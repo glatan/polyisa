@@ -230,6 +230,13 @@ pub trait Backend {
         c: Self::B,
     ) -> (Self::V<W>, Self::B, Self::B);
     fn udiv<W: Width>(&mut self, a: Self::V<W>, b: Self::V<W>) -> Self::V<W>;
+    fn urem<W: Width>(&mut self, a: Self::V<W>, b: Self::V<W>) -> Self::V<W>;
+    fn mul<W: Width>(&mut self, a: Self::V<W>, b: Self::V<W>) -> Self::V<W>;
+    fn mulh<W: Width>(&mut self, a: Self::V<W>, b: Self::V<W>) -> Self::V<W>;
+    fn mulhsu<W: Width>(&mut self, a: Self::V<W>, b: Self::V<W>) -> Self::V<W>;
+    fn mulhu<W: Width>(&mut self, a: Self::V<W>, b: Self::V<W>) -> Self::V<W>;
+    fn sdiv<W: Width>(&mut self, a: Self::V<W>, b: Self::V<W>) -> Self::V<W>;
+    fn srem<W: Width>(&mut self, a: Self::V<W>, b: Self::V<W>) -> Self::V<W>;
     fn zext<F: Width, T: Width>(&mut self, a: Self::V<F>) -> Self::V<T>;
     fn sext<F: Width, T: Width>(&mut self, a: Self::V<F>) -> Self::V<T>;
     fn trunc<F: Width, T: Width>(&mut self, a: Self::V<F>) -> Self::V<T>;

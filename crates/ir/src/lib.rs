@@ -121,6 +121,34 @@ impl Backend for IrBackend {
         self.fresh::<W>()
     }
 
+    fn urem<W: Width>(&mut self, _a: Self::V<W>, _b: Self::V<W>) -> Self::V<W> {
+        self.fresh::<W>()
+    }
+
+    fn mul<W: Width>(&mut self, _a: Self::V<W>, _b: Self::V<W>) -> Self::V<W> {
+        self.fresh::<W>()
+    }
+
+    fn mulh<W: Width>(&mut self, _a: Self::V<W>, _b: Self::V<W>) -> Self::V<W> {
+        self.fresh::<W>()
+    }
+
+    fn mulhsu<W: Width>(&mut self, _a: Self::V<W>, _b: Self::V<W>) -> Self::V<W> {
+        self.fresh::<W>()
+    }
+
+    fn mulhu<W: Width>(&mut self, _a: Self::V<W>, _b: Self::V<W>) -> Self::V<W> {
+        self.fresh::<W>()
+    }
+
+    fn sdiv<W: Width>(&mut self, _a: Self::V<W>, _b: Self::V<W>) -> Self::V<W> {
+        self.fresh::<W>()
+    }
+
+    fn srem<W: Width>(&mut self, _a: Self::V<W>, _b: Self::V<W>) -> Self::V<W> {
+        self.fresh::<W>()
+    }
+
     fn zext<F: Width, T: Width>(&mut self, _a: Self::V<F>) -> Self::V<T> {
         self.fresh::<T>()
     }

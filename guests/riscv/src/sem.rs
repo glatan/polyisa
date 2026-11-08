@@ -491,6 +491,124 @@ pub fn sraw<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
     Ok(())
 }
 
+// M（乗除算）
+
+pub fn mul<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    let x = read(b, rs1);
+    let y = read(b, rs2);
+    let s = b.mul(x, y);
+    write(b, rd, s);
+    Ok(())
+}
+
+pub fn mulh<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    let x = read(b, rs1);
+    let y = read(b, rs2);
+    let s = b.mulh(x, y);
+    write(b, rd, s);
+    Ok(())
+}
+
+pub fn mulhsu<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    let x = read(b, rs1);
+    let y = read(b, rs2);
+    let s = b.mulhsu(x, y);
+    write(b, rd, s);
+    Ok(())
+}
+
+pub fn mulhu<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    let x = read(b, rs1);
+    let y = read(b, rs2);
+    let s = b.mulhu(x, y);
+    write(b, rd, s);
+    Ok(())
+}
+
+/// DIV。0 除算は -1、最小値の -1 除算は最小値（RISC-V の規定）。
+pub fn div<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    let x = read(b, rs1);
+    let y = read(b, rs2);
+    let q = b.sdiv(x, y);
+    let zero = const_w64(b, 0);
+    let c = b.cmp(Cmp::Eq, y, zero);
+    let all = const_w64(b, u64::MAX);
+    let s = b.select(c, all, q);
+    write(b, rd, s);
+    Ok(())
+}
+
+/// DIVU。0 除算は全ビット 1（バックエンドの全域定義と一致）。
+pub fn divu<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    let x = read(b, rs1);
+    let y = read(b, rs2);
+    let s = b.udiv(x, y);
+    write(b, rd, s);
+    Ok(())
+}
+
+/// REM。0 除算の剰余は被除数（バックエンドの全域定義と一致）。
+pub fn rem<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    let x = read(b, rs1);
+    let y = read(b, rs2);
+    let s = b.srem(x, y);
+    write(b, rd, s);
+    Ok(())
+}
+
+/// REMU。同上。
+pub fn remu<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    let x = read(b, rs1);
+    let y = read(b, rs2);
+    let s = b.urem(x, y);
+    write(b, rd, s);
+    Ok(())
+}
+
+pub fn mulw<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    let x = read_w(b, rs1);
+    let y = read_w(b, rs2);
+    let s = b.mul(x, y);
+    write_w(b, rd, s);
+    Ok(())
+}
+
+pub fn divw<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    let x = read_w(b, rs1);
+    let y = read_w(b, rs2);
+    let q = b.sdiv(x, y);
+    let zero = b.konst::<W32>(0);
+    let c = b.cmp(Cmp::Eq, y, zero);
+    let all = b.konst::<W32>(u32::MAX);
+    let s = b.select(c, all, q);
+    write_w(b, rd, s);
+    Ok(())
+}
+
+pub fn divuw<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    let x = read_w(b, rs1);
+    let y = read_w(b, rs2);
+    let s = b.udiv(x, y);
+    write_w(b, rd, s);
+    Ok(())
+}
+
+pub fn remw<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    let x = read_w(b, rs1);
+    let y = read_w(b, rs2);
+    let s = b.srem(x, y);
+    write_w(b, rd, s);
+    Ok(())
+}
+
+pub fn remuw<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    let x = read_w(b, rs1);
+    let y = read_w(b, rs2);
+    let s = b.urem(x, y);
+    write_w(b, rd, s);
+    Ok(())
+}
+
 // SYSTEM
 
 /// FENCE。裸実行と順序保証の不要な段階では何もしない。

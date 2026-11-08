@@ -47,8 +47,8 @@ mod tests {
 
     #[test]
     fn insn_count() {
-        // RV32I 共通 37 件のうちシフト 3 件を RV64 版で置換し、RV64 専用 12 件と SYSTEM 4 件を足す。
-        assert_eq!(INSNS.len(), 53);
+        // RV64I 53 件＋M 13 件。
+        assert_eq!(INSNS.len(), 66);
     }
 
     #[test]
@@ -64,6 +64,9 @@ mod tests {
         assert_eq!(decode(0x0000_0073, 32), Some(Insn::Ecall));
         assert_eq!(decode(0x0ff0_000f, 32), Some(Insn::Fence));
         assert_eq!(decode(0x0000_100f, 32), Some(Insn::FenceI));
+        assert_eq!(decode(0x0220_80b3, 32), Some(Insn::Mul));
+        assert_eq!(decode(0x0220_c4b3, 32), Some(Insn::Div));
+        assert_eq!(decode(0x0220_f4bb, 32), Some(Insn::Remuw));
         assert_eq!(decode(0xffff_ffff, 32), None);
         assert_eq!(decode(0x0020_8133, 16), None);
     }

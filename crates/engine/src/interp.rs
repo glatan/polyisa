@@ -148,9 +148,65 @@ impl Backend for InterpBackend {
     }
 
     fn udiv<W: Width>(&mut self, a: Self::V<W>, b: Self::V<W>) -> Self::V<W> {
-        match to_u64::<W>(a).checked_div(to_u64::<W>(b)) {
-            Some(q) => from_u64::<W>(q),
-            None => from_u64::<W>(mask_bits(W::BITS)),
+        match W::to_u128(a).checked_div(W::to_u128(b)) {
+            Some(q) => from_u128::<W>(q),
+            // 全域定義：0 除算は全ビット 1。
+            None => from_u128::<W>(mask_u128(W::BITS)),
+        }
+    }
+
+    fn urem<W: Width>(&mut self, a: Self::V<W>, b: Self::V<W>) -> Self::V<W> {
+        match W::to_u128(a).checked_rem(W::to_u128(b)) {
+            Some(r) => from_u128::<W>(r),
+            // 全域定義：0 除算の剰余は被除数。
+            None => from_u128::<W>(W::to_u128(a)),
+        }
+    }
+
+    fn mul<W: Width>(&mut self, a: Self::V<W>, b: Self::V<W>) -> Self::V<W> {
+        from_u128::<W>(W::to_u128(a).wrapping_mul(W::to_u128(b)))
+    }
+
+    fn mulh<W: Width>(&mut self, a: Self::V<W>, b: Self::V<W>) -> Self::V<W> {
+        // 符号付き×符号付きの上位。128 ビットに収まらない幅は後の段階で足す。
+        let w = W::BITS;
+        let ah = sext_to_i128(W::to_u128(a), w);
+        let bh = sext_to_i128(W::to_u128(b), w);
+        from_u128::<W>(((ah.wrapping_mul(bh) >> w) & mask_i128(w)) as u128)
+    }
+
+    fn mulhsu<W: Width>(&mut self, a: Self::V<W>, b: Self::V<W>) -> Self::V<W> {
+        // 符号付き×符号なしの上位。64 ビット以下では積が 128 ビットに収まる。
+        let w = W::BITS;
+        let ah = sext_to_i128(W::to_u128(a), w);
+        let bh = W::to_u128(b) as i128;
+        from_u128::<W>((ah.wrapping_mul(bh) >> w) as u128)
+    }
+
+    fn mulhu<W: Width>(&mut self, a: Self::V<W>, b: Self::V<W>) -> Self::V<W> {
+        let w = W::BITS;
+        from_u128::<W>((W::to_u128(a).wrapping_mul(W::to_u128(b)) >> w) & mask_u128(w))
+    }
+
+    fn sdiv<W: Width>(&mut self, a: Self::V<W>, b: Self::V<W>) -> Self::V<W> {
+        let w = W::BITS;
+        let sa = sext_to_i128(W::to_u128(a), w);
+        let sb = sext_to_i128(W::to_u128(b), w);
+        match sb {
+            // 全域定義：0 除算は全ビット 1、最小値の -1 除算は最小値。
+            0 => from_u128::<W>(mask_u128(w)),
+            _ => from_u128::<W>(sa.wrapping_div(sb) as u128),
+        }
+    }
+
+    fn srem<W: Width>(&mut self, a: Self::V<W>, b: Self::V<W>) -> Self::V<W> {
+        let w = W::BITS;
+        let sa = sext_to_i128(W::to_u128(a), w);
+        let sb = sext_to_i128(W::to_u128(b), w);
+        match sb {
+            // 全域定義：0 除算の剰余は被除数。
+            0 => from_u128::<W>(W::to_u128(a)),
+            _ => from_u128::<W>(sa.wrapping_rem(sb) as u128),
         }
     }
 
@@ -307,19 +363,24 @@ fn from_u128<W: Width>(v: u128) -> W::Repr {
     W::from_u128(v & mask_u128(W::BITS))
 }
 
-const fn mask_bits(bits: u32) -> u64 {
-    if bits >= 64 {
-        u64::MAX
-    } else {
-        (1u64 << bits) - 1
-    }
-}
-
 const fn mask_u128(bits: u32) -> u128 {
     if bits >= 128 {
         u128::MAX
     } else {
         (1u128 << bits) - 1
+    }
+}
+
+/// `w` ビットの値を `i128` に符号拡張する。M 拡張は 64 ビット以下で使う。
+fn sext_to_i128(v: u128, w: u32) -> i128 {
+    (((v & mask_u128(w)) << (128 - w)) as i128) >> (128 - w)
+}
+
+const fn mask_i128(bits: u32) -> i128 {
+    if bits >= 128 {
+        -1
+    } else {
+        ((1u128 << bits) - 1) as i128
     }
 }
 

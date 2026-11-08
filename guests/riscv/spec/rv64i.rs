@@ -12,7 +12,7 @@ use polyisa_isadl::pred::Pred;
 pub fn build_model() -> polyisa_isadl::Model {
     let mut m = polyisa_isadl::Model::new();
 
-    for class in ["alu", "load", "store", "branch", "jump", "system"] {
+    for class in ["alu", "load", "store", "branch", "jump", "system", "mult", "div"] {
         m.timing_classes.push(class.to_string());
     }
 
@@ -130,6 +130,20 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("fence_i", "I", "00000000000000000001000000001111", "fence.i", "system"),
         ("ecall", "I", "000000000000 ..... 000 ..... 1110011", "ecall", "system"),
         ("ebreak", "I", "000000000001 ..... 000 ..... 1110011", "ebreak", "system"),
+        // M（乗除算。funct7=0000001）
+        ("mul", "R", "0000001 ..... ..... 000 ..... 0110011", "mul {rd}, {rs1}, {rs2}", "mult"),
+        ("mulh", "R", "0000001 ..... ..... 001 ..... 0110011", "mulh {rd}, {rs1}, {rs2}", "mult"),
+        ("mulhsu", "R", "0000001 ..... ..... 010 ..... 0110011", "mulhsu {rd}, {rs1}, {rs2}", "mult"),
+        ("mulhu", "R", "0000001 ..... ..... 011 ..... 0110011", "mulhu {rd}, {rs1}, {rs2}", "mult"),
+        ("div", "R", "0000001 ..... ..... 100 ..... 0110011", "div {rd}, {rs1}, {rs2}", "div"),
+        ("divu", "R", "0000001 ..... ..... 101 ..... 0110011", "divu {rd}, {rs1}, {rs2}", "div"),
+        ("rem", "R", "0000001 ..... ..... 110 ..... 0110011", "rem {rd}, {rs1}, {rs2}", "div"),
+        ("remu", "R", "0000001 ..... ..... 111 ..... 0110011", "remu {rd}, {rs1}, {rs2}", "div"),
+        ("mulw", "R", "0000001 ..... ..... 000 ..... 0111011", "mulw {rd}, {rs1}, {rs2}", "mult"),
+        ("divw", "R", "0000001 ..... ..... 100 ..... 0111011", "divw {rd}, {rs1}, {rs2}", "div"),
+        ("divuw", "R", "0000001 ..... ..... 101 ..... 0111011", "divuw {rd}, {rs1}, {rs2}", "div"),
+        ("remw", "R", "0000001 ..... ..... 110 ..... 0111011", "remw {rd}, {rs1}, {rs2}", "div"),
+        ("remuw", "R", "0000001 ..... ..... 111 ..... 0111011", "remuw {rd}, {rs1}, {rs2}", "div"),
     ];
     for (name, format, pattern, syntax, timing) in insns {
         m.insns.push(Insn {
