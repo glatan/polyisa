@@ -529,6 +529,17 @@ fn c_compressed() {
     assert_eq!(x(&mut env, 10), 0xffff_ffff_ffff_ff0b);
     env.step(|b| sem::c_addw(b, Gpr(10), Gpr(9))).unwrap();
     assert_eq!(x(&mut env, 10), 0xa);
+    // C.LUI / C.ADDI16SP の分岐。
+    env.step(|b| sem::c_lui_addi16sp(b, Gpr(11), 1)).unwrap();
+    assert_eq!(x(&mut env, 11), 0x1000);
+    env.step(|b| sem::addi(b, Gpr(2), Gpr(0), 0x100)).unwrap();
+    env.step(|b| sem::c_lui_addi16sp(b, Gpr(2), 16)).unwrap();
+    assert_eq!(x(&mut env, 2), 0x110);
+    // C.JAL（RV32）の展開。
+    let pc = env.pc;
+    env.step(|b| sem::c_jal(b, pc, 16)).unwrap();
+    assert_eq!(env.pc, pc + 16);
+    assert_eq!(x(&mut env, 1), pc + 4);
 }
 
 #[test]

@@ -1598,3 +1598,17 @@ pub fn c_addw<B: Backend>(b: &mut B, rd: Gpr, rs2: Gpr) -> Flow<B> {
     let r = rd.0;
     addw(b, rd, Gpr(r), rs2)
 }
+
+/// C.LUI / C.ADDI16SP。rd==x2で分岐する（展開先が異なるため）。
+pub fn c_lui_addi16sp<B: Backend>(b: &mut B, rd: Gpr, imm: i64) -> Flow<B> {
+    if rd.0 == 2 {
+        addi(b, rd, Gpr(2), imm)
+    } else {
+        lui(b, rd, imm)
+    }
+}
+
+/// C.JAL（RV32）。`jal x1, offset` に展開する。
+pub fn c_jal<B: Backend>(b: &mut B, pc: u64, offset: i64) -> Flow<B> {
+    jal(b, Gpr(1), pc, offset)
+}
