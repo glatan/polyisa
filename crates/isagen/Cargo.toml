@@ -1,0 +1,11 @@
+[package]
+name = "polyisa-isagen"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.99"
+
+[dependencies]
+polyisa-isadl = { path = "../isadl" }
+
+[lints]
+workspace = true
