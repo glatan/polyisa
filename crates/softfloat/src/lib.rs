@@ -206,10 +206,168 @@ impl<const E: u32, const M: u32> Binary<E, M> {
         finish::<E, M>(neg, &mut e, &mut m, sticky)
     }
 
+    /// 符号つき 64 ビット整数に変換する。RNE で丸め、範囲外は飽和する。
+    #[must_use]
+    pub fn to_i64(self) -> i64 {
+        if self.is_nan() {
+            return i64::MAX;
+        }
+        let (neg, exp, frac) = self.decode();
+        if self.is_inf() {
+            return if neg { i64::MIN } else { i64::MAX };
+        }
+        if self.is_zero() {
+            return 0;
+        }
+        let (ue, m) = expand(exp, frac, M, Self::bias());
+        // 値 = m * 2^(ue-M)。整数部と端数に分ける。
+        let e = ue - M as i64;
+        to_int_signed(neg, m, e, 64) as i64
+    }
+
+    /// 符号なし 64 ビット整数に変換する。RNE で丸め、範囲外は飽和する。負は 0 になる。
+    #[must_use]
+    pub fn to_u64(self) -> u64 {
+        if self.is_nan() {
+            return u64::MAX;
+        }
+        let (neg, exp, frac) = self.decode();
+        if self.is_inf() {
+            return if neg { 0 } else { u64::MAX };
+        }
+        if self.is_zero() || neg {
+            return 0;
+        }
+        let (ue, m) = expand(exp, frac, M, Self::bias());
+        let e = ue - M as i64;
+        to_int_unsigned(m, e, 64)
+    }
+
+    /// 符号つき 64 ビット整数から変換する。RNE。
+    #[must_use]
+    pub fn from_i64(v: i64) -> Self {
+        let neg = v < 0;
+        from_mag(neg, v.unsigned_abs() as u128)
+    }
+
+    /// 符号なし 64 ビット整数から変換する。RNE。
+    #[must_use]
+    pub fn from_u64(v: u64) -> Self {
+        from_mag(false, u128::from(v))
+    }
+
+    /// 等しいか。NaN は等しくない。+0 と -0 は等しい。
+    #[must_use]
+    pub fn eq(self, other: Self) -> bool {
+        if self.is_nan() || other.is_nan() {
+            return false;
+        }
+        if self.is_zero() && other.is_zero() {
+            return true;
+        }
+        self.bits == other.bits
+    }
+
+    /// 小さいか。NaN があれば偽。
+    #[must_use]
+    pub fn lt(self, other: Self) -> bool {
+        if self.is_nan() || other.is_nan() {
+            return false;
+        }
+        let (s1, e1, f1) = self.decode();
+        let (s2, e2, f2) = other.decode();
+        match (s1, s2) {
+            (true, false) => !self.is_zero() || !other.is_zero(),
+            (false, true) => false,
+            (false, false) => (e1, f1) < (e2, f2),
+            (true, true) => (e1, f1) > (e2, f2),
+        }
+    }
+
+    /// 以下か。NaN があれば偽。
+    #[must_use]
+    pub fn le(self, other: Self) -> bool {
+        self.lt(other) || self.eq(other)
+    }
+
+    /// 最小値。どちらかが NaN ならもう一方。正規 NaN 同士は正規 NaN。
+    /// +0 と -0 では -0 を返す。
+    #[must_use]
+    pub fn fmin(self, other: Self) -> Self {
+        if self.is_nan() {
+            return other;
+        }
+        if other.is_nan() {
+            return self;
+        }
+        if self.lt(other) {
+            self
+        } else if other.lt(self) {
+            other
+        } else if self.negative() {
+            self
+        } else {
+            other
+        }
+    }
+
+    /// 最大値。NaN の扱いは `fmin` と同じ。+0 と -0 では +0 を返す。
+    #[must_use]
+    pub fn fmax(self, other: Self) -> Self {
+        if self.is_nan() {
+            return other;
+        }
+        if other.is_nan() {
+            return self;
+        }
+        if self.lt(other) {
+            other
+        } else if other.lt(self) {
+            self
+        } else if self.negative() {
+            other
+        } else {
+            self
+        }
+    }
+
+    fn negative(self) -> bool {
+        self.decode().0
+    }
+
     fn zero_signed(neg: bool) -> Self {
         Self {
             bits: (neg as u64) << (E + M),
         }
+    }
+
+    /// 平方根。RNE。負の有限値は NaN になる。
+    #[must_use]
+    pub fn sqrt(self) -> Self {
+        let (neg, exp, frac) = self.decode();
+        if self.is_nan() || (neg && !self.is_zero() && !self.is_inf()) {
+            return Self::canonical_nan();
+        }
+        if self.is_zero() || self.is_inf() {
+            return self;
+        }
+        let bias = Self::bias();
+        let (ue, m) = expand(exp, frac, M, bias);
+        // E_in = ue - M が奇数のときは m を倍にして偶数に揃える。
+        let (mut ein, mut m) = (ue - M as i64, m);
+        if ein & 1 != 0 {
+            m <<= 1;
+            ein -= 1;
+        }
+        // 十分な余裕を持って整数平方根を取る。余りは sticky になる。
+        const EXTRA: u32 = 64;
+        let scaled = m << EXTRA;
+        let (mut q, rem) = isqrt_rem(scaled);
+        let mut sticky: i8 = i8::from(rem != 0);
+        // value = q * 2^(E_in/2 - EXTRA/2)。窓の不変条件に合わせる。
+        let mut e = ein / 2 - (EXTRA as i64) / 2 + M as i64 + 3;
+        sticky = normalize_window::<E, M>(&mut e, &mut q, sticky);
+        finish::<E, M>(neg, &mut e, &mut q, sticky)
     }
 }
 
@@ -374,7 +532,134 @@ fn finish<const E: u32, const M: u32>(
     }
 }
 
-/// 右に `d` ビット寄せ、落ちたビットを戻り値（sticky）に畳む。
+/// 整数平方根。商と余りを返す。ビット単位の筆算であり、余りは正確である。
+fn isqrt_rem(n: u128) -> (u128, u128) {
+    let mut op = n;
+    let mut res: u128 = 0;
+    let mut one: u128 = 1 << 126;
+    while one != 0 {
+        if op >= res + one {
+            op -= res + one;
+            res = (res >> 1) + one;
+        } else {
+            res >>= 1;
+        }
+        one >>= 2;
+    }
+    (res, op)
+}
+
+/// 符号つき整数への変換。値は `m * 2^e`（m は非負の整数）である。RNE、範囲外は飽和する。
+fn to_int_signed(neg: bool, m: u128, e: i64, bits: u32) -> i128 {
+    let max = (1i128 << (bits - 1)) - 1;
+    // 大きすぎる値は飽和する。
+    if e >= 64 {
+        return if neg { -max - 1 } else { max };
+    }
+    let mag: i128 = if e >= 0 {
+        let v = m << e as u32;
+        v.min(max as u128 + 1) as i128
+    } else {
+        let d = (-e) as u32;
+        // d は最大で 1074 程度になる。u128 を超えるシフトに注意する。
+        if d >= 128 {
+            return 0;
+        }
+        let q = m >> d;
+        let dropped = m & ((1u128 << d) - 1);
+        let half = 1u128 << (d - 1);
+        (q + u128::from(dropped > half || (dropped == half && (q & 1) == 1))) as i128
+    };
+    let signed = if neg { -mag } else { mag };
+    signed.clamp(-max - 1, max)
+}
+
+/// 符号なし整数への変換。呼び出し側で非負・有限を保証する。
+fn to_int_unsigned(m: u128, e: i64, bits: u32) -> u64 {
+    let max = (1u128 << bits) - 1;
+    if e >= 64 {
+        return max as u64;
+    }
+    let v: u128 = if e >= 0 {
+        m << e as u32
+    } else {
+        let d = (-e) as u32;
+        if d >= 128 {
+            return 0;
+        }
+        let q = m >> d;
+        let dropped = m & ((1u128 << d) - 1);
+        let half = 1u128 << (d - 1);
+        q + u128::from(dropped > half || (dropped == half && (q & 1) == 1))
+    };
+    v.min(max) as u64
+}
+
+/// 32 ビット形式と 64 ビット形式の相互変換。RNE。
+impl F32 {
+    /// 64 ビット形式に変換する。
+    #[must_use]
+    pub fn to_f64(self) -> F64 {
+        convert(self)
+    }
+}
+
+impl F64 {
+    /// 32 ビット形式に変換する。
+    #[must_use]
+    pub fn to_f32(self) -> F32 {
+        convert(self)
+    }
+}
+
+/// 整数の絶対値から浮動小数点を作る。RNE。
+fn from_mag<const E: u32, const M: u32>(neg: bool, mag: u128) -> Binary<E, M> {
+    if mag == 0 {
+        return Binary::zero_signed(neg);
+    }
+    let bitlen = 128 - mag.leading_zeros() as i64;
+    // 窓 [2^(M+3), 2^(M+4)) に寄せる。余りは sticky になる。
+    let shift = (M as i64 + 4) - bitlen;
+    let (mut m, sticky): (u128, i8) = if shift >= 0 {
+        (mag << shift as u32, 0)
+    } else {
+        let s = (-shift) as u32;
+        (mag >> s, (mag & ((1u128 << s) - 1) != 0) as i8)
+    };
+    let mut e = bitlen - 1;
+    let sticky = normalize_window::<E, M>(&mut e, &mut m, sticky);
+    finish::<E, M>(neg, &mut e, &mut m, sticky)
+}
+
+/// 形式を変える。RNE。指数範囲の違いは `finish` が扱う。
+fn convert<const E1: u32, const M1: u32, const E2: u32, const M2: u32>(
+    v: Binary<E1, M1>,
+) -> Binary<E2, M2> {
+    let (neg, exp, frac) = v.decode();
+    if v.is_nan() {
+        return Binary::<E2, M2>::canonical_nan();
+    }
+    if v.is_inf() {
+        return Binary::<E2, M2>::inf(neg);
+    }
+    if v.is_zero() {
+        return Binary::<E2, M2>::zero_signed(neg);
+    }
+    let bias1 = Binary::<E1, M1>::bias();
+    let (ue, m) = expand(exp, frac, M1, bias1);
+    let mut e = ue;
+    // 対象の形式の仮数幅に合わせる。余りは sticky に畳む。
+    let mut m = m << 3;
+    let mut sticky: i8 = 0;
+    if M1 > M2 {
+        let d = M1 - M2;
+        sticky = shr_jam(&mut m, d) as i8;
+    } else if M2 > M1 {
+        m <<= M2 - M1;
+    }
+    let sticky = normalize_window::<E2, M2>(&mut e, &mut m, sticky);
+    finish::<E2, M2>(neg, &mut e, &mut m, sticky)
+}
 fn shr_jam(m: &mut u128, d: u32) -> bool {
     if d == 0 {
         return false;
@@ -440,6 +725,70 @@ mod tests {
         let two = F32::from_bits(0x4000_0000);
         assert_eq!(one.add(two).bits(), 0x4040_0000);
         assert_eq!(one.mul(two).bits(), two.bits());
+    }
+
+    #[test]
+    fn sqrt_cases() {
+        let four = F64::from_bits(0x4010_0000_0000_0000);
+        let two = F64::from_bits(0x4000_0000_0000_0000);
+        assert_eq!(four.sqrt().bits(), two.bits());
+        assert_eq!(F64::zero().sqrt().bits(), F64::zero().bits());
+        assert!(F64::from_bits(0xbff0_0000_0000_0000).sqrt().is_nan());
+        assert_eq!(F64::inf(false).sqrt().bits(), F64::inf(false).bits());
+        // 2 の平方根は丸めで決まる。
+        assert_eq!(two.sqrt().bits(), 0x3ff6_a09e_667f_3bcd);
+    }
+
+    #[test]
+    fn int_conversions() {
+        let one5 = F64::from_bits(0x3ff8_0000_0000_0000);
+        assert_eq!(one5.to_i64(), 2);
+        assert_eq!(one5.to_u64(), 2);
+        let neg = F64::from_bits(0xbff8_0000_0000_0000);
+        assert_eq!(neg.to_i64(), -2);
+        assert_eq!(neg.to_u64(), 0);
+        // 範囲外は飽和する。
+        assert_eq!(F64::from_bits(0x43e0_0000_0000_0000).to_i64(), i64::MAX);
+        assert_eq!(F64::from_bits(0xc3e0_0000_0000_0000).to_i64(), i64::MIN);
+        assert_eq!(F64::canonical_nan().to_i64(), i64::MAX);
+        assert_eq!(F64::canonical_nan().to_u64(), u64::MAX);
+        // 整数からは正確に丸める。u64::MAX は 2^64 に切り上がる。
+        assert_eq!(F64::from_i64(-42).bits(), 0xc045_0000_0000_0000);
+        assert_eq!(F64::from_u64(u64::MAX).bits(), 0x43f0_0000_0000_0000);
+        assert_eq!(F32::from_bits(0x3f80_0000).to_i64(), 1);
+    }
+
+    #[test]
+    fn f32_f64_convert() {
+        let one = F32::from_bits(0x3f80_0000);
+        assert_eq!(one.to_f64().bits(), 0x3ff0_0000_0000_0000);
+        let back: F32 = one.to_f64().to_f32();
+        assert_eq!(back.bits(), one.bits());
+        // 狭める方向は丸める。
+        let third64 = F64::from_bits(0x3fd5_5555_5555_5555);
+        assert_eq!(third64.to_f32().bits(), 0x3eaa_aaab);
+    }
+
+    #[test]
+    fn comparisons() {
+        let one = F64::from_bits(0x3ff0_0000_0000_0000);
+        let two = F64::from_bits(0x4000_0000_0000_0000);
+        let nan = F64::canonical_nan();
+        let pz = F64::zero();
+        let nz = F64::from_bits(0x8000_0000_0000_0000);
+        assert!(one.lt(two));
+        assert!(!two.lt(one));
+        assert!(one.le(one));
+        assert!(pz.eq(nz));
+        assert!(!nan.eq(nan));
+        assert!(!nan.lt(one));
+        assert!(!one.lt(nan));
+        assert_eq!(one.fmin(two).bits(), one.bits());
+        assert_eq!(one.fmax(two).bits(), two.bits());
+        assert_eq!(nan.fmin(one).bits(), one.bits());
+        assert_eq!(one.fmin(nan).bits(), one.bits());
+        assert_eq!(pz.fmax(nz).bits(), pz.bits());
+        assert_eq!(pz.fmin(nz).bits(), nz.bits());
     }
 
     /// ホストの演算との差分検査。NaN はビット比較せず、NaN 同士で一致とみなす。
@@ -576,6 +925,79 @@ mod tests {
                 assert!(r.is_nan(), "div nan a={a:#x} b={b:#x}");
             } else {
                 assert_eq!(r.bits(), w.to_bits(), "div a={a:#x} b={b:#x}");
+            }
+        }
+    }
+
+    #[test]
+    fn diff_extra() {
+        // sqrt、変換、比較、min/max の差分検査。
+        let mut s = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            s
+        };
+        for _ in 0..20_000 {
+            let a = next();
+            let fa = f64::from_bits(a);
+            let r = F64::from_bits(a).sqrt();
+            let w = fa.sqrt();
+            if w.is_nan() {
+                assert!(r.is_nan(), "sqrt nan {a:#x}");
+            } else {
+                assert_eq!(r.bits(), w.to_bits(), "sqrt {a:#x}");
+            }
+            if fa.is_finite() && fa.abs() < 9.0e18 {
+                // `as` は切り捨てなので、RNE の期待値は round_ties_even で作る。
+                assert_eq!(
+                    F64::from_bits(a).to_i64(),
+                    fa.round_ties_even() as i64,
+                    "to_i64 {a:#x}"
+                );
+                if fa >= 0.0 {
+                    assert_eq!(
+                        F64::from_bits(a).to_u64(),
+                        fa.round_ties_even() as u64,
+                        "to_u64 {a:#x}"
+                    );
+                }
+                assert_eq!(
+                    F64::from_bits(a).to_f32().bits() as u32,
+                    (fa as f32).to_bits(),
+                    "to_f32 {a:#x}"
+                );
+            }
+            let b = next();
+            let fb = f64::from_bits(b);
+            assert_eq!(F64::from_bits(a).eq(F64::from_bits(b)), fa == fb, "eq");
+            assert_eq!(
+                F64::from_bits(a).lt(F64::from_bits(b)),
+                fa < fb,
+                "lt {a:#x} {b:#x}"
+            );
+            assert_eq!(
+                F64::from_bits(a).fmin(F64::from_bits(b)).bits(),
+                fa.min(fb).to_bits(),
+                "min {a:#x} {b:#x}"
+            );
+            assert_eq!(
+                F64::from_bits(a).fmax(F64::from_bits(b)).bits(),
+                fa.max(fb).to_bits(),
+                "max {a:#x} {b:#x}"
+            );
+            let c = next() as u32;
+            // NaN は正規化される（RISC-V の fcvt と同じ）。それ以外は host と一致する。
+            let fc = F32::from_bits(u64::from(c));
+            if fc.is_nan() {
+                assert!(fc.to_f64().is_nan(), "f32 to f64 nan {c:#x}");
+            } else {
+                assert_eq!(
+                    fc.to_f64().bits(),
+                    f64::from(f32::from_bits(c)).to_bits(),
+                    "f32 to f64"
+                );
             }
         }
     }
