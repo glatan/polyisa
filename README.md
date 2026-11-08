@@ -2,7 +2,7 @@
 
 polyisa は、多数の CPU アーキテクチャのユーザープログラムを実行するエミュレータである。Rust で実装し、外部クレートに依存しない。
 
-- 対象の ISA：x86（16/32/64 ビット）、ARM、AArch64、MIPS、RISC-V、Power、s390 系、WebAssembly、および 68k、VAX、PDP-11、SPARC、Alpha、PA-RISC、SuperH、LoongArch、OpenRISC、IA-64、Hexagon
+- 対象の ISA：x86（16/32/64 ビット）、ARM（AArch32 以前）、AArch64、MIPS、RISC-V、Power、s390、WebAssembly、および m68k、VAX、PDP-11、SPARC、Alpha、PA-RISC、SuperH、LoongArch、OpenRISC、IA-64、Hexagon（計 19 ファミリ。クレート名は小文字の `guests/<isa>` を使う）
 - ISA のバージョン、拡張、CPU の世代を CPU モデルとして区別し、実行時に選ぶ
 - ユーザーモードのエミュレーション。OS のサービスはプロセス内の仮想カーネルが提供する
 - インタプリタから始め、同じ命令意味論から JIT を後で追加する
