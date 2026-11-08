@@ -220,11 +220,13 @@ fn run(env: &mut BareEnv, entry: u64, rv32: bool) -> Outcome {
     use polyisa_guest_riscv::Insn;
     env.pc = entry;
     for _ in 0..STEP_LIMIT {
-        let mut w = [0u8; 4];
+        // 16 ビット単位でフェッチする（C 拡張のため）。32 ビット命令は
+        // 下位 2 ビットが 0b11 である。
+        let mut h = [0u8; 2];
         if env
             .backend
             .mem
-            .read(VirtAddr(env.pc), &mut w, acc_fetch())
+            .read(VirtAddr(env.pc), &mut h, acc_fetch())
             .is_err()
         {
             return Outcome::Unimplemented {
@@ -232,7 +234,24 @@ fn run(env: &mut BareEnv, entry: u64, rv32: bool) -> Outcome {
                 word: 0xffff_ffff,
             };
         }
-        let word = u32::from_le_bytes(w);
+        let lo = u16::from_le_bytes(h);
+        let (word, ilen) = if lo & 0b11 == 0b11 {
+            let mut hh = [0u8; 2];
+            if env
+                .backend
+                .mem
+                .read(VirtAddr(env.pc + 2), &mut hh, acc_fetch())
+                .is_err()
+            {
+                return Outcome::Unimplemented {
+                    pc: env.pc,
+                    word: u32::from(lo),
+                };
+            }
+            ((u16::from_le_bytes(hh) as u32) << 16 | u32::from(lo), 4u64)
+        } else {
+            (u32::from(lo), 2u64)
+        };
         // MRET（特権。user-mode相当のrunnerでは mepc へ戻す）。
         // RV32 では MXLEN=32 の mepc に合わせ、下位 32 ビットに包む。
         if word == 0x3020_0073 {
@@ -242,9 +261,13 @@ fn run(env: &mut BareEnv, entry: u64, rv32: bool) -> Outcome {
             env.pc = if rv32 { mepc & 0xffff_ffff } else { mepc };
             continue;
         }
-        // C拡張はこの対象（rv64g）には含めない。
-        if word & 0b11 != 0b11 {
-            return Outcome::Unimplemented { pc: env.pc, word };
+        if ilen == 2 {
+            // 16 ビット命令は C 拡張の実行器に渡す。RV32 と重なる符号化の
+            // 振り分けもそちらで行う（デコーダ自体は RV64 優先のまま）。
+            if let Some(o) = step_c(env, word as u16, rv32) {
+                return o;
+            }
+            continue;
         }
         let Some(insn) = polyisa_guest_riscv::decode(word as u128, 32) else {
             return Outcome::Unimplemented { pc: env.pc, word };
@@ -664,8 +687,20 @@ fn run(env: &mut BareEnv, entry: u64, rv32: bool) -> Outcome {
             Insn::Fence => env.step(sem::fence),
             Insn::FenceI => env.step(sem::fence_i),
             // F 単精度。
-            Insn::Flw => env.step(|b| sem::flw(b, fd, rs1, imm_i(word))),
-            Insn::Fsw => env.step(|b| sem::fsw(b, rs1, fs2, imm_s(word))),
+            Insn::Flw => {
+                if rv32 {
+                    env.step(|b| sem::flw_rv32(b, fd, rs1, imm_i(word)))
+                } else {
+                    env.step(|b| sem::flw(b, fd, rs1, imm_i(word)))
+                }
+            }
+            Insn::Fsw => {
+                if rv32 {
+                    env.step(|b| sem::fsw_rv32(b, rs1, fs2, imm_s(word)))
+                } else {
+                    env.step(|b| sem::fsw(b, rs1, fs2, imm_s(word)))
+                }
+            }
             Insn::FaddS => env.step(|b| sem::fadd_s(b, fd, fs1, fs2)),
             Insn::FsubS => env.step(|b| sem::fsub_s(b, fd, fs1, fs2)),
             Insn::FmulS => env.step(|b| sem::fmul_s(b, fd, fs1, fs2)),
@@ -731,8 +766,20 @@ fn run(env: &mut BareEnv, entry: u64, rv32: bool) -> Outcome {
             Insn::FnmsubS => env.step(|b| sem::fnmsub_s(b, fd, fs1, fs2, fs3)),
             Insn::FnmaddS => env.step(|b| sem::fnmadd_s(b, fd, fs1, fs2, fs3)),
             // D 倍精度。
-            Insn::Fld => env.step(|b| sem::fld(b, fd, rs1, imm_i(word))),
-            Insn::Fsd => env.step(|b| sem::fsd(b, rs1, fs2, imm_s(word))),
+            Insn::Fld => {
+                if rv32 {
+                    env.step(|b| sem::fld_rv32(b, fd, rs1, imm_i(word)))
+                } else {
+                    env.step(|b| sem::fld(b, fd, rs1, imm_i(word)))
+                }
+            }
+            Insn::Fsd => {
+                if rv32 {
+                    env.step(|b| sem::fsd_rv32(b, rs1, fs2, imm_s(word)))
+                } else {
+                    env.step(|b| sem::fsd(b, rs1, fs2, imm_s(word)))
+                }
+            }
             Insn::FaddD => env.step(|b| sem::fadd_d(b, fd, fs1, fs2)),
             Insn::FsubD => env.step(|b| sem::fsub_d(b, fd, fs1, fs2)),
             Insn::FmulD => env.step(|b| sem::fmul_d(b, fd, fs1, fs2)),
@@ -825,6 +872,534 @@ fn run(env: &mut BareEnv, entry: u64, rv32: bool) -> Outcome {
     Outcome::StepLimit { pc: env.pc }
 }
 
+/// 16ビット命令を1件実行する。継続するとき None、退出するとき Some を返す。
+/// RV32 と重なる 5 通りの符号化は RV32 側に振り分ける（デコーダ自体は
+/// RV64 優先の線形照合のまま。将来のモデル対応分配までの暫定）。
+/// Ref: SPEC-RISCV-UNPRIV (20250508) §C.
+fn step_c(env: &mut BareEnv, w16: u16, rv32: bool) -> Option<Outcome> {
+    let word = u32::from(w16);
+    // RV32 との重なり。生成デコーダは RV64 側を返すので先に横取りする。
+    if rv32 {
+        let funct3 = (word >> 13) & 7;
+        let op = word & 3;
+        let w = w16;
+        let r = match (funct3, op) {
+            // c.jal (RV32)。c.addiw と同符号化。
+            (0b001, 0b01) => {
+                let off = c_j_imm(w);
+                let pc = env.pc;
+                Some(env.step(|b| sem::c_jal(b, pc, off)))
+            }
+            // c.flw (RV32)。c.ld と同符号化。
+            (0b011, 0b00) => {
+                let rd = Fpr(crd3(w));
+                let rs1 = Gpr(crs1(w));
+                let off = c_lw_uimm(w) as i64;
+                Some(env.step(|b| sem::c_flw_rv32(b, rd, rs1, off)))
+            }
+            // c.fsw (RV32)。c.sd と同符号化。
+            (0b111, 0b00) => {
+                let rs1 = Gpr(crs1(w));
+                let rs2 = Fpr(crd3(w));
+                let off = c_lw_uimm(w) as i64;
+                Some(env.step(|b| sem::c_fsw_rv32(b, rs1, rs2, off)))
+            }
+            // c.flwsp (RV32)。c.ldsp と同符号化。
+            (0b011, 0b10) => {
+                let rd = Fpr(creg5(w));
+                let off = c_lwsp_uimm(w) as i64;
+                Some(env.step(|b| sem::c_flwsp_rv32(b, rd, off)))
+            }
+            // c.fswsp (RV32)。c.sdsp と同符号化。
+            (0b111, 0b10) => {
+                let rs2 = Fpr(creg5(w));
+                let off = c_swsp_uimm(w) as i64;
+                Some(env.step(|b| sem::c_fswsp_rv32(b, rs2, off)))
+            }
+            _ => None,
+        };
+        if let Some(r) = r {
+            return match r {
+                Ok(()) => {
+                    if env.backend.ctrl == polyisa_engine::interp::Ctrl::Fallthrough {
+                        env.pc += 2;
+                    }
+                    None
+                }
+                Err(_) => Some(Outcome::Unimplemented { pc: env.pc, word }),
+            };
+        }
+    }
+    let Some(insn) = polyisa_guest_riscv::decode(u128::from(word), 16) else {
+        return Some(Outcome::Unimplemented { pc: env.pc, word });
+    };
+    let r = run_c(env, insn, word, rv32);
+    match r {
+        Ok(()) => {
+            if env.backend.ctrl == polyisa_engine::interp::Ctrl::Fallthrough {
+                env.pc += 2;
+            }
+            None
+        }
+        Err(o) => Some(o),
+    }
+}
+
+/// 圧縮レジスタ番号（3ビット）。x8〜x15 を指す。
+fn c_reg3(w: u16, lo: u32) -> u8 {
+    (((w as u32) >> lo) & 7) as u8 + 8
+}
+
+/// 5ビットレジスタ番号。
+fn creg5(w: u16) -> u8 {
+    (((w as u32) >> 7) & 31) as u8
+}
+
+/// CR 形式の rs1/rd（[11:7]）。
+fn crd5(w: u16) -> u8 {
+    (((w as u32) >> 7) & 31) as u8
+}
+
+/// CR 形式の rs2（[6:2]）。
+fn crs2(w: u16) -> u8 {
+    (((w as u32) >> 2) & 31) as u8
+}
+
+fn crd3(w: u16) -> u8 {
+    c_reg3(w, 2)
+}
+
+fn crs1(w: u16) -> u8 {
+    c_reg3(w, 7)
+}
+
+/// C.ADDI4SPN の nzuimm[9:2]。llvm-mc の符号化と突合済み。
+fn c_addi4spn_uimm(w: u16) -> u32 {
+    let w = w as u32;
+    (((w >> 7) & 0xF) << 6) | (((w >> 11) & 3) << 4) | (((w >> 5) & 1) << 3) | (((w >> 6) & 1) << 2)
+}
+
+/// CL 形式のロード・ストア即値（c.lw/c.sw/c.flw/c.fsw 用）。
+fn c_lw_uimm(w: u16) -> u32 {
+    let w = w as u32;
+    (((w >> 12) & 1) << 5)
+        | (((w >> 11) & 1) << 4)
+        | (((w >> 10) & 1) << 3)
+        | (((w >> 6) & 1) << 2)
+        | (((w >> 5) & 1) << 6)
+}
+
+/// C.ADDI16SP の nzimm[9:4]（符号付き10ビット相当に復元する）。
+fn c_addi16sp_imm(w: u16) -> i64 {
+    let w = w as u32;
+    let nz = (((w >> 12) & 1) << 9)
+        | (((w >> 3) & 3) << 7)
+        | (((w >> 5) & 1) << 6)
+        | (((w >> 2) & 1) << 5)
+        | (((w >> 6) & 1) << 4);
+    if nz & 0x200 != 0 {
+        nz as i64 - 1024
+    } else {
+        nz as i64
+    }
+}
+
+/// C.LUI の nzimm[17:12]。6ビット符号付きで、sem側で12ビット左へ寄せる。
+/// llvm-mc の符号化と突合済み（c.lui s0, 0xfffe1 → 0x7405）。
+fn c_lui_imm(w: u16) -> i64 {
+    let w = w as u32;
+    let v = (((w >> 12) & 1) << 5) | ((w >> 2) & 0x1F);
+    if v & 0x20 != 0 {
+        v as i64 - 64
+    } else {
+        v as i64
+    }
+}
+
+/// CI/CB 形式の 6 ビット即値・シフト量（符号付きに復元する）。
+fn c_imm6(w: u16) -> i64 {
+    let v = ((((w as u32) >> 12) & 1) << 5) | (((w as u32) >> 2) & 0x1F);
+    if v & 0x20 != 0 {
+        v as i64 - 64
+    } else {
+        v as i64
+    }
+}
+
+/// CI 形式のシフト量（0 拡張）。
+fn c_shamt6(w: u16) -> u64 {
+    ((((w as u32) >> 12) & 1) << 5 | (((w as u32) >> 2) & 0x1F)) as u64
+}
+
+/// CJ 形式のジャンプオフセット（符号付き）。
+fn c_j_imm(w: u16) -> i64 {
+    let w = w as u32;
+    let v = (((w >> 12) & 1) << 11)
+        | (((w >> 11) & 1) << 4)
+        | (((w >> 9) & 3) << 8)
+        | (((w >> 8) & 1) << 10)
+        | (((w >> 7) & 1) << 6)
+        | (((w >> 6) & 1) << 7)
+        | (((w >> 3) & 7) << 1)
+        | (((w >> 2) & 1) << 5);
+    if v & 0x800 != 0 {
+        v as i64 - 4096
+    } else {
+        v as i64
+    }
+}
+
+/// CB 形式の分岐オフセット（符号付き）。
+/// ビット配置は wavedrom（c-cb-format-ls.edn）と llvm-mc で突合済み。
+/// inst[12]=off[8]、inst[11:10]=off[4:3]、inst[6:2]=off[7:6|2:1|5]。
+fn c_b_imm(w: u16) -> i64 {
+    let w = w as u32;
+    let v = (((w >> 12) & 1) << 8)
+        | (((w >> 11) & 1) << 4)
+        | (((w >> 10) & 1) << 3)
+        | (((w >> 6) & 1) << 7)
+        | (((w >> 5) & 1) << 6)
+        | (((w >> 4) & 1) << 2)
+        | (((w >> 3) & 1) << 1)
+        | (((w >> 2) & 1) << 5);
+    if v & 0x100 != 0 {
+        v as i64 - 512
+    } else {
+        v as i64
+    }
+}
+
+/// C.LWSP の uimm[7:2]。
+fn c_lwsp_uimm(w: u16) -> u32 {
+    let w = w as u32;
+    (((w >> 12) & 1) << 5)
+        | (((w >> 6) & 1) << 4)
+        | (((w >> 5) & 1) << 3)
+        | (((w >> 4) & 1) << 2)
+        | (((w >> 2) & 3) << 6)
+}
+
+/// C.SWSP の uimm[7:2]。
+fn c_swsp_uimm(w: u16) -> u32 {
+    let w = w as u32;
+    (((w >> 9) & 0xF) << 2) | (((w >> 7) & 3) << 6)
+}
+
+/// 16ビット命令を実行する。Ok は実行して継続、Err は退出する。
+fn run_c(
+    env: &mut BareEnv,
+    insn: polyisa_guest_riscv::Insn,
+    word: u32,
+    rv32: bool,
+) -> Result<(), Outcome> {
+    use polyisa_guest_riscv::Insn;
+    let w = word as u16;
+    let r = |b: u32, lo: u32| ((word >> lo) & ((1u32 << b) - 1)) as u8;
+    let ok = match insn {
+        Insn::CAddi4spn => {
+            let rd = Gpr(crd3(w));
+            let uimm = c_addi4spn_uimm(w) as i64;
+            env.step(|b| sem::c_addi4spn(b, rd, uimm))
+        }
+        Insn::CLw => {
+            let rd = Gpr(crd3(w));
+            let rs1 = Gpr(crs1(w));
+            let off = c_lw_uimm(w) as i64;
+            if rv32 {
+                env.step(|b| sem::c_lw_rv32(b, rd, rs1, off))
+            } else {
+                env.step(|b| sem::c_lw(b, rd, rs1, off))
+            }
+        }
+        Insn::CFlw => {
+            let rd = Fpr(crd3(w));
+            let rs1 = Gpr(crs1(w));
+            let off = c_lw_uimm(w) as i64;
+            env.step(|b| sem::c_flw(b, rd, rs1, off))
+        }
+        Insn::CSw => {
+            let rs1 = Gpr(crs1(w));
+            let rs2 = Gpr(crd3(w));
+            let off = c_lw_uimm(w) as i64;
+            if rv32 {
+                env.step(|b| sem::c_sw_rv32(b, rs1, rs2, off))
+            } else {
+                env.step(|b| sem::c_sw(b, rs1, rs2, off))
+            }
+        }
+        Insn::CFsw => {
+            let rs1 = Gpr(crs1(w));
+            let rs2 = Fpr(crd3(w));
+            let off = c_lw_uimm(w) as i64;
+            env.step(|b| sem::c_fsw(b, rs1, rs2, off))
+        }
+        Insn::CLd => {
+            if rv32 {
+                return Err(Outcome::Unimplemented { pc: env.pc, word });
+            }
+            let rd = Gpr(crd3(w));
+            let rs1 = Gpr(crs1(w));
+            // CL の倍精度 uimm[7:3]。
+            let off = ((((word >> 10) & 7) << 3) | (((word >> 5) & 3) << 6)) as i64;
+            env.step(|b| sem::c_ld(b, rd, rs1, off))
+        }
+        Insn::CSd => {
+            if rv32 {
+                return Err(Outcome::Unimplemented { pc: env.pc, word });
+            }
+            let rs1 = Gpr(crs1(w));
+            let rs2 = Gpr(crd3(w));
+            let off = ((((word >> 10) & 7) << 3) | (((word >> 5) & 3) << 6)) as i64;
+            env.step(|b| sem::c_sd(b, rs1, rs2, off))
+        }
+        Insn::CAddi => {
+            let rd = Gpr(r(5, 7));
+            let imm = c_imm6(w);
+            if rv32 {
+                env.step(|b| sem::c_addi_rv32(b, rd, imm))
+            } else {
+                env.step(|b| sem::c_addi(b, rd, imm))
+            }
+        }
+        Insn::CAddiw => {
+            if rv32 {
+                return Err(Outcome::Unimplemented { pc: env.pc, word });
+            }
+            let rd = Gpr(r(5, 7));
+            let imm = c_imm6(w);
+            env.step(|b| sem::c_addiw(b, rd, imm))
+        }
+        Insn::CLi => {
+            let rd = Gpr(r(5, 7));
+            let imm = c_imm6(w);
+            if rv32 {
+                env.step(|b| sem::c_li_rv32(b, rd, imm))
+            } else {
+                env.step(|b| sem::c_li(b, rd, imm))
+            }
+        }
+        Insn::CLuiAddi16sp => {
+            let rd = Gpr(r(5, 7));
+            if rd.0 == 2 {
+                let imm = c_addi16sp_imm(w);
+                if rv32 {
+                    env.step(|b| sem::c_lui_addi16sp_rv32(b, rd, imm))
+                } else {
+                    env.step(|b| sem::c_lui_addi16sp(b, rd, imm))
+                }
+            } else {
+                let imm = c_lui_imm(w);
+                if rv32 {
+                    env.step(|b| sem::c_lui_rv32(b, rd, imm))
+                } else {
+                    env.step(|b| sem::c_lui_addi16sp(b, rd, imm))
+                }
+            }
+        }
+        Insn::CJ => {
+            let pc = env.pc;
+            let off = c_j_imm(w);
+            if rv32 {
+                env.step(|b| sem::c_j_rv32(b, pc, off))
+            } else {
+                env.step(|b| sem::c_j(b, pc, off))
+            }
+        }
+        Insn::CBeqz => {
+            let rs1 = Gpr(crs1(w));
+            let pc = env.pc;
+            let off = c_b_imm(w);
+            if rv32 {
+                env.step(|b| sem::c_beqz_rv32(b, rs1, pc, off))
+            } else {
+                env.step(|b| sem::c_beqz(b, rs1, pc, off))
+            }
+        }
+        Insn::CBnez => {
+            let rs1 = Gpr(crs1(w));
+            let pc = env.pc;
+            let off = c_b_imm(w);
+            if rv32 {
+                env.step(|b| sem::c_bnez_rv32(b, rs1, pc, off))
+            } else {
+                env.step(|b| sem::c_bnez(b, rs1, pc, off))
+            }
+        }
+        Insn::CSlli => {
+            let rd = Gpr(r(5, 7));
+            let shamt = c_shamt6(w);
+            if rv32 {
+                env.step(|b| sem::c_slli_rv32(b, rd, shamt))
+            } else {
+                env.step(|b| sem::c_slli(b, rd, shamt))
+            }
+        }
+        Insn::CLwsp => {
+            let rd = Gpr(creg5(w));
+            let off = c_lwsp_uimm(w) as i64;
+            if rv32 {
+                env.step(|b| sem::c_lwsp_rv32(b, rd, off))
+            } else {
+                env.step(|b| sem::c_lwsp(b, rd, off))
+            }
+        }
+        Insn::CLdsp => {
+            if rv32 {
+                return Err(Outcome::Unimplemented { pc: env.pc, word });
+            }
+            let rd = Gpr(creg5(w));
+            // C.LDSP の uimm[8:3]。
+            let off = ((((word >> 5) & 7) << 3)
+                | (((word >> 12) & 1) << 8)
+                | (((word >> 2) & 3) << 6)) as i64;
+            env.step(|b| sem::c_ldsp(b, rd, off))
+        }
+        Insn::CSwsp => {
+            let rs2 = Gpr(creg5(w));
+            let off = c_swsp_uimm(w) as i64;
+            if rv32 {
+                env.step(|b| sem::c_swsp_rv32(b, rs2, off))
+            } else {
+                env.step(|b| sem::c_swsp(b, rs2, off))
+            }
+        }
+        Insn::CSdsp => {
+            if rv32 {
+                return Err(Outcome::Unimplemented { pc: env.pc, word });
+            }
+            let rs2 = Gpr(creg5(w));
+            let off = ((((word >> 7) & 7) << 3) | (((word >> 10) & 7) << 6)) as i64;
+            env.step(|b| sem::c_sdsp(b, rs2, off))
+        }
+        Insn::CSrli => {
+            let rd = Gpr(crs1(w));
+            let shamt = c_shamt6(w);
+            if rv32 {
+                env.step(|b| sem::c_srli_rv32(b, rd, shamt))
+            } else {
+                env.step(|b| sem::c_srli(b, rd, shamt))
+            }
+        }
+        Insn::CSrai => {
+            let rd = Gpr(crs1(w));
+            let shamt = c_shamt6(w);
+            if rv32 {
+                env.step(|b| sem::c_srai_rv32(b, rd, shamt))
+            } else {
+                env.step(|b| sem::c_srai(b, rd, shamt))
+            }
+        }
+        Insn::CAndi => {
+            let rd = Gpr(crs1(w));
+            let imm = c_imm6(w);
+            if rv32 {
+                env.step(|b| sem::c_andi_rv32(b, rd, imm))
+            } else {
+                env.step(|b| sem::c_andi(b, rd, imm))
+            }
+        }
+        Insn::CSub => {
+            let rd = Gpr(crs1(w));
+            let rs2 = Gpr(crd3(w));
+            if rv32 {
+                env.step(|b| sem::c_sub_rv32(b, rd, rs2))
+            } else {
+                env.step(|b| sem::c_sub(b, rd, rs2))
+            }
+        }
+        Insn::CXor => {
+            let rd = Gpr(crs1(w));
+            let rs2 = Gpr(crd3(w));
+            if rv32 {
+                env.step(|b| sem::c_xor_rv32(b, rd, rs2))
+            } else {
+                env.step(|b| sem::c_xor(b, rd, rs2))
+            }
+        }
+        Insn::COr => {
+            let rd = Gpr(crs1(w));
+            let rs2 = Gpr(crd3(w));
+            if rv32 {
+                env.step(|b| sem::c_or_rv32(b, rd, rs2))
+            } else {
+                env.step(|b| sem::c_or(b, rd, rs2))
+            }
+        }
+        Insn::CAnd => {
+            let rd = Gpr(crs1(w));
+            let rs2 = Gpr(crd3(w));
+            if rv32 {
+                env.step(|b| sem::c_and_rv32(b, rd, rs2))
+            } else {
+                env.step(|b| sem::c_and(b, rd, rs2))
+            }
+        }
+        Insn::CSubw => {
+            if rv32 {
+                return Err(Outcome::Unimplemented { pc: env.pc, word });
+            }
+            let rd = Gpr(crs1(w));
+            let rs2 = Gpr(crd3(w));
+            env.step(|b| sem::c_subw(b, rd, rs2))
+        }
+        Insn::CAddw => {
+            if rv32 {
+                return Err(Outcome::Unimplemented { pc: env.pc, word });
+            }
+            let rd = Gpr(crs1(w));
+            let rs2 = Gpr(crd3(w));
+            env.step(|b| sem::c_addw(b, rd, rs2))
+        }
+        Insn::CJr => {
+            let rs1 = Gpr(crd5(w));
+            let pc = env.pc;
+            if rv32 {
+                env.step(|b| sem::c_jr_rv32(b, rs1, pc))
+            } else {
+                env.step(|b| sem::c_jr(b, rs1, pc))
+            }
+        }
+        Insn::CMv => {
+            let rd = Gpr(crd5(w));
+            let rs2 = Gpr(crs2(w));
+            if rv32 {
+                env.step(|b| sem::c_mv_rv32(b, rd, rs2))
+            } else {
+                env.step(|b| sem::c_mv(b, rd, rs2))
+            }
+        }
+        Insn::CJalr => {
+            let rs1 = Gpr(crd5(w));
+            let pc = env.pc;
+            if rv32 {
+                env.step(|b| sem::c_jalr_rv32(b, rs1, pc))
+            } else {
+                env.step(|b| sem::c_jalr(b, rs1, pc))
+            }
+        }
+        Insn::CAdd => {
+            let rd = Gpr(crd5(w));
+            let rs2 = Gpr(crs2(w));
+            if rv32 {
+                env.step(|b| sem::c_add_rv32(b, rd, rs2))
+            } else {
+                env.step(|b| sem::c_add(b, rd, rs2))
+            }
+        }
+        Insn::CEbreak => {
+            let pc = env.pc;
+            env.step(|b| sem::c_ebreak(b, pc))
+        }
+        _ => {
+            return Err(Outcome::Unimplemented { pc: env.pc, word });
+        }
+    };
+    if ok.is_err() {
+        return Err(Outcome::Unimplemented { pc: env.pc, word });
+    }
+    Ok(())
+}
+
 fn check_one_in(sub: &str, name: &str) {
     let root = testdata();
     if !root.join(format!("isa/{sub}/{name}.S")).exists() {
@@ -871,6 +1446,14 @@ fn check_rv32i(name: &str) {
 
 fn check_rv32m(name: &str) {
     check_one_in("rv32um", name);
+}
+
+fn check_rv32f(name: &str) {
+    check_one_in("rv32uf", name);
+}
+
+fn check_rv32c(name: &str) {
+    check_one_in("rv32uc", name);
 }
 
 fn check_um(name: &str) {
@@ -1380,4 +1963,64 @@ fn rv32um_p_rem() {
 #[test]
 fn rv32um_p_remu() {
     check_rv32m("remu");
+}
+
+#[test]
+fn rv32uf_p_fadd() {
+    check_rv32f("fadd");
+}
+
+#[test]
+fn rv32uf_p_fclass() {
+    check_rv32f("fclass");
+}
+
+#[test]
+fn rv32uf_p_fcmp() {
+    check_rv32f("fcmp");
+}
+
+#[test]
+fn rv32uf_p_fcvt() {
+    check_rv32f("fcvt");
+}
+
+#[test]
+fn rv32uf_p_fcvt_w() {
+    check_rv32f("fcvt_w");
+}
+
+#[test]
+fn rv32uf_p_fdiv() {
+    check_rv32f("fdiv");
+}
+
+#[test]
+fn rv32uf_p_fmadd() {
+    check_rv32f("fmadd");
+}
+
+#[test]
+fn rv32uf_p_fmin() {
+    check_rv32f("fmin");
+}
+
+#[test]
+fn rv32uf_p_ldst() {
+    check_rv32f("ldst");
+}
+
+#[test]
+fn rv32uf_p_move() {
+    check_rv32f("move");
+}
+
+#[test]
+fn rv32uf_p_recoding() {
+    check_rv32f("recoding");
+}
+
+#[test]
+fn rv32uc_p_rvc() {
+    check_rv32c("rvc");
 }
