@@ -466,6 +466,50 @@ fn d_arithmetic() {
 }
 
 #[test]
+fn c_compressed() {
+    let mut env = env();
+    env.map_rw(0, 1).unwrap();
+    env.pc = 0x1_0000;
+    // C.ADDI / C.LI / C.ADDIW：32ビット版への委譲。
+    env.step(|b| sem::c_addi(b, Gpr(1), 5)).unwrap();
+    assert_eq!(x(&mut env, 1), 5);
+    env.step(|b| sem::c_li(b, Gpr(2), -3)).unwrap();
+    assert_eq!(x(&mut env, 2), 0xffff_ffff_ffff_fffd);
+    env.step(|b| sem::c_addiw(b, Gpr(3), 1)).unwrap();
+    assert_eq!(x(&mut env, 3), 1);
+    // C.ADDI4SPN：x2基準。
+    env.step(|b| sem::addi(b, Gpr(2), Gpr(0), 0x100)).unwrap();
+    env.step(|b| sem::c_addi4spn(b, Gpr(4), 16)).unwrap();
+    assert_eq!(x(&mut env, 4), 0x110);
+    // C.SLLI。
+    env.step(|b| sem::c_slli(b, Gpr(4), 2)).unwrap();
+    assert_eq!(x(&mut env, 4), 0x440);
+    // C.LW / C.SW、C.LD / C.SD、C.LWSP系の往復。
+    env.step(|b| sem::c_sw(b, Gpr(2), Gpr(4), 0)).unwrap();
+    env.step(|b| sem::c_lw(b, Gpr(5), Gpr(2), 0)).unwrap();
+    assert_eq!(x(&mut env, 5), 0x440);
+    env.step(|b| sem::c_sd(b, Gpr(2), Gpr(4), 8)).unwrap();
+    env.step(|b| sem::c_ld(b, Gpr(6), Gpr(2), 8)).unwrap();
+    assert_eq!(x(&mut env, 6), 0x440);
+    env.step(|b| sem::c_swsp(b, Gpr(4), 0)).unwrap();
+    env.step(|b| sem::c_lwsp(b, Gpr(7), 0)).unwrap();
+    assert_eq!(x(&mut env, 7), 0x440);
+    env.step(|b| sem::c_sdsp(b, Gpr(4), 8)).unwrap();
+    env.step(|b| sem::c_ldsp(b, Gpr(8), 8)).unwrap();
+    assert_eq!(x(&mut env, 8), 0x440);
+    // C.J / C.BEQZ / C.BNEZ。
+    let pc = env.pc;
+    env.step(|b| sem::c_j(b, pc, 16)).unwrap();
+    assert_eq!(env.pc, 0x1_0010);
+    let pc = env.pc;
+    env.step(|b| sem::c_beqz(b, Gpr(0), pc, 16)).unwrap();
+    assert_eq!(env.pc, 0x1_0020);
+    let pc = env.pc;
+    env.step(|b| sem::c_bnez(b, Gpr(0), pc, 16)).unwrap();
+    assert_eq!(env.pc, 0x1_0020);
+}
+
+#[test]
 fn system_exits() {
     let mut env = env();
     let r = env.step(|b| sem::ecall(b, 0x100));

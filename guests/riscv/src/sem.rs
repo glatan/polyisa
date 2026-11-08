@@ -1437,3 +1437,90 @@ pub fn fcvt_d_s<B: Backend>(b: &mut B, rd: Fpr, rs1: Fpr) -> Flow<B> {
     write_fd(b, rd, s);
     Ok(())
 }
+
+// C（圧縮）。各命令は対応する32ビット命令への展開である。
+// Ref: SPEC-RISCV-UNPRIV (20250508) §C.
+// 即値は呼び出し側で組み立て済み（バイトオフセット）として受ける。
+
+/// C.ADDI4SPN。`addi rd, x2, uimm` に展開する。
+pub fn c_addi4spn<B: Backend>(b: &mut B, rd: Gpr, uimm: i64) -> Flow<B> {
+    addi(b, rd, Gpr(2), uimm)
+}
+
+/// C.LW。
+pub fn c_lw<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, oimm: i64) -> Flow<B> {
+    lw(b, rd, rs1, oimm)
+}
+
+/// C.LD。
+pub fn c_ld<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, oimm: i64) -> Flow<B> {
+    ld(b, rd, rs1, oimm)
+}
+
+/// C.SW。
+pub fn c_sw<B: Backend>(b: &mut B, rs1: Gpr, rs2: Gpr, oimm: i64) -> Flow<B> {
+    sw(b, rs1, rs2, oimm)
+}
+
+/// C.SD。
+pub fn c_sd<B: Backend>(b: &mut B, rs1: Gpr, rs2: Gpr, oimm: i64) -> Flow<B> {
+    sd(b, rs1, rs2, oimm)
+}
+
+/// C.ADDI。`addi rd, rd, nzimm` に展開する。
+pub fn c_addi<B: Backend>(b: &mut B, rd: Gpr, nzimm: i64) -> Flow<B> {
+    let r = rd.0;
+    addi(b, rd, Gpr(r), nzimm)
+}
+
+/// C.ADDIW。`addiw rd, rd, imm` に展開する。
+pub fn c_addiw<B: Backend>(b: &mut B, rd: Gpr, imm: i64) -> Flow<B> {
+    let r = rd.0;
+    addiw(b, rd, Gpr(r), imm)
+}
+
+/// C.LI。`addi rd, x0, imm` に展開する。
+pub fn c_li<B: Backend>(b: &mut B, rd: Gpr, imm: i64) -> Flow<B> {
+    addi(b, rd, Gpr(0), imm)
+}
+
+/// C.J。`jal x0, offset` に展開する。
+pub fn c_j<B: Backend>(b: &mut B, pc: u64, offset: i64) -> Flow<B> {
+    jal(b, Gpr(0), pc, offset)
+}
+
+/// C.BEQZ。`beq rs1, x0, offset` に展開する。
+pub fn c_beqz<B: Backend>(b: &mut B, rs1: Gpr, pc: u64, offset: i64) -> Flow<B> {
+    beq(b, rs1, Gpr(0), pc, offset)
+}
+
+/// C.BNEZ。`bne rs1, x0, offset` に展開する。
+pub fn c_bnez<B: Backend>(b: &mut B, rs1: Gpr, pc: u64, offset: i64) -> Flow<B> {
+    bne(b, rs1, Gpr(0), pc, offset)
+}
+
+/// C.SLLI。
+pub fn c_slli<B: Backend>(b: &mut B, rd: Gpr, shamt: u64) -> Flow<B> {
+    let r = rd.0;
+    slli(b, rd, Gpr(r), shamt)
+}
+
+/// C.LWSP。`lw rd, offset(x2)` に展開する。
+pub fn c_lwsp<B: Backend>(b: &mut B, rd: Gpr, oimm: i64) -> Flow<B> {
+    lw(b, rd, Gpr(2), oimm)
+}
+
+/// C.LDSP。`ld rd, offset(x2)` に展開する。
+pub fn c_ldsp<B: Backend>(b: &mut B, rd: Gpr, oimm: i64) -> Flow<B> {
+    ld(b, rd, Gpr(2), oimm)
+}
+
+/// C.SWSP。`sw rs2, offset(x2)` に展開する。
+pub fn c_swsp<B: Backend>(b: &mut B, rs2: Gpr, oimm: i64) -> Flow<B> {
+    sw(b, Gpr(2), rs2, oimm)
+}
+
+/// C.SDSP。`sd rs2, offset(x2)` に展開する。
+pub fn c_sdsp<B: Backend>(b: &mut B, rs2: Gpr, oimm: i64) -> Flow<B> {
+    sd(b, Gpr(2), rs2, oimm)
+}

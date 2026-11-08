@@ -230,6 +230,24 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("fmv_d_x", "R", "1111001 00000 ..... 000 ..... 1010011", "fmv.d.x {rd}, {rs1}", "fpu"),
         ("fcvt_s_d", "R", "0100000 00001 ..... ... ..... 1010011", "fcvt.s.d {rd}, {rs1}", "fpu"),
         ("fcvt_d_s", "R", "0100001 00000 ..... ... ..... 1010011", "fcvt.d.s {rd}, {rs1}", "fpu"),
+        // C（圧縮。16ビット。funct3とop下位2ビットで区別できる衝突なし subset）
+        // Ref: SPEC-RISCV-UNPRIV (20250508) §C.
+        ("c_addi4spn", "R", "000 ........ ... 00", "c.addi4spn {rd}, {imm}", "alu"),
+        ("c_lw", "R", "010 ........ ... 00", "c.lw {rd}, {imm}({rs1})", "load"),
+        ("c_ld", "R", "011 ........ ... 00", "c.ld {rd}, {imm}({rs1})", "load"),
+        ("c_sw", "R", "110 ........ ... 00", "c.sw {rs2}, {imm}({rs1})", "store"),
+        ("c_sd", "R", "111 ........ ... 00", "c.sd {rs2}, {imm}({rs1})", "store"),
+        ("c_addi", "R", "000 ........ ... 01", "c.addi {rd}, {imm}", "alu"),
+        ("c_addiw", "R", "001 ........ ... 01", "c.addiw {rd}, {imm}", "alu"),
+        ("c_li", "R", "010 ........ ... 01", "c.li {rd}, {imm}", "alu"),
+        ("c_j", "R", "101 ........ ... 01", "c.j {imm}", "jump"),
+        ("c_beqz", "R", "110 ........ ... 01", "c.beqz {rs1}, {imm}", "branch"),
+        ("c_bnez", "R", "111 ........ ... 01", "c.bnez {rs1}, {imm}", "branch"),
+        ("c_slli", "R", "000 ........ ... 10", "c.slli {rd}, {imm}", "alu"),
+        ("c_lwsp", "R", "010 ........ ... 10", "c.lwsp {rd}, {imm}", "load"),
+        ("c_ldsp", "R", "011 ........ ... 10", "c.ldsp {rd}, {imm}", "load"),
+        ("c_swsp", "R", "110 ........ ... 10", "c.swsp {rs2}, {imm}", "store"),
+        ("c_sdsp", "R", "111 ........ ... 10", "c.sdsp {rs2}, {imm}", "store"),
     ];
     for (name, format, pattern, syntax, timing) in insns {
         m.insns.push(Insn {
