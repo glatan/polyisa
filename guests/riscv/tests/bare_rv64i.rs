@@ -654,7 +654,7 @@ fn c_compressed() {
     let pc = env.pc;
     env.step(|b| sem::c_jal(b, pc, 16)).unwrap();
     assert_eq!(env.pc, pc + 16);
-    assert_eq!(x(&mut env, 1), pc + 4);
+    assert_eq!(x(&mut env, 1), (pc + 2) & 0xffff_ffff);
 }
 
 #[test]
@@ -678,7 +678,14 @@ fn c_jump_moves() {
     env.pc = pc;
     env.step(|b| sem::c_jalr(b, Gpr(3), pc)).unwrap();
     assert_eq!(env.pc, 0x40);
-    assert_eq!(x(&mut env, 1), pc + 4);
+    assert_eq!(x(&mut env, 1), pc + 2);
+    // RV32 版は戻りと飛び先を32ビットで包む。
+    env.pc = pc;
+    env.step(|b| sem::c_jalr_rv32(b, Gpr(3), pc)).unwrap();
+    assert_eq!(env.pc, 0x40);
+    assert_eq!(x(&mut env, 1), (pc + 2) & 0xffff_ffff);
+    env.step(|b| sem::c_jr_rv32(b, Gpr(3), pc)).unwrap();
+    assert_eq!(env.pc, 0x40);
     // C.EBREAK は ebreak と同じ退出になる。
     env.pc = 0x1_0080;
     let r = env.step(|b| sem::c_ebreak(b, 0x1_0080));

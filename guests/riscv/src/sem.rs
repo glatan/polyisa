@@ -1706,6 +1706,63 @@ pub fn fsd<B: Backend>(b: &mut B, rs1: Gpr, rs2: Fpr, oimm: i64) -> Flow<B> {
     Ok(())
 }
 
+// RV32 の浮動小数点ロードストア。アドレスは 32 ビットで包む。
+// 値の扱いは XLEN によらない。
+
+/// FLW（RV32）。
+pub fn flw_rv32<B: Backend>(b: &mut B, rd: Fpr, rs1: Gpr, oimm: i64) -> Flow<B> {
+    let addr = load_addr_rv32(b, rs1, oimm);
+    let v: B::V<W32> = b.load(addr, DATA_READ)?;
+    let w = b.trunc::<W32, F32>(v);
+    write_f(b, rd, w);
+    Ok(())
+}
+
+/// FSW（RV32）。
+pub fn fsw_rv32<B: Backend>(b: &mut B, rs1: Gpr, rs2: Fpr, oimm: i64) -> Flow<B> {
+    let v = read_f(b, rs2);
+    let addr = load_addr_rv32(b, rs1, oimm);
+    b.store(addr, v, DATA_WRITE)?;
+    Ok(())
+}
+
+/// FLD（RV32）。
+pub fn fld_rv32<B: Backend>(b: &mut B, rd: Fpr, rs1: Gpr, oimm: i64) -> Flow<B> {
+    let addr = load_addr_rv32(b, rs1, oimm);
+    let v: B::V<W64> = b.load(addr, DATA_READ)?;
+    let w = b.trunc::<W64, F64>(v);
+    write_fd(b, rd, w);
+    Ok(())
+}
+
+/// FSD（RV32）。
+pub fn fsd_rv32<B: Backend>(b: &mut B, rs1: Gpr, rs2: Fpr, oimm: i64) -> Flow<B> {
+    let v = read_fd(b, rs2);
+    let addr = load_addr_rv32(b, rs1, oimm);
+    b.store(addr, v, DATA_WRITE)?;
+    Ok(())
+}
+
+/// C.FLW（RV32）。
+pub fn c_flw_rv32<B: Backend>(b: &mut B, rd: Fpr, rs1: Gpr, oimm: i64) -> Flow<B> {
+    flw_rv32(b, rd, rs1, oimm)
+}
+
+/// C.FSW（RV32）。
+pub fn c_fsw_rv32<B: Backend>(b: &mut B, rs1: Gpr, rs2: Fpr, oimm: i64) -> Flow<B> {
+    fsw_rv32(b, rs1, rs2, oimm)
+}
+
+/// C.FLWSP（RV32）。`flw rd, offset(x2)` に展開する。
+pub fn c_flwsp_rv32<B: Backend>(b: &mut B, rd: Fpr, oimm: i64) -> Flow<B> {
+    flw_rv32(b, rd, Gpr(2), oimm)
+}
+
+/// C.FSWSP（RV32）。`fsw rs2, offset(x2)` に展開する。
+pub fn c_fswsp_rv32<B: Backend>(b: &mut B, rs2: Fpr, oimm: i64) -> Flow<B> {
+    fsw_rv32(b, Gpr(2), rs2, oimm)
+}
+
 /// FADD.D。
 pub fn fadd_d<B: Backend>(b: &mut B, rd: Fpr, rs1: Fpr, rs2: Fpr) -> Flow<B> {
     let x = read_fd(b, rs1);
@@ -2217,9 +2274,13 @@ pub fn c_lui_addi16sp<B: Backend>(b: &mut B, rd: Gpr, imm: i64) -> Flow<B> {
     }
 }
 
-/// C.JAL（RV32）。`jal x1, offset` に展開する。
+/// C.JAL（RV32）。戻りアドレスは pc+2（16ビット命令）で、飛び先は32ビットで包む。
 pub fn c_jal<B: Backend>(b: &mut B, pc: u64, offset: i64) -> Flow<B> {
-    jal(b, Gpr(1), pc, offset)
+    let ret = b.konst::<W32>(((pc.wrapping_add(2)) & MASK32) as u32);
+    write_w(b, Gpr(1), ret);
+    let target = const_w64(b, pc.wrapping_add(offset as u64) & MASK32);
+    b.jump(target);
+    Ok(())
 }
 
 /// C.JR。`jalr x0, 0(rs1)` に展開する。
@@ -2232,9 +2293,33 @@ pub fn c_mv<B: Backend>(b: &mut B, rd: Gpr, rs2: Gpr) -> Flow<B> {
     add(b, rd, Gpr(0), rs2)
 }
 
-/// C.JALR。`jalr x1, 0(rs1)` に展開する。
+/// C.JALR。戻りアドレスは pc+2（16ビット命令）。RV64 用で飛び先は包まない。
 pub fn c_jalr<B: Backend>(b: &mut B, rs1: Gpr, pc: u64) -> Flow<B> {
-    jalr(b, Gpr(1), rs1, pc, 0)
+    let base = read(b, rs1);
+    let mask = const_w64(b, !1);
+    let target = b.and(base, mask);
+    let ret = const_w64(b, pc.wrapping_add(2));
+    write(b, Gpr(1), ret);
+    b.jump(target);
+    Ok(())
+}
+
+/// C.JR（RV32）。`jalr x0, 0(rs1)` と同じで、飛び先は32ビットで包む。
+pub fn c_jr_rv32<B: Backend>(b: &mut B, rs1: Gpr, pc: u64) -> Flow<B> {
+    jalr_rv32(b, Gpr(0), rs1, pc, 0)
+}
+
+/// C.JALR（RV32）。戻りは (pc+2) を32ビットで包み、飛び先も32ビットで包む。
+pub fn c_jalr_rv32<B: Backend>(b: &mut B, rs1: Gpr, pc: u64) -> Flow<B> {
+    let base = read(b, rs1);
+    let b32 = b.trunc::<W64, W32>(base);
+    let addr = b.zext::<W32, W64>(b32);
+    let mask = const_w64(b, !1);
+    let target = b.and(addr, mask);
+    let ret = b.konst::<W32>(((pc.wrapping_add(2)) & MASK32) as u32);
+    write_w(b, Gpr(1), ret);
+    b.jump(target);
+    Ok(())
 }
 
 /// C.ADD。`add rd, rd, rs2` に展開する。
@@ -2256,6 +2341,127 @@ pub fn c_flw<B: Backend>(b: &mut B, rd: Fpr, rs1: Gpr, oimm: i64) -> Flow<B> {
 /// C.FSW（RV32）。単精度ストア。
 pub fn c_fsw<B: Backend>(b: &mut B, rs1: Gpr, rs2: Fpr, oimm: i64) -> Flow<B> {
     fsw(b, rs1, rs2, oimm)
+}
+
+// C（RV32）。GPR は下位 32 ビットに符号拡張して置く。
+
+/// C.LW（RV32）。
+pub fn c_lw_rv32<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, oimm: i64) -> Flow<B> {
+    lw_rv32(b, rd, rs1, oimm)
+}
+
+/// C.SW（RV32）。
+pub fn c_sw_rv32<B: Backend>(b: &mut B, rs1: Gpr, rs2: Gpr, oimm: i64) -> Flow<B> {
+    sw_rv32(b, rs1, rs2, oimm)
+}
+
+/// C.ADDI（RV32）。`addi rd, rd, nzimm` に展開する。
+pub fn c_addi_rv32<B: Backend>(b: &mut B, rd: Gpr, nzimm: i64) -> Flow<B> {
+    let r = rd.0;
+    addi_rv32(b, rd, Gpr(r), nzimm)
+}
+
+/// C.LI（RV32）。`addi rd, x0, imm` に展開する。
+pub fn c_li_rv32<B: Backend>(b: &mut B, rd: Gpr, imm: i64) -> Flow<B> {
+    addi_rv32(b, rd, Gpr(0), imm)
+}
+
+/// C.LUI / C.ADDI16SP（RV32）。
+pub fn c_lui_addi16sp_rv32<B: Backend>(b: &mut B, rd: Gpr, imm: i64) -> Flow<B> {
+    if rd.0 == 2 {
+        addi_rv32(b, rd, Gpr(2), imm)
+    } else {
+        lui_rv32(b, rd, imm)
+    }
+}
+
+/// C.LUI（RV32）。
+pub fn c_lui_rv32<B: Backend>(b: &mut B, rd: Gpr, imm: i64) -> Flow<B> {
+    lui_rv32(b, rd, imm)
+}
+
+/// C.J（RV32）。`jal x0, offset` に展開する。
+pub fn c_j_rv32<B: Backend>(b: &mut B, pc: u64, offset: i64) -> Flow<B> {
+    jal_rv32(b, Gpr(0), pc, offset)
+}
+
+/// C.BEQZ（RV32）。
+pub fn c_beqz_rv32<B: Backend>(b: &mut B, rs1: Gpr, pc: u64, offset: i64) -> Flow<B> {
+    beq_rv32(b, rs1, Gpr(0), pc, offset)
+}
+
+/// C.BNEZ（RV32）。
+pub fn c_bnez_rv32<B: Backend>(b: &mut B, rs1: Gpr, pc: u64, offset: i64) -> Flow<B> {
+    bne_rv32(b, rs1, Gpr(0), pc, offset)
+}
+
+/// C.SLLI（RV32）。
+pub fn c_slli_rv32<B: Backend>(b: &mut B, rd: Gpr, shamt: u64) -> Flow<B> {
+    let r = rd.0;
+    slli_rv32(b, rd, Gpr(r), shamt)
+}
+
+/// C.LWSP（RV32）。
+pub fn c_lwsp_rv32<B: Backend>(b: &mut B, rd: Gpr, oimm: i64) -> Flow<B> {
+    lw_rv32(b, rd, Gpr(2), oimm)
+}
+
+/// C.SWSP（RV32）。
+pub fn c_swsp_rv32<B: Backend>(b: &mut B, rs2: Gpr, oimm: i64) -> Flow<B> {
+    sw_rv32(b, Gpr(2), rs2, oimm)
+}
+
+/// C.SRLI（RV32）。
+pub fn c_srli_rv32<B: Backend>(b: &mut B, rd: Gpr, shamt: u64) -> Flow<B> {
+    let r = rd.0;
+    srli_rv32(b, rd, Gpr(r), shamt)
+}
+
+/// C.SRAI（RV32）。
+pub fn c_srai_rv32<B: Backend>(b: &mut B, rd: Gpr, shamt: u64) -> Flow<B> {
+    let r = rd.0;
+    srai_rv32(b, rd, Gpr(r), shamt)
+}
+
+/// C.ANDI（RV32）。
+pub fn c_andi_rv32<B: Backend>(b: &mut B, rd: Gpr, imm: i64) -> Flow<B> {
+    let r = rd.0;
+    andi_rv32(b, rd, Gpr(r), imm)
+}
+
+/// C.SUB（RV32）。
+pub fn c_sub_rv32<B: Backend>(b: &mut B, rd: Gpr, rs2: Gpr) -> Flow<B> {
+    let r = rd.0;
+    sub_rv32(b, rd, Gpr(r), rs2)
+}
+
+/// C.XOR（RV32）。
+pub fn c_xor_rv32<B: Backend>(b: &mut B, rd: Gpr, rs2: Gpr) -> Flow<B> {
+    let r = rd.0;
+    xor_rv32(b, rd, Gpr(r), rs2)
+}
+
+/// C.OR（RV32）。
+pub fn c_or_rv32<B: Backend>(b: &mut B, rd: Gpr, rs2: Gpr) -> Flow<B> {
+    let r = rd.0;
+    or_rv32(b, rd, Gpr(r), rs2)
+}
+
+/// C.AND（RV32）。
+pub fn c_and_rv32<B: Backend>(b: &mut B, rd: Gpr, rs2: Gpr) -> Flow<B> {
+    let r = rd.0;
+    and_rv32(b, rd, Gpr(r), rs2)
+}
+
+/// C.MV（RV32）。
+pub fn c_mv_rv32<B: Backend>(b: &mut B, rd: Gpr, rs2: Gpr) -> Flow<B> {
+    add_rv32(b, rd, Gpr(0), rs2)
+}
+
+/// C.ADD（RV32）。
+pub fn c_add_rv32<B: Backend>(b: &mut B, rd: Gpr, rs2: Gpr) -> Flow<B> {
+    let r = rd.0;
+    add_rv32(b, rd, Gpr(r), rs2)
 }
 
 /// C.FLWSP（RV32）。`flw rd, offset(x2)` に展開する。
