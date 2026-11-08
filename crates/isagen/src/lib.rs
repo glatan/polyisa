@@ -125,6 +125,16 @@ fn gen_metadata(model: &Model) -> String {
         ));
     }
     s.push_str("];\n");
+    s.push_str("pub const FEATURES: &[&str] = &[\n");
+    for f in &model.features {
+        s.push_str(&format!("    {:?},\n", f.name));
+    }
+    s.push_str("];\n");
+    s.push_str("pub const MODELS: &[&str] = &[\n");
+    for m in &model.models {
+        s.push_str(&format!("    {:?},\n", m.name));
+    }
+    s.push_str("];\n");
     s
 }
 
@@ -181,6 +191,8 @@ mod tests {
         assert!(g.insn_type.contains("Add"));
         assert!(g.disassembler.contains("add {rd}"));
         assert!(g.metadata.contains("alu"));
+        assert!(g.metadata.contains("FEATURES"));
+        assert!(g.metadata.contains("MODELS"));
         assert!(g.encoder.contains("encode_add"));
     }
 

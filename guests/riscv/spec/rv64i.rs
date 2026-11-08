@@ -16,6 +16,41 @@ pub fn build_model() -> polyisa_isadl::Model {
         m.timing_classes.push(class.to_string());
     }
 
+    // 機能と汎用CPUモデル。RVA22U64相当のRV64GCを汎用とする。
+    // Ref: SPEC-RISCV-UNPRIV (20250508), SPEC-RISCV-PROFILES (RVA23 v1.0).
+    for (name, implies, conflicts) in [
+        ("rv64", &[][..], &["rv32"][..]),
+        ("rv32", &[][..], &["rv64"][..]),
+        ("m", &[][..], &[][..]),
+        ("a", &[][..], &[][..]),
+        ("f", &[][..], &[][..]),
+        ("d", &["f"][..], &[][..]),
+        ("c", &[][..], &[][..]),
+        ("zicsr", &[][..], &[][..]),
+        ("zifencei", &[][..], &[][..]),
+    ] {
+        m.features.push(polyisa_isadl::model::Feature {
+            name: name.to_string(),
+            implies: implies.iter().map(|s| s.to_string()).collect(),
+            conflicts: conflicts.iter().map(|s| s.to_string()).collect(),
+        });
+    }
+    m.models.push(polyisa_isadl::model::ModelDef {
+        name: "rv64gc".to_string(),
+        parent: String::new(),
+        add_features: ["rv64", "m", "a", "f", "d", "c", "zicsr", "zifencei"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+        remove_features: Vec::new(),
+    });
+    m.models.push(polyisa_isadl::model::ModelDef {
+        name: "rv64imac".to_string(),
+        parent: "rv64gc".to_string(),
+        add_features: Vec::new(),
+        remove_features: ["f", "d"].iter().map(|s| s.to_string()).collect(),
+    });
+
     m.regclasses.push(RegClass {
         name: "gpr".to_string(),
         dynamic: false,

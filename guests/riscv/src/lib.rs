@@ -68,6 +68,15 @@ mod tests {
     }
 
     #[test]
+    fn cpu_models() {
+        // 汎用CPUモデルと機能集合。RVA相当のRV64GCを汎用とする。
+        assert!(FEATURES.contains(&"rv64"));
+        assert!(FEATURES.contains(&"c"));
+        assert!(FEATURES.contains(&"zicsr"));
+        assert!(MODELS.contains(&"rv64gc"));
+    }
+
+    #[test]
     fn decode_spot_checks() {
         // 命令語はビット配置から手で組み立てる（ Ref: SPEC-RISCV-UNPRIV）。
         assert_eq!(decode(0x0020_8133, 32), Some(Insn::Add));
