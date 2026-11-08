@@ -215,13 +215,20 @@ pub trait Backend {
 
     // 整数演算（抜粋。段階 0 は整数演算だけを使う）
     fn add<W: Width>(&mut self, a: Self::V<W>, b: Self::V<W>) -> Self::V<W>;
+    fn sub<W: Width>(&mut self, a: Self::V<W>, b: Self::V<W>) -> Self::V<W>;
+    fn and<W: Width>(&mut self, a: Self::V<W>, b: Self::V<W>) -> Self::V<W>;
+    fn or<W: Width>(&mut self, a: Self::V<W>, b: Self::V<W>) -> Self::V<W>;
+    fn xor<W: Width>(&mut self, a: Self::V<W>, b: Self::V<W>) -> Self::V<W>;
+    fn not<W: Width>(&mut self, a: Self::V<W>) -> Self::V<W>;
+    fn shl<W: Width>(&mut self, a: Self::V<W>, n: Self::V<W>) -> Self::V<W>;
+    fn shr_l<W: Width>(&mut self, a: Self::V<W>, n: Self::V<W>) -> Self::V<W>;
+    fn shr_a<W: Width>(&mut self, a: Self::V<W>, n: Self::V<W>) -> Self::V<W>;
     fn add_with_carry<W: Width>(
         &mut self,
         a: Self::V<W>,
         b: Self::V<W>,
         c: Self::B,
     ) -> (Self::V<W>, Self::B, Self::B);
-    fn shl<W: Width>(&mut self, a: Self::V<W>, n: Self::V<W>) -> Self::V<W>;
     fn udiv<W: Width>(&mut self, a: Self::V<W>, b: Self::V<W>) -> Self::V<W>;
     fn zext<F: Width, T: Width>(&mut self, a: Self::V<F>) -> Self::V<T>;
     fn sext<F: Width, T: Width>(&mut self, a: Self::V<F>) -> Self::V<T>;

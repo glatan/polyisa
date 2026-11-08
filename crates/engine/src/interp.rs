@@ -86,6 +86,26 @@ impl Backend for InterpBackend {
         W::from_u128(W::to_u128(a).wrapping_add(W::to_u128(b)))
     }
 
+    fn sub<W: Width>(&mut self, a: Self::V<W>, b: Self::V<W>) -> Self::V<W> {
+        W::from_u128(W::to_u128(a).wrapping_sub(W::to_u128(b)))
+    }
+
+    fn and<W: Width>(&mut self, a: Self::V<W>, b: Self::V<W>) -> Self::V<W> {
+        W::from_u128(W::to_u128(a) & W::to_u128(b))
+    }
+
+    fn or<W: Width>(&mut self, a: Self::V<W>, b: Self::V<W>) -> Self::V<W> {
+        W::from_u128(W::to_u128(a) | W::to_u128(b))
+    }
+
+    fn xor<W: Width>(&mut self, a: Self::V<W>, b: Self::V<W>) -> Self::V<W> {
+        W::from_u128(W::to_u128(a) ^ W::to_u128(b))
+    }
+
+    fn not<W: Width>(&mut self, a: Self::V<W>) -> Self::V<W> {
+        from_u128::<W>(!W::to_u128(a))
+    }
+
     fn add_with_carry<W: Width>(
         &mut self,
         a: Self::V<W>,
@@ -98,11 +118,32 @@ impl Backend for InterpBackend {
     }
 
     fn shl<W: Width>(&mut self, a: Self::V<W>, n: Self::V<W>) -> Self::V<W> {
-        let shift = to_u64::<W>(n);
-        if shift >= u64::from(W::BITS) {
-            from_u64::<W>(0)
+        // 全域定義：幅以上のシフトは 0。
+        if W::to_u128(n) >= u128::from(W::BITS) {
+            from_u128::<W>(0)
         } else {
-            from_u64::<W>(to_u64::<W>(a) << shift)
+            from_u128::<W>(W::to_u128(a) << W::to_u128(n))
+        }
+    }
+
+    fn shr_l<W: Width>(&mut self, a: Self::V<W>, n: Self::V<W>) -> Self::V<W> {
+        // 全域定義：幅以上のシフトは 0。
+        if W::to_u128(n) >= u128::from(W::BITS) {
+            from_u128::<W>(0)
+        } else {
+            from_u128::<W>(W::to_u128(a) >> W::to_u128(n))
+        }
+    }
+
+    fn shr_a<W: Width>(&mut self, a: Self::V<W>, n: Self::V<W>) -> Self::V<W> {
+        // 全域定義：幅以上のシフトは符号ビットで埋める。
+        let w = W::BITS;
+        let ext = ((W::to_u128(a) << (128 - w)) as i128) >> (128 - w);
+        let s = W::to_u128(n);
+        if s >= 128 {
+            from_u128::<W>(if ext < 0 { u128::MAX } else { 0 })
+        } else {
+            from_u128::<W>((ext >> s) as u128)
         }
     }
 

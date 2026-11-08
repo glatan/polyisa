@@ -72,6 +72,26 @@ impl Backend for IrBackend {
         self.fresh::<W>()
     }
 
+    fn sub<W: Width>(&mut self, _a: Self::V<W>, _b: Self::V<W>) -> Self::V<W> {
+        self.fresh::<W>()
+    }
+
+    fn and<W: Width>(&mut self, _a: Self::V<W>, _b: Self::V<W>) -> Self::V<W> {
+        self.fresh::<W>()
+    }
+
+    fn or<W: Width>(&mut self, _a: Self::V<W>, _b: Self::V<W>) -> Self::V<W> {
+        self.fresh::<W>()
+    }
+
+    fn xor<W: Width>(&mut self, _a: Self::V<W>, _b: Self::V<W>) -> Self::V<W> {
+        self.fresh::<W>()
+    }
+
+    fn not<W: Width>(&mut self, _a: Self::V<W>) -> Self::V<W> {
+        self.fresh::<W>()
+    }
+
     fn add_with_carry<W: Width>(
         &mut self,
         _a: Self::V<W>,
@@ -86,6 +106,14 @@ impl Backend for IrBackend {
     }
 
     fn shl<W: Width>(&mut self, _a: Self::V<W>, _n: Self::V<W>) -> Self::V<W> {
+        self.fresh::<W>()
+    }
+
+    fn shr_l<W: Width>(&mut self, _a: Self::V<W>, _n: Self::V<W>) -> Self::V<W> {
+        self.fresh::<W>()
+    }
+
+    fn shr_a<W: Width>(&mut self, _a: Self::V<W>, _n: Self::V<W>) -> Self::V<W> {
         self.fresh::<W>()
     }
 
