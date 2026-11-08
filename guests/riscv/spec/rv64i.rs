@@ -12,7 +12,7 @@ use polyisa_isadl::pred::Pred;
 pub fn build_model() -> polyisa_isadl::Model {
     let mut m = polyisa_isadl::Model::new();
 
-    for class in ["alu", "load", "store", "branch", "jump", "system", "mult", "div"] {
+    for class in ["alu", "load", "store", "branch", "jump", "system", "mult", "div", "atomic"] {
         m.timing_classes.push(class.to_string());
     }
 
@@ -151,6 +151,29 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("csrrwi", "I", "............ ..... 101 ..... 1110011", "csrrwi {rd}, {csr}, {uimm}", "system"),
         ("csrrsi", "I", "............ ..... 110 ..... 1110011", "csrrsi {rd}, {csr}, {uimm}", "system"),
         ("csrrci", "I", "............ ..... 111 ..... 1110011", "csrrci {rd}, {csr}, {uimm}", "system"),
+        // A（不可分操作。aq/rl=00 の通常形のみ）
+        ("lr_w", "I", "000100000000 ..... 010 ..... 0101111", "lr_w {rd}, ({rs1})", "atomic"),
+        ("lr_d", "I", "000100000000 ..... 011 ..... 0101111", "lr_d {rd}, ({rs1})", "atomic"),
+        ("sc_w", "R", "0001100 ..... ..... 010 ..... 0101111", "sc_w {rd}, {rs1}, {rs2}", "atomic"),
+        ("sc_d", "R", "0001100 ..... ..... 011 ..... 0101111", "sc_d {rd}, {rs1}, {rs2}", "atomic"),
+        ("amoswap_w", "R", "0000100 ..... ..... 010 ..... 0101111", "amoswap_w {rd}, {rs1}, {rs2}", "atomic"),
+        ("amoadd_w", "R", "0000000 ..... ..... 010 ..... 0101111", "amoadd_w {rd}, {rs1}, {rs2}", "atomic"),
+        ("amoxor_w", "R", "0010000 ..... ..... 010 ..... 0101111", "amoxor_w {rd}, {rs1}, {rs2}", "atomic"),
+        ("amoand_w", "R", "0110000 ..... ..... 010 ..... 0101111", "amoand_w {rd}, {rs1}, {rs2}", "atomic"),
+        ("amoor_w", "R", "0100000 ..... ..... 010 ..... 0101111", "amoor_w {rd}, {rs1}, {rs2}", "atomic"),
+        ("amomin_w", "R", "1000000 ..... ..... 010 ..... 0101111", "amomin_w {rd}, {rs1}, {rs2}", "atomic"),
+        ("amomax_w", "R", "1010000 ..... ..... 010 ..... 0101111", "amomax_w {rd}, {rs1}, {rs2}", "atomic"),
+        ("amominu_w", "R", "1100000 ..... ..... 010 ..... 0101111", "amominu_w {rd}, {rs1}, {rs2}", "atomic"),
+        ("amomaxu_w", "R", "1110000 ..... ..... 010 ..... 0101111", "amomaxu_w {rd}, {rs1}, {rs2}", "atomic"),
+        ("amoswap_d", "R", "0000100 ..... ..... 011 ..... 0101111", "amoswap_d {rd}, {rs1}, {rs2}", "atomic"),
+        ("amoadd_d", "R", "0000000 ..... ..... 011 ..... 0101111", "amoadd_d {rd}, {rs1}, {rs2}", "atomic"),
+        ("amoxor_d", "R", "0010000 ..... ..... 011 ..... 0101111", "amoxor_d {rd}, {rs1}, {rs2}", "atomic"),
+        ("amoand_d", "R", "0110000 ..... ..... 011 ..... 0101111", "amoand_d {rd}, {rs1}, {rs2}", "atomic"),
+        ("amoor_d", "R", "0100000 ..... ..... 011 ..... 0101111", "amoor_d {rd}, {rs1}, {rs2}", "atomic"),
+        ("amomin_d", "R", "1000000 ..... ..... 011 ..... 0101111", "amomin_d {rd}, {rs1}, {rs2}", "atomic"),
+        ("amomax_d", "R", "1010000 ..... ..... 011 ..... 0101111", "amomax_d {rd}, {rs1}, {rs2}", "atomic"),
+        ("amominu_d", "R", "1100000 ..... ..... 011 ..... 0101111", "amominu_d {rd}, {rs1}, {rs2}", "atomic"),
+        ("amomaxu_d", "R", "1110000 ..... ..... 011 ..... 0101111", "amomaxu_d {rd}, {rs1}, {rs2}", "atomic"),
     ];
     for (name, format, pattern, syntax, timing) in insns {
         m.insns.push(Insn {

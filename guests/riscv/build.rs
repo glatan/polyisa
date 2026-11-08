@@ -8,6 +8,9 @@ fn main() {
     println!("cargo::rerun-if-changed=spec/");
     println!("cargo::rerun-if-changed=build.rs");
     let model = build_model();
+    for insn in &model.insns {
+        assert_eq!(insn.pattern.len(), 32, "{}", insn.name);
+    }
     let report = polyisa_isadl::validate(&model);
     assert!(
         report.errors.is_empty(),

@@ -31,6 +31,8 @@ pub struct InterpBackend {
     pub mem: AddressSpace,
     /// 直前の制御。`jump` と `branch` が更新する。
     pub ctrl: Ctrl,
+    /// 予約付きロードの予約。条件付きストアとゲストスレッドの切り替えで解除する。
+    pub reservation: polyisa_mem::Reservation,
 }
 
 impl InterpBackend {
@@ -40,6 +42,7 @@ impl InterpBackend {
             state: vec![0u8; state_bytes],
             mem: AddressSpace::new(),
             ctrl: Ctrl::Fallthrough,
+            reservation: polyisa_mem::Reservation::empty(),
         }
     }
 
@@ -47,6 +50,14 @@ impl InterpBackend {
         let n = (W::BITS / 8) as usize;
         let off = r.offset();
         self.state.get(off..off + n).map(|_| (off, n))
+    }
+
+    /// 書き込みによる予約の解除。重なる範囲への書き込みで予約を失う。
+    fn break_reservation(&mut self, addr: u64, len: u32) {
+        let r = self.reservation;
+        if r.valid && addr < r.addr.0 + u64::from(r.len) && r.addr.0 < addr + u64::from(len) {
+            self.reservation.valid = false;
+        }
     }
 }
 
@@ -261,6 +272,7 @@ impl Backend for InterpBackend {
         acc: Access,
     ) -> Result<(), Self::Exit> {
         let bytes = (W::BITS / 8) as usize;
+        self.break_reservation(addr, bytes as u32);
         self.mem
             .write_value(VirtAddr(addr), to_u64::<W>(v), bytes, acc)
             .map_err(|e| self.mem_exit(addr, e, acc))
@@ -287,6 +299,36 @@ impl Backend for InterpBackend {
             self.store::<W>(addr, new, acc)?;
         }
         Ok(cur)
+    }
+
+    fn load_reserved<W: Width>(
+        &mut self,
+        addr: Self::V<W64>,
+        acc: Access,
+    ) -> Result<Self::V<W>, Self::Exit> {
+        let v: Self::V<W> = self.load::<W>(addr, acc)?;
+        self.reservation = polyisa_mem::Reservation {
+            addr: VirtAddr(addr),
+            len: W::BITS / 8,
+            valid: true,
+        };
+        Ok(v)
+    }
+
+    fn store_conditional<W: Width>(
+        &mut self,
+        addr: Self::V<W64>,
+        v: Self::V<W>,
+        acc: Access,
+    ) -> Result<Self::B, Self::Exit> {
+        let r = self.reservation;
+        // 条件付きストアの実行で予約は解除される。
+        self.reservation.valid = false;
+        let ok = r.valid && r.addr.0 == addr && r.len == W::BITS / 8;
+        if ok {
+            self.store::<W>(addr, v, acc)?;
+        }
+        Ok(ok)
     }
 
     fn if_then<F>(&mut self, c: Self::B, then: F) -> Result<(), Self::Exit>

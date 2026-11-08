@@ -60,8 +60,8 @@ mod tests {
 
     #[test]
     fn insn_count() {
-        // RV64I 53 件＋M 13 件＋CSR 6 件。
-        assert_eq!(INSNS.len(), 72);
+        // RV64I 53 件＋M 13 件＋CSR 6 件＋A 22 件。
+        assert_eq!(INSNS.len(), 94);
     }
 
     #[test]
@@ -82,6 +82,10 @@ mod tests {
         assert_eq!(decode(0x0220_f4bb, 32), Some(Insn::Remuw));
         assert_eq!(decode(0xc001_10f3, 32), Some(Insn::Csrrw));
         assert_eq!(decode(0xc010_21f3, 32), Some(Insn::Csrrs));
+        assert_eq!(decode(0x1000_a12f, 32), Some(Insn::LrW));
+        assert_eq!(decode(0x1820_b1af, 32), Some(Insn::ScD));
+        assert_eq!(decode(0x0020_b1af, 32), Some(Insn::AmoaddD));
+        assert_eq!(decode(0xe020_a1af, 32), Some(Insn::AmomaxuW));
         assert_eq!(decode(0xffff_ffff, 32), None);
         assert_eq!(decode(0x0020_8133, 16), None);
     }
