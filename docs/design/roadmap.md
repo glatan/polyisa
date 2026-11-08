@@ -107,7 +107,7 @@ ISA ファミリの実装を始める前に、その ISA の仕様書、ABI の�
 | 段階 2（Hexagon 試作） | SPEC-HEXAGON-PRM（版確定） | TOOL-LLVM（確認済みで足りるか点検）、リンカ方針 |
 | 段階 2（IA-64 試作） | SPEC-IA64-SDM（版確定） | オラクルなし（手組ベクタは SPEC の F 許可が条件） |
 | 段階 2（SPARC 試作） | SPEC-SPARC-V8（V9 要否含む） | TOOL-LLVM（確認済み） |
-| 段階 2（WASM 試作） | SPEC-WASM-CORE、SPEC-WASI-P1（版確定） | TEST-WASM-SPEC、TOOL-WASMTIME（X） |
+| 段階 2（WASM 試作） | SPEC-WASM-CORE、SPEC-WASI-P1（版確定） | TEST-WASM-SPEC、TOOL-WASMTIME（用途Xは確認時に付与） |
 | 段階 3（MIPS） | SPEC-MIPS-IV/R6/R3000（版確定） | o32/n32/n64 の ABI 文書（未登録分は追加）、TOOL-LLVM |
 | 段階 4（x86） | SPEC-X86 各書、SPEC-X86-PSABI（登録済み、版は確認時に確定） | busybox 等の BIN（未登録分は追加） |
 

@@ -378,7 +378,7 @@ mod tests {
     }
 
     /// 最小の ELF64 ビッグエンディアン。値は BE で置く。
-    /// e_machine = 243（RISC-V）で記録の確認もする。
+    /// e_machine の値は往復確認用である（RISC-V=243）。
     fn minimal_be() -> Vec<u8> {
         let mut v = vec![0u8; 64 + 56];
         v[0..4].copy_from_slice(&MAGIC);
@@ -411,7 +411,7 @@ mod tests {
     }
 
     /// 最小の ELF32 ビッグエンディアン。値は BE で置く。
-    /// e_machine = 20（PowerPC）で記録の確認もする。
+    /// e_machine の値は往復確認用である（PowerPC=20）。
     fn minimal32_be() -> Vec<u8> {
         let mut v = vec![0u8; 52 + 32];
         v[0..4].copy_from_slice(&MAGIC);
@@ -473,6 +473,21 @@ mod tests {
         assert_eq!(phdrs[0].vaddr, 0x1_0000);
         assert_eq!(phdrs[0].flags, 5);
         assert_eq!(phdrs[0].memsz, 0x1000);
+    }
+
+    #[test]
+    fn empty_phdr_table_ignores_entry_size() {
+        // 項目表を持たない形式（phnum=0）は項目の大きさを見ない。
+        let mut bytes = minimal();
+        bytes[54..56].copy_from_slice(&0u16.to_le_bytes());
+        bytes[56..58].copy_from_slice(&0u16.to_le_bytes());
+        let ehdr = parse_ehdr(&bytes).unwrap();
+        assert!(parse_phdrs(&bytes, &ehdr).unwrap().is_empty());
+        let mut bytes32 = minimal32();
+        bytes32[42..44].copy_from_slice(&0u16.to_le_bytes());
+        bytes32[44..46].copy_from_slice(&0u16.to_le_bytes());
+        let ehdr32 = parse_ehdr32(&bytes32).unwrap();
+        assert!(parse_phdrs32(&bytes32, &ehdr32).unwrap().is_empty());
     }
 
     #[test]

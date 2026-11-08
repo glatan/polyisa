@@ -1542,6 +1542,16 @@ pub fn run_elf(path: &str, argv: &[String]) -> Result<u64, String> {
 
     let bytes = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
     let ehdr = polyisa_loader::elf::parse_ehdr(&bytes).map_err(|e| format!("ehdr: {e:?}"))?;
+    // `run` は RV64 リトルエンディアンの実行のみを受け持つ。
+    // EM_RISCV=243。BE や他 ISA は後の段階の入口で受ける。
+    // Ref: SPEC-RISCV-PSABI (v1.0) §1（RISC-V の e_machine 値）。
+    const EM_RISCV: u16 = 243;
+    if !ehdr.little {
+        return Err("big-endian ELF は未対応".to_string());
+    }
+    if ehdr.machine != EM_RISCV {
+        return Err(format!("未対応の e_machine: {}", ehdr.machine));
+    }
     let phdrs =
         polyisa_loader::elf::parse_phdrs(&bytes, &ehdr).map_err(|e| format!("phdrs: {e:?}"))?;
     let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_riscv::CpuState>());
