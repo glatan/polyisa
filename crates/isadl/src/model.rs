@@ -76,6 +76,21 @@ pub struct Format {
     pub operands: Vec<Operand>,
 }
 
+/// フィールド値の制約（`where`）。デコード時に評価する。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum WhereOp {
+    Eq,
+    Ne,
+}
+
+/// フィールド値の制約（`where`）1 件。`field` は形式のフィールド名である。
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct WhereClause {
+    pub field: String,
+    pub op: WhereOp,
+    pub value: u128,
+}
+
 /// 命令。
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Insn {
@@ -83,6 +98,7 @@ pub struct Insn {
     pub format: String,
     pub pattern: Pattern,
     pub when: Pred,
+    pub wheres: Vec<WhereClause>,
     pub syntax: String,
     pub timing: String,
 }

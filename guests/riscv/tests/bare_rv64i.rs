@@ -543,6 +543,44 @@ fn c_compressed() {
 }
 
 #[test]
+fn c_jump_moves() {
+    use polyisa_guest_riscv::sem::Fpr;
+    let mut env = env();
+    env.pc = 0x1_0000;
+    env.map_rw(0, 1).unwrap();
+    // C.MV / C.ADD。
+    env.step(|b| sem::addi(b, Gpr(2), Gpr(0), 7)).unwrap();
+    env.step(|b| sem::c_mv(b, Gpr(1), Gpr(2))).unwrap();
+    assert_eq!(x(&mut env, 1), 7);
+    env.step(|b| sem::c_add(b, Gpr(1), Gpr(2))).unwrap();
+    assert_eq!(x(&mut env, 1), 14);
+    // C.JR / C.JALR。
+    env.step(|b| sem::addi(b, Gpr(3), Gpr(0), 0x40)).unwrap();
+    let pc = env.pc;
+    env.step(|b| sem::c_jr(b, Gpr(3), pc)).unwrap();
+    assert_eq!(env.pc, 0x40);
+    assert_eq!(x(&mut env, 1), 14);
+    env.pc = pc;
+    env.step(|b| sem::c_jalr(b, Gpr(3), pc)).unwrap();
+    assert_eq!(env.pc, 0x40);
+    assert_eq!(x(&mut env, 1), pc + 4);
+    // C.EBREAK は ebreak と同じ退出になる。
+    env.pc = 0x1_0080;
+    let r = env.step(|b| sem::c_ebreak(b, 0x1_0080));
+    assert!(matches!(r, Err(InterpExit::Exception(_))));
+    // C.FLW / C.FSW、C.FLWSP / C.FSWSP の往復（RV32符号化・RV64実行）。
+    env.step(|b| sem::addi(b, Gpr(4), Gpr(0), 0x100)).unwrap();
+    env.backend.set(Fpr(10).state(), 0xFFFF_FFFF_3FC0_0000);
+    env.step(|b| sem::c_fsw(b, Gpr(4), Fpr(10), 0)).unwrap();
+    env.step(|b| sem::c_flw(b, Fpr(11), Gpr(4), 0)).unwrap();
+    assert_eq!(xf(&mut env, 11), 0x3FC0_0000);
+    env.step(|b| sem::addi(b, Gpr(2), Gpr(0), 0x100)).unwrap();
+    env.step(|b| sem::c_fswsp(b, Fpr(10), 8)).unwrap();
+    env.step(|b| sem::c_flwsp(b, Fpr(12), 8)).unwrap();
+    assert_eq!(xf(&mut env, 12), 0x3FC0_0000);
+}
+
+#[test]
 fn system_exits() {
     let mut env = env();
     let r = env.step(|b| sem::ecall(b, 0x100));

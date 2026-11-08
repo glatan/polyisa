@@ -63,8 +63,8 @@ mod tests {
 
     #[test]
     fn insn_count() {
-        // RV64I 53 件＋M 13 件＋CSR 6 件＋A 22 件＋F 26 件＋D 28 件＋C 31 件。
-        assert_eq!(INSNS.len(), 179);
+        // RV64I 53 件＋M 13 件＋CSR 6 件＋A 22 件＋F 26 件＋D 28 件＋C 40 件。
+        assert_eq!(INSNS.len(), 188);
     }
 
     #[test]
@@ -118,6 +118,14 @@ mod tests {
         assert_eq!(decode(0x8401, 16), Some(Insn::CSrai));
         assert_eq!(decode(0x8c21, 16), Some(Insn::CXor));
         assert_eq!(decode(0x9c01, 16), Some(Insn::CSubw));
+        assert_eq!(decode(0x8082, 16), Some(Insn::CJr));
+        assert_eq!(decode(0x810e, 16), Some(Insn::CMv));
+        assert_eq!(decode(0x9082, 16), Some(Insn::CJalr));
+        assert_eq!(decode(0x910a, 16), Some(Insn::CAdd));
+        assert_eq!(decode(0x9002, 16), Some(Insn::CEbreak));
+        assert_eq!(decode(0x8002, 16), None);
+        // RV64優先：c_flw と同符号化の c_ld が先に一致する。
+        assert_eq!(decode(0x6000, 16), Some(Insn::CLd));
         assert_eq!(decode(0x6001, 16), Some(Insn::CLuiAddi16sp));
         assert_eq!(decode(0xa000, 16), Some(Insn::CFsd));
         assert_eq!(decode(0x4000, 16), Some(Insn::CLw));

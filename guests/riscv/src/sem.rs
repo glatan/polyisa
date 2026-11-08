@@ -1612,3 +1612,49 @@ pub fn c_lui_addi16sp<B: Backend>(b: &mut B, rd: Gpr, imm: i64) -> Flow<B> {
 pub fn c_jal<B: Backend>(b: &mut B, pc: u64, offset: i64) -> Flow<B> {
     jal(b, Gpr(1), pc, offset)
 }
+
+/// C.JR。`jalr x0, 0(rs1)` に展開する。
+pub fn c_jr<B: Backend>(b: &mut B, rs1: Gpr, pc: u64) -> Flow<B> {
+    jalr(b, Gpr(0), rs1, pc, 0)
+}
+
+/// C.MV。`add rd, x0, rs2` に展開する。
+pub fn c_mv<B: Backend>(b: &mut B, rd: Gpr, rs2: Gpr) -> Flow<B> {
+    add(b, rd, Gpr(0), rs2)
+}
+
+/// C.JALR。`jalr x1, 0(rs1)` に展開する。
+pub fn c_jalr<B: Backend>(b: &mut B, rs1: Gpr, pc: u64) -> Flow<B> {
+    jalr(b, Gpr(1), rs1, pc, 0)
+}
+
+/// C.ADD。`add rd, rd, rs2` に展開する。
+pub fn c_add<B: Backend>(b: &mut B, rd: Gpr, rs2: Gpr) -> Flow<B> {
+    let r = rd.0;
+    add(b, rd, Gpr(r), rs2)
+}
+
+/// C.EBREAK。`ebreak` と同じ。
+pub fn c_ebreak<B: Backend>(b: &mut B, pc: u64) -> Flow<B> {
+    ebreak(b, pc)
+}
+
+/// C.FLW（RV32）。単精度ロード。
+pub fn c_flw<B: Backend>(b: &mut B, rd: Fpr, rs1: Gpr, oimm: i64) -> Flow<B> {
+    flw(b, rd, rs1, oimm)
+}
+
+/// C.FSW（RV32）。単精度ストア。
+pub fn c_fsw<B: Backend>(b: &mut B, rs1: Gpr, rs2: Fpr, oimm: i64) -> Flow<B> {
+    fsw(b, rs1, rs2, oimm)
+}
+
+/// C.FLWSP（RV32）。`flw rd, offset(x2)` に展開する。
+pub fn c_flwsp<B: Backend>(b: &mut B, rd: Fpr, oimm: i64) -> Flow<B> {
+    flw(b, rd, Gpr(2), oimm)
+}
+
+/// C.FSWSP（RV32）。`fsw rs2, offset(x2)` に展開する。
+pub fn c_fswsp<B: Backend>(b: &mut B, rs2: Fpr, oimm: i64) -> Flow<B> {
+    fsw(b, Gpr(2), rs2, oimm)
+}

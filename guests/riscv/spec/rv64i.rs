@@ -56,7 +56,15 @@ pub fn build_model() -> polyisa_isadl::Model {
         dynamic: false,
     });
 
-    for (name, hi, lo) in [("rd", 11, 7), ("rs1", 19, 15), ("rs2", 24, 20), ("funct3", 14, 12)] {
+    for (name, hi, lo) in [
+        ("rd", 11, 7),
+        ("rs1", 19, 15),
+        ("rs2", 24, 20),
+        ("funct3", 14, 12),
+        // 圧縮命令のレジスタ位置。CR形式で使う。
+        ("cr_rs1", 11, 7),
+        ("cr_rs2", 6, 2),
+    ] {
         m.fields.push(Field {
             name: name.to_string(),
             kind: FieldKind::Bits { hi, lo },
@@ -101,6 +109,15 @@ pub fn build_model() -> polyisa_isadl::Model {
         name: "J".to_string(),
         fields: vec!["rd".to_string()],
         operands: vec![gpr("rd", Access::Write)],
+    });
+    // CR（圧縮レジスタ形式。JR群の where 判定と operand 取り出しに使う）。
+    m.formats.push(Format {
+        name: "CR".to_string(),
+        fields: vec!["cr_rs1".to_string(), "cr_rs2".to_string()],
+        operands: vec![
+            gpr("cr_rs1", Access::ReadWrite),
+            gpr("cr_rs2", Access::Read),
+        ],
     });
 
     // (名前, 形式, パターン, 構文, 分類)
@@ -304,6 +321,7 @@ pub fn build_model() -> polyisa_isadl::Model {
             format: format.to_string(),
             pattern: Pattern::parse(pattern).expect("valid pattern"),
             when: Pred::True,
+            wheres: vec![],
             syntax: syntax.to_string(),
             timing: timing.to_string(),
         });
@@ -316,9 +334,88 @@ pub fn build_model() -> polyisa_isadl::Model {
         format: "R".to_string(),
         pattern: Pattern::parse("001 ........ ... 01").expect("valid pattern"),
         when: Pred::Not(Box::new(Pred::Flag("rv64".to_string()))),
+        wheres: vec![],
         syntax: "c.jal {imm}".to_string(),
         timing: "jump".to_string(),
     });
+    // JR群（funct3=100・op=10）。レジスタ値で区別するため where で受ける。
+    // Ref: SPEC-RISCV-UNPRIV (20250508) §C.
+    let cr = |op: WhereOp, field: &str, value: u128| WhereClause {
+        field: field.to_string(),
+        op,
+        value,
+    };
+    for (name, bit12, w1, w2, syntax, timing) in [
+        (
+            "c_jr",
+            '0',
+            cr(WhereOp::Ne, "cr_rs1", 0),
+            cr(WhereOp::Eq, "cr_rs2", 0),
+            "c.jr {rs1}",
+            "jump",
+        ),
+        (
+            "c_mv",
+            '0',
+            cr(WhereOp::Ne, "cr_rs1", 0),
+            cr(WhereOp::Ne, "cr_rs2", 0),
+            "c.mv {rd}, {rs2}",
+            "alu",
+        ),
+        (
+            "c_jalr",
+            '1',
+            cr(WhereOp::Ne, "cr_rs1", 0),
+            cr(WhereOp::Eq, "cr_rs2", 0),
+            "c.jalr {rs1}",
+            "jump",
+        ),
+        (
+            "c_add",
+            '1',
+            cr(WhereOp::Ne, "cr_rs1", 0),
+            cr(WhereOp::Ne, "cr_rs2", 0),
+            "c.add {rd}, {rs2}",
+            "alu",
+        ),
+        (
+            "c_ebreak",
+            '1',
+            cr(WhereOp::Eq, "cr_rs1", 0),
+            cr(WhereOp::Eq, "cr_rs2", 0),
+            "c.ebreak",
+            "system",
+        ),
+    ] {
+        m.insns.push(Insn {
+            name: name.to_string(),
+            format: "CR".to_string(),
+            pattern: Pattern::parse(&format!("100 {bit12} ..... ..... 10"))
+                .expect("valid pattern"),
+            when: Pred::True,
+            wheres: vec![w1, w2],
+            syntax: syntax.to_string(),
+            timing: timing.to_string(),
+        });
+    }
+    // RV32の単精度ロードストア（RV64の倍精度と同符号化）。whenで区別する。
+    // Ref: SPEC-RISCV-UNPRIV (20250508) §C.
+    for (name, pattern, syntax, timing) in [
+        ("c_flw", "011 ........ ... 00", "c.flw {rd}, {imm}({rs1})", "load"),
+        ("c_fsw", "111 ........ ... 00", "c.fsw {rs2}, {imm}({rs1})", "store"),
+        ("c_flwsp", "011 ........ ... 10", "c.flwsp {rd}, {imm}", "load"),
+        ("c_fswsp", "111 ........ ... 10", "c.fswsp {rs2}, {imm}", "store"),
+    ] {
+        m.insns.push(Insn {
+            name: name.to_string(),
+            format: "R".to_string(),
+            pattern: Pattern::parse(pattern).expect("valid pattern"),
+            when: Pred::Flag("rv32".to_string()),
+            wheres: vec![],
+            syntax: syntax.to_string(),
+            timing: timing.to_string(),
+        });
+    }
     // RV64限定命令にrv64注記を付ける。デコーダは現段階ではwhenを評価しない
     // （解決はデコード時という設計の将来対応）。検証の一意性には影響しない。
     // Ref: SPEC-RISCV-UNPRIV (20250508).

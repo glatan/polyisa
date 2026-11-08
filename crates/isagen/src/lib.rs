@@ -77,10 +77,49 @@ fn gen_decoder(model: &Model) -> String {
                 insn.pattern.mask(),
                 insn.pattern.bits()
             ));
+            if insn.wheres.is_empty() {
+                s.push_str(&format!(
+                    "            if word & {:#x} == {:#x} {{\n                return Some(Insn::{});\n            }}\n",
+                    insn.pattern.mask(),
+                    insn.pattern.bits(),
+                    to_ident(&insn.name)
+                ));
+                continue;
+            }
+            // `where` 付き：一致後にフィールド値を取り出して条件を評価する。
             s.push_str(&format!(
-                "            if word & {:#x} == {:#x} {{\n                return Some(Insn::{});\n            }}\n",
+                "            if word & {:#x} == {:#x} {{\n",
                 insn.pattern.mask(),
-                insn.pattern.bits(),
+                insn.pattern.bits()
+            ));
+            let tag = to_snake(&insn.name);
+            let mut conds = Vec::new();
+            for (k, w) in insn.wheres.iter().enumerate() {
+                let (hi, lo) = match model.fields.iter().find(|f| f.name == w.field) {
+                    Some(f) => match f.kind {
+                        polyisa_isadl::model::FieldKind::Bits { hi, lo } => (hi, lo),
+                        _ => (0, 0),
+                    },
+                    None => (0, 0),
+                };
+                let width = hi - lo + 1;
+                let mask: u128 = if width >= 128 {
+                    u128::MAX
+                } else {
+                    (1u128 << width) - 1
+                };
+                s.push_str(&format!(
+                    "                let w_{tag}_{k} = (word >> {lo}) & {mask:#x};\n"
+                ));
+                let op = match w.op {
+                    polyisa_isadl::model::WhereOp::Eq => "==",
+                    polyisa_isadl::model::WhereOp::Ne => "!=",
+                };
+                conds.push(format!("w_{tag}_{k} {op} {:#x}", w.value));
+            }
+            s.push_str(&format!(
+                "                if {} {{\n                    return Some(Insn::{});\n                }}\n            }}\n",
+                conds.join(" && "),
                 to_ident(&insn.name)
             ));
         }
@@ -238,6 +277,7 @@ mod tests {
             format: "R".to_string(),
             pattern: Pattern::parse("0000000 ..... ..... 000 ..... 0110011").unwrap(),
             when: Pred::True,
+            wheres: vec![],
             syntax: "add {rd}, {rs1}, {rs2}".to_string(),
             timing: "alu".to_string(),
         });
@@ -272,6 +312,7 @@ mod tests {
             format: "R".to_string(),
             pattern: Pattern::parse("000. ..... ..... 01").unwrap(),
             when: Pred::True,
+            wheres: vec![],
             syntax: "c.addi".to_string(),
             timing: "alu".to_string(),
         });
@@ -279,6 +320,27 @@ mod tests {
         assert!(g.decoder.contains("32 =>"));
         assert!(g.decoder.contains("16 =>"));
         assert!(g.decoder.contains("Some(Insn::CAddi)"));
+    }
+
+    #[test]
+    fn decoder_evaluates_where_clauses() {
+        use polyisa_isadl::model::{FieldKind, WhereClause, WhereOp};
+        let mut m = model();
+        for (name, hi, lo) in [("rd", 11, 7), ("rs1", 19, 15), ("rs2", 24, 20)] {
+            m.fields.push(Field {
+                name: name.to_string(),
+                kind: FieldKind::Bits { hi, lo },
+            });
+        }
+        m.formats[0].fields = vec!["rd".to_string(), "rs1".to_string()];
+        m.insns[0].wheres = vec![WhereClause {
+            field: "rs2".to_string(),
+            op: WhereOp::Eq,
+            value: 0,
+        }];
+        let g = generate(&m).unwrap();
+        assert!(g.decoder.contains("w_add_0 == 0x0"));
+        assert!(g.decoder.contains("Some(Insn::Add)"));
     }
 
     #[test]
@@ -316,6 +378,7 @@ mod tests {
             format: "R".to_string(),
             pattern: Pattern::parse("0000000 ..... ..... 000 ..... 0110011").unwrap(),
             when: Pred::True,
+            wheres: vec![],
             syntax: "add".to_string(),
             timing: "alu".to_string(),
         });

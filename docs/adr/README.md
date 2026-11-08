@@ -16,6 +16,7 @@
 | [0008](0008-software-page-table.md) | ゲストのアドレス空間をソフトウェアのページ表で表現する | 承認 |
 | [0009](0009-no-code-reuse-until-license.md) | ライセンスが決まるまで、他の実装のコードとデータを取り込まない | 承認 |
 | [0010](0010-reference-register.md) | 参照資料と外部のツールを台帳で一元管理し、台帳で許可した用途にだけ使う | 承認 |
+| [0011](0011-where-clause-and-rv32-overlap.md) | where句の等価・非等価を実装し、RV32/RV64の重なりはwhenで区別する | 承認 |
 
 ## 書き方
 
