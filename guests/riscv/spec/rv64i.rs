@@ -298,5 +298,33 @@ pub fn build_model() -> polyisa_isadl::Model {
             timing: timing.to_string(),
         });
     }
+    // RV64限定命令にrv64注記を付ける。デコーダは現段階ではwhenを評価しない
+    // （解決はデコード時という設計の将来対応）。検証の一意性には影響しない。
+    // Ref: SPEC-RISCV-UNPRIV (20250508).
+    for insn in m.insns.iter_mut() {
+        let rv64_only = matches!(
+            insn.name.as_str(),
+            "ld" | "lwu"
+                | "sd" | "addiw"
+                | "slliw" | "srliw"
+                | "sraiw" | "addw"
+                | "subw" | "sllw"
+                | "srlw" | "sraw"
+                | "mulw" | "divw"
+                | "divuw" | "remw"
+                | "remuw" | "lr_d"
+                | "sc_d" | "amoswap_d"
+                | "amoadd_d" | "amoxor_d"
+                | "amoand_d" | "amoor_d"
+                | "amomin_d" | "amomax_d"
+                | "amominu_d" | "amomaxu_d"
+                | "c_ld" | "c_sd"
+                | "c_addiw" | "c_ldsp"
+                | "c_sdsp"
+        );
+        if rv64_only {
+            insn.when = Pred::Flag("rv64".to_string());
+        }
+    }
     m
 }
