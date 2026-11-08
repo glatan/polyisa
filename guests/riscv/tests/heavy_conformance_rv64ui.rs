@@ -89,9 +89,9 @@ fn walkdir(dir: &Path) -> Vec<PathBuf> {
 }
 
 /// 1件をビルドして ELF のバイト列を返す。道具がなければ None。
-fn build_elf(name: &str) -> Option<Vec<u8>> {
+fn build_elf_in(sub: &str, name: &str) -> Option<Vec<u8>> {
     let root = testdata();
-    let src = root.join("isa").join("rv64ui").join(format!("{name}.S"));
+    let src = root.join("isa").join(sub).join(format!("{name}.S"));
     if !src.exists() {
         return None;
     }
@@ -298,6 +298,19 @@ fn run(env: &mut BareEnv, entry: u64) -> Outcome {
             Insn::Sra => env.step(|b| sem::sra(b, rd, rs1, rs2)),
             Insn::Slti => env.step(|b| sem::slti(b, rd, rs1, imm_i(word))),
             Insn::Sltiu => env.step(|b| sem::sltiu(b, rd, rs1, imm_i(word))),
+            Insn::Mul => env.step(|b| sem::mul(b, rd, rs1, rs2)),
+            Insn::Mulh => env.step(|b| sem::mulh(b, rd, rs1, rs2)),
+            Insn::Mulhsu => env.step(|b| sem::mulhsu(b, rd, rs1, rs2)),
+            Insn::Mulhu => env.step(|b| sem::mulhu(b, rd, rs1, rs2)),
+            Insn::Div => env.step(|b| sem::div(b, rd, rs1, rs2)),
+            Insn::Divu => env.step(|b| sem::divu(b, rd, rs1, rs2)),
+            Insn::Rem => env.step(|b| sem::rem(b, rd, rs1, rs2)),
+            Insn::Remu => env.step(|b| sem::remu(b, rd, rs1, rs2)),
+            Insn::Mulw => env.step(|b| sem::mulw(b, rd, rs1, rs2)),
+            Insn::Divw => env.step(|b| sem::divw(b, rd, rs1, rs2)),
+            Insn::Divuw => env.step(|b| sem::divuw(b, rd, rs1, rs2)),
+            Insn::Remw => env.step(|b| sem::remw(b, rd, rs1, rs2)),
+            Insn::Remuw => env.step(|b| sem::remuw(b, rd, rs1, rs2)),
             Insn::Xori => env.step(|b| sem::xori(b, rd, rs1, imm_i(word))),
             Insn::Ori => env.step(|b| sem::ori(b, rd, rs1, imm_i(word))),
             Insn::Andi => env.step(|b| sem::andi(b, rd, rs1, imm_i(word))),
@@ -329,13 +342,13 @@ fn run(env: &mut BareEnv, entry: u64) -> Outcome {
     Outcome::StepLimit { pc: env.pc }
 }
 
-fn check_one(name: &str) {
+fn check_one_in(sub: &str, name: &str) {
     let root = testdata();
-    if !root.join(format!("isa/rv64ui/{name}.S")).exists() {
+    if !root.join(format!("isa/{sub}/{name}.S")).exists() {
         eprintln!("skip: .testdata/riscv-tests がないため未実行");
         return;
     }
-    let Some(bytes) = build_elf(name) else {
+    let Some(bytes) = build_elf_in(sub, name) else {
         eprintln!("skip: 組み立て器がないため未実行");
         return;
     };
@@ -350,6 +363,14 @@ fn check_one(name: &str) {
         }
         Outcome::StepLimit { pc } => panic!("{name}: 予算切れ pc={pc:#x}"),
     }
+}
+
+fn check_one(name: &str) {
+    check_one_in("rv64ui", name);
+}
+
+fn check_um(name: &str) {
+    check_one_in("rv64um", name);
 }
 
 #[test]
@@ -410,4 +431,84 @@ fn rv64ui_p_and() {
 #[test]
 fn rv64ui_p_or() {
     check_one("or");
+}
+
+#[test]
+fn rv64ui_p_xor() {
+    check_one("xor");
+}
+
+#[test]
+fn rv64ui_p_slt() {
+    check_one("slt");
+}
+
+#[test]
+fn rv64ui_p_sltu() {
+    check_one("sltu");
+}
+
+#[test]
+fn rv64ui_p_srli() {
+    check_one("srli");
+}
+
+#[test]
+fn rv64ui_p_srai() {
+    check_one("srai");
+}
+
+#[test]
+fn rv64ui_p_bne() {
+    check_one("bne");
+}
+
+#[test]
+fn rv64ui_p_blt() {
+    check_one("blt");
+}
+
+#[test]
+fn rv64ui_p_lui() {
+    check_one("lui");
+}
+
+#[test]
+fn rv64ui_p_auipc() {
+    check_one("auipc");
+}
+
+#[test]
+fn rv64ui_p_lb() {
+    check_one("lb");
+}
+
+#[test]
+fn rv64ui_p_sh() {
+    check_one("sh");
+}
+
+#[test]
+fn rv64um_p_mul() {
+    check_um("mul");
+}
+
+#[test]
+fn rv64um_p_div() {
+    check_um("div");
+}
+
+#[test]
+fn rv64um_p_rem() {
+    check_um("rem");
+}
+
+#[test]
+fn rv64um_p_mulh() {
+    check_um("mulh");
+}
+
+#[test]
+fn rv64um_p_divu() {
+    check_um("divu");
 }
