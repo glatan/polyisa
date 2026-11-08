@@ -111,6 +111,10 @@ pub fn parse_ehdr(bytes: &[u8]) -> Result<Ehdr, Error> {
     let get16 = |off: usize| u16_of(&bytes[off..off + 2], little).ok_or(Error::Truncated);
     let get32 = |off: usize| u32_of(&bytes[off..off + 4], little).ok_or(Error::Truncated);
     let get64 = |off: usize| u64_of(&bytes[off..off + 8], little).ok_or(Error::Truncated);
+    // ヘッダと項目の大きさが想定どおりであることを確かめる。
+    if get16(52)? != 64 || get16(54)? != 56 {
+        return Err(Error::Unsupported);
+    }
     Ok(Ehdr {
         little,
         file_type: get16(16)?,
@@ -136,6 +140,10 @@ pub fn parse_ehdr32(bytes: &[u8]) -> Result<Ehdr, Error> {
     let little = true;
     let get16 = |off: usize| u16_of(&bytes[off..off + 2], little).ok_or(Error::Truncated);
     let get32 = |off: usize| u32_of(&bytes[off..off + 4], little).ok_or(Error::Truncated);
+    // ヘッダと項目の大きさが想定どおりであることを確かめる。
+    if get16(40)? != 52 || get16(42)? != 32 {
+        return Err(Error::Unsupported);
+    }
     Ok(Ehdr {
         little,
         file_type: get16(16)?,
@@ -372,6 +380,19 @@ mod tests {
         cut.truncate(100);
         let ehdr = parse_ehdr(&cut).unwrap();
         assert_eq!(parse_phdrs(&cut, &ehdr), Err(Error::Truncated));
+        // ヘッダや項目の大きさが想定と違えば受け付けない。
+        let mut esz = minimal();
+        esz[52..54].copy_from_slice(&0u16.to_le_bytes());
+        assert_eq!(parse_ehdr(&esz), Err(Error::Unsupported));
+        let mut psz = minimal();
+        psz[54..56].copy_from_slice(&0u16.to_le_bytes());
+        assert_eq!(parse_ehdr(&psz), Err(Error::Unsupported));
+        let mut esz32 = minimal32();
+        esz32[40..42].copy_from_slice(&0u16.to_le_bytes());
+        assert_eq!(parse_ehdr32(&esz32), Err(Error::Unsupported));
+        let mut psz32 = minimal32();
+        psz32[42..44].copy_from_slice(&0u16.to_le_bytes());
+        assert_eq!(parse_ehdr32(&psz32), Err(Error::Unsupported));
     }
 
     #[test]
