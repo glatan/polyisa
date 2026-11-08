@@ -122,15 +122,133 @@ fn cmd_doctor() -> i32 {
     0
 }
 
-/// テストデータの取得。取得定義がまだない段階では何もしない。
+/// テストデータの取得。`tools/testdata/manifest.txt` の定義に従い、
+/// 取得先がなければ `git clone` して版を合わせ、あれば版の一致を確かめる。
+/// 未確認項目の取得はしない（manifest に載せない）。
 fn cmd_testdata_fetch() -> i32 {
     let manifest = workspace_root().join("tools/testdata/manifest.txt");
-    if !manifest.exists() {
-        println!("testdata:fetch: manifest.txt がないため何もしない");
-        return 0;
+    let body = match std::fs::read_to_string(&manifest) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("testdata:fetch: manifest.txt が読めない: {e}");
+            return 1;
+        }
+    };
+    let mut failed = false;
+    for (lineno, line) in body.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut parts = line.split_whitespace();
+        let (id, url, rev, dest) = match (parts.next(), parts.next(), parts.next(), parts.next()) {
+            (Some(a), Some(b), Some(c), Some(d)) if parts.next().is_none() => (a, b, c, d),
+            _ => {
+                eprintln!(
+                    "testdata:fetch: {}行目: 形式が違う（ID URL 版 配置先の4項目）",
+                    lineno + 1
+                );
+                failed = true;
+                continue;
+            }
+        };
+        if id.is_empty() || url.is_empty() || rev.is_empty() || dest.is_empty() {
+            eprintln!("testdata:fetch: {}行目: 空の項目がある", lineno + 1);
+            failed = true;
+            continue;
+        }
+        if dest.split('/').any(|c| c == "..") {
+            eprintln!(
+                "testdata:fetch: {}行目: 配置先に `..` は使えない",
+                lineno + 1
+            );
+            failed = true;
+            continue;
+        }
+        let dir = workspace_root().join(dest);
+        if !dir.join(".git").exists() {
+            println!("testdata:fetch: {id} を取得する ({url} {rev})");
+            if let Err(e) = fetch_clone(url, rev, &dir) {
+                eprintln!("testdata:fetch: {id}: {e}");
+                // 中途半端な複製を残さない。次回は最初からやり直す。
+                let _ = std::fs::remove_dir_all(&dir);
+                failed = true;
+            }
+            continue;
+        }
+        match git_head(&dir) {
+            Ok(h) if h.starts_with(rev) || rev.starts_with(&h) => {
+                println!("testdata:fetch: {id} は版が一致する ({h})");
+            }
+            Ok(h) => {
+                eprintln!(
+                    "testdata:fetch: {id}: 版が違う（取得定義 {rev}、現物 {h}）。手で合わせること"
+                );
+                failed = true;
+            }
+            Err(e) => {
+                eprintln!("testdata:fetch: {id}: 版の確認に失敗: {e}");
+                failed = true;
+            }
+        }
     }
-    eprintln!("testdata:fetch: 未実装");
-    1
+    i32::from(failed)
+}
+
+/// 空の場所に複製し、指定の版に合わせる。
+fn fetch_clone(url: &str, rev: &str, dir: &std::path::Path) -> Result<(), String> {
+    let dir_s = dir.to_string_lossy().to_string();
+    let run_in = |dir_arg: &str, args: &[&str]| -> Result<String, String> {
+        let out = std::process::Command::new("git")
+            .args(["-C", dir_arg])
+            .args(args)
+            .output()
+            .map_err(|e| format!("git の起動に失敗: {e}"))?;
+        if !out.status.success() {
+            return Err(format!(
+                "git -C {dir_arg} {} が失敗: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    };
+    if let Some(parent) = dir.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("作成に失敗: {e}"))?;
+    }
+    let run = |args: &[&str]| -> Result<String, String> {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .output()
+            .map_err(|e| format!("git の起動に失敗: {e}"))?;
+        if !out.status.success() {
+            return Err(format!(
+                "git {} が失敗: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    };
+    run(&["clone", url, &dir_s])?;
+    run_in(&dir_s, &["checkout", rev]).map(|_| ())
+}
+
+/// 配置先の HEAD を読む。
+fn git_head(dir: &std::path::Path) -> Result<String, String> {
+    let out = std::process::Command::new("git")
+        .args(["-C"])
+        .arg(dir)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .map_err(|e| format!("git の起動に失敗: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "rev-parse が失敗: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 /// `.git/hooks/pre-commit` に `task check` を実行するフックを入れる。

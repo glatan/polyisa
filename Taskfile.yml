@@ -53,9 +53,9 @@ tasks:
       vars: [ISA]
 
   bench:
-    desc: "性能の計測"
+    desc: "性能の計測（汎用意味論と直接実装の比較。判定は結果を見て行い、記録は ADR-0012）"
     cmds:
-      - echo "bench は段階1の計測対象ができてから定義する"
+      - cargo test --release -p polyisa-engine --test bench_generic_direct -- --nocapture
 
   doctor:
     desc: "外部ツールとターゲットの有無と版を表示する"
