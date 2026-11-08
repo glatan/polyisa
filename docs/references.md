@@ -96,10 +96,10 @@
 | SPEC-MIPS-R6 | MIPS Architecture For Programmers（MIPS32 と MIPS64 の Release 6） | MIPS | — | mips | — | — | 未確認 | |
 | SPEC-MIPS-IV | MIPS IV Instruction Set | MIPS Technologies | — | mips | — | — | 未確認 | |
 | SPEC-MIPS-R3000 | R3000 のソフトウェアリファレンスマニュアル（書名は確認時に確定） | 確認時に記録 | — | mips（R3000 のタイミング） | — | — | 未確認 | |
-| SPEC-RISCV-UNPRIV | The RISC-V Instruction Set Manual, Volume I: Unprivileged Architecture | RISC-V International | — | riscv | — | — | 未確認 | |
-| SPEC-RISCV-PRIV | The RISC-V Instruction Set Manual, Volume II: Privileged Architecture | RISC-V International | — | riscv | — | — | 未確認 | |
-| SPEC-RISCV-PROFILES | RISC-V Profiles | RISC-V International | — | riscv | — | — | 未確認 | |
-| SPEC-RISCV-PSABI | RISC-V ELF psABI Specification | RISC-V International | — | riscv、os-linux | — | — | 未確認 | |
+| SPEC-RISCV-UNPRIV | The RISC-V Instruction Set Manual, Volume I: Unprivileged Architecture | RISC-V International | 20250508 | riscv | CC-BY-4.0 | R,F | 2026-11-08 glatan | エンコーディング等の事実を自前表現で記述。条文・図の複製なし |
+| SPEC-RISCV-PRIV | The RISC-V Instruction Set Manual, Volume II: Privileged Architecture | RISC-V International | 20250508 | riscv | CC-BY-4.0 | R,F | 2026-11-08 glatan | 同上 |
+| SPEC-RISCV-PROFILES | RISC-V Profiles（RVA23 v1.0、2024-10-17） | RISC-V International | RVA23 v1.0 | riscv | CC-BY-4.0 | R,F | 2026-11-08 glatan | プロファイルの構成の事実を自前表現で記述 |
+| SPEC-RISCV-PSABI | RISC-V ELF psABI Specification | RISC-V International | v1.0 | riscv、os-linux | CC-BY-4.0 | R,F | 2026-11-08 glatan | 構造体配置等の事実を自前表現で記述 |
 | SPEC-SIFIVE-U74 | SiFive U74 のコアのマニュアル（書名は確認時に確定） | SiFive | — | riscv（U74 のタイミング） | — | — | 未確認 | |
 | SPEC-POWER-ISA | Power ISA | OpenPOWER Foundation | — | power | — | — | 未確認 | |
 | SPEC-POWERPC-PEM | 32 ビットの PowerPC のプログラミング環境のマニュアル（書名は確認時に確定） | 確認時に記録 | — | power | — | — | 未確認 | |
@@ -125,25 +125,25 @@
 | SPEC-OPENRISC-1000 | OpenRISC 1000 Architecture Manual | 確認時に記録 | — | openrisc | — | — | 未確認 | |
 | SPEC-IA64-SDM | Intel Itanium Architecture Software Developer's Manual | Intel | — | ia64 | — | — | 未確認 | |
 | SPEC-HEXAGON-PRM | Hexagon の Programmer's Reference Manual（版ごとに項目を分ける） | Qualcomm | — | hexagon | — | — | 未確認 | |
-| SPEC-IEEE754 | IEEE Standard for Floating-Point Arithmetic（IEEE 754） | IEEE | — | softfloat | — | — | 未確認 | |
+| SPEC-IEEE754 | IEEE Standard for Floating-Point Arithmetic（IEEE 754-2019） | IEEE | 2019 | softfloat | © IEEE、All rights reserved（本文書の購入・購読で入手） | R,F | 2026-11-08 glatan | 数値・丸め規則の事実のみ自前表現で使用。条文・図表の複製なし。許諾範囲は所有者判断 |
 | SPEC-DECIMAL-ARITH | General Decimal Arithmetic Specification | 確認時に記録 | — | decimal | — | — | 未確認 | |
-| SPEC-ELF-GABI | System V Application Binary Interface の ELF の汎用部分（書名は確認時に確定） | 確認時に記録 | — | loader | — | — | 未確認 | |
-| SPEC-LINUX-MANPAGES | Linux man-pages | Linux man-pages プロジェクト | — | os-linux | — | — | 未確認 | |
+| SPEC-ELF-GABI | System V Application Binary Interface の ELF の汎用部分 | SCO（現 Xinuos） | Edition 4.1（1997）＋2001-04-24 DRAFT（ch.4/5） | loader | © SCO、All rights reserved（複製の明示的許諾なし） | R,F | 2026-11-08 glatan | 数値・配置の事実のみ自前表現で使用。条文・図表の複製なし。許諾範囲は所有者判断 |
+| SPEC-LINUX-MANPAGES | Linux man-pages | Linux man-pages プロジェクト | 6.20 | os-linux | 各ページに異なるライセンス（Copying-policy。要約：nroff配布条件で自由に配布可） | R | 2026-11-08 glatan | 動作理解の参照のみ。番号・配置の事実は SRC-LINUX から取る |
 
 ### ソース
 
 | ID | 名称 | 発行者 | 版 | 対象 | 利用条件 | 用途 | 確認 | 備考 |
 |---|---|---|---|---|---|---|---|---|
-| SRC-LINUX | Linux カーネルのソース（UAPI ヘッダ、システムコールの表、シグナルフレームの定義） | Linux カーネルの開発者 | — | os-linux | — | — | 未確認 | カーネル本体のコードの翻訳は `C` にあたる |
+| SRC-LINUX | Linux カーネルのソース（UAPI ヘッダ、システムコールの表、シグナルフレームの定義） | Linux カーネルの開発者 | 7.3 | os-linux | GNU GPL version 2（COPYING）。UAPI は Linux-syscall-note の例外でユーザ空間利用可 | R,F | 2026-11-08 glatan | 番号・配置の事実を自前表現で記述。カーネル本体コードの翻訳はしない（`C` にあたる） |
 
 ### テスト
 
 | ID | 名称 | 発行者 | 版 | 対象 | 利用条件 | 用途 | 確認 | 備考 |
 |---|---|---|---|---|---|---|---|---|
-| TEST-RISCV-TESTS | riscv-tests | 確認時に記録 | — | riscv | — | — | 未確認 | |
-| TEST-RISCV-ARCH-TEST | riscv-arch-test | 確認時に記録 | — | riscv | — | — | 未確認 | |
+| TEST-RISCV-TESTS | riscv-tests | RISC-V International のコントリビュータ | commit 3df703c（HEAD） | riscv | BSD 3-clause（Regents of the University of California） | T | 2026-11-08 glatan | 取得して検証に使う。リポジトリに含めない |
+| TEST-RISCV-ARCH-TEST | riscv-arch-test | RISC-V International のコントリビュータ | commit 7569d06（HEAD） | riscv | コード BSD-3-Clause／Apache-2.0、文書 CC-BY-4.0 | T | 2026-11-08 glatan | 取得して検証に使う。リポジトリに含めない |
 | TEST-WASM-SPEC | WebAssembly の仕様のテストスイート | 確認時に記録 | — | wasm | — | — | 未確認 | |
-| TEST-TESTFLOAT | Berkeley TestFloat | 確認時に記録 | — | softfloat | — | — | 未確認 | テストベクタの生成のために実行する（`X`）ことと、生成したベクタを使う（`T`）ことの両方を要する |
+| TEST-TESTFLOAT | Berkeley TestFloat | John Hauser（UC Berkeley） | Release 3e | softfloat | BSD 3-clause（Regents of the University of California） | T,X | 2026-11-08 glatan | 生成ベクタの使用（`T`）とベクタ生成のための実行（`X`）。リポジトリに含めない |
 | TEST-DECTEST | 十進演算のテストケース集（書名は確認時に確定） | 確認時に記録 | — | decimal | — | — | 未確認 | |
 | TEST-SINGLESTEP-68000 | SingleStepTests の 68000 のテストデータ | 確認時に記録 | — | m68k | — | — | 未確認 | |
 | TEST-SINGLESTEP-8088 | SingleStepTests の 8088 のテストデータ | 確認時に記録 | — | x86 | — | — | 未確認 | |
@@ -170,7 +170,7 @@
 | TOOL-NEXTEST | cargo-nextest | nextest-rs | 0.9.151 | テストの実行 | MIT OR Apache-2.0（LICENSE-MIT、LICENSE-APACHE） | X | 2026-11-08 glatan | 別プロセスで実行する。複製・再配布しない |
 | TOOL-GIT | Git | Git プロジェクト | 2.56.0 | 開発作業、テストデータの取得 | GNU GPL version 2（COPYING。v2 のみ） | X | 2026-11-08 glatan | 別プロセスで実行する。複製・再配布・組み込みをしない |
 | TOOL-CURL | curl | curl プロジェクト | 8.23.0 | テストデータの取得 | curl license（COPYING） | X | 2026-11-08 glatan | 別プロセスで実行する。複製・再配布しない |
-| TOOL-LLVM | LLVM と clang（llvm-objdump を含む） | LLVM プロジェクト | — | 検証 | — | — | 未確認 | |
+| TOOL-LLVM | LLVM と clang（llvm-objdump を含む） | LLVM プロジェクト | 23.1.4（手元検証） | 検証 | Apache-2.0 WITH LLVM-exception（LICENSE.TXT） | X | 2026-11-08 glatan | 別プロセスで実行する。複製・再配布・組み込みをしない |
 | TOOL-GDB | GDB | GNU プロジェクト | — | 検証 | — | — | 未確認 | |
 | TOOL-WASMTIME | wasmtime | Bytecode Alliance | — | wasm の検証 | — | — | 未確認 | |
 | TOOL-QEMU | QEMU | QEMU プロジェクト | — | 検証（用意できた環境だけ） | — | — | 未確認 | |
