@@ -1,0 +1,11 @@
+[package]
+name = "polyisa-mem"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.99"
+
+[dependencies]
+polyisa-bits = { path = "../bits" }
+
+[lints]
+workspace = true

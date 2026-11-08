@@ -1,5 +1,14 @@
 [workspace]
-members = ["tools/devtool", "crates/bits", "crates/testkit"]
+members = [
+    "tools/devtool",
+    "crates/bits",
+    "crates/testkit",
+    "crates/mem",
+    "crates/timing",
+    "crates/sem",
+    "crates/guest",
+    "crates/engine",
+]
 resolver = "2"
 
 [workspace.package]

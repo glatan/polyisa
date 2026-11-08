@@ -1,0 +1,12 @@
+[package]
+name = "polyisa-sem"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.99"
+
+[dependencies]
+polyisa-bits = { path = "../bits" }
+polyisa-mem = { path = "../mem" }
+
+[lints]
+workspace = true
