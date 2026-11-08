@@ -68,6 +68,13 @@ mod tests {
     }
 
     #[test]
+    fn operands_r_fields() {
+        // add x1,x2,x3 = 0x003100b3。Ref: SPEC-RISCV-UNPRIV。
+        let o = ops_r(0x0031_00b3);
+        assert_eq!((o.rd, o.rs1, o.rs2), (1, 2, 3));
+    }
+
+    #[test]
     fn cpu_models() {
         // 汎用CPUモデルと機能集合。RVA相当のRV64GCを汎用とする。
         assert!(FEATURES.contains(&"rv64"));

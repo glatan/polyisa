@@ -29,6 +29,7 @@ fn main() {
         &generated.decoder,
         &generated.disassembler,
         &generated.encoder,
+        &generated.operands,
         &generated.metadata,
     ] {
         all.push_str(part);
