@@ -1,8 +1,12 @@
 //! 実行ファイル形式の解析。配置の方針は OS パーソナリティが決める。
 //!
-//! 形式ごとの定数表は参照資料の確認後に埋める。ここでは種別の判定の入口だけを提供する。
+//! ELF の定数と配置は SPEC-ELF-GABI の確認済みの版に基づく（`// Ref:` は `elf` にある）。
 
 #![forbid(unsafe_code)]
+
+pub mod elf;
+
+use elf::MAGIC;
 
 /// ファイルの種別。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -11,12 +15,14 @@ pub enum FileKind {
     Elf,
 }
 
-/// 先頭バイトから種別を推定する。詳細の解析は後の段階で足す。
+/// 先頭バイトから種別を推定する。ELF の識別子に一致すれば `Elf` とする。
 #[must_use]
 pub fn probe_kind(bytes: &[u8]) -> FileKind {
-    // ELF の識別子などの定数は、台帳の確認後にここで扱う。
-    let _ = bytes;
-    FileKind::Unknown
+    if bytes.len() >= MAGIC.len() && bytes[0..MAGIC.len()] == MAGIC {
+        FileKind::Elf
+    } else {
+        FileKind::Unknown
+    }
 }
 
 #[cfg(test)]
@@ -26,5 +32,12 @@ mod tests {
     #[test]
     fn empty_is_unknown() {
         assert_eq!(probe_kind(&[]), FileKind::Unknown);
+    }
+
+    #[test]
+    fn magic_is_elf() {
+        let mut bytes = [0u8; 8];
+        bytes[0..4].copy_from_slice(&MAGIC);
+        assert_eq!(probe_kind(&bytes), FileKind::Elf);
     }
 }
