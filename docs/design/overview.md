@@ -1,6 +1,6 @@
 # polyisa 設計概要
 
-この文書は polyisa の目的、要件、非目標、全体構成を定める。各サブシステムの詳細は個別の設計文書に、設計判断の理由と却下した代替案は ADR に置く。文書の一覧と読む順序は [docs/README.md](../README.md) にある。用語は [用語集](glossary.md) で定義する。
+この文書は polyisa の目的、要件、非目標、全体構成を定める。各サブシステムの詳細は個別の設計文書に、設計判断の理由と却下した代替案は ADR に置く。文書の一覧と読む順序は [文書の一覧](../README.md) にある。用語は [用語集](glossary.md) で定義する。
 
 ## polyisa が実行するもの
 
@@ -15,7 +15,7 @@ polyisa は、多数の CPU アーキテクチャ向けに作られたユーザ�
 | ID | 要件 | 関連文書 |
 |---|---|---|
 | R1 | Rust で実装し、外部クレートに一切依存しない。dev-dependencies と build-dependencies も含む。標準ライブラリにない OS 機能は、FFI 宣言も自前で書く | [ADR-0001](../adr/0001-no-external-crates.md) |
-| R2 | 主対象は x86（16/32/64 ビット）、ARM（AArch32 以前）、AArch64、MIPS、RISC-V、Power、s390 系、WebAssembly とする。古い・マイナーな ISA として、68k・VAX・PDP-11、SPARC・Alpha・PA-RISC・SuperH・LoongArch・OpenRISC、IA-64・Hexagon を対象に含める | [アーキテクチャ固有の要求](arch-requirements.md) |
+| R2 | 主対象は x86（16/32/64 ビット）、ARM（AArch32 以前）、AArch64、MIPS、RISC-V、Power、s390、WebAssembly とする。古い・マイナーな ISA として、m68k・VAX・PDP-11、SPARC・Alpha・PA-RISC・SuperH・LoongArch・OpenRISC、IA-64・Hexagon を対象に含める（計 19 ファミリ） | [アーキテクチャ固有の要求](arch-requirements.md) |
 | R3 | ISA のバージョン、拡張、CPU の世代を区別し、それらによるグループ化を表現できる | [CPU モデル](cpu-models.md) |
 | R4 | エミュレーションの形態はユーザーモードとする。ゲストのプログラムを実行し、OS のサービスをエミュレータが提供する | [ユーザーモード](user-mode.md) |
 | R5 | インタプリタで正しさを先に固め、JIT を後から追加する。JIT の追加で ISA ごとの命令意味論を書き直さない | [命令意味論](semantics.md)、[実行エンジン](execution-engine.md)、[JIT](jit.md) |

@@ -4,7 +4,7 @@
 
 ## 方針
 
-ホストの機能は、標準ライブラリにあるものは標準ライブラリで使い、ないものだけを `host` クレートの自前の FFI 宣言で補う。`host` 以外のクレートは、ホストの OS とホストの CPU を判定する条件付きコンパイル（`cfg(target_os)`、`cfg(target_arch)`、`cfg(target_endian)`、`cfg(target_pointer_width)`）を使わない。例外は JIT のホストのバックエンドで、これはホストの ISA ごとのモジュールに閉じる。この規則は `task check` の検査で確認する（[開発作業とローカル検証](dev-workflow.md)）。
+ホストの機能は、標準ライブラリにあるものは標準ライブラリで使い、ないものだけを `host` クレートの自前の FFI 宣言で補う。`host` 以外のクレートは、ホストの OS とホストの CPU を判定する条件付きコンパイル（`cfg(target_os)`、`cfg(target_arch)`、`cfg(target_endian)`、`cfg(target_pointer_width)`）を使わない。`std::os::unix` のように OS ごとにしかない標準ライブラリのモジュールの直接利用も `host` に限り、他のクレートは OS 非依存の `std` の範囲だけを使う。OS 差が必要な処理は `host` の API 経由で呼ぶ。例外は JIT のホストのバックエンドで、これはホストの ISA ごとのモジュールに閉じる。この規則は `task check` の検査で確認する（[開発作業とローカル検証](dev-workflow.md)）。
 
 標準ライブラリを優先するのは、標準ライブラリが Linux、macOS、Windows、WASI の差を吸収しており、標準ライブラリで書いた部分は移植の作業から外れるからである。
 
@@ -15,8 +15,8 @@ polyisa がホストに求める機能と、その提供元は次のとおりで
 | 機能 | 使う側 | 提供元 |
 |---|---|---|
 | ページフレーム用のメモリの確保 | `mem` | 標準ライブラリのメモリ確保 |
-| ファイルとディレクトリの操作、メタデータ | `kernel` | `std::fs`、Unix では `std::os::unix::fs` |
-| ソケット | `kernel` | `std::net`、Unix では `std::os::unix::net` |
+| ファイルとディレクトリの操作、メタデータ | `kernel` | `std::fs`。Unix 拡張が必要な部分は `host` 経由 |
+| ソケット | `kernel` | `std::net`。Unix 拡張が必要な部分は `host` 経由 |
 | スレッド（ホストの入出力の作業用） | `kernel` | `std::thread` |
 | 時刻 | `kernel` | `std::time` |
 | 端末かどうかの判定 | `kernel` | `std::io::IsTerminal` |
