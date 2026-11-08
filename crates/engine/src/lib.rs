@@ -5,6 +5,7 @@
 #![forbid(unsafe_code)]
 
 pub mod bare;
+pub mod cache;
 pub mod interp;
 
 use polyisa_mem::Tlb;
