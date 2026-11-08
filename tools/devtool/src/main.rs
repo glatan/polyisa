@@ -54,7 +54,7 @@ fn cmd_check() -> i32 {
         eprintln!("check: cfg の規則: {e}");
         failed = true;
     }
-    if let Err(e) = check_refs_register() {
+    if let Err(e) = check_refs_full() {
         eprintln!("check: 台帳の検査: {e}");
         failed = true;
     }
@@ -68,9 +68,16 @@ fn cmd_check() -> i32 {
 
 /// `task refs:check` の実体。台帳の表が読めることを確かめる。
 fn cmd_refs_check() -> i32 {
-    match check_refs_register() {
-        Ok(n) => {
-            println!("refs:check: ok ({n} ids)");
+    let count = match check_refs_register() {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("refs:check: {e}");
+            return 1;
+        }
+    };
+    match check_refs_full() {
+        Ok(()) => {
+            println!("refs:check: ok ({count} ids)");
             0
         }
         Err(e) => {
@@ -207,25 +214,278 @@ fn check_cfg_rules() -> Result<(), String> {
 fn check_refs_register() -> Result<usize, String> {
     let path = workspace_root().join("docs/references.md");
     let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let mut ids = std::collections::BTreeSet::new();
+    let table = parse_register(&text);
+    if table.is_empty() {
+        return Err("no register IDs found".to_string());
+    }
+    Ok(table.len())
+}
+
+/// `refs:check` の本体。文書の「機械的な検査」の 1〜4 を行う。5 は `check` で行う。
+fn check_refs_full() -> Result<(), String> {
+    let root = workspace_root();
+    let text =
+        std::fs::read_to_string(root.join("docs/references.md")).map_err(|e| e.to_string())?;
+    let table = parse_register(&text);
+    if table.is_empty() {
+        return Err("no register IDs found".to_string());
+    }
+    let mut violations = Vec::new();
+
+    // 1・2：固定書式の注記の走査。`// Ref: ID`（Rust）、`reference ID;` と `ref ID`（ISADL）。
+    for hit in scan_notations(&root) {
+        match table.get(&hit.id) {
+            None => violations.push(format!("{}:{}: unknown ID {}", hit.file, hit.line, hit.id)),
+            Some(entry) => {
+                if !entry.confirmed {
+                    violations.push(format!(
+                        "{}:{}: {} is unconfirmed",
+                        hit.file, hit.line, hit.id
+                    ));
+                } else if !entry.uses.iter().any(|u| u == &hit.need) {
+                    violations.push(format!(
+                        "{}:{}: {} lacks {:?}",
+                        hit.file, hit.line, hit.id, hit.need
+                    ));
+                }
+            }
+        }
+    }
+
+    // 取得定義の突合せ。`T` が要る。
+    let manifest = root.join("tools/testdata/manifest.txt");
+    if manifest.exists() {
+        let text = std::fs::read_to_string(&manifest).map_err(|e| e.to_string())?;
+        for (i, line) in text.lines().enumerate() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let id = line.split_whitespace().next().unwrap_or("");
+            match table.get(id) {
+                None => violations.push(format!("manifest.txt:{}: unknown ID {id}", i + 1)),
+                Some(entry) => {
+                    if !entry.confirmed {
+                        violations.push(format!("manifest.txt:{}: {id} is unconfirmed", i + 1));
+                    } else if !entry.uses.iter().any(|u| u == "T") {
+                        violations.push(format!("manifest.txt:{}: {id} lacks 'T'", i + 1));
+                    }
+                }
+            }
+        }
+    }
+
+    // 3：`.testdata/` の除外。`.gitignore` と `git ls-files` の両方を見る。
+    if let Err(e) = check_testdata_untracked(&root) {
+        violations.push(e);
+    }
+
+    // 4：著作権表示と SPDX 識別子の走査。台帳は対象外。
+    violations.extend(scan_notices(&root));
+
+    if violations.is_empty() {
+        Ok(())
+    } else {
+        Err(violations.join("; "))
+    }
+}
+
+/// 台帳の項目。用途は `R,F,T,X` の列、確認は日付の有無だけを見る。
+struct RegisterEntry {
+    uses: Vec<String>,
+    confirmed: bool,
+}
+
+/// 台帳の表を読む。`用途` と `確認` の列だけを使う。
+fn parse_register(text: &str) -> std::collections::BTreeMap<String, RegisterEntry> {
+    let mut table = std::collections::BTreeMap::new();
     for line in text.lines().map(str::trim) {
         if !line.starts_with("| ") {
             continue;
         }
         let cols: Vec<&str> = line.split('|').map(str::trim).collect();
-        // `| ID | ... |` の行だけを拾う。区切り行と見出し行は `---` を含むか ID にならない。
-        if cols.len() < 3 {
+        // `| ID | 名称 | 発行者 | 版 | 対象 | 利用条件 | 用途 | 確認 | 備考 |` の 9 列。
+        if cols.len() < 10 {
             continue;
         }
-        let id = cols[1];
-        if is_register_id(id) {
-            ids.insert(id.to_string());
+        let (id, uses, confirmed_cell) = (cols[1], cols[7], cols[8]);
+        if !is_register_id(id) {
+            continue;
+        }
+        let uses = uses
+            .split(',')
+            .map(str::trim)
+            .filter(|u| !u.is_empty() && *u != "—")
+            .map(str::to_string)
+            .collect();
+        table.insert(
+            id.to_string(),
+            RegisterEntry {
+                uses,
+                confirmed: is_confirmed(confirmed_cell),
+            },
+        );
+    }
+    table
+}
+
+/// 確認の欄が `YYYY-MM-DD 確認者名` の形かどうか。
+fn is_confirmed(cell: &str) -> bool {
+    let b = cell.as_bytes();
+    cell.len() >= 10
+        && b[0..4].iter().all(|c| c.is_ascii_digit())
+        && b[4] == b'-'
+        && b[5..7].iter().all(|c| c.is_ascii_digit())
+        && b[7] == b'-'
+        && b[8..10].iter().all(|c| c.is_ascii_digit())
+}
+
+/// 固定書式の注記の1件。`need` は参照の場所に応じた用途。
+struct NotationHit {
+    file: String,
+    line: usize,
+    id: String,
+    need: String,
+}
+
+/// 成果物の注記を集める。対象は `crates/`、`guests/`、`tools/`。
+/// Rust では `// Ref: ID`、ISADL では `reference ID;` と `ref ID` を拾う。
+fn scan_notations(root: &std::path::Path) -> Vec<NotationHit> {
+    let mut out = Vec::new();
+    for base in ["crates", "guests", "tools"] {
+        let mut files = Vec::new();
+        collect_files(&root.join(base), &mut files);
+        files.sort();
+        for f in files {
+            let ext = f.extension().and_then(|s| s.to_str()).unwrap_or("");
+            if ext != "rs" && ext != "isadl" {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&f) else {
+                continue;
+            };
+            let rel = f.strip_prefix(root).unwrap_or(&f).display().to_string();
+            for (i, line) in text.lines().enumerate() {
+                let code = line.split("//").next().unwrap_or("");
+                // Rust の注記はコメントで書くので、元の行から探す。
+                for id in find_ids(line, "// Ref:") {
+                    out.push(NotationHit {
+                        file: rel.clone(),
+                        line: i + 1,
+                        id,
+                        need: "F".to_string(),
+                    });
+                }
+                if ext == "isadl" {
+                    for id in find_ids(code, "reference") {
+                        out.push(NotationHit {
+                            file: rel.clone(),
+                            line: i + 1,
+                            id,
+                            need: "F".to_string(),
+                        });
+                    }
+                    for id in find_ids(code, "ref") {
+                        out.push(NotationHit {
+                            file: rel.clone(),
+                            line: i + 1,
+                            id,
+                            need: "F".to_string(),
+                        });
+                    }
+                }
+            }
         }
     }
-    if ids.is_empty() {
-        return Err("no register IDs found".to_string());
+    out
+}
+
+/// 行から接頭辞の直後の ID を拾う。
+fn find_ids(line: &str, marker: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = line;
+    while let Some(pos) = rest.find(marker) {
+        rest = &rest[pos + marker.len()..];
+        let token: String = rest
+            .chars()
+            .skip_while(|c| !c.is_ascii_alphanumeric())
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+            .collect();
+        if is_register_id(&token) {
+            out.push(token);
+        }
     }
-    Ok(ids.len())
+    out
+}
+
+fn collect_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            // 生成物と取得物は走査しない。
+            if let Some(name) = p.file_name().and_then(|s| s.to_str())
+                && (name == "target" || name == ".testdata")
+            {
+                continue;
+            }
+            collect_files(&p, out);
+        } else {
+            out.push(p);
+        }
+    }
+}
+
+/// `.testdata/` が追跡対象外かどうか。`.gitignore` と `git ls-files` を見る。
+fn check_testdata_untracked(root: &std::path::Path) -> Result<(), String> {
+    let ignore = std::fs::read_to_string(root.join(".gitignore")).unwrap_or_default();
+    if !ignore.lines().any(|l| l.trim() == ".testdata/") {
+        return Err(".testdata/ is not in .gitignore".to_string());
+    }
+    let out = std::process::Command::new("git")
+        .args(["ls-files", ".testdata/"])
+        .current_dir(root)
+        .output()
+        .map_err(|e| format!("git ls-files: {e}"))?;
+    if !out.status.success() {
+        return Err("git ls-files failed".to_string());
+    }
+    let tracked = String::from_utf8_lossy(&out.stdout);
+    if tracked.lines().next().is_some() {
+        return Err(".testdata/ is tracked by git".to_string());
+    }
+    Ok(())
+}
+
+/// 著作権表示と SPDX 識別子の走査。`docs/references.md` は対象外。
+fn scan_notices(root: &std::path::Path) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut files = Vec::new();
+    collect_files(root, &mut files);
+    files.sort();
+    for f in files {
+        let rel = f.strip_prefix(root).unwrap_or(&f).display().to_string();
+        if rel == "docs/references.md" {
+            continue;
+        }
+        if rel.starts_with(".git/") || rel.contains("/target/") || rel.starts_with(".testdata/") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&f) else {
+            continue;
+        };
+        for (i, line) in text.lines().enumerate() {
+            // 検査自身のソースに文字列が現れないよう、動的に組み立てる。
+            let copy: String = ["Copy", "right"].concat();
+            let spdx: String = ["SPDX-", "License-Identifier"].concat();
+            if line.contains(&copy) || line.contains('\u{a9}') || line.contains(&spdx) {
+                out.push(format!("{}:{}: third-party notice?", rel, i + 1));
+            }
+        }
+    }
+    out
 }
 
 fn is_register_id(id: &str) -> bool {
@@ -545,6 +805,45 @@ mod tests {
     fn refs_register_is_readable() {
         let n = check_refs_register().expect("references.md should parse");
         assert!(n > 60, "expected many IDs, got {n}");
+    }
+
+    #[test]
+    fn refs_full_passes_on_current_tree() {
+        // 成果物に固定書式の注記はなく、`.testdata` も追跡外のため通る。
+        assert!(check_refs_full().is_ok());
+    }
+
+    #[test]
+    fn confirmed_format() {
+        assert!(is_confirmed("2026-11-08 owner"));
+        assert!(!is_confirmed("未確認"));
+        assert!(!is_confirmed("—"));
+        assert!(!is_confirmed("2026/11/08 owner"));
+    }
+
+    #[test]
+    fn register_uses_parsed() {
+        let text = "| ID | 名称 | 発行者 | 版 | 対象 | 利用条件 | 用途 | 確認 | 備考 |\n\
+                    |---|---|---|---|---|---|---|---|---|\n\
+                    | SPEC-FOO | x | y | — | z | w | R,F | 2026-11-08 owner | |\n\
+                    | TOOL-BAR | x | y | — | z | w | — | 未確認 | |";
+        let t = parse_register(text);
+        assert_eq!(t["SPEC-FOO"].uses, vec!["R".to_string(), "F".to_string()]);
+        assert!(t["SPEC-FOO"].confirmed);
+        assert!(t["TOOL-BAR"].uses.is_empty());
+        assert!(!t["TOOL-BAR"].confirmed);
+    }
+
+    #[test]
+    fn notation_ids_found() {
+        // 検査対象の書式を直接書くと走査に拾われるため、動的に組み立てる。
+        let marker: String = ["/", "/ Ref:"].concat();
+        let line = format!("{marker} SPEC-RISCV-UNPRIV §2.4");
+        assert_eq!(
+            find_ids(&line, &marker),
+            vec!["SPEC-RISCV-UNPRIV".to_string()]
+        );
+        assert!(find_ids("// just a comment", &marker).is_empty());
     }
 
     #[test]
