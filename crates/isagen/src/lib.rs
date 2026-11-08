@@ -77,6 +77,15 @@ fn gen_decoder(model: &Model) -> Result<String, GenError> {
     // 生成時に `UnsupportedWhen` で失敗させ、入口の拡張を促す。
     // `decode` は既定（RV64）を選ぶ互換用の殻である。
     s.push_str("pub fn decode_model(word: u128, len: u32, is_rv64: bool) -> Option<Insn> {\n");
+    // `when` を使わないモデルでは `is_rv64` が未使用になる。呼び出し側の
+    // 互換性のため引数は残し、警告が出ないよう明示的に破棄する。
+    let uses_xlen = model
+        .insns
+        .iter()
+        .any(|i| !when_guard(&i.when).unwrap_or_default().is_empty());
+    if !uses_xlen {
+        s.push_str("    let _ = is_rv64;\n");
+    }
     s.push_str("    match len {\n");
     // 長さごとに分岐する。RISC-V C拡張の16ビット命令と32ビット命令の混在を想定する。
     let mut lens: Vec<u32> = model.insns.iter().map(|i| i.pattern.len()).collect();
@@ -130,9 +139,15 @@ fn gen_decoder(model: &Model) -> Result<String, GenError> {
                 } else {
                     (1u128 << width) - 1
                 };
-                s.push_str(&format!(
-                    "                let w_{tag}_{k} = (word >> {lo}) & {mask:#x};\n"
-                ));
+                if lo == 0 {
+                    s.push_str(&format!(
+                        "                let w_{tag}_{k} = word & {mask:#x};\n"
+                    ));
+                } else {
+                    s.push_str(&format!(
+                        "                let w_{tag}_{k} = (word >> {lo}) & {mask:#x};\n"
+                    ));
+                }
                 let op = match w.op {
                     polyisa_isadl::model::WhereOp::Eq => "==",
                     polyisa_isadl::model::WhereOp::Ne => "!=",
@@ -244,9 +259,13 @@ fn gen_operands(model: &Model) -> String {
             } else {
                 (1u128 << width) - 1
             };
-            s.push_str(&format!(
-                "    let {name} = ((word >> {lo}) & {mask:#x}) as u32;\n"
-            ));
+            if *lo == 0 {
+                s.push_str(&format!("    let {name} = (word & {mask:#x}) as u32;\n"));
+            } else {
+                s.push_str(&format!(
+                    "    let {name} = ((word >> {lo}) & {mask:#x}) as u32;\n"
+                ));
+            }
         }
         s.push_str(&format!("    {ty} {{ raw: word,"));
         for (name, _, _) in &items {
