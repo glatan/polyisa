@@ -6,7 +6,7 @@
 
 #![forbid(unsafe_code)]
 
-use polyisa_isadl::Model;
+pub use polyisa_isadl::Model;
 
 /// 生成に失敗した理由。
 #[derive(Clone, PartialEq, Eq, Debug)]
