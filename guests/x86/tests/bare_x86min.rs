@@ -49,6 +49,42 @@ fn add_mov_imm() {
 }
 
 #[test]
+fn syscall_traps() {
+    use polyisa_engine::interp::InterpExit;
+    use polyisa_sem::ExceptionKind;
+    let r = env_step(|b| sem::syscall(b, 0x1000));
+    assert!(matches!(
+        r,
+        Err(InterpExit::Exception(e)) if e.kind == ExceptionKind::Trap && e.addr == Some(0x1000)
+    ));
+}
+
+fn env_step<F>(f: F) -> Result<(), polyisa_engine::interp::InterpExit>
+where
+    F: FnOnce(
+        &mut polyisa_engine::interp::InterpBackend,
+    ) -> Result<(), polyisa_engine::interp::InterpExit>,
+{
+    let mut env = env();
+    env.step(f)
+}
+
+#[test]
+fn cpuid_leaf0_returns_vendor() {
+    let mut env = env();
+    env.backend.set(sem::Gpr(0).state(), 0);
+    env.step(sem::cpuid).unwrap();
+    assert_eq!(env.backend.get(sem::Gpr(0).state()), 1);
+    assert_eq!(env.backend.get(sem::Gpr(3).state()), 0x756e_6547);
+    assert_eq!(env.backend.get(sem::Gpr(1).state()), 0x6c65_746e);
+    assert_eq!(env.backend.get(sem::Gpr(2).state()), 0x4965_6e69);
+    // leaf 1 は試作ではゼロを返す。
+    env.backend.set(sem::Gpr(0).state(), 1);
+    env.step(sem::cpuid).unwrap();
+    assert_eq!(env.backend.get(sem::Gpr(0).state()), 0);
+}
+
+#[test]
 fn jmp_sets_eip() {
     let mut env = env();
     env.backend.set(sem::eip_ref(), 0x1000);

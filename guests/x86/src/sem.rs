@@ -2,13 +2,14 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! x86 最小の命令意味論。バックエンドに対して総称的に書く.
 //!
-//! EAX 系の整数演算のみ持つ。EFLAGS の更新（遅延フラグは本格実装）、
-//! ModRM/SIB、セグメント、64ビット拡張は本格実装で足す。
+//! EAX 系の整数演算と SYSCALL/CPUID の最小形のみ持つ。EFLAGS の更新
+//! （遅延フラグは本格実装）、ModRM/SIB、セグメント、64ビット拡張、
+//! CPUID の機能導出は本格実装で足す。
 //!
 //! 出典は SPEC-X86-INTEL-SDM Combined v093 (2026-09-24) である。
 //! Ref: SPEC-X86-INTEL-SDM (v093).
 
-use polyisa_sem::{Backend, Flow, StateRef, W32};
+use polyisa_sem::{Backend, Cmp, ExceptionKind, Flow, GuestException, StateRef, W32};
 
 use super::CpuState;
 
@@ -77,6 +78,39 @@ pub fn add_eax<B: Backend>(b: &mut B, imm: u32) -> Flow<B> {
 pub fn mov_eax<B: Backend>(b: &mut B, imm: u32) -> Flow<B> {
     let v = b.konst::<W32>(imm);
     write(b, Gpr::eax(), v);
+    Ok(())
+}
+
+/// SYSCALL。OS パーソナリティが処理する退出を返す（番号・規約は本格実装で足す）。
+pub fn syscall<B: Backend>(b: &mut B, eip: u32) -> Flow<B> {
+    Err(b.raise(GuestException {
+        kind: ExceptionKind::Trap,
+        code: 0,
+        addr: Some(eip as u64),
+        in_delay_slot: false,
+    }))
+}
+
+/// CPUID。leaf 0 のベンダIDのみ返す（機能導出は本格実装で足す）。
+/// TODO(本格実装): leaf 1+ はゼロでなく版数・機能ビットを返す。
+/// EAX=最大leaf、EBX="Genu"、EDX="ineI"、ECX="ntel"。
+pub fn cpuid<B: Backend>(b: &mut B) -> Flow<B> {
+    // レジスタ番号は EAX=0, ECX=1, EDX=2, EBX=3 である。
+    let leaf = read(b, Gpr(0));
+    let zero = b.konst::<W32>(0);
+    let is_zero = b.cmp::<W32>(Cmp::Eq, leaf, zero);
+    let max = b.konst::<W32>(1);
+    let new_eax = b.select::<W32>(is_zero, max, zero);
+    write(b, Gpr(0), new_eax);
+    let ebx_v = b.konst::<W32>(0x756e_6547);
+    let new_ebx = b.select::<W32>(is_zero, ebx_v, zero);
+    write(b, Gpr(3), new_ebx);
+    let ecx_v = b.konst::<W32>(0x6c65_746e);
+    let new_ecx = b.select::<W32>(is_zero, ecx_v, zero);
+    write(b, Gpr(1), new_ecx);
+    let edx_v = b.konst::<W32>(0x4965_6e69);
+    let new_edx = b.select::<W32>(is_zero, edx_v, zero);
+    write(b, Gpr(2), new_edx);
     Ok(())
 }
 

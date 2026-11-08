@@ -2,8 +2,11 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // x86 最小の ISADL モデル（段階4の最小）。
 //
-// i386 の整数6件に絞る。可変長（8/16/40ビット）のデコード入口を確かめる。
+// i386 の整数8件に絞る。可変長（8/16/40ビット）のデコード入口を確かめる。
 // ModRM/SIB フック・遅延フラグ・x87・SSE・64ビット・セグメントは本格実装で足す。
+// SYSCALL/CPUID は退出・識別情報の最小形のみ持つ（機能導出は本格実装で足す）。
+// SYSCALL (0F 05) は IA-32e 用であり 32bit 正統は SYSENTER (0F 34) だが、
+// 試作では x86-64 への橋渡しとして SYSCALL を先に持つ。i386 feature の無条件有効は試作の割り切りである。
 // imm32/disp8 の切り出しは本格実装で足す。
 // 出典は SPEC-X86-INTEL-SDM Combined v093 (2026-09-24) である。
 // Ref: SPEC-X86-INTEL-SDM (v093).
@@ -16,7 +19,7 @@ use polyisa_isadl::pred::Pred;
 pub fn build_model() -> polyisa_isadl::Model {
     let mut m = polyisa_isadl::Model::new();
 
-    for class in ["alu", "jump"] {
+    for class in ["alu", "jump", "system"] {
         m.timing_classes.push(class.to_string());
     }
 
@@ -55,6 +58,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("add_eax", "F1", "00000101 ................................", "add eax, {imm}", "alu"),
         ("jmp8", "F1", "11101011 ........", "jmp {imm}", "jump"),
         ("mov_eax", "F1", "10111000 ................................", "mov eax, {imm}", "alu"),
+        ("syscall", "F1", "00001111 00000101", "syscall", "system"),
+        ("cpuid", "F1", "00001111 10100010", "cpuid", "system"),
     ];
     for (name, format, pattern, syntax, timing) in insns {
         m.insns.push(Insn {
