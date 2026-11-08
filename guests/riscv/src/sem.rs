@@ -1241,6 +1241,88 @@ where
     Ok(())
 }
 
+// A（RV32）。W 接尾辞の演算は 32 ビットで同一だが、アドレスは 32 ビットで包む。
+
+/// LR.W（RV32）。
+pub fn lr_w_rv32<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, oimm: i64) -> Flow<B> {
+    let addr = load_addr_rv32(b, rs1, oimm);
+    let v: B::V<W32> = b.load_reserved(addr, LR_ACC)?;
+    write_w(b, rd, v);
+    Ok(())
+}
+
+/// SC.W（RV32）。成功で 0、失敗で 0 以外を書く。
+pub fn sc_w_rv32<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr, oimm: i64) -> Flow<B> {
+    let raw = read(b, rs2);
+    let v = b.trunc::<W64, W32>(raw);
+    let addr = load_addr_rv32(b, rs1, oimm);
+    let ok = b.store_conditional(addr, v, SC_ACC)?;
+    let zero = const_w64(b, 0);
+    let one = const_w64(b, 1);
+    let s = b.select(ok, zero, one);
+    write(b, rd, s);
+    Ok(())
+}
+
+fn amo_w_rv32<B: Backend, F>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr, oimm: i64, f: F) -> Flow<B>
+where
+    F: FnOnce(&mut B, B::V<W32>, B::V<W32>) -> B::V<W32>,
+{
+    let addr = load_addr_rv32(b, rs1, oimm);
+    let cur: B::V<W32> = b.load(addr, AMO_ACC)?;
+    let raw = read(b, rs2);
+    let y = b.trunc::<W64, W32>(raw);
+    let nxt = f(b, cur, y);
+    b.store(addr, nxt, AMO_ACC)?;
+    write_w(b, rd, cur);
+    Ok(())
+}
+
+/// AMOSWAP.W（RV32）。
+pub fn amoswap_w_rv32<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr, oimm: i64) -> Flow<B> {
+    amo_w_rv32(b, rd, rs1, rs2, oimm, |_, _, y| y)
+}
+
+/// AMOADD.W（RV32）。
+pub fn amoadd_w_rv32<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr, oimm: i64) -> Flow<B> {
+    amo_w_rv32(b, rd, rs1, rs2, oimm, |b, a, y| b.add(a, y))
+}
+
+/// AMOXOR.W（RV32）。
+pub fn amoxor_w_rv32<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr, oimm: i64) -> Flow<B> {
+    amo_w_rv32(b, rd, rs1, rs2, oimm, |b, a, y| b.xor(a, y))
+}
+
+/// AMOAND.W（RV32）。
+pub fn amoand_w_rv32<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr, oimm: i64) -> Flow<B> {
+    amo_w_rv32(b, rd, rs1, rs2, oimm, |b, a, y| b.and(a, y))
+}
+
+/// AMOOR.W（RV32）。
+pub fn amoor_w_rv32<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr, oimm: i64) -> Flow<B> {
+    amo_w_rv32(b, rd, rs1, rs2, oimm, |b, a, y| b.or(a, y))
+}
+
+/// AMOMIN.W（RV32）。
+pub fn amomin_w_rv32<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr, oimm: i64) -> Flow<B> {
+    amo_w_rv32(b, rd, rs1, rs2, oimm, min_s)
+}
+
+/// AMOMAX.W（RV32）。
+pub fn amomax_w_rv32<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr, oimm: i64) -> Flow<B> {
+    amo_w_rv32(b, rd, rs1, rs2, oimm, max_s)
+}
+
+/// AMOMINU.W（RV32）。
+pub fn amominu_w_rv32<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr, oimm: i64) -> Flow<B> {
+    amo_w_rv32(b, rd, rs1, rs2, oimm, min_u)
+}
+
+/// AMOMAXU.W（RV32）。
+pub fn amomaxu_w_rv32<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr, oimm: i64) -> Flow<B> {
+    amo_w_rv32(b, rd, rs1, rs2, oimm, max_u)
+}
+
 fn min_s<B: Backend>(b: &mut B, a: B::V<W32>, y: B::V<W32>) -> B::V<W32> {
     let c = b.cmp(Cmp::LtS, a, y);
     b.select(c, a, y)
@@ -1424,7 +1506,8 @@ pub fn ebreak<B: Backend>(b: &mut B, pc: u64) -> Flow<B> {
     env_exit(b, polyisa_sem::ExceptionKind::Break, pc)
 }
 
-// F（単精度浮動小数点）。丸めは RNE 固定、動的丸めは後の段階で足す。
+// F（単精度浮動小数点）。丸めモードは引数 rm で受ける（rm=7/DYN は
+// 呼び出し側が frm CSR で解決する）。RNE 固定の記述は残さない。
 
 /// FLW。
 pub fn flw<B: Backend>(b: &mut B, rd: Fpr, rs1: Gpr, oimm: i64) -> Flow<B> {
@@ -2150,7 +2233,8 @@ pub fn c_li<B: Backend>(b: &mut B, rd: Gpr, imm: i64) -> Flow<B> {
     addi(b, rd, Gpr(0), imm)
 }
 
-/// C.J。`jal x0, offset` に展開する。
+/// C.J。`jal x0, offset` に展開する。rd=x0 捨てのため戻りの pc+2/pc+4
+/// の違いは現れない。リンクを残す C.JAL と区別する。
 pub fn c_j<B: Backend>(b: &mut B, pc: u64, offset: i64) -> Flow<B> {
     jal(b, Gpr(0), pc, offset)
 }
@@ -2209,6 +2293,26 @@ pub fn c_fldsp<B: Backend>(b: &mut B, rd: Fpr, oimm: i64) -> Flow<B> {
 /// C.FSDSP。`fsd rs2, offset(x2)` に展開する。
 pub fn c_fsdsp<B: Backend>(b: &mut B, rs2: Fpr, oimm: i64) -> Flow<B> {
     fsd(b, Gpr(2), rs2, oimm)
+}
+
+/// C.FLD（RV32）。アドレスは 32 ビットで包む。
+pub fn c_fld_rv32<B: Backend>(b: &mut B, rd: Fpr, rs1: Gpr, oimm: i64) -> Flow<B> {
+    fld_rv32(b, rd, rs1, oimm)
+}
+
+/// C.FSD（RV32）。アドレスは 32 ビットで包む。
+pub fn c_fsd_rv32<B: Backend>(b: &mut B, rs1: Gpr, rs2: Fpr, oimm: i64) -> Flow<B> {
+    fsd_rv32(b, rs1, rs2, oimm)
+}
+
+/// C.FLDSP（RV32）。`fld rd, offset(x2)` に展開する。
+pub fn c_fldsp_rv32<B: Backend>(b: &mut B, rd: Fpr, oimm: i64) -> Flow<B> {
+    fld_rv32(b, rd, Gpr(2), oimm)
+}
+
+/// C.FSDSP（RV32）。`fsd rs2, offset(x2)` に展開する。
+pub fn c_fsdsp_rv32<B: Backend>(b: &mut B, rs2: Fpr, oimm: i64) -> Flow<B> {
+    fsd_rv32(b, Gpr(2), rs2, oimm)
 }
 
 /// C.SRLI。
@@ -2333,12 +2437,14 @@ pub fn c_ebreak<B: Backend>(b: &mut B, pc: u64) -> Flow<B> {
     ebreak(b, pc)
 }
 
-/// C.FLW（RV32）。単精度ロード。
+/// C.FLW。RV64 側の実行器（RV32 は事前振り分けで c_flw_rv32 を使う）。
+/// 単精度ロード。
 pub fn c_flw<B: Backend>(b: &mut B, rd: Fpr, rs1: Gpr, oimm: i64) -> Flow<B> {
     flw(b, rd, rs1, oimm)
 }
 
-/// C.FSW（RV32）。単精度ストア。
+/// C.FSW。RV64 側の実行器（RV32 は事前振り分けで c_fsw_rv32 を使う）。
+/// 単精度ストア。
 pub fn c_fsw<B: Backend>(b: &mut B, rs1: Gpr, rs2: Fpr, oimm: i64) -> Flow<B> {
     fsw(b, rs1, rs2, oimm)
 }
@@ -2464,12 +2570,14 @@ pub fn c_add_rv32<B: Backend>(b: &mut B, rd: Gpr, rs2: Gpr) -> Flow<B> {
     add_rv32(b, rd, Gpr(r), rs2)
 }
 
-/// C.FLWSP（RV32）。`flw rd, offset(x2)` に展開する。
+/// C.FLWSP。RV64 側の実行器（RV32 は事前振り分けで c_flwsp_rv32 を使う）。
+/// `flw rd, offset(x2)` に展開する。
 pub fn c_flwsp<B: Backend>(b: &mut B, rd: Fpr, oimm: i64) -> Flow<B> {
     flw(b, rd, Gpr(2), oimm)
 }
 
-/// C.FSWSP（RV32）。`fsw rs2, offset(x2)` に展開する。
+/// C.FSWSP。RV64 側の実行器（RV32 は事前振り分けで c_fswsp_rv32 を使う）。
+/// `fsw rs2, offset(x2)` に展開する。
 pub fn c_fswsp<B: Backend>(b: &mut B, rs2: Fpr, oimm: i64) -> Flow<B> {
     fsw(b, Gpr(2), rs2, oimm)
 }

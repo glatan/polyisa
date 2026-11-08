@@ -457,17 +457,24 @@ impl Backend for InterpBackend {
 
     fn cmp<W: Width>(&mut self, op: Cmp, a: Self::V<W>, b: Self::V<W>) -> Self::B {
         let (a, b) = (to_u64::<W>(a), to_u64::<W>(b));
+        // 符号付き比較は幅の最上位ビットを符号とみなす。
+        // ゼロ拡張のまま `as i64` すると W32 の負値が正とみなされる。
+        let shift = 64 - W::BITS;
+        let (sa, sb) = (
+            ((a << shift) as i64) >> shift,
+            ((b << shift) as i64) >> shift,
+        );
         match op {
             Cmp::Eq => a == b,
             Cmp::Ne => a != b,
             Cmp::LtU => a < b,
-            Cmp::LtS => (a as i64) < (b as i64),
+            Cmp::LtS => sa < sb,
             Cmp::GtU => a > b,
-            Cmp::GtS => (a as i64) > (b as i64),
+            Cmp::GtS => sa > sb,
             Cmp::LeU => a <= b,
-            Cmp::LeS => (a as i64) <= (b as i64),
+            Cmp::LeS => sa <= sb,
             Cmp::GeU => a >= b,
-            Cmp::GeS => (a as i64) >= (b as i64),
+            Cmp::GeS => sa >= sb,
         }
     }
 

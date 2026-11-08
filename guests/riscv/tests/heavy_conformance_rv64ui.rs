@@ -5,7 +5,7 @@
 //! `ecall`（a7=93）の a0（0=成功）である（`env/p/riscv_test.h` の
 //! RVTEST_PASS/FAIL）。
 //!
-//! 使う外部ツールは台帳 TOOL-RUST（clang）と TOOL-LLVM ではなく rust-lld
+//! 使う外部ツールは台帳 TOOL-LLVM（clang）と rust-lld
 //! （Rust 配布物、用途X・確認済み）。テストデータは台帳 TEST-RISCV-TESTS
 //! （用途T・確認済み、リポジトリに含めない）.
 
@@ -483,6 +483,55 @@ fn run(env: &mut BareEnv, entry: u64, rv32: bool) -> Outcome {
                     env.step(|b| sem::sub(b, rd, rs1, rs2))
                 }
             }
+            // W 接尾辞（RV64 のみ）。RV32 では不正命令相当として拒否する。
+            Insn::Addw => {
+                if rv32 {
+                    return Outcome::Unimplemented { pc: env.pc, word };
+                }
+                env.step(|b| sem::addw(b, rd, rs1, rs2))
+            }
+            Insn::Subw => {
+                if rv32 {
+                    return Outcome::Unimplemented { pc: env.pc, word };
+                }
+                env.step(|b| sem::subw(b, rd, rs1, rs2))
+            }
+            Insn::Sllw => {
+                if rv32 {
+                    return Outcome::Unimplemented { pc: env.pc, word };
+                }
+                env.step(|b| sem::sllw(b, rd, rs1, rs2))
+            }
+            Insn::Srlw => {
+                if rv32 {
+                    return Outcome::Unimplemented { pc: env.pc, word };
+                }
+                env.step(|b| sem::srlw(b, rd, rs1, rs2))
+            }
+            Insn::Sraw => {
+                if rv32 {
+                    return Outcome::Unimplemented { pc: env.pc, word };
+                }
+                env.step(|b| sem::sraw(b, rd, rs1, rs2))
+            }
+            Insn::Slliw => {
+                if rv32 {
+                    return Outcome::Unimplemented { pc: env.pc, word };
+                }
+                env.step(|b| sem::slliw(b, rd, rs1, ((word >> 20) & 31) as u64))
+            }
+            Insn::Srliw => {
+                if rv32 {
+                    return Outcome::Unimplemented { pc: env.pc, word };
+                }
+                env.step(|b| sem::srliw(b, rd, rs1, ((word >> 20) & 31) as u64))
+            }
+            Insn::Sraiw => {
+                if rv32 {
+                    return Outcome::Unimplemented { pc: env.pc, word };
+                }
+                env.step(|b| sem::sraiw(b, rd, rs1, ((word >> 20) & 31) as u64))
+            }
             Insn::Sll => {
                 if rv32 {
                     env.step(|b| sem::sll_rv32(b, rd, rs1, rs2))
@@ -638,6 +687,151 @@ fn run(env: &mut BareEnv, entry: u64, rv32: bool) -> Outcome {
                     return Outcome::Unimplemented { pc: env.pc, word };
                 }
                 env.step(|b| sem::remuw(b, rd, rs1, rs2))
+            }
+            // A 原子命令。W 接尾辞は RV32 でも使い、アドレスは包む。
+            // D 接尾辞は RV64 のみ。
+            Insn::LrW => {
+                if rv32 {
+                    env.step(|b| sem::lr_w_rv32(b, rd, rs1, 0))
+                } else {
+                    env.step(|b| sem::lr_w(b, rd, rs1, 0))
+                }
+            }
+            Insn::ScW => {
+                if rv32 {
+                    env.step(|b| sem::sc_w_rv32(b, rd, rs1, rs2, 0))
+                } else {
+                    env.step(|b| sem::sc_w(b, rd, rs1, rs2, 0))
+                }
+            }
+            Insn::AmoswapW => {
+                if rv32 {
+                    env.step(|b| sem::amoswap_w_rv32(b, rd, rs1, rs2, 0))
+                } else {
+                    env.step(|b| sem::amoswap_w(b, rd, rs1, rs2, 0))
+                }
+            }
+            Insn::AmoaddW => {
+                if rv32 {
+                    env.step(|b| sem::amoadd_w_rv32(b, rd, rs1, rs2, 0))
+                } else {
+                    env.step(|b| sem::amoadd_w(b, rd, rs1, rs2, 0))
+                }
+            }
+            Insn::AmoxorW => {
+                if rv32 {
+                    env.step(|b| sem::amoxor_w_rv32(b, rd, rs1, rs2, 0))
+                } else {
+                    env.step(|b| sem::amoxor_w(b, rd, rs1, rs2, 0))
+                }
+            }
+            Insn::AmoandW => {
+                if rv32 {
+                    env.step(|b| sem::amoand_w_rv32(b, rd, rs1, rs2, 0))
+                } else {
+                    env.step(|b| sem::amoand_w(b, rd, rs1, rs2, 0))
+                }
+            }
+            Insn::AmoorW => {
+                if rv32 {
+                    env.step(|b| sem::amoor_w_rv32(b, rd, rs1, rs2, 0))
+                } else {
+                    env.step(|b| sem::amoor_w(b, rd, rs1, rs2, 0))
+                }
+            }
+            Insn::AmominW => {
+                if rv32 {
+                    env.step(|b| sem::amomin_w_rv32(b, rd, rs1, rs2, 0))
+                } else {
+                    env.step(|b| sem::amomin_w(b, rd, rs1, rs2, 0))
+                }
+            }
+            Insn::AmomaxW => {
+                if rv32 {
+                    env.step(|b| sem::amomax_w_rv32(b, rd, rs1, rs2, 0))
+                } else {
+                    env.step(|b| sem::amomax_w(b, rd, rs1, rs2, 0))
+                }
+            }
+            Insn::AmominuW => {
+                if rv32 {
+                    env.step(|b| sem::amominu_w_rv32(b, rd, rs1, rs2, 0))
+                } else {
+                    env.step(|b| sem::amominu_w(b, rd, rs1, rs2, 0))
+                }
+            }
+            Insn::AmomaxuW => {
+                if rv32 {
+                    env.step(|b| sem::amomaxu_w_rv32(b, rd, rs1, rs2, 0))
+                } else {
+                    env.step(|b| sem::amomaxu_w(b, rd, rs1, rs2, 0))
+                }
+            }
+            Insn::LrD => {
+                if rv32 {
+                    return Outcome::Unimplemented { pc: env.pc, word };
+                }
+                env.step(|b| sem::lr_d(b, rd, rs1, 0))
+            }
+            Insn::ScD => {
+                if rv32 {
+                    return Outcome::Unimplemented { pc: env.pc, word };
+                }
+                env.step(|b| sem::sc_d(b, rd, rs1, rs2, 0))
+            }
+            Insn::AmoswapD => {
+                if rv32 {
+                    return Outcome::Unimplemented { pc: env.pc, word };
+                }
+                env.step(|b| sem::amoswap_d(b, rd, rs1, rs2, 0))
+            }
+            Insn::AmoaddD => {
+                if rv32 {
+                    return Outcome::Unimplemented { pc: env.pc, word };
+                }
+                env.step(|b| sem::amoadd_d(b, rd, rs1, rs2, 0))
+            }
+            Insn::AmoxorD => {
+                if rv32 {
+                    return Outcome::Unimplemented { pc: env.pc, word };
+                }
+                env.step(|b| sem::amoxor_d(b, rd, rs1, rs2, 0))
+            }
+            Insn::AmoandD => {
+                if rv32 {
+                    return Outcome::Unimplemented { pc: env.pc, word };
+                }
+                env.step(|b| sem::amoand_d(b, rd, rs1, rs2, 0))
+            }
+            Insn::AmoorD => {
+                if rv32 {
+                    return Outcome::Unimplemented { pc: env.pc, word };
+                }
+                env.step(|b| sem::amoor_d(b, rd, rs1, rs2, 0))
+            }
+            Insn::AmominD => {
+                if rv32 {
+                    return Outcome::Unimplemented { pc: env.pc, word };
+                }
+                env.step(|b| sem::amomin_d(b, rd, rs1, rs2, 0))
+            }
+            Insn::AmomaxD => {
+                if rv32 {
+                    return Outcome::Unimplemented { pc: env.pc, word };
+                }
+                env.step(|b| sem::amomax_d(b, rd, rs1, rs2, 0))
+            }
+            Insn::AmominuD => {
+                if rv32 {
+                    return Outcome::Unimplemented { pc: env.pc, word };
+                }
+                env.step(|b| sem::amominu_d(b, rd, rs1, rs2, 0))
+            }
+            Insn::AmomaxuD => {
+                if rv32 {
+                    return Outcome::Unimplemented { pc: env.pc, word };
+                }
+                env.step(|b| sem::amomaxu_d(b, rd, rs1, rs2, 0))
             }
             Insn::Xori => {
                 if rv32 {
@@ -912,7 +1106,8 @@ fn step_c(env: &mut BareEnv, w16: u16, rv32: bool) -> Option<Outcome> {
             }
             // c.fswsp (RV32)。c.sdsp と同符号化。
             (0b111, 0b10) => {
-                let rs2 = Fpr(creg5(w));
+                // CSS 形式。rs2 は bits[6:2]。
+                let rs2 = Fpr(crs2(w));
                 let off = c_swsp_uimm(w) as i64;
                 Some(env.step(|b| sem::c_fswsp_rv32(b, rs2, off)))
             }
@@ -1085,6 +1280,39 @@ fn c_swsp_uimm(w: u16) -> u32 {
     (((w >> 9) & 0xF) << 2) | (((w >> 7) & 3) << 6)
 }
 
+/// CL 形式の倍精度ロード・ストア即値（c.ld/c.sd 用）の uimm[7:3]。
+/// llvm-mc 単ビットプローブで突合済み。
+/// inst[12:10]=off[5:3]、inst[6:5]=off[7:6]。
+fn c_ld_uimm(w: u16) -> u32 {
+    let w = w as u32;
+    (((w >> 10) & 7) << 3) | (((w >> 5) & 3) << 6)
+}
+
+/// C.LDSP の uimm[8:3]。llvm-mc 単ビットプローブで突合済み。
+/// inst[12]=off[5]、inst[6:5]=off[4:3]、inst[4:2]=off[8:6]。
+/// inst[7] は rd の一部でありオフセットに含めない。
+fn c_ldsp_uimm(w: u16) -> u32 {
+    let w = w as u32;
+    (((w >> 5) & 1) << 3)
+        | (((w >> 6) & 1) << 4)
+        | (((w >> 12) & 1) << 5)
+        | (((w >> 2) & 1) << 6)
+        | (((w >> 3) & 1) << 7)
+        | (((w >> 4) & 1) << 8)
+}
+
+/// C.SDSP の uimm[8:3]。llvm-mc 単ビットプローブで突合済み。
+/// inst[12:10]=off[5:3]、inst[9:7]=off[8:6]。
+fn c_sdsp_uimm(w: u16) -> u32 {
+    let w = w as u32;
+    (((w >> 10) & 1) << 3)
+        | (((w >> 11) & 1) << 4)
+        | (((w >> 12) & 1) << 5)
+        | (((w >> 7) & 1) << 6)
+        | (((w >> 8) & 1) << 7)
+        | (((w >> 9) & 1) << 8)
+}
+
 /// 16ビット命令を実行する。Ok は実行して継続、Err は退出する。
 fn run_c(
     env: &mut BareEnv,
@@ -1115,7 +1343,11 @@ fn run_c(
             let rd = Fpr(crd3(w));
             let rs1 = Gpr(crs1(w));
             let off = c_lw_uimm(w) as i64;
-            env.step(|b| sem::c_flw(b, rd, rs1, off))
+            if rv32 {
+                env.step(|b| sem::c_flw_rv32(b, rd, rs1, off))
+            } else {
+                env.step(|b| sem::c_flw(b, rd, rs1, off))
+            }
         }
         Insn::CSw => {
             let rs1 = Gpr(crs1(w));
@@ -1131,7 +1363,69 @@ fn run_c(
             let rs1 = Gpr(crs1(w));
             let rs2 = Fpr(crd3(w));
             let off = c_lw_uimm(w) as i64;
-            env.step(|b| sem::c_fsw(b, rs1, rs2, off))
+            if rv32 {
+                env.step(|b| sem::c_fsw_rv32(b, rs1, rs2, off))
+            } else {
+                env.step(|b| sem::c_fsw(b, rs1, rs2, off))
+            }
+        }
+        Insn::CFld => {
+            let rd = Fpr(crd3(w));
+            let rs1 = Gpr(crs1(w));
+            let off = c_ld_uimm(w) as i64;
+            if rv32 {
+                env.step(|b| sem::c_fld_rv32(b, rd, rs1, off))
+            } else {
+                env.step(|b| sem::c_fld(b, rd, rs1, off))
+            }
+        }
+        Insn::CFsd => {
+            let rs1 = Gpr(crs1(w));
+            let rs2 = Fpr(crd3(w));
+            let off = c_ld_uimm(w) as i64;
+            if rv32 {
+                env.step(|b| sem::c_fsd_rv32(b, rs1, rs2, off))
+            } else {
+                env.step(|b| sem::c_fsd(b, rs1, rs2, off))
+            }
+        }
+        Insn::CFlwsp => {
+            let rd = Fpr(creg5(w));
+            let off = c_lwsp_uimm(w) as i64;
+            if rv32 {
+                env.step(|b| sem::c_flwsp_rv32(b, rd, off))
+            } else {
+                env.step(|b| sem::c_flwsp(b, rd, off))
+            }
+        }
+        Insn::CFswsp => {
+            // CSS 形式。rs2 は bits[6:2]（CI の rd とは位置が違う）。
+            let rs2 = Fpr(crs2(w));
+            let off = c_swsp_uimm(w) as i64;
+            if rv32 {
+                env.step(|b| sem::c_fswsp_rv32(b, rs2, off))
+            } else {
+                env.step(|b| sem::c_fswsp(b, rs2, off))
+            }
+        }
+        Insn::CFldsp => {
+            let rd = Fpr(creg5(w));
+            let off = c_ldsp_uimm(w) as i64;
+            if rv32 {
+                env.step(|b| sem::c_fldsp_rv32(b, rd, off))
+            } else {
+                env.step(|b| sem::c_fldsp(b, rd, off))
+            }
+        }
+        Insn::CFsdsp => {
+            // CSS 形式。rs2 は bits[6:2]。
+            let rs2 = Fpr(crs2(w));
+            let off = c_sdsp_uimm(w) as i64;
+            if rv32 {
+                env.step(|b| sem::c_fsdsp_rv32(b, rs2, off))
+            } else {
+                env.step(|b| sem::c_fsdsp(b, rs2, off))
+            }
         }
         Insn::CLd => {
             if rv32 {
@@ -1139,8 +1433,7 @@ fn run_c(
             }
             let rd = Gpr(crd3(w));
             let rs1 = Gpr(crs1(w));
-            // CL の倍精度 uimm[7:3]。
-            let off = ((((word >> 10) & 7) << 3) | (((word >> 5) & 3) << 6)) as i64;
+            let off = c_ld_uimm(w) as i64;
             env.step(|b| sem::c_ld(b, rd, rs1, off))
         }
         Insn::CSd => {
@@ -1149,7 +1442,7 @@ fn run_c(
             }
             let rs1 = Gpr(crs1(w));
             let rs2 = Gpr(crd3(w));
-            let off = ((((word >> 10) & 7) << 3) | (((word >> 5) & 3) << 6)) as i64;
+            let off = c_ld_uimm(w) as i64;
             env.step(|b| sem::c_sd(b, rs1, rs2, off))
         }
         Insn::CAddi => {
@@ -1248,14 +1541,12 @@ fn run_c(
                 return Err(Outcome::Unimplemented { pc: env.pc, word });
             }
             let rd = Gpr(creg5(w));
-            // C.LDSP の uimm[8:3]。
-            let off = ((((word >> 5) & 7) << 3)
-                | (((word >> 12) & 1) << 8)
-                | (((word >> 2) & 3) << 6)) as i64;
+            let off = c_ldsp_uimm(w) as i64;
             env.step(|b| sem::c_ldsp(b, rd, off))
         }
         Insn::CSwsp => {
-            let rs2 = Gpr(creg5(w));
+            // CSS 形式。rs2 は bits[6:2]。
+            let rs2 = Gpr(crs2(w));
             let off = c_swsp_uimm(w) as i64;
             if rv32 {
                 env.step(|b| sem::c_swsp_rv32(b, rs2, off))
@@ -1267,8 +1558,9 @@ fn run_c(
             if rv32 {
                 return Err(Outcome::Unimplemented { pc: env.pc, word });
             }
-            let rs2 = Gpr(creg5(w));
-            let off = ((((word >> 7) & 7) << 3) | (((word >> 10) & 7) << 6)) as i64;
+            // CSS 形式。rs2 は bits[6:2]。
+            let rs2 = Gpr(crs2(w));
+            let off = c_sdsp_uimm(w) as i64;
             env.step(|b| sem::c_sdsp(b, rs2, off))
         }
         Insn::CSrli => {
@@ -1452,8 +1744,16 @@ fn check_rv32f(name: &str) {
     check_one_in("rv32uf", name);
 }
 
+fn check_rv32d(name: &str) {
+    check_one_in("rv32ud", name);
+}
+
 fn check_rv32c(name: &str) {
     check_one_in("rv32uc", name);
+}
+
+fn check_rv32a(name: &str) {
+    check_one_in("rv32ua", name);
 }
 
 fn check_um(name: &str) {
@@ -1466,6 +1766,14 @@ fn check_uf(name: &str) {
 
 fn check_ud(name: &str) {
     check_one_in("rv64ud", name);
+}
+
+fn check_uc(name: &str) {
+    check_one_in("rv64uc", name);
+}
+
+fn check_ua(name: &str) {
+    check_one_in("rv64ua", name);
 }
 
 #[test]
@@ -2023,4 +2331,398 @@ fn rv32uf_p_recoding() {
 #[test]
 fn rv32uc_p_rvc() {
     check_rv32c("rvc");
+}
+
+#[test]
+fn rv32ud_p_fadd() {
+    check_rv32d("fadd");
+}
+
+#[test]
+fn rv32ud_p_fclass() {
+    check_rv32d("fclass");
+}
+
+#[test]
+fn rv32ud_p_fcmp() {
+    check_rv32d("fcmp");
+}
+
+#[test]
+fn rv32ud_p_fcvt() {
+    check_rv32d("fcvt");
+}
+
+#[test]
+fn rv32ud_p_fcvt_w() {
+    check_rv32d("fcvt_w");
+}
+
+#[test]
+fn rv32ud_p_fdiv() {
+    check_rv32d("fdiv");
+}
+
+#[test]
+fn rv32ud_p_fmadd() {
+    check_rv32d("fmadd");
+}
+
+#[test]
+fn rv32ud_p_fmin() {
+    check_rv32d("fmin");
+}
+
+#[test]
+fn rv32ud_p_ldst() {
+    check_rv32d("ldst");
+}
+
+#[test]
+fn rv32ud_p_move() {
+    check_rv32d("move");
+}
+
+#[test]
+fn rv32ud_p_recoding() {
+    check_rv32d("recoding");
+}
+
+#[test]
+fn rv64uc_p_rvc() {
+    check_uc("rvc");
+}
+
+#[test]
+fn rv32ua_p_amoadd_w() {
+    check_rv32a("amoadd_w");
+}
+
+#[test]
+fn rv32ua_p_amoand_w() {
+    check_rv32a("amoand_w");
+}
+
+#[test]
+fn rv32ua_p_amomax_w() {
+    check_rv32a("amomax_w");
+}
+
+#[test]
+fn rv32ua_p_amomaxu_w() {
+    check_rv32a("amomaxu_w");
+}
+
+#[test]
+fn rv32ua_p_amomin_w() {
+    check_rv32a("amomin_w");
+}
+
+#[test]
+fn rv32ua_p_amominu_w() {
+    check_rv32a("amominu_w");
+}
+
+#[test]
+fn rv32ua_p_amoor_w() {
+    check_rv32a("amoor_w");
+}
+
+#[test]
+fn rv32ua_p_amoswap_w() {
+    check_rv32a("amoswap_w");
+}
+
+#[test]
+fn rv32ua_p_amoxor_w() {
+    check_rv32a("amoxor_w");
+}
+
+#[test]
+fn rv32ua_p_lrsc() {
+    check_rv32a("lrsc");
+}
+
+#[test]
+fn rv64ua_p_amoadd_w() {
+    check_ua("amoadd_w");
+}
+
+#[test]
+fn rv64ua_p_amoadd_d() {
+    check_ua("amoadd_d");
+}
+
+#[test]
+fn rv64ua_p_amoand_w() {
+    check_ua("amoand_w");
+}
+
+#[test]
+fn rv64ua_p_amoand_d() {
+    check_ua("amoand_d");
+}
+
+#[test]
+fn rv64ua_p_amomax_w() {
+    check_ua("amomax_w");
+}
+
+#[test]
+fn rv64ua_p_amomax_d() {
+    check_ua("amomax_d");
+}
+
+#[test]
+fn rv64ua_p_amomaxu_w() {
+    check_ua("amomaxu_w");
+}
+
+#[test]
+fn rv64ua_p_amomaxu_d() {
+    check_ua("amomaxu_d");
+}
+
+#[test]
+fn rv64ua_p_amomin_w() {
+    check_ua("amomin_w");
+}
+
+#[test]
+fn rv64ua_p_amomin_d() {
+    check_ua("amomin_d");
+}
+
+#[test]
+fn rv64ua_p_amominu_w() {
+    check_ua("amominu_w");
+}
+
+#[test]
+fn rv64ua_p_amominu_d() {
+    check_ua("amominu_d");
+}
+
+#[test]
+fn rv64ua_p_amoor_w() {
+    check_ua("amoor_w");
+}
+
+#[test]
+fn rv64ua_p_amoor_d() {
+    check_ua("amoor_d");
+}
+
+#[test]
+fn rv64ua_p_amoswap_w() {
+    check_ua("amoswap_w");
+}
+
+#[test]
+fn rv64ua_p_amoswap_d() {
+    check_ua("amoswap_d");
+}
+
+#[test]
+fn rv64ua_p_amoxor_w() {
+    check_ua("amoxor_w");
+}
+
+#[test]
+fn rv64ua_p_amoxor_d() {
+    check_ua("amoxor_d");
+}
+
+#[test]
+fn rv64ua_p_lrsc() {
+    check_ua("lrsc");
+}
+
+// rv64ui 残件（W接尾辞・LD/SD・LWU・残りのI命令）。
+// fence_i（非実行セグメントへの自己書き換え）と
+// ma_data（非整列アクセス）は対象外（ロードマップ注記）。
+
+#[test]
+fn rv64ui_p_addiw() {
+    check_one("addiw");
+}
+
+#[test]
+fn rv64ui_p_addw() {
+    check_one("addw");
+}
+
+#[test]
+fn rv64ui_p_andi() {
+    check_one("andi");
+}
+
+#[test]
+fn rv64ui_p_bge() {
+    check_one("bge");
+}
+
+#[test]
+fn rv64ui_p_bgeu() {
+    check_one("bgeu");
+}
+
+#[test]
+fn rv64ui_p_bltu() {
+    check_one("bltu");
+}
+
+#[test]
+fn rv64ui_p_lbu() {
+    check_one("lbu");
+}
+
+#[test]
+fn rv64ui_p_ld() {
+    check_one("ld");
+}
+
+#[test]
+fn rv64ui_p_ld_st() {
+    check_one("ld_st");
+}
+
+#[test]
+fn rv64ui_p_lh() {
+    check_one("lh");
+}
+
+#[test]
+fn rv64ui_p_lhu() {
+    check_one("lhu");
+}
+
+#[test]
+fn rv64ui_p_lwu() {
+    check_one("lwu");
+}
+
+#[test]
+fn rv64ui_p_ori() {
+    check_one("ori");
+}
+
+#[test]
+fn rv64ui_p_sb() {
+    check_one("sb");
+}
+
+#[test]
+fn rv64ui_p_sd() {
+    check_one("sd");
+}
+
+#[test]
+fn rv64ui_p_simple() {
+    check_one("simple");
+}
+
+#[test]
+fn rv64ui_p_slli() {
+    check_one("slli");
+}
+
+#[test]
+fn rv64ui_p_slliw() {
+    check_one("slliw");
+}
+
+#[test]
+fn rv64ui_p_sllw() {
+    check_one("sllw");
+}
+
+#[test]
+fn rv64ui_p_slti() {
+    check_one("slti");
+}
+
+#[test]
+fn rv64ui_p_sltiu() {
+    check_one("sltiu");
+}
+
+#[test]
+fn rv64ui_p_srl() {
+    check_one("srl");
+}
+
+#[test]
+fn rv64ui_p_srliw() {
+    check_one("srliw");
+}
+
+#[test]
+fn rv64ui_p_srlw() {
+    check_one("srlw");
+}
+
+#[test]
+fn rv64ui_p_st_ld() {
+    check_one("st_ld");
+}
+
+#[test]
+fn rv64ui_p_subw() {
+    check_one("subw");
+}
+
+#[test]
+fn rv64ui_p_xori() {
+    check_one("xori");
+}
+
+#[test]
+fn rv64ui_p_sraiw() {
+    check_one("sraiw");
+}
+
+#[test]
+fn rv64ui_p_sraw() {
+    check_one("sraw");
+}
+
+#[test]
+fn rv64um_p_divuw() {
+    check_um("divuw");
+}
+
+#[test]
+fn rv64um_p_divw() {
+    check_um("divw");
+}
+
+#[test]
+fn rv64um_p_mulhsu() {
+    check_um("mulhsu");
+}
+
+#[test]
+fn rv64um_p_mulhu() {
+    check_um("mulhu");
+}
+
+#[test]
+fn rv64um_p_mulw() {
+    check_um("mulw");
+}
+
+#[test]
+fn rv64um_p_remuw() {
+    check_um("remuw");
+}
+
+#[test]
+fn rv64um_p_remw() {
+    check_um("remw");
+}
+
+#[test]
+fn rv64um_p_remu() {
+    check_um("remu");
 }

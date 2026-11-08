@@ -67,6 +67,20 @@ mod tests {
     }
 
     #[test]
+    fn state_layout_pinned() {
+        // sem.rs の StateRef と runner の offset_of が依存する配置を固定する。
+        // 末尾への追加は許すが、既存項目の移動は許さない。
+        assert_eq!(core::mem::offset_of!(CpuState, x), 0);
+        assert_eq!(core::mem::offset_of!(CpuState, pc), 32 * 8);
+        assert_eq!(core::mem::offset_of!(CpuState, csr), 32 * 8 + 8);
+        assert_eq!(core::mem::offset_of!(CpuState, f), 32 * 8 + 8 + 4096 * 8);
+        assert_eq!(
+            core::mem::offset_of!(CpuState, priv_level),
+            32 * 8 + 8 + 4096 * 8 + 32 * 8
+        );
+    }
+
+    #[test]
     fn insn_count() {
         // RV64I 53 件＋M 13 件＋CSR 6 件＋A 22 件＋F 26 件＋D 28 件＋C 40 件＋FMA 8 件。
         assert_eq!(INSNS.len(), 196);
