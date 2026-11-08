@@ -28,6 +28,7 @@ members = [
     "guests/mips",
     "guests/x86",
     "guests/wasm",
+    "guests/hexagon",
 ]
 resolver = "2"
 
