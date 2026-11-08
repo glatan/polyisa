@@ -354,8 +354,8 @@ pub fn build_model() -> polyisa_isadl::Model {
             timing: timing.to_string(),
         });
     }
-    // RV32のC.JALはRV64のC.ADDIWと同じ符号化。whenで区別する（将来の
-    // モデル対応デコード用）。現段階の線形デコーダは先勝ちでC.ADDIWを返す。
+    // RV32のC.JALはRV64のC.ADDIWと同じ符号化。whenで区別し、
+    // 生成デコーダ（decode_model）がモデルで解決する（ADR-0006）。
     // Ref: SPEC-RISCV-UNPRIV (20250508) §C.
     m.insns.push(Insn {
         name: "c_jal".to_string(),
@@ -444,8 +444,8 @@ pub fn build_model() -> polyisa_isadl::Model {
             timing: timing.to_string(),
         });
     }
-    // RV64限定命令にrv64注記を付ける。デコーダは現段階ではwhenを評価しない
-    // （解決はデコード時という設計の将来対応）。検証の一意性には影響しない。
+    // RV64限定命令にrv64注記を付ける。生成デコーダ（decode_model）が
+    // モデルで解決する（ADR-0006）。
     // Ref: SPEC-RISCV-UNPRIV (20250508).
     for insn in m.insns.iter_mut() {
         let rv64_only = matches!(
