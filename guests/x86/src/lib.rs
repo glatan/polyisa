@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! x86 最小のゲスト ISA。段階4の最小であり、可変長デコードを確かめる。
 //!
-//! i386 の EAX 系6件のみ持つ。ModRM/SIB フック・EFLAGS・セグメント・
-//! 64ビット・x87・SSE は本格実装で足す。
+//! i386 の EAX 系8件のみ持つ。ModRM/SIB フック・EFLAGS・セグメント・
+//! 64ビット・x87・SSE は本格実装で足す。SYSCALL/CPUID は最小形のみ持つ。
 
 #![forbid(unsafe_code)]
 
@@ -50,8 +50,8 @@ mod tests {
 
     #[test]
     fn insn_count() {
-        // 試作の整数6件。
-        assert_eq!(INSNS.len(), 6);
+        // 試作の整数8件。
+        assert_eq!(INSNS.len(), 8);
     }
 
     #[test]
@@ -68,6 +68,9 @@ mod tests {
         // 16ビット：opcode + disp8。
         assert_eq!(decode(0xEBFE, 16), Some(Insn::Jmp8));
         assert_eq!(decode(0xEB00, 16), Some(Insn::Jmp8));
+        // 16ビット2バイトオペコード：SYSCALL (0F 05)、CPUID (0F A2)。
+        assert_eq!(decode(0x0F05, 16), Some(Insn::Syscall));
+        assert_eq!(decode(0x0FA2, 16), Some(Insn::Cpuid));
         // 長さ違いは一致しない。
         assert_eq!(decode(0x90, 16), None);
         assert_eq!(decode(0xFFFF_FFFF, 32), None);
