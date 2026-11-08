@@ -272,6 +272,7 @@ pub trait Backend {
     fn fadd<F: Width>(&mut self, a: Self::V<F>, b: Self::V<F>) -> Self::V<F>;
     fn fsub<F: Width>(&mut self, a: Self::V<F>, b: Self::V<F>) -> Self::V<F>;
     fn fmul<F: Width>(&mut self, a: Self::V<F>, b: Self::V<F>) -> Self::V<F>;
+    fn fmadd<F: Width>(&mut self, a: Self::V<F>, b: Self::V<F>, c: Self::V<F>) -> Self::V<F>;
     fn fdiv<F: Width>(&mut self, a: Self::V<F>, b: Self::V<F>) -> Self::V<F>;
     fn fsqrt<F: Width>(&mut self, a: Self::V<F>) -> Self::V<F>;
     fn fmin<F: Width>(&mut self, a: Self::V<F>, b: Self::V<F>) -> Self::V<F>;
@@ -283,15 +284,17 @@ pub trait Backend {
     fn flt<F: Width>(&mut self, a: Self::V<F>, b: Self::V<F>) -> Self::B;
     fn fle<F: Width>(&mut self, a: Self::V<F>, b: Self::V<F>) -> Self::B;
     fn fclass<F: Width>(&mut self, a: Self::V<F>) -> Self::V<W32>;
-    fn fcvt_s32<F: Width>(&mut self, a: Self::V<F>) -> Self::V<W32>;
-    fn fcvt_u32<F: Width>(&mut self, a: Self::V<F>) -> Self::V<W32>;
-    fn fcvt_s64<F: Width>(&mut self, a: Self::V<F>) -> Self::V<W64>;
-    fn fcvt_u64<F: Width>(&mut self, a: Self::V<F>) -> Self::V<W64>;
-    fn fcvt_from_s32<F: Width>(&mut self, a: Self::V<W32>) -> Self::V<F>;
-    fn fcvt_from_u32<F: Width>(&mut self, a: Self::V<W32>) -> Self::V<F>;
-    fn fcvt_from_s64<F: Width>(&mut self, a: Self::V<W64>) -> Self::V<F>;
-    fn fcvt_from_u64<F: Width>(&mut self, a: Self::V<W64>) -> Self::V<F>;
-    fn fcvt_ff<F: Width, T: Width>(&mut self, a: Self::V<F>) -> Self::V<T>;
+    fn fcvt_s32<F: Width>(&mut self, a: Self::V<F>, rm: u8) -> Self::V<W32>;
+    fn fcvt_u32<F: Width>(&mut self, a: Self::V<F>, rm: u8) -> Self::V<W32>;
+    fn fcvt_s64<F: Width>(&mut self, a: Self::V<F>, rm: u8) -> Self::V<W64>;
+    fn fcvt_u64<F: Width>(&mut self, a: Self::V<F>, rm: u8) -> Self::V<W64>;
+    fn fcvt_from_s32<F: Width>(&mut self, a: Self::V<W32>, rm: u8) -> Self::V<F>;
+    fn fcvt_from_u32<F: Width>(&mut self, a: Self::V<W32>, rm: u8) -> Self::V<F>;
+    fn fcvt_from_s64<F: Width>(&mut self, a: Self::V<W64>, rm: u8) -> Self::V<F>;
+    fn fcvt_from_u64<F: Width>(&mut self, a: Self::V<W64>, rm: u8) -> Self::V<F>;
+    fn fcvt_ff<F: Width, T: Width>(&mut self, a: Self::V<F>, rm: u8) -> Self::V<T>;
+    /// 蓄積した浮動小数点例外フラグを取り出す。読み出しでクリアする。
+    fn fp_flags(&mut self) -> u8;
     fn zext<F: Width, T: Width>(&mut self, a: Self::V<F>) -> Self::V<T>;
     fn sext<F: Width, T: Width>(&mut self, a: Self::V<F>) -> Self::V<T>;
     fn trunc<F: Width, T: Width>(&mut self, a: Self::V<F>) -> Self::V<T>;

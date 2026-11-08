@@ -639,14 +639,76 @@ fn csr_array() -> StateArray<W64> {
     StateArray::<W64>::from_layout(core::mem::offset_of!(CpuState, csr), 8)
 }
 
+/// fcsr（0x003）の下位 8 ビットが正本であり、frm（0x002）は
+/// その [7:5]、fflags（0x001）は [4:0] の別名である。
+/// 上位の予約ビットへの書き込みは捨てる。
 fn read_csr<B: Backend>(b: &mut B, csr: Csr) -> B::V<W64> {
-    let i = b.konst::<W32>(u32::from(csr.0));
-    b.get_indexed(csr_array(), i)
+    let three = b.konst::<W32>(3);
+    let fcsr: B::V<W64> = b.get_indexed(csr_array(), three);
+    match csr.0 {
+        0x001 => {
+            let m = b.konst::<W64>(0x1F);
+            b.and(fcsr, m)
+        }
+        0x002 => {
+            let n = b.konst::<W64>(5);
+            let s = b.shr_l(fcsr, n);
+            let m = b.konst::<W64>(7);
+            b.and(s, m)
+        }
+        0x003 => {
+            let m = b.konst::<W64>(0xFF);
+            b.and(fcsr, m)
+        }
+        _ => {
+            let i = b.konst::<W32>(u32::from(csr.0));
+            b.get_indexed(csr_array(), i)
+        }
+    }
 }
 
 fn write_csr<B: Backend>(b: &mut B, csr: Csr, v: B::V<W64>) {
-    let i = b.konst::<W32>(u32::from(csr.0));
-    b.set_indexed(csr_array(), i, v);
+    let three = b.konst::<W32>(3);
+    let master: B::V<W64> = b.get_indexed(csr_array(), three);
+    let e0 = b.konst::<W64>(0xE0);
+    let m1f = b.konst::<W64>(0x1F);
+    let m7 = b.konst::<W64>(7);
+    let n5 = b.konst::<W64>(5);
+    let w = match csr.0 {
+        0x001 => {
+            let a = b.and(master, e0);
+            let lo = b.and(v, m1f);
+            b.or(a, lo)
+        }
+        0x002 => {
+            let a = b.and(master, m1f);
+            let f = b.and(v, m7);
+            let s = b.shl(f, n5);
+            b.or(a, s)
+        }
+        0x003 => {
+            let m = b.konst::<W64>(0xFF);
+            b.and(v, m)
+        }
+        _ => v,
+    };
+    let i = b.konst::<W32>(match csr.0 {
+        0x001..=0x003 => 3,
+        n => u32::from(n),
+    });
+    b.set_indexed(csr_array(), i, w);
+}
+
+/// 蓄積したFP例外フラグをfcsr/fflagsに積む。signalingなFP演算の直後に呼ぶ。
+fn accrue_fp<B: Backend>(b: &mut B) {
+    let f = b.fp_flags();
+    if f == 0 {
+        return;
+    }
+    let cur = read_csr(b, Csr(0x003));
+    let bits = b.konst::<W64>(u64::from(f));
+    let nxt = b.or(cur, bits);
+    write_csr(b, Csr(0x003), nxt);
 }
 
 pub fn csrrw<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, csr: Csr) -> Flow<B> {
@@ -905,8 +967,23 @@ impl Fpr {
 }
 
 fn read_f<B: Backend>(b: &mut B, r: Fpr) -> B::V<F32> {
+    // 転送系（FSW/FMV.X.W）は素通し。下位32ビットを無視せず転送する。
     let w: B::V<W64> = b.get(r.state());
     b.trunc::<W64, F32>(w)
+}
+
+/// NaNボックス検査付き読み出し。転送以外の単精度演算で使う。
+/// 上位32ビットが全1でなければ正準NaNを返す（SPEC-RISCV-UNPRIV D章）。
+fn read_f_checked<B: Backend>(b: &mut B, r: Fpr) -> B::V<F32> {
+    let w: B::V<W64> = b.get(r.state());
+    let low = b.trunc::<W64, F32>(w);
+    let shift = b.konst::<W64>(32);
+    let hi64 = b.shr_l(w, shift);
+    let hi = b.trunc::<W64, W32>(hi64);
+    let all1 = b.konst::<W32>(0xffff_ffff);
+    let boxed = b.cmp(Cmp::Eq, hi, all1);
+    let canon = b.konst::<F32>(0x7fc0_0000);
+    b.select(boxed, low, canon)
 }
 
 /// 単精度の値を NaN ボックスして書く。
@@ -968,52 +1045,57 @@ pub fn fsw<B: Backend>(b: &mut B, rs1: Gpr, rs2: Fpr, oimm: i64) -> Flow<B> {
 
 /// FADD.S。
 pub fn fadd_s<B: Backend>(b: &mut B, rd: Fpr, rs1: Fpr, rs2: Fpr) -> Flow<B> {
-    let x = read_f(b, rs1);
-    let y = read_f(b, rs2);
+    let x = read_f_checked(b, rs1);
+    let y = read_f_checked(b, rs2);
     let s = b.fadd(x, y);
     write_f(b, rd, s);
+    accrue_fp(b);
     Ok(())
 }
 
 /// FSUB.S。
 pub fn fsub_s<B: Backend>(b: &mut B, rd: Fpr, rs1: Fpr, rs2: Fpr) -> Flow<B> {
-    let x = read_f(b, rs1);
-    let y = read_f(b, rs2);
+    let x = read_f_checked(b, rs1);
+    let y = read_f_checked(b, rs2);
     let s = b.fsub(x, y);
     write_f(b, rd, s);
+    accrue_fp(b);
     Ok(())
 }
 
 /// FMUL.S。
 pub fn fmul_s<B: Backend>(b: &mut B, rd: Fpr, rs1: Fpr, rs2: Fpr) -> Flow<B> {
-    let x = read_f(b, rs1);
-    let y = read_f(b, rs2);
+    let x = read_f_checked(b, rs1);
+    let y = read_f_checked(b, rs2);
     let s = b.fmul(x, y);
     write_f(b, rd, s);
+    accrue_fp(b);
     Ok(())
 }
 
 /// FDIV.S。
 pub fn fdiv_s<B: Backend>(b: &mut B, rd: Fpr, rs1: Fpr, rs2: Fpr) -> Flow<B> {
-    let x = read_f(b, rs1);
-    let y = read_f(b, rs2);
+    let x = read_f_checked(b, rs1);
+    let y = read_f_checked(b, rs2);
     let s = b.fdiv(x, y);
     write_f(b, rd, s);
+    accrue_fp(b);
     Ok(())
 }
 
 /// FSQRT.S。
 pub fn fsqrt_s<B: Backend>(b: &mut B, rd: Fpr, rs1: Fpr) -> Flow<B> {
-    let x = read_f(b, rs1);
+    let x = read_f_checked(b, rs1);
     let s = b.fsqrt(x);
     write_f(b, rd, s);
+    accrue_fp(b);
     Ok(())
 }
 
 /// FSGNJ.S。
 pub fn fsgnj_s<B: Backend>(b: &mut B, rd: Fpr, rs1: Fpr, rs2: Fpr) -> Flow<B> {
-    let x = read_f(b, rs1);
-    let y = read_f(b, rs2);
+    let x = read_f_checked(b, rs1);
+    let y = read_f_checked(b, rs2);
     let __v = b.fsgnj(x, y);
     write_f(b, rd, __v);
     Ok(())
@@ -1021,8 +1103,8 @@ pub fn fsgnj_s<B: Backend>(b: &mut B, rd: Fpr, rs1: Fpr, rs2: Fpr) -> Flow<B> {
 
 /// FSGNJN.S。
 pub fn fsgnjn_s<B: Backend>(b: &mut B, rd: Fpr, rs1: Fpr, rs2: Fpr) -> Flow<B> {
-    let x = read_f(b, rs1);
-    let y = read_f(b, rs2);
+    let x = read_f_checked(b, rs1);
+    let y = read_f_checked(b, rs2);
     let __v = b.fsgnjn(x, y);
     write_f(b, rd, __v);
     Ok(())
@@ -1030,8 +1112,8 @@ pub fn fsgnjn_s<B: Backend>(b: &mut B, rd: Fpr, rs1: Fpr, rs2: Fpr) -> Flow<B> {
 
 /// FSGNJX.S。
 pub fn fsgnjx_s<B: Backend>(b: &mut B, rd: Fpr, rs1: Fpr, rs2: Fpr) -> Flow<B> {
-    let x = read_f(b, rs1);
-    let y = read_f(b, rs2);
+    let x = read_f_checked(b, rs1);
+    let y = read_f_checked(b, rs2);
     let __v = b.fsgnjx(x, y);
     write_f(b, rd, __v);
     Ok(())
@@ -1039,19 +1121,21 @@ pub fn fsgnjx_s<B: Backend>(b: &mut B, rd: Fpr, rs1: Fpr, rs2: Fpr) -> Flow<B> {
 
 /// FMIN.S。
 pub fn fmin_s<B: Backend>(b: &mut B, rd: Fpr, rs1: Fpr, rs2: Fpr) -> Flow<B> {
-    let x = read_f(b, rs1);
-    let y = read_f(b, rs2);
+    let x = read_f_checked(b, rs1);
+    let y = read_f_checked(b, rs2);
     let __v = b.fmin(x, y);
     write_f(b, rd, __v);
+    accrue_fp(b);
     Ok(())
 }
 
 /// FMAX.S。
 pub fn fmax_s<B: Backend>(b: &mut B, rd: Fpr, rs1: Fpr, rs2: Fpr) -> Flow<B> {
-    let x = read_f(b, rs1);
-    let y = read_f(b, rs2);
+    let x = read_f_checked(b, rs1);
+    let y = read_f_checked(b, rs2);
     let __v = b.fmax(x, y);
     write_f(b, rd, __v);
+    accrue_fp(b);
     Ok(())
 }
 
@@ -1064,34 +1148,37 @@ fn write_cmp<B: Backend>(b: &mut B, rd: Gpr, c: B::B) {
 
 /// FEQ.S。
 pub fn feq_s<B: Backend>(b: &mut B, rd: Gpr, rs1: Fpr, rs2: Fpr) -> Flow<B> {
-    let x = read_f(b, rs1);
-    let y = read_f(b, rs2);
+    let x = read_f_checked(b, rs1);
+    let y = read_f_checked(b, rs2);
     let c = b.feq(x, y);
     write_cmp(b, rd, c);
+    accrue_fp(b);
     Ok(())
 }
 
 /// FLT.S。
 pub fn flt_s<B: Backend>(b: &mut B, rd: Gpr, rs1: Fpr, rs2: Fpr) -> Flow<B> {
-    let x = read_f(b, rs1);
-    let y = read_f(b, rs2);
+    let x = read_f_checked(b, rs1);
+    let y = read_f_checked(b, rs2);
     let c = b.flt(x, y);
     write_cmp(b, rd, c);
+    accrue_fp(b);
     Ok(())
 }
 
 /// FLE.S。
 pub fn fle_s<B: Backend>(b: &mut B, rd: Gpr, rs1: Fpr, rs2: Fpr) -> Flow<B> {
-    let x = read_f(b, rs1);
-    let y = read_f(b, rs2);
+    let x = read_f_checked(b, rs1);
+    let y = read_f_checked(b, rs2);
     let c = b.fle(x, y);
     write_cmp(b, rd, c);
+    accrue_fp(b);
     Ok(())
 }
 
 /// FCLASS.S。分類ビットを整数レジスタに書く。
 pub fn fclass_s<B: Backend>(b: &mut B, rd: Gpr, rs1: Fpr) -> Flow<B> {
-    let x = read_f(b, rs1);
+    let x = read_f_checked(b, rs1);
     let v = b.fclass(x);
     let w = b.zext::<W32, W64>(v);
     write(b, rd, w);
@@ -1099,70 +1186,78 @@ pub fn fclass_s<B: Backend>(b: &mut B, rd: Gpr, rs1: Fpr) -> Flow<B> {
 }
 
 /// FCVT.W.S。範囲外は飽和する。
-pub fn fcvt_w_s<B: Backend>(b: &mut B, rd: Gpr, rs1: Fpr) -> Flow<B> {
-    let x = read_f(b, rs1);
-    let v = b.fcvt_s32(x);
+pub fn fcvt_w_s<B: Backend>(b: &mut B, rd: Gpr, rs1: Fpr, rm: u8) -> Flow<B> {
+    let x = read_f_checked(b, rs1);
+    let v = b.fcvt_s32(x, rm);
     let w = b.sext::<W32, W64>(v);
     write(b, rd, w);
+    accrue_fp(b);
     Ok(())
 }
 
 /// FCVT.WU.S。
-pub fn fcvt_wu_s<B: Backend>(b: &mut B, rd: Gpr, rs1: Fpr) -> Flow<B> {
-    let x = read_f(b, rs1);
-    let v = b.fcvt_u32(x);
-    let w = b.zext::<W32, W64>(v);
+pub fn fcvt_wu_s<B: Backend>(b: &mut B, rd: Gpr, rs1: Fpr, rm: u8) -> Flow<B> {
+    let x = read_f_checked(b, rs1);
+    let v = b.fcvt_u32(x, rm);
+    let w = b.sext::<W32, W64>(v);
     write(b, rd, w);
+    accrue_fp(b);
     Ok(())
 }
 
 /// FCVT.L.S。
-pub fn fcvt_l_s<B: Backend>(b: &mut B, rd: Gpr, rs1: Fpr) -> Flow<B> {
-    let x = read_f(b, rs1);
-    let s = b.fcvt_s64(x);
+pub fn fcvt_l_s<B: Backend>(b: &mut B, rd: Gpr, rs1: Fpr, rm: u8) -> Flow<B> {
+    let x = read_f_checked(b, rs1);
+    let s = b.fcvt_s64(x, rm);
     write(b, rd, s);
+    accrue_fp(b);
     Ok(())
 }
 
 /// FCVT.LU.S。
-pub fn fcvt_lu_s<B: Backend>(b: &mut B, rd: Gpr, rs1: Fpr) -> Flow<B> {
-    let x = read_f(b, rs1);
-    let s = b.fcvt_u64(x);
+pub fn fcvt_lu_s<B: Backend>(b: &mut B, rd: Gpr, rs1: Fpr, rm: u8) -> Flow<B> {
+    let x = read_f_checked(b, rs1);
+    let s = b.fcvt_u64(x, rm);
     write(b, rd, s);
+    accrue_fp(b);
     Ok(())
 }
 
 /// FCVT.S.W。
-pub fn fcvt_s_w<B: Backend>(b: &mut B, rd: Fpr, rs1: Gpr) -> Flow<B> {
+pub fn fcvt_s_w<B: Backend>(b: &mut B, rd: Fpr, rs1: Gpr, rm: u8) -> Flow<B> {
     let raw = read(b, rs1);
     let x = b.trunc::<W64, W32>(raw);
-    let s = b.fcvt_from_s32(x);
+    let s = b.fcvt_from_s32(x, rm);
     write_f(b, rd, s);
+    accrue_fp(b);
     Ok(())
 }
 
 /// FCVT.S.WU。
-pub fn fcvt_s_wu<B: Backend>(b: &mut B, rd: Fpr, rs1: Gpr) -> Flow<B> {
+pub fn fcvt_s_wu<B: Backend>(b: &mut B, rd: Fpr, rs1: Gpr, rm: u8) -> Flow<B> {
     let raw = read(b, rs1);
     let x = b.trunc::<W64, W32>(raw);
-    let s = b.fcvt_from_u32(x);
+    let s = b.fcvt_from_u32(x, rm);
     write_f(b, rd, s);
+    accrue_fp(b);
     Ok(())
 }
 
 /// FCVT.S.L。
-pub fn fcvt_s_l<B: Backend>(b: &mut B, rd: Fpr, rs1: Gpr) -> Flow<B> {
+pub fn fcvt_s_l<B: Backend>(b: &mut B, rd: Fpr, rs1: Gpr, rm: u8) -> Flow<B> {
     let x = read(b, rs1);
-    let s = b.fcvt_from_s64(x);
+    let s = b.fcvt_from_s64(x, rm);
     write_f(b, rd, s);
+    accrue_fp(b);
     Ok(())
 }
 
 /// FCVT.S.LU。
-pub fn fcvt_s_lu<B: Backend>(b: &mut B, rd: Fpr, rs1: Gpr) -> Flow<B> {
+pub fn fcvt_s_lu<B: Backend>(b: &mut B, rd: Fpr, rs1: Gpr, rm: u8) -> Flow<B> {
     let x = read(b, rs1);
-    let s = b.fcvt_from_u64(x);
+    let s = b.fcvt_from_u64(x, rm);
     write_f(b, rd, s);
+    accrue_fp(b);
     Ok(())
 }
 
@@ -1217,6 +1312,7 @@ pub fn fadd_d<B: Backend>(b: &mut B, rd: Fpr, rs1: Fpr, rs2: Fpr) -> Flow<B> {
     let y = read_fd(b, rs2);
     let s = b.fadd(x, y);
     write_fd(b, rd, s);
+    accrue_fp(b);
     Ok(())
 }
 
@@ -1226,6 +1322,7 @@ pub fn fsub_d<B: Backend>(b: &mut B, rd: Fpr, rs1: Fpr, rs2: Fpr) -> Flow<B> {
     let y = read_fd(b, rs2);
     let s = b.fsub(x, y);
     write_fd(b, rd, s);
+    accrue_fp(b);
     Ok(())
 }
 
@@ -1235,6 +1332,103 @@ pub fn fmul_d<B: Backend>(b: &mut B, rd: Fpr, rs1: Fpr, rs2: Fpr) -> Flow<B> {
     let y = read_fd(b, rs2);
     let s = b.fmul(x, y);
     write_fd(b, rd, s);
+    accrue_fp(b);
+    Ok(())
+}
+
+/// FMADD.S。積和融合（単精度、単一丸め）。
+pub fn fmadd_s<B: Backend>(b: &mut B, rd: Fpr, rs1: Fpr, rs2: Fpr, rs3: Fpr) -> Flow<B> {
+    let x = read_f_checked(b, rs1);
+    let y = read_f_checked(b, rs2);
+    let z = read_f_checked(b, rs3);
+    let s = b.fmadd(x, y, z);
+    write_f(b, rd, s);
+    accrue_fp(b);
+    Ok(())
+}
+
+/// FMSUB.S。`rs1*rs2-rs3` の融合演算。
+pub fn fmsub_s<B: Backend>(b: &mut B, rd: Fpr, rs1: Fpr, rs2: Fpr, rs3: Fpr) -> Flow<B> {
+    let x = read_f_checked(b, rs1);
+    let y = read_f_checked(b, rs2);
+    let z = read_f_checked(b, rs3);
+    let nz = b.fsgnjn(z, z);
+    let s = b.fmadd(x, y, nz);
+    write_f(b, rd, s);
+    accrue_fp(b);
+    Ok(())
+}
+
+/// FNMSUB.S。`-(rs1*rs2)+rs3` の融合演算。
+pub fn fnmsub_s<B: Backend>(b: &mut B, rd: Fpr, rs1: Fpr, rs2: Fpr, rs3: Fpr) -> Flow<B> {
+    let x = read_f_checked(b, rs1);
+    let y = read_f_checked(b, rs2);
+    let z = read_f_checked(b, rs3);
+    let nx = b.fsgnjn(x, x);
+    let s = b.fmadd(nx, y, z);
+    write_f(b, rd, s);
+    accrue_fp(b);
+    Ok(())
+}
+
+/// FNMADD.S。`-(rs1*rs2)-rs3` の融合演算。
+pub fn fnmadd_s<B: Backend>(b: &mut B, rd: Fpr, rs1: Fpr, rs2: Fpr, rs3: Fpr) -> Flow<B> {
+    let x = read_f_checked(b, rs1);
+    let y = read_f_checked(b, rs2);
+    let z = read_f_checked(b, rs3);
+    let nx = b.fsgnjn(x, x);
+    let nz = b.fsgnjn(z, z);
+    let s = b.fmadd(nx, y, nz);
+    write_f(b, rd, s);
+    accrue_fp(b);
+    Ok(())
+}
+
+/// FMADD.D。積和融合（倍精度、単一丸め）。
+pub fn fmadd_d<B: Backend>(b: &mut B, rd: Fpr, rs1: Fpr, rs2: Fpr, rs3: Fpr) -> Flow<B> {
+    let x = read_fd(b, rs1);
+    let y = read_fd(b, rs2);
+    let z = read_fd(b, rs3);
+    let s = b.fmadd(x, y, z);
+    write_fd(b, rd, s);
+    accrue_fp(b);
+    Ok(())
+}
+
+/// FMSUB.D。
+pub fn fmsub_d<B: Backend>(b: &mut B, rd: Fpr, rs1: Fpr, rs2: Fpr, rs3: Fpr) -> Flow<B> {
+    let x = read_fd(b, rs1);
+    let y = read_fd(b, rs2);
+    let z = read_fd(b, rs3);
+    let nz = b.fsgnjn(z, z);
+    let s = b.fmadd(x, y, nz);
+    write_fd(b, rd, s);
+    accrue_fp(b);
+    Ok(())
+}
+
+/// FNMSUB.D。
+pub fn fnmsub_d<B: Backend>(b: &mut B, rd: Fpr, rs1: Fpr, rs2: Fpr, rs3: Fpr) -> Flow<B> {
+    let x = read_fd(b, rs1);
+    let y = read_fd(b, rs2);
+    let z = read_fd(b, rs3);
+    let nx = b.fsgnjn(x, x);
+    let s = b.fmadd(nx, y, z);
+    write_fd(b, rd, s);
+    accrue_fp(b);
+    Ok(())
+}
+
+/// FNMADD.D。
+pub fn fnmadd_d<B: Backend>(b: &mut B, rd: Fpr, rs1: Fpr, rs2: Fpr, rs3: Fpr) -> Flow<B> {
+    let x = read_fd(b, rs1);
+    let y = read_fd(b, rs2);
+    let z = read_fd(b, rs3);
+    let nx = b.fsgnjn(x, x);
+    let nz = b.fsgnjn(z, z);
+    let s = b.fmadd(nx, y, nz);
+    write_fd(b, rd, s);
+    accrue_fp(b);
     Ok(())
 }
 
@@ -1244,6 +1438,7 @@ pub fn fdiv_d<B: Backend>(b: &mut B, rd: Fpr, rs1: Fpr, rs2: Fpr) -> Flow<B> {
     let y = read_fd(b, rs2);
     let s = b.fdiv(x, y);
     write_fd(b, rd, s);
+    accrue_fp(b);
     Ok(())
 }
 
@@ -1252,6 +1447,7 @@ pub fn fsqrt_d<B: Backend>(b: &mut B, rd: Fpr, rs1: Fpr) -> Flow<B> {
     let x = read_fd(b, rs1);
     let __w = b.fsqrt(x);
     write_fd(b, rd, __w);
+    accrue_fp(b);
     Ok(())
 }
 
@@ -1288,6 +1484,7 @@ pub fn fmin_d<B: Backend>(b: &mut B, rd: Fpr, rs1: Fpr, rs2: Fpr) -> Flow<B> {
     let y = read_fd(b, rs2);
     let __w = b.fmin(x, y);
     write_fd(b, rd, __w);
+    accrue_fp(b);
     Ok(())
 }
 
@@ -1297,6 +1494,7 @@ pub fn fmax_d<B: Backend>(b: &mut B, rd: Fpr, rs1: Fpr, rs2: Fpr) -> Flow<B> {
     let y = read_fd(b, rs2);
     let __w = b.fmax(x, y);
     write_fd(b, rd, __w);
+    accrue_fp(b);
     Ok(())
 }
 
@@ -1306,6 +1504,7 @@ pub fn feq_d<B: Backend>(b: &mut B, rd: Gpr, rs1: Fpr, rs2: Fpr) -> Flow<B> {
     let y = read_fd(b, rs2);
     let c = b.feq(x, y);
     write_cmp(b, rd, c);
+    accrue_fp(b);
     Ok(())
 }
 
@@ -1315,6 +1514,7 @@ pub fn flt_d<B: Backend>(b: &mut B, rd: Gpr, rs1: Fpr, rs2: Fpr) -> Flow<B> {
     let y = read_fd(b, rs2);
     let c = b.flt(x, y);
     write_cmp(b, rd, c);
+    accrue_fp(b);
     Ok(())
 }
 
@@ -1324,6 +1524,7 @@ pub fn fle_d<B: Backend>(b: &mut B, rd: Gpr, rs1: Fpr, rs2: Fpr) -> Flow<B> {
     let y = read_fd(b, rs2);
     let c = b.fle(x, y);
     write_cmp(b, rd, c);
+    accrue_fp(b);
     Ok(())
 }
 
@@ -1337,38 +1538,40 @@ pub fn fclass_d<B: Backend>(b: &mut B, rd: Gpr, rs1: Fpr) -> Flow<B> {
 }
 
 /// FCVT.W.D。
-pub fn fcvt_w_d<B: Backend>(b: &mut B, rd: Gpr, rs1: Fpr) -> Flow<B> {
+pub fn fcvt_w_d<B: Backend>(b: &mut B, rd: Gpr, rs1: Fpr, rm: u8) -> Flow<B> {
     let x = read_fd(b, rs1);
-    let v = b.fcvt_s64(x);
-    let w = b.trunc::<W64, W32>(v);
-    let s = b.sext::<W32, W64>(w);
+    let v = b.fcvt_s32(x, rm);
+    let s = b.sext::<W32, W64>(v);
     write(b, rd, s);
+    accrue_fp(b);
     Ok(())
 }
 
 /// FCVT.WU.D。
-pub fn fcvt_wu_d<B: Backend>(b: &mut B, rd: Gpr, rs1: Fpr) -> Flow<B> {
+pub fn fcvt_wu_d<B: Backend>(b: &mut B, rd: Gpr, rs1: Fpr, rm: u8) -> Flow<B> {
     let x = read_fd(b, rs1);
-    let v = b.fcvt_u64(x);
-    let w = b.trunc::<W64, W32>(v);
-    let z = b.zext::<W32, W64>(w);
+    let v = b.fcvt_u32(x, rm);
+    let z = b.sext::<W32, W64>(v);
     write(b, rd, z);
+    accrue_fp(b);
     Ok(())
 }
 
 /// FCVT.L.D。
-pub fn fcvt_l_d<B: Backend>(b: &mut B, rd: Gpr, rs1: Fpr) -> Flow<B> {
+pub fn fcvt_l_d<B: Backend>(b: &mut B, rd: Gpr, rs1: Fpr, rm: u8) -> Flow<B> {
     let x = read_fd(b, rs1);
-    let s = b.fcvt_s64(x);
+    let s = b.fcvt_s64(x, rm);
     write(b, rd, s);
+    accrue_fp(b);
     Ok(())
 }
 
 /// FCVT.LU.D。
-pub fn fcvt_lu_d<B: Backend>(b: &mut B, rd: Gpr, rs1: Fpr) -> Flow<B> {
+pub fn fcvt_lu_d<B: Backend>(b: &mut B, rd: Gpr, rs1: Fpr, rm: u8) -> Flow<B> {
     let x = read_fd(b, rs1);
-    let s = b.fcvt_u64(x);
+    let s = b.fcvt_u64(x, rm);
     write(b, rd, s);
+    accrue_fp(b);
     Ok(())
 }
 
@@ -1389,52 +1592,58 @@ pub fn fmv_d_x<B: Backend>(b: &mut B, rd: Fpr, rs1: Gpr) -> Flow<B> {
 }
 
 /// FCVT.D.W。
-pub fn fcvt_d_w<B: Backend>(b: &mut B, rd: Fpr, rs1: Gpr) -> Flow<B> {
+pub fn fcvt_d_w<B: Backend>(b: &mut B, rd: Fpr, rs1: Gpr, rm: u8) -> Flow<B> {
     let raw = read(b, rs1);
     let x = b.trunc::<W64, W32>(raw);
-    let s = b.fcvt_from_s32(x);
+    let s = b.fcvt_from_s32(x, rm);
     write_fd(b, rd, s);
+    accrue_fp(b);
     Ok(())
 }
 
 /// FCVT.D.WU。
-pub fn fcvt_d_wu<B: Backend>(b: &mut B, rd: Fpr, rs1: Gpr) -> Flow<B> {
+pub fn fcvt_d_wu<B: Backend>(b: &mut B, rd: Fpr, rs1: Gpr, rm: u8) -> Flow<B> {
     let raw = read(b, rs1);
     let x = b.trunc::<W64, W32>(raw);
-    let s = b.fcvt_from_u32(x);
+    let s = b.fcvt_from_u32(x, rm);
     write_fd(b, rd, s);
+    accrue_fp(b);
     Ok(())
 }
 
 /// FCVT.D.L。
-pub fn fcvt_d_l<B: Backend>(b: &mut B, rd: Fpr, rs1: Gpr) -> Flow<B> {
+pub fn fcvt_d_l<B: Backend>(b: &mut B, rd: Fpr, rs1: Gpr, rm: u8) -> Flow<B> {
     let x = read(b, rs1);
-    let s = b.fcvt_from_s64(x);
+    let s = b.fcvt_from_s64(x, rm);
     write_fd(b, rd, s);
+    accrue_fp(b);
     Ok(())
 }
 
 /// FCVT.D.LU。
-pub fn fcvt_d_lu<B: Backend>(b: &mut B, rd: Fpr, rs1: Gpr) -> Flow<B> {
+pub fn fcvt_d_lu<B: Backend>(b: &mut B, rd: Fpr, rs1: Gpr, rm: u8) -> Flow<B> {
     let x = read(b, rs1);
-    let s = b.fcvt_from_u64(x);
+    let s = b.fcvt_from_u64(x, rm);
     write_fd(b, rd, s);
+    accrue_fp(b);
     Ok(())
 }
 
 /// FCVT.S.D。単精度に丸める。
-pub fn fcvt_s_d<B: Backend>(b: &mut B, rd: Fpr, rs1: Fpr) -> Flow<B> {
+pub fn fcvt_s_d<B: Backend>(b: &mut B, rd: Fpr, rs1: Fpr, rm: u8) -> Flow<B> {
     let x = read_fd(b, rs1);
-    let s = b.fcvt_ff(x);
+    let s = b.fcvt_ff(x, rm);
     write_f(b, rd, s);
+    accrue_fp(b);
     Ok(())
 }
 
 /// FCVT.D.S。倍精度に広げる。
-pub fn fcvt_d_s<B: Backend>(b: &mut B, rd: Fpr, rs1: Fpr) -> Flow<B> {
-    let x = read_f(b, rs1);
-    let s = b.fcvt_ff(x);
+pub fn fcvt_d_s<B: Backend>(b: &mut B, rd: Fpr, rs1: Fpr, rm: u8) -> Flow<B> {
+    let x = read_f_checked(b, rs1);
+    let s = b.fcvt_ff(x, rm);
     write_fd(b, rd, s);
+    accrue_fp(b);
     Ok(())
 }
 

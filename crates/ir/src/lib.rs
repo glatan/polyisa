@@ -161,6 +161,10 @@ impl Backend for IrBackend {
         self.fresh::<F>()
     }
 
+    fn fmadd<F: Width>(&mut self, _a: Self::V<F>, _b: Self::V<F>, _c: Self::V<F>) -> Self::V<F> {
+        self.fresh::<F>()
+    }
+
     fn fdiv<F: Width>(&mut self, _a: Self::V<F>, _b: Self::V<F>) -> Self::V<F> {
         self.fresh::<F>()
     }
@@ -205,40 +209,44 @@ impl Backend for IrBackend {
         self.fresh::<W32>()
     }
 
-    fn fcvt_s32<F: Width>(&mut self, _a: Self::V<F>) -> Self::V<W32> {
+    fn fcvt_s32<F: Width>(&mut self, _a: Self::V<F>, _rm: u8) -> Self::V<W32> {
         self.fresh::<W32>()
     }
 
-    fn fcvt_u32<F: Width>(&mut self, _a: Self::V<F>) -> Self::V<W32> {
+    fn fcvt_u32<F: Width>(&mut self, _a: Self::V<F>, _rm: u8) -> Self::V<W32> {
         self.fresh::<W32>()
     }
 
-    fn fcvt_s64<F: Width>(&mut self, _a: Self::V<F>) -> Self::V<W64> {
+    fn fcvt_s64<F: Width>(&mut self, _a: Self::V<F>, _rm: u8) -> Self::V<W64> {
         self.fresh::<W64>()
     }
 
-    fn fcvt_u64<F: Width>(&mut self, _a: Self::V<F>) -> Self::V<W64> {
+    fn fcvt_u64<F: Width>(&mut self, _a: Self::V<F>, _rm: u8) -> Self::V<W64> {
         self.fresh::<W64>()
     }
 
-    fn fcvt_from_s32<F: Width>(&mut self, _a: Self::V<W32>) -> Self::V<F> {
+    fn fcvt_from_s32<F: Width>(&mut self, _a: Self::V<W32>, _rm: u8) -> Self::V<F> {
         self.fresh::<F>()
     }
 
-    fn fcvt_from_u32<F: Width>(&mut self, _a: Self::V<W32>) -> Self::V<F> {
+    fn fcvt_from_u32<F: Width>(&mut self, _a: Self::V<W32>, _rm: u8) -> Self::V<F> {
         self.fresh::<F>()
     }
 
-    fn fcvt_from_s64<F: Width>(&mut self, _a: Self::V<W64>) -> Self::V<F> {
+    fn fcvt_from_s64<F: Width>(&mut self, _a: Self::V<W64>, _rm: u8) -> Self::V<F> {
         self.fresh::<F>()
     }
 
-    fn fcvt_from_u64<F: Width>(&mut self, _a: Self::V<W64>) -> Self::V<F> {
+    fn fcvt_from_u64<F: Width>(&mut self, _a: Self::V<W64>, _rm: u8) -> Self::V<F> {
         self.fresh::<F>()
     }
 
-    fn fcvt_ff<F: Width, T: Width>(&mut self, _a: Self::V<F>) -> Self::V<T> {
+    fn fcvt_ff<F: Width, T: Width>(&mut self, _a: Self::V<F>, _rm: u8) -> Self::V<T> {
         self.fresh::<T>()
+    }
+
+    fn fp_flags(&mut self) -> u8 {
+        0
     }
 
     fn zext<F: Width, T: Width>(&mut self, _a: Self::V<F>) -> Self::V<T> {

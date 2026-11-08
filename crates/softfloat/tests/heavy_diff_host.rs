@@ -77,6 +77,38 @@ fn pat64(rng: &mut u64, i: u64) -> u64 {
     }
 }
 
+fn same_f32_3(got: u64, want: u64, op: &str, a: u32, b: u32, c: u32, i: u64) {
+    let gn = F32::from_bits(got).is_nan();
+    let wn = f32::from_bits(want as u32).is_nan();
+    if gn || wn {
+        assert!(
+            gn && wn,
+            "{op} f32 NaN不一致 i={i} a={a:#x} b={b:#x} c={c:#x} got={got:#x} want={want:#x}"
+        );
+        return;
+    }
+    assert_eq!(
+        got as u32, want as u32,
+        "{op} f32 不一致 i={i} a={a:#x} b={b:#x} c={c:#x}"
+    );
+}
+
+fn same_f64_3(got: u64, want: u64, op: &str, a: u64, b: u64, c: u64, i: u64) {
+    let gn = F64::from_bits(got).is_nan();
+    let wn = f64::from_bits(want).is_nan();
+    if gn || wn {
+        assert!(
+            gn && wn,
+            "{op} f64 NaN不一致 i={i} a={a:#x} b={b:#x} c={c:#x} got={got:#x} want={want:#x}"
+        );
+        return;
+    }
+    assert_eq!(
+        got, want,
+        "{op} f64 不一致 i={i} a={a:#x} b={b:#x} c={c:#x}"
+    );
+}
+
 fn same_f32(got: u64, want: u64, op: &str, a: u32, b: u32, i: u64) {
     let gn = F32::from_bits(got).is_nan();
     let wn = f32::from_bits(want as u32).is_nan();
@@ -119,6 +151,7 @@ fn host_diff_f32() {
         same_f32(
             F32::from_bits(a as u64)
                 .add(F32::from_bits(b as u64))
+                .0
                 .bits(),
             (fa + fb).to_bits() as u64,
             "add",
@@ -129,6 +162,7 @@ fn host_diff_f32() {
         same_f32(
             F32::from_bits(a as u64)
                 .sub(F32::from_bits(b as u64))
+                .0
                 .bits(),
             (fa - fb).to_bits() as u64,
             "sub",
@@ -139,6 +173,7 @@ fn host_diff_f32() {
         same_f32(
             F32::from_bits(a as u64)
                 .mul(F32::from_bits(b as u64))
+                .0
                 .bits(),
             (fa * fb).to_bits() as u64,
             "mul",
@@ -149,6 +184,7 @@ fn host_diff_f32() {
         same_f32(
             F32::from_bits(a as u64)
                 .div(F32::from_bits(b as u64))
+                .0
                 .bits(),
             (fa / fb).to_bits() as u64,
             "div",
@@ -157,11 +193,24 @@ fn host_diff_f32() {
             i,
         );
         same_f32(
-            F32::from_bits(a as u64).sqrt().bits(),
+            F32::from_bits(a as u64).sqrt().0.bits(),
             fa.sqrt().to_bits() as u64,
             "sqrt",
             a,
             0,
+            i,
+        );
+        let c = pat32(&mut rng, i.wrapping_mul(0x9E37_79B9).wrapping_add(2));
+        same_f32_3(
+            F32::from_bits(a as u64)
+                .fmadd(F32::from_bits(b as u64), F32::from_bits(c as u64))
+                .0
+                .bits(),
+            fa.mul_add(fb, f32::from_bits(c)).to_bits() as u64,
+            "fmadd",
+            a,
+            b,
+            c,
             i,
         );
     }
@@ -176,7 +225,7 @@ fn host_diff_f64() {
         let fa = f64::from_bits(a);
         let fb = f64::from_bits(b);
         same_f64(
-            F64::from_bits(a).add(F64::from_bits(b)).bits(),
+            F64::from_bits(a).add(F64::from_bits(b)).0.bits(),
             (fa + fb).to_bits(),
             "add",
             a,
@@ -184,7 +233,7 @@ fn host_diff_f64() {
             i,
         );
         same_f64(
-            F64::from_bits(a).sub(F64::from_bits(b)).bits(),
+            F64::from_bits(a).sub(F64::from_bits(b)).0.bits(),
             (fa - fb).to_bits(),
             "sub",
             a,
@@ -192,7 +241,7 @@ fn host_diff_f64() {
             i,
         );
         same_f64(
-            F64::from_bits(a).mul(F64::from_bits(b)).bits(),
+            F64::from_bits(a).mul(F64::from_bits(b)).0.bits(),
             (fa * fb).to_bits(),
             "mul",
             a,
@@ -200,7 +249,7 @@ fn host_diff_f64() {
             i,
         );
         same_f64(
-            F64::from_bits(a).div(F64::from_bits(b)).bits(),
+            F64::from_bits(a).div(F64::from_bits(b)).0.bits(),
             (fa / fb).to_bits(),
             "div",
             a,
@@ -208,11 +257,24 @@ fn host_diff_f64() {
             i,
         );
         same_f64(
-            F64::from_bits(a).sqrt().bits(),
+            F64::from_bits(a).sqrt().0.bits(),
             fa.sqrt().to_bits(),
             "sqrt",
             a,
             0,
+            i,
+        );
+        let c = pat64(&mut rng, i.wrapping_mul(0x9E37_79B9).wrapping_add(2));
+        same_f64_3(
+            F64::from_bits(a)
+                .fmadd(F64::from_bits(b), F64::from_bits(c))
+                .0
+                .bits(),
+            fa.mul_add(fb, f64::from_bits(c)).to_bits(),
+            "fmadd",
+            a,
+            b,
+            c,
             i,
         );
     }
