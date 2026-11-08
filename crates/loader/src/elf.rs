@@ -143,6 +143,57 @@ pub fn parse_phdrs(bytes: &[u8], ehdr: &Ehdr) -> Result<Vec<Phdr>, Error> {
     Ok(out)
 }
 
+/// PT_LOAD セグメントをアドレス空間に配置する。段階1の範囲。
+/// `bytes` はファイル全体、`phdrs` は `parse_phdrs` の結果とする。
+/// 書き込み可能な写像で配置し、ファイル範囲外はゼロのままにする。
+pub fn load_segments(
+    bytes: &[u8],
+    phdrs: &[Phdr],
+    mem: &mut polyisa_mem::AddressSpace,
+) -> Result<(), Error> {
+    use polyisa_mem::{PAGE_SIZE, Perms, VirtAddr};
+    for ph in phdrs {
+        if ph.seg_type != 1 {
+            continue;
+        }
+        if ph.memsz < ph.filesz {
+            return Err(Error::Unsupported);
+        }
+        let end_off = ph.offset.checked_add(ph.filesz).ok_or(Error::Truncated)?;
+        if bytes.len() < end_off as usize {
+            return Err(Error::Truncated);
+        }
+        let mut perms = Perms::NONE;
+        if ph.flags & 4 != 0 {
+            perms = Perms(perms.0 | Perms::R.0);
+        }
+        if ph.flags & 2 != 0 {
+            perms = Perms(perms.0 | Perms::W.0);
+        }
+        if ph.flags & 1 != 0 {
+            perms = Perms(perms.0 | Perms::X.0);
+        }
+        // ロード時の書き込みのため W を足す。権限の絞り込みは後の段階で足す。
+        perms = Perms(perms.0 | Perms::W.0);
+        let base = ph.vaddr & !(PAGE_SIZE - 1);
+        let end = ph.vaddr.checked_add(ph.memsz).ok_or(Error::Truncated)?;
+        let end_aligned =
+            end.checked_add(PAGE_SIZE - 1).ok_or(Error::Truncated)? & !(PAGE_SIZE - 1);
+        let count = (end_aligned - base) / PAGE_SIZE;
+        if count == 0 {
+            continue;
+        }
+        mem.map(VirtAddr(base), count, perms)
+            .map_err(|_| Error::Truncated)?;
+        if ph.filesz > 0 {
+            let src = &bytes[ph.offset as usize..end_off as usize];
+            mem.write(VirtAddr(ph.vaddr), src)
+                .map_err(|_| Error::Truncated)?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -212,5 +263,35 @@ mod tests {
             super::super::probe_kind(&[]),
             super::super::FileKind::Unknown
         );
+    }
+
+    #[test]
+    fn load_maps_and_copies() {
+        use polyisa_mem::{Access, AccessKind, Align, Endian, VirtAddr};
+        let mut bytes = minimal();
+        bytes.resize(0x200, 0);
+        // ファイル先頭に目印を置き、LOAD の写像先から読めることを確かめる。
+        bytes[0x100] = 0xAB;
+        bytes[0x101] = 0xCD;
+        let ehdr = parse_ehdr(&bytes).unwrap();
+        let mut phdrs = parse_phdrs(&bytes, &ehdr).unwrap();
+        // テスト用にファイル範囲を先頭 0x200 バイト、配置先は 0x10000 とする。
+        phdrs[0].offset = 0;
+        phdrs[0].filesz = 0x200;
+        phdrs[0].memsz = 0x1000;
+        let mut mem = polyisa_mem::AddressSpace::new();
+        load_segments(&bytes, &phdrs, &mut mem).unwrap();
+        let mut buf = [0u8; 2];
+        let acc = Access {
+            endian: Endian::Le,
+            align: Align::Natural,
+            kind: AccessKind::DataRead,
+        };
+        mem.read(VirtAddr(0x1_0100), &mut buf, acc).unwrap();
+        assert_eq!(buf, [0xAB, 0xCD]);
+        // BSS 部分はゼロである。
+        let mut z = [0xFFu8; 4];
+        mem.read(VirtAddr(0x1_0800), &mut z, acc).unwrap();
+        assert_eq!(z, [0; 4]);
     }
 }

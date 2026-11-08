@@ -6,6 +6,7 @@ rust-version = "1.99"
 
 [dependencies]
 polyisa-bits = { path = "../bits" }
+polyisa-mem = { path = "../mem" }
 
 [lints]
 workspace = true
