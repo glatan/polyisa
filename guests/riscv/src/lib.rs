@@ -42,4 +42,27 @@ mod tests {
         assert_eq!(s.x[0], 0);
         assert_eq!(core::mem::offset_of!(CpuState, pc), 32 * 8);
     }
+
+    #[test]
+    fn insn_count() {
+        // RV32I 共通 37 件のうちシフト 3 件を RV64 版で置換し、RV64 専用 12 件と SYSTEM 4 件を足す。
+        assert_eq!(INSNS.len(), 53);
+    }
+
+    #[test]
+    fn decode_spot_checks() {
+        // 命令語はビット配置から手で組み立てる（ Ref: SPEC-RISCV-UNPRIV）。
+        assert_eq!(decode(0x0020_8133, 32), Some(Insn::Add));
+        assert_eq!(decode(0x4020_8133, 32), Some(Insn::Sub));
+        assert_eq!(decode(0x0001_2183, 32), Some(Insn::Lw));
+        assert_eq!(decode(0x0080_b183, 32), Some(Insn::Ld));
+        assert_eq!(decode(0x0051_819b, 32), Some(Insn::Addiw));
+        assert_eq!(decode(0x0000_00ef, 32), Some(Insn::Jal));
+        assert_eq!(decode(0x0020_8063, 32), Some(Insn::Beq));
+        assert_eq!(decode(0x0000_0073, 32), Some(Insn::Ecall));
+        assert_eq!(decode(0x0ff0_000f, 32), Some(Insn::Fence));
+        assert_eq!(decode(0x0000_100f, 32), Some(Insn::FenceI));
+        assert_eq!(decode(0xffff_ffff, 32), None);
+        assert_eq!(decode(0x0020_8133, 16), None);
+    }
 }

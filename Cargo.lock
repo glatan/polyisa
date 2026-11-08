@@ -67,6 +67,7 @@ dependencies = [
  "polyisa-bits",
  "polyisa-decimal",
  "polyisa-guest",
+ "polyisa-isadl",
  "polyisa-isagen",
  "polyisa-mem",
  "polyisa-sem",

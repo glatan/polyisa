@@ -1,11 +1,20 @@
-//! `spec/` の ISADL 記述からコードを生成する。記述自体は参照資料の確認後に書く。
+//! `spec/` の ISADL 記述からコードを生成する。
+
+// Ref: SPEC-RISCV-UNPRIV (20250508).
+include!("spec/rv64i.rs");
 
 fn main() {
     // ISADL 記述の変更で再生成するための監視指定。
     println!("cargo::rerun-if-changed=spec/");
-    // 確認前は記述が空のため、空のモデルから殻を生成する。
-    let model = polyisa_isagen::Model::new();
-    let generated = polyisa_isagen::generate(&model).expect("empty model is valid");
+    println!("cargo::rerun-if-changed=build.rs");
+    let model = build_model();
+    let report = polyisa_isadl::validate(&model);
+    assert!(
+        report.errors.is_empty(),
+        "invalid RV64I model: {:?}",
+        report.errors
+    );
+    let generated = polyisa_isagen::generate(&model).expect("valid RV64I model");
     let out = std::path::PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
     let mut all = String::new();
     for part in [

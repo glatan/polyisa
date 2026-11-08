@@ -82,6 +82,12 @@ impl Pattern {
         self.mask
     }
 
+    /// 固定ビットの値。
+    #[must_use]
+    pub const fn bits(&self) -> u128 {
+        self.bits
+    }
+
     /// 命令語が一致するかどうか。下位余白は無視し、`len` ビットで比べる。
     #[must_use]
     pub const fn matches(&self, word: u128) -> bool {
