@@ -18,10 +18,16 @@ impl Record {
     }
 }
 
-/// 行を組み立てる。書式の確定は観測の実装時に行う。
+/// 行を組み立てる。決定性のため16進小文字・固定書式とする。
 #[must_use]
 pub fn format_step(pc: u64, name: &str) -> Record {
     Record::new(&format!("{pc:#x}: {name}"))
+}
+
+/// システムコールの記録行を組み立てる。番号は10進で書く。
+#[must_use]
+pub fn format_syscall(nr: u64, name: &str) -> Record {
+    Record::new(&format!("syscall {nr} ({name})"))
 }
 
 #[cfg(test)]
@@ -31,5 +37,10 @@ mod tests {
     #[test]
     fn line_format() {
         assert_eq!(format_step(0x1000, "add").line, "0x1000: add");
+    }
+
+    #[test]
+    fn syscall_format() {
+        assert_eq!(format_syscall(64, "write").line, "syscall 64 (write)");
     }
 }
