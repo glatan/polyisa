@@ -1,5 +1,5 @@
 [workspace]
-members = ["tools/devtool"]
+members = ["tools/devtool", "crates/bits", "crates/testkit"]
 resolver = "2"
 
 [workspace.package]
