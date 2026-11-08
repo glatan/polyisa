@@ -8,6 +8,8 @@ members = [
     "crates/sem",
     "crates/guest",
     "crates/engine",
+    "crates/isadl",
+    "crates/isagen",
 ]
 resolver = "2"
 

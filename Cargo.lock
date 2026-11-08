@@ -31,6 +31,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "polyisa-isadl"
+version = "0.0.0"
+
+[[package]]
+name = "polyisa-isagen"
+version = "0.0.0"
+dependencies = [
+ "polyisa-isadl",
+]
+
+[[package]]
 name = "polyisa-mem"
 version = "0.0.0"
 dependencies = [
