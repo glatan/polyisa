@@ -216,6 +216,40 @@ fn m_extension() {
 }
 
 #[test]
+fn csr_read_write_set_clear() {
+    use polyisa_guest_riscv::sem::Csr;
+    let mut env = env();
+    // cycle (0xC00) に書いて読む。
+    env.step(|b| sem::addi(b, Gpr(1), Gpr(0), 42)).unwrap();
+    env.step(|b| sem::csrrw(b, Gpr(2), Gpr(1), Csr(0xC00)))
+        .unwrap();
+    assert_eq!(x(&mut env, 2), 0);
+    env.step(|b| sem::csrrw(b, Gpr(2), Gpr(0), Csr(0xC00)))
+        .unwrap();
+    assert_eq!(x(&mut env, 2), 42);
+    // ビットを立てる。戻り値は書き換え前の値。
+    env.step(|b| sem::csrrsi(b, Gpr(3), 0b101, Csr(0xC00)))
+        .unwrap();
+    assert_eq!(x(&mut env, 3), 0);
+    // 0b011111 を置き、x1=0b101010 のビットを落とす（0b011111 & ~0b101010 = 0b010101）。
+    env.step(|b| sem::csrrwi(b, Gpr(0), 0b11111, Csr(0xC00)))
+        .unwrap();
+    env.step(|b| sem::csrrc(b, Gpr(3), Gpr(1), Csr(0xC00)))
+        .unwrap();
+    assert_eq!(x(&mut env, 3), 0b011111);
+    env.step(|b| sem::csrrs(b, Gpr(4), Gpr(0), Csr(0xC00)))
+        .unwrap();
+    assert_eq!(x(&mut env, 4), 0b010101);
+    // rs1=x0 の CSRRS は書き込まない。
+    env.step(|b| sem::csrrs(b, Gpr(3), Gpr(0), Csr(0xC00)))
+        .unwrap();
+    assert_eq!(x(&mut env, 3), 0b010101);
+    // uimm=0 の CSRRSI は書き込まない。
+    env.step(|b| sem::csrrsi(b, Gpr(3), 0, Csr(0xC00))).unwrap();
+    assert_eq!(x(&mut env, 3), 0b010101);
+}
+
+#[test]
 fn system_exits() {
     let mut env = env();
     let r = env.step(|b| sem::ecall(b, 0x100));

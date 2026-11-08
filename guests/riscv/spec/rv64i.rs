@@ -144,6 +144,13 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("divuw", "R", "0000001 ..... ..... 101 ..... 0111011", "divuw {rd}, {rs1}, {rs2}", "div"),
         ("remw", "R", "0000001 ..... ..... 110 ..... 0111011", "remw {rd}, {rs1}, {rs2}", "div"),
         ("remuw", "R", "0000001 ..... ..... 111 ..... 0111011", "remuw {rd}, {rs1}, {rs2}", "div"),
+        // SYSTEM の CSR 系（Zicsr）
+        ("csrrw", "I", "............ ..... 001 ..... 1110011", "csrrw {rd}, {csr}, {rs1}", "system"),
+        ("csrrs", "I", "............ ..... 010 ..... 1110011", "csrrs {rd}, {csr}, {rs1}", "system"),
+        ("csrrc", "I", "............ ..... 011 ..... 1110011", "csrrc {rd}, {csr}, {rs1}", "system"),
+        ("csrrwi", "I", "............ ..... 101 ..... 1110011", "csrrwi {rd}, {csr}, {uimm}", "system"),
+        ("csrrsi", "I", "............ ..... 110 ..... 1110011", "csrrsi {rd}, {csr}, {uimm}", "system"),
+        ("csrrci", "I", "............ ..... 111 ..... 1110011", "csrrci {rd}, {csr}, {uimm}", "system"),
     ];
     for (name, format, pattern, syntax, timing) in insns {
         m.insns.push(Insn {
