@@ -1,0 +1,11 @@
+[profile.default]
+# TODO: heavy_ バイナリができたら `not binary(/^heavy_/)` に戻す。現状は対象がなくフィルタが失敗するため all()。
+default-filter = "all()"
+retries = 0
+slow-timeout = { period = "30s", terminate-after = 2 }
+
+[profile.full]
+default-filter = "all()"
+fail-fast = false
+slow-timeout = { period = "300s", terminate-after = 12 }
+junit.path = "junit.xml"
