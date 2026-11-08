@@ -140,6 +140,48 @@ fn blt_signed_vs_unsigned() {
 }
 
 #[test]
+fn logic_and_w_suffix() {
+    let mut env = env();
+    env.step(|b| sem::addi(b, Gpr(1), Gpr(0), 0b1100)).unwrap();
+    env.step(|b| sem::addi(b, Gpr(2), Gpr(0), 0b1010)).unwrap();
+    env.step(|b| sem::xori(b, Gpr(3), Gpr(1), 0b1010)).unwrap();
+    assert_eq!(x(&mut env, 3), 0b0110);
+    env.step(|b| sem::ori(b, Gpr(3), Gpr(1), 0b1010)).unwrap();
+    assert_eq!(x(&mut env, 3), 0b1110);
+    env.step(|b| sem::andi(b, Gpr(3), Gpr(1), 0b1010)).unwrap();
+    assert_eq!(x(&mut env, 3), 0b1000);
+    env.step(|b| sem::xor(b, Gpr(3), Gpr(1), Gpr(2))).unwrap();
+    assert_eq!(x(&mut env, 3), 0b0110);
+    env.step(|b| sem::or(b, Gpr(3), Gpr(1), Gpr(2))).unwrap();
+    assert_eq!(x(&mut env, 3), 0b1110);
+    env.step(|b| sem::and(b, Gpr(3), Gpr(1), Gpr(2))).unwrap();
+    assert_eq!(x(&mut env, 3), 0b1000);
+    // シフトと W 接尾辞。
+    env.step(|b| sem::sll(b, Gpr(3), Gpr(1), Gpr(2))).unwrap();
+    assert_eq!(x(&mut env, 3), 0b1100u64 << 10);
+    env.step(|b| sem::srl(b, Gpr(3), Gpr(1), Gpr(2))).unwrap();
+    assert_eq!(x(&mut env, 3), 0b1100u64 >> 10);
+    env.step(|b| sem::addi(b, Gpr(4), Gpr(0), -8)).unwrap();
+    env.step(|b| sem::sra(b, Gpr(3), Gpr(4), Gpr(2))).unwrap();
+    assert_eq!(x(&mut env, 3), 0xffff_ffff_ffff_ffff);
+    env.step(|b| sem::addw(b, Gpr(3), Gpr(1), Gpr(2))).unwrap();
+    assert_eq!(x(&mut env, 3), 22);
+    env.step(|b| sem::subw(b, Gpr(3), Gpr(1), Gpr(2))).unwrap();
+    assert_eq!(x(&mut env, 3), 2);
+    env.step(|b| sem::sllw(b, Gpr(3), Gpr(1), Gpr(2))).unwrap();
+    assert_eq!(x(&mut env, 3), 0b1100u64 << 10);
+    env.step(|b| sem::srlw(b, Gpr(3), Gpr(1), Gpr(2))).unwrap();
+    assert_eq!(x(&mut env, 3), 0);
+    // bge/bgeu。x1=12、x2=10。
+    env.step(|b| sem::bge(b, Gpr(1), Gpr(2), 0x200, 8)).unwrap();
+    assert!(matches!(env.backend.ctrl, Ctrl::Jump(0x208)));
+    env.backend.ctrl = Ctrl::Fallthrough;
+    env.step(|b| sem::bgeu(b, Gpr(2), Gpr(1), 0x200, 8))
+        .unwrap();
+    assert!(matches!(env.backend.ctrl, Ctrl::Fallthrough));
+}
+
+#[test]
 fn system_exits() {
     let mut env = env();
     let r = env.step(|b| sem::ecall(b, 0x100));
