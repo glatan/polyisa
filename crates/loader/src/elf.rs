@@ -3,9 +3,8 @@
 //! 出典は下記の確認済みの版である。数値・配置の事実のみを自前の表現で使う。
 //! 条文・図表の複製はしない。
 //!
-//! 段階 1 の範囲はリトルエンディアンに限り、ヘッダとプログラムヘッダを読む。
-//! 32 ビットと 64 ビットの両方を受け付ける。ビッグエンディアン、
-//! セクションの解釈は後の段階で足す。
+//! 32 ビットと 64 ビット、リトルエンディアンとビッグエンディアンの
+//! ヘッダとプログラムヘッダを読む。セクションの解釈は後の段階で足す。
 
 // Ref: SPEC-ELF-GABI (Edition 4.1＋2001-04-24 DRAFT).
 
@@ -25,6 +24,9 @@ pub const CLASS_32: u8 = 1;
 /// リトルエンディアンを示す `EI_DATA` の値。
 pub const DATA_LE: u8 = 1;
 
+/// ビッグエンディアンを示す `EI_DATA` の値。
+pub const DATA_BE: u8 = 2;
+
 /// 解析の失敗。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Error {
@@ -32,7 +34,7 @@ pub enum Error {
     Truncated,
     /// 識別子が ELF ではない。
     BadMagic,
-    /// リトルエンディアンではない、または 32/64 ビットのいずれでもない。
+    /// 未対応の形式（想定外のクラス・バイト順・大きさ）である。
     Unsupported,
 }
 
@@ -41,6 +43,8 @@ pub enum Error {
 pub struct Ehdr {
     /// 対象のバイト順。
     pub little: bool,
+    /// 対象の機械（`e_machine`）。受入れ可否の判断は呼び出し側が行う。
+    pub machine: u16,
     /// ファイルの種別（`ET_*`）。
     pub file_type: u16,
     /// 要求する ABI の版（`e_flags`）。
@@ -96,7 +100,7 @@ fn u64_of(bytes: &[u8], little: bool) -> Option<u64> {
     }
 }
 
-/// ELF ヘッダを読む。64 ビットのリトルエンディアンだけを受け付ける。
+/// ELF ヘッダを読む。64 ビットのリトル・ビッグ両エンディアンを受け付ける。
 pub fn parse_ehdr(bytes: &[u8]) -> Result<Ehdr, Error> {
     if bytes.len() < 64 {
         return Err(Error::Truncated);
@@ -104,19 +108,22 @@ pub fn parse_ehdr(bytes: &[u8]) -> Result<Ehdr, Error> {
     if bytes[0..4] != MAGIC {
         return Err(Error::BadMagic);
     }
-    if bytes[4] != CLASS_64 || bytes[5] != DATA_LE {
+    if bytes[4] != CLASS_64 || (bytes[5] != DATA_LE && bytes[5] != DATA_BE) {
         return Err(Error::Unsupported);
     }
-    let little = true;
+    let little = bytes[5] == DATA_LE;
     let get16 = |off: usize| u16_of(&bytes[off..off + 2], little).ok_or(Error::Truncated);
     let get32 = |off: usize| u32_of(&bytes[off..off + 4], little).ok_or(Error::Truncated);
     let get64 = |off: usize| u64_of(&bytes[off..off + 8], little).ok_or(Error::Truncated);
     // ヘッダと項目の大きさが想定どおりであることを確かめる。
-    if get16(52)? != 64 || get16(54)? != 56 {
+    // 項目表を持たない形式（e_phnum=0 の再配置可能物など）は
+    // 項目の大きさを見ない。
+    if get16(52)? != 64 || (get16(56)? != 0 && get16(54)? != 56) {
         return Err(Error::Unsupported);
     }
     Ok(Ehdr {
         little,
+        machine: get16(18)?,
         file_type: get16(16)?,
         flags: get32(48)?,
         entry: get64(24)?,
@@ -125,7 +132,7 @@ pub fn parse_ehdr(bytes: &[u8]) -> Result<Ehdr, Error> {
     })
 }
 
-/// ELF ヘッダを読む。32 ビットのリトルエンディアンだけを受け付ける。
+/// ELF ヘッダを読む。32 ビットのリトル・ビッグ両エンディアンを受け付ける。
 /// 32 ビットの値は 64 ビットにゼロ拡張して `Ehdr` に入れる。
 pub fn parse_ehdr32(bytes: &[u8]) -> Result<Ehdr, Error> {
     if bytes.len() < 52 {
@@ -134,18 +141,21 @@ pub fn parse_ehdr32(bytes: &[u8]) -> Result<Ehdr, Error> {
     if bytes[0..4] != MAGIC {
         return Err(Error::BadMagic);
     }
-    if bytes[4] != CLASS_32 || bytes[5] != DATA_LE {
+    if bytes[4] != CLASS_32 || (bytes[5] != DATA_LE && bytes[5] != DATA_BE) {
         return Err(Error::Unsupported);
     }
-    let little = true;
+    let little = bytes[5] == DATA_LE;
     let get16 = |off: usize| u16_of(&bytes[off..off + 2], little).ok_or(Error::Truncated);
     let get32 = |off: usize| u32_of(&bytes[off..off + 4], little).ok_or(Error::Truncated);
     // ヘッダと項目の大きさが想定どおりであることを確かめる。
-    if get16(40)? != 52 || get16(42)? != 32 {
+    // 項目表を持たない形式（e_phnum=0 の再配置可能物など）は
+    // 項目の大きさを見ない。
+    if get16(40)? != 52 || (get16(44)? != 0 && get16(42)? != 32) {
         return Err(Error::Unsupported);
     }
     Ok(Ehdr {
         little,
+        machine: get16(18)?,
         file_type: get16(16)?,
         flags: get32(36)?,
         entry: u64::from(get32(24)?),
@@ -367,6 +377,104 @@ mod tests {
         assert_eq!(phdrs[0].memsz, 0x1000);
     }
 
+    /// 最小の ELF64 ビッグエンディアン。値は BE で置く。
+    /// e_machine = 243（RISC-V）で記録の確認もする。
+    fn minimal_be() -> Vec<u8> {
+        let mut v = vec![0u8; 64 + 56];
+        v[0..4].copy_from_slice(&MAGIC);
+        v[4] = CLASS_64;
+        v[5] = DATA_BE;
+        v[6] = 1; // EI_VERSION
+        // e_type = ET_EXEC (2), e_machine = 243
+        v[16..18].copy_from_slice(&2u16.to_be_bytes());
+        v[18..20].copy_from_slice(&243u16.to_be_bytes());
+        // e_entry = 0x80000000
+        v[24..32].copy_from_slice(&0x8000_0000u64.to_be_bytes());
+        // e_phoff = 64
+        v[32..40].copy_from_slice(&64u64.to_be_bytes());
+        // e_ehsize = 64, e_phentsize = 56, e_phnum = 1
+        v[52..54].copy_from_slice(&64u16.to_be_bytes());
+        v[54..56].copy_from_slice(&56u16.to_be_bytes());
+        v[56..58].copy_from_slice(&1u16.to_be_bytes());
+        let p = 64;
+        // p_type = PT_LOAD (1), p_flags = R|X (5)
+        v[p..p + 4].copy_from_slice(&1u32.to_be_bytes());
+        v[p + 4..p + 8].copy_from_slice(&5u32.to_be_bytes());
+        // p_offset = 0, p_vaddr = 0x80000000
+        v[p + 8..p + 16].copy_from_slice(&0u64.to_be_bytes());
+        v[p + 16..p + 24].copy_from_slice(&0x8000_0000u64.to_be_bytes());
+        // p_filesz = p_memsz = 0x1000, p_align = 0x1000
+        v[p + 32..p + 40].copy_from_slice(&0x1000u64.to_be_bytes());
+        v[p + 40..p + 48].copy_from_slice(&0x1000u64.to_be_bytes());
+        v[p + 48..p + 56].copy_from_slice(&0x1000u64.to_be_bytes());
+        v
+    }
+
+    /// 最小の ELF32 ビッグエンディアン。値は BE で置く。
+    /// e_machine = 20（PowerPC）で記録の確認もする。
+    fn minimal32_be() -> Vec<u8> {
+        let mut v = vec![0u8; 52 + 32];
+        v[0..4].copy_from_slice(&MAGIC);
+        v[4] = CLASS_32;
+        v[5] = DATA_BE;
+        v[6] = 1; // EI_VERSION
+        // e_type = ET_EXEC (2), e_machine = 20
+        v[16..18].copy_from_slice(&2u16.to_be_bytes());
+        v[18..20].copy_from_slice(&20u16.to_be_bytes());
+        // e_entry = 0x10000
+        v[24..28].copy_from_slice(&0x1_0000u32.to_be_bytes());
+        // e_phoff = 52
+        v[28..32].copy_from_slice(&52u32.to_be_bytes());
+        // e_ehsize = 52, e_phentsize = 32, e_phnum = 1
+        v[40..42].copy_from_slice(&52u16.to_be_bytes());
+        v[42..44].copy_from_slice(&32u16.to_be_bytes());
+        v[44..46].copy_from_slice(&1u16.to_be_bytes());
+        let p = 52;
+        // p_type = PT_LOAD (1)
+        v[p..p + 4].copy_from_slice(&1u32.to_be_bytes());
+        // p_offset = 0, p_vaddr = 0x10000
+        v[p + 4..p + 8].copy_from_slice(&0u32.to_be_bytes());
+        v[p + 8..p + 12].copy_from_slice(&0x1_0000u32.to_be_bytes());
+        // p_filesz = p_memsz = 0x1000
+        v[p + 16..p + 20].copy_from_slice(&0x1000u32.to_be_bytes());
+        v[p + 20..p + 24].copy_from_slice(&0x1000u32.to_be_bytes());
+        // p_flags = R|X (5)
+        v[p + 24..p + 28].copy_from_slice(&5u32.to_be_bytes());
+        v
+    }
+
+    #[test]
+    fn header_and_phdr_big_endian() {
+        let bytes = minimal_be();
+        let ehdr = parse_ehdr(&bytes).unwrap();
+        assert!(!ehdr.little);
+        assert_eq!(ehdr.machine, 243);
+        assert_eq!(ehdr.entry, 0x8000_0000);
+        assert_eq!(ehdr.phnum, 1);
+        let phdrs = parse_phdrs(&bytes, &ehdr).unwrap();
+        assert_eq!(phdrs.len(), 1);
+        assert_eq!(phdrs[0].seg_type, 1);
+        assert_eq!(phdrs[0].vaddr, 0x8000_0000);
+        assert_eq!(phdrs[0].flags, 5);
+        assert_eq!(phdrs[0].memsz, 0x1000);
+    }
+
+    #[test]
+    fn header32_and_phdr32_big_endian() {
+        let bytes = minimal32_be();
+        let ehdr = parse_ehdr32(&bytes).unwrap();
+        assert!(!ehdr.little);
+        assert_eq!(ehdr.machine, 20);
+        assert_eq!(ehdr.entry, 0x1_0000);
+        assert_eq!(ehdr.phnum, 1);
+        let phdrs = parse_phdrs32(&bytes, &ehdr).unwrap();
+        assert_eq!(phdrs.len(), 1);
+        assert_eq!(phdrs[0].seg_type, 1);
+        assert_eq!(phdrs[0].vaddr, 0x1_0000);
+        assert_eq!(phdrs[0].flags, 5);
+        assert_eq!(phdrs[0].memsz, 0x1000);
+    }
+
     #[test]
     fn rejects() {
         assert_eq!(parse_ehdr(&[]), Err(Error::Truncated));
@@ -374,7 +482,7 @@ mod tests {
         bad[0] = 0;
         assert_eq!(parse_ehdr(&bad), Err(Error::BadMagic));
         let mut be = minimal();
-        be[5] = 2; // EI_DATA = big endian
+        be[5] = 3; // EI_DATA が LE/BE のいずれでもない。
         assert_eq!(parse_ehdr(&be), Err(Error::Unsupported));
         let mut cut = minimal();
         cut.truncate(100);
