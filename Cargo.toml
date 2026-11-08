@@ -25,6 +25,7 @@ members = [
     "crates/jit",
     "guests/riscv",
     "guests/sparc",
+    "guests/mips",
 ]
 resolver = "2"
 
