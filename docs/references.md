@@ -108,15 +108,15 @@ BSD 系の資産は `D` と `C` を許可できる。GPL 系の資産と Arm の
 | SPEC-S390-ZARCH-POP | z/Architecture Principles of Operation | IBM | — | s390 | — | — | 未確認 | |
 | SPEC-S390-ESA390-POP | Enterprise Systems Architecture/390 Principles of Operation | IBM | — | s390 | — | — | 未確認 | |
 | SPEC-S390-S360-POP | IBM System/360 Principles of Operation | IBM | — | s390 | — | — | 未確認 | |
-| SPEC-WASM-CORE | WebAssembly Core Specification | W3C | — | wasm | — | — | 未確認 | |
-| SPEC-WASI-P1 | WASI preview1 の定義 | 確認時に記録 | — | wasm、os-wasi | — | — | 未確認 | |
+| SPEC-WASM-CORE | WebAssembly Core Specification, Release 3.0 | W3C、WebAssembly Community Group | 3.0 | wasm | W3C Software and Document Notice and License（repo の document/ の条件。公開の LICENSE 表で確認） | — | 未確認 | 仕様の事実を自前表現で記述。条文・図の複製なし。R,F の許可は所有者が判断 |
+| SPEC-WASI-P1 | WASI 0.1（wasi_snapshot_preview1） | WebAssembly Community Group、Bytecode Alliance | 0.1 | wasm、os-wasi | ライセンス表示なし（GitHub NOASSERTION。wasi-0.1 に LICENSE ファイルなし） | — | 未確認 | API 定義等の事実を自前表現で記述。複製なし。R,F の許可は所有者が判断 |
 | SPEC-M68K-PRM | M68000 Family Programmer's Reference Manual | Motorola | — | m68k | — | — | 未確認 | |
 | SPEC-M68K-UM | M68000 8-/16-/32-Bit Microprocessors User's Manual | Motorola | — | m68k（68000 のタイミング） | — | — | 未確認 | |
 | SPEC-M68K-FPU | MC68881/MC68882 Floating-Point Coprocessor User's Manual | Motorola | — | m68k | — | — | 未確認 | |
 | SPEC-M68K-COLDFIRE | ColdFire Family Programmer's Reference Manual | Freescale | — | m68k | — | — | 未確認 | |
 | SPEC-VAX-ARM | VAX Architecture Reference Manual | DEC | — | vax | — | — | 未確認 | |
 | SPEC-PDP11-HANDBOOK | PDP-11 Processor Handbook（モデルごとの版は確認時に確定） | DEC | — | pdp11 | — | — | 未確認 | |
-| SPEC-SPARC-V8 | The SPARC Architecture Manual, Version 8 | SPARC International | — | sparc | — | — | 未確認 | |
+| SPEC-SPARC-V8 | The SPARC Architecture Manual, Version 8（1992。V9 の要否は試作時に判断） | SPARC International | Version 8 | sparc | © 1991,1992 SPARC International, Inc.、All rights reserved（公開PDFの前文で確認。事前の許諾なく複製不可） | — | 未確認 | エンコーディング等の事実を自前表現で記述。条文・図の複製なし。R,F の許可は所有者が判断。V9 が要る場合は項目を追加する |
 | SPEC-SPARC-V9 | The SPARC Architecture Manual, Version 9 | SPARC International | — | sparc | — | — | 未確認 | |
 | SPEC-ALPHA-ARM | Alpha Architecture Reference Manual | DEC | — | alpha | — | — | 未確認 | |
 | SPEC-PARISC-11 | PA-RISC 1.1 Architecture and Instruction Set Reference Manual | HP | — | parisc | — | — | 未確認 | |
@@ -125,8 +125,8 @@ BSD 系の資産は `D` と `C` を許可できる。GPL 系の資産と Arm の
 | SPEC-SUPERH-SH4 | SH-4 のソフトウェアマニュアル（書名は確認時に確定） | 確認時に記録 | — | superh | — | — | 未確認 | |
 | SPEC-LOONGARCH-RM | LoongArch Reference Manual, Volume 1: Basic Architecture | Loongson | — | loongarch | — | — | 未確認 | |
 | SPEC-OPENRISC-1000 | OpenRISC 1000 Architecture Manual | 確認時に記録 | — | openrisc | — | — | 未確認 | |
-| SPEC-IA64-SDM | Intel Itanium Architecture Software Developer's Manual | Intel | — | ia64 | — | — | 未確認 | |
-| SPEC-HEXAGON-PRM | Hexagon の Programmer's Reference Manual（版ごとに項目を分ける） | Qualcomm | — | hexagon | — | — | 未確認 | |
+| SPEC-IA64-SDM | Intel Itanium Architecture Software Developer's Manual, Revision 2.3（2010-05。全4巻） | Intel | Rev 2.3 | ia64 | © Intel Corporation、All rights reserved（Intel 標準の法務通知。公開の Specification Update 248699-009 で同文を確認。複製の許諾なし） | — | 未確認 | Rev 2.3 各巻の前文 verbatim は確認時に所有者が確定。手組ベクタ用の R,F の許可は所有者が判断。オラクルなし |
+| SPEC-HEXAGON-PRM | Qualcomm Hexagon V73 Programmer's Reference Manual（80-N2040-53） | Qualcomm | V73 | hexagon | © 2022, 2024 Qualcomm Technologies, Inc. and/or its subsidiaries、All rights reserved（公開PDFの前文で確認。複製の許諾なし） | — | 未確認 | エンコーディング等の事実を自前表現で記述。条文・図の複製なし。R,F の許可は所有者が判断 |
 | SPEC-IEEE754 | IEEE Standard for Floating-Point Arithmetic（IEEE 754-2019） | IEEE | 2019 | softfloat | © IEEE、All rights reserved（本文書の購入・購読で入手） | R,F | 2026-11-08 glatan | 数値・丸め規則の事実のみ自前表現で使用。条文・図表の複製なし。許諾範囲は所有者判断 |
 | SPEC-DECIMAL-ARITH | General Decimal Arithmetic Specification | 確認時に記録 | — | decimal | — | — | 未確認 | |
 | SPEC-ELF-GABI | System V Application Binary Interface の ELF の汎用部分 | SCO（現 Xinuos） | Edition 4.1（1997）＋2001-04-24 DRAFT（ch.4/5） | loader | © SCO、All rights reserved（複製の明示的許諾なし） | R,F | 2026-11-08 glatan | 数値・配置の事実のみ自前表現で使用。条文・図表の複製なし。許諾範囲は所有者判断 |
@@ -145,7 +145,7 @@ BSD 系の資産は `D` と `C` を許可できる。GPL 系の資産と Arm の
 |---|---|---|---|---|---|---|---|---|
 | TEST-RISCV-TESTS | riscv-tests | RISC-V International のコントリビュータ | commit 3df703c（HEAD） | riscv | BSD 3-clause（Regents of the University of California） | T | 2026-11-08 glatan | 取得して検証に使う。リポジトリに含めない |
 | TEST-RISCV-ARCH-TEST | riscv-arch-test | RISC-V International のコントリビュータ | commit 7569d06（HEAD） | riscv | コード BSD-3-Clause／Apache-2.0、文書 CC-BY-4.0 | T | 2026-11-08 glatan | 取得して検証に使う。リポジトリに含めない |
-| TEST-WASM-SPEC | WebAssembly の仕様のテストスイート | 確認時に記録 | — | wasm | — | — | 未確認 | |
+| TEST-WASM-SPEC | WebAssembly 仕様のテストスイート（WebAssembly/spec の test/） | WebAssembly Community Group | main HEAD==f3268fa9（確認時に固定） | wasm | Apache License 2.0（test/ の条件。公開の LICENSE 表で確認） | — | 未確認 | 版は `git ls-remote` で HEAD を確認。取得して使う。リポジトリに含めない。用途 T の許可は所有者が判断 |
 | TEST-TESTFLOAT | Berkeley TestFloat | John Hauser（UC Berkeley） | Release 3e | softfloat | BSD 3-clause（Regents of the University of California） | T,X | 2026-11-08 glatan | 生成ベクタの使用（`T`）とベクタ生成のための実行（`X`）。リポジトリに含めない |
 | TEST-DECTEST | 十進演算のテストケース集（書名は確認時に確定） | 確認時に記録 | — | decimal | — | — | 未確認 | |
 | TEST-SINGLESTEP-68000 | SingleStepTests の 68000 のテストデータ | 確認時に記録 | — | m68k | — | — | 未確認 | |
