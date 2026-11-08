@@ -97,6 +97,7 @@
 | SPEC-MIPS-R6 | MIPS Architecture For Programmers（MIPS32 と MIPS64 の Release 6） | MIPS | — | mips | — | — | 未確認 | |
 | SPEC-MIPS-IV | MIPS IV Instruction Set | MIPS Technologies | — | mips | — | — | 未確認 | |
 | SPEC-MIPS-R3000 | R3000 のソフトウェアリファレンスマニュアル（書名は確認時に確定） | 確認時に記録 | — | mips（R3000 のタイミング） | — | — | 未確認 | |
+| SPEC-MIPS-ABI | System V ABI の MIPS RISC Processor Supplement（o32/n32/n64 の根拠。書名・版は確認時に確定） | 確認時に記録 | — | mips（os-linux の MIPS 対応） | — | — | 未確認 | |
 | SPEC-RISCV-UNPRIV | The RISC-V Instruction Set Manual, Volume I: Unprivileged Architecture | RISC-V International | 20250508 | riscv | CC-BY-4.0 | R,F | 2026-11-08 glatan | エンコーディング等の事実を自前表現で記述。条文・図の複製なし |
 | SPEC-RISCV-PRIV | The RISC-V Instruction Set Manual, Volume II: Privileged Architecture | RISC-V International | 20250508 | riscv | CC-BY-4.0 | R,F | 2026-11-08 glatan | 同上 |
 | SPEC-RISCV-PROFILES | RISC-V Profiles（RVA23 v1.0、2024-10-17） | RISC-V International | RVA23 v1.0 | riscv | CC-BY-4.0 | R,F | 2026-11-08 glatan | プロファイルの構成の事実を自前表現で記述 |
@@ -136,6 +137,7 @@
 | ID | 名称 | 発行者 | 版 | 対象 | 利用条件 | 用途 | 確認 | 備考 |
 |---|---|---|---|---|---|---|---|---|
 | SRC-LINUX | Linux カーネルのソース（UAPI ヘッダ、システムコールの表、シグナルフレームの定義） | Linux カーネルの開発者 | 7.3 | os-linux | GNU GPL version 2（COPYING）。UAPI は Linux-syscall-note の例外でユーザ空間利用可 | R,F | 2026-11-08 glatan | 番号・配置の事実を自前表現で記述。カーネル本体コードの翻訳はしない（`C` にあたる） |
+| SRC-SOFTFLOAT3 | Berkeley SoftFloat-3（TestFloat 生成器のビルドに使用。版は確認時に確定） | John Hauser（UC Berkeley） | — | softfloat（TestFloat 実行） | — | — | 未確認 | リポジトリに含めない。手元では commit 07ebd29d を確認（2026-11-09 `git ls-remote`） |
 
 ### テスト
 
