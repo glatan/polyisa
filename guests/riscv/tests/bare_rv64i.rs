@@ -19,6 +19,11 @@ fn x(env: &mut BareEnv, r: u8) -> u64 {
     env.backend.get(Gpr(r).state())
 }
 
+fn xf(env: &mut BareEnv, r: u8) -> u32 {
+    use polyisa_guest_riscv::sem::Fpr;
+    (env.backend.get(Fpr(r).state()) & 0xffff_ffff) as u32
+}
+
 #[test]
 fn addi_add() {
     let mut env = env();
@@ -309,6 +314,103 @@ fn amo_ops() {
     assert_eq!(x(&mut env, 4), u64::MAX);
     env.step(|b| sem::ld(b, Gpr(5), Gpr(1), 0)).unwrap();
     assert_eq!(x(&mut env, 5), u64::MAX);
+}
+
+#[test]
+fn f_arithmetic() {
+    use polyisa_guest_riscv::sem::Fpr;
+    let mut env = env();
+    // f1 = 1.5、f2 = 2.25 を置く。
+    env.backend.set(
+        Fpr(1).state(),
+        0x0000_0000_3fc0_0000 | 0xffff_ffff_0000_0000,
+    );
+    env.backend.set(
+        Fpr(2).state(),
+        0x0000_0000_4010_0000 | 0xffff_ffff_0000_0000,
+    );
+    env.step(|b| sem::fadd_s(b, Fpr(3), Fpr(1), Fpr(2)))
+        .unwrap();
+    assert_eq!(xf(&mut env, 3), 0x4070_0000);
+    env.step(|b| sem::fsub_s(b, Fpr(3), Fpr(2), Fpr(1)))
+        .unwrap();
+    assert_eq!(xf(&mut env, 3), 0x3f40_0000);
+    env.step(|b| sem::fmul_s(b, Fpr(3), Fpr(1), Fpr(2)))
+        .unwrap();
+    assert_eq!(xf(&mut env, 3), 0x4058_0000);
+    env.step(|b| sem::fdiv_s(b, Fpr(3), Fpr(2), Fpr(1)))
+        .unwrap();
+    assert_eq!(xf(&mut env, 3), 0x3fc0_0000);
+}
+
+#[test]
+fn f_sqrt_min_max_class() {
+    use polyisa_guest_riscv::sem::Fpr;
+    let mut env = env();
+    env.backend.set(
+        Fpr(1).state(),
+        0x0000_0000_4000_0000 | 0xffff_ffff_0000_0000,
+    );
+    env.step(|b| sem::fsqrt_s(b, Fpr(2), Fpr(1))).unwrap();
+    assert_eq!(xf(&mut env, 2), 0x3fb5_04f3);
+    env.backend.set(
+        Fpr(3).state(),
+        0x0000_0000_7fc0_0000 | 0xffff_ffff_0000_0000,
+    );
+    // NaN が混ざるともう一方が選ばれる。
+    env.step(|b| sem::fmin_s(b, Fpr(4), Fpr(1), Fpr(3)))
+        .unwrap();
+    assert_eq!(xf(&mut env, 4), 0x4000_0000);
+    env.step(|b| sem::fmax_s(b, Fpr(4), Fpr(3), Fpr(1)))
+        .unwrap();
+    assert_eq!(xf(&mut env, 4), 0x4000_0000);
+    // 分類：+normal は 64、-0 は 8、qNaN は 512。
+    env.step(|b| sem::fclass_s(b, Gpr(5), Fpr(1))).unwrap();
+    assert_eq!(x(&mut env, 5), 64);
+    env.backend.set(
+        Fpr(6).state(),
+        0x0000_0000_8000_0000 | 0xffff_ffff_0000_0000,
+    );
+    env.step(|b| sem::fclass_s(b, Gpr(5), Fpr(6))).unwrap();
+    assert_eq!(x(&mut env, 5), 8);
+    env.step(|b| sem::fclass_s(b, Gpr(5), Fpr(3))).unwrap();
+    assert_eq!(x(&mut env, 5), 512);
+}
+
+#[test]
+fn f_convert_move_compare() {
+    use polyisa_guest_riscv::sem::Fpr;
+    let mut env = env();
+    env.map_rw(0x0, 1).unwrap();
+    // 1.5 を置く。
+    env.backend.set(
+        Fpr(1).state(),
+        0x0000_0000_3fc0_0000 | 0xffff_ffff_0000_0000,
+    );
+    // fcvt.w.s(1.5) = 2、fcvt.s.w(2) = 2.0。
+    env.step(|b| sem::fcvt_w_s(b, Gpr(2), Fpr(1))).unwrap();
+    assert_eq!(x(&mut env, 2), 2);
+    env.step(|b| sem::fcvt_s_w(b, Fpr(3), Gpr(2))).unwrap();
+    assert_eq!(xf(&mut env, 3), 0x4000_0000);
+    // feq / flt。
+    env.step(|b| sem::feq_s(b, Gpr(4), Fpr(1), Fpr(1))).unwrap();
+    assert_eq!(x(&mut env, 4), 1);
+    env.step(|b| sem::flt_s(b, Gpr(4), Fpr(1), Fpr(3))).unwrap();
+    assert_eq!(x(&mut env, 4), 1);
+    // fsgnj で符号を入れ替える。
+    env.step(|b| sem::fsgnjn_s(b, Fpr(4), Fpr(1), Fpr(3)))
+        .unwrap();
+    assert_eq!(xf(&mut env, 4), 0xbfc0_0000);
+    // fmv.x.w / fmv.w.x でビット列を往復させる。
+    env.step(|b| sem::fmv_x_w(b, Gpr(5), Fpr(1))).unwrap();
+    assert_eq!(x(&mut env, 5), 0x0000_0000_3fc0_0000);
+    env.step(|b| sem::fmv_w_x(b, Fpr(6), Gpr(5))).unwrap();
+    assert_eq!(xf(&mut env, 6), 0x3fc0_0000);
+    // fsw / flw でメモリを往復させる。
+    env.step(|b| sem::addi(b, Gpr(7), Gpr(0), 0x100)).unwrap();
+    env.step(|b| sem::fsw(b, Gpr(7), Fpr(1), 0)).unwrap();
+    env.step(|b| sem::flw(b, Fpr(8), Gpr(7), 0)).unwrap();
+    assert_eq!(xf(&mut env, 8), 0x3fc0_0000);
 }
 
 #[test]

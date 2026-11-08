@@ -10,6 +10,7 @@ polyisa-mem = { path = "../mem" }
 polyisa-sem = { path = "../sem" }
 polyisa-guest = { path = "../guest" }
 polyisa-timing = { path = "../timing" }
+polyisa-softfloat = { path = "../softfloat" }
 
 [lints]
 workspace = true

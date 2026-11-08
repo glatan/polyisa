@@ -149,6 +149,98 @@ impl Backend for IrBackend {
         self.fresh::<W>()
     }
 
+    fn fadd<F: Width>(&mut self, _a: Self::V<F>, _b: Self::V<F>) -> Self::V<F> {
+        self.fresh::<F>()
+    }
+
+    fn fsub<F: Width>(&mut self, _a: Self::V<F>, _b: Self::V<F>) -> Self::V<F> {
+        self.fresh::<F>()
+    }
+
+    fn fmul<F: Width>(&mut self, _a: Self::V<F>, _b: Self::V<F>) -> Self::V<F> {
+        self.fresh::<F>()
+    }
+
+    fn fdiv<F: Width>(&mut self, _a: Self::V<F>, _b: Self::V<F>) -> Self::V<F> {
+        self.fresh::<F>()
+    }
+
+    fn fsqrt<F: Width>(&mut self, _a: Self::V<F>) -> Self::V<F> {
+        self.fresh::<F>()
+    }
+
+    fn fmin<F: Width>(&mut self, _a: Self::V<F>, _b: Self::V<F>) -> Self::V<F> {
+        self.fresh::<F>()
+    }
+
+    fn fmax<F: Width>(&mut self, _a: Self::V<F>, _b: Self::V<F>) -> Self::V<F> {
+        self.fresh::<F>()
+    }
+
+    fn fsgnj<F: Width>(&mut self, _a: Self::V<F>, _b: Self::V<F>) -> Self::V<F> {
+        self.fresh::<F>()
+    }
+
+    fn fsgnjn<F: Width>(&mut self, _a: Self::V<F>, _b: Self::V<F>) -> Self::V<F> {
+        self.fresh::<F>()
+    }
+
+    fn fsgnjx<F: Width>(&mut self, _a: Self::V<F>, _b: Self::V<F>) -> Self::V<F> {
+        self.fresh::<F>()
+    }
+
+    fn feq<F: Width>(&mut self, _a: Self::V<F>, _b: Self::V<F>) -> Self::B {
+        IrCond(self.ir.next)
+    }
+
+    fn flt<F: Width>(&mut self, _a: Self::V<F>, _b: Self::V<F>) -> Self::B {
+        IrCond(self.ir.next)
+    }
+
+    fn fle<F: Width>(&mut self, _a: Self::V<F>, _b: Self::V<F>) -> Self::B {
+        IrCond(self.ir.next)
+    }
+
+    fn fclass<F: Width>(&mut self, _a: Self::V<F>) -> Self::V<W32> {
+        self.fresh::<W32>()
+    }
+
+    fn fcvt_s32<F: Width>(&mut self, _a: Self::V<F>) -> Self::V<W32> {
+        self.fresh::<W32>()
+    }
+
+    fn fcvt_u32<F: Width>(&mut self, _a: Self::V<F>) -> Self::V<W32> {
+        self.fresh::<W32>()
+    }
+
+    fn fcvt_s64<F: Width>(&mut self, _a: Self::V<F>) -> Self::V<W64> {
+        self.fresh::<W64>()
+    }
+
+    fn fcvt_u64<F: Width>(&mut self, _a: Self::V<F>) -> Self::V<W64> {
+        self.fresh::<W64>()
+    }
+
+    fn fcvt_from_s32<F: Width>(&mut self, _a: Self::V<W32>) -> Self::V<F> {
+        self.fresh::<F>()
+    }
+
+    fn fcvt_from_u32<F: Width>(&mut self, _a: Self::V<W32>) -> Self::V<F> {
+        self.fresh::<F>()
+    }
+
+    fn fcvt_from_s64<F: Width>(&mut self, _a: Self::V<W64>) -> Self::V<F> {
+        self.fresh::<F>()
+    }
+
+    fn fcvt_from_u64<F: Width>(&mut self, _a: Self::V<W64>) -> Self::V<F> {
+        self.fresh::<F>()
+    }
+
+    fn fcvt_ff<F: Width, T: Width>(&mut self, _a: Self::V<F>) -> Self::V<T> {
+        self.fresh::<T>()
+    }
+
     fn zext<F: Width, T: Width>(&mut self, _a: Self::V<F>) -> Self::V<T> {
         self.fresh::<T>()
     }
