@@ -341,11 +341,14 @@ impl<const E: u32, const M: u32> Binary<E, M> {
         }
     }
 
-    /// 平方根。RNE。負の有限値は NaN になる。
+    /// 平方根。RNE。負の値（負の無限大を含む）は NaN になる。
     #[must_use]
     pub fn sqrt(self) -> Self {
         let (neg, exp, frac) = self.decode();
         if self.is_nan() || (neg && !self.is_zero() && !self.is_inf()) {
+            return Self::canonical_nan();
+        }
+        if neg && self.is_inf() {
             return Self::canonical_nan();
         }
         if self.is_zero() || self.is_inf() {
@@ -358,6 +361,13 @@ impl<const E: u32, const M: u32> Binary<E, M> {
         if ein & 1 != 0 {
             m <<= 1;
             ein -= 1;
+        }
+        // m を M+1 ビット以上にそろえる。isqrt の商が窓の下限を下回ると、
+        // 左シフトで埋めたゼロが GRS に混ざり丸めを誤るためである。
+        // 2 ビットずつ動かすので ein の偶奇は保たれる。
+        while m < (1u128 << (M + 1)) {
+            m <<= 2;
+            ein -= 2;
         }
         // 十分な余裕を持って整数平方根を取る。余りは sticky になる。
         const EXTRA: u32 = 64;
