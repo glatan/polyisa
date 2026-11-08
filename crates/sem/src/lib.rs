@@ -10,6 +10,10 @@ pub use polyisa_mem::Access;
 pub trait Width: Copy + 'static {
     const BITS: u32;
     type Repr: Copy + PartialEq + core::fmt::Debug;
+    /// 実行時の値を 128 ビット整数にする。幅より上は 0。
+    fn to_u128(v: Self::Repr) -> u128;
+    /// 128 ビット整数から実行時の値にする。幅より上は切り捨てる。
+    fn from_u128(v: u128) -> Self::Repr;
 }
 
 /// 8 ビット。
@@ -31,22 +35,52 @@ pub struct W128;
 impl Width for W8 {
     const BITS: u32 = 8;
     type Repr = u8;
+    fn to_u128(v: Self::Repr) -> u128 {
+        u128::from(v)
+    }
+    fn from_u128(v: u128) -> Self::Repr {
+        v as u8
+    }
 }
 impl Width for W16 {
     const BITS: u32 = 16;
     type Repr = u16;
+    fn to_u128(v: Self::Repr) -> u128 {
+        u128::from(v)
+    }
+    fn from_u128(v: u128) -> Self::Repr {
+        v as u16
+    }
 }
 impl Width for W32 {
     const BITS: u32 = 32;
     type Repr = u32;
+    fn to_u128(v: Self::Repr) -> u128 {
+        u128::from(v)
+    }
+    fn from_u128(v: u128) -> Self::Repr {
+        v as u32
+    }
 }
 impl Width for W64 {
     const BITS: u32 = 64;
     type Repr = u64;
+    fn to_u128(v: Self::Repr) -> u128 {
+        u128::from(v)
+    }
+    fn from_u128(v: u128) -> Self::Repr {
+        v as u64
+    }
 }
 impl Width for W128 {
     const BITS: u32 = 128;
     type Repr = u128;
+    fn to_u128(v: Self::Repr) -> u128 {
+        v
+    }
+    fn from_u128(v: u128) -> Self::Repr {
+        v
+    }
 }
 
 /// 比較の演算。
@@ -128,6 +162,18 @@ impl<W: Width> StateArray<W> {
             stride,
             _width: core::marker::PhantomData,
         }
+    }
+
+    /// 配列の基底オフセット。
+    #[must_use]
+    pub const fn offset(self) -> usize {
+        self.offset
+    }
+
+    /// 要素の間隔（バイト）。
+    #[must_use]
+    pub const fn stride(self) -> usize {
+        self.stride
     }
 }
 

@@ -241,6 +241,54 @@ impl AddressSpace {
         Ok(())
     }
 
+    /// 多バイト値を読む。`acc` のエンディアンで変換し、整列を検査する。
+    pub fn read_value(
+        &self,
+        addr: VirtAddr,
+        width_bytes: usize,
+        acc: Access,
+    ) -> Result<u64, MemError> {
+        if width_bytes == 0 || width_bytes > 8 {
+            return Err(MemError::NotAligned);
+        }
+        if acc.align == Align::Natural && !addr.0.is_multiple_of(width_bytes as u64) {
+            return Err(MemError::NotAligned);
+        }
+        let mut buf = [0u8; 8];
+        self.read(addr, &mut buf[..width_bytes], acc)?;
+        let v = match acc.endian {
+            Endian::Le => polyisa_bits::read_le(&buf[..width_bytes], width_bytes),
+            Endian::Be => polyisa_bits::read_be(&buf[..width_bytes], width_bytes),
+        };
+        v.ok_or(MemError::PageFault)
+    }
+
+    /// 多バイト値を書く。`read_value` と対称の変換と検査を行う。
+    pub fn write_value(
+        &mut self,
+        addr: VirtAddr,
+        value: u64,
+        width_bytes: usize,
+        acc: Access,
+    ) -> Result<(), MemError> {
+        if width_bytes == 0 || width_bytes > 8 {
+            return Err(MemError::NotAligned);
+        }
+        if acc.align == Align::Natural && !addr.0.is_multiple_of(width_bytes as u64) {
+            return Err(MemError::NotAligned);
+        }
+        // 書き込み権限の検査は `write` が行う。ここでは変換だけして渡す。
+        let mut buf = [0u8; 8];
+        let ok = match acc.endian {
+            Endian::Le => polyisa_bits::write_le(&mut buf[..width_bytes], value, width_bytes),
+            Endian::Be => polyisa_bits::write_be(&mut buf[..width_bytes], value, width_bytes),
+        };
+        if !ok {
+            return Err(MemError::NotAligned);
+        }
+        self.write(addr, &buf[..width_bytes])
+    }
+
     /// `fork` のための複製。書き込み可のページを COW にする。
     ///
     /// 親子でページフレームの `Arc` を共有し、最初の書き込みで
@@ -382,6 +430,46 @@ mod tests {
             aspace.read(VirtAddr(0x0), &mut buf, Access::DATA_LE),
             Err(MemError::PageFault)
         );
+    }
+
+    #[test]
+    fn endian_values_and_align() {
+        let mut aspace = AddressSpace::new();
+        aspace.map(VirtAddr(0x1000), 1, Perms::RW).unwrap();
+        let le = Access {
+            endian: Endian::Le,
+            align: Align::Natural,
+            kind: AccessKind::DataRead,
+        };
+        aspace
+            .write_value(VirtAddr(0x1000), 0x1234_5678, 4, le)
+            .unwrap();
+        assert_eq!(
+            aspace.read_value(VirtAddr(0x1000), 4, le).unwrap(),
+            0x1234_5678
+        );
+        let be = Access {
+            endian: Endian::Be,
+            ..le
+        };
+        aspace
+            .write_value(VirtAddr(0x1000), 0x1234_5678, 4, be)
+            .unwrap();
+        assert_eq!(
+            aspace.read_value(VirtAddr(0x1000), 4, be).unwrap(),
+            0x1234_5678
+        );
+        // 自然整列の違反。
+        assert_eq!(
+            aspace.read_value(VirtAddr(0x1001), 4, le),
+            Err(MemError::NotAligned)
+        );
+        // 非整列可なら通る。
+        let un = Access {
+            align: Align::Unaligned,
+            ..le
+        };
+        assert!(aspace.read_value(VirtAddr(0x1001), 4, un).is_ok());
     }
 
     #[test]

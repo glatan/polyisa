@@ -5,7 +5,6 @@ edition = "2024"
 rust-version = "1.99"
 
 [dependencies]
-polyisa-bits = { path = "../bits" }
 polyisa-mem = { path = "../mem" }
 polyisa-sem = { path = "../sem" }
 polyisa-guest = { path = "../guest" }
