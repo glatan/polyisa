@@ -15,6 +15,9 @@ dependencies = [
  "polyisa-guest-riscv",
  "polyisa-kernel",
  "polyisa-loader",
+ "polyisa-mem",
+ "polyisa-os-linux",
+ "polyisa-sem",
  "polyisa-trace",
 ]
 
@@ -67,6 +70,7 @@ name = "polyisa-guest-riscv"
 version = "0.0.0"
 dependencies = [
  "polyisa-bits",
+ "polyisa-cli",
  "polyisa-decimal",
  "polyisa-engine",
  "polyisa-guest",
