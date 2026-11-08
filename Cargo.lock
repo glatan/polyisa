@@ -61,6 +61,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "polyisa-guest-riscv"
+version = "0.0.0"
+dependencies = [
+ "polyisa-bits",
+ "polyisa-decimal",
+ "polyisa-guest",
+ "polyisa-isagen",
+ "polyisa-mem",
+ "polyisa-sem",
+ "polyisa-softfloat",
+ "polyisa-timing",
+]
+
+[[package]]
 name = "polyisa-host"
 version = "0.0.0"
 
