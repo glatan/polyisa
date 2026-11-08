@@ -97,15 +97,22 @@ fn build_elf_in(sub: &str, name: &str) -> Option<Vec<u8>> {
     }
     let cc = bin(&["clang", "/usr/sbin/clang", "/usr/bin/clang"])?;
     let lld = rust_lld()?;
+    // RV32 と RV64 でツールチェインの指定を切り替える。
+    let rv32 = sub.starts_with("rv32");
+    let (target, march, abi, emul) = if rv32 {
+        ("riscv32-unknown-elf", "rv32g", "ilp32d", "elf32lriscv")
+    } else {
+        ("riscv64-unknown-elf", "rv64g", "lp64d", "elf64lriscv")
+    };
     let dir = std::env::temp_dir().join("polyisa-riscv-tests");
     let _ = std::fs::create_dir_all(&dir);
     let obj = dir.join(format!("{sub}_{name}.o"));
     let elf = dir.join(format!("{sub}_{name}.elf"));
     let st = Command::new(&cc)
         .args([
-            "--target=riscv64-unknown-elf",
-            "-march=rv64g",
-            "-mabi=lp64d",
+            &format!("--target={target}"),
+            &format!("-march={march}"),
+            &format!("-mabi={abi}"),
             "-mcmodel=medany",
             "-fvisibility=hidden",
             "-nostdlib",
@@ -128,6 +135,8 @@ fn build_elf_in(sub: &str, name: &str) -> Option<Vec<u8>> {
         .args([
             "-flavor",
             "gnu",
+            "-m",
+            emul,
             "-T",
             root.join("env/p/link.ld").to_str()?,
             obj.to_str()?,
@@ -207,7 +216,7 @@ fn off_j(word: u32) -> i64 {
     ((v as i32) << 11 >> 11) as i64
 }
 
-fn run(env: &mut BareEnv, entry: u64) -> Outcome {
+fn run(env: &mut BareEnv, entry: u64, rv32: bool) -> Outcome {
     use polyisa_guest_riscv::Insn;
     env.pc = entry;
     for _ in 0..STEP_LIMIT {
@@ -225,11 +234,12 @@ fn run(env: &mut BareEnv, entry: u64) -> Outcome {
         }
         let word = u32::from_le_bytes(w);
         // MRET（特権。user-mode相当のrunnerでは mepc へ戻す）。
+        // RV32 では MXLEN=32 の mepc に合わせ、下位 32 ビットに包む。
         if word == 0x3020_0073 {
             let mepc: u64 = env.backend.get(StateRef::<W64>::from_offset(
                 core::mem::offset_of!(CpuState, csr) + 0x341 * 8,
             ));
-            env.pc = mepc;
+            env.pc = if rv32 { mepc & 0xffff_ffff } else { mepc };
             continue;
         }
         // C拡張はこの対象（rv64g）には含めない。
@@ -249,86 +259,384 @@ fn run(env: &mut BareEnv, entry: u64) -> Outcome {
         let fs3 = Fpr(r(5, 27));
         let csr = Csr(((word >> 20) & 0xfff) as u16);
         let ok = match insn {
-            Insn::Add => env.step(|b| sem::add(b, rd, rs1, rs2)),
-            Insn::Addi => env.step(|b| sem::addi(b, rd, rs1, imm_i(word))),
-            Insn::Addiw => env.step(|b| sem::addiw(b, rd, rs1, imm_i(word))),
-            Insn::Lui => env.step(|b| sem::lui(b, rd, imm_u(word))),
+            Insn::Add => {
+                if rv32 {
+                    env.step(|b| sem::add_rv32(b, rd, rs1, rs2))
+                } else {
+                    env.step(|b| sem::add(b, rd, rs1, rs2))
+                }
+            }
+            Insn::Addi => {
+                if rv32 {
+                    env.step(|b| sem::addi_rv32(b, rd, rs1, imm_i(word)))
+                } else {
+                    env.step(|b| sem::addi(b, rd, rs1, imm_i(word)))
+                }
+            }
+            Insn::Addiw => {
+                if rv32 {
+                    return Outcome::Unimplemented { pc: env.pc, word };
+                }
+                env.step(|b| sem::addiw(b, rd, rs1, imm_i(word)))
+            }
+            Insn::Lui => {
+                if rv32 {
+                    env.step(|b| sem::lui_rv32(b, rd, imm_u(word)))
+                } else {
+                    env.step(|b| sem::lui(b, rd, imm_u(word)))
+                }
+            }
             Insn::Auipc => {
                 let pc = env.pc;
-                env.step(|b| sem::auipc(b, rd, pc, imm_u(word)))
+                if rv32 {
+                    env.step(|b| sem::auipc_rv32(b, rd, pc, imm_u(word)))
+                } else {
+                    env.step(|b| sem::auipc(b, rd, pc, imm_u(word)))
+                }
             }
             Insn::Jal => {
                 let pc = env.pc;
-                env.step(|b| sem::jal(b, rd, pc, off_j(word)))
+                if rv32 {
+                    env.step(|b| sem::jal_rv32(b, rd, pc, off_j(word)))
+                } else {
+                    env.step(|b| sem::jal(b, rd, pc, off_j(word)))
+                }
             }
             Insn::Jalr => {
                 let pc = env.pc;
-                env.step(|b| sem::jalr(b, rd, rs1, pc, imm_i(word)))
+                if rv32 {
+                    env.step(|b| sem::jalr_rv32(b, rd, rs1, pc, imm_i(word)))
+                } else {
+                    env.step(|b| sem::jalr(b, rd, rs1, pc, imm_i(word)))
+                }
             }
             Insn::Beq => {
                 let pc = env.pc;
-                env.step(|b| sem::beq(b, rs1, rs2, pc, off_b(word)))
+                if rv32 {
+                    env.step(|b| sem::beq_rv32(b, rs1, rs2, pc, off_b(word)))
+                } else {
+                    env.step(|b| sem::beq(b, rs1, rs2, pc, off_b(word)))
+                }
             }
             Insn::Bne => {
                 let pc = env.pc;
-                env.step(|b| sem::bne(b, rs1, rs2, pc, off_b(word)))
+                if rv32 {
+                    env.step(|b| sem::bne_rv32(b, rs1, rs2, pc, off_b(word)))
+                } else {
+                    env.step(|b| sem::bne(b, rs1, rs2, pc, off_b(word)))
+                }
             }
             Insn::Blt => {
                 let pc = env.pc;
-                env.step(|b| sem::blt(b, rs1, rs2, pc, off_b(word)))
+                if rv32 {
+                    env.step(|b| sem::blt_rv32(b, rs1, rs2, pc, off_b(word)))
+                } else {
+                    env.step(|b| sem::blt(b, rs1, rs2, pc, off_b(word)))
+                }
             }
             Insn::Bge => {
                 let pc = env.pc;
-                env.step(|b| sem::bge(b, rs1, rs2, pc, off_b(word)))
+                if rv32 {
+                    env.step(|b| sem::bge_rv32(b, rs1, rs2, pc, off_b(word)))
+                } else {
+                    env.step(|b| sem::bge(b, rs1, rs2, pc, off_b(word)))
+                }
             }
             Insn::Bltu => {
                 let pc = env.pc;
-                env.step(|b| sem::bltu(b, rs1, rs2, pc, off_b(word)))
+                if rv32 {
+                    env.step(|b| sem::bltu_rv32(b, rs1, rs2, pc, off_b(word)))
+                } else {
+                    env.step(|b| sem::bltu(b, rs1, rs2, pc, off_b(word)))
+                }
             }
             Insn::Bgeu => {
                 let pc = env.pc;
-                env.step(|b| sem::bgeu(b, rs1, rs2, pc, off_b(word)))
+                if rv32 {
+                    env.step(|b| sem::bgeu_rv32(b, rs1, rs2, pc, off_b(word)))
+                } else {
+                    env.step(|b| sem::bgeu(b, rs1, rs2, pc, off_b(word)))
+                }
             }
-            Insn::Lb => env.step(|b| sem::lb(b, rd, rs1, imm_i(word))),
-            Insn::Lh => env.step(|b| sem::lh(b, rd, rs1, imm_i(word))),
-            Insn::Lw => env.step(|b| sem::lw(b, rd, rs1, imm_i(word))),
-            Insn::Ld => env.step(|b| sem::ld(b, rd, rs1, imm_i(word))),
-            Insn::Lbu => env.step(|b| sem::lbu(b, rd, rs1, imm_i(word))),
-            Insn::Lhu => env.step(|b| sem::lhu(b, rd, rs1, imm_i(word))),
-            Insn::Lwu => env.step(|b| sem::lwu(b, rd, rs1, imm_i(word))),
-            Insn::Sb => env.step(|b| sem::sb(b, rs1, rs2, imm_s(word))),
-            Insn::Sh => env.step(|b| sem::sh(b, rs1, rs2, imm_s(word))),
-            Insn::Sw => env.step(|b| sem::sw(b, rs1, rs2, imm_s(word))),
-            Insn::Sd => env.step(|b| sem::sd(b, rs1, rs2, imm_s(word))),
-            Insn::Slli => env.step(|b| sem::slli(b, rd, rs1, ((word >> 20) & 63) as u64)),
-            Insn::Srli => env.step(|b| sem::srli(b, rd, rs1, ((word >> 20) & 63) as u64)),
-            Insn::Srai => env.step(|b| sem::srai(b, rd, rs1, ((word >> 20) & 63) as u64)),
-            Insn::Sub => env.step(|b| sem::sub(b, rd, rs1, rs2)),
-            Insn::Sll => env.step(|b| sem::sll(b, rd, rs1, rs2)),
-            Insn::Slt => env.step(|b| sem::slt(b, rd, rs1, rs2)),
-            Insn::Sltu => env.step(|b| sem::sltu(b, rd, rs1, rs2)),
-            Insn::Xor => env.step(|b| sem::xor(b, rd, rs1, rs2)),
-            Insn::Or => env.step(|b| sem::or(b, rd, rs1, rs2)),
-            Insn::And => env.step(|b| sem::and(b, rd, rs1, rs2)),
-            Insn::Sra => env.step(|b| sem::sra(b, rd, rs1, rs2)),
-            Insn::Slti => env.step(|b| sem::slti(b, rd, rs1, imm_i(word))),
-            Insn::Sltiu => env.step(|b| sem::sltiu(b, rd, rs1, imm_i(word))),
-            Insn::Mul => env.step(|b| sem::mul(b, rd, rs1, rs2)),
-            Insn::Mulh => env.step(|b| sem::mulh(b, rd, rs1, rs2)),
-            Insn::Mulhsu => env.step(|b| sem::mulhsu(b, rd, rs1, rs2)),
-            Insn::Mulhu => env.step(|b| sem::mulhu(b, rd, rs1, rs2)),
-            Insn::Div => env.step(|b| sem::div(b, rd, rs1, rs2)),
-            Insn::Divu => env.step(|b| sem::divu(b, rd, rs1, rs2)),
-            Insn::Rem => env.step(|b| sem::rem(b, rd, rs1, rs2)),
-            Insn::Remu => env.step(|b| sem::remu(b, rd, rs1, rs2)),
-            Insn::Mulw => env.step(|b| sem::mulw(b, rd, rs1, rs2)),
-            Insn::Divw => env.step(|b| sem::divw(b, rd, rs1, rs2)),
-            Insn::Divuw => env.step(|b| sem::divuw(b, rd, rs1, rs2)),
-            Insn::Remw => env.step(|b| sem::remw(b, rd, rs1, rs2)),
-            Insn::Remuw => env.step(|b| sem::remuw(b, rd, rs1, rs2)),
-            Insn::Xori => env.step(|b| sem::xori(b, rd, rs1, imm_i(word))),
-            Insn::Ori => env.step(|b| sem::ori(b, rd, rs1, imm_i(word))),
-            Insn::Andi => env.step(|b| sem::andi(b, rd, rs1, imm_i(word))),
+            Insn::Lb => {
+                if rv32 {
+                    env.step(|b| sem::lb_rv32(b, rd, rs1, imm_i(word)))
+                } else {
+                    env.step(|b| sem::lb(b, rd, rs1, imm_i(word)))
+                }
+            }
+            Insn::Lh => {
+                if rv32 {
+                    env.step(|b| sem::lh_rv32(b, rd, rs1, imm_i(word)))
+                } else {
+                    env.step(|b| sem::lh(b, rd, rs1, imm_i(word)))
+                }
+            }
+            Insn::Lw => {
+                if rv32 {
+                    env.step(|b| sem::lw_rv32(b, rd, rs1, imm_i(word)))
+                } else {
+                    env.step(|b| sem::lw(b, rd, rs1, imm_i(word)))
+                }
+            }
+            Insn::Ld => {
+                if rv32 {
+                    return Outcome::Unimplemented { pc: env.pc, word };
+                }
+                env.step(|b| sem::ld(b, rd, rs1, imm_i(word)))
+            }
+            Insn::Lbu => {
+                if rv32 {
+                    env.step(|b| sem::lbu_rv32(b, rd, rs1, imm_i(word)))
+                } else {
+                    env.step(|b| sem::lbu(b, rd, rs1, imm_i(word)))
+                }
+            }
+            Insn::Lhu => {
+                if rv32 {
+                    env.step(|b| sem::lhu_rv32(b, rd, rs1, imm_i(word)))
+                } else {
+                    env.step(|b| sem::lhu(b, rd, rs1, imm_i(word)))
+                }
+            }
+            Insn::Lwu => {
+                if rv32 {
+                    return Outcome::Unimplemented { pc: env.pc, word };
+                }
+                env.step(|b| sem::lwu(b, rd, rs1, imm_i(word)))
+            }
+            Insn::Sb => {
+                if rv32 {
+                    env.step(|b| sem::sb_rv32(b, rs1, rs2, imm_s(word)))
+                } else {
+                    env.step(|b| sem::sb(b, rs1, rs2, imm_s(word)))
+                }
+            }
+            Insn::Sh => {
+                if rv32 {
+                    env.step(|b| sem::sh_rv32(b, rs1, rs2, imm_s(word)))
+                } else {
+                    env.step(|b| sem::sh(b, rs1, rs2, imm_s(word)))
+                }
+            }
+            Insn::Sw => {
+                if rv32 {
+                    env.step(|b| sem::sw_rv32(b, rs1, rs2, imm_s(word)))
+                } else {
+                    env.step(|b| sem::sw(b, rs1, rs2, imm_s(word)))
+                }
+            }
+            Insn::Sd => {
+                if rv32 {
+                    return Outcome::Unimplemented { pc: env.pc, word };
+                }
+                env.step(|b| sem::sd(b, rs1, rs2, imm_s(word)))
+            }
+            Insn::Slli => {
+                if rv32 {
+                    env.step(|b| sem::slli_rv32(b, rd, rs1, ((word >> 20) & 63) as u64))
+                } else {
+                    env.step(|b| sem::slli(b, rd, rs1, ((word >> 20) & 63) as u64))
+                }
+            }
+            Insn::Srli => {
+                if rv32 {
+                    env.step(|b| sem::srli_rv32(b, rd, rs1, ((word >> 20) & 63) as u64))
+                } else {
+                    env.step(|b| sem::srli(b, rd, rs1, ((word >> 20) & 63) as u64))
+                }
+            }
+            Insn::Srai => {
+                if rv32 {
+                    env.step(|b| sem::srai_rv32(b, rd, rs1, ((word >> 20) & 63) as u64))
+                } else {
+                    env.step(|b| sem::srai(b, rd, rs1, ((word >> 20) & 63) as u64))
+                }
+            }
+            Insn::Sub => {
+                if rv32 {
+                    env.step(|b| sem::sub_rv32(b, rd, rs1, rs2))
+                } else {
+                    env.step(|b| sem::sub(b, rd, rs1, rs2))
+                }
+            }
+            Insn::Sll => {
+                if rv32 {
+                    env.step(|b| sem::sll_rv32(b, rd, rs1, rs2))
+                } else {
+                    env.step(|b| sem::sll(b, rd, rs1, rs2))
+                }
+            }
+            Insn::Slt => {
+                if rv32 {
+                    env.step(|b| sem::slt_rv32(b, rd, rs1, rs2))
+                } else {
+                    env.step(|b| sem::slt(b, rd, rs1, rs2))
+                }
+            }
+            Insn::Sltu => {
+                if rv32 {
+                    env.step(|b| sem::sltu_rv32(b, rd, rs1, rs2))
+                } else {
+                    env.step(|b| sem::sltu(b, rd, rs1, rs2))
+                }
+            }
+            Insn::Xor => {
+                if rv32 {
+                    env.step(|b| sem::xor_rv32(b, rd, rs1, rs2))
+                } else {
+                    env.step(|b| sem::xor(b, rd, rs1, rs2))
+                }
+            }
+            Insn::Or => {
+                if rv32 {
+                    env.step(|b| sem::or_rv32(b, rd, rs1, rs2))
+                } else {
+                    env.step(|b| sem::or(b, rd, rs1, rs2))
+                }
+            }
+            Insn::And => {
+                if rv32 {
+                    env.step(|b| sem::and_rv32(b, rd, rs1, rs2))
+                } else {
+                    env.step(|b| sem::and(b, rd, rs1, rs2))
+                }
+            }
+            Insn::Sra => {
+                if rv32 {
+                    env.step(|b| sem::sra_rv32(b, rd, rs1, rs2))
+                } else {
+                    env.step(|b| sem::sra(b, rd, rs1, rs2))
+                }
+            }
+            Insn::Srl => {
+                if rv32 {
+                    env.step(|b| sem::srl_rv32(b, rd, rs1, rs2))
+                } else {
+                    env.step(|b| sem::srl(b, rd, rs1, rs2))
+                }
+            }
+            Insn::Slti => {
+                if rv32 {
+                    env.step(|b| sem::slti_rv32(b, rd, rs1, imm_i(word)))
+                } else {
+                    env.step(|b| sem::slti(b, rd, rs1, imm_i(word)))
+                }
+            }
+            Insn::Sltiu => {
+                if rv32 {
+                    env.step(|b| sem::sltiu_rv32(b, rd, rs1, imm_i(word)))
+                } else {
+                    env.step(|b| sem::sltiu(b, rd, rs1, imm_i(word)))
+                }
+            }
+            Insn::Mul => {
+                if rv32 {
+                    env.step(|b| sem::mul_rv32(b, rd, rs1, rs2))
+                } else {
+                    env.step(|b| sem::mul(b, rd, rs1, rs2))
+                }
+            }
+            Insn::Mulh => {
+                if rv32 {
+                    env.step(|b| sem::mulh_rv32(b, rd, rs1, rs2))
+                } else {
+                    env.step(|b| sem::mulh(b, rd, rs1, rs2))
+                }
+            }
+            Insn::Mulhsu => {
+                if rv32 {
+                    env.step(|b| sem::mulhsu_rv32(b, rd, rs1, rs2))
+                } else {
+                    env.step(|b| sem::mulhsu(b, rd, rs1, rs2))
+                }
+            }
+            Insn::Mulhu => {
+                if rv32 {
+                    env.step(|b| sem::mulhu_rv32(b, rd, rs1, rs2))
+                } else {
+                    env.step(|b| sem::mulhu(b, rd, rs1, rs2))
+                }
+            }
+            Insn::Div => {
+                if rv32 {
+                    env.step(|b| sem::div_rv32(b, rd, rs1, rs2))
+                } else {
+                    env.step(|b| sem::div(b, rd, rs1, rs2))
+                }
+            }
+            Insn::Divu => {
+                if rv32 {
+                    env.step(|b| sem::divu_rv32(b, rd, rs1, rs2))
+                } else {
+                    env.step(|b| sem::divu(b, rd, rs1, rs2))
+                }
+            }
+            Insn::Rem => {
+                if rv32 {
+                    env.step(|b| sem::rem_rv32(b, rd, rs1, rs2))
+                } else {
+                    env.step(|b| sem::rem(b, rd, rs1, rs2))
+                }
+            }
+            Insn::Remu => {
+                if rv32 {
+                    env.step(|b| sem::remu_rv32(b, rd, rs1, rs2))
+                } else {
+                    env.step(|b| sem::remu(b, rd, rs1, rs2))
+                }
+            }
+            Insn::Mulw => {
+                if rv32 {
+                    return Outcome::Unimplemented { pc: env.pc, word };
+                }
+                env.step(|b| sem::mulw(b, rd, rs1, rs2))
+            }
+            Insn::Divw => {
+                if rv32 {
+                    return Outcome::Unimplemented { pc: env.pc, word };
+                }
+                env.step(|b| sem::divw(b, rd, rs1, rs2))
+            }
+            Insn::Divuw => {
+                if rv32 {
+                    return Outcome::Unimplemented { pc: env.pc, word };
+                }
+                env.step(|b| sem::divuw(b, rd, rs1, rs2))
+            }
+            Insn::Remw => {
+                if rv32 {
+                    return Outcome::Unimplemented { pc: env.pc, word };
+                }
+                env.step(|b| sem::remw(b, rd, rs1, rs2))
+            }
+            Insn::Remuw => {
+                if rv32 {
+                    return Outcome::Unimplemented { pc: env.pc, word };
+                }
+                env.step(|b| sem::remuw(b, rd, rs1, rs2))
+            }
+            Insn::Xori => {
+                if rv32 {
+                    env.step(|b| sem::xori_rv32(b, rd, rs1, imm_i(word)))
+                } else {
+                    env.step(|b| sem::xori(b, rd, rs1, imm_i(word)))
+                }
+            }
+            Insn::Ori => {
+                if rv32 {
+                    env.step(|b| sem::ori_rv32(b, rd, rs1, imm_i(word)))
+                } else {
+                    env.step(|b| sem::ori(b, rd, rs1, imm_i(word)))
+                }
+            }
+            Insn::Andi => {
+                if rv32 {
+                    env.step(|b| sem::andi_rv32(b, rd, rs1, imm_i(word)))
+                } else {
+                    env.step(|b| sem::andi(b, rd, rs1, imm_i(word)))
+                }
+            }
             Insn::Csrrw => {
                 let pc = env.pc;
                 env.step(|b| sem::csrrw(b, rd, rs1, csr, pc))
@@ -381,10 +689,16 @@ fn run(env: &mut BareEnv, entry: u64) -> Outcome {
                 env.step(|b| sem::fcvt_wu_s(b, rd, fs1, rm))
             }
             Insn::FcvtLS => {
+                if rv32 {
+                    return Outcome::Unimplemented { pc: env.pc, word };
+                }
                 let rm = resolve_rm(env, ((word >> 12) & 7) as u8);
                 env.step(|b| sem::fcvt_l_s(b, rd, fs1, rm))
             }
             Insn::FcvtLuS => {
+                if rv32 {
+                    return Outcome::Unimplemented { pc: env.pc, word };
+                }
                 let rm = resolve_rm(env, ((word >> 12) & 7) as u8);
                 env.step(|b| sem::fcvt_lu_s(b, rd, fs1, rm))
             }
@@ -398,10 +712,16 @@ fn run(env: &mut BareEnv, entry: u64) -> Outcome {
                 env.step(|b| sem::fcvt_s_wu(b, fd, rs1, rm))
             }
             Insn::FcvtSL => {
+                if rv32 {
+                    return Outcome::Unimplemented { pc: env.pc, word };
+                }
                 let rm = resolve_rm(env, ((word >> 12) & 7) as u8);
                 env.step(|b| sem::fcvt_s_l(b, fd, rs1, rm))
             }
             Insn::FcvtSLu => {
+                if rv32 {
+                    return Outcome::Unimplemented { pc: env.pc, word };
+                }
                 let rm = resolve_rm(env, ((word >> 12) & 7) as u8);
                 env.step(|b| sem::fcvt_s_lu(b, fd, rs1, rm))
             }
@@ -436,10 +756,16 @@ fn run(env: &mut BareEnv, entry: u64) -> Outcome {
                 env.step(|b| sem::fcvt_wu_d(b, rd, fs1, rm))
             }
             Insn::FcvtLD => {
+                if rv32 {
+                    return Outcome::Unimplemented { pc: env.pc, word };
+                }
                 let rm = resolve_rm(env, ((word >> 12) & 7) as u8);
                 env.step(|b| sem::fcvt_l_d(b, rd, fs1, rm))
             }
             Insn::FcvtLuD => {
+                if rv32 {
+                    return Outcome::Unimplemented { pc: env.pc, word };
+                }
                 let rm = resolve_rm(env, ((word >> 12) & 7) as u8);
                 env.step(|b| sem::fcvt_lu_d(b, rd, fs1, rm))
             }
@@ -453,10 +779,16 @@ fn run(env: &mut BareEnv, entry: u64) -> Outcome {
                 env.step(|b| sem::fcvt_d_wu(b, fd, rs1, rm))
             }
             Insn::FcvtDL => {
+                if rv32 {
+                    return Outcome::Unimplemented { pc: env.pc, word };
+                }
                 let rm = resolve_rm(env, ((word >> 12) & 7) as u8);
                 env.step(|b| sem::fcvt_d_l(b, fd, rs1, rm))
             }
             Insn::FcvtDLu => {
+                if rv32 {
+                    return Outcome::Unimplemented { pc: env.pc, word };
+                }
                 let rm = resolve_rm(env, ((word >> 12) & 7) as u8);
                 env.step(|b| sem::fcvt_d_lu(b, fd, rs1, rm))
             }
@@ -499,12 +831,20 @@ fn check_one_in(sub: &str, name: &str) {
         eprintln!("skip: .testdata/riscv-tests がないため未実行");
         return;
     }
+    let rv32 = sub.starts_with("rv32");
     let Some(bytes) = build_elf_in(sub, name) else {
         eprintln!("skip: 組み立て器がないため未実行");
         return;
     };
-    let ehdr = polyisa_loader::elf::parse_ehdr(&bytes).expect("ELFヘッダ");
-    let phdrs = polyisa_loader::elf::parse_phdrs(&bytes, &ehdr).expect("PHDR");
+    let (ehdr, phdrs) = if rv32 {
+        let ehdr = polyisa_loader::elf::parse_ehdr32(&bytes).expect("ELFヘッダ");
+        let phdrs = polyisa_loader::elf::parse_phdrs32(&bytes, &ehdr).expect("PHDR");
+        (ehdr, phdrs)
+    } else {
+        let ehdr = polyisa_loader::elf::parse_ehdr(&bytes).expect("ELFヘッダ");
+        let phdrs = polyisa_loader::elf::parse_phdrs(&bytes, &ehdr).expect("PHDR");
+        (ehdr, phdrs)
+    };
     let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
     // riscv-tests のハーネスは M モードで動く。特権レベルを M (3) に置く。
     env.backend.set(
@@ -512,7 +852,7 @@ fn check_one_in(sub: &str, name: &str) {
         3,
     );
     polyisa_loader::elf::load_segments(&bytes, &phdrs, &mut env.backend.mem).expect("配置");
-    match run(&mut env, ehdr.entry) {
+    match run(&mut env, ehdr.entry, rv32) {
         Outcome::Exit(code) => assert_eq!(code, 0, "{name} が失敗"),
         Outcome::Unimplemented { pc, word } => {
             panic!("{name}: 未実装に到達 pc={pc:#x} word={word:#x}")
@@ -523,6 +863,14 @@ fn check_one_in(sub: &str, name: &str) {
 
 fn check_one(name: &str) {
     check_one_in("rv64ui", name);
+}
+
+fn check_rv32i(name: &str) {
+    check_one_in("rv32ui", name);
+}
+
+fn check_rv32m(name: &str) {
+    check_one_in("rv32um", name);
 }
 
 fn check_um(name: &str) {
@@ -790,4 +1138,246 @@ fn rv64ud_p_recoding() {
 #[test]
 fn rv64ud_p_structural() {
     check_ud("structural");
+}
+
+// rv32ui のうち fence_i（非実行セグメントへの自己書き換え）と
+// ma_data（非整列アクセス）は対象外。rv64 の実行分と同範囲に限る。
+#[test]
+fn rv32ui_p_add() {
+    check_rv32i("add");
+}
+
+#[test]
+fn rv32ui_p_addi() {
+    check_rv32i("addi");
+}
+
+#[test]
+fn rv32ui_p_and() {
+    check_rv32i("and");
+}
+
+#[test]
+fn rv32ui_p_andi() {
+    check_rv32i("andi");
+}
+
+#[test]
+fn rv32ui_p_auipc() {
+    check_rv32i("auipc");
+}
+
+#[test]
+fn rv32ui_p_beq() {
+    check_rv32i("beq");
+}
+
+#[test]
+fn rv32ui_p_bge() {
+    check_rv32i("bge");
+}
+
+#[test]
+fn rv32ui_p_bgeu() {
+    check_rv32i("bgeu");
+}
+
+#[test]
+fn rv32ui_p_blt() {
+    check_rv32i("blt");
+}
+
+#[test]
+fn rv32ui_p_bltu() {
+    check_rv32i("bltu");
+}
+
+#[test]
+fn rv32ui_p_bne() {
+    check_rv32i("bne");
+}
+
+#[test]
+fn rv32ui_p_jal() {
+    check_rv32i("jal");
+}
+
+#[test]
+fn rv32ui_p_jalr() {
+    check_rv32i("jalr");
+}
+
+#[test]
+fn rv32ui_p_lb() {
+    check_rv32i("lb");
+}
+
+#[test]
+fn rv32ui_p_lbu() {
+    check_rv32i("lbu");
+}
+
+#[test]
+fn rv32ui_p_lh() {
+    check_rv32i("lh");
+}
+
+#[test]
+fn rv32ui_p_lhu() {
+    check_rv32i("lhu");
+}
+
+#[test]
+fn rv32ui_p_lui() {
+    check_rv32i("lui");
+}
+
+#[test]
+fn rv32ui_p_lw() {
+    check_rv32i("lw");
+}
+
+#[test]
+fn rv32ui_p_or() {
+    check_rv32i("or");
+}
+
+#[test]
+fn rv32ui_p_ori() {
+    check_rv32i("ori");
+}
+
+#[test]
+fn rv32ui_p_sb() {
+    check_rv32i("sb");
+}
+
+#[test]
+fn rv32ui_p_sh() {
+    check_rv32i("sh");
+}
+
+#[test]
+fn rv32ui_p_sll() {
+    check_rv32i("sll");
+}
+
+#[test]
+fn rv32ui_p_slli() {
+    check_rv32i("slli");
+}
+
+#[test]
+fn rv32ui_p_slt() {
+    check_rv32i("slt");
+}
+
+#[test]
+fn rv32ui_p_slti() {
+    check_rv32i("slti");
+}
+
+#[test]
+fn rv32ui_p_sltiu() {
+    check_rv32i("sltiu");
+}
+
+#[test]
+fn rv32ui_p_sltu() {
+    check_rv32i("sltu");
+}
+
+#[test]
+fn rv32ui_p_sra() {
+    check_rv32i("sra");
+}
+
+#[test]
+fn rv32ui_p_srai() {
+    check_rv32i("srai");
+}
+
+#[test]
+fn rv32ui_p_srl() {
+    check_rv32i("srl");
+}
+
+#[test]
+fn rv32ui_p_srli() {
+    check_rv32i("srli");
+}
+
+#[test]
+fn rv32ui_p_sub() {
+    check_rv32i("sub");
+}
+
+#[test]
+fn rv32ui_p_sw() {
+    check_rv32i("sw");
+}
+
+#[test]
+fn rv32ui_p_xor() {
+    check_rv32i("xor");
+}
+
+#[test]
+fn rv32ui_p_xori() {
+    check_rv32i("xori");
+}
+
+#[test]
+fn rv32ui_p_simple() {
+    check_rv32i("simple");
+}
+
+#[test]
+fn rv32ui_p_ld_st() {
+    check_rv32i("ld_st");
+}
+
+#[test]
+fn rv32ui_p_st_ld() {
+    check_rv32i("st_ld");
+}
+
+#[test]
+fn rv32um_p_mul() {
+    check_rv32m("mul");
+}
+
+#[test]
+fn rv32um_p_mulh() {
+    check_rv32m("mulh");
+}
+
+#[test]
+fn rv32um_p_mulhsu() {
+    check_rv32m("mulhsu");
+}
+
+#[test]
+fn rv32um_p_mulhu() {
+    check_rv32m("mulhu");
+}
+
+#[test]
+fn rv32um_p_div() {
+    check_rv32m("div");
+}
+
+#[test]
+fn rv32um_p_divu() {
+    check_rv32m("divu");
+}
+
+#[test]
+fn rv32um_p_rem() {
+    check_rv32m("rem");
+}
+
+#[test]
+fn rv32um_p_remu() {
+    check_rv32m("remu");
 }

@@ -696,6 +696,57 @@ fn c_jump_moves() {
 }
 
 #[test]
+fn rv32_wrap_semantics() {
+    let mut env = env();
+    env.map_rw(0, 1).unwrap();
+    // 0xFFFFFFFF + 1 は 32 ビットで包んで 0 になる（RV64 では 0x100000000）。
+    env.step(|b| sem::addi_rv32(b, Gpr(1), Gpr(0), -1)).unwrap();
+    assert_eq!(x(&mut env, 1), 0xffff_ffff_ffff_ffff);
+    env.step(|b| sem::addi_rv32(b, Gpr(2), Gpr(0), 1)).unwrap();
+    env.step(|b| sem::add_rv32(b, Gpr(3), Gpr(1), Gpr(2)))
+        .unwrap();
+    assert_eq!(x(&mut env, 3), 0);
+    // 符号付き比較では -1 < 1、符号なしでは 0xFFFFFFFF > 1。
+    env.step(|b| sem::slt_rv32(b, Gpr(4), Gpr(1), Gpr(2)))
+        .unwrap();
+    assert_eq!(x(&mut env, 4), 1);
+    env.step(|b| sem::sltu_rv32(b, Gpr(4), Gpr(1), Gpr(2)))
+        .unwrap();
+    assert_eq!(x(&mut env, 4), 0);
+    // 算術右シフトは符号を伸ばす。slli は下位 5 ビットだけ使う。
+    env.step(|b| sem::srai_rv32(b, Gpr(5), Gpr(1), 31)).unwrap();
+    assert_eq!(x(&mut env, 5), 0xffff_ffff_ffff_ffff);
+    env.step(|b| sem::slli_rv32(b, Gpr(5), Gpr(2), 33)).unwrap();
+    assert_eq!(x(&mut env, 5), 2);
+    // 7 % -1 = 0。(-1)*(-1) の上位 32 ビットは 0。
+    env.step(|b| sem::addi_rv32(b, Gpr(6), Gpr(0), 7)).unwrap();
+    env.step(|b| sem::rem_rv32(b, Gpr(7), Gpr(6), Gpr(1)))
+        .unwrap();
+    assert_eq!(x(&mut env, 7), 0);
+    env.step(|b| sem::mulh_rv32(b, Gpr(7), Gpr(1), Gpr(1)))
+        .unwrap();
+    assert_eq!(x(&mut env, 7), 0);
+    // ロードストアは下位 32 ビットで往復する。
+    env.step(|b| sem::addi_rv32(b, Gpr(9), Gpr(0), 0x100))
+        .unwrap();
+    env.step(|b| sem::sw_rv32(b, Gpr(9), Gpr(1), 0)).unwrap();
+    env.step(|b| sem::lw_rv32(b, Gpr(10), Gpr(9), 0)).unwrap();
+    assert_eq!(x(&mut env, 10), 0xffff_ffff_ffff_ffff);
+    // JAL の戻りと飛び先は 32 ビットで包む。
+    env.step(|b| sem::jal_rv32(b, Gpr(8), 0xffff_fff0, 32))
+        .unwrap();
+    assert_eq!(env.pc, 0x10);
+    assert_eq!(x(&mut env, 8), 0xffff_ffff_ffff_fff4);
+    // JALR のベース加算も 32 ビットで包む。
+    env.step(|b| sem::addi_rv32(b, Gpr(11), Gpr(0), -256))
+        .unwrap();
+    env.step(|b| sem::jalr_rv32(b, Gpr(0), Gpr(11), 0x1000, 0x10))
+        .unwrap();
+    assert_eq!(env.pc, 0xffff_ff10);
+    assert_eq!(x(&mut env, 0), 0);
+}
+
+#[test]
 fn system_exits() {
     let mut env = env();
     let r = env.step(|b| sem::ecall(b, 0x100));

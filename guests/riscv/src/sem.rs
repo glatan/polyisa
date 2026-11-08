@@ -629,6 +629,358 @@ pub fn remuw<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
     Ok(())
 }
 
+// RV32（XLEN=32）の整数演算。GPR は下位 32 ビットに符号拡張した値を置き、
+// 分岐・ジャンプの飛び先とロードストアのアドレスは 32 ビットで包む。
+// W 接尾辞の RV64 命令と同じ約束なので、意味が同一の演算は W 版に委譲する。
+// Ref: SPEC-RISCV-UNPRIV (20250508) §RV32I.
+
+/// 32 ビットマスク。RV32 の PC とアドレスの包み込みに使う。
+const MASK32: u64 = 0xffff_ffff;
+
+/// RV32 用のロードアドレス。32 ビットで包んでゼロ拡張する。
+fn load_addr_rv32<B: Backend>(b: &mut B, rs1: Gpr, oimm: i64) -> B::V<W64> {
+    let base = read(b, rs1);
+    let b32 = b.trunc::<W64, W32>(base);
+    let off = b.konst::<W32>(oimm as u32);
+    let a32 = b.add(b32, off);
+    b.zext::<W32, W64>(a32)
+}
+
+/// LUI（RV32）。
+pub fn lui_rv32<B: Backend>(b: &mut B, rd: Gpr, imm20: i64) -> Flow<B> {
+    let v = b.konst::<W32>((imm20 as u32) << 12);
+    write_w(b, rd, v);
+    Ok(())
+}
+
+/// AUIPC（RV32）。
+pub fn auipc_rv32<B: Backend>(b: &mut B, rd: Gpr, pc: u64, imm20: i64) -> Flow<B> {
+    let v = pc.wrapping_add((imm20 as u64) << 12) & MASK32;
+    let w = b.konst::<W32>(v as u32);
+    write_w(b, rd, w);
+    Ok(())
+}
+
+/// JAL（RV32）。
+pub fn jal_rv32<B: Backend>(b: &mut B, rd: Gpr, pc: u64, jimm: i64) -> Flow<B> {
+    let ret = b.konst::<W32>(((pc.wrapping_add(4)) & MASK32) as u32);
+    write_w(b, rd, ret);
+    let target = const_w64(b, pc.wrapping_add(jimm as u64) & MASK32);
+    b.jump(target);
+    Ok(())
+}
+
+/// JALR（RV32）。飛び先の最下位ビットは 0 にし、32 ビットで包む。
+pub fn jalr_rv32<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, pc: u64, oimm: i64) -> Flow<B> {
+    let base = read(b, rs1);
+    let b32 = b.trunc::<W64, W32>(base);
+    let off = b.konst::<W32>(oimm as u32);
+    let sum = b.add(b32, off);
+    let addr = b.zext::<W32, W64>(sum);
+    let mask = const_w64(b, !1);
+    let target = b.and(addr, mask);
+    let ret = b.konst::<W32>(((pc.wrapping_add(4)) & MASK32) as u32);
+    write_w(b, rd, ret);
+    b.jump(target);
+    Ok(())
+}
+
+// RV32 分岐。条件は 32 ビットで比べ、飛び先は 32 ビットで包む。
+
+fn branch_rv32<B: Backend>(b: &mut B, op: Cmp, rs1: Gpr, rs2: Gpr, pc: u64, bimm: i64) -> Flow<B> {
+    // 符号付き比較は 64 ビットに符号拡張してから比べる。
+    // 符号なし比較はゼロ拡張のままで正しい。
+    let x = read_w(b, rs1);
+    let y = read_w(b, rs2);
+    let c = match op {
+        Cmp::LtS | Cmp::GeS => {
+            let xs = b.sext::<W32, W64>(x);
+            let ys = b.sext::<W32, W64>(y);
+            b.cmp(op, xs, ys)
+        }
+        _ => b.cmp(op, x, y),
+    };
+    b.branch(c, pc.wrapping_add(bimm as u64) & MASK32);
+    Ok(())
+}
+
+pub fn beq_rv32<B: Backend>(b: &mut B, rs1: Gpr, rs2: Gpr, pc: u64, bimm: i64) -> Flow<B> {
+    branch_rv32(b, Cmp::Eq, rs1, rs2, pc, bimm)
+}
+
+pub fn bne_rv32<B: Backend>(b: &mut B, rs1: Gpr, rs2: Gpr, pc: u64, bimm: i64) -> Flow<B> {
+    branch_rv32(b, Cmp::Ne, rs1, rs2, pc, bimm)
+}
+
+pub fn blt_rv32<B: Backend>(b: &mut B, rs1: Gpr, rs2: Gpr, pc: u64, bimm: i64) -> Flow<B> {
+    branch_rv32(b, Cmp::LtS, rs1, rs2, pc, bimm)
+}
+
+pub fn bge_rv32<B: Backend>(b: &mut B, rs1: Gpr, rs2: Gpr, pc: u64, bimm: i64) -> Flow<B> {
+    branch_rv32(b, Cmp::GeS, rs1, rs2, pc, bimm)
+}
+
+pub fn bltu_rv32<B: Backend>(b: &mut B, rs1: Gpr, rs2: Gpr, pc: u64, bimm: i64) -> Flow<B> {
+    branch_rv32(b, Cmp::LtU, rs1, rs2, pc, bimm)
+}
+
+pub fn bgeu_rv32<B: Backend>(b: &mut B, rs1: Gpr, rs2: Gpr, pc: u64, bimm: i64) -> Flow<B> {
+    branch_rv32(b, Cmp::GeU, rs1, rs2, pc, bimm)
+}
+
+// RV32 ロード。32 ビットに符号・ゼロ拡張して書き戻す。
+
+pub fn lb_rv32<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, oimm: i64) -> Flow<B> {
+    let addr = load_addr_rv32(b, rs1, oimm);
+    let v: B::V<W8> = b.load(addr, DATA_READ)?;
+    let e = b.sext::<W8, W32>(v);
+    write_w(b, rd, e);
+    Ok(())
+}
+
+pub fn lh_rv32<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, oimm: i64) -> Flow<B> {
+    let addr = load_addr_rv32(b, rs1, oimm);
+    let v: B::V<W16> = b.load(addr, DATA_READ)?;
+    let e = b.sext::<W16, W32>(v);
+    write_w(b, rd, e);
+    Ok(())
+}
+
+pub fn lw_rv32<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, oimm: i64) -> Flow<B> {
+    let addr = load_addr_rv32(b, rs1, oimm);
+    let v: B::V<W32> = b.load(addr, DATA_READ)?;
+    write_w(b, rd, v);
+    Ok(())
+}
+
+pub fn lbu_rv32<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, oimm: i64) -> Flow<B> {
+    let addr = load_addr_rv32(b, rs1, oimm);
+    let v: B::V<W8> = b.load(addr, DATA_READ)?;
+    let e = b.zext::<W8, W32>(v);
+    write_w(b, rd, e);
+    Ok(())
+}
+
+pub fn lhu_rv32<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, oimm: i64) -> Flow<B> {
+    let addr = load_addr_rv32(b, rs1, oimm);
+    let v: B::V<W16> = b.load(addr, DATA_READ)?;
+    let e = b.zext::<W16, W32>(v);
+    write_w(b, rd, e);
+    Ok(())
+}
+
+// RV32 ストア。値の切り詰めは XLEN によらないので 64 ビット版と同じ形である。
+
+pub fn sb_rv32<B: Backend>(b: &mut B, rs1: Gpr, rs2: Gpr, oimm: i64) -> Flow<B> {
+    let raw = read(b, rs2);
+    let v = b.trunc::<W64, W8>(raw);
+    let addr = load_addr_rv32(b, rs1, oimm);
+    b.store(addr, v, DATA_WRITE)?;
+    Ok(())
+}
+
+pub fn sh_rv32<B: Backend>(b: &mut B, rs1: Gpr, rs2: Gpr, oimm: i64) -> Flow<B> {
+    let raw = read(b, rs2);
+    let v = b.trunc::<W64, W16>(raw);
+    let addr = load_addr_rv32(b, rs1, oimm);
+    b.store(addr, v, DATA_WRITE)?;
+    Ok(())
+}
+
+pub fn sw_rv32<B: Backend>(b: &mut B, rs1: Gpr, rs2: Gpr, oimm: i64) -> Flow<B> {
+    let raw = read(b, rs2);
+    let v = b.trunc::<W64, W32>(raw);
+    let addr = load_addr_rv32(b, rs1, oimm);
+    b.store(addr, v, DATA_WRITE)?;
+    Ok(())
+}
+
+// RV32 OP-IMM。32 ビット演算して符号拡張して書く。
+
+pub fn addi_rv32<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, oimm: i64) -> Flow<B> {
+    let x = read_w(b, rs1);
+    let y = b.konst::<W32>(oimm as u32);
+    let s = b.add(x, y);
+    write_w(b, rd, s);
+    Ok(())
+}
+
+pub fn slti_rv32<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, oimm: i64) -> Flow<B> {
+    let x = read_w(b, rs1);
+    let xs = b.sext::<W32, W64>(x);
+    let y = b.konst::<W32>(oimm as u32);
+    let ys = b.sext::<W32, W64>(y);
+    let c = b.cmp(Cmp::LtS, xs, ys);
+    setcc(b, rd, c);
+    Ok(())
+}
+
+pub fn sltiu_rv32<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, oimm: i64) -> Flow<B> {
+    let x = read_w(b, rs1);
+    let y = b.konst::<W32>(oimm as u32);
+    let c = b.cmp(Cmp::LtU, x, y);
+    setcc(b, rd, c);
+    Ok(())
+}
+
+pub fn xori_rv32<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, oimm: i64) -> Flow<B> {
+    let x = read_w(b, rs1);
+    let y = b.konst::<W32>(oimm as u32);
+    let s = b.xor(x, y);
+    write_w(b, rd, s);
+    Ok(())
+}
+
+pub fn ori_rv32<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, oimm: i64) -> Flow<B> {
+    let x = read_w(b, rs1);
+    let y = b.konst::<W32>(oimm as u32);
+    let s = b.or(x, y);
+    write_w(b, rd, s);
+    Ok(())
+}
+
+pub fn andi_rv32<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, oimm: i64) -> Flow<B> {
+    let x = read_w(b, rs1);
+    let y = b.konst::<W32>(oimm as u32);
+    let s = b.and(x, y);
+    write_w(b, rd, s);
+    Ok(())
+}
+
+pub fn slli_rv32<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, shamt: u64) -> Flow<B> {
+    let x = read_w(b, rs1);
+    let n = b.konst::<W32>((shamt & 31) as u32);
+    let s = b.shl(x, n);
+    write_w(b, rd, s);
+    Ok(())
+}
+
+pub fn srli_rv32<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, shamt: u64) -> Flow<B> {
+    let x = read_w(b, rs1);
+    let n = b.konst::<W32>((shamt & 31) as u32);
+    let s = b.shr_l(x, n);
+    write_w(b, rd, s);
+    Ok(())
+}
+
+pub fn srai_rv32<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, shamt: u64) -> Flow<B> {
+    let x = read_w(b, rs1);
+    let n = b.konst::<W32>((shamt & 31) as u32);
+    let s = b.shr_a(x, n);
+    write_w(b, rd, s);
+    Ok(())
+}
+
+// RV32 OP。32 ビット演算して符号拡張して書く。W 接尾辞と意味が同一のものは委譲する。
+
+pub fn add_rv32<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    addw(b, rd, rs1, rs2)
+}
+
+pub fn sub_rv32<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    subw(b, rd, rs1, rs2)
+}
+
+pub fn sll_rv32<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    sllw(b, rd, rs1, rs2)
+}
+
+pub fn slt_rv32<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    let x = read_w(b, rs1);
+    let xs = b.sext::<W32, W64>(x);
+    let y = read_w(b, rs2);
+    let ys = b.sext::<W32, W64>(y);
+    let c = b.cmp(Cmp::LtS, xs, ys);
+    setcc(b, rd, c);
+    Ok(())
+}
+
+pub fn sltu_rv32<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    let x = read_w(b, rs1);
+    let y = read_w(b, rs2);
+    let c = b.cmp(Cmp::LtU, x, y);
+    setcc(b, rd, c);
+    Ok(())
+}
+
+pub fn xor_rv32<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    let x = read_w(b, rs1);
+    let y = read_w(b, rs2);
+    let s = b.xor(x, y);
+    write_w(b, rd, s);
+    Ok(())
+}
+
+pub fn srl_rv32<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    srlw(b, rd, rs1, rs2)
+}
+
+pub fn sra_rv32<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    sraw(b, rd, rs1, rs2)
+}
+
+pub fn or_rv32<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    let x = read_w(b, rs1);
+    let y = read_w(b, rs2);
+    let s = b.or(x, y);
+    write_w(b, rd, s);
+    Ok(())
+}
+
+pub fn and_rv32<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    let x = read_w(b, rs1);
+    let y = read_w(b, rs2);
+    let s = b.and(x, y);
+    write_w(b, rd, s);
+    Ok(())
+}
+
+// RV32 M（乗除算）。下位 32 ビットの積と剰余は W 版と同じである。
+
+pub fn mul_rv32<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    mulw(b, rd, rs1, rs2)
+}
+
+pub fn mulh_rv32<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    let x = read_w(b, rs1);
+    let y = read_w(b, rs2);
+    let s = b.mulh(x, y);
+    write_w(b, rd, s);
+    Ok(())
+}
+
+pub fn mulhsu_rv32<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    let x = read_w(b, rs1);
+    let y = read_w(b, rs2);
+    let s = b.mulhsu(x, y);
+    write_w(b, rd, s);
+    Ok(())
+}
+
+pub fn mulhu_rv32<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    let x = read_w(b, rs1);
+    let y = read_w(b, rs2);
+    let s = b.mulhu(x, y);
+    write_w(b, rd, s);
+    Ok(())
+}
+
+pub fn div_rv32<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    divw(b, rd, rs1, rs2)
+}
+
+pub fn divu_rv32<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    divuw(b, rd, rs1, rs2)
+}
+
+pub fn rem_rv32<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    remw(b, rd, rs1, rs2)
+}
+
+pub fn remu_rv32<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    remuw(b, rd, rs1, rs2)
+}
+
 // CSR（Zicsr）。権限と読み書き属性を検査する。
 // Ref: SPEC-RISCV-PRIV (20250508) §CSR address mapping conventions.
 

@@ -22,7 +22,8 @@ impl polyisa_guest::GuestIsa for Riscv {
 #[repr(C)]
 #[derive(Clone, Debug)]
 pub struct CpuState {
-    /// 整数レジスタ x0〜x31。RV32 では下位 32 ビットだけを使う。
+    /// 整数レジスタ x0〜x31。RV32 では下位 32 ビットに符号拡張した値を置く
+    ///（W 接尾辞の書き戻しと同じ約束）。読み出しは下位 32 ビットを使う。
     pub x: [u64; 32],
     /// プログラムカウンタ。
     pub pc: u64,
