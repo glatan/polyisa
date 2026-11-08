@@ -24,6 +24,11 @@ fn xf(env: &mut BareEnv, r: u8) -> u32 {
     (env.backend.get(Fpr(r).state()) & 0xffff_ffff) as u32
 }
 
+fn x64(env: &mut BareEnv, r: u8) -> u64 {
+    use polyisa_guest_riscv::sem::Fpr;
+    env.backend.get(Fpr(r).state())
+}
+
 #[test]
 fn addi_add() {
     let mut env = env();
@@ -411,6 +416,53 @@ fn f_convert_move_compare() {
     env.step(|b| sem::fsw(b, Gpr(7), Fpr(1), 0)).unwrap();
     env.step(|b| sem::flw(b, Fpr(8), Gpr(7), 0)).unwrap();
     assert_eq!(xf(&mut env, 8), 0x3fc0_0000);
+}
+
+#[test]
+fn d_arithmetic() {
+    use polyisa_guest_riscv::sem::Fpr;
+    let mut env = env();
+    env.map_rw(0, 1).unwrap();
+    // f64 1.5 と 2.25 を置く。
+    env.backend.set(Fpr(1).state(), 0x3FF8_0000_0000_0000);
+    env.backend.set(Fpr(2).state(), 0x4002_0000_0000_0000);
+    env.step(|b| sem::fadd_d(b, Fpr(3), Fpr(1), Fpr(2)))
+        .unwrap();
+    assert_eq!(x64(&mut env, 3), 0x400E_0000_0000_0000);
+    env.step(|b| sem::fsub_d(b, Fpr(3), Fpr(2), Fpr(1)))
+        .unwrap();
+    assert_eq!(x64(&mut env, 3), 0x3FE8_0000_0000_0000);
+    env.step(|b| sem::fmul_d(b, Fpr(3), Fpr(1), Fpr(2)))
+        .unwrap();
+    assert_eq!(x64(&mut env, 3), 0x400B_0000_0000_0000);
+    env.step(|b| sem::fdiv_d(b, Fpr(3), Fpr(2), Fpr(1)))
+        .unwrap();
+    assert_eq!(x64(&mut env, 3), 0x3FF8_0000_0000_0000);
+    env.step(|b| sem::fsqrt_d(b, Fpr(3), Fpr(2))).unwrap();
+    assert_eq!(x64(&mut env, 3), 0x3FF8_0000_0000_0000);
+    // 比較と分類。
+    env.step(|b| sem::flt_d(b, Gpr(4), Fpr(1), Fpr(2))).unwrap();
+    assert_eq!(x(&mut env, 4), 1);
+    env.step(|b| sem::feq_d(b, Gpr(4), Fpr(1), Fpr(1))).unwrap();
+    assert_eq!(x(&mut env, 4), 1);
+    env.step(|b| sem::fclass_d(b, Gpr(4), Fpr(1))).unwrap();
+    assert_eq!(x(&mut env, 4), 64);
+    // 整数との往復。1.5 は偶数丸めで 2 になる。
+    env.step(|b| sem::fcvt_l_d(b, Gpr(4), Fpr(1))).unwrap();
+    assert_eq!(x(&mut env, 4), 2);
+    env.step(|b| sem::fcvt_d_l(b, Fpr(5), Gpr(4))).unwrap();
+    assert_eq!(x64(&mut env, 5), 0x4000_0000_0000_0000);
+    env.step(|b| sem::fcvt_s_d(b, Fpr(6), Fpr(1))).unwrap();
+    assert_eq!(xf(&mut env, 6), 0x3FC0_0000);
+    // fmv.d.x / fmv.x.d / fld / fsd でビット列を往復させる。
+    env.step(|b| sem::addi(b, Gpr(7), Gpr(0), 0x300)).unwrap();
+    env.step(|b| sem::fmv_d_x(b, Fpr(7), Gpr(7))).unwrap();
+    assert_eq!(x64(&mut env, 7), 0x300);
+    env.step(|b| sem::fmv_x_d(b, Gpr(8), Fpr(2))).unwrap();
+    assert_eq!(x(&mut env, 8), 0x4002_0000_0000_0000);
+    env.step(|b| sem::fsd(b, Gpr(7), Fpr(2), 0)).unwrap();
+    env.step(|b| sem::fld(b, Fpr(9), Gpr(7), 0)).unwrap();
+    assert_eq!(x64(&mut env, 9), 0x4002_0000_0000_0000);
 }
 
 #[test]
