@@ -1,0 +1,12 @@
+[package]
+name = "polyisa-jit"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.99"
+
+[dependencies]
+polyisa-ir = { path = "../ir" }
+polyisa-host = { path = "../host" }
+
+[lints]
+workspace = true

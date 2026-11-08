@@ -1,0 +1,15 @@
+[package]
+name = "polyisa-cli"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.99"
+
+[dependencies]
+polyisa-engine = { path = "../engine" }
+polyisa-guest = { path = "../guest" }
+polyisa-kernel = { path = "../kernel" }
+polyisa-loader = { path = "../loader" }
+polyisa-trace = { path = "../trace" }
+
+[lints]
+workspace = true

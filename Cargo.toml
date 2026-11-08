@@ -10,6 +10,19 @@ members = [
     "crates/engine",
     "crates/isadl",
     "crates/isagen",
+    "crates/diag",
+    "crates/softfloat",
+    "crates/decimal",
+    "crates/ir",
+    "crates/host",
+    "crates/loader",
+    "crates/kernel",
+    "crates/os-linux",
+    "crates/os-wasi",
+    "crates/trace",
+    "crates/gdbstub",
+    "crates/cli",
+    "crates/jit",
 ]
 resolver = "2"
 
