@@ -11,7 +11,49 @@ name = "polyisa-devtool"
 version = "0.0.0"
 
 [[package]]
+name = "polyisa-engine"
+version = "0.0.0"
+dependencies = [
+ "polyisa-bits",
+ "polyisa-guest",
+ "polyisa-mem",
+ "polyisa-sem",
+ "polyisa-timing",
+]
+
+[[package]]
+name = "polyisa-guest"
+version = "0.0.0"
+dependencies = [
+ "polyisa-bits",
+ "polyisa-sem",
+ "polyisa-timing",
+]
+
+[[package]]
+name = "polyisa-mem"
+version = "0.0.0"
+dependencies = [
+ "polyisa-bits",
+]
+
+[[package]]
+name = "polyisa-sem"
+version = "0.0.0"
+dependencies = [
+ "polyisa-bits",
+ "polyisa-mem",
+]
+
+[[package]]
 name = "polyisa-testkit"
+version = "0.0.0"
+dependencies = [
+ "polyisa-bits",
+]
+
+[[package]]
+name = "polyisa-timing"
 version = "0.0.0"
 dependencies = [
  "polyisa-bits",

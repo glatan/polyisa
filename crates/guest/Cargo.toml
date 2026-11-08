@@ -1,0 +1,13 @@
+[package]
+name = "polyisa-guest"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.99"
+
+[dependencies]
+polyisa-bits = { path = "../bits" }
+polyisa-sem = { path = "../sem" }
+polyisa-timing = { path = "../timing" }
+
+[lints]
+workspace = true
