@@ -7,6 +7,7 @@ rust-version = "1.99"
 [dependencies]
 polyisa-engine = { path = "../engine" }
 polyisa-guest = { path = "../guest" }
+polyisa-guest-riscv = { path = "../../guests/riscv" }
 polyisa-kernel = { path = "../kernel" }
 polyisa-loader = { path = "../loader" }
 polyisa-trace = { path = "../trace" }
