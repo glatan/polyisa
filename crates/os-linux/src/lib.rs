@@ -8,10 +8,12 @@
 #![forbid(unsafe_code)]
 
 /// 対応するゲスト ABI の名前。段階1は RV64 のみ。
+/// x86_64 は番号表のみを持ち、実行は段階4の範囲である。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum GuestAbi {
     Unknown,
     Rv64Linux,
+    X86_64Linux,
 }
 
 /// 段階1で使うシステムコール番号（RISC-V・asm-generic）。
@@ -45,7 +47,40 @@ pub mod rv64 {
     pub const STATX: u64 = 291;
 }
 
-/// ABI と番号から名前を引く。段階1の範囲のみ。
+/// 段階4の準備としての x86_64 番号表（Linux・64ビット）。
+/// 値はカーネルの UAPI 由来の事実であり、`heavy_abi_uapi` で突き合わせる。
+/// 実行時の規約（`syscall` 命令、レジスタ割当て）は段階4の範囲である。
+// Ref: SRC-LINUX (7.3).
+pub mod x86_64 {
+    pub const READ: u64 = 0;
+    pub const WRITE: u64 = 1;
+    pub const CLOSE: u64 = 3;
+    pub const MMAP: u64 = 9;
+    pub const MPROTECT: u64 = 10;
+    pub const MUNMAP: u64 = 11;
+    pub const BRK: u64 = 12;
+    pub const EXIT: u64 = 60;
+    pub const EXIT_GROUP: u64 = 231;
+    pub const UNAME: u64 = 63;
+    pub const SET_TID_ADDRESS: u64 = 218;
+    pub const CLOCK_GETTIME: u64 = 228;
+    pub const GETRANDOM: u64 = 318;
+    pub const OPENAT: u64 = 257;
+    // 段階2相当（ファイル操作）。
+    pub const LSEEK: u64 = 8;
+    pub const GETDENTS64: u64 = 217;
+    pub const GETCWD: u64 = 79;
+    pub const DUP3: u64 = 292;
+    pub const FCNTL: u64 = 72;
+    pub const IOCTL: u64 = 16;
+    pub const PREAD64: u64 = 17;
+    pub const READLINKAT: u64 = 267;
+    pub const NEWFSTATAT: u64 = 262;
+    pub const FSTAT: u64 = 5;
+    pub const STATX: u64 = 332;
+}
+
+/// ABI と番号から名前を引く。段階1の範囲と x86_64 の番号表のみ。
 #[must_use]
 pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
     match abi {
@@ -75,6 +110,34 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             rv64::NEWFSTATAT => Some("newfstatat"),
             rv64::FSTAT => Some("fstat"),
             rv64::STATX => Some("statx"),
+            _ => None,
+        },
+        GuestAbi::X86_64Linux => match nr {
+            x86_64::READ => Some("read"),
+            x86_64::WRITE => Some("write"),
+            x86_64::CLOSE => Some("close"),
+            x86_64::MMAP => Some("mmap"),
+            x86_64::MPROTECT => Some("mprotect"),
+            x86_64::MUNMAP => Some("munmap"),
+            x86_64::BRK => Some("brk"),
+            x86_64::EXIT => Some("exit"),
+            x86_64::EXIT_GROUP => Some("exit_group"),
+            x86_64::UNAME => Some("uname"),
+            x86_64::SET_TID_ADDRESS => Some("set_tid_address"),
+            x86_64::CLOCK_GETTIME => Some("clock_gettime"),
+            x86_64::GETRANDOM => Some("getrandom"),
+            x86_64::OPENAT => Some("openat"),
+            x86_64::LSEEK => Some("lseek"),
+            x86_64::GETDENTS64 => Some("getdents64"),
+            x86_64::GETCWD => Some("getcwd"),
+            x86_64::DUP3 => Some("dup3"),
+            x86_64::FCNTL => Some("fcntl"),
+            x86_64::IOCTL => Some("ioctl"),
+            x86_64::PREAD64 => Some("pread64"),
+            x86_64::READLINKAT => Some("readlinkat"),
+            x86_64::NEWFSTATAT => Some("newfstatat"),
+            x86_64::FSTAT => Some("fstat"),
+            x86_64::STATX => Some("statx"),
             _ => None,
         },
         GuestAbi::Unknown => None,
@@ -153,6 +216,19 @@ mod tests {
         assert_eq!(syscall_name(GuestAbi::Rv64Linux, 291), Some("statx"));
         assert_eq!(syscall_name(GuestAbi::Rv64Linux, 61), Some("getdents64"));
         assert_eq!(syscall_name(GuestAbi::Rv64Linux, 9999), None);
+    }
+
+    #[test]
+    fn x86_64_stage1_numbers() {
+        // 代表的な番号が x86_64 の UAPI と一致する（全体は層6で突合せ）。
+        assert_eq!(x86_64::WRITE, 1);
+        assert_eq!(x86_64::EXIT_GROUP, 231);
+        assert_eq!(x86_64::MMAP, 9);
+        assert_eq!(x86_64::BRK, 12);
+        assert_eq!(syscall_name(GuestAbi::X86_64Linux, 1), Some("write"));
+        assert_eq!(syscall_name(GuestAbi::X86_64Linux, 332), Some("statx"));
+        assert_eq!(syscall_name(GuestAbi::X86_64Linux, 217), Some("getdents64"));
+        assert_eq!(syscall_name(GuestAbi::X86_64Linux, 64), None);
     }
 
     #[test]
