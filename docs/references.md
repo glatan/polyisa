@@ -90,6 +90,7 @@
 | SPEC-X86-8086 | 8086 と 8088 のユーザーズマニュアル（書名は確認時に確定） | Intel | — | x86（8086、8088） | — | — | 未確認 | |
 | SPEC-X86-I486 | 80486 のプログラマ向けリファレンスマニュアル（書名は確認時に確定） | Intel | — | x86（80486 のタイミング） | — | — | 未確認 | |
 | SPEC-X86-PENTIUM | Pentium の開発者向けマニュアル（書名は確認時に確定） | Intel | — | x86（Pentium のタイミング） | — | — | 未確認 | |
+| SPEC-X86-PSABI | System V Application Binary Interface の x86-64 移植版（書名・版は確認時に確定） | 確認時に記録 | — | x86（psABI、初期スタック・シグナルフレーム） | — | — | 未確認 | os-linux の x86_64 対応時に用途を定める |
 | SPEC-ARM-ARM-A | Arm Architecture Reference Manual for A-profile architecture | Arm | — | aarch64、arm | — | — | 未確認 | |
 | SPEC-ARM-ARM-V7AR | ARM Architecture Reference Manual, ARMv7-A and ARMv7-R edition | Arm | — | arm | — | — | 未確認 | |
 | SPEC-ARM-ARM-LEGACY | ARMv6 以前の ARM Architecture Reference Manual（版は確認時に確定） | Arm | — | arm | — | — | 未確認 | |
