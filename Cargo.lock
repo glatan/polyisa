@@ -7,7 +7,29 @@ name = "polyisa-bits"
 version = "0.0.0"
 
 [[package]]
+name = "polyisa-cli"
+version = "0.0.0"
+dependencies = [
+ "polyisa-engine",
+ "polyisa-guest",
+ "polyisa-kernel",
+ "polyisa-loader",
+ "polyisa-trace",
+]
+
+[[package]]
+name = "polyisa-decimal"
+version = "0.0.0"
+dependencies = [
+ "polyisa-bits",
+]
+
+[[package]]
 name = "polyisa-devtool"
+version = "0.0.0"
+
+[[package]]
+name = "polyisa-diag"
 version = "0.0.0"
 
 [[package]]
@@ -22,12 +44,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "polyisa-gdbstub"
+version = "0.0.0"
+dependencies = [
+ "polyisa-engine",
+ "polyisa-guest",
+]
+
+[[package]]
 name = "polyisa-guest"
 version = "0.0.0"
 dependencies = [
  "polyisa-bits",
  "polyisa-sem",
  "polyisa-timing",
+]
+
+[[package]]
+name = "polyisa-host"
+version = "0.0.0"
+
+[[package]]
+name = "polyisa-ir"
+version = "0.0.0"
+dependencies = [
+ "polyisa-bits",
+ "polyisa-guest",
+ "polyisa-mem",
+ "polyisa-sem",
 ]
 
 [[package]]
@@ -42,10 +86,55 @@ dependencies = [
 ]
 
 [[package]]
+name = "polyisa-jit"
+version = "0.0.0"
+dependencies = [
+ "polyisa-host",
+ "polyisa-ir",
+]
+
+[[package]]
+name = "polyisa-kernel"
+version = "0.0.0"
+dependencies = [
+ "polyisa-engine",
+ "polyisa-guest",
+ "polyisa-host",
+ "polyisa-mem",
+ "polyisa-timing",
+]
+
+[[package]]
+name = "polyisa-loader"
+version = "0.0.0"
+dependencies = [
+ "polyisa-bits",
+]
+
+[[package]]
 name = "polyisa-mem"
 version = "0.0.0"
 dependencies = [
  "polyisa-bits",
+]
+
+[[package]]
+name = "polyisa-os-linux"
+version = "0.0.0"
+dependencies = [
+ "polyisa-engine",
+ "polyisa-guest",
+ "polyisa-kernel",
+ "polyisa-loader",
+]
+
+[[package]]
+name = "polyisa-os-wasi"
+version = "0.0.0"
+dependencies = [
+ "polyisa-engine",
+ "polyisa-guest",
+ "polyisa-kernel",
 ]
 
 [[package]]
@@ -54,6 +143,13 @@ version = "0.0.0"
 dependencies = [
  "polyisa-bits",
  "polyisa-mem",
+]
+
+[[package]]
+name = "polyisa-softfloat"
+version = "0.0.0"
+dependencies = [
+ "polyisa-bits",
 ]
 
 [[package]]
@@ -68,4 +164,12 @@ name = "polyisa-timing"
 version = "0.0.0"
 dependencies = [
  "polyisa-bits",
+]
+
+[[package]]
+name = "polyisa-trace"
+version = "0.0.0"
+dependencies = [
+ "polyisa-engine",
+ "polyisa-guest",
 ]
