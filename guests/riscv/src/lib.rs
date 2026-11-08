@@ -145,7 +145,7 @@ mod tests {
         assert_eq!(decode(0x910a, 16), Some(Insn::CAdd));
         assert_eq!(decode(0x9002, 16), Some(Insn::CEbreak));
         assert_eq!(decode(0x8002, 16), None);
-        // RV64優先：c_flw と同符号化の c_ld が先に一致する。
+        // 既定は RV64：c_flw と同符号化の c_ld が先に一致する。
         assert_eq!(decode(0x6000, 16), Some(Insn::CLd));
         assert_eq!(decode(0x6001, 16), Some(Insn::CLuiAddi16sp));
         assert_eq!(decode(0xa000, 16), Some(Insn::CFsd));
@@ -156,5 +156,32 @@ mod tests {
         assert_eq!(decode(0x6002, 16), Some(Insn::CLdsp));
         assert_eq!(decode(0xffff_ffff, 32), None);
         assert_eq!(decode(0x0020_8133, 16), None);
+    }
+
+    #[test]
+    fn decode_model_resolves_rv32_overlap() {
+        // モデル対応デコード（ADR-0006）。RV32/RV64 で符号化が重なる
+        // 5 通りは、`when` の述語で振り分ける。
+        // Ref: SPEC-RISCV-UNPRIV (20250508) §C.
+        // c.jal / c.addiw。
+        assert_eq!(decode_model(0x2001, 16, true), Some(Insn::CAddiw));
+        assert_eq!(decode_model(0x2001, 16, false), Some(Insn::CJal));
+        // c.flw / c.ld。
+        assert_eq!(decode_model(0x6000, 16, true), Some(Insn::CLd));
+        assert_eq!(decode_model(0x6000, 16, false), Some(Insn::CFlw));
+        // c.fsw / c.sd。
+        assert_eq!(decode_model(0xe000, 16, true), Some(Insn::CSd));
+        assert_eq!(decode_model(0xe000, 16, false), Some(Insn::CFsw));
+        // c.flwsp / c.ldsp。
+        assert_eq!(decode_model(0x6002, 16, true), Some(Insn::CLdsp));
+        assert_eq!(decode_model(0x6002, 16, false), Some(Insn::CFlwsp));
+        // c.fswsp / c.sdsp。
+        assert_eq!(decode_model(0xe002, 16, true), Some(Insn::CSdsp));
+        assert_eq!(decode_model(0xe002, 16, false), Some(Insn::CFswsp));
+        // 重ならない命令は XLEN によらず同じ。
+        assert_eq!(decode_model(0x0000, 16, true), Some(Insn::CAddi4spn));
+        assert_eq!(decode_model(0x0000, 16, false), Some(Insn::CAddi4spn));
+        assert_eq!(decode_model(0x8002, 16, true), None);
+        assert_eq!(decode_model(0x8002, 16, false), None);
     }
 }

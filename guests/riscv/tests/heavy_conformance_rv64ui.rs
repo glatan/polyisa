@@ -1067,65 +1067,12 @@ fn run(env: &mut BareEnv, entry: u64, rv32: bool) -> Outcome {
 }
 
 /// 16ビット命令を1件実行する。継続するとき None、退出するとき Some を返す。
-/// RV32 と重なる 5 通りの符号化は RV32 側に振り分ける（デコーダ自体は
-/// RV64 優先の線形照合のまま。将来のモデル対応分配までの暫定）。
+/// RV32/RV64 で符号化が重なる命令は、モデル対応デコード（`decode_model`、
+/// ADR-0006）が `when` の述語で振り分ける。
 /// Ref: SPEC-RISCV-UNPRIV (20250508) §C.
 fn step_c(env: &mut BareEnv, w16: u16, rv32: bool) -> Option<Outcome> {
     let word = u32::from(w16);
-    // RV32 との重なり。生成デコーダは RV64 側を返すので先に横取りする。
-    if rv32 {
-        let funct3 = (word >> 13) & 7;
-        let op = word & 3;
-        let w = w16;
-        let r = match (funct3, op) {
-            // c.jal (RV32)。c.addiw と同符号化。
-            (0b001, 0b01) => {
-                let off = c_j_imm(w);
-                let pc = env.pc;
-                Some(env.step(|b| sem::c_jal(b, pc, off)))
-            }
-            // c.flw (RV32)。c.ld と同符号化。
-            (0b011, 0b00) => {
-                let rd = Fpr(crd3(w));
-                let rs1 = Gpr(crs1(w));
-                let off = c_lw_uimm(w) as i64;
-                Some(env.step(|b| sem::c_flw_rv32(b, rd, rs1, off)))
-            }
-            // c.fsw (RV32)。c.sd と同符号化。
-            (0b111, 0b00) => {
-                let rs1 = Gpr(crs1(w));
-                let rs2 = Fpr(crd3(w));
-                let off = c_lw_uimm(w) as i64;
-                Some(env.step(|b| sem::c_fsw_rv32(b, rs1, rs2, off)))
-            }
-            // c.flwsp (RV32)。c.ldsp と同符号化。
-            (0b011, 0b10) => {
-                let rd = Fpr(creg5(w));
-                let off = c_lwsp_uimm(w) as i64;
-                Some(env.step(|b| sem::c_flwsp_rv32(b, rd, off)))
-            }
-            // c.fswsp (RV32)。c.sdsp と同符号化。
-            (0b111, 0b10) => {
-                // CSS 形式。rs2 は bits[6:2]。
-                let rs2 = Fpr(crs2(w));
-                let off = c_swsp_uimm(w) as i64;
-                Some(env.step(|b| sem::c_fswsp_rv32(b, rs2, off)))
-            }
-            _ => None,
-        };
-        if let Some(r) = r {
-            return match r {
-                Ok(()) => {
-                    if env.backend.ctrl == polyisa_engine::interp::Ctrl::Fallthrough {
-                        env.pc += 2;
-                    }
-                    None
-                }
-                Err(_) => Some(Outcome::Unimplemented { pc: env.pc, word }),
-            };
-        }
-    }
-    let Some(insn) = polyisa_guest_riscv::decode(u128::from(word), 16) else {
+    let Some(insn) = polyisa_guest_riscv::decode_model(u128::from(word), 16, !rv32) else {
         return Some(Outcome::Unimplemented { pc: env.pc, word });
     };
     let r = run_c(env, insn, word, rv32);
@@ -1461,6 +1408,15 @@ fn run_c(
             let rd = Gpr(r(5, 7));
             let imm = c_imm6(w);
             env.step(|b| sem::c_addiw(b, rd, imm))
+        }
+        Insn::CJal => {
+            // RV32 のみ（RV64 では CAddiw に分配される）。
+            if !rv32 {
+                return Err(Outcome::Unimplemented { pc: env.pc, word });
+            }
+            let pc = env.pc;
+            let off = c_j_imm(w);
+            env.step(|b| sem::c_jal(b, pc, off))
         }
         Insn::CLi => {
             let rd = Gpr(r(5, 7));
