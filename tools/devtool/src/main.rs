@@ -46,6 +46,14 @@ fn cmd_check() -> i32 {
         eprintln!("check: 外部依存の禁止: {e}");
         failed = true;
     }
+    if let Err(e) = check_dep_rules() {
+        eprintln!("check: 依存規則: {e}");
+        failed = true;
+    }
+    if let Err(e) = check_cfg_rules() {
+        eprintln!("check: cfg の規則: {e}");
+        failed = true;
+    }
     if let Err(e) = check_refs_register() {
         eprintln!("check: 台帳の検査: {e}");
         failed = true;
@@ -173,6 +181,27 @@ fn check_no_external_crates() -> Result<(), String> {
     }
 }
 
+/// クレート間の依存規則を検査する。許可表は `docs/design/workspace.md` の「依存規則」による。
+fn check_dep_rules() -> Result<(), String> {
+    let violations = dep_violations(&workspace_root());
+    if violations.is_empty() {
+        Ok(())
+    } else {
+        Err(violations.join("; "))
+    }
+}
+
+/// ホスト依存の分離を検査する。`crates/` では `host` と `jit` だけが
+/// `cfg(target_*)` と `std::os::` の OS 固有モジュールを使える。
+fn check_cfg_rules() -> Result<(), String> {
+    let violations = cfg_violations(&workspace_root());
+    if violations.is_empty() {
+        Ok(())
+    } else {
+        Err(violations.join("; "))
+    }
+}
+
 /// 台帳の表が読め、ID が `^(SPEC|SRC|TEST|BIN|MEAS|TOOL)-` に従うことを確かめる。
 /// 内容の確認（利用条件の妥当性）は所有者が行い、ここでは書式だけを見る。
 fn check_refs_register() -> Result<usize, String> {
@@ -202,6 +231,233 @@ fn check_refs_register() -> Result<usize, String> {
 fn is_register_id(id: &str) -> bool {
     const PREFIXES: [&str; 6] = ["SPEC-", "SRC-", "TEST-", "BIN-", "MEAS-", "TOOL-"];
     PREFIXES.iter().any(|p| id.starts_with(p))
+}
+
+/// 依存してよい相手の表。`docs/design/workspace.md` の「依存規則」による。
+/// 殻の段階では `cli` を最小の依存に絞っている（全依存は後の段階で戻す）。
+fn allowed_deps(pkg: &str) -> Option<&'static [&'static str]> {
+    Some(match pkg {
+        "polyisa-bits" => &[],
+        "polyisa-softfloat" => &["polyisa-bits"],
+        "polyisa-decimal" => &["polyisa-bits"],
+        "polyisa-diag" => &[],
+        "polyisa-isadl" => &[],
+        "polyisa-isagen" => &["polyisa-isadl"],
+        "polyisa-mem" => &["polyisa-bits"],
+        "polyisa-sem" => &["polyisa-bits", "polyisa-mem"],
+        "polyisa-guest" => &["polyisa-bits", "polyisa-sem", "polyisa-timing"],
+        "polyisa-timing" => &["polyisa-bits"],
+        "polyisa-engine" => &[
+            "polyisa-bits",
+            "polyisa-mem",
+            "polyisa-sem",
+            "polyisa-guest",
+            "polyisa-timing",
+        ],
+        "polyisa-ir" => &["polyisa-sem", "polyisa-guest", "polyisa-mem"],
+        "polyisa-jit" => &["polyisa-ir", "polyisa-host"],
+        "polyisa-loader" => &["polyisa-bits"],
+        "polyisa-kernel" => &[
+            "polyisa-mem",
+            "polyisa-engine",
+            "polyisa-guest",
+            "polyisa-timing",
+            "polyisa-host",
+        ],
+        "polyisa-os-linux" => &[
+            "polyisa-kernel",
+            "polyisa-loader",
+            "polyisa-engine",
+            "polyisa-guest",
+        ],
+        "polyisa-os-wasi" => &["polyisa-kernel", "polyisa-engine", "polyisa-guest"],
+        "polyisa-host" => &[],
+        "polyisa-trace" => &["polyisa-engine", "polyisa-guest"],
+        "polyisa-gdbstub" => &["polyisa-engine", "polyisa-guest"],
+        "polyisa-cli" => &[
+            "polyisa-engine",
+            "polyisa-guest",
+            "polyisa-kernel",
+            "polyisa-loader",
+            "polyisa-trace",
+        ],
+        "polyisa-testkit" => &["polyisa-bits"],
+        "polyisa-devtool" => &[
+            "polyisa-testkit",
+            "polyisa-isadl",
+            "polyisa-isagen",
+            "polyisa-trace",
+        ],
+        _ => return None,
+    })
+}
+
+/// 各メンバーの `Cargo.toml` を読み、許可表にない依存を列挙する。
+fn dep_violations(root: &std::path::Path) -> Vec<String> {
+    let members = workspace_members(root);
+    let mut out = Vec::new();
+    for (dir, pkg) in &members {
+        let text = match std::fs::read_to_string(root.join(format!("{dir}/Cargo.toml"))) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        let Some(allowed) = allowed_deps(pkg) else {
+            continue;
+        };
+        for dep in workspace_dep_names(&text) {
+            if !allowed.contains(&dep.as_str()) {
+                out.push(format!("{pkg} -> {dep}"));
+            }
+        }
+    }
+    out
+}
+
+/// `crates/` の Rust ソースからホスト分離の違反を集める。
+/// `host` と `jit` 以外での `cfg(target_*)` と `std::os::` の使用を違反とする。
+fn cfg_violations(root: &std::path::Path) -> Vec<String> {
+    let mut out = Vec::new();
+    let crates = root.join("crates");
+    let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(&crates) {
+        for e in rd.flatten() {
+            if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                dirs.push(e.path());
+            }
+        }
+    }
+    dirs.sort();
+    for dir in dirs {
+        let name = dir.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        // `host` と JIT のホストバックエンド（`jit`）は例外。
+        if name == "host" || name == "jit" {
+            continue;
+        }
+        let mut files = Vec::new();
+        collect_rs(&dir, &mut files);
+        files.sort();
+        for f in files {
+            let text = match std::fs::read_to_string(&f) {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            for (i, line) in text.lines().enumerate() {
+                // コメント行は検査の対象外にする。
+                let code = line.split("//").next().unwrap_or("");
+                if code.contains("cfg(target_os")
+                    || code.contains("cfg(target_arch")
+                    || code.contains("cfg(target_endian")
+                    || code.contains("cfg(target_pointer_width")
+                    || code.contains("std::os::")
+                {
+                    let rel = f.strip_prefix(root).unwrap_or(&f).display().to_string();
+                    out.push(format!("{}:{}: {}", rel, i + 1, code.trim()));
+                }
+            }
+        }
+    }
+    out
+}
+
+fn collect_rs(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            collect_rs(&p, out);
+        } else if p.extension().and_then(|s| s.to_str()) == Some("rs") {
+            out.push(p);
+        }
+    }
+}
+
+/// ルートの `Cargo.toml` から `(dir, package)` を集める。
+fn workspace_members(root: &std::path::Path) -> Vec<(String, String)> {
+    let Ok(root_text) = std::fs::read_to_string(root.join("Cargo.toml")) else {
+        return Vec::new();
+    };
+    let mut members = Vec::new();
+    let mut in_members = false;
+    for line in root_text.lines() {
+        let t = line.trim();
+        if t.starts_with("members") {
+            in_members = true;
+            for part in t.split('"').skip(1).step_by(2) {
+                members.push(part.to_string());
+            }
+            if t.contains(']') {
+                in_members = false;
+            }
+            continue;
+        }
+        if in_members {
+            for part in t.split('"').skip(1).step_by(2) {
+                members.push(part.to_string());
+            }
+            if t.contains(']') {
+                in_members = false;
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for m in members {
+        let Ok(text) = std::fs::read_to_string(root.join(format!("{m}/Cargo.toml"))) else {
+            continue;
+        };
+        if let Some(pkg) = package_name_of(&text) {
+            out.push((m, pkg));
+        }
+    }
+    out
+}
+
+/// `[package] name = "..."` を読む。
+fn package_name_of(text: &str) -> Option<String> {
+    let mut in_package = false;
+    for line in text.lines() {
+        let t = line.trim();
+        if t == "[package]" {
+            in_package = true;
+            continue;
+        }
+        if t.starts_with('[') {
+            in_package = false;
+            continue;
+        }
+        if in_package
+            && let Some(v) = t.strip_prefix("name")
+            && let Some(q1) = v.find('"')
+            && let Some(q2) = v[q1 + 1..].find('"')
+        {
+            return Some(v[q1 + 1..q1 + 1 + q2].to_string());
+        }
+    }
+    None
+}
+
+/// `[dependencies]` の `polyisa-*` を集める。
+fn workspace_dep_names(manifest: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut in_deps = false;
+    for line in manifest.lines() {
+        let t = line.trim();
+        if t.starts_with('[') {
+            in_deps = t == "[dependencies]";
+            continue;
+        }
+        if !in_deps {
+            continue;
+        }
+        let t = t.split('#').next().unwrap_or("").trim();
+        if let Some(name) = t.split(['=', ' ']).next()
+            && name.starts_with("polyisa-")
+        {
+            out.push(name.to_string());
+        }
+    }
+    out
 }
 
 /// ワークスペースのメンバーのパッケージ名を `cargo metadata` なしで集める。
@@ -280,5 +536,26 @@ mod tests {
     fn refs_register_is_readable() {
         let n = check_refs_register().expect("references.md should parse");
         assert!(n > 60, "expected many IDs, got {n}");
+    }
+
+    #[test]
+    fn dep_rules_hold() {
+        assert!(check_dep_rules().is_ok());
+    }
+
+    #[test]
+    fn cfg_rules_hold() {
+        assert!(check_cfg_rules().is_ok());
+    }
+
+    #[test]
+    fn dep_names_parsed() {
+        let manifest = "[dependencies]\npolyisa-bits = { path = \"../bits\" }\nserde = \"1\"\n";
+        assert_eq!(
+            workspace_dep_names(manifest),
+            vec!["polyisa-bits".to_string()]
+        );
+        assert_eq!(allowed_deps("polyisa-mem"), Some(&["polyisa-bits"][..]));
+        assert_eq!(allowed_deps("no-such-crate"), None);
     }
 }

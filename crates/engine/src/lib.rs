@@ -4,6 +4,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod interp;
+
 use polyisa_mem::Tlb;
 
 /// 実行の単位の数か、仮想時間のサイクル数で与える。実時間では与えない。

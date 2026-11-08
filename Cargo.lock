@@ -68,7 +68,6 @@ version = "0.0.0"
 name = "polyisa-ir"
 version = "0.0.0"
 dependencies = [
- "polyisa-bits",
  "polyisa-guest",
  "polyisa-mem",
  "polyisa-sem",
