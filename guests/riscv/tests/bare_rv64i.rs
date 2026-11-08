@@ -516,6 +516,19 @@ fn c_compressed() {
     let pc = env.pc;
     env.step(|b| sem::c_bnez(b, Gpr(0), pc, 16)).unwrap();
     assert_eq!(env.pc, 0x1_0020);
+    // C.SRLI / C.SRAI / C.ANDI / C.SUB・XOR・OR・AND / C.SUBW・ADDW。
+    env.step(|b| sem::addi(b, Gpr(9), Gpr(0), -8)).unwrap();
+    env.step(|b| sem::c_srli(b, Gpr(9), 2)).unwrap();
+    assert_eq!(x(&mut env, 9), 0x3fff_ffff_ffff_fffe);
+    env.step(|b| sem::c_srai(b, Gpr(9), 2)).unwrap();
+    assert_eq!(x(&mut env, 9), 0x0fff_ffff_ffff_ffff);
+    env.step(|b| sem::c_andi(b, Gpr(9), 0xff)).unwrap();
+    assert_eq!(x(&mut env, 9), 0xff);
+    env.step(|b| sem::addi(b, Gpr(10), Gpr(0), 10)).unwrap();
+    env.step(|b| sem::c_sub(b, Gpr(10), Gpr(9))).unwrap();
+    assert_eq!(x(&mut env, 10), 0xffff_ffff_ffff_ff0b);
+    env.step(|b| sem::c_addw(b, Gpr(10), Gpr(9))).unwrap();
+    assert_eq!(x(&mut env, 10), 0xa);
 }
 
 #[test]
