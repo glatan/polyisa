@@ -26,10 +26,13 @@ pub struct CpuState {
     pub x: [u64; 32],
     /// プログラムカウンタ。
     pub pc: u64,
-    /// CSR ファイル。12 ビットのアドレスで引く。権限検査は後の段階で足す。
+    /// CSR ファイル。12 ビットのアドレスで引く。
     pub csr: [u64; 4096],
     /// 浮動小数点レジスタ f0〜f31。単精度の値は NaN ボックスして入れる。
     pub f: [u64; 32],
+    /// 現在の特権レベル（0=U、1=S、3=M）。CSR の権限検査に使う。
+    /// 裸実行の初期値は 0（U）であり、M モードのテストハーネスは明示的に 3 を置く。
+    pub priv_level: u64,
 }
 
 impl Default for CpuState {
@@ -39,6 +42,7 @@ impl Default for CpuState {
             pc: 0,
             csr: [0; 4096],
             f: [0; 32],
+            priv_level: 0,
         }
     }
 }

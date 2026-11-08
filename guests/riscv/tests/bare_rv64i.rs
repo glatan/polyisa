@@ -229,34 +229,84 @@ fn m_extension() {
 fn csr_read_write_set_clear() {
     use polyisa_guest_riscv::sem::Csr;
     let mut env = env();
-    // cycle (0xC00) に書いて読む。
+    // fcsr (0x003) に書いて読む。U モードの読み書き CSR である。
     env.step(|b| sem::addi(b, Gpr(1), Gpr(0), 42)).unwrap();
-    env.step(|b| sem::csrrw(b, Gpr(2), Gpr(1), Csr(0xC00)))
+    let pc = env.pc;
+    env.step(|b| sem::csrrw(b, Gpr(2), Gpr(1), Csr(0x003), pc))
         .unwrap();
     assert_eq!(x(&mut env, 2), 0);
-    env.step(|b| sem::csrrw(b, Gpr(2), Gpr(0), Csr(0xC00)))
+    let pc = env.pc;
+    env.step(|b| sem::csrrw(b, Gpr(2), Gpr(0), Csr(0x003), pc))
         .unwrap();
     assert_eq!(x(&mut env, 2), 42);
     // ビットを立てる。戻り値は書き換え前の値。
-    env.step(|b| sem::csrrsi(b, Gpr(3), 0b101, Csr(0xC00)))
+    let pc = env.pc;
+    env.step(|b| sem::csrrsi(b, Gpr(3), 0b101, Csr(0x003), pc))
         .unwrap();
     assert_eq!(x(&mut env, 3), 0);
     // 0b011111 を置き、x1=0b101010 のビットを落とす（0b011111 & ~0b101010 = 0b010101）。
-    env.step(|b| sem::csrrwi(b, Gpr(0), 0b11111, Csr(0xC00)))
+    let pc = env.pc;
+    env.step(|b| sem::csrrwi(b, Gpr(0), 0b11111, Csr(0x003), pc))
         .unwrap();
-    env.step(|b| sem::csrrc(b, Gpr(3), Gpr(1), Csr(0xC00)))
+    let pc = env.pc;
+    env.step(|b| sem::csrrc(b, Gpr(3), Gpr(1), Csr(0x003), pc))
         .unwrap();
     assert_eq!(x(&mut env, 3), 0b011111);
-    env.step(|b| sem::csrrs(b, Gpr(4), Gpr(0), Csr(0xC00)))
+    let pc = env.pc;
+    env.step(|b| sem::csrrs(b, Gpr(4), Gpr(0), Csr(0x003), pc))
         .unwrap();
     assert_eq!(x(&mut env, 4), 0b010101);
     // rs1=x0 の CSRRS は書き込まない。
-    env.step(|b| sem::csrrs(b, Gpr(3), Gpr(0), Csr(0xC00)))
+    let pc = env.pc;
+    env.step(|b| sem::csrrs(b, Gpr(3), Gpr(0), Csr(0x003), pc))
         .unwrap();
     assert_eq!(x(&mut env, 3), 0b010101);
     // uimm=0 の CSRRSI は書き込まない。
-    env.step(|b| sem::csrrsi(b, Gpr(3), 0, Csr(0xC00))).unwrap();
+    let pc = env.pc;
+    env.step(|b| sem::csrrsi(b, Gpr(3), 0, Csr(0x003), pc))
+        .unwrap();
     assert_eq!(x(&mut env, 3), 0b010101);
+}
+
+#[test]
+fn csr_permission_checks() {
+    use polyisa_guest_riscv::sem::Csr;
+    use polyisa_sem::{StateRef, W64};
+    fn priv_of() -> StateRef<W64> {
+        StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, priv_level))
+    }
+    let mut env = env();
+    // 初期状態は U モード (0) である。
+    assert_eq!(env.backend.get(priv_of()), 0);
+    // U モードで cycle (0xC00、読み出し専用) を読むのは成功する。
+    let pc = env.pc;
+    env.step(|b| sem::csrrs(b, Gpr(1), Gpr(0), Csr(0xC00), pc))
+        .unwrap();
+    // U モードで読み出し専用 CSR に書くと不正命令になる。
+    let pc = env.pc;
+    let r = env.step(|b| sem::csrrw(b, Gpr(1), Gpr(0), Csr(0xC00), pc));
+    assert!(matches!(r, Err(InterpExit::Exception(e)) if e.code == 2 && e.addr == Some(pc)));
+    // U モードで M 権限の CSR (mstatus, 0x300) に触ると不正命令になる。
+    let pc = env.pc;
+    let r = env.step(|b| sem::csrrs(b, Gpr(1), Gpr(0), Csr(0x300), pc));
+    assert!(matches!(r, Err(InterpExit::Exception(e)) if e.code == 2 && e.addr == Some(pc)));
+    // U モードで未定義の U 権限 CSR (0x010) に触ると不正命令になる。
+    let pc = env.pc;
+    let r = env.step(|b| sem::csrrs(b, Gpr(1), Gpr(0), Csr(0x010), pc));
+    assert!(matches!(r, Err(InterpExit::Exception(e)) if e.code == 2 && e.addr == Some(pc)));
+    // M モードでは M 権限の CSR に触れる。
+    env.backend.set(priv_of(), 3);
+    let pc = env.pc;
+    env.step(|b| sem::csrrw(b, Gpr(1), Gpr(0), Csr(0x300), pc))
+        .unwrap();
+    // 読み出し専用への書き込みは M モードでも不正命令になる。
+    let pc = env.pc;
+    let r = env.step(|b| sem::csrrw(b, Gpr(1), Gpr(0), Csr(0xC00), pc));
+    assert!(matches!(r, Err(InterpExit::Exception(e)) if e.code == 2 && e.addr == Some(pc)));
+    // M モードでの読み出し専用の読み出しは成功する。
+    let pc = env.pc;
+    env.step(|b| sem::csrrs(b, Gpr(1), Gpr(0), Csr(0xC00), pc))
+        .unwrap();
 }
 
 #[test]

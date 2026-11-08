@@ -629,11 +629,53 @@ pub fn remuw<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
     Ok(())
 }
 
-// CSR（Zicsr）。権限と読み書き属性の検査は後の段階で足す。
+// CSR（Zicsr）。権限と読み書き属性を検査する。
+// Ref: SPEC-RISCV-PRIV (20250508) §CSR address mapping conventions.
 
 /// CSR 番号（12 ビット）。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Csr(pub u16);
+
+/// 現在の特権レベルの CPU 状態での位置。
+fn priv_ref() -> StateRef<W64> {
+    StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, priv_level))
+}
+
+/// 不正命令の退出。mcause の値は 2（illegal instruction）である。
+fn illegal_insn<B: Backend>(b: &mut B, pc: u64) -> B::Exit {
+    b.raise(GuestException {
+        kind: polyisa_sem::ExceptionKind::Undefined,
+        code: 2,
+        addr: Some(pc),
+        in_delay_slot: false,
+    })
+}
+
+/// ユーザーモードで使える CSR。fflags/frm/fcsr とカウンタのみである。
+fn is_user_csr(n: u16) -> bool {
+    matches!(n, 0x001 | 0x002 | 0x003 | 0xC00 | 0xC01 | 0xC02)
+}
+
+/// CSR アクセスの権限検査。状態を書く前に呼ぶ。
+fn check_csr<B: Backend>(b: &mut B, csr: Csr, will_write: bool, pc: u64) -> Flow<B> {
+    // csr[9:8] が要求する最低特権レベル、csr[11:10]==0b11 が読み出し専用である。
+    let need = ((csr.0 >> 8) & 3) as u64;
+    if will_write && (csr.0 >> 10) & 3 == 3 {
+        return Err(illegal_insn(b, pc));
+    }
+    let cur: B::V<W64> = b.get(priv_ref());
+    let need_v = b.konst::<W64>(need);
+    let low = b.cmp(Cmp::LtU, cur, need_v);
+    b.if_then(low, |b| Err(illegal_insn(b, pc)))?;
+    // U モードでは未定義の U 権限 CSR も不正命令にする。
+    // M モードの裸ハーネスは全 CSR を許す。
+    if !is_user_csr(csr.0) {
+        let u_mode = b.konst::<W64>(0);
+        let is_u = b.cmp(Cmp::Eq, cur, u_mode);
+        b.if_then(is_u, |b| Err(illegal_insn(b, pc)))?;
+    }
+    Ok(())
+}
 
 fn csr_array() -> StateArray<W64> {
     StateArray::<W64>::from_layout(core::mem::offset_of!(CpuState, csr), 8)
@@ -711,7 +753,8 @@ fn accrue_fp<B: Backend>(b: &mut B) {
     write_csr(b, Csr(0x003), nxt);
 }
 
-pub fn csrrw<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, csr: Csr) -> Flow<B> {
+pub fn csrrw<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, csr: Csr, pc: u64) -> Flow<B> {
+    check_csr(b, csr, true, pc)?;
     let t = read_csr(b, csr);
     let x = read(b, rs1);
     write_csr(b, csr, x);
@@ -719,7 +762,8 @@ pub fn csrrw<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, csr: Csr) -> Flow<B> {
     Ok(())
 }
 
-pub fn csrrs<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, csr: Csr) -> Flow<B> {
+pub fn csrrs<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, csr: Csr, pc: u64) -> Flow<B> {
+    check_csr(b, csr, !rs1.is_zero(), pc)?;
     let t = read_csr(b, csr);
     if !rs1.is_zero() {
         let x = read(b, rs1);
@@ -730,7 +774,8 @@ pub fn csrrs<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, csr: Csr) -> Flow<B> {
     Ok(())
 }
 
-pub fn csrrc<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, csr: Csr) -> Flow<B> {
+pub fn csrrc<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, csr: Csr, pc: u64) -> Flow<B> {
+    check_csr(b, csr, !rs1.is_zero(), pc)?;
     let t = read_csr(b, csr);
     if !rs1.is_zero() {
         let x = read(b, rs1);
@@ -742,7 +787,8 @@ pub fn csrrc<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, csr: Csr) -> Flow<B> {
     Ok(())
 }
 
-pub fn csrrwi<B: Backend>(b: &mut B, rd: Gpr, uimm: u64, csr: Csr) -> Flow<B> {
+pub fn csrrwi<B: Backend>(b: &mut B, rd: Gpr, uimm: u64, csr: Csr, pc: u64) -> Flow<B> {
+    check_csr(b, csr, true, pc)?;
     let t = read_csr(b, csr);
     let x = b.konst::<W64>(uimm & 31);
     write_csr(b, csr, x);
@@ -750,7 +796,8 @@ pub fn csrrwi<B: Backend>(b: &mut B, rd: Gpr, uimm: u64, csr: Csr) -> Flow<B> {
     Ok(())
 }
 
-pub fn csrrsi<B: Backend>(b: &mut B, rd: Gpr, uimm: u64, csr: Csr) -> Flow<B> {
+pub fn csrrsi<B: Backend>(b: &mut B, rd: Gpr, uimm: u64, csr: Csr, pc: u64) -> Flow<B> {
+    check_csr(b, csr, uimm & 31 != 0, pc)?;
     let t = read_csr(b, csr);
     if uimm & 31 != 0 {
         let x = b.konst::<W64>(uimm & 31);
@@ -761,7 +808,8 @@ pub fn csrrsi<B: Backend>(b: &mut B, rd: Gpr, uimm: u64, csr: Csr) -> Flow<B> {
     Ok(())
 }
 
-pub fn csrrci<B: Backend>(b: &mut B, rd: Gpr, uimm: u64, csr: Csr) -> Flow<B> {
+pub fn csrrci<B: Backend>(b: &mut B, rd: Gpr, uimm: u64, csr: Csr, pc: u64) -> Flow<B> {
+    check_csr(b, csr, uimm & 31 != 0, pc)?;
     let t = read_csr(b, csr);
     if uimm & 31 != 0 {
         let x = b.konst::<W64>(uimm & 31);
