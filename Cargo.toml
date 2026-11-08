@@ -1,0 +1,19 @@
+[workspace]
+members = ["tools/devtool"]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.99"
+license = "TBD"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = "warn"
+
+[profile.heavy]
+inherits = "release"
+debug-assertions = true
+overflow-checks = true

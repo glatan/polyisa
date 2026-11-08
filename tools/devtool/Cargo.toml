@@ -1,0 +1,12 @@
+[package]
+name = "polyisa-devtool"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.99"
+
+[[bin]]
+name = "devtool"
+path = "src/main.rs"
+
+[lints]
+workspace = true

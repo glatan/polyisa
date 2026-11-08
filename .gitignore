@@ -1,0 +1,17 @@
+# Rust のビルド成果物
+/target/
+/tools/devtool/target/
+**/target/
+
+# テストデータ（取得物はコミットしない）
+.testdata/
+
+# nextest の JUnit 出力
+junit.xml
+target/nextest/
+
+# エディタ
+.vscode/
+.idea/
+*.swp
+*~

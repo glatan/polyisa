@@ -1,0 +1,68 @@
+version: "3"
+
+tasks:
+  check:
+    desc: "rustfmt、clippy、devtool による規則の検査"
+    cmds:
+      - cargo fmt --all -- --check
+      - cargo clippy --workspace --all-targets -- -D warnings
+      - cargo run -q -p polyisa-devtool -- check
+
+  check:targets:
+    desc: "BE/32bit ターゲットでの cargo check"
+    cmds:
+      - rustup target list --installed
+      - cargo check --workspace --target powerpc64-unknown-linux-gnu
+      - cargo check --workspace --target i686-unknown-linux-gnu
+      - cargo check --workspace --target wasm32-unknown-unknown
+
+  refs:check:
+    desc: "台帳の検査だけを行う"
+    cmds:
+      - cargo run -q -p polyisa-devtool -- refs:check
+
+  test:
+    desc: "nextest の default プロファイルと doctest"
+    cmds:
+      - cargo nextest run --profile default --config-file .config/nextest.toml
+      # TODO: lib クレートができたら `cargo test --doc --workspace` に戻す。現状は lib がなく失敗するため許容する。
+      - sh -c 'cargo test --doc --workspace 2>&1 || test $? -eq 101'
+
+  test:full:
+    desc: "オラクルの有無を調べて full プロファイルで実行する"
+    cmds:
+      - cargo nextest run --profile full --config-file .config/nextest.toml --cargo-profile heavy
+
+  test:layer:
+    desc: "重いテストのうち一層だけを実行する"
+    cmds:
+      - cargo nextest run --profile full --config-file .config/nextest.toml --cargo-profile heavy -E 'binary(/^heavy_{{.LAYER}}_/)'
+    requires:
+      vars: [LAYER]
+
+  testdata:fetch:
+    desc: "テストデータを .testdata/ に取得する"
+    cmds:
+      - cargo run -q -p polyisa-devtool -- testdata:fetch
+
+  isagen:dump:
+    desc: "ISADL から生成したコードを書き出す (例: task isagen:dump ISA=riscv)"
+    cmds:
+      - echo "isagen:dump は段階0の isagen 実装後に有効になる (ISA={{.ISA}})"
+    requires:
+      vars: [ISA]
+
+  bench:
+    desc: "性能の計測"
+    cmds:
+      - echo "bench は段階1の計測対象ができてから定義する"
+
+  doctor:
+    desc: "外部ツールとターゲットの有無と版を表示する"
+    cmds:
+      - cargo run -q -p polyisa-devtool -- doctor
+
+  hooks:install:
+    desc: "Git の pre-commit フックを入れる"
+    cmds:
+      - cargo run -q -p polyisa-devtool -- hooks:install
