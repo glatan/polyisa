@@ -1,3 +1,5 @@
+// Copyright (c) polyisa contributors
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! `spec/` の ISADL 記述からコードを生成する。
 
 // Ref: SPEC-RISCV-UNPRIV (20250508).

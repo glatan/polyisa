@@ -1,3 +1,5 @@
+// Copyright (c) polyisa contributors
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! 命令トレースとシステムコールトレースの記録形式と出力。
 
 #![forbid(unsafe_code)]

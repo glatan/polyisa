@@ -1,3 +1,5 @@
+// Copyright (c) polyisa contributors
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! ゲストメモリ。ソフトウェアページ表、ページフレーム、ソフトウェア TLB。
 //!
 //! 詳しくは [ゲストメモリ](../../docs/design/memory.md) を見る。

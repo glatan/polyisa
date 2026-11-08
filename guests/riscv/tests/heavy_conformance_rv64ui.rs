@@ -1,3 +1,5 @@
+// Copyright (c) polyisa contributors
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! riscv-tests の RV64UI 実行（層5・conformance）。
 //!
 //! `.testdata/riscv-tests` の1件を clang＋rust-lld でビルドし、製品の

@@ -1,3 +1,5 @@
+// Copyright (c) polyisa contributors
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! 総称意味論と直接実装の性能比較（段階1完了条件3の記録用）。
 //!
 //! 手順はロードマップ段階1の完了条件3に従う。代表命令について

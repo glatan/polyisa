@@ -1,3 +1,5 @@
+// Copyright (c) polyisa contributors
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! 実行エンジン。インタプリタのバックエンド、ブロック管理、実行ループ。
 //!
 //! 詳しくは [実行エンジン](../../docs/design/execution-engine.md) を見る。

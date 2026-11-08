@@ -1,3 +1,5 @@
+// Copyright (c) polyisa contributors
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! 実行ファイル形式の解析。配置の方針は OS パーソナリティが決める。
 //!
 //! ELF の定数と配置は SPEC-ELF-GABI の確認済みの版に基づく（`// Ref:` は `elf` にある）。

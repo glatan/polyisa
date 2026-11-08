@@ -1,3 +1,5 @@
+// Copyright (c) polyisa contributors
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! 開発作業のコマンド。成果物に含まれない。外部クレートに依存しない。
 //!
 //! タスクから呼ぶ薄い入口にし、条件分岐とデータ処理はここに書く.
@@ -577,6 +579,24 @@ fn check_testdata_untracked(root: &std::path::Path) -> Result<(), String> {
     Ok(())
 }
 
+/// 1行が第三者の著作権表示・ライセンス識別子に当たるかどうか。
+/// 自前のデュアルライセンス表示と自前の著作権行は許可する。
+fn notice_violation(line: &str) -> bool {
+    // 検査自身のソースに文字列が現れないよう、動的に組み立てる。
+    let copy: String = ["Copy", "right"].concat();
+    let spdx: String = ["SPDX-", "License-Identifier"].concat();
+    // 自前の表示は許可する。第三者の同表記ファイルの素通りは受容する（同条件のため実害なし）。
+    let own_copy: String = ["polyisa contri", "butors"].concat();
+    if line.contains(&spdx) {
+        // 自前のデュアルライセンスの表示は許可する。
+        return !line.contains("MIT OR Apache-2.0");
+    }
+    if line.contains(&copy) || line.contains('\u{a9}') {
+        return !line.contains(&own_copy);
+    }
+    false
+}
+
 /// 著作権表示と SPDX 識別子の走査。`docs/references.md` は対象外。
 fn scan_notices(root: &std::path::Path) -> Vec<String> {
     let mut out = Vec::new();
@@ -588,6 +608,9 @@ fn scan_notices(root: &std::path::Path) -> Vec<String> {
         if rel == "docs/references.md" {
             continue;
         }
+        if rel == "LICENSE-MIT" || rel == "LICENSE-APACHE" {
+            continue;
+        }
         if rel.starts_with(".git/") || rel.contains("/target/") || rel.starts_with(".testdata/") {
             continue;
         }
@@ -595,10 +618,7 @@ fn scan_notices(root: &std::path::Path) -> Vec<String> {
             continue;
         };
         for (i, line) in text.lines().enumerate() {
-            // 検査自身のソースに文字列が現れないよう、動的に組み立てる。
-            let copy: String = ["Copy", "right"].concat();
-            let spdx: String = ["SPDX-", "License-Identifier"].concat();
-            if line.contains(&copy) || line.contains('\u{a9}') || line.contains(&spdx) {
+            if notice_violation(line) {
                 out.push(format!("{}:{}: third-party notice?", rel, i + 1));
             }
         }
@@ -967,6 +987,19 @@ mod tests {
             vec!["SPEC-RISCV-UNPRIV".to_string()]
         );
         assert!(find_ids("// just a comment", &marker).is_empty());
+    }
+
+    #[test]
+    fn notice_allowlist() {
+        // 走査対象の文字列を直接書くと走査に拾われるため、動的に組み立てる。
+        let spdx: String = ["SPDX-", "License-Identifier"].concat();
+        let copy: String = ["Copy", "right"].concat();
+        let own_copy: String = ["polyisa contri", "butors"].concat();
+        assert!(!notice_violation(&format!("// {spdx}: MIT OR Apache-2.0")));
+        assert!(notice_violation(&format!("// {spdx}: GPL-3.0-only")));
+        assert!(!notice_violation(&format!("// {copy} (c) {own_copy}")));
+        assert!(notice_violation(&format!("// {copy} (c) someone-else")));
+        assert!(notice_violation(&format!("{} 2026 someone", '\u{a9}')));
     }
 
     #[test]

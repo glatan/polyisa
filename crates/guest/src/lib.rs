@@ -1,3 +1,5 @@
+// Copyright (c) polyisa contributors
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! ゲスト ISA が実装する共通の型。CPU モデル、機能集合、レジスタ記述。
 //!
 //! 詳しくは [CPU モデル](../../docs/design/cpu-models.md) を見る。

@@ -1,3 +1,5 @@
+// Copyright (c) polyisa contributors
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! インタプリタのバックエンド。具体的な整数でその場で実行する。
 //!
 //! 境界条件は全域で定義する。シフト量が幅以上の論理シフトは 0、

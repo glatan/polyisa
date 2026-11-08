@@ -1,3 +1,5 @@
+// Copyright (c) polyisa contributors
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! ビットパターン。`0`、`1`、`.`（任意）からなる。空白と `_` は無視する。
 //!
 //! 例：RISC-V の `add` の `0000000 ..... ..... 000 ..... 0110011`。

@@ -1,3 +1,5 @@
+// Copyright (c) polyisa contributors
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! テスト用の部品。擬似乱数、性質テストの実行器、SHA-256、オラクル呼び出し。
 //!
 //! 本番コードからは `dev-dependencies` でのみ使う。外部クレートに依存しない。

@@ -1,3 +1,5 @@
+// Copyright (c) polyisa contributors
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! ABI 表とカーネル UAPI の突き合わせ（層6・abi）。
 //!
 //! 手順は検証戦略の層6の簡易版である。本来はカーネルソースから UAPI を生成して

@@ -8,8 +8,8 @@
 # 未確認項目の取得は `refs:check` が失敗する。版は台帳の記載と一致させる。
 # 出典: docs/references.md の TEST-RISCV-TESTS、TEST-RISCV-ARCH-TEST、
 # TEST-TESTFLOAT（いずれも用途T・確認済み）。
-TEST-RISCV-TESTS https://github.com/riscv/riscv-tests.git 3df703cd52d5f0d8224e3c50bf03c6cb70efff98 .testdata/riscv-tests
-TEST-RISCV-ARCH-TEST https://github.com/riscv/riscv-arch-test.git 7569d06d6e232f571898505508b6175df7d1a640 .testdata/riscv-arch-test
+TEST-RISCV-TESTS https://github.com/riscv-software-src/riscv-tests.git 3df703cd52d5f0d8224e3c50bf03c6cb70efff98 .testdata/riscv-tests
+TEST-RISCV-ARCH-TEST https://github.com/riscv-non-isa/riscv-arch-test.git 7569d06d6e232f571898505508b6175df7d1a640 .testdata/riscv-arch-test
 # TEST-TESTFLOAT の台帳の版は Release 3e。取得元の tag がないため、
 # 手元で検証済みの複製と一致する commit を固定する。
 # 対応確認：2026-11-09 に `git ls-remote` で取得元 HEAD==a9c849f、

@@ -1,3 +1,5 @@
+// Copyright (c) polyisa contributors
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! `when` 述語。機能と実行モードについての命題論理式。
 //!
 //! 全文法の構文解析は後の段階で足す。ここでは述語の値と、

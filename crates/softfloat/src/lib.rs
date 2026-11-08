@@ -1,3 +1,5 @@
+// Copyright (c) polyisa contributors
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! ソフトウェア浮動小数点。ホストの FPU を使わず、整数演算で実装する。
 //!
 //! 出典は SPEC-IEEE754 の版 2019 である。数値・丸め規則の事実のみを自前の表現で使う。

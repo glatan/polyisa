@@ -1,3 +1,5 @@
+// Copyright (c) polyisa contributors
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! 十進演算。パック十進整数と十進浮動小数点。
 //!
 //! 中身は確認後に実装する。ここでは型だけを提供する。

@@ -18,4 +18,4 @@ polyisa は、多数の CPU アーキテクチャのユーザープログラム�
 
 ## ライセンス
 
-未定である。ライセンスが決まるまでの扱いは [ADR-0009](docs/adr/0009-no-code-reuse-until-license.md) にある。参照する資料と外部のツールの利用条件は [参照資料の台帳](docs/references.md) で管理する。
+`MIT OR Apache-2.0` である。全文は `LICENSE-MIT` と `LICENSE-APACHE` にある。選定の経緯は [ADR-0013](docs/adr/0013-license-mit-or-apache.md) にある。参照する資料と外部のツールの利用条件は [参照資料の台帳](docs/references.md) で管理する。

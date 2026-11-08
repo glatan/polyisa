@@ -1,3 +1,5 @@
+// Copyright (c) polyisa contributors
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! ELF の解析。配置の方針は OS パーソナリティが決める.
 //!
 //! 出典は下記の確認済みの版である。数値・配置の事実のみを自前の表現で使う。

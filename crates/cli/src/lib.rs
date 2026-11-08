@@ -1,3 +1,5 @@
+// Copyright (c) polyisa contributors
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! `polyisa` コマンド。実行の機構そのものは各クレートが持つ。
 
 #![forbid(unsafe_code)]

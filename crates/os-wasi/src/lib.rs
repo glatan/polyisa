@@ -1,3 +1,5 @@
+// Copyright (c) polyisa contributors
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! WASI パーソナリティ。仮想カーネルの上で WASI を実装する。
 
 #![forbid(unsafe_code)]

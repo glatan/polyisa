@@ -1,3 +1,5 @@
+// Copyright (c) polyisa contributors
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! 最小の静的プログラム実行（層7・program）。
 //!
 //! 手順は検証戦略の層7に従う。手で組み立てた RV64 の静的バイナリ

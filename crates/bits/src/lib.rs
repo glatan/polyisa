@@ -1,3 +1,5 @@
+// Copyright (c) polyisa contributors
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! ビット操作。CPU や ISA の概念を持たない。
 //!
 //! ISADL の生成コード、ゲストメモリ、命令意味論の土台になる。

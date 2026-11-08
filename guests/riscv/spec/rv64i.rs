@@ -1,3 +1,5 @@
+// Copyright (c) polyisa contributors
+// SPDX-License-Identifier: MIT OR Apache-2.0
 // RV64I の ISADL モデル。
 //
 // 出典は下記の資料の版 20250508 である。各命令の節番号は

@@ -1,3 +1,5 @@
+// Copyright (c) polyisa contributors
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! TestFloat との比較（層5・conformance）。
 //!
 //! 手順は検証戦略の層5と浮動小数点の設計文書に従う。

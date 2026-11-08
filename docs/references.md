@@ -30,7 +30,7 @@
 | `D` | 再配布 | 資料の全部または一部をリポジトリに含める |
 | `C` | コードの流用 | ソースコードを複製、移植、翻訳する |
 
-ライセンスが決まるまでは、どの項目にも `D` と `C` を許可しない（[ADR-0009](adr/0009-no-code-reuse-until-license.md)）。
+BSD 系の資産は `D` と `C` を許可できる。GPL 系の資産と Arm の機械可読仕様には `D` と `C` を許可しない（[ADR-0013](adr/0013-license-mit-or-apache.md)）。
 
 ## 規則
 
@@ -40,7 +40,7 @@
 4. 項目を確認済みにできるのはプロジェクトの所有者だけである。他の参加者と AI のエージェントは、項目を追加して確認を依頼できるが、「確認」の欄は埋めない。確認の欄は `YYYY-MM-DD 確認者名` の形で書く。
 5. 成果物（`crates/`、`guests/`、`tools/` のコード、ISADL の記述、テスト、取得定義）の中で資料を参照するときは、機械可読の注記で書く。Rust のコードとテストでは `// Ref: SPEC-RISCV-UNPRIV §2.4` のように ID と節を書き、ライセンスの情報を書き写さない。ISADL では `reference SPEC-RISCV-UNPRIV;` と `ref SPEC-RISCV-UNPRIV "§2.4"` で書く。この書式以外の ID の言及は、検査の参照とみなさない。
 6. 確認済みでない項目は、成果物のいかなる用途にも使わない。ただし、利用条件を確かめるために資料を読むことは除く。設計文書での引用は記述の形を示す例示に限り、実装の根拠にしない。例示の引用は検査の対象外とする。
-7. 用途の欄は `R`、`F`、`T`、`X` の組み合わせをカンマ区切りで書く（例：`R,F`）。確認前は `—` とする。`—` はいかなる用途の許可も表さない。`D` と `C` はライセンス決定まで書かない。
+7. 用途の欄は `R`、`F`、`T`、`X`、`D`、`C` の組み合わせをカンマ区切りで書く（例：`R,F`）。確認前は `—` とする。`—` はいかなる用途の許可も表さない。`D` と `C` は BSD 系の資産に限り、所有者が原文を確認して許可する。GPL 系の資産と Arm の機械可読仕様には `D` と `C` を許可しない。
 8. 開発の立ち上げに必要な道具（`TOOL-RUST`、`TOOL-GIT`、`TOOL-CURL`、`TOOL-TASK`、`TOOL-NEXTEST`）は、他の項目に先立って確認する。それまでの開発作業は、利用条件を確かめる範囲（規則 6 の例外）に位置づける。
 
 ## 機械的な検査
@@ -57,7 +57,7 @@
    | `testkit` の表に書いたツールと、devtool が実行するツール | `X` |
 
 3. テストデータの取得先（`.testdata/`）が `.gitignore` の対象であり、`git ls-files` に現れない。取得定義（`tools/testdata/manifest.txt`）がある場合は、各行の ID が台帳にあり、用途 `T` が許可されていること。
-4. 台帳を除くリポジトリのファイルに、polyisa のもの以外の著作権表示と SPDX のライセンス識別子が含まれていない。走査するのは `Copyright`、`©`、`SPDX-License-Identifier` の文字列であり、台帳の `docs/references.md` は対象外とする。
+4. 台帳と自前のライセンス文を除くリポジトリのファイルに、polyisa のもの以外の著作権表示と SPDX のライセンス識別子が含まれていない。走査するのは `Copyright`、`©`、`SPDX-License-Identifier` の文字列であり、台帳の `docs/references.md` と自前の `LICENSE-MIT`、`LICENSE-APACHE` は対象外とする。自前の `MIT OR Apache-2.0` の識別子行と `polyisa contributors` の著作権行は許可する。
 5. `Cargo.lock` にワークスペース外のパッケージがない（[ADR-0001](adr/0001-no-external-crates.md)）。
 
 設計文書と台帳は、1 と 2 の検査の対象外とする。設計文書に現れる ID は、記述の形を示す例示とみなす。設計文書での資料の参照（`R`）は、規則 1 と 6 によって管理する。
@@ -130,14 +130,14 @@
 | SPEC-IEEE754 | IEEE Standard for Floating-Point Arithmetic（IEEE 754-2019） | IEEE | 2019 | softfloat | © IEEE、All rights reserved（本文書の購入・購読で入手） | R,F | 2026-11-08 glatan | 数値・丸め規則の事実のみ自前表現で使用。条文・図表の複製なし。許諾範囲は所有者判断 |
 | SPEC-DECIMAL-ARITH | General Decimal Arithmetic Specification | 確認時に記録 | — | decimal | — | — | 未確認 | |
 | SPEC-ELF-GABI | System V Application Binary Interface の ELF の汎用部分 | SCO（現 Xinuos） | Edition 4.1（1997）＋2001-04-24 DRAFT（ch.4/5） | loader | © SCO、All rights reserved（複製の明示的許諾なし） | R,F | 2026-11-08 glatan | 数値・配置の事実のみ自前表現で使用。条文・図表の複製なし。許諾範囲は所有者判断 |
-| SPEC-LINUX-MANPAGES | Linux man-pages | Linux man-pages プロジェクト | 6.20 | os-linux | 各ページに異なるライセンス（Copying-policy。要約：nroff配布条件で自由に配布可） | R | 2026-11-08 glatan | 動作理解の参照のみ。番号・配置の事実は SRC-LINUX から取る |
+| SPEC-LINUX-MANPAGES | Linux man-pages | Linux man-pages プロジェクト | 6.20 | os-linux | 各ページに異なるライセンス（GPL、BSD系、Linux-man-pages-copyleft系、verbatim-onlyが混在。ページ冒頭の表示が効力を持つ） | R | 2026-11-08 glatan | 動作理解の参照のみ。verbatim-onlyの頁があるためFは許可しない。番号・配置の事実は SRC-LINUX から取る |
 
 ### ソース
 
 | ID | 名称 | 発行者 | 版 | 対象 | 利用条件 | 用途 | 確認 | 備考 |
 |---|---|---|---|---|---|---|---|---|
 | SRC-LINUX | Linux カーネルのソース（UAPI ヘッダ、システムコールの表、シグナルフレームの定義） | Linux カーネルの開発者 | 7.3 | os-linux | GNU GPL version 2（COPYING）。UAPI は Linux-syscall-note の例外でユーザ空間利用可 | R,F | 2026-11-08 glatan | 番号・配置の事実を自前表現で記述。カーネル本体コードの翻訳はしない（`C` にあたる） |
-| SRC-SOFTFLOAT3 | Berkeley SoftFloat-3（TestFloat 生成器のビルドに使用。版は確認時に確定） | John Hauser（UC Berkeley） | — | softfloat（TestFloat 実行） | — | — | 未確認 | リポジトリに含めない。手元では commit 07ebd29d を確認（2026-11-09 `git ls-remote`） |
+| SRC-SOFTFLOAT3 | Berkeley SoftFloat-3（TestFloat 生成器のビルドに使用） | John Hauser（UC Berkeley） | Release 3e（commit 07ebd29d） | softfloat（TestFloat 実行） | BSD 3-clause（COPYING.txt。Regents of the University of California） | X | 2026-11-09 glatan | リポジトリに含めない。版は `git ls-remote` で HEAD==07ebd29d を確認、COPYING.txt は BSD 3-clause 型文面 |
 
 ### テスト
 
@@ -170,11 +170,11 @@
 |---|---|---|---|---|---|---|---|---|
 | TOOL-RUST | Rust のツールチェーン（rustc、cargo、rust-lld、rustfmt、clippy、Miri） | Rust プロジェクト | 1.99.1 | 全体 | MIT OR Apache-2.0（LICENSE-MIT、LICENSE-APACHE） | X | 2026-11-08 glatan | 別プロセスで実行する。複製・再配布しない |
 | TOOL-TASK | Task 3.54.0（Arch Linux のパッケージ名は go-task） | go-task | 3.54.0 | 開発作業 | MIT（LICENSE） | X | 2026-11-08 glatan | 別プロセスで実行する。複製・再配布しない |
-| TOOL-NEXTEST | cargo-nextest | nextest-rs | 0.9.151 | テストの実行 | MIT OR Apache-2.0（LICENSE-MIT、LICENSE-APACHE） | X | 2026-11-08 glatan | 別プロセスで実行する。複製・再配布しない |
+| TOOL-NEXTEST | cargo-nextest | nextest-rs | 0.9.151 | テストの実行 | Apache-2.0 OR MIT（LICENSE-APACHE、LICENSE-MIT） | X | 2026-11-08 glatan | 別プロセスで実行する。複製・再配布しない |
 | TOOL-GIT | Git | Git プロジェクト | 2.56.0 | 開発作業、テストデータの取得 | GNU GPL version 2（COPYING。v2 のみ） | X | 2026-11-08 glatan | 別プロセスで実行する。複製・再配布・組み込みをしない |
 | TOOL-CURL | curl | curl プロジェクト | 8.23.0 | テストデータの取得 | curl license（COPYING） | X | 2026-11-08 glatan | 別プロセスで実行する。複製・再配布しない |
 | TOOL-LLVM | LLVM と clang（llvm-objdump を含む） | LLVM プロジェクト | 23.1.4（手元検証） | 検証 | Apache-2.0 WITH LLVM-exception（LICENSE.TXT） | X | 2026-11-08 glatan | 別プロセスで実行する。複製・再配布・組み込みをしない |
-| TOOL-GDB | GDB | GNU プロジェクト | — | 検証 | — | — | 未確認 | |
-| TOOL-WASMTIME | wasmtime | Bytecode Alliance | — | wasm の検証 | — | — | 未確認 | |
-| TOOL-QEMU | QEMU | QEMU プロジェクト | — | 検証（用意できた環境だけ） | — | — | 未確認 | |
-| TOOL-BINUTILS | GNU binutils | GNU プロジェクト | — | 検証（用意できた環境だけ） | — | — | 未確認 | |
+| TOOL-GDB | GDB | GNU プロジェクト | 18.1（手元検証） | 検証 | GNU GPL version 3（COPYING） | X | 2026-11-09 glatan | 別プロセスで実行する。複製・再配布・組み込みをしない |
+| TOOL-WASMTIME | wasmtime | Bytecode Alliance | 50.0.1（手元検証） | wasm の検証 | Apache-2.0 with LLVM exception（LICENSE） | X | 2026-11-09 glatan | 別プロセスで実行する。複製・再配布・組み込みをしない |
+| TOOL-QEMU | QEMU | QEMU プロジェクト | —（手元未導入） | 検証（用意できた環境だけ） | GNU GPL version 2（LICENSE。全体。手元未検証） | X | 2026-11-09 glatan | 別プロセスで実行する。複製・再配布・組み込みをしない |
+| TOOL-BINUTILS | GNU binutils | GNU プロジェクト | 2.47（手元検証） | 検証（用意できた環境だけ） | GNU GPL version 3（COPYING） | X | 2026-11-09 glatan | 別プロセスで実行する。複製・再配布・組み込みをしない |

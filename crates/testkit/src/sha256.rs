@@ -1,3 +1,5 @@
+// Copyright (c) polyisa contributors
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! SHA-256（FIPS 180-4）。テストデータの検証に使う。外部クレートに依存しない。
 
 const K: [u32; 64] = [

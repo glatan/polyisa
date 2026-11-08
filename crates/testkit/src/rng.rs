@@ -1,3 +1,5 @@
+// Copyright (c) polyisa contributors
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! 決定的な擬似乱数（SplitMix64）。テストの再現に使う。
 
 /// 決定的な乱数源。同じ種からは同じ列が出る。

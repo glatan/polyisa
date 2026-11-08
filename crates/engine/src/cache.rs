@@ -1,3 +1,5 @@
+// Copyright (c) polyisa contributors
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! デコードキャッシュとジャンプキャッシュ。ブロックキーで引く。
 //!
 //! デコード済みステップの中身は意味論の結び付けの後に足す。

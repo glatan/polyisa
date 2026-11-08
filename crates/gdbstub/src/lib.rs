@@ -1,3 +1,5 @@
+// Copyright (c) polyisa contributors
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! GDB リモートシリアルプロトコルのサーバ。`std::net` の TCP で待つ。
 //!
 //! プロトコルの実装は後の段階で足す。

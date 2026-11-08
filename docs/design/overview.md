@@ -21,7 +21,7 @@ polyisa は、多数の CPU アーキテクチャ向けに作られたユーザ�
 | R5 | インタプリタで正しさを先に固め、JIT を後から追加する。JIT の追加で ISA ごとの命令意味論を書き直さない | [命令意味論](semantics.md)、[実行エンジン](execution-engine.md)、[JIT](jit.md) |
 | R6 | 全 CPU でサイクル単位の正確さを目標とする | [タイミングモデル](timing.md) |
 | R7 | 当面のホストは Linux x86_64 とする。他の OS、他のアーキテクチャ、32 ビット、ビッグエンディアンのホストへ移植できるよう、Linux x86_64 への依存を最小にする | [ホスト抽象化](host.md) |
-| R8 | ライセンスは未定とする。決まるまで、他の実装のコードを流用しない | [ADR-0009](../adr/0009-no-code-reuse-until-license.md) |
+| R8 | ライセンスは `MIT OR Apache-2.0` とする。BSD 系の資産は再配布とコードの流用ができる。GPL 系の資産と Arm の機械可読仕様は引き続き取り込まない | [ADR-0013](../adr/0013-license-mit-or-apache.md) |
 | R9 | CI を使わず、検証は開発者の手元で行う。この規模のプロジェクトでは、CI の利用枠がすぐに尽きるためである | [開発作業とローカル検証](dev-workflow.md) |
 | R10 | 参照する仕様とその利用条件を一か所にまとめ、ライセンスの違反を防ぐ | [参照資料の台帳](../references.md)、[ADR-0010](../adr/0010-reference-register.md) |
 | R11 | 開発作業の入口には Task を、テストの実行には cargo-nextest を使う | [開発作業とローカル検証](dev-workflow.md) |

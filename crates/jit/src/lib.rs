@@ -1,3 +1,5 @@
+// Copyright (c) polyisa contributors
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! JIT。IR からホストの機械語を生成し、実行する。後の段階で実装する。
 
 #![forbid(unsafe_code)]

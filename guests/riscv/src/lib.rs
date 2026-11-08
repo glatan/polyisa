@@ -1,3 +1,5 @@
+// Copyright (c) polyisa contributors
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! RISC-V のゲスト ISA。ISADL 記述は参照資料の確認後に `spec/` に書く。
 //!
 //! ここではクレートの殻と CPU 状態の形だけを提供する。

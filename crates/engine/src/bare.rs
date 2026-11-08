@@ -1,3 +1,5 @@
+// Copyright (c) polyisa contributors
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! 裸実行環境。OS パーソナリティなしで vCPU とアドレス空間だけを動かす。
 //!
 //! 命令の検証に使う。CPU 状態の形はゲスト ISA クレートが決め、

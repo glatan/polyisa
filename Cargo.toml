@@ -30,7 +30,7 @@ resolver = "2"
 [workspace.package]
 edition = "2024"
 rust-version = "1.99"
-license = "TBD"
+license = "MIT OR Apache-2.0"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

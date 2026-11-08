@@ -1,3 +1,5 @@
+// Copyright (c) polyisa contributors
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! 動的リンク機構の実行（層7・program）。
 //!
 //! PT_INTERP・VFS・openat/read/mmap等のhandlerを、合成の interp/app 2ELFで

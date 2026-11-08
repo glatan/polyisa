@@ -1,3 +1,5 @@
+// Copyright (c) polyisa contributors
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! 検査済みモデルの入れ物。構文解析器がこの形を作り、検査と生成が読む。
 //!
 //! ビット連結（`++`）、スケーリング、フックの詳細は後の段階で足す。

@@ -1,3 +1,5 @@
+// Copyright (c) polyisa contributors
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! タイミングモデル。命令イベントを受け、仮想時間を進める。
 //!
 //! 詳しくは [タイミングモデル](../../docs/design/timing.md) を見る。

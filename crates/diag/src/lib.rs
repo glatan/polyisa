@@ -1,3 +1,5 @@
+// Copyright (c) polyisa contributors
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! polyisa 自身の診断ログ。ゲストのトレースは `trace` が扱う。
 
 #![forbid(unsafe_code)]

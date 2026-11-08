@@ -1,3 +1,5 @@
+// Copyright (c) polyisa contributors
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! RV64I の命令単位のテスト。裸実行環境で CPU 状態とメモリを検査する。
 //!
 //! 命令語の組み立てはビット配置の定義から手で行う。生成したエンコーダに

@@ -1,3 +1,5 @@
+// Copyright (c) polyisa contributors
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! 中間表現。IR のバックエンド、最適化は後の段階で足す。
 //!
 //! ここでは値の番号と、バックエンドの殻だけを提供する。

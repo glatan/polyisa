@@ -1,3 +1,5 @@
+// Copyright (c) polyisa contributors
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! llvm-objdump とのデコーダ差分（層4・oracle）。
 //!
 //! 手順は検証戦略の層4に従う。llvm-mc で組み立てた命令語を

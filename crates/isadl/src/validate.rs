@@ -1,3 +1,5 @@
+// Copyright (c) polyisa contributors
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! 静的検査。コード生成の前に違反があれば失敗させる。
 //!
 //! 設計文書の検査項目（`docs/design/isa-description.md` の「静的検査」）のうち、

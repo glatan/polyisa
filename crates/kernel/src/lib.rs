@@ -1,3 +1,5 @@
+// Copyright (c) polyisa contributors
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! 仮想カーネル。ゲストプロセス、ゲストスレッド、スケジューラ。
 //!
 //! システムコール番号などの ABI 表は OS パーソナリティ側に置く。

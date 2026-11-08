@@ -1,3 +1,5 @@
+// Copyright (c) polyisa contributors
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! RV64I の命令意味論。バックエンドに対して総称的に書く.
 //!
 //! デコード済みのオペランドは Rust の値で受け、実行時の値は `B::V` で扱う。

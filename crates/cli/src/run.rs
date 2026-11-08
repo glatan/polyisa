@@ -1,3 +1,5 @@
+// Copyright (c) polyisa contributors
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! RV64/RV32 ユーザーモード実行の run loop。fetch/decode/dispatch を回す.
 //!
 //! riscv-tests の適合実行と `cli run` で共有する。OS 依存の ecall 処理は

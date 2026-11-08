@@ -1,3 +1,5 @@
+// Copyright (c) polyisa contributors
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Linux パーソナリティ。仮想カーネルの上で Linux の規約を実装する.
 //!
 //! 番号表は Linux カーネルの UAPI 由来の事実を自前表現で書く。
