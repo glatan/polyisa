@@ -10,7 +10,7 @@
 //! （用途T・確認済み、リポジトリに含めない）.
 
 use polyisa_engine::bare::BareEnv;
-use polyisa_guest_riscv::sem::{Csr, Gpr};
+use polyisa_guest_riscv::sem::{Csr, Fpr, Gpr};
 use polyisa_guest_riscv::{CpuState, sem};
 use polyisa_mem::{Access, AccessKind, Align, Endian, VirtAddr};
 use polyisa_sem::{Backend as _, StateRef, W64};
@@ -99,8 +99,8 @@ fn build_elf_in(sub: &str, name: &str) -> Option<Vec<u8>> {
     let lld = rust_lld()?;
     let dir = std::env::temp_dir().join("polyisa-riscv-tests");
     let _ = std::fs::create_dir_all(&dir);
-    let obj = dir.join(format!("{name}.o"));
-    let elf = dir.join(format!("{name}.elf"));
+    let obj = dir.join(format!("{sub}_{name}.o"));
+    let elf = dir.join(format!("{sub}_{name}.elf"));
     let st = Command::new(&cc)
         .args([
             "--target=riscv64-unknown-elf",
@@ -186,6 +186,17 @@ fn off_b(word: u32) -> i64 {
     ((v as i32) << 19 >> 19) as i64
 }
 
+/// rmフィールドから実効丸めモードを求める。DYN(7)はfrm CSRで解決する。
+fn resolve_rm(env: &mut BareEnv, rm_bits: u8) -> u8 {
+    if rm_bits != 7 {
+        return rm_bits;
+    }
+    let fcsr: u64 = env.backend.get(StateRef::<W64>::from_offset(
+        core::mem::offset_of!(CpuState, csr) + 3 * 8,
+    ));
+    ((fcsr >> 5) & 7) as u8
+}
+
 /// J形式ジャンプオフセット。
 fn off_j(word: u32) -> i64 {
     let b20 = (word >> 31) & 1;
@@ -232,6 +243,10 @@ fn run(env: &mut BareEnv, entry: u64) -> Outcome {
         let rd = Gpr(r(5, 7));
         let rs1 = Gpr(r(5, 15));
         let rs2 = Gpr(r(5, 20));
+        let fd = Fpr(r(5, 7));
+        let fs1 = Fpr(r(5, 15));
+        let fs2 = Fpr(r(5, 20));
+        let fs3 = Fpr(r(5, 27));
         let csr = Csr(((word >> 20) & 0xfff) as u16);
         let ok = match insn {
             Insn::Add => env.step(|b| sem::add(b, rd, rs1, rs2)),
@@ -322,6 +337,124 @@ fn run(env: &mut BareEnv, entry: u64) -> Outcome {
             Insn::Csrrci => env.step(|b| sem::csrrci(b, rd, ((word >> 15) & 31) as u64, csr)),
             Insn::Fence => env.step(sem::fence),
             Insn::FenceI => env.step(sem::fence_i),
+            // F 単精度。
+            Insn::Flw => env.step(|b| sem::flw(b, fd, rs1, imm_i(word))),
+            Insn::Fsw => env.step(|b| sem::fsw(b, rs1, fs2, imm_s(word))),
+            Insn::FaddS => env.step(|b| sem::fadd_s(b, fd, fs1, fs2)),
+            Insn::FsubS => env.step(|b| sem::fsub_s(b, fd, fs1, fs2)),
+            Insn::FmulS => env.step(|b| sem::fmul_s(b, fd, fs1, fs2)),
+            Insn::FdivS => env.step(|b| sem::fdiv_s(b, fd, fs1, fs2)),
+            Insn::FsqrtS => env.step(|b| sem::fsqrt_s(b, fd, fs1)),
+            Insn::FsgnjS => env.step(|b| sem::fsgnj_s(b, fd, fs1, fs2)),
+            Insn::FsgnjnS => env.step(|b| sem::fsgnjn_s(b, fd, fs1, fs2)),
+            Insn::FsgnjxS => env.step(|b| sem::fsgnjx_s(b, fd, fs1, fs2)),
+            Insn::FminS => env.step(|b| sem::fmin_s(b, fd, fs1, fs2)),
+            Insn::FmaxS => env.step(|b| sem::fmax_s(b, fd, fs1, fs2)),
+            Insn::FeqS => env.step(|b| sem::feq_s(b, rd, fs1, fs2)),
+            Insn::FltS => env.step(|b| sem::flt_s(b, rd, fs1, fs2)),
+            Insn::FleS => env.step(|b| sem::fle_s(b, rd, fs1, fs2)),
+            Insn::FclassS => env.step(|b| sem::fclass_s(b, rd, fs1)),
+            Insn::FcvtWS => {
+                let rm = resolve_rm(env, ((word >> 12) & 7) as u8);
+                env.step(|b| sem::fcvt_w_s(b, rd, fs1, rm))
+            }
+            Insn::FcvtWuS => {
+                let rm = resolve_rm(env, ((word >> 12) & 7) as u8);
+                env.step(|b| sem::fcvt_wu_s(b, rd, fs1, rm))
+            }
+            Insn::FcvtLS => {
+                let rm = resolve_rm(env, ((word >> 12) & 7) as u8);
+                env.step(|b| sem::fcvt_l_s(b, rd, fs1, rm))
+            }
+            Insn::FcvtLuS => {
+                let rm = resolve_rm(env, ((word >> 12) & 7) as u8);
+                env.step(|b| sem::fcvt_lu_s(b, rd, fs1, rm))
+            }
+            Insn::FmvXW => env.step(|b| sem::fmv_x_w(b, rd, fs1)),
+            Insn::FcvtSW => {
+                let rm = resolve_rm(env, ((word >> 12) & 7) as u8);
+                env.step(|b| sem::fcvt_s_w(b, fd, rs1, rm))
+            }
+            Insn::FcvtSWu => {
+                let rm = resolve_rm(env, ((word >> 12) & 7) as u8);
+                env.step(|b| sem::fcvt_s_wu(b, fd, rs1, rm))
+            }
+            Insn::FcvtSL => {
+                let rm = resolve_rm(env, ((word >> 12) & 7) as u8);
+                env.step(|b| sem::fcvt_s_l(b, fd, rs1, rm))
+            }
+            Insn::FcvtSLu => {
+                let rm = resolve_rm(env, ((word >> 12) & 7) as u8);
+                env.step(|b| sem::fcvt_s_lu(b, fd, rs1, rm))
+            }
+            Insn::FmvWX => env.step(|b| sem::fmv_w_x(b, fd, rs1)),
+            Insn::FmaddS => env.step(|b| sem::fmadd_s(b, fd, fs1, fs2, fs3)),
+            Insn::FmsubS => env.step(|b| sem::fmsub_s(b, fd, fs1, fs2, fs3)),
+            Insn::FnmsubS => env.step(|b| sem::fnmsub_s(b, fd, fs1, fs2, fs3)),
+            Insn::FnmaddS => env.step(|b| sem::fnmadd_s(b, fd, fs1, fs2, fs3)),
+            // D 倍精度。
+            Insn::Fld => env.step(|b| sem::fld(b, fd, rs1, imm_i(word))),
+            Insn::Fsd => env.step(|b| sem::fsd(b, rs1, fs2, imm_s(word))),
+            Insn::FaddD => env.step(|b| sem::fadd_d(b, fd, fs1, fs2)),
+            Insn::FsubD => env.step(|b| sem::fsub_d(b, fd, fs1, fs2)),
+            Insn::FmulD => env.step(|b| sem::fmul_d(b, fd, fs1, fs2)),
+            Insn::FdivD => env.step(|b| sem::fdiv_d(b, fd, fs1, fs2)),
+            Insn::FsqrtD => env.step(|b| sem::fsqrt_d(b, fd, fs1)),
+            Insn::FsgnjD => env.step(|b| sem::fsgnj_d(b, fd, fs1, fs2)),
+            Insn::FsgnjnD => env.step(|b| sem::fsgnjn_d(b, fd, fs1, fs2)),
+            Insn::FsgnjxD => env.step(|b| sem::fsgnjx_d(b, fd, fs1, fs2)),
+            Insn::FminD => env.step(|b| sem::fmin_d(b, fd, fs1, fs2)),
+            Insn::FmaxD => env.step(|b| sem::fmax_d(b, fd, fs1, fs2)),
+            Insn::FeqD => env.step(|b| sem::feq_d(b, rd, fs1, fs2)),
+            Insn::FltD => env.step(|b| sem::flt_d(b, rd, fs1, fs2)),
+            Insn::FleD => env.step(|b| sem::fle_d(b, rd, fs1, fs2)),
+            Insn::FclassD => env.step(|b| sem::fclass_d(b, rd, fs1)),
+            Insn::FcvtWD => {
+                let rm = resolve_rm(env, ((word >> 12) & 7) as u8);
+                env.step(|b| sem::fcvt_w_d(b, rd, fs1, rm))
+            }
+            Insn::FcvtWuD => {
+                let rm = resolve_rm(env, ((word >> 12) & 7) as u8);
+                env.step(|b| sem::fcvt_wu_d(b, rd, fs1, rm))
+            }
+            Insn::FcvtLD => {
+                let rm = resolve_rm(env, ((word >> 12) & 7) as u8);
+                env.step(|b| sem::fcvt_l_d(b, rd, fs1, rm))
+            }
+            Insn::FcvtLuD => {
+                let rm = resolve_rm(env, ((word >> 12) & 7) as u8);
+                env.step(|b| sem::fcvt_lu_d(b, rd, fs1, rm))
+            }
+            Insn::FmvXD => env.step(|b| sem::fmv_x_d(b, rd, fs1)),
+            Insn::FcvtDW => {
+                let rm = resolve_rm(env, ((word >> 12) & 7) as u8);
+                env.step(|b| sem::fcvt_d_w(b, fd, rs1, rm))
+            }
+            Insn::FcvtDWu => {
+                let rm = resolve_rm(env, ((word >> 12) & 7) as u8);
+                env.step(|b| sem::fcvt_d_wu(b, fd, rs1, rm))
+            }
+            Insn::FcvtDL => {
+                let rm = resolve_rm(env, ((word >> 12) & 7) as u8);
+                env.step(|b| sem::fcvt_d_l(b, fd, rs1, rm))
+            }
+            Insn::FcvtDLu => {
+                let rm = resolve_rm(env, ((word >> 12) & 7) as u8);
+                env.step(|b| sem::fcvt_d_lu(b, fd, rs1, rm))
+            }
+            Insn::FmvDX => env.step(|b| sem::fmv_d_x(b, fd, rs1)),
+            Insn::FcvtSD => {
+                let rm = resolve_rm(env, ((word >> 12) & 7) as u8);
+                env.step(|b| sem::fcvt_s_d(b, fd, fs1, rm))
+            }
+            Insn::FcvtDS => {
+                let rm = resolve_rm(env, ((word >> 12) & 7) as u8);
+                env.step(|b| sem::fcvt_d_s(b, fd, fs1, rm))
+            }
+            Insn::FmaddD => env.step(|b| sem::fmadd_d(b, fd, fs1, fs2, fs3)),
+            Insn::FmsubD => env.step(|b| sem::fmsub_d(b, fd, fs1, fs2, fs3)),
+            Insn::FnmsubD => env.step(|b| sem::fnmsub_d(b, fd, fs1, fs2, fs3)),
+            Insn::FnmaddD => env.step(|b| sem::fnmadd_d(b, fd, fs1, fs2, fs3)),
             Insn::Ecall => {
                 let a7 = reg(env, 17);
                 if a7 == 93 {
@@ -371,6 +504,14 @@ fn check_one(name: &str) {
 
 fn check_um(name: &str) {
     check_one_in("rv64um", name);
+}
+
+fn check_uf(name: &str) {
+    check_one_in("rv64uf", name);
+}
+
+fn check_ud(name: &str) {
+    check_one_in("rv64ud", name);
 }
 
 #[test]
@@ -511,4 +652,119 @@ fn rv64um_p_mulh() {
 #[test]
 fn rv64um_p_divu() {
     check_um("divu");
+}
+
+#[test]
+fn rv64uf_p_fadd() {
+    check_uf("fadd");
+}
+
+#[test]
+fn rv64uf_p_fclass() {
+    check_uf("fclass");
+}
+
+#[test]
+fn rv64uf_p_fcmp() {
+    check_uf("fcmp");
+}
+
+#[test]
+fn rv64uf_p_fcvt() {
+    check_uf("fcvt");
+}
+
+#[test]
+fn rv64uf_p_fcvt_w() {
+    check_uf("fcvt_w");
+}
+
+#[test]
+fn rv64uf_p_fdiv() {
+    check_uf("fdiv");
+}
+
+#[test]
+fn rv64uf_p_fmadd() {
+    check_uf("fmadd");
+}
+
+#[test]
+fn rv64uf_p_fmin() {
+    check_uf("fmin");
+}
+
+#[test]
+fn rv64uf_p_ldst() {
+    check_uf("ldst");
+}
+
+#[test]
+fn rv64uf_p_move() {
+    check_uf("move");
+}
+
+#[test]
+fn rv64uf_p_recoding() {
+    check_uf("recoding");
+}
+
+#[test]
+fn rv64ud_p_fadd() {
+    check_ud("fadd");
+}
+
+#[test]
+fn rv64ud_p_fclass() {
+    check_ud("fclass");
+}
+
+#[test]
+fn rv64ud_p_fcmp() {
+    check_ud("fcmp");
+}
+
+#[test]
+fn rv64ud_p_fcvt() {
+    check_ud("fcvt");
+}
+
+#[test]
+fn rv64ud_p_fcvt_w() {
+    check_ud("fcvt_w");
+}
+
+#[test]
+fn rv64ud_p_fdiv() {
+    check_ud("fdiv");
+}
+
+#[test]
+fn rv64ud_p_fmadd() {
+    check_ud("fmadd");
+}
+
+#[test]
+fn rv64ud_p_fmin() {
+    check_ud("fmin");
+}
+
+#[test]
+fn rv64ud_p_ldst() {
+    check_ud("ldst");
+}
+
+#[test]
+fn rv64ud_p_move() {
+    check_ud("move");
+}
+
+#[test]
+fn rv64ud_p_recoding() {
+    check_ud("recoding");
+}
+
+#[test]
+fn rv64ud_p_structural() {
+    check_ud("structural");
 }

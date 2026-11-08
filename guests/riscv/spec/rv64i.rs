@@ -64,6 +64,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         // 圧縮命令のレジスタ位置。CR形式で使う。
         ("cr_rs1", 11, 7),
         ("cr_rs2", 6, 2),
+        // 積和融合命令の第4オペランド。R4形式で使う。
+        ("rs3", 31, 27),
     ] {
         m.fields.push(Field {
             name: name.to_string(),
@@ -117,6 +119,22 @@ pub fn build_model() -> polyisa_isadl::Model {
         operands: vec![
             gpr("cr_rs1", Access::ReadWrite),
             gpr("cr_rs2", Access::Read),
+        ],
+    });
+    // R4（積和融合形式。第4オペランド rs3 を持つ）。
+    m.formats.push(Format {
+        name: "R4".to_string(),
+        fields: vec![
+            "rs3".to_string(),
+            "rs2".to_string(),
+            "rs1".to_string(),
+            "rd".to_string(),
+        ],
+        operands: vec![
+            gpr("rd", Access::Write),
+            gpr("rs1", Access::Read),
+            gpr("rs2", Access::Read),
+            gpr("rs3", Access::Read),
         ],
     });
 
@@ -233,6 +251,15 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("fsub_s", "R", "0000100 ..... ..... ... ..... 1010011", "fsub.s {rd}, {rs1}, {rs2}", "fpu"),
         ("fmul_s", "R", "0001000 ..... ..... ... ..... 1010011", "fmul.s {rd}, {rs1}, {rs2}", "fpu"),
         ("fdiv_s", "R", "0001100 ..... ..... ... ..... 1010011", "fdiv.s {rd}, {rs1}, {rs2}", "fpu"),
+        // 積和融合（R4形式。funct2 で単精度/倍精度を区別する。rm は RNE 固定）
+        ("fmadd_s", "R4", "..... 00 ..... ..... ... ..... 1000011", "fmadd.s {rd}, {rs1}, {rs2}, {rs3}", "fpu"),
+        ("fmsub_s", "R4", "..... 00 ..... ..... ... ..... 1000111", "fmsub.s {rd}, {rs1}, {rs2}, {rs3}", "fpu"),
+        ("fnmsub_s", "R4", "..... 00 ..... ..... ... ..... 1001011", "fnmsub.s {rd}, {rs1}, {rs2}, {rs3}", "fpu"),
+        ("fnmadd_s", "R4", "..... 00 ..... ..... ... ..... 1001111", "fnmadd.s {rd}, {rs1}, {rs2}, {rs3}", "fpu"),
+        ("fmadd_d", "R4", "..... 01 ..... ..... ... ..... 1000011", "fmadd.d {rd}, {rs1}, {rs2}, {rs3}", "fpu"),
+        ("fmsub_d", "R4", "..... 01 ..... ..... ... ..... 1000111", "fmsub.d {rd}, {rs1}, {rs2}, {rs3}", "fpu"),
+        ("fnmsub_d", "R4", "..... 01 ..... ..... ... ..... 1001011", "fnmsub.d {rd}, {rs1}, {rs2}, {rs3}", "fpu"),
+        ("fnmadd_d", "R4", "..... 01 ..... ..... ... ..... 1001111", "fnmadd.d {rd}, {rs1}, {rs2}, {rs3}", "fpu"),
         ("fsqrt_s", "R", "0101100 00000 ..... ... ..... 1010011", "fsqrt.s {rd}, {rs1}", "fpu"),
         ("fsgnj_s", "R", "0010000 ..... ..... 000 ..... 1010011", "fsgnj.s {rd}, {rs1}, {rs2}", "fpu"),
         ("fsgnjn_s", "R", "0010000 ..... ..... 001 ..... 1010011", "fsgnjn.s {rd}, {rs1}, {rs2}", "fpu"),

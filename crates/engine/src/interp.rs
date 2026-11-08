@@ -7,7 +7,7 @@ use polyisa_mem::{Access, AddressSpace, MemError, VirtAddr};
 use polyisa_sem::{
     Backend, Cmp, GuestException, Helper, HintKey, Param, StateArray, StateRef, W32, W64, Width,
 };
-use polyisa_softfloat::{F32 as SF32, F64 as SF64};
+use polyisa_softfloat::{F32 as SF32, F64 as SF64, Rm as FpRm};
 
 /// インタプリタの退出理由。
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -34,6 +34,8 @@ pub struct InterpBackend {
     pub ctrl: Ctrl,
     /// 予約付きロードの予約。条件付きストアとゲストスレッドの切り替えで解除する。
     pub reservation: polyisa_mem::Reservation,
+    /// 蓄積した浮動小数点例外フラグ。sem が読み出して fcsr に積む。
+    pub fp_flags: u8,
 }
 
 impl InterpBackend {
@@ -44,6 +46,7 @@ impl InterpBackend {
             mem: AddressSpace::new(),
             ctrl: Ctrl::Fallthrough,
             reservation: polyisa_mem::Reservation::empty(),
+            fp_flags: 0,
         }
     }
 
@@ -224,61 +227,57 @@ impl Backend for InterpBackend {
 
     // 浮動小数点演算は softfloat に委譲する。F32 と F64 で分岐する。
     fn fadd<F: Width>(&mut self, a: Self::V<F>, b: Self::V<F>) -> Self::V<F> {
-        F::from_u128(fbin::<F>(
-            F::to_u128(a),
-            F::to_u128(b),
-            SF32::add,
-            SF64::add,
-        ))
+        let (v, f) = fbin::<F>(F::to_u128(a), F::to_u128(b), SF32::add, SF64::add);
+        self.fp_flags |= f;
+        F::from_u128(v)
     }
 
     fn fsub<F: Width>(&mut self, a: Self::V<F>, b: Self::V<F>) -> Self::V<F> {
-        F::from_u128(fbin::<F>(
-            F::to_u128(a),
-            F::to_u128(b),
-            SF32::sub,
-            SF64::sub,
-        ))
+        let (v, f) = fbin::<F>(F::to_u128(a), F::to_u128(b), SF32::sub, SF64::sub);
+        self.fp_flags |= f;
+        F::from_u128(v)
     }
 
     fn fmul<F: Width>(&mut self, a: Self::V<F>, b: Self::V<F>) -> Self::V<F> {
-        F::from_u128(fbin::<F>(
+        let (v, f) = fbin::<F>(F::to_u128(a), F::to_u128(b), SF32::mul, SF64::mul);
+        self.fp_flags |= f;
+        F::from_u128(v)
+    }
+
+    fn fmadd<F: Width>(&mut self, a: Self::V<F>, b: Self::V<F>, c: Self::V<F>) -> Self::V<F> {
+        let (v, f) = ftri::<F>(
             F::to_u128(a),
             F::to_u128(b),
-            SF32::mul,
-            SF64::mul,
-        ))
+            F::to_u128(c),
+            SF32::fmadd,
+            SF64::fmadd,
+        );
+        self.fp_flags |= f;
+        F::from_u128(v)
     }
 
     fn fdiv<F: Width>(&mut self, a: Self::V<F>, b: Self::V<F>) -> Self::V<F> {
-        F::from_u128(fbin::<F>(
-            F::to_u128(a),
-            F::to_u128(b),
-            SF32::div,
-            SF64::div,
-        ))
+        let (v, f) = fbin::<F>(F::to_u128(a), F::to_u128(b), SF32::div, SF64::div);
+        self.fp_flags |= f;
+        F::from_u128(v)
     }
 
     fn fsqrt<F: Width>(&mut self, a: Self::V<F>) -> Self::V<F> {
-        F::from_u128(funa::<F>(F::to_u128(a), SF32::sqrt, SF64::sqrt))
+        let (v, f) = funa::<F>(F::to_u128(a), SF32::sqrt, SF64::sqrt);
+        self.fp_flags |= f;
+        F::from_u128(v)
     }
 
     fn fmin<F: Width>(&mut self, a: Self::V<F>, b: Self::V<F>) -> Self::V<F> {
-        F::from_u128(fbin::<F>(
-            F::to_u128(a),
-            F::to_u128(b),
-            SF32::fmin,
-            SF64::fmin,
-        ))
+        let (v, f) = fbin::<F>(F::to_u128(a), F::to_u128(b), SF32::fmin, SF64::fmin);
+        self.fp_flags |= f;
+        F::from_u128(v)
     }
 
     fn fmax<F: Width>(&mut self, a: Self::V<F>, b: Self::V<F>) -> Self::V<F> {
-        F::from_u128(fbin::<F>(
-            F::to_u128(a),
-            F::to_u128(b),
-            SF32::fmax,
-            SF64::fmax,
-        ))
+        let (v, f) = fbin::<F>(F::to_u128(a), F::to_u128(b), SF32::fmax, SF64::fmax);
+        self.fp_flags |= f;
+        F::from_u128(v)
     }
 
     fn fsgnj<F: Width>(&mut self, a: Self::V<F>, b: Self::V<F>) -> Self::V<F> {
@@ -294,15 +293,21 @@ impl Backend for InterpBackend {
     }
 
     fn feq<F: Width>(&mut self, a: Self::V<F>, b: Self::V<F>) -> Self::B {
-        fcmp::<F>(F::to_u128(a), F::to_u128(b), SF32::eq, SF64::eq)
+        let (v, f) = fcmp::<F>(F::to_u128(a), F::to_u128(b), SF32::eq, SF64::eq);
+        self.fp_flags |= f;
+        v
     }
 
     fn flt<F: Width>(&mut self, a: Self::V<F>, b: Self::V<F>) -> Self::B {
-        fcmp::<F>(F::to_u128(a), F::to_u128(b), SF32::lt, SF64::lt)
+        let (v, f) = fcmp::<F>(F::to_u128(a), F::to_u128(b), SF32::lt, SF64::lt);
+        self.fp_flags |= f;
+        v
     }
 
     fn fle<F: Width>(&mut self, a: Self::V<F>, b: Self::V<F>) -> Self::B {
-        fcmp::<F>(F::to_u128(a), F::to_u128(b), SF32::le, SF64::le)
+        let (v, f) = fcmp::<F>(F::to_u128(a), F::to_u128(b), SF32::le, SF64::le);
+        self.fp_flags |= f;
+        v
     }
 
     fn fclass<F: Width>(&mut self, a: Self::V<F>) -> Self::V<W32> {
@@ -314,62 +319,128 @@ impl Backend for InterpBackend {
         fclass_bits(F::to_u128(a) as u64, e, m)
     }
 
-    fn fcvt_s32<F: Width>(&mut self, a: Self::V<F>) -> Self::V<W32> {
-        fcvti::<F>(F::to_u128(a)).clamp(i32::MIN as i64, i32::MAX as i64) as u32
+    fn fcvt_s32<F: Width>(&mut self, a: Self::V<F>, rm: u8) -> Self::V<W32> {
+        let rm = FpRm::from_bits(rm);
+        let (v, f) = match F::BITS {
+            32 => SF32::from_bits(F::to_u128(a) as u64).to_i32(rm),
+            _ => SF64::from_bits(F::to_u128(a) as u64).to_i32(rm),
+        };
+        self.fp_flags |= f;
+        v as u32
     }
 
-    fn fcvt_u32<F: Width>(&mut self, a: Self::V<F>) -> Self::V<W32> {
-        fcvtu::<F>(F::to_u128(a)).min(u32::MAX as u64) as u32
+    fn fcvt_u32<F: Width>(&mut self, a: Self::V<F>, rm: u8) -> Self::V<W32> {
+        let rm = FpRm::from_bits(rm);
+        let (v, f) = match F::BITS {
+            32 => SF32::from_bits(F::to_u128(a) as u64).to_u32(rm),
+            _ => SF64::from_bits(F::to_u128(a) as u64).to_u32(rm),
+        };
+        self.fp_flags |= f;
+        v
     }
 
-    fn fcvt_s64<F: Width>(&mut self, a: Self::V<F>) -> Self::V<W64> {
-        fcvti::<F>(F::to_u128(a)) as u64
+    fn fcvt_s64<F: Width>(&mut self, a: Self::V<F>, rm: u8) -> Self::V<W64> {
+        let (v, f) = fcvti::<F>(F::to_u128(a), FpRm::from_bits(rm));
+        self.fp_flags |= f;
+        v as u64
     }
 
-    fn fcvt_u64<F: Width>(&mut self, a: Self::V<F>) -> Self::V<W64> {
-        fcvtu::<F>(F::to_u128(a))
+    fn fcvt_u64<F: Width>(&mut self, a: Self::V<F>, rm: u8) -> Self::V<W64> {
+        let (v, f) = fcvtu::<F>(F::to_u128(a), FpRm::from_bits(rm));
+        self.fp_flags |= f;
+        v
     }
 
-    fn fcvt_from_s32<F: Width>(&mut self, a: Self::V<W32>) -> Self::V<F> {
+    fn fcvt_from_s32<F: Width>(&mut self, a: Self::V<W32>, rm: u8) -> Self::V<F> {
         let v = a as i32 as i64;
+        let rm = FpRm::from_bits(rm);
         F::from_u128(match F::BITS {
-            32 => u128::from(SF32::from_i64(v).bits()),
-            _ => u128::from(SF64::from_i64(v).bits()),
+            32 => {
+                let (r, f) = SF32::from_i64(v, rm);
+                self.fp_flags |= f;
+                u128::from(r.bits())
+            }
+            _ => {
+                let (r, f) = SF64::from_i64(v, rm);
+                self.fp_flags |= f;
+                u128::from(r.bits())
+            }
         })
     }
 
-    fn fcvt_from_u32<F: Width>(&mut self, a: Self::V<W32>) -> Self::V<F> {
+    fn fcvt_from_u32<F: Width>(&mut self, a: Self::V<W32>, rm: u8) -> Self::V<F> {
         let v = a as u64;
+        let rm = FpRm::from_bits(rm);
         F::from_u128(match F::BITS {
-            32 => u128::from(SF32::from_u64(v).bits()),
-            _ => u128::from(SF64::from_u64(v).bits()),
+            32 => {
+                let (r, f) = SF32::from_u64(v, rm);
+                self.fp_flags |= f;
+                u128::from(r.bits())
+            }
+            _ => {
+                let (r, f) = SF64::from_u64(v, rm);
+                self.fp_flags |= f;
+                u128::from(r.bits())
+            }
         })
     }
 
-    fn fcvt_from_s64<F: Width>(&mut self, a: Self::V<W64>) -> Self::V<F> {
+    fn fcvt_from_s64<F: Width>(&mut self, a: Self::V<W64>, rm: u8) -> Self::V<F> {
+        let rm = FpRm::from_bits(rm);
         F::from_u128(match F::BITS {
-            32 => u128::from(SF32::from_i64(a as i64).bits()),
-            _ => u128::from(SF64::from_i64(a as i64).bits()),
+            32 => {
+                let (r, f) = SF32::from_i64(a as i64, rm);
+                self.fp_flags |= f;
+                u128::from(r.bits())
+            }
+            _ => {
+                let (r, f) = SF64::from_i64(a as i64, rm);
+                self.fp_flags |= f;
+                u128::from(r.bits())
+            }
         })
     }
 
-    fn fcvt_from_u64<F: Width>(&mut self, a: Self::V<W64>) -> Self::V<F> {
-        // 符号なし 64 ビット。RNE。
+    fn fcvt_from_u64<F: Width>(&mut self, a: Self::V<W64>, rm: u8) -> Self::V<F> {
+        let rm = FpRm::from_bits(rm);
         match F::BITS {
-            32 => F::from_u128(u128::from(SF32::from_u64(a).bits())),
-            _ => F::from_u128(u128::from(SF64::from_u64(a).bits())),
+            32 => {
+                let (r, f) = SF32::from_u64(a, rm);
+                self.fp_flags |= f;
+                F::from_u128(u128::from(r.bits()))
+            }
+            _ => {
+                let (r, f) = SF64::from_u64(a, rm);
+                self.fp_flags |= f;
+                F::from_u128(u128::from(r.bits()))
+            }
         }
     }
 
-    fn fcvt_ff<F: Width, T: Width>(&mut self, a: Self::V<F>) -> Self::V<T> {
+    fn fcvt_ff<F: Width, T: Width>(&mut self, a: Self::V<F>, rm: u8) -> Self::V<T> {
         let v = F::to_u128(a);
+        let rm = FpRm::from_bits(rm);
         let out: u128 = match (F::BITS, T::BITS) {
-            (32, 64) => u128::from(SF32::from_bits(v as u64).to_f64().bits()),
-            (64, 32) => u128::from(SF64::from_bits(v as u64).to_f32().bits()),
+            (32, 64) => {
+                let (r, f) = SF32::from_bits(v as u64).to_f64(rm);
+                self.fp_flags |= f;
+                u128::from(r.bits())
+            }
+            (64, 32) => {
+                let (r, f) = SF64::from_bits(v as u64).to_f32(rm);
+                self.fp_flags |= f;
+                u128::from(r.bits())
+            }
             (32, 32) | (64, 64) => v,
             _ => unimplemented!("float conversion"),
         };
         T::from_u128(out)
+    }
+
+    fn fp_flags(&mut self) -> u8 {
+        let f = self.fp_flags;
+        self.fp_flags = 0;
+        f
     }
 
     fn zext<F: Width, T: Width>(&mut self, a: Self::V<F>) -> Self::V<T> {
@@ -573,20 +644,64 @@ fn sext_to_i128(v: u128, w: u32) -> i128 {
 fn fbin<F: Width>(
     a: u128,
     b: u128,
-    f32op: fn(SF32, SF32) -> SF32,
-    f64op: fn(SF64, SF64) -> SF64,
-) -> u128 {
+    f32op: fn(SF32, SF32) -> (SF32, u8),
+    f64op: fn(SF64, SF64) -> (SF64, u8),
+) -> (u128, u8) {
     match F::BITS {
-        32 => u128::from(f32op(SF32::from_bits(a as u64), SF32::from_bits(b as u64)).bits()),
-        _ => u128::from(f64op(SF64::from_bits(a as u64), SF64::from_bits(b as u64)).bits()),
+        32 => {
+            let (v, f) = f32op(SF32::from_bits(a as u64), SF32::from_bits(b as u64));
+            (u128::from(v.bits()), f)
+        }
+        _ => {
+            let (v, f) = f64op(SF64::from_bits(a as u64), SF64::from_bits(b as u64));
+            (u128::from(v.bits()), f)
+        }
     }
 }
 
 /// 単項の浮動小数点演算を振り分ける。
-fn funa<F: Width>(a: u128, f32op: fn(SF32) -> SF32, f64op: fn(SF64) -> SF64) -> u128 {
+fn funa<F: Width>(
+    a: u128,
+    f32op: fn(SF32) -> (SF32, u8),
+    f64op: fn(SF64) -> (SF64, u8),
+) -> (u128, u8) {
     match F::BITS {
-        32 => u128::from(f32op(SF32::from_bits(a as u64)).bits()),
-        _ => u128::from(f64op(SF64::from_bits(a as u64)).bits()),
+        32 => {
+            let (v, f) = f32op(SF32::from_bits(a as u64));
+            (u128::from(v.bits()), f)
+        }
+        _ => {
+            let (v, f) = f64op(SF64::from_bits(a as u64));
+            (u128::from(v.bits()), f)
+        }
+    }
+}
+
+/// 浮動小数点の三項演算を振り分ける。
+fn ftri<F: Width>(
+    a: u128,
+    b: u128,
+    c: u128,
+    f32op: fn(SF32, SF32, SF32) -> (SF32, u8),
+    f64op: fn(SF64, SF64, SF64) -> (SF64, u8),
+) -> (u128, u8) {
+    match F::BITS {
+        32 => {
+            let (v, f) = f32op(
+                SF32::from_bits(a as u64),
+                SF32::from_bits(b as u64),
+                SF32::from_bits(c as u64),
+            );
+            (u128::from(v.bits()), f)
+        }
+        _ => {
+            let (v, f) = f64op(
+                SF64::from_bits(a as u64),
+                SF64::from_bits(b as u64),
+                SF64::from_bits(c as u64),
+            );
+            (u128::from(v.bits()), f)
+        }
     }
 }
 
@@ -594,9 +709,9 @@ fn funa<F: Width>(a: u128, f32op: fn(SF32) -> SF32, f64op: fn(SF64) -> SF64) -> 
 fn fcmp<F: Width>(
     a: u128,
     b: u128,
-    f32op: fn(SF32, SF32) -> bool,
-    f64op: fn(SF64, SF64) -> bool,
-) -> bool {
+    f32op: fn(SF32, SF32) -> (bool, u8),
+    f64op: fn(SF64, SF64) -> (bool, u8),
+) -> (bool, u8) {
     match F::BITS {
         32 => f32op(SF32::from_bits(a as u64), SF32::from_bits(b as u64)),
         _ => f64op(SF64::from_bits(a as u64), SF64::from_bits(b as u64)),
@@ -618,18 +733,18 @@ fn fsgn<F: Width>(a: u128, b: u128, neg: bool, xor: bool) -> u128 {
 }
 
 /// 符号つき整数への変換。飽和は呼び出し側で行う。
-fn fcvti<F: Width>(a: u128) -> i64 {
+fn fcvti<F: Width>(a: u128, rm: FpRm) -> (i64, u8) {
     match F::BITS {
-        32 => SF32::from_bits(a as u64).to_i64(),
-        _ => SF64::from_bits(a as u64).to_i64(),
+        32 => SF32::from_bits(a as u64).to_i64(rm),
+        _ => SF64::from_bits(a as u64).to_i64(rm),
     }
 }
 
 /// 符号なし整数への変換。飽和は呼び出し側で行う。
-fn fcvtu<F: Width>(a: u128) -> u64 {
+fn fcvtu<F: Width>(a: u128, rm: FpRm) -> (u64, u8) {
     match F::BITS {
-        32 => SF32::from_bits(a as u64).to_u64(),
-        _ => SF64::from_bits(a as u64).to_u64(),
+        32 => SF32::from_bits(a as u64).to_u64(rm),
+        _ => SF64::from_bits(a as u64).to_u64(rm),
     }
 }
 

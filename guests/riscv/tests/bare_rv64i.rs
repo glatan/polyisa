@@ -346,6 +346,23 @@ fn f_arithmetic() {
     env.step(|b| sem::fdiv_s(b, Fpr(3), Fpr(2), Fpr(1)))
         .unwrap();
     assert_eq!(xf(&mut env, 3), 0x3fc0_0000);
+    // NXが立つことを確認（2.25/1.5は正確なので別途不正確演算で確認）。
+    env.backend.set(
+        Fpr(1).state(),
+        0x0000_0000_3fc0_0000 | 0xffff_ffff_0000_0000,
+    );
+    env.backend.set(
+        Fpr(2).state(),
+        0x0000_0000_3dcc_cccd | 0xffff_ffff_0000_0000,
+    );
+    env.step(|b| sem::fadd_s(b, Fpr(3), Fpr(1), Fpr(2)))
+        .unwrap();
+    let fcsr: u64 = env
+        .backend
+        .get(polyisa_sem::StateRef::<polyisa_sem::W64>::from_offset(
+            core::mem::offset_of!(polyisa_guest_riscv::CpuState, csr) + 3 * 8,
+        ));
+    assert_ne!(fcsr & 1, 0, "NXが立つはず");
 }
 
 #[test]
@@ -393,9 +410,9 @@ fn f_convert_move_compare() {
         0x0000_0000_3fc0_0000 | 0xffff_ffff_0000_0000,
     );
     // fcvt.w.s(1.5) = 2、fcvt.s.w(2) = 2.0。
-    env.step(|b| sem::fcvt_w_s(b, Gpr(2), Fpr(1))).unwrap();
+    env.step(|b| sem::fcvt_w_s(b, Gpr(2), Fpr(1), 0)).unwrap();
     assert_eq!(x(&mut env, 2), 2);
-    env.step(|b| sem::fcvt_s_w(b, Fpr(3), Gpr(2))).unwrap();
+    env.step(|b| sem::fcvt_s_w(b, Fpr(3), Gpr(2), 0)).unwrap();
     assert_eq!(xf(&mut env, 3), 0x4000_0000);
     // feq / flt。
     env.step(|b| sem::feq_s(b, Gpr(4), Fpr(1), Fpr(1))).unwrap();
@@ -448,11 +465,11 @@ fn d_arithmetic() {
     env.step(|b| sem::fclass_d(b, Gpr(4), Fpr(1))).unwrap();
     assert_eq!(x(&mut env, 4), 64);
     // 整数との往復。1.5 は偶数丸めで 2 になる。
-    env.step(|b| sem::fcvt_l_d(b, Gpr(4), Fpr(1))).unwrap();
+    env.step(|b| sem::fcvt_l_d(b, Gpr(4), Fpr(1), 0)).unwrap();
     assert_eq!(x(&mut env, 4), 2);
-    env.step(|b| sem::fcvt_d_l(b, Fpr(5), Gpr(4))).unwrap();
+    env.step(|b| sem::fcvt_d_l(b, Fpr(5), Gpr(4), 0)).unwrap();
     assert_eq!(x64(&mut env, 5), 0x4000_0000_0000_0000);
-    env.step(|b| sem::fcvt_s_d(b, Fpr(6), Fpr(1))).unwrap();
+    env.step(|b| sem::fcvt_s_d(b, Fpr(6), Fpr(1), 0)).unwrap();
     assert_eq!(xf(&mut env, 6), 0x3FC0_0000);
     // fmv.d.x / fmv.x.d / fld / fsd でビット列を往復させる。
     env.step(|b| sem::addi(b, Gpr(7), Gpr(0), 0x300)).unwrap();
@@ -463,6 +480,54 @@ fn d_arithmetic() {
     env.step(|b| sem::fsd(b, Gpr(7), Fpr(2), 0)).unwrap();
     env.step(|b| sem::fld(b, Fpr(9), Gpr(7), 0)).unwrap();
     assert_eq!(x64(&mut env, 9), 0x4002_0000_0000_0000);
+}
+
+#[test]
+fn fma_fused() {
+    use polyisa_guest_riscv::sem::Fpr;
+    let mut env = env();
+    env.map_rw(0, 1).unwrap();
+    // 単一丸めの証人値（ホスト mul_add・高精度演算と突合済み）。
+    // f32: a=0xbbed0000, b=0xfe466d80, c=0xd1e23e49。
+    for (i, bits) in [0xbbed0000u64, 0xfe466d80, 0xd1e23e49].iter().enumerate() {
+        env.backend
+            .set(Fpr(i as u8 + 1).state(), 0xffff_ffff_0000_0000 | bits);
+    }
+    env.step(|b| sem::fmadd_s(b, Fpr(4), Fpr(1), Fpr(2), Fpr(3)))
+        .unwrap();
+    assert_eq!(xf(&mut env, 4), 0x7ab7_b35f);
+    env.step(|b| sem::fmsub_s(b, Fpr(5), Fpr(1), Fpr(2), Fpr(3)))
+        .unwrap();
+    assert_eq!(xf(&mut env, 5), 0x7ab7_b360);
+    env.step(|b| sem::fnmadd_s(b, Fpr(6), Fpr(1), Fpr(2), Fpr(3)))
+        .unwrap();
+    assert_eq!(xf(&mut env, 6), 0xfab7_b35f);
+    env.step(|b| sem::fnmsub_s(b, Fpr(7), Fpr(1), Fpr(2), Fpr(3)))
+        .unwrap();
+    assert_eq!(xf(&mut env, 7), 0xfab7_b360);
+    // f64: a=0xb65feea97d824264, b=0x718d4d05e8e22743, c=0xe63658c912d0498d。
+    for (i, bits) in [
+        0xb65feea97d824264u64,
+        0x718d4d05e8e22743,
+        0xe63658c912d0498d,
+    ]
+    .iter()
+    .enumerate()
+    {
+        env.backend.set(Fpr(i as u8 + 11).state(), *bits);
+    }
+    env.step(|b| sem::fmadd_d(b, Fpr(14), Fpr(11), Fpr(12), Fpr(13)))
+        .unwrap();
+    assert_eq!(x64(&mut env, 14), 0xe7fd3d25c8a80f51);
+    env.step(|b| sem::fmsub_d(b, Fpr(15), Fpr(11), Fpr(12), Fpr(13)))
+        .unwrap();
+    assert_eq!(x64(&mut env, 15), 0xe7fd3d25c5dcf62e);
+    env.step(|b| sem::fnmsub_d(b, Fpr(16), Fpr(11), Fpr(12), Fpr(13)))
+        .unwrap();
+    assert_eq!(x64(&mut env, 16), 0x67fd3d25c5dcf62e);
+    env.step(|b| sem::fnmadd_d(b, Fpr(17), Fpr(11), Fpr(12), Fpr(13)))
+        .unwrap();
+    assert_eq!(x64(&mut env, 17), 0x67fd3d25c8a80f51);
 }
 
 #[test]
