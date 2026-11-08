@@ -75,7 +75,7 @@ ISA 基盤層   isagen → isadl
              guest → bits, sem, timing
 ゲスト ISA 層 guests/* → bits, softfloat, decimal, mem, sem, guest, timing
              （build-dependency として isagen）
-実行層       engine → bits, mem, sem, guest, timing
+実行層       engine → bits, mem, sem, guest, timing, softfloat
              ir → sem, guest, mem
              jit → ir, host
              （build-dependency として isagen。ホストの命令のエンコーダだけを生成する）

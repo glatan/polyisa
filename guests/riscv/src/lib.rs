@@ -28,6 +28,8 @@ pub struct CpuState {
     pub pc: u64,
     /// CSR ファイル。12 ビットのアドレスで引く。権限検査は後の段階で足す。
     pub csr: [u64; 4096],
+    /// 浮動小数点レジスタ f0〜f31。単精度の値は NaN ボックスして入れる。
+    pub f: [u64; 32],
 }
 
 impl Default for CpuState {
@@ -36,6 +38,7 @@ impl Default for CpuState {
             x: [0; 32],
             pc: 0,
             csr: [0; 4096],
+            f: [0; 32],
         }
     }
 }
@@ -60,8 +63,8 @@ mod tests {
 
     #[test]
     fn insn_count() {
-        // RV64I 53 件＋M 13 件＋CSR 6 件＋A 22 件。
-        assert_eq!(INSNS.len(), 94);
+        // RV64I 53 件＋M 13 件＋CSR 6 件＋A 22 件＋F 26 件。
+        assert_eq!(INSNS.len(), 120);
     }
 
     #[test]
@@ -84,6 +87,9 @@ mod tests {
         assert_eq!(decode(0xc010_21f3, 32), Some(Insn::Csrrs));
         assert_eq!(decode(0x1000_a12f, 32), Some(Insn::LrW));
         assert_eq!(decode(0x1820_b1af, 32), Some(Insn::ScD));
+        assert_eq!(decode(0x0000_a187, 32), Some(Insn::Flw));
+        assert_eq!(decode(0x0020_f1d3, 32), Some(Insn::FaddS));
+        assert_eq!(decode(0xa031_20d3, 32), Some(Insn::FeqS));
         assert_eq!(decode(0x0020_b1af, 32), Some(Insn::AmoaddD));
         assert_eq!(decode(0xe020_a1af, 32), Some(Insn::AmomaxuW));
         assert_eq!(decode(0xffff_ffff, 32), None);

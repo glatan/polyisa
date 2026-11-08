@@ -83,6 +83,36 @@ impl Width for W128 {
     }
 }
 
+/// 32 ビット浮動小数点のビット列。`W32` と同じ幅だが、浮動小数点演算の対象であることを表す。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct F32;
+
+/// 64 ビット浮動小数点のビット列。`W64` と同じ幅だが、浮動小数点演算の対象であることを表す。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct F64;
+
+impl Width for F32 {
+    const BITS: u32 = 32;
+    type Repr = u32;
+    fn to_u128(v: Self::Repr) -> u128 {
+        u128::from(v)
+    }
+    fn from_u128(v: u128) -> Self::Repr {
+        v as u32
+    }
+}
+
+impl Width for F64 {
+    const BITS: u32 = 64;
+    type Repr = u64;
+    fn to_u128(v: Self::Repr) -> u128 {
+        u128::from(v)
+    }
+    fn from_u128(v: u128) -> Self::Repr {
+        v as u64
+    }
+}
+
 /// 比較の演算。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Cmp {
@@ -237,6 +267,31 @@ pub trait Backend {
     fn mulhu<W: Width>(&mut self, a: Self::V<W>, b: Self::V<W>) -> Self::V<W>;
     fn sdiv<W: Width>(&mut self, a: Self::V<W>, b: Self::V<W>) -> Self::V<W>;
     fn srem<W: Width>(&mut self, a: Self::V<W>, b: Self::V<W>) -> Self::V<W>;
+
+    // 浮動小数点演算（RNE 固定。動的丸めと例外フラグは FpEnv の導入時に足す）
+    fn fadd<F: Width>(&mut self, a: Self::V<F>, b: Self::V<F>) -> Self::V<F>;
+    fn fsub<F: Width>(&mut self, a: Self::V<F>, b: Self::V<F>) -> Self::V<F>;
+    fn fmul<F: Width>(&mut self, a: Self::V<F>, b: Self::V<F>) -> Self::V<F>;
+    fn fdiv<F: Width>(&mut self, a: Self::V<F>, b: Self::V<F>) -> Self::V<F>;
+    fn fsqrt<F: Width>(&mut self, a: Self::V<F>) -> Self::V<F>;
+    fn fmin<F: Width>(&mut self, a: Self::V<F>, b: Self::V<F>) -> Self::V<F>;
+    fn fmax<F: Width>(&mut self, a: Self::V<F>, b: Self::V<F>) -> Self::V<F>;
+    fn fsgnj<F: Width>(&mut self, a: Self::V<F>, b: Self::V<F>) -> Self::V<F>;
+    fn fsgnjn<F: Width>(&mut self, a: Self::V<F>, b: Self::V<F>) -> Self::V<F>;
+    fn fsgnjx<F: Width>(&mut self, a: Self::V<F>, b: Self::V<F>) -> Self::V<F>;
+    fn feq<F: Width>(&mut self, a: Self::V<F>, b: Self::V<F>) -> Self::B;
+    fn flt<F: Width>(&mut self, a: Self::V<F>, b: Self::V<F>) -> Self::B;
+    fn fle<F: Width>(&mut self, a: Self::V<F>, b: Self::V<F>) -> Self::B;
+    fn fclass<F: Width>(&mut self, a: Self::V<F>) -> Self::V<W32>;
+    fn fcvt_s32<F: Width>(&mut self, a: Self::V<F>) -> Self::V<W32>;
+    fn fcvt_u32<F: Width>(&mut self, a: Self::V<F>) -> Self::V<W32>;
+    fn fcvt_s64<F: Width>(&mut self, a: Self::V<F>) -> Self::V<W64>;
+    fn fcvt_u64<F: Width>(&mut self, a: Self::V<F>) -> Self::V<W64>;
+    fn fcvt_from_s32<F: Width>(&mut self, a: Self::V<W32>) -> Self::V<F>;
+    fn fcvt_from_u32<F: Width>(&mut self, a: Self::V<W32>) -> Self::V<F>;
+    fn fcvt_from_s64<F: Width>(&mut self, a: Self::V<W64>) -> Self::V<F>;
+    fn fcvt_from_u64<F: Width>(&mut self, a: Self::V<W64>) -> Self::V<F>;
+    fn fcvt_ff<F: Width, T: Width>(&mut self, a: Self::V<F>) -> Self::V<T>;
     fn zext<F: Width, T: Width>(&mut self, a: Self::V<F>) -> Self::V<T>;
     fn sext<F: Width, T: Width>(&mut self, a: Self::V<F>) -> Self::V<T>;
     fn trunc<F: Width, T: Width>(&mut self, a: Self::V<F>) -> Self::V<T>;

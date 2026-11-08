@@ -12,7 +12,7 @@ use polyisa_isadl::pred::Pred;
 pub fn build_model() -> polyisa_isadl::Model {
     let mut m = polyisa_isadl::Model::new();
 
-    for class in ["alu", "load", "store", "branch", "jump", "system", "mult", "div", "atomic"] {
+    for class in ["alu", "load", "store", "branch", "jump", "system", "mult", "div", "atomic", "fpu"] {
         m.timing_classes.push(class.to_string());
     }
 
@@ -174,6 +174,33 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("amomax_d", "R", "1010000 ..... ..... 011 ..... 0101111", "amomax_d {rd}, {rs1}, {rs2}", "atomic"),
         ("amominu_d", "R", "1100000 ..... ..... 011 ..... 0101111", "amominu_d {rd}, {rs1}, {rs2}", "atomic"),
         ("amomaxu_d", "R", "1110000 ..... ..... 011 ..... 0101111", "amomaxu_d {rd}, {rs1}, {rs2}", "atomic"),
+        // F（単精度浮動小数点。fmt=00。rm は RNE 固定で無視する）
+        ("flw", "I", "............ ..... 010 ..... 0000111", "flw {rd}, {imm}({rs1})", "load"),
+        ("fsw", "S", "....... ..... ..... 010 ..... 0100111", "fsw {rs2}, {imm}({rs1})", "store"),
+        ("fadd_s", "R", "0000000 ..... ..... ... ..... 1010011", "fadd.s {rd}, {rs1}, {rs2}", "fpu"),
+        ("fsub_s", "R", "0000100 ..... ..... ... ..... 1010011", "fsub.s {rd}, {rs1}, {rs2}", "fpu"),
+        ("fmul_s", "R", "0001000 ..... ..... ... ..... 1010011", "fmul.s {rd}, {rs1}, {rs2}", "fpu"),
+        ("fdiv_s", "R", "0001100 ..... ..... ... ..... 1010011", "fdiv.s {rd}, {rs1}, {rs2}", "fpu"),
+        ("fsqrt_s", "R", "0101100 00000 ..... ... ..... 1010011", "fsqrt.s {rd}, {rs1}", "fpu"),
+        ("fsgnj_s", "R", "0010000 ..... ..... 000 ..... 1010011", "fsgnj.s {rd}, {rs1}, {rs2}", "fpu"),
+        ("fsgnjn_s", "R", "0010000 ..... ..... 001 ..... 1010011", "fsgnjn.s {rd}, {rs1}, {rs2}", "fpu"),
+        ("fsgnjx_s", "R", "0010000 ..... ..... 010 ..... 1010011", "fsgnjx.s {rd}, {rs1}, {rs2}", "fpu"),
+        ("fmin_s", "R", "0010100 ..... ..... 000 ..... 1010011", "fmin.s {rd}, {rs1}, {rs2}", "fpu"),
+        ("fmax_s", "R", "0010100 ..... ..... 001 ..... 1010011", "fmax.s {rd}, {rs1}, {rs2}", "fpu"),
+        ("fcvt_w_s", "R", "1100000 00000 ..... ... ..... 1010011", "fcvt.w.s {rd}, {rs1}", "fpu"),
+        ("fcvt_wu_s", "R", "1100000 00001 ..... ... ..... 1010011", "fcvt.wu.s {rd}, {rs1}", "fpu"),
+        ("fcvt_l_s", "R", "1100000 00010 ..... ... ..... 1010011", "fcvt.l.s {rd}, {rs1}", "fpu"),
+        ("fcvt_lu_s", "R", "1100000 00011 ..... ... ..... 1010011", "fcvt.lu.s {rd}, {rs1}", "fpu"),
+        ("fmv_x_w", "R", "1110000 00000 ..... 000 ..... 1010011", "fmv.x.w {rd}, {rs1}", "fpu"),
+        ("fclass_s", "R", "1110000 00000 ..... 001 ..... 1010011", "fclass.s {rd}, {rs1}", "fpu"),
+        ("feq_s", "R", "1010000 ..... ..... 010 ..... 1010011", "feq.s {rd}, {rs1}, {rs2}", "fpu"),
+        ("flt_s", "R", "1010000 ..... ..... 001 ..... 1010011", "flt.s {rd}, {rs1}, {rs2}", "fpu"),
+        ("fle_s", "R", "1010000 ..... ..... 000 ..... 1010011", "fle.s {rd}, {rs1}, {rs2}", "fpu"),
+        ("fcvt_s_w", "R", "1101000 00000 ..... ... ..... 1010011", "fcvt.s.w {rd}, {rs1}", "fpu"),
+        ("fcvt_s_wu", "R", "1101001 00000 ..... ... ..... 1010011", "fcvt.s.wu {rd}, {rs1}", "fpu"),
+        ("fcvt_s_l", "R", "1101010 00000 ..... ... ..... 1010011", "fcvt.s.l {rd}, {rs1}", "fpu"),
+        ("fcvt_s_lu", "R", "1101011 00000 ..... ... ..... 1010011", "fcvt.s.lu {rd}, {rs1}", "fpu"),
+        ("fmv_w_x", "R", "1111000 00000 ..... 000 ..... 1010011", "fmv.w.x {rd}, {rs1}", "fpu"),
     ];
     for (name, format, pattern, syntax, timing) in insns {
         m.insns.push(Insn {

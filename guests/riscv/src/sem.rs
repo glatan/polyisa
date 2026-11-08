@@ -8,7 +8,9 @@
 //! - バックエンドの呼び出しは必ず文で分け、引数の中で借用を重ねない。
 
 use polyisa_mem::{Access, AccessKind, Align, Endian};
-use polyisa_sem::{Backend, Cmp, Flow, GuestException, StateArray, StateRef, W8, W16, W32, W64};
+use polyisa_sem::{
+    Backend, Cmp, F32, Flow, GuestException, StateArray, StateRef, W8, W16, W32, W64,
+};
 
 use super::CpuState;
 
@@ -891,6 +893,30 @@ pub fn amomaxu_d<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr, oimm: i64) 
 
 // SYSTEM
 
+/// 浮動小数点レジスタ番号。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Fpr(pub u8);
+
+impl Fpr {
+    /// CPU 状態の対応する要素を指す。値は u64 の NaN ボックス形で持つ。
+    pub fn state(self) -> StateRef<W64> {
+        StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, f) + usize::from(self.0) * 8)
+    }
+}
+
+fn read_f<B: Backend>(b: &mut B, r: Fpr) -> B::V<F32> {
+    let w: B::V<W64> = b.get(r.state());
+    b.trunc::<W64, F32>(w)
+}
+
+/// 単精度の値を NaN ボックスして書く。
+fn write_f<B: Backend>(b: &mut B, rd: Fpr, v: B::V<F32>) {
+    let w = b.zext::<F32, W64>(v);
+    let top = b.konst::<W64>(0xffff_ffff_0000_0000);
+    let boxed = b.or(w, top);
+    b.set(rd.state(), boxed);
+}
+
 /// FENCE。裸実行と順序保証の不要な段階では何もしない。
 pub fn fence<B: Backend>(_b: &mut B) -> Flow<B> {
     Ok(())
@@ -919,4 +945,239 @@ pub fn ecall<B: Backend>(b: &mut B, pc: u64) -> Flow<B> {
 /// EBREAK。デバッガが処理する退出を返す。
 pub fn ebreak<B: Backend>(b: &mut B, pc: u64) -> Flow<B> {
     env_exit(b, polyisa_sem::ExceptionKind::Break, pc)
+}
+
+// F（単精度浮動小数点）。丸めは RNE 固定、動的丸めは後の段階で足す。
+
+/// FLW。
+pub fn flw<B: Backend>(b: &mut B, rd: Fpr, rs1: Gpr, oimm: i64) -> Flow<B> {
+    let addr = load_addr(b, rs1, oimm);
+    let v: B::V<W32> = b.load(addr, DATA_READ)?;
+    let w = b.trunc::<W32, F32>(v);
+    write_f(b, rd, w);
+    Ok(())
+}
+
+/// FSW。
+pub fn fsw<B: Backend>(b: &mut B, rs1: Gpr, rs2: Fpr, oimm: i64) -> Flow<B> {
+    let v = read_f(b, rs2);
+    let addr = load_addr(b, rs1, oimm);
+    b.store(addr, v, DATA_WRITE)?;
+    Ok(())
+}
+
+/// FADD.S。
+pub fn fadd_s<B: Backend>(b: &mut B, rd: Fpr, rs1: Fpr, rs2: Fpr) -> Flow<B> {
+    let x = read_f(b, rs1);
+    let y = read_f(b, rs2);
+    let s = b.fadd(x, y);
+    write_f(b, rd, s);
+    Ok(())
+}
+
+/// FSUB.S。
+pub fn fsub_s<B: Backend>(b: &mut B, rd: Fpr, rs1: Fpr, rs2: Fpr) -> Flow<B> {
+    let x = read_f(b, rs1);
+    let y = read_f(b, rs2);
+    let s = b.fsub(x, y);
+    write_f(b, rd, s);
+    Ok(())
+}
+
+/// FMUL.S。
+pub fn fmul_s<B: Backend>(b: &mut B, rd: Fpr, rs1: Fpr, rs2: Fpr) -> Flow<B> {
+    let x = read_f(b, rs1);
+    let y = read_f(b, rs2);
+    let s = b.fmul(x, y);
+    write_f(b, rd, s);
+    Ok(())
+}
+
+/// FDIV.S。
+pub fn fdiv_s<B: Backend>(b: &mut B, rd: Fpr, rs1: Fpr, rs2: Fpr) -> Flow<B> {
+    let x = read_f(b, rs1);
+    let y = read_f(b, rs2);
+    let s = b.fdiv(x, y);
+    write_f(b, rd, s);
+    Ok(())
+}
+
+/// FSQRT.S。
+pub fn fsqrt_s<B: Backend>(b: &mut B, rd: Fpr, rs1: Fpr) -> Flow<B> {
+    let x = read_f(b, rs1);
+    let s = b.fsqrt(x);
+    write_f(b, rd, s);
+    Ok(())
+}
+
+/// FSGNJ.S。
+pub fn fsgnj_s<B: Backend>(b: &mut B, rd: Fpr, rs1: Fpr, rs2: Fpr) -> Flow<B> {
+    let x = read_f(b, rs1);
+    let y = read_f(b, rs2);
+    let __v = b.fsgnj(x, y);
+    write_f(b, rd, __v);
+    Ok(())
+}
+
+/// FSGNJN.S。
+pub fn fsgnjn_s<B: Backend>(b: &mut B, rd: Fpr, rs1: Fpr, rs2: Fpr) -> Flow<B> {
+    let x = read_f(b, rs1);
+    let y = read_f(b, rs2);
+    let __v = b.fsgnjn(x, y);
+    write_f(b, rd, __v);
+    Ok(())
+}
+
+/// FSGNJX.S。
+pub fn fsgnjx_s<B: Backend>(b: &mut B, rd: Fpr, rs1: Fpr, rs2: Fpr) -> Flow<B> {
+    let x = read_f(b, rs1);
+    let y = read_f(b, rs2);
+    let __v = b.fsgnjx(x, y);
+    write_f(b, rd, __v);
+    Ok(())
+}
+
+/// FMIN.S。
+pub fn fmin_s<B: Backend>(b: &mut B, rd: Fpr, rs1: Fpr, rs2: Fpr) -> Flow<B> {
+    let x = read_f(b, rs1);
+    let y = read_f(b, rs2);
+    let __v = b.fmin(x, y);
+    write_f(b, rd, __v);
+    Ok(())
+}
+
+/// FMAX.S。
+pub fn fmax_s<B: Backend>(b: &mut B, rd: Fpr, rs1: Fpr, rs2: Fpr) -> Flow<B> {
+    let x = read_f(b, rs1);
+    let y = read_f(b, rs2);
+    let __v = b.fmax(x, y);
+    write_f(b, rd, __v);
+    Ok(())
+}
+
+fn write_cmp<B: Backend>(b: &mut B, rd: Gpr, c: B::B) {
+    let t = b.konst::<W64>(1);
+    let f = b.konst::<W64>(0);
+    let s = b.select(c, t, f);
+    write(b, rd, s);
+}
+
+/// FEQ.S。
+pub fn feq_s<B: Backend>(b: &mut B, rd: Gpr, rs1: Fpr, rs2: Fpr) -> Flow<B> {
+    let x = read_f(b, rs1);
+    let y = read_f(b, rs2);
+    let c = b.feq(x, y);
+    write_cmp(b, rd, c);
+    Ok(())
+}
+
+/// FLT.S。
+pub fn flt_s<B: Backend>(b: &mut B, rd: Gpr, rs1: Fpr, rs2: Fpr) -> Flow<B> {
+    let x = read_f(b, rs1);
+    let y = read_f(b, rs2);
+    let c = b.flt(x, y);
+    write_cmp(b, rd, c);
+    Ok(())
+}
+
+/// FLE.S。
+pub fn fle_s<B: Backend>(b: &mut B, rd: Gpr, rs1: Fpr, rs2: Fpr) -> Flow<B> {
+    let x = read_f(b, rs1);
+    let y = read_f(b, rs2);
+    let c = b.fle(x, y);
+    write_cmp(b, rd, c);
+    Ok(())
+}
+
+/// FCLASS.S。分類ビットを整数レジスタに書く。
+pub fn fclass_s<B: Backend>(b: &mut B, rd: Gpr, rs1: Fpr) -> Flow<B> {
+    let x = read_f(b, rs1);
+    let v = b.fclass(x);
+    let w = b.zext::<W32, W64>(v);
+    write(b, rd, w);
+    Ok(())
+}
+
+/// FCVT.W.S。範囲外は飽和する。
+pub fn fcvt_w_s<B: Backend>(b: &mut B, rd: Gpr, rs1: Fpr) -> Flow<B> {
+    let x = read_f(b, rs1);
+    let v = b.fcvt_s32(x);
+    let w = b.sext::<W32, W64>(v);
+    write(b, rd, w);
+    Ok(())
+}
+
+/// FCVT.WU.S。
+pub fn fcvt_wu_s<B: Backend>(b: &mut B, rd: Gpr, rs1: Fpr) -> Flow<B> {
+    let x = read_f(b, rs1);
+    let v = b.fcvt_u32(x);
+    let w = b.zext::<W32, W64>(v);
+    write(b, rd, w);
+    Ok(())
+}
+
+/// FCVT.L.S。
+pub fn fcvt_l_s<B: Backend>(b: &mut B, rd: Gpr, rs1: Fpr) -> Flow<B> {
+    let x = read_f(b, rs1);
+    let s = b.fcvt_s64(x);
+    write(b, rd, s);
+    Ok(())
+}
+
+/// FCVT.LU.S。
+pub fn fcvt_lu_s<B: Backend>(b: &mut B, rd: Gpr, rs1: Fpr) -> Flow<B> {
+    let x = read_f(b, rs1);
+    let s = b.fcvt_u64(x);
+    write(b, rd, s);
+    Ok(())
+}
+
+/// FCVT.S.W。
+pub fn fcvt_s_w<B: Backend>(b: &mut B, rd: Fpr, rs1: Gpr) -> Flow<B> {
+    let raw = read(b, rs1);
+    let x = b.trunc::<W64, W32>(raw);
+    let s = b.fcvt_from_s32(x);
+    write_f(b, rd, s);
+    Ok(())
+}
+
+/// FCVT.S.WU。
+pub fn fcvt_s_wu<B: Backend>(b: &mut B, rd: Fpr, rs1: Gpr) -> Flow<B> {
+    let raw = read(b, rs1);
+    let x = b.trunc::<W64, W32>(raw);
+    let s = b.fcvt_from_u32(x);
+    write_f(b, rd, s);
+    Ok(())
+}
+
+/// FCVT.S.L。
+pub fn fcvt_s_l<B: Backend>(b: &mut B, rd: Fpr, rs1: Gpr) -> Flow<B> {
+    let x = read(b, rs1);
+    let s = b.fcvt_from_s64(x);
+    write_f(b, rd, s);
+    Ok(())
+}
+
+/// FCVT.S.LU。
+pub fn fcvt_s_lu<B: Backend>(b: &mut B, rd: Fpr, rs1: Gpr) -> Flow<B> {
+    let x = read(b, rs1);
+    let s = b.fcvt_from_u64(x);
+    write_f(b, rd, s);
+    Ok(())
+}
+
+/// FMV.X.W。ビット列をそのまま整数レジスタに移す（符号拡張する）。
+pub fn fmv_x_w<B: Backend>(b: &mut B, rd: Gpr, rs1: Fpr) -> Flow<B> {
+    let x = read_f(b, rs1);
+    let w = b.sext::<F32, W64>(x);
+    write(b, rd, w);
+    Ok(())
+}
+
+/// FMV.W.X。下位 32 ビットを浮動小数点レジスタに移す（NaN ボックスする）。
+pub fn fmv_w_x<B: Backend>(b: &mut B, rd: Fpr, rs1: Gpr) -> Flow<B> {
+    let raw = read(b, rs1);
+    let x = b.trunc::<W64, F32>(raw);
+    write_f(b, rd, x);
+    Ok(())
 }
