@@ -165,11 +165,11 @@
 
 | ID | 名称 | 発行者 | 版 | 対象 | 利用条件 | 用途 | 確認 | 備考 |
 |---|---|---|---|---|---|---|---|---|
-| TOOL-RUST | Rust のツールチェーン（rustc、cargo、rust-lld、rustfmt、clippy、Miri） | Rust プロジェクト | — | 全体 | — | — | 未確認 | |
-| TOOL-TASK | Task（Arch Linux のパッケージ名は go-task） | 確認時に記録 | — | 開発作業 | — | — | 未確認 | |
-| TOOL-NEXTEST | cargo-nextest | 確認時に記録 | — | テストの実行 | — | — | 未確認 | |
-| TOOL-GIT | Git | Git プロジェクト | — | 開発作業、テストデータの取得 | — | — | 未確認 | |
-| TOOL-CURL | curl | curl プロジェクト | — | テストデータの取得 | — | — | 未確認 | |
+| TOOL-RUST | Rust のツールチェーン（rustc、cargo、rust-lld、rustfmt、clippy、Miri） | Rust プロジェクト | 1.99.1 | 全体 | MIT OR Apache-2.0（LICENSE-MIT、LICENSE-APACHE） | X | 2026-11-08 glatan | 別プロセスで実行する。複製・再配布しない |
+| TOOL-TASK | Task 3.54.0（Arch Linux のパッケージ名は go-task） | go-task | 3.54.0 | 開発作業 | MIT（LICENSE） | X | 2026-11-08 glatan | 別プロセスで実行する。複製・再配布しない |
+| TOOL-NEXTEST | cargo-nextest | nextest-rs | 0.9.151 | テストの実行 | MIT OR Apache-2.0（LICENSE-MIT、LICENSE-APACHE） | X | 2026-11-08 glatan | 別プロセスで実行する。複製・再配布しない |
+| TOOL-GIT | Git | Git プロジェクト | 2.56.0 | 開発作業、テストデータの取得 | GNU GPL version 2（COPYING。v2 のみ） | X | 2026-11-08 glatan | 別プロセスで実行する。複製・再配布・組み込みをしない |
+| TOOL-CURL | curl | curl プロジェクト | 8.23.0 | テストデータの取得 | curl license（COPYING） | X | 2026-11-08 glatan | 別プロセスで実行する。複製・再配布しない |
 | TOOL-LLVM | LLVM と clang（llvm-objdump を含む） | LLVM プロジェクト | — | 検証 | — | — | 未確認 | |
 | TOOL-GDB | GDB | GNU プロジェクト | — | 検証 | — | — | 未確認 | |
 | TOOL-WASMTIME | wasmtime | Bytecode Alliance | — | wasm の検証 | — | — | 未確認 | |
