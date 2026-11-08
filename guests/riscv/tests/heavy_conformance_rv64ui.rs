@@ -1675,6 +1675,24 @@ fn check_one_in(sub: &str, name: &str) {
         3,
     );
     polyisa_loader::elf::load_segments(&bytes, &phdrs, &mut env.backend.mem).expect("配置");
+    // PMP のない M モードでは、写像済みメモリはすべて fetch 可能である。
+    // fence_i の自己書き換え先（.data 等の RW セグメント）への分岐を通す。
+    {
+        use polyisa_mem::{PAGE_SIZE, Perms};
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        for ph in phdrs.iter().filter(|ph| ph.seg_type == 1) {
+            let base = ph.vaddr & !(PAGE_SIZE - 1);
+            let end = ph.vaddr.checked_add(ph.memsz).expect("PHDR範囲");
+            let aligned = end.checked_add(PAGE_SIZE - 1).expect("PHDR範囲") & !(PAGE_SIZE - 1);
+            let count = (aligned - base) / PAGE_SIZE;
+            if count > 0 {
+                env.backend
+                    .mem
+                    .protect(VirtAddr(base), count, rwx)
+                    .expect("権限付与");
+            }
+        }
+    }
     match run(&mut env, ehdr.entry, rv32) {
         Outcome::Exit(code) => assert_eq!(code, 0, "{name} が失敗"),
         Outcome::Unimplemented { pc, word } => {
@@ -1987,8 +2005,13 @@ fn rv64ud_p_structural() {
     check_ud("structural");
 }
 
-// rv32ui のうち fence_i（非実行セグメントへの自己書き換え）と
-// ma_data（非整列アクセス）は対象外。rv64 の実行分と同範囲に限る。
+// rv32ui のうち ma_data（非整列アクセス）は対象外。
+// fence_i は PMP のない M モードの写像で通る（ロードマップ注記）。
+#[test]
+fn rv32ui_p_ma_data() {
+    check_rv32i("ma_data");
+}
+
 #[test]
 fn rv32ui_p_add() {
     check_rv32i("add");
@@ -2172,6 +2195,11 @@ fn rv32ui_p_xor() {
 #[test]
 fn rv32ui_p_xori() {
     check_rv32i("xori");
+}
+
+#[test]
+fn rv32ui_p_fence_i() {
+    check_rv32i("fence_i");
 }
 
 #[test]
@@ -2495,8 +2523,12 @@ fn rv64ua_p_lrsc() {
 }
 
 // rv64ui 残件（W接尾辞・LD/SD・LWU・残りのI命令）。
-// fence_i（非実行セグメントへの自己書き換え）と
-// ma_data（非整列アクセス）は対象外（ロードマップ注記）。
+// fence_i は PMP のない M モードの写像で通る。
+// ma_data は非整列を許す実装（DATA_READ/WRITE の Unaligned）で通す。
+#[test]
+fn rv64ui_p_ma_data() {
+    check_one("ma_data");
+}
 
 #[test]
 fn rv64ui_p_addiw() {
@@ -2571,6 +2603,11 @@ fn rv64ui_p_sb() {
 #[test]
 fn rv64ui_p_sd() {
     check_one("sd");
+}
+
+#[test]
+fn rv64ui_p_fence_i() {
+    check_one("fence_i");
 }
 
 #[test]
