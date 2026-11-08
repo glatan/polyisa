@@ -11,11 +11,13 @@
 
 /// 対応するゲスト ABI の名前。段階1は RV64 のみ。
 /// x86_64 は番号表のみを持ち、実行は段階4の範囲である。
+/// i386 は番号表のみを持ち、実行は段階4の範囲である。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum GuestAbi {
     Unknown,
     Rv64Linux,
     X86_64Linux,
+    I386Linux,
 }
 
 /// 段階1で使うシステムコール番号（RISC-V・asm-generic）。
@@ -82,7 +84,40 @@ pub mod x86_64 {
     pub const STATX: u64 = 332;
 }
 
-/// ABI と番号から名前を引く。段階1の範囲と x86_64 の番号表のみ。
+/// 段階4の準備としての i386 番号表（Linux・32ビット）。
+/// 値はカーネルの UAPI 由来の事実である。新旧 stat 系は i386 の実態に合わせ、
+/// newfstatat（i386 に存在しない）の代わりに fstatat64 を持つ。
+// Ref: SRC-LINUX (7.3).
+pub mod i386 {
+    pub const READ: u64 = 3;
+    pub const WRITE: u64 = 4;
+    pub const CLOSE: u64 = 6;
+    pub const MMAP: u64 = 90;
+    pub const MPROTECT: u64 = 125;
+    pub const MUNMAP: u64 = 91;
+    pub const BRK: u64 = 45;
+    pub const EXIT: u64 = 1;
+    pub const EXIT_GROUP: u64 = 252;
+    pub const UNAME: u64 = 122;
+    pub const SET_TID_ADDRESS: u64 = 258;
+    pub const CLOCK_GETTIME: u64 = 265;
+    pub const GETRANDOM: u64 = 355;
+    pub const OPENAT: u64 = 295;
+    // 段階2相当（ファイル操作）。
+    pub const LSEEK: u64 = 19;
+    pub const GETDENTS64: u64 = 220;
+    pub const GETCWD: u64 = 183;
+    pub const DUP3: u64 = 330;
+    pub const FCNTL: u64 = 55;
+    pub const IOCTL: u64 = 54;
+    pub const PREAD64: u64 = 180;
+    pub const READLINKAT: u64 = 305;
+    pub const FSTATAT64: u64 = 300;
+    pub const FSTAT: u64 = 108;
+    pub const STATX: u64 = 383;
+}
+
+/// ABI と番号から名前を引く。段階1の範囲と x86_64・i386 の番号表のみ。
 #[must_use]
 pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
     match abi {
@@ -112,6 +147,34 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             rv64::NEWFSTATAT => Some("newfstatat"),
             rv64::FSTAT => Some("fstat"),
             rv64::STATX => Some("statx"),
+            _ => None,
+        },
+        GuestAbi::I386Linux => match nr {
+            i386::READ => Some("read"),
+            i386::WRITE => Some("write"),
+            i386::CLOSE => Some("close"),
+            i386::MMAP => Some("mmap"),
+            i386::MPROTECT => Some("mprotect"),
+            i386::MUNMAP => Some("munmap"),
+            i386::BRK => Some("brk"),
+            i386::EXIT => Some("exit"),
+            i386::EXIT_GROUP => Some("exit_group"),
+            i386::UNAME => Some("uname"),
+            i386::SET_TID_ADDRESS => Some("set_tid_address"),
+            i386::CLOCK_GETTIME => Some("clock_gettime"),
+            i386::GETRANDOM => Some("getrandom"),
+            i386::OPENAT => Some("openat"),
+            i386::LSEEK => Some("lseek"),
+            i386::GETDENTS64 => Some("getdents64"),
+            i386::GETCWD => Some("getcwd"),
+            i386::DUP3 => Some("dup3"),
+            i386::FCNTL => Some("fcntl"),
+            i386::IOCTL => Some("ioctl"),
+            i386::PREAD64 => Some("pread64"),
+            i386::READLINKAT => Some("readlinkat"),
+            i386::FSTATAT64 => Some("fstatat64"),
+            i386::FSTAT => Some("fstat"),
+            i386::STATX => Some("statx"),
             _ => None,
         },
         GuestAbi::X86_64Linux => match nr {
@@ -231,6 +294,21 @@ mod tests {
         assert_eq!(syscall_name(GuestAbi::X86_64Linux, 332), Some("statx"));
         assert_eq!(syscall_name(GuestAbi::X86_64Linux, 217), Some("getdents64"));
         assert_eq!(syscall_name(GuestAbi::X86_64Linux, 64), None);
+    }
+
+    #[test]
+    fn i386_stage1_numbers() {
+        // 代表的な番号が i386 の UAPI と一致する（全体は層6で突合せ）。
+        // newfstatat は i386 に存在しないため fstatat64 を持つ。
+        assert_eq!(i386::WRITE, 4);
+        assert_eq!(i386::EXIT_GROUP, 252);
+        assert_eq!(i386::MMAP, 90);
+        assert_eq!(i386::BRK, 45);
+        assert_eq!(syscall_name(GuestAbi::I386Linux, 4), Some("write"));
+        assert_eq!(syscall_name(GuestAbi::I386Linux, 383), Some("statx"));
+        assert_eq!(syscall_name(GuestAbi::I386Linux, 300), Some("fstatat64"));
+        assert_eq!(syscall_name(GuestAbi::I386Linux, 220), Some("getdents64"));
+        assert_eq!(syscall_name(GuestAbi::I386Linux, 64), None);
     }
 
     #[test]
