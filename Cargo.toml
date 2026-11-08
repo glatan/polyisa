@@ -26,6 +26,7 @@ members = [
     "guests/riscv",
     "guests/sparc",
     "guests/mips",
+    "guests/x86",
 ]
 resolver = "2"
 
