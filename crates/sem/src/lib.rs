@@ -260,6 +260,17 @@ pub trait Backend {
         new: Self::V<W>,
         acc: Access,
     ) -> Result<Self::V<W>, Self::Exit>;
+    fn load_reserved<W: Width>(
+        &mut self,
+        addr: Self::V<W64>,
+        acc: Access,
+    ) -> Result<Self::V<W>, Self::Exit>;
+    fn store_conditional<W: Width>(
+        &mut self,
+        addr: Self::V<W64>,
+        v: Self::V<W>,
+        acc: Access,
+    ) -> Result<Self::B, Self::Exit>;
 
     // 制御
     fn if_then<F>(&mut self, c: Self::B, then: F) -> Result<(), Self::Exit>

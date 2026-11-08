@@ -250,6 +250,68 @@ fn csr_read_write_set_clear() {
 }
 
 #[test]
+fn lr_sc_success_and_fail() {
+    let mut env = env();
+    env.map_rw(0x0, 1).unwrap();
+    env.step(|b| sem::addi(b, Gpr(1), Gpr(0), 0x100)).unwrap();
+    env.step(|b| sem::addi(b, Gpr(2), Gpr(0), 7)).unwrap();
+    env.step(|b| sem::sw(b, Gpr(1), Gpr(2), 0)).unwrap();
+    // 予約して条件付きストア。成功で 0 を書く。
+    env.step(|b| sem::lr_w(b, Gpr(3), Gpr(1), 0)).unwrap();
+    assert_eq!(x(&mut env, 3), 7);
+    env.step(|b| sem::addi(b, Gpr(4), Gpr(0), 9)).unwrap();
+    env.step(|b| sem::sc_w(b, Gpr(5), Gpr(1), Gpr(4), 0))
+        .unwrap();
+    assert_eq!(x(&mut env, 5), 0);
+    env.step(|b| sem::lw(b, Gpr(6), Gpr(1), 0)).unwrap();
+    assert_eq!(x(&mut env, 6), 9);
+    // 予約なしのストアは予約を奪う。SC は失敗し 0 以外を書く。
+    env.step(|b| sem::lr_w(b, Gpr(3), Gpr(1), 0)).unwrap();
+    env.step(|b| sem::sw(b, Gpr(1), Gpr(2), 0)).unwrap();
+    env.step(|b| sem::sc_w(b, Gpr(5), Gpr(1), Gpr(4), 0))
+        .unwrap();
+    assert_ne!(x(&mut env, 5), 0);
+    env.step(|b| sem::lw(b, Gpr(6), Gpr(1), 0)).unwrap();
+    assert_eq!(x(&mut env, 6), 7);
+}
+
+#[test]
+fn amo_ops() {
+    let mut env = env();
+    env.map_rw(0x0, 1).unwrap();
+    env.step(|b| sem::addi(b, Gpr(1), Gpr(0), 0x200)).unwrap();
+    env.step(|b| sem::addi(b, Gpr(2), Gpr(0), 12)).unwrap();
+    env.step(|b| sem::sw(b, Gpr(1), Gpr(2), 0)).unwrap();
+    // SWAP：古い値を返し、新しい値を置く。
+    env.step(|b| sem::addi(b, Gpr(3), Gpr(0), 5)).unwrap();
+    env.step(|b| sem::amoswap_w(b, Gpr(4), Gpr(1), Gpr(3), 0))
+        .unwrap();
+    assert_eq!(x(&mut env, 4), 12);
+    env.step(|b| sem::lw(b, Gpr(5), Gpr(1), 0)).unwrap();
+    assert_eq!(x(&mut env, 5), 5);
+    // ADD：5 + 12。
+    env.step(|b| sem::amoadd_d(b, Gpr(4), Gpr(1), Gpr(2), 0))
+        .unwrap();
+    assert_eq!(x(&mut env, 4), 5);
+    env.step(|b| sem::ld(b, Gpr(5), Gpr(1), 0)).unwrap();
+    assert_eq!(x(&mut env, 5), 17);
+    // MIN（符号付き）：-1 と 17 では -1 が残る。
+    env.step(|b| sem::addi(b, Gpr(6), Gpr(0), -1)).unwrap();
+    env.step(|b| sem::amomin_d(b, Gpr(4), Gpr(1), Gpr(6), 0))
+        .unwrap();
+    assert_eq!(x(&mut env, 4), 17);
+    env.step(|b| sem::ld(b, Gpr(5), Gpr(1), 0)).unwrap();
+    assert_eq!(x(&mut env, 5), u64::MAX);
+    // MAXU（符号なし）：0xffff... と 1 では 0xffff... が残る。
+    env.step(|b| sem::addi(b, Gpr(7), Gpr(0), 1)).unwrap();
+    env.step(|b| sem::amomaxu_d(b, Gpr(4), Gpr(1), Gpr(7), 0))
+        .unwrap();
+    assert_eq!(x(&mut env, 4), u64::MAX);
+    env.step(|b| sem::ld(b, Gpr(5), Gpr(1), 0)).unwrap();
+    assert_eq!(x(&mut env, 5), u64::MAX);
+}
+
+#[test]
 fn system_exits() {
     let mut env = env();
     let r = env.step(|b| sem::ecall(b, 0x100));

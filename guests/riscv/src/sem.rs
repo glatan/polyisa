@@ -40,6 +40,24 @@ const DATA_WRITE: Access = Access {
     kind: AccessKind::DataWrite,
 };
 
+const LR_ACC: Access = Access {
+    endian: Endian::Le,
+    align: Align::Natural,
+    kind: AccessKind::LoadReserved,
+};
+
+const SC_ACC: Access = Access {
+    endian: Endian::Le,
+    align: Align::Natural,
+    kind: AccessKind::StoreConditional,
+};
+
+const AMO_ACC: Access = Access {
+    endian: Endian::Le,
+    align: Align::Natural,
+    kind: AccessKind::AtomicRw,
+};
+
 fn read<B: Backend>(b: &mut B, r: Gpr) -> B::V<W64> {
     if r.is_zero() {
         b.konst::<W64>(0)
@@ -689,6 +707,186 @@ pub fn csrrci<B: Backend>(b: &mut B, rd: Gpr, uimm: u64, csr: Csr) -> Flow<B> {
     }
     write(b, rd, t);
     Ok(())
+}
+
+// A（不可分操作）。aq/rl ビットは順序保証の不要な段階では無視する。
+
+pub fn lr_w<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, oimm: i64) -> Flow<B> {
+    let addr = load_addr(b, rs1, oimm);
+    let v: B::V<W32> = b.load_reserved(addr, LR_ACC)?;
+    write_w(b, rd, v);
+    Ok(())
+}
+
+pub fn lr_d<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, oimm: i64) -> Flow<B> {
+    let addr = load_addr(b, rs1, oimm);
+    let v: B::V<W64> = b.load_reserved(addr, LR_ACC)?;
+    write(b, rd, v);
+    Ok(())
+}
+
+/// SC。成功で 0、失敗で 0 以外を書く。
+pub fn sc_w<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr, oimm: i64) -> Flow<B> {
+    let raw = read(b, rs2);
+    let v = b.trunc::<W64, W32>(raw);
+    let addr = load_addr(b, rs1, oimm);
+    let ok = b.store_conditional(addr, v, SC_ACC)?;
+    let zero = const_w64(b, 0);
+    let one = const_w64(b, 1);
+    let s = b.select(ok, zero, one);
+    write(b, rd, s);
+    Ok(())
+}
+
+pub fn sc_d<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr, oimm: i64) -> Flow<B> {
+    let v = read(b, rs2);
+    let addr = load_addr(b, rs1, oimm);
+    let ok = b.store_conditional(addr, v, SC_ACC)?;
+    let zero = const_w64(b, 0);
+    let one = const_w64(b, 1);
+    let s = b.select(ok, zero, one);
+    write(b, rd, s);
+    Ok(())
+}
+
+fn amo_w<B: Backend, F>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr, oimm: i64, f: F) -> Flow<B>
+where
+    F: FnOnce(&mut B, B::V<W32>, B::V<W32>) -> B::V<W32>,
+{
+    let addr = load_addr(b, rs1, oimm);
+    let cur: B::V<W32> = b.load(addr, AMO_ACC)?;
+    let raw = read(b, rs2);
+    let y = b.trunc::<W64, W32>(raw);
+    let nxt = f(b, cur, y);
+    // 意味論の側で読み書きを分けても、単一ホストスレッドでは不可分になる。
+    b.store(addr, nxt, AMO_ACC)?;
+    write_w(b, rd, cur);
+    Ok(())
+}
+
+fn amo_d<B: Backend, F>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr, oimm: i64, f: F) -> Flow<B>
+where
+    F: FnOnce(&mut B, B::V<W64>, B::V<W64>) -> B::V<W64>,
+{
+    let addr = load_addr(b, rs1, oimm);
+    let cur: B::V<W64> = b.load(addr, AMO_ACC)?;
+    let y = read(b, rs2);
+    let nxt = f(b, cur, y);
+    b.store(addr, nxt, AMO_ACC)?;
+    write(b, rd, cur);
+    Ok(())
+}
+
+fn min_s<B: Backend>(b: &mut B, a: B::V<W32>, y: B::V<W32>) -> B::V<W32> {
+    let c = b.cmp(Cmp::LtS, a, y);
+    b.select(c, a, y)
+}
+
+fn max_s<B: Backend>(b: &mut B, a: B::V<W32>, y: B::V<W32>) -> B::V<W32> {
+    let c = b.cmp(Cmp::LtS, a, y);
+    b.select(c, y, a)
+}
+
+fn min_u<B: Backend>(b: &mut B, a: B::V<W32>, y: B::V<W32>) -> B::V<W32> {
+    let c = b.cmp(Cmp::LtU, a, y);
+    b.select(c, a, y)
+}
+
+fn max_u<B: Backend>(b: &mut B, a: B::V<W32>, y: B::V<W32>) -> B::V<W32> {
+    let c = b.cmp(Cmp::LtU, a, y);
+    b.select(c, y, a)
+}
+
+fn min_s64<B: Backend>(b: &mut B, a: B::V<W64>, y: B::V<W64>) -> B::V<W64> {
+    let c = b.cmp(Cmp::LtS, a, y);
+    b.select(c, a, y)
+}
+
+fn max_s64<B: Backend>(b: &mut B, a: B::V<W64>, y: B::V<W64>) -> B::V<W64> {
+    let c = b.cmp(Cmp::LtS, a, y);
+    b.select(c, y, a)
+}
+
+fn min_u64<B: Backend>(b: &mut B, a: B::V<W64>, y: B::V<W64>) -> B::V<W64> {
+    let c = b.cmp(Cmp::LtU, a, y);
+    b.select(c, a, y)
+}
+
+fn max_u64<B: Backend>(b: &mut B, a: B::V<W64>, y: B::V<W64>) -> B::V<W64> {
+    let c = b.cmp(Cmp::LtU, a, y);
+    b.select(c, y, a)
+}
+
+pub fn amoswap_w<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr, oimm: i64) -> Flow<B> {
+    amo_w(b, rd, rs1, rs2, oimm, |_, _, y| y)
+}
+
+pub fn amoadd_w<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr, oimm: i64) -> Flow<B> {
+    amo_w(b, rd, rs1, rs2, oimm, |b, a, y| b.add(a, y))
+}
+
+pub fn amoxor_w<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr, oimm: i64) -> Flow<B> {
+    amo_w(b, rd, rs1, rs2, oimm, |b, a, y| b.xor(a, y))
+}
+
+pub fn amoand_w<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr, oimm: i64) -> Flow<B> {
+    amo_w(b, rd, rs1, rs2, oimm, |b, a, y| b.and(a, y))
+}
+
+pub fn amoor_w<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr, oimm: i64) -> Flow<B> {
+    amo_w(b, rd, rs1, rs2, oimm, |b, a, y| b.or(a, y))
+}
+
+pub fn amomin_w<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr, oimm: i64) -> Flow<B> {
+    amo_w(b, rd, rs1, rs2, oimm, min_s)
+}
+
+pub fn amomax_w<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr, oimm: i64) -> Flow<B> {
+    amo_w(b, rd, rs1, rs2, oimm, max_s)
+}
+
+pub fn amominu_w<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr, oimm: i64) -> Flow<B> {
+    amo_w(b, rd, rs1, rs2, oimm, min_u)
+}
+
+pub fn amomaxu_w<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr, oimm: i64) -> Flow<B> {
+    amo_w(b, rd, rs1, rs2, oimm, max_u)
+}
+
+pub fn amoswap_d<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr, oimm: i64) -> Flow<B> {
+    amo_d(b, rd, rs1, rs2, oimm, |_, _, y| y)
+}
+
+pub fn amoadd_d<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr, oimm: i64) -> Flow<B> {
+    amo_d(b, rd, rs1, rs2, oimm, |b, a, y| b.add(a, y))
+}
+
+pub fn amoxor_d<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr, oimm: i64) -> Flow<B> {
+    amo_d(b, rd, rs1, rs2, oimm, |b, a, y| b.xor(a, y))
+}
+
+pub fn amoand_d<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr, oimm: i64) -> Flow<B> {
+    amo_d(b, rd, rs1, rs2, oimm, |b, a, y| b.and(a, y))
+}
+
+pub fn amoor_d<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr, oimm: i64) -> Flow<B> {
+    amo_d(b, rd, rs1, rs2, oimm, |b, a, y| b.or(a, y))
+}
+
+pub fn amomin_d<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr, oimm: i64) -> Flow<B> {
+    amo_d(b, rd, rs1, rs2, oimm, min_s64)
+}
+
+pub fn amomax_d<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr, oimm: i64) -> Flow<B> {
+    amo_d(b, rd, rs1, rs2, oimm, max_s64)
+}
+
+pub fn amominu_d<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr, oimm: i64) -> Flow<B> {
+    amo_d(b, rd, rs1, rs2, oimm, min_u64)
+}
+
+pub fn amomaxu_d<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr, oimm: i64) -> Flow<B> {
+    amo_d(b, rd, rs1, rs2, oimm, max_u64)
 }
 
 // SYSTEM

@@ -200,6 +200,23 @@ impl Backend for IrBackend {
         Ok(self.fresh::<W>())
     }
 
+    fn load_reserved<W: Width>(
+        &mut self,
+        _addr: Self::V<W64>,
+        _acc: Access,
+    ) -> Result<Self::V<W>, Self::Exit> {
+        Ok(self.fresh::<W>())
+    }
+
+    fn store_conditional<W: Width>(
+        &mut self,
+        _addr: Self::V<W64>,
+        _v: Self::V<W>,
+        _acc: Access,
+    ) -> Result<Self::B, Self::Exit> {
+        Ok(IrCond(self.ir.next))
+    }
+
     fn if_then<F>(&mut self, _c: Self::B, _then: F) -> Result<(), Self::Exit>
     where
         F: FnOnce(&mut Self) -> Result<(), Self::Exit>,
