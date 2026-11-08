@@ -4,6 +4,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod sem;
+
 // 空のモデルから生成した殻。ISADL 記述の追加後に中身が増える。
 include!(concat!(env!("OUT_DIR"), "/generated.rs"));
 

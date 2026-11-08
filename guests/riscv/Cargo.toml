@@ -17,5 +17,8 @@ polyisa-timing = { path = "../../crates/timing" }
 polyisa-isadl = { path = "../../crates/isadl" }
 polyisa-isagen = { path = "../../crates/isagen" }
 
+[dev-dependencies]
+polyisa-engine = { path = "../../crates/engine" }
+
 [lints]
 workspace = true
