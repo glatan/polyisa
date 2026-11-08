@@ -329,12 +329,30 @@ fn run(env: &mut BareEnv, entry: u64) -> Outcome {
             Insn::Xori => env.step(|b| sem::xori(b, rd, rs1, imm_i(word))),
             Insn::Ori => env.step(|b| sem::ori(b, rd, rs1, imm_i(word))),
             Insn::Andi => env.step(|b| sem::andi(b, rd, rs1, imm_i(word))),
-            Insn::Csrrw => env.step(|b| sem::csrrw(b, rd, rs1, csr)),
-            Insn::Csrrs => env.step(|b| sem::csrrs(b, rd, rs1, csr)),
-            Insn::Csrrc => env.step(|b| sem::csrrc(b, rd, rs1, csr)),
-            Insn::Csrrwi => env.step(|b| sem::csrrwi(b, rd, ((word >> 15) & 31) as u64, csr)),
-            Insn::Csrrsi => env.step(|b| sem::csrrsi(b, rd, ((word >> 15) & 31) as u64, csr)),
-            Insn::Csrrci => env.step(|b| sem::csrrci(b, rd, ((word >> 15) & 31) as u64, csr)),
+            Insn::Csrrw => {
+                let pc = env.pc;
+                env.step(|b| sem::csrrw(b, rd, rs1, csr, pc))
+            }
+            Insn::Csrrs => {
+                let pc = env.pc;
+                env.step(|b| sem::csrrs(b, rd, rs1, csr, pc))
+            }
+            Insn::Csrrc => {
+                let pc = env.pc;
+                env.step(|b| sem::csrrc(b, rd, rs1, csr, pc))
+            }
+            Insn::Csrrwi => {
+                let pc = env.pc;
+                env.step(|b| sem::csrrwi(b, rd, ((word >> 15) & 31) as u64, csr, pc))
+            }
+            Insn::Csrrsi => {
+                let pc = env.pc;
+                env.step(|b| sem::csrrsi(b, rd, ((word >> 15) & 31) as u64, csr, pc))
+            }
+            Insn::Csrrci => {
+                let pc = env.pc;
+                env.step(|b| sem::csrrci(b, rd, ((word >> 15) & 31) as u64, csr, pc))
+            }
             Insn::Fence => env.step(sem::fence),
             Insn::FenceI => env.step(sem::fence_i),
             // F 単精度。
@@ -488,6 +506,11 @@ fn check_one_in(sub: &str, name: &str) {
     let ehdr = polyisa_loader::elf::parse_ehdr(&bytes).expect("ELFヘッダ");
     let phdrs = polyisa_loader::elf::parse_phdrs(&bytes, &ehdr).expect("PHDR");
     let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    // riscv-tests のハーネスは M モードで動く。特権レベルを M (3) に置く。
+    env.backend.set(
+        StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, priv_level)),
+        3,
+    );
     polyisa_loader::elf::load_segments(&bytes, &phdrs, &mut env.backend.mem).expect("配置");
     match run(&mut env, ehdr.entry) {
         Outcome::Exit(code) => assert_eq!(code, 0, "{name} が失敗"),
