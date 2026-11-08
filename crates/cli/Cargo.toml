@@ -10,6 +10,9 @@ polyisa-guest = { path = "../guest" }
 polyisa-guest-riscv = { path = "../../guests/riscv" }
 polyisa-kernel = { path = "../kernel" }
 polyisa-loader = { path = "../loader" }
+polyisa-mem = { path = "../mem" }
+polyisa-os-linux = { path = "../os-linux" }
+polyisa-sem = { path = "../sem" }
 polyisa-trace = { path = "../trace" }
 
 [lints]

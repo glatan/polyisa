@@ -2,6 +2,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod run;
+
 /// `run`、`cpus`、`disasm` のいずれか。引数の解析は後の段階で足す。
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Command {
