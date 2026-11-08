@@ -23,6 +23,7 @@ members = [
     "crates/gdbstub",
     "crates/cli",
     "crates/jit",
+    "guests/riscv",
 ]
 resolver = "2"
 
