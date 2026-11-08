@@ -10,7 +10,9 @@ fn main() {
             std::process::exit(2);
         }
         polyisa_cli::Command::Cpus => {
-            println!("riscv");
+            // 汎用CPUモデル。詳細は guests/riscv の MODELS を見る。
+            println!("riscv:rv64gc");
+            println!("riscv:rv64imac");
         }
         polyisa_cli::Command::Disasm => {
             eprintln!("disasm: 未実装（逆アセンブラの生成後に足す）");

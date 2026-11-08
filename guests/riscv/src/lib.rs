@@ -63,8 +63,17 @@ mod tests {
 
     #[test]
     fn insn_count() {
-        // RV64I 53 件＋M 13 件＋CSR 6 件＋A 22 件＋F 26 件＋D 28 件。
-        assert_eq!(INSNS.len(), 148);
+        // RV64I 53 件＋M 13 件＋CSR 6 件＋A 22 件＋F 26 件＋D 28 件＋C 20 件。
+        assert_eq!(INSNS.len(), 168);
+    }
+
+    #[test]
+    fn cpu_models() {
+        // 汎用CPUモデルと機能集合。RVA相当のRV64GCを汎用とする。
+        assert!(FEATURES.contains(&"rv64"));
+        assert!(FEATURES.contains(&"c"));
+        assert!(FEATURES.contains(&"zicsr"));
+        assert!(MODELS.contains(&"rv64gc"));
     }
 
     #[test]
@@ -96,6 +105,14 @@ mod tests {
         assert_eq!(decode(0x0220_f1d3, 32), Some(Insn::FaddD));
         assert_eq!(decode(0xf200_81d3, 32), Some(Insn::FmvDX));
         assert_eq!(decode(0xd200_f1d3, 32), Some(Insn::FcvtDW));
+        assert_eq!(decode(0x0000, 16), Some(Insn::CAddi4spn));
+        assert_eq!(decode(0x2000, 16), Some(Insn::CFld));
+        assert_eq!(decode(0xa000, 16), Some(Insn::CFsd));
+        assert_eq!(decode(0x4000, 16), Some(Insn::CLw));
+        assert_eq!(decode(0x0001, 16), Some(Insn::CAddi));
+        assert_eq!(decode(0xa001, 16), Some(Insn::CJ));
+        assert_eq!(decode(0x0002, 16), Some(Insn::CSlli));
+        assert_eq!(decode(0x6002, 16), Some(Insn::CLdsp));
         assert_eq!(decode(0xffff_ffff, 32), None);
         assert_eq!(decode(0x0020_8133, 16), None);
     }

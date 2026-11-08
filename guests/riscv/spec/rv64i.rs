@@ -16,6 +16,41 @@ pub fn build_model() -> polyisa_isadl::Model {
         m.timing_classes.push(class.to_string());
     }
 
+    // 機能と汎用CPUモデル。RVA22U64相当のRV64GCを汎用とする。
+    // Ref: SPEC-RISCV-UNPRIV (20250508), SPEC-RISCV-PROFILES (RVA23 v1.0).
+    for (name, implies, conflicts) in [
+        ("rv64", &[][..], &["rv32"][..]),
+        ("rv32", &[][..], &["rv64"][..]),
+        ("m", &[][..], &[][..]),
+        ("a", &[][..], &[][..]),
+        ("f", &[][..], &[][..]),
+        ("d", &["f"][..], &[][..]),
+        ("c", &[][..], &[][..]),
+        ("zicsr", &[][..], &[][..]),
+        ("zifencei", &[][..], &[][..]),
+    ] {
+        m.features.push(polyisa_isadl::model::Feature {
+            name: name.to_string(),
+            implies: implies.iter().map(|s| s.to_string()).collect(),
+            conflicts: conflicts.iter().map(|s| s.to_string()).collect(),
+        });
+    }
+    m.models.push(polyisa_isadl::model::ModelDef {
+        name: "rv64gc".to_string(),
+        parent: String::new(),
+        add_features: ["rv64", "m", "a", "f", "d", "c", "zicsr", "zifencei"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+        remove_features: Vec::new(),
+    });
+    m.models.push(polyisa_isadl::model::ModelDef {
+        name: "rv64imac".to_string(),
+        parent: "rv64gc".to_string(),
+        add_features: Vec::new(),
+        remove_features: ["f", "d"].iter().map(|s| s.to_string()).collect(),
+    });
+
     m.regclasses.push(RegClass {
         name: "gpr".to_string(),
         dynamic: false,
@@ -230,6 +265,28 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("fmv_d_x", "R", "1111001 00000 ..... 000 ..... 1010011", "fmv.d.x {rd}, {rs1}", "fpu"),
         ("fcvt_s_d", "R", "0100000 00001 ..... ... ..... 1010011", "fcvt.s.d {rd}, {rs1}", "fpu"),
         ("fcvt_d_s", "R", "0100001 00000 ..... ... ..... 1010011", "fcvt.d.s {rd}, {rs1}", "fpu"),
+        // C（圧縮。16ビット。funct3とop下位2ビットで区別できる衝突なし subset）
+        // Ref: SPEC-RISCV-UNPRIV (20250508) §C.
+        ("c_addi4spn", "R", "000 ........ ... 00", "c.addi4spn {rd}, {imm}", "alu"),
+        ("c_fld", "R", "001 ........ ... 00", "c.fld {rd}, {imm}({rs1})", "load"),
+        ("c_fsd", "R", "101 ........ ... 00", "c.fsd {rs2}, {imm}({rs1})", "store"),
+        ("c_lw", "R", "010 ........ ... 00", "c.lw {rd}, {imm}({rs1})", "load"),
+        ("c_ld", "R", "011 ........ ... 00", "c.ld {rd}, {imm}({rs1})", "load"),
+        ("c_sw", "R", "110 ........ ... 00", "c.sw {rs2}, {imm}({rs1})", "store"),
+        ("c_sd", "R", "111 ........ ... 00", "c.sd {rs2}, {imm}({rs1})", "store"),
+        ("c_addi", "R", "000 ........ ... 01", "c.addi {rd}, {imm}", "alu"),
+        ("c_addiw", "R", "001 ........ ... 01", "c.addiw {rd}, {imm}", "alu"),
+        ("c_li", "R", "010 ........ ... 01", "c.li {rd}, {imm}", "alu"),
+        ("c_j", "R", "101 ........ ... 01", "c.j {imm}", "jump"),
+        ("c_beqz", "R", "110 ........ ... 01", "c.beqz {rs1}, {imm}", "branch"),
+        ("c_bnez", "R", "111 ........ ... 01", "c.bnez {rs1}, {imm}", "branch"),
+        ("c_slli", "R", "000 ........ ... 10", "c.slli {rd}, {imm}", "alu"),
+        ("c_lwsp", "R", "010 ........ ... 10", "c.lwsp {rd}, {imm}", "load"),
+        ("c_ldsp", "R", "011 ........ ... 10", "c.ldsp {rd}, {imm}", "load"),
+        ("c_fldsp", "R", "001 ........ ... 10", "c.fldsp {rd}, {imm}", "load"),
+        ("c_fsdsp", "R", "101 ........ ... 10", "c.fsdsp {rs2}, {imm}", "store"),
+        ("c_swsp", "R", "110 ........ ... 10", "c.swsp {rs2}, {imm}", "store"),
+        ("c_sdsp", "R", "111 ........ ... 10", "c.sdsp {rs2}, {imm}", "store"),
     ];
     for (name, format, pattern, syntax, timing) in insns {
         m.insns.push(Insn {
@@ -240,6 +297,34 @@ pub fn build_model() -> polyisa_isadl::Model {
             syntax: syntax.to_string(),
             timing: timing.to_string(),
         });
+    }
+    // RV64限定命令にrv64注記を付ける。デコーダは現段階ではwhenを評価しない
+    // （解決はデコード時という設計の将来対応）。検証の一意性には影響しない。
+    // Ref: SPEC-RISCV-UNPRIV (20250508).
+    for insn in m.insns.iter_mut() {
+        let rv64_only = matches!(
+            insn.name.as_str(),
+            "ld" | "lwu"
+                | "sd" | "addiw"
+                | "slliw" | "srliw"
+                | "sraiw" | "addw"
+                | "subw" | "sllw"
+                | "srlw" | "sraw"
+                | "mulw" | "divw"
+                | "divuw" | "remw"
+                | "remuw" | "lr_d"
+                | "sc_d" | "amoswap_d"
+                | "amoadd_d" | "amoxor_d"
+                | "amoand_d" | "amoor_d"
+                | "amomin_d" | "amomax_d"
+                | "amominu_d" | "amomaxu_d"
+                | "c_ld" | "c_sd"
+                | "c_addiw" | "c_ldsp"
+                | "c_sdsp"
+        );
+        if rv64_only {
+            insn.when = Pred::Flag("rv64".to_string());
+        }
     }
     m
 }
