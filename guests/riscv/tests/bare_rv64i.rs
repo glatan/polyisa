@@ -497,6 +497,15 @@ fn c_compressed() {
     env.step(|b| sem::c_sdsp(b, Gpr(4), 8)).unwrap();
     env.step(|b| sem::c_ldsp(b, Gpr(8), 8)).unwrap();
     assert_eq!(x(&mut env, 8), 0x440);
+    // C.FLD / C.FSD、C.FLDSP / C.FSDSP の往復。
+    use polyisa_guest_riscv::sem::Fpr;
+    env.backend.set(Fpr(10).state(), 0x4002_0000_0000_0000);
+    env.step(|b| sem::c_fsd(b, Gpr(2), Fpr(10), 16)).unwrap();
+    env.step(|b| sem::c_fld(b, Fpr(11), Gpr(2), 16)).unwrap();
+    assert_eq!(x64(&mut env, 11), 0x4002_0000_0000_0000);
+    env.step(|b| sem::c_fsdsp(b, Fpr(10), 24)).unwrap();
+    env.step(|b| sem::c_fldsp(b, Fpr(12), 24)).unwrap();
+    assert_eq!(x64(&mut env, 12), 0x4002_0000_0000_0000);
     // C.J / C.BEQZ / C.BNEZ。
     let pc = env.pc;
     env.step(|b| sem::c_j(b, pc, 16)).unwrap();

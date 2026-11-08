@@ -1524,3 +1524,23 @@ pub fn c_swsp<B: Backend>(b: &mut B, rs2: Gpr, oimm: i64) -> Flow<B> {
 pub fn c_sdsp<B: Backend>(b: &mut B, rs2: Gpr, oimm: i64) -> Flow<B> {
     sd(b, Gpr(2), rs2, oimm)
 }
+
+/// C.FLD。
+pub fn c_fld<B: Backend>(b: &mut B, rd: Fpr, rs1: Gpr, oimm: i64) -> Flow<B> {
+    fld(b, rd, rs1, oimm)
+}
+
+/// C.FSD。
+pub fn c_fsd<B: Backend>(b: &mut B, rs1: Gpr, rs2: Fpr, oimm: i64) -> Flow<B> {
+    fsd(b, rs1, rs2, oimm)
+}
+
+/// C.FLDSP。`fld rd, offset(x2)` に展開する。
+pub fn c_fldsp<B: Backend>(b: &mut B, rd: Fpr, oimm: i64) -> Flow<B> {
+    fld(b, rd, Gpr(2), oimm)
+}
+
+/// C.FSDSP。`fsd rs2, offset(x2)` に展開する。
+pub fn c_fsdsp<B: Backend>(b: &mut B, rs2: Fpr, oimm: i64) -> Flow<B> {
+    fsd(b, Gpr(2), rs2, oimm)
+}

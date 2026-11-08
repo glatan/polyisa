@@ -268,6 +268,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         // C（圧縮。16ビット。funct3とop下位2ビットで区別できる衝突なし subset）
         // Ref: SPEC-RISCV-UNPRIV (20250508) §C.
         ("c_addi4spn", "R", "000 ........ ... 00", "c.addi4spn {rd}, {imm}", "alu"),
+        ("c_fld", "R", "001 ........ ... 00", "c.fld {rd}, {imm}({rs1})", "load"),
+        ("c_fsd", "R", "101 ........ ... 00", "c.fsd {rs2}, {imm}({rs1})", "store"),
         ("c_lw", "R", "010 ........ ... 00", "c.lw {rd}, {imm}({rs1})", "load"),
         ("c_ld", "R", "011 ........ ... 00", "c.ld {rd}, {imm}({rs1})", "load"),
         ("c_sw", "R", "110 ........ ... 00", "c.sw {rs2}, {imm}({rs1})", "store"),
@@ -281,6 +283,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("c_slli", "R", "000 ........ ... 10", "c.slli {rd}, {imm}", "alu"),
         ("c_lwsp", "R", "010 ........ ... 10", "c.lwsp {rd}, {imm}", "load"),
         ("c_ldsp", "R", "011 ........ ... 10", "c.ldsp {rd}, {imm}", "load"),
+        ("c_fldsp", "R", "001 ........ ... 10", "c.fldsp {rd}, {imm}", "load"),
+        ("c_fsdsp", "R", "101 ........ ... 10", "c.fsdsp {rs2}, {imm}", "store"),
         ("c_swsp", "R", "110 ........ ... 10", "c.swsp {rs2}, {imm}", "store"),
         ("c_sdsp", "R", "111 ........ ... 10", "c.sdsp {rs2}, {imm}", "store"),
     ];
