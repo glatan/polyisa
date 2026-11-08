@@ -201,6 +201,24 @@ impl AddressSpace {
         }
     }
 
+    /// 写像済み範囲の許可を変える（mprotect 相当）。範囲はページ境界に
+    /// 整列しているとする。未写像のページがあれば `PageFault` で失敗し、
+    /// そのページより前の変更は残る。OS パーソナリティの mprotect 実装と、
+    /// PMP のない M モードを模すテストハーネスが使う。
+    pub fn protect(&mut self, base: VirtAddr, count: u64, perms: Perms) -> Result<(), MemError> {
+        if !base.0.is_multiple_of(PAGE_SIZE) {
+            return Err(MemError::NotAligned);
+        }
+        for i in 0..count {
+            let entry = self
+                .pages
+                .get_mut(&PageNo(base.0 / PAGE_SIZE + i))
+                .ok_or(MemError::PageFault)?;
+            entry.perms = perms;
+        }
+        Ok(())
+    }
+
     /// バイト列を読む。未写像や許可不足ではエラーを返す。
     pub fn read(&self, addr: VirtAddr, buf: &mut [u8], acc: Access) -> Result<(), MemError> {
         let kind_perm = match acc.kind {
@@ -492,6 +510,41 @@ mod tests {
             .read(VirtAddr(0x0), &mut buf, Access::DATA_LE)
             .unwrap();
         assert_eq!(buf, [9]);
+    }
+
+    #[test]
+    fn protect_changes_perms() {
+        let mut aspace = AddressSpace::new();
+        aspace.map(VirtAddr(0x1000), 2, Perms::RW).unwrap();
+        let fetch = Access {
+            endian: Endian::Le,
+            align: Align::Natural,
+            kind: AccessKind::Fetch,
+        };
+        // X なしでは fetch が失敗する。
+        let mut buf = [0u8; 1];
+        assert_eq!(
+            aspace.read(VirtAddr(0x1000), &mut buf, fetch),
+            Err(MemError::PageFault)
+        );
+        // 許可を足すと通る。未写像には失敗する。
+        aspace
+            .protect(
+                VirtAddr(0x1000),
+                2,
+                Perms(Perms::R.0 | Perms::W.0 | Perms::X.0),
+            )
+            .unwrap();
+        assert!(aspace.read(VirtAddr(0x1000), &mut buf, fetch).is_ok());
+        assert_eq!(
+            aspace.protect(VirtAddr(0x3000), 1, Perms::R),
+            Err(MemError::PageFault)
+        );
+        // 非整列の base は拒否する。
+        assert_eq!(
+            aspace.protect(VirtAddr(0x1001), 1, Perms::R),
+            Err(MemError::NotAligned)
+        );
     }
 
     #[test]

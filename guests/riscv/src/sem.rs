@@ -32,13 +32,18 @@ impl Gpr {
 
 const DATA_READ: Access = Access {
     endian: Endian::Le,
-    align: Align::Natural,
+    // 非整列を許す実装を選ぶ。RISC-V は非整列の扱いを実装に委ねており、
+    // ユーザーモードの実行器はバイト単位で正値を返す（`ma_data` が通る）。
+    // 不可分操作（LR/SC/AMO）は整列を要求するので別の属性のままである。
+    // Ref: SPEC-RISCV-UNPRIV (20250508), arch-requirements.md §RISC-V.
+    align: Align::Unaligned,
     kind: AccessKind::DataRead,
 };
 
 const DATA_WRITE: Access = Access {
     endian: Endian::Le,
-    align: Align::Natural,
+    // DATA_READ と同じ理由で非整列を許す。
+    align: Align::Unaligned,
     kind: AccessKind::DataWrite,
 };
 
