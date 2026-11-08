@@ -182,6 +182,40 @@ fn logic_and_w_suffix() {
 }
 
 #[test]
+fn m_extension() {
+    let mut env = env();
+    env.step(|b| sem::addi(b, Gpr(1), Gpr(0), 7)).unwrap();
+    env.step(|b| sem::addi(b, Gpr(2), Gpr(0), 6)).unwrap();
+    env.step(|b| sem::mul(b, Gpr(3), Gpr(1), Gpr(2))).unwrap();
+    assert_eq!(x(&mut env, 3), 42);
+    env.step(|b| sem::div(b, Gpr(3), Gpr(1), Gpr(2))).unwrap();
+    assert_eq!(x(&mut env, 3), 1);
+    env.step(|b| sem::rem(b, Gpr(3), Gpr(1), Gpr(2))).unwrap();
+    assert_eq!(x(&mut env, 3), 1);
+    // 0 除算とオーバーフロー。
+    env.step(|b| sem::div(b, Gpr(3), Gpr(1), Gpr(0))).unwrap();
+    assert_eq!(x(&mut env, 3), u64::MAX);
+    env.step(|b| sem::rem(b, Gpr(3), Gpr(1), Gpr(0))).unwrap();
+    assert_eq!(x(&mut env, 3), 7);
+    env.step(|b| sem::addi(b, Gpr(4), Gpr(0), -8)).unwrap();
+    env.step(|b| sem::div(b, Gpr(5), Gpr(4), Gpr(0))).unwrap();
+    assert_eq!(x(&mut env, 5), u64::MAX);
+    // MULW。x6 の下位 32 ビットは 0x80000000。
+    env.step(|b| sem::lui(b, Gpr(6), -524288)).unwrap();
+    env.step(|b| sem::mulw(b, Gpr(10), Gpr(6), Gpr(1))).unwrap();
+    assert_eq!(x(&mut env, 10), 0xffff_ffff_8000_0000);
+    // x11 に最小値を置き、MULHU と -1 除算を確かめる。
+    env.step(|b| sem::slli(b, Gpr(11), Gpr(6), 32)).unwrap();
+    assert_eq!(x(&mut env, 11), 0x8000_0000_0000_0000);
+    env.step(|b| sem::mulhu(b, Gpr(9), Gpr(11), Gpr(11)))
+        .unwrap();
+    assert_eq!(x(&mut env, 9), 0x4000_0000_0000_0000);
+    env.step(|b| sem::addi(b, Gpr(7), Gpr(0), -1)).unwrap();
+    env.step(|b| sem::div(b, Gpr(8), Gpr(11), Gpr(7))).unwrap();
+    assert_eq!(x(&mut env, 8), 0x8000_0000_0000_0000);
+}
+
+#[test]
 fn system_exits() {
     let mut env = env();
     let r = env.step(|b| sem::ecall(b, 0x100));
