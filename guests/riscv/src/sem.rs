@@ -1544,3 +1544,71 @@ pub fn c_fldsp<B: Backend>(b: &mut B, rd: Fpr, oimm: i64) -> Flow<B> {
 pub fn c_fsdsp<B: Backend>(b: &mut B, rs2: Fpr, oimm: i64) -> Flow<B> {
     fsd(b, Gpr(2), rs2, oimm)
 }
+
+/// C.SRLI。
+pub fn c_srli<B: Backend>(b: &mut B, rd: Gpr, shamt: u64) -> Flow<B> {
+    let r = rd.0;
+    srli(b, rd, Gpr(r), shamt)
+}
+
+/// C.SRAI。
+pub fn c_srai<B: Backend>(b: &mut B, rd: Gpr, shamt: u64) -> Flow<B> {
+    let r = rd.0;
+    srai(b, rd, Gpr(r), shamt)
+}
+
+/// C.ANDI。
+pub fn c_andi<B: Backend>(b: &mut B, rd: Gpr, imm: i64) -> Flow<B> {
+    let r = rd.0;
+    andi(b, rd, Gpr(r), imm)
+}
+
+/// C.SUB。
+pub fn c_sub<B: Backend>(b: &mut B, rd: Gpr, rs2: Gpr) -> Flow<B> {
+    let r = rd.0;
+    sub(b, rd, Gpr(r), rs2)
+}
+
+/// C.XOR。
+pub fn c_xor<B: Backend>(b: &mut B, rd: Gpr, rs2: Gpr) -> Flow<B> {
+    let r = rd.0;
+    xor(b, rd, Gpr(r), rs2)
+}
+
+/// C.OR。
+pub fn c_or<B: Backend>(b: &mut B, rd: Gpr, rs2: Gpr) -> Flow<B> {
+    let r = rd.0;
+    or(b, rd, Gpr(r), rs2)
+}
+
+/// C.AND。
+pub fn c_and<B: Backend>(b: &mut B, rd: Gpr, rs2: Gpr) -> Flow<B> {
+    let r = rd.0;
+    and(b, rd, Gpr(r), rs2)
+}
+
+/// C.SUBW。
+pub fn c_subw<B: Backend>(b: &mut B, rd: Gpr, rs2: Gpr) -> Flow<B> {
+    let r = rd.0;
+    subw(b, rd, Gpr(r), rs2)
+}
+
+/// C.ADDW。
+pub fn c_addw<B: Backend>(b: &mut B, rd: Gpr, rs2: Gpr) -> Flow<B> {
+    let r = rd.0;
+    addw(b, rd, Gpr(r), rs2)
+}
+
+/// C.LUI / C.ADDI16SP。rd==x2で分岐する（展開先が異なるため）。
+pub fn c_lui_addi16sp<B: Backend>(b: &mut B, rd: Gpr, imm: i64) -> Flow<B> {
+    if rd.0 == 2 {
+        addi(b, rd, Gpr(2), imm)
+    } else {
+        lui(b, rd, imm)
+    }
+}
+
+/// C.JAL（RV32）。`jal x1, offset` に展開する。
+pub fn c_jal<B: Backend>(b: &mut B, pc: u64, offset: i64) -> Flow<B> {
+    jal(b, Gpr(1), pc, offset)
+}

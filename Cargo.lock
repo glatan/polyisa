@@ -74,6 +74,7 @@ dependencies = [
  "polyisa-isagen",
  "polyisa-loader",
  "polyisa-mem",
+ "polyisa-os-linux",
  "polyisa-sem",
  "polyisa-softfloat",
  "polyisa-timing",

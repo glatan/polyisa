@@ -277,6 +277,16 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("c_addi", "R", "000 ........ ... 01", "c.addi {rd}, {imm}", "alu"),
         ("c_addiw", "R", "001 ........ ... 01", "c.addiw {rd}, {imm}", "alu"),
         ("c_li", "R", "010 ........ ... 01", "c.li {rd}, {imm}", "alu"),
+        ("c_lui_addi16sp", "R", "011 ........ ... 01", "c.lui/addi16sp {rd}, {imm}", "alu"),
+        ("c_srli", "R", "100 0 00 ... ..... 01", "c.srli {rd}, {imm}", "alu"),
+        ("c_srai", "R", "100 . 01 ... ..... 01", "c.srai {rd}, {imm}", "alu"),
+        ("c_andi", "R", "100 . 10 ... ..... 01", "c.andi {rd}, {imm}", "alu"),
+        ("c_sub", "R", "100 0 11 ... 00 ... 01", "c.sub {rd}, {rs2}", "alu"),
+        ("c_xor", "R", "100 0 11 ... 01 ... 01", "c.xor {rd}, {rs2}", "alu"),
+        ("c_or", "R", "100 0 11 ... 10 ... 01", "c.or {rd}, {rs2}", "alu"),
+        ("c_and", "R", "100 0 11 ... 11 ... 01", "c.and {rd}, {rs2}", "alu"),
+        ("c_subw", "R", "100 1 11 ... 00 ... 01", "c.subw {rd}, {rs2}", "alu"),
+        ("c_addw", "R", "100 1 11 ... 01 ... 01", "c.addw {rd}, {rs2}", "alu"),
         ("c_j", "R", "101 ........ ... 01", "c.j {imm}", "jump"),
         ("c_beqz", "R", "110 ........ ... 01", "c.beqz {rs1}, {imm}", "branch"),
         ("c_bnez", "R", "111 ........ ... 01", "c.bnez {rs1}, {imm}", "branch"),
@@ -298,6 +308,17 @@ pub fn build_model() -> polyisa_isadl::Model {
             timing: timing.to_string(),
         });
     }
+    // RV32のC.JALはRV64のC.ADDIWと同じ符号化。whenで区別する（将来の
+    // モデル対応デコード用）。現段階の線形デコーダは先勝ちでC.ADDIWを返す。
+    // Ref: SPEC-RISCV-UNPRIV (20250508) §C.
+    m.insns.push(Insn {
+        name: "c_jal".to_string(),
+        format: "R".to_string(),
+        pattern: Pattern::parse("001 ........ ... 01").expect("valid pattern"),
+        when: Pred::Not(Box::new(Pred::Flag("rv64".to_string()))),
+        syntax: "c.jal {imm}".to_string(),
+        timing: "jump".to_string(),
+    });
     // RV64限定命令にrv64注記を付ける。デコーダは現段階ではwhenを評価しない
     // （解決はデコード時という設計の将来対応）。検証の一意性には影響しない。
     // Ref: SPEC-RISCV-UNPRIV (20250508).

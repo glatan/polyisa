@@ -516,6 +516,30 @@ fn c_compressed() {
     let pc = env.pc;
     env.step(|b| sem::c_bnez(b, Gpr(0), pc, 16)).unwrap();
     assert_eq!(env.pc, 0x1_0020);
+    // C.SRLI / C.SRAI / C.ANDI / C.SUB・XOR・OR・AND / C.SUBW・ADDW。
+    env.step(|b| sem::addi(b, Gpr(9), Gpr(0), -8)).unwrap();
+    env.step(|b| sem::c_srli(b, Gpr(9), 2)).unwrap();
+    assert_eq!(x(&mut env, 9), 0x3fff_ffff_ffff_fffe);
+    env.step(|b| sem::c_srai(b, Gpr(9), 2)).unwrap();
+    assert_eq!(x(&mut env, 9), 0x0fff_ffff_ffff_ffff);
+    env.step(|b| sem::c_andi(b, Gpr(9), 0xff)).unwrap();
+    assert_eq!(x(&mut env, 9), 0xff);
+    env.step(|b| sem::addi(b, Gpr(10), Gpr(0), 10)).unwrap();
+    env.step(|b| sem::c_sub(b, Gpr(10), Gpr(9))).unwrap();
+    assert_eq!(x(&mut env, 10), 0xffff_ffff_ffff_ff0b);
+    env.step(|b| sem::c_addw(b, Gpr(10), Gpr(9))).unwrap();
+    assert_eq!(x(&mut env, 10), 0xa);
+    // C.LUI / C.ADDI16SP の分岐。
+    env.step(|b| sem::c_lui_addi16sp(b, Gpr(11), 1)).unwrap();
+    assert_eq!(x(&mut env, 11), 0x1000);
+    env.step(|b| sem::addi(b, Gpr(2), Gpr(0), 0x100)).unwrap();
+    env.step(|b| sem::c_lui_addi16sp(b, Gpr(2), 16)).unwrap();
+    assert_eq!(x(&mut env, 2), 0x110);
+    // C.JAL（RV32）の展開。
+    let pc = env.pc;
+    env.step(|b| sem::c_jal(b, pc, 16)).unwrap();
+    assert_eq!(env.pc, pc + 16);
+    assert_eq!(x(&mut env, 1), pc + 4);
 }
 
 #[test]
