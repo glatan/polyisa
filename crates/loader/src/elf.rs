@@ -143,6 +143,23 @@ pub fn parse_phdrs(bytes: &[u8], ehdr: &Ehdr) -> Result<Vec<Phdr>, Error> {
     Ok(out)
 }
 
+/// PT_INTERP の指す動的リンカのパスを読む。なければ None。
+/// 文字列はファイル内の NUL 終端とみなす。
+// Ref: SPEC-ELF-GABI (Edition 4.1＋2001-04-24 DRAFT).
+#[must_use]
+pub fn parse_interp(bytes: &[u8], phdrs: &[Phdr]) -> Option<String> {
+    for ph in phdrs {
+        if ph.seg_type != 3 {
+            continue;
+        }
+        let end = ph.offset.checked_add(ph.filesz)? as usize;
+        let raw = bytes.get(ph.offset as usize..end)?;
+        let end = raw.iter().position(|&b| b == 0)?;
+        return String::from_utf8(raw[..end].to_vec()).ok();
+    }
+    None
+}
+
 /// PT_LOAD セグメントをアドレス空間に配置する。段階1の範囲。
 /// `bytes` はファイル全体、`phdrs` は `parse_phdrs` の結果とする。
 /// 書き込み可能な写像で配置し、ファイル範囲外はゼロのままにする。
@@ -254,6 +271,28 @@ mod tests {
         cut.truncate(100);
         let ehdr = parse_ehdr(&cut).unwrap();
         assert_eq!(parse_phdrs(&cut, &ehdr), Err(Error::Truncated));
+    }
+
+    #[test]
+    fn interp_path_or_none() {
+        let bytes = minimal();
+        let ehdr = parse_ehdr(&bytes).unwrap();
+        let phdrs = parse_phdrs(&bytes, &ehdr).unwrap();
+        assert_eq!(parse_interp(&bytes, &phdrs), None);
+        let path = b"/lib/ld-linux-riscv64-lp64d.so.1\0";
+        let ph = Phdr {
+            seg_type: 3,
+            offset: 0,
+            vaddr: 0,
+            filesz: path.len() as u64,
+            memsz: path.len() as u64,
+            flags: 4,
+            align: 1,
+        };
+        assert_eq!(
+            parse_interp(path, &[ph]),
+            Some("/lib/ld-linux-riscv64-lp64d.so.1".to_string())
+        );
     }
 
     #[test]
