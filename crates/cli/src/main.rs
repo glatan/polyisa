@@ -6,8 +6,17 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match polyisa_cli::parse_command(&args) {
         polyisa_cli::Command::Run => {
-            eprintln!("run: 未実装（ユーザーモードの実装後に足す）");
-            std::process::exit(2);
+            let Some(path) = args.get(1) else {
+                eprintln!("usage: polyisa run <elf> [args...]");
+                std::process::exit(2);
+            };
+            match polyisa_cli::run::run_elf(path, &args[2..]) {
+                Ok(code) => std::process::exit(code as i32),
+                Err(msg) => {
+                    eprintln!("{msg}");
+                    std::process::exit(1);
+                }
+            }
         }
         polyisa_cli::Command::Cpus => {
             for m in polyisa_guest_riscv::MODELS {

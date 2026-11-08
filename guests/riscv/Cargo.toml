@@ -18,6 +18,7 @@ polyisa-isadl = { path = "../../crates/isadl" }
 polyisa-isagen = { path = "../../crates/isagen" }
 
 [dev-dependencies]
+polyisa-cli = { path = "../../crates/cli" }
 polyisa-engine = { path = "../../crates/engine" }
 polyisa-loader = { path = "../../crates/loader" }
 polyisa-os-linux = { path = "../../crates/os-linux" }
