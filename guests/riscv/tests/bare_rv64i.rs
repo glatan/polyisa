@@ -766,3 +766,29 @@ fn system_exits() {
     env.step(sem::fence).unwrap();
     env.step(sem::fence_i).unwrap();
 }
+
+#[test]
+fn store_fault_leaves_state_unchanged() {
+    let mut env = env();
+    // 書き込み先に値を置き、退避レジスタを初期化する。
+    env.step(|b| sem::addi(b, Gpr(1), Gpr(0), 0x1_0000))
+        .unwrap();
+    env.step(|b| sem::addi(b, Gpr(2), Gpr(0), 0x5a)).unwrap();
+    env.step(|b| sem::sw(b, Gpr(1), Gpr(2), 0)).unwrap();
+    env.step(|b| sem::addi(b, Gpr(3), Gpr(0), 0)).unwrap();
+    // 未写像へのストアは失敗し、rd と既存メモリを変えない。
+    let r = env.step(|b| sem::sw(b, Gpr(1), Gpr(2), 0x1_0000));
+    assert!(r.is_err());
+    assert_eq!(x(&mut env, 3), 0);
+    env.step(|b| sem::lw(b, Gpr(4), Gpr(1), 0)).unwrap();
+    assert_eq!(x(&mut env, 4), 0x5a);
+    // AMO も同様に、失敗時は rd を変えない。
+    env.step(|b| sem::addi(b, Gpr(5), Gpr(0), 0)).unwrap();
+    let r = env.step(|b| sem::amoswap_w(b, Gpr(5), Gpr(1), Gpr(2), 0x1_0000));
+    assert!(r.is_err());
+    assert_eq!(x(&mut env, 5), 0);
+    // 未写像の読み出しは値が要るため未定義にしない（読み出し側の確認）。
+    let r = env.step(|b| sem::lw(b, Gpr(6), Gpr(1), 0x1_0000));
+    assert!(r.is_err());
+    assert_eq!(x(&mut env, 6), 0);
+}

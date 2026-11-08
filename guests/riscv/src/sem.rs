@@ -213,12 +213,14 @@ pub fn lwu<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, oimm: i64) -> Flow<B> {
     Ok(())
 }
 
-// ストア。複数ページにまたがる命令の `probe` は後の段階で足す。
+// ストア。書き込みの前に `probe` で全範囲の可否を確かめ、
+// 例外時は状態を変えずに退出する（[命令意味論](../../../docs/design/semantics.md)）。
 
 pub fn sb<B: Backend>(b: &mut B, rs1: Gpr, rs2: Gpr, oimm: i64) -> Flow<B> {
     let raw = read(b, rs2);
     let v = b.trunc::<W64, W8>(raw);
     let addr = load_addr(b, rs1, oimm);
+    b.probe(addr, 1, DATA_WRITE)?;
     b.store(addr, v, DATA_WRITE)?;
     Ok(())
 }
@@ -227,6 +229,7 @@ pub fn sh<B: Backend>(b: &mut B, rs1: Gpr, rs2: Gpr, oimm: i64) -> Flow<B> {
     let raw = read(b, rs2);
     let v = b.trunc::<W64, W16>(raw);
     let addr = load_addr(b, rs1, oimm);
+    b.probe(addr, 2, DATA_WRITE)?;
     b.store(addr, v, DATA_WRITE)?;
     Ok(())
 }
@@ -235,6 +238,7 @@ pub fn sw<B: Backend>(b: &mut B, rs1: Gpr, rs2: Gpr, oimm: i64) -> Flow<B> {
     let raw = read(b, rs2);
     let v = b.trunc::<W64, W32>(raw);
     let addr = load_addr(b, rs1, oimm);
+    b.probe(addr, 4, DATA_WRITE)?;
     b.store(addr, v, DATA_WRITE)?;
     Ok(())
 }
@@ -242,6 +246,7 @@ pub fn sw<B: Backend>(b: &mut B, rs1: Gpr, rs2: Gpr, oimm: i64) -> Flow<B> {
 pub fn sd<B: Backend>(b: &mut B, rs1: Gpr, rs2: Gpr, oimm: i64) -> Flow<B> {
     let v = read(b, rs2);
     let addr = load_addr(b, rs1, oimm);
+    b.probe(addr, 8, DATA_WRITE)?;
     b.store(addr, v, DATA_WRITE)?;
     Ok(())
 }
@@ -775,6 +780,7 @@ pub fn sb_rv32<B: Backend>(b: &mut B, rs1: Gpr, rs2: Gpr, oimm: i64) -> Flow<B> 
     let raw = read(b, rs2);
     let v = b.trunc::<W64, W8>(raw);
     let addr = load_addr_rv32(b, rs1, oimm);
+    b.probe(addr, 1, DATA_WRITE)?;
     b.store(addr, v, DATA_WRITE)?;
     Ok(())
 }
@@ -783,6 +789,7 @@ pub fn sh_rv32<B: Backend>(b: &mut B, rs1: Gpr, rs2: Gpr, oimm: i64) -> Flow<B> 
     let raw = read(b, rs2);
     let v = b.trunc::<W64, W16>(raw);
     let addr = load_addr_rv32(b, rs1, oimm);
+    b.probe(addr, 2, DATA_WRITE)?;
     b.store(addr, v, DATA_WRITE)?;
     Ok(())
 }
@@ -791,6 +798,7 @@ pub fn sw_rv32<B: Backend>(b: &mut B, rs1: Gpr, rs2: Gpr, oimm: i64) -> Flow<B> 
     let raw = read(b, rs2);
     let v = b.trunc::<W64, W32>(raw);
     let addr = load_addr_rv32(b, rs1, oimm);
+    b.probe(addr, 4, DATA_WRITE)?;
     b.store(addr, v, DATA_WRITE)?;
     Ok(())
 }
@@ -1177,6 +1185,7 @@ pub fn csrrci<B: Backend>(b: &mut B, rd: Gpr, uimm: u64, csr: Csr, pc: u64) -> F
 
 pub fn lr_w<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, oimm: i64) -> Flow<B> {
     let addr = load_addr(b, rs1, oimm);
+    b.probe(addr, 4, LR_ACC)?;
     let v: B::V<W32> = b.load_reserved(addr, LR_ACC)?;
     write_w(b, rd, v);
     Ok(())
@@ -1184,6 +1193,7 @@ pub fn lr_w<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, oimm: i64) -> Flow<B> {
 
 pub fn lr_d<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, oimm: i64) -> Flow<B> {
     let addr = load_addr(b, rs1, oimm);
+    b.probe(addr, 8, LR_ACC)?;
     let v: B::V<W64> = b.load_reserved(addr, LR_ACC)?;
     write(b, rd, v);
     Ok(())
@@ -1194,6 +1204,7 @@ pub fn sc_w<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr, oimm: i64) -> Fl
     let raw = read(b, rs2);
     let v = b.trunc::<W64, W32>(raw);
     let addr = load_addr(b, rs1, oimm);
+    b.probe(addr, 4, SC_ACC)?;
     let ok = b.store_conditional(addr, v, SC_ACC)?;
     let zero = const_w64(b, 0);
     let one = const_w64(b, 1);
@@ -1205,6 +1216,7 @@ pub fn sc_w<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr, oimm: i64) -> Fl
 pub fn sc_d<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr, oimm: i64) -> Flow<B> {
     let v = read(b, rs2);
     let addr = load_addr(b, rs1, oimm);
+    b.probe(addr, 8, SC_ACC)?;
     let ok = b.store_conditional(addr, v, SC_ACC)?;
     let zero = const_w64(b, 0);
     let one = const_w64(b, 1);
@@ -1218,6 +1230,7 @@ where
     F: FnOnce(&mut B, B::V<W32>, B::V<W32>) -> B::V<W32>,
 {
     let addr = load_addr(b, rs1, oimm);
+    b.probe(addr, 4, AMO_ACC)?;
     let cur: B::V<W32> = b.load(addr, AMO_ACC)?;
     let raw = read(b, rs2);
     let y = b.trunc::<W64, W32>(raw);
@@ -1233,6 +1246,7 @@ where
     F: FnOnce(&mut B, B::V<W64>, B::V<W64>) -> B::V<W64>,
 {
     let addr = load_addr(b, rs1, oimm);
+    b.probe(addr, 8, AMO_ACC)?;
     let cur: B::V<W64> = b.load(addr, AMO_ACC)?;
     let y = read(b, rs2);
     let nxt = f(b, cur, y);
@@ -1246,6 +1260,7 @@ where
 /// LR.W（RV32）。
 pub fn lr_w_rv32<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, oimm: i64) -> Flow<B> {
     let addr = load_addr_rv32(b, rs1, oimm);
+    b.probe(addr, 4, LR_ACC)?;
     let v: B::V<W32> = b.load_reserved(addr, LR_ACC)?;
     write_w(b, rd, v);
     Ok(())
@@ -1256,6 +1271,7 @@ pub fn sc_w_rv32<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr, oimm: i64) 
     let raw = read(b, rs2);
     let v = b.trunc::<W64, W32>(raw);
     let addr = load_addr_rv32(b, rs1, oimm);
+    b.probe(addr, 4, SC_ACC)?;
     let ok = b.store_conditional(addr, v, SC_ACC)?;
     let zero = const_w64(b, 0);
     let one = const_w64(b, 1);
@@ -1269,6 +1285,7 @@ where
     F: FnOnce(&mut B, B::V<W32>, B::V<W32>) -> B::V<W32>,
 {
     let addr = load_addr_rv32(b, rs1, oimm);
+    b.probe(addr, 4, AMO_ACC)?;
     let cur: B::V<W32> = b.load(addr, AMO_ACC)?;
     let raw = read(b, rs2);
     let y = b.trunc::<W64, W32>(raw);
@@ -1522,6 +1539,7 @@ pub fn flw<B: Backend>(b: &mut B, rd: Fpr, rs1: Gpr, oimm: i64) -> Flow<B> {
 pub fn fsw<B: Backend>(b: &mut B, rs1: Gpr, rs2: Fpr, oimm: i64) -> Flow<B> {
     let v = read_f(b, rs2);
     let addr = load_addr(b, rs1, oimm);
+    b.probe(addr, 4, DATA_WRITE)?;
     b.store(addr, v, DATA_WRITE)?;
     Ok(())
 }
@@ -1785,6 +1803,7 @@ pub fn fld<B: Backend>(b: &mut B, rd: Fpr, rs1: Gpr, oimm: i64) -> Flow<B> {
 pub fn fsd<B: Backend>(b: &mut B, rs1: Gpr, rs2: Fpr, oimm: i64) -> Flow<B> {
     let v = read_fd(b, rs2);
     let addr = load_addr(b, rs1, oimm);
+    b.probe(addr, 8, DATA_WRITE)?;
     b.store(addr, v, DATA_WRITE)?;
     Ok(())
 }
@@ -1805,6 +1824,7 @@ pub fn flw_rv32<B: Backend>(b: &mut B, rd: Fpr, rs1: Gpr, oimm: i64) -> Flow<B> 
 pub fn fsw_rv32<B: Backend>(b: &mut B, rs1: Gpr, rs2: Fpr, oimm: i64) -> Flow<B> {
     let v = read_f(b, rs2);
     let addr = load_addr_rv32(b, rs1, oimm);
+    b.probe(addr, 4, DATA_WRITE)?;
     b.store(addr, v, DATA_WRITE)?;
     Ok(())
 }
@@ -1822,6 +1842,7 @@ pub fn fld_rv32<B: Backend>(b: &mut B, rd: Fpr, rs1: Gpr, oimm: i64) -> Flow<B> 
 pub fn fsd_rv32<B: Backend>(b: &mut B, rs1: Gpr, rs2: Fpr, oimm: i64) -> Flow<B> {
     let v = read_fd(b, rs2);
     let addr = load_addr_rv32(b, rs1, oimm);
+    b.probe(addr, 8, DATA_WRITE)?;
     b.store(addr, v, DATA_WRITE)?;
     Ok(())
 }
