@@ -3,8 +3,9 @@
 //! 出典は下記の確認済みの版である。数値・配置の事実のみを自前の表現で使う。
 //! 条文・図表の複製はしない。
 //!
-//! 段階 1 の範囲は 64 ビットのリトルエンディアンに限り、ヘッダとプログラムヘッダを読む。
-//! 32 ビット、ビッグエンディアン、セクションの解釈は後の段階で足す。
+//! 段階 1 の範囲はリトルエンディアンに限り、ヘッダとプログラムヘッダを読む。
+//! 32 ビットと 64 ビットの両方を受け付ける。ビッグエンディアン、
+//! セクションの解釈は後の段階で足す。
 
 // Ref: SPEC-ELF-GABI (Edition 4.1＋2001-04-24 DRAFT).
 
@@ -18,6 +19,9 @@ pub const MAGIC: [u8; 4] = [0x7f, b'E', b'L', b'F'];
 /// 64 ビットの対象であることを示す `EI_CLASS` の値。
 pub const CLASS_64: u8 = 2;
 
+/// 32 ビットの対象であることを示す `EI_CLASS` の値。
+pub const CLASS_32: u8 = 1;
+
 /// リトルエンディアンを示す `EI_DATA` の値。
 pub const DATA_LE: u8 = 1;
 
@@ -28,7 +32,7 @@ pub enum Error {
     Truncated,
     /// 識別子が ELF ではない。
     BadMagic,
-    /// 64 ビットのリトルエンディアンではない。
+    /// リトルエンディアンではない、または 32/64 ビットのいずれでもない。
     Unsupported,
 }
 
@@ -115,6 +119,56 @@ pub fn parse_ehdr(bytes: &[u8]) -> Result<Ehdr, Error> {
         phoff: get64(32)?,
         phnum: get16(56)?,
     })
+}
+
+/// ELF ヘッダを読む。32 ビットのリトルエンディアンだけを受け付ける。
+/// 32 ビットの値は 64 ビットにゼロ拡張して `Ehdr` に入れる。
+pub fn parse_ehdr32(bytes: &[u8]) -> Result<Ehdr, Error> {
+    if bytes.len() < 52 {
+        return Err(Error::Truncated);
+    }
+    if bytes[0..4] != MAGIC {
+        return Err(Error::BadMagic);
+    }
+    if bytes[4] != CLASS_32 || bytes[5] != DATA_LE {
+        return Err(Error::Unsupported);
+    }
+    let little = true;
+    let get16 = |off: usize| u16_of(&bytes[off..off + 2], little).ok_or(Error::Truncated);
+    let get32 = |off: usize| u32_of(&bytes[off..off + 4], little).ok_or(Error::Truncated);
+    Ok(Ehdr {
+        little,
+        file_type: get16(16)?,
+        flags: get32(36)?,
+        entry: u64::from(get32(24)?),
+        phoff: u64::from(get32(28)?),
+        phnum: get16(44)?,
+    })
+}
+
+/// プログラムヘッダ表を読む。32 ビット形式（1 件 32 バイト）用。
+/// `ehdr` は `parse_ehdr32` で読んだものとする。
+pub fn parse_phdrs32(bytes: &[u8], ehdr: &Ehdr) -> Result<Vec<Phdr>, Error> {
+    let mut out = Vec::new();
+    let mut off = ehdr.phoff as usize;
+    for _ in 0..ehdr.phnum as usize {
+        if bytes.len() < off + 32 {
+            return Err(Error::Truncated);
+        }
+        let get32 =
+            |at: usize| u32_of(&bytes[off + at..off + at + 4], ehdr.little).ok_or(Error::Truncated);
+        out.push(Phdr {
+            seg_type: get32(0)?,
+            offset: u64::from(get32(4)?),
+            vaddr: u64::from(get32(8)?),
+            filesz: u64::from(get32(16)?),
+            memsz: u64::from(get32(20)?),
+            flags: get32(24)?,
+            align: u64::from(get32(28)?),
+        });
+        off += 32;
+    }
+    Ok(out)
 }
 
 /// プログラムヘッダ表を読む。`ehdr` は同じバイト列から読んだものとする。
@@ -256,6 +310,53 @@ mod tests {
         assert_eq!(phdrs[0].seg_type, 1);
         assert_eq!(phdrs[0].vaddr, 0x1_0000);
         assert_eq!(phdrs[0].flags, 5);
+    }
+
+    /// 最小の ELF32（ヘッダ＋LOAD 1 件）を手で組み立てる。
+    fn minimal32() -> Vec<u8> {
+        let mut v = vec![0u8; 52 + 32];
+        v[0..4].copy_from_slice(&MAGIC);
+        v[4] = CLASS_32;
+        v[5] = DATA_LE;
+        v[6] = 1; // EI_VERSION
+        // e_type = ET_EXEC (2)
+        v[16..18].copy_from_slice(&2u16.to_le_bytes());
+        // e_entry = 0x80000000
+        v[24..28].copy_from_slice(&0x8000_0000u32.to_le_bytes());
+        // e_phoff = 52
+        v[28..32].copy_from_slice(&52u32.to_le_bytes());
+        // e_ehsize = 52, e_phentsize = 32, e_phnum = 1
+        v[40..42].copy_from_slice(&52u16.to_le_bytes());
+        v[42..44].copy_from_slice(&32u16.to_le_bytes());
+        v[44..46].copy_from_slice(&1u16.to_le_bytes());
+        // e_flags = 0
+        v[36..40].copy_from_slice(&0u32.to_le_bytes());
+        let p = 52;
+        // p_type = PT_LOAD (1)
+        v[p..p + 4].copy_from_slice(&1u32.to_le_bytes());
+        // p_offset = 0, p_vaddr = 0x80000000
+        v[p + 4..p + 8].copy_from_slice(&0u32.to_le_bytes());
+        v[p + 8..p + 12].copy_from_slice(&0x8000_0000u32.to_le_bytes());
+        // p_filesz = p_memsz = 0x1000
+        v[p + 16..p + 20].copy_from_slice(&0x1000u32.to_le_bytes());
+        v[p + 20..p + 24].copy_from_slice(&0x1000u32.to_le_bytes());
+        // p_flags = R|X (5)
+        v[p + 24..p + 28].copy_from_slice(&5u32.to_le_bytes());
+        v
+    }
+
+    #[test]
+    fn header32_and_phdr32() {
+        let bytes = minimal32();
+        let ehdr = parse_ehdr32(&bytes).unwrap();
+        assert_eq!(ehdr.entry, 0x8000_0000);
+        assert_eq!(ehdr.phnum, 1);
+        let phdrs = parse_phdrs32(&bytes, &ehdr).unwrap();
+        assert_eq!(phdrs.len(), 1);
+        assert_eq!(phdrs[0].seg_type, 1);
+        assert_eq!(phdrs[0].vaddr, 0x8000_0000);
+        assert_eq!(phdrs[0].flags, 5);
+        assert_eq!(phdrs[0].memsz, 0x1000);
     }
 
     #[test]
