@@ -20,12 +20,24 @@ impl polyisa_guest::GuestIsa for Riscv {
 
 /// CPU 状態。`#[repr(C)]` で配置を固定し、`StateRef` はここを指す。
 #[repr(C)]
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct CpuState {
     /// 整数レジスタ x0〜x31。RV32 では下位 32 ビットだけを使う。
     pub x: [u64; 32],
     /// プログラムカウンタ。
     pub pc: u64,
+    /// CSR ファイル。12 ビットのアドレスで引く。権限検査は後の段階で足す。
+    pub csr: [u64; 4096],
+}
+
+impl Default for CpuState {
+    fn default() -> Self {
+        Self {
+            x: [0; 32],
+            pc: 0,
+            csr: [0; 4096],
+        }
+    }
 }
 
 #[cfg(test)]
@@ -43,12 +55,13 @@ mod tests {
         let s = CpuState::default();
         assert_eq!(s.x[0], 0);
         assert_eq!(core::mem::offset_of!(CpuState, pc), 32 * 8);
+        assert_eq!(core::mem::offset_of!(CpuState, csr), 32 * 8 + 8);
     }
 
     #[test]
     fn insn_count() {
-        // RV64I 53 件＋M 13 件。
-        assert_eq!(INSNS.len(), 66);
+        // RV64I 53 件＋M 13 件＋CSR 6 件。
+        assert_eq!(INSNS.len(), 72);
     }
 
     #[test]
@@ -67,6 +80,8 @@ mod tests {
         assert_eq!(decode(0x0220_80b3, 32), Some(Insn::Mul));
         assert_eq!(decode(0x0220_c4b3, 32), Some(Insn::Div));
         assert_eq!(decode(0x0220_f4bb, 32), Some(Insn::Remuw));
+        assert_eq!(decode(0xc001_10f3, 32), Some(Insn::Csrrw));
+        assert_eq!(decode(0xc010_21f3, 32), Some(Insn::Csrrs));
         assert_eq!(decode(0xffff_ffff, 32), None);
         assert_eq!(decode(0x0020_8133, 16), None);
     }

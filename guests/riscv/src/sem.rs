@@ -8,7 +8,7 @@
 //! - バックエンドの呼び出しは必ず文で分け、引数の中で借用を重ねない。
 
 use polyisa_mem::{Access, AccessKind, Align, Endian};
-use polyisa_sem::{Backend, Cmp, Flow, GuestException, StateRef, W8, W16, W32, W64};
+use polyisa_sem::{Backend, Cmp, Flow, GuestException, StateArray, StateRef, W8, W16, W32, W64};
 
 use super::CpuState;
 
@@ -606,6 +606,88 @@ pub fn remuw<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
     let y = read_w(b, rs2);
     let s = b.urem(x, y);
     write_w(b, rd, s);
+    Ok(())
+}
+
+// CSR（Zicsr）。権限と読み書き属性の検査は後の段階で足す。
+
+/// CSR 番号（12 ビット）。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Csr(pub u16);
+
+fn csr_array() -> StateArray<W64> {
+    StateArray::<W64>::from_layout(core::mem::offset_of!(CpuState, csr), 8)
+}
+
+fn read_csr<B: Backend>(b: &mut B, csr: Csr) -> B::V<W64> {
+    let i = b.konst::<W32>(u32::from(csr.0));
+    b.get_indexed(csr_array(), i)
+}
+
+fn write_csr<B: Backend>(b: &mut B, csr: Csr, v: B::V<W64>) {
+    let i = b.konst::<W32>(u32::from(csr.0));
+    b.set_indexed(csr_array(), i, v);
+}
+
+pub fn csrrw<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, csr: Csr) -> Flow<B> {
+    let t = read_csr(b, csr);
+    let x = read(b, rs1);
+    write_csr(b, csr, x);
+    write(b, rd, t);
+    Ok(())
+}
+
+pub fn csrrs<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, csr: Csr) -> Flow<B> {
+    let t = read_csr(b, csr);
+    if !rs1.is_zero() {
+        let x = read(b, rs1);
+        let s = b.or(t, x);
+        write_csr(b, csr, s);
+    }
+    write(b, rd, t);
+    Ok(())
+}
+
+pub fn csrrc<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, csr: Csr) -> Flow<B> {
+    let t = read_csr(b, csr);
+    if !rs1.is_zero() {
+        let x = read(b, rs1);
+        let n = b.not(x);
+        let s = b.and(t, n);
+        write_csr(b, csr, s);
+    }
+    write(b, rd, t);
+    Ok(())
+}
+
+pub fn csrrwi<B: Backend>(b: &mut B, rd: Gpr, uimm: u64, csr: Csr) -> Flow<B> {
+    let t = read_csr(b, csr);
+    let x = b.konst::<W64>(uimm & 31);
+    write_csr(b, csr, x);
+    write(b, rd, t);
+    Ok(())
+}
+
+pub fn csrrsi<B: Backend>(b: &mut B, rd: Gpr, uimm: u64, csr: Csr) -> Flow<B> {
+    let t = read_csr(b, csr);
+    if uimm & 31 != 0 {
+        let x = b.konst::<W64>(uimm & 31);
+        let s = b.or(t, x);
+        write_csr(b, csr, s);
+    }
+    write(b, rd, t);
+    Ok(())
+}
+
+pub fn csrrci<B: Backend>(b: &mut B, rd: Gpr, uimm: u64, csr: Csr) -> Flow<B> {
+    let t = read_csr(b, csr);
+    if uimm & 31 != 0 {
+        let x = b.konst::<W64>(uimm & 31);
+        let n = b.not(x);
+        let s = b.and(t, n);
+        write_csr(b, csr, s);
+    }
+    write(b, rd, t);
     Ok(())
 }
 
