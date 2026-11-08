@@ -61,6 +61,21 @@ pub fn validate(model: &Model) -> Report {
                 name: insn.name.clone(),
             });
         }
+        for w in &insn.wheres {
+            match fields.get(w.field.as_str()) {
+                Some(f) => match f.kind {
+                    crate::model::FieldKind::Bits { .. } => {}
+                    _ => errors.push(ValidationError::Unresolved {
+                        kind: "where-hook".to_string(),
+                        name: w.field.clone(),
+                    }),
+                },
+                None => errors.push(ValidationError::Unresolved {
+                    kind: "where-field".to_string(),
+                    name: w.field.clone(),
+                }),
+            }
+        }
     }
 
     for feature in &model.features {
@@ -116,18 +131,90 @@ pub fn validate(model: &Model) -> Report {
     }
 
     // デコードの一意性。長さが同じで重なり、述語が両立しうる組を誤りとする。
+    // `where` が互いに排他なら重なりを許す。機能の排他も考慮する。
+    let mut conflicts: Vec<(String, String)> = Vec::new();
+    for f in &model.features {
+        for c in &f.conflicts {
+            conflicts.push((f.name.clone(), c.clone()));
+        }
+    }
     for (i, a) in model.insns.iter().enumerate() {
         for b in model.insns.iter().skip(i + 1) {
-            if a.pattern.overlaps(&b.pattern) && a.when.maybe_both_true(&b.when) {
-                errors.push(ValidationError::Ambiguous {
-                    first: a.name.clone(),
-                    second: b.name.clone(),
-                });
+            if !a.pattern.overlaps(&b.pattern) {
+                continue;
             }
+            if !a.when.maybe_both_true(&b.when) {
+                continue;
+            }
+            if wheres_disjoint(&a.wheres, &b.wheres) {
+                continue;
+            }
+            if when_disjoint_by_conflict(&a.when, &b.when, &conflicts) {
+                continue;
+            }
+            errors.push(ValidationError::Ambiguous {
+                first: a.name.clone(),
+                second: b.name.clone(),
+            });
         }
     }
 
     Report { errors, warnings }
+}
+
+/// `where` 句の組が互いに排他かどうか。同一フィールドへの矛盾があれば真。
+fn wheres_disjoint(a: &[crate::model::WhereClause], b: &[crate::model::WhereClause]) -> bool {
+    use crate::model::WhereOp::{Eq, Ne};
+    for x in a {
+        for y in b {
+            if x.field != y.field {
+                continue;
+            }
+            match (x.op, y.op) {
+                (Eq, Eq) if x.value != y.value => return true,
+                (Eq, Ne) if x.value == y.value => return true,
+                (Ne, Eq) if x.value == y.value => return true,
+                _ => {}
+            }
+        }
+    }
+    false
+}
+
+/// 機能の排他宣言により `when` が両立しないかどうか。
+/// 肯定側の旗の組に排他関係があれば真とする（保守的）。
+fn when_disjoint_by_conflict(
+    a: &crate::pred::Pred,
+    b: &crate::pred::Pred,
+    conflicts: &[(String, String)],
+) -> bool {
+    use crate::pred::Pred::{All, Flag};
+    fn pos(p: &crate::pred::Pred, out: &mut Vec<String>) {
+        match p {
+            Flag(f) => out.push(f.clone()),
+            All(ps) => {
+                for q in ps {
+                    pos(q, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut pa = Vec::new();
+    let mut pb = Vec::new();
+    pos(a, &mut pa);
+    pos(b, &mut pb);
+    for f in &pa {
+        for g in &pb {
+            if conflicts
+                .iter()
+                .any(|(x, y)| (x == f && y == g) || (x == g && y == f))
+            {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -158,6 +245,7 @@ mod tests {
             format: "R".to_string(),
             pattern: Pattern::parse("0000000 ..... ..... 000 ..... 0110011").unwrap(),
             when: Pred::True,
+            wheres: vec![],
             syntax: "add".to_string(),
             timing: "alu".to_string(),
         });
@@ -178,6 +266,7 @@ mod tests {
             format: "R".to_string(),
             pattern: Pattern::parse("0000000 ..... ..... 000 ..... 0110011").unwrap(),
             when: Pred::True,
+            wheres: vec![],
             syntax: "add".to_string(),
             timing: "alu".to_string(),
         });
@@ -203,7 +292,62 @@ mod tests {
             format: "R".to_string(),
             pattern: Pattern::parse("0000000 ..... ..... 000 ..... 0110011").unwrap(),
             when: Pred::Flag("mips_r6".to_string()),
+            wheres: vec![],
             syntax: "bovc".to_string(),
+            timing: "alu".to_string(),
+        });
+        let r = validate(&m);
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+    }
+
+    #[test]
+    fn where_disjoint_pair_passes() {
+        use crate::model::{WhereClause, WhereOp};
+        let mut m = test_model();
+        m.fields.push(Field {
+            name: "rs2".to_string(),
+            kind: FieldKind::Bits { hi: 24, lo: 20 },
+        });
+        m.insns[0].wheres = vec![WhereClause {
+            field: "rs2".to_string(),
+            op: WhereOp::Eq,
+            value: 0,
+        }];
+        m.insns.push(Insn {
+            name: "add_alias".to_string(),
+            format: "R".to_string(),
+            pattern: Pattern::parse("0000000 ..... ..... 000 ..... 0110011").unwrap(),
+            when: Pred::True,
+            wheres: vec![WhereClause {
+                field: "rs2".to_string(),
+                op: WhereOp::Ne,
+                value: 0,
+            }],
+            syntax: "add".to_string(),
+            timing: "alu".to_string(),
+        });
+        let r = validate(&m);
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+    }
+
+    #[test]
+    fn conflict_declared_when_passes() {
+        let mut m = test_model();
+        for (name, conflicts) in [("rv64", vec!["rv32"]), ("rv32", vec!["rv64"])] {
+            m.features.push(Feature {
+                name: name.to_string(),
+                implies: vec![],
+                conflicts: conflicts.iter().map(|s| s.to_string()).collect(),
+            });
+        }
+        m.insns[0].when = Pred::Flag("rv64".to_string());
+        m.insns.push(Insn {
+            name: "add32".to_string(),
+            format: "R".to_string(),
+            pattern: Pattern::parse("0000000 ..... ..... 000 ..... 0110011").unwrap(),
+            when: Pred::Flag("rv32".to_string()),
+            wheres: vec![],
+            syntax: "add".to_string(),
             timing: "alu".to_string(),
         });
         let r = validate(&m);
