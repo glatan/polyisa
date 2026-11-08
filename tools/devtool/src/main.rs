@@ -718,6 +718,15 @@ fn allowed_deps(pkg: &str) -> Option<&'static [&'static str]> {
             "polyisa-guest",
             "polyisa-timing",
         ],
+        "polyisa-guest-x86" => &[
+            "polyisa-bits",
+            "polyisa-softfloat",
+            "polyisa-decimal",
+            "polyisa-mem",
+            "polyisa-sem",
+            "polyisa-guest",
+            "polyisa-timing",
+        ],
         _ => return None,
     })
 }

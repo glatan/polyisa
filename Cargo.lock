@@ -117,6 +117,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "polyisa-guest-x86"
+version = "0.0.0"
+dependencies = [
+ "polyisa-bits",
+ "polyisa-decimal",
+ "polyisa-engine",
+ "polyisa-guest",
+ "polyisa-isadl",
+ "polyisa-isagen",
+ "polyisa-mem",
+ "polyisa-sem",
+ "polyisa-softfloat",
+ "polyisa-timing",
+]
+
+[[package]]
 name = "polyisa-host"
 version = "0.0.0"
 
