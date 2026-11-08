@@ -10,16 +10,25 @@ fn main() {
             std::process::exit(2);
         }
         polyisa_cli::Command::Cpus => {
-            // 汎用CPUモデル。詳細は guests/riscv の MODELS を見る。
-            println!("riscv:rv64gc");
-            println!("riscv:rv64imac");
+            for m in polyisa_guest_riscv::MODELS {
+                println!("riscv:{m}");
+            }
         }
         polyisa_cli::Command::Disasm => {
-            eprintln!("disasm: 未実装（逆アセンブラの生成後に足す）");
-            std::process::exit(2);
+            let Some(word) = args.get(1).and_then(|s| polyisa_cli::parse_hex_word(s)) else {
+                eprintln!("usage: polyisa disasm <hex-word>");
+                std::process::exit(2);
+            };
+            match polyisa_cli::disassemble_riscv(word) {
+                Some(s) => println!("{s}"),
+                None => {
+                    eprintln!("unknown instruction: {word:#x}");
+                    std::process::exit(1);
+                }
+            }
         }
         polyisa_cli::Command::Help => {
-            println!("usage: polyisa <run|cpus|disasm>");
+            println!("usage: polyisa <run|cpus|disasm> [args]");
         }
     }
 }
