@@ -82,6 +82,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "polyisa-guest-ia64"
+version = "0.0.0"
+dependencies = [
+ "polyisa-bits",
+ "polyisa-decimal",
+ "polyisa-engine",
+ "polyisa-guest",
+ "polyisa-isadl",
+ "polyisa-isagen",
+ "polyisa-mem",
+ "polyisa-sem",
+ "polyisa-softfloat",
+ "polyisa-timing",
+]
+
+[[package]]
 name = "polyisa-guest-mips"
 version = "0.0.0"
 dependencies = [
