@@ -63,6 +63,11 @@ fn fetch_len(first: u8, second: Option<u8>, third: Option<u8>) -> Option<u64> {
         0xEB | 0x74 | 0x75 | 0xE2 | 0xCD | 0x85 | 0x0F | 0x39 | 0x21 | 0x0B | 0x09 | 0x72
         | 0x73 | 0x76 | 0x77 | 0x7C | 0x7D | 0x7E | 0x7F | 0xF7 => Some(2),
         0x05 | 0x2D | 0x3D | 0xB8 | 0xE8 | 0xE9 | 0x25 | 0x0D | 0x35 => Some(5),
+        // 0x83 /r ib (AND imm8 群)。register-direct のみ 3B で受け、メモリ形式は未対応。
+        0x83 => {
+            let s = second?;
+            if s >> 6 == 3 { Some(3) } else { None }
+        }
         // C7 /0 (MOV r/m,imm32 系)。register-direct のみ 6B で受け、メモリ形式は未対応。
         0xC7 => {
             let s = second?;
@@ -124,8 +129,9 @@ pub fn run(env: &mut BareEnv, entry: u32, sys: &mut impl TrapHandler, limit: u64
     run_mode(env, entry, sys, limit, false)
 }
 
-/// `is64` のとき REX.W (0x48) 接頭辞を受け付ける実行ループ。
-/// 64ビットのスタック・R8-R15・SIB は未対応であり、4GB 未満の静的バイナリを想定する。
+/// `is64` のとき REX 接頭辞を受け付ける実行ループ。
+/// REX はデコード前に剥がし、レジスタ拡張と W ビットだけを意味論に渡す。
+/// 64ビットのスタック・SIB・64ビットメモリ形式は逐次対応し、4GB 未満の静的バイナリを想定する。
 pub fn run_mode(
     env: &mut BareEnv,
     entry: u32,
@@ -148,15 +154,11 @@ pub fn run_mode(
                 word: 0,
             };
         }
-        // REX.W 接頭辞（64ビットモードのみ）。R8-R15 を使う REX は未対応。
+        // REX 接頭辞（64ビットモードのみ）。デコード前に剥がす。
         let mut off: u64 = 0;
+        let mut rex: u8 = 0;
         if is64 && (0x40..=0x4F).contains(&head[0]) {
-            if head[0] != 0x48 {
-                return Outcome::Unimplemented {
-                    eip: pc as u32,
-                    word: head[0] as u128,
-                };
-            }
+            rex = head[0];
             off = 1;
             if env
                 .backend
@@ -173,7 +175,7 @@ pub fn run_mode(
         let mut peek = [0u8; 1];
         let second = if matches!(
             head[0],
-            0x01 | 0x8B | 0x29 | 0x31 | 0x89 | 0xC1 | 0xC7 | 0x8D | 0xF7
+            0x01 | 0x8B | 0x29 | 0x31 | 0x89 | 0xC1 | 0xC7 | 0x83 | 0x8D | 0xF7
         ) {
             if env
                 .backend
@@ -216,25 +218,29 @@ pub fn run_mode(
                 word: head[0] as u128,
             };
         };
-        // REX.W の追随者は C7/8B/89/01/29/39/8D のみ。
-        if off == 1 && !matches!(head[0], 0xC7 | 0x8B | 0x89 | 0x01 | 0x29 | 0x39 | 0x8D) {
+        // REX の追随者は reg-direct 系・C7/83・PUSH/POP のみ。
+        // REX.SIB・REXメモリ形式は未対応。
+        if off == 1
+            && !matches!(
+                head[0],
+                0x8B | 0x89 | 0x01 | 0x29 | 0x39 | 0x8D | 0xC7 | 0x83 | 0x50..=0x5F
+            )
+        {
             return Outcome::Unimplemented {
                 eip: pc as u32,
                 word: head[0] as u128,
             };
         }
+        // REX はデコード前に剥がす。nbytes は eip 進行用に接頭辞を含む。
         let nbytes = base + off;
         let mut bytes = [0u8; 8];
-        if off == 1 {
-            bytes[0] = 0x48;
-        }
-        bytes[off as usize] = head[0];
+        bytes[0] = head[0];
         if base >= 2 {
             // 長さ判定用のぞき見を使う。なければ読み直す。
-            bytes[off as usize + 1] = second.unwrap_or(0);
+            bytes[1] = second.unwrap_or(0);
         }
         if base >= 3 {
-            bytes[off as usize + 2] = third.unwrap_or(0);
+            bytes[2] = third.unwrap_or(0);
         }
         for i in 1..base {
             if i == 1 && second.is_some() {
@@ -255,42 +261,59 @@ pub fn run_mode(
                     word: head[0] as u128,
                 };
             }
-            bytes[(off + i) as usize] = b[0];
+            bytes[i as usize] = b[0];
         }
         // ISADL の word 組立（opcode 上位詰め）に合わせる。
         let mut word: u128 = 0;
-        for i in 0..nbytes {
+        for i in 0..base {
             word = (word << 8) | bytes[i as usize] as u128;
         }
-        let len_bits = (nbytes * 8) as u32;
+        let len_bits = (base * 8) as u32;
         let Some(insn) = decode(word, len_bits) else {
             return Outcome::Unimplemented {
                 eip: pc as u32,
                 word,
             };
         };
-        // 64ビットでは絶対番地形は RIP 相対であり、絶対番地の意味論は使えない。
-        if is64
-            && matches!(
-                insn,
-                Insn::MovEaxAbs
-                    | Insn::MovAbsEax
-                    | Insn::LeaAbs
-                    | Insn::MovEaxSibS2a32
-                    | Insn::MovSibS2a32Eax
-                    | Insn::MovEaxSibS4a32
-                    | Insn::MovSibS4a32Eax
-                    | Insn::MovEaxSibS8a32
-                    | Insn::MovSibS8a32Eax
-                    | Insn::LeaSibS2a32
-                    | Insn::LeaSibS4a32
-                    | Insn::LeaSibS8a32
-            )
-        {
-            return Outcome::Unimplemented {
-                eip: pc as u32,
-                word,
-            };
+        // 64ビットの mod=00 rm=101 は RIP 相対である。SIB 直接番地 base は
+        // 絶対番地のまま（u64 アドレスで扱う）なので通す。
+        // REX 拡張ビット付きのメモリ形式（SIB・LEA含む）は未対応。
+        // reg-direct 形・C7/83・PUSH/POP・RIP相対のみ R8-R15 を受け付ける。
+        if is64 && rex & 0x7 != 0 {
+            match insn {
+                Insn::MovRm32
+                | Insn::MovMr32
+                | Insn::AddRm32
+                | Insn::SubRm32
+                | Insn::AndRm32
+                | Insn::OrRm32
+                | Insn::XorRm32
+                | Insn::CmpRm32
+                | Insn::MovRmImm
+                | Insn::AndRmImm8
+                | Insn::PushEax
+                | Insn::PushEcx
+                | Insn::PushEdx
+                | Insn::PushEbx
+                | Insn::PushEsp
+                | Insn::PushEbp
+                | Insn::PushEsi
+                | Insn::PushEdi
+                | Insn::PopEax
+                | Insn::PopEcx
+                | Insn::PopEdx
+                | Insn::PopEbx
+                | Insn::PopEsp
+                | Insn::PopEbp
+                | Insn::PopEsi
+                | Insn::PopEdi => {}
+                _ => {
+                    return Outcome::Unimplemented {
+                        eip: pc as u32,
+                        word,
+                    };
+                }
+            }
         }
         // imm/disp の取り出し。32ビット値は LE 実バイト列から復元する。
         let imm32 = || (word as u32).swap_bytes();
@@ -299,7 +322,7 @@ pub fn run_mode(
         // 意味論が分岐を取ると backend.ctrl に Jump が残る（取らなければ
         // Fallthrough）。eip 等値での判定は自己ループで誤るため使わない。
         use polyisa_engine::interp::Ctrl;
-        let r = env.step(|b| dispatch(b, insn, eip, word, nbytes, off, is64, imm32, disp8));
+        let r = env.step(|b| dispatch(b, insn, eip, word, nbytes, off, is64, rex, imm32, disp8));
         match r {
             Ok(()) => match env.backend.ctrl {
                 Ctrl::Jump(_) => {}
@@ -346,17 +369,22 @@ fn dispatch<B: Backend>(
     nbytes: u64,
     off: u64,
     is64: bool,
+    rex: u8,
     imm32: impl Fn() -> u32,
     disp8: impl Fn() -> i8,
 ) -> Result<(), B::Exit> {
     use polyisa_guest_x86::sem::Gpr;
     let disp32 = || imm32() as i32;
     // ModRM register-direct の reg/rm 抽出。ModRM は先頭から 2+off バイト目にあり、
-    // word（opcode 上位詰め）内の位置は命令長で決まる。
+    // word（opcode 上位詰め）内の位置は命令長で決まる。REX.R/B で 8-15 に拡張する。
     let modrm = || ((word >> ((nbytes - 2 - off) * 8)) & 0xff) as u8;
-    let reg = || Gpr((modrm() >> 3) & 7);
-    let rm = || Gpr(modrm() & 7);
-    let r = match insn {
+    let reg = || Gpr(((modrm() >> 3) & 7) | (((rex >> 2) & 1) << 3));
+    let rm = || Gpr((modrm() & 7) | ((rex & 1) << 3));
+    // PUSH/POP のレジスタは opcode 下位3ビット + REX.B。
+    let push_r = || Gpr(((word as u8) & 7) | ((rex & 1) << 3));
+    // REX.W の有無で 32/64ビット意味論を選ぶ。
+    let rex_w = rex & 8 != 0;
+    let r: Result<(), B::Exit> = match insn {
         Insn::Nop => sem::nop(b),
         Insn::IncEax => sem::inc_r32(b, Gpr(0)),
         Insn::IncEcx => sem::inc_r32(b, Gpr(1)),
@@ -379,16 +407,40 @@ fn dispatch<B: Backend>(
         Insn::MovEax => sem::mov_eax(b, imm32()),
         Insn::Syscall => sem::syscall(b, eip),
         Insn::Cpuid => sem::cpuid(b),
-        Insn::AddRm32 => sem::add_rm32(b, rm(), reg()),
-        Insn::MovRm32 => sem::mov_rm32(b, reg(), rm()),
+        Insn::AddRm32 => {
+            if rex_w {
+                sem::add_rm64(b, rm(), reg())
+            } else {
+                sem::add_rm32(b, rm(), reg())
+            }
+        }
+        Insn::MovRm32 => {
+            if rex_w {
+                sem::mov_rm64(b, reg(), rm())
+            } else {
+                sem::mov_rm32(b, reg(), rm())
+            }
+        }
         Insn::MovEaxMem => sem::mov_eax_mem(b, disp8()),
         Insn::MovMemEax => sem::mov_mem_eax(b, disp8()),
         Insn::MovEaxMemnd => sem::mov_eax_memnd(b),
         Insn::MovMemndEax => sem::mov_memnd_eax(b),
         Insn::MovEaxMemd32 => sem::mov_eax_memd32(b, disp32()),
         Insn::MovMemd32Eax => sem::mov_memd32_eax(b, disp32()),
-        Insn::MovEaxAbs => sem::mov_eax_abs(b, imm32()),
-        Insn::MovAbsEax => sem::mov_abs_eax(b, imm32()),
+        Insn::MovEaxAbs => {
+            if is64 {
+                sem::mov_eax_rip(b, eip as u64 + nbytes, disp32())
+            } else {
+                sem::mov_eax_abs(b, imm32())
+            }
+        }
+        Insn::MovAbsEax => {
+            if is64 {
+                sem::mov_rip_eax(b, eip as u64 + nbytes, disp32())
+            } else {
+                sem::mov_abs_eax(b, imm32())
+            }
+        }
         Insn::MovEaxSib => sem::mov_eax_sib(b),
         Insn::MovSibEax => sem::mov_sib_eax(b),
         Insn::MovEaxSibd => sem::mov_eax_sibd(b, disp8()),
@@ -417,24 +469,48 @@ fn dispatch<B: Backend>(
         Insn::MovSibS4ndEax => sem::mov_sib_s4nd_eax(b),
         Insn::MovEaxSibS8nd => sem::mov_eax_sib_s8nd(b),
         Insn::MovSibS8ndEax => sem::mov_sib_s8nd_eax(b),
-        Insn::PushEax => sem::push_reg(b, Gpr(0)),
-        Insn::PushEcx => sem::push_reg(b, Gpr(1)),
-        Insn::PushEdx => sem::push_reg(b, Gpr(2)),
-        Insn::PushEbx => sem::push_reg(b, Gpr(3)),
-        Insn::PushEsp => sem::push_reg(b, Gpr(4)),
-        Insn::PushEbp => sem::push_reg(b, Gpr(5)),
-        Insn::PushEsi => sem::push_reg(b, Gpr(6)),
-        Insn::PushEdi => sem::push_reg(b, Gpr(7)),
-        Insn::PopEax => sem::pop_reg(b, Gpr(0)),
-        Insn::PopEcx => sem::pop_reg(b, Gpr(1)),
-        Insn::PopEdx => sem::pop_reg(b, Gpr(2)),
-        Insn::PopEbx => sem::pop_reg(b, Gpr(3)),
-        Insn::PopEsp => sem::pop_reg(b, Gpr(4)),
-        Insn::PopEbp => sem::pop_reg(b, Gpr(5)),
-        Insn::PopEsi => sem::pop_reg(b, Gpr(6)),
-        Insn::PopEdi => sem::pop_reg(b, Gpr(7)),
-        Insn::CallRel32 => sem::call_rel32(b, eip, disp32()),
-        Insn::Ret => sem::ret(b),
+        Insn::PushEax
+        | Insn::PushEcx
+        | Insn::PushEdx
+        | Insn::PushEbx
+        | Insn::PushEsp
+        | Insn::PushEbp
+        | Insn::PushEsi
+        | Insn::PushEdi => {
+            if is64 {
+                sem::push_reg64(b, push_r())
+            } else {
+                sem::push_reg(b, push_r())
+            }
+        }
+        Insn::PopEax
+        | Insn::PopEcx
+        | Insn::PopEdx
+        | Insn::PopEbx
+        | Insn::PopEsp
+        | Insn::PopEbp
+        | Insn::PopEsi
+        | Insn::PopEdi => {
+            if is64 {
+                sem::pop_reg64(b, push_r())
+            } else {
+                sem::pop_reg(b, push_r())
+            }
+        }
+        Insn::CallRel32 => {
+            if is64 {
+                sem::call_rel64(b, eip as u64 + nbytes, disp32())
+            } else {
+                sem::call_rel32(b, eip, disp32())
+            }
+        }
+        Insn::Ret => {
+            if is64 {
+                sem::ret64(b)
+            } else {
+                sem::ret(b)
+            }
+        }
         Insn::CmpEax => sem::cmp_eax(b, imm32()),
         Insn::TestEax => sem::test_eax(b),
         Insn::Je => sem::je(b, eip, disp8()),
@@ -450,7 +526,13 @@ fn dispatch<B: Backend>(
         Insn::Loop => sem::loop_rel8(b, eip, disp8()),
         Insn::JmpRel32 => sem::jmp_rel32(b, eip, disp32()),
         Insn::SubEax => sem::sub_eax(b, imm32()),
-        Insn::Leave => sem::leave(b),
+        Insn::Leave => {
+            if is64 {
+                sem::leave64(b)
+            } else {
+                sem::leave(b)
+            }
+        }
         Insn::AndEax => sem::and_eax(b, imm32()),
         Insn::OrEax => sem::or_eax(b, imm32()),
         Insn::XorImm => sem::xor_imm(b, imm32()),
@@ -459,7 +541,13 @@ fn dispatch<B: Backend>(
         Insn::Int80 => sem::int80(b, eip),
         Insn::LeaM8 => sem::lea_m8(b, reg(), disp8()),
         Insn::LeaM32 => sem::lea_m32(b, reg(), disp32()),
-        Insn::LeaAbs => sem::lea_abs(b, reg(), imm32()),
+        Insn::LeaAbs => {
+            if is64 {
+                sem::lea_rip64(b, reg(), eip as u64 + nbytes, disp32())
+            } else {
+                sem::lea_abs(b, reg(), imm32())
+            }
+        }
         Insn::LeaSib => sem::lea_sib(b, reg()),
         Insn::LeaSibd => sem::lea_sibd(b, reg(), disp8()),
         Insn::LeaSibS2 => sem::lea_sib_s2(b, reg(), disp8()),
@@ -474,22 +562,47 @@ fn dispatch<B: Backend>(
         Insn::LeaSibS2a32 => sem::lea_sib_s2a32(b, reg(), disp32()),
         Insn::LeaSibS4a32 => sem::lea_sib_s4a32(b, reg(), disp32()),
         Insn::LeaSibS8a32 => sem::lea_sib_s8a32(b, reg(), disp32()),
-        Insn::CmpRm32 => sem::cmp_rm32(b, rm(), reg()),
+        Insn::MovRmImm => {
+            if rex_w {
+                sem::mov_rm64_imm(b, rm(), imm32())
+            } else {
+                sem::mov_rm32_imm(b, rm(), imm32())
+            }
+        }
+        Insn::AndRmImm8 => {
+            if rex_w {
+                sem::and_rm64_imm8(b, rm(), disp8())
+            } else {
+                sem::and_rm32_imm8(b, rm(), disp8())
+            }
+        }
+        Insn::CmpRm32 => {
+            if rex_w {
+                sem::cmp_rm64(b, rm(), reg())
+            } else {
+                sem::cmp_rm32(b, rm(), reg())
+            }
+        }
         Insn::AndRm32 => sem::and_rm32(b, rm(), reg()),
         Insn::OrRm32 => sem::or_rm32(b, rm(), reg()),
-        Insn::SubRm32 => sem::sub_rm32(b, rm(), reg()),
+        Insn::SubRm32 => {
+            if rex_w {
+                sem::sub_rm64(b, rm(), reg())
+            } else {
+                sem::sub_rm32(b, rm(), reg())
+            }
+        }
         Insn::XorRm32 => sem::xor_rm32(b, rm(), reg()),
-        Insn::MovMr32 => sem::mov_mr32(b, rm(), reg()),
+        Insn::MovMr32 => {
+            if rex_w {
+                sem::mov_mr64(b, rm(), reg())
+            } else {
+                sem::mov_mr32(b, rm(), reg())
+            }
+        }
         Insn::MulRm32 => sem::mul_rm32(b),
         Insn::DivRm32 => sem::div_rm32(b, eip),
         Insn::IdivRm32 => sem::idiv_rm32(b, eip),
-        Insn::MovRm64Imm => sem::mov_rm64_imm(b, rm(), imm32()),
-        Insn::MovRm64 => sem::mov_rm64(b, reg(), rm()),
-        Insn::MovMr64 => sem::mov_mr64(b, rm(), reg()),
-        Insn::AddRm64 => sem::add_rm64(b, rm(), reg()),
-        Insn::SubRm64 => sem::sub_rm64(b, rm(), reg()),
-        Insn::CmpRm64 => sem::cmp_rm64(b, rm(), reg()),
-        Insn::LeaRip64 => sem::lea_rip64(b, reg(), eip as u64 + nbytes, disp32()),
     };
     if is64 {
         // 64ビットでの32ビット書き込みは上位をゼロ拡張する。
@@ -534,10 +647,13 @@ fn dispatch<B: Backend>(
             | Insn::AndRm32
             | Insn::OrRm32
             | Insn::XorRm32
-            | Insn::MovMr32 => Some(rm()),
+            | Insn::MovMr32
+            | Insn::MovRmImm
+            | Insn::AndRmImm8 => Some(rm()),
             Insn::MovRm32 => Some(reg()),
             Insn::LeaM8
             | Insn::LeaM32
+            | Insn::LeaAbs
             | Insn::LeaSib
             | Insn::LeaSibd
             | Insn::LeaSibS2

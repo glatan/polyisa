@@ -537,3 +537,55 @@ fn run_rex64_gas_absorbed() {
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
     assert_eq!(out, Outcome::Exit(7));
 }
+
+#[test]
+fn run_rex_b_and_stack64() {
+    // REX.B (R8/R9) と 64ビットスタックを run 経由で回す。
+    // mov rax,0x77 (48 C7 C0); mov r8,rax (49 89 C0); push r8 (41 50);
+    // pop r9 (41 59); mov rdi,r9 (4C 89 CF); mov rax,60; syscall -> exit(0x77)
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    let prog: &[u8] = &[
+        0x48, 0xC7, 0xC0, 0x77, 0x00, 0x00, 0x00, // mov rax,0x77
+        0x49, 0x89, 0xC0, // mov r8,rax
+        0x41, 0x50, // push r8
+        0x41, 0x59, // pop r9
+        0x4C, 0x89, 0xCF, // mov rdi,r9
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x0F, 0x05, // syscall -> exit(0x77)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0x77));
+}
+
+#[test]
+fn run_rip_relative_norex() {
+    // REX なし RIP 相対（8B/89 05）を 64ビットモードで回す。
+    // 0x1000: 89 05 FA 0F 00 00  mov [rip+0xffa],eax ([0x2000]=eax)
+    // 0x1006: B8 00 00 00 00     mov eax,0
+    // 0x100B: 8B 05 EF 0F 00 00  mov eax,[rip+0xfef] ([0x2000])
+    // mov rdi,rax (48 89 C7); mov rax,60; syscall -> exit(0x77)
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    env.backend.set(Gpr(0).state(), 0x77);
+    let prog: &[u8] = &[
+        0x89, 0x05, 0xFA, 0x0F, 0x00, 0x00, // mov [rip+0xffa],eax ([0x2000]=0x77)
+        0xB8, 0x00, 0x00, 0x00, 0x00, // mov eax,0
+        0x8B, 0x05, 0xEF, 0x0F, 0x00, 0x00, // mov eax,[rip+0xfef] (eax=0x77)
+        0x48, 0x89, 0xC7, // mov rdi,rax
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x0F, 0x05, // syscall -> exit(0x77)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0x77));
+}

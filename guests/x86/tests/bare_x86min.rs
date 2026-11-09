@@ -1038,3 +1038,47 @@ fn rip_relative_lea() {
         .unwrap();
     assert_eq!(env.backend.get(Gpr(1).state()), 0xFF7);
 }
+
+#[test]
+fn r8_regs_roundtrip() {
+    // REX.B 拡張レジスタ R8/R9 の読み書き。
+    let mut env = env();
+    env.step(|b| {
+        sem::write64(b, Gpr(9), 0x1122_3344_5566_7788);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::mov_mr32(b, Gpr(8), Gpr(9))).unwrap();
+    // 下位32ビットだけ移る（32ビット MOV）。
+    assert_eq!(env.backend.get(Gpr(8).state()), 0x5566_7788);
+    // 64ビット MOV で全64ビットが移る。
+    env.step(|b| sem::mov_mr64(b, Gpr(8), Gpr(9))).unwrap();
+    assert_eq!(env.backend.get(Gpr(8).state()), 0x5566_7788);
+}
+
+#[test]
+fn c7_and_imm8() {
+    // MOV r/m,imm32 (/0)：フラグを変えない。
+    let mut env = env();
+    env.backend.set(sem::eflags_ref(), 0xFFF);
+    env.step(|b| sem::mov_rm32_imm(b, Gpr(1), 0x1234_5678))
+        .unwrap();
+    assert_eq!(env.backend.get(Gpr(1).state()), 0x1234_5678);
+    assert_eq!(env.backend.get(sem::eflags_ref()), 0xFFF);
+    // AND r/m,imm8 (/4)：0x8000000f & 0x81 = 0x80000001。SF=1、CF=OF=0。
+    env.backend.set(Gpr(0).state(), 0x8000_000F);
+    env.step(|b| sem::and_rm32_imm8(b, Gpr(0), 0x81u8 as i8))
+        .unwrap();
+    assert_eq!(env.backend.get(Gpr(0).state()), 0x8000_0001);
+    let f = env.backend.get(sem::eflags_ref());
+    assert_eq!(f & 0x80, 0x80);
+    assert_eq!(f & 0x41, 0);
+    // 64ビット版：0xFF & 0x0F = 0x0F。
+    env.step(|b| {
+        sem::write64(b, Gpr(2), 0xFF);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::and_rm64_imm8(b, Gpr(2), 0x0F)).unwrap();
+    assert_eq!(env.backend.get(Gpr(2).state()), 0x0F);
+}
