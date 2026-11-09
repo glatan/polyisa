@@ -85,6 +85,19 @@ fn cpuid_leaf0_returns_vendor() {
 }
 
 #[test]
+fn modrm_register_direct() {
+    let mut env = env();
+    env.backend.set(Gpr(1).state(), 35);
+    env.step(|b| sem::mov_eax(b, 7)).unwrap();
+    // MOV EAX, ECX：EAX=35。
+    env.step(sem::mov_rm32).unwrap();
+    assert_eq!(eax(&mut env), 35);
+    // ADD EAX, ECX：EAX=70。
+    env.step(sem::add_rm32).unwrap();
+    assert_eq!(eax(&mut env), 70);
+}
+
+#[test]
 fn jmp_sets_eip() {
     let mut env = env();
     env.backend.set(sem::eip_ref(), 0x1000);
