@@ -2,8 +2,10 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! MIPS I 試作のゲスト ISA。段階3の最小であり、裸実行で遅延スロットを確かめる。
 //!
-//! R 形式の整数演算と LW/SW・BEQ・J・HI/LO 乗除算のみ持つ。FPU、R6 の割り当て直し、
-//! microMIPS、ロード遅延、branch likely、両エンディアンの切り替えは本格実装で足す。
+//! R 形式の整数演算と LW/SW・BEQ・J・HI/LO 乗除算に加え、R6 の割り当て直しの
+//! 最小形（ADDI の pre-R6 ゲートと BEQZALC）を持つ。BOVC/BEQC は field 間比較の
+//! where が要るため先送りする。FPU、microMIPS、ロード遅延、branch likely、
+//! 両エンディアンの切り替えは本格実装で足す。
 
 #![forbid(unsafe_code)]
 
@@ -71,8 +73,8 @@ mod tests {
 
     #[test]
     fn insn_count() {
-        // 試作の整数17件（nop は sll $0,$0,0 の別名として扱う）。
-        assert_eq!(INSNS.len(), 17);
+        // 試作の整数19件（nop は sll $0,$0,0 の別名として扱う）。
+        assert_eq!(INSNS.len(), 19);
     }
 
     #[test]
@@ -97,12 +99,25 @@ mod tests {
         assert_eq!(decode(0xac41_0010, 32), Some(Insn::Sw));
         assert_eq!(decode(0x1022_0004, 32), Some(Insn::Beq));
         assert_eq!(decode(0x0800_0400, 32), Some(Insn::J));
+        // R6 の割り当て直し：op=001000 は pre-R6 では ADDI。
+        // Ref: SPEC-MIPS-R6 (Rev 6.06).
+        assert_eq!(decode(0x2043_0010, 32), Some(Insn::Addi));
+        // R6 では rs==0 && rt!=0 の符号化が BEQZALC になる。
+        assert_eq!(decode(0x2001_0004, 32), Some(Insn::Addi));
+        assert_eq!(
+            decode_model_ex(0x2001_0004, 32, true, FEAT_MIPS_R6),
+            Some(Insn::Beqzalc)
+        );
+        // R6 で BOVC/BEQC になる符号化は未実装のため None（現 r6 は大部分 illegal）。
+        assert_eq!(decode_model_ex(0x2043_0010, 32, true, FEAT_MIPS_R6), None);
         assert_eq!(decode(0xffff_ffff, 32), None);
     }
 
     #[test]
     fn cpu_models() {
         assert!(FEATURES.contains(&"mips1"));
+        assert!(FEATURES.contains(&"mips_r6"));
         assert!(MODELS.contains(&"r3000"));
+        assert!(MODELS.contains(&"r6"));
     }
 }
