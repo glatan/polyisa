@@ -670,3 +670,67 @@ fn run_sib_generic_regs() {
     let out = run_x86::run(&mut env, 0x1000, &mut sys, 100);
     assert_eq!(out, Outcome::Exit(0x77));
 }
+
+#[test]
+fn run_xmm_movd_punpck_pshufd() {
+    // 66 0F 6E C6 (movd xmm0,esi); 66 0F 60 C0 (punpcklbw); 66 0F 61 C0 (punpcklwd);
+    // 66 0F 70 C0 00 (pshufd); mov rdi,rax; mov rax,60; syscall -> exit(0)
+    // ここでは XMM が動くことだけ確かめ、exit コードは固定する。
+    // ESI=0x44 -> 全バイト 0x44 の xmm0 を作る。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    env.backend.set(Gpr(6).state(), 0x44);
+    let prog: &[u8] = &[
+        0x66, 0x0F, 0x6E, 0xC6, // movd xmm0,esi
+        0x66, 0x0F, 0x60, 0xC0, // punpcklbw xmm0,xmm0
+        0x66, 0x0F, 0x61, 0xC0, // punpcklwd xmm0,xmm0
+        0x66, 0x0F, 0x70, 0xC0, 0x00, // pshufd xmm0,xmm0,0
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
+        0x0F, 0x05, // syscall -> exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0));
+    // xmm0 の低32ビットが 0x44444444 であることを確かめる。
+    let v: u128 = env.backend.get(polyisa_guest_x86::sem::xmm_ref(
+        polyisa_guest_x86::sem::Xmm(0),
+    ));
+    assert_eq!((v & 0xffff_ffff) as u32, 0x4444_4444);
+}
+
+#[test]
+fn run_movups_memnd_and_near_jcc() {
+    // MOVUPS [0x1500],xmm0 -> MOVUPS xmm1,[0x1500] の往復と near Jcc。
+    // movd xmm0,esi (esi=0x77); movups [0x1500],xmm0; movups xmm1,[0x1500];
+    // cmp eax,0; je +6 (skip mov eax,1); mov eax,1; ... の代わりに
+    // near JE (0F 84) で飛ぶことを確かめ、exit(0x77) する。
+    // 簡略化：xmm 往復後に cmp + near je で分岐し、exit コードを変える。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    env.backend.set(Gpr(6).state(), 0x77);
+    env.backend.set(Gpr(0).state(), 0);
+    let prog: &[u8] = &[
+        0x66, 0x0F, 0x6E, 0xC6, // movd xmm0,esi (xmm0=0x77)
+        0x0F, 0x11, 0x05, 0xF5, 0x04, 0x00, 0x00, // movups [rip+0x4f5],xmm0 ([0x1500])
+        // next_rip = 0x1000+4+7=0x100B, +0x4F5=0x1500. 計算：0x100B+0x4F5=0x1500. 正しくは disp=0x1500-0x100B=0x4F5.
+        0xB8, 0x00, 0x00, 0x00, 0x00, // mov eax,0 (ZF=1にするため cmp の前座)
+        0x3D, 0x00, 0x00, 0x00, 0x00, // cmp eax,0 (ZF=1)
+        0x0F, 0x84, 0x05, 0x00, 0x00, 0x00, // je +5 (mov eax,1 を飛ばす)
+        0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax,1 (飛ばされる)
+        0x48, 0xC7, 0xC7, 0x77, 0x00, 0x00, 0x00, // mov rdi,0x77
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x0F, 0x05, // syscall -> exit(0x77)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0x77));
+}

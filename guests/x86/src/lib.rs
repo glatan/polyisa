@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! x86 最小のゲスト ISA。段階4の最小であり、可変長デコードを確かめる。
 //!
-//! i386 の106件を持つ。ModRM/SIB は base/index/scale 汎用形。
+//! i386 の163件を持つ。ModRM/SIB 汎用・XMM最小・near Jcc・MOVZX・CMOVB・ADD RIP等を含む。
 //! REX 接頭辞はデコード前に剥がし、Insは共有して64ビット意味論に切り替える。
 //! SYSCALL/CPUID は最小形、ModRM は register-direct（全組合せ）・mod=01+disp8・
 //! mod=10+disp32・絶対番地と SIB base+index 形（スケール付き、disp8/disp32・disp なしを含む）を持ち、
@@ -70,7 +70,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数116件。
-        assert_eq!(INSNS.len(), 116);
+        assert_eq!(INSNS.len(), 163);
     }
 
     #[test]
@@ -186,6 +186,53 @@ mod tests {
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x63C6, 16), Some(Insn::Movsxd));
         assert_eq!(decode(0x6300, 16), None);
+        // XMM 最小セット（66 接頭辞は実行側で剥がす）。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x0F6EC6, 24), Some(Insn::MovdXmm));
+        assert_eq!(decode(0x0F6E00, 24), None);
+        assert_eq!(decode(0x0F60C0, 24), Some(Insn::Punpcklbw));
+        assert_eq!(decode(0x0F61C0, 24), Some(Insn::Punpcklwd));
+        assert_eq!(decode(0x0F70C000, 32), Some(Insn::Pshufd));
+        assert_eq!(decode(0x0F7EC6, 24), Some(Insn::MovqR64Xmm));
+        assert_eq!(decode(0x0F10C0, 24), Some(Insn::MovupsLoadXmm));
+        assert_eq!(decode(0x0F1107, 24), Some(Insn::MovupsStoreMemnd));
+        assert_eq!(decode(0x0F114418F0, 40), Some(Insn::MovupsStoreSibd));
+        assert_eq!(decode(0x0F1007, 24), Some(Insn::MovupsLoadMemnd));
+        assert_eq!(decode(0x0F104310, 32), Some(Insn::MovupsLoadMem8));
+        assert_eq!(decode(0x0F114310, 32), Some(Insn::MovupsStoreMem8));
+        assert_eq!(decode(0x0F100433, 32), Some(Insn::MovupsLoadSib));
+        assert_eq!(decode(0x0F110433, 32), Some(Insn::MovupsStoreSib));
+        assert_eq!(decode(0x0F10443310, 40), Some(Insn::MovupsLoadSibd));
+        assert_eq!(decode(0x0F2907, 24), Some(Insn::MovapsStoreMemnd));
+        assert_eq!(decode(0x0F294310, 32), Some(Insn::MovapsStoreMem8));
+        assert_eq!(decode(0x0FE707, 24), Some(Insn::MovntdqStoreMemnd));
+        assert_eq!(decode(0x0FE74310, 32), Some(Insn::MovntdqStoreMem8));
+        assert_eq!(decode(0x0F1F0400, 32), Some(Insn::NoplSib));
+        assert_eq!(decode(0x0F1F440000, 40), Some(Insn::NoplSibd));
+        assert_eq!(decode(0x0F1F840000000000, 64), Some(Insn::NoplSibd32));
+        assert_eq!(decode(0x0F100578563412, 56), Some(Insn::MovupsLoadRip));
+        assert_eq!(decode(0x0F110578563412, 56), Some(Insn::MovupsStoreRip));
+        // near Jcc (0F 80-8F + disp32)。6バイト.
+        assert_eq!(decode(0x0F8200000000, 48), Some(Insn::JbRel32));
+        assert_eq!(decode(0x0F8700000000, 48), Some(Insn::JaRel32));
+        assert_eq!(decode(0x0F8400000000, 48), Some(Insn::JeRel32));
+        assert_eq!(decode(0x0F8500000000, 48), Some(Insn::JneRel32));
+        assert_eq!(decode(0x0F8000000000, 48), Some(Insn::JoRel32));
+        assert_eq!(decode(0x0F8F00000000, 48), Some(Insn::JgRel32));
+        // SUB r/m,imm32 (81 /5)。64ビット版は REX.W を付ける.
+        assert_eq!(decode(0x81EB00000000, 48), Some(Insn::SubRm32Imm));
+        // CMP r/m,imm32 (81 /7)。
+        assert_eq!(decode(0x81FB00000000, 48), Some(Insn::CmpRm32Imm));
+        // CMP [RIP+disp32],imm8 (83 3D + disp32 + imm8)。
+        assert_eq!(decode(0x833D0000000038, 56), Some(Insn::CmpRmImm8Rip));
+        // CMOVB r,r/m (0F 42 /r)。
+        assert_eq!(decode(0x0F42C2, 24), Some(Insn::Cmovb));
+        // ADD r,[RIP+disp32] (03 05 + disp32)。
+        assert_eq!(decode(0x030500000000, 48), Some(Insn::AddRRip));
+        // MOVZX r32,r/m16 (0F B7 95 + disp32)。
+        assert_eq!(decode(0x0FB79500000000, 56), Some(Insn::MovzxR32M16));
+        // C7 /0 m64,imm32 (RBP+disp32)。
+        assert_eq!(decode(0xC7850000000000000000, 80), Some(Insn::MovRmImmM32));
         // ループと近傍ジャンプ：LOOP rel8 (E2)、JMP rel32 (E9)。
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0xE2FE, 16), Some(Insn::Loop));

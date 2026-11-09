@@ -9,10 +9,10 @@ fn main() {
     println!("cargo::rerun-if-changed=spec/");
     println!("cargo::rerun-if-changed=build.rs");
     let model = build_model();
-    // 可変長：1〜7バイト（disp32 付きは 48/56 ビット）。
+    // 可変長：1〜10バイト（disp32+imm32 付きは 80 ビット）。
     for insn in &model.insns {
         assert!(
-            [8, 16, 24, 32, 40, 48, 56].contains(&insn.pattern.len()),
+            [8, 16, 24, 32, 40, 48, 56, 64, 80].contains(&insn.pattern.len()),
             "{}",
             insn.name
         );

@@ -1311,3 +1311,198 @@ fn sub_imm32_sets_flags() {
     assert_eq!(eax(&mut env), 0xFFFF_FFFF);
     assert_eq!(env.backend.get(sem::eflags_ref()) & 0x1, 1);
 }
+
+#[test]
+fn xmm_movd_punpck_pshufd() {
+    use polyisa_guest_x86::sem::Xmm;
+    // MOVD xmm0,esi (ESI=0x11223344) -> xmm0低32=0x11223344、上位0。
+    let mut env = env();
+    env.backend.set(Gpr(6).state(), 0x1122_3344);
+    env.step(|b| sem::movd_xmm_gpr32(b, Xmm(0), Gpr(6)))
+        .unwrap();
+    let lo: u128 = env.backend.get(sem::xmm_ref(Xmm(0)));
+    assert_eq!(lo, 0x1122_3344);
+    // PUNPCKLBW xmm0,xmm0 -> 低8バイトの交互挿し。0x44 0x44 0x33 0x33 ... の繰返し。
+    env.step(|b| sem::punpcklbw(b, Xmm(0), Xmm(0))).unwrap();
+    let v: u128 = env.backend.get(sem::xmm_ref(Xmm(0)));
+    // 低16ビット = 0x4444 (0x44,0x44)。
+    assert_eq!((v & 0xffff) as u16, 0x4444);
+    // PUNPCKLWD xmm0,xmm0 -> 低4ワードの交互挿し。
+    env.step(|b| sem::punpcklwd(b, Xmm(0), Xmm(0))).unwrap();
+    let w: u128 = env.backend.get(sem::xmm_ref(Xmm(0)));
+    assert_eq!((w & 0xffff_ffff) as u32, 0x4444_4444);
+    // PSHUFD xmm1,xmm0,0x00 -> 全dwordに dword0 を複写。
+    env.step(|b| sem::pshufd(b, Xmm(1), Xmm(0), 0x00)).unwrap();
+    let s: u128 = env.backend.get(sem::xmm_ref(Xmm(1)));
+    assert_eq!((s & 0xffff_ffff) as u32, (w & 0xffff_ffff) as u32);
+    assert_eq!(((s >> 32) & 0xffff_ffff) as u32, (w & 0xffff_ffff) as u32);
+    // MOVQ r64,xmm (REX.W)：下位64を GPR に移す。
+    env.step(|b| sem::movq_r64_xmm(b, Gpr(6), Xmm(1))).unwrap();
+    assert_eq!(env.backend.get(Gpr(6).state()), (s & 0xffff_ffff) as u32);
+}
+
+#[test]
+fn xmm_movups_mem_roundtrip() {
+    use polyisa_guest_x86::sem::Xmm;
+    // MOVUPS [base],xmm / xmm,[base] の往復。非整列でもよい。
+    let mut env = env();
+    env.map_rw(0, 1).unwrap();
+    env.backend.set(Gpr(3).state(), 0x100);
+    env.step(|b| {
+        let v = b.konst::<polyisa_sem::W128>(0x0102030405060708090a0b0c0d0e0f10u128);
+        b.set(sem::xmm_ref(Xmm(0)), v);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::movups_store_memnd(b, Xmm(0), Gpr(3)))
+        .unwrap();
+    env.step(|b| {
+        let z = b.konst::<polyisa_sem::W128>(0);
+        b.set(sem::xmm_ref(Xmm(0)), z);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::movups_load_memnd(b, Xmm(0), Gpr(3)))
+        .unwrap();
+    let v: u128 = env.backend.get(sem::xmm_ref(Xmm(0)));
+    assert_eq!(v, 0x0102030405060708090a0b0c0d0e0f10u128);
+    // disp8 形。
+    env.backend.set(Gpr(3).state(), 0x100);
+    env.step(|b| sem::movups_store_mem8(b, Xmm(0), Gpr(3), 0x10))
+        .unwrap();
+    env.step(|b| {
+        let z = b.konst::<polyisa_sem::W128>(0);
+        b.set(sem::xmm_ref(Xmm(0)), z);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::movups_load_mem8(b, Xmm(0), Gpr(3), 0x10))
+        .unwrap();
+    let w: u128 = env.backend.get(sem::xmm_ref(Xmm(0)));
+    assert_eq!(w, 0x0102030405060708090a0b0c0d0e0f10u128);
+}
+
+#[test]
+fn near_jcc_taken_and_not_taken() {
+    // JE rel32：ZF=1 で飛ぶ、ZF=0 で落ちる。
+    let mut env = env();
+    env.backend.set(sem::eflags_ref(), 0x40);
+    env.backend.set(sem::eip_ref(), 0x1000);
+    env.step(|b| sem::je_rel32(b, 0x1000, 0x20)).unwrap();
+    assert_eq!(env.backend.get(sem::eip_ref()), 0x1026);
+    env.backend.set(sem::eflags_ref(), 0x0);
+    env.backend.set(sem::eip_ref(), 0x1000);
+    env.step(|b| sem::je_rel32(b, 0x1000, 0x20)).unwrap();
+    assert_eq!(env.backend.get(sem::eip_ref()), 0x1000);
+    // JB rel32：CF=1 で飛ぶ。
+    env.backend.set(sem::eflags_ref(), 0x1);
+    env.backend.set(sem::eip_ref(), 0x2000);
+    env.step(|b| sem::jb_rel32(b, 0x2000, 0x10)).unwrap();
+    assert_eq!(env.backend.get(sem::eip_ref()), 0x2016);
+}
+
+#[test]
+fn cmp_imm32_sets_flags() {
+    // CMP RDX,0x80 (64ビット)：0x80-0x80=0 -> ZF=1。
+    let mut env = env();
+    env.step(|b| {
+        sem::write64(b, Gpr(2), 0x80);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::cmp_rm64_imm(b, Gpr(2), 0x80)).unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0x40);
+    // CMP EAX,1：0-1 -> CF=1。
+    env.backend.set(Gpr(0).state(), 0);
+    env.step(|b| sem::cmp_rm32_imm(b, Gpr(0), 1)).unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x1, 0x1);
+}
+
+#[test]
+fn cmovb_moves_on_carry() {
+    // CMOVB r32: CF=1 で mov、CF=0 で保持。
+    let mut env = env();
+    env.backend.set(Gpr(0).state(), 1);
+    env.backend.set(Gpr(1).state(), 2);
+    env.backend.set(sem::eflags_ref(), 0x1);
+    env.step(|b| sem::cmovb_r32(b, Gpr(0), Gpr(1))).unwrap();
+    assert_eq!(eax(&mut env), 2);
+    env.backend.set(Gpr(0).state(), 1);
+    env.backend.set(sem::eflags_ref(), 0x0);
+    env.step(|b| sem::cmovb_r32(b, Gpr(0), Gpr(1))).unwrap();
+    assert_eq!(eax(&mut env), 1);
+    // 64ビット版。
+    env.step(|b| {
+        sem::write64(b, Gpr(0), 10);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| {
+        sem::write64(b, Gpr(1), 20);
+        Ok(())
+    })
+    .unwrap();
+    env.backend.set(sem::eflags_ref(), 0x1);
+    env.step(|b| sem::cmovb_r64(b, Gpr(0), Gpr(1))).unwrap();
+    assert_eq!(env.backend.get(Gpr(0).state()), 20);
+}
+
+#[test]
+fn movzx_r32_m16_zero_extends() {
+    // MOVZX r32,m16: 0xFF80 -> 0x0000FF80。
+    let mut env = env();
+    env.map_rw(0, 1).unwrap();
+    env.backend.set(Gpr(5).state(), 0x100);
+    env.backend
+        .mem
+        .write(VirtAddr(0x100), &[0x80u8, 0xFF])
+        .unwrap();
+    env.step(|b| sem::movzx_r32_m16_mem32(b, Gpr(0), Gpr(5), 0))
+        .unwrap();
+    assert_eq!(eax(&mut env), 0xFF80);
+}
+
+#[test]
+fn add_rip_roundtrip() {
+    // ADD RAX,[RIP]: [0x1500]=5, RAX=10 -> 15。
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend.set(Gpr(0).state(), 10);
+    env.backend
+        .mem
+        .write(VirtAddr(0x1500), &[5u8, 0, 0, 0, 0, 0, 0, 0])
+        .unwrap();
+    // next_rip=0x1007, disp=0x1500-0x1007=0x4F9 で 0x1500 を指す.
+    env.step(|b| sem::add_r64_rip(b, Gpr(0), 0x1007, 0x4F9))
+        .unwrap();
+    assert_eq!(env.backend.get(Gpr(0).state()), 15);
+}
+
+#[test]
+fn mov_16bit_rip_roundtrip() {
+    // MOV [RIP],r16 / r16,[RIP] の往復.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend.set(Gpr(2).state(), 0x1234);
+    // next_rip=0x1007, disp で 0x1500 を指す.
+    env.step(|b| sem::mov_rip_r16(b, Gpr(2), 0x1007, 0x4F9))
+        .unwrap();
+    env.backend.set(Gpr(2).state(), 0);
+    env.step(|b| sem::mov_r16_rip(b, Gpr(2), 0x1007, 0x4F9))
+        .unwrap();
+    assert_eq!(env.backend.get(Gpr(2).state()) & 0xffff, 0x1234);
+}
+
+#[test]
+fn c7_mem32_stores() {
+    // C7 [RBP+disp32],imm32: [0x100+0x20]=0x11223344.
+    let mut env = env();
+    env.map_rw(0, 1).unwrap();
+    env.backend.set(Gpr(5).state(), 0x100);
+    env.step(|b| sem::mov_rm32_imm_mem32(b, Gpr(5), 0x20, 0x1122_3344))
+        .unwrap();
+    env.backend.set(Gpr(0).state(), 0);
+    env.step(|b| sem::mov_eax_mem32(b, Gpr(0), Gpr(5), 0x20))
+        .unwrap();
+    assert_eq!(eax(&mut env), 0x1122_3344);
+}

@@ -490,10 +490,32 @@ impl Backend for InterpBackend {
         acc: Access,
     ) -> Result<Self::V<W>, Self::Exit> {
         let bytes = (W::BITS / 8) as usize;
+        if bytes <= 8 {
+            return self
+                .mem
+                .read_value(VirtAddr(addr), bytes, acc)
+                .map(from_u64::<W>)
+                .map_err(|e| self.mem_exit(addr, e, acc));
+        }
+        // 128ビットのような幅広アクセスは生読みして u128 に組む。
+        let mut buf = vec![0u8; bytes];
         self.mem
-            .read_value(VirtAddr(addr), bytes, acc)
-            .map(from_u64::<W>)
-            .map_err(|e| self.mem_exit(addr, e, acc))
+            .read(VirtAddr(addr), &mut buf, acc)
+            .map_err(|e| self.mem_exit(addr, e, acc))?;
+        let mut v: u128 = 0;
+        match acc.endian {
+            polyisa_mem::Endian::Le => {
+                for (i, b) in buf.iter().enumerate() {
+                    v |= (*b as u128) << (8 * i);
+                }
+            }
+            polyisa_mem::Endian::Be => {
+                for b in buf.iter() {
+                    v = (v << 8) | (*b as u128);
+                }
+            }
+        }
+        Ok(from_u128::<W>(v))
     }
 
     fn store<W: Width>(
@@ -504,8 +526,29 @@ impl Backend for InterpBackend {
     ) -> Result<(), Self::Exit> {
         let bytes = (W::BITS / 8) as usize;
         self.break_reservation(addr, bytes as u32);
+        if bytes <= 8 {
+            return self
+                .mem
+                .write_value(VirtAddr(addr), to_u64::<W>(v), bytes, acc)
+                .map_err(|e| self.mem_exit(addr, e, acc));
+        }
+        // 128ビットのような幅広アクセスは u128 から生書きする。
+        let mut buf = vec![0u8; bytes];
+        let v128 = W::to_u128(v);
+        match acc.endian {
+            polyisa_mem::Endian::Le => {
+                for (i, b) in buf.iter_mut().enumerate() {
+                    *b = ((v128 >> (8 * i)) & 0xff) as u8;
+                }
+            }
+            polyisa_mem::Endian::Be => {
+                for (i, b) in buf.iter_mut().enumerate() {
+                    *b = ((v128 >> (8 * (bytes - 1 - i))) & 0xff) as u8;
+                }
+            }
+        }
         self.mem
-            .write_value(VirtAddr(addr), to_u64::<W>(v), bytes, acc)
+            .write(VirtAddr(addr), &buf)
             .map_err(|e| self.mem_exit(addr, e, acc))
     }
 

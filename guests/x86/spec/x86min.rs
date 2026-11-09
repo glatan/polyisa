@@ -215,6 +215,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("cmp_rm_imm8", "F1", "10000011 11111... ........", "cmp r/m, {imm}", "alu"),
         ("sub_rm32_imm", "F1", "10000001 11101... ................................", "sub r/m32, {imm}", "alu"),
         ("sub_rm64_imm", "F1", "01001000 10000001 11101... ................................", "sub r/m64, {imm}", "alu"),
+        ("cmp_rm32_imm", "F1", "10000001 11111... ................................", "cmp r/m32, {imm}", "alu"),
+        ("cmp_rm64_imm", "F1", "01001000 10000001 11111... ................................", "cmp r/m64, {imm}", "alu"),
         ("movsxd", "F1", "01100011 11......", "movsxd r, r/m32", "alu"),
         ("movsb", "F1", "10100100", "movsb", "load"),
         ("movsd", "F1", "10100101", "movsd", "load"),
@@ -222,6 +224,51 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("stosd", "F1", "10101011", "stosd", "store"),
         ("endbr64", "F1", "00001111 00011110 11111010", "endbr64", "alu"),
         ("nopl", "F1", "00001111 00011111 00000000", "nopl", "alu"),
+        // XMM 最小セット（66 接頭辞は実行側で剥がす。REX.W は dispatch で見る）。
+        // MOVD xmm,r32 (66 0F 6E /r)。reg-direct のみ。
+        ("movd_xmm", "F1", "00001111 01101110 11......", "movd xmm, r32", "load"),
+        // PUNPCKLBW xmm,xmm (66 0F 60 /r)。reg-direct のみ。
+        ("punpcklbw", "F1", "00001111 01100000 11......", "punpcklbw xmm, xmm", "alu"),
+        // PUNPCKLWD xmm,xmm (66 0F 61 /r)。reg-direct のみ。
+        ("punpcklwd", "F1", "00001111 01100001 11......", "punpcklwd xmm, xmm", "alu"),
+        // PSHUFD xmm,xmm,imm8 (66 0F 70 /r ib)。reg-direct のみ。
+        ("pshufd", "F1", "00001111 01110000 11...... ........", "pshufd xmm, xmm", "alu"),
+        // MOVQ r64,xmm (66 REX.W 0F 7E /r)。reg-direct のみ。
+        ("movq_r64_xmm", "F1", "00001111 01111110 11......", "movq r64, xmm", "load"),
+        // MOVUPS xmm,xmm / m128,xmm (0F 10 / 0F 11)。reg-direct は F1。
+        ("movups_load_xmm", "F1", "00001111 00010000 11......", "movups xmm, xmm", "load"),
+        ("movups_store_xmm", "F1", "00001111 00010001 11......", "movups xmm, xmm", "store"),
+        // near Jcc (0F 80-8F + disp32)。6バイト。条件は dispatch で分ける。
+        ("jo_rel32", "F1", "00001111 10000000 ................................", "jo rel32", "jump"),
+        ("jno_rel32", "F1", "00001111 10000001 ................................", "jno rel32", "jump"),
+        ("jb_rel32", "F1", "00001111 10000010 ................................", "jb rel32", "jump"),
+        ("jae_rel32", "F1", "00001111 10000011 ................................", "jae rel32", "jump"),
+        ("je_rel32", "F1", "00001111 10000100 ................................", "je rel32", "jump"),
+        ("jne_rel32", "F1", "00001111 10000101 ................................", "jne rel32", "jump"),
+        ("jbe_rel32", "F1", "00001111 10000110 ................................", "jbe rel32", "jump"),
+        ("ja_rel32", "F1", "00001111 10000111 ................................", "ja rel32", "jump"),
+        ("js_rel32", "F1", "00001111 10001000 ................................", "js rel32", "jump"),
+        ("jns_rel32", "F1", "00001111 10001001 ................................", "jns rel32", "jump"),
+        ("jp_rel32", "F1", "00001111 10001010 ................................", "jp rel32", "jump"),
+        ("jnp_rel32", "F1", "00001111 10001011 ................................", "jnp rel32", "jump"),
+        ("jl_rel32", "F1", "00001111 10001100 ................................", "jl rel32", "jump"),
+        ("jge_rel32", "F1", "00001111 10001101 ................................", "jge rel32", "jump"),
+        ("jle_rel32", "F1", "00001111 10001110 ................................", "jle rel32", "jump"),
+        ("jg_rel32", "F1", "00001111 10001111 ................................", "jg rel32", "jump"),
+        ("nopl_sibd32", "F1", "00001111 00011111 10000100 ........ ................................", "nopl [r/m+sib+disp32]", "alu"),
+        // MOVZX r32,r/m16 (0F B7 /r)。RBP+disp32 形。
+        ("movzx_r32_m16", "F1", "00001111 10110111 10010101 ................................", "movzx r32, r/m16", "load"),
+        // CMOVB r32/r64, r/m32/r/m64 (0F 42 /r)。reg-direct のみ。REX.W で切替.
+        ("cmovb", "F1", "00001111 01000010 11......", "cmovb r, r/m", "alu"),
+        // ADD r32, m32 (03 /r)。RIP/abs のみ。REX.W で64ビット.
+        ("add_r_rip", "F1", "00000011 00...101 ................................", "add r, [rip]", "alu"),
+        // CMP [RIP+disp32],imm8 (83 3D + disp32 + imm8)。64ビット RIP相対.
+        ("cmp_rm_imm8_rip", "F1", "10000011 00111101 ................................ ........", "cmp r/m, {imm}", "alu"),
+        // C7 /0 m64,imm32 (REX.W)。RBP+disp32 形 (mod=10 rm=101)。REX は剥がし済み.
+        ("mov_rm_imm_m32", "F1", "11000111 10000101 ................................ ................................", "mov r/m, {imm}", "alu"),
+        // MOVUPS RIP相対 (64ビットの mod=00 rm=101)。disp32 は実行側で RIP 加算する。
+        ("movups_load_rip", "F1", "00001111 00010000 00...101 ................................", "movups xmm, [rip]", "load"),
+        ("movups_store_rip", "F1", "00001111 00010001 00...101 ................................", "movups [rip], xmm", "store"),
     ];
     for (name, format, pattern, syntax, timing) in insns {
         m.insns.push(Insn {
@@ -428,6 +475,119 @@ pub fn build_model() -> polyisa_isadl::Model {
             "cmp r/m, {imm}",
             "alu",
         ),
+        (
+            "movups_load_memnd",
+            "MR",
+            "00001111 00010000 00......",
+            vec![wc("mr_rm", WhereOp::Ne, 4), wc("mr_rm", WhereOp::Ne, 5)],
+            "movups xmm, [r/m]",
+            "load",
+        ),
+        (
+            "movups_store_memnd",
+            "MR",
+            "00001111 00010001 00......",
+            vec![wc("mr_rm", WhereOp::Ne, 4), wc("mr_rm", WhereOp::Ne, 5)],
+            "movups [r/m], xmm",
+            "store",
+        ),
+        (
+            "movups_load_mem8",
+            "M8",
+            "00001111 00010000 01...... ........",
+            vec![wc("m8_rm", WhereOp::Ne, 4)],
+            "movups xmm, [r/m+disp8]",
+            "load",
+        ),
+        (
+            "movups_store_mem8",
+            "M8",
+            "00001111 00010001 01...... ........",
+            vec![wc("m8_rm", WhereOp::Ne, 4)],
+            "movups [r/m+disp8], xmm",
+            "store",
+        ),
+        (
+            "movups_load_sib",
+            "N8",
+            "00001111 00010000 00...100 ........",
+            vec![wc("n8_base", WhereOp::Ne, 5)],
+            "movups xmm, [r/m+sib]",
+            "load",
+        ),
+        (
+            "movups_store_sib",
+            "N8",
+            "00001111 00010001 00...100 ........",
+            vec![wc("n8_base", WhereOp::Ne, 5)],
+            "movups [r/m+sib], xmm",
+            "store",
+        ),
+        (
+            "movups_load_sibd",
+            "S8",
+            "00001111 00010000 01...100 ........ ........",
+            vec![],
+            "movups xmm, [r/m+sib+disp8]",
+            "load",
+        ),
+        (
+            "movups_store_sibd",
+            "S8",
+            "00001111 00010001 01...100 ........ ........",
+            vec![],
+            "movups [r/m+sib+disp8], xmm",
+            "store",
+        ),
+        (
+            "movntdq_store_memnd",
+            "MR",
+            "00001111 11100111 00......",
+            vec![wc("mr_rm", WhereOp::Ne, 4), wc("mr_rm", WhereOp::Ne, 5)],
+            "movntdq [r/m], xmm",
+            "store",
+        ),
+        (
+            "movntdq_store_mem8",
+            "M8",
+            "00001111 11100111 01...... ........",
+            vec![wc("m8_rm", WhereOp::Ne, 4)],
+            "movntdq [r/m+disp8], xmm",
+            "store",
+        ),
+        (
+            "movaps_store_memnd",
+            "MR",
+            "00001111 00101001 00......",
+            vec![wc("mr_rm", WhereOp::Ne, 4), wc("mr_rm", WhereOp::Ne, 5)],
+            "movaps [r/m], xmm",
+            "store",
+        ),
+        (
+            "movaps_store_mem8",
+            "M8",
+            "00001111 00101001 01...... ........",
+            vec![wc("m8_rm", WhereOp::Ne, 4)],
+            "movaps [r/m+disp8], xmm",
+            "store",
+        ),
+        (
+            "nopl_sib",
+            "N8",
+            "00001111 00011111 00...100 ........",
+            vec![wc("n8_base", WhereOp::Ne, 5)],
+            "nopl [r/m+sib]",
+            "alu",
+        ),
+        (
+            "nopl_sibd",
+            "S8",
+            "00001111 00011111 01...100 ........ ........",
+            vec![],
+            "nopl [r/m+sib+disp8]",
+            "alu",
+        ),
+
     ];
     for (name, format, pattern, wheres, syntax, timing) in mem {
         m.insns.push(Insn {
