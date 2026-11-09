@@ -243,6 +243,22 @@ fn and_or_xor_imm() {
 }
 
 #[test]
+fn shifts_mask_count() {
+    let mut env = env();
+    // 1 << 31 = 0x80000000。
+    env.backend.set(Gpr(0).state(), 1);
+    env.step(|b| sem::shl_eax(b, 31)).unwrap();
+    assert_eq!(eax(&mut env), 0x8000_0000);
+    // 0x80000000 >> 1 = 0x40000000（論理）。
+    env.step(|b| sem::shr_eax(b, 1)).unwrap();
+    assert_eq!(eax(&mut env), 0x4000_0000);
+    // カウントは下位5ビット：33 は 1 と同じ。
+    env.backend.set(Gpr(0).state(), 1);
+    env.step(|b| sem::shl_eax(b, 33)).unwrap();
+    assert_eq!(eax(&mut env), 2);
+}
+
+#[test]
 fn frame_setup_and_leave() {
     let mut env = env();
     env.map_rw(0, 1).unwrap();
