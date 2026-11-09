@@ -946,3 +946,43 @@ fn run_and_imm8_rip() {
         .unwrap();
     assert_eq!(u32::from_le_bytes(back), 0xFFFF_FFCF);
 }
+
+#[test]
+fn run_and_imm32_rip() {
+    // run 経由で 81 25 + disp32 + imm32 (ANDL [RIP],imm32) を回す。
+    // [0x1500]=0xFFFFFFFF に AND $0xFC3FFEF3 で [0x1500]=0xFC3FFEF3 になり、exit(0)。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    env.backend
+        .mem
+        .write(VirtAddr(0x1500), &[0xFFu8, 0xFF, 0xFF, 0xFF])
+        .unwrap();
+    let prog: &[u8] = &[
+        0x81, 0x25, 0xF6, 0x04, 0x00, 0x00, 0xF3, 0xFE, 0x3F,
+        0xFC, // andl $0xfc3ffef3,[rip+0x4f6] ([0x1500])
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
+        0x0F, 0x05, // syscall -> exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0));
+    let mut back = [0u8; 4];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x1500),
+            &mut back,
+            polyisa_mem::Access {
+                endian: polyisa_mem::Endian::Le,
+                align: polyisa_mem::Align::Unaligned,
+                kind: polyisa_mem::AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(u32::from_le_bytes(back), 0xFC3F_FEF3);
+}

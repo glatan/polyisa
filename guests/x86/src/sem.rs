@@ -3396,6 +3396,30 @@ pub fn or_rm32_abs<B: Backend>(b: &mut B, addr32: u32, imm: u32) -> Flow<B> {
     Ok(())
 }
 
+/// AND m32, imm32 RIP (81 25)。32ビット AND し、5 旗を更新する.
+pub fn and_rm32_rip<B: Backend>(b: &mut B, next_rip: u64, disp: i32, imm: u32) -> Flow<B> {
+    let base = b.konst::<W64>(next_rip);
+    let d = b.konst::<W64>(disp as i64 as u64);
+    let addr = b.add::<W64>(base, d);
+    let x: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let y = b.konst::<W32>(imm);
+    let v = b.and::<W32>(x, y);
+    b.store::<W32>(addr, v, DATA_WRITE)?;
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// AND [disp32], imm32 (32ビット絶対番地).
+pub fn and_rm32_abs<B: Backend>(b: &mut B, addr32: u32, imm: u32) -> Flow<B> {
+    let addr = b.konst::<W64>(addr32 as u64);
+    let x: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let y = b.konst::<W32>(imm);
+    let v = b.and::<W32>(x, y);
+    b.store::<W32>(addr, v, DATA_WRITE)?;
+    update_logic_flags(b, v);
+    Ok(())
+}
+
 /// ADD m32, imm32 RIP (81 05)。32ビット ADD し、6 旗を更新する.
 pub fn add_rm32_rip<B: Backend>(b: &mut B, next_rip: u64, disp: i32, imm: u32) -> Flow<B> {
     let base = b.konst::<W64>(next_rip);

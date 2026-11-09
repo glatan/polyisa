@@ -2336,3 +2336,30 @@ fn and_imm8_rip_clears_bits() {
         .unwrap();
     assert_eq!(u32::from_le_bytes(back), 0xFFFF_FFCF);
 }
+
+#[test]
+fn and_imm32_rip_clears_bits() {
+    // ANDL $0xFC3FFEF3,[RIP]: [0x1500]=0xFFFFFFFF & 0xFC3FFEF3.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1500), &[0xFFu8, 0xFF, 0xFF, 0xFF])
+        .unwrap();
+    env.step(|b| sem::and_rm32_rip(b, 0x100A, 0x4F6, 0xFC3F_FEF3))
+        .unwrap();
+    let mut back = [0u8; 4];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x1500),
+            &mut back,
+            Access {
+                endian: Endian::Le,
+                align: Align::Unaligned,
+                kind: AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(u32::from_le_bytes(back), 0xFC3F_FEF3);
+}

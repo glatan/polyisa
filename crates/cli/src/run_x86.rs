@@ -1472,6 +1472,15 @@ fn dispatch<B: Backend>(
                 sem::or_rm32_abs(b, ((word >> 32) as u32).swap_bytes(), imm32())
             }
         }
+        Insn::AndRm32Rip => {
+            // 81 25 + disp32 + imm32 (80b)。disp は (word>>32) 下位32 LE、imm は最下位32.
+            let disp = ((word >> 32) as u32).swap_bytes() as i32;
+            if is64 {
+                sem::and_rm32_rip(b, eip as u64 + nbytes, disp, imm32())
+            } else {
+                sem::and_rm32_abs(b, ((word >> 32) as u32).swap_bytes(), imm32())
+            }
+        }
         Insn::AddRm32Rip => {
             let disp = ((word >> 32) as u32).swap_bytes() as i32;
             if is64 {
