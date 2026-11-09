@@ -4783,3 +4783,34 @@ fn movd_xmm_rip_basic() {
     })
     .unwrap();
 }
+
+#[test]
+fn or_m32_r32_memnd_basic() {
+    // OR [RCX],ESI (09 31): [0x1500]=0x0F0F0F0F | 0xF0F0F0F0 = 0xFFFFFFFF.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend.set(Gpr(1).state(), 0x1500);
+    env.backend.set(Gpr(6).state(), 0xF0F0_F0F0);
+    env.backend
+        .mem
+        .write(VirtAddr(0x1500), &0x0F0F_0F0Fu32.to_le_bytes())
+        .unwrap();
+    env.step(|b| sem::or_m32_r32_memnd(b, Gpr(1), Gpr(6)))
+        .unwrap();
+    let mut back = [0u8; 4];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x1500),
+            &mut back,
+            Access {
+                endian: Endian::Le,
+                align: Align::Unaligned,
+                kind: AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(u32::from_le_bytes(back), 0xFFFF_FFFF);
+    // ZF=0 (結果非ゼロ).
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0);
+}

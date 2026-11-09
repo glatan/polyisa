@@ -3548,6 +3548,27 @@ fn dispatch<B: Backend>(
                 sem::or_rm32(b, rm(), reg())
             }
         }
+        Insn::OrM32R32Memnd => {
+            if rex_w {
+                sem::or_m64_r64_memnd(b, rm(), reg())
+            } else {
+                sem::or_m32_r32_memnd(b, rm(), reg())
+            }
+        }
+        Insn::OrM32R32Mem8 => {
+            if rex_w {
+                sem::or_m64_r64_mem8(b, rm(), disp8(), reg())
+            } else {
+                sem::or_m32_r32_mem8(b, rm(), disp8(), reg())
+            }
+        }
+        Insn::OrM32R32Mem32 => {
+            if rex_w {
+                sem::or_m64_r64_mem32(b, rm(), disp32(), reg())
+            } else {
+                sem::or_m32_r32_mem32(b, rm(), disp32(), reg())
+            }
+        }
         Insn::SubRm32 => {
             if rex_w {
                 sem::sub_rm64(b, rm(), reg())
