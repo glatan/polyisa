@@ -4056,9 +4056,9 @@ fn dispatch<B: Backend>(
         }
         Insn::CmoveM64 => {
             if rex_w {
-                sem::cmove_r64_mem32(b, reg0f_as_gpr(), Gpr(5 | ((rex & 1) << 3)), disp32())
+                sem::cmove_r64_mem32(b, reg0f_as_gpr(), rm0f(), disp32())
             } else {
-                sem::cmove_r32_mem32(b, reg0f_as_gpr(), Gpr(5 | ((rex & 1) << 3)), disp32())
+                sem::cmove_r32_mem32(b, reg0f_as_gpr(), rm0f(), disp32())
             }
         }
         Insn::CmoveRip => {
@@ -5107,6 +5107,7 @@ const EBADF: u32 = 9;
 const EACCES: u32 = 13;
 const ENOMEM: u32 = 12;
 const EINVAL: u32 = 22;
+const ERANGE: u32 = 34;
 
 fn neg_errno(n: u32) -> u32 {
     (n as i32).wrapping_neg() as u32
@@ -5643,6 +5644,45 @@ impl TrapHandler for CliLinux {
             || nr == polyisa_os_linux::i386::GETEGID && !self.is64
         {
             set64(env, Gpr(0), 0);
+            return TrapOutcome::Handled;
+        }
+        if nr == polyisa_os_linux::x86_64::GETCWD && self.is64
+            || nr == polyisa_os_linux::i386::GETCWD && !self.is64
+        {
+            // getcwd(buf, size)。ホスト cwd を返し、NUL 込み長さを返す.
+            let buf = get64(env, r_a);
+            let size = get64(env, r_b);
+            if buf == 0 || size == 0 {
+                set64(env, Gpr(0), neg(EINVAL));
+                return TrapOutcome::Handled;
+            }
+            let cwd = std::env::current_dir()
+                .ok()
+                .and_then(|p| p.into_os_string().into_string().ok())
+                .unwrap_or_else(|| "/".to_string());
+            let bytes = cwd.as_bytes();
+            let need = (bytes.len() as u64) + 1;
+            if size < need {
+                set64(env, Gpr(0), neg(ERANGE));
+                return TrapOutcome::Handled;
+            }
+            if env
+                .backend
+                .mem
+                .write(polyisa_mem::VirtAddr(buf), bytes)
+                .is_err()
+            {
+                return TrapOutcome::Unimplemented;
+            }
+            if env
+                .backend
+                .mem
+                .write(polyisa_mem::VirtAddr(buf + bytes.len() as u64), &[0u8])
+                .is_err()
+            {
+                return TrapOutcome::Unimplemented;
+            }
+            set64(env, Gpr(0), need);
             return TrapOutcome::Handled;
         }
         if nr == polyisa_os_linux::x86_64::MPROTECT && self.is64
@@ -6341,6 +6381,39 @@ mod tests {
             assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
             assert_eq!(get64(&mut env, Gpr(0)), 0);
         }
+    }
+
+    #[test]
+    fn getcwd_returns_host_cwd() {
+        use polyisa_os_linux::x86_64 as abi;
+        let mut sys = CliLinux::x86_64();
+        let mut env = bare();
+        set64(&mut env, Gpr(0), abi::GETCWD);
+        set64(&mut env, Gpr(7), 0x100);
+        set64(&mut env, Gpr(6), 0x100);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let n = get64(&mut env, Gpr(0)) as usize;
+        assert!(n > 1);
+        let mut back = vec![0u8; n];
+        env.backend
+            .mem
+            .read(
+                VirtAddr(0x100),
+                &mut back,
+                polyisa_mem::Access {
+                    endian: polyisa_mem::Endian::Le,
+                    align: polyisa_mem::Align::Unaligned,
+                    kind: polyisa_mem::AccessKind::DataRead,
+                },
+            )
+            .unwrap();
+        assert_eq!(back[n - 1], 0);
+        // ERANGE: サイズ不足.
+        set64(&mut env, Gpr(0), abi::GETCWD);
+        set64(&mut env, Gpr(7), 0x100);
+        set64(&mut env, Gpr(6), 1);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(ERANGE));
     }
 
     #[test]
