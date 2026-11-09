@@ -9069,3 +9069,113 @@ pub fn cmove_r32_abs<B: Backend>(b: &mut B, dst: Gpr, addr32: u32) -> Flow<B> {
     write(b, dst, v);
     Ok(())
 }
+
+/// CALL r/m64 [base+disp32] (FF /2 mod=10)。リターン先を積んで間接ジャンプ.
+pub fn call_r64_mem32<B: Backend>(b: &mut B, eip_next: u64, base: Gpr, disp: i32) -> Flow<B> {
+    let addr = eff_addr32(b, base, disp);
+    let target64: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let ret_addr = eip_next;
+    let rsp = read64(b, Gpr(4));
+    let eight = b.konst::<W64>(8);
+    let next = b.sub::<W64>(rsp, eight);
+    write64(b, Gpr(4), next);
+    let ret = b.konst::<W64>(ret_addr);
+    b.store::<W64>(next, ret, DATA_WRITE)?;
+    let t32: B::V<W32> = b.trunc::<W64, W32>(target64);
+    b.set(eip_ref(), t32);
+    b.jump(target64);
+    Ok(())
+}
+
+/// CALL r/m32 [base+disp32] (FF /2 mod=10、32ビット)。
+pub fn call_r32_mem32<B: Backend>(b: &mut B, eip_next: u32, base: Gpr, disp: i32) -> Flow<B> {
+    let addr = eff_addr32(b, base, disp);
+    let target: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let ret_addr = eip_next;
+    let esp = read(b, Gpr(4));
+    let four = b.konst::<W32>(4);
+    let next = b.sub::<W32>(esp, four);
+    b.set(esp_ref(), next);
+    let saddr = b.zext::<W32, W64>(next);
+    let ret = b.konst::<W32>(ret_addr);
+    b.store::<W32>(saddr, ret, DATA_WRITE)?;
+    b.set(eip_ref(), target);
+    let tj = b.zext::<W32, W64>(target);
+    b.jump(tj);
+    Ok(())
+}
+
+/// PUSH imm8 (6A ib、32ビット)。4バイト積む.
+pub fn push_imm8_32<B: Backend>(b: &mut B, imm: i8) -> Flow<B> {
+    let v = b.konst::<W32>(imm as i32 as u32);
+    let esp = read(b, Gpr(4));
+    let four = b.konst::<W32>(4);
+    let next = b.sub::<W32>(esp, four);
+    b.set(esp_ref(), next);
+    let addr = b.zext::<W32, W64>(next);
+    b.store::<W32>(addr, v, DATA_WRITE)?;
+    Ok(())
+}
+
+/// PUSH imm8 (6A ib、64ビット)。符号拡張して8バイト積む.
+pub fn push_imm8_64<B: Backend>(b: &mut B, imm: i8) -> Flow<B> {
+    let v = b.konst::<W64>(imm as i64 as u64);
+    let rsp = read64(b, Gpr(4));
+    let eight = b.konst::<W64>(8);
+    let next = b.sub::<W64>(rsp, eight);
+    write64(b, Gpr(4), next);
+    b.store::<W64>(next, v, DATA_WRITE)?;
+    Ok(())
+}
+
+/// PUSH imm32 (68 id、32ビット)。4バイト積む.
+pub fn push_imm32_32<B: Backend>(b: &mut B, imm: u32) -> Flow<B> {
+    let v = b.konst::<W32>(imm);
+    let esp = read(b, Gpr(4));
+    let four = b.konst::<W32>(4);
+    let next = b.sub::<W32>(esp, four);
+    b.set(esp_ref(), next);
+    let addr = b.zext::<W32, W64>(next);
+    b.store::<W32>(addr, v, DATA_WRITE)?;
+    Ok(())
+}
+
+/// PUSH imm32 (68 id、64ビット)。符号拡張して8バイト積む.
+pub fn push_imm32_64<B: Backend>(b: &mut B, imm: u32) -> Flow<B> {
+    let v = b.konst::<W64>(imm as i32 as i64 as u64);
+    let rsp = read64(b, Gpr(4));
+    let eight = b.konst::<W64>(8);
+    let next = b.sub::<W64>(rsp, eight);
+    write64(b, Gpr(4), next);
+    b.store::<W64>(next, v, DATA_WRITE)?;
+    Ok(())
+}
+
+/// CMPB m8,imm8 [base] (80 /7 mod=00)。8ビットを比較し、6 旗を更新する.
+pub fn cmp_rm8_imm_memnd<B: Backend>(b: &mut B, base: Gpr, imm: u8) -> Flow<B> {
+    use polyisa_sem::W8;
+    let addr = read64(b, base);
+    let x: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
+    let y = b.konst::<W8>(imm);
+    let v = b.sub::<W8>(x, y);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
+/// XCHG r32, RAX (91-97)。dst と RAX を交換.
+pub fn xchg_r32_ax<B: Backend>(b: &mut B, dst: Gpr) -> Flow<B> {
+    let a = read(b, dst);
+    let c = read(b, Gpr(0));
+    write(b, dst, c);
+    write(b, Gpr(0), a);
+    Ok(())
+}
+
+/// XCHG r64, RAX (REX.W + 91-97)。
+pub fn xchg_r64_ax<B: Backend>(b: &mut B, dst: Gpr) -> Flow<B> {
+    let a = read64(b, dst);
+    let c = read64(b, Gpr(0));
+    write64(b, dst, c);
+    write64(b, Gpr(0), a);
+    Ok(())
+}

@@ -4243,3 +4243,123 @@ fn rdsspq_is_nop() {
     env.step(sem::nop).unwrap();
     assert_eq!(env.backend.get(Gpr(0).state()), 0x1234);
 }
+
+#[test]
+fn call_r64_mem32_basic() {
+    // CALL [RBP-0x88] (FF /2 mod=10): RBP=0x200, [0x178]=0x3000.
+    // eip_next=0x1006 を積み、eip=0x3000 へ飛ぶ.
+    let mut env = env();
+    env.map_rw(0, 2).unwrap();
+    env.backend.set(Gpr(4).state(), 0x200);
+    env.backend.set(Gpr(5).state(), 0x200);
+    env.backend
+        .mem
+        .write(VirtAddr(0x178), &0x3000u64.to_le_bytes())
+        .unwrap();
+    env.step(|b| sem::call_r64_mem32(b, 0x1006, Gpr(5), -0x88))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::eip_ref()), 0x3000);
+    assert_eq!(env.backend.get(Gpr(4).state()), 0x1f8);
+    let mut ret = [0u8; 8];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x1f8),
+            &mut ret,
+            Access {
+                endian: Endian::Le,
+                align: Align::Unaligned,
+                kind: AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(u64::from_le_bytes(ret), 0x1006);
+}
+
+#[test]
+fn push_imm8_64_sign_extends() {
+    // PUSH imm8 -3 (6A FD): RSP=0x200 -> [0x1F8]=0xFFFF_FFFF_FFFF_FFFD, RSP=0x1F8.
+    let mut env = env();
+    env.map_rw(0, 2).unwrap();
+    env.backend.set(Gpr(4).state(), 0x200);
+    env.step(|b| sem::push_imm8_64(b, -3)).unwrap();
+    assert_eq!(env.backend.get(Gpr(4).state()), 0x1F8);
+    let mut back = [0u8; 8];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x1F8),
+            &mut back,
+            Access {
+                endian: Endian::Le,
+                align: Align::Unaligned,
+                kind: AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(u64::from_le_bytes(back), 0xFFFF_FFFF_FFFF_FFFD);
+}
+
+#[test]
+fn push_imm32_64_sign_extends() {
+    // PUSH imm32 0x7F00 (68): [RSP-8]=0x7F00.
+    let mut env = env();
+    env.map_rw(0, 2).unwrap();
+    env.backend.set(Gpr(4).state(), 0x200);
+    env.step(|b| sem::push_imm32_64(b, 0x7F00)).unwrap();
+    assert_eq!(env.backend.get(Gpr(4).state()), 0x1F8);
+    let mut back = [0u8; 8];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x1F8),
+            &mut back,
+            Access {
+                endian: Endian::Le,
+                align: Align::Unaligned,
+                kind: AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(u64::from_le_bytes(back), 0x7F00);
+}
+
+#[test]
+fn cmp_rm8_imm_memnd_sets_flags() {
+    // CMPB $0x2D,[RDI] (80 /7 mod=00): [0x1500]=0x2D -> ZF=1.
+    // [0x1500]=0x2E -> ZF=0.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend.set(Gpr(7).state(), 0x1500);
+    env.backend.mem.write(VirtAddr(0x1500), &[0x2Du8]).unwrap();
+    env.step(|b| sem::cmp_rm8_imm_memnd(b, Gpr(7), 0x2D))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0x40);
+    env.backend.mem.write(VirtAddr(0x1500), &[0x2Eu8]).unwrap();
+    env.step(|b| sem::cmp_rm8_imm_memnd(b, Gpr(7), 0x2D))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0);
+}
+
+#[test]
+fn xchg_r64_ax_swaps() {
+    // XCHG RDX,RAX (REX.W 92): RAX=0x11, RDX=0x22 -> 交換.
+    let mut env = env();
+    env.step(|b| {
+        sem::write64(b, Gpr(0), 0x11);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| {
+        sem::write64(b, Gpr(2), 0x22);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::xchg_r64_ax(b, Gpr(2))).unwrap();
+    env.step(|b| {
+        assert_eq!(sem::read64(b, Gpr(0)), 0x22);
+        assert_eq!(sem::read64(b, Gpr(2)), 0x11);
+        Ok(())
+    })
+    .unwrap();
+}

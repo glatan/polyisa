@@ -167,6 +167,18 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("push_ebp", "F1", "01010101", "push ebp", "store"),
         ("push_esi", "F1", "01010110", "push esi", "store"),
         ("push_edi", "F1", "01010111", "push edi", "store"),
+        // PUSH imm32 (68 id)。64ビットでは符号拡張して8バイト積む.
+        ("push_imm32", "F1", "01101000 ................................", "push {imm}", "store"),
+        // PUSH imm8 (6A ib)。64ビットでは符号拡張して8バイト積む.
+        ("push_imm8", "F1", "01101010 ........", "push {imm}", "store"),
+        // XCHG r32/r64, RAX (90-97)。90 は NOP と共有のため 91-97 のみ。REX.B で拡張、REX.W で64bit.
+        ("xchg_rcx_ax", "F1", "10010001", "xchg rcx, rax", "alu"),
+        ("xchg_rdx_ax", "F1", "10010010", "xchg rdx, rax", "alu"),
+        ("xchg_rbx_ax", "F1", "10010011", "xchg rbx, rax", "alu"),
+        ("xchg_rsp_ax", "F1", "10010100", "xchg rsp, rax", "alu"),
+        ("xchg_rbp_ax", "F1", "10010101", "xchg rbp, rax", "alu"),
+        ("xchg_rsi_ax", "F1", "10010110", "xchg rsi, rax", "alu"),
+        ("xchg_rdi_ax", "F1", "10010111", "xchg rdi, rax", "alu"),
         ("pop_eax", "F1", "01011000", "pop eax", "load"),
         ("pop_ecx", "F1", "01011001", "pop ecx", "load"),
         ("pop_edx", "F1", "01011010", "pop edx", "load"),
@@ -343,6 +355,10 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("sub_r_rip", "F1", "00101011 00...101 ................................", "sub r32, m32", "alu"),
         // CALL r/m64 mod=01 [base+disp8] (FF /2)。64ビット間接コール.
         ("call_r_mem8", "M8", "11111111 01010... ........", "call r/m64", "jump"),
+        // CALL r/m64 mod=00 [base] (FF /2)。SIBなし.
+        ("call_r_memnd", "MR", "11111111 01000...", "call r/m64", "jump"),
+        // CALL r/m64 mod=10 [base+disp32] (FF /2)。SIBなし.
+        ("call_r_mem32", "M32", "11111111 10010... ................................", "call r/m64", "jump"),
         // CALL [base+index*scale] (FF /2 SIB mod=00)。64ビット間接コール.
         ("call_r_sib", "N8", "11111111 00010100 ........", "call r/m64", "jump"),
         // XCHG r32,r/m32 (87 /r)。reg-direct・mod=00/01/10/RIP (SIBなし).
@@ -1258,6 +1274,15 @@ pub fn build_model() -> polyisa_isadl::Model {
             "S8",
             "10000000 01111... ........ ........",
             vec![wc("s8_rm", WhereOp::Ne, 4)],
+            "cmp r/m8, {imm}",
+            "alu",
+        ),
+        // CMPB m8,imm8 mod=00 [base] (80 /7)。SIBなし.
+        (
+            "cmp_rm8_imm_memnd",
+            "F1",
+            "10000000 00111... ........",
+            vec![],
             "cmp r/m8, {imm}",
             "alu",
         ),

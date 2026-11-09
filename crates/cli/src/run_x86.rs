@@ -69,7 +69,9 @@ fn fetch_len(
     rex_w: bool,
 ) -> Option<u64> {
     match first {
-        0x90 | 0x40..=0x4F | 0x50..=0x5F | 0xC3 | 0xC9 | 0x98 => Some(1),
+        0x90 | 0x91..=0x97 | 0x40..=0x4F | 0x50..=0x5F | 0xC3 | 0xC9 | 0x98 => Some(1),
+        0x6A => Some(2),
+        0x68 => Some(5),
         0xEB | 0x70 | 0x71 | 0x72 | 0x73 | 0x74 | 0x75 | 0x76 | 0x77 | 0x78 | 0x79 | 0x7A
         | 0x7B | 0x7C | 0x7D | 0x7E | 0x7F | 0xE2 | 0xCD | 0x3C => Some(2),
         0x05 | 0x2D | 0x3D | 0xE8 | 0xE9 | 0x25 | 0x0D | 0x35 | 0xA9 => Some(5),
@@ -515,6 +517,9 @@ fn fetch_len(
             } else if md == 0 && reg == 1 && rm != 4 && rm != 5 {
                 // mod=00 [base],imm8 (3B) の /1 ORB のみ (SIBなし).
                 Some(3)
+            } else if md == 0 && reg == 7 && rm != 4 && rm != 5 {
+                // mod=00 [base],imm8 (3B) の /7 CMPB のみ (SIBなし).
+                Some(3)
             } else {
                 None
             }
@@ -955,6 +960,13 @@ pub fn run_mode(
                 head[0],
                 0x8B | 0x89
                     | 0x90
+                    | 0x91
+                    | 0x92
+                    | 0x93
+                    | 0x94
+                    | 0x95
+                    | 0x96
+                    | 0x97
                     | 0x01
                     | 0x03
                     | 0x0B
@@ -1004,6 +1016,8 @@ pub fn run_mode(
                     | 0xAA
                     | 0xAB
                     | 0xB8..=0xBF
+                    | 0x6A
+                    | 0x68
                     | 0x50..=0x5F | 0xE8 | 0xE9
             )
         {
@@ -1842,6 +1856,36 @@ fn dispatch<B: Backend>(
                 sem::push_reg(b, push_r())
             }
         }
+        Insn::PushImm8 => {
+            let imm = (word & 0xff) as u8 as i8;
+            if is64 {
+                sem::push_imm8_64(b, imm)
+            } else {
+                sem::push_imm8_32(b, imm)
+            }
+        }
+        Insn::PushImm32 => {
+            if is64 {
+                sem::push_imm32_64(b, imm32())
+            } else {
+                sem::push_imm32_32(b, imm32())
+            }
+        }
+        Insn::XchgRcxAx
+        | Insn::XchgRdxAx
+        | Insn::XchgRbxAx
+        | Insn::XchgRspAx
+        | Insn::XchgRbpAx
+        | Insn::XchgRsiAx
+        | Insn::XchgRdiAx => {
+            // 91-97: dst は opcode 下3ビット + REX.B、相手は RAX.
+            let dst = Gpr(((word as u8) & 7) | ((rex & 1) << 3));
+            if rex_w {
+                sem::xchg_r64_ax(b, dst)
+            } else {
+                sem::xchg_r32_ax(b, dst)
+            }
+        }
         Insn::PopEax
         | Insn::PopEcx
         | Insn::PopEdx
@@ -1869,6 +1913,22 @@ fn dispatch<B: Backend>(
                 sem::call_r64_mem8(b, eip as u64 + nbytes, rm(), disp8())
             } else {
                 sem::call_r32_mem8(b, eip.wrapping_add(nbytes as u32), rm(), disp8())
+            }
+        }
+        Insn::CallRMemnd => {
+            // FF /2 mod=00 [base] 間接CALL.
+            if is64 {
+                sem::call_r64_memnd(b, eip as u64 + nbytes, rm())
+            } else {
+                sem::call_r32_memnd(b, eip.wrapping_add(nbytes as u32), rm())
+            }
+        }
+        Insn::CallRMem32 => {
+            // FF /2 mod=10 [base+disp32] 間接CALL.
+            if is64 {
+                sem::call_r64_mem32(b, eip as u64 + nbytes, rm(), disp32())
+            } else {
+                sem::call_r32_mem32(b, eip.wrapping_add(nbytes as u32), rm(), disp32())
             }
         }
         Insn::CallRSib => {
@@ -2034,6 +2094,11 @@ fn dispatch<B: Backend>(
             let d8 = ((word >> 8) & 0xff) as u8 as i8;
             let imm = (word & 0xff) as u8;
             sem::cmp_rm8_imm_mem8(b, rm(), d8, imm)
+        }
+        Insn::CmpRm8ImmMemnd => {
+            // 80 /7 mod=00 [base],imm8 (24b)。imm は最下位8.
+            let imm = (word & 0xff) as u8;
+            sem::cmp_rm8_imm_memnd(b, rm(), imm)
         }
         Insn::MovRm8ImmMem8 => {
             // C6 /0 mod=01 [base+disp8],imm8 (32b)。disp は (word>>8) 下位8、imm は最下位8.
@@ -4180,6 +4245,13 @@ fn dispatch<B: Backend>(
             | Insn::XchgRMem32
             | Insn::XchgRRip => Some(reg()),
             Insn::MovR32Imm => Some(Gpr((((word >> 32) & 7) as u8) | ((rex & 1) << 3))),
+            Insn::XchgRcxAx
+            | Insn::XchgRdxAx
+            | Insn::XchgRbxAx
+            | Insn::XchgRspAx
+            | Insn::XchgRbpAx
+            | Insn::XchgRsiAx
+            | Insn::XchgRdiAx => Some(Gpr(((word as u8) & 7) | ((rex & 1) << 3))),
             Insn::LeaM8
             | Insn::LeaM32
             | Insn::LeaMnd
