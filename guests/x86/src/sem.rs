@@ -311,6 +311,32 @@ pub fn esp_ref() -> StateRef<W32> {
     Gpr(4).state()
 }
 
+/// LOOP rel8。ECX を 1 減じ、0 でなければ eip+2+disp に飛ぶ。
+/// busybox の繰り返しに使う最小形である。EFLAGS には影響しない（SDM 通り）。
+pub fn loop_rel8<B: Backend>(b: &mut B, eip: u32, disp: i8) -> Flow<B> {
+    let ecx = read(b, Gpr(1));
+    let one = b.konst::<W32>(1);
+    let next = b.sub::<W32>(ecx, one);
+    write(b, Gpr(1), next);
+    let zero = b.konst::<W32>(0);
+    let again = b.cmp::<W32>(Cmp::Ne, next, zero);
+    let target = eip.wrapping_add(2).wrapping_add(disp as i32 as u32);
+    let t = b.konst::<W32>(target);
+    b.if_then(again, |b| {
+        b.set(eip_ref(), t);
+        Ok(())
+    })?;
+    Ok(())
+}
+
+/// JMP rel32。eip+5+disp32 に飛ぶ。
+pub fn jmp_rel32<B: Backend>(b: &mut B, eip: u32, disp: i32) -> Flow<B> {
+    let target = eip.wrapping_add(5).wrapping_add(disp as u32);
+    let t = b.konst::<W32>(target);
+    b.set(eip_ref(), t);
+    Ok(())
+}
+
 /// JMP rel8。eip からの相対（呼び出し側が eip+2 基準の完成形を渡す）。
 pub fn jmp8<B: Backend>(b: &mut B, target: u32) -> Flow<B> {
     let t = b.konst::<W32>(target);
