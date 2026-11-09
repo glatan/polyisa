@@ -2166,7 +2166,7 @@ pub fn run_image_x86_64(
     bytes: &[u8],
     prog: &str,
     argv: &[String],
-    sys: &mut impl TrapHandler,
+    sys: &mut CliLinux,
 ) -> Result<u64, String> {
     use polyisa_guest_x86::sem::Gpr;
     use polyisa_mem::{PAGE_SIZE, Perms};
@@ -2188,6 +2188,15 @@ pub fn run_image_x86_64(
     let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_x86::CpuState>());
     polyisa_loader::elf::load_segments(bytes, &phdrs, &mut env.backend.mem)
         .map_err(|e| format!("load: {e:?}"))?;
+    // ヒープの初期ブレークは像末尾（PT_LOAD の最大到達）。brk(0) の問い合わせに答える。
+    let mut image_end = 0u64;
+    for ph in &phdrs {
+        if ph.seg_type != 1 {
+            continue;
+        }
+        image_end = image_end.max(ph.vaddr.saturating_add(ph.memsz));
+    }
+    sys.init_brk(image_end);
     let top = 0x7fff_0000u64;
     let mut arg_bytes = vec![prog.as_bytes().to_vec()];
     for a in argv {
@@ -2253,6 +2262,9 @@ pub struct CliLinux {
     reported: Vec<u64>,
     fds: Vec<Option<std::fs::File>>,
     is64: bool,
+    /// プログラムブレーク（ヒープ末尾）。0 は未初期化。
+    /// `run_image_x86_64` がロード後に像末尾へ進める。
+    heap_end: u64,
 }
 
 impl CliLinux {
@@ -2267,6 +2279,13 @@ impl CliLinux {
             is64: true,
             ..Self::default()
         }
+    }
+
+    /// プログラムブレークの初期値を置く。像末尾をページ境界に切り上げる。
+    /// `run_image_x86_64` がセグメント配置の直後に呼ぶ。
+    pub fn init_brk(&mut self, image_end: u64) {
+        use polyisa_mem::PAGE_SIZE;
+        self.heap_end = image_end.next_multiple_of(PAGE_SIZE);
     }
 }
 
@@ -2327,7 +2346,7 @@ impl TrapHandler for CliLinux {
         } else {
             (Gpr(3), Gpr(1), Gpr(2))
         };
-        let (n_openat, n_read, n_close, n_write, n_exit, n_exit_group) = if self.is64 {
+        let (n_openat, n_read, n_close, n_write, n_exit, n_exit_group, n_brk) = if self.is64 {
             use polyisa_os_linux::x86_64 as abi;
             (
                 abi::OPENAT,
@@ -2336,6 +2355,7 @@ impl TrapHandler for CliLinux {
                 abi::WRITE,
                 abi::EXIT,
                 abi::EXIT_GROUP,
+                abi::BRK,
             )
         } else {
             use polyisa_os_linux::i386 as abi;
@@ -2346,6 +2366,7 @@ impl TrapHandler for CliLinux {
                 abi::WRITE,
                 abi::EXIT,
                 abi::EXIT_GROUP,
+                abi::BRK,
             )
         };
         let guest_abi = if self.is64 {
@@ -2496,6 +2517,47 @@ impl TrapHandler for CliLinux {
         }
         if nr == n_exit || nr == n_exit_group {
             return TrapOutcome::Exit(get64(env, r_a) as u32);
+        }
+        if nr == n_brk {
+            use polyisa_mem::{PAGE_SIZE, Perms, VirtAddr};
+            let addr = get64(env, r_a);
+            // 未初期化の非常口：像末尾を知らないため要求値を切り上げて使う。
+            // run_image 経由では init_brk 済みのため通常は通らない。
+            if self.heap_end == 0 {
+                self.heap_end = addr.next_multiple_of(PAGE_SIZE);
+                set64(env, Gpr(0), self.heap_end);
+                return TrapOutcome::Handled;
+            }
+            if addr == 0 {
+                // brk(0) は問い合わせであり現ブレークを返す。
+                set64(env, Gpr(0), self.heap_end);
+                return TrapOutcome::Handled;
+            }
+            let aligned = addr.next_multiple_of(PAGE_SIZE);
+            if aligned > self.heap_end {
+                // 拡張しすぎは失敗扱い（現ブレークを返す）。
+                const MAX_GROW: u64 = 256 * 1024 * 1024;
+                if aligned - self.heap_end > MAX_GROW {
+                    set64(env, Gpr(0), self.heap_end);
+                    return TrapOutcome::Handled;
+                }
+                let count = (aligned - self.heap_end) / PAGE_SIZE;
+                if env
+                    .backend
+                    .mem
+                    .map(VirtAddr(self.heap_end), count, Perms::RW)
+                    .is_err()
+                {
+                    set64(env, Gpr(0), self.heap_end);
+                    return TrapOutcome::Handled;
+                }
+                self.heap_end = aligned;
+            } else {
+                // 縮小は受け付ける（写像は残す）。
+                self.heap_end = aligned;
+            }
+            set64(env, Gpr(0), self.heap_end);
+            return TrapOutcome::Handled;
         }
         if !self.reported.contains(&nr) {
             self.reported.push(nr);
@@ -2665,5 +2727,44 @@ mod tests {
         ));
         assert_eq!(env.backend.get(Gpr(0).state()), neg_errno(EBADF));
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn brk_query_extend_shrink() {
+        use polyisa_os_linux::x86_64 as abi;
+        let mut sys = CliLinux::x86_64();
+        sys.init_brk(0x1234);
+        assert_eq!(sys.heap_end, 0x2000);
+        let mut env = bare();
+        // brk(0) は問い合わせであり現ブレークを返す。
+        set64(&mut env, Gpr(0), abi::BRK);
+        set64(&mut env, Gpr(7), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0x2000);
+        // brk(0x2100) は 0x3000 まで拡張する。
+        set64(&mut env, Gpr(0), abi::BRK);
+        set64(&mut env, Gpr(7), 0x2100);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0x3000);
+        assert_eq!(sys.heap_end, 0x3000);
+        // 拡張域は零初期化され、読み書きできる。
+        env.backend.mem.write(VirtAddr(0x2FF0), b"hi").unwrap();
+        let mut back = [0u8; 2];
+        env.backend
+            .mem
+            .read(VirtAddr(0x2FF0), &mut back, data_access())
+            .unwrap();
+        assert_eq!(&back, b"hi");
+        // 縮小は受け付ける。
+        set64(&mut env, Gpr(0), abi::BRK);
+        set64(&mut env, Gpr(7), 0x2000);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0x2000);
+        // 拡張しすぎは失敗扱い（現ブレークを返す）。
+        set64(&mut env, Gpr(0), abi::BRK);
+        set64(&mut env, Gpr(7), 0x2000 + 256 * 1024 * 1024 + 1);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0x2000);
+        assert_eq!(sys.heap_end, 0x2000);
     }
 }
