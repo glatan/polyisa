@@ -354,11 +354,60 @@ pub fn run_elf_x86(path: &str, argv: &[String]) -> Result<u64, String> {
     run_image_x86(&bytes, path, argv, &mut sys)
 }
 
-/// `cli run` の x86 用 ecall 処理。write（fd 1/2）と exit/exit_group を受け、
-/// ほかは未対応として報告する。
+/// ゲストの NUL 終端文字列を読む。上限を超えるか読めなければ None。
+fn guest_c_string(env: &mut BareEnv, addr: u64) -> Option<String> {
+    let acc = polyisa_mem::Access {
+        endian: polyisa_mem::Endian::Le,
+        align: polyisa_mem::Align::Unaligned,
+        kind: polyisa_mem::AccessKind::DataRead,
+    };
+    let mut buf = vec![0u8; 4096];
+    env.backend.mem.read(VirtAddr(addr), &mut buf, acc).ok()?;
+    let end = buf.iter().position(|&b| b == 0)?;
+    String::from_utf8(buf[..end].to_vec()).ok()
+}
+
+/// `cli run` の x86 用 ecall 処理。openat/read/write/close と
+/// exit/exit_group をホストに直結して受け、ほかは未対応として報告する。
+///
+/// 試作の合意事項：仮想カーネル・VFS・ゲストルートの適用は後の段階である。
+/// ここではホストのファイルに直接触る（裸実行の延長）。パスの隔離はしないので、
+/// 信頼できないゲストバイナリには使わないこと。絶対パスの O_RDONLY のみ受け付け、
+/// 1 回の転送は 64 KiB ずつに区切る。
 #[derive(Default)]
 pub struct CliX86 {
     reported: Vec<u64>,
+    fds: Vec<Option<std::fs::File>>,
+}
+
+/// i386 の openat の引数。dirfd が -100 (AT_FDCWD) のときだけ受け付ける。
+const AT_FDCWD_U32: u32 = 0xffff_ff9c;
+
+/// O_CLOEXEC の値。無視してよい旗としてだけ扱う。
+/// Ref: SRC-LINUX (7.3).
+const O_CLOEXEC: u32 = 0x80000;
+
+/// 1 回の read/write でホストに確保する上限（バイト）。ゲスト指定の
+/// 長さが大きくても、この刻みで分割して転送する。
+const IO_CHUNK: usize = 65536;
+
+/// Linux 汎用の errno 番号の一部。負数で返す。
+/// Ref: SRC-LINUX (7.3).
+const ENOENT: u32 = 2;
+const EBADF: u32 = 9;
+const EACCES: u32 = 13;
+const EINVAL: u32 = 22;
+
+fn neg_errno(n: u32) -> u32 {
+    (n as i32).wrapping_neg() as u32
+}
+
+fn data_access() -> polyisa_mem::Access {
+    polyisa_mem::Access {
+        endian: polyisa_mem::Endian::Le,
+        align: polyisa_mem::Align::Unaligned,
+        kind: polyisa_mem::AccessKind::DataRead,
+    }
 }
 
 impl TrapHandler for CliX86 {
@@ -367,25 +416,134 @@ impl TrapHandler for CliX86 {
         // INT 0x80 (code 0x80) と SYSCALL (code 0) のどちらも番号は EAX にある。
         let _ = code;
         let nr = env.backend.get(Gpr(0).state()) as u64;
+        if nr == polyisa_os_linux::i386::OPENAT {
+            let dirfd = env.backend.get(Gpr(3).state());
+            let path_addr = env.backend.get(Gpr(1).state()) as u64;
+            let flags = env.backend.get(Gpr(2).state());
+            if dirfd != AT_FDCWD_U32 {
+                env.backend.set(Gpr(0).state(), neg_errno(EINVAL));
+                return TrapOutcome::Handled;
+            }
+            // O_RDONLY のみ受け付ける（O_CLOEXEC は無視する）。
+            if flags & !O_CLOEXEC != 0 {
+                env.backend.set(Gpr(0).state(), neg_errno(EINVAL));
+                return TrapOutcome::Handled;
+            }
+            let path = match guest_c_string(env, path_addr) {
+                Some(p) => p,
+                None => return TrapOutcome::Unimplemented,
+            };
+            if !path.starts_with('/') {
+                env.backend.set(Gpr(0).state(), neg_errno(EINVAL));
+                return TrapOutcome::Handled;
+            }
+            return match std::fs::File::open(&path) {
+                Ok(f) => {
+                    self.fds.push(Some(f));
+                    env.backend
+                        .set(Gpr(0).state(), (3 + self.fds.len() - 1) as u32);
+                    TrapOutcome::Handled
+                }
+                Err(e) => {
+                    let no = match e.kind() {
+                        std::io::ErrorKind::NotFound => ENOENT,
+                        std::io::ErrorKind::PermissionDenied => EACCES,
+                        _ => EINVAL,
+                    };
+                    env.backend.set(Gpr(0).state(), neg_errno(no));
+                    TrapOutcome::Handled
+                }
+            };
+        }
+        if nr == polyisa_os_linux::i386::READ {
+            let fd = env.backend.get(Gpr(3).state());
+            let buf = env.backend.get(Gpr(1).state()) as u64;
+            let mut left = env.backend.get(Gpr(2).state()) as usize;
+            let slot = fd.wrapping_sub(3) as usize;
+            let Some(slot) = self.fds.get_mut(slot).and_then(|f| f.as_mut()) else {
+                // fd 0 (stdin) は空読みとして 0 を返す。
+                if fd == 0 {
+                    env.backend.set(Gpr(0).state(), 0);
+                    return TrapOutcome::Handled;
+                }
+                env.backend.set(Gpr(0).state(), neg_errno(EBADF));
+                return TrapOutcome::Handled;
+            };
+            let mut done = 0usize;
+            let mut chunk = vec![0u8; IO_CHUNK];
+            while left > 0 {
+                let take = left.min(IO_CHUNK);
+                let n = match std::io::Read::read(slot, &mut chunk[..take]) {
+                    Ok(0) => break,
+                    Ok(n) => n,
+                    Err(_) => break,
+                };
+                if env
+                    .backend
+                    .mem
+                    .write(VirtAddr(buf + done as u64), &chunk[..n])
+                    .is_err()
+                {
+                    return TrapOutcome::Unimplemented;
+                }
+                done += n;
+                left -= n;
+                if n < take {
+                    break;
+                }
+            }
+            env.backend.set(Gpr(0).state(), done as u32);
+            return TrapOutcome::Handled;
+        }
+        if nr == polyisa_os_linux::i386::CLOSE {
+            let fd = env.backend.get(Gpr(3).state());
+            let slot = fd.wrapping_sub(3) as usize;
+            return match self.fds.get_mut(slot) {
+                Some(f) if f.is_some() => {
+                    *f = None;
+                    env.backend.set(Gpr(0).state(), 0);
+                    TrapOutcome::Handled
+                }
+                _ => {
+                    env.backend.set(Gpr(0).state(), neg_errno(EBADF));
+                    TrapOutcome::Handled
+                }
+            };
+        }
         if nr == polyisa_os_linux::i386::WRITE {
             let fd = env.backend.get(Gpr(3).state());
             let buf = env.backend.get(Gpr(1).state()) as u64;
-            let len = env.backend.get(Gpr(2).state()) as usize;
-            let mut data = vec![0u8; len];
-            let acc = polyisa_mem::Access {
-                endian: polyisa_mem::Endian::Le,
-                align: polyisa_mem::Align::Unaligned,
-                kind: polyisa_mem::AccessKind::DataRead,
-            };
-            if env.backend.mem.read(VirtAddr(buf), &mut data, acc).is_err() {
-                return TrapOutcome::Unimplemented;
+            let mut left = env.backend.get(Gpr(2).state()) as usize;
+            if fd != 1 && fd != 2 {
+                env.backend.set(Gpr(0).state(), neg_errno(EBADF));
+                return TrapOutcome::Handled;
             }
-            // EBX=1/2 のみ受け、EAX に書いたバイト数を返す。
-            let done = match fd {
-                1 => std::io::Write::write(&mut std::io::stdout(), &data).unwrap_or(0),
-                2 => std::io::Write::write(&mut std::io::stderr(), &data).unwrap_or(0),
-                _ => return TrapOutcome::Unimplemented,
-            };
+            let mut done = 0usize;
+            let mut chunk = vec![0u8; IO_CHUNK];
+            while left > 0 {
+                let take = left.min(IO_CHUNK);
+                if env
+                    .backend
+                    .mem
+                    .read(
+                        VirtAddr(buf + done as u64),
+                        &mut chunk[..take],
+                        data_access(),
+                    )
+                    .is_err()
+                {
+                    return TrapOutcome::Unimplemented;
+                }
+                let n = match fd {
+                    1 => std::io::Write::write(&mut std::io::stdout(), &chunk[..take]).unwrap_or(0),
+                    _ => std::io::Write::write(&mut std::io::stderr(), &chunk[..take]).unwrap_or(0),
+                };
+                done += n;
+                left -= n;
+                if n < take {
+                    break;
+                }
+            }
             env.backend.set(Gpr(0).state(), done as u32);
             return TrapOutcome::Handled;
         }
@@ -398,5 +556,167 @@ impl TrapHandler for CliX86 {
             eprintln!("run: unhandled syscall {nr} ({})", name.unwrap_or("?"));
         }
         TrapOutcome::Unimplemented
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use polyisa_guest_x86::sem::Gpr;
+    use polyisa_mem::{Perms, VirtAddr};
+
+    fn bare() -> BareEnv {
+        let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_x86::CpuState>());
+        env.backend.mem.map(VirtAddr(0), 2, Perms::RW).unwrap();
+        env
+    }
+
+    fn set_regs(env: &mut BareEnv, nr: u32, a: u32, b: u32, c: u32) {
+        env.backend.set(Gpr(0).state(), nr);
+        env.backend.set(Gpr(3).state(), a);
+        env.backend.set(Gpr(1).state(), b);
+        env.backend.set(Gpr(2).state(), c);
+    }
+
+    #[test]
+    fn write_stdout_and_bad_fd() {
+        let mut sys = CliX86::default();
+        let mut env = bare();
+        env.backend.mem.write(VirtAddr(0x100), b"hi").unwrap();
+        // write(1, 0x100, 2) は受理し、書いたバイト数を返す。
+        set_regs(&mut env, polyisa_os_linux::i386::WRITE as u32, 1, 0x100, 2);
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(env.backend.get(Gpr(0).state()), 2);
+        // 存在しない fd への write は EBADF。
+        set_regs(&mut env, polyisa_os_linux::i386::WRITE as u32, 9, 0x100, 2);
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(env.backend.get(Gpr(0).state()), neg_errno(EBADF));
+    }
+
+    #[test]
+    fn openat_missing_is_enoent() {
+        let mut sys = CliX86::default();
+        let mut env = bare();
+        env.backend
+            .mem
+            .write(VirtAddr(0x100), b"/no/such/file\0")
+            .unwrap();
+        set_regs(
+            &mut env,
+            polyisa_os_linux::i386::OPENAT as u32,
+            0xffff_ff9c,
+            0x100,
+            0,
+        );
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(env.backend.get(Gpr(0).state()), neg_errno(ENOENT));
+    }
+
+    #[test]
+    fn openat_rejects_bad_dirfd_and_flags() {
+        let mut sys = CliX86::default();
+        let mut env = bare();
+        env.backend.mem.write(VirtAddr(0x100), b"/x\0").unwrap();
+        // dirfd が AT_FDCWD ではない。
+        set_regs(&mut env, polyisa_os_linux::i386::OPENAT as u32, 3, 0x100, 0);
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(env.backend.get(Gpr(0).state()), neg_errno(EINVAL));
+        // O_WRONLY 相当の flags は受け付けない。
+        set_regs(
+            &mut env,
+            polyisa_os_linux::i386::OPENAT as u32,
+            0xffff_ff9c,
+            0x100,
+            1,
+        );
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(env.backend.get(Gpr(0).state()), neg_errno(EINVAL));
+        // 相対パスは受け付けない。
+        env.backend.mem.write(VirtAddr(0x100), b"rel\0").unwrap();
+        set_regs(
+            &mut env,
+            polyisa_os_linux::i386::OPENAT as u32,
+            0xffff_ff9c,
+            0x100,
+            0,
+        );
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(env.backend.get(Gpr(0).state()), neg_errno(EINVAL));
+    }
+
+    #[test]
+    fn read_write_close_roundtrip() {
+        let path = std::env::temp_dir().join(format!("polyisa-unit-{}", std::process::id()));
+        std::fs::write(&path, b"abcdef").unwrap();
+        let path_s = path.to_string_lossy().into_owned();
+        let mut sys = CliX86::default();
+        let mut env = bare();
+        env.backend
+            .mem
+            .write(VirtAddr(0x100), path_s.as_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x100 + path_s.len() as u64), &[0])
+            .unwrap();
+        // openat -> fd 3。
+        set_regs(
+            &mut env,
+            polyisa_os_linux::i386::OPENAT as u32,
+            0xffff_ff9c,
+            0x100,
+            0,
+        );
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(env.backend.get(Gpr(0).state()), 3);
+        // read(fd=3, buf=0x200, 64) -> 6。
+        set_regs(&mut env, polyisa_os_linux::i386::READ as u32, 3, 0x200, 64);
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(env.backend.get(Gpr(0).state()), 6);
+        // close(3) -> 0、もう一度 close(3) -> EBADF。
+        set_regs(&mut env, polyisa_os_linux::i386::CLOSE as u32, 3, 0, 0);
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(env.backend.get(Gpr(0).state()), 0);
+        set_regs(&mut env, polyisa_os_linux::i386::CLOSE as u32, 3, 0, 0);
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(env.backend.get(Gpr(0).state()), neg_errno(EBADF));
+        // read(closed fd=3) -> EBADF。
+        set_regs(&mut env, polyisa_os_linux::i386::READ as u32, 3, 0x200, 64);
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(env.backend.get(Gpr(0).state()), neg_errno(EBADF));
+        let _ = std::fs::remove_file(&path);
     }
 }
