@@ -11,7 +11,7 @@
 
 use polyisa_mem::{Access, AccessKind, Align, Endian};
 use polyisa_sem::{
-    Backend, Cmp, ExceptionKind, Flow, GuestException, StateRef, W8, W32, W64, Width,
+    Backend, Cmp, ExceptionKind, Flow, GuestException, StateRef, W8, W32, W64, W128, Width,
 };
 
 use super::CpuState;
@@ -1091,6 +1091,302 @@ pub fn and_rm32_imm8<B: Backend>(b: &mut B, dst: Gpr, imm: i8) -> Flow<B> {
     Ok(())
 }
 
+/// ADD r/m32, imm8。imm8 は符号拡張する。6 旗を更新する。
+pub fn add_rm32_imm8<B: Backend>(b: &mut B, dst: Gpr, imm: i8) -> Flow<B> {
+    let x = read(b, dst);
+    let y = b.konst::<W32>(imm as i32 as u32);
+    let v = b.add::<W32>(x, y);
+    write(b, dst, v);
+    update_add_flags(b, x, y, v);
+    Ok(())
+}
+
+/// ADD r/m64, imm8。imm8 は符号拡張する。6 旗を更新する。
+pub fn add_rm64_imm8<B: Backend>(b: &mut B, dst: Gpr, imm: i8) -> Flow<B> {
+    let x = read64(b, dst);
+    let y = b.konst::<W64>(imm as i64 as u64);
+    let v = b.add::<W64>(x, y);
+    write64(b, dst, v);
+    update_add_flags(b, x, y, v);
+    Ok(())
+}
+
+/// OR r/m32, imm8。imm8 は符号拡張する。5 旗を更新する（CF=0、OF=0）。
+pub fn or_rm32_imm8<B: Backend>(b: &mut B, dst: Gpr, imm: i8) -> Flow<B> {
+    let x = read(b, dst);
+    let y = b.konst::<W32>(imm as i32 as u32);
+    let v = b.or::<W32>(x, y);
+    write(b, dst, v);
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// OR r/m64, imm8。imm8 は符号拡張する。5 旗を更新する（CF=0、OF=0）。
+pub fn or_rm64_imm8<B: Backend>(b: &mut B, dst: Gpr, imm: i8) -> Flow<B> {
+    let x = read64(b, dst);
+    let y = b.konst::<W64>(imm as i64 as u64);
+    let v = b.or::<W64>(x, y);
+    write64(b, dst, v);
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// ADC r/m32, imm8。CF を足し込んで 6 旗を更新する。
+pub fn adc_rm32_imm8<B: Backend>(b: &mut B, dst: Gpr, imm: i8) -> Flow<B> {
+    let x = read(b, dst);
+    let y = b.konst::<W32>(imm as i32 as u32);
+    let c = cf_num(b);
+    let y1 = b.add::<W32>(y, c);
+    let x64 = b.zext::<W32, W64>(x);
+    let y64 = b.zext::<W32, W64>(y);
+    let c64 = b.zext::<W32, W64>(c);
+    let t1 = b.add::<W64>(x64, y64);
+    let t = b.add::<W64>(t1, c64);
+    let v: B::V<W32> = b.trunc::<W64, W32>(t);
+    write(b, dst, v);
+    let n32 = b.konst::<W64>(32);
+    let carry = b.shr_l::<W64>(t, n32);
+    let zero64 = b.konst::<W64>(0);
+    let cf_take = b.cmp::<W64>(Cmp::Ne, carry, zero64);
+    let cf = pick(b, cf_take, FLAG_CF);
+    let a = b.xor::<W32>(x, v);
+    let c2 = b.xor::<W32>(y1, v);
+    let s = b.and::<W32>(a, c2);
+    let n31 = b.konst::<W32>(31);
+    let s31 = b.shr_l::<W32>(s, n31);
+    let zero = b.konst::<W32>(0);
+    let of_take = b.cmp::<W32>(Cmp::Ne, s31, zero);
+    let of = pick(b, of_take, FLAG_OF);
+    let af = af_bit(b, x, y1, v);
+    let szp = szp_bits(b, v);
+    let old: B::V<W32> = b.get(eflags_ref());
+    let clear_mask = b.konst::<W32>(!FLAG_OSZPCA);
+    let mut f = b.and::<W32>(old, clear_mask);
+    f = b.or::<W32>(f, cf);
+    f = b.or::<W32>(f, of);
+    f = b.or::<W32>(f, af);
+    f = b.or::<W32>(f, szp);
+    b.set(eflags_ref(), f);
+    Ok(())
+}
+
+/// SBB r/m32, imm8。CF を借りて 6 旗を更新する。
+pub fn sbb_rm32_imm8<B: Backend>(b: &mut B, dst: Gpr, imm: i8) -> Flow<B> {
+    let x = read(b, dst);
+    let y = b.konst::<W32>(imm as i32 as u32);
+    let c = cf_num(b);
+    let y1 = b.add::<W32>(y, c);
+    let x64 = b.zext::<W32, W64>(x);
+    let y64 = b.zext::<W32, W64>(y);
+    let c64 = b.zext::<W32, W64>(c);
+    let t1 = b.sub::<W64>(x64, y64);
+    let t2 = b.sub::<W64>(t1, c64);
+    let v: B::V<W32> = b.trunc::<W64, W32>(t2);
+    write(b, dst, v);
+    let n32 = b.konst::<W64>(32);
+    let borrow = b.shr_l::<W64>(t2, n32);
+    let zero64 = b.konst::<W64>(0);
+    let cf_take = b.cmp::<W64>(Cmp::Ne, borrow, zero64);
+    let cf = pick(b, cf_take, FLAG_CF);
+    let a = b.xor::<W32>(x, y1);
+    let c2 = b.xor::<W32>(x, v);
+    let s = b.and::<W32>(a, c2);
+    let n31 = b.konst::<W32>(31);
+    let s31 = b.shr_l::<W32>(s, n31);
+    let zero = b.konst::<W32>(0);
+    let of_take = b.cmp::<W32>(Cmp::Ne, s31, zero);
+    let of = pick(b, of_take, FLAG_OF);
+    let af = af_bit(b, x, y1, v);
+    let szp = szp_bits(b, v);
+    let old: B::V<W32> = b.get(eflags_ref());
+    let clear_mask = b.konst::<W32>(!FLAG_OSZPCA);
+    let mut f = b.and::<W32>(old, clear_mask);
+    f = b.or::<W32>(f, cf);
+    f = b.or::<W32>(f, of);
+    f = b.or::<W32>(f, af);
+    f = b.or::<W32>(f, szp);
+    b.set(eflags_ref(), f);
+    Ok(())
+}
+
+/// ADC r/m64, imm8。CF を足し込んで 6 旗を更新する。
+pub fn adc_rm64_imm8<B: Backend>(b: &mut B, dst: Gpr, imm: i8) -> Flow<B> {
+    let x = read64(b, dst);
+    let y = b.konst::<W64>(imm as i64 as u64);
+    let c = cf_num(b);
+    let x128 = b.zext::<W64, W128>(x);
+    let y128 = b.zext::<W64, W128>(y);
+    let c128 = b.zext::<W32, W128>(c);
+    let t1 = b.add::<W128>(x128, y128);
+    let t = b.add::<W128>(t1, c128);
+    let v: B::V<W64> = b.trunc::<W128, W64>(t);
+    write64(b, dst, v);
+    let n64 = b.konst::<W128>(64);
+    let carry = b.shr_l::<W128>(t, n64);
+    let zero128 = b.konst::<W128>(W128::from_u128(0));
+    let cf_take = b.cmp::<W128>(Cmp::Ne, carry, zero128);
+    let cf = pick(b, cf_take, FLAG_CF);
+    let c64 = b.trunc::<W128, W64>(c128);
+    let y1 = b.add::<W64>(y, c64);
+    let a = b.xor::<W64>(x, v);
+    let c2 = b.xor::<W64>(y1, v);
+    let acc = b.and::<W64>(a, c2);
+    let n63 = b.konst::<W64>(63);
+    let s63 = b.shr_l::<W64>(acc, n63);
+    let zero = b.konst::<W64>(0);
+    let of_take = b.cmp::<W64>(Cmp::Ne, s63, zero);
+    let of = pick(b, of_take, FLAG_OF);
+    let af = af_bit(b, x, y1, v);
+    let szp = szp_bits(b, v);
+    let old: B::V<W32> = b.get(eflags_ref());
+    let clear_mask = b.konst::<W32>(!FLAG_OSZPCA);
+    let mut f = b.and::<W32>(old, clear_mask);
+    f = b.or::<W32>(f, cf);
+    f = b.or::<W32>(f, of);
+    f = b.or::<W32>(f, af);
+    f = b.or::<W32>(f, szp);
+    b.set(eflags_ref(), f);
+    Ok(())
+}
+
+/// SBB r/m64, imm8。CF を借りて 6 旗を更新する。
+pub fn sbb_rm64_imm8<B: Backend>(b: &mut B, dst: Gpr, imm: i8) -> Flow<B> {
+    let x = read64(b, dst);
+    let y = b.konst::<W64>(imm as i64 as u64);
+    let c = cf_num(b);
+    let x128 = b.zext::<W64, W128>(x);
+    let y128 = b.zext::<W64, W128>(y);
+    let c128 = b.zext::<W32, W128>(c);
+    let t1 = b.sub::<W128>(x128, y128);
+    let t = b.sub::<W128>(t1, c128);
+    let v: B::V<W64> = b.trunc::<W128, W64>(t);
+    write64(b, dst, v);
+    let n64 = b.konst::<W128>(64);
+    let borrow = b.shr_l::<W128>(t, n64);
+    let zero128 = b.konst::<W128>(W128::from_u128(0));
+    let cf_take = b.cmp::<W128>(Cmp::Ne, borrow, zero128);
+    let cf = pick(b, cf_take, FLAG_CF);
+    let c64 = b.trunc::<W128, W64>(c128);
+    let y1 = b.add::<W64>(y, c64);
+    let a = b.xor::<W64>(x, y1);
+    let c2 = b.xor::<W64>(x, v);
+    let acc = b.and::<W64>(a, c2);
+    let n63 = b.konst::<W64>(63);
+    let s63 = b.shr_l::<W64>(acc, n63);
+    let zero = b.konst::<W64>(0);
+    let of_take = b.cmp::<W64>(Cmp::Ne, s63, zero);
+    let of = pick(b, of_take, FLAG_OF);
+    let af = af_bit(b, x, y1, v);
+    let szp = szp_bits(b, v);
+    let old: B::V<W32> = b.get(eflags_ref());
+    let clear_mask = b.konst::<W32>(!FLAG_OSZPCA);
+    let mut f = b.and::<W32>(old, clear_mask);
+    f = b.or::<W32>(f, cf);
+    f = b.or::<W32>(f, of);
+    f = b.or::<W32>(f, af);
+    f = b.or::<W32>(f, szp);
+    b.set(eflags_ref(), f);
+    Ok(())
+}
+
+/// SUB r/m32, imm8。imm8 は符号拡張する。6 旗を更新する。
+pub fn sub_rm32_imm8<B: Backend>(b: &mut B, dst: Gpr, imm: i8) -> Flow<B> {
+    let x = read(b, dst);
+    let y = b.konst::<W32>(imm as i32 as u32);
+    let v = b.sub::<W32>(x, y);
+    write(b, dst, v);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
+/// SUB r/m32, imm32。6 旗を更新する。
+pub fn sub_rm32_imm<B: Backend>(b: &mut B, dst: Gpr, imm: u32) -> Flow<B> {
+    let x = read(b, dst);
+    let y = b.konst::<W32>(imm);
+    let v = b.sub::<W32>(x, y);
+    write(b, dst, v);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
+/// SUB r/m64, imm32。imm32 は符号拡張する。6 旗を更新する。
+pub fn sub_rm64_imm<B: Backend>(b: &mut B, dst: Gpr, imm: u32) -> Flow<B> {
+    let x = read64(b, dst);
+    let y = b.konst::<W64>(imm as i32 as u64);
+    let v = b.sub::<W64>(x, y);
+    write64(b, dst, v);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
+/// SUB r/m64, imm8。imm8 は符号拡張する。6 旗を更新する。
+pub fn sub_rm64_imm8<B: Backend>(b: &mut B, dst: Gpr, imm: i8) -> Flow<B> {
+    let x = read64(b, dst);
+    let y = b.konst::<W64>(imm as i64 as u64);
+    let v = b.sub::<W64>(x, y);
+    write64(b, dst, v);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
+/// XOR r/m32, imm8。imm8 は符号拡張する。5 旗を更新する（CF=0、OF=0）。
+pub fn xor_rm32_imm8<B: Backend>(b: &mut B, dst: Gpr, imm: i8) -> Flow<B> {
+    let x = read(b, dst);
+    let y = b.konst::<W32>(imm as i32 as u32);
+    let v = b.xor::<W32>(x, y);
+    write(b, dst, v);
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// XOR r/m64, imm8。imm8 は符号拡張する。5 旗を更新する（CF=0、OF=0）。
+pub fn xor_rm64_imm8<B: Backend>(b: &mut B, dst: Gpr, imm: i8) -> Flow<B> {
+    let x = read64(b, dst);
+    let y = b.konst::<W64>(imm as i64 as u64);
+    let v = b.xor::<W64>(x, y);
+    write64(b, dst, v);
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// CMP r/m32, imm8。dst は変えず 6 旗を更新する。
+pub fn cmp_rm32_imm8<B: Backend>(b: &mut B, dst: Gpr, imm: i8) -> Flow<B> {
+    let x = read(b, dst);
+    let y = b.konst::<W32>(imm as i32 as u32);
+    let v = b.sub::<W32>(x, y);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
+/// CMP r/m32, [base+disp8], imm8 (mod=01)。メモリ値を読んで比較する。
+pub fn cmp_rm32_imm8m8<B: Backend>(b: &mut B, base: Gpr, disp: i8, imm: i8) -> Flow<B> {
+    let addr = eff_addr(b, base, disp);
+    let x: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let y = b.konst::<W32>(imm as i32 as u32);
+    let v = b.sub::<W32>(x, y);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
+/// CMP r/m64, [base+disp8], imm8 (mod=01)。メモリ値を読んで比較する。
+pub fn cmp_rm64_imm8m8<B: Backend>(b: &mut B, base: Gpr, disp: i8, imm: i8) -> Flow<B> {
+    let addr = eff_addr(b, base, disp);
+    let x: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let y = b.konst::<W64>(imm as i64 as u64);
+    let v = b.sub::<W64>(x, y);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
+/// CMP r/m64, imm8 (REX.W + 83 /7)。dst は変えず 6 旗を更新する。
+pub fn cmp_rm64_imm8<B: Backend>(b: &mut B, dst: Gpr, imm: i8) -> Flow<B> {
+    let x = read64(b, dst);
+    let y = b.konst::<W64>(imm as i64 as u64);
+    let v = b.sub::<W64>(x, y);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
 /// AND r/m64, imm8。imm8 は符号拡張する。5 旗を更新する（CF=0、OF=0）。
 pub fn and_rm64_imm8<B: Backend>(b: &mut B, dst: Gpr, imm: i8) -> Flow<B> {
     let x = read64(b, dst);
@@ -1101,22 +1397,22 @@ pub fn and_rm64_imm8<B: Backend>(b: &mut B, dst: Gpr, imm: i8) -> Flow<B> {
     Ok(())
 }
 
-/// MOV EAX, [RIP+disp32] (64ビットの mod=00 rm=101)。
-pub fn mov_eax_rip<B: Backend>(b: &mut B, next_rip: u64, disp: i32) -> Flow<B> {
+/// MOV r32, [RIP+disp32] (64ビットの mod=00 rm=101)。
+pub fn mov_eax_rip<B: Backend>(b: &mut B, dst: Gpr, next_rip: u64, disp: i32) -> Flow<B> {
     let base = b.konst::<W64>(next_rip);
     let d = b.konst::<W64>(disp as i64 as u64);
     let addr = b.add::<W64>(base, d);
     let v: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
-    write(b, Gpr(0), v);
+    write(b, dst, v);
     Ok(())
 }
 
-/// MOV [RIP+disp32], EAX (64ビットの mod=00 rm=101)。
-pub fn mov_rip_eax<B: Backend>(b: &mut B, next_rip: u64, disp: i32) -> Flow<B> {
+/// MOV [RIP+disp32], r32 (64ビットの mod=00 rm=101)。
+pub fn mov_rip_eax<B: Backend>(b: &mut B, src: Gpr, next_rip: u64, disp: i32) -> Flow<B> {
     let base = b.konst::<W64>(next_rip);
     let d = b.konst::<W64>(disp as i64 as u64);
     let addr = b.add::<W64>(base, d);
-    let v: B::V<W32> = read(b, Gpr(0));
+    let v: B::V<W32> = read(b, src);
     b.store::<W32>(addr, v, DATA_WRITE)?;
     Ok(())
 }
@@ -1243,10 +1539,10 @@ fn div0<B: Backend>(b: &mut B, eip: u32) -> B::Exit {
     })
 }
 
-/// MOV EAX, imm32。
-pub fn mov_eax<B: Backend>(b: &mut B, imm: u32) -> Flow<B> {
+/// MOV r32, imm32。32ビットで包む。
+pub fn mov_r32_imm<B: Backend>(b: &mut B, dst: Gpr, imm: u32) -> Flow<B> {
     let v = b.konst::<W32>(imm);
-    write(b, Gpr::eax(), v);
+    write(b, dst, v);
     Ok(())
 }
 
@@ -1387,10 +1683,11 @@ pub fn pop_reg64<B: Backend>(b: &mut B, rd: Gpr) -> Flow<B> {
     Ok(())
 }
 
-/// CALL rel32 (64ビット)。戻り（RIP+5）を積み、RIP+5+disp に飛ぶ。
-/// RIP は 4GB 未満を想定し、下位で eip を更新する。
-pub fn call_rel64<B: Backend>(b: &mut B, rip: u64, disp: i32) -> Flow<B> {
-    let ret_addr = rip.wrapping_add(5);
+/// CALL rel32 (64ビット)。戻り（次 RIP）を積み、次 RIP+disp に飛ぶ。
+/// next_rip は接頭辞込みの次命令先頭である。RIP は 4GB 未満を想定し、
+/// 下位で eip を更新する。
+pub fn call_rel64<B: Backend>(b: &mut B, next_rip: u64, disp: i32) -> Flow<B> {
+    let ret_addr = next_rip;
     let rsp = read64(b, Gpr(4));
     let eight = b.konst::<W64>(8);
     let next = b.sub::<W64>(rsp, eight);

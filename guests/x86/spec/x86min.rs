@@ -2,14 +2,13 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // x86 最小の ISADL モデル（段階4の最小）。
 //
-// i386 の整数126件に C7・83 の /r と string 操作・MOVSXD の計134件。
+// i386 の105件に ModRM/SIB 汎用 23件と string・NOP・MOVSXD・C7・83 を加えた計106件。
 // REX 接頭辞はデコード前に剥がし、Insは共有して意味論で切り替える。
 // 可変長（8/16/24/32/40/48/56ビット）のデコード入口と
-// ModRM register-direct の全レジスタ組合せを確かめる。
-// REX.W=1 の64ビット演算と R8-R15・SIB・64ビットメモリ形式は意味論・実行側で足す。
-// ModRM の disp32・絶対番地は EBX 基底と直接番地のみ持つ。SIB base は EBX または
-// 直接番地のみ持つ。Rust フック・遅延フラグ・x87・SSE・セグメントと
-// REX.W 最小以外の64ビット拡張は本格実装で足す。
+// ModRM/SIB は base/index/scale 汎用形（where 付き）で確かめる。
+// REX.W=1 の64ビット演算と R8-R15 は意味論・実行側で扱う。
+// ModRM・SIB とも base/index 任意。絶対番地は 32bit・RIP相対（64bit）を持つ。
+// Rust フック・遅延フラグ・x87・SSE・セグメントは本格実装で足す。
 // SYSCALL/CPUID は退出・識別情報の最小形のみ持つ（機能導出は本格実装で足す）。
 // SYSCALL (0F 05) は IA-32e 用であり 32bit 正統は SYSENTER (0F 34) だが、
 // 試作では x86-64 への橋渡しとして SYSCALL を先に持つ。i386 feature の無条件有効は試作の割り切りである。
@@ -151,8 +150,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("jmp8", "F1", "11101011 ........", "jmp {imm}", "jump"),
         ("add_rm32", "F1", "00000001 11......", "add r/m32, r32", "alu"),
         ("mov_rm32", "F1", "10001011 11......", "mov r32, r/m32", "alu"),
-        ("mov_eax_abs", "F1", "10001011 00000101 ................................", "mov eax, [disp32]", "load"),
-        ("mov_abs_eax", "F1", "10001001 00000101 ................................", "mov [disp32], eax", "store"),
+        ("mov_eax_abs", "F1", "10001011 00...101 ................................", "mov eax, [disp32]", "load"),
+        ("mov_abs_eax", "F1", "10001001 00...101 ................................", "mov [disp32], eax", "store"),
         ("mul_rm32", "F1", "11110111 11100001", "mul eax, ecx", "mult"),
         ("div_rm32", "F1", "11110111 11110001", "div eax, ecx", "div"),
         ("idiv_rm32", "F1", "11110111 11111001", "idiv eax, ecx", "div"),
@@ -202,17 +201,27 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("sub_eax", "F1", "00101101 ................................", "sub eax, {imm}", "alu"),
         ("mov_mr32", "F1", "10001001 11......", "mov r/m32, r32", "alu"),
         ("leave", "F1", "11001001", "leave", "alu"),
-        ("mov_eax", "F1", "10111000 ................................", "mov eax, {imm}", "alu"),
+        ("mov_r32_imm", "F1", "10111... ................................", "mov r32, {imm}", "alu"),
         ("syscall", "F1", "00001111 00000101", "syscall", "system"),
         ("cpuid", "F1", "00001111 10100010", "cpuid", "system"),
         ("mov_rm_imm", "F1", "11000111 11000... ................................", "mov r/m, {imm}", "alu"),
-        ("and_rm_imm8", "F1", "10000011 11...100 ........", "and r/m, {imm}", "alu"),
+        ("add_rm_imm8", "F1", "10000011 11000... ........", "add r/m, {imm}", "alu"),
+        ("or_rm_imm8", "F1", "10000011 11001... ........", "or r/m, {imm}", "alu"),
+        ("adc_rm_imm8", "F1", "10000011 11010... ........", "adc r/m, {imm}", "alu"),
+        ("sbb_rm_imm8", "F1", "10000011 11011... ........", "sbb r/m, {imm}", "alu"),
+        ("and_rm_imm8", "F1", "10000011 11100... ........", "and r/m, {imm}", "alu"),
+        ("sub_rm_imm8", "F1", "10000011 11101... ........", "sub r/m, {imm}", "alu"),
+        ("xor_rm_imm8", "F1", "10000011 11110... ........", "xor r/m, {imm}", "alu"),
+        ("cmp_rm_imm8", "F1", "10000011 11111... ........", "cmp r/m, {imm}", "alu"),
+        ("sub_rm32_imm", "F1", "10000001 11101... ................................", "sub r/m32, {imm}", "alu"),
+        ("sub_rm64_imm", "F1", "01001000 10000001 11101... ................................", "sub r/m64, {imm}", "alu"),
         ("movsxd", "F1", "01100011 11......", "movsxd r, r/m32", "alu"),
         ("movsb", "F1", "10100100", "movsb", "load"),
         ("movsd", "F1", "10100101", "movsd", "load"),
         ("stosb", "F1", "10101010", "stosb", "store"),
         ("stosd", "F1", "10101011", "stosd", "store"),
         ("endbr64", "F1", "00001111 00011110 11111010", "endbr64", "alu"),
+        ("nopl", "F1", "00001111 00011111 00000000", "nopl", "alu"),
     ];
     for (name, format, pattern, syntax, timing) in insns {
         m.insns.push(Insn {
@@ -409,6 +418,14 @@ pub fn build_model() -> polyisa_isadl::Model {
             "10001101 00...100 ........ ................................",
             vec![wc("d32_base", WhereOp::Eq, 5)],
             "lea r32, [sib+disp32]",
+            "alu",
+        ),
+        (
+            "cmp_rm_imm8m8",
+            "S8",
+            "10000011 01111... ........ ........",
+            vec![wc("s8_rm", WhereOp::Ne, 4)],
+            "cmp r/m, {imm}",
             "alu",
         ),
     ];

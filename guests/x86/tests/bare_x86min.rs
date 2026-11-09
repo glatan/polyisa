@@ -39,12 +39,14 @@ fn inc_dec_wraps() {
 #[test]
 fn add_mov_imm() {
     let mut env = env();
-    env.step(|b| sem::mov_eax(b, 0x1234_5678)).unwrap();
+    env.step(|b| sem::mov_r32_imm(b, Gpr(0), 0x1234_5678))
+        .unwrap();
     assert_eq!(eax(&mut env), 0x1234_5678);
     env.step(|b| sem::add_eax(b, 1)).unwrap();
     assert_eq!(eax(&mut env), 0x1234_5679);
     // 32ビットで包む。
-    env.step(|b| sem::mov_eax(b, 0xffff_ffff)).unwrap();
+    env.step(|b| sem::mov_r32_imm(b, Gpr(0), 0xffff_ffff))
+        .unwrap();
     env.step(|b| sem::add_eax(b, 1)).unwrap();
     assert_eq!(eax(&mut env), 0);
 }
@@ -100,7 +102,7 @@ fn cpuid_leaf0_returns_vendor() {
 fn modrm_register_direct() {
     let mut env = env();
     env.backend.set(Gpr(1).state(), 35);
-    env.step(|b| sem::mov_eax(b, 7)).unwrap();
+    env.step(|b| sem::mov_r32_imm(b, Gpr(0), 7)).unwrap();
     // MOV EAX, ECX：EAX=35。
     env.step(|b| sem::mov_rm32(b, Gpr(0), Gpr(1))).unwrap();
     assert_eq!(eax(&mut env), 35);
@@ -950,7 +952,7 @@ fn varlen_decode_lengths() {
     // 可変長：8/16/40ビットの入口で分かれることは lib の decode テストで確認する。
     // ここでは意味論が長さによらず動くことを確認する。
     let mut env = env();
-    env.step(|b| sem::mov_eax(b, 7)).unwrap();
+    env.step(|b| sem::mov_r32_imm(b, Gpr(0), 7)).unwrap();
     env.step(sem::inc_eax).unwrap();
     assert_eq!(eax(&mut env), 8);
 }
@@ -1204,4 +1206,108 @@ fn mem_base_generic_roundtrip() {
     env.step(|b| sem::mov_eax_sibd(b, Gpr(1), Gpr(2), Gpr(7), 3, 0))
         .unwrap();
     assert_eq!(env.backend.get(Gpr(1).state()), 0x2468_ACE0);
+}
+
+#[test]
+fn arith_imm8_matrix() {
+    // 算術 imm8 群：各演算の意味と旗を確認する。
+    let mut env = env();
+    // ADD 0x10 + 0x20 = 0x30：CF=OF=SF=ZF=0、PF=1（低8ビット 0x30 は偶パリティ）。
+    env.backend.set(Gpr(0).state(), 0x10);
+    env.step(|b| sem::add_rm32_imm8(b, Gpr(0), 0x20)).unwrap();
+    assert_eq!(eax(&mut env), 0x30);
+    assert_eq!(env.backend.get(sem::eflags_ref()), 0x4);
+    // SUB 3 - 5 = -2：SF=1、CF=1。
+    env.backend.set(Gpr(0).state(), 3);
+    env.step(|b| sem::sub_rm32_imm8(b, Gpr(0), 5)).unwrap();
+    assert_eq!(eax(&mut env), 0xFFFF_FFFE);
+    let f = env.backend.get(sem::eflags_ref());
+    assert_eq!(f & 0x81, 0x81);
+    // CMP 5,5：ZF=1、CF=0。EAX 不変。
+    env.backend.set(Gpr(0).state(), 5);
+    env.step(|b| sem::cmp_rm32_imm8(b, Gpr(0), 5)).unwrap();
+    assert_eq!(eax(&mut env), 5);
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0x40);
+    // OR 0x0f | sext(0xf0) = 0xffffffff：SF=1、PF=1。
+    env.backend.set(Gpr(0).state(), 0x0f);
+    env.step(|b| sem::or_rm32_imm8(b, Gpr(0), 0xF0u8 as i8))
+        .unwrap();
+    assert_eq!(eax(&mut env), 0xFFFF_FFFF);
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x84, 0x84);
+    // XOR 0xffffffff ^ sext(0xff) = 0：ZF=1、CF=OF=0。
+    env.backend.set(Gpr(0).state(), 0xFFFF_FFFF);
+    env.step(|b| sem::xor_rm32_imm8(b, Gpr(0), 0xFFu8 as i8))
+        .unwrap();
+    assert_eq!(eax(&mut env), 0);
+    let g = env.backend.get(sem::eflags_ref());
+    assert_eq!(g & 0x40, 0x40);
+    assert_eq!(g & 0x801, 0);
+    // ADC：CF=1 の状態で 1 + sext(0xff) + CF = 1（繰り上がりあり）。
+    env.backend.set(Gpr(0).state(), 1);
+    env.step(|b| sem::sub_rm32_imm8(b, Gpr(1), 1)).unwrap();
+    env.backend.set(Gpr(1).state(), 2);
+    env.step(|b| sem::cmp_rm32_imm8(b, Gpr(1), 3)).unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x1, 1);
+    env.backend.set(Gpr(0).state(), 1);
+    env.step(|b| sem::adc_rm32_imm8(b, Gpr(0), 0xFFu8 as i8))
+        .unwrap();
+    assert_eq!(eax(&mut env), 1);
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x1, 1);
+    // SBB：CF=1 の状態で 5 - 1 - CF = 3。
+    env.backend.set(Gpr(0).state(), 5);
+    env.step(|b| sem::sbb_rm32_imm8(b, Gpr(0), 1)).unwrap();
+    assert_eq!(eax(&mut env), 3);
+}
+
+#[test]
+fn arith_imm8_64bit() {
+    // 64ビット版：ADD/SUB の 64bit 演算と旗。
+    let mut env = env();
+    env.step(|b| {
+        sem::write64(b, Gpr(0), 0xFFFF_FFFF_FFFF_FFFF);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::add_rm64_imm8(b, Gpr(0), 1)).unwrap();
+    assert_eq!(env.backend.get(Gpr(0).state()), 0);
+    assert_eq!(env.backend.get(sem::hi_ref(Gpr(0))), 0);
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x1, 1);
+    // CMP r64,imm8：-1 vs 0 → SF=1。
+    env.step(|b| {
+        sem::write64(b, Gpr(0), 0xFFFF_FFFF_FFFF_FFFF);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::cmp_rm64_imm8(b, Gpr(0), 0)).unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x80, 0x80);
+}
+
+#[test]
+fn cmp_mem_imm8_roundtrip() {
+    // CMP [base+disp8],imm8：メモリ値を読んで ZF/CF を更新する。
+    let mut env = env();
+    env.map_rw(0, 1).unwrap();
+    env.backend.set(Gpr(3).state(), 0x100);
+    env.backend.mem.write(VirtAddr(0x110), &[5u8]).unwrap();
+    env.step(|b| sem::cmp_rm32_imm8m8(b, Gpr(3), 0x10, 5))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0x40);
+    env.step(|b| sem::cmp_rm32_imm8m8(b, Gpr(3), 0x10, 6))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x1, 0x1);
+}
+
+#[test]
+fn sub_imm32_sets_flags() {
+    // SUB ESP,imm32：0x2000 - 0x20 = 0x1fe0、CF=0。
+    let mut env = env();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    env.step(|b| sem::sub_rm32_imm(b, Gpr(4), 0x20)).unwrap();
+    assert_eq!(env.backend.get(Gpr(4).state()), 0x1FE0);
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x1, 0);
+    // 借り：0 - 1 = 0xffffffff、CF=1。
+    env.backend.set(Gpr(0).state(), 0);
+    env.step(|b| sem::sub_rm32_imm(b, Gpr(0), 1)).unwrap();
+    assert_eq!(eax(&mut env), 0xFFFF_FFFF);
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x1, 1);
 }

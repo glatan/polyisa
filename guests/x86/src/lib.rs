@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! x86 最小のゲスト ISA。段階4の最小であり、可変長デコードを確かめる。
 //!
-//! i386 の105件を持つ。ModRM/SIB は base/index/scale 汎用形。
+//! i386 の106件を持つ。ModRM/SIB は base/index/scale 汎用形。
 //! REX 接頭辞はデコード前に剥がし、Insは共有して64ビット意味論に切り替える。
 //! SYSCALL/CPUID は最小形、ModRM は register-direct（全組合せ）・mod=01+disp8・
 //! mod=10+disp32・絶対番地と SIB base+index 形（スケール付き、disp8/disp32・disp なしを含む）を持ち、
@@ -63,8 +63,8 @@ mod tests {
 
     #[test]
     fn insn_count() {
-        // 試作の整数105件。
-        assert_eq!(INSNS.len(), 105);
+        // 試作の整数116件。
+        assert_eq!(INSNS.len(), 116);
     }
 
     #[test]
@@ -91,7 +91,9 @@ mod tests {
         // 試作の word 組立は opcode 上位詰めであり実メモリLE像と逆。fetch結合時に直す。
         assert_eq!(decode(0x05_0000_0001, 40), Some(Insn::AddEax));
         assert_eq!(decode(0x05_ffff_ffff, 40), Some(Insn::AddEax));
-        assert_eq!(decode(0xB8_1234_5678, 40), Some(Insn::MovEax));
+        assert_eq!(decode(0xB8_1234_5678, 40), Some(Insn::MovR32Imm));
+        assert_eq!(decode(0xBB_1234_5678, 40), Some(Insn::MovR32Imm));
+        assert_eq!(decode(0xB8_1234_5678, 32), None);
         // 16ビット：opcode + disp8。
         assert_eq!(decode(0xEBFE, 16), Some(Insn::Jmp8));
         assert_eq!(decode(0xEB00, 16), Some(Insn::Jmp8));
@@ -139,9 +141,28 @@ mod tests {
         assert_eq!(decode(0x0000_C7C0_1234_5678, 48), Some(Insn::MovRmImm));
         assert_eq!(decode(0x0000_C7C1_1234_5678, 48), Some(Insn::MovRmImm));
         assert_eq!(decode(0x0000_C700_1234_5678, 48), None);
-        // 83 /4 (AND r/m,imm8)：同上。
+        // 83 /r (算術 imm8 群)：/0 ADD、/1 OR、/2 ADC、/3 SBB、
+        // /4 AND、/5 SUB、/6 XOR、/7 CMP。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x0083_C0F0, 24), Some(Insn::AddRmImm8));
+        assert_eq!(decode(0x0083_C9F0, 24), Some(Insn::OrRmImm8));
+        assert_eq!(decode(0x0083_D0F0, 24), Some(Insn::AdcRmImm8));
+        assert_eq!(decode(0x0083_D9F0, 24), Some(Insn::SbbRmImm8));
         assert_eq!(decode(0x0083_E4F0, 24), Some(Insn::AndRmImm8));
-        assert_eq!(decode(0x0083_E0F0, 24), None);
+        assert_eq!(decode(0x0083_E0F0, 24), Some(Insn::AndRmImm8));
+        assert_eq!(decode(0x0083_E9F0, 24), Some(Insn::SubRmImm8));
+        assert_eq!(decode(0x0083_F1F0, 24), Some(Insn::XorRmImm8));
+        assert_eq!(decode(0x0083_F9F0, 24), Some(Insn::CmpRmImm8));
+        // SUB r/m32,imm8 (29 /5)。64ビット版も同じ語形で REX.W を付ける。
+        assert_eq!(decode(0x0083_EB00, 24), Some(Insn::SubRmImm8));
+        // SUB r/m32,imm32 (81 /5)。64ビット版は REX.W を付ける。
+        assert_eq!(decode(0x81EB_0000_0000, 48), Some(Insn::SubRm32Imm));
+        assert_eq!(decode(0x81E8_0000_0000, 48), Some(Insn::SubRm32Imm));
+        // mod=01 m8 形：CMP [EBX+disp8],imm8 (83 7B ..) と reg 任意形。
+        assert_eq!(decode(0x837B_1000, 32), Some(Insn::CmpRmImm8m8));
+        assert_eq!(decode(0x8379_1000, 32), Some(Insn::CmpRmImm8m8));
+        assert_eq!(decode(0x837C_1000, 32), None);
+        assert_eq!(decode(0x0083_00F0, 24), None);
         // string 操作（F3 接頭辞は実行側で剥がす）。
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0xA4, 8), Some(Insn::Movsb));
@@ -152,6 +173,9 @@ mod tests {
         // ENDBR64 (F3 0F 1E FA)：F3 接頭辞は実行側で剥がす。
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x0F1EFA, 24), Some(Insn::Endbr64));
+        // NOP r/m (0F 1F /0)：F3/0x66 接頭辞は実行側で剥がす。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x0F1F00, 24), Some(Insn::Nopl));
         // MOVSXD r,r/m32 (63 /r)。REX.W で 64ビット符号拡張。
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x63C6, 16), Some(Insn::Movsxd));
@@ -260,6 +284,8 @@ mod tests {
         assert_eq!(decode(0x8B84_7856_3412, 48), None);
         assert_eq!(decode(0x8B05_7856_3412, 48), Some(Insn::MovEaxAbs));
         assert_eq!(decode(0x8905_7856_3412, 48), Some(Insn::MovAbsEax));
+        // reg 任意：MOV [RIP+disp32],RDI (89 3D ..) も同じ Insn。
+        assert_eq!(decode(0x893D_C2D6_1F00, 48), Some(Insn::MovAbsEax));
         // mod違い・長さ違いは一致しない。
         assert_eq!(decode(0x8B43_7856_3412, 48), None);
         assert_eq!(decode(0x8B83_7856_3412, 32), None);
@@ -272,6 +298,8 @@ mod tests {
         assert_eq!(decode(0x0089_0433, 24), Some(Insn::MovSibEax));
         assert_eq!(decode(0x8B44_3310, 32), Some(Insn::MovEaxSibd));
         assert_eq!(decode(0x8B44_7B10, 32), Some(Insn::MovEaxSibd));
+        // reg 任意：MOV ECX,[EBX+ESI*2+disp8] (8B 4C 73 ..) も同じ Insn。
+        assert_eq!(decode(0x8B4C_7310, 32), Some(Insn::MovEaxSibd));
         assert_eq!(decode(0x8944_33F0, 32), Some(Insn::MovSibdEax));
         assert_eq!(decode(0x8B04_3310, 32), None);
         assert_eq!(decode(0x008B_8473_1000_0000, 56), Some(Insn::MovEaxSibd32));
