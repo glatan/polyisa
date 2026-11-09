@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! x86 最小のゲスト ISA。段階4の最小であり、可変長デコードを確かめる。
 //!
-//! i386 の163件を持つ。ModRM/SIB 汎用・XMM最小・near Jcc・MOVZX・CMOVB・ADD RIP等を含む。
+//! i386 の195件を持つ。ModRM/SIB 汎用・XMM最小・near Jcc・MOVZX・CMOVB・ADD RIP等を含む。
 //! REX 接頭辞はデコード前に剥がし、Insは共有して64ビット意味論に切り替える。
 //! SYSCALL/CPUID は最小形、ModRM は register-direct（全組合せ）・mod=01+disp8・
 //! mod=10+disp32・絶対番地と SIB base+index 形（スケール付き、disp8/disp32・disp なしを含む）を持ち、
@@ -70,7 +70,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数116件。
-        assert_eq!(INSNS.len(), 163);
+        assert_eq!(INSNS.len(), 195);
     }
 
     #[test]
@@ -125,7 +125,7 @@ mod tests {
         // 比較・条件分岐：CMP EAX,imm32 (3D)、TEST EAX,EAX (85 C0)、JE (74)、JNE (75)。
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x3D_0000_0001, 40), Some(Insn::CmpEax));
-        assert_eq!(decode(0x85C0, 16), Some(Insn::TestEax));
+        assert_eq!(decode(0x85C0, 16), Some(Insn::TestRm32));
         assert_eq!(decode(0x7400, 16), Some(Insn::Je));
         assert_eq!(decode(0x75FE, 16), Some(Insn::Jne));
         // 符号なし条件分岐：JB (72)、JAE (73)、JBE (76)、JA (77)。
@@ -223,14 +223,75 @@ mod tests {
         assert_eq!(decode(0x81EB00000000, 48), Some(Insn::SubRm32Imm));
         // CMP r/m,imm32 (81 /7)。
         assert_eq!(decode(0x81FB00000000, 48), Some(Insn::CmpRm32Imm));
+        // ADD/OR/ADC/SBB/AND/XOR r/m,imm32 (81 /0-6)。64ビット版は REX.W を付ける.
+        assert_eq!(decode(0x81C300000000, 48), Some(Insn::AddRm32Imm));
+        assert_eq!(decode(0x4881C300000000, 56), Some(Insn::AddRm64Imm));
+        assert_eq!(decode(0x81C900000000, 48), Some(Insn::OrRm32Imm));
+        assert_eq!(decode(0x81D200000000, 48), Some(Insn::AdcRm32Imm));
+        assert_eq!(decode(0x81DB00000000, 48), Some(Insn::SbbRm32Imm));
+        assert_eq!(decode(0x81E400000000, 48), Some(Insn::AndRm32Imm));
+        assert_eq!(decode(0x81F100000000, 48), Some(Insn::XorRm32Imm));
+        assert_eq!(
+            decode(0xC78405A0FBFFFF00000000, 88),
+            Some(Insn::MovRmImmSibd32)
+        );
+        assert_eq!(
+            decode(0x0F11841590FBFFFF, 64),
+            Some(Insn::MovupsStoreSibd32)
+        );
+        assert_eq!(
+            decode(0x0F29841590FBFFFF, 64),
+            Some(Insn::MovapsStoreSibd32)
+        );
+        assert_eq!(decode(0x0FB70500000000, 56), Some(Insn::MovzxR32M16Rip));
+        assert_eq!(decode(0x81C900000000, 48), Some(Insn::OrRm32Imm));
+        assert_eq!(decode(0x81D200000000, 48), Some(Insn::AdcRm32Imm));
+        assert_eq!(decode(0x81DB00000000, 48), Some(Insn::SbbRm32Imm));
+        assert_eq!(decode(0x81E400000000, 48), Some(Insn::AndRm32Imm));
+        assert_eq!(decode(0x81F100000000, 48), Some(Insn::XorRm32Imm));
+        assert_eq!(decode(0x810D0000000000000000, 80), Some(Insn::OrRm32Rip));
+        assert_eq!(decode(0x81050000000000000000, 80), Some(Insn::AddRm32Rip));
+        assert_eq!(decode(0xC7050000000004000000, 80), Some(Insn::MovRmImmRip));
+        assert_eq!(decode(0xF6C110, 24), Some(Insn::TestRm8Imm));
+        assert_eq!(decode(0xA801, 16), Some(Insn::TestAlImm));
+        assert_eq!(decode(0xF6050000000002, 56), Some(Insn::TestM8ImmRip));
+        assert_eq!(decode(0x80E580, 24), Some(Insn::AndRm8Imm));
+        assert_eq!(decode(0x830D0000000040, 56), Some(Insn::OrRmImm8Rip));
+        assert_eq!(decode(0x0F6E8500000000, 56), Some(Insn::MovdXmmM32));
+        assert_eq!(decode(0xF7D0, 16), Some(Insn::NotRm32));
+        assert_eq!(decode(0xF7D8, 16), Some(Insn::NegRm32));
+        assert_eq!(decode(0xA900000001, 40), Some(Insn::TestEaxImm));
+        assert_eq!(decode(0x0B1500000000, 48), Some(Insn::OrRRip));
+        assert_eq!(decode(0x090500000000, 48), Some(Insn::OrMRip));
+        assert_eq!(decode(0x833F0F, 24), Some(Insn::CmpRmImm8Memnd));
+        assert_eq!(decode(0x00C1EA08, 24), Some(Insn::ShrRm32Imm8));
         // CMP [RIP+disp32],imm8 (83 3D + disp32 + imm8)。
         assert_eq!(decode(0x833D0000000038, 56), Some(Insn::CmpRmImm8Rip));
         // CMOVB r,r/m (0F 42 /r)。
         assert_eq!(decode(0x0F42C2, 24), Some(Insn::Cmovb));
+        assert_eq!(decode(0x0F45F0, 24), Some(Insn::Cmovne));
         // ADD r,[RIP+disp32] (03 05 + disp32)。
         assert_eq!(decode(0x030500000000, 48), Some(Insn::AddRRip));
         // MOVZX r32,r/m16 (0F B7 95 + disp32)。
         assert_eq!(decode(0x0FB79500000000, 56), Some(Insn::MovzxR32M16));
+        assert_eq!(
+            decode(0xC78405A0FBFFFF00000000, 88),
+            Some(Insn::MovRmImmSibd32)
+        );
+        assert_eq!(decode(0x85D2, 16), Some(Insn::TestRm32));
+        assert_eq!(decode(0xF7C400080000, 48), Some(Insn::TestRm32Imm));
+        assert_eq!(decode(0x0FEFC0, 24), Some(Insn::Pxor));
+        assert_eq!(decode(0x0F62C0, 24), Some(Insn::Punpckldq));
+        assert_eq!(decode(0x0FD60500000000, 56), Some(Insn::MovqM64XmmRip));
+        assert_eq!(decode(0x0F10841590FBFFFF, 64), Some(Insn::MovupsLoadSibd32));
+        assert_eq!(
+            decode(0x0F11841590FBFFFF, 64),
+            Some(Insn::MovupsStoreSibd32)
+        );
+        assert_eq!(
+            decode(0x0F29841590FBFFFF, 64),
+            Some(Insn::MovapsStoreSibd32)
+        );
         // C7 /0 m64,imm32 (RBP+disp32)。
         assert_eq!(decode(0xC7850000000000000000, 80), Some(Insn::MovRmImmM32));
         // ループと近傍ジャンプ：LOOP rel8 (E2)、JMP rel32 (E9)。
@@ -276,7 +337,7 @@ mod tests {
         // シフト：SHL EAX,imm8 (C1 E0 ib)、SHR EAX,imm8 (C1 E8 ib)。
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x00C1_E002, 24), Some(Insn::ShlEax));
-        assert_eq!(decode(0x00C1_E81F, 24), Some(Insn::ShrEax));
+        assert_eq!(decode(0x00C1_E81F, 24), Some(Insn::ShrRm32Imm8));
         // /6 (110) や mod=00 は別命令であり一致しない。
         assert_eq!(decode(0x00C1_F002, 24), None);
         assert_eq!(decode(0x00C1_2002, 24), None);

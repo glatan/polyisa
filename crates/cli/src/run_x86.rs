@@ -57,9 +57,10 @@ fn eip_of(env: &mut BareEnv) -> u32 {
 fn fetch_len(first: u8, second: Option<u8>, third: Option<u8>, fourth: Option<u8>) -> Option<u64> {
     match first {
         0x90 | 0x40..=0x4F | 0x50..=0x5F | 0xC3 | 0xC9 => Some(1),
-        0xEB | 0x74 | 0x75 | 0xE2 | 0xCD | 0x85 | 0x39 | 0x21 | 0x0B | 0x09 | 0x72 | 0x73
-        | 0x76 | 0x77 | 0x7C | 0x7D | 0x7E | 0x7F | 0xF7 => Some(2),
-        0x05 | 0x2D | 0x3D | 0xB8..=0xBF | 0xE8 | 0xE9 | 0x25 | 0x0D | 0x35 => Some(5),
+        0xEB | 0x74 | 0x75 | 0xE2 | 0xCD | 0x85 | 0x39 | 0x21 | 0x72 | 0x73 | 0x76 | 0x77
+        | 0x7C | 0x7D | 0x7E | 0x7F => Some(2),
+        0x05 | 0x2D | 0x3D | 0xB8..=0xBF | 0xE8 | 0xE9 | 0x25 | 0x0D | 0x35 | 0xA9 => Some(5),
+        0xA8 => Some(2),
         // 0F 1E (ENDBR64) は 3B、0F 1F (NOP r/m) は ModRM で長さが決まる。
         // SIB 付き NOP は未対応。XMM・MOVUPS・near Jcc を受け付ける。
         // 2バイトオペコードでは second=opcode2、third=ModRM、fourth=SIB である。
@@ -105,7 +106,23 @@ fn fetch_len(first: u8, second: Option<u8>, third: Option<u8>, fourth: Option<u8
                 // CMOVcc (0F 40-4F /r)。reg-direct のみ.
                 let m = third?;
                 if m >> 6 == 3 { Some(3) } else { None }
-            } else if matches!(s, 0x6E | 0x60 | 0x61 | 0x7E) {
+            } else if s == 0x6E {
+                // MOVD xmm,m32 (66 0F 6E /r)。reg-direct と mod=00/01/10 (SIBなし).
+                let m = third?;
+                let md = m >> 6;
+                let rm = m & 7;
+                if md == 3 {
+                    Some(3)
+                } else if rm == 4 {
+                    None
+                } else if md == 1 {
+                    Some(4)
+                } else if md == 2 {
+                    Some(7)
+                } else {
+                    if rm == 5 { None } else { Some(3) }
+                }
+            } else if matches!(s, 0x60 | 0x61 | 0x62 | 0x7E | 0xEF) {
                 // XMM reg-direct のみ（66 接頭辞は剥がし済み）。
                 let m = third?;
                 if m >> 6 == 3 { Some(3) } else { None }
@@ -113,6 +130,12 @@ fn fetch_len(first: u8, second: Option<u8>, third: Option<u8>, fourth: Option<u8
                 // PSHUFD xmm,xmm,imm8。reg-direct のみ。
                 let m = third?;
                 if m >> 6 == 3 { Some(4) } else { None }
+            } else if s == 0xD6 {
+                // MOVQ m64,xmm RIP (66 0F D6 05 + disp32)。RIP のみ 7B.
+                let m = third?;
+                let md = m >> 6;
+                let rm = m & 7;
+                if md == 0 && rm == 5 { Some(7) } else { None }
             } else if s == 0x10 || s == 0x11 || s == 0x29 || s == 0xE7 || s == 0xB6 || s == 0xB7 {
                 // MOVUPS/MOVNTDQ。ModRM/SIB/disp で長さが決まる。
                 // reg-direct は MOVUPS のみ（E7 は無効）。
@@ -214,7 +237,7 @@ fn fetch_len(first: u8, second: Option<u8>, third: Option<u8>, fourth: Option<u8
                 )
             }
         }
-        // C7 /0 (MOV r/m,imm32 系)。SIB 付きは未対応。
+        // C7 /0 (MOV r/m,imm32 系)。SIB mod=00 は未対応。
         0xC7 => {
             let s = second?;
             let md = s >> 6;
@@ -222,7 +245,15 @@ fn fetch_len(first: u8, second: Option<u8>, third: Option<u8>, fourth: Option<u8
             if md == 3 {
                 Some(6)
             } else if rm == 4 {
-                None
+                // SIB 付き。mod=01 は disp8+imm32 (8B)、mod=10 は disp32+imm32 (11B)。
+                // mod=00 は SIB base で変わるため未対応。
+                if md == 1 {
+                    Some(8)
+                } else if md == 2 {
+                    Some(11)
+                } else {
+                    None
+                }
             } else if md == 1 {
                 Some(7)
             } else if md == 2 {
@@ -232,8 +263,49 @@ fn fetch_len(first: u8, second: Option<u8>, third: Option<u8>, fourth: Option<u8
                 if rm == 5 { Some(10) } else { Some(6) }
             }
         }
-        // 0x03 /r (ADD r32,r/m32)。reg-direct と RIP/abs のみ.
-        0x03 => {
+        // 80 /r ib (ADD/OR/ADC/SBB/AND/SUB/XOR/CMP r/m8,imm8)。reg-direct のみ 3B (ANDのみ実装).
+        0x80 => {
+            let s = second?;
+            if s >> 6 == 3 {
+                // /4 AND のみ実装。他の /r は未対応.
+                let reg = (s >> 3) & 7;
+                if reg == 4 { Some(3) } else { None }
+            } else {
+                None
+            }
+        }
+        // F6 /0 (TEST r/m8,imm8)。reg-direct 3B、RIP 7B.
+        0xF6 => {
+            let s = second?;
+            let md = s >> 6;
+            let rm = s & 7;
+            if md == 3 {
+                Some(3)
+            } else if md == 0 && rm == 5 {
+                Some(7)
+            } else {
+                None
+            }
+        }
+        // F7 /r (TEST/NOT/NEG/MUL/DIV)。reg-direct のみ.
+        // /0 TEST は imm32 付きで 6B、/2 NOT・/3 NEG・/4 MUL・/6 DIV・/7 IDIV は 2B.
+        0xF7 => {
+            let s = second?;
+            if s >> 6 != 3 {
+                None
+            } else {
+                let reg = (s >> 3) & 7;
+                if reg == 0 {
+                    Some(6)
+                } else if reg == 2 || reg == 3 || reg == 4 || reg == 6 || reg == 7 {
+                    Some(2)
+                } else {
+                    None
+                }
+            }
+        }
+        // 0x03 /r (ADD) と 0x09 /r (OR m32,r32) と 0x0B /r (OR r32,m32)。reg-direct と RIP/abs のみ.
+        0x03 | 0x0B | 0x09 => {
             let s = second?;
             let md = s >> 6;
             let rm = s & 7;
@@ -373,6 +445,8 @@ pub fn run_mode(
                 | 0x31
                 | 0x89
                 | 0x03
+                | 0x0B
+                | 0x09
                 | 0xC1
                 | 0xC7
                 | 0x81
@@ -381,6 +455,8 @@ pub fn run_mode(
                 | 0x8D
                 | 0x0F
                 | 0xF7
+                | 0xF6
+                | 0x80
         ) {
             if env
                 .backend
@@ -408,8 +484,11 @@ pub fn run_mode(
                         0x1F | 0x6E
                             | 0x60
                             | 0x61
+                            | 0x62
                             | 0x70
                             | 0x7E
+                            | 0xEF
+                            | 0xD6
                             | 0x10
                             | 0x11
                             | 0x29
@@ -470,6 +549,7 @@ pub fn run_mode(
                 0x8B | 0x89
                     | 0x01
                     | 0x03
+                    | 0x0B
                     | 0x29
                     | 0x31
                     | 0x39
@@ -477,6 +557,8 @@ pub fn run_mode(
                     | 0x09
                     | 0x85
                     | 0xF7
+                    | 0xF6
+                    | 0x80
                     | 0x8D
                     | 0xC7
                     | 0x83
@@ -558,9 +640,13 @@ pub fn run_mode(
                 insn,
                 Insn::Nopl
                     | Insn::MovdXmm
+                    | Insn::MovdXmmM32
                     | Insn::Punpcklbw
                     | Insn::Punpcklwd
+                    | Insn::Punpckldq
+                    | Insn::MovqM64XmmRip
                     | Insn::Pshufd
+                    | Insn::Pxor
                     | Insn::MovqR64Xmm
                     | Insn::MovupsLoadXmm
                     | Insn::MovupsStoreXmm
@@ -596,9 +682,13 @@ pub fn run_mode(
             && matches!(
                 insn,
                 Insn::MovdXmm
+                    | Insn::MovdXmmM32
                     | Insn::Punpcklbw
                     | Insn::Punpcklwd
+                    | Insn::Punpckldq
+                    | Insn::MovqM64XmmRip
                     | Insn::Pshufd
+                    | Insn::Pxor
                     | Insn::MovqR64Xmm
                     | Insn::MovntdqStoreMemnd
                     | Insn::MovntdqStoreMem8
@@ -609,28 +699,8 @@ pub fn run_mode(
                 word,
             };
         }
-        // REX 拡張ビット付きでは絶対番地形（mod=00 rm=101）は未対応。
-        // dst が REX.R で拡張されるが意味論が EAX 固定のためである。
-        // それ以外の汎用形はレジスタ拡張に対応済みである。
-        if std::env::var("POLYISA_DEBUG").is_ok() {
-            eprintln!("REACHED_DECODE pc={pc:#x} insn={insn:?} word={word:#x}");
-        }
-        if is64 && rex & 0x7 != 0 {
-            match insn {
-                Insn::MovEaxAbs
-                | Insn::MovAbsEax
-                | Insn::LeaAbs
-                | Insn::MovEaxSibabs
-                | Insn::MovSibabsEax
-                | Insn::LeaSibabs => {
-                    return Outcome::Unimplemented {
-                        eip: pc as u32,
-                        word,
-                    };
-                }
-                _ => {}
-            }
-        }
+        // REX 拡張は reg/rm/SIB 抽出で対応済み (R/R/B/X)。W は rex_w で切替.
+        let _ = rex;
         // imm/disp の取り出し。32ビット値は LE 実バイト列から復元する。
         let imm32 = || (word as u32).swap_bytes();
         let disp8 = || (word & 0xff) as u8 as i8;
@@ -900,7 +970,44 @@ fn dispatch<B: Backend>(
             }
         }
         Insn::CmpEax => sem::cmp_eax(b, imm32()),
-        Insn::TestEax => sem::test_eax(b),
+        Insn::TestRm32 => sem::test_rm32(b, rm(), reg()),
+        Insn::TestRm32Imm => sem::test_rm32_imm(b, rm(), imm32()),
+        Insn::NotRm32 => sem::not_rm32(b, rm()),
+        Insn::NegRm32 => sem::neg_rm32(b, rm()),
+        Insn::TestRm8Imm => {
+            // 8ビット ModRM: REXありは低8ビット、なしの4-7は上位8ビット.
+            let rm_f = modrm() & 7;
+            let (dst, high) = if rex != 0 {
+                (Gpr(rm_f | ((rex & 1) << 3)), false)
+            } else if rm_f < 4 {
+                (Gpr(rm_f), false)
+            } else {
+                (Gpr(rm_f - 4), true)
+            };
+            sem::test_rm8_imm(b, dst, (word & 0xff) as u8, high)
+        }
+        Insn::AndRm8Imm => {
+            let rm_f = modrm() & 7;
+            let (dst, high) = if rex != 0 {
+                (Gpr(rm_f | ((rex & 1) << 3)), false)
+            } else if rm_f < 4 {
+                (Gpr(rm_f), false)
+            } else {
+                (Gpr(rm_f - 4), true)
+            };
+            sem::and_rm8_imm(b, dst, (word & 0xff) as u8, high)
+        }
+        Insn::TestM8ImmRip => {
+            let disp = ((word >> 8) as u32).swap_bytes() as i32;
+            let imm = (word & 0xff) as u8;
+            if is64 {
+                sem::test_m8_imm_rip(b, eip as u64 + nbytes, disp, imm)
+            } else {
+                sem::test_m8_imm_abs(b, ((word >> 8) as u32).swap_bytes(), imm)
+            }
+        }
+        Insn::TestAlImm => sem::test_al_imm(b, (word & 0xff) as u8),
+        Insn::TestEaxImm => sem::test_eax_imm(b, imm32()),
         Insn::Je => sem::je(b, eip, disp8()),
         Insn::Jne => sem::jne(b, eip, disp8()),
         Insn::Jb => sem::jb(b, eip, disp8()),
@@ -925,7 +1032,7 @@ fn dispatch<B: Backend>(
         Insn::OrEax => sem::or_eax(b, imm32()),
         Insn::XorImm => sem::xor_imm(b, imm32()),
         Insn::ShlEax => sem::shl_eax(b, word as u8),
-        Insn::ShrEax => sem::shr_eax(b, word as u8),
+        Insn::ShrRm32Imm8 => sem::shr_rm32_imm8(b, rm(), word as u8),
         Insn::Int80 => sem::int80(b, eip),
         Insn::LeaM8 => sem::lea_m8(b, reg(), rm(), disp8()),
         Insn::LeaM32 => sem::lea_m32(b, reg(), rm(), disp32()),
@@ -1038,8 +1145,67 @@ fn dispatch<B: Backend>(
                 sem::cmp_rm32_imm8m8(b, rm(), d8, i8)
             }
         }
+        Insn::CmpRmImm8Memnd => {
+            // mod=00 m8 形：imm8 は最下位.
+            let i8 = (word & 0xff) as u8 as i8;
+            sem::cmp_rm32_imm8_memnd(b, rm(), i8)
+        }
         Insn::SubRm32Imm => sem::sub_rm32_imm(b, rm(), imm32()),
         Insn::SubRm64Imm => sem::sub_rm64_imm(b, rm(), imm32()),
+        Insn::AddRm32Imm => sem::add_rm32_imm(b, rm(), imm32()),
+        Insn::AddRm64Imm => sem::add_rm64_imm(b, rm(), imm32()),
+        Insn::OrRm32Imm => {
+            if rex_w {
+                sem::or_rm64_imm(b, rm(), imm32())
+            } else {
+                sem::or_rm32_imm(b, rm(), imm32())
+            }
+        }
+        Insn::AdcRm32Imm => {
+            if rex_w {
+                sem::adc_rm64_imm(b, rm(), imm32())
+            } else {
+                sem::adc_rm32_imm(b, rm(), imm32())
+            }
+        }
+        Insn::SbbRm32Imm => {
+            if rex_w {
+                sem::sbb_rm64_imm(b, rm(), imm32())
+            } else {
+                sem::sbb_rm32_imm(b, rm(), imm32())
+            }
+        }
+        Insn::AndRm32Imm => {
+            if rex_w {
+                sem::and_rm64_imm(b, rm(), imm32())
+            } else {
+                sem::and_rm32_imm(b, rm(), imm32())
+            }
+        }
+        Insn::XorRm32Imm => {
+            if rex_w {
+                sem::xor_rm64_imm(b, rm(), imm32())
+            } else {
+                sem::xor_rm32_imm(b, rm(), imm32())
+            }
+        }
+        Insn::OrRm32Rip => {
+            // 81 0D + disp32 + imm32 (80b)。disp は (word>>32) 下位32 LE、imm は最下位32.
+            let disp = ((word >> 32) as u32).swap_bytes() as i32;
+            if is64 {
+                sem::or_rm32_rip(b, eip as u64 + nbytes, disp, imm32())
+            } else {
+                sem::or_rm32_abs(b, ((word >> 32) as u32).swap_bytes(), imm32())
+            }
+        }
+        Insn::AddRm32Rip => {
+            let disp = ((word >> 32) as u32).swap_bytes() as i32;
+            if is64 {
+                sem::add_rm32_rip(b, eip as u64 + nbytes, disp, imm32())
+            } else {
+                sem::add_rm32_abs(b, ((word >> 32) as u32).swap_bytes(), imm32())
+            }
+        }
         Insn::CmpRm32Imm => sem::cmp_rm32_imm(b, rm(), imm32()),
         Insn::CmpRm64Imm => sem::cmp_rm64_imm(b, rm(), imm32()),
         Insn::AddRRip => {
@@ -1049,6 +1215,20 @@ fn dispatch<B: Backend>(
                 sem::add_r32_rip(b, reg(), eip as u64 + nbytes, disp32())
             } else {
                 sem::add_r32_abs(b, reg(), imm32())
+            }
+        }
+        Insn::OrRRip => {
+            if is64 {
+                sem::or_r32_rip(b, reg(), eip as u64 + nbytes, disp32())
+            } else {
+                sem::or_r32_abs(b, reg(), imm32())
+            }
+        }
+        Insn::OrMRip => {
+            if is64 {
+                sem::or_m32_r32_rip(b, reg(), eip as u64 + nbytes, disp32())
+            } else {
+                sem::or_m32_r32_abs(b, reg(), imm32())
             }
         }
         Insn::Movsxd => {
@@ -1102,11 +1282,66 @@ fn dispatch<B: Backend>(
             }
         }
         Insn::MovdXmm => sem::movd_xmm_gpr32(b, xmm_reg(), rm0f()),
+        Insn::MovdXmmM32 => {
+            // 0F6E modrm + disp32 (mod=10 RBP)。disp は low32 LE? Actually word 56b: [0F][6E][modrm][disp0..3] (7B). disp = low32 LE? low32 = disp BE? Use disp32() which is (word as u32).swap? Wait word low32 = disp BE? For 56b word, low32 = disp (4B). disp32() = (word as u32).swap_bytes() as i32. Good (since low32 is disp). Good.
+            sem::movd_xmm_m32(b, xmm_reg(), rm0f(), disp32())
+        }
         Insn::Punpcklbw => sem::punpcklbw(b, xmm_reg(), xmm_rm()),
         Insn::Punpcklwd => sem::punpcklwd(b, xmm_reg(), xmm_rm()),
+        Insn::Punpckldq => sem::punpckldq(b, xmm_reg(), xmm_rm()),
+        Insn::MovqM64XmmRip => {
+            if is64 {
+                sem::movq_m64_xmm_rip(b, xmm_reg(), eip as u64 + nbytes, disp32())
+            } else {
+                sem::movq_m64_xmm_abs(b, xmm_reg(), imm32())
+            }
+        }
         Insn::Pshufd => {
             let imm = (word & 0xff) as u8;
             sem::pshufd(b, xmm_reg(), xmm_rm(), imm)
+        }
+        Insn::Pxor => sem::pxor_xmm(b, xmm_reg(), xmm_rm()),
+        Insn::MovupsLoadSibd32 => {
+            if sib0f_no_index() {
+                sem::movups_load_mem32(b, xmm_reg(), sib0f_base(), disp32())
+            } else {
+                sem::movups_load_sibd32(
+                    b,
+                    xmm_reg(),
+                    sib0f_base(),
+                    sib0f_idx(),
+                    sib0f_shift(),
+                    disp32(),
+                )
+            }
+        }
+        Insn::MovupsStoreSibd32 => {
+            if sib0f_no_index() {
+                sem::movups_store_mem32(b, xmm_reg(), sib0f_base(), disp32())
+            } else {
+                sem::movups_store_sibd32(
+                    b,
+                    xmm_reg(),
+                    sib0f_base(),
+                    sib0f_idx(),
+                    sib0f_shift(),
+                    disp32(),
+                )
+            }
+        }
+        Insn::MovapsStoreSibd32 => {
+            if sib0f_no_index() {
+                sem::movups_store_mem32(b, xmm_reg(), sib0f_base(), disp32())
+            } else {
+                sem::movups_store_sibd32(
+                    b,
+                    xmm_reg(),
+                    sib0f_base(),
+                    sib0f_idx(),
+                    sib0f_shift(),
+                    disp32(),
+                )
+            }
         }
         Insn::MovqR64Xmm => sem::movq_r64_xmm(b, rm0f(), xmm_reg()),
         Insn::MovupsLoadXmm => sem::movups_xmm_xmm(b, xmm_reg(), xmm_rm()),
@@ -1169,6 +1404,33 @@ fn dispatch<B: Backend>(
                 sem::mov_rm32_imm_mem32(b, Gpr(5 | ((rex & 1) << 3)), disp, imm32())
             }
         }
+        Insn::MovRmImmRip => {
+            // C7 05 + disp32 + imm32 (mod=00 RIP)。disp は上位32、imm は下位32.
+            let disp = ((word >> 32) as u32).swap_bytes() as i32;
+            if rex_w {
+                sem::mov_rm64_imm_rip(b, eip as u64 + nbytes, disp, imm32())
+            } else if is64 {
+                sem::mov_rm32_imm_rip(b, eip as u64 + nbytes, disp, imm32())
+            } else {
+                sem::mov_rm32_imm_abs(b, ((word >> 32) as u32).swap_bytes(), imm32())
+            }
+        }
+        Insn::MovRmImmSibd32 => {
+            // C7 SIB+disp32+imm32 (11B)。disp は下から2番目の32、imm は最下位32.
+            // no_index (idx=100) は base のみで扱う.
+            let disp = ((word >> 32) as u32).swap_bytes() as i32;
+            if no_index() {
+                if rex_w {
+                    sem::mov_rm64_imm_mem32(b, sib_base(), disp, imm32())
+                } else {
+                    sem::mov_rm32_imm_mem32(b, sib_base(), disp, imm32())
+                }
+            } else if rex_w {
+                sem::mov_rm64_imm_sibd32(b, sib_base(), sib_idx(), sib_shift(), disp, imm32())
+            } else {
+                sem::mov_rm32_imm_sibd32(b, sib_base(), sib_idx(), sib_shift(), disp, imm32())
+            }
+        }
         Insn::MovapsStoreMemnd => sem::movups_store_memnd(b, xmm_reg(), rm0f()),
         Insn::MovapsStoreMem8 => sem::movups_store_mem8(b, xmm_reg(), rm0f(), disp8()),
         Insn::NoplSib => sem::nop(b),
@@ -1179,6 +1441,13 @@ fn dispatch<B: Backend>(
                 sem::cmovb_r64(b, reg(), rm())
             } else {
                 sem::cmovb_r32(b, reg(), rm())
+            }
+        }
+        Insn::Cmovne => {
+            if rex_w {
+                sem::cmovne_r64(b, reg(), rm())
+            } else {
+                sem::cmovne_r32(b, reg(), rm())
             }
         }
         Insn::CmpRmImm8Rip => {
@@ -1196,9 +1465,28 @@ fn dispatch<B: Backend>(
                 sem::cmp_rm32_imm8_abs(b, disp_le, imm)
             }
         }
+        Insn::OrRmImm8Rip => {
+            // 83 0D + disp32 + imm8 (56ビット)。disp は (word>>8) 下位32 LE、imm は最下位.
+            let disp_le = ((word >> 8) as u32).swap_bytes();
+            let disp = disp_le as i32;
+            let imm = (word & 0xff) as u8 as i8;
+            if is64 {
+                sem::or_rm32_imm8_rip(b, eip as u64 + nbytes, disp, imm)
+            } else {
+                sem::or_rm32_imm8_abs(b, disp_le, imm)
+            }
+        }
         Insn::MovzxR32M16 => {
             // 0F B7 95 + disp32 (mod=10 RBP)。dst は reg フィールド.
             sem::movzx_r32_m16_mem32(b, reg0f_as_gpr(), Gpr(5 | ((rex & 1) << 3)), disp32())
+        }
+        Insn::MovzxR32M16Rip => {
+            // 0F B7 05 + disp32 (mod=00 RIP)。dst は reg フィールド.
+            if is64 {
+                sem::movzx_r32_m16_rip(b, reg0f_as_gpr(), eip as u64 + nbytes, disp32())
+            } else {
+                sem::movzx_r32_m16_abs(b, reg0f_as_gpr(), imm32())
+            }
         }
         Insn::MovupsLoadRip => {
             if is64 {
@@ -1242,7 +1530,6 @@ fn dispatch<B: Backend>(
             | Insn::OrEax
             | Insn::XorImm
             | Insn::ShlEax
-            | Insn::ShrEax
             | Insn::PopEax => Some(Gpr(0)),
             Insn::IncEcx | Insn::DecEcx | Insn::PopEcx => Some(Gpr(1)),
             Insn::IncEdx | Insn::DecEdx | Insn::PopEdx => Some(Gpr(2)),
@@ -1259,6 +1546,12 @@ fn dispatch<B: Backend>(
             | Insn::MovMr32
             | Insn::MovRmImm
             | Insn::SubRm32Imm
+            | Insn::AddRm32Imm
+            | Insn::OrRm32Imm
+            | Insn::AdcRm32Imm
+            | Insn::SbbRm32Imm
+            | Insn::AndRm32Imm
+            | Insn::XorRm32Imm
             | Insn::CmpRm32Imm
             | Insn::AndRmImm8
             | Insn::AddRmImm8
@@ -1267,11 +1560,18 @@ fn dispatch<B: Backend>(
             | Insn::SbbRmImm8
             | Insn::SubRmImm8
             | Insn::XorRmImm8
-            | Insn::CmpRmImm8 => Some(rm()),
+            | Insn::CmpRmImm8
+            | Insn::ShrRm32Imm8
+            | Insn::NotRm32
+            | Insn::NegRm32 => Some(rm()),
             Insn::MovRm32
             | Insn::Movsxd
             | Insn::Cmovb
+            | Insn::Cmovne
+            | Insn::MovzxR32M16
+            | Insn::MovzxR32M16Rip
             | Insn::AddRRip
+            | Insn::OrRRip
             | Insn::MovEaxMem8
             | Insn::MovEaxMemnd
             | Insn::MovEaxMem32
