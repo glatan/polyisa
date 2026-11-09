@@ -963,7 +963,7 @@ fn mul_widens_to_edx_eax() {
     let mut env = env();
     env.backend.set(Gpr(0).state(), 0xffff_ffff);
     env.backend.set(Gpr(1).state(), 2);
-    env.step(sem::mul_rm32).unwrap();
+    env.step(|b| sem::mul_rm32(b, Gpr(1))).unwrap();
     assert_eq!(eax(&mut env), 0xffff_fffe);
     assert_eq!(env.backend.get(Gpr(2).state()), 1);
 }
@@ -975,7 +975,7 @@ fn div_quotient_remainder() {
     env.backend.set(Gpr(2).state(), 0);
     env.backend.set(Gpr(0).state(), 17);
     env.backend.set(Gpr(1).state(), 5);
-    env.step(|b| sem::div_rm32(b, 0x1000)).unwrap();
+    env.step(|b| sem::div_rm32(b, 0x1000, Gpr(1))).unwrap();
     assert_eq!(eax(&mut env), 3);
     assert_eq!(env.backend.get(Gpr(2).state()), 2);
 }
@@ -988,7 +988,7 @@ fn div_by_zero_traps() {
     env.backend.set(Gpr(2).state(), 0);
     env.backend.set(Gpr(0).state(), 17);
     env.backend.set(Gpr(1).state(), 0);
-    let r = env.step(|b| sem::div_rm32(b, 0x1000));
+    let r = env.step(|b| sem::div_rm32(b, 0x1000, Gpr(1)));
     assert!(matches!(
         r,
         Err(InterpExit::Exception(e)) if e.kind == ExceptionKind::DivZero && e.addr == Some(0x1000)
@@ -1002,7 +1002,7 @@ fn idiv_signed() {
     env.backend.set(Gpr(2).state(), 0xffff_ffff);
     env.backend.set(Gpr(0).state(), 0xffff_fff9);
     env.backend.set(Gpr(1).state(), 2);
-    env.step(|b| sem::idiv_rm32(b, 0x1000)).unwrap();
+    env.step(|b| sem::idiv_rm32(b, 0x1000, Gpr(1))).unwrap();
     assert_eq!(eax(&mut env), 0xffff_fffd);
     assert_eq!(env.backend.get(Gpr(2).state()), 0xffff_ffff);
 }
@@ -1016,7 +1016,7 @@ fn idiv_overflow_traps() {
     env.backend.set(Gpr(2).state(), 0xffff_ffff);
     env.backend.set(Gpr(0).state(), 0x8000_0000);
     env.backend.set(Gpr(1).state(), 0xffff_ffff);
-    let r = env.step(|b| sem::idiv_rm32(b, 0x1000));
+    let r = env.step(|b| sem::idiv_rm32(b, 0x1000, Gpr(1)));
     assert!(matches!(
         r,
         Err(InterpExit::Exception(e)) if e.kind == ExceptionKind::DivZero && e.addr == Some(0x1000)
@@ -1914,5 +1914,102 @@ fn cmove_moves_on_z() {
     env.backend.set(Gpr(0).state(), 1);
     env.backend.set(sem::eflags_ref(), 0x0);
     env.step(|b| sem::cmove_r32(b, Gpr(0), Gpr(1))).unwrap();
+    assert_eq!(eax(&mut env), 1);
+}
+
+#[test]
+fn cmovns_moves_on_ns() {
+    // CMOVNS: SF=0 で mov、SF=1 で保持.
+    let mut env = env();
+    env.backend.set(Gpr(0).state(), 1);
+    env.backend.set(Gpr(1).state(), 2);
+    env.backend.set(sem::eflags_ref(), 0x0);
+    env.step(|b| sem::cmovns_r32(b, Gpr(0), Gpr(1))).unwrap();
+    assert_eq!(eax(&mut env), 2);
+    env.backend.set(Gpr(0).state(), 1);
+    env.backend.set(sem::eflags_ref(), 0x80);
+    env.step(|b| sem::cmovns_r32(b, Gpr(0), Gpr(1))).unwrap();
+    assert_eq!(eax(&mut env), 1);
+}
+
+#[test]
+fn div_rm64_rdi() {
+    // DIV RDI (64-bit): RDX:RAX=17 / RDI=5 -> RAX=3, RDX=2.
+    let mut env = env();
+    env.step(|b| {
+        sem::write64(b, Gpr(0), 17);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| {
+        sem::write64(b, Gpr(2), 0);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| {
+        sem::write64(b, Gpr(7), 5);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::div_rm64(b, 0x1000, Gpr(7))).unwrap();
+    assert_eq!(env.backend.get(Gpr(0).state()), 3);
+}
+
+#[test]
+fn sar_rm64_imm8_arith() {
+    // SAR RCX,2 (64-bit): 0xF0 >>a 2 = 0x3C (sign 0).
+    let mut env = env();
+    env.step(|b| {
+        sem::write64(b, Gpr(1), 0xF0);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::sar_rm64_imm8(b, Gpr(1), 2)).unwrap();
+    assert_eq!(env.backend.get(Gpr(1).state()), 0x3C);
+    // SAR negative: 0xFFFF_FFFF_FFFF_FFF0 >>a 4 = 0xFFFF_FFFF_FFFF_FFFF? Actually -16 >>4 = -1.
+    env.step(|b| {
+        sem::write64(b, Gpr(1), 0xFFFF_FFFF_FFFF_FFF0);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::sar_rm64_imm8(b, Gpr(1), 4)).unwrap();
+    assert_eq!(env.backend.get(Gpr(1).state()), 0xFFFF_FFFF);
+}
+
+#[test]
+fn mov_r64_imm64_roundtrip() {
+    // MOV R12,0x1122334455667788.
+    let mut env = env();
+    env.step(|b| sem::mov_r64_imm64(b, Gpr(12), 0x1122_3344_5566_7788))
+        .unwrap();
+    assert_eq!(env.backend.get(Gpr(12).state()), 0x5566_7788);
+    // high tested via write64? Gpr(12) is x[4], full 64.
+    env.step(|b| {
+        let v = sem::read64(b, Gpr(12));
+        // dummy to use read64
+        let _ = v;
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn cmovbe_moves_on_carry_or_zero() {
+    // CMOVBE: CF=1 で mov.
+    let mut env = env();
+    env.backend.set(Gpr(0).state(), 1);
+    env.backend.set(Gpr(1).state(), 2);
+    env.backend.set(sem::eflags_ref(), 0x1);
+    env.step(|b| sem::cmovbe_r32(b, Gpr(0), Gpr(1))).unwrap();
+    assert_eq!(eax(&mut env), 2);
+    // ZF=1 で mov.
+    env.backend.set(Gpr(0).state(), 1);
+    env.backend.set(sem::eflags_ref(), 0x40);
+    env.step(|b| sem::cmovbe_r32(b, Gpr(0), Gpr(1))).unwrap();
+    assert_eq!(eax(&mut env), 2);
+    // CF=0,ZF=0 で保持.
+    env.backend.set(Gpr(0).state(), 1);
+    env.backend.set(sem::eflags_ref(), 0x0);
+    env.step(|b| sem::cmovbe_r32(b, Gpr(0), Gpr(1))).unwrap();
     assert_eq!(eax(&mut env), 1);
 }

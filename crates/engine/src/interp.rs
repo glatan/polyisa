@@ -458,6 +458,24 @@ impl Backend for InterpBackend {
     }
 
     fn cmp<W: Width>(&mut self, op: Cmp, a: Self::V<W>, b: Self::V<W>) -> Self::B {
+        // 128ビット幅は u128 で直接比べる（to_u64 では上位が落ち、64-BITS が負になる）。
+        if W::BITS > 64 {
+            let (x, y) = (W::to_u128(a), W::to_u128(b));
+            // 符号付きは最上位ビットを符号とみなす。W128 では as i128 でよい。
+            let (sx, sy) = (x as i128, y as i128);
+            return match op {
+                Cmp::Eq => x == y,
+                Cmp::Ne => x != y,
+                Cmp::LtU => x < y,
+                Cmp::LtS => sx < sy,
+                Cmp::GtU => x > y,
+                Cmp::GtS => sx > sy,
+                Cmp::LeU => x <= y,
+                Cmp::LeS => sx <= sy,
+                Cmp::GeU => x >= y,
+                Cmp::GeS => sx >= sy,
+            };
+        }
         let (a, b) = (to_u64::<W>(a), to_u64::<W>(b));
         // 符号付き比較は幅の最上位ビットを符号とみなす。
         // ゼロ拡張のまま `as i64` すると W32 の負値が正とみなされる。
