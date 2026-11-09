@@ -1040,6 +1040,26 @@ pub fn mov_abs_eax<B: Backend>(b: &mut B, src: Gpr, addr: u32) -> Flow<B> {
     Ok(())
 }
 
+/// MOV FS:[disp32], r32 (FS 上書き + SIB 直接番地ストア)。FS base へ32bit格納.
+pub fn mov_m32_fs_abs<B: Backend>(b: &mut B, src: Gpr, fs_base: u64, disp: i32) -> Flow<B> {
+    let base = b.konst::<W64>(fs_base);
+    let d = b.konst::<W64>(disp as i64 as u64);
+    let addr = b.add::<W64>(base, d);
+    let v: B::V<W32> = read(b, src);
+    b.store::<W32>(addr, v, DATA_WRITE)?;
+    Ok(())
+}
+
+/// MOV FS:[disp32], r64 (FS 上書き + SIB 直接番地ストア、REX.W)。FS base へ64bit格納.
+pub fn mov_m64_fs_abs<B: Backend>(b: &mut B, src: Gpr, fs_base: u64, disp: i32) -> Flow<B> {
+    let base = b.konst::<W64>(fs_base);
+    let d = b.konst::<W64>(disp as i64 as u64);
+    let addr = b.add::<W64>(base, d);
+    let v: B::V<W64> = read64(b, src);
+    b.store::<W64>(addr, v, DATA_WRITE)?;
+    Ok(())
+}
+
 /// SUB EAX, imm32。結果を書き、6 旗を更新する。
 pub fn sub_eax<B: Backend>(b: &mut B, imm: u32) -> Flow<B> {
     let x = read(b, Gpr(0));
@@ -3056,6 +3076,26 @@ pub fn mov_rm32_imm_mem32<B: Backend>(b: &mut B, base: Gpr, disp: i32, imm: u32)
     Ok(())
 }
 
+/// MOV m32, imm32 FS:[disp32] (FS 上書き + C7 SIB 直接番地)。FS base へ32bit格納.
+pub fn mov_rm32_imm_fs_abs<B: Backend>(b: &mut B, fs_base: u64, disp: i32, imm: u32) -> Flow<B> {
+    let base = b.konst::<W64>(fs_base);
+    let d = b.konst::<W64>(disp as i64 as u64);
+    let addr = b.add::<W64>(base, d);
+    let v = b.konst::<W32>(imm);
+    b.store::<W32>(addr, v, DATA_WRITE)?;
+    Ok(())
+}
+
+/// MOV m64, imm32 FS:[disp32] (FS 上書き + C7 SIB 直接番地、REX.W)。imm32 は符号拡張する.
+pub fn mov_rm64_imm_fs_abs<B: Backend>(b: &mut B, fs_base: u64, disp: i32, imm: u32) -> Flow<B> {
+    let base = b.konst::<W64>(fs_base);
+    let d = b.konst::<W64>(disp as i64 as u64);
+    let addr = b.add::<W64>(base, d);
+    let v = b.konst::<W64>(imm as i32 as u64);
+    b.store::<W64>(addr, v, DATA_WRITE)?;
+    Ok(())
+}
+
 /// MOV m64, imm32 (C7 /0 mod=10 RBP+disp32, REX.W)。imm32 は符号拡張する。
 pub fn mov_rm64_imm_mem32<B: Backend>(b: &mut B, base: Gpr, disp: i32, imm: u32) -> Flow<B> {
     let addr = eff_addr32(b, base, disp);
@@ -3488,6 +3528,68 @@ pub fn mov_rm64_imm_sibd32<B: Backend>(
     Ok(())
 }
 
+/// MOV m32, [idx*scale+disp32] abs (C7 /0 SIB 直接番地、索引あり)。
+pub fn mov_rm32_imm_sibabs<B: Backend>(
+    b: &mut B,
+    idx: Gpr,
+    shift: u32,
+    disp: i32,
+    imm: u32,
+) -> Flow<B> {
+    let addr = sib_addr_scaled_abs(b, shift, disp, idx);
+    let v = b.konst::<W32>(imm);
+    b.store::<W32>(addr, v, DATA_WRITE)?;
+    Ok(())
+}
+
+/// MOV m64, [idx*scale+disp32] abs (C7 /0 SIB 直接番地、索引あり、REX.W)。imm32 は符号拡張する.
+pub fn mov_rm64_imm_sibabs<B: Backend>(
+    b: &mut B,
+    idx: Gpr,
+    shift: u32,
+    disp: i32,
+    imm: u32,
+) -> Flow<B> {
+    let addr = sib_addr_scaled_abs(b, shift, disp, idx);
+    let v = b.konst::<W64>(imm as i32 as u64);
+    b.store::<W64>(addr, v, DATA_WRITE)?;
+    Ok(())
+}
+
+/// MOV FS:[idx*scale+disp32] (C7 SIB 直接番地、索引あり)。FS base からの32bit格納.
+pub fn mov_rm32_imm_fs_sibabs<B: Backend>(
+    b: &mut B,
+    fs_base: u64,
+    idx: Gpr,
+    shift: u32,
+    disp: i32,
+    imm: u32,
+) -> Flow<B> {
+    let rel = sib_addr_scaled_abs(b, shift, disp, idx);
+    let base = b.konst::<W64>(fs_base);
+    let addr = b.add::<W64>(base, rel);
+    let v = b.konst::<W32>(imm);
+    b.store::<W32>(addr, v, DATA_WRITE)?;
+    Ok(())
+}
+
+/// MOV FS:[idx*scale+disp32] (C7 SIB 直接番地、索引あり、REX.W)。FS base からの64bit格納.
+pub fn mov_rm64_imm_fs_sibabs<B: Backend>(
+    b: &mut B,
+    fs_base: u64,
+    idx: Gpr,
+    shift: u32,
+    disp: i32,
+    imm: u32,
+) -> Flow<B> {
+    let rel = sib_addr_scaled_abs(b, shift, disp, idx);
+    let base = b.konst::<W64>(fs_base);
+    let addr = b.add::<W64>(base, rel);
+    let v = b.konst::<W64>(imm as i32 as u64);
+    b.store::<W64>(addr, v, DATA_WRITE)?;
+    Ok(())
+}
+
 /// MOVZX r32,m16 RIP相対。16ビットを読んでゼロ拡張する.
 pub fn movzx_r32_m16_rip<B: Backend>(b: &mut B, dst: Gpr, next_rip: u64, disp: i32) -> Flow<B> {
     use polyisa_sem::W16;
@@ -3535,6 +3637,14 @@ pub fn mov_rm32_imm_abs<B: Backend>(b: &mut B, addr32: u32, imm: u32) -> Flow<B>
     let addr = b.konst::<W64>(addr32 as u64);
     let v = b.konst::<W32>(imm);
     b.store::<W32>(addr, v, DATA_WRITE)?;
+    Ok(())
+}
+
+/// MOV m64, [disp32] abs (C7 SIB 直接番地、REX.W)。imm32 は符号拡張する.
+pub fn mov_rm64_imm_abs<B: Backend>(b: &mut B, addr32: u32, imm: u32) -> Flow<B> {
+    let addr = b.konst::<W64>(addr32 as u64);
+    let v = b.konst::<W64>(imm as i32 as u64);
+    b.store::<W64>(addr, v, DATA_WRITE)?;
     Ok(())
 }
 

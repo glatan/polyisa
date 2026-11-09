@@ -349,13 +349,14 @@ fn fetch_len(
                 Some(6 - sub)
             } else if rm == 4 {
                 // SIB 付き。mod=01 は disp8+imm (8B/6B)、mod=10 は disp32+imm (11B/9B)。
-                // mod=00 は SIB base で変わるため未対応。
+                // mod=00 は SIB base が直接番地 (101) のとき disp32+imm (11B/9B)。
                 if md == 1 {
                     Some(8 - sub)
                 } else if md == 2 {
                     Some(11 - sub)
                 } else {
-                    None
+                    let t = third?;
+                    if t & 7 == 5 { Some(11 - sub) } else { None }
                 }
             } else if md == 1 {
                 Some(7 - sub)
@@ -635,7 +636,8 @@ pub fn run_mode(
         };
         // SIB 付き（mod≠11 かつ rm=100）は第3バイト（SIB）で長さが変わる。
         // 2バイトオペコード（0F）では third=ModRM、fourth=SIB である。
-        let third = if (matches!(head[0], 0x8B | 0x89 | 0x8D)
+        // C7 は SIB の base で mod=00 の長さが変わるため同様に読む。
+        let third = if (matches!(head[0], 0x8B | 0x89 | 0x8D | 0xC7)
             && matches!(second, Some(s) if s & 7 == 4 && s >> 6 != 3))
             || (head[0] == 0x0F
                 && (matches!(
@@ -1148,7 +1150,17 @@ fn dispatch<B: Backend>(
         }
         Insn::MovSibabsEax => {
             if no_index() {
-                sem::mov_abs_eax(b, reg(), disp32() as u32)
+                match fs {
+                    // FS 上書き + SIB 直接番地は FS:[disp32] とみなす。
+                    Some(base) if is64 => {
+                        if rex_w {
+                            sem::mov_m64_fs_abs(b, reg(), base, disp32())
+                        } else {
+                            sem::mov_m32_fs_abs(b, reg(), base, disp32())
+                        }
+                    }
+                    _ => sem::mov_abs_eax(b, reg(), disp32() as u32),
+                }
             } else {
                 sem::mov_sibabs_eax(b, reg(), sib_idx(), sib_shift(), disp32())
             }
@@ -1842,6 +1854,30 @@ fn dispatch<B: Backend>(
                 sem::mov_rm64_imm_sibd32(b, sib_base(), sib_idx(), sib_shift(), disp, imm32())
             } else {
                 sem::mov_rm32_imm_sibd32(b, sib_base(), sib_idx(), sib_shift(), disp, imm32())
+            }
+        }
+        Insn::MovRmImmSibabs => {
+            // C7 SIB 直接番地+disp32+imm32 (11B, mod=00)。disp は下から2番目の32、imm は最下位32.
+            // SIB base=101 (直接番地)。idx=100 (no_index) 以外は sib_idx で扱う.
+            let disp = ((word >> 32) as u32).swap_bytes() as i32;
+            let disp_le = ((word >> 32) as u32).swap_bytes();
+            if no_index() {
+                match fs {
+                    Some(base) if rex_w => sem::mov_rm64_imm_fs_abs(b, base, disp, imm32()),
+                    Some(base) => sem::mov_rm32_imm_fs_abs(b, base, disp, imm32()),
+                    None if rex_w => sem::mov_rm64_imm_abs(b, disp_le, imm32()),
+                    None => sem::mov_rm32_imm_abs(b, disp_le, imm32()),
+                }
+            } else if let Some(base) = fs {
+                if rex_w {
+                    sem::mov_rm64_imm_fs_sibabs(b, base, sib_idx(), sib_shift(), disp, imm32())
+                } else {
+                    sem::mov_rm32_imm_fs_sibabs(b, base, sib_idx(), sib_shift(), disp, imm32())
+                }
+            } else if rex_w {
+                sem::mov_rm64_imm_sibabs(b, sib_idx(), sib_shift(), disp, imm32())
+            } else {
+                sem::mov_rm32_imm_sibabs(b, sib_idx(), sib_shift(), disp, imm32())
             }
         }
         Insn::MovapsStoreMemnd => sem::movups_store_memnd(b, xmm_reg(), rm0f()),
@@ -2538,6 +2574,12 @@ impl TrapHandler for CliLinux {
         if nr == n_exit || nr == n_exit_group {
             return TrapOutcome::Exit(get64(env, r_a) as u32);
         }
+        if self.is64 && nr == polyisa_os_linux::x86_64::SET_TID_ADDRESS {
+            // 単一スレッド実装としてホスト PID を TID として返す。
+            // 本物は clear_child_tid を記録し終了時に書き込むが、試作では値返却のみ行う。
+            set64(env, Gpr(0), std::process::id() as u64);
+            return TrapOutcome::Handled;
+        }
         // arch_prctl (x86-64 のみ)。TLS の FS ベース設定を受け付ける。
         // Ref: SRC-LINUX (7.3) arch/x86/include/uapi/asm/prctl.h.
         if self.is64 && nr == polyisa_os_linux::x86_64::ARCH_PRCTL {
@@ -2849,6 +2891,17 @@ mod tests {
     }
 
     #[test]
+    fn set_tid_address_returns_tid() {
+        use polyisa_os_linux::x86_64 as abi;
+        let mut sys = CliLinux::x86_64();
+        let mut env = bare();
+        set64(&mut env, Gpr(0), abi::SET_TID_ADDRESS);
+        set64(&mut env, Gpr(7), 0x100);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), std::process::id() as u64);
+    }
+
+    #[test]
     fn fs_relative_mov_sibabs() {
         // FS 上書き + REX.W 8B SIB直接番地 (MOV RDX,FS:[disp32]) を run する。
         // FS 絶対番地のため disp=target-fs_base=0x500 (RIP相対ではない)。
@@ -2872,5 +2925,61 @@ mod tests {
         env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
         let out = run_mode(&mut env, 0x1000, &mut sys, 100, true);
         assert_eq!(out, Outcome::Exit(0x1234_5678));
+    }
+
+    #[test]
+    fn fs_relative_mov_sibabs_store() {
+        // FS 上書き + REX.W 89 SIB直接番地 (MOV FS:[disp32],RAX) を run する。
+        // fs_base=0x1000、disp=0x500 で [0x1500] へ64bit格納し、exit(0)。
+        let mut sys = CliLinux::x86_64();
+        sys.fs_base = 0x1000;
+        let mut env = bare();
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        let prog: &[u8] = &[
+            0x48, 0xB8, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22,
+            0x11, // movabs rax,0x1122334455667788
+            0x64, 0x48, 0x89, 0x04, 0x25, 0x00, 0x05, 0x00, 0x00, // mov FS:[0x500],rax
+            0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+            0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
+            0x0F, 0x05, // syscall -> exit(0)
+        ];
+        env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+        let out = run_mode(&mut env, 0x1000, &mut sys, 100, true);
+        assert_eq!(out, Outcome::Exit(0));
+        let mut back = [0u8; 8];
+        env.backend
+            .mem
+            .read(VirtAddr(0x1500), &mut back, data_access())
+            .unwrap();
+        assert_eq!(u64::from_le_bytes(back), 0x1122_3344_5566_7788);
+    }
+
+    #[test]
+    fn fs_relative_mov_sibabs_store_imm32() {
+        // FS 上書き + C7 SIB 直接番地 (MOV FS:[disp32],imm32) を run する。
+        // fs_base=0x1000、disp=0x500 で [0x1500]=0x11223344 になり、exit(0)。
+        // SIB=0x25 (no_index) の mod=00 形。fetch 長 11B+接頭辞の経路検証も兼ねる。
+        let mut sys = CliLinux::x86_64();
+        sys.fs_base = 0x1000;
+        let mut env = bare();
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        let prog: &[u8] = &[
+            0x64, 0xC7, 0x04, 0x25, 0x00, 0x05, 0x00, 0x00, 0x44, 0x33, 0x22,
+            0x11, // movl $0x11223344,FS:[0x500]
+            0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+            0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
+            0x0F, 0x05, // syscall -> exit(0)
+        ];
+        env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+        let out = run_mode(&mut env, 0x1000, &mut sys, 100, true);
+        assert_eq!(out, Outcome::Exit(0));
+        let mut back = [0u8; 4];
+        env.backend
+            .mem
+            .read(VirtAddr(0x1500), &mut back, data_access())
+            .unwrap();
+        assert_eq!(u32::from_le_bytes(back), 0x1122_3344);
     }
 }
