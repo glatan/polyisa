@@ -4468,3 +4468,41 @@ fn psubb_wraps() {
     })
     .unwrap();
 }
+
+#[test]
+fn call_r64_rm_basic() {
+    // CALL RAX (FF /2 mod=11): RAX=0x2000, eip_next=0x1002 を積み、eip=0x2000 へ.
+    let mut env = env();
+    env.map_rw(0, 2).unwrap();
+    env.backend.set(Gpr(4).state(), 0x200);
+    env.step(|b| {
+        sem::write64(b, Gpr(0), 0x2000);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::call_r64_rm(b, 0x1002, Gpr(0))).unwrap();
+    assert_eq!(env.backend.get(sem::eip_ref()), 0x2000);
+    assert_eq!(env.backend.get(Gpr(4).state()), 0x1f8);
+    let mut ret = [0u8; 8];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x1F8),
+            &mut ret,
+            Access {
+                endian: Endian::Le,
+                align: Align::Unaligned,
+                kind: AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(u64::from_le_bytes(ret), 0x1002);
+}
+
+#[test]
+fn mov_r8_imm_basic() {
+    // MOV R13B,1 (REX.B B5 ib): R13B=1.
+    let mut env = env();
+    env.step(|b| sem::mov_r8_imm(b, Gpr(13), false, 1)).unwrap();
+    assert_eq!(env.backend.get(Gpr(13).state()) & 0xFF, 1);
+}

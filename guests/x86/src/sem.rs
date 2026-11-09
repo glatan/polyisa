@@ -9525,3 +9525,44 @@ pub fn psubb_xmm<B: Backend>(b: &mut B, dst: Xmm, src: Xmm) -> Flow<B> {
     b.set(xmm_ref(dst), acc);
     Ok(())
 }
+
+/// CALL r/m64 reg-direct (FF /2 mod=11)。64ビット間接コール.
+pub fn call_r64_rm<B: Backend>(b: &mut B, eip_next: u64, src: Gpr) -> Flow<B> {
+    let target64: B::V<W64> = read64(b, src);
+    let ret_addr = eip_next;
+    let rsp = read64(b, Gpr(4));
+    let eight = b.konst::<W64>(8);
+    let next = b.sub::<W64>(rsp, eight);
+    write64(b, Gpr(4), next);
+    let ret = b.konst::<W64>(ret_addr);
+    b.store::<W64>(next, ret, DATA_WRITE)?;
+    let t32: B::V<W32> = b.trunc::<W64, W32>(target64);
+    b.set(eip_ref(), t32);
+    b.jump(target64);
+    Ok(())
+}
+
+/// CALL r/m32 reg-direct (FF /2 mod=11、32ビット)。
+pub fn call_r32_rm<B: Backend>(b: &mut B, eip_next: u32, src: Gpr) -> Flow<B> {
+    let target: B::V<W32> = read(b, src);
+    let ret_addr = eip_next;
+    let esp = read(b, Gpr(4));
+    let four = b.konst::<W32>(4);
+    let next = b.sub::<W32>(esp, four);
+    b.set(esp_ref(), next);
+    let saddr = b.zext::<W32, W64>(next);
+    let ret = b.konst::<W32>(ret_addr);
+    b.store::<W32>(saddr, ret, DATA_WRITE)?;
+    b.set(eip_ref(), target);
+    let tj = b.zext::<W32, W64>(target);
+    b.jump(tj);
+    Ok(())
+}
+
+/// MOV r8,imm8 (B0+r ib)。8ビット即値を書く.
+pub fn mov_r8_imm<B: Backend>(b: &mut B, dst: Gpr, high: bool, imm: u8) -> Flow<B> {
+    use polyisa_sem::W8;
+    let v = b.konst::<W8>(imm);
+    write8(b, dst, high, v);
+    Ok(())
+}

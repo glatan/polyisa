@@ -70,7 +70,7 @@ fn fetch_len(
 ) -> Option<u64> {
     match first {
         0x90 | 0x91..=0x97 | 0x40..=0x4F | 0x50..=0x5F | 0xC3 | 0xC9 | 0x98 => Some(1),
-        0x6A => Some(2),
+        0x6A | 0xB0..=0xB7 => Some(2),
         0x68 => Some(5),
         0xEB | 0x70 | 0x71 | 0x72 | 0x73 | 0x74 | 0x75 | 0x76 | 0x77 | 0x78 | 0x79 | 0x7A
         | 0x7B | 0x7C | 0x7D | 0x7E | 0x7F | 0xE2 | 0xCD | 0x3C => Some(2),
@@ -1044,6 +1044,7 @@ pub fn run_mode(
                     | 0xAA
                     | 0xAB
                     | 0xB8..=0xBF
+                    | 0xB0..=0xB7
                     | 0x6A
                     | 0x68
                     | 0x50..=0x5F | 0xE8 | 0xE9
@@ -1377,6 +1378,19 @@ fn dispatch<B: Backend>(
             let dst = Gpr((((word >> 64) & 7) as u8) | ((rex & 1) << 3));
             let imm = (word as u64).swap_bytes();
             sem::mov_r64_imm64(b, dst, imm)
+        }
+        Insn::MovR8Imm => {
+            // B0+r ib: dst は opcode 下3ビット + REX.B。REX ありは低8、なしの4-7は上位8.
+            let reg_f = ((word >> 8) & 7) as u8;
+            let imm = (word & 0xff) as u8;
+            let (dst, high) = if rex != 0 {
+                (Gpr(reg_f | ((rex & 1) << 3)), false)
+            } else if reg_f < 4 {
+                (Gpr(reg_f), false)
+            } else {
+                (Gpr(reg_f - 4), true)
+            };
+            sem::mov_r8_imm(b, dst, high, imm)
         }
         Insn::Syscall => sem::syscall(b, eip),
         Insn::Cpuid => sem::cpuid(b),
@@ -2207,6 +2221,14 @@ fn dispatch<B: Backend>(
                 sem::call_r64_mem8(b, eip as u64 + nbytes, rm(), disp8())
             } else {
                 sem::call_r32_mem8(b, eip.wrapping_add(nbytes as u32), rm(), disp8())
+            }
+        }
+        Insn::CallRRm => {
+            // FF /2 mod=11 reg-direct 間接CALL。src は rm().
+            if is64 {
+                sem::call_r64_rm(b, eip as u64 + nbytes, rm())
+            } else {
+                sem::call_r32_rm(b, eip.wrapping_add(nbytes as u32), rm())
             }
         }
         Insn::CallRMemnd => {

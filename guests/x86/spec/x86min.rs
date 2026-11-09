@@ -175,6 +175,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("push_imm32", "F1", "01101000 ................................", "push {imm}", "store"),
         // PUSH imm8 (6A ib)。64ビットでは符号拡張して8バイト積む.
         ("push_imm8", "F1", "01101010 ........", "push {imm}", "store"),
+        // MOV r8,imm8 (B0+r ib)。REX.B で拡張、REX ありは低8・なしの4-7は上位8.
+        ("mov_r8_imm", "F1", "10110... ........", "mov r8, {imm}", "load"),
         // XCHG r32/r64, RAX (90-97)。90 は NOP と共有のため 91-97 のみ。REX.B で拡張、REX.W で64bit.
         ("xchg_rcx_ax", "F1", "10010001", "xchg rcx, rax", "alu"),
         ("xchg_rdx_ax", "F1", "10010010", "xchg rdx, rax", "alu"),
@@ -363,6 +365,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("call_r_memnd", "MR", "11111111 01000...", "call r/m64", "jump"),
         // CALL r/m64 mod=10 [base+disp32] (FF /2)。SIBなし.
         ("call_r_mem32", "M32", "11111111 10010... ................................", "call r/m64", "jump"),
+        // CALL r/m64 reg-direct (FF /2 mod=11)。レジスタ間接コール.
+        ("call_r_rm", "F1", "11111111 11010...", "call r/m64", "jump"),
         // CALL [base+index*scale] (FF /2 SIB mod=00)。64ビット間接コール.
         ("call_r_sib", "N8", "11111111 00010100 ........", "call r/m64", "jump"),
         // XCHG r32,r/m32 (87 /r)。reg-direct・mod=00/01/10/RIP (SIBなし).
