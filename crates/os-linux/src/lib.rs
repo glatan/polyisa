@@ -271,7 +271,10 @@ pub fn build_initial_stack(
     }
     let strings_len: usize = args.iter().map(|a| a.len() + 1).sum::<usize>()
         + env.iter().map(|e| e.len() + 1).sum::<usize>();
-    let arrays_len: usize = 8 * (1 + (args.len() + 1) + (env.len() + 1)) + 16 * (auxv.len() + 1);
+    // AT_EXECFN を args[0] 向けに1件足す（args 空では付けない）。
+    let execfn_extra: usize = if args.is_empty() { 0 } else { 16 };
+    let arrays_len: usize =
+        8 * (1 + (args.len() + 1) + (env.len() + 1)) + 16 * (auxv.len() + 1) + execfn_extra;
     let total = arrays_len + strings_len;
     let aligned = total.next_multiple_of(16);
     let sp = top - aligned as u64;
@@ -305,10 +308,16 @@ pub fn build_initial_stack(
         w64(&mut img, off + 8, *v);
         off += 16;
     }
-    // AT_NULL 終端。img はゼロ初期化済みなので off を進めるだけ.
-    off += 16;
-    debug_assert_eq!(off, arrays_len);
-    let _ = pos;
+    // AT_EXECFN (31) は args[0] の番地を指す。静的 glibc の _dl_get_origin が参照する.
+    // args が空の単体テストでは付けない.
+    if !args.is_empty() {
+        const AT_EXECFN: u64 = 31;
+        w64(&mut img, off, AT_EXECFN);
+        w64(&mut img, off + 8, addrs[0]);
+        off += 16;
+    }
+    // AT_NULL 終端は img のゼロ初期化で表す.
+    let _ = (off, pos);
     (img, sp)
 }
 
@@ -370,11 +379,13 @@ mod tests {
         let a1 = r64(16);
         assert_eq!(r64(24), 0);
         assert_eq!(r64(32), 0);
-        // auxv.
+        // auxv: (6,0x1000) + AT_EXECFN(31,args[0]) + AT_NULL.
         assert_eq!(r64(40), 6);
         assert_eq!(r64(48), 0x1000);
-        assert_eq!(r64(56), 0);
-        assert_eq!(r64(64), 0);
+        assert_eq!(r64(56), 31);
+        assert_eq!(r64(64), a0);
+        assert_eq!(r64(72), 0);
+        assert_eq!(r64(80), 0);
         // 文字列の解決。
         let at = |addr: u64| (addr - sp) as usize;
         assert_eq!(&img[at(a0)..at(a0) + 4], b"prog");
