@@ -792,7 +792,18 @@ pub fn run_mode(
             }
             // #DE 等の Trap 以外の退出（未実装命令を含む）は区別せず止める。
             // 本格実装では DivZero をシグナルに変える。
-            Err(_) => {
+            Err(e) => {
+                if eip == 0x4507bb {
+                    use polyisa_guest_x86::sem::{Gpr, read64};
+                    let rdi = read64(&mut env.backend, Gpr(7));
+                    let rax = read64(&mut env.backend, Gpr(0));
+                    let r8 = read64(&mut env.backend, Gpr(8));
+                    let rcx = read64(&mut env.backend, Gpr(1));
+                    let tgt = rcx.wrapping_add(0x30);
+                    eprintln!(
+                        "DBG4507BB err={e:?} rdi={rdi:#x} rax={rax:#x} r8={r8:#x} rcx={rcx:#x} target={tgt:#x}"
+                    );
+                }
                 return Outcome::Unimplemented { eip, word };
             }
         }
@@ -1147,9 +1158,27 @@ fn dispatch<B: Backend>(
             }
         }
         Insn::Int80 => sem::int80(b, eip),
-        Insn::LeaM8 => sem::lea_m8(b, reg(), rm(), disp8()),
-        Insn::LeaM32 => sem::lea_m32(b, reg(), rm(), disp32()),
-        Insn::LeaMnd => sem::lea_mnd(b, reg(), rm()),
+        Insn::LeaM8 => {
+            if rex_w {
+                sem::lea_m8_64(b, reg(), rm(), disp8())
+            } else {
+                sem::lea_m8(b, reg(), rm(), disp8())
+            }
+        }
+        Insn::LeaM32 => {
+            if rex_w {
+                sem::lea_m32_64(b, reg(), rm(), disp32())
+            } else {
+                sem::lea_m32(b, reg(), rm(), disp32())
+            }
+        }
+        Insn::LeaMnd => {
+            if rex_w {
+                sem::lea_mnd_64(b, reg(), rm())
+            } else {
+                sem::lea_mnd(b, reg(), rm())
+            }
+        }
         Insn::LeaAbs => {
             if is64 {
                 sem::lea_rip64(b, reg(), eip as u64 + nbytes, disp32())
@@ -1158,27 +1187,48 @@ fn dispatch<B: Backend>(
             }
         }
         Insn::LeaSib => {
-            if no_index() {
+            if rex_w {
+                if no_index() {
+                    sem::lea_mnd_64(b, reg(), sib_base())
+                } else {
+                    sem::lea_sib_64(b, reg(), sib_base(), sib_idx(), sib_shift())
+                }
+            } else if no_index() {
                 sem::lea_mnd(b, reg(), sib_base())
             } else {
                 sem::lea_sib(b, reg(), sib_base(), sib_idx(), sib_shift())
             }
         }
         Insn::LeaSibd => {
-            if no_index() {
+            if rex_w {
+                if no_index() {
+                    sem::lea_m8_64(b, reg(), sib_base(), disp8())
+                } else {
+                    sem::lea_sibd_64(b, reg(), sib_base(), sib_idx(), sib_shift(), disp8())
+                }
+            } else if no_index() {
                 sem::lea_m8(b, reg(), sib_base(), disp8())
             } else {
                 sem::lea_sibd(b, reg(), sib_base(), sib_idx(), sib_shift(), disp8())
             }
         }
         Insn::LeaSibd32 => {
-            if no_index() {
+            if rex_w {
+                if no_index() {
+                    sem::lea_m32_64(b, reg(), sib_base(), disp32())
+                } else {
+                    sem::lea_sibd32_64(b, reg(), sib_base(), sib_idx(), sib_shift(), disp32())
+                }
+            } else if no_index() {
                 sem::lea_m32(b, reg(), sib_base(), disp32())
             } else {
                 sem::lea_sibd32(b, reg(), sib_base(), sib_idx(), sib_shift(), disp32())
             }
         }
         Insn::LeaSibabs => {
+            // SIB abs with REX.W is unimplemented (direct番地 + REX). Fall through to 32-bit for now.
+            // 64-bit SIB abs (lea_sibabs_64) exists but dispatch keeps 32-bit for compatibility.
+            // REX.W LEA SIB abs は未対応のため 32ビットで扱う (4GB 未満想定).
             if no_index() {
                 sem::lea_abs(b, reg(), disp32() as u32)
             } else {

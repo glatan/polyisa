@@ -2043,3 +2043,22 @@ fn imul_r_imm_basic() {
         .unwrap();
     assert_eq!(env.backend.get(Gpr(8).state()), 0x110);
 }
+
+#[test]
+fn lea_sib64_rex_x() {
+    // LEA RCX,[RAX+R8] (64-bit): RAX=0x1000, R8=0x20 -> RCX=0x1020.
+    let mut env = env();
+    env.step(|b| {
+        sem::write64(b, Gpr(0), 0x1000);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| {
+        sem::write64(b, Gpr(8), 0x20);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::lea_sib_64(b, Gpr(1), Gpr(0), Gpr(8), 0))
+        .unwrap();
+    assert_eq!(env.backend.get(Gpr(1).state()), 0x1020);
+}

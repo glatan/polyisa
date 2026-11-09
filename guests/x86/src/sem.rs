@@ -1249,6 +1249,69 @@ pub fn lea_sibabs<B: Backend>(b: &mut B, dst: Gpr, idx: Gpr, shift: u32, disp: i
 
 /// CMP r/m32, r32。dst は変えず 6 旗を更新する。
 /// 方向は x=rm、y=reg。
+/// LEA r64, [base+disp8] (REX.W)。
+pub fn lea_m8_64<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, disp: i8) -> Flow<B> {
+    let addr = eff_addr(b, base, disp);
+    write64(b, dst, addr);
+    Ok(())
+}
+
+/// LEA r64, [base+disp32] (REX.W)。
+pub fn lea_m32_64<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, disp: i32) -> Flow<B> {
+    let addr = eff_addr32(b, base, disp);
+    write64(b, dst, addr);
+    Ok(())
+}
+
+/// LEA r64, [base] (REX.W)。
+pub fn lea_mnd_64<B: Backend>(b: &mut B, dst: Gpr, base: Gpr) -> Flow<B> {
+    let addr = read64(b, base);
+    write64(b, dst, addr);
+    Ok(())
+}
+
+/// LEA r64, [base+index*scale] (REX.W, SIB mod=00)。
+pub fn lea_sib_64<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, idx: Gpr, shift: u32) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, 0, base, idx);
+    write64(b, dst, addr);
+    Ok(())
+}
+
+/// LEA r64, [base+index*scale+disp8] (REX.W, SIB mod=01)。
+pub fn lea_sibd_64<B: Backend>(
+    b: &mut B,
+    dst: Gpr,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i8,
+) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, disp as i32, base, idx);
+    write64(b, dst, addr);
+    Ok(())
+}
+
+/// LEA r64, [base+index*scale+disp32] (REX.W, SIB mod=10)。
+pub fn lea_sibd32_64<B: Backend>(
+    b: &mut B,
+    dst: Gpr,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i32,
+) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, disp, base, idx);
+    write64(b, dst, addr);
+    Ok(())
+}
+
+/// LEA r64, [index*scale+disp32] (REX.W, SIB mod=00 base=直接番地)。
+pub fn lea_sibabs_64<B: Backend>(b: &mut B, dst: Gpr, idx: Gpr, shift: u32, disp: i32) -> Flow<B> {
+    let addr = sib_addr_scaled_abs(b, shift, disp, idx);
+    write64(b, dst, addr);
+    Ok(())
+}
+
 pub fn cmp_rm32<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
     let x = read(b, dst);
     let y = read(b, src);
