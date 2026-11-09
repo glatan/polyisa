@@ -144,7 +144,7 @@ fn fetch_len(
                 } else {
                     if rm == 5 { None } else { Some(3) }
                 }
-            } else if matches!(s, 0x60 | 0x61 | 0x62 | 0xEF) {
+            } else if matches!(s, 0x60 | 0x61 | 0x62 | 0xDB | 0xEF) {
                 // XMM reg-direct のみ（66 接頭辞は剥がし済み）。
                 let m = third?;
                 if m >> 6 == 3 { Some(3) } else { None }
@@ -591,6 +591,7 @@ pub fn run_mode(
                             | 0x62
                             | 0x70
                             | 0x7E
+                            | 0xDB
                             | 0xEF
                             | 0xD6
                             | 0x10
@@ -764,6 +765,7 @@ pub fn run_mode(
                     | Insn::MovqM64XmmRip
                     | Insn::Pshufd
                     | Insn::Pxor
+                    | Insn::Pand
                     | Insn::MovqR64Xmm
                     | Insn::MovupsLoadXmm
                     | Insn::MovupsStoreXmm
@@ -807,6 +809,7 @@ pub fn run_mode(
                     | Insn::MovqM64XmmRip
                     | Insn::Pshufd
                     | Insn::Pxor
+                    | Insn::Pand
                     | Insn::MovqR64Xmm
                     | Insn::MovRm16ImmM32
                     | Insn::MovntdqStoreMemnd
@@ -1604,6 +1607,7 @@ fn dispatch<B: Backend>(
             sem::pshufd(b, xmm_reg(), xmm_rm(), imm)
         }
         Insn::Pxor => sem::pxor_xmm(b, xmm_reg(), xmm_rm()),
+        Insn::Pand => sem::pand_xmm(b, xmm_reg(), xmm_rm()),
         Insn::MovupsLoadSibd32 => {
             if sib0f_no_index() {
                 sem::movups_load_mem32(b, xmm_reg(), sib0f_base(), disp32())

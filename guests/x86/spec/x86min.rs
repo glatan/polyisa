@@ -307,6 +307,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         // PXOR xmm,xmm (66 0F EF /r)。
         ("pxor", "F1", "00001111 11101111 11......", "pxor xmm, xmm", "alu"),
         ("punpckldq", "F1", "00001111 01100010 11......", "punpckldq xmm, xmm", "alu"),
+        // PAND xmm,xmm (66 0F DB /r)。reg-direct のみ。
+        ("pand", "F1", "00001111 11011011 11......", "pand xmm, xmm", "alu"),
         ("movq_m64_xmm_rip", "F1", "00001111 11010110 00...101 ................................", "movq m64, xmm", "store"),
         // MOVQ xmm,m64 RIP (F3 0F 7E 05 + disp32)。F3 接頭辞は実行側で剥がす。
         ("movq_xmm_m64_rip", "F1", "00001111 01111110 00...101 ................................", "movq xmm, m64", "load"),

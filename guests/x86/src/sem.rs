@@ -2674,6 +2674,15 @@ pub fn pxor_xmm<B: Backend>(b: &mut B, dst: Xmm, src: Xmm) -> Flow<B> {
     Ok(())
 }
 
+/// PAND xmm1, xmm2。128ビット AND する.
+pub fn pand_xmm<B: Backend>(b: &mut B, dst: Xmm, src: Xmm) -> Flow<B> {
+    let a: B::V<W128> = b.get(xmm_ref(dst));
+    let c: B::V<W128> = b.get(xmm_ref(src));
+    let v = b.and::<W128>(a, c);
+    b.set(xmm_ref(dst), v);
+    Ok(())
+}
+
 /// MOVQ m64,xmm RIP (66 0F D6)。XMM 下位64を [RIP+disp] に格納する.
 pub fn movq_m64_xmm_rip<B: Backend>(b: &mut B, src: Xmm, next_rip: u64, disp: i32) -> Flow<B> {
     let base = b.konst::<W64>(next_rip);

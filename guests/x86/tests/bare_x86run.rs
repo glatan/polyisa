@@ -986,3 +986,32 @@ fn run_and_imm32_rip() {
         .unwrap();
     assert_eq!(u32::from_le_bytes(back), 0xFC3F_FEF3);
 }
+
+#[test]
+fn run_pand_reg_direct() {
+    // run 経由で 66 0F DB /r (PAND xmm0,xmm1) を回す。
+    // movd で xmm0=0xFF / xmm1=0x0F を作り、PAND で xmm0=0x0F になることを確かめる。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    env.backend.set(Gpr(6).state(), 0xFF);
+    env.backend.set(Gpr(1).state(), 0x0F);
+    let prog: &[u8] = &[
+        0x66, 0x0F, 0x6E, 0xC6, // movd xmm0,esi (xmm0=0xFF)
+        0x66, 0x0F, 0x6E, 0xC9, // movd xmm1,ecx (xmm1=0x0F)
+        0x66, 0x0F, 0xDB, 0xC1, // pand xmm0,xmm1 (xmm0=0x0F)
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
+        0x0F, 0x05, // syscall -> exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0));
+    let v: u128 = env.backend.get(polyisa_guest_x86::sem::xmm_ref(
+        polyisa_guest_x86::sem::Xmm(0),
+    ));
+    assert_eq!(v & 0xffff_ffff, 0x0F);
+}

@@ -2363,3 +2363,21 @@ fn and_imm32_rip_clears_bits() {
         .unwrap();
     assert_eq!(u32::from_le_bytes(back), 0xFC3F_FEF3);
 }
+
+#[test]
+fn pand_keeps_common_bits() {
+    // PAND: 0xFF00FF00 & 0xF0F0F0F0... (128bit) = 共通ビットのみ.
+    use polyisa_guest_x86::sem::Xmm;
+    let mut env = env();
+    env.step(|b| {
+        let a = b.konst::<polyisa_sem::W128>(0xFF00FF00FF00FF00FF00FF00FF00FF00u128);
+        b.set(sem::xmm_ref(Xmm(0)), a);
+        let c = b.konst::<polyisa_sem::W128>(0xF0F0F0F0F0F0F0F0F0F0F0F0F0F0F0F0u128);
+        b.set(sem::xmm_ref(Xmm(1)), c);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::pand_xmm(b, Xmm(0), Xmm(1))).unwrap();
+    let v: u128 = env.backend.get(sem::xmm_ref(Xmm(0)));
+    assert_eq!(v, 0xF000F000F000F000F000F000F000F000u128);
+}
