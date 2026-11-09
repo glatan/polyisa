@@ -94,8 +94,10 @@ pub fn je<B: Backend>(b: &mut B, eip: u32, disp: i8) -> Flow<B> {
     let zf = read_zf(b);
     let target = eip.wrapping_add(2).wrapping_add(disp as i32 as u32);
     let t = b.konst::<W32>(target);
+    let tj = b.konst::<W64>(target as u64);
     b.if_then(zf, |b| {
         b.set(eip_ref(), t);
+        b.jump(tj);
         Ok(())
     })?;
     Ok(())
@@ -111,8 +113,10 @@ pub fn jne<B: Backend>(b: &mut B, eip: u32, disp: i8) -> Flow<B> {
     let one = b.konst::<W32>(1);
     let zf_num = b.select::<W32>(zf, one, zero);
     let take = b.cmp::<W32>(Cmp::Eq, zf_num, zero);
+    let tj = b.konst::<W64>(target as u64);
     b.if_then(take, |b| {
         b.set(eip_ref(), t);
+        b.jump(tj);
         Ok(())
     })?;
     Ok(())
@@ -404,6 +408,8 @@ pub fn call_rel32<B: Backend>(b: &mut B, eip: u32, disp: i32) -> Flow<B> {
     let target = ret_addr.wrapping_add(disp as u32);
     let t = b.konst::<W32>(target);
     b.set(eip_ref(), t);
+    let tj = b.konst::<W64>(target as u64);
+    b.jump(tj);
     Ok(())
 }
 
@@ -413,6 +419,8 @@ pub fn ret<B: Backend>(b: &mut B) -> Flow<B> {
     let addr = b.zext::<W32, W64>(esp);
     let v: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
     b.set(eip_ref(), v);
+    let w = b.zext::<W32, W64>(v);
+    b.jump(w);
     let four = b.konst::<W32>(4);
     let next = b.add::<W32>(esp, four);
     b.set(esp_ref(), next);
@@ -434,8 +442,10 @@ pub fn loop_rel8<B: Backend>(b: &mut B, eip: u32, disp: i8) -> Flow<B> {
     let again = b.cmp::<W32>(Cmp::Ne, next, zero);
     let target = eip.wrapping_add(2).wrapping_add(disp as i32 as u32);
     let t = b.konst::<W32>(target);
+    let tj = b.konst::<W64>(target as u64);
     b.if_then(again, |b| {
         b.set(eip_ref(), t);
+        b.jump(tj);
         Ok(())
     })?;
     Ok(())
@@ -446,6 +456,8 @@ pub fn jmp_rel32<B: Backend>(b: &mut B, eip: u32, disp: i32) -> Flow<B> {
     let target = eip.wrapping_add(5).wrapping_add(disp as u32);
     let t = b.konst::<W32>(target);
     b.set(eip_ref(), t);
+    let tj = b.konst::<W64>(target as u64);
+    b.jump(tj);
     Ok(())
 }
 
@@ -453,5 +465,7 @@ pub fn jmp_rel32<B: Backend>(b: &mut B, eip: u32, disp: i32) -> Flow<B> {
 pub fn jmp8<B: Backend>(b: &mut B, target: u32) -> Flow<B> {
     let t = b.konst::<W32>(target);
     b.set(eip_ref(), t);
+    let tj = b.konst::<W64>(target as u64);
+    b.jump(tj);
     Ok(())
 }

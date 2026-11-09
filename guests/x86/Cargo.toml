@@ -20,6 +20,7 @@ polyisa-isagen = { path = "../../crates/isagen" }
 
 [dev-dependencies]
 polyisa-engine = { path = "../../crates/engine" }
+polyisa-cli = { path = "../../crates/cli" }
 
 [lints]
 workspace = true

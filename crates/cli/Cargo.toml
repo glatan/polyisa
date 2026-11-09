@@ -9,6 +9,7 @@ rust-version = "1.99"
 polyisa-engine = { path = "../engine" }
 polyisa-guest = { path = "../guest" }
 polyisa-guest-riscv = { path = "../../guests/riscv" }
+polyisa-guest-x86 = { path = "../../guests/x86" }
 polyisa-kernel = { path = "../kernel" }
 polyisa-loader = { path = "../loader" }
 polyisa-mem = { path = "../mem" }
