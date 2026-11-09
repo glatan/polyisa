@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! x86 最小の命令意味論。バックエンドに対して総称的に書く.
 //!
-//! EAX 系の整数演算と SYSCALL/CPUID の最小形のみ持つ。EFLAGS の更新
+//! EAX/ECX 系の整数演算と SYSCALL/CPUID の最小形のみ持つ。EFLAGS の更新
 //! （遅延フラグは本格実装）、ModRM/SIB、セグメント、64ビット拡張、
 //! CPUID の機能導出は本格実装で足す。
 //!
@@ -71,6 +71,23 @@ pub fn add_eax<B: Backend>(b: &mut B, imm: u32) -> Flow<B> {
     let y = b.konst::<W32>(imm);
     let v = b.add::<W32>(x, y);
     write(b, Gpr::eax(), v);
+    Ok(())
+}
+
+/// ADD EAX, ECX (ModRM register-direct 01 C8 の最小形)。
+/// SIB/disp/メモリ形式と Rust フックは本格実装で足す。
+pub fn add_rm32<B: Backend>(b: &mut B) -> Flow<B> {
+    let x = read(b, Gpr(0));
+    let y = read(b, Gpr(1));
+    let v = b.add::<W32>(x, y);
+    write(b, Gpr(0), v);
+    Ok(())
+}
+
+/// MOV EAX, ECX (ModRM register-direct 8B C1 の最小形)。
+pub fn mov_rm32<B: Backend>(b: &mut B) -> Flow<B> {
+    let v = read(b, Gpr(1));
+    write(b, Gpr(0), v);
     Ok(())
 }
 

@@ -2,8 +2,10 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // x86 最小の ISADL モデル（段階4の最小）。
 //
-// i386 の整数8件に絞る。可変長（8/16/40ビット）のデコード入口を確かめる。
-// ModRM/SIB フック・遅延フラグ・x87・SSE・64ビット・セグメントは本格実装で足す。
+// i386 の整数10件に絞る。可変長（8/16/40ビット）のデコード入口と
+// ModRM register-direct の最小形を確かめる。
+// ModRM の SIB・disp・メモリ形式と Rust フック・遅延フラグ・x87・SSE・
+// 64ビット・セグメントは本格実装で足す。
 // SYSCALL/CPUID は退出・識別情報の最小形のみ持つ（機能導出は本格実装で足す）。
 // SYSCALL (0F 05) は IA-32e 用であり 32bit 正統は SYSENTER (0F 34) だが、
 // 試作では x86-64 への橋渡しとして SYSCALL を先に持つ。i386 feature の無条件有効は試作の割り切りである。
@@ -57,6 +59,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("dec_eax", "F1", "01001000", "dec eax", "alu"),
         ("add_eax", "F1", "00000101 ................................", "add eax, {imm}", "alu"),
         ("jmp8", "F1", "11101011 ........", "jmp {imm}", "jump"),
+        ("add_rm32", "F1", "00000001 11001000", "add eax, ecx", "alu"),
+        ("mov_rm32", "F1", "10001011 11000001", "mov eax, ecx", "alu"),
         ("mov_eax", "F1", "10111000 ................................", "mov eax, {imm}", "alu"),
         ("syscall", "F1", "00001111 00000101", "syscall", "system"),
         ("cpuid", "F1", "00001111 10100010", "cpuid", "system"),

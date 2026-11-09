@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! x86 最小のゲスト ISA。段階4の最小であり、可変長デコードを確かめる。
 //!
-//! i386 の EAX 系8件のみ持つ。ModRM/SIB フック・EFLAGS・セグメント・
-//! 64ビット・x87・SSE は本格実装で足す。SYSCALL/CPUID は最小形のみ持つ。
+//! i386 の EAX/ECX 系10件のみ持つ。ModRM の SIB/disp/メモリ形式と Rust フック・
+//! EFLAGS・64ビット・x87・SSE・セグメントは本格実装で足す。
+//! SYSCALL/CPUID は最小形のみ持つ。ModRM は register-direct のみ持つ。
 
 #![forbid(unsafe_code)]
 
@@ -50,8 +51,8 @@ mod tests {
 
     #[test]
     fn insn_count() {
-        // 試作の整数8件。
-        assert_eq!(INSNS.len(), 8);
+        // 試作の整数10件。
+        assert_eq!(INSNS.len(), 10);
     }
 
     #[test]
@@ -71,6 +72,12 @@ mod tests {
         // 16ビット2バイトオペコード：SYSCALL (0F 05)、CPUID (0F A2)。
         assert_eq!(decode(0x0F05, 16), Some(Insn::Syscall));
         assert_eq!(decode(0x0FA2, 16), Some(Insn::Cpuid));
+        // ModRM register-direct：ADD EAX,ECX (01 C8)、MOV EAX,ECX (8B C1)。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x01C8, 16), Some(Insn::AddRm32));
+        assert_eq!(decode(0x8BC1, 16), Some(Insn::MovRm32));
+        // ModRM の mod=00 (メモリ形式) は未対応であり一致しない。
+        assert_eq!(decode(0x0108, 16), None);
         // 長さ違いは一致しない。
         assert_eq!(decode(0x90, 16), None);
         assert_eq!(decode(0xFFFF_FFFF, 32), None);
