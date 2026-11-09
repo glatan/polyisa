@@ -177,6 +177,7 @@ dependencies = [
  "polyisa-isadl",
  "polyisa-isagen",
  "polyisa-mem",
+ "polyisa-os-linux",
  "polyisa-sem",
  "polyisa-softfloat",
  "polyisa-timing",
