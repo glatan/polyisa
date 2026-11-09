@@ -2309,3 +2309,30 @@ fn movq_xmm_m64_rip_roundtrip() {
     let v: u128 = env.backend.get(sem::xmm_ref(Xmm(0)));
     assert_eq!(v, 0x1122_3344_5566_7788);
 }
+
+#[test]
+fn and_imm8_rip_clears_bits() {
+    // ANDL $0xCF,[RIP]: [0x1500]=0xFF & 0xCF = 0xCF.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1500), &[0xFFu8, 0xFF, 0xFF, 0xFF])
+        .unwrap();
+    env.step(|b| sem::and_rm32_imm8_rip(b, 0x1007, 0x4F9, 0xCFu8 as i8))
+        .unwrap();
+    let mut back = [0u8; 4];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x1500),
+            &mut back,
+            Access {
+                endian: Endian::Le,
+                align: Align::Unaligned,
+                kind: AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(u32::from_le_bytes(back), 0xFFFF_FFCF);
+}

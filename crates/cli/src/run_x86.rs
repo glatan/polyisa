@@ -1832,6 +1832,17 @@ fn dispatch<B: Backend>(
                 sem::or_rm32_imm8_abs(b, disp_le, imm)
             }
         }
+        Insn::AndRmImm8Rip => {
+            // 83 25 + disp32 + imm8 (56ビット)。disp は (word>>8) 下位32 LE、imm は最下位.
+            let disp_le = ((word >> 8) as u32).swap_bytes();
+            let disp = disp_le as i32;
+            let imm = (word & 0xff) as u8 as i8;
+            if is64 {
+                sem::and_rm32_imm8_rip(b, eip as u64 + nbytes, disp, imm)
+            } else {
+                sem::and_rm32_imm8_abs(b, disp_le, imm)
+            }
+        }
         Insn::MovzxR32M16 => {
             // 0F B7 95 + disp32 (mod=10 RBP)。dst は reg フィールド.
             sem::movzx_r32_m16_mem32(b, reg0f_as_gpr(), Gpr(5 | ((rex & 1) << 3)), disp32())
