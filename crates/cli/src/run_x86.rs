@@ -228,11 +228,19 @@ fn fetch_len(
                 let m = third?;
                 if m >> 6 == 3 { Some(3) } else { None }
             } else if s == 0xD6 {
-                // MOVQ m64,xmm RIP (66 0F D6 05 + disp32)。RIP のみ 7B.
+                // MOVQ m64,xmm (66 0F D6 /r)。mod=00/01/10 (SIBなし) と RIP。reg-direct/SIB は未対応.
                 let m = third?;
                 let md = m >> 6;
                 let rm = m & 7;
-                if md == 0 && rm == 5 { Some(7) } else { None }
+                if md == 3 || rm == 4 {
+                    None
+                } else if md == 1 {
+                    Some(4)
+                } else if md == 2 || rm == 5 {
+                    Some(7)
+                } else {
+                    Some(3)
+                }
             } else if s == 0x10
                 || s == 0x11
                 || s == 0x28
@@ -765,10 +773,14 @@ pub fn run_mode(
         let mut rep = false;
         let mut rex: u8 = 0;
         let mut has66 = false;
+        let mut has_f2 = false;
         let mut has_fs = false;
         loop {
             if head[0] == 0xF3 && !rep {
                 rep = true;
+            } else if head[0] == 0xF2 && !has_f2 {
+                // REPNE 接頭辞。string 反復と SSE (PSHUFLW) で使う.
+                has_f2 = true;
             } else if head[0] == 0xF0 {
                 // LOCK 接頭辞。単一スレッドのため無視する.
             } else if is64 && (0x40..=0x4F).contains(&head[0]) && rex == 0 {
@@ -1118,12 +1130,16 @@ pub fn run_mode(
                 insn,
                 Insn::Nop
                     | Insn::Nopl
+                    | Insn::TestRm32
                     | Insn::MovdXmm
                     | Insn::MovdXmmM32
                     | Insn::Punpcklbw
                     | Insn::Punpcklwd
                     | Insn::Punpckldq
                     | Insn::MovqM64XmmRip
+                    | Insn::MovqM64XmmMemnd
+                    | Insn::MovqM64XmmMem8
+                    | Insn::MovqM64XmmMem32
                     | Insn::Pshufd
                     | Insn::Pslldq
                     | Insn::Psubb
@@ -1182,6 +1198,7 @@ pub fn run_mode(
             };
         }
         // XMM 系は 0x66 が必須（MOVUPS を除く）。剥がし忘れを防ぐ。
+        // PSHUFD は F2 (PSHUFLW) でも有効のため、ここでは除いて後段で判定する.
         if !has66
             && matches!(
                 insn,
@@ -1191,7 +1208,9 @@ pub fn run_mode(
                     | Insn::Punpcklwd
                     | Insn::Punpckldq
                     | Insn::MovqM64XmmRip
-                    | Insn::Pshufd
+                    | Insn::MovqM64XmmMemnd
+                    | Insn::MovqM64XmmMem8
+                    | Insn::MovqM64XmmMem32
                     | Insn::Pslldq
                     | Insn::Psubb
                     | Insn::Pxor
@@ -1220,6 +1239,13 @@ pub fn run_mode(
                 word,
             };
         }
+        // PSHUFD/PSHUFLW は 66/F2 のいずれかが必須。
+        if matches!(insn, Insn::Pshufd) && !has66 && !has_f2 {
+            return Outcome::Unimplemented {
+                eip: pc as u32,
+                word,
+            };
+        }
         // REX 拡張は reg/rm/SIB 抽出で対応済み (R/R/B/X)。W は rex_w で切替.
         let _ = rex;
         // FS 上書きの有無とベース。dispatch 側で FS 相対アドレッシングに使う.
@@ -1233,7 +1259,7 @@ pub fn run_mode(
         use polyisa_engine::interp::Ctrl;
         let r = env.step(|b| {
             dispatch(
-                b, insn, eip, word, nbytes, off, is64, rex, has66, fs, imm32, disp8,
+                b, insn, eip, word, nbytes, off, is64, rex, has66, has_f2, fs, imm32, disp8,
             )
         });
         match r {
@@ -1284,6 +1310,7 @@ fn dispatch<B: Backend>(
     is64: bool,
     rex: u8,
     has66: bool,
+    has_f2: bool,
     fs: Option<u64>,
     imm32: impl Fn() -> u32,
     disp8: impl Fn() -> i8,
@@ -2325,7 +2352,21 @@ fn dispatch<B: Backend>(
         }
         Insn::CmpAlImm => sem::cmp_al_imm(b, (word & 0xff) as u8),
         Insn::TestRm32 => {
-            if rex_w {
+            if has66 {
+                // 66 85: 16ビット TEST。reg-direct のみ対応.
+                if modrm() >> 6 == 3 {
+                    sem::test_rm16(b, rm(), reg())
+                } else {
+                    let md = modrm() >> 6;
+                    if md == 1 {
+                        sem::test_m16_r16_mem8(b, rm(), disp8(), reg())
+                    } else if md == 2 {
+                        sem::test_m16_r16_mem32(b, rm(), disp32(), reg())
+                    } else {
+                        sem::test_m16_r16_memnd(b, rm(), reg())
+                    }
+                }
+            } else if rex_w {
                 sem::test_rm64(b, rm(), reg())
             } else {
                 sem::test_rm32(b, rm(), reg())
@@ -2864,6 +2905,35 @@ fn dispatch<B: Backend>(
                 sem::sub_rm64_imm8_mem32(b, rm(), disp, imm)
             } else {
                 sem::sub_rm32_imm8_mem32(b, rm(), disp, imm)
+            }
+        }
+        Insn::AndRmImm8Mem8 => {
+            // 83 /4 mod=01 [base+disp8],imm8 (32b)。
+            let d8 = ((word >> 8) & 0xff) as u8 as i8;
+            let imm = (word & 0xff) as u8 as i8;
+            if rex_w {
+                sem::and_rm64_imm8_mem8(b, rm(), d8, imm)
+            } else {
+                sem::and_rm32_imm8_mem8(b, rm(), d8, imm)
+            }
+        }
+        Insn::AndRmImm8Memnd => {
+            // 83 /4 mod=00 [base],imm8 (24b)。
+            let imm = (word & 0xff) as u8 as i8;
+            if rex_w {
+                sem::and_rm64_imm8_memnd(b, rm(), imm)
+            } else {
+                sem::and_rm32_imm8_memnd(b, rm(), imm)
+            }
+        }
+        Insn::AndRmImm8Mem32 => {
+            // 83 /4 mod=10 [base+disp32],imm8 (56b)。
+            let disp = ((word >> 8) as u32).swap_bytes() as i32;
+            let imm = (word & 0xff) as u8 as i8;
+            if rex_w {
+                sem::and_rm64_imm8_mem32(b, rm(), disp, imm)
+            } else {
+                sem::and_rm32_imm8_mem32(b, rm(), disp, imm)
             }
         }
         Insn::CmpRmImm8 => {
@@ -3459,6 +3529,9 @@ fn dispatch<B: Backend>(
                 sem::movq_m64_xmm_abs(b, xmm_reg(), imm32())
             }
         }
+        Insn::MovqM64XmmMemnd => sem::movq_m64_xmm_memnd(b, xmm_reg(), rm0f()),
+        Insn::MovqM64XmmMem8 => sem::movq_m64_xmm_mem8(b, xmm_reg(), rm0f(), disp8()),
+        Insn::MovqM64XmmMem32 => sem::movq_m64_xmm_mem32(b, xmm_reg(), rm0f(), disp32()),
         Insn::MovqXmmM64Rip => {
             if is64 {
                 sem::movq_xmm_m64_rip(b, xmm_reg(), eip as u64 + nbytes, disp32())
@@ -3468,7 +3541,12 @@ fn dispatch<B: Backend>(
         }
         Insn::Pshufd => {
             let imm = (word & 0xff) as u8;
-            sem::pshufd(b, xmm_reg(), xmm_rm(), imm)
+            // F2 接頭辞では PSHUFLW として振る舞う (0F 70 共有のため Insn を共用).
+            if has_f2 {
+                sem::pshuflw_xmm(b, xmm_reg(), xmm_rm(), imm)
+            } else {
+                sem::pshufd(b, xmm_reg(), xmm_rm(), imm)
+            }
         }
         Insn::Pslldq => {
             let imm = (word & 0xff) as u8;
@@ -4090,6 +4168,20 @@ fn dispatch<B: Backend>(
                 sem::movzx_r32_m16_abs(b, reg0f_as_gpr(), imm32())
             }
         }
+        Insn::MovzxR32M16Sib => {
+            // 0F B7 SIB mod=00 [base+index*scale]。no_index は [base].
+            if sib0f_no_index() {
+                if rex_w {
+                    sem::movzx_r64_m16_memnd(b, reg0f_as_gpr(), sib0f_base())
+                } else {
+                    sem::movzx_r32_m16_memnd(b, reg0f_as_gpr(), sib0f_base())
+                }
+            } else if rex_w {
+                sem::movzx_r64_m16_sib(b, reg0f_as_gpr(), sib0f_base(), sib0f_idx(), sib0f_shift())
+            } else {
+                sem::movzx_r32_m16_sib(b, reg0f_as_gpr(), sib0f_base(), sib0f_idx(), sib0f_shift())
+            }
+        }
         Insn::MovzxR32M8Rip => {
             // 0F B6 05 + disp32 (mod=00 RIP)。dst は reg フィールド.
             if is64 {
@@ -4500,6 +4592,7 @@ fn dispatch<B: Backend>(
             | Insn::Cmovle
             | Insn::Cmovg
             | Insn::MovzxR32M16Mem32
+            | Insn::MovzxR32M16Sib
             | Insn::MovzxR32M16Sibd
             | Insn::MovzxR32M16Rip
             | Insn::MovzxR32M8Rip

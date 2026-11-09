@@ -4506,3 +4506,120 @@ fn mov_r8_imm_basic() {
     env.step(|b| sem::mov_r8_imm(b, Gpr(13), false, 1)).unwrap();
     assert_eq!(env.backend.get(Gpr(13).state()) & 0xFF, 1);
 }
+
+#[test]
+fn movzx_r32_m16_sib_basic() {
+    // MOVZX EDX,[R9+RAX*2] (REX.B 0F B7 SIB mod=00): R9=0x1500, RAX=2 -> [0x1504]=0x1234 -> EDX=0x1234.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.step(|b| {
+        sem::write64(b, Gpr(9), 0x1500);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| {
+        sem::write64(b, Gpr(0), 2);
+        Ok(())
+    })
+    .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1504), &[0x34u8, 0x12])
+        .unwrap();
+    env.step(|b| sem::movzx_r32_m16_sib(b, Gpr(2), Gpr(9), Gpr(0), 1))
+        .unwrap();
+    assert_eq!(env.backend.get(Gpr(2).state()) & 0xFFFF, 0x1234);
+}
+
+#[test]
+fn and_rm32_imm8_memnd_basic() {
+    // ANDL $0,[RAX] (83 20 00): [0x1500]=0xFF00_FF00 -> 0x0000_0000? 0xFF00FF00 & 0x00 = 0.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend.set(Gpr(0).state(), 0x1500);
+    env.backend
+        .mem
+        .write(VirtAddr(0x1500), &0xFF00_FF00u32.to_le_bytes())
+        .unwrap();
+    env.step(|b| sem::and_rm32_imm8_memnd(b, Gpr(0), 0))
+        .unwrap();
+    let mut back = [0u8; 4];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x1500),
+            &mut back,
+            Access {
+                endian: Endian::Le,
+                align: Align::Unaligned,
+                kind: AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(u32::from_le_bytes(back), 0x00);
+    // ZF=1.
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0x40);
+}
+
+#[test]
+fn test_rm16_sets_zf() {
+    // TEST DX,DX (66 85 /r): DX=0 -> ZF=1. DX=1 -> ZF=0.
+    let mut env = env();
+    env.backend.set(Gpr(2).state(), 0);
+    env.step(|b| sem::test_rm16(b, Gpr(2), Gpr(2))).unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0x40);
+    env.backend.set(Gpr(2).state(), 1);
+    env.step(|b| sem::test_rm16(b, Gpr(2), Gpr(2))).unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0);
+}
+
+#[test]
+fn pshuflw_identity_low_words() {
+    // PSHUFLW xmm1,xmm0,0x00: 下位ワード全て word0 へ、上位64は維持.
+    // src=0xDDCC_BBAA_4433_2211_8877_6655_4433_2211 -> low=0x2211 x4, high維持.
+    let mut env = env();
+    env.step(|b| {
+        let v = b.konst::<polyisa_sem::W128>(0xDDCCBBAA443322118877665544332211);
+        b.set(sem::xmm_ref(sem::Xmm(0)), v);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::pshuflw_xmm(b, sem::Xmm(1), sem::Xmm(0), 0x00))
+        .unwrap();
+    env.step(|b| {
+        let v: u128 = b.get(sem::xmm_ref(sem::Xmm(1)));
+        assert_eq!(v, 0xDDCCBBAA443322112211221122112211);
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn movq_m64_xmm_mem32_basic() {
+    // MOVQ [RCX+0x90],XMM1 (66 0F D6 mod=10): [0x1590]=low64(XMM1).
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend.set(Gpr(1).state(), 0x1500);
+    env.step(|b| {
+        let v = b.konst::<polyisa_sem::W128>(0x112233445566778899AABBCCDDEEFF00);
+        b.set(sem::xmm_ref(sem::Xmm(1)), v);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::movq_m64_xmm_mem32(b, sem::Xmm(1), Gpr(1), 0x90))
+        .unwrap();
+    let mut back = [0u8; 8];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x1590),
+            &mut back,
+            Access {
+                endian: Endian::Le,
+                align: Align::Unaligned,
+                kind: AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(u64::from_le_bytes(back), 0x99AABBCCDDEEFF00);
+}

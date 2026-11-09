@@ -271,6 +271,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("punpcklwd", "F1", "00001111 01100001 11......", "punpcklwd xmm, xmm", "alu"),
         // PSHUFD xmm,xmm,imm8 (66 0F 70 /r ib)。reg-direct のみ。
         ("pshufd", "F1", "00001111 01110000 11...... ........", "pshufd xmm, xmm", "alu"),
+        // PSHUFLW (F2 0F 70 /r ib) はバイト列共有のため Insn::Pshufd を共用し dispatch で切替.
         // MOVQ r64,xmm (66 REX.W 0F 7E /r)。reg-direct のみ。
         ("movq_r64_xmm", "F1", "00001111 01111110 11......", "movq r64, xmm", "load"),
         // MOVUPS xmm,xmm / m128,xmm (0F 10 / 0F 11)。reg-direct は F1。
@@ -472,6 +473,10 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("movdqu_load_xmm", "F1", "00001111 01101111 11......", "movdqu xmm, xmm", "load"),
         // MOVDQA xmm,m128 RIP (66 0F 6F 05 + disp32)。66必須、アライメントは問わない.
         ("movdqa_load_rip", "F1", "00001111 01101111 00...101 ................................", "movdqa xmm, m128", "load"),
+        // MOVQ m64,xmm mod=00/01/10 (66 0F D6 /r)。SIBなし.
+        ("movq_m64_xmm_memnd", "MR", "00001111 11010110 00......", "movq m64, xmm", "store"),
+        ("movq_m64_xmm_mem8", "M8", "00001111 11010110 01...... ........", "movq m64, xmm", "store"),
+        ("movq_m64_xmm_mem32", "M32", "00001111 11010110 10...... ................................", "movq m64, xmm", "store"),
         // MOVAPS xmm,m128 mod=00/01/10/RIP (0F 28 /r)。SIBなし、MOVUPS と等価.
         ("movaps_load_memnd", "MR", "00001111 00101000 00......", "movaps xmm, m128", "load"),
         ("movaps_load_mem8", "M8", "00001111 00101000 01...... ........", "movaps xmm, m128", "load"),
@@ -548,6 +553,12 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("xor_rm_imm8_memnd", "F1", "10000011 00110... ........", "xor r/m, {imm}", "alu"),
         // XOR m32/m64,imm8 mod=10 [base+disp32] (83 /6)。REX.W で64bit.
         ("xor_rm_imm8_mem32", "F1", "10000011 10110... ................................ ........", "xor r/m, {imm}", "alu"),
+        // AND m32/m64,imm8 mod=01 [base+disp8] (83 /4)。REX.W で64bit.
+        ("and_rm_imm8_mem8", "F1", "10000011 01100... ........ ........", "and r/m, {imm}", "alu"),
+        // AND m32/m64,imm8 mod=00 [base] (83 /4)。REX.W で64bit.
+        ("and_rm_imm8_memnd", "F1", "10000011 00100... ........", "and r/m, {imm}", "alu"),
+        // AND m32/m64,imm8 mod=10 [base+disp32] (83 /4)。REX.W で64bit.
+        ("and_rm_imm8_mem32", "F1", "10000011 10100... ................................ ........", "and r/m, {imm}", "alu"),
         ("mov_rm16_imm_m32", "F1", "11000111 10000101 ................................ ................", "mov r/m16, {imm}", "alu"),
         // MOVUPS RIP相対 (64ビットの mod=00 rm=101)。disp32 は実行側で RIP 加算する。
         ("movups_load_rip", "F1", "00001111 00010000 00...101 ................................", "movups xmm, [rip]", "load"),
@@ -926,6 +937,14 @@ pub fn build_model() -> polyisa_isadl::Model {
             "S8",
             "00001111 10110111 01...100 ........ ........",
             vec![],
+            "movzx r32, m16",
+            "load",
+        ),
+        (
+            "movzx_r32_m16_sib",
+            "N8",
+            "00001111 10110111 00...100 ........",
+            vec![wc("n8_base", WhereOp::Ne, 5)],
             "movzx r32, m16",
             "load",
         ),
