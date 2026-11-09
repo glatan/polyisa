@@ -1018,7 +1018,7 @@ fn run_pand_reg_direct() {
 
 #[test]
 fn run_sar_rm64_cl() {
-    // run 経由で REX.W D1 /7 (SAR RDI,CL) を回す。
+    // run 経由で REX.W D3 /7 (SAR RDI,CL) を回す。
     // RDI=0xF0、CL=2 -> RDI=0x3C になり、exit(0x3C)。
     let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
@@ -1028,7 +1028,7 @@ fn run_sar_rm64_cl() {
     let prog: &[u8] = &[
         0x48, 0xC7, 0xC7, 0xF0, 0x00, 0x00, 0x00, // mov rdi,0xF0
         0x48, 0xC7, 0xC1, 0x02, 0x00, 0x00, 0x00, // mov rcx,2
-        0x48, 0xD1, 0xFF, // sar rdi,cl (rdi=0x3C)
+        0x48, 0xD3, 0xFF, // sar rdi,cl (rdi=0x3C)
         0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
         0x0F, 0x05, // syscall -> exit(rdi=0x3C)
     ];

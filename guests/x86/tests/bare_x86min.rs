@@ -3557,3 +3557,60 @@ fn test_r8_r8_sets_zf() {
         .unwrap();
     assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0);
 }
+
+#[test]
+fn xor_r32_mem8_basic() {
+    // XOR EBX,[RBP-0x40] (33 /r mod=01): EBX=0xFF, [0x14C0]=0x0F -> 0xF0.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend.set(Gpr(5).state(), 0x1500);
+    env.backend.set(Gpr(3).state(), 0xFF);
+    env.backend
+        .mem
+        .write(VirtAddr(0x14C0), &[0x0Fu8, 0, 0, 0])
+        .unwrap();
+    env.step(|b| sem::xor_r32_mem8(b, Gpr(3), Gpr(5), -0x40))
+        .unwrap();
+    assert_eq!(env.backend.get(Gpr(3).state()), 0xF0);
+}
+
+#[test]
+fn ror_rm32_basic() {
+    // ROR EAX,8: 0x12345678 -> 0x78123456.
+    let mut env = env();
+    env.backend.set(Gpr(0).state(), 0x1234_5678);
+    env.step(|b| sem::ror_rm32_imm8(b, Gpr(0), 8)).unwrap();
+    assert_eq!(eax(&mut env), 0x7812_3456);
+}
+
+#[test]
+fn shl_rm32_basic() {
+    // SHL EBX,0x20 (32 &31=0) -> 変化なし.
+    let mut env = env();
+    env.backend.set(Gpr(3).state(), 0x1234);
+    env.step(|b| sem::shl_rm32_imm8(b, Gpr(3), 0x20)).unwrap();
+    assert_eq!(env.backend.get(Gpr(3).state()), 0x1234);
+}
+
+#[test]
+fn imul_r64_basic() {
+    // IMUL RAX,RDX (REX.W): RAX=3, RDX=7 -> 21.
+    let mut env = env();
+    env.step(|b| {
+        sem::write64(b, Gpr(0), 3);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| {
+        sem::write64(b, Gpr(2), 7);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::imul_r64(b, Gpr(0), Gpr(2))).unwrap();
+    env.step(|b| {
+        let v = sem::read64(b, Gpr(0));
+        assert_eq!(v, 21);
+        Ok(())
+    })
+    .unwrap();
+}

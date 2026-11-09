@@ -200,7 +200,14 @@ fn fetch_len(
                 let md = m >> 6;
                 let rm = m & 7;
                 if md == 0 && rm == 5 { Some(7) } else { None }
-            } else if s == 0x10 || s == 0x11 || s == 0x29 || s == 0xE7 || s == 0xB6 || s == 0xB7 {
+            } else if s == 0x10
+                || s == 0x11
+                || s == 0x29
+                || s == 0xE7
+                || s == 0xB6
+                || s == 0xB7
+                || s == 0xAF
+            {
                 // MOVUPS/MOVNTDQ。ModRM/SIB/disp で長さが決まる。
                 // reg-direct は MOVUPS のみ（E7 は無効）。
                 let m = third?;
@@ -478,10 +485,11 @@ fn fetch_len(
                 }
             }
         }
-        // 0x03 /r (ADD)、0x0B /r (OR)、0x3B /r (CMP)、0x2B /r (SUB)。
+        // 0x03 /r (ADD)、0x0B /r (OR)、0x3B /r (CMP)、0x2B /r (SUB)、
+        // 0x33 /r (XOR)、0x23 /r (AND)、0x13 /r (ADC)、0x1B /r (SBB)。
         // reg-direct 2B、mod=00 base 2B / RIP/abs 6B、mod=01 3B、mod=10 6B。
         // SIB は mod=00 直接番地のみ 7B.
-        0x03 | 0x0B | 0x3B | 0x2B => {
+        0x03 | 0x0B | 0x3B | 0x2B | 0x33 | 0x23 | 0x13 | 0x1B => {
             let s = second?;
             let md = s >> 6;
             let rm = s & 7;
@@ -569,6 +577,10 @@ fn fetch_len(
         }
         // 0xD1 (CL シフト) は register-direct のみ 2B。/7 SAR のみ実装 (他は decode 失败)。
         0xD1 => {
+            let s = second?;
+            if s >> 6 == 3 { Some(2) } else { None }
+        }
+        0xD3 => {
             let s = second?;
             if s >> 6 == 3 { Some(2) } else { None }
         }
@@ -699,12 +711,17 @@ pub fn run_mode(
                 | 0x0B
                 | 0x3B
                 | 0x2B
+                | 0x33
+                | 0x23
+                | 0x13
+                | 0x1B
                 | 0xFF
                 | 0x09
                 | 0x11
                 | 0x19
                 | 0xC1
                 | 0xD1
+                | 0xD3
                 | 0xC7
                 | 0x81
                 | 0x83
@@ -740,7 +757,19 @@ pub fn run_mode(
         // C7/0x88 は SIB の base で mod=00 の長さが変わるため同様に読む。
         let third = if (matches!(
             head[0],
-            0x8B | 0x89 | 0x8D | 0xC7 | 0x88 | 0x03 | 0x0B | 0x3B | 0x2B | 0xFF
+            0x8B | 0x89
+                | 0x8D
+                | 0xC7
+                | 0x88
+                | 0x03
+                | 0x0B
+                | 0x3B
+                | 0x2B
+                | 0x33
+                | 0x23
+                | 0x13
+                | 0x1B
+                | 0xFF
         ) && matches!(second, Some(s) if s & 7 == 4 && s >> 6 != 3))
             || (head[0] == 0x0F
                 && (matches!(
@@ -763,6 +792,7 @@ pub fn run_mode(
                             | 0xE7
                             | 0xB6
                             | 0xB7
+                            | 0xAF
                     )
                 ) || matches!(second, Some(0x40..=0x4F))
                     || matches!(second, Some(0x90..=0x9F))))
@@ -785,7 +815,10 @@ pub fn run_mode(
         };
         // 0F MOVUPS/MOVNTDQ/NOP の SIB 付きは第4バイト（SIB）で長さが変わる。
         let fourth = if head[0] == 0x0F
-            && matches!(second, Some(0x10 | 0x11 | 0x29 | 0xE7 | 0x1F | 0xB6 | 0xB7))
+            && matches!(
+                second,
+                Some(0x10 | 0x11 | 0x29 | 0xE7 | 0x1F | 0xB6 | 0xB7 | 0xAF)
+            )
             && matches!(third, Some(m) if m & 7 == 4 && m >> 6 != 3)
         {
             let mut sib = [0u8; 1];
@@ -817,11 +850,16 @@ pub fn run_mode(
             && !matches!(
                 head[0],
                 0x8B | 0x89
+                    | 0x90
                     | 0x01
                     | 0x03
                     | 0x0B
                     | 0x3B
                     | 0x2B
+                    | 0x33
+                    | 0x23
+                    | 0x13
+                    | 0x1B
                     | 0xFF
                     | 0x11
                     | 0x19
@@ -839,6 +877,7 @@ pub fn run_mode(
                     | 0x84
                     | 0xC1
                     | 0xD1
+                    | 0xD3
                     | 0x05
                     | 0x2D
                     | 0x3D
@@ -928,7 +967,8 @@ pub fn run_mode(
         if has66
             && !matches!(
                 insn,
-                Insn::Nopl
+                Insn::Nop
+                    | Insn::Nopl
                     | Insn::MovdXmm
                     | Insn::MovdXmmM32
                     | Insn::Punpcklbw
@@ -1744,11 +1784,11 @@ fn dispatch<B: Backend>(
                 sem::xor_imm(b, imm32())
             }
         }
-        Insn::ShlEax => {
+        Insn::ShlRm32Imm8 => {
             if rex_w {
-                sem::shl_rm64_imm8(b, Gpr(0), word as u8)
+                sem::shl_rm64_imm8(b, rm(), word as u8)
             } else {
-                sem::shl_eax(b, word as u8)
+                sem::shl_rm32_imm8(b, rm(), word as u8)
             }
         }
         Insn::ShrRm32Imm8 => {
@@ -1756,6 +1796,41 @@ fn dispatch<B: Backend>(
                 sem::shr_rm64_imm8(b, rm(), word as u8)
             } else {
                 sem::shr_rm32_imm8(b, rm(), word as u8)
+            }
+        }
+        Insn::ShrRm321 => {
+            if rex_w {
+                sem::shr_rm64_imm8(b, rm(), 1)
+            } else {
+                sem::shr_rm32_imm8(b, rm(), 1)
+            }
+        }
+        Insn::ShlRm321 => {
+            if rex_w {
+                sem::shl_rm64_imm8(b, rm(), 1)
+            } else {
+                sem::shl_rm32_imm8(b, rm(), 1)
+            }
+        }
+        Insn::SarRm321 => {
+            if rex_w {
+                sem::sar_rm64_imm8(b, rm(), 1)
+            } else {
+                sem::sar_rm32_imm8(b, rm(), 1)
+            }
+        }
+        Insn::RorRm32Imm8 => {
+            if rex_w {
+                sem::ror_rm64_imm8(b, rm(), word as u8)
+            } else {
+                sem::ror_rm32_imm8(b, rm(), word as u8)
+            }
+        }
+        Insn::RolRm32Imm8 => {
+            if rex_w {
+                sem::rol_rm64_imm8(b, rm(), word as u8)
+            } else {
+                sem::rol_rm32_imm8(b, rm(), word as u8)
             }
         }
         Insn::SarRm32Imm8 => {
@@ -2122,6 +2197,126 @@ fn dispatch<B: Backend>(
                 sem::add_r64_mem32(b, reg(), rm(), disp32())
             } else {
                 sem::add_r32_mem32(b, reg(), rm(), disp32())
+            }
+        }
+        Insn::XorRMemnd => {
+            if rex_w {
+                sem::xor_r64_memnd(b, reg(), rm())
+            } else {
+                sem::xor_r32_memnd(b, reg(), rm())
+            }
+        }
+        Insn::XorRMem8 => {
+            if rex_w {
+                sem::xor_r64_mem8(b, reg(), rm(), disp8())
+            } else {
+                sem::xor_r32_mem8(b, reg(), rm(), disp8())
+            }
+        }
+        Insn::XorRMem32 => {
+            if rex_w {
+                sem::xor_r64_mem32(b, reg(), rm(), disp32())
+            } else {
+                sem::xor_r32_mem32(b, reg(), rm(), disp32())
+            }
+        }
+        Insn::XorRRip => {
+            if rex_w {
+                sem::xor_r64_rip(b, reg(), eip as u64 + nbytes, disp32())
+            } else if is64 {
+                sem::xor_r32_rip(b, reg(), eip as u64 + nbytes, disp32())
+            } else {
+                sem::xor_r32_abs(b, reg(), imm32())
+            }
+        }
+        Insn::AndRMemnd => {
+            if rex_w {
+                sem::and_r64_memnd(b, reg(), rm())
+            } else {
+                sem::and_r32_memnd(b, reg(), rm())
+            }
+        }
+        Insn::AndRMem8 => {
+            if rex_w {
+                sem::and_r64_mem8(b, reg(), rm(), disp8())
+            } else {
+                sem::and_r32_mem8(b, reg(), rm(), disp8())
+            }
+        }
+        Insn::AndRMem32 => {
+            if rex_w {
+                sem::and_r64_mem32(b, reg(), rm(), disp32())
+            } else {
+                sem::and_r32_mem32(b, reg(), rm(), disp32())
+            }
+        }
+        Insn::AndRRip => {
+            if rex_w {
+                sem::and_r64_rip(b, reg(), eip as u64 + nbytes, disp32())
+            } else if is64 {
+                sem::and_r32_rip(b, reg(), eip as u64 + nbytes, disp32())
+            } else {
+                sem::and_r32_abs(b, reg(), imm32())
+            }
+        }
+        Insn::AdcRMemnd => {
+            if rex_w {
+                sem::adc_r64_memnd(b, reg(), rm())
+            } else {
+                sem::adc_r32_memnd(b, reg(), rm())
+            }
+        }
+        Insn::AdcRMem8 => {
+            if rex_w {
+                sem::adc_r64_mem8(b, reg(), rm(), disp8())
+            } else {
+                sem::adc_r32_mem8(b, reg(), rm(), disp8())
+            }
+        }
+        Insn::AdcRMem32 => {
+            if rex_w {
+                sem::adc_r64_mem32(b, reg(), rm(), disp32())
+            } else {
+                sem::adc_r32_mem32(b, reg(), rm(), disp32())
+            }
+        }
+        Insn::AdcRRip => {
+            if rex_w {
+                sem::adc_r64_rip(b, reg(), eip as u64 + nbytes, disp32())
+            } else if is64 {
+                sem::adc_r32_rip(b, reg(), eip as u64 + nbytes, disp32())
+            } else {
+                sem::adc_r32_abs(b, reg(), imm32())
+            }
+        }
+        Insn::SbbRMemnd => {
+            if rex_w {
+                sem::sbb_r64_memnd(b, reg(), rm())
+            } else {
+                sem::sbb_r32_memnd(b, reg(), rm())
+            }
+        }
+        Insn::SbbRMem8 => {
+            if rex_w {
+                sem::sbb_r64_mem8(b, reg(), rm(), disp8())
+            } else {
+                sem::sbb_r32_mem8(b, reg(), rm(), disp8())
+            }
+        }
+        Insn::SbbRMem32 => {
+            if rex_w {
+                sem::sbb_r64_mem32(b, reg(), rm(), disp32())
+            } else {
+                sem::sbb_r32_mem32(b, reg(), rm(), disp32())
+            }
+        }
+        Insn::SbbRRip => {
+            if rex_w {
+                sem::sbb_r64_rip(b, reg(), eip as u64 + nbytes, disp32())
+            } else if is64 {
+                sem::sbb_r32_rip(b, reg(), eip as u64 + nbytes, disp32())
+            } else {
+                sem::sbb_r32_abs(b, reg(), imm32())
             }
         }
         Insn::SubRMemnd => {
@@ -2666,6 +2861,44 @@ fn dispatch<B: Backend>(
                 sem::imul_r32_imm(b, reg(), rm(), imm32())
             }
         }
+        Insn::ImulRRm => {
+            // 0F AF /r reg-direct (dst=reg0f, src=rm0f).
+            if rex_w {
+                sem::imul_r64(b, reg0f_as_gpr(), rm0f())
+            } else {
+                sem::imul_r32(b, reg0f_as_gpr(), rm0f())
+            }
+        }
+        Insn::ImulRMemnd => {
+            if rex_w {
+                sem::imul_r64_memnd(b, reg0f_as_gpr(), rm0f())
+            } else {
+                sem::imul_r32_memnd(b, reg0f_as_gpr(), rm0f())
+            }
+        }
+        Insn::ImulRMem8 => {
+            if rex_w {
+                sem::imul_r64_mem8(b, reg0f_as_gpr(), rm0f(), disp8())
+            } else {
+                sem::imul_r32_mem8(b, reg0f_as_gpr(), rm0f(), disp8())
+            }
+        }
+        Insn::ImulRMem32 => {
+            if rex_w {
+                sem::imul_r64_mem32(b, reg0f_as_gpr(), rm0f(), disp32())
+            } else {
+                sem::imul_r32_mem32(b, reg0f_as_gpr(), rm0f(), disp32())
+            }
+        }
+        Insn::ImulRRip => {
+            if rex_w {
+                sem::imul_r64_rip(b, reg0f_as_gpr(), eip as u64 + nbytes, disp32())
+            } else if is64 {
+                sem::imul_r32_rip(b, reg0f_as_gpr(), eip as u64 + nbytes, disp32())
+            } else {
+                sem::imul_r32_abs(b, reg0f_as_gpr(), imm32())
+            }
+        }
         Insn::ImulRImm8Rip => {
             // 6B /r ib + disp32 + imm8 (56b)。disp は (word>>8) 下位32 LE、imm は最下位8.
             let disp_le = ((word >> 8) as u32).swap_bytes();
@@ -2973,7 +3206,6 @@ fn dispatch<B: Backend>(
             | Insn::AndEax
             | Insn::OrEax
             | Insn::XorImm
-            | Insn::ShlEax
             | Insn::PopEax
             | Insn::Cwde => Some(Gpr(0)),
             Insn::IncEcx | Insn::DecEcx | Insn::PopEcx => Some(Gpr(1)),
@@ -3009,7 +3241,13 @@ fn dispatch<B: Backend>(
             | Insn::XorRmImm8
             | Insn::CmpRmImm8
             | Insn::ShrRm32Imm8
+            | Insn::ShrRm321
+            | Insn::ShlRm32Imm8
+            | Insn::ShlRm321
+            | Insn::SarRm321
             | Insn::SarRm32Imm8
+            | Insn::RorRm32Imm8
+            | Insn::RolRm32Imm8
             | Insn::SarRm32Cl
             | Insn::NotRm32
             | Insn::NegRm32 => Some(rm()),
@@ -3024,7 +3262,12 @@ fn dispatch<B: Backend>(
             | Insn::MovzxR32M16
             | Insn::MovzxR32M16Rip
             | Insn::MovzxR32M8Rip
-            | Insn::MovzxR32R8 => Some(reg0f_as_gpr()),
+            | Insn::MovzxR32R8
+            | Insn::ImulRRm
+            | Insn::ImulRMemnd
+            | Insn::ImulRMem8
+            | Insn::ImulRMem32
+            | Insn::ImulRRip => Some(reg0f_as_gpr()),
             Insn::AddRRip
             | Insn::AddRMemnd
             | Insn::AddRMem8
@@ -3034,6 +3277,22 @@ fn dispatch<B: Backend>(
             | Insn::SubRMem8
             | Insn::SubRMem32
             | Insn::SubRRip
+            | Insn::XorRMemnd
+            | Insn::XorRMem8
+            | Insn::XorRMem32
+            | Insn::XorRRip
+            | Insn::AndRMemnd
+            | Insn::AndRMem8
+            | Insn::AndRMem32
+            | Insn::AndRRip
+            | Insn::AdcRMemnd
+            | Insn::AdcRMem8
+            | Insn::AdcRMem32
+            | Insn::AdcRRip
+            | Insn::SbbRMemnd
+            | Insn::SbbRMem8
+            | Insn::SbbRMem32
+            | Insn::SbbRRip
             | Insn::OrRRip
             | Insn::OrRMemnd
             | Insn::OrRMem8
@@ -3596,14 +3855,20 @@ impl TrapHandler for CliLinux {
             return TrapOutcome::Handled;
         }
         if self.is64 && nr == polyisa_os_linux::x86_64::CLOCK_GETTIME {
-            // clock_gettime(clk_id, tp)。試作では 0 時刻を書いて 0 を返す.
+            // clock_gettime(clk_id, tp)。ホスト時刻を書いて 0 を返す.
+            // 0 固定では時刻待ちループが回り続けるため、実時刻を進める.
             let tp = get64(env, r_b);
             if tp != 0 {
-                let zeros = [0u8; 16];
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default();
+                let mut both = [0u8; 16];
+                both[..8].copy_from_slice(&(now.as_secs() as i64).to_le_bytes());
+                both[8..].copy_from_slice(&(now.subsec_nanos() as i64).to_le_bytes());
                 if env
                     .backend
                     .mem
-                    .write(polyisa_mem::VirtAddr(tp), &zeros)
+                    .write(polyisa_mem::VirtAddr(tp), &both)
                     .is_err()
                 {
                     return TrapOutcome::Unimplemented;
@@ -4028,7 +4293,9 @@ mod tests {
             .mem
             .read(VirtAddr(0x100), &mut back, data_access())
             .unwrap();
-        assert_eq!(back, [0u8; 16]);
+        // ホスト時刻が書かれる (0 固定ではない)。
+        assert_ne!(back, [0u8; 16]);
+        assert_ne!(back, [0xFFu8; 16]);
     }
 
     #[test]

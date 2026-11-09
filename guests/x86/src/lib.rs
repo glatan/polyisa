@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! x86 最小のゲスト ISA。段階4の最小であり、可変長デコードを確かめる。
 //!
-//! i386 の289件を持つ。ModRM/SIB 汎用・XMM最小・near Jcc・MOVZX・CMOVB・ADD RIP等を含む。
+//! i386 の315件を持つ。ModRM/SIB 汎用・XMM最小・near Jcc・MOVZX・CMOVB・ADD RIP等を含む。
 //! REX 接頭辞はデコード前に剥がし、Insは共有して64ビット意味論に切り替える。
 //! SYSCALL/CPUID は最小形、ModRM は register-direct（全組合せ）・mod=01+disp8・
 //! mod=10+disp32・絶対番地と SIB base+index 形（スケール付き、disp8/disp32・disp なしを含む）を持ち、
@@ -70,7 +70,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数116件。
-        assert_eq!(INSNS.len(), 289);
+        assert_eq!(INSNS.len(), 315);
     }
 
     #[test]
@@ -278,6 +278,9 @@ mod tests {
         assert_eq!(decode(0xFF5710, 24), Some(Insn::CallRMem8));
         assert_eq!(decode(0x881DD1DE1600, 48), Some(Insn::MovM8R8Rip));
         assert_eq!(decode(0x2B042528000000, 56), Some(Insn::SubRSibabs));
+        assert_eq!(decode(0x335DD8, 24), Some(Insn::XorRMem8));
+        assert_eq!(decode(0xC1C808, 24), Some(Insn::RorRm32Imm8));
+        assert_eq!(decode(0x0FAFC2, 24), Some(Insn::ImulRRm));
         assert_eq!(decode(0x84FF, 16), Some(Insn::TestR8R8));
         assert_eq!(decode(0x83470C01, 32), Some(Insn::AddRmImm8Mem8));
         assert_eq!(decode(0x0F94C5, 24), Some(Insn::Sete));
@@ -314,7 +317,8 @@ mod tests {
         assert_eq!(decode(0x69C788000000, 48), Some(Insn::ImulRImm));
         assert_eq!(decode(0x6B1567FD1A0038, 56), Some(Insn::ImulRImm8Rip));
         assert_eq!(decode(0x00C1F908, 24), Some(Insn::SarRm32Imm8));
-        assert_eq!(decode(0x00D1FF, 16), Some(Insn::SarRm32Cl));
+        assert_eq!(decode(0x00D3FF, 16), Some(Insn::SarRm32Cl));
+        assert_eq!(decode(0x00D1FF, 16), Some(Insn::SarRm321));
         // ADD r,[RIP+disp32] (03 05 + disp32)。
         assert_eq!(decode(0x030500000000, 48), Some(Insn::AddRRip));
         // MOVZX r32,r/m16 (0F B7 95 + disp32)。
@@ -394,8 +398,9 @@ mod tests {
         assert_eq!(decode(0x35_0000_00FF, 40), Some(Insn::XorImm));
         // シフト：SHL EAX,imm8 (C1 E0 ib)、SHR EAX,imm8 (C1 E8 ib)。
         // Ref: SPEC-X86-INTEL-SDM (v093).
-        assert_eq!(decode(0x00C1_E002, 24), Some(Insn::ShlEax));
+        assert_eq!(decode(0x00C1_E002, 24), Some(Insn::ShlRm32Imm8));
         assert_eq!(decode(0x00C1_E81F, 24), Some(Insn::ShrRm32Imm8));
+        assert_eq!(decode(0x00C1_E320, 24), Some(Insn::ShlRm32Imm8));
         // /6 (110) や mod=00 は別命令であり一致しない。
         assert_eq!(decode(0x00C1_F002, 24), None);
         assert_eq!(decode(0x00C1_2002, 24), None);
