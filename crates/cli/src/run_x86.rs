@@ -2682,6 +2682,23 @@ fn dispatch<B: Backend>(
                 sem::sub_r32_sibabs(b, reg(), sib_idx(), sib_shift(), disp)
             }
         }
+        Insn::CmpRSibabs => {
+            // 3B /r mod=00 SIB 直接番地 (7B)。ADD/SUB と同型.
+            let disp = disp32();
+            let disp_le = imm32();
+            if no_index() {
+                match fs {
+                    Some(base) if rex_w => sem::cmp_r64_fs_abs(b, reg(), base, disp),
+                    Some(base) => sem::cmp_r32_fs_abs(b, reg(), base, disp),
+                    None if rex_w => sem::cmp_r64_abs(b, reg(), disp_le),
+                    None => sem::cmp_r32_abs(b, reg(), disp_le),
+                }
+            } else if rex_w {
+                sem::cmp_r64_sibabs(b, reg(), sib_idx(), sib_shift(), disp)
+            } else {
+                sem::cmp_r32_sibabs(b, reg(), sib_idx(), sib_shift(), disp)
+            }
+        }
         Insn::OrRRip => {
             if rex_w {
                 sem::or_r64_rip(b, reg(), eip as u64 + nbytes, disp32())
@@ -4521,6 +4538,51 @@ impl TrapHandler for CliLinux {
             set64(env, Gpr(0), std::process::id() as u64);
             return TrapOutcome::Handled;
         }
+        if nr == polyisa_os_linux::x86_64::GETTID && self.is64
+            || nr == polyisa_os_linux::i386::GETTID && !self.is64
+        {
+            // 単一スレッド実装としてホスト PID を TID として返す。
+            set64(env, Gpr(0), std::process::id() as u64);
+            return TrapOutcome::Handled;
+        }
+        if nr == polyisa_os_linux::x86_64::GETPID && self.is64
+            || nr == polyisa_os_linux::i386::GETPID && !self.is64
+        {
+            set64(env, Gpr(0), std::process::id() as u64);
+            return TrapOutcome::Handled;
+        }
+        if nr == polyisa_os_linux::x86_64::RT_SIGACTION && self.is64
+            || nr == polyisa_os_linux::i386::RT_SIGACTION && !self.is64
+        {
+            // シグナルハンドラ設定は無視して 0 を返す (試作はシグナルなし).
+            set64(env, Gpr(0), 0);
+            return TrapOutcome::Handled;
+        }
+        if nr == polyisa_os_linux::x86_64::RT_SIGPROCMASK && self.is64
+            || nr == polyisa_os_linux::i386::RT_SIGPROCMASK && !self.is64
+        {
+            // シグナルマスク変更は無視して 0 を返す.
+            set64(env, Gpr(0), 0);
+            return TrapOutcome::Handled;
+        }
+        if nr == polyisa_os_linux::x86_64::TGKILL && self.is64
+            || nr == polyisa_os_linux::i386::TGKILL && !self.is64
+        {
+            // tgkill(tgid, tid, sig)。単一スレッド試作として sig==0 は 0 を返す.
+            // シグナル番号が範囲外なら EINVAL.
+            let sig = if self.is64 {
+                get64(env, Gpr(2))
+            } else {
+                u64::from(env.backend.get(Gpr(2).state()))
+            };
+            if sig > 64 {
+                set64(env, Gpr(0), neg(EINVAL));
+                return TrapOutcome::Handled;
+            }
+            // sig==0 は存在確認であり 0 を返す。他のシグナルは無視して 0 とする.
+            set64(env, Gpr(0), 0);
+            return TrapOutcome::Handled;
+        }
         if self.is64 && nr == polyisa_os_linux::x86_64::SET_ROBUST_LIST {
             // robust futex リスト先頭を記録して 0 を返す。
             // 長さは struct robust_list_head (24バイト) のはずであり、異なる場合は EINVAL.
@@ -5074,6 +5136,57 @@ mod tests {
         set64(&mut env, Gpr(7), 0x100);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), std::process::id() as u64);
+    }
+
+    #[test]
+    fn gettid_returns_tid() {
+        use polyisa_os_linux::x86_64 as abi;
+        let mut sys = CliLinux::x86_64();
+        let mut env = bare();
+        set64(&mut env, Gpr(0), abi::GETTID);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), std::process::id() as u64);
+    }
+
+    #[test]
+    fn getpid_returns_pid() {
+        use polyisa_os_linux::x86_64 as abi;
+        let mut sys = CliLinux::x86_64();
+        let mut env = bare();
+        set64(&mut env, Gpr(0), abi::GETPID);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), std::process::id() as u64);
+    }
+
+    #[test]
+    fn rt_sig_returns_zero() {
+        use polyisa_os_linux::x86_64 as abi;
+        let mut sys = CliLinux::x86_64();
+        let mut env = bare();
+        set64(&mut env, Gpr(0), abi::RT_SIGACTION);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        set64(&mut env, Gpr(0), abi::RT_SIGPROCMASK);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+    }
+
+    #[test]
+    fn tgkill_zero_returns_zero() {
+        use polyisa_os_linux::x86_64 as abi;
+        let mut sys = CliLinux::x86_64();
+        let mut env = bare();
+        set64(&mut env, Gpr(0), abi::TGKILL);
+        set64(&mut env, Gpr(7), 100);
+        set64(&mut env, Gpr(6), 100);
+        set64(&mut env, Gpr(2), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        // sig 範囲外は EINVAL。
+        set64(&mut env, Gpr(0), abi::TGKILL);
+        set64(&mut env, Gpr(2), 100);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EINVAL));
     }
 
     #[test]

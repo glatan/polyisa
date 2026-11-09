@@ -3902,3 +3902,22 @@ fn xchg_r64_rip_basic() {
         .unwrap();
     assert_eq!(u64::from_le_bytes(back), 0x11);
 }
+
+#[test]
+fn cmp_r64_fs_abs_basic() {
+    // CMP RDI,FS:[0x10] (REX.W SIB-abs FS): RDI=0x10, [FS:0x10]=0x10 -> ZF=1.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1010), &[0x10u8, 0, 0, 0, 0, 0, 0, 0])
+        .unwrap();
+    env.step(|b| {
+        sem::write64(b, Gpr(7), 0x10);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::cmp_r64_fs_abs(b, Gpr(7), 0x1000, 0x10))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0x40);
+}

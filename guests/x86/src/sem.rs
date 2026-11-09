@@ -7692,3 +7692,57 @@ pub fn xchg_r64_rip<B: Backend>(b: &mut B, dst: Gpr, next_rip: u64, disp: i32) -
     write64(b, dst, m);
     Ok(())
 }
+
+/// CMP r32, [index*scale+disp32] abs (3B SIB 直接番地、索引あり)。
+pub fn cmp_r32_sibabs<B: Backend>(b: &mut B, dst: Gpr, idx: Gpr, shift: u32, disp: i32) -> Flow<B> {
+    let addr = sib_addr_scaled_abs(b, shift, disp, idx);
+    let y: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let x = read(b, dst);
+    let v = b.sub::<W32>(x, y);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
+/// CMP r64, [index*scale+disp32] abs (3B SIB 直接番地、索引あり、REX.W)。
+pub fn cmp_r64_sibabs<B: Backend>(b: &mut B, dst: Gpr, idx: Gpr, shift: u32, disp: i32) -> Flow<B> {
+    let addr = sib_addr_scaled_abs(b, shift, disp, idx);
+    let y: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let x = read64(b, dst);
+    let v = b.sub::<W64>(x, y);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
+/// CMP r32, FS:[disp32] (FS + 3B SIB 直接番地)。
+pub fn cmp_r32_fs_abs<B: Backend>(b: &mut B, dst: Gpr, fs_base: u64, disp: i32) -> Flow<B> {
+    let base = b.konst::<W64>(fs_base);
+    let d = b.konst::<W64>(disp as i64 as u64);
+    let addr = b.add::<W64>(base, d);
+    let y: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let x = read(b, dst);
+    let v = b.sub::<W32>(x, y);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
+/// CMP r64, FS:[disp32] (FS + 3B SIB 直接番地、REX.W)。
+pub fn cmp_r64_fs_abs<B: Backend>(b: &mut B, dst: Gpr, fs_base: u64, disp: i32) -> Flow<B> {
+    let base = b.konst::<W64>(fs_base);
+    let d = b.konst::<W64>(disp as i64 as u64);
+    let addr = b.add::<W64>(base, d);
+    let y: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let x = read64(b, dst);
+    let v = b.sub::<W64>(x, y);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
+/// CMP r64, m64 [disp32] abs (REX.W)。
+pub fn cmp_r64_abs<B: Backend>(b: &mut B, dst: Gpr, addr32: u32) -> Flow<B> {
+    let addr = b.konst::<W64>(addr32 as u64);
+    let y: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let x = read64(b, dst);
+    let v = b.sub::<W64>(x, y);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
