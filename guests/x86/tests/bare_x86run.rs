@@ -337,6 +337,33 @@ fn run_lea_scaled() {
 }
 
 #[test]
+fn run_signed_branch() {
+    // CMP+JL を run 経由で回す。-5 < 0 で taken、exit(7)。
+    // mov eax,-5; cmp eax,0; jl +5 -> mov eax,7 を実行;
+    // push eax; pop ebx; mov eax,1; int 0x80 -> exit(7)
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    let prog: &[u8] = &[
+        0xB8, 0xFB, 0xFF, 0xFF, 0xFF, // mov eax,-5
+        0x3D, 0x00, 0x00, 0x00, 0x00, // cmp eax,0
+        0x7C, 0x05, // jl +5 -> 0x1011
+        0xB8, 0x63, 0x00, 0x00, 0x00, // mov eax,99 (skipped)
+        0xB8, 0x07, 0x00, 0x00, 0x00, // mov eax,7
+        0x50, // push eax
+        0x5B, // pop ebx (ebx=7)
+        0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax,1
+        0xCD, 0x80, // int 0x80 -> exit(7)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = ExitOne;
+    let out = run_x86::run(&mut env, 0x1000, &mut sys, 100);
+    assert_eq!(out, Outcome::Exit(7));
+}
+
+#[test]
 fn run_gas_absorbed_cell() {
     // 実アセンブラ由来のバイト列をそのまま埋め込んだ統合テスト。
     // 由来：Binutils GAS (as --32) + ld -m elf_i386 でリンクした静的 i386 バイナリの

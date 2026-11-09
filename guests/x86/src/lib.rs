@@ -2,10 +2,11 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! x86 最小のゲスト ISA。段階4の最小であり、可変長デコードを確かめる。
 //!
-//! i386 の汎用レジスタ系122件のみ持つ。SIB+disp32 と Rust フック・
-//! EFLAGS(SF/OF/PF/AF)・64ビット・x87・SSE・セグメントは本格実装で足す。
+//! i386 の汎用レジスタ系126件のみ持つ。SIB+disp32 と Rust フック・
+//! 64ビット・x87・SSE・セグメントは本格実装で足す。
 //! SYSCALL/CPUID は最小形、ModRM は register-direct（全組合せ）・mod=01+disp8・
-//! mod=10+disp32・絶対番地と SIB base+index 形（スケール付き、disp8 の有無は問わない）を持つ。
+//! mod=10+disp32・絶対番地と SIB base+index 形（スケール付き、disp8/disp32・disp なしを含む）を持ち、
+//! EFLAGS は CF/PF/AF/ZF/SF/OF の 6 旗を追跡する。条件分岐は符号付き（JL/JGE/JLE/JG）まで持つ。
 
 #![forbid(unsafe_code)]
 
@@ -32,7 +33,7 @@ pub struct CpuState {
     pub g: [u32; 8],
     /// 命令ポインタ。
     pub eip: u32,
-    /// フラグレジスタ（試作では ZF bit6 と CF bit0 のみ使う）。
+    /// フラグレジスタ（CF bit0、PF bit2、AF bit4、ZF bit6、SF bit7、OF bit11 を使う）。
     pub eflags: u32,
 }
 
@@ -55,8 +56,8 @@ mod tests {
 
     #[test]
     fn insn_count() {
-        // 試作の整数122件。
-        assert_eq!(INSNS.len(), 122);
+        // 試作の整数126件。
+        assert_eq!(INSNS.len(), 126);
     }
 
     #[test]
@@ -118,6 +119,13 @@ mod tests {
         assert_eq!(decode(0x7300, 16), Some(Insn::Jae));
         assert_eq!(decode(0x7600, 16), Some(Insn::Jbe));
         assert_eq!(decode(0x7700, 16), Some(Insn::Ja));
+        // 符号付き条件分岐：JL (7C)、JGE (7D)、JLE (7E)、JG (7F)。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x7C00, 16), Some(Insn::Jl));
+        assert_eq!(decode(0x7DFE, 16), Some(Insn::Jge));
+        assert_eq!(decode(0x7E00, 16), Some(Insn::Jle));
+        assert_eq!(decode(0x7FFE, 16), Some(Insn::Jg));
+        assert_eq!(decode(0x7C00, 8), None);
         // ループと近傍ジャンプ：LOOP rel8 (E2)、JMP rel32 (E9)。
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0xE2FE, 16), Some(Insn::Loop));

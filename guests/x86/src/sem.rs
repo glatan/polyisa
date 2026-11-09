@@ -40,26 +40,122 @@ pub fn eflags_ref() -> StateRef<W32> {
     StateRef::<W32>::from_offset(core::mem::offset_of!(CpuState, eflags))
 }
 
-/// ZF（bit6）と CF（bit0）を更新する。遅延評価は本格実装で足す。
-fn update_zf_cf<B: Backend>(b: &mut B, x: B::V<W32>, y: B::V<W32>) {
-    let flags: B::V<W32> = b.get(eflags_ref());
-    let zf_mask = b.konst::<W32>(0xffff_ffbf);
-    let cleared_zf = b.and::<W32>(flags, zf_mask);
-    let eq = b.cmp::<W32>(Cmp::Eq, x, y);
-    let zf_on = b.konst::<W32>(0x40);
-    let zf_off = b.konst::<W32>(0);
-    let zf_bit = b.select::<W32>(eq, zf_on, zf_off);
-    let e1 = b.or::<W32>(cleared_zf, zf_bit);
-    b.set(eflags_ref(), e1);
-    let flags2: B::V<W32> = b.get(eflags_ref());
-    let cf_mask = b.konst::<W32>(0xffff_fffe);
-    let cleared_cf = b.and::<W32>(flags2, cf_mask);
-    let lt = b.cmp::<W32>(Cmp::LtU, x, y);
-    let cf_on = b.konst::<W32>(1);
-    let cf_off = b.konst::<W32>(0);
-    let cf_bit = b.select::<W32>(lt, cf_on, cf_off);
-    let e2 = b.or::<W32>(cleared_cf, cf_bit);
-    b.set(eflags_ref(), e2);
+/// EFLAGS のビット位置（i386）。
+const FLAG_CF: u32 = 0x1;
+const FLAG_PF: u32 = 0x4;
+const FLAG_AF: u32 = 0x10;
+const FLAG_ZF: u32 = 0x40;
+const FLAG_SF: u32 = 0x80;
+const FLAG_OF: u32 = 0x800;
+/// ADD/SUB/CMP と論理演算で更新する 6 旗のマスク（遅延評価は本格実装で足す）。
+const FLAG_OSZPCA: u32 = FLAG_OF | FLAG_SF | FLAG_ZF | FLAG_AF | FLAG_PF | FLAG_CF;
+/// シフトで更新する 5 旗のマスク（AF は不定のため触らない）。
+const FLAG_OSZPC: u32 = FLAG_OF | FLAG_SF | FLAG_ZF | FLAG_PF | FLAG_CF;
+
+/// 条件の真偽でビット値（bit / 0）を選ぶ。
+fn pick<B: Backend>(b: &mut B, c: B::B, bit: u32) -> B::V<W32> {
+    let t = b.konst::<W32>(bit);
+    let f = b.konst::<W32>(0);
+    b.select::<W32>(c, t, f)
+}
+
+/// 低8ビットの偶パリティで PF bit を作る。
+fn pf_bit<B: Backend>(b: &mut B, v: B::V<W32>) -> B::V<W32> {
+    let ff = b.konst::<W32>(0xff);
+    let mut x = b.and::<W32>(v, ff);
+    for s in [4u32, 2, 1] {
+        let n = b.konst::<W32>(s);
+        let y = b.shr_l::<W32>(x, n);
+        x = b.xor::<W32>(x, y);
+    }
+    let one = b.konst::<W32>(1);
+    let x1 = b.and::<W32>(x, one);
+    let zero = b.konst::<W32>(0);
+    let even = b.cmp::<W32>(Cmp::Eq, x1, zero);
+    pick(b, even, FLAG_PF)
+}
+
+/// 結果値から SF/ZF/PF の 3 ビット分を作る。
+fn szp_bits<B: Backend>(b: &mut B, v: B::V<W32>) -> B::V<W32> {
+    let top_mask = b.konst::<W32>(0x8000_0000);
+    let top = b.and::<W32>(v, top_mask);
+    let zero = b.konst::<W32>(0);
+    let sf_take = b.cmp::<W32>(Cmp::Ne, top, zero);
+    let sf = pick(b, sf_take, FLAG_SF);
+    let zf_take = b.cmp::<W32>(Cmp::Eq, v, zero);
+    let zf = pick(b, zf_take, FLAG_ZF);
+    let pf = pf_bit(b, v);
+    let t = b.or::<W32>(sf, zf);
+    b.or::<W32>(t, pf)
+}
+
+/// (x OP y) の補助キャリ（bit4）から AF bit を作る。ADD/SUB/CMP 共通式。
+fn af_bit<B: Backend>(b: &mut B, x: B::V<W32>, y: B::V<W32>, v: B::V<W32>) -> B::V<W32> {
+    let t = b.xor::<W32>(x, y);
+    let u = b.xor::<W32>(t, v);
+    let af_mask = b.konst::<W32>(FLAG_AF);
+    let nib = b.and::<W32>(u, af_mask);
+    let zero = b.konst::<W32>(0);
+    let take = b.cmp::<W32>(Cmp::Ne, nib, zero);
+    pick(b, take, FLAG_AF)
+}
+
+/// ADD 系の 6 旗を更新する。CF=繰り上がり、OF=符号あふれ。
+fn update_add_flags<B: Backend>(b: &mut B, x: B::V<W32>, y: B::V<W32>, v: B::V<W32>) {
+    let old: B::V<W32> = b.get(eflags_ref());
+    let zero = b.konst::<W32>(0);
+    let cf_take = b.cmp::<W32>(Cmp::LtU, v, x);
+    let cf = pick(b, cf_take, FLAG_CF);
+    let a = b.xor::<W32>(x, v);
+    let c = b.xor::<W32>(y, v);
+    let s = b.and::<W32>(a, c);
+    let n31 = b.konst::<W32>(31);
+    let s31 = b.shr_l::<W32>(s, n31);
+    let of_take = b.cmp::<W32>(Cmp::Ne, s31, zero);
+    let of = pick(b, of_take, FLAG_OF);
+    let af = af_bit(b, x, y, v);
+    let szp = szp_bits(b, v);
+    let clear_mask = b.konst::<W32>(!FLAG_OSZPCA);
+    let mut f = b.and::<W32>(old, clear_mask);
+    f = b.or::<W32>(f, cf);
+    f = b.or::<W32>(f, of);
+    f = b.or::<W32>(f, af);
+    f = b.or::<W32>(f, szp);
+    b.set(eflags_ref(), f);
+}
+
+/// SUB/CMP 系の 6 旗を更新する。CF=借り、OF=符号あふれ。
+fn update_sub_flags<B: Backend>(b: &mut B, x: B::V<W32>, y: B::V<W32>, v: B::V<W32>) {
+    let old: B::V<W32> = b.get(eflags_ref());
+    let zero = b.konst::<W32>(0);
+    let cf_take = b.cmp::<W32>(Cmp::LtU, x, y);
+    let cf = pick(b, cf_take, FLAG_CF);
+    let a = b.xor::<W32>(x, y);
+    let c = b.xor::<W32>(x, v);
+    let s = b.and::<W32>(a, c);
+    let n31 = b.konst::<W32>(31);
+    let s31 = b.shr_l::<W32>(s, n31);
+    let of_take = b.cmp::<W32>(Cmp::Ne, s31, zero);
+    let of = pick(b, of_take, FLAG_OF);
+    let af = af_bit(b, x, y, v);
+    let szp = szp_bits(b, v);
+    let clear_mask = b.konst::<W32>(!FLAG_OSZPCA);
+    let mut f = b.and::<W32>(old, clear_mask);
+    f = b.or::<W32>(f, cf);
+    f = b.or::<W32>(f, of);
+    f = b.or::<W32>(f, af);
+    f = b.or::<W32>(f, szp);
+    b.set(eflags_ref(), f);
+}
+
+/// 論理演算の 5 旗を更新する（CF=0、OF=0、AF は不定のため保存）。
+fn update_logic_flags<B: Backend>(b: &mut B, v: B::V<W32>) {
+    let old: B::V<W32> = b.get(eflags_ref());
+    let szp = szp_bits(b, v);
+    let clear_mask = b.konst::<W32>(!FLAG_OSZPC);
+    let cleared = b.and::<W32>(old, clear_mask);
+    let f = b.or::<W32>(cleared, szp);
+    b.set(eflags_ref(), f);
 }
 
 /// CF を読む。
@@ -73,27 +169,27 @@ fn read_cf<B: Backend>(b: &mut B) -> B::B {
 
 fn read_zf<B: Backend>(b: &mut B) -> B::B {
     let flags: B::V<W32> = b.get(eflags_ref());
-    let mask = b.konst::<W32>(0x40);
+    let mask = b.konst::<W32>(FLAG_ZF);
     let masked = b.and::<W32>(flags, mask);
     let zero = b.konst::<W32>(0);
     b.cmp::<W32>(Cmp::Ne, masked, zero)
 }
 
-/// CMP EAX, imm32。EAX は変えず ZF/CF だけ更新する。
+/// CMP EAX, imm32。EAX は変えず 6 旗を更新する。
 pub fn cmp_eax<B: Backend>(b: &mut B, imm: u32) -> Flow<B> {
     let x = read(b, Gpr(0));
     let y = b.konst::<W32>(imm);
-    update_zf_cf(b, x, y);
+    let v = b.sub::<W32>(x, y);
+    update_sub_flags(b, x, y, v);
     Ok(())
 }
 
-/// TEST EAX, EAX。AND 結果で ZF/CF を更新する（CF=0）。
+/// TEST EAX, EAX。AND 結果で 5 旗を更新する（CF=0、OF=0）。
 /// EAX 自身は変えない。
 pub fn test_eax<B: Backend>(b: &mut B) -> Flow<B> {
     let x = read(b, Gpr(0));
     let v = b.and::<W32>(x, x);
-    let zero = b.konst::<W32>(0);
-    update_zf_cf(b, v, zero);
+    update_logic_flags(b, v);
     Ok(())
 }
 
@@ -125,7 +221,29 @@ fn cf_num<B: Backend>(b: &mut B) -> B::V<W32> {
 /// ZF を 0/1 の値として読む。
 fn zf_num<B: Backend>(b: &mut B) -> B::V<W32> {
     let flags: B::V<W32> = b.get(eflags_ref());
-    let mask = b.konst::<W32>(0x40);
+    let mask = b.konst::<W32>(FLAG_ZF);
+    let masked = b.and::<W32>(flags, mask);
+    let one = b.konst::<W32>(1);
+    let zero = b.konst::<W32>(0);
+    let take = b.cmp::<W32>(Cmp::Ne, masked, zero);
+    b.select::<W32>(take, one, zero)
+}
+
+/// SF を 0/1 の値として読む。
+fn sf_num<B: Backend>(b: &mut B) -> B::V<W32> {
+    let flags: B::V<W32> = b.get(eflags_ref());
+    let mask = b.konst::<W32>(FLAG_SF);
+    let masked = b.and::<W32>(flags, mask);
+    let one = b.konst::<W32>(1);
+    let zero = b.konst::<W32>(0);
+    let take = b.cmp::<W32>(Cmp::Ne, masked, zero);
+    b.select::<W32>(take, one, zero)
+}
+
+/// OF を 0/1 の値として読む。
+fn of_num<B: Backend>(b: &mut B) -> B::V<W32> {
+    let flags: B::V<W32> = b.get(eflags_ref());
+    let mask = b.konst::<W32>(FLAG_OF);
     let masked = b.and::<W32>(flags, mask);
     let one = b.konst::<W32>(1);
     let zero = b.konst::<W32>(0);
@@ -201,6 +319,84 @@ pub fn ja<B: Backend>(b: &mut B, eip: u32, disp: i8) -> Flow<B> {
     Ok(())
 }
 
+/// JL rel8。SF!=OF なら eip+2+disp に飛ぶ（符号付き小なり）。
+pub fn jl<B: Backend>(b: &mut B, eip: u32, disp: i8) -> Flow<B> {
+    let sf = sf_num(b);
+    let of = of_num(b);
+    let take = b.cmp::<W32>(Cmp::Ne, sf, of);
+    let target = eip.wrapping_add(2).wrapping_add(disp as i32 as u32);
+    let t = b.konst::<W32>(target);
+    let tj = b.konst::<W64>(target as u64);
+    b.if_then(take, |b| {
+        b.set(eip_ref(), t);
+        b.jump(tj);
+        Ok(())
+    })?;
+    Ok(())
+}
+
+/// JGE rel8。SF==OF なら eip+2+disp に飛ぶ（符号付き以上）。
+pub fn jge<B: Backend>(b: &mut B, eip: u32, disp: i8) -> Flow<B> {
+    let sf = sf_num(b);
+    let of = of_num(b);
+    let take = b.cmp::<W32>(Cmp::Eq, sf, of);
+    let target = eip.wrapping_add(2).wrapping_add(disp as i32 as u32);
+    let t = b.konst::<W32>(target);
+    let tj = b.konst::<W64>(target as u64);
+    b.if_then(take, |b| {
+        b.set(eip_ref(), t);
+        b.jump(tj);
+        Ok(())
+    })?;
+    Ok(())
+}
+
+/// JLE rel8。ZF=1 または SF!=OF なら eip+2+disp に飛ぶ（符号付き以下）。
+pub fn jle<B: Backend>(b: &mut B, eip: u32, disp: i8) -> Flow<B> {
+    let zf = zf_num(b);
+    let sf = sf_num(b);
+    let of = of_num(b);
+    let zero = b.konst::<W32>(0);
+    let one = b.konst::<W32>(1);
+    let ne = b.cmp::<W32>(Cmp::Ne, sf, of);
+    let ne_n = b.select::<W32>(ne, one, zero);
+    let either = b.or::<W32>(zf, ne_n);
+    let take = b.cmp::<W32>(Cmp::Ne, either, zero);
+    let target = eip.wrapping_add(2).wrapping_add(disp as i32 as u32);
+    let t = b.konst::<W32>(target);
+    let tj = b.konst::<W64>(target as u64);
+    b.if_then(take, |b| {
+        b.set(eip_ref(), t);
+        b.jump(tj);
+        Ok(())
+    })?;
+    Ok(())
+}
+
+/// JG rel8。ZF=0 かつ SF==OF なら eip+2+disp に飛ぶ（符号付き大なり）。
+pub fn jg<B: Backend>(b: &mut B, eip: u32, disp: i8) -> Flow<B> {
+    let zf = zf_num(b);
+    let sf = sf_num(b);
+    let of = of_num(b);
+    let zero = b.konst::<W32>(0);
+    let one = b.konst::<W32>(1);
+    let eq = b.cmp::<W32>(Cmp::Eq, sf, of);
+    let eq_n = b.select::<W32>(eq, one, zero);
+    let zf_is_clear = b.cmp::<W32>(Cmp::Eq, zf, zero);
+    let zf_ok = b.select::<W32>(zf_is_clear, one, zero);
+    let both = b.and::<W32>(eq_n, zf_ok);
+    let take = b.cmp::<W32>(Cmp::Ne, both, zero);
+    let target = eip.wrapping_add(2).wrapping_add(disp as i32 as u32);
+    let t = b.konst::<W32>(target);
+    let tj = b.konst::<W64>(target as u64);
+    b.if_then(take, |b| {
+        b.set(eip_ref(), t);
+        b.jump(tj);
+        Ok(())
+    })?;
+    Ok(())
+}
+
 /// JNE rel8。ZF=0 なら eip+2+disp に飛ぶ。
 /// if_then は肯定分岐のみのため、ZF の否定は select で作る。
 pub fn jne<B: Backend>(b: &mut B, eip: u32, disp: i8) -> Flow<B> {
@@ -233,26 +429,44 @@ pub fn nop<B: Backend>(_b: &mut B) -> Flow<B> {
     Ok(())
 }
 
-/// INC r32。32ビットで包む（EFLAGS 更新は本格実装で足す）。
+/// INC r32。32ビットで包む。CF 以外の 5 旗を更新する（CF は保存）。
 pub fn inc_r32<B: Backend>(b: &mut B, rd: Gpr) -> Flow<B> {
+    let cf_mask = b.konst::<W32>(FLAG_CF);
+    let all_flags = b.get(eflags_ref());
+    let saved_cf = b.and::<W32>(all_flags, cf_mask);
     let x = read(b, rd);
     let one = b.konst::<W32>(1);
     let v = b.add::<W32>(x, one);
     write(b, rd, v);
+    update_add_flags(b, x, one, v);
+    let f = b.get(eflags_ref());
+    let not_cf = b.konst::<W32>(!FLAG_CF);
+    let cleared = b.and::<W32>(f, not_cf);
+    let restored = b.or::<W32>(cleared, saved_cf);
+    b.set(eflags_ref(), restored);
     Ok(())
 }
 
-/// INC EAX。32ビットで包む（EFLAGS 更新は本格実装で足す）。
+/// INC EAX。32ビットで包む。CF 以外の 5 旗を更新する（CF は保存）。
 pub fn inc_eax<B: Backend>(b: &mut B) -> Flow<B> {
     inc_r32(b, Gpr::eax())
 }
 
-/// DEC r32。32ビットで包む（EFLAGS 更新は本格実装で足す）。
+/// DEC r32。32ビットで包む。CF 以外の 5 旗を更新する（CF は保存）。
 pub fn dec_r32<B: Backend>(b: &mut B, rd: Gpr) -> Flow<B> {
+    let cf_mask = b.konst::<W32>(FLAG_CF);
+    let all_flags = b.get(eflags_ref());
+    let saved_cf = b.and::<W32>(all_flags, cf_mask);
     let x = read(b, rd);
     let one = b.konst::<W32>(1);
     let v = b.sub::<W32>(x, one);
     write(b, rd, v);
+    update_sub_flags(b, x, one, v);
+    let f = b.get(eflags_ref());
+    let not_cf = b.konst::<W32>(!FLAG_CF);
+    let cleared = b.and::<W32>(f, not_cf);
+    let restored = b.or::<W32>(cleared, saved_cf);
+    b.set(eflags_ref(), restored);
     Ok(())
 }
 
@@ -261,22 +475,24 @@ pub fn dec_eax<B: Backend>(b: &mut B) -> Flow<B> {
     dec_r32(b, Gpr::eax())
 }
 
-/// ADD EAX, imm32。32ビットで包む。
+/// ADD EAX, imm32。32ビットで包み、6 旗を更新する。
 pub fn add_eax<B: Backend>(b: &mut B, imm: u32) -> Flow<B> {
     let x = read(b, Gpr::eax());
     let y = b.konst::<W32>(imm);
     let v = b.add::<W32>(x, y);
     write(b, Gpr::eax(), v);
+    update_add_flags(b, x, y, v);
     Ok(())
 }
 
 /// ADD r/m32, r32 (ModRM register-direct 01 /r、mod=11)。
-/// 方向は dst=rm、src=reg。SIB/disp/メモリ形式と Rust フックは本格実装で足す。
+/// 方向は dst=rm、src=reg。6 旗を更新する。
 pub fn add_rm32<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
     let x = read(b, dst);
     let y = read(b, src);
     let v = b.add::<W32>(x, y);
     write(b, dst, v);
+    update_add_flags(b, x, y, v);
     Ok(())
 }
 
@@ -677,13 +893,13 @@ pub fn mov_abs_eax<B: Backend>(b: &mut B, addr: u32) -> Flow<B> {
     Ok(())
 }
 
-/// SUB EAX, imm32。結果を書き、ZF/CF を更新する。
+/// SUB EAX, imm32。結果を書き、6 旗を更新する。
 pub fn sub_eax<B: Backend>(b: &mut B, imm: u32) -> Flow<B> {
     let x = read(b, Gpr(0));
     let y = b.konst::<W32>(imm);
     let v = b.sub::<W32>(x, y);
     write(b, Gpr(0), v);
-    update_zf_cf(b, x, y);
+    update_sub_flags(b, x, y, v);
     Ok(())
 }
 
@@ -694,54 +910,116 @@ pub fn leave<B: Backend>(b: &mut B) -> Flow<B> {
     pop_reg(b, Gpr(5))
 }
 
-/// AND EAX, imm32。結果を書き、ZF/CF を更新する。
+/// AND EAX, imm32。結果を書き、5 旗を更新する（CF=0、OF=0）。
 pub fn and_eax<B: Backend>(b: &mut B, imm: u32) -> Flow<B> {
     let x = read(b, Gpr(0));
     let y = b.konst::<W32>(imm);
     let v = b.and::<W32>(x, y);
     write(b, Gpr(0), v);
-    let zero = b.konst::<W32>(0);
-    update_zf_cf(b, v, zero);
+    update_logic_flags(b, v);
     Ok(())
 }
 
-/// OR EAX, imm32。結果を書き、ZF/CF を更新する。
+/// OR EAX, imm32。結果を書き、5 旗を更新する（CF=0、OF=0）。
 pub fn or_eax<B: Backend>(b: &mut B, imm: u32) -> Flow<B> {
     let x = read(b, Gpr(0));
     let y = b.konst::<W32>(imm);
     let v = b.or::<W32>(x, y);
     write(b, Gpr(0), v);
-    let zero = b.konst::<W32>(0);
-    update_zf_cf(b, v, zero);
+    update_logic_flags(b, v);
     Ok(())
 }
 
-/// XOR EAX, imm32。結果を書き、ZF/CF を更新する。
+/// XOR EAX, imm32。結果を書き、5 旗を更新する（CF=0、OF=0）。
 pub fn xor_imm<B: Backend>(b: &mut B, imm: u32) -> Flow<B> {
     let x = read(b, Gpr(0));
     let y = b.konst::<W32>(imm);
     let v = b.xor::<W32>(x, y);
     write(b, Gpr(0), v);
-    let zero = b.konst::<W32>(0);
-    update_zf_cf(b, v, zero);
+    update_logic_flags(b, v);
     Ok(())
 }
 
-/// SHL EAX, imm8。カウントは下位5ビットだけ使う。EFLAGS 更新は本格実装で足す。
+/// SHL EAX, imm8。カウントは下位5ビットだけ使う。
+/// カウント 0 では何も変えない。CF=追い出されたビット、OF=カウント1のときのみ更新、
+/// SF/ZF/PF=結果から、AF は不定のため保存。
 pub fn shl_eax<B: Backend>(b: &mut B, n: u8) -> Flow<B> {
     let x = read(b, Gpr(0));
     let count = b.konst::<W32>((n & 31) as u32);
     let v = b.shl::<W32>(x, count);
     write(b, Gpr(0), v);
+    let old: B::V<W32> = b.get(eflags_ref());
+    let zero = b.konst::<W32>(0);
+    let active = b.cmp::<W32>(Cmp::Ne, count, zero);
+    // 追い出されたビット = (x << (count-1)) の最上位。count=0 では使わない。
+    let one = b.konst::<W32>(1);
+    let c1 = b.sub::<W32>(count, one);
+    let safe_c1 = b.select::<W32>(active, c1, zero);
+    let shifted = b.shl::<W32>(x, safe_c1);
+    let top_mask = b.konst::<W32>(0x8000_0000);
+    let top = b.and::<W32>(shifted, top_mask);
+    let cf_take = b.cmp::<W32>(Cmp::Ne, top, zero);
+    let cf = pick(b, cf_take, FLAG_CF);
+    // OF（count=1）= 結果の最上位 XOR CF。
+    let n31 = b.konst::<W32>(31);
+    let v_top = b.shr_l::<W32>(v, n31);
+    let v31 = b.and::<W32>(v_top, one);
+    let out_top = b.shr_l::<W32>(shifted, n31);
+    let cf01 = b.and::<W32>(out_top, one);
+    let of_raw = b.cmp::<W32>(Cmp::Ne, v31, cf01);
+    let of_new = pick(b, of_raw, FLAG_OF);
+    let of_mask = b.konst::<W32>(FLAG_OF);
+    let old_of = b.and::<W32>(old, of_mask);
+    let is_one = b.cmp::<W32>(Cmp::Eq, count, one);
+    let of = b.select::<W32>(is_one, of_new, old_of);
+    let szp = szp_bits(b, v);
+    let clear_mask = b.konst::<W32>(!FLAG_OSZPC);
+    let mut new_flags = b.and::<W32>(old, clear_mask);
+    new_flags = b.or::<W32>(new_flags, cf);
+    new_flags = b.or::<W32>(new_flags, of);
+    new_flags = b.or::<W32>(new_flags, szp);
+    let assembled = b.select::<W32>(active, new_flags, old);
+    b.set(eflags_ref(), assembled);
     Ok(())
 }
 
-/// SHR EAX, imm8。論理右シフト。カウントは下位5ビットだけ使う。EFLAGS 更新は本格実装で足す。
+/// SHR EAX, imm8。論理右シフト。カウントは下位5ビットだけ使う。
+/// カウント 0 では何も変えない。CF=追い出されたビット、OF=カウント1のとき旧最上位、
+/// SF/ZF/PF=結果から、AF は不定のため保存。
 pub fn shr_eax<B: Backend>(b: &mut B, n: u8) -> Flow<B> {
     let x = read(b, Gpr(0));
     let count = b.konst::<W32>((n & 31) as u32);
     let v = b.shr_l::<W32>(x, count);
     write(b, Gpr(0), v);
+    let old: B::V<W32> = b.get(eflags_ref());
+    let zero = b.konst::<W32>(0);
+    let active = b.cmp::<W32>(Cmp::Ne, count, zero);
+    // 追い出されたビット = (x >> (count-1)) の最下位。count=0 では使わない。
+    let one = b.konst::<W32>(1);
+    let c1 = b.sub::<W32>(count, one);
+    let safe_c1 = b.select::<W32>(active, c1, zero);
+    let shifted = b.shr_l::<W32>(x, safe_c1);
+    let low = b.and::<W32>(shifted, one);
+    let cf_take = b.cmp::<W32>(Cmp::Ne, low, zero);
+    let cf = pick(b, cf_take, FLAG_CF);
+    // OF（count=1）= シフト前の最上位。
+    let n31 = b.konst::<W32>(31);
+    let x_top = b.shr_l::<W32>(x, n31);
+    let x31 = b.and::<W32>(x_top, one);
+    let of_raw = b.cmp::<W32>(Cmp::Ne, x31, zero);
+    let of_new = pick(b, of_raw, FLAG_OF);
+    let of_mask = b.konst::<W32>(FLAG_OF);
+    let old_of = b.and::<W32>(old, of_mask);
+    let is_one = b.cmp::<W32>(Cmp::Eq, count, one);
+    let of = b.select::<W32>(is_one, of_new, old_of);
+    let szp = szp_bits(b, v);
+    let clear_mask = b.konst::<W32>(!FLAG_OSZPC);
+    let mut new_flags = b.and::<W32>(old, clear_mask);
+    new_flags = b.or::<W32>(new_flags, cf);
+    new_flags = b.or::<W32>(new_flags, of);
+    new_flags = b.or::<W32>(new_flags, szp);
+    let assembled = b.select::<W32>(active, new_flags, old);
+    b.set(eflags_ref(), assembled);
     Ok(())
 }
 
@@ -860,56 +1138,54 @@ pub fn lea_sib_s8a32<B: Backend>(b: &mut B, dst: Gpr, disp: i32) -> Flow<B> {
     lea_sib_scaled_abs(b, dst, 3, disp)
 }
 
-/// CMP r/m32, r32。dst は変えず ZF/CF だけ更新する。
+/// CMP r/m32, r32。dst は変えず 6 旗を更新する。
 /// 方向は x=rm、y=reg。
 pub fn cmp_rm32<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
     let x = read(b, dst);
     let y = read(b, src);
-    update_zf_cf(b, x, y);
+    let v = b.sub::<W32>(x, y);
+    update_sub_flags(b, x, y, v);
     Ok(())
 }
 
-/// AND r/m32, r32。結果を dst に書き、ZF/CF を更新する（CF=0）。
+/// AND r/m32, r32。結果を dst に書き、5 旗を更新する（CF=0、OF=0）。
 pub fn and_rm32<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
     let x = read(b, dst);
     let y = read(b, src);
     let v = b.and::<W32>(x, y);
     write(b, dst, v);
-    let zero = b.konst::<W32>(0);
-    update_zf_cf(b, v, zero);
+    update_logic_flags(b, v);
     Ok(())
 }
 
-/// OR r/m32, r32。結果を dst に書き、ZF/CF を更新する（CF=0）。
+/// OR r/m32, r32。結果を dst に書き、5 旗を更新する（CF=0、OF=0）。
 pub fn or_rm32<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
     let x = read(b, dst);
     let y = read(b, src);
     let v = b.or::<W32>(x, y);
     write(b, dst, v);
-    let zero = b.konst::<W32>(0);
-    update_zf_cf(b, v, zero);
+    update_logic_flags(b, v);
     Ok(())
 }
 
-/// SUB r/m32, r32。結果を dst に書き、ZF/CF を更新する。
+/// SUB r/m32, r32。結果を dst に書き、6 旗を更新する。
 pub fn sub_rm32<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
     let x = read(b, dst);
     let y = read(b, src);
     let v = b.sub::<W32>(x, y);
     write(b, dst, v);
-    update_zf_cf(b, x, y);
+    update_sub_flags(b, x, y, v);
     Ok(())
 }
 
-/// XOR r/m32, r32。結果を dst に書き、ZF/CF を更新する（CF=0）。
+/// XOR r/m32, r32。結果を dst に書き、5 旗を更新する（CF=0、OF=0）。
 /// 31 C0（XOR EAX,EAX のゼロ化イディオム）はこの汎用形で扱う。
 pub fn xor_rm32<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
     let x = read(b, dst);
     let y = read(b, src);
     let v = b.xor::<W32>(x, y);
     write(b, dst, v);
-    let zero = b.konst::<W32>(0);
-    update_zf_cf(b, v, zero);
+    update_logic_flags(b, v);
     Ok(())
 }
 
