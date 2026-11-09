@@ -308,6 +308,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("movaps_store_sibd32", "F1", "00001111 00101001 10...100 ........ ................................", "movaps [r/m+sib+disp32], xmm", "store"),
         // MOVZX r32,m16 RIP (0F B7 05 + disp32)。
         ("movzx_r32_m16_rip", "F1", "00001111 10110111 00000101 ................................", "movzx r32, m16", "load"),
+        // MOVZX r32,m8 RIP (0F B6 05 + disp32)。F3/66 接頭辞なし.
+        ("movzx_r32_m8_rip", "F1", "00001111 10110110 00000101 ................................", "movzx r32, m8", "load"),
         // PXOR xmm,xmm (66 0F EF /r)。
         ("pxor", "F1", "00001111 11101111 11......", "pxor xmm, xmm", "alu"),
         ("punpckldq", "F1", "00001111 01100010 11......", "punpckldq xmm, xmm", "alu"),

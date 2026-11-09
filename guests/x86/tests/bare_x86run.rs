@@ -1282,3 +1282,25 @@ fn run_cdqe_sign_extend() {
     let v = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(7));
     assert_eq!(v, 0xFFFF_FFFF_8000_0000);
 }
+
+#[test]
+fn run_movzx_r32_m8_rip() {
+    // run 経由で 0F B6 05 + disp32 (MOVZX EAX,[RIP+disp]) を回す (64bit)。
+    // [0x1500]=0x80 -> EAX=0x80 になり、exit(0x80)。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    env.backend.mem.write(VirtAddr(0x1500), &[0x80u8]).unwrap();
+    let prog: &[u8] = &[
+        0x0F, 0xB6, 0x05, 0xF9, 0x04, 0x00, 0x00, // movzx eax,[rip+0x4f9] ([0x1500]=0x80)
+        0x48, 0x89, 0xC7, // mov rdi,rax
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x0F, 0x05, // syscall -> exit(0x80)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0x80));
+}

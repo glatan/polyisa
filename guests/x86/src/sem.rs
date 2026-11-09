@@ -3612,6 +3612,28 @@ pub fn movzx_r32_m16_abs<B: Backend>(b: &mut B, dst: Gpr, addr32: u32) -> Flow<B
     Ok(())
 }
 
+/// MOVZX r32,m8 RIP相対。8ビットを読んでゼロ拡張する.
+pub fn movzx_r32_m8_rip<B: Backend>(b: &mut B, dst: Gpr, next_rip: u64, disp: i32) -> Flow<B> {
+    use polyisa_sem::W8;
+    let base = b.konst::<W64>(next_rip);
+    let d = b.konst::<W64>(disp as i64 as u64);
+    let addr = b.add::<W64>(base, d);
+    let v8: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
+    let v = b.zext::<W8, W32>(v8);
+    write(b, dst, v);
+    Ok(())
+}
+
+/// MOVZX r32,m8 絶対番地 (32ビット)。
+pub fn movzx_r32_m8_abs<B: Backend>(b: &mut B, dst: Gpr, addr32: u32) -> Flow<B> {
+    use polyisa_sem::W8;
+    let addr = b.konst::<W64>(addr32 as u64);
+    let v8: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
+    let v = b.zext::<W8, W32>(v8);
+    write(b, dst, v);
+    Ok(())
+}
+
 /// MOV m32, imm32 RIP (C7 05)。32ビットストア.
 pub fn mov_rm32_imm_rip<B: Backend>(b: &mut B, next_rip: u64, disp: i32, imm: u32) -> Flow<B> {
     let base = b.konst::<W64>(next_rip);

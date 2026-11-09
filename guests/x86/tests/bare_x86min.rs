@@ -2879,3 +2879,18 @@ fn mov_rm64_imm_fs_sibabs_indexed() {
         .unwrap();
     assert_eq!(u64::from_le_bytes(back), 0x77);
 }
+
+#[test]
+fn movzx_r32_m8_rip_zero_extends() {
+    // MOVZX EAX,[RIP+disp]: [0x1500]=0xFF80 の下位8bit=0x80 -> EAX=0x80.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1500), &[0x80u8, 0xFF])
+        .unwrap();
+    env.backend.set(Gpr(0).state(), 0xFFFF_FFFF);
+    env.step(|b| sem::movzx_r32_m8_rip(b, Gpr(0), 0x1007, 0x4F9))
+        .unwrap();
+    assert_eq!(eax(&mut env), 0x80);
+}

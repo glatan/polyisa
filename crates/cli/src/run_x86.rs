@@ -2017,6 +2017,14 @@ fn dispatch<B: Backend>(
                 sem::movzx_r32_m16_abs(b, reg0f_as_gpr(), imm32())
             }
         }
+        Insn::MovzxR32M8Rip => {
+            // 0F B6 05 + disp32 (mod=00 RIP)。dst は reg フィールド.
+            if is64 {
+                sem::movzx_r32_m8_rip(b, reg0f_as_gpr(), eip as u64 + nbytes, disp32())
+            } else {
+                sem::movzx_r32_m8_abs(b, reg0f_as_gpr(), imm32())
+            }
+        }
         Insn::MovupsLoadRip => {
             if is64 {
                 sem::movups_load_rip(b, xmm_reg(), eip as u64 + nbytes, disp32())
@@ -2108,7 +2116,8 @@ fn dispatch<B: Backend>(
             | Insn::Cmova
             | Insn::Cmovae
             | Insn::MovzxR32M16
-            | Insn::MovzxR32M16Rip => Some(reg0f_as_gpr()),
+            | Insn::MovzxR32M16Rip
+            | Insn::MovzxR32M8Rip => Some(reg0f_as_gpr()),
             Insn::AddRRip
             | Insn::AddRMemnd
             | Insn::OrRRip
