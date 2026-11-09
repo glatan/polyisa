@@ -64,3 +64,40 @@ fn self_loop_hits_step_limit_without_advancing() {
     let out = run_x86::run(&mut env, 0x1000, &mut ExitOne, 100);
     assert_eq!(out, Outcome::StepLimit { eip: 0x1000 });
 }
+
+#[test]
+fn run_lea_and_logic_branch() {
+    // LEA/AND/OR/CMP/JE を run 経由で回し、taken で exit(48) する。
+    // 0x1000: B8 10 00 00 00  mov eax,0x10
+    // 0x1005: 50             push eax
+    // 0x1006: 59             pop ecx
+    // 0x1007: 53             push ebx
+    // 0x1008: 5B             pop ebx (placeholder, replaced below)
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    env.backend.set(Gpr(3).state(), 0x100);
+    let prog: &[u8] = &[
+        0xB8, 0x10, 0x00, 0x00, 0x00, // mov eax,0x10
+        0x50, // push eax
+        0x59, // pop ecx (ecx=0x10)
+        0x53, // push ebx (ebx=0x100)
+        0x5B, // pop ebx
+        0x8D, 0x43, 0x20, // lea eax,[ebx+0x20] (eax=0x120)
+        0x21, 0xC8, // and eax,ecx (eax=0x10)
+        0x09, 0xC8, // or eax,ecx (eax=0x10)
+        0x39, 0xC8, // cmp eax,ecx (ZF=1)
+        0x74, 0x05, // je +5 -> 0x101a
+        0xB8, 0x63, 0x00, 0x00, 0x00, // mov eax,99 (skipped)
+        0x50, // push eax (eax=0x10)
+        0x5B, // pop ebx (ebx=0x10)
+        0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax,1 (exit)
+        0xCD, 0x80, // int 0x80 -> exit(0x10)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = ExitOne;
+    let out = run_x86::run(&mut env, 0x1000, &mut sys, 100);
+    assert_eq!(out, Outcome::Exit(0x10));
+}

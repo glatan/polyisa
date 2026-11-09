@@ -270,6 +270,49 @@ fn shifts_mask_count() {
 }
 
 #[test]
+fn lea_and_reg_logic() {
+    let mut env = env();
+    // LEA EAX,[EBX+disp8]：メモリに触れず EBX+0x10。
+    env.backend.set(Gpr(3).state(), 0x100);
+    env.step(|b| sem::lea_eax(b, 0x10)).unwrap();
+    assert_eq!(eax(&mut env), 0x110);
+    // disp=-1：0xFF。
+    env.step(|b| sem::lea_eax(b, -1)).unwrap();
+    assert_eq!(eax(&mut env), 0xFF);
+    // CMP EAX,ECX：5 vs 5 で ZF=1、CF=0。EAX 不変。
+    env.backend.set(Gpr(0).state(), 5);
+    env.backend.set(Gpr(1).state(), 5);
+    env.step(sem::cmp_rm32).unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0x40);
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x1, 0);
+    assert_eq!(eax(&mut env), 5);
+    // 4 vs 5 で ZF=0、CF=1。
+    env.backend.set(Gpr(0).state(), 4);
+    env.step(sem::cmp_rm32).unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0);
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x1, 1);
+    // AND EAX,ECX：0b1100 & 0b1010 = 0b1000、ZF=0、CF=0。
+    env.backend.set(Gpr(0).state(), 0b1100);
+    env.backend.set(Gpr(1).state(), 0b1010);
+    env.step(sem::and_rm32).unwrap();
+    assert_eq!(eax(&mut env), 0b1000);
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0);
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x1, 0);
+    // OR EAX,ECX：0 | 0xff = 0xff、ZF=0。LEA は EFLAGS を変えない。
+    env.backend.set(Gpr(3).state(), 0x100);
+    env.backend.set(sem::eflags_ref(), 0);
+    env.step(|b| sem::lea_eax(b, 0x10)).unwrap();
+    assert_eq!(eax(&mut env), 0x110);
+    assert_eq!(env.backend.get(sem::eflags_ref()), 0);
+    env.backend.set(Gpr(0).state(), 0);
+    env.backend.set(Gpr(1).state(), 0xff);
+    env.step(sem::or_rm32).unwrap();
+    assert_eq!(eax(&mut env), 0xff);
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0);
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x1, 0);
+}
+
+#[test]
 fn frame_setup_and_leave() {
     let mut env = env();
     env.map_rw(0, 1).unwrap();
