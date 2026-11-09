@@ -9937,3 +9937,23 @@ pub fn mov_r16_m16_sib<B: Backend>(
     write(b, dst, v);
     Ok(())
 }
+
+/// MOVB [RIP+disp32],imm8 (C6 05 + disp32 + imm8)。1バイト書く.
+pub fn mov_rm8_imm_rip<B: Backend>(b: &mut B, next_rip: u64, disp: i32, imm: u8) -> Flow<B> {
+    use polyisa_sem::W8;
+    let base = b.konst::<W64>(next_rip);
+    let d = b.konst::<W64>(disp as i64 as u64);
+    let addr = b.add::<W64>(base, d);
+    let v = b.konst::<W8>(imm);
+    b.store::<W8>(addr, v, DATA_WRITE)?;
+    Ok(())
+}
+
+/// MOVB [disp32],imm8 (32ビット絶対番地)。
+pub fn mov_rm8_imm_abs<B: Backend>(b: &mut B, addr32: u32, imm: u8) -> Flow<B> {
+    use polyisa_sem::W8;
+    let addr = b.konst::<W64>(addr32 as u64);
+    let v = b.konst::<W8>(imm);
+    b.store::<W8>(addr, v, DATA_WRITE)?;
+    Ok(())
+}

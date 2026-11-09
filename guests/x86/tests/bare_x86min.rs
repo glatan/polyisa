@@ -4690,3 +4690,26 @@ fn mov_m16_r16_sib_basic() {
         .unwrap();
     assert_eq!(u16::from_le_bytes(back), 0x1234);
 }
+
+#[test]
+fn mov_rm8_imm_rip_basic() {
+    // MOVB [RIP+disp],1 (C6 05 + disp32 + imm8): [0x1500]=1.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.step(|b| sem::mov_rm8_imm_rip(b, 0x1007, 0x4F9, 1))
+        .unwrap();
+    let mut back = [0u8; 1];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x1500),
+            &mut back,
+            Access {
+                endian: Endian::Le,
+                align: Align::Unaligned,
+                kind: AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(back, [0x01u8]);
+}

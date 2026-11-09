@@ -422,6 +422,12 @@ fn fetch_len(
             } else if md == 0 && rm != 5 {
                 // mod=00 [base],imm8 (3B).
                 Some(3)
+            } else if md == 0 && rm == 5 {
+                // mod=00 RIP [RIP+disp32],imm8 (7B: C6 05 + disp32 + imm8).
+                Some(7)
+            } else if md == 2 {
+                // mod=10 [base+disp32],imm8 (7B).
+                Some(7)
             } else {
                 None
             }
@@ -2490,6 +2496,16 @@ fn dispatch<B: Backend>(
             // C6 /0 mod=00 [base],imm8 (24b)。imm は最下位8.
             let imm = (word & 0xff) as u8;
             sem::mov_rm8_imm_memnd(b, rm(), imm)
+        }
+        Insn::MovRm8ImmRip => {
+            // C6 05 + disp32 + imm8 (56b)。RIP 相対.
+            let disp = ((word >> 8) as u32).swap_bytes() as i32;
+            let imm = (word & 0xff) as u8;
+            if is64 {
+                sem::mov_rm8_imm_rip(b, eip as u64 + nbytes, disp, imm)
+            } else {
+                sem::mov_rm8_imm_abs(b, ((word >> 8) as u32).swap_bytes(), imm)
+            }
         }
         Insn::OrRm8ImmMem32 => {
             // 80 /1 mod=10 [base+disp32],imm8 (56b)。disp は (word>>8) 下位32 LE、imm は最下位8.

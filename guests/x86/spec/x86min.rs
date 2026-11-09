@@ -438,9 +438,9 @@ pub fn build_model() -> polyisa_isadl::Model {
         // MOVAPS SIB+disp32 (8バイト)。
         ("movaps_store_sibd32", "F1", "00001111 00101001 10...100 ........ ................................", "movaps [r/m+sib+disp32], xmm", "store"),
         // MOVZX r32,m16 RIP (0F B7 05 + disp32)。
-        ("movzx_r32_m16_rip", "F1", "00001111 10110111 00000101 ................................", "movzx r32, m16", "load"),
+        ("movzx_r32_m16_rip", "F1", "00001111 10110111 00...101 ................................", "movzx r32, m16", "load"),
         // MOVZX r32,m8 RIP (0F B6 05 + disp32)。F3/66 接頭辞なし.
-        ("movzx_r32_m8_rip", "F1", "00001111 10110110 00000101 ................................", "movzx r32, m8", "load"),
+        ("movzx_r32_m8_rip", "F1", "00001111 10110110 00...101 ................................", "movzx r32, m8", "load"),
         // MOVZX r32,r/m8 reg-direct (0F B6 /r mod=11)。REX ありは低8、なしの4-7は上位8.
         ("movzx_r32_r8", "F1", "00001111 10110110 11......", "movzx r32, r/m8", "load"),
         // PXOR xmm,xmm (66 0F EF /r)。
@@ -533,6 +533,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("cmp_rm_imm8_rip", "F1", "10000011 00111101 ................................ ........", "cmp r/m, {imm}", "alu"),
         // CMPB [RIP+disp32],imm8 (80 3D + disp32 + imm8)。8ビット比較.
         ("cmp_rm8_imm_rip", "F1", "10000000 00111101 ................................ ........", "cmp r/m8, {imm}", "alu"),
+        // MOVB [RIP+disp32],imm8 (C6 05 + disp32 + imm8)。8ビット書き込み.
+        ("mov_rm8_imm_rip", "F1", "11000110 00000101 ................................ ........", "mov r/m8, {imm}", "store"),
         // ADD m32/m64,imm8 mod=01 [base+disp8] (83 /0)。REX.W で64bit.
         ("add_rm_imm8_mem8", "F1", "10000011 01000... ........ ........", "add r/m, {imm}", "alu"),
         // ADD m32/m64,imm8 mod=00 [base] (83 /0)。REX.W で64bit.
