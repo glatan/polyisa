@@ -4865,3 +4865,22 @@ fn or_rm64_imm8_mem8_basic() {
         .unwrap();
     assert_eq!(u64::from_le_bytes(back), 0xF1);
 }
+
+#[test]
+fn mov_r32_fs_memnd_basic() {
+    // MOV EAX,FS:[RAX] (FS base 0x1000 + RAX 0x500 = [0x1500]=0x12345678).
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1500), &0x1234_5678u32.to_le_bytes())
+        .unwrap();
+    env.step(|b| {
+        sem::write64(b, Gpr(0), 0x500);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::mov_r32_fs_memnd(b, Gpr(2), 0x1000, Gpr(0)))
+        .unwrap();
+    assert_eq!(env.backend.get(Gpr(2).state()), 0x1234_5678);
+}

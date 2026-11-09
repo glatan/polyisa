@@ -10196,3 +10196,23 @@ pub fn or_rm64_imm8_mem32<B: Backend>(b: &mut B, base: Gpr, disp: i32, imm: i8) 
     update_logic_flags(b, v);
     Ok(())
 }
+
+/// MOV r32, FS:[base] (FS + 8B mod=00)。FS base + base レジスタから32bit読む.
+pub fn mov_r32_fs_memnd<B: Backend>(b: &mut B, dst: Gpr, fs_base: u64, base: Gpr) -> Flow<B> {
+    let f = b.konst::<W64>(fs_base);
+    let r = read64(b, base);
+    let addr = b.add::<W64>(f, r);
+    let v: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    write(b, dst, v);
+    Ok(())
+}
+
+/// MOV r64, FS:[base] (FS + REX.W 8B mod=00)。
+pub fn mov_r64_fs_memnd<B: Backend>(b: &mut B, dst: Gpr, fs_base: u64, base: Gpr) -> Flow<B> {
+    let f = b.konst::<W64>(fs_base);
+    let r = read64(b, base);
+    let addr = b.add::<W64>(f, r);
+    let v: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    write64(b, dst, v);
+    Ok(())
+}

@@ -1557,7 +1557,13 @@ fn dispatch<B: Backend>(
             }
         }
         Insn::MovEaxMemnd => {
-            if rex_w {
+            if let Some(base) = fs {
+                if rex_w {
+                    sem::mov_r64_fs_memnd(b, reg(), base, rm())
+                } else {
+                    sem::mov_r32_fs_memnd(b, reg(), base, rm())
+                }
+            } else if rex_w {
                 sem::mov_r64_memnd(b, reg(), rm())
             } else {
                 sem::mov_eax_memnd(b, reg(), rm())
@@ -6803,5 +6809,29 @@ mod tests {
         env.backend.mem.write(VirtAddr(0x1010), prog).unwrap();
         let out = run_mode(&mut env, 0x1010, &mut sys, 100, true);
         assert_eq!(out, Outcome::Exit(0x50));
+    }
+
+    #[test]
+    fn fs_relative_mov_eax_memnd() {
+        // FS 上書き + 8B mod=00 [base] (MOV EAX,FS:[RAX]) を run する.
+        let mut sys = CliLinux::x86_64();
+        sys.fs_base = 0x1000;
+        let mut env = bare();
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x1500), &0x1234_5678u32.to_le_bytes())
+            .unwrap();
+        let prog: &[u8] = &[
+            0x48, 0xC7, 0xC0, 0x00, 0x05, 0x00, 0x00, // mov rax,0x500
+            0x64, 0x8B, 0x00, // mov eax,FS:[rax]
+            0x48, 0x89, 0xC7, // mov rdi,rax
+            0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+            0x0F, 0x05, // syscall -> exit
+        ];
+        env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+        let out = run_mode(&mut env, 0x1000, &mut sys, 100, true);
+        assert_eq!(out, Outcome::Exit(0x1234_5678));
     }
 }
