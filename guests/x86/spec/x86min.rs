@@ -306,6 +306,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("or_r_rip", "F1", "00001011 00...101 ................................", "or r32, m32", "alu"),
         // SUB r32,m32 RIP (2B 1D/05 + disp32)。2B 05 は mod=00 rm=101.
         ("sub_r_rip", "F1", "00101011 00...101 ................................", "sub r32, m32", "alu"),
+        // CALL r/m64 mod=01 [base+disp8] (FF /2)。64ビット間接コール.
+        ("call_r_mem8", "M8", "11111111 01010... ........", "call r/m64", "jump"),
         // OR m32,r32 RIP (09 05 + disp32)。
         ("or_m_rip", "F1", "00001001 00...101 ................................", "or m32, r32", "alu"),
         // ADD m32,imm32 RIP (81 05 + disp32 + imm32).
@@ -385,6 +387,18 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("add_rm_imm8_memnd", "F1", "10000011 00000... ........", "add r/m, {imm}", "alu"),
         // ADD m32/m64,imm8 mod=10 [base+disp32] (83 /0)。REX.W で64bit.
         ("add_rm_imm8_mem32", "F1", "10000011 10000... ................................ ........", "add r/m, {imm}", "alu"),
+        // SUB m32/m64,imm8 mod=01 [base+disp8] (83 /5)。REX.W で64bit.
+        ("sub_rm_imm8_mem8", "F1", "10000011 01101... ........ ........", "sub r/m, {imm}", "alu"),
+        // SUB m32/m64,imm8 mod=00 [base] (83 /5)。REX.W で64bit.
+        ("sub_rm_imm8_memnd", "F1", "10000011 00101... ........", "sub r/m, {imm}", "alu"),
+        // SUB m32/m64,imm8 mod=10 [base+disp32] (83 /5)。REX.W で64bit.
+        ("sub_rm_imm8_mem32", "F1", "10000011 10101... ................................ ........", "sub r/m, {imm}", "alu"),
+        // XOR m32/m64,imm8 mod=01 [base+disp8] (83 /6)。REX.W で64bit.
+        ("xor_rm_imm8_mem8", "F1", "10000011 01110... ........ ........", "xor r/m, {imm}", "alu"),
+        // XOR m32/m64,imm8 mod=00 [base] (83 /6)。REX.W で64bit.
+        ("xor_rm_imm8_memnd", "F1", "10000011 00110... ........", "xor r/m, {imm}", "alu"),
+        // XOR m32/m64,imm8 mod=10 [base+disp32] (83 /6)。REX.W で64bit.
+        ("xor_rm_imm8_mem32", "F1", "10000011 10110... ................................ ........", "xor r/m, {imm}", "alu"),
         ("mov_rm16_imm_m32", "F1", "11000111 10000101 ................................ ................", "mov r/m16, {imm}", "alu"),
         // MOVUPS RIP相対 (64ビットの mod=00 rm=101)。disp32 は実行側で RIP 加算する。
         ("movups_load_rip", "F1", "00001111 00010000 00...101 ................................", "movups xmm, [rip]", "load"),
@@ -759,6 +773,14 @@ pub fn build_model() -> polyisa_isadl::Model {
             "store",
         ),
         (
+            "mov_m8_r8_rip",
+            "F1",
+            "10001000 00...101 ................................",
+            vec![],
+            "mov [rip], r8",
+            "store",
+        ),
+        (
             "mov_m8_r8",
             "F1",
             "10001000 11......",
@@ -812,6 +834,14 @@ pub fn build_model() -> polyisa_isadl::Model {
             "10000000 10001... ................................ ........",
             vec![],
             "or r/m8, {imm}",
+            "alu",
+        ),
+        (
+            "and_rm8_imm_mem32",
+            "F1",
+            "10000000 10100... ................................ ........",
+            vec![],
+            "and r/m8, {imm}",
             "alu",
         ),
         (

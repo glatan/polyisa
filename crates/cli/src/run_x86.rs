@@ -420,6 +420,9 @@ fn fetch_len(
             } else if md == 2 && reg == 1 {
                 // mod=10 [base+disp32],imm8 (7B) の /1 ORB のみ.
                 Some(7)
+            } else if md == 2 && reg == 4 {
+                // mod=10 [base+disp32],imm8 (7B) の /4 ANDB のみ.
+                Some(7)
             } else if md == 0 && rm == 5 && reg == 7 {
                 // mod=00 RIP [RIP+disp32],imm8 (7B) の /7 CMPB のみ.
                 Some(7)
@@ -457,8 +460,9 @@ fn fetch_len(
                 }
             }
         }
-        // 0x03 /r (ADD) と 0x0B /r (OR r32,m32)。reg-direct・mod=00 memnd・RIP/abs のみ.
-        // SIB と mod=01/10 は未対応で None。
+        // 0x03 /r (ADD)、0x0B /r (OR)、0x3B /r (CMP)、0x2B /r (SUB)。
+        // reg-direct 2B、mod=00 base 2B / RIP/abs 6B、mod=01 3B、mod=10 6B。
+        // SIB は mod=00 直接番地のみ 7B.
         0x03 | 0x0B | 0x3B | 0x2B => {
             let s = second?;
             let md = s >> 6;
@@ -479,10 +483,39 @@ fn fetch_len(
                 Some(2)
             } else if md == 1 {
                 Some(3)
-            } else if md == 2 {
+            } else {
+                // mod=10 base+disp32 6B.
+                Some(6)
+            }
+        }
+        // 0xFF /r (CALL/JMP/PUSH 間接)。/2 CALL のみ mod=00/01/10/11 (SIB直接番地含む).
+        0xFF => {
+            let s = second?;
+            let md = s >> 6;
+            let reg = (s >> 3) & 7;
+            let rm = s & 7;
+            if reg != 2 {
+                return None;
+            }
+            if md == 3 {
+                Some(2)
+            } else if rm == 4 {
+                let t = third?;
+                if md == 1 {
+                    Some(4)
+                } else if md == 2 || t & 7 == 5 {
+                    // mod=10 SIB+disp32 7B、mod=00 SIB直接番地 7B.
+                    Some(7)
+                } else {
+                    Some(3)
+                }
+            } else if md == 1 {
+                Some(3)
+            } else if md == 2 || rm == 5 {
+                // mod=10 base+disp32 6B、mod=00 abs disp32 6B.
                 Some(6)
             } else {
-                None
+                Some(2)
             }
         }
         // register-direct と ModRMメモリ (SIBなし) に対応するALU opcode。
@@ -648,6 +681,7 @@ pub fn run_mode(
                 | 0x0B
                 | 0x3B
                 | 0x2B
+                | 0xFF
                 | 0x09
                 | 0x11
                 | 0x19
@@ -687,7 +721,7 @@ pub fn run_mode(
         // C7/0x88 は SIB の base で mod=00 の長さが変わるため同様に読む。
         let third = if (matches!(
             head[0],
-            0x8B | 0x89 | 0x8D | 0xC7 | 0x88 | 0x03 | 0x0B | 0x3B | 0x2B
+            0x8B | 0x89 | 0x8D | 0xC7 | 0x88 | 0x03 | 0x0B | 0x3B | 0x2B | 0xFF
         ) && matches!(second, Some(s) if s & 7 == 4 && s >> 6 != 3))
             || (head[0] == 0x0F
                 && (matches!(
@@ -769,6 +803,7 @@ pub fn run_mode(
                     | 0x0B
                     | 0x3B
                     | 0x2B
+                    | 0xFF
                     | 0x11
                     | 0x19
                     | 0x29
@@ -1361,6 +1396,22 @@ fn dispatch<B: Backend>(
             };
             sem::mov_m8_r8_mem32(b, src, rm(), disp32(), high)
         }
+        Insn::MovM8R8Rip => {
+            // 88 /r mod=00 rm=101 RIP [RIP+disp32],r8。src は reg フィールド.
+            let reg_f = (modrm() >> 3) & 7;
+            let (src, high) = if rex != 0 {
+                (Gpr(reg_f | ((rex >> 2) & 1) << 3), false)
+            } else if reg_f < 4 {
+                (Gpr(reg_f), false)
+            } else {
+                (Gpr(reg_f - 4), true)
+            };
+            if is64 {
+                sem::mov_m8_r8_rip(b, src, eip as u64 + nbytes, disp32(), high)
+            } else {
+                sem::mov_m8_r8_abs(b, src, imm32(), high)
+            }
+        }
         Insn::MovM8R8 => {
             // 88 /r mod=11 reg-direct。dst は rm、src は reg.
             let reg_f = (modrm() >> 3) & 7;
@@ -1414,6 +1465,14 @@ fn dispatch<B: Backend>(
                 sem::call_rel64(b, eip as u64 + nbytes, disp32())
             } else {
                 sem::call_rel32(b, eip, disp32())
+            }
+        }
+        Insn::CallRMem8 => {
+            // FF /2 mod=01 [base+disp8] 間接CALL。base は rm().
+            if is64 {
+                sem::call_r64_mem8(b, eip as u64 + nbytes, rm(), disp8())
+            } else {
+                sem::call_r32_mem8(b, eip.wrapping_add(nbytes as u32), rm(), disp8())
             }
         }
         Insn::Ret => {
@@ -1528,6 +1587,12 @@ fn dispatch<B: Backend>(
             let disp = ((word >> 8) as u32).swap_bytes() as i32;
             let imm = (word & 0xff) as u8;
             sem::or_rm8_imm_mem32(b, rm(), disp, imm)
+        }
+        Insn::AndRm8ImmMem32 => {
+            // 80 /4 mod=10 [base+disp32],imm8 (56b)。disp は (word>>8) 下位32 LE、imm は最下位8.
+            let disp = ((word >> 8) as u32).swap_bytes() as i32;
+            let imm = (word & 0xff) as u8;
+            sem::and_rm8_imm_mem32(b, rm(), disp, imm)
         }
         Insn::TestM8ImmRip => {
             let disp = ((word >> 8) as u32).swap_bytes() as i32;
@@ -1792,6 +1857,64 @@ fn dispatch<B: Backend>(
                 sem::xor_rm64_imm8(b, rm(), disp8())
             } else {
                 sem::xor_rm32_imm8(b, rm(), disp8())
+            }
+        }
+        Insn::XorRmImm8Mem8 => {
+            // 83 /6 mod=01 [base+disp8],imm8 (32b)。disp は (word>>8) 下位8、imm は最下位8.
+            let d8 = ((word >> 8) & 0xff) as u8 as i8;
+            let imm = (word & 0xff) as u8 as i8;
+            if rex_w {
+                sem::xor_rm64_imm8_mem8(b, rm(), d8, imm)
+            } else {
+                sem::xor_rm32_imm8_mem8(b, rm(), d8, imm)
+            }
+        }
+        Insn::XorRmImm8Memnd => {
+            // 83 /6 mod=00 [base],imm8 (24b)。imm は最下位8.
+            let imm = (word & 0xff) as u8 as i8;
+            if rex_w {
+                sem::xor_rm64_imm8_memnd(b, rm(), imm)
+            } else {
+                sem::xor_rm32_imm8_memnd(b, rm(), imm)
+            }
+        }
+        Insn::XorRmImm8Mem32 => {
+            // 83 /6 mod=10 [base+disp32],imm8 (56b)。disp は (word>>8) 下位32 LE、imm は最下位8.
+            let disp = ((word >> 8) as u32).swap_bytes() as i32;
+            let imm = (word & 0xff) as u8 as i8;
+            if rex_w {
+                sem::xor_rm64_imm8_mem32(b, rm(), disp, imm)
+            } else {
+                sem::xor_rm32_imm8_mem32(b, rm(), disp, imm)
+            }
+        }
+        Insn::SubRmImm8Mem8 => {
+            // 83 /5 mod=01 [base+disp8],imm8 (32b)。disp は (word>>8) 下位8、imm は最下位8.
+            let d8 = ((word >> 8) & 0xff) as u8 as i8;
+            let imm = (word & 0xff) as u8 as i8;
+            if rex_w {
+                sem::sub_rm64_imm8_mem8(b, rm(), d8, imm)
+            } else {
+                sem::sub_rm32_imm8_mem8(b, rm(), d8, imm)
+            }
+        }
+        Insn::SubRmImm8Memnd => {
+            // 83 /5 mod=00 [base],imm8 (24b)。imm は最下位8.
+            let imm = (word & 0xff) as u8 as i8;
+            if rex_w {
+                sem::sub_rm64_imm8_memnd(b, rm(), imm)
+            } else {
+                sem::sub_rm32_imm8_memnd(b, rm(), imm)
+            }
+        }
+        Insn::SubRmImm8Mem32 => {
+            // 83 /5 mod=10 [base+disp32],imm8 (56b)。disp は (word>>8) 下位32 LE、imm は最下位8.
+            let disp = ((word >> 8) as u32).swap_bytes() as i32;
+            let imm = (word & 0xff) as u8 as i8;
+            if rex_w {
+                sem::sub_rm64_imm8_mem32(b, rm(), disp, imm)
+            } else {
+                sem::sub_rm32_imm8_mem32(b, rm(), disp, imm)
             }
         }
         Insn::CmpRmImm8 => {

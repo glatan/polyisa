@@ -3430,3 +3430,84 @@ fn sub_r64_mem8_basic() {
     })
     .unwrap();
 }
+
+#[test]
+fn and_rm8_imm_mem32_basic() {
+    // ANDB [RBX+0x355],0x7f: [0x1355]=0xFF -> 0x7F.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend.set(Gpr(3).state(), 0x1000);
+    env.backend.mem.write(VirtAddr(0x1355), &[0xFFu8]).unwrap();
+    env.step(|b| sem::and_rm8_imm_mem32(b, Gpr(3), 0x355, 0x7F))
+        .unwrap();
+    let mut back = [0u8; 1];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x1355),
+            &mut back,
+            Access {
+                endian: Endian::Le,
+                align: Align::Unaligned,
+                kind: AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(back, [0x7Fu8]);
+}
+
+#[test]
+fn xor_rm32_imm8_mem8_basic() {
+    // XOR [RDI+0x04],1 (83 /6 mod=01): [0x1504]=0x03 -> 0x02.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend.set(Gpr(7).state(), 0x1500);
+    env.backend
+        .mem
+        .write(VirtAddr(0x1504), &[0x03u8, 0, 0, 0])
+        .unwrap();
+    env.step(|b| sem::xor_rm32_imm8_mem8(b, Gpr(7), 0x04, 1))
+        .unwrap();
+    let mut back = [0u8; 4];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x1504),
+            &mut back,
+            Access {
+                endian: Endian::Le,
+                align: Align::Unaligned,
+                kind: AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(u32::from_le_bytes(back), 0x02);
+}
+
+#[test]
+fn sub_rm32_imm8_mem8_basic() {
+    // SUB [RDI+0x04],1 (83 /5 mod=01): [0x1504]=0x03 -> 0x02.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend.set(Gpr(7).state(), 0x1500);
+    env.backend
+        .mem
+        .write(VirtAddr(0x1504), &[0x03u8, 0, 0, 0])
+        .unwrap();
+    env.step(|b| sem::sub_rm32_imm8_mem8(b, Gpr(7), 0x04, 1))
+        .unwrap();
+    let mut back = [0u8; 4];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x1504),
+            &mut back,
+            Access {
+                endian: Endian::Le,
+                align: Align::Unaligned,
+                kind: AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(u32::from_le_bytes(back), 0x02);
+}
