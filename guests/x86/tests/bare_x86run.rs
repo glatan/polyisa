@@ -1304,3 +1304,33 @@ fn run_movzx_r32_m8_rip() {
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
     assert_eq!(out, Outcome::Exit(0x80));
 }
+
+#[test]
+fn run_mov_r64_rip() {
+    // run 経由で REX.W 8B 05 + disp32 (MOV R8,[RIP+disp]) を回す。
+    // [0x1500]=-160 -> R8=-160 として exit(0)、R8 で検証する。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x1500),
+            &[0x60u8, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF],
+        )
+        .unwrap();
+    let prog: &[u8] = &[
+        0x4C, 0x8B, 0x05, 0xF9, 0x04, 0x00, 0x00, // mov r8,[rip+0x4f9] ([0x1500]=-160)
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
+        0x0F, 0x05, // syscall -> exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0));
+    let v = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(8));
+    assert_eq!(v, 0xFFFF_FFFF_FFFF_FF60);
+}

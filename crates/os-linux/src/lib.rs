@@ -83,6 +83,8 @@ pub mod x86_64 {
     pub const FSTAT: u64 = 5;
     pub const STATX: u64 = 332;
     pub const ARCH_PRCTL: u64 = 158;
+    pub const SET_ROBUST_LIST: u64 = 273;
+    pub const RSEQ: u64 = 334;
 }
 
 /// 段階4の準備としての i386 番号表（Linux・32ビット）。

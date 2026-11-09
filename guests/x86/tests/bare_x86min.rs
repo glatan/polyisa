@@ -2992,3 +2992,297 @@ fn mov_m8_r8_fs_sibabs_indexed() {
         .unwrap();
     assert_eq!(back, [0xABu8]);
 }
+
+#[test]
+fn add_r32_fs_abs_roundtrip() {
+    // ADD EDX,FS:[0x10]: FS=0x1000, [0x1010]=0x40, EDX=0x10 -> 0x50.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1010), &[0x40u8, 0, 0, 0])
+        .unwrap();
+    env.backend.set(Gpr(2).state(), 0x10);
+    env.step(|b| sem::add_r32_fs_abs(b, Gpr(2), 0x1000, 0x10))
+        .unwrap();
+    assert_eq!(env.backend.get(Gpr(2).state()), 0x50);
+}
+
+#[test]
+fn add_r64_fs_abs_roundtrip() {
+    // ADD RDX,FS:[0x10] (REX.W): [0x1010]=0x40, RDX=0x10 -> 0x50.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1010), &[0x40u8, 0, 0, 0, 0, 0, 0, 0])
+        .unwrap();
+    env.step(|b| {
+        sem::write64(b, Gpr(2), 0x10);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::add_r64_fs_abs(b, Gpr(2), 0x1000, 0x10))
+        .unwrap();
+    assert_eq!(env.backend.get(Gpr(2).state()), 0x50);
+}
+
+#[test]
+fn add_r64_abs_roundtrip() {
+    // ADD RDX,[0x1500] (REX.W abs): [0x1500]=0x40, RDX=0x10 -> 0x50.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1500), &[0x40u8, 0, 0, 0, 0, 0, 0, 0])
+        .unwrap();
+    env.step(|b| {
+        sem::write64(b, Gpr(2), 0x10);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::add_r64_abs(b, Gpr(2), 0x1500)).unwrap();
+    assert_eq!(env.backend.get(Gpr(2).state()), 0x50);
+}
+
+#[test]
+fn add_r32_sibabs_indexed() {
+    // ADD EDX,[RSI*2+0x20] (索引あり): RSI=0x10 -> [0x40]=0x40, EDX=0x10 -> 0x50.
+    let mut env = env();
+    env.map_rw(0, 1).unwrap();
+    env.backend.set(Gpr(6).state(), 0x10);
+    env.backend.set(Gpr(2).state(), 0x10);
+    env.backend
+        .mem
+        .write(VirtAddr(0x40), &[0x40u8, 0, 0, 0])
+        .unwrap();
+    env.step(|b| sem::add_r32_sibabs(b, Gpr(2), Gpr(6), 1, 0x20))
+        .unwrap();
+    assert_eq!(env.backend.get(Gpr(2).state()), 0x50);
+}
+
+#[test]
+fn add_r64_sibabs_indexed() {
+    // ADD RDX,[RSI*2+0x20] (REX.W, 索引あり).
+    let mut env = env();
+    env.map_rw(0, 1).unwrap();
+    env.backend.set(Gpr(6).state(), 0x10);
+    env.step(|b| {
+        sem::write64(b, Gpr(2), 0x10);
+        Ok(())
+    })
+    .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x40), &[0x40u8, 0, 0, 0, 0, 0, 0, 0])
+        .unwrap();
+    env.step(|b| sem::add_r64_sibabs(b, Gpr(2), Gpr(6), 1, 0x20))
+        .unwrap();
+    assert_eq!(env.backend.get(Gpr(2).state()), 0x50);
+}
+
+#[test]
+fn mov_r64_rip_sign_extended() {
+    // MOV R8,[RIP+disp] (REX.W): [0x1500]=0xFFFFFFFFFFFFFF60 -> R8 同値.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x1500),
+            &[0x60u8, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF],
+        )
+        .unwrap();
+    env.step(|b| sem::mov_r64_rip(b, Gpr(8), 0x1007, 0x4F9))
+        .unwrap();
+    env.step(|b| {
+        let v = sem::read64(b, Gpr(8));
+        assert_eq!(v, 0xFFFF_FFFF_FFFF_FF60);
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn mov_r64_memnd_sign_extended() {
+    // MOV RDX,[RBX] (REX.W mod=00): [0x1500]=-160 -> RDX=-160.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend.set(Gpr(3).state(), 0x1500);
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x1500),
+            &[0x60u8, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF],
+        )
+        .unwrap();
+    env.step(|b| sem::mov_r64_memnd(b, Gpr(2), Gpr(3))).unwrap();
+    env.step(|b| {
+        let v = sem::read64(b, Gpr(2));
+        assert_eq!(v, 0xFFFF_FFFF_FFFF_FF60);
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn neg_rm64_negates() {
+    // NEG RAX (REX.W): RAX=160 -> -160.
+    let mut env = env();
+    env.step(|b| {
+        sem::write64(b, Gpr(0), 160);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::neg_rm64(b, Gpr(0))).unwrap();
+    env.step(|b| {
+        let v = sem::read64(b, Gpr(0));
+        assert_eq!(v, 0xFFFF_FFFF_FFFF_FF60);
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn and_rm64_keeps_high() {
+    // AND RAX,RBX (REX.W): high bits preserved.
+    let mut env = env();
+    env.step(|b| {
+        sem::write64(b, Gpr(0), 0xFFFF_FFFF_FFFF_FF60);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| {
+        sem::write64(b, Gpr(3), 0xFFFF_FFFF_FFFF_FFFF);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::and_rm64(b, Gpr(0), Gpr(3))).unwrap();
+    env.step(|b| {
+        let v = sem::read64(b, Gpr(0));
+        assert_eq!(v, 0xFFFF_FFFF_FFFF_FF60);
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn mov_rm32_imm_mem8_basic() {
+    // MOV [RBX+0x4],0xFFFFFFFF (C7 mod=01): [0x1504]=0xFFFFFFFF.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend.set(Gpr(3).state(), 0x1500);
+    env.step(|b| sem::mov_rm32_imm_mem8(b, Gpr(3), 0x04, 0xFFFF_FFFF))
+        .unwrap();
+    let mut back = [0u8; 4];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x1504),
+            &mut back,
+            Access {
+                endian: Endian::Le,
+                align: Align::Unaligned,
+                kind: AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(u32::from_le_bytes(back), 0xFFFF_FFFF);
+}
+
+#[test]
+fn mov_rm32_imm_fs_mem8_basic() {
+    // MOV FS:[R8+0x4],-1: FS=0x1000, R8=0x500 -> [0x1504]=0xFFFFFFFF.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend.set(Gpr(8).state(), 0x500);
+    env.step(|b| sem::mov_rm32_imm_fs_mem8(b, 0x1000, Gpr(8), 0x04, 0xFFFF_FFFF))
+        .unwrap();
+    let mut back = [0u8; 4];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x1504),
+            &mut back,
+            Access {
+                endian: Endian::Le,
+                align: Align::Unaligned,
+                kind: AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(u32::from_le_bytes(back), 0xFFFF_FFFF);
+}
+
+#[test]
+fn movzx_r32_r8_low_and_high() {
+    // MOVZX ESI,SIL (REXあり低8): SIL=0xFF -> ESI=0xFF.
+    let mut env = env();
+    env.backend.set(Gpr(6).state(), 0xFF);
+    env.step(|b| sem::movzx_r32_r8(b, Gpr(6), Gpr(6), false))
+        .unwrap();
+    assert_eq!(env.backend.get(Gpr(6).state()), 0xFF);
+    // MOVZX ESI,DH (REXなし上位8): EDX=0xFF00 -> ESI=0xFF.
+    env.backend.set(Gpr(2).state(), 0xFF00);
+    env.backend.set(Gpr(6).state(), 0);
+    env.step(|b| sem::movzx_r32_r8(b, Gpr(6), Gpr(2), true))
+        .unwrap();
+    assert_eq!(env.backend.get(Gpr(6).state()), 0xFF);
+}
+
+#[test]
+fn mov_m8_r8_mem8_basic() {
+    // MOV [RBP-0x41],SIL (88 mod=01, REX): SIL=0x77 -> [addr]=0x77.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend.set(Gpr(5).state(), 0x1100);
+    env.backend.set(Gpr(6).state(), 0x77);
+    env.step(|b| sem::mov_m8_r8_mem8(b, Gpr(6), Gpr(5), -0x41, false))
+        .unwrap();
+    let mut back = [0u8; 1];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x10BF),
+            &mut back,
+            Access {
+                endian: Endian::Le,
+                align: Align::Unaligned,
+                kind: AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(back, [0x77u8]);
+}
+
+#[test]
+fn cmp_rm_mem8_sets_zf() {
+    // CMP [RDI+8],ECX (mod=01): [0x1508]=0x10, ECX=0x10 -> ZF=1.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend.set(Gpr(7).state(), 0x1500);
+    env.backend.set(Gpr(1).state(), 0x10);
+    env.backend
+        .mem
+        .write(VirtAddr(0x1508), &[0x10u8, 0, 0, 0])
+        .unwrap();
+    env.step(|b| sem::cmp_rm32_mem8(b, Gpr(7), 0x08, Gpr(1)))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0x40);
+}
+
+#[test]
+fn cmp_rm_memnd_sets_zf() {
+    // CMP [RBX],EDX (mod=00): [0x1500]=0x10, EDX=0x10 -> ZF=1.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend.set(Gpr(3).state(), 0x1500);
+    env.backend.set(Gpr(2).state(), 0x10);
+    env.backend
+        .mem
+        .write(VirtAddr(0x1500), &[0x10u8, 0, 0, 0])
+        .unwrap();
+    env.step(|b| sem::cmp_rm32_memnd(b, Gpr(3), Gpr(2)))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0x40);
+}

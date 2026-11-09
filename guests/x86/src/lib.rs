@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! x86 最小のゲスト ISA。段階4の最小であり、可変長デコードを確かめる。
 //!
-//! i386 の230件を持つ。ModRM/SIB 汎用・XMM最小・near Jcc・MOVZX・CMOVB・ADD RIP等を含む。
+//! i386 の240件を持つ。ModRM/SIB 汎用・XMM最小・near Jcc・MOVZX・CMOVB・ADD RIP等を含む。
 //! REX 接頭辞はデコード前に剥がし、Insは共有して64ビット意味論に切り替える。
 //! SYSCALL/CPUID は最小形、ModRM は register-direct（全組合せ）・mod=01+disp8・
 //! mod=10+disp32・絶対番地と SIB base+index 形（スケール付き、disp8/disp32・disp なしを含む）を持ち、
@@ -70,7 +70,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数116件。
-        assert_eq!(INSNS.len(), 230);
+        assert_eq!(INSNS.len(), 240);
     }
 
     #[test]
@@ -147,7 +147,7 @@ mod tests {
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x0000_C7C0_1234_5678, 48), Some(Insn::MovRmImm));
         assert_eq!(decode(0x0000_C7C1_1234_5678, 48), Some(Insn::MovRmImm));
-        assert_eq!(decode(0x0000_C700_1234_5678, 48), None);
+        assert_eq!(decode(0x0000_C700_1234_5678, 48), Some(Insn::MovRmImmMemnd));
         // 83 /r (算術 imm8 群)：/0 ADD、/1 OR、/2 ADC、/3 SBB、
         // /4 AND、/5 SUB、/6 XOR、/7 CMP。
         // Ref: SPEC-X86-INTEL-SDM (v093).
@@ -248,6 +248,10 @@ mod tests {
         );
         assert_eq!(decode(0x0FB70500000000, 56), Some(Insn::MovzxR32M16Rip));
         assert_eq!(decode(0x0FB60576641700, 56), Some(Insn::MovzxR32M8Rip));
+        assert_eq!(decode(0x0FB6F6, 24), Some(Insn::MovzxR32R8));
+        assert_eq!(decode(0x8875BF, 24), Some(Insn::MovM8R8Mem8));
+        assert_eq!(decode(0x394F08, 24), Some(Insn::CmpRmMem8));
+        assert_eq!(decode(0x390B, 16), Some(Insn::CmpRmMemnd));
         assert_eq!(decode(0x81C900000000, 48), Some(Insn::OrRm32Imm));
         assert_eq!(decode(0x81D200000000, 48), Some(Insn::AdcRm32Imm));
         assert_eq!(decode(0x81DB00000000, 48), Some(Insn::SbbRm32Imm));
@@ -331,6 +335,8 @@ mod tests {
         // C7 /0 m64,imm32 (RBP+disp32)。
         assert_eq!(decode(0xC7850000000000000000, 80), Some(Insn::MovRmImmM32));
         assert_eq!(decode(0xC7839004000001000000, 80), Some(Insn::MovRmImmM32));
+        assert_eq!(decode(0xC74004FFFFFFFF, 56), Some(Insn::MovRmImmM8));
+        assert_eq!(decode(0xC700FFFFFFFF, 48), Some(Insn::MovRmImmMemnd));
         // ループと近傍ジャンプ：LOOP rel8 (E2)、JMP rel32 (E9)。
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0xE2FE, 16), Some(Insn::Loop));
@@ -409,6 +415,7 @@ mod tests {
         assert_eq!(decode(0x39D8, 16), Some(Insn::CmpRm32));
         assert_eq!(decode(0x39AD60FEFFFF, 48), Some(Insn::CmpRmMem32));
         assert_eq!(decode(0x0F43AD68FEFFFF, 56), Some(Insn::CmovaeM64));
+        assert_eq!(decode(0x033C2500000000, 56), Some(Insn::AddRSibabs));
         assert_eq!(decode(0x21C8, 16), Some(Insn::AndRm32));
         assert_eq!(decode(0x21D8, 16), Some(Insn::AndRm32));
         assert_eq!(decode(0x09C8, 16), Some(Insn::OrRm32));
