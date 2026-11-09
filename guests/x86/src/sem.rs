@@ -313,6 +313,43 @@ pub fn shr_eax<B: Backend>(b: &mut B, n: u8) -> Flow<B> {
     Ok(())
 }
 
+/// LEA EAX, [EBX+disp8]。メモリに触れず実効アドレスを入れる。
+pub fn lea_eax<B: Backend>(b: &mut B, disp: i8) -> Flow<B> {
+    let addr32 = eff_addr(b, Gpr(3), disp);
+    write(b, Gpr(0), addr32);
+    Ok(())
+}
+
+/// CMP EAX, ECX。EAX は変えず ZF/CF だけ更新する。
+pub fn cmp_rm32<B: Backend>(b: &mut B) -> Flow<B> {
+    let x = read(b, Gpr(0));
+    let y = read(b, Gpr(1));
+    update_zf_cf(b, x, y);
+    Ok(())
+}
+
+/// AND EAX, ECX。結果を書き、ZF/CF を更新する（CF=0）。
+pub fn and_rm32<B: Backend>(b: &mut B) -> Flow<B> {
+    let x = read(b, Gpr(0));
+    let y = read(b, Gpr(1));
+    let v = b.and::<W32>(x, y);
+    write(b, Gpr(0), v);
+    let zero = b.konst::<W32>(0);
+    update_zf_cf(b, v, zero);
+    Ok(())
+}
+
+/// OR EAX, ECX。結果を書き、ZF/CF を更新する（CF=0）。
+pub fn or_rm32<B: Backend>(b: &mut B) -> Flow<B> {
+    let x = read(b, Gpr(0));
+    let y = read(b, Gpr(1));
+    let v = b.or::<W32>(x, y);
+    write(b, Gpr(0), v);
+    let zero = b.konst::<W32>(0);
+    update_zf_cf(b, v, zero);
+    Ok(())
+}
+
 /// MOV EAX, imm32。
 pub fn mov_eax<B: Backend>(b: &mut B, imm: u32) -> Flow<B> {
     let v = b.konst::<W32>(imm);

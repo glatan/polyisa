@@ -58,9 +58,9 @@ fn eip_of(env: &mut BareEnv) -> u32 {
 fn fetch_len(first: u8, second: Option<u8>) -> Option<u64> {
     match first {
         0x90 | 0x40..=0x4F | 0x50..=0x5F | 0xC3 | 0xC9 => Some(1),
-        0xEB | 0x74 | 0x75 | 0xE2 | 0xCD | 0x85 | 0x0F => Some(2),
+        0xEB | 0x74 | 0x75 | 0xE2 | 0xCD | 0x85 | 0x0F | 0x39 | 0x21 | 0x0B | 0x09 => Some(2),
         0x05 | 0x2D | 0x3D | 0xB8 | 0xE8 | 0xE9 | 0x25 | 0x0D | 0x35 => Some(5),
-        0x01 | 0x8B | 0x31 | 0x89 | 0xC1 => {
+        0x01 | 0x8B | 0x31 | 0x89 | 0xC1 | 0x8D => {
             let s = second?;
             if first == 0xC1 || s == 0x43 {
                 Some(3)
@@ -90,7 +90,7 @@ pub fn run(env: &mut BareEnv, entry: u32, sys: &mut impl TrapHandler, limit: u64
             };
         }
         let mut peek = [0u8; 1];
-        let second = if matches!(head[0], 0x01 | 0x8B | 0x31 | 0x89 | 0xC1) {
+        let second = if matches!(head[0], 0x01 | 0x8B | 0x31 | 0x89 | 0xC1 | 0x8D) {
             if env
                 .backend
                 .mem
@@ -263,6 +263,10 @@ fn dispatch<B: Backend>(
         Insn::ShlEax => sem::shl_eax(b, word as u8),
         Insn::ShrEax => sem::shr_eax(b, word as u8),
         Insn::Int80 => sem::int80(b, eip),
+        Insn::LeaEax => sem::lea_eax(b, disp8()),
+        Insn::CmpRm32 => sem::cmp_rm32(b),
+        Insn::AndRm32 => sem::and_rm32(b),
+        Insn::OrRm32 => sem::or_rm32(b),
     }
 }
 
