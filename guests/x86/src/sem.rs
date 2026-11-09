@@ -3375,6 +3375,28 @@ pub fn add_r64_rip<B: Backend>(b: &mut B, dst: Gpr, next_rip: u64, disp: i32) ->
     Ok(())
 }
 
+/// ADD r32, [base] (mod=00)。32ビットで包み、6旗を更新する.
+pub fn add_r32_memnd<B: Backend>(b: &mut B, dst: Gpr, base: Gpr) -> Flow<B> {
+    let addr = read64(b, base);
+    let y: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let x = read(b, dst);
+    let v = b.add::<W32>(x, y);
+    write(b, dst, v);
+    update_add_flags(b, x, y, v);
+    Ok(())
+}
+
+/// ADD r64, [base] (mod=00, REX.W)。64ビットで包み、6旗を更新する.
+pub fn add_r64_memnd<B: Backend>(b: &mut B, dst: Gpr, base: Gpr) -> Flow<B> {
+    let addr = read64(b, base);
+    let y: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let x = read64(b, dst);
+    let v = b.add::<W64>(x, y);
+    write64(b, dst, v);
+    update_add_flags(b, x, y, v);
+    Ok(())
+}
+
 /// ADD r32, [disp32] (32ビット絶対番地).
 pub fn add_r32_abs<B: Backend>(b: &mut B, dst: Gpr, addr32: u32) -> Flow<B> {
     let addr = b.konst::<W64>(addr32 as u64);

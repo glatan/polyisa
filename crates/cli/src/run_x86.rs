@@ -412,7 +412,8 @@ fn fetch_len(
                 }
             }
         }
-        // 0x03 /r (ADD) と 0x0B /r (OR r32,m32)。reg-direct と RIP/abs のみ.
+        // 0x03 /r (ADD) と 0x0B /r (OR r32,m32)。reg-direct・mod=00 memnd・RIP/abs のみ.
+        // SIB と mod=01/10 は未対応で None。
         0x03 | 0x0B => {
             let s = second?;
             let md = s >> 6;
@@ -423,6 +424,8 @@ fn fetch_len(
                 None
             } else if md == 0 && rm == 5 {
                 Some(6)
+            } else if md == 0 {
+                Some(2)
             } else {
                 None
             }
@@ -1555,6 +1558,13 @@ fn dispatch<B: Backend>(
                 sem::add_r32_abs(b, reg(), imm32())
             }
         }
+        Insn::AddRMemnd => {
+            if rex_w {
+                sem::add_r64_memnd(b, reg(), rm())
+            } else {
+                sem::add_r32_memnd(b, reg(), rm())
+            }
+        }
         Insn::OrRRip => {
             if is64 {
                 sem::or_r32_rip(b, reg(), eip as u64 + nbytes, disp32())
@@ -2029,6 +2039,7 @@ fn dispatch<B: Backend>(
             | Insn::MovzxR32M16
             | Insn::MovzxR32M16Rip => Some(reg0f_as_gpr()),
             Insn::AddRRip
+            | Insn::AddRMemnd
             | Insn::OrRRip
             | Insn::MovEaxMem8
             | Insn::MovEaxMemnd

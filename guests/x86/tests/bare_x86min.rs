@@ -2497,3 +2497,37 @@ fn movdqu_load_mem8_roundtrip() {
     let v: u128 = env.backend.get(sem::xmm_ref(Xmm(0)));
     assert_eq!(v, 0xFFEEDDCCBBAA99887766554433221100u128);
 }
+
+#[test]
+fn add_r_memnd_basic() {
+    // ADD EDX,[RBX] (mod=00): [0x1500]=0x40, EDX=0x10 -> 0x50.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend.set(Gpr(3).state(), 0x1500);
+    env.backend.set(Gpr(2).state(), 0x10);
+    env.backend
+        .mem
+        .write(VirtAddr(0x1500), &[0x40u8, 0, 0, 0])
+        .unwrap();
+    env.step(|b| sem::add_r32_memnd(b, Gpr(2), Gpr(3))).unwrap();
+    assert_eq!(env.backend.get(Gpr(2).state()), 0x50);
+}
+
+#[test]
+fn add_r64_memnd_basic() {
+    // ADD RDX,[RBX] (REX.W, mod=00): [0x1500]=0x40, RDX=0x10 -> 0x50.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend.set(Gpr(3).state(), 0x1500);
+    env.step(|b| {
+        sem::write64(b, Gpr(2), 0x10);
+        Ok(())
+    })
+    .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1500), &[0x40u8, 0, 0, 0, 0, 0, 0, 0])
+        .unwrap();
+    env.step(|b| sem::add_r64_memnd(b, Gpr(2), Gpr(3))).unwrap();
+    assert_eq!(env.backend.get(Gpr(2).state()), 0x50);
+}

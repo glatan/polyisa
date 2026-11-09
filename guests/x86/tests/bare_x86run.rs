@@ -1124,3 +1124,30 @@ fn run_movdqu_load_mem8() {
     ));
     assert_eq!(v & 0xffff_ffff, 0x12345678);
 }
+
+#[test]
+fn run_add_r_memnd() {
+    // run 経由で REX.W 03 /r mod=00 (ADD RDX,[RBX]) を回す。
+    // [0x1500]=0x40, RDX=0x10 -> RDX=0x50 になり、exit(0x50)。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    env.backend
+        .mem
+        .write(VirtAddr(0x1500), &[0x40u8, 0, 0, 0, 0, 0, 0, 0])
+        .unwrap();
+    let prog: &[u8] = &[
+        0x48, 0xC7, 0xC3, 0x00, 0x15, 0x00, 0x00, // mov rbx,0x1500
+        0x48, 0xC7, 0xC2, 0x10, 0x00, 0x00, 0x00, // mov rdx,0x10
+        0x48, 0x03, 0x13, // add rdx,[rbx] (rdx=0x50)
+        0x48, 0x89, 0xD7, // mov rdi,rdx
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x0F, 0x05, // syscall -> exit(0x50)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0x50));
+}

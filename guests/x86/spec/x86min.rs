@@ -433,6 +433,14 @@ pub fn build_model() -> polyisa_isadl::Model {
             "store",
         ),
         (
+            "add_r_memnd",
+            "MR",
+            "00000011 00......",
+            vec![wc("mr_rm", WhereOp::Ne, 4), wc("mr_rm", WhereOp::Ne, 5)],
+            "add r32, [r/m]",
+            "alu",
+        ),
+        (
             "mov_eax_sib",
             "N8",
             "10001011 00...100 ........",
