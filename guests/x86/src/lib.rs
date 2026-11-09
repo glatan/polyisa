@@ -40,6 +40,8 @@ pub struct CpuState {
     pub h: [u32; 8],
     /// 拡張レジスタ R8-R15（64ビット、x86-64 のみ使う）。
     pub x: [u64; 8],
+    /// XMM レジスタ 8本。下位・上位の u64 ずつ置く（x86-64 のみ使う）。
+    pub xmm: [[u64; 2]; 8],
 }
 
 #[cfg(test)]
@@ -59,6 +61,10 @@ mod tests {
         assert_eq!(core::mem::offset_of!(CpuState, eflags), 8 * 4 + 4);
         assert_eq!(core::mem::offset_of!(CpuState, h), 8 * 4 + 4 + 4);
         assert_eq!(core::mem::offset_of!(CpuState, x), 8 * 4 + 4 + 4 + 8 * 4);
+        assert_eq!(
+            core::mem::offset_of!(CpuState, xmm),
+            8 * 4 + 4 + 4 + 8 * 4 + 8 * 8
+        );
     }
 
     #[test]

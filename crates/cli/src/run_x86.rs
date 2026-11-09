@@ -391,9 +391,6 @@ pub fn run_mode(
             word = (word << 8) | bytes[i as usize] as u128;
         }
         let len_bits = (base * 8) as u32;
-        if std::env::var("POLYISA_TRACE").is_ok() {
-            eprintln!("TRACE pc={pc:#x} off={off} word={word:#x} len={len_bits}");
-        }
         let Some(insn) = decode(word, len_bits) else {
             return Outcome::Unimplemented {
                 eip: pc as u32,
