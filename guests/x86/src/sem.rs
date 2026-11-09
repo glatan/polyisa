@@ -444,6 +444,67 @@ pub fn cmp_rm8_imm<B: Backend>(b: &mut B, dst: Gpr, imm: u8, high: bool) -> Flow
     Ok(())
 }
 
+/// MOV [disp32], r8 (88 /r SIB 直接番地、mod=00)。絶対番地へ8bit格納.
+pub fn mov_m8_r8_abs<B: Backend>(b: &mut B, src: Gpr, addr: u32, high: bool) -> Flow<B> {
+    use polyisa_sem::W8;
+    let a = b.konst::<W64>(addr as u64);
+    let x = read8(b, src, high);
+    b.store::<W8>(a, x, DATA_WRITE)?;
+    Ok(())
+}
+
+/// MOV FS:[disp32], r8 (88 /r SIB 直接番地、mod=00)。FS base へ8bit格納.
+pub fn mov_m8_r8_fs_abs<B: Backend>(
+    b: &mut B,
+    src: Gpr,
+    fs_base: u64,
+    disp: i32,
+    high: bool,
+) -> Flow<B> {
+    use polyisa_sem::W8;
+    let base = b.konst::<W64>(fs_base);
+    let d = b.konst::<W64>(disp as i64 as u64);
+    let addr = b.add::<W64>(base, d);
+    let x = read8(b, src, high);
+    b.store::<W8>(addr, x, DATA_WRITE)?;
+    Ok(())
+}
+
+/// MOV [idx*scale+disp32], r8 (88 /r SIB 直接番地、索引あり)。8bit格納.
+pub fn mov_m8_r8_sibabs<B: Backend>(
+    b: &mut B,
+    src: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i32,
+    high: bool,
+) -> Flow<B> {
+    use polyisa_sem::W8;
+    let addr = sib_addr_scaled_abs(b, shift, disp, idx);
+    let x = read8(b, src, high);
+    b.store::<W8>(addr, x, DATA_WRITE)?;
+    Ok(())
+}
+
+/// MOV FS:[idx*scale+disp32], r8 (88 /r SIB 直接番地、索引あり)。FS base からの8bit格納.
+pub fn mov_m8_r8_fs_sibabs<B: Backend>(
+    b: &mut B,
+    src: Gpr,
+    fs_base: u64,
+    idx: Gpr,
+    shift: u32,
+    disp: i32,
+    high: bool,
+) -> Flow<B> {
+    use polyisa_sem::W8;
+    let rel = sib_addr_scaled_abs(b, shift, disp, idx);
+    let base = b.konst::<W64>(fs_base);
+    let addr = b.add::<W64>(base, rel);
+    let x = read8(b, src, high);
+    b.store::<W8>(addr, x, DATA_WRITE)?;
+    Ok(())
+}
+
 /// CMP r/m8,imm8 SIB+disp8 (80 /7 mod=01)。メモリを読んで比較する.
 pub fn cmp_rm8_imm_sibd<B: Backend>(
     b: &mut B,

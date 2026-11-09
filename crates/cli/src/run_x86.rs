@@ -338,7 +338,19 @@ fn fetch_len(
             }
             None
         }
-        // C7 /0 (MOV r/m,imm32 系)。SIB mod=00 は未対応。
+        // 0x88 /r (MOV r/m8,r8)。mod=00 SIB 直接番地 (base=101) のみ 7B。
+        // reg-direct・mod=01/10・SIB index 付きは未対応。
+        0x88 => {
+            let s = second?;
+            let md = s >> 6;
+            let rm = s & 7;
+            if md != 0 || rm != 4 {
+                return None;
+            }
+            let t = third?;
+            if t & 7 == 5 { Some(7) } else { None }
+        }
+        // C7 /0 (MOV r/m,imm32 系)。SIB mod=00 は直接番地 (base=101) のみ。
         // has66 (66 C7) は imm16 のため 2B 短くなる.
         0xC7 => {
             let s = second?;
@@ -618,6 +630,7 @@ pub fn run_mode(
                 | 0xF6
                 | 0x80
                 | 0xC6
+                | 0x88
         ) {
             if env
                 .backend
@@ -636,8 +649,8 @@ pub fn run_mode(
         };
         // SIB 付き（mod≠11 かつ rm=100）は第3バイト（SIB）で長さが変わる。
         // 2バイトオペコード（0F）では third=ModRM、fourth=SIB である。
-        // C7 は SIB の base で mod=00 の長さが変わるため同様に読む。
-        let third = if (matches!(head[0], 0x8B | 0x89 | 0x8D | 0xC7)
+        // C7/0x88 は SIB の base で mod=00 の長さが変わるため同様に読む。
+        let third = if (matches!(head[0], 0x8B | 0x89 | 0x8D | 0xC7 | 0x88)
             && matches!(second, Some(s) if s & 7 == 4 && s >> 6 != 3))
             || (head[0] == 0x0F
                 && (matches!(
@@ -728,6 +741,7 @@ pub fn run_mode(
                     | 0xF6
                     | 0x80
                     | 0xC6
+                    | 0x88
                     | 0xC1
                     | 0xD1
                     | 0x05
@@ -1163,6 +1177,28 @@ fn dispatch<B: Backend>(
                 }
             } else {
                 sem::mov_sibabs_eax(b, reg(), sib_idx(), sib_shift(), disp32())
+            }
+        }
+        Insn::MovSibabsR8 => {
+            // 88 /r mod=00 SIB 直接番地。src は reg フィールド (REX.R で拡張)。
+            // REX なしの reg 4-7 は上位8ビット (AH/CH/DH/BH)。
+            let reg_f = (modrm() >> 3) & 7;
+            let (src, high) = if rex != 0 {
+                (Gpr(reg_f | ((rex >> 2) & 1) << 3), false)
+            } else if reg_f < 4 {
+                (Gpr(reg_f), false)
+            } else {
+                (Gpr(reg_f - 4), true)
+            };
+            if no_index() {
+                match fs {
+                    Some(base) => sem::mov_m8_r8_fs_abs(b, src, base, disp32(), high),
+                    None => sem::mov_m8_r8_abs(b, src, disp32() as u32, high),
+                }
+            } else if let Some(base) = fs {
+                sem::mov_m8_r8_fs_sibabs(b, src, base, sib_idx(), sib_shift(), disp32(), high)
+            } else {
+                sem::mov_m8_r8_sibabs(b, src, sib_idx(), sib_shift(), disp32(), high)
             }
         }
         Insn::PushEax
@@ -2990,5 +3026,32 @@ mod tests {
             .read(VirtAddr(0x1500), &mut back, data_access())
             .unwrap();
         assert_eq!(u32::from_le_bytes(back), 0x1122_3344);
+    }
+
+    #[test]
+    fn fs_relative_mov_sibabs_store_imm8() {
+        // FS 上書き + 88 SIB 直接番地 (MOV FS:[disp32],r8) を run する。
+        // fs_base=0x1000、disp=0x611、AL=0x77 -> [0x1611]=0x77、exit(0)。
+        let mut sys = CliLinux::x86_64();
+        sys.fs_base = 0x1000;
+        let mut env = bare();
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.set(Gpr(0).state(), 0x77);
+        let prog: &[u8] = &[
+            0x64, 0x88, 0x04, 0x25, 0x11, 0x06, 0x00, 0x00, // mov FS:[0x611],al
+            0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+            0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
+            0x0F, 0x05, // syscall -> exit(0)
+        ];
+        env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+        let out = run_mode(&mut env, 0x1000, &mut sys, 100, true);
+        assert_eq!(out, Outcome::Exit(0));
+        let mut back = [0u8; 1];
+        env.backend
+            .mem
+            .read(VirtAddr(0x1611), &mut back, data_access())
+            .unwrap();
+        assert_eq!(back, [0x77u8]);
     }
 }

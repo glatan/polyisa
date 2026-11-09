@@ -2894,3 +2894,101 @@ fn movzx_r32_m8_rip_zero_extends() {
         .unwrap();
     assert_eq!(eax(&mut env), 0x80);
 }
+
+#[test]
+fn mov_m8_r8_abs_stores_byte() {
+    // MOV [0x1500],AL (88 /r SIB 直接番地、FSなし): AL=0x77.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend.set(Gpr(0).state(), 0x77);
+    env.step(|b| sem::mov_m8_r8_abs(b, Gpr(0), 0x1500, false))
+        .unwrap();
+    let mut back = [0u8; 1];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x1500),
+            &mut back,
+            Access {
+                endian: Endian::Le,
+                align: Align::Unaligned,
+                kind: AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(back, [0x77u8]);
+}
+
+#[test]
+fn mov_m8_r8_fs_abs_stores_byte() {
+    // MOV FS:[0x611],AL: FS=0x1000 -> [0x1611]=0x77.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend.set(Gpr(0).state(), 0x77);
+    env.step(|b| sem::mov_m8_r8_fs_abs(b, Gpr(0), 0x1000, 0x611, false))
+        .unwrap();
+    let mut back = [0u8; 1];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x1611),
+            &mut back,
+            Access {
+                endian: Endian::Le,
+                align: Align::Unaligned,
+                kind: AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(back, [0x77u8]);
+}
+
+#[test]
+fn mov_m8_r8_sibabs_indexed() {
+    // MOV [RSI*2+0x20],CL (索引あり): RSI=0x10 -> [0x40].
+    let mut env = env();
+    env.map_rw(0, 1).unwrap();
+    env.backend.set(Gpr(6).state(), 0x10);
+    env.backend.set(Gpr(1).state(), 0xAB);
+    env.step(|b| sem::mov_m8_r8_sibabs(b, Gpr(1), Gpr(6), 1, 0x20, false))
+        .unwrap();
+    let mut back = [0u8; 1];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x40),
+            &mut back,
+            Access {
+                endian: Endian::Le,
+                align: Align::Unaligned,
+                kind: AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(back, [0xABu8]);
+}
+
+#[test]
+fn mov_m8_r8_fs_sibabs_indexed() {
+    // MOV FS:[RSI*2+0x20],CL: FS=0x1000, RSI=0x10 -> [0x1040].
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend.set(Gpr(6).state(), 0x10);
+    env.backend.set(Gpr(1).state(), 0xAB);
+    env.step(|b| sem::mov_m8_r8_fs_sibabs(b, Gpr(1), 0x1000, Gpr(6), 1, 0x20, false))
+        .unwrap();
+    let mut back = [0u8; 1];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x1040),
+            &mut back,
+            Access {
+                endian: Endian::Le,
+                align: Align::Unaligned,
+                kind: AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(back, [0xABu8]);
+}
