@@ -426,6 +426,11 @@ fn fetch_len(
             let s = second?;
             if s >> 6 == 3 { Some(3) } else { None }
         }
+        // 0xD1 (CL シフト) は register-direct のみ 2B。/7 SAR のみ実装 (他は decode 失败)。
+        0xD1 => {
+            let s = second?;
+            if s >> 6 == 3 { Some(2) } else { None }
+        }
         0x8B | 0x89 | 0x8D => {
             let s = second?;
             let modrm_mod = s >> 6;
@@ -550,6 +555,7 @@ pub fn run_mode(
                 | 0x11
                 | 0x19
                 | 0xC1
+                | 0xD1
                 | 0xC7
                 | 0x81
                 | 0x83
@@ -669,6 +675,7 @@ pub fn run_mode(
                     | 0x80
                     | 0xC6
                     | 0xC1
+                    | 0xD1
                     | 0x05
                     | 0x2D
                     | 0x3D
@@ -1269,6 +1276,13 @@ fn dispatch<B: Backend>(
                 sem::sar_rm64_imm8(b, rm(), word as u8)
             } else {
                 sem::sar_rm32_imm8(b, rm(), word as u8)
+            }
+        }
+        Insn::SarRm32Cl => {
+            if rex_w {
+                sem::sar_rm64_cl(b, rm())
+            } else {
+                sem::sar_rm32_cl(b, rm())
             }
         }
         Insn::Int80 => sem::int80(b, eip),
@@ -1946,6 +1960,7 @@ fn dispatch<B: Backend>(
             | Insn::CmpRmImm8
             | Insn::ShrRm32Imm8
             | Insn::SarRm32Imm8
+            | Insn::SarRm32Cl
             | Insn::NotRm32
             | Insn::NegRm32 => Some(rm()),
             Insn::MovRm32 | Insn::Movsxd | Insn::ImulRImm => Some(reg()),

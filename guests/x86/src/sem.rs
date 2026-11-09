@@ -1241,6 +1241,70 @@ pub fn sar_rm64_imm8<B: Backend>(b: &mut B, dst: Gpr, n: u8) -> Flow<B> {
     Ok(())
 }
 
+/// SAR r/m32,CL (D1 /7)。CL 下位5ビットで算術右シフトし、CF/SZP を更新する.
+pub fn sar_rm32_cl<B: Backend>(b: &mut B, dst: Gpr) -> Flow<B> {
+    let x = read(b, dst);
+    let cl8 = read8(b, Gpr(1), false);
+    let cl32 = b.zext::<W8, W32>(cl8);
+    let mask = b.konst::<W32>(31);
+    let count = b.and::<W32>(cl32, mask);
+    let v = b.shr_a::<W32>(x, count);
+    write(b, dst, v);
+    let old: B::V<W32> = b.get(eflags_ref());
+    let zero = b.konst::<W32>(0);
+    let active = b.cmp::<W32>(Cmp::Ne, count, zero);
+    let one = b.konst::<W32>(1);
+    let c1 = b.sub::<W32>(count, one);
+    let safe_c1 = b.select::<W32>(active, c1, zero);
+    let shifted = b.shr_l::<W32>(x, safe_c1);
+    let low = b.and::<W32>(shifted, one);
+    let cf_take = b.cmp::<W32>(Cmp::Ne, low, zero);
+    let cf = pick(b, cf_take, FLAG_CF);
+    let of_new = zero;
+    let szp = szp_bits(b, v);
+    let clear_mask = b.konst::<W32>(!FLAG_OSZPC);
+    let mut new_flags = b.and::<W32>(old, clear_mask);
+    new_flags = b.or::<W32>(new_flags, cf);
+    new_flags = b.or::<W32>(new_flags, of_new);
+    new_flags = b.or::<W32>(new_flags, szp);
+    let assembled = b.select::<W32>(active, new_flags, old);
+    b.set(eflags_ref(), assembled);
+    Ok(())
+}
+
+/// SAR r/m64,CL (REX.W + D1 /7)。CL 下位6ビットで算術右シフトし、CF/SZP を更新する.
+pub fn sar_rm64_cl<B: Backend>(b: &mut B, dst: Gpr) -> Flow<B> {
+    let x = read64(b, dst);
+    let cl8 = read8(b, Gpr(1), false);
+    let cl64 = b.zext::<W8, W64>(cl8);
+    let mask = b.konst::<W64>(63);
+    let count = b.and::<W64>(cl64, mask);
+    let v = b.shr_a::<W64>(x, count);
+    write64(b, dst, v);
+    let old: B::V<W32> = b.get(eflags_ref());
+    let zero64 = b.konst::<W64>(0);
+    let one64 = b.konst::<W64>(1);
+    let c1 = b.sub::<W64>(count, one64);
+    let active64 = b.cmp::<W64>(Cmp::Ne, count, zero64);
+    let safe_c1 = b.select::<W64>(active64, c1, zero64);
+    let shifted = b.shr_l::<W64>(x, safe_c1);
+    let low = b.and::<W64>(shifted, one64);
+    let cf_take = b.cmp::<W64>(Cmp::Ne, low, zero64);
+    let cf = pick(b, cf_take, FLAG_CF);
+    let zero32 = b.konst::<W32>(0);
+    let of_new = zero32;
+    let szp = szp_bits(b, v);
+    let clear_mask = b.konst::<W32>(!FLAG_OSZPC);
+    let mut new_flags = b.and::<W32>(old, clear_mask);
+    new_flags = b.or::<W32>(new_flags, cf);
+    new_flags = b.or::<W32>(new_flags, of_new);
+    new_flags = b.or::<W32>(new_flags, szp);
+    let active = b.cmp::<W64>(Cmp::Ne, count, zero64);
+    let assembled = b.select::<W32>(active, new_flags, old);
+    b.set(eflags_ref(), assembled);
+    Ok(())
+}
+
 /// LEA r32, [base+disp8]。メモリに触れず実効アドレスを dst に入れる。
 pub fn lea_m8<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, disp: i8) -> Flow<B> {
     let addr = eff_addr(b, base, disp);

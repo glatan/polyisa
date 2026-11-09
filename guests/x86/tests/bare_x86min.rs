@@ -2381,3 +2381,49 @@ fn pand_keeps_common_bits() {
     let v: u128 = env.backend.get(sem::xmm_ref(Xmm(0)));
     assert_eq!(v, 0xF000F000F000F000F000F000F000F000u128);
 }
+
+#[test]
+fn sar_rm_cl_basic_and_mask() {
+    // SAR EDX,CL: EDX=0xF0, CL=2 -> 0x3C。
+    let mut env = env();
+    env.backend.set(Gpr(2).state(), 0xF0);
+    env.backend.set(Gpr(1).state(), 2);
+    env.step(|b| sem::sar_rm32_cl(b, Gpr(2))).unwrap();
+    assert_eq!(env.backend.get(Gpr(2).state()), 0x3C);
+    // CL=33 -> 下位5ビットで1として扱う: 0xF0>>a1=0x78。
+    env.backend.set(Gpr(2).state(), 0xF0);
+    env.backend.set(Gpr(1).state(), 33);
+    env.step(|b| sem::sar_rm32_cl(b, Gpr(2))).unwrap();
+    assert_eq!(env.backend.get(Gpr(2).state()), 0x78);
+}
+
+#[test]
+fn sar_rm64_cl_basic_and_mask() {
+    // SAR RDX,CL (64-bit): RDX=0xF0, CL=2 -> 0x3C。
+    let mut env = env();
+    env.step(|b| {
+        sem::write64(b, Gpr(2), 0xF0);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| {
+        sem::write64(b, Gpr(1), 2);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::sar_rm64_cl(b, Gpr(2))).unwrap();
+    assert_eq!(env.backend.get(Gpr(2).state()), 0x3C);
+    // CL=65 -> 下位6ビットで1として扱う。
+    env.step(|b| {
+        sem::write64(b, Gpr(2), 0xF0);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| {
+        sem::write64(b, Gpr(1), 65);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::sar_rm64_cl(b, Gpr(2))).unwrap();
+    assert_eq!(env.backend.get(Gpr(2).state()), 0x78);
+}

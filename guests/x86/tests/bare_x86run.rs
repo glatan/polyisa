@@ -1015,3 +1015,25 @@ fn run_pand_reg_direct() {
     ));
     assert_eq!(v & 0xffff_ffff, 0x0F);
 }
+
+#[test]
+fn run_sar_rm64_cl() {
+    // run 経由で REX.W D1 /7 (SAR RDI,CL) を回す。
+    // RDI=0xF0、CL=2 -> RDI=0x3C になり、exit(0x3C)。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    let prog: &[u8] = &[
+        0x48, 0xC7, 0xC7, 0xF0, 0x00, 0x00, 0x00, // mov rdi,0xF0
+        0x48, 0xC7, 0xC1, 0x02, 0x00, 0x00, 0x00, // mov rcx,2
+        0x48, 0xD1, 0xFF, // sar rdi,cl (rdi=0x3C)
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x0F, 0x05, // syscall -> exit(rdi=0x3C)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0x3C));
+}
