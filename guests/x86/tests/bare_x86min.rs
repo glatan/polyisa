@@ -2194,3 +2194,41 @@ fn cmp_rm8_imm_mem8_sets_flags() {
         .unwrap();
     assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0);
 }
+
+#[test]
+fn cmova_moves_when_above() {
+    // CMOVA: CF=0/ZF=0 で mov、CF=1 で保持、ZF=1 で保持.
+    let mut env = env();
+    env.backend.set(Gpr(0).state(), 1);
+    env.backend.set(Gpr(1).state(), 2);
+    env.backend.set(sem::eflags_ref(), 0x0);
+    env.step(|b| sem::cmova_r32(b, Gpr(0), Gpr(1))).unwrap();
+    assert_eq!(eax(&mut env), 2);
+    env.backend.set(Gpr(0).state(), 1);
+    env.backend.set(sem::eflags_ref(), 0x1);
+    env.step(|b| sem::cmova_r32(b, Gpr(0), Gpr(1))).unwrap();
+    assert_eq!(eax(&mut env), 1);
+    env.backend.set(Gpr(0).state(), 1);
+    env.backend.set(sem::eflags_ref(), 0x40);
+    env.step(|b| sem::cmova_r32(b, Gpr(0), Gpr(1))).unwrap();
+    assert_eq!(eax(&mut env), 1);
+}
+
+#[test]
+fn cmova_r64_moves_when_above() {
+    // CMOVA RDX,RCX (REX.W): CF=0/ZF=0 で mov.
+    let mut env = env();
+    env.step(|b| {
+        sem::write64(b, Gpr(2), 1);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| {
+        sem::write64(b, Gpr(1), 2);
+        Ok(())
+    })
+    .unwrap();
+    env.backend.set(sem::eflags_ref(), 0x0);
+    env.step(|b| sem::cmova_r64(b, Gpr(2), Gpr(1))).unwrap();
+    assert_eq!(env.backend.get(Gpr(2).state()), 2);
+}

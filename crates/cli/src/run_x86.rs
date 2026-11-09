@@ -1690,37 +1690,44 @@ fn dispatch<B: Backend>(
         Insn::NoplSibd32 => sem::nop(b),
         Insn::Cmovb => {
             if rex_w {
-                sem::cmovb_r64(b, reg(), rm())
+                sem::cmovb_r64(b, reg0f_as_gpr(), rm0f())
             } else {
-                sem::cmovb_r32(b, reg(), rm())
+                sem::cmovb_r32(b, reg0f_as_gpr(), rm0f())
             }
         }
         Insn::Cmovne => {
             if rex_w {
-                sem::cmovne_r64(b, reg(), rm())
+                sem::cmovne_r64(b, reg0f_as_gpr(), rm0f())
             } else {
-                sem::cmovne_r32(b, reg(), rm())
+                sem::cmovne_r32(b, reg0f_as_gpr(), rm0f())
             }
         }
         Insn::Cmove => {
             if rex_w {
-                sem::cmove_r64(b, reg(), rm())
+                sem::cmove_r64(b, reg0f_as_gpr(), rm0f())
             } else {
-                sem::cmove_r32(b, reg(), rm())
+                sem::cmove_r32(b, reg0f_as_gpr(), rm0f())
             }
         }
         Insn::Cmovns => {
             if rex_w {
-                sem::cmovns_r64(b, reg(), rm())
+                sem::cmovns_r64(b, reg0f_as_gpr(), rm0f())
             } else {
-                sem::cmovns_r32(b, reg(), rm())
+                sem::cmovns_r32(b, reg0f_as_gpr(), rm0f())
             }
         }
         Insn::Cmovbe => {
             if rex_w {
-                sem::cmovbe_r64(b, reg(), rm())
+                sem::cmovbe_r64(b, reg0f_as_gpr(), rm0f())
             } else {
-                sem::cmovbe_r32(b, reg(), rm())
+                sem::cmovbe_r32(b, reg0f_as_gpr(), rm0f())
+            }
+        }
+        Insn::Cmova => {
+            if rex_w {
+                sem::cmova_r64(b, reg0f_as_gpr(), rm0f())
+            } else {
+                sem::cmova_r32(b, reg0f_as_gpr(), rm0f())
             }
         }
         Insn::CmoveM64 => {
@@ -1862,17 +1869,16 @@ fn dispatch<B: Backend>(
             | Insn::SarRm32Imm8
             | Insn::NotRm32
             | Insn::NegRm32 => Some(rm()),
-            Insn::MovRm32
-            | Insn::Movsxd
-            | Insn::Cmovb
+            Insn::MovRm32 | Insn::Movsxd | Insn::ImulRImm => Some(reg()),
+            Insn::Cmovb
             | Insn::Cmovne
             | Insn::Cmove
             | Insn::Cmovns
             | Insn::Cmovbe
-            | Insn::ImulRImm
+            | Insn::Cmova
             | Insn::MovzxR32M16
-            | Insn::MovzxR32M16Rip
-            | Insn::AddRRip
+            | Insn::MovzxR32M16Rip => Some(reg0f_as_gpr()),
+            Insn::AddRRip
             | Insn::OrRRip
             | Insn::MovEaxMem8
             | Insn::MovEaxMemnd

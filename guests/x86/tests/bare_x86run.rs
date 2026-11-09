@@ -791,3 +791,32 @@ fn run_cmpb_mem8_disp8() {
     let out = run_x86::run(&mut env, 0x1000, &mut sys, 100);
     assert_eq!(out, Outcome::Exit(0x77));
 }
+
+#[test]
+fn run_cmova_reg_direct() {
+    // run 経由で 0F47 reg-direct (CMOVA ECX,EDX) を回す。
+    // ECX=1、EDX=2、CF=0/ZF=0 なので ECX=2 になり exit(2)。
+    // fetch/decode/dispatch のレジスタ抽出 (0F系) の検証も兼ねる。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    let prog: &[u8] = &[
+        0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax,1
+        0x50, // push eax
+        0x59, // pop ecx (ecx=1)
+        0xB8, 0x02, 0x00, 0x00, 0x00, // mov eax,2
+        0x50, // push eax
+        0x5A, // pop edx (edx=2)
+        0x0F, 0x47, 0xCA, // cmova ecx,edx (ecx=2)
+        0x51, // push ecx
+        0x5B, // pop ebx (ebx=2)
+        0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax,1 (exit)
+        0xCD, 0x80, // int 0x80 -> exit(2)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = ExitOne;
+    let out = run_x86::run(&mut env, 0x1000, &mut sys, 100);
+    assert_eq!(out, Outcome::Exit(2));
+}
