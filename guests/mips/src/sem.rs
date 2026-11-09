@@ -4,13 +4,13 @@
 //!
 //! 遅延スロットは pc/npc の組で表す。分岐・ジャンプは npc だけを書き換え、
 //! 遅延スロットの1命令を実行してから `commit` で pc を進める。
-//! HI/LO、FPU、R6、両エンディアン切り替えは本格実装で足す。
+//! FPU、R6、両エンディアン切り替えは本格実装で足す（HI/LO 乗除算は本格相当の最小形を持つ）。
 //!
 //! 出典は SPEC-MIPS-IV Rev 3.2 (1995-09) である。
 //! Ref: SPEC-MIPS-IV (Rev 3.2).
 
 use polyisa_mem::{Access, AccessKind, Align, Endian};
-use polyisa_sem::{Backend, Flow, StateRef, W32, W64};
+use polyisa_sem::{Backend, Cmp, Flow, StateRef, W32, W64};
 
 use super::CpuState;
 
@@ -38,6 +38,16 @@ pub fn pc_ref() -> StateRef<W64> {
 /// npc を指す。
 pub fn npc_ref() -> StateRef<W64> {
     StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, npc))
+}
+
+/// HI を指す。
+pub fn hi_ref() -> StateRef<W64> {
+    StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, hi))
+}
+
+/// LO を指す。
+pub fn lo_ref() -> StateRef<W64> {
+    StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, lo))
 }
 
 fn read<B: Backend>(b: &mut B, r: Gpr) -> B::V<W64> {
@@ -118,6 +128,133 @@ pub fn sll<B: Backend>(b: &mut B, rd: Gpr, rt: Gpr, shamt: u32) -> Flow<B> {
     let lo = b.konst::<W64>(0xffff_ffff);
     let masked = b.and::<W64>(v, lo);
     write(b, rd, masked);
+    Ok(())
+}
+
+/// MULT。32ビット符号付き積の64ビット結果を HI:LO に置く。
+pub fn mult<B: Backend>(b: &mut B, rs: Gpr, rt: Gpr) -> Flow<B> {
+    let x = read(b, rs);
+    let y = read(b, rt);
+    let x32: B::V<W32> = b.trunc::<W64, W32>(x);
+    let y32: B::V<W32> = b.trunc::<W64, W32>(y);
+    let a: B::V<W64> = b.sext::<W32, W64>(x32);
+    let c: B::V<W64> = b.sext::<W32, W64>(y32);
+    let p = b.mul::<W64>(a, c);
+    let shift = b.konst::<W64>(32);
+    let hi64 = b.shr_l::<W64>(p, shift);
+    let hi32: B::V<W32> = b.trunc::<W64, W32>(hi64);
+    let lo32: B::V<W32> = b.trunc::<W64, W32>(p);
+    let hi = b.zext::<W32, W64>(hi32);
+    let lo = b.zext::<W32, W64>(lo32);
+    b.set(hi_ref(), hi);
+    b.set(lo_ref(), lo);
+    Ok(())
+}
+
+/// MULTU。32ビット符号なし積の64ビット結果を HI:LO に置く。
+pub fn multu<B: Backend>(b: &mut B, rs: Gpr, rt: Gpr) -> Flow<B> {
+    let x = read(b, rs);
+    let y = read(b, rt);
+    let x32: B::V<W32> = b.trunc::<W64, W32>(x);
+    let y32: B::V<W32> = b.trunc::<W64, W32>(y);
+    let a: B::V<W64> = b.zext::<W32, W64>(x32);
+    let c: B::V<W64> = b.zext::<W32, W64>(y32);
+    let p = b.mul::<W64>(a, c);
+    let shift = b.konst::<W64>(32);
+    let hi64 = b.shr_l::<W64>(p, shift);
+    let hi32: B::V<W32> = b.trunc::<W64, W32>(hi64);
+    let lo32: B::V<W32> = b.trunc::<W64, W32>(p);
+    let hi = b.zext::<W32, W64>(hi32);
+    let lo = b.zext::<W32, W64>(lo32);
+    b.set(hi_ref(), hi);
+    b.set(lo_ref(), lo);
+    Ok(())
+}
+
+/// DIV。LO=商、HI=剰余。0 除算は UNPREDICTABLE のため HI/LO 不変とする
+///（挙動パラメータ化は本格実装で足す）。
+pub fn div<B: Backend>(b: &mut B, rs: Gpr, rt: Gpr) -> Flow<B> {
+    let x = read(b, rs);
+    let y = read(b, rt);
+    let x32: B::V<W32> = b.trunc::<W64, W32>(x);
+    let y32: B::V<W32> = b.trunc::<W64, W32>(y);
+    let zero32 = b.konst::<W32>(0);
+    let is_zero = b.cmp::<W32>(Cmp::Eq, y32, zero32);
+    let one32 = b.konst::<W32>(1);
+    let safe = b.select::<W32>(is_zero, one32, y32);
+    let a: B::V<W64> = b.sext::<W32, W64>(x32);
+    let c: B::V<W64> = b.sext::<W32, W64>(safe);
+    let q64 = b.sdiv::<W64>(a, c);
+    let r64 = b.srem::<W64>(a, c);
+    let q32: B::V<W32> = b.trunc::<W64, W32>(q64);
+    let r32: B::V<W32> = b.trunc::<W64, W32>(r64);
+    let new_lo = b.zext::<W32, W64>(q32);
+    let new_hi = b.zext::<W32, W64>(r32);
+    let old_lo: B::V<W64> = b.get(lo_ref());
+    let old_hi: B::V<W64> = b.get(hi_ref());
+    let fin_lo = b.select::<W64>(is_zero, old_lo, new_lo);
+    let fin_hi = b.select::<W64>(is_zero, old_hi, new_hi);
+    b.set(lo_ref(), fin_lo);
+    b.set(hi_ref(), fin_hi);
+    Ok(())
+}
+
+/// DIVU。LO=商、HI=剰余。0 除算は HI/LO 不変とする。
+pub fn divu<B: Backend>(b: &mut B, rs: Gpr, rt: Gpr) -> Flow<B> {
+    let x = read(b, rs);
+    let y = read(b, rt);
+    let x32: B::V<W32> = b.trunc::<W64, W32>(x);
+    let y32: B::V<W32> = b.trunc::<W64, W32>(y);
+    let zero32 = b.konst::<W32>(0);
+    let is_zero = b.cmp::<W32>(Cmp::Eq, y32, zero32);
+    let one32 = b.konst::<W32>(1);
+    let safe = b.select::<W32>(is_zero, one32, y32);
+    let a: B::V<W64> = b.zext::<W32, W64>(x32);
+    let c: B::V<W64> = b.zext::<W32, W64>(safe);
+    let q64 = b.udiv::<W64>(a, c);
+    let r64 = b.urem::<W64>(a, c);
+    let q32: B::V<W32> = b.trunc::<W64, W32>(q64);
+    let r32: B::V<W32> = b.trunc::<W64, W32>(r64);
+    let new_lo = b.zext::<W32, W64>(q32);
+    let new_hi = b.zext::<W32, W64>(r32);
+    let old_lo: B::V<W64> = b.get(lo_ref());
+    let old_hi: B::V<W64> = b.get(hi_ref());
+    let fin_lo = b.select::<W64>(is_zero, old_lo, new_lo);
+    let fin_hi = b.select::<W64>(is_zero, old_hi, new_hi);
+    b.set(lo_ref(), fin_lo);
+    b.set(hi_ref(), fin_hi);
+    Ok(())
+}
+
+/// MFHI。HI の下位32ビットを rd に書く。
+pub fn mfhi<B: Backend>(b: &mut B, rd: Gpr) -> Flow<B> {
+    let v: B::V<W64> = b.get(hi_ref());
+    write(b, rd, v);
+    Ok(())
+}
+
+/// MFLO。LO の下位32ビットを rd に書く。
+pub fn mflo<B: Backend>(b: &mut B, rd: Gpr) -> Flow<B> {
+    let v: B::V<W64> = b.get(lo_ref());
+    write(b, rd, v);
+    Ok(())
+}
+
+/// MTHI。rs の下位32ビットを HI に書く。
+pub fn mthi<B: Backend>(b: &mut B, rs: Gpr) -> Flow<B> {
+    let x = read(b, rs);
+    let x32: B::V<W32> = b.trunc::<W64, W32>(x);
+    let v = b.zext::<W32, W64>(x32);
+    b.set(hi_ref(), v);
+    Ok(())
+}
+
+/// MTLO。rs の下位32ビットを LO に書く。
+pub fn mtlo<B: Backend>(b: &mut B, rs: Gpr) -> Flow<B> {
+    let x = read(b, rs);
+    let x32: B::V<W32> = b.trunc::<W64, W32>(x);
+    let v = b.zext::<W32, W64>(x32);
+    b.set(lo_ref(), v);
     Ok(())
 }
 
