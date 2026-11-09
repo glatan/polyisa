@@ -222,6 +222,27 @@ fn sub_wraps_and_sets_flags() {
 }
 
 #[test]
+fn and_or_xor_imm() {
+    let mut env = env();
+    // 0b1100 & 0b1010 = 0b1000。ZF=0、CF=0。
+    env.backend.set(Gpr(0).state(), 0b1100);
+    env.step(|b| sem::and_eax(b, 0b1010)).unwrap();
+    assert_eq!(eax(&mut env), 0b1000);
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0);
+    // 0 | 0 = 0。ZF=1。
+    env.backend.set(Gpr(0).state(), 0);
+    env.step(|b| sem::or_eax(b, 0)).unwrap();
+    assert_eq!(eax(&mut env), 0);
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0x40);
+    // 0xff ^ 0xff = 0。ZF=1。
+    env.backend.set(Gpr(0).state(), 0xff);
+    env.step(|b| sem::xor_imm(b, 0xff)).unwrap();
+    assert_eq!(eax(&mut env), 0);
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0x40);
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x1, 0);
+}
+
+#[test]
 fn frame_setup_and_leave() {
     let mut env = env();
     env.map_rw(0, 1).unwrap();

@@ -54,8 +54,8 @@ mod tests {
 
     #[test]
     fn insn_count() {
-        // 試作の整数28件。
-        assert_eq!(INSNS.len(), 28);
+        // 試作の整数31件。
+        assert_eq!(INSNS.len(), 31);
     }
 
     #[test]
@@ -107,6 +107,12 @@ mod tests {
         assert_eq!(decode(0x2D_0000_0001, 40), Some(Insn::SubEax));
         assert_eq!(decode(0x89E5, 16), Some(Insn::MovEbpEsp));
         assert_eq!(decode(0xC9, 8), Some(Insn::Leave));
+        // EAX-imm32 群の残り：AND (25)、OR (0D)、XOR imm (35)。
+        // ADD (05)/SUB (2D)/CMP (3D) と合わせ6種が揃う。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x25_1234_5678, 40), Some(Insn::AndEax));
+        assert_eq!(decode(0x0D_FFFF_FFFF, 40), Some(Insn::OrEax));
+        assert_eq!(decode(0x35_0000_00FF, 40), Some(Insn::XorImm));
         // ModRM mod=01 + disp8：MOV EAX,[EBX+disp8] (8B 43 ..) と MOV [EBX+disp8],EAX (89 43 ..)。
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x008B_4310, 24), Some(Insn::MovEaxMem));

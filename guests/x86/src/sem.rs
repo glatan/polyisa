@@ -248,6 +248,39 @@ pub fn leave<B: Backend>(b: &mut B) -> Flow<B> {
     pop_reg(b, Gpr(5))
 }
 
+/// AND EAX, imm32。結果を書き、ZF/CF を更新する。
+pub fn and_eax<B: Backend>(b: &mut B, imm: u32) -> Flow<B> {
+    let x = read(b, Gpr(0));
+    let y = b.konst::<W32>(imm);
+    let v = b.and::<W32>(x, y);
+    write(b, Gpr(0), v);
+    let zero = b.konst::<W32>(0);
+    update_zf_cf(b, v, zero);
+    Ok(())
+}
+
+/// OR EAX, imm32。結果を書き、ZF/CF を更新する。
+pub fn or_eax<B: Backend>(b: &mut B, imm: u32) -> Flow<B> {
+    let x = read(b, Gpr(0));
+    let y = b.konst::<W32>(imm);
+    let v = b.or::<W32>(x, y);
+    write(b, Gpr(0), v);
+    let zero = b.konst::<W32>(0);
+    update_zf_cf(b, v, zero);
+    Ok(())
+}
+
+/// XOR EAX, imm32。結果を書き、ZF/CF を更新する。
+pub fn xor_imm<B: Backend>(b: &mut B, imm: u32) -> Flow<B> {
+    let x = read(b, Gpr(0));
+    let y = b.konst::<W32>(imm);
+    let v = b.xor::<W32>(x, y);
+    write(b, Gpr(0), v);
+    let zero = b.konst::<W32>(0);
+    update_zf_cf(b, v, zero);
+    Ok(())
+}
+
 /// MOV EAX, imm32。
 pub fn mov_eax<B: Backend>(b: &mut B, imm: u32) -> Flow<B> {
     let v = b.konst::<W32>(imm);
