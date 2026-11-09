@@ -3614,3 +3614,29 @@ fn imul_r64_basic() {
     })
     .unwrap();
 }
+
+#[test]
+fn or_rm8_imm_sib_basic() {
+    // ORB [RSP],0 (80 /1 SIB mod=00 no_index): [0x1500]=0xF0 | 0x0F = 0xFF? Actually imm=0, [0x1500]=0xF0 -> 0xF0.
+    // Use imm=0x0F: [0x1500]=0xF0 -> 0xFF.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend.set(Gpr(4).state(), 0x1500);
+    env.backend.mem.write(VirtAddr(0x1500), &[0xF0u8]).unwrap();
+    env.step(|b| sem::or_rm8_imm_memnd(b, Gpr(4), 0x0F))
+        .unwrap();
+    let mut back = [0u8; 1];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x1500),
+            &mut back,
+            Access {
+                endian: Endian::Le,
+                align: Align::Unaligned,
+                kind: AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(back, [0xFFu8]);
+}

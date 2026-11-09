@@ -439,7 +439,15 @@ fn fetch_len(
                 if reg == 4 || reg == 7 { Some(3) } else { None }
             } else if rm == 4 {
                 // SIB 付き。mod=01 SIB+disp8+imm8 (5B) の /7 CMP のみ.
-                if md == 1 && reg == 7 { Some(5) } else { None }
+                // mod=00 SIB [base] (no_index, non-abs) +imm8 (4B) の /1 ORB のみ.
+                if md == 1 && reg == 7 {
+                    Some(5)
+                } else if md == 0 && reg == 1 {
+                    let t = third?;
+                    if t & 7 != 5 { Some(4) } else { None }
+                } else {
+                    None
+                }
             } else if md == 1 && reg == 7 {
                 Some(4)
             } else if md == 2 && reg == 1 {
@@ -451,6 +459,9 @@ fn fetch_len(
             } else if md == 0 && rm == 5 && reg == 7 {
                 // mod=00 RIP [RIP+disp32],imm8 (7B) の /7 CMPB のみ.
                 Some(7)
+            } else if md == 0 && reg == 1 && rm != 4 && rm != 5 {
+                // mod=00 [base],imm8 (3B) の /1 ORB のみ (SIBなし).
+                Some(3)
             } else {
                 None
             }
@@ -769,6 +780,7 @@ pub fn run_mode(
                 | 0x23
                 | 0x13
                 | 0x1B
+                | 0x80
                 | 0xFF
         ) && matches!(second, Some(s) if s & 7 == 4 && s >> 6 != 3))
             || (head[0] == 0x0F
@@ -1703,6 +1715,26 @@ fn dispatch<B: Backend>(
             let disp = ((word >> 8) as u32).swap_bytes() as i32;
             let imm = (word & 0xff) as u8;
             sem::or_rm8_imm_mem32(b, rm(), disp, imm)
+        }
+        Insn::OrRm8ImmMemnd => {
+            // 80 /1 mod=00 [base],imm8 (24b)。imm は最下位8.
+            let imm = (word & 0xff) as u8;
+            sem::or_rm8_imm_memnd(b, rm(), imm)
+        }
+        Insn::OrRm8ImmSib => {
+            // 80 /1 mod=00 SIB [base] (no_index, non-abs) +imm8 (32b)。SIB は third.
+            // 索引ありは SIB スケールで処理する.
+            let sib_v = ((word >> 8) & 0xff) as u8;
+            let imm = (word & 0xff) as u8;
+            let shift = ((sib_v >> 6) & 3) as u32;
+            let idx_raw = (sib_v >> 3) & 7;
+            let idx = Gpr(idx_raw | (((rex >> 1) & 1) << 3));
+            let base = Gpr((sib_v & 7) | ((rex & 1) << 3));
+            if idx_raw == 4 && (rex >> 1) & 1 == 0 {
+                sem::or_rm8_imm_memnd(b, base, imm)
+            } else {
+                sem::or_rm8_imm_sib(b, base, idx, shift, imm)
+            }
         }
         Insn::AndRm8ImmMem32 => {
             // 80 /4 mod=10 [base+disp32],imm8 (56b)。disp は (word>>8) 下位32 LE、imm は最下位8.
@@ -3361,7 +3393,9 @@ pub fn run_image_x86(
         arg_bytes.push(a.as_bytes().to_vec());
     }
     let (img, sp) = polyisa_os_linux::build_initial_stack(top, &arg_bytes, &[], &[(6, 0x1000)]);
-    let base = sp & !(PAGE_SIZE - 1);
+    // スタックは 8MB 確保する (Linux既定と同等)。sub $0x1000,%rsp等の拡張でPageFaultにならないため.
+    const STACK_SIZE: u64 = 8 * 1024 * 1024;
+    let base = top - STACK_SIZE;
     let end = top.next_multiple_of(PAGE_SIZE);
     let count = (end - base) / PAGE_SIZE;
     env.backend
@@ -3437,7 +3471,9 @@ pub fn run_image_x86_64(
         arg_bytes.push(a.as_bytes().to_vec());
     }
     let (img, sp) = polyisa_os_linux::build_initial_stack(top, &arg_bytes, &[], &[(6, 0x1000)]);
-    let base = sp & !(PAGE_SIZE - 1);
+    // スタックは 8MB 確保する (Linux既定と同等)。sub $0x1000,%rsp等の拡張でPageFaultにならないため.
+    const STACK_SIZE: u64 = 8 * 1024 * 1024;
+    let base = top - STACK_SIZE;
     let end = top.next_multiple_of(PAGE_SIZE);
     let count = (end - base) / PAGE_SIZE;
     env.backend
