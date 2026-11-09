@@ -421,6 +421,60 @@ pub fn mov_sib_s8_eax<B: Backend>(b: &mut B, disp: i8) -> Flow<B> {
     Ok(())
 }
 
+/// MOV EAX, [EBX+ESI*2] (SIB mod=00 base+index*2)。
+pub fn mov_eax_sib_s2nd<B: Backend>(b: &mut B) -> Flow<B> {
+    let addr32 = sib_addr_scaled(b, 1, 0);
+    let addr = b.zext::<W32, W64>(addr32);
+    let v: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    write(b, Gpr(0), v);
+    Ok(())
+}
+
+/// MOV [EBX+ESI*2], EAX (SIB mod=00 base+index*2)。
+pub fn mov_sib_s2nd_eax<B: Backend>(b: &mut B) -> Flow<B> {
+    let addr32 = sib_addr_scaled(b, 1, 0);
+    let addr = b.zext::<W32, W64>(addr32);
+    let v: B::V<W32> = read(b, Gpr(0));
+    b.store::<W32>(addr, v, DATA_WRITE)?;
+    Ok(())
+}
+
+/// MOV EAX, [EBX+ESI*4] (SIB mod=00 base+index*4)。
+pub fn mov_eax_sib_s4nd<B: Backend>(b: &mut B) -> Flow<B> {
+    let addr32 = sib_addr_scaled(b, 2, 0);
+    let addr = b.zext::<W32, W64>(addr32);
+    let v: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    write(b, Gpr(0), v);
+    Ok(())
+}
+
+/// MOV [EBX+ESI*4], EAX (SIB mod=00 base+index*4)。
+pub fn mov_sib_s4nd_eax<B: Backend>(b: &mut B) -> Flow<B> {
+    let addr32 = sib_addr_scaled(b, 2, 0);
+    let addr = b.zext::<W32, W64>(addr32);
+    let v: B::V<W32> = read(b, Gpr(0));
+    b.store::<W32>(addr, v, DATA_WRITE)?;
+    Ok(())
+}
+
+/// MOV EAX, [EBX+ESI*8] (SIB mod=00 base+index*8)。
+pub fn mov_eax_sib_s8nd<B: Backend>(b: &mut B) -> Flow<B> {
+    let addr32 = sib_addr_scaled(b, 3, 0);
+    let addr = b.zext::<W32, W64>(addr32);
+    let v: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    write(b, Gpr(0), v);
+    Ok(())
+}
+
+/// MOV [EBX+ESI*8], EAX (SIB mod=00 base+index*8)。
+pub fn mov_sib_s8nd_eax<B: Backend>(b: &mut B) -> Flow<B> {
+    let addr32 = sib_addr_scaled(b, 3, 0);
+    let addr = b.zext::<W32, W64>(addr32);
+    let v: B::V<W32> = read(b, Gpr(0));
+    b.store::<W32>(addr, v, DATA_WRITE)?;
+    Ok(())
+}
+
 /// MOV [EBX+ESI], EAX (SIB mod=00 base+index の最小形)。
 /// スケール・disp・絶対番地・SIB 拡張は本格実装で足す。
 pub fn mov_sib_eax<B: Backend>(b: &mut B) -> Flow<B> {
