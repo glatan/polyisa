@@ -313,6 +313,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("punpcklqdq", "F1", "00001111 01101100 11......", "punpcklqdq xmm, xmm", "alu"),
         // PAND xmm,xmm (66 0F DB /r)。reg-direct のみ。
         ("pand", "F1", "00001111 11011011 11......", "pand xmm, xmm", "alu"),
+        // CWDE/CDQE (0x98)。AX→EAX / EAX→RAX 符号拡張。REX.W で切替.
+        ("cwde", "F1", "10011000", "cwde", "alu"),
         ("movq_m64_xmm_rip", "F1", "00001111 11010110 00...101 ................................", "movq m64, xmm", "store"),
         // MOVQ xmm,m64 RIP (F3 0F 7E 05 + disp32)。F3 接頭辞は実行側で剥がす。
         ("movq_xmm_m64_rip", "F1", "00001111 01111110 00...101 ................................", "movq xmm, m64", "load"),

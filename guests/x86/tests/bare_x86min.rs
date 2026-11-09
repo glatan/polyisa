@@ -2621,3 +2621,29 @@ fn movups_mem32_roundtrip() {
     let v: u128 = env.backend.get(sem::xmm_ref(Xmm(1)));
     assert_eq!(v, 0x0102030405060708090a0b0c0d0e0f10u128);
 }
+
+#[test]
+fn cwde_sign_extends_ax() {
+    // CWDE: AX=0xFF80 -> EAX=0xFFFFFF80; AX=0x77 -> EAX=0x77.
+    let mut env = env();
+    env.backend.set(Gpr(0).state(), 0xFF80);
+    env.step(sem::cwde).unwrap();
+    assert_eq!(eax(&mut env), 0xFFFF_FF80);
+    env.backend.set(Gpr(0).state(), 0x77);
+    env.step(sem::cwde).unwrap();
+    assert_eq!(eax(&mut env), 0x77);
+}
+
+#[test]
+fn cdqe_sign_extends_eax() {
+    // CDQE (REX.W): EAX=0x80000000 -> RAX=0xFFFFFFFF80000000.
+    let mut env = env();
+    env.step(|b| {
+        sem::write64(b, Gpr(0), 0x8000_0000);
+        Ok(())
+    })
+    .unwrap();
+    env.step(sem::cdqe).unwrap();
+    let v = sem::read64(&mut env.backend, Gpr(0));
+    assert_eq!(v, 0xFFFF_FFFF_8000_0000);
+}

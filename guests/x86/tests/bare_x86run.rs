@@ -1258,3 +1258,27 @@ fn run_movups_mem32_roundtrip() {
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 200, true);
     assert_eq!(out, Outcome::Exit(0x77));
 }
+
+#[test]
+fn run_cdqe_sign_extend() {
+    // run 経由で REX.W 98 (CDQE) を回す。
+    // EAX=0x80000000 -> RAX=0xFFFFFFFF80000000 になり、exit(0)。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    let prog: &[u8] = &[
+        0xB8, 0x00, 0x00, 0x00, 0x80, // mov eax,0x80000000
+        0x48, 0x98, // cdqe (rax=0xffffffff80000000)
+        0x48, 0x89, 0xC7, // mov rdi,rax
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x0F, 0x05, // syscall -> exit(0x80000000)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0x8000_0000));
+    let v = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(7));
+    assert_eq!(v, 0xFFFF_FFFF_8000_0000);
+}

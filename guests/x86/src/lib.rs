@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! x86 最小のゲスト ISA。段階4の最小であり、可変長デコードを確かめる。
 //!
-//! i386 の226件を持つ。ModRM/SIB 汎用・XMM最小・near Jcc・MOVZX・CMOVB・ADD RIP等を含む。
+//! i386 の227件を持つ。ModRM/SIB 汎用・XMM最小・near Jcc・MOVZX・CMOVB・ADD RIP等を含む。
 //! REX 接頭辞はデコード前に剥がし、Insは共有して64ビット意味論に切り替える。
 //! SYSCALL/CPUID は最小形、ModRM は register-direct（全組合せ）・mod=01+disp8・
 //! mod=10+disp32・絶対番地と SIB base+index 形（スケール付き、disp8/disp32・disp なしを含む）を持ち、
@@ -70,13 +70,14 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数116件。
-        assert_eq!(INSNS.len(), 226);
+        assert_eq!(INSNS.len(), 227);
     }
 
     #[test]
     fn decode_spot_checks() {
         // 命令語はビット配置から手で組み立てる。Ref: SPEC-X86-INTEL-SDM。
         assert_eq!(decode(0x90, 8), Some(Insn::Nop));
+        assert_eq!(decode(0x98, 8), Some(Insn::Cwde));
         assert_eq!(decode(0x40, 8), Some(Insn::IncEax));
         assert_eq!(decode(0x41, 8), Some(Insn::IncEcx));
         assert_eq!(decode(0x42, 8), Some(Insn::IncEdx));

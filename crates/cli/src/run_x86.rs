@@ -63,7 +63,7 @@ fn fetch_len(
     rex_w: bool,
 ) -> Option<u64> {
     match first {
-        0x90 | 0x40..=0x4F | 0x50..=0x5F | 0xC3 | 0xC9 => Some(1),
+        0x90 | 0x40..=0x4F | 0x50..=0x5F | 0xC3 | 0xC9 | 0x98 => Some(1),
         0xEB | 0x74 | 0x75 | 0xE2 | 0xCD | 0x72 | 0x73 | 0x76 | 0x77 | 0x7C | 0x7D | 0x7E
         | 0x7F => Some(2),
         0x05 | 0x2D | 0x3D | 0xE8 | 0xE9 | 0x25 | 0x0D | 0x35 | 0xA9 => Some(5),
@@ -730,6 +730,7 @@ pub fn run_mode(
                     | 0x63
                     | 0x69
                     | 0x6B
+                    | 0x98
                     | 0x0F
                     | 0xA4
                     | 0xA5
@@ -1597,6 +1598,13 @@ fn dispatch<B: Backend>(
                 sem::movsxd_rm32(b, reg(), rm())
             }
         }
+        Insn::Cwde => {
+            if rex_w {
+                sem::cdqe(b)
+            } else {
+                sem::cwde(b)
+            }
+        }
         Insn::CmpRm32 => {
             if rex_w {
                 sem::cmp_rm64(b, rm(), reg())
@@ -2003,7 +2011,8 @@ fn dispatch<B: Backend>(
             | Insn::OrEax
             | Insn::XorImm
             | Insn::ShlEax
-            | Insn::PopEax => Some(Gpr(0)),
+            | Insn::PopEax
+            | Insn::Cwde => Some(Gpr(0)),
             Insn::IncEcx | Insn::DecEcx | Insn::PopEcx => Some(Gpr(1)),
             Insn::IncEdx | Insn::DecEdx | Insn::PopEdx => Some(Gpr(2)),
             Insn::IncEbx | Insn::DecEbx | Insn::PopEbx => Some(Gpr(3)),

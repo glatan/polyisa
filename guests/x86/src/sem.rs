@@ -1574,6 +1574,24 @@ pub fn movsxd_rm64<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
     Ok(())
 }
 
+/// CWDE (0x98)。AX を符号拡張して EAX に置く.
+pub fn cwde<B: Backend>(b: &mut B) -> Flow<B> {
+    use polyisa_sem::W16;
+    let x32 = read(b, Gpr(0));
+    let x: B::V<W16> = b.trunc::<W32, W16>(x32);
+    let v = b.sext::<W16, W32>(x);
+    write(b, Gpr(0), v);
+    Ok(())
+}
+
+/// CDQE (REX.W + 0x98)。EAX を符号拡張して RAX に置く.
+pub fn cdqe<B: Backend>(b: &mut B) -> Flow<B> {
+    let x = read(b, Gpr(0));
+    let v = b.sext::<W32, W64>(x);
+    write64(b, Gpr(0), v);
+    Ok(())
+}
+
 /// MOV r/m32, imm32 (C7 /0)。フラグは変えない。
 pub fn mov_rm32_imm<B: Backend>(b: &mut B, dst: Gpr, imm: u32) -> Flow<B> {
     let v = b.konst::<W32>(imm);
