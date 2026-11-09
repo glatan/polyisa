@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! x86 最小のゲスト ISA。段階4の最小であり、可変長デコードを確かめる。
 //!
-//! i386 の汎用レジスタ系43件のみ持つ。ModRM の SIB/disp32/メモリ形式と Rust フック・
+//! i386 の汎用レジスタ系57件のみ持つ。ModRM の SIB/disp32/メモリ形式と Rust フック・
 //! EFLAGS(SF/OF/PF/AF)・64ビット・x87・SSE・セグメントは本格実装で足す。
 //! SYSCALL/CPUID は最小形、ModRM は register-direct と mod=01+disp8 のみ持つ。
 
@@ -54,8 +54,8 @@ mod tests {
 
     #[test]
     fn insn_count() {
-        // 試作の整数43件。
-        assert_eq!(INSNS.len(), 43);
+        // 試作の整数57件。
+        assert_eq!(INSNS.len(), 57);
     }
 
     #[test]
@@ -63,7 +63,21 @@ mod tests {
         // 命令語はビット配置から手で組み立てる。Ref: SPEC-X86-INTEL-SDM。
         assert_eq!(decode(0x90, 8), Some(Insn::Nop));
         assert_eq!(decode(0x40, 8), Some(Insn::IncEax));
+        assert_eq!(decode(0x41, 8), Some(Insn::IncEcx));
+        assert_eq!(decode(0x42, 8), Some(Insn::IncEdx));
+        assert_eq!(decode(0x43, 8), Some(Insn::IncEbx));
+        assert_eq!(decode(0x44, 8), Some(Insn::IncEsp));
+        assert_eq!(decode(0x45, 8), Some(Insn::IncEbp));
+        assert_eq!(decode(0x46, 8), Some(Insn::IncEsi));
+        assert_eq!(decode(0x47, 8), Some(Insn::IncEdi));
         assert_eq!(decode(0x48, 8), Some(Insn::DecEax));
+        assert_eq!(decode(0x49, 8), Some(Insn::DecEcx));
+        assert_eq!(decode(0x4A, 8), Some(Insn::DecEdx));
+        assert_eq!(decode(0x4B, 8), Some(Insn::DecEbx));
+        assert_eq!(decode(0x4C, 8), Some(Insn::DecEsp));
+        assert_eq!(decode(0x4D, 8), Some(Insn::DecEbp));
+        assert_eq!(decode(0x4E, 8), Some(Insn::DecEsi));
+        assert_eq!(decode(0x4F, 8), Some(Insn::DecEdi));
         // 40ビット：opcode + imm32（下位32ビットは don't care）。
         // 試作の word 組立は opcode 上位詰めであり実メモリLE像と逆。fetch結合時に直す。
         assert_eq!(decode(0x05_0000_0001, 40), Some(Insn::AddEax));

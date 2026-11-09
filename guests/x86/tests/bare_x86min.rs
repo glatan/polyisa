@@ -296,6 +296,31 @@ fn callee_saved_prologue_epilogue() {
 }
 
 #[test]
+fn inc_dec_all_regs() {
+    let mut env = env();
+    // ECX/EDX/EBX/ESP/EBP/ESI/EDI を回す。DEC 0 は 0xffffffff に包む。
+    for (r, start) in [
+        (1u8, 10u32),
+        (2, 20),
+        (3, 30),
+        (4, 0x100),
+        (5, 50),
+        (6, 60),
+        (7, 70),
+    ] {
+        env.backend.set(Gpr(r).state(), start);
+        env.step(|b| sem::inc_r32(b, Gpr(r))).unwrap();
+        assert_eq!(env.backend.get(Gpr(r).state()), start.wrapping_add(1));
+        env.step(|b| sem::dec_r32(b, Gpr(r))).unwrap();
+        env.step(|b| sem::dec_r32(b, Gpr(r))).unwrap();
+        assert_eq!(env.backend.get(Gpr(r).state()), start.wrapping_sub(1));
+    }
+    env.backend.set(Gpr(2).state(), 0);
+    env.step(|b| sem::dec_r32(b, Gpr(2))).unwrap();
+    assert_eq!(env.backend.get(Gpr(2).state()), 0xffff_ffff);
+}
+
+#[test]
 fn pop_esp_takes_popped_value() {
     let mut env = env();
     env.map_rw(0, 1).unwrap();
