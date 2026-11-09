@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // MIPS I 試作の ISADL モデル（段階3の最小）。
 //
-// MIPS I の整数17件と ADDI、R6 の BEQZALC（計19件）に絞る。遅延スロットは pc/npc で表す。
+// MIPS I の整数17件と ADDI/ADDIU、R6 の BEQZALC（計20件）に絞る。遅延スロットは pc/npc で表す。
 // R6 の BEQZALC は遅延スロットを持たない。
 // ADD/SUB（trap あり）は扱わず WRAP する ADDU/SUBU のみ持つ。trap は本格実装で足す。
 // R6 の割り当て直しの残り・microMIPS・FPU・ロード遅延・branch likely・LE切替は本格実装で足す。
@@ -133,6 +133,28 @@ pub fn build_model() -> polyisa_isadl::Model {
             timing: timing.to_string(),
         });
     }
+    // R6 は整数の HI/LO 乗除算を廃止した（MUL/MUH/MOD 系に置換）。
+    // 該当 8 件は pre-R6 のモデルのみで有効にする。
+    // Ref: SPEC-MIPS-R6 (Rev 6.06).
+    for insn in m.insns.iter_mut() {
+        if matches!(
+            insn.name.as_str(),
+            "mult" | "multu" | "div" | "divu" | "mfhi" | "mflo" | "mthi" | "mtlo"
+        ) {
+            insn.when = Pred::Not(Box::new(Pred::Flag("mips_r6".to_string())));
+        }
+    }
+    // ADDIU は R6 にも残る（trap なし）。ADDI と同じく WRAP で代用する。
+    // Ref: SPEC-MIPS-IV (Rev 3.2).
+    m.insns.push(Insn {
+        name: "addiu".to_string(),
+        format: "FI".to_string(),
+        pattern: Pattern::parse("001001 ..... ..... ................").expect("valid pattern"),
+        when: Pred::True,
+        wheres: vec![],
+        syntax: "addiu {rt}, {rs}, {imm}".to_string(),
+        timing: "alu".to_string(),
+    });
     // MIPS I の ADDI。R6 では op=001000 が割り当て直されるため、
     // pre-R6 のモデルでのみ有効にする。trap は WRAP で代用し本格実装で足す。
     // Ref: SPEC-MIPS-R6 (Rev 6.06).
