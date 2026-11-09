@@ -4623,3 +4623,70 @@ fn movq_m64_xmm_mem32_basic() {
         .unwrap();
     assert_eq!(u64::from_le_bytes(back), 0x99AABBCCDDEEFF00);
 }
+
+#[test]
+fn xor_r64_sibd32_basic() {
+    // XOR RCX,[R9+RAX*8+0x98] (REX.WB 33 /r SIB mod=10): RCX=0xFF, [mem]=0x0F -> 0xF0.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.step(|b| {
+        sem::write64(b, Gpr(1), 0xFF);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| {
+        sem::write64(b, Gpr(9), 0x1500);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| {
+        sem::write64(b, Gpr(0), 2);
+        Ok(())
+    })
+    .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x15A8), &0x0Fu64.to_le_bytes())
+        .unwrap();
+    env.step(|b| sem::xor_r64_sibd32(b, Gpr(1), Gpr(9), Gpr(0), 3, 0x98))
+        .unwrap();
+    env.step(|b| {
+        assert_eq!(sem::read64(b, Gpr(1)), 0xF0);
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn mov_m16_r16_sib_basic() {
+    // MOV [R9+RAX*2],DX (66 89 SIB mod=00): DX=0x1234 -> [0x1504]=0x1234.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend.set(Gpr(2).state(), 0x1234);
+    env.step(|b| {
+        sem::write64(b, Gpr(9), 0x1500);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| {
+        sem::write64(b, Gpr(0), 2);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::mov_m16_r16_sib(b, Gpr(2), Gpr(9), Gpr(0), 1))
+        .unwrap();
+    let mut back = [0u8; 2];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x1504),
+            &mut back,
+            Access {
+                endian: Endian::Le,
+                align: Align::Unaligned,
+                kind: AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(u16::from_le_bytes(back), 0x1234);
+}

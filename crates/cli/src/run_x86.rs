@@ -603,13 +603,20 @@ fn fetch_len(
             if md == 3 {
                 Some(2)
             } else if rm == 4 {
-                // SIB mod=00 直接番地 (base=101) のみ 7B。SIB index 付きは未対応.
-                if md == 0 {
-                    let t = third?;
-                    if t & 7 == 5 { Some(7) } else { None }
-                } else {
-                    None
-                }
+                // SIB 付き。disp の有無は SIB base で決まる。
+                let t = third?;
+                let disp = match md {
+                    1 => 1,
+                    2 => 4,
+                    _ => {
+                        if t & 7 == 5 {
+                            4
+                        } else {
+                            0
+                        }
+                    }
+                };
+                Some(3 + disp)
             } else if md == 0 && rm == 5 {
                 Some(6)
             } else if md == 0 {
@@ -1176,6 +1183,8 @@ pub fn run_mode(
                     | Insn::MovntdqStoreMem8
                     | Insn::MovapsStoreMemnd
                     | Insn::MovapsStoreMem8
+                    | Insn::MovSibEax
+                    | Insn::MovEaxSib
                     | Insn::NoplSib
                     | Insn::NoplSibd
                     | Insn::NoplSibd32
@@ -1587,7 +1596,14 @@ fn dispatch<B: Backend>(
             }
         }
         Insn::MovEaxSib => {
-            if no_index() {
+            if has66 {
+                // 66 8B: 16ビット SIB ロード.
+                if no_index() {
+                    sem::mov_r16_m16_memnd(b, reg(), sib_base())
+                } else {
+                    sem::mov_r16_m16_sib(b, reg(), sib_base(), sib_idx(), sib_shift())
+                }
+            } else if no_index() {
                 if rex_w {
                     sem::mov_r64_memnd(b, reg(), sib_base())
                 } else {
@@ -1600,7 +1616,14 @@ fn dispatch<B: Backend>(
             }
         }
         Insn::MovSibEax => {
-            if no_index() {
+            if has66 {
+                // 66 89: 16ビット SIB ストア.
+                if no_index() {
+                    sem::mov_m16_r16_memnd(b, reg(), sib_base())
+                } else {
+                    sem::mov_m16_r16_sib(b, reg(), sib_base(), sib_idx(), sib_shift())
+                }
+            } else if no_index() {
                 if rex_w {
                     sem::mov_m64_memnd(b, reg(), sib_base())
                 } else {
@@ -3086,6 +3109,46 @@ fn dispatch<B: Backend>(
                 sem::xor_r64_mem32(b, reg(), rm(), disp32())
             } else {
                 sem::xor_r32_mem32(b, reg(), rm(), disp32())
+            }
+        }
+        Insn::XorRSib => {
+            // 33 /r SIB mod=00 [base+index*scale]。no_index は [base].
+            if no_index() {
+                if rex_w {
+                    sem::xor_r64_memnd(b, reg(), sib_base())
+                } else {
+                    sem::xor_r32_memnd(b, reg(), sib_base())
+                }
+            } else if rex_w {
+                sem::xor_r64_sib(b, reg(), sib_base(), sib_idx(), sib_shift())
+            } else {
+                sem::xor_r32_sib(b, reg(), sib_base(), sib_idx(), sib_shift())
+            }
+        }
+        Insn::XorRSibd => {
+            if no_index() {
+                if rex_w {
+                    sem::xor_r64_mem8(b, reg(), sib_base(), disp8())
+                } else {
+                    sem::xor_r32_mem8(b, reg(), sib_base(), disp8())
+                }
+            } else if rex_w {
+                sem::xor_r64_sibd(b, reg(), sib_base(), sib_idx(), sib_shift(), disp8())
+            } else {
+                sem::xor_r32_sibd(b, reg(), sib_base(), sib_idx(), sib_shift(), disp8())
+            }
+        }
+        Insn::XorRSibd32 => {
+            if no_index() {
+                if rex_w {
+                    sem::xor_r64_mem32(b, reg(), sib_base(), disp32())
+                } else {
+                    sem::xor_r32_mem32(b, reg(), sib_base(), disp32())
+                }
+            } else if rex_w {
+                sem::xor_r64_sibd32(b, reg(), sib_base(), sib_idx(), sib_shift(), disp32())
+            } else {
+                sem::xor_r32_sibd32(b, reg(), sib_base(), sib_idx(), sib_shift(), disp32())
             }
         }
         Insn::XorRRip => {
@@ -4630,6 +4693,9 @@ fn dispatch<B: Backend>(
             | Insn::XorRMemnd
             | Insn::XorRMem8
             | Insn::XorRMem32
+            | Insn::XorRSib
+            | Insn::XorRSibd
+            | Insn::XorRSibd32
             | Insn::XorRRip
             | Insn::AndRMemnd
             | Insn::AndRMem8

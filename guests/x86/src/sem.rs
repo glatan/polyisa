@@ -9783,3 +9783,157 @@ pub fn movq_m64_xmm_mem32<B: Backend>(b: &mut B, src: Xmm, base: Gpr, disp: i32)
     b.store::<W64>(addr, v, DATA_WRITE)?;
     Ok(())
 }
+
+/// XOR r32, [base+index*scale] (33 /r SIB mod=00)。
+pub fn xor_r32_sib<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, idx: Gpr, shift: u32) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, 0, base, idx);
+    let y: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let x = read(b, dst);
+    let v = b.xor::<W32>(x, y);
+    write(b, dst, v);
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// XOR r64, [base+index*scale] (33 /r SIB mod=00, REX.W)。
+pub fn xor_r64_sib<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, idx: Gpr, shift: u32) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, 0, base, idx);
+    let y: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let x = read64(b, dst);
+    let v = b.xor::<W64>(x, y);
+    write64(b, dst, v);
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// XOR r32, [base+index*scale+disp8] (33 /r SIB mod=01)。
+pub fn xor_r32_sibd<B: Backend>(
+    b: &mut B,
+    dst: Gpr,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i8,
+) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, disp as i32, base, idx);
+    let y: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let x = read(b, dst);
+    let v = b.xor::<W32>(x, y);
+    write(b, dst, v);
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// XOR r64, [base+index*scale+disp8] (33 /r SIB mod=01, REX.W)。
+pub fn xor_r64_sibd<B: Backend>(
+    b: &mut B,
+    dst: Gpr,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i8,
+) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, disp as i32, base, idx);
+    let y: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let x = read64(b, dst);
+    let v = b.xor::<W64>(x, y);
+    write64(b, dst, v);
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// XOR r32, [base+index*scale+disp32] (33 /r SIB mod=10)。
+pub fn xor_r32_sibd32<B: Backend>(
+    b: &mut B,
+    dst: Gpr,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i32,
+) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, disp, base, idx);
+    let y: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let x = read(b, dst);
+    let v = b.xor::<W32>(x, y);
+    write(b, dst, v);
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// XOR r64, [base+index*scale+disp32] (33 /r SIB mod=10, REX.W)。
+pub fn xor_r64_sibd32<B: Backend>(
+    b: &mut B,
+    dst: Gpr,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i32,
+) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, disp, base, idx);
+    let y: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let x = read64(b, dst);
+    let v = b.xor::<W64>(x, y);
+    write64(b, dst, v);
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// MOV [base],r16 (66 89 mod=00)。16ビットストア.
+pub fn mov_m16_r16_memnd<B: Backend>(b: &mut B, src: Gpr, base: Gpr) -> Flow<B> {
+    use polyisa_sem::W16;
+    let addr = read64(b, base);
+    let src32 = read(b, src);
+    let v16: B::V<W16> = b.trunc::<W32, W16>(src32);
+    b.store::<W16>(addr, v16, DATA_WRITE)?;
+    Ok(())
+}
+
+/// MOV [base+index*scale],r16 (66 89 SIB mod=00)。16ビットストア.
+pub fn mov_m16_r16_sib<B: Backend>(
+    b: &mut B,
+    src: Gpr,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+) -> Flow<B> {
+    use polyisa_sem::W16;
+    let addr = sib_addr_scaled(b, shift, 0, base, idx);
+    let src32 = read(b, src);
+    let v16: B::V<W16> = b.trunc::<W32, W16>(src32);
+    b.store::<W16>(addr, v16, DATA_WRITE)?;
+    Ok(())
+}
+
+/// MOV r16,[base] (66 8B mod=00)。上位は保存.
+pub fn mov_r16_m16_memnd<B: Backend>(b: &mut B, dst: Gpr, base: Gpr) -> Flow<B> {
+    use polyisa_sem::W16;
+    let addr = read64(b, base);
+    let v16: B::V<W16> = b.load::<W16>(addr, DATA_READ)?;
+    let cur32 = read(b, dst);
+    let mask = b.konst::<W32>(0xffff_0000);
+    let preserved = b.and::<W32>(cur32, mask);
+    let ext32 = b.zext::<W16, W32>(v16);
+    let v = b.or::<W32>(preserved, ext32);
+    write(b, dst, v);
+    Ok(())
+}
+
+/// MOV r16,[base+index*scale] (66 8B SIB mod=00)。上位は保存.
+pub fn mov_r16_m16_sib<B: Backend>(
+    b: &mut B,
+    dst: Gpr,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+) -> Flow<B> {
+    use polyisa_sem::W16;
+    let addr = sib_addr_scaled(b, shift, 0, base, idx);
+    let v16: B::V<W16> = b.load::<W16>(addr, DATA_READ)?;
+    let cur32 = read(b, dst);
+    let mask = b.konst::<W32>(0xffff_0000);
+    let preserved = b.and::<W32>(cur32, mask);
+    let ext32 = b.zext::<W16, W32>(v16);
+    let v = b.or::<W32>(preserved, ext32);
+    write(b, dst, v);
+    Ok(())
+}
