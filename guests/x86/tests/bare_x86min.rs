@@ -973,3 +973,68 @@ fn idiv_overflow_traps() {
         Err(InterpExit::Exception(e)) if e.kind == ExceptionKind::DivZero && e.addr == Some(0x1000)
     ));
 }
+
+#[test]
+fn r64_read_write_split() {
+    // 64ビットレジスタは上位 h と下位 g に分割して持つ。
+    let mut env = env();
+    env.step(|b| {
+        sem::write64(b, Gpr(1), 0x1122_3344_5566_7788);
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(env.backend.get(Gpr(1).state()), 0x5566_7788);
+    assert_eq!(env.backend.get(sem::hi_ref(Gpr(1))), 0x1122_3344);
+    // MOV r64：EDX の全64ビットが ECX に移る。
+    env.step(|b| {
+        sem::write64(b, Gpr(2), 0x00AA_BBCC_DDEE_FF11);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::mov_rm64(b, Gpr(1), Gpr(2))).unwrap();
+    assert_eq!(env.backend.get(Gpr(1).state()), 0xDDEE_FF11);
+    assert_eq!(env.backend.get(sem::hi_ref(Gpr(1))), 0x00AA_BBCC);
+}
+
+#[test]
+fn r64_add_flags() {
+    // 0xffffffffffffffff + 1 = 0：CF=ZF=AF=PF=1、SF=OF=0。
+    let mut env = env();
+    env.step(|b| {
+        sem::write64(b, Gpr(0), 0xFFFF_FFFF_FFFF_FFFF);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| {
+        sem::write64(b, Gpr(1), 1);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::add_rm64(b, Gpr(0), Gpr(1))).unwrap();
+    assert_eq!(env.backend.get(Gpr(0).state()), 0);
+    assert_eq!(env.backend.get(sem::hi_ref(Gpr(0))), 0);
+    assert_eq!(env.backend.get(sem::eflags_ref()), 0x55);
+    // 0x7fffffffffffffff + 1：SF=OF=1。
+    env.step(|b| {
+        sem::write64(b, Gpr(0), 0x7FFF_FFFF_FFFF_FFFF);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::add_rm64(b, Gpr(0), Gpr(1))).unwrap();
+    assert_eq!(env.backend.get(sem::hi_ref(Gpr(0))), 0x8000_0000);
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x880, 0x880);
+}
+
+#[test]
+fn rip_relative_lea() {
+    // LEA RAX,[RIP+disp32]：次命令先頭 + disp が入る。
+    let mut env = env();
+    env.step(|b| sem::lea_rip64(b, Gpr(0), 0x1007, 0x10))
+        .unwrap();
+    assert_eq!(env.backend.get(Gpr(0).state()), 0x1017);
+    assert_eq!(env.backend.get(sem::hi_ref(Gpr(0))), 0);
+    // 負の disp。
+    env.step(|b| sem::lea_rip64(b, Gpr(1), 0x1007, -0x10))
+        .unwrap();
+    assert_eq!(env.backend.get(Gpr(1).state()), 0xFF7);
+}

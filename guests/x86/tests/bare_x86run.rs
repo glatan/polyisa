@@ -463,3 +463,77 @@ fn run_div_exit_quotient() {
     let out = run_x86::run(&mut env, 0x1000, &mut sys, 100);
     assert_eq!(out, Outcome::Exit(3));
 }
+
+/// x86-64 用の最小トラップ処理。番号は RAX、引数は RDI にある。
+struct X64Exit;
+
+impl TrapHandler for X64Exit {
+    fn handle_trap(&mut self, env: &mut BareEnv, _code: u32) -> TrapOutcome {
+        let nr = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(0));
+        if nr == 60 {
+            let code = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(7));
+            TrapOutcome::Exit(code as u32)
+        } else {
+            TrapOutcome::Unimplemented
+        }
+    }
+}
+
+#[test]
+fn run_rex64_basic() {
+    // REX.W 最小形を 64ビットモードで回す。SYSCALL 番号は RAX、引数は RDI。
+    // lea rax,[rip+0x10] (rax=0x1017); mov rcx,0x77; add rax,rcx (rax=0x108e);
+    // mov rdi,rcx (rdi=0x77); mov rax,60; syscall -> exit(0x77)
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    let prog: &[u8] = &[
+        0x48, 0x8D, 0x05, 0x10, 0x00, 0x00, 0x00, // lea rax,[rip+0x10]
+        0x48, 0xC7, 0xC1, 0x77, 0x00, 0x00, 0x00, // mov rcx,0x77
+        0x48, 0x01, 0xC8, // add rax,rcx
+        0x48, 0x89, 0xCF, // mov rdi,rcx
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x0F, 0x05, // syscall -> exit(0x77)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0x77));
+    // 32ビット書き込みは上位をゼロ拡張する（LEA の RAX 上位は 0 のまま）。
+    assert_eq!(env.backend.get(Gpr(0).state()), 60);
+}
+
+#[test]
+fn run_rex64_gas_absorbed() {
+    // 実アセンブラ由来の x86-64 バイト列をそのまま埋め込んだ統合テスト。
+    // 由来：Binutils GAS + ld の静的 x86-64 バイナリの .text
+    // （lea rsi,[rip+msg] / mov rdi,1 / mov rdx,13 / mov rax,1 / syscall /
+    // mov rdi,7 / mov rax,60 / syscall）。コードを 0x1000 に置くため
+    // msg は 0x1007+0x2029 = 0x3030 に写像する。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.mem.map(VirtAddr(0x3000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    env.backend
+        .mem
+        .write(VirtAddr(0x3030), b"Hello, poly!\n")
+        .unwrap();
+    let prog: &[u8] = &[
+        0x48, 0x8D, 0x35, 0x29, 0x20, 0x00, 0x00, // lea rsi,[rip+0x2029]
+        0x48, 0xC7, 0xC7, 0x01, 0x00, 0x00, 0x00, // mov rdi,1
+        0x48, 0xC7, 0xC2, 0x0D, 0x00, 0x00, 0x00, // mov rdx,13
+        0x48, 0xC7, 0xC0, 0x01, 0x00, 0x00, 0x00, // mov rax,1 (write)
+        0x0F, 0x05, // syscall
+        0x48, 0xC7, 0xC7, 0x07, 0x00, 0x00, 0x00, // mov rdi,7
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60 (exit)
+        0x0F, 0x05, // syscall -> exit(7)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = run_x86::CliLinux::x86_64();
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(7));
+}

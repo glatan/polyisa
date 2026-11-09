@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! x86 最小のゲスト ISA。段階4の最小であり、可変長デコードを確かめる。
 //!
-//! i386 の汎用レジスタ系126件のみ持つ。SIB+disp32 と Rust フック・
-//! 64ビット・x87・SSE・セグメントは本格実装で足す。
+//! i386 の126件に x86-64 最小の REX.W 7件を加えた計133件を持つ。
+//! REX.W は 0x48 のみ、R8-R15・SIB・64ビットメモリ形式は本格実装で足す。
 //! SYSCALL/CPUID は最小形、ModRM は register-direct（全組合せ）・mod=01+disp8・
 //! mod=10+disp32・絶対番地と SIB base+index 形（スケール付き、disp8/disp32・disp なしを含む）を持ち、
 //! EFLAGS は CF/PF/AF/ZF/SF/OF の 6 旗を追跡する。条件分岐は符号付き（JL/JGE/JLE/JG）まで持つ。
@@ -26,15 +26,18 @@ impl polyisa_guest::GuestIsa for X86 {
 
 /// CPU 状態。`#[repr(C)]` で配置を固定する。
 /// レジスタ順は EAX,ECX,EDX,EBX,ESP,EBP,ESI,EDI である。
+/// 64ビット拡張の上位32ビットは `h` に置く（x86-64 の RAX..RDI に対応）。
 #[repr(C)]
 #[derive(Clone, Debug, Default)]
 pub struct CpuState {
-    /// 汎用レジスタ 8本（32ビット）。
+    /// 汎用レジスタ 8本の下位32ビット。
     pub g: [u32; 8],
-    /// 命令ポインタ。
+    /// 命令ポインタの下位32ビット（64ビット実行でも上位は不変とする試作）。
     pub eip: u32,
     /// フラグレジスタ（CF bit0、PF bit2、AF bit4、ZF bit6、SF bit7、OF bit11 を使う）。
     pub eflags: u32,
+    /// 汎用レジスタ 8本の上位32ビット（x86-64 のみ使う）。
+    pub h: [u32; 8],
 }
 
 #[cfg(test)]
@@ -52,12 +55,13 @@ mod tests {
         assert_eq!(core::mem::offset_of!(CpuState, g), 0);
         assert_eq!(core::mem::offset_of!(CpuState, eip), 8 * 4);
         assert_eq!(core::mem::offset_of!(CpuState, eflags), 8 * 4 + 4);
+        assert_eq!(core::mem::offset_of!(CpuState, h), 8 * 4 + 4 + 4);
     }
 
     #[test]
     fn insn_count() {
-        // 試作の整数126件。
-        assert_eq!(INSNS.len(), 126);
+        // 試作の整数133件。
+        assert_eq!(INSNS.len(), 133);
     }
 
     #[test]
@@ -126,6 +130,20 @@ mod tests {
         assert_eq!(decode(0x7E00, 16), Some(Insn::Jle));
         assert_eq!(decode(0x7FFE, 16), Some(Insn::Jg));
         assert_eq!(decode(0x7C00, 8), None);
+        // REX.W 最小形：48 C7 C0+imm32 (MOV RAX,imm32)、48 8B/89/01/29/39 /r、
+        // 48 8D 05+disp32 (LEA RAX,[RIP+disp32])。R8-R15 は未対応。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x0048_C7C0_1234_5678, 56), Some(Insn::MovRm64Imm));
+        assert_eq!(decode(0x0048_C7C1_1234_5678, 56), Some(Insn::MovRm64Imm));
+        assert_eq!(decode(0x0048_C700_1234_5678, 56), None);
+        assert_eq!(decode(0x488BD8, 24), Some(Insn::MovRm64));
+        assert_eq!(decode(0x4889D8, 24), Some(Insn::MovMr64));
+        assert_eq!(decode(0x4801D8, 24), Some(Insn::AddRm64));
+        assert_eq!(decode(0x4829D8, 24), Some(Insn::SubRm64));
+        assert_eq!(decode(0x4839D8, 24), Some(Insn::CmpRm64));
+        assert_eq!(decode(0x4801C0, 24), Some(Insn::AddRm64));
+        assert_eq!(decode(0x0048_8D05_7856_3412, 56), Some(Insn::LeaRip64));
+        assert_eq!(decode(0x0048_8D05_7856_3412, 32), None);
         // ループと近傍ジャンプ：LOOP rel8 (E2)、JMP rel32 (E9)。
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0xE2FE, 16), Some(Insn::Loop));

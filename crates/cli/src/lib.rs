@@ -33,6 +33,9 @@ pub fn run_path(path: &str, argv: &[String]) -> Result<u64, String> {
             // EM_RISCV=243。Ref: SPEC-RISCV-PSABI (v1.0).
             if ehdr.machine == 243 {
                 run::run_elf(path, argv)
+            } else if ehdr.machine == 62 {
+                // EM_X86_64。Ref: SRC-LINUX (7.3)。
+                run_x86::run_elf_x86_64(path, argv)
             } else {
                 Err(format!("未対応の e_machine: {}", ehdr.machine))
             }
