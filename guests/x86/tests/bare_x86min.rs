@@ -499,6 +499,25 @@ fn sib_base_index_roundtrip() {
 }
 
 #[test]
+fn sib_disp8_roundtrip() {
+    let mut env = env();
+    env.map_rw(0, 1).unwrap();
+    // EBX=0x100、ESI=0x20、disp=0x10 → [0x130] に書いて読む。
+    env.backend.set(Gpr(3).state(), 0x100);
+    env.backend.set(Gpr(6).state(), 0x20);
+    env.backend.set(Gpr(0).state(), 0xA5A5_A5A5);
+    env.step(|b| sem::mov_sibd_eax(b, 0x10)).unwrap();
+    env.backend.set(Gpr(0).state(), 0);
+    env.step(|b| sem::mov_eax_sibd(b, 0x10)).unwrap();
+    assert_eq!(eax(&mut env), 0xA5A5_A5A5);
+    // disp=-1：0x100+0x20-1 = 0x11f。
+    env.step(|b| sem::mov_sibd_eax(b, -1)).unwrap();
+    env.backend.set(Gpr(0).state(), 0);
+    env.step(|b| sem::mov_eax_sibd(b, -1)).unwrap();
+    assert_eq!(eax(&mut env), 0xA5A5_A5A5);
+}
+
+#[test]
 fn jmp_sets_eip() {
     let mut env = env();
     env.backend.set(sem::eip_ref(), 0x1000);

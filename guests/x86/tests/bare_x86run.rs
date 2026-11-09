@@ -133,3 +133,38 @@ fn run_sib_load_store() {
     let out = run_x86::run(&mut env, 0x1000, &mut sys, 100);
     assert_eq!(out, Outcome::Exit(0x77));
 }
+
+#[test]
+fn run_sib_disp8() {
+    // run 経由で SIB+disp8 形式を回す。exit コードで検証する。
+    // mov eax,0x1500; push eax; pop ebx (ebx=0x1500);
+    // mov eax,0x20; push eax; pop esi (esi=0x20);
+    // mov eax,0x77; mov [ebx+esi+0x10],eax ([0x1530]=0x77);
+    // mov eax,0; mov eax,[ebx+esi+0x10] (eax=0x77);
+    // push eax; pop ebx; mov eax,1; int 0x80 -> exit(0x77)
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    let prog: &[u8] = &[
+        0xB8, 0x00, 0x15, 0x00, 0x00, // mov eax,0x1500
+        0x50, // push eax
+        0x5B, // pop ebx
+        0xB8, 0x20, 0x00, 0x00, 0x00, // mov eax,0x20
+        0x50, // push eax
+        0x5E, // pop esi
+        0xB8, 0x77, 0x00, 0x00, 0x00, // mov eax,0x77
+        0x89, 0x44, 0x33, 0x10, // mov [ebx+esi+0x10],eax
+        0xB8, 0x00, 0x00, 0x00, 0x00, // mov eax,0
+        0x8B, 0x44, 0x33, 0x10, // mov eax,[ebx+esi+0x10]
+        0x50, // push eax
+        0x5B, // pop ebx
+        0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax,1
+        0xCD, 0x80, // int 0x80 -> exit(0x77)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = ExitOne;
+    let out = run_x86::run(&mut env, 0x1000, &mut sys, 100);
+    assert_eq!(out, Outcome::Exit(0x77));
+}

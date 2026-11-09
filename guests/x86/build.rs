@@ -11,7 +11,7 @@ fn main() {
     let model = build_model();
     for insn in &model.insns {
         assert!(
-            [8, 16, 24, 40].contains(&insn.pattern.len()),
+            [8, 16, 24, 32, 40].contains(&insn.pattern.len()),
             "{}",
             insn.name
         );
