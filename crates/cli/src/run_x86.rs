@@ -563,7 +563,7 @@ fn fetch_len(
                 None
             }
         }
-        // F6 /0 (TEST r/m8,imm8)。reg-direct 3B、RIP 7B.
+        // F6 /0 (TEST r/m8,imm8)。reg-direct 3B、RIP 7B、SIB mod01 5B.
         0xF6 => {
             let s = second?;
             let md = s >> 6;
@@ -577,7 +577,8 @@ fn fetch_len(
             } else if md == 0 && rm == 5 {
                 Some(7)
             } else if rm == 4 {
-                None
+                // SIB 付き。mod=01 SIB+disp8+imm8 (5B) の /0 TEST のみ.
+                if md == 1 { Some(5) } else { None }
             } else if md == 1 {
                 Some(4)
             } else if md == 0 {
@@ -911,6 +912,7 @@ pub fn run_mode(
                 | 0x13
                 | 0x1B
                 | 0x80
+                | 0xF6
                 | 0xFF
         ) && matches!(second, Some(s) if s & 7 == 4 && s >> 6 != 3))
             || (head[0] == 0x0F
@@ -2583,6 +2585,17 @@ fn dispatch<B: Backend>(
             let disp = ((word >> 8) as u32).swap_bytes() as i32;
             let imm = (word & 0xff) as u8;
             sem::test_m8_imm_mem32(b, rm(), disp, imm)
+        }
+        Insn::TestM8ImmSibd => {
+            // F6 /0 SIB mod=01 [base+index*scale+disp8],imm8 (40b)。
+            // disp8 は (word>>8) 下位8、imm は最下位8.
+            let d8 = ((word >> 8) & 0xff) as u8 as i8;
+            let imm = (word & 0xff) as u8;
+            if no_index() {
+                sem::test_m8_imm_mem8(b, sib_base(), d8, imm)
+            } else {
+                sem::test_m8_imm_sibd(b, sib_base(), sib_idx(), sib_shift(), d8, imm)
+            }
         }
         Insn::CmpRm8ImmRip => {
             // 80 3D + disp32 + imm8 (56b)。disp は (word>>8) 下位32 LE、imm は最下位8.

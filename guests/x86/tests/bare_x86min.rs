@@ -4913,3 +4913,23 @@ fn mov_m32_fs_memnd_basic() {
         .unwrap();
     assert_eq!(u32::from_le_bytes(back), 0x1122_3344);
 }
+
+#[test]
+fn test_m8_imm_sibd_basic() {
+    // TESTB $0x80,[R12+1] (F6 44 24 01 80): [0x1501]=0x80 -> ZF=0. [0x1501]=0x00 -> ZF=1.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.step(|b| {
+        sem::write64(b, Gpr(12), 0x1500);
+        Ok(())
+    })
+    .unwrap();
+    env.backend.mem.write(VirtAddr(0x1501), &[0x80u8]).unwrap();
+    env.step(|b| sem::test_m8_imm_sibd(b, Gpr(12), Gpr(4), 0, 1, 0x80))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0);
+    env.backend.mem.write(VirtAddr(0x1501), &[0x00u8]).unwrap();
+    env.step(|b| sem::test_m8_imm_sibd(b, Gpr(12), Gpr(4), 0, 1, 0x80))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0x40);
+}
