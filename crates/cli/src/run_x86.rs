@@ -265,3 +265,115 @@ fn dispatch<B: Backend>(
         Insn::Int80 => sem::int80(b, eip),
     }
 }
+
+/// ELF32 イメージを実行する。`run_elf` の x86 版であり、EM_386 の静的実行を
+/// 受け持つ。番号表は i386 Linux のものを使う。
+pub fn run_image_x86(
+    bytes: &[u8],
+    prog: &str,
+    argv: &[String],
+    sys: &mut impl TrapHandler,
+) -> Result<u64, String> {
+    use polyisa_guest_x86::sem::Gpr;
+    use polyisa_mem::{PAGE_SIZE, Perms};
+
+    let ehdr = polyisa_loader::elf::parse_ehdr32(bytes).map_err(|e| format!("ehdr: {e:?}"))?;
+    if !ehdr.little {
+        return Err("big-endian ELF は未対応".to_string());
+    }
+    // EM_386=3。Ref: SRC-LINUX (7.3).
+    const EM_386: u16 = 3;
+    if ehdr.machine != EM_386 {
+        return Err(format!("未対応の e_machine: {}", ehdr.machine));
+    }
+    let phdrs =
+        polyisa_loader::elf::parse_phdrs32(bytes, &ehdr).map_err(|e| format!("phdrs: {e:?}"))?;
+    let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_x86::CpuState>());
+    polyisa_loader::elf::load_segments(bytes, &phdrs, &mut env.backend.mem)
+        .map_err(|e| format!("load: {e:?}"))?;
+    // 初期スタックを写像する。配置の規約は i386 psABI の確定を待つ試作であり、
+    // RV64 と同じ LE 像を使う（動的リンクは後の段階）。
+    let top = 0x7fff_0000u64;
+    let mut arg_bytes = vec![prog.as_bytes().to_vec()];
+    for a in argv {
+        arg_bytes.push(a.as_bytes().to_vec());
+    }
+    let (img, sp) = polyisa_os_linux::build_initial_stack(top, &arg_bytes, &[], &[(6, 0x1000)]);
+    let base = sp & !(PAGE_SIZE - 1);
+    let end = top.next_multiple_of(PAGE_SIZE);
+    let count = (end - base) / PAGE_SIZE;
+    env.backend
+        .mem
+        .map(
+            polyisa_mem::VirtAddr(base),
+            count,
+            Perms(Perms::R.0 | Perms::W.0),
+        )
+        .map_err(|e| format!("stack map: {e:?}"))?;
+    env.backend
+        .mem
+        .write(polyisa_mem::VirtAddr(sp), &img)
+        .map_err(|e| format!("stack write: {e:?}"))?;
+    env.backend.set(Gpr(4).state(), sp as u32);
+    match run(&mut env, ehdr.entry as u32, sys, 1_000_000) {
+        Outcome::Exit(code) => Ok(code as u64),
+        Outcome::Unimplemented { eip, word } => {
+            Err(format!("unimplemented at {eip:#x}: {word:#x}"))
+        }
+        Outcome::StepLimit { eip } => Err(format!("step limit at {eip:#x}")),
+    }
+}
+
+/// ELF ファイルを実行する。`run_elf` の x86 版である。
+pub fn run_elf_x86(path: &str, argv: &[String]) -> Result<u64, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
+    let mut sys = CliX86::default();
+    run_image_x86(&bytes, path, argv, &mut sys)
+}
+
+/// `cli run` の x86 用 ecall 処理。write（fd 1/2）と exit/exit_group を受け、
+/// ほかは未対応として報告する。
+#[derive(Default)]
+pub struct CliX86 {
+    reported: Vec<u64>,
+}
+
+impl TrapHandler for CliX86 {
+    fn handle_trap(&mut self, env: &mut BareEnv, code: u32) -> TrapOutcome {
+        use polyisa_guest_x86::sem::Gpr;
+        // INT 0x80 (code 0x80) と SYSCALL (code 0) のどちらも番号は EAX にある。
+        let _ = code;
+        let nr = env.backend.get(Gpr(0).state()) as u64;
+        if nr == polyisa_os_linux::i386::WRITE {
+            let fd = env.backend.get(Gpr(3).state());
+            let buf = env.backend.get(Gpr(1).state()) as u64;
+            let len = env.backend.get(Gpr(2).state()) as usize;
+            let mut data = vec![0u8; len];
+            let acc = polyisa_mem::Access {
+                endian: polyisa_mem::Endian::Le,
+                align: polyisa_mem::Align::Unaligned,
+                kind: polyisa_mem::AccessKind::DataRead,
+            };
+            if env.backend.mem.read(VirtAddr(buf), &mut data, acc).is_err() {
+                return TrapOutcome::Unimplemented;
+            }
+            // EBX=1/2 のみ受け、EAX に書いたバイト数を返す。
+            let done = match fd {
+                1 => std::io::Write::write(&mut std::io::stdout(), &data).unwrap_or(0),
+                2 => std::io::Write::write(&mut std::io::stderr(), &data).unwrap_or(0),
+                _ => return TrapOutcome::Unimplemented,
+            };
+            env.backend.set(Gpr(0).state(), done as u32);
+            return TrapOutcome::Handled;
+        }
+        if nr == polyisa_os_linux::i386::EXIT || nr == polyisa_os_linux::i386::EXIT_GROUP {
+            return TrapOutcome::Exit(env.backend.get(Gpr(3).state()));
+        }
+        if !self.reported.contains(&nr) {
+            self.reported.push(nr);
+            let name = polyisa_os_linux::syscall_name(polyisa_os_linux::GuestAbi::I386Linux, nr);
+            eprintln!("run: unhandled syscall {nr} ({})", name.unwrap_or("?"));
+        }
+        TrapOutcome::Unimplemented
+    }
+}
