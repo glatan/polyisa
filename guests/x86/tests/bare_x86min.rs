@@ -434,6 +434,57 @@ fn jmp_rel32_jumps() {
 }
 
 #[test]
+fn unsigned_branches() {
+    let mut env = env();
+    // 4 vs 5：CF=1、ZF=0。JB/JBE は飛び、JAE/JA は飛ばない。
+    env.backend.set(Gpr(0).state(), 4);
+    env.backend.set(Gpr(1).state(), 5);
+    env.step(sem::cmp_rm32).unwrap();
+    env.backend.set(sem::eip_ref(), 0x1000);
+    env.step(|b| sem::jb(b, 0x1000, 0x10)).unwrap();
+    assert_eq!(env.backend.get(sem::eip_ref()), 0x1012);
+    env.backend.set(sem::eip_ref(), 0x1000);
+    env.step(|b| sem::jbe(b, 0x1000, 0x10)).unwrap();
+    assert_eq!(env.backend.get(sem::eip_ref()), 0x1012);
+    env.backend.set(sem::eip_ref(), 0x1000);
+    env.step(|b| sem::jae(b, 0x1000, 0x10)).unwrap();
+    assert_eq!(env.backend.get(sem::eip_ref()), 0x1000);
+    env.backend.set(sem::eip_ref(), 0x1000);
+    env.step(|b| sem::ja(b, 0x1000, 0x10)).unwrap();
+    assert_eq!(env.backend.get(sem::eip_ref()), 0x1000);
+    // 5 vs 5：ZF=1、CF=0。JBE/JAE は飛び、JB/JA は飛ばない。
+    env.backend.set(Gpr(0).state(), 5);
+    env.step(|b| sem::cmp_eax(b, 5)).unwrap();
+    env.backend.set(sem::eip_ref(), 0x2000);
+    env.step(|b| sem::jbe(b, 0x2000, 0x10)).unwrap();
+    assert_eq!(env.backend.get(sem::eip_ref()), 0x2012);
+    env.backend.set(sem::eip_ref(), 0x2000);
+    env.step(|b| sem::jae(b, 0x2000, 0x10)).unwrap();
+    assert_eq!(env.backend.get(sem::eip_ref()), 0x2012);
+    env.backend.set(sem::eip_ref(), 0x2000);
+    env.step(|b| sem::jb(b, 0x2000, 0x10)).unwrap();
+    assert_eq!(env.backend.get(sem::eip_ref()), 0x2000);
+    env.backend.set(sem::eip_ref(), 0x2000);
+    env.step(|b| sem::ja(b, 0x2000, 0x10)).unwrap();
+    assert_eq!(env.backend.get(sem::eip_ref()), 0x2000);
+    // 6 vs 5：CF=0、ZF=0。JA/JAE は飛び、JB/JBE は飛ばない。
+    env.backend.set(Gpr(0).state(), 6);
+    env.step(sem::cmp_rm32).unwrap();
+    env.backend.set(sem::eip_ref(), 0x3000);
+    env.step(|b| sem::ja(b, 0x3000, 0x10)).unwrap();
+    assert_eq!(env.backend.get(sem::eip_ref()), 0x3012);
+    env.backend.set(sem::eip_ref(), 0x3000);
+    env.step(|b| sem::jae(b, 0x3000, 0x10)).unwrap();
+    assert_eq!(env.backend.get(sem::eip_ref()), 0x3012);
+    env.backend.set(sem::eip_ref(), 0x3000);
+    env.step(|b| sem::jb(b, 0x3000, 0x10)).unwrap();
+    assert_eq!(env.backend.get(sem::eip_ref()), 0x3000);
+    env.backend.set(sem::eip_ref(), 0x3000);
+    env.step(|b| sem::jbe(b, 0x3000, 0x10)).unwrap();
+    assert_eq!(env.backend.get(sem::eip_ref()), 0x3000);
+}
+
+#[test]
 fn jmp_sets_eip() {
     let mut env = env();
     env.backend.set(sem::eip_ref(), 0x1000);
