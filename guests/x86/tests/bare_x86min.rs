@@ -330,6 +330,83 @@ fn sub_wraps_and_sets_flags() {
 }
 
 #[test]
+fn flags_add_overflow() {
+    let mut env = env();
+    // 0x7fffffff + 1 = 0x80000000：OF=SF=AF=PF=1、CF=ZF=0。
+    env.backend.set(Gpr(0).state(), 0x7FFF_FFFF);
+    env.step(|b| sem::add_eax(b, 1)).unwrap();
+    assert_eq!(eax(&mut env), 0x8000_0000);
+    assert_eq!(env.backend.get(sem::eflags_ref()), 0x894);
+    // 0xffffffff + 1 = 0：CF=ZF=AF=PF=1、SF=OF=0。
+    env.backend.set(Gpr(0).state(), 0xFFFF_FFFF);
+    env.step(|b| sem::add_eax(b, 1)).unwrap();
+    assert_eq!(eax(&mut env), 0);
+    assert_eq!(env.backend.get(sem::eflags_ref()), 0x55);
+    // 0 - 1 = 0xffffffff：CF=PF=AF=SF=1、ZF=OF=0。
+    env.backend.set(Gpr(0).state(), 0);
+    env.step(|b| sem::sub_eax(b, 1)).unwrap();
+    assert_eq!(eax(&mut env), 0xFFFF_FFFF);
+    assert_eq!(env.backend.get(sem::eflags_ref()), 0x95);
+}
+
+#[test]
+fn flags_logic_clears_cf_of() {
+    let mut env = env();
+    // 先に ADD で OF=1 にしてから AND で消えることを見る。
+    env.backend.set(Gpr(0).state(), 0x7FFF_FFFF);
+    env.step(|b| sem::add_eax(b, 1)).unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x800, 0x800);
+    env.backend.set(Gpr(0).state(), 0xF0);
+    env.backend.set(Gpr(1).state(), 0x0F);
+    env.step(|b| sem::and_rm32(b, Gpr(0), Gpr(1))).unwrap();
+    assert_eq!(eax(&mut env), 0);
+    // ZF=PF=1、CF=OF=SF=0。AF は ADD 時の 1 が保存される。
+    assert_eq!(env.backend.get(sem::eflags_ref()), 0x54);
+}
+
+#[test]
+fn flags_inc_dec_preserve_cf() {
+    let mut env = env();
+    // SUB で CF=1 にしてから INC。EAX=0xffffffff→0。
+    env.backend.set(Gpr(0).state(), 0);
+    env.step(|b| sem::sub_eax(b, 1)).unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x1, 1);
+    env.step(|b| sem::inc_r32(b, Gpr(0))).unwrap();
+    assert_eq!(eax(&mut env), 0);
+    // ZF=PF=AF=1、CF=1（保存）、SF=OF=0。
+    assert_eq!(env.backend.get(sem::eflags_ref()), 0x55);
+    // DEC で CF 保存：EAX=1→0、CF=1 のまま ZF=1。
+    env.backend.set(Gpr(0).state(), 1);
+    env.step(|b| sem::dec_r32(b, Gpr(0))).unwrap();
+    assert_eq!(eax(&mut env), 0);
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x1, 1);
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0x40);
+}
+
+#[test]
+fn flags_shift() {
+    let mut env = env();
+    // 0x40000000 << 1：CF=0、OF=1、SF=PF=1。
+    env.backend.set(sem::eflags_ref(), 0);
+    env.backend.set(Gpr(0).state(), 0x4000_0000);
+    env.step(|b| sem::shl_eax(b, 1)).unwrap();
+    assert_eq!(eax(&mut env), 0x8000_0000);
+    assert_eq!(env.backend.get(sem::eflags_ref()), 0x884);
+    // 0x80000001 >> 1：CF=1、OF=1（旧最上位）、SF=0、PF=1。
+    env.backend.set(sem::eflags_ref(), 0);
+    env.backend.set(Gpr(0).state(), 0x8000_0001);
+    env.step(|b| sem::shr_eax(b, 1)).unwrap();
+    assert_eq!(eax(&mut env), 0x4000_0000);
+    assert_eq!(env.backend.get(sem::eflags_ref()), 0x805);
+    // カウント 0 は結果も旗も変えない。
+    env.backend.set(Gpr(0).state(), 5);
+    env.backend.set(sem::eflags_ref(), 0x1234);
+    env.step(|b| sem::shl_eax(b, 32)).unwrap();
+    assert_eq!(eax(&mut env), 5);
+    assert_eq!(env.backend.get(sem::eflags_ref()), 0x1234);
+}
+
+#[test]
 fn and_or_xor_imm() {
     let mut env = env();
     // 0b1100 & 0b1010 = 0b1000。ZF=0、CF=0。
@@ -613,6 +690,68 @@ fn unsigned_branches() {
     env.backend.set(sem::eip_ref(), 0x3000);
     env.step(|b| sem::jbe(b, 0x3000, 0x10)).unwrap();
     assert_eq!(env.backend.get(sem::eip_ref()), 0x3000);
+}
+
+#[test]
+fn signed_branches() {
+    let mut env = env();
+    // 4 vs 5（負）：JL/JLE は飛び、JGE/JG は飛ばない。
+    env.backend.set(Gpr(0).state(), 4);
+    env.backend.set(Gpr(1).state(), 5);
+    env.step(|b| sem::cmp_rm32(b, Gpr(0), Gpr(1))).unwrap();
+    env.backend.set(sem::eip_ref(), 0x1000);
+    env.step(|b| sem::jl(b, 0x1000, 0x10)).unwrap();
+    assert_eq!(env.backend.get(sem::eip_ref()), 0x1012);
+    env.backend.set(sem::eip_ref(), 0x1000);
+    env.step(|b| sem::jge(b, 0x1000, 0x10)).unwrap();
+    assert_eq!(env.backend.get(sem::eip_ref()), 0x1000);
+    env.backend.set(sem::eip_ref(), 0x1000);
+    env.step(|b| sem::jle(b, 0x1000, 0x10)).unwrap();
+    assert_eq!(env.backend.get(sem::eip_ref()), 0x1012);
+    env.backend.set(sem::eip_ref(), 0x1000);
+    env.step(|b| sem::jg(b, 0x1000, 0x10)).unwrap();
+    assert_eq!(env.backend.get(sem::eip_ref()), 0x1000);
+    // 5 vs 5（等）：JGE/JLE は飛び、JL/JG は飛ばない。
+    env.backend.set(Gpr(0).state(), 5);
+    env.step(|b| sem::cmp_rm32(b, Gpr(0), Gpr(1))).unwrap();
+    env.backend.set(sem::eip_ref(), 0x2000);
+    env.step(|b| sem::jl(b, 0x2000, 0x10)).unwrap();
+    assert_eq!(env.backend.get(sem::eip_ref()), 0x2000);
+    env.backend.set(sem::eip_ref(), 0x2000);
+    env.step(|b| sem::jge(b, 0x2000, 0x10)).unwrap();
+    assert_eq!(env.backend.get(sem::eip_ref()), 0x2012);
+    env.backend.set(sem::eip_ref(), 0x2000);
+    env.step(|b| sem::jle(b, 0x2000, 0x10)).unwrap();
+    assert_eq!(env.backend.get(sem::eip_ref()), 0x2012);
+    env.backend.set(sem::eip_ref(), 0x2000);
+    env.step(|b| sem::jg(b, 0x2000, 0x10)).unwrap();
+    assert_eq!(env.backend.get(sem::eip_ref()), 0x2000);
+    // 6 vs 5（正）：JGE/JG は飛び、JL/JLE は飛ばない。
+    env.backend.set(Gpr(0).state(), 6);
+    env.step(|b| sem::cmp_rm32(b, Gpr(0), Gpr(1))).unwrap();
+    env.backend.set(sem::eip_ref(), 0x3000);
+    env.step(|b| sem::jl(b, 0x3000, 0x10)).unwrap();
+    assert_eq!(env.backend.get(sem::eip_ref()), 0x3000);
+    env.backend.set(sem::eip_ref(), 0x3000);
+    env.step(|b| sem::jge(b, 0x3000, 0x10)).unwrap();
+    assert_eq!(env.backend.get(sem::eip_ref()), 0x3012);
+    env.backend.set(sem::eip_ref(), 0x3000);
+    env.step(|b| sem::jle(b, 0x3000, 0x10)).unwrap();
+    assert_eq!(env.backend.get(sem::eip_ref()), 0x3000);
+    env.backend.set(sem::eip_ref(), 0x3000);
+    env.step(|b| sem::jg(b, 0x3000, 0x10)).unwrap();
+    assert_eq!(env.backend.get(sem::eip_ref()), 0x3012);
+    // あふれ：0x7fffffff vs -1。符号付きでは正（SF==OF=1）。
+    // JL は飛ばず、JGE が飛ぶ。
+    env.backend.set(Gpr(0).state(), 0x7FFF_FFFF);
+    env.backend.set(Gpr(1).state(), 0xFFFF_FFFF);
+    env.step(|b| sem::cmp_rm32(b, Gpr(0), Gpr(1))).unwrap();
+    env.backend.set(sem::eip_ref(), 0x4000);
+    env.step(|b| sem::jl(b, 0x4000, 0x10)).unwrap();
+    assert_eq!(env.backend.get(sem::eip_ref()), 0x4000);
+    env.backend.set(sem::eip_ref(), 0x4000);
+    env.step(|b| sem::jge(b, 0x4000, 0x10)).unwrap();
+    assert_eq!(env.backend.get(sem::eip_ref()), 0x4012);
 }
 
 #[test]

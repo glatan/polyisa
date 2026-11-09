@@ -61,7 +61,7 @@ fn fetch_len(first: u8, second: Option<u8>, third: Option<u8>) -> Option<u64> {
     match first {
         0x90 | 0x40..=0x4F | 0x50..=0x5F | 0xC3 | 0xC9 => Some(1),
         0xEB | 0x74 | 0x75 | 0xE2 | 0xCD | 0x85 | 0x0F | 0x39 | 0x21 | 0x0B | 0x09 | 0x72
-        | 0x73 | 0x76 | 0x77 | 0xF7 => Some(2),
+        | 0x73 | 0x76 | 0x77 | 0x7C | 0x7D | 0x7E | 0x7F | 0xF7 => Some(2),
         0x05 | 0x2D | 0x3D | 0xB8 | 0xE8 | 0xE9 | 0x25 | 0x0D | 0x35 => Some(5),
         // register-direct のみ対応する opcode（メモリ形式は未対応）。
         // SIB を含むことはなく、0xC1（シフト）のみ imm8 で 3B になる。
@@ -368,6 +368,10 @@ fn dispatch<B: Backend>(
         Insn::Jae => sem::jae(b, eip, disp8()),
         Insn::Jbe => sem::jbe(b, eip, disp8()),
         Insn::Ja => sem::ja(b, eip, disp8()),
+        Insn::Jl => sem::jl(b, eip, disp8()),
+        Insn::Jge => sem::jge(b, eip, disp8()),
+        Insn::Jle => sem::jle(b, eip, disp8()),
+        Insn::Jg => sem::jg(b, eip, disp8()),
         Insn::Loop => sem::loop_rel8(b, eip, disp8()),
         Insn::JmpRel32 => sem::jmp_rel32(b, eip, disp32()),
         Insn::SubEax => sem::sub_eax(b, imm32()),
