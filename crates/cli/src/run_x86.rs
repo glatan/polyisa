@@ -830,9 +830,9 @@ fn dispatch<B: Backend>(
     let sib0f = || ((word >> ((nbytes - 4 - off) * 8)) & 0xff) as u8;
     let sib0f_shift = || ((sib0f() >> 6) & 3) as u32;
     let sib0f_idx_raw = || (sib0f() >> 3) & 7;
-    let sib0f_idx = || Gpr(sib0f_idx_raw() | (((rex >> 2) & 1) << 3));
+    let sib0f_idx = || Gpr(sib0f_idx_raw() | (((rex >> 1) & 1) << 3));
     let sib0f_base = || Gpr((sib0f() & 7) | ((rex & 1) << 3));
-    let sib0f_no_index = || sib0f_idx_raw() == 4 && (rex >> 2) & 1 == 0;
+    let sib0f_no_index = || sib0f_idx_raw() == 4 && (rex >> 1) & 1 == 0;
     let reg0f_as_gpr = || Gpr(((modrm0f() >> 3) & 7) | (((rex >> 2) & 1) << 3));
     // has66 は呼び出し側で検証済み（XMM/NOP 系のみ通過）。
     let _ = has66;
@@ -844,10 +844,10 @@ fn dispatch<B: Backend>(
     let sib = || ((word >> ((nbytes - 3 - off) * 8)) & 0xff) as u8;
     let sib_shift = || ((sib() >> 6) & 3) as u32;
     let sib_idx_raw = || (sib() >> 3) & 7;
-    let sib_idx = || Gpr(sib_idx_raw() | (((rex >> 2) & 1) << 3));
+    let sib_idx = || Gpr(sib_idx_raw() | (((rex >> 1) & 1) << 3));
     let sib_base = || Gpr((sib() & 7) | ((rex & 1) << 3));
     // SIB index なし（100 + REX.X なし）は base のみで扱う。
-    let no_index = || sib_idx_raw() == 4 && (rex >> 2) & 1 == 0;
+    let no_index = || sib_idx_raw() == 4 && (rex >> 1) & 1 == 0;
     let r: Result<(), B::Exit> = match insn {
         Insn::Nop => sem::nop(b),
         Insn::IncEax => sem::inc_r32(b, Gpr(0)),

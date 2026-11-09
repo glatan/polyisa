@@ -734,3 +734,31 @@ fn run_movups_memnd_and_near_jcc() {
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
     assert_eq!(out, Outcome::Exit(0x77));
 }
+
+#[test]
+fn run_lea_rex_x_sib() {
+    // LEA RCX,[RAX+R8] with REX.WX (4A 8D 0C 00): RAX=0x1000, R8=0x20 -> RCX=0x1020.
+    // mov rax,0x1000; push rax; pop rax? Simpler: use mov r32,imm + push/pop for R8? R8 via REX.B mov? Use mov r8,rax? Actually mov r8,rax needs REX. Simpler: set regs directly via env, then run single LEA.
+    // Here test via run: mov eax,0x1000; mov r8d,0x20? Need REX for R8. Instead set via env before run and execute single LEA.
+    // For run経由: 4A 8D 0C 00 (lea rcx,[rax+r8]); mov rax,60; mov rdi,rcx; syscall exit(rcx low?) -> exit(0x1020 & 0xFF? Actually exit code is low 8? Use exit(0x20?) Hmm.
+    // Simpler: verify via sem directly in bare_x86min? Already covered by SIB generic? Add run-level check with REX.X.
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    // Set RAX=0x1000, R8=0x20 via direct backend writes (bypass run).
+    polyisa_guest_x86::sem::write64(&mut env.backend, Gpr(0), 0x1000);
+    polyisa_guest_x86::sem::write64(&mut env.backend, Gpr(8), 0x20);
+    let prog: &[u8] = &[
+        0x4A, 0x8D, 0x0C, 0x00, // lea rcx,[rax+r8] (rcx=0x1020)
+        0x48, 0x89, 0xCF, // mov rdi,rcx
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x0F, 0x05, // syscall -> exit(rdi=0x1020 -> low 8 = 0x20)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    // exit code is low 8? Actually exit code is u32 (rdi low 32). rdi=0x1020, exit=0x1020=4128? But exit code is & 0xFF? Linux exit code is low 8 bits. Our X64Exit returns rdi as u32 directly (not masked). So expect 0x1020.
+    assert_eq!(out, Outcome::Exit(0x1020));
+}
