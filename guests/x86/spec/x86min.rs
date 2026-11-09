@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // x86 最小の ISADL モデル（段階4の最小）。
 //
-// i386 の整数81件に絞る。可変長（8/16/24/32/40ビット）のデコード入口と
+// i386 の整数87件に絞る。可変長（8/16/24/32/40ビット）のデコード入口と
 // ModRM register-direct の最小形を確かめる。
-// ModRM の disp32・絶対番地・スケール付き SIB と Rust フック・遅延フラグ・x87・SSE・
+// ModRM の disp32・絶対番地と Rust フック・遅延フラグ・x87・SSE・
 // 64ビット・セグメントは本格実装で足す。
 // SYSCALL/CPUID は退出・識別情報の最小形のみ持つ（機能導出は本格実装で足す）。
 // SYSCALL (0F 05) は IA-32e 用であり 32bit 正統は SYSENTER (0F 34) だが、
@@ -53,7 +53,7 @@ pub fn build_model() -> polyisa_isadl::Model {
     // (名前, 形式, パターン, 構文, 分類)
     // 可変長：8ビット単独、16ビット（opcode+disp8/modrm）、24ビット（opcode+modrm+disp8、
     // opcode+modrm+SIB）、32ビット（opcode+modrm+SIB+disp8）、40ビット（opcode+imm32）。
-    // メモリ形式は mod=01+disp8 と SIB base+index（±disp8）のみ持つ。
+    // メモリ形式は mod=01+disp8 と SIB base+index 形（スケール付き、disp8 の有無は問わない）のみ持つ。
     // Ref: SPEC-X86-INTEL-SDM (v093).
     let insns: &[(&str, &str, &str, &str, &str)] = &[
         ("nop", "F1", "10010000", "nop", "alu"),
@@ -89,6 +89,12 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("mov_sib_s4_eax", "F1", "10001001 01000100 10110011 ........", "mov [ebx+esi*4+disp8], eax", "store"),
         ("mov_eax_sib_s8", "F1", "10001011 01000100 11110011 ........", "mov eax, [ebx+esi*8+disp8]", "load"),
         ("mov_sib_s8_eax", "F1", "10001001 01000100 11110011 ........", "mov [ebx+esi*8+disp8], eax", "store"),
+        ("mov_eax_sib_s2nd", "F1", "10001011 00000100 01110011", "mov eax, [ebx+esi*2]", "load"),
+        ("mov_sib_s2nd_eax", "F1", "10001001 00000100 01110011", "mov [ebx+esi*2], eax", "store"),
+        ("mov_eax_sib_s4nd", "F1", "10001011 00000100 10110011", "mov eax, [ebx+esi*4]", "load"),
+        ("mov_sib_s4nd_eax", "F1", "10001001 00000100 10110011", "mov [ebx+esi*4], eax", "store"),
+        ("mov_eax_sib_s8nd", "F1", "10001011 00000100 11110011", "mov eax, [ebx+esi*8]", "load"),
+        ("mov_sib_s8nd_eax", "F1", "10001001 00000100 11110011", "mov [ebx+esi*8], eax", "store"),
         ("mul_rm32", "F1", "11110111 11100001", "mul eax, ecx", "mult"),
         ("div_rm32", "F1", "11110111 11110001", "div eax, ecx", "div"),
         ("idiv_rm32", "F1", "11110111 11111001", "idiv eax, ecx", "div"),

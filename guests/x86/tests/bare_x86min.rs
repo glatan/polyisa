@@ -548,6 +548,35 @@ fn sib_scaled_roundtrip() {
 }
 
 #[test]
+fn sib_scaled_nd_roundtrip() {
+    // SIB スケール付き・disp なし：mod=00 の base+index*scale を裸実行で回す。
+    // EBX=0x100、ESI=0x10。*2 で [0x120]、*4 で [0x140]、*8 で [0x180]。
+    let mut env = env();
+    env.map_rw(0, 1).unwrap();
+    env.backend.set(Gpr(3).state(), 0x100);
+    env.backend.set(Gpr(6).state(), 0x10);
+    env.backend.set(Gpr(0).state(), 0x1111_2222);
+    env.step(sem::mov_sib_s2nd_eax).unwrap();
+    env.backend.set(Gpr(0).state(), 0);
+    env.step(sem::mov_eax_sib_s2nd).unwrap();
+    assert_eq!(eax(&mut env), 0x1111_2222);
+    env.backend.set(Gpr(3).state(), 0x100);
+    env.backend.set(Gpr(6).state(), 0x10);
+    env.backend.set(Gpr(0).state(), 0x3333_4444);
+    env.step(sem::mov_sib_s4nd_eax).unwrap();
+    env.backend.set(Gpr(0).state(), 0);
+    env.step(sem::mov_eax_sib_s4nd).unwrap();
+    assert_eq!(eax(&mut env), 0x3333_4444);
+    env.backend.set(Gpr(3).state(), 0x100);
+    env.backend.set(Gpr(6).state(), 0x10);
+    env.backend.set(Gpr(0).state(), 0x5555_6666);
+    env.step(sem::mov_sib_s8nd_eax).unwrap();
+    env.backend.set(Gpr(0).state(), 0);
+    env.step(sem::mov_eax_sib_s8nd).unwrap();
+    assert_eq!(eax(&mut env), 0x5555_6666);
+}
+
+#[test]
 fn jmp_sets_eip() {
     let mut env = env();
     env.backend.set(sem::eip_ref(), 0x1000);
