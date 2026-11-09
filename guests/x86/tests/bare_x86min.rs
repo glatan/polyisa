@@ -2427,3 +2427,21 @@ fn sar_rm64_cl_basic_and_mask() {
     env.step(|b| sem::sar_rm64_cl(b, Gpr(2))).unwrap();
     assert_eq!(env.backend.get(Gpr(2).state()), 0x78);
 }
+
+#[test]
+fn punpcklqdq_interleaves_qwords() {
+    // PUNPCKLQDQ: dst=[hi_d,lo_d], src=[hi_s,lo_s] -> [lo_s,lo_d] (64bit単位).
+    use polyisa_guest_x86::sem::Xmm;
+    let mut env = env();
+    env.step(|b| {
+        let a = b.konst::<polyisa_sem::W128>(0x1111_1111_2222_2222u128);
+        b.set(sem::xmm_ref(Xmm(0)), a);
+        let c = b.konst::<polyisa_sem::W128>(0x3333_3333_4444_4444u128);
+        b.set(sem::xmm_ref(Xmm(1)), c);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::punpcklqdq(b, Xmm(0), Xmm(1))).unwrap();
+    let v: u128 = env.backend.get(sem::xmm_ref(Xmm(0)));
+    assert_eq!(v, 0x3333_3333_4444_4444_1111_1111_2222_2222u128);
+}

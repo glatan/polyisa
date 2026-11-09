@@ -1037,3 +1037,30 @@ fn run_sar_rm64_cl() {
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
     assert_eq!(out, Outcome::Exit(0x3C));
 }
+
+#[test]
+fn run_punpcklqdq_reg_direct() {
+    // run 経由で 66 0F 6C /r (PUNPCKLQDQ xmm0,xmm0) を回す。
+    // movd で xmm0 低32=0x11223344 を作り、PUNPCKLQDQ で [lo,lo] になることを確かめる。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    env.backend.set(Gpr(6).state(), 0x1122_3344);
+    let prog: &[u8] = &[
+        0x66, 0x0F, 0x6E, 0xC6, // movd xmm0,esi (xmm0=0x11223344)
+        0x66, 0x0F, 0x6C, 0xC0, // punpcklqdq xmm0,xmm0
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
+        0x0F, 0x05, // syscall -> exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0));
+    let v: u128 = env.backend.get(polyisa_guest_x86::sem::xmm_ref(
+        polyisa_guest_x86::sem::Xmm(0),
+    ));
+    assert_eq!(v, 0x0000_0000_1122_3344_0000_0000_1122_3344u128);
+}

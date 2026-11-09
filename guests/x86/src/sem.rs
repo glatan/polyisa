@@ -2747,6 +2747,20 @@ pub fn pand_xmm<B: Backend>(b: &mut B, dst: Xmm, src: Xmm) -> Flow<B> {
     Ok(())
 }
 
+/// PUNPCKLQDQ xmm1, xmm2。下位64ビットずつを交互に挿す (dst_lo, src_lo).
+pub fn punpcklqdq<B: Backend>(b: &mut B, dst: Xmm, src: Xmm) -> Flow<B> {
+    let a: B::V<W128> = b.get(xmm_ref(dst));
+    let c: B::V<W128> = b.get(xmm_ref(src));
+    let mask = b.konst::<W128>(0xffff_ffff_ffff_ffff);
+    let lo_a = b.and::<W128>(a, mask);
+    let lo_c = b.and::<W128>(c, mask);
+    let pos = b.konst::<W128>(64);
+    let hi = b.shl::<W128>(lo_c, pos);
+    let v = b.or::<W128>(lo_a, hi);
+    b.set(xmm_ref(dst), v);
+    Ok(())
+}
+
 /// MOVQ m64,xmm RIP (66 0F D6)。XMM 下位64を [RIP+disp] に格納する.
 pub fn movq_m64_xmm_rip<B: Backend>(b: &mut B, src: Xmm, next_rip: u64, disp: i32) -> Flow<B> {
     let base = b.konst::<W64>(next_rip);
