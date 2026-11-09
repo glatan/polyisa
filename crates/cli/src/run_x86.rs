@@ -1319,6 +1319,7 @@ fn dispatch<B: Backend>(
         Insn::Syscall => sem::syscall(b, eip),
         Insn::Cpuid => sem::cpuid(b),
         Insn::Endbr64 => sem::nop(b),
+        Insn::Rdsspq => sem::nop(b),
         Insn::Nopl => sem::nop(b),
         Insn::AddRm32 => {
             if rex_w {

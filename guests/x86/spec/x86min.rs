@@ -239,6 +239,9 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("stosb", "F1", "10101010", "stosb", "store"),
         ("stosd", "F1", "10101011", "stosd", "store"),
         ("endbr64", "F1", "00001111 00011110 11111010", "endbr64", "alu"),
+        // RDSSPQ r64 (F3 REX.W 0F 1E /1)。CETシャドースタック未実装のためNOP扱い.
+        // F3/REX.W は剥がし済みのため 0F 1E C8 の3Bで受ける。
+        ("rdsspq", "F1", "00001111 00011110 11001000", "rdsspq", "system"),
         ("nopl", "F1", "00001111 00011111 00000000", "nopl", "alu"),
         // XMM 最小セット（66 接頭辞は実行側で剥がす。REX.W は dispatch で見る）。
         // MOVD xmm,r32 (66 0F 6E /r)。reg-direct のみ。

@@ -4234,3 +4234,12 @@ fn cmove_r64_rip_not_taken() {
     })
     .unwrap();
 }
+
+#[test]
+fn rdsspq_is_nop() {
+    // RDSSPQ %rax (F3 48 0F 1E C8): CET未実装のためNOP。レジスタ不変.
+    let mut env = env();
+    env.backend.set(Gpr(0).state(), 0x1234);
+    env.step(sem::nop).unwrap();
+    assert_eq!(env.backend.get(Gpr(0).state()), 0x1234);
+}
