@@ -10,7 +10,11 @@ fn main() {
     println!("cargo::rerun-if-changed=build.rs");
     let model = build_model();
     for insn in &model.insns {
-        assert!([8, 16, 40].contains(&insn.pattern.len()), "{}", insn.name);
+        assert!(
+            [8, 16, 24, 40].contains(&insn.pattern.len()),
+            "{}",
+            insn.name
+        );
     }
     let report = polyisa_isadl::validate(&model);
     assert!(

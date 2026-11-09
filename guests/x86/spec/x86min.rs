@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // x86 最小の ISADL モデル（段階4の最小）。
 //
-// i386 の整数10件に絞る。可変長（8/16/40ビット）のデコード入口と
+// i386 の整数12件に絞る。可変長（8/16/24/40ビット）のデコード入口と
 // ModRM register-direct の最小形を確かめる。
-// ModRM の SIB・disp・メモリ形式と Rust フック・遅延フラグ・x87・SSE・
+// ModRM の SIB・絶対番地・スケール形式と Rust フック・遅延フラグ・x87・SSE・
 // 64ビット・セグメントは本格実装で足す。
 // SYSCALL/CPUID は退出・識別情報の最小形のみ持つ（機能導出は本格実装で足す）。
 // SYSCALL (0F 05) は IA-32e 用であり 32bit 正統は SYSENTER (0F 34) だが、
@@ -21,7 +21,7 @@ use polyisa_isadl::pred::Pred;
 pub fn build_model() -> polyisa_isadl::Model {
     let mut m = polyisa_isadl::Model::new();
 
-    for class in ["alu", "jump", "system"] {
+    for class in ["alu", "jump", "system", "load", "store"] {
         m.timing_classes.push(class.to_string());
     }
 
@@ -51,7 +51,8 @@ pub fn build_model() -> polyisa_isadl::Model {
     });
 
     // (名前, 形式, パターン, 構文, 分類)
-    // 可変長：8ビット単独、16ビット（opcode+disp8）、40ビット（opcode+imm32）。
+    // 可変長：8ビット単独、16ビット（opcode+disp8/modrm）、24ビット（opcode+modrm+disp8）、
+// 40ビット（opcode+imm32）。メモリ形式は mod=01 + disp8 のみ持つ。
     // Ref: SPEC-X86-INTEL-SDM (v093).
     let insns: &[(&str, &str, &str, &str, &str)] = &[
         ("nop", "F1", "10010000", "nop", "alu"),
@@ -61,6 +62,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("jmp8", "F1", "11101011 ........", "jmp {imm}", "jump"),
         ("add_rm32", "F1", "00000001 11001000", "add eax, ecx", "alu"),
         ("mov_rm32", "F1", "10001011 11000001", "mov eax, ecx", "alu"),
+        ("mov_eax_mem", "F1", "10001011 01000011 ........", "mov eax, [ebx+disp8]", "load"),
+        ("mov_mem_eax", "F1", "10001001 01000011 ........", "mov [ebx+disp8], eax", "store"),
         ("mov_eax", "F1", "10111000 ................................", "mov eax, {imm}", "alu"),
         ("syscall", "F1", "00001111 00000101", "syscall", "system"),
         ("cpuid", "F1", "00001111 10100010", "cpuid", "system"),

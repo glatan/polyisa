@@ -9,7 +9,8 @@
 //! 出典は SPEC-X86-INTEL-SDM Combined v093 (2026-09-24) である。
 //! Ref: SPEC-X86-INTEL-SDM (v093).
 
-use polyisa_sem::{Backend, Cmp, ExceptionKind, Flow, GuestException, StateRef, W32};
+use polyisa_mem::{Access, AccessKind, Align, Endian};
+use polyisa_sem::{Backend, Cmp, ExceptionKind, Flow, GuestException, StateRef, W32, W64};
 
 use super::CpuState;
 
@@ -88,6 +89,49 @@ pub fn add_rm32<B: Backend>(b: &mut B) -> Flow<B> {
 pub fn mov_rm32<B: Backend>(b: &mut B) -> Flow<B> {
     let v = read(b, Gpr(1));
     write(b, Gpr(0), v);
+    Ok(())
+}
+
+const DATA_READ: Access = Access {
+    endian: Endian::Le,
+    // x86 は非整列アクセスを許す。
+    align: Align::Unaligned,
+    kind: AccessKind::DataRead,
+};
+
+const DATA_WRITE: Access = Access {
+    endian: Endian::Le,
+    align: Align::Unaligned,
+    kind: AccessKind::DataWrite,
+};
+
+/// ベース + disp8 の実効アドレスを求める（disp8 は符号付き）。
+fn eff_addr<B: Backend>(b: &mut B, base: Gpr, disp: i8) -> B::V<W32> {
+    let r = read32(b, base);
+    let d = b.konst::<W32>(disp as i32 as u32);
+    b.add::<W32>(r, d)
+}
+
+fn read32<B: Backend>(b: &mut B, r: Gpr) -> B::V<W32> {
+    b.get(r.state())
+}
+
+/// MOV EAX, [EBX+disp8] (ModRM mod=01 の最小形)。
+/// SIB・disp32・絶対番地は本格実装で足す。
+pub fn mov_eax_mem<B: Backend>(b: &mut B, disp: i8) -> Flow<B> {
+    let addr32 = eff_addr(b, Gpr(3), disp);
+    let addr = b.zext::<W32, W64>(addr32);
+    let v: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    write(b, Gpr(0), v);
+    Ok(())
+}
+
+/// MOV [EBX+disp8], EAX (ModRM mod=01 の最小形)。
+pub fn mov_mem_eax<B: Backend>(b: &mut B, disp: i8) -> Flow<B> {
+    let addr32 = eff_addr(b, Gpr(3), disp);
+    let addr = b.zext::<W32, W64>(addr32);
+    let v: B::V<W32> = read32(b, Gpr(0));
+    b.store::<W32>(addr, v, DATA_WRITE)?;
     Ok(())
 }
 
