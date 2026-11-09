@@ -54,23 +54,60 @@ fn eip_of(env: &mut BareEnv) -> u32 {
     env.backend.get(polyisa_guest_x86::sem::eip_ref())
 }
 
-/// 先頭バイト（必要なら第2バイト）から命令長を決める。単位はバイト。
-fn fetch_len(first: u8, second: Option<u8>) -> Option<u64> {
+/// 先頭バイト（必要なら第2・第3バイト）から命令長を決める。単位はバイト。
+/// mod/rm による dispers 判定：mod=01→disp8、mod=10→disp32、mod=00 rm=101→disp32
+/// （絶対番地）、mod=00 rm=100→SIB（base=101 のとき disp32）。
+fn fetch_len(first: u8, second: Option<u8>, third: Option<u8>) -> Option<u64> {
     match first {
         0x90 | 0x40..=0x4F | 0x50..=0x5F | 0xC3 | 0xC9 => Some(1),
         0xEB | 0x74 | 0x75 | 0xE2 | 0xCD | 0x85 | 0x0F | 0x39 | 0x21 | 0x0B | 0x09 | 0x72
         | 0x73 | 0x76 | 0x77 | 0xF7 => Some(2),
         0x05 | 0x2D | 0x3D | 0xB8 | 0xE8 | 0xE9 | 0x25 | 0x0D | 0x35 => Some(5),
-        // 現サブセットの SIB+disp8 (mod=01、rm=100、s==0x44) は 8B/89 のみで 4B。
-        // 0xC1 等の他 opcode との組み合わせや disp32 の 6B は本格実装で足す。
-        0x01 | 0x8B | 0x29 | 0x31 | 0x89 | 0xC1 | 0x8D => {
+        // register-direct のみ対応する opcode（メモリ形式は未対応）。
+        // SIB を含むことはなく、0xC1（シフト）のみ imm8 で 3B になる。
+        0x01 | 0x29 | 0x31 | 0xC1 => {
             let s = second?;
-            if (first == 0x8B || first == 0x89) && s == 0x44 {
-                Some(4)
-            } else if first == 0xC1 || s == 0x43 || s == 0x04 {
+            if first == 0xC1 || s == 0x43 || s == 0x04 {
                 Some(3)
             } else {
                 Some(2)
+            }
+        }
+        0x8B | 0x89 | 0x8D => {
+            let s = second?;
+            let modrm_mod = s >> 6;
+            let modrm_rm = s & 7;
+            if modrm_mod == 3 {
+                // register-direct。
+                Some(2)
+            } else if modrm_rm == 4 {
+                // SIB 付き。disp の有無は SIB base で決まる。
+                let t = third?;
+                let disp = match modrm_mod {
+                    1 => 1,
+                    2 => 4,
+                    _ => {
+                        if t & 7 == 5 {
+                            4
+                        } else {
+                            0
+                        }
+                    }
+                };
+                Some(3 + disp)
+            } else {
+                let disp = match modrm_mod {
+                    1 => 1,
+                    2 => 4,
+                    _ => {
+                        if modrm_rm == 5 {
+                            4
+                        } else {
+                            0
+                        }
+                    }
+                };
+                Some(2 + disp)
             }
         }
         _ => None,
@@ -114,20 +151,46 @@ pub fn run(env: &mut BareEnv, entry: u32, sys: &mut impl TrapHandler, limit: u64
         } else {
             None
         };
-        let Some(nbytes) = fetch_len(head[0], second) else {
+        // SIB 付き（mod≠11 かつ rm=100）は第3バイト（SIB）で長さが変わる。
+        let third = if matches!(head[0], 0x8B | 0x89 | 0x8D)
+            && matches!(second, Some(s) if s & 7 == 4 && s >> 6 != 3)
+        {
+            let mut sib = [0u8; 1];
+            if env
+                .backend
+                .mem
+                .read(VirtAddr(pc + 2), &mut sib, acc_fetch())
+                .is_err()
+            {
+                return Outcome::Unimplemented {
+                    eip: pc as u32,
+                    word: head[0] as u128,
+                };
+            }
+            Some(sib[0])
+        } else {
+            None
+        };
+        let Some(nbytes) = fetch_len(head[0], second, third) else {
             return Outcome::Unimplemented {
                 eip: pc as u32,
                 word: head[0] as u128,
             };
         };
-        let mut bytes = [0u8; 5];
+        let mut bytes = [0u8; 7];
         bytes[0] = head[0];
         if nbytes >= 2 {
             // 長さ判定用のぞき見を使う。なければ読み直す。
             bytes[1] = second.unwrap_or(0);
         }
+        if nbytes >= 3 {
+            bytes[2] = third.unwrap_or(0);
+        }
         for i in 1..nbytes {
             if i == 1 && second.is_some() {
+                continue;
+            }
+            if i == 2 && third.is_some() {
                 continue;
             }
             let mut b = [0u8; 1];
@@ -243,6 +306,10 @@ fn dispatch<B: Backend>(
         Insn::MovRm32 => sem::mov_rm32(b, reg(), rm()),
         Insn::MovEaxMem => sem::mov_eax_mem(b, disp8()),
         Insn::MovMemEax => sem::mov_mem_eax(b, disp8()),
+        Insn::MovEaxMemd32 => sem::mov_eax_memd32(b, disp32()),
+        Insn::MovMemd32Eax => sem::mov_memd32_eax(b, disp32()),
+        Insn::MovEaxAbs => sem::mov_eax_abs(b, imm32()),
+        Insn::MovAbsEax => sem::mov_abs_eax(b, imm32()),
         Insn::MovEaxSib => sem::mov_eax_sib(b),
         Insn::MovSibEax => sem::mov_sib_eax(b),
         Insn::MovEaxSibd => sem::mov_eax_sibd(b, disp8()),

@@ -179,6 +179,37 @@ fn mem_load_store_disp8() {
 }
 
 #[test]
+fn mem_load_store_disp32() {
+    let mut env = env();
+    env.map_rw(0, 1).unwrap();
+    // EBX=0x100 を base にし、EAX=0x12345678 を [+0x20] に書いて読む。
+    env.backend.set(Gpr(3).state(), 0x100);
+    env.backend.set(Gpr(0).state(), 0x1234_5678);
+    env.step(|b| sem::mov_memd32_eax(b, 0x20)).unwrap();
+    env.backend.set(Gpr(0).state(), 0);
+    env.step(|b| sem::mov_eax_memd32(b, 0x20)).unwrap();
+    assert_eq!(eax(&mut env), 0x1234_5678);
+    // disp32 は符号付き：-1 は base-1 を指す。
+    env.backend.set(Gpr(0).state(), 0xAABB_CCDD);
+    env.step(|b| sem::mov_memd32_eax(b, -1)).unwrap();
+    env.backend.set(Gpr(0).state(), 0);
+    env.step(|b| sem::mov_eax_memd32(b, -1)).unwrap();
+    assert_eq!(eax(&mut env), 0xAABB_CCDD);
+}
+
+#[test]
+fn mem_load_store_absolute() {
+    let mut env = env();
+    env.map_rw(0, 1).unwrap();
+    // 絶対番地 [0x200] に EAX=0x55AA55AA を書いて読む。
+    env.backend.set(Gpr(0).state(), 0x55AA_55AA);
+    env.step(|b| sem::mov_abs_eax(b, 0x200)).unwrap();
+    env.backend.set(Gpr(0).state(), 0);
+    env.step(|b| sem::mov_eax_abs(b, 0x200)).unwrap();
+    assert_eq!(eax(&mut env), 0x55AA_55AA);
+}
+
+#[test]
 fn push_pop_roundtrip() {
     let mut env = env();
     env.map_rw(0, 1).unwrap();
