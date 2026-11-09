@@ -3975,3 +3975,57 @@ fn cmp_al_imm_sets_cf() {
     // CF is bit0.
     assert_eq!(env.backend.get(sem::eflags_ref()) & 0x1, 0x1);
 }
+
+#[test]
+fn pcmpeqd_all_equal() {
+    // PCMPEQD xmm0,xmm0: all equal -> all 0xFFFFFFFF.
+    let mut env = env();
+    env.step(|b| {
+        let v = b.konst::<polyisa_sem::W128>(0x0102030405060708090A0B0C0D0E0F10);
+        b.set(sem::xmm_ref(sem::Xmm(0)), v);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::pcmpeqd_xmm(b, sem::Xmm(0), sem::Xmm(0)))
+        .unwrap();
+    env.step(|b| {
+        let v: u128 = b.get(sem::xmm_ref(sem::Xmm(0)));
+        assert_eq!(v, u128::MAX);
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn movzx_r32_m16_mem32_basic() {
+    // MOVZX ESI,[RDI+0x2F0] (0F B7 mod=10): [0x17F0]=0x1234 -> ESI=0x1234.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend.set(Gpr(7).state(), 0x1500);
+    env.backend
+        .mem
+        .write(VirtAddr(0x17F0), &[0x34u8, 0x12])
+        .unwrap();
+    env.step(|b| sem::movzx_r32_m16_mem32(b, Gpr(6), Gpr(7), 0x2F0))
+        .unwrap();
+    assert_eq!(env.backend.get(Gpr(6).state()) & 0xFFFF, 0x1234);
+}
+
+#[test]
+fn imul_r64_imm8_basic() {
+    // IMUL RSI,RSI,0x38 (REX.W 6B mod=11): RSI=2 -> 0x70.
+    let mut env = env();
+    env.step(|b| {
+        sem::write64(b, Gpr(6), 2);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::imul_r64_imm8(b, Gpr(6), Gpr(6), 0x38))
+        .unwrap();
+    env.step(|b| {
+        let v = sem::read64(b, Gpr(6));
+        assert_eq!(v, 0x70);
+        Ok(())
+    })
+    .unwrap();
+}

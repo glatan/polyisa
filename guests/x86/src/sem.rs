@@ -8506,3 +8506,60 @@ pub fn cmovg_r64<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
     write64(b, dst, v);
     Ok(())
 }
+
+/// PCMPEQD xmm1, xmm2。32ビット毎に等しければ 0xFFFFFFFF、異なれば 0x00.
+pub fn pcmpeqd_xmm<B: Backend>(b: &mut B, dst: Xmm, src: Xmm) -> Flow<B> {
+    let a: B::V<W128> = b.get(xmm_ref(dst));
+    let c: B::V<W128> = b.get(xmm_ref(src));
+    let mut acc: B::V<W128> = b.konst::<W128>(0);
+    for i in 0..4 {
+        let shift = b.konst::<W128>((i * 32) as u128);
+        let mask = b.konst::<W128>(0xFFFF_FFFF);
+        let ab = b.shr_l::<W128>(a, shift);
+        let cb = b.shr_l::<W128>(c, shift);
+        let ab32 = b.and::<W128>(ab, mask);
+        let cb32 = b.and::<W128>(cb, mask);
+        let eq = b.cmp::<W128>(Cmp::Eq, ab32, cb32);
+        let one = b.konst::<W128>(0xFFFF_FFFF);
+        let zero = b.konst::<W128>(0);
+        let dw = b.select::<W128>(eq, one, zero);
+        let pos = b.shl::<W128>(dw, shift);
+        acc = b.or::<W128>(acc, pos);
+    }
+    b.set(xmm_ref(dst), acc);
+    Ok(())
+}
+
+/// MOVZX r64,m16 [base+disp32] (0F B7 mod=10, REX.W)。
+pub fn movzx_r64_m16_mem32<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, disp: i32) -> Flow<B> {
+    use polyisa_sem::W16;
+    let addr = eff_addr32(b, base, disp);
+    let v16: B::V<W16> = b.load::<W16>(addr, DATA_READ)?;
+    let v = b.zext::<W16, W64>(v16);
+    write64(b, dst, v);
+    Ok(())
+}
+
+/// IMUL r32, r/m32, imm8 reg-direct (6B /r ib mod=11)。
+pub fn imul_r32_imm8<B: Backend>(b: &mut B, dst: Gpr, src: Gpr, imm: i8) -> Flow<B> {
+    let x = read(b, src);
+    let y = b.konst::<W32>(imm as i32 as u32);
+    let x64 = b.sext::<W32, W64>(x);
+    let y64 = b.sext::<W32, W64>(y);
+    let p64 = b.mul::<W64>(x64, y64);
+    let v: B::V<W32> = b.trunc::<W64, W32>(p64);
+    write(b, dst, v);
+    Ok(())
+}
+
+/// IMUL r64, r/m64, imm8 reg-direct (6B /r ib mod=11, REX.W)。
+pub fn imul_r64_imm8<B: Backend>(b: &mut B, dst: Gpr, src: Gpr, imm: i8) -> Flow<B> {
+    let x = read64(b, src);
+    let y = b.konst::<W64>(imm as i64 as u64);
+    let x128 = b.sext::<W64, W128>(x);
+    let y128 = b.sext::<W64, W128>(y);
+    let p128 = b.mul::<W128>(x128, y128);
+    let v: B::V<W64> = b.trunc::<W128, W64>(p128);
+    write64(b, dst, v);
+    Ok(())
+}

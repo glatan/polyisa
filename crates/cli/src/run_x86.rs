@@ -173,7 +173,7 @@ fn fetch_len(
                 } else {
                     Some(3)
                 }
-            } else if matches!(s, 0x60 | 0x61 | 0x62 | 0x6C | 0xDB | 0xEF | 0xD7) {
+            } else if matches!(s, 0x60 | 0x61 | 0x62 | 0x6C | 0xDB | 0xEF | 0xD7 | 0x76) {
                 // XMM reg-direct のみ（66 接頭辞は剥がし済み）。
                 let m = third?;
                 if m >> 6 == 3 { Some(3) } else { None }
@@ -834,6 +834,7 @@ pub fn run_mode(
                             | 0x6C
                             | 0x70
                             | 0x74
+                            | 0x76
                             | 0x7E
                             | 0xD7
                             | 0xDB
@@ -1037,6 +1038,7 @@ pub fn run_mode(
                     | Insn::Pxor
                     | Insn::Pand
                     | Insn::Pcmpeqb
+                    | Insn::Pcmpeqd
                     | Insn::Por
                     | Insn::Pmovmskb
                     | Insn::PcmpeqbMemnd
@@ -1097,6 +1099,7 @@ pub fn run_mode(
                     | Insn::Pxor
                     | Insn::Pand
                     | Insn::Pcmpeqb
+                    | Insn::Pcmpeqd
                     | Insn::Por
                     | Insn::Pmovmskb
                     | Insn::PcmpeqbMemnd
@@ -2944,6 +2947,7 @@ fn dispatch<B: Backend>(
         Insn::Pxor => sem::pxor_xmm(b, xmm_reg(), xmm_rm()),
         Insn::Pand => sem::pand_xmm(b, xmm_reg(), xmm_rm()),
         Insn::Pcmpeqb => sem::pcmpeqb_xmm(b, xmm_reg(), xmm_rm()),
+        Insn::Pcmpeqd => sem::pcmpeqd_xmm(b, xmm_reg(), xmm_rm()),
         Insn::Por => sem::por_xmm(b, xmm_reg(), xmm_rm()),
         Insn::PcmpeqbMemnd => sem::pcmpeqb_xmm_memnd(b, xmm_reg(), rm0f()),
         Insn::PcmpeqbMem8 => sem::pcmpeqb_xmm_mem8(b, xmm_reg(), rm0f(), disp8()),
@@ -3150,6 +3154,7 @@ fn dispatch<B: Backend>(
         }
         Insn::MovapsStoreMemnd => sem::movups_store_memnd(b, xmm_reg(), rm0f()),
         Insn::MovapsStoreMem8 => sem::movups_store_mem8(b, xmm_reg(), rm0f(), disp8()),
+        Insn::MovapsStoreRip => sem::movups_store_rip(b, xmm_reg(), eip as u64 + nbytes, disp32()),
         Insn::NoplSib => sem::nop(b),
         Insn::NoplSibd => sem::nop(b),
         Insn::NoplSibd32 => sem::nop(b),
@@ -3284,6 +3289,13 @@ fn dispatch<B: Backend>(
                 sem::imul_r64_imm(b, reg(), rm(), imm32())
             } else {
                 sem::imul_r32_imm(b, reg(), rm(), imm32())
+            }
+        }
+        Insn::ImulRImm8 => {
+            if rex_w {
+                sem::imul_r64_imm8(b, reg(), rm(), disp8())
+            } else {
+                sem::imul_r32_imm8(b, reg(), rm(), disp8())
             }
         }
         Insn::ImulRRm => {
@@ -3450,9 +3462,12 @@ fn dispatch<B: Backend>(
                 sem::and_rm32_imm8_abs(b, disp_le, imm)
             }
         }
-        Insn::MovzxR32M16 => {
-            // 0F B7 95 + disp32 (mod=10 RBP)。dst は reg フィールド.
-            sem::movzx_r32_m16_mem32(b, reg0f_as_gpr(), Gpr(5 | ((rex & 1) << 3)), disp32())
+        Insn::MovzxR32M16Mem32 => {
+            if rex_w {
+                sem::movzx_r64_m16_mem32(b, reg0f_as_gpr(), rm0f(), disp32())
+            } else {
+                sem::movzx_r32_m16_mem32(b, reg0f_as_gpr(), rm0f(), disp32())
+            }
         }
         Insn::MovzxR32M16Sibd => {
             if sib0f_no_index() {
@@ -3869,7 +3884,11 @@ fn dispatch<B: Backend>(
             | Insn::ShrRm32Cl
             | Insn::NotRm32
             | Insn::NegRm32 => Some(rm()),
-            Insn::MovRm32 | Insn::Movsxd | Insn::ImulRImm | Insn::ImulRImm8Rip => Some(reg()),
+            Insn::MovRm32
+            | Insn::Movsxd
+            | Insn::ImulRImm
+            | Insn::ImulRImm8
+            | Insn::ImulRImm8Rip => Some(reg()),
             Insn::Cmovb
             | Insn::Cmovne
             | Insn::Cmove
@@ -3886,7 +3905,7 @@ fn dispatch<B: Backend>(
             | Insn::Cmovge
             | Insn::Cmovle
             | Insn::Cmovg
-            | Insn::MovzxR32M16
+            | Insn::MovzxR32M16Mem32
             | Insn::MovzxR32M16Sibd
             | Insn::MovzxR32M16Rip
             | Insn::MovzxR32M8Rip
