@@ -8808,3 +8808,85 @@ pub fn pminub_xmm<B: Backend>(b: &mut B, dst: Xmm, src: Xmm) -> Flow<B> {
     b.set(xmm_ref(dst), acc);
     Ok(())
 }
+
+/// CALL [base] (FF /2 SIB mod=00 no_index)。64ビット間接コール.
+pub fn call_r64_memnd<B: Backend>(b: &mut B, eip_next: u64, base: Gpr) -> Flow<B> {
+    let addr = read64(b, base);
+    let target64: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let ret_addr = eip_next;
+    let rsp = read64(b, Gpr(4));
+    let eight = b.konst::<W64>(8);
+    let next = b.sub::<W64>(rsp, eight);
+    write64(b, Gpr(4), next);
+    let ret = b.konst::<W64>(ret_addr);
+    b.store::<W64>(next, ret, DATA_WRITE)?;
+    let t32: B::V<W32> = b.trunc::<W64, W32>(target64);
+    b.set(eip_ref(), t32);
+    b.jump(target64);
+    Ok(())
+}
+
+/// CALL [base+index*scale] (FF /2 SIB mod=00)。64ビット間接コール.
+pub fn call_r64_sib<B: Backend>(
+    b: &mut B,
+    eip_next: u64,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, 0, base, idx);
+    let target64: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let ret_addr = eip_next;
+    let rsp = read64(b, Gpr(4));
+    let eight = b.konst::<W64>(8);
+    let next = b.sub::<W64>(rsp, eight);
+    write64(b, Gpr(4), next);
+    let ret = b.konst::<W64>(ret_addr);
+    b.store::<W64>(next, ret, DATA_WRITE)?;
+    let t32: B::V<W32> = b.trunc::<W64, W32>(target64);
+    b.set(eip_ref(), t32);
+    b.jump(target64);
+    Ok(())
+}
+
+/// CALL [base] (FF /2 SIB mod=00 no_index、32ビット)。
+pub fn call_r32_memnd<B: Backend>(b: &mut B, eip_next: u32, base: Gpr) -> Flow<B> {
+    let addr = read64(b, base);
+    let target: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let ret_addr = eip_next;
+    let esp = read(b, Gpr(4));
+    let four = b.konst::<W32>(4);
+    let next = b.sub::<W32>(esp, four);
+    b.set(esp_ref(), next);
+    let saddr = b.zext::<W32, W64>(next);
+    let ret = b.konst::<W32>(ret_addr);
+    b.store::<W32>(saddr, ret, DATA_WRITE)?;
+    b.set(eip_ref(), target);
+    let tj = b.zext::<W32, W64>(target);
+    b.jump(tj);
+    Ok(())
+}
+
+/// CALL [base+index*scale] (FF /2 SIB mod=00、32ビット)。
+pub fn call_r32_sib<B: Backend>(
+    b: &mut B,
+    eip_next: u32,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, 0, base, idx);
+    let target: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let ret_addr = eip_next;
+    let esp = read(b, Gpr(4));
+    let four = b.konst::<W32>(4);
+    let next = b.sub::<W32>(esp, four);
+    b.set(esp_ref(), next);
+    let saddr = b.zext::<W32, W64>(next);
+    let ret = b.konst::<W32>(ret_addr);
+    b.store::<W32>(saddr, ret, DATA_WRITE)?;
+    b.set(eip_ref(), target);
+    let tj = b.zext::<W32, W64>(target);
+    b.jump(tj);
+    Ok(())
+}

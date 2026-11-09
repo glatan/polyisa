@@ -334,6 +334,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("sub_r_rip", "F1", "00101011 00...101 ................................", "sub r32, m32", "alu"),
         // CALL r/m64 mod=01 [base+disp8] (FF /2)。64ビット間接コール.
         ("call_r_mem8", "M8", "11111111 01010... ........", "call r/m64", "jump"),
+        // CALL [base+index*scale] (FF /2 SIB mod=00)。64ビット間接コール.
+        ("call_r_sib", "N8", "11111111 00010100 ........", "call r/m64", "jump"),
         // XCHG r32,r/m32 (87 /r)。reg-direct・mod=00/01/10/RIP (SIBなし).
         ("xchg_r_rm", "F1", "10000111 11......", "xchg r32, r/m32", "alu"),
         ("xchg_r_memnd", "MR", "10000111 00......", "xchg r32, [r/m]", "alu"),

@@ -1843,6 +1843,26 @@ fn dispatch<B: Backend>(
                 sem::call_r32_mem8(b, eip.wrapping_add(nbytes as u32), rm(), disp8())
             }
         }
+        Insn::CallRSib => {
+            // FF /2 SIB mod=00 [base+index*scale] 間接CALL。no_index は [base].
+            if no_index() {
+                if is64 {
+                    sem::call_r64_memnd(b, eip as u64 + nbytes, sib_base())
+                } else {
+                    sem::call_r32_memnd(b, eip.wrapping_add(nbytes as u32), sib_base())
+                }
+            } else if is64 {
+                sem::call_r64_sib(b, eip as u64 + nbytes, sib_base(), sib_idx(), sib_shift())
+            } else {
+                sem::call_r32_sib(
+                    b,
+                    eip.wrapping_add(nbytes as u32),
+                    sib_base(),
+                    sib_idx(),
+                    sib_shift(),
+                )
+            }
+        }
         Insn::CallRRip => {
             if is64 {
                 sem::call_r64_rip(b, eip as u64 + nbytes, eip as u64 + nbytes, disp32())

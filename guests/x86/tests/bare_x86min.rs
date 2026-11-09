@@ -4062,3 +4062,65 @@ fn pminub_basic() {
     })
     .unwrap();
 }
+
+#[test]
+fn call_r64_sib_indexed() {
+    // CALL [R15+R14*8] (FF /2 SIB mod=00): R15=0x100, R14=2 -> [0x110]=0x2000.
+    // eip_next=0x1004 を積み、eip=0x2000 へ飛ぶ。RSP は 8 減る。
+    let mut env = env();
+    env.map_rw(0, 2).unwrap();
+    env.backend.set(Gpr(4).state(), 0x200);
+    env.step(|b| {
+        sem::write64(b, Gpr(15), 0x100);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| {
+        sem::write64(b, Gpr(14), 2);
+        Ok(())
+    })
+    .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x110), &0x2000u64.to_le_bytes())
+        .unwrap();
+    env.step(|b| sem::call_r64_sib(b, 0x1004, Gpr(15), Gpr(14), 3))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::eip_ref()), 0x2000);
+    assert_eq!(env.backend.get(Gpr(4).state()), 0x1f8);
+    let mut ret = [0u8; 8];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x1f8),
+            &mut ret,
+            Access {
+                endian: Endian::Le,
+                align: Align::Unaligned,
+                kind: AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(u64::from_le_bytes(ret), 0x1004);
+}
+
+#[test]
+fn call_r64_sib_no_index() {
+    // CALL [R15] (FF /2 SIB no_index): [0x100]=0x3000.
+    let mut env = env();
+    env.map_rw(0, 2).unwrap();
+    env.backend.set(Gpr(4).state(), 0x200);
+    env.step(|b| {
+        sem::write64(b, Gpr(15), 0x100);
+        Ok(())
+    })
+    .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x100), &0x3000u64.to_le_bytes())
+        .unwrap();
+    env.step(|b| sem::call_r64_memnd(b, 0x1004, Gpr(15)))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::eip_ref()), 0x3000);
+    assert_eq!(env.backend.get(Gpr(4).state()), 0x1f8);
+}
