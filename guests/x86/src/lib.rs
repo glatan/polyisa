@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! x86 最小のゲスト ISA。段階4の最小であり、可変長デコードを確かめる。
 //!
-//! i386 の240件を持つ。ModRM/SIB 汎用・XMM最小・near Jcc・MOVZX・CMOVB・ADD RIP等を含む。
+//! i386 の268件を持つ。ModRM/SIB 汎用・XMM最小・near Jcc・MOVZX・CMOVB・ADD RIP等を含む。
 //! REX 接頭辞はデコード前に剥がし、Insは共有して64ビット意味論に切り替える。
 //! SYSCALL/CPUID は最小形、ModRM は register-direct（全組合せ）・mod=01+disp8・
 //! mod=10+disp32・絶対番地と SIB base+index 形（スケール付き、disp8/disp32・disp なしを含む）を持ち、
@@ -70,7 +70,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数116件。
-        assert_eq!(INSNS.len(), 240);
+        assert_eq!(INSNS.len(), 268);
     }
 
     #[test]
@@ -169,7 +169,7 @@ mod tests {
         assert_eq!(decode(0x837B_1000, 32), Some(Insn::CmpRmImm8m8));
         assert_eq!(decode(0x8379_1000, 32), Some(Insn::CmpRmImm8m8));
         assert_eq!(decode(0x837C_1000, 32), None);
-        assert_eq!(decode(0x0083_00F0, 24), None);
+        assert_eq!(decode(0x0083_00F0, 24), Some(Insn::AddRmImm8Memnd));
         // string 操作（F3 接頭辞は実行側で剥がす）。
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0xA4, 8), Some(Insn::Movsb));
@@ -271,6 +271,13 @@ mod tests {
         assert_eq!(decode(0xF6C110, 24), Some(Insn::TestRm8Imm));
         assert_eq!(decode(0xA801, 16), Some(Insn::TestAlImm));
         assert_eq!(decode(0xF6050000000002, 56), Some(Insn::TestM8ImmRip));
+        assert_eq!(decode(0x803D41DB190000, 56), Some(Insn::CmpRm8ImmRip));
+        assert_eq!(decode(0x83470C01, 32), Some(Insn::AddRmImm8Mem8));
+        assert_eq!(decode(0x0F94C5, 24), Some(Insn::Sete));
+        assert_eq!(decode(0x3B2E, 16), Some(Insn::CmpRMemnd));
+        assert_eq!(decode(0x3905DFCF1D00, 48), Some(Insn::CmpRmRip));
+        assert_eq!(decode(0x0F6F057CC61600, 56), Some(Insn::MovdqaLoadRip));
+        assert_eq!(decode(0x0345B0, 24), Some(Insn::AddRMem8));
         assert_eq!(decode(0x80E580, 24), Some(Insn::AndRm8Imm));
         assert_eq!(decode(0x830D0000000040, 56), Some(Insn::OrRmImm8Rip));
         assert_eq!(decode(0x832577D21F00CF, 56), Some(Insn::AndRmImm8Rip));

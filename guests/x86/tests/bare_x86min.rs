@@ -3286,3 +3286,122 @@ fn cmp_rm_memnd_sets_zf() {
         .unwrap();
     assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0x40);
 }
+
+#[test]
+fn cmp_rm8_imm_rip_sets_zf() {
+    // CMPB $0,[RIP+disp]: [0x1500]=0 -> ZF=1; [0x1500]=1 -> ZF=0.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend.mem.write(VirtAddr(0x1500), &[0u8]).unwrap();
+    env.step(|b| sem::cmp_rm8_imm_rip(b, 0x1007, 0x4F9, 0))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0x40);
+    env.backend.mem.write(VirtAddr(0x1500), &[1u8]).unwrap();
+    env.step(|b| sem::cmp_rm8_imm_rip(b, 0x1007, 0x4F9, 0))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0);
+}
+
+#[test]
+fn add_rm32_imm8_mem8_basic() {
+    // ADD [RDI+0x0c],1 (83 /0 mod=01): [0x150C]=0x10 -> 0x11.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend.set(Gpr(7).state(), 0x1500);
+    env.backend
+        .mem
+        .write(VirtAddr(0x150C), &[0x10u8, 0, 0, 0])
+        .unwrap();
+    env.step(|b| sem::add_rm32_imm8_mem8(b, Gpr(7), 0x0C, 1))
+        .unwrap();
+    let mut back = [0u8; 4];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x150C),
+            &mut back,
+            Access {
+                endian: Endian::Le,
+                align: Align::Unaligned,
+                kind: AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(u32::from_le_bytes(back), 0x11);
+}
+
+#[test]
+fn sete_sets_on_zf() {
+    // SETE R13B (REX.B): ZF=1 -> 1、ZF=0 -> 0.
+    let mut env = env();
+    env.backend.set(sem::eflags_ref(), 0x40);
+    env.step(|b| sem::sete_r8(b, Gpr(13), false)).unwrap();
+    assert_eq!(env.backend.get(Gpr(13).state()), 1);
+    env.backend.set(sem::eflags_ref(), 0x0);
+    env.step(|b| sem::sete_r8(b, Gpr(13), false)).unwrap();
+    assert_eq!(env.backend.get(Gpr(13).state()), 0);
+}
+
+#[test]
+fn cmp_r_memnd_basic() {
+    // CMP R13,[R14] (3B mod=00, REX.W): R13=0x10, [R14]=0x10 -> ZF=1.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend.set(Gpr(14).state(), 0x1500);
+    env.step(|b| {
+        sem::write64(b, Gpr(13), 0x10);
+        Ok(())
+    })
+    .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1500), &[0x10u8, 0, 0, 0, 0, 0, 0, 0])
+        .unwrap();
+    env.step(|b| sem::cmp_r64_memnd(b, Gpr(13), Gpr(14)))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0x40);
+}
+
+#[test]
+fn cmp_rm64_rip_basic() {
+    // CMP [RIP+disp],RAX (REX.W): [0x1500]=0x10, RAX=0x10 -> ZF=1.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.step(|b| {
+        sem::write64(b, Gpr(0), 0x10);
+        Ok(())
+    })
+    .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1500), &[0x10u8, 0, 0, 0, 0, 0, 0, 0])
+        .unwrap();
+    env.step(|b| sem::cmp_rm64_rip(b, 0x1007, 0x4F9, Gpr(0)))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0x40);
+}
+
+#[test]
+fn add_r64_mem8_basic() {
+    // ADD RAX,[RBP-0x50] (REX.W mod=01): RAX=0x10, [0x14B0]=0x20 -> 0x30.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend.set(Gpr(5).state(), 0x1500);
+    env.step(|b| {
+        sem::write64(b, Gpr(0), 0x10);
+        Ok(())
+    })
+    .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x14B0), &[0x20u8, 0, 0, 0, 0, 0, 0, 0])
+        .unwrap();
+    env.step(|b| sem::add_r64_mem8(b, Gpr(0), Gpr(5), -0x50))
+        .unwrap();
+    env.step(|b| {
+        let v = sem::read64(b, Gpr(0));
+        assert_eq!(v, 0x30);
+        Ok(())
+    })
+    .unwrap();
+}

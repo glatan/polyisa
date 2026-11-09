@@ -1334,3 +1334,28 @@ fn run_mov_r64_rip() {
     let v = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(8));
     assert_eq!(v, 0xFFFF_FFFF_FFFF_FF60);
 }
+
+#[test]
+fn run_cmpb_imm_rip() {
+    // run 経由で 80 3D + disp32 + imm8 (CMPB [RIP],imm8) を回す (64bit)。
+    // [0x1500]=0 に CMPB $0 で ZF=1、je taken で exit(0x77)。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    env.backend.mem.write(VirtAddr(0x1500), &[0u8]).unwrap();
+    let prog: &[u8] = &[
+        0x80, 0x3D, 0xF9, 0x04, 0x00, 0x00, 0x00, // cmpb $0,[rip+0x4f9] ([0x1500]=0 -> ZF=1)
+        0x74, 0x09, // je +9 (to mov rdi,0x77)
+        0x48, 0xC7, 0xC7, 0x01, 0x00, 0x00, 0x00, // mov rdi,1
+        0xEB, 0x07, // jmp +7 (to mov rax,60)
+        0x48, 0xC7, 0xC7, 0x77, 0x00, 0x00, 0x00, // mov rdi,0x77
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x0F, 0x05, // syscall -> exit(0x77)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0x77));
+}
