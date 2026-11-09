@@ -1151,3 +1151,42 @@ fn run_add_r_memnd() {
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
     assert_eq!(out, Outcome::Exit(0x50));
 }
+
+#[test]
+fn run_orb_mem32_disp32() {
+    // run 経由で 80 /1 mod=10 [base+disp32],imm8 (ORB) を回す。
+    // RBX=0x1000、[0x1356]=0x01 に ORB $0x80 で [0x1356]=0x81 になり、exit(0)。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    env.backend.mem.write(VirtAddr(0x1356), &[0x01u8]).unwrap();
+    let prog: &[u8] = &[
+        0xB8, 0x00, 0x10, 0x00, 0x00, // mov eax,0x1000
+        0x50, // push eax
+        0x5B, // pop ebx (ebx=0x1000)
+        0x80, 0x8B, 0x56, 0x03, 0x00, 0x00, 0x80, // orb $0x80,0x356(%rbx)
+        0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax,1 (exit)
+        0xBB, 0x00, 0x00, 0x00, 0x00, // mov ebx,0
+        0xCD, 0x80, // int 0x80 -> exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = ExitOne;
+    let out = run_x86::run(&mut env, 0x1000, &mut sys, 100);
+    assert_eq!(out, Outcome::Exit(0));
+    let mut back = [0u8; 1];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x1356),
+            &mut back,
+            polyisa_mem::Access {
+                endian: polyisa_mem::Endian::Le,
+                align: polyisa_mem::Align::Unaligned,
+                kind: polyisa_mem::AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(back, [0x81u8]);
+}

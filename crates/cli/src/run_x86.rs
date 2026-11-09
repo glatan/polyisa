@@ -378,6 +378,9 @@ fn fetch_len(
                 if md == 1 && reg == 7 { Some(5) } else { None }
             } else if md == 1 && reg == 7 {
                 Some(4)
+            } else if md == 2 && reg == 1 {
+                // mod=10 [base+disp32],imm8 (7B) の /1 ORB のみ.
+                Some(7)
             } else {
                 None
             }
@@ -1251,6 +1254,12 @@ fn dispatch<B: Backend>(
             let d8 = ((word >> 8) & 0xff) as u8 as i8;
             let imm = (word & 0xff) as u8;
             sem::mov_rm8_imm_mem8(b, rm(), d8, imm)
+        }
+        Insn::OrRm8ImmMem32 => {
+            // 80 /1 mod=10 [base+disp32],imm8 (56b)。disp は (word>>8) 下位32 LE、imm は最下位8.
+            let disp = ((word >> 8) as u32).swap_bytes() as i32;
+            let imm = (word & 0xff) as u8;
+            sem::or_rm8_imm_mem32(b, rm(), disp, imm)
         }
         Insn::TestM8ImmRip => {
             let disp = ((word >> 8) as u32).swap_bytes() as i32;

@@ -2531,3 +2531,28 @@ fn add_r64_memnd_basic() {
     env.step(|b| sem::add_r64_memnd(b, Gpr(2), Gpr(3))).unwrap();
     assert_eq!(env.backend.get(Gpr(2).state()), 0x50);
 }
+
+#[test]
+fn or_rm8_imm_mem32_sets_bits() {
+    // ORB $0x80,0x356(%RBX) (mod=10): [0x1356]=0x01 -> 0x81.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend.set(Gpr(3).state(), 0x1000);
+    env.backend.mem.write(VirtAddr(0x1356), &[0x01u8]).unwrap();
+    env.step(|b| sem::or_rm8_imm_mem32(b, Gpr(3), 0x356, 0x80))
+        .unwrap();
+    let mut back = [0u8; 1];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x1356),
+            &mut back,
+            Access {
+                endian: Endian::Le,
+                align: Align::Unaligned,
+                kind: AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(back, [0x81u8]);
+}

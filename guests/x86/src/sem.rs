@@ -473,6 +473,18 @@ pub fn cmp_rm8_imm_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8, imm: u8) -> 
     Ok(())
 }
 
+/// OR r/m8,imm8 [base+disp32] (80 /1 mod=10、SIBなし)。メモリを読んで OR し、書き戻す.
+pub fn or_rm8_imm_mem32<B: Backend>(b: &mut B, base: Gpr, disp: i32, imm: u8) -> Flow<B> {
+    use polyisa_sem::W8;
+    let addr = eff_addr32(b, base, disp);
+    let x: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
+    let y = b.konst::<W8>(imm);
+    let v = b.or::<W8>(x, y);
+    b.store::<W8>(addr, v, DATA_WRITE)?;
+    update_logic_flags(b, v);
+    Ok(())
+}
+
 /// MOV r/m8,imm8 [base+disp8] (C6 /0 mod=01、SIBなし)。メモリに1バイト書く.
 pub fn mov_rm8_imm_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8, imm: u8) -> Flow<B> {
     use polyisa_sem::W8;
