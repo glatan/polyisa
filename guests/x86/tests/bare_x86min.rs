@@ -564,3 +564,69 @@ fn varlen_decode_lengths() {
     env.step(sem::inc_eax).unwrap();
     assert_eq!(eax(&mut env), 8);
 }
+
+#[test]
+fn mul_widens_to_edx_eax() {
+    // 0xffffffff * 2 = 0x1_fffffffe。EAX=下位、EDX=上位。
+    let mut env = env();
+    env.backend.set(Gpr(0).state(), 0xffff_ffff);
+    env.backend.set(Gpr(1).state(), 2);
+    env.step(sem::mul_rm32).unwrap();
+    assert_eq!(eax(&mut env), 0xffff_fffe);
+    assert_eq!(env.backend.get(Gpr(2).state()), 1);
+}
+
+#[test]
+fn div_quotient_remainder() {
+    let mut env = env();
+    // DIV: EDX:EAX=17 / ECX=5 → EAX=3、EDX=2。
+    env.backend.set(Gpr(2).state(), 0);
+    env.backend.set(Gpr(0).state(), 17);
+    env.backend.set(Gpr(1).state(), 5);
+    env.step(|b| sem::div_rm32(b, 0x1000)).unwrap();
+    assert_eq!(eax(&mut env), 3);
+    assert_eq!(env.backend.get(Gpr(2).state()), 2);
+}
+
+#[test]
+fn div_by_zero_traps() {
+    use polyisa_engine::interp::InterpExit;
+    use polyisa_sem::ExceptionKind;
+    let mut env = env();
+    env.backend.set(Gpr(2).state(), 0);
+    env.backend.set(Gpr(0).state(), 17);
+    env.backend.set(Gpr(1).state(), 0);
+    let r = env.step(|b| sem::div_rm32(b, 0x1000));
+    assert!(matches!(
+        r,
+        Err(InterpExit::Exception(e)) if e.kind == ExceptionKind::DivZero && e.addr == Some(0x1000)
+    ));
+}
+
+#[test]
+fn idiv_signed() {
+    // IDIV: EDX:EAX=-7 / ECX=2 -> EAX=-3, EDX=-1.
+    let mut env = env();
+    env.backend.set(Gpr(2).state(), 0xffff_ffff);
+    env.backend.set(Gpr(0).state(), 0xffff_fff9);
+    env.backend.set(Gpr(1).state(), 2);
+    env.step(|b| sem::idiv_rm32(b, 0x1000)).unwrap();
+    assert_eq!(eax(&mut env), 0xffff_fffd);
+    assert_eq!(env.backend.get(Gpr(2).state()), 0xffff_ffff);
+}
+
+#[test]
+fn idiv_overflow_traps() {
+    use polyisa_engine::interp::InterpExit;
+    use polyisa_sem::ExceptionKind;
+    // INT_MIN / -1 は商が収まらないため DivZero。
+    let mut env = env();
+    env.backend.set(Gpr(2).state(), 0xffff_ffff);
+    env.backend.set(Gpr(0).state(), 0x8000_0000);
+    env.backend.set(Gpr(1).state(), 0xffff_ffff);
+    let r = env.step(|b| sem::idiv_rm32(b, 0x1000));
+    assert!(matches!(
+        r,
+        Err(InterpExit::Exception(e)) if e.kind == ExceptionKind::DivZero && e.addr == Some(0x1000)
+    ));
+}

@@ -59,7 +59,7 @@ fn fetch_len(first: u8, second: Option<u8>) -> Option<u64> {
     match first {
         0x90 | 0x40..=0x4F | 0x50..=0x5F | 0xC3 | 0xC9 => Some(1),
         0xEB | 0x74 | 0x75 | 0xE2 | 0xCD | 0x85 | 0x0F | 0x39 | 0x21 | 0x0B | 0x09 | 0x72
-        | 0x73 | 0x76 | 0x77 => Some(2),
+        | 0x73 | 0x76 | 0x77 | 0xF7 => Some(2),
         0x05 | 0x2D | 0x3D | 0xB8 | 0xE8 | 0xE9 | 0x25 | 0x0D | 0x35 => Some(5),
         // 現サブセットの SIB+disp8 (mod=01、rm=100、s==0x44) は 8B/89 のみで 4B。
         // 0xC1 等の他 opcode との組み合わせや disp32 の 6B は本格実装で足す。
@@ -95,7 +95,7 @@ pub fn run(env: &mut BareEnv, entry: u32, sys: &mut impl TrapHandler, limit: u64
             };
         }
         let mut peek = [0u8; 1];
-        let second = if matches!(head[0], 0x01 | 0x8B | 0x31 | 0x89 | 0xC1 | 0x8D) {
+        let second = if matches!(head[0], 0x01 | 0x8B | 0x31 | 0x89 | 0xC1 | 0x8D | 0xF7) {
             if env
                 .backend
                 .mem
@@ -188,6 +188,8 @@ pub fn run(env: &mut BareEnv, entry: u32, sys: &mut impl TrapHandler, limit: u64
                     }
                 }
             }
+            // #DE 等の Trap 以外の退出（未実装命令を含む）は区別せず止める。
+            // 本格実装では DivZero をシグナルに変える。
             Err(_) => {
                 return Outcome::Unimplemented { eip, word };
             }
@@ -286,6 +288,9 @@ fn dispatch<B: Backend>(
         Insn::CmpRm32 => sem::cmp_rm32(b),
         Insn::AndRm32 => sem::and_rm32(b),
         Insn::OrRm32 => sem::or_rm32(b),
+        Insn::MulRm32 => sem::mul_rm32(b),
+        Insn::DivRm32 => sem::div_rm32(b, eip),
+        Insn::IdivRm32 => sem::idiv_rm32(b, eip),
     }
 }
 

@@ -203,3 +203,32 @@ fn run_sib_scaled() {
     let out = run_x86::run(&mut env, 0x1000, &mut sys, 100);
     assert_eq!(out, Outcome::Exit(0x77));
 }
+
+#[test]
+fn run_div_exit_quotient() {
+    // F7 F1 の fetch と div ディスパッチを run 経由で検証する。
+    // EDX:EAX=17 / ECX=5 -> EAX=3 で exit(3)。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    let prog: &[u8] = &[
+        0xB8, 0x00, 0x00, 0x00, 0x00, // mov eax,0
+        0x50, // push eax
+        0x5A, // pop edx (edx=0)
+        0xB8, 0x05, 0x00, 0x00, 0x00, // mov eax,5
+        0x50, // push eax
+        0x59, // pop ecx (ecx=5)
+        0xB8, 0x11, 0x00, 0x00, 0x00, // mov eax,17
+        0xF7, 0xF1, // div eax,ecx (eax=3, edx=2)
+        0x50, // push eax
+        0x5B, // pop ebx (ebx=3)
+        0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax,1 (exit)
+        0xCD, 0x80, // int 0x80 -> exit(3)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = ExitOne;
+    let out = run_x86::run(&mut env, 0x1000, &mut sys, 100);
+    assert_eq!(out, Outcome::Exit(3));
+}

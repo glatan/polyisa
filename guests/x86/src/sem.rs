@@ -564,6 +564,90 @@ pub fn or_rm32<B: Backend>(b: &mut B) -> Flow<B> {
     Ok(())
 }
 
+/// MUL EAX, ECX。符号なし積の下位32ビットを EAX、上位を EDX に置く。
+/// EFLAGS 更新は本格実装で足す。
+pub fn mul_rm32<B: Backend>(b: &mut B) -> Flow<B> {
+    let x = read(b, Gpr(0));
+    let y = read(b, Gpr(1));
+    let x64 = b.zext::<W32, W64>(x);
+    let y64 = b.zext::<W32, W64>(y);
+    let p = b.mul::<W64>(x64, y64);
+    let lo32: B::V<W32> = b.trunc::<W64, W32>(p);
+    write(b, Gpr(0), lo32);
+    let shift = b.konst::<W64>(32);
+    let hi64 = b.shr_l::<W64>(p, shift);
+    let hi32: B::V<W32> = b.trunc::<W64, W32>(hi64);
+    write(b, Gpr(2), hi32);
+    Ok(())
+}
+
+/// DIV EAX, ECX。EDX:EAX を符号なし除算し、商を EAX、剰余を EDX に置く。
+/// 0 除算と商あふれは実機の #DE に相当する DivZero で退出する。
+pub fn div_rm32<B: Backend>(b: &mut B, eip: u32) -> Flow<B> {
+    let lo = read(b, Gpr(0));
+    let hi = read(b, Gpr(2));
+    let y = read(b, Gpr(1));
+    let hi64 = b.zext::<W32, W64>(hi);
+    let shift = b.konst::<W64>(32);
+    let hi_sh = b.shl::<W64>(hi64, shift);
+    let lo64 = b.zext::<W32, W64>(lo);
+    let dvd = b.or::<W64>(hi_sh, lo64);
+    let dvs = b.zext::<W32, W64>(y);
+    let zero64 = b.konst::<W64>(0);
+    let is_zero = b.cmp::<W64>(Cmp::Eq, dvs, zero64);
+    b.if_then(is_zero, |b| Err(div0(b, eip)))?;
+    let q64 = b.udiv::<W64>(dvd, dvs);
+    let r64 = b.urem::<W64>(dvd, dvs);
+    let qhi = b.shr_l::<W64>(q64, shift);
+    let over = b.cmp::<W64>(Cmp::Ne, qhi, zero64);
+    b.if_then(over, |b| Err(div0(b, eip)))?;
+    let q32: B::V<W32> = b.trunc::<W64, W32>(q64);
+    let r32: B::V<W32> = b.trunc::<W64, W32>(r64);
+    write(b, Gpr(0), q32);
+    write(b, Gpr(2), r32);
+    Ok(())
+}
+
+/// IDIV EAX, ECX。EDX:EAX を符号付き除算し、商を EAX、剰余を EDX に置く。
+/// 0 除算と INT_MIN/(-1) の商あふれは DivZero で退出する。
+pub fn idiv_rm32<B: Backend>(b: &mut B, eip: u32) -> Flow<B> {
+    let lo = read(b, Gpr(0));
+    let hi = read(b, Gpr(2));
+    let y = read(b, Gpr(1));
+    let hi64 = b.sext::<W32, W64>(hi);
+    let shift = b.konst::<W64>(32);
+    let hi_sh = b.shl::<W64>(hi64, shift);
+    let lo64 = b.zext::<W32, W64>(lo);
+    let dvd = b.or::<W64>(hi_sh, lo64);
+    let y64 = b.sext::<W32, W64>(y);
+    let zero64 = b.konst::<W64>(0);
+    let is_zero = b.cmp::<W64>(Cmp::Eq, y64, zero64);
+    b.if_then(is_zero, |b| Err(div0(b, eip)))?;
+    let q64 = b.sdiv::<W64>(dvd, y64);
+    // 商が 32 ビット符号付きに収まらなければ #DE と同じ扱いにする。
+    // INT32_MIN / -1（商 +2^31）などがここに当たる。
+    let q32x: B::V<W32> = b.trunc::<W64, W32>(q64);
+    let qfull = b.sext::<W32, W64>(q32x);
+    let over = b.cmp::<W64>(Cmp::Ne, qfull, q64);
+    b.if_then(over, |b| Err(div0(b, eip)))?;
+    let r64 = b.srem::<W64>(dvd, y64);
+    let q32: B::V<W32> = b.trunc::<W64, W32>(q64);
+    let r32: B::V<W32> = b.trunc::<W64, W32>(r64);
+    write(b, Gpr(0), q32);
+    write(b, Gpr(2), r32);
+    Ok(())
+}
+
+/// 実機の #DE（0 除算・商あふれ）に相当する退出。
+fn div0<B: Backend>(b: &mut B, eip: u32) -> B::Exit {
+    b.raise(GuestException {
+        kind: ExceptionKind::DivZero,
+        code: 0,
+        addr: Some(eip as u64),
+        in_delay_slot: false,
+    })
+}
+
 /// MOV EAX, imm32。
 pub fn mov_eax<B: Backend>(b: &mut B, imm: u32) -> Flow<B> {
     let v = b.konst::<W32>(imm);

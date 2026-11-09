@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! x86 最小のゲスト ISA。段階4の最小であり、可変長デコードを確かめる。
 //!
-//! i386 の汎用レジスタ系78件のみ持つ。SIB のスケール・disp32・絶対番地と Rust フック・
+//! i386 の汎用レジスタ系81件のみ持つ。SIB のスケール・disp32・絶対番地と Rust フック・
 //! EFLAGS(SF/OF/PF/AF)・64ビット・x87・SSE・セグメントは本格実装で足す。
 //! SYSCALL/CPUID は最小形、ModRM は register-direct・mod=01+disp8・SIB base+index 最小形・SIB+disp8・SIB スケール付き(ss=01/10/11)を持つ。
 
@@ -54,8 +54,8 @@ mod tests {
 
     #[test]
     fn insn_count() {
-        // 試作の整数78件。
-        assert_eq!(INSNS.len(), 78);
+        // 試作の整数81件。
+        assert_eq!(INSNS.len(), 81);
     }
 
     #[test]
@@ -176,6 +176,13 @@ mod tests {
         assert_eq!(decode(0x8B44_3310, 32), Some(Insn::MovEaxSibd));
         assert_eq!(decode(0x8944_33F0, 32), Some(Insn::MovSibdEax));
         assert_eq!(decode(0x8B44_3400, 32), None);
+        // MUL/DIV/IDIV EAX,ECX (F7 /4,/6,/7)。ModRM の reg フィールドで区別する。
+        // F7 E0 (/4 rm=000) は未対応の別命令であり一致しない。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0xF7E1, 16), Some(Insn::MulRm32));
+        assert_eq!(decode(0xF7F1, 16), Some(Insn::DivRm32));
+        assert_eq!(decode(0xF7F9, 16), Some(Insn::IdivRm32));
+        assert_eq!(decode(0xF7E0, 16), None);
         // SIB スケール付き（ss=01/10/11）：*2=0x73、*4=0xB3、*8=0xF3。
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x8B44_7310, 32), Some(Insn::MovEaxSibS2));

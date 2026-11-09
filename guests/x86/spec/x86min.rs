@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // x86 最小の ISADL モデル（段階4の最小）。
 //
-// i386 の整数78件に絞る。可変長（8/16/24/32/40ビット）のデコード入口と
+// i386 の整数81件に絞る。可変長（8/16/24/32/40ビット）のデコード入口と
 // ModRM register-direct の最小形を確かめる。
 // ModRM の disp32・絶対番地・スケール付き SIB と Rust フック・遅延フラグ・x87・SSE・
 // 64ビット・セグメントは本格実装で足す。
@@ -21,7 +21,7 @@ use polyisa_isadl::pred::Pred;
 pub fn build_model() -> polyisa_isadl::Model {
     let mut m = polyisa_isadl::Model::new();
 
-    for class in ["alu", "jump", "system", "load", "store"] {
+    for class in ["alu", "jump", "system", "load", "store", "mult", "div"] {
         m.timing_classes.push(class.to_string());
     }
 
@@ -89,6 +89,9 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("mov_sib_s4_eax", "F1", "10001001 01000100 10110011 ........", "mov [ebx+esi*4+disp8], eax", "store"),
         ("mov_eax_sib_s8", "F1", "10001011 01000100 11110011 ........", "mov eax, [ebx+esi*8+disp8]", "load"),
         ("mov_sib_s8_eax", "F1", "10001001 01000100 11110011 ........", "mov [ebx+esi*8+disp8], eax", "store"),
+        ("mul_rm32", "F1", "11110111 11100001", "mul eax, ecx", "mult"),
+        ("div_rm32", "F1", "11110111 11110001", "div eax, ecx", "div"),
+        ("idiv_rm32", "F1", "11110111 11111001", "idiv eax, ecx", "div"),
         ("push_eax", "F1", "01010000", "push eax", "store"),
         ("push_ecx", "F1", "01010001", "push ecx", "store"),
         ("push_edx", "F1", "01010010", "push edx", "store"),
