@@ -726,11 +726,119 @@ pub fn shr_eax<B: Backend>(b: &mut B, n: u8) -> Flow<B> {
     Ok(())
 }
 
-/// LEA EAX, [EBX+disp8]。メモリに触れず実効アドレスを入れる。
-pub fn lea_eax<B: Backend>(b: &mut B, disp: i8) -> Flow<B> {
+/// LEA r32, [EBX+disp8]。メモリに触れず実効アドレスを dst に入れる。
+pub fn lea_m8<B: Backend>(b: &mut B, dst: Gpr, disp: i8) -> Flow<B> {
     let addr32 = eff_addr(b, Gpr(3), disp);
-    write(b, Gpr(0), addr32);
+    write(b, dst, addr32);
     Ok(())
+}
+
+/// LEA r32, [EBX+disp32]。
+pub fn lea_m32<B: Backend>(b: &mut B, dst: Gpr, disp: i32) -> Flow<B> {
+    let addr32 = eff_addr32(b, Gpr(3), disp);
+    write(b, dst, addr32);
+    Ok(())
+}
+
+/// LEA r32, [disp32] (絶対番地)。
+pub fn lea_abs<B: Backend>(b: &mut B, dst: Gpr, addr: u32) -> Flow<B> {
+    let addr32 = b.konst::<W32>(addr);
+    write(b, dst, addr32);
+    Ok(())
+}
+
+/// LEA r32, [EBX+ESI]。
+pub fn lea_sib<B: Backend>(b: &mut B, dst: Gpr) -> Flow<B> {
+    let base = read(b, Gpr(3));
+    let idx = read(b, Gpr(6));
+    let addr32 = b.add::<W32>(base, idx);
+    write(b, dst, addr32);
+    Ok(())
+}
+
+/// LEA r32, [EBX+ESI+disp8]。
+pub fn lea_sibd<B: Backend>(b: &mut B, dst: Gpr, disp: i8) -> Flow<B> {
+    let base = read(b, Gpr(3));
+    let idx = read(b, Gpr(6));
+    let sum = b.add::<W32>(base, idx);
+    let d = b.konst::<W32>(disp as i32 as u32);
+    let addr32 = b.add::<W32>(sum, d);
+    write(b, dst, addr32);
+    Ok(())
+}
+
+/// LEA r32, [EBX+ESI*scale+disp8]。scale は 1/2/4/8 のいずれか。
+fn lea_sib_scaled<B: Backend>(b: &mut B, dst: Gpr, shift: u32, disp: i32) -> Flow<B> {
+    let addr32 = sib_addr_scaled(b, shift, disp);
+    write(b, dst, addr32);
+    Ok(())
+}
+
+/// LEA r32, [EBX+ESI*2+disp8]。
+pub fn lea_sib_s2<B: Backend>(b: &mut B, dst: Gpr, disp: i8) -> Flow<B> {
+    lea_sib_scaled(b, dst, 1, disp as i32)
+}
+
+/// LEA r32, [EBX+ESI*4+disp8]。
+pub fn lea_sib_s4<B: Backend>(b: &mut B, dst: Gpr, disp: i8) -> Flow<B> {
+    lea_sib_scaled(b, dst, 2, disp as i32)
+}
+
+/// LEA r32, [EBX+ESI*8+disp8]。
+pub fn lea_sib_s8<B: Backend>(b: &mut B, dst: Gpr, disp: i8) -> Flow<B> {
+    lea_sib_scaled(b, dst, 3, disp as i32)
+}
+
+/// LEA r32, [EBX+ESI*2] (disp なし)。
+pub fn lea_sib_s2nd<B: Backend>(b: &mut B, dst: Gpr) -> Flow<B> {
+    lea_sib_scaled(b, dst, 1, 0)
+}
+
+/// LEA r32, [EBX+ESI*4] (disp なし)。
+pub fn lea_sib_s4nd<B: Backend>(b: &mut B, dst: Gpr) -> Flow<B> {
+    lea_sib_scaled(b, dst, 2, 0)
+}
+
+/// LEA r32, [EBX+ESI*8] (disp なし)。
+pub fn lea_sib_s8nd<B: Backend>(b: &mut B, dst: Gpr) -> Flow<B> {
+    lea_sib_scaled(b, dst, 3, 0)
+}
+
+/// LEA r32, [EBX+ESI*2+disp32]。
+pub fn lea_sib_s2d32<B: Backend>(b: &mut B, dst: Gpr, disp: i32) -> Flow<B> {
+    lea_sib_scaled(b, dst, 1, disp)
+}
+
+/// LEA r32, [EBX+ESI*4+disp32]。
+pub fn lea_sib_s4d32<B: Backend>(b: &mut B, dst: Gpr, disp: i32) -> Flow<B> {
+    lea_sib_scaled(b, dst, 2, disp)
+}
+
+/// LEA r32, [EBX+ESI*8+disp32]。
+pub fn lea_sib_s8d32<B: Backend>(b: &mut B, dst: Gpr, disp: i32) -> Flow<B> {
+    lea_sib_scaled(b, dst, 3, disp)
+}
+
+/// LEA r32, [ESI*scale+disp32] (直接番地 base)。scale は 1/2/4/8 のいずれか。
+fn lea_sib_scaled_abs<B: Backend>(b: &mut B, dst: Gpr, shift: u32, disp: i32) -> Flow<B> {
+    let addr32 = sib_addr_scaled_abs(b, shift, disp);
+    write(b, dst, addr32);
+    Ok(())
+}
+
+/// LEA r32, [ESI*2+disp32]。
+pub fn lea_sib_s2a32<B: Backend>(b: &mut B, dst: Gpr, disp: i32) -> Flow<B> {
+    lea_sib_scaled_abs(b, dst, 1, disp)
+}
+
+/// LEA r32, [ESI*4+disp32]。
+pub fn lea_sib_s4a32<B: Backend>(b: &mut B, dst: Gpr, disp: i32) -> Flow<B> {
+    lea_sib_scaled_abs(b, dst, 2, disp)
+}
+
+/// LEA r32, [ESI*8+disp32]。
+pub fn lea_sib_s8a32<B: Backend>(b: &mut B, dst: Gpr, disp: i32) -> Flow<B> {
+    lea_sib_scaled_abs(b, dst, 3, disp)
 }
 
 /// CMP r/m32, r32。dst は変えず ZF/CF だけ更新する。

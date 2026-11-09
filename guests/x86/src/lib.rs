@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! x86 最小のゲスト ISA。段階4の最小であり、可変長デコードを確かめる。
 //!
-//! i386 の汎用レジスタ系104件のみ持つ。SIB+disp32 と Rust フック・
+//! i386 の汎用レジスタ系120件のみ持つ。SIB+disp32 と Rust フック・
 //! EFLAGS(SF/OF/PF/AF)・64ビット・x87・SSE・セグメントは本格実装で足す。
 //! SYSCALL/CPUID は最小形、ModRM は register-direct（全組合せ）・mod=01+disp8・
 //! mod=10+disp32・絶対番地と SIB base+index 形（スケール付き、disp8 の有無は問わない）を持つ。
@@ -55,8 +55,8 @@ mod tests {
 
     #[test]
     fn insn_count() {
-        // 試作の整数104件。
-        assert_eq!(INSNS.len(), 104);
+        // 試作の整数120件。
+        assert_eq!(INSNS.len(), 120);
     }
 
     #[test]
@@ -169,17 +169,34 @@ mod tests {
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0xCD80, 16), Some(Insn::Int80));
         assert_eq!(decode(0xCD81, 16), None);
-        // LEA EAX,[EBX+disp8] (8D 43 ib) と reg/reg 形 CMP/AND/OR (39/21/09 /r)。
+        // LEA r32 (8D /r、dst=reg)：EBX+disp8・EBX+disp32・絶対番地・SIB 各形。
         // Ref: SPEC-X86-INTEL-SDM (v093).
-        assert_eq!(decode(0x008D_4310, 24), Some(Insn::LeaEax));
+        assert_eq!(decode(0x008D_4310, 24), Some(Insn::LeaM8));
+        assert_eq!(decode(0x008D_4B10, 24), Some(Insn::LeaM8));
+        assert_eq!(decode(0x008D_8310, 24), None);
+        assert_eq!(decode(0x8D83_7856_3412, 48), Some(Insn::LeaM32));
+        assert_eq!(decode(0x8D05_7856_3412, 48), Some(Insn::LeaAbs));
+        assert_eq!(decode(0x008D_0433, 24), Some(Insn::LeaSib));
+        assert_eq!(decode(0x8D44_3310, 32), Some(Insn::LeaSibd));
+        assert_eq!(decode(0x8D44_7310, 32), Some(Insn::LeaSibS2));
+        assert_eq!(decode(0x8D44_B310, 32), Some(Insn::LeaSibS4));
+        assert_eq!(decode(0x8D44_F310, 32), Some(Insn::LeaSibS8));
+        assert_eq!(decode(0x008D_0473, 24), Some(Insn::LeaSibS2nd));
+        assert_eq!(decode(0x008D_04B3, 24), Some(Insn::LeaSibS4nd));
+        assert_eq!(decode(0x008D_04F3, 24), Some(Insn::LeaSibS8nd));
+        assert_eq!(decode(0x008D_8473_1000_0000, 56), Some(Insn::LeaSibS2d32));
+        assert_eq!(decode(0x008D_84B3_1000_0000, 56), Some(Insn::LeaSibS4d32));
+        assert_eq!(decode(0x008D_84F3_1000_0000, 56), Some(Insn::LeaSibS8d32));
+        assert_eq!(decode(0x008D_0475_1000_0000, 56), Some(Insn::LeaSibS2a32));
+        assert_eq!(decode(0x008D_04B5_1000_0000, 56), Some(Insn::LeaSibS4a32));
+        assert_eq!(decode(0x008D_04F5_1000_0000, 56), Some(Insn::LeaSibS8a32));
         assert_eq!(decode(0x39C8, 16), Some(Insn::CmpRm32));
         assert_eq!(decode(0x39D8, 16), Some(Insn::CmpRm32));
         assert_eq!(decode(0x21C8, 16), Some(Insn::AndRm32));
         assert_eq!(decode(0x21D8, 16), Some(Insn::AndRm32));
         assert_eq!(decode(0x09C8, 16), Some(Insn::OrRm32));
         assert_eq!(decode(0x09D8, 16), Some(Insn::OrRm32));
-        // mod=10 (disp32) や mod=01 は register-direct ではなく一致しない。
-        assert_eq!(decode(0x008D_8310, 24), None);
+        // mod=01 の 39 /r は register-direct ではなく一致しない。
         assert_eq!(decode(0x397C, 16), None);
         // SIB base+index 最小形：MOV EAX,[EBX+ESI] (8B 04 33) と MOV [EBX+ESI],EAX (89 04 33)。
         assert_eq!(decode(0x008B_0433, 24), Some(Insn::MovEaxSib));

@@ -226,7 +226,7 @@ pub fn run(env: &mut BareEnv, entry: u32, sys: &mut impl TrapHandler, limit: u64
         // 意味論が分岐を取ると backend.ctrl に Jump が残る（取らなければ
         // Fallthrough）。eip 等値での判定は自己ループで誤るため使わない。
         use polyisa_engine::interp::Ctrl;
-        let r = env.step(|b| dispatch(b, insn, eip, word, imm32, disp8));
+        let r = env.step(|b| dispatch(b, insn, eip, word, nbytes, imm32, disp8));
         match r {
             Ok(()) => match env.backend.ctrl {
                 Ctrl::Jump(_) => {}
@@ -270,13 +270,15 @@ fn dispatch<B: Backend>(
     insn: Insn,
     eip: u32,
     word: u128,
+    nbytes: u64,
     imm32: impl Fn() -> u32,
     disp8: impl Fn() -> i8,
 ) -> Result<(), B::Exit> {
     use polyisa_guest_x86::sem::Gpr;
     let disp32 = || imm32() as i32;
-    // ModRM register-direct の reg/rm 抽出。word 下位8ビットが ModRM。
-    let modrm = || (word & 0xff) as u8;
+    // ModRM register-direct の reg/rm 抽出。ModRM は先頭から2バイト目にあり、
+    // word（opcode 上位詰め）内の位置は命令長で決まる。
+    let modrm = || ((word >> ((nbytes - 2) * 8)) & 0xff) as u8;
     let reg = || Gpr((modrm() >> 3) & 7);
     let rm = || Gpr(modrm() & 7);
     match insn {
@@ -374,7 +376,23 @@ fn dispatch<B: Backend>(
         Insn::ShlEax => sem::shl_eax(b, word as u8),
         Insn::ShrEax => sem::shr_eax(b, word as u8),
         Insn::Int80 => sem::int80(b, eip),
-        Insn::LeaEax => sem::lea_eax(b, disp8()),
+        Insn::LeaM8 => sem::lea_m8(b, reg(), disp8()),
+        Insn::LeaM32 => sem::lea_m32(b, reg(), disp32()),
+        Insn::LeaAbs => sem::lea_abs(b, reg(), imm32()),
+        Insn::LeaSib => sem::lea_sib(b, reg()),
+        Insn::LeaSibd => sem::lea_sibd(b, reg(), disp8()),
+        Insn::LeaSibS2 => sem::lea_sib_s2(b, reg(), disp8()),
+        Insn::LeaSibS4 => sem::lea_sib_s4(b, reg(), disp8()),
+        Insn::LeaSibS8 => sem::lea_sib_s8(b, reg(), disp8()),
+        Insn::LeaSibS2nd => sem::lea_sib_s2nd(b, reg()),
+        Insn::LeaSibS4nd => sem::lea_sib_s4nd(b, reg()),
+        Insn::LeaSibS8nd => sem::lea_sib_s8nd(b, reg()),
+        Insn::LeaSibS2d32 => sem::lea_sib_s2d32(b, reg(), disp32()),
+        Insn::LeaSibS4d32 => sem::lea_sib_s4d32(b, reg(), disp32()),
+        Insn::LeaSibS8d32 => sem::lea_sib_s8d32(b, reg(), disp32()),
+        Insn::LeaSibS2a32 => sem::lea_sib_s2a32(b, reg(), disp32()),
+        Insn::LeaSibS4a32 => sem::lea_sib_s4a32(b, reg(), disp32()),
+        Insn::LeaSibS8a32 => sem::lea_sib_s8a32(b, reg(), disp32()),
         Insn::CmpRm32 => sem::cmp_rm32(b, rm(), reg()),
         Insn::AndRm32 => sem::and_rm32(b, rm(), reg()),
         Insn::OrRm32 => sem::or_rm32(b, rm(), reg()),

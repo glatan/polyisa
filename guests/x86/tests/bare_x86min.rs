@@ -358,10 +358,10 @@ fn lea_and_reg_logic() {
     let mut env = env();
     // LEA EAX,[EBX+disp8]：メモリに触れず EBX+0x10。
     env.backend.set(Gpr(3).state(), 0x100);
-    env.step(|b| sem::lea_eax(b, 0x10)).unwrap();
+    env.step(|b| sem::lea_m8(b, Gpr(0), 0x10)).unwrap();
     assert_eq!(eax(&mut env), 0x110);
     // disp=-1：0xFF。
-    env.step(|b| sem::lea_eax(b, -1)).unwrap();
+    env.step(|b| sem::lea_m8(b, Gpr(0), -1)).unwrap();
     assert_eq!(eax(&mut env), 0xFF);
     // CMP EAX,ECX：5 vs 5 で ZF=1、CF=0。EAX 不変。
     env.backend.set(Gpr(0).state(), 5);
@@ -385,7 +385,7 @@ fn lea_and_reg_logic() {
     // OR EAX,ECX：0 | 0xff = 0xff、ZF=0。LEA は EFLAGS を変えない。
     env.backend.set(Gpr(3).state(), 0x100);
     env.backend.set(sem::eflags_ref(), 0);
-    env.step(|b| sem::lea_eax(b, 0x10)).unwrap();
+    env.step(|b| sem::lea_m8(b, Gpr(0), 0x10)).unwrap();
     assert_eq!(eax(&mut env), 0x110);
     assert_eq!(env.backend.get(sem::eflags_ref()), 0);
     env.backend.set(Gpr(0).state(), 0);
@@ -394,6 +394,40 @@ fn lea_and_reg_logic() {
     assert_eq!(eax(&mut env), 0xff);
     assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0);
     assert_eq!(env.backend.get(sem::eflags_ref()) & 0x1, 0);
+}
+
+#[test]
+fn lea_matrix() {
+    // LEA 全番地形の行列：dst 任意、メモリに触れない。
+    let mut env = env();
+    env.map_rw(0, 1).unwrap();
+    // EBX=0x100、ESI=0x10。dst=ECX に入れる。
+    env.backend.set(Gpr(3).state(), 0x100);
+    env.backend.set(Gpr(6).state(), 0x10);
+    env.step(|b| sem::lea_m8(b, Gpr(1), 0x10)).unwrap();
+    assert_eq!(env.backend.get(Gpr(1).state()), 0x110);
+    env.step(|b| sem::lea_m32(b, Gpr(1), 0x20)).unwrap();
+    assert_eq!(env.backend.get(Gpr(1).state()), 0x120);
+    env.step(|b| sem::lea_abs(b, Gpr(1), 0x300)).unwrap();
+    assert_eq!(env.backend.get(Gpr(1).state()), 0x300);
+    env.step(|b| sem::lea_sib(b, Gpr(1))).unwrap();
+    assert_eq!(env.backend.get(Gpr(1).state()), 0x110);
+    env.step(|b| sem::lea_sibd(b, Gpr(1), 0x10)).unwrap();
+    assert_eq!(env.backend.get(Gpr(1).state()), 0x120);
+    // スケール付き：*4 で [0x140+disp]。
+    env.step(|b| sem::lea_sib_s4(b, Gpr(1), 0x10)).unwrap();
+    assert_eq!(env.backend.get(Gpr(1).state()), 0x150);
+    env.step(|b| sem::lea_sib_s4nd(b, Gpr(1))).unwrap();
+    assert_eq!(env.backend.get(Gpr(1).state()), 0x140);
+    env.step(|b| sem::lea_sib_s4d32(b, Gpr(1), 0x20)).unwrap();
+    assert_eq!(env.backend.get(Gpr(1).state()), 0x160);
+    env.step(|b| sem::lea_sib_s4a32(b, Gpr(1), 0x200)).unwrap();
+    assert_eq!(env.backend.get(Gpr(1).state()), 0x240);
+    // *2/*8 の代表：disp なし。
+    env.step(|b| sem::lea_sib_s2nd(b, Gpr(2))).unwrap();
+    assert_eq!(env.backend.get(Gpr(2).state()), 0x120);
+    env.step(|b| sem::lea_sib_s8nd(b, Gpr(2))).unwrap();
+    assert_eq!(env.backend.get(Gpr(2).state()), 0x180);
 }
 
 #[test]
