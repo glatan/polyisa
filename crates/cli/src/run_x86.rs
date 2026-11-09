@@ -173,13 +173,26 @@ fn fetch_len(
                 } else {
                     Some(3)
                 }
-            } else if matches!(
-                s,
-                0x60 | 0x61 | 0x62 | 0x6C | 0xDB | 0xEF | 0x74 | 0xEB | 0xD7
-            ) {
+            } else if matches!(s, 0x60 | 0x61 | 0x62 | 0x6C | 0xDB | 0xEF | 0xD7) {
                 // XMM reg-direct のみ（66 接頭辞は剥がし済み）。
                 let m = third?;
                 if m >> 6 == 3 { Some(3) } else { None }
+            } else if s == 0x74 || s == 0xEB {
+                // PCMPEQB/POR xmm,m128 (66 0F 74/EB /r)。reg-direct と mod=00/01/10 (SIBなし).
+                let m = third?;
+                let md = m >> 6;
+                let rm = m & 7;
+                if md == 3 {
+                    Some(3)
+                } else if rm == 4 {
+                    None
+                } else if md == 1 {
+                    Some(4)
+                } else if md == 2 || rm == 5 {
+                    Some(7)
+                } else {
+                    Some(3)
+                }
             } else if s == 0x7E {
                 // MOVQ r64,xmm (reg-direct) と MOVQ xmm,m64 RIP (mod=00 rm=101)。
                 // F3/66 接頭辞は剥がし済み。REX.W は dispatch で見る。
@@ -1001,6 +1014,12 @@ pub fn run_mode(
                     | Insn::Pcmpeqb
                     | Insn::Por
                     | Insn::Pmovmskb
+                    | Insn::PcmpeqbMemnd
+                    | Insn::PcmpeqbMem8
+                    | Insn::PcmpeqbMem32
+                    | Insn::PorMemnd
+                    | Insn::PorMem8
+                    | Insn::PorMem32
                     | Insn::Punpcklqdq
                     | Insn::MovqR64Xmm
                     | Insn::MovupsLoadXmm
@@ -1053,6 +1072,12 @@ pub fn run_mode(
                     | Insn::Pcmpeqb
                     | Insn::Por
                     | Insn::Pmovmskb
+                    | Insn::PcmpeqbMemnd
+                    | Insn::PcmpeqbMem8
+                    | Insn::PcmpeqbMem32
+                    | Insn::PorMemnd
+                    | Insn::PorMem8
+                    | Insn::PorMem32
                     | Insn::Punpcklqdq
                     | Insn::MovqR64Xmm
                     | Insn::MovRm16ImmM32
@@ -1646,6 +1671,13 @@ fn dispatch<B: Backend>(
                 sem::call_r64_mem8(b, eip as u64 + nbytes, rm(), disp8())
             } else {
                 sem::call_r32_mem8(b, eip.wrapping_add(nbytes as u32), rm(), disp8())
+            }
+        }
+        Insn::CallRRip => {
+            if is64 {
+                sem::call_r64_rip(b, eip as u64 + nbytes, eip as u64 + nbytes, disp32())
+            } else {
+                sem::call_r32_abs(b, eip.wrapping_add(nbytes as u32), imm32())
             }
         }
         Insn::JmpRRm => {
@@ -2711,6 +2743,12 @@ fn dispatch<B: Backend>(
         Insn::Pand => sem::pand_xmm(b, xmm_reg(), xmm_rm()),
         Insn::Pcmpeqb => sem::pcmpeqb_xmm(b, xmm_reg(), xmm_rm()),
         Insn::Por => sem::por_xmm(b, xmm_reg(), xmm_rm()),
+        Insn::PcmpeqbMemnd => sem::pcmpeqb_xmm_memnd(b, xmm_reg(), rm0f()),
+        Insn::PcmpeqbMem8 => sem::pcmpeqb_xmm_mem8(b, xmm_reg(), rm0f(), disp8()),
+        Insn::PcmpeqbMem32 => sem::pcmpeqb_xmm_mem32(b, xmm_reg(), rm0f(), disp32()),
+        Insn::PorMemnd => sem::por_xmm_memnd(b, xmm_reg(), rm0f()),
+        Insn::PorMem8 => sem::por_xmm_mem8(b, xmm_reg(), rm0f(), disp8()),
+        Insn::PorMem32 => sem::por_xmm_mem32(b, xmm_reg(), rm0f(), disp32()),
         Insn::Pmovmskb => {
             if rex_w {
                 sem::pmovmskb_r64(b, reg0f_as_gpr(), xmm_rm())
@@ -3692,6 +3730,7 @@ pub fn run_image_x86_64(
         image_end = image_end.max(ph.vaddr.saturating_add(ph.memsz));
     }
     sys.init_brk(image_end);
+    sys.exe_path = prog.to_string();
     let top = 0x7fff_0000u64;
     let mut arg_bytes = vec![prog.as_bytes().to_vec()];
     for a in argv {
@@ -3770,6 +3809,8 @@ pub struct CliLinux {
     robust_head: u64,
     /// rseq 領域先頭。rseq で記録する。終了時の書き戻しは未対応.
     rseq_addr: u64,
+    /// ゲスト実行ファイルのホストパス。/proc/self/exe の readlinkat に答える.
+    exe_path: String,
 }
 
 impl CliLinux {
@@ -3813,6 +3854,7 @@ const IO_CHUNK: usize = 65536;
 const ENOENT: u32 = 2;
 const EBADF: u32 = 9;
 const EACCES: u32 = 13;
+const ENOMEM: u32 = 12;
 const EINVAL: u32 = 22;
 
 fn neg_errno(n: u32) -> u32 {
@@ -4024,8 +4066,289 @@ impl TrapHandler for CliLinux {
             set64(env, Gpr(0), done);
             return TrapOutcome::Handled;
         }
+        // writev/readv (x86-64: 20/19, i386: 146/145)。iovec 配列を辿って転送する.
+        // fd 1/2 (writev) と opened fd/stdin (readv) のみ受け付ける.
+        let (n_readv, n_writev) = if self.is64 {
+            use polyisa_os_linux::x86_64 as abi;
+            (abi::READV, abi::WRITEV)
+        } else {
+            use polyisa_os_linux::i386 as abi;
+            (abi::READV, abi::WRITEV)
+        };
+        if nr == n_writev {
+            let fd = get64(env, r_a) as u32;
+            let iov = get64(env, r_b);
+            let iovcnt = get64(env, r_c);
+            if fd != 1 && fd != 2 {
+                set64(env, Gpr(0), neg(EBADF));
+                return TrapOutcome::Handled;
+            }
+            const IOV_MAX: u64 = 1024;
+            if iovcnt > IOV_MAX {
+                set64(env, Gpr(0), neg(EINVAL));
+                return TrapOutcome::Handled;
+            }
+            let mut done = 0u64;
+            let mut chunk = vec![0u8; IO_CHUNK];
+            for idx in 0..iovcnt {
+                let (base, len) = if self.is64 {
+                    let mut ent = [0u8; 16];
+                    if env
+                        .backend
+                        .mem
+                        .read(VirtAddr(iov + idx * 16), &mut ent, data_access())
+                        .is_err()
+                    {
+                        return TrapOutcome::Unimplemented;
+                    }
+                    (
+                        u64::from_le_bytes(ent[..8].try_into().unwrap()),
+                        u64::from_le_bytes(ent[8..].try_into().unwrap()),
+                    )
+                } else {
+                    let mut ent = [0u8; 8];
+                    if env
+                        .backend
+                        .mem
+                        .read(VirtAddr(iov + idx * 8), &mut ent, data_access())
+                        .is_err()
+                    {
+                        return TrapOutcome::Unimplemented;
+                    }
+                    (
+                        u64::from(u32::from_le_bytes(ent[..4].try_into().unwrap())),
+                        u64::from(u32::from_le_bytes(ent[4..].try_into().unwrap())),
+                    )
+                };
+                let mut left = len;
+                let mut off = 0u64;
+                while left > 0 {
+                    let take = left.min(IO_CHUNK as u64) as usize;
+                    if env
+                        .backend
+                        .mem
+                        .read(VirtAddr(base + off), &mut chunk[..take], data_access())
+                        .is_err()
+                    {
+                        return TrapOutcome::Unimplemented;
+                    }
+                    let n = match fd {
+                        1 => std::io::Write::write(&mut std::io::stdout(), &chunk[..take])
+                            .unwrap_or(0),
+                        _ => std::io::Write::write(&mut std::io::stderr(), &chunk[..take])
+                            .unwrap_or(0),
+                    };
+                    done += n as u64;
+                    left -= n as u64;
+                    off += n as u64;
+                    if n < take {
+                        break;
+                    }
+                }
+            }
+            set64(env, Gpr(0), done);
+            return TrapOutcome::Handled;
+        }
+        if nr == n_readv {
+            let fd = get64(env, r_a) as u32;
+            let iov = get64(env, r_b);
+            let iovcnt = get64(env, r_c);
+            const IOV_MAX: u64 = 1024;
+            if iovcnt > IOV_MAX {
+                set64(env, Gpr(0), neg(EINVAL));
+                return TrapOutcome::Handled;
+            }
+            let slot = fd.wrapping_sub(3) as usize;
+            let is_stdin = fd == 0;
+            if !is_stdin && self.fds.get(slot).and_then(|f| f.as_ref()).is_none() {
+                set64(env, Gpr(0), neg(EBADF));
+                return TrapOutcome::Handled;
+            }
+            let mut done = 0u64;
+            let mut chunk = vec![0u8; IO_CHUNK];
+            for idx in 0..iovcnt {
+                let (base, len) = if self.is64 {
+                    let mut ent = [0u8; 16];
+                    if env
+                        .backend
+                        .mem
+                        .read(VirtAddr(iov + idx * 16), &mut ent, data_access())
+                        .is_err()
+                    {
+                        return TrapOutcome::Unimplemented;
+                    }
+                    (
+                        u64::from_le_bytes(ent[..8].try_into().unwrap()),
+                        u64::from_le_bytes(ent[8..].try_into().unwrap()),
+                    )
+                } else {
+                    let mut ent = [0u8; 8];
+                    if env
+                        .backend
+                        .mem
+                        .read(VirtAddr(iov + idx * 8), &mut ent, data_access())
+                        .is_err()
+                    {
+                        return TrapOutcome::Unimplemented;
+                    }
+                    (
+                        u64::from(u32::from_le_bytes(ent[..4].try_into().unwrap())),
+                        u64::from(u32::from_le_bytes(ent[4..].try_into().unwrap())),
+                    )
+                };
+                let mut left = len;
+                let mut off = 0u64;
+                while left > 0 {
+                    let take = left.min(IO_CHUNK as u64) as usize;
+                    let n = if is_stdin {
+                        0
+                    } else {
+                        let f = self.fds.get_mut(slot).and_then(|f| f.as_mut()).unwrap();
+                        match std::io::Read::read(f, &mut chunk[..take]) {
+                            Ok(0) => 0,
+                            Ok(n) => n,
+                            Err(_) => 0,
+                        }
+                    };
+                    if n == 0 {
+                        break;
+                    }
+                    if env
+                        .backend
+                        .mem
+                        .write(VirtAddr(base + off), &chunk[..n])
+                        .is_err()
+                    {
+                        return TrapOutcome::Unimplemented;
+                    }
+                    done += n as u64;
+                    left -= n as u64;
+                    off += n as u64;
+                    if n < take {
+                        break;
+                    }
+                }
+                // stdin は空読みとして次へ進む.
+                if is_stdin {
+                    continue;
+                }
+            }
+            set64(env, Gpr(0), done);
+            return TrapOutcome::Handled;
+        }
         if nr == n_exit || nr == n_exit_group {
             return TrapOutcome::Exit(get64(env, r_a) as u32);
+        }
+        if self.is64 && nr == polyisa_os_linux::x86_64::MMAP {
+            // mmap(addr, len, prot, flags, fd, offset)。匿名のみ受け付ける.
+            // ファイル-backed は未対応のため EINVAL.
+            // prot は寛容に RW で写像する (PROT_NONE 予約後の mprotect 前でも動くため).
+            use polyisa_mem::{PAGE_SIZE, Perms, VirtAddr};
+            let addr = get64(env, Gpr(7));
+            let len = get64(env, Gpr(6));
+            let _prot = get64(env, Gpr(2));
+            let flags = get64(env, Gpr(10));
+            let fd = get64(env, Gpr(8)) as i64;
+            let offset = get64(env, Gpr(9));
+            const MAP_ANONYMOUS: u64 = 0x20;
+            const MAP_FIXED: u64 = 0x10;
+            if len == 0 {
+                set64(env, Gpr(0), neg(EINVAL));
+                return TrapOutcome::Handled;
+            }
+            if offset & (PAGE_SIZE - 1) != 0 {
+                set64(env, Gpr(0), neg(EINVAL));
+                return TrapOutcome::Handled;
+            }
+            if flags & MAP_ANONYMOUS == 0 && fd != -1 {
+                set64(env, Gpr(0), neg(EINVAL));
+                return TrapOutcome::Handled;
+            }
+            // 拡張しすぎは失敗扱い.
+            const MAX_MMAP: u64 = 1024 * 1024 * 1024;
+            if len > MAX_MMAP {
+                set64(env, Gpr(0), neg(ENOMEM));
+                return TrapOutcome::Handled;
+            }
+            let aligned_len = len.next_multiple_of(PAGE_SIZE);
+            let count = aligned_len / PAGE_SIZE;
+            if flags & MAP_FIXED != 0 {
+                if addr & (PAGE_SIZE - 1) != 0 {
+                    set64(env, Gpr(0), neg(EINVAL));
+                    return TrapOutcome::Handled;
+                }
+                if env
+                    .backend
+                    .mem
+                    .map(VirtAddr(addr), count, Perms::RW)
+                    .is_err()
+                {
+                    set64(env, Gpr(0), neg(ENOMEM));
+                    return TrapOutcome::Handled;
+                }
+                // heap_end より後ろに伸ばしたら追随する (brk との衝突回避).
+                if self.heap_end == 0 {
+                    self.heap_end = (addr + aligned_len).next_multiple_of(PAGE_SIZE);
+                } else {
+                    self.heap_end = self
+                        .heap_end
+                        .max((addr + aligned_len).next_multiple_of(PAGE_SIZE));
+                }
+                set64(env, Gpr(0), addr);
+                return TrapOutcome::Handled;
+            }
+            if addr == 0 {
+                if self.heap_end == 0 {
+                    self.heap_end = 0x6000_0000;
+                }
+                let base = self.heap_end.next_multiple_of(PAGE_SIZE);
+                if env
+                    .backend
+                    .mem
+                    .map(VirtAddr(base), count, Perms::RW)
+                    .is_err()
+                {
+                    set64(env, Gpr(0), neg(ENOMEM));
+                    return TrapOutcome::Handled;
+                }
+                self.heap_end = base + aligned_len;
+                set64(env, Gpr(0), base);
+                return TrapOutcome::Handled;
+            }
+            // ヒント付き: 要求番地に写像を試み、駄目なら heap_end から取る.
+            let hint = addr & !(PAGE_SIZE - 1);
+            if env
+                .backend
+                .mem
+                .map(VirtAddr(hint), count, Perms::RW)
+                .is_ok()
+            {
+                if self.heap_end == 0 {
+                    self.heap_end = (hint + aligned_len).next_multiple_of(PAGE_SIZE);
+                } else {
+                    self.heap_end = self
+                        .heap_end
+                        .max((hint + aligned_len).next_multiple_of(PAGE_SIZE));
+                }
+                set64(env, Gpr(0), hint);
+                return TrapOutcome::Handled;
+            }
+            if self.heap_end == 0 {
+                self.heap_end = 0x6000_0000;
+            }
+            let base = self.heap_end.next_multiple_of(PAGE_SIZE);
+            if env
+                .backend
+                .mem
+                .map(VirtAddr(base), count, Perms::RW)
+                .is_err()
+            {
+                set64(env, Gpr(0), neg(ENOMEM));
+                return TrapOutcome::Handled;
+            }
+            self.heap_end = base + aligned_len;
+            set64(env, Gpr(0), base);
+            return TrapOutcome::Handled;
         }
         if self.is64 && nr == polyisa_os_linux::x86_64::SET_TID_ADDRESS {
             // 単一スレッド実装としてホスト PID を TID として返す。
@@ -4182,16 +4505,22 @@ impl TrapHandler for CliLinux {
                 set64(env, Gpr(0), neg(EINVAL));
                 return TrapOutcome::Handled;
             }
-            let target = match std::fs::read_link(&path) {
-                Ok(p) => p.into_os_string().into_string().unwrap_or_default(),
-                Err(e) => {
-                    let no = match e.kind() {
-                        std::io::ErrorKind::NotFound => ENOENT,
-                        std::io::ErrorKind::PermissionDenied => EACCES,
-                        _ => EINVAL,
-                    };
-                    set64(env, Gpr(0), neg(no));
-                    return TrapOutcome::Handled;
+            // /proc/self/exe はゲスト実行ファイル自身を返す (ホスト exe ではない).
+            // 空の exe_path (単体テスト) ではホストに直結する.
+            let target = if path == "/proc/self/exe" && !self.exe_path.is_empty() {
+                self.exe_path.clone()
+            } else {
+                match std::fs::read_link(&path) {
+                    Ok(p) => p.into_os_string().into_string().unwrap_or_default(),
+                    Err(e) => {
+                        let no = match e.kind() {
+                            std::io::ErrorKind::NotFound => ENOENT,
+                            std::io::ErrorKind::PermissionDenied => EACCES,
+                            _ => EINVAL,
+                        };
+                        set64(env, Gpr(0), neg(no));
+                        return TrapOutcome::Handled;
+                    }
                 }
             };
             let bytes = target.as_bytes();
@@ -4324,6 +4653,60 @@ mod tests {
             TrapOutcome::Handled
         ));
         assert_eq!(env.backend.get(Gpr(0).state()), neg_errno(EBADF));
+    }
+
+    #[test]
+    fn writev_two_iovecs() {
+        use polyisa_os_linux::x86_64 as abi;
+        let mut sys = CliLinux::x86_64();
+        let mut env = bare();
+        env.backend.mem.write(VirtAddr(0x100), b"hi").unwrap();
+        env.backend.mem.write(VirtAddr(0x110), b"!").unwrap();
+        // iov[0]={0x100,2}, iov[1]={0x110,1} at 0x200.
+        let mut iov = [0u8; 32];
+        iov[..8].copy_from_slice(&0x100u64.to_le_bytes());
+        iov[8..16].copy_from_slice(&2u64.to_le_bytes());
+        iov[16..24].copy_from_slice(&0x110u64.to_le_bytes());
+        iov[24..32].copy_from_slice(&1u64.to_le_bytes());
+        env.backend.mem.write(VirtAddr(0x200), &iov).unwrap();
+        set64(&mut env, Gpr(0), abi::WRITEV);
+        set64(&mut env, Gpr(7), 2);
+        set64(&mut env, Gpr(6), 0x200);
+        set64(&mut env, Gpr(2), 2);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 3);
+        // fd=9 は EBADF。
+        set64(&mut env, Gpr(0), abi::WRITEV);
+        set64(&mut env, Gpr(7), 9);
+        set64(&mut env, Gpr(6), 0x200);
+        set64(&mut env, Gpr(2), 2);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EBADF));
+    }
+
+    #[test]
+    fn mmap_anonymous_returns_addr() {
+        use polyisa_os_linux::x86_64 as abi;
+        let mut sys = CliLinux::x86_64();
+        sys.heap_end = 0x6000_0000;
+        let mut env = bare();
+        // mmap(NULL, 0x1000, PROT_READ|WRITE, MAP_PRIVATE|ANONYMOUS, -1, 0).
+        set64(&mut env, Gpr(0), abi::MMAP);
+        set64(&mut env, Gpr(7), 0);
+        set64(&mut env, Gpr(6), 0x1000);
+        set64(&mut env, Gpr(2), 3);
+        set64(&mut env, Gpr(10), 0x22);
+        set64(&mut env, Gpr(8), 0xffff_ffff_ffff_ffff);
+        set64(&mut env, Gpr(9), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let base = get64(&mut env, Gpr(0));
+        assert_eq!(base, 0x6000_0000);
+        // len=0 は EINVAL。
+        set64(&mut env, Gpr(0), abi::MMAP);
+        set64(&mut env, Gpr(7), 0);
+        set64(&mut env, Gpr(6), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EINVAL));
     }
 
     #[test]

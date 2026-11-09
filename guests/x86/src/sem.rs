@@ -7270,3 +7270,142 @@ pub fn add_m32_r32_abs<B: Backend>(b: &mut B, addr32: u32, src: Gpr) -> Flow<B> 
     update_add_flags(b, x, y, v);
     Ok(())
 }
+
+/// PCMPEQB xmm,[base] (66 0F 74 mod=00)。16Bロードして比較.
+pub fn pcmpeqb_xmm_memnd<B: Backend>(b: &mut B, dst: Xmm, base: Gpr) -> Flow<B> {
+    let addr = read64(b, base);
+    let c: B::V<W128> = b.load::<W128>(addr, DATA_READ)?;
+    let a: B::V<W128> = b.get(xmm_ref(dst));
+    let mut acc: B::V<W128> = b.konst::<W128>(0);
+    for i in 0..16 {
+        let shift = b.konst::<W128>(i as u128 * 8);
+        let mask = b.konst::<W128>(0xFF);
+        let ab = b.shr_l::<W128>(a, shift);
+        let cb = b.shr_l::<W128>(c, shift);
+        let ab8 = b.and::<W128>(ab, mask);
+        let cb8 = b.and::<W128>(cb, mask);
+        let eq = b.cmp::<W128>(Cmp::Eq, ab8, cb8);
+        let one = b.konst::<W128>(0xFF);
+        let zero = b.konst::<W128>(0);
+        let byte = b.select::<W128>(eq, one, zero);
+        let pos = b.shl::<W128>(byte, shift);
+        acc = b.or::<W128>(acc, pos);
+    }
+    b.set(xmm_ref(dst), acc);
+    Ok(())
+}
+
+/// PCMPEQB xmm,[base+disp8] (66 0F 74 mod=01)。
+pub fn pcmpeqb_xmm_mem8<B: Backend>(b: &mut B, dst: Xmm, base: Gpr, disp: i8) -> Flow<B> {
+    let addr = eff_addr(b, base, disp);
+    let c: B::V<W128> = b.load::<W128>(addr, DATA_READ)?;
+    let a: B::V<W128> = b.get(xmm_ref(dst));
+    let mut acc: B::V<W128> = b.konst::<W128>(0);
+    for i in 0..16 {
+        let shift = b.konst::<W128>(i as u128 * 8);
+        let mask = b.konst::<W128>(0xFF);
+        let ab = b.shr_l::<W128>(a, shift);
+        let cb = b.shr_l::<W128>(c, shift);
+        let ab8 = b.and::<W128>(ab, mask);
+        let cb8 = b.and::<W128>(cb, mask);
+        let eq = b.cmp::<W128>(Cmp::Eq, ab8, cb8);
+        let one = b.konst::<W128>(0xFF);
+        let zero = b.konst::<W128>(0);
+        let byte = b.select::<W128>(eq, one, zero);
+        let pos = b.shl::<W128>(byte, shift);
+        acc = b.or::<W128>(acc, pos);
+    }
+    b.set(xmm_ref(dst), acc);
+    Ok(())
+}
+
+/// PCMPEQB xmm,[base+disp32] (66 0F 74 mod=10)。
+pub fn pcmpeqb_xmm_mem32<B: Backend>(b: &mut B, dst: Xmm, base: Gpr, disp: i32) -> Flow<B> {
+    let addr = eff_addr32(b, base, disp);
+    let c: B::V<W128> = b.load::<W128>(addr, DATA_READ)?;
+    let a: B::V<W128> = b.get(xmm_ref(dst));
+    let mut acc: B::V<W128> = b.konst::<W128>(0);
+    for i in 0..16 {
+        let shift = b.konst::<W128>(i as u128 * 8);
+        let mask = b.konst::<W128>(0xFF);
+        let ab = b.shr_l::<W128>(a, shift);
+        let cb = b.shr_l::<W128>(c, shift);
+        let ab8 = b.and::<W128>(ab, mask);
+        let cb8 = b.and::<W128>(cb, mask);
+        let eq = b.cmp::<W128>(Cmp::Eq, ab8, cb8);
+        let one = b.konst::<W128>(0xFF);
+        let zero = b.konst::<W128>(0);
+        let byte = b.select::<W128>(eq, one, zero);
+        let pos = b.shl::<W128>(byte, shift);
+        acc = b.or::<W128>(acc, pos);
+    }
+    b.set(xmm_ref(dst), acc);
+    Ok(())
+}
+
+/// POR xmm,[base] (66 0F EB mod=00)。
+pub fn por_xmm_memnd<B: Backend>(b: &mut B, dst: Xmm, base: Gpr) -> Flow<B> {
+    let addr = read64(b, base);
+    let c: B::V<W128> = b.load::<W128>(addr, DATA_READ)?;
+    let a: B::V<W128> = b.get(xmm_ref(dst));
+    let v = b.or::<W128>(a, c);
+    b.set(xmm_ref(dst), v);
+    Ok(())
+}
+
+/// POR xmm,[base+disp8] (66 0F EB mod=01)。
+pub fn por_xmm_mem8<B: Backend>(b: &mut B, dst: Xmm, base: Gpr, disp: i8) -> Flow<B> {
+    let addr = eff_addr(b, base, disp);
+    let c: B::V<W128> = b.load::<W128>(addr, DATA_READ)?;
+    let a: B::V<W128> = b.get(xmm_ref(dst));
+    let v = b.or::<W128>(a, c);
+    b.set(xmm_ref(dst), v);
+    Ok(())
+}
+
+/// POR xmm,[base+disp32] (66 0F EB mod=10)。
+pub fn por_xmm_mem32<B: Backend>(b: &mut B, dst: Xmm, base: Gpr, disp: i32) -> Flow<B> {
+    let addr = eff_addr32(b, base, disp);
+    let c: B::V<W128> = b.load::<W128>(addr, DATA_READ)?;
+    let a: B::V<W128> = b.get(xmm_ref(dst));
+    let v = b.or::<W128>(a, c);
+    b.set(xmm_ref(dst), v);
+    Ok(())
+}
+
+/// CALL [RIP+disp32] (FF /2 RIP)。64ビット間接コール.
+pub fn call_r64_rip<B: Backend>(b: &mut B, eip_next: u64, next_rip: u64, disp: i32) -> Flow<B> {
+    let base = b.konst::<W64>(next_rip);
+    let d = b.konst::<W64>(disp as i64 as u64);
+    let addr = b.add::<W64>(base, d);
+    let target64: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let ret_addr = eip_next;
+    let rsp = read64(b, Gpr(4));
+    let eight = b.konst::<W64>(8);
+    let next = b.sub::<W64>(rsp, eight);
+    write64(b, Gpr(4), next);
+    let ret = b.konst::<W64>(ret_addr);
+    b.store::<W64>(next, ret, DATA_WRITE)?;
+    let t32: B::V<W32> = b.trunc::<W64, W32>(target64);
+    b.set(eip_ref(), t32);
+    b.jump(target64);
+    Ok(())
+}
+
+/// CALL [disp32] abs (32ビット)。
+pub fn call_r32_abs<B: Backend>(b: &mut B, eip_next: u32, addr32: u32) -> Flow<B> {
+    let addr = b.konst::<W64>(addr32 as u64);
+    let target: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let ret_addr = eip_next;
+    let esp = read(b, Gpr(4));
+    let four = b.konst::<W32>(4);
+    let next = b.sub::<W32>(esp, four);
+    b.set(esp_ref(), next);
+    let saddr = b.zext::<W32, W64>(next);
+    let ret = b.konst::<W32>(ret_addr);
+    b.store::<W32>(saddr, ret, DATA_WRITE)?;
+    b.set(eip_ref(), target);
+    let tj = b.zext::<W32, W64>(target);
+    b.jump(tj);
+    Ok(())
+}

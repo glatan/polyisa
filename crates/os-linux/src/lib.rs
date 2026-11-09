@@ -49,6 +49,8 @@ pub mod rv64 {
     pub const NEWFSTATAT: u64 = 79;
     pub const FSTAT: u64 = 80;
     pub const STATX: u64 = 291;
+    pub const READV: u64 = 65;
+    pub const WRITEV: u64 = 66;
 }
 
 /// 段階4の準備としての x86_64 番号表（Linux・64ビット）。
@@ -86,6 +88,8 @@ pub mod x86_64 {
     pub const SET_ROBUST_LIST: u64 = 273;
     pub const RSEQ: u64 = 334;
     pub const PRLIMIT64: u64 = 302;
+    pub const READV: u64 = 19;
+    pub const WRITEV: u64 = 20;
 }
 
 /// 段階4の準備としての i386 番号表（Linux・32ビット）。
@@ -107,6 +111,8 @@ pub mod i386 {
     pub const CLOCK_GETTIME: u64 = 265;
     pub const GETRANDOM: u64 = 355;
     pub const OPENAT: u64 = 295;
+    pub const READV: u64 = 145;
+    pub const WRITEV: u64 = 146;
     // 段階2相当（ファイル操作）。
     pub const LSEEK: u64 = 19;
     pub const GETDENTS64: u64 = 220;
@@ -151,6 +157,8 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             rv64::NEWFSTATAT => Some("newfstatat"),
             rv64::FSTAT => Some("fstat"),
             rv64::STATX => Some("statx"),
+            rv64::READV => Some("readv"),
+            rv64::WRITEV => Some("writev"),
             _ => None,
         },
         GuestAbi::I386Linux => match nr {
@@ -179,6 +187,8 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             i386::FSTATAT64 => Some("fstatat64"),
             i386::FSTAT => Some("fstat"),
             i386::STATX => Some("statx"),
+            i386::READV => Some("readv"),
+            i386::WRITEV => Some("writev"),
             _ => None,
         },
         GuestAbi::X86_64Linux => match nr {
@@ -207,6 +217,8 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             x86_64::NEWFSTATAT => Some("newfstatat"),
             x86_64::FSTAT => Some("fstat"),
             x86_64::STATX => Some("statx"),
+            x86_64::READV => Some("readv"),
+            x86_64::WRITEV => Some("writev"),
             _ => None,
         },
         GuestAbi::Unknown => None,

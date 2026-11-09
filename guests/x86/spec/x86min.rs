@@ -316,6 +316,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("sub_r_rip", "F1", "00101011 00...101 ................................", "sub r32, m32", "alu"),
         // CALL r/m64 mod=01 [base+disp8] (FF /2)。64ビット間接コール.
         ("call_r_mem8", "M8", "11111111 01010... ........", "call r/m64", "jump"),
+        // CALL [RIP+disp32] (FF /2 RIP)。
+        ("call_r_rip", "F1", "11111111 00010101 ................................", "call r/m64", "jump"),
         // ADD m32,r32 mod=00 [base] (01 /r)。REX.W で64bit.
         ("add_m32_r32_memnd", "MR", "00000001 00......", "add m32, r32", "alu"),
         // ADD m32,r32 mod=01 [base+disp8] (01 /r)。
@@ -747,6 +749,54 @@ pub fn build_model() -> polyisa_isadl::Model {
             "00001111 10110110 10...... ................................",
             vec![wc("m32_rm", WhereOp::Ne, 4)],
             "movzx r32, m8",
+            "load",
+        ),
+        (
+            "pcmpeqb_memnd",
+            "MR",
+            "00001111 01110100 00......",
+            vec![wc("mr_rm", WhereOp::Ne, 4), wc("mr_rm", WhereOp::Ne, 5)],
+            "pcmpeqb xmm, m128",
+            "load",
+        ),
+        (
+            "pcmpeqb_mem8",
+            "M8",
+            "00001111 01110100 01...... ........",
+            vec![wc("m8_rm", WhereOp::Ne, 4)],
+            "pcmpeqb xmm, m128",
+            "load",
+        ),
+        (
+            "pcmpeqb_mem32",
+            "M32",
+            "00001111 01110100 10...... ................................",
+            vec![wc("m32_rm", WhereOp::Ne, 4)],
+            "pcmpeqb xmm, m128",
+            "load",
+        ),
+        (
+            "por_memnd",
+            "MR",
+            "00001111 11101011 00......",
+            vec![wc("mr_rm", WhereOp::Ne, 4), wc("mr_rm", WhereOp::Ne, 5)],
+            "por xmm, m128",
+            "load",
+        ),
+        (
+            "por_mem8",
+            "M8",
+            "00001111 11101011 01...... ........",
+            vec![wc("m8_rm", WhereOp::Ne, 4)],
+            "por xmm, m128",
+            "load",
+        ),
+        (
+            "por_mem32",
+            "M32",
+            "00001111 11101011 10...... ................................",
+            vec![wc("m32_rm", WhereOp::Ne, 4)],
+            "por xmm, m128",
             "load",
         ),
         (
