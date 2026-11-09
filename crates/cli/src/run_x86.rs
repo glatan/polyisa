@@ -212,9 +212,21 @@ fn fetch_len(
                     None
                 }
             } else if s == 0x70 {
-                // PSHUFD xmm,xmm,imm8。reg-direct のみ。
+                // PSHUFD xmm,xmm,imm8 (66 0F 70 /r ib)。reg-direct のみ。
                 let m = third?;
                 if m >> 6 == 3 { Some(4) } else { None }
+            } else if s == 0x73 {
+                // PSLLDQ xmm,imm8 (66 0F 73 /7 ib)。reg-direct のみ、reg=111。
+                let m = third?;
+                if m >> 6 == 3 && (m >> 3) & 7 == 7 {
+                    Some(4)
+                } else {
+                    None
+                }
+            } else if s == 0xF8 {
+                // PSUBB xmm,xmm (66 0F F8 /r)。reg-direct のみ。
+                let m = third?;
+                if m >> 6 == 3 { Some(3) } else { None }
             } else if s == 0xD6 {
                 // MOVQ m64,xmm RIP (66 0F D6 05 + disp32)。RIP のみ 7B.
                 let m = third?;
@@ -408,21 +420,29 @@ fn fetch_len(
         }
         // 0x88 /r (MOV r/m8,r8)。mod=00 SIB 直接番地 (base=101) のみ 7B。
         // reg-direct・mod=01/10・SIB index 付きは未対応。
-        0x88 | 0x8A => {
-            // 88/8A /r (MOV r/m8,r8 / MOV r8,r/m8)。reg-direct 2B、mod=00 base 2B / abs 6B、
-            // mod=01 base+disp8 3B、mod=10 base+disp32 6B。SIB は直接番地のみ 7B.
-            // SIB index 付き・mod=00 SIB base などは未対応で None.
+        0x88 | 0x8A | 0x38 | 0x3A => {
+            // 88/8A /r (MOV r/m8,r8 / MOV r8,r/m8)、38/3A /r (CMP r/m8,r8 / CMP r8,r/m8)。
+            // reg-direct 2B、mod=00 base 2B / abs 6B、mod=01 base+disp8 3B、mod=10 base+disp32 6B。
+            // SIB 付きは disp で長さが変わる (mod=00 base=101 は disp32 付き 7B)。
             let s = second?;
             let md = s >> 6;
             let rm = s & 7;
             if md == 3 {
                 Some(2)
             } else if rm == 4 {
-                if md != 0 {
-                    return None;
-                }
                 let t = third?;
-                if t & 7 == 5 { Some(7) } else { None }
+                let disp = match md {
+                    1 => 1,
+                    2 => 4,
+                    _ => {
+                        if t & 7 == 5 {
+                            4
+                        } else {
+                            0
+                        }
+                    }
+                };
+                Some(3 + disp)
             } else if md == 1 {
                 Some(3)
             } else if md == 2 || rm == 5 {
@@ -593,13 +613,13 @@ fn fetch_len(
                 Some(6)
             }
         }
-        // 0xFF /r (CALL/JMP/PUSH 間接)。/2 CALL と /4 JMP のみ mod=00/01/10/11 (SIB直接番地含む).
+        // 0xFF /r (INC/DEC/CALL/JMP)。/0 INC・/1 DEC・/2 CALL・/4 JMP のみ mod=00/01/10/11 (SIB直接番地含む).
         0xFF => {
             let s = second?;
             let md = s >> 6;
             let reg = (s >> 3) & 7;
             let rm = s & 7;
-            if reg != 2 && reg != 4 {
+            if reg != 0 && reg != 1 && reg != 2 && reg != 4 {
                 return None;
             }
             if md == 3 {
@@ -819,6 +839,8 @@ pub fn run_mode(
                 | 0xC6
                 | 0x88
                 | 0x8A
+                | 0x38
+                | 0x3A
                 | 0x84
         ) {
             if env
@@ -838,7 +860,7 @@ pub fn run_mode(
         };
         // SIB 付き（mod≠11 かつ rm=100）は第3バイト（SIB）で長さが変わる。
         // 2バイトオペコード（0F）では third=ModRM、fourth=SIB である。
-        // C7/0x88/0x8A は SIB の base で mod=00 の長さが変わるため同様に読む。
+        // C7/0x88/0x8A/0x38/0x3A は SIB の base で mod=00 の長さが変わるため同様に読む。
         let third = if (matches!(
             head[0],
             0x8B | 0x89
@@ -846,6 +868,8 @@ pub fn run_mode(
                 | 0xC7
                 | 0x88
                 | 0x8A
+                | 0x38
+                | 0x3A
                 | 0x87
                 | 0x63
                 | 0x03
@@ -870,6 +894,7 @@ pub fn run_mode(
                             | 0x62
                             | 0x6C
                             | 0x70
+                            | 0x73
                             | 0x74
                             | 0x76
                             | 0x7E
@@ -878,6 +903,7 @@ pub fn run_mode(
                             | 0xDB
                             | 0xEB
                             | 0xEF
+                            | 0xF8
                             | 0xD6
                             | 0x10
                             | 0x11
@@ -991,6 +1017,8 @@ pub fn run_mode(
                     | 0xC6
                     | 0x88
                     | 0x8A
+                    | 0x38
+                    | 0x3A
                     | 0x87
                     | 0x84
                     | 0xC1
@@ -1096,6 +1124,8 @@ pub fn run_mode(
                     | Insn::Punpckldq
                     | Insn::MovqM64XmmRip
                     | Insn::Pshufd
+                    | Insn::Pslldq
+                    | Insn::Psubb
                     | Insn::Pxor
                     | Insn::Pand
                     | Insn::Pminub
@@ -1161,6 +1191,8 @@ pub fn run_mode(
                     | Insn::Punpckldq
                     | Insn::MovqM64XmmRip
                     | Insn::Pshufd
+                    | Insn::Pslldq
+                    | Insn::Psubb
                     | Insn::Pxor
                     | Insn::Pand
                     | Insn::Pminub
@@ -1307,6 +1339,22 @@ fn dispatch<B: Backend>(
         Insn::DecEbp => sem::dec_r32(b, Gpr(5)),
         Insn::DecEsi => sem::dec_r32(b, Gpr(6)),
         Insn::DecEdi => sem::dec_r32(b, Gpr(7)),
+        Insn::IncRm => {
+            // FF /0 reg-direct。rm() が対象.
+            if rex_w {
+                sem::inc_r64(b, rm())
+            } else {
+                sem::inc_r32(b, rm())
+            }
+        }
+        Insn::DecRm => {
+            // FF /1 reg-direct。
+            if rex_w {
+                sem::dec_r64(b, rm())
+            } else {
+                sem::dec_r32(b, rm())
+            }
+        }
         Insn::AddEax => {
             if rex_w {
                 sem::add_rm64_imm(b, Gpr(0), imm32())
@@ -1766,6 +1814,54 @@ fn dispatch<B: Backend>(
                 sem::mov_r8_m8_memnd(b, dst, high, rm())
             }
         }
+        Insn::MovR8M8Sib => {
+            // 8A /r SIB mod=00 [base+index*scale] load。dst は reg フィールド.
+            let reg_f = (modrm() >> 3) & 7;
+            let (dst, high) = if rex != 0 {
+                (Gpr(reg_f | ((rex >> 2) & 1) << 3), false)
+            } else if reg_f < 4 {
+                (Gpr(reg_f), false)
+            } else {
+                (Gpr(reg_f - 4), true)
+            };
+            if no_index() {
+                sem::mov_r8_m8_memnd(b, dst, high, sib_base())
+            } else {
+                sem::mov_r8_m8_sib(b, dst, high, sib_base(), sib_idx(), sib_shift())
+            }
+        }
+        Insn::MovR8M8Sibd => {
+            // 8A /r SIB mod=01 [base+index*scale+disp8] load.
+            let reg_f = (modrm() >> 3) & 7;
+            let (dst, high) = if rex != 0 {
+                (Gpr(reg_f | ((rex >> 2) & 1) << 3), false)
+            } else if reg_f < 4 {
+                (Gpr(reg_f), false)
+            } else {
+                (Gpr(reg_f - 4), true)
+            };
+            if no_index() {
+                sem::mov_r8_m8_mem8(b, dst, high, sib_base(), disp8())
+            } else {
+                sem::mov_r8_m8_sibd(b, dst, high, sib_base(), sib_idx(), sib_shift(), disp8())
+            }
+        }
+        Insn::MovR8M8Sibd32 => {
+            // 8A /r SIB mod=10 [base+index*scale+disp32] load.
+            let reg_f = (modrm() >> 3) & 7;
+            let (dst, high) = if rex != 0 {
+                (Gpr(reg_f | ((rex >> 2) & 1) << 3), false)
+            } else if reg_f < 4 {
+                (Gpr(reg_f), false)
+            } else {
+                (Gpr(reg_f - 4), true)
+            };
+            if no_index() {
+                sem::mov_r8_m8_mem32(b, dst, high, sib_base(), disp32())
+            } else {
+                sem::mov_r8_m8_sibd32(b, dst, high, sib_base(), sib_idx(), sib_shift(), disp32())
+            }
+        }
         Insn::MovR8M8 => {
             // 8A /r mod=11 reg-direct。dst は reg、src は rm.
             let reg_f = (modrm() >> 3) & 7;
@@ -1785,6 +1881,204 @@ fn dispatch<B: Backend>(
                 (Gpr(rm_f - 4), true)
             };
             sem::mov_r8_r8(b, dst, dst_high, src, src_high)
+        }
+        Insn::CmpM8R8 => {
+            // 38 /r mod=11 reg-direct。dst は rm、src は reg.
+            let reg_f = (modrm() >> 3) & 7;
+            let rm_f = modrm() & 7;
+            let (src, src_high) = if rex != 0 {
+                (Gpr(reg_f | ((rex >> 2) & 1) << 3), false)
+            } else if reg_f < 4 {
+                (Gpr(reg_f), false)
+            } else {
+                (Gpr(reg_f - 4), true)
+            };
+            let (dst, dst_high) = if rex != 0 {
+                (Gpr(rm_f | ((rex & 1) << 3)), false)
+            } else if rm_f < 4 {
+                (Gpr(rm_f), false)
+            } else {
+                (Gpr(rm_f - 4), true)
+            };
+            sem::cmp_m8_r8(b, dst, dst_high, src, src_high)
+        }
+        Insn::CmpM8R8Memnd => {
+            // 38 /r mod=00 [base],r8。src は reg フィールド.
+            let reg_f = (modrm() >> 3) & 7;
+            let (src, high) = if rex != 0 {
+                (Gpr(reg_f | ((rex >> 2) & 1) << 3), false)
+            } else if reg_f < 4 {
+                (Gpr(reg_f), false)
+            } else {
+                (Gpr(reg_f - 4), true)
+            };
+            sem::cmp_m8_r8_memnd(b, rm(), src, high)
+        }
+        Insn::CmpM8R8Mem8 => {
+            let reg_f = (modrm() >> 3) & 7;
+            let (src, high) = if rex != 0 {
+                (Gpr(reg_f | ((rex >> 2) & 1) << 3), false)
+            } else if reg_f < 4 {
+                (Gpr(reg_f), false)
+            } else {
+                (Gpr(reg_f - 4), true)
+            };
+            sem::cmp_m8_r8_mem8(b, rm(), disp8(), src, high)
+        }
+        Insn::CmpM8R8Mem32 => {
+            let reg_f = (modrm() >> 3) & 7;
+            let (src, high) = if rex != 0 {
+                (Gpr(reg_f | ((rex >> 2) & 1) << 3), false)
+            } else if reg_f < 4 {
+                (Gpr(reg_f), false)
+            } else {
+                (Gpr(reg_f - 4), true)
+            };
+            sem::cmp_m8_r8_mem32(b, rm(), disp32(), src, high)
+        }
+        Insn::CmpM8R8Sib => {
+            // 38 /r SIB mod=00 [base+index*scale],r8。
+            let reg_f = (modrm() >> 3) & 7;
+            let (src, high) = if rex != 0 {
+                (Gpr(reg_f | ((rex >> 2) & 1) << 3), false)
+            } else if reg_f < 4 {
+                (Gpr(reg_f), false)
+            } else {
+                (Gpr(reg_f - 4), true)
+            };
+            if no_index() {
+                sem::cmp_m8_r8_memnd(b, sib_base(), src, high)
+            } else {
+                sem::cmp_m8_r8_sib(b, sib_base(), sib_idx(), sib_shift(), src, high)
+            }
+        }
+        Insn::CmpM8R8Sibd => {
+            let reg_f = (modrm() >> 3) & 7;
+            let (src, high) = if rex != 0 {
+                (Gpr(reg_f | ((rex >> 2) & 1) << 3), false)
+            } else if reg_f < 4 {
+                (Gpr(reg_f), false)
+            } else {
+                (Gpr(reg_f - 4), true)
+            };
+            if no_index() {
+                sem::cmp_m8_r8_mem8(b, sib_base(), disp8(), src, high)
+            } else {
+                sem::cmp_m8_r8_sibd(b, sib_base(), sib_idx(), sib_shift(), disp8(), src, high)
+            }
+        }
+        Insn::CmpM8R8Sibd32 => {
+            let reg_f = (modrm() >> 3) & 7;
+            let (src, high) = if rex != 0 {
+                (Gpr(reg_f | ((rex >> 2) & 1) << 3), false)
+            } else if reg_f < 4 {
+                (Gpr(reg_f), false)
+            } else {
+                (Gpr(reg_f - 4), true)
+            };
+            if no_index() {
+                sem::cmp_m8_r8_mem32(b, sib_base(), disp32(), src, high)
+            } else {
+                sem::cmp_m8_r8_sibd32(b, sib_base(), sib_idx(), sib_shift(), disp32(), src, high)
+            }
+        }
+        Insn::CmpR8M8 => {
+            // 3A /r mod=11 reg-direct。dst は reg、src は rm.
+            let reg_f = (modrm() >> 3) & 7;
+            let rm_f = modrm() & 7;
+            let (dst, dst_high) = if rex != 0 {
+                (Gpr(reg_f | ((rex >> 2) & 1) << 3), false)
+            } else if reg_f < 4 {
+                (Gpr(reg_f), false)
+            } else {
+                (Gpr(reg_f - 4), true)
+            };
+            let (src, src_high) = if rex != 0 {
+                (Gpr(rm_f | ((rex & 1) << 3)), false)
+            } else if rm_f < 4 {
+                (Gpr(rm_f), false)
+            } else {
+                (Gpr(rm_f - 4), true)
+            };
+            sem::cmp_r8_m8(b, dst, dst_high, src, src_high)
+        }
+        Insn::CmpR8M8Memnd => {
+            let reg_f = (modrm() >> 3) & 7;
+            let (dst, high) = if rex != 0 {
+                (Gpr(reg_f | ((rex >> 2) & 1) << 3), false)
+            } else if reg_f < 4 {
+                (Gpr(reg_f), false)
+            } else {
+                (Gpr(reg_f - 4), true)
+            };
+            sem::cmp_r8_m8_memnd(b, dst, high, rm())
+        }
+        Insn::CmpR8M8Mem8 => {
+            let reg_f = (modrm() >> 3) & 7;
+            let (dst, high) = if rex != 0 {
+                (Gpr(reg_f | ((rex >> 2) & 1) << 3), false)
+            } else if reg_f < 4 {
+                (Gpr(reg_f), false)
+            } else {
+                (Gpr(reg_f - 4), true)
+            };
+            sem::cmp_r8_m8_mem8(b, dst, high, rm(), disp8())
+        }
+        Insn::CmpR8M8Mem32 => {
+            let reg_f = (modrm() >> 3) & 7;
+            let (dst, high) = if rex != 0 {
+                (Gpr(reg_f | ((rex >> 2) & 1) << 3), false)
+            } else if reg_f < 4 {
+                (Gpr(reg_f), false)
+            } else {
+                (Gpr(reg_f - 4), true)
+            };
+            sem::cmp_r8_m8_mem32(b, dst, high, rm(), disp32())
+        }
+        Insn::CmpR8M8Sib => {
+            let reg_f = (modrm() >> 3) & 7;
+            let (dst, high) = if rex != 0 {
+                (Gpr(reg_f | ((rex >> 2) & 1) << 3), false)
+            } else if reg_f < 4 {
+                (Gpr(reg_f), false)
+            } else {
+                (Gpr(reg_f - 4), true)
+            };
+            if no_index() {
+                sem::cmp_r8_m8_memnd(b, dst, high, sib_base())
+            } else {
+                sem::cmp_r8_m8_sib(b, dst, high, sib_base(), sib_idx(), sib_shift())
+            }
+        }
+        Insn::CmpR8M8Sibd => {
+            let reg_f = (modrm() >> 3) & 7;
+            let (dst, high) = if rex != 0 {
+                (Gpr(reg_f | ((rex >> 2) & 1) << 3), false)
+            } else if reg_f < 4 {
+                (Gpr(reg_f), false)
+            } else {
+                (Gpr(reg_f - 4), true)
+            };
+            if no_index() {
+                sem::cmp_r8_m8_mem8(b, dst, high, sib_base(), disp8())
+            } else {
+                sem::cmp_r8_m8_sibd(b, dst, high, sib_base(), sib_idx(), sib_shift(), disp8())
+            }
+        }
+        Insn::CmpR8M8Sibd32 => {
+            let reg_f = (modrm() >> 3) & 7;
+            let (dst, high) = if rex != 0 {
+                (Gpr(reg_f | ((rex >> 2) & 1) << 3), false)
+            } else if reg_f < 4 {
+                (Gpr(reg_f), false)
+            } else {
+                (Gpr(reg_f - 4), true)
+            };
+            if no_index() {
+                sem::cmp_r8_m8_mem32(b, dst, high, sib_base(), disp32())
+            } else {
+                sem::cmp_r8_m8_sibd32(b, dst, high, sib_base(), sib_idx(), sib_shift(), disp32())
+            }
         }
         Insn::TestR8R8 => {
             // 84 /r mod=11 reg-direct。dst は rm、src は reg (TEST は書換なし).
@@ -3154,6 +3448,11 @@ fn dispatch<B: Backend>(
             let imm = (word & 0xff) as u8;
             sem::pshufd(b, xmm_reg(), xmm_rm(), imm)
         }
+        Insn::Pslldq => {
+            let imm = (word & 0xff) as u8;
+            sem::pslldq_xmm(b, xmm_reg(), imm)
+        }
+        Insn::Psubb => sem::psubb_xmm(b, xmm_reg(), xmm_rm()),
         Insn::Pxor => sem::pxor_xmm(b, xmm_reg(), xmm_rm()),
         Insn::Pand => sem::pand_xmm(b, xmm_reg(), xmm_rm()),
         Insn::Pminub => sem::pminub_xmm(b, xmm_reg(), xmm_rm()),
@@ -4148,7 +4447,9 @@ fn dispatch<B: Backend>(
             | Insn::ShlRm32Cl
             | Insn::ShrRm32Cl
             | Insn::NotRm32
-            | Insn::NegRm32 => Some(rm()),
+            | Insn::NegRm32
+            | Insn::IncRm
+            | Insn::DecRm => Some(rm()),
             Insn::MovRm32
             | Insn::Movsxd
             | Insn::MovsxdMemnd

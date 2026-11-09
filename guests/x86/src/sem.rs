@@ -9179,3 +9179,349 @@ pub fn xchg_r64_ax<B: Backend>(b: &mut B, dst: Gpr) -> Flow<B> {
     write64(b, Gpr(0), a);
     Ok(())
 }
+
+/// MOV r8,[base+index*scale] (8A /r SIB mod=00)。8ビットロード.
+pub fn mov_r8_m8_sib<B: Backend>(
+    b: &mut B,
+    dst: Gpr,
+    dst_high: bool,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+) -> Flow<B> {
+    use polyisa_sem::W8;
+    let addr = sib_addr_scaled(b, shift, 0, base, idx);
+    let x: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
+    write8(b, dst, dst_high, x);
+    Ok(())
+}
+
+/// MOV r8,[base+index*scale+disp8] (8A /r SIB mod=01)。
+pub fn mov_r8_m8_sibd<B: Backend>(
+    b: &mut B,
+    dst: Gpr,
+    dst_high: bool,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i8,
+) -> Flow<B> {
+    use polyisa_sem::W8;
+    let addr = sib_addr_scaled(b, shift, disp as i32, base, idx);
+    let x: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
+    write8(b, dst, dst_high, x);
+    Ok(())
+}
+
+/// MOV r8,[base+index*scale+disp32] (8A /r SIB mod=10)。
+pub fn mov_r8_m8_sibd32<B: Backend>(
+    b: &mut B,
+    dst: Gpr,
+    dst_high: bool,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i32,
+) -> Flow<B> {
+    use polyisa_sem::W8;
+    let addr = sib_addr_scaled(b, shift, disp, base, idx);
+    let x: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
+    write8(b, dst, dst_high, x);
+    Ok(())
+}
+
+/// INC r64 (REX.W + FF /0)。64ビットで包む。CF 以外の 5 旗を更新する（CF は保存）。
+pub fn inc_r64<B: Backend>(b: &mut B, rd: Gpr) -> Flow<B> {
+    let cf_mask = b.konst::<W32>(FLAG_CF);
+    let all_flags = b.get(eflags_ref());
+    let saved_cf = b.and::<W32>(all_flags, cf_mask);
+    let x = read64(b, rd);
+    let one = b.konst::<W64>(1);
+    let v = b.add::<W64>(x, one);
+    write64(b, rd, v);
+    update_add_flags(b, x, one, v);
+    let f = b.get(eflags_ref());
+    let not_cf = b.konst::<W32>(!FLAG_CF);
+    let cleared = b.and::<W32>(f, not_cf);
+    let restored = b.or::<W32>(cleared, saved_cf);
+    b.set(eflags_ref(), restored);
+    Ok(())
+}
+
+/// DEC r64 (REX.W + FF /1)。64ビットで包む。CF 以外の 5 旗を更新する（CF は保存）。
+pub fn dec_r64<B: Backend>(b: &mut B, rd: Gpr) -> Flow<B> {
+    let cf_mask = b.konst::<W32>(FLAG_CF);
+    let all_flags = b.get(eflags_ref());
+    let saved_cf = b.and::<W32>(all_flags, cf_mask);
+    let x = read64(b, rd);
+    let one = b.konst::<W64>(1);
+    let v = b.sub::<W64>(x, one);
+    write64(b, rd, v);
+    update_sub_flags(b, x, one, v);
+    let f = b.get(eflags_ref());
+    let not_cf = b.konst::<W32>(!FLAG_CF);
+    let cleared = b.and::<W32>(f, not_cf);
+    let restored = b.or::<W32>(cleared, saved_cf);
+    b.set(eflags_ref(), restored);
+    Ok(())
+}
+
+/// CMP r/m8, r8 reg-direct (38 /r mod=11)。mem役=dst rm を src reg と比較.
+pub fn cmp_m8_r8<B: Backend>(
+    b: &mut B,
+    dst: Gpr,
+    dst_high: bool,
+    src: Gpr,
+    src_high: bool,
+) -> Flow<B> {
+    use polyisa_sem::W8;
+    let x = read8(b, dst, dst_high);
+    let y = read8(b, src, src_high);
+    let v = b.sub::<W8>(x, y);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
+/// CMP [base], r8 (38 /r mod=00)。
+pub fn cmp_m8_r8_memnd<B: Backend>(b: &mut B, base: Gpr, src: Gpr, high: bool) -> Flow<B> {
+    use polyisa_sem::W8;
+    let addr = read64(b, base);
+    let x: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
+    let y = read8(b, src, high);
+    let v = b.sub::<W8>(x, y);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
+/// CMP [base+disp8], r8 (38 /r mod=01)。
+pub fn cmp_m8_r8_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8, src: Gpr, high: bool) -> Flow<B> {
+    use polyisa_sem::W8;
+    let addr = eff_addr(b, base, disp);
+    let x: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
+    let y = read8(b, src, high);
+    let v = b.sub::<W8>(x, y);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
+/// CMP [base+disp32], r8 (38 /r mod=10)。
+pub fn cmp_m8_r8_mem32<B: Backend>(
+    b: &mut B,
+    base: Gpr,
+    disp: i32,
+    src: Gpr,
+    high: bool,
+) -> Flow<B> {
+    use polyisa_sem::W8;
+    let addr = eff_addr32(b, base, disp);
+    let x: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
+    let y = read8(b, src, high);
+    let v = b.sub::<W8>(x, y);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
+/// CMP [base+index*scale], r8 (38 /r SIB mod=00)。
+pub fn cmp_m8_r8_sib<B: Backend>(
+    b: &mut B,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    src: Gpr,
+    high: bool,
+) -> Flow<B> {
+    use polyisa_sem::W8;
+    let addr = sib_addr_scaled(b, shift, 0, base, idx);
+    let x: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
+    let y = read8(b, src, high);
+    let v = b.sub::<W8>(x, y);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
+/// CMP [base+index*scale+disp8], r8 (38 /r SIB mod=01)。
+pub fn cmp_m8_r8_sibd<B: Backend>(
+    b: &mut B,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i8,
+    src: Gpr,
+    high: bool,
+) -> Flow<B> {
+    use polyisa_sem::W8;
+    let addr = sib_addr_scaled(b, shift, disp as i32, base, idx);
+    let x: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
+    let y = read8(b, src, high);
+    let v = b.sub::<W8>(x, y);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
+/// CMP [base+index*scale+disp32], r8 (38 /r SIB mod=10)。
+pub fn cmp_m8_r8_sibd32<B: Backend>(
+    b: &mut B,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i32,
+    src: Gpr,
+    high: bool,
+) -> Flow<B> {
+    use polyisa_sem::W8;
+    let addr = sib_addr_scaled(b, shift, disp, base, idx);
+    let x: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
+    let y = read8(b, src, high);
+    let v = b.sub::<W8>(x, y);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
+/// CMP r8, r/m8 reg-direct (3A /r mod=11)。
+pub fn cmp_r8_m8<B: Backend>(
+    b: &mut B,
+    dst: Gpr,
+    dst_high: bool,
+    src: Gpr,
+    src_high: bool,
+) -> Flow<B> {
+    use polyisa_sem::W8;
+    let x = read8(b, dst, dst_high);
+    let y = read8(b, src, src_high);
+    let v = b.sub::<W8>(x, y);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
+/// CMP r8, [base] (3A /r mod=00)。
+pub fn cmp_r8_m8_memnd<B: Backend>(b: &mut B, dst: Gpr, dst_high: bool, base: Gpr) -> Flow<B> {
+    use polyisa_sem::W8;
+    let x = read8(b, dst, dst_high);
+    let addr = read64(b, base);
+    let y: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
+    let v = b.sub::<W8>(x, y);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
+/// CMP r8, [base+disp8] (3A /r mod=01)。
+pub fn cmp_r8_m8_mem8<B: Backend>(
+    b: &mut B,
+    dst: Gpr,
+    dst_high: bool,
+    base: Gpr,
+    disp: i8,
+) -> Flow<B> {
+    use polyisa_sem::W8;
+    let x = read8(b, dst, dst_high);
+    let addr = eff_addr(b, base, disp);
+    let y: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
+    let v = b.sub::<W8>(x, y);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
+/// CMP r8, [base+disp32] (3A /r mod=10)。
+pub fn cmp_r8_m8_mem32<B: Backend>(
+    b: &mut B,
+    dst: Gpr,
+    dst_high: bool,
+    base: Gpr,
+    disp: i32,
+) -> Flow<B> {
+    use polyisa_sem::W8;
+    let x = read8(b, dst, dst_high);
+    let addr = eff_addr32(b, base, disp);
+    let y: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
+    let v = b.sub::<W8>(x, y);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
+/// CMP r8, [base+index*scale] (3A /r SIB mod=00)。
+pub fn cmp_r8_m8_sib<B: Backend>(
+    b: &mut B,
+    dst: Gpr,
+    dst_high: bool,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+) -> Flow<B> {
+    use polyisa_sem::W8;
+    let x = read8(b, dst, dst_high);
+    let addr = sib_addr_scaled(b, shift, 0, base, idx);
+    let y: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
+    let v = b.sub::<W8>(x, y);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
+/// CMP r8, [base+index*scale+disp8] (3A /r SIB mod=01)。
+pub fn cmp_r8_m8_sibd<B: Backend>(
+    b: &mut B,
+    dst: Gpr,
+    dst_high: bool,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i8,
+) -> Flow<B> {
+    use polyisa_sem::W8;
+    let x = read8(b, dst, dst_high);
+    let addr = sib_addr_scaled(b, shift, disp as i32, base, idx);
+    let y: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
+    let v = b.sub::<W8>(x, y);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
+/// CMP r8, [base+index*scale+disp32] (3A /r SIB mod=10)。
+pub fn cmp_r8_m8_sibd32<B: Backend>(
+    b: &mut B,
+    dst: Gpr,
+    dst_high: bool,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i32,
+) -> Flow<B> {
+    use polyisa_sem::W8;
+    let x = read8(b, dst, dst_high);
+    let addr = sib_addr_scaled(b, shift, disp, base, idx);
+    let y: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
+    let v = b.sub::<W8>(x, y);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
+/// PSLLDQ xmm, imm8 (66 0F 73 /7 ib)。128ビット全体を imm バイト左シフト (imm*8ビット).
+/// imm>16 ではゼロになる。
+pub fn pslldq_xmm<B: Backend>(b: &mut B, dst: Xmm, imm: u8) -> Flow<B> {
+    let a: B::V<W128> = b.get(xmm_ref(dst));
+    let n = (imm as u128).min(16) * 8;
+    let shift = b.konst::<W128>(n);
+    let v = b.shl::<W128>(a, shift);
+    b.set(xmm_ref(dst), v);
+    Ok(())
+}
+
+/// PSUBB xmm1, xmm2 (66 0F F8 /r)。バイト毎に wraparound 減算する.
+pub fn psubb_xmm<B: Backend>(b: &mut B, dst: Xmm, src: Xmm) -> Flow<B> {
+    let a: B::V<W128> = b.get(xmm_ref(dst));
+    let c: B::V<W128> = b.get(xmm_ref(src));
+    let mut acc: B::V<W128> = b.konst::<W128>(0);
+    for i in 0..16 {
+        let shift = b.konst::<W128>((i * 8) as u128);
+        let mask = b.konst::<W128>(0xFF);
+        let ab = b.shr_l::<W128>(a, shift);
+        let cb = b.shr_l::<W128>(c, shift);
+        let ab8 = b.and::<W128>(ab, mask);
+        let cb8 = b.and::<W128>(cb, mask);
+        let d = b.sub::<W128>(ab8, cb8);
+        let d8 = b.and::<W128>(d, mask);
+        let pos = b.shl::<W128>(d8, shift);
+        acc = b.or::<W128>(acc, pos);
+    }
+    b.set(xmm_ref(dst), acc);
+    Ok(())
+}

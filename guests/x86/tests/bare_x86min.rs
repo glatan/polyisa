@@ -4363,3 +4363,108 @@ fn xchg_r64_ax_swaps() {
     })
     .unwrap();
 }
+
+#[test]
+fn mov_r8_m8_sib_indexed() {
+    // MOV DL,[RSI+RAX] (8A 14 06): RSI=0x1500, RAX=2 -> [0x1502]=0x77 -> DL=0x77.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend.set(Gpr(6).state(), 0x1500);
+    env.backend.set(Gpr(0).state(), 2);
+    env.backend.mem.write(VirtAddr(0x1502), &[0x77u8]).unwrap();
+    env.step(|b| sem::mov_r8_m8_sib(b, Gpr(2), false, Gpr(6), Gpr(0), 0))
+        .unwrap();
+    assert_eq!(env.backend.get(Gpr(2).state()) & 0xFF, 0x77);
+}
+
+#[test]
+fn mov_r8_m8_sib_no_index() {
+    // MOV DL,[RSI] (8A SIB no_index): [0x1500]=0x55 -> DL=0x55.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend.set(Gpr(6).state(), 0x1500);
+    env.backend.mem.write(VirtAddr(0x1500), &[0x55u8]).unwrap();
+    env.step(|b| sem::mov_r8_m8_memnd(b, Gpr(2), false, Gpr(6)))
+        .unwrap();
+    assert_eq!(env.backend.get(Gpr(2).state()) & 0xFF, 0x55);
+}
+
+#[test]
+fn inc_r64_wraps_and_preserves_cf() {
+    // INC RAX (REX.W FF /0): RAX=0xFFFF_FFFF_FFFF_FFFF -> 0, CF=1 のまま.
+    let mut env = env();
+    env.backend.set(sem::eflags_ref(), 0x1);
+    env.step(|b| {
+        sem::write64(b, Gpr(0), 0xFFFF_FFFF_FFFF_FFFF);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::inc_r64(b, Gpr(0))).unwrap();
+    env.step(|b| {
+        assert_eq!(sem::read64(b, Gpr(0)), 0);
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x1, 0x1);
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0x40);
+}
+
+#[test]
+fn cmp_m8_r8_sibd_sets_flags() {
+    // CMP [RDI+RAX-1],DL (38 54 07 FF): [0x15FF]=DL -> ZF=1.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend.set(Gpr(7).state(), 0x1500);
+    env.backend.set(Gpr(0).state(), 0x100);
+    env.backend.set(Gpr(2).state(), 0x77);
+    env.backend.mem.write(VirtAddr(0x15FF), &[0x77u8]).unwrap();
+    env.step(|b| sem::cmp_m8_r8_sibd(b, Gpr(7), Gpr(0), 0, -1, Gpr(2), false))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0x40);
+    // [0x15FF]=0x78 -> ZF=0.
+    env.backend.mem.write(VirtAddr(0x15FF), &[0x78u8]).unwrap();
+    env.step(|b| sem::cmp_m8_r8_sibd(b, Gpr(7), Gpr(0), 0, -1, Gpr(2), false))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0);
+}
+
+#[test]
+fn pslldq_shifts_bytes() {
+    // PSLLDQ xmm2,8: 0xFF...FF (low 8 bytes) -> high 8 bytes.
+    let mut env = env();
+    env.step(|b| {
+        let v = b.konst::<polyisa_sem::W128>(0x0000000000000000FFFFFFFFFFFFFFFF);
+        b.set(sem::xmm_ref(sem::Xmm(2)), v);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::pslldq_xmm(b, sem::Xmm(2), 8)).unwrap();
+    env.step(|b| {
+        let v: u128 = b.get(sem::xmm_ref(sem::Xmm(2)));
+        assert_eq!(v, 0xFFFFFFFFFFFFFFFF0000000000000000);
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn psubb_wraps() {
+    // PSUBB xmm2,xmm0: 0x10-0x01=0x0F per byte.
+    let mut env = env();
+    env.step(|b| {
+        let v = b.konst::<polyisa_sem::W128>(0x10101010101010101010101010101010);
+        b.set(sem::xmm_ref(sem::Xmm(2)), v);
+        let w = b.konst::<polyisa_sem::W128>(0x01010101010101010101010101010101);
+        b.set(sem::xmm_ref(sem::Xmm(0)), w);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::psubb_xmm(b, sem::Xmm(2), sem::Xmm(0)))
+        .unwrap();
+    env.step(|b| {
+        let v: u128 = b.get(sem::xmm_ref(sem::Xmm(2)));
+        assert_eq!(v, 0x0F0F0F0F0F0F0F0F0F0F0F0F0F0F0F0F);
+        Ok(())
+    })
+    .unwrap();
+}
