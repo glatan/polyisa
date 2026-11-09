@@ -61,12 +61,13 @@ fn fetch_len(first: u8, second: Option<u8>) -> Option<u64> {
         0xEB | 0x74 | 0x75 | 0xE2 | 0xCD | 0x85 | 0x0F | 0x39 | 0x21 | 0x0B | 0x09 | 0x72
         | 0x73 | 0x76 | 0x77 => Some(2),
         0x05 | 0x2D | 0x3D | 0xB8 | 0xE8 | 0xE9 | 0x25 | 0x0D | 0x35 => Some(5),
-        // TODO(本格実装): SIB 付きの変形 (mod=01+SIB+disp8 の 4B、
-        // disp32 の 6B など) が増えたら入口の長さ規則を拡張する。
-        // 現サブセットでは s==0x43 (mod=01+disp8) と s==0x04 (SIB 最小形) のみ 3B である。
+        // 現サブセットの SIB+disp8 (mod=01、rm=100、s==0x44) は 8B/89 のみで 4B。
+        // 0xC1 等の他 opcode との組み合わせや disp32 の 6B は本格実装で足す。
         0x01 | 0x8B | 0x31 | 0x89 | 0xC1 | 0x8D => {
             let s = second?;
-            if first == 0xC1 || s == 0x43 || s == 0x04 {
+            if (first == 0x8B || first == 0x89) && s == 0x44 {
+                Some(4)
+            } else if first == 0xC1 || s == 0x43 || s == 0x04 {
                 Some(3)
             } else {
                 Some(2)
@@ -235,6 +236,8 @@ fn dispatch<B: Backend>(
         Insn::MovMemEax => sem::mov_mem_eax(b, disp8()),
         Insn::MovEaxSib => sem::mov_eax_sib(b),
         Insn::MovSibEax => sem::mov_sib_eax(b),
+        Insn::MovEaxSibd => sem::mov_eax_sibd(b, disp8()),
+        Insn::MovSibdEax => sem::mov_sibd_eax(b, disp8()),
         Insn::PushEax => sem::push_reg(b, Gpr(0)),
         Insn::PushEcx => sem::push_reg(b, Gpr(1)),
         Insn::PushEdx => sem::push_reg(b, Gpr(2)),
