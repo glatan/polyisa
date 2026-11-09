@@ -304,6 +304,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("and_rm32_rip", "F1", "10000001 00100101 ................................ ................................", "and r/m32, {imm}", "alu"),
         // OR r32,m32 RIP (0B 15 + disp32)。
         ("or_r_rip", "F1", "00001011 00...101 ................................", "or r32, m32", "alu"),
+        // SUB r32,m32 RIP (2B 1D/05 + disp32)。2B 05 は mod=00 rm=101.
+        ("sub_r_rip", "F1", "00101011 00...101 ................................", "sub r32, m32", "alu"),
         // OR m32,r32 RIP (09 05 + disp32)。
         ("or_m_rip", "F1", "00001001 00...101 ................................", "or m32, r32", "alu"),
         // ADD m32,imm32 RIP (81 05 + disp32 + imm32).
@@ -562,6 +564,54 @@ pub fn build_model() -> polyisa_isadl::Model {
             "00000011 00......",
             vec![wc("mr_rm", WhereOp::Ne, 4), wc("mr_rm", WhereOp::Ne, 5)],
             "add r32, [r/m]",
+            "alu",
+        ),
+        (
+            "sub_r_memnd",
+            "MR",
+            "00101011 00......",
+            vec![wc("mr_rm", WhereOp::Ne, 4), wc("mr_rm", WhereOp::Ne, 5)],
+            "sub r32, [r/m]",
+            "alu",
+        ),
+        (
+            "sub_r_mem8",
+            "M8",
+            "00101011 01...... ........",
+            vec![wc("m8_rm", WhereOp::Ne, 4)],
+            "sub r32, m32",
+            "alu",
+        ),
+        (
+            "sub_r_mem32",
+            "M32",
+            "00101011 10...... ................................",
+            vec![wc("m32_rm", WhereOp::Ne, 4)],
+            "sub r32, m32",
+            "alu",
+        ),
+        (
+            "or_r_memnd",
+            "MR",
+            "00001011 00......",
+            vec![wc("mr_rm", WhereOp::Ne, 4), wc("mr_rm", WhereOp::Ne, 5)],
+            "or r32, [r/m]",
+            "alu",
+        ),
+        (
+            "or_r_mem8",
+            "M8",
+            "00001011 01...... ........",
+            vec![wc("m8_rm", WhereOp::Ne, 4)],
+            "or r32, m32",
+            "alu",
+        ),
+        (
+            "or_r_mem32",
+            "M32",
+            "00001011 10...... ................................",
+            vec![wc("m32_rm", WhereOp::Ne, 4)],
+            "or r32, m32",
             "alu",
         ),
         (

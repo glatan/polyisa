@@ -459,7 +459,7 @@ fn fetch_len(
         }
         // 0x03 /r (ADD) と 0x0B /r (OR r32,m32)。reg-direct・mod=00 memnd・RIP/abs のみ.
         // SIB と mod=01/10 は未対応で None。
-        0x03 | 0x0B | 0x3B => {
+        0x03 | 0x0B | 0x3B | 0x2B => {
             let s = second?;
             let md = s >> 6;
             let rm = s & 7;
@@ -647,6 +647,7 @@ pub fn run_mode(
                 | 0x03
                 | 0x0B
                 | 0x3B
+                | 0x2B
                 | 0x09
                 | 0x11
                 | 0x19
@@ -686,7 +687,7 @@ pub fn run_mode(
         // C7/0x88 は SIB の base で mod=00 の長さが変わるため同様に読む。
         let third = if (matches!(
             head[0],
-            0x8B | 0x89 | 0x8D | 0xC7 | 0x88 | 0x03 | 0x0B | 0x3B
+            0x8B | 0x89 | 0x8D | 0xC7 | 0x88 | 0x03 | 0x0B | 0x3B | 0x2B
         ) && matches!(second, Some(s) if s & 7 == 4 && s >> 6 != 3))
             || (head[0] == 0x0F
                 && (matches!(
@@ -767,6 +768,7 @@ pub fn run_mode(
                     | 0x03
                     | 0x0B
                     | 0x3B
+                    | 0x2B
                     | 0x11
                     | 0x19
                     | 0x29
@@ -1923,6 +1925,57 @@ fn dispatch<B: Backend>(
                 sem::add_r32_mem32(b, reg(), rm(), disp32())
             }
         }
+        Insn::SubRMemnd => {
+            if rex_w {
+                sem::sub_r64_memnd(b, reg(), rm())
+            } else {
+                sem::sub_r32_memnd(b, reg(), rm())
+            }
+        }
+        Insn::SubRMem8 => {
+            if rex_w {
+                sem::sub_r64_mem8(b, reg(), rm(), disp8())
+            } else {
+                sem::sub_r32_mem8(b, reg(), rm(), disp8())
+            }
+        }
+        Insn::SubRMem32 => {
+            if rex_w {
+                sem::sub_r64_mem32(b, reg(), rm(), disp32())
+            } else {
+                sem::sub_r32_mem32(b, reg(), rm(), disp32())
+            }
+        }
+        Insn::SubRRip => {
+            if rex_w {
+                sem::sub_r64_rip(b, reg(), eip as u64 + nbytes, disp32())
+            } else if is64 {
+                sem::sub_r32_rip(b, reg(), eip as u64 + nbytes, disp32())
+            } else {
+                sem::sub_r32_abs(b, reg(), imm32())
+            }
+        }
+        Insn::OrRMemnd => {
+            if rex_w {
+                sem::or_r64_memnd(b, reg(), rm())
+            } else {
+                sem::or_r32_memnd(b, reg(), rm())
+            }
+        }
+        Insn::OrRMem8 => {
+            if rex_w {
+                sem::or_r64_mem8(b, reg(), rm(), disp8())
+            } else {
+                sem::or_r32_mem8(b, reg(), rm(), disp8())
+            }
+        }
+        Insn::OrRMem32 => {
+            if rex_w {
+                sem::or_r64_mem32(b, reg(), rm(), disp32())
+            } else {
+                sem::or_r32_mem32(b, reg(), rm(), disp32())
+            }
+        }
         Insn::AddRSibabs => {
             // 03 /r mod=00 SIB 直接番地 (7B)。disp32 は最下位32 LE。
             // no_index は [disp32]、索引ありは [idx*scale+disp32].
@@ -1943,7 +1996,9 @@ fn dispatch<B: Backend>(
             }
         }
         Insn::OrRRip => {
-            if is64 {
+            if rex_w {
+                sem::or_r64_rip(b, reg(), eip as u64 + nbytes, disp32())
+            } else if is64 {
                 sem::or_r32_rip(b, reg(), eip as u64 + nbytes, disp32())
             } else {
                 sem::or_r32_abs(b, reg(), imm32())
@@ -2759,7 +2814,14 @@ fn dispatch<B: Backend>(
             | Insn::AddRMem8
             | Insn::AddRMem32
             | Insn::AddRSibabs
+            | Insn::SubRMemnd
+            | Insn::SubRMem8
+            | Insn::SubRMem32
+            | Insn::SubRRip
             | Insn::OrRRip
+            | Insn::OrRMemnd
+            | Insn::OrRMem8
+            | Insn::OrRMem32
             | Insn::MovEaxMem8
             | Insn::MovEaxMemnd
             | Insn::MovEaxMem32

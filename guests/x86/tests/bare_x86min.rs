@@ -3405,3 +3405,28 @@ fn add_r64_mem8_basic() {
     })
     .unwrap();
 }
+
+#[test]
+fn sub_r64_mem8_basic() {
+    // SUB R9,[RBP-0x38] (2B mod=01, REX.W): R9=0x30, [0x14C8]=0x10 -> 0x20.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend.set(Gpr(5).state(), 0x1500);
+    env.step(|b| {
+        sem::write64(b, Gpr(9), 0x30);
+        Ok(())
+    })
+    .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x14C8), &[0x10u8, 0, 0, 0, 0, 0, 0, 0])
+        .unwrap();
+    env.step(|b| sem::sub_r64_mem8(b, Gpr(9), Gpr(5), -0x38))
+        .unwrap();
+    env.step(|b| {
+        let v = sem::read64(b, Gpr(9));
+        assert_eq!(v, 0x20);
+        Ok(())
+    })
+    .unwrap();
+}

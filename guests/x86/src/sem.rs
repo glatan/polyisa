@@ -4518,6 +4518,175 @@ pub fn add_r64_mem32<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, disp: i32) -> F
     Ok(())
 }
 
+/// SUB r32, [base] (2B /r mod=00)。
+pub fn sub_r32_memnd<B: Backend>(b: &mut B, dst: Gpr, base: Gpr) -> Flow<B> {
+    let addr = read64(b, base);
+    let y: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let x = read(b, dst);
+    let v = b.sub::<W32>(x, y);
+    write(b, dst, v);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
+/// SUB r64, [base] (2B /r mod=00, REX.W)。
+pub fn sub_r64_memnd<B: Backend>(b: &mut B, dst: Gpr, base: Gpr) -> Flow<B> {
+    let addr = read64(b, base);
+    let y: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let x = read64(b, dst);
+    let v = b.sub::<W64>(x, y);
+    write64(b, dst, v);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
+/// SUB r32, [base+disp8] (2B /r mod=01)。
+pub fn sub_r32_mem8<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, disp: i8) -> Flow<B> {
+    let addr = eff_addr(b, base, disp);
+    let y: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let x = read(b, dst);
+    let v = b.sub::<W32>(x, y);
+    write(b, dst, v);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
+/// SUB r64, [base+disp8] (2B /r mod=01, REX.W)。
+pub fn sub_r64_mem8<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, disp: i8) -> Flow<B> {
+    let addr = eff_addr(b, base, disp);
+    let y: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let x = read64(b, dst);
+    let v = b.sub::<W64>(x, y);
+    write64(b, dst, v);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
+/// SUB r32, [base+disp32] (2B /r mod=10)。
+pub fn sub_r32_mem32<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, disp: i32) -> Flow<B> {
+    let addr = eff_addr32(b, base, disp);
+    let y: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let x = read(b, dst);
+    let v = b.sub::<W32>(x, y);
+    write(b, dst, v);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
+/// SUB r64, [base+disp32] (2B /r mod=10, REX.W)。
+pub fn sub_r64_mem32<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, disp: i32) -> Flow<B> {
+    let addr = eff_addr32(b, base, disp);
+    let y: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let x = read64(b, dst);
+    let v = b.sub::<W64>(x, y);
+    write64(b, dst, v);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
+/// SUB r32, [RIP+disp32] (2B /r RIP)。
+pub fn sub_r32_rip<B: Backend>(b: &mut B, dst: Gpr, next_rip: u64, disp: i32) -> Flow<B> {
+    let base = b.konst::<W64>(next_rip);
+    let d = b.konst::<W64>(disp as i64 as u64);
+    let addr = b.add::<W64>(base, d);
+    let y: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let x = read(b, dst);
+    let v = b.sub::<W32>(x, y);
+    write(b, dst, v);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
+/// SUB r64, [RIP+disp32] (2B /r RIP, REX.W)。
+pub fn sub_r64_rip<B: Backend>(b: &mut B, dst: Gpr, next_rip: u64, disp: i32) -> Flow<B> {
+    let base = b.konst::<W64>(next_rip);
+    let d = b.konst::<W64>(disp as i64 as u64);
+    let addr = b.add::<W64>(base, d);
+    let y: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let x = read64(b, dst);
+    let v = b.sub::<W64>(x, y);
+    write64(b, dst, v);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
+/// SUB r32, [disp32] abs (32ビット)。
+pub fn sub_r32_abs<B: Backend>(b: &mut B, dst: Gpr, addr32: u32) -> Flow<B> {
+    let addr = b.konst::<W64>(addr32 as u64);
+    let y: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let x = read(b, dst);
+    let v = b.sub::<W32>(x, y);
+    write(b, dst, v);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
+/// OR r32, [base] (0B /r mod=00)。
+pub fn or_r32_memnd<B: Backend>(b: &mut B, dst: Gpr, base: Gpr) -> Flow<B> {
+    let addr = read64(b, base);
+    let y: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let x = read(b, dst);
+    let v = b.or::<W32>(x, y);
+    write(b, dst, v);
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// OR r64, [base] (0B /r mod=00, REX.W)。
+pub fn or_r64_memnd<B: Backend>(b: &mut B, dst: Gpr, base: Gpr) -> Flow<B> {
+    let addr = read64(b, base);
+    let y: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let x = read64(b, dst);
+    let v = b.or::<W64>(x, y);
+    write64(b, dst, v);
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// OR r32, [base+disp8] (0B /r mod=01)。
+pub fn or_r32_mem8<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, disp: i8) -> Flow<B> {
+    let addr = eff_addr(b, base, disp);
+    let y: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let x = read(b, dst);
+    let v = b.or::<W32>(x, y);
+    write(b, dst, v);
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// OR r64, [base+disp8] (0B /r mod=01, REX.W)。
+pub fn or_r64_mem8<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, disp: i8) -> Flow<B> {
+    let addr = eff_addr(b, base, disp);
+    let y: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let x = read64(b, dst);
+    let v = b.or::<W64>(x, y);
+    write64(b, dst, v);
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// OR r32, [base+disp32] (0B /r mod=10)。
+pub fn or_r32_mem32<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, disp: i32) -> Flow<B> {
+    let addr = eff_addr32(b, base, disp);
+    let y: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let x = read(b, dst);
+    let v = b.or::<W32>(x, y);
+    write(b, dst, v);
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// OR r64, [base+disp32] (0B /r mod=10, REX.W)。
+pub fn or_r64_mem32<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, disp: i32) -> Flow<B> {
+    let addr = eff_addr32(b, base, disp);
+    let y: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let x = read64(b, dst);
+    let v = b.or::<W64>(x, y);
+    write64(b, dst, v);
+    update_logic_flags(b, v);
+    Ok(())
+}
+
 /// ADD r32, [disp32] (32ビット絶対番地).
 pub fn add_r32_abs<B: Backend>(b: &mut B, dst: Gpr, addr32: u32) -> Flow<B> {
     let addr = b.konst::<W64>(addr32 as u64);
@@ -4811,6 +4980,19 @@ pub fn or_r32_rip<B: Backend>(b: &mut B, dst: Gpr, next_rip: u64, disp: i32) -> 
     let x = read(b, dst);
     let v = b.or::<W32>(x, y);
     write(b, dst, v);
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// OR r64, [RIP+disp32] (0B /r RIP, REX.W)。
+pub fn or_r64_rip<B: Backend>(b: &mut B, dst: Gpr, next_rip: u64, disp: i32) -> Flow<B> {
+    let base = b.konst::<W64>(next_rip);
+    let d = b.konst::<W64>(disp as i64 as u64);
+    let addr = b.add::<W64>(base, d);
+    let y: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let x = read64(b, dst);
+    let v = b.or::<W64>(x, y);
+    write64(b, dst, v);
     update_logic_flags(b, v);
     Ok(())
 }
