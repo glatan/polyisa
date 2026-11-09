@@ -2980,6 +2980,38 @@ pub fn cmova_r64<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
     Ok(())
 }
 
+/// CMOVAE r32, r/m32。CF=0 なら src を dst に移す.
+pub fn cmovae_r32<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
+    let take = {
+        let cf = read_cf(b);
+        let zero = b.konst::<W32>(0);
+        let one = b.konst::<W32>(1);
+        let n = b.select::<W32>(cf, one, zero);
+        b.cmp::<W32>(Cmp::Eq, n, zero)
+    };
+    let srcv = read(b, src);
+    let dstv = read(b, dst);
+    let v = b.select::<W32>(take, srcv, dstv);
+    write(b, dst, v);
+    Ok(())
+}
+
+/// CMOVAE r64, r/m64。CF=0 なら src を dst に移す（REX.W）.
+pub fn cmovae_r64<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
+    let take = {
+        let cf = read_cf(b);
+        let zero = b.konst::<W32>(0);
+        let one = b.konst::<W32>(1);
+        let n = b.select::<W32>(cf, one, zero);
+        b.cmp::<W32>(Cmp::Eq, n, zero)
+    };
+    let srcv = read64(b, src);
+    let dstv = read64(b, dst);
+    let v = b.select::<W64>(take, srcv, dstv);
+    write64(b, dst, v);
+    Ok(())
+}
+
 /// CMOVE r64, m64 (RBP+disp32)。ZF=1 なら mem64 を dst に移す.
 pub fn cmove_r64_mem32<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, disp: i32) -> Flow<B> {
     let addr = eff_addr32(b, base, disp);

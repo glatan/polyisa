@@ -820,3 +820,31 @@ fn run_cmova_reg_direct() {
     let out = run_x86::run(&mut env, 0x1000, &mut sys, 100);
     assert_eq!(out, Outcome::Exit(2));
 }
+
+#[test]
+fn run_cmovae_reg_direct() {
+    // run 経由で 0F43 reg-direct (CMOVAE ECX,EDX) を回す。
+    // ECX=1、EDX=2、CF=0 なので ECX=2 になり exit(2)。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    let prog: &[u8] = &[
+        0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax,1
+        0x50, // push eax
+        0x59, // pop ecx (ecx=1)
+        0xB8, 0x02, 0x00, 0x00, 0x00, // mov eax,2
+        0x50, // push eax
+        0x5A, // pop edx (edx=2)
+        0x0F, 0x43, 0xCA, // cmovae ecx,edx (ecx=2)
+        0x51, // push ecx
+        0x5B, // pop ebx (ebx=2)
+        0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax,1 (exit)
+        0xCD, 0x80, // int 0x80 -> exit(2)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = ExitOne;
+    let out = run_x86::run(&mut env, 0x1000, &mut sys, 100);
+    assert_eq!(out, Outcome::Exit(2));
+}

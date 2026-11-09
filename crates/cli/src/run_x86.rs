@@ -1730,6 +1730,13 @@ fn dispatch<B: Backend>(
                 sem::cmova_r32(b, reg0f_as_gpr(), rm0f())
             }
         }
+        Insn::Cmovae => {
+            if rex_w {
+                sem::cmovae_r64(b, reg0f_as_gpr(), rm0f())
+            } else {
+                sem::cmovae_r32(b, reg0f_as_gpr(), rm0f())
+            }
+        }
         Insn::CmoveM64 => {
             if rex_w {
                 sem::cmove_r64_mem32(b, reg0f_as_gpr(), Gpr(5 | ((rex & 1) << 3)), disp32())
@@ -1876,6 +1883,7 @@ fn dispatch<B: Backend>(
             | Insn::Cmovns
             | Insn::Cmovbe
             | Insn::Cmova
+            | Insn::Cmovae
             | Insn::MovzxR32M16
             | Insn::MovzxR32M16Rip => Some(reg0f_as_gpr()),
             Insn::AddRRip

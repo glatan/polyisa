@@ -272,6 +272,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("cmovns", "F1", "00001111 01001001 11......", "cmovns r, r/m", "alu"),
         ("cmovbe", "F1", "00001111 01000110 11......", "cmovbe r, r/m", "alu"),
         ("cmova", "F1", "00001111 01000111 11......", "cmova r, r/m", "alu"),
+        ("cmovae", "F1", "00001111 01000011 11......", "cmovae r, r/m", "alu"),
         ("cmove_m64", "F1", "00001111 01000100 10000101 ................................", "cmove r64, m64", "load"),
         ("imul_r_imm", "F1", "01101001 11...... ................................", "imul r, r/m, {imm}", "alu"),
         // OR m32,imm32 RIP (81 0D + disp32 + imm32)。64ビット RIP相対.

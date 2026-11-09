@@ -2232,3 +2232,37 @@ fn cmova_r64_moves_when_above() {
     env.step(|b| sem::cmova_r64(b, Gpr(2), Gpr(1))).unwrap();
     assert_eq!(env.backend.get(Gpr(2).state()), 2);
 }
+
+#[test]
+fn cmovae_moves_when_no_carry() {
+    // CMOVAE: CF=0 で mov、CF=1 で保持.
+    let mut env = env();
+    env.backend.set(Gpr(0).state(), 1);
+    env.backend.set(Gpr(1).state(), 2);
+    env.backend.set(sem::eflags_ref(), 0x0);
+    env.step(|b| sem::cmovae_r32(b, Gpr(0), Gpr(1))).unwrap();
+    assert_eq!(eax(&mut env), 2);
+    env.backend.set(Gpr(0).state(), 1);
+    env.backend.set(sem::eflags_ref(), 0x1);
+    env.step(|b| sem::cmovae_r32(b, Gpr(0), Gpr(1))).unwrap();
+    assert_eq!(eax(&mut env), 1);
+}
+
+#[test]
+fn cmovae_r64_moves_when_no_carry() {
+    // CMOVAE RAX,R8 (REX.W): CF=0 で mov.
+    let mut env = env();
+    env.step(|b| {
+        sem::write64(b, Gpr(0), 1);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| {
+        sem::write64(b, Gpr(8), 2);
+        Ok(())
+    })
+    .unwrap();
+    env.backend.set(sem::eflags_ref(), 0x0);
+    env.step(|b| sem::cmovae_r64(b, Gpr(0), Gpr(8))).unwrap();
+    assert_eq!(env.backend.get(Gpr(0).state()), 2);
+}
