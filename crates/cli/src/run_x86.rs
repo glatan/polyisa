@@ -3629,7 +3629,8 @@ fn dispatch<B: Backend>(
         }
         Insn::Pslldq => {
             let imm = (word & 0xff) as u8;
-            sem::pslldq_xmm(b, xmm_reg(), imm)
+            // 0F 73 /7: dst は rm フィールド (reg=111 は拡張子)。xmm_reg() は 7 になるため使わない.
+            sem::pslldq_xmm(b, xmm_rm(), imm)
         }
         Insn::Psubb => sem::psubb_xmm(b, xmm_reg(), xmm_rm()),
         Insn::Pxor => sem::pxor_xmm(b, xmm_reg(), xmm_rm()),
