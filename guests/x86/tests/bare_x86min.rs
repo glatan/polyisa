@@ -1877,3 +1877,42 @@ fn movq_m64_rip_roundtrip() {
         .unwrap();
     assert_eq!(u64::from_le_bytes(back), 0x1122_3344_5566_7788);
 }
+
+#[test]
+fn c7_16bit_stores() {
+    // 66 C7 [RBP+disp32],imm16: [0x100+0x20]=0x1234 (low 16).
+    let mut env = env();
+    env.map_rw(0, 1).unwrap();
+    env.backend.set(Gpr(5).state(), 0x100);
+    env.step(|b| sem::mov_rm16_imm_mem32(b, Gpr(5), 0x20, 0x1234))
+        .unwrap();
+    let mut back = [0u8; 2];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x120),
+            &mut back,
+            Access {
+                endian: Endian::Le,
+                align: Align::Unaligned,
+                kind: AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(u16::from_le_bytes(back), 0x1234);
+}
+
+#[test]
+fn cmove_moves_on_z() {
+    // CMOVE: ZF=1 で mov、ZF=0 で保持.
+    let mut env = env();
+    env.backend.set(Gpr(0).state(), 1);
+    env.backend.set(Gpr(1).state(), 2);
+    env.backend.set(sem::eflags_ref(), 0x40);
+    env.step(|b| sem::cmove_r32(b, Gpr(0), Gpr(1))).unwrap();
+    assert_eq!(eax(&mut env), 2);
+    env.backend.set(Gpr(0).state(), 1);
+    env.backend.set(sem::eflags_ref(), 0x0);
+    env.step(|b| sem::cmove_r32(b, Gpr(0), Gpr(1))).unwrap();
+    assert_eq!(eax(&mut env), 1);
+}

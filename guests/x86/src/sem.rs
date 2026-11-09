@@ -2557,6 +2557,15 @@ pub fn movups_store_rip<B: Backend>(b: &mut B, src: Xmm, next_rip: u64, disp: i3
 }
 
 /// MOV m32, imm32 (C7 /0 mod=10 RBP+disp32)。
+/// MOV m16, imm16 (66 C7 /0 mod=10 RBP+disp32).
+pub fn mov_rm16_imm_mem32<B: Backend>(b: &mut B, base: Gpr, disp: i32, imm: u16) -> Flow<B> {
+    use polyisa_sem::W16;
+    let addr = eff_addr32(b, base, disp);
+    let v = b.konst::<W16>(imm);
+    b.store::<W16>(addr, v, DATA_WRITE)?;
+    Ok(())
+}
+
 pub fn mov_rm32_imm_mem32<B: Backend>(b: &mut B, base: Gpr, disp: i32, imm: u32) -> Flow<B> {
     let addr = eff_addr32(b, base, disp);
     let v = b.konst::<W32>(imm);
@@ -2593,6 +2602,26 @@ pub fn cmovne_r32<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
     let dstv = read(b, dst);
     let v = b.select::<W32>(take, srcv, dstv);
     write(b, dst, v);
+    Ok(())
+}
+
+/// CMOVE r32, r/m32。ZF=1 なら src を dst に移す.
+pub fn cmove_r32<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
+    let take = read_zf(b);
+    let srcv = read(b, src);
+    let dstv = read(b, dst);
+    let v = b.select::<W32>(take, srcv, dstv);
+    write(b, dst, v);
+    Ok(())
+}
+
+/// CMOVE r64, r/m64。ZF=1 なら src を dst に移す（REX.W）.
+pub fn cmove_r64<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
+    let take = read_zf(b);
+    let srcv = read64(b, src);
+    let dstv = read64(b, dst);
+    let v = b.select::<W64>(take, srcv, dstv);
+    write64(b, dst, v);
     Ok(())
 }
 

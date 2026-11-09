@@ -54,7 +54,13 @@ fn eip_of(env: &mut BareEnv) -> u32 {
     env.backend.get(polyisa_guest_x86::sem::eip_ref())
 }
 
-fn fetch_len(first: u8, second: Option<u8>, third: Option<u8>, fourth: Option<u8>) -> Option<u64> {
+fn fetch_len(
+    first: u8,
+    second: Option<u8>,
+    third: Option<u8>,
+    fourth: Option<u8>,
+    has66: bool,
+) -> Option<u64> {
     match first {
         0x90 | 0x40..=0x4F | 0x50..=0x5F | 0xC3 | 0xC9 => Some(1),
         0xEB | 0x74 | 0x75 | 0xE2 | 0xCD | 0x85 | 0x39 | 0x21 | 0x72 | 0x73 | 0x76 | 0x77
@@ -188,12 +194,14 @@ fn fetch_len(first: u8, second: Option<u8>, third: Option<u8>, fourth: Option<u8
             if s >> 6 == 3 { Some(2) } else { None }
         }
         // 0x81 /r id (算術 imm32 群)。SIB 付きは未対応。
+        // has66 (66 81) は imm16 のため 2B 短くなる.
         0x81 => {
             let s = second?;
             let md = s >> 6;
             let rm = s & 7;
+            let sub = if has66 { 2 } else { 0 };
             if md == 3 {
-                Some(6)
+                Some(6 - sub)
             } else if rm == 4 {
                 None
             } else {
@@ -208,7 +216,8 @@ fn fetch_len(first: u8, second: Option<u8>, third: Option<u8>, fourth: Option<u8
                                 0
                             }
                         }
-                    } + 4,
+                    } + 4
+                        - sub,
                 )
             }
         }
@@ -238,29 +247,35 @@ fn fetch_len(first: u8, second: Option<u8>, third: Option<u8>, fourth: Option<u8
             }
         }
         // C7 /0 (MOV r/m,imm32 系)。SIB mod=00 は未対応。
+        // has66 (66 C7) は imm16 のため 2B 短くなる.
         0xC7 => {
             let s = second?;
             let md = s >> 6;
             let rm = s & 7;
+            let sub = if has66 { 2 } else { 0 };
             if md == 3 {
-                Some(6)
+                Some(6 - sub)
             } else if rm == 4 {
-                // SIB 付き。mod=01 は disp8+imm32 (8B)、mod=10 は disp32+imm32 (11B)。
+                // SIB 付き。mod=01 は disp8+imm (8B/6B)、mod=10 は disp32+imm (11B/9B)。
                 // mod=00 は SIB base で変わるため未対応。
                 if md == 1 {
-                    Some(8)
+                    Some(8 - sub)
                 } else if md == 2 {
-                    Some(11)
+                    Some(11 - sub)
                 } else {
                     None
                 }
             } else if md == 1 {
-                Some(7)
+                Some(7 - sub)
             } else if md == 2 {
-                Some(10)
+                Some(10 - sub)
             } else {
-                // mod=00: rm=5 は disp32+imm32 (10B)、それ以外は imm32 のみ (6B)。
-                if rm == 5 { Some(10) } else { Some(6) }
+                // mod=00: rm=5 は disp32+imm (10B/8B)、それ以外は imm のみ (6B/4B)。
+                if rm == 5 {
+                    Some(10 - sub)
+                } else {
+                    Some(6 - sub)
+                }
             }
         }
         // 80 /r ib (ADD/OR/ADC/SBB/AND/SUB/XOR/CMP r/m8,imm8)。reg-direct のみ 3B (ANDのみ実装).
@@ -535,7 +550,7 @@ pub fn run_mode(
         } else {
             None
         };
-        let Some(base) = fetch_len(head[0], second, third, fourth) else {
+        let Some(base) = fetch_len(head[0], second, third, fourth, has66) else {
             return Outcome::Unimplemented {
                 eip: pc as u32,
                 word: head[0] as u128,
@@ -669,6 +684,7 @@ pub fn run_mode(
                     | Insn::MovupsStoreRip
                     | Insn::MovAbsEax
                     | Insn::MovEaxAbs
+                    | Insn::MovRm16ImmM32
                     | Insn::CmpRmImm8Rip
             )
         {
@@ -690,6 +706,7 @@ pub fn run_mode(
                     | Insn::Pshufd
                     | Insn::Pxor
                     | Insn::MovqR64Xmm
+                    | Insn::MovRm16ImmM32
                     | Insn::MovntdqStoreMemnd
                     | Insn::MovntdqStoreMem8
             )
@@ -1404,6 +1421,12 @@ fn dispatch<B: Backend>(
                 sem::mov_rm32_imm_mem32(b, Gpr(5 | ((rex & 1) << 3)), disp, imm32())
             }
         }
+        Insn::MovRm16ImmM32 => {
+            // 66 C7 85 + disp32 + imm16 (64b)。disp は (word>>16) 下位32 LE、imm は最下位16 LE.
+            let disp = ((word >> 16) as u32).swap_bytes() as i32;
+            let imm = ((word & 0xffff) as u16).swap_bytes();
+            sem::mov_rm16_imm_mem32(b, Gpr(5 | ((rex & 1) << 3)), disp, imm)
+        }
         Insn::MovRmImmRip => {
             // C7 05 + disp32 + imm32 (mod=00 RIP)。disp は上位32、imm は下位32.
             let disp = ((word >> 32) as u32).swap_bytes() as i32;
@@ -1448,6 +1471,13 @@ fn dispatch<B: Backend>(
                 sem::cmovne_r64(b, reg(), rm())
             } else {
                 sem::cmovne_r32(b, reg(), rm())
+            }
+        }
+        Insn::Cmove => {
+            if rex_w {
+                sem::cmove_r64(b, reg(), rm())
+            } else {
+                sem::cmove_r32(b, reg(), rm())
             }
         }
         Insn::CmpRmImm8Rip => {
@@ -1568,6 +1598,7 @@ fn dispatch<B: Backend>(
             | Insn::Movsxd
             | Insn::Cmovb
             | Insn::Cmovne
+            | Insn::Cmove
             | Insn::MovzxR32M16
             | Insn::MovzxR32M16Rip
             | Insn::AddRRip
