@@ -2,10 +2,10 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // x86 最小の ISADL モデル（段階4の最小）。
 //
-// i386 の整数92件に絞る。可変長（8/16/24/32/40/48/56ビット）のデコード入口と
+// i386 の整数104件に絞る。可変長（8/16/24/32/40/48/56ビット）のデコード入口と
 // ModRM register-direct の全レジスタ組合せを確かめる。
-// ModRM の disp32・絶対番地は EBX 基底と直接番地のみ持つ。SIB+disp32 と Rust フック・
-// 遅延フラグ・x87・SSE・64ビット・セグメントは本格実装で足す。
+// ModRM の disp32・絶対番地は EBX 基底と直接番地のみ持つ。SIB base は EBX または
+// 直接番地のみ持つ。Rust フック・遅延フラグ・x87・SSE・64ビット・セグメントは本格実装で足す。
 // SYSCALL/CPUID は退出・識別情報の最小形のみ持つ（機能導出は本格実装で足す）。
 // SYSCALL (0F 05) は IA-32e 用であり 32bit 正統は SYSENTER (0F 34) だが、
 // 試作では x86-64 への橋渡しとして SYSCALL を先に持つ。i386 feature の無条件有効は試作の割り切りである。
@@ -55,7 +55,7 @@ pub fn build_model() -> polyisa_isadl::Model {
     // opcode+modrm+SIB）、32ビット（opcode+modrm+SIB+disp8）、40ビット（opcode+imm32）、
     // 48ビット（opcode+modrm+disp32）、56ビット（opcode+modrm+SIB+disp32）。
     // メモリ形式は mod=01+disp8・mod=10+disp32・絶対番地と SIB base+index 形
-    // （スケール付き、disp8 の有無は問わない）のみ持つ。SIB+disp32 は後の段階で足す。
+    // （スケール付き、disp8/disp32・disp なしを含む）のみ持つ。
     // Ref: SPEC-X86-INTEL-SDM (v093).
     let insns: &[(&str, &str, &str, &str, &str)] = &[
         ("nop", "F1", "10010000", "nop", "alu"),
@@ -101,6 +101,18 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("mov_sib_s4nd_eax", "F1", "10001001 00000100 10110011", "mov [ebx+esi*4], eax", "store"),
         ("mov_eax_sib_s8nd", "F1", "10001011 00000100 11110011", "mov eax, [ebx+esi*8]", "load"),
         ("mov_sib_s8nd_eax", "F1", "10001001 00000100 11110011", "mov [ebx+esi*8], eax", "store"),
+        ("mov_eax_sib_s2d32", "F1", "10001011 10000100 01110011 ................................", "mov eax, [ebx+esi*2+disp32]", "load"),
+        ("mov_sib_s2d32_eax", "F1", "10001001 10000100 01110011 ................................", "mov [ebx+esi*2+disp32], eax", "store"),
+        ("mov_eax_sib_s4d32", "F1", "10001011 10000100 10110011 ................................", "mov eax, [ebx+esi*4+disp32]", "load"),
+        ("mov_sib_s4d32_eax", "F1", "10001001 10000100 10110011 ................................", "mov [ebx+esi*4+disp32], eax", "store"),
+        ("mov_eax_sib_s8d32", "F1", "10001011 10000100 11110011 ................................", "mov eax, [ebx+esi*8+disp32]", "load"),
+        ("mov_sib_s8d32_eax", "F1", "10001001 10000100 11110011 ................................", "mov [ebx+esi*8+disp32], eax", "store"),
+        ("mov_eax_sib_s2a32", "F1", "10001011 00000100 01110101 ................................", "mov eax, [esi*2+disp32]", "load"),
+        ("mov_sib_s2a32_eax", "F1", "10001001 00000100 01110101 ................................", "mov [esi*2+disp32], eax", "store"),
+        ("mov_eax_sib_s4a32", "F1", "10001011 00000100 10110101 ................................", "mov eax, [esi*4+disp32]", "load"),
+        ("mov_sib_s4a32_eax", "F1", "10001001 00000100 10110101 ................................", "mov [esi*4+disp32], eax", "store"),
+        ("mov_eax_sib_s8a32", "F1", "10001011 00000100 11110101 ................................", "mov eax, [esi*8+disp32]", "load"),
+        ("mov_sib_s8a32_eax", "F1", "10001001 00000100 11110101 ................................", "mov [esi*8+disp32], eax", "store"),
         ("mul_rm32", "F1", "11110111 11100001", "mul eax, ecx", "mult"),
         ("div_rm32", "F1", "11110111 11110001", "div eax, ecx", "div"),
         ("idiv_rm32", "F1", "11110111 11111001", "idiv eax, ecx", "div"),

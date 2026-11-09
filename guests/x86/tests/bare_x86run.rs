@@ -306,6 +306,46 @@ fn run_mem_disp32_and_absolute() {
 }
 
 #[test]
+fn run_sib_disp32() {
+    // SIB+disp32（7バイト）を run 経由で回し、exit コードで検証する。
+    // mov eax,0x1500; push eax; pop ebx (ebx=0x1500);
+    // mov eax,0x10; push eax; pop esi (esi=0x10);
+    // mov eax,0x77; mov [ebx+esi*4+0x20],eax ([0x1560]=0x77);
+    // mov eax,0; mov eax,[ebx+esi*4+0x20] (eax=0x77);
+    // mov [esi*4+0x1500],eax ([0x1540]=0x77);
+    // mov eax,0; mov eax,[esi*4+0x1500] (eax=0x77);
+    // push eax; pop ebx; mov eax,1; int 0x80 -> exit(0x77)
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    let prog: &[u8] = &[
+        0xB8, 0x00, 0x15, 0x00, 0x00, // mov eax,0x1500
+        0x50, // push eax
+        0x5B, // pop ebx (ebx=0x1500)
+        0xB8, 0x10, 0x00, 0x00, 0x00, // mov eax,0x10
+        0x50, // push eax
+        0x5E, // pop esi (esi=0x10)
+        0xB8, 0x77, 0x00, 0x00, 0x00, // mov eax,0x77
+        0x89, 0x84, 0xB3, 0x20, 0x00, 0x00, 0x00, // mov [ebx+esi*4+0x20],eax
+        0xB8, 0x00, 0x00, 0x00, 0x00, // mov eax,0
+        0x8B, 0x84, 0xB3, 0x20, 0x00, 0x00, 0x00, // mov eax,[ebx+esi*4+0x20]
+        0x89, 0x04, 0xB5, 0x00, 0x15, 0x00, 0x00, // mov [esi*4+0x1500],eax
+        0xB8, 0x00, 0x00, 0x00, 0x00, // mov eax,0
+        0x8B, 0x04, 0xB5, 0x00, 0x15, 0x00, 0x00, // mov eax,[esi*4+0x1500]
+        0x50, // push eax
+        0x5B, // pop ebx (ebx=0x77)
+        0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax,1
+        0xCD, 0x80, // int 0x80 -> exit(0x77)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = ExitOne;
+    let out = run_x86::run(&mut env, 0x1000, &mut sys, 100);
+    assert_eq!(out, Outcome::Exit(0x77));
+}
+
+#[test]
 fn run_div_exit_quotient() {
     // F7 F1 の fetch と div ディスパッチを run 経由で検証する。
     // EDX:EAX=17 / ECX=5 -> EAX=3 で exit(3)。

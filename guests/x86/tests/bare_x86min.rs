@@ -661,6 +661,50 @@ fn sib_scaled_nd_roundtrip() {
 }
 
 #[test]
+fn sib_disp32_roundtrip() {
+    // SIB スケール付き・disp32：mod=10（EBX 基底）と mod=00 直接番地 base を往復する。
+    let mut env = env();
+    env.map_rw(0, 1).unwrap();
+    // EBX=0x100、ESI=0x10、disp=0x20。
+    // *2 で [0x140]、*4 で [0x160]、*8 で [0x1a0]。
+    env.backend.set(Gpr(3).state(), 0x100);
+    env.backend.set(Gpr(6).state(), 0x10);
+    env.backend.set(Gpr(0).state(), 0x1111_2222);
+    env.step(|b| sem::mov_sib_s2d32_eax(b, 0x20)).unwrap();
+    env.backend.set(Gpr(0).state(), 0);
+    env.step(|b| sem::mov_eax_sib_s2d32(b, 0x20)).unwrap();
+    assert_eq!(eax(&mut env), 0x1111_2222);
+    env.backend.set(Gpr(0).state(), 0x3333_4444);
+    env.step(|b| sem::mov_sib_s4d32_eax(b, 0x20)).unwrap();
+    env.backend.set(Gpr(0).state(), 0);
+    env.step(|b| sem::mov_eax_sib_s4d32(b, 0x20)).unwrap();
+    assert_eq!(eax(&mut env), 0x3333_4444);
+    env.backend.set(Gpr(0).state(), 0x5555_6666);
+    env.step(|b| sem::mov_sib_s8d32_eax(b, 0x20)).unwrap();
+    env.backend.set(Gpr(0).state(), 0);
+    env.step(|b| sem::mov_eax_sib_s8d32(b, 0x20)).unwrap();
+    assert_eq!(eax(&mut env), 0x5555_6666);
+    // 直接番地 base：ESI=0x10、disp=0x200。
+    // *2 で [0x220]、*4 で [0x240]、*8 で [0x280]。
+    env.backend.set(Gpr(6).state(), 0x10);
+    env.backend.set(Gpr(0).state(), 0x7777_8888);
+    env.step(|b| sem::mov_sib_s2a32_eax(b, 0x200)).unwrap();
+    env.backend.set(Gpr(0).state(), 0);
+    env.step(|b| sem::mov_eax_sib_s2a32(b, 0x200)).unwrap();
+    assert_eq!(eax(&mut env), 0x7777_8888);
+    env.backend.set(Gpr(0).state(), 0x9999_AAAA);
+    env.step(|b| sem::mov_sib_s4a32_eax(b, 0x200)).unwrap();
+    env.backend.set(Gpr(0).state(), 0);
+    env.step(|b| sem::mov_eax_sib_s4a32(b, 0x200)).unwrap();
+    assert_eq!(eax(&mut env), 0x9999_AAAA);
+    env.backend.set(Gpr(0).state(), 0xBBBB_CCCC);
+    env.step(|b| sem::mov_sib_s8a32_eax(b, 0x200)).unwrap();
+    env.backend.set(Gpr(0).state(), 0);
+    env.step(|b| sem::mov_eax_sib_s8a32(b, 0x200)).unwrap();
+    assert_eq!(eax(&mut env), 0xBBBB_CCCC);
+}
+
+#[test]
 fn jmp_sets_eip() {
     let mut env = env();
     env.backend.set(sem::eip_ref(), 0x1000);

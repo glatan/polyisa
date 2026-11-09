@@ -357,20 +357,30 @@ pub fn mov_sibd_eax<B: Backend>(b: &mut B, disp: i8) -> Flow<B> {
     Ok(())
 }
 
-/// SIB base+index にスケールと disp8 を足した実効アドレス。
-fn sib_addr_scaled<B: Backend>(b: &mut B, shift: u32, disp: i8) -> B::V<W32> {
+/// SIB base+index にスケールと disp を足した実効アドレス。
+fn sib_addr_scaled<B: Backend>(b: &mut B, shift: u32, disp: i32) -> B::V<W32> {
     let base = read(b, Gpr(3));
     let idx = read(b, Gpr(6));
     let n = b.konst::<W32>(shift);
     let scaled = b.shl::<W32>(idx, n);
     let sum = b.add::<W32>(base, scaled);
-    let d = b.konst::<W32>(disp as i32 as u32);
+    let d = b.konst::<W32>(disp as u32);
     b.add::<W32>(sum, d)
+}
+
+/// SIB 直接番地 base にスケール付き index と disp32 を足した実効アドレス。
+/// mod=00 base=101（base なし）の形。
+fn sib_addr_scaled_abs<B: Backend>(b: &mut B, shift: u32, disp: i32) -> B::V<W32> {
+    let idx = read(b, Gpr(6));
+    let n = b.konst::<W32>(shift);
+    let scaled = b.shl::<W32>(idx, n);
+    let d = b.konst::<W32>(disp as u32);
+    b.add::<W32>(scaled, d)
 }
 
 /// MOV EAX, [EBX+ESI*2+disp8]。
 pub fn mov_eax_sib_s2<B: Backend>(b: &mut B, disp: i8) -> Flow<B> {
-    let addr32 = sib_addr_scaled(b, 1, disp);
+    let addr32 = sib_addr_scaled(b, 1, disp as i32);
     let addr = b.zext::<W32, W64>(addr32);
     let v: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
     write(b, Gpr(0), v);
@@ -379,7 +389,7 @@ pub fn mov_eax_sib_s2<B: Backend>(b: &mut B, disp: i8) -> Flow<B> {
 
 /// MOV [EBX+ESI*2+disp8], EAX。
 pub fn mov_sib_s2_eax<B: Backend>(b: &mut B, disp: i8) -> Flow<B> {
-    let addr32 = sib_addr_scaled(b, 1, disp);
+    let addr32 = sib_addr_scaled(b, 1, disp as i32);
     let addr = b.zext::<W32, W64>(addr32);
     let v: B::V<W32> = read(b, Gpr(0));
     b.store::<W32>(addr, v, DATA_WRITE)?;
@@ -388,7 +398,7 @@ pub fn mov_sib_s2_eax<B: Backend>(b: &mut B, disp: i8) -> Flow<B> {
 
 /// MOV EAX, [EBX+ESI*4+disp8]。
 pub fn mov_eax_sib_s4<B: Backend>(b: &mut B, disp: i8) -> Flow<B> {
-    let addr32 = sib_addr_scaled(b, 2, disp);
+    let addr32 = sib_addr_scaled(b, 2, disp as i32);
     let addr = b.zext::<W32, W64>(addr32);
     let v: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
     write(b, Gpr(0), v);
@@ -397,7 +407,7 @@ pub fn mov_eax_sib_s4<B: Backend>(b: &mut B, disp: i8) -> Flow<B> {
 
 /// MOV [EBX+ESI*4+disp8], EAX。
 pub fn mov_sib_s4_eax<B: Backend>(b: &mut B, disp: i8) -> Flow<B> {
-    let addr32 = sib_addr_scaled(b, 2, disp);
+    let addr32 = sib_addr_scaled(b, 2, disp as i32);
     let addr = b.zext::<W32, W64>(addr32);
     let v: B::V<W32> = read(b, Gpr(0));
     b.store::<W32>(addr, v, DATA_WRITE)?;
@@ -406,7 +416,7 @@ pub fn mov_sib_s4_eax<B: Backend>(b: &mut B, disp: i8) -> Flow<B> {
 
 /// MOV EAX, [EBX+ESI*8+disp8]。
 pub fn mov_eax_sib_s8<B: Backend>(b: &mut B, disp: i8) -> Flow<B> {
-    let addr32 = sib_addr_scaled(b, 3, disp);
+    let addr32 = sib_addr_scaled(b, 3, disp as i32);
     let addr = b.zext::<W32, W64>(addr32);
     let v: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
     write(b, Gpr(0), v);
@@ -415,7 +425,7 @@ pub fn mov_eax_sib_s8<B: Backend>(b: &mut B, disp: i8) -> Flow<B> {
 
 /// MOV [EBX+ESI*8+disp8], EAX。
 pub fn mov_sib_s8_eax<B: Backend>(b: &mut B, disp: i8) -> Flow<B> {
-    let addr32 = sib_addr_scaled(b, 3, disp);
+    let addr32 = sib_addr_scaled(b, 3, disp as i32);
     let addr = b.zext::<W32, W64>(addr32);
     let v: B::V<W32> = read(b, Gpr(0));
     b.store::<W32>(addr, v, DATA_WRITE)?;
@@ -470,6 +480,114 @@ pub fn mov_eax_sib_s8nd<B: Backend>(b: &mut B) -> Flow<B> {
 /// MOV [EBX+ESI*8], EAX (SIB mod=00 base+index*8)。
 pub fn mov_sib_s8nd_eax<B: Backend>(b: &mut B) -> Flow<B> {
     let addr32 = sib_addr_scaled(b, 3, 0);
+    let addr = b.zext::<W32, W64>(addr32);
+    let v: B::V<W32> = read(b, Gpr(0));
+    b.store::<W32>(addr, v, DATA_WRITE)?;
+    Ok(())
+}
+
+/// MOV EAX, [EBX+ESI*2+disp32] (SIB mod=10 base+index*2)。
+pub fn mov_eax_sib_s2d32<B: Backend>(b: &mut B, disp: i32) -> Flow<B> {
+    let addr32 = sib_addr_scaled(b, 1, disp);
+    let addr = b.zext::<W32, W64>(addr32);
+    let v: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    write(b, Gpr(0), v);
+    Ok(())
+}
+
+/// MOV [EBX+ESI*2+disp32], EAX。
+pub fn mov_sib_s2d32_eax<B: Backend>(b: &mut B, disp: i32) -> Flow<B> {
+    let addr32 = sib_addr_scaled(b, 1, disp);
+    let addr = b.zext::<W32, W64>(addr32);
+    let v: B::V<W32> = read(b, Gpr(0));
+    b.store::<W32>(addr, v, DATA_WRITE)?;
+    Ok(())
+}
+
+/// MOV EAX, [EBX+ESI*4+disp32] (SIB mod=10 base+index*4)。
+pub fn mov_eax_sib_s4d32<B: Backend>(b: &mut B, disp: i32) -> Flow<B> {
+    let addr32 = sib_addr_scaled(b, 2, disp);
+    let addr = b.zext::<W32, W64>(addr32);
+    let v: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    write(b, Gpr(0), v);
+    Ok(())
+}
+
+/// MOV [EBX+ESI*4+disp32], EAX。
+pub fn mov_sib_s4d32_eax<B: Backend>(b: &mut B, disp: i32) -> Flow<B> {
+    let addr32 = sib_addr_scaled(b, 2, disp);
+    let addr = b.zext::<W32, W64>(addr32);
+    let v: B::V<W32> = read(b, Gpr(0));
+    b.store::<W32>(addr, v, DATA_WRITE)?;
+    Ok(())
+}
+
+/// MOV EAX, [EBX+ESI*8+disp32] (SIB mod=10 base+index*8)。
+pub fn mov_eax_sib_s8d32<B: Backend>(b: &mut B, disp: i32) -> Flow<B> {
+    let addr32 = sib_addr_scaled(b, 3, disp);
+    let addr = b.zext::<W32, W64>(addr32);
+    let v: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    write(b, Gpr(0), v);
+    Ok(())
+}
+
+/// MOV [EBX+ESI*8+disp32], EAX。
+pub fn mov_sib_s8d32_eax<B: Backend>(b: &mut B, disp: i32) -> Flow<B> {
+    let addr32 = sib_addr_scaled(b, 3, disp);
+    let addr = b.zext::<W32, W64>(addr32);
+    let v: B::V<W32> = read(b, Gpr(0));
+    b.store::<W32>(addr, v, DATA_WRITE)?;
+    Ok(())
+}
+
+/// MOV EAX, [ESI*2+disp32] (SIB mod=00 base=直接番地)。
+pub fn mov_eax_sib_s2a32<B: Backend>(b: &mut B, disp: i32) -> Flow<B> {
+    let addr32 = sib_addr_scaled_abs(b, 1, disp);
+    let addr = b.zext::<W32, W64>(addr32);
+    let v: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    write(b, Gpr(0), v);
+    Ok(())
+}
+
+/// MOV [ESI*2+disp32], EAX。
+pub fn mov_sib_s2a32_eax<B: Backend>(b: &mut B, disp: i32) -> Flow<B> {
+    let addr32 = sib_addr_scaled_abs(b, 1, disp);
+    let addr = b.zext::<W32, W64>(addr32);
+    let v: B::V<W32> = read(b, Gpr(0));
+    b.store::<W32>(addr, v, DATA_WRITE)?;
+    Ok(())
+}
+
+/// MOV EAX, [ESI*4+disp32] (SIB mod=00 base=直接番地)。
+pub fn mov_eax_sib_s4a32<B: Backend>(b: &mut B, disp: i32) -> Flow<B> {
+    let addr32 = sib_addr_scaled_abs(b, 2, disp);
+    let addr = b.zext::<W32, W64>(addr32);
+    let v: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    write(b, Gpr(0), v);
+    Ok(())
+}
+
+/// MOV [ESI*4+disp32], EAX。
+pub fn mov_sib_s4a32_eax<B: Backend>(b: &mut B, disp: i32) -> Flow<B> {
+    let addr32 = sib_addr_scaled_abs(b, 2, disp);
+    let addr = b.zext::<W32, W64>(addr32);
+    let v: B::V<W32> = read(b, Gpr(0));
+    b.store::<W32>(addr, v, DATA_WRITE)?;
+    Ok(())
+}
+
+/// MOV EAX, [ESI*8+disp32] (SIB mod=00 base=直接番地)。
+pub fn mov_eax_sib_s8a32<B: Backend>(b: &mut B, disp: i32) -> Flow<B> {
+    let addr32 = sib_addr_scaled_abs(b, 3, disp);
+    let addr = b.zext::<W32, W64>(addr32);
+    let v: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    write(b, Gpr(0), v);
+    Ok(())
+}
+
+/// MOV [ESI*8+disp32], EAX。
+pub fn mov_sib_s8a32_eax<B: Backend>(b: &mut B, disp: i32) -> Flow<B> {
+    let addr32 = sib_addr_scaled_abs(b, 3, disp);
     let addr = b.zext::<W32, W64>(addr32);
     let v: B::V<W32> = read(b, Gpr(0));
     b.store::<W32>(addr, v, DATA_WRITE)?;
