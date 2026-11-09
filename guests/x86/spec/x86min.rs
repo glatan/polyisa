@@ -2,10 +2,10 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // x86 最小の ISADL モデル（段階4の最小）。
 //
-// i386 の整数88件に絞る。可変長（8/16/24/32/40ビット）のデコード入口と
+// i386 の整数92件に絞る。可変長（8/16/24/32/40/48/56ビット）のデコード入口と
 // ModRM register-direct の全レジスタ組合せを確かめる。
-// ModRM の disp32・絶対番地と Rust フック・遅延フラグ・x87・SSE・
-// 64ビット・セグメントは本格実装で足す。
+// ModRM の disp32・絶対番地は EBX 基底と直接番地のみ持つ。SIB+disp32 と Rust フック・
+// 遅延フラグ・x87・SSE・64ビット・セグメントは本格実装で足す。
 // SYSCALL/CPUID は退出・識別情報の最小形のみ持つ（機能導出は本格実装で足す）。
 // SYSCALL (0F 05) は IA-32e 用であり 32bit 正統は SYSENTER (0F 34) だが、
 // 試作では x86-64 への橋渡しとして SYSCALL を先に持つ。i386 feature の無条件有効は試作の割り切りである。
@@ -52,8 +52,10 @@ pub fn build_model() -> polyisa_isadl::Model {
 
     // (名前, 形式, パターン, 構文, 分類)
     // 可変長：8ビット単独、16ビット（opcode+disp8/modrm）、24ビット（opcode+modrm+disp8、
-    // opcode+modrm+SIB）、32ビット（opcode+modrm+SIB+disp8）、40ビット（opcode+imm32）。
-    // メモリ形式は mod=01+disp8 と SIB base+index 形（スケール付き、disp8 の有無は問わない）のみ持つ。
+    // opcode+modrm+SIB）、32ビット（opcode+modrm+SIB+disp8）、40ビット（opcode+imm32）、
+    // 48ビット（opcode+modrm+disp32）、56ビット（opcode+modrm+SIB+disp32）。
+    // メモリ形式は mod=01+disp8・mod=10+disp32・絶対番地と SIB base+index 形
+    // （スケール付き、disp8 の有無は問わない）のみ持つ。SIB+disp32 は後の段階で足す。
     // Ref: SPEC-X86-INTEL-SDM (v093).
     let insns: &[(&str, &str, &str, &str, &str)] = &[
         ("nop", "F1", "10010000", "nop", "alu"),
@@ -79,6 +81,10 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("mov_rm32", "F1", "10001011 11......", "mov r32, r/m32", "alu"),
         ("mov_eax_mem", "F1", "10001011 01000011 ........", "mov eax, [ebx+disp8]", "load"),
         ("mov_mem_eax", "F1", "10001001 01000011 ........", "mov [ebx+disp8], eax", "store"),
+        ("mov_eax_memd32", "F1", "10001011 10000011 ................................", "mov eax, [ebx+disp32]", "load"),
+        ("mov_memd32_eax", "F1", "10001001 10000011 ................................", "mov [ebx+disp32], eax", "store"),
+        ("mov_eax_abs", "F1", "10001011 00000101 ................................", "mov eax, [disp32]", "load"),
+        ("mov_abs_eax", "F1", "10001001 00000101 ................................", "mov [disp32], eax", "store"),
         ("mov_eax_sib", "F1", "10001011 00000100 00110011", "mov eax, [ebx+esi]", "load"),
         ("mov_sib_eax", "F1", "10001001 00000100 00110011", "mov [ebx+esi], eax", "store"),
         ("mov_eax_sibd", "F1", "10001011 01000100 00110011 ........", "mov eax, [ebx+esi+disp8]", "load"),

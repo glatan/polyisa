@@ -497,6 +497,49 @@ pub fn mov_mem_eax<B: Backend>(b: &mut B, disp: i8) -> Flow<B> {
     Ok(())
 }
 
+/// ベース + disp32 の実効アドレスを求める（disp32 は符号付き）。
+fn eff_addr32<B: Backend>(b: &mut B, base: Gpr, disp: i32) -> B::V<W32> {
+    let r = read(b, base);
+    let d = b.konst::<W32>(disp as u32);
+    b.add::<W32>(r, d)
+}
+
+/// MOV EAX, [EBX+disp32] (ModRM mod=10 の最小形)。
+pub fn mov_eax_memd32<B: Backend>(b: &mut B, disp: i32) -> Flow<B> {
+    let addr32 = eff_addr32(b, Gpr(3), disp);
+    let addr = b.zext::<W32, W64>(addr32);
+    let v: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    write(b, Gpr(0), v);
+    Ok(())
+}
+
+/// MOV [EBX+disp32], EAX (ModRM mod=10 の最小形)。
+pub fn mov_memd32_eax<B: Backend>(b: &mut B, disp: i32) -> Flow<B> {
+    let addr32 = eff_addr32(b, Gpr(3), disp);
+    let addr = b.zext::<W32, W64>(addr32);
+    let v: B::V<W32> = read(b, Gpr(0));
+    b.store::<W32>(addr, v, DATA_WRITE)?;
+    Ok(())
+}
+
+/// MOV EAX, [disp32] (絶対番地、mod=00 rm=101)。
+pub fn mov_eax_abs<B: Backend>(b: &mut B, addr: u32) -> Flow<B> {
+    let addr32 = b.konst::<W32>(addr);
+    let addr = b.zext::<W32, W64>(addr32);
+    let v: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    write(b, Gpr(0), v);
+    Ok(())
+}
+
+/// MOV [disp32], EAX (絶対番地、mod=00 rm=101)。
+pub fn mov_abs_eax<B: Backend>(b: &mut B, addr: u32) -> Flow<B> {
+    let addr32 = b.konst::<W32>(addr);
+    let addr = b.zext::<W32, W64>(addr32);
+    let v: B::V<W32> = read(b, Gpr(0));
+    b.store::<W32>(addr, v, DATA_WRITE)?;
+    Ok(())
+}
+
 /// SUB EAX, imm32。結果を書き、ZF/CF を更新する。
 pub fn sub_eax<B: Backend>(b: &mut B, imm: u32) -> Flow<B> {
     let x = read(b, Gpr(0));
