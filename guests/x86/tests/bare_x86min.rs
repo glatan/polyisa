@@ -518,6 +518,36 @@ fn sib_disp8_roundtrip() {
 }
 
 #[test]
+fn sib_scaled_roundtrip() {
+    let mut env = env();
+    env.map_rw(0, 1).unwrap();
+    // EBX=0x100、ESI=0x10、*4 で [0x140] に書いて読む。
+    env.backend.set(Gpr(3).state(), 0x100);
+    env.backend.set(Gpr(6).state(), 0x10);
+    env.backend.set(Gpr(0).state(), 0x1234_5678);
+    env.step(|b| sem::mov_sib_s4_eax(b, 0)).unwrap();
+    env.backend.set(Gpr(0).state(), 0);
+    env.step(|b| sem::mov_eax_sib_s4(b, 0)).unwrap();
+    assert_eq!(eax(&mut env), 0x1234_5678);
+    // *2：0x100+0x10*2+0 = 0x120。
+    env.backend.set(Gpr(3).state(), 0x100);
+    env.backend.set(Gpr(6).state(), 0x10);
+    env.backend.set(Gpr(0).state(), 0x55AA_55AA);
+    env.step(|b| sem::mov_sib_s2_eax(b, 0)).unwrap();
+    env.backend.set(Gpr(0).state(), 0);
+    env.step(|b| sem::mov_eax_sib_s2(b, 0)).unwrap();
+    assert_eq!(eax(&mut env), 0x55AA_55AA);
+    // *8、disp=-16：0x100+0x80-0x10 = 0x170。
+    env.backend.set(Gpr(3).state(), 0x100);
+    env.backend.set(Gpr(6).state(), 0x10);
+    env.backend.set(Gpr(0).state(), 0x9ABC_DEF0);
+    env.step(|b| sem::mov_sib_s8_eax(b, -16)).unwrap();
+    env.backend.set(Gpr(0).state(), 0);
+    env.step(|b| sem::mov_eax_sib_s8(b, -16)).unwrap();
+    assert_eq!(eax(&mut env), 0x9ABC_DEF0);
+}
+
+#[test]
 fn jmp_sets_eip() {
     let mut env = env();
     env.backend.set(sem::eip_ref(), 0x1000);
