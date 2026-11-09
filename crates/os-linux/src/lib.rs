@@ -85,6 +85,7 @@ pub mod x86_64 {
     pub const ARCH_PRCTL: u64 = 158;
     pub const SET_ROBUST_LIST: u64 = 273;
     pub const RSEQ: u64 = 334;
+    pub const PRLIMIT64: u64 = 302;
 }
 
 /// 段階4の準備としての i386 番号表（Linux・32ビット）。

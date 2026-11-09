@@ -3511,3 +3511,49 @@ fn sub_rm32_imm8_mem8_basic() {
         .unwrap();
     assert_eq!(u32::from_le_bytes(back), 0x02);
 }
+
+#[test]
+fn sub_r64_fs_abs_basic() {
+    // SUB RAX,FS:[0x28] (REX.W SIB-abs FS): RAX=0x30, [FS:0x28]=0x10 -> 0x20.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1028), &[0x10u8, 0, 0, 0, 0, 0, 0, 0])
+        .unwrap();
+    env.step(|b| {
+        sem::write64(b, Gpr(0), 0x30);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::sub_r64_fs_abs(b, Gpr(0), 0x1000, 0x28))
+        .unwrap();
+    env.step(|b| {
+        let v = sem::read64(b, Gpr(0));
+        assert_eq!(v, 0x20);
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn test_r8_r8_sets_zf() {
+    // TEST DIL,DIL (REX): DIL=0 -> ZF=1; DIL=1 -> ZF=0.
+    let mut env = env();
+    env.step(|b| {
+        sem::write64(b, Gpr(7), 0);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::test_r8_r8(b, Gpr(7), false, Gpr(7), false))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0x40);
+    env.step(|b| {
+        sem::write64(b, Gpr(7), 1);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::test_r8_r8(b, Gpr(7), false, Gpr(7), false))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0);
+}

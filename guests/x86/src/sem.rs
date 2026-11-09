@@ -596,6 +596,67 @@ pub fn mov_m8_r8_rip<B: Backend>(
     Ok(())
 }
 
+/// TEST r/m8, r8 reg-direct (84 /r mod=11)。AND して5旗を更新、dstは変えない.
+pub fn test_r8_r8<B: Backend>(
+    b: &mut B,
+    dst: Gpr,
+    dst_high: bool,
+    src: Gpr,
+    src_high: bool,
+) -> Flow<B> {
+    use polyisa_sem::W8;
+    let x = read8(b, dst, dst_high);
+    let y = read8(b, src, src_high);
+    let v = b.and::<W8>(x, y);
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// TEST [base], r8 (84 /r mod=00)。
+pub fn test_m8_r8_memnd<B: Backend>(b: &mut B, base: Gpr, src: Gpr, high: bool) -> Flow<B> {
+    use polyisa_sem::W8;
+    let addr = read64(b, base);
+    let x: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
+    let y = read8(b, src, high);
+    let v = b.and::<W8>(x, y);
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// TEST [base+disp8], r8 (84 /r mod=01)。
+pub fn test_m8_r8_mem8<B: Backend>(
+    b: &mut B,
+    base: Gpr,
+    disp: i8,
+    src: Gpr,
+    high: bool,
+) -> Flow<B> {
+    use polyisa_sem::W8;
+    let addr = eff_addr(b, base, disp);
+    let x: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
+    let y = read8(b, src, high);
+    let v = b.and::<W8>(x, y);
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// TEST [base+disp32], r8 (84 /r mod=10)。
+pub fn test_m8_r8_mem32<B: Backend>(
+    b: &mut B,
+    base: Gpr,
+    disp: i32,
+    src: Gpr,
+    high: bool,
+) -> Flow<B> {
+    use polyisa_sem::W8;
+    let addr = eff_addr32(b, base, disp);
+    let x: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
+    let y = read8(b, src, high);
+    let v = b.and::<W8>(x, y);
+    update_logic_flags(b, v);
+    Ok(())
+}
+
 /// MOV r/m8, r8 reg-direct (88 /r mod=11)。8bit転送.
 pub fn mov_r8_r8<B: Backend>(
     b: &mut B,
@@ -4778,6 +4839,65 @@ pub fn sub_r32_abs<B: Backend>(b: &mut B, dst: Gpr, addr32: u32) -> Flow<B> {
     let x = read(b, dst);
     let v = b.sub::<W32>(x, y);
     write(b, dst, v);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
+/// SUB r64, [disp32] abs (REX.W)。
+pub fn sub_r64_abs<B: Backend>(b: &mut B, dst: Gpr, addr32: u32) -> Flow<B> {
+    let addr = b.konst::<W64>(addr32 as u64);
+    let y: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let x = read64(b, dst);
+    let v = b.sub::<W64>(x, y);
+    write64(b, dst, v);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
+/// SUB r32, [index*scale+disp32] abs (2B SIB 直接番地、索引あり)。
+pub fn sub_r32_sibabs<B: Backend>(b: &mut B, dst: Gpr, idx: Gpr, shift: u32, disp: i32) -> Flow<B> {
+    let addr = sib_addr_scaled_abs(b, shift, disp, idx);
+    let y: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let x = read(b, dst);
+    let v = b.sub::<W32>(x, y);
+    write(b, dst, v);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
+/// SUB r64, [index*scale+disp32] abs (2B SIB 直接番地、索引あり、REX.W)。
+pub fn sub_r64_sibabs<B: Backend>(b: &mut B, dst: Gpr, idx: Gpr, shift: u32, disp: i32) -> Flow<B> {
+    let addr = sib_addr_scaled_abs(b, shift, disp, idx);
+    let y: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let x = read64(b, dst);
+    let v = b.sub::<W64>(x, y);
+    write64(b, dst, v);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
+/// SUB r32, FS:[disp32] (FS + 2B SIB 直接番地)。
+pub fn sub_r32_fs_abs<B: Backend>(b: &mut B, dst: Gpr, fs_base: u64, disp: i32) -> Flow<B> {
+    let base = b.konst::<W64>(fs_base);
+    let d = b.konst::<W64>(disp as i64 as u64);
+    let addr = b.add::<W64>(base, d);
+    let y: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let x = read(b, dst);
+    let v = b.sub::<W32>(x, y);
+    write(b, dst, v);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
+/// SUB r64, FS:[disp32] (FS + 2B SIB 直接番地、REX.W)。
+pub fn sub_r64_fs_abs<B: Backend>(b: &mut B, dst: Gpr, fs_base: u64, disp: i32) -> Flow<B> {
+    let base = b.konst::<W64>(fs_base);
+    let d = b.konst::<W64>(disp as i64 as u64);
+    let addr = b.add::<W64>(base, d);
+    let y: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let x = read64(b, dst);
+    let v = b.sub::<W64>(x, y);
+    write64(b, dst, v);
     update_sub_flags(b, x, y, v);
     Ok(())
 }

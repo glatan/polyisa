@@ -370,6 +370,24 @@ fn fetch_len(
                 Some(2)
             }
         }
+        // 0x84 /r (TEST r/m8,r8)。reg-direct 2B、mod=00 base 2B / abs 6B、
+        // mod=01 base+disp8 3B、mod=10 base+disp32 6B。SIB は未対応で None.
+        0x84 => {
+            let s = second?;
+            let md = s >> 6;
+            let rm = s & 7;
+            if md == 3 {
+                Some(2)
+            } else if rm == 4 {
+                None
+            } else if md == 1 {
+                Some(3)
+            } else if md == 2 || rm == 5 {
+                Some(6)
+            } else {
+                Some(2)
+            }
+        }
         // C7 /0 (MOV r/m,imm32 系)。SIB mod=00 は直接番地 (base=101) のみ。
         // has66 (66 C7) は imm16 のため 2B 短くなる.
         0xC7 => {
@@ -700,6 +718,7 @@ pub fn run_mode(
                 | 0x80
                 | 0xC6
                 | 0x88
+                | 0x84
         ) {
             if env
                 .backend
@@ -817,6 +836,7 @@ pub fn run_mode(
                     | 0x80
                     | 0xC6
                     | 0x88
+                    | 0x84
                     | 0xC1
                     | 0xD1
                     | 0x05
@@ -1431,6 +1451,62 @@ fn dispatch<B: Backend>(
                 (Gpr(rm_f - 4), true)
             };
             sem::mov_r8_r8(b, dst, dst_high, src, src_high)
+        }
+        Insn::TestR8R8 => {
+            // 84 /r mod=11 reg-direct。dst は rm、src は reg (TEST は書換なし).
+            let reg_f = (modrm() >> 3) & 7;
+            let rm_f = modrm() & 7;
+            let (src, src_high) = if rex != 0 {
+                (Gpr(reg_f | ((rex >> 2) & 1) << 3), false)
+            } else if reg_f < 4 {
+                (Gpr(reg_f), false)
+            } else {
+                (Gpr(reg_f - 4), true)
+            };
+            let (dst, dst_high) = if rex != 0 {
+                (Gpr(rm_f | ((rex & 1) << 3)), false)
+            } else if rm_f < 4 {
+                (Gpr(rm_f), false)
+            } else {
+                (Gpr(rm_f - 4), true)
+            };
+            sem::test_r8_r8(b, dst, dst_high, src, src_high)
+        }
+        Insn::TestM8R8Memnd => {
+            // 84 /r mod=00 [base],r8。src は reg フィールド.
+            let reg_f = (modrm() >> 3) & 7;
+            let (src, high) = if rex != 0 {
+                (Gpr(reg_f | ((rex >> 2) & 1) << 3), false)
+            } else if reg_f < 4 {
+                (Gpr(reg_f), false)
+            } else {
+                (Gpr(reg_f - 4), true)
+            };
+            sem::test_m8_r8_memnd(b, rm(), src, high)
+        }
+        Insn::TestM8R8Mem8 => {
+            // 84 /r mod=01 [base+disp8],r8.
+            let reg_f = (modrm() >> 3) & 7;
+            let (src, high) = if rex != 0 {
+                (Gpr(reg_f | ((rex >> 2) & 1) << 3), false)
+            } else if reg_f < 4 {
+                (Gpr(reg_f), false)
+            } else {
+                (Gpr(reg_f - 4), true)
+            };
+            sem::test_m8_r8_mem8(b, rm(), disp8(), src, high)
+        }
+        Insn::TestM8R8Mem32 => {
+            // 84 /r mod=10 [base+disp32],r8.
+            let reg_f = (modrm() >> 3) & 7;
+            let (src, high) = if rex != 0 {
+                (Gpr(reg_f | ((rex >> 2) & 1) << 3), false)
+            } else if reg_f < 4 {
+                (Gpr(reg_f), false)
+            } else {
+                (Gpr(reg_f - 4), true)
+            };
+            sem::test_m8_r8_mem32(b, rm(), disp32(), src, high)
         }
         Insn::PushEax
         | Insn::PushEcx
@@ -2116,6 +2192,23 @@ fn dispatch<B: Backend>(
                 sem::add_r64_sibabs(b, reg(), sib_idx(), sib_shift(), disp)
             } else {
                 sem::add_r32_sibabs(b, reg(), sib_idx(), sib_shift(), disp)
+            }
+        }
+        Insn::SubRSibabs => {
+            // 2B /r mod=00 SIB 直接番地 (7B)。ADD と同型.
+            let disp = disp32();
+            let disp_le = imm32();
+            if no_index() {
+                match fs {
+                    Some(base) if rex_w => sem::sub_r64_fs_abs(b, reg(), base, disp),
+                    Some(base) => sem::sub_r32_fs_abs(b, reg(), base, disp),
+                    None if rex_w => sem::sub_r64_abs(b, reg(), disp_le),
+                    None => sem::sub_r32_abs(b, reg(), disp_le),
+                }
+            } else if rex_w {
+                sem::sub_r64_sibabs(b, reg(), sib_idx(), sib_shift(), disp)
+            } else {
+                sem::sub_r32_sibabs(b, reg(), sib_idx(), sib_shift(), disp)
             }
         }
         Insn::OrRRip => {
@@ -3443,6 +3536,82 @@ impl TrapHandler for CliLinux {
             set64(env, Gpr(0), 0);
             return TrapOutcome::Handled;
         }
+        if self.is64 && nr == polyisa_os_linux::x86_64::GETRANDOM {
+            // getrandom(buf, len, flags)。試作では 0 埋めして len を返す.
+            // flags は GRND_NONBLOCK(1)/GRND_RANDOM(2)/GRND_INSECURE(4) のみ受け付ける.
+            let buf = get64(env, r_a);
+            let len = get64(env, r_b);
+            let flags = get64(env, r_c);
+            if flags & !7 != 0 {
+                set64(env, Gpr(0), neg(EINVAL));
+                return TrapOutcome::Handled;
+            }
+            // 拡張しすぎは失敗扱い (0 を返す)。
+            const MAX_GETRANDOM: u64 = 256 * 1024;
+            if len > MAX_GETRANDOM {
+                set64(env, Gpr(0), neg(EINVAL));
+                return TrapOutcome::Handled;
+            }
+            let zeros = vec![0u8; len as usize];
+            if len != 0
+                && env
+                    .backend
+                    .mem
+                    .write(polyisa_mem::VirtAddr(buf), &zeros)
+                    .is_err()
+            {
+                return TrapOutcome::Unimplemented;
+            }
+            set64(env, Gpr(0), len);
+            return TrapOutcome::Handled;
+        }
+        if self.is64 && nr == polyisa_os_linux::x86_64::PRLIMIT64 {
+            // prlimit64(pid, resource, new_limit, old_limit)。
+            // 試作では new_limit の設定は無視し、old_limit には無制限を書く.
+            // resource は 0..16 (RLIM_NLIMITS) のみ受け付ける.
+            const RLIM_NLIMITS: u64 = 16;
+            const RLIM_INFINITY: u64 = 0xffff_ffff_ffff_ffff;
+            let resource = get64(env, r_b);
+            if resource >= RLIM_NLIMITS {
+                set64(env, Gpr(0), neg(EINVAL));
+                return TrapOutcome::Handled;
+            }
+            let old_limit = get64(env, Gpr(10));
+            if old_limit != 0 {
+                let buf = RLIM_INFINITY.to_le_bytes();
+                // rlim_cur (8B) + rlim_max (8B) = 16B.
+                let mut both = [0u8; 16];
+                both[..8].copy_from_slice(&buf);
+                both[8..].copy_from_slice(&buf);
+                if env
+                    .backend
+                    .mem
+                    .write(polyisa_mem::VirtAddr(old_limit), &both)
+                    .is_err()
+                {
+                    return TrapOutcome::Unimplemented;
+                }
+            }
+            set64(env, Gpr(0), 0);
+            return TrapOutcome::Handled;
+        }
+        if self.is64 && nr == polyisa_os_linux::x86_64::CLOCK_GETTIME {
+            // clock_gettime(clk_id, tp)。試作では 0 時刻を書いて 0 を返す.
+            let tp = get64(env, r_b);
+            if tp != 0 {
+                let zeros = [0u8; 16];
+                if env
+                    .backend
+                    .mem
+                    .write(polyisa_mem::VirtAddr(tp), &zeros)
+                    .is_err()
+                {
+                    return TrapOutcome::Unimplemented;
+                }
+            }
+            set64(env, Gpr(0), 0);
+            return TrapOutcome::Handled;
+        }
         // arch_prctl (x86-64 のみ)。TLS の FS ベース設定を受け付ける。
         // Ref: SRC-LINUX (7.3) arch/x86/include/uapi/asm/prctl.h.
         if self.is64 && nr == polyisa_os_linux::x86_64::ARCH_PRCTL {
@@ -3783,6 +3952,83 @@ mod tests {
         set64(&mut env, Gpr(2), 0);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EINVAL));
+    }
+
+    #[test]
+    fn getrandom_fills_zeros() {
+        use polyisa_os_linux::x86_64 as abi;
+        let mut sys = CliLinux::x86_64();
+        let mut env = bare();
+        set64(&mut env, Gpr(0), abi::GETRANDOM);
+        set64(&mut env, Gpr(7), 0x100);
+        set64(&mut env, Gpr(6), 8);
+        set64(&mut env, Gpr(2), 1);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 8);
+        let mut back = [0xFFu8; 8];
+        env.backend
+            .mem
+            .read(VirtAddr(0x100), &mut back, data_access())
+            .unwrap();
+        assert_eq!(back, [0u8; 8]);
+        // 不明な flags は EINVAL。
+        set64(&mut env, Gpr(0), abi::GETRANDOM);
+        set64(&mut env, Gpr(7), 0x100);
+        set64(&mut env, Gpr(6), 8);
+        set64(&mut env, Gpr(2), 8);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EINVAL));
+    }
+
+    #[test]
+    fn prlimit64_writes_infinity() {
+        use polyisa_os_linux::x86_64 as abi;
+        let mut sys = CliLinux::x86_64();
+        let mut env = bare();
+        set64(&mut env, Gpr(0), abi::PRLIMIT64);
+        set64(&mut env, Gpr(7), 0);
+        set64(&mut env, Gpr(6), 3);
+        set64(&mut env, Gpr(2), 0);
+        set64(&mut env, Gpr(10), 0x100);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        let mut back = [0u8; 16];
+        env.backend
+            .mem
+            .read(VirtAddr(0x100), &mut back, data_access())
+            .unwrap();
+        assert_eq!(
+            u64::from_le_bytes(back[..8].try_into().unwrap()),
+            0xFFFF_FFFF_FFFF_FFFF
+        );
+        assert_eq!(
+            u64::from_le_bytes(back[8..].try_into().unwrap()),
+            0xFFFF_FFFF_FFFF_FFFF
+        );
+        // resource 範囲外は EINVAL。
+        set64(&mut env, Gpr(0), abi::PRLIMIT64);
+        set64(&mut env, Gpr(7), 0);
+        set64(&mut env, Gpr(6), 16);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EINVAL));
+    }
+
+    #[test]
+    fn clock_gettime_writes_zeros() {
+        use polyisa_os_linux::x86_64 as abi;
+        let mut sys = CliLinux::x86_64();
+        let mut env = bare();
+        set64(&mut env, Gpr(0), abi::CLOCK_GETTIME);
+        set64(&mut env, Gpr(7), 1);
+        set64(&mut env, Gpr(6), 0x100);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        let mut back = [0xFFu8; 16];
+        env.backend
+            .mem
+            .read(VirtAddr(0x100), &mut back, data_access())
+            .unwrap();
+        assert_eq!(back, [0u8; 16]);
     }
 
     #[test]
