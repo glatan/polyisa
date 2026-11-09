@@ -98,6 +98,23 @@ fn modrm_register_direct() {
 }
 
 #[test]
+fn mem_load_store_disp8() {
+    let mut env = env();
+    env.map_rw(0, 1).unwrap();
+    // EBX=0x100 を base にし、EAX=0x12345678 を [+0x10] に書いて読む。
+    env.backend.set(Gpr(3).state(), 0x100);
+    env.backend.set(Gpr(0).state(), 0x1234_5678);
+    env.step(|b| sem::mov_mem_eax(b, 0x10)).unwrap();
+    env.step(|b| sem::mov_eax_mem(b, 0x10)).unwrap();
+    assert_eq!(eax(&mut env), 0x1234_5678);
+    // disp8 は符号付き：-1 は base-1 を指す。
+    env.backend.set(Gpr(0).state(), 0xAABB_CCDD);
+    env.step(|b| sem::mov_mem_eax(b, -1)).unwrap();
+    env.step(|b| sem::mov_eax_mem(b, -1)).unwrap();
+    assert_eq!(eax(&mut env), 0xAABB_CCDD);
+}
+
+#[test]
 fn jmp_sets_eip() {
     let mut env = env();
     env.backend.set(sem::eip_ref(), 0x1000);
