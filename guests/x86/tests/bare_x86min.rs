@@ -196,6 +196,53 @@ fn je_jne_branch_on_zf() {
 }
 
 #[test]
+fn xor_zeroes_and_sets_zf() {
+    let mut env = env();
+    env.backend.set(Gpr(0).state(), 0x1234_5678);
+    env.step(sem::xor_eax).unwrap();
+    assert_eq!(eax(&mut env), 0);
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0x40);
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x1, 0);
+}
+
+#[test]
+fn sub_wraps_and_sets_flags() {
+    let mut env = env();
+    // 5 - 5 = 0：ZF=1、CF=0。
+    env.backend.set(Gpr(0).state(), 5);
+    env.step(|b| sem::sub_eax(b, 5)).unwrap();
+    assert_eq!(eax(&mut env), 0);
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0x40);
+    // 5 - 6：0xffffffff、CF=1。
+    env.backend.set(Gpr(0).state(), 5);
+    env.step(|b| sem::sub_eax(b, 6)).unwrap();
+    assert_eq!(eax(&mut env), 0xffff_ffff);
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0);
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x1, 1);
+}
+
+#[test]
+fn frame_setup_and_leave() {
+    let mut env = env();
+    env.map_rw(0, 1).unwrap();
+    // 正規の関数枠：PUSH EBP; MOV EBP,ESP; ...; LEAVE。
+    env.backend.set(Gpr(4).state(), 0x300);
+    env.backend.set(Gpr(5).state(), 0xAAAA_BBBB);
+    env.step(|b| sem::push_reg(b, Gpr(5))).unwrap();
+    assert_eq!(env.backend.get(Gpr(4).state()), 0x2fc);
+    env.step(sem::mov_ebp_esp).unwrap();
+    assert_eq!(env.backend.get(Gpr(5).state()), 0x2fc);
+    // ローカル代わりに PUSH EAX。
+    env.backend.set(Gpr(0).state(), 0x1111_2222);
+    env.step(|b| sem::push_reg(b, Gpr(0))).unwrap();
+    assert_eq!(env.backend.get(Gpr(4).state()), 0x2f8);
+    // LEAVE：ESP=EBP に戻し、POP EBP で復帰。
+    env.step(sem::leave).unwrap();
+    assert_eq!(env.backend.get(Gpr(5).state()), 0xAAAA_BBBB);
+    assert_eq!(env.backend.get(Gpr(4).state()), 0x300);
+}
+
+#[test]
 fn loop_counts_down() {
     let mut env = env();
     // ECX=3 から LOOP -2 を回す：3→2→1→0 で抜ける。
