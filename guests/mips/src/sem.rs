@@ -4,7 +4,8 @@
 //!
 //! 遅延スロットは pc/npc の組で表す。分岐・ジャンプは npc だけを書き換え、
 //! 遅延スロットの1命令を実行してから `commit` で pc を進める。
-//! FPU、R6 の残り（BOVC/BEQC 等）、両エンディアン切り替えは本格実装で足す（HI/LO 乗除算は本格相当の最小形を持つ）。
+//! FPU、R6 の残り（BOVC/BEQC 等）、両エンディアン切り替えは本格実装で足す（HI/LO 乗除算は
+//! pre-R6 のみで有効な本格相当の最小形）。
 //!
 //! 出典は SPEC-MIPS-IV Rev 3.2 (1995-09) である。
 //! Ref: SPEC-MIPS-IV (Rev 3.2).
@@ -260,6 +261,17 @@ pub fn mtlo<B: Backend>(b: &mut B, rs: Gpr) -> Flow<B> {
 
 /// ADDI。32ビットで包む（trap は WRAP で代用し本格実装で足す）。
 pub fn addi<B: Backend>(b: &mut B, rt: Gpr, rs: Gpr, imm: i32) -> Flow<B> {
+    let base = read(b, rs);
+    let off = b.konst::<W64>(imm as i64 as u64);
+    let s = b.add::<W64>(base, off);
+    let lo = b.konst::<W64>(0xffff_ffff);
+    let masked = b.and::<W64>(s, lo);
+    write(b, rt, masked);
+    Ok(())
+}
+
+/// ADDIU。trap なしで 32 ビットに包む。R6 でも有効である。
+pub fn addiu<B: Backend>(b: &mut B, rt: Gpr, rs: Gpr, imm: i32) -> Flow<B> {
     let base = read(b, rs);
     let off = b.konst::<W64>(imm as i64 as u64);
     let s = b.add::<W64>(base, off);

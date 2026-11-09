@@ -3,9 +3,10 @@
 //! MIPS I 試作のゲスト ISA。段階3の最小であり、裸実行で遅延スロットを確かめる。
 //!
 //! R 形式の整数演算と LW/SW・BEQ・J・HI/LO 乗除算に加え、R6 の割り当て直しの
-//! 最小形（ADDI の pre-R6 ゲートと BEQZALC）を持つ。BOVC/BEQC は field 間比較の
-//! where が要るため先送りする。FPU、microMIPS、ロード遅延、branch likely、
-//! 両エンディアンの切り替えは本格実装で足す。
+//! 最小形（ADDI の pre-R6 ゲート、ADDIU の保持、BEQZALC）を持つ。BOVC/BEQC は
+//! field 間比較の where が要るため先送りする。FPU、microMIPS、ロード遅延、
+//! branch likely、両エンディアンの切り替えは本格実装で足す。HI/LO 乗除算は
+//! pre-R6 のみで有効である。
 
 #![forbid(unsafe_code)]
 
@@ -73,8 +74,8 @@ mod tests {
 
     #[test]
     fn insn_count() {
-        // 試作の整数19件（nop は sll $0,$0,0 の別名として扱う）。
-        assert_eq!(INSNS.len(), 19);
+        // 試作の整数20件（nop は sll $0,$0,0 の別名として扱う）。
+        assert_eq!(INSNS.len(), 20);
     }
 
     #[test]
@@ -104,6 +105,15 @@ mod tests {
         assert_eq!(decode(0x2043_0010, 32), Some(Insn::Addi));
         // R6 では rs==0 && rt!=0 の符号化が BEQZALC になる。
         assert_eq!(decode(0x2001_0004, 32), Some(Insn::Addi));
+        // ADDIU は R6 でも残る。
+        assert_eq!(decode(0x2443_0010, 32), Some(Insn::Addiu));
+        assert_eq!(
+            decode_model_ex(0x2443_0010, 32, true, FEAT_MIPS_R6),
+            Some(Insn::Addiu)
+        );
+        // HI/LO 乗除算は R6 で削除される（MUL/MUH/MOD 系は本格実装）。
+        assert_eq!(decode(0x0022_0018, 32), Some(Insn::Mult));
+        assert_eq!(decode_model_ex(0x0022_0018, 32, true, FEAT_MIPS_R6), None);
         assert_eq!(
             decode_model_ex(0x2001_0004, 32, true, FEAT_MIPS_R6),
             Some(Insn::Beqzalc)

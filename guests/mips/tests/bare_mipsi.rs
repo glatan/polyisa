@@ -155,6 +155,18 @@ fn addi_wraps() {
 }
 
 #[test]
+fn addiu_wraps_like_addi() {
+    // ADDIU は R6 でも残る。trap なしで 32 ビットに包む。
+    // $0 への書き込みは捨てる。
+    let mut env = env();
+    env.backend.set(Gpr(1).state(), 0xffff_ffff);
+    env.step(|b| sem::addiu(b, Gpr(2), Gpr(1), 2)).unwrap();
+    assert_eq!(g(&mut env, 2), 1);
+    env.step(|b| sem::addiu(b, Gpr(0), Gpr(1), 2)).unwrap();
+    assert_eq!(g(&mut env, 0), 0);
+}
+
+#[test]
 fn beqzalc_links_and_branches_without_delay_slot() {
     let mut env = env();
     // R6 の BEQZALC は遅延スロットなし：rt==0 のとき 1 ステップで pc が飛ぶ。
