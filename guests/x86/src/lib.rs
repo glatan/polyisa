@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! x86 最小のゲスト ISA。段階4の最小であり、可変長デコードを確かめる。
 //!
-//! i386 の汎用レジスタ系92件のみ持つ。SIB+disp32 と Rust フック・
+//! i386 の汎用レジスタ系104件のみ持つ。SIB+disp32 と Rust フック・
 //! EFLAGS(SF/OF/PF/AF)・64ビット・x87・SSE・セグメントは本格実装で足す。
 //! SYSCALL/CPUID は最小形、ModRM は register-direct（全組合せ）・mod=01+disp8・
 //! mod=10+disp32・絶対番地と SIB base+index 形（スケール付き、disp8 の有無は問わない）を持つ。
@@ -55,8 +55,8 @@ mod tests {
 
     #[test]
     fn insn_count() {
-        // 試作の整数92件。
-        assert_eq!(INSNS.len(), 92);
+        // 試作の整数104件。
+        assert_eq!(INSNS.len(), 104);
     }
 
     #[test]
@@ -214,6 +214,61 @@ mod tests {
         assert_eq!(decode(0x0089_04B3, 24), Some(Insn::MovSibS4ndEax));
         assert_eq!(decode(0x008B_04F3, 24), Some(Insn::MovEaxSibS8nd));
         assert_eq!(decode(0x0089_04F3, 24), Some(Insn::MovSibS8ndEax));
+        // SIB スケール付き・disp32：MOV EAX,[EBX+ESI*{2,4,8}+disp32]
+        // (8B 84 {73,B3,F3}+disp32) と MOV [EBX+ESI*{2,4,8}+disp32],EAX (89 84 ...)、
+        // 直接番地 base：MOV EAX,[ESI*{2,4,8}+disp32] (8B 04 {75,B5,F5}+disp32) と
+        // MOV [ESI*{2,4,8}+disp32],EAX (89 04 ...)（56ビット）。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(
+            decode(0x008B_8473_1000_0000, 56),
+            Some(Insn::MovEaxSibS2d32)
+        );
+        assert_eq!(
+            decode(0x0089_8473_1000_0000, 56),
+            Some(Insn::MovSibS2d32Eax)
+        );
+        assert_eq!(
+            decode(0x008B_84B3_1000_0000, 56),
+            Some(Insn::MovEaxSibS4d32)
+        );
+        assert_eq!(
+            decode(0x0089_84B3_1000_0000, 56),
+            Some(Insn::MovSibS4d32Eax)
+        );
+        assert_eq!(
+            decode(0x008B_84F3_1000_0000, 56),
+            Some(Insn::MovEaxSibS8d32)
+        );
+        assert_eq!(
+            decode(0x0089_84F3_1000_0000, 56),
+            Some(Insn::MovSibS8d32Eax)
+        );
+        assert_eq!(
+            decode(0x008B_0475_1000_0000, 56),
+            Some(Insn::MovEaxSibS2a32)
+        );
+        assert_eq!(
+            decode(0x0089_0475_1000_0000, 56),
+            Some(Insn::MovSibS2a32Eax)
+        );
+        assert_eq!(
+            decode(0x008B_04B5_1000_0000, 56),
+            Some(Insn::MovEaxSibS4a32)
+        );
+        assert_eq!(
+            decode(0x0089_04B5_1000_0000, 56),
+            Some(Insn::MovSibS4a32Eax)
+        );
+        assert_eq!(
+            decode(0x008B_04F5_1000_0000, 56),
+            Some(Insn::MovEaxSibS8a32)
+        );
+        assert_eq!(
+            decode(0x0089_04F5_1000_0000, 56),
+            Some(Insn::MovSibS8a32Eax)
+        );
+        // 長さ違いは一致しない。
+        assert_eq!(decode(0x008B_8473_1000_0000, 32), None);
         // ModRM mod=01 + disp8：MOV EAX,[EBX+disp8] (8B 43 ..) と MOV [EBX+disp8],EAX (89 43 ..)。
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x008B_4310, 24), Some(Insn::MovEaxMem));
