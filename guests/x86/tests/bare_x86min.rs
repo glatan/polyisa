@@ -4763,3 +4763,23 @@ fn mov_rm32_imm_sibd_basic() {
         .unwrap();
     assert_eq!(u32::from_le_bytes(back), 0x30);
 }
+
+#[test]
+fn movd_xmm_rip_basic() {
+    // MOVD XMM0,[RIP+disp] (66 0F 6E 05): [0x1500]=0x11223344 -> XMM0 low32=0x11223344.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1500), &0x1122_3344u32.to_le_bytes())
+        .unwrap();
+    env.step(|b| sem::movd_xmm_rip(b, sem::Xmm(0), 0x1007, 0x4F9))
+        .unwrap();
+    env.step(|b| {
+        let v: u128 = b.get(sem::xmm_ref(sem::Xmm(0)));
+        assert_eq!((v & 0xffff_ffff) as u32, 0x1122_3344);
+        assert_eq!(v >> 32, 0);
+        Ok(())
+    })
+    .unwrap();
+}

@@ -10015,3 +10015,23 @@ pub fn mov_rm64_imm_sibd<B: Backend>(
     b.store::<W64>(addr, v, DATA_WRITE)?;
     Ok(())
 }
+
+/// MOVD xmm, m32 [RIP+disp32] (66 0F 6E /r mod=00)。32ビットを読んで上位96を消す.
+pub fn movd_xmm_rip<B: Backend>(b: &mut B, dst: Xmm, next_rip: u64, disp: i32) -> Flow<B> {
+    let base = b.konst::<W64>(next_rip);
+    let d = b.konst::<W64>(disp as i64 as u64);
+    let addr = b.add::<W64>(base, d);
+    let v32: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let v = b.zext::<W32, W128>(v32);
+    b.set(xmm_ref(dst), v);
+    Ok(())
+}
+
+/// MOVD xmm, m32 [disp32] abs (32ビット)。
+pub fn movd_xmm_abs<B: Backend>(b: &mut B, dst: Xmm, addr32: u32) -> Flow<B> {
+    let addr = b.konst::<W64>(addr32 as u64);
+    let v32: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let v = b.zext::<W32, W128>(v32);
+    b.set(xmm_ref(dst), v);
+    Ok(())
+}

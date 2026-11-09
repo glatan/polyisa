@@ -141,7 +141,7 @@ fn fetch_len(
                 let m = third?;
                 if m >> 6 == 3 { Some(3) } else { None }
             } else if s == 0x6E {
-                // MOVD xmm,m32 (66 0F 6E /r)。reg-direct と mod=00/01/10 (SIBなし).
+                // MOVD xmm,m32 (66 0F 6E /r)。reg-direct と mod=00/01/10 (SIBなし)、RIP 7B.
                 let m = third?;
                 let md = m >> 6;
                 let rm = m & 7;
@@ -151,10 +151,10 @@ fn fetch_len(
                     None
                 } else if md == 1 {
                     Some(4)
-                } else if md == 2 {
+                } else if md == 2 || rm == 5 {
                     Some(7)
                 } else {
-                    if rm == 5 { None } else { Some(3) }
+                    Some(3)
                 }
             } else if s == 0x6F {
                 // MOVDQU xmm,m128 (F3 0F 6F /r) と MOVDQA xmm,m128 RIP (66 0F 6F)。
@@ -1151,6 +1151,7 @@ pub fn run_mode(
                     | Insn::TestRm32
                     | Insn::MovdXmm
                     | Insn::MovdXmmM32
+                    | Insn::MovdXmmRip
                     | Insn::Punpcklbw
                     | Insn::Punpcklwd
                     | Insn::Punpckldq
@@ -1224,6 +1225,7 @@ pub fn run_mode(
                 insn,
                 Insn::MovdXmm
                     | Insn::MovdXmmM32
+                    | Insn::MovdXmmRip
                     | Insn::Punpcklbw
                     | Insn::Punpcklwd
                     | Insn::Punpckldq
@@ -3602,6 +3604,14 @@ fn dispatch<B: Backend>(
         Insn::MovdXmmM32 => {
             // 0F6E modrm + disp32 (mod=10 RBP)。disp は low32 LE? Actually word 56b: [0F][6E][modrm][disp0..3] (7B). disp = low32 LE? low32 = disp BE? Use disp32() which is (word as u32).swap? Wait word low32 = disp BE? For 56b word, low32 = disp (4B). disp32() = (word as u32).swap_bytes() as i32. Good (since low32 is disp). Good.
             sem::movd_xmm_m32(b, xmm_reg(), rm0f(), disp32())
+        }
+        Insn::MovdXmmRip => {
+            // 66 0F 6E 05 + disp32 (mod=00 RIP)。dst は reg フィールド.
+            if is64 {
+                sem::movd_xmm_rip(b, xmm_reg(), eip as u64 + nbytes, disp32())
+            } else {
+                sem::movd_xmm_abs(b, xmm_reg(), imm32())
+            }
         }
         Insn::Punpcklbw => sem::punpcklbw(b, xmm_reg(), xmm_rm()),
         Insn::Punpcklwd => sem::punpcklwd(b, xmm_reg(), xmm_rm()),

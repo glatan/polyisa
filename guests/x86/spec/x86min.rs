@@ -265,6 +265,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         // MOVD xmm,r32 (66 0F 6E /r)。reg-direct のみ。
         ("movd_xmm", "F1", "00001111 01101110 11......", "movd xmm, r32", "load"),
         ("movd_xmm_m32", "F1", "00001111 01101110 10000101 ................................", "movd xmm, m32", "load"),
+        ("movd_xmm_rip", "F1", "00001111 01101110 00...101 ................................", "movd xmm, m32", "load"),
         // PUNPCKLBW xmm,xmm (66 0F 60 /r)。reg-direct のみ。
         ("punpcklbw", "F1", "00001111 01100000 11......", "punpcklbw xmm, xmm", "alu"),
         // PUNPCKLWD xmm,xmm (66 0F 61 /r)。reg-direct のみ。
