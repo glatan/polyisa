@@ -37,6 +37,10 @@ pub mod rv64 {
     pub const GETTID: u64 = 178;
     pub const GETPID: u64 = 172;
     pub const TGKILL: u64 = 131;
+    pub const GETUID: u64 = 174;
+    pub const GETEUID: u64 = 175;
+    pub const GETGID: u64 = 176;
+    pub const GETEGID: u64 = 177;
     pub const RT_SIGACTION: u64 = 134;
     pub const RT_SIGPROCMASK: u64 = 135;
     pub const CLOCK_GETTIME: u64 = 113;
@@ -77,6 +81,10 @@ pub mod x86_64 {
     pub const GETTID: u64 = 186;
     pub const GETPID: u64 = 39;
     pub const TGKILL: u64 = 234;
+    pub const GETUID: u64 = 102;
+    pub const GETGID: u64 = 104;
+    pub const GETEUID: u64 = 107;
+    pub const GETEGID: u64 = 108;
     pub const RT_SIGACTION: u64 = 13;
     pub const RT_SIGPROCMASK: u64 = 14;
     pub const CLOCK_GETTIME: u64 = 228;
@@ -122,6 +130,10 @@ pub mod i386 {
     pub const GETTID: u64 = 224;
     pub const GETPID: u64 = 20;
     pub const TGKILL: u64 = 270;
+    pub const GETUID: u64 = 24;
+    pub const GETGID: u64 = 47;
+    pub const GETEUID: u64 = 49;
+    pub const GETEGID: u64 = 50;
     pub const RT_SIGACTION: u64 = 174;
     pub const RT_SIGPROCMASK: u64 = 175;
     pub const CLOCK_GETTIME: u64 = 265;
@@ -163,6 +175,10 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             rv64::GETTID => Some("gettid"),
             rv64::GETPID => Some("getpid"),
             rv64::TGKILL => Some("tgkill"),
+            rv64::GETUID => Some("getuid"),
+            rv64::GETEUID => Some("geteuid"),
+            rv64::GETGID => Some("getgid"),
+            rv64::GETEGID => Some("getegid"),
             rv64::RT_SIGACTION => Some("rt_sigaction"),
             rv64::RT_SIGPROCMASK => Some("rt_sigprocmask"),
             rv64::CLOCK_GETTIME => Some("clock_gettime"),
@@ -198,6 +214,10 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             i386::GETTID => Some("gettid"),
             i386::GETPID => Some("getpid"),
             i386::TGKILL => Some("tgkill"),
+            i386::GETUID => Some("getuid"),
+            i386::GETEUID => Some("geteuid"),
+            i386::GETGID => Some("getgid"),
+            i386::GETEGID => Some("getegid"),
             i386::RT_SIGACTION => Some("rt_sigaction"),
             i386::RT_SIGPROCMASK => Some("rt_sigprocmask"),
             i386::CLOCK_GETTIME => Some("clock_gettime"),
@@ -234,6 +254,10 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             x86_64::GETTID => Some("gettid"),
             x86_64::GETPID => Some("getpid"),
             x86_64::TGKILL => Some("tgkill"),
+            x86_64::GETUID => Some("getuid"),
+            x86_64::GETEUID => Some("geteuid"),
+            x86_64::GETGID => Some("getgid"),
+            x86_64::GETEGID => Some("getegid"),
             x86_64::RT_SIGACTION => Some("rt_sigaction"),
             x86_64::RT_SIGPROCMASK => Some("rt_sigprocmask"),
             x86_64::CLOCK_GETTIME => Some("clock_gettime"),

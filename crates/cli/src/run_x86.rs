@@ -5041,6 +5041,23 @@ impl TrapHandler for CliLinux {
             set64(env, Gpr(0), std::process::id() as u64);
             return TrapOutcome::Handled;
         }
+        if nr == polyisa_os_linux::x86_64::GETUID && self.is64
+            || nr == polyisa_os_linux::i386::GETUID && !self.is64
+            || nr == polyisa_os_linux::x86_64::GETEUID && self.is64
+            || nr == polyisa_os_linux::i386::GETEUID && !self.is64
+        {
+            // root として uid 0 を返す.
+            set64(env, Gpr(0), 0);
+            return TrapOutcome::Handled;
+        }
+        if nr == polyisa_os_linux::x86_64::GETGID && self.is64
+            || nr == polyisa_os_linux::i386::GETGID && !self.is64
+            || nr == polyisa_os_linux::x86_64::GETEGID && self.is64
+            || nr == polyisa_os_linux::i386::GETEGID && !self.is64
+        {
+            set64(env, Gpr(0), 0);
+            return TrapOutcome::Handled;
+        }
         if nr == polyisa_os_linux::x86_64::MPROTECT && self.is64
             || nr == polyisa_os_linux::i386::MPROTECT && !self.is64
         {
@@ -5725,6 +5742,18 @@ mod tests {
         set64(&mut env, Gpr(0), abi::GETPID);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), std::process::id() as u64);
+    }
+
+    #[test]
+    fn getuid_gid_return_zero() {
+        use polyisa_os_linux::x86_64 as abi;
+        let mut sys = CliLinux::x86_64();
+        let mut env = bare();
+        for nr in [abi::GETUID, abi::GETGID, abi::GETEUID, abi::GETEGID] {
+            set64(&mut env, Gpr(0), nr);
+            assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+            assert_eq!(get64(&mut env, Gpr(0)), 0);
+        }
     }
 
     #[test]
