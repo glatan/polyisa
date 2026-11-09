@@ -2096,3 +2096,39 @@ fn cmove_mem32_roundtrip() {
         .unwrap();
     assert_eq!(env.backend.get(Gpr(0).state()), 0x77);
 }
+
+#[test]
+fn cmp_rm_mem32_sets_zf() {
+    // CMP [RBP+disp32],ESI (mod=10): [0x120]=5, ESI=5 -> ZF=1.
+    let mut env = env();
+    env.map_rw(0, 1).unwrap();
+    env.backend.set(Gpr(5).state(), 0x100);
+    env.backend.set(Gpr(6).state(), 5);
+    env.backend
+        .mem
+        .write(VirtAddr(0x120), &[5u8, 0, 0, 0])
+        .unwrap();
+    env.step(|b| sem::cmp_rm32_mem32(b, Gpr(5), 0x20, Gpr(6)))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0x40);
+}
+
+#[test]
+fn cmp_rm64_mem32_sets_zf() {
+    // CMP [RBP+disp32],R13 (mod=10, REX.W): [0x120]=7, R13=7 -> ZF=1.
+    let mut env = env();
+    env.map_rw(0, 1).unwrap();
+    env.backend.set(Gpr(5).state(), 0x100);
+    env.step(|b| {
+        sem::write64(b, Gpr(13), 7);
+        Ok(())
+    })
+    .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x120), &[7u8, 0, 0, 0, 0, 0, 0, 0])
+        .unwrap();
+    env.step(|b| sem::cmp_rm64_mem32(b, Gpr(5), 0x20, Gpr(13)))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0x40);
+}

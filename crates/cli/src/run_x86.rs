@@ -64,8 +64,8 @@ fn fetch_len(
 ) -> Option<u64> {
     match first {
         0x90 | 0x40..=0x4F | 0x50..=0x5F | 0xC3 | 0xC9 => Some(1),
-        0xEB | 0x74 | 0x75 | 0xE2 | 0xCD | 0x85 | 0x39 | 0x21 | 0x72 | 0x73 | 0x76 | 0x77
-        | 0x7C | 0x7D | 0x7E | 0x7F => Some(2),
+        0xEB | 0x74 | 0x75 | 0xE2 | 0xCD | 0x72 | 0x73 | 0x76 | 0x77 | 0x7C | 0x7D | 0x7E
+        | 0x7F => Some(2),
         0x05 | 0x2D | 0x3D | 0xE8 | 0xE9 | 0x25 | 0x0D | 0x35 | 0xA9 => Some(5),
         0xB8..=0xBF => {
             if rex_w {
@@ -345,13 +345,8 @@ fn fetch_len(
                 }
             }
         }
-        // 0x11 /r (ADC) と 0x19 /r (SBB)。reg-direct のみ.
-        0x11 | 0x19 => {
-            let s = second?;
-            if s >> 6 == 3 { Some(2) } else { None }
-        }
-        // 0x03 /r (ADD) と 0x09 /r (OR m32,r32) と 0x0B /r (OR r32,m32)。reg-direct と RIP/abs のみ.
-        0x03 | 0x0B | 0x09 => {
+        // 0x03 /r (ADD) と 0x0B /r (OR r32,m32)。reg-direct と RIP/abs のみ.
+        0x03 | 0x0B => {
             let s = second?;
             let md = s >> 6;
             let rm = s & 7;
@@ -365,15 +360,36 @@ fn fetch_len(
                 None
             }
         }
-        // register-direct のみ対応する opcode（メモリ形式は未対応）。
-        // SIB を含むことはなく、0xC1（シフト）のみ imm8 で 3B になる。
-        0x01 | 0x29 | 0x31 | 0xC1 => {
+        // register-direct と ModRMメモリ (SIBなし) に対応するALU opcode。
+        // SIB付き (rm==4) は未対応で None。mod=01は+1、mod=10は+4、mod=00 rm=5は+4。
+        0x01 | 0x29 | 0x31 | 0x39 | 0x21 | 0x09 | 0x85 | 0x11 | 0x19 => {
             let s = second?;
-            if first == 0xC1 || s == 0x43 || s == 0x04 {
-                Some(3)
-            } else {
-                Some(2)
+            let md = s >> 6;
+            let rm = s & 7;
+            if md == 3 {
+                return Some(2);
             }
+            if rm == 4 {
+                return None;
+            }
+            Some(
+                2 + match md {
+                    1 => 1,
+                    2 => 4,
+                    _ => {
+                        if rm == 5 {
+                            4
+                        } else {
+                            0
+                        }
+                    }
+                },
+            )
+        }
+        // 0xC1 (シフト) は register-direct のみ 3B。
+        0xC1 => {
+            let s = second?;
+            if s >> 6 == 3 { Some(3) } else { None }
         }
         0x8B | 0x89 | 0x8D => {
             let s = second?;
@@ -489,6 +505,9 @@ pub fn run_mode(
             0x01 | 0x8B
                 | 0x29
                 | 0x31
+                | 0x39
+                | 0x21
+                | 0x85
                 | 0x89
                 | 0x03
                 | 0x0B
@@ -1449,6 +1468,13 @@ fn dispatch<B: Backend>(
                 sem::cmp_rm64(b, rm(), reg())
             } else {
                 sem::cmp_rm32(b, rm(), reg())
+            }
+        }
+        Insn::CmpRmMem32 => {
+            if rex_w {
+                sem::cmp_rm64_mem32(b, rm(), disp32(), reg())
+            } else {
+                sem::cmp_rm32_mem32(b, rm(), disp32(), reg())
             }
         }
         Insn::AndRm32 => sem::and_rm32(b, rm(), reg()),

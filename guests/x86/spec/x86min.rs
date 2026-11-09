@@ -384,6 +384,14 @@ pub fn build_model() -> polyisa_isadl::Model {
             "store",
         ),
         (
+            "cmp_rm_mem32",
+            "M32",
+            "00111001 10...... ................................",
+            vec![wc("m32_rm", WhereOp::Ne, 4)],
+            "cmp r/m32, r32",
+            "alu",
+        ),
+        (
             "mov_eax_memnd",
             "MR",
             "10001011 00......",
