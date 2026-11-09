@@ -8890,3 +8890,182 @@ pub fn call_r32_sib<B: Backend>(
     b.jump(tj);
     Ok(())
 }
+
+/// MOVSXD r32, m32 [base] (63 /r mod=00)。32ビット転送と等価.
+pub fn movsxd_rm32_memnd<B: Backend>(b: &mut B, dst: Gpr, base: Gpr) -> Flow<B> {
+    let addr = read64(b, base);
+    let v: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    write(b, dst, v);
+    Ok(())
+}
+
+/// MOVSXD r64, m32 [base] (REX.W + 63 /r mod=00)。符号拡張する.
+pub fn movsxd_rm64_memnd<B: Backend>(b: &mut B, dst: Gpr, base: Gpr) -> Flow<B> {
+    let addr = read64(b, base);
+    let v32: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let v = b.sext::<W32, W64>(v32);
+    write64(b, dst, v);
+    Ok(())
+}
+
+/// MOVSXD r32, m32 [base+disp8] (63 /r mod=01)。
+pub fn movsxd_rm32_mem8<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, disp: i8) -> Flow<B> {
+    let addr = eff_addr(b, base, disp);
+    let v: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    write(b, dst, v);
+    Ok(())
+}
+
+/// MOVSXD r64, m32 [base+disp8] (REX.W)。
+pub fn movsxd_rm64_mem8<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, disp: i8) -> Flow<B> {
+    let addr = eff_addr(b, base, disp);
+    let v32: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let v = b.sext::<W32, W64>(v32);
+    write64(b, dst, v);
+    Ok(())
+}
+
+/// MOVSXD r32, m32 [base+disp32] (63 /r mod=10)。
+pub fn movsxd_rm32_mem32<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, disp: i32) -> Flow<B> {
+    let addr = eff_addr32(b, base, disp);
+    let v: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    write(b, dst, v);
+    Ok(())
+}
+
+/// MOVSXD r64, m32 [base+disp32] (REX.W)。
+pub fn movsxd_rm64_mem32<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, disp: i32) -> Flow<B> {
+    let addr = eff_addr32(b, base, disp);
+    let v32: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let v = b.sext::<W32, W64>(v32);
+    write64(b, dst, v);
+    Ok(())
+}
+
+/// MOVSXD r32, m32 [base+index*scale] (63 /r SIB mod=00)。
+pub fn movsxd_rm32_sib<B: Backend>(
+    b: &mut B,
+    dst: Gpr,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, 0, base, idx);
+    let v: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    write(b, dst, v);
+    Ok(())
+}
+
+/// MOVSXD r64, m32 [base+index*scale] (REX.W)。
+pub fn movsxd_rm64_sib<B: Backend>(
+    b: &mut B,
+    dst: Gpr,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, 0, base, idx);
+    let v32: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let v = b.sext::<W32, W64>(v32);
+    write64(b, dst, v);
+    Ok(())
+}
+
+/// MOVSXD r32, m32 [base+index*scale+disp8] (SIB mod=01)。
+pub fn movsxd_rm32_sibd<B: Backend>(
+    b: &mut B,
+    dst: Gpr,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i8,
+) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, disp as i32, base, idx);
+    let v: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    write(b, dst, v);
+    Ok(())
+}
+
+/// MOVSXD r64, m32 [base+index*scale+disp8] (REX.W)。
+pub fn movsxd_rm64_sibd<B: Backend>(
+    b: &mut B,
+    dst: Gpr,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i8,
+) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, disp as i32, base, idx);
+    let v32: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let v = b.sext::<W32, W64>(v32);
+    write64(b, dst, v);
+    Ok(())
+}
+
+/// MOVSXD r32, m32 [base+index*scale+disp32] (SIB mod=10)。
+pub fn movsxd_rm32_sibd32<B: Backend>(
+    b: &mut B,
+    dst: Gpr,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i32,
+) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, disp, base, idx);
+    let v: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    write(b, dst, v);
+    Ok(())
+}
+
+/// MOVSXD r64, m32 [base+index*scale+disp32] (REX.W)。
+pub fn movsxd_rm64_sibd32<B: Backend>(
+    b: &mut B,
+    dst: Gpr,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i32,
+) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, disp, base, idx);
+    let v32: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let v = b.sext::<W32, W64>(v32);
+    write64(b, dst, v);
+    Ok(())
+}
+
+/// CMOVE r64, m64 [RIP+disp32] (0F 44 /r RIP、REX.W)。ZF=1 なら移す.
+pub fn cmove_r64_rip<B: Backend>(b: &mut B, dst: Gpr, next_rip: u64, disp: i32) -> Flow<B> {
+    let base = b.konst::<W64>(next_rip);
+    let d = b.konst::<W64>(disp as i64 as u64);
+    let addr = b.add::<W64>(base, d);
+    let srcv: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let take = read_zf(b);
+    let dstv = read64(b, dst);
+    let v = b.select::<W64>(take, srcv, dstv);
+    write64(b, dst, v);
+    Ok(())
+}
+
+/// CMOVE r32, m32 [RIP+disp32]。ZF=1 なら移す.
+pub fn cmove_r32_rip<B: Backend>(b: &mut B, dst: Gpr, next_rip: u64, disp: i32) -> Flow<B> {
+    let base = b.konst::<W64>(next_rip);
+    let d = b.konst::<W64>(disp as i64 as u64);
+    let addr = b.add::<W64>(base, d);
+    let srcv: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let take = read_zf(b);
+    let dstv = read(b, dst);
+    let v = b.select::<W32>(take, srcv, dstv);
+    write(b, dst, v);
+    Ok(())
+}
+
+/// CMOVE r32, m32 [disp32] abs (32ビット)。
+pub fn cmove_r32_abs<B: Backend>(b: &mut B, dst: Gpr, addr32: u32) -> Flow<B> {
+    let addr = b.konst::<W64>(addr32 as u64);
+    let srcv: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let take = read_zf(b);
+    let dstv = read(b, dst);
+    let v = b.select::<W32>(take, srcv, dstv);
+    write(b, dst, v);
+    Ok(())
+}

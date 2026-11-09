@@ -4124,3 +4124,113 @@ fn call_r64_sib_no_index() {
     assert_eq!(env.backend.get(sem::eip_ref()), 0x3000);
     assert_eq!(env.backend.get(Gpr(4).state()), 0x1f8);
 }
+
+#[test]
+fn movsxd_rm64_mem8_sign_extends() {
+    // MOVSXD RAX,[RBX+4] (REX.W 63 /r mod=01): [0x104]=0xFFFF_FFFE (-2) -> RAX=0xFFFF_FFFF_FFFF_FFFE.
+    let mut env = env();
+    env.map_rw(0, 2).unwrap();
+    env.backend.set(Gpr(3).state(), 0x100);
+    env.backend
+        .mem
+        .write(VirtAddr(0x104), &0xFFFF_FFFEu32.to_le_bytes())
+        .unwrap();
+    env.step(|b| sem::movsxd_rm64_mem8(b, Gpr(0), Gpr(3), 4))
+        .unwrap();
+    env.step(|b| {
+        let v = sem::read64(b, Gpr(0));
+        assert_eq!(v, 0xFFFF_FFFF_FFFF_FFFE);
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn movsxd_rm32_mem8_zero_extends_hi() {
+    // MOVSXD EAX,[RBX+4] (63 /r mod=01, REX.Wなし): 高位は呼出側 clear_hi で消える想定だが
+    // sem単体では下位のみ書く。[0x104]=0x8000_0001 -> EAX=0x8000_0001.
+    let mut env = env();
+    env.map_rw(0, 2).unwrap();
+    env.backend.set(Gpr(3).state(), 0x100);
+    env.backend
+        .mem
+        .write(VirtAddr(0x104), &0x8000_0001u32.to_le_bytes())
+        .unwrap();
+    env.step(|b| sem::movsxd_rm32_mem8(b, Gpr(0), Gpr(3), 4))
+        .unwrap();
+    assert_eq!(env.backend.get(Gpr(0).state()), 0x8000_0001);
+}
+
+#[test]
+fn movsxd_rm64_sib_indexed() {
+    // MOVSXD RAX,[RDX+RAX*4] (REX.W 63 /r SIB mod=00): RDX=0x100, RAX(idx)=2 -> [0x108]=0xFFFF_FFFE -> RAX=0xFFFF_FFFF_FFFF_FFFE.
+    let mut env = env();
+    env.map_rw(0, 2).unwrap();
+    env.step(|b| {
+        sem::write64(b, Gpr(2), 0x100);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| {
+        sem::write64(b, Gpr(0), 2);
+        Ok(())
+    })
+    .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x108), &0xFFFF_FFFEu32.to_le_bytes())
+        .unwrap();
+    env.step(|b| sem::movsxd_rm64_sib(b, Gpr(0), Gpr(2), Gpr(0), 2))
+        .unwrap();
+    env.step(|b| {
+        let v = sem::read64(b, Gpr(0));
+        assert_eq!(v, 0xFFFF_FFFF_FFFF_FFFE);
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn cmove_r64_rip_taken() {
+    // CMOVE RDI,[RIP+disp]: ZF=1 -> RDI=[0x1500]=0x1234_5678_9ABC_DEF0.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend.set(sem::eflags_ref(), 0x40);
+    env.backend
+        .mem
+        .write(VirtAddr(0x1500), &0x1234_5678_9ABC_DEF0u64.to_le_bytes())
+        .unwrap();
+    env.step(|b| sem::cmove_r64_rip(b, Gpr(7), 0x1007, 0x4F9))
+        .unwrap();
+    env.step(|b| {
+        let v = sem::read64(b, Gpr(7));
+        assert_eq!(v, 0x1234_5678_9ABC_DEF0);
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn cmove_r64_rip_not_taken() {
+    // ZF=0 -> RDI 不変 (0x11 のまま).
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend.set(sem::eflags_ref(), 0x0);
+    env.step(|b| {
+        sem::write64(b, Gpr(7), 0x11);
+        Ok(())
+    })
+    .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1500), &0x22u64.to_le_bytes())
+        .unwrap();
+    env.step(|b| sem::cmove_r64_rip(b, Gpr(7), 0x1007, 0x4F9))
+        .unwrap();
+    env.step(|b| {
+        let v = sem::read64(b, Gpr(7));
+        assert_eq!(v, 0x11);
+        Ok(())
+    })
+    .unwrap();
+}

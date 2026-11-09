@@ -123,13 +123,13 @@ fn fetch_len(
                     )
                 }
             } else if (0x40..=0x4F).contains(&s) {
-                // CMOVcc (0F 40-4F /r)。reg-direct 3B、RBP+disp32 (mod=10) 7B.
+                // CMOVcc (0F 40-4F /r)。reg-direct 3B、mod=10 RBP+disp32 7B、mod=00 RIP 7B.
                 let m = third?;
                 let md = m >> 6;
                 let rm = m & 7;
                 if md == 3 {
                     Some(3)
-                } else if md == 2 && rm == 5 {
+                } else if rm == 5 && (md == 2 || md == 0) {
                     Some(7)
                 } else {
                     None
@@ -276,10 +276,36 @@ fn fetch_len(
         }
         // string 操作（A4/A5/AA/AB）は 1 バイト。繰り返しは実行側で回す。
         0xA4 | 0xA5 | 0xAA | 0xAB => Some(1),
-        // 0x63 /r (MOVSXD)。register-direct のみ 2B で受け、メモリ形式は未対応。
+        // 0x63 /r (MOVSXD)。reg-direct 2B、mod=00 base 2B / abs 6B、
+        // mod=01 base+disp8 3B、mod=10 base+disp32 6B。
+        // SIB 付きは disp で長さが変わる (mod=00 base=101 は disp32 付き 7B)。
         0x63 => {
             let s = second?;
-            if s >> 6 == 3 { Some(2) } else { None }
+            let md = s >> 6;
+            let rm = s & 7;
+            if md == 3 {
+                Some(2)
+            } else if rm == 4 {
+                let t = third?;
+                let disp = match md {
+                    1 => 1,
+                    2 => 4,
+                    _ => {
+                        if t & 7 == 5 {
+                            4
+                        } else {
+                            0
+                        }
+                    }
+                };
+                Some(3 + disp)
+            } else if md == 1 {
+                Some(3)
+            } else if md == 2 || rm == 5 {
+                Some(6)
+            } else {
+                Some(2)
+            }
         }
         // 0x69 /r id (IMUL r,r/m,imm32)。reg-direct のみ 6B.
         0x69 => {
@@ -816,6 +842,7 @@ pub fn run_mode(
                 | 0x88
                 | 0x8A
                 | 0x87
+                | 0x63
                 | 0x03
                 | 0x0B
                 | 0x3B
@@ -2835,6 +2862,66 @@ fn dispatch<B: Backend>(
                 sem::movsxd_rm32(b, reg(), rm())
             }
         }
+        Insn::MovsxdMemnd => {
+            if rex_w {
+                sem::movsxd_rm64_memnd(b, reg(), rm())
+            } else {
+                sem::movsxd_rm32_memnd(b, reg(), rm())
+            }
+        }
+        Insn::MovsxdMem8 => {
+            if rex_w {
+                sem::movsxd_rm64_mem8(b, reg(), rm(), disp8())
+            } else {
+                sem::movsxd_rm32_mem8(b, reg(), rm(), disp8())
+            }
+        }
+        Insn::MovsxdMem32 => {
+            if rex_w {
+                sem::movsxd_rm64_mem32(b, reg(), rm(), disp32())
+            } else {
+                sem::movsxd_rm32_mem32(b, reg(), rm(), disp32())
+            }
+        }
+        Insn::MovsxdSib => {
+            if no_index() {
+                if rex_w {
+                    sem::movsxd_rm64_memnd(b, reg(), sib_base())
+                } else {
+                    sem::movsxd_rm32_memnd(b, reg(), sib_base())
+                }
+            } else if rex_w {
+                sem::movsxd_rm64_sib(b, reg(), sib_base(), sib_idx(), sib_shift())
+            } else {
+                sem::movsxd_rm32_sib(b, reg(), sib_base(), sib_idx(), sib_shift())
+            }
+        }
+        Insn::MovsxdSibd => {
+            if no_index() {
+                if rex_w {
+                    sem::movsxd_rm64_mem8(b, reg(), sib_base(), disp8())
+                } else {
+                    sem::movsxd_rm32_mem8(b, reg(), sib_base(), disp8())
+                }
+            } else if rex_w {
+                sem::movsxd_rm64_sibd(b, reg(), sib_base(), sib_idx(), sib_shift(), disp8())
+            } else {
+                sem::movsxd_rm32_sibd(b, reg(), sib_base(), sib_idx(), sib_shift(), disp8())
+            }
+        }
+        Insn::MovsxdSibd32 => {
+            if no_index() {
+                if rex_w {
+                    sem::movsxd_rm64_mem32(b, reg(), sib_base(), disp32())
+                } else {
+                    sem::movsxd_rm32_mem32(b, reg(), sib_base(), disp32())
+                }
+            } else if rex_w {
+                sem::movsxd_rm64_sibd32(b, reg(), sib_base(), sib_idx(), sib_shift(), disp32())
+            } else {
+                sem::movsxd_rm32_sibd32(b, reg(), sib_base(), sib_idx(), sib_shift(), disp32())
+            }
+        }
         Insn::Cwde => {
             if rex_w {
                 sem::cdqe(b)
@@ -3341,6 +3428,15 @@ fn dispatch<B: Backend>(
                 sem::cmove_r64_mem32(b, reg0f_as_gpr(), Gpr(5 | ((rex & 1) << 3)), disp32())
             } else {
                 sem::cmove_r32_mem32(b, reg0f_as_gpr(), Gpr(5 | ((rex & 1) << 3)), disp32())
+            }
+        }
+        Insn::CmoveRip => {
+            if rex_w {
+                sem::cmove_r64_rip(b, reg0f_as_gpr(), eip as u64 + nbytes, disp32())
+            } else if is64 {
+                sem::cmove_r32_rip(b, reg0f_as_gpr(), eip as u64 + nbytes, disp32())
+            } else {
+                sem::cmove_r32_abs(b, reg0f_as_gpr(), imm32())
             }
         }
         Insn::CmovaeM64 => {
@@ -3989,6 +4085,12 @@ fn dispatch<B: Backend>(
             | Insn::NegRm32 => Some(rm()),
             Insn::MovRm32
             | Insn::Movsxd
+            | Insn::MovsxdMemnd
+            | Insn::MovsxdMem8
+            | Insn::MovsxdMem32
+            | Insn::MovsxdSib
+            | Insn::MovsxdSibd
+            | Insn::MovsxdSibd32
             | Insn::ImulRImm
             | Insn::ImulRImm8
             | Insn::ImulRImm8Rip => Some(reg()),
@@ -4088,7 +4190,22 @@ fn dispatch<B: Backend>(
             _ => None,
         };
         if let Some(d) = dst {
-            sem::clear_hi(b, d);
+            // MOVSXD は REX.W 時に符号拡張の上位を保持するため clear_hi しない。
+            // 32ビット時は下位書込みのゼロ拡張として clear_hi する。
+            let skip = rex_w
+                && matches!(
+                    insn,
+                    Insn::Movsxd
+                        | Insn::MovsxdMemnd
+                        | Insn::MovsxdMem8
+                        | Insn::MovsxdMem32
+                        | Insn::MovsxdSib
+                        | Insn::MovsxdSibd
+                        | Insn::MovsxdSibd32
+                );
+            if !skip {
+                sem::clear_hi(b, d);
+            }
         }
         // 32ビット DIV/MUL/IDIV のみゼロ拡張する。64ビット DIV (REX.W) は full64 のため消さない.
         if !rex_w && matches!(insn, Insn::MulRm32 | Insn::DivRm32 | Insn::IdivRm32) {

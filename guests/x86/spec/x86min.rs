@@ -230,6 +230,10 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("cmp_rm32_imm", "F1", "10000001 11111... ................................", "cmp r/m32, {imm}", "alu"),
         ("cmp_rm64_imm", "F1", "01001000 10000001 11111... ................................", "cmp r/m64, {imm}", "alu"),
         ("movsxd", "F1", "01100011 11......", "movsxd r, r/m32", "alu"),
+        // MOVSXD r, m32 mod=00/01/10 (63 /r)。SIBなし。REX.W で64bit符号拡張.
+        ("movsxd_memnd", "MR", "01100011 00......", "movsxd r, m32", "load"),
+        ("movsxd_mem8", "M8", "01100011 01...... ........", "movsxd r, m32", "load"),
+        ("movsxd_mem32", "M32", "01100011 10...... ................................", "movsxd r, m32", "load"),
         ("movsb", "F1", "10100100", "movsb", "load"),
         ("movsd", "F1", "10100101", "movsd", "load"),
         ("stosb", "F1", "10101010", "stosb", "store"),
@@ -309,6 +313,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("setle", "F1", "00001111 10011110 11......", "setle r/m8", "alu"),
         ("setg", "F1", "00001111 10011111 11......", "setg r/m8", "alu"),
         ("cmove_m64", "F1", "00001111 01000100 10000101 ................................", "cmove r64, m64", "load"),
+        // CMOVE r64/r32, m64/m32 [RIP+disp32] (0F 44 05/0D... + disp32)。REX.W で64bit.
+        ("cmove_rip", "F1", "00001111 01000100 00...101 ................................", "cmove r, m", "load"),
         ("imul_r_imm", "F1", "01101001 11...... ................................", "imul r, r/m, {imm}", "alu"),
         // IMUL r32/r64, r/m32/r/m64, imm8 reg-direct (6B /r ib mod=11)。REX.W で64bit.
         ("imul_r_imm8", "F1", "01101011 11...... ........", "imul r, r/m, {imm}", "alu"),
@@ -890,6 +896,30 @@ pub fn build_model() -> polyisa_isadl::Model {
             "00001111 10110111 01...100 ........ ........",
             vec![],
             "movzx r32, m16",
+            "load",
+        ),
+        (
+            "movsxd_sib",
+            "N8",
+            "01100011 00...100 ........",
+            vec![wc("n8_base", WhereOp::Ne, 5)],
+            "movsxd r, m32",
+            "load",
+        ),
+        (
+            "movsxd_sibd",
+            "S8",
+            "01100011 01...100 ........ ........",
+            vec![],
+            "movsxd r, m32",
+            "load",
+        ),
+        (
+            "movsxd_sibd32",
+            "D32",
+            "01100011 10...100 ........ ................................",
+            vec![],
+            "movsxd r, m32",
             "load",
         ),
         (
