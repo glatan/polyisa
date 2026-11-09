@@ -70,6 +70,17 @@ where
 }
 
 #[test]
+fn int80_traps_with_vector() {
+    use polyisa_engine::interp::InterpExit;
+    use polyisa_sem::ExceptionKind;
+    let r = env_step(|b| sem::int80(b, 0x1000));
+    assert!(matches!(
+        r,
+        Err(InterpExit::Exception(e)) if e.kind == ExceptionKind::Trap && e.code == 0x80 && e.addr == Some(0x1000)
+    ));
+}
+
+#[test]
 fn cpuid_leaf0_returns_vendor() {
     let mut env = env();
     env.backend.set(sem::Gpr(0).state(), 0);
