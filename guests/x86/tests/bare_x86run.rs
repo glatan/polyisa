@@ -240,6 +240,37 @@ fn run_sib_scaled_nd() {
 }
 
 #[test]
+fn run_regreg_matrix() {
+    // register-direct 汎用形を run 経由で回し、exit コードで検証する。
+    // mov eax,0x10; push eax; pop ecx (ecx=0x10);
+    // mov eax,0x13; sub eax,ecx (29 C8: eax=3);
+    // xor ecx,ecx (31 C9: ecx=0);
+    // mov edx,eax (8B D0: edx=3); mov ebx,edx (89 D3: ebx=3);
+    // mov eax,1; int 0x80 -> exit(3)
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    let prog: &[u8] = &[
+        0xB8, 0x10, 0x00, 0x00, 0x00, // mov eax,0x10
+        0x50, // push eax
+        0x59, // pop ecx (ecx=0x10)
+        0xB8, 0x13, 0x00, 0x00, 0x00, // mov eax,0x13
+        0x29, 0xC8, // sub eax,ecx (eax=3)
+        0x31, 0xC9, // xor ecx,ecx (ecx=0)
+        0x8B, 0xD0, // mov edx,eax (edx=3)
+        0x89, 0xD3, // mov ebx,edx (ebx=3)
+        0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax,1
+        0xCD, 0x80, // int 0x80 -> exit(3)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = ExitOne;
+    let out = run_x86::run(&mut env, 0x1000, &mut sys, 100);
+    assert_eq!(out, Outcome::Exit(3));
+}
+
+#[test]
 fn run_div_exit_quotient() {
     // F7 F1 の fetch と div ディスパッチを run 経由で検証する。
     // EDX:EAX=17 / ECX=5 -> EAX=3 で exit(3)。

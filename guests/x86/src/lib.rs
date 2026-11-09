@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! x86 最小のゲスト ISA。段階4の最小であり、可変長デコードを確かめる。
 //!
-//! i386 の汎用レジスタ系87件のみ持つ。SIB の disp32・絶対番地と Rust フック・
+//! i386 の汎用レジスタ系88件のみ持つ。SIB の disp32・絶対番地と Rust フック・
 //! EFLAGS(SF/OF/PF/AF)・64ビット・x87・SSE・セグメントは本格実装で足す。
-//! SYSCALL/CPUID は最小形、ModRM は register-direct・mod=01+disp8・
+//! SYSCALL/CPUID は最小形、ModRM は register-direct（全組合せ）・mod=01+disp8・
 //! SIB base+index 形（スケール付き、disp8 の有無は問わない）を持つ。
 
 #![forbid(unsafe_code)]
@@ -55,8 +55,8 @@ mod tests {
 
     #[test]
     fn insn_count() {
-        // 試作の整数87件。
-        assert_eq!(INSNS.len(), 87);
+        // 試作の整数88件。
+        assert_eq!(INSNS.len(), 88);
     }
 
     #[test]
@@ -90,12 +90,17 @@ mod tests {
         // 16ビット2バイトオペコード：SYSCALL (0F 05)、CPUID (0F A2)。
         assert_eq!(decode(0x0F05, 16), Some(Insn::Syscall));
         assert_eq!(decode(0x0FA2, 16), Some(Insn::Cpuid));
-        // ModRM register-direct：ADD EAX,ECX (01 C8)、MOV EAX,ECX (8B C1)。
+        // ModRM register-direct 全組合せ：ADD (01 /r dst=rm)、MOV (8B /r dst=reg)、
+        // CMP (39)、AND (21)、OR (09)、SUB (29)、XOR (31)、MOV store (89 /r dst=rm)。
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x01C8, 16), Some(Insn::AddRm32));
+        assert_eq!(decode(0x01D8, 16), Some(Insn::AddRm32));
+        assert_eq!(decode(0x01C3, 16), Some(Insn::AddRm32));
         assert_eq!(decode(0x8BC1, 16), Some(Insn::MovRm32));
-        // ModRM の mod=00 (絶対番地なしメモリ) は未対応であり一致しない。
+        assert_eq!(decode(0x8BD8, 16), Some(Insn::MovRm32));
+        // ModRM の mod=00 (メモリ) は未対応であり一致しない。
         assert_eq!(decode(0x0108, 16), None);
+        assert_eq!(decode(0x8B08, 16), None);
         // スタック操作とコール/リターン：PUSH EAX (50)、POP EAX (58)、PUSH EBP (55)、
         // POP EBP (5D)、CALL rel32 (E8+imm32)、RET (C3)。
         // Ref: SPEC-X86-INTEL-SDM (v093).
@@ -117,12 +122,17 @@ mod tests {
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0xE2FE, 16), Some(Insn::Loop));
         assert_eq!(decode(0xE9_0000_0010, 40), Some(Insn::JmpRel32));
-        // 実バイナリ頻出イディオム：XOR EAX,EAX (31 C0)、SUB EAX,imm32 (2D)、
-        // MOV EBP,ESP (89 E5)、LEAVE (C9)。
+        // 実バイナリ頻出イディオム：XOR r/m32,r32 (31 /r。31 C0 はゼロ化)、SUB EAX,imm32 (2D)、
+        // MOV r/m32,r32 (89 /r。89 E5 は関数枠の入口)。
         // Ref: SPEC-X86-INTEL-SDM (v093).
-        assert_eq!(decode(0x31C0, 16), Some(Insn::XorEax));
+        assert_eq!(decode(0x31C0, 16), Some(Insn::XorRm32));
+        assert_eq!(decode(0x31C9, 16), Some(Insn::XorRm32));
+        assert_eq!(decode(0x3108, 16), None);
         assert_eq!(decode(0x2D_0000_0001, 40), Some(Insn::SubEax));
-        assert_eq!(decode(0x89E5, 16), Some(Insn::MovEbpEsp));
+        assert_eq!(decode(0x29C8, 16), Some(Insn::SubRm32));
+        assert_eq!(decode(0x29D8, 16), Some(Insn::SubRm32));
+        assert_eq!(decode(0x89E5, 16), Some(Insn::MovMr32));
+        assert_eq!(decode(0x89D8, 16), Some(Insn::MovMr32));
         assert_eq!(decode(0xC9, 8), Some(Insn::Leave));
         // PUSH/POP r32 全レジスタ：PUSH 50+r、POP 58+r。
         // Ref: SPEC-X86-INTEL-SDM (v093).
@@ -159,13 +169,16 @@ mod tests {
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0xCD80, 16), Some(Insn::Int80));
         assert_eq!(decode(0xCD81, 16), None);
-        // LEA EAX,[EBX+disp8] (8D 43 ib) と reg/reg 形 CMP/AND/OR EAX,ECX。
+        // LEA EAX,[EBX+disp8] (8D 43 ib) と reg/reg 形 CMP/AND/OR (39/21/09 /r)。
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x008D_4310, 24), Some(Insn::LeaEax));
         assert_eq!(decode(0x39C8, 16), Some(Insn::CmpRm32));
+        assert_eq!(decode(0x39D8, 16), Some(Insn::CmpRm32));
         assert_eq!(decode(0x21C8, 16), Some(Insn::AndRm32));
+        assert_eq!(decode(0x21D8, 16), Some(Insn::AndRm32));
         assert_eq!(decode(0x09C8, 16), Some(Insn::OrRm32));
-        // mod=10 (disp32) や別レジスタの組み合わせは未対応。
+        assert_eq!(decode(0x09D8, 16), Some(Insn::OrRm32));
+        // mod=10 (disp32) や mod=01 は register-direct ではなく一致しない。
         assert_eq!(decode(0x008D_8310, 24), None);
         assert_eq!(decode(0x397C, 16), None);
         // SIB base+index 最小形：MOV EAX,[EBX+ESI] (8B 04 33) と MOV [EBX+ESI],EAX (89 04 33)。

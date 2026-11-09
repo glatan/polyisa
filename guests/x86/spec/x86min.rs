@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // x86 最小の ISADL モデル（段階4の最小）。
 //
-// i386 の整数87件に絞る。可変長（8/16/24/32/40ビット）のデコード入口と
-// ModRM register-direct の最小形を確かめる。
+// i386 の整数88件に絞る。可変長（8/16/24/32/40ビット）のデコード入口と
+// ModRM register-direct の全レジスタ組合せを確かめる。
 // ModRM の disp32・絶対番地と Rust フック・遅延フラグ・x87・SSE・
 // 64ビット・セグメントは本格実装で足す。
 // SYSCALL/CPUID は退出・識別情報の最小形のみ持つ（機能導出は本格実装で足す）。
@@ -75,8 +75,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("dec_edi", "F1", "01001111", "dec edi", "alu"),
         ("add_eax", "F1", "00000101 ................................", "add eax, {imm}", "alu"),
         ("jmp8", "F1", "11101011 ........", "jmp {imm}", "jump"),
-        ("add_rm32", "F1", "00000001 11001000", "add eax, ecx", "alu"),
-        ("mov_rm32", "F1", "10001011 11000001", "mov eax, ecx", "alu"),
+        ("add_rm32", "F1", "00000001 11......", "add r/m32, r32", "alu"),
+        ("mov_rm32", "F1", "10001011 11......", "mov r32, r/m32", "alu"),
         ("mov_eax_mem", "F1", "10001011 01000011 ........", "mov eax, [ebx+disp8]", "load"),
         ("mov_mem_eax", "F1", "10001001 01000011 ........", "mov [ebx+disp8], eax", "store"),
         ("mov_eax_sib", "F1", "10001011 00000100 00110011", "mov eax, [ebx+esi]", "load"),
@@ -126,7 +126,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("ja", "F1", "01110111 ........", "ja {imm}", "jump"),
         ("loop", "F1", "11100010 ........", "loop {imm}", "jump"),
         ("jmp_rel32", "F1", "11101001 ................................", "jmp {imm}", "jump"),
-        ("xor_eax", "F1", "00110001 11000000", "xor eax, eax", "alu"),
+        ("xor_rm32", "F1", "00110001 11......", "xor r/m32, r32", "alu"),
         ("and_eax", "F1", "00100101 ................................", "and eax, {imm}", "alu"),
         ("or_eax", "F1", "00001101 ................................", "or eax, {imm}", "alu"),
         ("xor_imm", "F1", "00110101 ................................", "xor eax, {imm}", "alu"),
@@ -134,11 +134,12 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("shr_eax", "F1", "11000001 11101000 ........", "shr eax, {imm}", "alu"),
         ("int80", "F1", "11001101 10000000", "int 0x80", "system"),
         ("lea_eax", "F1", "10001101 01000011 ........", "lea eax, [ebx+disp8]", "alu"),
-        ("cmp_rm32", "F1", "00111001 11001000", "cmp eax, ecx", "alu"),
-        ("and_rm32", "F1", "00100001 11001000", "and eax, ecx", "alu"),
-        ("or_rm32", "F1", "00001001 11001000", "or eax, ecx", "alu"),
+        ("cmp_rm32", "F1", "00111001 11......", "cmp r/m32, r32", "alu"),
+        ("and_rm32", "F1", "00100001 11......", "and r/m32, r32", "alu"),
+        ("or_rm32", "F1", "00001001 11......", "or r/m32, r32", "alu"),
+        ("sub_rm32", "F1", "00101001 11......", "sub r/m32, r32", "alu"),
         ("sub_eax", "F1", "00101101 ................................", "sub eax, {imm}", "alu"),
-        ("mov_ebp_esp", "F1", "10001001 11100101", "mov ebp, esp", "alu"),
+        ("mov_mr32", "F1", "10001001 11......", "mov r/m32, r32", "alu"),
         ("leave", "F1", "11001001", "leave", "alu"),
         ("mov_eax", "F1", "10111000 ................................", "mov eax, {imm}", "alu"),
         ("syscall", "F1", "00001111 00000101", "syscall", "system"),

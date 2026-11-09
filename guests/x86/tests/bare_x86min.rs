@@ -101,11 +101,64 @@ fn modrm_register_direct() {
     env.backend.set(Gpr(1).state(), 35);
     env.step(|b| sem::mov_eax(b, 7)).unwrap();
     // MOV EAX, ECX：EAX=35。
-    env.step(sem::mov_rm32).unwrap();
+    env.step(|b| sem::mov_rm32(b, Gpr(0), Gpr(1))).unwrap();
     assert_eq!(eax(&mut env), 35);
     // ADD EAX, ECX：EAX=70。
-    env.step(sem::add_rm32).unwrap();
+    env.step(|b| sem::add_rm32(b, Gpr(0), Gpr(1))).unwrap();
     assert_eq!(eax(&mut env), 70);
+}
+
+#[test]
+fn regreg_matrix_roundtrip() {
+    // register-direct 全組合せの行列：高レジスタを含む dst/src で往復する。
+    // MOV r32,r/m32 (dst=reg)：ESI→EDI。
+    let mut env = env();
+    env.backend.set(Gpr(6).state(), 0x1234_5678);
+    env.step(|b| sem::mov_rm32(b, Gpr(7), Gpr(6))).unwrap();
+    assert_eq!(env.backend.get(Gpr(7).state()), 0x1234_5678);
+    // MOV r/m32,r32 (dst=rm)：EBX→EBP。
+    env.backend.set(Gpr(3).state(), 0x1111_2222);
+    env.step(|b| sem::mov_mr32(b, Gpr(5), Gpr(3))).unwrap();
+    assert_eq!(env.backend.get(Gpr(5).state()), 0x1111_2222);
+    // ADD EDX,ESI：0x100+0x20=0x120。
+    env.backend.set(Gpr(2).state(), 0x100);
+    env.backend.set(Gpr(6).state(), 0x20);
+    env.step(|b| sem::add_rm32(b, Gpr(2), Gpr(6))).unwrap();
+    assert_eq!(env.backend.get(Gpr(2).state()), 0x120);
+    // SUB EDI,EBX：0x120-0x20=0x100、ZF=0。
+    env.backend.set(Gpr(7).state(), 0x120);
+    env.backend.set(Gpr(3).state(), 0x20);
+    env.step(|b| sem::sub_rm32(b, Gpr(7), Gpr(3))).unwrap();
+    assert_eq!(env.backend.get(Gpr(7).state()), 0x100);
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0);
+    // SUB で同値引き：ZF=1。
+    env.step(|b| sem::sub_rm32(b, Gpr(7), Gpr(7))).unwrap();
+    assert_eq!(env.backend.get(Gpr(7).state()), 0);
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0x40);
+    // XOR ECX,ECX：ゼロ化イディオムの汎用形。
+    env.backend.set(Gpr(1).state(), 0xDEAD_BEEF);
+    env.step(|b| sem::xor_rm32(b, Gpr(1), Gpr(1))).unwrap();
+    assert_eq!(env.backend.get(Gpr(1).state()), 0);
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0x40);
+    // XOR ESI,EDI：0xff ^ 0xf0 = 0x0f。
+    env.backend.set(Gpr(6).state(), 0xff);
+    env.backend.set(Gpr(7).state(), 0xf0);
+    env.step(|b| sem::xor_rm32(b, Gpr(6), Gpr(7))).unwrap();
+    assert_eq!(env.backend.get(Gpr(6).state()), 0x0f);
+    // AND/OR の高レジスタ組合せ。
+    env.backend.set(Gpr(6).state(), 0b1100);
+    env.backend.set(Gpr(7).state(), 0b1010);
+    env.step(|b| sem::and_rm32(b, Gpr(6), Gpr(7))).unwrap();
+    assert_eq!(env.backend.get(Gpr(6).state()), 0b1000);
+    env.backend.set(Gpr(6).state(), 0b1100);
+    env.step(|b| sem::or_rm32(b, Gpr(6), Gpr(7))).unwrap();
+    assert_eq!(env.backend.get(Gpr(6).state()), 0b1110);
+    // CMP ESI,EDI：比較のみで dst 不変。
+    env.backend.set(Gpr(6).state(), 7);
+    env.backend.set(Gpr(7).state(), 7);
+    env.step(|b| sem::cmp_rm32(b, Gpr(6), Gpr(7))).unwrap();
+    assert_eq!(env.backend.get(Gpr(6).state()), 7);
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0x40);
 }
 
 #[test]
@@ -210,7 +263,7 @@ fn je_jne_branch_on_zf() {
 fn xor_zeroes_and_sets_zf() {
     let mut env = env();
     env.backend.set(Gpr(0).state(), 0x1234_5678);
-    env.step(sem::xor_eax).unwrap();
+    env.step(|b| sem::xor_rm32(b, Gpr(0), Gpr(0))).unwrap();
     assert_eq!(eax(&mut env), 0);
     assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0x40);
     assert_eq!(env.backend.get(sem::eflags_ref()) & 0x1, 0);
@@ -282,19 +335,19 @@ fn lea_and_reg_logic() {
     // CMP EAX,ECX：5 vs 5 で ZF=1、CF=0。EAX 不変。
     env.backend.set(Gpr(0).state(), 5);
     env.backend.set(Gpr(1).state(), 5);
-    env.step(sem::cmp_rm32).unwrap();
+    env.step(|b| sem::cmp_rm32(b, Gpr(0), Gpr(1))).unwrap();
     assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0x40);
     assert_eq!(env.backend.get(sem::eflags_ref()) & 0x1, 0);
     assert_eq!(eax(&mut env), 5);
     // 4 vs 5 で ZF=0、CF=1。
     env.backend.set(Gpr(0).state(), 4);
-    env.step(sem::cmp_rm32).unwrap();
+    env.step(|b| sem::cmp_rm32(b, Gpr(0), Gpr(1))).unwrap();
     assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0);
     assert_eq!(env.backend.get(sem::eflags_ref()) & 0x1, 1);
     // AND EAX,ECX：0b1100 & 0b1010 = 0b1000、ZF=0、CF=0。
     env.backend.set(Gpr(0).state(), 0b1100);
     env.backend.set(Gpr(1).state(), 0b1010);
-    env.step(sem::and_rm32).unwrap();
+    env.step(|b| sem::and_rm32(b, Gpr(0), Gpr(1))).unwrap();
     assert_eq!(eax(&mut env), 0b1000);
     assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0);
     assert_eq!(env.backend.get(sem::eflags_ref()) & 0x1, 0);
@@ -306,7 +359,7 @@ fn lea_and_reg_logic() {
     assert_eq!(env.backend.get(sem::eflags_ref()), 0);
     env.backend.set(Gpr(0).state(), 0);
     env.backend.set(Gpr(1).state(), 0xff);
-    env.step(sem::or_rm32).unwrap();
+    env.step(|b| sem::or_rm32(b, Gpr(0), Gpr(1))).unwrap();
     assert_eq!(eax(&mut env), 0xff);
     assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0);
     assert_eq!(env.backend.get(sem::eflags_ref()) & 0x1, 0);
@@ -321,7 +374,7 @@ fn frame_setup_and_leave() {
     env.backend.set(Gpr(5).state(), 0xAAAA_BBBB);
     env.step(|b| sem::push_reg(b, Gpr(5))).unwrap();
     assert_eq!(env.backend.get(Gpr(4).state()), 0x2fc);
-    env.step(sem::mov_ebp_esp).unwrap();
+    env.step(|b| sem::mov_mr32(b, Gpr(5), Gpr(4))).unwrap();
     assert_eq!(env.backend.get(Gpr(5).state()), 0x2fc);
     // ローカル代わりに PUSH EAX。
     env.backend.set(Gpr(0).state(), 0x1111_2222);
@@ -344,7 +397,7 @@ fn callee_saved_prologue_epilogue() {
     env.backend.set(Gpr(6).state(), 0xCCCC);
     env.backend.set(Gpr(7).state(), 0xDDDD);
     env.step(|b| sem::push_reg(b, Gpr(5))).unwrap();
-    env.step(sem::mov_ebp_esp).unwrap();
+    env.step(|b| sem::mov_mr32(b, Gpr(5), Gpr(4))).unwrap();
     env.step(|b| sem::push_reg(b, Gpr(3))).unwrap();
     env.step(|b| sem::push_reg(b, Gpr(6))).unwrap();
     env.step(|b| sem::push_reg(b, Gpr(7))).unwrap();
@@ -439,7 +492,7 @@ fn unsigned_branches() {
     // 4 vs 5：CF=1、ZF=0。JB/JBE は飛び、JAE/JA は飛ばない。
     env.backend.set(Gpr(0).state(), 4);
     env.backend.set(Gpr(1).state(), 5);
-    env.step(sem::cmp_rm32).unwrap();
+    env.step(|b| sem::cmp_rm32(b, Gpr(0), Gpr(1))).unwrap();
     env.backend.set(sem::eip_ref(), 0x1000);
     env.step(|b| sem::jb(b, 0x1000, 0x10)).unwrap();
     assert_eq!(env.backend.get(sem::eip_ref()), 0x1012);
@@ -469,7 +522,7 @@ fn unsigned_branches() {
     assert_eq!(env.backend.get(sem::eip_ref()), 0x2000);
     // 6 vs 5：CF=0、ZF=0。JA/JAE は飛び、JB/JBE は飛ばない。
     env.backend.set(Gpr(0).state(), 6);
-    env.step(sem::cmp_rm32).unwrap();
+    env.step(|b| sem::cmp_rm32(b, Gpr(0), Gpr(1))).unwrap();
     env.backend.set(sem::eip_ref(), 0x3000);
     env.step(|b| sem::ja(b, 0x3000, 0x10)).unwrap();
     assert_eq!(env.backend.get(sem::eip_ref()), 0x3012);
