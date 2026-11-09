@@ -316,6 +316,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("movq_m64_xmm_rip", "F1", "00001111 11010110 00...101 ................................", "movq m64, xmm", "store"),
         // MOVQ xmm,m64 RIP (F3 0F 7E 05 + disp32)。F3 接頭辞は実行側で剥がす。
         ("movq_xmm_m64_rip", "F1", "00001111 01111110 00...101 ................................", "movq xmm, m64", "load"),
+        // MOVDQU xmm,xmm (F3 0F 6F reg-direct)。16B 非整列転送は MOVUPS と等価のため意味論を共有する。
+        ("movdqu_load_xmm", "F1", "00001111 01101111 11......", "movdqu xmm, xmm", "load"),
         ("shr_rm32_imm8", "F1", "11000001 11101... ........", "shr r/m32, {imm}", "alu"),
         ("sar_rm32_imm8", "F1", "11000001 11111... ........", "sar r/m32, {imm}", "alu"),
         ("sar_rm32_cl", "F1", "11010001 11111...", "sar r/m32, cl", "alu"),
@@ -612,6 +614,15 @@ pub fn build_model() -> polyisa_isadl::Model {
             "00001111 00010000 01...... ........",
             vec![wc("m8_rm", WhereOp::Ne, 4)],
             "movups xmm, [r/m+disp8]",
+            "load",
+        ),
+        // MOVDQU xmm,m128 mod=01 (F3 0F 6F)。SIBなし。MOVUPS と等価のため意味論を共有する。
+        (
+            "movdqu_load_mem8",
+            "M8",
+            "00001111 01101111 01...... ........",
+            vec![wc("m8_rm", WhereOp::Ne, 4)],
+            "movdqu xmm, m128",
             "load",
         ),
         (

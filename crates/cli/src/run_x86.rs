@@ -144,6 +144,23 @@ fn fetch_len(
                 } else {
                     if rm == 5 { None } else { Some(3) }
                 }
+            } else if s == 0x6F {
+                // MOVDQU xmm,m128 (F3 0F 6F /r)。reg-direct と mod=00/01/10 (SIBなし)。
+                // F3 接頭辞は剥がし済み。16B 非整列転送は MOVUPS と等価のため意味論を共有する。
+                let m = third?;
+                let md = m >> 6;
+                let rm = m & 7;
+                if md == 3 {
+                    Some(3)
+                } else if rm == 4 {
+                    None
+                } else if md == 1 {
+                    Some(4)
+                } else if md == 2 {
+                    Some(7)
+                } else {
+                    if rm == 5 { None } else { Some(3) }
+                }
             } else if matches!(s, 0x60 | 0x61 | 0x62 | 0x6C | 0xDB | 0xEF) {
                 // XMM reg-direct のみ（66 接頭辞は剥がし済み）。
                 let m = third?;
@@ -608,6 +625,7 @@ pub fn run_mode(
                     second,
                     Some(
                         0x1F | 0x6E
+                            | 0x6F
                             | 0x60
                             | 0x61
                             | 0x62
@@ -1692,6 +1710,9 @@ fn dispatch<B: Backend>(
         Insn::MovupsStoreMemnd => sem::movups_store_memnd(b, xmm_reg(), rm0f()),
         Insn::MovupsLoadMem8 => sem::movups_load_mem8(b, xmm_reg(), rm0f(), disp8()),
         Insn::MovupsStoreMem8 => sem::movups_store_mem8(b, xmm_reg(), rm0f(), disp8()),
+        // MOVDQU (F3 0F 6F) は16B非整列転送で MOVUPS と等価のため意味論を共有する.
+        Insn::MovdquLoadXmm => sem::movups_xmm_xmm(b, xmm_reg(), xmm_rm()),
+        Insn::MovdquLoadMem8 => sem::movups_load_mem8(b, xmm_reg(), rm0f(), disp8()),
         Insn::MovupsLoadSib => {
             if sib0f_no_index() {
                 sem::movups_load_memnd(b, xmm_reg(), sib0f_base())

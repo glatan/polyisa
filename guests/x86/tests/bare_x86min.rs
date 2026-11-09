@@ -2474,3 +2474,26 @@ fn imul_r32_imm8_rip_basic() {
         .unwrap();
     assert_eq!(env.backend.get(Gpr(2).state()), 112);
 }
+
+#[test]
+fn movdqu_load_mem8_roundtrip() {
+    // MOVDQU xmm0,[base+disp8]: 16B 非整列ロード.
+    use polyisa_guest_x86::sem::Xmm;
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend.set(Gpr(0).state(), 0x1000);
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x1020),
+            &[
+                0x00u8, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC,
+                0xDD, 0xEE, 0xFF,
+            ],
+        )
+        .unwrap();
+    env.step(|b| sem::movups_load_mem8(b, Xmm(0), Gpr(0), 0x20))
+        .unwrap();
+    let v: u128 = env.backend.get(sem::xmm_ref(Xmm(0)));
+    assert_eq!(v, 0xFFEEDDCCBBAA99887766554433221100u128);
+}
