@@ -1227,3 +1227,34 @@ fn run_c7_mem32_generic_base() {
         .unwrap();
     assert_eq!(u32::from_le_bytes(back), 0x1122_3344);
 }
+
+#[test]
+fn run_movups_mem32_roundtrip() {
+    // run 経由で 0F 11/0F 10 mod=10 [base+disp32] の往復を回す (64bit)。
+    // movd xmm0,esi (0x77); movups [rbx+0x500],xmm0; movups xmm1,[rbx+0x500];
+    // movups [rbx+0x510],xmm1; mov eax,[rbx+0x510]; mov rdi,rax; exit(0x77).
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    let prog: &[u8] = &[
+        0x48, 0xC7, 0xC0, 0x00, 0x10, 0x00, 0x00, // mov rax,0x1000
+        0x50, // push rax
+        0x5B, // pop rbx (rbx=0x1000)
+        0x48, 0xC7, 0xC6, 0x77, 0x00, 0x00, 0x00, // mov rsi,0x77
+        0x66, 0x0F, 0x6E, 0xC6, // movd xmm0,esi (xmm0=0x77)
+        0x0F, 0x11, 0x83, 0x00, 0x05, 0x00, 0x00, // movups [rbx+0x500],xmm0
+        0x66, 0x0F, 0xEF, 0xC9, // pxor xmm1,xmm1
+        0x0F, 0x10, 0x8B, 0x00, 0x05, 0x00, 0x00, // movups xmm1,[rbx+0x500]
+        0x0F, 0x11, 0x8B, 0x10, 0x05, 0x00, 0x00, // movups [rbx+0x510],xmm1
+        0x8B, 0x83, 0x10, 0x05, 0x00, 0x00, // mov eax,[rbx+0x510] (eax=0x77)
+        0x48, 0x89, 0xC7, // mov rdi,rax
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x0F, 0x05, // syscall -> exit(0x77)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 200, true);
+    assert_eq!(out, Outcome::Exit(0x77));
+}

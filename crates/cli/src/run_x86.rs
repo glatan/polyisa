@@ -823,6 +823,8 @@ pub fn run_mode(
                     | Insn::MovupsStoreMemnd
                     | Insn::MovupsLoadMem8
                     | Insn::MovupsStoreMem8
+                    | Insn::MovupsLoadMem32
+                    | Insn::MovupsStoreMem32
                     | Insn::MovupsLoadSib
                     | Insn::MovupsStoreSib
                     | Insn::MovupsLoadSibd
@@ -1729,6 +1731,8 @@ fn dispatch<B: Backend>(
         Insn::MovupsStoreMemnd => sem::movups_store_memnd(b, xmm_reg(), rm0f()),
         Insn::MovupsLoadMem8 => sem::movups_load_mem8(b, xmm_reg(), rm0f(), disp8()),
         Insn::MovupsStoreMem8 => sem::movups_store_mem8(b, xmm_reg(), rm0f(), disp8()),
+        Insn::MovupsLoadMem32 => sem::movups_load_mem32(b, xmm_reg(), rm0f(), disp32()),
+        Insn::MovupsStoreMem32 => sem::movups_store_mem32(b, xmm_reg(), rm0f(), disp32()),
         // MOVDQU (F3 0F 6F) は16B非整列転送で MOVUPS と等価のため意味論を共有する.
         Insn::MovdquLoadXmm => sem::movups_xmm_xmm(b, xmm_reg(), xmm_rm()),
         Insn::MovdquLoadMem8 => sem::movups_load_mem8(b, xmm_reg(), rm0f(), disp8()),

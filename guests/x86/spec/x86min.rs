@@ -657,6 +657,22 @@ pub fn build_model() -> polyisa_isadl::Model {
             "store",
         ),
         (
+            "movups_load_mem32",
+            "M32",
+            "00001111 00010000 10...... ................................",
+            vec![wc("m32_rm", WhereOp::Ne, 4)],
+            "movups xmm, [r/m+disp32]",
+            "load",
+        ),
+        (
+            "movups_store_mem32",
+            "M32",
+            "00001111 00010001 10...... ................................",
+            vec![wc("m32_rm", WhereOp::Ne, 4)],
+            "movups [r/m+disp32], xmm",
+            "store",
+        ),
+        (
             "movups_load_sib",
             "N8",
             "00001111 00010000 00...100 ........",

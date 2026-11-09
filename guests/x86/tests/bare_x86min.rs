@@ -2594,3 +2594,30 @@ fn c7_mem64_generic_base() {
         .unwrap();
     assert_eq!(u64::from_le_bytes(back), 1);
 }
+
+#[test]
+fn movups_mem32_roundtrip() {
+    // MOVUPS [RBX+disp32],xmm0 -> MOVUPS xmm1,[RBX+disp32] の往復 (mod=10).
+    use polyisa_guest_x86::sem::Xmm;
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend.set(Gpr(3).state(), 0x1000);
+    env.step(|b| {
+        let v = b.konst::<polyisa_sem::W128>(0x0102030405060708090a0b0c0d0e0f10u128);
+        b.set(sem::xmm_ref(Xmm(0)), v);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::movups_store_mem32(b, Xmm(0), Gpr(3), 0x468))
+        .unwrap();
+    env.step(|b| {
+        let z = b.konst::<polyisa_sem::W128>(0);
+        b.set(sem::xmm_ref(Xmm(1)), z);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::movups_load_mem32(b, Xmm(1), Gpr(3), 0x468))
+        .unwrap();
+    let v: u128 = env.backend.get(sem::xmm_ref(Xmm(1)));
+    assert_eq!(v, 0x0102030405060708090a0b0c0d0e0f10u128);
+}
