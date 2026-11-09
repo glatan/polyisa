@@ -10216,3 +10216,23 @@ pub fn mov_r64_fs_memnd<B: Backend>(b: &mut B, dst: Gpr, fs_base: u64, base: Gpr
     write64(b, dst, v);
     Ok(())
 }
+
+/// MOV FS:[base], r32 (FS + 89 mod=00)。FS base + base レジスタへ32bit格納.
+pub fn mov_m32_fs_memnd<B: Backend>(b: &mut B, src: Gpr, fs_base: u64, base: Gpr) -> Flow<B> {
+    let f = b.konst::<W64>(fs_base);
+    let r = read64(b, base);
+    let addr = b.add::<W64>(f, r);
+    let v: B::V<W32> = read(b, src);
+    b.store::<W32>(addr, v, DATA_WRITE)?;
+    Ok(())
+}
+
+/// MOV FS:[base], r64 (FS + REX.W 89 mod=00)。
+pub fn mov_m64_fs_memnd<B: Backend>(b: &mut B, src: Gpr, fs_base: u64, base: Gpr) -> Flow<B> {
+    let f = b.konst::<W64>(fs_base);
+    let r = read64(b, base);
+    let addr = b.add::<W64>(f, r);
+    let v: B::V<W64> = read64(b, src);
+    b.store::<W64>(addr, v, DATA_WRITE)?;
+    Ok(())
+}

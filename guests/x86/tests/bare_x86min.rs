@@ -4884,3 +4884,32 @@ fn mov_r32_fs_memnd_basic() {
         .unwrap();
     assert_eq!(env.backend.get(Gpr(2).state()), 0x1234_5678);
 }
+
+#[test]
+fn mov_m32_fs_memnd_basic() {
+    // MOV FS:[RAX],EDI (FS base 0x1000 + RAX 0x500 = [0x1500]=EDI).
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend.set(Gpr(7).state(), 0x1122_3344);
+    env.step(|b| {
+        sem::write64(b, Gpr(0), 0x500);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::mov_m32_fs_memnd(b, Gpr(7), 0x1000, Gpr(0)))
+        .unwrap();
+    let mut back = [0u8; 4];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x1500),
+            &mut back,
+            Access {
+                endian: Endian::Le,
+                align: Align::Unaligned,
+                kind: AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(u32::from_le_bytes(back), 0x1122_3344);
+}

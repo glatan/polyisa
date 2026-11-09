@@ -1570,7 +1570,13 @@ fn dispatch<B: Backend>(
             }
         }
         Insn::MovMemndEax => {
-            if rex_w {
+            if let Some(base) = fs {
+                if rex_w {
+                    sem::mov_m64_fs_memnd(b, reg(), base, rm())
+                } else {
+                    sem::mov_m32_fs_memnd(b, reg(), base, rm())
+                }
+            } else if rex_w {
                 sem::mov_m64_memnd(b, reg(), rm())
             } else {
                 sem::mov_memnd_eax(b, reg(), rm())
