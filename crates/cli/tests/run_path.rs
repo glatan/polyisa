@@ -90,3 +90,57 @@ fn run_path_rejects_unknown_machine() {
     let _ = std::fs::remove_file(&path);
     assert!(r.is_err());
 }
+
+fn hello_x86_64() -> Vec<u8> {
+    // REX.W 最小形だけの静的 x86-64 バイナリ。write(1, msg, 13) して exit(7)。
+    let code: &[u8] = &[
+        0x48, 0x8D, 0x35, 0x27, 0x00, 0x00, 0x00, // lea rsi,[rip+msg]
+        0x48, 0xC7, 0xC7, 0x01, 0x00, 0x00, 0x00, // mov rdi,1
+        0x48, 0xC7, 0xC2, 0x0D, 0x00, 0x00, 0x00, // mov rdx,13
+        0x48, 0xC7, 0xC0, 0x01, 0x00, 0x00, 0x00, // mov rax,1 (write)
+        0x0F, 0x05, // syscall
+        0x48, 0xC7, 0xC7, 0x07, 0x00, 0x00, 0x00, // mov rdi,7
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60 (exit)
+        0x0F, 0x05, // syscall
+    ];
+    let msg = b"Hello, poly!\n";
+    assert_eq!(code.len(), 0x2E);
+    // msg はコード直後。lea の disp32 = msg - next_rip。
+    assert_eq!(0x27, code.len() as u8 - 7);
+    let mut f = Vec::new();
+    f.extend_from_slice(&[0x7f, b'E', b'L', b'F', 2, 1, 1, 0]);
+    f.extend_from_slice(&[0u8; 8]);
+    f.extend_from_slice(&2u16.to_le_bytes());
+    f.extend_from_slice(&62u16.to_le_bytes());
+    f.extend_from_slice(&1u32.to_le_bytes());
+    f.extend_from_slice(&0x400000u64.to_le_bytes());
+    f.extend_from_slice(&64u64.to_le_bytes());
+    f.extend_from_slice(&0u64.to_le_bytes());
+    f.extend_from_slice(&0u32.to_le_bytes());
+    f.extend_from_slice(&64u16.to_le_bytes());
+    f.extend_from_slice(&56u16.to_le_bytes());
+    f.extend_from_slice(&1u16.to_le_bytes());
+    f.extend_from_slice(&0u16.to_le_bytes());
+    f.extend_from_slice(&0u16.to_le_bytes());
+    f.extend_from_slice(&0u16.to_le_bytes());
+    let seg_len = (code.len() + msg.len()) as u64;
+    f.extend_from_slice(&1u32.to_le_bytes());
+    f.extend_from_slice(&5u32.to_le_bytes());
+    f.extend_from_slice(&120u64.to_le_bytes());
+    f.extend_from_slice(&0x400000u64.to_le_bytes());
+    f.extend_from_slice(&0x400000u64.to_le_bytes());
+    f.extend_from_slice(&seg_len.to_le_bytes());
+    f.extend_from_slice(&seg_len.to_le_bytes());
+    f.extend_from_slice(&0x1000u64.to_le_bytes());
+    f.extend_from_slice(code);
+    f.extend_from_slice(msg);
+    f
+}
+
+#[test]
+fn run_path_executes_x86_64_hello() {
+    let path = write_temp("hello64", &hello_x86_64());
+    let r = polyisa_cli::run_path(&path.to_string_lossy(), &[]);
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(r, Ok(7));
+}

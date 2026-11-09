@@ -63,6 +63,11 @@ fn fetch_len(first: u8, second: Option<u8>, third: Option<u8>) -> Option<u64> {
         0xEB | 0x74 | 0x75 | 0xE2 | 0xCD | 0x85 | 0x0F | 0x39 | 0x21 | 0x0B | 0x09 | 0x72
         | 0x73 | 0x76 | 0x77 | 0x7C | 0x7D | 0x7E | 0x7F | 0xF7 => Some(2),
         0x05 | 0x2D | 0x3D | 0xB8 | 0xE8 | 0xE9 | 0x25 | 0x0D | 0x35 => Some(5),
+        // C7 /0 (MOV r/m,imm32 系)。register-direct のみ 6B で受け、メモリ形式は未対応。
+        0xC7 => {
+            let s = second?;
+            if s >> 6 == 3 { Some(6) } else { None }
+        }
         // register-direct のみ対応する opcode（メモリ形式は未対応）。
         // SIB を含むことはなく、0xC1（シフト）のみ imm8 で 3B になる。
         0x01 | 0x29 | 0x31 | 0xC1 => {
@@ -116,6 +121,18 @@ fn fetch_len(first: u8, second: Option<u8>, third: Option<u8>) -> Option<u64> {
 
 /// eip から実行する。fallthrough は eip を命令長だけ進める。
 pub fn run(env: &mut BareEnv, entry: u32, sys: &mut impl TrapHandler, limit: u64) -> Outcome {
+    run_mode(env, entry, sys, limit, false)
+}
+
+/// `is64` のとき REX.W (0x48) 接頭辞を受け付ける実行ループ。
+/// 64ビットのスタック・R8-R15・SIB は未対応であり、4GB 未満の静的バイナリを想定する。
+pub fn run_mode(
+    env: &mut BareEnv,
+    entry: u32,
+    sys: &mut impl TrapHandler,
+    limit: u64,
+    is64: bool,
+) -> Outcome {
     env.backend.set(polyisa_guest_x86::sem::eip_ref(), entry);
     for _ in 0..limit {
         let pc = eip_of(env) as u64;
@@ -131,15 +148,37 @@ pub fn run(env: &mut BareEnv, entry: u32, sys: &mut impl TrapHandler, limit: u64
                 word: 0,
             };
         }
+        // REX.W 接頭辞（64ビットモードのみ）。R8-R15 を使う REX は未対応。
+        let mut off: u64 = 0;
+        if is64 && (0x40..=0x4F).contains(&head[0]) {
+            if head[0] != 0x48 {
+                return Outcome::Unimplemented {
+                    eip: pc as u32,
+                    word: head[0] as u128,
+                };
+            }
+            off = 1;
+            if env
+                .backend
+                .mem
+                .read(VirtAddr(pc + 1), &mut head, acc_fetch())
+                .is_err()
+            {
+                return Outcome::Unimplemented {
+                    eip: pc as u32,
+                    word: head[0] as u128,
+                };
+            }
+        }
         let mut peek = [0u8; 1];
         let second = if matches!(
             head[0],
-            0x01 | 0x8B | 0x29 | 0x31 | 0x89 | 0xC1 | 0x8D | 0xF7
+            0x01 | 0x8B | 0x29 | 0x31 | 0x89 | 0xC1 | 0xC7 | 0x8D | 0xF7
         ) {
             if env
                 .backend
                 .mem
-                .read(VirtAddr(pc + 1), &mut peek, acc_fetch())
+                .read(VirtAddr(pc + off + 1), &mut peek, acc_fetch())
                 .is_err()
             {
                 return Outcome::Unimplemented {
@@ -159,7 +198,7 @@ pub fn run(env: &mut BareEnv, entry: u32, sys: &mut impl TrapHandler, limit: u64
             if env
                 .backend
                 .mem
-                .read(VirtAddr(pc + 2), &mut sib, acc_fetch())
+                .read(VirtAddr(pc + off + 2), &mut sib, acc_fetch())
                 .is_err()
             {
                 return Outcome::Unimplemented {
@@ -171,22 +210,33 @@ pub fn run(env: &mut BareEnv, entry: u32, sys: &mut impl TrapHandler, limit: u64
         } else {
             None
         };
-        let Some(nbytes) = fetch_len(head[0], second, third) else {
+        let Some(base) = fetch_len(head[0], second, third) else {
             return Outcome::Unimplemented {
                 eip: pc as u32,
                 word: head[0] as u128,
             };
         };
-        let mut bytes = [0u8; 7];
-        bytes[0] = head[0];
-        if nbytes >= 2 {
+        // REX.W の追随者は C7/8B/89/01/29/39/8D のみ。
+        if off == 1 && !matches!(head[0], 0xC7 | 0x8B | 0x89 | 0x01 | 0x29 | 0x39 | 0x8D) {
+            return Outcome::Unimplemented {
+                eip: pc as u32,
+                word: head[0] as u128,
+            };
+        }
+        let nbytes = base + off;
+        let mut bytes = [0u8; 8];
+        if off == 1 {
+            bytes[0] = 0x48;
+        }
+        bytes[off as usize] = head[0];
+        if base >= 2 {
             // 長さ判定用のぞき見を使う。なければ読み直す。
-            bytes[1] = second.unwrap_or(0);
+            bytes[off as usize + 1] = second.unwrap_or(0);
         }
-        if nbytes >= 3 {
-            bytes[2] = third.unwrap_or(0);
+        if base >= 3 {
+            bytes[off as usize + 2] = third.unwrap_or(0);
         }
-        for i in 1..nbytes {
+        for i in 1..base {
             if i == 1 && second.is_some() {
                 continue;
             }
@@ -197,7 +247,7 @@ pub fn run(env: &mut BareEnv, entry: u32, sys: &mut impl TrapHandler, limit: u64
             if env
                 .backend
                 .mem
-                .read(VirtAddr(pc + i), &mut b, acc_fetch())
+                .read(VirtAddr(pc + off + i), &mut b, acc_fetch())
                 .is_err()
             {
                 return Outcome::Unimplemented {
@@ -205,7 +255,7 @@ pub fn run(env: &mut BareEnv, entry: u32, sys: &mut impl TrapHandler, limit: u64
                     word: head[0] as u128,
                 };
             }
-            bytes[i as usize] = b[0];
+            bytes[(off + i) as usize] = b[0];
         }
         // ISADL の word 組立（opcode 上位詰め）に合わせる。
         let mut word: u128 = 0;
@@ -219,6 +269,29 @@ pub fn run(env: &mut BareEnv, entry: u32, sys: &mut impl TrapHandler, limit: u64
                 word,
             };
         };
+        // 64ビットでは絶対番地形は RIP 相対であり、絶対番地の意味論は使えない。
+        if is64
+            && matches!(
+                insn,
+                Insn::MovEaxAbs
+                    | Insn::MovAbsEax
+                    | Insn::LeaAbs
+                    | Insn::MovEaxSibS2a32
+                    | Insn::MovSibS2a32Eax
+                    | Insn::MovEaxSibS4a32
+                    | Insn::MovSibS4a32Eax
+                    | Insn::MovEaxSibS8a32
+                    | Insn::MovSibS8a32Eax
+                    | Insn::LeaSibS2a32
+                    | Insn::LeaSibS4a32
+                    | Insn::LeaSibS8a32
+            )
+        {
+            return Outcome::Unimplemented {
+                eip: pc as u32,
+                word,
+            };
+        }
         // imm/disp の取り出し。32ビット値は LE 実バイト列から復元する。
         let imm32 = || (word as u32).swap_bytes();
         let disp8 = || (word & 0xff) as u8 as i8;
@@ -226,7 +299,7 @@ pub fn run(env: &mut BareEnv, entry: u32, sys: &mut impl TrapHandler, limit: u64
         // 意味論が分岐を取ると backend.ctrl に Jump が残る（取らなければ
         // Fallthrough）。eip 等値での判定は自己ループで誤るため使わない。
         use polyisa_engine::interp::Ctrl;
-        let r = env.step(|b| dispatch(b, insn, eip, word, nbytes, imm32, disp8));
+        let r = env.step(|b| dispatch(b, insn, eip, word, nbytes, off, is64, imm32, disp8));
         match r {
             Ok(()) => match env.backend.ctrl {
                 Ctrl::Jump(_) => {}
@@ -264,24 +337,26 @@ pub fn run(env: &mut BareEnv, entry: u32, sys: &mut impl TrapHandler, limit: u64
     Outcome::StepLimit { eip: eip_of(env) }
 }
 
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 fn dispatch<B: Backend>(
     b: &mut B,
     insn: Insn,
     eip: u32,
     word: u128,
     nbytes: u64,
+    off: u64,
+    is64: bool,
     imm32: impl Fn() -> u32,
     disp8: impl Fn() -> i8,
 ) -> Result<(), B::Exit> {
     use polyisa_guest_x86::sem::Gpr;
     let disp32 = || imm32() as i32;
-    // ModRM register-direct の reg/rm 抽出。ModRM は先頭から2バイト目にあり、
+    // ModRM register-direct の reg/rm 抽出。ModRM は先頭から 2+off バイト目にあり、
     // word（opcode 上位詰め）内の位置は命令長で決まる。
-    let modrm = || ((word >> ((nbytes - 2) * 8)) & 0xff) as u8;
+    let modrm = || ((word >> ((nbytes - 2 - off) * 8)) & 0xff) as u8;
     let reg = || Gpr((modrm() >> 3) & 7);
     let rm = || Gpr(modrm() & 7);
-    match insn {
+    let r = match insn {
         Insn::Nop => sem::nop(b),
         Insn::IncEax => sem::inc_r32(b, Gpr(0)),
         Insn::IncEcx => sem::inc_r32(b, Gpr(1)),
@@ -408,7 +483,83 @@ fn dispatch<B: Backend>(
         Insn::MulRm32 => sem::mul_rm32(b),
         Insn::DivRm32 => sem::div_rm32(b, eip),
         Insn::IdivRm32 => sem::idiv_rm32(b, eip),
+        Insn::MovRm64Imm => sem::mov_rm64_imm(b, rm(), imm32()),
+        Insn::MovRm64 => sem::mov_rm64(b, reg(), rm()),
+        Insn::MovMr64 => sem::mov_mr64(b, rm(), reg()),
+        Insn::AddRm64 => sem::add_rm64(b, rm(), reg()),
+        Insn::SubRm64 => sem::sub_rm64(b, rm(), reg()),
+        Insn::CmpRm64 => sem::cmp_rm64(b, rm(), reg()),
+        Insn::LeaRip64 => sem::lea_rip64(b, reg(), eip as u64 + nbytes, disp32()),
+    };
+    if is64 {
+        // 64ビットでの32ビット書き込みは上位をゼロ拡張する。
+        let dst: Option<Gpr> = match insn {
+            Insn::IncEax
+            | Insn::DecEax
+            | Insn::AddEax
+            | Insn::MovEax
+            | Insn::SubEax
+            | Insn::AndEax
+            | Insn::OrEax
+            | Insn::XorImm
+            | Insn::ShlEax
+            | Insn::ShrEax
+            | Insn::MovEaxMem
+            | Insn::MovEaxMemnd
+            | Insn::MovEaxMemd32
+            | Insn::MovEaxSib
+            | Insn::MovEaxSibd
+            | Insn::MovEaxSibS2
+            | Insn::MovEaxSibS4
+            | Insn::MovEaxSibS8
+            | Insn::MovEaxSibS2d32
+            | Insn::MovEaxSibS4d32
+            | Insn::MovEaxSibS8d32
+            | Insn::MovEaxSibS2a32
+            | Insn::MovEaxSibS4a32
+            | Insn::MovEaxSibS8a32
+            | Insn::MovEaxSibS2nd
+            | Insn::MovEaxSibS4nd
+            | Insn::MovEaxSibS8nd
+            | Insn::PopEax => Some(Gpr(0)),
+            Insn::IncEcx | Insn::DecEcx | Insn::PopEcx => Some(Gpr(1)),
+            Insn::IncEdx | Insn::DecEdx | Insn::PopEdx => Some(Gpr(2)),
+            Insn::IncEbx | Insn::DecEbx | Insn::PopEbx => Some(Gpr(3)),
+            Insn::IncEsp | Insn::DecEsp | Insn::PopEsp => Some(Gpr(4)),
+            Insn::IncEbp | Insn::DecEbp | Insn::PopEbp => Some(Gpr(5)),
+            Insn::IncEsi | Insn::DecEsi | Insn::PopEsi => Some(Gpr(6)),
+            Insn::IncEdi | Insn::DecEdi | Insn::PopEdi => Some(Gpr(7)),
+            Insn::AddRm32
+            | Insn::SubRm32
+            | Insn::AndRm32
+            | Insn::OrRm32
+            | Insn::XorRm32
+            | Insn::MovMr32 => Some(rm()),
+            Insn::MovRm32 => Some(reg()),
+            Insn::LeaM8
+            | Insn::LeaM32
+            | Insn::LeaSib
+            | Insn::LeaSibd
+            | Insn::LeaSibS2
+            | Insn::LeaSibS4
+            | Insn::LeaSibS8
+            | Insn::LeaSibS2nd
+            | Insn::LeaSibS4nd
+            | Insn::LeaSibS8nd
+            | Insn::LeaSibS2d32
+            | Insn::LeaSibS4d32
+            | Insn::LeaSibS8d32 => Some(reg()),
+            _ => None,
+        };
+        if let Some(d) = dst {
+            sem::clear_hi(b, d);
+        }
+        if matches!(insn, Insn::MulRm32 | Insn::DivRm32 | Insn::IdivRm32) {
+            sem::clear_hi(b, Gpr(0));
+            sem::clear_hi(b, Gpr(2));
+        }
     }
+    r
 }
 
 /// ELF32 イメージを実行する。`run_elf` の x86 版であり、EM_386 の静的実行を
@@ -472,8 +623,75 @@ pub fn run_image_x86(
 /// ELF ファイルを実行する。`run_elf` の x86 版である。
 pub fn run_elf_x86(path: &str, argv: &[String]) -> Result<u64, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
-    let mut sys = CliX86::default();
+    let mut sys = CliLinux::i386();
     run_image_x86(&bytes, path, argv, &mut sys)
+}
+
+/// ELF64 イメージを実行する。EM_X86_64 の静的実行を受け持つ。
+/// 番号表は x86-64 Linux のものを使う。4GB 未満の配置を想定し、
+/// RIP 上位と 64ビットスタックは扱わない（静的・非PIE のみ）。
+pub fn run_image_x86_64(
+    bytes: &[u8],
+    prog: &str,
+    argv: &[String],
+    sys: &mut impl TrapHandler,
+) -> Result<u64, String> {
+    use polyisa_guest_x86::sem::Gpr;
+    use polyisa_mem::{PAGE_SIZE, Perms};
+
+    let ehdr = polyisa_loader::elf::parse_ehdr(bytes).map_err(|e| format!("ehdr: {e:?}"))?;
+    if !ehdr.little {
+        return Err("big-endian ELF は未対応".to_string());
+    }
+    // EM_X86_64=62。Ref: SRC-LINUX (7.3).
+    const EM_X86_64: u16 = 62;
+    if ehdr.machine != EM_X86_64 {
+        return Err(format!("未対応の e_machine: {}", ehdr.machine));
+    }
+    if ehdr.entry > u64::from(u32::MAX) {
+        return Err("64ビット entry は未対応".to_string());
+    }
+    let phdrs =
+        polyisa_loader::elf::parse_phdrs(bytes, &ehdr).map_err(|e| format!("phdrs: {e:?}"))?;
+    let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_x86::CpuState>());
+    polyisa_loader::elf::load_segments(bytes, &phdrs, &mut env.backend.mem)
+        .map_err(|e| format!("load: {e:?}"))?;
+    let top = 0x7fff_0000u64;
+    let mut arg_bytes = vec![prog.as_bytes().to_vec()];
+    for a in argv {
+        arg_bytes.push(a.as_bytes().to_vec());
+    }
+    let (img, sp) = polyisa_os_linux::build_initial_stack(top, &arg_bytes, &[], &[(6, 0x1000)]);
+    let base = sp & !(PAGE_SIZE - 1);
+    let end = top.next_multiple_of(PAGE_SIZE);
+    let count = (end - base) / PAGE_SIZE;
+    env.backend
+        .mem
+        .map(
+            polyisa_mem::VirtAddr(base),
+            count,
+            Perms(Perms::R.0 | Perms::W.0),
+        )
+        .map_err(|e| format!("stack map: {e:?}"))?;
+    env.backend
+        .mem
+        .write(polyisa_mem::VirtAddr(sp), &img)
+        .map_err(|e| format!("stack write: {e:?}"))?;
+    polyisa_guest_x86::sem::write64(&mut env.backend, Gpr(4), sp);
+    match run_mode(&mut env, ehdr.entry as u32, sys, 1_000_000, true) {
+        Outcome::Exit(code) => Ok(code as u64),
+        Outcome::Unimplemented { eip, word } => {
+            Err(format!("unimplemented at {eip:#x}: {word:#x}"))
+        }
+        Outcome::StepLimit { eip } => Err(format!("step limit at {eip:#x}")),
+    }
+}
+
+/// ELF64 ファイルを実行する。`run_elf_x86` の x86-64 版である。
+pub fn run_elf_x86_64(path: &str, argv: &[String]) -> Result<u64, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
+    let mut sys = CliLinux::x86_64();
+    run_image_x86_64(&bytes, path, argv, &mut sys)
 }
 
 /// ゲストの NUL 終端文字列を読む。上限を超えるか読めなければ None。
@@ -489,18 +707,39 @@ fn guest_c_string(env: &mut BareEnv, addr: u64) -> Option<String> {
     String::from_utf8(buf[..end].to_vec()).ok()
 }
 
-/// `cli run` の x86 用 ecall 処理。openat/read/write/close と
+/// `cli run` の Linux 用 ecall 処理。openat/read/write/close と
 /// exit/exit_group をホストに直結して受け、ほかは未対応として報告する。
+/// i386（`is64=false`）と x86-64（`is64=true`）で番号表と引数レジスタが変わる。
+/// x86-64 の引数は RDI/RSI/RDX（Gpr 7/6/2）、番号は RAX（Gpr 0）にある。
 ///
 /// 試作の合意事項：仮想カーネル・VFS・ゲストルートの適用は後の段階である。
 /// ここではホストのファイルに直接触る（裸実行の延長）。パスの隔離はしないので、
 /// 信頼できないゲストバイナリには使わないこと。絶対パスの O_RDONLY のみ受け付け、
 /// 1 回の転送は 64 KiB ずつに区切る。
 #[derive(Default)]
-pub struct CliX86 {
+pub struct CliLinux {
     reported: Vec<u64>,
     fds: Vec<Option<std::fs::File>>,
+    is64: bool,
 }
+
+impl CliLinux {
+    /// i386 用ハンドラ。
+    pub fn i386() -> Self {
+        Self::default()
+    }
+
+    /// x86-64 用ハンドラ。
+    pub fn x86_64() -> Self {
+        Self {
+            is64: true,
+            ..Self::default()
+        }
+    }
+}
+
+/// 旧名。`CliLinux` を使うこと。
+pub type CliX86 = CliLinux;
 
 /// i386 の openat の引数。dirfd が -100 (AT_FDCWD) のときだけ受け付ける。
 const AT_FDCWD_U32: u32 = 0xffff_ff9c;
@@ -532,23 +771,82 @@ fn data_access() -> polyisa_mem::Access {
     }
 }
 
-impl TrapHandler for CliX86 {
+/// 64ビットの負 errno（符号拡張する）。
+fn neg_errno64(n: u32) -> u64 {
+    (n as i32) as i64 as u64
+}
+
+fn get64(env: &mut BareEnv, r: polyisa_guest_x86::sem::Gpr) -> u64 {
+    polyisa_guest_x86::sem::read64(&mut env.backend, r)
+}
+
+fn set64(env: &mut BareEnv, r: polyisa_guest_x86::sem::Gpr, v: u64) {
+    polyisa_guest_x86::sem::write64(&mut env.backend, r, v);
+}
+
+impl TrapHandler for CliLinux {
     fn handle_trap(&mut self, env: &mut BareEnv, code: u32) -> TrapOutcome {
         use polyisa_guest_x86::sem::Gpr;
-        // INT 0x80 (code 0x80) と SYSCALL (code 0) のどちらも番号は EAX にある。
+        // INT 0x80 (code 0x80) と SYSCALL (code 0) のどちらも番号は RAX/EAX にある。
         let _ = code;
-        let nr = env.backend.get(Gpr(0).state()) as u64;
-        if nr == polyisa_os_linux::i386::OPENAT {
-            let dirfd = env.backend.get(Gpr(3).state());
-            let path_addr = env.backend.get(Gpr(1).state()) as u64;
-            let flags = env.backend.get(Gpr(2).state());
-            if dirfd != AT_FDCWD_U32 {
-                env.backend.set(Gpr(0).state(), neg_errno(EINVAL));
+        // 引数レジスタ：i386 は EBX/ECX/EDX、x86-64 は RDI/RSI/RDX。
+        let (r_a, r_b, r_c) = if self.is64 {
+            (Gpr(7), Gpr(6), Gpr(2))
+        } else {
+            (Gpr(3), Gpr(1), Gpr(2))
+        };
+        let (n_openat, n_read, n_close, n_write, n_exit, n_exit_group) = if self.is64 {
+            use polyisa_os_linux::x86_64 as abi;
+            (
+                abi::OPENAT,
+                abi::READ,
+                abi::CLOSE,
+                abi::WRITE,
+                abi::EXIT,
+                abi::EXIT_GROUP,
+            )
+        } else {
+            use polyisa_os_linux::i386 as abi;
+            (
+                abi::OPENAT,
+                abi::READ,
+                abi::CLOSE,
+                abi::WRITE,
+                abi::EXIT,
+                abi::EXIT_GROUP,
+            )
+        };
+        let guest_abi = if self.is64 {
+            polyisa_os_linux::GuestAbi::X86_64Linux
+        } else {
+            polyisa_os_linux::GuestAbi::I386Linux
+        };
+        // dirfd の AT_FDCWD：i386 は 32ビット、x86-64 は 64ビットの -100。
+        let at_fdcwd: u64 = if self.is64 {
+            0xffff_ffff_ffff_ff9c
+        } else {
+            u64::from(AT_FDCWD_U32)
+        };
+        // 戻り値の負 errno：x86-64 は 64ビット符号拡張、i386 は 32ビット。
+        let neg = |n: u32| -> u64 {
+            if self.is64 {
+                neg_errno64(n)
+            } else {
+                u64::from(neg_errno(n))
+            }
+        };
+        let nr = get64(env, Gpr(0));
+        if nr == n_openat {
+            let dirfd = get64(env, r_a);
+            let path_addr = get64(env, r_b);
+            let flags = get64(env, r_c) as u32;
+            if dirfd != at_fdcwd {
+                set64(env, Gpr(0), neg(EINVAL));
                 return TrapOutcome::Handled;
             }
             // O_RDONLY のみ受け付ける（O_CLOEXEC は無視する）。
             if flags & !O_CLOEXEC != 0 {
-                env.backend.set(Gpr(0).state(), neg_errno(EINVAL));
+                set64(env, Gpr(0), neg(EINVAL));
                 return TrapOutcome::Handled;
             }
             let path = match guest_c_string(env, path_addr) {
@@ -556,14 +854,13 @@ impl TrapHandler for CliX86 {
                 None => return TrapOutcome::Unimplemented,
             };
             if !path.starts_with('/') {
-                env.backend.set(Gpr(0).state(), neg_errno(EINVAL));
+                set64(env, Gpr(0), neg(EINVAL));
                 return TrapOutcome::Handled;
             }
             return match std::fs::File::open(&path) {
                 Ok(f) => {
                     self.fds.push(Some(f));
-                    env.backend
-                        .set(Gpr(0).state(), (3 + self.fds.len() - 1) as u32);
+                    set64(env, Gpr(0), (3 + self.fds.len() - 1) as u64);
                     TrapOutcome::Handled
                 }
                 Err(e) => {
@@ -572,29 +869,29 @@ impl TrapHandler for CliX86 {
                         std::io::ErrorKind::PermissionDenied => EACCES,
                         _ => EINVAL,
                     };
-                    env.backend.set(Gpr(0).state(), neg_errno(no));
+                    set64(env, Gpr(0), neg(no));
                     TrapOutcome::Handled
                 }
             };
         }
-        if nr == polyisa_os_linux::i386::READ {
-            let fd = env.backend.get(Gpr(3).state());
-            let buf = env.backend.get(Gpr(1).state()) as u64;
-            let mut left = env.backend.get(Gpr(2).state()) as usize;
+        if nr == n_read {
+            let fd = get64(env, r_a) as u32;
+            let buf = get64(env, r_b);
+            let mut left = get64(env, r_c);
             let slot = fd.wrapping_sub(3) as usize;
             let Some(slot) = self.fds.get_mut(slot).and_then(|f| f.as_mut()) else {
                 // fd 0 (stdin) は空読みとして 0 を返す。
                 if fd == 0 {
-                    env.backend.set(Gpr(0).state(), 0);
+                    set64(env, Gpr(0), 0);
                     return TrapOutcome::Handled;
                 }
-                env.backend.set(Gpr(0).state(), neg_errno(EBADF));
+                set64(env, Gpr(0), neg(EBADF));
                 return TrapOutcome::Handled;
             };
-            let mut done = 0usize;
+            let mut done = 0u64;
             let mut chunk = vec![0u8; IO_CHUNK];
             while left > 0 {
-                let take = left.min(IO_CHUNK);
+                let take = left.min(IO_CHUNK as u64) as usize;
                 let n = match std::io::Read::read(slot, &mut chunk[..take]) {
                     Ok(0) => break,
                     Ok(n) => n,
@@ -603,55 +900,51 @@ impl TrapHandler for CliX86 {
                 if env
                     .backend
                     .mem
-                    .write(VirtAddr(buf + done as u64), &chunk[..n])
+                    .write(VirtAddr(buf + done), &chunk[..n])
                     .is_err()
                 {
                     return TrapOutcome::Unimplemented;
                 }
-                done += n;
-                left -= n;
+                done += n as u64;
+                left -= n as u64;
                 if n < take {
                     break;
                 }
             }
-            env.backend.set(Gpr(0).state(), done as u32);
+            set64(env, Gpr(0), done);
             return TrapOutcome::Handled;
         }
-        if nr == polyisa_os_linux::i386::CLOSE {
-            let fd = env.backend.get(Gpr(3).state());
+        if nr == n_close {
+            let fd = get64(env, r_a) as u32;
             let slot = fd.wrapping_sub(3) as usize;
             return match self.fds.get_mut(slot) {
                 Some(f) if f.is_some() => {
                     *f = None;
-                    env.backend.set(Gpr(0).state(), 0);
+                    set64(env, Gpr(0), 0);
                     TrapOutcome::Handled
                 }
                 _ => {
-                    env.backend.set(Gpr(0).state(), neg_errno(EBADF));
+                    set64(env, Gpr(0), neg(EBADF));
                     TrapOutcome::Handled
                 }
             };
         }
-        if nr == polyisa_os_linux::i386::WRITE {
-            let fd = env.backend.get(Gpr(3).state());
-            let buf = env.backend.get(Gpr(1).state()) as u64;
-            let mut left = env.backend.get(Gpr(2).state()) as usize;
+        if nr == n_write {
+            let fd = get64(env, r_a) as u32;
+            let buf = get64(env, r_b);
+            let mut left = get64(env, r_c);
             if fd != 1 && fd != 2 {
-                env.backend.set(Gpr(0).state(), neg_errno(EBADF));
+                set64(env, Gpr(0), neg(EBADF));
                 return TrapOutcome::Handled;
             }
-            let mut done = 0usize;
+            let mut done = 0u64;
             let mut chunk = vec![0u8; IO_CHUNK];
             while left > 0 {
-                let take = left.min(IO_CHUNK);
+                let take = left.min(IO_CHUNK as u64) as usize;
                 if env
                     .backend
                     .mem
-                    .read(
-                        VirtAddr(buf + done as u64),
-                        &mut chunk[..take],
-                        data_access(),
-                    )
+                    .read(VirtAddr(buf + done), &mut chunk[..take], data_access())
                     .is_err()
                 {
                     return TrapOutcome::Unimplemented;
@@ -660,21 +953,21 @@ impl TrapHandler for CliX86 {
                     1 => std::io::Write::write(&mut std::io::stdout(), &chunk[..take]).unwrap_or(0),
                     _ => std::io::Write::write(&mut std::io::stderr(), &chunk[..take]).unwrap_or(0),
                 };
-                done += n;
-                left -= n;
+                done += n as u64;
+                left -= n as u64;
                 if n < take {
                     break;
                 }
             }
-            env.backend.set(Gpr(0).state(), done as u32);
+            set64(env, Gpr(0), done);
             return TrapOutcome::Handled;
         }
-        if nr == polyisa_os_linux::i386::EXIT || nr == polyisa_os_linux::i386::EXIT_GROUP {
-            return TrapOutcome::Exit(env.backend.get(Gpr(3).state()));
+        if nr == n_exit || nr == n_exit_group {
+            return TrapOutcome::Exit(get64(env, r_a) as u32);
         }
         if !self.reported.contains(&nr) {
             self.reported.push(nr);
-            let name = polyisa_os_linux::syscall_name(polyisa_os_linux::GuestAbi::I386Linux, nr);
+            let name = polyisa_os_linux::syscall_name(guest_abi, nr);
             eprintln!("run: unhandled syscall {nr} ({})", name.unwrap_or("?"));
         }
         TrapOutcome::Unimplemented

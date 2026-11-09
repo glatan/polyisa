@@ -10,7 +10,7 @@
 //! Ref: SPEC-X86-INTEL-SDM (v093).
 
 use polyisa_mem::{Access, AccessKind, Align, Endian};
-use polyisa_sem::{Backend, Cmp, ExceptionKind, Flow, GuestException, StateRef, W32, W64};
+use polyisa_sem::{Backend, Cmp, ExceptionKind, Flow, GuestException, StateRef, W32, W64, Width};
 
 use super::CpuState;
 
@@ -40,6 +40,38 @@ pub fn eflags_ref() -> StateRef<W32> {
     StateRef::<W32>::from_offset(core::mem::offset_of!(CpuState, eflags))
 }
 
+/// 汎用レジスタの上位32ビットを指す（x86-64 用）。
+pub fn hi_ref(r: Gpr) -> StateRef<W32> {
+    StateRef::<W32>::from_offset(core::mem::offset_of!(CpuState, h) + (r.0 as usize) * 4)
+}
+
+/// 64ビットレジスタを読む（上位 h と下位 g を結合する）。
+pub fn read64<B: Backend>(b: &mut B, r: Gpr) -> B::V<W64> {
+    let lo32 = read(b, r);
+    let lo = b.zext::<W32, W64>(lo32);
+    let hi32 = b.get(hi_ref(r));
+    let hi = b.zext::<W32, W64>(hi32);
+    let n = b.konst::<W64>(32);
+    let hi_sh = b.shl::<W64>(hi, n);
+    b.or::<W64>(hi_sh, lo)
+}
+
+/// 64ビットレジスタに書く（上位 h と下位 g に分割する）。
+pub fn write64<B: Backend>(b: &mut B, rd: Gpr, v: B::V<W64>) {
+    let lo: B::V<W32> = b.trunc::<W64, W32>(v);
+    write(b, rd, lo);
+    let n = b.konst::<W64>(32);
+    let hi64 = b.shr_l::<W64>(v, n);
+    let hi: B::V<W32> = b.trunc::<W64, W32>(hi64);
+    b.set(hi_ref(rd), hi);
+}
+
+/// 32ビット書き込みのゼロ拡張（x86-64 で下位32ビット書き込みは上位を消す）。
+pub fn clear_hi<B: Backend>(b: &mut B, rd: Gpr) {
+    let zero = b.konst::<W32>(0);
+    b.set(hi_ref(rd), zero);
+}
+
 /// EFLAGS のビット位置（i386）。
 const FLAG_CF: u32 = 0x1;
 const FLAG_PF: u32 = 0x4;
@@ -60,29 +92,29 @@ fn pick<B: Backend>(b: &mut B, c: B::B, bit: u32) -> B::V<W32> {
 }
 
 /// 低8ビットの偶パリティで PF bit を作る。
-fn pf_bit<B: Backend>(b: &mut B, v: B::V<W32>) -> B::V<W32> {
-    let ff = b.konst::<W32>(0xff);
-    let mut x = b.and::<W32>(v, ff);
+fn pf_bit<B: Backend, W: Width>(b: &mut B, v: B::V<W>) -> B::V<W32> {
+    let ff = b.konst::<W>(W::from_u128(0xff));
+    let mut x = b.and::<W>(v, ff);
     for s in [4u32, 2, 1] {
-        let n = b.konst::<W32>(s);
-        let y = b.shr_l::<W32>(x, n);
-        x = b.xor::<W32>(x, y);
+        let n = b.konst::<W>(W::from_u128(s as u128));
+        let y = b.shr_l::<W>(x, n);
+        x = b.xor::<W>(x, y);
     }
-    let one = b.konst::<W32>(1);
-    let x1 = b.and::<W32>(x, one);
-    let zero = b.konst::<W32>(0);
-    let even = b.cmp::<W32>(Cmp::Eq, x1, zero);
+    let one = b.konst::<W>(W::from_u128(1));
+    let x1 = b.and::<W>(x, one);
+    let zero = b.konst::<W>(W::from_u128(0));
+    let even = b.cmp::<W>(Cmp::Eq, x1, zero);
     pick(b, even, FLAG_PF)
 }
 
 /// 結果値から SF/ZF/PF の 3 ビット分を作る。
-fn szp_bits<B: Backend>(b: &mut B, v: B::V<W32>) -> B::V<W32> {
-    let top_mask = b.konst::<W32>(0x8000_0000);
-    let top = b.and::<W32>(v, top_mask);
-    let zero = b.konst::<W32>(0);
-    let sf_take = b.cmp::<W32>(Cmp::Ne, top, zero);
+fn szp_bits<B: Backend, W: Width>(b: &mut B, v: B::V<W>) -> B::V<W32> {
+    let top_mask = b.konst::<W>(W::from_u128(1u128 << (W::BITS - 1)));
+    let top = b.and::<W>(v, top_mask);
+    let zero = b.konst::<W>(W::from_u128(0));
+    let sf_take = b.cmp::<W>(Cmp::Ne, top, zero);
     let sf = pick(b, sf_take, FLAG_SF);
-    let zf_take = b.cmp::<W32>(Cmp::Eq, v, zero);
+    let zf_take = b.cmp::<W>(Cmp::Eq, v, zero);
     let zf = pick(b, zf_take, FLAG_ZF);
     let pf = pf_bit(b, v);
     let t = b.or::<W32>(sf, zf);
@@ -90,28 +122,28 @@ fn szp_bits<B: Backend>(b: &mut B, v: B::V<W32>) -> B::V<W32> {
 }
 
 /// (x OP y) の補助キャリ（bit4）から AF bit を作る。ADD/SUB/CMP 共通式。
-fn af_bit<B: Backend>(b: &mut B, x: B::V<W32>, y: B::V<W32>, v: B::V<W32>) -> B::V<W32> {
-    let t = b.xor::<W32>(x, y);
-    let u = b.xor::<W32>(t, v);
-    let af_mask = b.konst::<W32>(FLAG_AF);
-    let nib = b.and::<W32>(u, af_mask);
-    let zero = b.konst::<W32>(0);
-    let take = b.cmp::<W32>(Cmp::Ne, nib, zero);
+fn af_bit<B: Backend, W: Width>(b: &mut B, x: B::V<W>, y: B::V<W>, v: B::V<W>) -> B::V<W32> {
+    let t = b.xor::<W>(x, y);
+    let u = b.xor::<W>(t, v);
+    let af_mask = b.konst::<W>(W::from_u128(FLAG_AF as u128));
+    let nib = b.and::<W>(u, af_mask);
+    let zero = b.konst::<W>(W::from_u128(0));
+    let take = b.cmp::<W>(Cmp::Ne, nib, zero);
     pick(b, take, FLAG_AF)
 }
 
 /// ADD 系の 6 旗を更新する。CF=繰り上がり、OF=符号あふれ。
-fn update_add_flags<B: Backend>(b: &mut B, x: B::V<W32>, y: B::V<W32>, v: B::V<W32>) {
+fn update_add_flags<B: Backend, W: Width>(b: &mut B, x: B::V<W>, y: B::V<W>, v: B::V<W>) {
     let old: B::V<W32> = b.get(eflags_ref());
-    let zero = b.konst::<W32>(0);
-    let cf_take = b.cmp::<W32>(Cmp::LtU, v, x);
+    let zero = b.konst::<W>(W::from_u128(0));
+    let cf_take = b.cmp::<W>(Cmp::LtU, v, x);
     let cf = pick(b, cf_take, FLAG_CF);
-    let a = b.xor::<W32>(x, v);
-    let c = b.xor::<W32>(y, v);
-    let s = b.and::<W32>(a, c);
-    let n31 = b.konst::<W32>(31);
-    let s31 = b.shr_l::<W32>(s, n31);
-    let of_take = b.cmp::<W32>(Cmp::Ne, s31, zero);
+    let a = b.xor::<W>(x, v);
+    let c = b.xor::<W>(y, v);
+    let s = b.and::<W>(a, c);
+    let n_top = b.konst::<W>(W::from_u128((W::BITS - 1) as u128));
+    let s_top = b.shr_l::<W>(s, n_top);
+    let of_take = b.cmp::<W>(Cmp::Ne, s_top, zero);
     let of = pick(b, of_take, FLAG_OF);
     let af = af_bit(b, x, y, v);
     let szp = szp_bits(b, v);
@@ -125,17 +157,17 @@ fn update_add_flags<B: Backend>(b: &mut B, x: B::V<W32>, y: B::V<W32>, v: B::V<W
 }
 
 /// SUB/CMP 系の 6 旗を更新する。CF=借り、OF=符号あふれ。
-fn update_sub_flags<B: Backend>(b: &mut B, x: B::V<W32>, y: B::V<W32>, v: B::V<W32>) {
+fn update_sub_flags<B: Backend, W: Width>(b: &mut B, x: B::V<W>, y: B::V<W>, v: B::V<W>) {
     let old: B::V<W32> = b.get(eflags_ref());
-    let zero = b.konst::<W32>(0);
-    let cf_take = b.cmp::<W32>(Cmp::LtU, x, y);
+    let zero = b.konst::<W>(W::from_u128(0));
+    let cf_take = b.cmp::<W>(Cmp::LtU, x, y);
     let cf = pick(b, cf_take, FLAG_CF);
-    let a = b.xor::<W32>(x, y);
-    let c = b.xor::<W32>(x, v);
-    let s = b.and::<W32>(a, c);
-    let n31 = b.konst::<W32>(31);
-    let s31 = b.shr_l::<W32>(s, n31);
-    let of_take = b.cmp::<W32>(Cmp::Ne, s31, zero);
+    let a = b.xor::<W>(x, y);
+    let c = b.xor::<W>(x, v);
+    let s = b.and::<W>(a, c);
+    let n_top = b.konst::<W>(W::from_u128((W::BITS - 1) as u128));
+    let s_top = b.shr_l::<W>(s, n_top);
+    let of_take = b.cmp::<W>(Cmp::Ne, s_top, zero);
     let of = pick(b, of_take, FLAG_OF);
     let af = af_bit(b, x, y, v);
     let szp = szp_bits(b, v);
@@ -149,7 +181,7 @@ fn update_sub_flags<B: Backend>(b: &mut B, x: B::V<W32>, y: B::V<W32>, v: B::V<W
 }
 
 /// 論理演算の 5 旗を更新する（CF=0、OF=0、AF は不定のため保存）。
-fn update_logic_flags<B: Backend>(b: &mut B, v: B::V<W32>) {
+fn update_logic_flags<B: Backend, W: Width>(b: &mut B, v: B::V<W>) {
     let old: B::V<W32> = b.get(eflags_ref());
     let szp = szp_bits(b, v);
     let clear_mask = b.konst::<W32>(!FLAG_OSZPC);
@@ -1194,6 +1226,66 @@ pub fn xor_rm32<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
 pub fn mov_mr32<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
     let v = read(b, src);
     write(b, dst, v);
+    Ok(())
+}
+
+/// MOV r/m64, imm32 (REX.W + C7 /0)。imm32 は符号拡張する。
+pub fn mov_rm64_imm<B: Backend>(b: &mut B, dst: Gpr, imm: u32) -> Flow<B> {
+    let y = b.konst::<W32>(imm);
+    let v = b.sext::<W32, W64>(y);
+    write64(b, dst, v);
+    Ok(())
+}
+
+/// MOV r64, r/m64 (REX.W + 8B /r)。方向は dst=reg、src=rm。
+pub fn mov_rm64<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
+    let v = read64(b, src);
+    write64(b, dst, v);
+    Ok(())
+}
+
+/// MOV r/m64, r64 (REX.W + 89 /r)。方向は dst=rm、src=reg。
+pub fn mov_mr64<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
+    let v = read64(b, src);
+    write64(b, dst, v);
+    Ok(())
+}
+
+/// ADD r/m64, r64 (REX.W + 01 /r)。6 旗を更新する。
+pub fn add_rm64<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
+    let x = read64(b, dst);
+    let y = read64(b, src);
+    let v = b.add::<W64>(x, y);
+    write64(b, dst, v);
+    update_add_flags(b, x, y, v);
+    Ok(())
+}
+
+/// SUB r/m64, r64 (REX.W + 29 /r)。6 旗を更新する。
+pub fn sub_rm64<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
+    let x = read64(b, dst);
+    let y = read64(b, src);
+    let v = b.sub::<W64>(x, y);
+    write64(b, dst, v);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
+/// CMP r/m64, r64 (REX.W + 39 /r)。dst は変えず 6 旗を更新する。
+pub fn cmp_rm64<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
+    let x = read64(b, dst);
+    let y = read64(b, src);
+    let v = b.sub::<W64>(x, y);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
+/// LEA r64, [RIP+disp32] (REX.W + 8D 05)。RIP は次命令先頭を指す。
+pub fn lea_rip64<B: Backend>(b: &mut B, dst: Gpr, next_rip: u64, disp: i32) -> Flow<B> {
+    let base = b.konst::<W64>(next_rip);
+    let d = b.konst::<W64>(disp as i64 as u64);
+    let addr = b.add::<W64>(base, d);
+    write64(b, dst, addr);
     Ok(())
 }
 
