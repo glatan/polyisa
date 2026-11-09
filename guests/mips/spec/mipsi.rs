@@ -2,9 +2,11 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // MIPS I 試作の ISADL モデル（段階3の最小）。
 //
-// MIPS I の整数9件に絞る。遅延スロットは pc/npc で表す。
+// MIPS I の整数17件に絞る。遅延スロットは pc/npc で表す。
 // ADD/SUB（trap あり）は扱わず WRAP する ADDU/SUBU のみ持つ。trap は本格実装で足す。
-// R6 の割り当て直し・microMIPS・FPU・HI/LO・ロード遅延・branch likely・LE切替は本格実装で足す。
+// R6 の割り当て直し・microMIPS・FPU・ロード遅延・branch likely・LE切替は本格実装で足す。
+// HI/LO と乗除算は本格相当の最小形を持つ（ div-by-zero は UNPREDICTABLE のため
+// HI/LO 不変とし、挙動パラメータ化は本格実装で足す）。
 // FI は lw/sw/beq を一形式に統合する試作の簡略化。imm16/target/shamt の切り出しは本格実装で足す。
 // 出典は SPEC-MIPS-IV Rev 3.2 (1995-09) である。
 // Ref: SPEC-MIPS-IV (Rev 3.2).
@@ -17,7 +19,7 @@ use polyisa_isadl::pred::Pred;
 pub fn build_model() -> polyisa_isadl::Model {
     let mut m = polyisa_isadl::Model::new();
 
-    for class in ["alu", "load", "store", "branch", "jump"] {
+    for class in ["alu", "load", "store", "branch", "jump", "mult", "div"] {
         m.timing_classes.push(class.to_string());
     }
 
@@ -92,6 +94,14 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("and", "FR", "000000 ..... ..... ..... ..... 100100", "and {rd}, {rs}, {rt}", "alu"),
         ("or", "FR", "000000 ..... ..... ..... ..... 100101", "or {rd}, {rs}, {rt}", "alu"),
         ("sll", "FR", "000000 00000 ..... ..... ..... 000000", "sll {rd}, {rt}, {shamt}", "alu"),
+        ("mult", "FR", "000000 ..... ..... ..... ..... 011000", "mult {rs}, {rt}", "mult"),
+        ("multu", "FR", "000000 ..... ..... ..... ..... 011001", "multu {rs}, {rt}", "mult"),
+        ("div", "FR", "000000 ..... ..... ..... ..... 011010", "div {rs}, {rt}", "div"),
+        ("divu", "FR", "000000 ..... ..... ..... ..... 011011", "divu {rs}, {rt}", "div"),
+        ("mfhi", "FR", "000000 00000 00000 ..... 00000 010000", "mfhi {rd}", "alu"),
+        ("mflo", "FR", "000000 00000 00000 ..... 00000 010010", "mflo {rd}", "alu"),
+        ("mthi", "FR", "000000 ..... 00000 00000 00000 010001", "mthi {rs}", "alu"),
+        ("mtlo", "FR", "000000 ..... 00000 00000 00000 010011", "mtlo {rs}", "alu"),
         ("lw", "FI", "100011 ..... ..... ................", "lw {rt}, {imm}({rs})", "load"),
         ("sw", "FI", "101011 ..... ..... ................", "sw {rt}, {imm}({rs})", "store"),
         ("beq", "FI", "000100 ..... ..... ................", "beq {rs}, {rt}, {imm}", "branch"),

@@ -94,6 +94,55 @@ fn delay_slot_executes_before_branch() {
 }
 
 #[test]
+fn mult_div_hi_lo() {
+    let mut env = env();
+    // 7 * 6 = 42。HI=0、LO=42。
+    env.backend.set(Gpr(1).state(), 7);
+    env.backend.set(Gpr(2).state(), 6);
+    env.step(|b| sem::mult(b, Gpr(1), Gpr(2))).unwrap();
+    env.step(|b| sem::mfhi(b, Gpr(3))).unwrap();
+    env.step(|b| sem::mflo(b, Gpr(4))).unwrap();
+    assert_eq!(g(&mut env, 3), 0);
+    assert_eq!(g(&mut env, 4), 42);
+    // 符号付き: -2 * 6 = -12。HI=0xffffffff、LO=0xfffffff4。
+    env.backend.set(Gpr(1).state(), 0xffff_ffff_ffff_fffe);
+    env.step(|b| sem::mult(b, Gpr(1), Gpr(2))).unwrap();
+    env.step(|b| sem::mfhi(b, Gpr(3))).unwrap();
+    env.step(|b| sem::mflo(b, Gpr(4))).unwrap();
+    assert_eq!(g(&mut env, 3), 0xffff_ffff);
+    assert_eq!(g(&mut env, 4), 0xffff_fff4);
+    // DIV: 42 / 6 = 7 余り 0。
+    env.backend.set(Gpr(5).state(), 42);
+    env.backend.set(Gpr(6).state(), 6);
+    env.step(|b| sem::div(b, Gpr(5), Gpr(6))).unwrap();
+    env.step(|b| sem::mflo(b, Gpr(7))).unwrap();
+    env.step(|b| sem::mfhi(b, Gpr(8))).unwrap();
+    assert_eq!(g(&mut env, 7), 7);
+    assert_eq!(g(&mut env, 8), 0);
+    // 0 除算は HI/LO 不変。
+    env.step(|b| sem::div(b, Gpr(5), Gpr(0))).unwrap();
+    env.step(|b| sem::mflo(b, Gpr(7))).unwrap();
+    env.step(|b| sem::mfhi(b, Gpr(8))).unwrap();
+    assert_eq!(g(&mut env, 7), 7);
+    assert_eq!(g(&mut env, 8), 0);
+    // DIVU: 0xffffffff / 2 = 0x7fffffff 余り 1。
+    env.backend.set(Gpr(9).state(), 0xffff_ffff);
+    env.backend.set(Gpr(10).state(), 2);
+    env.step(|b| sem::divu(b, Gpr(9), Gpr(10))).unwrap();
+    env.step(|b| sem::mflo(b, Gpr(11))).unwrap();
+    env.step(|b| sem::mfhi(b, Gpr(12))).unwrap();
+    assert_eq!(g(&mut env, 11), 0x7fff_ffff);
+    assert_eq!(g(&mut env, 12), 1);
+    // MTHI/MTLO/MFHI/MFLO の往復。
+    env.step(|b| sem::mthi(b, Gpr(9))).unwrap();
+    env.step(|b| sem::mtlo(b, Gpr(10))).unwrap();
+    env.step(|b| sem::mfhi(b, Gpr(13))).unwrap();
+    env.step(|b| sem::mflo(b, Gpr(14))).unwrap();
+    assert_eq!(g(&mut env, 13), 0xffff_ffff);
+    assert_eq!(g(&mut env, 14), 2);
+}
+
+#[test]
 fn jump_defers_one_slot() {
     let mut env = env();
     env.backend.set(sem::pc_ref(), 0x1000);
