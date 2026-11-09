@@ -449,6 +449,15 @@ pub fn cmp_rm8_imm_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8, imm: u8) -> 
     Ok(())
 }
 
+/// MOV r/m8,imm8 [base+disp8] (C6 /0 mod=01、SIBなし)。メモリに1バイト書く.
+pub fn mov_rm8_imm_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8, imm: u8) -> Flow<B> {
+    use polyisa_sem::W8;
+    let addr = eff_addr(b, base, disp);
+    let v = b.konst::<W8>(imm);
+    b.store::<W8>(addr, v, DATA_WRITE)?;
+    Ok(())
+}
+
 /// TEST EAX, EAX。AND 結果で 5 旗を更新する（CF=0、OF=0）。
 /// EAX 自身は変えない。
 pub fn test_eax<B: Backend>(b: &mut B) -> Flow<B> {

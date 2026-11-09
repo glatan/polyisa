@@ -2266,3 +2266,27 @@ fn cmovae_r64_moves_when_no_carry() {
     env.step(|b| sem::cmovae_r64(b, Gpr(0), Gpr(8))).unwrap();
     assert_eq!(env.backend.get(Gpr(0).state()), 2);
 }
+
+#[test]
+fn mov_rm8_imm_mem8_stores_byte() {
+    // MOVB $1,0x68(%RDI) (mod=01): [0x168]=1.
+    let mut env = env();
+    env.map_rw(0, 1).unwrap();
+    env.backend.set(Gpr(7).state(), 0x100);
+    env.step(|b| sem::mov_rm8_imm_mem8(b, Gpr(7), 0x68, 1))
+        .unwrap();
+    let mut back = [0u8; 1];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x168),
+            &mut back,
+            Access {
+                endian: Endian::Le,
+                align: Align::Unaligned,
+                kind: AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(back, [1u8]);
+}

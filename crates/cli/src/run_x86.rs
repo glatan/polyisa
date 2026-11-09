@@ -267,6 +267,26 @@ fn fetch_len(
                 )
             }
         }
+        // C6 /0 (MOV r/m8,imm8)。reg-direct 3B、mod=01 4B。SIB は未対応.
+        0xC6 => {
+            let s = second?;
+            let md = s >> 6;
+            let reg = (s >> 3) & 7;
+            let rm = s & 7;
+            if reg != 0 {
+                return None;
+            }
+            if md == 3 {
+                return Some(3);
+            }
+            if rm == 4 {
+                return None;
+            }
+            if md == 1 {
+                return Some(4);
+            }
+            None
+        }
         // C7 /0 (MOV r/m,imm32 系)。SIB mod=00 は未対応。
         // has66 (66 C7) は imm16 のため 2B 短くなる.
         0xC7 => {
@@ -527,6 +547,7 @@ pub fn run_mode(
                 | 0xF7
                 | 0xF6
                 | 0x80
+                | 0xC6
         ) {
             if env
                 .backend
@@ -632,6 +653,7 @@ pub fn run_mode(
                     | 0xF7
                     | 0xF6
                     | 0x80
+                    | 0xC6
                     | 0xC1
                     | 0x05
                     | 0x2D
@@ -1159,6 +1181,12 @@ fn dispatch<B: Backend>(
             let d8 = ((word >> 8) & 0xff) as u8 as i8;
             let imm = (word & 0xff) as u8;
             sem::cmp_rm8_imm_mem8(b, rm(), d8, imm)
+        }
+        Insn::MovRm8ImmMem8 => {
+            // C6 /0 mod=01 [base+disp8],imm8 (32b)。disp は (word>>8) 下位8、imm は最下位8.
+            let d8 = ((word >> 8) & 0xff) as u8 as i8;
+            let imm = (word & 0xff) as u8;
+            sem::mov_rm8_imm_mem8(b, rm(), d8, imm)
         }
         Insn::TestM8ImmRip => {
             let disp = ((word >> 8) as u32).swap_bytes() as i32;

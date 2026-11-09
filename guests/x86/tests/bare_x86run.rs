@@ -848,3 +848,32 @@ fn run_cmovae_reg_direct() {
     let out = run_x86::run(&mut env, 0x1000, &mut sys, 100);
     assert_eq!(out, Outcome::Exit(2));
 }
+
+#[test]
+fn run_movb_mem8_disp8() {
+    // run 経由で C6 /0 mod=01 [base+disp8],imm8 を回す。
+    // RDI=0x1500 として MOVB $0x77,0x69(%RDI) で [0x1569]=0x77 を書き、
+    // CMPB $0x77,0x69(%RDI) + je で検証して exit(0x77)。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    let prog: &[u8] = &[
+        0xB8, 0x00, 0x15, 0x00, 0x00, // mov eax,0x1500
+        0x50, // push eax
+        0x5F, // pop edi (edi=0x1500)
+        0xC6, 0x47, 0x69, 0x77, // movb $0x77,0x69(%rdi)
+        0x80, 0x7F, 0x69, 0x77, // cmpb $0x77,0x69(%rdi)
+        0x74, 0x07, // je +7
+        0xBB, 0x01, 0x00, 0x00, 0x00, // mov ebx,1
+        0xEB, 0x05, // jmp +5
+        0xBB, 0x77, 0x00, 0x00, 0x00, // mov ebx,0x77
+        0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax,1 (exit)
+        0xCD, 0x80, // int 0x80 -> exit(0x77)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = ExitOne;
+    let out = run_x86::run(&mut env, 0x1000, &mut sys, 100);
+    assert_eq!(out, Outcome::Exit(0x77));
+}
