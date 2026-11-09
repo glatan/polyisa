@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! x86 最小のゲスト ISA。段階4の最小であり、可変長デコードを確かめる。
 //!
-//! i386 の EAX/ECX/EBX/EBP/ESP 系18件のみ持つ。ModRM の SIB/disp32/絶対番地と Rust フック・
-//! EFLAGS・64ビット・x87・SSE・セグメントは本格実装で足す。ModRM mod=01+disp8 のみ持つ。
-//! SYSCALL/CPUID は最小形のみ持つ。ModRM は register-direct のみ持つ。
+//! i386 の汎用レジスタ系43件のみ持つ。ModRM の SIB/disp32/メモリ形式と Rust フック・
+//! EFLAGS(SF/OF/PF/AF)・64ビット・x87・SSE・セグメントは本格実装で足す。
+//! SYSCALL/CPUID は最小形、ModRM は register-direct と mod=01+disp8 のみ持つ。
 
 #![forbid(unsafe_code)]
 
@@ -54,8 +54,8 @@ mod tests {
 
     #[test]
     fn insn_count() {
-        // 試作の整数31件。
-        assert_eq!(INSNS.len(), 31);
+        // 試作の整数43件。
+        assert_eq!(INSNS.len(), 43);
     }
 
     #[test]
@@ -84,10 +84,6 @@ mod tests {
         // スタック操作とコール/リターン：PUSH EAX (50)、POP EAX (58)、PUSH EBP (55)、
         // POP EBP (5D)、CALL rel32 (E8+imm32)、RET (C3)。
         // Ref: SPEC-X86-INTEL-SDM (v093).
-        assert_eq!(decode(0x50, 8), Some(Insn::PushEax));
-        assert_eq!(decode(0x58, 8), Some(Insn::PopEax));
-        assert_eq!(decode(0x55, 8), Some(Insn::PushEbp));
-        assert_eq!(decode(0x5D, 8), Some(Insn::PopEbp));
         assert_eq!(decode(0xE8_0000_0010, 40), Some(Insn::CallRel32));
         assert_eq!(decode(0xC3, 8), Some(Insn::Ret));
         // 比較・条件分岐：CMP EAX,imm32 (3D)、TEST EAX,EAX (85 C0)、JE (74)、JNE (75)。
@@ -107,6 +103,24 @@ mod tests {
         assert_eq!(decode(0x2D_0000_0001, 40), Some(Insn::SubEax));
         assert_eq!(decode(0x89E5, 16), Some(Insn::MovEbpEsp));
         assert_eq!(decode(0xC9, 8), Some(Insn::Leave));
+        // PUSH/POP r32 全レジスタ：PUSH 50+r、POP 58+r。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x50, 8), Some(Insn::PushEax));
+        assert_eq!(decode(0x51, 8), Some(Insn::PushEcx));
+        assert_eq!(decode(0x52, 8), Some(Insn::PushEdx));
+        assert_eq!(decode(0x53, 8), Some(Insn::PushEbx));
+        assert_eq!(decode(0x54, 8), Some(Insn::PushEsp));
+        assert_eq!(decode(0x55, 8), Some(Insn::PushEbp));
+        assert_eq!(decode(0x56, 8), Some(Insn::PushEsi));
+        assert_eq!(decode(0x57, 8), Some(Insn::PushEdi));
+        assert_eq!(decode(0x58, 8), Some(Insn::PopEax));
+        assert_eq!(decode(0x59, 8), Some(Insn::PopEcx));
+        assert_eq!(decode(0x5A, 8), Some(Insn::PopEdx));
+        assert_eq!(decode(0x5B, 8), Some(Insn::PopEbx));
+        assert_eq!(decode(0x5C, 8), Some(Insn::PopEsp));
+        assert_eq!(decode(0x5D, 8), Some(Insn::PopEbp));
+        assert_eq!(decode(0x5E, 8), Some(Insn::PopEsi));
+        assert_eq!(decode(0x5F, 8), Some(Insn::PopEdi));
         // EAX-imm32 群の残り：AND (25)、OR (0D)、XOR imm (35)。
         // ADD (05)/SUB (2D)/CMP (3D) と合わせ6種が揃う。
         // Ref: SPEC-X86-INTEL-SDM (v093).
