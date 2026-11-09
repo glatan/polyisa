@@ -1012,6 +1012,26 @@ pub fn mov_eax_abs<B: Backend>(b: &mut B, dst: Gpr, addr: u32) -> Flow<B> {
     Ok(())
 }
 
+/// MOV r32, FS:[disp32] (FS 上書き + SIB 直接番地)。FS base からの32bitロード.
+pub fn mov_r32_fs_abs<B: Backend>(b: &mut B, dst: Gpr, fs_base: u64, disp: i32) -> Flow<B> {
+    let base = b.konst::<W64>(fs_base);
+    let d = b.konst::<W64>(disp as i64 as u64);
+    let addr = b.add::<W64>(base, d);
+    let v: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    write(b, dst, v);
+    Ok(())
+}
+
+/// MOV r64, FS:[disp32] (FS 上書き + SIB 直接番地、REX.W)。FS base からの64bitロード.
+pub fn mov_r64_fs_abs<B: Backend>(b: &mut B, dst: Gpr, fs_base: u64, disp: i32) -> Flow<B> {
+    let base = b.konst::<W64>(fs_base);
+    let d = b.konst::<W64>(disp as i64 as u64);
+    let addr = b.add::<W64>(base, d);
+    let v: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    write64(b, dst, v);
+    Ok(())
+}
+
 /// MOV [disp32], r32 (絶対番地、mod=00 rm=101)。
 pub fn mov_abs_eax<B: Backend>(b: &mut B, src: Gpr, addr: u32) -> Flow<B> {
     let addr = b.konst::<W64>(addr as u64);

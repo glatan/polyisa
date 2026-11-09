@@ -82,6 +82,7 @@ pub mod x86_64 {
     pub const NEWFSTATAT: u64 = 262;
     pub const FSTAT: u64 = 5;
     pub const STATX: u64 = 332;
+    pub const ARCH_PRCTL: u64 = 158;
 }
 
 /// 段階4の準備としての i386 番号表（Linux・32ビット）。

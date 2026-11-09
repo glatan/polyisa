@@ -2647,3 +2647,41 @@ fn cdqe_sign_extends_eax() {
     let v = sem::read64(&mut env.backend, Gpr(0));
     assert_eq!(v, 0xFFFF_FFFF_8000_0000);
 }
+
+#[test]
+fn mov_r64_fs_abs_roundtrip() {
+    // MOV RDX,FS:[0x10] (SIB直接番地): FS=0x1000 -> [0x1010] の64bitを読む.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x1010),
+            &[0x88u8, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11],
+        )
+        .unwrap();
+    env.step(|b| sem::mov_r64_fs_abs(b, Gpr(2), 0x1000, 0x10))
+        .unwrap();
+    assert_eq!(env.backend.get(Gpr(2).state()), 0x5566_7788);
+    env.step(|b| {
+        let v = sem::read64(b, Gpr(2));
+        assert_eq!(v, 0x1122_3344_5566_7788);
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn mov_r32_fs_abs_roundtrip() {
+    // MOV EDX,FS:[0x10] (32bit): [0x1010] の下位32bitを読む.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1010), &[0x78u8, 0x56, 0x34, 0x12])
+        .unwrap();
+    env.backend.set(Gpr(2).state(), 0);
+    env.step(|b| sem::mov_r32_fs_abs(b, Gpr(2), 0x1000, 0x10))
+        .unwrap();
+    assert_eq!(env.backend.get(Gpr(2).state()), 0x1234_5678);
+}

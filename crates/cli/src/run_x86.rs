@@ -40,6 +40,12 @@ pub enum TrapOutcome {
 /// SYSCALL と INT 0x80 を処理する。EAX などの読み書きはここで行う。
 pub trait TrapHandler {
     fn handle_trap(&mut self, env: &mut BareEnv, code: u32) -> TrapOutcome;
+
+    /// FS ベース（TLS）を返す。arch_prctl(ARCH_SET_FS) を処理する
+    /// ハンドラ以外は 0 を返す。
+    fn fs_base(&self) -> u64 {
+        0
+    }
 }
 
 fn acc_fetch() -> Access {
@@ -544,11 +550,13 @@ pub fn run_mode(
         // 0x67 は 64ビットモードのみ受け付け、32ビットアドレス指定とみなす
         // （4GB 未満では u64 演算と等価のため意味論への影響はない）。
         // F3 は string 命令でのみ意味を持つ。0x66 は NOP/XMM 系でのみ受け付ける。
-        // セグメント上書き（2E/3E/26/64/65/36）は無視する（4GB 未満では等価）。
+        // FS 上書き（0x64）は記録し、対応するメモリ形式で FS ベースを加算する。
+        // その他のセグメント上書き（2E/3E/26/65/36）は無視する（4GB 未満では等価）。
         let mut off: u64 = 0;
         let mut rep = false;
         let mut rex: u8 = 0;
         let mut has66 = false;
+        let mut has_fs = false;
         loop {
             if head[0] == 0xF3 && !rep {
                 rep = true;
@@ -559,7 +567,10 @@ pub fn run_mode(
                 has66 = true;
             } else if is64 && head[0] == 0x67 {
                 // アドレスサイズ接頭辞。複数あっても1バイトずつ剥がす。
-            } else if matches!(head[0], 0x2E | 0x3E | 0x26 | 0x64 | 0x65 | 0x36) {
+            } else if head[0] == 0x64 && !has_fs {
+                // FS 上書き。dispatch 側で FS ベースを加算する。
+                has_fs = true;
+            } else if matches!(head[0], 0x2E | 0x3E | 0x26 | 0x65 | 0x36) {
                 // セグメント上書き。4GB 未満では無視してよい。
             } else {
                 break;
@@ -877,6 +888,8 @@ pub fn run_mode(
         }
         // REX 拡張は reg/rm/SIB 抽出で対応済み (R/R/B/X)。W は rex_w で切替.
         let _ = rex;
+        // FS 上書きの有無とベース。dispatch 側で FS 相対アドレッシングに使う.
+        let fs = has_fs.then(|| sys.fs_base());
         // imm/disp の取り出し。32ビット値は LE 実バイト列から復元する。
         let imm32 = || (word as u32).swap_bytes();
         let disp8 = || (word & 0xff) as u8 as i8;
@@ -886,7 +899,7 @@ pub fn run_mode(
         use polyisa_engine::interp::Ctrl;
         let r = env.step(|b| {
             dispatch(
-                b, insn, eip, word, nbytes, off, is64, rex, has66, imm32, disp8,
+                b, insn, eip, word, nbytes, off, is64, rex, has66, fs, imm32, disp8,
             )
         });
         match r {
@@ -918,18 +931,7 @@ pub fn run_mode(
             }
             // #DE 等の Trap 以外の退出（未実装命令を含む）は区別せず止める。
             // 本格実装では DivZero をシグナルに変える。
-            Err(e) => {
-                if eip == 0x4507bb {
-                    use polyisa_guest_x86::sem::{Gpr, read64};
-                    let rdi = read64(&mut env.backend, Gpr(7));
-                    let rax = read64(&mut env.backend, Gpr(0));
-                    let r8 = read64(&mut env.backend, Gpr(8));
-                    let rcx = read64(&mut env.backend, Gpr(1));
-                    let tgt = rcx.wrapping_add(0x30);
-                    eprintln!(
-                        "DBG4507BB err={e:?} rdi={rdi:#x} rax={rax:#x} r8={r8:#x} rcx={rcx:#x} target={tgt:#x}"
-                    );
-                }
+            Err(_) => {
                 return Outcome::Unimplemented { eip, word };
             }
         }
@@ -948,6 +950,7 @@ fn dispatch<B: Backend>(
     is64: bool,
     rex: u8,
     has66: bool,
+    fs: Option<u64>,
     imm32: impl Fn() -> u32,
     disp8: impl Fn() -> i8,
 ) -> Result<(), B::Exit> {
@@ -1128,7 +1131,17 @@ fn dispatch<B: Backend>(
         }
         Insn::MovEaxSibabs => {
             if no_index() {
-                sem::mov_eax_abs(b, reg(), disp32() as u32)
+                match fs {
+                    // FS 上書き + SIB 直接番地は FS:[disp32] とみなす。
+                    Some(base) if is64 => {
+                        if rex_w {
+                            sem::mov_r64_fs_abs(b, reg(), base, disp32())
+                        } else {
+                            sem::mov_r32_fs_abs(b, reg(), base, disp32())
+                        }
+                    }
+                    _ => sem::mov_eax_abs(b, reg(), disp32() as u32),
+                }
             } else {
                 sem::mov_eax_sibabs(b, reg(), sib_idx(), sib_shift(), disp32())
             }
@@ -2265,6 +2278,9 @@ pub struct CliLinux {
     /// プログラムブレーク（ヒープ末尾）。0 は未初期化。
     /// `run_image_x86_64` がロード後に像末尾へ進める。
     heap_end: u64,
+    /// FS ベース（TLS）。arch_prctl(ARCH_SET_FS) で記録する。
+    /// FS 相対アドレッシングは未対応のため、値の保持のみ行う。
+    fs_base: u64,
 }
 
 impl CliLinux {
@@ -2336,6 +2352,10 @@ fn set64(env: &mut BareEnv, r: polyisa_guest_x86::sem::Gpr, v: u64) {
 }
 
 impl TrapHandler for CliLinux {
+    fn fs_base(&self) -> u64 {
+        self.fs_base
+    }
+
     fn handle_trap(&mut self, env: &mut BareEnv, code: u32) -> TrapOutcome {
         use polyisa_guest_x86::sem::Gpr;
         // INT 0x80 (code 0x80) と SYSCALL (code 0) のどちらも番号は RAX/EAX にある。
@@ -2517,6 +2537,35 @@ impl TrapHandler for CliLinux {
         }
         if nr == n_exit || nr == n_exit_group {
             return TrapOutcome::Exit(get64(env, r_a) as u32);
+        }
+        // arch_prctl (x86-64 のみ)。TLS の FS ベース設定を受け付ける。
+        // Ref: SRC-LINUX (7.3) arch/x86/include/uapi/asm/prctl.h.
+        if self.is64 && nr == polyisa_os_linux::x86_64::ARCH_PRCTL {
+            const ARCH_SET_FS: u64 = 0x1002;
+            const ARCH_GET_FS: u64 = 0x1003;
+            let op = get64(env, r_a);
+            if op == ARCH_SET_FS {
+                self.fs_base = get64(env, r_b);
+                set64(env, Gpr(0), 0);
+                return TrapOutcome::Handled;
+            }
+            if op == ARCH_GET_FS {
+                let base = self.fs_base;
+                let dst = get64(env, r_b);
+                let buf = base.to_le_bytes();
+                if env
+                    .backend
+                    .mem
+                    .write(polyisa_mem::VirtAddr(dst), &buf)
+                    .is_err()
+                {
+                    return TrapOutcome::Unimplemented;
+                }
+                set64(env, Gpr(0), 0);
+                return TrapOutcome::Handled;
+            }
+            set64(env, Gpr(0), neg(EINVAL));
+            return TrapOutcome::Handled;
         }
         if nr == n_brk {
             use polyisa_mem::{PAGE_SIZE, Perms, VirtAddr};
@@ -2766,5 +2815,62 @@ mod tests {
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), 0x2000);
         assert_eq!(sys.heap_end, 0x2000);
+    }
+
+    #[test]
+    fn arch_prctl_set_get_fs() {
+        use polyisa_os_linux::x86_64 as abi;
+        let mut sys = CliLinux::x86_64();
+        let mut env = bare();
+        // ARCH_SET_FS(0x1002) は base を記録して 0 を返す。
+        set64(&mut env, Gpr(0), abi::ARCH_PRCTL);
+        set64(&mut env, Gpr(7), 0x1002);
+        set64(&mut env, Gpr(6), 0x5000);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        assert_eq!(sys.fs_base, 0x5000);
+        // ARCH_GET_FS(0x1003) は記録値を [addr] に書いて 0 を返す。
+        set64(&mut env, Gpr(0), abi::ARCH_PRCTL);
+        set64(&mut env, Gpr(7), 0x1003);
+        set64(&mut env, Gpr(6), 0x100);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        let mut back = [0u8; 8];
+        env.backend
+            .mem
+            .read(VirtAddr(0x100), &mut back, data_access())
+            .unwrap();
+        assert_eq!(u64::from_le_bytes(back), 0x5000);
+        // 不明な op は EINVAL。
+        set64(&mut env, Gpr(0), abi::ARCH_PRCTL);
+        set64(&mut env, Gpr(7), 0x9999);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EINVAL));
+    }
+
+    #[test]
+    fn fs_relative_mov_sibabs() {
+        // FS 上書き + REX.W 8B SIB直接番地 (MOV RDX,FS:[disp32]) を run する。
+        // FS 絶対番地のため disp=target-fs_base=0x500 (RIP相対ではない)。
+        // fs_base=0x1000、disp=0x500 で [0x1500] を読み、exit(低32)。
+        let mut sys = CliLinux::x86_64();
+        sys.fs_base = 0x1000;
+        let mut env = bare();
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x1500), &[0x78u8, 0x56, 0x34, 0x12, 0, 0, 0, 0])
+            .unwrap();
+        let prog: &[u8] = &[
+            0x64, 0x48, 0x8B, 0x14, 0x25, 0x00, 0x05, 0x00,
+            0x00, // mov rdx,FS:[0x500] ([0x1500])
+            0x48, 0x89, 0xD7, // mov rdi,rdx
+            0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+            0x0F, 0x05, // syscall -> exit(0x12345678)
+        ];
+        env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+        let out = run_mode(&mut env, 0x1000, &mut sys, 100, true);
+        assert_eq!(out, Outcome::Exit(0x1234_5678));
     }
 }
