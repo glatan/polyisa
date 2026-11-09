@@ -338,6 +338,12 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("bsf_r_mem8", "M8", "00001111 10111100 01...... ........", "bsf r, m32", "load"),
         ("bsf_r_mem32", "M32", "00001111 10111100 10...... ................................", "bsf r, m32", "load"),
         ("bsf_r_rip", "F1", "00001111 10111100 00...101 ................................", "bsf r, m32", "load"),
+        // CMPXCHG r32/r64, r/m32/r/m64 (0F B1 /r)。reg-direct・mod=00/01/10/RIP (SIBなし).
+        ("cmpxchg_r_rm", "F1", "00001111 10110001 11......", "cmpxchg r, r/m", "alu"),
+        ("cmpxchg_r_memnd", "MR", "00001111 10110001 00......", "cmpxchg [r/m], r", "alu"),
+        ("cmpxchg_r_mem8", "M8", "00001111 10110001 01...... ........", "cmpxchg [r/m], r", "alu"),
+        ("cmpxchg_r_mem32", "M32", "00001111 10110001 10...... ................................", "cmpxchg [r/m], r", "alu"),
+        ("cmpxchg_r_rip", "F1", "00001111 10110001 00...101 ................................", "cmpxchg [rip], r", "alu"),
         // JMP r/m64 reg-direct (FF /4 mod=11)。
         ("jmp_r_rm", "F1", "11111111 11100...", "jmp r/m64", "jump"),
         // JMP [base] (FF /4 mod=00)。

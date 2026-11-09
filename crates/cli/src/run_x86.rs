@@ -224,6 +224,7 @@ fn fetch_len(
                 || s == 0xB7
                 || s == 0xAF
                 || s == 0xBC
+                || s == 0xB1
             {
                 // MOVUPS/MOVNTDQ。ModRM/SIB/disp で長さが決まる。
                 // reg-direct は MOVUPS のみ（E7 は無効）。
@@ -687,10 +688,11 @@ pub fn run_mode(
                 word: 0,
             };
         }
-        // 接頭辞（F3・REX・0x66・0x67・セグメント）をデコード前に剥がす。順不同に対応する。
+        // 接頭辞（F0/F3・REX・0x66・0x67・セグメント）をデコード前に剥がす。順不同に対応する。
         // 0x67 は 64ビットモードのみ受け付け、32ビットアドレス指定とみなす
         // （4GB 未満では u64 演算と等価のため意味論への影響はない）。
         // F3 は string 命令でのみ意味を持つ。0x66 は NOP/XMM 系でのみ受け付ける。
+        // F0 (LOCK) は単一スレッド試作として無視する。
         // FS 上書き（0x64）は記録し、対応するメモリ形式で FS ベースを加算する。
         // その他のセグメント上書き（2E/3E/26/65/36）は無視する（4GB 未満では等価）。
         let mut off: u64 = 0;
@@ -701,6 +703,8 @@ pub fn run_mode(
         loop {
             if head[0] == 0xF3 && !rep {
                 rep = true;
+            } else if head[0] == 0xF0 {
+                // LOCK 接頭辞。単一スレッドのため無視する.
             } else if is64 && (0x40..=0x4F).contains(&head[0]) && rex == 0 {
                 rex = head[0];
             } else if head[0] == 0x66 {
@@ -834,6 +838,7 @@ pub fn run_mode(
                             | 0xB7
                             | 0xAF
                             | 0xBC
+                            | 0xB1
                     )
                 ) || matches!(second, Some(0x40..=0x4F))
                     || matches!(second, Some(0x90..=0x9F))))
@@ -858,7 +863,7 @@ pub fn run_mode(
         let fourth = if head[0] == 0x0F
             && matches!(
                 second,
-                Some(0x10 | 0x11 | 0x29 | 0xE7 | 0x1F | 0xB6 | 0xB7 | 0xAF | 0xBC)
+                Some(0x10 | 0x11 | 0x29 | 0xE7 | 0x1F | 0xB6 | 0xB7 | 0xAF | 0xBC | 0xB1)
             )
             && matches!(third, Some(m) if m & 7 == 4 && m >> 6 != 3)
         {
@@ -3213,6 +3218,44 @@ fn dispatch<B: Backend>(
                 sem::bsf_r64(b, reg0f_as_gpr(), rm0f())
             } else {
                 sem::bsf_r32(b, reg0f_as_gpr(), rm0f())
+            }
+        }
+        Insn::CmpxchgRRm => {
+            // 0F B1 /r reg-direct (dst=rm/mem役, src=reg)。RAX 暗黙.
+            if rex_w {
+                sem::cmpxchg_r64(b, rm0f(), reg0f_as_gpr())
+            } else {
+                sem::cmpxchg_r32(b, rm0f(), reg0f_as_gpr())
+            }
+        }
+        Insn::CmpxchgRMemnd => {
+            if rex_w {
+                sem::cmpxchg_r64_memnd(b, rm0f(), reg0f_as_gpr())
+            } else {
+                sem::cmpxchg_r32_memnd(b, rm0f(), reg0f_as_gpr())
+            }
+        }
+        Insn::CmpxchgRMem8 => {
+            if rex_w {
+                sem::cmpxchg_r64_mem8(b, rm0f(), disp8(), reg0f_as_gpr())
+            } else {
+                sem::cmpxchg_r32_mem8(b, rm0f(), disp8(), reg0f_as_gpr())
+            }
+        }
+        Insn::CmpxchgRMem32 => {
+            if rex_w {
+                sem::cmpxchg_r64_mem32(b, rm0f(), disp32(), reg0f_as_gpr())
+            } else {
+                sem::cmpxchg_r32_mem32(b, rm0f(), disp32(), reg0f_as_gpr())
+            }
+        }
+        Insn::CmpxchgRRip => {
+            if rex_w {
+                sem::cmpxchg_r64_rip(b, eip as u64 + nbytes, disp32(), reg0f_as_gpr())
+            } else if is64 {
+                sem::cmpxchg_r32_rip(b, eip as u64 + nbytes, disp32(), reg0f_as_gpr())
+            } else {
+                sem::cmpxchg_r32_memnd(b, rm0f(), reg0f_as_gpr())
             }
         }
         Insn::BsfRMemnd => {
