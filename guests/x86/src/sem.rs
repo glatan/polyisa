@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! x86 最小の命令意味論。バックエンドに対して総称的に書く.
 //!
-//! EAX/ECX 系の整数演算と SYSCALL/CPUID の最小形のみ持つ。EFLAGS の更新
+//! 整数演算と SYSCALL/CPUID の最小形のみ持つ。EFLAGS の更新
 //! （遅延フラグは本格実装）、ModRM/SIB、セグメント、64ビット拡張、
 //! CPUID の機能導出は本格実装で足す。
 //!
@@ -270,20 +270,21 @@ pub fn add_eax<B: Backend>(b: &mut B, imm: u32) -> Flow<B> {
     Ok(())
 }
 
-/// ADD EAX, ECX (ModRM register-direct 01 C8 の最小形)。
-/// SIB/disp/メモリ形式と Rust フックは本格実装で足す。
-pub fn add_rm32<B: Backend>(b: &mut B) -> Flow<B> {
-    let x = read(b, Gpr(0));
-    let y = read(b, Gpr(1));
+/// ADD r/m32, r32 (ModRM register-direct 01 /r、mod=11)。
+/// 方向は dst=rm、src=reg。SIB/disp/メモリ形式と Rust フックは本格実装で足す。
+pub fn add_rm32<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
+    let x = read(b, dst);
+    let y = read(b, src);
     let v = b.add::<W32>(x, y);
-    write(b, Gpr(0), v);
+    write(b, dst, v);
     Ok(())
 }
 
-/// MOV EAX, ECX (ModRM register-direct 8B C1 の最小形)。
-pub fn mov_rm32<B: Backend>(b: &mut B) -> Flow<B> {
-    let v = read(b, Gpr(1));
-    write(b, Gpr(0), v);
+/// MOV r32, r/m32 (ModRM register-direct 8B /r、mod=11)。
+/// 方向は dst=reg、src=rm。
+pub fn mov_rm32<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
+    let v = read(b, src);
+    write(b, dst, v);
     Ok(())
 }
 
@@ -496,16 +497,6 @@ pub fn mov_mem_eax<B: Backend>(b: &mut B, disp: i8) -> Flow<B> {
     Ok(())
 }
 
-/// XOR EAX, EAX (31 C0)。ゼロ化のイディオム。ZF/CF を更新する。
-pub fn xor_eax<B: Backend>(b: &mut B) -> Flow<B> {
-    let x = read(b, Gpr(0));
-    let v = b.xor::<W32>(x, x);
-    write(b, Gpr(0), v);
-    let zero = b.konst::<W32>(0);
-    update_zf_cf(b, v, zero);
-    Ok(())
-}
-
 /// SUB EAX, imm32。結果を書き、ZF/CF を更新する。
 pub fn sub_eax<B: Backend>(b: &mut B, imm: u32) -> Flow<B> {
     let x = read(b, Gpr(0));
@@ -513,13 +504,6 @@ pub fn sub_eax<B: Backend>(b: &mut B, imm: u32) -> Flow<B> {
     let v = b.sub::<W32>(x, y);
     write(b, Gpr(0), v);
     update_zf_cf(b, x, y);
-    Ok(())
-}
-
-/// MOV EBP, ESP (89 E5)。関数枠の入口。
-pub fn mov_ebp_esp<B: Backend>(b: &mut B) -> Flow<B> {
-    let v = read(b, Gpr(4));
-    write(b, Gpr(5), v);
     Ok(())
 }
 
@@ -588,33 +572,64 @@ pub fn lea_eax<B: Backend>(b: &mut B, disp: i8) -> Flow<B> {
     Ok(())
 }
 
-/// CMP EAX, ECX。EAX は変えず ZF/CF だけ更新する。
-pub fn cmp_rm32<B: Backend>(b: &mut B) -> Flow<B> {
-    let x = read(b, Gpr(0));
-    let y = read(b, Gpr(1));
+/// CMP r/m32, r32。dst は変えず ZF/CF だけ更新する。
+/// 方向は x=rm、y=reg。
+pub fn cmp_rm32<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
+    let x = read(b, dst);
+    let y = read(b, src);
     update_zf_cf(b, x, y);
     Ok(())
 }
 
-/// AND EAX, ECX。結果を書き、ZF/CF を更新する（CF=0）。
-pub fn and_rm32<B: Backend>(b: &mut B) -> Flow<B> {
-    let x = read(b, Gpr(0));
-    let y = read(b, Gpr(1));
+/// AND r/m32, r32。結果を dst に書き、ZF/CF を更新する（CF=0）。
+pub fn and_rm32<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
+    let x = read(b, dst);
+    let y = read(b, src);
     let v = b.and::<W32>(x, y);
-    write(b, Gpr(0), v);
+    write(b, dst, v);
     let zero = b.konst::<W32>(0);
     update_zf_cf(b, v, zero);
     Ok(())
 }
 
-/// OR EAX, ECX。結果を書き、ZF/CF を更新する（CF=0）。
-pub fn or_rm32<B: Backend>(b: &mut B) -> Flow<B> {
-    let x = read(b, Gpr(0));
-    let y = read(b, Gpr(1));
+/// OR r/m32, r32。結果を dst に書き、ZF/CF を更新する（CF=0）。
+pub fn or_rm32<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
+    let x = read(b, dst);
+    let y = read(b, src);
     let v = b.or::<W32>(x, y);
-    write(b, Gpr(0), v);
+    write(b, dst, v);
     let zero = b.konst::<W32>(0);
     update_zf_cf(b, v, zero);
+    Ok(())
+}
+
+/// SUB r/m32, r32。結果を dst に書き、ZF/CF を更新する。
+pub fn sub_rm32<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
+    let x = read(b, dst);
+    let y = read(b, src);
+    let v = b.sub::<W32>(x, y);
+    write(b, dst, v);
+    update_zf_cf(b, x, y);
+    Ok(())
+}
+
+/// XOR r/m32, r32。結果を dst に書き、ZF/CF を更新する（CF=0）。
+/// 31 C0（XOR EAX,EAX のゼロ化イディオム）はこの汎用形で扱う。
+pub fn xor_rm32<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
+    let x = read(b, dst);
+    let y = read(b, src);
+    let v = b.xor::<W32>(x, y);
+    write(b, dst, v);
+    let zero = b.konst::<W32>(0);
+    update_zf_cf(b, v, zero);
+    Ok(())
+}
+
+/// MOV r/m32, r32 (ModRM register-direct 89 /r、mod=11)。
+/// 方向は dst=rm、src=reg。89 E5（MOV EBP,ESP）はこの汎用形で扱う。
+pub fn mov_mr32<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
+    let v = read(b, src);
+    write(b, dst, v);
     Ok(())
 }
 

@@ -63,7 +63,7 @@ fn fetch_len(first: u8, second: Option<u8>) -> Option<u64> {
         0x05 | 0x2D | 0x3D | 0xB8 | 0xE8 | 0xE9 | 0x25 | 0x0D | 0x35 => Some(5),
         // 現サブセットの SIB+disp8 (mod=01、rm=100、s==0x44) は 8B/89 のみで 4B。
         // 0xC1 等の他 opcode との組み合わせや disp32 の 6B は本格実装で足す。
-        0x01 | 0x8B | 0x31 | 0x89 | 0xC1 | 0x8D => {
+        0x01 | 0x8B | 0x29 | 0x31 | 0x89 | 0xC1 | 0x8D => {
             let s = second?;
             if (first == 0x8B || first == 0x89) && s == 0x44 {
                 Some(4)
@@ -95,7 +95,10 @@ pub fn run(env: &mut BareEnv, entry: u32, sys: &mut impl TrapHandler, limit: u64
             };
         }
         let mut peek = [0u8; 1];
-        let second = if matches!(head[0], 0x01 | 0x8B | 0x31 | 0x89 | 0xC1 | 0x8D | 0xF7) {
+        let second = if matches!(
+            head[0],
+            0x01 | 0x8B | 0x29 | 0x31 | 0x89 | 0xC1 | 0x8D | 0xF7
+        ) {
             if env
                 .backend
                 .mem
@@ -209,6 +212,10 @@ fn dispatch<B: Backend>(
 ) -> Result<(), B::Exit> {
     use polyisa_guest_x86::sem::Gpr;
     let disp32 = || imm32() as i32;
+    // ModRM register-direct の reg/rm 抽出。word 下位8ビットが ModRM。
+    let modrm = || (word & 0xff) as u8;
+    let reg = || Gpr((modrm() >> 3) & 7);
+    let rm = || Gpr(modrm() & 7);
     match insn {
         Insn::Nop => sem::nop(b),
         Insn::IncEax => sem::inc_r32(b, Gpr(0)),
@@ -232,8 +239,8 @@ fn dispatch<B: Backend>(
         Insn::MovEax => sem::mov_eax(b, imm32()),
         Insn::Syscall => sem::syscall(b, eip),
         Insn::Cpuid => sem::cpuid(b),
-        Insn::AddRm32 => sem::add_rm32(b),
-        Insn::MovRm32 => sem::mov_rm32(b),
+        Insn::AddRm32 => sem::add_rm32(b, rm(), reg()),
+        Insn::MovRm32 => sem::mov_rm32(b, reg(), rm()),
         Insn::MovEaxMem => sem::mov_eax_mem(b, disp8()),
         Insn::MovMemEax => sem::mov_mem_eax(b, disp8()),
         Insn::MovEaxSib => sem::mov_eax_sib(b),
@@ -280,9 +287,7 @@ fn dispatch<B: Backend>(
         Insn::Ja => sem::ja(b, eip, disp8()),
         Insn::Loop => sem::loop_rel8(b, eip, disp8()),
         Insn::JmpRel32 => sem::jmp_rel32(b, eip, disp32()),
-        Insn::XorEax => sem::xor_eax(b),
         Insn::SubEax => sem::sub_eax(b, imm32()),
-        Insn::MovEbpEsp => sem::mov_ebp_esp(b),
         Insn::Leave => sem::leave(b),
         Insn::AndEax => sem::and_eax(b, imm32()),
         Insn::OrEax => sem::or_eax(b, imm32()),
@@ -291,9 +296,12 @@ fn dispatch<B: Backend>(
         Insn::ShrEax => sem::shr_eax(b, word as u8),
         Insn::Int80 => sem::int80(b, eip),
         Insn::LeaEax => sem::lea_eax(b, disp8()),
-        Insn::CmpRm32 => sem::cmp_rm32(b),
-        Insn::AndRm32 => sem::and_rm32(b),
-        Insn::OrRm32 => sem::or_rm32(b),
+        Insn::CmpRm32 => sem::cmp_rm32(b, rm(), reg()),
+        Insn::AndRm32 => sem::and_rm32(b, rm(), reg()),
+        Insn::OrRm32 => sem::or_rm32(b, rm(), reg()),
+        Insn::SubRm32 => sem::sub_rm32(b, rm(), reg()),
+        Insn::XorRm32 => sem::xor_rm32(b, rm(), reg()),
+        Insn::MovMr32 => sem::mov_mr32(b, rm(), reg()),
         Insn::MulRm32 => sem::mul_rm32(b),
         Insn::DivRm32 => sem::div_rm32(b, eip),
         Insn::IdivRm32 => sem::idiv_rm32(b, eip),
