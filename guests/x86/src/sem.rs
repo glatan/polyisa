@@ -10130,3 +10130,69 @@ pub fn movsxd_rm32_abs<B: Backend>(b: &mut B, dst: Gpr, addr32: u32) -> Flow<B> 
     write(b, dst, v);
     Ok(())
 }
+
+/// OR m32,imm8 [base] (83 /1 mod=00)。
+pub fn or_rm32_imm8_memnd<B: Backend>(b: &mut B, base: Gpr, imm: i8) -> Flow<B> {
+    let addr = read64(b, base);
+    let x: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let y = b.konst::<W32>(imm as i32 as u32);
+    let v = b.or::<W32>(x, y);
+    b.store::<W32>(addr, v, DATA_WRITE)?;
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// OR m64,imm8 [base] (83 /1 mod=00, REX.W)。
+pub fn or_rm64_imm8_memnd<B: Backend>(b: &mut B, base: Gpr, imm: i8) -> Flow<B> {
+    let addr = read64(b, base);
+    let x: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let y = b.konst::<W64>(imm as i64 as u64);
+    let v = b.or::<W64>(x, y);
+    b.store::<W64>(addr, v, DATA_WRITE)?;
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// OR m32,imm8 [base+disp8] (83 /1 mod=01)。
+pub fn or_rm32_imm8_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8, imm: i8) -> Flow<B> {
+    let addr = eff_addr(b, base, disp);
+    let x: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let y = b.konst::<W32>(imm as i32 as u32);
+    let v = b.or::<W32>(x, y);
+    b.store::<W32>(addr, v, DATA_WRITE)?;
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// OR m64,imm8 [base+disp8] (83 /1 mod=01, REX.W)。
+pub fn or_rm64_imm8_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8, imm: i8) -> Flow<B> {
+    let addr = eff_addr(b, base, disp);
+    let x: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let y = b.konst::<W64>(imm as i64 as u64);
+    let v = b.or::<W64>(x, y);
+    b.store::<W64>(addr, v, DATA_WRITE)?;
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// OR m32,imm8 [base+disp32] (83 /1 mod=10)。
+pub fn or_rm32_imm8_mem32<B: Backend>(b: &mut B, base: Gpr, disp: i32, imm: i8) -> Flow<B> {
+    let addr = eff_addr32(b, base, disp);
+    let x: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let y = b.konst::<W32>(imm as i32 as u32);
+    let v = b.or::<W32>(x, y);
+    b.store::<W32>(addr, v, DATA_WRITE)?;
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// OR m64,imm8 [base+disp32] (83 /1 mod=10, REX.W)。
+pub fn or_rm64_imm8_mem32<B: Backend>(b: &mut B, base: Gpr, disp: i32, imm: i8) -> Flow<B> {
+    let addr = eff_addr32(b, base, disp);
+    let x: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let y = b.konst::<W64>(imm as i64 as u64);
+    let v = b.or::<W64>(x, y);
+    b.store::<W64>(addr, v, DATA_WRITE)?;
+    update_logic_flags(b, v);
+    Ok(())
+}

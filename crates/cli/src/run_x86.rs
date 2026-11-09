@@ -2867,6 +2867,35 @@ fn dispatch<B: Backend>(
                 sem::or_rm32_imm8(b, rm(), disp8())
             }
         }
+        Insn::OrRmImm8Memnd => {
+            // 83 /1 mod=00 [base],imm8 (24b)。imm は最下位8.
+            let imm = (word & 0xff) as u8 as i8;
+            if rex_w {
+                sem::or_rm64_imm8_memnd(b, rm(), imm)
+            } else {
+                sem::or_rm32_imm8_memnd(b, rm(), imm)
+            }
+        }
+        Insn::OrRmImm8Mem8 => {
+            // 83 /1 mod=01 [base+disp8],imm8 (32b)。
+            let d8 = ((word >> 8) & 0xff) as u8 as i8;
+            let imm = (word & 0xff) as u8 as i8;
+            if rex_w {
+                sem::or_rm64_imm8_mem8(b, rm(), d8, imm)
+            } else {
+                sem::or_rm32_imm8_mem8(b, rm(), d8, imm)
+            }
+        }
+        Insn::OrRmImm8Mem32 => {
+            // 83 /1 mod=10 [base+disp32],imm8 (56b)。
+            let disp = ((word >> 8) as u32).swap_bytes() as i32;
+            let imm = (word & 0xff) as u8 as i8;
+            if rex_w {
+                sem::or_rm64_imm8_mem32(b, rm(), disp, imm)
+            } else {
+                sem::or_rm32_imm8_mem32(b, rm(), disp, imm)
+            }
+        }
         Insn::AdcRmImm8 => {
             if rex_w {
                 sem::adc_rm64_imm8(b, rm(), disp8())

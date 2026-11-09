@@ -4833,3 +4833,35 @@ fn movsxd_rm64_rip_sign_extends() {
     })
     .unwrap();
 }
+
+#[test]
+fn or_rm64_imm8_mem8_basic() {
+    // OR [R8+8],1 (REX.WB 83 /1 mod=01): [0x1508]=0xF0 -> 0xF1.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.step(|b| {
+        sem::write64(b, Gpr(8), 0x1500);
+        Ok(())
+    })
+    .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1508), &0xF0u64.to_le_bytes())
+        .unwrap();
+    env.step(|b| sem::or_rm64_imm8_mem8(b, Gpr(8), 8, 1))
+        .unwrap();
+    let mut back = [0u8; 8];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x1508),
+            &mut back,
+            Access {
+                endian: Endian::Le,
+                align: Align::Unaligned,
+                kind: AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(u64::from_le_bytes(back), 0xF1);
+}
