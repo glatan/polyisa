@@ -14,8 +14,8 @@ pub use polyisa_isadl::Model;
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum GenError {
     Invalid(Vec<polyisa_isadl::ValidationError>),
-    /// デコーダが評価できない `when` の機能旗。XLEN（rv32/rv64）以外の
-    /// 旗で符号化を区別する命令が出たら、デコーダの入口を広げて対応する。
+    /// デコーダが評価できない `when` の機能旗。64 個を超える旗で
+    /// 符号化を区別しようとしたときに使う。
     UnsupportedWhen(String),
 }
 
@@ -72,19 +72,37 @@ fn gen_decoder(model: &Model) -> Result<String, GenError> {
     s.push_str("    decode_model(word, len, true)\n");
     s.push_str("}\n");
     // モデル対応デコード（ADR-0006）。`when` の述語を評価し、符号化の
-    // 重なりを機能で解決する。現段階で符号化を区別する旗は XLEN
-    // （rv32/rv64）のみであり、`is_rv64` で受ける。他の旗が出たら
-    // 生成時に `UnsupportedWhen` で失敗させ、入口の拡張を促す。
-    // `decode` は既定（RV64）を選ぶ互換用の殻である。
+    // 重なりを機能で解決する。XLEN（rv32/rv64）は `is_rv64` で受け、
+    // それ以外の機能旗は `feats` のビット集合で受ける。
+    // `decode` と `decode_model` は既定（RV64、機能なし）を選ぶ互換用の殻である。
     s.push_str("pub fn decode_model(word: u128, len: u32, is_rv64: bool) -> Option<Insn> {\n");
-    // `when` を使わないモデルでは `is_rv64` が未使用になる。呼び出し側の
-    // 互換性のため引数は残し、警告が出ないよう明示的に破棄する。
-    let uses_xlen = model
-        .insns
-        .iter()
-        .any(|i| !when_guard(&i.when).unwrap_or_default().is_empty());
-    if !uses_xlen {
+    s.push_str("    decode_model_ex(word, len, is_rv64, 0)\n");
+    s.push_str("}\n");
+    let extra = extra_flags(model)?;
+    for (i, name) in extra.iter().enumerate() {
+        s.push_str(&format!(
+            "pub const {}: u64 = 1 << {};\n",
+            feat_const(name),
+            i
+        ));
+    }
+    s.push_str(
+        "pub fn decode_model_ex(word: u128, len: u32, is_rv64: bool, feats: u64) -> Option<Insn> {\n",
+    );
+    // `when` を使わないモデルでは `is_rv64` と `feats` が未使用になる。
+    // 呼び出し側の互換性のため引数は残し、警告が出ないよう明示的に破棄する。
+    // ビット番号は辞書順で決まるため、新しい旗の追加でずれる。
+    // 呼び出し側は数値を直書きせず、生成した `FEAT_*` 定数を使うこと。
+    let uses_is_rv64 = model.insns.iter().any(|i| {
+        when_guard(&i.when, &extra)
+            .unwrap_or_default()
+            .contains("is_rv64")
+    });
+    if !uses_is_rv64 {
         s.push_str("    let _ = is_rv64;\n");
+    }
+    if extra.is_empty() {
+        s.push_str("    let _ = feats;\n");
     }
     s.push_str("    match len {\n");
     // 長さごとに分岐する。RISC-V C拡張の16ビット命令と32ビット命令の混在を想定する。
@@ -94,7 +112,7 @@ fn gen_decoder(model: &Model) -> Result<String, GenError> {
     for l in lens {
         s.push_str(&format!("        {l} => {{\n"));
         for insn in model.insns.iter().filter(|i| i.pattern.len() == l) {
-            let guard = when_guard(&insn.when)?;
+            let guard = when_guard(&insn.when, &extra)?;
             let check = if guard.is_empty() {
                 format!(
                     "word & {:#x} == {:#x}",
@@ -166,33 +184,95 @@ fn gen_decoder(model: &Model) -> Result<String, GenError> {
     Ok(s)
 }
 
-/// `when` 述語をデコーダ入口の `is_rv64` に対する Rust 式にする。
-/// 空文字は無条件（`Pred::True`）を表す。XLEN 以外の旗は
-/// `UnsupportedWhen` で失敗させる。
-fn when_guard(pred: &polyisa_isadl::pred::Pred) -> Result<String, GenError> {
+/// `when` 述語をデコーダ入口の引数に対する Rust 式にする。
+/// 空文字は無条件（`Pred::True`）を表す。XLEN（rv32/rv64）は `is_rv64`
+/// で受け、それ以外の機能旗は `feats` のビット集合で受ける。
+/// ビットの割り当ては `extra_flags` が決める。
+fn when_guard(pred: &polyisa_isadl::pred::Pred, extra: &[String]) -> Result<String, GenError> {
     use polyisa_isadl::pred::Pred;
     match pred {
         Pred::True => Ok(String::new()),
         Pred::False => Ok("false".to_string()),
         Pred::Flag(name) if name == "rv64" => Ok("is_rv64".to_string()),
         Pred::Flag(name) if name == "rv32" => Ok("!is_rv64".to_string()),
+        Pred::Flag(name) if extra.iter().any(|f| f == name) => {
+            Ok(format!("(feats & {} != 0)", feat_const(name)))
+        }
         Pred::Flag(name) => Err(GenError::UnsupportedWhen(name.clone())),
-        Pred::Not(inner) => Ok(format!("!({})", when_guard(inner)?)),
+        Pred::Not(inner) => Ok(format!("!({})", when_guard(inner, extra)?)),
         Pred::All(ps) => {
             let mut parts = Vec::new();
             for p in ps {
-                parts.push(format!("({})", when_guard(p)?));
+                parts.push(format!("({})", when_guard(p, extra)?));
             }
             Ok(parts.join(" && "))
         }
         Pred::Any(ps) => {
             let mut parts = Vec::new();
             for p in ps {
-                parts.push(format!("({})", when_guard(p)?));
+                parts.push(format!("({})", when_guard(p, extra)?));
             }
             Ok(parts.join(" || "))
         }
     }
+}
+
+/// `when` に現れる XLEN 以外の機能旗を集める。辞書順に並べ、位置が
+/// ビット番号になる。64 個を超えたら生成しない。
+fn extra_flags(model: &Model) -> Result<Vec<String>, GenError> {
+    use polyisa_isadl::pred::Pred;
+    fn collect(pred: &Pred, out: &mut Vec<String>) {
+        match pred {
+            Pred::True | Pred::False => {}
+            Pred::Flag(name) => {
+                if name != "rv32" && name != "rv64" && !out.iter().any(|f| f == name) {
+                    out.push(name.clone());
+                }
+            }
+            Pred::Not(inner) => collect(inner, out),
+            Pred::All(ps) | Pred::Any(ps) => {
+                for p in ps {
+                    collect(p, out);
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for insn in &model.insns {
+        collect(&insn.when, &mut out);
+    }
+    out.sort();
+    {
+        use std::collections::BTreeSet;
+        let mut seen = BTreeSet::new();
+        for f in &out {
+            if !seen.insert(feat_const(f)) {
+                return Err(GenError::UnsupportedWhen(format!(
+                    "conflicting feature flag names for {f}"
+                )));
+            }
+        }
+    }
+    if out.len() > 64 {
+        return Err(GenError::UnsupportedWhen(format!(
+            "too many feature flags: {}",
+            out.len()
+        )));
+    }
+    Ok(out)
+}
+
+/// 機能旗の名前を生成コードの定数名にする。
+fn feat_const(name: &str) -> String {
+    let mut s = String::from("FEAT_");
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() {
+            s.push(c.to_ascii_uppercase());
+        } else {
+            s.push('_');
+        }
+    }
+    s
 }
 
 fn gen_disassembler(model: &Model) -> String {
@@ -436,9 +516,58 @@ mod tests {
     }
 
     #[test]
-    fn decoder_rejects_unknown_when_flag() {
+    fn decoder_accepts_feature_flag_with_feats() {
+        // XLEN 以外の旗は `feats` のビット集合で受ける。
         let mut m = model();
         m.insns[0].when = Pred::Flag("m".to_string());
+        let g = generate(&m).unwrap();
+        assert!(g.decoder.contains("pub const FEAT_M: u64 = 1 << 0;"));
+        assert!(g.decoder.contains("(feats & FEAT_M != 0)"));
+        // 旗だけのモデルでは `is_rv64` が未使用になる。
+        assert!(g.decoder.contains("let _ = is_rv64;"));
+        assert!(!g.decoder.contains("let _ = feats;"));
+        assert!(
+            g.decoder
+                .contains("fn decode_model_ex(word: u128, len: u32, is_rv64: bool, feats: u64)")
+        );
+        // 互換用の入口は既定（機能なし）で拡張版に委譲する。
+        assert!(g.decoder.contains("decode_model_ex(word, len, is_rv64, 0)"));
+    }
+
+    #[test]
+    fn decoder_guards_overlapping_encodings_with_feature() {
+        // 同じ符号化を `when` の肯定と否定で振り分ける（R6 の割り当て直しの形）。
+        let mut m = model();
+        m.insns[0].when = Pred::Not(Box::new(Pred::Flag("mips_r6".to_string())));
+        m.insns.push(Insn {
+            name: "bovc_like".to_string(),
+            format: "R".to_string(),
+            pattern: Pattern::parse("0000000 ..... ..... 000 ..... 0110011").unwrap(),
+            when: Pred::Flag("mips_r6".to_string()),
+            wheres: vec![],
+            syntax: "bovc_like".to_string(),
+            timing: "alu".to_string(),
+        });
+        let g = generate(&m).unwrap();
+        assert!(g.decoder.contains("pub const FEAT_MIPS_R6: u64 = 1 << 0;"));
+        assert!(g.decoder.contains("!((feats & FEAT_MIPS_R6 != 0))"));
+        assert!(g.decoder.contains("(feats & FEAT_MIPS_R6 != 0)"));
+    }
+
+    #[test]
+    fn decoder_rejects_too_many_feature_flags() {
+        let mut m = model();
+        for i in 0..65u32 {
+            m.insns.push(Insn {
+                name: format!("f{i}"),
+                format: "R".to_string(),
+                pattern: Pattern::parse(&format!("0{:07b}", i)).unwrap(),
+                when: Pred::Flag(format!("feat{i}")),
+                wheres: vec![],
+                syntax: format!("f{i}"),
+                timing: "alu".to_string(),
+            });
+        }
         assert!(matches!(generate(&m), Err(GenError::UnsupportedWhen(_))));
     }
 
