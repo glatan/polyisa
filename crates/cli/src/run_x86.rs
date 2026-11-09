@@ -218,6 +218,7 @@ fn fetch_len(
                 if md == 0 && rm == 5 { Some(7) } else { None }
             } else if s == 0x10
                 || s == 0x11
+                || s == 0x28
                 || s == 0x29
                 || s == 0xE7
                 || s == 0xB6
@@ -843,6 +844,7 @@ pub fn run_mode(
                             | 0xD6
                             | 0x10
                             | 0x11
+                            | 0x28
                             | 0x29
                             | 0xE7
                             | 0xB6
@@ -874,7 +876,7 @@ pub fn run_mode(
         let fourth = if head[0] == 0x0F
             && matches!(
                 second,
-                Some(0x10 | 0x11 | 0x29 | 0xE7 | 0x1F | 0xB6 | 0xB7 | 0xAF | 0xBC | 0xB1)
+                Some(0x10 | 0x11 | 0x28 | 0x29 | 0xE7 | 0x1F | 0xB6 | 0xB7 | 0xAF | 0xBC | 0xB1)
             )
             && matches!(third, Some(m) if m & 7 == 4 && m >> 6 != 3)
         {
@@ -1074,6 +1076,9 @@ pub fn run_mode(
                     | Insn::MovupsStoreRip
                     | Insn::MovdqaLoadRip
                     | Insn::MovdquLoadXmm
+                    | Insn::MovdquLoadMemnd
+                    | Insn::MovdquLoadMem8
+                    | Insn::MovdquLoadMem32
                     | Insn::MovAbsEax
                     | Insn::MovEaxAbs
                     | Insn::MovRm16ImmM32
@@ -3018,7 +3023,10 @@ fn dispatch<B: Backend>(
         Insn::MovdquLoadXmm => sem::movups_xmm_xmm(b, xmm_reg(), xmm_rm()),
         Insn::MovdquLoadMem8 => sem::movups_load_mem8(b, xmm_reg(), rm0f(), disp8()),
         Insn::MovdquLoadMemnd => sem::movups_load_memnd(b, xmm_reg(), rm0f()),
-        // MOVDQA xmm,m128 RIP (66 0F 6F)。アライメントは問わず MOVUPS と等価.
+        Insn::MovdquLoadMem32 => sem::movups_load_mem32(b, xmm_reg(), rm0f(), disp32()),
+        // MOVDQA (66 0F 6F) は16B転送で MOVUPS と等価のため意味論を共有する.
+        // mod=00/01/10 は Movdqu とバイト列が同一のため decode は Movdqu 側に寄る.
+        // 66 接頭辞の許可のみ行い、分岐は Movdqu 側で処理する.
         Insn::MovdqaLoadRip => sem::movups_load_rip(b, xmm_reg(), eip as u64 + nbytes, disp32()),
         Insn::MovupsLoadSib => {
             if sib0f_no_index() {
@@ -3155,6 +3163,10 @@ fn dispatch<B: Backend>(
         Insn::MovapsStoreMemnd => sem::movups_store_memnd(b, xmm_reg(), rm0f()),
         Insn::MovapsStoreMem8 => sem::movups_store_mem8(b, xmm_reg(), rm0f(), disp8()),
         Insn::MovapsStoreRip => sem::movups_store_rip(b, xmm_reg(), eip as u64 + nbytes, disp32()),
+        Insn::MovapsLoadMemnd => sem::movups_load_memnd(b, xmm_reg(), rm0f()),
+        Insn::MovapsLoadMem8 => sem::movups_load_mem8(b, xmm_reg(), rm0f(), disp8()),
+        Insn::MovapsLoadMem32 => sem::movups_load_mem32(b, xmm_reg(), rm0f(), disp32()),
+        Insn::MovapsLoadRip => sem::movups_load_rip(b, xmm_reg(), eip as u64 + nbytes, disp32()),
         Insn::NoplSib => sem::nop(b),
         Insn::NoplSibd => sem::nop(b),
         Insn::NoplSibd32 => sem::nop(b),
@@ -4743,6 +4755,30 @@ impl TrapHandler for CliLinux {
             set64(env, Gpr(0), std::process::id() as u64);
             return TrapOutcome::Handled;
         }
+        if nr == polyisa_os_linux::x86_64::MPROTECT && self.is64
+            || nr == polyisa_os_linux::i386::MPROTECT && !self.is64
+        {
+            // mprotect(addr, len, prot)。試作では権限変更を無視して 0 を返す.
+            // addr/len の検証のみ行う (len==0 は EINVAL).
+            let len = if self.is64 {
+                get64(env, Gpr(6))
+            } else {
+                u64::from(env.backend.get(Gpr(1).state()))
+            };
+            if len == 0 {
+                set64(env, Gpr(0), neg(EINVAL));
+                return TrapOutcome::Handled;
+            }
+            set64(env, Gpr(0), 0);
+            return TrapOutcome::Handled;
+        }
+        if nr == polyisa_os_linux::x86_64::MUNMAP && self.is64
+            || nr == polyisa_os_linux::i386::MUNMAP && !self.is64
+        {
+            // munmap(addr, len)。試作では写像解除せず 0 を返す.
+            set64(env, Gpr(0), 0);
+            return TrapOutcome::Handled;
+        }
         if nr == polyisa_os_linux::x86_64::RT_SIGACTION && self.is64
             || nr == polyisa_os_linux::i386::RT_SIGACTION && !self.is64
         {
@@ -5403,6 +5439,24 @@ mod tests {
         set64(&mut env, Gpr(0), abi::GETPID);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), std::process::id() as u64);
+    }
+
+    #[test]
+    fn mprotect_munmap_return_zero() {
+        use polyisa_os_linux::x86_64 as abi;
+        let mut sys = CliLinux::x86_64();
+        let mut env = bare();
+        set64(&mut env, Gpr(0), abi::MPROTECT);
+        set64(&mut env, Gpr(6), 0x1000);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        set64(&mut env, Gpr(0), abi::MPROTECT);
+        set64(&mut env, Gpr(6), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EINVAL));
+        set64(&mut env, Gpr(0), abi::MUNMAP);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
     }
 
     #[test]

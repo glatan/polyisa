@@ -425,6 +425,11 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("movdqu_load_xmm", "F1", "00001111 01101111 11......", "movdqu xmm, xmm", "load"),
         // MOVDQA xmm,m128 RIP (66 0F 6F 05 + disp32)。66必須、アライメントは問わない.
         ("movdqa_load_rip", "F1", "00001111 01101111 00...101 ................................", "movdqa xmm, m128", "load"),
+        // MOVAPS xmm,m128 mod=00/01/10/RIP (0F 28 /r)。SIBなし、MOVUPS と等価.
+        ("movaps_load_memnd", "MR", "00001111 00101000 00......", "movaps xmm, m128", "load"),
+        ("movaps_load_mem8", "M8", "00001111 00101000 01...... ........", "movaps xmm, m128", "load"),
+        ("movaps_load_mem32", "M32", "00001111 00101000 10...... ................................", "movaps xmm, m128", "load"),
+        ("movaps_load_rip", "F1", "00001111 00101000 00...101 ................................", "movaps xmm, m128", "load"),
         // MOVAPS [RIP+disp32],xmm (0F 29 05 + disp32)。
         ("movaps_store_rip", "F1", "00001111 00101001 00...101 ................................", "movaps [rip], xmm", "store"),
         ("shr_rm32_imm8", "F1", "11000001 11101... ........", "shr r/m32, {imm}", "alu"),
@@ -1304,6 +1309,15 @@ pub fn build_model() -> polyisa_isadl::Model {
             "MR",
             "00001111 01101111 00......",
             vec![wc("mr_rm", WhereOp::Ne, 4), wc("mr_rm", WhereOp::Ne, 5)],
+            "movdqu xmm, m128",
+            "load",
+        ),
+        // MOVDQU xmm,m128 mod=10 [base+disp32] (F3 0F 6F)。SIBなし.
+        (
+            "movdqu_load_mem32",
+            "M32",
+            "00001111 01101111 10...... ................................",
+            vec![wc("m32_rm", WhereOp::Ne, 4)],
             "movdqu xmm, m128",
             "load",
         ),
