@@ -495,14 +495,19 @@ fn fetch_len(
                 Some(6 - sub)
             } else if rm == 4 {
                 // SIB 付き。mod=01 は disp8+imm (8B/6B)、mod=10 は disp32+imm (11B/9B)。
-                // mod=00 は SIB base が直接番地 (101) のとき disp32+imm (11B/9B)。
+                // mod=00 は SIB base が直接番地 (101) のとき disp32+imm (11B/9B)、
+                // それ以外は disp なし+imm (7B/5B)。
                 if md == 1 {
                     Some(8 - sub)
                 } else if md == 2 {
                     Some(11 - sub)
                 } else {
                     let t = third?;
-                    if t & 7 == 5 { Some(11 - sub) } else { None }
+                    if t & 7 == 5 {
+                        Some(11 - sub)
+                    } else {
+                        Some(7 - sub)
+                    }
                 }
             } else if md == 1 {
                 Some(7 - sub)
@@ -3843,6 +3848,44 @@ fn dispatch<B: Backend>(
                 sem::mov_rm64_imm_sibabs(b, sib_idx(), sib_shift(), disp, imm32())
             } else {
                 sem::mov_rm32_imm_sibabs(b, sib_idx(), sib_shift(), disp, imm32())
+            }
+        }
+        Insn::MovRmImmSib => {
+            // C7 /0 SIB mod=00 [base+index*scale]+imm32 (7B)。no_index は [base].
+            // FS 上書きでは FS_base + 実効アドレスに格納する.
+            if no_index() {
+                match fs {
+                    Some(base) if rex_w => sem::mov_rm64_imm_fs_memnd(b, base, sib_base(), imm32()),
+                    Some(base) => sem::mov_rm32_imm_fs_memnd(b, base, sib_base(), imm32()),
+                    None if rex_w => sem::mov_rm64_imm_memnd(b, sib_base(), imm32()),
+                    None => sem::mov_rm32_imm_memnd(b, sib_base(), imm32()),
+                }
+            } else {
+                // FS+SIB-indexed は非対応のため暫定で Unimplemented とせず FS 無視で扱う?
+                // 既存の FS+SIB 暫定方針に合わせ、FS ありでも通常 SIB として扱う.
+                if rex_w {
+                    sem::mov_rm64_imm_sib(b, sib_base(), sib_idx(), sib_shift(), imm32())
+                } else {
+                    sem::mov_rm32_imm_sib(b, sib_base(), sib_idx(), sib_shift(), imm32())
+                }
+            }
+        }
+        Insn::MovRmImmSibd => {
+            // C7 /0 SIB mod=01 [base+index*scale+disp8]+imm32 (8B)。disp8 は (word>>32) 下位8.
+            let d8 = ((word >> 32) & 0xff) as u8 as i8;
+            if no_index() {
+                match fs {
+                    Some(base) if rex_w => {
+                        sem::mov_rm64_imm_fs_mem8(b, base, sib_base(), d8, imm32())
+                    }
+                    Some(base) => sem::mov_rm32_imm_fs_mem8(b, base, sib_base(), d8, imm32()),
+                    None if rex_w => sem::mov_rm64_imm_mem8(b, sib_base(), d8, imm32()),
+                    None => sem::mov_rm32_imm_mem8(b, sib_base(), d8, imm32()),
+                }
+            } else if rex_w {
+                sem::mov_rm64_imm_sibd(b, sib_base(), sib_idx(), sib_shift(), d8, imm32())
+            } else {
+                sem::mov_rm32_imm_sibd(b, sib_base(), sib_idx(), sib_shift(), d8, imm32())
             }
         }
         Insn::MovapsStoreMemnd => sem::movups_store_memnd(b, xmm_reg(), rm0f()),

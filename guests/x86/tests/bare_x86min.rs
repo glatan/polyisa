@@ -4713,3 +4713,53 @@ fn mov_rm8_imm_rip_basic() {
         .unwrap();
     assert_eq!(back, [0x01u8]);
 }
+
+#[test]
+fn mov_rm32_imm_sib_basic() {
+    // MOV [RSI+RAX],0x10 indexed SIB: [0x1502]=0x10.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend.set(Gpr(6).state(), 0x1500);
+    env.backend.set(Gpr(0).state(), 2);
+    env.step(|b| sem::mov_rm32_imm_sib(b, Gpr(6), Gpr(0), 0, 0x10))
+        .unwrap();
+    let mut back = [0u8; 4];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x1502),
+            &mut back,
+            Access {
+                endian: Endian::Le,
+                align: Align::Unaligned,
+                kind: AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(u32::from_le_bytes(back), 0x10);
+}
+
+#[test]
+fn mov_rm32_imm_sibd_basic() {
+    // MOV [RSI+RAX+8],0x30 indexed SIB+disp8: [0x150A]=0x30.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend.set(Gpr(6).state(), 0x1500);
+    env.backend.set(Gpr(0).state(), 2);
+    env.step(|b| sem::mov_rm32_imm_sibd(b, Gpr(6), Gpr(0), 0, 8, 0x30))
+        .unwrap();
+    let mut back = [0u8; 4];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x150A),
+            &mut back,
+            Access {
+                endian: Endian::Le,
+                align: Align::Unaligned,
+                kind: AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(u32::from_le_bytes(back), 0x30);
+}

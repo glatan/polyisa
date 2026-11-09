@@ -9957,3 +9957,61 @@ pub fn mov_rm8_imm_abs<B: Backend>(b: &mut B, addr32: u32, imm: u8) -> Flow<B> {
     b.store::<W8>(addr, v, DATA_WRITE)?;
     Ok(())
 }
+
+/// MOV m32, imm32 (C7 /0 SIB mod=00 [base+index*scale])。
+pub fn mov_rm32_imm_sib<B: Backend>(
+    b: &mut B,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    imm: u32,
+) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, 0, base, idx);
+    let v = b.konst::<W32>(imm);
+    b.store::<W32>(addr, v, DATA_WRITE)?;
+    Ok(())
+}
+
+/// MOV m64, imm32 (C7 /0 SIB mod=00, REX.W)。imm32 は符号拡張する.
+pub fn mov_rm64_imm_sib<B: Backend>(
+    b: &mut B,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    imm: u32,
+) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, 0, base, idx);
+    let v = b.konst::<W64>(imm as i32 as u64);
+    b.store::<W64>(addr, v, DATA_WRITE)?;
+    Ok(())
+}
+
+/// MOV m32, imm32 (C7 /0 SIB mod=01 [base+index*scale+disp8])。
+pub fn mov_rm32_imm_sibd<B: Backend>(
+    b: &mut B,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i8,
+    imm: u32,
+) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, disp as i32, base, idx);
+    let v = b.konst::<W32>(imm);
+    b.store::<W32>(addr, v, DATA_WRITE)?;
+    Ok(())
+}
+
+/// MOV m64, imm32 (C7 /0 SIB mod=01, REX.W)。
+pub fn mov_rm64_imm_sibd<B: Backend>(
+    b: &mut B,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i8,
+    imm: u32,
+) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, disp as i32, base, idx);
+    let v = b.konst::<W64>(imm as i32 as u64);
+    b.store::<W64>(addr, v, DATA_WRITE)?;
+    Ok(())
+}
