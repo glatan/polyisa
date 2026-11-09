@@ -173,7 +173,10 @@ fn fetch_len(
                 } else {
                     Some(3)
                 }
-            } else if matches!(s, 0x60 | 0x61 | 0x62 | 0x6C | 0xDB | 0xEF | 0xD7 | 0x76) {
+            } else if matches!(
+                s,
+                0x60 | 0x61 | 0x62 | 0x6C | 0xDB | 0xEF | 0xD7 | 0x76 | 0xDA
+            ) {
                 // XMM reg-direct のみ（66 接頭辞は剥がし済み）。
                 let m = third?;
                 if m >> 6 == 3 { Some(3) } else { None }
@@ -225,6 +228,7 @@ fn fetch_len(
                 || s == 0xB7
                 || s == 0xAF
                 || s == 0xBC
+                || s == 0xBD
                 || s == 0xB1
             {
                 // MOVUPS/MOVNTDQ。ModRM/SIB/disp で長さが決まる。
@@ -838,6 +842,7 @@ pub fn run_mode(
                             | 0x76
                             | 0x7E
                             | 0xD7
+                            | 0xDA
                             | 0xDB
                             | 0xEB
                             | 0xEF
@@ -851,6 +856,7 @@ pub fn run_mode(
                             | 0xB7
                             | 0xAF
                             | 0xBC
+                            | 0xBD
                             | 0xB1
                     )
                 ) || matches!(second, Some(0x40..=0x4F))
@@ -876,7 +882,19 @@ pub fn run_mode(
         let fourth = if head[0] == 0x0F
             && matches!(
                 second,
-                Some(0x10 | 0x11 | 0x28 | 0x29 | 0xE7 | 0x1F | 0xB6 | 0xB7 | 0xAF | 0xBC | 0xB1)
+                Some(
+                    0x10 | 0x11
+                        | 0x28
+                        | 0x29
+                        | 0xE7
+                        | 0x1F
+                        | 0xB6
+                        | 0xB7
+                        | 0xAF
+                        | 0xBC
+                        | 0xBD
+                        | 0xB1
+                )
             )
             && matches!(third, Some(m) if m & 7 == 4 && m >> 6 != 3)
         {
@@ -1039,6 +1057,7 @@ pub fn run_mode(
                     | Insn::Pshufd
                     | Insn::Pxor
                     | Insn::Pand
+                    | Insn::Pminub
                     | Insn::Pcmpeqb
                     | Insn::Pcmpeqd
                     | Insn::Por
@@ -1103,6 +1122,7 @@ pub fn run_mode(
                     | Insn::Pshufd
                     | Insn::Pxor
                     | Insn::Pand
+                    | Insn::Pminub
                     | Insn::Pcmpeqb
                     | Insn::Pcmpeqd
                     | Insn::Por
@@ -2312,6 +2332,18 @@ fn dispatch<B: Backend>(
                 sem::add_rm32_imm8_mem32(b, rm(), disp, imm)
             }
         }
+        Insn::AddRm32Imm8Rip => {
+            // 83 05 + disp32 + imm8 (56b)。RIP 相対.
+            let disp = ((word >> 8) as u32).swap_bytes() as i32;
+            let imm = (word & 0xff) as u8 as i8;
+            if rex_w {
+                sem::add_rm64_imm8_rip(b, eip as u64 + nbytes, disp, imm)
+            } else if is64 {
+                sem::add_rm32_imm8_rip(b, eip as u64 + nbytes, disp, imm)
+            } else {
+                sem::add_rm32_imm8_abs(b, ((word >> 8) as u32).swap_bytes(), imm)
+            }
+        }
         Insn::OrRmImm8 => {
             if rex_w {
                 sem::or_rm64_imm8(b, rm(), disp8())
@@ -2951,6 +2983,7 @@ fn dispatch<B: Backend>(
         }
         Insn::Pxor => sem::pxor_xmm(b, xmm_reg(), xmm_rm()),
         Insn::Pand => sem::pand_xmm(b, xmm_reg(), xmm_rm()),
+        Insn::Pminub => sem::pminub_xmm(b, xmm_reg(), xmm_rm()),
         Insn::Pcmpeqb => sem::pcmpeqb_xmm(b, xmm_reg(), xmm_rm()),
         Insn::Pcmpeqd => sem::pcmpeqd_xmm(b, xmm_reg(), xmm_rm()),
         Insn::Por => sem::por_xmm(b, xmm_reg(), xmm_rm()),
@@ -3167,6 +3200,7 @@ fn dispatch<B: Backend>(
         Insn::MovapsLoadMem8 => sem::movups_load_mem8(b, xmm_reg(), rm0f(), disp8()),
         Insn::MovapsLoadMem32 => sem::movups_load_mem32(b, xmm_reg(), rm0f(), disp32()),
         Insn::MovapsLoadRip => sem::movups_load_rip(b, xmm_reg(), eip as u64 + nbytes, disp32()),
+        Insn::MovapsLoadXmm => sem::movups_xmm_xmm(b, xmm_reg(), xmm_rm()),
         Insn::NoplSib => sem::nop(b),
         Insn::NoplSibd => sem::nop(b),
         Insn::NoplSibd32 => sem::nop(b),
@@ -3422,6 +3456,43 @@ fn dispatch<B: Backend>(
             } else {
                 // 32ビット絶対番地は未対応 (BSF は RIP 想定のため)。
                 sem::bsf_r32_memnd(b, reg0f_as_gpr(), rm0f())
+            }
+        }
+        Insn::BsrRRm => {
+            if rex_w {
+                sem::bsr_r64(b, reg0f_as_gpr(), rm0f())
+            } else {
+                sem::bsr_r32(b, reg0f_as_gpr(), rm0f())
+            }
+        }
+        Insn::BsrRMemnd => {
+            if rex_w {
+                sem::bsr_r64_memnd(b, reg0f_as_gpr(), rm0f())
+            } else {
+                sem::bsr_r32_memnd(b, reg0f_as_gpr(), rm0f())
+            }
+        }
+        Insn::BsrRMem8 => {
+            if rex_w {
+                sem::bsr_r64_mem8(b, reg0f_as_gpr(), rm0f(), disp8())
+            } else {
+                sem::bsr_r32_mem8(b, reg0f_as_gpr(), rm0f(), disp8())
+            }
+        }
+        Insn::BsrRMem32 => {
+            if rex_w {
+                sem::bsr_r64_mem32(b, reg0f_as_gpr(), rm0f(), disp32())
+            } else {
+                sem::bsr_r32_mem32(b, reg0f_as_gpr(), rm0f(), disp32())
+            }
+        }
+        Insn::BsrRRip => {
+            if rex_w {
+                sem::bsr_r64_rip(b, reg0f_as_gpr(), eip as u64 + nbytes, disp32())
+            } else if is64 {
+                sem::bsr_r32_rip(b, reg0f_as_gpr(), eip as u64 + nbytes, disp32())
+            } else {
+                sem::bsr_r32_memnd(b, reg0f_as_gpr(), rm0f())
             }
         }
         Insn::ImulRImm8Rip => {
@@ -3937,7 +4008,12 @@ fn dispatch<B: Backend>(
             | Insn::BsfRMemnd
             | Insn::BsfRMem8
             | Insn::BsfRMem32
-            | Insn::BsfRRip => Some(reg0f_as_gpr()),
+            | Insn::BsfRRip
+            | Insn::BsrRRm
+            | Insn::BsrRMemnd
+            | Insn::BsrRMem8
+            | Insn::BsrRMem32
+            | Insn::BsrRRip => Some(reg0f_as_gpr()),
             Insn::AddRRip
             | Insn::AddRMemnd
             | Insn::AddRMem8

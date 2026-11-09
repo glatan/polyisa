@@ -8563,3 +8563,248 @@ pub fn imul_r64_imm8<B: Backend>(b: &mut B, dst: Gpr, src: Gpr, imm: i8) -> Flow
     write64(b, dst, v);
     Ok(())
 }
+
+/// BSR 共通: 32bit値のリーディングゼロから最上位1の位置を求める (0なら32).
+fn bsr_ctz32<B: Backend>(b: &mut B, y: B::V<W32>) -> B::V<W32> {
+    let zero = b.konst::<W32>(0);
+    let one = b.konst::<W32>(1);
+    let c32 = b.konst::<W32>(32);
+    let mut acc: B::V<W32> = c32;
+    for i in (0..32).rev() {
+        let bit = b.konst::<W32>(1u32 << i);
+        let t = b.and::<W32>(y, bit);
+        let nz = b.cmp::<W32>(Cmp::Ne, t, zero);
+        let cand = b.konst::<W32>(i);
+        let undecided = b.cmp::<W32>(Cmp::Eq, acc, c32);
+        let nz_n = b.select::<W32>(nz, one, zero);
+        let un_n = b.select::<W32>(undecided, one, zero);
+        let both = b.and::<W32>(nz_n, un_n);
+        let take_b = b.cmp::<W32>(Cmp::Ne, both, zero);
+        acc = b.select::<W32>(take_b, cand, acc);
+    }
+    acc
+}
+
+/// BSR 共通: 64bit値の最上位1の位置 (0なら64).
+fn bsr_ctz64<B: Backend>(b: &mut B, y: B::V<W64>) -> B::V<W64> {
+    let zero64 = b.konst::<W64>(0);
+    let one32 = b.konst::<W32>(1);
+    let zero32 = b.konst::<W32>(0);
+    let c64 = b.konst::<W64>(64);
+    let mut acc: B::V<W64> = c64;
+    for i in (0..64).rev() {
+        let bit = b.konst::<W64>(1u64 << (i % 64));
+        let t = b.and::<W64>(y, bit);
+        let take = b.cmp::<W64>(Cmp::Ne, t, zero64);
+        let a64 = b.cmp::<W64>(Cmp::Eq, acc, c64);
+        let an = b.select::<W32>(a64, one32, zero32);
+        let tn = b.select::<W32>(take, one32, zero32);
+        let both = b.and::<W32>(an, tn);
+        let upd = b.cmp::<W32>(Cmp::Ne, both, zero32);
+        let cand = b.konst::<W64>(i as u64);
+        acc = b.select::<W64>(upd, cand, acc);
+    }
+    acc
+}
+
+/// BSR の ZF 更新 (ZF のみ、他は保存).
+fn bsr_set_zf<B: Backend>(b: &mut B, is_zero: B::B) {
+    let old: B::V<W32> = b.get(eflags_ref());
+    let zf_on = b.konst::<W32>(crate::sem::FLAG_ZF);
+    let zf_off_mask = b.konst::<W32>(!crate::sem::FLAG_ZF);
+    let cleared = b.and::<W32>(old, zf_off_mask);
+    let zero32 = b.konst::<W32>(0);
+    let zf_new = b.select::<W32>(is_zero, zf_on, zero32);
+    let nv = b.or::<W32>(cleared, zf_new);
+    b.set(eflags_ref(), nv);
+}
+
+/// BSR r32, r/m32 reg-direct。最上位の1の位置を求める。src=0ならZF=1、dst不定 (0とする).
+pub fn bsr_r32<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
+    let y = read(b, src);
+    let zero = b.konst::<W32>(0);
+    let is_zero = b.cmp::<W32>(Cmp::Eq, y, zero);
+    let acc = bsr_ctz32(b, y);
+    let v = b.select::<W32>(is_zero, zero, acc);
+    write(b, dst, v);
+    bsr_set_zf(b, is_zero);
+    Ok(())
+}
+
+/// BSR r64, r/m64 reg-direct (REX.W)。
+pub fn bsr_r64<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
+    let y = read64(b, src);
+    let zero64 = b.konst::<W64>(0);
+    let is_zero = b.cmp::<W64>(Cmp::Eq, y, zero64);
+    let acc = bsr_ctz64(b, y);
+    let v = b.select::<W64>(is_zero, zero64, acc);
+    write64(b, dst, v);
+    bsr_set_zf(b, is_zero);
+    Ok(())
+}
+
+/// BSR r32, m32 [base] (mod=00)。
+pub fn bsr_r32_memnd<B: Backend>(b: &mut B, dst: Gpr, base: Gpr) -> Flow<B> {
+    let addr = read64(b, base);
+    let y: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let zero = b.konst::<W32>(0);
+    let is_zero = b.cmp::<W32>(Cmp::Eq, y, zero);
+    let acc = bsr_ctz32(b, y);
+    let v = b.select::<W32>(is_zero, zero, acc);
+    write(b, dst, v);
+    bsr_set_zf(b, is_zero);
+    Ok(())
+}
+
+/// BSR r64, m64 [base] (mod=00, REX.W)。
+pub fn bsr_r64_memnd<B: Backend>(b: &mut B, dst: Gpr, base: Gpr) -> Flow<B> {
+    let addr = read64(b, base);
+    let y: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let zero64 = b.konst::<W64>(0);
+    let is_zero = b.cmp::<W64>(Cmp::Eq, y, zero64);
+    let acc = bsr_ctz64(b, y);
+    let v = b.select::<W64>(is_zero, zero64, acc);
+    write64(b, dst, v);
+    bsr_set_zf(b, is_zero);
+    Ok(())
+}
+
+/// BSR r32, m32 [base+disp8] (mod=01)。
+pub fn bsr_r32_mem8<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, disp: i8) -> Flow<B> {
+    let addr = eff_addr(b, base, disp);
+    let y: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let zero = b.konst::<W32>(0);
+    let is_zero = b.cmp::<W32>(Cmp::Eq, y, zero);
+    let acc = bsr_ctz32(b, y);
+    let v = b.select::<W32>(is_zero, zero, acc);
+    write(b, dst, v);
+    bsr_set_zf(b, is_zero);
+    Ok(())
+}
+
+/// BSR r64, m64 [base+disp8] (REX.W)。
+pub fn bsr_r64_mem8<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, disp: i8) -> Flow<B> {
+    let addr = eff_addr(b, base, disp);
+    let y: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let zero64 = b.konst::<W64>(0);
+    let is_zero = b.cmp::<W64>(Cmp::Eq, y, zero64);
+    let acc = bsr_ctz64(b, y);
+    let v = b.select::<W64>(is_zero, zero64, acc);
+    write64(b, dst, v);
+    bsr_set_zf(b, is_zero);
+    Ok(())
+}
+
+/// BSR r32, m32 [base+disp32] (mod=10)。
+pub fn bsr_r32_mem32<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, disp: i32) -> Flow<B> {
+    let addr = eff_addr32(b, base, disp);
+    let y: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let zero = b.konst::<W32>(0);
+    let is_zero = b.cmp::<W32>(Cmp::Eq, y, zero);
+    let acc = bsr_ctz32(b, y);
+    let v = b.select::<W32>(is_zero, zero, acc);
+    write(b, dst, v);
+    bsr_set_zf(b, is_zero);
+    Ok(())
+}
+
+/// BSR r64, m64 [base+disp32] (REX.W)。
+pub fn bsr_r64_mem32<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, disp: i32) -> Flow<B> {
+    let addr = eff_addr32(b, base, disp);
+    let y: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let zero64 = b.konst::<W64>(0);
+    let is_zero = b.cmp::<W64>(Cmp::Eq, y, zero64);
+    let acc = bsr_ctz64(b, y);
+    let v = b.select::<W64>(is_zero, zero64, acc);
+    write64(b, dst, v);
+    bsr_set_zf(b, is_zero);
+    Ok(())
+}
+
+/// BSR r32, m32 [RIP+disp32]。
+pub fn bsr_r32_rip<B: Backend>(b: &mut B, dst: Gpr, next_rip: u64, disp: i32) -> Flow<B> {
+    let base = b.konst::<W64>(next_rip);
+    let d = b.konst::<W64>(disp as i64 as u64);
+    let addr = b.add::<W64>(base, d);
+    let y: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let zero = b.konst::<W32>(0);
+    let is_zero = b.cmp::<W32>(Cmp::Eq, y, zero);
+    let acc = bsr_ctz32(b, y);
+    let v = b.select::<W32>(is_zero, zero, acc);
+    write(b, dst, v);
+    bsr_set_zf(b, is_zero);
+    Ok(())
+}
+
+/// BSR r64, m64 [RIP+disp32] (REX.W)。
+pub fn bsr_r64_rip<B: Backend>(b: &mut B, dst: Gpr, next_rip: u64, disp: i32) -> Flow<B> {
+    let base = b.konst::<W64>(next_rip);
+    let d = b.konst::<W64>(disp as i64 as u64);
+    let addr = b.add::<W64>(base, d);
+    let y: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let zero64 = b.konst::<W64>(0);
+    let is_zero = b.cmp::<W64>(Cmp::Eq, y, zero64);
+    let acc = bsr_ctz64(b, y);
+    let v = b.select::<W64>(is_zero, zero64, acc);
+    write64(b, dst, v);
+    bsr_set_zf(b, is_zero);
+    Ok(())
+}
+
+/// ADD m32,imm8 [RIP+disp32] (83 /0 RIP)。
+pub fn add_rm32_imm8_rip<B: Backend>(b: &mut B, next_rip: u64, disp: i32, imm: i8) -> Flow<B> {
+    let base = b.konst::<W64>(next_rip);
+    let d = b.konst::<W64>(disp as i64 as u64);
+    let addr = b.add::<W64>(base, d);
+    let x: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let y = b.konst::<W32>(imm as i32 as u32);
+    let v = b.add::<W32>(x, y);
+    b.store::<W32>(addr, v, DATA_WRITE)?;
+    update_add_flags(b, x, y, v);
+    Ok(())
+}
+
+/// ADD m64,imm8 [RIP+disp32] (83 /0 RIP, REX.W)。
+pub fn add_rm64_imm8_rip<B: Backend>(b: &mut B, next_rip: u64, disp: i32, imm: i8) -> Flow<B> {
+    let base = b.konst::<W64>(next_rip);
+    let d = b.konst::<W64>(disp as i64 as u64);
+    let addr = b.add::<W64>(base, d);
+    let x: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let y = b.konst::<W64>(imm as i64 as u64);
+    let v = b.add::<W64>(x, y);
+    b.store::<W64>(addr, v, DATA_WRITE)?;
+    update_add_flags(b, x, y, v);
+    Ok(())
+}
+
+/// ADD m32,imm8 [disp32] abs (32ビット)。
+pub fn add_rm32_imm8_abs<B: Backend>(b: &mut B, addr32: u32, imm: i8) -> Flow<B> {
+    let addr = b.konst::<W64>(addr32 as u64);
+    let x: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let y = b.konst::<W32>(imm as i32 as u32);
+    let v = b.add::<W32>(x, y);
+    b.store::<W32>(addr, v, DATA_WRITE)?;
+    update_add_flags(b, x, y, v);
+    Ok(())
+}
+
+/// PMINUB xmm1, xmm2。符号なしバイト毎に小さい方を選ぶ.
+pub fn pminub_xmm<B: Backend>(b: &mut B, dst: Xmm, src: Xmm) -> Flow<B> {
+    let a: B::V<W128> = b.get(xmm_ref(dst));
+    let c: B::V<W128> = b.get(xmm_ref(src));
+    let mut acc: B::V<W128> = b.konst::<W128>(0);
+    for i in 0..16 {
+        let shift = b.konst::<W128>((i * 8) as u128);
+        let mask = b.konst::<W128>(0xFF);
+        let ab = b.shr_l::<W128>(a, shift);
+        let cb = b.shr_l::<W128>(c, shift);
+        let ab8 = b.and::<W128>(ab, mask);
+        let cb8 = b.and::<W128>(cb, mask);
+        let take_a = b.cmp::<W128>(Cmp::LtU, ab8, cb8);
+        let byte = b.select::<W128>(take_a, ab8, cb8);
+        let pos = b.shl::<W128>(byte, shift);
+        acc = b.or::<W128>(acc, pos);
+    }
+    b.set(xmm_ref(dst), acc);
+    Ok(())
+}

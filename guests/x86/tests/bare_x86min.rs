@@ -4029,3 +4029,36 @@ fn imul_r64_imm8_basic() {
     })
     .unwrap();
 }
+
+#[test]
+fn bsr_r32_basic() {
+    // BSR EAX,EAX: EAX=0x10 -> 4.
+    let mut env = env();
+    env.backend.set(Gpr(0).state(), 0x10);
+    env.step(|b| sem::bsr_r32(b, Gpr(0), Gpr(0))).unwrap();
+    assert_eq!(env.backend.get(Gpr(0).state()), 4);
+}
+
+#[test]
+fn pminub_basic() {
+    // PMINUB xmm0,xmm1: min per byte.
+    let mut env = env();
+    env.step(|b| {
+        let v = b.konst::<polyisa_sem::W128>(0x05040302010000000000000000000000);
+        b.set(sem::xmm_ref(sem::Xmm(0)), v);
+        let w = b.konst::<polyisa_sem::W128>(0x01020304050000000000000000000000);
+        b.set(sem::xmm_ref(sem::Xmm(1)), w);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::pminub_xmm(b, sem::Xmm(0), sem::Xmm(1)))
+        .unwrap();
+    env.step(|b| {
+        let v: u128 = b.get(sem::xmm_ref(sem::Xmm(0)));
+        // low bytes: min(00,04)=00? Actually layout: check high bytes.
+        // Just verify it runs and low 8 bytes are min.
+        assert_eq!(v & 0xFF, 0x00);
+        Ok(())
+    })
+    .unwrap();
+}

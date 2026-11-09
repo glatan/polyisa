@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! x86 最小のゲスト ISA。段階4の最小であり、可変長デコードを確かめる。
 //!
-//! i386 の395件を持つ。ModRM/SIB 汎用・XMM最小・near Jcc・MOVZX・CMOVB・ADD RIP等を含む。
+//! i386 の403件を持つ。ModRM/SIB 汎用・XMM最小・near Jcc・MOVZX・CMOVB・ADD RIP等を含む。
 //! REX 接頭辞はデコード前に剥がし、Insは共有して64ビット意味論に切り替える。
 //! SYSCALL/CPUID は最小形、ModRM は register-direct（全組合せ）・mod=01+disp8・
 //! mod=10+disp32・絶対番地と SIB base+index 形（スケール付き、disp8/disp32・disp なしを含む）を持ち、
@@ -70,7 +70,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数116件。
-        assert_eq!(INSNS.len(), 395);
+        assert_eq!(INSNS.len(), 403);
     }
 
     #[test]
@@ -344,6 +344,8 @@ mod tests {
         );
         assert_eq!(decode(0x85D2, 16), Some(Insn::TestRm32));
         assert_eq!(decode(0x0F285710, 32), Some(Insn::MovapsLoadMem8));
+        assert_eq!(decode(0x0F28F5, 24), Some(Insn::MovapsLoadXmm));
+        assert_eq!(decode(0x0FBDC0, 24), Some(Insn::BsrRRm));
         assert_eq!(decode(0x3C02, 16), Some(Insn::CmpAlImm));
         assert_eq!(decode(0x3B3C2510000000, 56), Some(Insn::CmpRSibabs));
         assert_eq!(decode(0x873DB6381A00, 48), Some(Insn::XchgRRip));
@@ -359,6 +361,8 @@ mod tests {
         assert_eq!(decode(0x0FD7C0, 24), Some(Insn::Pmovmskb));
         assert_eq!(decode(0x0F74C1, 24), Some(Insn::Pcmpeqb));
         assert_eq!(decode(0x0F76C0, 24), Some(Insn::Pcmpeqd));
+        assert_eq!(decode(0x0FDAEC, 24), Some(Insn::Pminub));
+        assert_eq!(decode(0x8305DF641F0001, 56), Some(Insn::AddRm32Imm8Rip));
         assert_eq!(decode(0x0FEBC4, 24), Some(Insn::Por));
         assert_eq!(decode(0x0F62C0, 24), Some(Insn::Punpckldq));
         assert_eq!(decode(0x0F6CC0, 24), Some(Insn::Punpcklqdq));
