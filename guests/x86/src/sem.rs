@@ -316,6 +316,18 @@ pub fn mov_eax<B: Backend>(b: &mut B, imm: u32) -> Flow<B> {
     Ok(())
 }
 
+/// INT 0x80。i386 のシステムコール命令。OS パーソナリティが処理する退出を返す。
+/// 呼び出し規約は eax=番号・ebx,ecx,edx,esi,edi,ebp=引数、戻りは eax（負が errno）。
+/// IDT 経由のベクタ分岐と特権検査は本格実装で足す。
+pub fn int80<B: Backend>(b: &mut B, eip: u32) -> Flow<B> {
+    Err(b.raise(GuestException {
+        kind: ExceptionKind::Trap,
+        code: 0x80,
+        addr: Some(eip as u64),
+        in_delay_slot: false,
+    }))
+}
+
 /// SYSCALL。OS パーソナリティが処理する退出を返す（番号・規約は本格実装で足す）。
 pub fn syscall<B: Backend>(b: &mut B, eip: u32) -> Flow<B> {
     Err(b.raise(GuestException {
