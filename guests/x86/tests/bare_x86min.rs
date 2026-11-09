@@ -3965,3 +3965,13 @@ fn cmovs_taken() {
     env.step(|b| sem::cmovs_r32(b, Gpr(2), Gpr(0))).unwrap();
     assert_eq!(env.backend.get(Gpr(2).state()), 0x77);
 }
+
+#[test]
+fn cmp_al_imm_sets_cf() {
+    // CMP AL,2: AL=1 -> CF=1 (borrow).
+    let mut env = env();
+    env.backend.set(Gpr(0).state(), 1);
+    env.step(|b| sem::cmp_al_imm(b, 2)).unwrap();
+    // CF is bit0.
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x1, 0x1);
+}

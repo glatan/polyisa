@@ -178,6 +178,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("call_rel32", "F1", "11101000 ................................", "call {imm}", "jump"),
         ("ret", "F1", "11000011", "ret", "jump"),
         ("cmp_eax", "F1", "00111101 ................................", "cmp eax, {imm}", "alu"),
+        ("cmp_al_imm", "F1", "00111100 ........", "cmp al, {imm}", "alu"),
         
         ("je", "F1", "01110100 ........", "je {imm}", "jump"),
         ("jne", "F1", "01110101 ........", "jne {imm}", "jump"),

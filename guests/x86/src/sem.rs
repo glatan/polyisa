@@ -244,6 +244,17 @@ pub fn cmp_eax<B: Backend>(b: &mut B, imm: u32) -> Flow<B> {
     Ok(())
 }
 
+/// CMP AL,imm8。AL と imm8 を比較し 6 旗を更新する (dst 不変).
+pub fn cmp_al_imm<B: Backend>(b: &mut B, imm: u8) -> Flow<B> {
+    use polyisa_sem::W8;
+    let x32 = read(b, Gpr(0));
+    let x: B::V<W8> = b.trunc::<W32, W8>(x32);
+    let y = b.konst::<W8>(imm);
+    let v = b.sub::<W8>(x, y);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
 /// TEST r/m32,r32。AND 結果で 5 旗を更新する（CF=0、OF=0）。dst/src は変えない.
 pub fn test_rm32<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
     let x = read(b, dst);
