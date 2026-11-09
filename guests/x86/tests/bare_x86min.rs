@@ -2062,3 +2062,37 @@ fn lea_sib64_rex_x() {
         .unwrap();
     assert_eq!(env.backend.get(Gpr(1).state()), 0x1020);
 }
+
+#[test]
+fn cmp_rm8_imm_sets_flags() {
+    // CMP AL,1: AL=1 -> ZF=1.
+    let mut env = env();
+    env.backend.set(Gpr(0).state(), 1);
+    env.step(|b| sem::cmp_rm8_imm(b, Gpr(0), 1, false)).unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0x40);
+    // CMP [base+idx+disp],imm8 SIBd.
+    env.map_rw(0, 1).unwrap();
+    env.backend.set(Gpr(3).state(), 0x100);
+    env.backend.set(Gpr(6).state(), 0x10);
+    env.backend.mem.write(VirtAddr(0x120), &[5u8]).unwrap();
+    env.step(|b| sem::cmp_rm8_imm_sibd(b, Gpr(3), Gpr(6), 0, 0x10, 5))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0x40);
+}
+
+#[test]
+fn cmove_mem32_roundtrip() {
+    // CMOVE RAX,[RBP+0x20]: [0x120]=0x77, ZF=1 -> RAX=0x77.
+    let mut env = env();
+    env.map_rw(0, 1).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x120), &[0x77u8, 0, 0, 0, 0, 0, 0, 0])
+        .unwrap();
+    env.backend.set(Gpr(5).state(), 0x100);
+    env.backend.set(Gpr(0).state(), 0);
+    env.backend.set(sem::eflags_ref(), 0x40);
+    env.step(|b| sem::cmove_r64_mem32(b, Gpr(0), Gpr(5), 0x20))
+        .unwrap();
+    assert_eq!(env.backend.get(Gpr(0).state()), 0x77);
+}

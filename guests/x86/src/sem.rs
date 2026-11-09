@@ -410,6 +410,34 @@ pub fn and_rm8_imm<B: Backend>(b: &mut B, dst: Gpr, imm: u8, high: bool) -> Flow
     Ok(())
 }
 
+/// CMP r/m8,imm8。メモリを読まずレジスタを比較し、6 旗を更新する.
+pub fn cmp_rm8_imm<B: Backend>(b: &mut B, dst: Gpr, imm: u8, high: bool) -> Flow<B> {
+    use polyisa_sem::W8;
+    let x = read8(b, dst, high);
+    let y = b.konst::<W8>(imm);
+    let v = b.sub::<W8>(x, y);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
+/// CMP r/m8,imm8 SIB+disp8 (80 /7 mod=01)。メモリを読んで比較する.
+pub fn cmp_rm8_imm_sibd<B: Backend>(
+    b: &mut B,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i8,
+    imm: u8,
+) -> Flow<B> {
+    use polyisa_sem::W8;
+    let addr = sib_addr_scaled(b, shift, disp as i32, base, idx);
+    let x: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
+    let y = b.konst::<W8>(imm);
+    let v = b.sub::<W8>(x, y);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
 /// TEST EAX, EAX。AND 結果で 5 旗を更新する（CF=0、OF=0）。
 /// EAX 自身は変えない。
 pub fn test_eax<B: Backend>(b: &mut B) -> Flow<B> {
@@ -2890,6 +2918,28 @@ pub fn cmovbe_r64<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
     let dstv = read64(b, dst);
     let v = b.select::<W64>(take, srcv, dstv);
     write64(b, dst, v);
+    Ok(())
+}
+
+/// CMOVE r64, m64 (RBP+disp32)。ZF=1 なら mem64 を dst に移す.
+pub fn cmove_r64_mem32<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, disp: i32) -> Flow<B> {
+    let addr = eff_addr32(b, base, disp);
+    let srcv: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let take = read_zf(b);
+    let dstv = read64(b, dst);
+    let v = b.select::<W64>(take, srcv, dstv);
+    write64(b, dst, v);
+    Ok(())
+}
+
+/// CMOVE r32, m32 (RBP+disp32)。ZF=1 なら mem32 を dst に移す.
+pub fn cmove_r32_mem32<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, disp: i32) -> Flow<B> {
+    let addr = eff_addr32(b, base, disp);
+    let srcv: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let take = read_zf(b);
+    let dstv = read(b, dst);
+    let v = b.select::<W32>(take, srcv, dstv);
+    write(b, dst, v);
     Ok(())
 }
 
