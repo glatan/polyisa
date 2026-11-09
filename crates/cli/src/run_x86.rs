@@ -201,6 +201,11 @@ fn fetch_len(
             let s = second?;
             if s >> 6 == 3 { Some(2) } else { None }
         }
+        // 0x69 /r id (IMUL r,r/m,imm32)。reg-direct のみ 6B.
+        0x69 => {
+            let s = second?;
+            if s >> 6 == 3 { Some(6) } else { None }
+        }
         // 0x81 /r id (算術 imm32 群)。SIB 付きは未対応。
         // has66 (66 81) は imm16 のため 2B 短くなる.
         0x81 => {
@@ -326,6 +331,11 @@ fn fetch_len(
                     None
                 }
             }
+        }
+        // 0x11 /r (ADC) と 0x19 /r (SBB)。reg-direct のみ.
+        0x11 | 0x19 => {
+            let s = second?;
+            if s >> 6 == 3 { Some(2) } else { None }
         }
         // 0x03 /r (ADD) と 0x09 /r (OR m32,r32) と 0x0B /r (OR r32,m32)。reg-direct と RIP/abs のみ.
         0x03 | 0x0B | 0x09 => {
@@ -470,11 +480,14 @@ pub fn run_mode(
                 | 0x03
                 | 0x0B
                 | 0x09
+                | 0x11
+                | 0x19
                 | 0xC1
                 | 0xC7
                 | 0x81
                 | 0x83
                 | 0x63
+                | 0x69
                 | 0x8D
                 | 0x0F
                 | 0xF7
@@ -574,6 +587,8 @@ pub fn run_mode(
                     | 0x01
                     | 0x03
                     | 0x0B
+                    | 0x11
+                    | 0x19
                     | 0x29
                     | 0x31
                     | 0x39
@@ -584,11 +599,18 @@ pub fn run_mode(
                     | 0xF6
                     | 0x80
                     | 0xC1
+                    | 0x05
+                    | 0x2D
+                    | 0x3D
+                    | 0x25
+                    | 0x0D
+                    | 0x35
                     | 0x8D
                     | 0xC7
                     | 0x83
                     | 0x81
                     | 0x63
+                    | 0x69
                     | 0x0F
                     | 0xA4
                     | 0xA5
@@ -844,7 +866,13 @@ fn dispatch<B: Backend>(
         Insn::DecEbp => sem::dec_r32(b, Gpr(5)),
         Insn::DecEsi => sem::dec_r32(b, Gpr(6)),
         Insn::DecEdi => sem::dec_r32(b, Gpr(7)),
-        Insn::AddEax => sem::add_eax(b, imm32()),
+        Insn::AddEax => {
+            if rex_w {
+                sem::add_rm64_imm(b, Gpr(0), imm32())
+            } else {
+                sem::add_eax(b, imm32())
+            }
+        }
         Insn::Jmp8 => sem::jmp8(b, eip.wrapping_add(2).wrapping_add(disp8() as i32 as u32)),
         Insn::MovR32Imm => {
             // B8+r：dst は opcode 下3ビット（REX.B で拡張）。
@@ -870,6 +898,20 @@ fn dispatch<B: Backend>(
                 sem::add_rm64(b, rm(), reg())
             } else {
                 sem::add_rm32(b, rm(), reg())
+            }
+        }
+        Insn::AdcRm32 => {
+            if rex_w {
+                sem::adc_rm64(b, rm(), reg())
+            } else {
+                sem::adc_rm32(b, rm(), reg())
+            }
+        }
+        Insn::SbbRm32 => {
+            if rex_w {
+                sem::sbb_rm64(b, rm(), reg())
+            } else {
+                sem::sbb_rm32(b, rm(), reg())
             }
         }
         Insn::MovRm32 => {
@@ -1003,7 +1045,13 @@ fn dispatch<B: Backend>(
                 sem::ret(b)
             }
         }
-        Insn::CmpEax => sem::cmp_eax(b, imm32()),
+        Insn::CmpEax => {
+            if rex_w {
+                sem::cmp_rm64_imm(b, Gpr(0), imm32())
+            } else {
+                sem::cmp_eax(b, imm32())
+            }
+        }
         Insn::TestRm32 => sem::test_rm32(b, rm(), reg()),
         Insn::TestRm32Imm => sem::test_rm32_imm(b, rm(), imm32()),
         Insn::NotRm32 => sem::not_rm32(b, rm()),
@@ -1054,7 +1102,13 @@ fn dispatch<B: Backend>(
         Insn::Jg => sem::jg(b, eip, disp8()),
         Insn::Loop => sem::loop_rel8(b, eip, disp8()),
         Insn::JmpRel32 => sem::jmp_rel32(b, eip, disp32()),
-        Insn::SubEax => sem::sub_eax(b, imm32()),
+        Insn::SubEax => {
+            if rex_w {
+                sem::sub_rm64_imm(b, Gpr(0), imm32())
+            } else {
+                sem::sub_eax(b, imm32())
+            }
+        }
         Insn::Leave => {
             if is64 {
                 sem::leave64(b)
@@ -1062,9 +1116,27 @@ fn dispatch<B: Backend>(
                 sem::leave(b)
             }
         }
-        Insn::AndEax => sem::and_eax(b, imm32()),
-        Insn::OrEax => sem::or_eax(b, imm32()),
-        Insn::XorImm => sem::xor_imm(b, imm32()),
+        Insn::AndEax => {
+            if rex_w {
+                sem::and_rm64_imm(b, Gpr(0), imm32())
+            } else {
+                sem::and_eax(b, imm32())
+            }
+        }
+        Insn::OrEax => {
+            if rex_w {
+                sem::or_rm64_imm(b, Gpr(0), imm32())
+            } else {
+                sem::or_eax(b, imm32())
+            }
+        }
+        Insn::XorImm => {
+            if rex_w {
+                sem::xor_rm64_imm(b, Gpr(0), imm32())
+            } else {
+                sem::xor_imm(b, imm32())
+            }
+        }
         Insn::ShlEax => sem::shl_eax(b, word as u8),
         Insn::ShrRm32Imm8 => sem::shr_rm32_imm8(b, rm(), word as u8),
         Insn::SarRm32Imm8 => {
@@ -1524,6 +1596,13 @@ fn dispatch<B: Backend>(
                 sem::cmovbe_r32(b, reg(), rm())
             }
         }
+        Insn::ImulRImm => {
+            if rex_w {
+                sem::imul_r64_imm(b, reg(), rm(), imm32())
+            } else {
+                sem::imul_r32_imm(b, reg(), rm(), imm32())
+            }
+        }
         Insn::CmpRmImm8Rip => {
             // 83 3D + disp32 + imm8: word = [83][3D][disp0..3][imm] (56ビット)。
             // disp32 は (word>>8) の下位32を LE 復元する. imm は最下位.
@@ -1593,8 +1672,9 @@ fn dispatch<B: Backend>(
         Insn::JleRel32 => sem::jle_rel32(b, eip, disp32()),
         Insn::JgRel32 => sem::jg_rel32(b, eip, disp32()),
     };
-    if is64 {
+    if is64 && !rex_w {
         // 64ビットでの32ビット書き込みは上位をゼロ拡張する。
+        // REX.W の64ビット書き込みは full64 のため消さない.
         let dst: Option<Gpr> = match insn {
             Insn::IncEax
             | Insn::DecEax
@@ -1613,6 +1693,8 @@ fn dispatch<B: Backend>(
             Insn::IncEsi | Insn::DecEsi | Insn::PopEsi => Some(Gpr(6)),
             Insn::IncEdi | Insn::DecEdi | Insn::PopEdi => Some(Gpr(7)),
             Insn::AddRm32
+            | Insn::AdcRm32
+            | Insn::SbbRm32
             | Insn::SubRm32
             | Insn::AndRm32
             | Insn::OrRm32
@@ -1646,6 +1728,7 @@ fn dispatch<B: Backend>(
             | Insn::Cmove
             | Insn::Cmovns
             | Insn::Cmovbe
+            | Insn::ImulRImm
             | Insn::MovzxR32M16
             | Insn::MovzxR32M16Rip
             | Insn::AddRRip

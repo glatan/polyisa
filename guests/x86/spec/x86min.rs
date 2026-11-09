@@ -198,6 +198,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("and_rm32", "F1", "00100001 11......", "and r/m32, r32", "alu"),
         ("or_rm32", "F1", "00001001 11......", "or r/m32, r32", "alu"),
         ("sub_rm32", "F1", "00101001 11......", "sub r/m32, r32", "alu"),
+        ("adc_rm32", "F1", "00010001 11......", "adc r/m32, r32", "alu"),
+        ("sbb_rm32", "F1", "00011001 11......", "sbb r/m32, r32", "alu"),
         ("sub_eax", "F1", "00101101 ................................", "sub eax, {imm}", "alu"),
         ("mov_mr32", "F1", "10001001 11......", "mov r/m32, r32", "alu"),
         ("leave", "F1", "11001001", "leave", "alu"),
@@ -269,6 +271,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         // CMOVNS r32/r64, r/m32/r/m64 (0F 49 /r)。reg-direct のみ.
         ("cmovns", "F1", "00001111 01001001 11......", "cmovns r, r/m", "alu"),
         ("cmovbe", "F1", "00001111 01000110 11......", "cmovbe r, r/m", "alu"),
+        ("imul_r_imm", "F1", "01101001 11...... ................................", "imul r, r/m, {imm}", "alu"),
         // OR m32,imm32 RIP (81 0D + disp32 + imm32)。64ビット RIP相対.
         ("or_rm32_rip", "F1", "10000001 00001101 ................................ ................................", "or r/m32, {imm}", "alu"),
         // OR r32,m32 RIP (0B 15 + disp32)。

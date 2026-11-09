@@ -1559,6 +1559,76 @@ pub fn sbb_rm64_imm8<B: Backend>(b: &mut B, dst: Gpr, imm: i8) -> Flow<B> {
 }
 
 /// SUB r/m32, imm8。imm8 は符号拡張する。6 旗を更新する。
+/// ADC r/m32, r32。CF を足し込んで 6 旗を更新する.
+pub fn adc_rm32<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
+    let x = read(b, dst);
+    let y = read(b, src);
+    let c = cf_num(b);
+    let y1 = b.add::<W32>(y, c);
+    let x64 = b.zext::<W32, W64>(x);
+    let y64 = b.zext::<W32, W64>(y);
+    let c64 = b.zext::<W32, W64>(c);
+    let t1 = b.add::<W64>(x64, y64);
+    let t = b.add::<W64>(t1, c64);
+    let v: B::V<W32> = b.trunc::<W64, W32>(t);
+    write(b, dst, v);
+    update_add_flags(b, x, y1, v);
+    Ok(())
+}
+
+/// ADC r/m64, r64 (REX.W)。CF を足し込んで 6 旗を更新する.
+pub fn adc_rm64<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
+    let x = read64(b, dst);
+    let y = read64(b, src);
+    let c = cf_num(b);
+    let x128 = b.zext::<W64, W128>(x);
+    let y128 = b.zext::<W64, W128>(y);
+    let c128 = b.zext::<W32, W128>(c);
+    let t1 = b.add::<W128>(x128, y128);
+    let t = b.add::<W128>(t1, c128);
+    let v: B::V<W64> = b.trunc::<W128, W64>(t);
+    write64(b, dst, v);
+    let c64 = b.trunc::<W128, W64>(c128);
+    let y1 = b.add::<W64>(y, c64);
+    update_add_flags(b, x, y1, v);
+    Ok(())
+}
+
+/// SBB r/m32, r32。CF を借りて 6 旗を更新する.
+pub fn sbb_rm32<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
+    let x = read(b, dst);
+    let y = read(b, src);
+    let c = cf_num(b);
+    let y1 = b.add::<W32>(y, c);
+    let x64 = b.zext::<W32, W64>(x);
+    let y64 = b.zext::<W32, W64>(y);
+    let c64 = b.zext::<W32, W64>(c);
+    let t1 = b.sub::<W64>(x64, y64);
+    let t = b.sub::<W64>(t1, c64);
+    let v: B::V<W32> = b.trunc::<W64, W32>(t);
+    write(b, dst, v);
+    update_sub_flags(b, x, y1, v);
+    Ok(())
+}
+
+/// SBB r/m64, r64 (REX.W)。CF を借りて 6 旗を更新する.
+pub fn sbb_rm64<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
+    let x = read64(b, dst);
+    let y = read64(b, src);
+    let c = cf_num(b);
+    let x128 = b.zext::<W64, W128>(x);
+    let y128 = b.zext::<W64, W128>(y);
+    let c128 = b.zext::<W32, W128>(c);
+    let t1 = b.sub::<W128>(x128, y128);
+    let t = b.sub::<W128>(t1, c128);
+    let v: B::V<W64> = b.trunc::<W128, W64>(t);
+    write64(b, dst, v);
+    let c64 = b.trunc::<W128, W64>(c128);
+    let y1 = b.add::<W64>(y, c64);
+    update_sub_flags(b, x, y1, v);
+    Ok(())
+}
+
 pub fn sub_rm32_imm8<B: Backend>(b: &mut B, dst: Gpr, imm: i8) -> Flow<B> {
     let x = read(b, dst);
     let y = b.konst::<W32>(imm as i32 as u32);
@@ -2756,6 +2826,30 @@ pub fn cmovbe_r64<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
     let srcv = read64(b, src);
     let dstv = read64(b, dst);
     let v = b.select::<W64>(take, srcv, dstv);
+    write64(b, dst, v);
+    Ok(())
+}
+
+/// IMUL r32, r/m32, imm32。符号付き積の下位32ビットを dst に置く.
+pub fn imul_r32_imm<B: Backend>(b: &mut B, dst: Gpr, src: Gpr, imm: u32) -> Flow<B> {
+    let x = read(b, src);
+    let y = b.konst::<W32>(imm);
+    let x64 = b.sext::<W32, W64>(x);
+    let y64 = b.sext::<W32, W64>(y);
+    let p64 = b.mul::<W64>(x64, y64);
+    let v: B::V<W32> = b.trunc::<W64, W32>(p64);
+    write(b, dst, v);
+    Ok(())
+}
+
+/// IMUL r64, r/m64, imm32 (REX.W)。imm32 は符号拡張する.
+pub fn imul_r64_imm<B: Backend>(b: &mut B, dst: Gpr, src: Gpr, imm: u32) -> Flow<B> {
+    let x = read64(b, src);
+    let y = b.konst::<W64>(imm as i32 as u64);
+    let x128 = b.sext::<W64, W128>(x);
+    let y128 = b.sext::<W64, W128>(y);
+    let p128 = b.mul::<W128>(x128, y128);
+    let v: B::V<W64> = b.trunc::<W128, W64>(p128);
     write64(b, dst, v);
     Ok(())
 }

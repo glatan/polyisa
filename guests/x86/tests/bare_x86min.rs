@@ -2013,3 +2013,33 @@ fn cmovbe_moves_on_carry_or_zero() {
     env.step(|b| sem::cmovbe_r32(b, Gpr(0), Gpr(1))).unwrap();
     assert_eq!(eax(&mut env), 1);
 }
+
+#[test]
+fn adc_sbb_rm32_carry() {
+    // ADC: CF=1, 1+2+1=4.
+    let mut env = env();
+    env.backend.set(Gpr(0).state(), 1);
+    env.backend.set(Gpr(1).state(), 2);
+    env.backend.set(sem::eflags_ref(), 0x1);
+    env.step(|b| sem::adc_rm32(b, Gpr(0), Gpr(1))).unwrap();
+    assert_eq!(eax(&mut env), 4);
+    // SBB: CF=1, 5-2-1=2.
+    env.backend.set(Gpr(0).state(), 5);
+    env.backend.set(sem::eflags_ref(), 0x1);
+    env.step(|b| sem::sbb_rm32(b, Gpr(0), Gpr(1))).unwrap();
+    assert_eq!(eax(&mut env), 2);
+}
+
+#[test]
+fn imul_r_imm_basic() {
+    // IMUL R8,RDI,0x88: RDI=2 -> R8=0x110.
+    let mut env = env();
+    env.step(|b| {
+        sem::write64(b, Gpr(6), 2);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::imul_r64_imm(b, Gpr(8), Gpr(6), 0x88))
+        .unwrap();
+    assert_eq!(env.backend.get(Gpr(8).state()), 0x110);
+}
