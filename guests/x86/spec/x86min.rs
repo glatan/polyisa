@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // x86 最小の ISADL モデル（段階4の最小）。
 //
-// i386 の整数31件に絞る。可変長（8/16/24/40ビット）のデコード入口と
+// i386 の整数43件に絞る。可変長（8/16/24/40ビット）のデコード入口と
 // ModRM register-direct の最小形を確かめる。
 // ModRM の SIB・絶対番地・スケール形式と Rust フック・遅延フラグ・x87・SSE・
 // 64ビット・セグメントは本格実装で足す。
@@ -65,9 +65,21 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("mov_eax_mem", "F1", "10001011 01000011 ........", "mov eax, [ebx+disp8]", "load"),
         ("mov_mem_eax", "F1", "10001001 01000011 ........", "mov [ebx+disp8], eax", "store"),
         ("push_eax", "F1", "01010000", "push eax", "store"),
-        ("pop_eax", "F1", "01011000", "pop eax", "load"),
+        ("push_ecx", "F1", "01010001", "push ecx", "store"),
+        ("push_edx", "F1", "01010010", "push edx", "store"),
+        ("push_ebx", "F1", "01010011", "push ebx", "store"),
+        ("push_esp", "F1", "01010100", "push esp", "store"),
         ("push_ebp", "F1", "01010101", "push ebp", "store"),
+        ("push_esi", "F1", "01010110", "push esi", "store"),
+        ("push_edi", "F1", "01010111", "push edi", "store"),
+        ("pop_eax", "F1", "01011000", "pop eax", "load"),
+        ("pop_ecx", "F1", "01011001", "pop ecx", "load"),
+        ("pop_edx", "F1", "01011010", "pop edx", "load"),
+        ("pop_ebx", "F1", "01011011", "pop ebx", "load"),
+        ("pop_esp", "F1", "01011100", "pop esp", "load"),
         ("pop_ebp", "F1", "01011101", "pop ebp", "load"),
+        ("pop_esi", "F1", "01011110", "pop esi", "load"),
+        ("pop_edi", "F1", "01011111", "pop edi", "load"),
         ("call_rel32", "F1", "11101000 ................................", "call {imm}", "jump"),
         ("ret", "F1", "11000011", "ret", "jump"),
         ("cmp_eax", "F1", "00111101 ................................", "cmp eax, {imm}", "alu"),

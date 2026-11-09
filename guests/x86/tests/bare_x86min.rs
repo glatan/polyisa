@@ -264,6 +264,52 @@ fn frame_setup_and_leave() {
 }
 
 #[test]
+fn callee_saved_prologue_epilogue() {
+    let mut env = env();
+    env.map_rw(0, 1).unwrap();
+    // 正規のプロローグ：PUSH EBP; MOV EBP,ESP; PUSH EBX/ESI/EDI。
+    env.backend.set(Gpr(4).state(), 0x400);
+    env.backend.set(Gpr(5).state(), 0xAAAA);
+    env.backend.set(Gpr(3).state(), 0xBBBB);
+    env.backend.set(Gpr(6).state(), 0xCCCC);
+    env.backend.set(Gpr(7).state(), 0xDDDD);
+    env.step(|b| sem::push_reg(b, Gpr(5))).unwrap();
+    env.step(sem::mov_ebp_esp).unwrap();
+    env.step(|b| sem::push_reg(b, Gpr(3))).unwrap();
+    env.step(|b| sem::push_reg(b, Gpr(6))).unwrap();
+    env.step(|b| sem::push_reg(b, Gpr(7))).unwrap();
+    assert_eq!(env.backend.get(Gpr(4).state()), 0x3f0);
+    // 作業中にレジスタを壊す。
+    env.backend.set(Gpr(3).state(), 0);
+    env.backend.set(Gpr(6).state(), 0);
+    env.backend.set(Gpr(7).state(), 0);
+    // エピローグ：POP EDI/ESI/EBX; LEAVE。
+    env.step(|b| sem::pop_reg(b, Gpr(7))).unwrap();
+    env.step(|b| sem::pop_reg(b, Gpr(6))).unwrap();
+    env.step(|b| sem::pop_reg(b, Gpr(3))).unwrap();
+    env.step(sem::leave).unwrap();
+    assert_eq!(env.backend.get(Gpr(3).state()), 0xBBBB);
+    assert_eq!(env.backend.get(Gpr(6).state()), 0xCCCC);
+    assert_eq!(env.backend.get(Gpr(7).state()), 0xDDDD);
+    assert_eq!(env.backend.get(Gpr(5).state()), 0xAAAA);
+    assert_eq!(env.backend.get(Gpr(4).state()), 0x400);
+}
+
+#[test]
+fn pop_esp_takes_popped_value() {
+    let mut env = env();
+    env.map_rw(0, 1).unwrap();
+    // [0x100] に置いた値を POP ESP で取り出す。ESP は old+4 ではなく取り出し値になる。
+    env.backend.set(Gpr(4).state(), 0x100);
+    env.backend.set(Gpr(0).state(), 0x1234_5678);
+    env.step(|b| sem::push_reg(b, Gpr(0))).unwrap();
+    assert_eq!(env.backend.get(Gpr(4).state()), 0xfc);
+    env.backend.set(Gpr(0).state(), 0);
+    env.step(|b| sem::pop_reg(b, Gpr(4))).unwrap();
+    assert_eq!(env.backend.get(Gpr(4).state()), 0x1234_5678);
+}
+
+#[test]
 fn loop_counts_down() {
     let mut env = env();
     // ECX=3 から LOOP -2 を回す：3→2→1→0 で抜ける。

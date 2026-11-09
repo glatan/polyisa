@@ -335,14 +335,19 @@ pub fn push_reg<B: Backend>(b: &mut B, rs: Gpr) -> Flow<B> {
 }
 
 /// POP r32。読んでから ESP を 4 進める。
+/// POP ESP の行き先は加算結果ではなく取り出した値そのものである（実機通り）。
 pub fn pop_reg<B: Backend>(b: &mut B, rd: Gpr) -> Flow<B> {
     let esp = read(b, Gpr(4));
     let addr = b.zext::<W32, W64>(esp);
     let v: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
-    write(b, rd, v);
-    let four = b.konst::<W32>(4);
-    let next = b.add::<W32>(esp, four);
-    b.set(esp_ref(), next);
+    if rd.0 == 4 {
+        b.set(esp_ref(), v);
+    } else {
+        write(b, rd, v);
+        let four = b.konst::<W32>(4);
+        let next = b.add::<W32>(esp, four);
+        b.set(esp_ref(), next);
+    }
     Ok(())
 }
 
