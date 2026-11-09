@@ -195,8 +195,9 @@ fn when_guard(pred: &polyisa_isadl::pred::Pred, extra: &[String]) -> Result<Stri
         Pred::False => Ok("false".to_string()),
         Pred::Flag(name) if name == "rv64" => Ok("is_rv64".to_string()),
         Pred::Flag(name) if name == "rv32" => Ok("!is_rv64".to_string()),
+        // 呼び出し側が括弧で囲むため、ここでは付けない。
         Pred::Flag(name) if extra.iter().any(|f| f == name) => {
-            Ok(format!("(feats & {} != 0)", feat_const(name)))
+            Ok(format!("feats & {} != 0", feat_const(name)))
         }
         Pred::Flag(name) => Err(GenError::UnsupportedWhen(name.clone())),
         Pred::Not(inner) => Ok(format!("!({})", when_guard(inner, extra)?)),
@@ -550,7 +551,7 @@ mod tests {
         });
         let g = generate(&m).unwrap();
         assert!(g.decoder.contains("pub const FEAT_MIPS_R6: u64 = 1 << 0;"));
-        assert!(g.decoder.contains("!((feats & FEAT_MIPS_R6 != 0))"));
+        assert!(g.decoder.contains("(!(feats & FEAT_MIPS_R6 != 0))"));
         assert!(g.decoder.contains("(feats & FEAT_MIPS_R6 != 0)"));
     }
 

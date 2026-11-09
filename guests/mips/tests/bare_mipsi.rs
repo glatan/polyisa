@@ -143,6 +143,41 @@ fn mult_div_hi_lo() {
 }
 
 #[test]
+fn addi_wraps() {
+    let mut env = env();
+    // 0x7fffffff + 1 は 32 ビットで包んで 0x80000000 になる。
+    env.backend.set(Gpr(1).state(), 0x7fff_ffff);
+    env.step(|b| sem::addi(b, Gpr(2), Gpr(1), 1)).unwrap();
+    assert_eq!(g(&mut env, 2), 0x8000_0000);
+    // $0 への書き込みは捨てる。
+    env.step(|b| sem::addi(b, Gpr(0), Gpr(1), 1)).unwrap();
+    assert_eq!(g(&mut env, 0), 0);
+}
+
+#[test]
+fn beqzalc_links_and_branches_without_delay_slot() {
+    let mut env = env();
+    // R6 の BEQZALC は遅延スロットなし：rt==0 のとき 1 ステップで pc が飛ぶ。
+    // リンク（$31=pc+4）は条件によらず書く。
+    env.backend.set(sem::pc_ref(), 0x1000);
+    env.backend.set(sem::npc_ref(), 0xdead_beef);
+    env.backend.set(Gpr(1).state(), 0);
+    env.step(|b| sem::beqzalc(b, Gpr(0), Gpr(1), 0x1000, 4))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::pc_ref()), 0x1014);
+    assert_eq!(g(&mut env, 31), 0x1004);
+    // npc には触らない（commit 不要）。
+    assert_eq!(env.backend.get(sem::npc_ref()), 0xdead_beef);
+    // rt!=0 のときは分岐せず、リンクだけ書く。
+    env.backend.set(sem::pc_ref(), 0x2000);
+    env.backend.set(Gpr(1).state(), 7);
+    env.step(|b| sem::beqzalc(b, Gpr(0), Gpr(1), 0x2000, 4))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::pc_ref()), 0x2000);
+    assert_eq!(g(&mut env, 31), 0x2004);
+}
+
+#[test]
 fn jump_defers_one_slot() {
     let mut env = env();
     env.backend.set(sem::pc_ref(), 0x1000);

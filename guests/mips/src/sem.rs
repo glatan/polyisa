@@ -4,7 +4,7 @@
 //!
 //! 遅延スロットは pc/npc の組で表す。分岐・ジャンプは npc だけを書き換え、
 //! 遅延スロットの1命令を実行してから `commit` で pc を進める。
-//! FPU、R6、両エンディアン切り替えは本格実装で足す（HI/LO 乗除算は本格相当の最小形を持つ）。
+//! FPU、R6 の残り（BOVC/BEQC 等）、両エンディアン切り替えは本格実装で足す（HI/LO 乗除算は本格相当の最小形を持つ）。
 //!
 //! 出典は SPEC-MIPS-IV Rev 3.2 (1995-09) である。
 //! Ref: SPEC-MIPS-IV (Rev 3.2).
@@ -255,6 +255,37 @@ pub fn mtlo<B: Backend>(b: &mut B, rs: Gpr) -> Flow<B> {
     let x32: B::V<W32> = b.trunc::<W64, W32>(x);
     let v = b.zext::<W32, W64>(x32);
     b.set(lo_ref(), v);
+    Ok(())
+}
+
+/// ADDI。32ビットで包む（trap は WRAP で代用し本格実装で足す）。
+pub fn addi<B: Backend>(b: &mut B, rt: Gpr, rs: Gpr, imm: i32) -> Flow<B> {
+    let base = read(b, rs);
+    let off = b.konst::<W64>(imm as i64 as u64);
+    let s = b.add::<W64>(base, off);
+    let lo = b.konst::<W64>(0xffff_ffff);
+    let masked = b.and::<W64>(s, lo);
+    write(b, rt, masked);
+    Ok(())
+}
+
+/// BEQZALC。R6 の遅延スロットなし分岐・リンク。rt==0 のときだけ分岐し、
+/// $31 へのリンク（pc+4）は無条件に行う。1 命令で終わり commit は不要。
+pub fn beqzalc<B: Backend>(b: &mut B, _rs: Gpr, rt: Gpr, pc: u64, disp: i32) -> Flow<B> {
+    // デコードが rs==0 を保証する。分岐条件 rt==0 はここで調べる。
+    let y = read(b, rt);
+    let zero = b.konst::<W64>(0);
+    let take = b.cmp::<W64>(polyisa_sem::Cmp::Eq, y, zero);
+    let ret = const_w64(b, pc.wrapping_add(4));
+    write(b, Gpr(31), ret);
+    let target = pc
+        .wrapping_add(4)
+        .wrapping_add((disp as i64 as u64).wrapping_mul(4));
+    let t = const_w64(b, target);
+    b.if_then(take, |b| {
+        b.set(pc_ref(), t);
+        Ok(())
+    })?;
     Ok(())
 }
 
