@@ -340,8 +340,6 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("add_r_rip", "F1", "00000011 00...101 ................................", "add r, [rip]", "alu"),
         // CMP [RIP+disp32],imm8 (83 3D + disp32 + imm8)。64ビット RIP相対.
         ("cmp_rm_imm8_rip", "F1", "10000011 00111101 ................................ ........", "cmp r/m, {imm}", "alu"),
-        // C7 /0 m64,imm32 (REX.W)。RBP+disp32 形 (mod=10 rm=101)。REX は剥がし済み.
-        ("mov_rm_imm_m32", "F1", "11000111 10000101 ................................ ................................", "mov r/m, {imm}", "alu"),
         ("mov_rm16_imm_m32", "F1", "11000111 10000101 ................................ ................", "mov r/m16, {imm}", "alu"),
         // MOVUPS RIP相対 (64ビットの mod=00 rm=101)。disp32 は実行側で RIP 加算する。
         ("movups_load_rip", "F1", "00001111 00010000 00...101 ................................", "movups xmm, [rip]", "load"),
@@ -399,6 +397,15 @@ pub fn build_model() -> polyisa_isadl::Model {
             vec![wc("m32_rm", WhereOp::Ne, 4)],
             "mov [r/m+disp32], r32",
             "store",
+        ),
+        // C7 /0 m32/m64,imm32 mod=10 (SIBなし)。REX.W で64bit。base 任意.
+        (
+            "mov_rm_imm_m32",
+            "M32",
+            "11000111 10000... ................................ ................................",
+            vec![wc("m32_rm", WhereOp::Ne, 4)],
+            "mov r/m, {imm}",
+            "alu",
         ),
         (
             "cmp_rm_mem32",

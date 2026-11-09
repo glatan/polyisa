@@ -1190,3 +1190,40 @@ fn run_orb_mem32_disp32() {
         .unwrap();
     assert_eq!(back, [0x81u8]);
 }
+
+#[test]
+fn run_c7_mem32_generic_base() {
+    // run 経由で C7 /0 mod=10 [RBX+disp32],imm32 (汎用base) を回す。
+    // [0x1500]=0x11223344 を書き込み、exit(0)。読み戻しで検証する.
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    env.backend.set(Gpr(3).state(), 0x1000);
+    let prog: &[u8] = &[
+        0xC7, 0x83, 0x00, 0x05, 0x00, 0x00, 0x44, 0x33, 0x22,
+        0x11, // movl $0x11223344,0x500(%rbx) ([0x1500])
+        0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax,1 (exit)
+        0xBB, 0x00, 0x00, 0x00, 0x00, // mov ebx,0
+        0xCD, 0x80, // int 0x80 -> exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = ExitOne;
+    let out = run_x86::run(&mut env, 0x1000, &mut sys, 100);
+    assert_eq!(out, Outcome::Exit(0));
+    let mut back = [0u8; 4];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x1500),
+            &mut back,
+            polyisa_mem::Access {
+                endian: polyisa_mem::Endian::Le,
+                align: polyisa_mem::Align::Unaligned,
+                kind: polyisa_mem::AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(u32::from_le_bytes(back), 0x1122_3344);
+}

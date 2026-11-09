@@ -321,6 +321,7 @@ mod tests {
         );
         // C7 /0 m64,imm32 (RBP+disp32)。
         assert_eq!(decode(0xC7850000000000000000, 80), Some(Insn::MovRmImmM32));
+        assert_eq!(decode(0xC7839004000001000000, 80), Some(Insn::MovRmImmM32));
         // ループと近傍ジャンプ：LOOP rel8 (E2)、JMP rel32 (E9)。
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0xE2FE, 16), Some(Insn::Loop));

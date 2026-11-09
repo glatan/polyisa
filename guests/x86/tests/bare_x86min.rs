@@ -2556,3 +2556,41 @@ fn or_rm8_imm_mem32_sets_bits() {
         .unwrap();
     assert_eq!(back, [0x81u8]);
 }
+
+#[test]
+fn c7_mem32_generic_base() {
+    // C7 [RBX+disp32],imm32: base 汎用 (RBX) の往復.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend.set(Gpr(3).state(), 0x1000);
+    env.step(|b| sem::mov_rm32_imm_mem32(b, Gpr(3), 0x20, 0x1122_3344))
+        .unwrap();
+    env.backend.set(Gpr(0).state(), 0);
+    env.step(|b| sem::mov_eax_mem32(b, Gpr(0), Gpr(3), 0x20))
+        .unwrap();
+    assert_eq!(eax(&mut env), 0x1122_3344);
+}
+
+#[test]
+fn c7_mem64_generic_base() {
+    // C7 [RBX+disp32],imm32 (REX.W): [0x120]=1 (符号拡張).
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend.set(Gpr(3).state(), 0x1000);
+    env.step(|b| sem::mov_rm64_imm_mem32(b, Gpr(3), 0x20, 1))
+        .unwrap();
+    let mut back = [0u8; 8];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x1020),
+            &mut back,
+            Access {
+                endian: Endian::Le,
+                align: Align::Unaligned,
+                kind: AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(u64::from_le_bytes(back), 1);
+}

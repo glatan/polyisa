@@ -1777,13 +1777,13 @@ fn dispatch<B: Backend>(
         Insn::MovntdqStoreMemnd => sem::movups_store_memnd(b, xmm_reg(), rm0f()),
         Insn::MovntdqStoreMem8 => sem::movups_store_mem8(b, xmm_reg(), rm0f(), disp8()),
         Insn::MovRmImmM32 => {
-            // C7 85 + disp32 + imm32 (mod=10 RBP)。disp は上位32、imm は下位32。
+            // C7 /0 + disp32 + imm32 (mod=10)。disp は上位32、imm は下位32。base 任意.
             let disp = (word >> 32) as u32;
             let disp = disp.swap_bytes() as i32;
             if rex_w {
-                sem::mov_rm64_imm_mem32(b, Gpr(5 | ((rex & 1) << 3)), disp, imm32())
+                sem::mov_rm64_imm_mem32(b, rm(), disp, imm32())
             } else {
-                sem::mov_rm32_imm_mem32(b, Gpr(5 | ((rex & 1) << 3)), disp, imm32())
+                sem::mov_rm32_imm_mem32(b, rm(), disp, imm32())
             }
         }
         Insn::MovRm16ImmM32 => {
