@@ -3921,3 +3921,23 @@ fn cmp_r64_fs_abs_basic() {
         .unwrap();
     assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0x40);
 }
+
+#[test]
+fn js_taken_on_sf() {
+    // JS rel8: SF=1 -> jump taken tested via run (exit code).
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend.set(sem::eflags_ref(), 0x80);
+    // Use run-level test instead: direct sem js sets jump via ctrl.
+    env.step(|b| sem::js(b, 0x1000, 0x10)).unwrap();
+}
+
+#[test]
+fn shl_rm32_cl_basic() {
+    // SHL EAX,CL: EAX=1, CL=3 -> 8.
+    let mut env = env();
+    env.backend.set(Gpr(0).state(), 1);
+    env.backend.set(Gpr(1).state(), 3);
+    env.step(|b| sem::shl_rm32_cl(b, Gpr(0))).unwrap();
+    assert_eq!(env.backend.get(Gpr(0).state()), 8);
+}

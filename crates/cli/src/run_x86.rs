@@ -70,8 +70,8 @@ fn fetch_len(
 ) -> Option<u64> {
     match first {
         0x90 | 0x40..=0x4F | 0x50..=0x5F | 0xC3 | 0xC9 | 0x98 => Some(1),
-        0xEB | 0x74 | 0x75 | 0xE2 | 0xCD | 0x72 | 0x73 | 0x76 | 0x77 | 0x7C | 0x7D | 0x7E
-        | 0x7F => Some(2),
+        0xEB | 0x70 | 0x71 | 0x72 | 0x73 | 0x74 | 0x75 | 0x76 | 0x77 | 0x78 | 0x79 | 0x7A
+        | 0x7B | 0x7C | 0x7D | 0x7E | 0x7F | 0xE2 | 0xCD => Some(2),
         0x05 | 0x2D | 0x3D | 0xE8 | 0xE9 | 0x25 | 0x0D | 0x35 | 0xA9 => Some(5),
         0xB8..=0xBF => {
             if rex_w {
@@ -2020,6 +2020,8 @@ fn dispatch<B: Backend>(
         }
         Insn::Je => sem::je(b, eip, disp8()),
         Insn::Jne => sem::jne(b, eip, disp8()),
+        Insn::Jo => sem::jo(b, eip, disp8()),
+        Insn::Jno => sem::jno(b, eip, disp8()),
         Insn::Jb => sem::jb(b, eip, disp8()),
         Insn::Jae => sem::jae(b, eip, disp8()),
         Insn::Jbe => sem::jbe(b, eip, disp8()),
@@ -2028,6 +2030,10 @@ fn dispatch<B: Backend>(
         Insn::Jge => sem::jge(b, eip, disp8()),
         Insn::Jle => sem::jle(b, eip, disp8()),
         Insn::Jg => sem::jg(b, eip, disp8()),
+        Insn::Js => sem::js(b, eip, disp8()),
+        Insn::Jns => sem::jns(b, eip, disp8()),
+        Insn::Jp => sem::jp(b, eip, disp8()),
+        Insn::Jnp => sem::jnp(b, eip, disp8()),
         Insn::Loop => sem::loop_rel8(b, eip, disp8()),
         Insn::JmpRel32 => sem::jmp_rel32(b, eip, disp32()),
         Insn::SubEax => {
@@ -2126,6 +2132,20 @@ fn dispatch<B: Backend>(
                 sem::sar_rm64_cl(b, rm())
             } else {
                 sem::sar_rm32_cl(b, rm())
+            }
+        }
+        Insn::ShlRm32Cl => {
+            if rex_w {
+                sem::shl_rm64_cl(b, rm())
+            } else {
+                sem::shl_rm32_cl(b, rm())
+            }
+        }
+        Insn::ShrRm32Cl => {
+            if rex_w {
+                sem::shr_rm64_cl(b, rm())
+            } else {
+                sem::shr_rm32_cl(b, rm())
             }
         }
         Insn::Int80 => sem::int80(b, eip),
@@ -3754,6 +3774,8 @@ fn dispatch<B: Backend>(
             | Insn::RorRm32Imm8
             | Insn::RolRm32Imm8
             | Insn::SarRm32Cl
+            | Insn::ShlRm32Cl
+            | Insn::ShrRm32Cl
             | Insn::NotRm32
             | Insn::NegRm32 => Some(rm()),
             Insn::MovRm32 | Insn::Movsxd | Insn::ImulRImm | Insn::ImulRImm8Rip => Some(reg()),
@@ -4151,10 +4173,18 @@ impl TrapHandler for CliLinux {
             polyisa_os_linux::GuestAbi::I386Linux
         };
         // dirfd の AT_FDCWD：i386 は 32ビット、x86-64 は 64ビットの -100。
+        // 32ビット mov で設定された場合 (RDI=0xffffff9c) も受け付けるため下位32で比較する.
         let at_fdcwd: u64 = if self.is64 {
             0xffff_ffff_ffff_ff9c
         } else {
             u64::from(AT_FDCWD_U32)
+        };
+        let is_at_fdcwd = |dirfd: u64| -> bool {
+            if self.is64 {
+                (dirfd as u32) == AT_FDCWD_U32
+            } else {
+                dirfd == at_fdcwd
+            }
         };
         // 戻り値の負 errno：x86-64 は 64ビット符号拡張、i386 は 32ビット。
         let neg = |n: u32| -> u64 {
@@ -4169,7 +4199,7 @@ impl TrapHandler for CliLinux {
             let dirfd = get64(env, r_a);
             let path_addr = get64(env, r_b);
             let flags = get64(env, r_c) as u32;
-            if dirfd != at_fdcwd {
+            if !is_at_fdcwd(dirfd) {
                 set64(env, Gpr(0), neg(EINVAL));
                 return TrapOutcome::Handled;
             }
@@ -4753,7 +4783,7 @@ impl TrapHandler for CliLinux {
                     u64::from(env.backend.get(Gpr(6).state())),
                 )
             };
-            if dirfd != at_fdcwd {
+            if !is_at_fdcwd(dirfd) {
                 set64(env, Gpr(0), neg(EINVAL));
                 return TrapOutcome::Handled;
             }
@@ -4777,6 +4807,61 @@ impl TrapHandler for CliLinux {
             }
             // /proc/self/exe はゲスト実行ファイル自身を返す (ホスト exe ではない).
             // 空の exe_path (単体テスト) ではホストに直結する.
+            let target = if path == "/proc/self/exe" && !self.exe_path.is_empty() {
+                self.exe_path.clone()
+            } else {
+                match std::fs::read_link(&path) {
+                    Ok(p) => p.into_os_string().into_string().unwrap_or_default(),
+                    Err(e) => {
+                        let no = match e.kind() {
+                            std::io::ErrorKind::NotFound => ENOENT,
+                            std::io::ErrorKind::PermissionDenied => EACCES,
+                            _ => EINVAL,
+                        };
+                        set64(env, Gpr(0), neg(no));
+                        return TrapOutcome::Handled;
+                    }
+                }
+            };
+            let bytes = target.as_bytes();
+            let take = (bytes.len() as u64).min(bufsiz) as usize;
+            if env
+                .backend
+                .mem
+                .write(polyisa_mem::VirtAddr(buf), &bytes[..take])
+                .is_err()
+            {
+                return TrapOutcome::Unimplemented;
+            }
+            set64(env, Gpr(0), take as u64);
+            return TrapOutcome::Handled;
+        }
+        if nr == polyisa_os_linux::x86_64::READLINK && self.is64
+            || nr == polyisa_os_linux::i386::READLINK && !self.is64
+        {
+            // readlink(pathname, buf, bufsiz)。readlinkat から dirfd 検証を除いた形.
+            let (path_addr, buf, bufsiz) = if self.is64 {
+                (get64(env, Gpr(7)), get64(env, Gpr(6)), get64(env, Gpr(2)))
+            } else {
+                (
+                    u64::from(env.backend.get(Gpr(3).state())),
+                    u64::from(env.backend.get(Gpr(1).state())),
+                    u64::from(env.backend.get(Gpr(2).state())),
+                )
+            };
+            if bufsiz == 0 {
+                set64(env, Gpr(0), neg(EINVAL));
+                return TrapOutcome::Handled;
+            }
+            let path = match guest_c_string(env, path_addr) {
+                Some(p) => p,
+                None => return TrapOutcome::Unimplemented,
+            };
+            const MAX_READLINK: u64 = 4096;
+            if bufsiz > MAX_READLINK {
+                set64(env, Gpr(0), neg(EINVAL));
+                return TrapOutcome::Handled;
+            }
             let target = if path == "/proc/self/exe" && !self.exe_path.is_empty() {
                 self.exe_path.clone()
             } else {
@@ -5363,6 +5448,31 @@ mod tests {
         set64(&mut env, Gpr(10), 0);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EINVAL));
+    }
+
+    #[test]
+    fn readlink_proc_self_exe() {
+        use polyisa_os_linux::x86_64 as abi;
+        let mut sys = CliLinux::x86_64();
+        sys.exe_path = "/tmp/opencode/work/busybox-1.37.0/busybox".to_string();
+        let mut env = bare();
+        env.backend
+            .mem
+            .write(VirtAddr(0x100), b"/proc/self/exe\0")
+            .unwrap();
+        set64(&mut env, Gpr(0), abi::READLINK);
+        set64(&mut env, Gpr(7), 0x100);
+        set64(&mut env, Gpr(6), 0x200);
+        set64(&mut env, Gpr(2), 0x100);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let n = get64(&mut env, Gpr(0));
+        assert_eq!(n, 0x29);
+        let mut back = vec![0u8; n as usize];
+        env.backend
+            .mem
+            .read(VirtAddr(0x200), &mut back, data_access())
+            .unwrap();
+        assert_eq!(&back, b"/tmp/opencode/work/busybox-1.37.0/busybox");
     }
 
     #[test]

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! x86 最小のゲスト ISA。段階4の最小であり、可変長デコードを確かめる。
 //!
-//! i386 の366件を持つ。ModRM/SIB 汎用・XMM最小・near Jcc・MOVZX・CMOVB・ADD RIP等を含む。
+//! i386 の374件を持つ。ModRM/SIB 汎用・XMM最小・near Jcc・MOVZX・CMOVB・ADD RIP等を含む。
 //! REX 接頭辞はデコード前に剥がし、Insは共有して64ビット意味論に切り替える。
 //! SYSCALL/CPUID は最小形、ModRM は register-direct（全組合せ）・mod=01+disp8・
 //! mod=10+disp32・絶対番地と SIB base+index 形（スケール付き、disp8/disp32・disp なしを含む）を持ち、
@@ -70,7 +70,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数116件。
-        assert_eq!(INSNS.len(), 366);
+        assert_eq!(INSNS.len(), 374);
     }
 
     #[test]
@@ -141,6 +141,7 @@ mod tests {
         assert_eq!(decode(0x7DFE, 16), Some(Insn::Jge));
         assert_eq!(decode(0x7E00, 16), Some(Insn::Jle));
         assert_eq!(decode(0x7FFE, 16), Some(Insn::Jg));
+        assert_eq!(decode(0x7800, 16), Some(Insn::Js));
         assert_eq!(decode(0x7C00, 8), None);
         // C7 /0 (MOV r/m,imm32)：REX は剥がしてあるため Insn を共有する。
         // 64ビット切り替えは dispatch が REX.W で行う。
@@ -322,6 +323,7 @@ mod tests {
         assert_eq!(decode(0x6B1567FD1A0038, 56), Some(Insn::ImulRImm8Rip));
         assert_eq!(decode(0x00C1F908, 24), Some(Insn::SarRm32Imm8));
         assert_eq!(decode(0x00D3FF, 16), Some(Insn::SarRm32Cl));
+        assert_eq!(decode(0x00D3E0, 16), Some(Insn::ShlRm32Cl));
         assert_eq!(decode(0x00D1FF, 16), Some(Insn::SarRm321));
         // ADD r,[RIP+disp32] (03 05 + disp32)。
         assert_eq!(decode(0x030500000000, 48), Some(Insn::AddRRip));

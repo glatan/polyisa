@@ -7957,3 +7957,240 @@ pub fn cmpxchg_r64_rip<B: Backend>(b: &mut B, next_rip: u64, disp: i32, src: Gpr
     write64(b, Gpr(0), new_acc);
     Ok(())
 }
+
+/// JO rel8。OF=1 なら分岐.
+pub fn jo<B: Backend>(b: &mut B, eip: u32, disp: i8) -> Flow<B> {
+    let of = read_of(b);
+    let target = eip.wrapping_add(2).wrapping_add(disp as i32 as u32);
+    let t = b.konst::<W32>(target);
+    let tj = b.konst::<W64>(target as u64);
+    b.if_then(of, |b| {
+        b.set(eip_ref(), t);
+        b.jump(tj);
+        Ok(())
+    })?;
+    Ok(())
+}
+
+/// JNO rel8。OF=0 なら分岐.
+pub fn jno<B: Backend>(b: &mut B, eip: u32, disp: i8) -> Flow<B> {
+    let of = read_of(b);
+    let zero = b.konst::<W32>(0);
+    let one = b.konst::<W32>(1);
+    let n = b.select::<W32>(of, one, zero);
+    let take = b.cmp::<W32>(Cmp::Eq, n, zero);
+    let target = eip.wrapping_add(2).wrapping_add(disp as i32 as u32);
+    let t = b.konst::<W32>(target);
+    let tj = b.konst::<W64>(target as u64);
+    b.if_then(take, |b| {
+        b.set(eip_ref(), t);
+        b.jump(tj);
+        Ok(())
+    })?;
+    Ok(())
+}
+
+/// JS rel8。SF=1 なら分岐.
+pub fn js<B: Backend>(b: &mut B, eip: u32, disp: i8) -> Flow<B> {
+    let sf = read_sf(b);
+    let target = eip.wrapping_add(2).wrapping_add(disp as i32 as u32);
+    let t = b.konst::<W32>(target);
+    let tj = b.konst::<W64>(target as u64);
+    b.if_then(sf, |b| {
+        b.set(eip_ref(), t);
+        b.jump(tj);
+        Ok(())
+    })?;
+    Ok(())
+}
+
+/// JNS rel8。SF=0 なら分岐.
+pub fn jns<B: Backend>(b: &mut B, eip: u32, disp: i8) -> Flow<B> {
+    let sf = read_sf(b);
+    let zero = b.konst::<W32>(0);
+    let one = b.konst::<W32>(1);
+    let n = b.select::<W32>(sf, one, zero);
+    let take = b.cmp::<W32>(Cmp::Eq, n, zero);
+    let target = eip.wrapping_add(2).wrapping_add(disp as i32 as u32);
+    let t = b.konst::<W32>(target);
+    let tj = b.konst::<W64>(target as u64);
+    b.if_then(take, |b| {
+        b.set(eip_ref(), t);
+        b.jump(tj);
+        Ok(())
+    })?;
+    Ok(())
+}
+
+/// JP rel8。PF=1 なら分岐.
+pub fn jp<B: Backend>(b: &mut B, eip: u32, disp: i8) -> Flow<B> {
+    let pf = read_pf(b);
+    let target = eip.wrapping_add(2).wrapping_add(disp as i32 as u32);
+    let t = b.konst::<W32>(target);
+    let tj = b.konst::<W64>(target as u64);
+    b.if_then(pf, |b| {
+        b.set(eip_ref(), t);
+        b.jump(tj);
+        Ok(())
+    })?;
+    Ok(())
+}
+
+/// JNP rel8。PF=0 なら分岐.
+pub fn jnp<B: Backend>(b: &mut B, eip: u32, disp: i8) -> Flow<B> {
+    let pf = read_pf(b);
+    let zero = b.konst::<W32>(0);
+    let one = b.konst::<W32>(1);
+    let n = b.select::<W32>(pf, one, zero);
+    let take = b.cmp::<W32>(Cmp::Eq, n, zero);
+    let target = eip.wrapping_add(2).wrapping_add(disp as i32 as u32);
+    let t = b.konst::<W32>(target);
+    let tj = b.konst::<W64>(target as u64);
+    b.if_then(take, |b| {
+        b.set(eip_ref(), t);
+        b.jump(tj);
+        Ok(())
+    })?;
+    Ok(())
+}
+
+/// SHL r/m32,CL (D3 /4)。CL 下位5ビットで論理左シフトし、CF/OF/SZP を更新する.
+pub fn shl_rm32_cl<B: Backend>(b: &mut B, dst: Gpr) -> Flow<B> {
+    let x = read(b, dst);
+    let cl8 = read8(b, Gpr(1), false);
+    let cl32 = b.zext::<W8, W32>(cl8);
+    let mask = b.konst::<W32>(31);
+    let count = b.and::<W32>(cl32, mask);
+    let v = b.shl::<W32>(x, count);
+    write(b, dst, v);
+    let old: B::V<W32> = b.get(eflags_ref());
+    let zero = b.konst::<W32>(0);
+    let active = b.cmp::<W32>(Cmp::Ne, count, zero);
+    let one = b.konst::<W32>(1);
+    let c1 = b.sub::<W32>(count, one);
+    let safe_c1 = b.select::<W32>(active, c1, zero);
+    let shifted = b.shl::<W32>(x, safe_c1);
+    let top_mask = b.konst::<W32>(0x8000_0000);
+    let top = b.and::<W32>(shifted, top_mask);
+    let cf_take = b.cmp::<W32>(Cmp::Ne, top, zero);
+    let cf = pick(b, cf_take, FLAG_CF);
+    let n31 = b.konst::<W32>(31);
+    let v_top = b.shr_l::<W32>(v, n31);
+    let v31 = b.and::<W32>(v_top, one);
+    let out_top = b.shr_l::<W32>(shifted, n31);
+    let cf01 = b.and::<W32>(out_top, one);
+    let of_raw = b.cmp::<W32>(Cmp::Ne, v31, cf01);
+    let of_new = pick(b, of_raw, FLAG_OF);
+    let of_mask = b.konst::<W32>(FLAG_OF);
+    let old_of = b.and::<W32>(old, of_mask);
+    let is_one = b.cmp::<W32>(Cmp::Eq, count, one);
+    let of = b.select::<W32>(is_one, of_new, old_of);
+    let szp = szp_bits(b, v);
+    let clear_mask = b.konst::<W32>(!FLAG_OSZPC);
+    let mut new_flags = b.and::<W32>(old, clear_mask);
+    new_flags = b.or::<W32>(new_flags, cf);
+    new_flags = b.or::<W32>(new_flags, of);
+    new_flags = b.or::<W32>(new_flags, szp);
+    let assembled = b.select::<W32>(active, new_flags, old);
+    b.set(eflags_ref(), assembled);
+    Ok(())
+}
+
+/// SHL r/m64,CL (REX.W + D3 /4)。
+pub fn shl_rm64_cl<B: Backend>(b: &mut B, dst: Gpr) -> Flow<B> {
+    let x = read64(b, dst);
+    let cl8 = read8(b, Gpr(1), false);
+    let cl64 = b.zext::<W8, W64>(cl8);
+    let mask = b.konst::<W64>(63);
+    let count = b.and::<W64>(cl64, mask);
+    let v = b.shl::<W64>(x, count);
+    write64(b, dst, v);
+    let old: B::V<W32> = b.get(eflags_ref());
+    let zero64 = b.konst::<W64>(0);
+    let one64 = b.konst::<W64>(1);
+    let active = b.cmp::<W64>(Cmp::Ne, count, zero64);
+    let c1 = b.sub::<W64>(count, one64);
+    let safe_c1 = b.select::<W64>(active, c1, zero64);
+    let shifted = b.shl::<W64>(x, safe_c1);
+    let n63 = b.konst::<W64>(63);
+    let top = b.shr_l::<W64>(shifted, n63);
+    let low = b.and::<W64>(top, one64);
+    let cf_take = b.cmp::<W64>(Cmp::Ne, low, zero64);
+    let cf = pick(b, cf_take, FLAG_CF);
+    let szp = szp_bits(b, v);
+    let clear_mask = b.konst::<W32>(!FLAG_OSZPC);
+    let mut new_flags = b.and::<W32>(old, clear_mask);
+    new_flags = b.or::<W32>(new_flags, cf);
+    new_flags = b.or::<W32>(new_flags, szp);
+    let assembled = b.select::<W32>(active, new_flags, old);
+    b.set(eflags_ref(), assembled);
+    Ok(())
+}
+
+/// SHR r/m32,CL (D3 /5)。CL 下位5ビットで論理右シフトし、CF/OF/SZP を更新する.
+pub fn shr_rm32_cl<B: Backend>(b: &mut B, dst: Gpr) -> Flow<B> {
+    let x = read(b, dst);
+    let cl8 = read8(b, Gpr(1), false);
+    let cl32 = b.zext::<W8, W32>(cl8);
+    let mask = b.konst::<W32>(31);
+    let count = b.and::<W32>(cl32, mask);
+    let v = b.shr_l::<W32>(x, count);
+    write(b, dst, v);
+    let old: B::V<W32> = b.get(eflags_ref());
+    let zero = b.konst::<W32>(0);
+    let active = b.cmp::<W32>(Cmp::Ne, count, zero);
+    let one = b.konst::<W32>(1);
+    let c1 = b.sub::<W32>(count, one);
+    let safe_c1 = b.select::<W32>(active, c1, zero);
+    let shifted = b.shr_l::<W32>(x, safe_c1);
+    let low = b.and::<W32>(shifted, one);
+    let cf_take = b.cmp::<W32>(Cmp::Ne, low, zero);
+    let cf = pick(b, cf_take, FLAG_CF);
+    let n31 = b.konst::<W32>(31);
+    let x_top = b.shr_l::<W32>(x, n31);
+    let x31 = b.and::<W32>(x_top, one);
+    let of_raw = b.cmp::<W32>(Cmp::Ne, x31, zero);
+    let of_new = pick(b, of_raw, FLAG_OF);
+    let of_mask = b.konst::<W32>(FLAG_OF);
+    let old_of = b.and::<W32>(old, of_mask);
+    let is_one = b.cmp::<W32>(Cmp::Eq, count, one);
+    let of = b.select::<W32>(is_one, of_new, old_of);
+    let szp = szp_bits(b, v);
+    let clear_mask = b.konst::<W32>(!FLAG_OSZPC);
+    let mut new_flags = b.and::<W32>(old, clear_mask);
+    new_flags = b.or::<W32>(new_flags, cf);
+    new_flags = b.or::<W32>(new_flags, of);
+    new_flags = b.or::<W32>(new_flags, szp);
+    let assembled = b.select::<W32>(active, new_flags, old);
+    b.set(eflags_ref(), assembled);
+    Ok(())
+}
+
+/// SHR r/m64,CL (REX.W + D3 /5)。
+pub fn shr_rm64_cl<B: Backend>(b: &mut B, dst: Gpr) -> Flow<B> {
+    let x = read64(b, dst);
+    let cl8 = read8(b, Gpr(1), false);
+    let cl64 = b.zext::<W8, W64>(cl8);
+    let mask = b.konst::<W64>(63);
+    let count = b.and::<W64>(cl64, mask);
+    let v = b.shr_l::<W64>(x, count);
+    write64(b, dst, v);
+    let old: B::V<W32> = b.get(eflags_ref());
+    let zero64 = b.konst::<W64>(0);
+    let one64 = b.konst::<W64>(1);
+    let active = b.cmp::<W64>(Cmp::Ne, count, zero64);
+    let c1 = b.sub::<W64>(count, one64);
+    let safe_c1 = b.select::<W64>(active, c1, zero64);
+    let shifted = b.shr_l::<W64>(x, safe_c1);
+    let low = b.and::<W64>(shifted, one64);
+    let cf_take = b.cmp::<W64>(Cmp::Ne, low, zero64);
+    let cf = pick(b, cf_take, FLAG_CF);
+    let szp = szp_bits(b, v);
+    let clear_mask = b.konst::<W32>(!FLAG_OSZPC);
+    let mut new_flags = b.and::<W32>(old, clear_mask);
+    new_flags = b.or::<W32>(new_flags, cf);
+    new_flags = b.or::<W32>(new_flags, szp);
+    let assembled = b.select::<W32>(active, new_flags, old);
+    b.set(eflags_ref(), assembled);
+    Ok(())
+}

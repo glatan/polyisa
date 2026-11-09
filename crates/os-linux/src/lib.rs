@@ -91,6 +91,7 @@ pub mod x86_64 {
     pub const IOCTL: u64 = 16;
     pub const PREAD64: u64 = 17;
     pub const READLINKAT: u64 = 267;
+    pub const READLINK: u64 = 89;
     pub const NEWFSTATAT: u64 = 262;
     pub const FSTAT: u64 = 5;
     pub const STATX: u64 = 332;
@@ -137,6 +138,7 @@ pub mod i386 {
     pub const IOCTL: u64 = 54;
     pub const PREAD64: u64 = 180;
     pub const READLINKAT: u64 = 305;
+    pub const READLINK: u64 = 85;
     pub const FSTATAT64: u64 = 300;
     pub const FSTAT: u64 = 108;
     pub const STATX: u64 = 383;
@@ -209,6 +211,7 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             i386::IOCTL => Some("ioctl"),
             i386::PREAD64 => Some("pread64"),
             i386::READLINKAT => Some("readlinkat"),
+            i386::READLINK => Some("readlink"),
             i386::FSTATAT64 => Some("fstatat64"),
             i386::FSTAT => Some("fstat"),
             i386::STATX => Some("statx"),
@@ -244,6 +247,7 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             x86_64::IOCTL => Some("ioctl"),
             x86_64::PREAD64 => Some("pread64"),
             x86_64::READLINKAT => Some("readlinkat"),
+            x86_64::READLINK => Some("readlink"),
             x86_64::NEWFSTATAT => Some("newfstatat"),
             x86_64::FSTAT => Some("fstat"),
             x86_64::STATX => Some("statx"),
