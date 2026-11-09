@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // x86 最小の ISADL モデル（段階4の最小）。
 //
-// i386 の整数43件に絞る。可変長（8/16/24/40ビット）のデコード入口と
+// i386 の整数57件に絞る。可変長（8/16/24/40ビット）のデコード入口と
 // ModRM register-direct の最小形を確かめる。
 // ModRM の SIB・絶対番地・スケール形式と Rust フック・遅延フラグ・x87・SSE・
 // 64ビット・セグメントは本格実装で足す。
@@ -57,7 +57,21 @@ pub fn build_model() -> polyisa_isadl::Model {
     let insns: &[(&str, &str, &str, &str, &str)] = &[
         ("nop", "F1", "10010000", "nop", "alu"),
         ("inc_eax", "F1", "01000000", "inc eax", "alu"),
+        ("inc_ecx", "F1", "01000001", "inc ecx", "alu"),
+        ("inc_edx", "F1", "01000010", "inc edx", "alu"),
+        ("inc_ebx", "F1", "01000011", "inc ebx", "alu"),
+        ("inc_esp", "F1", "01000100", "inc esp", "alu"),
+        ("inc_ebp", "F1", "01000101", "inc ebp", "alu"),
+        ("inc_esi", "F1", "01000110", "inc esi", "alu"),
+        ("inc_edi", "F1", "01000111", "inc edi", "alu"),
         ("dec_eax", "F1", "01001000", "dec eax", "alu"),
+        ("dec_ecx", "F1", "01001001", "dec ecx", "alu"),
+        ("dec_edx", "F1", "01001010", "dec edx", "alu"),
+        ("dec_ebx", "F1", "01001011", "dec ebx", "alu"),
+        ("dec_esp", "F1", "01001100", "dec esp", "alu"),
+        ("dec_ebp", "F1", "01001101", "dec ebp", "alu"),
+        ("dec_esi", "F1", "01001110", "dec esi", "alu"),
+        ("dec_edi", "F1", "01001111", "dec edi", "alu"),
         ("add_eax", "F1", "00000101 ................................", "add eax, {imm}", "alu"),
         ("jmp8", "F1", "11101011 ........", "jmp {imm}", "jump"),
         ("add_rm32", "F1", "00000001 11001000", "add eax, ecx", "alu"),

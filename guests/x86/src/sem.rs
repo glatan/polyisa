@@ -131,22 +131,32 @@ pub fn nop<B: Backend>(_b: &mut B) -> Flow<B> {
     Ok(())
 }
 
-/// INC EAX。32ビットで包む（EFLAGS 更新は本格実装で足す）。
-pub fn inc_eax<B: Backend>(b: &mut B) -> Flow<B> {
-    let x = read(b, Gpr::eax());
+/// INC r32。32ビットで包む（EFLAGS 更新は本格実装で足す）。
+pub fn inc_r32<B: Backend>(b: &mut B, rd: Gpr) -> Flow<B> {
+    let x = read(b, rd);
     let one = b.konst::<W32>(1);
     let v = b.add::<W32>(x, one);
-    write(b, Gpr::eax(), v);
+    write(b, rd, v);
+    Ok(())
+}
+
+/// INC EAX。32ビットで包む（EFLAGS 更新は本格実装で足す）。
+pub fn inc_eax<B: Backend>(b: &mut B) -> Flow<B> {
+    inc_r32(b, Gpr::eax())
+}
+
+/// DEC r32。32ビットで包む（EFLAGS 更新は本格実装で足す）。
+pub fn dec_r32<B: Backend>(b: &mut B, rd: Gpr) -> Flow<B> {
+    let x = read(b, rd);
+    let one = b.konst::<W32>(1);
+    let v = b.sub::<W32>(x, one);
+    write(b, rd, v);
     Ok(())
 }
 
 /// DEC EAX。32ビットで包む。
 pub fn dec_eax<B: Backend>(b: &mut B) -> Flow<B> {
-    let x = read(b, Gpr::eax());
-    let one = b.konst::<W32>(1);
-    let v = b.sub::<W32>(x, one);
-    write(b, Gpr::eax(), v);
-    Ok(())
+    dec_r32(b, Gpr::eax())
 }
 
 /// ADD EAX, imm32。32ビットで包む。
