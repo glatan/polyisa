@@ -316,6 +316,16 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("sub_r_rip", "F1", "00101011 00...101 ................................", "sub r32, m32", "alu"),
         // CALL r/m64 mod=01 [base+disp8] (FF /2)。64ビット間接コール.
         ("call_r_mem8", "M8", "11111111 01010... ........", "call r/m64", "jump"),
+        // JMP r/m64 reg-direct (FF /4 mod=11)。
+        ("jmp_r_rm", "F1", "11111111 11100...", "jmp r/m64", "jump"),
+        // JMP [base] (FF /4 mod=00)。
+        ("jmp_r_memnd", "MR", "11111111 00100...", "jmp r/m64", "jump"),
+        // JMP [base+disp8] (FF /4 mod=01)。
+        ("jmp_r_mem8", "M8", "11111111 00101... ........", "jmp r/m64", "jump"),
+        // JMP [base+disp32] (FF /4 mod=10)。
+        ("jmp_r_mem32", "M32", "11111111 00110... ................................", "jmp r/m64", "jump"),
+        // JMP [RIP+disp32] (FF /4 RIP)。
+        ("jmp_r_rip", "F1", "11111111 00100101 ................................", "jmp r/m64", "jump"),
         // OR m32,r32 RIP (09 05 + disp32)。
         ("or_m_rip", "F1", "00001001 00...101 ................................", "or m32, r32", "alu"),
         // ADD m32,imm32 RIP (81 05 + disp32 + imm32).
@@ -352,6 +362,12 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("punpcklqdq", "F1", "00001111 01101100 11......", "punpcklqdq xmm, xmm", "alu"),
         // PAND xmm,xmm (66 0F DB /r)。reg-direct のみ。
         ("pand", "F1", "00001111 11011011 11......", "pand xmm, xmm", "alu"),
+        // PMOVMSKB r32,xmm (66 0F D7 /r)。reg-direct のみ、REX.W で64bit.
+        ("pmovmskb", "F1", "00001111 11010111 11......", "pmovmskb r32, xmm", "load"),
+        // PCMPEQB xmm,xmm (66 0F 74 /r)。reg-direct のみ.
+        ("pcmpeqb", "F1", "00001111 01110100 11......", "pcmpeqb xmm, xmm", "alu"),
+        // POR xmm,xmm (66 0F EB /r)。reg-direct のみ.
+        ("por", "F1", "00001111 11101011 11......", "por xmm, xmm", "alu"),
         // CWDE/CDQE (0x98)。AX→EAX / EAX→RAX 符号拡張。REX.W で切替.
         ("cwde", "F1", "10011000", "cwde", "alu"),
         ("movq_m64_xmm_rip", "F1", "00001111 11010110 00...101 ................................", "movq m64, xmm", "store"),
@@ -694,6 +710,54 @@ pub fn build_model() -> polyisa_isadl::Model {
             vec![wc("mr_rm", WhereOp::Ne, 4), wc("mr_rm", WhereOp::Ne, 5)],
             "add r32, [r/m]",
             "alu",
+        ),
+        (
+            "movzx_r32_m8_memnd",
+            "MR",
+            "00001111 10110110 00......",
+            vec![wc("mr_rm", WhereOp::Ne, 4), wc("mr_rm", WhereOp::Ne, 5)],
+            "movzx r32, m8",
+            "load",
+        ),
+        (
+            "movzx_r32_m8_mem8",
+            "M8",
+            "00001111 10110110 01...... ........",
+            vec![wc("m8_rm", WhereOp::Ne, 4)],
+            "movzx r32, m8",
+            "load",
+        ),
+        (
+            "movzx_r32_m8_mem32",
+            "M32",
+            "00001111 10110110 10...... ................................",
+            vec![wc("m32_rm", WhereOp::Ne, 4)],
+            "movzx r32, m8",
+            "load",
+        ),
+        (
+            "movzx_r32_m8_sib",
+            "N8",
+            "00001111 10110110 00...100 ........",
+            vec![wc("n8_base", WhereOp::Ne, 5)],
+            "movzx r32, m8",
+            "load",
+        ),
+        (
+            "movzx_r32_m8_sibd",
+            "S8",
+            "00001111 10110110 01...100 ........ ........",
+            vec![],
+            "movzx r32, m8",
+            "load",
+        ),
+        (
+            "movzx_r32_m8_sibd32",
+            "D32",
+            "00001111 10110110 10...100 ........ ................................",
+            vec![],
+            "movzx r32, m8",
+            "load",
         ),
         (
             "sub_r_memnd",
@@ -1061,6 +1125,15 @@ pub fn build_model() -> polyisa_isadl::Model {
             "M8",
             "00001111 01101111 01...... ........",
             vec![wc("m8_rm", WhereOp::Ne, 4)],
+            "movdqu xmm, m128",
+            "load",
+        ),
+        // MOVDQU xmm,m128 mod=00 [base] (F3 0F 6F)。SIB/絶対番地なし.
+        (
+            "movdqu_load_memnd",
+            "MR",
+            "00001111 01101111 00......",
+            vec![wc("mr_rm", WhereOp::Ne, 4), wc("mr_rm", WhereOp::Ne, 5)],
             "movdqu xmm, m128",
             "load",
         ),

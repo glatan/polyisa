@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! x86 最小のゲスト ISA。段階4の最小であり、可変長デコードを確かめる。
 //!
-//! i386 の317件を持つ。ModRM/SIB 汎用・XMM最小・near Jcc・MOVZX・CMOVB・ADD RIP等を含む。
+//! i386 の332件を持つ。ModRM/SIB 汎用・XMM最小・near Jcc・MOVZX・CMOVB・ADD RIP等を含む。
 //! REX 接頭辞はデコード前に剥がし、Insは共有して64ビット意味論に切り替える。
 //! SYSCALL/CPUID は最小形、ModRM は register-direct（全組合せ）・mod=01+disp8・
 //! mod=10+disp32・絶対番地と SIB base+index 形（スケール付き、disp8/disp32・disp なしを含む）を持ち、
@@ -70,7 +70,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数116件。
-        assert_eq!(INSNS.len(), 317);
+        assert_eq!(INSNS.len(), 332);
     }
 
     #[test]
@@ -249,6 +249,8 @@ mod tests {
         assert_eq!(decode(0x0FB70500000000, 56), Some(Insn::MovzxR32M16Rip));
         assert_eq!(decode(0x0FB60576641700, 56), Some(Insn::MovzxR32M8Rip));
         assert_eq!(decode(0x0FB6F6, 24), Some(Insn::MovzxR32R8));
+        assert_eq!(decode(0x0FB69500F0FFFF, 56), Some(Insn::MovzxR32M8Mem32));
+        assert_eq!(decode(0x0FB60406, 32), Some(Insn::MovzxR32M8Sib));
         assert_eq!(decode(0x8875BF, 24), Some(Insn::MovM8R8Mem8));
         assert_eq!(decode(0x394F08, 24), Some(Insn::CmpRmMem8));
         assert_eq!(decode(0x390B, 16), Some(Insn::CmpRmMemnd));
@@ -282,6 +284,7 @@ mod tests {
         assert_eq!(decode(0xC1C808, 24), Some(Insn::RorRm32Imm8));
         assert_eq!(decode(0x0FAFC2, 24), Some(Insn::ImulRRm));
         assert_eq!(decode(0x800C2400, 32), Some(Insn::OrRm8ImmSib));
+        assert_eq!(decode(0xFF25DA8F2600, 48), Some(Insn::JmpRRip));
         assert_eq!(decode(0x84FF, 16), Some(Insn::TestR8R8));
         assert_eq!(decode(0x83470C01, 32), Some(Insn::AddRmImm8Mem8));
         assert_eq!(decode(0x0F94C5, 24), Some(Insn::Sete));
@@ -335,10 +338,14 @@ mod tests {
         assert_eq!(decode(0x85D2, 16), Some(Insn::TestRm32));
         assert_eq!(decode(0xF7C400080000, 48), Some(Insn::TestRm32Imm));
         assert_eq!(decode(0x0FEFC0, 24), Some(Insn::Pxor));
+        assert_eq!(decode(0x0FD7C0, 24), Some(Insn::Pmovmskb));
+        assert_eq!(decode(0x0F74C1, 24), Some(Insn::Pcmpeqb));
+        assert_eq!(decode(0x0FEBC4, 24), Some(Insn::Por));
         assert_eq!(decode(0x0F62C0, 24), Some(Insn::Punpckldq));
         assert_eq!(decode(0x0F6CC0, 24), Some(Insn::Punpcklqdq));
         assert_eq!(decode(0x0F6FC0, 24), Some(Insn::MovdquLoadXmm));
         assert_eq!(decode(0x0F6F4020, 32), Some(Insn::MovdquLoadMem8));
+        assert_eq!(decode(0x0F6F07, 24), Some(Insn::MovdquLoadMemnd));
         assert_eq!(decode(0x88042511060000, 56), Some(Insn::MovSibabsR8));
         assert_eq!(decode(0x0FDBC1, 24), Some(Insn::Pand));
         assert_eq!(decode(0x0FD60500000000, 56), Some(Insn::MovqM64XmmRip));

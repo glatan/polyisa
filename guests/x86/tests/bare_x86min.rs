@@ -3640,3 +3640,83 @@ fn or_rm8_imm_sib_basic() {
         .unwrap();
     assert_eq!(back, [0xFFu8]);
 }
+
+#[test]
+fn movzx_r32_m8_mem32_basic() {
+    // MOVZX EDX,[RBP-0x1000] (0F B6 mod=10): [0x0500]=0xFF -> EDX=0xFF.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.map_rw(0x0, 1).unwrap();
+    env.backend.set(Gpr(5).state(), 0x1500);
+    env.backend.mem.write(VirtAddr(0x0500), &[0xFFu8]).unwrap();
+    env.step(|b| sem::movzx_r32_m8_mem32(b, Gpr(2), Gpr(5), -0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(Gpr(2).state()), 0xFF);
+}
+
+#[test]
+fn movzx_r32_m8_sib_basic() {
+    // MOVZX EAX,[RSI+R8] (0F B6 SIB mod=00): [0x1500]=0xAB -> EAX=0xAB.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend.set(Gpr(6).state(), 0x1000);
+    env.step(|b| {
+        sem::write64(b, Gpr(8), 0x500);
+        Ok(())
+    })
+    .unwrap();
+    env.backend.mem.write(VirtAddr(0x1500), &[0xABu8]).unwrap();
+    env.step(|b| sem::movzx_r32_m8_sib(b, Gpr(0), Gpr(6), Gpr(8), 0))
+        .unwrap();
+    assert_eq!(env.backend.get(Gpr(0).state()), 0xAB);
+}
+
+#[test]
+fn jmp_r64_rip_basic() {
+    // JMP [RIP+disp]: [0x1500]=0x2000 -> 実行のみ (jump は ctrl に残るため eip 検証はしない).
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.map_rw(0x2000, 1).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1500), &[0x00u8, 0x20, 0, 0, 0, 0, 0, 0])
+        .unwrap();
+    env.step(|b| sem::jmp_r64_rip(b, 0x1007, 0x4F9)).unwrap();
+}
+
+#[test]
+fn pcmpeqb_all_equal() {
+    // PCMPEQB xmm0,xmm1: all bytes equal -> all 0xFF.
+    let mut env = env();
+    env.step(|b| {
+        let v = b.konst::<polyisa_sem::W128>(0x0102030405060708090A0B0C0D0E0F10);
+        b.set(sem::xmm_ref(sem::Xmm(0)), v);
+        let w = b.konst::<polyisa_sem::W128>(0x0102030405060708090A0B0C0D0E0F10);
+        b.set(sem::xmm_ref(sem::Xmm(1)), w);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::pcmpeqb_xmm(b, sem::Xmm(0), sem::Xmm(1)))
+        .unwrap();
+    env.step(|b| {
+        let v: u128 = b.get(sem::xmm_ref(sem::Xmm(0)));
+        assert_eq!(v, u128::MAX);
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn pmovmskb_basic() {
+    // PMOVMSKB EAX,XMM0: XMM0=0x80..0x00 -> mask bit0=1? Use 0xFF.. -> 0xFFFF.
+    let mut env = env();
+    env.step(|b| {
+        let v = b.konst::<polyisa_sem::W128>(u128::MAX);
+        b.set(sem::xmm_ref(sem::Xmm(0)), v);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::pmovmskb_r32(b, Gpr(0), sem::Xmm(0)))
+        .unwrap();
+    assert_eq!(env.backend.get(Gpr(0).state()), 0xFFFF);
+}

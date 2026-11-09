@@ -173,7 +173,10 @@ fn fetch_len(
                 } else {
                     Some(3)
                 }
-            } else if matches!(s, 0x60 | 0x61 | 0x62 | 0x6C | 0xDB | 0xEF) {
+            } else if matches!(
+                s,
+                0x60 | 0x61 | 0x62 | 0x6C | 0xDB | 0xEF | 0x74 | 0xEB | 0xD7
+            ) {
                 // XMM reg-direct のみ（66 接頭辞は剥がし済み）。
                 let m = third?;
                 if m >> 6 == 3 { Some(3) } else { None }
@@ -525,13 +528,13 @@ fn fetch_len(
                 Some(6)
             }
         }
-        // 0xFF /r (CALL/JMP/PUSH 間接)。/2 CALL のみ mod=00/01/10/11 (SIB直接番地含む).
+        // 0xFF /r (CALL/JMP/PUSH 間接)。/2 CALL と /4 JMP のみ mod=00/01/10/11 (SIB直接番地含む).
         0xFF => {
             let s = second?;
             let md = s >> 6;
             let reg = (s >> 3) & 7;
             let rm = s & 7;
-            if reg != 2 {
+            if reg != 2 && reg != 4 {
                 return None;
             }
             if md == 3 {
@@ -794,8 +797,11 @@ pub fn run_mode(
                             | 0x62
                             | 0x6C
                             | 0x70
+                            | 0x74
                             | 0x7E
+                            | 0xD7
                             | 0xDB
+                            | 0xEB
                             | 0xEF
                             | 0xD6
                             | 0x10
@@ -990,6 +996,9 @@ pub fn run_mode(
                     | Insn::Pshufd
                     | Insn::Pxor
                     | Insn::Pand
+                    | Insn::Pcmpeqb
+                    | Insn::Por
+                    | Insn::Pmovmskb
                     | Insn::Punpcklqdq
                     | Insn::MovqR64Xmm
                     | Insn::MovupsLoadXmm
@@ -1014,6 +1023,7 @@ pub fn run_mode(
                     | Insn::MovupsLoadRip
                     | Insn::MovupsStoreRip
                     | Insn::MovdqaLoadRip
+                    | Insn::MovdquLoadXmm
                     | Insn::MovAbsEax
                     | Insn::MovEaxAbs
                     | Insn::MovRm16ImmM32
@@ -1038,6 +1048,9 @@ pub fn run_mode(
                     | Insn::Pshufd
                     | Insn::Pxor
                     | Insn::Pand
+                    | Insn::Pcmpeqb
+                    | Insn::Por
+                    | Insn::Pmovmskb
                     | Insn::Punpcklqdq
                     | Insn::MovqR64Xmm
                     | Insn::MovRm16ImmM32
@@ -1601,6 +1614,41 @@ fn dispatch<B: Backend>(
                 sem::call_r64_mem8(b, eip as u64 + nbytes, rm(), disp8())
             } else {
                 sem::call_r32_mem8(b, eip.wrapping_add(nbytes as u32), rm(), disp8())
+            }
+        }
+        Insn::JmpRRm => {
+            if is64 {
+                sem::jmp_r64_rm(b, rm())
+            } else {
+                sem::jmp_r32_rm(b, rm())
+            }
+        }
+        Insn::JmpRMemnd => {
+            if is64 {
+                sem::jmp_r64_memnd(b, rm())
+            } else {
+                sem::jmp_r32_memnd(b, rm())
+            }
+        }
+        Insn::JmpRMem8 => {
+            if is64 {
+                sem::jmp_r64_mem8(b, rm(), disp8())
+            } else {
+                sem::jmp_r32_mem8(b, rm(), disp8())
+            }
+        }
+        Insn::JmpRMem32 => {
+            if is64 {
+                sem::jmp_r64_mem32(b, rm(), disp32())
+            } else {
+                sem::jmp_r32_mem32(b, rm(), disp32())
+            }
+        }
+        Insn::JmpRRip => {
+            if is64 {
+                sem::jmp_r64_rip(b, eip as u64 + nbytes, disp32())
+            } else {
+                sem::jmp_r32_abs(b, imm32())
             }
         }
         Insn::Ret => {
@@ -2629,6 +2677,15 @@ fn dispatch<B: Backend>(
         }
         Insn::Pxor => sem::pxor_xmm(b, xmm_reg(), xmm_rm()),
         Insn::Pand => sem::pand_xmm(b, xmm_reg(), xmm_rm()),
+        Insn::Pcmpeqb => sem::pcmpeqb_xmm(b, xmm_reg(), xmm_rm()),
+        Insn::Por => sem::por_xmm(b, xmm_reg(), xmm_rm()),
+        Insn::Pmovmskb => {
+            if rex_w {
+                sem::pmovmskb_r64(b, reg0f_as_gpr(), xmm_rm())
+            } else {
+                sem::pmovmskb_r32(b, reg0f_as_gpr(), xmm_rm())
+            }
+        }
         Insn::Punpcklqdq => sem::punpcklqdq(b, xmm_reg(), xmm_rm()),
         Insn::MovupsLoadSibd32 => {
             if sib0f_no_index() {
@@ -2684,6 +2741,7 @@ fn dispatch<B: Backend>(
         // MOVDQU (F3 0F 6F) は16B非整列転送で MOVUPS と等価のため意味論を共有する.
         Insn::MovdquLoadXmm => sem::movups_xmm_xmm(b, xmm_reg(), xmm_rm()),
         Insn::MovdquLoadMem8 => sem::movups_load_mem8(b, xmm_reg(), rm0f(), disp8()),
+        Insn::MovdquLoadMemnd => sem::movups_load_memnd(b, xmm_reg(), rm0f()),
         // MOVDQA xmm,m128 RIP (66 0F 6F)。アライメントは問わず MOVUPS と等価.
         Insn::MovdqaLoadRip => sem::movups_load_rip(b, xmm_reg(), eip as u64 + nbytes, disp32()),
         Insn::MovupsLoadSib => {
@@ -3001,6 +3059,94 @@ fn dispatch<B: Backend>(
                 sem::movzx_r32_m8_abs(b, reg0f_as_gpr(), imm32())
             }
         }
+        Insn::MovzxR32M8Memnd => {
+            if rex_w {
+                sem::movzx_r64_m8_memnd(b, reg0f_as_gpr(), rm0f())
+            } else {
+                sem::movzx_r32_m8_memnd(b, reg0f_as_gpr(), rm0f())
+            }
+        }
+        Insn::MovzxR32M8Mem8 => {
+            if rex_w {
+                sem::movzx_r64_m8_mem8(b, reg0f_as_gpr(), rm0f(), disp8())
+            } else {
+                sem::movzx_r32_m8_mem8(b, reg0f_as_gpr(), rm0f(), disp8())
+            }
+        }
+        Insn::MovzxR32M8Mem32 => {
+            if rex_w {
+                sem::movzx_r64_m8_mem32(b, reg0f_as_gpr(), rm0f(), disp32())
+            } else {
+                sem::movzx_r32_m8_mem32(b, reg0f_as_gpr(), rm0f(), disp32())
+            }
+        }
+        Insn::MovzxR32M8Sib => {
+            if sib0f_no_index() {
+                if rex_w {
+                    sem::movzx_r64_m8_memnd(b, reg0f_as_gpr(), sib0f_base())
+                } else {
+                    sem::movzx_r32_m8_memnd(b, reg0f_as_gpr(), sib0f_base())
+                }
+            } else if rex_w {
+                sem::movzx_r64_m8_sib(b, reg0f_as_gpr(), sib0f_base(), sib0f_idx(), sib0f_shift())
+            } else {
+                sem::movzx_r32_m8_sib(b, reg0f_as_gpr(), sib0f_base(), sib0f_idx(), sib0f_shift())
+            }
+        }
+        Insn::MovzxR32M8Sibd => {
+            if sib0f_no_index() {
+                if rex_w {
+                    sem::movzx_r64_m8_mem8(b, reg0f_as_gpr(), sib0f_base(), disp8())
+                } else {
+                    sem::movzx_r32_m8_mem8(b, reg0f_as_gpr(), sib0f_base(), disp8())
+                }
+            } else if rex_w {
+                sem::movzx_r64_m8_sibd(
+                    b,
+                    reg0f_as_gpr(),
+                    sib0f_base(),
+                    sib0f_idx(),
+                    sib0f_shift(),
+                    disp8(),
+                )
+            } else {
+                sem::movzx_r32_m8_sibd(
+                    b,
+                    reg0f_as_gpr(),
+                    sib0f_base(),
+                    sib0f_idx(),
+                    sib0f_shift(),
+                    disp8(),
+                )
+            }
+        }
+        Insn::MovzxR32M8Sibd32 => {
+            if sib0f_no_index() {
+                if rex_w {
+                    sem::movzx_r64_m8_mem32(b, reg0f_as_gpr(), sib0f_base(), disp32())
+                } else {
+                    sem::movzx_r32_m8_mem32(b, reg0f_as_gpr(), sib0f_base(), disp32())
+                }
+            } else if rex_w {
+                sem::movzx_r64_m8_sibd32(
+                    b,
+                    reg0f_as_gpr(),
+                    sib0f_base(),
+                    sib0f_idx(),
+                    sib0f_shift(),
+                    disp32(),
+                )
+            } else {
+                sem::movzx_r32_m8_sibd32(
+                    b,
+                    reg0f_as_gpr(),
+                    sib0f_base(),
+                    sib0f_idx(),
+                    sib0f_shift(),
+                    disp32(),
+                )
+            }
+        }
         Insn::MovzxR32R8 => {
             // 0F B6 /r mod=11 reg-direct。src は rm フィールド (REX.B で拡張)。
             // REX なしの rm 4-7 は上位8ビット (AH/CH/DH/BH)。
@@ -3294,6 +3440,12 @@ fn dispatch<B: Backend>(
             | Insn::MovzxR32M16
             | Insn::MovzxR32M16Rip
             | Insn::MovzxR32M8Rip
+            | Insn::MovzxR32M8Memnd
+            | Insn::MovzxR32M8Mem8
+            | Insn::MovzxR32M8Mem32
+            | Insn::MovzxR32M8Sib
+            | Insn::MovzxR32M8Sibd
+            | Insn::MovzxR32M8Sibd32
             | Insn::MovzxR32R8
             | Insn::ImulRRm
             | Insn::ImulRMemnd
@@ -3913,6 +4065,73 @@ impl TrapHandler for CliLinux {
             set64(env, Gpr(0), 0);
             return TrapOutcome::Handled;
         }
+        if nr == polyisa_os_linux::x86_64::READLINKAT && self.is64
+            || nr == polyisa_os_linux::i386::READLINKAT && !self.is64
+        {
+            // readlinkat(dirfd, pathname, buf, bufsiz)。AT_FDCWD+絶対パスのみ.
+            // ホストの read_link に直結し、切詰めて返す（NUL 終端なし）。
+            let (dirfd, path_addr, buf, bufsiz) = if self.is64 {
+                (
+                    get64(env, Gpr(7)),
+                    get64(env, Gpr(6)),
+                    get64(env, Gpr(2)),
+                    get64(env, Gpr(10)),
+                )
+            } else {
+                (
+                    u64::from(env.backend.get(Gpr(3).state())),
+                    u64::from(env.backend.get(Gpr(1).state())),
+                    u64::from(env.backend.get(Gpr(2).state())),
+                    u64::from(env.backend.get(Gpr(6).state())),
+                )
+            };
+            if dirfd != at_fdcwd {
+                set64(env, Gpr(0), neg(EINVAL));
+                return TrapOutcome::Handled;
+            }
+            if bufsiz == 0 {
+                set64(env, Gpr(0), neg(EINVAL));
+                return TrapOutcome::Handled;
+            }
+            let path = match guest_c_string(env, path_addr) {
+                Some(p) => p,
+                None => return TrapOutcome::Unimplemented,
+            };
+            if !path.starts_with('/') {
+                set64(env, Gpr(0), neg(EINVAL));
+                return TrapOutcome::Handled;
+            }
+            // 拡張しすぎは失敗扱い.
+            const MAX_READLINK: u64 = 4096;
+            if bufsiz > MAX_READLINK {
+                set64(env, Gpr(0), neg(EINVAL));
+                return TrapOutcome::Handled;
+            }
+            let target = match std::fs::read_link(&path) {
+                Ok(p) => p.into_os_string().into_string().unwrap_or_default(),
+                Err(e) => {
+                    let no = match e.kind() {
+                        std::io::ErrorKind::NotFound => ENOENT,
+                        std::io::ErrorKind::PermissionDenied => EACCES,
+                        _ => EINVAL,
+                    };
+                    set64(env, Gpr(0), neg(no));
+                    return TrapOutcome::Handled;
+                }
+            };
+            let bytes = target.as_bytes();
+            let take = (bytes.len() as u64).min(bufsiz) as usize;
+            if env
+                .backend
+                .mem
+                .write(polyisa_mem::VirtAddr(buf), &bytes[..take])
+                .is_err()
+            {
+                return TrapOutcome::Unimplemented;
+            }
+            set64(env, Gpr(0), take as u64);
+            return TrapOutcome::Handled;
+        }
         // arch_prctl (x86-64 のみ)。TLS の FS ベース設定を受け付ける。
         // Ref: SRC-LINUX (7.3) arch/x86/include/uapi/asm/prctl.h.
         if self.is64 && nr == polyisa_os_linux::x86_64::ARCH_PRCTL {
@@ -4332,6 +4551,39 @@ mod tests {
         // ホスト時刻が書かれる (0 固定ではない)。
         assert_ne!(back, [0u8; 16]);
         assert_ne!(back, [0xFFu8; 16]);
+    }
+
+    #[test]
+    fn readlinkat_proc_self_exe() {
+        use polyisa_os_linux::x86_64 as abi;
+        let mut sys = CliLinux::x86_64();
+        let mut env = bare();
+        env.backend
+            .mem
+            .write(VirtAddr(0x100), b"/proc/self/exe\0")
+            .unwrap();
+        set64(&mut env, Gpr(0), abi::READLINKAT);
+        set64(&mut env, Gpr(7), 0xffff_ffff_ffff_ff9c);
+        set64(&mut env, Gpr(6), 0x100);
+        set64(&mut env, Gpr(2), 0x200);
+        set64(&mut env, Gpr(10), 0x100);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let n = get64(&mut env, Gpr(0));
+        assert!(n > 0 && n < 0x100);
+        let mut back = vec![0u8; n as usize];
+        env.backend
+            .mem
+            .read(VirtAddr(0x200), &mut back, data_access())
+            .unwrap();
+        assert!(back.starts_with(b"/"));
+        // bufsiz=0 は EINVAL。
+        set64(&mut env, Gpr(0), abi::READLINKAT);
+        set64(&mut env, Gpr(7), 0xffff_ffff_ffff_ff9c);
+        set64(&mut env, Gpr(6), 0x100);
+        set64(&mut env, Gpr(2), 0x200);
+        set64(&mut env, Gpr(10), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EINVAL));
     }
 
     #[test]
