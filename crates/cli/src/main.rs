@@ -12,7 +12,7 @@ fn main() {
                 eprintln!("usage: polyisa run <elf> [args...]");
                 std::process::exit(2);
             };
-            match polyisa_cli::run::run_elf(path, &args[2..]) {
+            match polyisa_cli::run_path(path, &args[2..]) {
                 Ok(code) => std::process::exit(code as i32),
                 Err(msg) => {
                     eprintln!("{msg}");
