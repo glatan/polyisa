@@ -214,6 +214,40 @@ pub fn mov_mem_eax<B: Backend>(b: &mut B, disp: i8) -> Flow<B> {
     Ok(())
 }
 
+/// XOR EAX, EAX (31 C0)。ゼロ化のイディオム。ZF/CF を更新する。
+pub fn xor_eax<B: Backend>(b: &mut B) -> Flow<B> {
+    let x = read(b, Gpr(0));
+    let v = b.xor::<W32>(x, x);
+    write(b, Gpr(0), v);
+    let zero = b.konst::<W32>(0);
+    update_zf_cf(b, v, zero);
+    Ok(())
+}
+
+/// SUB EAX, imm32。結果を書き、ZF/CF を更新する。
+pub fn sub_eax<B: Backend>(b: &mut B, imm: u32) -> Flow<B> {
+    let x = read(b, Gpr(0));
+    let y = b.konst::<W32>(imm);
+    let v = b.sub::<W32>(x, y);
+    write(b, Gpr(0), v);
+    update_zf_cf(b, x, y);
+    Ok(())
+}
+
+/// MOV EBP, ESP (89 E5)。関数枠の入口。
+pub fn mov_ebp_esp<B: Backend>(b: &mut B) -> Flow<B> {
+    let v = read(b, Gpr(4));
+    write(b, Gpr(5), v);
+    Ok(())
+}
+
+/// LEAVE (C9)。ESP=EBP として POP EBP と等価。
+pub fn leave<B: Backend>(b: &mut B) -> Flow<B> {
+    let ebp = read(b, Gpr(5));
+    b.set(esp_ref(), ebp);
+    pop_reg(b, Gpr(5))
+}
+
 /// MOV EAX, imm32。
 pub fn mov_eax<B: Backend>(b: &mut B, imm: u32) -> Flow<B> {
     let v = b.konst::<W32>(imm);
