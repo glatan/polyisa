@@ -2445,3 +2445,32 @@ fn punpcklqdq_interleaves_qwords() {
     let v: u128 = env.backend.get(sem::xmm_ref(Xmm(0)));
     assert_eq!(v, 0x3333_3333_4444_4444_1111_1111_2222_2222u128);
 }
+
+#[test]
+fn imul_r64_imm8_rip_basic() {
+    // IMUL RDX,[RIP+disp],0x38: [0x1500]=2 -> RDX=112.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1500), &[2u8, 0, 0, 0, 0, 0, 0, 0])
+        .unwrap();
+    env.step(|b| sem::imul_r64_imm8_rip(b, Gpr(2), 0x1008, 0x4F8, 0x38))
+        .unwrap();
+    assert_eq!(env.backend.get(Gpr(2).state()), 112);
+}
+
+#[test]
+fn imul_r32_imm8_rip_basic() {
+    // IMUL EDX,[RIP+disp],0x38 (32bit): [0x1500]=2 -> EDX=112.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1500), &[2u8, 0, 0, 0])
+        .unwrap();
+    env.backend.set(Gpr(2).state(), 0);
+    env.step(|b| sem::imul_r32_imm8_rip(b, Gpr(2), 0x1007, 0x4F9, 0x38))
+        .unwrap();
+    assert_eq!(env.backend.get(Gpr(2).state()), 112);
+}

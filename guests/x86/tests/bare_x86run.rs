@@ -1064,3 +1064,29 @@ fn run_punpcklqdq_reg_direct() {
     ));
     assert_eq!(v, 0x0000_0000_1122_3344_0000_0000_1122_3344u128);
 }
+
+#[test]
+fn run_imul_r64_imm8_rip() {
+    // run 経由で REX.W 6B /r ib + disp32 (IMUL RDX,[RIP+disp],0x38) を回す。
+    // [0x1500]=2 * 0x38 = 112=0x70 になり、exit(0x70)。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    env.backend
+        .mem
+        .write(VirtAddr(0x1500), &[2u8, 0, 0, 0, 0, 0, 0, 0])
+        .unwrap();
+    let prog: &[u8] = &[
+        0x48, 0x6B, 0x15, 0xF8, 0x04, 0x00, 0x00,
+        0x38, // imul rdx,[rip+0x4f8],0x38 ([0x1500]=2 -> 112)
+        0x48, 0x89, 0xD7, // mov rdi,rdx
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x0F, 0x05, // syscall -> exit(0x70)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0x70));
+}

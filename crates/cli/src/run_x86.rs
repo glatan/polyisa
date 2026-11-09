@@ -227,6 +227,21 @@ fn fetch_len(
             let s = second?;
             if s >> 6 == 3 { Some(6) } else { None }
         }
+        // 0x6B /r ib (IMUL r,r/m,imm8)。reg-direct 3B、RIP 7B。SIB は未対応.
+        0x6B => {
+            let s = second?;
+            let md = s >> 6;
+            let rm = s & 7;
+            if md == 3 {
+                Some(3)
+            } else if rm == 4 {
+                None
+            } else if md == 0 && rm == 5 {
+                Some(7)
+            } else {
+                None
+            }
+        }
         // 0x81 /r id (算術 imm32 群)。SIB 付きは未対応。
         // has66 (66 81) は imm16 のため 2B 短くなる.
         0x81 => {
@@ -561,6 +576,7 @@ pub fn run_mode(
                 | 0x83
                 | 0x63
                 | 0x69
+                | 0x6B
                 | 0x8D
                 | 0x0F
                 | 0xF7
@@ -689,6 +705,7 @@ pub fn run_mode(
                     | 0x81
                     | 0x63
                     | 0x69
+                    | 0x6B
                     | 0x0F
                     | 0xA4
                     | 0xA5
@@ -1837,6 +1854,19 @@ fn dispatch<B: Backend>(
                 sem::imul_r32_imm(b, reg(), rm(), imm32())
             }
         }
+        Insn::ImulRImm8Rip => {
+            // 6B /r ib + disp32 + imm8 (56b)。disp は (word>>8) 下位32 LE、imm は最下位8.
+            let disp_le = ((word >> 8) as u32).swap_bytes();
+            let disp = disp_le as i32;
+            let imm = (word & 0xff) as u8 as i8;
+            if rex_w {
+                sem::imul_r64_imm8_rip(b, reg(), eip as u64 + nbytes, disp, imm)
+            } else if is64 {
+                sem::imul_r32_imm8_rip(b, reg(), eip as u64 + nbytes, disp, imm)
+            } else {
+                sem::imul_r32_imm8_abs(b, reg(), disp_le, imm)
+            }
+        }
         Insn::CmpRmImm8Rip => {
             // 83 3D + disp32 + imm8: word = [83][3D][disp0..3][imm] (56ビット)。
             // disp32 は (word>>8) の下位32を LE 復元する. imm は最下位.
@@ -1967,7 +1997,7 @@ fn dispatch<B: Backend>(
             | Insn::SarRm32Cl
             | Insn::NotRm32
             | Insn::NegRm32 => Some(rm()),
-            Insn::MovRm32 | Insn::Movsxd | Insn::ImulRImm => Some(reg()),
+            Insn::MovRm32 | Insn::Movsxd | Insn::ImulRImm | Insn::ImulRImm8Rip => Some(reg()),
             Insn::Cmovb
             | Insn::Cmovne
             | Insn::Cmove

@@ -3232,6 +3232,61 @@ pub fn imul_r64_imm<B: Backend>(b: &mut B, dst: Gpr, src: Gpr, imm: u32) -> Flow
     Ok(())
 }
 
+/// IMUL r32, m32, imm8 RIP (6B /r ib)。m32 と imm8 (符号拡張) の符号付き積の下位32ビットを dst に置く.
+pub fn imul_r32_imm8_rip<B: Backend>(
+    b: &mut B,
+    dst: Gpr,
+    next_rip: u64,
+    disp: i32,
+    imm: i8,
+) -> Flow<B> {
+    let base = b.konst::<W64>(next_rip);
+    let d = b.konst::<W64>(disp as i64 as u64);
+    let addr = b.add::<W64>(base, d);
+    let x: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let y = b.konst::<W32>(imm as i32 as u32);
+    let x64 = b.sext::<W32, W64>(x);
+    let y64 = b.sext::<W32, W64>(y);
+    let p64 = b.mul::<W64>(x64, y64);
+    let v: B::V<W32> = b.trunc::<W64, W32>(p64);
+    write(b, dst, v);
+    Ok(())
+}
+
+/// IMUL [disp32], imm8 (32ビット絶対番地、m32 を読む).
+pub fn imul_r32_imm8_abs<B: Backend>(b: &mut B, dst: Gpr, addr32: u32, imm: i8) -> Flow<B> {
+    let addr = b.konst::<W64>(addr32 as u64);
+    let x: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let y = b.konst::<W32>(imm as i32 as u32);
+    let x64 = b.sext::<W32, W64>(x);
+    let y64 = b.sext::<W32, W64>(y);
+    let p64 = b.mul::<W64>(x64, y64);
+    let v: B::V<W32> = b.trunc::<W64, W32>(p64);
+    write(b, dst, v);
+    Ok(())
+}
+
+/// IMUL r64, m64, imm8 RIP (REX.W + 6B /r ib)。m64 と imm8 (符号拡張) の符号付き積の下位64ビットを dst に置く.
+pub fn imul_r64_imm8_rip<B: Backend>(
+    b: &mut B,
+    dst: Gpr,
+    next_rip: u64,
+    disp: i32,
+    imm: i8,
+) -> Flow<B> {
+    let base = b.konst::<W64>(next_rip);
+    let d = b.konst::<W64>(disp as i64 as u64);
+    let addr = b.add::<W64>(base, d);
+    let x: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let y = b.konst::<W64>(imm as i64 as u64);
+    let x128 = b.sext::<W64, W128>(x);
+    let y128 = b.sext::<W64, W128>(y);
+    let p128 = b.mul::<W128>(x128, y128);
+    let v: B::V<W64> = b.trunc::<W128, W64>(p128);
+    write64(b, dst, v);
+    Ok(())
+}
+
 /// CMOVNS r64, r/m64。SF=0 なら src を dst に移す（REX.W）.
 pub fn cmovns_r64<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
     let take = {
