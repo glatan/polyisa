@@ -272,6 +272,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("movzx_r32_m16", "F1", "00001111 10110111 10010101 ................................", "movzx r32, r/m16", "load"),
         // CMOVB r32/r64, r/m32/r/m64 (0F 42 /r)。reg-direct のみ。REX.W で切替.
         ("cmovb", "F1", "00001111 01000010 11......", "cmovb r, r/m", "alu"),
+        ("cmovo", "F1", "00001111 01000000 11......", "cmovo r, r/m", "alu"),
+        ("cmovno", "F1", "00001111 01000001 11......", "cmovno r, r/m", "alu"),
         // CMOVNE r32/r64, r/m32/r/m64 (0F 45 /r)。reg-direct のみ.
         ("cmovne", "F1", "00001111 01000101 11......", "cmovne r, r/m", "alu"),
         // CMOVE r32/r64, r/m32/r/m64 (0F 44 /r)。reg-direct のみ.
@@ -281,6 +283,13 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("cmovbe", "F1", "00001111 01000110 11......", "cmovbe r, r/m", "alu"),
         ("cmova", "F1", "00001111 01000111 11......", "cmova r, r/m", "alu"),
         ("cmovae", "F1", "00001111 01000011 11......", "cmovae r, r/m", "alu"),
+        ("cmovs", "F1", "00001111 01001000 11......", "cmovs r, r/m", "alu"),
+        ("cmovp", "F1", "00001111 01001010 11......", "cmovp r, r/m", "alu"),
+        ("cmovnp", "F1", "00001111 01001011 11......", "cmovnp r, r/m", "alu"),
+        ("cmovl", "F1", "00001111 01001100 11......", "cmovl r, r/m", "alu"),
+        ("cmovge", "F1", "00001111 01001101 11......", "cmovge r, r/m", "alu"),
+        ("cmovle", "F1", "00001111 01001110 11......", "cmovle r, r/m", "alu"),
+        ("cmovg", "F1", "00001111 01001111 11......", "cmovg r, r/m", "alu"),
         // SETcc r/m8 reg-direct (0F 90-9F /r mod=11)。REXありは低8、なしの4-7は上位8.
         ("seto", "F1", "00001111 10010000 11......", "seto r/m8", "alu"),
         ("setno", "F1", "00001111 10010001 11......", "setno r/m8", "alu"),
@@ -437,6 +446,12 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("cmp_rm8_imm", "F1", "10000000 11111... ........", "cmp r/m8, {imm}", "alu"),
         ("cmp_rm8_imm_sibd", "F1", "10000000 01111100 ........ ........ ........", "cmp r/m8, {imm}", "alu"),
         ("test_m8_imm_rip", "F1", "11110110 00000101 ................................ ........", "test m8, {imm}", "alu"),
+        // TEST m8,imm8 mod=00 [base] (F6 /0)。SIBなし.
+        ("test_m8_imm_memnd", "MR", "11110110 00000... ........", "test m8, {imm}", "alu"),
+        // TEST m8,imm8 mod=01 [base+disp8] (F6 /0)。
+        ("test_m8_imm_mem8", "M8", "11110110 01000... ........ ........", "test m8, {imm}", "alu"),
+        // TEST m8,imm8 mod=10 [base+disp32] (F6 /0)。
+        ("test_m8_imm_mem32", "M32", "11110110 10000... ................................ ........", "test m8, {imm}", "alu"),
         // CMP r32, m32 RIP (3B 05 + disp32)。
         ("cmp_r_rip", "F1", "00111011 00...101 ................................", "cmp r32, m32", "alu"),
         // CMP r/m32, r32 RIP (39 05 + disp32)。dst=mem.

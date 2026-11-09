@@ -3941,3 +3941,27 @@ fn shl_rm32_cl_basic() {
     env.step(|b| sem::shl_rm32_cl(b, Gpr(0))).unwrap();
     assert_eq!(env.backend.get(Gpr(0).state()), 8);
 }
+
+#[test]
+fn test_m8_imm_mem8_sets_zf() {
+    // TESTB $0x2,[RBX+0x04]: [0x1504]=0x02 -> ZF=0? AND=0x02 -> ZF=0. Use 0x00 for ZF=1? Actually 0x02&0x02=0x02 ZF=0.
+    // Use [0x1504]=0x00 -> ZF=1.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend.set(Gpr(3).state(), 0x1500);
+    env.backend.mem.write(VirtAddr(0x1504), &[0x00u8]).unwrap();
+    env.step(|b| sem::test_m8_imm_mem8(b, Gpr(3), 0x04, 0x02))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0x40);
+}
+
+#[test]
+fn cmovs_taken() {
+    // CMOVS RDX,RAX: SF=1 -> RDX=RAX.
+    let mut env = env();
+    env.backend.set(sem::eflags_ref(), 0x80);
+    env.backend.set(Gpr(0).state(), 0x77);
+    env.backend.set(Gpr(2).state(), 0);
+    env.step(|b| sem::cmovs_r32(b, Gpr(2), Gpr(0))).unwrap();
+    assert_eq!(env.backend.get(Gpr(2).state()), 0x77);
+}

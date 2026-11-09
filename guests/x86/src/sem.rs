@@ -424,6 +424,39 @@ pub fn test_m8_imm_abs<B: Backend>(b: &mut B, addr32: u32, imm: u8) -> Flow<B> {
     Ok(())
 }
 
+/// TEST m8,imm8 [base] (F6 /0 mod=00)。
+pub fn test_m8_imm_memnd<B: Backend>(b: &mut B, base: Gpr, imm: u8) -> Flow<B> {
+    use polyisa_sem::W8;
+    let addr = read64(b, base);
+    let x: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
+    let y = b.konst::<W8>(imm);
+    let v = b.and::<W8>(x, y);
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// TEST m8,imm8 [base+disp8] (F6 /0 mod=01)。
+pub fn test_m8_imm_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8, imm: u8) -> Flow<B> {
+    use polyisa_sem::W8;
+    let addr = eff_addr(b, base, disp);
+    let x: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
+    let y = b.konst::<W8>(imm);
+    let v = b.and::<W8>(x, y);
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// TEST m8,imm8 [base+disp32] (F6 /0 mod=10)。
+pub fn test_m8_imm_mem32<B: Backend>(b: &mut B, base: Gpr, disp: i32, imm: u8) -> Flow<B> {
+    use polyisa_sem::W8;
+    let addr = eff_addr32(b, base, disp);
+    let x: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
+    let y = b.konst::<W8>(imm);
+    let v = b.and::<W8>(x, y);
+    update_logic_flags(b, v);
+    Ok(())
+}
+
 /// CMPB m8,imm8 RIP (80 3D)。8ビットを読んで比較し、6 旗を更新する.
 pub fn cmp_rm8_imm_rip<B: Backend>(b: &mut B, next_rip: u64, disp: i32, imm: u8) -> Flow<B> {
     use polyisa_sem::W8;
@@ -8192,5 +8225,273 @@ pub fn shr_rm64_cl<B: Backend>(b: &mut B, dst: Gpr) -> Flow<B> {
     new_flags = b.or::<W32>(new_flags, szp);
     let assembled = b.select::<W32>(active, new_flags, old);
     b.set(eflags_ref(), assembled);
+    Ok(())
+}
+
+/// CMOVO r32, r/m32。OF=1 なら src を dst に移す.
+pub fn cmovo_r32<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
+    let take = read_of(b);
+    let srcv = read(b, src);
+    let dstv = read(b, dst);
+    let v = b.select::<W32>(take, srcv, dstv);
+    write(b, dst, v);
+    Ok(())
+}
+
+/// CMOVO r64, r/m64 (REX.W)。
+pub fn cmovo_r64<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
+    let take = read_of(b);
+    let srcv = read64(b, src);
+    let dstv = read64(b, dst);
+    let v = b.select::<W64>(take, srcv, dstv);
+    write64(b, dst, v);
+    Ok(())
+}
+
+/// CMOVNO r32。OF=0 なら移す.
+pub fn cmovno_r32<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
+    let of = read_of(b);
+    let zero = b.konst::<W32>(0);
+    let one = b.konst::<W32>(1);
+    let n = b.select::<W32>(of, one, zero);
+    let take = b.cmp::<W32>(Cmp::Eq, n, zero);
+    let srcv = read(b, src);
+    let dstv = read(b, dst);
+    let v = b.select::<W32>(take, srcv, dstv);
+    write(b, dst, v);
+    Ok(())
+}
+
+/// CMOVNO r64 (REX.W)。
+pub fn cmovno_r64<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
+    let of = read_of(b);
+    let zero = b.konst::<W32>(0);
+    let one = b.konst::<W32>(1);
+    let n = b.select::<W32>(of, one, zero);
+    let take = b.cmp::<W32>(Cmp::Eq, n, zero);
+    let srcv = read64(b, src);
+    let dstv = read64(b, dst);
+    let v = b.select::<W64>(take, srcv, dstv);
+    write64(b, dst, v);
+    Ok(())
+}
+
+/// CMOVS r32。SF=1 なら移す.
+pub fn cmovs_r32<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
+    let take = read_sf(b);
+    let srcv = read(b, src);
+    let dstv = read(b, dst);
+    let v = b.select::<W32>(take, srcv, dstv);
+    write(b, dst, v);
+    Ok(())
+}
+
+/// CMOVS r64 (REX.W)。
+pub fn cmovs_r64<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
+    let take = read_sf(b);
+    let srcv = read64(b, src);
+    let dstv = read64(b, dst);
+    let v = b.select::<W64>(take, srcv, dstv);
+    write64(b, dst, v);
+    Ok(())
+}
+
+/// CMOVP r32。PF=1 なら移す.
+pub fn cmovp_r32<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
+    let take = read_pf(b);
+    let srcv = read(b, src);
+    let dstv = read(b, dst);
+    let v = b.select::<W32>(take, srcv, dstv);
+    write(b, dst, v);
+    Ok(())
+}
+
+/// CMOVP r64 (REX.W)。
+pub fn cmovp_r64<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
+    let take = read_pf(b);
+    let srcv = read64(b, src);
+    let dstv = read64(b, dst);
+    let v = b.select::<W64>(take, srcv, dstv);
+    write64(b, dst, v);
+    Ok(())
+}
+
+/// CMOVNP r32。PF=0 なら移す.
+pub fn cmovnp_r32<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
+    let pf = read_pf(b);
+    let zero = b.konst::<W32>(0);
+    let one = b.konst::<W32>(1);
+    let n = b.select::<W32>(pf, one, zero);
+    let take = b.cmp::<W32>(Cmp::Eq, n, zero);
+    let srcv = read(b, src);
+    let dstv = read(b, dst);
+    let v = b.select::<W32>(take, srcv, dstv);
+    write(b, dst, v);
+    Ok(())
+}
+
+/// CMOVNP r64 (REX.W)。
+pub fn cmovnp_r64<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
+    let pf = read_pf(b);
+    let zero = b.konst::<W32>(0);
+    let one = b.konst::<W32>(1);
+    let n = b.select::<W32>(pf, one, zero);
+    let take = b.cmp::<W32>(Cmp::Eq, n, zero);
+    let srcv = read64(b, src);
+    let dstv = read64(b, dst);
+    let v = b.select::<W64>(take, srcv, dstv);
+    write64(b, dst, v);
+    Ok(())
+}
+
+/// CMOVL r32。SF!=OF なら移す.
+pub fn cmovl_r32<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
+    let sf = read_sf(b);
+    let of = read_of(b);
+    let zero = b.konst::<W32>(0);
+    let one = b.konst::<W32>(1);
+    let sf_n = b.select::<W32>(sf, one, zero);
+    let of_n = b.select::<W32>(of, one, zero);
+    let take = b.cmp::<W32>(Cmp::Ne, sf_n, of_n);
+    let srcv = read(b, src);
+    let dstv = read(b, dst);
+    let v = b.select::<W32>(take, srcv, dstv);
+    write(b, dst, v);
+    Ok(())
+}
+
+/// CMOVL r64 (REX.W)。
+pub fn cmovl_r64<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
+    let sf = read_sf(b);
+    let of = read_of(b);
+    let zero = b.konst::<W32>(0);
+    let one = b.konst::<W32>(1);
+    let sf_n = b.select::<W32>(sf, one, zero);
+    let of_n = b.select::<W32>(of, one, zero);
+    let take = b.cmp::<W32>(Cmp::Ne, sf_n, of_n);
+    let srcv = read64(b, src);
+    let dstv = read64(b, dst);
+    let v = b.select::<W64>(take, srcv, dstv);
+    write64(b, dst, v);
+    Ok(())
+}
+
+/// CMOVGE r32。SF==OF なら移す.
+pub fn cmovge_r32<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
+    let sf = read_sf(b);
+    let of = read_of(b);
+    let zero = b.konst::<W32>(0);
+    let one = b.konst::<W32>(1);
+    let sf_n = b.select::<W32>(sf, one, zero);
+    let of_n = b.select::<W32>(of, one, zero);
+    let take = b.cmp::<W32>(Cmp::Eq, sf_n, of_n);
+    let srcv = read(b, src);
+    let dstv = read(b, dst);
+    let v = b.select::<W32>(take, srcv, dstv);
+    write(b, dst, v);
+    Ok(())
+}
+
+/// CMOVGE r64 (REX.W)。
+pub fn cmovge_r64<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
+    let sf = read_sf(b);
+    let of = read_of(b);
+    let zero = b.konst::<W32>(0);
+    let one = b.konst::<W32>(1);
+    let sf_n = b.select::<W32>(sf, one, zero);
+    let of_n = b.select::<W32>(of, one, zero);
+    let take = b.cmp::<W32>(Cmp::Eq, sf_n, of_n);
+    let srcv = read64(b, src);
+    let dstv = read64(b, dst);
+    let v = b.select::<W64>(take, srcv, dstv);
+    write64(b, dst, v);
+    Ok(())
+}
+
+/// CMOVLE r32。ZF=1 または SF!=OF なら移す.
+pub fn cmovle_r32<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
+    let zf = read_zf(b);
+    let sf = read_sf(b);
+    let of = read_of(b);
+    let zero = b.konst::<W32>(0);
+    let one = b.konst::<W32>(1);
+    let sf_n = b.select::<W32>(sf, one, zero);
+    let of_n = b.select::<W32>(of, one, zero);
+    let ne = b.cmp::<W32>(Cmp::Ne, sf_n, of_n);
+    let ne_n = b.select::<W32>(ne, one, zero);
+    let zf_n = b.select::<W32>(zf, one, zero);
+    let either = b.or::<W32>(zf_n, ne_n);
+    let take = b.cmp::<W32>(Cmp::Ne, either, zero);
+    let srcv = read(b, src);
+    let dstv = read(b, dst);
+    let v = b.select::<W32>(take, srcv, dstv);
+    write(b, dst, v);
+    Ok(())
+}
+
+/// CMOVLE r64 (REX.W)。
+pub fn cmovle_r64<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
+    let zf = read_zf(b);
+    let sf = read_sf(b);
+    let of = read_of(b);
+    let zero = b.konst::<W32>(0);
+    let one = b.konst::<W32>(1);
+    let sf_n = b.select::<W32>(sf, one, zero);
+    let of_n = b.select::<W32>(of, one, zero);
+    let ne = b.cmp::<W32>(Cmp::Ne, sf_n, of_n);
+    let ne_n = b.select::<W32>(ne, one, zero);
+    let zf_n = b.select::<W32>(zf, one, zero);
+    let either = b.or::<W32>(zf_n, ne_n);
+    let take = b.cmp::<W32>(Cmp::Ne, either, zero);
+    let srcv = read64(b, src);
+    let dstv = read64(b, dst);
+    let v = b.select::<W64>(take, srcv, dstv);
+    write64(b, dst, v);
+    Ok(())
+}
+
+/// CMOVG r32。ZF=0 かつ SF==OF なら移す.
+pub fn cmovg_r32<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
+    let zf = read_zf(b);
+    let sf = read_sf(b);
+    let of = read_of(b);
+    let zero = b.konst::<W32>(0);
+    let one = b.konst::<W32>(1);
+    let sf_n = b.select::<W32>(sf, one, zero);
+    let of_n = b.select::<W32>(of, one, zero);
+    let eq = b.cmp::<W32>(Cmp::Eq, sf_n, of_n);
+    let eq_n = b.select::<W32>(eq, one, zero);
+    let zf_n = b.select::<W32>(zf, one, zero);
+    let zf_zero = b.cmp::<W32>(Cmp::Eq, zf_n, zero);
+    let zf_zero_n = b.select::<W32>(zf_zero, one, zero);
+    let both = b.and::<W32>(zf_zero_n, eq_n);
+    let take = b.cmp::<W32>(Cmp::Ne, both, zero);
+    let srcv = read(b, src);
+    let dstv = read(b, dst);
+    let v = b.select::<W32>(take, srcv, dstv);
+    write(b, dst, v);
+    Ok(())
+}
+
+/// CMOVG r64 (REX.W)。
+pub fn cmovg_r64<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
+    let zf = read_zf(b);
+    let sf = read_sf(b);
+    let of = read_of(b);
+    let zero = b.konst::<W32>(0);
+    let one = b.konst::<W32>(1);
+    let sf_n = b.select::<W32>(sf, one, zero);
+    let of_n = b.select::<W32>(of, one, zero);
+    let eq = b.cmp::<W32>(Cmp::Eq, sf_n, of_n);
+    let eq_n = b.select::<W32>(eq, one, zero);
+    let zf_n = b.select::<W32>(zf, one, zero);
+    let zf_zero = b.cmp::<W32>(Cmp::Eq, zf_n, zero);
+    let zf_zero_n = b.select::<W32>(zf_zero, one, zero);
+    let both = b.and::<W32>(zf_zero_n, eq_n);
+    let take = b.cmp::<W32>(Cmp::Ne, both, zero);
+    let srcv = read64(b, src);
+    let dstv = read64(b, dst);
+    let v = b.select::<W64>(take, srcv, dstv);
+    write64(b, dst, v);
     Ok(())
 }

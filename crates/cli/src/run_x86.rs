@@ -492,13 +492,23 @@ fn fetch_len(
         0xF6 => {
             let s = second?;
             let md = s >> 6;
+            let reg = (s >> 3) & 7;
             let rm = s & 7;
+            if reg != 0 {
+                return None;
+            }
             if md == 3 {
                 Some(3)
             } else if md == 0 && rm == 5 {
                 Some(7)
-            } else {
+            } else if rm == 4 {
                 None
+            } else if md == 1 {
+                Some(4)
+            } else if md == 0 {
+                Some(3)
+            } else {
+                Some(7)
             }
         }
         // F7 /r (TEST/NOT/NEG/MUL/DIV)。reg-direct のみ.
@@ -2000,6 +2010,23 @@ fn dispatch<B: Backend>(
                 sem::test_m8_imm_abs(b, ((word >> 8) as u32).swap_bytes(), imm)
             }
         }
+        Insn::TestM8ImmMemnd => {
+            // F6 /0 mod=00 [base],imm8 (24b)。imm は最下位8.
+            let imm = (word & 0xff) as u8;
+            sem::test_m8_imm_memnd(b, rm(), imm)
+        }
+        Insn::TestM8ImmMem8 => {
+            // F6 /0 mod=01 [base+disp8],imm8 (32b)。
+            let d8 = ((word >> 8) & 0xff) as u8 as i8;
+            let imm = (word & 0xff) as u8;
+            sem::test_m8_imm_mem8(b, rm(), d8, imm)
+        }
+        Insn::TestM8ImmMem32 => {
+            // F6 /0 mod=10 [base+disp32],imm8 (56b)。
+            let disp = ((word >> 8) as u32).swap_bytes() as i32;
+            let imm = (word & 0xff) as u8;
+            sem::test_m8_imm_mem32(b, rm(), disp, imm)
+        }
         Insn::CmpRm8ImmRip => {
             // 80 3D + disp32 + imm8 (56b)。disp は (word>>8) 下位32 LE、imm は最下位8.
             let disp = ((word >> 8) as u32).swap_bytes() as i32;
@@ -3174,6 +3201,69 @@ fn dispatch<B: Backend>(
                 sem::cmovae_r32(b, reg0f_as_gpr(), rm0f())
             }
         }
+        Insn::Cmovo => {
+            if rex_w {
+                sem::cmovo_r64(b, reg0f_as_gpr(), rm0f())
+            } else {
+                sem::cmovo_r32(b, reg0f_as_gpr(), rm0f())
+            }
+        }
+        Insn::Cmovno => {
+            if rex_w {
+                sem::cmovno_r64(b, reg0f_as_gpr(), rm0f())
+            } else {
+                sem::cmovno_r32(b, reg0f_as_gpr(), rm0f())
+            }
+        }
+        Insn::Cmovs => {
+            if rex_w {
+                sem::cmovs_r64(b, reg0f_as_gpr(), rm0f())
+            } else {
+                sem::cmovs_r32(b, reg0f_as_gpr(), rm0f())
+            }
+        }
+        Insn::Cmovp => {
+            if rex_w {
+                sem::cmovp_r64(b, reg0f_as_gpr(), rm0f())
+            } else {
+                sem::cmovp_r32(b, reg0f_as_gpr(), rm0f())
+            }
+        }
+        Insn::Cmovnp => {
+            if rex_w {
+                sem::cmovnp_r64(b, reg0f_as_gpr(), rm0f())
+            } else {
+                sem::cmovnp_r32(b, reg0f_as_gpr(), rm0f())
+            }
+        }
+        Insn::Cmovl => {
+            if rex_w {
+                sem::cmovl_r64(b, reg0f_as_gpr(), rm0f())
+            } else {
+                sem::cmovl_r32(b, reg0f_as_gpr(), rm0f())
+            }
+        }
+        Insn::Cmovge => {
+            if rex_w {
+                sem::cmovge_r64(b, reg0f_as_gpr(), rm0f())
+            } else {
+                sem::cmovge_r32(b, reg0f_as_gpr(), rm0f())
+            }
+        }
+        Insn::Cmovle => {
+            if rex_w {
+                sem::cmovle_r64(b, reg0f_as_gpr(), rm0f())
+            } else {
+                sem::cmovle_r32(b, reg0f_as_gpr(), rm0f())
+            }
+        }
+        Insn::Cmovg => {
+            if rex_w {
+                sem::cmovg_r64(b, reg0f_as_gpr(), rm0f())
+            } else {
+                sem::cmovg_r32(b, reg0f_as_gpr(), rm0f())
+            }
+        }
         Insn::CmoveM64 => {
             if rex_w {
                 sem::cmove_r64_mem32(b, reg0f_as_gpr(), Gpr(5 | ((rex & 1) << 3)), disp32())
@@ -3786,6 +3876,15 @@ fn dispatch<B: Backend>(
             | Insn::Cmovbe
             | Insn::Cmova
             | Insn::Cmovae
+            | Insn::Cmovo
+            | Insn::Cmovno
+            | Insn::Cmovs
+            | Insn::Cmovp
+            | Insn::Cmovnp
+            | Insn::Cmovl
+            | Insn::Cmovge
+            | Insn::Cmovle
+            | Insn::Cmovg
             | Insn::MovzxR32M16
             | Insn::MovzxR32M16Sibd
             | Insn::MovzxR32M16Rip
