@@ -144,10 +144,23 @@ fn fetch_len(
                 } else {
                     if rm == 5 { None } else { Some(3) }
                 }
-            } else if matches!(s, 0x60 | 0x61 | 0x62 | 0x7E | 0xEF) {
+            } else if matches!(s, 0x60 | 0x61 | 0x62 | 0xEF) {
                 // XMM reg-direct のみ（66 接頭辞は剥がし済み）。
                 let m = third?;
                 if m >> 6 == 3 { Some(3) } else { None }
+            } else if s == 0x7E {
+                // MOVQ r64,xmm (reg-direct) と MOVQ xmm,m64 RIP (mod=00 rm=101)。
+                // F3/66 接頭辞は剥がし済み。REX.W は dispatch で見る。
+                let m = third?;
+                let md = m >> 6;
+                let rm = m & 7;
+                if md == 3 {
+                    Some(3)
+                } else if md == 0 && rm == 5 {
+                    Some(7)
+                } else {
+                    None
+                }
             } else if s == 0x70 {
                 // PSHUFD xmm,xmm,imm8。reg-direct のみ。
                 let m = third?;
@@ -1568,6 +1581,13 @@ fn dispatch<B: Backend>(
                 sem::movq_m64_xmm_rip(b, xmm_reg(), eip as u64 + nbytes, disp32())
             } else {
                 sem::movq_m64_xmm_abs(b, xmm_reg(), imm32())
+            }
+        }
+        Insn::MovqXmmM64Rip => {
+            if is64 {
+                sem::movq_xmm_m64_rip(b, xmm_reg(), eip as u64 + nbytes, disp32())
+            } else {
+                sem::movq_xmm_m64_abs(b, xmm_reg(), imm32())
             }
         }
         Insn::Pshufd => {

@@ -2670,6 +2670,26 @@ pub fn movq_m64_xmm_abs<B: Backend>(b: &mut B, src: Xmm, addr32: u32) -> Flow<B>
     Ok(())
 }
 
+/// MOVQ xmm,m64 RIP (F3 0F 7E)。[RIP+disp] の64ビットを XMM 下位に移し、上位64を消す.
+pub fn movq_xmm_m64_rip<B: Backend>(b: &mut B, dst: Xmm, next_rip: u64, disp: i32) -> Flow<B> {
+    let base = b.konst::<W64>(next_rip);
+    let d = b.konst::<W64>(disp as i64 as u64);
+    let addr = b.add::<W64>(base, d);
+    let v64: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let v = b.zext::<W64, W128>(v64);
+    b.set(xmm_ref(dst), v);
+    Ok(())
+}
+
+/// MOVQ xmm,[disp32] (32ビット絶対番地、64ビットロード).
+pub fn movq_xmm_m64_abs<B: Backend>(b: &mut B, dst: Xmm, addr32: u32) -> Flow<B> {
+    let addr = b.konst::<W64>(addr32 as u64);
+    let v64: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let v = b.zext::<W64, W128>(v64);
+    b.set(xmm_ref(dst), v);
+    Ok(())
+}
+
 /// PUNPCKLDQ xmm1, xmm2。下位2ダブルワードずつを交互に挿す.
 pub fn punpckldq<B: Backend>(b: &mut B, dst: Xmm, src: Xmm) -> Flow<B> {
     let a: B::V<W128> = b.get(xmm_ref(dst));

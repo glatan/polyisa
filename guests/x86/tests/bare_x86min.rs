@@ -2290,3 +2290,22 @@ fn mov_rm8_imm_mem8_stores_byte() {
         .unwrap();
     assert_eq!(back, [1u8]);
 }
+
+#[test]
+fn movq_xmm_m64_rip_roundtrip() {
+    // MOVQ xmm0,[RIP+disp]: [0x1500]=0x1122334455667788 -> xmm0 低64。
+    use polyisa_guest_x86::sem::Xmm;
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x1500),
+            &[0x88u8, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11],
+        )
+        .unwrap();
+    env.step(|b| sem::movq_xmm_m64_rip(b, Xmm(0), 0x1007, 0x4F9))
+        .unwrap();
+    let v: u128 = env.backend.get(sem::xmm_ref(Xmm(0)));
+    assert_eq!(v, 0x1122_3344_5566_7788);
+}

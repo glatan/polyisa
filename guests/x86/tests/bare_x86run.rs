@@ -877,3 +877,32 @@ fn run_movb_mem8_disp8() {
     let out = run_x86::run(&mut env, 0x1000, &mut sys, 100);
     assert_eq!(out, Outcome::Exit(0x77));
 }
+
+#[test]
+fn run_movq_xmm_m64_rip() {
+    // run 経由で F3 0F 7E mod=00 [RIP+disp32] (MOVQ xmm0,[0x1500]) を回す。
+    // [0x1500]=0x77 として xmm0 低64が 0x77 になることを確かめ、exit(0)。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    env.backend
+        .mem
+        .write(VirtAddr(0x1500), &[0x77u8, 0, 0, 0, 0, 0, 0, 0])
+        .unwrap();
+    let prog: &[u8] = &[
+        0xF3, 0x0F, 0x7E, 0x05, 0xF8, 0x04, 0x00, 0x00, // movq xmm0,[rip+0x4f8] ([0x1500])
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
+        0x0F, 0x05, // syscall -> exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0));
+    let v: u128 = env.backend.get(polyisa_guest_x86::sem::xmm_ref(
+        polyisa_guest_x86::sem::Xmm(0),
+    ));
+    assert_eq!(v & 0xffff_ffff_ffff_ffff, 0x77);
+}
