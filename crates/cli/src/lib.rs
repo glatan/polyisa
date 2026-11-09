@@ -7,6 +7,40 @@
 pub mod run;
 pub mod run_x86;
 
+/// ELF を選んで実行する。`EI_CLASS` と `e_machine` で RISC-V と x86 を振り分ける。
+/// 番号表の出典は各 `run_elf_*` 側にある。RV32 を含むそれ以外の組み合わせは
+/// 未対応として拒否する（従来の `run_elf` も RV32 を受け付けない）。
+pub fn run_path(path: &str, argv: &[String]) -> Result<u64, String> {
+    use polyisa_loader::elf::{CLASS_32, CLASS_64, MAGIC};
+    let bytes = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
+    if bytes.len() < 6 || bytes[0..4] != MAGIC {
+        return Err(format!("{path} は ELF ではない"));
+    }
+    match bytes[4] {
+        CLASS_32 => {
+            let ehdr =
+                polyisa_loader::elf::parse_ehdr32(&bytes).map_err(|e| format!("ehdr: {e:?}"))?;
+            // EM_386=3。Ref: SRC-LINUX (7.3).
+            if ehdr.machine == 3 {
+                run_x86::run_elf_x86(path, argv)
+            } else {
+                Err(format!("未対応の e_machine: {}", ehdr.machine))
+            }
+        }
+        CLASS_64 => {
+            let ehdr =
+                polyisa_loader::elf::parse_ehdr(&bytes).map_err(|e| format!("ehdr: {e:?}"))?;
+            // EM_RISCV=243。Ref: SPEC-RISCV-PSABI (v1.0).
+            if ehdr.machine == 243 {
+                run::run_elf(path, argv)
+            } else {
+                Err(format!("未対応の e_machine: {}", ehdr.machine))
+            }
+        }
+        _ => Err(format!("{path} は未知の ELF クラスである")),
+    }
+}
+
 /// `run`、`cpus`、`disasm` のいずれか。引数の解析は後の段階で足す。
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Command {
