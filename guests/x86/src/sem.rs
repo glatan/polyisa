@@ -2963,6 +2963,40 @@ pub fn cmove_r32_mem32<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, disp: i32) ->
     Ok(())
 }
 
+/// CMOVAE r32, m32 [base+disp32] (mod=10)。CF=0 なら mem32 を dst に移す.
+pub fn cmovae_r32_mem32<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, disp: i32) -> Flow<B> {
+    let addr = eff_addr32(b, base, disp);
+    let srcv: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let take = {
+        let cf = read_cf(b);
+        let zero = b.konst::<W32>(0);
+        let one = b.konst::<W32>(1);
+        let n = b.select::<W32>(cf, one, zero);
+        b.cmp::<W32>(Cmp::Eq, n, zero)
+    };
+    let dstv = read(b, dst);
+    let v = b.select::<W32>(take, srcv, dstv);
+    write(b, dst, v);
+    Ok(())
+}
+
+/// CMOVAE r64, m64 [base+disp32] (mod=10, REX.W)。CF=0 なら mem64 を dst に移す.
+pub fn cmovae_r64_mem32<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, disp: i32) -> Flow<B> {
+    let addr = eff_addr32(b, base, disp);
+    let srcv: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let take = {
+        let cf = read_cf(b);
+        let zero = b.konst::<W32>(0);
+        let one = b.konst::<W32>(1);
+        let n = b.select::<W32>(cf, one, zero);
+        b.cmp::<W32>(Cmp::Eq, n, zero)
+    };
+    let dstv = read64(b, dst);
+    let v = b.select::<W64>(take, srcv, dstv);
+    write64(b, dst, v);
+    Ok(())
+}
+
 /// IMUL r32, r/m32, imm32。符号付き積の下位32ビットを dst に置く.
 pub fn imul_r32_imm<B: Backend>(b: &mut B, dst: Gpr, src: Gpr, imm: u32) -> Flow<B> {
     let x = read(b, src);

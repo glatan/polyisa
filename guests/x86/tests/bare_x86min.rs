@@ -2132,3 +2132,49 @@ fn cmp_rm64_mem32_sets_zf() {
         .unwrap();
     assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0x40);
 }
+
+#[test]
+fn cmovae_rm_mem32_taken_and_not_taken() {
+    // CMOVAE [RBP+disp32] (mod=10): CF=0 で採用、CF=1 で保持.
+    let mut env = env();
+    env.map_rw(0, 1).unwrap();
+    env.backend.set(Gpr(5).state(), 0x100);
+    env.backend
+        .mem
+        .write(VirtAddr(0x120), &[0x77u8, 0, 0, 0])
+        .unwrap();
+    env.backend.set(Gpr(0).state(), 0);
+    env.backend.set(sem::eflags_ref(), 0x0);
+    env.step(|b| sem::cmovae_r32_mem32(b, Gpr(0), Gpr(5), 0x20))
+        .unwrap();
+    assert_eq!(eax(&mut env), 0x77);
+    env.backend.set(Gpr(0).state(), 0);
+    env.backend.set(sem::eflags_ref(), 0x1);
+    env.step(|b| sem::cmovae_r32_mem32(b, Gpr(0), Gpr(5), 0x20))
+        .unwrap();
+    assert_eq!(eax(&mut env), 0);
+}
+
+#[test]
+fn cmovae_rm64_mem32_taken() {
+    // CMOVAE R13,[RBP-0x198] (REX.W): CF=0 で mem64 を R13 に移す.
+    let mut env = env();
+    env.map_rw(0, 1).unwrap();
+    env.backend.set(Gpr(5).state(), 0x300);
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x168),
+            &[0x88u8, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11],
+        )
+        .unwrap();
+    env.step(|b| {
+        sem::write64(b, Gpr(13), 0);
+        Ok(())
+    })
+    .unwrap();
+    env.backend.set(sem::eflags_ref(), 0x0);
+    env.step(|b| sem::cmovae_r64_mem32(b, Gpr(13), Gpr(5), -0x198))
+        .unwrap();
+    assert_eq!(env.backend.get(Gpr(13).state()), 0x5566_7788);
+}

@@ -1722,6 +1722,13 @@ fn dispatch<B: Backend>(
                 sem::cmove_r32_mem32(b, reg0f_as_gpr(), Gpr(5 | ((rex & 1) << 3)), disp32())
             }
         }
+        Insn::CmovaeM64 => {
+            if rex_w {
+                sem::cmovae_r64_mem32(b, reg0f_as_gpr(), rm0f(), disp32())
+            } else {
+                sem::cmovae_r32_mem32(b, reg0f_as_gpr(), rm0f(), disp32())
+            }
+        }
         Insn::ImulRImm => {
             if rex_w {
                 sem::imul_r64_imm(b, reg(), rm(), imm32())

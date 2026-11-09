@@ -392,6 +392,14 @@ pub fn build_model() -> polyisa_isadl::Model {
             "alu",
         ),
         (
+            "cmovae_m64",
+            "M32",
+            "00001111 01000011 10...... ................................",
+            vec![wc("m32_rm", WhereOp::Ne, 4)],
+            "cmovae r64, m64",
+            "load",
+        ),
+        (
             "mov_eax_memnd",
             "MR",
             "10001011 00......",
