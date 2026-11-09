@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // x86 最小の ISADL モデル（段階4の最小）。
 //
-// i386 の整数126件に C7・83 の /r 2件を加えた計128件。
+// i386 の整数126件に C7・83 の /r と string 操作・MOVSXD の計134件。
 // REX 接頭辞はデコード前に剥がし、Insは共有して意味論で切り替える。
 // 可変長（8/16/24/32/40/48/56ビット）のデコード入口と
 // ModRM register-direct の全レジスタ組合せを確かめる。
@@ -54,12 +54,80 @@ pub fn build_model() -> polyisa_isadl::Model {
         operands: vec![],
     });
 
+    // ModRM/SIB のフィールド。長さごとにビット位置が変わるため形式を分ける。
+    // 末尾の数字はパターン長（ビット）を表す。
+    for (name, hi, lo) in [
+        ("m8_mod", 15, 14),
+        ("m8_reg", 13, 11),
+        ("m8_rm", 10, 8),
+        ("mr_mod", 7, 6),
+        ("mr_reg", 5, 3),
+        ("mr_rm", 2, 0),
+        ("m32_mod", 39, 38),
+        ("m32_reg", 37, 35),
+        ("m32_rm", 34, 32),
+        ("s8_mod", 23, 22),
+        ("s8_reg", 21, 19),
+        ("s8_rm", 18, 16),
+        ("s8_ss", 15, 14),
+        ("s8_idx", 13, 11),
+        ("s8_base", 10, 8),
+        ("n8_mod", 15, 14),
+        ("n8_reg", 13, 11),
+        ("n8_rm", 10, 8),
+        ("n8_ss", 7, 6),
+        ("n8_idx", 5, 3),
+        ("n8_base", 2, 0),
+        ("d32_mod", 47, 46),
+        ("d32_reg", 45, 43),
+        ("d32_rm", 42, 40),
+        ("d32_ss", 39, 38),
+        ("d32_idx", 37, 35),
+        ("d32_base", 34, 32),
+    ] {
+        m.fields.push(Field {
+            name: name.to_string(),
+            kind: FieldKind::Bits { hi, lo },
+        });
+    }
+    for (name, fields) in [
+        ("M8", vec!["m8_mod", "m8_reg", "m8_rm"]),
+        ("MR", vec!["mr_mod", "mr_reg", "mr_rm"]),
+        ("M32", vec!["m32_mod", "m32_reg", "m32_rm"]),
+        (
+            "S8",
+            vec!["s8_mod", "s8_reg", "s8_rm", "s8_ss", "s8_idx", "s8_base"],
+        ),
+        (
+            "N8",
+            vec!["n8_mod", "n8_reg", "n8_rm", "n8_ss", "n8_idx", "n8_base"],
+        ),
+        (
+            "D32",
+            vec![
+                "d32_mod",
+                "d32_reg",
+                "d32_rm",
+                "d32_ss",
+                "d32_idx",
+                "d32_base",
+            ],
+        ),
+    ] {
+        m.formats.push(Format {
+            name: name.to_string(),
+            fields: fields.iter().map(|s| s.to_string()).collect(),
+            operands: vec![],
+        });
+    }
+
     // (名前, 形式, パターン, 構文, 分類)
     // 可変長：8ビット単独、16ビット（opcode+disp8/modrm）、24ビット（opcode+modrm+disp8、
     // opcode+modrm+SIB）、32ビット（opcode+modrm+SIB+disp8）、40ビット（opcode+imm32）、
     // 48ビット（opcode+modrm+disp32）、56ビット（opcode+modrm+SIB+disp32）。
-    // メモリ形式は mod=01+disp8・mod=10+disp32・絶対番地と SIB base+index 形
-    // （スケール付き、disp8/disp32・disp なしを含む）のみ持つ。
+    // メモリ形式は ModRM base 任意（mod=01+disp8・mod=10+disp32・mod=00）と
+    // SIB base/index/scale 任意（mod=00/01/10・直接番地 base を含む）を持つ。
+    // base/index/scale/disp の展開は where と実行側の抽出で行う。
     // Ref: SPEC-X86-INTEL-SDM (v093).
     let insns: &[(&str, &str, &str, &str, &str)] = &[
         ("nop", "F1", "10010000", "nop", "alu"),
@@ -83,42 +151,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("jmp8", "F1", "11101011 ........", "jmp {imm}", "jump"),
         ("add_rm32", "F1", "00000001 11......", "add r/m32, r32", "alu"),
         ("mov_rm32", "F1", "10001011 11......", "mov r32, r/m32", "alu"),
-        ("mov_eax_mem", "F1", "10001011 01000011 ........", "mov eax, [ebx+disp8]", "load"),
-        ("mov_mem_eax", "F1", "10001001 01000011 ........", "mov [ebx+disp8], eax", "store"),
-        ("mov_eax_memnd", "F1", "10001011 00000011", "mov eax, [ebx]", "load"),
-        ("mov_memnd_eax", "F1", "10001001 00000011", "mov [ebx], eax", "store"),
-        ("mov_eax_memd32", "F1", "10001011 10000011 ................................", "mov eax, [ebx+disp32]", "load"),
-        ("mov_memd32_eax", "F1", "10001001 10000011 ................................", "mov [ebx+disp32], eax", "store"),
         ("mov_eax_abs", "F1", "10001011 00000101 ................................", "mov eax, [disp32]", "load"),
         ("mov_abs_eax", "F1", "10001001 00000101 ................................", "mov [disp32], eax", "store"),
-        ("mov_eax_sib", "F1", "10001011 00000100 00110011", "mov eax, [ebx+esi]", "load"),
-        ("mov_sib_eax", "F1", "10001001 00000100 00110011", "mov [ebx+esi], eax", "store"),
-        ("mov_eax_sibd", "F1", "10001011 01000100 00110011 ........", "mov eax, [ebx+esi+disp8]", "load"),
-        ("mov_sibd_eax", "F1", "10001001 01000100 00110011 ........", "mov [ebx+esi+disp8], eax", "store"),
-        ("mov_eax_sib_s2", "F1", "10001011 01000100 01110011 ........", "mov eax, [ebx+esi*2+disp8]", "load"),
-        ("mov_sib_s2_eax", "F1", "10001001 01000100 01110011 ........", "mov [ebx+esi*2+disp8], eax", "store"),
-        ("mov_eax_sib_s4", "F1", "10001011 01000100 10110011 ........", "mov eax, [ebx+esi*4+disp8]", "load"),
-        ("mov_sib_s4_eax", "F1", "10001001 01000100 10110011 ........", "mov [ebx+esi*4+disp8], eax", "store"),
-        ("mov_eax_sib_s8", "F1", "10001011 01000100 11110011 ........", "mov eax, [ebx+esi*8+disp8]", "load"),
-        ("mov_sib_s8_eax", "F1", "10001001 01000100 11110011 ........", "mov [ebx+esi*8+disp8], eax", "store"),
-        ("mov_eax_sib_s2nd", "F1", "10001011 00000100 01110011", "mov eax, [ebx+esi*2]", "load"),
-        ("mov_sib_s2nd_eax", "F1", "10001001 00000100 01110011", "mov [ebx+esi*2], eax", "store"),
-        ("mov_eax_sib_s4nd", "F1", "10001011 00000100 10110011", "mov eax, [ebx+esi*4]", "load"),
-        ("mov_sib_s4nd_eax", "F1", "10001001 00000100 10110011", "mov [ebx+esi*4], eax", "store"),
-        ("mov_eax_sib_s8nd", "F1", "10001011 00000100 11110011", "mov eax, [ebx+esi*8]", "load"),
-        ("mov_sib_s8nd_eax", "F1", "10001001 00000100 11110011", "mov [ebx+esi*8], eax", "store"),
-        ("mov_eax_sib_s2d32", "F1", "10001011 10000100 01110011 ................................", "mov eax, [ebx+esi*2+disp32]", "load"),
-        ("mov_sib_s2d32_eax", "F1", "10001001 10000100 01110011 ................................", "mov [ebx+esi*2+disp32], eax", "store"),
-        ("mov_eax_sib_s4d32", "F1", "10001011 10000100 10110011 ................................", "mov eax, [ebx+esi*4+disp32]", "load"),
-        ("mov_sib_s4d32_eax", "F1", "10001001 10000100 10110011 ................................", "mov [ebx+esi*4+disp32], eax", "store"),
-        ("mov_eax_sib_s8d32", "F1", "10001011 10000100 11110011 ................................", "mov eax, [ebx+esi*8+disp32]", "load"),
-        ("mov_sib_s8d32_eax", "F1", "10001001 10000100 11110011 ................................", "mov [ebx+esi*8+disp32], eax", "store"),
-        ("mov_eax_sib_s2a32", "F1", "10001011 00000100 01110101 ................................", "mov eax, [esi*2+disp32]", "load"),
-        ("mov_sib_s2a32_eax", "F1", "10001001 00000100 01110101 ................................", "mov [esi*2+disp32], eax", "store"),
-        ("mov_eax_sib_s4a32", "F1", "10001011 00000100 10110101 ................................", "mov eax, [esi*4+disp32]", "load"),
-        ("mov_sib_s4a32_eax", "F1", "10001001 00000100 10110101 ................................", "mov [esi*4+disp32], eax", "store"),
-        ("mov_eax_sib_s8a32", "F1", "10001011 00000100 11110101 ................................", "mov eax, [esi*8+disp32]", "load"),
-        ("mov_sib_s8a32_eax", "F1", "10001001 00000100 11110101 ................................", "mov [esi*8+disp32], eax", "store"),
         ("mul_rm32", "F1", "11110111 11100001", "mul eax, ecx", "mult"),
         ("div_rm32", "F1", "11110111 11110001", "div eax, ecx", "div"),
         ("idiv_rm32", "F1", "11110111 11111001", "idiv eax, ecx", "div"),
@@ -161,23 +195,6 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("shl_eax", "F1", "11000001 11100000 ........", "shl eax, {imm}", "alu"),
         ("shr_eax", "F1", "11000001 11101000 ........", "shr eax, {imm}", "alu"),
         ("int80", "F1", "11001101 10000000", "int 0x80", "system"),
-        ("lea_m8", "F1", "10001101 01...011 ........", "lea r32, [ebx+disp8]", "alu"),
-        ("lea_m32", "F1", "10001101 10...011 ................................", "lea r32, [ebx+disp32]", "alu"),
-        ("lea_abs", "F1", "10001101 00...101 ................................", "lea r32, [disp32]", "alu"),
-        ("lea_sib", "F1", "10001101 00000100 00110011", "lea r32, [ebx+esi]", "alu"),
-        ("lea_sibd", "F1", "10001101 01000100 00110011 ........", "lea r32, [ebx+esi+disp8]", "alu"),
-        ("lea_sib_s2", "F1", "10001101 01000100 01110011 ........", "lea r32, [ebx+esi*2+disp8]", "alu"),
-        ("lea_sib_s4", "F1", "10001101 01000100 10110011 ........", "lea r32, [ebx+esi*4+disp8]", "alu"),
-        ("lea_sib_s8", "F1", "10001101 01000100 11110011 ........", "lea r32, [ebx+esi*8+disp8]", "alu"),
-        ("lea_sib_s2nd", "F1", "10001101 00000100 01110011", "lea r32, [ebx+esi*2]", "alu"),
-        ("lea_sib_s4nd", "F1", "10001101 00000100 10110011", "lea r32, [ebx+esi*4]", "alu"),
-        ("lea_sib_s8nd", "F1", "10001101 00000100 11110011", "lea r32, [ebx+esi*8]", "alu"),
-        ("lea_sib_s2d32", "F1", "10001101 10000100 01110011 ................................", "lea r32, [ebx+esi*2+disp32]", "alu"),
-        ("lea_sib_s4d32", "F1", "10001101 10000100 10110011 ................................", "lea r32, [ebx+esi*4+disp32]", "alu"),
-        ("lea_sib_s8d32", "F1", "10001101 10000100 11110011 ................................", "lea r32, [ebx+esi*8+disp32]", "alu"),
-        ("lea_sib_s2a32", "F1", "10001101 00000100 01110101 ................................", "lea r32, [esi*2+disp32]", "alu"),
-        ("lea_sib_s4a32", "F1", "10001101 00000100 10110101 ................................", "lea r32, [esi*4+disp32]", "alu"),
-        ("lea_sib_s8a32", "F1", "10001101 00000100 11110101 ................................", "lea r32, [esi*8+disp32]", "alu"),
         ("cmp_rm32", "F1", "00111001 11......", "cmp r/m32, r32", "alu"),
         ("and_rm32", "F1", "00100001 11......", "and r/m32, r32", "alu"),
         ("or_rm32", "F1", "00001001 11......", "or r/m32, r32", "alu"),
@@ -190,6 +207,12 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("cpuid", "F1", "00001111 10100010", "cpuid", "system"),
         ("mov_rm_imm", "F1", "11000111 11000... ................................", "mov r/m, {imm}", "alu"),
         ("and_rm_imm8", "F1", "10000011 11...100 ........", "and r/m, {imm}", "alu"),
+        ("movsxd", "F1", "01100011 11......", "movsxd r, r/m32", "alu"),
+        ("movsb", "F1", "10100100", "movsb", "load"),
+        ("movsd", "F1", "10100101", "movsd", "load"),
+        ("stosb", "F1", "10101010", "stosb", "store"),
+        ("stosd", "F1", "10101011", "stosd", "store"),
+        ("endbr64", "F1", "00001111 00011110 11111010", "endbr64", "alu"),
     ];
     for (name, format, pattern, syntax, timing) in insns {
         m.insns.push(Insn {
@@ -198,6 +221,204 @@ pub fn build_model() -> polyisa_isadl::Model {
             pattern: Pattern::parse(pattern).expect("valid pattern"),
             when: Pred::True,
             wheres: vec![],
+            syntax: syntax.to_string(),
+            timing: timing.to_string(),
+        });
+    }
+    // ModRM/SIB の汎用形。base/index/scale は実行側で抽出する。
+    // mod/rm の一致は where で絞る（パターンの don't care と組み合わせる）。
+    let wc = |field: &str, op: WhereOp, value: u128| WhereClause {
+        field: field.to_string(),
+        op,
+        value,
+    };
+    // (名前, 形式, パターン, where, 構文, 分類)
+    type MemDef<'a> = (&'a str, &'a str, &'a str, Vec<WhereClause>, &'a str, &'a str);
+    let mem: &[MemDef] = &[ 
+        (
+            "mov_eax_mem8",
+            "M8",
+            "10001011 01...... ........",
+            vec![wc("m8_rm", WhereOp::Ne, 4)],
+            "mov r32, [r/m+disp8]",
+            "load",
+        ),
+        (
+            "mov_mem_eax8",
+            "M8",
+            "10001001 01...... ........",
+            vec![wc("m8_rm", WhereOp::Ne, 4)],
+            "mov [r/m+disp8], r32",
+            "store",
+        ),
+        (
+            "mov_eax_mem32",
+            "M32",
+            "10001011 10...... ................................",
+            vec![wc("m32_rm", WhereOp::Ne, 4)],
+            "mov r32, [r/m+disp32]",
+            "load",
+        ),
+        (
+            "mov_mem_eax32",
+            "M32",
+            "10001001 10...... ................................",
+            vec![wc("m32_rm", WhereOp::Ne, 4)],
+            "mov [r/m+disp32], r32",
+            "store",
+        ),
+        (
+            "mov_eax_memnd",
+            "MR",
+            "10001011 00......",
+            vec![wc("mr_rm", WhereOp::Ne, 4), wc("mr_rm", WhereOp::Ne, 5)],
+            "mov r32, [r/m]",
+            "load",
+        ),
+        (
+            "mov_memnd_eax",
+            "MR",
+            "10001001 00......",
+            vec![wc("mr_rm", WhereOp::Ne, 4), wc("mr_rm", WhereOp::Ne, 5)],
+            "mov [r/m], r32",
+            "store",
+        ),
+        (
+            "mov_eax_sib",
+            "N8",
+            "10001011 00...100 ........",
+            vec![wc("n8_base", WhereOp::Ne, 5)],
+            "mov r32, [r/m+sib]",
+            "load",
+        ),
+        (
+            "mov_sib_eax",
+            "N8",
+            "10001001 00...100 ........",
+            vec![wc("n8_base", WhereOp::Ne, 5)],
+            "mov [r/m+sib], r32",
+            "store",
+        ),
+        (
+            "lea_m8",
+            "M8",
+            "10001101 01...... ........",
+            vec![wc("m8_rm", WhereOp::Ne, 4)],
+            "lea r32, [r/m+disp8]",
+            "alu",
+        ),
+        (
+            "lea_m32",
+            "M32",
+            "10001101 10...... ................................",
+            vec![wc("m32_rm", WhereOp::Ne, 4)],
+            "lea r32, [r/m+disp32]",
+            "alu",
+        ),
+        (
+            "lea_mnd",
+            "MR",
+            "10001101 00......",
+            vec![wc("mr_rm", WhereOp::Ne, 4), wc("mr_rm", WhereOp::Ne, 5)],
+            "lea r32, [r/m]",
+            "alu",
+        ),
+        (
+            "mov_eax_sibd",
+            "S8",
+            "10001011 01...100 ........ ........",
+            vec![],
+            "mov r32, [r/m+sib+disp8]",
+            "load",
+        ),
+        (
+            "mov_sibd_eax",
+            "S8",
+            "10001001 01...100 ........ ........",
+            vec![],
+            "mov [r/m+sib+disp8], r32",
+            "store",
+        ),
+        (
+            "lea_sib",
+            "N8",
+            "10001101 00...100 ........",
+            vec![wc("n8_base", WhereOp::Ne, 5)],
+            "lea r32, [r/m+sib]",
+            "alu",
+        ),
+        (
+            "lea_sibd",
+            "S8",
+            "10001101 01...100 ........ ........",
+            vec![],
+            "lea r32, [r/m+sib+disp8]",
+            "alu",
+        ),
+        (
+            "lea_abs",
+            "F1",
+            "10001101 00...101 ................................",
+            vec![],
+            "lea r32, [disp32]",
+            "alu",
+        ),
+        (
+            "mov_eax_sibd32",
+            "D32",
+            "10001011 10...100 ........ ................................",
+            vec![],
+            "mov r32, [r/m+sib+disp32]",
+            "load",
+        ),
+        (
+            "mov_sibd32_eax",
+            "D32",
+            "10001001 10...100 ........ ................................",
+            vec![],
+            "mov [r/m+sib+disp32], r32",
+            "store",
+        ),
+        (
+            "mov_eax_sibabs",
+            "D32",
+            "10001011 00...100 ........ ................................",
+            vec![wc("d32_base", WhereOp::Eq, 5)],
+            "mov r32, [sib+disp32]",
+            "load",
+        ),
+        (
+            "mov_sibabs_eax",
+            "D32",
+            "10001001 00...100 ........ ................................",
+            vec![wc("d32_base", WhereOp::Eq, 5)],
+            "mov [sib+disp32], r32",
+            "store",
+        ),
+        (
+            "lea_sibd32",
+            "D32",
+            "10001101 10...100 ........ ................................",
+            vec![],
+            "lea r32, [r/m+sib+disp32]",
+            "alu",
+        ),
+        (
+            "lea_sibabs",
+            "D32",
+            "10001101 00...100 ........ ................................",
+            vec![wc("d32_base", WhereOp::Eq, 5)],
+            "lea r32, [sib+disp32]",
+            "alu",
+        ),
+    ];
+    for (name, format, pattern, wheres, syntax, timing) in mem {
+        m.insns.push(Insn {
+            name: name.to_string(),
+            format: format.to_string(),
+            pattern: Pattern::parse(pattern).expect("valid pattern"),
+            when: Pred::True,
+            wheres: wheres.clone(),
             syntax: syntax.to_string(),
             timing: timing.to_string(),
         });

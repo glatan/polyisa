@@ -589,3 +589,84 @@ fn run_rip_relative_norex() {
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
     assert_eq!(out, Outcome::Exit(0x77));
 }
+
+#[test]
+fn run_rep_movsb() {
+    // REP MOVSB を run 経由で回す。ECX=3 で [0x1500..0x1502] を [0x1600..] に写す。
+    // mov esi,0x1500 相当は push/pop で作る（mov imm は EAX のみ）。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    env.backend.mem.write(VirtAddr(0x1500), &[7, 8, 9]).unwrap();
+    let prog: &[u8] = &[
+        0xB8, 0x00, 0x15, 0x00, 0x00, // mov eax,0x1500
+        0x50, // push eax
+        0x5E, // pop esi (esi=0x1500)
+        0xB8, 0x00, 0x16, 0x00, 0x00, // mov eax,0x1600
+        0x50, // push eax
+        0x5F, // pop edi (edi=0x1600)
+        0xB8, 0x03, 0x00, 0x00, 0x00, // mov eax,3
+        0x50, // push eax
+        0x59, // pop ecx (ecx=3)
+        0xF3, 0xA4, // rep movsb
+        0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax,1
+        0x50, // push eax
+        0x5B, // pop ebx (ebx=1)
+        0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax,1 (exit)
+        0xCD, 0x80, // int 0x80 -> exit(1)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = ExitOne;
+    let out = run_x86::run(&mut env, 0x1000, &mut sys, 100);
+    assert_eq!(out, Outcome::Exit(1));
+    let mut back = [0u8; 3];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x1600),
+            &mut back,
+            polyisa_mem::Access {
+                endian: polyisa_mem::Endian::Le,
+                align: polyisa_mem::Align::Unaligned,
+                kind: polyisa_mem::AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(back, [7, 8, 9]);
+}
+
+#[test]
+fn run_sib_generic_regs() {
+    // SIB 汎用形（base=EBX、index=ECX、dst=EDX）を run 経由で回す。
+    // mov eax,0x1500; push eax; pop ebx (ebx=0x1500);
+    // mov eax,0x10; push eax; pop ecx (ecx=0x10);
+    // mov eax,0x77; mov [ebx+ecx*4],eax ([0x1540]=0x77);
+    // mov eax,0; mov edx,[ebx+ecx*4] (edx=0x77);
+    // mov ebx,edx; mov eax,1; int 0x80 -> exit(0x77)
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    let prog: &[u8] = &[
+        0xB8, 0x00, 0x15, 0x00, 0x00, // mov eax,0x1500
+        0x50, // push eax
+        0x5B, // pop ebx (ebx=0x1500)
+        0xB8, 0x10, 0x00, 0x00, 0x00, // mov eax,0x10
+        0x50, // push eax
+        0x59, // pop ecx (ecx=0x10)
+        0xB8, 0x77, 0x00, 0x00, 0x00, // mov eax,0x77
+        0x89, 0x04, 0x8B, // mov [ebx+ecx*4],eax
+        0xB8, 0x00, 0x00, 0x00, 0x00, // mov eax,0
+        0x8B, 0x14, 0x8B, // mov edx,[ebx+ecx*4] (edx=0x77)
+        0x89, 0xD3, // mov ebx,edx
+        0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax,1
+        0xCD, 0x80, // int 0x80 -> exit(0x77)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = ExitOne;
+    let out = run_x86::run(&mut env, 0x1000, &mut sys, 100);
+    assert_eq!(out, Outcome::Exit(0x77));
+}

@@ -60,9 +60,21 @@ fn eip_of(env: &mut BareEnv) -> u32 {
 fn fetch_len(first: u8, second: Option<u8>, third: Option<u8>) -> Option<u64> {
     match first {
         0x90 | 0x40..=0x4F | 0x50..=0x5F | 0xC3 | 0xC9 => Some(1),
-        0xEB | 0x74 | 0x75 | 0xE2 | 0xCD | 0x85 | 0x0F | 0x39 | 0x21 | 0x0B | 0x09 | 0x72
-        | 0x73 | 0x76 | 0x77 | 0x7C | 0x7D | 0x7E | 0x7F | 0xF7 => Some(2),
+        0xEB | 0x74 | 0x75 | 0xE2 | 0xCD | 0x85 | 0x39 | 0x21 | 0x0B | 0x09 | 0x72 | 0x73
+        | 0x76 | 0x77 | 0x7C | 0x7D | 0x7E | 0x7F | 0xF7 => Some(2),
         0x05 | 0x2D | 0x3D | 0xB8 | 0xE8 | 0xE9 | 0x25 | 0x0D | 0x35 => Some(5),
+        // 0F 1E (ENDBR64) のみ 3B、ほかは 2B。
+        0x0F => {
+            let s = second?;
+            if s == 0x1E { Some(3) } else { Some(2) }
+        }
+        // string 操作（A4/A5/AA/AB）は 1 バイト。繰り返しは実行側で回す。
+        0xA4 | 0xA5 | 0xAA | 0xAB => Some(1),
+        // 0x63 /r (MOVSXD)。register-direct のみ 2B で受け、メモリ形式は未対応。
+        0x63 => {
+            let s = second?;
+            if s >> 6 == 3 { Some(2) } else { None }
+        }
         // 0x83 /r ib (AND imm8 群)。register-direct のみ 3B で受け、メモリ形式は未対応。
         0x83 => {
             let s = second?;
@@ -154,16 +166,28 @@ pub fn run_mode(
                 word: 0,
             };
         }
-        // REX 接頭辞（64ビットモードのみ）。デコード前に剥がす。
+        // 接頭辞（F3・REX・0x67）をデコード前に剥がす。順不同に対応する。
+        // 0x67 は 64ビットモードのみ受け付け、32ビットアドレス指定とみなす
+        // （4GB 未満では u64 演算と等価のため意味論への影響はない）。
+        // F3 は string 命令でのみ意味を持ち、ほかでは無視される。
         let mut off: u64 = 0;
+        let mut rep = false;
         let mut rex: u8 = 0;
-        if is64 && (0x40..=0x4F).contains(&head[0]) {
-            rex = head[0];
-            off = 1;
+        loop {
+            if head[0] == 0xF3 && !rep {
+                rep = true;
+            } else if is64 && (0x40..=0x4F).contains(&head[0]) && rex == 0 {
+                rex = head[0];
+            } else if is64 && head[0] == 0x67 {
+                // アドレスサイズ接頭辞。複数あっても1バイトずつ剥がす。
+            } else {
+                break;
+            }
+            off += 1;
             if env
                 .backend
                 .mem
-                .read(VirtAddr(pc + 1), &mut head, acc_fetch())
+                .read(VirtAddr(pc + off), &mut head, acc_fetch())
                 .is_err()
             {
                 return Outcome::Unimplemented {
@@ -175,7 +199,7 @@ pub fn run_mode(
         let mut peek = [0u8; 1];
         let second = if matches!(
             head[0],
-            0x01 | 0x8B | 0x29 | 0x31 | 0x89 | 0xC1 | 0xC7 | 0x83 | 0x8D | 0xF7
+            0x01 | 0x8B | 0x29 | 0x31 | 0x89 | 0xC1 | 0xC7 | 0x83 | 0x63 | 0x8D | 0x0F | 0xF7
         ) {
             if env
                 .backend
@@ -218,12 +242,26 @@ pub fn run_mode(
                 word: head[0] as u128,
             };
         };
-        // REX の追随者は reg-direct 系・C7/83・PUSH/POP のみ。
-        // REX.SIB・REXメモリ形式は未対応。
-        if off == 1
+        // 接頭辞付きの追随者は reg-direct 系・C7/83・string・0F・PUSH/POP・CALL/JMP のみ。
+        // REX.SIB・REXメモリ形式は未対応。F3 付きは string・ENDBR64 のみ受け付ける。
+        if off >= 1
             && !matches!(
                 head[0],
-                0x8B | 0x89 | 0x01 | 0x29 | 0x39 | 0x8D | 0xC7 | 0x83 | 0x50..=0x5F
+                0x8B | 0x89
+                    | 0x01
+                    | 0x29
+                    | 0x31
+                    | 0x39
+                    | 0x8D
+                    | 0xC7
+                    | 0x83
+                    | 0x63
+                    | 0x0F
+                    | 0xA4
+                    | 0xA5
+                    | 0xAA
+                    | 0xAB
+                    | 0x50..=0x5F | 0xE8 | 0xE9
             )
         {
             return Outcome::Unimplemented {
@@ -288,6 +326,7 @@ pub fn run_mode(
                 | Insn::AndRm32
                 | Insn::OrRm32
                 | Insn::XorRm32
+                | Insn::Movsxd
                 | Insn::CmpRm32
                 | Insn::MovRmImm
                 | Insn::AndRmImm8
@@ -314,6 +353,13 @@ pub fn run_mode(
                     };
                 }
             }
+        }
+        // string 操作は F3 付きのみ受け付ける。
+        if !rep && matches!(insn, Insn::Movsb | Insn::Movsd | Insn::Stosb | Insn::Stosd) {
+            return Outcome::Unimplemented {
+                eip: pc as u32,
+                word,
+            };
         }
         // imm/disp の取り出し。32ビット値は LE 実バイト列から復元する。
         let imm32 = || (word as u32).swap_bytes();
@@ -384,6 +430,14 @@ fn dispatch<B: Backend>(
     let push_r = || Gpr(((word as u8) & 7) | ((rex & 1) << 3));
     // REX.W の有無で 32/64ビット意味論を選ぶ。
     let rex_w = rex & 8 != 0;
+    // SIB バイトと scale/index/base の抽出。SIB 付き命令でのみ呼ぶ。
+    let sib = || ((word >> ((nbytes - 3 - off) * 8)) & 0xff) as u8;
+    let sib_shift = || ((sib() >> 6) & 3) as u32;
+    let sib_idx_raw = || (sib() >> 3) & 7;
+    let sib_idx = || Gpr(sib_idx_raw() | (((rex >> 2) & 1) << 3));
+    let sib_base = || Gpr((sib() & 7) | ((rex & 1) << 3));
+    // SIB index なし（100 + REX.X なし）は base のみで扱う。
+    let no_index = || sib_idx_raw() == 4 && (rex >> 2) & 1 == 0;
     let r: Result<(), B::Exit> = match insn {
         Insn::Nop => sem::nop(b),
         Insn::IncEax => sem::inc_r32(b, Gpr(0)),
@@ -407,6 +461,7 @@ fn dispatch<B: Backend>(
         Insn::MovEax => sem::mov_eax(b, imm32()),
         Insn::Syscall => sem::syscall(b, eip),
         Insn::Cpuid => sem::cpuid(b),
+        Insn::Endbr64 => sem::nop(b),
         Insn::AddRm32 => {
             if rex_w {
                 sem::add_rm64(b, rm(), reg())
@@ -421,54 +476,82 @@ fn dispatch<B: Backend>(
                 sem::mov_rm32(b, reg(), rm())
             }
         }
-        Insn::MovEaxMem => sem::mov_eax_mem(b, disp8()),
-        Insn::MovMemEax => sem::mov_mem_eax(b, disp8()),
-        Insn::MovEaxMemnd => sem::mov_eax_memnd(b),
-        Insn::MovMemndEax => sem::mov_memnd_eax(b),
-        Insn::MovEaxMemd32 => sem::mov_eax_memd32(b, disp32()),
-        Insn::MovMemd32Eax => sem::mov_memd32_eax(b, disp32()),
+        Insn::MovEaxMem8 => sem::mov_eax_mem8(b, reg(), rm(), disp8()),
+        Insn::MovMemEax8 => sem::mov_mem_eax8(b, reg(), rm(), disp8()),
+        Insn::MovEaxMemnd => sem::mov_eax_memnd(b, reg(), rm()),
+        Insn::MovMemndEax => sem::mov_memnd_eax(b, reg(), rm()),
+        Insn::MovEaxMem32 => sem::mov_eax_mem32(b, reg(), rm(), disp32()),
+        Insn::MovMemEax32 => sem::mov_mem_eax32(b, reg(), rm(), disp32()),
         Insn::MovEaxAbs => {
             if is64 {
                 sem::mov_eax_rip(b, eip as u64 + nbytes, disp32())
             } else {
-                sem::mov_eax_abs(b, imm32())
+                sem::mov_eax_abs(b, Gpr(0), imm32())
             }
         }
         Insn::MovAbsEax => {
             if is64 {
                 sem::mov_rip_eax(b, eip as u64 + nbytes, disp32())
             } else {
-                sem::mov_abs_eax(b, imm32())
+                sem::mov_abs_eax(b, Gpr(0), imm32())
             }
         }
-        Insn::MovEaxSib => sem::mov_eax_sib(b),
-        Insn::MovSibEax => sem::mov_sib_eax(b),
-        Insn::MovEaxSibd => sem::mov_eax_sibd(b, disp8()),
-        Insn::MovSibdEax => sem::mov_sibd_eax(b, disp8()),
-        Insn::MovEaxSibS2 => sem::mov_eax_sib_s2(b, disp8()),
-        Insn::MovSibS2Eax => sem::mov_sib_s2_eax(b, disp8()),
-        Insn::MovEaxSibS4 => sem::mov_eax_sib_s4(b, disp8()),
-        Insn::MovSibS4Eax => sem::mov_sib_s4_eax(b, disp8()),
-        Insn::MovEaxSibS8 => sem::mov_eax_sib_s8(b, disp8()),
-        Insn::MovSibS8Eax => sem::mov_sib_s8_eax(b, disp8()),
-        Insn::MovEaxSibS2d32 => sem::mov_eax_sib_s2d32(b, disp32()),
-        Insn::MovSibS2d32Eax => sem::mov_sib_s2d32_eax(b, disp32()),
-        Insn::MovEaxSibS4d32 => sem::mov_eax_sib_s4d32(b, disp32()),
-        Insn::MovSibS4d32Eax => sem::mov_sib_s4d32_eax(b, disp32()),
-        Insn::MovEaxSibS8d32 => sem::mov_eax_sib_s8d32(b, disp32()),
-        Insn::MovSibS8d32Eax => sem::mov_sib_s8d32_eax(b, disp32()),
-        Insn::MovEaxSibS2a32 => sem::mov_eax_sib_s2a32(b, disp32()),
-        Insn::MovSibS2a32Eax => sem::mov_sib_s2a32_eax(b, disp32()),
-        Insn::MovEaxSibS4a32 => sem::mov_eax_sib_s4a32(b, disp32()),
-        Insn::MovSibS4a32Eax => sem::mov_sib_s4a32_eax(b, disp32()),
-        Insn::MovEaxSibS8a32 => sem::mov_eax_sib_s8a32(b, disp32()),
-        Insn::MovSibS8a32Eax => sem::mov_sib_s8a32_eax(b, disp32()),
-        Insn::MovEaxSibS2nd => sem::mov_eax_sib_s2nd(b),
-        Insn::MovSibS2ndEax => sem::mov_sib_s2nd_eax(b),
-        Insn::MovEaxSibS4nd => sem::mov_eax_sib_s4nd(b),
-        Insn::MovSibS4ndEax => sem::mov_sib_s4nd_eax(b),
-        Insn::MovEaxSibS8nd => sem::mov_eax_sib_s8nd(b),
-        Insn::MovSibS8ndEax => sem::mov_sib_s8nd_eax(b),
+        Insn::MovEaxSib => {
+            if no_index() {
+                sem::mov_eax_memnd(b, reg(), sib_base())
+            } else {
+                sem::mov_eax_sib(b, reg(), sib_base(), sib_idx(), sib_shift())
+            }
+        }
+        Insn::MovSibEax => {
+            if no_index() {
+                sem::mov_memnd_eax(b, reg(), sib_base())
+            } else {
+                sem::mov_sib_eax(b, reg(), sib_base(), sib_idx(), sib_shift())
+            }
+        }
+        Insn::MovEaxSibd => {
+            if no_index() {
+                sem::mov_eax_mem8(b, reg(), sib_base(), disp8())
+            } else {
+                sem::mov_eax_sibd(b, reg(), sib_base(), sib_idx(), sib_shift(), disp8())
+            }
+        }
+        Insn::MovSibdEax => {
+            if no_index() {
+                sem::mov_mem_eax8(b, reg(), sib_base(), disp8())
+            } else {
+                sem::mov_sibd_eax(b, reg(), sib_base(), sib_idx(), sib_shift(), disp8())
+            }
+        }
+        Insn::MovEaxSibd32 => {
+            if no_index() {
+                sem::mov_eax_mem32(b, reg(), sib_base(), disp32())
+            } else {
+                sem::mov_eax_sibd32(b, reg(), sib_base(), sib_idx(), sib_shift(), disp32())
+            }
+        }
+        Insn::MovSibd32Eax => {
+            if no_index() {
+                sem::mov_mem_eax32(b, reg(), sib_base(), disp32())
+            } else {
+                sem::mov_sibd32_eax(b, reg(), sib_base(), sib_idx(), sib_shift(), disp32())
+            }
+        }
+        Insn::MovEaxSibabs => {
+            if no_index() {
+                sem::mov_eax_abs(b, reg(), disp32() as u32)
+            } else {
+                sem::mov_eax_sibabs(b, reg(), sib_idx(), sib_shift(), disp32())
+            }
+        }
+        Insn::MovSibabsEax => {
+            if no_index() {
+                sem::mov_abs_eax(b, reg(), disp32() as u32)
+            } else {
+                sem::mov_sibabs_eax(b, reg(), sib_idx(), sib_shift(), disp32())
+            }
+        }
         Insn::PushEax
         | Insn::PushEcx
         | Insn::PushEdx
@@ -539,8 +622,9 @@ fn dispatch<B: Backend>(
         Insn::ShlEax => sem::shl_eax(b, word as u8),
         Insn::ShrEax => sem::shr_eax(b, word as u8),
         Insn::Int80 => sem::int80(b, eip),
-        Insn::LeaM8 => sem::lea_m8(b, reg(), disp8()),
-        Insn::LeaM32 => sem::lea_m32(b, reg(), disp32()),
+        Insn::LeaM8 => sem::lea_m8(b, reg(), rm(), disp8()),
+        Insn::LeaM32 => sem::lea_m32(b, reg(), rm(), disp32()),
+        Insn::LeaMnd => sem::lea_mnd(b, reg(), rm()),
         Insn::LeaAbs => {
             if is64 {
                 sem::lea_rip64(b, reg(), eip as u64 + nbytes, disp32())
@@ -548,20 +632,34 @@ fn dispatch<B: Backend>(
                 sem::lea_abs(b, reg(), imm32())
             }
         }
-        Insn::LeaSib => sem::lea_sib(b, reg()),
-        Insn::LeaSibd => sem::lea_sibd(b, reg(), disp8()),
-        Insn::LeaSibS2 => sem::lea_sib_s2(b, reg(), disp8()),
-        Insn::LeaSibS4 => sem::lea_sib_s4(b, reg(), disp8()),
-        Insn::LeaSibS8 => sem::lea_sib_s8(b, reg(), disp8()),
-        Insn::LeaSibS2nd => sem::lea_sib_s2nd(b, reg()),
-        Insn::LeaSibS4nd => sem::lea_sib_s4nd(b, reg()),
-        Insn::LeaSibS8nd => sem::lea_sib_s8nd(b, reg()),
-        Insn::LeaSibS2d32 => sem::lea_sib_s2d32(b, reg(), disp32()),
-        Insn::LeaSibS4d32 => sem::lea_sib_s4d32(b, reg(), disp32()),
-        Insn::LeaSibS8d32 => sem::lea_sib_s8d32(b, reg(), disp32()),
-        Insn::LeaSibS2a32 => sem::lea_sib_s2a32(b, reg(), disp32()),
-        Insn::LeaSibS4a32 => sem::lea_sib_s4a32(b, reg(), disp32()),
-        Insn::LeaSibS8a32 => sem::lea_sib_s8a32(b, reg(), disp32()),
+        Insn::LeaSib => {
+            if no_index() {
+                sem::lea_mnd(b, reg(), sib_base())
+            } else {
+                sem::lea_sib(b, reg(), sib_base(), sib_idx(), sib_shift())
+            }
+        }
+        Insn::LeaSibd => {
+            if no_index() {
+                sem::lea_m8(b, reg(), sib_base(), disp8())
+            } else {
+                sem::lea_sibd(b, reg(), sib_base(), sib_idx(), sib_shift(), disp8())
+            }
+        }
+        Insn::LeaSibd32 => {
+            if no_index() {
+                sem::lea_m32(b, reg(), sib_base(), disp32())
+            } else {
+                sem::lea_sibd32(b, reg(), sib_base(), sib_idx(), sib_shift(), disp32())
+            }
+        }
+        Insn::LeaSibabs => {
+            if no_index() {
+                sem::lea_abs(b, reg(), disp32() as u32)
+            } else {
+                sem::lea_sibabs(b, reg(), sib_idx(), sib_shift(), disp32())
+            }
+        }
         Insn::MovRmImm => {
             if rex_w {
                 sem::mov_rm64_imm(b, rm(), imm32())
@@ -574,6 +672,13 @@ fn dispatch<B: Backend>(
                 sem::and_rm64_imm8(b, rm(), disp8())
             } else {
                 sem::and_rm32_imm8(b, rm(), disp8())
+            }
+        }
+        Insn::Movsxd => {
+            if rex_w {
+                sem::movsxd_rm64(b, reg(), rm())
+            } else {
+                sem::movsxd_rm32(b, reg(), rm())
             }
         }
         Insn::CmpRm32 => {
@@ -603,6 +708,22 @@ fn dispatch<B: Backend>(
         Insn::MulRm32 => sem::mul_rm32(b),
         Insn::DivRm32 => sem::div_rm32(b, eip),
         Insn::IdivRm32 => sem::idiv_rm32(b, eip),
+        Insn::Movsb => sem::rep_movsb(b, eip),
+        Insn::Movsd => {
+            if rex_w {
+                sem::rep_movsq(b, eip)
+            } else {
+                sem::rep_movsd(b, eip)
+            }
+        }
+        Insn::Stosb => sem::rep_stosb(b, eip),
+        Insn::Stosd => {
+            if rex_w {
+                sem::rep_stosq(b, eip)
+            } else {
+                sem::rep_stosd(b, eip)
+            }
+        }
     };
     if is64 {
         // 64ビットでの32ビット書き込みは上位をゼロ拡張する。
@@ -617,23 +738,13 @@ fn dispatch<B: Backend>(
             | Insn::XorImm
             | Insn::ShlEax
             | Insn::ShrEax
-            | Insn::MovEaxMem
+            | Insn::MovEaxMem8
             | Insn::MovEaxMemnd
-            | Insn::MovEaxMemd32
+            | Insn::MovEaxMem32
             | Insn::MovEaxSib
             | Insn::MovEaxSibd
-            | Insn::MovEaxSibS2
-            | Insn::MovEaxSibS4
-            | Insn::MovEaxSibS8
-            | Insn::MovEaxSibS2d32
-            | Insn::MovEaxSibS4d32
-            | Insn::MovEaxSibS8d32
-            | Insn::MovEaxSibS2a32
-            | Insn::MovEaxSibS4a32
-            | Insn::MovEaxSibS8a32
-            | Insn::MovEaxSibS2nd
-            | Insn::MovEaxSibS4nd
-            | Insn::MovEaxSibS8nd
+            | Insn::MovEaxSibd32
+            | Insn::MovEaxSibabs
             | Insn::PopEax => Some(Gpr(0)),
             Insn::IncEcx | Insn::DecEcx | Insn::PopEcx => Some(Gpr(1)),
             Insn::IncEdx | Insn::DecEdx | Insn::PopEdx => Some(Gpr(2)),
@@ -650,21 +761,15 @@ fn dispatch<B: Backend>(
             | Insn::MovMr32
             | Insn::MovRmImm
             | Insn::AndRmImm8 => Some(rm()),
-            Insn::MovRm32 => Some(reg()),
+            Insn::MovRm32 | Insn::Movsxd => Some(reg()),
             Insn::LeaM8
             | Insn::LeaM32
+            | Insn::LeaMnd
             | Insn::LeaAbs
             | Insn::LeaSib
             | Insn::LeaSibd
-            | Insn::LeaSibS2
-            | Insn::LeaSibS4
-            | Insn::LeaSibS8
-            | Insn::LeaSibS2nd
-            | Insn::LeaSibS4nd
-            | Insn::LeaSibS8nd
-            | Insn::LeaSibS2d32
-            | Insn::LeaSibS4d32
-            | Insn::LeaSibS8d32 => Some(reg()),
+            | Insn::LeaSibd32
+            | Insn::LeaSibabs => Some(reg()),
             _ => None,
         };
         if let Some(d) = dst {

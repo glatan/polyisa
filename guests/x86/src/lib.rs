@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! x86 最小のゲスト ISA。段階4の最小であり、可変長デコードを確かめる。
 //!
-//! i386 の126件に C7・83 の /r 2件を加えた計128件を持つ。
+//! i386 の105件を持つ。ModRM/SIB は base/index/scale 汎用形。
 //! REX 接頭辞はデコード前に剥がし、Insは共有して64ビット意味論に切り替える。
 //! SYSCALL/CPUID は最小形、ModRM は register-direct（全組合せ）・mod=01+disp8・
 //! mod=10+disp32・絶対番地と SIB base+index 形（スケール付き、disp8/disp32・disp なしを含む）を持ち、
@@ -63,8 +63,8 @@ mod tests {
 
     #[test]
     fn insn_count() {
-        // 試作の整数128件。
-        assert_eq!(INSNS.len(), 128);
+        // 試作の整数105件。
+        assert_eq!(INSNS.len(), 105);
     }
 
     #[test]
@@ -106,9 +106,9 @@ mod tests {
         assert_eq!(decode(0x01C3, 16), Some(Insn::AddRm32));
         assert_eq!(decode(0x8BC1, 16), Some(Insn::MovRm32));
         assert_eq!(decode(0x8BD8, 16), Some(Insn::MovRm32));
-        // ModRM の mod=00 (メモリ) は未対応であり一致しない。
+        // ModRM の mod=00 (メモリ) は register-direct とは一致しない。
         assert_eq!(decode(0x0108, 16), None);
-        assert_eq!(decode(0x8B08, 16), None);
+        assert_eq!(decode(0x8B08, 16), Some(Insn::MovEaxMemnd));
         // スタック操作とコール/リターン：PUSH EAX (50)、POP EAX (58)、PUSH EBP (55)、
         // POP EBP (5D)、CALL rel32 (E8+imm32)、RET (C3)。
         // Ref: SPEC-X86-INTEL-SDM (v093).
@@ -142,6 +142,20 @@ mod tests {
         // 83 /4 (AND r/m,imm8)：同上。
         assert_eq!(decode(0x0083_E4F0, 24), Some(Insn::AndRmImm8));
         assert_eq!(decode(0x0083_E0F0, 24), None);
+        // string 操作（F3 接頭辞は実行側で剥がす）。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0xA4, 8), Some(Insn::Movsb));
+        assert_eq!(decode(0xA5, 8), Some(Insn::Movsd));
+        assert_eq!(decode(0xAA, 8), Some(Insn::Stosb));
+        assert_eq!(decode(0xAB, 8), Some(Insn::Stosd));
+        assert_eq!(decode(0xA4, 16), None);
+        // ENDBR64 (F3 0F 1E FA)：F3 接頭辞は実行側で剥がす。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x0F1EFA, 24), Some(Insn::Endbr64));
+        // MOVSXD r,r/m32 (63 /r)。REX.W で 64ビット符号拡張。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x63C6, 16), Some(Insn::Movsxd));
+        assert_eq!(decode(0x6300, 16), None);
         // ループと近傍ジャンプ：LOOP rel8 (E2)、JMP rel32 (E9)。
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0xE2FE, 16), Some(Insn::Loop));
@@ -193,27 +207,29 @@ mod tests {
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0xCD80, 16), Some(Insn::Int80));
         assert_eq!(decode(0xCD81, 16), None);
-        // LEA r32 (8D /r、dst=reg)：EBX+disp8・EBX+disp32・絶対番地・SIB 各形。
+        // LEA 汎用形：base/index 任意。dst=reg は実行側で抽出する。
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x008D_4310, 24), Some(Insn::LeaM8));
         assert_eq!(decode(0x008D_4B10, 24), Some(Insn::LeaM8));
         assert_eq!(decode(0x008D_8310, 24), None);
         assert_eq!(decode(0x8D83_7856_3412, 48), Some(Insn::LeaM32));
+        assert_eq!(decode(0x8D8B_7856_3412, 48), Some(Insn::LeaM32));
+        // SIB+disp32 形は 56ビット長でなければ一致しない。
+        assert_eq!(decode(0x8D84_7856_3412, 48), None);
+        assert_eq!(decode(0x8D43_7856_3412, 48), None);
+        assert_eq!(decode(0x8D03, 16), Some(Insn::LeaMnd));
+        assert_eq!(decode(0x8D1B, 16), Some(Insn::LeaMnd));
+        assert_eq!(decode(0x8D05, 16), None);
         assert_eq!(decode(0x8D05_7856_3412, 48), Some(Insn::LeaAbs));
         assert_eq!(decode(0x008D_0433, 24), Some(Insn::LeaSib));
+        assert_eq!(decode(0x008D_0425, 24), None);
         assert_eq!(decode(0x8D44_3310, 32), Some(Insn::LeaSibd));
-        assert_eq!(decode(0x8D44_7310, 32), Some(Insn::LeaSibS2));
-        assert_eq!(decode(0x8D44_B310, 32), Some(Insn::LeaSibS4));
-        assert_eq!(decode(0x8D44_F310, 32), Some(Insn::LeaSibS8));
-        assert_eq!(decode(0x008D_0473, 24), Some(Insn::LeaSibS2nd));
-        assert_eq!(decode(0x008D_04B3, 24), Some(Insn::LeaSibS4nd));
-        assert_eq!(decode(0x008D_04F3, 24), Some(Insn::LeaSibS8nd));
-        assert_eq!(decode(0x008D_8473_1000_0000, 56), Some(Insn::LeaSibS2d32));
-        assert_eq!(decode(0x008D_84B3_1000_0000, 56), Some(Insn::LeaSibS4d32));
-        assert_eq!(decode(0x008D_84F3_1000_0000, 56), Some(Insn::LeaSibS8d32));
-        assert_eq!(decode(0x008D_0475_1000_0000, 56), Some(Insn::LeaSibS2a32));
-        assert_eq!(decode(0x008D_04B5_1000_0000, 56), Some(Insn::LeaSibS4a32));
-        assert_eq!(decode(0x008D_04F5_1000_0000, 56), Some(Insn::LeaSibS8a32));
+        assert_eq!(decode(0x8D44_7B10, 32), Some(Insn::LeaSibd));
+        assert_eq!(decode(0x008D_8473_1000_0000, 56), Some(Insn::LeaSibd32));
+        assert_eq!(decode(0x008D_84FB_1000_0000, 56), Some(Insn::LeaSibd32));
+        assert_eq!(decode(0x008D_0475_1000_0000, 56), Some(Insn::LeaSibabs));
+        assert_eq!(decode(0x008D_04F5_1000_0000, 56), Some(Insn::LeaSibabs));
+        assert_eq!(decode(0x008D_0433_1000_0000, 56), None);
         assert_eq!(decode(0x39C8, 16), Some(Insn::CmpRm32));
         assert_eq!(decode(0x39D8, 16), Some(Insn::CmpRm32));
         assert_eq!(decode(0x21C8, 16), Some(Insn::AndRm32));
@@ -222,116 +238,51 @@ mod tests {
         assert_eq!(decode(0x09D8, 16), Some(Insn::OrRm32));
         // mod=01 の 39 /r は register-direct ではなく一致しない。
         assert_eq!(decode(0x397C, 16), None);
-        // SIB base+index 最小形：MOV EAX,[EBX+ESI] (8B 04 33) と MOV [EBX+ESI],EAX (89 04 33)。
-        assert_eq!(decode(0x008B_0433, 24), Some(Insn::MovEaxSib));
-        assert_eq!(decode(0x0089_0433, 24), Some(Insn::MovSibEax));
-        assert_eq!(decode(0x008B_0434, 24), None);
-        // SIB+disp8：MOV EAX,[EBX+ESI+disp8] (8B 44 33 ib) と MOV [EBX+ESI+disp8],EAX (89 44 33 ib)。
+        // ModRM 汎用形：base は実行側で抽出する。SIB (rm=100) と絶対番地 (rm=101)
+        // は別 Insn であり一致しない。
         // Ref: SPEC-X86-INTEL-SDM (v093).
-        assert_eq!(decode(0x8B44_3310, 32), Some(Insn::MovEaxSibd));
-        assert_eq!(decode(0x8944_33F0, 32), Some(Insn::MovSibdEax));
-        assert_eq!(decode(0x8B44_3400, 32), None);
-        // MUL/DIV/IDIV EAX,ECX (F7 /4,/6,/7)。ModRM の reg フィールドで区別する。
-        // F7 E0 (/4 rm=000) は未対応の別命令であり一致しない。
-        // Ref: SPEC-X86-INTEL-SDM (v093).
-        assert_eq!(decode(0xF7E1, 16), Some(Insn::MulRm32));
-        assert_eq!(decode(0xF7F1, 16), Some(Insn::DivRm32));
-        assert_eq!(decode(0xF7F9, 16), Some(Insn::IdivRm32));
-        assert_eq!(decode(0xF7E0, 16), None);
-        // SIB スケール付き（ss=01/10/11）：*2=0x73、*4=0xB3、*8=0xF3。
-        // Ref: SPEC-X86-INTEL-SDM (v093).
-        assert_eq!(decode(0x8B44_7310, 32), Some(Insn::MovEaxSibS2));
-        assert_eq!(decode(0x8944_7310, 32), Some(Insn::MovSibS2Eax));
-        assert_eq!(decode(0x8B44_B310, 32), Some(Insn::MovEaxSibS4));
-        assert_eq!(decode(0x8944_B310, 32), Some(Insn::MovSibS4Eax));
-        assert_eq!(decode(0x8B44_F310, 32), Some(Insn::MovEaxSibS8));
-        assert_eq!(decode(0x8944_F310, 32), Some(Insn::MovSibS8Eax));
-        // SIB スケール付き・disp なし：MOV EAX,[EBX+ESI*{2,4,8}] (8B 04 {73,B3,F3}) と
-        // MOV [EBX+ESI*{2,4,8}],EAX (89 04 {73,B3,F3})。
-        // Ref: SPEC-X86-INTEL-SDM (v093).
-        assert_eq!(decode(0x008B_0473, 24), Some(Insn::MovEaxSibS2nd));
-        assert_eq!(decode(0x0089_0473, 24), Some(Insn::MovSibS2ndEax));
-        assert_eq!(decode(0x008B_04B3, 24), Some(Insn::MovEaxSibS4nd));
-        assert_eq!(decode(0x0089_04B3, 24), Some(Insn::MovSibS4ndEax));
-        assert_eq!(decode(0x008B_04F3, 24), Some(Insn::MovEaxSibS8nd));
-        assert_eq!(decode(0x0089_04F3, 24), Some(Insn::MovSibS8ndEax));
-        // SIB スケール付き・disp32：MOV EAX,[EBX+ESI*{2,4,8}+disp32]
-        // (8B 84 {73,B3,F3}+disp32) と MOV [EBX+ESI*{2,4,8}+disp32],EAX (89 84 ...)、
-        // 直接番地 base：MOV EAX,[ESI*{2,4,8}+disp32] (8B 04 {75,B5,F5}+disp32) と
-        // MOV [ESI*{2,4,8}+disp32],EAX (89 04 ...)（56ビット）。
-        // Ref: SPEC-X86-INTEL-SDM (v093).
-        assert_eq!(
-            decode(0x008B_8473_1000_0000, 56),
-            Some(Insn::MovEaxSibS2d32)
-        );
-        assert_eq!(
-            decode(0x0089_8473_1000_0000, 56),
-            Some(Insn::MovSibS2d32Eax)
-        );
-        assert_eq!(
-            decode(0x008B_84B3_1000_0000, 56),
-            Some(Insn::MovEaxSibS4d32)
-        );
-        assert_eq!(
-            decode(0x0089_84B3_1000_0000, 56),
-            Some(Insn::MovSibS4d32Eax)
-        );
-        assert_eq!(
-            decode(0x008B_84F3_1000_0000, 56),
-            Some(Insn::MovEaxSibS8d32)
-        );
-        assert_eq!(
-            decode(0x0089_84F3_1000_0000, 56),
-            Some(Insn::MovSibS8d32Eax)
-        );
-        assert_eq!(
-            decode(0x008B_0475_1000_0000, 56),
-            Some(Insn::MovEaxSibS2a32)
-        );
-        assert_eq!(
-            decode(0x0089_0475_1000_0000, 56),
-            Some(Insn::MovSibS2a32Eax)
-        );
-        assert_eq!(
-            decode(0x008B_04B5_1000_0000, 56),
-            Some(Insn::MovEaxSibS4a32)
-        );
-        assert_eq!(
-            decode(0x0089_04B5_1000_0000, 56),
-            Some(Insn::MovSibS4a32Eax)
-        );
-        assert_eq!(
-            decode(0x008B_04F5_1000_0000, 56),
-            Some(Insn::MovEaxSibS8a32)
-        );
-        assert_eq!(
-            decode(0x0089_04F5_1000_0000, 56),
-            Some(Insn::MovSibS8a32Eax)
-        );
-        // 長さ違いは一致しない。
-        assert_eq!(decode(0x008B_8473_1000_0000, 32), None);
-        // ModRM mod=01 + disp8：MOV EAX,[EBX+disp8] (8B 43 ..) と MOV [EBX+disp8],EAX (89 43 ..)。
-        // Ref: SPEC-X86-INTEL-SDM (v093).
-        assert_eq!(decode(0x008B_4310, 24), Some(Insn::MovEaxMem));
-        assert_eq!(decode(0x0089_43F0, 24), Some(Insn::MovMemEax));
-        // mod=00 [EBX]（disp なし）：gas は disp8=0 を mod=00 に畳む。
-        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x008B_4310, 24), Some(Insn::MovEaxMem8));
+        assert_eq!(decode(0x008B_4B10, 24), Some(Insn::MovEaxMem8));
+        assert_eq!(decode(0x0089_43F0, 24), Some(Insn::MovMemEax8));
+        // base/reg 任意：MOV ECX,[EBP+disp8] (8B 4D ..) も同じ Insn。
+        assert_eq!(decode(0x008B_4D10, 24), Some(Insn::MovEaxMem8));
+        assert_eq!(decode(0x0089_4DF0, 24), Some(Insn::MovMemEax8));
+        assert_eq!(decode(0x008B_4410, 24), None);
         assert_eq!(decode(0x8B03, 16), Some(Insn::MovEaxMemnd));
+        assert_eq!(decode(0x8B0B, 16), Some(Insn::MovEaxMemnd));
         assert_eq!(decode(0x8903, 16), Some(Insn::MovMemndEax));
-        assert_eq!(decode(0x8B00, 16), None);
-        // ModRM mod=10 + disp32：MOV EAX,[EBX+disp32] (8B 83+disp32) と
-        // MOV [EBX+disp32],EAX (89 83+disp32)。絶対番地：MOV EAX,[disp32] (8B 05+disp32) と
-        // MOV [disp32],EAX (89 05+disp32)。disp32 は LE 実バイト列を上位詰めで表す。
-        // Ref: SPEC-X86-INTEL-SDM (v093).
-        assert_eq!(decode(0x8B83_7856_3412, 48), Some(Insn::MovEaxMemd32));
-        assert_eq!(decode(0x8983_7856_3412, 48), Some(Insn::MovMemd32Eax));
+        assert_eq!(decode(0x8B00, 16), Some(Insn::MovEaxMemnd));
+        assert_eq!(decode(0x8B04, 16), None);
+        assert_eq!(decode(0x8B05, 16), None);
+        assert_eq!(decode(0x8B83_7856_3412, 48), Some(Insn::MovEaxMem32));
+        assert_eq!(decode(0x8B8B_7856_3412, 48), Some(Insn::MovEaxMem32));
+        assert_eq!(decode(0x8983_7856_3412, 48), Some(Insn::MovMemEax32));
+        assert_eq!(decode(0x8B84_7856_3412, 48), None);
         assert_eq!(decode(0x8B05_7856_3412, 48), Some(Insn::MovEaxAbs));
         assert_eq!(decode(0x8905_7856_3412, 48), Some(Insn::MovAbsEax));
         // mod違い・長さ違いは一致しない。
         assert_eq!(decode(0x8B43_7856_3412, 48), None);
         assert_eq!(decode(0x8B83_7856_3412, 32), None);
-        // disp8 の値は don't care であり、mod=10 (disp32) とは一致しない。
         assert_eq!(decode(0x008B_8310, 24), None);
+        // SIB 汎用形：scale/index/base は実行側で抽出する。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x008B_0433, 24), Some(Insn::MovEaxSib));
+        assert_eq!(decode(0x008B_0434, 24), Some(Insn::MovEaxSib));
+        assert_eq!(decode(0x008B_0425, 24), None);
+        assert_eq!(decode(0x0089_0433, 24), Some(Insn::MovSibEax));
+        assert_eq!(decode(0x8B44_3310, 32), Some(Insn::MovEaxSibd));
+        assert_eq!(decode(0x8B44_7B10, 32), Some(Insn::MovEaxSibd));
+        assert_eq!(decode(0x8944_33F0, 32), Some(Insn::MovSibdEax));
+        assert_eq!(decode(0x8B04_3310, 32), None);
+        assert_eq!(decode(0x008B_8473_1000_0000, 56), Some(Insn::MovEaxSibd32));
+        assert_eq!(decode(0x008B_84FB_1000_0000, 56), Some(Insn::MovEaxSibd32));
+        assert_eq!(decode(0x0089_84FB_1000_0000, 56), Some(Insn::MovSibd32Eax));
+        assert_eq!(decode(0x008B_0475_1000_0000, 56), Some(Insn::MovEaxSibabs));
+        assert_eq!(decode(0x008B_04F5_1000_0000, 56), Some(Insn::MovEaxSibabs));
+        assert_eq!(decode(0x0089_04F5_1000_0000, 56), Some(Insn::MovSibabsEax));
+        assert_eq!(decode(0x008B_0433_1000_0000, 56), None);
+        // 長さ違いは一致しない。
+        assert_eq!(decode(0x008B_8473_1000_0000, 32), None);
         // 長さ違いは一致しない。
         assert_eq!(decode(0x90, 16), None);
         assert_eq!(decode(0xFFFF_FFFF, 32), None);

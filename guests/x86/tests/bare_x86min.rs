@@ -7,6 +7,7 @@
 use polyisa_engine::bare::BareEnv;
 use polyisa_guest_x86::CpuState;
 use polyisa_guest_x86::sem::{self, Gpr};
+use polyisa_mem::{Access, AccessKind, Align, Endian, VirtAddr};
 use polyisa_sem::Backend as _;
 
 fn env() -> BareEnv {
@@ -168,13 +169,17 @@ fn mem_load_store_disp8() {
     // EBX=0x100 を base にし、EAX=0x12345678 を [+0x10] に書いて読む。
     env.backend.set(Gpr(3).state(), 0x100);
     env.backend.set(Gpr(0).state(), 0x1234_5678);
-    env.step(|b| sem::mov_mem_eax(b, 0x10)).unwrap();
-    env.step(|b| sem::mov_eax_mem(b, 0x10)).unwrap();
+    env.step(|b| sem::mov_mem_eax8(b, Gpr(0), Gpr(3), 0x10))
+        .unwrap();
+    env.step(|b| sem::mov_eax_mem8(b, Gpr(0), Gpr(3), 0x10))
+        .unwrap();
     assert_eq!(eax(&mut env), 0x1234_5678);
     // disp8 は符号付き：-1 は base-1 を指す。
     env.backend.set(Gpr(0).state(), 0xAABB_CCDD);
-    env.step(|b| sem::mov_mem_eax(b, -1)).unwrap();
-    env.step(|b| sem::mov_eax_mem(b, -1)).unwrap();
+    env.step(|b| sem::mov_mem_eax8(b, Gpr(0), Gpr(3), -1))
+        .unwrap();
+    env.step(|b| sem::mov_eax_mem8(b, Gpr(0), Gpr(3), -1))
+        .unwrap();
     assert_eq!(eax(&mut env), 0xAABB_CCDD);
 }
 
@@ -185,9 +190,9 @@ fn mem_load_store_no_disp() {
     env.map_rw(0, 1).unwrap();
     env.backend.set(Gpr(3).state(), 0x100);
     env.backend.set(Gpr(0).state(), 0xDEAD_BEEF);
-    env.step(sem::mov_memnd_eax).unwrap();
+    env.step(|b| sem::mov_memnd_eax(b, Gpr(0), Gpr(3))).unwrap();
     env.backend.set(Gpr(0).state(), 0);
-    env.step(sem::mov_eax_memnd).unwrap();
+    env.step(|b| sem::mov_eax_memnd(b, Gpr(0), Gpr(3))).unwrap();
     assert_eq!(eax(&mut env), 0xDEAD_BEEF);
 }
 
@@ -198,15 +203,19 @@ fn mem_load_store_disp32() {
     // EBX=0x100 を base にし、EAX=0x12345678 を [+0x20] に書いて読む。
     env.backend.set(Gpr(3).state(), 0x100);
     env.backend.set(Gpr(0).state(), 0x1234_5678);
-    env.step(|b| sem::mov_memd32_eax(b, 0x20)).unwrap();
+    env.step(|b| sem::mov_mem_eax32(b, Gpr(0), Gpr(3), 0x20))
+        .unwrap();
     env.backend.set(Gpr(0).state(), 0);
-    env.step(|b| sem::mov_eax_memd32(b, 0x20)).unwrap();
+    env.step(|b| sem::mov_eax_mem32(b, Gpr(0), Gpr(3), 0x20))
+        .unwrap();
     assert_eq!(eax(&mut env), 0x1234_5678);
     // disp32 は符号付き：-1 は base-1 を指す。
     env.backend.set(Gpr(0).state(), 0xAABB_CCDD);
-    env.step(|b| sem::mov_memd32_eax(b, -1)).unwrap();
+    env.step(|b| sem::mov_mem_eax32(b, Gpr(0), Gpr(3), -1))
+        .unwrap();
     env.backend.set(Gpr(0).state(), 0);
-    env.step(|b| sem::mov_eax_memd32(b, -1)).unwrap();
+    env.step(|b| sem::mov_eax_mem32(b, Gpr(0), Gpr(3), -1))
+        .unwrap();
     assert_eq!(eax(&mut env), 0xAABB_CCDD);
 }
 
@@ -216,9 +225,9 @@ fn mem_load_store_absolute() {
     env.map_rw(0, 1).unwrap();
     // 絶対番地 [0x200] に EAX=0x55AA55AA を書いて読む。
     env.backend.set(Gpr(0).state(), 0x55AA_55AA);
-    env.step(|b| sem::mov_abs_eax(b, 0x200)).unwrap();
+    env.step(|b| sem::mov_abs_eax(b, Gpr(0), 0x200)).unwrap();
     env.backend.set(Gpr(0).state(), 0);
-    env.step(|b| sem::mov_eax_abs(b, 0x200)).unwrap();
+    env.step(|b| sem::mov_eax_abs(b, Gpr(0), 0x200)).unwrap();
     assert_eq!(eax(&mut env), 0x55AA_55AA);
 }
 
@@ -448,10 +457,10 @@ fn lea_and_reg_logic() {
     let mut env = env();
     // LEA EAX,[EBX+disp8]：メモリに触れず EBX+0x10。
     env.backend.set(Gpr(3).state(), 0x100);
-    env.step(|b| sem::lea_m8(b, Gpr(0), 0x10)).unwrap();
+    env.step(|b| sem::lea_m8(b, Gpr(0), Gpr(3), 0x10)).unwrap();
     assert_eq!(eax(&mut env), 0x110);
     // disp=-1：0xFF。
-    env.step(|b| sem::lea_m8(b, Gpr(0), -1)).unwrap();
+    env.step(|b| sem::lea_m8(b, Gpr(0), Gpr(3), -1)).unwrap();
     assert_eq!(eax(&mut env), 0xFF);
     // CMP EAX,ECX：5 vs 5 で ZF=1、CF=0。EAX 不変。
     env.backend.set(Gpr(0).state(), 5);
@@ -475,7 +484,7 @@ fn lea_and_reg_logic() {
     // OR EAX,ECX：0 | 0xff = 0xff、ZF=0。LEA は EFLAGS を変えない。
     env.backend.set(Gpr(3).state(), 0x100);
     env.backend.set(sem::eflags_ref(), 0);
-    env.step(|b| sem::lea_m8(b, Gpr(0), 0x10)).unwrap();
+    env.step(|b| sem::lea_m8(b, Gpr(0), Gpr(3), 0x10)).unwrap();
     assert_eq!(eax(&mut env), 0x110);
     assert_eq!(env.backend.get(sem::eflags_ref()), 0);
     env.backend.set(Gpr(0).state(), 0);
@@ -494,29 +503,37 @@ fn lea_matrix() {
     // EBX=0x100、ESI=0x10。dst=ECX に入れる。
     env.backend.set(Gpr(3).state(), 0x100);
     env.backend.set(Gpr(6).state(), 0x10);
-    env.step(|b| sem::lea_m8(b, Gpr(1), 0x10)).unwrap();
+    env.step(|b| sem::lea_m8(b, Gpr(1), Gpr(3), 0x10)).unwrap();
     assert_eq!(env.backend.get(Gpr(1).state()), 0x110);
-    env.step(|b| sem::lea_m32(b, Gpr(1), 0x20)).unwrap();
+    env.step(|b| sem::lea_m32(b, Gpr(1), Gpr(3), 0x20)).unwrap();
     assert_eq!(env.backend.get(Gpr(1).state()), 0x120);
     env.step(|b| sem::lea_abs(b, Gpr(1), 0x300)).unwrap();
     assert_eq!(env.backend.get(Gpr(1).state()), 0x300);
-    env.step(|b| sem::lea_sib(b, Gpr(1))).unwrap();
+    env.step(|b| sem::lea_sib(b, Gpr(1), Gpr(3), Gpr(6), 0))
+        .unwrap();
     assert_eq!(env.backend.get(Gpr(1).state()), 0x110);
-    env.step(|b| sem::lea_sibd(b, Gpr(1), 0x10)).unwrap();
+    env.step(|b| sem::lea_sibd(b, Gpr(1), Gpr(3), Gpr(6), 0, 0x10))
+        .unwrap();
     assert_eq!(env.backend.get(Gpr(1).state()), 0x120);
     // スケール付き：*4 で [0x140+disp]。
-    env.step(|b| sem::lea_sib_s4(b, Gpr(1), 0x10)).unwrap();
+    env.step(|b| sem::lea_sibd(b, Gpr(1), Gpr(3), Gpr(6), 2, 0x10))
+        .unwrap();
     assert_eq!(env.backend.get(Gpr(1).state()), 0x150);
-    env.step(|b| sem::lea_sib_s4nd(b, Gpr(1))).unwrap();
+    env.step(|b| sem::lea_sib(b, Gpr(1), Gpr(3), Gpr(6), 2))
+        .unwrap();
     assert_eq!(env.backend.get(Gpr(1).state()), 0x140);
-    env.step(|b| sem::lea_sib_s4d32(b, Gpr(1), 0x20)).unwrap();
+    env.step(|b| sem::lea_sibd32(b, Gpr(1), Gpr(3), Gpr(6), 2, 0x20))
+        .unwrap();
     assert_eq!(env.backend.get(Gpr(1).state()), 0x160);
-    env.step(|b| sem::lea_sib_s4a32(b, Gpr(1), 0x200)).unwrap();
+    env.step(|b| sem::lea_sibabs(b, Gpr(1), Gpr(6), 2, 0x200))
+        .unwrap();
     assert_eq!(env.backend.get(Gpr(1).state()), 0x240);
     // *2/*8 の代表：disp なし。
-    env.step(|b| sem::lea_sib_s2nd(b, Gpr(2))).unwrap();
+    env.step(|b| sem::lea_sib(b, Gpr(2), Gpr(3), Gpr(6), 1))
+        .unwrap();
     assert_eq!(env.backend.get(Gpr(2).state()), 0x120);
-    env.step(|b| sem::lea_sib_s8nd(b, Gpr(2))).unwrap();
+    env.step(|b| sem::lea_sib(b, Gpr(2), Gpr(3), Gpr(6), 3))
+        .unwrap();
     assert_eq!(env.backend.get(Gpr(2).state()), 0x180);
 }
 
@@ -762,9 +779,11 @@ fn sib_base_index_roundtrip() {
     env.backend.set(Gpr(3).state(), 0x100);
     env.backend.set(Gpr(6).state(), 0x20);
     env.backend.set(Gpr(0).state(), 0xDEAD_BEEF);
-    env.step(sem::mov_sib_eax).unwrap();
+    env.step(|b| sem::mov_sib_eax(b, Gpr(0), Gpr(3), Gpr(6), 0))
+        .unwrap();
     env.backend.set(Gpr(0).state(), 0);
-    env.step(sem::mov_eax_sib).unwrap();
+    env.step(|b| sem::mov_eax_sib(b, Gpr(0), Gpr(3), Gpr(6), 0))
+        .unwrap();
     assert_eq!(eax(&mut env), 0xDEAD_BEEF);
 }
 
@@ -776,14 +795,18 @@ fn sib_disp8_roundtrip() {
     env.backend.set(Gpr(3).state(), 0x100);
     env.backend.set(Gpr(6).state(), 0x20);
     env.backend.set(Gpr(0).state(), 0xA5A5_A5A5);
-    env.step(|b| sem::mov_sibd_eax(b, 0x10)).unwrap();
+    env.step(|b| sem::mov_sibd_eax(b, Gpr(0), Gpr(3), Gpr(6), 0, 0x10))
+        .unwrap();
     env.backend.set(Gpr(0).state(), 0);
-    env.step(|b| sem::mov_eax_sibd(b, 0x10)).unwrap();
+    env.step(|b| sem::mov_eax_sibd(b, Gpr(0), Gpr(3), Gpr(6), 0, 0x10))
+        .unwrap();
     assert_eq!(eax(&mut env), 0xA5A5_A5A5);
     // disp=-1：0x100+0x20-1 = 0x11f。
-    env.step(|b| sem::mov_sibd_eax(b, -1)).unwrap();
+    env.step(|b| sem::mov_sibd_eax(b, Gpr(0), Gpr(3), Gpr(6), 0, -1))
+        .unwrap();
     env.backend.set(Gpr(0).state(), 0);
-    env.step(|b| sem::mov_eax_sibd(b, -1)).unwrap();
+    env.step(|b| sem::mov_eax_sibd(b, Gpr(0), Gpr(3), Gpr(6), 0, -1))
+        .unwrap();
     assert_eq!(eax(&mut env), 0xA5A5_A5A5);
 }
 
@@ -795,25 +818,31 @@ fn sib_scaled_roundtrip() {
     env.backend.set(Gpr(3).state(), 0x100);
     env.backend.set(Gpr(6).state(), 0x10);
     env.backend.set(Gpr(0).state(), 0x1234_5678);
-    env.step(|b| sem::mov_sib_s4_eax(b, 0)).unwrap();
+    env.step(|b| sem::mov_sibd_eax(b, Gpr(0), Gpr(3), Gpr(6), 2, 0))
+        .unwrap();
     env.backend.set(Gpr(0).state(), 0);
-    env.step(|b| sem::mov_eax_sib_s4(b, 0)).unwrap();
+    env.step(|b| sem::mov_eax_sibd(b, Gpr(0), Gpr(3), Gpr(6), 2, 0))
+        .unwrap();
     assert_eq!(eax(&mut env), 0x1234_5678);
     // *2：0x100+0x10*2+0 = 0x120。
     env.backend.set(Gpr(3).state(), 0x100);
     env.backend.set(Gpr(6).state(), 0x10);
     env.backend.set(Gpr(0).state(), 0x55AA_55AA);
-    env.step(|b| sem::mov_sib_s2_eax(b, 0)).unwrap();
+    env.step(|b| sem::mov_sibd_eax(b, Gpr(0), Gpr(3), Gpr(6), 1, 0))
+        .unwrap();
     env.backend.set(Gpr(0).state(), 0);
-    env.step(|b| sem::mov_eax_sib_s2(b, 0)).unwrap();
+    env.step(|b| sem::mov_eax_sibd(b, Gpr(0), Gpr(3), Gpr(6), 1, 0))
+        .unwrap();
     assert_eq!(eax(&mut env), 0x55AA_55AA);
     // *8、disp=-16：0x100+0x80-0x10 = 0x170。
     env.backend.set(Gpr(3).state(), 0x100);
     env.backend.set(Gpr(6).state(), 0x10);
     env.backend.set(Gpr(0).state(), 0x9ABC_DEF0);
-    env.step(|b| sem::mov_sib_s8_eax(b, -16)).unwrap();
+    env.step(|b| sem::mov_sibd_eax(b, Gpr(0), Gpr(3), Gpr(6), 3, -16))
+        .unwrap();
     env.backend.set(Gpr(0).state(), 0);
-    env.step(|b| sem::mov_eax_sib_s8(b, -16)).unwrap();
+    env.step(|b| sem::mov_eax_sibd(b, Gpr(0), Gpr(3), Gpr(6), 3, -16))
+        .unwrap();
     assert_eq!(eax(&mut env), 0x9ABC_DEF0);
 }
 
@@ -826,23 +855,29 @@ fn sib_scaled_nd_roundtrip() {
     env.backend.set(Gpr(3).state(), 0x100);
     env.backend.set(Gpr(6).state(), 0x10);
     env.backend.set(Gpr(0).state(), 0x1111_2222);
-    env.step(sem::mov_sib_s2nd_eax).unwrap();
+    env.step(|b| sem::mov_sib_eax(b, Gpr(0), Gpr(3), Gpr(6), 1))
+        .unwrap();
     env.backend.set(Gpr(0).state(), 0);
-    env.step(sem::mov_eax_sib_s2nd).unwrap();
+    env.step(|b| sem::mov_eax_sib(b, Gpr(0), Gpr(3), Gpr(6), 1))
+        .unwrap();
     assert_eq!(eax(&mut env), 0x1111_2222);
     env.backend.set(Gpr(3).state(), 0x100);
     env.backend.set(Gpr(6).state(), 0x10);
     env.backend.set(Gpr(0).state(), 0x3333_4444);
-    env.step(sem::mov_sib_s4nd_eax).unwrap();
+    env.step(|b| sem::mov_sib_eax(b, Gpr(0), Gpr(3), Gpr(6), 2))
+        .unwrap();
     env.backend.set(Gpr(0).state(), 0);
-    env.step(sem::mov_eax_sib_s4nd).unwrap();
+    env.step(|b| sem::mov_eax_sib(b, Gpr(0), Gpr(3), Gpr(6), 2))
+        .unwrap();
     assert_eq!(eax(&mut env), 0x3333_4444);
     env.backend.set(Gpr(3).state(), 0x100);
     env.backend.set(Gpr(6).state(), 0x10);
     env.backend.set(Gpr(0).state(), 0x5555_6666);
-    env.step(sem::mov_sib_s8nd_eax).unwrap();
+    env.step(|b| sem::mov_sib_eax(b, Gpr(0), Gpr(3), Gpr(6), 3))
+        .unwrap();
     env.backend.set(Gpr(0).state(), 0);
-    env.step(sem::mov_eax_sib_s8nd).unwrap();
+    env.step(|b| sem::mov_eax_sib(b, Gpr(0), Gpr(3), Gpr(6), 3))
+        .unwrap();
     assert_eq!(eax(&mut env), 0x5555_6666);
 }
 
@@ -856,37 +891,49 @@ fn sib_disp32_roundtrip() {
     env.backend.set(Gpr(3).state(), 0x100);
     env.backend.set(Gpr(6).state(), 0x10);
     env.backend.set(Gpr(0).state(), 0x1111_2222);
-    env.step(|b| sem::mov_sib_s2d32_eax(b, 0x20)).unwrap();
+    env.step(|b| sem::mov_sibd32_eax(b, Gpr(0), Gpr(3), Gpr(6), 1, 0x20))
+        .unwrap();
     env.backend.set(Gpr(0).state(), 0);
-    env.step(|b| sem::mov_eax_sib_s2d32(b, 0x20)).unwrap();
+    env.step(|b| sem::mov_eax_sibd32(b, Gpr(0), Gpr(3), Gpr(6), 1, 0x20))
+        .unwrap();
     assert_eq!(eax(&mut env), 0x1111_2222);
     env.backend.set(Gpr(0).state(), 0x3333_4444);
-    env.step(|b| sem::mov_sib_s4d32_eax(b, 0x20)).unwrap();
+    env.step(|b| sem::mov_sibd32_eax(b, Gpr(0), Gpr(3), Gpr(6), 2, 0x20))
+        .unwrap();
     env.backend.set(Gpr(0).state(), 0);
-    env.step(|b| sem::mov_eax_sib_s4d32(b, 0x20)).unwrap();
+    env.step(|b| sem::mov_eax_sibd32(b, Gpr(0), Gpr(3), Gpr(6), 2, 0x20))
+        .unwrap();
     assert_eq!(eax(&mut env), 0x3333_4444);
     env.backend.set(Gpr(0).state(), 0x5555_6666);
-    env.step(|b| sem::mov_sib_s8d32_eax(b, 0x20)).unwrap();
+    env.step(|b| sem::mov_sibd32_eax(b, Gpr(0), Gpr(3), Gpr(6), 3, 0x20))
+        .unwrap();
     env.backend.set(Gpr(0).state(), 0);
-    env.step(|b| sem::mov_eax_sib_s8d32(b, 0x20)).unwrap();
+    env.step(|b| sem::mov_eax_sibd32(b, Gpr(0), Gpr(3), Gpr(6), 3, 0x20))
+        .unwrap();
     assert_eq!(eax(&mut env), 0x5555_6666);
     // 直接番地 base：ESI=0x10、disp=0x200。
     // *2 で [0x220]、*4 で [0x240]、*8 で [0x280]。
     env.backend.set(Gpr(6).state(), 0x10);
     env.backend.set(Gpr(0).state(), 0x7777_8888);
-    env.step(|b| sem::mov_sib_s2a32_eax(b, 0x200)).unwrap();
+    env.step(|b| sem::mov_sibabs_eax(b, Gpr(0), Gpr(6), 1, 0x200))
+        .unwrap();
     env.backend.set(Gpr(0).state(), 0);
-    env.step(|b| sem::mov_eax_sib_s2a32(b, 0x200)).unwrap();
+    env.step(|b| sem::mov_eax_sibabs(b, Gpr(0), Gpr(6), 1, 0x200))
+        .unwrap();
     assert_eq!(eax(&mut env), 0x7777_8888);
     env.backend.set(Gpr(0).state(), 0x9999_AAAA);
-    env.step(|b| sem::mov_sib_s4a32_eax(b, 0x200)).unwrap();
+    env.step(|b| sem::mov_sibabs_eax(b, Gpr(0), Gpr(6), 2, 0x200))
+        .unwrap();
     env.backend.set(Gpr(0).state(), 0);
-    env.step(|b| sem::mov_eax_sib_s4a32(b, 0x200)).unwrap();
+    env.step(|b| sem::mov_eax_sibabs(b, Gpr(0), Gpr(6), 2, 0x200))
+        .unwrap();
     assert_eq!(eax(&mut env), 0x9999_AAAA);
     env.backend.set(Gpr(0).state(), 0xBBBB_CCCC);
-    env.step(|b| sem::mov_sib_s8a32_eax(b, 0x200)).unwrap();
+    env.step(|b| sem::mov_sibabs_eax(b, Gpr(0), Gpr(6), 3, 0x200))
+        .unwrap();
     env.backend.set(Gpr(0).state(), 0);
-    env.step(|b| sem::mov_eax_sib_s8a32(b, 0x200)).unwrap();
+    env.step(|b| sem::mov_eax_sibabs(b, Gpr(0), Gpr(6), 3, 0x200))
+        .unwrap();
     assert_eq!(eax(&mut env), 0xBBBB_CCCC);
 }
 
@@ -1081,4 +1128,80 @@ fn c7_and_imm8() {
     .unwrap();
     env.step(|b| sem::and_rm64_imm8(b, Gpr(2), 0x0F)).unwrap();
     assert_eq!(env.backend.get(Gpr(2).state()), 0x0F);
+}
+
+#[test]
+fn rep_movs_roundtrip() {
+    // REP MOVSB：3バイト転送で RSI/RDI が進み ECX が 0 になる。
+    let mut env = env();
+    env.map_rw(0, 1).unwrap();
+    env.backend.set(Gpr(6).state(), 0x100);
+    env.backend.set(Gpr(7).state(), 0x200);
+    env.backend.set(Gpr(1).state(), 3);
+    env.backend.mem.write(VirtAddr(0x100), &[9, 8, 7]).unwrap();
+    env.backend.set(sem::eip_ref(), 0x1000);
+    for _ in 0..3 {
+        env.step(|b| sem::rep_movsb(b, 0x1000)).unwrap();
+    }
+    let mut back = [0u8; 3];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x200),
+            &mut back,
+            Access {
+                endian: Endian::Le,
+                align: Align::Unaligned,
+                kind: AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(back, [9, 8, 7]);
+    assert_eq!(env.backend.get(Gpr(6).state()), 0x103);
+    assert_eq!(env.backend.get(Gpr(7).state()), 0x203);
+    assert_eq!(env.backend.get(Gpr(1).state()), 0);
+    // eip は最終段で Fallthrough のまま（Jump しない）。
+    assert_eq!(env.backend.get(sem::eip_ref()), 0x1000);
+}
+
+#[test]
+fn rep_stosd_roundtrip() {
+    // REP STOSD：EAX を2つ格納する。
+    let mut env = env();
+    env.map_rw(0, 1).unwrap();
+    env.backend.set(Gpr(7).state(), 0x300);
+    env.backend.set(Gpr(1).state(), 2);
+    env.backend.set(Gpr(0).state(), 0xA5A5_A5A5);
+    env.backend.set(sem::eip_ref(), 0x1000);
+    for _ in 0..2 {
+        env.step(|b| sem::rep_stosd(b, 0x1000)).unwrap();
+    }
+    assert_eq!(env.backend.get(Gpr(7).state()), 0x308);
+    assert_eq!(env.backend.get(Gpr(1).state()), 0);
+}
+
+#[test]
+fn mem_base_generic_roundtrip() {
+    // ModRM base 汎用形：EBP 基底・ECX 転送先でも往復する。
+    let mut env = env();
+    env.map_rw(0, 1).unwrap();
+    env.backend.set(Gpr(5).state(), 0x100);
+    env.backend.set(Gpr(1).state(), 0x1357_9BDF);
+    env.step(|b| sem::mov_mem_eax8(b, Gpr(1), Gpr(5), 0x10))
+        .unwrap();
+    env.backend.set(Gpr(1).state(), 0);
+    env.backend.set(Gpr(0).state(), 0x2222_2222);
+    env.step(|b| sem::mov_eax_mem8(b, Gpr(0), Gpr(5), 0x10))
+        .unwrap();
+    assert_eq!(eax(&mut env), 0x1357_9BDF);
+    // SIB 汎用形：base=EDX、index=EDI、scale=8、dst=ECX。
+    env.backend.set(Gpr(2).state(), 0x100);
+    env.backend.set(Gpr(7).state(), 0x10);
+    env.backend.set(Gpr(1).state(), 0x2468_ACE0);
+    env.step(|b| sem::mov_sibd_eax(b, Gpr(1), Gpr(2), Gpr(7), 3, 0))
+        .unwrap();
+    env.backend.set(Gpr(1).state(), 0);
+    env.step(|b| sem::mov_eax_sibd(b, Gpr(1), Gpr(2), Gpr(7), 3, 0))
+        .unwrap();
+    assert_eq!(env.backend.get(Gpr(1).state()), 0x2468_ACE0);
 }
