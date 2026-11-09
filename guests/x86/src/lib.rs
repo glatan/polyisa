@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! x86 最小のゲスト ISA。段階4の最小であり、可変長デコードを確かめる。
 //!
-//! i386 の汎用レジスタ系64件のみ持つ。ModRM の SIB/disp32/メモリ形式と Rust フック・
+//! i386 の汎用レジスタ系68件のみ持つ。ModRM の SIB/disp32/メモリ形式と Rust フック・
 //! EFLAGS(SF/OF/PF/AF)・64ビット・x87・SSE・セグメントは本格実装で足す。
 //! SYSCALL/CPUID は最小形、ModRM は register-direct と mod=01+disp8 のみ持つ。
 
@@ -54,8 +54,8 @@ mod tests {
 
     #[test]
     fn insn_count() {
-        // 試作の整数64件。
-        assert_eq!(INSNS.len(), 64);
+        // 試作の整数68件。
+        assert_eq!(INSNS.len(), 68);
     }
 
     #[test]
@@ -106,6 +106,12 @@ mod tests {
         assert_eq!(decode(0x85C0, 16), Some(Insn::TestEax));
         assert_eq!(decode(0x7400, 16), Some(Insn::Je));
         assert_eq!(decode(0x75FE, 16), Some(Insn::Jne));
+        // 符号なし条件分岐：JB (72)、JAE (73)、JBE (76)、JA (77)。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x7200, 16), Some(Insn::Jb));
+        assert_eq!(decode(0x7300, 16), Some(Insn::Jae));
+        assert_eq!(decode(0x7600, 16), Some(Insn::Jbe));
+        assert_eq!(decode(0x7700, 16), Some(Insn::Ja));
         // ループと近傍ジャンプ：LOOP rel8 (E2)、JMP rel32 (E9)。
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0xE2FE, 16), Some(Insn::Loop));

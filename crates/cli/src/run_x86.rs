@@ -58,7 +58,8 @@ fn eip_of(env: &mut BareEnv) -> u32 {
 fn fetch_len(first: u8, second: Option<u8>) -> Option<u64> {
     match first {
         0x90 | 0x40..=0x4F | 0x50..=0x5F | 0xC3 | 0xC9 => Some(1),
-        0xEB | 0x74 | 0x75 | 0xE2 | 0xCD | 0x85 | 0x0F | 0x39 | 0x21 | 0x0B | 0x09 => Some(2),
+        0xEB | 0x74 | 0x75 | 0xE2 | 0xCD | 0x85 | 0x0F | 0x39 | 0x21 | 0x0B | 0x09 | 0x72
+        | 0x73 | 0x76 | 0x77 => Some(2),
         0x05 | 0x2D | 0x3D | 0xB8 | 0xE8 | 0xE9 | 0x25 | 0x0D | 0x35 => Some(5),
         0x01 | 0x8B | 0x31 | 0x89 | 0xC1 | 0x8D => {
             let s = second?;
@@ -251,6 +252,10 @@ fn dispatch<B: Backend>(
         Insn::TestEax => sem::test_eax(b),
         Insn::Je => sem::je(b, eip, disp8()),
         Insn::Jne => sem::jne(b, eip, disp8()),
+        Insn::Jb => sem::jb(b, eip, disp8()),
+        Insn::Jae => sem::jae(b, eip, disp8()),
+        Insn::Jbe => sem::jbe(b, eip, disp8()),
+        Insn::Ja => sem::ja(b, eip, disp8()),
         Insn::Loop => sem::loop_rel8(b, eip, disp8()),
         Insn::JmpRel32 => sem::jmp_rel32(b, eip, disp32()),
         Insn::XorEax => sem::xor_eax(b),

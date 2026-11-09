@@ -62,7 +62,15 @@ fn update_zf_cf<B: Backend>(b: &mut B, x: B::V<W32>, y: B::V<W32>) {
     b.set(eflags_ref(), e2);
 }
 
-/// ZF を読む。
+/// CF を読む。
+fn read_cf<B: Backend>(b: &mut B) -> B::B {
+    let flags: B::V<W32> = b.get(eflags_ref());
+    let mask = b.konst::<W32>(0x1);
+    let masked = b.and::<W32>(flags, mask);
+    let zero = b.konst::<W32>(0);
+    b.cmp::<W32>(Cmp::Ne, masked, zero)
+}
+
 fn read_zf<B: Backend>(b: &mut B) -> B::B {
     let flags: B::V<W32> = b.get(eflags_ref());
     let mask = b.konst::<W32>(0x40);
@@ -96,6 +104,96 @@ pub fn je<B: Backend>(b: &mut B, eip: u32, disp: i8) -> Flow<B> {
     let t = b.konst::<W32>(target);
     let tj = b.konst::<W64>(target as u64);
     b.if_then(zf, |b| {
+        b.set(eip_ref(), t);
+        b.jump(tj);
+        Ok(())
+    })?;
+    Ok(())
+}
+
+/// CF を 0/1 の値として読む。
+fn cf_num<B: Backend>(b: &mut B) -> B::V<W32> {
+    let flags: B::V<W32> = b.get(eflags_ref());
+    let mask = b.konst::<W32>(0x1);
+    let masked = b.and::<W32>(flags, mask);
+    let one = b.konst::<W32>(1);
+    let zero = b.konst::<W32>(0);
+    let take = b.cmp::<W32>(Cmp::Ne, masked, zero);
+    b.select::<W32>(take, one, zero)
+}
+
+/// ZF を 0/1 の値として読む。
+fn zf_num<B: Backend>(b: &mut B) -> B::V<W32> {
+    let flags: B::V<W32> = b.get(eflags_ref());
+    let mask = b.konst::<W32>(0x40);
+    let masked = b.and::<W32>(flags, mask);
+    let one = b.konst::<W32>(1);
+    let zero = b.konst::<W32>(0);
+    let take = b.cmp::<W32>(Cmp::Ne, masked, zero);
+    b.select::<W32>(take, one, zero)
+}
+
+/// JB rel8。CF=1 なら eip+2+disp に飛ぶ。
+pub fn jb<B: Backend>(b: &mut B, eip: u32, disp: i8) -> Flow<B> {
+    let cf = read_cf(b);
+    let target = eip.wrapping_add(2).wrapping_add(disp as i32 as u32);
+    let t = b.konst::<W32>(target);
+    let tj = b.konst::<W64>(target as u64);
+    b.if_then(cf, |b| {
+        b.set(eip_ref(), t);
+        b.jump(tj);
+        Ok(())
+    })?;
+    Ok(())
+}
+
+/// JAE rel8。CF=0 なら eip+2+disp に飛ぶ。
+pub fn jae<B: Backend>(b: &mut B, eip: u32, disp: i8) -> Flow<B> {
+    let cf = read_cf(b);
+    let zero = b.konst::<W32>(0);
+    let one = b.konst::<W32>(1);
+    let cf_is_set = b.select::<W32>(cf, one, zero);
+    let take = b.cmp::<W32>(Cmp::Eq, cf_is_set, zero);
+    let target = eip.wrapping_add(2).wrapping_add(disp as i32 as u32);
+    let t = b.konst::<W32>(target);
+    let tj = b.konst::<W64>(target as u64);
+    b.if_then(take, |b| {
+        b.set(eip_ref(), t);
+        b.jump(tj);
+        Ok(())
+    })?;
+    Ok(())
+}
+
+/// JBE rel8。CF=1 または ZF=1 なら eip+2+disp に飛ぶ。
+pub fn jbe<B: Backend>(b: &mut B, eip: u32, disp: i8) -> Flow<B> {
+    let cf = cf_num(b);
+    let zf = zf_num(b);
+    let either = b.or::<W32>(cf, zf);
+    let zero = b.konst::<W32>(0);
+    let take = b.cmp::<W32>(Cmp::Ne, either, zero);
+    let target = eip.wrapping_add(2).wrapping_add(disp as i32 as u32);
+    let t = b.konst::<W32>(target);
+    let tj = b.konst::<W64>(target as u64);
+    b.if_then(take, |b| {
+        b.set(eip_ref(), t);
+        b.jump(tj);
+        Ok(())
+    })?;
+    Ok(())
+}
+
+/// JA rel8。CF=0 かつ ZF=0 なら eip+2+disp に飛ぶ。
+pub fn ja<B: Backend>(b: &mut B, eip: u32, disp: i8) -> Flow<B> {
+    let cf = cf_num(b);
+    let zf = zf_num(b);
+    let either = b.or::<W32>(cf, zf);
+    let zero = b.konst::<W32>(0);
+    let take = b.cmp::<W32>(Cmp::Eq, either, zero);
+    let target = eip.wrapping_add(2).wrapping_add(disp as i32 as u32);
+    let t = b.konst::<W32>(target);
+    let tj = b.konst::<W64>(target as u64);
+    b.if_then(take, |b| {
         b.set(eip_ref(), t);
         b.jump(tj);
         Ok(())
