@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! x86 最小のゲスト ISA。段階4の最小であり、可変長デコードを確かめる。
 //!
-//! i386 の332件を持つ。ModRM/SIB 汎用・XMM最小・near Jcc・MOVZX・CMOVB・ADD RIP等を含む。
+//! i386 の341件を持つ。ModRM/SIB 汎用・XMM最小・near Jcc・MOVZX・CMOVB・ADD RIP等を含む。
 //! REX 接頭辞はデコード前に剥がし、Insは共有して64ビット意味論に切り替える。
 //! SYSCALL/CPUID は最小形、ModRM は register-direct（全組合せ）・mod=01+disp8・
 //! mod=10+disp32・絶対番地と SIB base+index 形（スケール付き、disp8/disp32・disp なしを含む）を持ち、
@@ -70,7 +70,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数116件。
-        assert_eq!(INSNS.len(), 332);
+        assert_eq!(INSNS.len(), 341);
     }
 
     #[test]
@@ -116,7 +116,7 @@ mod tests {
         assert_eq!(decode(0x8BC1, 16), Some(Insn::MovRm32));
         assert_eq!(decode(0x8BD8, 16), Some(Insn::MovRm32));
         // ModRM の mod=00 (メモリ) は register-direct とは一致しない。
-        assert_eq!(decode(0x0108, 16), None);
+        assert_eq!(decode(0x0108, 16), Some(Insn::AddM32R32Memnd));
         assert_eq!(decode(0x8B08, 16), Some(Insn::MovEaxMemnd));
         // スタック操作とコール/リターン：PUSH EAX (50)、POP EAX (58)、PUSH EBP (55)、
         // POP EBP (5D)、CALL rel32 (E8+imm32)、RET (C3)。
@@ -336,8 +336,10 @@ mod tests {
             Some(Insn::MovRmImmSibabs)
         );
         assert_eq!(decode(0x85D2, 16), Some(Insn::TestRm32));
+        assert_eq!(decode(0x019578FEFFFF, 48), Some(Insn::AddM32R32Mem32));
         assert_eq!(decode(0xF7C400080000, 48), Some(Insn::TestRm32Imm));
         assert_eq!(decode(0x0FEFC0, 24), Some(Insn::Pxor));
+        assert_eq!(decode(0x0FBCC0, 24), Some(Insn::BsfRRm));
         assert_eq!(decode(0x0FD7C0, 24), Some(Insn::Pmovmskb));
         assert_eq!(decode(0x0F74C1, 24), Some(Insn::Pcmpeqb));
         assert_eq!(decode(0x0FEBC4, 24), Some(Insn::Por));

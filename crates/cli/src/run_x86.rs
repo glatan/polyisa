@@ -210,6 +210,7 @@ fn fetch_len(
                 || s == 0xB6
                 || s == 0xB7
                 || s == 0xAF
+                || s == 0xBC
             {
                 // MOVUPS/MOVNTDQ。ModRM/SIB/disp で長さが決まる。
                 // reg-direct は MOVUPS のみ（E7 は無効）。
@@ -811,6 +812,7 @@ pub fn run_mode(
                             | 0xB6
                             | 0xB7
                             | 0xAF
+                            | 0xBC
                     )
                 ) || matches!(second, Some(0x40..=0x4F))
                     || matches!(second, Some(0x90..=0x9F))))
@@ -835,7 +837,7 @@ pub fn run_mode(
         let fourth = if head[0] == 0x0F
             && matches!(
                 second,
-                Some(0x10 | 0x11 | 0x29 | 0xE7 | 0x1F | 0xB6 | 0xB7 | 0xAF)
+                Some(0x10 | 0x11 | 0x29 | 0xE7 | 0x1F | 0xB6 | 0xB7 | 0xAF | 0xBC)
             )
             && matches!(third, Some(m) if m & 7 == 4 && m >> 6 != 3)
         {
@@ -1216,6 +1218,36 @@ fn dispatch<B: Backend>(
                 sem::add_rm64(b, rm(), reg())
             } else {
                 sem::add_rm32(b, rm(), reg())
+            }
+        }
+        Insn::AddM32R32Memnd => {
+            if rex_w {
+                sem::add_m64_r64_memnd(b, rm(), reg())
+            } else {
+                sem::add_m32_r32_memnd(b, rm(), reg())
+            }
+        }
+        Insn::AddM32R32Mem8 => {
+            if rex_w {
+                sem::add_m64_r64_mem8(b, rm(), disp8(), reg())
+            } else {
+                sem::add_m32_r32_mem8(b, rm(), disp8(), reg())
+            }
+        }
+        Insn::AddM32R32Mem32 => {
+            if rex_w {
+                sem::add_m64_r64_mem32(b, rm(), disp32(), reg())
+            } else {
+                sem::add_m32_r32_mem32(b, rm(), disp32(), reg())
+            }
+        }
+        Insn::AddM32R32Rip => {
+            if rex_w {
+                sem::add_m64_r64_rip(b, eip as u64 + nbytes, disp32(), reg())
+            } else if is64 {
+                sem::add_m32_r32_rip(b, eip as u64 + nbytes, disp32(), reg())
+            } else {
+                sem::add_m32_r32_abs(b, imm32(), reg())
             }
         }
         Insn::AdcRm32 => {
@@ -2989,6 +3021,44 @@ fn dispatch<B: Backend>(
                 sem::imul_r32_abs(b, reg0f_as_gpr(), imm32())
             }
         }
+        Insn::BsfRRm => {
+            if rex_w {
+                sem::bsf_r64(b, reg0f_as_gpr(), rm0f())
+            } else {
+                sem::bsf_r32(b, reg0f_as_gpr(), rm0f())
+            }
+        }
+        Insn::BsfRMemnd => {
+            if rex_w {
+                sem::bsf_r64_memnd(b, reg0f_as_gpr(), rm0f())
+            } else {
+                sem::bsf_r32_memnd(b, reg0f_as_gpr(), rm0f())
+            }
+        }
+        Insn::BsfRMem8 => {
+            if rex_w {
+                sem::bsf_r64_mem8(b, reg0f_as_gpr(), rm0f(), disp8())
+            } else {
+                sem::bsf_r32_mem8(b, reg0f_as_gpr(), rm0f(), disp8())
+            }
+        }
+        Insn::BsfRMem32 => {
+            if rex_w {
+                sem::bsf_r64_mem32(b, reg0f_as_gpr(), rm0f(), disp32())
+            } else {
+                sem::bsf_r32_mem32(b, reg0f_as_gpr(), rm0f(), disp32())
+            }
+        }
+        Insn::BsfRRip => {
+            if rex_w {
+                sem::bsf_r64_rip(b, reg0f_as_gpr(), eip as u64 + nbytes, disp32())
+            } else if is64 {
+                sem::bsf_r32_rip(b, reg0f_as_gpr(), eip as u64 + nbytes, disp32())
+            } else {
+                // 32ビット絶対番地は未対応 (BSF は RIP 想定のため)。
+                sem::bsf_r32_memnd(b, reg0f_as_gpr(), rm0f())
+            }
+        }
         Insn::ImulRImm8Rip => {
             // 6B /r ib + disp32 + imm8 (56b)。disp は (word>>8) 下位32 LE、imm は最下位8.
             let disp_le = ((word >> 8) as u32).swap_bytes();
@@ -3451,7 +3521,12 @@ fn dispatch<B: Backend>(
             | Insn::ImulRMemnd
             | Insn::ImulRMem8
             | Insn::ImulRMem32
-            | Insn::ImulRRip => Some(reg0f_as_gpr()),
+            | Insn::ImulRRip
+            | Insn::BsfRRm
+            | Insn::BsfRMemnd
+            | Insn::BsfRMem8
+            | Insn::BsfRMem32
+            | Insn::BsfRRip => Some(reg0f_as_gpr()),
             Insn::AddRRip
             | Insn::AddRMemnd
             | Insn::AddRMem8

@@ -3720,3 +3720,54 @@ fn pmovmskb_basic() {
         .unwrap();
     assert_eq!(env.backend.get(Gpr(0).state()), 0xFFFF);
 }
+
+#[test]
+fn bsf_r64_basic() {
+    // BSF RAX,RAX: RAX=0x10 -> 4.
+    let mut env = env();
+    env.step(|b| {
+        sem::write64(b, Gpr(0), 0x10);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::bsf_r64(b, Gpr(0), Gpr(0))).unwrap();
+    env.step(|b| {
+        let v = sem::read64(b, Gpr(0));
+        assert_eq!(v, 4);
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn add_m64_r64_mem32_basic() {
+    // ADD [RBP-0x188],RDX (REX.W mod=10): [0x1320]=0x10, RDX=0x20 -> 0x30.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend.set(Gpr(5).state(), 0x14A8);
+    env.step(|b| {
+        sem::write64(b, Gpr(2), 0x20);
+        Ok(())
+    })
+    .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1320), &[0x10u8, 0, 0, 0, 0, 0, 0, 0])
+        .unwrap();
+    env.step(|b| sem::add_m64_r64_mem32(b, Gpr(5), -0x188, Gpr(2)))
+        .unwrap();
+    let mut back = [0u8; 8];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x1320),
+            &mut back,
+            Access {
+                endian: Endian::Le,
+                align: Align::Unaligned,
+                kind: AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(u64::from_le_bytes(back), 0x30);
+}
