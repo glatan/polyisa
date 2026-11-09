@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! x86 最小のゲスト ISA。段階4の最小であり、可変長デコードを確かめる。
 //!
-//! i386 の汎用レジスタ系72件のみ持つ。ModRM の SIB 拡張・disp32・絶対番地と Rust フック・
+//! i386 の汎用レジスタ系78件のみ持つ。SIB のスケール・disp32・絶対番地と Rust フック・
 //! EFLAGS(SF/OF/PF/AF)・64ビット・x87・SSE・セグメントは本格実装で足す。
-//! SYSCALL/CPUID は最小形、ModRM は register-direct・mod=01+disp8・SIB base+index 最小形・SIB+disp8 のみ持つ。
+//! SYSCALL/CPUID は最小形、ModRM は register-direct・mod=01+disp8・SIB base+index 最小形・SIB+disp8・SIB スケール付き(ss=01/10/11)を持つ。
 
 #![forbid(unsafe_code)]
 
@@ -54,8 +54,8 @@ mod tests {
 
     #[test]
     fn insn_count() {
-        // 試作の整数72件。
-        assert_eq!(INSNS.len(), 72);
+        // 試作の整数78件。
+        assert_eq!(INSNS.len(), 78);
     }
 
     #[test]
@@ -176,6 +176,15 @@ mod tests {
         assert_eq!(decode(0x8B44_3310, 32), Some(Insn::MovEaxSibd));
         assert_eq!(decode(0x8944_33F0, 32), Some(Insn::MovSibdEax));
         assert_eq!(decode(0x8B44_3400, 32), None);
+        // SIB スケール付き（ss=01/10/11）：*2=0x73、*4=0xB3、*8=0xF3。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x8B44_7310, 32), Some(Insn::MovEaxSibS2));
+        assert_eq!(decode(0x8944_7310, 32), Some(Insn::MovSibS2Eax));
+        assert_eq!(decode(0x8B44_B310, 32), Some(Insn::MovEaxSibS4));
+        assert_eq!(decode(0x8944_B310, 32), Some(Insn::MovSibS4Eax));
+        assert_eq!(decode(0x8B44_F310, 32), Some(Insn::MovEaxSibS8));
+        assert_eq!(decode(0x8944_F310, 32), Some(Insn::MovSibS8Eax));
+        assert_eq!(decode(0x8B44_3310, 32), Some(Insn::MovEaxSibd));
         // ModRM mod=01 + disp8：MOV EAX,[EBX+disp8] (8B 43 ..) と MOV [EBX+disp8],EAX (89 43 ..)。
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x008B_4310, 24), Some(Insn::MovEaxMem));
