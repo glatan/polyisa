@@ -145,6 +145,57 @@ fn call_ret_roundtrip() {
 }
 
 #[test]
+fn cmp_sets_zf_cf() {
+    let mut env = env();
+    // EAX=5 と 5：ZF=1、CF=0。
+    env.backend.set(Gpr(0).state(), 5);
+    env.step(|b| sem::cmp_eax(b, 5)).unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0x40);
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x1, 0);
+    // EAX=5 と 6：ZF=0、CF=1（符号なしで借り）。
+    env.step(|b| sem::cmp_eax(b, 6)).unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0);
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x1, 1);
+}
+
+#[test]
+fn test_eax_sets_zf() {
+    let mut env = env();
+    // EAX=0：ZF=1、CF=0。
+    env.backend.set(Gpr(0).state(), 0);
+    env.step(sem::test_eax).unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0x40);
+    // EAX=1：ZF=0、CF=0、EAX 不変。
+    env.backend.set(Gpr(0).state(), 1);
+    env.step(sem::test_eax).unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0);
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x1, 0);
+    assert_eq!(eax(&mut env), 1);
+}
+
+#[test]
+fn je_jne_branch_on_zf() {
+    let mut env = env();
+    // ZF=1：JE は飛び、JNE は飛ばない。
+    env.backend.set(Gpr(0).state(), 5);
+    env.step(|b| sem::cmp_eax(b, 5)).unwrap();
+    env.backend.set(sem::eip_ref(), 0x1000);
+    env.step(|b| sem::je(b, 0x1000, 0x10)).unwrap();
+    assert_eq!(env.backend.get(sem::eip_ref()), 0x1012);
+    env.backend.set(sem::eip_ref(), 0x1000);
+    env.step(|b| sem::jne(b, 0x1000, 0x10)).unwrap();
+    assert_eq!(env.backend.get(sem::eip_ref()), 0x1000);
+    // ZF=0：JE は飛ばず、JNE は飛ぶ。
+    env.step(|b| sem::cmp_eax(b, 6)).unwrap();
+    assert_eq!(eax(&mut env), 5);
+    env.backend.set(sem::eip_ref(), 0x1000);
+    env.step(|b| sem::je(b, 0x1000, 0x10)).unwrap();
+    assert_eq!(env.backend.get(sem::eip_ref()), 0x1000);
+    env.step(|b| sem::jne(b, 0x1000, 0x10)).unwrap();
+    assert_eq!(env.backend.get(sem::eip_ref()), 0x1012);
+}
+
+#[test]
 fn jmp_sets_eip() {
     let mut env = env();
     env.backend.set(sem::eip_ref(), 0x1000);

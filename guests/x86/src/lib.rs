@@ -31,6 +31,8 @@ pub struct CpuState {
     pub g: [u32; 8],
     /// 命令ポインタ。
     pub eip: u32,
+    /// フラグレジスタ（試作では ZF bit6 と CF bit0 のみ使う）。
+    pub eflags: u32,
 }
 
 #[cfg(test)]
@@ -47,12 +49,13 @@ mod tests {
     fn state_layout_pinned() {
         assert_eq!(core::mem::offset_of!(CpuState, g), 0);
         assert_eq!(core::mem::offset_of!(CpuState, eip), 8 * 4);
+        assert_eq!(core::mem::offset_of!(CpuState, eflags), 8 * 4 + 4);
     }
 
     #[test]
     fn insn_count() {
-        // 試作の整数18件。
-        assert_eq!(INSNS.len(), 18);
+        // 試作の整数22件。
+        assert_eq!(INSNS.len(), 22);
     }
 
     #[test]
@@ -87,6 +90,12 @@ mod tests {
         assert_eq!(decode(0x5D, 8), Some(Insn::PopEbp));
         assert_eq!(decode(0xE8_0000_0010, 40), Some(Insn::CallRel32));
         assert_eq!(decode(0xC3, 8), Some(Insn::Ret));
+        // 比較・条件分岐：CMP EAX,imm32 (3D)、TEST EAX,EAX (85 C0)、JE (74)、JNE (75)。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x3D_0000_0001, 40), Some(Insn::CmpEax));
+        assert_eq!(decode(0x85C0, 16), Some(Insn::TestEax));
+        assert_eq!(decode(0x7400, 16), Some(Insn::Je));
+        assert_eq!(decode(0x75FE, 16), Some(Insn::Jne));
         // ModRM mod=01 + disp8：MOV EAX,[EBX+disp8] (8B 43 ..) と MOV [EBX+disp8],EAX (89 43 ..)。
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x008B_4310, 24), Some(Insn::MovEaxMem));

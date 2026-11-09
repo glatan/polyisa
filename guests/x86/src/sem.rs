@@ -35,6 +35,89 @@ pub fn eip_ref() -> StateRef<W32> {
     StateRef::<W32>::from_offset(core::mem::offset_of!(CpuState, eip))
 }
 
+/// eflags を指す。
+pub fn eflags_ref() -> StateRef<W32> {
+    StateRef::<W32>::from_offset(core::mem::offset_of!(CpuState, eflags))
+}
+
+/// ZF（bit6）と CF（bit0）を更新する。遅延評価は本格実装で足す。
+fn update_zf_cf<B: Backend>(b: &mut B, x: B::V<W32>, y: B::V<W32>) {
+    let flags: B::V<W32> = b.get(eflags_ref());
+    let zf_mask = b.konst::<W32>(0xffff_ffbf);
+    let cleared_zf = b.and::<W32>(flags, zf_mask);
+    let eq = b.cmp::<W32>(Cmp::Eq, x, y);
+    let zf_on = b.konst::<W32>(0x40);
+    let zf_off = b.konst::<W32>(0);
+    let zf_bit = b.select::<W32>(eq, zf_on, zf_off);
+    let e1 = b.or::<W32>(cleared_zf, zf_bit);
+    b.set(eflags_ref(), e1);
+    let flags2: B::V<W32> = b.get(eflags_ref());
+    let cf_mask = b.konst::<W32>(0xffff_fffe);
+    let cleared_cf = b.and::<W32>(flags2, cf_mask);
+    let lt = b.cmp::<W32>(Cmp::LtU, x, y);
+    let cf_on = b.konst::<W32>(1);
+    let cf_off = b.konst::<W32>(0);
+    let cf_bit = b.select::<W32>(lt, cf_on, cf_off);
+    let e2 = b.or::<W32>(cleared_cf, cf_bit);
+    b.set(eflags_ref(), e2);
+}
+
+/// ZF を読む。
+fn read_zf<B: Backend>(b: &mut B) -> B::B {
+    let flags: B::V<W32> = b.get(eflags_ref());
+    let mask = b.konst::<W32>(0x40);
+    let masked = b.and::<W32>(flags, mask);
+    let zero = b.konst::<W32>(0);
+    b.cmp::<W32>(Cmp::Ne, masked, zero)
+}
+
+/// CMP EAX, imm32。EAX は変えず ZF/CF だけ更新する。
+pub fn cmp_eax<B: Backend>(b: &mut B, imm: u32) -> Flow<B> {
+    let x = read(b, Gpr(0));
+    let y = b.konst::<W32>(imm);
+    update_zf_cf(b, x, y);
+    Ok(())
+}
+
+/// TEST EAX, EAX。AND 結果で ZF/CF を更新する（CF=0）。
+/// EAX 自身は変えない。
+pub fn test_eax<B: Backend>(b: &mut B) -> Flow<B> {
+    let x = read(b, Gpr(0));
+    let v = b.and::<W32>(x, x);
+    let zero = b.konst::<W32>(0);
+    update_zf_cf(b, v, zero);
+    Ok(())
+}
+
+/// JE rel8。ZF=1 なら eip+2+disp に飛ぶ。
+pub fn je<B: Backend>(b: &mut B, eip: u32, disp: i8) -> Flow<B> {
+    let zf = read_zf(b);
+    let target = eip.wrapping_add(2).wrapping_add(disp as i32 as u32);
+    let t = b.konst::<W32>(target);
+    b.if_then(zf, |b| {
+        b.set(eip_ref(), t);
+        Ok(())
+    })?;
+    Ok(())
+}
+
+/// JNE rel8。ZF=0 なら eip+2+disp に飛ぶ。
+/// if_then は肯定分岐のみのため、ZF の否定は select で作る。
+pub fn jne<B: Backend>(b: &mut B, eip: u32, disp: i8) -> Flow<B> {
+    let zf = read_zf(b);
+    let target = eip.wrapping_add(2).wrapping_add(disp as i32 as u32);
+    let t = b.konst::<W32>(target);
+    let zero = b.konst::<W32>(0);
+    let one = b.konst::<W32>(1);
+    let zf_num = b.select::<W32>(zf, one, zero);
+    let take = b.cmp::<W32>(Cmp::Eq, zf_num, zero);
+    b.if_then(take, |b| {
+        b.set(eip_ref(), t);
+        Ok(())
+    })?;
+    Ok(())
+}
+
 fn read<B: Backend>(b: &mut B, r: Gpr) -> B::V<W32> {
     b.get(r.state())
 }
