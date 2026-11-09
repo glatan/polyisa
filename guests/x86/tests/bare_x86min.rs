@@ -3771,3 +3771,134 @@ fn add_m64_r64_mem32_basic() {
         .unwrap();
     assert_eq!(u64::from_le_bytes(back), 0x30);
 }
+
+#[test]
+fn mov_r8_m8_memnd_basic() {
+    // MOV CL,[RSI] (8A mod=00): [0x1500]=0x77 -> CL=0x77.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend.set(Gpr(6).state(), 0x1500);
+    env.backend.mem.write(VirtAddr(0x1500), &[0x77u8]).unwrap();
+    env.step(|b| sem::mov_r8_m8_memnd(b, Gpr(1), false, Gpr(6)))
+        .unwrap();
+    assert_eq!(env.backend.get(Gpr(1).state()) & 0xFF, 0x77);
+}
+
+#[test]
+fn movzx_r32_m16_sibd_basic() {
+    // MOVZX ESI,[RSI+RDX-2] (0F B7 SIB mod=01): [0x15FE]=0x1234 -> ESI=0x1234.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend.set(Gpr(6).state(), 0x1500);
+    env.step(|b| {
+        sem::write64(b, Gpr(2), 0x100);
+        Ok(())
+    })
+    .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x15FE), &[0x34u8, 0x12])
+        .unwrap();
+    env.step(|b| sem::movzx_r32_m16_sibd(b, Gpr(6), Gpr(6), Gpr(2), 0, -2))
+        .unwrap();
+    assert_eq!(env.backend.get(Gpr(6).state()) & 0xFFFF, 0x1234);
+}
+
+#[test]
+fn mov_m16_r16_sibd_basic() {
+    // MOV [RSI+RDX-2],SI (66 89 SIB mod=01): [0x15FE]=0x1234.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend.set(Gpr(6).state(), 0x1500);
+    env.step(|b| {
+        sem::write64(b, Gpr(2), 0x100);
+        Ok(())
+    })
+    .unwrap();
+    env.backend.set(Gpr(6).state(), 0x1234);
+    // Note: Gpr(6) is both base and dst in this test? Use RDI as base to avoid clash.
+    env.backend.set(Gpr(7).state(), 0x1500);
+    env.step(|b| {
+        sem::write64(b, Gpr(6), 0x1234);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::mov_m16_r16_sibd(b, Gpr(6), Gpr(7), Gpr(2), 0, -2))
+        .unwrap();
+    let mut back = [0u8; 2];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x15FE),
+            &mut back,
+            Access {
+                endian: Endian::Le,
+                align: Align::Unaligned,
+                kind: AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(u16::from_le_bytes(back), 0x1234);
+}
+
+#[test]
+fn mov_rm8_imm_memnd_basic() {
+    // MOVB [RAX],0 (C6 /0 mod=00): [0x1500]=0xFF -> 0x00.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend.set(Gpr(0).state(), 0x1500);
+    env.backend.mem.write(VirtAddr(0x1500), &[0xFFu8]).unwrap();
+    env.step(|b| sem::mov_rm8_imm_memnd(b, Gpr(0), 0)).unwrap();
+    let mut back = [0u8; 1];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x1500),
+            &mut back,
+            Access {
+                endian: Endian::Le,
+                align: Align::Unaligned,
+                kind: AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(back, [0x00u8]);
+}
+
+#[test]
+fn xchg_r64_rip_basic() {
+    // XCHG RDI,[RIP+disp]: RDI=0x11, [0x1500]=0x22 -> swap.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.step(|b| {
+        sem::write64(b, Gpr(7), 0x11);
+        Ok(())
+    })
+    .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1500), &[0x22u8, 0, 0, 0, 0, 0, 0, 0])
+        .unwrap();
+    env.step(|b| sem::xchg_r64_rip(b, Gpr(7), 0x1007, 0x4F9))
+        .unwrap();
+    env.step(|b| {
+        let v = sem::read64(b, Gpr(7));
+        assert_eq!(v, 0x22);
+        Ok(())
+    })
+    .unwrap();
+    let mut back = [0u8; 8];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x1500),
+            &mut back,
+            Access {
+                endian: Endian::Le,
+                align: Align::Unaligned,
+                kind: AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(u64::from_le_bytes(back), 0x11);
+}
