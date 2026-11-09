@@ -337,6 +337,38 @@ fn run_lea_scaled() {
 }
 
 #[test]
+fn run_gas_absorbed_cell() {
+    // 実アセンブラ由来のバイト列をそのまま埋め込んだ統合テスト。
+    // 由来：Binutils GAS (as --32) + ld -m elf_i386 でリンクした静的 i386 バイナリの
+    // .text（leal cell,%ebx / movl $0x77,%eax / mov %eax,(%ebx) / mov (%ebx),%eax /
+    // mov %eax,%ebx / movl $1,%eax / int $0x80）。cell = 0x804b028。
+    // gas は disp8=0 を mod=00（89 03 / 8B 03）に畳む。dst=EBX の LEA を含む。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend
+        .mem
+        .map(VirtAddr(0x804b000), 1, Perms::RW)
+        .unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    let prog: &[u8] = &[
+        0x8D, 0x1D, 0x28, 0xB0, 0x04, 0x08, // lea ebx,[0x804b028]
+        0xB8, 0x77, 0x00, 0x00, 0x00, // mov eax,0x77
+        0x89, 0x03, // mov [ebx],eax
+        0xB8, 0x00, 0x00, 0x00, 0x00, // mov eax,0
+        0x8B, 0x03, // mov eax,[ebx]
+        0x89, 0xC3, // mov ebx,eax
+        0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax,1
+        0xCD, 0x80, // int 0x80 -> exit(0x77)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = ExitOne;
+    let out = run_x86::run(&mut env, 0x1000, &mut sys, 100);
+    assert_eq!(out, Outcome::Exit(0x77));
+}
+
+#[test]
 fn run_sib_disp32() {
     // SIB+disp32（7バイト）を run 経由で回し、exit コードで検証する。
     // mov eax,0x1500; push eax; pop ebx (ebx=0x1500);

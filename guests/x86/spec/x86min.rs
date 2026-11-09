@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // x86 最小の ISADL モデル（段階4の最小）。
 //
-// i386 の整数120件に絞る。可変長（8/16/24/32/40/48/56ビット）のデコード入口と
+// i386 の整数122件に絞る。可変長（8/16/24/32/40/48/56ビット）のデコード入口と
 // ModRM register-direct の全レジスタ組合せを確かめる。
 // ModRM の disp32・絶対番地は EBX 基底と直接番地のみ持つ。SIB base は EBX または
 // 直接番地のみ持つ。Rust フック・遅延フラグ・x87・SSE・64ビット・セグメントは本格実装で足す。
@@ -81,6 +81,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("mov_rm32", "F1", "10001011 11......", "mov r32, r/m32", "alu"),
         ("mov_eax_mem", "F1", "10001011 01000011 ........", "mov eax, [ebx+disp8]", "load"),
         ("mov_mem_eax", "F1", "10001001 01000011 ........", "mov [ebx+disp8], eax", "store"),
+        ("mov_eax_memnd", "F1", "10001011 00000011", "mov eax, [ebx]", "load"),
+        ("mov_memnd_eax", "F1", "10001001 00000011", "mov [ebx], eax", "store"),
         ("mov_eax_memd32", "F1", "10001011 10000011 ................................", "mov eax, [ebx+disp32]", "load"),
         ("mov_memd32_eax", "F1", "10001001 10000011 ................................", "mov [ebx+disp32], eax", "store"),
         ("mov_eax_abs", "F1", "10001011 00000101 ................................", "mov eax, [disp32]", "load"),

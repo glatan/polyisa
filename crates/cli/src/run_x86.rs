@@ -308,6 +308,8 @@ fn dispatch<B: Backend>(
         Insn::MovRm32 => sem::mov_rm32(b, reg(), rm()),
         Insn::MovEaxMem => sem::mov_eax_mem(b, disp8()),
         Insn::MovMemEax => sem::mov_mem_eax(b, disp8()),
+        Insn::MovEaxMemnd => sem::mov_eax_memnd(b),
+        Insn::MovMemndEax => sem::mov_memnd_eax(b),
         Insn::MovEaxMemd32 => sem::mov_eax_memd32(b, disp32()),
         Insn::MovMemd32Eax => sem::mov_memd32_eax(b, disp32()),
         Insn::MovEaxAbs => sem::mov_eax_abs(b, imm32()),

@@ -179,6 +179,19 @@ fn mem_load_store_disp8() {
 }
 
 #[test]
+fn mem_load_store_no_disp() {
+    // mod=00 [EBX]：disp なしの最小形。
+    let mut env = env();
+    env.map_rw(0, 1).unwrap();
+    env.backend.set(Gpr(3).state(), 0x100);
+    env.backend.set(Gpr(0).state(), 0xDEAD_BEEF);
+    env.step(sem::mov_memnd_eax).unwrap();
+    env.backend.set(Gpr(0).state(), 0);
+    env.step(sem::mov_eax_memnd).unwrap();
+    assert_eq!(eax(&mut env), 0xDEAD_BEEF);
+}
+
+#[test]
 fn mem_load_store_disp32() {
     let mut env = env();
     env.map_rw(0, 1).unwrap();

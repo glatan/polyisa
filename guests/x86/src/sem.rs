@@ -615,6 +615,25 @@ pub fn mov_mem_eax<B: Backend>(b: &mut B, disp: i8) -> Flow<B> {
     Ok(())
 }
 
+/// MOV EAX, [EBX] (ModRM mod=00 rm=011 の最小形)。
+/// gas は disp8=0 を mod=00 に畳むため実バイナリで頻出する。
+pub fn mov_eax_memnd<B: Backend>(b: &mut B) -> Flow<B> {
+    let addr32 = read(b, Gpr(3));
+    let addr = b.zext::<W32, W64>(addr32);
+    let v: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    write(b, Gpr(0), v);
+    Ok(())
+}
+
+/// MOV [EBX], EAX (ModRM mod=00 rm=011 の最小形)。
+pub fn mov_memnd_eax<B: Backend>(b: &mut B) -> Flow<B> {
+    let addr32 = read(b, Gpr(3));
+    let addr = b.zext::<W32, W64>(addr32);
+    let v: B::V<W32> = read(b, Gpr(0));
+    b.store::<W32>(addr, v, DATA_WRITE)?;
+    Ok(())
+}
+
 /// ベース + disp32 の実効アドレスを求める（disp32 は符号付き）。
 fn eff_addr32<B: Backend>(b: &mut B, base: Gpr, disp: i32) -> B::V<W32> {
     let r = read(b, base);
