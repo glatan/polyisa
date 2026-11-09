@@ -107,13 +107,9 @@ const DATA_WRITE: Access = Access {
 
 /// ベース + disp8 の実効アドレスを求める（disp8 は符号付き）。
 fn eff_addr<B: Backend>(b: &mut B, base: Gpr, disp: i8) -> B::V<W32> {
-    let r = read32(b, base);
+    let r = read(b, base);
     let d = b.konst::<W32>(disp as i32 as u32);
     b.add::<W32>(r, d)
-}
-
-fn read32<B: Backend>(b: &mut B, r: Gpr) -> B::V<W32> {
-    b.get(r.state())
 }
 
 /// MOV EAX, [EBX+disp8] (ModRM mod=01 の最小形)。
@@ -130,7 +126,7 @@ pub fn mov_eax_mem<B: Backend>(b: &mut B, disp: i8) -> Flow<B> {
 pub fn mov_mem_eax<B: Backend>(b: &mut B, disp: i8) -> Flow<B> {
     let addr32 = eff_addr(b, Gpr(3), disp);
     let addr = b.zext::<W32, W64>(addr32);
-    let v: B::V<W32> = read32(b, Gpr(0));
+    let v: B::V<W32> = read(b, Gpr(0));
     b.store::<W32>(addr, v, DATA_WRITE)?;
     Ok(())
 }
@@ -173,6 +169,63 @@ pub fn cpuid<B: Backend>(b: &mut B) -> Flow<B> {
     let new_edx = b.select::<W32>(is_zero, edx_v, zero);
     write(b, Gpr(2), new_edx);
     Ok(())
+}
+
+/// PUSH r32。ESP を 4 減じてから積む（x86 は下向きスタック）。
+/// PUSH ESP は減算前の値を積むため、先に値を読む。
+pub fn push_reg<B: Backend>(b: &mut B, rs: Gpr) -> Flow<B> {
+    let v: B::V<W32> = read(b, rs);
+    let esp = read(b, Gpr(4));
+    let four = b.konst::<W32>(4);
+    let next = b.sub::<W32>(esp, four);
+    b.set(esp_ref(), next);
+    let addr = b.zext::<W32, W64>(next);
+    b.store::<W32>(addr, v, DATA_WRITE)?;
+    Ok(())
+}
+
+/// POP r32。読んでから ESP を 4 進める。
+pub fn pop_reg<B: Backend>(b: &mut B, rd: Gpr) -> Flow<B> {
+    let esp = read(b, Gpr(4));
+    let addr = b.zext::<W32, W64>(esp);
+    let v: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    write(b, rd, v);
+    let four = b.konst::<W32>(4);
+    let next = b.add::<W32>(esp, four);
+    b.set(esp_ref(), next);
+    Ok(())
+}
+
+/// CALL rel32。戻り（eip+5）を積み、eip+5+disp に飛ぶ。
+pub fn call_rel32<B: Backend>(b: &mut B, eip: u32, disp: i32) -> Flow<B> {
+    let ret_addr = eip.wrapping_add(5);
+    let esp = read(b, Gpr(4));
+    let four = b.konst::<W32>(4);
+    let next = b.sub::<W32>(esp, four);
+    b.set(esp_ref(), next);
+    let addr = b.zext::<W32, W64>(next);
+    let ret = b.konst::<W32>(ret_addr);
+    b.store::<W32>(addr, ret, DATA_WRITE)?;
+    let target = ret_addr.wrapping_add(disp as u32);
+    let t = b.konst::<W32>(target);
+    b.set(eip_ref(), t);
+    Ok(())
+}
+
+/// RET。スタック先頭を eip に戻す。
+pub fn ret<B: Backend>(b: &mut B) -> Flow<B> {
+    let esp = read(b, Gpr(4));
+    let addr = b.zext::<W32, W64>(esp);
+    let v: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    b.set(eip_ref(), v);
+    let four = b.konst::<W32>(4);
+    let next = b.add::<W32>(esp, four);
+    b.set(esp_ref(), next);
+    Ok(())
+}
+
+pub fn esp_ref() -> StateRef<W32> {
+    Gpr(4).state()
 }
 
 /// JMP rel8。eip からの相対（呼び出し側が eip+2 基準の完成形を渡す）。

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // x86 最小の ISADL モデル（段階4の最小）。
 //
-// i386 の整数12件に絞る。可変長（8/16/24/40ビット）のデコード入口と
+// i386 の整数18件に絞る。可変長（8/16/24/40ビット）のデコード入口と
 // ModRM register-direct の最小形を確かめる。
 // ModRM の SIB・絶対番地・スケール形式と Rust フック・遅延フラグ・x87・SSE・
 // 64ビット・セグメントは本格実装で足す。
@@ -64,6 +64,12 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("mov_rm32", "F1", "10001011 11000001", "mov eax, ecx", "alu"),
         ("mov_eax_mem", "F1", "10001011 01000011 ........", "mov eax, [ebx+disp8]", "load"),
         ("mov_mem_eax", "F1", "10001001 01000011 ........", "mov [ebx+disp8], eax", "store"),
+        ("push_eax", "F1", "01010000", "push eax", "store"),
+        ("pop_eax", "F1", "01011000", "pop eax", "load"),
+        ("push_ebp", "F1", "01010101", "push ebp", "store"),
+        ("pop_ebp", "F1", "01011101", "pop ebp", "load"),
+        ("call_rel32", "F1", "11101000 ................................", "call {imm}", "jump"),
+        ("ret", "F1", "11000011", "ret", "jump"),
         ("mov_eax", "F1", "10111000 ................................", "mov eax, {imm}", "alu"),
         ("syscall", "F1", "00001111 00000101", "syscall", "system"),
         ("cpuid", "F1", "00001111 10100010", "cpuid", "system"),

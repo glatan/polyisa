@@ -115,6 +115,36 @@ fn mem_load_store_disp8() {
 }
 
 #[test]
+fn push_pop_roundtrip() {
+    let mut env = env();
+    env.map_rw(0, 1).unwrap();
+    // ESP=0x200 から PUSH EAX (7)。ESP=0x1fc、[0x1fc]=7。
+    env.backend.set(Gpr(4).state(), 0x200);
+    env.backend.set(Gpr(0).state(), 7);
+    env.step(|b| sem::push_reg(b, Gpr(0))).unwrap();
+    assert_eq!(env.backend.get(Gpr(4).state()), 0x1fc);
+    env.backend.set(Gpr(0).state(), 0);
+    env.step(|b| sem::pop_reg(b, Gpr(0))).unwrap();
+    assert_eq!(eax(&mut env), 7);
+    assert_eq!(env.backend.get(Gpr(4).state()), 0x200);
+}
+
+#[test]
+fn call_ret_roundtrip() {
+    let mut env = env();
+    env.map_rw(0, 1).unwrap();
+    // CALL rel32: eip=0x1000、disp=0x20 → 戻り 0x1005 を積み、eip=0x1025。
+    env.backend.set(Gpr(4).state(), 0x200);
+    env.step(|b| sem::call_rel32(b, 0x1000, 0x20)).unwrap();
+    assert_eq!(env.backend.get(sem::eip_ref()), 0x1025);
+    assert_eq!(env.backend.get(Gpr(4).state()), 0x1fc);
+    // RET：eip=0x1005 に戻り、ESP=0x200 に戻る。
+    env.step(sem::ret).unwrap();
+    assert_eq!(env.backend.get(sem::eip_ref()), 0x1005);
+    assert_eq!(env.backend.get(Gpr(4).state()), 0x200);
+}
+
+#[test]
 fn jmp_sets_eip() {
     let mut env = env();
     env.backend.set(sem::eip_ref(), 0x1000);
