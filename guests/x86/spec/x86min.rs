@@ -252,6 +252,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("movsxd_memnd", "MR", "01100011 00......", "movsxd r, m32", "load"),
         ("movsxd_mem8", "M8", "01100011 01...... ........", "movsxd r, m32", "load"),
         ("movsxd_mem32", "M32", "01100011 10...... ................................", "movsxd r, m32", "load"),
+        // MOVSXD r, m32 RIP (63 05 + disp32)。REX.W で64bit符号拡張.
+        ("movsxd_rip", "F1", "01100011 00...101 ................................", "movsxd r, m32", "load"),
         ("movsb", "F1", "10100100", "movsb", "load"),
         ("movsd", "F1", "10100101", "movsd", "load"),
         ("stosb", "F1", "10101010", "stosb", "store"),

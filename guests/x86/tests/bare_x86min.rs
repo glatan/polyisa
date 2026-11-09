@@ -4814,3 +4814,22 @@ fn or_m32_r32_memnd_basic() {
     // ZF=0 (結果非ゼロ).
     assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0);
 }
+
+#[test]
+fn movsxd_rm64_rip_sign_extends() {
+    // MOVSXD RAX,[RIP+disp] (REX.W 63 /r RIP): [0x1500]=0xFFFF_FFFE (-2) -> RAX=FFFF_FFFF_FFFF_FFFE.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1500), &0xFFFF_FFFEu32.to_le_bytes())
+        .unwrap();
+    env.step(|b| sem::movsxd_rm64_rip(b, Gpr(0), 0x1006, 0x4FA))
+        .unwrap();
+    env.step(|b| {
+        let v = sem::read64(b, Gpr(0));
+        assert_eq!(v, 0xFFFF_FFFF_FFFF_FFFE);
+        Ok(())
+    })
+    .unwrap();
+}

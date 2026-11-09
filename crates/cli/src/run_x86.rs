@@ -3421,6 +3421,18 @@ fn dispatch<B: Backend>(
                 sem::movsxd_rm32_mem32(b, reg(), rm(), disp32())
             }
         }
+        Insn::MovsxdRip => {
+            // 63 05 + disp32 (mod=00 RIP)。REX.W で64bit符号拡張.
+            if is64 {
+                if rex_w {
+                    sem::movsxd_rm64_rip(b, reg(), eip as u64 + nbytes, disp32())
+                } else {
+                    sem::movsxd_rm32_rip(b, reg(), eip as u64 + nbytes, disp32())
+                }
+            } else {
+                sem::movsxd_rm32_abs(b, reg(), imm32())
+            }
+        }
         Insn::MovsxdSib => {
             if no_index() {
                 if rex_w {
@@ -4723,6 +4735,7 @@ fn dispatch<B: Backend>(
             | Insn::MovsxdMemnd
             | Insn::MovsxdMem8
             | Insn::MovsxdMem32
+            | Insn::MovsxdRip
             | Insn::MovsxdSib
             | Insn::MovsxdSibd
             | Insn::MovsxdSibd32
@@ -4845,6 +4858,7 @@ fn dispatch<B: Backend>(
                         | Insn::MovsxdMemnd
                         | Insn::MovsxdMem8
                         | Insn::MovsxdMem32
+                        | Insn::MovsxdRip
                         | Insn::MovsxdSib
                         | Insn::MovsxdSibd
                         | Insn::MovsxdSibd32

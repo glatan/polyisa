@@ -10101,3 +10101,32 @@ pub fn or_m64_r64_mem32<B: Backend>(b: &mut B, base: Gpr, disp: i32, src: Gpr) -
     update_logic_flags(b, v);
     Ok(())
 }
+
+/// MOVSXD r32, m32 [RIP+disp32] (63 /r RIP)。32ビット転送と等価.
+pub fn movsxd_rm32_rip<B: Backend>(b: &mut B, dst: Gpr, next_rip: u64, disp: i32) -> Flow<B> {
+    let base = b.konst::<W64>(next_rip);
+    let d = b.konst::<W64>(disp as i64 as u64);
+    let addr = b.add::<W64>(base, d);
+    let v: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    write(b, dst, v);
+    Ok(())
+}
+
+/// MOVSXD r64, m32 [RIP+disp32] (REX.W + 63 /r RIP)。符号拡張する.
+pub fn movsxd_rm64_rip<B: Backend>(b: &mut B, dst: Gpr, next_rip: u64, disp: i32) -> Flow<B> {
+    let base = b.konst::<W64>(next_rip);
+    let d = b.konst::<W64>(disp as i64 as u64);
+    let addr = b.add::<W64>(base, d);
+    let v32: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let v = b.sext::<W32, W64>(v32);
+    write64(b, dst, v);
+    Ok(())
+}
+
+/// MOVSXD r32, m32 [disp32] abs (32ビット)。
+pub fn movsxd_rm32_abs<B: Backend>(b: &mut B, dst: Gpr, addr32: u32) -> Flow<B> {
+    let addr = b.konst::<W64>(addr32 as u64);
+    let v: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    write(b, dst, v);
+    Ok(())
+}
