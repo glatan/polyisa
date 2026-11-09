@@ -291,6 +291,24 @@ pub fn xor_imm<B: Backend>(b: &mut B, imm: u32) -> Flow<B> {
     Ok(())
 }
 
+/// SHL EAX, imm8。カウントは下位5ビットだけ使う。EFLAGS 更新は本格実装で足す。
+pub fn shl_eax<B: Backend>(b: &mut B, n: u8) -> Flow<B> {
+    let x = read(b, Gpr(0));
+    let count = b.konst::<W32>((n & 31) as u32);
+    let v = b.shl::<W32>(x, count);
+    write(b, Gpr(0), v);
+    Ok(())
+}
+
+/// SHR EAX, imm8。論理右シフト。カウントは下位5ビットだけ使う。EFLAGS 更新は本格実装で足す。
+pub fn shr_eax<B: Backend>(b: &mut B, n: u8) -> Flow<B> {
+    let x = read(b, Gpr(0));
+    let count = b.konst::<W32>((n & 31) as u32);
+    let v = b.shr_l::<W32>(x, count);
+    write(b, Gpr(0), v);
+    Ok(())
+}
+
 /// MOV EAX, imm32。
 pub fn mov_eax<B: Backend>(b: &mut B, imm: u32) -> Flow<B> {
     let v = b.konst::<W32>(imm);
