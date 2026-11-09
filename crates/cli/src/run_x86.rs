@@ -300,7 +300,7 @@ fn fetch_len(
             }
         }
         // 80 /r ib (ADD/OR/ADC/SBB/AND/SUB/XOR/CMP r/m8,imm8)。
-        // reg-direct: /4 AND と /7 CMP のみ 3B。SIB+disp8: /7 CMP のみ 5B.
+        // reg-direct: /4 AND と /7 CMP のみ 3B。mod=01: /7 CMP のみ 4B (SIB付きは 5B).
         0x80 => {
             let s = second?;
             let md = s >> 6;
@@ -311,6 +311,8 @@ fn fetch_len(
             } else if rm == 4 {
                 // SIB 付き。mod=01 SIB+disp8+imm8 (5B) の /7 CMP のみ.
                 if md == 1 && reg == 7 { Some(5) } else { None }
+            } else if md == 1 && reg == 7 {
+                Some(4)
             } else {
                 None
             }
@@ -1151,6 +1153,12 @@ fn dispatch<B: Backend>(
             } else {
                 sem::cmp_rm8_imm_sibd(b, base, idx, shift, d8, imm)
             }
+        }
+        Insn::CmpRm8ImmMem8 => {
+            // 80 /7 mod=01 [base+disp8],imm8 (32b)。disp は (word>>8) 下位8、imm は最下位8.
+            let d8 = ((word >> 8) & 0xff) as u8 as i8;
+            let imm = (word & 0xff) as u8;
+            sem::cmp_rm8_imm_mem8(b, rm(), d8, imm)
         }
         Insn::TestM8ImmRip => {
             let disp = ((word >> 8) as u32).swap_bytes() as i32;

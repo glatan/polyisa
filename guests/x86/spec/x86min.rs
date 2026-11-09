@@ -552,6 +552,14 @@ pub fn build_model() -> polyisa_isadl::Model {
             "alu",
         ),
         (
+            "cmp_rm8_imm_mem8",
+            "S8",
+            "10000000 01111... ........ ........",
+            vec![wc("s8_rm", WhereOp::Ne, 4)],
+            "cmp r/m8, {imm}",
+            "alu",
+        ),
+        (
             "cmp_rm_imm8_memnd",
             "M8",
             "10000011 00111... ........",

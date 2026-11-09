@@ -2178,3 +2178,19 @@ fn cmovae_rm64_mem32_taken() {
         .unwrap();
     assert_eq!(env.backend.get(Gpr(13).state()), 0x5566_7788);
 }
+
+#[test]
+fn cmp_rm8_imm_mem8_sets_flags() {
+    // CMPB $0,0x69(%RDI) (mod=01): [0x169]=0 -> ZF=1; [0x169]=1 -> ZF=0.
+    let mut env = env();
+    env.map_rw(0, 1).unwrap();
+    env.backend.set(Gpr(7).state(), 0x100);
+    env.backend.mem.write(VirtAddr(0x169), &[0u8]).unwrap();
+    env.step(|b| sem::cmp_rm8_imm_mem8(b, Gpr(7), 0x69, 0))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0x40);
+    env.backend.mem.write(VirtAddr(0x169), &[1u8]).unwrap();
+    env.step(|b| sem::cmp_rm8_imm_mem8(b, Gpr(7), 0x69, 0))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0);
+}

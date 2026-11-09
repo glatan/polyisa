@@ -762,3 +762,32 @@ fn run_lea_rex_x_sib() {
     // exit code is low 8? Actually exit code is u32 (rdi low 32). rdi=0x1020, exit=0x1020=4128? But exit code is & 0xFF? Linux exit code is low 8 bits. Our X64Exit returns rdi as u32 directly (not masked). So expect 0x1020.
     assert_eq!(out, Outcome::Exit(0x1020));
 }
+
+#[test]
+fn run_cmpb_mem8_disp8() {
+    // run 経由で 80 /7 mod=01 [base+disp8],imm8 を回す。
+    // edi=0x1500、[0x1569]=0 として CMPB $0,0x69(%rdi) で ZF=1、
+    // je taken で exit(0x77) になる。fetch 長 4B の検証も兼ねる。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    env.backend.mem.write(VirtAddr(0x1569), &[0u8]).unwrap();
+    let prog: &[u8] = &[
+        0xB8, 0x00, 0x15, 0x00, 0x00, // mov eax,0x1500
+        0x50, // push eax
+        0x5F, // pop edi (edi=0x1500)
+        0x80, 0x7F, 0x69, 0x00, // cmpb $0,0x69(%rdi)
+        0x74, 0x07, // je +7
+        0xBB, 0x01, 0x00, 0x00, 0x00, // mov ebx,1
+        0xEB, 0x05, // jmp +5
+        0xBB, 0x77, 0x00, 0x00, 0x00, // mov ebx,0x77
+        0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax,1 (exit)
+        0xCD, 0x80, // int 0x80 -> exit(0x77)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = ExitOne;
+    let out = run_x86::run(&mut env, 0x1000, &mut sys, 100);
+    assert_eq!(out, Outcome::Exit(0x77));
+}
