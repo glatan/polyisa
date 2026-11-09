@@ -485,6 +485,20 @@ fn unsigned_branches() {
 }
 
 #[test]
+fn sib_base_index_roundtrip() {
+    let mut env = env();
+    env.map_rw(0, 1).unwrap();
+    // EBX=0x100、ESI=0x20。[0x120] に EAX を書いて読む。
+    env.backend.set(Gpr(3).state(), 0x100);
+    env.backend.set(Gpr(6).state(), 0x20);
+    env.backend.set(Gpr(0).state(), 0xDEAD_BEEF);
+    env.step(sem::mov_sib_eax).unwrap();
+    env.backend.set(Gpr(0).state(), 0);
+    env.step(sem::mov_eax_sib).unwrap();
+    assert_eq!(eax(&mut env), 0xDEAD_BEEF);
+}
+
+#[test]
 fn jmp_sets_eip() {
     let mut env = env();
     env.backend.set(sem::eip_ref(), 0x1000);

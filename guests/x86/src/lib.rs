@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! x86 最小のゲスト ISA。段階4の最小であり、可変長デコードを確かめる。
 //!
-//! i386 の汎用レジスタ系68件のみ持つ。ModRM の SIB/disp32/メモリ形式と Rust フック・
+//! i386 の汎用レジスタ系70件のみ持つ。ModRM の SIB 拡張・disp32・絶対番地と Rust フック・
 //! EFLAGS(SF/OF/PF/AF)・64ビット・x87・SSE・セグメントは本格実装で足す。
-//! SYSCALL/CPUID は最小形、ModRM は register-direct と mod=01+disp8 のみ持つ。
+//! SYSCALL/CPUID は最小形、ModRM は register-direct・mod=01+disp8・SIB base+index 最小形のみ持つ。
 
 #![forbid(unsafe_code)]
 
@@ -54,8 +54,8 @@ mod tests {
 
     #[test]
     fn insn_count() {
-        // 試作の整数68件。
-        assert_eq!(INSNS.len(), 68);
+        // 試作の整数70件。
+        assert_eq!(INSNS.len(), 70);
     }
 
     #[test]
@@ -167,6 +167,10 @@ mod tests {
         // mod=10 (disp32) や別レジスタの組み合わせは未対応。
         assert_eq!(decode(0x008D_8310, 24), None);
         assert_eq!(decode(0x397C, 16), None);
+        // SIB base+index 最小形：MOV EAX,[EBX+ESI] (8B 04 33) と MOV [EBX+ESI],EAX (89 04 33)。
+        assert_eq!(decode(0x008B_0433, 24), Some(Insn::MovEaxSib));
+        assert_eq!(decode(0x0089_0433, 24), Some(Insn::MovSibEax));
+        assert_eq!(decode(0x008B_0434, 24), None);
         // ModRM mod=01 + disp8：MOV EAX,[EBX+disp8] (8B 43 ..) と MOV [EBX+disp8],EAX (89 43 ..)。
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x008B_4310, 24), Some(Insn::MovEaxMem));

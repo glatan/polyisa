@@ -317,6 +317,30 @@ pub fn mov_eax_mem<B: Backend>(b: &mut B, disp: i8) -> Flow<B> {
     Ok(())
 }
 
+/// MOV EAX, [EBX+ESI] (SIB mod=00 base+index の最小形)。
+/// スケール・disp・絶対番地・SIB 拡張は本格実装で足す。
+pub fn mov_eax_sib<B: Backend>(b: &mut B) -> Flow<B> {
+    let base = read(b, Gpr(3));
+    let idx = read(b, Gpr(6));
+    let addr32 = b.add::<W32>(base, idx);
+    let addr = b.zext::<W32, W64>(addr32);
+    let v: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    write(b, Gpr(0), v);
+    Ok(())
+}
+
+/// MOV [EBX+ESI], EAX (SIB mod=00 base+index の最小形)。
+/// スケール・disp・絶対番地・SIB 拡張は本格実装で足す。
+pub fn mov_sib_eax<B: Backend>(b: &mut B) -> Flow<B> {
+    let base = read(b, Gpr(3));
+    let idx = read(b, Gpr(6));
+    let addr32 = b.add::<W32>(base, idx);
+    let addr = b.zext::<W32, W64>(addr32);
+    let v: B::V<W32> = read(b, Gpr(0));
+    b.store::<W32>(addr, v, DATA_WRITE)?;
+    Ok(())
+}
+
 /// MOV [EBX+disp8], EAX (ModRM mod=01 の最小形)。
 pub fn mov_mem_eax<B: Backend>(b: &mut B, disp: i8) -> Flow<B> {
     let addr32 = eff_addr(b, Gpr(3), disp);
