@@ -54,8 +54,8 @@ mod tests {
 
     #[test]
     fn insn_count() {
-        // 試作の整数22件。
-        assert_eq!(INSNS.len(), 22);
+        // 試作の整数24件。
+        assert_eq!(INSNS.len(), 24);
     }
 
     #[test]
@@ -96,6 +96,10 @@ mod tests {
         assert_eq!(decode(0x85C0, 16), Some(Insn::TestEax));
         assert_eq!(decode(0x7400, 16), Some(Insn::Je));
         assert_eq!(decode(0x75FE, 16), Some(Insn::Jne));
+        // ループと近傍ジャンプ：LOOP rel8 (E2)、JMP rel32 (E9)。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0xE2FE, 16), Some(Insn::Loop));
+        assert_eq!(decode(0xE9_0000_0010, 40), Some(Insn::JmpRel32));
         // ModRM mod=01 + disp8：MOV EAX,[EBX+disp8] (8B 43 ..) と MOV [EBX+disp8],EAX (89 43 ..)。
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x008B_4310, 24), Some(Insn::MovEaxMem));

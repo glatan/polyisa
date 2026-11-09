@@ -196,6 +196,35 @@ fn je_jne_branch_on_zf() {
 }
 
 #[test]
+fn loop_counts_down() {
+    let mut env = env();
+    // ECX=3 から LOOP -2 を回す：3→2→1→0 で抜ける。
+    env.backend.set(Gpr(1).state(), 3);
+    env.backend.set(sem::eip_ref(), 0x1000);
+    env.step(|b| sem::loop_rel8(b, 0x1000, -2)).unwrap();
+    assert_eq!(env.backend.get(Gpr(1).state()), 2);
+    env.step(|b| sem::loop_rel8(b, 0x1000, -2)).unwrap();
+    assert_eq!(env.backend.get(Gpr(1).state()), 1);
+    env.step(|b| sem::loop_rel8(b, 0x1000, -2)).unwrap();
+    assert_eq!(env.backend.get(Gpr(1).state()), 0);
+    assert_eq!(env.backend.get(sem::eip_ref()), 0x1000);
+    // taken：ECX=2、disp=+0x10 → eip=0x1012。
+    env.backend.set(Gpr(1).state(), 2);
+    env.backend.set(sem::eip_ref(), 0x1000);
+    env.step(|b| sem::loop_rel8(b, 0x1000, 0x10)).unwrap();
+    assert_eq!(env.backend.get(Gpr(1).state()), 1);
+    assert_eq!(env.backend.get(sem::eip_ref()), 0x1012);
+}
+
+#[test]
+fn jmp_rel32_jumps() {
+    let mut env = env();
+    env.backend.set(sem::eip_ref(), 0x1000);
+    env.step(|b| sem::jmp_rel32(b, 0x1000, 0x100)).unwrap();
+    assert_eq!(env.backend.get(sem::eip_ref()), 0x1105);
+}
+
+#[test]
 fn jmp_sets_eip() {
     let mut env = env();
     env.backend.set(sem::eip_ref(), 0x1000);
