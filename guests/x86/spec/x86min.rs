@@ -377,6 +377,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("or_r8_m8_sibd", "S8", "00001010 01...100 ........ ........", "or r8, m8", "load"),
         // OR r8,r/m8 reg-direct (0A /r mod=11)。
         ("or_r8_r8", "F1", "00001010 11......", "or r8, r/m8", "alu"),
+        // SHR r/m8,imm8 (C0 /5 mod=11)。REX なしの 4-7 は上位8ビット.
+        ("shr_rm8_imm8", "F1", "11000000 11101... ........", "shr r/m8, {imm}", "alu"),
         // XADD r32, m32 [RIP+disp32] (0F C1 mod=00 rm=101)。LOCK は無視.
         ("xadd_r32_rip", "F1", "00001111 11000001 00...101 ................................", "xadd r32, m32", "alu"),
         // SHLD r/m32,r32,CL (0F A5 /r mod=11)。REX.W で64ビット.

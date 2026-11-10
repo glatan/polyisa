@@ -2323,6 +2323,43 @@ pub fn shr_rm32_imm8<B: Backend>(b: &mut B, dst: Gpr, n: u8) -> Flow<B> {
     Ok(())
 }
 
+/// SHR r/m8,imm8 (C0 /5 mod=11)。論理右シフトし、CF/OF/SZP を更新する.
+pub fn shr_rm8_imm8<B: Backend>(b: &mut B, dst: Gpr, dst_high: bool, n: u8) -> Flow<B> {
+    use polyisa_sem::W8;
+    let x = read8(b, dst, dst_high);
+    let count = b.konst::<W8>(n & 7);
+    let v = b.shr_l::<W8>(x, count);
+    write8(b, dst, dst_high, v);
+    let old: B::V<W32> = b.get(eflags_ref());
+    let zero = b.konst::<W8>(0);
+    let active = b.cmp::<W8>(Cmp::Ne, count, zero);
+    let one = b.konst::<W8>(1);
+    let c1 = b.sub::<W8>(count, one);
+    let safe_c1 = b.select::<W8>(active, c1, zero);
+    let shifted = b.shr_l::<W8>(x, safe_c1);
+    let low = b.and::<W8>(shifted, one);
+    let cf_take = b.cmp::<W8>(Cmp::Ne, low, zero);
+    let cf = pick(b, cf_take, FLAG_CF);
+    let n7 = b.konst::<W8>(7);
+    let x_top = b.shr_l::<W8>(x, n7);
+    let x7 = b.and::<W8>(x_top, one);
+    let of_raw = b.cmp::<W8>(Cmp::Ne, x7, zero);
+    let of_new = pick(b, of_raw, FLAG_OF);
+    let of_mask = b.konst::<W32>(FLAG_OF);
+    let old_of = b.and::<W32>(old, of_mask);
+    let is_one = b.cmp::<W8>(Cmp::Eq, count, one);
+    let of = b.select::<W32>(is_one, of_new, old_of);
+    let szp = szp_bits(b, v);
+    let clear_mask = b.konst::<W32>(!FLAG_OSZPC);
+    let mut new_flags = b.and::<W32>(old, clear_mask);
+    new_flags = b.or::<W32>(new_flags, cf);
+    new_flags = b.or::<W32>(new_flags, of);
+    new_flags = b.or::<W32>(new_flags, szp);
+    let assembled = b.select::<W32>(active, new_flags, old);
+    b.set(eflags_ref(), assembled);
+    Ok(())
+}
+
 /// SHR r/m64,imm8 (REX.W)。論理右シフトし、CF/OF/SZP を更新する.
 pub fn shr_rm64_imm8<B: Backend>(b: &mut B, dst: Gpr, n: u8) -> Flow<B> {
     let x = read64(b, dst);

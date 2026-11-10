@@ -6179,6 +6179,18 @@ fn or_r8_r8_ors() {
 }
 
 #[test]
+fn shr_rm8_imm8_shifts() {
+    // SHR AL,5 (C0 E8 05): AL=0xFF -> AL=0x07、CF=1 (bit4)。
+    // head の停止点 0x4c9097 に対応.
+    let mut env = env();
+    env.backend.set(Gpr(0).state(), 0xFF);
+    env.step(|b| sem::shr_rm8_imm8(b, Gpr(0), false, 5))
+        .unwrap();
+    assert_eq!(env.backend.get(Gpr(0).state()) & 0xFF, 0x07);
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x1, 1);
+}
+
+#[test]
 fn test_rm16_sets_zf() {
     // TEST DX,DX (66 85 /r): DX=0 -> ZF=1. DX=1 -> ZF=0.
     let mut env = env();

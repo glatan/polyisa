@@ -634,6 +634,11 @@ fn fetch_len(
                 None
             }
         }
+        // 0xC0 /r ib (シフト r/m8,imm8)。reg-direct 3B のみ。SIB・メモリは未対応.
+        0xC0 => {
+            let s = second?;
+            if s >> 6 == 3 { Some(3) } else { None }
+        }
         // 0x84 /r (TEST r/m8,r8)。reg-direct 2B、mod=00 base 2B / abs 6B、
         // mod=01 base+disp8 3B、mod=10 base+disp32 6B。SIB は未対応で None.
         0x84 => {
@@ -1094,6 +1099,7 @@ pub fn run_mode(
                 | 0x84
                 | 0xD9
                 | 0x0A
+                | 0xC0
         ) {
             if env
                 .backend
@@ -3263,6 +3269,19 @@ fn dispatch<B: Backend>(
                 (Gpr(rm_f - 4), true)
             };
             sem::or_r8_r8(b, dst, dst_high, src, src_high)
+        }
+        Insn::ShrRm8Imm8 => {
+            // C0 /5 mod=11 reg-direct。dst は rm フィールド.
+            // REX なしの rm 4-7 は上位8ビット (AH/CH/DH/BH)。
+            let rm_f = modrm() & 7;
+            let (dst, high) = if rex != 0 {
+                (Gpr(rm_f | ((rex & 1) << 3)), false)
+            } else if rm_f < 4 {
+                (Gpr(rm_f), false)
+            } else {
+                (Gpr(rm_f - 4), true)
+            };
+            sem::shr_rm8_imm8(b, dst, high, word as u8)
         }
         Insn::AndRm8ImmMem32 => {
             // 80 /4 mod=10 [base+disp32],imm8 (56b)。disp は (word>>8) 下位32 LE、imm は最下位8.
