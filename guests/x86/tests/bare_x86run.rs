@@ -3703,6 +3703,48 @@ fn run_movapd_co_use() {
 }
 
 #[test]
+fn run_mulsd() {
+    // run 経由で F2 0F 59 C2 (MULSD xmm0,xmm2) を回す。seq の停止点 0x5adf8c に対応.
+    // xmm0 下位=2.0、xmm2=3.0 -> 下位=6.0 (0x4018000000000000)、上位は xmm0 のまま、exit(0)。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.step(|b| {
+        let a = b.konst::<polyisa_sem::W128>(0xFFFF_0000_0000_0000_4000_0000_0000_0000u128);
+        b.set(
+            polyisa_guest_x86::sem::xmm_ref(polyisa_guest_x86::sem::Xmm(0)),
+            a,
+        );
+        let c = b.konst::<polyisa_sem::W128>(0x4008_0000_0000_0000u128);
+        b.set(
+            polyisa_guest_x86::sem::xmm_ref(polyisa_guest_x86::sem::Xmm(2)),
+            c,
+        );
+        Ok(())
+    })
+    .unwrap();
+    let prog: &[u8] = &[
+        0xF2, 0x0F, 0x59, 0xC2, // mulsd xmm0,xmm2
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
+        0x0F, 0x05, // syscall -> exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0));
+    env.step(|b| {
+        let v: u128 = b.get(polyisa_guest_x86::sem::xmm_ref(
+            polyisa_guest_x86::sem::Xmm(0),
+        ));
+        assert_eq!(v, 0xFFFF_0000_0000_0000_4018_0000_0000_0000u128);
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
 fn run_andpd() {
     // run 経由で 66 0F 54 C1 (ANDPD xmm0,xmm1) を回す。
     // xmm0=0xFF..FF、xmm1=0x0F0F.. -> xmm0=0x0F0F.. になり、exit(0)。

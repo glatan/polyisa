@@ -320,11 +320,17 @@ fn fetch_len(
                     None
                 }
             } else if s == 0x59 {
-                // MULSD xmm,m64 RIP (F2 0F 59 05 + disp32、7B)。
+                // MULSD xmm,m64 RIP (F2 0F 59 05 + disp32、7B) と reg-direct (F2 0F 59 /r mod=11、4B)。
                 let m = third?;
                 let md = m >> 6;
                 let rm = m & 7;
-                if md == 0 && rm == 5 { Some(7) } else { None }
+                if md == 3 {
+                    Some(3)
+                } else if md == 0 && rm == 5 {
+                    Some(7)
+                } else {
+                    None
+                }
             } else if s == 0xC1 {
                 // XADD r32,m32 (0F C1 /r)。mod=00 [base] (3B) と RIP (7B)。SIBなし.
                 let m = third?;
@@ -4608,6 +4614,8 @@ fn dispatch<B: Backend>(
         Insn::Addsd => sem::addsd_xmm(b, xmm_reg(), xmm_rm()),
         // SUBSD xmm,xmm (F2 0F 5C /r reg-direct)。F2 は剥がし済み.
         Insn::Subsd => sem::subsd_xmm(b, xmm_reg(), xmm_rm()),
+        // MULSD xmm,xmm (F2 0F 59 /r reg-direct)。F2 は剥がし済み.
+        Insn::Mulsd => sem::mulsd_xmm(b, xmm_reg(), xmm_rm()),
         Insn::MulsdXmmM64Rip => {
             // F2 0F 59 05 + disp32 (mod=00 RIP)。F2 は剥がし済み.
             if is64 {

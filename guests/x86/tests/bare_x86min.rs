@@ -2061,6 +2061,25 @@ fn subsd_xmm_subs_low64() {
 }
 
 #[test]
+fn mulsd_xmm_multiplies_low64() {
+    use polyisa_guest_x86::sem::Xmm;
+    // MULSD xmm1,xmm0: 下位=2.0*3.0=6.0 (0x4018000000000000)、上位は xmm1 のまま.
+    // seq の停止点 0x5adf8c に対応.
+    let mut env = env();
+    env.step(|b| {
+        let a = b.konst::<polyisa_sem::W128>(0xFFFF_0000_0000_0000_4000_0000_0000_0000u128);
+        b.set(sem::xmm_ref(Xmm(1)), a);
+        let c = b.konst::<polyisa_sem::W128>(0x4008_0000_0000_0000u128);
+        b.set(sem::xmm_ref(Xmm(0)), c);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::mulsd_xmm(b, Xmm(1), Xmm(0))).unwrap();
+    let v: u128 = env.backend.get(sem::xmm_ref(Xmm(1)));
+    assert_eq!(v, 0xFFFF_0000_0000_0000_4018_0000_0000_0000u128);
+}
+
+#[test]
 fn movzx_r32_r16_zero_extends() {
     // MOVZX EAX,BX: EBX=0x1234ABCD -> EAX=0xABCD。
     let mut env = env();
