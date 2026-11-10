@@ -9706,6 +9706,68 @@ pub fn addsd_xmm<B: Backend>(b: &mut B, dst: Xmm, src: Xmm) -> Flow<B> {
     Ok(())
 }
 
+/// SUBSD xmm1, xmm2 (F2 0F 5C /r reg-direct)。下位64の倍精度減算。上位64は dst のまま.
+pub fn subsd_xmm<B: Backend>(b: &mut B, dst: Xmm, src: Xmm) -> Flow<B> {
+    use polyisa_sem::F64;
+    let a128: B::V<W128> = b.get(xmm_ref(dst));
+    let c128: B::V<W128> = b.get(xmm_ref(src));
+    let alo64: B::V<W64> = b.trunc::<W128, W64>(a128);
+    let clo64: B::V<W64> = b.trunc::<W128, W64>(c128);
+    let a: B::V<F64> = b.trunc::<W64, F64>(alo64);
+    let c: B::V<F64> = b.trunc::<W64, F64>(clo64);
+    let v = b.fsub(a, c);
+    let vlo64: B::V<W64> = b.trunc::<F64, W64>(v);
+    let lo = b.zext::<W64, W128>(vlo64);
+    let hi_shift = b.konst::<W128>(64);
+    let hi = b.shr_l::<W128>(a128, hi_shift);
+    let hi_back = b.shl::<W128>(hi, hi_shift);
+    let res = b.or::<W128>(hi_back, lo);
+    b.set(xmm_ref(dst), res);
+    Ok(())
+}
+
+/// MULSD xmm,m64 RIP (F2 0F 59)。[RIP+disp] の倍精度を下位64に掛ける。上位64は dst のまま.
+pub fn mulsd_xmm_m64_rip<B: Backend>(b: &mut B, dst: Xmm, next_rip: u64, disp: i32) -> Flow<B> {
+    use polyisa_sem::F64;
+    let base = b.konst::<W64>(next_rip);
+    let d = b.konst::<W64>(disp as i64 as u64);
+    let addr = b.add::<W64>(base, d);
+    let m64: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let m: B::V<F64> = b.trunc::<W64, F64>(m64);
+    let a128: B::V<W128> = b.get(xmm_ref(dst));
+    let alo64: B::V<W64> = b.trunc::<W128, W64>(a128);
+    let a: B::V<F64> = b.trunc::<W64, F64>(alo64);
+    let v = b.fmul(a, m);
+    let vlo64: B::V<W64> = b.trunc::<F64, W64>(v);
+    let lo = b.zext::<W64, W128>(vlo64);
+    let hi_shift = b.konst::<W128>(64);
+    let hi = b.shr_l::<W128>(a128, hi_shift);
+    let hi_back = b.shl::<W128>(hi, hi_shift);
+    let res = b.or::<W128>(hi_back, lo);
+    b.set(xmm_ref(dst), res);
+    Ok(())
+}
+
+/// MULSD xmm,[disp32] (32ビット絶対番地、倍精度ロード乗算).
+pub fn mulsd_xmm_m64_abs<B: Backend>(b: &mut B, dst: Xmm, addr32: u32) -> Flow<B> {
+    use polyisa_sem::F64;
+    let addr = b.konst::<W64>(addr32 as u64);
+    let m64: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let m: B::V<F64> = b.trunc::<W64, F64>(m64);
+    let a128: B::V<W128> = b.get(xmm_ref(dst));
+    let alo64: B::V<W64> = b.trunc::<W128, W64>(a128);
+    let a: B::V<F64> = b.trunc::<W64, F64>(alo64);
+    let v = b.fmul(a, m);
+    let vlo64: B::V<W64> = b.trunc::<F64, W64>(v);
+    let lo = b.zext::<W64, W128>(vlo64);
+    let hi_shift = b.konst::<W128>(64);
+    let hi = b.shr_l::<W128>(a128, hi_shift);
+    let hi_back = b.shl::<W128>(hi, hi_shift);
+    let res = b.or::<W128>(hi_back, lo);
+    b.set(xmm_ref(dst), res);
+    Ok(())
+}
+
 /// COMISD xmm1, xmm2 (66 0F 2F /r reg-direct)。下位64の倍精度を比較し ZF/PF/CF を立てる.
 /// OF/SF/AF は 0 にする。順序なし (NaN) では ZF=PF=CF=1。
 pub fn comisd_xmm<B: Backend>(b: &mut B, dst: Xmm, src: Xmm) -> Flow<B> {

@@ -1300,6 +1300,75 @@ fn run_cvttsd2si_r64() {
 }
 
 #[test]
+fn run_subsd_reg_direct() {
+    // run 経由で F2 0F 5C C8 (SUBSD xmm1,xmm0) を回す。
+    // xmm1=3.0、xmm0=1.0 で下位=2.0 になることを確かめる。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    env.backend
+        .mem
+        .write(VirtAddr(0x2008), &0x4008_0000_0000_0000u64.to_le_bytes())
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2010), &0x3FF0_0000_0000_0000u64.to_le_bytes())
+        .unwrap();
+    env.backend.set(Gpr(3).state(), 0x2000);
+    let prog: &[u8] = &[
+        0xF3, 0x0F, 0x7E, 0x4B, 0x08, // movq xmm1,[rbx+8] (xmm1=3.0)
+        0xF3, 0x0F, 0x7E, 0x43, 0x10, // movq xmm0,[rbx+0x10] (xmm0=1.0)
+        0xF2, 0x0F, 0x5C, 0xC8, // subsd xmm1,xmm0 (xmm1=2.0)
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
+        0x0F, 0x05, // syscall -> exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0));
+    let v: u128 = env.backend.get(polyisa_guest_x86::sem::xmm_ref(
+        polyisa_guest_x86::sem::Xmm(1),
+    ));
+    assert_eq!((v & 0xFFFF_FFFF_FFFF_FFFF) as u64, 0x4000_0000_0000_0000);
+}
+
+#[test]
+fn run_mulsd_xmm_m64_rip() {
+    // run 経由で F2 0F 59 05 + disp32 (MULSD xmm0,[RIP]) を回す.
+    // [0x1500]=2.0、xmm0 下位=3.0 -> 6.0、exit(0)。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    env.backend
+        .mem
+        .write(VirtAddr(0x1500), &0x4000_0000_0000_0000u64.to_le_bytes())
+        .unwrap();
+    env.backend.set(Gpr(3).state(), 0x1500);
+    let prog: &[u8] = &[
+        0xF3, 0x0F, 0x7E, 0x43, 0x00, // movq xmm0,[rbx+0] (xmm0=2.0)
+        0xF2, 0x0F, 0x59, 0x05, 0xF3, 0x04, 0x00,
+        0x00, // mulsd xmm0,[rip+0x4f3] ([0x1500]=2.0 -> 4.0)
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
+        0x0F, 0x05, // syscall -> exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0));
+    let v: u128 = env.backend.get(polyisa_guest_x86::sem::xmm_ref(
+        polyisa_guest_x86::sem::Xmm(0),
+    ));
+    // xmm0=2.0 * [0x1500]=2.0 -> 4.0。
+    assert_eq!((v & 0xFFFF_FFFF_FFFF_FFFF) as u64, 0x4010_0000_0000_0000);
+}
+
+#[test]
 fn run_and_rm_imm8_sibd() {
     // run 経由で 48 83 64 24 10 00 (ANDQ $0,0x10(%rsp)) を回す。
     // [0x2010]=0xFF -> 0 になり、exit(0)。

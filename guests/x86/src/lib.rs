@@ -70,7 +70,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数116件。
-        assert_eq!(INSNS.len(), 485);
+        assert_eq!(INSNS.len(), 487);
     }
 
     #[test]
@@ -606,6 +606,14 @@ mod tests {
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x0F2FC1, 24), Some(Insn::Comisd));
         assert_eq!(decode(0x0F2FC1, 16), None);
+        // SUBSD xmm,xmm reg-direct (F2 0F 5C /r)。F2 は実行側で剥がす.
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x0F5CC1, 24), Some(Insn::Subsd));
+        assert_eq!(decode(0x0F5CC1, 16), None);
+        // MULSD xmm,m64 RIP (F2 0F 59 05 + disp32)。F2 は実行側で剥がす.
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x0F590500000000, 56), Some(Insn::MulsdXmmM64Rip));
+        assert_eq!(decode(0x0F590500000000, 48), None);
         // CVTTSD2SI r64,xmm reg-direct (F2 REX.W 0F 2C /r)。F2/REX は実行側で剥がす.
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x0F2CC0, 24), Some(Insn::Cvttsd2siR64));

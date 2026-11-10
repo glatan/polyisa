@@ -2021,6 +2021,46 @@ fn comisd_xmm_sets_flags() {
 }
 
 #[test]
+fn subsd_xmm_subs_low64() {
+    use polyisa_guest_x86::sem::Xmm;
+    // SUBSD xmm1,xmm0: 下位=3.0-1.0=2.0 (0x4000000000000000)、上位は xmm1 のまま.
+    let mut env = env();
+    env.step(|b| {
+        let a = b.konst::<polyisa_sem::W128>(0xFFFF_0000_0000_0000_4008_0000_0000_0000u128);
+        b.set(sem::xmm_ref(Xmm(1)), a);
+        let c = b.konst::<polyisa_sem::W128>(0x3FF0_0000_0000_0000u128);
+        b.set(sem::xmm_ref(Xmm(0)), c);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::subsd_xmm(b, Xmm(1), Xmm(0))).unwrap();
+    let v: u128 = env.backend.get(sem::xmm_ref(Xmm(1)));
+    assert_eq!(v, 0xFFFF_0000_0000_0000_4000_0000_0000_0000u128);
+}
+
+#[test]
+fn mulsd_xmm_m64_rip_multiplies() {
+    use polyisa_guest_x86::sem::Xmm;
+    // MULSD xmm0,[RIP]: [0x1500]=2.0、xmm0 下位=3.0 -> 6.0 (0x4018000000000000)。上位保持.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1500), &0x4000_0000_0000_0000u64.to_le_bytes())
+        .unwrap();
+    env.step(|b| {
+        let v = b.konst::<polyisa_sem::W128>(0xABCD_0000_0000_0000_4008_0000_0000_0000u128);
+        b.set(sem::xmm_ref(Xmm(0)), v);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::mulsd_xmm_m64_rip(b, Xmm(0), 0x1007, 0x4F9))
+        .unwrap();
+    let v: u128 = env.backend.get(sem::xmm_ref(Xmm(0)));
+    assert_eq!(v, 0xABCD_0000_0000_0000_4018_0000_0000_0000u128);
+}
+
+#[test]
 fn cvttsd2si_r64_truncates() {
     use polyisa_guest_x86::sem::Xmm;
     // CVTTSD2SI RAX,xmm0: 下位=3.9 -> RAX=3（切り捨て）。

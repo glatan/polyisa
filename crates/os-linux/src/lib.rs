@@ -61,6 +61,7 @@ pub mod rv64 {
     pub const READV: u64 = 65;
     pub const WRITEV: u64 = 66;
     pub const SENDFILE: u64 = 71;
+    pub const CLOCK_NANOSLEEP: u64 = 115;
 }
 
 /// 段階4の準備としての x86_64 番号表（Linux・64ビット）。
@@ -112,6 +113,7 @@ pub mod x86_64 {
     pub const WRITEV: u64 = 20;
     pub const SENDFILE: u64 = 40;
     pub const TIME: u64 = 201;
+    pub const CLOCK_NANOSLEEP: u64 = 230;
 }
 
 /// 段階4の準備としての i386 番号表（Linux・32ビット）。
@@ -159,6 +161,7 @@ pub mod i386 {
     pub const STATX: u64 = 383;
     pub const SENDFILE: u64 = 187;
     pub const TIME: u64 = 13;
+    pub const NANOSLEEP: u64 = 162;
 }
 
 /// ABI と番号から名前を引く。段階1の範囲と x86_64・i386 の番号表のみ。
@@ -203,6 +206,7 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             rv64::READV => Some("readv"),
             rv64::WRITEV => Some("writev"),
             rv64::SENDFILE => Some("sendfile"),
+            rv64::CLOCK_NANOSLEEP => Some("clock_nanosleep"),
             _ => None,
         },
         GuestAbi::I386Linux => match nr {
@@ -245,6 +249,7 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             i386::WRITEV => Some("writev"),
             i386::SENDFILE => Some("sendfile"),
             i386::TIME => Some("time"),
+            i386::NANOSLEEP => Some("nanosleep"),
             _ => None,
         },
         GuestAbi::X86_64Linux => match nr {
@@ -287,6 +292,7 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             x86_64::WRITEV => Some("writev"),
             x86_64::SENDFILE => Some("sendfile"),
             x86_64::TIME => Some("time"),
+            x86_64::CLOCK_NANOSLEEP => Some("clock_nanosleep"),
             _ => None,
         },
         GuestAbi::Unknown => None,
@@ -376,6 +382,11 @@ mod tests {
         assert_eq!(syscall_name(GuestAbi::Rv64Linux, 9999), None);
         assert_eq!(rv64::SENDFILE, 71);
         assert_eq!(syscall_name(GuestAbi::Rv64Linux, 71), Some("sendfile"));
+        assert_eq!(rv64::CLOCK_NANOSLEEP, 115);
+        assert_eq!(
+            syscall_name(GuestAbi::Rv64Linux, 115),
+            Some("clock_nanosleep")
+        );
     }
 
     #[test]
@@ -393,6 +404,11 @@ mod tests {
         assert_eq!(syscall_name(GuestAbi::X86_64Linux, 40), Some("sendfile"));
         assert_eq!(x86_64::TIME, 201);
         assert_eq!(syscall_name(GuestAbi::X86_64Linux, 201), Some("time"));
+        assert_eq!(x86_64::CLOCK_NANOSLEEP, 230);
+        assert_eq!(
+            syscall_name(GuestAbi::X86_64Linux, 230),
+            Some("clock_nanosleep")
+        );
     }
 
     #[test]
@@ -412,6 +428,8 @@ mod tests {
         assert_eq!(syscall_name(GuestAbi::I386Linux, 187), Some("sendfile"));
         assert_eq!(i386::TIME, 13);
         assert_eq!(syscall_name(GuestAbi::I386Linux, 13), Some("time"));
+        assert_eq!(i386::NANOSLEEP, 162);
+        assert_eq!(syscall_name(GuestAbi::I386Linux, 162), Some("nanosleep"));
     }
 
     #[test]

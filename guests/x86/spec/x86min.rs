@@ -479,6 +479,10 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("cvtsi2sd_r64", "F1", "00001111 00101010 11......", "cvtsi2sd xmm, r64", "load"),
         // ADDSD xmm,xmm (F2 0F 58 /r reg-direct)。F2 接頭辞は実行側で剥がす.
         ("addsd", "F1", "00001111 01011000 11......", "addsd xmm, xmm", "alu"),
+        // SUBSD xmm,xmm (F2 0F 5C /r reg-direct)。F2 接頭辞は実行側で剥がす.
+        ("subsd", "F1", "00001111 01011100 11......", "subsd xmm, xmm", "alu"),
+        // MULSD xmm,m64 RIP (F2 0F 59 05 + disp32)。F2 接頭辞は実行側で剥がす.
+        ("mulsd_xmm_m64_rip", "F1", "00001111 01011001 00...101 ................................", "mulsd xmm, m64", "load"),
         // COMISD xmm,xmm (66 0F 2F /r reg-direct)。
         ("comisd", "F1", "00001111 00101111 11......", "comisd xmm, xmm", "alu"),
         // CVTTSD2SI r64,xmm (F2 REX.W 0F 2C /r reg-direct)。F2 接頭辞は実行側で剥がす.

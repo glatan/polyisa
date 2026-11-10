@@ -193,6 +193,7 @@ fn fetch_len(
                     | 0x58
                     | 0x2F
                     | 0x2C
+                    | 0x5C
             ) {
                 // XMM reg-direct のみ（66 接頭辞は剥がし済み）。
                 let m = third?;
@@ -276,6 +277,12 @@ fn fetch_len(
                 } else {
                     None
                 }
+            } else if s == 0x59 {
+                // MULSD xmm,m64 RIP (F2 0F 59 05 + disp32、7B)。
+                let m = third?;
+                let md = m >> 6;
+                let rm = m & 7;
+                if md == 0 && rm == 5 { Some(7) } else { None }
             } else if s == 0x10
                 || s == 0x11
                 || s == 0x28
@@ -1001,6 +1008,8 @@ pub fn run_mode(
                             | 0x58
                             | 0x2F
                             | 0x2C
+                            | 0x5C
+                            | 0x59
                             | 0x7E
                             | 0xD7
                             | 0xDA
@@ -3890,6 +3899,16 @@ fn dispatch<B: Backend>(
         Insn::Cvtsi2sdR64 => sem::cvtsi2sd_r64(b, xmm_reg_r(), rm0f()),
         // ADDSD xmm,xmm (F2 0F 58 /r reg-direct)。F2 は剥がし済み.
         Insn::Addsd => sem::addsd_xmm(b, xmm_reg(), xmm_rm()),
+        // SUBSD xmm,xmm (F2 0F 5C /r reg-direct)。F2 は剥がし済み.
+        Insn::Subsd => sem::subsd_xmm(b, xmm_reg(), xmm_rm()),
+        Insn::MulsdXmmM64Rip => {
+            // F2 0F 59 05 + disp32 (mod=00 RIP)。F2 は剥がし済み.
+            if is64 {
+                sem::mulsd_xmm_m64_rip(b, xmm_reg(), eip as u64 + nbytes, disp32())
+            } else {
+                sem::mulsd_xmm_m64_abs(b, xmm_reg(), imm32())
+            }
+        }
         // COMISD xmm,xmm (66 0F 2F /r reg-direct)。
         Insn::Comisd => sem::comisd_xmm(b, xmm_reg(), xmm_rm()),
         // CVTTSD2SI r64,xmm (F2 REX.W 0F 2C /r reg-direct)。F2 は剥がし済み.
@@ -6174,6 +6193,17 @@ impl TrapHandler for CliLinux {
             set64(env, Gpr(0), secs as u64);
             return TrapOutcome::Handled;
         }
+        if self.is64 && nr == polyisa_os_linux::x86_64::CLOCK_NANOSLEEP {
+            // clock_nanosleep(clock_id, flags, req, rem)。試作では待たずに 0 を返す.
+            // clock_id は CLOCK_REALTIME(0)/MONOTONIC(1) のみ受け付ける.
+            let clock_id = get64(env, r_a);
+            if clock_id > 1 {
+                set64(env, Gpr(0), neg(EINVAL));
+                return TrapOutcome::Handled;
+            }
+            set64(env, Gpr(0), 0);
+            return TrapOutcome::Handled;
+        }
         if self.is64 && nr == polyisa_os_linux::x86_64::CLOCK_GETTIME {
             // clock_gettime(clk_id, tp)。ホスト時刻を書いて 0 を返す.
             // 0 固定では時刻待ちループが回り続けるため、実時刻を進める.
@@ -6876,6 +6906,26 @@ mod tests {
             .read(VirtAddr(0x100), &mut back, data_access())
             .unwrap();
         assert_eq!(i64::from_le_bytes(back) as u64, secs);
+    }
+
+    #[test]
+    fn clock_nanosleep_returns_zero() {
+        use polyisa_os_linux::x86_64 as abi;
+        let mut sys = CliLinux::x86_64();
+        let mut env = bare();
+        // clock_nanosleep(0, 0, req, rem) は待たずに 0 を返す。
+        set64(&mut env, Gpr(0), abi::CLOCK_NANOSLEEP);
+        set64(&mut env, Gpr(7), 0);
+        set64(&mut env, Gpr(6), 0);
+        set64(&mut env, Gpr(2), 0x100);
+        set64(&mut env, Gpr(10), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        // 不正な clock_id は EINVAL。
+        set64(&mut env, Gpr(0), abi::CLOCK_NANOSLEEP);
+        set64(&mut env, Gpr(7), 99);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EINVAL));
     }
 
     #[test]
