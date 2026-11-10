@@ -4824,73 +4824,73 @@ fn dispatch<B: Backend>(
         }
         Insn::MovdXmmM32 => {
             // 0F6E modrm + disp32 (mod=10 RBP)。disp は low32 LE? Actually word 56b: [0F][6E][modrm][disp0..3] (7B). disp = low32 LE? low32 = disp BE? Use disp32() which is (word as u32).swap? Wait word low32 = disp BE? For 56b word, low32 = disp (4B). disp32() = (word as u32).swap_bytes() as i32. Good (since low32 is disp). Good.
-            sem::movd_xmm_m32(b, xmm_reg(), rm0f(), disp32())
+            sem::movd_xmm_m32(b, xmm_reg_r(), rm0f(), disp32())
         }
         Insn::MovdXmmRip => {
             // 66 0F 6E 05 + disp32 (mod=00 RIP)。dst は reg フィールド.
             if is64 {
-                sem::movd_xmm_rip(b, xmm_reg(), eip as u64 + nbytes, disp32())
+                sem::movd_xmm_rip(b, xmm_reg_r(), eip as u64 + nbytes, disp32())
             } else {
-                sem::movd_xmm_abs(b, xmm_reg(), imm32())
+                sem::movd_xmm_abs(b, xmm_reg_r(), imm32())
             }
         }
-        Insn::Punpcklbw => sem::punpcklbw(b, xmm_reg(), xmm_rm()),
-        Insn::Punpcklwd => sem::punpcklwd(b, xmm_reg(), xmm_rm()),
-        Insn::Punpckldq => sem::punpckldq(b, xmm_reg(), xmm_rm()),
+        Insn::Punpcklbw => sem::punpcklbw(b, xmm_reg_r(), xmm_rm_b()),
+        Insn::Punpcklwd => sem::punpcklwd(b, xmm_reg_r(), xmm_rm_b()),
+        Insn::Punpckldq => sem::punpckldq(b, xmm_reg_r(), xmm_rm_b()),
         Insn::MovqM64XmmRip => {
             if is64 {
-                sem::movq_m64_xmm_rip(b, xmm_reg(), eip as u64 + nbytes, disp32())
+                sem::movq_m64_xmm_rip(b, xmm_reg_r(), eip as u64 + nbytes, disp32())
             } else {
-                sem::movq_m64_xmm_abs(b, xmm_reg(), imm32())
+                sem::movq_m64_xmm_abs(b, xmm_reg_r(), imm32())
             }
         }
-        Insn::MovqM64XmmMemnd => sem::movq_m64_xmm_memnd(b, xmm_reg(), rm0f()),
-        Insn::MovqM64XmmMem8 => sem::movq_m64_xmm_mem8(b, xmm_reg(), rm0f(), disp8()),
-        Insn::MovqM64XmmMem32 => sem::movq_m64_xmm_mem32(b, xmm_reg(), rm0f(), disp32()),
+        Insn::MovqM64XmmMemnd => sem::movq_m64_xmm_memnd(b, xmm_reg_r(), rm0f()),
+        Insn::MovqM64XmmMem8 => sem::movq_m64_xmm_mem8(b, xmm_reg_r(), rm0f(), disp8()),
+        Insn::MovqM64XmmMem32 => sem::movq_m64_xmm_mem32(b, xmm_reg_r(), rm0f(), disp32()),
         Insn::MovqXmmM64Rip => {
             if is64 {
-                sem::movq_xmm_m64_rip(b, xmm_reg(), eip as u64 + nbytes, disp32())
+                sem::movq_xmm_m64_rip(b, xmm_reg_r(), eip as u64 + nbytes, disp32())
             } else {
-                sem::movq_xmm_m64_abs(b, xmm_reg(), imm32())
+                sem::movq_xmm_m64_abs(b, xmm_reg_r(), imm32())
             }
         }
         // MOVQ xmm,[base+disp8] (F3 0F 7E mod=01、4B)。dst は reg フィールド.
-        Insn::MovqXmmM64Mem8 => sem::movq_xmm_m64_mem8(b, xmm_reg(), rm0f(), disp8()),
+        Insn::MovqXmmM64Mem8 => sem::movq_xmm_m64_mem8(b, xmm_reg_r(), rm0f(), disp8()),
         // MOVHPS xmm,[base+disp8] (0F 16 mod=01、4B。66 付き MOVHPD と共用)。dst は reg フィールド.
-        Insn::MovhpsXmmM64Mem8 => sem::movhps_xmm_m64_mem8(b, xmm_reg(), rm0f(), disp8()),
+        Insn::MovhpsXmmM64Mem8 => sem::movhps_xmm_m64_mem8(b, xmm_reg_r(), rm0f(), disp8()),
         // MOVLPD xmm,[base] (66 0F 12 mod=00、3B)。dst は reg フィールド.
-        Insn::MovlpdXmmM64Memnd => sem::movlpd_xmm_m64_memnd(b, xmm_reg(), rm0f()),
+        Insn::MovlpdXmmM64Memnd => sem::movlpd_xmm_m64_memnd(b, xmm_reg_r(), rm0f()),
         Insn::Pshufd => {
             let imm = (word & 0xff) as u8;
             // F2 接頭辞では PSHUFLW として振る舞う (0F 70 共有のため Insn を共用).
             if has_f2 {
-                sem::pshuflw_xmm(b, xmm_reg(), xmm_rm(), imm)
+                sem::pshuflw_xmm(b, xmm_reg_r(), xmm_rm_b(), imm)
             } else {
-                sem::pshufd(b, xmm_reg(), xmm_rm(), imm)
+                sem::pshufd(b, xmm_reg_r(), xmm_rm_b(), imm)
             }
         }
         Insn::Pslldq => {
             let imm = (word & 0xff) as u8;
             // 0F 73 /7: dst は rm フィールド (reg=111 は拡張子)。xmm_reg() は 7 になるため使わない.
-            sem::pslldq_xmm(b, xmm_rm(), imm)
+            sem::pslldq_xmm(b, xmm_rm_b(), imm)
         }
         Insn::Psrldq => {
             let imm = (word & 0xff) as u8;
             // 0F 73 /3: dst は rm フィールド (reg=011 は拡張子)。
-            sem::psrldq_xmm(b, xmm_rm(), imm)
+            sem::psrldq_xmm(b, xmm_rm_b(), imm)
         }
-        Insn::Psubb => sem::psubb_xmm(b, xmm_reg(), xmm_rm()),
+        Insn::Psubb => sem::psubb_xmm(b, xmm_reg_r(), xmm_rm_b()),
         // PADDB xmm,xmm (66 0F FC /r reg-direct)。REX.R/B で 8-15 に拡張する.
         Insn::Paddb => sem::paddb_xmm(b, xmm_reg_r(), xmm_rm_b()),
         // PCMPGTB xmm,xmm (66 0F 64 /r reg-direct)。REX.R/B で 8-15 に拡張する.
         Insn::Pcmpgtb => sem::pcmpgtb_xmm(b, xmm_reg_r(), xmm_rm_b()),
-        Insn::Pxor => sem::pxor_xmm(b, xmm_reg(), xmm_rm()),
+        Insn::Pxor => sem::pxor_xmm(b, xmm_reg_r(), xmm_rm_b()),
         // XORPS xmm,xmm (0F 57 /r reg-direct)。PXOR と等価.
-        Insn::Xorps => sem::pxor_xmm(b, xmm_reg(), xmm_rm()),
-        Insn::Pand => sem::pand_xmm(b, xmm_reg(), xmm_rm()),
+        Insn::Xorps => sem::pxor_xmm(b, xmm_reg_r(), xmm_rm_b()),
+        Insn::Pand => sem::pand_xmm(b, xmm_reg_r(), xmm_rm_b()),
         // ANDPD (66 0F 54) は PAND と等価のため意味論を共有する.
-        Insn::Andpd => sem::pand_xmm(b, xmm_reg(), xmm_rm()),
-        Insn::AndpdRip => sem::andpd_xmm_rip(b, xmm_reg(), eip as u64 + nbytes, disp32()),
+        Insn::Andpd => sem::pand_xmm(b, xmm_reg_r(), xmm_rm_b()),
+        Insn::AndpdRip => sem::andpd_xmm_rip(b, xmm_reg_r(), eip as u64 + nbytes, disp32()),
         // PANDN xmm,xmm (66 0F DF /r reg-direct)。REX.R/B で 8-15 に拡張する.
         Insn::Pandn => sem::pandn_xmm(b, xmm_reg_r(), xmm_rm_b()),
         // CVTSI2SD xmm,r64 (F2 REX.W 0F 2A /r reg-direct)。F2 は剥がし済み.
@@ -4904,43 +4904,43 @@ fn dispatch<B: Backend>(
             }
         }
         // ADDSD xmm,xmm (F2 0F 58 /r reg-direct)。F2 は剥がし済み.
-        Insn::Addsd => sem::addsd_xmm(b, xmm_reg(), xmm_rm()),
+        Insn::Addsd => sem::addsd_xmm(b, xmm_reg_r(), xmm_rm_b()),
         Insn::AddsdM64Sib => {
             // F2 0F 58 SIB mod=00 [base+index*scale] (4B)。no_index は [base].
             if sib0f_no_index() {
-                sem::addsd_xmm_m64_memnd(b, xmm_reg(), sib0f_base())
+                sem::addsd_xmm_m64_memnd(b, xmm_reg_r(), sib0f_base())
             } else {
-                sem::addsd_xmm_m64_sib(b, xmm_reg(), sib0f_base(), sib0f_idx(), sib0f_shift())
+                sem::addsd_xmm_m64_sib(b, xmm_reg_r(), sib0f_base(), sib0f_idx(), sib0f_shift())
             }
         }
         Insn::AddsdXmmM64Rip => {
             // F2 0F 58 05 + disp32 (mod=00 RIP)。F2 は剥がし済み.
             if is64 {
-                sem::addsd_xmm_m64_rip(b, xmm_reg(), eip as u64 + nbytes, disp32())
+                sem::addsd_xmm_m64_rip(b, xmm_reg_r(), eip as u64 + nbytes, disp32())
             } else {
-                sem::addsd_xmm_m64_abs(b, xmm_reg(), imm32())
+                sem::addsd_xmm_m64_abs(b, xmm_reg_r(), imm32())
             }
         }
         // SUBSD xmm,xmm (F2 0F 5C /r reg-direct)。F2 は剥がし済み.
-        Insn::Subsd => sem::subsd_xmm(b, xmm_reg(), xmm_rm()),
+        Insn::Subsd => sem::subsd_xmm(b, xmm_reg_r(), xmm_rm_b()),
         // MULSD xmm,xmm (F2 0F 59 /r reg-direct)。F2 は剥がし済み.
-        Insn::Mulsd => sem::mulsd_xmm(b, xmm_reg(), xmm_rm()),
+        Insn::Mulsd => sem::mulsd_xmm(b, xmm_reg_r(), xmm_rm_b()),
         Insn::MulsdXmmM64Rip => {
             // F2 0F 59 05 + disp32 (mod=00 RIP)。F2 は剥がし済み.
             if is64 {
-                sem::mulsd_xmm_m64_rip(b, xmm_reg(), eip as u64 + nbytes, disp32())
+                sem::mulsd_xmm_m64_rip(b, xmm_reg_r(), eip as u64 + nbytes, disp32())
             } else {
-                sem::mulsd_xmm_m64_abs(b, xmm_reg(), imm32())
+                sem::mulsd_xmm_m64_abs(b, xmm_reg_r(), imm32())
             }
         }
         // COMISD xmm,xmm (66 0F 2F /r reg-direct)。
-        Insn::Comisd => sem::comisd_xmm(b, xmm_reg(), xmm_rm()),
+        Insn::Comisd => sem::comisd_xmm(b, xmm_reg_r(), xmm_rm_b()),
         // UCOMISD (66 0F 2E) は順序なしの旗が等価のため COMISD と意味論を共有する.
-        Insn::Ucomisd => sem::comisd_xmm(b, xmm_reg(), xmm_rm()),
-        Insn::UcomisdMemnd => sem::ucomisd_xmm_memnd(b, xmm_reg(), rm0f()),
-        Insn::UcomisdMem8 => sem::ucomisd_xmm_mem8(b, xmm_reg(), rm0f(), disp8()),
-        Insn::UcomisdMem32 => sem::ucomisd_xmm_mem32(b, xmm_reg(), rm0f(), disp32()),
-        Insn::UcomisdRip => sem::ucomisd_xmm_rip(b, xmm_reg(), eip as u64 + nbytes, disp32()),
+        Insn::Ucomisd => sem::comisd_xmm(b, xmm_reg_r(), xmm_rm_b()),
+        Insn::UcomisdMemnd => sem::ucomisd_xmm_memnd(b, xmm_reg_r(), rm0f()),
+        Insn::UcomisdMem8 => sem::ucomisd_xmm_mem8(b, xmm_reg_r(), rm0f(), disp8()),
+        Insn::UcomisdMem32 => sem::ucomisd_xmm_mem32(b, xmm_reg_r(), rm0f(), disp32()),
+        Insn::UcomisdRip => sem::ucomisd_xmm_rip(b, xmm_reg_r(), eip as u64 + nbytes, disp32()),
         // CVTTSD2SI r64,xmm (F2 REX.W 0F 2C /r reg-direct)。F2 は剥がし済み.
         Insn::Cvttsd2siR64 => sem::cvttsd2si_r64(b, reg0f_as_gpr(), xmm_rm_b()),
         Insn::BtR32Imm => {
@@ -5009,37 +5009,37 @@ fn dispatch<B: Backend>(
                 sem::bts_r32_rm(b, rm0f(), reg0f_as_gpr())
             }
         }
-        Insn::Pminub => sem::pminub_xmm(b, xmm_reg(), xmm_rm()),
-        Insn::PminubMemnd => sem::pminub_xmm_memnd(b, xmm_reg(), rm0f()),
-        Insn::PminubMem8 => sem::pminub_xmm_mem8(b, xmm_reg(), rm0f(), disp8()),
-        Insn::PminubMem32 => sem::pminub_xmm_mem32(b, xmm_reg(), rm0f(), disp32()),
+        Insn::Pminub => sem::pminub_xmm(b, xmm_reg_r(), xmm_rm_b()),
+        Insn::PminubMemnd => sem::pminub_xmm_memnd(b, xmm_reg_r(), rm0f()),
+        Insn::PminubMem8 => sem::pminub_xmm_mem8(b, xmm_reg_r(), rm0f(), disp8()),
+        Insn::PminubMem32 => sem::pminub_xmm_mem32(b, xmm_reg_r(), rm0f(), disp32()),
         Insn::FnstcwMemnd => sem::fnstcw_memnd(b, rm()),
         Insn::FnstcwMem8 => sem::fnstcw_mem8(b, rm(), disp8()),
         Insn::FnstcwMem32 => sem::fnstcw_mem32(b, rm(), disp32()),
         Insn::FldcwMemnd => sem::fldcw_memnd(b, rm()),
         Insn::FldcwMem8 => sem::fldcw_mem8(b, rm(), disp8()),
         Insn::FldcwMem32 => sem::fldcw_mem32(b, rm(), disp32()),
-        Insn::Pcmpeqb => sem::pcmpeqb_xmm(b, xmm_reg(), xmm_rm()),
-        Insn::Pcmpeqd => sem::pcmpeqd_xmm(b, xmm_reg(), xmm_rm()),
-        Insn::Por => sem::por_xmm(b, xmm_reg(), xmm_rm()),
-        Insn::PcmpeqbMemnd => sem::pcmpeqb_xmm_memnd(b, xmm_reg(), rm0f()),
-        Insn::PcmpeqbMem8 => sem::pcmpeqb_xmm_mem8(b, xmm_reg(), rm0f(), disp8()),
-        Insn::PcmpeqbMem32 => sem::pcmpeqb_xmm_mem32(b, xmm_reg(), rm0f(), disp32()),
-        Insn::PorMemnd => sem::por_xmm_memnd(b, xmm_reg(), rm0f()),
-        Insn::PorMem8 => sem::por_xmm_mem8(b, xmm_reg(), rm0f(), disp8()),
-        Insn::PorMem32 => sem::por_xmm_mem32(b, xmm_reg(), rm0f(), disp32()),
+        Insn::Pcmpeqb => sem::pcmpeqb_xmm(b, xmm_reg_r(), xmm_rm_b()),
+        Insn::Pcmpeqd => sem::pcmpeqd_xmm(b, xmm_reg_r(), xmm_rm_b()),
+        Insn::Por => sem::por_xmm(b, xmm_reg_r(), xmm_rm_b()),
+        Insn::PcmpeqbMemnd => sem::pcmpeqb_xmm_memnd(b, xmm_reg_r(), rm0f()),
+        Insn::PcmpeqbMem8 => sem::pcmpeqb_xmm_mem8(b, xmm_reg_r(), rm0f(), disp8()),
+        Insn::PcmpeqbMem32 => sem::pcmpeqb_xmm_mem32(b, xmm_reg_r(), rm0f(), disp32()),
+        Insn::PorMemnd => sem::por_xmm_memnd(b, xmm_reg_r(), rm0f()),
+        Insn::PorMem8 => sem::por_xmm_mem8(b, xmm_reg_r(), rm0f(), disp8()),
+        Insn::PorMem32 => sem::por_xmm_mem32(b, xmm_reg_r(), rm0f(), disp32()),
         Insn::Pmovmskb => {
             if rex_w {
-                sem::pmovmskb_r64(b, reg0f_as_gpr(), xmm_rm())
+                sem::pmovmskb_r64(b, reg0f_as_gpr(), xmm_rm_b())
             } else {
-                sem::pmovmskb_r32(b, reg0f_as_gpr(), xmm_rm())
+                sem::pmovmskb_r32(b, reg0f_as_gpr(), xmm_rm_b())
             }
         }
-        Insn::Punpcklqdq => sem::punpcklqdq(b, xmm_reg(), xmm_rm()),
+        Insn::Punpcklqdq => sem::punpcklqdq(b, xmm_reg_r(), xmm_rm_b()),
         Insn::MovupsLoadSibd32 => {
             if has_f2 {
                 if sib0f_no_index() {
-                    sem::movsd_load_mem32(b, xmm_reg(), sib0f_base(), disp32())
+                    sem::movsd_load_mem32(b, xmm_reg_r(), sib0f_base(), disp32())
                 } else {
                     sem::movsd_load_sibd32(
                         b,
@@ -5051,7 +5051,7 @@ fn dispatch<B: Backend>(
                     )
                 }
             } else if sib0f_no_index() {
-                sem::movups_load_mem32(b, xmm_reg(), sib0f_base(), disp32())
+                sem::movups_load_mem32(b, xmm_reg_r(), sib0f_base(), disp32())
             } else {
                 sem::movups_load_sibd32(
                     b,
@@ -5066,7 +5066,7 @@ fn dispatch<B: Backend>(
         Insn::MovupsStoreSibd32 => {
             if has_f2 {
                 if sib0f_no_index() {
-                    sem::movsd_store_mem32(b, xmm_reg(), sib0f_base(), disp32())
+                    sem::movsd_store_mem32(b, xmm_reg_r(), sib0f_base(), disp32())
                 } else {
                     sem::movsd_store_sibd32(
                         b,
@@ -5078,7 +5078,7 @@ fn dispatch<B: Backend>(
                     )
                 }
             } else if sib0f_no_index() {
-                sem::movups_store_mem32(b, xmm_reg(), sib0f_base(), disp32())
+                sem::movups_store_mem32(b, xmm_reg_r(), sib0f_base(), disp32())
             } else {
                 sem::movups_store_sibd32(
                     b,
@@ -5092,7 +5092,7 @@ fn dispatch<B: Backend>(
         }
         Insn::MovapsStoreSibd32 => {
             if sib0f_no_index() {
-                sem::movups_store_mem32(b, xmm_reg(), sib0f_base(), disp32())
+                sem::movups_store_mem32(b, xmm_reg_r(), sib0f_base(), disp32())
             } else {
                 sem::movups_store_sibd32(
                     b,
@@ -5104,110 +5104,110 @@ fn dispatch<B: Backend>(
                 )
             }
         }
-        Insn::MovqR64Xmm => sem::movq_r64_xmm(b, rm0f(), xmm_reg()),
+        Insn::MovqR64Xmm => sem::movq_r64_xmm(b, rm0f(), xmm_reg_r()),
         // MOVSD (F2 0F 10/11) は下位64のみ転送し上位64は保持するため has_f2 で分岐する.
         Insn::MovupsLoadXmm => {
             if has_f2 {
-                sem::movsd_xmm_xmm(b, xmm_reg(), xmm_rm())
+                sem::movsd_xmm_xmm(b, xmm_reg_r(), xmm_rm_b())
             } else {
-                sem::movups_xmm_xmm(b, xmm_reg(), xmm_rm())
+                sem::movups_xmm_xmm(b, xmm_reg_r(), xmm_rm_b())
             }
         }
         Insn::MovupsStoreXmm => {
             if has_f2 {
-                sem::movsd_xmm_xmm(b, xmm_rm(), xmm_reg())
+                sem::movsd_xmm_xmm(b, xmm_rm_b(), xmm_reg_r())
             } else {
-                sem::movups_xmm_xmm(b, xmm_rm(), xmm_reg())
+                sem::movups_xmm_xmm(b, xmm_rm_b(), xmm_reg_r())
             }
         }
         Insn::MovupsLoadMemnd => {
             if has_f2 {
-                sem::movsd_load_memnd(b, xmm_reg(), rm0f())
+                sem::movsd_load_memnd(b, xmm_reg_r(), rm0f())
             } else {
-                sem::movups_load_memnd(b, xmm_reg(), rm0f())
+                sem::movups_load_memnd(b, xmm_reg_r(), rm0f())
             }
         }
         Insn::MovupsStoreMemnd => {
             if has_f2 {
-                sem::movsd_store_memnd(b, xmm_reg(), rm0f())
+                sem::movsd_store_memnd(b, xmm_reg_r(), rm0f())
             } else {
-                sem::movups_store_memnd(b, xmm_reg(), rm0f())
+                sem::movups_store_memnd(b, xmm_reg_r(), rm0f())
             }
         }
         Insn::MovupsLoadMem8 => {
             if has_f2 {
-                sem::movsd_load_mem8(b, xmm_reg(), rm0f(), disp8())
+                sem::movsd_load_mem8(b, xmm_reg_r(), rm0f(), disp8())
             } else {
-                sem::movups_load_mem8(b, xmm_reg(), rm0f(), disp8())
+                sem::movups_load_mem8(b, xmm_reg_r(), rm0f(), disp8())
             }
         }
         Insn::MovupsStoreMem8 => {
             if has_f2 {
-                sem::movsd_store_mem8(b, xmm_reg(), rm0f(), disp8())
+                sem::movsd_store_mem8(b, xmm_reg_r(), rm0f(), disp8())
             } else {
-                sem::movups_store_mem8(b, xmm_reg(), rm0f(), disp8())
+                sem::movups_store_mem8(b, xmm_reg_r(), rm0f(), disp8())
             }
         }
         Insn::MovupsLoadMem32 => {
             if has_f2 {
-                sem::movsd_load_mem32(b, xmm_reg(), rm0f(), disp32())
+                sem::movsd_load_mem32(b, xmm_reg_r(), rm0f(), disp32())
             } else {
-                sem::movups_load_mem32(b, xmm_reg(), rm0f(), disp32())
+                sem::movups_load_mem32(b, xmm_reg_r(), rm0f(), disp32())
             }
         }
         Insn::MovupsStoreMem32 => {
             if has_f2 {
-                sem::movsd_store_mem32(b, xmm_reg(), rm0f(), disp32())
+                sem::movsd_store_mem32(b, xmm_reg_r(), rm0f(), disp32())
             } else {
-                sem::movups_store_mem32(b, xmm_reg(), rm0f(), disp32())
+                sem::movups_store_mem32(b, xmm_reg_r(), rm0f(), disp32())
             }
         }
         // MOVDQU (F3 0F 6F) は16B非整列転送で MOVUPS と等価のため意味論を共有する.
         Insn::MovdquLoadXmm => sem::movups_xmm_xmm(b, xmm_reg_r(), xmm_rm_b()),
-        Insn::MovdquLoadMem8 => sem::movups_load_mem8(b, xmm_reg(), rm0f(), disp8()),
-        Insn::MovdquLoadMemnd => sem::movups_load_memnd(b, xmm_reg(), rm0f()),
-        Insn::MovdquLoadMem32 => sem::movups_load_mem32(b, xmm_reg(), rm0f(), disp32()),
+        Insn::MovdquLoadMem8 => sem::movups_load_mem8(b, xmm_reg_r(), rm0f(), disp8()),
+        Insn::MovdquLoadMemnd => sem::movups_load_memnd(b, xmm_reg_r(), rm0f()),
+        Insn::MovdquLoadMem32 => sem::movups_load_mem32(b, xmm_reg_r(), rm0f(), disp32()),
         Insn::MovdquLoadSib => {
             if sib0f_no_index() {
-                sem::movups_load_memnd(b, xmm_reg(), sib0f_base())
+                sem::movups_load_memnd(b, xmm_reg_r(), sib0f_base())
             } else {
-                sem::movups_load_sib(b, xmm_reg(), sib0f_base(), sib0f_idx(), sib0f_shift())
+                sem::movups_load_sib(b, xmm_reg_r(), sib0f_base(), sib0f_idx(), sib0f_shift())
             }
         }
         // MOVDQA (66 0F 6F) は16B転送で MOVUPS と等価のため意味論を共有する.
         // mod=00/01/10 は Movdqu とバイト列が同一のため decode は Movdqu 側に寄る.
         // 66 接頭辞の許可のみ行い、分岐は Movdqu 側で処理する.
-        Insn::MovdqaLoadRip => sem::movups_load_rip(b, xmm_reg(), eip as u64 + nbytes, disp32()),
+        Insn::MovdqaLoadRip => sem::movups_load_rip(b, xmm_reg_r(), eip as u64 + nbytes, disp32()),
         Insn::MovupsLoadSib => {
             if has_f2 {
                 if sib0f_no_index() {
-                    sem::movsd_load_memnd(b, xmm_reg(), sib0f_base())
+                    sem::movsd_load_memnd(b, xmm_reg_r(), sib0f_base())
                 } else {
-                    sem::movsd_load_sib(b, xmm_reg(), sib0f_base(), sib0f_idx(), sib0f_shift())
+                    sem::movsd_load_sib(b, xmm_reg_r(), sib0f_base(), sib0f_idx(), sib0f_shift())
                 }
             } else if sib0f_no_index() {
-                sem::movups_load_memnd(b, xmm_reg(), sib0f_base())
+                sem::movups_load_memnd(b, xmm_reg_r(), sib0f_base())
             } else {
-                sem::movups_load_sib(b, xmm_reg(), sib0f_base(), sib0f_idx(), sib0f_shift())
+                sem::movups_load_sib(b, xmm_reg_r(), sib0f_base(), sib0f_idx(), sib0f_shift())
             }
         }
         Insn::MovupsStoreSib => {
             if has_f2 {
                 if sib0f_no_index() {
-                    sem::movsd_store_memnd(b, xmm_reg(), sib0f_base())
+                    sem::movsd_store_memnd(b, xmm_reg_r(), sib0f_base())
                 } else {
-                    sem::movsd_store_sib(b, xmm_reg(), sib0f_base(), sib0f_idx(), sib0f_shift())
+                    sem::movsd_store_sib(b, xmm_reg_r(), sib0f_base(), sib0f_idx(), sib0f_shift())
                 }
             } else if sib0f_no_index() {
-                sem::movups_store_memnd(b, xmm_reg(), sib0f_base())
+                sem::movups_store_memnd(b, xmm_reg_r(), sib0f_base())
             } else {
-                sem::movups_store_sib(b, xmm_reg(), sib0f_base(), sib0f_idx(), sib0f_shift())
+                sem::movups_store_sib(b, xmm_reg_r(), sib0f_base(), sib0f_idx(), sib0f_shift())
             }
         }
         Insn::MovupsLoadSibd => {
             if has_f2 {
                 if sib0f_no_index() {
-                    sem::movsd_load_mem8(b, xmm_reg(), sib0f_base(), disp8())
+                    sem::movsd_load_mem8(b, xmm_reg_r(), sib0f_base(), disp8())
                 } else {
                     sem::movsd_load_sibd(
                         b,
@@ -5219,7 +5219,7 @@ fn dispatch<B: Backend>(
                     )
                 }
             } else if sib0f_no_index() {
-                sem::movups_load_mem8(b, xmm_reg(), sib0f_base(), disp8())
+                sem::movups_load_mem8(b, xmm_reg_r(), sib0f_base(), disp8())
             } else {
                 sem::movups_load_sibd(
                     b,
@@ -5234,7 +5234,7 @@ fn dispatch<B: Backend>(
         Insn::MovupsStoreSibd => {
             if has_f2 {
                 if sib0f_no_index() {
-                    sem::movsd_store_mem8(b, xmm_reg(), sib0f_base(), disp8())
+                    sem::movsd_store_mem8(b, xmm_reg_r(), sib0f_base(), disp8())
                 } else {
                     sem::movsd_store_sibd(
                         b,
@@ -5246,7 +5246,7 @@ fn dispatch<B: Backend>(
                     )
                 }
             } else if sib0f_no_index() {
-                sem::movups_store_mem8(b, xmm_reg(), sib0f_base(), disp8())
+                sem::movups_store_mem8(b, xmm_reg_r(), sib0f_base(), disp8())
             } else {
                 sem::movups_store_sibd(
                     b,
@@ -5258,8 +5258,8 @@ fn dispatch<B: Backend>(
                 )
             }
         }
-        Insn::MovntdqStoreMemnd => sem::movups_store_memnd(b, xmm_reg(), rm0f()),
-        Insn::MovntdqStoreMem8 => sem::movups_store_mem8(b, xmm_reg(), rm0f(), disp8()),
+        Insn::MovntdqStoreMemnd => sem::movups_store_memnd(b, xmm_reg_r(), rm0f()),
+        Insn::MovntdqStoreMem8 => sem::movups_store_mem8(b, xmm_reg_r(), rm0f(), disp8()),
         Insn::MovRmImmM32 => {
             // C7 /0 + disp32 + imm32 (mod=10)。disp は上位32、imm は下位32。base 任意.
             let disp = (word >> 32) as u32;
@@ -5386,14 +5386,16 @@ fn dispatch<B: Backend>(
                 sem::mov_rm32_imm_sibd(b, sib_base(), sib_idx(), sib_shift(), d8, imm32())
             }
         }
-        Insn::MovapsStoreMemnd => sem::movups_store_memnd(b, xmm_reg(), rm0f()),
-        Insn::MovapsStoreMem8 => sem::movups_store_mem8(b, xmm_reg(), rm0f(), disp8()),
-        Insn::MovapsStoreMem32 => sem::movaps_store_mem32(b, xmm_reg(), rm0f(), disp32()),
-        Insn::MovapsStoreRip => sem::movups_store_rip(b, xmm_reg(), eip as u64 + nbytes, disp32()),
-        Insn::MovapsLoadMemnd => sem::movups_load_memnd(b, xmm_reg(), rm0f()),
-        Insn::MovapsLoadMem8 => sem::movups_load_mem8(b, xmm_reg(), rm0f(), disp8()),
-        Insn::MovapsLoadMem32 => sem::movups_load_mem32(b, xmm_reg(), rm0f(), disp32()),
-        Insn::MovapsLoadRip => sem::movups_load_rip(b, xmm_reg(), eip as u64 + nbytes, disp32()),
+        Insn::MovapsStoreMemnd => sem::movups_store_memnd(b, xmm_reg_r(), rm0f()),
+        Insn::MovapsStoreMem8 => sem::movups_store_mem8(b, xmm_reg_r(), rm0f(), disp8()),
+        Insn::MovapsStoreMem32 => sem::movaps_store_mem32(b, xmm_reg_r(), rm0f(), disp32()),
+        Insn::MovapsStoreRip => {
+            sem::movups_store_rip(b, xmm_reg_r(), eip as u64 + nbytes, disp32())
+        }
+        Insn::MovapsLoadMemnd => sem::movups_load_memnd(b, xmm_reg_r(), rm0f()),
+        Insn::MovapsLoadMem8 => sem::movups_load_mem8(b, xmm_reg_r(), rm0f(), disp8()),
+        Insn::MovapsLoadMem32 => sem::movups_load_mem32(b, xmm_reg_r(), rm0f(), disp32()),
+        Insn::MovapsLoadRip => sem::movups_load_rip(b, xmm_reg_r(), eip as u64 + nbytes, disp32()),
         Insn::MovapsLoadXmm => sem::movups_xmm_xmm(b, xmm_reg(), xmm_rm()),
         Insn::NoplSib => sem::nop(b),
         Insn::NoplSibd => sem::nop(b),
@@ -6224,12 +6226,12 @@ fn dispatch<B: Backend>(
         Insn::MovupsLoadRip => {
             if has_f2 {
                 if is64 {
-                    sem::movsd_load_rip(b, xmm_reg(), eip as u64 + nbytes, disp32())
+                    sem::movsd_load_rip(b, xmm_reg_r(), eip as u64 + nbytes, disp32())
                 } else {
                     sem::movsd_load_abs(b, xmm_reg(), imm32())
                 }
             } else if is64 {
-                sem::movups_load_rip(b, xmm_reg(), eip as u64 + nbytes, disp32())
+                sem::movups_load_rip(b, xmm_reg_r(), eip as u64 + nbytes, disp32())
             } else {
                 sem::movups_load_abs(b, xmm_reg(), imm32())
             }
@@ -6237,12 +6239,12 @@ fn dispatch<B: Backend>(
         Insn::MovupsStoreRip => {
             if has_f2 {
                 if is64 {
-                    sem::movsd_store_rip(b, xmm_reg(), eip as u64 + nbytes, disp32())
+                    sem::movsd_store_rip(b, xmm_reg_r(), eip as u64 + nbytes, disp32())
                 } else {
                     sem::movsd_store_abs(b, xmm_reg(), imm32())
                 }
             } else if is64 {
-                sem::movups_store_rip(b, xmm_reg(), eip as u64 + nbytes, disp32())
+                sem::movups_store_rip(b, xmm_reg_r(), eip as u64 + nbytes, disp32())
             } else {
                 sem::movups_store_abs(b, xmm_reg(), imm32())
             }
@@ -6379,6 +6381,11 @@ fn dispatch<B: Backend>(
             | Insn::BsrRMem8
             | Insn::BsrRMem32
             | Insn::BsrRRip => Some(reg0f_as_gpr()),
+            Insn::XaddR32Memnd
+            | Insn::XaddR32Rip
+            | Insn::ShldR32Cl
+            | Insn::BtsR32Rm
+            | Insn::Pmovmskb => Some(reg0f_as_gpr()),
             Insn::AddRRip
             | Insn::AddRMemnd
             | Insn::AddRMem8
@@ -6465,6 +6472,26 @@ fn dispatch<B: Backend>(
         if !rex_w && matches!(insn, Insn::MulRm32 | Insn::DivRm32 | Insn::IdivRm32) {
             sem::clear_hi(b, Gpr(0));
             sem::clear_hi(b, Gpr(2));
+        }
+        // 32ビット XCHG は dst と RAX の両方をゼロ拡張する。64ビット XCHG (REX.W) は full64.
+        if !rex_w
+            && matches!(
+                insn,
+                Insn::XchgRRm
+                    | Insn::XchgRMemnd
+                    | Insn::XchgRMem8
+                    | Insn::XchgRMem32
+                    | Insn::XchgRRip
+                    | Insn::XchgRcxAx
+                    | Insn::XchgRdxAx
+                    | Insn::XchgRbxAx
+                    | Insn::XchgRspAx
+                    | Insn::XchgRbpAx
+                    | Insn::XchgRsiAx
+                    | Insn::XchgRdiAx
+            )
+        {
+            sem::clear_hi(b, Gpr(0));
         }
     }
     r
