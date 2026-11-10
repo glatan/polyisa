@@ -4098,6 +4098,20 @@ pub fn movhps_xmm_m64_mem8<B: Backend>(b: &mut B, dst: Xmm, base: Gpr, disp: i8)
     Ok(())
 }
 
+/// MOVLPD xmm,[base] (66 0F 12 /r mod=00)。64ビットを XMM 下位に移し、上位64は保持する.
+pub fn movlpd_xmm_m64_memnd<B: Backend>(b: &mut B, dst: Xmm, base: Gpr) -> Flow<B> {
+    let addr = read64(b, base);
+    let v64: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let cur: B::V<W128> = b.get(xmm_ref(dst));
+    let hi_shift = b.konst::<W128>(64);
+    let hi = b.shr_l::<W128>(cur, hi_shift);
+    let hi_back = b.shl::<W128>(hi, hi_shift);
+    let lo = b.zext::<W64, W128>(v64);
+    let v = b.or::<W128>(hi_back, lo);
+    b.set(xmm_ref(dst), v);
+    Ok(())
+}
+
 /// MOVQ xmm,[disp32] (32ビット絶対番地、64ビットロード).
 pub fn movq_xmm_m64_abs<B: Backend>(b: &mut B, dst: Xmm, addr32: u32) -> Flow<B> {
     let addr = b.konst::<W64>(addr32 as u64);

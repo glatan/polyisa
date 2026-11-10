@@ -1532,3 +1532,64 @@ fn run_movhps_xmm_m64_mem8() {
     // 下位64は movd の 0、上位64は [0x2038].
     assert_eq!(v, 0xAABB_CCDD_EEFF_0011_0000_0000_0000_0000u128);
 }
+
+#[test]
+fn run_movlpd_xmm_m64_memnd() {
+    // run 経由で 66 0F 12 0F (MOVLPD xmm1,[rdi]) を回す。
+    // [0x2000]=0xAABBCCDDEEFF0011 -> xmm1 下位64、exit(0)。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    env.backend.set(Gpr(7).state(), 0x2000);
+    env.backend
+        .mem
+        .write(VirtAddr(0x2000), &0xAABB_CCDD_EEFF_0011u64.to_le_bytes())
+        .unwrap();
+    let prog: &[u8] = &[
+        0x66, 0x0F, 0x12, 0x0F, // movlpd xmm1,[rdi]
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
+        0x0F, 0x05, // syscall -> exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0));
+    let v: u128 = env.backend.get(polyisa_guest_x86::sem::xmm_ref(
+        polyisa_guest_x86::sem::Xmm(1),
+    ));
+    assert_eq!((v & 0xFFFF_FFFF_FFFF_FFFF) as u64, 0xAABB_CCDD_EEFF_0011);
+}
+
+#[test]
+fn run_movhpd_xmm_m64_mem8() {
+    // run 経由で 66 0F 16 43 38 (MOVHPD xmm0,[rbx+0x38]) を回す。
+    // MOVHPS と等価：下位64は movd の 0 を保ち、上位64=[0x2038]、exit(0)。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    env.backend.set(Gpr(3).state(), 0x2000);
+    env.backend
+        .mem
+        .write(VirtAddr(0x2038), &0xAABB_CCDD_EEFF_0011u64.to_le_bytes())
+        .unwrap();
+    let prog: &[u8] = &[
+        0x66, 0x0F, 0x6E, 0xC0, // movd xmm0,eax (eax=0 -> xmm0=0。意味論の初期化)
+        0x66, 0x0F, 0x16, 0x43, 0x38, // movhpd xmm0,[rbx+0x38]
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
+        0x0F, 0x05, // syscall -> exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0));
+    let v: u128 = env.backend.get(polyisa_guest_x86::sem::xmm_ref(
+        polyisa_guest_x86::sem::Xmm(0),
+    ));
+    assert_eq!(v, 0xAABB_CCDD_EEFF_0011_0000_0000_0000_0000u128);
+}

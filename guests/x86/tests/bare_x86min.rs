@@ -1965,6 +1965,30 @@ fn movhps_xmm_m64_mem8_sets_high64() {
 }
 
 #[test]
+fn movlpd_xmm_m64_memnd_sets_low64() {
+    use polyisa_guest_x86::sem::Xmm;
+    // MOVLPD xmm1,[RDI]: 上位64は保持、下位64=[0].
+    // xmm1=0xAAAABBBBCCCCDDDD_1111222233334444、[0]=0xAABBCCDDEEFF0011
+    // -> 0xAAAABBBBCCCCDDDD_AABBCCDDEEFF0011.
+    let mut env = env();
+    env.map_rw(0, 1).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0), &0xAABB_CCDD_EEFF_0011u64.to_le_bytes())
+        .unwrap();
+    env.step(|b| {
+        let v = b.konst::<polyisa_sem::W128>(0xAAAA_BBBB_CCCC_DDDD_1111_2222_3333_4444u128);
+        b.set(sem::xmm_ref(Xmm(1)), v);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::movlpd_xmm_m64_memnd(b, Xmm(1), Gpr(7)))
+        .unwrap();
+    let v: u128 = env.backend.get(sem::xmm_ref(Xmm(1)));
+    assert_eq!(v, 0xAAAA_BBBB_CCCC_DDDD_AABB_CCDD_EEFF_0011u128);
+}
+
+#[test]
 fn c7_16bit_stores() {
     // 66 C7 [RBP+disp32],imm16: [0x100+0x20]=0x1234 (low 16).
     let mut env = env();

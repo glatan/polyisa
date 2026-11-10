@@ -494,6 +494,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("movq_xmm_m64_mem8", "M8", "00001111 01111110 01...... ........", "movq xmm, m64", "load"),
         // MOVHPS xmm,m64 mod=01 [base+disp8] (0F 16 /r)。SIBなし.
         ("movhps_xmm_m64_mem8", "M8", "00001111 00010110 01...... ........", "movhps xmm, m64", "load"),
+        // MOVLPD xmm,m64 mod=00 [base] (66 0F 12 /r)。SIBなし.
+        ("movlpd_xmm_m64_memnd", "MR", "00001111 00010010 00......", "movlpd xmm, m64", "load"),
         // MOVAPS xmm,m128 mod=00/01/10/RIP (0F 28 /r)。SIBなし、MOVUPS と等価.
         ("movaps_load_memnd", "MR", "00001111 00101000 00......", "movaps xmm, m128", "load"),
         ("movaps_load_mem8", "M8", "00001111 00101000 01...... ........", "movaps xmm, m128", "load"),

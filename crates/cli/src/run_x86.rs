@@ -251,6 +251,16 @@ fn fetch_len(
                 let md = m >> 6;
                 let rm = m & 7;
                 if md == 1 && rm != 4 { Some(4) } else { None }
+            } else if s == 0x12 {
+                // MOVLPD xmm,m64 (66 0F 12 /r)。mod=00 [base] (3B) のみ。SIB・RIPなし.
+                let m = third?;
+                let md = m >> 6;
+                let rm = m & 7;
+                if md == 0 && rm != 4 && rm != 5 {
+                    Some(3)
+                } else {
+                    None
+                }
             } else if s == 0x10
                 || s == 0x11
                 || s == 0x28
@@ -951,6 +961,7 @@ pub fn run_mode(
                             | 0x73
                             | 0x74
                             | 0x76
+                            | 0x12
                             | 0x16
                             | 0x7E
                             | 0xD7
@@ -1175,6 +1186,7 @@ pub fn run_mode(
                     | Insn::Nopl
                     | Insn::TestRm32
                     | Insn::TestM16ImmMemnd
+                    | Insn::MovlpdXmmM64Memnd
                     | Insn::MovdXmm
                     | Insn::MovdXmmM32
                     | Insn::MovdXmmRip
@@ -1185,6 +1197,8 @@ pub fn run_mode(
                     | Insn::MovqM64XmmMemnd
                     | Insn::MovqM64XmmMem8
                     | Insn::MovqM64XmmMem32
+                    // MOVHPD (66 0F 16) は MOVHPS (0F 16) と等価のため Insn を共用する.
+                    | Insn::MovhpsXmmM64Mem8
                     | Insn::Pshufd
                     | Insn::Pslldq
                     | Insn::Psubb
@@ -3763,8 +3777,10 @@ fn dispatch<B: Backend>(
         }
         // MOVQ xmm,[base+disp8] (F3 0F 7E mod=01、4B)。dst は reg フィールド.
         Insn::MovqXmmM64Mem8 => sem::movq_xmm_m64_mem8(b, xmm_reg(), rm0f(), disp8()),
-        // MOVHPS xmm,[base+disp8] (0F 16 mod=01、4B)。dst は reg フィールド.
+        // MOVHPS xmm,[base+disp8] (0F 16 mod=01、4B。66 付き MOVHPD と共用)。dst は reg フィールド.
         Insn::MovhpsXmmM64Mem8 => sem::movhps_xmm_m64_mem8(b, xmm_reg(), rm0f(), disp8()),
+        // MOVLPD xmm,[base] (66 0F 12 mod=00、3B)。dst は reg フィールド.
+        Insn::MovlpdXmmM64Memnd => sem::movlpd_xmm_m64_memnd(b, xmm_reg(), rm0f()),
         Insn::Pshufd => {
             let imm = (word & 0xff) as u8;
             // F2 接頭辞では PSHUFLW として振る舞う (0F 70 共有のため Insn を共用).
@@ -5128,10 +5144,21 @@ fn guest_c_string(env: &mut BareEnv, addr: u64) -> Option<String> {
         align: polyisa_mem::Align::Unaligned,
         kind: polyisa_mem::AccessKind::DataRead,
     };
-    let mut buf = vec![0u8; 4096];
-    env.backend.mem.read(VirtAddr(addr), &mut buf, acc).ok()?;
-    let end = buf.iter().position(|&b| b == 0)?;
-    String::from_utf8(buf[..end].to_vec()).ok()
+    // 1バイトずつ読む。まとめて読むと写像の境界で失敗するため.
+    // 上限は 4096 バイト（NUL がなければ失敗扱い）。
+    let mut buf = Vec::new();
+    for i in 0..4096u64 {
+        let mut b = [0u8; 1];
+        env.backend.mem.read(VirtAddr(addr + i), &mut b, acc).ok()?;
+        if b[0] == 0 {
+            break;
+        }
+        buf.push(b[0]);
+    }
+    if buf.len() == 4096 {
+        return None;
+    }
+    String::from_utf8(buf).ok()
 }
 
 /// `cli run` の Linux 用 ecall 処理。openat/read/write/close と
@@ -5835,6 +5862,54 @@ impl TrapHandler for CliLinux {
             set64(env, Gpr(0), 0);
             return TrapOutcome::Handled;
         }
+        if self.is64 && nr == polyisa_os_linux::x86_64::SENDFILE {
+            // sendfile(out_fd, in_fd, offset, count)。offset==NULL のみ受け付ける.
+            // in_fd から読んで out_fd (1/2) へ書き、転送バイト数を返す.
+            // Ref: SRC-LINUX (7.3).
+            let out_fd = get64(env, Gpr(7)) as u32;
+            let in_fd = get64(env, Gpr(6)) as u32;
+            let offset = get64(env, Gpr(2));
+            let mut left = get64(env, Gpr(10));
+            if offset != 0 {
+                set64(env, Gpr(0), neg(EINVAL));
+                return TrapOutcome::Handled;
+            }
+            if out_fd != 1 && out_fd != 2 {
+                set64(env, Gpr(0), neg(EBADF));
+                return TrapOutcome::Handled;
+            }
+            if in_fd == 0 {
+                // stdin は空読みとして 0 を返す（既存 read と同じ扱い）。
+                set64(env, Gpr(0), 0);
+                return TrapOutcome::Handled;
+            }
+            let slot = in_fd.wrapping_sub(3) as usize;
+            let Some(file) = self.fds.get_mut(slot).and_then(|f| f.as_mut()) else {
+                set64(env, Gpr(0), neg(EBADF));
+                return TrapOutcome::Handled;
+            };
+            let mut done = 0u64;
+            let mut chunk = vec![0u8; IO_CHUNK];
+            while left > 0 {
+                let take = left.min(IO_CHUNK as u64) as usize;
+                let n = match std::io::Read::read(file, &mut chunk[..take]) {
+                    Ok(0) => break,
+                    Ok(n) => n,
+                    Err(_) => break,
+                };
+                let w = match out_fd {
+                    1 => std::io::Write::write(&mut std::io::stdout(), &chunk[..n]).unwrap_or(0),
+                    _ => std::io::Write::write(&mut std::io::stderr(), &chunk[..n]).unwrap_or(0),
+                };
+                done += n as u64;
+                left -= n as u64;
+                if n < take || w < n {
+                    break;
+                }
+            }
+            set64(env, Gpr(0), done);
+            return TrapOutcome::Handled;
+        }
         if nr == polyisa_os_linux::x86_64::MPROTECT && self.is64
             || nr == polyisa_os_linux::i386::MPROTECT && !self.is64
         {
@@ -6300,6 +6375,27 @@ mod tests {
     }
 
     #[test]
+    fn openat_reads_string_near_map_edge() {
+        // 写像の末尾近くに置いたパスも読める（まとめて読むと境界で失敗するため）。
+        let mut sys = CliX86::default();
+        let mut env = bare();
+        env.backend.mem.write(VirtAddr(0x1FFD), b"/x\0").unwrap();
+        set_regs(
+            &mut env,
+            polyisa_os_linux::i386::OPENAT as u32,
+            0xffff_ff9c,
+            0x1FFD,
+            0,
+        );
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        // /x は存在しないため ENOENT。読めなければ Unimplemented になる。
+        assert_eq!(env.backend.get(Gpr(0).state()), neg_errno(ENOENT));
+    }
+
+    #[test]
     fn openat_missing_is_enoent() {
         let mut sys = CliX86::default();
         let mut env = bare();
@@ -6590,6 +6686,48 @@ mod tests {
         set64(&mut env, Gpr(6), 0x100);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EBADF));
+    }
+
+    #[test]
+    fn sendfile_file_to_stdout() {
+        use polyisa_os_linux::x86_64 as abi;
+        let mut sys = CliLinux::x86_64();
+        // /proc/self/exe を入力に積む（必ず存在する実行ファイル）。
+        let f = std::fs::File::open("/proc/self/exe").unwrap();
+        sys.fds.push(Some(f));
+        let mut env = bare();
+        // sendfile(1, 3, NULL, 16) は 16 を返して stdout に書く。
+        set64(&mut env, Gpr(0), abi::SENDFILE);
+        set64(&mut env, Gpr(7), 1);
+        set64(&mut env, Gpr(6), 3);
+        set64(&mut env, Gpr(2), 0);
+        set64(&mut env, Gpr(10), 16);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 16);
+        // offset 非NULL は EINVAL。
+        set64(&mut env, Gpr(0), abi::SENDFILE);
+        set64(&mut env, Gpr(7), 1);
+        set64(&mut env, Gpr(6), 3);
+        set64(&mut env, Gpr(2), 0x100);
+        set64(&mut env, Gpr(10), 16);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EINVAL));
+        // 不正な入力 fd は EBADF。
+        set64(&mut env, Gpr(0), abi::SENDFILE);
+        set64(&mut env, Gpr(7), 1);
+        set64(&mut env, Gpr(6), 99);
+        set64(&mut env, Gpr(2), 0);
+        set64(&mut env, Gpr(10), 16);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EBADF));
+        // stdin (0) は空読みとして 0 を返す。
+        set64(&mut env, Gpr(0), abi::SENDFILE);
+        set64(&mut env, Gpr(7), 1);
+        set64(&mut env, Gpr(6), 0);
+        set64(&mut env, Gpr(2), 0);
+        set64(&mut env, Gpr(10), 16);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
     }
 
     #[test]
