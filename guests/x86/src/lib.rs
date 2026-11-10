@@ -70,7 +70,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数116件。
-        assert_eq!(INSNS.len(), 487);
+        assert_eq!(INSNS.len(), 511);
     }
 
     #[test]
@@ -622,6 +622,106 @@ mod tests {
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x8364241000, 40), Some(Insn::AndRmImm8Sibd));
         assert_eq!(decode(0x8364241000, 32), None);
+        // AND m,imm8 SIB mod=00 no_index (83 /4 + SIB + imm8)。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x83242400, 32), Some(Insn::AndRmImm8Sib));
+        assert_eq!(decode(0x83242400, 24), None);
+        // MOVZX r32,r16 reg-direct (0F B7 /r)。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x0FB7C3, 24), Some(Insn::MovzxR32R16));
+        assert_eq!(decode(0x0FB7C300, 32), None);
+        // BT r32,imm8 reg-direct (0F BA /4 ib)。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x0FBAE31E, 32), Some(Insn::BtR32Imm));
+        assert_eq!(decode(0x0FBAE31E, 24), None);
+        // TEST m16,imm16 RIP (66 F7 05 + disp32 + imm16)。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0xF705000000003102, 64), Some(Insn::TestM16ImmRip));
+        assert_eq!(decode(0xF705000000003102, 56), None);
+        // CMOVNE r,m64 SIB+disp8 no_index (0F 45 mod=01)。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x0F45442450, 40), Some(Insn::CmovneR64Sibd));
+        assert_eq!(decode(0x0F45442450, 32), None);
+        // XOR r/m8,r8 reg-direct (30 /r)。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x30C0, 16), Some(Insn::XorM8R8));
+        assert_eq!(decode(0x30C0, 8), None);
+        // XADD r32,[base] (0F C1 mod=00)。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x0FC103, 24), Some(Insn::XaddR32Memnd));
+        assert_eq!(decode(0x0FC103, 16), None);
+        // NOPL [base+disp32] (0F 1F mod=10)。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x0F1F8000000000, 56), Some(Insn::NoplMem32));
+        assert_eq!(decode(0x0F1F8000000000, 48), None);
+        // NOPL [base+disp8] (0F 1F mod=01)。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x0F1F4000, 32), Some(Insn::NoplMem8));
+        assert_eq!(decode(0x0F1F4000, 24), None);
+        // CMPB [base],imm8 SIB mod=00 no_index (80 /7 + SIB + imm8)。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x803C2443, 32), Some(Insn::CmpRm8ImmSib));
+        assert_eq!(decode(0x803C2443, 24), None);
+        // MOVB [base+disp32],imm8 (C6 /0 mod=10)。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0xC68550FBFFFF20, 56), Some(Insn::MovRm8ImmMem32));
+        assert_eq!(decode(0xC68550FBFFFF20, 48), None);
+        // SUB r,m32 SIB+disp8 no_index (2B mod=01)。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x2B442408, 32), Some(Insn::SubRSibd));
+        assert_eq!(decode(0x2B442408, 24), None);
+        // MOVB [base+index*scale+disp8],imm8 (C6 /0 SIB mod=01)。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0xC64428FE3A, 40), Some(Insn::MovRm8ImmSibd));
+        assert_eq!(decode(0xC64428FE3A, 32), None);
+        // MOVB [base+index*scale],imm8 (C6 /0 SIB mod=00)。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0xC604163A, 32), Some(Insn::MovRm8ImmSib));
+        assert_eq!(decode(0xC604163A, 24), None);
+        // ADD r,m SIB+disp8 no_index (03 mod=01)。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x03442418, 32), Some(Insn::AddRSibd));
+        assert_eq!(decode(0x03442418, 24), None);
+        // MOVSX r32,m8 RIP (0F BE 05 + disp32)。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x0FBE0500000000, 56), Some(Insn::MovsxR32M8Rip));
+        assert_eq!(decode(0x0FBE0500000000, 48), None);
+        // MOVZX r32,m16 mod=01 [base+disp8] (0F B7 /r)。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x0FB75610, 32), Some(Insn::MovzxR32M16Mem8));
+        assert_eq!(decode(0x0FB75610, 24), None);
+        // MOVAPS [base+disp32],xmm (0F 29 mod=10)。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x0F2985E0FEFFFF, 56), Some(Insn::MovapsStoreMem32));
+        assert_eq!(decode(0x0F2985E0FEFFFF, 48), None);
+        // OR m32,r32 SIB+disp32 (09 /r SIB mod=10)。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x0994B008080000, 56), Some(Insn::OrM32R32Sibd32));
+        assert_eq!(decode(0x0994B008080000, 48), None);
+        // CMP r,m SIB mod=00 [base+index*scale] (3B /r)。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x3B0407, 24), Some(Insn::CmpRSib));
+        assert_eq!(decode(0x3B0407, 16), None);
+        // SUB m32,r32 mod=01 [base+disp8] (29 /r)。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x296DA0, 24), Some(Insn::SubM32R32Mem8));
+        assert_eq!(decode(0x296DA0, 16), None);
+        // MOV [base+index*scale],r8 SIB mod=00 (88 /r)。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x881407, 24), Some(Insn::MovM8R8Sib));
+        assert_eq!(decode(0x881407, 16), None);
+        // ADD m32,r32 SIB+disp8 (01 /r SIB mod=01)。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x016C2418, 32), Some(Insn::AddM32R32Sibd));
+        assert_eq!(decode(0x016C2418, 24), None);
+        // CMP m,imm8 SIB mod=00 no_index (83 /7 + SIB + imm8)。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x833C2400, 32), Some(Insn::CmpRmImm8Sib));
+        assert_eq!(decode(0x833C2400, 24), None);
+        // CMP m,imm8 SIB mod=00 [base+index*scale] (83 /7 + SIB + imm8)。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x833CD300, 32), Some(Insn::CmpRmImm8Sib));
+        assert_eq!(decode(0x833CD300, 24), None);
         // SUB r/m8,r8 reg-direct (28 /r)。
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x28D1, 16), Some(Insn::SubM8R8));

@@ -263,6 +263,10 @@ pub fn build_model() -> polyisa_isadl::Model {
         // F3/REX.W は剥がし済みのため 0F 1E C8 の3Bで受ける。
         ("rdsspq", "F1", "00001111 00011110 11001000", "rdsspq", "system"),
         ("nopl", "F1", "00001111 00011111 00000000", "nopl", "alu"),
+        // NOPL [base+disp8] (0F 1F mod=01)。何もしない.
+        ("nopl_mem8", "F1", "00001111 00011111 01...... ........", "nopl [r/m+disp8]", "alu"),
+        // NOPL [base+disp32] (0F 1F mod=10)。何もしない.
+        ("nopl_mem32", "F1", "00001111 00011111 10...... ................................", "nopl [r/m+disp32]", "alu"),
         // XMM 最小セット（66 接頭辞は実行側で剥がす。REX.W は dispatch で見る）。
         // MOVD xmm,r32 (66 0F 6E /r)。reg-direct のみ。
         ("movd_xmm", "F1", "00001111 01101110 11......", "movd xmm, r32", "load"),
@@ -338,6 +342,19 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("setle", "F1", "00001111 10011110 11......", "setle r/m8", "alu"),
         ("setg", "F1", "00001111 10011111 11......", "setg r/m8", "alu"),
         ("cmove_m64", "M32", "00001111 01000100 10...... ................................", "cmove r64, m64", "load"),
+        ("cmovne_r64_sibd", "F1", "00001111 01000101 01...100 ..100... ........", "cmovne r, m64", "load"),
+        // SUB r32/r64, m32/m64 SIB+disp8 no_index (2B mod=01)。REX.W で64bit.
+        ("sub_r_sibd", "F1", "00101011 01...100 ..100... ........", "sub r, m", "alu"),
+        // ADD r32/r64, m32/m64 SIB+disp8 no_index (03 mod=01)。REX.W で64bit.
+        ("add_r_sibd", "F1", "00000011 01...100 ..100... ........", "add r, m", "alu"),
+        // ADD m32,r32 SIB+disp8 (01 mod=01)。
+        ("add_m32_r32_sibd", "F1", "00000001 01...100 ........ ........", "add m, r", "alu"),
+        // CMP m32,imm8 SIB mod=00 (83 /7、no_index non-abs)。index=100 固定.
+        ("cmp_rm_imm8_sib", "F1", "10000011 00111100 ........ ........", "cmp r/m, {imm}", "alu"),
+        // CMP r32/r64, m32/m64 SIB mod=00 [base+index*scale] (3B /r)。
+        ("cmp_r_sib", "F1", "00111011 00...100 ........", "cmp r, m", "alu"),
+        // XADD r32, m32 [base] (0F C1 mod=00)。LOCK 接頭辞は実行側で無視する.
+        ("xadd_r32_memnd", "MR", "00001111 11000001 00......", "xadd r32, m32", "alu"),
         // CMOVE r64/r32, m64/m32 [RIP+disp32] (0F 44 05/0D... + disp32)。REX.W で64bit.
         ("cmove_rip", "F1", "00001111 01000100 00...101 ................................", "cmove r, m", "load"),
         ("imul_r_imm", "F1", "01101001 11...... ................................", "imul r, r/m, {imm}", "alu"),
@@ -454,8 +471,14 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("movzx_r32_m16_rip", "F1", "00001111 10110111 00...101 ................................", "movzx r32, m16", "load"),
         // MOVZX r32,m8 RIP (0F B6 05 + disp32)。F3/66 接頭辞なし.
         ("movzx_r32_m8_rip", "F1", "00001111 10110110 00...101 ................................", "movzx r32, m8", "load"),
+        // MOVSX r32,m8 RIP (0F BE 05 + disp32)。
+        ("movsx_r32_m8_rip", "F1", "00001111 10111110 00...101 ................................", "movsx r32, m8", "load"),
         // MOVZX r32,r/m8 reg-direct (0F B6 /r mod=11)。REX ありは低8、なしの4-7は上位8.
         ("movzx_r32_r8", "F1", "00001111 10110110 11......", "movzx r32, r/m8", "load"),
+        // MOVZX r32,r16 reg-direct (0F B7 /r mod=11)。
+        ("movzx_r32_r16", "F1", "00001111 10110111 11......", "movzx r32, r16", "load"),
+        // BT r32,imm8 (0F BA /4 ib reg-direct)。
+        ("bt_r32_imm", "F1", "00001111 10111010 11100... ........", "bt r32, {imm}", "alu"),
         // PXOR xmm,xmm (66 0F EF /r)。
         ("pxor", "F1", "00001111 11101111 11......", "pxor xmm, xmm", "alu"),
         // XORPS xmm,xmm (0F 57 /r)。PXOR と等価のため意味論を共有する.
@@ -547,14 +570,20 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("test_rm32_imm", "F1", "11110111 11000... ................................", "test r/m32, {imm}", "alu"),
         // TEST m16,imm16 mod=00 [base] (66 F7 /0)。66 接頭辞は実行側で剥がす.
         ("test_m16_imm_memnd", "F1", "11110111 00000... ................", "test m16, {imm}", "alu"),
+        // TEST m16,imm16 RIP (66 F7 05 + disp32 + imm16)。66 接頭辞は実行側で剥がす.
+        ("test_m16_imm_rip", "F1", "11110111 00000101 ................................ ................", "test m16, {imm}", "alu"),
         ("not_rm32", "F1", "11110111 11010...", "not r/m32", "alu"),
         ("neg_rm32", "F1", "11110111 11011...", "neg r/m32", "alu"),
         ("test_rm8_imm", "F1", "11110110 11000... ........", "test r/m8, {imm}", "alu"),
         ("and_rm8_imm", "F1", "10000000 11100... ........", "and r/m8, {imm}", "alu"),
         ("or_rm8_imm", "F1", "10000000 11001... ........", "or r/m8, {imm}", "alu"),
         ("cmp_rm8_imm", "F1", "10000000 11111... ........", "cmp r/m8, {imm}", "alu"),
+        // CMPB [base],imm8 SIB mod=00 (80 /7、no_index non-abs)。index=100 固定.
+        ("cmp_rm8_imm_sib", "F1", "10000000 00111100 ..100... ........", "cmp r/m8, {imm}", "alu"),
         // AND m32/m64,imm8 SIB mod=01 [base+disp8] (83 /4、no_index)。index=100 固定.
         ("and_rm_imm8_sibd", "F1", "10000011 01100100 ..100... ........ ........", "and r/m, {imm}", "alu"),
+        // AND m32/m64,imm8 SIB mod=00 [base] (83 /4、no_index non-abs)。index=100 固定.
+        ("and_rm_imm8_sib", "F1", "10000011 00100100 ..100... ........", "and r/m, {imm}", "alu"),
         ("cmp_rm8_imm_sibd", "F1", "10000000 01111100 ........ ........ ........", "cmp r/m8, {imm}", "alu"),
         ("test_m8_imm_rip", "F1", "11110110 00000101 ................................ ........", "test m8, {imm}", "alu"),
         // TEST m8,imm8 mod=00 [base] (F6 /0)。SIBなし.
@@ -940,6 +969,14 @@ pub fn build_model() -> polyisa_isadl::Model {
             "load",
         ),
         (
+            "movzx_r32_m16_mem8",
+            "M8",
+            "00001111 10110111 01...... ........",
+            vec![wc("m8_rm", WhereOp::Ne, 4)],
+            "movzx r32, m16",
+            "load",
+        ),
+        (
             "movzx_r32_m8_mem32",
             "M32",
             "00001111 10110110 10...... ................................",
@@ -1076,6 +1113,14 @@ pub fn build_model() -> polyisa_isadl::Model {
             "alu",
         ),
         (
+            "sub_m32_r32_mem8",
+            "M8",
+            "00101001 01...... ........",
+            vec![wc("m8_rm", WhereOp::Ne, 4)],
+            "sub m32, r32",
+            "alu",
+        ),
+        (
             "sub_r_mem32",
             "M32",
             "00101011 10...... ................................",
@@ -1121,6 +1166,14 @@ pub fn build_model() -> polyisa_isadl::Model {
             "10001001 00...100 ........",
             vec![wc("n8_base", WhereOp::Ne, 5)],
             "mov [r/m+sib], r32",
+            "store",
+        ),
+        (
+            "mov_m8_r8_sib",
+            "N8",
+            "10001000 00...100 ........",
+            vec![wc("n8_base", WhereOp::Ne, 5)],
+            "mov [r/m+sib], r8",
             "store",
         ),
         (
@@ -1202,6 +1255,14 @@ pub fn build_model() -> polyisa_isadl::Model {
             vec![],
             "mov [r/m+sib+disp32], r32",
             "store",
+        ),
+        (
+            "or_m32_r32_sibd32",
+            "D32",
+            "00001001 10...100 ........ ................................",
+            vec![],
+            "or [r/m+sib+disp32], r32",
+            "alu",
         ),
         (
             "mov_eax_sibabs",
@@ -1361,6 +1422,14 @@ pub fn build_model() -> polyisa_isadl::Model {
             "00101000 11......",
             vec![],
             "sub r/m8, r8",
+            "alu",
+        ),
+        (
+            "xor_m8_r8",
+            "F1",
+            "00110000 11......",
+            vec![],
+            "xor r/m8, r8",
             "alu",
         ),
         (
@@ -1597,6 +1666,31 @@ pub fn build_model() -> polyisa_isadl::Model {
             "store",
         ),
         (
+            "mov_rm8_imm_sibd",
+            "S8",
+            "11000110 01000100 ........ ........ ........",
+            vec![],
+            "mov r/m8, {imm}",
+            "store",
+        ),
+        // MOVB [base+index*scale],imm8 (C6 /0 SIB mod=00)。
+        (
+            "mov_rm8_imm_sib",
+            "F1",
+            "11000110 00000100 ........ ........",
+            vec![],
+            "mov r/m8, {imm}",
+            "store",
+        ),
+        (
+            "mov_rm8_imm_mem32",
+            "M32",
+            "11000110 10000... ................................ ........",
+            vec![wc("m32_rm", WhereOp::Ne, 4)],
+            "mov r/m8, {imm}",
+            "store",
+        ),
+        (
             "cmp_rm_imm8_memnd",
             "M8",
             "10000011 00111... ........",
@@ -1741,6 +1835,14 @@ pub fn build_model() -> polyisa_isadl::Model {
             "00001111 00101001 01...... ........",
             vec![wc("m8_rm", WhereOp::Ne, 4)],
             "movaps [r/m+disp8], xmm",
+            "store",
+        ),
+        (
+            "movaps_store_mem32",
+            "M32",
+            "00001111 00101001 10...... ................................",
+            vec![wc("m32_rm", WhereOp::Ne, 4)],
+            "movaps [r/m+disp32], xmm",
             "store",
         ),
         (
