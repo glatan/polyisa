@@ -131,6 +131,7 @@ pub mod x86_64 {
     pub const UMASK: u64 = 95;
     pub const FTRUNCATE: u64 = 77;
     pub const RENAME: u64 = 82;
+    pub const SYMLINK: u64 = 88;
 }
 
 /// 段階4の準備としての i386 番号表（Linux・32ビット）。
@@ -196,6 +197,7 @@ pub mod i386 {
     pub const UMASK: u64 = 60;
     pub const FTRUNCATE: u64 = 93;
     pub const RENAME: u64 = 38;
+    pub const SYMLINK: u64 = 83;
 }
 
 /// ABI と番号から名前を引く。段階1の範囲と x86_64・i386 の番号表のみ。
@@ -301,6 +303,7 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             i386::UMASK => Some("umask"),
             i386::FTRUNCATE => Some("ftruncate"),
             i386::RENAME => Some("rename"),
+            i386::SYMLINK => Some("symlink"),
             _ => None,
         },
         GuestAbi::X86_64Linux => match nr {
@@ -361,6 +364,7 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             x86_64::UMASK => Some("umask"),
             x86_64::FTRUNCATE => Some("ftruncate"),
             x86_64::RENAME => Some("rename"),
+            x86_64::SYMLINK => Some("symlink"),
             _ => None,
         },
         GuestAbi::Unknown => None,

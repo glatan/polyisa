@@ -14,6 +14,22 @@ pub fn parallelism() -> usize {
         .unwrap_or(1)
 }
 
+/// シンボリックリンクを作る。`ln -s` の仮想カーネル実装が使う。
+/// 可搬な std には作成 API がないためホスト依存としてここに置く。
+#[cfg(unix)]
+pub fn symlink(old: &str, new: &str) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(old, new)
+}
+
+/// 非 Unix ホストでは未対応の旨を返す。
+#[cfg(not(unix))]
+pub fn symlink(_old: &str, _new: &str) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "symlink is not supported on this host",
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

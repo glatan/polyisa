@@ -9055,6 +9055,38 @@ impl TrapHandler for CliLinux {
                 }
             };
         }
+        if nr == polyisa_os_linux::x86_64::SYMLINK && self.is64
+            || nr == polyisa_os_linux::i386::SYMLINK && !self.is64
+        {
+            // symlink(oldpath, newpath)。`ln -s` で使う。
+            // 可搬 API がないため実体はクリエート host の helper に置く。
+            let old_addr = get64(env, r_a);
+            let new_addr = get64(env, r_b);
+            let old_path = match guest_c_string(env, old_addr) {
+                Some(p) => p,
+                None => return TrapOutcome::Unimplemented,
+            };
+            let new_path = match guest_c_string(env, new_addr) {
+                Some(p) => p,
+                None => return TrapOutcome::Unimplemented,
+            };
+            return match polyisa_host::symlink(&old_path, &new_path) {
+                Ok(()) => {
+                    set64(env, Gpr(0), 0);
+                    TrapOutcome::Handled
+                }
+                Err(e) => {
+                    let no = match e.kind() {
+                        std::io::ErrorKind::NotFound => ENOENT,
+                        std::io::ErrorKind::AlreadyExists => 17,
+                        std::io::ErrorKind::PermissionDenied => EACCES,
+                        _ => EINVAL,
+                    };
+                    set64(env, Gpr(0), neg(no));
+                    TrapOutcome::Handled
+                }
+            };
+        }
         if nr == polyisa_os_linux::x86_64::RMDIR && self.is64
             || nr == polyisa_os_linux::i386::RMDIR && !self.is64
         {
@@ -10597,6 +10629,66 @@ mod tests {
             .write(VirtAddr(0x100 + missing.len() as u64), &[0])
             .unwrap();
         set64(&mut env, Gpr(0), abi::RENAME);
+        set64(&mut env, Gpr(7), 0x100);
+        set64(&mut env, Gpr(6), 0x200);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(ENOENT));
+        let _ = std::fs::remove_file(&new);
+    }
+
+    #[test]
+    fn symlink_roundtrip() {
+        // symlink(old, new) はリンクを作って 0 を返す。`ln -s` で使う.
+        // 実体は host helper のためここでは番号経路と結果の写像を確かめる.
+        use polyisa_os_linux::x86_64 as abi;
+        let mut sys = CliLinux::x86_64();
+        let mut env = bare();
+        let old = String::from("/tmp/symlink_target_exists");
+        let new = format!("/tmp/polyisa_symlink_{}", std::process::id());
+        let _ = std::fs::remove_file(&new);
+        env.backend
+            .mem
+            .write(VirtAddr(0x100), old.as_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x100 + old.len() as u64), &[0])
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x200), new.as_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x200 + new.len() as u64), &[0])
+            .unwrap();
+        // symlink(old, new) -> 0、new は old へのリンク.
+        set64(&mut env, Gpr(0), abi::SYMLINK);
+        set64(&mut env, Gpr(7), 0x100);
+        set64(&mut env, Gpr(6), 0x200);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        assert_eq!(
+            std::fs::read_link(&new).unwrap(),
+            std::path::PathBuf::from(old.as_str())
+        );
+        // 同じ new の再作成は EEXIST(17)。
+        set64(&mut env, Gpr(0), abi::SYMLINK);
+        set64(&mut env, Gpr(7), 0x100);
+        set64(&mut env, Gpr(6), 0x200);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(17));
+        // 存在しない親の下は ENOENT。
+        let bad = format!("/tmp/polyisa_no_dir_{}/link", std::process::id());
+        env.backend
+            .mem
+            .write(VirtAddr(0x200), bad.as_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x200 + bad.len() as u64), &[0])
+            .unwrap();
+        set64(&mut env, Gpr(0), abi::SYMLINK);
         set64(&mut env, Gpr(7), 0x100);
         set64(&mut env, Gpr(6), 0x200);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
