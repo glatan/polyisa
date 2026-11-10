@@ -735,6 +735,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("add_rm_imm8_memnd", "F1", "10000011 00000... ........", "add r/m, {imm}", "alu"),
         // ADD m32/m64,imm8 mod=10 [base+disp32] (83 /0)。REX.W で64bit.
         ("add_rm_imm8_mem32", "F1", "10000011 10000... ................................ ........", "add r/m, {imm}", "alu"),
+        // ADD m32/m64,imm8 SIB+disp8 (83 /0 SIB mod=01)。test 0x5b1d4e 対応.5B.
+        ("add_rm_imm8_sibd", "F1", "10000011 01000100 ........ ........ ........", "add r/m, {imm}", "alu"),
         // OR m32/m64,imm8 mod=00 [base] (83 /1)。REX.W で64bit.
         ("or_rm_imm8_memnd", "F1", "10000011 00001... ........", "or r/m, {imm}", "alu"),
         // OR m32/m64,imm8 mod=01 [base+disp8] (83 /1)。
