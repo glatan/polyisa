@@ -4585,6 +4585,20 @@ fn and_ax_imm16_masks_low() {
 }
 
 #[test]
+fn cmp_ax_imm16_sets_flags() {
+    // CMP AX,0x0800 (66 3D): AX=0 -> CF=1、ZF=0。AX=0x0800 -> ZF=1.
+    // seq の停止点 0x476e5b に対応.
+    let mut env = env();
+    env.backend.set(Gpr(0).state(), 0);
+    env.step(|b| sem::cmp_ax_imm16(b, 0x0800)).unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0);
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x1, 1);
+    env.backend.set(Gpr(0).state(), 0x0800);
+    env.step(|b| sem::cmp_ax_imm16(b, 0x0800)).unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0x40);
+}
+
+#[test]
 fn imul_r64_basic() {
     // IMUL RAX,RDX (REX.W): RAX=3, RDX=7 -> 21.
     let mut env = env();

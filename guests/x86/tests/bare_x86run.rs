@@ -3272,6 +3272,35 @@ fn run_and_ax_imm16() {
 }
 
 #[test]
+fn run_cmp_ax_imm16() {
+    // run 経由で 66 3D 00 08 (CMPW $0x0800,%ax) を回す。seq の停止点 0x476e5b に対応.
+    // AX=0 -> CF=1、ZF=0 になり、exit(0)。mov は旗を変えない.
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(0).state(), 0);
+    let prog: &[u8] = &[
+        0x66, 0x3D, 0x00, 0x08, // cmpw $0x0800,%ax
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
+        0x0F, 0x05, // syscall -> exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0));
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x40,
+        0
+    );
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x1,
+        1
+    );
+}
+
+#[test]
 fn run_shld_r64_cl_rexwr() {
     // run 経由で 4C 0F A5 C8 (SHLD RAX,R9,CL) を回す。seq の RBP 破壊バグに対応.
     // RAX=1、R9=0x8000000000000000、CL=1 -> RAX=3、RBP は保存される。

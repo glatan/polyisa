@@ -293,6 +293,16 @@ pub fn and_ax_imm16<B: Backend>(b: &mut B, imm: u16) -> Flow<B> {
     Ok(())
 }
 
+/// CMP AX,imm16 (66 3D)。AX と imm16 を比較し 6 旗を更新する (dst 不変).
+pub fn cmp_ax_imm16<B: Backend>(b: &mut B, imm: u16) -> Flow<B> {
+    let x32 = read(b, Gpr(0));
+    let x: B::V<W16> = b.trunc::<W32, W16>(x32);
+    let y = b.konst::<W16>(imm);
+    let v = b.sub::<W16>(x, y);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
 /// TEST r/m32,r32。AND 結果で 5 旗を更新する（CF=0、OF=0）。dst/src は変えない.
 pub fn test_rm32<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
     let x = read(b, dst);

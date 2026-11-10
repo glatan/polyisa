@@ -74,9 +74,17 @@ fn fetch_len(
         0x68 => Some(5),
         0xEB | 0x70 | 0x71 | 0x72 | 0x73 | 0x74 | 0x75 | 0x76 | 0x77 | 0x78 | 0x79 | 0x7A
         | 0x7B | 0x7C | 0x7D | 0x7E | 0x7F | 0xE2 | 0xCD | 0x3C | 0x0C => Some(2),
-        0x05 | 0x2D | 0x3D | 0xE8 | 0xE9 | 0x0D | 0x35 | 0xA9 => Some(5),
+        0x05 | 0x2D | 0xE8 | 0xE9 | 0x0D | 0x35 | 0xA9 => Some(5),
         // 0x25 (AND EAX,imm32)。66 接頭辞では AND AX,imm16 (3B)。
         0x25 => {
+            if has66 {
+                Some(3)
+            } else {
+                Some(5)
+            }
+        }
+        // 0x3D (CMP EAX,imm32)。66 接頭辞では CMP AX,imm16 (3B)。
+        0x3D => {
             if has66 {
                 Some(3)
             } else {
@@ -1435,6 +1443,7 @@ pub fn run_mode(
                     | Insn::MovEaxAbs
                     | Insn::MovRm16ImmM32
                     | Insn::AndAxImm16
+                    | Insn::CmpAxImm16
                     | Insn::CmpRmImm8Rip
                     // MOV [base+disp32],r16 (66 89 mod=10) は MovMemEax32 を共用する.
                     | Insn::MovMemEax32
@@ -3228,6 +3237,10 @@ fn dispatch<B: Backend>(
         Insn::AndAxImm16 => {
             // 66 25 + imm16 (24b、66 接頭辞は剥がし済み)。imm は最下位16 LE.
             sem::and_ax_imm16(b, ((word & 0xffff) as u16).swap_bytes())
+        }
+        Insn::CmpAxImm16 => {
+            // 66 3D + imm16 (24b、66 接頭辞は剥がし済み)。imm は最下位16 LE.
+            sem::cmp_ax_imm16(b, ((word & 0xffff) as u16).swap_bytes())
         }
         Insn::OrEax => {
             if rex_w {
