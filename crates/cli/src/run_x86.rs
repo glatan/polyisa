@@ -4243,15 +4243,19 @@ fn dispatch<B: Backend>(
             }
         }
         Insn::CmpM32R32Sibd => {
-            // 39 /r SIB mod=01 [base+disp8] no_index (32b)。
-            // SIB は (word>>8) 下位8、disp は最下位8。base は SIB 下位3 + REX.B。
-            let sib_v = ((word >> 8) & 0xff) as u8;
+            // 39 /r SIB mod=01 [base+index*scale+disp8] (32b)。no_index は base+disp8 のみ.
+            // SIB は (word>>8) 下位8、disp は最下位8。dst はメモリ、src は reg.
             let d8 = (word & 0xff) as u8 as i8;
-            let base = Gpr((sib_v & 7) | ((rex & 1) << 3));
-            if rex_w {
-                sem::cmp_rm64_mem8(b, base, d8, reg())
+            if no_index() {
+                if rex_w {
+                    sem::cmp_rm64_mem8(b, sib_base(), d8, reg())
+                } else {
+                    sem::cmp_rm32_mem8(b, sib_base(), d8, reg())
+                }
+            } else if rex_w {
+                sem::cmp_m64_r64_sibd(b, sib_base(), sib_idx(), sib_shift(), d8, reg())
             } else {
-                sem::cmp_rm32_mem8(b, base, d8, reg())
+                sem::cmp_m32_r32_sibd(b, sib_base(), sib_idx(), sib_shift(), d8, reg())
             }
         }
         Insn::CmpRmMemnd => {

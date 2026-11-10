@@ -2549,6 +2549,40 @@ pub fn cmp_rm64_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8, src: Gpr) -> Fl
     Ok(())
 }
 
+/// CMP m32, r32 [base+index*scale+disp8] (39 /r SIB mod=01)。
+pub fn cmp_m32_r32_sibd<B: Backend>(
+    b: &mut B,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i8,
+    src: Gpr,
+) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, disp as i32, base, idx);
+    let x: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let y = read(b, src);
+    let v = b.sub::<W32>(x, y);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
+/// CMP m64, r64 [base+index*scale+disp8] (39 /r SIB mod=01, REX.W)。
+pub fn cmp_m64_r64_sibd<B: Backend>(
+    b: &mut B,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i8,
+    src: Gpr,
+) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, disp as i32, base, idx);
+    let x: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let y = read64(b, src);
+    let v = b.sub::<W64>(x, y);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
 /// CMP r/m32, r32 [base] (mod=00)。dstメモリとsrcレジスタを比較する.
 pub fn cmp_rm32_memnd<B: Backend>(b: &mut B, base: Gpr, src: Gpr) -> Flow<B> {
     let addr = read64(b, base);
