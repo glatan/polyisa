@@ -7060,3 +7060,41 @@ fn run_sete_m8_sibd() {
         .unwrap();
     assert_eq!(back[0], 1);
 }
+
+#[test]
+fn run_pmaxub_reg_direct() {
+    // run 経由で 66 0F DE D8 (PMAXUB xmm3,xmm0) を回す。df 0x4d0bcd 対応.
+    // xmm3=0x01、xmm0=0x02 -> xmm3=0x02、eip は 0x1004 に進む.
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.step(|b| {
+        let v = b.konst::<polyisa_sem::W128>(0x01);
+        b.set(
+            polyisa_guest_x86::sem::xmm_ref(polyisa_guest_x86::sem::Xmm(3)),
+            v,
+        );
+        let w = b.konst::<polyisa_sem::W128>(0x02);
+        b.set(
+            polyisa_guest_x86::sem::xmm_ref(polyisa_guest_x86::sem::Xmm(0)),
+            w,
+        );
+        Ok(())
+    })
+    .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0x66, 0x0F, 0xDE, 0xD8])
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x1004 });
+    env.step(|b| {
+        let v: u128 = b.get(polyisa_guest_x86::sem::xmm_ref(
+            polyisa_guest_x86::sem::Xmm(3),
+        ));
+        assert_eq!(v & 0xFF, 0x02);
+        Ok(())
+    })
+    .unwrap();
+}

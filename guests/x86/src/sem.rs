@@ -11175,6 +11175,27 @@ pub fn pminub_xmm<B: Backend>(b: &mut B, dst: Xmm, src: Xmm) -> Flow<B> {
     Ok(())
 }
 
+/// PMAXUB xmm1, xmm2。df 0x4d0bcd 対応。符号なしバイト毎に大きい方を選ぶ.
+pub fn pmaxub_xmm<B: Backend>(b: &mut B, dst: Xmm, src: Xmm) -> Flow<B> {
+    let a: B::V<W128> = b.get(xmm_ref(dst));
+    let c: B::V<W128> = b.get(xmm_ref(src));
+    let mut acc: B::V<W128> = b.konst::<W128>(0);
+    for i in 0..16 {
+        let shift = b.konst::<W128>((i * 8) as u128);
+        let mask = b.konst::<W128>(0xFF);
+        let ab = b.shr_l::<W128>(a, shift);
+        let cb = b.shr_l::<W128>(c, shift);
+        let ab8 = b.and::<W128>(ab, mask);
+        let cb8 = b.and::<W128>(cb, mask);
+        let take_a = b.cmp::<W128>(Cmp::GtU, ab8, cb8);
+        let byte = b.select::<W128>(take_a, ab8, cb8);
+        let pos = b.shl::<W128>(byte, shift);
+        acc = b.or::<W128>(acc, pos);
+    }
+    b.set(xmm_ref(dst), acc);
+    Ok(())
+}
+
 /// CALL [base] (FF /2 SIB mod=00 no_index)。64ビット間接コール.
 pub fn call_r64_memnd<B: Backend>(b: &mut B, eip_next: u64, base: Gpr) -> Flow<B> {
     let addr = read64(b, base);

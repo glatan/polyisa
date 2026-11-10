@@ -311,8 +311,8 @@ fn fetch_len(
                 } else {
                     None
                 }
-            } else if s == 0x74 || s == 0xEB || s == 0xDA || s == 0x54 || s == 0x2E {
-                // PCMPEQB/POR/PMINUB/ANDPD/UCOMISD xmm,m (66 0F 74/EB/DA/54/2E /r)。reg-direct と mod=00/01/10 (SIBなし).
+            } else if s == 0x74 || s == 0xEB || s == 0xDA || s == 0xDE || s == 0x54 || s == 0x2E {
+                // PCMPEQB/POR/PMINUB/PMAXUB/ANDPD/UCOMISD xmm,m (66 0F 74/EB/DA/DE/54/2E /r)。reg-direct と mod=00/01/10 (SIBなし).
                 // POR SIB+disp32 (66 0F EB mod=10 rm=100) は grep 0x43d15b 対応で 8B.
                 let m = third?;
                 let md = m >> 6;
@@ -1346,6 +1346,7 @@ pub fn run_mode(
                             | 0x7E
                             | 0xD7
                             | 0xDA
+                            | 0xDE
                             | 0xDB
                             | 0xEB
                             | 0xEF
@@ -1613,6 +1614,7 @@ pub fn run_mode(
                     | Insn::Pand
                     | Insn::Pandn
                     | Insn::Pminub
+                    | Insn::Pmaxub
                     | Insn::Pcmpeqb
                     | Insn::Pcmpeqd
                     | Insn::Por
@@ -1726,6 +1728,7 @@ pub fn run_mode(
                     | Insn::Pxor
                     | Insn::Pand
                     | Insn::Pminub
+                    | Insn::Pmaxub
                     | Insn::Pcmpeqb
                     | Insn::Pcmpeqd
                     | Insn::Por
@@ -5452,6 +5455,7 @@ fn dispatch<B: Backend>(
             }
         }
         Insn::Pminub => sem::pminub_xmm(b, xmm_reg_r(), xmm_rm_b()),
+        Insn::Pmaxub => sem::pmaxub_xmm(b, xmm_reg_r(), xmm_rm_b()),
         Insn::PminubMemnd => sem::pminub_xmm_memnd(b, xmm_reg_r(), rm0f()),
         Insn::PminubMem8 => sem::pminub_xmm_mem8(b, xmm_reg_r(), rm0f(), disp8()),
         Insn::PminubMem32 => sem::pminub_xmm_mem32(b, xmm_reg_r(), rm0f(), disp32()),

@@ -8160,3 +8160,26 @@ fn sete_m8_sibd_writes() {
         .unwrap();
     assert_eq!(back[0], 1);
 }
+
+#[test]
+fn pmaxub_basic() {
+    // PMAXUB xmm0,xmm1: max per byte。df 0x4d0bcd 対応.
+    let mut env = env();
+    env.step(|b| {
+        let v = b.konst::<polyisa_sem::W128>(0x05040302010000000000000000000000);
+        b.set(sem::xmm_ref(sem::Xmm(0)), v);
+        let w = b.konst::<polyisa_sem::W128>(0x01020304050000000000000000000000);
+        b.set(sem::xmm_ref(sem::Xmm(1)), w);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::pmaxub_xmm(b, sem::Xmm(0), sem::Xmm(1)))
+        .unwrap();
+    env.step(|b| {
+        let v: u128 = b.get(sem::xmm_ref(sem::Xmm(0)));
+        // ビット88-95: max(0x01, 0x05)=0x05。
+        assert_eq!((v >> 88) & 0xFF, 0x05);
+        Ok(())
+    })
+    .unwrap();
+}

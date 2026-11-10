@@ -623,6 +623,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("cvttsd2si_r64", "F1", "00001111 00101100 11......", "cvttsd2si r64, xmm", "load"),
         // PMINUB xmm,xmm (66 0F DA /r)。reg-direct のみ.
         ("pminub", "F1", "00001111 11011010 11......", "pminub xmm, xmm", "alu"),
+        // PMAXUB xmm,xmm (66 0F DE /r)。df 0x4d0bcd 対応。reg-direct のみ.
+        ("pmaxub", "F1", "00001111 11011110 11......", "pmaxub xmm, xmm", "alu"),
         // PCMPEQD xmm,xmm (66 0F 76 /r)。reg-direct のみ.
         ("pcmpeqd", "F1", "00001111 01110110 11......", "pcmpeqd xmm, xmm", "alu"),
         // PMOVMSKB r32,xmm (66 0F D7 /r)。reg-direct のみ、REX.W で64bit.
