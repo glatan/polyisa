@@ -3182,6 +3182,29 @@ fn shld_r64_cl_shifts() {
 }
 
 #[test]
+fn shrd_r64_cl_shifts() {
+    // SHRD RAX,R8,CL: RAX=2、R8=1、CL=1 -> RAX=0x8000000000000001.
+    // seq 10 の停止点 0x4c4425 (4C 0F AD C0) に対応.
+    let mut env = env();
+    env.backend.set(Gpr(0).state(), 2);
+    env.backend.set(sem::hi_ref(Gpr(0)), 0);
+    env.step(|b| {
+        sem::write64(b, Gpr(8), 1);
+        Ok(())
+    })
+    .unwrap();
+    env.backend.set(Gpr(1).state(), 1);
+    env.step(|b| sem::shrd_r64_cl(b, Gpr(0), Gpr(8))).unwrap();
+    assert_eq!(env.backend.get(Gpr(0).state()), 1);
+    env.step(|b| {
+        let v = sem::read64(b, Gpr(0));
+        assert_eq!(v, 0x8000_0000_0000_0001);
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
 fn bt_r32_rm_sets_cf() {
     // BT EAX,ECX (0F A3 /r mod=11): EAX=0b101、ECX=2 -> CF=1 (bit2)。
     // ECX=1 -> CF=0 (bit1)。他旗は不変.

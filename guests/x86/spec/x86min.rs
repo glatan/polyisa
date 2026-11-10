@@ -397,6 +397,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("xadd_r32_rip", "F1", "00001111 11000001 00...101 ................................", "xadd r32, m32", "alu"),
         // SHLD r/m32,r32,CL (0F A5 /r mod=11)。REX.W で64ビット.
         ("shld_r32_cl", "F1", "00001111 10100101 11......", "shld r/m, r, cl", "alu"),
+        // SHRD r/m32,r32,CL (0F AD /r mod=11)。seq 10 の停止点 0x4c4425 対応。REX.W で64ビット.
+        ("shrd_r32_cl", "F1", "00001111 10101101 11......", "shrd r/m, r, cl", "alu"),
         // CMOVE r64/r32, m64/m32 [RIP+disp32] (0F 44 05/0D... + disp32)。REX.W で64bit.
         ("cmove_rip", "F1", "00001111 01000100 00...101 ................................", "cmove r, m", "load"),
         ("imul_r_imm", "F1", "01101001 11...... ................................", "imul r, r/m, {imm}", "alu"),

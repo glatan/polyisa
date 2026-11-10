@@ -416,8 +416,8 @@ fn fetch_len(
                 } else {
                     None
                 }
-            } else if s == 0xA5 {
-                // SHLD r/m32,r32,CL (0F A5 /r mod=11)。REX.W で64ビット.
+            } else if s == 0xA5 || s == 0xAD {
+                // SHLD/SHRD r/m32,r32,CL (0F A5/AD /r mod=11)。REX.W で64ビット.
                 let m = third?;
                 if m >> 6 == 3 { Some(3) } else { None }
             } else if s == 0xA3 {
@@ -1344,6 +1344,7 @@ pub fn run_mode(
                             | 0xBD
                             | 0xB1
                             | 0xA5
+                            | 0xAD
                             | 0xA3
                             | 0xAB
                     )
@@ -5312,6 +5313,15 @@ fn dispatch<B: Backend>(
                 sem::shld_r32_cl(b, rm0f(), reg0f_as_gpr())
             }
         }
+        Insn::ShrdR32Cl => {
+            // SHRD r/m32,r32,CL (0F AD /r mod=11)。seq 10 の停止点 0x4c4425 対応。REX.W で64ビット.
+            // 2バイトオペコードのため rm0f/reg0f で抽出する.
+            if rex_w {
+                sem::shrd_r64_cl(b, rm0f(), reg0f_as_gpr())
+            } else {
+                sem::shrd_r32_cl(b, rm0f(), reg0f_as_gpr())
+            }
+        }
         Insn::BtR32Rm => {
             // BT r/m32,r32 (0F A3 /r mod=11)。dst は rm、src は reg (REX.B/R で拡張)。
             // 2バイトオペコードのため rm0f/reg0f で抽出する.
@@ -6790,6 +6800,7 @@ fn dispatch<B: Backend>(
             Insn::XaddR32Memnd
             | Insn::XaddR32Rip
             | Insn::ShldR32Cl
+            | Insn::ShrdR32Cl
             | Insn::BtsR32Rm
             | Insn::Pmovmskb => Some(reg0f_as_gpr()),
             Insn::AddRRip

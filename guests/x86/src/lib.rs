@@ -76,7 +76,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数117件。
-        assert_eq!(INSNS.len(), 617);
+        assert_eq!(INSNS.len(), 618);
     }
 
     #[test]
@@ -861,6 +861,10 @@ mod tests {
         assert_eq!(decode(0x0FC103, 16), None);
         assert_eq!(decode(0x0FC10500000000, 56), Some(Insn::XaddR32Rip));
         assert_eq!(decode(0x0FA5C8, 24), Some(Insn::ShldR32Cl));
+        // SHRD r/m32,r32,CL (0F AD /r mod=11)。seq 10 の停止点 0x4c4425 (4C 0F AD C0 は REX 剥がし済み) に対応.
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x0FADC0, 24), Some(Insn::ShrdR32Cl));
+        assert_eq!(decode(0x0FADC0, 16), None);
         // NOPL [base+disp32] (0F 1F mod=10)。
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x0F1F8000000000, 56), Some(Insn::NoplMem32));

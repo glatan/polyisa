@@ -4647,6 +4647,58 @@ fn run_shld_r64_cl_rexwr() {
 }
 
 #[test]
+fn run_shrd_r64_cl_rexwr() {
+    // run 経由で 4C 0F AD C0 (SHRD RAX,R8,CL) を回す。seq 10 の停止点 0x4c4425 対応.
+    // RAX=2、R8=1、CL=1 -> RAX=0x8000000000000001、RBP は保存される。
+    // exit 系列で RAX が潰れるため [0x2100] に退避して検証.
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(0).state(), 2);
+    env.backend.set(polyisa_guest_x86::sem::hi_ref(Gpr(0)), 0);
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(8), 1);
+        Ok(())
+    })
+    .unwrap();
+    env.backend.set(Gpr(1).state(), 1);
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(5), 0x7ffe_fcf0);
+        Ok(())
+    })
+    .unwrap();
+    let prog: &[u8] = &[
+        0x4C, 0x0F, 0xAD, 0xC0, // shrd rax,r8,cl
+        0x48, 0x89, 0x05, 0xF5, 0x10, 0x00, 0x00, // mov [rip+0x10F5],rax -> [0x2100]
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
+        0x0F, 0x05, // syscall -> exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0));
+    let mut back = [0u8; 8];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x2100),
+            &mut back,
+            polyisa_mem::Access {
+                endian: polyisa_mem::Endian::Le,
+                align: polyisa_mem::Align::Unaligned,
+                kind: polyisa_mem::AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(u64::from_le_bytes(back), 0x8000_0000_0000_0001);
+    // RBP が保存される（SHLD と同じ rm0f/reg0f 経路）。
+    let rbp = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(5));
+    assert_eq!(rbp, 0x7ffe_fcf0);
+}
+
+#[test]
 fn run_and_r13b_mem32_rexr() {
     // run 経由で 44 22 AD 44 FB FF FF (AND R13B,[RBP-0x4BC]) を回す。wc の停止点 0x40bf62 に対応.
     // REX.R で dst を拡張。RBP=0x2000、[0x1B44]=0xF0、R13B=0x0F -> R13B=0x00、ZF=1.
