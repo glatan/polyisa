@@ -4788,3 +4788,46 @@ fn run_movhpd_xmm_m64_mem8() {
     ));
     assert_eq!(v, 0xAABB_CCDD_EEFF_0011_0000_0000_0000_0000u128);
 }
+
+#[test]
+fn run_movsd_load_store_sibd() {
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    env.backend.set(Gpr(3).state(), 0x2000);
+    env.backend
+        .mem
+        .write(VirtAddr(0x2038), &0xAABB_CCDD_EEFF_0011u64.to_le_bytes())
+        .unwrap();
+    let prog: &[u8] = &[
+        0xF2, 0x0F, 0x10, 0x43, 0x38, // movsd xmm0,[rbx+0x38]
+        0xF2, 0x0F, 0x11, 0x43, 0x40, // movsd [rbx+0x40],xmm0
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
+        0x0F, 0x05, // syscall -> exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0));
+    let v: u128 = env.backend.get(polyisa_guest_x86::sem::xmm_ref(
+        polyisa_guest_x86::sem::Xmm(0),
+    ));
+    assert_eq!((v & 0xFFFF_FFFF_FFFF_FFFF) as u64, 0xAABB_CCDD_EEFF_0011);
+    let mut back = [0u8; 8];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x2040),
+            &mut back,
+            polyisa_mem::Access {
+                endian: polyisa_mem::Endian::Le,
+                align: polyisa_mem::Align::Unaligned,
+                kind: polyisa_mem::AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(u64::from_le_bytes(back), 0xAABB_CCDD_EEFF_0011);
+}

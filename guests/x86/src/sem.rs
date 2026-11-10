@@ -4855,6 +4855,191 @@ pub fn movups_store_rip<B: Backend>(b: &mut B, src: Xmm, next_rip: u64, disp: i3
     Ok(())
 }
 
+/// MOVSD 共通: 下位64を v64 で置き換え、上位64は保持する.
+fn movsd_merge<B: Backend>(b: &mut B, dst: Xmm, v64: B::V<W64>) -> Flow<B> {
+    let cur: B::V<W128> = b.get(xmm_ref(dst));
+    let hi_shift = b.konst::<W128>(64);
+    let hi = b.shr_l::<W128>(cur, hi_shift);
+    let hi_back = b.shl::<W128>(hi, hi_shift);
+    let lo = b.zext::<W64, W128>(v64);
+    let v = b.or::<W128>(hi_back, lo);
+    b.set(xmm_ref(dst), v);
+    Ok(())
+}
+
+/// MOVSD xmm,xmm (F2 0F 10/11 reg-direct)。下位64のみ転送し上位64は保持する.
+pub fn movsd_xmm_xmm<B: Backend>(b: &mut B, dst: Xmm, src: Xmm) -> Flow<B> {
+    let s128: B::V<W128> = b.get(xmm_ref(src));
+    let s64: B::V<W64> = b.trunc::<W128, W64>(s128);
+    movsd_merge(b, dst, s64)
+}
+
+/// MOVSD xmm,m64 [base] (F2 0F 10 mod=00)。下位64のみ転送し上位64は保持する.
+pub fn movsd_load_memnd<B: Backend>(b: &mut B, dst: Xmm, base: Gpr) -> Flow<B> {
+    let addr = read64(b, base);
+    let v64: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    movsd_merge(b, dst, v64)
+}
+
+/// MOVSD m64,xmm [base] (F2 0F 11 mod=00)。下位64のみ格納する.
+pub fn movsd_store_memnd<B: Backend>(b: &mut B, src: Xmm, base: Gpr) -> Flow<B> {
+    let addr = read64(b, base);
+    let v128: B::V<W128> = b.get(xmm_ref(src));
+    let v: B::V<W64> = b.trunc::<W128, W64>(v128);
+    b.store::<W64>(addr, v, DATA_WRITE)?;
+    Ok(())
+}
+
+/// MOVSD xmm,m64 [base+disp8] (F2 0F 10 mod=01)。
+pub fn movsd_load_mem8<B: Backend>(b: &mut B, dst: Xmm, base: Gpr, disp: i8) -> Flow<B> {
+    let addr = eff_addr(b, base, disp);
+    let v64: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    movsd_merge(b, dst, v64)
+}
+
+/// MOVSD m64,xmm [base+disp8] (F2 0F 11 mod=01)。
+pub fn movsd_store_mem8<B: Backend>(b: &mut B, src: Xmm, base: Gpr, disp: i8) -> Flow<B> {
+    let addr = eff_addr(b, base, disp);
+    let v128: B::V<W128> = b.get(xmm_ref(src));
+    let v: B::V<W64> = b.trunc::<W128, W64>(v128);
+    b.store::<W64>(addr, v, DATA_WRITE)?;
+    Ok(())
+}
+
+/// MOVSD xmm,m64 [base+disp32] (F2 0F 10 mod=10)。
+pub fn movsd_load_mem32<B: Backend>(b: &mut B, dst: Xmm, base: Gpr, disp: i32) -> Flow<B> {
+    let addr = eff_addr32(b, base, disp);
+    let v64: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    movsd_merge(b, dst, v64)
+}
+
+/// MOVSD m64,xmm [base+disp32] (F2 0F 11 mod=10)。
+pub fn movsd_store_mem32<B: Backend>(b: &mut B, src: Xmm, base: Gpr, disp: i32) -> Flow<B> {
+    let addr = eff_addr32(b, base, disp);
+    let v128: B::V<W128> = b.get(xmm_ref(src));
+    let v: B::V<W64> = b.trunc::<W128, W64>(v128);
+    b.store::<W64>(addr, v, DATA_WRITE)?;
+    Ok(())
+}
+
+/// MOVSD xmm,m64 [base+index*scale] (F2 0F 10 SIB mod=00)。
+pub fn movsd_load_sib<B: Backend>(b: &mut B, dst: Xmm, base: Gpr, idx: Gpr, shift: u32) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, 0, base, idx);
+    let v64: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    movsd_merge(b, dst, v64)
+}
+
+/// MOVSD m64,xmm [base+index*scale] (F2 0F 11 SIB mod=00)。
+pub fn movsd_store_sib<B: Backend>(
+    b: &mut B,
+    src: Xmm,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, 0, base, idx);
+    let v128: B::V<W128> = b.get(xmm_ref(src));
+    let v: B::V<W64> = b.trunc::<W128, W64>(v128);
+    b.store::<W64>(addr, v, DATA_WRITE)?;
+    Ok(())
+}
+
+/// MOVSD xmm,m64 [base+index*scale+disp8] (F2 0F 10 SIB mod=01)。
+pub fn movsd_load_sibd<B: Backend>(
+    b: &mut B,
+    dst: Xmm,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i8,
+) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, disp as i32, base, idx);
+    let v64: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    movsd_merge(b, dst, v64)
+}
+
+/// MOVSD m64,xmm [base+index*scale+disp8] (F2 0F 11 SIB mod=01)。
+pub fn movsd_store_sibd<B: Backend>(
+    b: &mut B,
+    src: Xmm,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i8,
+) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, disp as i32, base, idx);
+    let v128: B::V<W128> = b.get(xmm_ref(src));
+    let v: B::V<W64> = b.trunc::<W128, W64>(v128);
+    b.store::<W64>(addr, v, DATA_WRITE)?;
+    Ok(())
+}
+
+/// MOVSD xmm,m64 [base+index*scale+disp32] (F2 0F 10 SIB mod=10)。
+pub fn movsd_load_sibd32<B: Backend>(
+    b: &mut B,
+    dst: Xmm,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i32,
+) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, disp, base, idx);
+    let v64: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    movsd_merge(b, dst, v64)
+}
+
+/// MOVSD m64,xmm [base+index*scale+disp32] (F2 0F 11 SIB mod=10)。
+pub fn movsd_store_sibd32<B: Backend>(
+    b: &mut B,
+    src: Xmm,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i32,
+) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, disp, base, idx);
+    let v128: B::V<W128> = b.get(xmm_ref(src));
+    let v: B::V<W64> = b.trunc::<W128, W64>(v128);
+    b.store::<W64>(addr, v, DATA_WRITE)?;
+    Ok(())
+}
+
+/// MOVSD xmm,m64 [RIP+disp32] (F2 0F 10 RIP)。
+pub fn movsd_load_rip<B: Backend>(b: &mut B, dst: Xmm, next_rip: u64, disp: i32) -> Flow<B> {
+    let base = b.konst::<W64>(next_rip);
+    let d = b.konst::<W64>(disp as i64 as u64);
+    let addr = b.add::<W64>(base, d);
+    let v64: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    movsd_merge(b, dst, v64)
+}
+
+/// MOVSD m64,xmm [RIP+disp32] (F2 0F 11 RIP)。
+pub fn movsd_store_rip<B: Backend>(b: &mut B, src: Xmm, next_rip: u64, disp: i32) -> Flow<B> {
+    let base = b.konst::<W64>(next_rip);
+    let d = b.konst::<W64>(disp as i64 as u64);
+    let addr = b.add::<W64>(base, d);
+    let v128: B::V<W128> = b.get(xmm_ref(src));
+    let v: B::V<W64> = b.trunc::<W128, W64>(v128);
+    b.store::<W64>(addr, v, DATA_WRITE)?;
+    Ok(())
+}
+
+/// MOVSD xmm,[disp32] (32ビット絶対番地)。
+pub fn movsd_load_abs<B: Backend>(b: &mut B, dst: Xmm, addr32: u32) -> Flow<B> {
+    let addr = b.konst::<W64>(addr32 as u64);
+    let v64: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    movsd_merge(b, dst, v64)
+}
+
+/// MOVSD [disp32],xmm (32ビット絶対番地)。
+pub fn movsd_store_abs<B: Backend>(b: &mut B, src: Xmm, addr32: u32) -> Flow<B> {
+    let addr = b.konst::<W64>(addr32 as u64);
+    let v128: B::V<W128> = b.get(xmm_ref(src));
+    let v: B::V<W64> = b.trunc::<W128, W64>(v128);
+    b.store::<W64>(addr, v, DATA_WRITE)?;
+    Ok(())
+}
+
 /// MOV m32, imm32 (C7 /0 mod=10 RBP+disp32)。
 /// MOV m16, imm16 (66 C7 /0 mod=10 RBP+disp32).
 pub fn mov_rm16_imm_mem32<B: Backend>(b: &mut B, base: Gpr, disp: i32, imm: u16) -> Flow<B> {

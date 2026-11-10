@@ -6628,3 +6628,76 @@ fn test_m8_imm_sibd_basic() {
         .unwrap();
     assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0x40);
 }
+
+#[test]
+fn movsd_load_memnd_merges_low64() {
+    use polyisa_guest_x86::sem::Xmm;
+    let mut env = env();
+    env.map_rw(0, 1).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0), &0xAABB_CCDD_EEFF_0011u64.to_le_bytes())
+        .unwrap();
+    env.step(|b| {
+        let v = b.konst::<polyisa_sem::W128>(0xAAAA_BBBB_CCCC_DDDD_1111_2222_3333_4444u128);
+        b.set(sem::xmm_ref(Xmm(1)), v);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::movsd_load_memnd(b, Xmm(1), Gpr(7)))
+        .unwrap();
+    let v: u128 = env.backend.get(sem::xmm_ref(Xmm(1)));
+    assert_eq!(v, 0xAAAA_BBBB_CCCC_DDDD_AABB_CCDD_EEFF_0011u128);
+}
+
+#[test]
+fn movsd_store_memnd_stores_low64_only() {
+    use polyisa_guest_x86::sem::Xmm;
+    let mut env = env();
+    env.map_rw(0, 1).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x10), &[0xFFu8; 16])
+        .unwrap();
+    env.step(|b| {
+        let v = b.konst::<polyisa_sem::W128>(0xAAAA_BBBB_CCCC_DDDD_AABB_CCDD_EEFF_0011u128);
+        b.set(sem::xmm_ref(Xmm(0)), v);
+        Ok(())
+    })
+    .unwrap();
+    env.backend.set(Gpr(3).state(), 0x10);
+    env.step(|b| sem::movsd_store_memnd(b, Xmm(0), Gpr(3)))
+        .unwrap();
+    let mut back = [0u8; 16];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x10),
+            &mut back,
+            Access {
+                endian: Endian::Le,
+                align: Align::Unaligned,
+                kind: AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(&back[0..8], &0xAABB_CCDD_EEFF_0011u64.to_le_bytes());
+    assert_eq!(&back[8..16], &[0xFFu8; 8]);
+}
+
+#[test]
+fn movsd_xmm_xmm_merges_low64() {
+    use polyisa_guest_x86::sem::Xmm;
+    let mut env = env();
+    env.step(|b| {
+        let d = b.konst::<polyisa_sem::W128>(0xAAAA_BBBB_CCCC_DDDD_1111_2222_3333_4444u128);
+        b.set(sem::xmm_ref(Xmm(0)), d);
+        let s = b.konst::<polyisa_sem::W128>(0x0102_0304_0506_0708_5555_6666_7777_8888u128);
+        b.set(sem::xmm_ref(Xmm(1)), s);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::movsd_xmm_xmm(b, Xmm(0), Xmm(1))).unwrap();
+    let v: u128 = env.backend.get(sem::xmm_ref(Xmm(0)));
+    assert_eq!(v, 0xAAAA_BBBB_CCCC_DDDD_5555_6666_7777_8888u128);
+}
