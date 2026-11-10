@@ -132,6 +132,10 @@ pub mod x86_64 {
     pub const FTRUNCATE: u64 = 77;
     pub const RENAME: u64 = 82;
     pub const SYMLINK: u64 = 88;
+    // df が到達する statfs 系。番号表の事実のみ持ち、実行は未対応.
+    // Ref: SRC-LINUX (7.3).
+    pub const STATFS: u64 = 137;
+    pub const FSTATFS: u64 = 138;
 }
 
 /// 段階4の準備としての i386 番号表（Linux・32ビット）。
@@ -198,6 +202,12 @@ pub mod i386 {
     pub const FTRUNCATE: u64 = 93;
     pub const RENAME: u64 = 38;
     pub const SYMLINK: u64 = 83;
+    // statfs 系の番号表の事実のみ。実行は未対応。素朴な STATFS=99 は
+    // 当表の GETGROUPS 値と衝突するため（別件の潜在問題、対象外）、
+    // 実用的に使われる 64 系のみ持つ.
+    // Ref: SRC-LINUX (7.3).
+    pub const STATFS64: u64 = 268;
+    pub const FSTATFS64: u64 = 269;
 }
 
 /// ABI と番号から名前を引く。段階1の範囲と x86_64・i386 の番号表のみ。
@@ -304,6 +314,8 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             i386::FTRUNCATE => Some("ftruncate"),
             i386::RENAME => Some("rename"),
             i386::SYMLINK => Some("symlink"),
+            i386::STATFS64 => Some("statfs64"),
+            i386::FSTATFS64 => Some("fstatfs64"),
             _ => None,
         },
         GuestAbi::X86_64Linux => match nr {
@@ -365,6 +377,8 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             x86_64::FTRUNCATE => Some("ftruncate"),
             x86_64::RENAME => Some("rename"),
             x86_64::SYMLINK => Some("symlink"),
+            x86_64::STATFS => Some("statfs"),
+            x86_64::FSTATFS => Some("fstatfs"),
             _ => None,
         },
         GuestAbi::Unknown => None,
