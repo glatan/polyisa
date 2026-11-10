@@ -1444,6 +1444,7 @@ pub fn run_mode(
                     | Insn::MovRm16ImmM32
                     | Insn::AndAxImm16
                     | Insn::CmpAxImm16
+                    | Insn::AddRm16Imm
                     | Insn::CmpRmImm8Rip
                     // MOV [base+disp32],r16 (66 89 mod=10) は MovMemEax32 を共用する.
                     | Insn::MovMemEax32
@@ -3241,6 +3242,10 @@ fn dispatch<B: Backend>(
         Insn::CmpAxImm16 => {
             // 66 3D + imm16 (24b、66 接頭辞は剥がし済み)。imm は最下位16 LE.
             sem::cmp_ax_imm16(b, ((word & 0xffff) as u16).swap_bytes())
+        }
+        Insn::AddRm16Imm => {
+            // 66 81 /0 mod=11 + imm16 (32b、66 接頭辞は剥がし済み)。imm は最下位16 LE.
+            sem::add_rm16_imm(b, rm(), ((word & 0xffff) as u16).swap_bytes())
         }
         Insn::OrEax => {
             if rex_w {

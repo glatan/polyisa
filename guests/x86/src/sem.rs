@@ -303,6 +303,33 @@ pub fn cmp_ax_imm16<B: Backend>(b: &mut B, imm: u16) -> Flow<B> {
     Ok(())
 }
 
+/// ADD r/m16,imm16 (66 81 /0 mod=11)。下位16ビットのみ書き換え、上位は保持. 6 旗を更新する.
+pub fn add_rm16_imm<B: Backend>(b: &mut B, dst: Gpr, imm: u16) -> Flow<B> {
+    let y = b.konst::<W16>(imm);
+    if dst.0 < 8 {
+        let x32 = read(b, dst);
+        let x: B::V<W16> = b.trunc::<W32, W16>(x32);
+        let v = b.add::<W16>(x, y);
+        let mask = b.konst::<W32>(0xFFFF_0000);
+        let preserved = b.and::<W32>(x32, mask);
+        let ext32 = b.zext::<W16, W32>(v);
+        let nv = b.or::<W32>(preserved, ext32);
+        write(b, dst, nv);
+        update_add_flags(b, x, y, v);
+    } else {
+        let x64 = read64(b, dst);
+        let x: B::V<W16> = b.trunc::<W64, W16>(x64);
+        let v = b.add::<W16>(x, y);
+        let mask = b.konst::<W64>(0xFFFF_FFFF_FFFF_0000);
+        let preserved = b.and::<W64>(x64, mask);
+        let ext64 = b.zext::<W16, W64>(v);
+        let nv = b.or::<W64>(preserved, ext64);
+        write64(b, dst, nv);
+        update_add_flags(b, x, y, v);
+    }
+    Ok(())
+}
+
 /// TEST r/m32,r32。AND 結果で 5 旗を更新する（CF=0、OF=0）。dst/src は変えない.
 pub fn test_rm32<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
     let x = read(b, dst);
