@@ -2442,6 +2442,32 @@ fn sete_m8_mem8_writes() {
 }
 
 #[test]
+fn setne_m8_mem32_writes() {
+    // SETNE [RBP-0x240]: ZF=0 -> 1。grep 0x43ddc1 対応.
+    let mut env = env();
+    env.map_rw(0, 1).unwrap();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend.set(Gpr(5).state(), 0x2000);
+    env.backend.set(sem::eflags_ref(), 0);
+    env.step(|b| sem::setne_m8_mem32(b, Gpr(5), -0x240))
+        .unwrap();
+    let mut back = [0u8; 1];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x1DC0),
+            &mut back,
+            Access {
+                endian: Endian::Le,
+                align: Align::Unaligned,
+                kind: AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(back[0], 1);
+}
+
+#[test]
 fn setne_m8_sibd_writes() {
     // SETNE [RAX+RSI*8+0x06]: ZF=0 -> 1。ls -l 0x42a294 対応.
     let mut env = env();
