@@ -4690,6 +4690,20 @@ fn dispatch<B: Backend>(
                 sem::or_r32_mem32(b, reg(), rm(), disp32())
             }
         }
+        Insn::OrRSib => {
+            // 0B /r SIB mod=00 [base+index*scale]。sed 0x5be0c9 対応. no_index は [base].
+            if no_index() {
+                if rex_w {
+                    sem::or_r64_memnd(b, reg(), sib_base())
+                } else {
+                    sem::or_r32_memnd(b, reg(), sib_base())
+                }
+            } else if rex_w {
+                sem::or_r64_sib(b, reg(), sib_base(), sib_idx(), sib_shift())
+            } else {
+                sem::or_r32_sib(b, reg(), sib_base(), sib_idx(), sib_shift())
+            }
+        }
         Insn::AddRSibabs => {
             // 03 /r mod=00 SIB 直接番地 (7B)。disp32 は最下位32 LE。
             // no_index は [disp32]、索引ありは [idx*scale+disp32].

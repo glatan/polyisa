@@ -1510,6 +1510,15 @@ pub fn build_model() -> polyisa_isadl::Model {
             "or r32, m32",
             "alu",
         ),
+        // OR r32,[base+index*scale] (0B /r mod=00 SIB)。sed 0x5be0c9 対応.
+        (
+            "or_r_sib",
+            "N8",
+            "00001011 00...100 ........",
+            vec![wc("n8_base", WhereOp::Ne, 5)],
+            "or r32, [r/m+sib]",
+            "alu",
+        ),
         (
             "mov_eax_sib",
             "N8",

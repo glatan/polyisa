@@ -3302,6 +3302,47 @@ fn run_add_rm_imm8_sibd() {
 }
 
 #[test]
+fn run_or_r_sib_no_index() {
+    // run 経由で 0B 04 24 (ORL (%rsp),%eax) を回す。sed 0x5be0c9 対応.
+    // RSP=0x2000、[0x2000]=0x0F、EAX=0xF0 -> EAX=0xFF。exit 系列で EAX が潰れるため [0x2100] に退避して検証.
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    env.backend.set(Gpr(0).state(), 0xF0);
+    env.backend
+        .mem
+        .write(VirtAddr(0x2000), &0x0Fu32.to_le_bytes())
+        .unwrap();
+    let prog: &[u8] = &[
+        0x0B, 0x04, 0x24, // orl (%rsp),%eax
+        0x89, 0x05, 0xF7, 0x10, 0x00, 0x00, // mov [rip+0x10F7],eax -> [0x2100]
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
+        0x0F, 0x05, // syscall -> exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0));
+    let mut back = [0u8; 4];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x2100),
+            &mut back,
+            polyisa_mem::Access {
+                endian: polyisa_mem::Endian::Le,
+                align: polyisa_mem::Align::Unaligned,
+                kind: polyisa_mem::AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(u32::from_le_bytes(back), 0xFF);
+}
+
+#[test]
 fn run_ucomisd_rip() {
     // run 経由で 66 0F 2E 0D + disp32 (UCOMISD xmm1,[RIP]) を回す。seq の停止点 0x45b763 に対応.
     // [0x2000]=2.0、xmm1=1.0 -> CF=1、ZF=0 になり、exit(0)。mov は旗を変えない.

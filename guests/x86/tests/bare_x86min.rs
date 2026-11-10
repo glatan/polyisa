@@ -6740,6 +6740,33 @@ fn add_rm64_imm8_sibd_no_index() {
 }
 
 #[test]
+fn or_r32_sib_no_index() {
+    // ORL (%rsp),%eax (0B 04 24): sed 0x5be0c9 対応。RSP=0x2000、[0x2000]=0x0F、EAX=0xF0 -> EAX=0xFF.
+    // no_index は memnd 経路.
+    let mut env = env();
+    env.map_rw(0x2000, 1).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    env.backend.set(Gpr(0).state(), 0xF0);
+    env.backend
+        .mem
+        .write(VirtAddr(0x2000), &0x0Fu32.to_le_bytes())
+        .unwrap();
+    env.step(|b| sem::or_r32_memnd(b, Gpr(0), Gpr(4))).unwrap();
+    assert_eq!(env.backend.get(Gpr(0).state()), 0xFF);
+    // 索引あり: ORL [RBX+RSI],%eax、[0x2010]=0x0F & EAX=0xF0 -> EAX=0xFF.
+    env.backend.set(Gpr(3).state(), 0x2000);
+    env.backend.set(Gpr(6).state(), 0x10);
+    env.backend.set(Gpr(0).state(), 0xF0);
+    env.backend
+        .mem
+        .write(VirtAddr(0x2010), &0x0Fu32.to_le_bytes())
+        .unwrap();
+    env.step(|b| sem::or_r32_sib(b, Gpr(0), Gpr(3), Gpr(6), 0))
+        .unwrap();
+    assert_eq!(env.backend.get(Gpr(0).state()), 0xFF);
+}
+
+#[test]
 fn and_rm32_imm8_sib_indexed_rexx() {
     // ANDL $0,[RAX+R9*4] (42 83 24 88 00): head の停止点に対応。REX.X で R9 を指す.
     // RAX=0x2000、R9=0x10、[0x2040]=0xFF -> 0.
