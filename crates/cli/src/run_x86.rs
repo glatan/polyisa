@@ -805,12 +805,15 @@ fn fetch_len(
                 }
             } else if rm == 4 {
                 // SIB 付き。mod=01 SIB+disp8+imm8 (5B) の /7 CMP と /1 ORB、
-                // mod=00 SIB [base] (no_index, non-abs) +imm8 (4B) の /1 ORB と /7 CMPB のみ.
+                // mod=00 SIB [base] (no_index, non-abs) +imm8 (4B) の /1 ORB と /7 CMPB、
+                // mod=10 SIB+disp32+imm8 (8B) の /7 CMPB (stat 0x429875 対応).
                 if md == 1 && (reg == 7 || reg == 1) {
                     Some(5)
                 } else if md == 0 && (reg == 1 || reg == 7) {
                     let t = third?;
                     if t & 7 != 5 { Some(4) } else { None }
+                } else if md == 2 && reg == 7 {
+                    Some(8)
                 } else {
                     None
                 }
@@ -3260,6 +3263,22 @@ fn dispatch<B: Backend>(
                 sem::cmp_rm8_imm_mem8(b, base, d8, imm)
             } else {
                 sem::cmp_rm8_imm_sibd(b, base, idx, shift, d8, imm)
+            }
+        }
+        Insn::CmpRm8ImmSibd32 => {
+            // 80 BC SIB disp32 imm8 (64b)。stat 0x429875 対応.
+            // SIB は (word>>40) 下位8、disp32 は (word>>8) 下位32 LE、imm は最下位8.
+            let sib_v = ((word >> 40) & 0xff) as u8;
+            let disp = (((word >> 8) as u32).swap_bytes()) as i32;
+            let imm = (word & 0xff) as u8;
+            let shift = ((sib_v >> 6) & 3) as u32;
+            let idx_raw = (sib_v >> 3) & 7;
+            let idx = Gpr(idx_raw | (((rex >> 1) & 1) << 3));
+            let base = Gpr((sib_v & 7) | ((rex & 1) << 3));
+            if idx_raw == 4 && (rex >> 1) & 1 == 0 {
+                sem::cmp_rm8_imm_mem32(b, base, disp, imm)
+            } else {
+                sem::cmp_rm8_imm_sibd32(b, base, idx, shift, disp, imm)
             }
         }
         Insn::CmpRm8ImmMem8 => {

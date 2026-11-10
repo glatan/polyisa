@@ -76,7 +76,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数117件。
-        assert_eq!(INSNS.len(), 599);
+        assert_eq!(INSNS.len(), 600);
     }
 
     #[test]
@@ -291,6 +291,11 @@ mod tests {
         assert_eq!(decode(0x81050000000000000000, 80), Some(Insn::AddRm32Rip));
         assert_eq!(decode(0xC7050000000004000000, 80), Some(Insn::MovRmImmRip));
         assert_eq!(decode(0x807C386800, 40), Some(Insn::CmpRm8ImmSibd));
+        // CMPB SIB+disp32 (80 /7 mod=10)。stat 0x429875 対応.
+        // 80 BC 05 F0 FE FF FF 00 は [RBP+RAX-0x110]==0x00 比較.
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x80BC05F0FEFFFF00, 64), Some(Insn::CmpRm8ImmSibd32));
+        assert_eq!(decode(0x80BC05F0FEFFFF00, 56), None);
         assert_eq!(decode(0x807F6900, 32), Some(Insn::CmpRm8ImmMem8));
         assert_eq!(decode(0xC6476801, 32), Some(Insn::MovRm8ImmMem8));
         assert_eq!(decode(0x808B5603000080, 56), Some(Insn::OrRm8ImmMem32));

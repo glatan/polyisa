@@ -3487,6 +3487,21 @@ fn cmp_rm8_imm_sets_flags() {
 }
 
 #[test]
+fn cmp_rm8_imm_sibd32_sets_flags() {
+    // CMP [RBP+RAX-0x110],0x00 (80 BC 05 F0 FE FF FF 00): stat 0x429875 対応.
+    // [0x1F0]=0x00 -> ZF=1。
+    let mut env = env();
+    env.map_rw(0, 1).unwrap();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend.set(Gpr(5).state(), 0x2000);
+    env.backend.set(Gpr(0).state(), 0x100);
+    env.backend.mem.write(VirtAddr(0x1F0), &[0u8]).unwrap();
+    env.step(|b| sem::cmp_rm8_imm_sibd32(b, Gpr(5), Gpr(0), 0, -0x110, 0))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0x40);
+}
+
+#[test]
 fn cmove_mem32_roundtrip() {
     // CMOVE RAX,[RBP+0x20]: [0x120]=0x77, ZF=1 -> RAX=0x77.
     let mut env = env();

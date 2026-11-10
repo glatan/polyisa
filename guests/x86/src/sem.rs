@@ -1237,6 +1237,24 @@ pub fn cmp_rm8_imm_sibd<B: Backend>(
     Ok(())
 }
 
+/// CMP r/m8,imm8 SIB+disp32 (80 /7 mod=10)。stat 0x429875 対応.
+pub fn cmp_rm8_imm_sibd32<B: Backend>(
+    b: &mut B,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i32,
+    imm: u8,
+) -> Flow<B> {
+    use polyisa_sem::W8;
+    let addr = sib_addr_scaled(b, shift, disp, base, idx);
+    let x: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
+    let y = b.konst::<W8>(imm);
+    let v = b.sub::<W8>(x, y);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
 /// CMP r/m8,imm8 [base+disp8] (80 /7 mod=01、SIBなし)。メモリを読んで比較する.
 pub fn cmp_rm8_imm_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8, imm: u8) -> Flow<B> {
     use polyisa_sem::W8;
