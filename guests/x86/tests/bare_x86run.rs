@@ -5157,6 +5157,32 @@ fn run_cmp_rm32_imm_memnd_sets_zf() {
 }
 
 #[test]
+fn run_cvtsi2sd_m32_mem8_converts() {
+    // CVTSI2SDL -0x34(%RBX),%xmm0 (F2 0F 2A 43 CC) を64ビットで回す.
+    // RBX=0x100、[0xCC]=5 -> xmm0 下位=5.0、eip は 0x1005 に進む.
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x0), 1, Perms::RW).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0xF2, 0x0F, 0x2A, 0x43, 0xCC])
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0xCC), &5u32.to_le_bytes())
+        .unwrap();
+    env.backend.set(Gpr(3).state(), 0x100);
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x1005 });
+    let v: u128 = env.backend.get(polyisa_guest_x86::sem::xmm_ref(
+        polyisa_guest_x86::sem::Xmm(0),
+    ));
+    assert_eq!(v as u64, 0x4014_0000_0000_0000);
+}
+
+#[test]
 fn run_andw_sibd_zeroes() {
     // ANDW $0x0,0x26(%RSP) (66 83 64 24 26 00) を64ビットで回す.
     // RSP=0x2000、[0x2026]=0xFFFF -> [0x2026]=0x0000、eip は 0x1006 に進む.

@@ -216,6 +216,19 @@ fn fetch_len(
                 } else {
                     Some(3)
                 }
+            } else if s == 0x2A {
+                // CVTSI2SD xmm,m32 (F2 0F 2A /r mod=01 [base+disp8]、4B、SIBなし)。
+                // reg-direct (3B) は Cvtsi2sdR64 が使う.
+                let m = third?;
+                let md = m >> 6;
+                let rm = m & 7;
+                if md == 3 {
+                    Some(3)
+                } else if md == 1 && rm != 4 {
+                    Some(4)
+                } else {
+                    None
+                }
             } else if matches!(
                 s,
                 0x60 | 0x61
@@ -229,7 +242,6 @@ fn fetch_len(
                     | 0x76
                     | 0x57
                     | 0xFC
-                    | 0x2A
                     | 0x2F
                     | 0x2C
                     | 0x5C
@@ -1603,6 +1615,13 @@ pub fn run_mode(
         }
         // PSHUFD/PSHUFLW は 66/F2 のいずれかが必須。
         if matches!(insn, Insn::Pshufd) && !has66 && !has_f2 {
+            return Outcome::Unimplemented {
+                eip: pc as u32,
+                word,
+            };
+        }
+        // CVTSI2SD (F2 0F 2A) と SUBPS (0F 2A) は符号化を共用する。F2 なしは未対応.
+        if matches!(insn, Insn::Cvtsi2sdM32Mem8) && !has_f2 {
             return Outcome::Unimplemented {
                 eip: pc as u32,
                 word,
@@ -4815,6 +4834,14 @@ fn dispatch<B: Backend>(
         Insn::Pandn => sem::pandn_xmm(b, xmm_reg_r(), xmm_rm_b()),
         // CVTSI2SD xmm,r64 (F2 REX.W 0F 2A /r reg-direct)。F2 は剥がし済み.
         Insn::Cvtsi2sdR64 => sem::cvtsi2sd_r64(b, xmm_reg_r(), rm0f()),
+        Insn::Cvtsi2sdM32Mem8 => {
+            // CVTSI2SD xmm,m32/m64 [base+disp8] (F2 0F 2A mod=01)。F2 は剥がし済み.
+            if rex_w {
+                sem::cvtsi2sd_xmm_m64_mem8(b, xmm_reg_r(), rm0f(), disp8())
+            } else {
+                sem::cvtsi2sd_xmm_m32_mem8(b, xmm_reg_r(), rm0f(), disp8())
+            }
+        }
         // ADDSD xmm,xmm (F2 0F 58 /r reg-direct)。F2 は剥がし済み.
         Insn::Addsd => sem::addsd_xmm(b, xmm_reg(), xmm_rm()),
         Insn::AddsdM64Sib => {

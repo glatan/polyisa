@@ -2413,6 +2413,24 @@ fn cmp_rm32_imm_memnd_sets_flags() {
 }
 
 #[test]
+fn cvtsi2sd_xmm_m32_mem8_converts() {
+    use polyisa_guest_x86::sem::Xmm;
+    // CVTSI2SD xmm0,[RBX]: [0x100]=5 -> xmm0 下位=5.0、上位保持.
+    let mut env = env();
+    env.map_rw(0, 1).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x100), &5u32.to_le_bytes())
+        .unwrap();
+    env.backend.set(Gpr(3).state(), 0x100);
+    env.step(|b| sem::cvtsi2sd_xmm_m32_mem8(b, Xmm(0), Gpr(3), 0))
+        .unwrap();
+    let v: u128 = env.backend.get(sem::xmm_ref(Xmm(0)));
+    assert_eq!(v as u64, 0x4014_0000_0000_0000);
+    assert_eq!((v >> 64) as u64, 0);
+}
+
+#[test]
 fn and_m16_imm8_mem8_zeroes() {
     // ANDW [RBX+0x10],0x00: [0x110]=0xFFFF -> [0x110]=0x0000、ZF=1。
     let mut env = env();
