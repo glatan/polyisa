@@ -231,6 +231,7 @@ fn fetch_len(
                     | 0xFC
                     | 0x2A
                     | 0x58
+                    | 0x2E
                     | 0x2F
                     | 0x2C
                     | 0x5C
@@ -1127,6 +1128,7 @@ pub fn run_mode(
                             | 0xFC
                             | 0x2A
                             | 0x58
+                            | 0x2E
                             | 0x2F
                             | 0x2C
                             | 0x5C
@@ -1432,6 +1434,7 @@ pub fn run_mode(
                     | Insn::MovupsStoreRip
                     | Insn::MovdqaLoadRip
                     | Insn::Comisd
+                    | Insn::Ucomisd
                     // MOV [base],r16 (66 89 mod=00) は MovMemndEax を共用する.
                     | Insn::MovMemndEax
                     | Insn::MovdquLoadXmm
@@ -4588,6 +4591,8 @@ fn dispatch<B: Backend>(
         }
         // COMISD xmm,xmm (66 0F 2F /r reg-direct)。
         Insn::Comisd => sem::comisd_xmm(b, xmm_reg(), xmm_rm()),
+        // UCOMISD (66 0F 2E) は順序なしの旗が等価のため COMISD と意味論を共有する.
+        Insn::Ucomisd => sem::comisd_xmm(b, xmm_reg(), xmm_rm()),
         // CVTTSD2SI r64,xmm (F2 REX.W 0F 2C /r reg-direct)。F2 は剥がし済み.
         Insn::Cvttsd2siR64 => sem::cvttsd2si_r64(b, reg0f_as_gpr(), xmm_rm_b()),
         Insn::BtR32Imm => {

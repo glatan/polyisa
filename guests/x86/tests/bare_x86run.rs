@@ -3552,6 +3552,39 @@ fn run_pminub_mem8() {
 }
 
 #[test]
+fn run_ucomisd_self() {
+    // run 経由で 66 0F 2E C0 (UCOMISD xmm0,xmm0) を回す。seq の停止点 0x45b74d に対応.
+    // xmm0=1.0 との比較は等価 -> ZF=1、PF=CF=0 になり、exit(0)。mov は旗を変えない.
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.step(|b| {
+        let v = b.konst::<polyisa_sem::W128>(0x3FF0_0000_0000_0000);
+        b.set(
+            polyisa_guest_x86::sem::xmm_ref(polyisa_guest_x86::sem::Xmm(0)),
+            v,
+        );
+        Ok(())
+    })
+    .unwrap();
+    let prog: &[u8] = &[
+        0x66, 0x0F, 0x2E, 0xC0, // ucomisd xmm0,xmm0
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
+        0x0F, 0x05, // syscall -> exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0));
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x40,
+        0x40
+    );
+}
+
+#[test]
 fn run_sar_rm64_cl() {
     // run 経由で REX.W D3 /7 (SAR RDI,CL) を回す。
     // RDI=0xF0、CL=2 -> RDI=0x3C になり、exit(0x3C)。
