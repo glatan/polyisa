@@ -3117,24 +3117,35 @@ fn dispatch<B: Backend>(
         }
         Insn::MovRm8ImmSib => {
             // C6 /0 SIB mod=00 [base+index*scale],imm8 (32b)。
-            // SIB は (word>>8) 下位8、imm は最下位8.
+            // SIB は (word>>8) 下位8、imm は最下位8。no_index は [base].
             let sib_v = ((word >> 8) & 0xff) as u8;
             let imm = (word & 0xff) as u8;
             let shift = ((sib_v >> 6) & 3) as u32;
-            let idx = Gpr(((sib_v >> 3) & 7) | (((rex >> 1) & 1) << 3));
+            let idx_raw = (sib_v >> 3) & 7;
+            let idx = Gpr(idx_raw | (((rex >> 1) & 1) << 3));
             let base = Gpr((sib_v & 7) | ((rex & 1) << 3));
-            sem::mov_rm8_imm_sib(b, base, idx, shift, imm)
+            if idx_raw == 4 && (rex >> 1) & 1 == 0 {
+                sem::mov_rm8_imm_memnd(b, base, imm)
+            } else {
+                sem::mov_rm8_imm_sib(b, base, idx, shift, imm)
+            }
         }
         Insn::MovRm8ImmSibd => {
             // C6 /0 SIB mod=01 [base+index*scale+disp8],imm8 (40b)。
             // SIB は (word>>16) 下位8、disp は (word>>8) 下位8、imm は最下位8.
+            // no_index は [base+disp8].
             let sib_v = ((word >> 16) & 0xff) as u8;
             let d8 = ((word >> 8) & 0xff) as u8 as i8;
             let imm = (word & 0xff) as u8;
             let shift = ((sib_v >> 6) & 3) as u32;
-            let idx = Gpr(((sib_v >> 3) & 7) | (((rex >> 1) & 1) << 3));
+            let idx_raw = (sib_v >> 3) & 7;
+            let idx = Gpr(idx_raw | (((rex >> 1) & 1) << 3));
             let base = Gpr((sib_v & 7) | ((rex & 1) << 3));
-            sem::mov_rm8_imm_sibd(b, base, idx, shift, d8, imm)
+            if idx_raw == 4 && (rex >> 1) & 1 == 0 {
+                sem::mov_rm8_imm_mem8(b, base, d8, imm)
+            } else {
+                sem::mov_rm8_imm_sibd(b, base, idx, shift, d8, imm)
+            }
         }
         Insn::MovRm8ImmMem32 => {
             // C6 /0 mod=10 [base+disp32],imm8 (56b)。disp は (word>>8) 下位32 LE、imm は最下位8.
