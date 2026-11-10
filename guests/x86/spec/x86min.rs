@@ -596,6 +596,9 @@ pub fn build_model() -> polyisa_isadl::Model {
         // MOVDQU xmm,xmm (F3 0F 6F reg-direct)。16B 非整列転送は MOVUPS と等価のため意味論を共有する。
         // MOVDQA xmm,xmm (66 0F 6F reg-direct) も等価のため MovdquLoadXmm を共用する.
         ("movdqu_load_xmm", "F1", "00001111 01101111 11......", "movdqu xmm, xmm", "load"),
+        // MOVDQU m128,xmm (F3 0F 7F /r)。16B 非整列転送は MOVUPS と等価のため意味論を共有する.
+        // MOVDQA m128,xmm (66 0F 7F /r) も等価のため共用する.
+        ("movdqu_store_xmm", "F1", "00001111 01111111 11......", "movdqu m128, xmm", "store"),
         // MOVDQA xmm,m128 RIP (66 0F 6F 05 + disp32)。66必須、アライメントは問わない.
         ("movdqa_load_rip", "F1", "00001111 01101111 00...101 ................................", "movdqa xmm, m128", "load"),
         // MOVQ m64,xmm mod=00/01/10 (66 0F D6 /r)。SIBなし.
@@ -2089,6 +2092,43 @@ pub fn build_model() -> polyisa_isadl::Model {
             vec![wc("n8_base", WhereOp::Ne, 5)],
             "movdqu xmm, m128",
             "load",
+        ),
+        // MOVDQU m128,xmm mod=00 [base] (F3 0F 7F)。SIB/絶対番地なし。MOVUPS と等価.
+        (
+            "movdqu_store_memnd",
+            "MR",
+            "00001111 01111111 00......",
+            vec![wc("mr_rm", WhereOp::Ne, 4), wc("mr_rm", WhereOp::Ne, 5)],
+            "movdqu m128, xmm",
+            "store",
+        ),
+        // MOVDQU m128,xmm mod=01 [base+disp8] (F3 0F 7F)。SIBなし。MOVUPS と等価.
+        (
+            "movdqu_store_mem8",
+            "M8",
+            "00001111 01111111 01...... ........",
+            vec![wc("m8_rm", WhereOp::Ne, 4)],
+            "movdqu m128, xmm",
+            "store",
+        ),
+        // MOVDQU m128,xmm mod=10 [base+disp32] (F3 0F 7F)。SIBなし。MOVUPS と等価.
+        (
+            "movdqu_store_mem32",
+            "M32",
+            "00001111 01111111 10...... ................................",
+            vec![wc("m32_rm", WhereOp::Ne, 4)],
+            "movdqu m128, xmm",
+            "store",
+        ),
+        // MOVDQU m128,xmm SIB mod=00 [base+index*scale] (F3 0F 7F / 66 0F 7F)。
+        // MOVDQA とバイト列共有のため意味論は MOVUPS と等価で共用する.
+        (
+            "movdqu_store_sib",
+            "N8",
+            "00001111 01111111 00...100 ........",
+            vec![wc("n8_base", WhereOp::Ne, 5)],
+            "movdqu m128, xmm",
+            "store",
         ),
         (
             "movups_store_mem8",

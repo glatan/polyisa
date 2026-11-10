@@ -216,6 +216,36 @@ fn fetch_len(
                 } else {
                     Some(3)
                 }
+            } else if s == 0x7F {
+                // MOVDQU m128,xmm (F3 0F 7F /r) と MOVDQA m128,xmm (66 0F 7F)。
+                // reg-direct と mod=00/01/10、SIB mod=00。16B転送は MOVUPS と等価.
+                // F3/66 接頭辞は剥がし済み。
+                let m = third?;
+                let md = m >> 6;
+                let rm = m & 7;
+                if md == 3 {
+                    Some(3)
+                } else if rm == 4 {
+                    let t = fourth?;
+                    let disp = match md {
+                        1 => 1,
+                        2 => 4,
+                        _ => {
+                            if t & 7 == 5 {
+                                4
+                            } else {
+                                0
+                            }
+                        }
+                    };
+                    Some(4 + disp)
+                } else if md == 1 {
+                    Some(4)
+                } else if md == 2 || rm == 5 {
+                    Some(7)
+                } else {
+                    Some(3)
+                }
             } else if s == 0x2A {
                 // CVTSI2SD xmm,m32 (F2 0F 2A /r mod=01 [base+disp8]、4B、SIBなし)。
                 // reg-direct (3B) は Cvtsi2sdR64 が使う.
@@ -1215,6 +1245,7 @@ pub fn run_mode(
                     Some(
                         0x1F | 0x6E
                             | 0x6F
+                            | 0x7F
                             | 0x60
                             | 0x61
                             | 0x62
@@ -1291,6 +1322,7 @@ pub fn run_mode(
                         | 0x28
                         | 0x29
                         | 0x6F
+                        | 0x7F
                         | 0xE7
                         | 0x1F
                         | 0xB6
@@ -1558,6 +1590,11 @@ pub fn run_mode(
                     | Insn::MovdquLoadMem8
                     | Insn::MovdquLoadMem32
                     | Insn::MovdquLoadSib
+                    | Insn::MovdquStoreXmm
+                    | Insn::MovdquStoreMemnd
+                    | Insn::MovdquStoreMem8
+                    | Insn::MovdquStoreMem32
+                    | Insn::MovdquStoreSib
                     | Insn::MovAbsEax
                     | Insn::MovEaxAbs
                     | Insn::MovRm16ImmM32
@@ -5184,6 +5221,19 @@ fn dispatch<B: Backend>(
                 sem::movups_load_memnd(b, xmm_reg_r(), sib0f_base())
             } else {
                 sem::movups_load_sib(b, xmm_reg_r(), sib0f_base(), sib0f_idx(), sib0f_shift())
+            }
+        }
+        // MOVDQU m128,xmm (F3 0F 7F) は16B非整列転送で MOVUPS と等価のため意味論を共有する.
+        // MOVDQA m128,xmm (66 0F 7F) も等価のため共用する.
+        Insn::MovdquStoreXmm => sem::movups_xmm_xmm(b, xmm_rm_b(), xmm_reg_r()),
+        Insn::MovdquStoreMemnd => sem::movups_store_memnd(b, xmm_reg_r(), rm0f()),
+        Insn::MovdquStoreMem8 => sem::movups_store_mem8(b, xmm_reg_r(), rm0f(), disp8()),
+        Insn::MovdquStoreMem32 => sem::movups_store_mem32(b, xmm_reg_r(), rm0f(), disp32()),
+        Insn::MovdquStoreSib => {
+            if sib0f_no_index() {
+                sem::movups_store_memnd(b, xmm_reg_r(), sib0f_base())
+            } else {
+                sem::movups_store_sib(b, xmm_reg_r(), sib0f_base(), sib0f_idx(), sib0f_shift())
             }
         }
         // MOVDQA (66 0F 6F) は16B転送で MOVUPS と等価のため意味論を共有する.

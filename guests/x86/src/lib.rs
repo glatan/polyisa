@@ -76,7 +76,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数117件。
-        assert_eq!(INSNS.len(), 586);
+        assert_eq!(INSNS.len(), 591);
     }
 
     #[test]
@@ -502,6 +502,11 @@ mod tests {
         assert_eq!(decode(0x0F6FCD, 24), Some(Insn::MovdquLoadXmm));
         assert_eq!(decode(0x0F6F4020, 32), Some(Insn::MovdquLoadMem8));
         assert_eq!(decode(0x0F6F07, 24), Some(Insn::MovdquLoadMemnd));
+        // MOVDQU m128,xmm (F3 0F 7F) と MOVDQA m128,xmm (66 0F 7F)。F3/66 は剥がし済み.
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x0F7FC0, 24), Some(Insn::MovdquStoreXmm));
+        assert_eq!(decode(0x0F7F07, 24), Some(Insn::MovdquStoreMemnd));
+        assert_eq!(decode(0x0F7F4020, 32), Some(Insn::MovdquStoreMem8));
         assert_eq!(decode(0x88042511060000, 56), Some(Insn::MovSibabsR8));
         assert_eq!(decode(0x0FDBC1, 24), Some(Insn::Pand));
         assert_eq!(decode(0x0FD60500000000, 56), Some(Insn::MovqM64XmmRip));

@@ -4374,6 +4374,56 @@ fn run_movdqu_load_mem8() {
 }
 
 #[test]
+fn run_movdqu_store_memnd() {
+    // run 経由で F3 0F 7F mod=00 (MOVDQU [RDI],xmm0) を回す.
+    // xmm0=16B を [0x2000] に格納して exit(0)、メモリで検証する.
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(7).state(), 0x2000);
+    env.step(|b| {
+        let v = b.konst::<polyisa_sem::W128>(0x0102030405060708090a0b0c0d0e0f10u128);
+        b.set(
+            polyisa_guest_x86::sem::xmm_ref(polyisa_guest_x86::sem::Xmm(0)),
+            v,
+        );
+        Ok(())
+    })
+    .unwrap();
+    let prog: &[u8] = &[
+        0xF3, 0x0F, 0x7F, 0x07, // movdqu [rdi],xmm0
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
+        0x0F, 0x05, // syscall -> exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0));
+    let mut buf = [0u8; 16];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x2000),
+            &mut buf,
+            polyisa_mem::Access {
+                endian: polyisa_mem::Endian::Le,
+                align: polyisa_mem::Align::Unaligned,
+                kind: polyisa_mem::AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        buf,
+        [
+            0x10u8, 0x0f, 0x0e, 0x0d, 0x0c, 0x0b, 0x0a, 0x09, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03,
+            0x02, 0x01
+        ]
+    );
+}
+
+#[test]
 fn run_add_r_memnd() {
     // run 経由で REX.W 03 /r mod=00 (ADD RDX,[RBX]) を回す。
     // [0x1500]=0x40, RDX=0x10 -> RDX=0x50 になり、exit(0x50)。
