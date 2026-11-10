@@ -7296,7 +7296,7 @@ pub struct CliLinux {
     fds: Vec<Option<std::fs::File>>,
     /// 標準 fd (0/1/2) の付け替え先。close 後に open したファイルが入る.
     /// uniq のように stdin をファイルに付け替える applet のため.
-    /// open は読取りのみ受け付けるため、ここに入るファイルは読取り専用である.
+    /// 読取り用・書込み用いずれのファイルも入る.
     std_files: [Option<std::fs::File>; 3],
     /// 標準 fd の閉鎖状態。初期 (stdio 接続) は false。close で true になる.
     std_closed: [bool; 3],
@@ -7599,15 +7599,15 @@ impl TrapHandler for CliLinux {
                 set64(env, Gpr(0), neg(EINVAL));
                 return TrapOutcome::Handled;
             }
-            // 書き込み・生成・切詰めを伴わない flags のみ受け付ける。
-            // O_NONBLOCK/O_CLOEXEC/O_DIRECTORY/O_NOFOLLOW 等は無視する。
-            // Ref: SRC-LINUX (7.3).
+            // 書込み・生成・切詰めを受け付ける。O_NONBLOCK/O_CLOEXEC/O_DIRECTORY/O_NOFOLLOW 等は無視する。
+            // truncate/cp/split が O_WRONLY|O_CREAT 等で開く。Ref: SRC-LINUX (7.3).
             const O_ACCMODE: u32 = 3;
             const O_CREAT: u32 = 0o100;
             const O_EXCL: u32 = 0o200;
             const O_TRUNC: u32 = 0o1000;
             const O_APPEND: u32 = 0o2000;
-            if flags & O_ACCMODE != 0 || flags & (O_CREAT | O_EXCL | O_TRUNC | O_APPEND) != 0 {
+            let acc = flags & O_ACCMODE;
+            if acc > 2 {
                 set64(env, Gpr(0), neg(EINVAL));
                 return TrapOutcome::Handled;
             }
@@ -7619,7 +7619,25 @@ impl TrapHandler for CliLinux {
                 set64(env, Gpr(0), neg(EINVAL));
                 return TrapOutcome::Handled;
             }
-            return match std::fs::File::open(&path) {
+            let want_write = acc != 0 || flags & (O_CREAT | O_TRUNC | O_APPEND) != 0;
+            let opened = if want_write {
+                let mut opts = std::fs::OpenOptions::new();
+                opts.read(acc != 1);
+                opts.write(true);
+                if flags & O_CREAT != 0 {
+                    if flags & O_EXCL != 0 {
+                        opts.create_new(true);
+                    } else {
+                        opts.create(true);
+                    }
+                }
+                opts.truncate(flags & O_TRUNC != 0);
+                opts.append(flags & O_APPEND != 0);
+                opts.open(&path)
+            } else {
+                std::fs::File::open(&path)
+            };
+            return match opened {
                 Ok(f) => {
                     let fd = self.alloc_fd(f);
                     set64(env, Gpr(0), fd as u64);
@@ -7629,6 +7647,7 @@ impl TrapHandler for CliLinux {
                     let no = match e.kind() {
                         std::io::ErrorKind::NotFound => ENOENT,
                         std::io::ErrorKind::PermissionDenied => EACCES,
+                        std::io::ErrorKind::AlreadyExists => 17,
                         _ => EINVAL,
                     };
                     set64(env, Gpr(0), neg(no));
@@ -7691,17 +7710,43 @@ impl TrapHandler for CliLinux {
             let fd = get64(env, r_a) as u32;
             let buf = get64(env, r_b);
             let mut left = get64(env, r_c);
-            // 付け替えた標準 fd は読取り専用のため EBADF（open は読取りのみ受け付ける）。
-            if fd < 3 && self.std_files[fd as usize].is_some() {
-                set64(env, Gpr(0), neg(EBADF));
+            if (fd == 1 || fd == 2) && self.std_files[fd as usize].is_none() {
+                let mut done = 0u64;
+                let mut chunk = vec![0u8; IO_CHUNK];
+                while left > 0 {
+                    let take = left.min(IO_CHUNK as u64) as usize;
+                    if env
+                        .backend
+                        .mem
+                        .read(VirtAddr(buf + done), &mut chunk[..take], data_access())
+                        .is_err()
+                    {
+                        return TrapOutcome::Unimplemented;
+                    }
+                    let n = match fd {
+                        1 => std::io::Write::write(&mut std::io::stdout(), &chunk[..take])
+                            .unwrap_or(0),
+                        _ => std::io::Write::write(&mut std::io::stderr(), &chunk[..take])
+                            .unwrap_or(0),
+                    };
+                    done += n as u64;
+                    left -= n as u64;
+                    if n < take {
+                        break;
+                    }
+                }
+                set64(env, Gpr(0), done);
                 return TrapOutcome::Handled;
             }
-            if fd != 1 && fd != 2 {
+            // 開ファイル (opened fd・付け替え先。dup2 で stdout に置いた出力先を含む)
+            // への write はホストに書く。読取り専用で開いた場合は EBADF になる。
+            let Some(file) = self.file_mut(fd) else {
                 set64(env, Gpr(0), neg(EBADF));
                 return TrapOutcome::Handled;
-            }
+            };
             let mut done = 0u64;
             let mut chunk = vec![0u8; IO_CHUNK];
+            let mut err_no: Option<u32> = None;
             while left > 0 {
                 let take = left.min(IO_CHUNK as u64) as usize;
                 if env
@@ -7712,17 +7757,34 @@ impl TrapHandler for CliLinux {
                 {
                     return TrapOutcome::Unimplemented;
                 }
-                let n = match fd {
-                    1 => std::io::Write::write(&mut std::io::stdout(), &chunk[..take]).unwrap_or(0),
-                    _ => std::io::Write::write(&mut std::io::stderr(), &chunk[..take]).unwrap_or(0),
-                };
-                done += n as u64;
-                left -= n as u64;
-                if n < take {
-                    break;
+                match std::io::Write::write(file, &chunk[..take]) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        done += n as u64;
+                        left -= n as u64;
+                        if n < take {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        err_no = Some(match e.raw_os_error() {
+                            Some(9) => EBADF,
+                            Some(13) => EACCES,
+                            _ => EINVAL,
+                        });
+                        break;
+                    }
                 }
             }
-            set64(env, Gpr(0), done);
+            if done == 0 {
+                if let Some(no) = err_no {
+                    set64(env, Gpr(0), neg(no));
+                } else {
+                    set64(env, Gpr(0), 0);
+                }
+            } else {
+                set64(env, Gpr(0), done);
+            }
             return TrapOutcome::Handled;
         }
         // writev/readv (x86-64: 20/19, i386: 146/145)。iovec 配列を辿って転送する.
@@ -9448,25 +9510,12 @@ mod tests {
     }
 
     #[test]
-    fn openat_rejects_bad_dirfd_and_flags() {
+    fn openat_rejects_bad_dirfd_and_relpath() {
         let mut sys = CliX86::default();
         let mut env = bare();
         env.backend.mem.write(VirtAddr(0x100), b"/x\0").unwrap();
         // dirfd が AT_FDCWD ではない。
         set_regs(&mut env, polyisa_os_linux::i386::OPENAT as u32, 3, 0x100, 0);
-        assert!(matches!(
-            sys.handle_trap(&mut env, 0x80),
-            TrapOutcome::Handled
-        ));
-        assert_eq!(env.backend.get(Gpr(0).state()), neg_errno(EINVAL));
-        // O_WRONLY 相当の flags は受け付けない。
-        set_regs(
-            &mut env,
-            polyisa_os_linux::i386::OPENAT as u32,
-            0xffff_ff9c,
-            0x100,
-            1,
-        );
         assert!(matches!(
             sys.handle_trap(&mut env, 0x80),
             TrapOutcome::Handled
@@ -9486,6 +9535,172 @@ mod tests {
             TrapOutcome::Handled
         ));
         assert_eq!(env.backend.get(Gpr(0).state()), neg_errno(EINVAL));
+    }
+
+    #[test]
+    fn openat_creat_wronly_write_roundtrip() {
+        // truncate/cp/split の前段: O_WRONLY|O_CREAT|O_TRUNC で作り、write して read で戻る.
+        // O_EXCL 付きの既存作成は EEXIST(17)。旧実装は書込み系 flags を EINVAL で拒否した.
+        let dir = std::env::temp_dir().join(format!("polyisa-unit-open-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir).unwrap();
+        let path_s = dir.join("f.txt").to_string_lossy().into_owned();
+        let mut sys = CliX86::default();
+        let mut env = bare();
+        env.backend
+            .mem
+            .write(VirtAddr(0x100), path_s.as_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x100 + path_s.len() as u64), &[0])
+            .unwrap();
+        env.backend.mem.write(VirtAddr(0x200), b"abcdef").unwrap();
+        // 存在しない path の O_WRONLY のみは ENOENT。
+        set_regs(
+            &mut env,
+            polyisa_os_linux::i386::OPENAT as u32,
+            0xffff_ff9c,
+            0x100,
+            1,
+        );
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(env.backend.get(Gpr(0).state()), neg_errno(ENOENT));
+        // O_WRONLY|O_CREAT|O_TRUNC (1|0o100|0o1000=0o1101) で作成 -> fd 3。
+        set_regs(
+            &mut env,
+            polyisa_os_linux::i386::OPENAT as u32,
+            0xffff_ff9c,
+            0x100,
+            0o1101,
+        );
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(env.backend.get(Gpr(0).state()), 3);
+        // write(3, 0x200, 6) -> 6。
+        set_regs(&mut env, polyisa_os_linux::i386::WRITE as u32, 3, 0x200, 6);
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(env.backend.get(Gpr(0).state()), 6);
+        // close(3) -> 0。
+        set_regs(&mut env, polyisa_os_linux::i386::CLOSE as u32, 3, 0, 0);
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(env.backend.get(Gpr(0).state()), 0);
+        // O_RDONLY で開き直して read -> "abcdef"。
+        set_regs(
+            &mut env,
+            polyisa_os_linux::i386::OPENAT as u32,
+            0xffff_ff9c,
+            0x100,
+            0,
+        );
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(env.backend.get(Gpr(0).state()), 3);
+        set_regs(&mut env, polyisa_os_linux::i386::READ as u32, 3, 0x300, 6);
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(env.backend.get(Gpr(0).state()), 6);
+        let mut back = [0u8; 6];
+        env.backend
+            .mem
+            .read(VirtAddr(0x300), &mut back, data_access())
+            .unwrap();
+        assert_eq!(&back, b"abcdef");
+        // O_RDWR で開いて追記位置を読書きできる。
+        set_regs(&mut env, polyisa_os_linux::i386::CLOSE as u32, 3, 0, 0);
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        set_regs(
+            &mut env,
+            polyisa_os_linux::i386::OPENAT as u32,
+            0xffff_ff9c,
+            0x100,
+            2,
+        );
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(env.backend.get(Gpr(0).state()), 3);
+        // O_CREAT|O_EXCL の既存作成は EEXIST(17)。
+        set_regs(
+            &mut env,
+            polyisa_os_linux::i386::OPENAT as u32,
+            0xffff_ff9c,
+            0x100,
+            0o300,
+        );
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(env.backend.get(Gpr(0).state()), neg_errno(17));
+        // O_TRUNC で空になる。
+        set_regs(&mut env, polyisa_os_linux::i386::CLOSE as u32, 3, 0, 0);
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        set_regs(
+            &mut env,
+            polyisa_os_linux::i386::OPENAT as u32,
+            0xffff_ff9c,
+            0x100,
+            0o1101,
+        );
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(env.backend.get(Gpr(0).state()), 3);
+        set_regs(&mut env, polyisa_os_linux::i386::READ as u32, 3, 0x300, 6);
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(env.backend.get(Gpr(0).state()), 0);
+        // 読取り専用 fd への write は EBADF。
+        set_regs(&mut env, polyisa_os_linux::i386::CLOSE as u32, 3, 0, 0);
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        set_regs(
+            &mut env,
+            polyisa_os_linux::i386::OPENAT as u32,
+            0xffff_ff9c,
+            0x100,
+            0,
+        );
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(env.backend.get(Gpr(0).state()), 3);
+        set_regs(&mut env, polyisa_os_linux::i386::WRITE as u32, 3, 0x200, 6);
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(env.backend.get(Gpr(0).state()), neg_errno(EBADF));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -10521,6 +10736,50 @@ mod tests {
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), 4);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn write_to_remapped_stdout_serves_file() {
+        // split の出力 pattern: open(WRONLY|CREAT) -> fd、dup2(fd, 1)、write(1) で書ける.
+        // 旧実装は付け替え後もホスト stdout に書いたため出力が空になった.
+        use polyisa_os_linux::x86_64 as abi;
+        let dir = std::env::temp_dir().join(format!("polyisa-unit-wstdout-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir).unwrap();
+        let path_s = dir.join("o.txt").to_string_lossy().into_owned();
+        let mut sys = CliLinux::x86_64();
+        let mut env = bare();
+        env.backend
+            .mem
+            .write(VirtAddr(0x100), path_s.as_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x100 + path_s.len() as u64), &[0])
+            .unwrap();
+        env.backend.mem.write(VirtAddr(0x200), b"abcdef").unwrap();
+        // openat(AT_FDCWD, path, O_WRONLY|O_CREAT|O_TRUNC) -> fd 3.
+        set64(&mut env, Gpr(0), abi::OPENAT);
+        set64(&mut env, Gpr(7), AT_FDCWD_U32 as u64);
+        set64(&mut env, Gpr(6), 0x100);
+        set64(&mut env, Gpr(2), 0o1101);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 3);
+        // dup2(3, 1) -> 1。
+        set64(&mut env, Gpr(0), abi::DUP2);
+        set64(&mut env, Gpr(7), 3);
+        set64(&mut env, Gpr(6), 1);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 1);
+        // write(1, 0x200, 6) -> 6。ホスト stdout ではなくファイルに書く。
+        set64(&mut env, Gpr(0), abi::WRITE);
+        set64(&mut env, Gpr(7), 1);
+        set64(&mut env, Gpr(6), 0x200);
+        set64(&mut env, Gpr(2), 6);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 6);
+        assert_eq!(std::fs::read(dir.join("o.txt")).unwrap(), b"abcdef");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
