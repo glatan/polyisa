@@ -891,7 +891,7 @@ fn fetch_len(
         }
         // register-direct と ModRMメモリ (SIBなし) に対応するALU opcode。
         // SIB付き (rm==4) は未対応で None。mod=01は+1、mod=10は+4、mod=00 rm=5は+4。
-        0x29 | 0x31 | 0x21 | 0x85 | 0x11 | 0x19 | 0x87 => {
+        0x29 | 0x31 | 0x21 | 0x11 | 0x19 | 0x87 => {
             let s = second?;
             let md = s >> 6;
             let rm = s & 7;
@@ -914,6 +914,24 @@ fn fetch_len(
                     }
                 },
             )
+        }
+        // 0x85 /r (TEST r,m)。reg-direct 2B、SIB mod=01 +disp8 4B、mod=01 base+disp8 3B、
+        // mod=10 base+disp32 6B、mod=00 base 2B / abs disp32 6B。SIB mod=00/10 は未対応.
+        0x85 => {
+            let s = second?;
+            let md = s >> 6;
+            let rm = s & 7;
+            if md == 3 {
+                Some(2)
+            } else if rm == 4 {
+                if md == 1 { Some(4) } else { None }
+            } else if md == 1 {
+                Some(3)
+            } else if md == 2 || rm == 5 {
+                Some(6)
+            } else {
+                Some(2)
+            }
         }
         // 0xC1 (シフト) は register-direct のみ 3B。
         0xC1 => {
@@ -3004,6 +3022,22 @@ fn dispatch<B: Backend>(
                 sem::test_r64_m64_mem8(b, reg(), rm(), d8)
             } else {
                 sem::test_r32_m32_mem8(b, reg(), rm(), d8)
+            }
+        }
+        Insn::TestRSibd => {
+            // 85 /r SIB mod=01 [base+index*scale+disp8] (32b)。dst は reg フィールド.
+            // disp は最下位8。no_index は base+disp8 のみ.
+            let d8 = (word & 0xff) as u8 as i8;
+            if no_index() {
+                if rex_w {
+                    sem::test_r64_m64_mem8(b, reg(), sib_base(), d8)
+                } else {
+                    sem::test_r32_m32_mem8(b, reg(), sib_base(), d8)
+                }
+            } else if rex_w {
+                sem::test_r64_m64_sibd(b, reg(), sib_base(), sib_idx(), sib_shift(), d8)
+            } else {
+                sem::test_r32_m32_sibd(b, reg(), sib_base(), sib_idx(), sib_shift(), d8)
             }
         }
         Insn::TestRm32Imm => {

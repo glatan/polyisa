@@ -76,7 +76,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数116件。
-        assert_eq!(INSNS.len(), 570);
+        assert_eq!(INSNS.len(), 571);
     }
 
     #[test]
@@ -838,6 +838,10 @@ mod tests {
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x3B4C2414, 32), Some(Insn::CmpRSibd));
         assert_eq!(decode(0x3B4C2414, 24), None);
+        // TEST r,m SIB mod=01 [base+index*scale+disp8] (85 /r)。wc の停止点 0x5b3696 に対応.
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x8544241C, 32), Some(Insn::TestRSibd));
+        assert_eq!(decode(0x8544241C, 24), None);
         // SUB m32,r32 mod=01 [base+disp8] (29 /r)。
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x296DA0, 24), Some(Insn::SubM32R32Mem8));

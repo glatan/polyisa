@@ -1081,6 +1081,14 @@ pub fn build_model() -> polyisa_isadl::Model {
             "alu",
         ),
         (
+            "test_r_sibd",
+            "S8",
+            "10000101 01...100 ........ ........",
+            vec![],
+            "test r32, [r/m+sib+disp8]",
+            "alu",
+        ),
+        (
             "movzx_r32_m16_mem8",
             "M8",
             "00001111 10110111 01...... ........",

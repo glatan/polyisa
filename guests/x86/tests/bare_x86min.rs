@@ -5661,6 +5661,41 @@ fn cmp_m8_r8_sibd_sets_flags() {
 }
 
 #[test]
+fn test_r32_m32_sibd_sets_flags() {
+    // TEST EAX,[RSP+0x1C] (85 44 24 1C): EAX=0xFF、[mem]=0x0F -> ZF=0.
+    // wc の停止点 0x5b3696 に対応。no_index は mem8 経路.
+    let mut env = env();
+    env.map_rw(0x2000, 1).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    env.backend.set(Gpr(0).state(), 0xFF);
+    env.backend
+        .mem
+        .write(VirtAddr(0x201C), &0x0Fu32.to_le_bytes())
+        .unwrap();
+    env.step(|b| sem::test_r32_m32_mem8(b, Gpr(0), Gpr(4), 0x1C))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0);
+    // [mem]=0 -> ZF=1.
+    env.backend
+        .mem
+        .write(VirtAddr(0x201C), &0u32.to_le_bytes())
+        .unwrap();
+    env.step(|b| sem::test_r32_m32_mem8(b, Gpr(0), Gpr(4), 0x1C))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0x40);
+    // 索引あり: TEST EAX,[EBX+ECX*2+0x10]、[0x2120]=0xFF & EAX=0xFF -> ZF=0.
+    env.backend.set(Gpr(3).state(), 0x2000);
+    env.backend.set(Gpr(1).state(), 0x88);
+    env.backend
+        .mem
+        .write(VirtAddr(0x2120), &0xFFu32.to_le_bytes())
+        .unwrap();
+    env.step(|b| sem::test_r32_m32_sibd(b, Gpr(0), Gpr(3), Gpr(1), 1, 0x10))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0);
+}
+
+#[test]
 fn cmp_r32_sibd_indexed_sets_flags() {
     // CMP EAX,[EBX+ECX*2+0x10] (3B 44 8B 10): [0x2120]=10、EAX=10 -> ZF=1.
     // RSP+disp8 の no_index 経路は dispatch で cmp_r32_mem8 に流れるため sem 直結で被せる.
