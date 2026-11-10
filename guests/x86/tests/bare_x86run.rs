@@ -4831,3 +4831,42 @@ fn run_movsd_load_store_sibd() {
         .unwrap();
     assert_eq!(u64::from_le_bytes(back), 0xAABB_CCDD_EEFF_0011);
 }
+
+#[test]
+fn run_movq_xmm_r64_rexw() {
+    // 66 REX.W 0F 6E C0 (movq xmm0,rax)。RAX=0x4045000000000000 -> xmm0低64。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(0), 0x4045_0000_0000_0000);
+        Ok(())
+    })
+    .unwrap();
+    let prog: &[u8] = &[
+        0x66, 0x48, 0x0F, 0x6E, 0xC0, // movq xmm0,rax (REX.W)
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
+        0x0F, 0x05, // syscall -> exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    // RAXを復元 (write64で汚したため再設定は不要、prog内で上書きされる前に実行される)。
+    // 実際は prog先頭でxmm0<-RAXを読むため、事前のRAX値が使われる。
+    // BareEnvのRAXはwrite64で設定済みのためそのまま実行する。
+    // ただし env.stepで設定した後にprogを書いたため順序は正しい。
+    let mut sys = X64Exit;
+    // RAXを再設定 (prog書込みでレジスタは変わらないため不要だが明示する)。
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(0), 0x4045_0000_0000_0000);
+        Ok(())
+    })
+    .unwrap();
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0));
+    let v: u128 = env.backend.get(polyisa_guest_x86::sem::xmm_ref(
+        polyisa_guest_x86::sem::Xmm(0),
+    ));
+    assert_eq!((v & 0xFFFF_FFFF_FFFF_FFFF) as u64, 0x4045_0000_0000_0000);
+}

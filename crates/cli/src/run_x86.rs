@@ -4682,7 +4682,15 @@ fn dispatch<B: Backend>(
                 sem::rep_stosd(b, eip)
             }
         }
-        Insn::MovdXmm => sem::movd_xmm_gpr32(b, xmm_reg(), rm0f()),
+        Insn::MovdXmm => {
+            // 66 0F 6E /r reg-direct。REX.W では MOVQ xmm,r64 (64ビット) として振る舞う.
+            // strtod が double ビット列を GPR 経由で XMM に組むのに使う.
+            if rex_w {
+                sem::movq_xmm_r64(b, xmm_reg_r(), rm0f())
+            } else {
+                sem::movd_xmm_gpr32(b, xmm_reg_r(), rm0f())
+            }
+        }
         Insn::MovdXmmM32 => {
             // 0F6E modrm + disp32 (mod=10 RBP)。disp は low32 LE? Actually word 56b: [0F][6E][modrm][disp0..3] (7B). disp = low32 LE? low32 = disp BE? Use disp32() which is (word as u32).swap? Wait word low32 = disp BE? For 56b word, low32 = disp (4B). disp32() = (word as u32).swap_bytes() as i32. Good (since low32 is disp). Good.
             sem::movd_xmm_m32(b, xmm_reg(), rm0f(), disp32())
