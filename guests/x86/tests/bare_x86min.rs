@@ -7326,3 +7326,40 @@ fn bswap_r64_reverses_bytes() {
     })
     .unwrap();
 }
+
+#[test]
+fn cmovne_r64_mem32_moves_on_nz() {
+    // CMOVNE RAX,[RBP-0xA8]: ZF=0 -> RAX=mem64。grep 0x442f5f 対応.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend.set(Gpr(5).state(), 0x2000);
+    env.backend
+        .mem
+        .write(VirtAddr(0x1F58), &0x1122_3344_5566_7788u64.to_le_bytes())
+        .unwrap();
+    env.backend.set(Gpr(0).state(), 0);
+    env.backend.set(sem::eflags_ref(), 0);
+    env.step(|b| sem::cmovne_r64_mem32(b, Gpr(0), Gpr(5), -0xA8))
+        .unwrap();
+    env.step(|b| {
+        let v = sem::read64(b, Gpr(0));
+        assert_eq!(v, 0x1122_3344_5566_7788);
+        Ok(())
+    })
+    .unwrap();
+    // ZF=1 keeps.
+    env.step(|b| {
+        sem::write64(b, Gpr(0), 0);
+        Ok(())
+    })
+    .unwrap();
+    env.backend.set(sem::eflags_ref(), 0x40);
+    env.step(|b| sem::cmovne_r64_mem32(b, Gpr(0), Gpr(5), -0xA8))
+        .unwrap();
+    env.step(|b| {
+        let v = sem::read64(b, Gpr(0));
+        assert_eq!(v, 0);
+        Ok(())
+    })
+    .unwrap();
+}

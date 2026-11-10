@@ -5727,6 +5727,14 @@ fn dispatch<B: Backend>(
                 sem::cmove_r32_mem32(b, reg0f_as_gpr(), rm0f(), disp32())
             }
         }
+        Insn::CmovneM64 => {
+            // 0F 45 mod=10 [base+disp32]。grep 0x442f5f 対応.
+            if rex_w {
+                sem::cmovne_r64_mem32(b, reg0f_as_gpr(), rm0f(), disp32())
+            } else {
+                sem::cmovne_r32_mem32(b, reg0f_as_gpr(), rm0f(), disp32())
+            }
+        }
         Insn::CmovneR64Sibd => {
             // 0F 45 SIB mod=01 [base+disp8] no_index (40b)。
             // SIB は (word>>8) 下位8、disp は最下位8。base は SIB 下位3 + REX.B。

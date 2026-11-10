@@ -5469,6 +5469,46 @@ fn run_cmove_r64_sibd_moves_on_z() {
 }
 
 #[test]
+fn run_cmovne_r64_mem32_moves_on_nz() {
+    // CMOVNE RAX,[RBP-0xA8] (48 0F 45 85 58 FF FF FF) を64ビットで回す。grep 対応.
+    // RBP=0x2000、[0x1F58]=0x1122...、ZF=0 -> RAX=0x1122...、eip は 0x1008 に進む.
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x1000),
+            &[0x48, 0x0F, 0x45, 0x85, 0x58, 0xFF, 0xFF, 0xFF],
+        )
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1F58), &0x1122_3344_5566_7788u64.to_le_bytes())
+        .unwrap();
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(5), 0x2000);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(0), 0);
+        Ok(())
+    })
+    .unwrap();
+    env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 0);
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x1008 });
+    env.step(|b| {
+        let v = polyisa_guest_x86::sem::read64(b, Gpr(0));
+        assert_eq!(v, 0x1122_3344_5566_7788);
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
 fn run_div_rm32_mem8_quotient_remainder() {
     // DIV EAX,[RDI+4] (F7 77 04) を32ビットで回す.
     // EDX:EAX=17、[0x104]=5 -> EAX=3、EDX=2、eip は 0x1003 に進む.
