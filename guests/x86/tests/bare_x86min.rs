@@ -2820,6 +2820,21 @@ fn movzx_r32_m16_mem8_zero_extends() {
 }
 
 #[test]
+fn movzx_r32_m16_memnd_zero_extends() {
+    // MOVZX ECX,[RSI]: [0]=0xABCD -> ECX=0xABCD。ls -l 0x4824c4 対応.
+    let mut env = env();
+    env.map_rw(0, 1).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0), &0xABCDu16.to_le_bytes())
+        .unwrap();
+    env.backend.set(Gpr(6).state(), 0);
+    env.step(|b| sem::movzx_r32_m16_memnd(b, Gpr(1), Gpr(6)))
+        .unwrap();
+    assert_eq!(env.backend.get(Gpr(1).state()), 0xABCD);
+}
+
+#[test]
 fn movsx_r32_m8_rip_sign_extends() {
     // MOVSX EAX,[RIP]: [0x1500]=0xFF -> EAX=0xFFFFFFFF。
     let mut env = env();

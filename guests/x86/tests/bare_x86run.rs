@@ -1629,6 +1629,32 @@ fn run_movzx_r32_m16_mem8() {
 }
 
 #[test]
+fn run_movzx_r32_m16_memnd() {
+    // run 経由で 0F B7 0E (MOVZX ECX,[RSI]) を回す。ls -l 0x4824c4 対応.
+    // [0x2000]=0xABCD -> ECX=0xABCD、eip は 0x1003 に進み exit(0)。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(6).state(), 0x2000);
+    env.backend
+        .mem
+        .write(VirtAddr(0x2000), &0xABCDu16.to_le_bytes())
+        .unwrap();
+    let prog: &[u8] = &[
+        0x0F, 0xB7, 0x0E, // movzx ecx,[rsi]
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
+        0x0F, 0x05, // syscall -> exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0));
+    assert_eq!(env.backend.get(Gpr(1).state()), 0xABCD);
+}
+
+#[test]
 fn run_movaps_store_mem32() {
     // run 経由で 0F 29 85 E0 FE FF FF (MOVAPS [rbp-0x120],xmm0) を回す。
     // RBP=0x2000、disp=-0x120 -> [0x1EE0]=xmm0、exit(0)。

@@ -76,7 +76,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数117件。
-        assert_eq!(INSNS.len(), 596);
+        assert_eq!(INSNS.len(), 597);
     }
 
     #[test]
@@ -859,6 +859,11 @@ mod tests {
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x0FB75610, 32), Some(Insn::MovzxR32M16Mem8));
         assert_eq!(decode(0x0FB75610, 24), None);
+        // MOVZX r32,m16 mod=00 [base] (0F B7 /r)。ls -l 0x4824c4 対応.
+        // 0F B7 0E は movzwl (%rsi),%ecx.
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x0FB70E, 24), Some(Insn::MovzxR32M16Memnd));
+        assert_eq!(decode(0x0FB70E, 32), None);
         // MOVAPS [base+disp32],xmm (0F 29 mod=10)。
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x0F2985E0FEFFFF, 56), Some(Insn::MovapsStoreMem32));
