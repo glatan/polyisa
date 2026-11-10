@@ -6943,6 +6943,24 @@ fn test_rm32_imm_memnd_sets_zf() {
 }
 
 #[test]
+fn add_r32_sib_indexed() {
+    // ADD ECX,[RDI+RBX*4] (03 /r SIB mod=00): [0x2040]=5、ECX=3 -> ECX=8.
+    // md5sum 0x5ca46d 対応.
+    let mut env = env();
+    env.map_rw(0x2000, 1).unwrap();
+    env.backend.set(Gpr(7).state(), 0x2000);
+    env.backend.set(Gpr(3).state(), 0x10);
+    env.backend.set(Gpr(1).state(), 3);
+    env.backend
+        .mem
+        .write(VirtAddr(0x2040), &5u32.to_le_bytes())
+        .unwrap();
+    env.step(|b| sem::add_r32_sib(b, Gpr(1), Gpr(7), Gpr(3), 2))
+        .unwrap();
+    assert_eq!(env.backend.get(Gpr(1).state()), 8);
+}
+
+#[test]
 fn and_rm32_imm8_sib_indexed_rexx() {
     // ANDL $0,[RAX+R9*4] (42 83 24 88 00): head の停止点に対応。REX.X で R9 を指す.
     // RAX=0x2000、R9=0x10、[0x2040]=0xFF -> 0.

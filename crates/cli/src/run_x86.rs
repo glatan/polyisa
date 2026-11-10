@@ -4487,6 +4487,20 @@ fn dispatch<B: Backend>(
                 sem::add_r32_mem32(b, reg(), rm(), disp32())
             }
         }
+        Insn::AddRSib => {
+            // 03 /r SIB mod=00 [base+index*scale]。md5sum 0x5ca46d 対応. no_index は [base].
+            if no_index() {
+                if rex_w {
+                    sem::add_r64_memnd(b, reg(), sib_base())
+                } else {
+                    sem::add_r32_memnd(b, reg(), sib_base())
+                }
+            } else if rex_w {
+                sem::add_r64_sib(b, reg(), sib_base(), sib_idx(), sib_shift())
+            } else {
+                sem::add_r32_sib(b, reg(), sib_base(), sib_idx(), sib_shift())
+            }
+        }
         Insn::XorRMemnd => {
             if rex_w {
                 sem::xor_r64_memnd(b, reg(), rm())
@@ -6859,6 +6873,7 @@ fn dispatch<B: Backend>(
             | Insn::AddRMemnd
             | Insn::AddRMem8
             | Insn::AddRMem32
+            | Insn::AddRSib
             | Insn::AddRSibabs
             | Insn::SubRMemnd
             | Insn::SubRMem8

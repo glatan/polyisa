@@ -13188,6 +13188,28 @@ pub fn movq_m64_xmm_mem32<B: Backend>(b: &mut B, src: Xmm, base: Gpr, disp: i32)
     Ok(())
 }
 
+/// ADD r32, [base+index*scale] (03 /r SIB mod=00)。md5sum 0x5ca46d 対応.
+pub fn add_r32_sib<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, idx: Gpr, shift: u32) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, 0, base, idx);
+    let y: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let x = read(b, dst);
+    let v = b.add::<W32>(x, y);
+    write(b, dst, v);
+    update_add_flags(b, x, y, v);
+    Ok(())
+}
+
+/// ADD r64, [base+index*scale] (03 /r SIB mod=00, REX.W)。
+pub fn add_r64_sib<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, idx: Gpr, shift: u32) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, 0, base, idx);
+    let y: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let x = read64(b, dst);
+    let v = b.add::<W64>(x, y);
+    write64(b, dst, v);
+    update_add_flags(b, x, y, v);
+    Ok(())
+}
+
 /// XOR r32, [base+index*scale] (33 /r SIB mod=00)。
 pub fn xor_r32_sib<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, idx: Gpr, shift: u32) -> Flow<B> {
     let addr = sib_addr_scaled(b, shift, 0, base, idx);
