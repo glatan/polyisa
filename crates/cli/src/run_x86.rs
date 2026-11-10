@@ -1603,6 +1603,14 @@ fn dispatch<B: Backend>(
             // FF /0 mod=00 [base]。CF 以外の 5 旗を更新する.
             sem::inc_r32_memnd(b, rm())
         }
+        Insn::IncRmSibd => {
+            // FF /0 SIB mod=01 [base+index*scale+disp8]。CF 以外の 5 旗を更新する.
+            if no_index() {
+                sem::inc_r32_mem8(b, sib_base(), disp8())
+            } else {
+                sem::inc_r32_sibd(b, sib_base(), sib_idx(), sib_shift(), disp8())
+            }
+        }
         Insn::DecRm => {
             // FF /1 reg-direct。
             if rex_w {
