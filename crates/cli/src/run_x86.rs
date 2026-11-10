@@ -369,10 +369,14 @@ fn fetch_len(
                 if m >> 6 == 3 { Some(3) } else { None }
             } else if s == 0xBA {
                 // BT/BTS r32/r64,imm8 (0F BA /4 ib と /5 ib reg-direct、4B)。REX.W で64ビット.
+                // BT m32,imm8 mod=00 [base] (0F BA /4 + ModRM + imm8、4B)。SIB/RIP 除外.
                 let m = third?;
                 let md = m >> 6;
                 let reg = (m >> 3) & 7;
-                if md == 3 && (reg == 4 || reg == 5) {
+                let rm = m & 7;
+                if (md == 3 && (reg == 4 || reg == 5))
+                    || (md == 0 && reg == 4 && rm != 4 && rm != 5)
+                {
                     Some(4)
                 } else {
                     None
@@ -4822,6 +4826,11 @@ fn dispatch<B: Backend>(
             // BT r32,imm8 (0F BA /4 ib reg-direct、4B)。imm は最下位8.
             let imm = (word & 0xff) as u8;
             sem::bt_r32_imm(b, rm0f(), imm)
+        }
+        Insn::BtM32Imm => {
+            // BT m32,imm8 mod=00 [base] (0F BA /4 + ModRM + imm8、4B)。imm は最下位8.
+            let imm = (word & 0xff) as u8;
+            sem::bt_m32_imm(b, rm0f(), imm)
         }
         Insn::BtsR32Imm => {
             // BTS r32/r64,imm8 (0F BA /5 ib reg-direct、4B)。imm は最下位8。REX.W で64ビット.

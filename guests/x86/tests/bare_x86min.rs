@@ -2167,6 +2167,25 @@ fn bt_r32_imm_sets_cf() {
 }
 
 #[test]
+fn bt_m32_imm_sets_cf() {
+    // BT [0x100],0x0C: [0x100]=0x1000 (bit12) -> CF=1。
+    let mut env = env();
+    env.map_rw(0, 1).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x100), &0x1000u32.to_le_bytes())
+        .unwrap();
+    env.backend.set(Gpr(7).state(), 0x100);
+    env.backend.set(sem::eflags_ref(), 0);
+    env.step(|b| sem::bt_m32_imm(b, Gpr(7), 0x0C)).unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x1, 0x1);
+    // bit11=0 -> CF=0。
+    env.backend.set(sem::eflags_ref(), 0);
+    env.step(|b| sem::bt_m32_imm(b, Gpr(7), 0x0B)).unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x1, 0x0);
+}
+
+#[test]
 fn movsx_r32_m8_mem8_sign_extends() {
     // MOVSX ESI,[RCX+1]: [1]=0xFF -> ESI=0xFFFFFFFF。
     let mut env = env();

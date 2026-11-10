@@ -5051,3 +5051,30 @@ fn run_div_rm32_mem8_quotient_remainder() {
     assert_eq!(env.backend.get(Gpr(0).state()), 3);
     assert_eq!(env.backend.get(Gpr(2).state()), 2);
 }
+
+#[test]
+fn run_bt_m32_imm_sets_cf() {
+    // BT [RDI],0x0C (0F BA 27 0C) を32ビットで回す.
+    // RDI=0x100、[0x100]=0x1000 (bit12) -> CF=1、eip は 0x1004 に進む.
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x0), 1, Perms::RW).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0x0F, 0xBA, 0x27, 0x0C])
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x100), &0x1000u32.to_le_bytes())
+        .unwrap();
+    env.backend.set(Gpr(7).state(), 0x100);
+    env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 0);
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x1004 });
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x1,
+        0x1
+    );
+}
