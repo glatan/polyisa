@@ -537,6 +537,8 @@ mod tests {
         assert_eq!(syscall_name(GuestAbi::I386Linux, 100), Some("fstatfs"));
         assert_eq!(i386::STATFS64, 268);
         assert_eq!(syscall_name(GuestAbi::I386Linux, 268), Some("statfs64"));
+        assert_eq!(i386::FSTATFS64, 269);
+        assert_eq!(syscall_name(GuestAbi::I386Linux, 269), Some("fstatfs64"));
     }
 
     #[test]
