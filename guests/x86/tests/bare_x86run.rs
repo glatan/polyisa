@@ -3747,6 +3747,39 @@ fn run_shld_r64_cl_rexwr() {
 }
 
 #[test]
+fn run_and_r13b_mem32_rexr() {
+    // run 経由で 44 22 AD 44 FB FF FF (AND R13B,[RBP-0x4BC]) を回す。wc の停止点 0x40bf62 に対応.
+    // REX.R で dst を拡張。RBP=0x2000、[0x1B44]=0xF0、R13B=0x0F -> R13B=0x00、ZF=1.
+    // REX 追随者ゲートの回帰 (旧実装はゲートで弾いていた)。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(5).state(), 0x2000);
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(13), 0x0F);
+        Ok(())
+    })
+    .unwrap();
+    env.backend.mem.write(VirtAddr(0x1B44), &[0xF0u8]).unwrap();
+    let prog: &[u8] = &[
+        0x44, 0x22, 0xAD, 0x44, 0xFB, 0xFF, 0xFF, // and r13b,[rbp-0x4BC]
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
+        0x0F, 0x05, // syscall -> exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0));
+    assert_eq!(env.backend.get(Gpr(13).state()) & 0xFF, 0x00);
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x40,
+        0x40
+    );
+}
+
+#[test]
 fn run_bt_r32_rm_rexr() {
     // run 経由で 44 0F A3 E8 (BT EAX,R13D) を回す。wc の停止点 0x5b380d に対応.
     // EAX=0x20 (bit5)、R13D=5 -> CF=1 になり、exit(0)。mov は旗を変えない.

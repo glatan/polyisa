@@ -1309,6 +1309,7 @@ pub fn run_mode(
                     | 0x2B
                     | 0x33
                     | 0x23
+                    | 0x22
                     | 0x13
                     | 0x1B
                     | 0xFF
