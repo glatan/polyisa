@@ -773,6 +773,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("mov_rm16_imm_m32", "F1", "11000111 10000101 ................................ ................", "mov r/m16, {imm}", "alu"),
         // MOVW [base+index*scale+disp8],imm16 (66 C7 /0 SIB mod=01)。stat 0x5af402 対応.6B+66.
         ("mov_rm16_imm_sibd", "F1", "11000111 01000100 ........ ........ ................", "mov r/m16, {imm}", "alu"),
+        // MOVW [RIP+disp32],imm16 (66 C7 05 + disp32 + imm16)。od 0x5ac863 対応.9B+66.
+        ("mov_rm16_imm_rip", "F1", "11000111 00000101 ................................ ................", "mov r/m16, {imm}", "alu"),
         // MOVUPS RIP相対 (64ビットの mod=00 rm=101)。disp32 は実行側で RIP 加算する。
         ("movups_load_rip", "F1", "00001111 00010000 00...101 ................................", "movups xmm, [rip]", "load"),
         ("movups_store_rip", "F1", "00001111 00010001 00...101 ................................", "movups [rip], xmm", "store"),

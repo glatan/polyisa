@@ -1659,6 +1659,7 @@ pub fn run_mode(
                     | Insn::MovEaxAbs
                     | Insn::MovRm16ImmM32
                     | Insn::MovRm16ImmSibd
+                    | Insn::MovRm16ImmRip
                     | Insn::AndAxImm16
                     | Insn::CmpAxImm16
                     | Insn::AddRm16Imm
@@ -1718,6 +1719,7 @@ pub fn run_mode(
                     | Insn::MovqR64Xmm
                     | Insn::MovRm16ImmM32
                     | Insn::MovRm16ImmSibd
+                    | Insn::MovRm16ImmRip
                     | Insn::MovntdqStoreMemnd
                     | Insn::MovntdqStoreMem8
                     | Insn::MovdqaLoadRip
@@ -5679,6 +5681,17 @@ fn dispatch<B: Backend>(
                 sem::mov_m16_imm_mem8(b, base, d8, imm)
             } else {
                 sem::mov_m16_imm_sibd(b, base, idx, shift, d8, imm)
+            }
+        }
+        Insn::MovRm16ImmRip => {
+            // 66 C7 05 + disp32 + imm16 (64b+66)。od 0x5ac863 対応.
+            // disp は (word>>16) 下位32 LE、imm は最下位16 LE.
+            let disp = ((word >> 16) as u32).swap_bytes() as i32;
+            let imm = ((word & 0xffff) as u16).swap_bytes();
+            if is64 {
+                sem::mov_rm16_imm_rip(b, eip as u64 + nbytes, disp, imm)
+            } else {
+                sem::mov_rm16_imm_abs(b, ((word >> 16) as u32).swap_bytes(), imm)
             }
         }
         Insn::MovRmImmRip => {

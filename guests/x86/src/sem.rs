@@ -5591,6 +5591,26 @@ pub fn mov_m16_imm_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8, imm: u16) ->
     Ok(())
 }
 
+/// MOV m16,imm16 [RIP+disp32] (66 C7 05 + disp32 + imm16)。od 0x5ac863 対応.
+pub fn mov_rm16_imm_rip<B: Backend>(b: &mut B, next_rip: u64, disp: i32, imm: u16) -> Flow<B> {
+    use polyisa_sem::W16;
+    let base = b.konst::<W64>(next_rip);
+    let d = b.konst::<W64>(disp as i64 as u64);
+    let addr = b.add::<W64>(base, d);
+    let v = b.konst::<W16>(imm);
+    b.store::<W16>(addr, v, DATA_WRITE)?;
+    Ok(())
+}
+
+/// MOV m16,imm16 [disp32] (66 C7 /0 32ビット絶対番地).
+pub fn mov_rm16_imm_abs<B: Backend>(b: &mut B, addr32: u32, imm: u16) -> Flow<B> {
+    use polyisa_sem::W16;
+    let addr = b.konst::<W64>(addr32 as u64);
+    let v = b.konst::<W16>(imm);
+    b.store::<W16>(addr, v, DATA_WRITE)?;
+    Ok(())
+}
+
 /// MOV m16,imm16 [base+index*scale+disp8] (66 C7 /0 SIB mod=01)。stat 0x5af402 対応.
 pub fn mov_m16_imm_sibd<B: Backend>(
     b: &mut B,

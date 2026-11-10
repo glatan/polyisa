@@ -6874,6 +6874,34 @@ fn cmp_rm64_imm8_sibd_indexed() {
 }
 
 #[test]
+fn mov_rm16_imm_rip_basic() {
+    // MOVW [RIP+0xFF7],0x1234 (66 C7 05 F7 0F 00 00 34 12 は 66 剥がし済み)。
+    // od 0x5ac863 対応。[0x2000]==0x1234 になる.
+    let mut env = env();
+    env.map_rw(0x2000, 1).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2000), &0u16.to_le_bytes())
+        .unwrap();
+    env.step(|b| sem::mov_rm16_imm_rip(b, 0x1009, 0xFF7, 0x1234))
+        .unwrap();
+    let mut back = [0u8; 2];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x2000),
+            &mut back,
+            Access {
+                endian: Endian::Le,
+                align: Align::Unaligned,
+                kind: AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(u16::from_le_bytes(back), 0x1234);
+}
+
+#[test]
 fn and_rm32_imm8_sib_indexed_rexx() {
     // ANDL $0,[RAX+R9*4] (42 83 24 88 00): head の停止点に対応。REX.X で R9 を指す.
     // RAX=0x2000、R9=0x10、[0x2040]=0xFF -> 0.
