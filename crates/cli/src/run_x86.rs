@@ -5906,7 +5906,7 @@ pub fn run_image_x86_64(
         .write(polyisa_mem::VirtAddr(sp), &img)
         .map_err(|e| format!("stack write: {e:?}"))?;
     polyisa_guest_x86::sem::write64(&mut env.backend, Gpr(4), sp);
-    match run_mode(&mut env, ehdr.entry as u32, sys, 1_000_000, true) {
+    match run_mode(&mut env, ehdr.entry as u32, sys, 10_000_000, true) {
         Outcome::Exit(code) => Ok(code as u64),
         Outcome::Unimplemented { eip, word } => {
             Err(format!("unimplemented at {eip:#x}: {word:#x}"))
