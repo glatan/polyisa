@@ -7409,7 +7409,7 @@ fn data_access() -> polyisa_mem::Access {
 
 /// 64ビットの負 errno（符号拡張する）。
 fn neg_errno64(n: u32) -> u64 {
-    (n as i32) as i64 as u64
+    (n as i32).wrapping_neg() as i64 as u64
 }
 
 fn get64(env: &mut BareEnv, r: polyisa_guest_x86::sem::Gpr) -> u64 {
@@ -8298,6 +8298,36 @@ impl TrapHandler for CliLinux {
                 Err(_) => set64(env, Gpr(0), neg(EINVAL)),
             }
             return TrapOutcome::Handled;
+        }
+        if nr == polyisa_os_linux::x86_64::FTRUNCATE && self.is64
+            || nr == polyisa_os_linux::i386::FTRUNCATE && !self.is64
+        {
+            // ftruncate(fd, length)。truncate -s で使う。ホストの set_len に直結する.
+            let fd = get64(env, r_a) as u32;
+            let len = get64(env, r_b);
+            let Some(file) = self.file_mut(fd) else {
+                set64(env, Gpr(0), neg(EBADF));
+                return TrapOutcome::Handled;
+            };
+            return match file.set_len(len) {
+                Ok(()) => {
+                    set64(env, Gpr(0), 0);
+                    TrapOutcome::Handled
+                }
+                Err(e) if e.raw_os_error() == Some(EBADF as i32) => {
+                    set64(env, Gpr(0), neg(EBADF));
+                    TrapOutcome::Handled
+                }
+                Err(e) => {
+                    let no = match e.kind() {
+                        std::io::ErrorKind::NotFound => ENOENT,
+                        std::io::ErrorKind::PermissionDenied => EACCES,
+                        _ => EINVAL,
+                    };
+                    set64(env, Gpr(0), neg(no));
+                    TrapOutcome::Handled
+                }
+            };
         }
         if self.is64 && nr == polyisa_os_linux::x86_64::GETGROUPS {
             // getgroups(size, list)。所属グループは root (0) のみとみなす.
@@ -10088,6 +10118,40 @@ mod tests {
         set64(&mut env, Gpr(7), 0o22);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), 0o77);
+    }
+
+    #[test]
+    fn ftruncate_roundtrip() {
+        // ftruncate(fd, len) は長さを変えて 0 を返す。truncate -s で使う.
+        use polyisa_os_linux::x86_64 as abi;
+        let mut sys = CliLinux::x86_64();
+        let mut env = bare();
+        let path = format!("/tmp/polyisa_ftruncate_{}", std::process::id());
+        std::fs::write(&path, b"abcdef").unwrap();
+        let f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        sys.fds.push(Some(f));
+        // ftruncate(3, 3) -> 0、大きさ 3.
+        set64(&mut env, Gpr(0), abi::FTRUNCATE);
+        set64(&mut env, Gpr(7), 3);
+        set64(&mut env, Gpr(6), 3);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 3);
+        // 不正 fd は EBADF。
+        set64(&mut env, Gpr(0), abi::FTRUNCATE);
+        set64(&mut env, Gpr(7), 99);
+        set64(&mut env, Gpr(6), 3);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EBADF));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn neg_errno_sign_extends() {
+        // 負 errno は符号拡張する。x86-64 の誤り (+errno) を回帰で防ぐ.
+        assert_eq!(neg_errno(22), 0xFFFF_FFEAu32);
+        assert_eq!(neg_errno64(22), 0xFFFF_FFFF_FFFF_FFEAu64);
+        assert_eq!(neg_errno64(0), 0);
     }
 
     #[test]
