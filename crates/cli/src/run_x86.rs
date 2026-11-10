@@ -312,13 +312,14 @@ fn fetch_len(
                 }
             } else if s == 0x74 || s == 0xEB || s == 0xDA || s == 0x54 || s == 0x2E {
                 // PCMPEQB/POR/PMINUB/ANDPD/UCOMISD xmm,m (66 0F 74/EB/DA/54/2E /r)。reg-direct と mod=00/01/10 (SIBなし).
+                // POR SIB+disp32 (66 0F EB mod=10 rm=100) は grep 0x43d15b 対応で 8B.
                 let m = third?;
                 let md = m >> 6;
                 let rm = m & 7;
                 if md == 3 {
                     Some(3)
                 } else if rm == 4 {
-                    None
+                    if s == 0xEB && md == 2 { Some(8) } else { None }
                 } else if md == 1 {
                     Some(4)
                 } else if md == 2 || rm == 5 {
@@ -1376,6 +1377,7 @@ pub fn run_mode(
                         | 0xBD
                         | 0xB1
                         | 0x58
+                        | 0xEB
                 )
             )
             || matches!(second, Some(0x40..=0x4F))
@@ -1589,6 +1591,7 @@ pub fn run_mode(
                     | Insn::PorMemnd
                     | Insn::PorMem8
                     | Insn::PorMem32
+                    | Insn::PorSibd32
                     | Insn::MovSibdEax
                     | Insn::MovEaxSibd
                     | Insn::Punpcklqdq
@@ -1698,6 +1701,7 @@ pub fn run_mode(
                     | Insn::PorMemnd
                     | Insn::PorMem8
                     | Insn::PorMem32
+                    | Insn::PorSibd32
                     | Insn::Punpcklqdq
                     | Insn::MovqR64Xmm
                     | Insn::MovRm16ImmM32
@@ -5273,6 +5277,21 @@ fn dispatch<B: Backend>(
         Insn::PorMemnd => sem::por_xmm_memnd(b, xmm_reg_r(), rm0f()),
         Insn::PorMem8 => sem::por_xmm_mem8(b, xmm_reg_r(), rm0f(), disp8()),
         Insn::PorMem32 => sem::por_xmm_mem32(b, xmm_reg_r(), rm0f(), disp32()),
+        Insn::PorSibd32 => {
+            // POR xmm,m128 SIB+disp32 (66 0F EB mod=10 rm=100)。grep 0x43d15b 対応.
+            if sib0f_no_index() {
+                sem::por_xmm_mem32(b, xmm_reg_r(), sib0f_base(), disp32())
+            } else {
+                sem::por_xmm_sibd32(
+                    b,
+                    xmm_reg_r(),
+                    sib0f_base(),
+                    sib0f_idx(),
+                    sib0f_shift(),
+                    disp32(),
+                )
+            }
+        }
         Insn::Pmovmskb => {
             if rex_w {
                 sem::pmovmskb_r64(b, reg0f_as_gpr(), xmm_rm_b())

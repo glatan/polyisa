@@ -1637,6 +1637,34 @@ fn movups_sibd32_roundtrip() {
 }
 
 #[test]
+fn por_sibd32_ors() {
+    use polyisa_guest_x86::sem::Xmm;
+    // POR xmm0,[RBX+RSI+0x20] SIB+disp32: [0x2030]=0x0F.. -> xmm0=0xF0.. => 0xFF...
+    // grep 0x43d15b 対応.
+    let mut env = env();
+    env.map_rw(0x2000, 1).unwrap();
+    env.backend.set(Gpr(3).state(), 0x2000);
+    env.backend.set(Gpr(6).state(), 0x10);
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x2030),
+            &0x0F0F0F0F0F0F0F0F0F0F0F0F0F0F0F0Fu128.to_le_bytes(),
+        )
+        .unwrap();
+    env.step(|b| {
+        let v = b.konst::<polyisa_sem::W128>(0xF0F0F0F0F0F0F0F0F0F0F0F0F0F0F0F0u128);
+        b.set(sem::xmm_ref(Xmm(0)), v);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::por_xmm_sibd32(b, Xmm(0), Gpr(3), Gpr(6), 0, 0x20))
+        .unwrap();
+    let v: u128 = env.backend.get(sem::xmm_ref(Xmm(0)));
+    assert_eq!(v, 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFu128);
+}
+
+#[test]
 fn arith_imm32_matrix() {
     // ADD r/m32,imm32: 0x10 + 0x20 = 0x30.
     let mut env = env();

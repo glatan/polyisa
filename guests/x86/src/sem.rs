@@ -9359,6 +9359,23 @@ pub fn por_xmm_mem32<B: Backend>(b: &mut B, dst: Xmm, base: Gpr, disp: i32) -> F
     Ok(())
 }
 
+/// POR xmm,[base+index*scale+disp32] (66 0F EB SIB mod=10)。grep 0x43d15b 対応.
+pub fn por_xmm_sibd32<B: Backend>(
+    b: &mut B,
+    dst: Xmm,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i32,
+) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, disp, base, idx);
+    let c: B::V<W128> = b.load::<W128>(addr, DATA_READ)?;
+    let a: B::V<W128> = b.get(xmm_ref(dst));
+    let v = b.or::<W128>(a, c);
+    b.set(xmm_ref(dst), v);
+    Ok(())
+}
+
 /// CALL [RIP+disp32] (FF /2 RIP)。64ビット間接コール.
 pub fn call_r64_rip<B: Backend>(b: &mut B, eip_next: u64, next_rip: u64, disp: i32) -> Flow<B> {
     let base = b.konst::<W64>(next_rip);

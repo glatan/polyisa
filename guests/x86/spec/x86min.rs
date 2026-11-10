@@ -1352,6 +1352,15 @@ pub fn build_model() -> polyisa_isadl::Model {
             "por xmm, m128",
             "load",
         ),
+        // POR xmm,m128 SIB+disp32 (66 0F EB mod=10 rm=100)。grep 0x43d15b 対応.8B.
+        (
+            "por_sibd32",
+            "F1",
+            "00001111 11101011 10...100 ........ ................................",
+            vec![],
+            "por xmm, m128",
+            "load",
+        ),
         (
             "movzx_r32_m8_sib",
             "N8",

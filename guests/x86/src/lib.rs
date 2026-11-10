@@ -76,7 +76,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数117件。
-        assert_eq!(INSNS.len(), 612);
+        assert_eq!(INSNS.len(), 613);
     }
 
     #[test]
@@ -560,6 +560,11 @@ mod tests {
         assert_eq!(decode(0xD9AB00000000, 56), None);
         assert_eq!(decode(0x8305DF641F0001, 56), Some(Insn::AddRm32Imm8Rip));
         assert_eq!(decode(0x0FEBC4, 24), Some(Insn::Por));
+        // POR xmm,m128 SIB+disp32 (66 0F EB mod=10 rm=100)。grep 0x43d15b 対応.
+        // 66 は剥がし済み。0F EB 84 9D C0 DFFF FF は por xmm0,[rbp+rbx*4-0x2040].
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x0FEB849DC0DFFFFF, 64), Some(Insn::PorSibd32));
+        assert_eq!(decode(0x0FEB849DC0DFFFFF, 56), None);
         assert_eq!(decode(0x0F62C0, 24), Some(Insn::Punpckldq));
         assert_eq!(decode(0x0F6CC0, 24), Some(Insn::Punpcklqdq));
         assert_eq!(decode(0x0F6FC0, 24), Some(Insn::MovdquLoadXmm));

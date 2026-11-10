@@ -738,6 +738,48 @@ fn run_xmm_movd_punpck_pshufd() {
 }
 
 #[test]
+fn run_por_sibd32() {
+    // run 経由で 66 0F EB 84 33 20 00 00 00 (POR xmm0,[RBX+RSI+0x20]) を回す。grep 0x43d15b 対応.
+    // RBX=0x2000、RSI=0x10、[0x2020]=0x0F..、xmm0=0xF0.. -> xmm0=0xFF..、exit(0)。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(3).state(), 0x2000);
+    env.backend.set(Gpr(6).state(), 0x10);
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x2030),
+            &0x0F0F0F0F0F0F0F0F0F0F0F0F0F0F0F0Fu128.to_le_bytes(),
+        )
+        .unwrap();
+    env.step(|b| {
+        let v = b.konst::<polyisa_sem::W128>(0xF0F0F0F0F0F0F0F0F0F0F0F0F0F0F0F0u128);
+        b.set(
+            polyisa_guest_x86::sem::xmm_ref(polyisa_guest_x86::sem::Xmm(0)),
+            v,
+        );
+        Ok(())
+    })
+    .unwrap();
+    let prog: &[u8] = &[
+        0x66, 0x0F, 0xEB, 0x84, 0x33, 0x20, 0x00, 0x00, 0x00, // por xmm0,[rbx+rsi+0x20]
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
+        0x0F, 0x05, // syscall -> exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0));
+    let v: u128 = env.backend.get(polyisa_guest_x86::sem::xmm_ref(
+        polyisa_guest_x86::sem::Xmm(0),
+    ));
+    assert_eq!(v, 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFu128);
+}
+
+#[test]
 fn run_movups_memnd_and_near_jcc() {
     // MOVUPS [0x1500],xmm0 -> MOVUPS xmm1,[0x1500] の往復と near Jcc。
     // movd xmm0,esi (esi=0x77); movups [0x1500],xmm0; movups xmm1,[0x1500];
