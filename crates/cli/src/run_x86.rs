@@ -7122,6 +7122,12 @@ fn guest_c_string(env: &mut BareEnv, addr: u64) -> Option<String> {
 pub struct CliLinux {
     reported: Vec<u64>,
     fds: Vec<Option<std::fs::File>>,
+    /// 標準 fd (0/1/2) の付け替え先。close 後に open したファイルが入る.
+    /// uniq のように stdin をファイルに付け替える applet のため.
+    /// open は読取りのみ受け付けるため、ここに入るファイルは読取り専用である.
+    std_files: [Option<std::fs::File>; 3],
+    /// 標準 fd の閉鎖状態。初期 (stdio 接続) は false。close で true になる.
+    std_closed: [bool; 3],
     is64: bool,
     /// プログラムブレーク（ヒープ末尾）。0 は未初期化。
     /// `run_image_x86_64` がロード後に像末尾へ進める。
@@ -7159,6 +7165,85 @@ impl CliLinux {
     pub fn init_brk(&mut self, image_end: u64) {
         use polyisa_mem::PAGE_SIZE;
         self.heap_end = image_end.next_multiple_of(PAGE_SIZE);
+    }
+
+    /// fd に対応する開ファイルの参照。標準 fd の付け替え先も見る.
+    fn file_ref(&self, fd: u32) -> Option<&std::fs::File> {
+        if fd < 3 {
+            self.std_files[fd as usize].as_ref()
+        } else {
+            self.fds
+                .get(fd.wrapping_sub(3) as usize)
+                .and_then(|f| f.as_ref())
+        }
+    }
+
+    /// fd に対応する開ファイルの可変参照。標準 fd の付け替え先も見る.
+    fn file_mut(&mut self, fd: u32) -> Option<&mut std::fs::File> {
+        if fd < 3 {
+            self.std_files[fd as usize].as_mut()
+        } else {
+            self.fds
+                .get_mut(fd.wrapping_sub(3) as usize)
+                .and_then(|f| f.as_mut())
+        }
+    }
+
+    /// 真の標準入出力に繋がっているか（閉じても付け替えてもいない）。
+    fn std_attached(&self, fd: u32) -> bool {
+        fd < 3 && !self.std_closed[fd as usize] && self.std_files[fd as usize].is_none()
+    }
+
+    /// fcntl・dup2 の妥当性。接続中・付け替え中の標準 fd と opened fd が真.
+    fn fd_valid(&self, fd: u32) -> bool {
+        (fd < 3 && (!self.std_closed[fd as usize] || self.std_files[fd as usize].is_some()))
+            || self
+                .fds
+                .get(fd.wrapping_sub(3) as usize)
+                .and_then(|f| f.as_ref())
+                .is_some()
+    }
+
+    /// 最下位の空き番号を割り当てる。閉じた標準 fd・空きスロットを再利用する.
+    fn alloc_fd(&mut self, f: std::fs::File) -> u32 {
+        for (i, slot) in self.std_files.iter_mut().enumerate() {
+            if slot.is_none() && self.std_closed[i] {
+                *slot = Some(f);
+                self.std_closed[i] = false;
+                return i as u32;
+            }
+        }
+        if let Some(idx) = self.fds.iter().position(|f| f.is_none()) {
+            self.fds[idx] = Some(f);
+            return (3 + idx) as u32;
+        }
+        self.fds.push(Some(f));
+        (3 + self.fds.len() - 1) as u32
+    }
+
+    /// fd を閉じる。標準 fd の初回 close も成功させる。閉じたら真.
+    fn close_fd(&mut self, fd: u32) -> bool {
+        if fd < 3 {
+            let i = fd as usize;
+            if self.std_files[i].is_some() {
+                self.std_files[i] = None;
+                self.std_closed[i] = true;
+                true
+            } else if !self.std_closed[i] {
+                self.std_closed[i] = true;
+                true
+            } else {
+                false
+            }
+        } else {
+            match self.fds.get_mut(fd.wrapping_sub(3) as usize) {
+                Some(f) if f.is_some() => {
+                    *f = None;
+                    true
+                }
+                _ => false,
+            }
+        }
     }
 
     /// start 以降で count ページ連続の空きを探す。見つからなければ None.
@@ -7318,8 +7403,10 @@ impl TrapHandler for CliLinux {
             }
         };
         // 戻り値の負 errno：x86-64 は 64ビット符号拡張、i386 は 32ビット。
+        // is64 を先に写す。neg が self を借りると後の &mut self と衝突するため.
+        let is64 = self.is64;
         let neg = |n: u32| -> u64 {
-            if self.is64 {
+            if is64 {
                 neg_errno64(n)
             } else {
                 u64::from(neg_errno(n))
@@ -7356,8 +7443,8 @@ impl TrapHandler for CliLinux {
             }
             return match std::fs::File::open(&path) {
                 Ok(f) => {
-                    self.fds.push(Some(f));
-                    set64(env, Gpr(0), (3 + self.fds.len() - 1) as u64);
+                    let fd = self.alloc_fd(f);
+                    set64(env, Gpr(0), fd as u64);
                     TrapOutcome::Handled
                 }
                 Err(e) => {
@@ -7375,10 +7462,10 @@ impl TrapHandler for CliLinux {
             let fd = get64(env, r_a) as u32;
             let buf = get64(env, r_b);
             let mut left = get64(env, r_c);
-            let slot = fd.wrapping_sub(3) as usize;
-            let Some(slot) = self.fds.get_mut(slot).and_then(|f| f.as_mut()) else {
-                // fd 0 (stdin) は空読みとして 0 を返す。
-                if fd == 0 {
+            // 付け替えた標準 fd はファイルから読む。真の stdin は空読みのまま.
+            let stdin_empty = fd == 0 && self.std_attached(0);
+            let Some(file) = self.file_mut(fd) else {
+                if stdin_empty {
                     set64(env, Gpr(0), 0);
                     return TrapOutcome::Handled;
                 }
@@ -7389,7 +7476,7 @@ impl TrapHandler for CliLinux {
             let mut chunk = vec![0u8; IO_CHUNK];
             while left > 0 {
                 let take = left.min(IO_CHUNK as u64) as usize;
-                let n = match std::io::Read::read(slot, &mut chunk[..take]) {
+                let n = match std::io::Read::read(file, &mut chunk[..take]) {
                     Ok(0) => break,
                     Ok(n) => n,
                     Err(_) => break,
@@ -7412,24 +7499,25 @@ impl TrapHandler for CliLinux {
             return TrapOutcome::Handled;
         }
         if nr == n_close {
+            // 標準 fd の close も成功させる。uniq は stdin を閉じて開き直す.
             let fd = get64(env, r_a) as u32;
-            let slot = fd.wrapping_sub(3) as usize;
-            return match self.fds.get_mut(slot) {
-                Some(f) if f.is_some() => {
-                    *f = None;
-                    set64(env, Gpr(0), 0);
-                    TrapOutcome::Handled
-                }
-                _ => {
-                    set64(env, Gpr(0), neg(EBADF));
-                    TrapOutcome::Handled
-                }
+            return if self.close_fd(fd) {
+                set64(env, Gpr(0), 0);
+                TrapOutcome::Handled
+            } else {
+                set64(env, Gpr(0), neg(EBADF));
+                TrapOutcome::Handled
             };
         }
         if nr == n_write {
             let fd = get64(env, r_a) as u32;
             let buf = get64(env, r_b);
             let mut left = get64(env, r_c);
+            // 付け替えた標準 fd は読取り専用のため EBADF（open は読取りのみ受け付ける）。
+            if fd < 3 && self.std_files[fd as usize].is_some() {
+                set64(env, Gpr(0), neg(EBADF));
+                return TrapOutcome::Handled;
+            }
             if fd != 1 && fd != 2 {
                 set64(env, Gpr(0), neg(EBADF));
                 return TrapOutcome::Handled;
@@ -7472,6 +7560,11 @@ impl TrapHandler for CliLinux {
             let fd = get64(env, r_a) as u32;
             let iov = get64(env, r_b);
             let iovcnt = get64(env, r_c);
+            // 付け替えた標準 fd は読取り専用のため EBADF。
+            if fd < 3 && self.std_files[fd as usize].is_some() {
+                set64(env, Gpr(0), neg(EBADF));
+                return TrapOutcome::Handled;
+            }
             if fd != 1 && fd != 2 {
                 set64(env, Gpr(0), neg(EBADF));
                 return TrapOutcome::Handled;
@@ -7551,9 +7644,9 @@ impl TrapHandler for CliLinux {
                 set64(env, Gpr(0), neg(EINVAL));
                 return TrapOutcome::Handled;
             }
-            let slot = fd.wrapping_sub(3) as usize;
-            let is_stdin = fd == 0;
-            if !is_stdin && self.fds.get(slot).and_then(|f| f.as_ref()).is_none() {
+            // 付け替えた標準 fd はファイルから読む。真の stdin は空読みのまま.
+            let empty_stdin = fd == 0 && self.std_attached(0);
+            if !empty_stdin && self.file_ref(fd).is_none() {
                 set64(env, Gpr(0), neg(EBADF));
                 return TrapOutcome::Handled;
             }
@@ -7593,10 +7686,10 @@ impl TrapHandler for CliLinux {
                 let mut off = 0u64;
                 while left > 0 {
                     let take = left.min(IO_CHUNK as u64) as usize;
-                    let n = if is_stdin {
+                    let n = if empty_stdin {
                         0
                     } else {
-                        let f = self.fds.get_mut(slot).and_then(|f| f.as_mut()).unwrap();
+                        let f = self.file_mut(fd).unwrap();
                         match std::io::Read::read(f, &mut chunk[..take]) {
                             Ok(0) => 0,
                             Ok(n) => n,
@@ -7621,8 +7714,8 @@ impl TrapHandler for CliLinux {
                         break;
                     }
                 }
-                // stdin は空読みとして次へ進む.
-                if is_stdin {
+                // 真の stdin は空読みとして次へ進む.
+                if empty_stdin {
                     continue;
                 }
             }
@@ -7957,8 +8050,12 @@ impl TrapHandler for CliLinux {
             // Ref: SRC-LINUX (7.3).
             let fd = get64(env, r_a) as u32;
             let stat_addr = get64(env, r_b);
-            let meta: std::io::Result<std::fs::Metadata> = if fd <= 2 {
-                std::fs::metadata(format!("/proc/self/fd/{fd}"))
+            let meta: std::io::Result<std::fs::Metadata> = if fd < 3 {
+                // 付け替えた標準 fd はファイルのメタデータを返す。
+                match self.std_files[fd as usize].as_ref() {
+                    Some(f) => f.metadata(),
+                    None => std::fs::metadata(format!("/proc/self/fd/{fd}")),
+                }
             } else {
                 let slot = fd.wrapping_sub(3) as usize;
                 match self.fds.get(slot).and_then(|f| f.as_ref()) {
@@ -8038,13 +8135,18 @@ impl TrapHandler for CliLinux {
                 set64(env, Gpr(0), neg(EBADF));
                 return TrapOutcome::Handled;
             }
-            if in_fd == 0 {
-                // stdin は空読みとして 0 を返す（既存 read と同じ扱い）。
-                set64(env, Gpr(0), 0);
+            // 付け替えた標準出力は読取り専用のため EBADF。
+            if self.std_files[out_fd as usize].is_some() {
+                set64(env, Gpr(0), neg(EBADF));
                 return TrapOutcome::Handled;
             }
-            let slot = in_fd.wrapping_sub(3) as usize;
-            let Some(file) = self.fds.get_mut(slot).and_then(|f| f.as_mut()) else {
+            // 付け替えた stdin はファイルから読む。真の stdin は空読みのまま.
+            let in_empty = in_fd == 0 && self.std_attached(0);
+            let Some(file) = self.file_mut(in_fd) else {
+                if in_empty {
+                    set64(env, Gpr(0), 0);
+                    return TrapOutcome::Handled;
+                }
                 set64(env, Gpr(0), neg(EBADF));
                 return TrapOutcome::Handled;
             };
@@ -8077,8 +8179,7 @@ impl TrapHandler for CliLinux {
             let fd = get64(env, Gpr(7)) as u32;
             let offset = get64(env, Gpr(6)) as i64;
             let whence = get64(env, Gpr(2)) as u32;
-            let slot = fd.wrapping_sub(3) as usize;
-            let Some(file) = self.fds.get_mut(slot).and_then(|f| f.as_mut()) else {
+            let Some(file) = self.file_mut(fd) else {
                 set64(env, Gpr(0), neg(EBADF));
                 return TrapOutcome::Handled;
             };
@@ -8505,16 +8606,8 @@ impl TrapHandler for CliLinux {
             // --list の dup2(1,2) は出力先の付け替えだが、試作では写像せず継続する.
             let oldfd = get64(env, r_a) as u32;
             let newfd = get64(env, r_b) as u32;
-            let valid = |fd: u32| {
-                fd == 0
-                    || fd == 1
-                    || fd == 2
-                    || self
-                        .fds
-                        .get(fd.wrapping_sub(3) as usize)
-                        .and_then(|f| f.as_ref())
-                        .is_some()
-            };
+            // 閉じた標準 fd は不正。接続中・付け替え中と opened fd が真.
+            let valid = |fd: u32| self.fd_valid(fd);
             if !valid(oldfd) || newfd > 1024 {
                 set64(env, Gpr(0), neg(EBADF));
                 return TrapOutcome::Handled;
@@ -8797,17 +8890,10 @@ impl TrapHandler for CliLinux {
         if nr == polyisa_os_linux::x86_64::FCNTL && self.is64
             || nr == polyisa_os_linux::i386::FCNTL && !self.is64
         {
-            // fcntl(fd, cmd, ...)。試作では 0/1/2 と opened fd に対して 0 を返す.
+            // fcntl(fd, cmd, ...)。接続中・付け替え中の標準 fd と opened fd に対して 0 を返す.
             // printf の stdout 設定などで呼ばれる。複製やロックは行わない.
             let fd = get64(env, r_a) as u32;
-            let valid = fd == 0
-                || fd == 1
-                || fd == 2
-                || self
-                    .fds
-                    .get(fd.wrapping_sub(3) as usize)
-                    .and_then(|f| f.as_ref())
-                    .is_some();
+            let valid = self.fd_valid(fd);
             if !valid {
                 set64(env, Gpr(0), neg(EBADF));
                 return TrapOutcome::Handled;
@@ -9153,6 +9239,118 @@ mod tests {
             TrapOutcome::Handled
         ));
         assert_eq!(env.backend.get(Gpr(0).state()), neg_errno(EBADF));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn stdin_close_open_read_serves_file() {
+        // uniq の stdin 付け替え回帰: close(0) -> 0、open -> 0、read(0) で内容が読める.
+        // 旧実装は close(0) で EBADF、read(0) で空読み 0 を返した.
+        let path = std::env::temp_dir().join(format!("polyisa-unit-stdin-{}", std::process::id()));
+        std::fs::write(&path, b"abcdef").unwrap();
+        let path_s = path.to_string_lossy().into_owned();
+        let mut sys = CliX86::default();
+        let mut env = bare();
+        env.backend
+            .mem
+            .write(VirtAddr(0x100), path_s.as_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x100 + path_s.len() as u64), &[0])
+            .unwrap();
+        // close(0) -> 0。
+        set_regs(&mut env, polyisa_os_linux::i386::CLOSE as u32, 0, 0, 0);
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(env.backend.get(Gpr(0).state()), 0);
+        // openat -> 最下位の空き 0。
+        set_regs(
+            &mut env,
+            polyisa_os_linux::i386::OPENAT as u32,
+            0xffff_ff9c,
+            0x100,
+            0,
+        );
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(env.backend.get(Gpr(0).state()), 0);
+        // read(0) -> 6（付け替えたファイルから読む）。
+        set_regs(&mut env, polyisa_os_linux::i386::READ as u32, 0, 0x200, 64);
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(env.backend.get(Gpr(0).state()), 6);
+        // fcntl(0) -> 0（付け替え中は妥当）。
+        set_regs(&mut env, polyisa_os_linux::i386::FCNTL as u32, 0, 3, 0);
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(env.backend.get(Gpr(0).state()), 0);
+        // close(0) -> 0、read(0) -> EBADF、もう一度 close(0) -> EBADF。
+        set_regs(&mut env, polyisa_os_linux::i386::CLOSE as u32, 0, 0, 0);
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(env.backend.get(Gpr(0).state()), 0);
+        set_regs(&mut env, polyisa_os_linux::i386::READ as u32, 0, 0x200, 64);
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(env.backend.get(Gpr(0).state()), neg_errno(EBADF));
+        set_regs(&mut env, polyisa_os_linux::i386::CLOSE as u32, 0, 0, 0);
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(env.backend.get(Gpr(0).state()), neg_errno(EBADF));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn open_reuses_freed_slot() {
+        // 最下位の空き番号を再利用する: open -> 3、close(3) -> 0、open -> 3.
+        // 旧実装は常に末尾へ積み、2回目は 4 を返した.
+        let path = std::env::temp_dir().join(format!("polyisa-unit-reuse-{}", std::process::id()));
+        std::fs::write(&path, b"abcdef").unwrap();
+        let path_s = path.to_string_lossy().into_owned();
+        let mut sys = CliX86::default();
+        let mut env = bare();
+        env.backend
+            .mem
+            .write(VirtAddr(0x100), path_s.as_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x100 + path_s.len() as u64), &[0])
+            .unwrap();
+        let openat = (polyisa_os_linux::i386::OPENAT as u32, 0xffff_ff9c, 0x100, 0);
+        set_regs(&mut env, openat.0, openat.1, openat.2, openat.3);
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(env.backend.get(Gpr(0).state()), 3);
+        set_regs(&mut env, polyisa_os_linux::i386::CLOSE as u32, 3, 0, 0);
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(env.backend.get(Gpr(0).state()), 0);
+        set_regs(&mut env, openat.0, openat.1, openat.2, openat.3);
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(env.backend.get(Gpr(0).state()), 3);
         let _ = std::fs::remove_file(&path);
     }
 
