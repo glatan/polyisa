@@ -13226,3 +13226,14 @@ pub fn test_m8_imm_sibd<B: Backend>(
     update_logic_flags(b, v);
     Ok(())
 }
+
+/// TEST m8,imm8 [base+index*scale] (F6 /0 SIB mod=00)。ls -l 0x40e342 対応.
+pub fn test_m8_imm_sib<B: Backend>(b: &mut B, base: Gpr, idx: Gpr, shift: u32, imm: u8) -> Flow<B> {
+    use polyisa_sem::W8;
+    let addr = sib_addr_scaled(b, shift, 0, base, idx);
+    let x: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
+    let y = b.konst::<W8>(imm);
+    let v = b.and::<W8>(x, y);
+    update_logic_flags(b, v);
+    Ok(())
+}

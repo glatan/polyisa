@@ -7042,6 +7042,27 @@ fn test_m8_imm_sibd_basic() {
 }
 
 #[test]
+fn test_m8_imm_sib_basic() {
+    // TESTB $0x04,[R12] (41 F6 04 24 04): REX.B 剥がし済み。ls -l 0x40e342 対応.
+    // [0x1500]=0x04 -> ZF=0。[0x1500]=0x00 -> ZF=1.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.step(|b| {
+        sem::write64(b, Gpr(12), 0x1500);
+        Ok(())
+    })
+    .unwrap();
+    env.backend.mem.write(VirtAddr(0x1500), &[0x04u8]).unwrap();
+    env.step(|b| sem::test_m8_imm_sib(b, Gpr(12), Gpr(4), 0, 0x04))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0);
+    env.backend.mem.write(VirtAddr(0x1500), &[0x00u8]).unwrap();
+    env.step(|b| sem::test_m8_imm_sib(b, Gpr(12), Gpr(4), 0, 0x04))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0x40);
+}
+
+#[test]
 fn movsd_load_memnd_merges_low64() {
     use polyisa_guest_x86::sem::Xmm;
     let mut env = env();

@@ -852,8 +852,16 @@ fn fetch_len(
             } else if md == 0 && rm == 5 {
                 Some(7)
             } else if rm == 4 {
-                // SIB 付き。mod=01 SIB+disp8+imm8 (5B) の /0 TEST のみ.
-                if md == 1 { Some(5) } else { None }
+                // SIB 付き。mod=01 SIB+disp8+imm8 (5B) と mod=00 SIB+imm8 (4B) の /0 TEST.
+                // mod=00 は base!=101 (non-abs) のみ。abs は disp32付き7Bで未対応.
+                if md == 1 {
+                    Some(5)
+                } else if md == 0 {
+                    let t = third?;
+                    if t & 7 != 5 { Some(4) } else { None }
+                } else {
+                    None
+                }
             } else if md == 1 {
                 Some(4)
             } else if md == 0 {
@@ -3490,6 +3498,21 @@ fn dispatch<B: Backend>(
                 sem::test_m8_imm_mem8(b, sib_base(), d8, imm)
             } else {
                 sem::test_m8_imm_sibd(b, sib_base(), sib_idx(), sib_shift(), d8, imm)
+            }
+        }
+        Insn::TestM8ImmSib => {
+            // F6 /0 SIB mod=00 [base+index*scale],imm8 (32b)。ls -l 0x40e342 対応.
+            // SIB は (word>>8) 下位8、imm は最下位8。REX.X/B で索引/ベース拡張.
+            let sib_v = ((word >> 8) & 0xff) as u8;
+            let imm = (word & 0xff) as u8;
+            let shift = ((sib_v >> 6) & 3) as u32;
+            let idx_raw = (sib_v >> 3) & 7;
+            let idx = Gpr(idx_raw | (((rex >> 1) & 1) << 3));
+            let base = Gpr((sib_v & 7) | ((rex & 1) << 3));
+            if idx_raw == 4 && (rex >> 1) & 1 == 0 {
+                sem::test_m8_imm_memnd(b, base, imm)
+            } else {
+                sem::test_m8_imm_sib(b, base, idx, shift, imm)
             }
         }
         Insn::CmpRm8ImmRip => {
