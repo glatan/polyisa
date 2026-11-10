@@ -5078,3 +5078,46 @@ fn run_bt_m32_imm_sets_cf() {
         0x1
     );
 }
+
+#[test]
+fn run_or_rm32_imm_mem8_ors() {
+    // ORL $0x400,[R13+0x00] (41 81 4D 00 00 04 00 00) を64ビットで回す.
+    // R13=0x2000、[0x2000]=0 -> [0x2000]=0x400、eip は 0x1008 に進む.
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x1000),
+            &[0x41, 0x81, 0x4D, 0x00, 0x00, 0x04, 0x00, 0x00],
+        )
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2000), &0u32.to_le_bytes())
+        .unwrap();
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(13), 0x2000);
+        Ok(())
+    })
+    .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x1008 });
+    let mut back = [0u8; 4];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x2000),
+            &mut back,
+            polyisa_mem::Access {
+                endian: polyisa_mem::Endian::Le,
+                align: polyisa_mem::Align::Unaligned,
+                kind: polyisa_mem::AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(u32::from_le_bytes(back), 0x400);
+}

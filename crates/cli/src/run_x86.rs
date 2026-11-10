@@ -4011,6 +4011,16 @@ fn dispatch<B: Backend>(
                 sem::or_rm32_imm_memnd(b, rm(), imm)
             }
         }
+        Insn::OrRm32ImmMem8 => {
+            // 81 /1 mod=01 [base+disp8],imm32 (56b)。disp は (word>>32) 下位8、imm は下位32 LE.
+            let d8 = ((word >> 32) & 0xff) as u8 as i8;
+            let imm = ((word & 0xffff_ffff) as u32).swap_bytes();
+            if rex_w {
+                sem::or_rm64_imm_mem8(b, rm(), d8, imm)
+            } else {
+                sem::or_rm32_imm_mem8(b, rm(), d8, imm)
+            }
+        }
         Insn::AdcRm32Imm => {
             if rex_w {
                 sem::adc_rm64_imm(b, rm(), imm32())
