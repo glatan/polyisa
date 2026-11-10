@@ -1994,7 +1994,8 @@ pub fn build_model() -> polyisa_isadl::Model {
             "mov_rm8_imm_mem32",
             "M32",
             "11000110 10000... ................................ ........",
-            vec![wc("m32_rm", WhereOp::Ne, 4)],
+            // SIB は取得長64で分岐するためここでは除外しない.
+            vec![],
             "mov r/m8, {imm}",
             "store",
         ),
