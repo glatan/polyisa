@@ -3747,6 +3747,36 @@ fn run_shld_r64_cl_rexwr() {
 }
 
 #[test]
+fn run_bt_r32_rm_rexr() {
+    // run 経由で 44 0F A3 E8 (BT EAX,R13D) を回す。wc の停止点 0x5b380d に対応.
+    // EAX=0x20 (bit5)、R13D=5 -> CF=1 になり、exit(0)。mov は旗を変えない.
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(13), 5);
+        Ok(())
+    })
+    .unwrap();
+    env.backend.set(Gpr(0).state(), 0x20);
+    let prog: &[u8] = &[
+        0x44, 0x0F, 0xA3, 0xE8, // bt eax,r13d
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
+        0x0F, 0x05, // syscall -> exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0));
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x1,
+        1
+    );
+}
+
+#[test]
 fn run_sub_rm_imm8_rip() {
     // run 経由で 83 2D F9 0F 00 00 01 (SUBL $1,0xFF9(%rip)) を回す。head の停止点 0x417b1b に対応.
     // [0x2000]=10 - 1 = 9 になり、exit(0)。

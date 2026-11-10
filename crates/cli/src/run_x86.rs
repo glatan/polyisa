@@ -363,6 +363,10 @@ fn fetch_len(
                 // SHLD r/m32,r32,CL (0F A5 /r mod=11)。REX.W で64ビット.
                 let m = third?;
                 if m >> 6 == 3 { Some(3) } else { None }
+            } else if s == 0xA3 {
+                // BT r/m32,r32 (0F A3 /r mod=11)。
+                let m = third?;
+                if m >> 6 == 3 { Some(3) } else { None }
             } else if s == 0xBA {
                 // BT r32,imm8 (0F BA /4 ib reg-direct、4B)。
                 let m = third?;
@@ -1216,6 +1220,7 @@ pub fn run_mode(
                             | 0xBD
                             | 0xB1
                             | 0xA5
+                            | 0xA3
                     )
                 ) || matches!(second, Some(0x40..=0x4F))
                     || matches!(second, Some(0x90..=0x9F))))
@@ -4803,6 +4808,11 @@ fn dispatch<B: Backend>(
             } else {
                 sem::shld_r32_cl(b, rm0f(), reg0f_as_gpr())
             }
+        }
+        Insn::BtR32Rm => {
+            // BT r/m32,r32 (0F A3 /r mod=11)。dst は rm、src は reg (REX.B/R で拡張)。
+            // 2バイトオペコードのため rm0f/reg0f で抽出する.
+            sem::bt_r32_rm(b, rm0f(), reg0f_as_gpr())
         }
         Insn::Pminub => sem::pminub_xmm(b, xmm_reg(), xmm_rm()),
         Insn::PminubMemnd => sem::pminub_xmm_memnd(b, xmm_reg(), rm0f()),

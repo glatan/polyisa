@@ -6633,6 +6633,23 @@ pub fn bt_r32_imm<B: Backend>(b: &mut B, dst: Gpr, imm: u8) -> Flow<B> {
     Ok(())
 }
 
+/// BT r/m32,r32 (0F A3 /r mod=11)。src 下位5ビット指定の1ビットを CF に入れる。他旗は不変.
+pub fn bt_r32_rm<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
+    let x32 = read(b, dst);
+    let s32 = read(b, src);
+    let mask = b.konst::<W32>(31);
+    let n = b.and::<W32>(s32, mask);
+    let sh = b.shr_l::<W32>(x32, n);
+    let one = b.konst::<W32>(1);
+    let bit = b.and::<W32>(sh, one);
+    let f: B::V<W32> = b.get(eflags_ref());
+    let not_cf = b.konst::<W32>(!FLAG_CF);
+    let cleared = b.and::<W32>(f, not_cf);
+    let restored = b.or::<W32>(cleared, bit);
+    b.set(eflags_ref(), restored);
+    Ok(())
+}
+
 /// MOVZX r32,m8 [base] (0F B6 mod=00)。8ビットを読んでゼロ拡張.
 pub fn movzx_r32_m8_memnd<B: Backend>(b: &mut B, dst: Gpr, base: Gpr) -> Flow<B> {
     use polyisa_sem::W8;

@@ -513,6 +513,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("movzx_r32_r16", "F1", "00001111 10110111 11......", "movzx r32, r16", "load"),
         // BT r32,imm8 (0F BA /4 ib reg-direct)。
         ("bt_r32_imm", "F1", "00001111 10111010 11100... ........", "bt r32, {imm}", "alu"),
+        // BT r/m32,r32 (0F A3 /r mod=11)。REX.R/B で 8-15 に拡張.
+        ("bt_r32_rm", "F1", "00001111 10100011 11......", "bt r/m32, r32", "alu"),
         // PXOR xmm,xmm (66 0F EF /r)。
         ("pxor", "F1", "00001111 11101111 11......", "pxor xmm, xmm", "alu"),
         // XORPS xmm,xmm (0F 57 /r)。PXOR と等価のため意味論を共有する.

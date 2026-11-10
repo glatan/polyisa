@@ -2742,6 +2742,24 @@ fn shld_r64_cl_shifts() {
 }
 
 #[test]
+fn bt_r32_rm_sets_cf() {
+    // BT EAX,ECX (0F A3 /r mod=11): EAX=0b101、ECX=2 -> CF=1 (bit2)。
+    // ECX=1 -> CF=0 (bit1)。他旗は不変.
+    // wc の停止点 0x5b380d に対応.
+    let mut env = env();
+    env.backend.set(Gpr(0).state(), 0b101);
+    env.backend.set(Gpr(1).state(), 2);
+    env.backend.set(sem::eflags_ref(), 0x40);
+    env.step(|b| sem::bt_r32_rm(b, Gpr(0), Gpr(1))).unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x1, 1);
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0x40);
+    env.backend.set(Gpr(1).state(), 1);
+    env.step(|b| sem::bt_r32_rm(b, Gpr(0), Gpr(1))).unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x1, 0);
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0x40);
+}
+
+#[test]
 fn test_m16_imm_rip_sets_zf() {
     // TESTW [RIP],0x0202: [0x1500]=0x0202 & 0x0202 -> ZF=0。
     let mut env = env();
