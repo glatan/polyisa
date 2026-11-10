@@ -562,11 +562,14 @@ fn fetch_len(
                 return Some(3);
             }
             if rm == 4 {
-                // SIB 付き。mod=01 SIB+disp8+imm8 (5B) と mod=00 SIB+imm8 (4B).
+                // SIB 付き。mod=01 SIB+disp8+imm8 (5B)、mod=00 SIB+imm8 (4B)、
+                // mod=10 SIB+disp32+imm8 (8B: C6+ModRM+SIB+disp32+imm8).
                 if md == 1 {
                     Some(5)
                 } else if md == 0 {
                     Some(4)
+                } else if md == 2 {
+                    Some(8)
                 } else {
                     None
                 }
@@ -3209,6 +3212,17 @@ fn dispatch<B: Backend>(
                 sem::mov_rm8_imm_mem8(b, base, d8, imm)
             } else {
                 sem::mov_rm8_imm_sibd(b, base, idx, shift, d8, imm)
+            }
+        }
+        Insn::MovRm8ImmSibd32 => {
+            // C6 /0 SIB mod=10 [base+index*scale+disp32],imm8 (64b)。
+            // disp は (word>>8) 下位32 LE、imm は最下位8。no_index は [base+disp32].
+            let disp = ((word >> 8) as u32).swap_bytes() as i32;
+            let imm = (word & 0xff) as u8;
+            if no_index() {
+                sem::mov_rm8_imm_mem32(b, sib_base(), disp, imm)
+            } else {
+                sem::mov_rm8_imm_sibd32(b, sib_base(), sib_idx(), sib_shift(), disp, imm)
             }
         }
         Insn::MovRm8ImmMem32 => {

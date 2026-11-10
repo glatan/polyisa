@@ -1345,6 +1345,22 @@ pub fn mov_rm8_imm_sibd<B: Backend>(
     Ok(())
 }
 
+/// MOVB [base+index*scale+disp32],imm8 (C6 /0 SIB mod=10)。メモリに1バイト書く.
+pub fn mov_rm8_imm_sibd32<B: Backend>(
+    b: &mut B,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i32,
+    imm: u8,
+) -> Flow<B> {
+    use polyisa_sem::W8;
+    let addr = sib_addr_scaled(b, shift, disp, base, idx);
+    let v = b.konst::<W8>(imm);
+    b.store::<W8>(addr, v, DATA_WRITE)?;
+    Ok(())
+}
+
 /// MOVB [base+index*scale],imm8 (C6 /0 SIB mod=00)。メモリに1バイト書く.
 pub fn mov_rm8_imm_sib<B: Backend>(b: &mut B, base: Gpr, idx: Gpr, shift: u32, imm: u8) -> Flow<B> {
     use polyisa_sem::W8;

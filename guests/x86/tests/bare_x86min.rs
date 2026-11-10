@@ -2610,6 +2610,31 @@ fn mov_rm8_imm_sibd_stores_byte() {
 }
 
 #[test]
+fn mov_rm8_imm_sibd32_stores_byte() {
+    // MOVB [RBP+RDX+0x100],0x01: RBP=0x200、RDX=0x10 -> [0x310]=0x01.
+    let mut env = env();
+    env.map_rw(0, 1).unwrap();
+    env.backend.set(Gpr(5).state(), 0x200);
+    env.backend.set(Gpr(2).state(), 0x10);
+    env.step(|b| sem::mov_rm8_imm_sibd32(b, Gpr(5), Gpr(2), 0, 0x100, 0x01))
+        .unwrap();
+    let mut back = [0u8; 1];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x310),
+            &mut back,
+            Access {
+                endian: Endian::Le,
+                align: Align::Unaligned,
+                kind: AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(back[0], 0x01);
+}
+
+#[test]
 fn sub_r32_sibd_subs() {
     // SUB EAX,[ESP+8]: EAX=10、[8]=3 -> EAX=7。
     let mut env = env();

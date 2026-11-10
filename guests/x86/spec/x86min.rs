@@ -1949,6 +1949,15 @@ pub fn build_model() -> polyisa_isadl::Model {
             "mov r/m8, {imm}",
             "store",
         ),
+        // MOVB [base+index*scale+disp32],imm8 (C6 /0 SIB mod=10)。
+        (
+            "mov_rm8_imm_sibd32",
+            "F1",
+            "11000110 10000100 ........ ................................ ........",
+            vec![],
+            "mov r/m8, {imm}",
+            "store",
+        ),
         // MOVB [base+index*scale],imm8 (C6 /0 SIB mod=00)。
         (
             "mov_rm8_imm_sib",
