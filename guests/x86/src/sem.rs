@@ -4113,6 +4113,38 @@ pub fn mul_rm64<B: Backend>(b: &mut B, rm: Gpr) -> Flow<B> {
     Ok(())
 }
 
+/// IMUL EAX, r/m32 (F7 /5)。符号付き積の64ビットを EDX:EAX に置く.
+pub fn imul_rm32<B: Backend>(b: &mut B, rm: Gpr) -> Flow<B> {
+    let x = read(b, Gpr(0));
+    let y = read(b, rm);
+    let x64 = b.sext::<W32, W64>(x);
+    let y64 = b.sext::<W32, W64>(y);
+    let p = b.mul::<W64>(x64, y64);
+    let lo32: B::V<W32> = b.trunc::<W64, W32>(p);
+    write(b, Gpr(0), lo32);
+    let shift = b.konst::<W64>(32);
+    let hi64 = b.shr_l::<W64>(p, shift);
+    let hi32: B::V<W32> = b.trunc::<W64, W32>(hi64);
+    write(b, Gpr(2), hi32);
+    Ok(())
+}
+
+/// IMUL RAX, r/m64 (REX.W F7 /5)。符号付き積の128ビットを RDX:RAX に置く.
+pub fn imul_rm64<B: Backend>(b: &mut B, rm: Gpr) -> Flow<B> {
+    let x = read64(b, Gpr(0));
+    let y = read64(b, rm);
+    let x128 = b.sext::<W64, W128>(x);
+    let y128 = b.sext::<W64, W128>(y);
+    let p = b.mul::<W128>(x128, y128);
+    let lo64: B::V<W64> = b.trunc::<W128, W64>(p);
+    write64(b, Gpr(0), lo64);
+    let shift = b.konst::<W128>(64);
+    let hi128 = b.shr_l::<W128>(p, shift);
+    let hi64: B::V<W64> = b.trunc::<W128, W64>(hi128);
+    write64(b, Gpr(2), hi64);
+    Ok(())
+}
+
 /// DIV EAX, ECX。EDX:EAX を符号なし除算し、商を EAX、剰余を EDX に置く。
 /// 0 除算と商あふれは実機の #DE に相当する DivZero で退出する。
 pub fn div_rm32<B: Backend>(b: &mut B, eip: u32, rm: Gpr) -> Flow<B> {

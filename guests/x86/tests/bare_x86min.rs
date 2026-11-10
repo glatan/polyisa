@@ -969,6 +969,32 @@ fn mul_widens_to_edx_eax() {
 }
 
 #[test]
+fn imul_rm64_signed_widens() {
+    // IMUL RDX:RAX = RAX * RDI (REX.W F7 /5)。ls -l 0x4a479e 対応.
+    // RAX=7、RDI=6 -> RAX=42、RDX=0。符号付きでも正は同じ.
+    let mut env = env();
+    env.step(|b| {
+        sem::write64(b, Gpr(0), 7);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| {
+        sem::write64(b, Gpr(7), 6);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::imul_rm64(b, Gpr(7))).unwrap();
+    env.step(|b| {
+        let lo = sem::read64(b, Gpr(0));
+        assert_eq!(lo, 42);
+        let hi = sem::read64(b, Gpr(2));
+        assert_eq!(hi, 0);
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
 fn div_quotient_remainder() {
     let mut env = env();
     // DIV: EDX:EAX=17 / ECX=5 → EAX=3、EDX=2。

@@ -870,8 +870,8 @@ fn fetch_len(
                 Some(7)
             }
         }
-        // F7 /r (TEST/NOT/NEG/MUL/DIV)。reg-direct のみ。
-        // /0 TEST は imm32 付きで 6B、/2 NOT・/3 NEG・/4 MUL・/6 DIV・/7 IDIV は 2B.
+        // F7 /r (TEST/NOT/NEG/MUL/IMUL/DIV)。reg-direct のみ。
+        // /0 TEST は imm32 付きで 6B、/2 NOT・/3 NEG・/4 MUL・/5 IMUL・/6 DIV・/7 IDIV は 2B.
         // 66 F7 /0 mod=00 [base] (TEST m16,imm16) は 66剥離後4B、
         // 66 F7 /0 RIP (TEST m16,imm16) は 66剥離後8B.
         0xF7 => {
@@ -898,7 +898,7 @@ fn fetch_len(
                 let reg = (s >> 3) & 7;
                 if reg == 0 {
                     Some(6)
-                } else if reg == 2 || reg == 3 || reg == 4 || reg == 6 || reg == 7 {
+                } else if reg == 2 || reg == 3 || reg == 4 || reg == 5 || reg == 6 || reg == 7 {
                     Some(2)
                 } else {
                     None
@@ -4874,6 +4874,14 @@ fn dispatch<B: Backend>(
                 sem::mul_rm32(b, rm())
             }
         }
+        Insn::ImulRm32 => {
+            // F7 /5 reg-direct。REX.W で64bit符号付き積を RDX:RAX に置く.
+            if rex_w {
+                sem::imul_rm64(b, rm())
+            } else {
+                sem::imul_rm32(b, rm())
+            }
+        }
         Insn::DivRm32 => {
             if rex_w {
                 sem::div_rm64(b, eip, rm())
@@ -6627,11 +6635,12 @@ fn dispatch<B: Backend>(
                 sem::clear_hi(b, d);
             }
         }
-        // 32ビット DIV/MUL/IDIV のみゼロ拡張する。64ビット DIV (REX.W) は full64 のため消さない.
+        // 32ビット DIV/MUL/IMUL/IDIV のみゼロ拡張する。64ビット DIV (REX.W) は full64 のため消さない.
         if !rex_w
             && matches!(
                 insn,
                 Insn::MulRm32
+                    | Insn::ImulRm32
                     | Insn::DivRm32
                     | Insn::IdivRm32
                     | Insn::DivRm32Mem8

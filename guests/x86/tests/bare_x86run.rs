@@ -464,6 +464,40 @@ fn run_div_exit_quotient() {
     assert_eq!(out, Outcome::Exit(3));
 }
 
+#[test]
+fn run_imul_rm64() {
+    // run 経由で 48 F7 EF (IMUL RDI) を回す。ls -l 0x4a479e 対応.
+    // RAX=7、RDI=6 -> RAX=42、RDX=0、eip は 0x1003 に進む.
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(0), 7);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(7), 6);
+        Ok(())
+    })
+    .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0x48, 0xF7, 0xEF])
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x1003 });
+    env.step(|b| {
+        let lo = polyisa_guest_x86::sem::read64(b, Gpr(0));
+        assert_eq!(lo, 42);
+        let hi = polyisa_guest_x86::sem::read64(b, Gpr(2));
+        assert_eq!(hi, 0);
+        Ok(())
+    })
+    .unwrap();
+}
+
 /// x86-64 用の最小トラップ処理。番号は RAX、引数は RDI にある。
 struct X64Exit;
 

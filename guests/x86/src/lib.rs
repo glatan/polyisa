@@ -76,7 +76,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数117件。
-        assert_eq!(INSNS.len(), 598);
+        assert_eq!(INSNS.len(), 599);
     }
 
     #[test]
@@ -375,6 +375,10 @@ mod tests {
         assert_eq!(decode(0xF7D0, 16), Some(Insn::NotRm32));
         assert_eq!(decode(0xF7D8, 16), Some(Insn::NegRm32));
         assert_eq!(decode(0xF7E1, 16), Some(Insn::MulRm32));
+        // IMUL r/m32 (F7 /5)。ls -l 0x4a479e 対応。48 F7 EF は REX.W 剥がし済み.
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0xF7EF, 16), Some(Insn::ImulRm32));
+        assert_eq!(decode(0xF7EF, 8), None);
         assert_eq!(decode(0xF7F7, 16), Some(Insn::DivRm32));
         assert_eq!(decode(0xF7F9, 16), Some(Insn::IdivRm32));
         // DIV m32 SIB+disp8 (F7 /6 mod=01 rm=100)。F7 74 24 0C は [RSP+0x0C].

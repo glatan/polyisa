@@ -163,6 +163,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("mov_eax_abs", "F1", "10001011 00...101 ................................", "mov eax, [disp32]", "load"),
         ("mov_abs_eax", "F1", "10001001 00...101 ................................", "mov [disp32], eax", "store"),
         ("mul_rm32", "F1", "11110111 11100...", "mul eax, r/m32", "mult"),
+        ("imul_rm32", "F1", "11110111 11101...", "imul eax, r/m32", "mult"),
         ("div_rm32", "F1", "11110111 11110...", "div eax, r/m32", "div"),
         ("idiv_rm32", "F1", "11110111 11111...", "idiv eax, r/m32", "div"),
         ("push_eax", "F1", "01010000", "push eax", "store"),
