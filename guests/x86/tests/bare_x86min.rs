@@ -2558,6 +2558,24 @@ fn sub_r32_sibd_subs() {
 }
 
 #[test]
+fn sub_r32_sibd_indexed_subs() {
+    // SUB ECX,[RAX+RSI*4+0x50] (2B 4C B0 50 相当): head の停止点 2B 44 B0 50 に対応.
+    // RAX=0x2000、RSI=0x10、[0x2090]=3、ECX=10 -> ECX=7.
+    let mut env = env();
+    env.map_rw(0x2000, 1).unwrap();
+    env.backend.set(Gpr(0).state(), 0x2000);
+    env.backend.set(Gpr(6).state(), 0x10);
+    env.backend
+        .mem
+        .write(VirtAddr(0x2090), &0x03u32.to_le_bytes())
+        .unwrap();
+    env.backend.set(Gpr(1).state(), 10);
+    env.step(|b| sem::sub_r32_sibd_indexed(b, Gpr(1), Gpr(0), Gpr(6), 2, 0x50))
+        .unwrap();
+    assert_eq!(env.backend.get(Gpr(1).state()), 7);
+}
+
+#[test]
 fn mov_rm8_imm_mem32_stores_byte() {
     // MOVB [RBP-0x4B0],0x20: [0x100-0x4B0]=[0xFFFFFFFFFFFFFB50]? ではなく、
     // RBP=0x200、disp=-0x100 -> [0x100]=0x20。

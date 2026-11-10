@@ -3980,15 +3980,19 @@ fn dispatch<B: Backend>(
             }
         }
         Insn::SubRSibd => {
-            // 2B SIB mod=01 [base+disp8] no_index (32b)。
-            // SIB は (word>>8) 下位8、disp は最下位8。base は SIB 下位3 + REX.B。
-            let sib_v = ((word >> 8) & 0xff) as u8;
+            // 2B SIB mod=01 [base+index*scale+disp8] (32b)。no_index は base+disp8 のみ.
+            // disp は最下位8。dst は reg フィールド.
             let d8 = (word & 0xff) as u8 as i8;
-            let base = Gpr((sib_v & 7) | ((rex & 1) << 3));
-            if rex_w {
-                sem::sub_r64_sibd(b, reg(), base, d8)
+            if no_index() {
+                if rex_w {
+                    sem::sub_r64_sibd(b, reg(), sib_base(), d8)
+                } else {
+                    sem::sub_r32_sibd(b, reg(), sib_base(), d8)
+                }
+            } else if rex_w {
+                sem::sub_r64_sibd_indexed(b, reg(), sib_base(), sib_idx(), sib_shift(), d8)
             } else {
-                sem::sub_r32_sibd(b, reg(), base, d8)
+                sem::sub_r32_sibd_indexed(b, reg(), sib_base(), sib_idx(), sib_shift(), d8)
             }
         }
         Insn::SubRMem32 => {

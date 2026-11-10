@@ -685,6 +685,11 @@ mod tests {
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x2B442408, 32), Some(Insn::SubRSibd));
         assert_eq!(decode(0x2B442408, 24), None);
+        // SUB r,m32 SIB+disp8 [base+index*scale+disp8] (2B mod=01)。
+        // 2B 44 B0 50 は subl 0x50(%rax,%rsi,4),%eax.
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x2B44B050, 32), Some(Insn::SubRSibd));
+        assert_eq!(decode(0x2B44B050, 24), None);
         // MOVB [base+index*scale+disp8],imm8 (C6 /0 SIB mod=01)。
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0xC64428FE3A, 40), Some(Insn::MovRm8ImmSibd));
