@@ -309,6 +309,10 @@ mod tests {
         assert_eq!(decode(0x6AFD, 16), Some(Insn::PushImm8));
         assert_eq!(decode(0xFF9578FFFFFF, 48), Some(Insn::CallRMem32));
         assert_eq!(decode(0xFF14F7, 24), Some(Insn::CallRSib));
+        // JMP [base+disp8] (FF /4 mod=01)。seq の停止点 0x47e635 に対応.
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0xFF6018, 24), Some(Insn::JmpRMem8));
+        assert_eq!(decode(0xFF6018, 16), None);
         // MOVSX r32,r/m8 reg-direct (0F BE /r mod=11)。seq の停止点 0x40b775 に対応.
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x0FBEC6, 24), Some(Insn::MovsxR32R8));

@@ -3157,6 +3157,32 @@ fn run_jmp_r_sib() {
 }
 
 #[test]
+fn run_jmp_r_mem8() {
+    // run 経由で FF 60 18 (JMP [RAX+0x18]) を回す。seq の停止点 0x47e635 に対応.
+    // RAX=0x2000、[0x2018]=0x1010 -> 0x1010 へ飛び、exit(0)。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(0).state(), 0x2000);
+    env.backend
+        .mem
+        .write(VirtAddr(0x2018), &0x1010u64.to_le_bytes())
+        .unwrap();
+    let jmp: &[u8] = &[0xFF, 0x60, 0x18]; // jmp [rax+0x18]
+    let exit: &[u8] = &[
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
+        0x0F, 0x05, // syscall -> exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), jmp).unwrap();
+    env.backend.mem.write(VirtAddr(0x1010), exit).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0));
+}
+
+#[test]
 fn run_or_rm8_imm_sibd() {
     // run 経由で 80 4C 04 F8 00 (ORB $0,-8(%rsp)) を回す。seq の停止点 0x45b828 に対応.
     // RSP=0x2000、[0x1FF8]=0xF0 -> 0xF0 のまま、ZF=0 になり、exit(0)。mov は旗を変えない.

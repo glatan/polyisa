@@ -459,7 +459,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         // JMP [base] (FF /4 mod=00)。
         ("jmp_r_memnd", "MR", "11111111 00100...", "jmp r/m64", "jump"),
         // JMP [base+disp8] (FF /4 mod=01)。
-        ("jmp_r_mem8", "M8", "11111111 00101... ........", "jmp r/m64", "jump"),
+        ("jmp_r_mem8", "M8", "11111111 01100... ........", "jmp r/m64", "jump"),
         // JMP [base+disp32] (FF /4 mod=10)。
         ("jmp_r_mem32", "M32", "11111111 00110... ................................", "jmp r/m64", "jump"),
         // JMP [RIP+disp32] (FF /4 RIP)。
