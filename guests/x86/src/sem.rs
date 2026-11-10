@@ -1028,6 +1028,18 @@ pub fn sete_m8_mem32<B: Backend>(b: &mut B, base: Gpr, disp: i32) -> Flow<B> {
     Ok(())
 }
 
+/// SETE m8 [base+disp8] (0F 94 mod=01)。grep 0x442245 対応.
+pub fn sete_m8_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8) -> Flow<B> {
+    use polyisa_sem::W8;
+    let addr = eff_addr(b, base, disp);
+    let take = read_zf(b);
+    let one = b.konst::<W8>(1);
+    let zero = b.konst::<W8>(0);
+    let v = b.select::<W8>(take, one, zero);
+    b.store::<W8>(addr, v, DATA_WRITE)?;
+    Ok(())
+}
+
 /// SETNE m8 [base+disp8] (0F 95 mod=01)。ZF=0 なら 1 を書く.
 pub fn setne_m8_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8) -> Flow<B> {
     use polyisa_sem::W8;

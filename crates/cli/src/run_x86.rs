@@ -159,6 +159,7 @@ fn fetch_len(
                 }
             } else if (0x90..=0x9F).contains(&s) {
                 // SETcc r/m8 (0F 90-9F /r)。reg-direct 3B、94 mod=10 [base+disp32] 7B、
+                // 94 mod=01 [base+disp8] 4B (grep 0x442245 対応)、
                 // 95 SIB mod=01 [base+index*scale+disp8] 5B (ls -l 対応).
                 let m = third?;
                 let md = m >> 6;
@@ -167,6 +168,8 @@ fn fetch_len(
                     Some(3)
                 } else if s == 0x94 && md == 2 {
                     Some(7)
+                } else if s == 0x94 && md == 1 && rm != 4 {
+                    Some(4)
                 } else if s == 0x95 && md == 1 && rm == 4 {
                     let _ = fourth?;
                     Some(5)
@@ -6350,6 +6353,10 @@ fn dispatch<B: Backend>(
         Insn::SeteM8Mem32 => {
             // 0F 94 mod=10 [base+disp32] (56b)。
             sem::sete_m8_mem32(b, rm0f(), disp32())
+        }
+        Insn::SeteM8Mem8 => {
+            // 0F 94 mod=01 [base+disp8] (32b)。grep 0x442245 対応.
+            sem::sete_m8_mem8(b, rm0f(), disp8())
         }
         Insn::SetneM8Sibd => {
             // 0F 95 SIB mod=01 [base+index*scale+disp8] (40b)。no_index は base のみ.
