@@ -8811,6 +8811,35 @@ impl TrapHandler for CliLinux {
             set64(env, Gpr(0), neg(EBADF));
             return TrapOutcome::Handled;
         }
+        if nr == polyisa_os_linux::x86_64::DUP3 && self.is64
+            || nr == polyisa_os_linux::i386::DUP3 && !self.is64
+        {
+            // dup3(oldfd, newfd, flags)。hexdump の libbb 準備で使う.
+            // flags は 0 のみ受け付け (O_CLOEXEC は無視して継続)。oldfd==newfd は EINVAL.
+            let oldfd = get64(env, r_a) as u32;
+            let newfd = get64(env, r_b) as u32;
+            let flags = get64(env, r_c) as u32;
+            const O_CLOEXEC: u32 = 0x80000;
+            if flags & !O_CLOEXEC != 0 {
+                set64(env, Gpr(0), neg(EINVAL));
+                return TrapOutcome::Handled;
+            }
+            if oldfd == newfd {
+                set64(env, Gpr(0), neg(EINVAL));
+                return TrapOutcome::Handled;
+            }
+            let valid = |fd: u32| self.fd_valid(fd);
+            if !valid(oldfd) || newfd > 1024 {
+                set64(env, Gpr(0), neg(EBADF));
+                return TrapOutcome::Handled;
+            }
+            if (oldfd == 1 || oldfd == 2) && (newfd == 1 || newfd == 2) {
+                set64(env, Gpr(0), newfd as u64);
+                return TrapOutcome::Handled;
+            }
+            set64(env, Gpr(0), neg(EBADF));
+            return TrapOutcome::Handled;
+        }
         if nr == polyisa_os_linux::x86_64::MKDIR && self.is64
             || nr == polyisa_os_linux::i386::MKDIR && !self.is64
         {
@@ -10353,6 +10382,34 @@ mod tests {
         set64(&mut env, Gpr(6), 0o755);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), 0);
+    }
+
+    #[test]
+    fn dup3_std_alias_returns_newfd() {
+        use polyisa_os_linux::x86_64 as abi;
+        let mut sys = CliLinux::x86_64();
+        let mut env = bare();
+        // dup3(1, 2, 0) は 2 を返す (hexdump の前段).
+        set64(&mut env, Gpr(0), abi::DUP3);
+        set64(&mut env, Gpr(7), 1);
+        set64(&mut env, Gpr(6), 2);
+        set64(&mut env, Gpr(2), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 2);
+        // oldfd==newfd は EINVAL.
+        set64(&mut env, Gpr(0), abi::DUP3);
+        set64(&mut env, Gpr(7), 1);
+        set64(&mut env, Gpr(6), 1);
+        set64(&mut env, Gpr(2), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EINVAL));
+        // 不正 flags は EINVAL.
+        set64(&mut env, Gpr(0), abi::DUP3);
+        set64(&mut env, Gpr(7), 1);
+        set64(&mut env, Gpr(6), 2);
+        set64(&mut env, Gpr(2), 0xFFFF);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EINVAL));
     }
 
     #[test]
