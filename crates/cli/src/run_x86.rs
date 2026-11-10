@@ -3582,15 +3582,24 @@ fn dispatch<B: Backend>(
             }
         }
         Insn::AndRmImm8Sib => {
-            // 83 /4 SIB mod=00 [base],imm8 (32b、no_index non-abs)。
+            // 83 /4 SIB mod=00 [base],imm8 (32b)。no_index は base のみ、索引ありは SIB スケール.
             // SIB は (word>>8) 下位8、imm は最下位8。base は SIB 下位3 + REX.B。
             let sib_v = ((word >> 8) & 0xff) as u8;
             let imm = (word & 0xff) as u8 as i8;
+            let shift = ((sib_v >> 6) & 3) as u32;
+            let idx_raw = (sib_v >> 3) & 7;
+            let idx = Gpr(idx_raw | (((rex >> 1) & 1) << 3));
             let base = Gpr((sib_v & 7) | ((rex & 1) << 3));
-            if rex_w {
-                sem::and_rm64_imm8_memnd(b, base, imm)
+            if idx_raw == 4 && (rex >> 1) & 1 == 0 {
+                if rex_w {
+                    sem::and_rm64_imm8_memnd(b, base, imm)
+                } else {
+                    sem::and_rm32_imm8_memnd(b, base, imm)
+                }
+            } else if rex_w {
+                sem::and_rm64_imm8_sib(b, base, idx, shift, imm)
             } else {
-                sem::and_rm32_imm8_memnd(b, base, imm)
+                sem::and_rm32_imm8_sib(b, base, idx, shift, imm)
             }
         }
         Insn::AndRmImm8Mem32 => {

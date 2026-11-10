@@ -631,6 +631,11 @@ mod tests {
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x83242400, 32), Some(Insn::AndRmImm8Sib));
         assert_eq!(decode(0x83242400, 24), None);
+        // AND m,imm8 SIB mod=00 [base+index*scale] (83 /4 + SIB + imm8)。
+        // 83 24 88 00 は andl $0,(%rax,%rcx,4).
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x83248800, 32), Some(Insn::AndRmImm8Sib));
+        assert_eq!(decode(0x83248800, 24), None);
         // MOVZX r32,r16 reg-direct (0F B7 /r)。
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x0FB7C3, 24), Some(Insn::MovzxR32R16));

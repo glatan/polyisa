@@ -602,8 +602,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("cmp_rm8_imm_sib", "F1", "10000000 00111100 ..100... ........", "cmp r/m8, {imm}", "alu"),
         // AND m32/m64,imm8 SIB mod=01 [base+disp8] (83 /4)。index有無は問わずdispatchで切替.
         ("and_rm_imm8_sibd", "F1", "10000011 01100100 ........ ........ ........", "and r/m, {imm}", "alu"),
-        // AND m32/m64,imm8 SIB mod=00 [base] (83 /4、no_index non-abs)。index=100 固定.
-        ("and_rm_imm8_sib", "F1", "10000011 00100100 ..100... ........", "and r/m, {imm}", "alu"),
+        // AND m32/m64,imm8 SIB mod=00 [base] (83 /4)。index有無は問わずdispatchで切替.
+        ("and_rm_imm8_sib", "F1", "10000011 00100100 ........ ........", "and r/m, {imm}", "alu"),
         ("cmp_rm8_imm_sibd", "F1", "10000000 01111100 ........ ........ ........", "cmp r/m8, {imm}", "alu"),
         ("test_m8_imm_rip", "F1", "11110110 00000101 ................................ ........", "test m8, {imm}", "alu"),
         // TEST m8,imm8 mod=00 [base] (F6 /0)。SIBなし.

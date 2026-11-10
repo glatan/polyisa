@@ -5582,6 +5582,40 @@ fn and_rm32_imm8_sibd_indexed() {
 }
 
 #[test]
+fn and_rm32_imm8_sib_indexed_rexx() {
+    // ANDL $0,[RAX+R9*4] (42 83 24 88 00): head の停止点に対応。REX.X で R9 を指す.
+    // RAX=0x2000、R9=0x10、[0x2040]=0xFF -> 0.
+    let mut env = env();
+    env.map_rw(0x2000, 1).unwrap();
+    env.backend.set(Gpr(0).state(), 0x2000);
+    env.step(|b| {
+        sem::write64(b, Gpr(9), 0x10);
+        Ok(())
+    })
+    .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2040), &0xFFu32.to_le_bytes())
+        .unwrap();
+    env.step(|b| sem::and_rm32_imm8_sib(b, Gpr(0), Gpr(9), 2, 0))
+        .unwrap();
+    let mut back = [0u8; 4];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x2040),
+            &mut back,
+            Access {
+                endian: Endian::Le,
+                align: Align::Unaligned,
+                kind: AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(u32::from_le_bytes(back), 0);
+}
+
+#[test]
 fn inc_r32_sibd_indexed() {
     // INCL -4(%rdi,%rdx,4) (FF 44 97 FC): RDI=0x2000、RDX=0x10、[0x203C]=0xFE -> 0xFF.
     // CF は保存される。
