@@ -4955,6 +4955,32 @@ fn and_rm8_imm_mem8_basic() {
 }
 
 #[test]
+fn and_rm8_imm_sibd_basic() {
+    // ANDB [RDI+RCX+0x3A],0xF3: grep 0x434710 対応。[0x207A]=0xFF -> 0xF3.
+    let mut env = env();
+    env.map_rw(0x2000, 1).unwrap();
+    env.backend.set(Gpr(7).state(), 0x2000);
+    env.backend.set(Gpr(1).state(), 0x40);
+    env.backend.mem.write(VirtAddr(0x207A), &[0xFFu8]).unwrap();
+    env.step(|b| sem::and_rm8_imm_sibd(b, Gpr(7), Gpr(1), 0, 0x3A, 0xF3))
+        .unwrap();
+    let mut back = [0u8; 1];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x207A),
+            &mut back,
+            Access {
+                endian: Endian::Le,
+                align: Align::Unaligned,
+                kind: AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(back, [0xF3u8]);
+}
+
+#[test]
 fn xor_rm32_imm8_mem8_basic() {
     // XOR [RDI+0x04],1 (83 /6 mod=01): [0x1504]=0x03 -> 0x02.
     let mut env = env();

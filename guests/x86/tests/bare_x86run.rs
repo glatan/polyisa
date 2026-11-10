@@ -2438,6 +2438,43 @@ fn run_and_rm8_imm_mem8() {
 }
 
 #[test]
+fn run_and_rm8_imm_sibd() {
+    // run 経由で 80 64 0F 3A F3 (ANDB $0xF3,0x3A(%rdi,%rcx)) を回す。grep 0x434710 対応.
+    // RDI=0x2000、RCX=0x40、[0x207A]=0xFF -> [0x207A]=0xF3、exit(0)。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(7).state(), 0x2000);
+    env.backend.set(Gpr(1).state(), 0x40);
+    env.backend.mem.write(VirtAddr(0x207A), &[0xFFu8]).unwrap();
+    let prog: &[u8] = &[
+        0x80, 0x64, 0x0F, 0x3A, 0xF3, // andb $0xF3,0x3A(%rdi,%rcx)
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
+        0x0F, 0x05, // syscall -> exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0));
+    let mut back = [0u8; 1];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x207A),
+            &mut back,
+            polyisa_mem::Access {
+                endian: polyisa_mem::Endian::Le,
+                align: polyisa_mem::Align::Unaligned,
+                kind: polyisa_mem::AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(back, [0xF3u8]);
+}
+
+#[test]
 fn run_cmp_m32_r32_sibd() {
     // run 経由で 39 54 24 14 (CMP 0x14(%rsp),%edx) を回す。
     // [0x2014]=5、EDX=5 -> ZF=1 のまま exit(0)。no_index は mem8 相当。

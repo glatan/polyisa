@@ -76,7 +76,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数117件。
-        assert_eq!(INSNS.len(), 605);
+        assert_eq!(INSNS.len(), 606);
     }
 
     #[test]
@@ -296,6 +296,11 @@ mod tests {
         assert_eq!(decode(0x81050000000000000000, 80), Some(Insn::AddRm32Rip));
         assert_eq!(decode(0xC7050000000004000000, 80), Some(Insn::MovRmImmRip));
         assert_eq!(decode(0x807C386800, 40), Some(Insn::CmpRm8ImmSibd));
+        // ANDB SIB+disp8 (80 /4 mod=01)。grep 0x434710 対応.
+        // 80 64 0F 3A F3 は [RDI+RCX+0x3A]&=0xF3.
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x80640F3AF3, 40), Some(Insn::AndRm8ImmSibd));
+        assert_eq!(decode(0x80640F3AF3, 32), None);
         // CMPB SIB+disp32 (80 /7 mod=10)。stat 0x429875 対応.
         // 80 BC 05 F0 FE FF FF 00 は [RBP+RAX-0x110]==0x00 比較.
         // Ref: SPEC-X86-INTEL-SDM (v093).
