@@ -4659,6 +4659,36 @@ fn run_xor_r8_m8_memnd() {
 }
 
 #[test]
+fn run_cmp_r_sib_no_index() {
+    // run 経由で 48 3B 04 24 (CMP RAX,[RSP] with REX.W) を回す。mv 0x5ab8fb 対応.
+    // RSP=0x2000、[0x2000]=5、RAX=5 -> ZF=1、exit(0)。RAX は exit 系列で潰れるため ZF で検証.
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    env.backend.set(Gpr(0).state(), 5);
+    env.backend
+        .mem
+        .write(VirtAddr(0x2000), &5u64.to_le_bytes())
+        .unwrap();
+    let prog: &[u8] = &[
+        0x48, 0x3B, 0x04, 0x24, // cmp rax,[rsp]
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
+        0x0F, 0x05, // syscall -> exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0));
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x40,
+        0x40
+    );
+}
+
+#[test]
 fn run_sub_m8_r8_reg_direct() {
     // run 経由で 28 D1 (SUB CL,DL) を回す。
     // ECX=5、EDX=3 -> CL=2、exit(0)。

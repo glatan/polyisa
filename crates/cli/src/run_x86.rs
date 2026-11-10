@@ -4946,16 +4946,18 @@ fn dispatch<B: Backend>(
             }
         }
         Insn::CmpRSib => {
-            // 3B /r SIB mod=00 [base+index*scale] (24b)。dst は reg フィールド.
-            // SIB は最下位8.
-            let sib_v = (word & 0xff) as u8;
-            let shift = ((sib_v >> 6) & 3) as u32;
-            let idx = Gpr(((sib_v >> 3) & 7) | (((rex >> 1) & 1) << 3));
-            let base = Gpr((sib_v & 7) | ((rex & 1) << 3));
-            if rex_w {
-                sem::cmp_r64_sib(b, reg(), base, idx, shift)
+            // 3B /r SIB mod=00 [base+index*scale] (24b)。mv 0x5ab8fb 対応. no_index は [base].
+            // dst は reg フィールド.
+            if no_index() {
+                if rex_w {
+                    sem::cmp_r64_memnd(b, reg(), sib_base())
+                } else {
+                    sem::cmp_r32_memnd(b, reg(), sib_base())
+                }
+            } else if rex_w {
+                sem::cmp_r64_sib(b, reg(), sib_base(), sib_idx(), sib_shift())
             } else {
-                sem::cmp_r32_sib(b, reg(), base, idx, shift)
+                sem::cmp_r32_sib(b, reg(), sib_base(), sib_idx(), sib_shift())
             }
         }
         Insn::CmpRSibd => {

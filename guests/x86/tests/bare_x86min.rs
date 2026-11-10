@@ -6994,6 +6994,32 @@ fn xor_r8_m8_memnd_basic() {
 }
 
 #[test]
+fn cmp_r32_sib_no_index() {
+    // CMP EAX,[RSP] (3B 04 24): [0x2000]=5、EAX=5 -> ZF=1.
+    // mv 0x5ab8fb 対応 (no_index は memnd 経路).
+    let mut env = env();
+    env.map_rw(0x2000, 1).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    env.backend.set(Gpr(0).state(), 5);
+    env.backend
+        .mem
+        .write(VirtAddr(0x2000), &5u32.to_le_bytes())
+        .unwrap();
+    env.step(|b| sem::cmp_r32_memnd(b, Gpr(0), Gpr(4))).unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0x40);
+    // 索引あり: CMP EAX,[RBX+RSI]、[0x2010]=5 & EAX=5 -> ZF=1.
+    env.backend.set(Gpr(3).state(), 0x2000);
+    env.backend.set(Gpr(6).state(), 0x10);
+    env.backend
+        .mem
+        .write(VirtAddr(0x2010), &5u32.to_le_bytes())
+        .unwrap();
+    env.step(|b| sem::cmp_r32_sib(b, Gpr(0), Gpr(3), Gpr(6), 0))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0x40);
+}
+
+#[test]
 fn and_rm32_imm8_sib_indexed_rexx() {
     // ANDL $0,[RAX+R9*4] (42 83 24 88 00): head の停止点に対応。REX.X で R9 を指す.
     // RAX=0x2000、R9=0x10、[0x2040]=0xFF -> 0.
