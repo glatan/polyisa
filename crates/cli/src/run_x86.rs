@@ -8781,16 +8781,33 @@ impl TrapHandler for CliLinux {
         if nr == polyisa_os_linux::x86_64::DUP && self.is64
             || nr == polyisa_os_linux::i386::DUP && !self.is64
         {
-            // dup(oldfd)。試作では 1/2 の複製のみ受け付け、新fdとして返す.
-            // opened fd の複製は未対応のため EBADF.
+            // dup(oldfd)。開ファイルは try_clone して最下位空きに置く (freopen 対応)。
+            // 真の 1/2 (ファイルなし) は旧来通り oldfd を返す.
             let oldfd = get64(env, r_a) as u32;
-            if oldfd == 1 || oldfd == 2 {
-                set64(env, Gpr(0), oldfd as u64);
+            if !self.fd_valid(oldfd) {
+                set64(env, Gpr(0), neg(EBADF));
                 return TrapOutcome::Handled;
             }
-            let slot = oldfd.wrapping_sub(3) as usize;
-            if self.fds.get(slot).and_then(|f| f.as_ref()).is_none() {
-                set64(env, Gpr(0), neg(EBADF));
+            if let Some(cloned) = self.file_ref(oldfd).and_then(|f| f.try_clone().ok()) {
+                for (i, slot) in self.std_files.iter_mut().enumerate() {
+                    if slot.is_none() && self.std_closed[i] {
+                        *slot = Some(cloned);
+                        self.std_closed[i] = false;
+                        set64(env, Gpr(0), i as u64);
+                        return TrapOutcome::Handled;
+                    }
+                }
+                if let Some(idx) = self.fds.iter().position(|f| f.is_none()) {
+                    self.fds[idx] = Some(cloned);
+                    set64(env, Gpr(0), (3 + idx) as u64);
+                    return TrapOutcome::Handled;
+                }
+                self.fds.push(Some(cloned));
+                set64(env, Gpr(0), (3 + self.fds.len() - 1) as u64);
+                return TrapOutcome::Handled;
+            }
+            if oldfd == 1 || oldfd == 2 {
+                set64(env, Gpr(0), oldfd as u64);
                 return TrapOutcome::Handled;
             }
             set64(env, Gpr(0), neg(EBADF));
@@ -8813,6 +8830,21 @@ impl TrapHandler for CliLinux {
                 set64(env, Gpr(0), newfd as u64);
                 return TrapOutcome::Handled;
             }
+            if let Some(cloned) = self.file_ref(oldfd).and_then(|f| f.try_clone().ok()) {
+                if newfd < 3 {
+                    let i = newfd as usize;
+                    self.std_files[i] = Some(cloned);
+                    self.std_closed[i] = false;
+                } else {
+                    let idx = newfd.wrapping_sub(3) as usize;
+                    while self.fds.len() <= idx {
+                        self.fds.push(None);
+                    }
+                    self.fds[idx] = Some(cloned);
+                }
+                set64(env, Gpr(0), newfd as u64);
+                return TrapOutcome::Handled;
+            }
             if (oldfd == 1 || oldfd == 2) && (newfd == 1 || newfd == 2) {
                 set64(env, Gpr(0), newfd as u64);
                 return TrapOutcome::Handled;
@@ -8824,7 +8856,7 @@ impl TrapHandler for CliLinux {
             || nr == polyisa_os_linux::i386::DUP3 && !self.is64
         {
             // dup3(oldfd, newfd, flags)。hexdump の libbb 準備で使う.
-            // flags は 0 のみ受け付け (O_CLOEXEC は無視して継続)。oldfd==newfd は EINVAL.
+            // flags は O_CLOEXEC のみ無視して継続。oldfd==newfd は EINVAL.
             let oldfd = get64(env, r_a) as u32;
             let newfd = get64(env, r_b) as u32;
             let flags = get64(env, r_c) as u32;
@@ -8840,6 +8872,21 @@ impl TrapHandler for CliLinux {
             let valid = |fd: u32| self.fd_valid(fd);
             if !valid(oldfd) || newfd > 1024 {
                 set64(env, Gpr(0), neg(EBADF));
+                return TrapOutcome::Handled;
+            }
+            if let Some(cloned) = self.file_ref(oldfd).and_then(|f| f.try_clone().ok()) {
+                if newfd < 3 {
+                    let i = newfd as usize;
+                    self.std_files[i] = Some(cloned);
+                    self.std_closed[i] = false;
+                } else {
+                    let idx = newfd.wrapping_sub(3) as usize;
+                    while self.fds.len() <= idx {
+                        self.fds.push(None);
+                    }
+                    self.fds[idx] = Some(cloned);
+                }
+                set64(env, Gpr(0), newfd as u64);
                 return TrapOutcome::Handled;
             }
             if (oldfd == 1 || oldfd == 2) && (newfd == 1 || newfd == 2) {
@@ -10419,6 +10466,50 @@ mod tests {
         set64(&mut env, Gpr(2), 0xFFFF);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EINVAL));
+    }
+
+    #[test]
+    fn dup2_opened_fd_onto_stdin_serves_file() {
+        // freopen 相当の付け替え回帰: open -> fd 3、close(0)、dup2(3, 0) -> 0、read(0) で読める.
+        // hexdump の Bad file descriptor 対応。旧実装は opened fd の dup2 で EBADF.
+        use polyisa_os_linux::x86_64 as abi;
+        let path = std::env::temp_dir().join(format!("polyisa-unit-dup2-{}", std::process::id()));
+        std::fs::write(&path, b"abcdef").unwrap();
+        let path_s = path.to_string_lossy().into_owned();
+        let mut sys = CliLinux::x86_64();
+        let mut env = bare();
+        env.backend
+            .mem
+            .write(VirtAddr(0x100), path_s.as_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x100 + path_s.len() as u64), &[0])
+            .unwrap();
+        // openat(AT_FDCWD, path, O_RDONLY) -> fd 3.
+        set64(&mut env, Gpr(0), abi::OPENAT);
+        set64(&mut env, Gpr(7), AT_FDCWD_U32 as u64);
+        set64(&mut env, Gpr(6), 0x100);
+        set64(&mut env, Gpr(2), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 3);
+        // close(0) -> 0。
+        set64(&mut env, Gpr(0), abi::CLOSE);
+        set64(&mut env, Gpr(7), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        // dup2(3, 0) -> 0。
+        set64(&mut env, Gpr(0), abi::DUP2);
+        set64(&mut env, Gpr(7), 3);
+        set64(&mut env, Gpr(6), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        // dup(3) -> 最下位空き 4。
+        set64(&mut env, Gpr(0), abi::DUP);
+        set64(&mut env, Gpr(7), 3);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 4);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
