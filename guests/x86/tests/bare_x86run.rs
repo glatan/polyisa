@@ -4907,3 +4907,39 @@ fn run_bts_r64_imm() {
     })
     .unwrap();
 }
+
+#[test]
+fn run_pop_rbx_1p0_keeps_hi() {
+    // POP RBX (0x5B) は64ビット既定のため上位を消さない。1.0 の復元を確かめる。
+    // RSP=0x2000 に 1.0 を置き、RBX=0 から POP 1回で RBX=1.0・RSP=0x2008 になる.
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.mem.write(VirtAddr(0x1000), &[0x5B]).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2000), &0x3ff0_0000_0000_0000u64.to_le_bytes())
+        .unwrap();
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(3), 0);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(4), 0x2000);
+        Ok(())
+    })
+    .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x1001 });
+    env.step(|b| {
+        let v = polyisa_guest_x86::sem::read64(b, Gpr(3));
+        assert_eq!(v, 0x3ff0_0000_0000_0000);
+        let rsp = polyisa_guest_x86::sem::read64(b, Gpr(4));
+        assert_eq!(rsp, 0x2008);
+        Ok(())
+    })
+    .unwrap();
+}

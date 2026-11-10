@@ -6082,6 +6082,7 @@ fn dispatch<B: Backend>(
     if is64 && !rex_w {
         // 64ビットでの32ビット書き込みは上位をゼロ拡張する。
         // REX.W の64ビット書き込みは full64 のため消さない.
+        // PUSH/POP は REX.W なしでも64ビットが既定のため消さない（0x5B 等）。
         let dst: Option<Gpr> = match insn {
             Insn::IncEax
             | Insn::DecEax
@@ -6090,15 +6091,14 @@ fn dispatch<B: Backend>(
             | Insn::AndEax
             | Insn::OrEax
             | Insn::XorImm
-            | Insn::PopEax
             | Insn::Cwde => Some(Gpr(0)),
-            Insn::IncEcx | Insn::DecEcx | Insn::PopEcx => Some(Gpr(1)),
-            Insn::IncEdx | Insn::DecEdx | Insn::PopEdx => Some(Gpr(2)),
-            Insn::IncEbx | Insn::DecEbx | Insn::PopEbx => Some(Gpr(3)),
-            Insn::IncEsp | Insn::DecEsp | Insn::PopEsp => Some(Gpr(4)),
-            Insn::IncEbp | Insn::DecEbp | Insn::PopEbp => Some(Gpr(5)),
-            Insn::IncEsi | Insn::DecEsi | Insn::PopEsi => Some(Gpr(6)),
-            Insn::IncEdi | Insn::DecEdi | Insn::PopEdi => Some(Gpr(7)),
+            Insn::IncEcx | Insn::DecEcx => Some(Gpr(1)),
+            Insn::IncEdx | Insn::DecEdx => Some(Gpr(2)),
+            Insn::IncEbx | Insn::DecEbx => Some(Gpr(3)),
+            Insn::IncEsp | Insn::DecEsp => Some(Gpr(4)),
+            Insn::IncEbp | Insn::DecEbp => Some(Gpr(5)),
+            Insn::IncEsi | Insn::DecEsi => Some(Gpr(6)),
+            Insn::IncEdi | Insn::DecEdi => Some(Gpr(7)),
             Insn::AddRm32
             | Insn::AdcRm32
             | Insn::SbbRm32
