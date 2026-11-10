@@ -6979,6 +6979,21 @@ fn add_r32_sib_indexed() {
 }
 
 #[test]
+fn xor_r8_m8_memnd_basic() {
+    // XOR AL,[RSI] (32 06): [0x2000]=0x0F、AL=0xF0 -> AL=0xFF、ZF=0.
+    // cksum 0x5c7fc7 対応.
+    let mut env = env();
+    env.map_rw(0x2000, 1).unwrap();
+    env.backend.set(Gpr(6).state(), 0x2000);
+    env.backend.set(Gpr(0).state(), 0xF0);
+    env.backend.mem.write(VirtAddr(0x2000), &[0x0Fu8]).unwrap();
+    env.step(|b| sem::xor_r8_m8_memnd(b, Gpr(0), false, Gpr(6)))
+        .unwrap();
+    assert_eq!(env.backend.get(Gpr(0).state()) & 0xFF, 0xFF);
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0);
+}
+
+#[test]
 fn and_rm32_imm8_sib_indexed_rexx() {
     // ANDL $0,[RAX+R9*4] (42 83 24 88 00): head の停止点に対応。REX.X で R9 を指す.
     // RAX=0x2000、R9=0x10、[0x2040]=0xFF -> 0.

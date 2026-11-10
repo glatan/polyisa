@@ -706,6 +706,18 @@ fn fetch_len(
                 Some(2)
             }
         }
+        // 0x32 /r (XOR r8,r/m8)。mod=00 [base] 2B のみ。cksum 0x5c7fc7 対応.
+        // reg-direct・SIB・RIP は未対応で None.
+        0x32 => {
+            let s = second?;
+            let md = s >> 6;
+            let rm = s & 7;
+            if md == 0 && rm != 4 && rm != 5 {
+                Some(2)
+            } else {
+                None
+            }
+        }
         // 0x0A /r (OR r8,r/m8)。reg-direct 2B、SIB mod=01 +disp8 4B、RIP 6B.
         0x0A => {
             let s = second?;
@@ -1240,6 +1252,7 @@ pub fn run_mode(
                 | 0x20
                 | 0x28
                 | 0x30
+                | 0x32
                 | 0x08
                 | 0x22
                 | 0x84
@@ -1464,6 +1477,7 @@ pub fn run_mode(
                     | 0x20
                     | 0x28
                     | 0x30
+                    | 0x32
                     | 0x08
                     | 0x87
                     | 0x84
@@ -2477,6 +2491,19 @@ fn dispatch<B: Backend>(
                 (Gpr(reg_f - 4), true)
             };
             sem::mov_r8_m8_memnd(b, dst, high, rm())
+        }
+        Insn::XorR8M8Memnd => {
+            // 32 /r mod=00 [base],r8 load。cksum 0x5c7fc7 対応. dst は reg フィールド.
+            // REX なしの reg 4-7 は上位8ビット (AH/CH/DH/BH)。
+            let reg_f = (modrm() >> 3) & 7;
+            let (dst, high) = if rex != 0 {
+                (Gpr(reg_f | ((rex >> 2) & 1) << 3), false)
+            } else if reg_f < 4 {
+                (Gpr(reg_f), false)
+            } else {
+                (Gpr(reg_f - 4), true)
+            };
+            sem::xor_r8_m8_memnd(b, dst, high, rm())
         }
         Insn::MovR8M8Mem8 => {
             let reg_f = (modrm() >> 3) & 7;

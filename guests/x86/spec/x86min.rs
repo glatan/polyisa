@@ -1747,6 +1747,15 @@ pub fn build_model() -> polyisa_isadl::Model {
             "mov r8, [r/m]",
             "load",
         ),
+        // XOR r8,[base] (32 /r mod=00)。cksum 0x5c7fc7 対応.
+        (
+            "xor_r8_m8_memnd",
+            "MR",
+            "00110010 00......",
+            vec![wc("mr_rm", WhereOp::Ne, 4), wc("mr_rm", WhereOp::Ne, 5)],
+            "xor r8, [r/m]",
+            "alu",
+        ),
         (
             "mov_r8_m8_mem8",
             "M8",

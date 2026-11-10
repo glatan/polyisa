@@ -9695,6 +9695,18 @@ pub fn mov_r8_m8_memnd<B: Backend>(b: &mut B, dst: Gpr, dst_high: bool, base: Gp
     Ok(())
 }
 
+/// XOR r8,[base] (32 /r mod=00)。cksum 0x5c7fc7 対応.
+pub fn xor_r8_m8_memnd<B: Backend>(b: &mut B, dst: Gpr, dst_high: bool, base: Gpr) -> Flow<B> {
+    use polyisa_sem::W8;
+    let addr = read64(b, base);
+    let y: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
+    let x = read8(b, dst, dst_high);
+    let v = b.xor::<W8>(x, y);
+    write8(b, dst, dst_high, v);
+    update_logic_flags(b, v);
+    Ok(())
+}
+
 /// MOV r8,[base+disp8] (8A /r mod=01)。
 pub fn mov_r8_m8_mem8<B: Backend>(
     b: &mut B,

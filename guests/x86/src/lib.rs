@@ -76,7 +76,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数117件。
-        assert_eq!(INSNS.len(), 623);
+        assert_eq!(INSNS.len(), 624);
     }
 
     #[test]
@@ -442,6 +442,11 @@ mod tests {
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x030C9F, 24), Some(Insn::AddRSib));
         assert_eq!(decode(0x030C9F, 8), None);
+        // XOR r8,[base] (32 /r mod=00)。32 06 は XOR AL,[RSI].
+        // cksum 0x5c7fc7 対応.
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x3206, 16), Some(Insn::XorR8M8Memnd));
+        assert_eq!(decode(0x3206, 8), None);
         assert_eq!(decode(0x833F0F, 24), Some(Insn::CmpRmImm8Memnd));
         // CMP m32,imm8 mod=10 [base+disp32] (83 /7)。
         assert_eq!(decode(0x83BDD8FBFFFF00, 56), Some(Insn::CmpRmImm8Mem32));
