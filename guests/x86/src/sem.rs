@@ -547,6 +547,26 @@ pub fn test_rm64_imm<B: Backend>(b: &mut B, dst: Gpr, imm: u32) -> Flow<B> {
     Ok(())
 }
 
+/// TEST m32,imm32 [base] (F7 /0 mod=00)。tac 0x5b0ca8 対応.
+pub fn test_rm32_imm_memnd<B: Backend>(b: &mut B, base: Gpr, imm: u32) -> Flow<B> {
+    let addr = read64(b, base);
+    let x: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let y = b.konst::<W32>(imm);
+    let v = b.and::<W32>(x, y);
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// TEST m64,imm32 [base] (F7 /0 mod=00, REX.W)。imm32 は符号拡張する.
+pub fn test_rm64_imm_memnd<B: Backend>(b: &mut B, base: Gpr, imm: u32) -> Flow<B> {
+    let addr = read64(b, base);
+    let x: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let y = b.konst::<W64>(imm as i32 as u64);
+    let v = b.and::<W64>(x, y);
+    update_logic_flags(b, v);
+    Ok(())
+}
+
 /// 8ビット GPR を読む。REX ありは低8ビット、REX なしの 4-7 は上位8ビット (AH/CH/DH/BH).
 fn read8<B: Backend>(b: &mut B, r: Gpr, high: bool) -> B::V<W8> {
     if high {

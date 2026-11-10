@@ -913,6 +913,9 @@ fn fetch_len(
                     Some(4)
                 } else if has66 && md == 0 && reg == 0 && rm == 5 {
                     Some(8)
+                } else if md == 0 && reg == 0 && rm != 4 && rm != 5 {
+                    // TEST m32,imm32 mod=00 [base] (6B: F7 /0 + ModRM + imm32)。tac 0x5b0ca8 対応.
+                    Some(6)
                 } else if md == 1 && reg == 6 && rm != 4 {
                     // DIV r/m32 mod=01 [base+disp8] (3B: F7 /6 + ModRM + disp8).
                     Some(3)
@@ -3245,6 +3248,14 @@ fn dispatch<B: Backend>(
                 sem::test_rm64_imm(b, rm(), imm32())
             } else {
                 sem::test_rm32_imm(b, rm(), imm32())
+            }
+        }
+        Insn::TestRm32ImmMemnd => {
+            // F7 /0 mod=00 [base],imm32 (48b)。tac 0x5b0ca8 対応. imm は最下位32 LE.
+            if rex_w {
+                sem::test_rm64_imm_memnd(b, rm(), imm32())
+            } else {
+                sem::test_rm32_imm_memnd(b, rm(), imm32())
             }
         }
         Insn::TestM16ImmMemnd => {

@@ -678,6 +678,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("test_m16_imm_memnd", "F1", "11110111 00000... ................", "test m16, {imm}", "alu"),
         // TEST m16,imm16 RIP (66 F7 05 + disp32 + imm16)。66 接頭辞は実行側で剥がす.
         ("test_m16_imm_rip", "F1", "11110111 00000101 ................................ ................", "test m16, {imm}", "alu"),
+        // TEST m32,imm32 mod=00 [base] (F7 /0)。tac 0x5b0ca8 対応.
+        ("test_rm32_imm_memnd", "F1", "11110111 00000... ................................", "test m32, {imm}", "alu"),
         ("not_rm32", "F1", "11110111 11010...", "not r/m32", "alu"),
         ("neg_rm32", "F1", "11110111 11011...", "neg r/m32", "alu"),
         ("test_rm8_imm", "F1", "11110110 11000... ........", "test r/m8, {imm}", "alu"),

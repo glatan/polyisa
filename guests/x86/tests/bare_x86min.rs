@@ -6920,6 +6920,29 @@ fn cmp_m32_r32_sib_indexed() {
 }
 
 #[test]
+fn test_rm32_imm_memnd_sets_zf() {
+    // TESTL $0xFF,(%rbx) (F7 03 ...): [0x2000]=0x0F -> ZF=0、[0x2000]=0 -> ZF=1.
+    // tac 0x5b0ca8 対応.
+    let mut env = env();
+    env.map_rw(0x2000, 1).unwrap();
+    env.backend.set(Gpr(3).state(), 0x2000);
+    env.backend
+        .mem
+        .write(VirtAddr(0x2000), &0x0Fu32.to_le_bytes())
+        .unwrap();
+    env.step(|b| sem::test_rm32_imm_memnd(b, Gpr(3), 0xFF))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0);
+    env.backend
+        .mem
+        .write(VirtAddr(0x2000), &0u32.to_le_bytes())
+        .unwrap();
+    env.step(|b| sem::test_rm32_imm_memnd(b, Gpr(3), 0xFF))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0x40);
+}
+
+#[test]
 fn and_rm32_imm8_sib_indexed_rexx() {
     // ANDL $0,[RAX+R9*4] (42 83 24 88 00): head の停止点に対応。REX.X で R9 を指す.
     // RAX=0x2000、R9=0x10、[0x2040]=0xFF -> 0.
