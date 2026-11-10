@@ -4056,6 +4056,33 @@ pub fn div_rm32<B: Backend>(b: &mut B, eip: u32, rm: Gpr) -> Flow<B> {
     Ok(())
 }
 
+/// DIV EAX, m32 [base+disp8] (F7 /6 mod=01)。EDX:EAX を符号なし除算する.
+pub fn div_rm32_mem8<B: Backend>(b: &mut B, eip: u32, base: Gpr, disp: i8) -> Flow<B> {
+    let lo = read(b, Gpr(0));
+    let hi = read(b, Gpr(2));
+    let addr = eff_addr(b, base, disp);
+    let y: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let hi64 = b.zext::<W32, W64>(hi);
+    let shift = b.konst::<W64>(32);
+    let hi_sh = b.shl::<W64>(hi64, shift);
+    let lo64 = b.zext::<W32, W64>(lo);
+    let dvd = b.or::<W64>(hi_sh, lo64);
+    let dvs = b.zext::<W32, W64>(y);
+    let zero64 = b.konst::<W64>(0);
+    let is_zero = b.cmp::<W64>(Cmp::Eq, dvs, zero64);
+    b.if_then(is_zero, |b| Err(div0(b, eip)))?;
+    let q64 = b.udiv::<W64>(dvd, dvs);
+    let r64 = b.urem::<W64>(dvd, dvs);
+    let qhi = b.shr_l::<W64>(q64, shift);
+    let over = b.cmp::<W64>(Cmp::Ne, qhi, zero64);
+    b.if_then(over, |b| Err(div0(b, eip)))?;
+    let q32: B::V<W32> = b.trunc::<W64, W32>(q64);
+    let r32: B::V<W32> = b.trunc::<W64, W32>(r64);
+    write(b, Gpr(0), q32);
+    write(b, Gpr(2), r32);
+    Ok(())
+}
+
 /// IDIV EAX, ECX。EDX:EAX を符号付き除算し、商を EAX、剰余を EDX に置く。
 /// 0 除算と INT_MIN/(-1) の商あふれは DivZero で退出する。
 /// DIV r/m64 (REX.W + F7 /6)。RDX:RAX を符号なし除算し、商を RAX、剰余を RDX に置く.

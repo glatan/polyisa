@@ -813,6 +813,9 @@ fn fetch_len(
                     Some(4)
                 } else if has66 && md == 0 && reg == 0 && rm == 5 {
                     Some(8)
+                } else if md == 1 && reg == 6 && rm != 4 {
+                    // DIV r/m32 mod=01 [base+disp8] (3B: F7 /6 + ModRM + disp8).
+                    Some(3)
                 } else {
                     None
                 }
@@ -4683,6 +4686,7 @@ fn dispatch<B: Backend>(
                 sem::div_rm32(b, eip, rm())
             }
         }
+        Insn::DivRm32Mem8 => sem::div_rm32_mem8(b, eip, rm(), disp8()),
         Insn::IdivRm32 => sem::idiv_rm32(b, eip, rm()),
         Insn::Movsb => sem::rep_movsb(b, eip),
         Insn::Movsd => {

@@ -5025,3 +5025,29 @@ fn run_cmove_r64_sibd_moves_on_z() {
     })
     .unwrap();
 }
+
+#[test]
+fn run_div_rm32_mem8_quotient_remainder() {
+    // DIV EAX,[RDI+4] (F7 77 04) を32ビットで回す.
+    // EDX:EAX=17、[0x104]=5 -> EAX=3、EDX=2、eip は 0x1003 に進む.
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x0), 1, Perms::RW).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0xF7, 0x77, 0x04])
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x104), &5u32.to_le_bytes())
+        .unwrap();
+    env.backend.set(Gpr(7).state(), 0x100);
+    env.backend.set(Gpr(2).state(), 0);
+    env.backend.set(Gpr(0).state(), 17);
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x1003 });
+    assert_eq!(env.backend.get(Gpr(0).state()), 3);
+    assert_eq!(env.backend.get(Gpr(2).state()), 2);
+}

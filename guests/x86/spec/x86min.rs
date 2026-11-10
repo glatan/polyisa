@@ -894,6 +894,14 @@ pub fn build_model() -> polyisa_isadl::Model {
             "alu",
         ),
         (
+            "div_rm32_mem8",
+            "M8",
+            "11110111 01110... ........",
+            vec![wc("m8_rm", WhereOp::Ne, 4)],
+            "div eax, r/m32",
+            "div",
+        ),
+        (
             "add_r_mem32",
             "M32",
             "00000011 10...... ................................",
