@@ -4755,64 +4755,106 @@ fn rep_continue<B: Backend>(b: &mut B, eip: u32) -> Flow<B> {
 }
 
 /// REP MOVSB。1バイト転送して繰り返す。
+/// count==0 では何もせず Fallthrough (od 0x5ad076 対応)。
 pub fn rep_movsb<B: Backend>(b: &mut B, eip: u32) -> Flow<B> {
-    let src = read64(b, Gpr(6));
-    let dst = read64(b, Gpr(7));
-    let v: B::V<W8> = b.load::<W8>(src, DATA_READ)?;
-    b.store::<W8>(dst, v, DATA_WRITE)?;
-    bump64(b, Gpr(6), 1);
-    bump64(b, Gpr(7), 1);
-    rep_continue(b, eip)
+    let c = read64(b, Gpr(1));
+    let zero = b.konst::<W64>(0);
+    let active = b.cmp::<W64>(Cmp::Ne, c, zero);
+    b.if_then(active, |b| {
+        let src = read64(b, Gpr(6));
+        let dst = read64(b, Gpr(7));
+        let v: B::V<W8> = b.load::<W8>(src, DATA_READ)?;
+        b.store::<W8>(dst, v, DATA_WRITE)?;
+        bump64(b, Gpr(6), 1);
+        bump64(b, Gpr(7), 1);
+        rep_continue(b, eip)
+    })?;
+    Ok(())
 }
 
 /// REP MOVSD。4バイト転送して繰り返す。
+/// count==0 では何もせず Fallthrough。
 pub fn rep_movsd<B: Backend>(b: &mut B, eip: u32) -> Flow<B> {
-    let src = read64(b, Gpr(6));
-    let dst = read64(b, Gpr(7));
-    let v: B::V<W32> = b.load::<W32>(src, DATA_READ)?;
-    b.store::<W32>(dst, v, DATA_WRITE)?;
-    bump64(b, Gpr(6), 4);
-    bump64(b, Gpr(7), 4);
-    rep_continue(b, eip)
+    let c = read64(b, Gpr(1));
+    let zero = b.konst::<W64>(0);
+    let active = b.cmp::<W64>(Cmp::Ne, c, zero);
+    b.if_then(active, |b| {
+        let src = read64(b, Gpr(6));
+        let dst = read64(b, Gpr(7));
+        let v: B::V<W32> = b.load::<W32>(src, DATA_READ)?;
+        b.store::<W32>(dst, v, DATA_WRITE)?;
+        bump64(b, Gpr(6), 4);
+        bump64(b, Gpr(7), 4);
+        rep_continue(b, eip)
+    })?;
+    Ok(())
 }
 
 /// REP MOVSQ。8バイト転送して繰り返す（REX.W）。
+/// count==0 では何もせず Fallthrough。
 pub fn rep_movsq<B: Backend>(b: &mut B, eip: u32) -> Flow<B> {
-    let src = read64(b, Gpr(6));
-    let dst = read64(b, Gpr(7));
-    let v: B::V<W64> = b.load::<W64>(src, DATA_READ)?;
-    b.store::<W64>(dst, v, DATA_WRITE)?;
-    bump64(b, Gpr(6), 8);
-    bump64(b, Gpr(7), 8);
-    rep_continue(b, eip)
+    let c = read64(b, Gpr(1));
+    let zero = b.konst::<W64>(0);
+    let active = b.cmp::<W64>(Cmp::Ne, c, zero);
+    b.if_then(active, |b| {
+        let src = read64(b, Gpr(6));
+        let dst = read64(b, Gpr(7));
+        let v: B::V<W64> = b.load::<W64>(src, DATA_READ)?;
+        b.store::<W64>(dst, v, DATA_WRITE)?;
+        bump64(b, Gpr(6), 8);
+        bump64(b, Gpr(7), 8);
+        rep_continue(b, eip)
+    })?;
+    Ok(())
 }
 
 /// REP STOSB。AL を1バイト格納して繰り返す。
+/// count==0 では何もせず Fallthrough (od 0x5ad076 対応)。
 pub fn rep_stosb<B: Backend>(b: &mut B, eip: u32) -> Flow<B> {
-    let dst = read64(b, Gpr(7));
-    let eax = read(b, Gpr(0));
-    let al: B::V<W8> = b.trunc::<W32, W8>(eax);
-    b.store::<W8>(dst, al, DATA_WRITE)?;
-    bump64(b, Gpr(7), 1);
-    rep_continue(b, eip)
+    let c = read64(b, Gpr(1));
+    let zero = b.konst::<W64>(0);
+    let active = b.cmp::<W64>(Cmp::Ne, c, zero);
+    b.if_then(active, |b| {
+        let dst = read64(b, Gpr(7));
+        let eax = read(b, Gpr(0));
+        let al: B::V<W8> = b.trunc::<W32, W8>(eax);
+        b.store::<W8>(dst, al, DATA_WRITE)?;
+        bump64(b, Gpr(7), 1);
+        rep_continue(b, eip)
+    })?;
+    Ok(())
 }
 
 /// REP STOSD。EAX を4バイト格納して繰り返す。
+/// count==0 では何もせず Fallthrough。
 pub fn rep_stosd<B: Backend>(b: &mut B, eip: u32) -> Flow<B> {
-    let dst = read64(b, Gpr(7));
-    let v = read(b, Gpr(0));
-    b.store::<W32>(dst, v, DATA_WRITE)?;
-    bump64(b, Gpr(7), 4);
-    rep_continue(b, eip)
+    let c = read64(b, Gpr(1));
+    let zero = b.konst::<W64>(0);
+    let active = b.cmp::<W64>(Cmp::Ne, c, zero);
+    b.if_then(active, |b| {
+        let dst = read64(b, Gpr(7));
+        let v = read(b, Gpr(0));
+        b.store::<W32>(dst, v, DATA_WRITE)?;
+        bump64(b, Gpr(7), 4);
+        rep_continue(b, eip)
+    })?;
+    Ok(())
 }
 
 /// REP STOSQ。RAX を8バイト格納して繰り返す（REX.W）。
+/// count==0 では何もせず Fallthrough。
 pub fn rep_stosq<B: Backend>(b: &mut B, eip: u32) -> Flow<B> {
-    let dst = read64(b, Gpr(7));
-    let v = read64(b, Gpr(0));
-    b.store::<W64>(dst, v, DATA_WRITE)?;
-    bump64(b, Gpr(7), 8);
-    rep_continue(b, eip)
+    let c = read64(b, Gpr(1));
+    let zero = b.konst::<W64>(0);
+    let active = b.cmp::<W64>(Cmp::Ne, c, zero);
+    b.if_then(active, |b| {
+        let dst = read64(b, Gpr(7));
+        let v = read64(b, Gpr(0));
+        b.store::<W64>(dst, v, DATA_WRITE)?;
+        bump64(b, Gpr(7), 8);
+        rep_continue(b, eip)
+    })?;
+    Ok(())
 }
 
 /// MOVSB 単発。F3 なしの1バイト転送（RCX を触らず分岐しない）。

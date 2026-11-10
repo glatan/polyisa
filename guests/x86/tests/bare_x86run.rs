@@ -672,6 +672,45 @@ fn run_rep_movsb() {
 }
 
 #[test]
+fn run_rep_stosb_zero_count() {
+    // run 経由で F3 AA (REP STOSB) を RCX=0 で回す。od 0x5ad076 対応.
+    // RDI=0x2000、[0x2000]=0x00、AL=0xFF、RCX=0 -> [0x2000]==0x00、exit(0)。
+    // 旧実装は1バイト格納して 2^64 回ループし step limit になった.
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(7).state(), 0x2000);
+    env.backend.set(Gpr(1).state(), 0);
+    env.backend.set(Gpr(0).state(), 0xFF);
+    env.backend.mem.write(VirtAddr(0x2000), &[0u8]).unwrap();
+    let prog: &[u8] = &[
+        0xF3, 0xAA, // rep stosb (何もしない)
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
+        0x0F, 0x05, // syscall -> exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0));
+    let mut back = [0u8; 1];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x2000),
+            &mut back,
+            polyisa_mem::Access {
+                endian: polyisa_mem::Endian::Le,
+                align: polyisa_mem::Align::Unaligned,
+                kind: polyisa_mem::AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(back, [0u8]);
+}
+
+#[test]
 fn run_sib_generic_regs() {
     // SIB 汎用形（base=EBX、index=ECX、dst=EDX）を run 経由で回す。
     // mov eax,0x1500; push eax; pop ebx (ebx=0x1500);

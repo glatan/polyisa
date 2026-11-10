@@ -1246,6 +1246,37 @@ fn rep_stosd_roundtrip() {
 }
 
 #[test]
+fn rep_stosb_zero_count_skips() {
+    // REP STOSB count==0 では格納せず Fallthrough。od 0x5ad076 対応.
+    // RDI=0x300、[0x300]=0x00、AL=0xFF、RCX=0 -> [0x300]==0x00、RCX==0、RDI 不変.
+    let mut env = env();
+    env.map_rw(0, 1).unwrap();
+    env.backend.set(Gpr(7).state(), 0x300);
+    env.backend.set(Gpr(1).state(), 0);
+    env.backend.set(Gpr(0).state(), 0xFF);
+    env.backend.mem.write(VirtAddr(0x300), &[0u8]).unwrap();
+    env.backend.set(sem::eip_ref(), 0x1000);
+    env.step(|b| sem::rep_stosb(b, 0x1000)).unwrap();
+    let mut back = [0u8; 1];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x300),
+            &mut back,
+            Access {
+                endian: Endian::Le,
+                align: Align::Unaligned,
+                kind: AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(back, [0u8]);
+    assert_eq!(env.backend.get(Gpr(1).state()), 0);
+    assert_eq!(env.backend.get(Gpr(7).state()), 0x300);
+    assert_eq!(env.backend.get(sem::eip_ref()), 0x1000);
+}
+
+#[test]
 fn mem_base_generic_roundtrip() {
     // ModRM base 汎用形：EBP 基底・ECX 転送先でも往復する。
     let mut env = env();
