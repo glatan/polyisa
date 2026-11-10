@@ -12956,6 +12956,26 @@ pub fn cmp_rm32_imm_memnd<B: Backend>(b: &mut B, base: Gpr, imm: u32) -> Flow<B>
     Ok(())
 }
 
+/// CMP m32,imm32 [base+disp8] (81 /7 mod=01)。dst は変えず 6 旗を更新する.
+pub fn cmp_rm32_imm_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8, imm: u32) -> Flow<B> {
+    let addr = eff_addr(b, base, disp);
+    let x: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let y = b.konst::<W32>(imm);
+    let v = b.sub::<W32>(x, y);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
+/// CMP m32,imm32 [base+disp32] (81 /7 mod=10)。dst は変えず 6 旗を更新する.
+pub fn cmp_rm32_imm_mem32<B: Backend>(b: &mut B, base: Gpr, disp: i32, imm: u32) -> Flow<B> {
+    let addr = eff_addr32(b, base, disp);
+    let x: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let y = b.konst::<W32>(imm);
+    let v = b.sub::<W32>(x, y);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
 /// CMP m64,imm32 [base] (81 /7 mod=00、REX.W)。imm32 は符号拡張する.
 pub fn cmp_rm64_imm_memnd<B: Backend>(b: &mut B, base: Gpr, imm: u32) -> Flow<B> {
     let addr = read64(b, base);

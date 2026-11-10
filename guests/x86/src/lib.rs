@@ -76,7 +76,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数117件。
-        assert_eq!(INSNS.len(), 592);
+        assert_eq!(INSNS.len(), 594);
     }
 
     #[test]
@@ -234,6 +234,18 @@ mod tests {
         assert_eq!(decode(0x81EB00000000, 48), Some(Insn::SubRm32Imm));
         // CMP r/m,imm32 (81 /7)。
         assert_eq!(decode(0x81FB00000000, 48), Some(Insn::CmpRm32Imm));
+        // CMP m32,imm32 mod=01 [base+disp8] (81 /7)。81 7D 08 + imm32.
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x817D0800000000, 56), Some(Insn::CmpRm32ImmMem8));
+        assert_eq!(decode(0x817D0800000000, 48), None);
+        // CMP m32,imm32 mod=10 [base+disp32] (81 /7)。ls -l 0x429bda 対応.
+        // 81 BD 00 FF FF FF 54 5A 69 66 は [RBP-0x100]==0x66695A54 比較.
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(
+            decode(0x81BD00FFFFFF545A6966, 80),
+            Some(Insn::CmpRm32ImmMem32)
+        );
+        assert_eq!(decode(0x81BD00FFFFFF545A6966, 64), None);
         // ADD/OR/ADC/SBB/AND/XOR r/m,imm32 (81 /0-6)。64ビット版は REX.W を付ける.
         assert_eq!(decode(0x81C300000000, 48), Some(Insn::AddRm32Imm));
         assert_eq!(decode(0x4881C300000000, 56), Some(Insn::AddRm64Imm));

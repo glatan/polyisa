@@ -4199,6 +4199,20 @@ fn dispatch<B: Backend>(
                 sem::cmp_rm32_imm_memnd(b, rm(), imm)
             }
         }
+        Insn::CmpRm32ImmMem8 => {
+            // 81 /7 mod=01 [base+disp8],imm32 (56b)。disp は (word>>32) 下位8、imm は下位32 LE.
+            let d8 = ((word >> 32) & 0xff) as u8 as i8;
+            let imm = ((word & 0xffff_ffff) as u32).swap_bytes();
+            // REX.W の64bit比較は未対応のため32bitで比較する（試作）。
+            sem::cmp_rm32_imm_mem8(b, rm(), d8, imm)
+        }
+        Insn::CmpRm32ImmMem32 => {
+            // 81 /7 mod=10 [base+disp32],imm32 (80b)。disp は (word>>32) 上位32 LE、imm は下位32 LE.
+            // word組立は opcode上位詰めのため disp は上位32、imm は下位32.
+            let disp = ((word >> 32) as u32).swap_bytes() as i32;
+            let imm = ((word & 0xffff_ffff) as u32).swap_bytes();
+            sem::cmp_rm32_imm_mem32(b, rm(), disp, imm)
+        }
         Insn::AddRRip => {
             if rex_w {
                 sem::add_r64_rip(b, reg(), eip as u64 + nbytes, disp32())

@@ -2499,6 +2499,22 @@ fn cmp_rm32_imm_memnd_sets_flags() {
 }
 
 #[test]
+fn cmp_rm32_imm_mem32_sets_flags() {
+    // CMP [RBP-0x100],0x66695A54: ls -l 0x429bda 対応。等しければ ZF=1.
+    let mut env = env();
+    env.map_rw(0, 2).unwrap();
+    env.backend.set(Gpr(5).state(), 0x100);
+    env.backend
+        .mem
+        .write(VirtAddr(0), &0x66695A54u32.to_le_bytes())
+        .unwrap();
+    env.backend.set(sem::eflags_ref(), 0);
+    env.step(|b| sem::cmp_rm32_imm_mem32(b, Gpr(5), -0x100, 0x66695A54))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0x40);
+}
+
+#[test]
 fn cvtsi2sd_xmm_m32_mem8_converts() {
     use polyisa_guest_x86::sem::Xmm;
     // CVTSI2SD xmm0,[RBX]: [0x100]=5 -> xmm0 下位=5.0、上位保持.

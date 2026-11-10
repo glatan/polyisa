@@ -5374,6 +5374,36 @@ fn run_cmp_rm32_imm_memnd_sets_zf() {
 }
 
 #[test]
+fn run_cmp_rm32_imm_mem32_sets_zf() {
+    // CMPL $0x66695A54,-0x100(%RBP) (81 BD 00 FF FF FF 54 5A 69 66) を回す。ls -l 対応.
+    // RBP=0x2000、[0x1F00]=0x66695A54 -> ZF=1、eip は 0x100A に進む.
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x1000),
+            &[0x81, 0xBD, 0x00, 0xFF, 0xFF, 0xFF, 0x54, 0x5A, 0x69, 0x66],
+        )
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1F00), &0x66695A54u32.to_le_bytes())
+        .unwrap();
+    env.backend.set(Gpr(5).state(), 0x2000);
+    env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 0);
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x100A });
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x40,
+        0x40
+    );
+}
+
+#[test]
 fn run_cvtsi2sd_m32_mem8_converts() {
     // CVTSI2SDL -0x34(%RBX),%xmm0 (F2 0F 2A 43 CC) を64ビットで回す.
     // RBX=0x100、[0xCC]=5 -> xmm0 下位=5.0、eip は 0x1005 に進む.
