@@ -1410,6 +1410,8 @@ pub fn run_mode(
                     | Insn::MovqR64Xmm
                     | Insn::MovupsLoadXmm
                     | Insn::MovupsStoreXmm
+                    // MOVAPD (66 0F 28) は MOVAPS と等価のため Insn を共用する.
+                    | Insn::MovapsLoadXmm
                     | Insn::MovupsLoadMemnd
                     | Insn::MovupsStoreMemnd
                     | Insn::MovupsLoadMem8
