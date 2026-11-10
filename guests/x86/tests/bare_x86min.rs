@@ -6717,6 +6717,32 @@ fn inc_r32_mem8_no_index() {
 }
 
 #[test]
+fn inc_r32_rip_basic() {
+    // INCL 0xb4bde(%rip) (FF 05 DE 4B 0B 00): sed 0x5bdcc0 対応。[0x2000]=0 -> 1.
+    let mut env = env();
+    env.map_rw(0x2000, 1).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2000), &0u32.to_le_bytes())
+        .unwrap();
+    env.step(|b| sem::inc_r32_rip(b, 0x1FF7, 9)).unwrap();
+    let mut back = [0u8; 4];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x2000),
+            &mut back,
+            Access {
+                endian: Endian::Le,
+                align: Align::Unaligned,
+                kind: AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(u32::from_le_bytes(back), 1);
+}
+
+#[test]
 fn dec_r32_mem8_no_index() {
     // DECL 0x0C(%rsp) (FF 4C 24 0C): no_index 経路。RSP=0x2000、[0x200C]=1 -> 0.
     // CF は保存される。

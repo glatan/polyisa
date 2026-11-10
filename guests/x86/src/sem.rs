@@ -1916,6 +1916,27 @@ pub fn inc_r32_sibd<B: Backend>(b: &mut B, base: Gpr, idx: Gpr, shift: u32, disp
     Ok(())
 }
 
+/// INC m32 [RIP+disp32] (FF /0 mod=00 rm=101)。sed 0x5bdcc0 対応.
+pub fn inc_r32_rip<B: Backend>(b: &mut B, next_rip: u64, disp: i32) -> Flow<B> {
+    let cf_mask = b.konst::<W32>(FLAG_CF);
+    let all_flags = b.get(eflags_ref());
+    let saved_cf = b.and::<W32>(all_flags, cf_mask);
+    let base = b.konst::<W64>(next_rip);
+    let d = b.konst::<W64>(disp as i64 as u64);
+    let addr = b.add::<W64>(base, d);
+    let x: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let one = b.konst::<W32>(1);
+    let v = b.add::<W32>(x, one);
+    b.store::<W32>(addr, v, DATA_WRITE)?;
+    update_add_flags(b, x, one, v);
+    let f = b.get(eflags_ref());
+    let not_cf = b.konst::<W32>(!FLAG_CF);
+    let cleared = b.and::<W32>(f, not_cf);
+    let restored = b.or::<W32>(cleared, saved_cf);
+    b.set(eflags_ref(), restored);
+    Ok(())
+}
+
 /// DEC m32 [base+disp8] (FF /1 mod=01)。CF 以外の 5 旗を更新する（CF は保存）。
 pub fn dec_r32_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8) -> Flow<B> {
     let cf_mask = b.konst::<W32>(FLAG_CF);

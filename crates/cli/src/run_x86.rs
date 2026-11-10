@@ -1903,6 +1903,10 @@ fn dispatch<B: Backend>(
             // FF /0 mod=01 [base+disp8] (SIBなし)。CF 以外の 5 旗を更新する.
             sem::inc_r32_mem8(b, rm(), disp8())
         }
+        Insn::IncRmRip => {
+            // FF /0 mod=00 rm=101 [RIP+disp32]。sed 0x5bdcc0 対応.
+            sem::inc_r32_rip(b, eip as u64 + nbytes, disp32())
+        }
         Insn::DecRmMem8 => {
             // FF /1 mod=01 [base+disp8] (SIBなし)。CF 以外の 5 旗を更新する.
             sem::dec_r32_mem8(b, rm(), disp8())

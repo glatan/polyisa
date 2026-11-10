@@ -379,6 +379,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("dec_rm_sibd", "S8", "11111111 01001100 ........ ........", "dec r/m", "alu"),
         // INC m32 [base+disp8] (FF /0 mod=01、SIBなし)。
         ("inc_rm_mem8", "M8", "11111111 01000... ........", "inc r/m", "alu"),
+        // INC m32 [RIP+disp32] (FF /0 mod=00 rm=101)。sed 0x5bdcc0 対応.
+        ("inc_rm_rip", "F1", "11111111 00000101 ................................", "inc r/m", "alu"),
         // DEC m32 [base+disp8] (FF /1 mod=01、SIBなし)。
         ("dec_rm_mem8", "M8", "11111111 01001... ........", "dec r/m", "alu"),
         // OR r8,m8 SIB mod=01 [base+index*scale+disp8] (0A /r)。dst は reg.
