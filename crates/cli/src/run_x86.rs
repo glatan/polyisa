@@ -8810,6 +8810,36 @@ impl TrapHandler for CliLinux {
                 }
             };
         }
+        if nr == polyisa_os_linux::x86_64::RENAME && self.is64
+            || nr == polyisa_os_linux::i386::RENAME && !self.is64
+        {
+            // rename(oldpath, newpath)。ホストの rename に直結する.
+            let old_addr = get64(env, r_a);
+            let new_addr = get64(env, r_b);
+            let old_path = match guest_c_string(env, old_addr) {
+                Some(p) => p,
+                None => return TrapOutcome::Unimplemented,
+            };
+            let new_path = match guest_c_string(env, new_addr) {
+                Some(p) => p,
+                None => return TrapOutcome::Unimplemented,
+            };
+            return match std::fs::rename(&old_path, &new_path) {
+                Ok(()) => {
+                    set64(env, Gpr(0), 0);
+                    TrapOutcome::Handled
+                }
+                Err(e) => {
+                    let no = match e.kind() {
+                        std::io::ErrorKind::NotFound => ENOENT,
+                        std::io::ErrorKind::PermissionDenied => EACCES,
+                        _ => EINVAL,
+                    };
+                    set64(env, Gpr(0), neg(no));
+                    TrapOutcome::Handled
+                }
+            };
+        }
         if nr == polyisa_os_linux::x86_64::RMDIR && self.is64
             || nr == polyisa_os_linux::i386::RMDIR && !self.is64
         {
@@ -10152,6 +10182,58 @@ mod tests {
         assert_eq!(neg_errno(22), 0xFFFF_FFEAu32);
         assert_eq!(neg_errno64(22), 0xFFFF_FFFF_FFFF_FFEAu64);
         assert_eq!(neg_errno64(0), 0);
+    }
+
+    #[test]
+    fn rename_roundtrip() {
+        // rename(old, new) は移動して 0 を返す。mv で使う.
+        use polyisa_os_linux::x86_64 as abi;
+        let mut sys = CliLinux::x86_64();
+        let mut env = bare();
+        let old = format!("/tmp/polyisa_rename_old_{}", std::process::id());
+        let new = format!("/tmp/polyisa_rename_new_{}", std::process::id());
+        let _ = std::fs::remove_file(&new);
+        std::fs::write(&old, b"data").unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x100), old.as_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x100 + old.len() as u64), &[0])
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x200), new.as_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x200 + new.len() as u64), &[0])
+            .unwrap();
+        // rename(old, new) -> 0、old は消えて new ができる.
+        set64(&mut env, Gpr(0), abi::RENAME);
+        set64(&mut env, Gpr(7), 0x100);
+        set64(&mut env, Gpr(6), 0x200);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        assert!(std::fs::metadata(&old).is_err());
+        assert_eq!(std::fs::read(&new).unwrap(), b"data");
+        // 存在しない old は ENOENT。
+        let missing = format!("/tmp/polyisa_rename_missing_{}", std::process::id());
+        env.backend
+            .mem
+            .write(VirtAddr(0x100), missing.as_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x100 + missing.len() as u64), &[0])
+            .unwrap();
+        set64(&mut env, Gpr(0), abi::RENAME);
+        set64(&mut env, Gpr(7), 0x100);
+        set64(&mut env, Gpr(6), 0x200);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(ENOENT));
+        let _ = std::fs::remove_file(&new);
     }
 
     #[test]
