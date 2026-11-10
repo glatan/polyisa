@@ -7020,6 +7020,33 @@ fn cmp_r32_sib_no_index() {
 }
 
 #[test]
+fn cmovne_r64_rip_takes() {
+    // CMOVNE RAX,[RIP+0xFF7] (48 0F 45 05 ... は REX 剥がし済み)。ln 0x5a9e44 対応.
+    // ZF=0 -> RAX=[0x2000]、ZF=1 -> RAX 維持.
+    let mut env = env();
+    env.map_rw(0x2000, 1).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2000), &0x1122_3344_5566_7788u64.to_le_bytes())
+        .unwrap();
+    env.backend.set(sem::eflags_ref(), 0);
+    env.step(|b| sem::cmovne_r64_rip(b, Gpr(0), 0x1009, 0xFF7))
+        .unwrap();
+    let v = sem::read64(&mut env.backend, Gpr(0));
+    assert_eq!(v, 0x1122_3344_5566_7788);
+    env.backend.set(sem::eflags_ref(), 0x40);
+    env.step(|b| {
+        sem::write64(b, Gpr(0), 0xAA);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::cmovne_r64_rip(b, Gpr(0), 0x1009, 0xFF7))
+        .unwrap();
+    let v = sem::read64(&mut env.backend, Gpr(0));
+    assert_eq!(v, 0xAA);
+}
+
+#[test]
 fn and_rm32_imm8_sib_indexed_rexx() {
     // ANDL $0,[RAX+R9*4] (42 83 24 88 00): head の停止点に対応。REX.X で R9 を指す.
     // RAX=0x2000、R9=0x10、[0x2040]=0xFF -> 0.

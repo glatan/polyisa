@@ -11413,6 +11413,55 @@ pub fn cmove_r32_abs<B: Backend>(b: &mut B, dst: Gpr, addr32: u32) -> Flow<B> {
     Ok(())
 }
 
+/// CMOVNE r64, m64 [RIP+disp32] (0F 45 /r RIP、REX.W)。ZF=0 なら移す.
+pub fn cmovne_r64_rip<B: Backend>(b: &mut B, dst: Gpr, next_rip: u64, disp: i32) -> Flow<B> {
+    let base = b.konst::<W64>(next_rip);
+    let d = b.konst::<W64>(disp as i64 as u64);
+    let addr = b.add::<W64>(base, d);
+    let srcv: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let zf = read_zf(b);
+    let zero = b.konst::<W32>(0);
+    let one = b.konst::<W32>(1);
+    let zf_n = b.select::<W32>(zf, one, zero);
+    let take = b.cmp::<W32>(Cmp::Eq, zf_n, zero);
+    let dstv = read64(b, dst);
+    let v = b.select::<W64>(take, srcv, dstv);
+    write64(b, dst, v);
+    Ok(())
+}
+
+/// CMOVNE r32, m32 [RIP+disp32]。ZF=0 なら移す.
+pub fn cmovne_r32_rip<B: Backend>(b: &mut B, dst: Gpr, next_rip: u64, disp: i32) -> Flow<B> {
+    let base = b.konst::<W64>(next_rip);
+    let d = b.konst::<W64>(disp as i64 as u64);
+    let addr = b.add::<W64>(base, d);
+    let srcv: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let zf = read_zf(b);
+    let zero = b.konst::<W32>(0);
+    let one = b.konst::<W32>(1);
+    let zf_n = b.select::<W32>(zf, one, zero);
+    let take = b.cmp::<W32>(Cmp::Eq, zf_n, zero);
+    let dstv = read(b, dst);
+    let v = b.select::<W32>(take, srcv, dstv);
+    write(b, dst, v);
+    Ok(())
+}
+
+/// CMOVNE r32, m32 [disp32] abs (32ビット)。
+pub fn cmovne_r32_abs<B: Backend>(b: &mut B, dst: Gpr, addr32: u32) -> Flow<B> {
+    let addr = b.konst::<W64>(addr32 as u64);
+    let srcv: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let zf = read_zf(b);
+    let zero = b.konst::<W32>(0);
+    let one = b.konst::<W32>(1);
+    let zf_n = b.select::<W32>(zf, one, zero);
+    let take = b.cmp::<W32>(Cmp::Eq, zf_n, zero);
+    let dstv = read(b, dst);
+    let v = b.select::<W32>(take, srcv, dstv);
+    write(b, dst, v);
+    Ok(())
+}
+
 /// CALL r/m64 [base+disp32] (FF /2 mod=10)。リターン先を積んで間接ジャンプ.
 pub fn call_r64_mem32<B: Backend>(b: &mut B, eip_next: u64, base: Gpr, disp: i32) -> Flow<B> {
     let addr = eff_addr32(b, base, disp);

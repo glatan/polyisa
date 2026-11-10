@@ -76,7 +76,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数117件。
-        assert_eq!(INSNS.len(), 624);
+        assert_eq!(INSNS.len(), 625);
     }
 
     #[test]
@@ -442,6 +442,11 @@ mod tests {
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x030C9F, 24), Some(Insn::AddRSib));
         assert_eq!(decode(0x030C9F, 8), None);
+        // CMOVNE r64/r32, m64/m32 [RIP+disp32] (0F 45 05 + disp32)。ln 0x5a9e44 対応.
+        // 48 0F 45 05 34 00 0C 00 は REX.W 剥がし済み.
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x0F450534000C00, 56), Some(Insn::CmovneRip));
+        assert_eq!(decode(0x0F450534000C00, 48), None);
         // XOR r8,[base] (32 /r mod=00)。32 06 は XOR AL,[RSI].
         // cksum 0x5c7fc7 対応.
         // Ref: SPEC-X86-INTEL-SDM (v093).

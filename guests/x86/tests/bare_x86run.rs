@@ -4689,6 +4689,34 @@ fn run_cmp_r_sib_no_index() {
 }
 
 #[test]
+fn run_cmovne_r64_rip() {
+    // run 経由で 48 0F 45 1D F9 0F 00 00 (CMOVNE RBX,[RIP+0xFF9]) を回す。ln 0x5a9e44 対応.
+    // [0x2000]=0x1122334455667788、RBX=0、ZF=0 -> RBX=[0x2000]、exit(0)。RBX は exit 系列で潰れない.
+    // RIP=0x1008 が next_rip.
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2000), &0x1122_3344_5566_7788u64.to_le_bytes())
+        .unwrap();
+    env.backend.set(Gpr(3).state(), 0);
+    let prog: &[u8] = &[
+        0x48, 0x0F, 0x45, 0x1D, 0xF8, 0x0F, 0x00, 0x00, // cmovne rbx,[rip+0xFF8] -> [0x2000]
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
+        0x0F, 0x05, // syscall -> exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0));
+    let v = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(3));
+    assert_eq!(v, 0x1122_3344_5566_7788);
+}
+
+#[test]
 fn run_sub_m8_r8_reg_direct() {
     // run 経由で 28 D1 (SUB CL,DL) を回す。
     // ECX=5、EDX=3 -> CL=2、exit(0)。
