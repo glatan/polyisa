@@ -3310,6 +3310,28 @@ fn run_add_rm16_imm() {
 }
 
 #[test]
+fn run_and_rm16_imm() {
+    // run 経由で 66 81 E2 FF 08 (ANDW $0x08ff,%dx) を回す。seq の停止点 0x40b7f1 に対応.
+    // EDX=0x1234FFFF -> EDX=0x123408FF になり、exit(0)。mov は EDX を変えない.
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(2).state(), 0x1234_FFFF);
+    let prog: &[u8] = &[
+        0x66, 0x81, 0xE2, 0xFF, 0x08, // andw $0x08ff,%dx
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
+        0x0F, 0x05, // syscall -> exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0));
+    assert_eq!(env.backend.get(Gpr(2).state()), 0x1234_08FF);
+}
+
+#[test]
 fn run_and_ax_imm16() {
     // run 経由で 66 25 00 0C (ANDW $0x0c00,%ax) を回す。seq の停止点 0x476e57 に対応.
     // EAX=0x1234037F -> EAX=0x12340000。exit 系列で EAX が潰れるため [0x2000] に退避して検証.

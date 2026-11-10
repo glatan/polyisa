@@ -642,6 +642,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("cmp_ax_imm16", "F1", "00111101 ................", "cmp ax, {imm}", "alu"),
         // ADD r/m16,imm16 (66 81 /0 mod=11)。66 接頭辞は実行側で剥がす.
         ("add_rm16_imm", "F1", "10000001 11000... ................", "add r/m16, {imm}", "alu"),
+        // AND r/m16,imm16 (66 81 /4 mod=11)。66 接頭辞は実行側で剥がす.
+        ("and_rm16_imm", "F1", "10000001 11100... ................", "and r/m16, {imm}", "alu"),
         // ADD r32, m32 (03 /r)。RIP/abs のみ。REX.W で64ビット.
         ("add_r_rip", "F1", "00000011 00...101 ................................", "add r, [rip]", "alu"),
         // CMP [RIP+disp32],imm8 (83 3D + disp32 + imm8)。64ビット RIP相対.

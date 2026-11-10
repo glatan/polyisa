@@ -4616,6 +4616,22 @@ fn add_rm16_imm_adds() {
 }
 
 #[test]
+fn and_rm16_imm_masks() {
+    // AND DX,0x08FF (66 81 /4): EDX=0x1234FFFF -> EDX=0x123408FF、ZF=0.
+    // seq の停止点 0x40b7f1 に対応。上位16ビットは保持.
+    let mut env = env();
+    env.backend.set(Gpr(2).state(), 0x1234_FFFF);
+    env.step(|b| sem::and_rm16_imm(b, Gpr(2), 0x08FF)).unwrap();
+    assert_eq!(env.backend.get(Gpr(2).state()), 0x1234_08FF);
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0);
+    // DX=0 & 0x08FF = 0 -> ZF=1.
+    env.backend.set(Gpr(2).state(), 0);
+    env.step(|b| sem::and_rm16_imm(b, Gpr(2), 0x08FF)).unwrap();
+    assert_eq!(env.backend.get(Gpr(2).state()), 0);
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0x40);
+}
+
+#[test]
 fn imul_r64_basic() {
     // IMUL RAX,RDX (REX.W): RAX=3, RDX=7 -> 21.
     let mut env = env();
