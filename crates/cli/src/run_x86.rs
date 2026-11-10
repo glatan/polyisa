@@ -8073,6 +8073,27 @@ impl TrapHandler for CliLinux {
             set64(env, Gpr(0), 0);
             return TrapOutcome::Handled;
         }
+        if nr == polyisa_os_linux::x86_64::FCNTL && self.is64
+            || nr == polyisa_os_linux::i386::FCNTL && !self.is64
+        {
+            // fcntl(fd, cmd, ...)。試作では 0/1/2 と opened fd に対して 0 を返す.
+            // printf の stdout 設定などで呼ばれる。複製やロックは行わない.
+            let fd = get64(env, r_a) as u32;
+            let valid = fd == 0
+                || fd == 1
+                || fd == 2
+                || self
+                    .fds
+                    .get(fd.wrapping_sub(3) as usize)
+                    .and_then(|f| f.as_ref())
+                    .is_some();
+            if !valid {
+                set64(env, Gpr(0), neg(EBADF));
+                return TrapOutcome::Handled;
+            }
+            set64(env, Gpr(0), 0);
+            return TrapOutcome::Handled;
+        }
         if nr == n_brk {
             use polyisa_mem::{PAGE_SIZE, Perms, VirtAddr};
             let addr = get64(env, r_a);
@@ -8770,6 +8791,25 @@ mod tests {
         set64(&mut env, Gpr(2), 0x100);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(ENOTTY));
+    }
+
+    #[test]
+    fn fcntl_stdout_returns_zero() {
+        use polyisa_os_linux::x86_64 as abi;
+        let mut sys = CliLinux::x86_64();
+        let mut env = bare();
+        // fcntl(1, F_GETFL) は 0 を返して継続する。printf の stdout 設定で使う.
+        set64(&mut env, Gpr(0), abi::FCNTL);
+        set64(&mut env, Gpr(7), 1);
+        set64(&mut env, Gpr(6), 3);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        // 不正 fd は EBADF。
+        set64(&mut env, Gpr(0), abi::FCNTL);
+        set64(&mut env, Gpr(7), 99);
+        set64(&mut env, Gpr(6), 3);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EBADF));
     }
 
     #[test]
