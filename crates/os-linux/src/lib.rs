@@ -128,6 +128,7 @@ pub mod x86_64 {
     pub const CHMOD: u64 = 90;
     pub const FCHMOD: u64 = 91;
     pub const FCHMODAT: u64 = 268;
+    pub const UMASK: u64 = 95;
 }
 
 /// 段階4の準備としての i386 番号表（Linux・32ビット）。
@@ -190,6 +191,7 @@ pub mod i386 {
     pub const CHMOD: u64 = 15;
     pub const FCHMOD: u64 = 94;
     pub const FCHMODAT: u64 = 306;
+    pub const UMASK: u64 = 60;
 }
 
 /// ABI と番号から名前を引く。段階1の範囲と x86_64・i386 の番号表のみ。
@@ -292,6 +294,7 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             i386::CHMOD => Some("chmod"),
             i386::FCHMOD => Some("fchmod"),
             i386::FCHMODAT => Some("fchmodat"),
+            i386::UMASK => Some("umask"),
             _ => None,
         },
         GuestAbi::X86_64Linux => match nr {
@@ -349,6 +352,7 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             x86_64::CHMOD => Some("chmod"),
             x86_64::FCHMOD => Some("fchmod"),
             x86_64::FCHMODAT => Some("fchmodat"),
+            x86_64::UMASK => Some("umask"),
             _ => None,
         },
         GuestAbi::Unknown => None,

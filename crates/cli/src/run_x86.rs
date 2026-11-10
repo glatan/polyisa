@@ -7223,6 +7223,8 @@ pub struct CliLinux {
     std_files: [Option<std::fs::File>; 3],
     /// 標準 fd の閉鎖状態。初期 (stdio 接続) は false。close で true になる.
     std_closed: [bool; 3],
+    /// ファイル作成マスク。umask で更新する。初期値は 022.
+    umask: u32,
     is64: bool,
     /// プログラムブレーク（ヒープ末尾）。0 は未初期化。
     /// `run_image_x86_64` がロード後に像末尾へ進める。
@@ -7244,13 +7246,17 @@ pub struct CliLinux {
 impl CliLinux {
     /// i386 用ハンドラ。
     pub fn i386() -> Self {
-        Self::default()
+        Self {
+            umask: 0o22,
+            ..Self::default()
+        }
     }
 
     /// x86-64 用ハンドラ。
     pub fn x86_64() -> Self {
         Self {
             is64: true,
+            umask: 0o22,
             ..Self::default()
         }
     }
@@ -8982,6 +8988,17 @@ impl TrapHandler for CliLinux {
             set64(env, Gpr(0), 0);
             return TrapOutcome::Handled;
         }
+        if nr == polyisa_os_linux::x86_64::UMASK && self.is64
+            || nr == polyisa_os_linux::i386::UMASK && !self.is64
+        {
+            // umask(mask)。旧マスクを返して更新する。mkdir -p の保存・復元で使う.
+            // ホストの umask は触らない.
+            let mask = get64(env, r_a) as u32 & 0o777;
+            let old = self.umask;
+            self.umask = mask;
+            set64(env, Gpr(0), u64::from(old));
+            return TrapOutcome::Handled;
+        }
         if nr == polyisa_os_linux::x86_64::FCNTL && self.is64
             || nr == polyisa_os_linux::i386::FCNTL && !self.is64
         {
@@ -10052,6 +10069,25 @@ mod tests {
         set64(&mut env, Gpr(7), 0x100);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), 0);
+    }
+
+    #[test]
+    fn umask_roundtrip() {
+        // umask(mask) は旧マスクを返して更新する。mkdir -p の保存・復元で使う.
+        use polyisa_os_linux::x86_64 as abi;
+        let mut sys = CliLinux::x86_64();
+        let mut env = bare();
+        sys.umask = 0o22;
+        // umask(0o77) -> 0o22。
+        set64(&mut env, Gpr(0), abi::UMASK);
+        set64(&mut env, Gpr(7), 0o77);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0o22);
+        // umask(0o22) -> 0o77。
+        set64(&mut env, Gpr(0), abi::UMASK);
+        set64(&mut env, Gpr(7), 0o22);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0o77);
     }
 
     #[test]
