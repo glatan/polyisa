@@ -6864,3 +6864,33 @@ fn run_bswap_ecx() {
     assert_eq!(out, Outcome::StepLimit { eip: 0x1002 });
     assert_eq!(env.backend.get(Gpr(1).state()), 0x7856_3412);
 }
+
+#[test]
+fn run_imul_r_sibd() {
+    // run 経由で 41 0F AF 6C 24 14 (IMUL EBP,[R12+0x14]) を回す。hexdump 0x5c8ca2 対応.
+    // R12=0x2000、[0x2014]=6、EBP=7 -> EBP=42、exit(42)。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(12), 0x2000);
+        Ok(())
+    })
+    .unwrap();
+    env.backend.set(Gpr(5).state(), 7);
+    env.backend
+        .mem
+        .write(VirtAddr(0x2014), &0x06u32.to_le_bytes())
+        .unwrap();
+    let prog: &[u8] = &[
+        0x41, 0x0F, 0xAF, 0x6C, 0x24, 0x14, // imul ebp,[r12+0x14] (ebp=42)
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0x63, 0xFD, // movsxd rdi,ebp (rdi=42)
+        0x0F, 0x05, // syscall -> exit(42)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(42));
+}

@@ -8865,6 +8865,72 @@ pub fn imul_r64_mem8<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, disp: i8) -> Fl
     Ok(())
 }
 
+/// IMUL r32, m32 SIB+disp8 (no_index)。hexdump 0x5c8ca2 対応.
+pub fn imul_r32_sibd<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, disp: i8) -> Flow<B> {
+    let addr = eff_addr(b, base, disp);
+    let y: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let x = read(b, dst);
+    let x64 = b.sext::<W32, W64>(x);
+    let y64 = b.sext::<W32, W64>(y);
+    let p64 = b.mul::<W64>(x64, y64);
+    let v: B::V<W32> = b.trunc::<W64, W32>(p64);
+    write(b, dst, v);
+    Ok(())
+}
+
+/// IMUL r64, m64 SIB+disp8 (no_index, REX.W)。
+pub fn imul_r64_sibd<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, disp: i8) -> Flow<B> {
+    let addr = eff_addr(b, base, disp);
+    let y: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let x = read64(b, dst);
+    let x128 = b.sext::<W64, W128>(x);
+    let y128 = b.sext::<W64, W128>(y);
+    let p128 = b.mul::<W128>(x128, y128);
+    let v: B::V<W64> = b.trunc::<W128, W64>(p128);
+    write64(b, dst, v);
+    Ok(())
+}
+
+/// IMUL r32, m32 [base+index*scale+disp8] (0F AF SIB mod=01)。
+pub fn imul_r32_sibd_indexed<B: Backend>(
+    b: &mut B,
+    dst: Gpr,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i8,
+) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, disp as i32, base, idx);
+    let y: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let x = read(b, dst);
+    let x64 = b.sext::<W32, W64>(x);
+    let y64 = b.sext::<W32, W64>(y);
+    let p64 = b.mul::<W64>(x64, y64);
+    let v: B::V<W32> = b.trunc::<W64, W32>(p64);
+    write(b, dst, v);
+    Ok(())
+}
+
+/// IMUL r64, m64 [base+index*scale+disp8] (0F AF SIB mod=01, REX.W)。
+pub fn imul_r64_sibd_indexed<B: Backend>(
+    b: &mut B,
+    dst: Gpr,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i8,
+) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, disp as i32, base, idx);
+    let y: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let x = read64(b, dst);
+    let x128 = b.sext::<W64, W128>(x);
+    let y128 = b.sext::<W64, W128>(y);
+    let p128 = b.mul::<W128>(x128, y128);
+    let v: B::V<W64> = b.trunc::<W128, W64>(p128);
+    write64(b, dst, v);
+    Ok(())
+}
+
 /// IMUL r32, m32 [base+disp32] (0F AF mod=10)。
 pub fn imul_r32_mem32<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, disp: i32) -> Flow<B> {
     let addr = eff_addr32(b, base, disp);

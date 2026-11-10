@@ -7969,3 +7969,39 @@ fn cmovne_r64_mem32_moves_on_nz() {
     })
     .unwrap();
 }
+
+#[test]
+fn imul_r32_sibd_multiplies() {
+    // IMUL EBP,[R12+0x14] (41 0F AF 6C 24 14 相当): hexdump 0x5c8ca2 対応.
+    // R12=0x2000、[0x2014]=6、EBP=7 -> EBP=42.
+    let mut env = env();
+    env.map_rw(0x2000, 1).unwrap();
+    env.backend.set(Gpr(12).state(), 0x2000);
+    env.backend
+        .mem
+        .write(VirtAddr(0x2014), &0x06u32.to_le_bytes())
+        .unwrap();
+    env.backend.set(Gpr(5).state(), 7);
+    env.step(|b| sem::imul_r32_sibd(b, Gpr(5), Gpr(12), 0x14))
+        .unwrap();
+    assert_eq!(env.backend.get(Gpr(5).state()), 42);
+}
+
+#[test]
+fn imul_r32_sibd_indexed_multiplies() {
+    // IMUL EAX,[RAX+RSI*4+0x50]: RAX=0x2000、RSI=0x10、[0x2090]=3、EAX=10 -> EAX=30.
+    let mut env = env();
+    env.map_rw(0x2000, 1).unwrap();
+    env.backend.set(Gpr(0).state(), 0x2000);
+    env.backend.set(Gpr(6).state(), 0x10);
+    env.backend
+        .mem
+        .write(VirtAddr(0x2090), &0x03u32.to_le_bytes())
+        .unwrap();
+    env.backend.set(Gpr(0).state(), 0x2000);
+    // dst は別レジスタにするため ECX を使う: ECX=10 -> 30.
+    env.backend.set(Gpr(1).state(), 10);
+    env.step(|b| sem::imul_r32_sibd_indexed(b, Gpr(1), Gpr(0), Gpr(6), 2, 0x50))
+        .unwrap();
+    assert_eq!(env.backend.get(Gpr(1).state()), 30);
+}

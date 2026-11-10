@@ -6095,6 +6095,28 @@ fn dispatch<B: Backend>(
                 sem::imul_r32_mem32(b, reg0f_as_gpr(), rm0f(), disp32())
             }
         }
+        Insn::ImulRSibd => {
+            // 0F AF SIB mod=01 [base+index*scale+disp8] (40b)。hexdump 0x5c8ca2 対応.
+            // no_index は base+disp8 のみ。SIB は (word>>8) 下位8、disp は最下位8.
+            // base は SIB 下位3 + REX.B。dst は reg0f フィールド.
+            let sib_v = ((word >> 8) & 0xff) as u8;
+            let d8 = (word & 0xff) as u8 as i8;
+            let shift = ((sib_v >> 6) & 3) as u32;
+            let idx_raw = (sib_v >> 3) & 7;
+            let idx = Gpr(idx_raw | (((rex >> 1) & 1) << 3));
+            let base = Gpr((sib_v & 7) | ((rex & 1) << 3));
+            if idx_raw == 4 && (rex >> 1) & 1 == 0 {
+                if rex_w {
+                    sem::imul_r64_sibd(b, reg0f_as_gpr(), base, d8)
+                } else {
+                    sem::imul_r32_sibd(b, reg0f_as_gpr(), base, d8)
+                }
+            } else if rex_w {
+                sem::imul_r64_sibd_indexed(b, reg0f_as_gpr(), base, idx, shift, d8)
+            } else {
+                sem::imul_r32_sibd_indexed(b, reg0f_as_gpr(), base, idx, shift, d8)
+            }
+        }
         Insn::ImulRRip => {
             if rex_w {
                 sem::imul_r64_rip(b, reg0f_as_gpr(), eip as u64 + nbytes, disp32())
@@ -6901,6 +6923,7 @@ fn dispatch<B: Backend>(
             | Insn::ImulRMemnd
             | Insn::ImulRMem8
             | Insn::ImulRMem32
+            | Insn::ImulRSibd
             | Insn::ImulRRip
             | Insn::BsfRRm
             | Insn::BsfRMemnd

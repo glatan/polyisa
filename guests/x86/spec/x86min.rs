@@ -668,6 +668,15 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("imul_r_memnd", "MR", "00001111 10101111 00......", "imul r, [r/m]", "load"),
         ("imul_r_mem8", "M8", "00001111 10101111 01...... ........", "imul r, m32", "load"),
         ("imul_r_mem32", "M32", "00001111 10101111 10...... ................................", "imul r, m32", "load"),
+        // IMUL r32/r64, m32/m64 SIB+disp8 (0F AF mod=01)。index有無は問わずdispatchで切替.
+        // hexdump 0x5c8ca2 (41 0F AF 6C 24 14) 対応。REX.W で64bit.
+        (
+            "imul_r_sibd",
+            "F1",
+            "00001111 10101111 01...100 ........ ........",
+            "imul r, m",
+            "load",
+        ),
         ("shl_rm32_imm8", "F1", "11000001 11100... ........", "shl r/m32, {imm}", "alu"),
         ("ror_rm32_imm8", "F1", "11000001 11001... ........", "ror r/m32, {imm}", "alu"),
         ("rol_rm32_imm8", "F1", "11000001 11000... ........", "rol r/m32, {imm}", "alu"),
