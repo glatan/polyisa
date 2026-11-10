@@ -197,6 +197,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("ret", "F1", "11000011", "ret", "jump"),
         ("cmp_eax", "F1", "00111101 ................................", "cmp eax, {imm}", "alu"),
         ("cmp_al_imm", "F1", "00111100 ........", "cmp al, {imm}", "alu"),
+        // OR AL,imm8 (0C ib)。
+        ("or_al_imm", "F1", "00001100 ........", "or al, {imm}", "alu"),
         
         ("je", "F1", "01110100 ........", "je {imm}", "jump"),
         ("jne", "F1", "01110101 ........", "jne {imm}", "jump"),
@@ -349,6 +351,12 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("add_r_sibd", "F1", "00000011 01...100 ..100... ........", "add r, m", "alu"),
         // ADD m32,r32 SIB+disp8 (01 mod=01)。
         ("add_m32_r32_sibd", "F1", "00000001 01...100 ........ ........", "add m, r", "alu"),
+        // CMP m32,r32 SIB+disp8 (39 mod=01)。
+        ("cmp_m32_r32_sibd", "F1", "00111001 01...100 ........ ........", "cmp m, r", "alu"),
+        // ADD m16,imm8 SIB mod=00 [base+index*scale] (66 83 /0)。66 接頭辞は実行側で剥がす.
+        ("add_m16_imm_sib", "F1", "10000011 00000100 ........ ........", "add m16, {imm}", "alu"),
+        // CMP m32,imm8 SIB mod=01 [base+disp8] (83 /7、no_index)。index=100 固定.
+        ("cmp_rm_imm8_sibd", "F1", "10000011 01111100 ..100... ........ ........", "cmp r/m, {imm}", "alu"),
         // CMP m32,imm8 SIB mod=00 (83 /7、no_index non-abs)。index=100 固定.
         ("cmp_rm_imm8_sib", "F1", "10000011 00111100 ........ ........", "cmp r/m, {imm}", "alu"),
         // CMP r32/r64, m32/m64 SIB mod=00 [base+index*scale] (3B /r)。
@@ -384,12 +392,12 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("call_r_mem8", "M8", "11111111 01010... ........", "call r/m64", "jump"),
         // CALL r/m64 mod=00 [base] (FF /2)。SIBなし.
         ("call_r_memnd", "MR", "11111111 01000...", "call r/m64", "jump"),
-        // CALL r/m64 mod=10 [base+disp32] (FF /2)。SIBなし.
-        ("call_r_mem32", "M32", "11111111 10010... ................................", "call r/m64", "jump"),
         // CALL r/m64 reg-direct (FF /2 mod=11)。レジスタ間接コール.
         ("call_r_rm", "F1", "11111111 11010...", "call r/m64", "jump"),
         // CALL [base+index*scale] (FF /2 SIB mod=00)。64ビット間接コール.
         ("call_r_sib", "N8", "11111111 00010100 ........", "call r/m64", "jump"),
+        // CALL [base+index*scale+disp32] (FF /2 SIB mod=10)。64ビット間接コール.
+        ("call_r_sibd32", "F1", "11111111 10010100 ........ ................................", "call r/m64", "jump"),
         // XCHG r32,r/m32 (87 /r)。reg-direct・mod=00/01/10/RIP (SIBなし).
         ("xchg_r_rm", "F1", "10000111 11......", "xchg r32, r/m32", "alu"),
         ("xchg_r_memnd", "MR", "10000111 00......", "xchg r32, [r/m]", "alu"),
@@ -450,6 +458,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("add_rm32_imm", "F1", "10000001 11000... ................................", "add r/m32, {imm}", "alu"),
         ("add_rm64_imm", "F1", "01001000 10000001 11000... ................................", "add r/m64, {imm}", "alu"),
         ("or_rm32_imm", "F1", "10000001 11001... ................................", "or r/m32, {imm}", "alu"),
+        // OR m32,imm32 mod=00 [base] (81 /1)。REX.W で64bit.
+        ("or_rm32_imm_memnd", "MR", "10000001 00001... ................................", "or r/m32, {imm}", "alu"),
         ("adc_rm32_imm", "F1", "10000001 11010... ................................", "adc r/m32, {imm}", "alu"),
         ("sbb_rm32_imm", "F1", "10000001 11011... ................................", "sbb r/m32, {imm}", "alu"),
         ("and_rm32_imm", "F1", "10000001 11100... ................................", "and r/m32, {imm}", "alu"),
@@ -737,6 +747,22 @@ pub fn build_model() -> polyisa_isadl::Model {
             "alu",
         ),
         (
+            "sete_m8_mem32",
+            "M32",
+            "00001111 10010100 10...... ................................",
+            vec![wc("m32_rm", WhereOp::Ne, 4)],
+            "sete m8",
+            "alu",
+        ),
+        (
+            "call_r_mem32",
+            "M32",
+            "11111111 10010... ................................",
+            vec![],
+            "call r/m64",
+            "jump",
+        ),
+        (
             "cmp_rm_mem8",
             "M8",
             "00111001 01...... ........",
@@ -967,6 +993,22 @@ pub fn build_model() -> polyisa_isadl::Model {
             vec![wc("m8_rm", WhereOp::Ne, 4)],
             "movzx r32, m8",
             "load",
+        ),
+        (
+            "and_r8_m8_mem32",
+            "M32",
+            "00100010 10...... ................................",
+            vec![wc("m32_rm", WhereOp::Ne, 4)],
+            "and r8, m8",
+            "alu",
+        ),
+        (
+            "test_r_mem8",
+            "M8",
+            "10000101 01...... ........",
+            vec![wc("m8_rm", WhereOp::Ne, 4)],
+            "test r, m",
+            "alu",
         ),
         (
             "movzx_r32_m16_mem8",
@@ -1361,6 +1403,14 @@ pub fn build_model() -> polyisa_isadl::Model {
             "load",
         ),
         (
+            "call_r_sibd",
+            "S8",
+            "11111111 01010100 ........ ........",
+            vec![],
+            "call r/m64",
+            "jump",
+        ),
+        (
             "mov_r8_m8_sibd32",
             "D32",
             "10001010 10...100 ........ ................................",
@@ -1422,6 +1472,14 @@ pub fn build_model() -> polyisa_isadl::Model {
             "00101000 11......",
             vec![],
             "sub r/m8, r8",
+            "alu",
+        ),
+        (
+            "or_m8_r8",
+            "F1",
+            "00001000 11......",
+            vec![],
+            "or r/m8, r8",
             "alu",
         ),
         (
@@ -1647,6 +1705,14 @@ pub fn build_model() -> polyisa_isadl::Model {
             "10000000 10100... ................................ ........",
             vec![],
             "and r/m8, {imm}",
+            "alu",
+        ),
+        (
+            "cmp_rm8_imm_mem32",
+            "F1",
+            "10000000 10111... ................................ ........",
+            vec![],
+            "cmp r/m8, {imm}",
             "alu",
         ),
         (

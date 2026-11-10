@@ -114,6 +114,7 @@ pub mod x86_64 {
     pub const SENDFILE: u64 = 40;
     pub const TIME: u64 = 201;
     pub const CLOCK_NANOSLEEP: u64 = 230;
+    pub const GETGROUPS: u64 = 115;
 }
 
 /// 段階4の準備としての i386 番号表（Linux・32ビット）。
@@ -162,6 +163,7 @@ pub mod i386 {
     pub const SENDFILE: u64 = 187;
     pub const TIME: u64 = 13;
     pub const NANOSLEEP: u64 = 162;
+    pub const GETGROUPS: u64 = 99;
 }
 
 /// ABI と番号から名前を引く。段階1の範囲と x86_64・i386 の番号表のみ。
@@ -250,6 +252,7 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             i386::SENDFILE => Some("sendfile"),
             i386::TIME => Some("time"),
             i386::NANOSLEEP => Some("nanosleep"),
+            i386::GETGROUPS => Some("getgroups"),
             _ => None,
         },
         GuestAbi::X86_64Linux => match nr {
@@ -293,6 +296,7 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             x86_64::SENDFILE => Some("sendfile"),
             x86_64::TIME => Some("time"),
             x86_64::CLOCK_NANOSLEEP => Some("clock_nanosleep"),
+            x86_64::GETGROUPS => Some("getgroups"),
             _ => None,
         },
         GuestAbi::Unknown => None,
@@ -409,6 +413,8 @@ mod tests {
             syscall_name(GuestAbi::X86_64Linux, 230),
             Some("clock_nanosleep")
         );
+        assert_eq!(x86_64::GETGROUPS, 115);
+        assert_eq!(syscall_name(GuestAbi::X86_64Linux, 115), Some("getgroups"));
     }
 
     #[test]
@@ -430,6 +436,8 @@ mod tests {
         assert_eq!(syscall_name(GuestAbi::I386Linux, 13), Some("time"));
         assert_eq!(i386::NANOSLEEP, 162);
         assert_eq!(syscall_name(GuestAbi::I386Linux, 162), Some("nanosleep"));
+        assert_eq!(i386::GETGROUPS, 99);
+        assert_eq!(syscall_name(GuestAbi::I386Linux, 99), Some("getgroups"));
     }
 
     #[test]
