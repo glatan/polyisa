@@ -3412,6 +3412,40 @@ fn run_cmp_rm64_imm8_sibd() {
 }
 
 #[test]
+fn run_cmp_m32_r32_sib_no_index() {
+    // run 経由で 44 39 2C 24 (CMP [RSP],R13D with REX.R) を回す。paste 0x5ad26b 対応.
+    // RSP=0x2000、[0x2000]=5、R13D=5 -> ZF=1、exit(0)。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(13), 5);
+        Ok(())
+    })
+    .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2000), &5u32.to_le_bytes())
+        .unwrap();
+    let prog: &[u8] = &[
+        0x44, 0x39, 0x2C, 0x24, // cmp [rsp],r13d
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
+        0x0F, 0x05, // syscall -> exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0));
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x40,
+        0x40
+    );
+}
+
+#[test]
 fn run_ucomisd_rip() {
     // run 経由で 66 0F 2E 0D + disp32 (UCOMISD xmm1,[RIP]) を回す。seq の停止点 0x45b763 に対応.
     // [0x2000]=2.0、xmm1=1.0 -> CF=1、ZF=0 になり、exit(0)。mov は旗を変えない.

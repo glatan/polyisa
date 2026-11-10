@@ -4964,6 +4964,20 @@ fn dispatch<B: Backend>(
                 sem::cmp_m32_r32_sibd(b, sib_base(), sib_idx(), sib_shift(), d8, reg())
             }
         }
+        Insn::CmpM32R32Sib => {
+            // 39 /r SIB mod=00 [base+index*scale]。paste 0x5ad26b 対応. no_index は [base].
+            if no_index() {
+                if rex_w {
+                    sem::cmp_rm64_memnd(b, sib_base(), reg())
+                } else {
+                    sem::cmp_rm32_memnd(b, sib_base(), reg())
+                }
+            } else if rex_w {
+                sem::cmp_m64_r64_sib(b, sib_base(), sib_idx(), sib_shift(), reg())
+            } else {
+                sem::cmp_m32_r32_sib(b, sib_base(), sib_idx(), sib_shift(), reg())
+            }
+        }
         Insn::CmpRmMemnd => {
             if rex_w {
                 sem::cmp_rm64_memnd(b, rm(), reg())

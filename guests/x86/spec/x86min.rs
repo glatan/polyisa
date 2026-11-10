@@ -1059,6 +1059,15 @@ pub fn build_model() -> polyisa_isadl::Model {
             "xor r32, [r/m+sib+disp32]",
             "alu",
         ),
+        // CMP m32,r32 SIB [base+index*scale] (39 /r mod=00)。paste 0x5ad26b 対応.
+        (
+            "cmp_m32_r32_sib",
+            "N8",
+            "00111001 00...100 ........",
+            vec![wc("n8_base", WhereOp::Ne, 5)],
+            "cmp m, r",
+            "alu",
+        ),
         (
             "cmp_r_sibd32",
             "D32",

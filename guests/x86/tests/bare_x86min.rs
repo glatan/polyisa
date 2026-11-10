@@ -6902,6 +6902,24 @@ fn mov_rm16_imm_rip_basic() {
 }
 
 #[test]
+fn cmp_m32_r32_sib_indexed() {
+    // CMP [RBX+RSI*2],EAX (39 /r SIB mod=00): [0x2020]=7、EAX=7 -> ZF=1.
+    // paste 0x5ad26b 対応 (no_index [RSP] は dispatch で memnd 経路).
+    let mut env = env();
+    env.map_rw(0x2000, 1).unwrap();
+    env.backend.set(Gpr(3).state(), 0x2000);
+    env.backend.set(Gpr(6).state(), 0x10);
+    env.backend.set(Gpr(0).state(), 7);
+    env.backend
+        .mem
+        .write(VirtAddr(0x2020), &7u32.to_le_bytes())
+        .unwrap();
+    env.step(|b| sem::cmp_m32_r32_sib(b, Gpr(3), Gpr(6), 1, Gpr(0)))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0x40);
+}
+
+#[test]
 fn and_rm32_imm8_sib_indexed_rexx() {
     // ANDL $0,[RAX+R9*4] (42 83 24 88 00): head の停止点に対応。REX.X で R9 を指す.
     // RAX=0x2000、R9=0x10、[0x2040]=0xFF -> 0.
