@@ -4453,6 +4453,18 @@ pub fn pand_xmm<B: Backend>(b: &mut B, dst: Xmm, src: Xmm) -> Flow<B> {
     Ok(())
 }
 
+/// ANDPD xmm,[RIP+disp] (66 0F 54 /r mod=00 rm=101)。128ビット AND.
+pub fn andpd_xmm_rip<B: Backend>(b: &mut B, dst: Xmm, next_rip: u64, disp: i32) -> Flow<B> {
+    let base = b.konst::<W64>(next_rip);
+    let d = b.konst::<W64>(disp as i64 as u64);
+    let addr = b.add::<W64>(base, d);
+    let c: B::V<W128> = b.load::<W128>(addr, DATA_READ)?;
+    let a: B::V<W128> = b.get(xmm_ref(dst));
+    let v = b.and::<W128>(a, c);
+    b.set(xmm_ref(dst), v);
+    Ok(())
+}
+
 /// PUNPCKLQDQ xmm1, xmm2。下位64ビットずつを交互に挿す (dst_lo, src_lo).
 pub fn punpcklqdq<B: Backend>(b: &mut B, dst: Xmm, src: Xmm) -> Flow<B> {
     let a: B::V<W128> = b.get(xmm_ref(dst));

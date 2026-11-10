@@ -3622,6 +3622,91 @@ fn run_movapd_co_use() {
 }
 
 #[test]
+fn run_andpd() {
+    // run 経由で 66 0F 54 C1 (ANDPD xmm0,xmm1) を回す。
+    // xmm0=0xFF..FF、xmm1=0x0F0F.. -> xmm0=0x0F0F.. になり、exit(0)。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.step(|b| {
+        let a = b.konst::<polyisa_sem::W128>(0xFFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF);
+        let c = b.konst::<polyisa_sem::W128>(0x0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0F);
+        b.set(
+            polyisa_guest_x86::sem::xmm_ref(polyisa_guest_x86::sem::Xmm(0)),
+            a,
+        );
+        b.set(
+            polyisa_guest_x86::sem::xmm_ref(polyisa_guest_x86::sem::Xmm(1)),
+            c,
+        );
+        Ok(())
+    })
+    .unwrap();
+    let prog: &[u8] = &[
+        0x66, 0x0F, 0x54, 0xC1, // andpd xmm0,xmm1
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
+        0x0F, 0x05, // syscall -> exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0));
+    env.step(|b| {
+        let v: u128 = b.get(polyisa_guest_x86::sem::xmm_ref(
+            polyisa_guest_x86::sem::Xmm(0),
+        ));
+        assert_eq!(v, 0x0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0F);
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn run_andpd_rip() {
+    // run 経由で 66 0F 54 0D + disp32 (ANDPD xmm1,[RIP]) を回す。seq の停止点 0x45b75b に対応.
+    // [0x2000]=0x0F0F..、xmm1=0xFF..FF -> xmm1=0x0F0F.. になり、exit(0)。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    let mut mem16 = [0u8; 16];
+    for b in mem16.iter_mut() {
+        *b = 0x0F;
+    }
+    env.backend.mem.write(VirtAddr(0x2000), &mem16).unwrap();
+    env.step(|b| {
+        let a = b.konst::<polyisa_sem::W128>(0xFFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF);
+        b.set(
+            polyisa_guest_x86::sem::xmm_ref(polyisa_guest_x86::sem::Xmm(1)),
+            a,
+        );
+        Ok(())
+    })
+    .unwrap();
+    // next_rip=0x1008、target=0x2000 -> disp=0xFF8.
+    let prog: &[u8] = &[
+        0x66, 0x0F, 0x54, 0x0D, 0xF8, 0x0F, 0x00, 0x00, // andpd xmm1,[rip+0xFF8]
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
+        0x0F, 0x05, // syscall -> exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0));
+    env.step(|b| {
+        let v: u128 = b.get(polyisa_guest_x86::sem::xmm_ref(
+            polyisa_guest_x86::sem::Xmm(1),
+        ));
+        assert_eq!(v, 0x0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0F);
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
 fn run_sar_rm64_cl() {
     // run 経由で REX.W D3 /7 (SAR RDI,CL) を回す。
     // RDI=0xF0、CL=2 -> RDI=0x3C になり、exit(0x3C)。

@@ -239,8 +239,8 @@ fn fetch_len(
                 // XMM reg-direct のみ（66 接頭辞は剥がし済み）。
                 let m = third?;
                 if m >> 6 == 3 { Some(3) } else { None }
-            } else if s == 0x74 || s == 0xEB || s == 0xDA {
-                // PCMPEQB/POR/PMINUB xmm,m128 (66 0F 74/EB/DA /r)。reg-direct と mod=00/01/10 (SIBなし).
+            } else if s == 0x74 || s == 0xEB || s == 0xDA || s == 0x54 {
+                // PCMPEQB/POR/PMINUB/ANDPD xmm,m128 (66 0F 74/EB/DA/54 /r)。reg-direct と mod=00/01/10 (SIBなし).
                 let m = third?;
                 let md = m >> 6;
                 let rm = m & 7;
@@ -1131,6 +1131,7 @@ pub fn run_mode(
                             | 0x2E
                             | 0x2F
                             | 0x2C
+                            | 0x54
                             | 0x5C
                             | 0x59
                             | 0xBA
@@ -1437,6 +1438,8 @@ pub fn run_mode(
                     | Insn::MovdqaLoadRip
                     | Insn::Comisd
                     | Insn::Ucomisd
+                    | Insn::Andpd
+                    | Insn::AndpdRip
                     // MOV [base],r16 (66 89 mod=00) は MovMemndEax を共用する.
                     | Insn::MovMemndEax
                     | Insn::MovdquLoadXmm
@@ -4575,6 +4578,9 @@ fn dispatch<B: Backend>(
         // XORPS xmm,xmm (0F 57 /r reg-direct)。PXOR と等価.
         Insn::Xorps => sem::pxor_xmm(b, xmm_reg(), xmm_rm()),
         Insn::Pand => sem::pand_xmm(b, xmm_reg(), xmm_rm()),
+        // ANDPD (66 0F 54) は PAND と等価のため意味論を共有する.
+        Insn::Andpd => sem::pand_xmm(b, xmm_reg(), xmm_rm()),
+        Insn::AndpdRip => sem::andpd_xmm_rip(b, xmm_reg(), eip as u64 + nbytes, disp32()),
         // PANDN xmm,xmm (66 0F DF /r reg-direct)。REX.R/B で 8-15 に拡張する.
         Insn::Pandn => sem::pandn_xmm(b, xmm_reg_r(), xmm_rm_b()),
         // CVTSI2SD xmm,r64 (F2 REX.W 0F 2A /r reg-direct)。F2 は剥がし済み.

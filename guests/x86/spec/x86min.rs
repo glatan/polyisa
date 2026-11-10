@@ -516,6 +516,10 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("punpcklqdq", "F1", "00001111 01101100 11......", "punpcklqdq xmm, xmm", "alu"),
         // PAND xmm,xmm (66 0F DB /r)。reg-direct のみ。
         ("pand", "F1", "00001111 11011011 11......", "pand xmm, xmm", "alu"),
+        // ANDPD xmm,xmm (66 0F 54 /r mod=11)。PAND と等価のため意味論を共有する.
+        ("andpd", "F1", "00001111 01010100 11......", "andpd xmm, xmm", "alu"),
+        // ANDPD xmm,[RIP+disp32] (66 0F 54 /r mod=00 rm=101)。
+        ("andpd_rip", "F1", "00001111 01010100 00...101 ................................", "andpd xmm, m128", "load"),
         // PSLLDQ xmm,imm8 (66 0F 73 /7 ib)。reg-direct のみ、66必須.
         ("pslldq", "F1", "00001111 01110011 11111... ........", "pslldq xmm, {imm}", "alu"),
         // PSRLDQ xmm,imm8 (66 0F 73 /3 ib)。reg-direct のみ、66必須.

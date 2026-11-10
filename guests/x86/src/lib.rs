@@ -76,7 +76,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数116件。
-        assert_eq!(INSNS.len(), 558);
+        assert_eq!(INSNS.len(), 560);
     }
 
     #[test]
@@ -413,6 +413,12 @@ mod tests {
         assert_eq!(decode(0x0FBCC0, 24), Some(Insn::BsfRRm));
         assert_eq!(decode(0x0FD7C0, 24), Some(Insn::Pmovmskb));
         assert_eq!(decode(0x0F74C1, 24), Some(Insn::Pcmpeqb));
+        // ANDPD xmm,xmm / xmm,[RIP+disp32] (66 0F 54)。seq の停止点 0x45b75b に対応.
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x0F54C0, 24), Some(Insn::Andpd));
+        assert_eq!(decode(0x0F54C0, 16), None);
+        assert_eq!(decode(0x0F540D1DFE1900, 56), Some(Insn::AndpdRip));
+        assert_eq!(decode(0x0F540D1DFE1900, 48), None);
         // UCOMISD xmm,xmm (66 0F 2E /r mod=11)。seq の停止点 0x45b74d に対応.
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x0F2EC0, 24), Some(Insn::Ucomisd));
