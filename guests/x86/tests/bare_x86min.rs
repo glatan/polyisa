@@ -6306,6 +6306,36 @@ fn and_rm32_imm8_sibd_indexed() {
 }
 
 #[test]
+fn or_rm64_imm8_sibd_indexed() {
+    // ORQ $1,[RBX+R12+0x08] (4A 83 4C 23 08 01): ls -l の停止点に対応.
+    // RBX=0x2000、R12=0x10、[0x2018]=0 -> 1.
+    let mut env = env();
+    env.map_rw(0x2000, 1).unwrap();
+    env.backend.set(Gpr(3).state(), 0x2000);
+    env.backend.set(Gpr(12).state(), 0x10);
+    env.backend
+        .mem
+        .write(VirtAddr(0x2018), &0u64.to_le_bytes())
+        .unwrap();
+    env.step(|b| sem::or_rm64_imm8_sibd(b, Gpr(3), Gpr(12), 0, 0x08, 0x01))
+        .unwrap();
+    let mut back = [0u8; 8];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x2018),
+            &mut back,
+            Access {
+                endian: Endian::Le,
+                align: Align::Unaligned,
+                kind: AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(u64::from_le_bytes(back), 1);
+}
+
+#[test]
 fn and_rm32_imm8_sib_indexed_rexx() {
     // ANDL $0,[RAX+R9*4] (42 83 24 88 00): head の停止点に対応。REX.X で R9 を指す.
     // RAX=0x2000、R9=0x10、[0x2040]=0xFF -> 0.

@@ -578,10 +578,10 @@ fn fetch_len(
             if md == 3 {
                 Some(3)
             } else if rm == 4 {
-                // SIB 付き。mod=01 SIB+disp8+imm8 (5B) の /4 AND と /7 CMP、
+                // SIB 付き。mod=01 SIB+disp8+imm8 (5B) の /4 AND と /7 CMP と /1 OR、
                 // mod=00 SIB+imm8 (4B) の /4 AND と /7 CMP、66 mod=00 SIB+imm8 (4B) の /0 ADD のみ.
                 let t = third?;
-                if (reg == 4 || reg == 7) && t & 7 != 5 && (md == 1 || md == 0) {
+                if (reg == 4 || reg == 7 || reg == 1) && t & 7 != 5 && (md == 1 || md == 0) {
                     Some(if md == 1 { 5 } else { 4 })
                 } else if has66 && reg == 0 && md == 0 && t & 7 != 5 {
                     Some(4)
@@ -3959,6 +3959,29 @@ fn dispatch<B: Backend>(
                 sem::and_rm64_imm8_sibd(b, base, idx, shift, d8, imm)
             } else {
                 sem::and_rm32_imm8_sibd(b, base, idx, shift, d8, imm)
+            }
+        }
+        Insn::OrRmImm8Sibd => {
+            // 83 /1 SIB mod=01 [base+disp8],imm8 (40b)。no_index は base のみ、索引ありは SIB スケール.
+            // SIB は (word>>16) 下位8、disp は (word>>8) 下位8、imm は最下位8.
+            // REX.W で64bit、REX.X/B で索引/ベース拡張.
+            let sib_v = ((word >> 16) & 0xff) as u8;
+            let d8 = ((word >> 8) & 0xff) as u8 as i8;
+            let imm = (word & 0xff) as u8 as i8;
+            let shift = ((sib_v >> 6) & 3) as u32;
+            let idx_raw = (sib_v >> 3) & 7;
+            let idx = Gpr(idx_raw | (((rex >> 1) & 1) << 3));
+            let base = Gpr((sib_v & 7) | ((rex & 1) << 3));
+            if idx_raw == 4 && (rex >> 1) & 1 == 0 {
+                if rex_w {
+                    sem::or_rm64_imm8_mem8(b, base, d8, imm)
+                } else {
+                    sem::or_rm32_imm8_mem8(b, base, d8, imm)
+                }
+            } else if rex_w {
+                sem::or_rm64_imm8_sibd(b, base, idx, shift, d8, imm)
+            } else {
+                sem::or_rm32_imm8_sibd(b, base, idx, shift, d8, imm)
             }
         }
         Insn::CmpRmImm8Sibd => {
