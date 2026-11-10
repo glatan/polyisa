@@ -2392,6 +2392,33 @@ fn sete_m8_mem32_writes() {
 }
 
 #[test]
+fn setne_m8_sibd_writes() {
+    // SETNE [RAX+RSI*8+0x06]: ZF=0 -> 1。ls -l 0x42a294 対応.
+    let mut env = env();
+    env.map_rw(0, 1).unwrap();
+    env.map_rw(0x2000, 1).unwrap();
+    env.backend.set(Gpr(0).state(), 0x2000);
+    env.backend.set(Gpr(6).state(), 0x10);
+    env.backend.set(sem::eflags_ref(), 0);
+    env.step(|b| sem::setne_m8_sibd(b, Gpr(0), Gpr(6), 3, 0x06))
+        .unwrap();
+    let mut back = [0u8; 1];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x2086),
+            &mut back,
+            Access {
+                endian: Endian::Le,
+                align: Align::Unaligned,
+                kind: AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(back[0], 1);
+}
+
+#[test]
 fn or_m8_r8_ors() {
     // OR AL,DL: EAX=0x01、EDX=0x02 -> AL=0x03。
     let mut env = env();

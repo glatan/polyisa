@@ -158,13 +158,18 @@ fn fetch_len(
                     None
                 }
             } else if (0x90..=0x9F).contains(&s) {
-                // SETcc r/m8 (0F 90-9F /r)。reg-direct 3B、94 mod=10 [base+disp32] 7B.
+                // SETcc r/m8 (0F 90-9F /r)。reg-direct 3B、94 mod=10 [base+disp32] 7B、
+                // 95 SIB mod=01 [base+index*scale+disp8] 5B (ls -l 対応).
                 let m = third?;
                 let md = m >> 6;
+                let rm = m & 7;
                 if md == 3 {
                     Some(3)
                 } else if s == 0x94 && md == 2 {
                     Some(7)
+                } else if s == 0x95 && md == 1 && rm == 4 {
+                    let _ = fourth?;
+                    Some(5)
                 } else {
                     None
                 }
@@ -1326,6 +1331,7 @@ pub fn run_mode(
                         | 0x29
                         | 0x6F
                         | 0x7F
+                        | 0x95
                         | 0xE7
                         | 0x1F
                         | 0xB6
@@ -6212,6 +6218,14 @@ fn dispatch<B: Backend>(
         Insn::SeteM8Mem32 => {
             // 0F 94 mod=10 [base+disp32] (56b)。
             sem::sete_m8_mem32(b, rm0f(), disp32())
+        }
+        Insn::SetneM8Sibd => {
+            // 0F 95 SIB mod=01 [base+index*scale+disp8] (40b)。no_index は base のみ.
+            if sib0f_no_index() {
+                sem::setne_m8_mem8(b, sib0f_base(), disp8())
+            } else {
+                sem::setne_m8_sibd(b, sib0f_base(), sib0f_idx(), sib0f_shift(), disp8())
+            }
         }
         Insn::Setne => {
             let rm_f = modrm0f() & 7;

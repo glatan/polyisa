@@ -345,6 +345,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("setge", "F1", "00001111 10011101 11......", "setge r/m8", "alu"),
         ("setle", "F1", "00001111 10011110 11......", "setle r/m8", "alu"),
         ("setg", "F1", "00001111 10011111 11......", "setg r/m8", "alu"),
+        // SETNE m8 SIB+disp8 (0F 95 SIB mod=01)。ls -l 0x42a294 対応。REX.X/B は dispatch で見る.
+        ("setne_m8_sibd", "F1", "00001111 10010101 01...100 ........ ........", "setne m8", "alu"),
         ("cmove_m64", "M32", "00001111 01000100 10...... ................................", "cmove r64, m64", "load"),
         ("cmovne_r64_sibd", "F1", "00001111 01000101 01...100 ..100... ........", "cmovne r, m64", "load"),
         ("cmove_r64_sibd", "F1", "00001111 01000100 01...100 ..100... ........", "cmove r, m64", "load"),

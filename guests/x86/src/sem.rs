@@ -1018,6 +1018,42 @@ pub fn sete_m8_mem32<B: Backend>(b: &mut B, base: Gpr, disp: i32) -> Flow<B> {
     Ok(())
 }
 
+/// SETNE m8 [base+disp8] (0F 95 mod=01)。ZF=0 なら 1 を書く.
+pub fn setne_m8_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8) -> Flow<B> {
+    use polyisa_sem::W8;
+    let addr = eff_addr(b, base, disp);
+    let take = {
+        let zf = read_zf(b);
+        let zero = b.konst::<W32>(0);
+        let one = b.konst::<W32>(1);
+        let n = b.select::<W32>(zf, one, zero);
+        b.cmp::<W32>(Cmp::Eq, n, zero)
+    };
+    let one = b.konst::<W8>(1);
+    let zero = b.konst::<W8>(0);
+    let v = b.select::<W8>(take, one, zero);
+    b.store::<W8>(addr, v, DATA_WRITE)?;
+    Ok(())
+}
+
+/// SETNE m8 [base+index*scale+disp8] (0F 95 SIB mod=01)。ZF=0 なら 1 を書く.
+pub fn setne_m8_sibd<B: Backend>(b: &mut B, base: Gpr, idx: Gpr, shift: u32, disp: i8) -> Flow<B> {
+    use polyisa_sem::W8;
+    let addr = sib_addr_scaled(b, shift, disp as i32, base, idx);
+    let take = {
+        let zf = read_zf(b);
+        let zero = b.konst::<W32>(0);
+        let one = b.konst::<W32>(1);
+        let n = b.select::<W32>(zf, one, zero);
+        b.cmp::<W32>(Cmp::Eq, n, zero)
+    };
+    let one = b.konst::<W8>(1);
+    let zero = b.konst::<W8>(0);
+    let v = b.select::<W8>(take, one, zero);
+    b.store::<W8>(addr, v, DATA_WRITE)?;
+    Ok(())
+}
+
 /// SETNE r/m8 (0F 95)。ZF=0 なら 1.
 pub fn setne_r8<B: Backend>(b: &mut B, dst: Gpr, high: bool) -> Flow<B> {
     let take = {
