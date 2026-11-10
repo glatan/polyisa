@@ -6790,6 +6790,23 @@ fn or_r32_sib_no_index() {
 }
 
 #[test]
+fn cmp_rm64_imm8_sibd_indexed() {
+    // CMPQ $0,-0x8(%rcx,%rax,8) (48 83 7C C1 F8 00 は REX 剥がし済み)。
+    // seq 10 の停止点 0x45bbd8 対応。RCX=0x2000、RAX=0x10、[0x2078]=0 -> ZF=1.
+    let mut env = env();
+    env.map_rw(0x2000, 1).unwrap();
+    env.backend.set(Gpr(1).state(), 0x2000);
+    env.backend.set(Gpr(0).state(), 0x10);
+    env.backend
+        .mem
+        .write(VirtAddr(0x2078), &0u64.to_le_bytes())
+        .unwrap();
+    env.step(|b| sem::cmp_rm64_imm8_sibd(b, Gpr(1), Gpr(0), 3, -8, 0))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0x40);
+}
+
+#[test]
 fn and_rm32_imm8_sib_indexed_rexx() {
     // ANDL $0,[RAX+R9*4] (42 83 24 88 00): head の停止点に対応。REX.X で R9 を指す.
     // RAX=0x2000、R9=0x10、[0x2040]=0xFF -> 0.

@@ -363,8 +363,9 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("cmp_m32_r32_sibd", "F1", "00111001 01...100 ........ ........", "cmp m, r", "alu"),
         // ADD m16,imm8 SIB mod=00 [base+index*scale] (66 83 /0)。66 接頭辞は実行側で剥がす.
         ("add_m16_imm_sib", "F1", "10000011 00000100 ........ ........", "add m16, {imm}", "alu"),
-        // CMP m32,imm8 SIB mod=01 [base+disp8] (83 /7、no_index)。index=100 固定.
-        ("cmp_rm_imm8_sibd", "F1", "10000011 01111100 ..100... ........ ........", "cmp r/m, {imm}", "alu"),
+        // CMP m32,imm8 SIB mod=01 [base+index*scale+disp8] (83 /7)。seq 10 の停止点 0x45bbd8 対応.
+        // index 固定を外し dispatch で no_index/索引を切替 (AND/OR/ADD sibd と同型)。
+        ("cmp_rm_imm8_sibd", "F1", "10000011 01111100 ........ ........ ........", "cmp r/m, {imm}", "alu"),
         // CMP m32,imm8 SIB mod=00 (83 /7、no_index non-abs)。index=100 固定.
         ("cmp_rm_imm8_sib", "F1", "10000011 00111100 ........ ........", "cmp r/m, {imm}", "alu"),
         // CMP r32/r64, m32/m64 SIB mod=00 [base+index*scale] (3B /r)。

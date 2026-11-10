@@ -1084,6 +1084,11 @@ mod tests {
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x837C241400, 40), Some(Insn::CmpRmImm8Sibd));
         assert_eq!(decode(0x837C241400, 32), None);
+        // CMP m64,imm8 SIB+disp8 indexed (83 /7 + SIB + disp8 + imm8)。48 83 7C C1 F8 00 は REX 剥がし済み.
+        // seq 10 の停止点 0x45bbd8 対応.
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x837CC1F800, 40), Some(Insn::CmpRmImm8Sibd));
+        assert_eq!(decode(0x837CC1F800, 32), None);
         // SETE m8 mod=10 [base+disp32] (0F 94 /r)。
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x0F94850BFBFFFF, 56), Some(Insn::SeteM8Mem32));
