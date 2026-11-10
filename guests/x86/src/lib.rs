@@ -76,7 +76,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数116件。
-        assert_eq!(INSNS.len(), 566);
+        assert_eq!(INSNS.len(), 567);
     }
 
     #[test]
@@ -417,6 +417,10 @@ mod tests {
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x0F59C2, 24), Some(Insn::Mulsd));
         assert_eq!(decode(0x0F59C2, 8), None);
+        // ADDSD xmm,m64 SIB mod=00 (F2 0F 58)。seq の停止点 0x5adf90 に対応.
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x0F580424, 32), Some(Insn::AddsdM64Sib));
+        assert_eq!(decode(0x0F580424, 24), None);
         // ANDPD xmm,xmm / xmm,[RIP+disp32] (66 0F 54)。seq の停止点 0x45b75b に対応.
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x0F54C0, 24), Some(Insn::Andpd));

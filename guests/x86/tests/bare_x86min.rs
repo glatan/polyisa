@@ -2080,6 +2080,54 @@ fn mulsd_xmm_multiplies_low64() {
 }
 
 #[test]
+fn addsd_m64_sib_adds() {
+    // ADDSD xmm0,[RSP] (F2 0F 58 04 24): [0x2000]=2.0、xmm0下位=3.0 -> 5.0、上位は維持.
+    // seq の停止点 0x5adf90 に対応. no_index 経路.
+    use polyisa_guest_x86::sem::Xmm;
+    let mut env = env();
+    env.map_rw(0x2000, 1).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    env.backend
+        .mem
+        .write(VirtAddr(0x2000), &2.0f64.to_le_bytes())
+        .unwrap();
+    env.step(|b| {
+        let a = b.konst::<polyisa_sem::W128>(0xFFFF_0000_0000_0000_4008_0000_0000_0000u128);
+        b.set(sem::xmm_ref(Xmm(0)), a);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::addsd_xmm_m64_memnd(b, Xmm(0), Gpr(4)))
+        .unwrap();
+    let v: u128 = env.backend.get(sem::xmm_ref(Xmm(0)));
+    assert_eq!(v, 0xFFFF_0000_0000_0000_4014_0000_0000_0000u128);
+}
+
+#[test]
+fn addsd_m64_sib_indexed_adds() {
+    // ADDSD xmm0,[RBX+RCX*2] (SIB indexed): [0x2120]=1.0、xmm0下位=2.0 -> 3.0.
+    use polyisa_guest_x86::sem::Xmm;
+    let mut env = env();
+    env.map_rw(0x2000, 1).unwrap();
+    env.backend.set(Gpr(3).state(), 0x2000);
+    env.backend.set(Gpr(1).state(), 0x90);
+    env.backend
+        .mem
+        .write(VirtAddr(0x2120), &1.0f64.to_le_bytes())
+        .unwrap();
+    env.step(|b| {
+        let a = b.konst::<polyisa_sem::W128>(0x4000_0000_0000_0000u128);
+        b.set(sem::xmm_ref(Xmm(0)), a);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::addsd_xmm_m64_sib(b, Xmm(0), Gpr(3), Gpr(1), 1))
+        .unwrap();
+    let v: u128 = env.backend.get(sem::xmm_ref(Xmm(0)));
+    assert_eq!(v, 0x4008_0000_0000_0000u128);
+}
+
+#[test]
 fn movzx_r32_r16_zero_extends() {
     // MOVZX EAX,BX: EBX=0x1234ABCD -> EAX=0xABCD。
     let mut env = env();

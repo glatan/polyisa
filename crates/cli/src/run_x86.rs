@@ -230,7 +230,6 @@ fn fetch_len(
                     | 0x57
                     | 0xFC
                     | 0x2A
-                    | 0x58
                     | 0x2F
                     | 0x2C
                     | 0x5C
@@ -238,6 +237,23 @@ fn fetch_len(
                 // XMM reg-direct のみ（66 接頭辞は剥がし済み）。
                 let m = third?;
                 if m >> 6 == 3 { Some(3) } else { None }
+            } else if s == 0x58 {
+                // ADDSD xmm,m64 (F2 0F 58 /r)。reg-direct (3B) と SIB mod=00 (4B、直接番地は disp32 付き 7B)。
+                let m = third?;
+                let md = m >> 6;
+                let rm = m & 7;
+                if md == 3 {
+                    Some(3)
+                } else if rm == 4 {
+                    let t = fourth?;
+                    if md == 0 {
+                        if t & 7 == 5 { Some(7) } else { Some(4) }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
             } else if s == 0x74 || s == 0xEB || s == 0xDA || s == 0x54 || s == 0x2E {
                 // PCMPEQB/POR/PMINUB/ANDPD/UCOMISD xmm,m (66 0F 74/EB/DA/54/2E /r)。reg-direct と mod=00/01/10 (SIBなし).
                 let m = third?;
@@ -1200,6 +1216,7 @@ pub fn run_mode(
                         | 0xBC
                         | 0xBD
                         | 0xB1
+                        | 0x58
                 )
             )
             || matches!(second, Some(0x40..=0x4F))
@@ -4612,6 +4629,14 @@ fn dispatch<B: Backend>(
         Insn::Cvtsi2sdR64 => sem::cvtsi2sd_r64(b, xmm_reg_r(), rm0f()),
         // ADDSD xmm,xmm (F2 0F 58 /r reg-direct)。F2 は剥がし済み.
         Insn::Addsd => sem::addsd_xmm(b, xmm_reg(), xmm_rm()),
+        Insn::AddsdM64Sib => {
+            // F2 0F 58 SIB mod=00 [base+index*scale] (4B)。no_index は [base].
+            if sib0f_no_index() {
+                sem::addsd_xmm_m64_memnd(b, xmm_reg(), sib0f_base())
+            } else {
+                sem::addsd_xmm_m64_sib(b, xmm_reg(), sib0f_base(), sib0f_idx(), sib0f_shift())
+            }
+        }
         // SUBSD xmm,xmm (F2 0F 5C /r reg-direct)。F2 は剥がし済み.
         Insn::Subsd => sem::subsd_xmm(b, xmm_reg(), xmm_rm()),
         // MULSD xmm,xmm (F2 0F 59 /r reg-direct)。F2 は剥がし済み.

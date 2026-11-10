@@ -10889,6 +10889,52 @@ pub fn addsd_xmm<B: Backend>(b: &mut B, dst: Xmm, src: Xmm) -> Flow<B> {
     Ok(())
 }
 
+/// ADDSD xmm,m64 [base] (F2 0F 58 mod=00)。[base] の倍精度を下位64に加える。上位64は dst のまま.
+pub fn addsd_xmm_m64_memnd<B: Backend>(b: &mut B, dst: Xmm, base: Gpr) -> Flow<B> {
+    use polyisa_sem::F64;
+    let a128: B::V<W128> = b.get(xmm_ref(dst));
+    let alo64: B::V<W64> = b.trunc::<W128, W64>(a128);
+    let a: B::V<F64> = b.trunc::<W64, F64>(alo64);
+    let addr = read64(b, base);
+    let m64: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let c: B::V<F64> = b.trunc::<W64, F64>(m64);
+    let v = b.fadd(a, c);
+    let vlo64: B::V<W64> = b.trunc::<F64, W64>(v);
+    let lo = b.zext::<W64, W128>(vlo64);
+    let hi_shift = b.konst::<W128>(64);
+    let hi = b.shr_l::<W128>(a128, hi_shift);
+    let hi_back = b.shl::<W128>(hi, hi_shift);
+    let res = b.or::<W128>(hi_back, lo);
+    b.set(xmm_ref(dst), res);
+    Ok(())
+}
+
+/// ADDSD xmm,m64 [base+index*scale] (F2 0F 58 SIB mod=00)。
+pub fn addsd_xmm_m64_sib<B: Backend>(
+    b: &mut B,
+    dst: Xmm,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+) -> Flow<B> {
+    use polyisa_sem::F64;
+    let a128: B::V<W128> = b.get(xmm_ref(dst));
+    let alo64: B::V<W64> = b.trunc::<W128, W64>(a128);
+    let a: B::V<F64> = b.trunc::<W64, F64>(alo64);
+    let addr = sib_addr_scaled(b, shift, 0, base, idx);
+    let m64: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let c: B::V<F64> = b.trunc::<W64, F64>(m64);
+    let v = b.fadd(a, c);
+    let vlo64: B::V<W64> = b.trunc::<F64, W64>(v);
+    let lo = b.zext::<W64, W128>(vlo64);
+    let hi_shift = b.konst::<W128>(64);
+    let hi = b.shr_l::<W128>(a128, hi_shift);
+    let hi_back = b.shl::<W128>(hi, hi_shift);
+    let res = b.or::<W128>(hi_back, lo);
+    b.set(xmm_ref(dst), res);
+    Ok(())
+}
+
 /// SUBSD xmm1, xmm2 (F2 0F 5C /r reg-direct)。下位64の倍精度減算。上位64は dst のまま.
 pub fn subsd_xmm<B: Backend>(b: &mut B, dst: Xmm, src: Xmm) -> Flow<B> {
     use polyisa_sem::F64;
