@@ -5794,6 +5794,31 @@ fn and_rm32_imm8_memnd_basic() {
 }
 
 #[test]
+fn ucomisd_mem8_compares() {
+    // UCOMISD xmm0,[RBX+0x10] (66 0F 2E 43 10): [mem]=2.0、xmm0=1.0 -> CF=1、ZF=0.
+    // seq の停止点 0x45b763 (RIP 形) と同じ意味論.
+    let mut env = env();
+    env.map_rw(0x2000, 1).unwrap();
+    env.backend.set(Gpr(3).state(), 0x2000);
+    env.backend
+        .mem
+        .write(VirtAddr(0x2010), &2.0f64.to_le_bytes())
+        .unwrap();
+    env.step(|b| {
+        let v = b.konst::<polyisa_sem::W128>(0x3FF0_0000_0000_0000);
+        b.set(sem::xmm_ref(sem::Xmm(0)), v);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::ucomisd_xmm_mem8(b, sem::Xmm(0), Gpr(3), 0x10))
+        .unwrap();
+    // 1.0 < 2.0 -> CF=1、ZF=0、PF=0.
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x1, 1);
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0);
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x4, 0);
+}
+
+#[test]
 fn and_rm32_imm8_sibd_indexed() {
     // ANDL $0,[RDI+RDX*4-4] (83 64 97 FC 00): head の停止点に対応.
     // RDI=0x2000、RDX=0x10、[0x203C]=0xFF -> 0.

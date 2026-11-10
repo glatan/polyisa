@@ -544,6 +544,11 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("comisd", "F1", "00001111 00101111 11......", "comisd xmm, xmm", "alu"),
         // UCOMISD xmm,xmm (66 0F 2E /r mod=11)。順序なしの旗は COMISD と等価のため意味論を共有する.
         ("ucomisd", "F1", "00001111 00101110 11......", "ucomisd xmm, xmm", "alu"),
+        // UCOMISD xmm,m64 mod=00/01/10/RIP (66 0F 2E)。COMISD と等価のため意味論を共有する.
+        ("ucomisd_memnd", "MR", "00001111 00101110 00......", "ucomisd xmm, m64", "load"),
+        ("ucomisd_mem8", "M8", "00001111 00101110 01...... ........", "ucomisd xmm, m64", "load"),
+        ("ucomisd_mem32", "M32", "00001111 00101110 10...... ................................", "ucomisd xmm, m64", "load"),
+        ("ucomisd_rip", "F1", "00001111 00101110 00...101 ................................", "ucomisd xmm, m64", "load"),
         // CVTTSD2SI r64,xmm (F2 REX.W 0F 2C /r reg-direct)。F2 接頭辞は実行側で剥がす.
         ("cvttsd2si_r64", "F1", "00001111 00101100 11......", "cvttsd2si r64, xmm", "load"),
         // PMINUB xmm,xmm (66 0F DA /r)。reg-direct のみ.

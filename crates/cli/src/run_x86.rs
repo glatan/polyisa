@@ -231,7 +231,6 @@ fn fetch_len(
                     | 0xFC
                     | 0x2A
                     | 0x58
-                    | 0x2E
                     | 0x2F
                     | 0x2C
                     | 0x5C
@@ -239,8 +238,8 @@ fn fetch_len(
                 // XMM reg-direct のみ（66 接頭辞は剥がし済み）。
                 let m = third?;
                 if m >> 6 == 3 { Some(3) } else { None }
-            } else if s == 0x74 || s == 0xEB || s == 0xDA || s == 0x54 {
-                // PCMPEQB/POR/PMINUB/ANDPD xmm,m128 (66 0F 74/EB/DA/54 /r)。reg-direct と mod=00/01/10 (SIBなし).
+            } else if s == 0x74 || s == 0xEB || s == 0xDA || s == 0x54 || s == 0x2E {
+                // PCMPEQB/POR/PMINUB/ANDPD/UCOMISD xmm,m (66 0F 74/EB/DA/54/2E /r)。reg-direct と mod=00/01/10 (SIBなし).
                 let m = third?;
                 let md = m >> 6;
                 let rm = m & 7;
@@ -1438,6 +1437,10 @@ pub fn run_mode(
                     | Insn::MovdqaLoadRip
                     | Insn::Comisd
                     | Insn::Ucomisd
+                    | Insn::UcomisdMemnd
+                    | Insn::UcomisdMem8
+                    | Insn::UcomisdMem32
+                    | Insn::UcomisdRip
                     | Insn::Andpd
                     | Insn::AndpdRip
                     // MOV [base],r16 (66 89 mod=00) は MovMemndEax を共用する.
@@ -4601,6 +4604,10 @@ fn dispatch<B: Backend>(
         Insn::Comisd => sem::comisd_xmm(b, xmm_reg(), xmm_rm()),
         // UCOMISD (66 0F 2E) は順序なしの旗が等価のため COMISD と意味論を共有する.
         Insn::Ucomisd => sem::comisd_xmm(b, xmm_reg(), xmm_rm()),
+        Insn::UcomisdMemnd => sem::ucomisd_xmm_memnd(b, xmm_reg(), rm0f()),
+        Insn::UcomisdMem8 => sem::ucomisd_xmm_mem8(b, xmm_reg(), rm0f(), disp8()),
+        Insn::UcomisdMem32 => sem::ucomisd_xmm_mem32(b, xmm_reg(), rm0f(), disp32()),
+        Insn::UcomisdRip => sem::ucomisd_xmm_rip(b, xmm_reg(), eip as u64 + nbytes, disp32()),
         // CVTTSD2SI r64,xmm (F2 REX.W 0F 2C /r reg-direct)。F2 は剥がし済み.
         Insn::Cvttsd2siR64 => sem::cvttsd2si_r64(b, reg0f_as_gpr(), xmm_rm_b()),
         Insn::BtR32Imm => {

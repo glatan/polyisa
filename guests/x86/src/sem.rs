@@ -10960,6 +10960,156 @@ pub fn comisd_xmm<B: Backend>(b: &mut B, dst: Xmm, src: Xmm) -> Flow<B> {
     Ok(())
 }
 
+/// UCOMISD xmm,m64 [base] (66 0F 2E mod=00)。非順序時は ZF=PF=CF=1.
+pub fn ucomisd_xmm_memnd<B: Backend>(b: &mut B, dst: Xmm, base: Gpr) -> Flow<B> {
+    use polyisa_sem::F64;
+    let a128: B::V<W128> = b.get(xmm_ref(dst));
+    let alo64: B::V<W64> = b.trunc::<W128, W64>(a128);
+    let a: B::V<F64> = b.trunc::<W64, F64>(alo64);
+    let addr = read64(b, base);
+    let m64: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let c: B::V<F64> = b.trunc::<W64, F64>(m64);
+    let one32 = b.konst::<W32>(1);
+    let zero32 = b.konst::<W32>(0);
+    let aa = b.feq(a, a);
+    let aa1 = b.select::<W32>(aa, one32, zero32);
+    let cc = b.feq(c, c);
+    let cc1 = b.select::<W32>(cc, one32, zero32);
+    let both = b.and::<W32>(aa1, cc1);
+    let u1 = b.xor::<W32>(both, one32);
+    let eq = b.feq(a, c);
+    let e1 = b.select::<W32>(eq, one32, zero32);
+    let lt = b.flt(a, c);
+    let l1 = b.select::<W32>(lt, one32, zero32);
+    let zf = b.or::<W32>(u1, e1);
+    let cf = b.or::<W32>(u1, l1);
+    let six = b.konst::<W32>(6);
+    let two = b.konst::<W32>(2);
+    let zf_sh = b.shl::<W32>(zf, six);
+    let pf_sh = b.shl::<W32>(u1, two);
+    let f: B::V<W32> = b.get(eflags_ref());
+    let clear = b.konst::<W32>(!(0x800 | 0x80 | 0x10 | 0x40 | 0x4 | 0x1));
+    let cleared = b.and::<W32>(f, clear);
+    let v1 = b.or::<W32>(cleared, zf_sh);
+    let v2 = b.or::<W32>(v1, pf_sh);
+    let v3 = b.or::<W32>(v2, cf);
+    b.set(eflags_ref(), v3);
+    Ok(())
+}
+
+/// UCOMISD xmm,m64 [base+disp8] (66 0F 2E mod=01)。
+pub fn ucomisd_xmm_mem8<B: Backend>(b: &mut B, dst: Xmm, base: Gpr, disp: i8) -> Flow<B> {
+    use polyisa_sem::F64;
+    let a128: B::V<W128> = b.get(xmm_ref(dst));
+    let alo64: B::V<W64> = b.trunc::<W128, W64>(a128);
+    let a: B::V<F64> = b.trunc::<W64, F64>(alo64);
+    let addr = eff_addr(b, base, disp);
+    let m64: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let c: B::V<F64> = b.trunc::<W64, F64>(m64);
+    let one32 = b.konst::<W32>(1);
+    let zero32 = b.konst::<W32>(0);
+    let aa = b.feq(a, a);
+    let aa1 = b.select::<W32>(aa, one32, zero32);
+    let cc = b.feq(c, c);
+    let cc1 = b.select::<W32>(cc, one32, zero32);
+    let both = b.and::<W32>(aa1, cc1);
+    let u1 = b.xor::<W32>(both, one32);
+    let eq = b.feq(a, c);
+    let e1 = b.select::<W32>(eq, one32, zero32);
+    let lt = b.flt(a, c);
+    let l1 = b.select::<W32>(lt, one32, zero32);
+    let zf = b.or::<W32>(u1, e1);
+    let cf = b.or::<W32>(u1, l1);
+    let six = b.konst::<W32>(6);
+    let two = b.konst::<W32>(2);
+    let zf_sh = b.shl::<W32>(zf, six);
+    let pf_sh = b.shl::<W32>(u1, two);
+    let f: B::V<W32> = b.get(eflags_ref());
+    let clear = b.konst::<W32>(!(0x800 | 0x80 | 0x10 | 0x40 | 0x4 | 0x1));
+    let cleared = b.and::<W32>(f, clear);
+    let v1 = b.or::<W32>(cleared, zf_sh);
+    let v2 = b.or::<W32>(v1, pf_sh);
+    let v3 = b.or::<W32>(v2, cf);
+    b.set(eflags_ref(), v3);
+    Ok(())
+}
+
+/// UCOMISD xmm,m64 [base+disp32] (66 0F 2E mod=10)。
+pub fn ucomisd_xmm_mem32<B: Backend>(b: &mut B, dst: Xmm, base: Gpr, disp: i32) -> Flow<B> {
+    use polyisa_sem::F64;
+    let a128: B::V<W128> = b.get(xmm_ref(dst));
+    let alo64: B::V<W64> = b.trunc::<W128, W64>(a128);
+    let a: B::V<F64> = b.trunc::<W64, F64>(alo64);
+    let addr = eff_addr32(b, base, disp);
+    let m64: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let c: B::V<F64> = b.trunc::<W64, F64>(m64);
+    let one32 = b.konst::<W32>(1);
+    let zero32 = b.konst::<W32>(0);
+    let aa = b.feq(a, a);
+    let aa1 = b.select::<W32>(aa, one32, zero32);
+    let cc = b.feq(c, c);
+    let cc1 = b.select::<W32>(cc, one32, zero32);
+    let both = b.and::<W32>(aa1, cc1);
+    let u1 = b.xor::<W32>(both, one32);
+    let eq = b.feq(a, c);
+    let e1 = b.select::<W32>(eq, one32, zero32);
+    let lt = b.flt(a, c);
+    let l1 = b.select::<W32>(lt, one32, zero32);
+    let zf = b.or::<W32>(u1, e1);
+    let cf = b.or::<W32>(u1, l1);
+    let six = b.konst::<W32>(6);
+    let two = b.konst::<W32>(2);
+    let zf_sh = b.shl::<W32>(zf, six);
+    let pf_sh = b.shl::<W32>(u1, two);
+    let f: B::V<W32> = b.get(eflags_ref());
+    let clear = b.konst::<W32>(!(0x800 | 0x80 | 0x10 | 0x40 | 0x4 | 0x1));
+    let cleared = b.and::<W32>(f, clear);
+    let v1 = b.or::<W32>(cleared, zf_sh);
+    let v2 = b.or::<W32>(v1, pf_sh);
+    let v3 = b.or::<W32>(v2, cf);
+    b.set(eflags_ref(), v3);
+    Ok(())
+}
+
+/// UCOMISD xmm,m64 [RIP+disp32] (66 0F 2E mod=00 rm=101)。
+pub fn ucomisd_xmm_rip<B: Backend>(b: &mut B, dst: Xmm, next_rip: u64, disp: i32) -> Flow<B> {
+    use polyisa_sem::F64;
+    let a128: B::V<W128> = b.get(xmm_ref(dst));
+    let alo64: B::V<W64> = b.trunc::<W128, W64>(a128);
+    let a: B::V<F64> = b.trunc::<W64, F64>(alo64);
+    let base = b.konst::<W64>(next_rip);
+    let d = b.konst::<W64>(disp as i64 as u64);
+    let addr = b.add::<W64>(base, d);
+    let m64: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let c: B::V<F64> = b.trunc::<W64, F64>(m64);
+    let one32 = b.konst::<W32>(1);
+    let zero32 = b.konst::<W32>(0);
+    let aa = b.feq(a, a);
+    let aa1 = b.select::<W32>(aa, one32, zero32);
+    let cc = b.feq(c, c);
+    let cc1 = b.select::<W32>(cc, one32, zero32);
+    let both = b.and::<W32>(aa1, cc1);
+    let u1 = b.xor::<W32>(both, one32);
+    let eq = b.feq(a, c);
+    let e1 = b.select::<W32>(eq, one32, zero32);
+    let lt = b.flt(a, c);
+    let l1 = b.select::<W32>(lt, one32, zero32);
+    let zf = b.or::<W32>(u1, e1);
+    let cf = b.or::<W32>(u1, l1);
+    let six = b.konst::<W32>(6);
+    let two = b.konst::<W32>(2);
+    let zf_sh = b.shl::<W32>(zf, six);
+    let pf_sh = b.shl::<W32>(u1, two);
+    let f: B::V<W32> = b.get(eflags_ref());
+    let clear = b.konst::<W32>(!(0x800 | 0x80 | 0x10 | 0x40 | 0x4 | 0x1));
+    let cleared = b.and::<W32>(f, clear);
+    let v1 = b.or::<W32>(cleared, zf_sh);
+    let v2 = b.or::<W32>(v1, pf_sh);
+    let v3 = b.or::<W32>(v2, cf);
+    b.set(eflags_ref(), v3);
+    Ok(())
+}
+
 /// CVTTSD2SI r64, xmm (F2 REX.W 0F 2C /r reg-direct)。倍精度を64ビット整数に切り捨て変換.
 pub fn cvttsd2si_r64<B: Backend>(b: &mut B, dst: Gpr, src: Xmm) -> Flow<B> {
     use polyisa_sem::F64;
