@@ -6033,6 +6033,59 @@ fn or_m32_r32_sib_ors() {
 }
 
 #[test]
+fn or_rm8_imm_mem8_ors() {
+    // ORB $0x0F,[RSP+0x10] (80 4C 24 10 0F): [0x2010]=0xF0 -> 0xFF、ZF=0.
+    // seq の停止点 0x45b828 (80 4C 04 F8 00) と同じ no_index 経路.
+    let mut env = env();
+    env.map_rw(0x2000, 1).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    env.backend.mem.write(VirtAddr(0x2010), &[0xF0u8]).unwrap();
+    env.step(|b| sem::or_rm8_imm_mem8(b, Gpr(4), 0x10, 0x0F))
+        .unwrap();
+    let mut back = [0u8; 1];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x2010),
+            &mut back,
+            Access {
+                endian: Endian::Le,
+                align: Align::Unaligned,
+                kind: AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(back[0], 0xFF);
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0);
+}
+
+#[test]
+fn or_rm8_imm_sibd_indexed() {
+    // ORB $0x0F,[RDI+RDX-4] (80 4C 97 FC 0F 相当): [0x203C]=0xF0 -> 0xFF.
+    let mut env = env();
+    env.map_rw(0x2000, 1).unwrap();
+    env.backend.set(Gpr(7).state(), 0x2000);
+    env.backend.set(Gpr(2).state(), 0x10);
+    env.backend.mem.write(VirtAddr(0x203C), &[0xF0u8]).unwrap();
+    env.step(|b| sem::or_rm8_imm_sibd(b, Gpr(7), Gpr(2), 2, -4, 0x0F))
+        .unwrap();
+    let mut back = [0u8; 1];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x203C),
+            &mut back,
+            Access {
+                endian: Endian::Le,
+                align: Align::Unaligned,
+                kind: AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(back[0], 0xFF);
+}
+
+#[test]
 fn test_rm16_sets_zf() {
     // TEST DX,DX (66 85 /r): DX=0 -> ZF=1. DX=1 -> ZF=0.
     let mut env = env();

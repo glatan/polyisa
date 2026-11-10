@@ -76,7 +76,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数116件。
-        assert_eq!(INSNS.len(), 564);
+        assert_eq!(INSNS.len(), 565);
     }
 
     #[test]
@@ -768,6 +768,10 @@ mod tests {
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x2B44B050, 32), Some(Insn::SubRSibd));
         assert_eq!(decode(0x2B44B050, 24), None);
+        // ORB [base+index*scale+disp8],imm8 (80 /1 SIB mod=01)。seq の停止点 0x45b828 に対応.
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x804C04F800, 40), Some(Insn::OrRm8ImmSibd));
+        assert_eq!(decode(0x804C04F800, 32), None);
         // MOVB [base+index*scale+disp8],imm8 (C6 /0 SIB mod=01)。
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0xC64428FE3A, 40), Some(Insn::MovRm8ImmSibd));
