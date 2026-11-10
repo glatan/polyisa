@@ -70,7 +70,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数116件。
-        assert_eq!(INSNS.len(), 469);
+        assert_eq!(INSNS.len(), 473);
     }
 
     #[test]
@@ -555,6 +555,23 @@ mod tests {
         // 長さ違いは一致しない。
         assert_eq!(decode(0x90, 16), None);
         assert_eq!(decode(0xFFFF_FFFF, 32), None);
+        // OR r/m8,imm8 reg-direct (80 /1 mod=11)。80 CD 08 は OR CH,8。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x80CD08, 24), Some(Insn::OrRm8Imm));
+        assert_eq!(decode(0x80C808, 24), Some(Insn::OrRm8Imm));
+        assert_eq!(decode(0x80CD08, 16), None);
+        // MOVQ xmm,[base+disp8] (F3 0F 7E mod=01)。F3 は実行側で剥がすため decode は 0F 7E から。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x0F7E4338, 32), Some(Insn::MovqXmmM64Mem8));
+        assert_eq!(decode(0x0F7E4338, 24), None);
+        // TEST m16,imm16 mod=00 [base] (66 F7 /0)。66 は実行側で剥がすため decode は F7 から。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0xF7030202, 32), Some(Insn::TestM16ImmMemnd));
+        assert_eq!(decode(0xF7030202, 24), None);
+        // MOVHPS xmm,[base+disp8] (0F 16 mod=01)。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x0F164338, 32), Some(Insn::MovhpsXmmM64Mem8));
+        assert_eq!(decode(0x0F164338, 24), None);
     }
 
     #[test]

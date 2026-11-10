@@ -490,6 +490,10 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("movq_m64_xmm_memnd", "MR", "00001111 11010110 00......", "movq m64, xmm", "store"),
         ("movq_m64_xmm_mem8", "M8", "00001111 11010110 01...... ........", "movq m64, xmm", "store"),
         ("movq_m64_xmm_mem32", "M32", "00001111 11010110 10...... ................................", "movq m64, xmm", "store"),
+        // MOVQ xmm,m64 mod=01 [base+disp8] (F3 0F 7E /r)。F3 接頭辞は実行側で剥がす。SIBなし.
+        ("movq_xmm_m64_mem8", "M8", "00001111 01111110 01...... ........", "movq xmm, m64", "load"),
+        // MOVHPS xmm,m64 mod=01 [base+disp8] (0F 16 /r)。SIBなし.
+        ("movhps_xmm_m64_mem8", "M8", "00001111 00010110 01...... ........", "movhps xmm, m64", "load"),
         // MOVAPS xmm,m128 mod=00/01/10/RIP (0F 28 /r)。SIBなし、MOVUPS と等価.
         ("movaps_load_memnd", "MR", "00001111 00101000 00......", "movaps xmm, m128", "load"),
         ("movaps_load_mem8", "M8", "00001111 00101000 01...... ........", "movaps xmm, m128", "load"),
@@ -518,10 +522,13 @@ pub fn build_model() -> polyisa_isadl::Model {
         // TEST r/m32,r32 (85 /r)。
         ("test_rm32", "F1", "10000101 11......", "test r/m32, r32", "alu"),
         ("test_rm32_imm", "F1", "11110111 11000... ................................", "test r/m32, {imm}", "alu"),
+        // TEST m16,imm16 mod=00 [base] (66 F7 /0)。66 接頭辞は実行側で剥がす.
+        ("test_m16_imm_memnd", "F1", "11110111 00000... ................", "test m16, {imm}", "alu"),
         ("not_rm32", "F1", "11110111 11010...", "not r/m32", "alu"),
         ("neg_rm32", "F1", "11110111 11011...", "neg r/m32", "alu"),
         ("test_rm8_imm", "F1", "11110110 11000... ........", "test r/m8, {imm}", "alu"),
         ("and_rm8_imm", "F1", "10000000 11100... ........", "and r/m8, {imm}", "alu"),
+        ("or_rm8_imm", "F1", "10000000 11001... ........", "or r/m8, {imm}", "alu"),
         ("cmp_rm8_imm", "F1", "10000000 11111... ........", "cmp r/m8, {imm}", "alu"),
         ("cmp_rm8_imm_sibd", "F1", "10000000 01111100 ........ ........ ........", "cmp r/m8, {imm}", "alu"),
         ("test_m8_imm_rip", "F1", "11110110 00000101 ................................ ........", "test m8, {imm}", "alu"),

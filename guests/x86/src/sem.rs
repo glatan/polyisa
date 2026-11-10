@@ -538,6 +538,16 @@ pub fn and_rm8_imm<B: Backend>(b: &mut B, dst: Gpr, imm: u8, high: bool) -> Flow
     Ok(())
 }
 
+/// OR r/m8,imm8。OR 結果で 5 旗を更新する（CF=0、OF=0）.
+pub fn or_rm8_imm<B: Backend>(b: &mut B, dst: Gpr, imm: u8, high: bool) -> Flow<B> {
+    let x = read8(b, dst, high);
+    let y = b.konst::<W8>(imm);
+    let v = b.or::<W8>(x, y);
+    write8(b, dst, high, v);
+    update_logic_flags(b, v);
+    Ok(())
+}
+
 /// CMP r/m8,imm8。メモリを読まずレジスタを比較し、6 旗を更新する.
 pub fn cmp_rm8_imm<B: Backend>(b: &mut B, dst: Gpr, imm: u8, high: bool) -> Flow<B> {
     use polyisa_sem::W8;
@@ -4060,6 +4070,30 @@ pub fn movq_xmm_m64_rip<B: Backend>(b: &mut B, dst: Xmm, next_rip: u64, disp: i3
     let addr = b.add::<W64>(base, d);
     let v64: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
     let v = b.zext::<W64, W128>(v64);
+    b.set(xmm_ref(dst), v);
+    Ok(())
+}
+
+/// MOVQ xmm,[base+disp8] (F3 0F 7E /r mod=01)。64ビットを XMM 下位に移し、上位64を消す.
+pub fn movq_xmm_m64_mem8<B: Backend>(b: &mut B, dst: Xmm, base: Gpr, disp: i8) -> Flow<B> {
+    let addr = eff_addr(b, base, disp);
+    let v64: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let v = b.zext::<W64, W128>(v64);
+    b.set(xmm_ref(dst), v);
+    Ok(())
+}
+
+/// MOVHPS xmm,[base+disp8] (0F 16 /r mod=01)。64ビットを XMM 上位に移し、下位64は保持する.
+pub fn movhps_xmm_m64_mem8<B: Backend>(b: &mut B, dst: Xmm, base: Gpr, disp: i8) -> Flow<B> {
+    let addr = eff_addr(b, base, disp);
+    let v64: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let cur: B::V<W128> = b.get(xmm_ref(dst));
+    let lo_mask = b.konst::<W128>(0xFFFF_FFFF_FFFF_FFFFu128);
+    let lo = b.and::<W128>(cur, lo_mask);
+    let hi64 = b.zext::<W64, W128>(v64);
+    let shift = b.konst::<W128>(64);
+    let hi = b.shl::<W128>(hi64, shift);
+    let v = b.or::<W128>(lo, hi);
     b.set(xmm_ref(dst), v);
     Ok(())
 }
@@ -9704,6 +9738,17 @@ pub fn test_m16_r16_memnd<B: Backend>(b: &mut B, base: Gpr, src: Gpr) -> Flow<B>
     let x: B::V<W16> = b.load::<W16>(addr, DATA_READ)?;
     let src32 = read(b, src);
     let y: B::V<W16> = b.trunc::<W32, W16>(src32);
+    let v = b.and::<W16>(x, y);
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// TEST m16,imm16 [base] (66 F7 /0 mod=00)。16ビット AND の結果で 5 旗を更新する（CF=0、OF=0）.
+pub fn test_m16_imm_memnd<B: Backend>(b: &mut B, base: Gpr, imm: u16) -> Flow<B> {
+    use polyisa_sem::W16;
+    let addr = read64(b, base);
+    let x: B::V<W16> = b.load::<W16>(addr, DATA_READ)?;
+    let y = b.konst::<W16>(imm);
     let v = b.and::<W16>(x, y);
     update_logic_flags(b, v);
     Ok(())

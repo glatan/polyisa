@@ -1829,6 +1829,22 @@ fn and_rm8_imm_high_byte() {
 }
 
 #[test]
+fn or_rm8_imm_high_byte() {
+    // OR CH,0x08: ECX=0x00000100 (CH=0x01) | 0x08 = 0x09 -> ECX=0x00000900.
+    // high=true は ECX の bit 8-15 (CH) を操作する.
+    let mut env = env();
+    env.backend.set(Gpr(1).state(), 0x100);
+    env.step(|b| sem::or_rm8_imm(b, Gpr(1), 0x08, true))
+        .unwrap();
+    assert_eq!(env.backend.get(Gpr(1).state()), 0x900);
+    // 低バイト (CL): ECX=0xF0 | 0x0F = 0xFF.
+    env.backend.set(Gpr(1).state(), 0xF0);
+    env.step(|b| sem::or_rm8_imm(b, Gpr(1), 0x0F, false))
+        .unwrap();
+    assert_eq!(env.backend.get(Gpr(1).state()) & 0xFF, 0xFF);
+}
+
+#[test]
 fn punpckldq_interleaves_dwords() {
     use polyisa_guest_x86::sem::Xmm;
     // dst=0xDDCCBBAA_44332211? Actually low 2 dwords: dst low=0x11111111,0x22222222; src low=0xAAAAAAAA,0xBBBBBBBB?
@@ -1876,6 +1892,76 @@ fn movq_m64_rip_roundtrip() {
         )
         .unwrap();
     assert_eq!(u64::from_le_bytes(back), 0x1122_3344_5566_7788);
+}
+
+#[test]
+fn movq_xmm_m64_mem8_loads_low64() {
+    use polyisa_guest_x86::sem::Xmm;
+    // MOVQ xmm0,[RBX+0x38]: [0x38]=0xAABBCCDDEEFF0011 -> xmm0 下位64、上位64は0.
+    let mut env = env();
+    env.map_rw(0, 1).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x38), &0xAABB_CCDD_EEFF_0011u64.to_le_bytes())
+        .unwrap();
+    // xmm0 上位に残骸を置き、消えることを確かめる.
+    env.step(|b| {
+        let v = b.konst::<polyisa_sem::W128>(0xFFFF_FFFF_FFFF_FFFF_0000_0000_0000_0000u128);
+        b.set(sem::xmm_ref(Xmm(0)), v);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::movq_xmm_m64_mem8(b, Xmm(0), Gpr(3), 0x38))
+        .unwrap();
+    let v: u128 = env.backend.get(sem::xmm_ref(Xmm(0)));
+    assert_eq!(v, 0xAABB_CCDD_EEFF_0011u128);
+}
+
+#[test]
+fn test_m16_imm_memnd_sets_zf() {
+    // TESTW [RBX],0x0202: [0]=0x0202 & 0x0202 = 0x0202 -> ZF=0。
+    let mut env = env();
+    env.map_rw(0, 1).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0), &0x0202u16.to_le_bytes())
+        .unwrap();
+    env.step(|b| sem::test_m16_imm_memnd(b, Gpr(3), 0x0202))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0);
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x1, 0);
+    // [0]=0x0100 & 0x0202 = 0 -> ZF=1。
+    env.backend
+        .mem
+        .write(VirtAddr(0), &0x0100u16.to_le_bytes())
+        .unwrap();
+    env.step(|b| sem::test_m16_imm_memnd(b, Gpr(3), 0x0202))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0x40);
+}
+
+#[test]
+fn movhps_xmm_m64_mem8_sets_high64() {
+    use polyisa_guest_x86::sem::Xmm;
+    // MOVHPS xmm0,[RBX+0x38]: 下位64は保持、上位64=[0x38].
+    // xmm0=0x1111222233334444、[0x38]=0xAABBCCDDEEFF0011
+    // -> 0xAABBCCDDEEFF0011_1111222233334444.
+    let mut env = env();
+    env.map_rw(0, 1).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x38), &0xAABB_CCDD_EEFF_0011u64.to_le_bytes())
+        .unwrap();
+    env.step(|b| {
+        let v = b.konst::<polyisa_sem::W128>(0x1111_2222_3333_4444u128);
+        b.set(sem::xmm_ref(Xmm(0)), v);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::movhps_xmm_m64_mem8(b, Xmm(0), Gpr(3), 0x38))
+        .unwrap();
+    let v: u128 = env.backend.get(sem::xmm_ref(Xmm(0)));
+    assert_eq!(v, 0xAABB_CCDD_EEFF_0011_1111_2222_3333_4444u128);
 }
 
 #[test]

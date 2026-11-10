@@ -199,7 +199,8 @@ fn fetch_len(
                     Some(3)
                 }
             } else if s == 0x7E {
-                // MOVQ r64,xmm (reg-direct) と MOVQ xmm,m64 RIP (mod=00 rm=101)。
+                // MOVQ r64,xmm (reg-direct) と MOVQ xmm,m64 RIP (mod=00 rm=101)、
+                // MOVQ xmm,[base+disp8] (mod=01、4B)。
                 // F3/66 接頭辞は剥がし済み。REX.W は dispatch で見る。
                 let m = third?;
                 let md = m >> 6;
@@ -208,6 +209,9 @@ fn fetch_len(
                     Some(3)
                 } else if md == 0 && rm == 5 {
                     Some(7)
+                } else if md == 1 && rm != 4 {
+                    // SIB (rm=100) は未対応.
+                    Some(4)
                 } else {
                     None
                 }
@@ -241,6 +245,12 @@ fn fetch_len(
                 } else {
                     Some(3)
                 }
+            } else if s == 0x16 {
+                // MOVHPS xmm,m64 (0F 16 /r)。mod=01 [base+disp8] (4B) のみ。SIBなし.
+                let m = third?;
+                let md = m >> 6;
+                let rm = m & 7;
+                if md == 1 && rm != 4 { Some(4) } else { None }
             } else if s == 0x10
                 || s == 0x11
                 || s == 0x28
@@ -530,7 +540,11 @@ fn fetch_len(
             let reg = (s >> 3) & 7;
             let rm = s & 7;
             if md == 3 {
-                if reg == 4 || reg == 7 { Some(3) } else { None }
+                if reg == 1 || reg == 4 || reg == 7 {
+                    Some(3)
+                } else {
+                    None
+                }
             } else if rm == 4 {
                 // SIB 付き。mod=01 SIB+disp8+imm8 (5B) の /7 CMP のみ.
                 // mod=00 SIB [base] (no_index, non-abs) +imm8 (4B) の /1 ORB のみ.
@@ -587,12 +601,20 @@ fn fetch_len(
                 Some(7)
             }
         }
-        // F7 /r (TEST/NOT/NEG/MUL/DIV)。reg-direct のみ.
+        // F7 /r (TEST/NOT/NEG/MUL/DIV)。reg-direct のみ。
         // /0 TEST は imm32 付きで 6B、/2 NOT・/3 NEG・/4 MUL・/6 DIV・/7 IDIV は 2B.
+        // 66 F7 /0 mod=00 [base] (TEST m16,imm16) は 66剥離後4B.
         0xF7 => {
             let s = second?;
             if s >> 6 != 3 {
-                None
+                let md = s >> 6;
+                let reg = (s >> 3) & 7;
+                let rm = s & 7;
+                if has66 && md == 0 && reg == 0 && rm != 4 && rm != 5 {
+                    Some(4)
+                } else {
+                    None
+                }
             } else {
                 let reg = (s >> 3) & 7;
                 if reg == 0 {
@@ -929,6 +951,7 @@ pub fn run_mode(
                             | 0x73
                             | 0x74
                             | 0x76
+                            | 0x16
                             | 0x7E
                             | 0xD7
                             | 0xDA
@@ -1151,6 +1174,7 @@ pub fn run_mode(
                 Insn::Nop
                     | Insn::Nopl
                     | Insn::TestRm32
+                    | Insn::TestM16ImmMemnd
                     | Insn::MovdXmm
                     | Insn::MovdXmmM32
                     | Insn::MovdXmmRip
@@ -2429,6 +2453,11 @@ fn dispatch<B: Backend>(
                 sem::test_rm32_imm(b, rm(), imm32())
             }
         }
+        Insn::TestM16ImmMemnd => {
+            // 66 F7 /0 mod=00 [base],imm16 (66剥離後4B)。imm は最下位16 LE.
+            let imm = ((word & 0xffff) as u16).swap_bytes();
+            sem::test_m16_imm_memnd(b, rm(), imm)
+        }
         Insn::NotRm32 => {
             if rex_w {
                 sem::not_rm64(b, rm())
@@ -2465,6 +2494,18 @@ fn dispatch<B: Backend>(
                 (Gpr(rm_f - 4), true)
             };
             sem::and_rm8_imm(b, dst, (word & 0xff) as u8, high)
+        }
+        Insn::OrRm8Imm => {
+            // 80 /1 reg-direct。REXありは低8ビット、なしの4-7は上位8ビット.
+            let rm_f = modrm() & 7;
+            let (dst, high) = if rex != 0 {
+                (Gpr(rm_f | ((rex & 1) << 3)), false)
+            } else if rm_f < 4 {
+                (Gpr(rm_f), false)
+            } else {
+                (Gpr(rm_f - 4), true)
+            };
+            sem::or_rm8_imm(b, dst, (word & 0xff) as u8, high)
         }
         Insn::CmpRm8Imm => {
             let rm_f = modrm() & 7;
@@ -3720,6 +3761,10 @@ fn dispatch<B: Backend>(
                 sem::movq_xmm_m64_abs(b, xmm_reg(), imm32())
             }
         }
+        // MOVQ xmm,[base+disp8] (F3 0F 7E mod=01、4B)。dst は reg フィールド.
+        Insn::MovqXmmM64Mem8 => sem::movq_xmm_m64_mem8(b, xmm_reg(), rm0f(), disp8()),
+        // MOVHPS xmm,[base+disp8] (0F 16 mod=01、4B)。dst は reg フィールド.
+        Insn::MovhpsXmmM64Mem8 => sem::movhps_xmm_m64_mem8(b, xmm_reg(), rm0f(), disp8()),
         Insn::Pshufd => {
             let imm = (word & 0xff) as u8;
             // F2 接頭辞では PSHUFLW として振る舞う (0F 70 共有のため Insn を共用).
@@ -5739,6 +5784,57 @@ impl TrapHandler for CliLinux {
             set64(env, Gpr(0), need);
             return TrapOutcome::Handled;
         }
+        if self.is64 && nr == polyisa_os_linux::x86_64::FSTAT {
+            // fstat(fd, struct stat *)。x86-64 struct stat (144B) を書く.
+            // レイアウトは musl/glibc 共通のカーネル ABI 由来である.
+            // ホスト依存の詳細は std の可搬 API だけでは取れないため、
+            // 種別 (st_mode) と大きさ (st_size) のみ実値を入れ、残りは 0 とする.
+            // Ref: SRC-LINUX (7.3).
+            let fd = get64(env, r_a) as u32;
+            let stat_addr = get64(env, r_b);
+            let meta: std::io::Result<std::fs::Metadata> = if fd <= 2 {
+                std::fs::metadata(format!("/proc/self/fd/{fd}"))
+            } else {
+                let slot = fd.wrapping_sub(3) as usize;
+                match self.fds.get(slot).and_then(|f| f.as_ref()) {
+                    Some(f) => f.metadata(),
+                    None => {
+                        set64(env, Gpr(0), neg(EBADF));
+                        return TrapOutcome::Handled;
+                    }
+                }
+            };
+            let m = match meta {
+                Ok(m) => m,
+                Err(_) => {
+                    set64(env, Gpr(0), neg(EBADF));
+                    return TrapOutcome::Handled;
+                }
+            };
+            let mut st = [0u8; 144];
+            // S_IFDIR/S_IFREG/S_IFLNK。fifo 等の判別は可搬 API にないため、
+            // ディレクトリでもシンボリックリンクでもなければ通常ファイルとみなす.
+            // 許可ビットは所有者の読み書き実行を仮定する（試作）。
+            const S_IFDIR: u32 = 0o040000;
+            const S_IFREG: u32 = 0o100000;
+            const S_IFLNK: u32 = 0o120000;
+            let ft = m.file_type();
+            let kind = if ft.is_dir() {
+                S_IFDIR
+            } else if ft.is_symlink() {
+                S_IFLNK
+            } else {
+                S_IFREG
+            };
+            st[24..28].copy_from_slice(&(kind | 0o700).to_le_bytes());
+            st[48..56].copy_from_slice(&(m.len() as i64).to_le_bytes());
+            // 残り (st_dev/st_ino/st_nlink/st_uid/st_gid/st_rdev/時刻等) は 0 のまま.
+            if env.backend.mem.write(VirtAddr(stat_addr), &st).is_err() {
+                return TrapOutcome::Unimplemented;
+            }
+            set64(env, Gpr(0), 0);
+            return TrapOutcome::Handled;
+        }
         if nr == polyisa_os_linux::x86_64::MPROTECT && self.is64
             || nr == polyisa_os_linux::i386::MPROTECT && !self.is64
         {
@@ -6468,6 +6564,32 @@ mod tests {
         set64(&mut env, Gpr(6), 1);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(ERANGE));
+    }
+
+    #[test]
+    fn fstat_stdout_writes_stat() {
+        use polyisa_os_linux::x86_64 as abi;
+        let mut sys = CliLinux::x86_64();
+        let mut env = bare();
+        // fstat(1, 0x100) は 0 を返し、struct stat (144B) を書く。
+        set64(&mut env, Gpr(0), abi::FSTAT);
+        set64(&mut env, Gpr(7), 1);
+        set64(&mut env, Gpr(6), 0x100);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        let mut back = [0u8; 144];
+        env.backend
+            .mem
+            .read(VirtAddr(0x100), &mut back, data_access())
+            .unwrap();
+        // st_mode (オフセット 24) は何かしら非0のはず。
+        assert_ne!(u32::from_le_bytes(back[24..28].try_into().unwrap()), 0);
+        // 不正 fd は EBADF。
+        set64(&mut env, Gpr(0), abi::FSTAT);
+        set64(&mut env, Gpr(7), 99);
+        set64(&mut env, Gpr(6), 0x100);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EBADF));
     }
 
     #[test]
