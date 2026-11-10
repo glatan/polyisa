@@ -1545,6 +1545,8 @@ pub fn run_mode(
                     | Insn::MovMemEax8
                     // ADD m16,imm8 SIB (66 83 /0 mod=00).
                     | Insn::AddM16ImmSib
+                    // AND m16,imm8 SIB+disp8 (66 83 /4 mod=01).
+                    | Insn::AndRmImm8Sibd
             )
         {
             return Outcome::Unimplemented {
@@ -3860,11 +3862,15 @@ fn dispatch<B: Backend>(
             let idx = Gpr(idx_raw | (((rex >> 1) & 1) << 3));
             let base = Gpr((sib_v & 7) | ((rex & 1) << 3));
             if idx_raw == 4 && (rex >> 1) & 1 == 0 {
-                if rex_w {
+                if has66 {
+                    sem::and_m16_imm8_mem8(b, base, d8, imm)
+                } else if rex_w {
                     sem::and_rm64_imm8_mem8(b, base, d8, imm)
                 } else {
                     sem::and_rm32_imm8_mem8(b, base, d8, imm)
                 }
+            } else if has66 {
+                sem::and_m16_imm8_sibd(b, base, idx, shift, d8, imm)
             } else if rex_w {
                 sem::and_rm64_imm8_sibd(b, base, idx, shift, d8, imm)
             } else {

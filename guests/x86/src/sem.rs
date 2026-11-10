@@ -11815,6 +11815,37 @@ pub fn and_rm64_imm8_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8, imm: i8) -
     Ok(())
 }
 
+/// AND m16,imm8 [base+disp8] (66 83 /4 mod=01)。16ビット AND で書戻す.
+pub fn and_m16_imm8_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8, imm: i8) -> Flow<B> {
+    use polyisa_sem::W16;
+    let addr = eff_addr(b, base, disp);
+    let x: B::V<W16> = b.load::<W16>(addr, DATA_READ)?;
+    let y = b.konst::<W16>(imm as i16 as u16);
+    let v = b.and::<W16>(x, y);
+    b.store::<W16>(addr, v, DATA_WRITE)?;
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// AND m16,imm8 [base+index*scale+disp8] (66 83 /4 SIB mod=01)。
+pub fn and_m16_imm8_sibd<B: Backend>(
+    b: &mut B,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i8,
+    imm: i8,
+) -> Flow<B> {
+    use polyisa_sem::W16;
+    let addr = sib_addr_scaled(b, shift, disp as i32, base, idx);
+    let x: B::V<W16> = b.load::<W16>(addr, DATA_READ)?;
+    let y = b.konst::<W16>(imm as i16 as u16);
+    let v = b.and::<W16>(x, y);
+    b.store::<W16>(addr, v, DATA_WRITE)?;
+    update_logic_flags(b, v);
+    Ok(())
+}
+
 /// AND m32,imm8 [base+index*scale+disp8] (83 /4 SIB mod=01)。
 pub fn and_rm32_imm8_sibd<B: Backend>(
     b: &mut B,
