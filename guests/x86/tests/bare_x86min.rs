@@ -6736,6 +6736,20 @@ fn or_r8_m8_mem8_ors() {
 }
 
 #[test]
+fn or_r8_m8_rip_ors() {
+    // OR AL,[RIP+disp] (0A 05 + disp32): find 0x5c44a7 対応.
+    // next_rip=0x1006、disp=0x1FFA -> [0x3000]=0x0F、AL=0xF0 -> AL=0xFF.
+    let mut env = env();
+    env.map_rw(0x3000, 1).unwrap();
+    env.backend.set(Gpr(0).state(), 0xF0);
+    env.backend.mem.write(VirtAddr(0x3000), &[0x0Fu8]).unwrap();
+    env.step(|b| sem::or_r8_m8_rip(b, Gpr(0), false, 0x1006, 0x1FFA))
+        .unwrap();
+    assert_eq!(env.backend.get(Gpr(0).state()) & 0xFF, 0xFF);
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0);
+}
+
+#[test]
 fn or_r8_r8_ors() {
     // OR AL,BL (0A C3): AL=0xF0、BL=0x0F -> AL=0xFF.
     let mut env = env();

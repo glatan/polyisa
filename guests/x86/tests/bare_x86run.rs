@@ -3648,6 +3648,33 @@ fn run_or_r8_m8_sibd() {
 }
 
 #[test]
+fn run_or_r8_m8_rip() {
+    // run 経由で 0A 05 + disp32 (OR AL,[RIP]) を回す。find 0x5c44a7 対応.
+    // next_rip=0x1006、disp=0xFFA -> [0x2000]=0x0F、AL=0xF0 -> AL=0xFF、exit(0)。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(0).state(), 0xF0);
+    env.backend.mem.write(VirtAddr(0x2000), &[0x0Fu8]).unwrap();
+    let prog: &[u8] = &[
+        0x0A, 0x05, 0xFA, 0x0F, 0x00, 0x00, // or al,[rip+0xFFA]
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
+        0x0F, 0x05, // syscall -> exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0));
+    // AL は exit 系列で潰れるため flags で確認: 0xFF -> ZF=0.
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x40,
+        0
+    );
+}
+
+#[test]
 fn run_or_r8_r8() {
     // run 経由で 0A C3 (OR AL,BL) を回す。
     // AL=0xF0、BL=0x0F -> AL=0xFF になり、exit(0)。

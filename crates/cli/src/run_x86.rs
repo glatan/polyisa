@@ -695,7 +695,7 @@ fn fetch_len(
                 Some(2)
             }
         }
-        // 0x0A /r (OR r8,r/m8)。reg-direct 2B、SIB mod=01 +disp8 4B。SIBなし・他modは未対応.
+        // 0x0A /r (OR r8,r/m8)。reg-direct 2B、SIB mod=01 +disp8 4B、RIP 6B.
         0x0A => {
             let s = second?;
             let md = s >> 6;
@@ -704,6 +704,9 @@ fn fetch_len(
                 Some(2)
             } else if md == 1 && rm == 4 {
                 Some(4)
+            } else if md == 0 && rm == 5 {
+                // OR r8,[RIP+disp32] (0A 05 + disp32)。find 0x5c44a7 対応.
+                Some(6)
             } else {
                 None
             }
@@ -3442,6 +3445,19 @@ fn dispatch<B: Backend>(
             } else {
                 sem::or_r8_m8_sibd(b, dst, dst_high, base, idx, shift, d8)
             }
+        }
+        Insn::OrR8M8Rip => {
+            // 0A 05 + disp32 (48b)。find 0x5c44a7 対応。dst は reg フィールド.
+            // REX なしの reg 4-7 は上位8ビット。
+            let reg_f = (modrm() >> 3) & 7;
+            let (dst, dst_high) = if rex != 0 {
+                (Gpr(reg_f | ((rex >> 2) & 1) << 3), false)
+            } else if reg_f < 4 {
+                (Gpr(reg_f), false)
+            } else {
+                (Gpr(reg_f - 4), true)
+            };
+            sem::or_r8_m8_rip(b, dst, dst_high, eip as u64 + nbytes, disp32())
         }
         Insn::OrR8R8 => {
             // 0A /r mod=11 reg-direct。dst は reg、src は rm フィールド (REX.R/B で拡張)。

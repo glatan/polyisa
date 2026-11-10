@@ -7122,6 +7122,26 @@ pub fn or_r8_r8<B: Backend>(
     Ok(())
 }
 
+/// OR r8,m8 RIP (0A 05 + disp32)。find 0x5c44a7 対応.
+pub fn or_r8_m8_rip<B: Backend>(
+    b: &mut B,
+    dst: Gpr,
+    dst_high: bool,
+    next_rip: u64,
+    disp: i32,
+) -> Flow<B> {
+    use polyisa_sem::W8;
+    let base = b.konst::<W64>(next_rip);
+    let d = b.konst::<W64>(disp as i64 as u64);
+    let addr = b.add::<W64>(base, d);
+    let y: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
+    let x = read8(b, dst, dst_high);
+    let v = b.or::<W8>(x, y);
+    write8(b, dst, dst_high, v);
+    update_logic_flags(b, v);
+    Ok(())
+}
+
 /// MOVZX r32,r16 reg-direct (0F B7)。16ビットを読んでゼロ拡張する.
 pub fn movzx_r32_r16<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
     use polyisa_sem::W16;

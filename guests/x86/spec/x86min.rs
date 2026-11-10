@@ -1713,6 +1713,15 @@ pub fn build_model() -> polyisa_isadl::Model {
             "mov r8, [rip]",
             "load",
         ),
+        // OR r8,m8 RIP (0A 05 + disp32)。find 0x5c44a7 対応.
+        (
+            "or_r8_m8_rip",
+            "F1",
+            "00001010 00...101 ................................",
+            vec![],
+            "or r8, m8",
+            "load",
+        ),
         (
             "mov_r8_m8",
             "F1",
