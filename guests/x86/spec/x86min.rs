@@ -518,8 +518,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("movzx_r32_r16", "F1", "00001111 10110111 11......", "movzx r32, r16", "load"),
         // BT r32,imm8 (0F BA /4 ib reg-direct)。
         ("bt_r32_imm", "F1", "00001111 10111010 11100... ........", "bt r32, {imm}", "alu"),
-        // BT m32,imm8 [RDI] (0F BA 27 ib)。mod=00 RDI固定のためF1で足りる.
-        ("bt_m32_imm", "F1", "00001111 10111010 00100111 ........", "bt m32, {imm}", "alu"),
+        // BT m32,imm8 mod=00 [base] (0F BA /4)。SIB/RIP は取得長で分離するため固定不要.
+        ("bt_m32_imm", "F1", "00001111 10111010 00100... ........", "bt m32, {imm}", "alu"),
         // BT m32,imm8 SIB mod=01 [base+disp8] (0F BA /4 + ModRM + SIB + disp8 + imm8)。
         ("bt_m32_imm_sibd", "F1", "00001111 10111010 01100100 ........ ........ ........", "bt m32, {imm}", "alu"),
         // BTS r32/r64,imm8 (0F BA /5 ib reg-direct)。REX.W で64ビット.
