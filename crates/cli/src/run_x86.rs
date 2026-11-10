@@ -841,6 +841,10 @@ fn fetch_len(
                 } else if md == 1 && reg == 6 && rm != 4 {
                     // DIV r/m32 mod=01 [base+disp8] (3B: F7 /6 + ModRM + disp8).
                     Some(3)
+                } else if md == 1 && reg == 6 && rm == 4 {
+                    // DIV r/m32 SIB mod=01 [base+index*scale+disp8] (4B: F7 /6 + ModRM + SIB + disp8).
+                    let _ = third?;
+                    Some(4)
                 } else {
                     None
                 }
@@ -1202,6 +1206,7 @@ pub fn run_mode(
                 | 0x1B
                 | 0x80
                 | 0xF6
+                | 0xF7
                 | 0xFF
         ) && matches!(second, Some(s) if s & 7 == 4 && s >> 6 != 3))
             || (head[0] == 0x0F
@@ -4771,6 +4776,14 @@ fn dispatch<B: Backend>(
             }
         }
         Insn::DivRm32Mem8 => sem::div_rm32_mem8(b, eip, rm(), disp8()),
+        Insn::DivRm32Sibd => {
+            // F7 /6 SIB mod=01 [base+index*scale+disp8]。no_index は [base+disp8].
+            if no_index() {
+                sem::div_rm32_mem8(b, eip, sib_base(), disp8())
+            } else {
+                sem::div_rm32_sibd(b, eip, sib_base(), sib_idx(), sib_shift(), disp8())
+            }
+        }
         Insn::IdivRm32 => sem::idiv_rm32(b, eip, rm()),
         Insn::Movsb => {
             if rep {
@@ -6468,7 +6481,16 @@ fn dispatch<B: Backend>(
             }
         }
         // 32ビット DIV/MUL/IDIV のみゼロ拡張する。64ビット DIV (REX.W) は full64 のため消さない.
-        if !rex_w && matches!(insn, Insn::MulRm32 | Insn::DivRm32 | Insn::IdivRm32) {
+        if !rex_w
+            && matches!(
+                insn,
+                Insn::MulRm32
+                    | Insn::DivRm32
+                    | Insn::IdivRm32
+                    | Insn::DivRm32Mem8
+                    | Insn::DivRm32Sibd
+            )
+        {
             sem::clear_hi(b, Gpr(0));
             sem::clear_hi(b, Gpr(2));
         }

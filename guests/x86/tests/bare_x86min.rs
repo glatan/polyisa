@@ -999,6 +999,25 @@ fn div_rm32_mem8_quotient_remainder() {
 }
 
 #[test]
+fn div_rm32_sibd_quotient_remainder() {
+    // DIV SIB: EDX:EAX=17 / [RSP+ECX*1+0x0C]=5 → EAX=3、EDX=2。ECX=0.
+    let mut env = env();
+    env.map_rw(0, 1).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x10C), &5u32.to_le_bytes())
+        .unwrap();
+    env.backend.set(Gpr(4).state(), 0x100);
+    env.backend.set(Gpr(1).state(), 0);
+    env.backend.set(Gpr(2).state(), 0);
+    env.backend.set(Gpr(0).state(), 17);
+    env.step(|b| sem::div_rm32_sibd(b, 0x1000, Gpr(4), Gpr(1), 0, 0x0C))
+        .unwrap();
+    assert_eq!(eax(&mut env), 3);
+    assert_eq!(env.backend.get(Gpr(2).state()), 2);
+}
+
+#[test]
 fn div_by_zero_traps() {
     use polyisa_engine::interp::InterpExit;
     use polyisa_sem::ExceptionKind;
