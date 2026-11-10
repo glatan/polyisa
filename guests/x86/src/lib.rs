@@ -76,7 +76,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数117件。
-        assert_eq!(INSNS.len(), 600);
+        assert_eq!(INSNS.len(), 601);
     }
 
     #[test]
@@ -302,6 +302,11 @@ mod tests {
         assert_eq!(decode(0x80F908, 24), Some(Insn::CmpRm8Imm));
         assert_eq!(decode(0xBCFFFFFFFFFFFFFFFF, 72), Some(Insn::MovR64Imm64));
         assert_eq!(decode(0xC785000000000000, 64), Some(Insn::MovRm16ImmM32));
+        // MOVW SIB+disp8 (66 C7 /0 SIB mod=01)。stat 0x5af402 対応.
+        // 66 C7 44 24 11 53 00 は [RSP+0x11]=0x53。66 剥がし済み.
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0xC74424115300, 48), Some(Insn::MovRm16ImmSibd));
+        assert_eq!(decode(0xC74424115300, 40), None);
         assert_eq!(decode(0xF6C110, 24), Some(Insn::TestRm8Imm));
         assert_eq!(decode(0xA801, 16), Some(Insn::TestAlImm));
         assert_eq!(decode(0xF6050000000002, 56), Some(Insn::TestM8ImmRip));

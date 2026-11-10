@@ -1618,6 +1618,7 @@ pub fn run_mode(
                     | Insn::MovAbsEax
                     | Insn::MovEaxAbs
                     | Insn::MovRm16ImmM32
+                    | Insn::MovRm16ImmSibd
                     | Insn::AndAxImm16
                     | Insn::CmpAxImm16
                     | Insn::AddRm16Imm
@@ -1675,6 +1676,7 @@ pub fn run_mode(
                     | Insn::Punpcklqdq
                     | Insn::MovqR64Xmm
                     | Insn::MovRm16ImmM32
+                    | Insn::MovRm16ImmSibd
                     | Insn::MovntdqStoreMemnd
                     | Insn::MovntdqStoreMem8
                     | Insn::MovdqaLoadRip
@@ -5454,6 +5456,22 @@ fn dispatch<B: Backend>(
             let disp = ((word >> 16) as u32).swap_bytes() as i32;
             let imm = ((word & 0xffff) as u16).swap_bytes();
             sem::mov_rm16_imm_mem32(b, Gpr(5 | ((rex & 1) << 3)), disp, imm)
+        }
+        Insn::MovRm16ImmSibd => {
+            // 66 C7 44 24 11 53 00 SIB+disp8+imm16 (48b+66)。stat 0x5af402 対応.
+            // SIB は (word>>24) 下位8、disp は (word>>16) 下位8、imm は最下位16 LE.
+            let sib_v = ((word >> 24) & 0xff) as u8;
+            let d8 = ((word >> 16) & 0xff) as u8 as i8;
+            let imm = ((word & 0xffff) as u16).swap_bytes();
+            let shift = ((sib_v >> 6) & 3) as u32;
+            let idx_raw = (sib_v >> 3) & 7;
+            let idx = Gpr(idx_raw | (((rex >> 1) & 1) << 3));
+            let base = Gpr((sib_v & 7) | ((rex & 1) << 3));
+            if idx_raw == 4 && (rex >> 1) & 1 == 0 {
+                sem::mov_m16_imm_mem8(b, base, d8, imm)
+            } else {
+                sem::mov_m16_imm_sibd(b, base, idx, shift, d8, imm)
+            }
         }
         Insn::MovRmImmRip => {
             // C7 05 + disp32 + imm32 (mod=00 RIP)。disp は上位32、imm は下位32.

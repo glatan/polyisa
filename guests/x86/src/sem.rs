@@ -5322,6 +5322,31 @@ pub fn mov_rm16_imm_mem32<B: Backend>(b: &mut B, base: Gpr, disp: i32, imm: u16)
     Ok(())
 }
 
+/// MOV m16,imm16 [base+disp8] (66 C7 /0 mod=01)。stat 0x5af402 対応.
+pub fn mov_m16_imm_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8, imm: u16) -> Flow<B> {
+    use polyisa_sem::W16;
+    let addr = eff_addr(b, base, disp);
+    let v = b.konst::<W16>(imm);
+    b.store::<W16>(addr, v, DATA_WRITE)?;
+    Ok(())
+}
+
+/// MOV m16,imm16 [base+index*scale+disp8] (66 C7 /0 SIB mod=01)。stat 0x5af402 対応.
+pub fn mov_m16_imm_sibd<B: Backend>(
+    b: &mut B,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i8,
+    imm: u16,
+) -> Flow<B> {
+    use polyisa_sem::W16;
+    let addr = sib_addr_scaled(b, shift, disp as i32, base, idx);
+    let v = b.konst::<W16>(imm);
+    b.store::<W16>(addr, v, DATA_WRITE)?;
+    Ok(())
+}
+
 pub fn mov_rm32_imm_mem32<B: Backend>(b: &mut B, base: Gpr, disp: i32, imm: u32) -> Flow<B> {
     let addr = eff_addr32(b, base, disp);
     let v = b.konst::<W32>(imm);

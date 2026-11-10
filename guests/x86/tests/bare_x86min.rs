@@ -3309,6 +3309,31 @@ fn c7_16bit_stores() {
 }
 
 #[test]
+fn c7_16bit_sibd_stores() {
+    // 66 C7 [RSP+0x11],0x53: stat 0x5af402 対応。[0x111]=0x53.
+    let mut env = env();
+    env.map_rw(0, 1).unwrap();
+    env.backend.set(Gpr(4).state(), 0x100);
+    env.backend.set(Gpr(2).state(), 0);
+    env.step(|b| sem::mov_m16_imm_sibd(b, Gpr(4), Gpr(2), 0, 0x11, 0x53))
+        .unwrap();
+    let mut back = [0u8; 2];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x111),
+            &mut back,
+            Access {
+                endian: Endian::Le,
+                align: Align::Unaligned,
+                kind: AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(u16::from_le_bytes(back), 0x53);
+}
+
+#[test]
 fn cmove_moves_on_z() {
     // CMOVE: ZF=1 で mov、ZF=0 で保持.
     let mut env = env();
