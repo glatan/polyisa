@@ -76,7 +76,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数117件。
-        assert_eq!(INSNS.len(), 579);
+        assert_eq!(INSNS.len(), 580);
     }
 
     #[test]

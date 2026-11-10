@@ -4083,6 +4083,15 @@ fn dispatch<B: Backend>(
         }
         Insn::CmpRm32Imm => sem::cmp_rm32_imm(b, rm(), imm32()),
         Insn::CmpRm64Imm => sem::cmp_rm64_imm(b, rm(), imm32()),
+        Insn::CmpRm32ImmMemnd => {
+            // 81 /7 mod=00 [base],imm32 (48b)。imm は下位32 LE.
+            let imm = ((word & 0xffff_ffff) as u32).swap_bytes();
+            if rex_w {
+                sem::cmp_rm64_imm_memnd(b, rm(), imm)
+            } else {
+                sem::cmp_rm32_imm_memnd(b, rm(), imm)
+            }
+        }
         Insn::AddRRip => {
             if rex_w {
                 sem::add_r64_rip(b, reg(), eip as u64 + nbytes, disp32())

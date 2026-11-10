@@ -2383,6 +2383,36 @@ fn or_rm32_imm_mem8_ors() {
 }
 
 #[test]
+fn cmp_rm32_imm_memnd_sets_flags() {
+    // CMP [RBX],0x2100: [0]=0x2100 -> ZF=1。dst は書かない.
+    let mut env = env();
+    env.map_rw(0, 1).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0), &0x2100u32.to_le_bytes())
+        .unwrap();
+    env.backend.set(Gpr(3).state(), 0);
+    env.backend.set(sem::eflags_ref(), 0);
+    env.step(|b| sem::cmp_rm32_imm_memnd(b, Gpr(3), 0x2100))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0x40);
+    let mut back = [0u8; 4];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0),
+            &mut back,
+            Access {
+                endian: Endian::Le,
+                align: Align::Unaligned,
+                kind: AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(u32::from_le_bytes(back), 0x2100);
+}
+
+#[test]
 fn and_m16_imm8_mem8_zeroes() {
     // ANDW [RBX+0x10],0x00: [0x110]=0xFFFF -> [0x110]=0x0000、ZF=1。
     let mut env = env();
