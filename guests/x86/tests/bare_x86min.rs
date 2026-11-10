@@ -6002,6 +6002,36 @@ fn cmp_r32_sibd_indexed_sets_flags() {
 }
 
 #[test]
+fn cmp_r64_sibd32_indexed_sets_flags() {
+    // CMP RBX,[R12+RAX*8+0x98]: [0x2118]=7、RBX=7 -> ZF=1。
+    let mut env = env();
+    env.map_rw(0x2000, 1).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2118), &7u64.to_le_bytes())
+        .unwrap();
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(12), 0x2000);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(0), 0x10);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(3), 7);
+        Ok(())
+    })
+    .unwrap();
+    env.backend.set(sem::eflags_ref(), 0);
+    env.step(|b| sem::cmp_r64_sibd32(b, Gpr(3), Gpr(12), Gpr(0), 3, 0x98))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0x40);
+}
+
+#[test]
 fn cmp_m32_r32_sibd_indexed_sets_flags() {
     // CMP [R8+RCX*4-8],EAX (41 39 44 88 F8): head のループ停止点に対応.
     // R8=0x2000、RCX=0x10、[0x2038]=10、EAX=10 -> ZF=1.

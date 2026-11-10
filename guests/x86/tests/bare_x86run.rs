@@ -5330,3 +5330,42 @@ fn run_bt_m32_imm_sibd_sets_cf() {
         0x1
     );
 }
+
+#[test]
+fn run_cmp_r64_sibd32_sets_zf() {
+    // CMP RBX,[R12+0x98] (49 3B 9C 24 98 00 00 00) を64ビットで回す.
+    // R12=0x2000、[0x2098]=7、RBX=7 -> ZF=1、eip は 0x1008 に進む.
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x1000),
+            &[0x49, 0x3B, 0x9C, 0x24, 0x98, 0x00, 0x00, 0x00],
+        )
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2098), &7u64.to_le_bytes())
+        .unwrap();
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(12), 0x2000);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(3), 7);
+        Ok(())
+    })
+    .unwrap();
+    env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 0);
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x1008 });
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x40,
+        0x40
+    );
+}

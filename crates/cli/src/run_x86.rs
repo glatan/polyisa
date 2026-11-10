@@ -4579,6 +4579,19 @@ fn dispatch<B: Backend>(
                 sem::cmp_r32_sibd(b, reg(), sib_base(), sib_idx(), sib_shift(), d8)
             }
         }
+        Insn::CmpRSibd32 => {
+            if no_index() {
+                if rex_w {
+                    sem::cmp_r64_mem32(b, reg(), sib_base(), disp32())
+                } else {
+                    sem::cmp_r32_mem32(b, reg(), sib_base(), disp32())
+                }
+            } else if rex_w {
+                sem::cmp_r64_sibd32(b, reg(), sib_base(), sib_idx(), sib_shift(), disp32())
+            } else {
+                sem::cmp_r32_sibd32(b, reg(), sib_base(), sib_idx(), sib_shift(), disp32())
+            }
+        }
         Insn::CmpRmMem32 => {
             if rex_w {
                 sem::cmp_rm64_mem32(b, rm(), disp32(), reg())

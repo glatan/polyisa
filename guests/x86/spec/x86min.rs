@@ -976,6 +976,14 @@ pub fn build_model() -> polyisa_isadl::Model {
             "alu",
         ),
         (
+            "cmp_r_sibd32",
+            "D32",
+            "00111011 10...100 ........ ................................",
+            vec![],
+            "cmp r32, [r/m+sib+disp32]",
+            "alu",
+        ),
+        (
             "and_r_memnd",
             "MR",
             "00100011 00......",
