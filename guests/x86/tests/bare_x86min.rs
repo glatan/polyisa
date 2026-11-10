@@ -2167,6 +2167,35 @@ fn bt_r32_imm_sets_cf() {
 }
 
 #[test]
+fn bts_r64_rm_sets_cf_and_bit() {
+    // BTS RDX,RSI: RDX=0、RSI=5 -> CF=0、RDX=0x20。
+    let mut env = env();
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(2), 0);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(6), 5);
+        Ok(())
+    })
+    .unwrap();
+    env.backend.set(sem::eflags_ref(), 0);
+    env.step(|b| sem::bts_r64_rm(b, Gpr(2), Gpr(6))).unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x1, 0x0);
+    env.step(|b| {
+        let v = polyisa_guest_x86::sem::read64(b, Gpr(2));
+        assert_eq!(v, 0x20);
+        Ok(())
+    })
+    .unwrap();
+    // bit5=1 -> CF=1。
+    env.backend.set(sem::eflags_ref(), 0);
+    env.step(|b| sem::bts_r64_rm(b, Gpr(2), Gpr(6))).unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x1, 0x1);
+}
+
+#[test]
 fn bt_m32_imm_sets_cf() {
     // BT [0x100],0x0C: [0x100]=0x1000 (bit12) -> CF=1。
     let mut env = env();
@@ -2183,6 +2212,22 @@ fn bt_m32_imm_sets_cf() {
     env.backend.set(sem::eflags_ref(), 0);
     env.step(|b| sem::bt_m32_imm(b, Gpr(7), 0x0B)).unwrap();
     assert_eq!(env.backend.get(sem::eflags_ref()) & 0x1, 0x0);
+}
+
+#[test]
+fn bt_m32_imm_sibd_sets_cf() {
+    // BT [RSP+0x18],0x10: [0x218]=0x10000 (bit16) -> CF=1。
+    let mut env = env();
+    env.map_rw(0, 1).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x218), &0x10000u32.to_le_bytes())
+        .unwrap();
+    env.backend.set(Gpr(4).state(), 0x200);
+    env.backend.set(sem::eflags_ref(), 0);
+    env.step(|b| sem::bt_m32_imm_mem8(b, Gpr(4), 0x18, 0x10))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x1, 0x1);
 }
 
 #[test]

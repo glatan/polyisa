@@ -379,9 +379,14 @@ fn fetch_len(
                 // BT r/m32,r32 (0F A3 /r mod=11)。
                 let m = third?;
                 if m >> 6 == 3 { Some(3) } else { None }
+            } else if s == 0xAB {
+                // BTS r/m32,r32 (0F AB /r mod=11)。REX.W で64ビット.
+                let m = third?;
+                if m >> 6 == 3 { Some(3) } else { None }
             } else if s == 0xBA {
                 // BT/BTS r32/r64,imm8 (0F BA /4 ib と /5 ib reg-direct、4B)。REX.W で64ビット.
                 // BT m32,imm8 mod=00 [base] (0F BA /4 + ModRM + imm8、4B)。SIB/RIP 除外.
+                // BT m32,imm8 SIB mod=01 [base+disp8] (0F BA /4 + ModRM + SIB + disp8 + imm8、6B).
                 let m = third?;
                 let md = m >> 6;
                 let reg = (m >> 3) & 7;
@@ -390,6 +395,8 @@ fn fetch_len(
                     || (md == 0 && reg == 4 && rm != 4 && rm != 5)
                 {
                     Some(4)
+                } else if md == 1 && reg == 4 && rm == 4 {
+                    Some(6)
                 } else {
                     None
                 }
@@ -1247,6 +1254,7 @@ pub fn run_mode(
                             | 0xB1
                             | 0xA5
                             | 0xA3
+                            | 0xAB
                     )
                 ) || matches!(second, Some(0x40..=0x4F))
                     || matches!(second, Some(0x90..=0x9F))))
@@ -4884,6 +4892,23 @@ fn dispatch<B: Backend>(
             let imm = (word & 0xff) as u8;
             sem::bt_m32_imm(b, rm0f(), imm)
         }
+        Insn::BtM32ImmSibd => {
+            // BT m32,imm8 SIB mod=01 [base+disp8] (0F BA /4 + ModRM + SIB + disp8 + imm8、6B)。
+            // SIB は (word>>16) 下位8、disp は (word>>8) 下位8、imm は最下位8.
+            // no_index は [base+disp8].
+            let sib_v = ((word >> 16) & 0xff) as u8;
+            let d8 = ((word >> 8) & 0xff) as u8 as i8;
+            let imm = (word & 0xff) as u8;
+            let shift = ((sib_v >> 6) & 3) as u32;
+            let idx_raw = (sib_v >> 3) & 7;
+            let idx = Gpr(idx_raw | (((rex >> 1) & 1) << 3));
+            let base = Gpr((sib_v & 7) | ((rex & 1) << 3));
+            if idx_raw == 4 && (rex >> 1) & 1 == 0 {
+                sem::bt_m32_imm_mem8(b, base, d8, imm)
+            } else {
+                sem::bt_m32_imm_sibd(b, base, idx, shift, d8, imm)
+            }
+        }
         Insn::BtsR32Imm => {
             // BTS r32/r64,imm8 (0F BA /5 ib reg-direct、4B)。imm は最下位8。REX.W で64ビット.
             let imm = (word & 0xff) as u8;
@@ -4914,6 +4939,14 @@ fn dispatch<B: Backend>(
             // BT r/m32,r32 (0F A3 /r mod=11)。dst は rm、src は reg (REX.B/R で拡張)。
             // 2バイトオペコードのため rm0f/reg0f で抽出する.
             sem::bt_r32_rm(b, rm0f(), reg0f_as_gpr())
+        }
+        Insn::BtsR32Rm => {
+            // BTS r/m32,r32 (0F AB /r mod=11)。dst は rm、src は reg (REX.B/R で拡張)。
+            if rex_w {
+                sem::bts_r64_rm(b, rm0f(), reg0f_as_gpr())
+            } else {
+                sem::bts_r32_rm(b, rm0f(), reg0f_as_gpr())
+            }
         }
         Insn::Pminub => sem::pminub_xmm(b, xmm_reg(), xmm_rm()),
         Insn::PminubMemnd => sem::pminub_xmm_memnd(b, xmm_reg(), rm0f()),

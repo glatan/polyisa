@@ -5262,3 +5262,71 @@ fn run_andw_sibd_zeroes() {
         .unwrap();
     assert_eq!(u16::from_le_bytes(back), 0x0000);
 }
+
+#[test]
+fn run_bts_r64_rm_sets_bit() {
+    // BTS RDX,RSI (48 0F AB F2) を64ビットで回す.
+    // RDX=0、RSI=5 -> RDX=0x20、CF=0、eip は 0x1004 に進む.
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0x48, 0x0F, 0xAB, 0xF2])
+        .unwrap();
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(2), 0);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(6), 5);
+        Ok(())
+    })
+    .unwrap();
+    env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 0);
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x1004 });
+    env.step(|b| {
+        let v = polyisa_guest_x86::sem::read64(b, Gpr(2));
+        assert_eq!(v, 0x20);
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x1,
+        0x0
+    );
+}
+
+#[test]
+fn run_bt_m32_imm_sibd_sets_cf() {
+    // BTL $0x10,0x18(%RSP) (0F BA 64 24 18 10) を64ビットで回す.
+    // RSP=0x2000、[0x2018]=0x10000 (bit16) -> CF=1、eip は 0x1006 に進む.
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0x0F, 0xBA, 0x64, 0x24, 0x18, 0x10])
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2018), &0x10000u32.to_le_bytes())
+        .unwrap();
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(4), 0x2000);
+        Ok(())
+    })
+    .unwrap();
+    env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 0);
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x1006 });
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x1,
+        0x1
+    );
+}
