@@ -989,6 +989,11 @@ mod tests {
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0xFF03, 16), Some(Insn::IncRmMemnd));
         assert_eq!(decode(0xFF03, 24), None);
+        // CALL m32 [base] (FF /2 mod=00)。FF 17 は call (%rdi)。REX.B 剥がし済み 41 FF 17 は call (%r15).
+        // find -name 0x5c3479 対応.
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0xFF17, 16), Some(Insn::CallRMemnd));
+        assert_eq!(decode(0xFF17, 8), None);
         // INC m32 [base+index*scale+disp8] (FF /0 SIB mod=01)。FF 44 97 FC は incl -4(%rdi,%rdx,4).
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0xFF4497FC, 32), Some(Insn::IncRmSibd));

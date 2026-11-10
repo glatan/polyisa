@@ -4374,6 +4374,39 @@ fn run_dec_rm_rip() {
 }
 
 #[test]
+fn run_call_r_memnd_rexb() {
+    // run 経由で 41 FF 17 (CALL (%r15) with REX.B) を回す。find -name 0x5c3479 対応.
+    // R15=0x2400、[0x2400]=0x1100 (exit 系列)、RSP=0x2800。CALL で 0x1100 へ飛び exit(0)。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(15), 0x2400);
+        Ok(())
+    })
+    .unwrap();
+    env.backend.set(Gpr(4).state(), 0x2800);
+    env.backend
+        .mem
+        .write(VirtAddr(0x2400), &0x1100u64.to_le_bytes())
+        .unwrap();
+    let prog: &[u8] = &[
+        0x41, 0xFF, 0x17, // call (%r15)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let exit: &[u8] = &[
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
+        0x0F, 0x05, // syscall -> exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1100), exit).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0));
+}
+
+#[test]
 fn run_sub_m8_r8_reg_direct() {
     // run 経由で 28 D1 (SUB CL,DL) を回す。
     // ECX=5、EDX=3 -> CL=2、exit(0)。

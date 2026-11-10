@@ -425,7 +425,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         // CALL r/m64 mod=01 [base+disp8] (FF /2)。64ビット間接コール.
         ("call_r_mem8", "M8", "11111111 01010... ........", "call r/m64", "jump"),
         // CALL r/m64 mod=00 [base] (FF /2)。SIBなし.
-        ("call_r_memnd", "MR", "11111111 01000...", "call r/m64", "jump"),
+        ("call_r_memnd", "MR", "11111111 00010...", "call r/m64", "jump"),
         // CALL r/m64 reg-direct (FF /2 mod=11)。レジスタ間接コール.
         ("call_r_rm", "F1", "11111111 11010...", "call r/m64", "jump"),
         // CALL [base+index*scale] (FF /2 SIB mod=00)。64ビット間接コール.
