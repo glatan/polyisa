@@ -8033,3 +8033,53 @@ fn bt_r64_rm_sets_cf_bit32() {
     env.step(|b| sem::bt_r64_rm(b, Gpr(14), Gpr(2))).unwrap();
     assert_eq!(env.backend.get(sem::eflags_ref()) & 0x1, 0);
 }
+
+#[test]
+fn mov_m16_imm_memnd_stores_word() {
+    // MOVW [R12],0x6C6C (66 41 C7 04 24 6C 6C 相当): hexdump 0x5c82dd 対応.
+    // R12=0x2000 -> [0x2000]=0x6C6C.
+    let mut env = env();
+    env.map_rw(0x2000, 1).unwrap();
+    env.backend.set(Gpr(12).state(), 0x2000);
+    env.step(|b| sem::mov_m16_imm_memnd(b, Gpr(12), 0x6C6C))
+        .unwrap();
+    let mut back = [0u8; 2];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x2000),
+            &mut back,
+            Access {
+                endian: Endian::Le,
+                align: Align::Unaligned,
+                kind: AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(u16::from_le_bytes(back), 0x6C6C);
+}
+
+#[test]
+fn mov_m16_imm_sib_indexed_stores_word() {
+    // MOVW [RAX+RSI*2],0x1234: RAX=0x2000、RSI=0x10 -> [0x2020]=0x1234.
+    let mut env = env();
+    env.map_rw(0x2000, 1).unwrap();
+    env.backend.set(Gpr(0).state(), 0x2000);
+    env.backend.set(Gpr(6).state(), 0x10);
+    env.step(|b| sem::mov_m16_imm_sib(b, Gpr(0), Gpr(6), 1, 0x1234))
+        .unwrap();
+    let mut back = [0u8; 2];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x2020),
+            &mut back,
+            Access {
+                endian: Endian::Le,
+                align: Align::Unaligned,
+                kind: AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(u16::from_le_bytes(back), 0x1234);
+}

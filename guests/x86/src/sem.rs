@@ -5679,6 +5679,30 @@ pub fn mov_m16_imm_sibd<B: Backend>(
     Ok(())
 }
 
+/// MOV m16,imm16 [base] (66 C7 /0 SIB mod=00 no_index)。hexdump 0x5c82dd 対応.
+pub fn mov_m16_imm_memnd<B: Backend>(b: &mut B, base: Gpr, imm: u16) -> Flow<B> {
+    use polyisa_sem::W16;
+    let addr = read64(b, base);
+    let v = b.konst::<W16>(imm);
+    b.store::<W16>(addr, v, DATA_WRITE)?;
+    Ok(())
+}
+
+/// MOV m16,imm16 [base+index*scale] (66 C7 /0 SIB mod=00)。hexdump 0x5c82dd 索引対応.
+pub fn mov_m16_imm_sib<B: Backend>(
+    b: &mut B,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    imm: u16,
+) -> Flow<B> {
+    use polyisa_sem::W16;
+    let addr = sib_addr_scaled(b, shift, 0, base, idx);
+    let v = b.konst::<W16>(imm);
+    b.store::<W16>(addr, v, DATA_WRITE)?;
+    Ok(())
+}
+
 pub fn mov_rm32_imm_mem32<B: Backend>(b: &mut B, base: Gpr, disp: i32, imm: u32) -> Flow<B> {
     let addr = eff_addr32(b, base, disp);
     let v = b.konst::<W32>(imm);
