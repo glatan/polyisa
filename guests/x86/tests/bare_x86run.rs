@@ -2311,6 +2311,42 @@ fn run_sete_m8_mem32() {
 }
 
 #[test]
+fn run_setle_m8_mem32() {
+    // run 経由で 0F 9E 85 73 FD FF FF (SETLE -0x28D(%rbp)) を回す。grep 0x43e091 対応.
+    // RBP=0x500、ZF=1 -> [0x273]=1、exit(0)。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(5).state(), 0x500);
+    env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 0x40);
+    let prog: &[u8] = &[
+        0x0F, 0x9E, 0x85, 0x73, 0xFD, 0xFF, 0xFF, // setle -0x28d(%rbp)
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
+        0x0F, 0x05, // syscall -> exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0));
+    let mut back = [0u8; 1];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x273),
+            &mut back,
+            polyisa_mem::Access {
+                endian: polyisa_mem::Endian::Le,
+                align: polyisa_mem::Align::Unaligned,
+                kind: polyisa_mem::AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(back[0], 1);
+}
+
+#[test]
 fn run_sete_m8_mem8() {
     // run 経由で 0F 94 45 97 (SETE -0x69(%rbp)) を回す。grep 0x442245 対応.
     // RBP=0x500、ZF=1 -> [0x497]=1、exit(0)。

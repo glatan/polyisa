@@ -1028,6 +1028,31 @@ pub fn sete_m8_mem32<B: Backend>(b: &mut B, base: Gpr, disp: i32) -> Flow<B> {
     Ok(())
 }
 
+/// SETLE m8 [base+disp32] (0F 9E mod=10)。grep 0x43e091 対応。ZF=1 または SF!=OF なら 1.
+pub fn setle_m8_mem32<B: Backend>(b: &mut B, base: Gpr, disp: i32) -> Flow<B> {
+    use polyisa_sem::W8;
+    let addr = eff_addr32(b, base, disp);
+    let take = {
+        let zf = read_zf(b);
+        let sf = read_sf(b);
+        let of = read_of(b);
+        let zero = b.konst::<W32>(0);
+        let one = b.konst::<W32>(1);
+        let sf_n = b.select::<W32>(sf, one, zero);
+        let of_n = b.select::<W32>(of, one, zero);
+        let ne = b.cmp::<W32>(Cmp::Ne, sf_n, of_n);
+        let ne_n = b.select::<W32>(ne, one, zero);
+        let zf_n = b.select::<W32>(zf, one, zero);
+        let either = b.or::<W32>(zf_n, ne_n);
+        b.cmp::<W32>(Cmp::Ne, either, zero)
+    };
+    let one = b.konst::<W8>(1);
+    let zero = b.konst::<W8>(0);
+    let v = b.select::<W8>(take, one, zero);
+    b.store::<W8>(addr, v, DATA_WRITE)?;
+    Ok(())
+}
+
 /// SETE m8 [base+disp8] (0F 94 mod=01)。grep 0x442245 対応.
 pub fn sete_m8_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8) -> Flow<B> {
     use polyisa_sem::W8;
