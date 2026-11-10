@@ -1941,6 +1941,118 @@ fn test_m16_imm_memnd_sets_zf() {
 }
 
 #[test]
+fn sub_m8_r8_sets_flags() {
+    // SUB CL,DL: ECX=0x05、EDX=0x03 -> CL=0x02、ZF=0、CF=0。
+    let mut env = env();
+    env.backend.set(Gpr(1).state(), 0x05);
+    env.backend.set(Gpr(2).state(), 0x03);
+    env.step(|b| sem::sub_m8_r8(b, Gpr(1), false, Gpr(2), false))
+        .unwrap();
+    assert_eq!(env.backend.get(Gpr(1).state()) & 0xFF, 0x02);
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0);
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x1, 0);
+    // 同値引き：ZF=1、CF=0。
+    env.step(|b| sem::sub_m8_r8(b, Gpr(1), false, Gpr(1), false))
+        .unwrap();
+    assert_eq!(env.backend.get(Gpr(1).state()) & 0xFF, 0x00);
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0x40);
+}
+
+#[test]
+fn cvtsi2sd_r64_converts() {
+    use polyisa_guest_x86::sem::Xmm;
+    // CVTSI2SD xmm0,RAX: RAX=5 -> 下位=5.0 (0x4014000000000000)、上位は保持.
+    let mut env = env();
+    env.backend.set(Gpr(0).state(), 5);
+    env.backend.set(sem::hi_ref(Gpr(0)), 0);
+    env.step(|b| {
+        let v = b.konst::<polyisa_sem::W128>(0xDEAD_BEEF_0000_0000_0000_0000_0000_0000u128);
+        b.set(sem::xmm_ref(Xmm(0)), v);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::cvtsi2sd_r64(b, Xmm(0), Gpr(0))).unwrap();
+    let v: u128 = env.backend.get(sem::xmm_ref(Xmm(0)));
+    assert_eq!(v, 0xDEAD_BEEF_0000_0000_4014_0000_0000_0000u128);
+}
+
+#[test]
+fn addsd_xmm_adds_low64() {
+    use polyisa_guest_x86::sem::Xmm;
+    // ADDSD xmm1,xmm0: 下位=1.0+2.0=3.0 (0x4008000000000000)、上位は xmm1 のまま.
+    let mut env = env();
+    env.step(|b| {
+        let a = b.konst::<polyisa_sem::W128>(0xFFFF_0000_0000_0000_3FF0_0000_0000_0000u128);
+        b.set(sem::xmm_ref(Xmm(1)), a);
+        let c = b.konst::<polyisa_sem::W128>(0x4000_0000_0000_0000u128);
+        b.set(sem::xmm_ref(Xmm(0)), c);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::addsd_xmm(b, Xmm(1), Xmm(0))).unwrap();
+    let v: u128 = env.backend.get(sem::xmm_ref(Xmm(1)));
+    assert_eq!(v, 0xFFFF_0000_0000_0000_4008_0000_0000_0000u128);
+}
+
+#[test]
+fn comisd_xmm_sets_flags() {
+    use polyisa_guest_x86::sem::Xmm;
+    // COMISD xmm0,xmm1: 1.0 vs 2.0 -> CF=1、ZF=PF=0。
+    let mut env = env();
+    env.step(|b| {
+        let a = b.konst::<polyisa_sem::W128>(0x3FF0_0000_0000_0000u128);
+        b.set(sem::xmm_ref(Xmm(0)), a);
+        let c = b.konst::<polyisa_sem::W128>(0x4000_0000_0000_0000u128);
+        b.set(sem::xmm_ref(Xmm(1)), c);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::comisd_xmm(b, Xmm(0), Xmm(1))).unwrap();
+    let f = env.backend.get(sem::eflags_ref());
+    assert_eq!(f & 0x1, 0x1);
+    assert_eq!(f & 0x40, 0);
+    assert_eq!(f & 0x4, 0);
+    // 同値：ZF=1、CF=PF=0。
+    env.step(|b| sem::comisd_xmm(b, Xmm(0), Xmm(0))).unwrap();
+    let g = env.backend.get(sem::eflags_ref());
+    assert_eq!(g & 0x40, 0x40);
+    assert_eq!(g & 0x1, 0);
+    assert_eq!(g & 0x4, 0);
+}
+
+#[test]
+fn cvttsd2si_r64_truncates() {
+    use polyisa_guest_x86::sem::Xmm;
+    // CVTTSD2SI RAX,xmm0: 下位=3.9 -> RAX=3（切り捨て）。
+    let mut env = env();
+    env.step(|b| {
+        let v = b.konst::<polyisa_sem::W128>(0x400B_3333_3333_3333u128);
+        b.set(sem::xmm_ref(Xmm(0)), v);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::cvttsd2si_r64(b, Gpr(0), Xmm(0))).unwrap();
+    assert_eq!(env.backend.get(Gpr(0).state()), 3);
+    assert_eq!(env.backend.get(sem::hi_ref(Gpr(0))), 0);
+}
+
+#[test]
+fn movsx_r32_m8_memnd_sign_extends() {
+    // MOVSX EDX,[EBX]: [0]=0xFF -> EDX=0xFFFFFFFF。
+    // [0]=0x7F -> EDX=0x7F。
+    let mut env = env();
+    env.map_rw(0, 1).unwrap();
+    env.backend.mem.write(VirtAddr(0), &[0xFF]).unwrap();
+    env.step(|b| sem::movsx_r32_m8_memnd(b, Gpr(2), Gpr(3)))
+        .unwrap();
+    assert_eq!(env.backend.get(Gpr(2).state()), 0xFFFF_FFFF);
+    env.backend.mem.write(VirtAddr(0), &[0x7F]).unwrap();
+    env.step(|b| sem::movsx_r32_m8_memnd(b, Gpr(2), Gpr(3)))
+        .unwrap();
+    assert_eq!(env.backend.get(Gpr(2).state()), 0x7F);
+}
+
+#[test]
 fn movhps_xmm_m64_mem8_sets_high64() {
     use polyisa_guest_x86::sem::Xmm;
     // MOVHPS xmm0,[RBX+0x38]: 下位64は保持、上位64=[0x38].

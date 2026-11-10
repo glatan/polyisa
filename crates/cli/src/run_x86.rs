@@ -177,7 +177,22 @@ fn fetch_len(
                 }
             } else if matches!(
                 s,
-                0x60 | 0x61 | 0x62 | 0x6C | 0xDB | 0xEF | 0xD7 | 0x76 | 0xDA
+                0x60 | 0x61
+                    | 0x62
+                    | 0x64
+                    | 0x6C
+                    | 0xDB
+                    | 0xDF
+                    | 0xEF
+                    | 0xD7
+                    | 0x76
+                    | 0xDA
+                    | 0x57
+                    | 0xFC
+                    | 0x2A
+                    | 0x58
+                    | 0x2F
+                    | 0x2C
             ) {
                 // XMM reg-direct のみ（66 接頭辞は剥がし済み）。
                 let m = third?;
@@ -268,6 +283,7 @@ fn fetch_len(
                 || s == 0xE7
                 || s == 0xB6
                 || s == 0xB7
+                || s == 0xBE
                 || s == 0xAF
                 || s == 0xBC
                 || s == 0xBD
@@ -397,15 +413,22 @@ fn fetch_len(
                 )
             }
         }
-        // 0x83 /r ib (算術 imm8 群)。SIB 付きは未対応。
+        // 0x83 /r ib (算術 imm8 群)。SIB は mod=01 no_index の /4 AND のみ.
         0x83 => {
             let s = second?;
             let md = s >> 6;
+            let reg = (s >> 3) & 7;
             let rm = s & 7;
             if md == 3 {
                 Some(3)
             } else if rm == 4 {
-                None
+                // SIB 付き。mod=01 SIB+disp8+imm8 (5B) の /4 AND のみ.
+                let t = third?;
+                if md == 1 && reg == 4 && t & 7 != 5 {
+                    Some(5)
+                } else {
+                    None
+                }
             } else {
                 Some(
                     2 + match md {
@@ -451,6 +474,11 @@ fn fetch_len(
             } else {
                 None
             }
+        }
+        // 0x28 /r (SUB r/m8,r8)。reg-direct 2B のみ。
+        0x28 => {
+            let s = second?;
+            if s >> 6 == 3 { Some(2) } else { None }
         }
         // 0x88 /r (MOV r/m8,r8)。mod=00 SIB 直接番地 (base=101) のみ 7B。
         // reg-direct・mod=01/10・SIB index 付きは未対応。
@@ -904,6 +932,7 @@ pub fn run_mode(
                 | 0x8A
                 | 0x38
                 | 0x3A
+                | 0x28
                 | 0x84
         ) {
             if env
@@ -934,6 +963,7 @@ pub fn run_mode(
                 | 0x38
                 | 0x3A
                 | 0x87
+                | 0x83
                 | 0x63
                 | 0x03
                 | 0x0B
@@ -960,9 +990,17 @@ pub fn run_mode(
                             | 0x70
                             | 0x73
                             | 0x74
+                            | 0x64
                             | 0x76
                             | 0x12
                             | 0x16
+                            | 0x57
+                            | 0xDF
+                            | 0xFC
+                            | 0x2A
+                            | 0x58
+                            | 0x2F
+                            | 0x2C
                             | 0x7E
                             | 0xD7
                             | 0xDA
@@ -978,6 +1016,7 @@ pub fn run_mode(
                             | 0xE7
                             | 0xB6
                             | 0xB7
+                            | 0xBE
                             | 0xAF
                             | 0xBC
                             | 0xBD
@@ -1202,8 +1241,11 @@ pub fn run_mode(
                     | Insn::Pshufd
                     | Insn::Pslldq
                     | Insn::Psubb
+                    | Insn::Paddb
+                    | Insn::Pcmpgtb
                     | Insn::Pxor
                     | Insn::Pand
+                    | Insn::Pandn
                     | Insn::Pminub
                     | Insn::Pcmpeqb
                     | Insn::Pcmpeqd
@@ -1243,6 +1285,7 @@ pub fn run_mode(
                     | Insn::MovupsLoadRip
                     | Insn::MovupsStoreRip
                     | Insn::MovdqaLoadRip
+                    | Insn::Comisd
                     | Insn::MovdquLoadXmm
                     | Insn::MovdquLoadMemnd
                     | Insn::MovdquLoadMem8
@@ -1388,6 +1431,9 @@ fn dispatch<B: Backend>(
     let modrm0f = || ((word >> ((nbytes - 3 - off) * 8)) & 0xff) as u8;
     let xmm_reg = || Xmm((modrm0f() >> 3) & 7);
     let xmm_rm = || Xmm(modrm0f() & 7);
+    // REX.R/B で 8-15 に拡張する XMM 抽出（MOVDQA reg-direct 等で使う）。
+    let xmm_reg_r = || Xmm(((modrm0f() >> 3) & 7) | (((rex >> 2) & 1) << 3));
+    let xmm_rm_b = || Xmm((modrm0f() & 7) | ((rex & 1) << 3));
     let rm0f = || Gpr((modrm0f() & 7) | ((rex & 1) << 3));
     // 2バイトオペコードの SIB 抽出。SIB は先頭から 4+off バイト目にある。
     let sib0f = || ((word >> ((nbytes - 4 - off) * 8)) & 0xff) as u8;
@@ -2030,6 +2076,26 @@ fn dispatch<B: Backend>(
                 (Gpr(rm_f - 4), true)
             };
             sem::cmp_m8_r8(b, dst, dst_high, src, src_high)
+        }
+        Insn::SubM8R8 => {
+            // 28 /r mod=11 reg-direct。dst は rm、src は reg.
+            let reg_f = (modrm() >> 3) & 7;
+            let rm_f = modrm() & 7;
+            let (src, src_high) = if rex != 0 {
+                (Gpr(reg_f | ((rex >> 2) & 1) << 3), false)
+            } else if reg_f < 4 {
+                (Gpr(reg_f), false)
+            } else {
+                (Gpr(reg_f - 4), true)
+            };
+            let (dst, dst_high) = if rex != 0 {
+                (Gpr(rm_f | ((rex & 1) << 3)), false)
+            } else if rm_f < 4 {
+                (Gpr(rm_f), false)
+            } else {
+                (Gpr(rm_f - 4), true)
+            };
+            sem::sub_m8_r8(b, dst, dst_high, src, src_high)
         }
         Insn::CmpM8R8Memnd => {
             // 38 /r mod=00 [base],r8。src は reg フィールド.
@@ -3081,6 +3147,20 @@ fn dispatch<B: Backend>(
                 sem::and_rm32_imm8_memnd(b, rm(), imm)
             }
         }
+        Insn::AndRmImm8Sibd => {
+            // 83 /4 SIB mod=01 [base+disp8],imm8 (40b、no_index)。
+            // SIB は (word>>16) 下位8、disp は (word>>8) 下位8、imm は最下位8.
+            // base は SIB 下位3 + REX.B。
+            let sib_v = ((word >> 16) & 0xff) as u8;
+            let d8 = ((word >> 8) & 0xff) as u8 as i8;
+            let imm = (word & 0xff) as u8 as i8;
+            let base = Gpr((sib_v & 7) | ((rex & 1) << 3));
+            if rex_w {
+                sem::and_rm64_imm8_mem8(b, base, d8, imm)
+            } else {
+                sem::and_rm32_imm8_mem8(b, base, d8, imm)
+            }
+        }
         Insn::AndRmImm8Mem32 => {
             // 83 /4 mod=10 [base+disp32],imm8 (56b)。
             let disp = ((word >> 8) as u32).swap_bytes() as i32;
@@ -3796,8 +3876,24 @@ fn dispatch<B: Backend>(
             sem::pslldq_xmm(b, xmm_rm(), imm)
         }
         Insn::Psubb => sem::psubb_xmm(b, xmm_reg(), xmm_rm()),
+        // PADDB xmm,xmm (66 0F FC /r reg-direct)。REX.R/B で 8-15 に拡張する.
+        Insn::Paddb => sem::paddb_xmm(b, xmm_reg_r(), xmm_rm_b()),
+        // PCMPGTB xmm,xmm (66 0F 64 /r reg-direct)。REX.R/B で 8-15 に拡張する.
+        Insn::Pcmpgtb => sem::pcmpgtb_xmm(b, xmm_reg_r(), xmm_rm_b()),
         Insn::Pxor => sem::pxor_xmm(b, xmm_reg(), xmm_rm()),
+        // XORPS xmm,xmm (0F 57 /r reg-direct)。PXOR と等価.
+        Insn::Xorps => sem::pxor_xmm(b, xmm_reg(), xmm_rm()),
         Insn::Pand => sem::pand_xmm(b, xmm_reg(), xmm_rm()),
+        // PANDN xmm,xmm (66 0F DF /r reg-direct)。REX.R/B で 8-15 に拡張する.
+        Insn::Pandn => sem::pandn_xmm(b, xmm_reg_r(), xmm_rm_b()),
+        // CVTSI2SD xmm,r64 (F2 REX.W 0F 2A /r reg-direct)。F2 は剥がし済み.
+        Insn::Cvtsi2sdR64 => sem::cvtsi2sd_r64(b, xmm_reg_r(), rm0f()),
+        // ADDSD xmm,xmm (F2 0F 58 /r reg-direct)。F2 は剥がし済み.
+        Insn::Addsd => sem::addsd_xmm(b, xmm_reg(), xmm_rm()),
+        // COMISD xmm,xmm (66 0F 2F /r reg-direct)。
+        Insn::Comisd => sem::comisd_xmm(b, xmm_reg(), xmm_rm()),
+        // CVTTSD2SI r64,xmm (F2 REX.W 0F 2C /r reg-direct)。F2 は剥がし済み.
+        Insn::Cvttsd2siR64 => sem::cvttsd2si_r64(b, reg0f_as_gpr(), xmm_rm_b()),
         Insn::Pminub => sem::pminub_xmm(b, xmm_reg(), xmm_rm()),
         Insn::Pcmpeqb => sem::pcmpeqb_xmm(b, xmm_reg(), xmm_rm()),
         Insn::Pcmpeqd => sem::pcmpeqd_xmm(b, xmm_reg(), xmm_rm()),
@@ -3868,7 +3964,7 @@ fn dispatch<B: Backend>(
         Insn::MovupsLoadMem32 => sem::movups_load_mem32(b, xmm_reg(), rm0f(), disp32()),
         Insn::MovupsStoreMem32 => sem::movups_store_mem32(b, xmm_reg(), rm0f(), disp32()),
         // MOVDQU (F3 0F 6F) は16B非整列転送で MOVUPS と等価のため意味論を共有する.
-        Insn::MovdquLoadXmm => sem::movups_xmm_xmm(b, xmm_reg(), xmm_rm()),
+        Insn::MovdquLoadXmm => sem::movups_xmm_xmm(b, xmm_reg_r(), xmm_rm_b()),
         Insn::MovdquLoadMem8 => sem::movups_load_mem8(b, xmm_reg(), rm0f(), disp8()),
         Insn::MovdquLoadMemnd => sem::movups_load_memnd(b, xmm_reg(), rm0f()),
         Insn::MovdquLoadMem32 => sem::movups_load_mem32(b, xmm_reg(), rm0f(), disp32()),
@@ -4476,6 +4572,14 @@ fn dispatch<B: Backend>(
                 sem::movzx_r64_m8_memnd(b, reg0f_as_gpr(), rm0f())
             } else {
                 sem::movzx_r32_m8_memnd(b, reg0f_as_gpr(), rm0f())
+            }
+        }
+        Insn::MovsxR32M8Memnd => {
+            // 0F BE mod=00 [base]。REX.W で64ビット符号拡張.
+            if rex_w {
+                sem::movsx_r64_m8_memnd(b, reg0f_as_gpr(), rm0f())
+            } else {
+                sem::movsx_r32_m8_memnd(b, reg0f_as_gpr(), rm0f())
             }
         }
         Insn::MovzxR32M8Mem8 => {
@@ -6050,6 +6154,26 @@ impl TrapHandler for CliLinux {
             set64(env, Gpr(0), 0);
             return TrapOutcome::Handled;
         }
+        if self.is64 && nr == polyisa_os_linux::x86_64::TIME {
+            // time(tloc)。ホスト時刻の秒を返し、tloc!=NULL なら書き込む.
+            // clock_gettime の ENOSYS フォールバックで呼ばれる.
+            let tloc = get64(env, r_a);
+            let secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+            if tloc != 0
+                && env
+                    .backend
+                    .mem
+                    .write(VirtAddr(tloc), &secs.to_le_bytes())
+                    .is_err()
+            {
+                return TrapOutcome::Unimplemented;
+            }
+            set64(env, Gpr(0), secs as u64);
+            return TrapOutcome::Handled;
+        }
         if self.is64 && nr == polyisa_os_linux::x86_64::CLOCK_GETTIME {
             // clock_gettime(clk_id, tp)。ホスト時刻を書いて 0 を返す.
             // 0 固定では時刻待ちループが回り続けるため、実時刻を進める.
@@ -6728,6 +6852,30 @@ mod tests {
         set64(&mut env, Gpr(10), 16);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), 0);
+    }
+
+    #[test]
+    fn time_returns_host_secs() {
+        use polyisa_os_linux::x86_64 as abi;
+        let mut sys = CliLinux::x86_64();
+        let mut env = bare();
+        // time(NULL) は 0 より大きい秒を返す。
+        set64(&mut env, Gpr(0), abi::TIME);
+        set64(&mut env, Gpr(7), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let secs = get64(&mut env, Gpr(0));
+        assert!(secs > 0);
+        // time(0x100) は同じ秒を [0x100] に書く。
+        set64(&mut env, Gpr(0), abi::TIME);
+        set64(&mut env, Gpr(7), 0x100);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), secs);
+        let mut back = [0u8; 8];
+        env.backend
+            .mem
+            .read(VirtAddr(0x100), &mut back, data_access())
+            .unwrap();
+        assert_eq!(i64::from_le_bytes(back) as u64, secs);
     }
 
     #[test]

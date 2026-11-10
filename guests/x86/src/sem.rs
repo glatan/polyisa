@@ -3901,7 +3901,7 @@ pub fn jmp8<B: Backend>(b: &mut B, target: u32) -> Flow<B> {
 
 /* ===== XMM 最小セット（SSE2）。DFやMXCSRは扱わず、整数データ移動のみ。 ===== */
 
-/// XMM レジスタ番号。0-7 である。
+/// XMM レジスタ番号。0-15 である（8-15 は REX.R/B で拡張する）。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Xmm(pub u8);
 
@@ -5834,6 +5834,26 @@ pub fn movzx_r64_m8_memnd<B: Backend>(b: &mut B, dst: Gpr, base: Gpr) -> Flow<B>
     let addr = read64(b, base);
     let v8: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
     let v = b.zext::<W8, W64>(v8);
+    write64(b, dst, v);
+    Ok(())
+}
+
+/// MOVSX r32,m8 [base] (0F BE mod=00)。8ビットを読んで符号拡張.
+pub fn movsx_r32_m8_memnd<B: Backend>(b: &mut B, dst: Gpr, base: Gpr) -> Flow<B> {
+    use polyisa_sem::W8;
+    let addr = read64(b, base);
+    let v8: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
+    let v = b.sext::<W8, W32>(v8);
+    write(b, dst, v);
+    Ok(())
+}
+
+/// MOVSX r64,m8 [base] (0F BE mod=00, REX.W)。
+pub fn movsx_r64_m8_memnd<B: Backend>(b: &mut B, dst: Gpr, base: Gpr) -> Flow<B> {
+    use polyisa_sem::W8;
+    let addr = read64(b, base);
+    let v8: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
+    let v = b.sext::<W8, W64>(v8);
     write64(b, dst, v);
     Ok(())
 }
@@ -9330,6 +9350,23 @@ pub fn cmp_m8_r8<B: Backend>(
     Ok(())
 }
 
+/// SUB r/m8, r8 reg-direct (28 /r mod=11)。dst rm から src reg を引いて書き戻す.
+pub fn sub_m8_r8<B: Backend>(
+    b: &mut B,
+    dst: Gpr,
+    dst_high: bool,
+    src: Gpr,
+    src_high: bool,
+) -> Flow<B> {
+    use polyisa_sem::W8;
+    let x = read8(b, dst, dst_high);
+    let y = read8(b, src, src_high);
+    let v = b.sub::<W8>(x, y);
+    write8(b, dst, dst_high, v);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
 /// CMP [base], r8 (38 /r mod=00)。
 pub fn cmp_m8_r8_memnd<B: Backend>(b: &mut B, base: Gpr, src: Gpr, high: bool) -> Flow<B> {
     use polyisa_sem::W8;
@@ -9571,6 +9608,152 @@ pub fn psubb_xmm<B: Backend>(b: &mut B, dst: Xmm, src: Xmm) -> Flow<B> {
         acc = b.or::<W128>(acc, pos);
     }
     b.set(xmm_ref(dst), acc);
+    Ok(())
+}
+
+/// PADDB xmm1, xmm2 (66 0F FC /r)。バイト毎に wraparound 加算する.
+pub fn paddb_xmm<B: Backend>(b: &mut B, dst: Xmm, src: Xmm) -> Flow<B> {
+    let a: B::V<W128> = b.get(xmm_ref(dst));
+    let c: B::V<W128> = b.get(xmm_ref(src));
+    let mut acc: B::V<W128> = b.konst::<W128>(0);
+    for i in 0..16 {
+        let shift = b.konst::<W128>((i * 8) as u128);
+        let mask = b.konst::<W128>(0xFF);
+        let ab = b.shr_l::<W128>(a, shift);
+        let cb = b.shr_l::<W128>(c, shift);
+        let ab8 = b.and::<W128>(ab, mask);
+        let cb8 = b.and::<W128>(cb, mask);
+        let d = b.add::<W128>(ab8, cb8);
+        let d8 = b.and::<W128>(d, mask);
+        let pos = b.shl::<W128>(d8, shift);
+        acc = b.or::<W128>(acc, pos);
+    }
+    b.set(xmm_ref(dst), acc);
+    Ok(())
+}
+
+/// PCMPGTB xmm1, xmm2 (66 0F 64 /r)。バイト毎に符号付き大于なら 0xFF、そうでなければ 0.
+pub fn pcmpgtb_xmm<B: Backend>(b: &mut B, dst: Xmm, src: Xmm) -> Flow<B> {
+    let a: B::V<W128> = b.get(xmm_ref(dst));
+    let c: B::V<W128> = b.get(xmm_ref(src));
+    let mut acc: B::V<W128> = b.konst::<W128>(0);
+    for i in 0..16 {
+        let shift = b.konst::<W128>((i * 8) as u128);
+        let mask = b.konst::<W128>(0xFF);
+        let bias = b.konst::<W128>(0x80);
+        let ab = b.shr_l::<W128>(a, shift);
+        let cb = b.shr_l::<W128>(c, shift);
+        // 符号付き比較は 0x80 バイアスで符号なし比較に直す.
+        let ab8 = b.and::<W128>(ab, mask);
+        let cb8 = b.and::<W128>(cb, mask);
+        let au = b.xor::<W128>(ab8, bias);
+        let cu = b.xor::<W128>(cb8, bias);
+        let gt = b.cmp::<W128>(Cmp::GtU, au, cu);
+        let zero = b.konst::<W128>(0);
+        let byte = b.select::<W128>(gt, mask, zero);
+        let pos = b.shl::<W128>(byte, shift);
+        acc = b.or::<W128>(acc, pos);
+    }
+    b.set(xmm_ref(dst), acc);
+    Ok(())
+}
+
+/// PANDN xmm1, xmm2 (66 0F DF /r)。(~dst) & src の128ビット AND.
+pub fn pandn_xmm<B: Backend>(b: &mut B, dst: Xmm, src: Xmm) -> Flow<B> {
+    let a: B::V<W128> = b.get(xmm_ref(dst));
+    let c: B::V<W128> = b.get(xmm_ref(src));
+    let ones = b.konst::<W128>(u128::MAX);
+    let na = b.xor::<W128>(a, ones);
+    let v = b.and::<W128>(na, c);
+    b.set(xmm_ref(dst), v);
+    Ok(())
+}
+
+/// CVTSI2SD xmm, r64 (F2 REX.W 0F 2A /r reg-direct)。64ビット整数を倍精度に変換し
+/// XMM 下位64に置く。上位64は保持する。丸めは最近接偶数 (rm=0) とする.
+pub fn cvtsi2sd_r64<B: Backend>(b: &mut B, dst: Xmm, src: Gpr) -> Flow<B> {
+    use polyisa_sem::F64;
+    let v64: B::V<W64> = read64(b, src);
+    let f: B::V<F64> = b.fcvt_from_s64(v64, 0);
+    let cur: B::V<W128> = b.get(xmm_ref(dst));
+    let hi_shift = b.konst::<W128>(64);
+    let hi = b.shr_l::<W128>(cur, hi_shift);
+    let hi_back = b.shl::<W128>(hi, hi_shift);
+    let lo64: B::V<W64> = b.trunc::<F64, W64>(f);
+    let lo = b.zext::<W64, W128>(lo64);
+    let v = b.or::<W128>(hi_back, lo);
+    b.set(xmm_ref(dst), v);
+    Ok(())
+}
+
+/// ADDSD xmm1, xmm2 (F2 0F 58 /r reg-direct)。下位64の倍精度加算。上位64は dst のまま.
+pub fn addsd_xmm<B: Backend>(b: &mut B, dst: Xmm, src: Xmm) -> Flow<B> {
+    use polyisa_sem::F64;
+    let a128: B::V<W128> = b.get(xmm_ref(dst));
+    let c128: B::V<W128> = b.get(xmm_ref(src));
+    let alo64: B::V<W64> = b.trunc::<W128, W64>(a128);
+    let clo64: B::V<W64> = b.trunc::<W128, W64>(c128);
+    let a: B::V<F64> = b.trunc::<W64, F64>(alo64);
+    let c: B::V<F64> = b.trunc::<W64, F64>(clo64);
+    let v = b.fadd(a, c);
+    let vlo64: B::V<W64> = b.trunc::<F64, W64>(v);
+    let lo = b.zext::<W64, W128>(vlo64);
+    let hi_shift = b.konst::<W128>(64);
+    let hi = b.shr_l::<W128>(a128, hi_shift);
+    let hi_back = b.shl::<W128>(hi, hi_shift);
+    let res = b.or::<W128>(hi_back, lo);
+    b.set(xmm_ref(dst), res);
+    Ok(())
+}
+
+/// COMISD xmm1, xmm2 (66 0F 2F /r reg-direct)。下位64の倍精度を比較し ZF/PF/CF を立てる.
+/// OF/SF/AF は 0 にする。順序なし (NaN) では ZF=PF=CF=1。
+pub fn comisd_xmm<B: Backend>(b: &mut B, dst: Xmm, src: Xmm) -> Flow<B> {
+    use polyisa_sem::F64;
+    let a128: B::V<W128> = b.get(xmm_ref(dst));
+    let c128: B::V<W128> = b.get(xmm_ref(src));
+    let alo64: B::V<W64> = b.trunc::<W128, W64>(a128);
+    let clo64: B::V<W64> = b.trunc::<W128, W64>(c128);
+    let a: B::V<F64> = b.trunc::<W64, F64>(alo64);
+    let c: B::V<F64> = b.trunc::<W64, F64>(clo64);
+    let one32 = b.konst::<W32>(1);
+    let zero32 = b.konst::<W32>(0);
+    // B 同士の論理演算はないため、0/1 に整数化して組み立てる.
+    let aa = b.feq(a, a);
+    let aa1 = b.select::<W32>(aa, one32, zero32);
+    let cc = b.feq(c, c);
+    let cc1 = b.select::<W32>(cc, one32, zero32);
+    let both = b.and::<W32>(aa1, cc1);
+    let u1 = b.xor::<W32>(both, one32);
+    let eq = b.feq(a, c);
+    let e1 = b.select::<W32>(eq, one32, zero32);
+    let lt = b.flt(a, c);
+    let l1 = b.select::<W32>(lt, one32, zero32);
+    // ZF = unordered OR eq、PF = unordered、CF = unordered OR lt.
+    let zf = b.or::<W32>(u1, e1);
+    let cf = b.or::<W32>(u1, l1);
+    let six = b.konst::<W32>(6);
+    let two = b.konst::<W32>(2);
+    let zf_sh = b.shl::<W32>(zf, six);
+    let pf_sh = b.shl::<W32>(u1, two);
+    let f: B::V<W32> = b.get(eflags_ref());
+    let clear = b.konst::<W32>(!(0x800 | 0x80 | 0x10 | 0x40 | 0x4 | 0x1));
+    let cleared = b.and::<W32>(f, clear);
+    let v1 = b.or::<W32>(cleared, zf_sh);
+    let v2 = b.or::<W32>(v1, pf_sh);
+    let v3 = b.or::<W32>(v2, cf);
+    b.set(eflags_ref(), v3);
+    Ok(())
+}
+
+/// CVTTSD2SI r64, xmm (F2 REX.W 0F 2C /r reg-direct)。倍精度を64ビット整数に切り捨て変換.
+pub fn cvttsd2si_r64<B: Backend>(b: &mut B, dst: Gpr, src: Xmm) -> Flow<B> {
+    use polyisa_sem::F64;
+    let c128: B::V<W128> = b.get(xmm_ref(src));
+    let clo64: B::V<W64> = b.trunc::<W128, W64>(c128);
+    let c: B::V<F64> = b.trunc::<W64, F64>(clo64);
+    let v = b.fcvt_s64(c, 1);
+    write64(b, dst, v);
     Ok(())
 }
 

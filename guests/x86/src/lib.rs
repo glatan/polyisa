@@ -40,8 +40,8 @@ pub struct CpuState {
     pub h: [u32; 8],
     /// 拡張レジスタ R8-R15（64ビット、x86-64 のみ使う）。
     pub x: [u64; 8],
-    /// XMM レジスタ 8本。下位・上位の u64 ずつ置く（x86-64 のみ使う）。
-    pub xmm: [[u64; 2]; 8],
+    /// XMM レジスタ 16本。下位・上位の u64 ずつ置く（x86-64 のみ使う）。
+    pub xmm: [[u64; 2]; 16],
 }
 
 #[cfg(test)]
@@ -70,7 +70,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数116件。
-        assert_eq!(INSNS.len(), 474);
+        assert_eq!(INSNS.len(), 485);
     }
 
     #[test]
@@ -395,6 +395,8 @@ mod tests {
         assert_eq!(decode(0x0F62C0, 24), Some(Insn::Punpckldq));
         assert_eq!(decode(0x0F6CC0, 24), Some(Insn::Punpcklqdq));
         assert_eq!(decode(0x0F6FC0, 24), Some(Insn::MovdquLoadXmm));
+        // REX 剥離後の代表値：44 0F 6F CD (MOVDQA xmm9,xmm5) は 0F 6F CD として decode する.
+        assert_eq!(decode(0x0F6FCD, 24), Some(Insn::MovdquLoadXmm));
         assert_eq!(decode(0x0F6F4020, 32), Some(Insn::MovdquLoadMem8));
         assert_eq!(decode(0x0F6F07, 24), Some(Insn::MovdquLoadMemnd));
         assert_eq!(decode(0x88042511060000, 56), Some(Insn::MovSibabsR8));
@@ -576,6 +578,50 @@ mod tests {
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x0F120F, 24), Some(Insn::MovlpdXmmM64Memnd));
         assert_eq!(decode(0x0F120F, 16), None);
+        // XORPS xmm,xmm reg-direct (0F 57 /r)。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x0F57C0, 24), Some(Insn::Xorps));
+        assert_eq!(decode(0x0F57C0, 16), None);
+        // PADDB xmm,xmm reg-direct (66 0F FC /r)。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x0FFCC1, 24), Some(Insn::Paddb));
+        assert_eq!(decode(0x0FFCC1, 16), None);
+        // PCMPGTB xmm,xmm reg-direct (66 0F 64 /r)。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x0F64C6, 24), Some(Insn::Pcmpgtb));
+        assert_eq!(decode(0x0F64C6, 16), None);
+        // PANDN xmm,xmm reg-direct (66 0F DF /r)。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x0FDFC7, 24), Some(Insn::Pandn));
+        assert_eq!(decode(0x0FDFC7, 16), None);
+        // CVTSI2SD xmm,r64 reg-direct (F2 REX.W 0F 2A /r)。F2/REX は実行側で剥がす.
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x0F2AC0, 24), Some(Insn::Cvtsi2sdR64));
+        assert_eq!(decode(0x0F2AC0, 16), None);
+        // ADDSD xmm,xmm reg-direct (F2 0F 58 /r)。F2 は実行側で剥がす.
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x0F58C8, 24), Some(Insn::Addsd));
+        assert_eq!(decode(0x0F58C8, 16), None);
+        // COMISD xmm,xmm reg-direct (66 0F 2F /r)。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x0F2FC1, 24), Some(Insn::Comisd));
+        assert_eq!(decode(0x0F2FC1, 16), None);
+        // CVTTSD2SI r64,xmm reg-direct (F2 REX.W 0F 2C /r)。F2/REX は実行側で剥がす.
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x0F2CC0, 24), Some(Insn::Cvttsd2siR64));
+        assert_eq!(decode(0x0F2CC0, 16), None);
+        // AND m,imm8 SIB mod=01 no_index (83 /4 + SIB + disp8 + imm8)。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x8364241000, 40), Some(Insn::AndRmImm8Sibd));
+        assert_eq!(decode(0x8364241000, 32), None);
+        // SUB r/m8,r8 reg-direct (28 /r)。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x28D1, 16), Some(Insn::SubM8R8));
+        assert_eq!(decode(0x28D1, 8), None);
+        // MOVSX r,m8 mod=00 [base] (0F BE /r)。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x0FBE13, 24), Some(Insn::MovsxR32M8Memnd));
+        assert_eq!(decode(0x0FBE13, 16), None);
     }
 
     #[test]

@@ -111,6 +111,7 @@ pub mod x86_64 {
     pub const READV: u64 = 19;
     pub const WRITEV: u64 = 20;
     pub const SENDFILE: u64 = 40;
+    pub const TIME: u64 = 201;
 }
 
 /// 段階4の準備としての i386 番号表（Linux・32ビット）。
@@ -157,6 +158,7 @@ pub mod i386 {
     pub const FSTAT: u64 = 108;
     pub const STATX: u64 = 383;
     pub const SENDFILE: u64 = 187;
+    pub const TIME: u64 = 13;
 }
 
 /// ABI と番号から名前を引く。段階1の範囲と x86_64・i386 の番号表のみ。
@@ -242,6 +244,7 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             i386::READV => Some("readv"),
             i386::WRITEV => Some("writev"),
             i386::SENDFILE => Some("sendfile"),
+            i386::TIME => Some("time"),
             _ => None,
         },
         GuestAbi::X86_64Linux => match nr {
@@ -283,6 +286,7 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             x86_64::READV => Some("readv"),
             x86_64::WRITEV => Some("writev"),
             x86_64::SENDFILE => Some("sendfile"),
+            x86_64::TIME => Some("time"),
             _ => None,
         },
         GuestAbi::Unknown => None,
@@ -387,6 +391,8 @@ mod tests {
         assert_eq!(syscall_name(GuestAbi::X86_64Linux, 64), None);
         assert_eq!(x86_64::SENDFILE, 40);
         assert_eq!(syscall_name(GuestAbi::X86_64Linux, 40), Some("sendfile"));
+        assert_eq!(x86_64::TIME, 201);
+        assert_eq!(syscall_name(GuestAbi::X86_64Linux, 201), Some("time"));
     }
 
     #[test]
@@ -404,6 +410,8 @@ mod tests {
         assert_eq!(syscall_name(GuestAbi::I386Linux, 64), None);
         assert_eq!(i386::SENDFILE, 187);
         assert_eq!(syscall_name(GuestAbi::I386Linux, 187), Some("sendfile"));
+        assert_eq!(i386::TIME, 13);
+        assert_eq!(syscall_name(GuestAbi::I386Linux, 13), Some("time"));
     }
 
     #[test]
