@@ -1442,6 +1442,7 @@ pub fn run_mode(
                     | 0x08
                     | 0x87
                     | 0x84
+                    | 0xC0
                     | 0xC1
                     | 0xD1
                     | 0xD3
