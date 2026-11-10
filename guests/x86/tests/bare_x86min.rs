@@ -6913,6 +6913,22 @@ fn shr_rm8_imm8_shifts() {
 }
 
 #[test]
+fn shr_rm8_1_shifts() {
+    // SHR R13B,1 (41 D0 ED は REX.B 剥がし済み D0 ED): R13B=0x03 -> 0x01、CF=1。
+    // sed の停止点 0x5bdd7d に対応。意味論は shr_rm8_imm8 の count=1 共用.
+    let mut env = env();
+    env.step(|b| {
+        sem::write64(b, Gpr(13), 0x03);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::shr_rm8_imm8(b, Gpr(13), false, 1))
+        .unwrap();
+    assert_eq!(env.backend.get(Gpr(13).state()) & 0xFF, 0x01);
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x1, 1);
+}
+
+#[test]
 fn test_rm16_sets_zf() {
     // TEST DX,DX (66 85 /r): DX=0 -> ZF=1. DX=1 -> ZF=0.
     let mut env = env();

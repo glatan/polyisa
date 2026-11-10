@@ -723,6 +723,11 @@ fn fetch_len(
             let s = second?;
             if s >> 6 == 3 { Some(3) } else { None }
         }
+        // 0xD0 /5 (SHR r/m8,1)。reg-direct 2B のみ。sed 0x5bdd7d 対応.
+        0xD0 => {
+            let s = second?;
+            if s >> 6 == 3 { Some(2) } else { None }
+        }
         // 0x84 /r (TEST r/m8,r8)。reg-direct 2B、mod=00 base 2B / abs 6B、
         // mod=01 base+disp8 3B、mod=10 base+disp32 6B。SIB は未対応で None.
         0x84 => {
@@ -1224,6 +1229,7 @@ pub fn run_mode(
                 | 0xD9
                 | 0x0A
                 | 0xC0
+                | 0xD0
         ) {
             if env
                 .backend
@@ -1443,6 +1449,7 @@ pub fn run_mode(
                     | 0x87
                     | 0x84
                     | 0xC0
+                    | 0xD0
                     | 0xC1
                     | 0xD1
                     | 0xD3
@@ -3512,6 +3519,19 @@ fn dispatch<B: Backend>(
                 (Gpr(rm_f - 4), true)
             };
             sem::shr_rm8_imm8(b, dst, high, word as u8)
+        }
+        Insn::ShrRm81 => {
+            // D0 /5 mod=11 reg-direct。dst は rm フィールド、count=1.
+            // REX.B で R8-R15 の下位8ビット。sed 0x5bdd7d (41 D0 ED) 対応.
+            let rm_f = modrm() & 7;
+            let (dst, high) = if rex != 0 {
+                (Gpr(rm_f | ((rex & 1) << 3)), false)
+            } else if rm_f < 4 {
+                (Gpr(rm_f), false)
+            } else {
+                (Gpr(rm_f - 4), true)
+            };
+            sem::shr_rm8_imm8(b, dst, high, 1)
         }
         Insn::AndRm8ImmMem32 => {
             // 80 /4 mod=10 [base+disp32],imm8 (56b)。disp は (word>>8) 下位32 LE、imm は最下位8.
