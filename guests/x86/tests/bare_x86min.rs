@@ -6313,6 +6313,43 @@ fn test_r32_m32_sibd_sets_flags() {
 }
 
 #[test]
+fn test_r64_m64_sibd32_sets_flags() {
+    // TEST RDX,[R13+R10+0xA8] (4B 85 94 15 A8 00 00 00 は REX 剥がし済み 85 94 15 A8..)。
+    // grep 0x43d250 対応。RDX=0xFF、[mem]=0x0F -> ZF=0。[mem]=0 -> ZF=1.
+    let mut env = env();
+    env.map_rw(0x2000, 1).unwrap();
+    env.step(|b| {
+        sem::write64(b, Gpr(13), 0x2000);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| {
+        sem::write64(b, Gpr(10), 0x10);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| {
+        sem::write64(b, Gpr(2), 0xFF);
+        Ok(())
+    })
+    .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x20B8), &0x0Fu64.to_le_bytes())
+        .unwrap();
+    env.step(|b| sem::test_r64_m64_sibd32(b, Gpr(2), Gpr(13), Gpr(10), 0, 0xA8))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0);
+    env.backend
+        .mem
+        .write(VirtAddr(0x20B8), &0u64.to_le_bytes())
+        .unwrap();
+    env.step(|b| sem::test_r64_m64_sibd32(b, Gpr(2), Gpr(13), Gpr(10), 0, 0xA8))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0x40);
+}
+
+#[test]
 fn test_r32_m32_memnd_sets_flags() {
     // TEST EAX,(RDI) (85 07): find 0x5d17f7 対応。EAX=0xFF、[mem]=0x0F -> ZF=0.
     let mut env = env();

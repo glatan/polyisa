@@ -1030,8 +1030,8 @@ fn fetch_len(
                 },
             )
         }
-        // 0x85 /r (TEST r,m)。reg-direct 2B、SIB mod=01 +disp8 4B、mod=01 base+disp8 3B、
-        // mod=10 base+disp32 6B、mod=00 base 2B / abs disp32 6B。SIB mod=00/10 は未対応.
+        // 0x85 /r (TEST r,m)。reg-direct 2B、SIB mod=01 +disp8 4B、SIB mod=10 +disp32 7B、
+        // mod=01 base+disp8 3B、mod=10 base+disp32 6B、mod=00 base 2B / abs disp32 6B。SIB mod=00 は未対応.
         0x85 => {
             let s = second?;
             let md = s >> 6;
@@ -1039,7 +1039,14 @@ fn fetch_len(
             if md == 3 {
                 Some(2)
             } else if rm == 4 {
-                if md == 1 { Some(4) } else { None }
+                if md == 1 {
+                    Some(4)
+                } else if md == 2 {
+                    // SIB+disp32 (85 /r mod=10 rm=100)。grep 0x43d250 対応.
+                    Some(7)
+                } else {
+                    None
+                }
             } else if md == 1 {
                 Some(3)
             } else if md == 2 || rm == 5 {
@@ -3204,6 +3211,22 @@ fn dispatch<B: Backend>(
                 sem::test_r64_m64_sibd(b, reg(), sib_base(), sib_idx(), sib_shift(), d8)
             } else {
                 sem::test_r32_m32_sibd(b, reg(), sib_base(), sib_idx(), sib_shift(), d8)
+            }
+        }
+        Insn::TestRSibd32 => {
+            // 85 /r SIB mod=10 [base+index*scale+disp32] (56b)。grep 0x43d250 対応.
+            // disp32 は末尾32 LE (swap 済み)。no_index は base+disp32 のみ.
+            let disp = disp32();
+            if no_index() {
+                if rex_w {
+                    sem::test_r64_m64_mem32(b, reg(), sib_base(), disp)
+                } else {
+                    sem::test_r32_m32_mem32(b, reg(), sib_base(), disp)
+                }
+            } else if rex_w {
+                sem::test_r64_m64_sibd32(b, reg(), sib_base(), sib_idx(), sib_shift(), disp)
+            } else {
+                sem::test_r32_m32_sibd32(b, reg(), sib_base(), sib_idx(), sib_shift(), disp)
             }
         }
         Insn::TestRm32Imm => {
