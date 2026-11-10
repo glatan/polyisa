@@ -5801,6 +5801,37 @@ fn dec_r32_sibd_indexed() {
 }
 
 #[test]
+fn or_m32_r32_sib_ors() {
+    // OR [RSP+RSI*4],EDI (09 3C B4): [0x2040]=0x0F、EDI=0xF0 -> [0x2040]=0xFF.
+    // RSP=0x2000、RSI=0x10、base=RSP、idx=RSI、shift=2.
+    let mut env = env();
+    env.map_rw(0x2000, 1).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    env.backend.set(Gpr(6).state(), 0x10);
+    env.backend.set(Gpr(7).state(), 0xF0);
+    env.backend
+        .mem
+        .write(VirtAddr(0x2040), &0x0Fu32.to_le_bytes())
+        .unwrap();
+    env.step(|b| sem::or_m32_r32_sib(b, Gpr(4), Gpr(6), 2, Gpr(7)))
+        .unwrap();
+    let mut back = [0u8; 4];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x2040),
+            &mut back,
+            Access {
+                endian: Endian::Le,
+                align: Align::Unaligned,
+                kind: AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(u32::from_le_bytes(back), 0xFF);
+}
+
+#[test]
 fn test_rm16_sets_zf() {
     // TEST DX,DX (66 85 /r): DX=0 -> ZF=1. DX=1 -> ZF=0.
     let mut env = env();

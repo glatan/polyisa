@@ -11520,6 +11520,28 @@ pub fn or_m64_r64_sibd32<B: Backend>(
     Ok(())
 }
 
+/// OR m32,r32 [base+index*scale] (09 /r SIB mod=00)。
+pub fn or_m32_r32_sib<B: Backend>(b: &mut B, base: Gpr, idx: Gpr, shift: u32, src: Gpr) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, 0, base, idx);
+    let x: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let y = read(b, src);
+    let v = b.or::<W32>(x, y);
+    b.store::<W32>(addr, v, DATA_WRITE)?;
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// OR m64,r64 [base+index*scale] (09 /r SIB mod=00, REX.W)。
+pub fn or_m64_r64_sib<B: Backend>(b: &mut B, base: Gpr, idx: Gpr, shift: u32, src: Gpr) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, 0, base, idx);
+    let x: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let y = read64(b, src);
+    let v = b.or::<W64>(x, y);
+    b.store::<W64>(addr, v, DATA_WRITE)?;
+    update_logic_flags(b, v);
+    Ok(())
+}
+
 /// OR m64,r64 [base+disp32] (09 /r mod=10, REX.W)。
 pub fn or_m64_r64_mem32<B: Backend>(b: &mut B, base: Gpr, disp: i32, src: Gpr) -> Flow<B> {
     let addr = eff_addr32(b, base, disp);

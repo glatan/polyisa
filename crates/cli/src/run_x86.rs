@@ -4350,6 +4350,15 @@ fn dispatch<B: Backend>(
                 sem::or_m32_r32_sibd32(b, sib_base(), sib_idx(), sib_shift(), disp32(), reg())
             }
         }
+        Insn::OrM32R32Sib => {
+            // 09 /r SIB mod=00 [base+index*scale] (24b)。src は reg フィールド.
+            // SIB は最下位8。REX.B で base を拡張する.
+            if rex_w {
+                sem::or_m64_r64_sib(b, sib_base(), sib_idx(), sib_shift(), reg())
+            } else {
+                sem::or_m32_r32_sib(b, sib_base(), sib_idx(), sib_shift(), reg())
+            }
+        }
         Insn::SubRm32 => {
             if rex_w {
                 sem::sub_rm64(b, rm(), reg())
