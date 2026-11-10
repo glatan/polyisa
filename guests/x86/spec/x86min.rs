@@ -1093,6 +1093,14 @@ pub fn build_model() -> polyisa_isadl::Model {
             "load",
         ),
         (
+            "movsx_r32_m8_sib",
+            "N8",
+            "00001111 10111110 00...100 ........",
+            vec![wc("n8_base", WhereOp::Ne, 5)],
+            "movsx r32, m8",
+            "load",
+        ),
+        (
             "movzx_r32_m8_sibd",
             "S8",
             "00001111 10110110 01...100 ........ ........",
@@ -1493,6 +1501,14 @@ pub fn build_model() -> polyisa_isadl::Model {
             "alu",
         ),
         (
+            "and_m8_r8",
+            "F1",
+            "00100000 11......",
+            vec![],
+            "and r/m8, r8",
+            "alu",
+        ),
+        (
             "xor_m8_r8",
             "F1",
             "00110000 11......",
@@ -1822,6 +1838,16 @@ pub fn build_model() -> polyisa_isadl::Model {
             "M32",
             "00001111 01101111 10...... ................................",
             vec![wc("m32_rm", WhereOp::Ne, 4)],
+            "movdqu xmm, m128",
+            "load",
+        ),
+        // MOVDQU xmm,m128 SIB mod=00 [base+index*scale] (F3 0F 6F / 66 0F 6F)。
+        // MOVDQA とバイト列共有のため意味論は MOVUPS と等価で共用する.
+        (
+            "movdqu_load_sib",
+            "N8",
+            "00001111 01101111 00...100 ........",
+            vec![wc("n8_base", WhereOp::Ne, 5)],
             "movdqu xmm, m128",
             "load",
         ),

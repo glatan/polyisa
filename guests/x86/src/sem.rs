@@ -6347,6 +6347,38 @@ pub fn movzx_r64_m8_sibd32<B: Backend>(
     Ok(())
 }
 
+/// MOVSX r32,m8 [base+index*scale] (0F BE SIB mod=00)。
+pub fn movsx_r32_m8_sib<B: Backend>(
+    b: &mut B,
+    dst: Gpr,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+) -> Flow<B> {
+    use polyisa_sem::W8;
+    let addr = sib_addr_scaled(b, shift, 0, base, idx);
+    let v8: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
+    let v = b.sext::<W8, W32>(v8);
+    write(b, dst, v);
+    Ok(())
+}
+
+/// MOVSX r64,m8 [base+index*scale] (0F BE SIB mod=00, REX.W)。
+pub fn movsx_r64_m8_sib<B: Backend>(
+    b: &mut B,
+    dst: Gpr,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+) -> Flow<B> {
+    use polyisa_sem::W8;
+    let addr = sib_addr_scaled(b, shift, 0, base, idx);
+    let v8: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
+    let v = b.sext::<W8, W64>(v8);
+    write64(b, dst, v);
+    Ok(())
+}
+
 /// MOVZX r64,r/m8 reg-direct (REX.W + 0F B6)。8ビットを読んでゼロ拡張する.
 pub fn movzx_r64_r8<B: Backend>(b: &mut B, dst: Gpr, src: Gpr, high: bool) -> Flow<B> {
     use polyisa_sem::W8;
@@ -9853,6 +9885,23 @@ pub fn xor_m8_r8<B: Backend>(
     let x = read8(b, dst, dst_high);
     let y = read8(b, src, src_high);
     let v = b.xor::<W8>(x, y);
+    write8(b, dst, dst_high, v);
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// AND r/m8, r8 reg-direct (20 /r mod=11)。dst rm と src reg の AND で 5 旗を更新する.
+pub fn and_m8_r8<B: Backend>(
+    b: &mut B,
+    dst: Gpr,
+    dst_high: bool,
+    src: Gpr,
+    src_high: bool,
+) -> Flow<B> {
+    use polyisa_sem::W8;
+    let x = read8(b, dst, dst_high);
+    let y = read8(b, src, src_high);
+    let v = b.and::<W8>(x, y);
     write8(b, dst, dst_high, v);
     update_logic_flags(b, v);
     Ok(())

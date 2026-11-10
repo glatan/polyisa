@@ -2347,6 +2347,88 @@ fn run_cmp_rm_imm8_mem32() {
 }
 
 #[test]
+fn run_and_m8_r8_rex() {
+    // run 経由で 40 20 C6 (AND SIL,AL) を回す。REX 付き low8。
+    // ESI=0xFF、EAX=0x0F -> SIL=0x0F で exit(0)。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(6).state(), 0xFF);
+    env.backend.set(Gpr(0).state(), 0x0F);
+    let prog: &[u8] = &[
+        0x40, 0x20, 0xC6, // and sil,al (REX)
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
+        0x0F, 0x05, // syscall -> exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0));
+    assert_eq!(env.backend.get(Gpr(6).state()) & 0xFF, 0x0F);
+}
+
+#[test]
+fn run_movsx_r32_m8_sib() {
+    // run 経由で 0F BE 0C 24 (MOVSX ECX,[RSP]) を回す。
+    // [0x2000]=0xFF -> ECX=0xFFFFFFFF で exit(0)。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    env.backend.mem.write(VirtAddr(0x2000), &[0xFF]).unwrap();
+    let prog: &[u8] = &[
+        0x0F, 0xBE, 0x0C, 0x24, // movsx ecx,[rsp]
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
+        0x0F, 0x05, // syscall -> exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0));
+    assert_eq!(env.backend.get(Gpr(1).state()), 0xFFFF_FFFF);
+}
+
+#[test]
+fn run_movdqu_load_sib() {
+    // run 経由で 66 0F 6F 0C 0E (MOVDQA xmm1,[RSI+RCX]) を回す。
+    // RSI=0x2000、RCX=0x100 -> [0x2100] 16B を xmm1 に載せて exit(0)。
+    use polyisa_guest_x86::sem::Xmm;
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.mem.map(VirtAddr(0x3000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(6).state(), 0x2000);
+    env.backend.set(Gpr(1).state(), 0x100);
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x2100),
+            &[
+                0x00u8, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC,
+                0xDD, 0xEE, 0xFF,
+            ],
+        )
+        .unwrap();
+    let prog: &[u8] = &[
+        0x66, 0x0F, 0x6F, 0x0C, 0x0E, // movdqa xmm1,[rsi+rcx]
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
+        0x0F, 0x05, // syscall -> exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0));
+    let v: u128 = env.backend.get(polyisa_guest_x86::sem::xmm_ref(Xmm(1)));
+    assert_eq!(v, 0xFFEEDDCCBBAA99887766554433221100u128);
+}
+
+#[test]
 fn run_nopl_mem32() {
     // run 経由で 0F 1F 80 00 00 00 00 (NOPL [rax]) を回す。
     // 何もせず exit(0)。

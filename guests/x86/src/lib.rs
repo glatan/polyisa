@@ -70,7 +70,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数116件。
-        assert_eq!(INSNS.len(), 525);
+        assert_eq!(INSNS.len(), 528);
     }
 
     #[test]
@@ -253,6 +253,8 @@ mod tests {
         assert_eq!(decode(0x0FB6F6, 24), Some(Insn::MovzxR32R8));
         assert_eq!(decode(0x0FB69500F0FFFF, 56), Some(Insn::MovzxR32M8Mem32));
         assert_eq!(decode(0x0FB60406, 32), Some(Insn::MovzxR32M8Sib));
+        assert_eq!(decode(0x0FBE0424, 32), Some(Insn::MovsxR32M8Sib));
+        assert_eq!(decode(0x0F6F0C0E, 32), Some(Insn::MovdquLoadSib));
         assert_eq!(decode(0x8875BF, 24), Some(Insn::MovM8R8Mem8));
         assert_eq!(decode(0x394F08, 24), Some(Insn::CmpRmMem8));
         assert_eq!(decode(0x390B, 16), Some(Insn::CmpRmMemnd));
@@ -648,6 +650,9 @@ mod tests {
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x30C0, 16), Some(Insn::XorM8R8));
         assert_eq!(decode(0x30C0, 8), None);
+        // AND r/m8,r8 reg-direct (20 /r)。
+        assert_eq!(decode(0x20C7, 16), Some(Insn::AndM8R8));
+        assert_eq!(decode(0x20C7, 8), None);
         // XADD r32,[base] (0F C1 mod=00)。
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x0FC103, 24), Some(Insn::XaddR32Memnd));

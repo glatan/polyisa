@@ -1970,6 +1970,17 @@ fn xor_m8_r8_zeroes() {
 }
 
 #[test]
+fn and_m8_r8_ands() {
+    // AND DIL,AL: EDI=0xFF、EAX=0x0F -> DIL=0x0F。seq の停止点に対応.
+    let mut env = env();
+    env.backend.set(Gpr(7).state(), 0xFF);
+    env.backend.set(Gpr(0).state(), 0x0F);
+    env.step(|b| sem::and_m8_r8(b, Gpr(7), false, Gpr(0), false))
+        .unwrap();
+    assert_eq!(env.backend.get(Gpr(7).state()) & 0xFF, 0x0F);
+}
+
+#[test]
 fn cvtsi2sd_r64_converts() {
     use polyisa_guest_x86::sem::Xmm;
     // CVTSI2SD xmm0,RAX: RAX=5 -> 下位=5.0 (0x4014000000000000)、上位は保持.
@@ -4508,6 +4519,52 @@ fn movzx_r32_m8_sib_basic() {
     env.step(|b| sem::movzx_r32_m8_sib(b, Gpr(0), Gpr(6), Gpr(8), 0))
         .unwrap();
     assert_eq!(env.backend.get(Gpr(0).state()), 0xAB);
+}
+
+#[test]
+fn movsx_r32_m8_sib_sign_extends() {
+    // MOVSX EAX,[RSI+R8] (0F BE SIB mod=00): [0x1500]=0xFF -> EAX=0xFFFFFFFF.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend.set(Gpr(6).state(), 0x1000);
+    env.step(|b| {
+        sem::write64(b, Gpr(8), 0x500);
+        Ok(())
+    })
+    .unwrap();
+    env.backend.mem.write(VirtAddr(0x1500), &[0xFFu8]).unwrap();
+    env.step(|b| sem::movsx_r32_m8_sib(b, Gpr(0), Gpr(6), Gpr(8), 0))
+        .unwrap();
+    assert_eq!(env.backend.get(Gpr(0).state()), 0xFFFF_FFFF);
+}
+
+#[test]
+fn movdqu_load_sib_roundtrip() {
+    // MOVDQA xmm0,[RSI+RCX] SIB mod=00: 16B ロード.
+    use polyisa_guest_x86::sem::Xmm;
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.map_rw(0x2000, 1).unwrap();
+    env.backend.set(Gpr(6).state(), 0x1000);
+    env.step(|b| {
+        sem::write64(b, Gpr(1), 0x100);
+        Ok(())
+    })
+    .unwrap();
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x1100),
+            &[
+                0x00u8, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC,
+                0xDD, 0xEE, 0xFF,
+            ],
+        )
+        .unwrap();
+    env.step(|b| sem::movups_load_sib(b, Xmm(0), Gpr(6), Gpr(1), 0))
+        .unwrap();
+    let v: u128 = env.backend.get(sem::xmm_ref(Xmm(0)));
+    assert_eq!(v, 0xFFEEDDCCBBAA99887766554433221100u128);
 }
 
 #[test]

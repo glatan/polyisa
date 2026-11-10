@@ -170,7 +170,7 @@ fn fetch_len(
                 }
             } else if s == 0x6F {
                 // MOVDQU xmm,m128 (F3 0F 6F /r) と MOVDQA xmm,m128 RIP (66 0F 6F)。
-                // reg-direct と mod=00/01/10 (SIBなし)、RIP (mod=00 rm=101) 7B.
+                // reg-direct と mod=00/01/10、SIB mod=00、RIP (mod=00 rm=101) 7B.
                 // F3/66 接頭辞は剥がし済み。16B転送は MOVUPS と等価のため意味論を共有する.
                 let m = third?;
                 let md = m >> 6;
@@ -178,7 +178,20 @@ fn fetch_len(
                 if md == 3 {
                     Some(3)
                 } else if rm == 4 {
-                    None
+                    // SIB 付き。fourth が SIB バイトである.
+                    let t = fourth?;
+                    let disp = match md {
+                        1 => 1,
+                        2 => 4,
+                        _ => {
+                            if t & 7 == 5 {
+                                4
+                            } else {
+                                0
+                            }
+                        }
+                    };
+                    Some(4 + disp)
                 } else if md == 1 {
                     Some(4)
                 } else if md == 2 || rm == 5 {
@@ -519,8 +532,8 @@ fn fetch_len(
                 None
             }
         }
-        // 0x28 /r (SUB r/m8,r8) と 0x30 /r (XOR r/m8,r8)。reg-direct 2B のみ。
-        0x28 | 0x30 => {
+        // 0x20 /r (AND r/m8,r8)、0x28 /r (SUB r/m8,r8) と 0x30 /r (XOR r/m8,r8)。reg-direct 2B のみ。
+        0x20 | 0x28 | 0x30 => {
             let s = second?;
             if s >> 6 == 3 { Some(2) } else { None }
         }
@@ -994,6 +1007,7 @@ pub fn run_mode(
                 | 0x8A
                 | 0x38
                 | 0x3A
+                | 0x20
                 | 0x28
                 | 0x30
                 | 0x08
@@ -1122,10 +1136,12 @@ pub fn run_mode(
                     0x10 | 0x11
                         | 0x28
                         | 0x29
+                        | 0x6F
                         | 0xE7
                         | 0x1F
                         | 0xB6
                         | 0xB7
+                        | 0xBE
                         | 0xAF
                         | 0xBC
                         | 0xBD
@@ -1198,6 +1214,10 @@ pub fn run_mode(
                     | 0x8A
                     | 0x38
                     | 0x3A
+                    | 0x20
+                    | 0x28
+                    | 0x30
+                    | 0x08
                     | 0x87
                     | 0x84
                     | 0xC1
@@ -1368,6 +1388,7 @@ pub fn run_mode(
                     | Insn::MovdquLoadMemnd
                     | Insn::MovdquLoadMem8
                     | Insn::MovdquLoadMem32
+                    | Insn::MovdquLoadSib
                     | Insn::MovAbsEax
                     | Insn::MovEaxAbs
                     | Insn::MovRm16ImmM32
@@ -2282,6 +2303,26 @@ fn dispatch<B: Backend>(
                 (Gpr(rm_f - 4), true)
             };
             sem::xor_m8_r8(b, dst, dst_high, src, src_high)
+        }
+        Insn::AndM8R8 => {
+            // 20 /r mod=11 reg-direct。dst は rm、src は reg.
+            let reg_f = (modrm() >> 3) & 7;
+            let rm_f = modrm() & 7;
+            let (src, src_high) = if rex != 0 {
+                (Gpr(reg_f | ((rex >> 2) & 1) << 3), false)
+            } else if reg_f < 4 {
+                (Gpr(reg_f), false)
+            } else {
+                (Gpr(reg_f - 4), true)
+            };
+            let (dst, dst_high) = if rex != 0 {
+                (Gpr(rm_f | ((rex & 1) << 3)), false)
+            } else if rm_f < 4 {
+                (Gpr(rm_f), false)
+            } else {
+                (Gpr(rm_f - 4), true)
+            };
+            sem::and_m8_r8(b, dst, dst_high, src, src_high)
         }
         Insn::CmpM8R8Memnd => {
             // 38 /r mod=00 [base],r8。src は reg フィールド.
@@ -4422,6 +4463,13 @@ fn dispatch<B: Backend>(
         Insn::MovdquLoadMem8 => sem::movups_load_mem8(b, xmm_reg(), rm0f(), disp8()),
         Insn::MovdquLoadMemnd => sem::movups_load_memnd(b, xmm_reg(), rm0f()),
         Insn::MovdquLoadMem32 => sem::movups_load_mem32(b, xmm_reg(), rm0f(), disp32()),
+        Insn::MovdquLoadSib => {
+            if sib0f_no_index() {
+                sem::movups_load_memnd(b, xmm_reg(), sib0f_base())
+            } else {
+                sem::movups_load_sib(b, xmm_reg(), sib0f_base(), sib0f_idx(), sib0f_shift())
+            }
+        }
         // MOVDQA (66 0F 6F) は16B転送で MOVUPS と等価のため意味論を共有する.
         // mod=00/01/10 は Movdqu とバイト列が同一のため decode は Movdqu 側に寄る.
         // 66 接頭辞の許可のみ行い、分岐は Movdqu 側で処理する.
@@ -5075,6 +5123,19 @@ fn dispatch<B: Backend>(
                 sem::movsx_r64_m8_mem8(b, reg0f_as_gpr(), rm0f(), disp8())
             } else {
                 sem::movsx_r32_m8_mem8(b, reg0f_as_gpr(), rm0f(), disp8())
+            }
+        }
+        Insn::MovsxR32M8Sib => {
+            if sib0f_no_index() {
+                if rex_w {
+                    sem::movsx_r64_m8_memnd(b, reg0f_as_gpr(), sib0f_base())
+                } else {
+                    sem::movsx_r32_m8_memnd(b, reg0f_as_gpr(), sib0f_base())
+                }
+            } else if rex_w {
+                sem::movsx_r64_m8_sib(b, reg0f_as_gpr(), sib0f_base(), sib0f_idx(), sib0f_shift())
+            } else {
+                sem::movsx_r32_m8_sib(b, reg0f_as_gpr(), sib0f_base(), sib0f_idx(), sib0f_shift())
             }
         }
         Insn::MovzxR32M8Mem8 => {
