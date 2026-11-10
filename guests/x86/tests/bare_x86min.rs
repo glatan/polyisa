@@ -2355,6 +2355,36 @@ fn mov_m8_r8_sib_stores_byte() {
 }
 
 #[test]
+fn mov_m8_r8_sibd32_stores_byte() {
+    // MOV [RSP+RDX+0x436],R14B: head の停止点に対応.
+    let mut env = env();
+    env.map_rw(0, 1).unwrap();
+    env.backend.set(Gpr(4).state(), 0x100);
+    env.backend.set(Gpr(2).state(), 0x10);
+    env.step(|b| {
+        sem::write64(b, Gpr(14), 0x42);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::mov_m8_r8_sibd32(b, Gpr(14), Gpr(4), Gpr(2), 0, 0x436, false))
+        .unwrap();
+    let mut back = [0u8; 1];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x546),
+            &mut back,
+            Access {
+                endian: Endian::Le,
+                align: Align::Unaligned,
+                kind: AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(back[0], 0x42);
+}
+
+#[test]
 fn sub_m64_r64_mem8_subs() {
     // SUB [RBP-0x60],R13: [0x1A0]=10、R13=3 -> [0x1A0]=7。
     let mut env = env();

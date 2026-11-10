@@ -2045,6 +2045,22 @@ fn dispatch<B: Backend>(
                 sem::mov_m8_r8_sib(b, src, sib_base(), sib_idx(), sib_shift(), high)
             }
         }
+        Insn::MovM8R8Sibd32 => {
+            // 88 /r SIB mod=10 [base+index*scale+disp32] store。src は reg フィールド.
+            let reg_f = (modrm() >> 3) & 7;
+            let (src, high) = if rex != 0 {
+                (Gpr(reg_f | ((rex >> 2) & 1) << 3), false)
+            } else if reg_f < 4 {
+                (Gpr(reg_f), false)
+            } else {
+                (Gpr(reg_f - 4), true)
+            };
+            if no_index() {
+                sem::mov_m8_r8_mem32(b, src, sib_base(), disp32(), high)
+            } else {
+                sem::mov_m8_r8_sibd32(b, src, sib_base(), sib_idx(), sib_shift(), disp32(), high)
+            }
+        }
         Insn::MovM8R8Mem8 => {
             // 88 /r mod=01 [base+disp8],r8。src は reg フィールド.
             let reg_f = (modrm() >> 3) & 7;

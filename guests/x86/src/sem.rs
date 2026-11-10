@@ -686,6 +686,23 @@ pub fn mov_m8_r8_mem32<B: Backend>(
     Ok(())
 }
 
+/// MOV [base+index*scale+disp32], r8 (88 /r SIB mod=10)。8bit格納.
+pub fn mov_m8_r8_sibd32<B: Backend>(
+    b: &mut B,
+    src: Gpr,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i32,
+    high: bool,
+) -> Flow<B> {
+    use polyisa_sem::W8;
+    let addr = sib_addr_scaled(b, shift, disp, base, idx);
+    let x = read8(b, src, high);
+    b.store::<W8>(addr, x, DATA_WRITE)?;
+    Ok(())
+}
+
 /// MOV [RIP+disp32], r8 (88 /r RIP)。8bit格納.
 pub fn mov_m8_r8_rip<B: Backend>(
     b: &mut B,
