@@ -5059,6 +5059,14 @@ fn dispatch<B: Backend>(
                 sem::movsx_r32_m8_memnd(b, reg0f_as_gpr(), rm0f())
             }
         }
+        Insn::MovsxR32M8Mem8 => {
+            // 0F BE mod=01 [base+disp8]。REX.W で64ビット符号拡張.
+            if rex_w {
+                sem::movsx_r64_m8_mem8(b, reg0f_as_gpr(), rm0f(), disp8())
+            } else {
+                sem::movsx_r32_m8_mem8(b, reg0f_as_gpr(), rm0f(), disp8())
+            }
+        }
         Insn::MovzxR32M8Mem8 => {
             if rex_w {
                 sem::movzx_r64_m8_mem8(b, reg0f_as_gpr(), rm0f(), disp8())

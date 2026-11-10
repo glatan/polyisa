@@ -2071,6 +2071,18 @@ fn bt_r32_imm_sets_cf() {
 }
 
 #[test]
+fn movsx_r32_m8_mem8_sign_extends() {
+    // MOVSX ESI,[RCX+1]: [1]=0xFF -> ESI=0xFFFFFFFF。
+    let mut env = env();
+    env.map_rw(0, 1).unwrap();
+    env.backend.mem.write(VirtAddr(1), &[0xFF]).unwrap();
+    env.backend.set(Gpr(1).state(), 0);
+    env.step(|b| sem::movsx_r32_m8_mem8(b, Gpr(6), Gpr(1), 1))
+        .unwrap();
+    assert_eq!(env.backend.get(Gpr(6).state()), 0xFFFF_FFFF);
+}
+
+#[test]
 fn cmp_rm32_imm8_mem8_sets_flags() {
     // CMP [RSP+0x14],0: [0x14]=0 -> ZF=1。
     let mut env = env();

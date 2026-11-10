@@ -6187,6 +6187,26 @@ pub fn movsx_r64_m8_memnd<B: Backend>(b: &mut B, dst: Gpr, base: Gpr) -> Flow<B>
     Ok(())
 }
 
+/// MOVSX r32,m8 [base+disp8] (0F BE mod=01)。
+pub fn movsx_r32_m8_mem8<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, disp: i8) -> Flow<B> {
+    use polyisa_sem::W8;
+    let addr = eff_addr(b, base, disp);
+    let v8: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
+    let v = b.sext::<W8, W32>(v8);
+    write(b, dst, v);
+    Ok(())
+}
+
+/// MOVSX r64,m8 [base+disp8] (0F BE mod=01, REX.W)。
+pub fn movsx_r64_m8_mem8<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, disp: i8) -> Flow<B> {
+    use polyisa_sem::W8;
+    let addr = eff_addr(b, base, disp);
+    let v8: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
+    let v = b.sext::<W8, W64>(v8);
+    write64(b, dst, v);
+    Ok(())
+}
+
 /// MOVZX r32,m8 [base+disp8] (0F B6 mod=01)。
 pub fn movzx_r32_m8_mem8<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, disp: i8) -> Flow<B> {
     use polyisa_sem::W8;

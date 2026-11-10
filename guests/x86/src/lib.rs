@@ -70,7 +70,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数116件。
-        assert_eq!(INSNS.len(), 523);
+        assert_eq!(INSNS.len(), 524);
     }
 
     #[test]
@@ -758,6 +758,10 @@ mod tests {
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x39542414, 32), Some(Insn::CmpM32R32Sibd));
         assert_eq!(decode(0x39542414, 24), None);
+        // MOVSX r32,m8 mod=01 [base+disp8] (0F BE /r)。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x0FBE7101, 32), Some(Insn::MovsxR32M8Mem8));
+        assert_eq!(decode(0x0FBE7101, 24), None);
         // ADD m16,imm8 SIB mod=00 (66 83 /0)。66 は実行側で剥がす.
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x83045101, 32), Some(Insn::AddM16ImmSib));

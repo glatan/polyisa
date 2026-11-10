@@ -995,6 +995,14 @@ pub fn build_model() -> polyisa_isadl::Model {
             "load",
         ),
         (
+            "movsx_r32_m8_mem8",
+            "M8",
+            "00001111 10111110 01...... ........",
+            vec![wc("m8_rm", WhereOp::Ne, 4)],
+            "movsx r32, m8",
+            "load",
+        ),
+        (
             "and_r8_m8_mem32",
             "M32",
             "00100010 10...... ................................",
