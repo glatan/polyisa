@@ -2020,9 +2020,9 @@ pub fn build_model() -> polyisa_isadl::Model {
         ),
         (
             "mov_rm8_imm_memnd",
-            "MR",
+            "M8",
             "11000110 00000... ........",
-            vec![wc("mr_rm", WhereOp::Ne, 4), wc("mr_rm", WhereOp::Ne, 5)],
+            vec![wc("m8_rm", WhereOp::Ne, 4), wc("m8_rm", WhereOp::Ne, 5)],
             "mov r/m8, {imm}",
             "store",
         ),

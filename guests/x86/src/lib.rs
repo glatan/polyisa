@@ -450,6 +450,11 @@ mod tests {
         assert_eq!(decode(0x3B3C2510000000, 56), Some(Insn::CmpRSibabs));
         assert_eq!(decode(0x873DB6381A00, 48), Some(Insn::XchgRRip));
         assert_eq!(decode(0xC60000, 24), Some(Insn::MovRm8ImmMemnd));
+        // MOVB [RAX],0x25 (C6 00 25): stat 0x40c912 対応。imm 下位3=101 でも decode する.
+        // MR形式の where 地雷対策 (M8 で ModRM 位置を見る).
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0xC60025, 24), Some(Insn::MovRm8ImmMemnd));
+        assert_eq!(decode(0xC60025, 16), None);
         assert_eq!(decode(0x0FB77416FE, 40), Some(Insn::MovzxR32M16Sibd));
         assert_eq!(decode(0x8A0E, 16), Some(Insn::MovR8M8Memnd));
         assert_eq!(decode(0xFF157D111A00, 48), Some(Insn::CallRRip));
