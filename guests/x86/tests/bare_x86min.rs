@@ -3114,6 +3114,24 @@ fn sub_r32_sibd_indexed_subs() {
 }
 
 #[test]
+fn add_r32_sibd_indexed_adds() {
+    // ADD ECX,[RAX+RSI*4+0x50] (03 4C B0 50 相当): sha1sum 0x5cab68 対応.
+    // RAX=0x2000、RSI=0x10、[0x2090]=3、ECX=10 -> ECX=13.
+    let mut env = env();
+    env.map_rw(0x2000, 1).unwrap();
+    env.backend.set(Gpr(0).state(), 0x2000);
+    env.backend.set(Gpr(6).state(), 0x10);
+    env.backend
+        .mem
+        .write(VirtAddr(0x2090), &0x03u32.to_le_bytes())
+        .unwrap();
+    env.backend.set(Gpr(1).state(), 10);
+    env.step(|b| sem::add_r32_sibd_indexed(b, Gpr(1), Gpr(0), Gpr(6), 2, 0x50))
+        .unwrap();
+    assert_eq!(env.backend.get(Gpr(1).state()), 13);
+}
+
+#[test]
 fn mov_rm8_imm_mem32_stores_byte() {
     // MOVB [RBP-0x4B0],0x20: [0x100-0x4B0]=[0xFFFFFFFFFFFFFB50]? ではなく、
     // RBP=0x200、disp=-0x100 -> [0x100]=0x20。

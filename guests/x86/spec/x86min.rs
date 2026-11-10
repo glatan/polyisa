@@ -355,8 +355,9 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("cmove_r64_sibd", "F1", "00001111 01000100 01...100 ..100... ........", "cmove r, m64", "load"),
         // SUB r32/r64, m32/m64 SIB+disp8 (2B mod=01)。index有無は問わずdispatchで切替.
         ("sub_r_sibd", "F1", "00101011 01...100 ........ ........", "sub r, m", "alu"),
-        // ADD r32/r64, m32/m64 SIB+disp8 no_index (03 mod=01)。REX.W で64bit.
-        ("add_r_sibd", "F1", "00000011 01...100 ..100... ........", "add r, m", "alu"),
+        // ADD r32/r64, m32/m64 SIB+disp8 (03 mod=01)。index有無は問わずdispatchで切替.
+        // sha1sum 0x5cab68 対応。REX.W で64bit.
+        ("add_r_sibd", "F1", "00000011 01...100 ........ ........", "add r, m", "alu"),
         // ADD m32,r32 SIB+disp8 (01 mod=01)。
         ("add_m32_r32_sibd", "F1", "00000001 01...100 ........ ........", "add m, r", "alu"),
         // CMP m32,r32 SIB+disp8 (39 mod=01)。

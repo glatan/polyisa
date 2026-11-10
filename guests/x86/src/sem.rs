@@ -6307,6 +6307,42 @@ pub fn add_r64_sibd<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, disp: i8) -> Flo
     Ok(())
 }
 
+/// ADD r32, m32 [base+index*scale+disp8] (03 /r SIB mod=01)。sha1sum 0x5cab68 対応.
+pub fn add_r32_sibd_indexed<B: Backend>(
+    b: &mut B,
+    dst: Gpr,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i8,
+) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, disp as i32, base, idx);
+    let y: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let x = read(b, dst);
+    let v = b.add::<W32>(x, y);
+    write(b, dst, v);
+    update_add_flags(b, x, y, v);
+    Ok(())
+}
+
+/// ADD r64, m64 [base+index*scale+disp8] (03 /r SIB mod=01, REX.W)。
+pub fn add_r64_sibd_indexed<B: Backend>(
+    b: &mut B,
+    dst: Gpr,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i8,
+) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, disp as i32, base, idx);
+    let y: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let x = read64(b, dst);
+    let v = b.add::<W64>(x, y);
+    write64(b, dst, v);
+    update_add_flags(b, x, y, v);
+    Ok(())
+}
+
 /// ADD m32,r32 [base+index*scale+disp8] (01 /r SIB mod=01)。
 pub fn add_m32_r32_sibd<B: Backend>(
     b: &mut B,

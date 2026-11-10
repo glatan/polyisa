@@ -1695,6 +1695,32 @@ fn run_add_r_sibd() {
 }
 
 #[test]
+fn run_add_r_sibd_indexed() {
+    // run 経由で 48 03 7C B4 28 (ADD RDI,[RSP+RSI*4+0x28]) を回す。sha1sum 0x5cab68 対応.
+    // RSP=0x2000、RSI=0x10、[0x2068]=5、RDI=3 -> RDI=8、exit(8)。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    env.backend.set(Gpr(6).state(), 0x10);
+    env.backend.set(Gpr(7).state(), 3);
+    env.backend
+        .mem
+        .write(VirtAddr(0x2068), &5u64.to_le_bytes())
+        .unwrap();
+    let prog: &[u8] = &[
+        0x48, 0x03, 0x7C, 0xB4, 0x28, // add rdi,[rsp+rsi*4+0x28] (rdi=8)
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x0F, 0x05, // syscall -> exit(rdi=8)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(8));
+}
+
+#[test]
 fn run_movsx_r32_m8_rip() {
     // run 経由で 0F BE 05 + disp32 (MOVSX EAX,[RIP]) を回す。
     // [0x1500]=0xFF -> EAX=0xFFFFFFFF、exit(0)。

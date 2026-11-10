@@ -4469,15 +4469,25 @@ fn dispatch<B: Backend>(
             }
         }
         Insn::AddRSibd => {
-            // 03 SIB mod=01 [base+disp8] no_index (32b)。
-            // SIB は (word>>8) 下位8、disp は最下位8。base は SIB 下位3 + REX.B。
+            // 03 SIB mod=01 [base+index*scale+disp8] (32b)。sha1sum 0x5cab68 対応.
+            // no_index は base+disp8 のみ。SIB は (word>>8) 下位8、disp は最下位8.
+            // base は SIB 下位3 + REX.B。dst は reg フィールド.
             let sib_v = ((word >> 8) & 0xff) as u8;
             let d8 = (word & 0xff) as u8 as i8;
+            let shift = ((sib_v >> 6) & 3) as u32;
+            let idx_raw = (sib_v >> 3) & 7;
+            let idx = Gpr(idx_raw | (((rex >> 1) & 1) << 3));
             let base = Gpr((sib_v & 7) | ((rex & 1) << 3));
-            if rex_w {
-                sem::add_r64_sibd(b, reg(), base, d8)
+            if idx_raw == 4 && (rex >> 1) & 1 == 0 {
+                if rex_w {
+                    sem::add_r64_sibd(b, reg(), base, d8)
+                } else {
+                    sem::add_r32_sibd(b, reg(), base, d8)
+                }
+            } else if rex_w {
+                sem::add_r64_sibd_indexed(b, reg(), base, idx, shift, d8)
             } else {
-                sem::add_r32_sibd(b, reg(), base, d8)
+                sem::add_r32_sibd_indexed(b, reg(), base, idx, shift, d8)
             }
         }
         Insn::AddRMem32 => {

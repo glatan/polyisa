@@ -956,6 +956,11 @@ mod tests {
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x03442418, 32), Some(Insn::AddRSibd));
         assert_eq!(decode(0x03442418, 24), None);
+        // ADD r,m SIB+disp8 indexed (03 mod=01)。03 44 B4 28 は ADD EAX,[RSP+RSI*4+0x28].
+        // sha1sum 0x5cab68 対応.
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x0344B428, 32), Some(Insn::AddRSibd));
+        assert_eq!(decode(0x0344B428, 24), None);
         // MOVSX r32,m8 RIP (0F BE 05 + disp32)。
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x0FBE0500000000, 56), Some(Insn::MovsxR32M8Rip));
