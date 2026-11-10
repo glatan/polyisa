@@ -11,7 +11,7 @@
 
 use polyisa_mem::{Access, AccessKind, Align, Endian};
 use polyisa_sem::{
-    Backend, Cmp, ExceptionKind, Flow, GuestException, StateRef, W8, W32, W64, W128, Width,
+    Backend, Cmp, ExceptionKind, Flow, GuestException, StateRef, W8, W16, W32, W64, W128, Width,
 };
 
 use super::CpuState;
@@ -46,6 +46,11 @@ pub fn eip_ref() -> StateRef<W32> {
 /// eflags を指す。
 pub fn eflags_ref() -> StateRef<W32> {
     StateRef::<W32>::from_offset(core::mem::offset_of!(CpuState, eflags))
+}
+
+/// x87 制御ワードを指す。
+pub fn fcw_ref() -> StateRef<W16> {
+    StateRef::<W16>::from_offset(core::mem::offset_of!(CpuState, fcw))
 }
 
 /// 汎用レジスタの上位32ビットを指す（x86-64 用、0-7 のみ）。
@@ -266,6 +271,22 @@ pub fn or_al_imm<B: Backend>(b: &mut B, imm: u8) -> Flow<B> {
     let mask = b.konst::<W32>(0xFFFF_FF00);
     let preserved = b.and::<W32>(x32, mask);
     let ext32 = b.zext::<W8, W32>(v);
+    let nv = b.or::<W32>(preserved, ext32);
+    write(b, Gpr(0), nv);
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// AND AX,imm16 (66 25)。AX のみ書き換え、上位16ビットは保持. 5 旗を更新する.
+pub fn and_ax_imm16<B: Backend>(b: &mut B, imm: u16) -> Flow<B> {
+    let x32 = read(b, Gpr(0));
+    let x: B::V<W16> = b.trunc::<W32, W16>(x32);
+    let y = b.konst::<W16>(imm);
+    let v = b.and::<W16>(x, y);
+    // AX のみ書き換え、上位は保持.
+    let mask = b.konst::<W32>(0xFFFF_0000);
+    let preserved = b.and::<W32>(x32, mask);
+    let ext32 = b.zext::<W16, W32>(v);
     let nv = b.or::<W32>(preserved, ext32);
     write(b, Gpr(0), nv);
     update_logic_flags(b, v);
@@ -8131,6 +8152,54 @@ pub fn pminub_xmm_mem32<B: Backend>(b: &mut B, dst: Xmm, base: Gpr, disp: i32) -
         acc = b.or::<W128>(acc, pos);
     }
     b.set(xmm_ref(dst), acc);
+    Ok(())
+}
+
+/// FNSTCW m16 [base] (D9 /7 mod=00)。x87 制御ワードを書く.
+pub fn fnstcw_memnd<B: Backend>(b: &mut B, base: Gpr) -> Flow<B> {
+    let addr = read64(b, base);
+    let v: B::V<W16> = b.get(fcw_ref());
+    b.store::<W16>(addr, v, DATA_WRITE)?;
+    Ok(())
+}
+
+/// FNSTCW m16 [base+disp8] (D9 /7 mod=01)。
+pub fn fnstcw_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8) -> Flow<B> {
+    let addr = eff_addr(b, base, disp);
+    let v: B::V<W16> = b.get(fcw_ref());
+    b.store::<W16>(addr, v, DATA_WRITE)?;
+    Ok(())
+}
+
+/// FNSTCW m16 [base+disp32] (D9 /7 mod=10)。
+pub fn fnstcw_mem32<B: Backend>(b: &mut B, base: Gpr, disp: i32) -> Flow<B> {
+    let addr = eff_addr32(b, base, disp);
+    let v: B::V<W16> = b.get(fcw_ref());
+    b.store::<W16>(addr, v, DATA_WRITE)?;
+    Ok(())
+}
+
+/// FLDCW m16 [base] (D9 /5 mod=00)。x87 制御ワードを読む.
+pub fn fldcw_memnd<B: Backend>(b: &mut B, base: Gpr) -> Flow<B> {
+    let addr = read64(b, base);
+    let v: B::V<W16> = b.load::<W16>(addr, DATA_READ)?;
+    b.set(fcw_ref(), v);
+    Ok(())
+}
+
+/// FLDCW m16 [base+disp8] (D9 /5 mod=01)。
+pub fn fldcw_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8) -> Flow<B> {
+    let addr = eff_addr(b, base, disp);
+    let v: B::V<W16> = b.load::<W16>(addr, DATA_READ)?;
+    b.set(fcw_ref(), v);
+    Ok(())
+}
+
+/// FLDCW m16 [base+disp32] (D9 /5 mod=10)。
+pub fn fldcw_mem32<B: Backend>(b: &mut B, base: Gpr, disp: i32) -> Flow<B> {
+    let addr = eff_addr32(b, base, disp);
+    let v: B::V<W16> = b.load::<W16>(addr, DATA_READ)?;
+    b.set(fcw_ref(), v);
     Ok(())
 }
 

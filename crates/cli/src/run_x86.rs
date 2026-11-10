@@ -74,7 +74,15 @@ fn fetch_len(
         0x68 => Some(5),
         0xEB | 0x70 | 0x71 | 0x72 | 0x73 | 0x74 | 0x75 | 0x76 | 0x77 | 0x78 | 0x79 | 0x7A
         | 0x7B | 0x7C | 0x7D | 0x7E | 0x7F | 0xE2 | 0xCD | 0x3C | 0x0C => Some(2),
-        0x05 | 0x2D | 0x3D | 0xE8 | 0xE9 | 0x25 | 0x0D | 0x35 | 0xA9 => Some(5),
+        0x05 | 0x2D | 0x3D | 0xE8 | 0xE9 | 0x0D | 0x35 | 0xA9 => Some(5),
+        // 0x25 (AND EAX,imm32)。66 接頭辞では AND AX,imm16 (3B)。
+        0x25 => {
+            if has66 {
+                Some(3)
+            } else {
+                Some(5)
+            }
+        }
         0xB8..=0xBF => {
             if rex_w {
                 Some(9)
@@ -601,6 +609,27 @@ fn fetch_len(
                 Some(2)
             }
         }
+        // 0xD9 /5 (FLDCW m16)、/7 (FNSTCW m16)。mod=00 base 2B / disp32 6B、
+        // mod=01 base+disp8 3B、mod=10 base+disp32 6B。reg-direct・SIB は未対応で None.
+        0xD9 => {
+            let s = second?;
+            let md = s >> 6;
+            let reg = (s >> 3) & 7;
+            let rm = s & 7;
+            if reg != 5 && reg != 7 {
+                return None;
+            }
+            if md == 3 || rm == 4 {
+                // reg-direct の x87 レジスタ操作と SIB は未対応.
+                None
+            } else if md == 1 {
+                Some(3)
+            } else if md == 2 || rm == 5 {
+                Some(6)
+            } else {
+                Some(2)
+            }
+        }
         // C7 /0 (MOV r/m,imm32 系)。SIB mod=00 は直接番地 (base=101) のみ。
         // has66 (66 C7) は imm16 のため 2B 短くなる.
         0xC7 => {
@@ -1020,6 +1049,7 @@ pub fn run_mode(
                 | 0x08
                 | 0x22
                 | 0x84
+                | 0xD9
         ) {
             if env
                 .backend
@@ -1404,6 +1434,7 @@ pub fn run_mode(
                     | Insn::MovAbsEax
                     | Insn::MovEaxAbs
                     | Insn::MovRm16ImmM32
+                    | Insn::AndAxImm16
                     | Insn::CmpRmImm8Rip
                     // MOV [base+disp32],r16 (66 89 mod=10) は MovMemEax32 を共用する.
                     | Insn::MovMemEax32
@@ -3194,6 +3225,10 @@ fn dispatch<B: Backend>(
                 sem::and_eax(b, imm32())
             }
         }
+        Insn::AndAxImm16 => {
+            // 66 25 + imm16 (24b、66 接頭辞は剥がし済み)。imm は最下位16 LE.
+            sem::and_ax_imm16(b, ((word & 0xffff) as u16).swap_bytes())
+        }
         Insn::OrEax => {
             if rex_w {
                 sem::or_rm64_imm(b, Gpr(0), imm32())
@@ -4544,6 +4579,12 @@ fn dispatch<B: Backend>(
         Insn::PminubMemnd => sem::pminub_xmm_memnd(b, xmm_reg(), rm0f()),
         Insn::PminubMem8 => sem::pminub_xmm_mem8(b, xmm_reg(), rm0f(), disp8()),
         Insn::PminubMem32 => sem::pminub_xmm_mem32(b, xmm_reg(), rm0f(), disp32()),
+        Insn::FnstcwMemnd => sem::fnstcw_memnd(b, rm()),
+        Insn::FnstcwMem8 => sem::fnstcw_mem8(b, rm(), disp8()),
+        Insn::FnstcwMem32 => sem::fnstcw_mem32(b, rm(), disp32()),
+        Insn::FldcwMemnd => sem::fldcw_memnd(b, rm()),
+        Insn::FldcwMem8 => sem::fldcw_mem8(b, rm(), disp8()),
+        Insn::FldcwMem32 => sem::fldcw_mem32(b, rm(), disp32()),
         Insn::Pcmpeqb => sem::pcmpeqb_xmm(b, xmm_reg(), xmm_rm()),
         Insn::Pcmpeqd => sem::pcmpeqd_xmm(b, xmm_reg(), xmm_rm()),
         Insn::Por => sem::por_xmm(b, xmm_reg(), xmm_rm()),
@@ -5871,6 +5912,8 @@ pub fn run_image_x86(
         .write(polyisa_mem::VirtAddr(sp), &img)
         .map_err(|e| format!("stack write: {e:?}"))?;
     env.backend.set(Gpr(4).state(), sp as u32);
+    // x87 制御ワードの初期値（丸め最近接の 0x037F）。FNSTCW/FLDCW で使う.
+    env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037F);
     match run(&mut env, ehdr.entry as u32, sys, 1_000_000) {
         Outcome::Exit(code) => Ok(code as u64),
         Outcome::Unimplemented { eip, word } => {
@@ -5950,6 +5993,8 @@ pub fn run_image_x86_64(
         .write(polyisa_mem::VirtAddr(sp), &img)
         .map_err(|e| format!("stack write: {e:?}"))?;
     polyisa_guest_x86::sem::write64(&mut env.backend, Gpr(4), sp);
+    // x87 制御ワードの初期値（丸め最近接の 0x037F）。FNSTCW/FLDCW で使う.
+    env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037F);
     match run_mode(&mut env, ehdr.entry as u32, sys, 30_000_000, true) {
         Outcome::Exit(code) => Ok(code as u64),
         Outcome::Unimplemented { eip, word } => {

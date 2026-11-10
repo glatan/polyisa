@@ -4574,6 +4574,17 @@ fn shl_rm32_basic() {
 }
 
 #[test]
+fn and_ax_imm16_masks_low() {
+    // AND AX,0x0C00 (66 25): EAX=0x1234037F -> EAX=0x12340000、ZF=1.
+    // seq の停止点 0x476e57 に対応.
+    let mut env = env();
+    env.backend.set(Gpr(0).state(), 0x1234_037F);
+    env.step(|b| sem::and_ax_imm16(b, 0x0C00)).unwrap();
+    assert_eq!(eax(&mut env), 0x1234_0000);
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0x40);
+}
+
+#[test]
 fn imul_r64_basic() {
     // IMUL RAX,RDX (REX.W): RAX=3, RDX=7 -> 21.
     let mut env = env();
@@ -5088,6 +5099,36 @@ fn pminub_basic() {
         Ok(())
     })
     .unwrap();
+}
+
+#[test]
+fn x87_fcw_roundtrip() {
+    // FLDCW/FNSTCW 往復: [0x110]=0x0C00 -> fcw -> [0x130]=0x0C00.
+    // seq の停止点 0x476e4a (FNSTCW -0x3a(%rbp)) に対応.
+    let mut env = env();
+    env.map_rw(0, 1).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x110), &0x0C00u16.to_le_bytes())
+        .unwrap();
+    env.backend.set(Gpr(3).state(), 0x100);
+    env.step(|b| sem::fldcw_mem8(b, Gpr(3), 0x10)).unwrap();
+    env.backend.set(Gpr(3).state(), 0x120);
+    env.step(|b| sem::fnstcw_mem8(b, Gpr(3), 0x10)).unwrap();
+    let mut back = [0u8; 2];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x130),
+            &mut back,
+            Access {
+                endian: Endian::Le,
+                align: Align::Unaligned,
+                kind: AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(u16::from_le_bytes(back), 0x0C00);
 }
 
 #[test]

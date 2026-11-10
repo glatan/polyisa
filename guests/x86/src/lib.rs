@@ -42,6 +42,8 @@ pub struct CpuState {
     pub x: [u64; 8],
     /// XMM レジスタ 16本。下位・上位の u64 ずつ置く（x86-64 のみ使う）。
     pub xmm: [[u64; 2]; 16],
+    /// x87 制御ワード（FNSTCW/FLDCW で使う。run_image が 0x037F に初期化する）。
+    pub fcw: u16,
 }
 
 #[cfg(test)]
@@ -65,12 +67,16 @@ mod tests {
             core::mem::offset_of!(CpuState, xmm),
             8 * 4 + 4 + 4 + 8 * 4 + 8 * 8
         );
+        assert_eq!(
+            core::mem::offset_of!(CpuState, fcw),
+            8 * 4 + 4 + 4 + 8 * 4 + 8 * 8 + 16 * 16
+        );
     }
 
     #[test]
     fn insn_count() {
         // 試作の整数116件。
-        assert_eq!(INSNS.len(), 545);
+        assert_eq!(INSNS.len(), 552);
     }
 
     #[test]
@@ -403,6 +409,10 @@ mod tests {
         assert_eq!(decode(0x0F74C1, 24), Some(Insn::Pcmpeqb));
         assert_eq!(decode(0x0F76C0, 24), Some(Insn::Pcmpeqd));
         assert_eq!(decode(0x0FDAEC, 24), Some(Insn::Pminub));
+        // AND AX,imm16 (66 25 + imm16)。seq の停止点 0x476e57 に対応.
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x250C00, 24), Some(Insn::AndAxImm16));
+        assert_eq!(decode(0x250C00, 8), None);
         // PMINUB xmm,m128 mod=00/01/10 (66 0F DA /r、SIBなし)。head の停止点 0x4dddd5 に対応.
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x0FDA03, 24), Some(Insn::PminubMemnd));
@@ -411,6 +421,20 @@ mod tests {
         assert_eq!(decode(0x0FDA4050, 24), None);
         assert_eq!(decode(0x0FDA8300000000, 56), Some(Insn::PminubMem32));
         assert_eq!(decode(0x0FDA8300000000, 48), None);
+        // FNSTCW/FLDCW m16 mod=00/01/10 (D9 /7//5)。seq の停止点 0x476e4a に対応.
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0xD93B, 16), Some(Insn::FnstcwMemnd));
+        assert_eq!(decode(0xD93B, 24), None);
+        assert_eq!(decode(0xD97DC6, 24), Some(Insn::FnstcwMem8));
+        assert_eq!(decode(0xD97DC6, 8), None);
+        assert_eq!(decode(0xD9BB00000000, 48), Some(Insn::FnstcwMem32));
+        assert_eq!(decode(0xD9BB00000000, 56), None);
+        assert_eq!(decode(0xD92B, 16), Some(Insn::FldcwMemnd));
+        assert_eq!(decode(0xD92B, 24), None);
+        assert_eq!(decode(0xD96DC6, 24), Some(Insn::FldcwMem8));
+        assert_eq!(decode(0xD96DC6, 8), None);
+        assert_eq!(decode(0xD9AB00000000, 48), Some(Insn::FldcwMem32));
+        assert_eq!(decode(0xD9AB00000000, 56), None);
         assert_eq!(decode(0x8305DF641F0001, 56), Some(Insn::AddRm32Imm8Rip));
         assert_eq!(decode(0x0FEBC4, 24), Some(Insn::Por));
         assert_eq!(decode(0x0F62C0, 24), Some(Insn::Punpckldq));

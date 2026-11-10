@@ -632,6 +632,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("sub_rm_imm8_rip", "F1", "10000011 00101101 ................................ ........", "sub r/m, {imm}", "alu"),
         ("test_al_imm", "F1", "10101000 ........", "test al, {imm}", "alu"),
         ("test_eax_imm", "F1", "10101001 ................................", "test eax, {imm}", "alu"),
+        // AND AX,imm16 (66 25 + imm16)。66 接頭辞は実行側で剥がす.
+        ("and_ax_imm16", "F1", "00100101 ................", "and ax, {imm}", "alu"),
         // ADD r32, m32 (03 /r)。RIP/abs のみ。REX.W で64ビット.
         ("add_r_rip", "F1", "00000011 00...101 ................................", "add r, [rip]", "alu"),
         // CMP [RIP+disp32],imm8 (83 3D + disp32 + imm8)。64ビット RIP相対.
@@ -1062,6 +1064,54 @@ pub fn build_model() -> polyisa_isadl::Model {
             vec![wc("m32_rm", WhereOp::Ne, 4)],
             "movzx r32, m8",
             "load",
+        ),
+        (
+            "fnstcw_memnd",
+            "MR",
+            "11011001 00111...",
+            vec![wc("mr_rm", WhereOp::Ne, 4), wc("mr_rm", WhereOp::Ne, 5)],
+            "fnstcw m16",
+            "alu",
+        ),
+        (
+            "fnstcw_mem8",
+            "M8",
+            "11011001 01111... ........",
+            vec![wc("m8_rm", WhereOp::Ne, 4)],
+            "fnstcw m16",
+            "alu",
+        ),
+        (
+            "fnstcw_mem32",
+            "M32",
+            "11011001 10111... ................................",
+            vec![wc("m32_rm", WhereOp::Ne, 4)],
+            "fnstcw m16",
+            "alu",
+        ),
+        (
+            "fldcw_memnd",
+            "MR",
+            "11011001 00101...",
+            vec![wc("mr_rm", WhereOp::Ne, 4), wc("mr_rm", WhereOp::Ne, 5)],
+            "fldcw m16",
+            "alu",
+        ),
+        (
+            "fldcw_mem8",
+            "M8",
+            "11011001 01101... ........",
+            vec![wc("m8_rm", WhereOp::Ne, 4)],
+            "fldcw m16",
+            "alu",
+        ),
+        (
+            "fldcw_mem32",
+            "M32",
+            "11011001 10101... ................................",
+            vec![wc("m32_rm", WhereOp::Ne, 4)],
+            "fldcw m16",
+            "alu",
         ),
         (
             "pcmpeqb_memnd",

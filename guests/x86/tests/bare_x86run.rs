@@ -3236,6 +3236,42 @@ fn run_rol_rm32_by1() {
 }
 
 #[test]
+fn run_and_ax_imm16() {
+    // run 経由で 66 25 00 0C (ANDW $0x0c00,%ax) を回す。seq の停止点 0x476e57 に対応.
+    // EAX=0x1234037F -> EAX=0x12340000。exit 系列で EAX が潰れるため [0x2000] に退避して検証.
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(0).state(), 0x1234_037F);
+    let prog: &[u8] = &[
+        0x66, 0x25, 0x00, 0x0C, // andw $0x0c00,%ax
+        0x89, 0x05, 0xF6, 0x0F, 0x00, 0x00, // mov %eax,0xFF6(%rip) -> [0x2000]
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
+        0x0F, 0x05, // syscall -> exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0));
+    let mut back = [0u8; 4];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x2000),
+            &mut back,
+            polyisa_mem::Access {
+                endian: polyisa_mem::Endian::Le,
+                align: polyisa_mem::Align::Unaligned,
+                kind: polyisa_mem::AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(u32::from_le_bytes(back), 0x1234_0000);
+}
+
+#[test]
 fn run_shld_r64_cl_rexwr() {
     // run 経由で 4C 0F A5 C8 (SHLD RAX,R9,CL) を回す。seq の RBP 破壊バグに対応.
     // RAX=1、R9=0x8000000000000000、CL=1 -> RAX=3、RBP は保存される。
@@ -3307,6 +3343,46 @@ fn run_sub_rm_imm8_rip() {
         )
         .unwrap();
     assert_eq!(u32::from_le_bytes(back), 9);
+}
+
+#[test]
+fn run_fnstcw_mem8() {
+    // run 経由で D9 7D C6 (FNSTCW -0x3a(%rbp)) を回す。seq の停止点 0x476e4a に対応.
+    // RBP=0x2000、fcw=0x037F -> [0x1FC6]=0x037F になり、exit(0)。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.set(Gpr(5).state(), 0x2000);
+    env.step(|b| {
+        let v = b.konst::<polyisa_sem::W16>(0x037F);
+        b.set(polyisa_guest_x86::sem::fcw_ref(), v);
+        Ok(())
+    })
+    .unwrap();
+    let prog: &[u8] = &[
+        0xD9, 0x7D, 0xC6, // fnstcw -0x3a(%rbp)
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
+        0x0F, 0x05, // syscall -> exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0));
+    let mut back = [0u8; 2];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x1FC6),
+            &mut back,
+            polyisa_mem::Access {
+                endian: polyisa_mem::Endian::Le,
+                align: polyisa_mem::Align::Unaligned,
+                kind: polyisa_mem::AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(u16::from_le_bytes(back), 0x037F);
 }
 
 #[test]
