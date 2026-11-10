@@ -203,7 +203,7 @@ pub mod i386 {
     pub const FTRUNCATE: u64 = 93;
     pub const RENAME: u64 = 38;
     pub const SYMLINK: u64 = 83;
-    // statfs 系の番号表の事実のみ。実行は未対応。旧番号 (99/100) と
+    // statfs 系の番号表の事実のみ。実行は未対応。statfs/fstatfs (99/100) と
     // 64 系 (268/269) を持つ。GETGROUPS=80 と区別する.
     // Ref: SRC-LINUX (7.3).
     pub const STATFS: u64 = 99;

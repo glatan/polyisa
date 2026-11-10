@@ -21,7 +21,7 @@ polyisa がホストに求める機能と、その提供元は次のとおりで
 | 時刻 | `kernel` | `std::time` |
 | 端末かどうかの判定 | `kernel` | `std::io::IsTerminal` |
 | 端末の生モードと端末の大きさ | `kernel` | `host`（Unix では `tcgetattr`、`tcsetattr`、`ioctl` の FFI 宣言） |
-| ファイルシステムの情報（`statfs`） | `kernel` | `host`（将来・未実装の FFI 宣言。現段階は番号表のみで `cli` 合成なし） |
+| ファイルシステムの情報（`statfs`） | `kernel` | `host`（将来・未実装の FFI 宣言。現段階は番号表のみでFS量の `cli` 合成なし。方針は `user-mode.md`） |
 | 実行可能メモリ | `jit` | `host`（Unix では `mmap`、`mprotect`、Windows では `VirtualAlloc`、`VirtualProtect`） |
 | 命令キャッシュの同期 | `jit` | `host`（AArch64 のホストで必要） |
 | ホストの CPU の機能の検出 | `jit` | `std::arch` の機能検出のマクロ |
