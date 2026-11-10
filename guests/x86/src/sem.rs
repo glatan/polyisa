@@ -6385,6 +6385,15 @@ pub fn movzx_r32_r8<B: Backend>(b: &mut B, dst: Gpr, src: Gpr, high: bool) -> Fl
     Ok(())
 }
 
+/// MOVSX r32,r/m8 reg-direct (0F BE /r mod=11)。8ビットを符号拡張する.
+pub fn movsx_r32_r8<B: Backend>(b: &mut B, dst: Gpr, src: Gpr, high: bool) -> Flow<B> {
+    use polyisa_sem::W8;
+    let v8 = read8(b, src, high);
+    let v = b.sext::<W8, W32>(v8);
+    write(b, dst, v);
+    Ok(())
+}
+
 /// AND r8,m8 [base+disp32] (22 /r mod=10)。
 pub fn and_r8_m8_mem32<B: Backend>(
     b: &mut B,
@@ -6665,6 +6674,15 @@ pub fn movzx_r64_r8<B: Backend>(b: &mut B, dst: Gpr, src: Gpr, high: bool) -> Fl
     use polyisa_sem::W8;
     let v8 = read8(b, src, high);
     let v = b.zext::<W8, W64>(v8);
+    write64(b, dst, v);
+    Ok(())
+}
+
+/// MOVSX r64,r/m8 reg-direct (0F BE /r mod=11、REX.W)。8ビットを符号拡張する.
+pub fn movsx_r64_r8<B: Backend>(b: &mut B, dst: Gpr, src: Gpr, high: bool) -> Flow<B> {
+    use polyisa_sem::W8;
+    let v8 = read8(b, src, high);
+    let v = b.sext::<W8, W64>(v8);
     write64(b, dst, v);
     Ok(())
 }

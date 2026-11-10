@@ -76,7 +76,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数116件。
-        assert_eq!(INSNS.len(), 555);
+        assert_eq!(INSNS.len(), 556);
     }
 
     #[test]
@@ -309,6 +309,9 @@ mod tests {
         assert_eq!(decode(0x6AFD, 16), Some(Insn::PushImm8));
         assert_eq!(decode(0xFF9578FFFFFF, 48), Some(Insn::CallRMem32));
         assert_eq!(decode(0xFF14F7, 24), Some(Insn::CallRSib));
+        // MOVSX r32,r/m8 reg-direct (0F BE /r mod=11)。seq の停止点 0x40b775 に対応.
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x0FBEC6, 24), Some(Insn::MovsxR32R8));
         // JMP [base+index*scale] (FF /4 SIB mod=00)。seq の停止点 0x40c83b に対応.
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0xFF24CA, 24), Some(Insn::JmpRSib));

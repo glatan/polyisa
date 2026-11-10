@@ -5163,6 +5163,30 @@ fn x87_fcw_roundtrip() {
 }
 
 #[test]
+fn movsx_r32_r8_sign_extends() {
+    // MOVSX R8D,R14B (45 0F BE C6): R14B=0xFF -> R8D=0xFFFFFFFF.
+    // seq の停止点 0x40b775 に対応.
+    let mut env = env();
+    env.step(|b| {
+        sem::write64(b, Gpr(14), 0xFF);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::movsx_r32_r8(b, Gpr(8), Gpr(14), false))
+        .unwrap();
+    assert_eq!(env.backend.get(Gpr(8).state()), 0xFFFF_FFFF);
+    // R14B=0x7F -> R8D=0x7F.
+    env.step(|b| {
+        sem::write64(b, Gpr(14), 0x7F);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::movsx_r32_r8(b, Gpr(8), Gpr(14), false))
+        .unwrap();
+    assert_eq!(env.backend.get(Gpr(8).state()), 0x7F);
+}
+
+#[test]
 fn pminub_mem8_takes_min() {
     // PMINUB xmm0,[RAX+0x50] (66 0F DA 40 50): head の停止点 0x4dddd5 に対応.
     // xmm0 low byte 0x05、mem low byte 0x03 -> 0x03.

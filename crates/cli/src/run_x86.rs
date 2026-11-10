@@ -5474,6 +5474,23 @@ fn dispatch<B: Backend>(
                 sem::movzx_r32_r8(b, reg0f_as_gpr(), src, high)
             }
         }
+        Insn::MovsxR32R8 => {
+            // 0F BE /r mod=11 reg-direct。src は rm フィールド (REX.B で拡張)。
+            // REX なしの rm 4-7 は上位8ビット (AH/CH/DH/BH)。
+            let rm_f = modrm0f() & 7;
+            let (src, high) = if rex != 0 {
+                (Gpr(rm_f | ((rex & 1) << 3)), false)
+            } else if rm_f < 4 {
+                (Gpr(rm_f), false)
+            } else {
+                (Gpr(rm_f - 4), true)
+            };
+            if rex_w {
+                sem::movsx_r64_r8(b, reg0f_as_gpr(), src, high)
+            } else {
+                sem::movsx_r32_r8(b, reg0f_as_gpr(), src, high)
+            }
+        }
         // SETcc r/m8 reg-direct (0F 90-9F)。dst は rm フィールド (REX.B で拡張)。
         // REX なしの rm 4-7 は上位8ビット。REX.W は無視 (常に8bit)。
         Insn::Seto => {

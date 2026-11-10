@@ -499,6 +499,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("movzx_r32_m8_rip", "F1", "00001111 10110110 00...101 ................................", "movzx r32, m8", "load"),
         // MOVSX r32,m8 RIP (0F BE 05 + disp32)。
         ("movsx_r32_m8_rip", "F1", "00001111 10111110 00...101 ................................", "movsx r32, m8", "load"),
+        // MOVSX r32/r64,r/m8 reg-direct (0F BE /r mod=11)。REX.R/B で 8-15 に拡張.
+        ("movsx_r32_r8", "F1", "00001111 10111110 11......", "movsx r32, r/m8", "load"),
         // MOVZX r32,r/m8 reg-direct (0F B6 /r mod=11)。REX ありは低8、なしの4-7は上位8.
         ("movzx_r32_r8", "F1", "00001111 10110110 11......", "movzx r32, r/m8", "load"),
         // MOVZX r32,r16 reg-direct (0F B7 /r mod=11)。
