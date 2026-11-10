@@ -13295,6 +13295,17 @@ pub fn test_m16_imm_memnd<B: Backend>(b: &mut B, base: Gpr, imm: u16) -> Flow<B>
     Ok(())
 }
 
+/// TEST m16,imm16 [base+disp8] (66 F7 /0 mod=01)。hexdump 0x5c8822 対応.
+pub fn test_m16_imm_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8, imm: u16) -> Flow<B> {
+    use polyisa_sem::W16;
+    let addr = eff_addr(b, base, disp);
+    let x: B::V<W16> = b.load::<W16>(addr, DATA_READ)?;
+    let y = b.konst::<W16>(imm);
+    let v = b.and::<W16>(x, y);
+    update_logic_flags(b, v);
+    Ok(())
+}
+
 /// TEST m16,imm16 RIP (66 F7 05 + disp32 + imm16)。[RIP+disp] の16ビット AND で 5 旗を更新する.
 pub fn test_m16_imm_rip<B: Backend>(b: &mut B, next_rip: u64, disp: i32, imm: u16) -> Flow<B> {
     use polyisa_sem::W16;

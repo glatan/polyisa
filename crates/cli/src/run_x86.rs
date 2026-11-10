@@ -923,6 +923,9 @@ fn fetch_len(
                 let rm = s & 7;
                 if has66 && md == 0 && reg == 0 && rm != 4 && rm != 5 {
                     Some(4)
+                } else if has66 && md == 1 && reg == 0 && rm != 4 {
+                    // TEST m16,imm16 mod=01 [base+disp8] (66剥離後5B)。hexdump 0x5c8822 対応.
+                    Some(5)
                 } else if has66 && md == 0 && reg == 0 && rm == 5 {
                     Some(8)
                 } else if md == 0 && reg == 0 && rm != 4 && rm != 5 {
@@ -1583,6 +1586,7 @@ pub fn run_mode(
                     | Insn::Nopl
                     | Insn::TestRm32
                     | Insn::TestM16ImmMemnd
+                    | Insn::TestM16ImmMem8
                     | Insn::TestM16ImmRip
                     | Insn::MovlpdXmmM64Memnd
                     | Insn::MovdXmm
@@ -3293,6 +3297,13 @@ fn dispatch<B: Backend>(
             // 66 F7 /0 mod=00 [base],imm16 (66剥離後4B)。imm は最下位16 LE.
             let imm = ((word & 0xffff) as u16).swap_bytes();
             sem::test_m16_imm_memnd(b, rm(), imm)
+        }
+        Insn::TestM16ImmMem8 => {
+            // 66 F7 /0 mod=01 [base+disp8],imm16 (66剥離後5B)。hexdump 0x5c8822 対応.
+            // disp は (word>>16) 下位8、imm は最下位16 LE.
+            let d8 = ((word >> 16) & 0xff) as u8 as i8;
+            let imm = ((word & 0xffff) as u16).swap_bytes();
+            sem::test_m16_imm_mem8(b, rm(), d8, imm)
         }
         Insn::TestM16ImmRip => {
             // 66 F7 05 + disp32 + imm16 (66剥離後8B)。

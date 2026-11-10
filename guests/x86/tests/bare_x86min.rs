@@ -8108,3 +8108,28 @@ fn mov_m16_imm_mem8_stores_word() {
         .unwrap();
     assert_eq!(u16::from_le_bytes(back), 0x0101);
 }
+
+#[test]
+fn test_m16_imm_mem8_updates_flags() {
+    // TESTW $0x402,[R13+0x8] (66 41 F7 45 08 02 04 相当): hexdump 0x5c8822 対応.
+    // [0x2008]=0x0402 -> ZF=0。[0x2008]=0x0101 -> ZF=1。CF=OF=0.
+    let mut env = env();
+    env.map_rw(0x2000, 1).unwrap();
+    env.backend.set(Gpr(5).state(), 0x2000);
+    env.backend
+        .mem
+        .write(VirtAddr(0x2008), &0x0402u16.to_le_bytes())
+        .unwrap();
+    env.backend.set(sem::eflags_ref(), 0x40);
+    env.step(|b| sem::test_m16_imm_mem8(b, Gpr(5), 0x08, 0x0402))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0);
+    env.backend
+        .mem
+        .write(VirtAddr(0x2008), &0x0101u16.to_le_bytes())
+        .unwrap();
+    env.step(|b| sem::test_m16_imm_mem8(b, Gpr(5), 0x08, 0x0402))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0x40);
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x801, 0);
+}

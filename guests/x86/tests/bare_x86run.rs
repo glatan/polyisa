@@ -6999,3 +6999,28 @@ fn run_mov_m16_imm_mem8() {
         .unwrap();
     assert_eq!(u16::from_le_bytes(back), 0x0101);
 }
+
+#[test]
+fn run_test_m16_imm_mem8() {
+    // run 経由で 66 F7 45 08 02 04 (TESTW $0x402,[RBP+0x8]) を回す。hexdump 0x5c8822 対応.
+    // [0x2008]=0x0402 で ZF=0 のまま exit(0)。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(5).state(), 0x2000);
+    env.backend
+        .mem
+        .write(VirtAddr(0x2008), &0x0402u16.to_le_bytes())
+        .unwrap();
+    let prog: &[u8] = &[
+        0x66, 0xF7, 0x45, 0x08, 0x02, 0x04, // testw $0x402,0x8(%rbp)
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
+        0x0F, 0x05, // syscall -> exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0));
+}
