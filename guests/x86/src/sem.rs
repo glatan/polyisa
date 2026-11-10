@@ -11182,6 +11182,23 @@ pub fn cmp_rm8_imm_memnd<B: Backend>(b: &mut B, base: Gpr, imm: u8) -> Flow<B> {
     Ok(())
 }
 
+/// CMPB m8,imm8 [base+index*scale] (80 /7 SIB mod=00 indexed)。grep 0x43e0e4 対応.
+pub fn cmp_rm8_imm_sib_idx<B: Backend>(
+    b: &mut B,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    imm: u8,
+) -> Flow<B> {
+    use polyisa_sem::W8;
+    let addr = sib_addr_scaled(b, shift, 0, base, idx);
+    let x: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
+    let y = b.konst::<W8>(imm);
+    let v = b.sub::<W8>(x, y);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
 /// XCHG r32, RAX (91-97)。dst と RAX を交換.
 pub fn xchg_r32_ax<B: Backend>(b: &mut B, dst: Gpr) -> Flow<B> {
     let a = read(b, dst);

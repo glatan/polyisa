@@ -3314,12 +3314,20 @@ fn dispatch<B: Backend>(
             sem::cmp_rm8_imm_memnd(b, rm(), imm)
         }
         Insn::CmpRm8ImmSib => {
-            // 80 /7 SIB mod=00 [base],imm8 (32b、no_index non-abs)。
-            // SIB は (word>>8) 下位8、imm は最下位8。base は SIB 下位3 + REX.B。
+            // 80 /7 SIB mod=00 [base+index*scale],imm8 (32b)。grep 0x43e0e4 対応.
+            // SIB は (word>>8) 下位8、imm は最下位8。no_index は [base]。
+            // REX.X/B で索引/ベース拡張.
             let sib_v = ((word >> 8) & 0xff) as u8;
             let imm = (word & 0xff) as u8;
+            let shift = ((sib_v >> 6) & 3) as u32;
+            let idx_raw = (sib_v >> 3) & 7;
+            let idx = Gpr(idx_raw | (((rex >> 1) & 1) << 3));
             let base = Gpr((sib_v & 7) | ((rex & 1) << 3));
-            sem::cmp_rm8_imm_memnd(b, base, imm)
+            if idx_raw == 4 && (rex >> 1) & 1 == 0 {
+                sem::cmp_rm8_imm_memnd(b, base, imm)
+            } else {
+                sem::cmp_rm8_imm_sib_idx(b, base, idx, shift, imm)
+            }
         }
         Insn::MovRm8ImmMem8 => {
             // C6 /0 mod=01 [base+disp8],imm8 (32b)。disp は (word>>8) 下位8、imm は最下位8.

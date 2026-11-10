@@ -2896,6 +2896,33 @@ fn run_cmp_rm8_imm_sib() {
 }
 
 #[test]
+fn run_cmp_rm8_imm_sib_idx() {
+    // run 経由で 80 3C 13 00 (CMPB $0x00,(%rbx,%rdx)) を回す。grep 0x43e0e4 対応.
+    // RBX=0x2000、RDX=0x10、[0x2010]=0x00 -> ZF=1、exit(0)。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(3).state(), 0x2000);
+    env.backend.set(Gpr(2).state(), 0x10);
+    env.backend.mem.write(VirtAddr(0x2010), &[0x00]).unwrap();
+    let prog: &[u8] = &[
+        0x80, 0x3C, 0x13, 0x00, // cmpb $0x00,(%rbx,%rdx)
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
+        0x0F, 0x05, // syscall -> exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0));
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x40,
+        0x40
+    );
+}
+
+#[test]
 fn run_mov_rm8_imm_mem32() {
     // run 経由で C6 85 50 FB FF FF 20 (MOVB $0x20,-0x4B0(%rbp)) を回す。
     // RBP=0x2000、disp=-0x4B0 -> [0x1B50]=0x20、exit(0)。

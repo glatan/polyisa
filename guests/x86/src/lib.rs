@@ -853,6 +853,11 @@ mod tests {
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x803C2443, 32), Some(Insn::CmpRm8ImmSib));
         assert_eq!(decode(0x803C2443, 24), None);
+        // CMPB [base+index*scale],imm8 SIB mod=00 indexed (80 /7)。grep 0x43e0e4 対応.
+        // 80 3C 13 00 は CMPB $0x00,(%rbx,%rdx).
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x803C1300, 32), Some(Insn::CmpRm8ImmSib));
+        assert_eq!(decode(0x803C1300, 24), None);
         // MOVB [base+disp32],imm8 (C6 /0 mod=10)。
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0xC68550FBFFFF20, 56), Some(Insn::MovRm8ImmMem32));
