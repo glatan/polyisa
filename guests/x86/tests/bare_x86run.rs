@@ -2322,6 +2322,31 @@ fn run_cmp_rm_imm8_sibd() {
 }
 
 #[test]
+fn run_cmp_rm_imm8_mem32() {
+    // run 経由で 83 BD 14 00 00 00 00 (CMPL $0,0x14(%rbp)) を回す。
+    // [0x2014]=0 で ZF=1 のまま exit(0)。seq の停止点に対応.
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(5).state(), 0x2000);
+    env.backend
+        .mem
+        .write(VirtAddr(0x2014), &0u32.to_le_bytes())
+        .unwrap();
+    let prog: &[u8] = &[
+        0x83, 0xBD, 0x14, 0x00, 0x00, 0x00, 0x00, // cmpl $0,0x14(%rbp)
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
+        0x0F, 0x05, // syscall -> exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0));
+}
+
+#[test]
 fn run_nopl_mem32() {
     // run 経由で 0F 1F 80 00 00 00 00 (NOPL [rax]) を回す。
     // 何もせず exit(0)。

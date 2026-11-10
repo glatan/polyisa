@@ -653,6 +653,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("and_rm_imm8_memnd", "F1", "10000011 00100... ........", "and r/m, {imm}", "alu"),
         // AND m32/m64,imm8 mod=10 [base+disp32] (83 /4)。REX.W で64bit.
         ("and_rm_imm8_mem32", "F1", "10000011 10100... ................................ ........", "and r/m, {imm}", "alu"),
+        // CMP m32/m64,imm8 mod=10 [base+disp32] (83 /7)。REX.W で64bit.
+        ("cmp_rm_imm8_mem32", "F1", "10000011 10111... ................................ ........", "cmp r/m, {imm}", "alu"),
         ("mov_rm16_imm_m32", "F1", "11000111 10000101 ................................ ................", "mov r/m16, {imm}", "alu"),
         // MOVUPS RIP相対 (64ビットの mod=00 rm=101)。disp32 は実行側で RIP 加算する。
         ("movups_load_rip", "F1", "00001111 00010000 00...101 ................................", "movups xmm, [rip]", "load"),

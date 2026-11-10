@@ -2139,6 +2139,21 @@ fn cmp_rm8_imm_mem32_sets_flags() {
 }
 
 #[test]
+fn cmp_rm32_imm8_mem32_sets_flags() {
+    // CMP [RBP-0x428],0: [0xD8]=0 -> ZF=1。seq の停止点 0x47768a に対応.
+    let mut env = env();
+    env.map_rw(0, 1).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0xD8), &0u32.to_le_bytes())
+        .unwrap();
+    env.backend.set(Gpr(5).state(), 0x500);
+    env.step(|b| sem::cmp_rm32_imm8_mem32(b, Gpr(5), -0x428, 0))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0x40);
+}
+
+#[test]
 fn and_r8_m8_mem32_ands() {
     // AND AL,[RBP-0x4C0]: AL=0xFF、[0x40]=0x0F -> AL=0x0F。
     let mut env = env();

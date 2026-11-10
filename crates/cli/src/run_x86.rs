@@ -3499,6 +3499,16 @@ fn dispatch<B: Backend>(
                 sem::and_rm32_imm8_mem32(b, rm(), disp, imm)
             }
         }
+        Insn::CmpRmImm8Mem32 => {
+            // 83 /7 mod=10 [base+disp32],imm8 (56b)。
+            let disp = ((word >> 8) as u32).swap_bytes() as i32;
+            let imm = (word & 0xff) as u8 as i8;
+            if rex_w {
+                sem::cmp_rm64_imm8_mem32(b, rm(), disp, imm)
+            } else {
+                sem::cmp_rm32_imm8_mem32(b, rm(), disp, imm)
+            }
+        }
         Insn::CmpRmImm8 => {
             if rex_w {
                 sem::cmp_rm64_imm8(b, rm(), disp8())
@@ -7075,6 +7085,320 @@ impl TrapHandler for CliLinux {
             set64(env, Gpr(0), neg(EINVAL));
             return TrapOutcome::Handled;
         }
+        if nr == polyisa_os_linux::x86_64::DUP && self.is64
+            || nr == polyisa_os_linux::i386::DUP && !self.is64
+        {
+            // dup(oldfd)。試作では 1/2 の複製のみ受け付け、新fdとして返す.
+            // opened fd の複製は未対応のため EBADF.
+            let oldfd = get64(env, r_a) as u32;
+            if oldfd == 1 || oldfd == 2 {
+                set64(env, Gpr(0), oldfd as u64);
+                return TrapOutcome::Handled;
+            }
+            let slot = oldfd.wrapping_sub(3) as usize;
+            if self.fds.get(slot).and_then(|f| f.as_ref()).is_none() {
+                set64(env, Gpr(0), neg(EBADF));
+                return TrapOutcome::Handled;
+            }
+            set64(env, Gpr(0), neg(EBADF));
+            return TrapOutcome::Handled;
+        }
+        if nr == polyisa_os_linux::x86_64::DUP2 && self.is64
+            || nr == polyisa_os_linux::i386::DUP2 && !self.is64
+        {
+            // dup2(oldfd, newfd)。1/2 同士の複製は newfd を返して継続する.
+            // --list の dup2(1,2) は出力先の付け替えだが、試作では写像せず継続する.
+            let oldfd = get64(env, r_a) as u32;
+            let newfd = get64(env, r_b) as u32;
+            let valid = |fd: u32| {
+                fd == 0
+                    || fd == 1
+                    || fd == 2
+                    || self
+                        .fds
+                        .get(fd.wrapping_sub(3) as usize)
+                        .and_then(|f| f.as_ref())
+                        .is_some()
+            };
+            if !valid(oldfd) || newfd > 1024 {
+                set64(env, Gpr(0), neg(EBADF));
+                return TrapOutcome::Handled;
+            }
+            if oldfd == newfd {
+                set64(env, Gpr(0), newfd as u64);
+                return TrapOutcome::Handled;
+            }
+            if (oldfd == 1 || oldfd == 2) && (newfd == 1 || newfd == 2) {
+                set64(env, Gpr(0), newfd as u64);
+                return TrapOutcome::Handled;
+            }
+            set64(env, Gpr(0), neg(EBADF));
+            return TrapOutcome::Handled;
+        }
+        if nr == polyisa_os_linux::x86_64::MKDIR && self.is64
+            || nr == polyisa_os_linux::i386::MKDIR && !self.is64
+        {
+            // mkdir(path, mode)。ホストの create_dir に直結する.
+            let path_addr = get64(env, r_a);
+            let path = match guest_c_string(env, path_addr) {
+                Some(p) => p,
+                None => return TrapOutcome::Unimplemented,
+            };
+            return match std::fs::create_dir(&path) {
+                Ok(()) => {
+                    set64(env, Gpr(0), 0);
+                    TrapOutcome::Handled
+                }
+                Err(e) => {
+                    let no = match e.kind() {
+                        std::io::ErrorKind::NotFound => ENOENT,
+                        std::io::ErrorKind::AlreadyExists => 17,
+                        std::io::ErrorKind::PermissionDenied => EACCES,
+                        _ => EINVAL,
+                    };
+                    set64(env, Gpr(0), neg(no));
+                    TrapOutcome::Handled
+                }
+            };
+        }
+        if nr == polyisa_os_linux::x86_64::MKDIRAT && self.is64
+            || nr == polyisa_os_linux::i386::MKDIRAT && !self.is64
+        {
+            // mkdirat(dirfd, path, mode)。AT_FDCWD+絶対/相対パスを受け付ける.
+            let (dirfd, path_addr) = (get64(env, r_a), get64(env, r_b));
+            if !is_at_fdcwd(dirfd) {
+                set64(env, Gpr(0), neg(EINVAL));
+                return TrapOutcome::Handled;
+            }
+            let path = match guest_c_string(env, path_addr) {
+                Some(p) => p,
+                None => return TrapOutcome::Unimplemented,
+            };
+            return match std::fs::create_dir(&path) {
+                Ok(()) => {
+                    set64(env, Gpr(0), 0);
+                    TrapOutcome::Handled
+                }
+                Err(e) => {
+                    let no = match e.kind() {
+                        std::io::ErrorKind::NotFound => ENOENT,
+                        std::io::ErrorKind::AlreadyExists => 17,
+                        std::io::ErrorKind::PermissionDenied => EACCES,
+                        _ => EINVAL,
+                    };
+                    set64(env, Gpr(0), neg(no));
+                    TrapOutcome::Handled
+                }
+            };
+        }
+        if nr == polyisa_os_linux::x86_64::RMDIR && self.is64
+            || nr == polyisa_os_linux::i386::RMDIR && !self.is64
+        {
+            // rmdir(path)。ホストの remove_dir に直結する.
+            let path_addr = get64(env, r_a);
+            let path = match guest_c_string(env, path_addr) {
+                Some(p) => p,
+                None => return TrapOutcome::Unimplemented,
+            };
+            return match std::fs::remove_dir(&path) {
+                Ok(()) => {
+                    set64(env, Gpr(0), 0);
+                    TrapOutcome::Handled
+                }
+                Err(e) => {
+                    let no = match e.kind() {
+                        std::io::ErrorKind::NotFound => ENOENT,
+                        std::io::ErrorKind::PermissionDenied => EACCES,
+                        _ => EINVAL,
+                    };
+                    set64(env, Gpr(0), neg(no));
+                    TrapOutcome::Handled
+                }
+            };
+        }
+        if nr == polyisa_os_linux::x86_64::UNLINK && self.is64
+            || nr == polyisa_os_linux::i386::UNLINK && !self.is64
+        {
+            // unlink(path)。ホストの remove_file に直結する.
+            let path_addr = get64(env, r_a);
+            let path = match guest_c_string(env, path_addr) {
+                Some(p) => p,
+                None => return TrapOutcome::Unimplemented,
+            };
+            return match std::fs::remove_file(&path) {
+                Ok(()) => {
+                    set64(env, Gpr(0), 0);
+                    TrapOutcome::Handled
+                }
+                Err(e) => {
+                    let no = match e.kind() {
+                        std::io::ErrorKind::NotFound => ENOENT,
+                        std::io::ErrorKind::PermissionDenied => EACCES,
+                        _ => EINVAL,
+                    };
+                    set64(env, Gpr(0), neg(no));
+                    TrapOutcome::Handled
+                }
+            };
+        }
+        if nr == polyisa_os_linux::x86_64::UNLINKAT && self.is64
+            || nr == polyisa_os_linux::i386::UNLINKAT && !self.is64
+        {
+            // unlinkat(dirfd, path, flags)。AT_FDCWD のみ、flags は 0/AT_REMOVEDIR(0x200) を受け付ける.
+            // ディレクトリ指定は remove_dir、以外は remove_file に直結する.
+            let (dirfd, path_addr, flags) = if self.is64 {
+                (get64(env, Gpr(7)), get64(env, Gpr(6)), get64(env, Gpr(2)))
+            } else {
+                (
+                    u64::from(env.backend.get(Gpr(3).state())),
+                    u64::from(env.backend.get(Gpr(1).state())),
+                    u64::from(env.backend.get(Gpr(2).state())),
+                )
+            };
+            if !is_at_fdcwd(dirfd) || flags & !0x200 != 0 {
+                set64(env, Gpr(0), neg(EINVAL));
+                return TrapOutcome::Handled;
+            }
+            let path = match guest_c_string(env, path_addr) {
+                Some(p) => p,
+                None => return TrapOutcome::Unimplemented,
+            };
+            let res = if flags & 0x200 != 0 {
+                std::fs::remove_dir(&path)
+            } else {
+                std::fs::remove_file(&path)
+            };
+            return match res {
+                Ok(()) => {
+                    set64(env, Gpr(0), 0);
+                    TrapOutcome::Handled
+                }
+                Err(e) => {
+                    let no = match e.kind() {
+                        std::io::ErrorKind::NotFound => ENOENT,
+                        std::io::ErrorKind::PermissionDenied => EACCES,
+                        _ => EINVAL,
+                    };
+                    set64(env, Gpr(0), neg(no));
+                    TrapOutcome::Handled
+                }
+            };
+        }
+        if nr == polyisa_os_linux::x86_64::ACCESS && self.is64
+            || nr == polyisa_os_linux::i386::ACCESS && !self.is64
+        {
+            // access(path, mode)。存在確認のみ行い、存在すれば 0 を返す.
+            // X_OK 等の実行権限の厳密判定はしない（試作の割り切り）。
+            let path_addr = get64(env, r_a);
+            let path = match guest_c_string(env, path_addr) {
+                Some(p) => p,
+                None => return TrapOutcome::Unimplemented,
+            };
+            return match std::fs::metadata(&path) {
+                Ok(_) => {
+                    set64(env, Gpr(0), 0);
+                    TrapOutcome::Handled
+                }
+                Err(e) => {
+                    let no = match e.kind() {
+                        std::io::ErrorKind::NotFound => ENOENT,
+                        std::io::ErrorKind::PermissionDenied => EACCES,
+                        _ => EINVAL,
+                    };
+                    set64(env, Gpr(0), neg(no));
+                    TrapOutcome::Handled
+                }
+            };
+        }
+        if nr == polyisa_os_linux::x86_64::FACCESSAT && self.is64
+            || nr == polyisa_os_linux::i386::FACCESSAT && !self.is64
+        {
+            // faccessat(dirfd, path, mode)。AT_FDCWD のみ、存在確認のみ行う.
+            let (dirfd, path_addr) = if self.is64 {
+                (get64(env, Gpr(7)), get64(env, Gpr(6)))
+            } else {
+                (
+                    u64::from(env.backend.get(Gpr(3).state())),
+                    u64::from(env.backend.get(Gpr(1).state())),
+                )
+            };
+            if !is_at_fdcwd(dirfd) {
+                set64(env, Gpr(0), neg(EINVAL));
+                return TrapOutcome::Handled;
+            }
+            let path = match guest_c_string(env, path_addr) {
+                Some(p) => p,
+                None => return TrapOutcome::Unimplemented,
+            };
+            return match std::fs::metadata(&path) {
+                Ok(_) => {
+                    set64(env, Gpr(0), 0);
+                    TrapOutcome::Handled
+                }
+                Err(e) => {
+                    let no = match e.kind() {
+                        std::io::ErrorKind::NotFound => ENOENT,
+                        std::io::ErrorKind::PermissionDenied => EACCES,
+                        _ => EINVAL,
+                    };
+                    set64(env, Gpr(0), neg(no));
+                    TrapOutcome::Handled
+                }
+            };
+        }
+        if nr == polyisa_os_linux::x86_64::UTIMENSAT && self.is64
+            || nr == polyisa_os_linux::i386::UTIMENSAT && !self.is64
+        {
+            // utimensat(dirfd, path, times, flags)。AT_FDCWD のみ受け付ける.
+            // times==NULL は現在時刻のつもりで、存在すれば 0、なければ空作成して 0 を返す.
+            // times!=NULL は無視して同様に扱う（touch の継続が目的の試作）。
+            let (dirfd, path_addr) = if self.is64 {
+                (get64(env, Gpr(7)), get64(env, Gpr(6)))
+            } else {
+                (
+                    u64::from(env.backend.get(Gpr(3).state())),
+                    u64::from(env.backend.get(Gpr(1).state())),
+                )
+            };
+            if !is_at_fdcwd(dirfd) {
+                set64(env, Gpr(0), neg(EINVAL));
+                return TrapOutcome::Handled;
+            }
+            let path = match guest_c_string(env, path_addr) {
+                Some(p) => p,
+                None => return TrapOutcome::Unimplemented,
+            };
+            if std::fs::metadata(&path).is_ok() {
+                set64(env, Gpr(0), 0);
+                return TrapOutcome::Handled;
+            }
+            return match std::fs::File::create(&path) {
+                Ok(_) => {
+                    set64(env, Gpr(0), 0);
+                    TrapOutcome::Handled
+                }
+                Err(e) => {
+                    let no = match e.kind() {
+                        std::io::ErrorKind::NotFound => ENOENT,
+                        std::io::ErrorKind::PermissionDenied => EACCES,
+                        _ => EINVAL,
+                    };
+                    set64(env, Gpr(0), neg(no));
+                    TrapOutcome::Handled
+                }
+            };
+        }
+        if nr == polyisa_os_linux::x86_64::CHMOD && self.is64
+            || nr == polyisa_os_linux::i386::CHMOD && !self.is64
+            || nr == polyisa_os_linux::x86_64::FCHMOD && self.is64
+            || nr == polyisa_os_linux::i386::FCHMOD && !self.is64
+            || nr == polyisa_os_linux::x86_64::FCHMODAT && self.is64
+            || nr == polyisa_os_linux::i386::FCHMODAT && !self.is64
+        {
+            // chmod/fchmod/fchmodat。試作では権限変更を無視して 0 を返す.
+            set64(env, Gpr(0), 0);
+            return TrapOutcome::Handled;
+        }
         if nr == n_brk {
             use polyisa_mem::{PAGE_SIZE, Perms, VirtAddr};
             let addr = get64(env, r_a);
@@ -7902,6 +8226,103 @@ mod tests {
         set64(&mut env, Gpr(2), 8);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EINVAL));
+    }
+
+    #[test]
+    fn mkdir_rmdir_roundtrip() {
+        use polyisa_os_linux::x86_64 as abi;
+        let mut sys = CliLinux::x86_64();
+        let mut env = bare();
+        let path = format!("/tmp/polyisa_mkdir_{}", std::process::id());
+        let _ = std::fs::remove_dir(&path);
+        env.backend
+            .mem
+            .write(VirtAddr(0x100), path.as_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x100 + path.len() as u64), &[0])
+            .unwrap();
+        // mkdir(path) は 0 を返す.
+        set64(&mut env, Gpr(0), abi::MKDIR);
+        set64(&mut env, Gpr(7), 0x100);
+        set64(&mut env, Gpr(6), 0o777);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        assert!(std::fs::metadata(&path).is_ok());
+        // 二重作成は EEXIST (17).
+        set64(&mut env, Gpr(0), abi::MKDIR);
+        set64(&mut env, Gpr(7), 0x100);
+        set64(&mut env, Gpr(6), 0o777);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(17));
+        // rmdir(path) は 0 を返す.
+        set64(&mut env, Gpr(0), abi::RMDIR);
+        set64(&mut env, Gpr(7), 0x100);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+    }
+
+    #[test]
+    fn unlink_access_utimensat_roundtrip() {
+        use polyisa_os_linux::x86_64 as abi;
+        let mut sys = CliLinux::x86_64();
+        let mut env = bare();
+        let path = format!("/tmp/polyisa_utimens_{}", std::process::id());
+        let _ = std::fs::remove_file(&path);
+        env.backend
+            .mem
+            .write(VirtAddr(0x100), path.as_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x100 + path.len() as u64), &[0])
+            .unwrap();
+        // utimensat(AT_FDCWD, path) は空作成して 0 を返す.
+        set64(&mut env, Gpr(0), abi::UTIMENSAT);
+        set64(&mut env, Gpr(7), 0xffff_ffff_ffff_ff9c);
+        set64(&mut env, Gpr(6), 0x100);
+        set64(&mut env, Gpr(2), 0);
+        set64(&mut env, Gpr(10), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        assert!(std::fs::metadata(&path).is_ok());
+        // access(path) は 0 を返す.
+        set64(&mut env, Gpr(0), abi::ACCESS);
+        set64(&mut env, Gpr(7), 0x100);
+        set64(&mut env, Gpr(6), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        // unlink(path) は 0 を返す.
+        set64(&mut env, Gpr(0), abi::UNLINK);
+        set64(&mut env, Gpr(7), 0x100);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        // 存在しない access は ENOENT.
+        set64(&mut env, Gpr(0), abi::ACCESS);
+        set64(&mut env, Gpr(7), 0x100);
+        set64(&mut env, Gpr(6), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(ENOENT));
+    }
+
+    #[test]
+    fn dup2_std_alias_returns_newfd() {
+        use polyisa_os_linux::x86_64 as abi;
+        let mut sys = CliLinux::x86_64();
+        let mut env = bare();
+        // dup2(1, 2) は 2 を返す (--list の画面幅取得の前段).
+        set64(&mut env, Gpr(0), abi::DUP2);
+        set64(&mut env, Gpr(7), 1);
+        set64(&mut env, Gpr(6), 2);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 2);
+        // chmod/fchmodat は無視して 0 を返す.
+        set64(&mut env, Gpr(0), abi::CHMOD);
+        set64(&mut env, Gpr(7), 0x100);
+        set64(&mut env, Gpr(6), 0o755);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
     }
 
     #[test]

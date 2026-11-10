@@ -115,6 +115,19 @@ pub mod x86_64 {
     pub const TIME: u64 = 201;
     pub const CLOCK_NANOSLEEP: u64 = 230;
     pub const GETGROUPS: u64 = 115;
+    pub const MKDIR: u64 = 83;
+    pub const RMDIR: u64 = 84;
+    pub const UNLINK: u64 = 87;
+    pub const ACCESS: u64 = 21;
+    pub const UTIMENSAT: u64 = 280;
+    pub const DUP: u64 = 32;
+    pub const DUP2: u64 = 33;
+    pub const MKDIRAT: u64 = 258;
+    pub const UNLINKAT: u64 = 263;
+    pub const FACCESSAT: u64 = 269;
+    pub const CHMOD: u64 = 90;
+    pub const FCHMOD: u64 = 91;
+    pub const FCHMODAT: u64 = 268;
 }
 
 /// 段階4の準備としての i386 番号表（Linux・32ビット）。
@@ -164,6 +177,19 @@ pub mod i386 {
     pub const TIME: u64 = 13;
     pub const NANOSLEEP: u64 = 162;
     pub const GETGROUPS: u64 = 99;
+    pub const MKDIR: u64 = 39;
+    pub const RMDIR: u64 = 40;
+    pub const UNLINK: u64 = 10;
+    pub const ACCESS: u64 = 33;
+    pub const UTIMENSAT: u64 = 320;
+    pub const DUP: u64 = 41;
+    pub const DUP2: u64 = 63;
+    pub const MKDIRAT: u64 = 296;
+    pub const UNLINKAT: u64 = 301;
+    pub const FACCESSAT: u64 = 307;
+    pub const CHMOD: u64 = 15;
+    pub const FCHMOD: u64 = 94;
+    pub const FCHMODAT: u64 = 306;
 }
 
 /// ABI と番号から名前を引く。段階1の範囲と x86_64・i386 の番号表のみ。
@@ -253,6 +279,19 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             i386::TIME => Some("time"),
             i386::NANOSLEEP => Some("nanosleep"),
             i386::GETGROUPS => Some("getgroups"),
+            i386::MKDIR => Some("mkdir"),
+            i386::RMDIR => Some("rmdir"),
+            i386::UNLINK => Some("unlink"),
+            i386::ACCESS => Some("access"),
+            i386::UTIMENSAT => Some("utimensat"),
+            i386::DUP => Some("dup"),
+            i386::DUP2 => Some("dup2"),
+            i386::MKDIRAT => Some("mkdirat"),
+            i386::UNLINKAT => Some("unlinkat"),
+            i386::FACCESSAT => Some("faccessat"),
+            i386::CHMOD => Some("chmod"),
+            i386::FCHMOD => Some("fchmod"),
+            i386::FCHMODAT => Some("fchmodat"),
             _ => None,
         },
         GuestAbi::X86_64Linux => match nr {
@@ -297,6 +336,19 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             x86_64::TIME => Some("time"),
             x86_64::CLOCK_NANOSLEEP => Some("clock_nanosleep"),
             x86_64::GETGROUPS => Some("getgroups"),
+            x86_64::MKDIR => Some("mkdir"),
+            x86_64::RMDIR => Some("rmdir"),
+            x86_64::UNLINK => Some("unlink"),
+            x86_64::ACCESS => Some("access"),
+            x86_64::UTIMENSAT => Some("utimensat"),
+            x86_64::DUP => Some("dup"),
+            x86_64::DUP2 => Some("dup2"),
+            x86_64::MKDIRAT => Some("mkdirat"),
+            x86_64::UNLINKAT => Some("unlinkat"),
+            x86_64::FACCESSAT => Some("faccessat"),
+            x86_64::CHMOD => Some("chmod"),
+            x86_64::FCHMOD => Some("fchmod"),
+            x86_64::FCHMODAT => Some("fchmodat"),
             _ => None,
         },
         GuestAbi::Unknown => None,

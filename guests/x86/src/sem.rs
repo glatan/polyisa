@@ -10481,6 +10481,26 @@ pub fn and_rm64_imm8_mem32<B: Backend>(b: &mut B, base: Gpr, disp: i32, imm: i8)
     Ok(())
 }
 
+/// CMP m32,imm8 [base+disp32] (83 /7 mod=10)。
+pub fn cmp_rm32_imm8_mem32<B: Backend>(b: &mut B, base: Gpr, disp: i32, imm: i8) -> Flow<B> {
+    let addr = eff_addr32(b, base, disp);
+    let x: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let y = b.konst::<W32>(imm as i32 as u32);
+    let v = b.sub::<W32>(x, y);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
+/// CMP m64,imm8 [base+disp32] (83 /7 mod=10, REX.W)。
+pub fn cmp_rm64_imm8_mem32<B: Backend>(b: &mut B, base: Gpr, disp: i32, imm: i8) -> Flow<B> {
+    let addr = eff_addr32(b, base, disp);
+    let x: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let y = b.konst::<W64>(imm as i64 as u64);
+    let v = b.sub::<W64>(x, y);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
 /// MOVZX r32,m16 [base] (0F B7 mod=00)。
 pub fn movzx_r32_m16_memnd<B: Backend>(b: &mut B, dst: Gpr, base: Gpr) -> Flow<B> {
     use polyisa_sem::W16;
