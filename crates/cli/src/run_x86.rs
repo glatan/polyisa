@@ -161,7 +161,7 @@ fn fetch_len(
                 // SETcc r/m8 (0F 90-9F /r)。reg-direct 3B、94 mod=10 [base+disp32] 7B、
                 // 94 mod=01 [base+disp8] 4B (grep 0x442245 対応)、95 mod=10 7B (grep 0x43ddc1 対応)、
                 // 9E mod=10 [base+disp32] 7B (grep 0x43e091 対応)、
-                // 95 SIB mod=01 [base+index*scale+disp8] 5B (ls -l 対応).
+                // 94/95 SIB mod=01 [base+index*scale+disp8] 5B (df 0x5a797e・ls -l 対応).
                 let m = third?;
                 let md = m >> 6;
                 let rm = m & 7;
@@ -174,7 +174,8 @@ fn fetch_len(
                 } else if (s == 0x95 || s == 0x9E) && md == 2 && rm != 4 {
                     // 95 mod=10 (grep 0x43ddc1)、9E mod=10 (grep 0x43e091)。共に 7B.
                     Some(7)
-                } else if s == 0x95 && md == 1 && rm == 4 {
+                } else if (s == 0x94 || s == 0x95) && md == 1 && rm == 4 {
+                    // 94 SIB mod=01 (df 0x5a797e)、95 SIB mod=01 (ls -l)。共に 5B.
                     let _ = fourth?;
                     Some(5)
                 } else {
@@ -1396,6 +1397,7 @@ pub fn run_mode(
                         | 0x29
                         | 0x6F
                         | 0x7F
+                        | 0x94
                         | 0x95
                         | 0xE7
                         | 0x1F
@@ -6694,6 +6696,15 @@ fn dispatch<B: Backend>(
                 sem::setne_m8_mem8(b, sib0f_base(), disp8())
             } else {
                 sem::setne_m8_sibd(b, sib0f_base(), sib0f_idx(), sib0f_shift(), disp8())
+            }
+        }
+        Insn::SeteM8Sibd => {
+            // 0F 94 SIB mod=01 [base+index*scale+disp8] (40b)。df 0x5a797e 対応.
+            // no_index は [base+disp8] として mem8 相当を呼ぶ.
+            if sib0f_no_index() {
+                sem::sete_m8_mem8(b, sib0f_base(), disp8())
+            } else {
+                sem::sete_m8_sibd(b, sib0f_base(), sib0f_idx(), sib0f_shift(), disp8())
             }
         }
         Insn::Setne => {

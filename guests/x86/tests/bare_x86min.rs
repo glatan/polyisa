@@ -8133,3 +8133,30 @@ fn test_m16_imm_mem8_updates_flags() {
     assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0x40);
     assert_eq!(env.backend.get(sem::eflags_ref()) & 0x801, 0);
 }
+
+#[test]
+fn sete_m8_sibd_writes() {
+    // SETE [RAX+RSI*8+0x06]: ZF=1 -> 1。df 0x5a797e 対応.
+    let mut env = env();
+    env.map_rw(0, 1).unwrap();
+    env.map_rw(0x2000, 1).unwrap();
+    env.backend.set(Gpr(0).state(), 0x2000);
+    env.backend.set(Gpr(6).state(), 0x10);
+    env.backend.set(sem::eflags_ref(), 0x40);
+    env.step(|b| sem::sete_m8_sibd(b, Gpr(0), Gpr(6), 3, 0x06))
+        .unwrap();
+    let mut back = [0u8; 1];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x2086),
+            &mut back,
+            Access {
+                endian: Endian::Le,
+                align: Align::Unaligned,
+                kind: AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(back[0], 1);
+}

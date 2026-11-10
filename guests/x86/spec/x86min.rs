@@ -348,6 +348,14 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("setg", "F1", "00001111 10011111 11......", "setg r/m8", "alu"),
         // SETNE m8 SIB+disp8 (0F 95 SIB mod=01)。ls -l 0x42a294 対応。REX.X/B は dispatch で見る.
         ("setne_m8_sibd", "F1", "00001111 10010101 01...100 ........ ........", "setne m8", "alu"),
+        // SETE m8 SIB+disp8 (0F 94 SIB mod=01)。df 0x5a797e 対応。index有無は問わずdispatchで切替.
+        (
+            "sete_m8_sibd",
+            "F1",
+            "00001111 10010100 01...100 ........ ........",
+            "sete m8",
+            "alu",
+        ),
         ("cmove_m64", "M32", "00001111 01000100 10...... ................................", "cmove r64, m64", "load"),
         // CMOVNE r64,m64 mod=10 [base+disp32] (0F 45)。grep 0x442f5f 対応.
         ("cmovne_m64", "M32", "00001111 01000101 10...... ................................", "cmovne r64, m64", "load"),

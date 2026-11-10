@@ -76,7 +76,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数117件。
-        assert_eq!(INSNS.len(), 629);
+        assert_eq!(INSNS.len(), 630);
     }
 
     #[test]
@@ -1173,6 +1173,11 @@ mod tests {
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x0F9544F006, 40), Some(Insn::SetneM8Sibd));
         assert_eq!(decode(0x0F9544F006, 32), None);
+        // SETE m8 SIB+disp8 (0F 94 SIB mod=01)。df 0x5a797e 対応.
+        // 0F 94 44 24 1F は SETE [RSP+0x1F] (no_index)。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x0F9444241F, 40), Some(Insn::SeteM8Sibd));
+        assert_eq!(decode(0x0F9444241F, 32), None);
         // SUB r/m8,r8 reg-direct (28 /r)。
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x28D1, 16), Some(Insn::SubM8R8));

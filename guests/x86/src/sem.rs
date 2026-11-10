@@ -1193,6 +1193,18 @@ pub fn setne_m8_sibd<B: Backend>(b: &mut B, base: Gpr, idx: Gpr, shift: u32, dis
     Ok(())
 }
 
+/// SETE m8 [base+index*scale+disp8] (0F 94 SIB mod=01)。df 0x5a797e 対応。ZF=1 なら 1 を書く.
+pub fn sete_m8_sibd<B: Backend>(b: &mut B, base: Gpr, idx: Gpr, shift: u32, disp: i8) -> Flow<B> {
+    use polyisa_sem::W8;
+    let addr = sib_addr_scaled(b, shift, disp as i32, base, idx);
+    let take = read_zf(b);
+    let one = b.konst::<W8>(1);
+    let zero = b.konst::<W8>(0);
+    let v = b.select::<W8>(take, one, zero);
+    b.store::<W8>(addr, v, DATA_WRITE)?;
+    Ok(())
+}
+
 /// SETNE r/m8 (0F 95)。ZF=0 なら 1.
 pub fn setne_r8<B: Backend>(b: &mut B, dst: Gpr, high: bool) -> Flow<B> {
     let take = {
