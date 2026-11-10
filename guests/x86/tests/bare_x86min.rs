@@ -6701,3 +6701,37 @@ fn movsd_xmm_xmm_merges_low64() {
     let v: u128 = env.backend.get(sem::xmm_ref(Xmm(0)));
     assert_eq!(v, 0xAAAA_BBBB_CCCC_DDDD_5555_6666_7777_8888u128);
 }
+
+#[test]
+fn bts_r32_imm_sets_bit_and_cf() {
+    // BTS EBX,0x1E: EBX=0x40000000 (bit30=1) -> CF=1, EBX|=1<<30 (変化なし).
+    // EBX=0 -> CF=0, EBX=1<<30.
+    let mut env = env();
+    env.backend.set(Gpr(3).state(), 0x4000_0000);
+    env.step(|b| sem::bts_r32_imm(b, Gpr(3), 0x1E)).unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x1, 1);
+    assert_eq!(env.backend.get(Gpr(3).state()), 0x4000_0000);
+    env.backend.set(Gpr(3).state(), 0);
+    env.step(|b| sem::bts_r32_imm(b, Gpr(3), 0x1E)).unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x1, 0);
+    assert_eq!(env.backend.get(Gpr(3).state()), 0x4000_0000);
+}
+
+#[test]
+fn bts_r64_imm_sets_bit_and_cf() {
+    // BTS RDX,0x34 (REX.W): RDX=0 -> CF=0, RDX=1<<52.
+    let mut env = env();
+    env.step(|b| {
+        sem::write64(b, Gpr(2), 0);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::bts_r64_imm(b, Gpr(2), 0x34)).unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x1, 0);
+    env.step(|b| {
+        let v = sem::read64(b, Gpr(2));
+        assert_eq!(v, 1u64 << 52);
+        Ok(())
+    })
+    .unwrap();
+}

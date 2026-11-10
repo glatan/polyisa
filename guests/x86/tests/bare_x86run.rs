@@ -4870,3 +4870,40 @@ fn run_movq_xmm_r64_rexw() {
     ));
     assert_eq!((v & 0xFFFF_FFFF_FFFF_FFFF) as u64, 0x4045_0000_0000_0000);
 }
+
+#[test]
+fn run_bts_r64_imm() {
+    // 48 0F BA EA 34 (BTS RDX,0x34 REX.W)。RDX=0 -> RDX=1<<52、exit(0)。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(2), 0);
+        Ok(())
+    })
+    .unwrap();
+    let prog: &[u8] = &[
+        0x48, 0x0F, 0xBA, 0xEA, 0x34, // bts rdx,0x34 (REX.W)
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
+        0x0F, 0x05, // syscall -> exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    // RDXを再設定 (prog書込みでレジスタは変わらない)。
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(2), 0);
+        Ok(())
+    })
+    .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0));
+    env.step(|b| {
+        let v = polyisa_guest_x86::sem::read64(b, Gpr(2));
+        assert_eq!(v, 1u64 << 52);
+        Ok(())
+    })
+    .unwrap();
+}

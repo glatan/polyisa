@@ -6818,6 +6818,43 @@ pub fn bt_r32_imm<B: Backend>(b: &mut B, dst: Gpr, imm: u8) -> Flow<B> {
     Ok(())
 }
 
+/// BTS r32, imm8 (0F BA /5 ib reg-direct)。指定ビットを CF に入れ、立てて書戻す.
+pub fn bts_r32_imm<B: Backend>(b: &mut B, dst: Gpr, imm: u8) -> Flow<B> {
+    let x32 = read(b, dst);
+    let n = b.konst::<W32>(u32::from(imm & 31));
+    let sh = b.shr_l::<W32>(x32, n);
+    let one = b.konst::<W32>(1);
+    let bit = b.and::<W32>(sh, one);
+    let f: B::V<W32> = b.get(eflags_ref());
+    let not_cf = b.konst::<W32>(!FLAG_CF);
+    let cleared = b.and::<W32>(f, not_cf);
+    let restored = b.or::<W32>(cleared, bit);
+    b.set(eflags_ref(), restored);
+    let mask = b.shl::<W32>(one, n);
+    let v = b.or::<W32>(x32, mask);
+    write(b, dst, v);
+    Ok(())
+}
+
+/// BTS r64, imm8 (REX.W + 0F BA /5 ib reg-direct)。指定ビットを CF に入れ、立てて書戻す.
+pub fn bts_r64_imm<B: Backend>(b: &mut B, dst: Gpr, imm: u8) -> Flow<B> {
+    let x64 = read64(b, dst);
+    let n = b.konst::<W64>(u64::from(imm & 63));
+    let sh = b.shr_l::<W64>(x64, n);
+    let one = b.konst::<W64>(1);
+    let bit64 = b.and::<W64>(sh, one);
+    let bit: B::V<W32> = b.trunc::<W64, W32>(bit64);
+    let f: B::V<W32> = b.get(eflags_ref());
+    let not_cf = b.konst::<W32>(!FLAG_CF);
+    let cleared = b.and::<W32>(f, not_cf);
+    let restored = b.or::<W32>(cleared, bit);
+    b.set(eflags_ref(), restored);
+    let mask = b.shl::<W64>(one, n);
+    let v = b.or::<W64>(x64, mask);
+    write64(b, dst, v);
+    Ok(())
+}
+
 /// BT r/m32,r32 (0F A3 /r mod=11)。src 下位5ビット指定の1ビットを CF に入れる。他旗は不変.
 pub fn bt_r32_rm<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
     let x32 = read(b, dst);

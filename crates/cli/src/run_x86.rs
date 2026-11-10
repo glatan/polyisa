@@ -368,11 +368,15 @@ fn fetch_len(
                 let m = third?;
                 if m >> 6 == 3 { Some(3) } else { None }
             } else if s == 0xBA {
-                // BT r32,imm8 (0F BA /4 ib reg-direct、4B)。
+                // BT/BTS r32/r64,imm8 (0F BA /4 ib と /5 ib reg-direct、4B)。REX.W で64ビット.
                 let m = third?;
                 let md = m >> 6;
                 let reg = (m >> 3) & 7;
-                if md == 3 && reg == 4 { Some(4) } else { None }
+                if md == 3 && (reg == 4 || reg == 5) {
+                    Some(4)
+                } else {
+                    None
+                }
             } else if s == 0x10
                 || s == 0x11
                 || s == 0x28
@@ -4800,6 +4804,15 @@ fn dispatch<B: Backend>(
             // BT r32,imm8 (0F BA /4 ib reg-direct、4B)。imm は最下位8.
             let imm = (word & 0xff) as u8;
             sem::bt_r32_imm(b, rm0f(), imm)
+        }
+        Insn::BtsR32Imm => {
+            // BTS r32/r64,imm8 (0F BA /5 ib reg-direct、4B)。imm は最下位8。REX.W で64ビット.
+            let imm = (word & 0xff) as u8;
+            if rex_w {
+                sem::bts_r64_imm(b, rm0f(), imm)
+            } else {
+                sem::bts_r32_imm(b, rm0f(), imm)
+            }
         }
         Insn::XaddR32Memnd => {
             // XADD r32,[base] (0F C1 mod=00、3B)。dst は reg フィールド.
