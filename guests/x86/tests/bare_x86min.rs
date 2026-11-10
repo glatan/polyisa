@@ -5552,6 +5552,36 @@ fn and_rm32_imm8_memnd_basic() {
 }
 
 #[test]
+fn and_rm32_imm8_sibd_indexed() {
+    // ANDL $0,[RDI+RDX*4-4] (83 64 97 FC 00): head の停止点に対応.
+    // RDI=0x2000、RDX=0x10、[0x203C]=0xFF -> 0.
+    let mut env = env();
+    env.map_rw(0x2000, 1).unwrap();
+    env.backend.set(Gpr(7).state(), 0x2000);
+    env.backend.set(Gpr(2).state(), 0x10);
+    env.backend
+        .mem
+        .write(VirtAddr(0x203C), &0xFFu32.to_le_bytes())
+        .unwrap();
+    env.step(|b| sem::and_rm32_imm8_sibd(b, Gpr(7), Gpr(2), 2, -4, 0))
+        .unwrap();
+    let mut back = [0u8; 4];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x203C),
+            &mut back,
+            Access {
+                endian: Endian::Le,
+                align: Align::Unaligned,
+                kind: AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(u32::from_le_bytes(back), 0);
+}
+
+#[test]
 fn test_rm16_sets_zf() {
     // TEST DX,DX (66 85 /r): DX=0 -> ZF=1. DX=1 -> ZF=0.
     let mut env = env();
