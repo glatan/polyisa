@@ -1922,6 +1922,10 @@ fn dispatch<B: Backend>(
             // FF /1 mod=01 [base+disp8] (SIBなし)。CF 以外の 5 旗を更新する.
             sem::dec_r32_mem8(b, rm(), disp8())
         }
+        Insn::DecRmRip => {
+            // FF /1 mod=00 rm=101 [RIP+disp32]。du -s 0x5a7fe7 対応.
+            sem::dec_r32_rip(b, eip as u64 + nbytes, disp32())
+        }
         Insn::AddEax => {
             if rex_w {
                 sem::add_rm64_imm(b, Gpr(0), imm32())
