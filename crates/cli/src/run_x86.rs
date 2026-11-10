@@ -1619,6 +1619,14 @@ fn dispatch<B: Backend>(
                 sem::dec_r32(b, rm())
             }
         }
+        Insn::DecRmSibd => {
+            // FF /1 SIB mod=01 [base+index*scale+disp8]。CF 以外の 5 旗を更新する.
+            if no_index() {
+                sem::dec_r32_mem8(b, sib_base(), disp8())
+            } else {
+                sem::dec_r32_sibd(b, sib_base(), sib_idx(), sib_shift(), disp8())
+            }
+        }
         Insn::AddEax => {
             if rex_w {
                 sem::add_rm64_imm(b, Gpr(0), imm32())

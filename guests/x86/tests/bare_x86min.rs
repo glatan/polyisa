@@ -5741,6 +5741,66 @@ fn inc_r32_mem8_no_index() {
 }
 
 #[test]
+fn dec_r32_mem8_no_index() {
+    // DECL 0x0C(%rsp) (FF 4C 24 0C): no_index 経路。RSP=0x2000、[0x200C]=1 -> 0.
+    // CF は保存される。
+    let mut env = env();
+    env.map_rw(0x2000, 1).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    env.backend
+        .mem
+        .write(VirtAddr(0x200C), &1u32.to_le_bytes())
+        .unwrap();
+    env.backend.set(sem::eflags_ref(), 1);
+    env.step(|b| sem::dec_r32_mem8(b, Gpr(4), 0x0C)).unwrap();
+    let mut back = [0u8; 4];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x200C),
+            &mut back,
+            Access {
+                endian: Endian::Le,
+                align: Align::Unaligned,
+                kind: AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(u32::from_le_bytes(back), 0);
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x1, 1);
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0x40);
+}
+
+#[test]
+fn dec_r32_sibd_indexed() {
+    // DECL -4(%rdi,%rdx,4) (FF 4C 97 FC 相当): RDI=0x2000、RDX=0x10、[0x203C]=1 -> 0.
+    let mut env = env();
+    env.map_rw(0x2000, 1).unwrap();
+    env.backend.set(Gpr(7).state(), 0x2000);
+    env.backend.set(Gpr(2).state(), 0x10);
+    env.backend
+        .mem
+        .write(VirtAddr(0x203C), &1u32.to_le_bytes())
+        .unwrap();
+    env.step(|b| sem::dec_r32_sibd(b, Gpr(7), Gpr(2), 2, -4))
+        .unwrap();
+    let mut back = [0u8; 4];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x203C),
+            &mut back,
+            Access {
+                endian: Endian::Le,
+                align: Align::Unaligned,
+                kind: AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(u32::from_le_bytes(back), 0);
+}
+
+#[test]
 fn test_rm16_sets_zf() {
     // TEST DX,DX (66 85 /r): DX=0 -> ZF=1. DX=1 -> ZF=0.
     let mut env = env();

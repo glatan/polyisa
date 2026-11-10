@@ -367,6 +367,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("inc_rm_memnd", "MR", "11111111 00000...", "inc r/m", "alu"),
         // INC m32 [base+index*scale+disp8] (FF /0 SIB mod=01)。
         ("inc_rm_sibd", "S8", "11111111 01000100 ........ ........", "inc r/m", "alu"),
+        // DEC m32 [base+index*scale+disp8] (FF /1 SIB mod=01)。
+        ("dec_rm_sibd", "S8", "11111111 01001100 ........ ........", "dec r/m", "alu"),
         // XADD r32, m32 [RIP+disp32] (0F C1 mod=00 rm=101)。LOCK は無視.
         ("xadd_r32_rip", "F1", "00001111 11000001 00...101 ................................", "xadd r32, m32", "alu"),
         // SHLD r/m32,r32,CL (0F A5 /r mod=11)。REX.W で64ビット.

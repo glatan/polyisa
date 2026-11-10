@@ -1528,6 +1528,44 @@ pub fn inc_r32_sibd<B: Backend>(b: &mut B, base: Gpr, idx: Gpr, shift: u32, disp
     Ok(())
 }
 
+/// DEC m32 [base+disp8] (FF /1 mod=01)。CF 以外の 5 旗を更新する（CF は保存）。
+pub fn dec_r32_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8) -> Flow<B> {
+    let cf_mask = b.konst::<W32>(FLAG_CF);
+    let all_flags = b.get(eflags_ref());
+    let saved_cf = b.and::<W32>(all_flags, cf_mask);
+    let addr = eff_addr(b, base, disp);
+    let x: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let one = b.konst::<W32>(1);
+    let v = b.sub::<W32>(x, one);
+    b.store::<W32>(addr, v, DATA_WRITE)?;
+    update_sub_flags(b, x, one, v);
+    let f = b.get(eflags_ref());
+    let not_cf = b.konst::<W32>(!FLAG_CF);
+    let cleared = b.and::<W32>(f, not_cf);
+    let restored = b.or::<W32>(cleared, saved_cf);
+    b.set(eflags_ref(), restored);
+    Ok(())
+}
+
+/// DEC m32 [base+index*scale+disp8] (FF /1 SIB mod=01)。
+pub fn dec_r32_sibd<B: Backend>(b: &mut B, base: Gpr, idx: Gpr, shift: u32, disp: i8) -> Flow<B> {
+    let cf_mask = b.konst::<W32>(FLAG_CF);
+    let all_flags = b.get(eflags_ref());
+    let saved_cf = b.and::<W32>(all_flags, cf_mask);
+    let addr = sib_addr_scaled(b, shift, disp as i32, base, idx);
+    let x: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let one = b.konst::<W32>(1);
+    let v = b.sub::<W32>(x, one);
+    b.store::<W32>(addr, v, DATA_WRITE)?;
+    update_sub_flags(b, x, one, v);
+    let f = b.get(eflags_ref());
+    let not_cf = b.konst::<W32>(!FLAG_CF);
+    let cleared = b.and::<W32>(f, not_cf);
+    let restored = b.or::<W32>(cleared, saved_cf);
+    b.set(eflags_ref(), restored);
+    Ok(())
+}
+
 /// ADD EAX, imm32。32ビットで包み、6 旗を更新する。
 pub fn add_eax<B: Backend>(b: &mut B, imm: u32) -> Flow<B> {
     let x = read(b, Gpr::eax());
