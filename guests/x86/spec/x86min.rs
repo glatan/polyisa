@@ -345,6 +345,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("setg", "F1", "00001111 10011111 11......", "setg r/m8", "alu"),
         ("cmove_m64", "M32", "00001111 01000100 10...... ................................", "cmove r64, m64", "load"),
         ("cmovne_r64_sibd", "F1", "00001111 01000101 01...100 ..100... ........", "cmovne r, m64", "load"),
+        ("cmove_r64_sibd", "F1", "00001111 01000100 01...100 ..100... ........", "cmove r, m64", "load"),
         // SUB r32/r64, m32/m64 SIB+disp8 (2B mod=01)。index有無は問わずdispatchで切替.
         ("sub_r_sibd", "F1", "00101011 01...100 ........ ........", "sub r, m", "alu"),
         // ADD r32/r64, m32/m64 SIB+disp8 no_index (03 mod=01)。REX.W で64bit.

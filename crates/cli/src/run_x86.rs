@@ -5370,6 +5370,18 @@ fn dispatch<B: Backend>(
                 sem::cmovne_r32_sibd(b, reg0f_as_gpr(), base, d8)
             }
         }
+        Insn::CmoveR64Sibd => {
+            // 0F 44 SIB mod=01 [base+disp8] no_index (40b)。
+            // SIB は (word>>8) 下位8、disp は最下位8。base は SIB 下位3 + REX.B。
+            let sib_v = ((word >> 8) & 0xff) as u8;
+            let d8 = (word & 0xff) as u8 as i8;
+            let base = Gpr((sib_v & 7) | ((rex & 1) << 3));
+            if rex_w {
+                sem::cmove_r64_sibd(b, reg0f_as_gpr(), base, d8)
+            } else {
+                sem::cmove_r32_sibd(b, reg0f_as_gpr(), base, d8)
+            }
+        }
         Insn::CmoveRip => {
             if rex_w {
                 sem::cmove_r64_rip(b, reg0f_as_gpr(), eip as u64 + nbytes, disp32())

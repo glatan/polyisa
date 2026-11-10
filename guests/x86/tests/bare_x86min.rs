@@ -2830,6 +2830,47 @@ fn cmovne_r64_sibd_moves_on_nz() {
 }
 
 #[test]
+fn cmove_r64_sibd_moves_on_z() {
+    // CMOVE RAX,[RSP+0x50]: ZF=1 で [0x50] を RAX に移す。
+    let mut env = env();
+    env.map_rw(0, 1).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x50), &0x1122_3344_5566_7788u64.to_le_bytes())
+        .unwrap();
+    env.backend.set(Gpr(4).state(), 0);
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(0), 0);
+        Ok(())
+    })
+    .unwrap();
+    env.backend.set(sem::eflags_ref(), 0x40);
+    env.step(|b| sem::cmove_r64_sibd(b, Gpr(0), Gpr(4), 0x50))
+        .unwrap();
+    env.step(|b| {
+        let v = polyisa_guest_x86::sem::read64(b, Gpr(0));
+        assert_eq!(v, 0x1122_3344_5566_7788);
+        Ok(())
+    })
+    .unwrap();
+    // ZF=0 では動かない。
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(0), 0);
+        Ok(())
+    })
+    .unwrap();
+    env.backend.set(sem::eflags_ref(), 0);
+    env.step(|b| sem::cmove_r64_sibd(b, Gpr(0), Gpr(4), 0x50))
+        .unwrap();
+    env.step(|b| {
+        let v = polyisa_guest_x86::sem::read64(b, Gpr(0));
+        assert_eq!(v, 0);
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
 fn mulsd_xmm_m64_rip_multiplies() {
     use polyisa_guest_x86::sem::Xmm;
     // MULSD xmm0,[RIP]: [0x1500]=2.0、xmm0 下位=3.0 -> 6.0 (0x4018000000000000)。上位保持.
