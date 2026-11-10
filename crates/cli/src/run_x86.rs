@@ -1742,7 +1742,20 @@ fn dispatch<B: Backend>(
     // SIB index なし（100 + REX.X なし）は base のみで扱う。
     let no_index = || sib_idx_raw() == 4 && (rex >> 1) & 1 == 0;
     let r: Result<(), B::Exit> = match insn {
-        Insn::Nop => sem::nop(b),
+        Insn::Nop => {
+            // 90 は NOP と共有。REX.B 付き (41 90/49 90) は XCHG RAX,R8 のため交換する.
+            // 48 90 (W のみ) は XCHG RAX,RAX のため NOP と等価.
+            if rex & 1 != 0 {
+                let dst = Gpr(((word as u8) & 7) | ((rex & 1) << 3));
+                if rex_w {
+                    sem::xchg_r64_ax(b, dst)
+                } else {
+                    sem::xchg_r32_ax(b, dst)
+                }
+            } else {
+                sem::nop(b)
+            }
+        }
         Insn::IncEax => sem::inc_r32(b, Gpr(0)),
         Insn::IncEcx => sem::inc_r32(b, Gpr(1)),
         Insn::IncEdx => sem::inc_r32(b, Gpr(2)),
