@@ -5584,6 +5584,27 @@ fn dispatch<B: Backend>(
                 sem::movsx_r32_m8_sib(b, reg0f_as_gpr(), sib0f_base(), sib0f_idx(), sib0f_shift())
             }
         }
+        Insn::MovsxR32M8Sibd => {
+            // 0F BE SIB mod=01 [base+index*scale+disp8] (40b)。no_index は [base+disp8].
+            // SIB は (word>>8) 下位8、disp は最下位8。REX.W で64ビット符号拡張.
+            let sib_v = ((word >> 8) & 0xff) as u8;
+            let d8 = (word & 0xff) as u8 as i8;
+            let shift = ((sib_v >> 6) & 3) as u32;
+            let idx_raw = (sib_v >> 3) & 7;
+            let idx = Gpr(idx_raw | (((rex >> 1) & 1) << 3));
+            let base = Gpr((sib_v & 7) | ((rex & 1) << 3));
+            if idx_raw == 4 && (rex >> 1) & 1 == 0 {
+                if rex_w {
+                    sem::movsx_r64_m8_mem8(b, reg0f_as_gpr(), base, d8)
+                } else {
+                    sem::movsx_r32_m8_mem8(b, reg0f_as_gpr(), base, d8)
+                }
+            } else if rex_w {
+                sem::movsx_r64_m8_sibd(b, reg0f_as_gpr(), base, idx, shift, d8)
+            } else {
+                sem::movsx_r32_m8_sibd(b, reg0f_as_gpr(), base, idx, shift, d8)
+            }
+        }
         Insn::MovzxR32M8Mem8 => {
             if rex_w {
                 sem::movzx_r64_m8_mem8(b, reg0f_as_gpr(), rm0f(), disp8())

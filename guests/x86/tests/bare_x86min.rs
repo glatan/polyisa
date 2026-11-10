@@ -5288,6 +5288,19 @@ fn movsx_r32_r8_sign_extends() {
 }
 
 #[test]
+fn movsx_r32_m8_sibd_indexed() {
+    // MOVSX EAX,[RBX+RCX*4-4] (0F BE 44 8B FC): RBX=0x2000、RCX=0x41 -> [0x2100]=0xFF -> EAX=0xFFFFFFFF.
+    let mut env = env();
+    env.map_rw(0x2000, 1).unwrap();
+    env.backend.set(Gpr(3).state(), 0x2000);
+    env.backend.set(Gpr(1).state(), 0x41);
+    env.backend.mem.write(VirtAddr(0x2100), &[0xFFu8]).unwrap();
+    env.step(|b| sem::movsx_r32_m8_sibd(b, Gpr(0), Gpr(3), Gpr(1), 2, -4))
+        .unwrap();
+    assert_eq!(env.backend.get(Gpr(0).state()), 0xFFFF_FFFF);
+}
+
+#[test]
 fn pminub_mem8_takes_min() {
     // PMINUB xmm0,[RAX+0x50] (66 0F DA 40 50): head の停止点 0x4dddd5 に対応.
     // xmm0 low byte 0x05、mem low byte 0x03 -> 0x03.

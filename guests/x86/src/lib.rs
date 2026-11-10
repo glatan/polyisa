@@ -76,7 +76,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数116件。
-        assert_eq!(INSNS.len(), 572);
+        assert_eq!(INSNS.len(), 573);
     }
 
     #[test]
@@ -951,6 +951,10 @@ mod tests {
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x0FBE13, 24), Some(Insn::MovsxR32M8Memnd));
         assert_eq!(decode(0x0FBE13, 16), None);
+        // MOVSX r32,m8 SIB mod=01 [base+index*scale+disp8] (0F BE)。wc の停止点 0x5b385a に対応.
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x0FBE7C241B, 40), Some(Insn::MovsxR32M8Sibd));
+        assert_eq!(decode(0x0FBE7C241B, 32), None);
     }
 
     #[test]
