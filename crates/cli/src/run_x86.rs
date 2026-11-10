@@ -1648,7 +1648,7 @@ pub fn run_mode(
         use polyisa_engine::interp::Ctrl;
         let r = env.step(|b| {
             dispatch(
-                b, insn, eip, word, nbytes, off, is64, rex, has66, has_f2, fs, imm32, disp8,
+                b, insn, eip, word, nbytes, off, is64, rex, has66, has_f2, rep, fs, imm32, disp8,
             )
         });
         match r {
@@ -1700,6 +1700,7 @@ fn dispatch<B: Backend>(
     rex: u8,
     has66: bool,
     has_f2: bool,
+    rep: bool,
     fs: Option<u64>,
     imm32: impl Fn() -> u32,
     disp8: impl Fn() -> i8,
@@ -4770,20 +4771,44 @@ fn dispatch<B: Backend>(
         }
         Insn::DivRm32Mem8 => sem::div_rm32_mem8(b, eip, rm(), disp8()),
         Insn::IdivRm32 => sem::idiv_rm32(b, eip, rm()),
-        Insn::Movsb => sem::rep_movsb(b, eip),
-        Insn::Movsd => {
-            if rex_w {
-                sem::rep_movsq(b, eip)
+        Insn::Movsb => {
+            if rep {
+                sem::rep_movsb(b, eip)
             } else {
-                sem::rep_movsd(b, eip)
+                sem::movsb_single(b)
             }
         }
-        Insn::Stosb => sem::rep_stosb(b, eip),
-        Insn::Stosd => {
-            if rex_w {
-                sem::rep_stosq(b, eip)
+        Insn::Movsd => {
+            if rep {
+                if rex_w {
+                    sem::rep_movsq(b, eip)
+                } else {
+                    sem::rep_movsd(b, eip)
+                }
+            } else if rex_w {
+                sem::movsq_single(b)
             } else {
-                sem::rep_stosd(b, eip)
+                sem::movsd_single(b)
+            }
+        }
+        Insn::Stosb => {
+            if rep {
+                sem::rep_stosb(b, eip)
+            } else {
+                sem::stosb_single(b)
+            }
+        }
+        Insn::Stosd => {
+            if rep {
+                if rex_w {
+                    sem::rep_stosq(b, eip)
+                } else {
+                    sem::rep_stosd(b, eip)
+                }
+            } else if rex_w {
+                sem::stosq_single(b)
+            } else {
+                sem::stosd_single(b)
             }
         }
         Insn::MovdXmm => {

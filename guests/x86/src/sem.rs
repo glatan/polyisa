@@ -4429,6 +4429,67 @@ pub fn rep_stosq<B: Backend>(b: &mut B, eip: u32) -> Flow<B> {
     rep_continue(b, eip)
 }
 
+/// MOVSB 単発。F3 なしの1バイト転送（RCX を触らず分岐しない）。
+pub fn movsb_single<B: Backend>(b: &mut B) -> Flow<B> {
+    let src = read64(b, Gpr(6));
+    let dst = read64(b, Gpr(7));
+    let v: B::V<W8> = b.load::<W8>(src, DATA_READ)?;
+    b.store::<W8>(dst, v, DATA_WRITE)?;
+    bump64(b, Gpr(6), 1);
+    bump64(b, Gpr(7), 1);
+    Ok(())
+}
+
+/// MOVSD 単発。F3 なしの4バイト転送。
+pub fn movsd_single<B: Backend>(b: &mut B) -> Flow<B> {
+    let src = read64(b, Gpr(6));
+    let dst = read64(b, Gpr(7));
+    let v: B::V<W32> = b.load::<W32>(src, DATA_READ)?;
+    b.store::<W32>(dst, v, DATA_WRITE)?;
+    bump64(b, Gpr(6), 4);
+    bump64(b, Gpr(7), 4);
+    Ok(())
+}
+
+/// MOVSQ 単発。F3 なしの8バイト転送（REX.W）。
+pub fn movsq_single<B: Backend>(b: &mut B) -> Flow<B> {
+    let src = read64(b, Gpr(6));
+    let dst = read64(b, Gpr(7));
+    let v: B::V<W64> = b.load::<W64>(src, DATA_READ)?;
+    b.store::<W64>(dst, v, DATA_WRITE)?;
+    bump64(b, Gpr(6), 8);
+    bump64(b, Gpr(7), 8);
+    Ok(())
+}
+
+/// STOSB 単発。F3 なしの1バイト格納。
+pub fn stosb_single<B: Backend>(b: &mut B) -> Flow<B> {
+    let dst = read64(b, Gpr(7));
+    let eax = read(b, Gpr(0));
+    let al: B::V<W8> = b.trunc::<W32, W8>(eax);
+    b.store::<W8>(dst, al, DATA_WRITE)?;
+    bump64(b, Gpr(7), 1);
+    Ok(())
+}
+
+/// STOSD 単発。F3 なしの4バイト格納。
+pub fn stosd_single<B: Backend>(b: &mut B) -> Flow<B> {
+    let dst = read64(b, Gpr(7));
+    let v = read(b, Gpr(0));
+    b.store::<W32>(dst, v, DATA_WRITE)?;
+    bump64(b, Gpr(7), 4);
+    Ok(())
+}
+
+/// STOSQ 単発。F3 なしの8バイト格納（REX.W）。
+pub fn stosq_single<B: Backend>(b: &mut B) -> Flow<B> {
+    let dst = read64(b, Gpr(7));
+    let v = read64(b, Gpr(0));
+    b.store::<W64>(dst, v, DATA_WRITE)?;
+    bump64(b, Gpr(7), 8);
+    Ok(())
+}
+
 /// LOOP rel8。ECX を 1 減じ、0 でなければ eip+2+disp に飛ぶ。
 /// busybox の繰り返しに使う最小形である。EFLAGS には影響しない（SDM 通り）。
 pub fn loop_rel8<B: Backend>(b: &mut B, eip: u32, disp: i8) -> Flow<B> {
