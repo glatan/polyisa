@@ -6894,3 +6894,34 @@ fn run_imul_r_sibd() {
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
     assert_eq!(out, Outcome::Exit(42));
 }
+
+#[test]
+fn run_bt_r64_rm_rexw() {
+    // run 経由で 49 0F A3 D6 (BT R14,RDX) を回す。hexdump 0x5c8dd9 対応.
+    // R14=0x800100003E00、RDX=0x20 -> CF=1、eip は 0x1004 に進む.
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(14), 0x8001_0000_3E00);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(2), 0x20);
+        Ok(())
+    })
+    .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0x49, 0x0F, 0xA3, 0xD6])
+        .unwrap();
+    env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 0x40);
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x1004 });
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x1,
+        1
+    );
+}

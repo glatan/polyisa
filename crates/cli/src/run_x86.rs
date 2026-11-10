@@ -5418,8 +5418,13 @@ fn dispatch<B: Backend>(
         }
         Insn::BtR32Rm => {
             // BT r/m32,r32 (0F A3 /r mod=11)。dst は rm、src は reg (REX.B/R で拡張)。
+            // REX.W で64ビット。hexdump 0x5c8dd9 (49 0F A3 D6) 対応.
             // 2バイトオペコードのため rm0f/reg0f で抽出する.
-            sem::bt_r32_rm(b, rm0f(), reg0f_as_gpr())
+            if rex_w {
+                sem::bt_r64_rm(b, rm0f(), reg0f_as_gpr())
+            } else {
+                sem::bt_r32_rm(b, rm0f(), reg0f_as_gpr())
+            }
         }
         Insn::BtsR32Rm => {
             // BTS r/m32,r32 (0F AB /r mod=11)。dst は rm、src は reg (REX.B/R で拡張)。

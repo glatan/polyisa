@@ -7686,6 +7686,25 @@ pub fn bt_r32_rm<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
     Ok(())
 }
 
+/// BT r/m64,r64 (REX.W + 0F A3 /r mod=11)。src 下位6ビット指定を CF に入れる。他旗は不変.
+/// hexdump 0x5c8dd9 (49 0F A3 D6) 対応。bit32 判定に必要.
+pub fn bt_r64_rm<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
+    let x64 = read64(b, dst);
+    let s64 = read64(b, src);
+    let mask = b.konst::<W64>(63);
+    let n = b.and::<W64>(s64, mask);
+    let sh = b.shr_l::<W64>(x64, n);
+    let one = b.konst::<W64>(1);
+    let bit64 = b.and::<W64>(sh, one);
+    let bit: B::V<W32> = b.trunc::<W64, W32>(bit64);
+    let f: B::V<W32> = b.get(eflags_ref());
+    let not_cf = b.konst::<W32>(!FLAG_CF);
+    let cleared = b.and::<W32>(f, not_cf);
+    let restored = b.or::<W32>(cleared, bit);
+    b.set(eflags_ref(), restored);
+    Ok(())
+}
+
 /// BTS r/m32,r32 (0F AB /r mod=11)。src 下位5ビット指定を CF に入れ、立てて書戻す.
 pub fn bts_r32_rm<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
     let x32 = read(b, dst);

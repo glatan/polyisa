@@ -8005,3 +8005,31 @@ fn imul_r32_sibd_indexed_multiplies() {
         .unwrap();
     assert_eq!(env.backend.get(Gpr(1).state()), 30);
 }
+
+#[test]
+fn bt_r64_rm_sets_cf_bit32() {
+    // BT R14,RDX (49 0F A3 D6 相当): hexdump 0x5c8dd9 対応.
+    // R14=0x800100003E00、RDX=0x20 (bit32) -> CF=1。RDX=0 -> CF=0。他旗は不変.
+    let mut env = env();
+    env.step(|b| {
+        sem::write64(b, Gpr(14), 0x8001_0000_3E00);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| {
+        sem::write64(b, Gpr(2), 0x20);
+        Ok(())
+    })
+    .unwrap();
+    env.backend.set(sem::eflags_ref(), 0x40);
+    env.step(|b| sem::bt_r64_rm(b, Gpr(14), Gpr(2))).unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x1, 1);
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0x40);
+    env.step(|b| {
+        sem::write64(b, Gpr(2), 0);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::bt_r64_rm(b, Gpr(14), Gpr(2))).unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x1, 0);
+}
