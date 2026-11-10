@@ -363,6 +363,10 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("cmp_r_sib", "F1", "00111011 00...100 ........", "cmp r, m", "alu"),
         // XADD r32, m32 [base] (0F C1 mod=00)。LOCK 接頭辞は実行側で無視する.
         ("xadd_r32_memnd", "MR", "00001111 11000001 00......", "xadd r32, m32", "alu"),
+        // XADD r32, m32 [RIP+disp32] (0F C1 mod=00 rm=101)。LOCK は無視.
+        ("xadd_r32_rip", "F1", "00001111 11000001 00...101 ................................", "xadd r32, m32", "alu"),
+        // SHLD r/m32,r32,CL (0F A5 /r mod=11)。REX.W で64ビット.
+        ("shld_r32_cl", "F1", "00001111 10100101 11......", "shld r/m, r, cl", "alu"),
         // CMOVE r64/r32, m64/m32 [RIP+disp32] (0F 44 05/0D... + disp32)。REX.W で64bit.
         ("cmove_rip", "F1", "00001111 01000100 00...101 ................................", "cmove r, m", "load"),
         ("imul_r_imm", "F1", "01101001 11...... ................................", "imul r, r/m, {imm}", "alu"),
@@ -500,6 +504,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("pand", "F1", "00001111 11011011 11......", "pand xmm, xmm", "alu"),
         // PSLLDQ xmm,imm8 (66 0F 73 /7 ib)。reg-direct のみ、66必須.
         ("pslldq", "F1", "00001111 01110011 11111... ........", "pslldq xmm, {imm}", "alu"),
+        // PSRLDQ xmm,imm8 (66 0F 73 /3 ib)。reg-direct のみ、66必須.
+        ("psrldq", "F1", "00001111 01110011 11011... ........", "psrldq xmm, {imm}", "alu"),
         // PSUBB xmm,xmm (66 0F F8 /r)。reg-direct のみ.
         ("psubb", "F1", "00001111 11111000 11......", "psubb xmm, xmm", "alu"),
         // PADDB xmm,xmm (66 0F FC /r)。reg-direct のみ、REX.R/B で 8-15 に拡張する.

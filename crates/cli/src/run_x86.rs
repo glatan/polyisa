@@ -261,9 +261,11 @@ fn fetch_len(
                 let m = third?;
                 if m >> 6 == 3 { Some(4) } else { None }
             } else if s == 0x73 {
-                // PSLLDQ xmm,imm8 (66 0F 73 /7 ib)。reg-direct のみ、reg=111。
+                // PSLLDQ xmm,imm8 (66 0F 73 /7 ib) と PSRLDQ xmm,imm8 (66 0F 73 /3 ib)。
+                // reg-direct のみ、reg=111 (/7) または reg=011 (/3)。
                 let m = third?;
-                if m >> 6 == 3 && (m >> 3) & 7 == 7 {
+                let reg = (m >> 3) & 7;
+                if m >> 6 == 3 && (reg == 7 || reg == 3) {
                     Some(4)
                 } else {
                     None
@@ -309,15 +311,21 @@ fn fetch_len(
                 let rm = m & 7;
                 if md == 0 && rm == 5 { Some(7) } else { None }
             } else if s == 0xC1 {
-                // XADD r32,m32 (0F C1 /r)。mod=00 [base] (3B) のみ。SIB・RIPなし.
+                // XADD r32,m32 (0F C1 /r)。mod=00 [base] (3B) と RIP (7B)。SIBなし.
                 let m = third?;
                 let md = m >> 6;
                 let rm = m & 7;
-                if md == 0 && rm != 4 && rm != 5 {
+                if md == 0 && rm == 5 {
+                    Some(7)
+                } else if md == 0 && rm != 4 && rm != 5 {
                     Some(3)
                 } else {
                     None
                 }
+            } else if s == 0xA5 {
+                // SHLD r/m32,r32,CL (0F A5 /r mod=11)。REX.W で64ビット.
+                let m = third?;
+                if m >> 6 == 3 { Some(3) } else { None }
             } else if s == 0xBA {
                 // BT r32,imm8 (0F BA /4 ib reg-direct、4B)。
                 let m = third?;
@@ -1108,6 +1116,7 @@ pub fn run_mode(
                             | 0xBC
                             | 0xBD
                             | 0xB1
+                            | 0xA5
                     )
                 ) || matches!(second, Some(0x40..=0x4F))
                     || matches!(second, Some(0x90..=0x9F))))
@@ -1335,6 +1344,7 @@ pub fn run_mode(
                     | Insn::MovhpsXmmM64Mem8
                     | Insn::Pshufd
                     | Insn::Pslldq
+                    | Insn::Psrldq
                     | Insn::Psubb
                     | Insn::Paddb
                     | Insn::Pcmpgtb
@@ -1422,6 +1432,7 @@ pub fn run_mode(
                     | Insn::MovqM64XmmMem8
                     | Insn::MovqM64XmmMem32
                     | Insn::Pslldq
+                    | Insn::Psrldq
                     | Insn::Psubb
                     | Insn::Pxor
                     | Insn::Pand
@@ -4351,6 +4362,11 @@ fn dispatch<B: Backend>(
             // 0F 73 /7: dst は rm フィールド (reg=111 は拡張子)。xmm_reg() は 7 になるため使わない.
             sem::pslldq_xmm(b, xmm_rm(), imm)
         }
+        Insn::Psrldq => {
+            let imm = (word & 0xff) as u8;
+            // 0F 73 /3: dst は rm フィールド (reg=011 は拡張子)。
+            sem::psrldq_xmm(b, xmm_rm(), imm)
+        }
         Insn::Psubb => sem::psubb_xmm(b, xmm_reg(), xmm_rm()),
         // PADDB xmm,xmm (66 0F FC /r reg-direct)。REX.R/B で 8-15 に拡張する.
         Insn::Paddb => sem::paddb_xmm(b, xmm_reg_r(), xmm_rm_b()),
@@ -4388,6 +4404,18 @@ fn dispatch<B: Backend>(
         Insn::XaddR32Memnd => {
             // XADD r32,[base] (0F C1 mod=00、3B)。dst は reg フィールド.
             sem::xadd_r32_memnd(b, reg0f_as_gpr(), rm0f())
+        }
+        Insn::XaddR32Rip => {
+            // XADD r32,[RIP+disp32] (0F C1 mod=00 rm=101)。LOCK は無視.
+            sem::xadd_r32_rip(b, reg0f_as_gpr(), eip as u64 + nbytes, disp32())
+        }
+        Insn::ShldR32Cl => {
+            // SHLD r/m32,r32,CL (0F A5 /r mod=11)。REX.W で64ビット.
+            if rex_w {
+                sem::shld_r64_cl(b, rm(), reg())
+            } else {
+                sem::shld_r32_cl(b, rm(), reg())
+            }
         }
         Insn::Pminub => sem::pminub_xmm(b, xmm_reg(), xmm_rm()),
         Insn::Pcmpeqb => sem::pcmpeqb_xmm(b, xmm_reg(), xmm_rm()),

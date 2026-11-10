@@ -2582,6 +2582,51 @@ fn xadd_r32_memnd_exchanges() {
 }
 
 #[test]
+fn xadd_r32_rip_exchanges() {
+    // XADD EAX,[RIP+disp]: EAX=5、[0x1500]=3 -> EAX=3、[0x1500]=8。
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1500), &0x03u32.to_le_bytes())
+        .unwrap();
+    env.backend.set(Gpr(0).state(), 5);
+    env.step(|b| sem::xadd_r32_rip(b, Gpr(0), 0x1007, 0x4F9))
+        .unwrap();
+    assert_eq!(env.backend.get(Gpr(0).state()), 3);
+    let mut back = [0u8; 4];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x1500),
+            &mut back,
+            Access {
+                endian: Endian::Le,
+                align: Align::Unaligned,
+                kind: AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(u32::from_le_bytes(back), 8);
+}
+
+#[test]
+fn shld_r64_cl_shifts() {
+    // SHLD RAX,R9,CL: RAX=0x1、R9=0x8000000000000000、CL=1 -> RAX=0x3.
+    let mut env = env();
+    env.backend.set(Gpr(0).state(), 1);
+    env.backend.set(sem::hi_ref(Gpr(0)), 0);
+    env.step(|b| {
+        sem::write64(b, Gpr(9), 0x8000_0000_0000_0000);
+        Ok(())
+    })
+    .unwrap();
+    env.backend.set(Gpr(1).state(), 1);
+    env.step(|b| sem::shld_r64_cl(b, Gpr(0), Gpr(9))).unwrap();
+    assert_eq!(env.backend.get(Gpr(0).state()), 3);
+}
+
+#[test]
 fn test_m16_imm_rip_sets_zf() {
     // TESTW [RIP],0x0202: [0x1500]=0x0202 & 0x0202 -> ZF=0。
     let mut env = env();
@@ -5338,6 +5383,25 @@ fn pslldq_shifts_bytes() {
     env.step(|b| {
         let v: u128 = b.get(sem::xmm_ref(sem::Xmm(2)));
         assert_eq!(v, 0xFFFFFFFFFFFFFFFF0000000000000000);
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn psrldq_shifts_bytes() {
+    // PSRLDQ xmm2,13: head の停止点 0x4dbb25 に対応.
+    let mut env = env();
+    env.step(|b| {
+        let v = b.konst::<polyisa_sem::W128>(0xFFEEDDCCBBAA99887766554433221100u128);
+        b.set(sem::xmm_ref(sem::Xmm(2)), v);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::psrldq_xmm(b, sem::Xmm(2), 13)).unwrap();
+    env.step(|b| {
+        let v: u128 = b.get(sem::xmm_ref(sem::Xmm(2)));
+        assert_eq!(v, 0xFFEEDDu128);
         Ok(())
     })
     .unwrap();

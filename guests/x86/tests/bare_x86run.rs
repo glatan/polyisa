@@ -3149,6 +3149,27 @@ fn run_pslldq_dst_is_rm() {
 }
 
 #[test]
+fn run_psrldq_dst_is_rm() {
+    // run 経由で 66 0F 73 D8 0D (PSRLDQ xmm0,13) を回す。head の停止点に対応.
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    let prog: &[u8] = &[
+        0x66, 0x0F, 0x6E, 0xC6, // movd xmm0,esi (esi=0 -> xmm0=0)
+        0x66, 0x0F, 0x73, 0xD8, 0x0D, // psrldq xmm0,13
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
+        0x0F, 0x05, // syscall -> exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0));
+}
+
+#[test]
 fn run_movd_xmm_rip() {
     // run 経由で 66 0F 6E 05 + disp32 (MOVD xmm0,[RIP]) を回す.
     // [0x1500]=0x11223344 として xmm0 低32が一致することを確かめ、exit(0).

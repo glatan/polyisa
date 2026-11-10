@@ -70,7 +70,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数116件。
-        assert_eq!(INSNS.len(), 528);
+        assert_eq!(INSNS.len(), 531);
     }
 
     #[test]
@@ -293,6 +293,7 @@ mod tests {
         assert_eq!(decode(0xFFD0, 16), Some(Insn::CallRRm));
         assert_eq!(decode(0xB501, 16), Some(Insn::MovR8Imm));
         assert_eq!(decode(0x0F73FA08, 32), Some(Insn::Pslldq));
+        assert_eq!(decode(0x0F73D80D, 32), Some(Insn::Psrldq));
         assert_eq!(decode(0x0FF8D0, 24), Some(Insn::Psubb));
         assert_eq!(decode(0x385407FF, 32), Some(Insn::CmpM8R8Sibd));
         assert_eq!(decode(0xFFC0, 16), Some(Insn::IncRm));
@@ -657,6 +658,8 @@ mod tests {
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x0FC103, 24), Some(Insn::XaddR32Memnd));
         assert_eq!(decode(0x0FC103, 16), None);
+        assert_eq!(decode(0x0FC10500000000, 56), Some(Insn::XaddR32Rip));
+        assert_eq!(decode(0x0FA5C8, 24), Some(Insn::ShldR32Cl));
         // NOPL [base+disp32] (0F 1F mod=10)。
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x0F1F8000000000, 56), Some(Insn::NoplMem32));
