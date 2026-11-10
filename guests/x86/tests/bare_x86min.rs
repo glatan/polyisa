@@ -4262,6 +4262,42 @@ fn cdqe_sign_extends_eax() {
 }
 
 #[test]
+fn cdq_sign_extends_eax() {
+    // CDQ: EAX=0xFFFFFFFF -> EDX=0xFFFFFFFF; EAX=1 -> EDX=0.
+    // od 0x5acde6 対応.
+    let mut env = env();
+    env.backend.set(Gpr(0).state(), 0xFFFF_FFFF);
+    env.step(sem::cdq).unwrap();
+    assert_eq!(env.backend.get(Gpr(2).state()), 0xFFFF_FFFF);
+    env.backend.set(Gpr(0).state(), 1);
+    env.backend.set(Gpr(2).state(), 0xFF);
+    env.step(sem::cdq).unwrap();
+    assert_eq!(env.backend.get(Gpr(2).state()), 0);
+}
+
+#[test]
+fn cqo_sign_extends_rax() {
+    // CQO (REX.W): RAX=0x8000000000000000 -> RDX=0xFFFFFFFFFFFFFFFF; RAX=1 -> RDX=0.
+    let mut env = env();
+    env.step(|b| {
+        sem::write64(b, Gpr(0), 0x8000_0000_0000_0000);
+        Ok(())
+    })
+    .unwrap();
+    env.step(sem::cqo).unwrap();
+    let v = sem::read64(&mut env.backend, Gpr(2));
+    assert_eq!(v, 0xFFFF_FFFF_FFFF_FFFF);
+    env.step(|b| {
+        sem::write64(b, Gpr(0), 1);
+        Ok(())
+    })
+    .unwrap();
+    env.step(sem::cqo).unwrap();
+    let v = sem::read64(&mut env.backend, Gpr(2));
+    assert_eq!(v, 0);
+}
+
+#[test]
 fn mov_r64_fs_abs_roundtrip() {
     // MOV RDX,FS:[0x10] (SIB直接番地): FS=0x1000 -> [0x1010] の64bitを読む.
     let mut env = env();

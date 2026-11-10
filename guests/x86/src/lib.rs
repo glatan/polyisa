@@ -76,7 +76,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数117件。
-        assert_eq!(INSNS.len(), 618);
+        assert_eq!(INSNS.len(), 619);
     }
 
     #[test]
@@ -84,6 +84,10 @@ mod tests {
         // 命令語はビット配置から手で組み立てる。Ref: SPEC-X86-INTEL-SDM。
         assert_eq!(decode(0x90, 8), Some(Insn::Nop));
         assert_eq!(decode(0x98, 8), Some(Insn::Cwde));
+        // CDQ/CQO (0x99)。od 0x5acde6 対応.
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x99, 8), Some(Insn::Cdq));
+        assert_eq!(decode(0x99, 16), None);
         assert_eq!(decode(0x40, 8), Some(Insn::IncEax));
         assert_eq!(decode(0x41, 8), Some(Insn::IncEcx));
         assert_eq!(decode(0x42, 8), Some(Insn::IncEdx));

@@ -69,7 +69,7 @@ fn fetch_len(
     rex_w: bool,
 ) -> Option<u64> {
     match first {
-        0x90 | 0x91..=0x97 | 0x40..=0x4F | 0x50..=0x5F | 0xC3 | 0xC9 | 0x98 => Some(1),
+        0x90 | 0x91..=0x97 | 0x40..=0x4F | 0x50..=0x5F | 0xC3 | 0xC9 | 0x98 | 0x99 => Some(1),
         0x6A | 0xB0..=0xB7 => Some(2),
         0x68 => Some(5),
         0xEB | 0x70 | 0x71 | 0x72 | 0x73 | 0x74 | 0x75 | 0x76 | 0x77 | 0x78 | 0x79 | 0x7A
@@ -1483,6 +1483,7 @@ pub fn run_mode(
                     | 0x69
                     | 0x6B
                     | 0x98
+                    | 0x99
                     | 0x0F
                     | 0xA4
                     | 0xA5
@@ -4869,6 +4870,10 @@ fn dispatch<B: Backend>(
                 sem::cwde(b)
             }
         }
+        Insn::Cdq => {
+            // CDQ/CQO (0x99)。od 0x5acde6 対応。REX.W で64ビット.
+            if rex_w { sem::cqo(b) } else { sem::cdq(b) }
+        }
         Insn::CmpRm32 => {
             if rex_w {
                 sem::cmp_rm64(b, rm(), reg())
@@ -6704,7 +6709,7 @@ fn dispatch<B: Backend>(
             | Insn::XorImm
             | Insn::Cwde => Some(Gpr(0)),
             Insn::IncEcx | Insn::DecEcx => Some(Gpr(1)),
-            Insn::IncEdx | Insn::DecEdx => Some(Gpr(2)),
+            Insn::IncEdx | Insn::DecEdx | Insn::Cdq => Some(Gpr(2)),
             Insn::IncEbx | Insn::DecEbx => Some(Gpr(3)),
             Insn::IncEsp | Insn::DecEsp => Some(Gpr(4)),
             Insn::IncEbp | Insn::DecEbp => Some(Gpr(5)),

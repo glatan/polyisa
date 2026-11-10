@@ -5523,6 +5523,56 @@ fn run_cdqe_sign_extend() {
 }
 
 #[test]
+fn run_cdq_sign_extend() {
+    // run 経由で 99 (CDQ) を回す。od 0x5acde6 対応.
+    // EAX=0xFFFFFFFF -> EDX=0xFFFFFFFF になり、exit(0)。EDX は exit 系列で潰れない.
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(0).state(), 0xFFFF_FFFF);
+    env.backend.set(polyisa_guest_x86::sem::hi_ref(Gpr(0)), 0);
+    let prog: &[u8] = &[
+        0x99, // cdq (edx=0xffffffff)
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
+        0x0F, 0x05, // syscall -> exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0));
+    assert_eq!(env.backend.get(Gpr(2).state()), 0xFFFF_FFFF);
+}
+
+#[test]
+fn run_cqo_sign_extend() {
+    // run 経由で REX.W 99 (CQO) を回す。
+    // RAX=0x8000000000000000 -> RDX=0xFFFFFFFFFFFFFFFF になり、exit(0)。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(0), 0x8000_0000_0000_0000);
+        Ok(())
+    })
+    .unwrap();
+    let prog: &[u8] = &[
+        0x48, 0x99, // cqo (rdx=0xffffffffffffffff)
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
+        0x0F, 0x05, // syscall -> exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0));
+    let v = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(2));
+    assert_eq!(v, 0xFFFF_FFFF_FFFF_FFFF);
+}
+
+#[test]
 fn run_movzx_r32_m8_rip() {
     // run 経由で 0F B6 05 + disp32 (MOVZX EAX,[RIP+disp]) を回す (64bit)。
     // [0x1500]=0x80 -> EAX=0x80 になり、exit(0x80)。

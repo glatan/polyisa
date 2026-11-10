@@ -3424,6 +3424,32 @@ pub fn cdqe<B: Backend>(b: &mut B) -> Flow<B> {
     Ok(())
 }
 
+/// CDQ (0x99)。EAX の符号で EDX を埋める。旗は変えない.
+pub fn cdq<B: Backend>(b: &mut B) -> Flow<B> {
+    let x = read(b, Gpr(0));
+    let n31 = b.konst::<W32>(31);
+    let top = b.shr_l::<W32>(x, n31);
+    let one = b.konst::<W32>(1);
+    let sign = b.and::<W32>(top, one);
+    let zero = b.konst::<W32>(0);
+    let v = b.sub::<W32>(zero, sign);
+    write(b, Gpr(2), v);
+    Ok(())
+}
+
+/// CQO (REX.W + 0x99)。RAX の符号で RDX を埋める。旗は変えない.
+pub fn cqo<B: Backend>(b: &mut B) -> Flow<B> {
+    let x = read64(b, Gpr(0));
+    let n63 = b.konst::<W64>(63);
+    let top = b.shr_l::<W64>(x, n63);
+    let one = b.konst::<W64>(1);
+    let sign = b.and::<W64>(top, one);
+    let zero = b.konst::<W64>(0);
+    let v = b.sub::<W64>(zero, sign);
+    write64(b, Gpr(2), v);
+    Ok(())
+}
+
 /// MOV r/m32, imm32 (C7 /0)。フラグは変えない。
 pub fn mov_rm32_imm<B: Backend>(b: &mut B, dst: Gpr, imm: u32) -> Flow<B> {
     let v = b.konst::<W32>(imm);
