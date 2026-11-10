@@ -1599,6 +1599,10 @@ fn dispatch<B: Backend>(
                 sem::inc_r32(b, rm())
             }
         }
+        Insn::IncRmMemnd => {
+            // FF /0 mod=00 [base]。CF 以外の 5 旗を更新する.
+            sem::inc_r32_memnd(b, rm())
+        }
         Insn::DecRm => {
             // FF /1 reg-direct。
             if rex_w {
@@ -2043,6 +2047,22 @@ fn dispatch<B: Backend>(
                 sem::mov_m8_r8_memnd(b, src, sib_base(), high)
             } else {
                 sem::mov_m8_r8_sib(b, src, sib_base(), sib_idx(), sib_shift(), high)
+            }
+        }
+        Insn::MovM8R8Sibd => {
+            // 88 /r SIB mod=01 [base+index*scale+disp8] store。src は reg フィールド.
+            let reg_f = (modrm() >> 3) & 7;
+            let (src, high) = if rex != 0 {
+                (Gpr(reg_f | ((rex >> 2) & 1) << 3), false)
+            } else if reg_f < 4 {
+                (Gpr(reg_f), false)
+            } else {
+                (Gpr(reg_f - 4), true)
+            };
+            if no_index() {
+                sem::mov_m8_r8_mem8(b, src, sib_base(), disp8(), high)
+            } else {
+                sem::mov_m8_r8_sibd(b, src, sib_base(), sib_idx(), sib_shift(), disp8(), high)
             }
         }
         Insn::MovM8R8Sibd32 => {

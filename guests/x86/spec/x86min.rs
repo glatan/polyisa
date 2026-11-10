@@ -363,6 +363,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("cmp_r_sib", "F1", "00111011 00...100 ........", "cmp r, m", "alu"),
         // XADD r32, m32 [base] (0F C1 mod=00)。LOCK 接頭辞は実行側で無視する.
         ("xadd_r32_memnd", "MR", "00001111 11000001 00......", "xadd r32, m32", "alu"),
+        // INC m32 [base] (FF /0 mod=00)。CF 以外の 5 旗を更新する.
+        ("inc_rm_memnd", "MR", "11111111 00000...", "inc r/m", "alu"),
         // XADD r32, m32 [RIP+disp32] (0F C1 mod=00 rm=101)。LOCK は無視.
         ("xadd_r32_rip", "F1", "00001111 11000001 00...101 ................................", "xadd r32, m32", "alu"),
         // SHLD r/m32,r32,CL (0F A5 /r mod=11)。REX.W で64ビット.
@@ -1240,6 +1242,14 @@ pub fn build_model() -> polyisa_isadl::Model {
             "10001000 00...100 ........",
             vec![wc("n8_base", WhereOp::Ne, 5)],
             "mov [r/m+sib], r8",
+            "store",
+        ),
+        (
+            "mov_m8_r8_sibd",
+            "S8",
+            "10001000 01...100 ........ ........",
+            vec![],
+            "mov [r/m+sib+disp8], r8",
             "store",
         ),
         (
