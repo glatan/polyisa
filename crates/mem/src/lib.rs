@@ -172,6 +172,13 @@ impl AddressSpace {
         self.pages.len()
     }
 
+    /// ページが写像済みかどうか。許可は問わない。
+    /// brk 縮小後の再拡張や mmap の空き探索で既存内容の保護に使う.
+    #[must_use]
+    pub fn is_mapped(&self, page: PageNo) -> bool {
+        self.pages.contains_key(&page)
+    }
+
     /// 範囲を写像する。範囲はページ境界に整列しているとする。
     pub fn map(&mut self, base: VirtAddr, count: u64, perms: Perms) -> Result<(), MemError> {
         if !base.0.is_multiple_of(PAGE_SIZE) {
@@ -450,6 +457,17 @@ mod tests {
             aspace.read(VirtAddr(0x0), &mut buf, Access::DATA_LE),
             Err(MemError::PageFault)
         );
+    }
+
+    #[test]
+    fn is_mapped_reports_occupancy() {
+        let mut aspace = AddressSpace::new();
+        assert!(!aspace.is_mapped(PageNo(1)));
+        aspace.map(VirtAddr(0x1000), 1, Perms::RW).unwrap();
+        assert!(aspace.is_mapped(PageNo(1)));
+        assert!(!aspace.is_mapped(PageNo(2)));
+        aspace.unmap(VirtAddr(0x1000), 1);
+        assert!(!aspace.is_mapped(PageNo(1)));
     }
 
     #[test]

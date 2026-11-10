@@ -6647,6 +6647,33 @@ impl CliLinux {
         use polyisa_mem::PAGE_SIZE;
         self.heap_end = image_end.next_multiple_of(PAGE_SIZE);
     }
+
+    /// start 以降で count ページ連続の空きを探す。見つからなければ None.
+    /// brk 縮小で残った写像や固定写像の上書きを避ける first-fit.
+    /// MAP_FIXED でない mmap は空きを選ぶ (Ref: SRC-LINUX (7.3))。
+    fn find_free_run(&self, env: &BareEnv, start: u64, count: u64) -> Option<u64> {
+        use polyisa_mem::{PAGE_SIZE, PageNo};
+        // 走査上限（4GB 分）。通常は先頭で見つかる.
+        const SCAN_CAP_PAGES: u64 = 1 << 20;
+        let mut base = start.next_multiple_of(PAGE_SIZE);
+        let mut scanned = 0u64;
+        while scanned < SCAN_CAP_PAGES {
+            let mut i = 0u64;
+            while i < count {
+                let page = (base / PAGE_SIZE).checked_add(i)?;
+                if env.backend.mem.is_mapped(PageNo(page)) {
+                    break;
+                }
+                i += 1;
+            }
+            if i == count {
+                return Some(base);
+            }
+            base = base.checked_add((i + 1) * PAGE_SIZE)?;
+            scanned += i + 1;
+        }
+        None
+    }
 }
 
 /// 旧名。`CliLinux` を使うこと。
@@ -7130,6 +7157,8 @@ impl TrapHandler for CliLinux {
                     set64(env, Gpr(0), neg(EINVAL));
                     return TrapOutcome::Handled;
                 }
+                // MAP_FIXED は既存写像を置換する。先に外してから写像する.
+                env.backend.mem.unmap(VirtAddr(addr), count);
                 if env
                     .backend
                     .mem
@@ -7154,7 +7183,11 @@ impl TrapHandler for CliLinux {
                 if self.heap_end == 0 {
                     self.heap_end = 0x6000_0000;
                 }
-                let base = self.heap_end.next_multiple_of(PAGE_SIZE);
+                // 縮小で残った写像を上書きしないよう空きを探す.
+                let Some(base) = self.find_free_run(env, self.heap_end, count) else {
+                    set64(env, Gpr(0), neg(ENOMEM));
+                    return TrapOutcome::Handled;
+                };
                 if env
                     .backend
                     .mem
@@ -7168,13 +7201,27 @@ impl TrapHandler for CliLinux {
                 set64(env, Gpr(0), base);
                 return TrapOutcome::Handled;
             }
-            // ヒント付き: 要求番地に写像を試み、駄目なら heap_end から取る.
+            // ヒント付き: 範囲全体が空きのときだけ要求番地に写像し、
+            // 占有があれば heap_end から first-fit で取る (上書きしない).
             let hint = addr & !(PAGE_SIZE - 1);
-            if env
-                .backend
-                .mem
-                .map(VirtAddr(hint), count, Perms::RW)
-                .is_ok()
+            let hint_free = {
+                use polyisa_mem::PageNo;
+                let mut i = 0u64;
+                while i < count {
+                    let page = (hint / PAGE_SIZE).checked_add(i);
+                    match page {
+                        Some(no) if !env.backend.mem.is_mapped(PageNo(no)) => i += 1,
+                        _ => break,
+                    }
+                }
+                i == count
+            };
+            if hint_free
+                && env
+                    .backend
+                    .mem
+                    .map(VirtAddr(hint), count, Perms::RW)
+                    .is_ok()
             {
                 if self.heap_end == 0 {
                     self.heap_end = (hint + aligned_len).next_multiple_of(PAGE_SIZE);
@@ -7189,7 +7236,10 @@ impl TrapHandler for CliLinux {
             if self.heap_end == 0 {
                 self.heap_end = 0x6000_0000;
             }
-            let base = self.heap_end.next_multiple_of(PAGE_SIZE);
+            let Some(base) = self.find_free_run(env, self.heap_end, count) else {
+                set64(env, Gpr(0), neg(ENOMEM));
+                return TrapOutcome::Handled;
+            };
             if env
                 .backend
                 .mem
@@ -8275,15 +8325,18 @@ impl TrapHandler for CliLinux {
                     set64(env, Gpr(0), self.heap_end);
                     return TrapOutcome::Handled;
                 }
-                let count = (aligned - self.heap_end) / PAGE_SIZE;
-                if env
-                    .backend
-                    .mem
-                    .map(VirtAddr(self.heap_end), count, Perms::RW)
-                    .is_err()
-                {
-                    set64(env, Gpr(0), self.heap_end);
-                    return TrapOutcome::Handled;
+                // 縮小で残った写像は消さず、欠けたページだけ足す。
+                // 実 brk は縮小で内容を捨てないため、再拡張で上書きしない.
+                use polyisa_mem::PageNo;
+                let mut cur = self.heap_end;
+                while cur < aligned {
+                    if !env.backend.mem.is_mapped(PageNo(cur / PAGE_SIZE))
+                        && env.backend.mem.map(VirtAddr(cur), 1, Perms::RW).is_err()
+                    {
+                        set64(env, Gpr(0), self.heap_end);
+                        return TrapOutcome::Handled;
+                    }
+                    cur += PAGE_SIZE;
                 }
                 self.heap_end = aligned;
             } else {
@@ -8394,6 +8447,37 @@ mod tests {
         set64(&mut env, Gpr(6), 0);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EINVAL));
+    }
+
+    #[test]
+    fn mmap_null_skips_mapped() {
+        use polyisa_os_linux::x86_64 as abi;
+        let mut sys = CliLinux::x86_64();
+        sys.heap_end = 0x6000_0000;
+        let mut env = bare();
+        // 先に 0x60000000 を写像して内容を書く（縮小で残った写像を模す）。
+        env.backend
+            .mem
+            .map(VirtAddr(0x6000_0000), 1, Perms::RW)
+            .unwrap();
+        env.backend.mem.write(VirtAddr(0x6000_0000), b"hi").unwrap();
+        // mmap(NULL, 0x1000, ...) は占有を避けて次のページを返す。
+        set64(&mut env, Gpr(0), abi::MMAP);
+        set64(&mut env, Gpr(7), 0);
+        set64(&mut env, Gpr(6), 0x1000);
+        set64(&mut env, Gpr(2), 3);
+        set64(&mut env, Gpr(10), 0x22);
+        set64(&mut env, Gpr(8), 0xffff_ffff_ffff_ffff);
+        set64(&mut env, Gpr(9), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0x6000_1000);
+        // 既存内容は残っている。
+        let mut back = [0u8; 2];
+        env.backend
+            .mem
+            .read(VirtAddr(0x6000_0000), &mut back, data_access())
+            .unwrap();
+        assert_eq!(&back, b"hi");
     }
 
     #[test]
@@ -8596,6 +8680,35 @@ mod tests {
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), 0x2000);
         assert_eq!(sys.heap_end, 0x2000);
+    }
+
+    #[test]
+    fn brk_shrink_regrow_keeps_data() {
+        use polyisa_os_linux::x86_64 as abi;
+        let mut sys = CliLinux::x86_64();
+        sys.init_brk(0x1234);
+        let mut env = bare();
+        // brk で 0x3000 まで拡張し、書き込んでから縮小・再拡張する。
+        set64(&mut env, Gpr(0), abi::BRK);
+        set64(&mut env, Gpr(7), 0x3000);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0x3000);
+        env.backend.mem.write(VirtAddr(0x2FF0), b"hi").unwrap();
+        set64(&mut env, Gpr(0), abi::BRK);
+        set64(&mut env, Gpr(7), 0x2000);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0x2000);
+        set64(&mut env, Gpr(0), abi::BRK);
+        set64(&mut env, Gpr(7), 0x3000);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0x3000);
+        // 縮小前の内容が残っている（ゼロ化されない）。
+        let mut back = [0u8; 2];
+        env.backend
+            .mem
+            .read(VirtAddr(0x2FF0), &mut back, data_access())
+            .unwrap();
+        assert_eq!(&back, b"hi");
     }
 
     #[test]
