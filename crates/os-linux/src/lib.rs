@@ -184,7 +184,8 @@ pub mod i386 {
     pub const SENDFILE: u64 = 187;
     pub const TIME: u64 = 13;
     pub const NANOSLEEP: u64 = 162;
-    pub const GETGROUPS: u64 = 99;
+    pub const GETGROUPS: u64 = 80;
+    pub const GETGROUPS32: u64 = 205;
     pub const MKDIR: u64 = 39;
     pub const RMDIR: u64 = 40;
     pub const UNLINK: u64 = 10;
@@ -202,10 +203,11 @@ pub mod i386 {
     pub const FTRUNCATE: u64 = 93;
     pub const RENAME: u64 = 38;
     pub const SYMLINK: u64 = 83;
-    // statfs 系の番号表の事実のみ。実行は未対応。素朴な STATFS=99 は
-    // 当表の GETGROUPS 値と衝突するため（別件の潜在問題、対象外）、
-    // 実用的に使われる 64 系のみ持つ.
+    // statfs 系の番号表の事実のみ。実行は未対応。旧番号 (99/100) と
+    // 64 系 (268/269) を持つ。GETGROUPS=80 と区別する.
     // Ref: SRC-LINUX (7.3).
+    pub const STATFS: u64 = 99;
+    pub const FSTATFS: u64 = 100;
     pub const STATFS64: u64 = 268;
     pub const FSTATFS64: u64 = 269;
 }
@@ -297,6 +299,7 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             i386::TIME => Some("time"),
             i386::NANOSLEEP => Some("nanosleep"),
             i386::GETGROUPS => Some("getgroups"),
+            i386::GETGROUPS32 => Some("getgroups32"),
             i386::MKDIR => Some("mkdir"),
             i386::RMDIR => Some("rmdir"),
             i386::UNLINK => Some("unlink"),
@@ -314,6 +317,8 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             i386::FTRUNCATE => Some("ftruncate"),
             i386::RENAME => Some("rename"),
             i386::SYMLINK => Some("symlink"),
+            i386::STATFS => Some("statfs"),
+            i386::FSTATFS => Some("fstatfs"),
             i386::STATFS64 => Some("statfs64"),
             i386::FSTATFS64 => Some("fstatfs64"),
             _ => None,
@@ -497,6 +502,10 @@ mod tests {
         );
         assert_eq!(x86_64::GETGROUPS, 115);
         assert_eq!(syscall_name(GuestAbi::X86_64Linux, 115), Some("getgroups"));
+        assert_eq!(x86_64::STATFS, 137);
+        assert_eq!(syscall_name(GuestAbi::X86_64Linux, 137), Some("statfs"));
+        assert_eq!(x86_64::FSTATFS, 138);
+        assert_eq!(syscall_name(GuestAbi::X86_64Linux, 138), Some("fstatfs"));
     }
 
     #[test]
@@ -518,8 +527,16 @@ mod tests {
         assert_eq!(syscall_name(GuestAbi::I386Linux, 13), Some("time"));
         assert_eq!(i386::NANOSLEEP, 162);
         assert_eq!(syscall_name(GuestAbi::I386Linux, 162), Some("nanosleep"));
-        assert_eq!(i386::GETGROUPS, 99);
-        assert_eq!(syscall_name(GuestAbi::I386Linux, 99), Some("getgroups"));
+        assert_eq!(i386::GETGROUPS, 80);
+        assert_eq!(syscall_name(GuestAbi::I386Linux, 80), Some("getgroups"));
+        assert_eq!(i386::GETGROUPS32, 205);
+        assert_eq!(syscall_name(GuestAbi::I386Linux, 205), Some("getgroups32"));
+        assert_eq!(i386::STATFS, 99);
+        assert_eq!(syscall_name(GuestAbi::I386Linux, 99), Some("statfs"));
+        assert_eq!(i386::FSTATFS, 100);
+        assert_eq!(syscall_name(GuestAbi::I386Linux, 100), Some("fstatfs"));
+        assert_eq!(i386::STATFS64, 268);
+        assert_eq!(syscall_name(GuestAbi::I386Linux, 268), Some("statfs64"));
     }
 
     #[test]

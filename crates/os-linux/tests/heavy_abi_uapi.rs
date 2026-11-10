@@ -182,6 +182,9 @@ fn syscall_numbers_match_uapi_x86_64() {
         ("__NR_newfstatat", polyisa_os_linux::x86_64::NEWFSTATAT),
         ("__NR_fstat", polyisa_os_linux::x86_64::FSTAT),
         ("__NR_statx", polyisa_os_linux::x86_64::STATX),
+        ("__NR_getgroups", polyisa_os_linux::x86_64::GETGROUPS),
+        ("__NR_statfs", polyisa_os_linux::x86_64::STATFS),
+        ("__NR_fstatfs", polyisa_os_linux::x86_64::FSTATFS),
     ];
     let macros: Vec<&str> = cases.iter().map(|(m, _)| *m).collect();
     let Some(got) = uapi_numbers_x86_64(&cc, &macros) else {
@@ -265,6 +268,12 @@ fn syscall_numbers_match_uapi_i386() {
         ("__NR_fstatat64", polyisa_os_linux::i386::FSTATAT64),
         ("__NR_fstat", polyisa_os_linux::i386::FSTAT),
         ("__NR_statx", polyisa_os_linux::i386::STATX),
+        ("__NR_getgroups", polyisa_os_linux::i386::GETGROUPS),
+        ("__NR_getgroups32", polyisa_os_linux::i386::GETGROUPS32),
+        ("__NR_statfs", polyisa_os_linux::i386::STATFS),
+        ("__NR_fstatfs", polyisa_os_linux::i386::FSTATFS),
+        ("__NR_statfs64", polyisa_os_linux::i386::STATFS64),
+        ("__NR_fstatfs64", polyisa_os_linux::i386::FSTATFS64),
     ];
     let macros: Vec<&str> = cases.iter().map(|(m, _)| *m).collect();
     let Some(got) = uapi_numbers_i386(&cc, &macros) else {
