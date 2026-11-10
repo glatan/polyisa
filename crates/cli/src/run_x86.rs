@@ -835,6 +835,9 @@ fn fetch_len(
             } else if md == 1 && reg == 7 {
                 // mod=01 [base+disp8],imm8 (4B) の /7 CMPB のみ (SIBなし).
                 Some(4)
+            } else if md == 1 && reg == 1 {
+                // mod=01 [base+disp8],imm8 (4B) の /1 ORB。sed 0x5bde04 対応.
+                Some(4)
             } else if md == 1 && reg == 4 {
                 // mod=01 [base+disp8],imm8 (4B) の /4 ANDB。grep 0x442d1d 対応.
                 Some(4)
@@ -3417,6 +3420,13 @@ fn dispatch<B: Backend>(
             // 80 /1 mod=00 [base],imm8 (24b)。imm は最下位8.
             let imm = (word & 0xff) as u8;
             sem::or_rm8_imm_memnd(b, rm(), imm)
+        }
+        Insn::OrRm8ImmMem8 => {
+            // 80 /1 mod=01 [base+disp8],imm8 (32b)。sed 0x5bde04 対応.
+            // disp8 は (word>>8) 下位8、imm は最下位8.
+            let d8 = ((word >> 8) & 0xff) as u8 as i8;
+            let imm = (word & 0xff) as u8;
+            sem::or_rm8_imm_mem8(b, rm(), d8, imm)
         }
         Insn::OrRm8ImmSib => {
             // 80 /1 mod=00 SIB [base] (no_index, non-abs) +imm8 (32b)。SIB は third.

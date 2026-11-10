@@ -2040,6 +2040,15 @@ pub fn build_model() -> polyisa_isadl::Model {
             "or [r/m+sib+disp8], {imm}",
             "alu",
         ),
+        // ORB m8,imm8 mod=01 [base+disp8] (80 /1)。sed 0x5bde04 対応.4B.
+        (
+            "or_rm8_imm_mem8",
+            "F1",
+            "10000000 01001... ........ ........",
+            vec![],
+            "or r/m8, {imm}",
+            "alu",
+        ),
         (
             "and_rm8_imm_mem32",
             "F1",
