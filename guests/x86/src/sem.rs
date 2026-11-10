@@ -7630,6 +7630,26 @@ pub fn jmp_r32_memnd<B: Backend>(b: &mut B, base: Gpr) -> Flow<B> {
     Ok(())
 }
 
+/// JMP [base+index*scale] (FF /4 SIB mod=00)。64ビット間接ジャンプ.
+pub fn jmp_r64_sib<B: Backend>(b: &mut B, base: Gpr, idx: Gpr, shift: u32) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, 0, base, idx);
+    let target64: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let t32: B::V<W32> = b.trunc::<W64, W32>(target64);
+    b.set(eip_ref(), t32);
+    b.jump(target64);
+    Ok(())
+}
+
+/// JMP [base+index*scale] (FF /4 SIB mod=00、32ビット)。
+pub fn jmp_r32_sib<B: Backend>(b: &mut B, base: Gpr, idx: Gpr, shift: u32) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, 0, base, idx);
+    let target: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    b.set(eip_ref(), target);
+    let tj = b.zext::<W32, W64>(target);
+    b.jump(tj);
+    Ok(())
+}
+
 /// JMP [base+disp8] (FF /4 mod=01)。64ビット.
 pub fn jmp_r64_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8) -> Flow<B> {
     let addr = eff_addr(b, base, disp);

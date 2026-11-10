@@ -2820,6 +2820,20 @@ fn dispatch<B: Backend>(
                 )
             }
         }
+        Insn::JmpRSib => {
+            // FF /4 SIB mod=00 [base+index*scale] 間接JMP。no_index は [base].
+            if no_index() {
+                if is64 {
+                    sem::jmp_r64_memnd(b, sib_base())
+                } else {
+                    sem::jmp_r32_memnd(b, sib_base())
+                }
+            } else if is64 {
+                sem::jmp_r64_sib(b, sib_base(), sib_idx(), sib_shift())
+            } else {
+                sem::jmp_r32_sib(b, sib_base(), sib_idx(), sib_shift())
+            }
+        }
         Insn::CallRSibd => {
             // FF /2 SIB mod=01 [base+index*scale+disp8] 間接CALL。no_index は [base+disp8].
             let d8 = disp8();

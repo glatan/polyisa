@@ -410,6 +410,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("call_r_rm", "F1", "11111111 11010...", "call r/m64", "jump"),
         // CALL [base+index*scale] (FF /2 SIB mod=00)。64ビット間接コール.
         ("call_r_sib", "N8", "11111111 00010100 ........", "call r/m64", "jump"),
+        // JMP [base+index*scale] (FF /4 SIB mod=00)。64ビット間接ジャンプ.
+        ("jmp_r_sib", "N8", "11111111 00100100 ........", "jmp r/m64", "jump"),
         // CALL [base+index*scale+disp32] (FF /2 SIB mod=10)。64ビット間接コール.
         ("call_r_sibd32", "F1", "11111111 10010100 ........ ................................", "call r/m64", "jump"),
         // XCHG r32,r/m32 (87 /r)。reg-direct・mod=00/01/10/RIP (SIBなし).
