@@ -3294,6 +3294,71 @@ fn run_mov_rm8_imm_sib_no_index() {
 }
 
 #[test]
+fn run_or_r8_m8_sibd() {
+    // run 経由で 0A 44 24 0A (OR AL,[RSP+0x0A]) を回す。head の停止点 0x5a96cc に対応.
+    // AL=0xF0、[0x200A]=0x0F -> AL=0xFF になり、exit(0)。mov は AL を変えない.
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    env.backend.set(Gpr(0).state(), 0xF0);
+    env.backend.mem.write(VirtAddr(0x200A), &[0x0Fu8]).unwrap();
+    let prog: &[u8] = &[
+        0x0A, 0x44, 0x24, 0x0A, // or al,[rsp+0x0A]
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
+        0x0F, 0x05, // syscall -> exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0));
+    // AL は exit 系列で潰れるため flags で確認: 0xFF -> ZF=0.
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x40,
+        0
+    );
+}
+
+#[test]
+fn run_or_r8_r8() {
+    // run 経由で 0A C3 (OR AL,BL) を回す。
+    // AL=0xF0、BL=0x0F -> AL=0xFF になり、exit(0)。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(0).state(), 0xF0);
+    env.backend.set(Gpr(3).state(), 0x0F);
+    let prog: &[u8] = &[
+        0x0A, 0xC3, // or al,bl
+        0x88, 0x05, 0xF8, 0x0F, 0x00, 0x00, // mov [rip+0xFF8],al -> [0x2000]
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
+        0x0F, 0x05, // syscall -> exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0));
+    let mut back = [0u8; 1];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x2000),
+            &mut back,
+            polyisa_mem::Access {
+                endian: polyisa_mem::Endian::Le,
+                align: polyisa_mem::Align::Unaligned,
+                kind: polyisa_mem::AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(back[0], 0xFF);
+}
+
+#[test]
 fn run_dec_rm_mem8_nosib() {
     // run 経由で FF 4B 2C (DECL 0x2C(%rbx)) を回す。head の停止点に対応.
     // RBX=0x2000、[0x202C]=1 -> 0 になり、exit(0)。

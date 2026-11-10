@@ -6153,6 +6153,32 @@ fn or_rm8_imm_sibd_indexed() {
 }
 
 #[test]
+fn or_r8_m8_mem8_ors() {
+    // OR AL,[RSP+0x0A] (0A 44 24 0A): AL=0xF0、[0x200A]=0x0F -> AL=0xFF、ZF=0.
+    // head の停止点 0x5a96cc に対応.
+    let mut env = env();
+    env.map_rw(0x2000, 1).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    env.backend.set(Gpr(0).state(), 0xF0);
+    env.backend.mem.write(VirtAddr(0x200A), &[0x0Fu8]).unwrap();
+    env.step(|b| sem::or_r8_m8_mem8(b, Gpr(0), false, Gpr(4), 0x0A))
+        .unwrap();
+    assert_eq!(env.backend.get(Gpr(0).state()) & 0xFF, 0xFF);
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0);
+}
+
+#[test]
+fn or_r8_r8_ors() {
+    // OR AL,BL (0A C3): AL=0xF0、BL=0x0F -> AL=0xFF.
+    let mut env = env();
+    env.backend.set(Gpr(0).state(), 0xF0);
+    env.backend.set(Gpr(3).state(), 0x0F);
+    env.step(|b| sem::or_r8_r8(b, Gpr(0), false, Gpr(3), false))
+        .unwrap();
+    assert_eq!(env.backend.get(Gpr(0).state()) & 0xFF, 0xFF);
+}
+
+#[test]
 fn test_rm16_sets_zf() {
     // TEST DX,DX (66 85 /r): DX=0 -> ZF=1. DX=1 -> ZF=0.
     let mut env = env();

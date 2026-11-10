@@ -6482,6 +6482,61 @@ pub fn and_r8_m8_mem32<B: Backend>(
     Ok(())
 }
 
+/// OR r8,m8 [base+disp8] (0A /r mod=01)。8ビット OR し dst に書く.
+pub fn or_r8_m8_mem8<B: Backend>(
+    b: &mut B,
+    dst: Gpr,
+    dst_high: bool,
+    base: Gpr,
+    disp: i8,
+) -> Flow<B> {
+    use polyisa_sem::W8;
+    let addr = eff_addr(b, base, disp);
+    let y: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
+    let x = read8(b, dst, dst_high);
+    let v = b.or::<W8>(x, y);
+    write8(b, dst, dst_high, v);
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// OR r8,m8 [base+index*scale+disp8] (0A /r SIB mod=01)。
+pub fn or_r8_m8_sibd<B: Backend>(
+    b: &mut B,
+    dst: Gpr,
+    dst_high: bool,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i8,
+) -> Flow<B> {
+    use polyisa_sem::W8;
+    let addr = sib_addr_scaled(b, shift, disp as i32, base, idx);
+    let y: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
+    let x = read8(b, dst, dst_high);
+    let v = b.or::<W8>(x, y);
+    write8(b, dst, dst_high, v);
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// OR r8,r/m8 reg-direct (0A /r mod=11)。8ビット OR し dst に書く.
+pub fn or_r8_r8<B: Backend>(
+    b: &mut B,
+    dst: Gpr,
+    dst_high: bool,
+    src: Gpr,
+    src_high: bool,
+) -> Flow<B> {
+    use polyisa_sem::W8;
+    let y: B::V<W8> = read8(b, src, src_high);
+    let x = read8(b, dst, dst_high);
+    let v = b.or::<W8>(x, y);
+    write8(b, dst, dst_high, v);
+    update_logic_flags(b, v);
+    Ok(())
+}
+
 /// MOVZX r32,r16 reg-direct (0F B7)。16ビットを読んでゼロ拡張する.
 pub fn movzx_r32_r16<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
     use polyisa_sem::W16;

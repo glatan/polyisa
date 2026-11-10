@@ -76,7 +76,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数116件。
-        assert_eq!(INSNS.len(), 567);
+        assert_eq!(INSNS.len(), 569);
     }
 
     #[test]
@@ -784,6 +784,14 @@ mod tests {
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x804C04F800, 40), Some(Insn::OrRm8ImmSibd));
         assert_eq!(decode(0x804C04F800, 32), None);
+        // OR r8,m8 SIB mod=01 (0A /r)。head の停止点 0x5a96cc に対応.
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x0A44240A, 32), Some(Insn::OrR8M8Sibd));
+        assert_eq!(decode(0x0A44240A, 24), None);
+        // OR r8,r/m8 reg-direct (0A /r mod=11)。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x0AC0, 16), Some(Insn::OrR8R8));
+        assert_eq!(decode(0x0AC0, 8), None);
         // MOVB [base+index*scale+disp8],imm8 (C6 /0 SIB mod=01)。
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0xC64428FE3A, 40), Some(Insn::MovRm8ImmSibd));

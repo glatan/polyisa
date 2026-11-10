@@ -621,6 +621,19 @@ fn fetch_len(
                 Some(2)
             }
         }
+        // 0x0A /r (OR r8,r/m8)。reg-direct 2B、SIB mod=01 +disp8 4B。SIBなし・他modは未対応.
+        0x0A => {
+            let s = second?;
+            let md = s >> 6;
+            let rm = s & 7;
+            if md == 3 {
+                Some(2)
+            } else if md == 1 && rm == 4 {
+                Some(4)
+            } else {
+                None
+            }
+        }
         // 0x84 /r (TEST r/m8,r8)。reg-direct 2B、mod=00 base 2B / abs 6B、
         // mod=01 base+disp8 3B、mod=10 base+disp32 6B。SIB は未対応で None.
         0x84 => {
@@ -1080,6 +1093,7 @@ pub fn run_mode(
                 | 0x22
                 | 0x84
                 | 0xD9
+                | 0x0A
         ) {
             if env
                 .backend
@@ -3204,6 +3218,51 @@ fn dispatch<B: Backend>(
             } else {
                 sem::or_rm8_imm_sibd(b, base, idx, shift, d8, imm)
             }
+        }
+        Insn::OrR8M8Sibd => {
+            // 0A /r SIB mod=01 [base+index*scale+disp8] (32b)。dst は reg フィールド.
+            // SIB は (word>>8) 下位8、disp は最下位8.
+            // REX なしの reg 4-7 は上位8ビット (AH/CH/DH/BH)。
+            let reg_f = (modrm() >> 3) & 7;
+            let (dst, dst_high) = if rex != 0 {
+                (Gpr(reg_f | ((rex >> 2) & 1) << 3), false)
+            } else if reg_f < 4 {
+                (Gpr(reg_f), false)
+            } else {
+                (Gpr(reg_f - 4), true)
+            };
+            let sib_v = ((word >> 8) & 0xff) as u8;
+            let d8 = (word & 0xff) as u8 as i8;
+            let shift = ((sib_v >> 6) & 3) as u32;
+            let idx_raw = (sib_v >> 3) & 7;
+            let idx = Gpr(idx_raw | (((rex >> 1) & 1) << 3));
+            let base = Gpr((sib_v & 7) | ((rex & 1) << 3));
+            if idx_raw == 4 && (rex >> 1) & 1 == 0 {
+                sem::or_r8_m8_mem8(b, dst, dst_high, base, d8)
+            } else {
+                sem::or_r8_m8_sibd(b, dst, dst_high, base, idx, shift, d8)
+            }
+        }
+        Insn::OrR8R8 => {
+            // 0A /r mod=11 reg-direct。dst は reg、src は rm フィールド (REX.R/B で拡張)。
+            // REX なしの 4-7 は上位8ビット (AH/CH/DH/BH)。
+            let reg_f = (modrm() >> 3) & 7;
+            let (dst, dst_high) = if rex != 0 {
+                (Gpr(reg_f | ((rex >> 2) & 1) << 3), false)
+            } else if reg_f < 4 {
+                (Gpr(reg_f), false)
+            } else {
+                (Gpr(reg_f - 4), true)
+            };
+            let rm_f = modrm() & 7;
+            let (src, src_high) = if rex != 0 {
+                (Gpr(rm_f | ((rex & 1) << 3)), false)
+            } else if rm_f < 4 {
+                (Gpr(rm_f), false)
+            } else {
+                (Gpr(rm_f - 4), true)
+            };
+            sem::or_r8_r8(b, dst, dst_high, src, src_high)
         }
         Insn::AndRm8ImmMem32 => {
             // 80 /4 mod=10 [base+disp32],imm8 (56b)。disp は (word>>8) 下位32 LE、imm は最下位8.
