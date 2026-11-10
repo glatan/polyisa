@@ -250,12 +250,14 @@ fn fetch_len(
                 let m = third?;
                 if m >> 6 == 3 { Some(3) } else { None }
             } else if s == 0x58 {
-                // ADDSD xmm,m64 (F2 0F 58 /r)。reg-direct (3B) と SIB mod=00 (4B、直接番地は disp32 付き 7B)。
+                // ADDSD xmm,m64 RIP (F2 0F 58 05 + disp32、7B) と reg-direct (3B)、SIB mod=00 (4B、直接番地は disp32 付き 7B)。
                 let m = third?;
                 let md = m >> 6;
                 let rm = m & 7;
                 if md == 3 {
                     Some(3)
+                } else if md == 0 && rm == 5 {
+                    Some(7)
                 } else if rm == 4 {
                     let t = fourth?;
                     if md == 0 {
@@ -4909,6 +4911,14 @@ fn dispatch<B: Backend>(
                 sem::addsd_xmm_m64_memnd(b, xmm_reg(), sib0f_base())
             } else {
                 sem::addsd_xmm_m64_sib(b, xmm_reg(), sib0f_base(), sib0f_idx(), sib0f_shift())
+            }
+        }
+        Insn::AddsdXmmM64Rip => {
+            // F2 0F 58 05 + disp32 (mod=00 RIP)。F2 は剥がし済み.
+            if is64 {
+                sem::addsd_xmm_m64_rip(b, xmm_reg(), eip as u64 + nbytes, disp32())
+            } else {
+                sem::addsd_xmm_m64_abs(b, xmm_reg(), imm32())
             }
         }
         // SUBSD xmm,xmm (F2 0F 5C /r reg-direct)。F2 は剥がし済み.

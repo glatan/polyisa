@@ -4147,6 +4147,39 @@ fn run_addsd_m64_sib() {
 }
 
 #[test]
+fn run_addsd_xmm_m64_rip() {
+    // run 経由で F2 0F 58 05 + disp32 (ADDSD xmm0,[RIP]) を回す.
+    // [0x1500]=2.0、xmm0 下位=3.0 -> 5.0、exit(0)。awk の停止点 0x5b72fc に対応.
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    env.backend
+        .mem
+        .write(VirtAddr(0x1500), &0x4000_0000_0000_0000u64.to_le_bytes())
+        .unwrap();
+    env.backend.set(Gpr(3).state(), 0x1500);
+    let prog: &[u8] = &[
+        0xF3, 0x0F, 0x7E, 0x43, 0x00, // movq xmm0,[rbx+0] (xmm0=2.0)
+        0xF2, 0x0F, 0x58, 0x05, 0xF3, 0x04, 0x00,
+        0x00, // addsd xmm0,[rip+0x4f3] ([0x1500]=2.0 -> 4.0)
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
+        0x0F, 0x05, // syscall -> exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0));
+    let v: u128 = env.backend.get(polyisa_guest_x86::sem::xmm_ref(
+        polyisa_guest_x86::sem::Xmm(0),
+    ));
+    // xmm0=2.0 + [0x1500]=2.0 -> 4.0。
+    assert_eq!((v & 0xFFFF_FFFF_FFFF_FFFF) as u64, 0x4010_0000_0000_0000);
+}
+
+#[test]
 fn run_andpd() {
     // run 経由で 66 0F 54 C1 (ANDPD xmm0,xmm1) を回す。
     // xmm0=0xFF..FF、xmm1=0x0F0F.. -> xmm0=0x0F0F.. になり、exit(0)。

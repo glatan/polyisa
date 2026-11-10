@@ -2146,6 +2146,28 @@ fn addsd_m64_sib_indexed_adds() {
 }
 
 #[test]
+fn addsd_xmm_m64_rip_adds() {
+    use polyisa_guest_x86::sem::Xmm;
+    // ADDSD xmm0,[RIP]: [0x1500]=2.0、xmm0 下位=3.0 -> 5.0 (0x4014000000000000)。上位保持.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1500), &0x4000_0000_0000_0000u64.to_le_bytes())
+        .unwrap();
+    env.step(|b| {
+        let v = b.konst::<polyisa_sem::W128>(0xABCD_0000_0000_0000_4008_0000_0000_0000u128);
+        b.set(sem::xmm_ref(Xmm(0)), v);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::addsd_xmm_m64_rip(b, Xmm(0), 0x1007, 0x4F9))
+        .unwrap();
+    let v: u128 = env.backend.get(sem::xmm_ref(Xmm(0)));
+    assert_eq!(v, 0xABCD_0000_0000_0000_4014_0000_0000_0000u128);
+}
+
+#[test]
 fn movzx_r32_r16_zero_extends() {
     // MOVZX EAX,BX: EBX=0x1234ABCD -> EAX=0xABCD。
     let mut env = env();
