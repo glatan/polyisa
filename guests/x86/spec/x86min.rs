@@ -2019,6 +2019,15 @@ pub fn build_model() -> polyisa_isadl::Model {
             "and r/m8, {imm}",
             "alu",
         ),
+        // ANDB m8,imm8 mod=01 [base+disp8] (80 /4)。grep 0x442d1d 対応.4B.
+        (
+            "and_rm8_imm_mem8",
+            "F1",
+            "10000000 01100... ........ ........",
+            vec![],
+            "and r/m8, {imm}",
+            "alu",
+        ),
         (
             "cmp_rm8_imm_mem32",
             "F1",

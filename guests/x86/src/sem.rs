@@ -1355,6 +1355,18 @@ pub fn and_rm8_imm_mem32<B: Backend>(b: &mut B, base: Gpr, disp: i32, imm: u8) -
     Ok(())
 }
 
+/// AND r/m8,imm8 [base+disp8] (80 /4 mod=01)。grep 0x442d1d 対応.
+pub fn and_rm8_imm_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8, imm: u8) -> Flow<B> {
+    use polyisa_sem::W8;
+    let addr = eff_addr(b, base, disp);
+    let x: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
+    let y = b.konst::<W8>(imm);
+    let v = b.and::<W8>(x, y);
+    b.store::<W8>(addr, v, DATA_WRITE)?;
+    update_logic_flags(b, v);
+    Ok(())
+}
+
 /// CMP r/m8,imm8 [base+disp32] (80 /7 mod=10)。メモリを読んで比較する.
 pub fn cmp_rm8_imm_mem32<B: Backend>(b: &mut B, base: Gpr, disp: i32, imm: u8) -> Flow<B> {
     use polyisa_sem::W8;

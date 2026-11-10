@@ -76,7 +76,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数117件。
-        assert_eq!(INSNS.len(), 603);
+        assert_eq!(INSNS.len(), 604);
     }
 
     #[test]
@@ -323,6 +323,11 @@ mod tests {
         assert_eq!(decode(0xF6042404, 24), None);
         assert_eq!(decode(0x803D41DB190000, 56), Some(Insn::CmpRm8ImmRip));
         assert_eq!(decode(0x80A3550300007F, 56), Some(Insn::AndRm8ImmMem32));
+        // ANDB m8,imm8 mod=01 [base+disp8] (80 /4)。grep 0x442d1d 対応.
+        // 80 67 38 90 は ANDB $0x90,0x38(%rdi).
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x80673890, 32), Some(Insn::AndRm8ImmMem8));
+        assert_eq!(decode(0x80673890, 24), None);
         assert_eq!(decode(0x836F0401, 32), Some(Insn::SubRmImm8Mem8));
         assert_eq!(decode(0x83770401, 32), Some(Insn::XorRmImm8Mem8));
         assert_eq!(decode(0x83480801, 32), Some(Insn::OrRmImm8Mem8));

@@ -821,6 +821,10 @@ fn fetch_len(
                     None
                 }
             } else if md == 1 && reg == 7 {
+                // mod=01 [base+disp8],imm8 (4B) の /7 CMPB のみ (SIBなし).
+                Some(4)
+            } else if md == 1 && reg == 4 {
+                // mod=01 [base+disp8],imm8 (4B) の /4 ANDB。grep 0x442d1d 対応.
                 Some(4)
             } else if md == 2 && reg == 1 {
                 // mod=10 [base+disp32],imm8 (7B) の /1 ORB のみ.
@@ -3498,6 +3502,13 @@ fn dispatch<B: Backend>(
             let disp = ((word >> 8) as u32).swap_bytes() as i32;
             let imm = (word & 0xff) as u8;
             sem::and_rm8_imm_mem32(b, rm(), disp, imm)
+        }
+        Insn::AndRm8ImmMem8 => {
+            // 80 /4 mod=01 [base+disp8],imm8 (32b)。grep 0x442d1d 対応.
+            // disp8 は (word>>8) 下位8、imm は最下位8.
+            let d8 = ((word >> 8) & 0xff) as u8 as i8;
+            let imm = (word & 0xff) as u8;
+            sem::and_rm8_imm_mem8(b, rm(), d8, imm)
         }
         Insn::CmpRm8ImmMem32 => {
             // 80 /7 mod=10 [base+disp32],imm8 (56b)。disp は (word>>8) 下位32 LE、imm は最下位8.
