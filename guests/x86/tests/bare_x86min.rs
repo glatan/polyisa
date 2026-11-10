@@ -5400,6 +5400,28 @@ fn cmp_m8_r8_sibd_sets_flags() {
 }
 
 #[test]
+fn cmp_r32_sibd_indexed_sets_flags() {
+    // CMP EAX,[EBX+ECX*2+0x10] (3B 44 8B 10): [0x2120]=10、EAX=10 -> ZF=1.
+    // RSP+disp8 の no_index 経路は dispatch で cmp_r32_mem8 に流れるため sem 直結で被せる.
+    let mut env = env();
+    env.map_rw(0x2000, 1).unwrap();
+    env.backend.set(Gpr(3).state(), 0x2000);
+    env.backend.set(Gpr(1).state(), 0x88);
+    env.backend
+        .mem
+        .write(VirtAddr(0x2120), &10u32.to_le_bytes())
+        .unwrap();
+    env.backend.set(Gpr(0).state(), 10);
+    env.step(|b| sem::cmp_r32_sibd(b, Gpr(0), Gpr(3), Gpr(1), 1, 0x10))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0x40);
+    env.backend.set(Gpr(0).state(), 11);
+    env.step(|b| sem::cmp_r32_sibd(b, Gpr(0), Gpr(3), Gpr(1), 1, 0x10))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x40, 0);
+}
+
+#[test]
 fn pslldq_shifts_bytes() {
     // PSLLDQ xmm2,8: 0xFF...FF (low 8 bytes) -> high 8 bytes.
     let mut env = env();

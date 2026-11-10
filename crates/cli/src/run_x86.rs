@@ -4203,6 +4203,22 @@ fn dispatch<B: Backend>(
                 sem::cmp_r32_sib(b, reg(), base, idx, shift)
             }
         }
+        Insn::CmpRSibd => {
+            // 3B /r SIB mod=01 [base+index*scale+disp8] (32b)。dst は reg フィールド.
+            // disp は最下位8。no_index は base+disp8 のみ.
+            let d8 = (word & 0xff) as u8 as i8;
+            if no_index() {
+                if rex_w {
+                    sem::cmp_r64_mem8(b, reg(), sib_base(), d8)
+                } else {
+                    sem::cmp_r32_mem8(b, reg(), sib_base(), d8)
+                }
+            } else if rex_w {
+                sem::cmp_r64_sibd(b, reg(), sib_base(), sib_idx(), sib_shift(), d8)
+            } else {
+                sem::cmp_r32_sibd(b, reg(), sib_base(), sib_idx(), sib_shift(), d8)
+            }
+        }
         Insn::CmpRmMem32 => {
             if rex_w {
                 sem::cmp_rm64_mem32(b, rm(), disp32(), reg())
