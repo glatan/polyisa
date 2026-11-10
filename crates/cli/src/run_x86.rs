@@ -4533,10 +4533,11 @@ fn dispatch<B: Backend>(
         }
         Insn::ShldR32Cl => {
             // SHLD r/m32,r32,CL (0F A5 /r mod=11)。REX.W で64ビット.
+            // 2バイトオペコードのため rm0f/reg0f で抽出する.
             if rex_w {
-                sem::shld_r64_cl(b, rm(), reg())
+                sem::shld_r64_cl(b, rm0f(), reg0f_as_gpr())
             } else {
-                sem::shld_r32_cl(b, rm(), reg())
+                sem::shld_r32_cl(b, rm0f(), reg0f_as_gpr())
             }
         }
         Insn::Pminub => sem::pminub_xmm(b, xmm_reg(), xmm_rm()),

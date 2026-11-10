@@ -3236,6 +3236,42 @@ fn run_rol_rm32_by1() {
 }
 
 #[test]
+fn run_shld_r64_cl_rexwr() {
+    // run 経由で 4C 0F A5 C8 (SHLD RAX,R9,CL) を回す。seq の RBP 破壊バグに対応.
+    // RAX=1、R9=0x8000000000000000、CL=1 -> RAX=3、RBP は保存される。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(0).state(), 1);
+    env.backend.set(polyisa_guest_x86::sem::hi_ref(Gpr(0)), 0);
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(9), 0x8000_0000_0000_0000);
+        Ok(())
+    })
+    .unwrap();
+    env.backend.set(Gpr(1).state(), 1);
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(5), 0x7ffe_fcf0);
+        Ok(())
+    })
+    .unwrap();
+    let prog: &[u8] = &[
+        0x4C, 0x0F, 0xA5, 0xC8, // shld rax,r9,cl
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
+        0x0F, 0x05, // syscall -> exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0));
+    // RBP が保存される（旧実装は rm()/reg() 誤抽出で RBP を破壊した）。
+    let rbp = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(5));
+    assert_eq!(rbp, 0x7ffe_fcf0);
+}
+
+#[test]
 fn run_sub_rm_imm8_rip() {
     // run 経由で 83 2D F9 0F 00 00 01 (SUBL $1,0xFF9(%rip)) を回す。head の停止点 0x417b1b に対応.
     // [0x2000]=10 - 1 = 9 になり、exit(0)。
