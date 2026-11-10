@@ -134,6 +134,8 @@ pub fn build_model() -> polyisa_isadl::Model {
     // Ref: SPEC-X86-INTEL-SDM (v093).
     let insns: &[(&str, &str, &str, &str, &str)] = &[
         ("nop", "F1", "10010000", "nop", "alu"),
+        // BSWAP r32/r64 (0F C8+rd)。REX.B で拡張、REX.W で64bit。F3/66 剥がし済み.
+        ("bswap", "F1", "00001111 11001...", "bswap", "alu"),
         ("inc_eax", "F1", "01000000", "inc eax", "alu"),
         ("inc_ecx", "F1", "01000001", "inc ecx", "alu"),
         ("inc_edx", "F1", "01000010", "inc edx", "alu"),

@@ -484,6 +484,9 @@ fn fetch_len(
             } else if (0x80..=0x8F).contains(&s) {
                 // near Jcc (0F 80-8F + disp32)。6バイト.
                 Some(6)
+            } else if (0xC8..=0xCF).contains(&s) {
+                // BSWAP r32/r64 (0F C8+rd)。ModRMなし2B。REX.B/W は dispatch で見る.
+                Some(2)
             } else {
                 None
             }
@@ -5823,6 +5826,15 @@ fn dispatch<B: Backend>(
                 sem::bsr_r32_memnd(b, reg0f_as_gpr(), rm0f())
             }
         }
+        Insn::Bswap => {
+            // BSWAP r32/r64 (0F C8+rd)。rd は opcode 下位3 + REX.B。REX.W で64bit.
+            let rd = Gpr(((word as u8) & 7) | ((rex & 1) << 3));
+            if rex_w {
+                sem::bswap_r64(b, rd)
+            } else {
+                sem::bswap_r32(b, rd)
+            }
+        }
         Insn::ImulRImm8Rip => {
             // 6B /r ib + disp32 + imm8 (56b)。disp は (word>>8) 下位32 LE、imm は最下位8.
             let disp_le = ((word >> 8) as u32).swap_bytes();
@@ -6531,6 +6543,8 @@ fn dispatch<B: Backend>(
             | Insn::XchgRMem32
             | Insn::XchgRRip => Some(reg()),
             Insn::MovR32Imm => Some(Gpr((((word >> 32) & 7) as u8) | ((rex & 1) << 3))),
+            // BSWAP r32 (0F C8+rd)。rd は opcode 下位3 + REX.B。32bit書込みはゼロ拡張.
+            Insn::Bswap => Some(Gpr(((word as u8) & 7) | ((rex & 1) << 3))),
             Insn::XchgRcxAx
             | Insn::XchgRdxAx
             | Insn::XchgRbxAx

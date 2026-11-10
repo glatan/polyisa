@@ -76,7 +76,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数117件。
-        assert_eq!(INSNS.len(), 594);
+        assert_eq!(INSNS.len(), 595);
     }
 
     #[test]
@@ -113,6 +113,11 @@ mod tests {
         // 16ビット2バイトオペコード：SYSCALL (0F 05)、CPUID (0F A2)。
         assert_eq!(decode(0x0F05, 16), Some(Insn::Syscall));
         assert_eq!(decode(0x0FA2, 16), Some(Insn::Cpuid));
+        // BSWAP r32/r64 (0F C8+rd)。ls -l 0x429c02 対応。REX 剥がし済み.
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x0FC9, 16), Some(Insn::Bswap));
+        assert_eq!(decode(0x0FC8, 16), Some(Insn::Bswap));
+        assert_eq!(decode(0x0FCF, 16), Some(Insn::Bswap));
         // ModRM register-direct 全組合せ：ADD (01 /r dst=rm)、MOV (8B /r dst=reg)、
         // CMP (39)、AND (21)、OR (09)、SUB (29)、XOR (31)、MOV store (89 /r dst=rm)。
         // Ref: SPEC-X86-INTEL-SDM (v093).

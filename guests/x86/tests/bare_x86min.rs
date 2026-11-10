@@ -7105,3 +7105,32 @@ fn bts_r64_imm_sets_bit_and_cf() {
     })
     .unwrap();
 }
+
+#[test]
+fn bswap_r32_reverses_bytes() {
+    // BSWAP ECX (0F C9): ECX=0x12345678 -> 0x78563412。旗は不変.
+    let mut env = env();
+    env.backend.set(Gpr(1).state(), 0x1234_5678);
+    env.backend.set(sem::eflags_ref(), 0x40);
+    env.step(|b| sem::bswap_r32(b, Gpr(1))).unwrap();
+    assert_eq!(env.backend.get(Gpr(1).state()), 0x7856_3412);
+    assert_eq!(env.backend.get(sem::eflags_ref()), 0x40);
+}
+
+#[test]
+fn bswap_r64_reverses_bytes() {
+    // BSWAP RCX (REX.W 0F C9): RCX=0x0102030405060708 -> 0x0807060504030201.
+    let mut env = env();
+    env.step(|b| {
+        sem::write64(b, Gpr(1), 0x0102_0304_0506_0708);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::bswap_r64(b, Gpr(1))).unwrap();
+    env.step(|b| {
+        let v = sem::read64(b, Gpr(1));
+        assert_eq!(v, 0x0807_0605_0403_0201);
+        Ok(())
+    })
+    .unwrap();
+}

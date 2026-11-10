@@ -1615,6 +1615,54 @@ pub fn nop<B: Backend>(_b: &mut B) -> Flow<B> {
     Ok(())
 }
 
+/// BSWAP r32。下位32ビットのバイト順を反転する。旗は変えない.
+pub fn bswap_r32<B: Backend>(b: &mut B, rd: Gpr) -> Flow<B> {
+    let x = read(b, rd);
+    let mff = b.konst::<W32>(0xFF);
+    let c8 = b.konst::<W32>(8);
+    let t1 = b.shr_l::<W32>(x, c8);
+    let mff1 = b.konst::<W32>(0xFF);
+    let b1 = b.and::<W32>(t1, mff1);
+    let c16 = b.konst::<W32>(16);
+    let t2 = b.shr_l::<W32>(x, c16);
+    let mff2 = b.konst::<W32>(0xFF);
+    let b2 = b.and::<W32>(t2, mff2);
+    let c24 = b.konst::<W32>(24);
+    let t3 = b.shr_l::<W32>(x, c24);
+    let mff3 = b.konst::<W32>(0xFF);
+    let b3 = b.and::<W32>(t3, mff3);
+    let b0 = b.and::<W32>(x, mff);
+    let k24 = b.konst::<W32>(24);
+    let r0 = b.shl::<W32>(b0, k24);
+    let k16 = b.konst::<W32>(16);
+    let r1 = b.shl::<W32>(b1, k16);
+    let k8 = b.konst::<W32>(8);
+    let r2 = b.shl::<W32>(b2, k8);
+    let v01 = b.or::<W32>(r0, r1);
+    let v23 = b.or::<W32>(r2, b3);
+    let v = b.or::<W32>(v01, v23);
+    write(b, rd, v);
+    Ok(())
+}
+
+/// BSWAP r64 (REX.W)。64ビットのバイト順を反転する。旗は変えない.
+pub fn bswap_r64<B: Backend>(b: &mut B, rd: Gpr) -> Flow<B> {
+    let x = read64(b, rd);
+    let mut v = b.konst::<W64>(0);
+    for shift in [0u64, 8, 16, 24, 32, 40, 48, 56] {
+        let n = b.konst::<W64>(shift);
+        let t = b.shr_l::<W64>(x, n);
+        let mff = b.konst::<W64>(0xFF);
+        let byte = b.and::<W64>(t, mff);
+        let m = b.konst::<W64>(56 - shift);
+        let placed = b.shl::<W64>(byte, m);
+        let nv = b.or::<W64>(v, placed);
+        v = nv;
+    }
+    write64(b, rd, v);
+    Ok(())
+}
+
 /// INC r32。32ビットで包む。CF 以外の 5 旗を更新する（CF は保存）。
 pub fn inc_r32<B: Backend>(b: &mut B, rd: Gpr) -> Flow<B> {
     let cf_mask = b.konst::<W32>(FLAG_CF);
