@@ -448,6 +448,30 @@ pub fn and_rm32_imm8_abs<B: Backend>(b: &mut B, addr32: u32, imm: i8) -> Flow<B>
     Ok(())
 }
 
+/// SUB m32,imm8 RIP (83 2D)。32ビット SUB し、6 旗を更新する.
+pub fn sub_rm32_imm8_rip<B: Backend>(b: &mut B, next_rip: u64, disp: i32, imm: i8) -> Flow<B> {
+    let base = b.konst::<W64>(next_rip);
+    let d = b.konst::<W64>(disp as i64 as u64);
+    let addr = b.add::<W64>(base, d);
+    let x: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let y = b.konst::<W32>(imm as i32 as u32);
+    let v = b.sub::<W32>(x, y);
+    b.store::<W32>(addr, v, DATA_WRITE)?;
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
+/// SUB [disp32],imm8 (32ビット絶対番地).
+pub fn sub_rm32_imm8_abs<B: Backend>(b: &mut B, addr32: u32, imm: i8) -> Flow<B> {
+    let addr = b.konst::<W64>(addr32 as u64);
+    let x: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let y = b.konst::<W32>(imm as i32 as u32);
+    let v = b.sub::<W32>(x, y);
+    b.store::<W32>(addr, v, DATA_WRITE)?;
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
 /// TEST m8,imm8 RIP (F6 05)。8ビットを読んで AND し、5 旗を更新する.
 pub fn test_m8_imm_rip<B: Backend>(b: &mut B, next_rip: u64, disp: i32, imm: u8) -> Flow<B> {
     use polyisa_sem::W8;
@@ -8037,6 +8061,72 @@ pub fn pcmpeqb_xmm_mem32<B: Backend>(b: &mut B, dst: Xmm, base: Gpr, disp: i32) 
         let one = b.konst::<W128>(0xFF);
         let zero = b.konst::<W128>(0);
         let byte = b.select::<W128>(eq, one, zero);
+        let pos = b.shl::<W128>(byte, shift);
+        acc = b.or::<W128>(acc, pos);
+    }
+    b.set(xmm_ref(dst), acc);
+    Ok(())
+}
+
+/// PMINUB xmm,[base] (66 0F DA mod=00)。符号なしバイト毎に小さい方を選ぶ.
+pub fn pminub_xmm_memnd<B: Backend>(b: &mut B, dst: Xmm, base: Gpr) -> Flow<B> {
+    let addr = read64(b, base);
+    let c: B::V<W128> = b.load::<W128>(addr, DATA_READ)?;
+    let a: B::V<W128> = b.get(xmm_ref(dst));
+    let mut acc: B::V<W128> = b.konst::<W128>(0);
+    for i in 0..16 {
+        let shift = b.konst::<W128>((i * 8) as u128);
+        let mask = b.konst::<W128>(0xFF);
+        let ab = b.shr_l::<W128>(a, shift);
+        let cb = b.shr_l::<W128>(c, shift);
+        let ab8 = b.and::<W128>(ab, mask);
+        let cb8 = b.and::<W128>(cb, mask);
+        let take_a = b.cmp::<W128>(Cmp::LtU, ab8, cb8);
+        let byte = b.select::<W128>(take_a, ab8, cb8);
+        let pos = b.shl::<W128>(byte, shift);
+        acc = b.or::<W128>(acc, pos);
+    }
+    b.set(xmm_ref(dst), acc);
+    Ok(())
+}
+
+/// PMINUB xmm,[base+disp8] (66 0F DA mod=01)。
+pub fn pminub_xmm_mem8<B: Backend>(b: &mut B, dst: Xmm, base: Gpr, disp: i8) -> Flow<B> {
+    let addr = eff_addr(b, base, disp);
+    let c: B::V<W128> = b.load::<W128>(addr, DATA_READ)?;
+    let a: B::V<W128> = b.get(xmm_ref(dst));
+    let mut acc: B::V<W128> = b.konst::<W128>(0);
+    for i in 0..16 {
+        let shift = b.konst::<W128>((i * 8) as u128);
+        let mask = b.konst::<W128>(0xFF);
+        let ab = b.shr_l::<W128>(a, shift);
+        let cb = b.shr_l::<W128>(c, shift);
+        let ab8 = b.and::<W128>(ab, mask);
+        let cb8 = b.and::<W128>(cb, mask);
+        let take_a = b.cmp::<W128>(Cmp::LtU, ab8, cb8);
+        let byte = b.select::<W128>(take_a, ab8, cb8);
+        let pos = b.shl::<W128>(byte, shift);
+        acc = b.or::<W128>(acc, pos);
+    }
+    b.set(xmm_ref(dst), acc);
+    Ok(())
+}
+
+/// PMINUB xmm,[base+disp32] (66 0F DA mod=10)。
+pub fn pminub_xmm_mem32<B: Backend>(b: &mut B, dst: Xmm, base: Gpr, disp: i32) -> Flow<B> {
+    let addr = eff_addr32(b, base, disp);
+    let c: B::V<W128> = b.load::<W128>(addr, DATA_READ)?;
+    let a: B::V<W128> = b.get(xmm_ref(dst));
+    let mut acc: B::V<W128> = b.konst::<W128>(0);
+    for i in 0..16 {
+        let shift = b.konst::<W128>((i * 8) as u128);
+        let mask = b.konst::<W128>(0xFF);
+        let ab = b.shr_l::<W128>(a, shift);
+        let cb = b.shr_l::<W128>(c, shift);
+        let ab8 = b.and::<W128>(ab, mask);
+        let cb8 = b.and::<W128>(cb, mask);
+        let take_a = b.cmp::<W128>(Cmp::LtU, ab8, cb8);
+        let byte = b.select::<W128>(take_a, ab8, cb8);
         let pos = b.shl::<W128>(byte, shift);
         acc = b.or::<W128>(acc, pos);
     }

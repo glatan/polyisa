@@ -580,6 +580,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("shr_rm32_1", "F1", "11010001 11101...", "shr r/m32, 1", "alu"),
         ("shl_rm32_1", "F1", "11010001 11100...", "shl r/m32, 1", "alu"),
         ("sar_rm32_1", "F1", "11010001 11111...", "sar r/m32, 1", "alu"),
+        ("rol_rm32_1", "F1", "11010001 11000...", "rol r/m32, 1", "alu"),
         // IMUL r32/r64, r/m32/r/m64 (0F AF /r)。reg-direct・mod=00/01/10/RIP (SIBなし).
         ("imul_r_rm", "F1", "00001111 10101111 11......", "imul r, r/m", "alu"),
         ("imul_r_memnd", "MR", "00001111 10101111 00......", "imul r, [r/m]", "load"),
@@ -627,6 +628,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("or_rm_imm8_rip", "F1", "10000011 00001101 ................................ ........", "or r/m, {imm}", "alu"),
         // AND m32,imm8 RIP (83 25 + disp32 + imm8)。64ビット RIP相対.
         ("and_rm_imm8_rip", "F1", "10000011 00100101 ................................ ........", "and r/m, {imm}", "alu"),
+        // SUB m32,imm8 RIP (83 2D + disp32 + imm8)。64ビット RIP相対.
+        ("sub_rm_imm8_rip", "F1", "10000011 00101101 ................................ ........", "sub r/m, {imm}", "alu"),
         ("test_al_imm", "F1", "10101000 ........", "test al, {imm}", "alu"),
         ("test_eax_imm", "F1", "10101001 ................................", "test eax, {imm}", "alu"),
         // ADD r32, m32 (03 /r)。RIP/abs のみ。REX.W で64ビット.
@@ -1082,6 +1085,30 @@ pub fn build_model() -> polyisa_isadl::Model {
             "00001111 01110100 10...... ................................",
             vec![wc("m32_rm", WhereOp::Ne, 4)],
             "pcmpeqb xmm, m128",
+            "load",
+        ),
+        (
+            "pminub_memnd",
+            "MR",
+            "00001111 11011010 00......",
+            vec![wc("mr_rm", WhereOp::Ne, 4), wc("mr_rm", WhereOp::Ne, 5)],
+            "pminub xmm, m128",
+            "load",
+        ),
+        (
+            "pminub_mem8",
+            "M8",
+            "00001111 11011010 01...... ........",
+            vec![wc("m8_rm", WhereOp::Ne, 4)],
+            "pminub xmm, m128",
+            "load",
+        ),
+        (
+            "pminub_mem32",
+            "M32",
+            "00001111 11011010 10...... ................................",
+            vec![wc("m32_rm", WhereOp::Ne, 4)],
+            "pminub xmm, m128",
             "load",
         ),
         (

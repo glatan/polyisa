@@ -3214,6 +3214,107 @@ fn run_movsx_r64_m8_memnd() {
 }
 
 #[test]
+fn run_rol_rm32_by1() {
+    // run 経由で D1 C2 (ROLL $1,%edx) を回す。head の停止点 0x59eb6c に対応.
+    // EDX=0x80000001 -> 0x00000003 になり、exit(0)。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(2).state(), 0x8000_0001);
+    let prog: &[u8] = &[
+        0xD1, 0xC2, // roll $1,%edx
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
+        0x0F, 0x05, // syscall -> exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0));
+    assert_eq!(env.backend.get(Gpr(2).state()), 0x0000_0003);
+}
+
+#[test]
+fn run_sub_rm_imm8_rip() {
+    // run 経由で 83 2D F9 0F 00 00 01 (SUBL $1,0xFF9(%rip)) を回す。head の停止点 0x417b1b に対応.
+    // [0x2000]=10 - 1 = 9 になり、exit(0)。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2000), &10u32.to_le_bytes())
+        .unwrap();
+    let prog: &[u8] = &[
+        0x83, 0x2D, 0xF9, 0x0F, 0x00, 0x00, 0x01, // subl $1,0xFF9(%rip)
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
+        0x0F, 0x05, // syscall -> exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0));
+    let mut back = [0u8; 4];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x2000),
+            &mut back,
+            polyisa_mem::Access {
+                endian: polyisa_mem::Endian::Le,
+                align: polyisa_mem::Align::Unaligned,
+                kind: polyisa_mem::AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(u32::from_le_bytes(back), 9);
+}
+
+#[test]
+fn run_pminub_mem8() {
+    // run 経由で 66 0F DA 40 50 (PMINUB xmm0,0x50(%rax)) を回す。head の停止点 0x4dddd5 に対応.
+    // xmm0 low byte 0x05、[0x2050] low byte 0x03 -> 0x03 になり、exit(0)。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(0).state(), 0x2000);
+    let mut mem16 = [0u8; 16];
+    mem16[0] = 0x03;
+    env.backend.mem.write(VirtAddr(0x2050), &mem16).unwrap();
+    env.step(|b| {
+        let v = b.konst::<polyisa_sem::W128>(0x05);
+        b.set(
+            polyisa_guest_x86::sem::xmm_ref(polyisa_guest_x86::sem::Xmm(0)),
+            v,
+        );
+        Ok(())
+    })
+    .unwrap();
+    let prog: &[u8] = &[
+        0x66, 0x0F, 0xDA, 0x40, 0x50, // pminub 0x50(%rax),%xmm0
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
+        0x0F, 0x05, // syscall -> exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0));
+    env.step(|b| {
+        let v: u128 = b.get(polyisa_guest_x86::sem::xmm_ref(
+            polyisa_guest_x86::sem::Xmm(0),
+        ));
+        assert_eq!(v & 0xFF, 0x03);
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
 fn run_sar_rm64_cl() {
     // run 経由で REX.W D3 /7 (SAR RDI,CL) を回す。
     // RDI=0xF0、CL=2 -> RDI=0x3C になり、exit(0x3C)。

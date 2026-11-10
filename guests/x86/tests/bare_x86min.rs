@@ -3281,6 +3281,33 @@ fn and_imm8_rip_clears_bits() {
 }
 
 #[test]
+fn sub_imm8_rip_subs() {
+    // SUBL $1,[RIP]: [0x1500]=10 - 1 = 9. head の停止点 0x417b1b に対応.
+    let mut env = env();
+    env.map_rw(0x1000, 1).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1500), &10u32.to_le_bytes())
+        .unwrap();
+    env.step(|b| sem::sub_rm32_imm8_rip(b, 0x1007, 0x4F9, 1))
+        .unwrap();
+    let mut back = [0u8; 4];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x1500),
+            &mut back,
+            Access {
+                endian: Endian::Le,
+                align: Align::Unaligned,
+                kind: AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(u32::from_le_bytes(back), 9);
+}
+
+#[test]
 fn and_imm32_rip_clears_bits() {
     // ANDL $0xFC3FFEF3,[RIP]: [0x1500]=0xFFFFFFFF & 0xFC3FFEF3.
     let mut env = env();
@@ -4527,6 +4554,17 @@ fn ror_rm32_basic() {
 }
 
 #[test]
+fn rol_rm32_by1_basic() {
+    // ROL EDX,1 (D1 C2): 0x80000001 -> 0x00000003、CF=1.
+    // D1 /0 は rol_rm32_imm8(_,1) と等価のため sem 直結で被せる.
+    let mut env = env();
+    env.backend.set(Gpr(2).state(), 0x8000_0001);
+    env.step(|b| sem::rol_rm32_imm8(b, Gpr(2), 1)).unwrap();
+    assert_eq!(env.backend.get(Gpr(2).state()), 0x0000_0003);
+    assert_eq!(env.backend.get(sem::eflags_ref()) & 0x1, 1);
+}
+
+#[test]
 fn shl_rm32_basic() {
     // SHL EBX,0x20 (32 &31=0) -> 変化なし.
     let mut env = env();
@@ -5047,6 +5085,32 @@ fn pminub_basic() {
         // low bytes: min(00,04)=00? Actually layout: check high bytes.
         // Just verify it runs and low 8 bytes are min.
         assert_eq!(v & 0xFF, 0x00);
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn pminub_mem8_takes_min() {
+    // PMINUB xmm0,[RAX+0x50] (66 0F DA 40 50): head の停止点 0x4dddd5 に対応.
+    // xmm0 low byte 0x05、mem low byte 0x03 -> 0x03.
+    let mut env = env();
+    env.map_rw(0x2000, 1).unwrap();
+    env.backend.set(Gpr(0).state(), 0x2000);
+    let mut mem16 = [0u8; 16];
+    mem16[0] = 0x03;
+    env.backend.mem.write(VirtAddr(0x2050), &mem16).unwrap();
+    env.step(|b| {
+        let v = b.konst::<polyisa_sem::W128>(0x05);
+        b.set(sem::xmm_ref(sem::Xmm(0)), v);
+        Ok(())
+    })
+    .unwrap();
+    env.step(|b| sem::pminub_xmm_mem8(b, sem::Xmm(0), Gpr(0), 0x50))
+        .unwrap();
+    env.step(|b| {
+        let v: u128 = b.get(sem::xmm_ref(sem::Xmm(0)));
+        assert_eq!(v & 0xFF, 0x03);
         Ok(())
     })
     .unwrap();

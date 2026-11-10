@@ -70,7 +70,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数116件。
-        assert_eq!(INSNS.len(), 540);
+        assert_eq!(INSNS.len(), 545);
     }
 
     #[test]
@@ -328,6 +328,10 @@ mod tests {
         assert_eq!(decode(0x80E580, 24), Some(Insn::AndRm8Imm));
         assert_eq!(decode(0x830D0000000040, 56), Some(Insn::OrRmImm8Rip));
         assert_eq!(decode(0x832577D21F00CF, 56), Some(Insn::AndRmImm8Rip));
+        // SUB [RIP+disp32],imm8 (83 2D + disp32 + imm8)。head の停止点 0x417b1b に対応.
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x832D012D250001, 56), Some(Insn::SubRmImm8Rip));
+        assert_eq!(decode(0x832D012D250001, 48), None);
         assert_eq!(decode(0x0F6E8500000000, 56), Some(Insn::MovdXmmM32));
         assert_eq!(decode(0x0F6E05930B1E00, 56), Some(Insn::MovdXmmRip));
         assert_eq!(decode(0x0931, 16), Some(Insn::OrM32R32Memnd));
@@ -362,6 +366,10 @@ mod tests {
         assert_eq!(decode(0x00D3FF, 16), Some(Insn::SarRm32Cl));
         assert_eq!(decode(0x00D3E0, 16), Some(Insn::ShlRm32Cl));
         assert_eq!(decode(0x00D1FF, 16), Some(Insn::SarRm321));
+        // ROL r/m32,1 (D1 /0 mod=11)。D1 C2 は roll $1,%edx.
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x00D1C2, 16), Some(Insn::RolRm321));
+        assert_eq!(decode(0x00D1C2, 8), None);
         // ADD r,[RIP+disp32] (03 05 + disp32)。
         assert_eq!(decode(0x030500000000, 48), Some(Insn::AddRRip));
         // MOVZX r32,m16 mod=10 (0F B7 /r)。
@@ -395,6 +403,14 @@ mod tests {
         assert_eq!(decode(0x0F74C1, 24), Some(Insn::Pcmpeqb));
         assert_eq!(decode(0x0F76C0, 24), Some(Insn::Pcmpeqd));
         assert_eq!(decode(0x0FDAEC, 24), Some(Insn::Pminub));
+        // PMINUB xmm,m128 mod=00/01/10 (66 0F DA /r、SIBなし)。head の停止点 0x4dddd5 に対応.
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x0FDA03, 24), Some(Insn::PminubMemnd));
+        assert_eq!(decode(0x0FDA03, 16), None);
+        assert_eq!(decode(0x0FDA4050, 32), Some(Insn::PminubMem8));
+        assert_eq!(decode(0x0FDA4050, 24), None);
+        assert_eq!(decode(0x0FDA8300000000, 56), Some(Insn::PminubMem32));
+        assert_eq!(decode(0x0FDA8300000000, 48), None);
         assert_eq!(decode(0x8305DF641F0001, 56), Some(Insn::AddRm32Imm8Rip));
         assert_eq!(decode(0x0FEBC4, 24), Some(Insn::Por));
         assert_eq!(decode(0x0F62C0, 24), Some(Insn::Punpckldq));

@@ -211,7 +211,6 @@ fn fetch_len(
                     | 0xEF
                     | 0xD7
                     | 0x76
-                    | 0xDA
                     | 0x57
                     | 0xFC
                     | 0x2A
@@ -223,8 +222,8 @@ fn fetch_len(
                 // XMM reg-direct のみ（66 接頭辞は剥がし済み）。
                 let m = third?;
                 if m >> 6 == 3 { Some(3) } else { None }
-            } else if s == 0x74 || s == 0xEB {
-                // PCMPEQB/POR xmm,m128 (66 0F 74/EB /r)。reg-direct と mod=00/01/10 (SIBなし).
+            } else if s == 0x74 || s == 0xEB || s == 0xDA {
+                // PCMPEQB/POR/PMINUB xmm,m128 (66 0F 74/EB/DA /r)。reg-direct と mod=00/01/10 (SIBなし).
                 let m = third?;
                 let md = m >> 6;
                 let rm = m & 7;
@@ -1359,6 +1358,9 @@ pub fn run_mode(
                     | Insn::PcmpeqbMemnd
                     | Insn::PcmpeqbMem8
                     | Insn::PcmpeqbMem32
+                    | Insn::PminubMemnd
+                    | Insn::PminubMem8
+                    | Insn::PminubMem32
                     | Insn::PorMemnd
                     | Insn::PorMem8
                     | Insn::PorMem32
@@ -1444,6 +1446,9 @@ pub fn run_mode(
                     | Insn::PcmpeqbMemnd
                     | Insn::PcmpeqbMem8
                     | Insn::PcmpeqbMem32
+                    | Insn::PminubMemnd
+                    | Insn::PminubMem8
+                    | Insn::PminubMem32
                     | Insn::PorMemnd
                     | Insn::PorMem8
                     | Insn::PorMem32
@@ -3231,6 +3236,13 @@ fn dispatch<B: Backend>(
                 sem::shl_rm32_imm8(b, rm(), 1)
             }
         }
+        Insn::RolRm321 => {
+            if rex_w {
+                sem::rol_rm64_imm8(b, rm(), 1)
+            } else {
+                sem::rol_rm32_imm8(b, rm(), 1)
+            }
+        }
         Insn::SarRm321 => {
             if rex_w {
                 sem::sar_rm64_imm8(b, rm(), 1)
@@ -4528,6 +4540,9 @@ fn dispatch<B: Backend>(
             }
         }
         Insn::Pminub => sem::pminub_xmm(b, xmm_reg(), xmm_rm()),
+        Insn::PminubMemnd => sem::pminub_xmm_memnd(b, xmm_reg(), rm0f()),
+        Insn::PminubMem8 => sem::pminub_xmm_mem8(b, xmm_reg(), rm0f(), disp8()),
+        Insn::PminubMem32 => sem::pminub_xmm_mem32(b, xmm_reg(), rm0f(), disp32()),
         Insn::Pcmpeqb => sem::pcmpeqb_xmm(b, xmm_reg(), xmm_rm()),
         Insn::Pcmpeqd => sem::pcmpeqd_xmm(b, xmm_reg(), xmm_rm()),
         Insn::Por => sem::por_xmm(b, xmm_reg(), xmm_rm()),
@@ -5154,6 +5169,17 @@ fn dispatch<B: Backend>(
                 sem::and_rm32_imm8_rip(b, eip as u64 + nbytes, disp, imm)
             } else {
                 sem::and_rm32_imm8_abs(b, disp_le, imm)
+            }
+        }
+        Insn::SubRmImm8Rip => {
+            // 83 2D + disp32 + imm8 (56ビット)。disp は (word>>8) 下位32 LE、imm は最下位.
+            let disp_le = ((word >> 8) as u32).swap_bytes();
+            let disp = disp_le as i32;
+            let imm = (word & 0xff) as u8 as i8;
+            if is64 {
+                sem::sub_rm32_imm8_rip(b, eip as u64 + nbytes, disp, imm)
+            } else {
+                sem::sub_rm32_imm8_abs(b, disp_le, imm)
             }
         }
         Insn::MovzxR32M16Mem32 => {
@@ -5923,7 +5949,7 @@ pub fn run_image_x86_64(
         .write(polyisa_mem::VirtAddr(sp), &img)
         .map_err(|e| format!("stack write: {e:?}"))?;
     polyisa_guest_x86::sem::write64(&mut env.backend, Gpr(4), sp);
-    match run_mode(&mut env, ehdr.entry as u32, sys, 10_000_000, true) {
+    match run_mode(&mut env, ehdr.entry as u32, sys, 30_000_000, true) {
         Outcome::Exit(code) => Ok(code as u64),
         Outcome::Unimplemented { eip, word } => {
             Err(format!("unimplemented at {eip:#x}: {word:#x}"))
