@@ -76,7 +76,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数117件。
-        assert_eq!(INSNS.len(), 627);
+        assert_eq!(INSNS.len(), 628);
     }
 
     #[test]
@@ -326,6 +326,11 @@ mod tests {
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0xC704246C6C, 40), Some(Insn::MovRm16ImmSib));
         assert_eq!(decode(0xC704246C6C, 32), None);
+        // MOVW [base+disp8],imm16 (66 C7 /0 mod=01)。hexdump 0x5c84f9 対応.
+        // 66 C7 43 5C 01 01 は [RBX+0x5C]=0x0101。66 剥がし済み.
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0xC7435C0101, 40), Some(Insn::MovRm16ImmMem8));
+        assert_eq!(decode(0xC7435C0101, 32), None);
         // MOVW [RIP+disp32],imm16 (66 C7 05 + disp32 + imm16)。od 0x5ac863 対応.
         // 66 C7 05 54 60 0C 00 01 00 は [RIP+0xC6054]=1。66 剥がし済み.
         // Ref: SPEC-X86-INTEL-SDM (v093).

@@ -8083,3 +8083,28 @@ fn mov_m16_imm_sib_indexed_stores_word() {
         .unwrap();
     assert_eq!(u16::from_le_bytes(back), 0x1234);
 }
+
+#[test]
+fn mov_m16_imm_mem8_stores_word() {
+    // MOVW [RBX+0x5C],0x0101 (66 C7 43 5C 01 01 相当): hexdump 0x5c84f9 対応.
+    // RBX=0x2000 -> [0x205C]=0x0101.
+    let mut env = env();
+    env.map_rw(0x2000, 1).unwrap();
+    env.backend.set(Gpr(3).state(), 0x2000);
+    env.step(|b| sem::mov_m16_imm_mem8(b, Gpr(3), 0x5C, 0x0101))
+        .unwrap();
+    let mut back = [0u8; 2];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x205C),
+            &mut back,
+            Access {
+                endian: Endian::Le,
+                align: Align::Unaligned,
+                kind: AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(u16::from_le_bytes(back), 0x0101);
+}

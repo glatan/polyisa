@@ -785,6 +785,15 @@ pub fn build_model() -> polyisa_isadl::Model {
         // CMP m32/m64,imm8 mod=10 [base+disp32] (83 /7)。REX.W で64bit.
         ("cmp_rm_imm8_mem32", "F1", "10000011 10111... ................................ ........", "cmp r/m, {imm}", "alu"),
         ("mov_rm16_imm_m32", "F1", "11000111 10000101 ................................ ................", "mov r/m16, {imm}", "alu"),
+        // MOVW [base+disp8],imm16 (66 C7 /0 mod=01)。hexdump 0x5c84f9 対応.5B+66.
+        // 66 C7 43 5C 01 01 は [RBX+0x5C]=0x0101。66 剥がし済み.
+        (
+            "mov_rm16_imm_mem8",
+            "F1",
+            "11000111 01000... ........ ................",
+            "mov r/m16, {imm}",
+            "alu",
+        ),
         // MOVW [base+index*scale+disp8],imm16 (66 C7 /0 SIB mod=01)。stat 0x5af402 対応.6B+66.
         ("mov_rm16_imm_sibd", "F1", "11000111 01000100 ........ ........ ................", "mov r/m16, {imm}", "alu"),
         // MOVW [base+index*scale],imm16 (66 C7 /0 SIB mod=00)。hexdump 0x5c82dd 対応.5B+66.
