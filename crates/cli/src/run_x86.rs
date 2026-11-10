@@ -1717,7 +1717,6 @@ fn dispatch<B: Backend>(
     // 2バイトオペコード（0F）の ModRM 抽出。ModRM は先頭から 3+off バイト目にある。
     let modrm0f = || ((word >> ((nbytes - 3 - off) * 8)) & 0xff) as u8;
     let xmm_reg = || Xmm((modrm0f() >> 3) & 7);
-    let xmm_rm = || Xmm(modrm0f() & 7);
     // REX.R/B で 8-15 に拡張する XMM 抽出（MOVDQA reg-direct 等で使う）。
     let xmm_reg_r = || Xmm(((modrm0f() >> 3) & 7) | (((rex >> 2) & 1) << 3));
     let xmm_rm_b = || Xmm((modrm0f() & 7) | ((rex & 1) << 3));
@@ -5043,7 +5042,7 @@ fn dispatch<B: Backend>(
                 } else {
                     sem::movsd_load_sibd32(
                         b,
-                        xmm_reg(),
+                        xmm_reg_r(),
                         sib0f_base(),
                         sib0f_idx(),
                         sib0f_shift(),
@@ -5055,7 +5054,7 @@ fn dispatch<B: Backend>(
             } else {
                 sem::movups_load_sibd32(
                     b,
-                    xmm_reg(),
+                    xmm_reg_r(),
                     sib0f_base(),
                     sib0f_idx(),
                     sib0f_shift(),
@@ -5070,7 +5069,7 @@ fn dispatch<B: Backend>(
                 } else {
                     sem::movsd_store_sibd32(
                         b,
-                        xmm_reg(),
+                        xmm_reg_r(),
                         sib0f_base(),
                         sib0f_idx(),
                         sib0f_shift(),
@@ -5082,7 +5081,7 @@ fn dispatch<B: Backend>(
             } else {
                 sem::movups_store_sibd32(
                     b,
-                    xmm_reg(),
+                    xmm_reg_r(),
                     sib0f_base(),
                     sib0f_idx(),
                     sib0f_shift(),
@@ -5096,7 +5095,7 @@ fn dispatch<B: Backend>(
             } else {
                 sem::movups_store_sibd32(
                     b,
-                    xmm_reg(),
+                    xmm_reg_r(),
                     sib0f_base(),
                     sib0f_idx(),
                     sib0f_shift(),
@@ -5211,7 +5210,7 @@ fn dispatch<B: Backend>(
                 } else {
                     sem::movsd_load_sibd(
                         b,
-                        xmm_reg(),
+                        xmm_reg_r(),
                         sib0f_base(),
                         sib0f_idx(),
                         sib0f_shift(),
@@ -5223,7 +5222,7 @@ fn dispatch<B: Backend>(
             } else {
                 sem::movups_load_sibd(
                     b,
-                    xmm_reg(),
+                    xmm_reg_r(),
                     sib0f_base(),
                     sib0f_idx(),
                     sib0f_shift(),
@@ -5238,7 +5237,7 @@ fn dispatch<B: Backend>(
                 } else {
                     sem::movsd_store_sibd(
                         b,
-                        xmm_reg(),
+                        xmm_reg_r(),
                         sib0f_base(),
                         sib0f_idx(),
                         sib0f_shift(),
@@ -5250,7 +5249,7 @@ fn dispatch<B: Backend>(
             } else {
                 sem::movups_store_sibd(
                     b,
-                    xmm_reg(),
+                    xmm_reg_r(),
                     sib0f_base(),
                     sib0f_idx(),
                     sib0f_shift(),
@@ -5396,7 +5395,7 @@ fn dispatch<B: Backend>(
         Insn::MovapsLoadMem8 => sem::movups_load_mem8(b, xmm_reg_r(), rm0f(), disp8()),
         Insn::MovapsLoadMem32 => sem::movups_load_mem32(b, xmm_reg_r(), rm0f(), disp32()),
         Insn::MovapsLoadRip => sem::movups_load_rip(b, xmm_reg_r(), eip as u64 + nbytes, disp32()),
-        Insn::MovapsLoadXmm => sem::movups_xmm_xmm(b, xmm_reg(), xmm_rm()),
+        Insn::MovapsLoadXmm => sem::movups_xmm_xmm(b, xmm_reg_r(), xmm_rm_b()),
         Insn::NoplSib => sem::nop(b),
         Insn::NoplSibd => sem::nop(b),
         Insn::NoplSibd32 => sem::nop(b),
