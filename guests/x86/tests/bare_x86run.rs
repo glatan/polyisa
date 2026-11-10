@@ -2059,6 +2059,36 @@ fn run_test_r_mem8() {
 }
 
 #[test]
+fn run_test_rm32_memnd() {
+    // run 経由で 85 07 (TEST EAX,(RDI)) を回す。find 0x5d17f7 対応.
+    // EAX=0xFF、RDI=0x2000、[0x2000]=0x0F -> ZF=0、eip は 0x1002 に進み exit(0)。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(7).state(), 0x2000);
+    env.backend.set(Gpr(0).state(), 0xFF);
+    env.backend
+        .mem
+        .write(VirtAddr(0x2000), &0x0Fu32.to_le_bytes())
+        .unwrap();
+    let prog: &[u8] = &[
+        0x85, 0x07, // test eax,(rdi)
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
+        0x0F, 0x05, // syscall -> exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0));
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x40,
+        0
+    );
+}
+
+#[test]
 fn run_mov_m16_r16_mem32() {
     // run 経由で 66 89 8F 80 00 00 00 (MOV [rdi+0x80],cx) を回す。
     // RDI=0x2000、CX=0x1234 -> [0x2080]=0x1234、exit(0)。MovMemEax32 を共用する。

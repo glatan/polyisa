@@ -3152,6 +3152,11 @@ fn dispatch<B: Backend>(
                 sem::test_r32_m32_mem8(b, reg(), rm(), d8)
             }
         }
+        Insn::TestRm32Memnd => {
+            // 85 /r mod=00 [base]。find 0x5d17f7 対応。dst は reg フィールド.
+            // REX.W の64bit比較は32bitで代用する（試作）。
+            sem::test_r32_m32_memnd(b, reg(), rm())
+        }
         Insn::TestRSibd => {
             // 85 /r SIB mod=01 [base+index*scale+disp8] (32b)。dst は reg フィールド.
             // disp は最下位8。no_index は base+disp8 のみ.

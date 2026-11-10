@@ -76,7 +76,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数117件。
-        assert_eq!(INSNS.len(), 601);
+        assert_eq!(INSNS.len(), 602);
     }
 
     #[test]
@@ -138,6 +138,11 @@ mod tests {
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x3D_0000_0001, 40), Some(Insn::CmpEax));
         assert_eq!(decode(0x85C0, 16), Some(Insn::TestRm32));
+        // TEST r/m32,r32 mod=00 [base] (85 /r)。find 0x5d17f7 対応.
+        // 85 07 は TEST EAX,(RDI).
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x8507, 16), Some(Insn::TestRm32Memnd));
+        assert_eq!(decode(0x8507, 8), None);
         assert_eq!(decode(0x7400, 16), Some(Insn::Je));
         assert_eq!(decode(0x75FE, 16), Some(Insn::Jne));
         // 符号なし条件分岐：JB (72)、JAE (73)、JBE (76)、JA (77)。

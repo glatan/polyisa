@@ -1178,6 +1178,14 @@ pub fn build_model() -> polyisa_isadl::Model {
             "alu",
         ),
         (
+            "test_rm32_memnd",
+            "MR",
+            "10000101 00......",
+            vec![wc("mr_rm", WhereOp::Ne, 4), wc("mr_rm", WhereOp::Ne, 5)],
+            "test r/m32, r32",
+            "alu",
+        ),
+        (
             "movzx_r32_m16_mem8",
             "M8",
             "00001111 10110111 01...... ........",
