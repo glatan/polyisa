@@ -8056,3 +8056,41 @@ fn run_fmulp_st1_one_and_a_half_squared() {
         (1u64 << 63) | (1u64 << 60)
     );
 }
+
+#[test]
+fn run_fstp_m64_sibd_stores_three() {
+    // DD 5C 24 08 = fstpl 0x8(%rsp)。3.0 を倍精度で書いて ST(0) を捨てる。seq 0x4d3169。
+    // Ref: SPEC-X86-INTEL-SDM (v093).
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000u32);
+    env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+    env.backend
+        .set(polyisa_guest_x86::sem::st_exp_ref(0), 0x4000u16);
+    env.backend.set(
+        polyisa_guest_x86::sem::st_sig_ref(0),
+        (1u64 << 63) | (1u64 << 62),
+    );
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0xDD, 0x5C, 0x24, 0x08])
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x1004 });
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::top_ref()), 1);
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)), 0);
+    let acc = polyisa_mem::Access {
+        endian: polyisa_mem::Endian::Le,
+        align: polyisa_mem::Align::Unaligned,
+        kind: polyisa_mem::AccessKind::DataRead,
+    };
+    let mut back = [0u8; 8];
+    env.backend
+        .mem
+        .read(VirtAddr(0x2008), &mut back, acc)
+        .unwrap();
+    assert_eq!(u64::from_le_bytes(back), 0x4008_0000_0000_0000);
+}

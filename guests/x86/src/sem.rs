@@ -10854,6 +10854,111 @@ pub fn fmulp_st<B: Backend>(b: &mut B, i: u8) -> Flow<B> {
     Ok(())
 }
 
+/// 80 ビットを倍精度へ丸める。非正規化数はゼロにする。
+fn f80_to_f64<B: Backend>(b: &mut B, sig: B::V<W64>, exp: B::V<W16>) -> B::V<W64> {
+    let exp64 = b.zext::<W16, W64>(exp);
+    let mask15 = b.konst::<W64>(0x7fff);
+    let ea = b.and::<W64>(exp64, mask15);
+    let s15 = b.konst::<W64>(15);
+    let sign = b.shr_l::<W64>(exp64, s15);
+    let s63 = b.konst::<W64>(63);
+    let sign_bit = b.shl::<W64>(sign, s63);
+    let zero = b.konst::<W64>(0);
+    let one = b.konst::<W64>(1);
+    let special = b.konst::<W64>(0x7fff);
+    let is_special = b.cmp::<W64>(Cmp::Eq, ea, special);
+    let is_zero = b.cmp::<W64>(Cmp::Eq, ea, zero);
+    let s11 = b.konst::<W64>(11);
+    let kept = b.shr_l::<W64>(sig, s11);
+    let m52 = b.konst::<W64>((1u64 << 52) - 1);
+    let s10 = b.konst::<W64>(10);
+    let sig_r = b.shr_l::<W64>(sig, s10);
+    let round_bit = b.and::<W64>(sig_r, one);
+    let sticky_mask = b.konst::<W64>((1u64 << 10) - 1);
+    let sticky_bits = b.and::<W64>(sig, sticky_mask);
+    let sticky = b.cmp::<W64>(Cmp::Ne, sticky_bits, zero);
+    let lsb = b.and::<W64>(kept, one);
+    let sticky_n = b.select::<W64>(sticky, one, zero);
+    let tie = b.or::<W64>(sticky_n, lsb);
+    let round_set = b.cmp::<W64>(Cmp::Eq, round_bit, one);
+    let up_n = b.select::<W64>(round_set, tie, zero);
+    let do_up = b.cmp::<W64>(Cmp::Ne, up_n, zero);
+    let kept_plus = b.add::<W64>(kept, one);
+    let kept_r = b.select::<W64>(do_up, kept_plus, kept);
+    let s53 = b.konst::<W64>(53);
+    let ov_bit = b.shr_l::<W64>(kept_r, s53);
+    let round_ov = b.cmp::<W64>(Cmp::Eq, ov_bit, one);
+    let frac_raw = b.and::<W64>(kept_r, m52);
+    let frac = b.select::<W64>(round_ov, zero, frac_raw);
+    let bias_delta = b.konst::<W64>(15360);
+    let exp_base = b.sub::<W64>(ea, bias_delta);
+    let exp_plus = b.add::<W64>(exp_base, one);
+    let exp_f = b.select::<W64>(round_ov, exp_plus, exp_base);
+    let under = b.cmp::<W64>(Cmp::LtU, ea, bias_delta);
+    let exp_is_zero = b.cmp::<W64>(Cmp::Eq, exp_f, zero);
+    let under_n = b.select::<W64>(under, one, zero);
+    let exp0_n = b.select::<W64>(exp_is_zero, one, zero);
+    let under_or = b.or::<W64>(under_n, exp0_n);
+    let is_under = b.cmp::<W64>(Cmp::Ne, under_or, zero);
+    let exp_max = b.konst::<W64>(2047);
+    let over = b.cmp::<W64>(Cmp::GeU, exp_f, exp_max);
+    let s52 = b.konst::<W64>(52);
+    let exp_shift = b.shl::<W64>(exp_f, s52);
+    let bits_num = b.or::<W64>(exp_shift, frac);
+    let inf_exp = b.shl::<W64>(exp_max, s52);
+    let bits_over = b.select::<W64>(over, inf_exp, bits_num);
+    let bits_fin = b.select::<W64>(is_under, zero, bits_over);
+    let bits_zero = b.select::<W64>(is_zero, zero, bits_fin);
+    let frac80 = b.konst::<W64>((1u64 << 63) - 1);
+    let frac_bits = b.and::<W64>(sig, frac80);
+    let is_nan = b.cmp::<W64>(Cmp::Ne, frac_bits, zero);
+    let nan_bits = b.konst::<W64>(0x7ff8_0000_0000_0000);
+    let bits_special = b.select::<W64>(is_nan, nan_bits, inf_exp);
+    let bits_mag = b.select::<W64>(is_special, bits_special, bits_zero);
+    b.or::<W64>(bits_mag, sign_bit)
+}
+
+fn pop_st<B: Backend>(b: &mut B, top: B::V<W16>) -> Flow<B> {
+    let zero64 = b.konst::<W64>(0);
+    let zero16 = b.konst::<W16>(0);
+    for slot in 0..8 {
+        let idx = b.konst::<W16>(slot as u16);
+        let hit = b.cmp::<W16>(Cmp::Eq, top, idx);
+        let old_sig = b.get(st_sig_ref(slot));
+        let old_exp = b.get(st_exp_ref(slot));
+        let new_sig = b.select::<W64>(hit, zero64, old_sig);
+        let new_exp = b.select::<W16>(hit, zero16, old_exp);
+        b.set(st_sig_ref(slot), new_sig);
+        b.set(st_exp_ref(slot), new_exp);
+    }
+    let one = b.konst::<W16>(1);
+    let inc = b.add::<W16>(top, one);
+    let seven = b.konst::<W16>(7);
+    let new_top = b.and::<W16>(inc, seven);
+    b.set(top_ref(), new_top);
+    Ok(())
+}
+
+/// FSTP m64 [base+disp8] (DD /3 SIB mod=01, no_index)。seq 0x4d3169 対応.
+pub fn fstp_m64_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8) -> Flow<B> {
+    let top = b.get(top_ref());
+    let (sig, exp) = read_st(b, top);
+    let bits = f80_to_f64(b, sig, exp);
+    let addr = eff_addr(b, base, disp);
+    b.store::<W64>(addr, bits, DATA_WRITE)?;
+    pop_st(b, top)
+}
+
+/// FSTP m64 [base+index*scale+disp8] (DD /3 SIB mod=01)。
+pub fn fstp_m64_sibd<B: Backend>(b: &mut B, base: Gpr, idx: Gpr, shift: u32, disp: i8) -> Flow<B> {
+    let top = b.get(top_ref());
+    let (sig, exp) = read_st(b, top);
+    let bits = f80_to_f64(b, sig, exp);
+    let addr = sib_addr_scaled(b, shift, disp as i32, base, idx);
+    b.store::<W64>(addr, bits, DATA_WRITE)?;
+    pop_st(b, top)
+}
+
 /// FLDCW m16 [base] (D9 /5 mod=00)。x87 制御ワードを読む.
 pub fn fldcw_memnd<B: Backend>(b: &mut B, base: Gpr) -> Flow<B> {
     let addr = read64(b, base);

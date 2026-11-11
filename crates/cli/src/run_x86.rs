@@ -877,7 +877,15 @@ fn fetch_len(
             let s = second?;
             let md = s >> 6;
             let reg = (s >> 3) & 7;
-            if md == 3 && reg == 3 { Some(2) } else { None }
+            let rm = s & 7;
+            if md == 3 && reg == 3 {
+                Some(2)
+            } else if reg == 3 && md == 1 && rm == 4 {
+                // FSTP m64 SIB+disp8。seq 0x4d3169 の DD 5C 24 08。
+                Some(4)
+            } else {
+                None
+            }
         }
         // C7 /0 (MOV r/m,imm32 系)。SIB mod=00 は直接番地 (base=101) のみ。
         // has66 (66 C7) は imm16 のため 2B 短くなる.
@@ -2957,6 +2965,14 @@ fn dispatch<B: Backend>(
                 (Gpr(rm_f - 4), true)
             };
             sem::and_m8_r8(b, dst, dst_high, src, src_high)
+        }
+        Insn::FstpM64Sibd => {
+            // DD /3 SIB mod=01。seq 0x4d3169 の fstpl 0x8(%rsp)。
+            if no_index() {
+                sem::fstp_m64_mem8(b, sib_base(), disp8())
+            } else {
+                sem::fstp_m64_sibd(b, sib_base(), sib_idx(), sib_shift(), disp8())
+            }
         }
         Insn::FmulpSt => {
             // DE C8+i。seq 0x4018c7 の DE C9 は FMULP ST(1)。
