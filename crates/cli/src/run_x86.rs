@@ -2138,6 +2138,8 @@ pub fn run_mode(
                     | Insn::MovEaxMemnd
                     // MOV r16, [base+disp8] (66 8B mod=01)。pgrep 0x44b629 の movw 0x12(%r14), %dx。
                     | Insn::MovEaxMem8
+                    // CMP m16,imm8 [base] (66 83 /7 mod=00)。ping 0x4be1f1 の cmpw $2, (%rdi)。
+                    | Insn::CmpRmImm8Memnd
                     // ADD r16, [base] (66 03 /r mod=00).
                     | Insn::AddRMemnd
                     // AND m16,imm8 SIB+disp8 (66 83 /4 mod=01).
@@ -5541,7 +5543,12 @@ fn dispatch<B: Backend>(
         Insn::CmpRmImm8Memnd => {
             // mod=00 m8 形：imm8 は最下位.
             let i8 = (word & 0xff) as u8 as i8;
-            sem::cmp_rm32_imm8_memnd(b, rm(), i8)
+            if has66 {
+                // 66 83 /7。ping 0x4be1f1 の cmpw $2, (%rdi)。
+                sem::cmp_m16_imm8_memnd(b, rm(), i8)
+            } else {
+                sem::cmp_rm32_imm8_memnd(b, rm(), i8)
+            }
         }
         Insn::CmpRmImm8Sib => {
             // 83 /7 SIB mod=00 [base],imm8 (32b)。no_index は base のみ、索引ありは SIB スケール.
