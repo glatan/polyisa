@@ -7621,6 +7621,42 @@ pub fn or_r32_mem8<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, disp: i8) -> Flow
     Ok(())
 }
 
+/// OR r32, [base+index*scale+disp8] (0B /r SIB mod=01)。
+pub fn or_r32_sibd_indexed<B: Backend>(
+    b: &mut B,
+    dst: Gpr,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i8,
+) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, disp as i32, base, idx);
+    let y: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let x = read(b, dst);
+    let v = b.or::<W32>(x, y);
+    write(b, dst, v);
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// OR r64, [base+index*scale+disp8] (0B /r SIB mod=01, REX.W)。
+pub fn or_r64_sibd_indexed<B: Backend>(
+    b: &mut B,
+    dst: Gpr,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i8,
+) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, disp as i32, base, idx);
+    let y: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let x = read64(b, dst);
+    let v = b.or::<W64>(x, y);
+    write64(b, dst, v);
+    update_logic_flags(b, v);
+    Ok(())
+}
+
 /// OR r64, [base+disp8] (0B /r mod=01, REX.W)。
 pub fn or_r64_mem8<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, disp: i8) -> Flow<B> {
     let addr = eff_addr(b, base, disp);

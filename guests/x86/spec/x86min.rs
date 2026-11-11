@@ -374,6 +374,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         // ADD r32/r64, m32/m64 SIB+disp8 (03 mod=01)。index有無は問わずdispatchで切替.
         // sha1sum 0x5cab68 対応。REX.W で64bit.
         ("add_r_sibd", "F1", "00000011 01...100 ........ ........", "add r, m", "alu"),
+        // OR r32/r64, m32/m64 SIB+disp8 (0B mod=01)。sed 0x4c9424 対応。REX.W で64bit.
+        ("or_r_sibd", "F1", "00001011 01...100 ........ ........", "or r, m", "alu"),
         // ADD m32,r32 SIB+disp32 (01 mod=10)。basename 0x48995c 対応.
         ("add_m32_r32_sibd32", "D32", "00000001 10...100 ........ ................................", "add m, r", "alu"),
         // SUB m32/m64,r32/r64 SIB+disp8 (29 mod=01)。wc 0x49e1db 対応。REX.W で64bit.

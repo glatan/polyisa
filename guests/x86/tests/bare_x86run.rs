@@ -7537,3 +7537,27 @@ fn run_cmp_rm_imm8_sibd_rbp() {
         0x40
     );
 }
+
+#[test]
+fn run_or_r32_sibd_r12() {
+    // 41 0B 44 24 18 = orl 0x18(%r12), %eax。0x7|0x10=0x17。sed 0x4c9424。
+    // Ref: SPEC-X86-INTEL-SDM (v093).
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2018), &0x10u32.to_le_bytes())
+        .unwrap();
+    env.backend.set(Gpr(12).state(), 0x2000u32);
+    env.backend.set(Gpr(0).state(), 7u32);
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0x41, 0x0B, 0x44, 0x24, 0x18])
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x1005 });
+    assert_eq!(env.backend.get(Gpr(0).state()), 0x17u32);
+}
