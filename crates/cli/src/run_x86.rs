@@ -7342,8 +7342,10 @@ pub struct CliLinux {
     rseq_addr: u64,
     /// ゲスト実行ファイルのホストパス。/proc/self/exe の readlinkat に答える.
     exe_path: String,
-    /// getdents64 で読み終わった fd。一度に全件返し、2回目以降は 0 (EOF) を返す.
+    /// getdents64 で最後まで読んだ fd。次の呼び出しは 0 (EOF) を返す.
     dir_done: Vec<u32>,
+    /// getdents64 の続き。fd と、次に返す名前の添字。
+    dir_pos: Vec<(u32, usize)>,
     /// openat で開いたホストパス。ゲスト fd とホストの fd 番号は一致しない。
     fd_paths: Vec<Option<String>>,
     /// 標準 fd に付け替えたファイルのホストパス。
@@ -7475,6 +7477,25 @@ impl CliLinux {
             *slot = None;
         }
         self.dir_done.retain(|d| *d != fd);
+        self.dir_pos.retain(|(id, _)| *id != fd);
+    }
+
+    /// getdents64 で次に返す名前の添字。記録がなければ先頭。
+    fn dir_cursor(&self, fd: u32) -> usize {
+        self.dir_pos
+            .iter()
+            .find(|(id, _)| *id == fd)
+            .map(|(_, n)| *n)
+            .unwrap_or(0)
+    }
+
+    /// getdents64 の続き位置を記録する。
+    fn set_dir_cursor(&mut self, fd: u32, next: usize) {
+        if let Some(slot) = self.dir_pos.iter_mut().find(|(id, _)| *id == fd) {
+            slot.1 = next;
+        } else {
+            self.dir_pos.push((fd, next));
+        }
     }
 
     /// fd 1 へ書く。capture_out があるときはそこへ溜める。
@@ -7575,6 +7596,7 @@ impl CliLinux {
             rseq_addr: self.rseq_addr,
             exe_path: self.exe_path.clone(),
             dir_done: self.dir_done.clone(),
+            dir_pos: self.dir_pos.clone(),
             fd_paths: self.fd_paths.clone(),
             std_paths: self.std_paths.clone(),
             capture_out: self.capture_out.clone(),
@@ -8320,25 +8342,30 @@ fn sys_mmap(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOu
     Some(TrapOutcome::Handled)
 }
 
-fn sys_set_tid_address(
-    _sys: &mut CliLinux,
-    env: &mut BareEnv,
-    _cx: &SysCtx,
-) -> Option<TrapOutcome> {
-    // 単一スレッド実装としてホスト PID を TID として返す。
-    // 本物は clear_child_tid を記録し終了時に書き込むが、試作では値返却のみ行う。
-    set64(env, Gpr(0), std::process::id() as u64);
+/// ゲストのプロセス識別子。未採番のときはホストの pid を返す。
+fn guest_pid(sys: &CliLinux) -> u64 {
+    if sys.pid != 0 {
+        sys.pid
+    } else {
+        u64::from(std::process::id())
+    }
+}
+
+fn sys_set_tid_address(sys: &mut CliLinux, env: &mut BareEnv, _cx: &SysCtx) -> Option<TrapOutcome> {
+    // 本物は clear_child_tid を記録し終了時に書き込む。試作は識別子の返却だけを行う。
+    // 単一スレッドなので tid は pid と同じ値である。
+    set64(env, Gpr(0), guest_pid(sys));
     Some(TrapOutcome::Handled)
 }
 
-fn sys_gettid(_sys: &mut CliLinux, env: &mut BareEnv, _cx: &SysCtx) -> Option<TrapOutcome> {
-    // 単一スレッド実装としてホスト PID を TID として返す。
-    set64(env, Gpr(0), std::process::id() as u64);
+fn sys_gettid(sys: &mut CliLinux, env: &mut BareEnv, _cx: &SysCtx) -> Option<TrapOutcome> {
+    // 単一スレッドなので tid は pid と同じ値である。
+    set64(env, Gpr(0), guest_pid(sys));
     Some(TrapOutcome::Handled)
 }
 
-fn sys_getpid(_sys: &mut CliLinux, env: &mut BareEnv, _cx: &SysCtx) -> Option<TrapOutcome> {
-    set64(env, Gpr(0), std::process::id() as u64);
+fn sys_getpid(sys: &mut CliLinux, env: &mut BareEnv, _cx: &SysCtx) -> Option<TrapOutcome> {
+    set64(env, Gpr(0), guest_pid(sys));
     Some(TrapOutcome::Handled)
 }
 
@@ -8418,7 +8445,8 @@ fn sys_getcwd(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Tra
 
 fn sys_getdents64(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     // getdents64(fd, dirp, count)。ホストのディレクトリ列挙を
-    // linux_dirent64 形式で書く。一度に全件返し、2回目以降は 0 を返す.
+    // linux_dirent64 形式で書く。入り切った分だけ返し、残りは次の呼び出しに残す。
+    // 1 件も入らなければ EINVAL で、読み位置は進めない。最後まで読んだあとは 0 を返す。
     // d_ino は 0、d_off は累積オフセット、種別は dir/file/link のみ判別する.
     // Ref: SRC-LINUX (7.3).
     let fd = get64(env, cx.r_a) as u32;
@@ -8473,9 +8501,18 @@ fn sys_getdents64(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<
     }
     // 名前順に並べ替えて決定的にする（カーネルの順序は不定だが、ls は自前で整列する）。
     names[2..].sort_by(|a, b| a.0.cmp(&b.0));
+    let start = sys.dir_cursor(fd);
+    if start >= names.len() {
+        if !sys.dir_done.contains(&fd) {
+            sys.dir_done.push(fd);
+        }
+        set64(env, Gpr(0), 0);
+        return Some(TrapOutcome::Handled);
+    }
     let mut out = Vec::new();
     let mut off = 0u64;
-    for (name, ty) in &names {
+    let mut taken = 0usize;
+    for (name, ty) in names.iter().skip(start) {
         let reclen = ((19 + name.len() + 1) as u64).next_multiple_of(8);
         if out.len() as u64 + reclen > count {
             break;
@@ -8490,11 +8527,22 @@ fn sys_getdents64(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<
         while !(out.len() as u64).is_multiple_of(8) {
             out.push(0);
         }
+        taken += 1;
     }
-    if !out.is_empty() && env.backend.mem.write(VirtAddr(dirp), &out).is_err() {
+    if taken == 0 {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    if env.backend.mem.write(VirtAddr(dirp), &out).is_err() {
         return Some(TrapOutcome::Unimplemented);
     }
-    sys.dir_done.push(fd);
+    let next = start + taken;
+    if next >= names.len() {
+        sys.dir_done.push(fd);
+        sys.dir_pos.retain(|(id, _)| *id != fd);
+    } else {
+        sys.set_dir_cursor(fd, next);
+    }
     set64(env, Gpr(0), out.len() as u64);
     Some(TrapOutcome::Handled)
 }
@@ -9675,17 +9723,23 @@ fn sys_execve(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Trap
 }
 
 fn sys_wait4(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // WNOHANG。子がまだ終了していなければ 0 を返す。
+    const WNOHANG: u64 = 1;
     let which = get64(env, cx.r_a) as i64;
     let status_ptr = get64(env, cx.r_b);
-    let run_child = sys
-        .parked
-        .as_ref()
-        .is_some_and(|child| which == -1 || which as u64 == child.linux.pid);
+    let options = get64(env, cx.r_c);
+    let wnohang = options & WNOHANG != 0;
+    let run_child = !wnohang
+        && sys
+            .parked
+            .as_ref()
+            .is_some_and(|child| which == -1 || which as u64 == child.linux.pid);
     if run_child && let Some(mut child) = sys.parked.take() {
         let entry = eip_of(&mut child.env);
         let is64 = child.linux.is64;
         let out = run_mode(&mut child.env, entry, &mut child.linux, 30_000_000, is64);
         if !matches!(out, Outcome::Exit(_)) {
+            sys.parked = Some(child);
             return Some(TrapOutcome::Unimplemented);
         }
     }
@@ -9710,9 +9764,17 @@ fn sys_wait4(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapO
             set64(env, Gpr(0), pid.0);
             Some(TrapOutcome::Handled)
         }
-        polyisa_kernel::Reap::Pending | polyisa_kernel::Reap::NoChild => {
+        polyisa_kernel::Reap::NoChild => {
             set64(env, Gpr(0), cx.neg(ECHILD));
             Some(TrapOutcome::Handled)
+        }
+        polyisa_kernel::Reap::Pending => {
+            if wnohang {
+                set64(env, Gpr(0), 0);
+                Some(TrapOutcome::Handled)
+            } else {
+                Some(TrapOutcome::Unimplemented)
+            }
         }
     }
 }
@@ -10544,7 +10606,21 @@ mod tests {
         set64(&mut env, Gpr(10), 0);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), 3);
-        // getdents64(3, 0x400, 0x500) は 0 より大きいバイト数を返す。
+        // 1 件も入らない count は EINVAL。読み位置は進めない。
+        set64(&mut env, Gpr(0), abi::GETDENTS64);
+        set64(&mut env, Gpr(7), 3);
+        set64(&mut env, Gpr(6), 0x400);
+        set64(&mut env, Gpr(2), 8);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EINVAL));
+        // "." 1 件だけ入る。残りは次の呼び出しに残る。
+        set64(&mut env, Gpr(0), abi::GETDENTS64);
+        set64(&mut env, Gpr(7), 3);
+        set64(&mut env, Gpr(6), 0x400);
+        set64(&mut env, Gpr(2), 24);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 24);
+        // getdents64(3, 0x400, 0x500) は残りの件数を返す。
         set64(&mut env, Gpr(0), abi::GETDENTS64);
         set64(&mut env, Gpr(7), 3);
         set64(&mut env, Gpr(6), 0x400);
@@ -10577,6 +10653,83 @@ mod tests {
         set64(&mut env, Gpr(0), abi::GETPID);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), std::process::id() as u64);
+    }
+
+    #[test]
+    fn clone_pid_matches_getpid() {
+        use polyisa_os_linux::x86_64 as abi;
+        let mut sys = CliLinux::x86_64();
+        let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_x86::CpuState>());
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.set(polyisa_guest_x86::sem::eip_ref(), 0x1000);
+        // 子は未実装命令で止まり、wait4 は子を戻す。
+        env.backend.mem.write(VirtAddr(0x1002), &[0x06]).unwrap();
+        set64(&mut env, Gpr(0), abi::CLONE);
+        set64(&mut env, Gpr(7), 17);
+        set64(&mut env, Gpr(6), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let child = get64(&mut env, Gpr(0));
+        assert!(child > 1, "child pid {child}");
+        set64(&mut env, Gpr(0), abi::GETPID);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), sys.pid);
+        assert_ne!(sys.pid, u64::from(std::process::id()));
+        set64(&mut env, Gpr(0), abi::GETTID);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), sys.pid);
+        // 子は終了しない。wait4 のあとでも parked に残る。
+        set64(&mut env, Gpr(0), abi::WAIT4);
+        set64(&mut env, Gpr(7), child);
+        set64(&mut env, Gpr(6), 0);
+        set64(&mut env, Gpr(2), 0);
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0),
+            TrapOutcome::Unimplemented
+        ));
+        assert!(sys.parked.is_some());
+    }
+
+    #[test]
+    fn wait4_wnohang_leaves_child_then_reaps() {
+        use polyisa_os_linux::x86_64 as abi;
+        let mut sys = CliLinux::x86_64();
+        let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_x86::CpuState>());
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.set(polyisa_guest_x86::sem::eip_ref(), 0x1000);
+        let child_code: &[u8] = &[
+            0x48, 0xC7, 0xC0, 60, 0, 0, 0, // mov rax, 60
+            0x48, 0xC7, 0xC7, 9, 0, 0, 0, // mov rdi, 9
+            0x0F, 0x05, // syscall
+        ];
+        env.backend.mem.write(VirtAddr(0x1002), child_code).unwrap();
+        set64(&mut env, Gpr(0), abi::CLONE);
+        set64(&mut env, Gpr(7), 17);
+        set64(&mut env, Gpr(6), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let child = get64(&mut env, Gpr(0));
+        // WNOHANG では子を走らせず 0 を返す。ECHILD ではない。
+        set64(&mut env, Gpr(0), abi::WAIT4);
+        set64(&mut env, Gpr(7), child);
+        set64(&mut env, Gpr(6), 0x1800);
+        set64(&mut env, Gpr(2), 1);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        assert!(sys.parked.is_some());
+        set64(&mut env, Gpr(0), abi::WAIT4);
+        set64(&mut env, Gpr(7), child);
+        set64(&mut env, Gpr(6), 0x1800);
+        set64(&mut env, Gpr(2), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), child);
+        let mut st = [0u8; 4];
+        env.backend
+            .mem
+            .read(VirtAddr(0x1800), &mut st, data_access())
+            .unwrap();
+        assert_eq!(u32::from_le_bytes(st), 9 << 8);
+        assert!(sys.parked.is_none());
     }
 
     #[test]
