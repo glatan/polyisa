@@ -25,6 +25,8 @@ pub enum Outcome {
     Unimplemented { eip: u32, word: u128 },
     /// 上限を超えた。
     StepLimit { eip: u32 },
+    /// 実行できるスレッドがない。待ちの対象は報告済み。
+    Deadlock,
 }
 
 /// トラップの処理結果。
@@ -1839,7 +1841,7 @@ pub fn run_mode(
                     }
                     TrapOutcome::Blocked => {
                         if !sys.on_block(env) {
-                            return Outcome::Unimplemented { eip, word };
+                            return Outcome::Deadlock;
                         }
                     }
                     TrapOutcome::Unimplemented => {
@@ -7213,6 +7215,7 @@ pub fn run_image_x86(
             Err(format!("unimplemented at {eip:#x}: {word:#x}"))
         }
         Outcome::StepLimit { eip } => Err(format!("step limit at {eip:#x}")),
+        Outcome::Deadlock => Err("deadlock".to_string()),
     }
 }
 
@@ -7294,6 +7297,7 @@ pub fn run_image_x86_64(
             Err(format!("unimplemented at {eip:#x}: {word:#x}"))
         }
         Outcome::StepLimit { eip } => Err(format!("step limit at {eip:#x}")),
+        Outcome::Deadlock => Err("deadlock".to_string()),
     }
 }
 
@@ -7566,6 +7570,74 @@ impl CliLinux {
         }
         if self.pipe_wait == Some(id) {
             self.pipe_wait = None;
+        }
+    }
+
+    /// 実行できない理由を一度報告する。
+    fn note_deadlock(&self) {
+        eprintln!("run: deadlock");
+        for (id, wait) in self.queue.0.borrow().meta.blocked() {
+            match wait {
+                polyisa_kernel::ThreadWait::Child { which } => {
+                    eprintln!("run: pid {} waits for child {which}", id.0);
+                }
+                polyisa_kernel::ThreadWait::Pipe { id: pipe } => {
+                    eprintln!("run: pid {} waits for pipe {pipe}", id.0);
+                }
+            }
+        }
+    }
+
+    /// 止めたスレッドの実行環境を外し、パイプの端を閉じる。
+    fn release_parked(&mut self, pid: u64) {
+        let queue = self.queue.clone();
+        let mut task = {
+            let mut borrowed = queue.0.borrow_mut();
+            let Some(idx) = borrowed
+                .parked
+                .iter()
+                .position(|task| task.linux.pid == pid)
+            else {
+                return;
+            };
+            borrowed.parked.remove(idx)
+        };
+        let fds: Vec<u32> = task
+            .linux
+            .pipe_ends
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, end)| end.map(|_| (idx as u32) + 3))
+            .collect();
+        for fd in fds {
+            task.linux.close_pipe(fd);
+        }
+    }
+
+    /// この子を待っているスレッドを、再び実行できるようにする。
+    fn wake_child_waiters(&mut self, child: polyisa_kernel::ProcessId) {
+        let queue = self.queue.clone();
+        let waiters: Vec<u64> = queue
+            .0
+            .borrow()
+            .parked
+            .iter()
+            .filter_map(|task| {
+                let which = task.linux.wait.as_ref().map(|wait| wait.which)?;
+                if self.procs.borrow().waits_for(
+                    polyisa_kernel::ProcessId(task.linux.pid),
+                    which,
+                    child,
+                ) {
+                    Some(task.linux.pid)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let mut queue = queue.0.borrow_mut();
+        for pid in waiters {
+            queue.meta.unblock(polyisa_kernel::ThreadId(pid));
         }
     }
 
@@ -7870,13 +7942,16 @@ impl CliLinux {
         let target = {
             let queue = self.queue.0.borrow();
             let waiter = queue.parked.iter().find_map(|task| {
-                task.linux.wait.as_ref().and_then(|wait| {
-                    if wait.which == -1 || wait.which as u64 == me.0 {
-                        Some(task.linux.pid)
-                    } else {
-                        None
-                    }
-                })
+                let which = task.linux.wait.as_ref().map(|wait| wait.which)?;
+                if self.procs.borrow().waits_for(
+                    polyisa_kernel::ProcessId(task.linux.pid),
+                    which,
+                    me,
+                ) {
+                    Some(task.linux.pid)
+                } else {
+                    None
+                }
             });
             waiter.or_else(|| queue.meta.least_runnable().map(|id| id.0))
         };
@@ -8889,13 +8964,8 @@ fn sys_kill(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOu
     }
     let me = sys.ensure_self();
     let target = polyisa_kernel::ProcessId(pid as u64);
-    if !sys.procs.borrow().owns(me, target) {
-        let errno = if sys.procs.borrow().pgid(target).is_none() {
-            ESRCH
-        } else {
-            EPERM
-        };
-        set64(env, Gpr(0), cx.neg(errno));
+    if sys.procs.borrow().pgid(target).is_none() {
+        set64(env, Gpr(0), cx.neg(ESRCH));
         return Some(TrapOutcome::Handled);
     }
     sys.procs.borrow_mut().kill(target, SIGKILL as u32);
@@ -8904,6 +8974,10 @@ fn sys_kill(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOu
         .borrow_mut()
         .meta
         .mark_exited(polyisa_kernel::ThreadId(target.0));
+    if target != me {
+        sys.release_parked(target.0);
+    }
+    sys.wake_child_waiters(target);
     if target == me {
         return Some(TrapOutcome::Exit(SIGKILL as u32));
     }
@@ -10309,12 +10383,17 @@ fn sys_wait4(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapO
     let status_ptr = get64(env, cx.r_b);
     let options = get64(env, cx.r_c);
     let wnohang = options & WNOHANG != 0;
-    let parent = if sys.pid == 0 {
+    if sys.pid == 0 {
         set64(env, Gpr(0), cx.neg(ECHILD));
         return Some(TrapOutcome::Handled);
-    } else {
-        polyisa_kernel::ProcessId(sys.pid)
-    };
+    }
+    sys.wait = None;
+    sys.queue
+        .0
+        .borrow_mut()
+        .meta
+        .unblock(polyisa_kernel::ThreadId(sys.pid));
+    let parent = polyisa_kernel::ProcessId(sys.pid);
     match sys.procs.borrow_mut().try_reap(parent, which) {
         polyisa_kernel::Reap::Exited { pid, code, signal } => {
             if status_ptr != 0 {
@@ -10437,7 +10516,14 @@ impl TrapHandler for CliLinux {
     }
 
     fn on_block(&mut self, env: &mut BareEnv) -> bool {
-        self.preempt(env)
+        let blocked = self.wait.is_some() || self.pipe_wait.is_some();
+        if self.preempt(env) {
+            return true;
+        }
+        if blocked {
+            self.note_deadlock();
+        }
+        false
     }
 
     fn take_exit(&mut self, env: &mut BareEnv, code: u32) -> bool {
@@ -12609,6 +12695,169 @@ mod tests {
         push_mov_imm(&mut code, 0xC0, 62);
         code.extend_from_slice(&[0x0F, 0x05]);
         push_mov_imm(&mut code, 0xC6, 0x1800);
+        push_mov_imm(&mut code, 0xC2, 0);
+        push_mov_imm(&mut code, 0xC0, 61);
+        code.extend_from_slice(&[0x0F, 0x05, 0x8B, 0x06, 0x48, 0x89, 0xC7]);
+        push_mov_imm(&mut code, 0xC0, 60);
+        code.extend_from_slice(&[0x0F, 0x05]);
+        env.backend.mem.write(VirtAddr(0x1000), &code).unwrap();
+        let out = run_mode(&mut env, 0x1000, &mut sys, 8_000, true);
+        assert_eq!(out, Outcome::Exit(9));
+    }
+
+    #[test]
+    fn kill_drops_the_parked_child() {
+        use polyisa_os_linux::x86_64 as abi;
+        let mut sys = CliLinux::x86_64();
+        let mut env = bare();
+        set64(&mut env, Gpr(0), abi::CLONE);
+        set64(&mut env, Gpr(7), 17);
+        set64(&mut env, Gpr(6), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let child = get64(&mut env, Gpr(0));
+        assert!(sys.task_pids().contains(&child));
+        set64(&mut env, Gpr(0), abi::KILL);
+        set64(&mut env, Gpr(7), child);
+        set64(&mut env, Gpr(6), 9);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        assert!(!sys.task_pids().contains(&child));
+        set64(&mut env, Gpr(0), abi::WAIT4);
+        set64(&mut env, Gpr(7), child);
+        set64(&mut env, Gpr(6), 0x100);
+        set64(&mut env, Gpr(2), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), child);
+        let mut status = [0u8; 4];
+        env.backend
+            .mem
+            .read(VirtAddr(0x100), &mut status, data_access())
+            .unwrap();
+        assert_eq!(u32::from_le_bytes(status), 9);
+    }
+
+    #[test]
+    fn wait4_zero_reaps_a_child_in_the_same_group() {
+        use polyisa_os_linux::x86_64 as abi;
+        let mut sys = CliLinux::x86_64();
+        let mut env = bare();
+        set64(&mut env, Gpr(0), abi::CLONE);
+        set64(&mut env, Gpr(7), 17);
+        set64(&mut env, Gpr(6), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let child = get64(&mut env, Gpr(0));
+        set64(&mut env, Gpr(0), abi::WAIT4);
+        set64(&mut env, Gpr(7), 0);
+        set64(&mut env, Gpr(6), 0);
+        set64(&mut env, Gpr(2), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(ECHILD));
+        set64(&mut env, Gpr(0), abi::SETPGID);
+        set64(&mut env, Gpr(7), child);
+        set64(&mut env, Gpr(6), sys.pid);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        sys.procs
+            .borrow_mut()
+            .exit(polyisa_kernel::ProcessId(child), 4);
+        set64(&mut env, Gpr(0), abi::WAIT4);
+        set64(&mut env, Gpr(7), 0);
+        set64(&mut env, Gpr(6), 0x100);
+        set64(&mut env, Gpr(2), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), child);
+        let mut status = [0u8; 4];
+        env.backend
+            .mem
+            .read(VirtAddr(0x100), &mut status, data_access())
+            .unwrap();
+        assert_eq!(u32::from_le_bytes(status), 4 << 8);
+    }
+
+    #[test]
+    fn wait_and_empty_read_stop_as_deadlock() {
+        use polyisa_os_linux::x86_64 as abi;
+        let mut sys = CliLinux::x86_64();
+        let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_x86::CpuState>());
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        set64(&mut env, Gpr(0), abi::PIPE2);
+        set64(&mut env, Gpr(7), 0x1800);
+        set64(&mut env, Gpr(6), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let mut code = Vec::new();
+        push_mov_imm(&mut code, 0xC0, 56);
+        push_mov_imm(&mut code, 0xC7, 17);
+        push_mov_imm(&mut code, 0xC6, 0);
+        code.extend_from_slice(&[0x0F, 0x05, 0x48, 0x85, 0xC0]);
+        let jnz_at = code.len();
+        code.extend_from_slice(&[0x75, 0]);
+        push_mov_imm(&mut code, 0xC7, 3);
+        push_mov_imm(&mut code, 0xC6, 0x1810);
+        push_mov_imm(&mut code, 0xC2, 1);
+        push_mov_imm(&mut code, 0xC0, 0);
+        code.extend_from_slice(&[0x0F, 0x05]);
+        push_mov_imm(&mut code, 0xC0, 60);
+        push_mov_imm(&mut code, 0xC7, 0);
+        code.extend_from_slice(&[0x0F, 0x05]);
+        let parent_at = code.len();
+        code[jnz_at + 1] = u8::try_from(parent_at - (jnz_at + 2)).unwrap();
+        push_mov_imm(&mut code, 0xC7, u32::MAX);
+        push_mov_imm(&mut code, 0xC6, 0);
+        push_mov_imm(&mut code, 0xC2, 0);
+        push_mov_imm(&mut code, 0xC0, 61);
+        code.extend_from_slice(&[0x0F, 0x05]);
+        push_mov_imm(&mut code, 0xC0, 60);
+        push_mov_imm(&mut code, 0xC7, 0);
+        code.extend_from_slice(&[0x0F, 0x05]);
+        env.backend.mem.write(VirtAddr(0x1000), &code).unwrap();
+        let out = run_mode(&mut env, 0x1000, &mut sys, 8_000, true);
+        assert_eq!(out, Outcome::Deadlock);
+    }
+
+    #[test]
+    fn sibling_kill_wakes_a_waiting_parent() {
+        use polyisa_os_linux::x86_64 as abi;
+        let mut sys = CliLinux::x86_64();
+        let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_x86::CpuState>());
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        set64(&mut env, Gpr(0), abi::PIPE2);
+        set64(&mut env, Gpr(7), 0x1700);
+        set64(&mut env, Gpr(6), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let mut code = Vec::new();
+        push_mov_imm(&mut code, 0xC0, 56);
+        push_mov_imm(&mut code, 0xC7, 17);
+        push_mov_imm(&mut code, 0xC6, 0);
+        code.extend_from_slice(&[0x0F, 0x05, 0x48, 0x85, 0xC0]);
+        let jnz_a = code.len();
+        code.extend_from_slice(&[0x75, 0]);
+        push_mov_imm(&mut code, 0xC7, 3);
+        push_mov_imm(&mut code, 0xC6, 0x1810);
+        push_mov_imm(&mut code, 0xC2, 1);
+        push_mov_imm(&mut code, 0xC0, 0);
+        code.extend_from_slice(&[0x0F, 0x05]);
+        push_mov_imm(&mut code, 0xC0, 60);
+        push_mov_imm(&mut code, 0xC7, 0);
+        code.extend_from_slice(&[0x0F, 0x05]);
+        let after_a = code.len();
+        code[jnz_a + 1] = u8::try_from(after_a - (jnz_a + 2)).unwrap();
+        code.extend_from_slice(&[0x48, 0x89, 0xC3]);
+        push_mov_imm(&mut code, 0xC0, 56);
+        push_mov_imm(&mut code, 0xC7, 17);
+        push_mov_imm(&mut code, 0xC6, 0);
+        code.extend_from_slice(&[0x0F, 0x05, 0x48, 0x85, 0xC0]);
+        let jnz_b = code.len();
+        code.extend_from_slice(&[0x75, 0]);
+        code.extend_from_slice(&[0x48, 0x89, 0xDF]);
+        push_mov_imm(&mut code, 0xC6, 9);
+        push_mov_imm(&mut code, 0xC0, 62);
+        code.extend_from_slice(&[0x0F, 0x05, 0xEB, 0xFE]);
+        let parent_at = code.len();
+        code[jnz_b + 1] = u8::try_from(parent_at - (jnz_b + 2)).unwrap();
+        push_mov_imm(&mut code, 0xC7, u32::MAX);
+        push_mov_imm(&mut code, 0xC6, 0x1820);
         push_mov_imm(&mut code, 0xC2, 0);
         push_mov_imm(&mut code, 0xC0, 61);
         code.extend_from_slice(&[0x0F, 0x05, 0x8B, 0x06, 0x48, 0x89, 0xC7]);

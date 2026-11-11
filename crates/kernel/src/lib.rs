@@ -119,11 +119,21 @@ impl ProcessTable {
             .any(|proc| proc.id == id && proc.parent.is_none())
     }
 
-    /// `parent` の子を回収する。`which` が -1 のときはどの子でもよい。
-    /// 0 や正で一致しない識別子は子がいても `NoChild` である。
+    /// `which` がこの子を待っているか。`-1` はどの子でも、`0` は親と同じグループ、
+    /// 正は子の識別子、それより小さい値はプロセスグループの識別子である。
+    #[must_use]
+    pub fn waits_for(&self, parent: ProcessId, which: i64, child: ProcessId) -> bool {
+        let parent_pgid = self.pgid(parent);
+        let Some(proc) = self.procs.iter().find(|proc| proc.id == child) else {
+            return false;
+        };
+        child_selected(parent, parent_pgid, proc, which)
+    }
+
+    /// `parent` の子を回収する。一致する子がいても終了していなければ `Pending`。
     pub fn try_reap(&mut self, parent: ProcessId, which: i64) -> Reap {
-        let matches =
-            |proc: &Proc| proc.parent == Some(parent) && (which == -1 || which as u64 == proc.id.0);
+        let parent_pgid = self.pgid(parent);
+        let matches = |proc: &Proc| child_selected(parent, parent_pgid, proc, which);
         if let Some(idx) = self
             .procs
             .iter()
@@ -142,6 +152,22 @@ impl ProcessTable {
             Reap::NoChild
         }
     }
+}
+
+fn child_selected(parent: ProcessId, parent_pgid: Option<u64>, proc: &Proc, which: i64) -> bool {
+    if proc.parent != Some(parent) {
+        return false;
+    }
+    if which == -1 {
+        return true;
+    }
+    if which > 0 {
+        return which as u64 == proc.id.0;
+    }
+    if which == 0 {
+        return parent_pgid == Some(proc.pgid);
+    }
+    proc.pgid == which.unsigned_abs()
 }
 
 /// ゲストスレッドが待っている理由。アドレス空間は呼び出し側が持つ。
@@ -224,6 +250,15 @@ impl GuestScheduler {
         self.threads
             .iter()
             .any(|thread| thread.id == id && thread.exited)
+    }
+
+    /// 待ちに入っているスレッド。実行を止めるときに報告する。
+    #[must_use]
+    pub fn blocked(&self) -> Vec<(ThreadId, ThreadWait)> {
+        self.threads
+            .iter()
+            .filter_map(|thread| thread.wait.map(|wait| (thread.id, wait)))
+            .collect()
     }
 
     /// `current` の代わりに走らせるスレッド。`current` を続けるなら `None`。
@@ -466,6 +501,36 @@ mod tests {
         assert_eq!(table.pgid(child), Some(parent.0));
         assert!(!table.set_pgid(ProcessId(99), 1));
         assert!(!table.owns(parent, ProcessId(99)));
+    }
+
+    #[test]
+    fn wait_selects_a_process_group() {
+        let mut table = ProcessTable::default();
+        let parent = table.spawn(None);
+        let child = table.fork(parent);
+        let other = table.fork(parent);
+        assert_eq!(table.try_reap(parent, 0), Reap::NoChild);
+        assert_eq!(table.try_reap(parent, -(other.0 as i64)), Reap::Pending);
+        assert!(table.set_pgid(child, parent.0));
+        assert_eq!(table.try_reap(parent, 0), Reap::Pending);
+        table.exit(child, 7);
+        assert_eq!(
+            table.try_reap(parent, 0),
+            Reap::Exited {
+                pid: child,
+                code: 7,
+                signal: None,
+            }
+        );
+        table.exit(other, 1);
+        assert_eq!(
+            table.try_reap(parent, -(other.0 as i64)),
+            Reap::Exited {
+                pid: other,
+                code: 1,
+                signal: None,
+            }
+        );
     }
 
     #[test]
