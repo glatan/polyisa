@@ -603,6 +603,14 @@ pub fn build_model() -> polyisa_isadl::Model {
             "and r/m32, {imm}",
             "alu",
         ),
+        // AND m32/m64,imm32 SIB+disp8 (81 /4 mod=01)。script 0x47b0b7 の andl $0xfffffe00, 0x14(%rsp)。
+        (
+            "and_rm32_imm_sibd",
+            "F1",
+            "10000001 01100100 ........ ........ ................................",
+            "and r/m32, {imm}",
+            "alu",
+        ),
         // CMP m32,imm32 mod=01 [base+disp8] (81 /7)。SIBなし.
         (
             "cmp_rm32_imm_mem8",

@@ -403,6 +403,7 @@ fn text_applets_match_host() {
         &["less", f],
         &["ed", f],
         &["rdev"],
+        &["script"],
         &["printenv"],
         &["which", "true"],
         &["install", "-m", "644", f, installed_s],

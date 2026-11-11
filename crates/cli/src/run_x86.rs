@@ -5519,6 +5519,22 @@ fn dispatch<B: Backend>(
                 sem::or_rm32_imm_memnd(b, rm(), imm)
             }
         }
+        Insn::AndRm32ImmSibd => {
+            // 81 /4 SIB mod=01。script 0x47b0b7 の andl $0xfffffe00, 0x14(%rsp)。
+            let disp = ((word >> 32) & 0xff) as u8 as i8;
+            let imm = ((word & 0xffff_ffff) as u32).swap_bytes();
+            if no_index() {
+                if rex_w {
+                    sem::and_rm64_imm_mem8(b, sib_base(), disp, imm)
+                } else {
+                    sem::and_rm32_imm_mem8(b, sib_base(), disp, imm)
+                }
+            } else if rex_w {
+                sem::and_rm64_imm_sibd(b, sib_base(), sib_idx(), sib_shift(), disp, imm)
+            } else {
+                sem::and_rm32_imm_sibd(b, sib_base(), sib_idx(), sib_shift(), disp, imm)
+            }
+        }
         Insn::AndRm32ImmMem8 => {
             // 81 /4 mod=01 [base+disp8],imm32。echo/id 0x4c08a2 対応.
             let d8 = ((word >> 32) & 0xff) as u8 as i8;
