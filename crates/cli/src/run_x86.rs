@@ -940,7 +940,11 @@ fn fetch_len(
             let s = second?;
             let md = s >> 6;
             let reg = (s >> 3) & 7;
-            if md == 3 && reg == 1 { Some(2) } else { None }
+            if md == 3 && (reg == 1 || reg == 5) {
+                Some(2)
+            } else {
+                None
+            }
         }
         // DF /5 SIB mod=00 (FILD m64)。seq 0x4018c4 の DF 2C 24。base=5 は disp32。
         0xDF => {
@@ -3083,6 +3087,10 @@ fn dispatch<B: Backend>(
         Insn::FmulpSt => {
             // DE C8+i。seq 0x4018c7 の DE C9 は FMULP ST(1)。
             sem::fmulp_st(b, (word & 7) as u8)
+        }
+        Insn::FsubpSt => {
+            // DE E8+i。seq 0x4d0c51 の DE E9 は FSUBP ST(1), ST(0)。
+            sem::fsubp_st(b, (word & 7) as u8)
         }
         Insn::FildM64Sib => {
             // DF /5 SIB mod=00 [base+index*scale]。seq 0x4018c4 の fildq (%rsp)。

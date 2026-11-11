@@ -11707,6 +11707,47 @@ pub fn fmulp_st<B: Backend>(b: &mut B, i: u8) -> Flow<B> {
     Ok(())
 }
 
+/// FSUBP ST(i), ST(0) (DE E8+i)。ST(i) から ST(0) を引いて書き、スタックを一つ捨てる。seq 0x4d0c51 対応.
+pub fn fsubp_st<B: Backend>(b: &mut B, i: u8) -> Flow<B> {
+    let top = b.get(top_ref());
+    let (sig0, exp0) = read_st(b, top);
+    let ii = b.konst::<W16>(i as u16);
+    let summed = b.add::<W16>(top, ii);
+    let seven = b.konst::<W16>(7);
+    let dst = b.and::<W16>(summed, seven);
+    let (sig1, exp1) = read_st(b, dst);
+    let sign_mask = b.konst::<W16>(0x8000);
+    let neg_exp0 = b.xor::<W16>(exp0, sign_mask);
+    let (sig_d, exp_d) = add_ext(b, sig1, exp1, sig0, neg_exp0);
+    for slot in 0..8 {
+        let idx = b.konst::<W16>(slot as u16);
+        let hit = b.cmp::<W16>(Cmp::Eq, dst, idx);
+        let old_sig = b.get(st_sig_ref(slot));
+        let old_exp = b.get(st_exp_ref(slot));
+        let new_sig = b.select::<W64>(hit, sig_d, old_sig);
+        let new_exp = b.select::<W16>(hit, exp_d, old_exp);
+        b.set(st_sig_ref(slot), new_sig);
+        b.set(st_exp_ref(slot), new_exp);
+    }
+    let zero64 = b.konst::<W64>(0);
+    let zero16 = b.konst::<W16>(0);
+    for slot in 0..8 {
+        let idx = b.konst::<W16>(slot as u16);
+        let hit = b.cmp::<W16>(Cmp::Eq, top, idx);
+        let old_sig = b.get(st_sig_ref(slot));
+        let old_exp = b.get(st_exp_ref(slot));
+        let new_sig = b.select::<W64>(hit, zero64, old_sig);
+        let new_exp = b.select::<W16>(hit, zero16, old_exp);
+        b.set(st_sig_ref(slot), new_sig);
+        b.set(st_exp_ref(slot), new_exp);
+    }
+    let one = b.konst::<W16>(1);
+    let inc = b.add::<W16>(top, one);
+    let new_top = b.and::<W16>(inc, seven);
+    b.set(top_ref(), new_top);
+    Ok(())
+}
+
 /// 80 ビットを倍精度へ丸める。非正規化数はゼロにする。
 fn f80_to_f64<B: Backend>(b: &mut B, sig: B::V<W64>, exp: B::V<W16>) -> B::V<W64> {
     let exp64 = b.zext::<W16, W64>(exp);

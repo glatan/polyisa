@@ -9040,3 +9040,42 @@ fn run_fild_m64_sibd_pushes_three() {
         (1u64 << 63) | (1u64 << 62)
     );
 }
+
+#[test]
+fn run_fsubp_st1_subtracts_and_pops() {
+    // DE E9 = fsubp %st(1), %st。ST(1)-ST(0) を書いてポップする。seq 0x4d0c51。
+    // Ref: SPEC-X86-INTEL-SDM (v093).
+    let three = (1u64 << 63) | (1u64 << 62);
+    let one = 1u64 << 63;
+    let run = |st0_exp: u16, st0_sig: u64, st1_exp: u16, st1_sig: u64| {
+        let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+        env.backend
+            .set(polyisa_guest_x86::sem::st_exp_ref(0), st0_exp);
+        env.backend
+            .set(polyisa_guest_x86::sem::st_sig_ref(0), st0_sig);
+        env.backend
+            .set(polyisa_guest_x86::sem::st_exp_ref(1), st1_exp);
+        env.backend
+            .set(polyisa_guest_x86::sem::st_sig_ref(1), st1_sig);
+        env.backend
+            .mem
+            .write(VirtAddr(0x1000), &[0xDE, 0xE9])
+            .unwrap();
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+        assert_eq!(out, Outcome::StepLimit { eip: 0x1002 });
+        assert_eq!(env.backend.get(polyisa_guest_x86::sem::top_ref()), 1);
+        assert_eq!(env.backend.get(polyisa_guest_x86::sem::st_exp_ref(0)), 0);
+        assert_eq!(env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)), 0);
+        (
+            env.backend.get(polyisa_guest_x86::sem::st_exp_ref(1)),
+            env.backend.get(polyisa_guest_x86::sem::st_sig_ref(1)),
+        )
+    };
+    assert_eq!(run(0x3FFF, one, 0x4000, three), (0x4000, one));
+    assert_eq!(run(0x4000, three, 0x3FFF, one), (0xC000, one));
+    assert_eq!(run(0x4000, three, 0x4000, three), (0, 0));
+}
