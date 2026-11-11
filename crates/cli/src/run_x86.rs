@@ -878,7 +878,10 @@ fn fetch_len(
             let md = s >> 6;
             let reg = (s >> 3) & 7;
             let rm = s & 7;
-            if md == 3 && reg == 3 {
+            if reg == 0 && md == 0 && rm != 4 && rm != 5 {
+                // FLDL [base] (DD /0)。seq 0x4d0723 の DD 00。
+                Some(2)
+            } else if md == 3 && reg == 3 {
                 Some(2)
             } else if reg == 3 && md == 1 && rm == 4 {
                 // FSTP m64 SIB+disp8。seq 0x4d3169 の DD 5C 24 08。
@@ -2997,6 +3000,10 @@ fn dispatch<B: Backend>(
         Insn::FstpSt => {
             // DD D8+i。seq 0x4024ee の DD D8 は FSTP ST(0)。
             sem::fstp_st(b, (word & 7) as u8)
+        }
+        Insn::FldM64Memnd => {
+            // DD /0 mod=00 [base]。seq 0x4d0723 の fldl (%rax)。
+            sem::fld_m64_memnd(b, rm())
         }
         Insn::FldM32Rip => {
             // D9 /0 mod=00 rm=101 [RIP+disp32]。seq 0x402335 対応。disp は下位32 LE.

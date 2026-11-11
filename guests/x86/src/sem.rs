@@ -10619,6 +10619,70 @@ fn push_i64<B: Backend>(b: &mut B, bits: B::V<W64>) -> Flow<B> {
     push_ext(b, sig_final, exp_word)
 }
 
+/// 倍精度を 80 ビットへ伸ばしてスタックへ載せる。非正規化数は正規化する。
+fn push_f64<B: Backend>(b: &mut B, bits: B::V<W64>) -> Flow<B> {
+    let s63 = b.konst::<W64>(63);
+    let sign = b.shr_l::<W64>(bits, s63);
+    let s52 = b.konst::<W64>(52);
+    let exp_raw = b.shr_l::<W64>(bits, s52);
+    let exp_mask = b.konst::<W64>(0x7ff);
+    let ea = b.and::<W64>(exp_raw, exp_mask);
+    let frac_mask = b.konst::<W64>((1u64 << 52) - 1);
+    let frac = b.and::<W64>(bits, frac_mask);
+    let zero64 = b.konst::<W64>(0);
+    let exp_zero = b.cmp::<W64>(Cmp::Eq, ea, zero64);
+    let frac_zero = b.cmp::<W64>(Cmp::Eq, frac, zero64);
+    let special = b.konst::<W64>(0x7ff);
+    let is_special = b.cmp::<W64>(Cmp::Eq, ea, special);
+    let int_bit = b.konst::<W64>(1u64 << 63);
+    let sh11 = b.konst::<W64>(11);
+    let frac_sh = b.shl::<W64>(frac, sh11);
+    let sig_norm = b.or::<W64>(int_bit, frac_sh);
+    let bias_add = b.konst::<W64>(15360);
+    let exp_norm = b.add::<W64>(ea, bias_add);
+    let mut v = frac;
+    let mut n = zero64;
+    for (k, mask) in [
+        (32u64, 0x000f_ffff_fff0_0000u64),
+        (16, 0x000f_fff0_0000_0000),
+        (8, 0x000f_f000_0000_0000),
+        (4, 0x000f_0000_0000_0000),
+        (2, 0x000c_0000_0000_0000),
+        (1, 0x0008_0000_0000_0000),
+    ] {
+        let m = b.konst::<W64>(mask);
+        let high = b.and::<W64>(v, m);
+        let empty = b.cmp::<W64>(Cmp::Eq, high, zero64);
+        let kk = b.konst::<W64>(k);
+        let shifted = b.shl::<W64>(v, kk);
+        v = b.select::<W64>(empty, shifted, v);
+        let n2 = b.add::<W64>(n, kk);
+        n = b.select::<W64>(empty, n2, n);
+    }
+    let den_bias = b.konst::<W64>(15360);
+    let den_exp = b.sub::<W64>(den_bias, n);
+    let m51 = b.konst::<W64>((1u64 << 51) - 1);
+    let frac51 = b.and::<W64>(v, m51);
+    let sh12 = b.konst::<W64>(12);
+    let frac51_sh = b.shl::<W64>(frac51, sh12);
+    let den_sig = b.or::<W64>(int_bit, frac51_sh);
+    let exp_if_sub = b.select::<W64>(frac_zero, zero64, den_exp);
+    let sig_if_sub = b.select::<W64>(frac_zero, zero64, den_sig);
+    let exp_num = b.select::<W64>(exp_zero, exp_if_sub, exp_norm);
+    let sig_num = b.select::<W64>(exp_zero, sig_if_sub, sig_norm);
+    let special_exp = b.konst::<W64>(0x7fff);
+    let nan_payload = b.or::<W64>(int_bit, frac_sh);
+    let inf_sig = int_bit;
+    let sig_special = b.select::<W64>(frac_zero, inf_sig, nan_payload);
+    let exp_final = b.select::<W64>(is_special, special_exp, exp_num);
+    let sig_final = b.select::<W64>(is_special, sig_special, sig_num);
+    let s15 = b.konst::<W64>(15);
+    let sign_bit = b.shl::<W64>(sign, s15);
+    let exp_word64 = b.or::<W64>(exp_final, sign_bit);
+    let exp_word: B::V<W16> = b.trunc::<W64, W16>(exp_word64);
+    push_ext(b, sig_final, exp_word)
+}
+
 /// FLDS [RIP+disp32] (D9 /0 mod=00 rm=101)。seq 0x402335 対応.
 pub fn fld_m32_rip<B: Backend>(b: &mut B, next_rip: u64, disp: i32) -> Flow<B> {
     let base = b.konst::<W64>(next_rip);
@@ -10626,6 +10690,13 @@ pub fn fld_m32_rip<B: Backend>(b: &mut B, next_rip: u64, disp: i32) -> Flow<B> {
     let addr = b.add::<W64>(base, d);
     let bits: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
     push_f32(b, bits)
+}
+
+/// FLDL [base] (DD /0 mod=00)。seq 0x4d0723 の fldl (%rax)。
+pub fn fld_m64_memnd<B: Backend>(b: &mut B, base: Gpr) -> Flow<B> {
+    let addr = read64(b, base);
+    let bits: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    push_f64(b, bits)
 }
 
 /// FLDS [disp32] (D9 /0 mod=00 rm=101、32ビット)。
