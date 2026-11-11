@@ -76,6 +76,7 @@
 - setpgid
 - stat
 - symlink
+- sync
 - tgkill
 - time
 - umask

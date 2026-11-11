@@ -9533,6 +9533,7 @@ const X86_64_SYSCALLS: &[(&str, SysFn)] = &[
     ("rename", sys_rename),
     ("symlink", sys_symlink),
     ("link", sys_link),
+    ("sync", sys_sync),
     ("rmdir", sys_rmdir),
     ("unlink", sys_unlink),
     ("unlinkat", sys_unlinkat),
@@ -11525,6 +11526,12 @@ fn sys_rename(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Tra
     })
 }
 
+fn sys_sync(_sys: &mut CliLinux, env: &mut BareEnv, _cx: &SysCtx) -> Option<TrapOutcome> {
+    // sync()。ゲストの書き込みは既にホストのファイルへ届いている。dirty な頁は持たない。
+    set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
+}
+
 fn sys_link(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     // link(oldpath, newpath)。ハードリンク。busybox の `link` が使う。
     let old_addr = get64(env, cx.r_a);
@@ -13242,6 +13249,16 @@ mod tests {
             .read(VirtAddr(0x100), &mut back, data_access())
             .unwrap();
         assert_eq!(u32::from_le_bytes(back), 0);
+    }
+
+    #[test]
+    fn sync_returns_zero() {
+        use polyisa_os_linux::x86_64 as abi;
+        let mut sys = CliLinux::x86_64();
+        let mut env = bare();
+        set64(&mut env, Gpr(0), abi::SYNC);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
     }
 
     #[test]

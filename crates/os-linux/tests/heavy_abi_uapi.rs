@@ -200,6 +200,7 @@ fn syscall_numbers_match_uapi_x86_64() {
         ("__NR_execve", polyisa_os_linux::x86_64::EXECVE),
         ("__NR_wait4", polyisa_os_linux::x86_64::WAIT4),
         ("__NR_link", polyisa_os_linux::x86_64::LINK),
+        ("__NR_sync", polyisa_os_linux::x86_64::SYNC),
     ];
     let macros: Vec<&str> = cases.iter().map(|(m, _)| *m).collect();
     let Some(got) = uapi_numbers_x86_64(&cc, &macros) else {

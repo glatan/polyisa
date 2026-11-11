@@ -145,6 +145,7 @@ pub mod x86_64 {
     pub const RENAME: u64 = 82;
     pub const SYMLINK: u64 = 88;
     pub const LINK: u64 = 86;
+    pub const SYNC: u64 = 162;
     pub const CLONE: u64 = 56;
     pub const EXECVE: u64 = 59;
     pub const WAIT4: u64 = 61;
@@ -440,6 +441,7 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             x86_64::RENAME => Some("rename"),
             x86_64::SYMLINK => Some("symlink"),
             x86_64::LINK => Some("link"),
+            x86_64::SYNC => Some("sync"),
             x86_64::ARCH_PRCTL => Some("arch_prctl"),
             x86_64::SET_ROBUST_LIST => Some("set_robust_list"),
             x86_64::RSEQ => Some("rseq"),
@@ -605,6 +607,8 @@ mod tests {
         assert_eq!(syscall_name(GuestAbi::X86_64Linux, 302), Some("prlimit64"));
         assert_eq!(x86_64::LINK, 86);
         assert_eq!(syscall_name(GuestAbi::X86_64Linux, 86), Some("link"));
+        assert_eq!(x86_64::SYNC, 162);
+        assert_eq!(syscall_name(GuestAbi::X86_64Linux, 162), Some("sync"));
     }
 
     #[test]
