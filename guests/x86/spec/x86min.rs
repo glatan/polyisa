@@ -1583,6 +1583,14 @@ pub fn build_model() -> polyisa_isadl::Model {
             "alu",
         ),
         (
+            "fldz",
+            "F1",
+            "11011001 11101110",
+            vec![],
+            "fldz",
+            "alu",
+        ),
+        (
             "fstp_st",
             "F1",
             "11011101 11011...",

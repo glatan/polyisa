@@ -85,7 +85,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数117件。
-        assert_eq!(INSNS.len(), 685);
+        assert_eq!(INSNS.len(), 686);
     }
 
     #[test]
@@ -774,6 +774,9 @@ mod tests {
         // FADD ST(0), ST(0) (D8 C0)。seq 0x4d097d。
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0xD8C0, 16), Some(Insn::FaddSt));
+        // FLDZ (D9 EE)。seq 0x4d097f。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0xD9EE, 16), Some(Insn::Fldz));
         assert_eq!(decode(0x35_0000_00FF, 40), Some(Insn::XorImm));
         // シフト：SHL EAX,imm8 (C1 E0 ib)、SHR EAX,imm8 (C1 E8 ib)。
         // Ref: SPEC-X86-INTEL-SDM (v093).

@@ -838,6 +838,10 @@ fn fetch_len(
                 // FLD ST(i) (D9 C0+i)。seq 0x4d0867 の D9 C0。
                 return Some(2);
             }
+            if reg == 5 && md == 3 && rm == 6 {
+                // FLDZ (D9 EE)。seq 0x4d097f。
+                return Some(2);
+            }
             if reg != 5 && reg != 7 {
                 return None;
             }
@@ -3388,6 +3392,10 @@ fn dispatch<B: Backend>(
             } else {
                 sem::push_reg(b, push_r())
             }
+        }
+        Insn::Fldz => {
+            // D9 EE。seq 0x4d097f の fldz。
+            sem::fldz(b)
         }
         Insn::FldSt => {
             // D9 C0+i。seq 0x4d0867 の D9 C0 は FLD ST(0)。
