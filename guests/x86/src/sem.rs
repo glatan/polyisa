@@ -11862,6 +11862,13 @@ pub fn fucomi_st<B: Backend>(b: &mut B, i: u8) -> Flow<B> {
     Ok(())
 }
 
+/// FUCOMIP ST(0), ST(i) (DF E8+i)。比較のあと先頭の段を捨てる。dd 0x4d0ea6 対応.
+pub fn fucomip_st<B: Backend>(b: &mut B, i: u8) -> Flow<B> {
+    fucomi_st(b, i)?;
+    let top = b.get(top_ref());
+    pop_st(b, top)
+}
+
 /// FLD ST(i) (D9 C0+i)。ST(i) の複製を載せる。元の段は残す。seq 0x4d0867 対応.
 pub fn fld_st<B: Backend>(b: &mut B, i: u8) -> Flow<B> {
     let top = b.get(top_ref());

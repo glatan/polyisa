@@ -317,6 +317,7 @@ fn text_applets_match_host() {
     let trunc_s = trunc.to_str().expect("utf-8");
     let installed = dir.join("installed");
     let installed_s = installed.to_str().expect("utf-8");
+    let dd_if = format!("if={f}");
     let copied_s = copied.to_str().expect("utf-8");
     let touched_s = touched.to_str().expect("utf-8");
     let link = dir.join("link");
@@ -380,6 +381,7 @@ fn text_applets_match_host() {
         &["hd", f],
         &["gzip", "-c", f],
         &["bzip2", "-c", f],
+        &["dd", dd_if.as_str(), "bs=2", "count=2"],
         &["printenv"],
         &["which", "true"],
         &["install", "-m", "644", f, installed_s],

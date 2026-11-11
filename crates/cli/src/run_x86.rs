@@ -1015,6 +1015,10 @@ fn fetch_len(
             let md = s >> 6;
             let reg = (s >> 3) & 7;
             let rm = s & 7;
+            if md == 3 && reg == 5 {
+                // FUCOMIP ST(0), ST(i) (DF E8+i)。dd 0x4d0ea6 の DF E9。
+                return Some(2);
+            }
             if reg == 5 && md == 1 && rm == 4 {
                 // FILD m64 SIB+disp8。seq 0x4d0c4d の DF 6C 24 30。4B.
                 return Some(4);
@@ -3623,6 +3627,10 @@ fn dispatch<B: Backend>(
         Insn::FucomiSt => {
             // DB E8+i。seq 0x4d0983 の DB E9 は FUCOMI ST(0), ST(1)。
             sem::fucomi_st(b, (word & 7) as u8)
+        }
+        Insn::FucomipSt => {
+            // DF E8+i。dd 0x4d0ea6 の DF E9 は FUCOMIP ST(0), ST(1)。
+            sem::fucomip_st(b, (word & 7) as u8)
         }
         Insn::FmulM32Rip => {
             // D8 /1 mod=00 rm=101。seq 0x4d0bf4 の fmuls disp32(%rip)。

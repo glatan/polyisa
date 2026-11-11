@@ -1716,6 +1716,15 @@ pub fn build_model() -> polyisa_isadl::Model {
             "fucomi st",
             "alu",
         ),
+        // FUCOMIP ST(0), ST(i) (DF E8+i)。dd 0x4d0ea6 対応。
+        (
+            "fucomip_st",
+            "F1",
+            "11011111 11101...",
+            vec![],
+            "fucomip st",
+            "alu",
+        ),
         (
             "fstp_st",
             "F1",
