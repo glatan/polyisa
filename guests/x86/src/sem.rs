@@ -10940,6 +10940,103 @@ pub fn fxch_st<B: Backend>(b: &mut B, i: u8) -> Flow<B> {
     Ok(())
 }
 
+/// ST(0) と ST(i) の比較。戻り値は ZF、PF、CF。NaN は unordered。
+fn cmp_f80<B: Backend>(
+    b: &mut B,
+    sig_a: B::V<W64>,
+    exp_a: B::V<W16>,
+    sig_b: B::V<W64>,
+    exp_b: B::V<W16>,
+) -> (B::B, B::B, B::B) {
+    let zero = b.konst::<W64>(0);
+    let one = b.konst::<W64>(1);
+    let mask15 = b.konst::<W64>(0x7fff);
+    let special = b.konst::<W64>(0x7fff);
+    let s15 = b.konst::<W64>(15);
+    let int_bit = b.konst::<W64>(1u64 << 63);
+
+    let exp_a64 = b.zext::<W16, W64>(exp_a);
+    let exp_b64 = b.zext::<W16, W64>(exp_b);
+    let ea = b.and::<W64>(exp_a64, mask15);
+    let eb = b.and::<W64>(exp_b64, mask15);
+    let sign_a = b.shr_l::<W64>(exp_a64, s15);
+    let sign_b = b.shr_l::<W64>(exp_b64, s15);
+
+    let sp_a = b.cmp::<W64>(Cmp::Eq, ea, special);
+    let sp_b = b.cmp::<W64>(Cmp::Eq, eb, special);
+    let sig_a_not_inf = b.cmp::<W64>(Cmp::Ne, sig_a, int_bit);
+    let sig_b_not_inf = b.cmp::<W64>(Cmp::Ne, sig_b, int_bit);
+    let nan_a = bit_and(b, sp_a, sig_a_not_inf);
+    let nan_b = bit_and(b, sp_b, sig_b_not_inf);
+    let unordered = bit_or(b, nan_a, nan_b);
+
+    let z_a = b.cmp::<W64>(Cmp::Eq, ea, zero);
+    let z_b = b.cmp::<W64>(Cmp::Eq, eb, zero);
+    let both_z = bit_and(b, z_a, z_b);
+    let not_both_z = bit_not(b, both_z);
+
+    let exp_gt = b.cmp::<W64>(Cmp::GtU, ea, eb);
+    let exp_lt = b.cmp::<W64>(Cmp::LtU, ea, eb);
+    let exp_eq = b.cmp::<W64>(Cmp::Eq, ea, eb);
+    let sig_gt = b.cmp::<W64>(Cmp::GtU, sig_a, sig_b);
+    let sig_lt = b.cmp::<W64>(Cmp::LtU, sig_a, sig_b);
+    let sig_eq = b.cmp::<W64>(Cmp::Eq, sig_a, sig_b);
+    let exp_eq_sig_gt = bit_and(b, exp_eq, sig_gt);
+    let exp_eq_sig_lt = bit_and(b, exp_eq, sig_lt);
+    let mag_gt = bit_or(b, exp_gt, exp_eq_sig_gt);
+    let mag_lt = bit_or(b, exp_lt, exp_eq_sig_lt);
+    let mag_eq = bit_and(b, exp_eq, sig_eq);
+
+    let a_neg = b.cmp::<W64>(Cmp::Eq, sign_a, one);
+    let b_neg = b.cmp::<W64>(Cmp::Eq, sign_b, one);
+    let not_a_neg = bit_not(b, a_neg);
+    let not_b_neg = bit_not(b, b_neg);
+    let signs_differ = b.cmp::<W64>(Cmp::Ne, sign_a, sign_b);
+    let same = bit_not(b, signs_differ);
+
+    let neg_and_pos = bit_and(b, a_neg, not_b_neg);
+    let neg_lt_pos = bit_and(b, neg_and_pos, not_both_z);
+
+    let neg_and_same = bit_and(b, a_neg, same);
+    let pos_and_same = bit_and(b, not_a_neg, same);
+    let neg_lt = bit_and(b, neg_and_same, mag_gt);
+    let pos_mag_lt = bit_and(b, pos_and_same, mag_lt);
+    let pos_lt = bit_and(b, pos_mag_lt, not_both_z);
+
+    let neg_side = bit_or(b, neg_lt_pos, neg_lt);
+    let a_lt = bit_or(b, neg_side, pos_lt);
+    let same_live = bit_and(b, same, not_both_z);
+    let same_eq = bit_and(b, same_live, mag_eq);
+    let a_eq = bit_or(b, both_z, same_eq);
+
+    let zf = bit_or(b, unordered, a_eq);
+    let cf = bit_or(b, unordered, a_lt);
+    (zf, unordered, cf)
+}
+
+/// FUCOMI ST(0), ST(i) (DB E8+i)。比較結果を EFLAGS に書き、スタックは戻さない。seq 0x4d0983 対応.
+pub fn fucomi_st<B: Backend>(b: &mut B, i: u8) -> Flow<B> {
+    let top = b.get(top_ref());
+    let (sig0, exp0) = read_st(b, top);
+    let ii = b.konst::<W16>(i as u16);
+    let summed = b.add::<W16>(top, ii);
+    let seven = b.konst::<W16>(7);
+    let src = b.and::<W16>(summed, seven);
+    let (sig1, exp1) = read_st(b, src);
+    let (zf, pf, cf) = cmp_f80(b, sig0, exp0, sig1, exp1);
+    let old = b.get(eflags_ref());
+    let clear_mask = b.konst::<W32>(!FLAG_OSZPCA);
+    let cleared = b.and::<W32>(old, clear_mask);
+    let zf_bit = pick(b, zf, FLAG_ZF);
+    let pf_bit = pick(b, pf, FLAG_PF);
+    let cf_bit = pick(b, cf, FLAG_CF);
+    let with_zf = b.or::<W32>(cleared, zf_bit);
+    let with_pf = b.or::<W32>(with_zf, pf_bit);
+    let flags = b.or::<W32>(with_pf, cf_bit);
+    b.set(eflags_ref(), flags);
+    Ok(())
+}
+
 /// FLD ST(i) (D9 C0+i)。ST(i) の複製を載せる。元の段は残す。seq 0x4d0867 対応.
 pub fn fld_st<B: Backend>(b: &mut B, i: u8) -> Flow<B> {
     let top = b.get(top_ref());

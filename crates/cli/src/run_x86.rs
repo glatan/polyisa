@@ -866,6 +866,10 @@ fn fetch_len(
             let md = s >> 6;
             let reg = (s >> 3) & 7;
             let rm = s & 7;
+            if reg == 5 && md == 3 {
+                // FUCOMI ST(0), ST(i) (DB E8+i)。seq 0x4d0983 の DB E9。
+                return Some(2);
+            }
             if reg == 5 && md == 0 && rm == 4 {
                 // FLD m80 SIB。seq 0x4d74d4 の DB 2C 24。base=5 は disp32。
                 let sib = third?;
@@ -3404,6 +3408,10 @@ fn dispatch<B: Backend>(
         Insn::FxchSt => {
             // D9 C8+i。seq 0x4d0981 の D9 C9 は FXCH ST(1)。
             sem::fxch_st(b, (word & 7) as u8)
+        }
+        Insn::FucomiSt => {
+            // DB E8+i。seq 0x4d0983 の DB E9 は FUCOMI ST(0), ST(1)。
+            sem::fucomi_st(b, (word & 7) as u8)
         }
         Insn::FldSt => {
             // D9 C0+i。seq 0x4d0867 の D9 C0 は FLD ST(0)。

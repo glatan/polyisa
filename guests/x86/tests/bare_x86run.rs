@@ -8777,3 +8777,39 @@ fn run_fxch_st1_swaps_three_and_one() {
         (1u64 << 63) | (1u64 << 62)
     );
 }
+
+#[test]
+fn run_fucomi_st1_sets_flags() {
+    // DB E9 = fucomi %st(1), %st。OF/SF/AF を消し、ZF/PF/CF だけを書く。seq 0x4d0983。
+    // Ref: SPEC-X86-INTEL-SDM (v093).
+    fn once(exp0: u16, sig0: u64, exp1: u16, sig1: u64) -> u32 {
+        let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+        env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 0x8D7);
+        env.backend.set(polyisa_guest_x86::sem::st_exp_ref(0), exp0);
+        env.backend.set(polyisa_guest_x86::sem::st_sig_ref(0), sig0);
+        env.backend.set(polyisa_guest_x86::sem::st_exp_ref(1), exp1);
+        env.backend.set(polyisa_guest_x86::sem::st_sig_ref(1), sig1);
+        env.backend
+            .mem
+            .write(VirtAddr(0x1000), &[0xDB, 0xE9])
+            .unwrap();
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+        assert_eq!(out, Outcome::StepLimit { eip: 0x1002 });
+        assert_eq!(env.backend.get(polyisa_guest_x86::sem::top_ref()), 0);
+        assert_eq!(env.backend.get(polyisa_guest_x86::sem::st_exp_ref(0)), exp0);
+        assert_eq!(env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)), sig0);
+        env.backend.get(polyisa_guest_x86::sem::eflags_ref())
+    }
+    let three = (1u64 << 63) | (1u64 << 62);
+    let one = 1u64 << 63;
+    assert_eq!(once(0x4000, three, 0x3FFF, one), 0x2);
+    assert_eq!(once(0x3FFF, one, 0x4000, three), 0x3);
+    assert_eq!(once(0x4000, three, 0x4000, three), 0x42);
+    assert_eq!(once(0xBFFF, one, 0x3FFF, one), 0x3);
+    assert_eq!(once(0, 0, 0x8000, 0), 0x42);
+    assert_eq!(once(0x7FFF, 0xC000_0000_0000_0000, 0x3FFF, one), 0x47);
+}
