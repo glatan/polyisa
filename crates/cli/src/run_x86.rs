@@ -632,6 +632,9 @@ fn fetch_len(
             } else if md == 1 {
                 // IMUL r, [base+disp8], imm32。ifplugd 0x4264b0 の 69 43 04。7B.
                 Some(7)
+            } else if md == 0 && rm == 5 {
+                // IMUL r, [rip+disp32], imm32。nslookup 0x42bb05 の 69 05。10B.
+                Some(10)
             } else {
                 None
             }
@@ -8087,6 +8090,19 @@ fn dispatch<B: Backend>(
                 sem::bswap_r32(b, rd)
             }
         }
+        Insn::ImulRImmRip => {
+            // 69 /r id + disp32 + imm32 (80b)。disp は (word>>32) 下位32 LE、imm は下位32 LE。
+            // nslookup 0x42bb05 の imul eax, [rip+disp32], 0x3e8。
+            let disp = ((word >> 32) as u32).swap_bytes() as i32;
+            let imm = ((word & 0xffff_ffff) as u32).swap_bytes();
+            if rex_w {
+                sem::imul_r64_imm_rip(b, reg(), eip as u64 + nbytes, disp, imm)
+            } else if is64 {
+                sem::imul_r32_imm_rip(b, reg(), eip as u64 + nbytes, disp, imm)
+            } else {
+                sem::imul_r32_imm_abs(b, reg(), disp as u32, imm)
+            }
+        }
         Insn::ImulRImm8Rip => {
             // 6B /r ib + disp32 + imm8 (56b)。disp は (word>>8) 下位32 LE、imm は最下位8.
             let disp_le = ((word >> 8) as u32).swap_bytes();
@@ -8838,7 +8854,8 @@ fn dispatch<B: Backend>(
             | Insn::MovsxdSibd32
             | Insn::ImulRImm
             | Insn::ImulRImm8
-            | Insn::ImulRImm8Rip => Some(reg()),
+            | Insn::ImulRImm8Rip
+            | Insn::ImulRImmRip => Some(reg()),
             Insn::Cmovb
             | Insn::Cmovne
             | Insn::Cmove
@@ -8983,6 +9000,7 @@ fn dispatch<B: Backend>(
                             | Insn::ImulRSibabs
                             | Insn::OrRSibabs
                             | Insn::MovsxR32M8Sibd32
+                            | Insn::ImulRImmRip
                     ))
                 || (has66 && matches!(insn, Insn::XorRm32 | Insn::RolRm32Imm8));
             if !skip {

@@ -85,7 +85,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数117件。
-        assert_eq!(INSNS.len(), 754);
+        assert_eq!(INSNS.len(), 755);
     }
 
     #[test]
@@ -639,6 +639,7 @@ mod tests {
         // FLD m80 RIP。dd 0x4d0e58 の DB 2D + disp32。
         assert_eq!(decode(0xDB2DFA0F0000, 48), Some(Insn::FldM80Rip));
         assert_eq!(decode(0x6B1567FD1A0038, 56), Some(Insn::ImulRImm8Rip));
+        assert_eq!(decode(0x6905F60F000005000000, 80), Some(Insn::ImulRImmRip));
         assert_eq!(decode(0x6BF638, 24), Some(Insn::ImulRImm8));
         assert_eq!(decode(0x6B44242858, 40), Some(Insn::ImulRImm8Sibd));
         assert_eq!(decode(0x6B2C2448, 32), Some(Insn::ImulRImm8Sib));
