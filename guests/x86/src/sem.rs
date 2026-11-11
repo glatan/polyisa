@@ -11195,6 +11195,20 @@ pub fn fild_m64_sib<B: Backend>(b: &mut B, base: Gpr, idx: Gpr, shift: u32) -> F
     push_i64(b, bits)
 }
 
+/// FILD m64 [base+disp8] (DF /5 SIB mod=01, no_index)。seq 0x4d0c4d 対応.
+pub fn fild_m64_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8) -> Flow<B> {
+    let addr = eff_addr(b, base, disp);
+    let bits: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    push_i64(b, bits)
+}
+
+/// FILD m64 [base+index*scale+disp8] (DF /5 SIB mod=01)。
+pub fn fild_m64_sibd<B: Backend>(b: &mut B, base: Gpr, idx: Gpr, shift: u32, disp: i8) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, disp as i32, base, idx);
+    let bits: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    push_i64(b, bits)
+}
+
 /// FSTP ST(i) (DD D8+i)。ST(0) を ST(i) へ写してからスタックを一つ捨てる。seq 0x4024ee 対応.
 pub fn fstp_st<B: Backend>(b: &mut B, i: u8) -> Flow<B> {
     let top = b.get(top_ref());

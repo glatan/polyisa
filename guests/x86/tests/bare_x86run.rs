@@ -9005,3 +9005,38 @@ fn run_fistp_m64_sibd_honors_rounding() {
     assert_eq!(once(0x3FFF, three, 0x037F).0, 2);
     assert_eq!(once(0x3FFE, 1u64 << 63, 0x037F).0, 0);
 }
+
+#[test]
+fn run_fild_m64_sibd_pushes_three() {
+    // DF 6C 24 30 = fildq 0x30(%rsp)。3 を載せる。seq 0x4d0c4d。
+    // Ref: SPEC-X86-INTEL-SDM (v093).
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(4), 0x2000);
+        Ok(())
+    })
+    .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2030), &3u64.to_le_bytes())
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0xDF, 0x6C, 0x24, 0x30])
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x1004 });
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::top_ref()), 7);
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::st_exp_ref(7)),
+        0x4000
+    );
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::st_sig_ref(7)),
+        (1u64 << 63) | (1u64 << 62)
+    );
+}

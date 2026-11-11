@@ -948,6 +948,10 @@ fn fetch_len(
             let md = s >> 6;
             let reg = (s >> 3) & 7;
             let rm = s & 7;
+            if reg == 5 && md == 1 && rm == 4 {
+                // FILD m64 SIB+disp8。seq 0x4d0c4d の DF 6C 24 30。4B.
+                return Some(4);
+            }
             if reg == 5 && md == 0 && rm == 4 {
                 let sib = third?;
                 if sib & 7 != 5 { Some(3) } else { None }
@@ -3086,6 +3090,14 @@ fn dispatch<B: Backend>(
                 sem::fild_m64_memnd(b, sib_base())
             } else {
                 sem::fild_m64_sib(b, sib_base(), sib_idx(), sib_shift())
+            }
+        }
+        Insn::FildM64Sibd => {
+            // DF /5 SIB mod=01。seq 0x4d0c4d の fildq 0x30(%rsp)。
+            if no_index() {
+                sem::fild_m64_mem8(b, sib_base(), disp8())
+            } else {
+                sem::fild_m64_sibd(b, sib_base(), sib_idx(), sib_shift(), disp8())
             }
         }
         Insn::FistpM64Sibd => {
