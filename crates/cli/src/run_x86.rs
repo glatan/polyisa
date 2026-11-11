@@ -874,6 +874,10 @@ fn fetch_len(
                 // FLD m80 SIB+disp32。seq 0x4d0853 の DB AC 24 80 1D 00 00。7B.
                 return Some(7);
             }
+            if reg == 7 && md == 1 && rm == 4 {
+                // FSTP m80 SIB+disp8。seq 0x4d74d7 の DB 7C 24 20。4B.
+                return Some(4);
+            }
             if reg == 7 && md == 2 && rm == 4 {
                 // FSTP m80 SIB+disp32。seq 0x4d0874 の DB BC 24 80 1D 00 00。7B.
                 return Some(7);
@@ -3049,6 +3053,14 @@ fn dispatch<B: Backend>(
         Insn::FstpSt => {
             // DD D8+i。seq 0x4024ee の DD D8 は FSTP ST(0)。
             sem::fstp_st(b, (word & 7) as u8)
+        }
+        Insn::FstpM80Sibd => {
+            // DB /7 SIB mod=01。seq 0x4d74d7 の fstpt 0x20(%rsp)。
+            if no_index() {
+                sem::fstp_m80_mem8(b, sib_base(), disp8())
+            } else {
+                sem::fstp_m80_sibd(b, sib_base(), sib_idx(), sib_shift(), disp8())
+            }
         }
         Insn::FstpM80Sibd32 => {
             // DB /7 SIB mod=10。seq 0x4d0874 の fstpt 0x1d80(%rsp)。

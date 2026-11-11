@@ -10818,6 +10818,30 @@ pub fn fstp_m80_sibd32<B: Backend>(
     pop_st(b, top)
 }
 
+/// FSTP m80 [base+disp8] (DB /7 SIB mod=01, no_index)。seq 0x4d74d7 対応.
+pub fn fstp_m80_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8) -> Flow<B> {
+    let top = b.get(top_ref());
+    let (sig, exp) = read_st(b, top);
+    let addr = eff_addr(b, base, disp);
+    b.store::<W64>(addr, sig, DATA_WRITE)?;
+    let eight = b.konst::<W64>(8);
+    let exp_addr = b.add::<W64>(addr, eight);
+    b.store::<W16>(exp_addr, exp, DATA_WRITE)?;
+    pop_st(b, top)
+}
+
+/// FSTP m80 [base+index*scale+disp8] (DB /7 SIB mod=01)。
+pub fn fstp_m80_sibd<B: Backend>(b: &mut B, base: Gpr, idx: Gpr, shift: u32, disp: i8) -> Flow<B> {
+    let top = b.get(top_ref());
+    let (sig, exp) = read_st(b, top);
+    let addr = sib_addr_scaled(b, shift, disp as i32, base, idx);
+    b.store::<W64>(addr, sig, DATA_WRITE)?;
+    let eight = b.konst::<W64>(8);
+    let exp_addr = b.add::<W64>(addr, eight);
+    b.store::<W16>(exp_addr, exp, DATA_WRITE)?;
+    pop_st(b, top)
+}
+
 /// FLD m80 [base+disp32] (DB /5 SIB mod=10, no_index)。seq 0x4d0853 対応.
 pub fn fld_m80_mem32<B: Backend>(b: &mut B, base: Gpr, disp: i32) -> Flow<B> {
     let addr = eff_addr32(b, base, disp);
