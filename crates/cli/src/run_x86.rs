@@ -5401,6 +5401,20 @@ fn dispatch<B: Backend>(
                 sem::and_r32_mem8(b, reg(), rm(), disp8())
             }
         }
+        Insn::AndRSibd => {
+            // 23 /r SIB mod=01。seq 0x4d0d34 の andl 0x3c(%rsp), %edi。
+            if no_index() {
+                if rex_w {
+                    sem::and_r64_mem8(b, reg(), sib_base(), disp8())
+                } else {
+                    sem::and_r32_mem8(b, reg(), sib_base(), disp8())
+                }
+            } else if rex_w {
+                sem::and_r64_sibd(b, reg(), sib_base(), sib_idx(), sib_shift(), disp8())
+            } else {
+                sem::and_r32_sibd(b, reg(), sib_base(), sib_idx(), sib_shift(), disp8())
+            }
+        }
         Insn::AndRMem32 => {
             if rex_w {
                 sem::and_r64_mem32(b, reg(), rm(), disp32())

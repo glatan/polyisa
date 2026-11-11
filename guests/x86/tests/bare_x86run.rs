@@ -9079,3 +9079,31 @@ fn run_fsubp_st1_subtracts_and_pops() {
     assert_eq!(run(0x4000, three, 0x3FFF, one), (0xC000, one));
     assert_eq!(run(0x4000, three, 0x4000, three), (0, 0));
 }
+
+#[test]
+fn run_and_r_sibd_edi() {
+    // 23 7C 24 3C = andl 0x3c(%rsp), %edi。seq 0x4d0d34。
+    // Ref: SPEC-X86-INTEL-SDM (v093).
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    env.backend.set(Gpr(7).state(), 0xFFFF_1234);
+    env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 1);
+    env.backend
+        .mem
+        .write(VirtAddr(0x203C), &0x0000_00FFu32.to_le_bytes())
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0x23, 0x7C, 0x24, 0x3C])
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x1004 });
+    assert_eq!(env.backend.get(Gpr(7).state()), 0x34);
+    let flags = env.backend.get(polyisa_guest_x86::sem::eflags_ref());
+    assert_eq!(flags & 1, 0);
+    assert_eq!(flags & 0x40, 0);
+}
