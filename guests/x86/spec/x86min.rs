@@ -2534,6 +2534,14 @@ pub fn build_model() -> polyisa_isadl::Model {
             "alu",
         ),
         (
+            "xor_m8_r8_sib",
+            "F1",
+            "00110000 00...100 ........",
+            vec![],
+            "xor r/m8, r8",
+            "alu",
+        ),
+        (
             "cmp_m8_r8",
             "F1",
             "00111000 11......",

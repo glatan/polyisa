@@ -15736,6 +15736,37 @@ pub fn xor_m8_r8<B: Backend>(
     Ok(())
 }
 
+/// XOR [base], r8 (30 /r SIB mod=00, no_index)。
+pub fn xor_m8_r8_memnd<B: Backend>(b: &mut B, base: Gpr, src: Gpr, high: bool) -> Flow<B> {
+    use polyisa_sem::W8;
+    let addr = read64(b, base);
+    let x: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
+    let y = read8(b, src, high);
+    let v = b.xor::<W8>(x, y);
+    b.store::<W8>(addr, v, DATA_WRITE)?;
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// XOR [base+index*scale], r8 (30 /r SIB mod=00)。
+pub fn xor_m8_r8_sib<B: Backend>(
+    b: &mut B,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    src: Gpr,
+    high: bool,
+) -> Flow<B> {
+    use polyisa_sem::W8;
+    let addr = sib_addr_scaled(b, shift, 0, base, idx);
+    let x: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
+    let y = read8(b, src, high);
+    let v = b.xor::<W8>(x, y);
+    b.store::<W8>(addr, v, DATA_WRITE)?;
+    update_logic_flags(b, v);
+    Ok(())
+}
+
 /// AND r/m8, r8 reg-direct (20 /r mod=11)。dst rm と src reg の AND で 5 旗を更新する.
 pub fn and_m8_r8<B: Backend>(
     b: &mut B,

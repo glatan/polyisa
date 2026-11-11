@@ -785,10 +785,24 @@ fn fetch_len(
                 None
             }
         }
-        // 0x20 /r (AND r/m8,r8)、0x28 /r (SUB r/m8,r8) と 0x30 /r (XOR r/m8,r8)。reg-direct 2B のみ。
-        0x20 | 0x28 | 0x30 => {
+        // 0x20 /r (AND r/m8,r8)、0x28 /r (SUB r/m8,r8) は reg-direct 2B のみ。
+        // 0x30 /r (XOR r/m8,r8) は reg-direct 2B と、mod=00 SIB (3B、base=5 以外)。sha3sum 0x4b4edd。
+        0x20 | 0x28 => {
             let s = second?;
             if s >> 6 == 3 { Some(2) } else { None }
+        }
+        0x30 => {
+            let s = second?;
+            let md = s >> 6;
+            let rm = s & 7;
+            if md == 3 {
+                Some(2)
+            } else if rm == 4 && md == 0 {
+                let t = third?;
+                if t & 7 != 5 { Some(3) } else { None }
+            } else {
+                None
+            }
         }
         // 0x08 /r (OR r/m8,r8)。reg-direct 2B、SIB mod=01 +disp8 4B。sed 0x4a87dd 対応.
         0x08 => {
@@ -1653,6 +1667,7 @@ pub fn run_mode(
                 | 0x13
                 | 0x1B
                 | 0x80
+                | 0x30
                 | 0xF6
                 | 0xF7
                 | 0xFF
@@ -3304,6 +3319,22 @@ fn dispatch<B: Backend>(
                 (Gpr(rm_f - 4), true)
             };
             sem::xor_m8_r8(b, dst, dst_high, src, src_high)
+        }
+        Insn::XorM8R8Sib => {
+            // 30 /r SIB mod=00。sha3sum 0x4b4edd の xorb %r9b, (%rdi,%rdx,1)。
+            let reg_f = (modrm() >> 3) & 7;
+            let (src, high) = if rex != 0 {
+                (Gpr(reg_f | ((rex >> 2) & 1) << 3), false)
+            } else if reg_f < 4 {
+                (Gpr(reg_f), false)
+            } else {
+                (Gpr(reg_f - 4), true)
+            };
+            if no_index() {
+                sem::xor_m8_r8_memnd(b, sib_base(), src, high)
+            } else {
+                sem::xor_m8_r8_sib(b, sib_base(), sib_idx(), sib_shift(), src, high)
+            }
         }
         Insn::AndM8R8 => {
             // 20 /r mod=11 reg-direct。dst は rm、src は reg.
