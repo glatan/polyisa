@@ -5738,6 +5738,29 @@ fn run_imul_r64_imm_sib() {
 }
 
 #[test]
+fn run_xor_r13w_self() {
+    // 66 45 31 ED = xor %r13w, %r13w。下位 16 ビットが 0 になり、ゼロとパリティが立つ。pgrep 0x44b572。
+    // Ref: SPEC-X86-INTEL-SDM (v093).
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    polyisa_guest_x86::sem::write64(&mut env.backend, Gpr(13), 0x1234_0000_0000_ABCD);
+    env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 0);
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0x66, 0x45, 0x31, 0xED])
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x1004 });
+    assert_eq!(
+        polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(13)),
+        0x1234_0000_0000_0000
+    );
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::eflags_ref()), 0x44);
+}
+
+#[test]
 fn run_imul_r64_imm8_rsp_nodisp() {
     // 48 6B 2C 24 48 = imul $0x48, (%rsp), %rbp。2*72=144。フラグは残る。mpstat 0x449c01。
     // Ref: SPEC-X86-INTEL-SDM (v093).

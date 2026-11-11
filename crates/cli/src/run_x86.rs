@@ -2057,6 +2057,8 @@ pub fn run_mode(
                     | Insn::CmpRm32
                     // SUB m16, r16 (66 29 /r mod=01)。lpq 0x4c3385 の subw %bx, 0x52(%rbp)。
                     | Insn::SubM32R32Mem8
+                    // XOR r16, r16 (66 31 /r mod=11)。pgrep 0x44b572 の xor %r13w, %r13w。
+                    | Insn::XorRm32
                     | Insn::CmpRmImm8Rip
                     // MOV [base+disp32],r16 (66 89 mod=10) は MovMemEax32 を共用する.
                     | Insn::MovMemEax32
@@ -6438,7 +6440,9 @@ fn dispatch<B: Backend>(
             }
         }
         Insn::XorRm32 => {
-            if rex_w {
+            if has66 && !rex_w {
+                sem::xor_rm16(b, rm(), reg())
+            } else if rex_w {
                 sem::xor_rm64(b, rm(), reg())
             } else {
                 sem::xor_rm32(b, rm(), reg())
@@ -8651,7 +8655,7 @@ fn dispatch<B: Backend>(
         if let Some(d) = dst {
             // MOVSXD は REX.W 時に符号拡張の上位を保持するため clear_hi しない。
             // 32ビット時は下位書込みのゼロ拡張として clear_hi する。
-            let skip = rex_w
+            let skip = (rex_w
                 && matches!(
                     insn,
                     Insn::Movsxd
@@ -8662,7 +8666,8 @@ fn dispatch<B: Backend>(
                         | Insn::MovsxdSib
                         | Insn::MovsxdSibd
                         | Insn::MovsxdSibd32
-                );
+                ))
+                || (has66 && matches!(insn, Insn::XorRm32 | Insn::RolRm32Imm8));
             if !skip {
                 sem::clear_hi(b, d);
             }

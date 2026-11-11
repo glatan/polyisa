@@ -4011,6 +4011,39 @@ pub fn sub_rm32<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
     Ok(())
 }
 
+/// XOR r16, r16 (66 31 /r mod=11)。下位 16 ビットだけ排他的論理和し、上位は残す。pgrep 0x44b572 対応.
+pub fn xor_rm16<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
+    let read_low = |b: &mut B, g: Gpr| -> B::V<W16> {
+        if g.0 < 8 {
+            let w = read(b, g);
+            b.trunc::<W32, W16>(w)
+        } else {
+            let w = read64(b, g);
+            b.trunc::<W64, W16>(w)
+        }
+    };
+    let x = read_low(b, dst);
+    let y = read_low(b, src);
+    let v = b.xor::<W16>(x, y);
+    if dst.0 < 8 {
+        let cur = read(b, dst);
+        let mask = b.konst::<W32>(0xFFFF_0000);
+        let preserved = b.and::<W32>(cur, mask);
+        let ext = b.zext::<W16, W32>(v);
+        let nv = b.or::<W32>(preserved, ext);
+        write(b, dst, nv);
+    } else {
+        let cur = read64(b, dst);
+        let mask = b.konst::<W64>(!0u64 << 16);
+        let preserved = b.and::<W64>(cur, mask);
+        let ext = b.zext::<W16, W64>(v);
+        let nv = b.or::<W64>(preserved, ext);
+        write64(b, dst, nv);
+    }
+    update_logic_flags(b, v);
+    Ok(())
+}
+
 /// XOR r/m32, r32。結果を dst に書き、5 旗を更新する（CF=0、OF=0）。
 /// 31 C0（XOR EAX,EAX のゼロ化イディオム）はこの汎用形で扱う。
 pub fn xor_rm32<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
