@@ -465,6 +465,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("imul_r_imm", "F1", "01101001 11...... ................................", "imul r, r/m, {imm}", "alu"),
         // IMUL r, [SIB+disp8], imm32 (69 /r)。mktemp 0x4d85cf の 48 69 44 24 08 01 00 01 00。
         ("imul_r_imm_sibd", "F1", "01101001 01...100 ..100... ........ ................................", "imul r, m, {imm}", "alu"),
+        // IMUL r, [base+disp8], imm32 (69 /r mod=01 rm!=4)。ifplugd 0x4264b0 の 69 43 04。
+        ("imul_r_imm_mem8", "F1", "01101001 01...... ........ ................................", "imul r, m, {imm}", "alu"),
         // IMUL r32/r64, r/m32/r/m64, imm8 reg-direct (6B /r ib mod=11)。REX.W で64bit.
         ("imul_r_imm8", "F1", "01101011 11...... ........", "imul r, r/m, {imm}", "alu"),
         // IMUL r64,r/m64,imm8 RIP (6B /r ib + disp32 + imm8)。REX.W で64bit.

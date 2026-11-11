@@ -621,6 +621,9 @@ fn fetch_len(
                 } else {
                     None
                 }
+            } else if md == 1 {
+                // IMUL r, [base+disp8], imm32。ifplugd 0x4264b0 の 69 43 04。7B.
+                Some(7)
             } else {
                 None
             }
@@ -7494,6 +7497,15 @@ fn dispatch<B: Backend>(
                 sem::imul_r64_imm_sib(b, reg(), sib_base(), sib_idx(), sib_shift(), imm32())
             } else {
                 sem::imul_r32_imm_sib(b, reg(), sib_base(), sib_idx(), sib_shift(), imm32())
+            }
+        }
+        Insn::ImulRImmMem8 => {
+            // 69 /r mod=01 [base+disp8], imm32。ifplugd 0x4264b0。フラグは変えない。
+            let disp = ((word >> 32) & 0xff) as u8 as i8;
+            if rex_w {
+                sem::imul_r64_imm_mem8(b, reg(), rm(), disp, imm32())
+            } else {
+                sem::imul_r32_imm_mem8(b, reg(), rm(), disp, imm32())
             }
         }
         Insn::ImulRImmSibd => {
