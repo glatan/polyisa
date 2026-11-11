@@ -7335,6 +7335,10 @@ pub struct CliLinux {
     exe_path: String,
     /// getdents64 で読み終わった fd。一度に全件返し、2回目以降は 0 (EOF) を返す.
     dir_done: Vec<u32>,
+    /// openat で開いたホストパス。ゲスト fd とホストの fd 番号は一致しない。
+    fd_paths: Vec<Option<String>>,
+    /// 標準 fd に付け替えたファイルのホストパス。
+    std_paths: [Option<String>; 3],
 }
 
 impl CliLinux {
@@ -7416,6 +7420,47 @@ impl CliLinux {
         (3 + self.fds.len() - 1) as u32
     }
 
+    /// ゲスト fd に、openat が開いたホストパスを覚える。
+    fn remember_path(&mut self, fd: u32, path: String) {
+        if fd < 3 {
+            self.std_paths[fd as usize] = Some(path);
+            return;
+        }
+        let idx = fd.wrapping_sub(3) as usize;
+        while self.fd_paths.len() <= idx {
+            self.fd_paths.push(None);
+        }
+        self.fd_paths[idx] = Some(path);
+    }
+
+    /// ゲスト fd に覚えたホストパス。
+    fn path_of(&self, fd: u32) -> Option<&str> {
+        if fd < 3 {
+            self.std_paths[fd as usize].as_deref()
+        } else {
+            self.fd_paths
+                .get(fd.wrapping_sub(3) as usize)
+                .and_then(|p| p.as_deref())
+        }
+    }
+
+    /// ゲスト fd のパスと、getdents64 の読み終わり印を捨てる。
+    fn forget_path(&mut self, fd: u32) {
+        if fd < 3 {
+            self.std_paths[fd as usize] = None;
+        } else if let Some(slot) = self.fd_paths.get_mut(fd.wrapping_sub(3) as usize) {
+            *slot = None;
+        }
+        self.dir_done.retain(|d| *d != fd);
+    }
+
+    /// 開ファイルを複製し、覚えてあるパスも返す。
+    fn clone_open(&self, fd: u32) -> Option<(std::fs::File, Option<String>)> {
+        let file = self.file_ref(fd)?.try_clone().ok()?;
+        let path = self.path_of(fd).map(str::to_string);
+        Some((file, path))
+    }
+
     /// fd を閉じる。標準 fd の初回 close も成功させる。閉じたら真.
     fn close_fd(&mut self, fd: u32) -> bool {
         if fd < 3 {
@@ -7423,6 +7468,7 @@ impl CliLinux {
             if self.std_files[i].is_some() {
                 self.std_files[i] = None;
                 self.std_closed[i] = true;
+                self.forget_path(fd);
                 true
             } else if !self.std_closed[i] {
                 self.std_closed[i] = true;
@@ -7434,6 +7480,7 @@ impl CliLinux {
             match self.fds.get_mut(fd.wrapping_sub(3) as usize) {
                 Some(f) if f.is_some() => {
                     *f = None;
+                    self.forget_path(fd);
                     true
                 }
                 _ => false,
@@ -7730,6 +7777,7 @@ fn sys_openat(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Trap
     Some(match opened {
         Ok(f) => {
             let fd = sys.alloc_fd(f);
+            sys.remember_path(fd, path);
             set64(env, Gpr(0), fd as u64);
             TrapOutcome::Handled
         }
@@ -8298,19 +8346,11 @@ fn sys_getdents64(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<
         set64(env, Gpr(0), 0);
         return Some(TrapOutcome::Handled);
     }
-    // opened fd のみ受け付ける。stdin/stdout (0-2) は EBADF。
-    let slot = fd.wrapping_sub(3) as usize;
-    if sys.fds.get(slot).and_then(|f| f.as_ref()).is_none() {
+    // opened fd のみ受け付ける。stdin/stdout (0-2) は、パスを覚えていなければ EBADF。
+    // ゲスト fd を /proc/self/fd のホスト fd とみなすと、別の記述子を開く。
+    let Some(dir_path) = sys.path_of(fd).map(std::path::PathBuf::from) else {
         set64(env, Gpr(0), cx.neg(EBADF));
         return Some(TrapOutcome::Handled);
-    }
-    let link = format!("/proc/self/fd/{fd}");
-    let dir_path = match std::fs::read_link(&link) {
-        Ok(p) => p,
-        Err(_) => {
-            set64(env, Gpr(0), cx.neg(EBADF));
-            return Some(TrapOutcome::Handled);
-        }
     };
     let rd = match std::fs::read_dir(&dir_path) {
         Ok(rd) => rd,
@@ -8960,22 +9000,31 @@ fn sys_dup(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOut
         set64(env, Gpr(0), cx.neg(EBADF));
         return Some(TrapOutcome::Handled);
     }
-    if let Some(cloned) = sys.file_ref(oldfd).and_then(|f| f.try_clone().ok()) {
-        for (i, slot) in sys.std_files.iter_mut().enumerate() {
-            if slot.is_none() && sys.std_closed[i] {
-                *slot = Some(cloned);
-                sys.std_closed[i] = false;
-                set64(env, Gpr(0), i as u64);
-                return Some(TrapOutcome::Handled);
+    if let Some((cloned, path)) = sys.clone_open(oldfd) {
+        if let Some(i) = (0..3).find(|&i| sys.std_files[i].is_none() && sys.std_closed[i]) {
+            sys.std_files[i] = Some(cloned);
+            sys.std_closed[i] = false;
+            if let Some(p) = path {
+                sys.remember_path(i as u32, p);
             }
+            set64(env, Gpr(0), i as u64);
+            return Some(TrapOutcome::Handled);
         }
         if let Some(idx) = sys.fds.iter().position(|f| f.is_none()) {
             sys.fds[idx] = Some(cloned);
-            set64(env, Gpr(0), (3 + idx) as u64);
+            let fd = (3 + idx) as u32;
+            if let Some(p) = path {
+                sys.remember_path(fd, p);
+            }
+            set64(env, Gpr(0), fd as u64);
             return Some(TrapOutcome::Handled);
         }
         sys.fds.push(Some(cloned));
-        set64(env, Gpr(0), (3 + sys.fds.len() - 1) as u64);
+        let fd = (3 + sys.fds.len() - 1) as u32;
+        if let Some(p) = path {
+            sys.remember_path(fd, p);
+        }
+        set64(env, Gpr(0), fd as u64);
         return Some(TrapOutcome::Handled);
     }
     if oldfd == 1 || oldfd == 2 {
@@ -9001,7 +9050,7 @@ fn sys_dup2(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOu
         set64(env, Gpr(0), newfd as u64);
         return Some(TrapOutcome::Handled);
     }
-    if let Some(cloned) = sys.file_ref(oldfd).and_then(|f| f.try_clone().ok()) {
+    if let Some((cloned, path)) = sys.clone_open(oldfd) {
         if newfd < 3 {
             let i = newfd as usize;
             sys.std_files[i] = Some(cloned);
@@ -9012,6 +9061,9 @@ fn sys_dup2(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOu
                 sys.fds.push(None);
             }
             sys.fds[idx] = Some(cloned);
+        }
+        if let Some(p) = path {
+            sys.remember_path(newfd, p);
         }
         set64(env, Gpr(0), newfd as u64);
         return Some(TrapOutcome::Handled);
@@ -9044,7 +9096,7 @@ fn sys_dup3(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOu
         set64(env, Gpr(0), cx.neg(EBADF));
         return Some(TrapOutcome::Handled);
     }
-    if let Some(cloned) = sys.file_ref(oldfd).and_then(|f| f.try_clone().ok()) {
+    if let Some((cloned, path)) = sys.clone_open(oldfd) {
         if newfd < 3 {
             let i = newfd as usize;
             sys.std_files[i] = Some(cloned);
@@ -9055,6 +9107,9 @@ fn sys_dup3(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOu
                 sys.fds.push(None);
             }
             sys.fds[idx] = Some(cloned);
+        }
+        if let Some(p) = path {
+            sys.remember_path(newfd, p);
         }
         set64(env, Gpr(0), newfd as u64);
         return Some(TrapOutcome::Handled);
@@ -10214,7 +10269,7 @@ mod tests {
         set64(&mut env, Gpr(2), 0x500);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         let n = get64(&mut env, Gpr(0));
-        assert!(n > 0);
+        assert!(n > 0 && n < 0x1_0000, "getdents64 returned {n:#x}");
         let mut back = vec![0u8; n as usize];
         env.backend
             .mem
