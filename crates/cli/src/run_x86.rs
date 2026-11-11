@@ -1120,11 +1120,12 @@ fn fetch_len(
                 }
             } else if rm == 4 {
                 // SIB 付き。mod=01 SIB+disp8+imm8 (5B) の /7 CMP と /1 ORB と /4 ANDB、
-                // mod=00 SIB [base] (no_index, non-abs) +imm8 (4B) の /1 ORB と /7 CMPB、
+                // mod=00 SIB [base+index*scale] +imm8 (4B) の /1 ORB と /6 XORB と /7 CMPB。
+                // base=5 は disp32 が付く。sha3sum 0x4b4f14 の xorb $6, (%rdi,%rax,1)。
                 // mod=10 SIB+disp32+imm8 (8B) の /7 CMPB (stat 0x429875 対応).
                 if md == 1 && (reg == 7 || reg == 6 || reg == 1 || reg == 4) {
                     Some(5)
-                } else if md == 0 && (reg == 1 || reg == 7) {
+                } else if md == 0 && (reg == 1 || reg == 6 || reg == 7) {
                     let t = third?;
                     if t & 7 != 5 { Some(4) } else { None }
                 } else if md == 2 && reg == 7 {
@@ -4261,6 +4262,15 @@ fn dispatch<B: Backend>(
                 sem::xor_rm8_imm_mem8(b, base, d8, imm)
             } else {
                 sem::xor_rm8_imm_sibd(b, base, idx, shift, d8, imm)
+            }
+        }
+        Insn::XorRm8ImmSib => {
+            // 80 /6 SIB mod=00。sha3sum 0x4b4f14 の xorb $6, (%rdi,%rax,1)。
+            let imm = (word & 0xff) as u8;
+            if no_index() {
+                sem::xor_rm8_imm_memnd(b, sib_base(), imm)
+            } else {
+                sem::xor_rm8_imm_sib(b, sib_base(), sib_idx(), sib_shift(), imm)
             }
         }
         Insn::CmpRm8ImmSibd => {
