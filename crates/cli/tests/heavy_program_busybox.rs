@@ -349,6 +349,7 @@ fn text_applets_match_host() {
         &["printf", "%x\n", "255"],
         &["arch"],
         &["uniq", "-c", f],
+        &["sleep", "0"],
     ];
     for args in cases {
         let argv: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();

@@ -9207,6 +9207,7 @@ const X86_64_SYSCALLS: &[(&str, SysFn)] = &[
     ("time", sys_time),
     ("ioctl", sys_ioctl),
     ("clock_nanosleep", sys_clock_nanosleep),
+    ("nanosleep", sys_nanosleep),
     ("clock_gettime", sys_clock_gettime),
     ("readlinkat", sys_readlinkat),
     ("readlink", sys_readlink),
@@ -10678,6 +10679,34 @@ fn sys_ioctl(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Trap
     // ls の画面幅取得などは失敗扱いで継続する.
     // Ref: SRC-LINUX (7.3).
     set64(env, Gpr(0), cx.neg(ENOTTY));
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_nanosleep(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // nanosleep(req, rem)。req の timespec を読んで、不正なら EINVAL。
+    // 試作では待たずに 0 を返す。sleep 0 はこれで正しい。
+    // Ref: SRC-LINUX (7.3).
+    let req = get64(env, cx.r_a);
+    if req == 0 {
+        set64(env, Gpr(0), cx.neg(EFAULT));
+        return Some(TrapOutcome::Handled);
+    }
+    let mut buf = [0u8; 16];
+    if env
+        .backend
+        .mem
+        .read(VirtAddr(req), &mut buf, data_access())
+        .is_err()
+    {
+        return Some(TrapOutcome::Unimplemented);
+    }
+    let sec = i64::from_le_bytes(buf[..8].try_into().unwrap());
+    let nsec = i64::from_le_bytes(buf[8..].try_into().unwrap());
+    if sec < 0 || !(0..1_000_000_000).contains(&nsec) {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    set64(env, Gpr(0), 0);
     Some(TrapOutcome::Handled)
 }
 
@@ -12773,6 +12802,32 @@ mod tests {
             .read(VirtAddr(0x100), &mut back, data_access())
             .unwrap();
         assert_eq!(u32::from_le_bytes(back), 0);
+    }
+
+    #[test]
+    fn nanosleep_zero_returns_zero() {
+        use polyisa_os_linux::x86_64 as abi;
+        let mut sys = CliLinux::x86_64();
+        let mut env = bare();
+        // nanosleep({0, 0}, NULL) は待たずに 0 を返す。sleep 0 が使う。
+        env.backend.mem.write(VirtAddr(0x100), &[0u8; 16]).unwrap();
+        set64(&mut env, Gpr(0), abi::NANOSLEEP);
+        set64(&mut env, Gpr(7), 0x100);
+        set64(&mut env, Gpr(6), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        // tv_nsec が範囲外なら EINVAL。
+        let bad = 1_000_000_000i64.to_le_bytes();
+        env.backend.mem.write(VirtAddr(0x108), &bad).unwrap();
+        set64(&mut env, Gpr(0), abi::NANOSLEEP);
+        set64(&mut env, Gpr(7), 0x100);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EINVAL));
+        // req が NULL なら EFAULT。
+        set64(&mut env, Gpr(0), abi::NANOSLEEP);
+        set64(&mut env, Gpr(7), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EFAULT));
     }
 
     #[test]
