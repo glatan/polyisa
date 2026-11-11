@@ -785,6 +785,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         // SUB m32/m64,imm8 SIB mod=01 [base+disp8] (83 /5)。index有無は問わずdispatchで切替.
         // seq 0x4d0bfa の 83 6C 24 58 1C は subl $0x1c, 0x58(%rsp).
         ("sub_rm_imm8_sibd", "F1", "10000011 01101100 ........ ........ ........", "sub r/m, {imm}", "alu"),
+        ("xor_rm_imm8_sibd", "F1", "10000011 01110100 ........ ........ ........", "xor r/m, {imm}", "alu"),
         // OR m32/m64,imm8 SIB mod=01 [base+disp8] (83 /1)。index有無は問わずdispatchで切替.
         ("or_rm_imm8_sibd", "F1", "10000011 01001100 ........ ........ ........", "or r/m, {imm}", "alu"),
         // OR m32/m64,imm8 SIB mod=00 [base+index*scale] (83 /1)。awk 0x4a1704 対応。base=5 は長さが違う.

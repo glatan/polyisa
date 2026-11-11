@@ -650,6 +650,10 @@ fn fetch_len(
                     // SUB m32,imm8 SIB+disp8。seq 0x4d0bfa の 83 6C 24 58 1C。5B.
                     return Some(5);
                 }
+                if reg == 6 && md == 1 {
+                    // XOR m64,imm8 SIB+disp8。sort 0x4d3045 の 48 83 74 24 10 07。5B.
+                    return Some(5);
+                }
                 // SIB 付き。mod=01 SIB+disp8+imm8 (5B) の /4 AND と /7 CMP と /1 OR と /0 ADD、
                 // mod=00 SIB+imm8 (4B) の /4 AND と /7 CMP、66 mod=00 SIB+imm8 (4B) の /0 ADD のみ.
                 let t = third?;
@@ -4745,6 +4749,27 @@ fn dispatch<B: Backend>(
                 sem::xor_rm64_imm8_mem8(b, rm(), d8, imm)
             } else {
                 sem::xor_rm32_imm8_mem8(b, rm(), d8, imm)
+            }
+        }
+        Insn::XorRmImm8Sibd => {
+            // 83 /6 SIB mod=01。sort 0x4d3045 の xorq $0x7, 0x10(%rsp)。
+            let sib_v = ((word >> 16) & 0xff) as u8;
+            let d8 = ((word >> 8) & 0xff) as u8 as i8;
+            let imm = (word & 0xff) as u8 as i8;
+            let shift = ((sib_v >> 6) & 3) as u32;
+            let idx_raw = (sib_v >> 3) & 7;
+            let idx = Gpr(idx_raw | (((rex >> 1) & 1) << 3));
+            let base = Gpr((sib_v & 7) | ((rex & 1) << 3));
+            if idx_raw == 4 && (rex >> 1) & 1 == 0 {
+                if rex_w {
+                    sem::xor_rm64_imm8_mem8(b, base, d8, imm)
+                } else {
+                    sem::xor_rm32_imm8_mem8(b, base, d8, imm)
+                }
+            } else if rex_w {
+                sem::xor_rm64_imm8_sibd(b, base, idx, shift, d8, imm)
+            } else {
+                sem::xor_rm32_imm8_sibd(b, base, idx, shift, d8, imm)
             }
         }
         Insn::XorRmImm8Memnd => {
