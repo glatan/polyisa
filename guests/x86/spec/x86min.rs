@@ -413,6 +413,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("xadd_r32_memnd", "MR", "00001111 11000001 00......", "xadd r32, m32", "alu"),
         // INC m32 [base] (FF /0 mod=00)。CF 以外の 5 旗を更新する.
         ("inc_rm_memnd", "MR", "11111111 00000...", "inc r/m", "alu"),
+        // INC m32 [base+index*scale] (FF /0 SIB mod=00)。sed 0x4ca2c7 対応。base=5 は長さが違う.
+        ("inc_rm_sib", "F1", "11111111 00000100 ........", "inc r/m", "alu"),
         // INC m32 [base+index*scale+disp8] (FF /0 SIB mod=01)。
         ("inc_rm_sibd", "S8", "11111111 01000100 ........ ........", "inc r/m", "alu"),
         // INC m32 [base+index*scale+disp32] (FF /0 SIB mod=10)。basename 0x4899d0 対応.

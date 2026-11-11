@@ -1988,6 +1988,14 @@ fn dispatch<B: Backend>(
             // FF /0 mod=00 [base]。CF 以外の 5 旗を更新する.
             sem::inc_r32_memnd(b, rm())
         }
+        Insn::IncRmSib => {
+            // FF /0 SIB mod=00 [base+index*scale]。sed 0x4ca2c7 対応。CF は残す.
+            if no_index() {
+                sem::inc_r32_memnd(b, sib_base())
+            } else {
+                sem::inc_r32_sib(b, sib_base(), sib_idx(), sib_shift())
+            }
+        }
         Insn::IncRmSibd => {
             // FF /0 SIB mod=01 [base+index*scale+disp8]。CF 以外の 5 旗を更新する.
             if no_index() {

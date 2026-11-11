@@ -7561,3 +7561,42 @@ fn run_or_r32_sibd_r12() {
     assert_eq!(out, Outcome::StepLimit { eip: 0x1005 });
     assert_eq!(env.backend.get(Gpr(0).state()), 0x17u32);
 }
+
+#[test]
+fn run_inc_rm_sib_keeps_cf() {
+    // FF 04 91 = incl (%rcx,%rdx,4)。10 が 11 になり、CF は残る。sed 0x4ca2c7。
+    // Ref: SPEC-X86-INTEL-SDM (v093).
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2004), &10u32.to_le_bytes())
+        .unwrap();
+    env.backend.set(Gpr(1).state(), 0x2000u32);
+    env.backend.set(Gpr(2).state(), 1u32);
+    env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 1u32);
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0xFF, 0x04, 0x91])
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x1003 });
+    let mut got = [0u8; 4];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x2004),
+            &mut got,
+            polyisa_mem::Access {
+                endian: polyisa_mem::Endian::Le,
+                align: polyisa_mem::Align::Natural,
+                kind: polyisa_mem::AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(u32::from_le_bytes(got), 11);
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 1, 1);
+}
