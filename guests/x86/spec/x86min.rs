@@ -1708,6 +1708,14 @@ pub fn build_model() -> polyisa_isadl::Model {
             "alu",
         ),
         (
+            "push_rm_mem8",
+            "M8",
+            "11111111 01110... ........",
+            vec![wc("m8_rm", WhereOp::Ne, 4)],
+            "push m",
+            "store",
+        ),
+        (
             "push_rm_sibd",
             "S8",
             "11111111 01110100 ........ ........",

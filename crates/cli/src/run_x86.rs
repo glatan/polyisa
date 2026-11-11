@@ -1326,6 +1326,10 @@ fn fetch_len(
                 // PUSH m SIB+disp8。seq 0x4d1a81 の FF 74 24 68。
                 return Some(4);
             }
+            if reg == 6 && md == 1 && rm != 4 {
+                // PUSH m [base+disp8]。vi 0x4ce196 の FF 73 40。
+                return Some(3);
+            }
             if reg != 0 && reg != 1 && reg != 2 && reg != 4 {
                 return None;
             }
@@ -3809,6 +3813,14 @@ fn dispatch<B: Backend>(
                 sem::fld_m80_mem32(b, sib_base(), disp32())
             } else {
                 sem::fld_m80_sibd32(b, sib_base(), sib_idx(), sib_shift(), disp32())
+            }
+        }
+        Insn::PushRmMem8 => {
+            // FF /6 mod=01 [base+disp8]。vi 0x4ce196 の pushq 0x40(%rbx)。番地は減算前。
+            if is64 {
+                sem::push_m64_mem8(b, rm(), disp8())
+            } else {
+                sem::push_m32_mem8(b, rm(), disp8())
             }
         }
         Insn::PushRmSibd => {
