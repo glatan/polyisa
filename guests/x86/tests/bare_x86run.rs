@@ -8952,3 +8952,56 @@ fn run_fldcw_sibd_rsp() {
     assert_eq!(out, Outcome::StepLimit { eip: 0x1004 });
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::fcw_ref()), 0x0C00);
 }
+
+#[test]
+fn run_fistp_m64_sibd_honors_rounding() {
+    // DF 7C 24 30 = fistpq 0x30(%rsp)。RC に従って整数を書き、ST(0) を捨てる。
+    // seq 0x4d0c31 は RC=ゼロ方向。
+    // Ref: SPEC-X86-INTEL-SDM (v093).
+    fn once(exp: u16, sig: u64, fcw: u16) -> (u64, u16) {
+        let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+        env.step(|b| {
+            polyisa_guest_x86::sem::write64(b, Gpr(4), 0x2000);
+            let cw = b.konst::<polyisa_sem::W16>(fcw);
+            b.set(polyisa_guest_x86::sem::fcw_ref(), cw);
+            Ok(())
+        })
+        .unwrap();
+        env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+        env.backend.set(polyisa_guest_x86::sem::st_exp_ref(0), exp);
+        env.backend.set(polyisa_guest_x86::sem::st_sig_ref(0), sig);
+        env.backend
+            .mem
+            .write(VirtAddr(0x1000), &[0xDF, 0x7C, 0x24, 0x30])
+            .unwrap();
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+        assert_eq!(out, Outcome::StepLimit { eip: 0x1004 });
+        assert_eq!(env.backend.get(polyisa_guest_x86::sem::top_ref()), 1);
+        assert_eq!(env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)), 0);
+        let acc = polyisa_mem::Access {
+            endian: polyisa_mem::Endian::Le,
+            align: polyisa_mem::Align::Unaligned,
+            kind: polyisa_mem::AccessKind::DataRead,
+        };
+        let mut got = [0u8; 8];
+        env.backend
+            .mem
+            .read(VirtAddr(0x2030), &mut got, acc)
+            .unwrap();
+        (
+            u64::from_le_bytes(got),
+            env.backend.get(polyisa_guest_x86::sem::top_ref()),
+        )
+    }
+    let three = (1u64 << 63) | (1u64 << 62);
+    let trunc = 0x037F | 0x0C00;
+    assert_eq!(once(0x4000, three, trunc).0, 3);
+    assert_eq!(once(0x3FFF, three, trunc).0, 1);
+    assert_eq!(once(0xBFFF, three, trunc).0, u64::MAX);
+    assert_eq!(once(0x3FFF, three, 0x037F).0, 2);
+    assert_eq!(once(0x3FFE, 1u64 << 63, 0x037F).0, 0);
+}

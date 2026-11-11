@@ -11757,6 +11757,136 @@ fn f80_to_f64<B: Backend>(b: &mut B, sig: B::V<W64>, exp: B::V<W16>) -> B::V<W64
     b.or::<W64>(bits_mag, sign_bit)
 }
 
+/// 80 ビットを符号付き 64 ビット整数へ丸める。丸め方向は FCW の RC。
+/// 入らない値と非数は不定整数 0x8000_0000_0000_0000。
+fn f80_to_i64<B: Backend>(b: &mut B, sig: B::V<W64>, exp: B::V<W16>) -> B::V<W64> {
+    let zero = b.konst::<W64>(0);
+    let one = b.konst::<W64>(1);
+    let mask15 = b.konst::<W64>(0x7fff);
+    let special = b.konst::<W64>(0x7fff);
+    let s15 = b.konst::<W64>(15);
+    let s63 = b.konst::<W64>(63);
+    let s10 = b.konst::<W64>(10);
+    let bias = b.konst::<W64>(16383);
+    let lim = b.konst::<W64>(16446);
+    let indef = b.konst::<W64>(1u64 << 63);
+    let rc_mask = b.konst::<W64>(3);
+
+    let fcw = b.get(fcw_ref());
+    let fcw64 = b.zext::<W16, W64>(fcw);
+    let rc_sh = b.shr_l::<W64>(fcw64, s10);
+    let rc = b.and::<W64>(rc_sh, rc_mask);
+    let nearest = b.cmp::<W64>(Cmp::Eq, rc, zero);
+    let floor = b.cmp::<W64>(Cmp::Eq, rc, one);
+    let two = b.konst::<W64>(2);
+    let ceil = b.cmp::<W64>(Cmp::Eq, rc, two);
+
+    let exp64 = b.zext::<W16, W64>(exp);
+    let ea = b.and::<W64>(exp64, mask15);
+    let sign = b.shr_l::<W64>(exp64, s15);
+    let is_sign = b.cmp::<W64>(Cmp::Eq, sign, one);
+    let not_sign = bit_not(b, is_sign);
+    let is_special = b.cmp::<W64>(Cmp::Eq, ea, special);
+    let is_zero_exp = b.cmp::<W64>(Cmp::Eq, ea, zero);
+    let ge_one = b.cmp::<W64>(Cmp::GeU, ea, bias);
+    let lt_ovf = b.cmp::<W64>(Cmp::LtU, ea, lim);
+    let in_norm = bit_and(b, ge_one, lt_ovf);
+    let at_63 = b.cmp::<W64>(Cmp::Eq, ea, lim);
+    let above = b.cmp::<W64>(Cmp::GtU, ea, lim);
+
+    let unb_raw = b.sub::<W64>(ea, bias);
+    let unb = b.select::<W64>(ge_one, unb_raw, zero);
+    let shift_raw = b.sub::<W64>(s63, unb);
+    let shift = b.select::<W64>(in_norm, shift_raw, zero);
+    let trunc = b.shr_l::<W64>(sig, shift);
+    let one_sh = b.shl::<W64>(one, shift);
+    let rem_mask = b.sub::<W64>(one_sh, one);
+    let rem = b.and::<W64>(sig, rem_mask);
+    let shift_nz = b.cmp::<W64>(Cmp::Ne, shift, zero);
+    let shift_m1_raw = b.sub::<W64>(shift, one);
+    let sh_m1 = b.select::<W64>(shift_nz, shift_m1_raw, zero);
+    let round_src = b.shr_l::<W64>(rem, sh_m1);
+    let round_bit = b.and::<W64>(round_src, one);
+    let round_on = b.cmp::<W64>(Cmp::Eq, round_bit, one);
+    let one_sticky = b.shl::<W64>(one, sh_m1);
+    let sticky_mask = b.sub::<W64>(one_sticky, one);
+    let sticky_bits = b.and::<W64>(rem, sticky_mask);
+    let sticky = b.cmp::<W64>(Cmp::Ne, sticky_bits, zero);
+    let any_frac = bit_or(b, round_on, sticky);
+    let lsb = b.and::<W64>(trunc, one);
+    let lsb_on = b.cmp::<W64>(Cmp::Eq, lsb, one);
+    let tie = bit_or(b, sticky, lsb_on);
+    let near_round = bit_and(b, nearest, round_on);
+    let nearest_up = bit_and(b, near_round, tie);
+    let floor_sign = bit_and(b, floor, is_sign);
+    let floor_up = bit_and(b, floor_sign, any_frac);
+    let ceil_pos = bit_and(b, ceil, not_sign);
+    let ceil_up = bit_and(b, ceil_pos, any_frac);
+    let up_nf = bit_or(b, nearest_up, floor_up);
+    let up_raw = bit_or(b, up_nf, ceil_up);
+    let do_up = bit_and(b, up_raw, in_norm);
+    let mag_base = b.select::<W64>(in_norm, trunc, zero);
+    let mag_plus = b.add::<W64>(mag_base, one);
+    let mag_norm = b.select::<W64>(do_up, mag_plus, mag_base);
+    let eq_min = b.cmp::<W64>(Cmp::Eq, mag_norm, indef);
+    let ovf_norm = bit_and(b, eq_min, not_sign);
+
+    let exact_min = b.cmp::<W64>(Cmp::Eq, sig, indef);
+    let at_and_exact = bit_and(b, at_63, exact_min);
+    let ok_min = bit_and(b, at_and_exact, is_sign);
+    let not_ok_min = bit_not(b, ok_min);
+    let ovf_63 = bit_and(b, at_63, not_ok_min);
+
+    let not_ge = bit_not(b, ge_one);
+    let not_zero = bit_not(b, is_zero_exp);
+    let not_special = bit_not(b, is_special);
+    let below = bit_and(b, not_ge, not_zero);
+    let frac = bit_and(b, below, not_special);
+    let k_raw = b.sub::<W64>(bias, ea);
+    let k = b.select::<W64>(frac, k_raw, zero);
+    let k_is_1 = b.cmp::<W64>(Cmp::Eq, k, one);
+    let only_int = b.cmp::<W64>(Cmp::Eq, sig, indef);
+    let not_only = bit_not(b, only_int);
+    let gt_half = bit_and(b, k_is_1, not_only);
+    let near_one = bit_and(b, nearest, gt_half);
+    let floor_one = bit_and(b, floor, is_sign);
+    let ceil_one = bit_and(b, ceil, not_sign);
+    let frac_mode = bit_or(b, near_one, floor_one);
+    let frac_mode = bit_or(b, frac_mode, ceil_one);
+    let frac_one = bit_and(b, frac, frac_mode);
+    let mag_frac = b.select::<W64>(frac_one, one, zero);
+
+    let mag_or_norm = b.select::<W64>(frac, mag_frac, mag_norm);
+    let mag = b.select::<W64>(ok_min, indef, mag_or_norm);
+    let neg = b.sub::<W64>(zero, mag);
+    let signed = b.select::<W64>(is_sign, neg, mag);
+    let bad_hi = bit_or(b, is_special, above);
+    let bad_ovf = bit_or(b, ovf_63, ovf_norm);
+    let bad = bit_or(b, bad_hi, bad_ovf);
+    b.select::<W64>(bad, indef, signed)
+}
+
+/// FISTP m64。整数を書いてから ST(0) を捨てる。
+fn fistp_m64_at<B: Backend>(b: &mut B, addr: B::V<W64>) -> Flow<B> {
+    let top = b.get(top_ref());
+    let (sig, exp) = read_st(b, top);
+    let bits = f80_to_i64(b, sig, exp);
+    b.store::<W64>(addr, bits, DATA_WRITE)?;
+    pop_st(b, top)
+}
+
+/// FISTP m64 [base+disp8] (DF /7 SIB mod=01, no_index)。seq 0x4d0c31 対応.
+pub fn fistp_m64_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8) -> Flow<B> {
+    let addr = eff_addr(b, base, disp);
+    fistp_m64_at(b, addr)
+}
+
+/// FISTP m64 [base+index*scale+disp8] (DF /7 SIB mod=01)。
+pub fn fistp_m64_sibd<B: Backend>(b: &mut B, base: Gpr, idx: Gpr, shift: u32, disp: i8) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, disp as i32, base, idx);
+    fistp_m64_at(b, addr)
+}
+
 fn pop_st<B: Backend>(b: &mut B, top: B::V<W16>) -> Flow<B> {
     let zero64 = b.konst::<W64>(0);
     let zero16 = b.konst::<W16>(0);

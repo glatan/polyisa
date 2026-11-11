@@ -1658,6 +1658,14 @@ pub fn build_model() -> polyisa_isadl::Model {
             "alu",
         ),
         (
+            "fistp_m64_sibd",
+            "S8",
+            "11011111 01111100 ........ ........",
+            vec![],
+            "fistp m64",
+            "alu",
+        ),
+        (
             "fmulp_st",
             "F1",
             "11011110 11001...",

@@ -951,6 +951,9 @@ fn fetch_len(
             if reg == 5 && md == 0 && rm == 4 {
                 let sib = third?;
                 if sib & 7 != 5 { Some(3) } else { None }
+            } else if reg == 7 && md == 1 && rm == 4 {
+                // FISTP m64 SIB+disp8。seq 0x4d0c31 の DF 7C 24 30。4B.
+                Some(4)
             } else {
                 None
             }
@@ -3083,6 +3086,14 @@ fn dispatch<B: Backend>(
                 sem::fild_m64_memnd(b, sib_base())
             } else {
                 sem::fild_m64_sib(b, sib_base(), sib_idx(), sib_shift())
+            }
+        }
+        Insn::FistpM64Sibd => {
+            // DF /7 SIB mod=01。seq 0x4d0c31 の fistpq 0x30(%rsp)。
+            if no_index() {
+                sem::fistp_m64_mem8(b, sib_base(), disp8())
+            } else {
+                sem::fistp_m64_sibd(b, sib_base(), sib_idx(), sib_shift(), disp8())
             }
         }
         Insn::FildM32Sibd => {
