@@ -10761,6 +10761,32 @@ pub fn fstp_m80_memnd<B: Backend>(b: &mut B, base: Gpr) -> Flow<B> {
     pop_st(b, top)
 }
 
+/// FLD m80 [base+disp32] (DB /5 SIB mod=10, no_index)。seq 0x4d0853 対応.
+pub fn fld_m80_mem32<B: Backend>(b: &mut B, base: Gpr, disp: i32) -> Flow<B> {
+    let addr = eff_addr32(b, base, disp);
+    let sig: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let eight = b.konst::<W64>(8);
+    let exp_addr = b.add::<W64>(addr, eight);
+    let exp: B::V<W16> = b.load::<W16>(exp_addr, DATA_READ)?;
+    push_ext(b, sig, exp)
+}
+
+/// FLD m80 [base+index*scale+disp32] (DB /5 SIB mod=10)。
+pub fn fld_m80_sibd32<B: Backend>(
+    b: &mut B,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i32,
+) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, disp, base, idx);
+    let sig: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let eight = b.konst::<W64>(8);
+    let exp_addr = b.add::<W64>(addr, eight);
+    let exp: B::V<W16> = b.load::<W16>(exp_addr, DATA_READ)?;
+    push_ext(b, sig, exp)
+}
+
 /// FLDS [disp32] (D9 /0 mod=00 rm=101、32ビット)。
 pub fn fld_m32_abs<B: Backend>(b: &mut B, addr32: u32) -> Flow<B> {
     let addr = b.konst::<W64>(addr32 as u64);

@@ -846,6 +846,10 @@ fn fetch_len(
             let md = s >> 6;
             let reg = (s >> 3) & 7;
             let rm = s & 7;
+            if reg == 5 && md == 2 && rm == 4 {
+                // FLD m80 SIB+disp32。seq 0x4d0853 の DB AC 24 80 1D 00 00。7B.
+                return Some(7);
+            }
             if reg == 7 && md == 0 && rm != 4 && rm != 5 {
                 // FSTP m80 [base]。seq 0x4d0725 の DB 3F。
                 Some(2)
@@ -3305,6 +3309,14 @@ fn dispatch<B: Backend>(
                 sem::push_reg64(b, push_r())
             } else {
                 sem::push_reg(b, push_r())
+            }
+        }
+        Insn::FldM80Sibd32 => {
+            // DB /5 SIB mod=10。seq 0x4d0853 の fldt 0x1d80(%rsp)。
+            if no_index() {
+                sem::fld_m80_mem32(b, sib_base(), disp32())
+            } else {
+                sem::fld_m80_sibd32(b, sib_base(), sib_idx(), sib_shift(), disp32())
             }
         }
         Insn::PushRmSibd => {
