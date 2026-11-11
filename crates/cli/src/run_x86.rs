@@ -1231,6 +1231,9 @@ fn fetch_len(
                 } else if md == 0 {
                     let t = third?;
                     if t & 7 != 5 { Some(4) } else { None }
+                } else if md == 2 {
+                    // mod=10 SIB+disp32+imm8 (8B)。ping 0x4c4288 の test BYTE PTR [rsp+disp32], imm8。
+                    Some(8)
                 } else {
                     None
                 }
@@ -4720,6 +4723,16 @@ fn dispatch<B: Backend>(
             let disp = ((word >> 8) as u32).swap_bytes() as i32;
             let imm = (word & 0xff) as u8;
             sem::test_m8_imm_mem32(b, rm(), disp, imm)
+        }
+        Insn::TestM8ImmSibd32 => {
+            // F6 /0 SIB mod=10。ping 0x4c4288 の test BYTE PTR [rsp+disp32], imm8。
+            let disp = ((word >> 8) as u32).swap_bytes() as i32;
+            let imm = (word & 0xff) as u8;
+            if no_index() {
+                sem::test_m8_imm_mem32(b, sib_base(), disp, imm)
+            } else {
+                sem::test_m8_imm_sibd32(b, sib_base(), sib_idx(), sib_shift(), disp, imm)
+            }
         }
         Insn::TestM8ImmSibd => {
             // F6 /0 SIB mod=01 [base+index*scale+disp8],imm8 (40b)。

@@ -85,7 +85,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数117件。
-        assert_eq!(INSNS.len(), 756);
+        assert_eq!(INSNS.len(), 757);
     }
 
     #[test]
@@ -356,6 +356,7 @@ mod tests {
         assert_eq!(decode(0xF6050000000002, 56), Some(Insn::TestM8ImmRip));
         assert_eq!(decode(0xF6430402, 32), Some(Insn::TestM8ImmMem8));
         assert_eq!(decode(0xF644240180, 40), Some(Insn::TestM8ImmSibd));
+        assert_eq!(decode(0xF684241000000001, 64), Some(Insn::TestM8ImmSibd32));
         // TEST m8,SIB mod=00 (F6 /0 SIB)。ls -l 0x40e342 対応。41 F6 04 24 04 は REX.B 剥がし済み.
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0xF6042404, 32), Some(Insn::TestM8ImmSib));

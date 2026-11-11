@@ -19248,6 +19248,24 @@ pub fn mov_m64_fs_memnd<B: Backend>(b: &mut B, src: Gpr, fs_base: u64, base: Gpr
     Ok(())
 }
 
+/// TEST m8,imm8 [base+index*scale+disp32] (F6 /0 SIB mod=10)。メモリは変えない。
+pub fn test_m8_imm_sibd32<B: Backend>(
+    b: &mut B,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i32,
+    imm: u8,
+) -> Flow<B> {
+    use polyisa_sem::W8;
+    let addr = sib_addr_scaled(b, shift, disp, base, idx);
+    let x: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
+    let y = b.konst::<W8>(imm);
+    let v = b.and::<W8>(x, y);
+    update_logic_flags(b, v);
+    Ok(())
+}
+
 /// TEST m8,imm8 [base+index*scale+disp8] (F6 /0 SIB mod=01)。
 pub fn test_m8_imm_sibd<B: Backend>(
     b: &mut B,

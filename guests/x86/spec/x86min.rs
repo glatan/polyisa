@@ -893,6 +893,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("test_m8_imm_sibd", "F1", "11110110 01000100 ........ ........ ........", "test m8, {imm}", "alu"),
         // TEST m8,imm8 SIB mod=00 [base+index*scale] (F6 /0)。ls -l 0x40e342 対応.4B.
         ("test_m8_imm_sib", "F1", "11110110 00000100 ........ ........", "test m8, {imm}", "alu"),
+        // TEST m8,imm8 SIB+disp32 (F6 /0 mod=10)。ping 0x4c4288 対応。
+        ("test_m8_imm_sibd32", "F1", "11110110 10000100 ........ ................................ ........", "test m8, {imm}", "alu"),
         // CMP r32, m32 RIP (3B 05 + disp32)。
         ("cmp_r_rip", "F1", "00111011 00...101 ................................", "cmp r32, m32", "alu"),
         // CMP r/m32, r32 RIP (39 05 + disp32)。dst=mem.
