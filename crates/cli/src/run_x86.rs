@@ -5424,6 +5424,20 @@ fn dispatch<B: Backend>(
                 sem::or_m32_r32_mem32(b, rm(), disp32(), reg())
             }
         }
+        Insn::OrM32R32Sibd => {
+            // 09 /r SIB mod=01 [base+index*scale+disp8]。sed 0x400d55 対応.
+            if no_index() {
+                if rex_w {
+                    sem::or_m64_r64_mem8(b, sib_base(), disp8(), reg())
+                } else {
+                    sem::or_m32_r32_mem8(b, sib_base(), disp8(), reg())
+                }
+            } else if rex_w {
+                sem::or_m64_r64_sibd(b, sib_base(), sib_idx(), sib_shift(), disp8(), reg())
+            } else {
+                sem::or_m32_r32_sibd(b, sib_base(), sib_idx(), sib_shift(), disp8(), reg())
+            }
+        }
         Insn::OrM32R32Sibd32 => {
             // 09 /r SIB mod=10 [base+index*scale+disp32] (8B)。src は reg フィールド.
             if rex_w {
