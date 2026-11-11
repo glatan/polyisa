@@ -25,6 +25,7 @@ impl polyisa_guest::GuestIsa for Sparc {
 #[repr(C)]
 #[derive(Clone, Debug)]
 pub struct CpuState {
+    // Gap: GAP-0018
     /// 整数レジスタ g0〜g31。g0 は読むと 0、書き込みは捨てる。
     pub g: [u64; 32],
     /// プログラムカウンタ。

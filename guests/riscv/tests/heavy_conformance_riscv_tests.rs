@@ -25,6 +25,7 @@ fn riscv_tests_presence() {
     let a = root.join("riscv-tests");
     let b = root.join("riscv-arch-test");
     if !a.exists() || !b.exists() {
+        // Gap: GAP-0005
         eprintln!("skip: .testdata/riscv-tests か riscv-arch-test がないため未実行");
         return;
     }

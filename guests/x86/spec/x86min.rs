@@ -1,5 +1,6 @@
 // Copyright (c) polyisa contributors
 // SPDX-License-Identifier: MIT OR Apache-2.0
+// Gap: GAP-0015
 // x86 最小の ISADL モデル（段階4の最小）。
 //
 // i386 の105件に ModRM/SIB 汎用 23件と string・NOP・MOVSXD・C7・83 を加えた計106件。

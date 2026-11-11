@@ -1,6 +1,5 @@
 [profile.default]
-# TODO: heavy_ バイナリができたら `not binary(/^heavy_/)` に戻す。現状は対象がなくフィルタが失敗するため all()。
-default-filter = "all()"
+default-filter = "not binary(/^heavy_/)"
 retries = 0
 slow-timeout = { period = "30s", terminate-after = 2 }
 

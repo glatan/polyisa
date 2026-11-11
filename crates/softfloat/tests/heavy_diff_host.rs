@@ -1,5 +1,6 @@
 // Copyright (c) polyisa contributors
 // SPDX-License-Identifier: MIT OR Apache-2.0
+// Gap: GAP-0009
 //! ホスト FPU との差分比較（層8・diff の浮動小数点版）。
 //!
 //! TestFloat ベクタ実行までのつなぎとして、ホストの RNE 演算（IEEE 754）と

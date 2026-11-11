@@ -1,5 +1,6 @@
 // Copyright (c) polyisa contributors
 // SPDX-License-Identifier: MIT OR Apache-2.0
+// Gap: GAP-0006
 //! ISADL の検査済みモデル。字句解析と構文解析は後の段階で足す。
 //!
 //! 詳しくは [ISA 記述言語](../../../docs/design/isa-description.md) を見る。

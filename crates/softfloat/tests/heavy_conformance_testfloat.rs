@@ -21,6 +21,7 @@ fn testdata_root() -> PathBuf {
 fn testfloat_vectors_presence() {
     let root = testdata_root();
     if !root.exists() {
+        // Gap: GAP-0005
         eprintln!("skip: .testdata/testfloat がないため未実行");
         return;
     }

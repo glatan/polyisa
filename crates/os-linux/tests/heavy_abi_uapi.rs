@@ -98,6 +98,7 @@ fn uapi_numbers_x86_64(clang: &str, macros: &[&str]) -> Option<Vec<u64>> {
 #[test]
 fn syscall_numbers_match_uapi() {
     let Some(cc) = clang() else {
+        // Gap: GAP-0005
         eprintln!("skip: clang がないため未実行");
         return;
     };
@@ -134,6 +135,7 @@ fn syscall_numbers_match_uapi() {
     ];
     let macros: Vec<&str> = cases.iter().map(|(m, _)| *m).collect();
     let Some(got) = uapi_numbers(&cc, &macros) else {
+        // Gap: GAP-0005
         eprintln!("skip: UAPI ヘッダの展開に失敗したため未実行");
         return;
     };
@@ -146,6 +148,7 @@ fn syscall_numbers_match_uapi() {
 #[test]
 fn syscall_numbers_match_uapi_x86_64() {
     let Some(cc) = clang() else {
+        // Gap: GAP-0005
         eprintln!("skip: clang がないため未実行");
         return;
     };
@@ -188,6 +191,7 @@ fn syscall_numbers_match_uapi_x86_64() {
     ];
     let macros: Vec<&str> = cases.iter().map(|(m, _)| *m).collect();
     let Some(got) = uapi_numbers_x86_64(&cc, &macros) else {
+        // Gap: GAP-0005
         eprintln!("skip: UAPI ヘッダの展開に失敗したため未実行");
         return;
     };
@@ -235,6 +239,7 @@ fn uapi_numbers_i386(clang: &str, macros: &[&str]) -> Option<Vec<u64>> {
 #[test]
 fn syscall_numbers_match_uapi_i386() {
     let Some(cc) = clang() else {
+        // Gap: GAP-0005
         eprintln!("skip: clang がないため未実行");
         return;
     };
@@ -277,6 +282,7 @@ fn syscall_numbers_match_uapi_i386() {
     ];
     let macros: Vec<&str> = cases.iter().map(|(m, _)| *m).collect();
     let Some(got) = uapi_numbers_i386(&cc, &macros) else {
+        // Gap: GAP-0005
         eprintln!("skip: UAPI ヘッダの展開に失敗したため未実行");
         return;
     };

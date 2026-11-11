@@ -58,6 +58,7 @@ fn mc_encode(mc: &str, asm: &str) -> Option<Vec<u8>> {
 #[test]
 fn llvm_oracle_spot_checks() {
     let Some(mc) = bin(&["llvm-mc", "/usr/sbin/llvm-mc", "/usr/bin/llvm-mc"]) else {
+        // Gap: GAP-0005
         eprintln!("skip: llvm-mc がないため未実行");
         return;
     };

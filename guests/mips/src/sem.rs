@@ -172,6 +172,7 @@ pub fn multu<B: Backend>(b: &mut B, rs: Gpr, rt: Gpr) -> Flow<B> {
     Ok(())
 }
 
+// Gap: GAP-0013
 /// DIV。LO=商、HI=剰余。0 除算は UNPREDICTABLE のため HI/LO 不変とする
 ///（挙動パラメータ化は本格実装で足す）。
 pub fn div<B: Backend>(b: &mut B, rs: Gpr, rt: Gpr) -> Flow<B> {

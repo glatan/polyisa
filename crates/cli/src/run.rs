@@ -104,6 +104,7 @@ fn off_j(word: u32) -> i64 {
 
 /// エントリから実行する。`rv32` は RV32 モデルを選ぶ。
 /// ecall は `sys` に委ね、それ以外は意味論で実行する。
+// Gap: GAP-0007
 pub fn run(env: &mut BareEnv, entry: u64, rv32: bool, sys: &mut impl EcallHandler) -> Outcome {
     env.pc = entry;
     for _ in 0..STEP_LIMIT {
@@ -1598,6 +1599,7 @@ pub struct CliEcall {
     reported: Vec<u64>,
 }
 
+// Gap: GAP-0001
 impl EcallHandler for CliEcall {
     fn handle_ecall(&mut self, env: &mut BareEnv, _word: u32) -> EcallOutcome {
         use polyisa_guest_riscv::sem::Gpr;
@@ -1631,6 +1633,7 @@ impl EcallHandler for CliEcall {
         if nr == polyisa_os_linux::rv64::EXIT || nr == polyisa_os_linux::rv64::EXIT_GROUP {
             return EcallOutcome::Exit(reg(env, 10));
         }
+        // Gap: GAP-0003
         if !self.reported.contains(&nr) {
             self.reported.push(nr);
             let name = polyisa_os_linux::syscall_name(polyisa_os_linux::GuestAbi::Rv64Linux, nr);

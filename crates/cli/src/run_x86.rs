@@ -1133,6 +1133,7 @@ fn fetch_len(
 }
 
 /// eip から実行する。fallthrough は eip を命令長だけ進める。
+// Gap: GAP-0007
 pub fn run(env: &mut BareEnv, entry: u32, sys: &mut impl TrapHandler, limit: u64) -> Outcome {
     run_mode(env, entry, sys, limit, false)
 }
@@ -7538,6 +7539,7 @@ fn stat144(m: &std::fs::Metadata) -> [u8; 144] {
     st
 }
 
+// Gap: GAP-0001
 impl TrapHandler for CliLinux {
     fn fs_base(&self) -> u64 {
         self.fs_base
@@ -7606,6 +7608,7 @@ impl TrapHandler for CliLinux {
             }
         };
         let nr = get64(env, Gpr(0));
+        // Gap: GAP-0002
         if nr == n_openat {
             let dirfd = get64(env, r_a);
             let path_addr = get64(env, r_b);
@@ -9379,6 +9382,7 @@ impl TrapHandler for CliLinux {
             set64(env, Gpr(0), self.heap_end);
             return TrapOutcome::Handled;
         }
+        // Gap: GAP-0003
         if !self.reported.contains(&nr) {
             self.reported.push(nr);
             let name = polyisa_os_linux::syscall_name(guest_abi, nr);

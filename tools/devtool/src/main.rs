@@ -4,6 +4,8 @@
 //!
 //! タスクから呼ぶ薄い入口にし、条件分岐とデータ処理はここに書く.
 
+mod gaps;
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let cmd = args.next().unwrap_or_else(|| usage_and_exit());
@@ -58,6 +60,15 @@ fn cmd_check() -> i32 {
     }
     if let Err(e) = check_refs_full() {
         eprintln!("check: 台帳の検査: {e}");
+        failed = true;
+    }
+    let root = workspace_root();
+    if let Err(e) = gaps::check_gaps(&root) {
+        eprintln!("check: 設計との差の台帳: {e}");
+        failed = true;
+    }
+    if let Err(e) = gaps::check_completion(&root) {
+        eprintln!("check: 完了条件: {e}");
         failed = true;
     }
     if failed {
@@ -309,6 +320,7 @@ fn check_no_external_crates() -> Result<(), String> {
 }
 
 /// クレート間の依存規則を検査する。許可表は `docs/design/workspace.md` の「依存規則」による。
+// Gap: GAP-0012
 fn check_dep_rules() -> Result<(), String> {
     let violations = dep_violations(&workspace_root());
     if violations.is_empty() {

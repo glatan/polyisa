@@ -132,7 +132,8 @@ pub mod x86_64 {
     pub const FTRUNCATE: u64 = 77;
     pub const RENAME: u64 = 82;
     pub const SYMLINK: u64 = 88;
-    // df が到達する statfs 系。番号表の事実のみ持ち、実行は未対応.
+    // Gap: GAP-0004
+    // statfs 系。busybox の `df` が呼ぶ。
     // Ref: SRC-LINUX (7.3).
     pub const STATFS: u64 = 137;
     pub const FSTATFS: u64 = 138;
@@ -203,7 +204,8 @@ pub mod i386 {
     pub const FTRUNCATE: u64 = 93;
     pub const RENAME: u64 = 38;
     pub const SYMLINK: u64 = 83;
-    // statfs 系の番号表の事実のみ。実行は未対応。statfs/fstatfs (99/100) と
+    // Gap: GAP-0004
+    // statfs 系。busybox の `df` が呼ぶ。statfs/fstatfs (99/100) と
     // 64 系 (268/269) を持つ。GETGROUPS=80 と区別する.
     // Ref: SRC-LINUX (7.3).
     pub const STATFS: u64 = 99;

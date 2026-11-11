@@ -1,5 +1,6 @@
 // Copyright (c) polyisa contributors
 // SPDX-License-Identifier: MIT OR Apache-2.0
+// Gap: GAP-0014
 // Hexagon 最小の ISADL モデル（段階2の試作）。
 //
 // スロット整数6件に絞る。試作パターンは実符号化の簡略化であり、

@@ -10,6 +10,9 @@
 //! 使う外部ツールは台帳 TOOL-LLVM（clang）と rust-lld
 //! （Rust 配布物、用途X・確認済み）。テストデータは台帳 TEST-RISCV-TESTS
 //! （用途T・確認済み、リポジトリに含めない）.
+//!
+//! `fence_i` の自己書き換えは、PMP のない M モードの写像（全 LOAD に R+W+X）で通る。
+//! `ma_data` の非整列アクセスは、非整列を許す実装（`DATA_READ`/`DATA_WRITE` の `Unaligned`。不可分操作は整列要求のまま）で通る。
 
 use polyisa_cli::run::{EcallHandler, EcallOutcome, Outcome, run};
 use polyisa_engine::bare::BareEnv;
@@ -166,11 +169,13 @@ fn check_one_in(sub: &str, name: &str) {
     }
     let root = testdata();
     if !root.join(format!("isa/{sub}/{name}.S")).exists() {
+        // Gap: GAP-0005
         eprintln!("skip: .testdata/riscv-tests がないため未実行");
         return;
     }
     let rv32 = sub.starts_with("rv32");
     let Some(bytes) = build_elf_in(sub, name) else {
+        // Gap: GAP-0005
         eprintln!("skip: 組み立て器がないため未実行");
         return;
     };
@@ -520,8 +525,6 @@ fn rv64ud_p_structural() {
     check_ud("structural");
 }
 
-// rv32ui のうち ma_data（非整列アクセス）は対象外。
-// fence_i は PMP のない M モードの写像で通る（ロードマップ注記）。
 #[test]
 fn rv32ui_p_ma_data() {
     check_rv32i("ma_data");

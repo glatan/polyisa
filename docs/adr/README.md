@@ -19,6 +19,7 @@
 | [0011](0011-where-clause-and-rv32-overlap.md) | where句の等価・非等価を実装し、RV32/RV64の重なりはwhenで区別する | 承認 |
 | [0012](0012-generic-backend-overhead.md) | 総称バックエンド経由の加算の上乗せを受け入れる | 承認 |
 | [0013](0013-license-mit-or-apache.md) | ライセンスを MIT OR Apache-2.0 とする | 承認 |
+| [0014](0014-statfs-number-table-only.md) | statfs 系は番号表だけを持ち、実行しない | 提案 |
 
 ## 書き方
 
