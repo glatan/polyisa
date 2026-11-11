@@ -997,6 +997,10 @@ fn fetch_len(
                     // DIV r/m32 SIB mod=01 [base+index*scale+disp8] (4B: F7 /6 + ModRM + SIB + disp8).
                     let _ = third?;
                     Some(4)
+                } else if md == 0 && reg == 6 && rm == 4 {
+                    // DIV r/m32 SIB mod=00 (3B)。base=5 は disp32。xxd 0x473876 対応.
+                    let t = third?;
+                    if t & 7 != 5 { Some(3) } else { None }
                 } else {
                     None
                 }
@@ -5613,6 +5617,14 @@ fn dispatch<B: Backend>(
             }
         }
         Insn::DivRm32Mem8 => sem::div_rm32_mem8(b, eip, rm(), disp8()),
+        Insn::DivRm32Sib => {
+            // F7 /6 SIB mod=00 [base+index*scale]。xxd 0x473876 対応。no_index は [base].
+            if no_index() {
+                sem::div_rm32_memnd(b, eip, sib_base())
+            } else {
+                sem::div_rm32_sib(b, eip, sib_base(), sib_idx(), sib_shift())
+            }
+        }
         Insn::DivRm32Sibd => {
             // F7 /6 SIB mod=01 [base+index*scale+disp8]。no_index は [base+disp8].
             if no_index() {
@@ -7581,6 +7593,7 @@ fn dispatch<B: Backend>(
                     | Insn::DivRm32
                     | Insn::IdivRm32
                     | Insn::DivRm32Mem8
+                    | Insn::DivRm32Sib
                     | Insn::DivRm32Sibd
             )
         {

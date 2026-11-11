@@ -76,7 +76,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数117件。
-        assert_eq!(INSNS.len(), 663);
+        assert_eq!(INSNS.len(), 664);
     }
 
     #[test]
@@ -477,6 +477,9 @@ mod tests {
         // DIV m32 SIB+disp8 (F7 /6 mod=01 rm=100)。F7 74 24 0C は [RSP+0x0C].
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0xF774240C, 32), Some(Insn::DivRm32Sibd));
+        // DIV m32 SIB mod=00 (F7 /6)。xxd 0x473876 の F7 34 24。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0xF73424, 24), Some(Insn::DivRm32Sib));
         assert_eq!(decode(0xF774240C, 24), None);
         assert_eq!(decode(0xA900000001, 40), Some(Insn::TestEaxImm));
         assert_eq!(decode(0x0B1500000000, 48), Some(Insn::OrRRip));

@@ -1106,6 +1106,14 @@ pub fn build_model() -> polyisa_isadl::Model {
             "div",
         ),
         (
+            "div_rm32_sib",
+            "N8",
+            "11110111 00110100 ........",
+            vec![wc("n8_base", WhereOp::Ne, 5)],
+            "div eax, r/m32",
+            "div",
+        ),
+        (
             "cvtsi2sd_m32_mem8",
             "M8",
             "00001111 00101010 01...... ........",

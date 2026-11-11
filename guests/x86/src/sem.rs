@@ -4770,6 +4770,60 @@ pub fn div_rm32_mem8<B: Backend>(b: &mut B, eip: u32, base: Gpr, disp: i8) -> Fl
     Ok(())
 }
 
+/// DIV EAX, m32 [base] (F7 /6 SIB mod=00, no_index)。EDX:EAX を符号なし除算する.
+pub fn div_rm32_memnd<B: Backend>(b: &mut B, eip: u32, base: Gpr) -> Flow<B> {
+    let lo = read(b, Gpr(0));
+    let hi = read(b, Gpr(2));
+    let addr = read64(b, base);
+    let y: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let hi64 = b.zext::<W32, W64>(hi);
+    let shift = b.konst::<W64>(32);
+    let hi_sh = b.shl::<W64>(hi64, shift);
+    let lo64 = b.zext::<W32, W64>(lo);
+    let dvd = b.or::<W64>(hi_sh, lo64);
+    let dvs = b.zext::<W32, W64>(y);
+    let zero64 = b.konst::<W64>(0);
+    let is_zero = b.cmp::<W64>(Cmp::Eq, dvs, zero64);
+    b.if_then(is_zero, |b| Err(div0(b, eip)))?;
+    let q64 = b.udiv::<W64>(dvd, dvs);
+    let r64 = b.urem::<W64>(dvd, dvs);
+    let qhi = b.shr_l::<W64>(q64, shift);
+    let over = b.cmp::<W64>(Cmp::Ne, qhi, zero64);
+    b.if_then(over, |b| Err(div0(b, eip)))?;
+    let q32: B::V<W32> = b.trunc::<W64, W32>(q64);
+    let r32: B::V<W32> = b.trunc::<W64, W32>(r64);
+    write(b, Gpr(0), q32);
+    write(b, Gpr(2), r32);
+    Ok(())
+}
+
+/// DIV EAX, m32 [base+index*scale] (F7 /6 SIB mod=00)。xxd 0x473876 対応.
+pub fn div_rm32_sib<B: Backend>(b: &mut B, eip: u32, base: Gpr, idx: Gpr, shift: u32) -> Flow<B> {
+    let lo = read(b, Gpr(0));
+    let hi = read(b, Gpr(2));
+    let addr = sib_addr_scaled(b, shift, 0, base, idx);
+    let y: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let hi64 = b.zext::<W32, W64>(hi);
+    let sh = b.konst::<W64>(32);
+    let hi_sh = b.shl::<W64>(hi64, sh);
+    let lo64 = b.zext::<W32, W64>(lo);
+    let dvd = b.or::<W64>(hi_sh, lo64);
+    let dvs = b.zext::<W32, W64>(y);
+    let zero64 = b.konst::<W64>(0);
+    let is_zero = b.cmp::<W64>(Cmp::Eq, dvs, zero64);
+    b.if_then(is_zero, |b| Err(div0(b, eip)))?;
+    let q64 = b.udiv::<W64>(dvd, dvs);
+    let r64 = b.urem::<W64>(dvd, dvs);
+    let qhi = b.shr_l::<W64>(q64, sh);
+    let over = b.cmp::<W64>(Cmp::Ne, qhi, zero64);
+    b.if_then(over, |b| Err(div0(b, eip)))?;
+    let q32: B::V<W32> = b.trunc::<W64, W32>(q64);
+    let r32: B::V<W32> = b.trunc::<W64, W32>(r64);
+    write(b, Gpr(0), q32);
+    write(b, Gpr(2), r32);
+    Ok(())
+}
+
 /// DIV EAX, m32 [base+index*scale+disp8] (F7 /6 SIB mod=01)。EDX:EAX を符号なし除算する.
 pub fn div_rm32_sibd<B: Backend>(
     b: &mut B,
