@@ -5314,6 +5314,33 @@ pub fn cmp_m16_imm8_sibd32<B: Backend>(
     Ok(())
 }
 
+/// CMP m16,imm8 [base+disp8] (66 83 /7 SIB mod=01, no_index)。メモリは変えない。rdev 0x4b3703 対応.
+pub fn cmp_m16_imm8_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8, imm: i8) -> Flow<B> {
+    let addr = eff_addr(b, base, disp);
+    let x: B::V<W16> = b.load::<W16>(addr, DATA_READ)?;
+    let y = b.konst::<W16>(imm as i16 as u16);
+    let v = b.sub::<W16>(x, y);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
+/// CMP m16,imm8 [base+index*scale+disp8] (66 83 /7 SIB mod=01)。
+pub fn cmp_m16_imm8_sibd<B: Backend>(
+    b: &mut B,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i8,
+    imm: i8,
+) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, disp as i32, base, idx);
+    let x: B::V<W16> = b.load::<W16>(addr, DATA_READ)?;
+    let y = b.konst::<W16>(imm as i16 as u16);
+    let v = b.sub::<W16>(x, y);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
 /// CMP m16,imm8 [base+disp32] (66 83 /7 mod=10 no_index)。
 pub fn cmp_m16_imm8_mem32<B: Backend>(b: &mut B, base: Gpr, disp: i32, imm: i8) -> Flow<B> {
     use polyisa_sem::W16;
