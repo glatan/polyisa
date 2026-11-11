@@ -1602,6 +1602,37 @@ pub fn or_rm8_imm_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8, imm: u8) -> F
     Ok(())
 }
 
+/// XOR [base+disp8],imm8 (80 /6 mod=01, no_index)。8ビット XOR し、書き戻す。iostat 0x448a1f 対応.
+pub fn xor_rm8_imm_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8, imm: u8) -> Flow<B> {
+    use polyisa_sem::W8;
+    let addr = eff_addr(b, base, disp);
+    let x: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
+    let y = b.konst::<W8>(imm);
+    let v = b.xor::<W8>(x, y);
+    b.store::<W8>(addr, v, DATA_WRITE)?;
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// XOR [base+index*scale+disp8],imm8 (80 /6 SIB mod=01)。8ビット XOR.
+pub fn xor_rm8_imm_sibd<B: Backend>(
+    b: &mut B,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i8,
+    imm: u8,
+) -> Flow<B> {
+    use polyisa_sem::W8;
+    let addr = sib_addr_scaled(b, shift, disp as i32, base, idx);
+    let x: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
+    let y = b.konst::<W8>(imm);
+    let v = b.xor::<W8>(x, y);
+    b.store::<W8>(addr, v, DATA_WRITE)?;
+    update_logic_flags(b, v);
+    Ok(())
+}
+
 /// OR [base+index*scale+disp8],imm8 (80 /1 SIB mod=01)。8ビット OR.
 pub fn or_rm8_imm_sibd<B: Backend>(
     b: &mut B,

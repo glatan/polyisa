@@ -1115,7 +1115,7 @@ fn fetch_len(
                 // SIB 付き。mod=01 SIB+disp8+imm8 (5B) の /7 CMP と /1 ORB と /4 ANDB、
                 // mod=00 SIB [base] (no_index, non-abs) +imm8 (4B) の /1 ORB と /7 CMPB、
                 // mod=10 SIB+disp32+imm8 (8B) の /7 CMPB (stat 0x429875 対応).
-                if md == 1 && (reg == 7 || reg == 1 || reg == 4) {
+                if md == 1 && (reg == 7 || reg == 6 || reg == 1 || reg == 4) {
                     Some(5)
                 } else if md == 0 && (reg == 1 || reg == 7) {
                     let t = third?;
@@ -4229,6 +4229,21 @@ fn dispatch<B: Backend>(
                 (Gpr(rm_f - 4), true)
             };
             sem::cmp_rm8_imm(b, dst, (word & 0xff) as u8, high)
+        }
+        Insn::XorRm8ImmSibd => {
+            // 80 74 SIB disp8 imm8 (40b)。iostat 0x448a1f の xorb $1, 0x1b(%rsp)。
+            let sib_v = ((word >> 16) & 0xff) as u8;
+            let d8 = ((word >> 8) & 0xff) as u8 as i8;
+            let imm = (word & 0xff) as u8;
+            let shift = ((sib_v >> 6) & 3) as u32;
+            let idx_raw = (sib_v >> 3) & 7;
+            let idx = Gpr(idx_raw | (((rex >> 1) & 1) << 3));
+            let base = Gpr((sib_v & 7) | ((rex & 1) << 3));
+            if idx_raw == 4 && (rex >> 1) & 1 == 0 {
+                sem::xor_rm8_imm_mem8(b, base, d8, imm)
+            } else {
+                sem::xor_rm8_imm_sibd(b, base, idx, shift, d8, imm)
+            }
         }
         Insn::CmpRm8ImmSibd => {
             // 80 7C SIB disp8 imm8 (40b)。SIB は (word>>16) 下位8、disp は (word>>8) 下位8、imm は最下位8.

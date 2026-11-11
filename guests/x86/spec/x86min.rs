@@ -831,6 +831,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         // AND m32/m64,imm8 SIB mod=00 [base] (83 /4)。index有無は問わずdispatchで切替.
         ("and_rm_imm8_sib", "F1", "10000011 00100100 ........ ........", "and r/m, {imm}", "alu"),
         ("cmp_rm8_imm_sibd", "F1", "10000000 01111100 ........ ........ ........", "cmp r/m8, {imm}", "alu"),
+        // XORB [SIB+disp8],imm8 (80 /6)。iostat 0x448a1f の 80 74 24 1B 01。
+        ("xor_rm8_imm_sibd", "F1", "10000000 01110100 ........ ........ ........", "xor r/m8, {imm}", "alu"),
         // CMPB m8,imm8 SIB mod=10 [base+index*scale+disp32] (80 /7)。stat 0x429875 対応.8B.
         ("cmp_rm8_imm_sibd32", "F1", "10000000 10111100 ........ ................................ ........", "cmp r/m8, {imm}", "alu"),
         ("test_m8_imm_rip", "F1", "11110110 00000101 ................................ ........", "test m8, {imm}", "alu"),
