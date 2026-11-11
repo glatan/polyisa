@@ -293,6 +293,21 @@ pub fn and_ax_imm16<B: Backend>(b: &mut B, imm: u16) -> Flow<B> {
     Ok(())
 }
 
+/// CMP r/m16,imm16 (66 81 /7 mod=11)。下位16ビットを比較し 6 旗を更新する (dst 不変).
+pub fn cmp_rm16_imm<B: Backend>(b: &mut B, dst: Gpr, imm: u16) -> Flow<B> {
+    let y = b.konst::<W16>(imm);
+    let x = if dst.0 < 8 {
+        let x32 = read(b, dst);
+        b.trunc::<W32, W16>(x32)
+    } else {
+        let x64 = read64(b, dst);
+        b.trunc::<W64, W16>(x64)
+    };
+    let v = b.sub::<W16>(x, y);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
 /// CMP AX,imm16 (66 3D)。AX と imm16 を比較し 6 旗を更新する (dst 不変).
 pub fn cmp_ax_imm16<B: Backend>(b: &mut B, imm: u16) -> Flow<B> {
     let x32 = read(b, Gpr(0));

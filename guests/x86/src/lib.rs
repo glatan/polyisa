@@ -76,7 +76,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数117件。
-        assert_eq!(INSNS.len(), 651);
+        assert_eq!(INSNS.len(), 652);
     }
 
     #[test]
@@ -644,6 +644,9 @@ mod tests {
         // AND r/m16,imm16 (66 81 /4 mod=11)。seq の停止点 0x40b7f1 に対応.
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x81E2FF08, 32), Some(Insn::AndRm16Imm));
+        // CMP r/m16,imm16 (66 81 /7)。basename 0x4bfaa8 の 66 81 FF C0 0F。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x81FFC00F, 32), Some(Insn::CmpRm16Imm));
         assert_eq!(decode(0x81E2FF08, 8), None);
         // PMINUB xmm,m128 mod=00/01/10 (66 0F DA /r、SIBなし)。head の停止点 0x4dddd5 に対応.
         // Ref: SPEC-X86-INTEL-SDM (v093).

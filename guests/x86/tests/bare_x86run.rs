@@ -7352,3 +7352,25 @@ fn run_add_m32_r32_sibd32() {
         .unwrap();
     assert_eq!(u32::from_le_bytes(got), 13);
 }
+
+#[test]
+fn run_cmp_di_imm16_sets_zf() {
+    // 66 81 FF C0 0F = cmpw $0x0fc0, %di。一致なら ZF=1、edi は変えない。
+    // basename 0x4bfaa8。Ref: SPEC-X86-INTEL-SDM (v093).
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.set(Gpr(7).state(), 0x1111_0FC0u32);
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0x66, 0x81, 0xFF, 0xC0, 0x0F])
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x1005 });
+    assert_eq!(env.backend.get(Gpr(7).state()), 0x1111_0FC0u32);
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x40,
+        0x40
+    );
+}
