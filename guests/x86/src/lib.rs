@@ -85,7 +85,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数117件。
-        assert_eq!(INSNS.len(), 670);
+        assert_eq!(INSNS.len(), 671);
     }
 
     #[test]
@@ -1014,6 +1014,9 @@ mod tests {
         // FILD m32 SIB+disp8 (DB /0)。seq 0x4018bc の DB 44 24 20。
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0xDB442420, 32), Some(Insn::FildM32Sibd));
+        // FILD m64 SIB (DF /5)。seq 0x4018c4 の DF 2C 24。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0xDF2C24, 24), Some(Insn::FildM64Sib));
         // OR m8, r8 SIB+disp8 (08 /r mod=01)。sed 0x4a87dd の 08 44 24 2F。
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x0844242F, 32), Some(Insn::OrM8R8Sibd));

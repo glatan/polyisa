@@ -65,7 +65,7 @@
 | dec | dec_eax、dec_ebp、dec_ebx、dec_ecx、dec_edi、dec_edx、dec_esi、dec_esp、dec_rm、dec_rm_mem8、dec_rm_rip、dec_rm_sib、dec_rm_sibd | 真 | alu |
 | div | div_rm32、div_rm32_mem8、div_rm32_sib、div_rm32_sibd | 真 | div |
 | endbr64 | endbr64 | 真 | alu |
-| fild | fild_m32_sibd | 真 | alu |
+| fild | fild_m32_sibd、fild_m64_sib | 真 | alu |
 | fld | fld_m32_rip | 真 | alu |
 | fldcw | fldcw_mem32、fldcw_mem8、fldcw_memnd | 真 | alu |
 | fnstcw | fnstcw_mem32、fnstcw_mem8、fnstcw_memnd | 真 | alu |

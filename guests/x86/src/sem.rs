@@ -10564,6 +10564,61 @@ fn push_i32<B: Backend>(b: &mut B, bits: B::V<W32>) -> Flow<B> {
     push_ext(b, sig_final, exp_word)
 }
 
+/// 符号付き 64 ビット整数を 80 ビットへ伸ばしてスタックへ載せる。
+fn push_i64<B: Backend>(b: &mut B, bits: B::V<W64>) -> Flow<B> {
+    let s63 = b.konst::<W64>(63);
+    let sign = b.shr_l::<W64>(bits, s63);
+    let one64 = b.konst::<W64>(1);
+    let neg_flag = b.cmp::<W64>(Cmp::Eq, sign, one64);
+    let zero64 = b.konst::<W64>(0);
+    let neg = b.sub::<W64>(zero64, bits);
+    let mag = b.select::<W64>(neg_flag, neg, bits);
+    let m63 = b.konst::<W64>(0x7fff_ffff_ffff_ffff);
+    let mag63 = b.and::<W64>(mag, m63);
+    let min_bits = b.konst::<W64>(1u64 << 63);
+    let is_min = b.cmp::<W64>(Cmp::Eq, bits, min_bits);
+    let mag_zero = b.cmp::<W64>(Cmp::Eq, mag63, zero64);
+    let mut v = mag63;
+    let mut n = zero64;
+    for (k, mask) in [
+        (32u64, 0x7fff_ffff_8000_0000u64),
+        (16, 0x7fff_0000_0000_0000),
+        (8, 0x7f80_0000_0000_0000),
+        (4, 0x7800_0000_0000_0000),
+        (2, 0x6000_0000_0000_0000),
+        (1, 0x4000_0000_0000_0000),
+    ] {
+        let m = b.konst::<W64>(mask);
+        let high = b.and::<W64>(v, m);
+        let empty = b.cmp::<W64>(Cmp::Eq, high, zero64);
+        let kk = b.konst::<W64>(k);
+        let shifted = b.shl::<W64>(v, kk);
+        v = b.select::<W64>(empty, shifted, v);
+        let n2 = b.add::<W64>(n, kk);
+        n = b.select::<W64>(empty, n2, n);
+    }
+    let bias = b.konst::<W64>(16445);
+    let exp_norm = b.sub::<W64>(bias, n);
+    let mfrac = b.konst::<W64>(0x3fff_ffff_ffff_ffff);
+    let frac = b.and::<W64>(v, mfrac);
+    let sh1 = b.konst::<W64>(1);
+    let frac_sh = b.shl::<W64>(frac, sh1);
+    let int_bit = b.konst::<W64>(1u64 << 63);
+    let sig_norm = b.or::<W64>(int_bit, frac_sh);
+    let min_exp = b.konst::<W64>(16446);
+    let exp_or_min = b.select::<W64>(is_min, min_exp, exp_norm);
+    let sig_or_min = b.select::<W64>(is_min, int_bit, sig_norm);
+    let exp_if_zero = b.select::<W64>(is_min, min_exp, zero64);
+    let sig_if_zero = b.select::<W64>(is_min, int_bit, zero64);
+    let exp_final = b.select::<W64>(mag_zero, exp_if_zero, exp_or_min);
+    let sig_final = b.select::<W64>(mag_zero, sig_if_zero, sig_or_min);
+    let s15 = b.konst::<W64>(15);
+    let sign_bit = b.shl::<W64>(sign, s15);
+    let exp_word64 = b.or::<W64>(exp_final, sign_bit);
+    let exp_word: B::V<W16> = b.trunc::<W64, W16>(exp_word64);
+    push_ext(b, sig_final, exp_word)
+}
+
 /// FLDS [RIP+disp32] (D9 /0 mod=00 rm=101)。seq 0x402335 対応.
 pub fn fld_m32_rip<B: Backend>(b: &mut B, next_rip: u64, disp: i32) -> Flow<B> {
     let base = b.konst::<W64>(next_rip);
@@ -10592,6 +10647,20 @@ pub fn fild_m32_sibd<B: Backend>(b: &mut B, base: Gpr, idx: Gpr, shift: u32, dis
     let addr = sib_addr_scaled(b, shift, disp as i32, base, idx);
     let bits: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
     push_i32(b, bits)
+}
+
+/// FILD m64 [base] (DF /5 SIB mod=00, no_index)。seq 0x4018c4 対応.
+pub fn fild_m64_memnd<B: Backend>(b: &mut B, base: Gpr) -> Flow<B> {
+    let addr = read64(b, base);
+    let bits: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    push_i64(b, bits)
+}
+
+/// FILD m64 [base+index*scale] (DF /5 SIB mod=00)。
+pub fn fild_m64_sib<B: Backend>(b: &mut B, base: Gpr, idx: Gpr, shift: u32) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, 0, base, idx);
+    let bits: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    push_i64(b, bits)
 }
 
 /// FSTP ST(i) (DD D8+i)。ST(0) を ST(i) へ写してからスタックを一つ捨てる。seq 0x4024ee 対応.

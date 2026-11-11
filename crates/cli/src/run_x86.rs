@@ -852,6 +852,19 @@ fn fetch_len(
                 None
             }
         }
+        // DF /5 SIB mod=00 (FILD m64)。seq 0x4018c4 の DF 2C 24。base=5 は disp32。
+        0xDF => {
+            let s = second?;
+            let md = s >> 6;
+            let reg = (s >> 3) & 7;
+            let rm = s & 7;
+            if reg == 5 && md == 0 && rm == 4 {
+                let sib = third?;
+                if sib & 7 != 5 { Some(3) } else { None }
+            } else {
+                None
+            }
+        }
         // DD D8+i (FSTP ST(i))。reg-direct 2B のみ。seq 0x4024ee 対応.
         0xDD => {
             let s = second?;
@@ -1357,6 +1370,7 @@ pub fn run_mode(
                 | 0x84
                 | 0xD9
                 | 0xDB
+                | 0xDF
                 | 0xDD
                 | 0x0A
                 | 0xC0
@@ -1410,6 +1424,7 @@ pub fn run_mode(
                 | 0xF6
                 | 0xF7
                 | 0xFF
+                | 0xDF
         ) && matches!(second, Some(s) if s & 7 == 4 && s >> 6 != 3))
             || (head[0] == 0x0F
                 && (matches!(
@@ -2934,6 +2949,14 @@ fn dispatch<B: Backend>(
                 (Gpr(rm_f - 4), true)
             };
             sem::and_m8_r8(b, dst, dst_high, src, src_high)
+        }
+        Insn::FildM64Sib => {
+            // DF /5 SIB mod=00 [base+index*scale]。seq 0x4018c4 の fildq (%rsp)。
+            if no_index() {
+                sem::fild_m64_memnd(b, sib_base())
+            } else {
+                sem::fild_m64_sib(b, sib_base(), sib_idx(), sib_shift())
+            }
         }
         Insn::FildM32Sibd => {
             // DB /0 SIB mod=01 [base+index*scale+disp8]。seq 0x4018bc 対応.

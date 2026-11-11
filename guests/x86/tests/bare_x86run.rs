@@ -7952,3 +7952,34 @@ fn run_fild_m32_sibd_pushes_three() {
         (1u64 << 63) | (1u64 << 62)
     );
 }
+
+#[test]
+fn run_fild_m64_sib_pushes_2_pow_40() {
+    // DF 2C 24 = fildq (%rsp)。2^40 は指数 16423、仮数は整数ビットだけ。seq 0x4018c4。
+    // Ref: SPEC-X86-INTEL-SDM (v093).
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2000), &(1u64 << 40).to_le_bytes())
+        .unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000u32);
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0xDF, 0x2C, 0x24])
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x1003 });
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::top_ref()), 7);
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::st_exp_ref(7)),
+        16423
+    );
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::st_sig_ref(7)),
+        1u64 << 63
+    );
+}
