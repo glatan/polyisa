@@ -9137,3 +9137,33 @@ fn run_cmovge_r32_sibd_moves_when_sf_eq_of() {
     assert_eq!(run(0x880), 0x42);
     assert_eq!(run(0x80), 1);
 }
+
+#[test]
+fn run_mulsd_xmm_m64_sibd_three_times_two() {
+    // F2 0F 59 44 24 08 = mulsd 0x8(%rsp), %xmm0。3.0*2.0=6.0。上位64は残す。seq 0x49924a。
+    // Ref: SPEC-X86-INTEL-SDM (v093).
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    env.backend.set(
+        polyisa_guest_x86::sem::xmm_ref(polyisa_guest_x86::sem::Xmm(0)),
+        0x1111_0000_0000_0000_4008_0000_0000_0000u128,
+    );
+    env.backend
+        .mem
+        .write(VirtAddr(0x2008), &0x4000_0000_0000_0000u64.to_le_bytes())
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0xF2, 0x0F, 0x59, 0x44, 0x24, 0x08])
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x1006 });
+    let v: u128 = env.backend.get(polyisa_guest_x86::sem::xmm_ref(
+        polyisa_guest_x86::sem::Xmm(0),
+    ));
+    assert_eq!(v, 0x1111_0000_0000_0000_4018_0000_0000_0000u128);
+}

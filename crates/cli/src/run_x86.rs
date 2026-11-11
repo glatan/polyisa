@@ -439,6 +439,9 @@ fn fetch_len(
                 let rm = m & 7;
                 if md == 3 {
                     Some(3)
+                } else if md == 1 && rm == 4 {
+                    // MULSD xmm,m64 SIB+disp8。seq 0x49924a の F2 0F 59 44 24 08。0F から 5B.
+                    Some(5)
                 } else if md == 0 && rm == 5 {
                     Some(7)
                 } else {
@@ -6193,6 +6196,21 @@ fn dispatch<B: Backend>(
                 sem::mulsd_xmm_m64_rip(b, xmm_reg_r(), eip as u64 + nbytes, disp32())
             } else {
                 sem::mulsd_xmm_m64_abs(b, xmm_reg_r(), imm32())
+            }
+        }
+        Insn::MulsdXmmM64Sibd => {
+            // F2 0F 59 SIB mod=01。seq 0x49924a の mulsd 0x8(%rsp), %xmm0。
+            if sib0f_no_index() {
+                sem::mulsd_xmm_m64_mem8(b, xmm_reg_r(), sib0f_base(), disp8())
+            } else {
+                sem::mulsd_xmm_m64_sibd(
+                    b,
+                    xmm_reg_r(),
+                    sib0f_base(),
+                    sib0f_idx(),
+                    sib0f_shift(),
+                    disp8(),
+                )
             }
         }
         // COMISD xmm,xmm (66 0F 2F /r reg-direct)。

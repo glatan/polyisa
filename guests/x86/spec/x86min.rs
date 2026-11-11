@@ -656,6 +656,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("subsd", "F1", "00001111 01011100 11......", "subsd xmm, xmm", "alu"),
         // MULSD xmm,m64 RIP (F2 0F 59 05 + disp32)。F2 接頭辞は実行側で剥がす.
         ("mulsd_xmm_m64_rip", "F1", "00001111 01011001 00...101 ................................", "mulsd xmm, m64", "load"),
+        ("mulsd_xmm_m64_sibd", "F1", "00001111 01011001 01...100 ........ ........", "mulsd xmm, m64", "load"),
         // MULSD xmm,xmm (F2 0F 59 /r reg-direct)。F2 は剥がし済み.
         ("mulsd", "F1", "00001111 01011001 11......", "mulsd xmm, xmm", "alu"),
         // COMISD xmm,xmm (66 0F 2F /r reg-direct)。
