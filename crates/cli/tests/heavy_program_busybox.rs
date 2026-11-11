@@ -4,6 +4,8 @@
 //!
 //! 対象は、コミットメッセージで exit 0 と記録され、再実行でも exit 0 だったものに限る。
 //! `true`、`echo hi`、`uname -a`、`id`。`df` は ADR-0014 により対象外。
+//! `sh -c 'echo hi'` は載せない。`_dl_get_origin` がパスの先頭を `/` とみなせず、
+//! glibc が exit 127 で止まる。
 //! この一覧はロードマップ S4-1 の `busybox --list` 全体ではない。
 //!
 //! バイナリは BusyBox 1.37.0 の静的リンク x86_64 である。台帳の BIN-DISTRO

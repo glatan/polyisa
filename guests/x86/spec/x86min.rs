@@ -135,6 +135,9 @@ pub fn build_model() -> polyisa_isadl::Model {
     // Ref: SPEC-X86-INTEL-SDM (v093).
     let insns: &[(&str, &str, &str, &str, &str)] = &[
         ("nop", "F1", "10010000", "nop", "alu"),
+        // HLT (F4)。ユーザーモードでは特権例外になるが、glibc の abort は
+        // 続けて exit を置く。ここでは 1 バイト進めてその後続を実行する。
+        ("hlt", "F1", "11110100", "hlt", "system"),
         // BSWAP r32/r64 (0F C8+rd)。REX.B で拡張、REX.W で64bit。F3/66 剥がし済み.
         ("bswap", "F1", "00001111 11001...", "bswap", "alu"),
         ("inc_eax", "F1", "01000000", "inc eax", "alu"),

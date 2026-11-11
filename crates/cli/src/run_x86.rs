@@ -85,7 +85,9 @@ fn fetch_len(
     rex_w: bool,
 ) -> Option<u64> {
     match first {
-        0x90 | 0x91..=0x97 | 0x40..=0x4F | 0x50..=0x5F | 0xC3 | 0xC9 | 0x98 | 0x99 => Some(1),
+        0x90 | 0x91..=0x97 | 0x40..=0x4F | 0x50..=0x5F | 0xC3 | 0xC9 | 0x98 | 0x99 | 0xF4 => {
+            Some(1)
+        }
         0x6A | 0xB0..=0xB7 => Some(2),
         0x68 => Some(5),
         0xEB | 0x70 | 0x71 | 0x72 | 0x73 | 0x74 | 0x75 | 0x76 | 0x77 | 0x78 | 0x79 | 0x7A
@@ -2031,6 +2033,7 @@ fn dispatch<B: Backend>(
         Insn::Syscall => sem::syscall(b, eip),
         Insn::Cpuid => sem::cpuid(b),
         Insn::Endbr64 => sem::nop(b),
+        Insn::Hlt => sem::nop(b),
         Insn::Rdsspq => sem::nop(b),
         Insn::Nopl => sem::nop(b),
         Insn::NoplMem8 => sem::nop(b),

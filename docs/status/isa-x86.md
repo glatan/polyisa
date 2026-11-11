@@ -65,6 +65,7 @@
 | endbr64 | endbr64 | 真 | alu |
 | fldcw | fldcw_mem32、fldcw_mem8、fldcw_memnd | 真 | alu |
 | fnstcw | fnstcw_mem32、fnstcw_mem8、fnstcw_memnd | 真 | alu |
+| hlt | hlt | 真 | system |
 | idiv | idiv_rm32 | 真 | div |
 | imul | imul_r_imm、imul_r_imm8、imul_r_imm8_rip、imul_r_rm | 真 | alu |
 | imul | imul_r_mem32、imul_r_mem8、imul_r_memnd、imul_r_rip、imul_r_sibd | 真 | load |
