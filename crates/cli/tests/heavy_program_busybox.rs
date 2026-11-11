@@ -310,6 +310,10 @@ fn text_applets_match_host() {
     let t = tabs.to_str().expect("utf-8");
     let binf = bin.to_str().expect("utf-8");
     let dir_s = dir.to_str().expect("utf-8");
+    let copied = dir.join("copied");
+    let touched = dir.join("touched");
+    let copied_s = copied.to_str().expect("utf-8");
+    let touched_s = touched.to_str().expect("utf-8");
     let cases: &[&[&str]] = &[
         &["cat", f],
         &["head", "-n", "2", f],
@@ -351,6 +355,10 @@ fn text_applets_match_host() {
         &["uniq", "-c", f],
         &["sleep", "0"],
         &["nproc"],
+        &["cp", f, copied_s],
+        &["touch", touched_s],
+        &["chmod", "644", f],
+        &["wc", "-l", f],
     ];
     for args in cases {
         let argv: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
