@@ -125,6 +125,7 @@ pub mod x86_64 {
     pub const TIME: u64 = 201;
     pub const NANOSLEEP: u64 = 35;
     pub const CLOCK_NANOSLEEP: u64 = 230;
+    pub const SCHED_GETAFFINITY: u64 = 204;
     pub const GETGROUPS: u64 = 115;
     pub const MKDIR: u64 = 83;
     pub const RMDIR: u64 = 84;
@@ -418,6 +419,7 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             x86_64::TIME => Some("time"),
             x86_64::NANOSLEEP => Some("nanosleep"),
             x86_64::CLOCK_NANOSLEEP => Some("clock_nanosleep"),
+            x86_64::SCHED_GETAFFINITY => Some("sched_getaffinity"),
             x86_64::GETGROUPS => Some("getgroups"),
             x86_64::MKDIR => Some("mkdir"),
             x86_64::RMDIR => Some("rmdir"),
@@ -568,6 +570,11 @@ mod tests {
         assert_eq!(syscall_name(GuestAbi::X86_64Linux, 201), Some("time"));
         assert_eq!(x86_64::NANOSLEEP, 35);
         assert_eq!(syscall_name(GuestAbi::X86_64Linux, 35), Some("nanosleep"));
+        assert_eq!(x86_64::SCHED_GETAFFINITY, 204);
+        assert_eq!(
+            syscall_name(GuestAbi::X86_64Linux, 204),
+            Some("sched_getaffinity")
+        );
         assert_eq!(x86_64::CLOCK_NANOSLEEP, 230);
         assert_eq!(
             syscall_name(GuestAbi::X86_64Linux, 230),

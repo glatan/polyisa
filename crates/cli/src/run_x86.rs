@@ -9208,6 +9208,7 @@ const X86_64_SYSCALLS: &[(&str, SysFn)] = &[
     ("ioctl", sys_ioctl),
     ("clock_nanosleep", sys_clock_nanosleep),
     ("nanosleep", sys_nanosleep),
+    ("sched_getaffinity", sys_sched_getaffinity),
     ("clock_gettime", sys_clock_gettime),
     ("readlinkat", sys_readlinkat),
     ("readlink", sys_readlink),
@@ -10707,6 +10708,102 @@ fn sys_nanosleep(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<
         return Some(TrapOutcome::Handled);
     }
     set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
+}
+
+/// `/proc/self/status` の `Cpus_allowed` を、CPU 0 が最下位ビットのバイト列にする。
+/// 長さは 8 の倍数に揃える。読めなければ CPU 0 だけを立てる。
+fn host_affinity_mask() -> Vec<u8> {
+    let fallback = vec![1, 0, 0, 0, 0, 0, 0, 0];
+    let Ok(text) = std::fs::read_to_string("/proc/self/status") else {
+        return fallback;
+    };
+    let Some(line) = text
+        .lines()
+        .find(|l| l.starts_with("Cpus_allowed:") && !l.starts_with("Cpus_allowed_list:"))
+    else {
+        return fallback;
+    };
+    let rest = line.split_once(':').map(|(_, r)| r.trim()).unwrap_or("");
+    let groups: Vec<&str> = rest
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if groups.is_empty() {
+        return fallback;
+    }
+    let mut bytes = Vec::new();
+    let mut bit_at = 0u32;
+    for (from_low, group) in groups.iter().rev().enumerate() {
+        let Ok(val) = u32::from_str_radix(group, 16) else {
+            return fallback;
+        };
+        let width = if from_low + 1 < groups.len() {
+            32
+        } else {
+            group.len().saturating_mul(4).max(1) as u32
+        };
+        for b in 0..width {
+            if (val >> b) & 1 == 1 {
+                let idx = bit_at + b;
+                let byte = (idx / 8) as usize;
+                if bytes.len() <= byte {
+                    bytes.resize(byte + 1, 0);
+                }
+                bytes[byte] |= 1 << (idx % 8);
+            }
+        }
+        bit_at += width;
+    }
+    if bytes.is_empty() {
+        return fallback;
+    }
+    while bytes.len() % 8 != 0 {
+        bytes.push(0);
+    }
+    bytes
+}
+
+fn sys_sched_getaffinity(
+    sys: &mut CliLinux,
+    env: &mut BareEnv,
+    cx: &SysCtx,
+) -> Option<TrapOutcome> {
+    // sched_getaffinity(pid, cpusetsize, mask)。
+    // 生の戻り値はコピーしたバイト数。musl は残りを 0 にして利用者へは 0 を返す。
+    // 0 を返すとマスク全体が消えるので、バイト数を返す。nproc がビットを数える。
+    // Ref: SRC-LINUX (7.3).
+    let pid = get64(env, cx.r_a);
+    let len = get64(env, cx.r_b);
+    let mask = get64(env, cx.r_c);
+    let me = guest_pid(sys);
+    if pid != 0 && pid != me {
+        set64(env, Gpr(0), cx.neg(ESRCH));
+        return Some(TrapOutcome::Handled);
+    }
+    // nproc は 0x2000 バイトを渡す。それより大きい要求は受けない。
+    const MAX_MASK: u64 = 65536;
+    if len == 0 || !len.is_multiple_of(8) || len > MAX_MASK || mask == 0 {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    let affinity = host_affinity_mask();
+    let highest = affinity.iter().rposition(|b| *b != 0).unwrap_or(0) as u64;
+    if highest >= len {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    // 戻り値はカーネルと同じくマスクのバイト数。バッファの残りは 0 にする。
+    // 呼び出し側が戻り値を見ずに len バイトを数えるため。
+    let ret = (affinity.len() as u64).min(len);
+    let mut buf = vec![0u8; len as usize];
+    let n = affinity.len().min(len as usize);
+    buf[..n].copy_from_slice(&affinity[..n]);
+    if env.backend.mem.write(VirtAddr(mask), &buf).is_err() {
+        return Some(TrapOutcome::Unimplemented);
+    }
+    set64(env, Gpr(0), ret);
     Some(TrapOutcome::Handled)
 }
 
@@ -12828,6 +12925,37 @@ mod tests {
         set64(&mut env, Gpr(7), 0);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EFAULT));
+    }
+
+    #[test]
+    fn sched_getaffinity_copies_host_mask() {
+        use polyisa_os_linux::x86_64 as abi;
+        let mut sys = CliLinux::x86_64();
+        let mut env = bare();
+        let want = host_affinity_mask();
+        // sched_getaffinity(0, 128, 0x200) はホストのマスクを書き、バイト数を返す。
+        set64(&mut env, Gpr(0), abi::SCHED_GETAFFINITY);
+        set64(&mut env, Gpr(7), 0);
+        set64(&mut env, Gpr(6), 128);
+        set64(&mut env, Gpr(2), 0x200);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), want.len() as u64);
+        let mut back = vec![0u8; want.len()];
+        env.backend
+            .mem
+            .read(VirtAddr(0x200), &mut back, data_access())
+            .unwrap();
+        assert_eq!(back, want);
+        // 長さ 0 は EINVAL。知らない pid は ESRCH。
+        set64(&mut env, Gpr(0), abi::SCHED_GETAFFINITY);
+        set64(&mut env, Gpr(6), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EINVAL));
+        set64(&mut env, Gpr(0), abi::SCHED_GETAFFINITY);
+        set64(&mut env, Gpr(7), 0x1000);
+        set64(&mut env, Gpr(6), 128);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(ESRCH));
     }
 
     #[test]

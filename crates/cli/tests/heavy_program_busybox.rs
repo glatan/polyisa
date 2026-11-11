@@ -350,6 +350,7 @@ fn text_applets_match_host() {
         &["arch"],
         &["uniq", "-c", f],
         &["sleep", "0"],
+        &["nproc"],
     ];
     for args in cases {
         let argv: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();

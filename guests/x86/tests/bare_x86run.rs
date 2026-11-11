@@ -9139,6 +9139,29 @@ fn run_cmovge_r32_sibd_moves_when_sf_eq_of() {
 }
 
 #[test]
+fn run_mov_r32_imm_clears_high() {
+    // BE 80 00 00 00 = movl $0x80, %esi。上位32ビットは消える。nproc の長さ引数。
+    // Ref: SPEC-X86-INTEL-SDM (v093).
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.set(Gpr(6).state(), 0x1111_1111);
+    env.backend
+        .set(polyisa_guest_x86::sem::hi_ref(Gpr(6)), 0x2222_2222);
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0xBE, 0x80, 0x00, 0x00, 0x00])
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x1005 });
+    assert_eq!(
+        polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(6)),
+        0x80
+    );
+}
+
+#[test]
 fn run_cmovl_r32_sib_rsp() {
     // 44 0F 4C 14 24 = cmovll (%rsp), %r10d。SF!=OF のときだけ移す。cut 0x492257。
     // Ref: SPEC-X86-INTEL-SDM (v093).

@@ -192,6 +192,10 @@ fn syscall_numbers_match_uapi_x86_64() {
         ("__NR_statfs", polyisa_os_linux::x86_64::STATFS),
         ("__NR_fstatfs", polyisa_os_linux::x86_64::FSTATFS),
         ("__NR_nanosleep", polyisa_os_linux::x86_64::NANOSLEEP),
+        (
+            "__NR_sched_getaffinity",
+            polyisa_os_linux::x86_64::SCHED_GETAFFINITY,
+        ),
         ("__NR_clone", polyisa_os_linux::x86_64::CLONE),
         ("__NR_execve", polyisa_os_linux::x86_64::EXECVE),
         ("__NR_wait4", polyisa_os_linux::x86_64::WAIT4),

@@ -5154,8 +5154,11 @@ pub fn mov_r64_imm64<B: Backend>(b: &mut B, dst: Gpr, imm: u64) -> Flow<B> {
 }
 
 pub fn mov_r32_imm<B: Backend>(b: &mut B, dst: Gpr, imm: u32) -> Flow<B> {
+    // 64ビットモードでは 32ビット書き込みが上位を消す。残すと nproc の
+    // movl $0x80, %esi の長さが壊れる。
     let v = b.konst::<W32>(imm);
     write(b, dst, v);
+    clear_hi(b, dst);
     Ok(())
 }
 

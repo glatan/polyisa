@@ -68,6 +68,7 @@
 - rseq
 - rt_sigaction
 - rt_sigprocmask
+- sched_getaffinity
 - sendfile
 - set_robust_list
 - set_tid_address
