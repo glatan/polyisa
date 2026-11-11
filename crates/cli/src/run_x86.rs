@@ -1321,7 +1321,7 @@ fn fetch_len(
             let s = second?;
             if s >> 6 == 3 { Some(3) } else { None }
         }
-        // 0xD1 (CL シフト) は register-direct のみ 2B。/7 SAR のみ実装 (他は decode 失败)。
+        // 0xD1 (/n シフト 1) は register-direct のみ 2B。/0 ROL、/1 ROR、/4 SHL、/5 SHR、/7 SAR。
         0xD1 => {
             let s = second?;
             if s >> 6 == 3 { Some(2) } else { None }
@@ -4496,6 +4496,14 @@ fn dispatch<B: Backend>(
                 sem::rol_rm64_imm8(b, rm(), 1)
             } else {
                 sem::rol_rm32_imm8(b, rm(), 1)
+            }
+        }
+        Insn::RorRm321 => {
+            // D1 /1。sha512sum 0x4b47c4 の rorq %rcx。
+            if rex_w {
+                sem::ror_rm64_imm8(b, rm(), 1)
+            } else {
+                sem::ror_rm32_imm8(b, rm(), 1)
             }
         }
         Insn::SarRm321 => {

@@ -336,6 +336,7 @@ fn text_applets_match_host() {
         &["strings", binf],
         &["md5sum", f],
         &["sha256sum", f],
+        &["sha512sum", f],
         &["hexdump", "-C", f],
         &["find", dir_s, "-name", "f"],
         &["test", "-f", f],

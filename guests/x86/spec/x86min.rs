@@ -725,6 +725,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("shl_rm32_1", "F1", "11010001 11100...", "shl r/m32, 1", "alu"),
         ("sar_rm32_1", "F1", "11010001 11111...", "sar r/m32, 1", "alu"),
         ("rol_rm32_1", "F1", "11010001 11000...", "rol r/m32, 1", "alu"),
+        // ROR r/m,1 (D1 /1 mod=11)。sha512sum 0x4b47c4 の 48 D1 C9。
+        ("ror_rm32_1", "F1", "11010001 11001...", "ror r/m32, 1", "alu"),
         // IMUL r32/r64, r/m32/r/m64 (0F AF /r)。reg-direct・mod=00/01/10/RIP (SIBなし).
         ("imul_r_rm", "F1", "00001111 10101111 11......", "imul r, r/m", "alu"),
         ("imul_r_memnd", "MR", "00001111 10101111 00......", "imul r, [r/m]", "load"),

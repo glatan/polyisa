@@ -85,7 +85,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数117件。
-        assert_eq!(INSNS.len(), 703);
+        assert_eq!(INSNS.len(), 704);
     }
 
     #[test]
@@ -575,6 +575,9 @@ mod tests {
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x00D1C2, 16), Some(Insn::RolRm321));
         assert_eq!(decode(0x00D1C2, 8), None);
+        // ROR r/m64,1 (D1 /1 mod=11)。sha512sum 0x4b47c4 の 48 D1 C9。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x00D1C9, 16), Some(Insn::RorRm321));
         // ADD r,[RIP+disp32] (03 05 + disp32)。
         assert_eq!(decode(0x030500000000, 48), Some(Insn::AddRRip));
         // MOVZX r32,m16 mod=10 (0F B7 /r)。

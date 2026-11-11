@@ -4879,6 +4879,27 @@ fn run_movsx_r64_m8_memnd() {
 }
 
 #[test]
+fn run_ror_rm64_by1() {
+    // 48 D1 C9 = rorq %rcx。下位1ビットが最上位へ回る。sha512sum 0x4b47c4。
+    // Ref: SPEC-X86-INTEL-SDM (v093).
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    polyisa_guest_x86::sem::write64(&mut env.backend, Gpr(1), 3);
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0x48, 0xD1, 0xC9])
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x1003 });
+    assert_eq!(
+        polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(1)),
+        0x8000_0000_0000_0001
+    );
+}
+
+#[test]
 fn run_rol_rm32_by1() {
     // run 経由で D1 C2 (ROLL $1,%edx) を回す。head の停止点 0x59eb6c に対応.
     // EDX=0x80000001 -> 0x00000003 になり、exit(0)。
