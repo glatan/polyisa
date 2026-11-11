@@ -400,6 +400,48 @@ pub fn test_r32_m32_mem8<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, disp: i8) -
     Ok(())
 }
 
+/// TEST r64,m64 [base] (85 /r mod=00, REX.W)。
+pub fn test_r64_m64_memnd<B: Backend>(b: &mut B, dst: Gpr, base: Gpr) -> Flow<B> {
+    let addr = read64(b, base);
+    let y: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let x = read64(b, dst);
+    let v = b.and::<W64>(x, y);
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// TEST r32,m32 [base+index*scale] (85 /r SIB mod=00)。awk 0x4a1c82 対応.
+pub fn test_r32_m32_sib<B: Backend>(
+    b: &mut B,
+    dst: Gpr,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, 0, base, idx);
+    let y: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let x = read(b, dst);
+    let v = b.and::<W32>(x, y);
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// TEST r64,m64 [base+index*scale] (85 /r SIB mod=00, REX.W)。
+pub fn test_r64_m64_sib<B: Backend>(
+    b: &mut B,
+    dst: Gpr,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, 0, base, idx);
+    let y: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let x = read64(b, dst);
+    let v = b.and::<W64>(x, y);
+    update_logic_flags(b, v);
+    Ok(())
+}
+
 /// TEST r32,m32 [base] (85 /r mod=00)。find 0x5d17f7 対応.
 pub fn test_r32_m32_memnd<B: Backend>(b: &mut B, dst: Gpr, base: Gpr) -> Flow<B> {
     let addr = read64(b, base);

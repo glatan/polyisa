@@ -1115,8 +1115,8 @@ fn fetch_len(
                 },
             )
         }
-        // 0x85 /r (TEST r,m)。reg-direct 2B、SIB mod=01 +disp8 4B、SIB mod=10 +disp32 7B、
-        // mod=01 base+disp8 3B、mod=10 base+disp32 6B、mod=00 base 2B / abs disp32 6B。SIB mod=00 は未対応.
+        // 0x85 /r (TEST r,m)。reg-direct 2B、SIB mod=00 3B、SIB mod=01 +disp8 4B、SIB mod=10 +disp32 7B、
+        // mod=01 base+disp8 3B、mod=10 base+disp32 6B、mod=00 base 2B / abs disp32 6B。SIB mod=00 base=5 は未対応.
         0x85 => {
             let s = second?;
             let md = s >> 6;
@@ -1130,7 +1130,9 @@ fn fetch_len(
                     // SIB+disp32 (85 /r mod=10 rm=100)。grep 0x43d250 対応.
                     Some(7)
                 } else {
-                    None
+                    // mod=00 SIB (3B)。base=5 は disp32。awk 0x4a1c82 対応.
+                    let t = third?;
+                    if t & 7 != 5 { Some(3) } else { None }
                 }
             } else if md == 1 {
                 Some(3)
@@ -1360,6 +1362,7 @@ pub fn run_mode(
                 | 0x38
                 | 0x3A
                 | 0x87
+                | 0x85
                 | 0x83
                 | 0x81
                 | 0x63
@@ -3458,6 +3461,20 @@ fn dispatch<B: Backend>(
             // 85 /r mod=00 [base]。find 0x5d17f7 対応。dst は reg フィールド.
             // REX.W の64bit比較は32bitで代用する（試作）。
             sem::test_r32_m32_memnd(b, reg(), rm())
+        }
+        Insn::TestRSib => {
+            // 85 /r SIB mod=00 [base+index*scale]。awk 0x4a1c82 対応。dst は reg.
+            if no_index() {
+                if rex_w {
+                    sem::test_r64_m64_memnd(b, reg(), sib_base())
+                } else {
+                    sem::test_r32_m32_memnd(b, reg(), sib_base())
+                }
+            } else if rex_w {
+                sem::test_r64_m64_sib(b, reg(), sib_base(), sib_idx(), sib_shift())
+            } else {
+                sem::test_r32_m32_sib(b, reg(), sib_base(), sib_idx(), sib_shift())
+            }
         }
         Insn::TestRSibd => {
             // 85 /r SIB mod=01 [base+index*scale+disp8] (32b)。dst は reg フィールド.
