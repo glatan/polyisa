@@ -840,6 +840,13 @@ fn fetch_len(
                 Some(2)
             }
         }
+        // DD D8+i (FSTP ST(i))。reg-direct 2B のみ。seq 0x4024ee 対応.
+        0xDD => {
+            let s = second?;
+            let md = s >> 6;
+            let reg = (s >> 3) & 7;
+            if md == 3 && reg == 3 { Some(2) } else { None }
+        }
         // C7 /0 (MOV r/m,imm32 系)。SIB mod=00 は直接番地 (base=101) のみ。
         // has66 (66 C7) は imm16 のため 2B 短くなる.
         0xC7 => {
@@ -1337,6 +1344,7 @@ pub fn run_mode(
                 | 0x22
                 | 0x84
                 | 0xD9
+                | 0xDD
                 | 0x0A
                 | 0xC0
                 | 0xD0
@@ -2913,6 +2921,10 @@ fn dispatch<B: Backend>(
                 (Gpr(rm_f - 4), true)
             };
             sem::and_m8_r8(b, dst, dst_high, src, src_high)
+        }
+        Insn::FstpSt => {
+            // DD D8+i。seq 0x4024ee の DD D8 は FSTP ST(0)。
+            sem::fstp_st(b, (word & 7) as u8)
         }
         Insn::FldM32Rip => {
             // D9 /0 mod=00 rm=101 [RIP+disp32]。seq 0x402335 対応。disp は下位32 LE.

@@ -10519,6 +10519,52 @@ pub fn fld_m32_abs<B: Backend>(b: &mut B, addr32: u32) -> Flow<B> {
     push_f32(b, bits)
 }
 
+/// FSTP ST(i) (DD D8+i)。ST(0) を ST(i) へ写してからスタックを一つ捨てる。seq 0x4024ee 対応.
+pub fn fstp_st<B: Backend>(b: &mut B, i: u8) -> Flow<B> {
+    let top = b.get(top_ref());
+    let ii = b.konst::<W16>(i as u16);
+    let summed = b.add::<W16>(top, ii);
+    let seven = b.konst::<W16>(7);
+    let dst = b.and::<W16>(summed, seven);
+    let mut sig = b.konst::<W64>(0);
+    let mut exp = b.konst::<W16>(0);
+    for slot in 0..8 {
+        let idx = b.konst::<W16>(slot as u16);
+        let hit = b.cmp::<W16>(Cmp::Eq, top, idx);
+        let got_sig = b.get(st_sig_ref(slot));
+        let got_exp = b.get(st_exp_ref(slot));
+        sig = b.select::<W64>(hit, got_sig, sig);
+        exp = b.select::<W16>(hit, got_exp, exp);
+    }
+    for slot in 0..8 {
+        let idx = b.konst::<W16>(slot as u16);
+        let hit = b.cmp::<W16>(Cmp::Eq, dst, idx);
+        let old_sig = b.get(st_sig_ref(slot));
+        let old_exp = b.get(st_exp_ref(slot));
+        let new_sig = b.select::<W64>(hit, sig, old_sig);
+        let new_exp = b.select::<W16>(hit, exp, old_exp);
+        b.set(st_sig_ref(slot), new_sig);
+        b.set(st_exp_ref(slot), new_exp);
+    }
+    let zero64 = b.konst::<W64>(0);
+    let zero16 = b.konst::<W16>(0);
+    for slot in 0..8 {
+        let idx = b.konst::<W16>(slot as u16);
+        let hit = b.cmp::<W16>(Cmp::Eq, top, idx);
+        let old_sig = b.get(st_sig_ref(slot));
+        let old_exp = b.get(st_exp_ref(slot));
+        let new_sig = b.select::<W64>(hit, zero64, old_sig);
+        let new_exp = b.select::<W16>(hit, zero16, old_exp);
+        b.set(st_sig_ref(slot), new_sig);
+        b.set(st_exp_ref(slot), new_exp);
+    }
+    let one = b.konst::<W16>(1);
+    let inc = b.add::<W16>(top, one);
+    let new_top = b.and::<W16>(inc, seven);
+    b.set(top_ref(), new_top);
+    Ok(())
+}
+
 /// FLDCW m16 [base] (D9 /5 mod=00)。x87 制御ワードを読む.
 pub fn fldcw_memnd<B: Backend>(b: &mut B, base: Gpr) -> Flow<B> {
     let addr = read64(b, base);
