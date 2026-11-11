@@ -1986,6 +1986,8 @@ pub fn run_mode(
                     | Insn::CmpM32R32Sib
                     // MOV r16, [base] (66 8B mod=00).
                     | Insn::MovEaxMemnd
+                    // ADD r16, [base] (66 03 /r mod=00).
+                    | Insn::AddRMemnd
                     // AND m16,imm8 SIB+disp8 (66 83 /4 mod=01).
                     | Insn::AndRmImm8Sibd
                     // SUB m16,imm8 SIB+disp8 (66 83 /5 mod=01).
@@ -5351,7 +5353,10 @@ fn dispatch<B: Backend>(
             }
         }
         Insn::AddRMemnd => {
-            if rex_w {
+            if has66 {
+                // 66 03 /r mod=00。gzip 0x4847b9 の addw (%rcx), %ax。
+                sem::add_r16_memnd(b, reg(), rm())
+            } else if rex_w {
                 sem::add_r64_memnd(b, reg(), rm())
             } else {
                 sem::add_r32_memnd(b, reg(), rm())

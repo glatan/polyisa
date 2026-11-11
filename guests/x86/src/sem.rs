@@ -7130,6 +7130,35 @@ pub fn add_r64_rip<B: Backend>(b: &mut B, dst: Gpr, next_rip: u64, disp: i32) ->
 }
 
 /// ADD r32, [base] (mod=00)。32ビットで包み、6旗を更新する.
+/// ADD r16, [base] (66 03 /r mod=00)。gzip 0x4847b9 の addw (%rcx), %ax。上位は残す。
+pub fn add_r16_memnd<B: Backend>(b: &mut B, dst: Gpr, base: Gpr) -> Flow<B> {
+    use polyisa_sem::W16;
+    let addr = read64(b, base);
+    let y: B::V<W16> = b.load::<W16>(addr, DATA_READ)?;
+    if dst.0 < 8 {
+        let x32 = read(b, dst);
+        let x = b.trunc::<W32, W16>(x32);
+        let v = b.add::<W16>(x, y);
+        let mask = b.konst::<W32>(0xFFFF_0000);
+        let preserved = b.and::<W32>(x32, mask);
+        let ext32 = b.zext::<W16, W32>(v);
+        let nv = b.or::<W32>(preserved, ext32);
+        write(b, dst, nv);
+        update_add_flags(b, x, y, v);
+    } else {
+        let x64 = read64(b, dst);
+        let x = b.trunc::<W64, W16>(x64);
+        let v = b.add::<W16>(x, y);
+        let mask = b.konst::<W64>(0xFFFF_FFFF_FFFF_0000);
+        let preserved = b.and::<W64>(x64, mask);
+        let ext64 = b.zext::<W16, W64>(v);
+        let nv = b.or::<W64>(preserved, ext64);
+        write64(b, dst, nv);
+        update_add_flags(b, x, y, v);
+    }
+    Ok(())
+}
+
 pub fn add_r32_memnd<B: Backend>(b: &mut B, dst: Gpr, base: Gpr) -> Flow<B> {
     let addr = read64(b, base);
     let y: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;

@@ -5195,6 +5195,38 @@ fn run_mov_r16_m16_memnd() {
 }
 
 #[test]
+fn run_add_r16_memnd() {
+    // 66 03 01 = addw (%rcx), %ax。gzip 0x4847b9。上位16ビットは残す。
+    // 0x7fff+1 は 0x8000 になり OF と SF が立つ。
+    // Ref: SPEC-X86-INTEL-SDM (v093).
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    for (ax, mem, eax, flags) in [
+        (0x0002u32, [0x01, 0x00], 0x1111_0003u32, 0x04u32),
+        (0x7fff, [0x01, 0x00], 0x1111_8000, 0x894),
+    ] {
+        let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+        env.backend.set(Gpr(1).state(), 0x2000);
+        env.backend.set(Gpr(0).state(), 0x1111_0000 | ax);
+        env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 0);
+        env.backend.mem.write(VirtAddr(0x2000), &mem).unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x1000), &[0x66, 0x03, 0x01])
+            .unwrap();
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+        assert_eq!(out, Outcome::StepLimit { eip: 0x1003 });
+        assert_eq!(env.backend.get(Gpr(0).state()), eax);
+        assert_eq!(
+            env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x8D5,
+            flags
+        );
+    }
+}
+
+#[test]
 fn run_imul_r64_imm_sibd() {
     // 48 69 44 24 08 01 00 01 00 = imulq $0x10001, 0x8(%rsp), %rax。3*0x10001=0x30003。
     // mktemp 0x4d85cf。Ref: SPEC-X86-INTEL-SDM (v093).
