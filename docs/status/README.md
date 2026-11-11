@@ -36,7 +36,7 @@
 | riscv | 196 | 196 | rv64gc、rv64imac | [isa-riscv.md](isa-riscv.md) |
 | sparc | 10 | 10 | generic | [isa-sparc.md](isa-sparc.md) |
 | wasm | 8 | 8 | generic | [isa-wasm.md](isa-wasm.md) |
-| x86 | 690 | 156 | generic32 | [isa-x86.md](isa-x86.md) |
+| x86 | 691 | 156 | generic32 | [isa-x86.md](isa-x86.md) |
 
 ## システムコール
 

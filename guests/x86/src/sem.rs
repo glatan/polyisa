@@ -10544,6 +10544,14 @@ pub fn fnstcw_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8) -> Flow<B> {
     Ok(())
 }
 
+/// FNSTCW m16 [base+index*scale+disp8] (D9 /7 SIB mod=01)。seq 0x4d0c17 対応.
+pub fn fnstcw_sibd<B: Backend>(b: &mut B, base: Gpr, idx: Gpr, shift: u32, disp: i8) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, disp as i32, base, idx);
+    let v: B::V<W16> = b.get(fcw_ref());
+    b.store::<W16>(addr, v, DATA_WRITE)?;
+    Ok(())
+}
+
 /// FNSTCW m16 [base+disp32] (D9 /7 mod=10)。
 pub fn fnstcw_mem32<B: Backend>(b: &mut B, base: Gpr, disp: i32) -> Flow<B> {
     let addr = eff_addr32(b, base, disp);
