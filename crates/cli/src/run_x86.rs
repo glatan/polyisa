@@ -2143,6 +2143,8 @@ pub fn run_mode(
                     | Insn::MovEaxMem8
                     // CMP m16,imm8 [base] (66 83 /7 mod=00)。ping 0x4be1f1 の cmpw $2, (%rdi)。
                     | Insn::CmpRmImm8Memnd
+                    // CMP m16,imm8 [base+disp8] (66 83 /7 mod=01)。ping 0x42e7b3 の cmpw $0xa, 0x4(%rbx)。
+                    | Insn::CmpRmImm8m8
                     // ADD r16, [base] (66 03 /r mod=00).
                     | Insn::AddRMemnd
                     // AND m16,imm8 SIB+disp8 (66 83 /4 mod=01).
@@ -5547,7 +5549,10 @@ fn dispatch<B: Backend>(
             // mod=01 m8 形：disp8 は下から2バイト目、imm8 は最下位。
             let d8 = ((word >> 8) & 0xff) as u8 as i8;
             let i8 = (word & 0xff) as u8 as i8;
-            if rex_w {
+            if has66 {
+                // 66 83 /7。ping 0x42e7b3 の cmpw $0xa, 0x4(%rbx)。
+                sem::cmp_m16_imm8_mem8(b, rm(), d8, i8)
+            } else if rex_w {
                 sem::cmp_rm64_imm8m8(b, rm(), d8, i8)
             } else {
                 sem::cmp_rm32_imm8m8(b, rm(), d8, i8)
