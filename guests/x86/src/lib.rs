@@ -85,7 +85,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数117件。
-        assert_eq!(INSNS.len(), 709);
+        assert_eq!(INSNS.len(), 710);
     }
 
     #[test]
@@ -592,6 +592,8 @@ mod tests {
         assert_eq!(decode(0x0301, 16), Some(Insn::AddRMemnd));
         // DEC [base+disp32]。gzip 0x484714 の FF 8B F4 2A 00 00。
         assert_eq!(decode(0xff8bf42a0000, 48), Some(Insn::DecRmMem32));
+        // SUB [base+disp32], r32。gzip 0x48473b の 29 83 F8 2A 00 00。
+        assert_eq!(decode(0x2983f82a0000, 48), Some(Insn::SubM32R32Mem32));
         assert_eq!(decode(0x6B1567FD1A0038, 56), Some(Insn::ImulRImm8Rip));
         assert_eq!(decode(0x6BF638, 24), Some(Insn::ImulRImm8));
         assert_eq!(decode(0x00C1F908, 24), Some(Insn::SarRm32Imm8));
@@ -1278,7 +1280,8 @@ mod tests {
         // MOVAPS [base+disp32],xmm (0F 29 mod=10)。
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x0F2985E0FEFFFF, 56), Some(Insn::MovapsStoreMem32));
-        assert_eq!(decode(0x0F2985E0FEFFFF, 48), None);
+        // 下位48ビット 29 85 E0 FE FF FF は SUB [rbp+disp32], eax。
+        assert_eq!(decode(0x0F2985E0FEFFFF, 48), Some(Insn::SubM32R32Mem32));
         // OR m32,r32 SIB+disp32 (09 /r SIB mod=10)。
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x0994B008080000, 56), Some(Insn::OrM32R32Sibd32));

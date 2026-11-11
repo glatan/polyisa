@@ -2503,6 +2503,14 @@ fn dispatch<B: Backend>(
                 sem::sub_m32_r32_mem8(b, rm(), disp8(), reg())
             }
         }
+        Insn::SubM32R32Mem32 => {
+            // 29 /r mod=10 [base+disp32]。gzip 0x48473b の subl %eax, 0x2af8(%rbx)。
+            if rex_w {
+                sem::sub_m64_r64_mem32(b, rm(), disp32(), reg())
+            } else {
+                sem::sub_m32_r32_mem32(b, rm(), disp32(), reg())
+            }
+        }
         Insn::AddM32R32Mem32 => {
             if rex_w {
                 sem::add_m64_r64_mem32(b, rm(), disp32(), reg())

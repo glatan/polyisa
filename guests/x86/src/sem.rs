@@ -16939,6 +16939,28 @@ pub fn sub_m32_r32_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8, src: Gpr) ->
     Ok(())
 }
 
+/// SUB m32, r32 [base+disp32] (29 /r mod=10)。gzip 0x48473b 対応。
+pub fn sub_m32_r32_mem32<B: Backend>(b: &mut B, base: Gpr, disp: i32, src: Gpr) -> Flow<B> {
+    let addr = eff_addr32(b, base, disp);
+    let x: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let y = read(b, src);
+    let v = b.sub::<W32>(x, y);
+    b.store::<W32>(addr, v, DATA_WRITE)?;
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
+/// SUB m64, r64 [base+disp32] (REX.W 29 /r mod=10)。
+pub fn sub_m64_r64_mem32<B: Backend>(b: &mut B, base: Gpr, disp: i32, src: Gpr) -> Flow<B> {
+    let addr = eff_addr32(b, base, disp);
+    let x: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let y = read64(b, src);
+    let v = b.sub::<W64>(x, y);
+    b.store::<W64>(addr, v, DATA_WRITE)?;
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
 /// SUB m32,r32 [base+index*scale+disp8] (29 /r SIB mod=01)。
 pub fn sub_m32_r32_sibd<B: Backend>(
     b: &mut B,

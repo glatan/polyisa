@@ -5270,6 +5270,56 @@ fn run_dec_rm_mem32() {
 }
 
 #[test]
+fn run_sub_m32_r32_mem32() {
+    // 29 83 F8 2A 00 00 = subl %eax, 0x2af8(%rbx)。gzip 0x48473b。
+    // Ref: SPEC-X86-INTEL-SDM (v093).
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    for (mem, eax, flags, outb) in [
+        (
+            [0x05, 0x00, 0x00, 0x00],
+            1u32,
+            0x00u32,
+            [0x04, 0x00, 0x00, 0x00],
+        ),
+        ([0x00, 0x00, 0x00, 0x00], 1, 0x95, [0xFF, 0xFF, 0xFF, 0xFF]),
+    ] {
+        let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.mem.map(VirtAddr(0x4000), 1, Perms::RW).unwrap();
+        env.backend.set(Gpr(3).state(), 0x2000);
+        env.backend.set(Gpr(0).state(), eax);
+        env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 0);
+        env.backend.mem.write(VirtAddr(0x4AF8), &mem).unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x1000), &[0x29, 0x83, 0xF8, 0x2A, 0x00, 0x00])
+            .unwrap();
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+        assert_eq!(out, Outcome::StepLimit { eip: 0x1006 });
+        assert_eq!(env.backend.get(Gpr(0).state()), eax);
+        assert_eq!(
+            env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x8D5,
+            flags
+        );
+        let mut back = [0u8; 4];
+        env.backend
+            .mem
+            .read(
+                VirtAddr(0x4AF8),
+                &mut back,
+                polyisa_mem::Access {
+                    endian: polyisa_mem::Endian::Le,
+                    align: polyisa_mem::Align::Unaligned,
+                    kind: polyisa_mem::AccessKind::DataRead,
+                },
+            )
+            .unwrap();
+        assert_eq!(back, outb);
+    }
+}
+
+#[test]
 fn run_imul_r64_imm_sibd() {
     // 48 69 44 24 08 01 00 01 00 = imulq $0x10001, 0x8(%rsp), %rax。3*0x10001=0x30003。
     // mktemp 0x4d85cf。Ref: SPEC-X86-INTEL-SDM (v093).

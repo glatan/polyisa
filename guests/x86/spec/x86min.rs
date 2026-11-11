@@ -1953,6 +1953,15 @@ pub fn build_model() -> polyisa_isadl::Model {
             "sub m32, r32",
             "alu",
         ),
+        // SUB m32, r32 mod=10 [base+disp32] (29 /r)。gzip 0x48473b の subl %eax, 0x2af8(%rbx)。
+        (
+            "sub_m32_r32_mem32",
+            "M32",
+            "00101001 10...... ................................",
+            vec![wc("m32_rm", WhereOp::Ne, 4)],
+            "sub m32, r32",
+            "alu",
+        ),
         (
             "sub_r_mem32",
             "M32",
