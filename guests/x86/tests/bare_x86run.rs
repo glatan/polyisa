@@ -5738,6 +5738,34 @@ fn run_imul_r64_imm_sib() {
 }
 
 #[test]
+fn run_imul_r64_imm8_rsp() {
+    // 48 6B 44 24 28 58 = imul $0x58, 0x28(%rsp), %rax。2*88=176。フラグは残る。iostat 0x44897d。
+    // Ref: SPEC-X86-INTEL-SDM (v093).
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 1);
+    env.backend
+        .mem
+        .write(VirtAddr(0x2028), &2u64.to_le_bytes())
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0x48, 0x6B, 0x44, 0x24, 0x28, 0x58])
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x1006 });
+    assert_eq!(
+        polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(0)),
+        176
+    );
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::eflags_ref()), 1);
+}
+
+#[test]
 fn run_cmp_ax_imm8_sets_flags() {
     // 66 83 F8 FF = cmp $-1, %ax。0 と比較すると借りと補助キャリー。ax は残る。iostat 0x4bea1d。
     // Ref: SPEC-X86-INTEL-SDM (v093).

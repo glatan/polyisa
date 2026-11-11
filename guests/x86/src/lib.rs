@@ -85,7 +85,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数117件。
-        assert_eq!(INSNS.len(), 729);
+        assert_eq!(INSNS.len(), 730);
     }
 
     #[test]
@@ -635,6 +635,7 @@ mod tests {
         assert_eq!(decode(0xDB2DFA0F0000, 48), Some(Insn::FldM80Rip));
         assert_eq!(decode(0x6B1567FD1A0038, 56), Some(Insn::ImulRImm8Rip));
         assert_eq!(decode(0x6BF638, 24), Some(Insn::ImulRImm8));
+        assert_eq!(decode(0x6B44242858, 40), Some(Insn::ImulRImm8Sibd));
         assert_eq!(decode(0x00C1F908, 24), Some(Insn::SarRm32Imm8));
         // BT r/m32,r32 (0F A3 /r mod=11)。wc の停止点 0x5b380d に対応.
         // Ref: SPEC-X86-INTEL-SDM (v093).

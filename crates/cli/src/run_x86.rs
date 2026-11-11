@@ -629,7 +629,7 @@ fn fetch_len(
                 None
             }
         }
-        // 0x6B /r ib (IMUL r,r/m,imm8)。reg-direct 3B、RIP 7B。SIB は未対応.
+        // 0x6B /r ib (IMUL r,r/m,imm8)。reg-direct 3B、RIP 7B、SIB+disp8 は 5B.
         0x6B => {
             let s = second?;
             let md = s >> 6;
@@ -637,7 +637,8 @@ fn fetch_len(
             if md == 3 {
                 Some(3)
             } else if rm == 4 {
-                None
+                // IMUL r, [SIB+disp8], imm8。iostat 0x44897d の 6B 44 24 28 58。5B.
+                if md == 1 { Some(5) } else { None }
             } else if md == 0 && rm == 5 {
                 Some(7)
             } else {
@@ -7548,6 +7549,17 @@ fn dispatch<B: Backend>(
                 sem::imul_r64_imm_sibd(b, reg(), base, disp, imm32())
             } else {
                 sem::imul_r32_imm_sibd(b, reg(), base, disp, imm32())
+            }
+        }
+        Insn::ImulRImm8Sibd => {
+            // 6B /r SIB mod=01 + imm8。disp は imm8 の直前。iostat 0x44897d。フラグは変えない。
+            let disp = ((word >> 8) & 0xff) as u8 as i8;
+            let imm = (word & 0xff) as u8 as i8;
+            let base = sib_base();
+            if rex_w {
+                sem::imul_r64_imm8_sibd(b, reg(), base, disp, imm)
+            } else {
+                sem::imul_r32_imm8_sibd(b, reg(), base, disp, imm)
             }
         }
         Insn::ImulRImm8 => {
