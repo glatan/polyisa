@@ -5,6 +5,7 @@
 #![forbid(unsafe_code)]
 
 pub mod run;
+pub mod run_mips;
 pub mod run_x86;
 
 /// ELF を選んで実行する。`EI_CLASS` と `e_machine` で RISC-V と x86 を振り分ける。
