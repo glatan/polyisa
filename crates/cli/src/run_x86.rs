@@ -1220,6 +1220,10 @@ fn fetch_len(
             let reg = (s >> 3) & 7;
             let rm = s & 7;
             if reg != 0 {
+                if md == 3 && reg == 6 {
+                    // DIV r/m8 (F6 /6 mod=11、2B)。lzcat 0x48b6ef の div dl。
+                    return Some(2);
+                }
                 return None;
             }
             if md == 3 {
@@ -6788,6 +6792,10 @@ fn dispatch<B: Backend>(
             } else {
                 sem::div_rm32(b, eip, rm())
             }
+        }
+        Insn::DivRm8 => {
+            // F6 /6 mod=11。lzcat 0x48b6ef の div dl。AX を 8 ビットで割り、商は AL、剰余は AH。
+            sem::div_rm8(b, eip, rm())
         }
         Insn::DivRm32Mem8 => sem::div_rm32_mem8(b, eip, rm(), disp8()),
         Insn::DivRm32Sib => {

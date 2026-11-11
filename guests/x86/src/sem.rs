@@ -5569,6 +5569,35 @@ pub fn imul_rm64<B: Backend>(b: &mut B, rm: Gpr) -> Flow<B> {
     Ok(())
 }
 
+/// DIV r/m8 (F6 /6)。AX を符号なしで割り、商を AL、剰余を AH に置く。上位は残す。
+/// 0 除算と商あふれは実機の #DE に相当する DivZero で退出する。フラグは変えない。
+pub fn div_rm8<B: Backend>(b: &mut B, eip: u32, rm: Gpr) -> Flow<B> {
+    use polyisa_sem::{W8, W16};
+    let eax = read(b, Gpr(0));
+    let ax: B::V<W16> = b.trunc::<W32, W16>(eax);
+    let src = read(b, rm);
+    let src8: B::V<W8> = b.trunc::<W32, W8>(src);
+    let dvd = b.zext::<W16, W64>(ax);
+    let dvs = b.zext::<W8, W64>(src8);
+    let zero = b.konst::<W64>(0);
+    let is_zero = b.cmp::<W64>(Cmp::Eq, dvs, zero);
+    b.if_then(is_zero, |b| Err(div0(b, eip)))?;
+    let q64 = b.udiv::<W64>(dvd, dvs);
+    let r64 = b.urem::<W64>(dvd, dvs);
+    let eight = b.konst::<W64>(8);
+    let qhi = b.shr_l::<W64>(q64, eight);
+    let over = b.cmp::<W64>(Cmp::Ne, qhi, zero);
+    b.if_then(over, |b| Err(div0(b, eip)))?;
+    let rax = read64(b, Gpr(0));
+    let mask = b.konst::<W64>(0xffff_ffff_ffff_0000);
+    let preserved = b.and::<W64>(rax, mask);
+    let rem = b.shl::<W64>(r64, eight);
+    let low = b.or::<W64>(rem, q64);
+    let v = b.or::<W64>(preserved, low);
+    write64(b, Gpr(0), v);
+    Ok(())
+}
+
 /// DIV EAX, ECX。EDX:EAX を符号なし除算し、商を EAX、剰余を EDX に置く。
 /// 0 除算と商あふれは実機の #DE に相当する DivZero で退出する。
 pub fn div_rm32<B: Backend>(b: &mut B, eip: u32, rm: Gpr) -> Flow<B> {

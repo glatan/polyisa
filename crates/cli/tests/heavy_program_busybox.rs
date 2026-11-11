@@ -432,6 +432,7 @@ fn text_applets_match_host() {
         &["pgrep", "nosuchname123"],
         &["gunzip", "-c", gz_s],
         &["bzcat", bz_s],
+        &["bunzip2", "-c", bz_s],
         &["lzop", "-c", f],
         &["kill", "-l"],
         &["pidof", "nosuchname123"],

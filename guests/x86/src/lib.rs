@@ -85,7 +85,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数117件。
-        assert_eq!(INSNS.len(), 761);
+        assert_eq!(INSNS.len(), 762);
     }
 
     #[test]
@@ -352,6 +352,7 @@ mod tests {
         assert_eq!(decode(0xC70554600C000100, 64), Some(Insn::MovRm16ImmRip));
         assert_eq!(decode(0xC70554600C000100, 56), None);
         assert_eq!(decode(0xF6C110, 24), Some(Insn::TestRm8Imm));
+        assert_eq!(decode(0xF6F2, 16), Some(Insn::DivRm8));
         assert_eq!(decode(0xA801, 16), Some(Insn::TestAlImm));
         assert_eq!(decode(0xF6050000000002, 56), Some(Insn::TestM8ImmRip));
         assert_eq!(decode(0xF6430402, 32), Some(Insn::TestM8ImmMem8));

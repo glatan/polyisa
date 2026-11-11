@@ -177,6 +177,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("mul_rm32", "F1", "11110111 11100...", "mul eax, r/m32", "mult"),
         ("imul_rm32", "F1", "11110111 11101...", "imul eax, r/m32", "mult"),
         ("div_rm32", "F1", "11110111 11110...", "div eax, r/m32", "div"),
+        // DIV r/m8 (F6 /6 mod=11)。lzcat 0x48b6ef の div dl。
+        ("div_rm8", "F1", "11110110 11110...", "div ax, r/m8", "div"),
         ("idiv_rm32", "F1", "11110111 11111...", "idiv eax, r/m32", "div"),
         ("push_eax", "F1", "01010000", "push eax", "store"),
         ("push_ecx", "F1", "01010001", "push ecx", "store"),

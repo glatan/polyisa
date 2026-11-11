@@ -5738,6 +5738,30 @@ fn run_imul_r64_imm_sib() {
 }
 
 #[test]
+fn run_div_dl() {
+    // F6 F2 = div dl。AX=0x107、DL=5 なら商 0x34、剰余 3。上位とフラグと DL は残る。lzcat 0x48b6ef。
+    // Ref: SPEC-X86-INTEL-SDM (v093).
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    polyisa_guest_x86::sem::write64(&mut env.backend, Gpr(0), 0x1111_2222_3333_0107);
+    polyisa_guest_x86::sem::write64(&mut env.backend, Gpr(2), 0xAAAA_BBBB_CCCC_0005);
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0xF6, 0xF2])
+        .unwrap();
+    env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 1);
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x1002 });
+    let rax: u64 = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(0));
+    let rdx: u64 = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(2));
+    assert_eq!(rax, 0x1111_2222_3333_0334);
+    assert_eq!(rdx, 0xAAAA_BBBB_CCCC_0005);
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::eflags_ref()), 1);
+}
+
+#[test]
 fn run_and_ax_r12_scale_disp32() {
     // 66 43 23 84 24 10 00 00 00 = and ax, [r12+r12+0x10]。0xff&0x0f は 0x0f。上位は残る。gunzip 0x48a957。
     // Ref: SPEC-X86-INTEL-SDM (v093).
