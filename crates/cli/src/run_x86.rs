@@ -443,6 +443,18 @@ fn fetch_len(
                 } else {
                     None
                 }
+            } else if s == 0x5E {
+                // DIVSD xmm,m64 RIP (F2 0F 5E 05 + disp32、7B)。dd 0x4928e8 対応.
+                let m = third?;
+                let md = m >> 6;
+                let rm = m & 7;
+                if md == 3 {
+                    Some(3)
+                } else if md == 0 && rm == 5 {
+                    Some(7)
+                } else {
+                    None
+                }
             } else if s == 0x59 {
                 // MULSD xmm,m64 RIP (F2 0F 59 05 + disp32、7B) と reg-direct (F2 0F 59 /r mod=11、4B)。
                 let m = third?;
@@ -1637,6 +1649,7 @@ pub fn run_mode(
                             | 0x54
                             | 0x5C
                             | 0x59
+                            | 0x5E
                             | 0xBA
                             | 0xC1
                             | 0x7E
@@ -2094,7 +2107,11 @@ pub fn run_mode(
             };
         }
         // CVTSI2SD (F2 0F 2A) と SUBPS (0F 2A) は符号化を共用する。F2 なしは未対応.
-        if matches!(insn, Insn::Cvtsi2sdM32Mem8) && !has_f2 {
+        if matches!(
+            insn,
+            Insn::Cvtsi2sdM32Mem8 | Insn::DivsdXmmM64Rip | Insn::Divsd
+        ) && !has_f2
+        {
             return Outcome::Unimplemented {
                 eip: pc as u32,
                 word,
@@ -6483,6 +6500,15 @@ fn dispatch<B: Backend>(
                 sem::mulsd_xmm_m64_rip(b, xmm_reg_r(), eip as u64 + nbytes, disp32())
             } else {
                 sem::mulsd_xmm_m64_abs(b, xmm_reg_r(), imm32())
+            }
+        }
+        Insn::Divsd => sem::divsd_xmm(b, xmm_reg_r(), xmm_rm_b()),
+        Insn::DivsdXmmM64Rip => {
+            // F2 0F 5E 05 + disp32。dd 0x4928e8 の divsd xmm0, [rip+disp]。
+            if is64 {
+                sem::divsd_xmm_m64_rip(b, xmm_reg_r(), eip as u64 + nbytes, disp32())
+            } else {
+                sem::divsd_xmm_m64_abs(b, xmm_reg_r(), imm32())
             }
         }
         Insn::MulsdXmmM64Sibd => {

@@ -6237,6 +6237,77 @@ fn run_movapd_co_use() {
 }
 
 #[test]
+fn run_divsd_xmm() {
+    // F2 0F 5E C8 = divsd xmm1, xmm0。4.0/2.0=2.0。上位64は残す。dd 0x492911。
+    // Ref: SPEC-X86-INTEL-SDM (v093).
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.step(|b| {
+        let src = b.konst::<polyisa_sem::W128>(0x4000_0000_0000_0000u128);
+        b.set(
+            polyisa_guest_x86::sem::xmm_ref(polyisa_guest_x86::sem::Xmm(0)),
+            src,
+        );
+        let dst = b.konst::<polyisa_sem::W128>(0xFFFF_0000_0000_0000_4010_0000_0000_0000u128);
+        b.set(
+            polyisa_guest_x86::sem::xmm_ref(polyisa_guest_x86::sem::Xmm(1)),
+            dst,
+        );
+        Ok(())
+    })
+    .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0xF2, 0x0F, 0x5E, 0xC8])
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x1004 });
+    let v: u128 = env.backend.get(polyisa_guest_x86::sem::xmm_ref(
+        polyisa_guest_x86::sem::Xmm(1),
+    ));
+    assert_eq!(v, 0xFFFF_0000_0000_0000_4000_0000_0000_0000u128);
+}
+
+#[test]
+fn run_divsd_xmm_m64_rip() {
+    // F2 0F 5E 05 F8 0F 00 00 = divsd xmm0, [rip+0xff8]。4.0/2.0=2.0。上位64は残す。
+    // 次命令は 0x1008、宛先は 0x2000。dd 0x4928e8。Ref: SPEC-X86-INTEL-SDM (v093).
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2000), &0x4000_0000_0000_0000u64.to_le_bytes())
+        .unwrap();
+    env.step(|b| {
+        let a = b.konst::<polyisa_sem::W128>(0xFFFF_0000_0000_0000_4010_0000_0000_0000u128);
+        b.set(
+            polyisa_guest_x86::sem::xmm_ref(polyisa_guest_x86::sem::Xmm(0)),
+            a,
+        );
+        Ok(())
+    })
+    .unwrap();
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x1000),
+            &[0xF2, 0x0F, 0x5E, 0x05, 0xF8, 0x0F, 0x00, 0x00],
+        )
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x1008 });
+    let v: u128 = env.backend.get(polyisa_guest_x86::sem::xmm_ref(
+        polyisa_guest_x86::sem::Xmm(0),
+    ));
+    assert_eq!(v, 0xFFFF_0000_0000_0000_4000_0000_0000_0000u128);
+}
+
+#[test]
 fn run_mulsd() {
     // run 経由で F2 0F 59 C2 (MULSD xmm0,xmm2) を回す。seq の停止点 0x5adf8c に対応.
     // xmm0 下位=2.0、xmm2=3.0 -> 下位=6.0 (0x4018000000000000)、上位は xmm0 のまま、exit(0)。
