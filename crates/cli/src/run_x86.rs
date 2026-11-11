@@ -2053,6 +2053,8 @@ pub fn run_mode(
                     | Insn::AddM16ImmSib
                     // CMP m16,imm8 SIB (66 83 /7 mod=00).
                     | Insn::CmpRmImm8Sib
+                    // CMP r16,imm8 (66 83 /7 mod=11)。iostat 0x4bea1d の cmp $-1, %ax。
+                    | Insn::CmpRmImm8
                     // CMP m16,imm8 SIB+disp32 (66 83 /7 mod=10).
                     | Insn::CmpRmImm8Sibd32
                     // CMP m16, r16 [base] (66 39 /r mod=00).
@@ -5337,7 +5339,9 @@ fn dispatch<B: Backend>(
             }
         }
         Insn::CmpRmImm8 => {
-            if rex_w {
+            if has66 {
+                sem::cmp_rm16_imm8(b, rm(), disp8())
+            } else if rex_w {
                 sem::cmp_rm64_imm8(b, rm(), disp8())
             } else {
                 sem::cmp_rm32_imm8(b, rm(), disp8())

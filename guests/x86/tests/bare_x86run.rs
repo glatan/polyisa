@@ -5738,6 +5738,30 @@ fn run_imul_r64_imm_sib() {
 }
 
 #[test]
+fn run_cmp_ax_imm8_sets_flags() {
+    // 66 83 F8 FF = cmp $-1, %ax。0 と比較すると借りと補助キャリー。ax は残る。iostat 0x4bea1d。
+    // Ref: SPEC-X86-INTEL-SDM (v093).
+    let run = |ax: u32| {
+        let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.set(Gpr(0).state(), ax);
+        env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 0);
+        env.backend
+            .mem
+            .write(VirtAddr(0x1000), &[0x66, 0x83, 0xF8, 0xFF])
+            .unwrap();
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+        assert_eq!(out, Outcome::StepLimit { eip: 0x1004 });
+        assert_eq!(env.backend.get(Gpr(0).state()), ax);
+        env.backend.get(polyisa_guest_x86::sem::eflags_ref())
+    };
+    assert_eq!(run(0), 0x11);
+    assert_eq!(run(0xFFFF), 0x44);
+}
+
+#[test]
 fn run_movsx_r64_m16_sibd32() {
     // 48 0F BF 84 00 00 00 00 00 = movswq (%rax,%rax,1), %rax。0xffff は -1。iostat 0x4be9fb。
     // Ref: SPEC-X86-INTEL-SDM (v093).
