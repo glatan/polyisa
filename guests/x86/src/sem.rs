@@ -17407,6 +17407,51 @@ pub fn or_m32_r32_sib<B: Backend>(b: &mut B, base: Gpr, idx: Gpr, shift: u32, sr
     Ok(())
 }
 
+/// OR m32, r32 [index*scale+disp32] (09 /r SIB mod=00、base なし)。
+pub fn or_m32_r32_sibabs<B: Backend>(
+    b: &mut B,
+    idx: Gpr,
+    shift: u32,
+    disp: i32,
+    src: Gpr,
+) -> Flow<B> {
+    let addr = sib_addr_scaled_abs(b, shift, disp, idx);
+    let x: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let y = read(b, src);
+    let v = b.or::<W32>(x, y);
+    b.store::<W32>(addr, v, DATA_WRITE)?;
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// OR m64, r64 [index*scale+disp32] (09 /r SIB mod=00、base なし, REX.W)。dd 0x4cde65 対応。
+pub fn or_m64_r64_sibabs<B: Backend>(
+    b: &mut B,
+    idx: Gpr,
+    shift: u32,
+    disp: i32,
+    src: Gpr,
+) -> Flow<B> {
+    let addr = sib_addr_scaled_abs(b, shift, disp, idx);
+    let x: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let y = read64(b, src);
+    let v = b.or::<W64>(x, y);
+    b.store::<W64>(addr, v, DATA_WRITE)?;
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// OR m64, r64 [disp32] (09 /r SIB mod=00、index なし, REX.W)。
+pub fn or_m64_r64_abs<B: Backend>(b: &mut B, disp: i32, src: Gpr) -> Flow<B> {
+    let addr = b.konst::<W64>(disp as i64 as u64);
+    let x: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let y = read64(b, src);
+    let v = b.or::<W64>(x, y);
+    b.store::<W64>(addr, v, DATA_WRITE)?;
+    update_logic_flags(b, v);
+    Ok(())
+}
+
 /// OR m64,r64 [base+index*scale] (09 /r SIB mod=00, REX.W)。
 pub fn or_m64_r64_sib<B: Backend>(b: &mut B, base: Gpr, idx: Gpr, shift: u32, src: Gpr) -> Flow<B> {
     let addr = sib_addr_scaled(b, shift, 0, base, idx);

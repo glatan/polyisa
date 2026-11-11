@@ -6209,6 +6209,20 @@ fn dispatch<B: Backend>(
                 sem::and_m32_r32_sib(b, sib_base(), sib_idx(), sib_shift(), reg())
             }
         }
+        Insn::OrM32R32Sibabs => {
+            // 09 /r SIB mod=00 base=101。dd 0x4cde65 の lock orq %rax, disp(,%rcx,8)。
+            if no_index() {
+                if rex_w {
+                    sem::or_m64_r64_abs(b, disp32(), reg())
+                } else {
+                    sem::or_m32_r32_abs(b, reg(), disp32() as u32)
+                }
+            } else if rex_w {
+                sem::or_m64_r64_sibabs(b, sib_idx(), sib_shift(), disp32(), reg())
+            } else {
+                sem::or_m32_r32_sibabs(b, sib_idx(), sib_shift(), disp32(), reg())
+            }
+        }
         Insn::OrM32R32Sib => {
             // 09 /r SIB mod=00 [base+index*scale] (24b)。src は reg フィールド.
             // SIB は最下位8。REX.B で base を拡張する。index=4 は基底だけ。seq 0x499151。

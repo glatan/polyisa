@@ -2180,6 +2180,15 @@ pub fn build_model() -> polyisa_isadl::Model {
             "or [r/m+sib+disp32], r32",
             "alu",
         ),
+        // OR m32/m64, r32/r64 [index*scale+disp32] (09 /r SIB mod=00 base=直接番地)。dd 0x4cde65 対応.
+        (
+            "or_m32_r32_sibabs",
+            "D32",
+            "00001001 00...100 ........ ................................",
+            vec![wc("d32_base", WhereOp::Eq, 5)],
+            "or [r/m+sib+disp32], r32",
+            "alu",
+        ),
         // ADD m32,r32 [index*scale+disp32] (01 /r SIB mod=00 base=直接番地)。echo 0x4c08d1 対応.
         // CMP m32,r32 [index*scale+disp32] (39 /r SIB mod=00 base=直接番地)。id 0x4bfd44 対応.
         (
