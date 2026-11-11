@@ -2147,6 +2147,15 @@ pub fn build_model() -> polyisa_isadl::Model {
             "or r32, [r/m+sib]",
             "alu",
         ),
+        // OR r32/r64, [index*scale+disp32] (0B /r SIB mod=00 base=直接番地)。cryptpw 0x4bb2e0 対応。
+        (
+            "or_r_sibabs",
+            "D32",
+            "00001011 00...100 ........ ................................",
+            vec![wc("d32_base", WhereOp::Eq, 5)],
+            "or r32, [sib+disp32]",
+            "alu",
+        ),
         (
             "mov_eax_sib",
             "N8",

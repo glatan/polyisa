@@ -85,7 +85,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数117件。
-        assert_eq!(INSNS.len(), 750);
+        assert_eq!(INSNS.len(), 751);
     }
 
     #[test]
@@ -511,6 +511,7 @@ mod tests {
         // sed 0x5be0c9 対応.
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x0B0424, 24), Some(Insn::OrRSib));
+        assert_eq!(decode(0x0B1C9500200000, 56), Some(Insn::OrRSibabs));
         assert_eq!(decode(0x0B0424, 16), None);
         // CMP m32,r32 SIB [base+index*scale] (39 /r mod=00)。paste 0x5ad26b 対応.
         // 44 39 2C 24 は REX.R 剥がし済み.

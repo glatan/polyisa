@@ -6162,6 +6162,20 @@ fn dispatch<B: Backend>(
                 sem::or_r32_sib(b, reg(), sib_base(), sib_idx(), sib_shift())
             }
         }
+        Insn::OrRSibabs => {
+            // 0B /r SIB mod=00 base=101。cryptpw 0x4bb2e0 の or r11d, [rdx*4+disp32]。
+            if no_index() {
+                if rex_w {
+                    sem::or_r64_abs(b, reg(), imm32())
+                } else {
+                    sem::or_r32_abs(b, reg(), imm32())
+                }
+            } else if rex_w {
+                sem::or_r64_sibabs(b, reg(), sib_idx(), sib_shift(), disp32())
+            } else {
+                sem::or_r32_sibabs(b, reg(), sib_idx(), sib_shift(), disp32())
+            }
+        }
         Insn::AddRSibabs => {
             // 03 /r mod=00 SIB 直接番地 (7B)。disp32 は最下位32 LE。
             // no_index は [disp32]、索引ありは [idx*scale+disp32].
@@ -8866,6 +8880,7 @@ fn dispatch<B: Backend>(
             | Insn::OrRMemnd
             | Insn::OrRMem8
             | Insn::OrRMem32
+            | Insn::OrRSibabs
             | Insn::MovEaxMem8
             | Insn::MovEaxMemnd
             | Insn::MovEaxMem32
@@ -8914,7 +8929,7 @@ fn dispatch<B: Backend>(
                         | Insn::MovsxdSibd
                         | Insn::MovsxdSibd32
                 ))
-                || (rex_w && matches!(insn, Insn::RolRm32Cl | Insn::ImulRSibabs))
+                || (rex_w && matches!(insn, Insn::RolRm32Cl | Insn::ImulRSibabs | Insn::OrRSibabs))
                 || (has66 && matches!(insn, Insn::XorRm32 | Insn::RolRm32Imm8));
             if !skip {
                 sem::clear_hi(b, d);
