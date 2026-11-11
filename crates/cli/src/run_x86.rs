@@ -2161,6 +2161,20 @@ fn dispatch<B: Backend>(
                 sem::add_m32_r32_sibabs(b, sib_idx(), sib_shift(), disp32(), reg())
             }
         }
+        Insn::AddM32R32Sibd32 => {
+            // 01 /r SIB mod=10 [base+index*scale+disp32]。basename 0x48995c 対応.
+            if no_index() {
+                if rex_w {
+                    sem::add_m64_r64_mem32(b, sib_base(), disp32(), reg())
+                } else {
+                    sem::add_m32_r32_mem32(b, sib_base(), disp32(), reg())
+                }
+            } else if rex_w {
+                sem::add_m64_r64_sibd32(b, sib_base(), sib_idx(), sib_shift(), disp32(), reg())
+            } else {
+                sem::add_m32_r32_sibd32(b, sib_base(), sib_idx(), sib_shift(), disp32(), reg())
+            }
+        }
         Insn::AddM32R32Sibd => {
             // 01 /r SIB mod=01 [base+index*scale+disp8] (32b)。src は reg フィールド.
             // SIB は (word>>8) 下位8、disp は最下位8.
