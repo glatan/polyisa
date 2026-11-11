@@ -53,6 +53,7 @@
 - mprotect
 - munmap
 - newfstatat
+- open
 - openat
 - pipe2
 - prlimit64

@@ -76,7 +76,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数117件。
-        assert_eq!(INSNS.len(), 632);
+        assert_eq!(INSNS.len(), 647);
     }
 
     #[test]
@@ -84,6 +84,8 @@ mod tests {
         // 命令語はビット配置から手で組み立てる。Ref: SPEC-X86-INTEL-SDM。
         assert_eq!(decode(0x90, 8), Some(Insn::Nop));
         assert_eq!(decode(0xF4, 8), Some(Insn::Hlt));
+        assert_eq!(decode(0xFC, 8), Some(Insn::Cld));
+        assert_eq!(decode(0xFD, 8), Some(Insn::Std));
         assert_eq!(decode(0x98, 8), Some(Insn::Cwde));
         // CDQ/CQO (0x99)。od 0x5acde6 対応.
         // Ref: SPEC-X86-INTEL-SDM (v093).
@@ -379,7 +381,48 @@ mod tests {
         assert_eq!(decode(0x803F2D, 24), Some(Insn::CmpRm8ImmMemnd));
         assert_eq!(decode(0x6AFD, 16), Some(Insn::PushImm8));
         assert_eq!(decode(0xFF9578FFFFFF, 48), Some(Insn::CallRMem32));
+        // FF 14 E5 40 15 4E 00: CALL [disp32+index*8]。true 0x403f86 対応.
+        // Ref: SPEC-X86-INTEL-SDM.
+        assert_eq!(decode(0xFF14E540154E00, 56), Some(Insn::CallRSibabs));
+        assert_eq!(decode(0xFF14E540154E00, 24), None);
         assert_eq!(decode(0xFF14F7, 24), Some(Insn::CallRSib));
+        // 0F B7 BC 2D C0 A2 4D 00: MOVZX r32,m16 SIB+disp32。echo 0x4c05ba 対応.
+        // Ref: SPEC-X86-INTEL-SDM.
+        assert_eq!(
+            decode(0x0FB7BC2DC0A24D00, 64),
+            Some(Insn::MovzxR32M16Sibd32)
+        );
+        assert_eq!(decode(0x0FB7BC2DC0A24D00, 56), None);
+        // FF 85 98 FA FF FF: INC m32 [base+disp32]。uname 0x4b3c4a 対応.
+        assert_eq!(decode(0xFF8598FAFFFF, 48), Some(Insn::IncRmMem32));
+        // 0F BE 82 A0 A2 4D 00: MOVSX r32,m8 [base+disp32]。echo 0x4c00d6 対応.
+        // Ref: SPEC-X86-INTEL-SDM.
+        assert_eq!(decode(0x0FBE82A0A24D00, 56), Some(Insn::MovsxR32M8Mem32));
+        assert_eq!(decode(0x0FBE82A0A24D00, 48), None);
+        // FF 24 F5 28 91 4E 00: JMP [disp32+index*8]。uname 0x4d05e8 対応.
+        assert_eq!(decode(0xFF24F528914E00, 56), Some(Insn::JmpRSibabs));
+        // 01 14 ED 90 25 71 00: ADD m32,r32 [disp32+index*8]。echo 0x4c08d1 対応.
+        // Ref: SPEC-X86-INTEL-SDM.
+        assert_eq!(decode(0x0114ED90257100, 56), Some(Insn::AddM32R32Sibabs));
+        // 39 2C D5 10 24 71 00: CMP m32,r32 [disp32+index*8]。id 0x4bfd44 対応.
+        assert_eq!(decode(0x392CD510247100, 56), Some(Insn::CmpM32R32Sibabs));
+        // 03 BC 24 E0 00 00 00: ADD r64, [base+disp32] SIB。id 0x4d31d6 対応.
+        assert_eq!(decode(0x03BC24E0000000, 56), Some(Insn::AddRSibd32));
+        assert_eq!(decode(0x03BC24E0000000, 32), None);
+        assert_eq!(decode(0x392CD510247100, 32), None);
+        assert_eq!(decode(0x0114ED90257100, 32), None);
+        // 83 3C C5 90 25 71 00 00: CMP m64,imm8 [disp32+index*8]。id 0x4c0a78 対応.
+        assert_eq!(decode(0x833CC59025710000, 64), Some(Insn::CmpRmImm8Sibabs));
+        assert_eq!(decode(0x833CC59025710000, 32), None);
+        // 81 65 20 FF 0F 00 00: AND m64,imm32 [base+disp8]。echo/id 0x4c08a2 対応.
+        // Ref: SPEC-X86-INTEL-SDM.
+        assert_eq!(decode(0x816520FF0F0000, 56), Some(Insn::AndRm32ImmMem8));
+        // F7 45 20 00 F0 FF FF: TEST m64,imm32 [base+disp8]。echo 0x4bfb84 対応.
+        assert_eq!(decode(0xF7452000F0FFFF, 56), Some(Insn::TestRm32ImmMem8));
+        assert_eq!(decode(0xF7452000F0FFFF, 48), None);
+        assert_eq!(decode(0x816520FF0F0000, 48), None);
+        assert_eq!(decode(0xFF24F528914E00, 24), None);
+        assert_eq!(decode(0xFF8598FAFFFF, 40), None);
         // JMP [base+disp8] (FF /4 mod=01)。seq の停止点 0x47e635 に対応.
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0xFF6018, 24), Some(Insn::JmpRMem8));
@@ -510,6 +553,11 @@ mod tests {
         assert_eq!(decode(0xC7042410000000, 56), Some(Insn::MovRmImmSib));
         assert_eq!(
             decode(0xC704251406000002000000, 88),
+            Some(Insn::MovRmImmSibabs)
+        );
+        // C7 04 CD + disp32 + imm32: MOV [disp32+index*8],imm32。echo/id 0x4bfc0e 対応.
+        assert_eq!(
+            decode(0xC704CDC023710000000000, 88),
             Some(Insn::MovRmImmSibabs)
         );
         assert_eq!(decode(0x85D2, 16), Some(Insn::TestRm32));
@@ -1135,6 +1183,10 @@ mod tests {
         assert_eq!(decode(0x80BD50FBFFFF20, 48), None);
         // CMP m32,r32 SIB+disp8 no_index (39 mod=01)。
         // Ref: SPEC-X86-INTEL-SDM (v093).
+        // 39 84 24 88 00 00 00: CMP m64, r64 SIB+disp32。true 0x4bed0c 対応.
+        // Ref: SPEC-X86-INTEL-SDM.
+        assert_eq!(decode(0x39842488000000, 56), Some(Insn::CmpM32R32Sibd32));
+        assert_eq!(decode(0x39842488000000, 32), None);
         assert_eq!(decode(0x39542414, 32), Some(Insn::CmpM32R32Sibd));
         assert_eq!(decode(0x39542414, 24), None);
         // MOVSX r32,m8 mod=01 [base+disp8] (0F BE /r)。
@@ -1147,6 +1199,10 @@ mod tests {
         assert_eq!(decode(0x83045101, 24), None);
         // CMP m32,imm8 SIB mod=01 no_index (83 /7 + SIB + disp8 + imm8)。
         // Ref: SPEC-X86-INTEL-SDM (v093).
+        // 83 BC 24 D8 00 00 00 00: CMP m64,imm8 SIB+disp32。true 0x4bed16 対応.
+        // Ref: SPEC-X86-INTEL-SDM.
+        assert_eq!(decode(0x83BC24D800000000, 64), Some(Insn::CmpRmImm8Sibd32));
+        assert_eq!(decode(0x83BC24D800000000, 56), None);
         assert_eq!(decode(0x837C241400, 40), Some(Insn::CmpRmImm8Sibd));
         assert_eq!(decode(0x837C241400, 32), None);
         // CMP m64,imm8 SIB+disp8 indexed (83 /7 + SIB + disp8 + imm8)。48 83 7C C1 F8 00 は REX 剥がし済み.

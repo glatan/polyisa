@@ -138,6 +138,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         // HLT (F4)。ユーザーモードでは特権例外になるが、glibc の abort は
         // 続けて exit を置く。ここでは 1 バイト進めてその後続を実行する。
         ("hlt", "F1", "11110100", "hlt", "system"),
+        ("cld", "F1", "11111100", "cld", "alu"),
+        ("std", "F1", "11111101", "std", "alu"),
         // BSWAP r32/r64 (0F C8+rd)。REX.B で拡張、REX.W で64bit。F3/66 剥がし済み.
         ("bswap", "F1", "00001111 11001...", "bswap", "alu"),
         ("inc_eax", "F1", "01000000", "inc eax", "alu"),
@@ -379,8 +381,24 @@ pub fn build_model() -> polyisa_isadl::Model {
         // CMP m32,imm8 SIB mod=01 [base+index*scale+disp8] (83 /7)。seq 10 の停止点 0x45bbd8 対応.
         // index 固定を外し dispatch で no_index/索引を切替 (AND/OR/ADD sibd と同型)。
         ("cmp_rm_imm8_sibd", "F1", "10000011 01111100 ........ ........ ........", "cmp r/m, {imm}", "alu"),
+        // CMP m32/m64,imm8 SIB+disp32 (83 /7 mod=10)。true 0x4bed16 対応.
+        (
+            "cmp_rm_imm8_sibd32",
+            "F1",
+            "10000011 10111100 ........ ................................ ........",
+            "cmp r/m, {imm}",
+            "alu",
+        ),
         // CMP m32,imm8 SIB mod=00 (83 /7、no_index non-abs)。index=100 固定.
         ("cmp_rm_imm8_sib", "F1", "10000011 00111100 ........ ........", "cmp r/m, {imm}", "alu"),
+        // CMP m,imm8 [index*scale+disp32] (83 /7 SIB mod=00 base=直接番地)。id 0x4c0a78 対応.
+        (
+            "cmp_rm_imm8_sibabs",
+            "F1",
+            "10000011 00111100 .....101 ................................ ........",
+            "cmp r/m, {imm}",
+            "alu",
+        ),
         // CMP r32/r64, m32/m64 SIB mod=00 [base+index*scale] (3B /r)。
         ("cmp_r_sib", "F1", "00111011 00...100 ........", "cmp r, m", "alu"),
         // XADD r32, m32 [base] (0F C1 mod=00)。LOCK 接頭辞は実行側で無視する.
@@ -518,6 +536,14 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("cmp_rm32_imm_memnd", "MR", "10000001 00111... ................................", "cmp r/m32, {imm}", "alu"),
         // OR m32,imm32 mod=01 [base+disp8] (81 /1)。SIB は fetch で弾く.
         ("or_rm32_imm_mem8", "M8", "10000001 01001... ........ ................................", "or r/m32, {imm}", "alu"),
+        // AND m32/m64,imm32 mod=01 [base+disp8] (81 /4)。echo/id 0x4c08a2 対応.
+        (
+            "and_rm32_imm_mem8",
+            "M8",
+            "10000001 01100... ........ ................................",
+            "and r/m32, {imm}",
+            "alu",
+        ),
         // CMP m32,imm32 mod=01 [base+disp8] (81 /7)。SIBなし.
         (
             "cmp_rm32_imm_mem8",
@@ -541,7 +567,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         // C7 /0 SIB+disp32+imm32 (11バイト)。REX.W で64切替は dispatch で.
         ("mov_rm_imm_sibd32", "F1", "11000111 10...100 ........ ................................ ................................", "mov r/m, {imm}", "alu"),
         // C7 /0 SIB 直接番地+disp32+imm32 (11バイト、mod=00)。idx=100・base=101 固定以外は fetch で弾く.
-        ("mov_rm_imm_sibabs", "F1", "11000111 00000100 ..100101 ................................ ................................", "mov r/m, {imm}", "alu"),
+        // index は任意。base=101 が直接番地。echo/id 0x4bfc0e は RCX*8+disp32.
+        ("mov_rm_imm_sibabs", "F1", "11000111 00000100 .....101 ................................ ................................", "mov r/m, {imm}", "alu"),
         // C7 /0 SIB mod=00 [base+index*scale]+imm32 (7バイト)。SIB 直接番地なし.
         ("mov_rm_imm_sib", "F1", "11000111 00...100 ........ ................................", "mov r/m, {imm}", "alu"),
         // C7 /0 SIB mod=01 [base+index*scale+disp8]+imm32 (8バイト).
@@ -715,6 +742,14 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("test_m16_imm_rip", "F1", "11110111 00000101 ................................ ................", "test m16, {imm}", "alu"),
         // TEST m32,imm32 mod=00 [base] (F7 /0)。tac 0x5b0ca8 対応.
         ("test_rm32_imm_memnd", "F1", "11110111 00000... ................................", "test m32, {imm}", "alu"),
+        // TEST m32/m64,imm32 mod=01 [base+disp8] (F7 /0)。echo 0x4bfb84 対応.
+        (
+            "test_rm32_imm_mem8",
+            "F1",
+            "11110111 01000... ........ ................................",
+            "test m32, {imm}",
+            "alu",
+        ),
         ("not_rm32", "F1", "11110111 11010...", "not r/m32", "alu"),
         ("neg_rm32", "F1", "11110111 11011...", "neg r/m32", "alu"),
         ("test_rm8_imm", "F1", "11110110 11000... ........", "test r/m8, {imm}", "alu"),
@@ -1140,6 +1175,24 @@ pub fn build_model() -> polyisa_isadl::Model {
             "cmp r32, [r/m+sib+disp32]",
             "alu",
         ),
+        // ADD r32/r64, m32/m64 SIB+disp32 (03 /r mod=10)。id 0x4d31d6 対応.
+        (
+            "add_r_sibd32",
+            "D32",
+            "00000011 10...100 ........ ................................",
+            vec![],
+            "add r, m",
+            "alu",
+        ),
+        // CMP m32/m64, r32/r64 SIB+disp32 (39 /r mod=10)。true 0x4bed0c 対応.
+        (
+            "cmp_m32_r32_sibd32",
+            "D32",
+            "00111001 10...100 ........ ................................",
+            vec![],
+            "cmp m, r",
+            "alu",
+        ),
         (
             "and_r_memnd",
             "MR",
@@ -1162,6 +1215,15 @@ pub fn build_model() -> polyisa_isadl::Model {
             "00100011 10...... ................................",
             vec![wc("m32_rm", WhereOp::Ne, 4)],
             "and r32, m32",
+            "alu",
+        ),
+        // INC m32 mod=10 [base+disp32] (FF /0)。uname 0x4b3c4a 対応.
+        (
+            "inc_rm_mem32",
+            "M32",
+            "11111111 10000... ................................",
+            vec![wc("m32_rm", WhereOp::Ne, 4)],
+            "inc r/m",
             "alu",
         ),
         (
@@ -1265,6 +1327,15 @@ pub fn build_model() -> polyisa_isadl::Model {
             "M8",
             "00001111 10111110 01...... ........",
             vec![wc("m8_rm", WhereOp::Ne, 4)],
+            "movsx r32, m8",
+            "load",
+        ),
+        // MOVSX r32,m8 mod=10 [base+disp32] (0F BE)。echo 0x4c00d6 対応.
+        (
+            "movsx_r32_m8_mem32",
+            "M32",
+            "00001111 10111110 10...... ................................",
+            vec![wc("m32_rm", WhereOp::Ne, 4)],
             "movsx r32, m8",
             "load",
         ),
@@ -1502,6 +1573,15 @@ pub fn build_model() -> polyisa_isadl::Model {
             "movzx r32, m16",
             "load",
         ),
+        // MOVZX r32,m16 SIB+disp32 (0F B7 mod=10)。echo 0x4c05ba 対応.
+        (
+            "movzx_r32_m16_sibd32",
+            "D32",
+            "00001111 10110111 10...100 ........ ................................",
+            vec![],
+            "movzx r32, m16",
+            "load",
+        ),
         (
             "movzx_r32_m16_sib",
             "N8",
@@ -1734,6 +1814,41 @@ pub fn build_model() -> polyisa_isadl::Model {
             vec![],
             "or [r/m+sib+disp32], r32",
             "alu",
+        ),
+        // ADD m32,r32 [index*scale+disp32] (01 /r SIB mod=00 base=直接番地)。echo 0x4c08d1 対応.
+        // CMP m32,r32 [index*scale+disp32] (39 /r SIB mod=00 base=直接番地)。id 0x4bfd44 対応.
+        (
+            "cmp_m32_r32_sibabs",
+            "D32",
+            "00111001 00...100 ........ ................................",
+            vec![wc("d32_base", WhereOp::Eq, 5)],
+            "cmp m, r",
+            "alu",
+        ),
+        (
+            "add_m32_r32_sibabs",
+            "D32",
+            "00000001 00...100 ........ ................................",
+            vec![wc("d32_base", WhereOp::Eq, 5)],
+            "add m, r",
+            "alu",
+        ),
+        (
+            "call_r_sibabs",
+            "D32",
+            "11111111 00010100 ........ ................................",
+            vec![wc("d32_base", WhereOp::Eq, 5)],
+            "call r/m64",
+            "jump",
+        ),
+        // JMP [index*scale+disp32] (FF /4 SIB mod=00 base=直接番地)。uname 0x4d05e8 対応.
+        (
+            "jmp_r_sibabs",
+            "D32",
+            "11111111 00100100 ........ ................................",
+            vec![wc("d32_base", WhereOp::Eq, 5)],
+            "jmp r/m64",
+            "jump",
         ),
         (
             "mov_eax_sibabs",

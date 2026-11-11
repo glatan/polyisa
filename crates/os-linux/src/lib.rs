@@ -98,6 +98,7 @@ pub mod x86_64 {
     pub const CLOCK_GETTIME: u64 = 228;
     pub const GETRANDOM: u64 = 318;
     pub const OPENAT: u64 = 257;
+    pub const OPEN: u64 = 2;
     // 段階2相当（ファイル操作）。
     pub const LSEEK: u64 = 8;
     pub const GETDENTS64: u64 = 217;
@@ -393,6 +394,7 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             x86_64::CLOCK_GETTIME => Some("clock_gettime"),
             x86_64::GETRANDOM => Some("getrandom"),
             x86_64::OPENAT => Some("openat"),
+            x86_64::OPEN => Some("open"),
             x86_64::LSEEK => Some("lseek"),
             x86_64::GETDENTS64 => Some("getdents64"),
             x86_64::GETCWD => Some("getcwd"),

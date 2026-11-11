@@ -158,6 +158,7 @@ fn syscall_numbers_match_uapi_x86_64() {
         ("__NR_write", polyisa_os_linux::x86_64::WRITE),
         ("__NR_close", polyisa_os_linux::x86_64::CLOSE),
         ("__NR_openat", polyisa_os_linux::x86_64::OPENAT),
+        ("__NR_open", polyisa_os_linux::x86_64::OPEN),
         ("__NR_mmap", polyisa_os_linux::x86_64::MMAP),
         ("__NR_mprotect", polyisa_os_linux::x86_64::MPROTECT),
         ("__NR_munmap", polyisa_os_linux::x86_64::MUNMAP),

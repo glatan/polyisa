@@ -60,3 +60,36 @@ fn list_excludes_only_df() {
     assert_eq!(target.len(), 401);
     assert!(target.iter().all(|name| *name != "df"));
 }
+
+#[test]
+fn true_echo_uname_id_match() {
+    let path = busybox();
+    let path = path.to_str().expect("utf-8 path");
+    let pinned: &[(&[&str], &[u8])] = &[
+        (
+            &["uname", "-a"],
+            b"Linux localhost 6.0.0 #1 x86_64 GNU/Linux\n",
+        ),
+        (&["id"], b"uid=0(root) gid=0(root) groups=0(root)\n"),
+    ];
+    for (args, expect) in pinned {
+        let argv: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
+        let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)
+            .unwrap_or_else(|e| panic!("{}: {e}", args.join(" ")));
+        assert_eq!(code, 0, "{}", args.join(" "));
+        assert_eq!(out.as_slice(), *expect, "{}", args.join(" "));
+    }
+    for args in [&["true"][..], &["echo", "hi"][..]] {
+        let argv: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
+        let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)
+            .unwrap_or_else(|e| panic!("{}: {e}", args.join(" ")));
+        let host = Command::new(path)
+            .args(args)
+            .env_clear()
+            .output()
+            .expect("host busybox");
+        assert!(host.status.success(), "{}", args.join(" "));
+        assert_eq!(code, 0, "{}", args.join(" "));
+        assert_eq!(out.as_slice(), host.stdout.as_slice(), "{}", args.join(" "));
+    }
+}
