@@ -85,7 +85,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数117件。
-        assert_eq!(INSNS.len(), 699);
+        assert_eq!(INSNS.len(), 700);
     }
 
     #[test]
@@ -413,6 +413,9 @@ mod tests {
         // 01 14 ED 90 25 71 00: ADD m32,r32 [disp32+index*8]。echo 0x4c08d1 対応.
         // Ref: SPEC-X86-INTEL-SDM.
         assert_eq!(decode(0x0114ED90257100, 56), Some(Insn::AddM32R32Sibabs));
+        // ADD m,r SIB mod=00。sort 0x4d2c0d の 01 3C E3。base=5 は直接番地なので別。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x013CE3, 24), Some(Insn::AddM32R32Sib));
         // 39 2C D5 10 24 71 00: CMP m32,r32 [disp32+index*8]。id 0x4bfd44 対応.
         assert_eq!(decode(0x392CD510247100, 56), Some(Insn::CmpM32R32Sibabs));
         // 03 BC 24 E0 00 00 00: ADD r64, [base+disp32] SIB。id 0x4d31d6 対応.

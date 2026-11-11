@@ -2114,6 +2114,14 @@ pub fn build_model() -> polyisa_isadl::Model {
             "alu",
         ),
         (
+            "add_m32_r32_sib",
+            "N8",
+            "00000001 00...100 ........",
+            vec![wc("n8_base", WhereOp::Ne, 5)],
+            "add m, r",
+            "alu",
+        ),
+        (
             "call_r_sibabs",
             "D32",
             "11111111 00010100 ........ ................................",

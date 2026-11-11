@@ -2379,6 +2379,20 @@ fn dispatch<B: Backend>(
                 sem::add_m32_r32_sibabs(b, sib_idx(), sib_shift(), disp32(), reg())
             }
         }
+        Insn::AddM32R32Sib => {
+            // 01 /r SIB mod=00 [base+index*scale]。sort 0x4d2c0d の addq %r15, (%rbx,%r12,8)。
+            if no_index() {
+                if rex_w {
+                    sem::add_m64_r64_memnd(b, sib_base(), reg())
+                } else {
+                    sem::add_m32_r32_memnd(b, sib_base(), reg())
+                }
+            } else if rex_w {
+                sem::add_m64_r64_sib(b, sib_base(), sib_idx(), sib_shift(), reg())
+            } else {
+                sem::add_m32_r32_sib(b, sib_base(), sib_idx(), sib_shift(), reg())
+            }
+        }
         Insn::AddM32R32Sibd32 => {
             // 01 /r SIB mod=10 [base+index*scale+disp32]。basename 0x48995c 対応.
             if no_index() {
