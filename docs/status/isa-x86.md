@@ -65,7 +65,7 @@
 | cvtsi2sd | cvtsi2sd_m32_mem8、cvtsi2sd_r64 | 真 | load |
 | cvttsd2si | cvttsd2si_r64 | 真 | load |
 | cwde | cwde | 真 | alu |
-| dec | dec_eax、dec_ebp、dec_ebx、dec_ecx、dec_edi、dec_edx、dec_esi、dec_esp、dec_rm、dec_rm_mem32、dec_rm_mem8、dec_rm_rip、dec_rm_sib、dec_rm_sibd | 真 | alu |
+| dec | dec_eax、dec_ebp、dec_ebx、dec_ecx、dec_edi、dec_edx、dec_esi、dec_esp、dec_r8、dec_rm、dec_rm_mem32、dec_rm_mem8、dec_rm_rip、dec_rm_sib、dec_rm_sibd | 真 | alu |
 | div | div_rm32、div_rm32_mem8、div_rm32_sib、div_rm32_sibd | 真 | div |
 | divsd | divsd | 真 | alu |
 | divsd | divsd_xmm_m64_rip | 真 | load |
@@ -89,7 +89,7 @@
 | imul | imul_r_imm、imul_r_imm8、imul_r_imm8_rip、imul_r_imm_sib、imul_r_imm_sibd、imul_r_rm | 真 | alu |
 | imul | imul_r_mem32、imul_r_mem8、imul_r_memnd、imul_r_rip、imul_r_sibd | 真 | load |
 | imul | imul_rm32 | 真 | mult |
-| inc | inc_eax、inc_ebp、inc_ebx、inc_ecx、inc_edi、inc_edx、inc_esi、inc_esp、inc_rm、inc_rm_mem32、inc_rm_mem8、inc_rm_memnd、inc_rm_rip、inc_rm_sib、inc_rm_sibd、inc_rm_sibd32 | 真 | alu |
+| inc | inc_eax、inc_ebp、inc_ebx、inc_ecx、inc_edi、inc_edx、inc_esi、inc_esp、inc_r8、inc_rm、inc_rm_mem32、inc_rm_mem8、inc_rm_memnd、inc_rm_rip、inc_rm_sib、inc_rm_sibd、inc_rm_sibd32 | 真 | alu |
 | int | int80 | 真 | system |
 | ja | ja、ja_rel32 | 真 | jump |
 | jae | jae、jae_rel32 | 真 | jump |

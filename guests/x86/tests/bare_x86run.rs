@@ -10173,6 +10173,39 @@ fn run_mov_r32_imm_clears_high() {
 }
 
 #[test]
+fn run_dec_r8_preserves_carry() {
+    // FE CA = dec %dl。1 は 0 になり、キャリーは残る。dc 0x40efa1。
+    // Ref: SPEC-X86-INTEL-SDM (v093).
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.set(Gpr(2).state(), 0xAB01);
+    env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 0x3);
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0xFE, 0xCA])
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x1002 });
+    assert_eq!(env.backend.get(Gpr(2).state()), 0xAB00);
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::eflags_ref()), 0x47);
+
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.set(Gpr(2).state(), 0x80);
+    env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 0x3);
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0xFE, 0xC2])
+        .unwrap();
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x1002 });
+    assert_eq!(env.backend.get(Gpr(2).state()), 0x81);
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 1, 1);
+}
+
+#[test]
 fn run_xchg_r8_swaps_bytes() {
     // 86 E9 = xchg %ch, %cl。86 D8 = xchg %bl, %al。フラグは残す。base64 0x4bd97a。
     // Ref: SPEC-X86-INTEL-SDM (v093).

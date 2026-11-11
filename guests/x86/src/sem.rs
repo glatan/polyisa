@@ -2045,6 +2045,42 @@ pub fn inc_eax<B: Backend>(b: &mut B) -> Flow<B> {
 }
 
 /// DEC r32。32ビットで包む。CF 以外の 5 旗を更新する（CF は保存）。
+/// DEC r8 (FE /1 mod=11)。CF は残し、残りの演算旗を 8 ビットで更新する。dc 0x40efa1 対応.
+pub fn dec_r8<B: Backend>(b: &mut B, rd: Gpr, high: bool) -> Flow<B> {
+    let cf_mask = b.konst::<W32>(FLAG_CF);
+    let all_flags = b.get(eflags_ref());
+    let saved_cf = b.and::<W32>(all_flags, cf_mask);
+    let x = read8(b, rd, high);
+    let one = b.konst::<W8>(1);
+    let v = b.sub::<W8>(x, one);
+    write8(b, rd, high, v);
+    update_sub_flags(b, x, one, v);
+    let f = b.get(eflags_ref());
+    let not_cf = b.konst::<W32>(!FLAG_CF);
+    let cleared = b.and::<W32>(f, not_cf);
+    let restored = b.or::<W32>(cleared, saved_cf);
+    b.set(eflags_ref(), restored);
+    Ok(())
+}
+
+/// INC r8 (FE /0 mod=11)。CF は残し、残りの演算旗を 8 ビットで更新する.
+pub fn inc_r8<B: Backend>(b: &mut B, rd: Gpr, high: bool) -> Flow<B> {
+    let cf_mask = b.konst::<W32>(FLAG_CF);
+    let all_flags = b.get(eflags_ref());
+    let saved_cf = b.and::<W32>(all_flags, cf_mask);
+    let x = read8(b, rd, high);
+    let one = b.konst::<W8>(1);
+    let v = b.add::<W8>(x, one);
+    write8(b, rd, high, v);
+    update_add_flags(b, x, one, v);
+    let f = b.get(eflags_ref());
+    let not_cf = b.konst::<W32>(!FLAG_CF);
+    let cleared = b.and::<W32>(f, not_cf);
+    let restored = b.or::<W32>(cleared, saved_cf);
+    b.set(eflags_ref(), restored);
+    Ok(())
+}
+
 pub fn dec_r32<B: Backend>(b: &mut B, rd: Gpr) -> Flow<B> {
     let cf_mask = b.konst::<W32>(FLAG_CF);
     let all_flags = b.get(eflags_ref());

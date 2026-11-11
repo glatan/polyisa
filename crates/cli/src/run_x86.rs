@@ -1309,6 +1309,17 @@ fn fetch_len(
         }
         // register-direct と ModRMメモリ (SIBなし) に対応するALU opcode。
         // SIB付き (rm==4) は未対応で None。mod=01は+1、mod=10は+4、mod=00 rm=5は+4。
+        0xFE => {
+            let s = second?;
+            let md = s >> 6;
+            let reg = (s >> 3) & 7;
+            // INC/DEC r8 (FE /0,/1 mod=11)。dc 0x40efa1 の FE CA。
+            if md == 3 && (reg == 0 || reg == 1) {
+                Some(2)
+            } else {
+                None
+            }
+        }
         0x29 | 0x31 | 0x21 | 0x11 | 0x19 | 0x86 | 0x87 => {
             let s = second?;
             let md = s >> 6;
@@ -1536,6 +1547,7 @@ pub fn run_mode(
                 | 0x1B
                 | 0x87
                 | 0x86
+                | 0xFE
                 | 0xFF
                 | 0x09
                 | 0x11
@@ -2419,6 +2431,29 @@ fn dispatch<B: Backend>(
             } else {
                 sem::add_rm32(b, rm(), reg())
             }
+        }
+        Insn::DecR8 => {
+            // FE /1 mod=11。dc 0x40efa1 の dec %dl。CF は残す。
+            let rm_f = modrm() & 7;
+            let (rd, high) = if rex != 0 {
+                (Gpr(rm_f | ((rex & 1) << 3)), false)
+            } else if rm_f < 4 {
+                (Gpr(rm_f), false)
+            } else {
+                (Gpr(rm_f - 4), true)
+            };
+            sem::dec_r8(b, rd, high)
+        }
+        Insn::IncR8 => {
+            let rm_f = modrm() & 7;
+            let (rd, high) = if rex != 0 {
+                (Gpr(rm_f | ((rex & 1) << 3)), false)
+            } else if rm_f < 4 {
+                (Gpr(rm_f), false)
+            } else {
+                (Gpr(rm_f - 4), true)
+            };
+            sem::inc_r8(b, rd, high)
         }
         Insn::XchgR8 => {
             // 86 /r mod=11。base64 0x4bd97a の xchg %ch, %cl。
