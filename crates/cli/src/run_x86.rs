@@ -640,6 +640,10 @@ fn fetch_len(
             if md == 3 {
                 Some(3)
             } else if rm == 4 {
+                if reg == 5 && md == 1 {
+                    // SUB m32,imm8 SIB+disp8。seq 0x4d0bfa の 83 6C 24 58 1C。5B.
+                    return Some(5);
+                }
                 // SIB 付き。mod=01 SIB+disp8+imm8 (5B) の /4 AND と /7 CMP と /1 OR と /0 ADD、
                 // mod=00 SIB+imm8 (4B) の /4 AND と /7 CMP、66 mod=00 SIB+imm8 (4B) の /0 ADD のみ.
                 let t = third?;
@@ -1915,6 +1919,8 @@ pub fn run_mode(
                     | Insn::AddM16ImmSib
                     // AND m16,imm8 SIB+disp8 (66 83 /4 mod=01).
                     | Insn::AndRmImm8Sibd
+                    // SUB m16,imm8 SIB+disp8 (66 83 /5 mod=01).
+                    | Insn::SubRmImm8Sibd
             )
         {
             return Outcome::Unimplemented {
@@ -4728,6 +4734,31 @@ fn dispatch<B: Backend>(
                 sem::sub_rm64_imm8_mem32(b, rm(), disp, imm)
             } else {
                 sem::sub_rm32_imm8_mem32(b, rm(), disp, imm)
+            }
+        }
+        Insn::SubRmImm8Sibd => {
+            // 83 /5 SIB mod=01 [base+disp8],imm8 (40b)。seq 0x4d0bfa の subl $0x1c, 0x58(%rsp)。
+            let sib_v = ((word >> 16) & 0xff) as u8;
+            let d8 = ((word >> 8) & 0xff) as u8 as i8;
+            let imm = (word & 0xff) as u8 as i8;
+            let shift = ((sib_v >> 6) & 3) as u32;
+            let idx_raw = (sib_v >> 3) & 7;
+            let idx = Gpr(idx_raw | (((rex >> 1) & 1) << 3));
+            let base = Gpr((sib_v & 7) | ((rex & 1) << 3));
+            if idx_raw == 4 && (rex >> 1) & 1 == 0 {
+                if has66 {
+                    sem::sub_m16_imm8_mem8(b, base, d8, imm)
+                } else if rex_w {
+                    sem::sub_rm64_imm8_mem8(b, base, d8, imm)
+                } else {
+                    sem::sub_rm32_imm8_mem8(b, base, d8, imm)
+                }
+            } else if has66 {
+                sem::sub_m16_imm8_sibd(b, base, idx, shift, d8, imm)
+            } else if rex_w {
+                sem::sub_rm64_imm8_sibd(b, base, idx, shift, d8, imm)
+            } else {
+                sem::sub_rm32_imm8_sibd(b, base, idx, shift, d8, imm)
             }
         }
         Insn::AndRmImm8Mem8 => {

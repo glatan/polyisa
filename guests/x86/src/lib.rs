@@ -85,7 +85,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数117件。
-        assert_eq!(INSNS.len(), 689);
+        assert_eq!(INSNS.len(), 690);
     }
 
     #[test]
@@ -786,6 +786,9 @@ mod tests {
         // FMUL m32 RIP (D8 /1)。seq 0x4d0bf4 の D8 0D FA 0F 00 00。
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0xD80DFA0F0000, 48), Some(Insn::FmulM32Rip));
+        // SUB m32,imm8 SIB+disp8 (83 /5)。seq 0x4d0bfa の 83 6C 24 58 1C。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x836C24581C, 40), Some(Insn::SubRmImm8Sibd));
         assert_eq!(decode(0x35_0000_00FF, 40), Some(Insn::XorImm));
         // シフト：SHL EAX,imm8 (C1 E0 ib)、SHR EAX,imm8 (C1 E8 ib)。
         // Ref: SPEC-X86-INTEL-SDM (v093).
