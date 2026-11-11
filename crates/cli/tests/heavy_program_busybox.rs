@@ -312,6 +312,11 @@ fn text_applets_match_host() {
     let dir_s = dir.to_str().expect("utf-8");
     let copied = dir.join("copied");
     let touched = dir.join("touched");
+    let trunc = dir.join("trunc");
+    std::fs::write(&trunc, b"abcdef").unwrap();
+    let trunc_s = trunc.to_str().expect("utf-8");
+    let installed = dir.join("installed");
+    let installed_s = installed.to_str().expect("utf-8");
     let copied_s = copied.to_str().expect("utf-8");
     let touched_s = touched.to_str().expect("utf-8");
     let link = dir.join("link");
@@ -375,6 +380,10 @@ fn text_applets_match_host() {
         &["hd", f],
         &["gzip", "-c", f],
         &["bzip2", "-c", f],
+        &["printenv"],
+        &["which", "true"],
+        &["install", "-m", "644", f, installed_s],
+        &["truncate", "-s", "2", trunc_s],
     ];
     for args in cases {
         let argv: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
