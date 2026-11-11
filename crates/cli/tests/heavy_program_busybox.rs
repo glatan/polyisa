@@ -286,3 +286,72 @@ fn seq_one_to_three_matches_host() {
     assert_eq!(code, 0);
     assert_eq!(out.as_slice(), host.stdout.as_slice());
 }
+
+#[test]
+fn text_applets_match_host() {
+    let path = busybox();
+    let path = path.to_str().expect("utf-8 path");
+    let dir = std::env::temp_dir().join(format!("polyisa-text-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir(&dir).unwrap();
+    let sub = dir.join("sub");
+    std::fs::create_dir(&sub).unwrap();
+    let file = dir.join("f");
+    let other = dir.join("g");
+    let tabs = dir.join("t");
+    let bin = dir.join("bin");
+    std::fs::write(&file, b"ab\ncd\nab\n").unwrap();
+    std::fs::write(&other, b"ab\nxx\n").unwrap();
+    std::fs::write(&tabs, b"hello world\n\thello\n").unwrap();
+    std::fs::write(&bin, b"abc\0def\n").unwrap();
+    std::fs::write(sub.join("f"), b"ab\ncd\nab\n").unwrap();
+    let f = file.to_str().expect("utf-8");
+    let g = other.to_str().expect("utf-8");
+    let t = tabs.to_str().expect("utf-8");
+    let binf = bin.to_str().expect("utf-8");
+    let dir_s = dir.to_str().expect("utf-8");
+    let cases: &[&[&str]] = &[
+        &["cat", f],
+        &["head", "-n", "2", f],
+        &["tail", "-n", "1", f],
+        &["uniq", f],
+        &["cut", "-c1", f],
+        &["printf", "%s\n", "hi"],
+        &["expr", "1", "+", "2"],
+        &["rev", f],
+        &["nl", f],
+        &["paste", f, g],
+        &["comm", f, g],
+        &["expand", t],
+        &["fold", "-w", "4", t],
+        &["tac", f],
+        &["cksum", f],
+        &["sum", f],
+        &["base64", f],
+        &["strings", binf],
+        &["md5sum", f],
+        &["sha256sum", f],
+        &["hexdump", "-C", f],
+        &["find", dir_s, "-name", "f"],
+        &["test", "-f", f],
+        &["cmp", f, f],
+    ];
+    for args in cases {
+        let argv: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
+        let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)
+            .unwrap_or_else(|e| panic!("{}: {e}", args.join(" ")));
+        let host = Command::new(path)
+            .args(*args)
+            .env_clear()
+            .output()
+            .unwrap_or_else(|e| panic!("host {}: {e}", args[0]));
+        assert_eq!(
+            code,
+            host.status.code().unwrap_or(1) as u64,
+            "{}",
+            args.join(" ")
+        );
+        assert_eq!(out.as_slice(), host.stdout.as_slice(), "{}", args.join(" "));
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
