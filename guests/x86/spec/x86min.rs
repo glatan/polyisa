@@ -1509,6 +1509,14 @@ pub fn build_model() -> polyisa_isadl::Model {
             "alu",
         ),
         (
+            "fstp_m80_memnd",
+            "MR",
+            "11011011 00111...",
+            vec![wc("mr_rm", WhereOp::Ne, 4), wc("mr_rm", WhereOp::Ne, 5)],
+            "fstp m80",
+            "alu",
+        ),
+        (
             "fstp_st",
             "F1",
             "11011101 11011...",

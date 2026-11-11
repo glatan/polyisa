@@ -10699,6 +10699,18 @@ pub fn fld_m64_memnd<B: Backend>(b: &mut B, base: Gpr) -> Flow<B> {
     push_f64(b, bits)
 }
 
+/// FSTP m80 [base] (DB /7 mod=00)。仮数 8 バイトと指数 2 バイトを書いて捨てる。seq 0x4d0725 対応.
+pub fn fstp_m80_memnd<B: Backend>(b: &mut B, base: Gpr) -> Flow<B> {
+    let top = b.get(top_ref());
+    let (sig, exp) = read_st(b, top);
+    let addr = read64(b, base);
+    b.store::<W64>(addr, sig, DATA_WRITE)?;
+    let eight = b.konst::<W64>(8);
+    let exp_addr = b.add::<W64>(addr, eight);
+    b.store::<W16>(exp_addr, exp, DATA_WRITE)?;
+    pop_st(b, top)
+}
+
 /// FLDS [disp32] (D9 /0 mod=00 rm=101、32ビット)。
 pub fn fld_m32_abs<B: Backend>(b: &mut B, addr32: u32) -> Flow<B> {
     let addr = b.konst::<W64>(addr32 as u64);

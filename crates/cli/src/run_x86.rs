@@ -846,7 +846,10 @@ fn fetch_len(
             let md = s >> 6;
             let reg = (s >> 3) & 7;
             let rm = s & 7;
-            if reg == 0 && md == 1 && rm == 4 {
+            if reg == 7 && md == 0 && rm != 4 && rm != 5 {
+                // FSTP m80 [base]。seq 0x4d0725 の DB 3F。
+                Some(2)
+            } else if reg == 0 && md == 1 && rm == 4 {
                 Some(4)
             } else {
                 None
@@ -3000,6 +3003,10 @@ fn dispatch<B: Backend>(
         Insn::FstpSt => {
             // DD D8+i。seq 0x4024ee の DD D8 は FSTP ST(0)。
             sem::fstp_st(b, (word & 7) as u8)
+        }
+        Insn::FstpM80Memnd => {
+            // DB /7 mod=00 [base]。seq 0x4d0725 の fstpt (%rdi)。
+            sem::fstp_m80_memnd(b, rm())
         }
         Insn::FldM64Memnd => {
             // DD /0 mod=00 [base]。seq 0x4d0723 の fldl (%rax)。
