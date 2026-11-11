@@ -94,3 +94,36 @@ fn nop_keeps_state() {
     env.step(sem::nop).unwrap();
     assert_eq!(g(&mut env, 1), 7);
 }
+
+#[test]
+fn bundle_runs_three_slots_until_branch() {
+    let mut env = env();
+    env.backend.set(Gpr(1).state(), 40);
+    env.backend.set(Gpr(2).state(), 2);
+    // 分岐がなければ 3 スロットとも実行する。
+    env.step(|b| {
+        sem::bundle(
+            b,
+            |b| sem::add(b, Gpr(3), Gpr(1), Gpr(2)),
+            |b| sem::add(b, Gpr(4), Gpr(1), Gpr(2)),
+            sem::nop,
+        )
+    })
+    .unwrap();
+    assert_eq!(g(&mut env, 3), 42);
+    assert_eq!(g(&mut env, 4), 42);
+    // 2 番目の分岐が成立すると、3 番目の add は走らない。
+    env.backend.set(Gpr(5).state(), 0);
+    env.step(|b| {
+        sem::bundle(
+            b,
+            |b| sem::add(b, Gpr(3), Gpr(1), Gpr(2)),
+            |b| sem::br(b, 0x2000),
+            |b| sem::add(b, Gpr(5), Gpr(1), Gpr(2)),
+        )
+    })
+    .unwrap();
+    assert_eq!(g(&mut env, 3), 42);
+    assert_eq!(env.backend.get(pc_ref()), 0x2000);
+    assert_eq!(g(&mut env, 5), 0);
+}

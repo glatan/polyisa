@@ -3,8 +3,9 @@
 //! IA-64 最小の命令意味論。バックエンドに対して総称的に書く.
 //!
 //! バンドル・述語実行・回転の最小形を確かめることが目的である。
-//! スロット分割・テンプレート・レジスタスタック・NaT/ALAT・
-//! 例外のスロット番号報告は本格実装で足す。
+//! 1 ステップで 3 スロットを順に実行し、分岐が成立したら残りを実行しない。
+//! 41ビットスロット・テンプレート・レジスタスタック・NaT/ALAT・
+//! 例外のスロット番号報告は試作に含まない。
 //!
 //! 出典は SPEC-IA64-SDM Rev 2.3 (2010-05) である。
 //! Ref: SPEC-IA64-SDM (Rev 2.3).
@@ -42,6 +43,38 @@ fn pr_base() -> usize {
 
 fn rrb_ref() -> StateRef<W64> {
     StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, rrb))
+}
+
+fn taken_ref() -> StateRef<W64> {
+    StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, taken))
+}
+
+fn not_taken<B: Backend>(b: &mut B) -> B::B {
+    let t: B::V<W64> = b.get(taken_ref());
+    let zero = b.konst::<W64>(0);
+    b.cmp::<W64>(Cmp::Eq, t, zero)
+}
+
+/// 3 スロットを 1 ステップで順に実行する。分岐が成立したら残りは実行しない。
+pub fn bundle<B: Backend, F0, F1, F2>(b: &mut B, s0: F0, s1: F1, s2: F2) -> Flow<B>
+where
+    F0: FnOnce(&mut B) -> Flow<B>,
+    F1: FnOnce(&mut B) -> Flow<B>,
+    F2: FnOnce(&mut B) -> Flow<B>,
+{
+    let zero = b.konst::<W64>(0);
+    b.set(taken_ref(), zero);
+    s0(b)?;
+    let go1 = not_taken(b);
+    b.if_then(go1, |b| {
+        s1(b)?;
+        let go2 = not_taken(b);
+        b.if_then(go2, s2)?;
+        Ok(())
+    })?;
+    let clear = b.konst::<W64>(0);
+    b.set(taken_ref(), clear);
+    Ok(())
 }
 
 fn write_gpr<B: Backend>(b: &mut B, rd: Gpr, v: B::V<W64>) {
@@ -117,10 +150,12 @@ pub fn nop<B: Backend>(_b: &mut B) -> Flow<B> {
     Ok(())
 }
 
-/// BR。バンドルアドレスを進める（スロット番号報告は本格実装で足す）。
+/// BR。バンドルアドレスを進め、後続スロットを止める。
 pub fn br<B: Backend>(b: &mut B, target: u64) -> Flow<B> {
     let pc = StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, pc));
     let t = b.konst::<W64>(target);
     b.set(pc, t);
+    let one = b.konst::<W64>(1);
+    b.set(taken_ref(), one);
     Ok(())
 }

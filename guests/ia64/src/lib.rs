@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! IA-64 最小のゲスト ISA。段階2の試作であり、バンドル・述語・回転を確かめる。
 //!
-//! 整数演算のみ持つ。41ビットスロット・テンプレート割り当て・MLX・F系・B系・
-//! レジスタスタック・NaT/ALAT・バンドルアドレス報告は本格実装で足す。
+//! 整数演算と、3 スロットを 1 ステップで実行するバンドルを持つ。
+//! 成立した分岐より後のスロットは実行しない。41ビットスロット・テンプレート割り当て・
+//! MLX・F系・B系・レジスタスタック・NaT/ALAT・バンドルアドレス報告は試作に含まない。
 //! 回転は 8本の回転域と RRB（基底）で表す動的なレジスタ参照の最小形である。
 
 #![forbid(unsafe_code)]
@@ -36,6 +37,8 @@ pub struct CpuState {
     pub rrb: u64,
     /// プログラムカウンタ（バンドルアドレス）。
     pub pc: u64,
+    /// バンドル内で分岐が成立したら 1。後続スロットを実行しない。
+    pub taken: u64,
 }
 
 #[cfg(test)]
@@ -54,10 +57,9 @@ mod tests {
         assert_eq!(core::mem::offset_of!(CpuState, rot), 32 * 8);
         assert_eq!(core::mem::offset_of!(CpuState, pr), 32 * 8 + 8 * 8);
         assert_eq!(core::mem::offset_of!(CpuState, rrb), 32 * 8 + 8 * 8 + 8 * 8);
-        assert_eq!(
-            core::mem::offset_of!(CpuState, pc),
-            32 * 8 + 8 * 8 + 8 * 8 + 8
-        );
+        let pc = 32 * 8 + 8 * 8 + 8 * 8 + 8;
+        assert_eq!(core::mem::offset_of!(CpuState, pc), pc);
+        assert_eq!(core::mem::offset_of!(CpuState, taken), pc + 8);
     }
 
     #[test]
