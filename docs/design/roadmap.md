@@ -98,7 +98,7 @@ ISA のバージョンの表現と、最初の `exact` のタイミングモデ�
 
 | ID | 条件 | 判定 |
 |---|---|---|
-| S4-1 | x86-64 と i386 の busybox のコマンド群のテストが通る。対象のコマンドは、台帳で確認した busybox の `busybox --list` が示すアプレットとする。`df` の扱いは [ADR-0014](../adr/0014-statfs-number-table-only.md) による。 | 未整備 |
+| S4-1 | x86-64 と i386 の busybox のコマンド群のテストが通る。対象のコマンドは、台帳で確認した busybox の `busybox --list` が示すアプレットとする。`df` の扱いは [ADR-0014](../adr/0014-statfs-number-table-only.md) による。 | テスト：`heavy_program_busybox` |
 | S4-2 | この段階の終わりに共通の抽象を見直し、確定させる。 | 所有者 |
 
 ### 段階 5 以降

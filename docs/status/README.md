@@ -19,7 +19,7 @@
 | S2-2 | 所有者 |
 | S3-1 | テスト：`heavy_program_mips` |
 | S3-2 | テスト：`heavy_timing_r3000` |
-| S4-1 | 未整備 |
+| S4-1 | テスト：`heavy_program_busybox` |
 | S4-2 | 所有者 |
 | SC-1 | 所有者 |
 | SC-2 | 所有者 |

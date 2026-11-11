@@ -1,49 +1,62 @@
 // Copyright (c) polyisa contributors
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! BusyBox の一部アプレットの回帰（層7・program）。
+//! S4-1 の枠。台帳の BIN-DISTRO（BusyBox 1.35.0、静的、x86_64、musl）の
+//! `busybox --list` を読み、`df` を対象から外す。
 //!
-//! 対象は、コミットメッセージで exit 0 と記録され、再実行でも exit 0 だったものに限る。
-//! `true`、`echo hi`、`uname -a`、`id`。`df` は ADR-0014 により対象外。
-//! `sh -c 'echo hi'` は載せない。`_dl_get_origin` がパスの先頭を `/` とみなせず、
-//! glibc が exit 127 で止まる。
-//! この一覧はロードマップ S4-1 の `busybox --list` 全体ではない。
-//!
-//! バイナリは BusyBox 1.37.0 の静的リンク x86_64 である。台帳の BIN-DISTRO
-//! （1.35.0）では `true` が未実装命令で止まるため、このテストには使わない。
-//! リポジトリには含めない。ファイルが無いときは失敗する。
+//! ゲストは空の環境変数で起動する。ホスト側の起動も環境変数を空にする。
+//! アプレットの終了コードと標準出力は、このテストでは見ない。
+//! バイナリはリポジトリに含めない。ファイルが無いときは失敗する。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 fn busybox() -> PathBuf {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     p.pop();
     p.pop();
-    p.join(".testdata/busybox-1.37.0/busybox")
+    p.join(".testdata/bin-distro/busybox")
+}
+
+fn listed_applets(path: &Path) -> Vec<String> {
+    let out = Command::new(path)
+        .arg("--list")
+        .env_clear()
+        .output()
+        .expect("busybox --list");
+    assert!(
+        out.status.success(),
+        "busybox --list: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout)
+        .expect("busybox --list は utf-8")
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// `--list` の全件から `df` だけを外した対象。件数は切り詰めない。
+fn target_applets(listed: &[String]) -> Vec<&str> {
+    listed
+        .iter()
+        .map(String::as_str)
+        .filter(|name| *name != "df")
+        .collect()
 }
 
 #[test]
-fn recorded_applets_match_exit_and_output() {
+fn list_excludes_only_df() {
     let path = busybox();
     assert!(
         path.is_file(),
-        "BusyBox 1.37.0 の静的 x86_64 を {} に置く。リポジトリには含めない。台帳の BIN-DISTRO 1.35.0 は、この一覧が exit 0 にならない別バイナリである。",
+        "BIN-DISTRO の BusyBox 1.35.0 を {} に置く。リポジトリには含めない。",
         path.display()
     );
-    let path = path.to_str().expect("utf-8 path");
-    let cases: &[(&[&str], &[u8])] = &[
-        (&["true"], b""),
-        (&["echo", "hi"], b"hi\n"),
-        (
-            &["uname", "-a"],
-            b"Linux localhost 6.0.0 #1 x86_64 GNU/Linux\n",
-        ),
-        (&["id"], b"uid=0(root) gid=0(root) groups=0(root)\n"),
-    ];
-    for (args, expect) in cases {
-        let argv: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
-        let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)
-            .unwrap_or_else(|e| panic!("{}: {e}", args.join(" ")));
-        assert_eq!(code, 0, "{}", args.join(" "));
-        assert_eq!(out.as_slice(), *expect, "{}", args.join(" "));
-    }
+    let listed = listed_applets(&path);
+    assert_eq!(listed.len(), 402, "BIN-DISTRO 1.35.0 の --list は 402 件");
+    assert_eq!(listed.iter().filter(|name| *name == "df").count(), 1);
+    let target = target_applets(&listed);
+    assert_eq!(target.len(), 401);
+    assert!(target.iter().all(|name| *name != "df"));
 }
