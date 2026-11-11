@@ -18232,6 +18232,28 @@ pub fn or_m64_r64_sibd32<B: Backend>(
 }
 
 /// OR m32,r32 [base+index*scale] (09 /r SIB mod=00)。
+/// XOR m32,r32 [base] (31 /r mod=00)。
+pub fn xor_m32_r32_memnd<B: Backend>(b: &mut B, base: Gpr, src: Gpr) -> Flow<B> {
+    let addr = read64(b, base);
+    let x: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let y = read(b, src);
+    let v = b.xor::<W32>(x, y);
+    b.store::<W32>(addr, v, DATA_WRITE)?;
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// XOR m64,r64 [base] (REX.W 31 /r mod=00)。
+pub fn xor_m64_r64_memnd<B: Backend>(b: &mut B, base: Gpr, src: Gpr) -> Flow<B> {
+    let addr = read64(b, base);
+    let x: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let y = read64(b, src);
+    let v = b.xor::<W64>(x, y);
+    b.store::<W64>(addr, v, DATA_WRITE)?;
+    update_logic_flags(b, v);
+    Ok(())
+}
+
 /// AND m32,r32 [base] (21 /r SIB mod=00 no_index)。
 pub fn and_m32_r32_memnd<B: Backend>(b: &mut B, base: Gpr, src: Gpr) -> Flow<B> {
     let addr = read64(b, base);

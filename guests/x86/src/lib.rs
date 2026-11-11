@@ -85,7 +85,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数117件。
-        assert_eq!(INSNS.len(), 739);
+        assert_eq!(INSNS.len(), 740);
     }
 
     #[test]
@@ -609,6 +609,7 @@ mod tests {
         assert_eq!(decode(0x210c94, 24), Some(Insn::AndM32R32Sib));
         // AND (%rdi), %rax。chat 0x4d3473 の 21 07。
         assert_eq!(decode(0x2107, 16), Some(Insn::AndM32R32Memnd));
+        assert_eq!(decode(0x310A, 16), Some(Insn::XorM32R32Memnd));
         // SHL [base+disp8],imm8。bzip2 0x480237 の C1 67 70 08。
         assert_eq!(decode(0xC1677008, 32), Some(Insn::ShlM32Imm8Mem8));
         // ADD [SIB+disp8],imm32。bzip2 0x480dcd の 81 44 24 28 02 01 00 00。
@@ -827,7 +828,7 @@ mod tests {
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x31C0, 16), Some(Insn::XorRm32));
         assert_eq!(decode(0x31C9, 16), Some(Insn::XorRm32));
-        assert_eq!(decode(0x3108, 16), None);
+        assert_eq!(decode(0x3108, 16), Some(Insn::XorM32R32Memnd));
         assert_eq!(decode(0x2D_0000_0001, 40), Some(Insn::SubEax));
         assert_eq!(decode(0x29C8, 16), Some(Insn::SubRm32));
         assert_eq!(decode(0x29D8, 16), Some(Insn::SubRm32));

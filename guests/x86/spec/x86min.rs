@@ -521,6 +521,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("add_m32_r32_memnd", "MR", "00000001 00......", "add m32, r32", "alu"),
         // AND m32,r32 mod=00 [base] (21 /r)。chat 0x4d3473 の andq %rax, (%rdi)。
         ("and_m32_r32_memnd", "MR", "00100001 00......", "and m32, r32", "alu"),
+        // XOR m32,r32 mod=00 [base] (31 /r)。sha3sum 0x4b45b5 の xorq %rcx, (%rdx)。
+        ("xor_m32_r32_memnd", "MR", "00110001 00......", "xor m32, r32", "alu"),
         // ADD m32,r32 mod=01 [base+disp8] (01 /r)。
         ("add_m32_r32_mem8", "M8", "00000001 01...... ........", "add m32, r32", "alu"),
         // ADD m32,r32 mod=10 [base+disp32] (01 /r)。
