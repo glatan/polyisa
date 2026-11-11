@@ -85,7 +85,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数117件。
-        assert_eq!(INSNS.len(), 701);
+        assert_eq!(INSNS.len(), 702);
     }
 
     #[test]
@@ -240,6 +240,9 @@ mod tests {
         assert_eq!(decode(0x0F100433, 32), Some(Insn::MovupsLoadSib));
         assert_eq!(decode(0x0F110433, 32), Some(Insn::MovupsStoreSib));
         assert_eq!(decode(0x0F10443310, 40), Some(Insn::MovupsLoadSibd));
+        // MOVAPS xmm, [SIB+disp8] (0F 28)。diff -q 0x4a55eb の 0F 28 44 24 50。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x0F28442450, 40), Some(Insn::MovapsLoadSibd));
         assert_eq!(decode(0x0F2907, 24), Some(Insn::MovapsStoreMemnd));
         assert_eq!(decode(0x0F294310, 32), Some(Insn::MovapsStoreMem8));
         assert_eq!(decode(0x0FE707, 24), Some(Insn::MovntdqStoreMemnd));

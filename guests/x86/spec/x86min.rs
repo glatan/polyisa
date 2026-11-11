@@ -2839,6 +2839,14 @@ pub fn build_model() -> polyisa_isadl::Model {
             "load",
         ),
         (
+            "movaps_load_sibd",
+            "S8",
+            "00001111 00101000 01...100 ........ ........",
+            vec![],
+            "movaps xmm, [r/m+sib+disp8]",
+            "load",
+        ),
+        (
             "movups_store_sibd",
             "S8",
             "00001111 00010001 01...100 ........ ........",

@@ -6650,6 +6650,21 @@ fn dispatch<B: Backend>(
                 )
             }
         }
+        Insn::MovapsLoadSibd => {
+            // 0F 28 SIB mod=01。diff -q 0x4a55eb の movaps 0x50(%rsp), %xmm0。
+            if sib0f_no_index() {
+                sem::movups_load_mem8(b, xmm_reg_r(), sib0f_base(), disp8())
+            } else {
+                sem::movups_load_sibd(
+                    b,
+                    xmm_reg_r(),
+                    sib0f_base(),
+                    sib0f_idx(),
+                    sib0f_shift(),
+                    disp8(),
+                )
+            }
+        }
         Insn::MovupsStoreSibd => {
             if has_f2 {
                 if sib0f_no_index() {
