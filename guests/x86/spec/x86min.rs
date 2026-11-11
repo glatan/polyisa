@@ -1910,6 +1910,15 @@ pub fn build_model() -> polyisa_isadl::Model {
             "movsx r32, m8",
             "load",
         ),
+        // MOVSX r32/r64, m16 SIB+disp32 (0F BF mod=10)。iostat 0x4be9fb の 48 0F BF 84 00。
+        (
+            "movsx_r32_m16_sibd32",
+            "D32",
+            "00001111 10111111 10...100 ........ ................................",
+            vec![],
+            "movsx r32, m16",
+            "load",
+        ),
         (
             "movsx_r32_m8_sibd",
             "S8",

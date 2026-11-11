@@ -519,6 +519,7 @@ fn fetch_len(
                 || s == 0xB6
                 || s == 0xB7
                 || s == 0xBE
+                || s == 0xBF
                 || s == 0xAF
                 || s == 0xBC
                 || s == 0xBD
@@ -1697,6 +1698,7 @@ pub fn run_mode(
                             | 0xB6
                             | 0xB7
                             | 0xBE
+                            | 0xBF
                             | 0xAF
                             | 0xBC
                             | 0xBD
@@ -1742,6 +1744,7 @@ pub fn run_mode(
                         | 0xB6
                         | 0xB7
                         | 0xBE
+                        | 0xBF
                         | 0xAF
                         | 0xBC
                         | 0xBD
@@ -7942,6 +7945,34 @@ fn dispatch<B: Backend>(
                 sem::movsx_r64_m8_mem8(b, reg0f_as_gpr(), rm0f(), disp8())
             } else {
                 sem::movsx_r32_m8_mem8(b, reg0f_as_gpr(), rm0f(), disp8())
+            }
+        }
+        Insn::MovsxR32M16Sibd32 => {
+            // 0F BF SIB mod=10。iostat 0x4be9fb の movswq disp(%rax,%rax,1), %rax。
+            if sib0f_no_index() {
+                if rex_w {
+                    sem::movsx_r64_m16_mem32(b, reg0f_as_gpr(), sib0f_base(), disp32())
+                } else {
+                    sem::movsx_r32_m16_mem32(b, reg0f_as_gpr(), sib0f_base(), disp32())
+                }
+            } else if rex_w {
+                sem::movsx_r64_m16_sibd32(
+                    b,
+                    reg0f_as_gpr(),
+                    sib0f_base(),
+                    sib0f_idx(),
+                    sib0f_shift(),
+                    disp32(),
+                )
+            } else {
+                sem::movsx_r32_m16_sibd32(
+                    b,
+                    reg0f_as_gpr(),
+                    sib0f_base(),
+                    sib0f_idx(),
+                    sib0f_shift(),
+                    disp32(),
+                )
             }
         }
         Insn::MovsxR32M8Sib => {

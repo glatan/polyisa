@@ -9693,6 +9693,56 @@ pub fn movzx_r64_m8_sibd32<B: Backend>(
     Ok(())
 }
 
+/// MOVSX r32,m16 [base+disp32] (0F BF SIB mod=10, no_index)。16ビットを符号拡張する.
+pub fn movsx_r32_m16_mem32<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, disp: i32) -> Flow<B> {
+    let addr = eff_addr32(b, base, disp);
+    let v16: B::V<W16> = b.load::<W16>(addr, DATA_READ)?;
+    let v = b.sext::<W16, W32>(v16);
+    write(b, dst, v);
+    Ok(())
+}
+
+/// MOVSX r64,m16 [base+disp32] (0F BF SIB mod=10, no_index, REX.W)。
+pub fn movsx_r64_m16_mem32<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, disp: i32) -> Flow<B> {
+    let addr = eff_addr32(b, base, disp);
+    let v16: B::V<W16> = b.load::<W16>(addr, DATA_READ)?;
+    let v = b.sext::<W16, W64>(v16);
+    write64(b, dst, v);
+    Ok(())
+}
+
+/// MOVSX r32,m16 [base+index*scale+disp32] (0F BF SIB mod=10)。
+pub fn movsx_r32_m16_sibd32<B: Backend>(
+    b: &mut B,
+    dst: Gpr,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i32,
+) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, disp, base, idx);
+    let v16: B::V<W16> = b.load::<W16>(addr, DATA_READ)?;
+    let v = b.sext::<W16, W32>(v16);
+    write(b, dst, v);
+    Ok(())
+}
+
+/// MOVSX r64,m16 [base+index*scale+disp32] (0F BF SIB mod=10, REX.W)。iostat 0x4be9fb 対応.
+pub fn movsx_r64_m16_sibd32<B: Backend>(
+    b: &mut B,
+    dst: Gpr,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i32,
+) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, disp, base, idx);
+    let v16: B::V<W16> = b.load::<W16>(addr, DATA_READ)?;
+    let v = b.sext::<W16, W64>(v16);
+    write64(b, dst, v);
+    Ok(())
+}
+
 /// MOVSX r32,m8 [base+index*scale] (0F BE SIB mod=00)。
 pub fn movsx_r32_m8_sib<B: Backend>(
     b: &mut B,

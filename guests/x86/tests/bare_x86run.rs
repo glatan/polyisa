@@ -5738,6 +5738,35 @@ fn run_imul_r64_imm_sib() {
 }
 
 #[test]
+fn run_movsx_r64_m16_sibd32() {
+    // 48 0F BF 84 00 00 00 00 00 = movswq (%rax,%rax,1), %rax。0xffff は -1。iostat 0x4be9fb。
+    // Ref: SPEC-X86-INTEL-SDM (v093).
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    polyisa_guest_x86::sem::write64(&mut env.backend, Gpr(0), 0x1000);
+    env.backend
+        .mem
+        .write(VirtAddr(0x2000), &0xFFFFu16.to_le_bytes())
+        .unwrap();
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x1000),
+            &[0x48, 0x0F, 0xBF, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00],
+        )
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x1009 });
+    assert_eq!(
+        polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(0)),
+        u64::MAX
+    );
+}
+
+#[test]
 fn run_sbb_rm32_imm8_rsp() {
     // 83 5C 24 14 FF = sbbl $-1, 0x14(%rsp)。0 から -1 を引くと 1、借りが出る。fsck 0x4d272f。
     // Ref: SPEC-X86-INTEL-SDM (v093).
