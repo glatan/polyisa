@@ -1411,6 +1411,10 @@ fn fetch_len(
                 if first == 0x29 && md == 1 {
                     return Some(4);
                 }
+                // XOR m,r SIB+disp8 (31 /r mod=01)。gunzip 0x48a1c3 の xor DWORD PTR [rsp+disp8], ecx。
+                if first == 0x31 && md == 1 {
+                    return Some(4);
+                }
                 // AND m,r SIB mod=00。bzip2 0x47f93d の 21 0C 94。base=5 は disp32。
                 if first == 0x21 && md == 0 {
                     let t = third?;
@@ -6645,6 +6649,20 @@ fn dispatch<B: Backend>(
                 sem::xor_m64_r64_mem8(b, rm(), disp8(), reg())
             } else {
                 sem::xor_m32_r32_mem8(b, rm(), disp8(), reg())
+            }
+        }
+        Insn::XorM32R32Sibd => {
+            // 31 /r SIB mod=01。gunzip 0x48a1c3 の xor DWORD PTR [rsp+disp8], ecx。
+            if no_index() {
+                if rex_w {
+                    sem::xor_m64_r64_mem8(b, sib_base(), disp8(), reg())
+                } else {
+                    sem::xor_m32_r32_mem8(b, sib_base(), disp8(), reg())
+                }
+            } else if rex_w {
+                sem::xor_m64_r64_sibd(b, sib_base(), sib_idx(), sib_shift(), disp8(), reg())
+            } else {
+                sem::xor_m32_r32_sibd(b, sib_base(), sib_idx(), sib_shift(), disp8(), reg())
             }
         }
         Insn::XorM32R32Mem32 => {

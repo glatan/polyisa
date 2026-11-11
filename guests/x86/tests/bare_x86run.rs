@@ -5738,6 +5738,50 @@ fn run_imul_r64_imm_sib() {
 }
 
 #[test]
+fn run_xor_rsp_disp8_ecx() {
+    // 31 4C 24 08 = xor DWORD PTR [rsp+0x8], ecx。1^1 は 0 で ZF。ecx と rsp は残る。gunzip 0x48a1c3。
+    // Ref: SPEC-X86-INTEL-SDM (v093).
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    polyisa_guest_x86::sem::write64(&mut env.backend, Gpr(4), 0x2000);
+    polyisa_guest_x86::sem::write64(&mut env.backend, Gpr(1), 0x9999_8888_0000_0001);
+    env.backend
+        .mem
+        .write(VirtAddr(0x2008), &0x0000_0001u32.to_le_bytes())
+        .unwrap();
+    env.backend.mem.write(VirtAddr(0x200C), &[0xAB]).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0x31, 0x4C, 0x24, 0x08])
+        .unwrap();
+    env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 1);
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x1004 });
+    let rsp: u64 = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(4));
+    let rcx: u64 = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(1));
+    assert_eq!(rsp, 0x2000);
+    assert_eq!(rcx, 0x9999_8888_0000_0001);
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::eflags_ref()), 0x44);
+    let mut nb = [0u8; 5];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x2008),
+            &mut nb,
+            polyisa_mem::Access {
+                endian: polyisa_mem::Endian::Le,
+                align: polyisa_mem::Align::Unaligned,
+                kind: polyisa_mem::AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(nb, [0x00, 0x00, 0x00, 0x00, 0xAB]);
+}
+
+#[test]
 fn run_cmovbe_edx_r8() {
     // 41 0F 46 10 = cmovbe edx, DWORD PTR [r8]。CF があるので移す。上位 32 は消える。gunzip 0x48a025。
     // Ref: SPEC-X86-INTEL-SDM (v093).
