@@ -5738,6 +5738,52 @@ fn run_imul_r64_imm_sib() {
 }
 
 #[test]
+fn run_movsx_eax_rsp_disp32() {
+    // 0F BE 84 24 FA 00 00 00 = movsbl 0xfa(%rsp), %eax。0x80 は符号拡張。上位は消える。nc 0x4c71fd。
+    // Ref: SPEC-X86-INTEL-SDM (v093).
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    polyisa_guest_x86::sem::write64(&mut env.backend, Gpr(4), 0x2000);
+    polyisa_guest_x86::sem::write64(&mut env.backend, Gpr(0), 0x1111_0000_0000_00AA);
+    env.backend
+        .mem
+        .write(VirtAddr(0x20FA), &[0x80, 0xAB])
+        .unwrap();
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x1000),
+            &[0x0F, 0xBE, 0x84, 0x24, 0xFA, 0x00, 0x00, 0x00],
+        )
+        .unwrap();
+    env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 1);
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x1008 });
+    let eax: u64 = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(0));
+    assert_eq!(eax, 0xffff_ff80);
+    let rsp: u64 = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(4));
+    assert_eq!(rsp, 0x2000);
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::eflags_ref()), 1);
+    let mut nb = [0u8; 1];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x20FB),
+            &mut nb,
+            polyisa_mem::Access {
+                endian: polyisa_mem::Endian::Le,
+                align: polyisa_mem::Align::Unaligned,
+                kind: polyisa_mem::AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(nb[0], 0xAB);
+}
+
+#[test]
 fn run_or_r11d_rdx_scale_disp32() {
     // 44 0B 1C 95 00 20 00 00 = or r11d, [rdx*4+0x2000]。1|2=3。上位は消える。cryptpw 0x4bb2e0。
     // Ref: SPEC-X86-INTEL-SDM (v093).

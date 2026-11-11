@@ -8351,6 +8351,34 @@ fn dispatch<B: Backend>(
                 sem::movsx_r32_m8_sibd(b, reg0f_as_gpr(), base, idx, shift, d8)
             }
         }
+        Insn::MovsxR32M8Sibd32 => {
+            // 0F BE SIB mod=10。nc 0x4c71fd の movsbl 0xfa(%rsp), %eax。
+            if sib0f_no_index() {
+                if rex_w {
+                    sem::movsx_r64_m8_mem32(b, reg0f_as_gpr(), sib0f_base(), disp32())
+                } else {
+                    sem::movsx_r32_m8_mem32(b, reg0f_as_gpr(), sib0f_base(), disp32())
+                }
+            } else if rex_w {
+                sem::movsx_r64_m8_sibd32(
+                    b,
+                    reg0f_as_gpr(),
+                    sib0f_base(),
+                    sib0f_idx(),
+                    sib0f_shift(),
+                    disp32(),
+                )
+            } else {
+                sem::movsx_r32_m8_sibd32(
+                    b,
+                    reg0f_as_gpr(),
+                    sib0f_base(),
+                    sib0f_idx(),
+                    sib0f_shift(),
+                    disp32(),
+                )
+            }
+        }
         Insn::MovzxR32M8Mem8 => {
             if rex_w {
                 sem::movzx_r64_m8_mem8(b, reg0f_as_gpr(), rm0f(), disp8())
@@ -8815,6 +8843,7 @@ fn dispatch<B: Backend>(
             | Insn::MovzxR32M16Sibd
             | Insn::MovzxR32M16Sibd32
             | Insn::MovsxR32M8Mem32
+            | Insn::MovsxR32M8Sibd32
             | Insn::MovzxR32M16Rip
             | Insn::MovzxR32M8Rip
             | Insn::MovzxR32M8Memnd
@@ -8929,7 +8958,14 @@ fn dispatch<B: Backend>(
                         | Insn::MovsxdSibd
                         | Insn::MovsxdSibd32
                 ))
-                || (rex_w && matches!(insn, Insn::RolRm32Cl | Insn::ImulRSibabs | Insn::OrRSibabs))
+                || (rex_w
+                    && matches!(
+                        insn,
+                        Insn::RolRm32Cl
+                            | Insn::ImulRSibabs
+                            | Insn::OrRSibabs
+                            | Insn::MovsxR32M8Sibd32
+                    ))
                 || (has66 && matches!(insn, Insn::XorRm32 | Insn::RolRm32Imm8));
             if !skip {
                 sem::clear_hi(b, d);
