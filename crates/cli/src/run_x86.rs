@@ -5900,6 +5900,20 @@ fn dispatch<B: Backend>(
                 sem::sub_r32_sibd_indexed(b, reg(), sib_base(), sib_idx(), sib_shift(), d8)
             }
         }
+        Insn::SubRSibd32 => {
+            // 2B SIB mod=10。iostat 0x448b8e の subq 0xc0(%rsp,%r13,1), %rbp。
+            if no_index() {
+                if rex_w {
+                    sem::sub_r64_mem32(b, reg(), sib_base(), disp32())
+                } else {
+                    sem::sub_r32_mem32(b, reg(), sib_base(), disp32())
+                }
+            } else if rex_w {
+                sem::sub_r64_sibd32(b, reg(), sib_base(), sib_idx(), sib_shift(), disp32())
+            } else {
+                sem::sub_r32_sibd32(b, reg(), sib_base(), sib_idx(), sib_shift(), disp32())
+            }
+        }
         Insn::SubRMem32 => {
             if rex_w {
                 sem::sub_r64_mem32(b, reg(), rm(), disp32())
