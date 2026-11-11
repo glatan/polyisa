@@ -822,6 +822,10 @@ fn fetch_len(
             let md = s >> 6;
             let reg = (s >> 3) & 7;
             let rm = s & 7;
+            if reg == 0 && md == 0 && rm == 5 {
+                // FLDS [RIP+disp32] (D9 /0)。seq 0x402335 対応。6B.
+                return Some(6);
+            }
             if reg != 5 && reg != 7 {
                 return None;
             }
@@ -2909,6 +2913,15 @@ fn dispatch<B: Backend>(
                 (Gpr(rm_f - 4), true)
             };
             sem::and_m8_r8(b, dst, dst_high, src, src_high)
+        }
+        Insn::FldM32Rip => {
+            // D9 /0 mod=00 rm=101 [RIP+disp32]。seq 0x402335 対応。disp は下位32 LE.
+            let disp = (word as u32).swap_bytes() as i32;
+            if is64 {
+                sem::fld_m32_rip(b, eip as u64 + nbytes, disp)
+            } else {
+                sem::fld_m32_abs(b, (word as u32).swap_bytes())
+            }
         }
         Insn::CmpM8R8Rip => {
             // 38 /r mod=00 rm=101 [RIP+disp32], r8。grep 0x4aec6d 対応.

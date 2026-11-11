@@ -53,6 +53,21 @@ pub fn fcw_ref() -> StateRef<W16> {
     StateRef::<W16>::from_offset(core::mem::offset_of!(CpuState, fcw))
 }
 
+/// x87 の TOP を指す。
+pub fn top_ref() -> StateRef<W16> {
+    StateRef::<W16>::from_offset(core::mem::offset_of!(CpuState, top))
+}
+
+/// x87 レジスタ `i` の指数部を指す。
+pub fn st_exp_ref(i: usize) -> StateRef<W16> {
+    StateRef::<W16>::from_offset(core::mem::offset_of!(CpuState, st_exp) + i * 2)
+}
+
+/// x87 レジスタ `i` の仮数を指す。
+pub fn st_sig_ref(i: usize) -> StateRef<W64> {
+    StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, st_sig) + i * 8)
+}
+
 /// 汎用レジスタの上位32ビットを指す（x86-64 用、0-7 のみ）。
 pub fn hi_ref(r: Gpr) -> StateRef<W32> {
     StateRef::<W32>::from_offset(core::mem::offset_of!(CpuState, h) + (r.0 as usize) * 4)
@@ -10405,6 +10420,103 @@ pub fn fnstcw_mem32<B: Backend>(b: &mut B, base: Gpr, disp: i32) -> Flow<B> {
     let v: B::V<W16> = b.get(fcw_ref());
     b.store::<W16>(addr, v, DATA_WRITE)?;
     Ok(())
+}
+
+/// binary32 のビットを 80 ビットへ伸ばし、TOP を 1 減らしてから ST(0) へ書く。
+fn push_f32<B: Backend>(b: &mut B, bits: B::V<W32>) -> Flow<B> {
+    let s31 = b.konst::<W32>(31);
+    let sign = b.shr_l::<W32>(bits, s31);
+    let s23 = b.konst::<W32>(23);
+    let shifted = b.shr_l::<W32>(bits, s23);
+    let m8 = b.konst::<W32>(0xff);
+    let exp8 = b.and::<W32>(shifted, m8);
+    let mfrac = b.konst::<W32>(0x7f_ffff);
+    let frac = b.and::<W32>(bits, mfrac);
+    let zero32 = b.konst::<W32>(0);
+    let exp_zero = b.cmp::<W32>(Cmp::Eq, exp8, zero32);
+    let max_exp = b.konst::<W32>(0xff);
+    let exp_max = b.cmp::<W32>(Cmp::Eq, exp8, max_exp);
+    let frac_zero = b.cmp::<W32>(Cmp::Eq, frac, zero32);
+    let bias = b.konst::<W32>(0x3f80);
+    let exp_norm = b.add::<W32>(exp8, bias);
+    let exp_special = b.konst::<W32>(0x7fff);
+    let exp_or_special = b.select::<W32>(exp_max, exp_special, exp_norm);
+    let exp_field = b.select::<W32>(exp_zero, zero32, exp_or_special);
+    let frac64 = b.zext::<W32, W64>(frac);
+    let sh40 = b.konst::<W64>(40);
+    let frac_shifted = b.shl::<W64>(frac64, sh40);
+    let int_bit = b.konst::<W64>(1u64 << 63);
+    let sig_norm = b.or::<W64>(int_bit, frac_shifted);
+    let zero64 = b.konst::<W64>(0);
+    let sig = b.select::<W64>(exp_zero, zero64, sig_norm);
+    // 非正規化数は bit22 が立つまで左へ寄せ、指数をその分下げる。
+    let mut v = frac;
+    let mut n = zero32;
+    for (k, mask) in [
+        (16u32, 0x7f_8000u32),
+        (8, 0x7c_0000),
+        (4, 0x78_0000),
+        (2, 0x60_0000),
+        (1, 0x40_0000),
+    ] {
+        let m = b.konst::<W32>(mask);
+        let high = b.and::<W32>(v, m);
+        let empty = b.cmp::<W32>(Cmp::Eq, high, zero32);
+        let kk = b.konst::<W32>(k);
+        let shifted_v = b.shl::<W32>(v, kk);
+        v = b.select::<W32>(empty, shifted_v, v);
+        let n2 = b.add::<W32>(n, kk);
+        n = b.select::<W32>(empty, n2, n);
+    }
+    let den_bias = b.konst::<W32>(16256);
+    let den_exp = b.sub::<W32>(den_bias, n);
+    let m22 = b.konst::<W32>(0x3f_ffff);
+    let frac22 = b.and::<W32>(v, m22);
+    let frac22_64 = b.zext::<W32, W64>(frac22);
+    let sh41 = b.konst::<W64>(41);
+    let frac22_sh = b.shl::<W64>(frac22_64, sh41);
+    let den_sig = b.or::<W64>(int_bit, frac22_sh);
+    let exp_if_sub = b.select::<W32>(frac_zero, zero32, den_exp);
+    let sig_if_sub = b.select::<W64>(frac_zero, zero64, den_sig);
+    let exp_final = b.select::<W32>(exp_zero, exp_if_sub, exp_field);
+    let sig_final = b.select::<W64>(exp_zero, sig_if_sub, sig);
+    let s15 = b.konst::<W32>(15);
+    let sign_bit = b.shl::<W32>(sign, s15);
+    let exp_word32 = b.or::<W32>(exp_final, sign_bit);
+    let exp_word: B::V<W16> = b.trunc::<W32, W16>(exp_word32);
+    let top = b.get(top_ref());
+    let one16 = b.konst::<W16>(1);
+    let dec = b.sub::<W16>(top, one16);
+    let seven = b.konst::<W16>(7);
+    let new_top = b.and::<W16>(dec, seven);
+    b.set(top_ref(), new_top);
+    for i in 0..8 {
+        let slot = b.konst::<W16>(i as u16);
+        let hit = b.cmp::<W16>(Cmp::Eq, new_top, slot);
+        let old_sig = b.get(st_sig_ref(i));
+        let old_exp = b.get(st_exp_ref(i));
+        let sig_i = b.select::<W64>(hit, sig_final, old_sig);
+        let exp_i = b.select::<W16>(hit, exp_word, old_exp);
+        b.set(st_sig_ref(i), sig_i);
+        b.set(st_exp_ref(i), exp_i);
+    }
+    Ok(())
+}
+
+/// FLDS [RIP+disp32] (D9 /0 mod=00 rm=101)。seq 0x402335 対応.
+pub fn fld_m32_rip<B: Backend>(b: &mut B, next_rip: u64, disp: i32) -> Flow<B> {
+    let base = b.konst::<W64>(next_rip);
+    let d = b.konst::<W64>(disp as i64 as u64);
+    let addr = b.add::<W64>(base, d);
+    let bits: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    push_f32(b, bits)
+}
+
+/// FLDS [disp32] (D9 /0 mod=00 rm=101、32ビット)。
+pub fn fld_m32_abs<B: Backend>(b: &mut B, addr32: u32) -> Flow<B> {
+    let addr = b.konst::<W64>(addr32 as u64);
+    let bits: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    push_f32(b, bits)
 }
 
 /// FLDCW m16 [base] (D9 /5 mod=00)。x87 制御ワードを読む.

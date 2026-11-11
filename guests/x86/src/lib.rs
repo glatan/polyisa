@@ -44,6 +44,12 @@ pub struct CpuState {
     pub xmm: [[u64; 2]; 16],
     /// x87 制御ワード（FNSTCW/FLDCW で使う。run_image が 0x037F に初期化する）。
     pub fcw: u16,
+    /// x87 の TOP。空のスタックは 0 で、FLD は 1 減らしてから書く。
+    pub top: u16,
+    /// x87 レジスタの指数部。bit15 が符号、bit14:0 がバイアス 16383 の指数。
+    pub st_exp: [u16; 8],
+    /// x87 レジスタの仮数。bit63 が整数ビット。
+    pub st_sig: [u64; 8],
 }
 
 #[cfg(test)]
@@ -71,12 +77,15 @@ mod tests {
             core::mem::offset_of!(CpuState, fcw),
             8 * 4 + 4 + 4 + 8 * 4 + 8 * 8 + 16 * 16
         );
+        assert_eq!(core::mem::offset_of!(CpuState, top), 394);
+        assert_eq!(core::mem::offset_of!(CpuState, st_exp), 396);
+        assert_eq!(core::mem::offset_of!(CpuState, st_sig), 416);
     }
 
     #[test]
     fn insn_count() {
         // 試作の整数117件。
-        assert_eq!(INSNS.len(), 667);
+        assert_eq!(INSNS.len(), 668);
     }
 
     #[test]
@@ -996,6 +1005,9 @@ mod tests {
         // CMP m8, r8 RIP (38 /r mod=00 rm=101)。grep 0x4aec6d の 38 35 C4 4B 26 00。
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x3835C44B2600, 48), Some(Insn::CmpM8R8Rip));
+        // FLDS RIP (D9 /0)。seq 0x402335 の D9 05 2D 89 0E 00。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0xD9052D890E00, 48), Some(Insn::FldM32Rip));
         // OR m8, r8 SIB+disp8 (08 /r mod=01)。sed 0x4a87dd の 08 44 24 2F。
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x0844242F, 32), Some(Insn::OrM8R8Sibd));
