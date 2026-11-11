@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // WebAssembly 最小の ISADL モデル（段階2の試作）。
 //
-// 整数スタックマシンの8件に絞る。モジュール検証・メモリ・テーブル・
-// グローバル・関数呼び出し・GC は本格実装で足す。
+// 整数スタックマシンの8件に絞る。関数本体の検証は validate が行う。
+// メモリ・テーブル・グローバル・関数呼び出し・GC は試作に含まない。
 // imm（LEB128）/labelidx の切り出しは本格実装で足す。
 // 出典は SPEC-WASM-CORE 3.0 (Release 3.0) である。
 // Ref: SPEC-WASM-CORE (3.0).

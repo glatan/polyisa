@@ -49,5 +49,4 @@
 | GAP-0013 | [CPU モデルとバージョンの表現「挙動パラメータ」](design/cpu-models.md#挙動パラメータ) | `div` と `divu` は、除数が 0 のとき変更前の HI と LO を書き戻す。挙動パラメータはない | 代替 | S3-1 |
 | GAP-0014 | [ISA 記述言語（ISADL）「形式と命令」](design/isa-description.md#形式と命令) | `hexmin.rs` と `ia64min.rs` のパターンは、上位 8 ビットで命令を区別する簡略化であり、実命令のエンコーディングではない | 代替 | 段階 5 以降の本格的な実装で実際のエンコーディングに置き換える |
 | GAP-0015 | [ISA 記述言語（ISADL）「オペコード表」](design/isa-description.md#オペコード表)、[同「フィールドとオペランド」](design/isa-description.md#フィールドとオペランド) | `x86min.rs` はオペコード表も ModRM/SIB のフックも使わず、レジスタ、mod、SIB の有無と変位の長さごとに命令を列挙する。ModRM と SIB のバイトの取り出しは `run_x86.rs` の `dispatch` が行う | 代替 | S4-2 |
-| GAP-0019 | [ロードマップ「段階 2：抽象の試作」](design/roadmap.md#段階-2抽象の試作) | WebAssembly モジュールの検証はない | 未着手 | モジュールの検証を試作に加え、`bare_wasmmin` で確かめる |
 | GAP-0021 | [検証戦略「テストの網羅の記録」](design/testing.md#テストの網羅の記録) | `task status` は命令の記述、完了条件の判定、設計との差を生成する。命令がどの層でテストされたかは生成しない | 未着手 | `task status` が命令と層の網羅を生成する |

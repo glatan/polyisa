@@ -7,6 +7,7 @@
 use polyisa_engine::bare::BareEnv;
 use polyisa_guest_wasm::CpuState;
 use polyisa_guest_wasm::sem;
+use polyisa_guest_wasm::validate::{self, Op, Reject};
 use polyisa_sem::Backend as _;
 
 fn env() -> BareEnv {
@@ -93,4 +94,33 @@ fn br_moves_offset_only() {
     // func は変えず off だけ進む（非線形PCの trial）。
     assert_eq!(env.backend.get(sem::func_ref()), 3);
     assert_eq!(env.backend.get(sem::off_ref()), 40);
+}
+
+#[test]
+fn validate_accepts_balanced_void_body() {
+    let ops = [Op::I32Const, Op::I32Const, Op::I32Add, Op::LocalSet(0)];
+    assert_eq!(validate::validate(4, &ops), Ok(()));
+}
+
+#[test]
+fn validate_rejects_underflow_and_local_and_leftover() {
+    assert_eq!(
+        validate::validate(4, &[Op::I32Add]),
+        Err(Reject::StackUnderflow)
+    );
+    assert_eq!(
+        validate::validate(4, &[Op::LocalGet(4)]),
+        Err(Reject::LocalRange)
+    );
+    assert_eq!(
+        validate::validate(4, &[Op::I32Const]),
+        Err(Reject::StackLeft)
+    );
+}
+
+#[test]
+fn validate_unreachable_makes_stack_polymorphic() {
+    // unreachable の後の add は、スタックが空でも拒否しない。終わりも合う。
+    let ops = [Op::Unreachable, Op::I32Add];
+    assert_eq!(validate::validate(1, &ops), Ok(()));
 }

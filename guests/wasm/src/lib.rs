@@ -2,14 +2,15 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! WebAssembly 最小のゲスト ISA。段階2の試作であり、スタックマシンとトラップを確かめる。
 //!
-//! 単一関数の整数演算のみ持つ。モジュール検証・線形メモリ・テーブル・
-//! グローバル・関数呼び出し・GC は本格実装で足す。
+//! 単一関数の整数演算と、制御フレームのない void 関数の検証を持つ。
+//! 線形メモリ・テーブル・グローバル・関数呼び出し・GC は試作に含まない。
 //! プログラムカウンタは func（関数番号）と off（関数内オフセット）の組であり、
 //! 線形メモリの外にあるコードを指す（自己書き換えなし）。
 
 #![forbid(unsafe_code)]
 
 pub mod sem;
+pub mod validate;
 
 // 空のモデルから生成した殻。ISADL 記述の追加後に中身が増える。
 include!(concat!(env!("OUT_DIR"), "/generated.rs"));
