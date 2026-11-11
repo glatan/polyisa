@@ -2043,6 +2043,8 @@ pub fn run_mode(
                     | Insn::AddRm16Imm
                     | Insn::AndRm16Imm
                     | Insn::CmpRm16Imm
+                    // ROL r16,imm8 (66 C1 /0)。httpd 0x4be767 の rol $8, %bp。
+                    | Insn::RolRm32Imm8
                     // CMP r/m16, r16 (66 39 /r mod=11) は CmpRm32 を共用する.
                     | Insn::CmpRm32
                     | Insn::CmpRmImm8Rip
@@ -4767,7 +4769,9 @@ fn dispatch<B: Backend>(
             }
         }
         Insn::RolRm32Imm8 => {
-            if rex_w {
+            if has66 {
+                sem::rol_rm16_imm8(b, rm(), word as u8)
+            } else if rex_w {
                 sem::rol_rm64_imm8(b, rm(), word as u8)
             } else {
                 sem::rol_rm32_imm8(b, rm(), word as u8)

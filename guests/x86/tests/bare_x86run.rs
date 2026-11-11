@@ -5738,6 +5738,26 @@ fn run_imul_r64_imm_sib() {
 }
 
 #[test]
+fn run_rol_bp_imm8() {
+    // 66 C1 C5 08 = rol $8, %bp。0x00ab は 0xab00。上位は残る。httpd 0x4be767。
+    // Ref: SPEC-X86-INTEL-SDM (v093).
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.set(Gpr(5).state(), 0x1234_00AB);
+    env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 0);
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0x66, 0xC1, 0xC5, 0x08])
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x1004 });
+    assert_eq!(env.backend.get(Gpr(5).state()), 0x1234_AB00);
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::eflags_ref()), 0x84);
+}
+
+#[test]
 fn run_sub_r64_sibd32() {
     // 4A 2B AC 2C C0 00 00 00 = subq 0xc0(%rsp,%r13,1), %rbp。1-2 は借り。iostat 0x448b8e。
     // Ref: SPEC-X86-INTEL-SDM (v093).

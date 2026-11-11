@@ -10414,6 +10414,59 @@ pub fn ror_rm64_imm8<B: Backend>(b: &mut B, dst: Gpr, n: u8) -> Flow<B> {
     Ok(())
 }
 
+/// ROL r16,imm8 (66 C1 /0)。下位 16 ビットだけ回し、上位は残す。回数 0 では旗を変えない。httpd 0x4be767 対応.
+pub fn rol_rm16_imm8<B: Backend>(b: &mut B, dst: Gpr, n: u8) -> Flow<B> {
+    let cnt = (n & 31) as u32;
+    let rot = cnt % 16;
+    let rotate = |b: &mut B, x: B::V<W16>| -> B::V<W16> {
+        if rot == 0 {
+            x
+        } else {
+            let sh = b.konst::<W16>(rot as u16);
+            let inv = b.konst::<W16>((16 - rot) as u16);
+            let l = b.shl::<W16>(x, sh);
+            let r = b.shr_l::<W16>(x, inv);
+            b.or::<W16>(l, r)
+        }
+    };
+    let v = if dst.0 < 8 {
+        let x32 = read(b, dst);
+        let x: B::V<W16> = b.trunc::<W32, W16>(x32);
+        let v = rotate(b, x);
+        let mask = b.konst::<W32>(0xFFFF_0000);
+        let preserved = b.and::<W32>(x32, mask);
+        let ext = b.zext::<W16, W32>(v);
+        let nv = b.or::<W32>(preserved, ext);
+        write(b, dst, nv);
+        v
+    } else {
+        let x64 = read64(b, dst);
+        let x: B::V<W16> = b.trunc::<W64, W16>(x64);
+        let v = rotate(b, x);
+        let mask = b.konst::<W64>(0xFFFF_FFFF_FFFF_0000);
+        let preserved = b.and::<W64>(x64, mask);
+        let ext = b.zext::<W16, W64>(v);
+        let nv = b.or::<W64>(preserved, ext);
+        write64(b, dst, nv);
+        v
+    };
+    if cnt != 0 {
+        let old: B::V<W32> = b.get(eflags_ref());
+        let one = b.konst::<W16>(1);
+        let low = b.and::<W16>(v, one);
+        let zero16 = b.konst::<W16>(0);
+        let cf_take = b.cmp::<W16>(Cmp::Ne, low, zero16);
+        let cf = pick(b, cf_take, FLAG_CF);
+        let szp = szp_bits(b, v);
+        let clear_mask = b.konst::<W32>(!(FLAG_CF | FLAG_SF | FLAG_ZF | FLAG_PF));
+        let cleared = b.and::<W32>(old, clear_mask);
+        let with_cf = b.or::<W32>(cleared, cf);
+        let assembled = b.or::<W32>(with_cf, szp);
+        b.set(eflags_ref(), assembled);
+    }
+    Ok(())
+}
+
 /// ROL r/m32,imm8。左回転し、CF/SZP を更新する（OF は保存）。
 pub fn rol_rm32_imm8<B: Backend>(b: &mut B, dst: Gpr, n: u8) -> Flow<B> {
     let x = read(b, dst);
