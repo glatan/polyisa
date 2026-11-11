@@ -650,6 +650,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("addsd", "F1", "00001111 01011000 11......", "addsd xmm, xmm", "alu"),
         // ADDSD xmm,m64 SIB mod=00 [base+index*scale] (F2 0F 58)。F2 は剥がし済み.
         ("addsd_m64_sib", "F1", "00001111 01011000 00...100 ........", "addsd xmm, m64", "load"),
+        ("addsd_xmm_m64_sibd", "F1", "00001111 01011000 01...100 ........ ........", "addsd xmm, m64", "load"),
         // ADDSD xmm,m64 RIP (F2 0F 58 05 + disp32)。F2 接頭辞は実行側で剥がす.
         ("addsd_xmm_m64_rip", "F1", "00001111 01011000 00...101 ................................", "addsd xmm, m64", "load"),
         // SUBSD xmm,xmm (F2 0F 5C /r reg-direct)。F2 接頭辞は実行側で剥がす.

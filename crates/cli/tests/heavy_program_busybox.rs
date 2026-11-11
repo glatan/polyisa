@@ -268,3 +268,21 @@ fn grep_one_file_matches_host() {
     assert_eq!(code, 0);
     assert_eq!(out.as_slice(), host.stdout.as_slice());
 }
+
+#[test]
+fn seq_one_to_three_matches_host() {
+    let path = busybox();
+    let path = path.to_str().expect("utf-8 path");
+    let args = ["seq", "1", "3"];
+    let argv: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
+    let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)
+        .unwrap_or_else(|e| panic!("seq: {e}"));
+    let host = Command::new(path)
+        .args(args)
+        .env_clear()
+        .output()
+        .expect("host seq");
+    assert!(host.status.success());
+    assert_eq!(code, 0);
+    assert_eq!(out.as_slice(), host.stdout.as_slice());
+}

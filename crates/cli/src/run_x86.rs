@@ -340,6 +340,9 @@ fn fetch_len(
                     Some(3)
                 } else if md == 0 && rm == 5 {
                     Some(7)
+                } else if rm == 4 && md == 1 {
+                    // ADDSD xmm,m64 SIB+disp8。seq 0x499253 の F2 0F 58 44 24 10。0F から 5B.
+                    Some(5)
                 } else if rm == 4 {
                     let t = fourth?;
                     if md == 0 {
@@ -6176,6 +6179,21 @@ fn dispatch<B: Backend>(
                 sem::addsd_xmm_m64_memnd(b, xmm_reg_r(), sib0f_base())
             } else {
                 sem::addsd_xmm_m64_sib(b, xmm_reg_r(), sib0f_base(), sib0f_idx(), sib0f_shift())
+            }
+        }
+        Insn::AddsdXmmM64Sibd => {
+            // F2 0F 58 SIB mod=01。seq 0x499253 の addsd 0x10(%rsp), %xmm0。
+            if sib0f_no_index() {
+                sem::addsd_xmm_m64_mem8(b, xmm_reg_r(), sib0f_base(), disp8())
+            } else {
+                sem::addsd_xmm_m64_sibd(
+                    b,
+                    xmm_reg_r(),
+                    sib0f_base(),
+                    sib0f_idx(),
+                    sib0f_shift(),
+                    disp8(),
+                )
             }
         }
         Insn::AddsdXmmM64Rip => {
