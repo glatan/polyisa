@@ -87,6 +87,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("d32_ss", 39, 38),
         ("d32_idx", 37, 35),
         ("d32_base", 34, 32),
+        // 66 C7 /0 mod=10（disp32+imm16、64ビット語）。rm は ModRM の下位3ビット。
+        ("i16_rm", 50, 48),
     ] {
         m.fields.push(Field {
             name: name.to_string(),
@@ -879,7 +881,6 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("and_rm_imm8_mem32", "F1", "10000011 10100... ................................ ........", "and r/m, {imm}", "alu"),
         // CMP m32/m64,imm8 mod=10 [base+disp32] (83 /7)。REX.W で64bit.
         ("cmp_rm_imm8_mem32", "F1", "10000011 10111... ................................ ........", "cmp r/m, {imm}", "alu"),
-        ("mov_rm16_imm_m32", "F1", "11000111 10000101 ................................ ................", "mov r/m16, {imm}", "alu"),
         // MOVW [base],imm16 (66 C7 /0 mod=00)。xxd 0x4b240f 対応.4B+66.
         ("mov_rm16_imm_memnd", "F1", "11000111 00000... ................", "mov r/m16, {imm}", "alu"),
         // MOVW [base+disp8],imm16 (66 C7 /0 mod=01)。hexdump 0x5c84f9 対応.5B+66.
@@ -893,6 +894,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ),
         // MOVW [base+index*scale+disp8],imm16 (66 C7 /0 SIB mod=01)。stat 0x5af402 対応.6B+66.
         ("mov_rm16_imm_sibd", "F1", "11000111 01000100 ........ ........ ................", "mov r/m16, {imm}", "alu"),
+        // MOVW [base+index*scale+disp32],imm16 (66 C7 /0 SIB mod=10)。gzip 0x485910 の 66 C7 84 03。
+        ("mov_rm16_imm_sibd32", "F1", "11000111 10000100 ........ ................................ ................", "mov r/m16, {imm}", "alu"),
         // MOVW [base+index*scale],imm16 (66 C7 /0 SIB mod=00)。hexdump 0x5c82dd 対応.5B+66.
         // index有無は問わずdispatchで切替.
         (
@@ -928,7 +931,23 @@ pub fn build_model() -> polyisa_isadl::Model {
     };
     // (名前, 形式, パターン, where, 構文, 分類)
     type MemDef<'a> = (&'a str, &'a str, &'a str, Vec<WhereClause>, &'a str, &'a str);
-    let mem: &[MemDef] = &[ 
+    let mem: &[MemDef] = &[
+        (
+            "mov_rm16_imm_m32",
+            "F1",
+            "11000111 10000101 ................................ ................",
+            vec![wc("i16_rm", WhereOp::Eq, 5)],
+            "mov r/m16, {imm}",
+            "alu",
+        ),
+        (
+            "mov_rm16_imm_disp32",
+            "F1",
+            "11000111 10000... ................................ ................",
+            vec![wc("i16_rm", WhereOp::Ne, 4), wc("i16_rm", WhereOp::Ne, 5)],
+            "mov r/m16, {imm}",
+            "alu",
+        ),
         (
             "mov_eax_mem8",
             "M8",

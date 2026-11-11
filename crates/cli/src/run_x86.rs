@@ -1891,6 +1891,8 @@ pub fn run_mode(
                     | Insn::PorMem32
                     | Insn::PorSibd32
                     | Insn::MovSibdEax
+                    | Insn::MovSibd32Eax
+                    | Insn::IncRmSibd32
                     | Insn::MovEaxSibd
                     | Insn::Punpcklqdq
                     | Insn::MovqR64Xmm
@@ -1947,6 +1949,8 @@ pub fn run_mode(
                     | Insn::MovRm16ImmMemnd
                     | Insn::MovRm16ImmMem8
                     | Insn::MovRm16ImmSibd
+                    | Insn::MovRm16ImmSibd32
+                    | Insn::MovRm16ImmDisp32
                     | Insn::MovRm16ImmSib
                     | Insn::MovRm16ImmRip
                     | Insn::AndAxImm16
@@ -2018,6 +2022,8 @@ pub fn run_mode(
                     | Insn::MovRm16ImmMemnd
                     | Insn::MovRm16ImmMem8
                     | Insn::MovRm16ImmSibd
+                    | Insn::MovRm16ImmSibd32
+                    | Insn::MovRm16ImmDisp32
                     | Insn::MovRm16ImmSib
                     | Insn::MovRm16ImmRip
                     | Insn::MovntdqStoreMemnd
@@ -2221,7 +2227,14 @@ fn dispatch<B: Backend>(
         }
         Insn::IncRmSibd32 => {
             // FF /0 SIB mod=10 [base+index*scale+disp32]。basename 0x4899d0 対応.
-            if no_index() {
+            // 66 付きは16ビット。gzip 0x484ac0 の incw 0x484(%rax,%rsi,4)。
+            if has66 {
+                if no_index() {
+                    sem::inc_r16_mem32(b, sib_base(), disp32())
+                } else {
+                    sem::inc_r16_sibd32(b, sib_base(), sib_idx(), sib_shift(), disp32())
+                }
+            } else if no_index() {
                 sem::inc_r32_mem32(b, sib_base(), disp32())
             } else {
                 sem::inc_r32_sibd32(b, sib_base(), sib_idx(), sib_shift(), disp32())
@@ -2678,7 +2691,14 @@ fn dispatch<B: Backend>(
             }
         }
         Insn::MovSibd32Eax => {
-            if no_index() {
+            if has66 {
+                // 66 89: 16ビット SIB+disp32 ストア。gzip 0x4859e4 の movw %cx, 0x12ec(%rbx,%rdx,4)。
+                if no_index() {
+                    sem::mov_m16_r16_mem32(b, reg(), sib_base(), disp32())
+                } else {
+                    sem::mov_m16_r16_sibd32(b, reg(), sib_base(), sib_idx(), sib_shift(), disp32())
+                }
+            } else if no_index() {
                 if rex_w {
                     sem::mov_m64_mem32(b, reg(), sib_base(), disp32())
                 } else {
@@ -6788,6 +6808,30 @@ fn dispatch<B: Backend>(
             } else {
                 sem::mov_m16_imm_sibd(b, base, idx, shift, d8, imm)
             }
+        }
+        Insn::MovRm16ImmSibd32 => {
+            // 66 C7 84 03 + disp32 + imm16。gzip 0x485910 の movw $0x8, 0xe6e(%rbx,%rax)。
+            // SIB は (word>>48) 下位8、disp は (word>>16) 下位32 LE、imm は最下位16 LE。
+            let sib_v = ((word >> 48) & 0xff) as u8;
+            let disp = ((word >> 16) as u32).swap_bytes() as i32;
+            let imm = ((word & 0xffff) as u16).swap_bytes();
+            let shift = ((sib_v >> 6) & 3) as u32;
+            let idx_raw = (sib_v >> 3) & 7;
+            let idx = Gpr(idx_raw | (((rex >> 1) & 1) << 3));
+            let base = Gpr((sib_v & 7) | ((rex & 1) << 3));
+            if idx_raw == 4 && (rex >> 1) & 1 == 0 {
+                sem::mov_rm16_imm_mem32(b, base, disp, imm)
+            } else {
+                sem::mov_m16_imm_sibd32(b, base, idx, shift, disp, imm)
+            }
+        }
+        Insn::MovRm16ImmDisp32 => {
+            // 66 C7 /0 mod=10 rm!=4。gzip 0x485966 の movw $0x8, 0x12ce(%rbx)。
+            let rm = ((word >> 48) & 7) as u8;
+            let base = Gpr(rm | ((rex & 1) << 3));
+            let disp = ((word >> 16) as u32).swap_bytes() as i32;
+            let imm = ((word & 0xffff) as u16).swap_bytes();
+            sem::mov_rm16_imm_mem32(b, base, disp, imm)
         }
         Insn::MovRm16ImmSib => {
             // 66 C7 04 24 6C 6C SIB+imm16 (40b+66)。hexdump 0x5c82dd 対応.

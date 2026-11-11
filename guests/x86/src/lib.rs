@@ -85,7 +85,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数117件。
-        assert_eq!(INSNS.len(), 705);
+        assert_eq!(INSNS.len(), 707);
     }
 
     #[test]
@@ -564,6 +564,20 @@ mod tests {
         // IMUL r64, [SIB+disp8], imm32。mktemp 0x4d85cf の 69 44 24 08 01 00 01 00。
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x6944240801000100, 64), Some(Insn::ImulRImmSibd));
+        // MOVW [base+index*scale+disp32],imm16。gzip 0x485910 の C7 84 03 6E 0E 00 00 08 00。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(
+            decode(0xC784036E0E00000800, 72),
+            Some(Insn::MovRm16ImmSibd32)
+        );
+        // MOVW [base+disp32],imm16。gzip 0x485966 の C7 83 CE 12 00 00 08 00。
+        assert_eq!(decode(0xC783CE1200000800, 64), Some(Insn::MovRm16ImmDisp32));
+        assert_eq!(decode(0xC785000000000100, 64), Some(Insn::MovRm16ImmM32));
+        assert_eq!(decode(0xC784000000000100, 64), None);
+        // MOV [base+index*scale+disp32],r。66 付きは16ビット。gzip 0x4859e4。
+        assert_eq!(decode(0x898c93ec120000, 56), Some(Insn::MovSibd32Eax));
+        // INCW [base+index*scale+disp32]。gzip 0x484ac0 の FF 84 B0 84 04 00 00。
+        assert_eq!(decode(0xff84b084040000, 56), Some(Insn::IncRmSibd32));
         assert_eq!(decode(0x6B1567FD1A0038, 56), Some(Insn::ImulRImm8Rip));
         assert_eq!(decode(0x6BF638, 24), Some(Insn::ImulRImm8));
         assert_eq!(decode(0x00C1F908, 24), Some(Insn::SarRm32Imm8));

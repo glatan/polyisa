@@ -2124,6 +2124,52 @@ pub fn inc_r32_mem32<B: Backend>(b: &mut B, base: Gpr, disp: i32) -> Flow<B> {
     Ok(())
 }
 
+/// INC m16 [base+disp32] (66 FF /0 mod=10)。CF は保存する。
+pub fn inc_r16_mem32<B: Backend>(b: &mut B, base: Gpr, disp: i32) -> Flow<B> {
+    use polyisa_sem::W16;
+    let cf_mask = b.konst::<W32>(FLAG_CF);
+    let all_flags = b.get(eflags_ref());
+    let saved_cf = b.and::<W32>(all_flags, cf_mask);
+    let addr = eff_addr32(b, base, disp);
+    let x: B::V<W16> = b.load::<W16>(addr, DATA_READ)?;
+    let one = b.konst::<W16>(1);
+    let v = b.add::<W16>(x, one);
+    b.store::<W16>(addr, v, DATA_WRITE)?;
+    update_add_flags(b, x, one, v);
+    let f = b.get(eflags_ref());
+    let not_cf = b.konst::<W32>(!FLAG_CF);
+    let cleared = b.and::<W32>(f, not_cf);
+    let restored = b.or::<W32>(cleared, saved_cf);
+    b.set(eflags_ref(), restored);
+    Ok(())
+}
+
+/// INC m16 [base+index*scale+disp32] (66 FF /0 SIB mod=10)。gzip 0x484ac0 対応。CF は保存する。
+pub fn inc_r16_sibd32<B: Backend>(
+    b: &mut B,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i32,
+) -> Flow<B> {
+    use polyisa_sem::W16;
+    let cf_mask = b.konst::<W32>(FLAG_CF);
+    let all_flags = b.get(eflags_ref());
+    let saved_cf = b.and::<W32>(all_flags, cf_mask);
+    let addr = sib_addr_scaled(b, shift, disp, base, idx);
+    let x: B::V<W16> = b.load::<W16>(addr, DATA_READ)?;
+    let one = b.konst::<W16>(1);
+    let v = b.add::<W16>(x, one);
+    b.store::<W16>(addr, v, DATA_WRITE)?;
+    update_add_flags(b, x, one, v);
+    let f = b.get(eflags_ref());
+    let not_cf = b.konst::<W32>(!FLAG_CF);
+    let cleared = b.and::<W32>(f, not_cf);
+    let restored = b.or::<W32>(cleared, saved_cf);
+    b.set(eflags_ref(), restored);
+    Ok(())
+}
+
 /// INC m32 [base+index*scale+disp32] (FF /0 SIB mod=10)。CF は保存する.
 pub fn inc_r32_sibd32<B: Backend>(
     b: &mut B,
@@ -6310,6 +6356,22 @@ pub fn mov_m16_imm_sibd<B: Backend>(
 ) -> Flow<B> {
     use polyisa_sem::W16;
     let addr = sib_addr_scaled(b, shift, disp as i32, base, idx);
+    let v = b.konst::<W16>(imm);
+    b.store::<W16>(addr, v, DATA_WRITE)?;
+    Ok(())
+}
+
+/// MOV m16,imm16 [base+index*scale+disp32] (66 C7 /0 SIB mod=10)。gzip 0x485910 対応.
+pub fn mov_m16_imm_sibd32<B: Backend>(
+    b: &mut B,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i32,
+    imm: u16,
+) -> Flow<B> {
+    use polyisa_sem::W16;
+    let addr = sib_addr_scaled(b, shift, disp, base, idx);
     let v = b.konst::<W16>(imm);
     b.store::<W16>(addr, v, DATA_WRITE)?;
     Ok(())
@@ -16505,6 +16567,23 @@ pub fn xor_r64_sibd32<B: Backend>(
 pub fn mov_m16_r16_memnd<B: Backend>(b: &mut B, src: Gpr, base: Gpr) -> Flow<B> {
     use polyisa_sem::W16;
     let addr = read64(b, base);
+    let src32 = read(b, src);
+    let v16: B::V<W16> = b.trunc::<W32, W16>(src32);
+    b.store::<W16>(addr, v16, DATA_WRITE)?;
+    Ok(())
+}
+
+/// MOV [base+index*scale+disp32],r16 (66 89 SIB mod=10)。gzip 0x4859e4 対応.
+pub fn mov_m16_r16_sibd32<B: Backend>(
+    b: &mut B,
+    src: Gpr,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i32,
+) -> Flow<B> {
+    use polyisa_sem::W16;
+    let addr = sib_addr_scaled(b, shift, disp, base, idx);
     let src32 = read(b, src);
     let v16: B::V<W16> = b.trunc::<W32, W16>(src32);
     b.store::<W16>(addr, v16, DATA_WRITE)?;

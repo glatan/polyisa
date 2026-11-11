@@ -107,7 +107,7 @@
 | lea | lea_abs、lea_m32、lea_m8、lea_mnd、lea_sib、lea_sibabs、lea_sibd、lea_sibd32 | 真 | alu |
 | leave | leave | 真 | alu |
 | loop | loop | 真 | jump |
-| mov | mov_mr32、mov_r32_imm、mov_r64_imm64、mov_rm16_imm_m32、mov_rm16_imm_mem8、mov_rm16_imm_memnd、mov_rm16_imm_rip、mov_rm16_imm_sib、mov_rm16_imm_sibd、mov_rm32、mov_rm_imm、mov_rm_imm_m32、mov_rm_imm_m8、mov_rm_imm_memnd、mov_rm_imm_rip、mov_rm_imm_sib、mov_rm_imm_sibabs、mov_rm_imm_sibd、mov_rm_imm_sibd32 | 真 | alu |
+| mov | mov_mr32、mov_r32_imm、mov_r64_imm64、mov_rm16_imm_disp32、mov_rm16_imm_m32、mov_rm16_imm_mem8、mov_rm16_imm_memnd、mov_rm16_imm_rip、mov_rm16_imm_sib、mov_rm16_imm_sibd、mov_rm16_imm_sibd32、mov_rm32、mov_rm_imm、mov_rm_imm_m32、mov_rm_imm_m8、mov_rm_imm_memnd、mov_rm_imm_rip、mov_rm_imm_sib、mov_rm_imm_sibabs、mov_rm_imm_sibd、mov_rm_imm_sibd32 | 真 | alu |
 | mov | mov_eax_abs、mov_eax_mem32、mov_eax_mem8、mov_eax_memnd、mov_eax_sib、mov_eax_sibabs、mov_eax_sibd、mov_eax_sibd32、mov_r8_imm、mov_r8_m8、mov_r8_m8_mem32、mov_r8_m8_mem8、mov_r8_m8_memnd、mov_r8_m8_rip、mov_r8_m8_sib、mov_r8_m8_sibd、mov_r8_m8_sibd32 | 真 | load |
 | mov | mov_abs_eax、mov_m8_r8、mov_m8_r8_mem32、mov_m8_r8_mem8、mov_m8_r8_memnd、mov_m8_r8_rip、mov_m8_r8_sib、mov_m8_r8_sibd、mov_m8_r8_sibd32、mov_mem_eax32、mov_mem_eax8、mov_memnd_eax、mov_rm8_imm_mem32、mov_rm8_imm_mem8、mov_rm8_imm_memnd、mov_rm8_imm_rip、mov_rm8_imm_sib、mov_rm8_imm_sibd、mov_rm8_imm_sibd32、mov_sib_eax、mov_sibabs_eax、mov_sibabs_r8、mov_sibd32_eax、mov_sibd_eax | 真 | store |
 | movaps | movaps_load_mem32、movaps_load_mem8、movaps_load_memnd、movaps_load_rip、movaps_load_sibd、movaps_load_xmm | 真 | load |
