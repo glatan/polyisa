@@ -804,6 +804,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("rol_rm32_imm8", "F1", "11000001 11000... ........", "rol r/m32, {imm}", "alu"),
         ("sar_rm32_cl", "F1", "11010011 11111...", "sar r/m32, cl", "alu"),
         ("shl_rm32_cl", "F1", "11010011 11100...", "shl r/m32, cl", "alu"),
+        ("rol_rm32_cl", "F1", "11010011 11000...", "rol r/m32, cl", "alu"),
         ("shr_rm32_cl", "F1", "11010011 11101...", "shr r/m32, cl", "alu"),
         // TEST r/m32,r32 (85 /r)。
         ("test_rm32", "F1", "10000101 11......", "test r/m32, r32", "alu"),

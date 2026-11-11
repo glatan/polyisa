@@ -10670,6 +10670,70 @@ pub fn rol_rm64_imm8<B: Backend>(b: &mut B, dst: Gpr, n: u8) -> Flow<B> {
     Ok(())
 }
 
+/// ROL r/m64,CL (REX.W D3 /0)。CL 下位6ビットで左回転し、回数 0 では旗を変えない。
+pub fn rol_rm64_cl<B: Backend>(b: &mut B, dst: Gpr) -> Flow<B> {
+    let x = read64(b, dst);
+    let cl8 = read8(b, Gpr(1), false);
+    let cl64 = b.zext::<W8, W64>(cl8);
+    let mask = b.konst::<W64>(63);
+    let count = b.and::<W64>(cl64, mask);
+    let zero64 = b.konst::<W64>(0);
+    let is_zero = b.cmp::<W64>(Cmp::Eq, count, zero64);
+    let l = b.shl::<W64>(x, count);
+    let width = b.konst::<W64>(64);
+    let inv = b.sub::<W64>(width, count);
+    let safe_inv = b.select::<W64>(is_zero, zero64, inv);
+    let r = b.shr_l::<W64>(x, safe_inv);
+    let rotated = b.or::<W64>(l, r);
+    let v = b.select::<W64>(is_zero, x, rotated);
+    write64(b, dst, v);
+    let old: B::V<W32> = b.get(eflags_ref());
+    let one64 = b.konst::<W64>(1);
+    let low = b.and::<W64>(v, one64);
+    let cf_take = b.cmp::<W64>(Cmp::Ne, low, zero64);
+    let cf = pick(b, cf_take, FLAG_CF);
+    let szp = szp_bits(b, v);
+    let clear_mask = b.konst::<W32>(!(FLAG_CF | FLAG_SF | FLAG_ZF | FLAG_PF));
+    let mut new_flags = b.and::<W32>(old, clear_mask);
+    new_flags = b.or::<W32>(new_flags, cf);
+    new_flags = b.or::<W32>(new_flags, szp);
+    let assembled = b.select::<W32>(is_zero, old, new_flags);
+    b.set(eflags_ref(), assembled);
+    Ok(())
+}
+
+/// ROL r/m32,CL (D3 /0)。CL 下位5ビットで左回転し、回数 0 では旗を変えない。
+pub fn rol_rm32_cl<B: Backend>(b: &mut B, dst: Gpr) -> Flow<B> {
+    let x = read(b, dst);
+    let cl8 = read8(b, Gpr(1), false);
+    let cl32 = b.zext::<W8, W32>(cl8);
+    let mask = b.konst::<W32>(31);
+    let count = b.and::<W32>(cl32, mask);
+    let zero = b.konst::<W32>(0);
+    let is_zero = b.cmp::<W32>(Cmp::Eq, count, zero);
+    let l = b.shl::<W32>(x, count);
+    let width = b.konst::<W32>(32);
+    let inv = b.sub::<W32>(width, count);
+    let safe_inv = b.select::<W32>(is_zero, zero, inv);
+    let r = b.shr_l::<W32>(x, safe_inv);
+    let rotated = b.or::<W32>(l, r);
+    let v = b.select::<W32>(is_zero, x, rotated);
+    write(b, dst, v);
+    let old: B::V<W32> = b.get(eflags_ref());
+    let one = b.konst::<W32>(1);
+    let low = b.and::<W32>(v, one);
+    let cf_take = b.cmp::<W32>(Cmp::Ne, low, zero);
+    let cf = pick(b, cf_take, FLAG_CF);
+    let szp = szp_bits(b, v);
+    let clear_mask = b.konst::<W32>(!(FLAG_CF | FLAG_SF | FLAG_ZF | FLAG_PF));
+    let mut new_flags = b.and::<W32>(old, clear_mask);
+    new_flags = b.or::<W32>(new_flags, cf);
+    new_flags = b.or::<W32>(new_flags, szp);
+    let assembled = b.select::<W32>(is_zero, old, new_flags);
+    b.set(eflags_ref(), assembled);
+    Ok(())
+}
+
 /// SHL r/m32,imm8。論理左シフトし、CF/OF/SZP を更新する.
 pub fn shl_rm32_imm8<B: Backend>(b: &mut B, dst: Gpr, n: u8) -> Flow<B> {
     let x = read(b, dst);

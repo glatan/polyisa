@@ -168,7 +168,7 @@
 | pxor | pxor | 真 | alu |
 | rdsspq | rdsspq | 真 | system |
 | ret | ret | 真 | jump |
-| rol | rol_rm32_1、rol_rm32_imm8 | 真 | alu |
+| rol | rol_rm32_1、rol_rm32_cl、rol_rm32_imm8 | 真 | alu |
 | ror | ror_rm32_1、ror_rm32_imm8 | 真 | alu |
 | sar | sar_rm32_1、sar_rm32_cl、sar_rm32_imm8 | 真 | alu |
 | sbb | sbb_r_mem32、sbb_r_mem8、sbb_r_memnd、sbb_r_rip、sbb_rm32、sbb_rm32_imm、sbb_rm_imm8、sbb_rm_imm8_sibd | 真 | alu |

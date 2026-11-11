@@ -4857,6 +4857,14 @@ fn dispatch<B: Backend>(
                 sem::sar_rm32_cl(b, rm())
             }
         }
+        Insn::RolRm32Cl => {
+            // D3 /0 mod=11。sha3sum 0x4b45f6 の rolq %cl, %r12。
+            if rex_w {
+                sem::rol_rm64_cl(b, rm())
+            } else {
+                sem::rol_rm32_cl(b, rm())
+            }
+        }
         Insn::ShlRm32Cl => {
             if rex_w {
                 sem::shl_rm64_cl(b, rm())
@@ -8628,6 +8636,7 @@ fn dispatch<B: Backend>(
             | Insn::RolRm32Imm8
             | Insn::SarRm32Cl
             | Insn::ShlRm32Cl
+            | Insn::RolRm32Cl
             | Insn::ShrRm32Cl
             | Insn::NotRm32
             | Insn::NegRm32
@@ -8779,6 +8788,7 @@ fn dispatch<B: Backend>(
                         | Insn::MovsxdSibd
                         | Insn::MovsxdSibd32
                 ))
+                || (rex_w && matches!(insn, Insn::RolRm32Cl))
                 || (has66 && matches!(insn, Insn::XorRm32 | Insn::RolRm32Imm8));
             if !skip {
                 sem::clear_hi(b, d);
