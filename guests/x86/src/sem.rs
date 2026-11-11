@@ -10915,6 +10915,31 @@ pub fn fldz<B: Backend>(b: &mut B) -> Flow<B> {
     push_ext(b, sig, exp)
 }
 
+/// FXCH ST(i) (D9 C8+i)。ST(0) と ST(i) を入れ替える。seq 0x4d0981 対応.
+pub fn fxch_st<B: Backend>(b: &mut B, i: u8) -> Flow<B> {
+    let top = b.get(top_ref());
+    let (sig0, exp0) = read_st(b, top);
+    let ii = b.konst::<W16>(i as u16);
+    let summed = b.add::<W16>(top, ii);
+    let seven = b.konst::<W16>(7);
+    let src = b.and::<W16>(summed, seven);
+    let (sig1, exp1) = read_st(b, src);
+    for slot in 0..8 {
+        let idx = b.konst::<W16>(slot as u16);
+        let hit_top = b.cmp::<W16>(Cmp::Eq, top, idx);
+        let hit_src = b.cmp::<W16>(Cmp::Eq, src, idx);
+        let old_sig = b.get(st_sig_ref(slot));
+        let old_exp = b.get(st_exp_ref(slot));
+        let sig_top = b.select::<W64>(hit_top, sig1, old_sig);
+        let exp_top = b.select::<W16>(hit_top, exp1, old_exp);
+        let new_sig = b.select::<W64>(hit_src, sig0, sig_top);
+        let new_exp = b.select::<W16>(hit_src, exp0, exp_top);
+        b.set(st_sig_ref(slot), new_sig);
+        b.set(st_exp_ref(slot), new_exp);
+    }
+    Ok(())
+}
+
 /// FLD ST(i) (D9 C0+i)。ST(i) の複製を載せる。元の段は残す。seq 0x4d0867 対応.
 pub fn fld_st<B: Backend>(b: &mut B, i: u8) -> Flow<B> {
     let top = b.get(top_ref());

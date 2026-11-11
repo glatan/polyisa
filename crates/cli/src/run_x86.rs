@@ -842,6 +842,10 @@ fn fetch_len(
                 // FLDZ (D9 EE)。seq 0x4d097f。
                 return Some(2);
             }
+            if reg == 1 && md == 3 {
+                // FXCH ST(i) (D9 C8+i)。seq 0x4d0981 の D9 C9。
+                return Some(2);
+            }
             if reg != 5 && reg != 7 {
                 return None;
             }
@@ -3396,6 +3400,10 @@ fn dispatch<B: Backend>(
         Insn::Fldz => {
             // D9 EE。seq 0x4d097f の fldz。
             sem::fldz(b)
+        }
+        Insn::FxchSt => {
+            // D9 C8+i。seq 0x4d0981 の D9 C9 は FXCH ST(1)。
+            sem::fxch_st(b, (word & 7) as u8)
         }
         Insn::FldSt => {
             // D9 C0+i。seq 0x4d0867 の D9 C0 は FLD ST(0)。
