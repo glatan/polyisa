@@ -16548,6 +16548,86 @@ pub fn cvtsi2sd_xmm_m64_sibd<B: Backend>(
     Ok(())
 }
 
+/// CVTSI2SD xmm, m32 [base] (F2 0F 2A SIB mod=00, no_index)。
+pub fn cvtsi2sd_xmm_m32_memnd<B: Backend>(b: &mut B, dst: Xmm, base: Gpr) -> Flow<B> {
+    use polyisa_sem::F64;
+    let addr = read64(b, base);
+    let v32: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let f: B::V<F64> = b.fcvt_from_s32(v32, 0);
+    let cur: B::V<W128> = b.get(xmm_ref(dst));
+    let hi_shift = b.konst::<W128>(64);
+    let hi = b.shr_l::<W128>(cur, hi_shift);
+    let hi_back = b.shl::<W128>(hi, hi_shift);
+    let lo64: B::V<W64> = b.trunc::<F64, W64>(f);
+    let lo = b.zext::<W64, W128>(lo64);
+    let v = b.or::<W128>(hi_back, lo);
+    b.set(xmm_ref(dst), v);
+    Ok(())
+}
+
+/// CVTSI2SD xmm, m64 [base] (F2 REX.W 0F 2A SIB mod=00, no_index)。
+pub fn cvtsi2sd_xmm_m64_memnd<B: Backend>(b: &mut B, dst: Xmm, base: Gpr) -> Flow<B> {
+    use polyisa_sem::F64;
+    let addr = read64(b, base);
+    let v64: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let f: B::V<F64> = b.fcvt_from_s64(v64, 0);
+    let cur: B::V<W128> = b.get(xmm_ref(dst));
+    let hi_shift = b.konst::<W128>(64);
+    let hi = b.shr_l::<W128>(cur, hi_shift);
+    let hi_back = b.shl::<W128>(hi, hi_shift);
+    let lo64: B::V<W64> = b.trunc::<F64, W64>(f);
+    let lo = b.zext::<W64, W128>(lo64);
+    let v = b.or::<W128>(hi_back, lo);
+    b.set(xmm_ref(dst), v);
+    Ok(())
+}
+
+/// CVTSI2SD xmm, m32 [base+index*scale] (F2 0F 2A SIB mod=00)。
+pub fn cvtsi2sd_xmm_m32_sib<B: Backend>(
+    b: &mut B,
+    dst: Xmm,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+) -> Flow<B> {
+    use polyisa_sem::F64;
+    let addr = sib_addr_scaled(b, shift, 0, base, idx);
+    let v32: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let f: B::V<F64> = b.fcvt_from_s32(v32, 0);
+    let cur: B::V<W128> = b.get(xmm_ref(dst));
+    let hi_shift = b.konst::<W128>(64);
+    let hi = b.shr_l::<W128>(cur, hi_shift);
+    let hi_back = b.shl::<W128>(hi, hi_shift);
+    let lo64: B::V<W64> = b.trunc::<F64, W64>(f);
+    let lo = b.zext::<W64, W128>(lo64);
+    let v = b.or::<W128>(hi_back, lo);
+    b.set(xmm_ref(dst), v);
+    Ok(())
+}
+
+/// CVTSI2SD xmm, m64 [base+index*scale] (F2 REX.W 0F 2A SIB mod=00)。
+pub fn cvtsi2sd_xmm_m64_sib<B: Backend>(
+    b: &mut B,
+    dst: Xmm,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+) -> Flow<B> {
+    use polyisa_sem::F64;
+    let addr = sib_addr_scaled(b, shift, 0, base, idx);
+    let v64: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let f: B::V<F64> = b.fcvt_from_s64(v64, 0);
+    let cur: B::V<W128> = b.get(xmm_ref(dst));
+    let hi_shift = b.konst::<W128>(64);
+    let hi = b.shr_l::<W128>(cur, hi_shift);
+    let hi_back = b.shl::<W128>(hi, hi_shift);
+    let lo64: B::V<W64> = b.trunc::<F64, W64>(f);
+    let lo = b.zext::<W64, W128>(lo64);
+    let v = b.or::<W128>(hi_back, lo);
+    b.set(xmm_ref(dst), v);
+    Ok(())
+}
+
 /// ADDSD xmm1, xmm2 (F2 0F 58 /r reg-direct)。下位64の倍精度加算。上位64は dst のまま.
 pub fn addsd_xmm<B: Backend>(b: &mut B, dst: Xmm, src: Xmm) -> Flow<B> {
     use polyisa_sem::F64;

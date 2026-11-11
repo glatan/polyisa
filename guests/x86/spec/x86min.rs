@@ -1251,6 +1251,14 @@ pub fn build_model() -> polyisa_isadl::Model {
             "load",
         ),
         (
+            "cvtsi2sd_m32_sib",
+            "N8",
+            "00001111 00101010 00...100 ........",
+            vec![wc("n8_base", WhereOp::Ne, 5)],
+            "cvtsi2sd xmm, m32",
+            "load",
+        ),
+        (
             "add_r_mem32",
             "M32",
             "00000011 10...... ................................",
