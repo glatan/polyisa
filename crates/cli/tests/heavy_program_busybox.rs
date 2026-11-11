@@ -316,6 +316,7 @@ fn text_applets_match_host() {
         &["tail", "-n", "1", f],
         &["uniq", f],
         &["cut", "-c1", f],
+        &["cut", "-d", "a", "-f2", f],
         &["printf", "%s\n", "hi"],
         &["expr", "1", "+", "2"],
         &["rev", f],

@@ -178,7 +178,7 @@ fn fetch_len(
                 }
             } else if (0x40..=0x4F).contains(&s) {
                 // CMOVcc (0F 40-4F /r)。reg-direct 3B、mod=10 RBP+disp32 7B、mod=00 RIP 7B、
-                // mod=01 SIB+disp8 no_index 5B.
+                // mod=01 SIB+disp8 no_index 5B、mod=00 SIB no_index 4B.
                 let m = third?;
                 let md = m >> 6;
                 let rm = m & 7;
@@ -190,6 +190,14 @@ fn fetch_len(
                     let t = fourth?;
                     // no_index (index=100) のみ.
                     if (t >> 3) & 7 == 4 { Some(5) } else { None }
+                } else if md == 0 && rm == 4 {
+                    let t = fourth?;
+                    // no_index かつ base≠5。cut 0x492257 の cmovll (%rsp), %r10d。4B.
+                    if (t >> 3) & 7 == 4 && t & 7 != 5 {
+                        Some(4)
+                    } else {
+                        None
+                    }
                 } else if s == 0x46 && md == 1 && rm != 4 {
                     // CMOVBE [base+disp8] (test 0x4d2874)。
                     Some(4)
@@ -7061,6 +7069,15 @@ fn dispatch<B: Backend>(
                 sem::cmovge_r64_sibd(b, reg0f_as_gpr(), base, d8)
             } else {
                 sem::cmovge_r32_sibd(b, reg0f_as_gpr(), base, d8)
+            }
+        }
+        Insn::CmovlR32Sib => {
+            // 0F 4C SIB mod=00 [base] no_index。cut 0x492257 の cmovll (%rsp), %r10d。
+            let base = sib0f_base();
+            if rex_w {
+                sem::cmovl_r64_sib(b, reg0f_as_gpr(), base)
+            } else {
+                sem::cmovl_r32_sib(b, reg0f_as_gpr(), base)
             }
         }
         Insn::CmoveRip => {
