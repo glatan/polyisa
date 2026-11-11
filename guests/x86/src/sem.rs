@@ -12455,6 +12455,38 @@ pub fn sub_m8_r8<B: Backend>(
     Ok(())
 }
 
+/// OR [base+disp8], r8 (08 /r SIB mod=01, no_index)。sed 0x4a87dd 対応.
+pub fn or_m8_r8_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8, src: Gpr, high: bool) -> Flow<B> {
+    use polyisa_sem::W8;
+    let addr = eff_addr(b, base, disp);
+    let x: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
+    let y = read8(b, src, high);
+    let v = b.or::<W8>(x, y);
+    b.store::<W8>(addr, v, DATA_WRITE)?;
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// OR [base+index*scale+disp8], r8 (08 /r SIB mod=01)。
+pub fn or_m8_r8_sibd<B: Backend>(
+    b: &mut B,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i8,
+    src: Gpr,
+    high: bool,
+) -> Flow<B> {
+    use polyisa_sem::W8;
+    let addr = sib_addr_scaled(b, shift, disp as i32, base, idx);
+    let x: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
+    let y = read8(b, src, high);
+    let v = b.or::<W8>(x, y);
+    b.store::<W8>(addr, v, DATA_WRITE)?;
+    update_logic_flags(b, v);
+    Ok(())
+}
+
 /// OR r/m8, r8 reg-direct (08 /r mod=11)。dst rm と src reg の OR で 5 旗を更新する.
 pub fn or_m8_r8<B: Backend>(
     b: &mut B,

@@ -706,10 +706,18 @@ fn fetch_len(
             let s = second?;
             if s >> 6 == 3 { Some(2) } else { None }
         }
-        // 0x08 /r (OR r/m8,r8)。reg-direct 2B のみ.
+        // 0x08 /r (OR r/m8,r8)。reg-direct 2B、SIB mod=01 +disp8 4B。sed 0x4a87dd 対応.
         0x08 => {
             let s = second?;
-            if s >> 6 == 3 { Some(2) } else { None }
+            let md = s >> 6;
+            let rm = s & 7;
+            if md == 3 {
+                Some(2)
+            } else if rm == 4 && md == 1 {
+                Some(4)
+            } else {
+                None
+            }
         }
         // 0x88 /r (MOV r/m8,r8)。mod=00 SIB 直接番地 (base=101) のみ 7B。
         // reg-direct・mod=01/10・SIB index 付きは未対応。
@@ -2926,6 +2934,22 @@ fn dispatch<B: Backend>(
                 sem::cmp_m8_r8_memnd(b, sib_base(), src, high)
             } else {
                 sem::cmp_m8_r8_sib(b, sib_base(), sib_idx(), sib_shift(), src, high)
+            }
+        }
+        Insn::OrM8R8Sibd => {
+            // 08 /r SIB mod=01 [base+index*scale+disp8], r8。sed 0x4a87dd 対応.
+            let reg_f = (modrm() >> 3) & 7;
+            let (src, high) = if rex != 0 {
+                (Gpr(reg_f | ((rex >> 2) & 1) << 3), false)
+            } else if reg_f < 4 {
+                (Gpr(reg_f), false)
+            } else {
+                (Gpr(reg_f - 4), true)
+            };
+            if no_index() {
+                sem::or_m8_r8_mem8(b, sib_base(), disp8(), src, high)
+            } else {
+                sem::or_m8_r8_sibd(b, sib_base(), sib_idx(), sib_shift(), disp8(), src, high)
             }
         }
         Insn::CmpM8R8Sibd => {
