@@ -5738,6 +5738,39 @@ fn run_imul_r64_imm_sib() {
 }
 
 #[test]
+fn run_minsd_xmm() {
+    // F2 0F 5D C1 = minsd xmm0, xmm1。4.0 と 2.0 の小さい方は 2.0。上位64は残る。ping 0x42e6d9。
+    // Ref: SPEC-X86-INTEL-SDM (v093).
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0xF2, 0x0F, 0x5D, 0xC1])
+        .unwrap();
+    env.backend.set(
+        polyisa_guest_x86::sem::xmm_ref(polyisa_guest_x86::sem::Xmm(0)),
+        (0x1111_2222_3333_4444_u128 << 64) | 0x4010_0000_0000_0000,
+    );
+    env.backend.set(
+        polyisa_guest_x86::sem::xmm_ref(polyisa_guest_x86::sem::Xmm(1)),
+        0x4000_0000_0000_0000_u128,
+    );
+    env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 1);
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x1004 });
+    let v: u128 = env.backend.get(polyisa_guest_x86::sem::xmm_ref(
+        polyisa_guest_x86::sem::Xmm(0),
+    ));
+    assert_eq!(
+        v,
+        (0x1111_2222_3333_4444_u128 << 64) | 0x4000_0000_0000_0000
+    );
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::eflags_ref()), 1);
+}
+
+#[test]
 fn run_mov_dx_r14_disp8() {
     // 66 41 8B 56 12 = movw 0x12(%r14), %dx。下位16だけ置き、上位は残る。pgrep 0x44b629。
     // Ref: SPEC-X86-INTEL-SDM (v093).

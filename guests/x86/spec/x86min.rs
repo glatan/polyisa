@@ -731,6 +731,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("divsd_xmm_m64_rip", "F1", "00001111 01011110 00...101 ................................", "divsd xmm, m64", "load"),
         // DIVSD xmm,xmm (F2 0F 5E /r reg-direct)。F2 接頭辞は実行側で剥がす。dd 0x492911 対応.
         ("divsd", "F1", "00001111 01011110 11......", "divsd xmm, xmm", "alu"),
+        // MINSD xmm,xmm (F2 0F 5D /r reg-direct)。F2 は剥がし済み。ping 0x42e6d9 対応。
+        ("minsd", "F1", "00001111 01011101 11......", "minsd xmm, xmm", "alu"),
         ("mulsd_xmm_m64_sibd", "F1", "00001111 01011001 01...100 ........ ........", "mulsd xmm, m64", "load"),
         // MULSD xmm,xmm (F2 0F 59 /r reg-direct)。F2 は剥がし済み.
         ("mulsd", "F1", "00001111 01011001 11......", "mulsd xmm, xmm", "alu"),

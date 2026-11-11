@@ -450,6 +450,10 @@ fn fetch_len(
                 } else {
                     None
                 }
+            } else if s == 0x5D {
+                // MINSD xmm,xmm (F2 0F 5D /r mod=11、3B)。ping 0x42e6d9 の minsd xmm0, xmm1。
+                let m = third?;
+                if m >> 6 == 3 { Some(3) } else { None }
             } else if s == 0x5E {
                 // DIVSD xmm,m64 RIP (F2 0F 5E 05 + disp32、7B)。dd 0x4928e8 対応.
                 let m = third?;
@@ -1736,6 +1740,7 @@ pub fn run_mode(
                             | 0x54
                             | 0x5C
                             | 0x59
+                            | 0x5D
                             | 0x5E
                             | 0xBA
                             | 0xC1
@@ -2217,6 +2222,7 @@ pub fn run_mode(
                 | Insn::Cvtsi2sdM32Sib
                 | Insn::DivsdXmmM64Rip
                 | Insn::Divsd
+                | Insn::Minsd
         ) && !has_f2
         {
             return Outcome::Unimplemented {
@@ -6944,6 +6950,7 @@ fn dispatch<B: Backend>(
             }
         }
         Insn::Divsd => sem::divsd_xmm(b, xmm_reg_r(), xmm_rm_b()),
+        Insn::Minsd => sem::minsd_xmm(b, xmm_reg_r(), xmm_rm_b()),
         Insn::DivsdXmmM64Rip => {
             // F2 0F 5E 05 + disp32。dd 0x4928e8 の divsd xmm0, [rip+disp]。
             if is64 {

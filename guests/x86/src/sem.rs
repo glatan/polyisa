@@ -17009,6 +17009,26 @@ pub fn mulsd_xmm<B: Backend>(b: &mut B, dst: Xmm, src: Xmm) -> Flow<B> {
     Ok(())
 }
 
+/// MINSD xmm,xmm (F2 0F 5D /r)。下位64の小さい方を dst に置く。上位64は dst のまま。ping 0x42e6d9 対応.
+pub fn minsd_xmm<B: Backend>(b: &mut B, dst: Xmm, src: Xmm) -> Flow<B> {
+    use polyisa_sem::F64;
+    let a128: B::V<W128> = b.get(xmm_ref(dst));
+    let c128: B::V<W128> = b.get(xmm_ref(src));
+    let alo64: B::V<W64> = b.trunc::<W128, W64>(a128);
+    let clo64: B::V<W64> = b.trunc::<W128, W64>(c128);
+    let a: B::V<F64> = b.trunc::<W64, F64>(alo64);
+    let c: B::V<F64> = b.trunc::<W64, F64>(clo64);
+    let v = b.fmin(a, c);
+    let vlo64: B::V<W64> = b.trunc::<F64, W64>(v);
+    let lo = b.zext::<W64, W128>(vlo64);
+    let hi_shift = b.konst::<W128>(64);
+    let hi = b.shr_l::<W128>(a128, hi_shift);
+    let hi_back = b.shl::<W128>(hi, hi_shift);
+    let res = b.or::<W128>(hi_back, lo);
+    b.set(xmm_ref(dst), res);
+    Ok(())
+}
+
 /// DIVSD xmm,xmm (F2 0F 5E /r)。src の下位64で dst の下位64を割る。上位64は dst のまま。dd 0x492911 対応.
 pub fn divsd_xmm<B: Backend>(b: &mut B, dst: Xmm, src: Xmm) -> Flow<B> {
     use polyisa_sem::F64;
