@@ -101,6 +101,8 @@ impl ProcessTable {
 pub enum ThreadWait {
     /// `wait`。`which` が -1 のときはどの子でもよい。
     Child { which: i64 },
+    /// 空のパイプの読み。
+    Pipe { id: u64 },
 }
 
 #[derive(Debug)]
@@ -153,6 +155,15 @@ impl GuestScheduler {
         }
     }
 
+    /// そのパイプを待っているスレッドを実行可能に戻す。
+    pub fn unblock_pipe(&mut self, id: u64) {
+        for thread in &mut self.threads {
+            if matches!(thread.wait, Some(ThreadWait::Pipe { id: waiting }) if waiting == id) {
+                thread.wait = None;
+            }
+        }
+    }
+
     pub fn mark_exited(&mut self, id: ThreadId) {
         if let Some(thread) = self.threads.iter_mut().find(|thread| thread.id == id) {
             thread.exited = true;
@@ -201,6 +212,100 @@ impl GuestScheduler {
             .find(|thread| thread.id == id)
             .map(|thread| thread.steps)
             .unwrap_or(0)
+    }
+}
+
+/// ゲストプロセス間で共有するパイプのバッファ。
+#[derive(Debug, Default)]
+pub struct PipeTable {
+    next: u64,
+    pipes: Vec<Pipe>,
+}
+
+#[derive(Debug)]
+struct Pipe {
+    id: u64,
+    data: Vec<u8>,
+    readers: u32,
+    writers: u32,
+}
+
+/// パイプからの読み出し。
+#[derive(Debug, PartialEq, Eq)]
+pub enum PipeRead {
+    /// 取り出したバイト列。
+    Bytes(Vec<u8>),
+    /// 書き手がなく、バッファも空。
+    Eof,
+    /// 書き手が残っていて、バッファが空。
+    Empty,
+}
+
+impl PipeTable {
+    /// 読み端と書き端を一つずつ持つパイプを作る。
+    pub fn open(&mut self) -> u64 {
+        self.next += 1;
+        let id = self.next;
+        self.pipes.push(Pipe {
+            id,
+            data: Vec::new(),
+            readers: 1,
+            writers: 1,
+        });
+        id
+    }
+
+    /// fork で端を複製したときに数を増やす。
+    pub fn dup(&mut self, id: u64, read: bool) {
+        if let Some(pipe) = self.get_mut(id) {
+            if read {
+                pipe.readers += 1;
+            } else {
+                pipe.writers += 1;
+            }
+        }
+    }
+
+    /// 端を閉じる。
+    pub fn close(&mut self, id: u64, read: bool) {
+        if let Some(pipe) = self.get_mut(id) {
+            if read {
+                pipe.readers = pipe.readers.saturating_sub(1);
+            } else {
+                pipe.writers = pipe.writers.saturating_sub(1);
+            }
+        }
+    }
+
+    /// 最大 `max` バイト読む。
+    pub fn read(&mut self, id: u64, max: usize) -> PipeRead {
+        let Some(pipe) = self.get_mut(id) else {
+            return PipeRead::Eof;
+        };
+        if pipe.data.is_empty() {
+            if pipe.writers == 0 {
+                PipeRead::Eof
+            } else {
+                PipeRead::Empty
+            }
+        } else {
+            let n = max.min(pipe.data.len());
+            PipeRead::Bytes(pipe.data.drain(..n).collect())
+        }
+    }
+
+    /// 書き手が読む相手を失っていれば `None`。
+    pub fn write(&mut self, id: u64, bytes: &[u8]) -> Option<usize> {
+        let pipe = self.get_mut(id)?;
+        if pipe.readers == 0 {
+            return None;
+        }
+        pipe.data.extend_from_slice(bytes);
+        Some(bytes.len())
+    }
+
+    fn get_mut(&mut self, id: u64) -> Option<&mut Pipe> {
+        self.pipes.iter_mut().find(|pipe| pipe.id == id)
     }
 }
 
@@ -284,5 +389,19 @@ mod tests {
         assert_eq!(sched.least_runnable(), None);
         sched.unblock(ThreadId(2));
         assert_eq!(sched.least_runnable(), Some(ThreadId(2)));
+    }
+
+    #[test]
+    fn pipe_read_waits_until_write_and_eof_when_writer_closes() {
+        let mut pipes = PipeTable::default();
+        let id = pipes.open();
+        assert_eq!(pipes.read(id, 4), PipeRead::Empty);
+        assert_eq!(pipes.write(id, b"ab"), Some(2));
+        assert_eq!(pipes.read(id, 1), PipeRead::Bytes(b"a".to_vec()));
+        pipes.close(id, false);
+        assert_eq!(pipes.read(id, 4), PipeRead::Bytes(b"b".to_vec()));
+        assert_eq!(pipes.read(id, 4), PipeRead::Eof);
+        pipes.close(id, true);
+        assert_eq!(pipes.write(id, b"z"), None);
     }
 }

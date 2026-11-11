@@ -132,6 +132,7 @@ pub mod x86_64 {
     pub const CLONE: u64 = 56;
     pub const EXECVE: u64 = 59;
     pub const WAIT4: u64 = 61;
+    pub const PIPE2: u64 = 293;
     // Gap: GAP-0004
     // statfs 系。busybox の `df` が呼ぶ。
     // Ref: SRC-LINUX (7.3).
@@ -216,6 +217,7 @@ pub mod i386 {
     pub const CLONE: u64 = 120;
     pub const EXECVE: u64 = 11;
     pub const WAIT4: u64 = 114;
+    pub const PIPE2: u64 = 331;
 }
 
 /// Linux の `clone` フラグ。アドレス空間の共有はプロセス生成では使わない。
@@ -343,6 +345,7 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             i386::CLONE => Some("clone"),
             i386::EXECVE => Some("execve"),
             i386::WAIT4 => Some("wait4"),
+            i386::PIPE2 => Some("pipe2"),
             _ => None,
         },
         GuestAbi::X86_64Linux => match nr {
@@ -413,6 +416,7 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             x86_64::CLONE => Some("clone"),
             x86_64::EXECVE => Some("execve"),
             x86_64::WAIT4 => Some("wait4"),
+            x86_64::PIPE2 => Some("pipe2"),
             _ => None,
         },
         GuestAbi::Unknown => None,

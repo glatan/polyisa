@@ -43,7 +43,7 @@
 | ゲスト ABI | 処理するシステムコール | 詳細 |
 |---|---|---|
 | rv64 | 3 | [syscalls.md](syscalls.md) |
-| x86_64 | 63 | [syscalls.md](syscalls.md) |
+| x86_64 | 64 | [syscalls.md](syscalls.md) |
 | i386 | 43 | [syscalls.md](syscalls.md) |
 
 ## 設計との差

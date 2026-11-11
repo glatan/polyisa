@@ -51,6 +51,7 @@
 - munmap
 - newfstatat
 - openat
+- pipe2
 - prlimit64
 - read
 - readlink
