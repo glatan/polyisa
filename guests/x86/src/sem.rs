@@ -3393,6 +3393,27 @@ pub fn cmp_rm32<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
     Ok(())
 }
 
+/// CMP r/m16, r16 (66 39 /r mod=11)。下位16ビットを比較し 6 旗を更新する。レジスタは変えない。fgrep 0x401227 対応.
+pub fn cmp_rm16<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
+    let x = if dst.0 < 8 {
+        let x32 = read(b, dst);
+        b.trunc::<W32, W16>(x32)
+    } else {
+        let x64 = read64(b, dst);
+        b.trunc::<W64, W16>(x64)
+    };
+    let y = if src.0 < 8 {
+        let y32 = read(b, src);
+        b.trunc::<W32, W16>(y32)
+    } else {
+        let y64 = read64(b, src);
+        b.trunc::<W64, W16>(y64)
+    };
+    let v = b.sub::<W16>(x, y);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
 /// CMP r/m32, r32 [base+disp32] (mod=10)。dstメモリとsrcレジスタを比較する。
 pub fn cmp_rm32_mem32<B: Backend>(b: &mut B, base: Gpr, disp: i32, src: Gpr) -> Flow<B> {
     let addr = eff_addr32(b, base, disp);

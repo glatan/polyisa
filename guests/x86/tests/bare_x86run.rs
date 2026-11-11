@@ -9306,3 +9306,29 @@ fn run_movaps_load_sibd_rsp() {
         bits
     );
 }
+
+#[test]
+fn run_cmp_si_dx_sets_flags() {
+    // 66 39 D6 = cmpw %dx, %si。SI-DX の旗だけを更新する。fgrep 0x401227。
+    // Ref: SPEC-X86-INTEL-SDM (v093).
+    let run = |si: u32, dx: u32| {
+        let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.set(Gpr(6).state(), si);
+        env.backend.set(Gpr(2).state(), dx);
+        env.backend
+            .mem
+            .write(VirtAddr(0x1000), &[0x66, 0x39, 0xD6])
+            .unwrap();
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+        assert_eq!(out, Outcome::StepLimit { eip: 0x1003 });
+        assert_eq!(env.backend.get(Gpr(6).state()), si);
+        assert_eq!(env.backend.get(Gpr(2).state()), dx);
+        env.backend.get(polyisa_guest_x86::sem::eflags_ref())
+    };
+    assert_eq!(run(0x1234, 0x0034) & 0x41, 0);
+    assert_eq!(run(0x0034, 0x0034) & 0x41, 0x40);
+    assert_eq!(run(0x0010, 0x0020) & 1, 1);
+}

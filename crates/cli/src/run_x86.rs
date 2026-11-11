@@ -1939,6 +1939,8 @@ pub fn run_mode(
                     | Insn::AddRm16Imm
                     | Insn::AndRm16Imm
                     | Insn::CmpRm16Imm
+                    // CMP r/m16, r16 (66 39 /r mod=11) は CmpRm32 を共用する.
+                    | Insn::CmpRm32
                     | Insn::CmpRmImm8Rip
                     // MOV [base+disp32],r16 (66 89 mod=10) は MovMemEax32 を共用する.
                     | Insn::MovMemEax32
@@ -5791,7 +5793,10 @@ fn dispatch<B: Backend>(
             if rex_w { sem::cqo(b) } else { sem::cdq(b) }
         }
         Insn::CmpRm32 => {
-            if rex_w {
+            // 66 39 /r は cmpw。fgrep 0x401227 の 66 39 D6。
+            if has66 {
+                sem::cmp_rm16(b, rm(), reg())
+            } else if rex_w {
                 sem::cmp_rm64(b, rm(), reg())
             } else {
                 sem::cmp_rm32(b, rm(), reg())

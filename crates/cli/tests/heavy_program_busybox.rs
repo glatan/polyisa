@@ -336,6 +336,7 @@ fn text_applets_match_host() {
         &["test", "-f", f],
         &["cmp", f, f],
         &["sort", f],
+        &["fgrep", "ab", f],
     ];
     for args in cases {
         let argv: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
