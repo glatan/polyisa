@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! SPARC V8 試作のゲスト ISA。段階2の試作であり、裸実行で遅延スロットを確かめる。
 //!
-//! レジスタウィンドウはフラットな32本で代用し、動的なレジスタ参照は本格実装で足す。
+//! レジスタウィンドウは 4 枚で、見える 24 本（out/local/in）を CWP で切り替える。
+//! グローバル 8 本はウィンドウの外にある。オーバーフロー例外は試作に含まない。
 //! 遅延スロットは pc/npc の組で表し、分岐の決定と遅延スロットの実行を分ける。
 //! BA の annul が立っているときは、遅延スロットの命令を実行しない。
 
@@ -22,28 +23,36 @@ impl polyisa_guest::GuestIsa for Sparc {
     }
 }
 
+/// レジスタウィンドウの枚数。2 の冪なので、CWP の巡回は下位ビットのマスクで行う。
+pub const NWINDOWS: usize = 4;
+
+/// 整数レジスタファイルの本数。グローバル 8 本と、ウィンドウ 1 枚あたり 16 本。
+pub const REG_FILE: usize = 8 + NWINDOWS * 16;
+
 /// CPU 状態。`#[repr(C)]` で配置を固定する。
 #[repr(C)]
 #[derive(Clone, Debug)]
 pub struct CpuState {
-    // Gap: GAP-0018
-    /// 整数レジスタ g0〜g31。g0 は読むと 0、書き込みは捨てる。
-    pub g: [u64; 32],
+    /// グローバルとウィンドウファイル。見えるレジスタ番号から物理番号への対応は CWP が決める。
+    pub g: [u64; REG_FILE],
     /// プログラムカウンタ。
     pub pc: u64,
     /// 次のプログラムカウンタ（遅延スロットの実行先）。
     pub npc: u64,
     /// annul ビット。1 のとき、次の遅延スロットは実行しない。
     pub annul: u64,
+    /// 現在のウィンドウ。0 から `NWINDOWS - 1`。
+    pub cwp: u64,
 }
 
 impl Default for CpuState {
     fn default() -> Self {
         Self {
-            g: [0; 32],
+            g: [0; REG_FILE],
             pc: 0,
             npc: 4,
             annul: 0,
+            cwp: 0,
         }
     }
 }
@@ -61,9 +70,10 @@ mod tests {
     #[test]
     fn state_layout_pinned() {
         assert_eq!(core::mem::offset_of!(CpuState, g), 0);
-        assert_eq!(core::mem::offset_of!(CpuState, pc), 32 * 8);
-        assert_eq!(core::mem::offset_of!(CpuState, npc), 32 * 8 + 8);
-        assert_eq!(core::mem::offset_of!(CpuState, annul), 32 * 8 + 16);
+        assert_eq!(core::mem::offset_of!(CpuState, pc), REG_FILE * 8);
+        assert_eq!(core::mem::offset_of!(CpuState, npc), REG_FILE * 8 + 8);
+        assert_eq!(core::mem::offset_of!(CpuState, annul), REG_FILE * 8 + 16);
+        assert_eq!(core::mem::offset_of!(CpuState, cwp), REG_FILE * 8 + 24);
     }
 
     #[test]

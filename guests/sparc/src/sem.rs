@@ -5,14 +5,14 @@
 //! 段階2の目的は遅延スロットのステップ構成を確かめることである。
 //! 分岐は即時に飛ばず npc だけを書き換え、遅延スロットの1命令を実行してから
 //! `commit` で pc を npc に進める。BA の annul が立っているときは、
-//! `delay_slot` が遅延スロットの命令を実行しない。レジスタウィンドウは
-//! 本格実装で足す。
+//! `delay_slot` が遅延スロットの命令を実行しない。見える out/local/in は
+//! CWP でレジスタファイル上の位置が変わる。SAVE は CWP を減らし、RESTORE は増やす。
 //!
 //! 出典は SPEC-SPARC-V8 (Version 8, 1992) である。
 //! Ref: SPEC-SPARC-V8 (Version 8).
 
 use polyisa_mem::{Access, AccessKind, Align, Endian};
-use polyisa_sem::{Backend, Cmp, Flow, StateRef, W32, W64};
+use polyisa_sem::{Backend, Cmp, Flow, StateArray, StateRef, W32, W64};
 
 use super::CpuState;
 
@@ -47,18 +47,56 @@ pub fn annul_ref() -> StateRef<W64> {
     StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, annul))
 }
 
+fn reg_array() -> StateArray<W64> {
+    StateArray::<W64>::from_layout(core::mem::offset_of!(CpuState, g), 8)
+}
+
+/// CWP を指す。
+pub fn cwp_ref() -> StateRef<W64> {
+    StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, cwp))
+}
+
+/// 見えるレジスタ番号を、CWP を加えた物理番号にする。0〜7 はグローバル。
+fn phys_index<B: Backend>(b: &mut B, reg: u8) -> B::V<W32> {
+    if reg < 8 {
+        return b.konst::<W32>(reg as u32);
+    }
+    let cwp: B::V<W64> = b.get(cwp_ref());
+    let off = b.konst::<W64>((reg as u64) - 8);
+    let sixteen = b.konst::<W64>(16);
+    let base = b.mul::<W64>(cwp, sixteen);
+    let sum = b.add::<W64>(base, off);
+    let mask = b.konst::<W64>((super::NWINDOWS * 16 - 1) as u64);
+    let wrapped = b.and::<W64>(sum, mask);
+    let eight = b.konst::<W64>(8);
+    let phys = b.add::<W64>(eight, wrapped);
+    b.trunc::<W64, W32>(phys)
+}
+
 fn read<B: Backend>(b: &mut B, r: Gpr) -> B::V<W64> {
     if r.is_zero() {
         b.konst::<W64>(0)
     } else {
-        b.get(r.state())
+        let idx = phys_index(b, r.0);
+        b.get_indexed(reg_array(), idx)
     }
 }
 
 fn write<B: Backend>(b: &mut B, rd: Gpr, v: B::V<W64>) {
     if !rd.is_zero() {
-        b.set(rd.state(), v);
+        let idx = phys_index(b, rd.0);
+        b.set_indexed(reg_array(), idx, v);
     }
+}
+
+/// CWP を `delta` 進め、ウィンドウ枚数で折り返す。
+fn step_cwp<B: Backend>(b: &mut B, delta: u64) {
+    let cwp = b.get(cwp_ref());
+    let d = b.konst::<W64>(delta);
+    let sum = b.add::<W64>(cwp, d);
+    let mask = b.konst::<W64>((super::NWINDOWS - 1) as u64);
+    let next = b.and::<W64>(sum, mask);
+    b.set(cwp_ref(), next);
 }
 
 fn const_w64<B: Backend>(b: &mut B, v: u64) -> B::V<W64> {
@@ -206,5 +244,32 @@ pub fn commit<B: Backend>(b: &mut B) -> Flow<B> {
     let four = b.konst::<W64>(4);
     let next = b.add::<W64>(npc, four);
     b.set(npc_ref(), next);
+    Ok(())
+}
+
+fn add32<B: Backend>(b: &mut B, x: B::V<W64>, y: B::V<W64>) -> B::V<W64> {
+    let s = b.add::<W64>(x, y);
+    let lo = b.konst::<W64>(0xffff_ffff);
+    b.and::<W64>(s, lo)
+}
+
+/// SAVE。旧ウィンドウで加算し、CWP を 1 減らしてから新ウィンドウへ書く。
+/// Ref: SPEC-SPARC-V8 (Version 8).
+pub fn save<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    let x = read(b, rs1);
+    let y = read(b, rs2);
+    let sum = add32(b, x, y);
+    step_cwp(b, (super::NWINDOWS as u64) - 1);
+    write(b, rd, sum);
+    Ok(())
+}
+
+/// RESTORE。現ウィンドウで加算し、CWP を 1 増やしてから戻ったウィンドウへ書く。
+pub fn restore<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
+    let x = read(b, rs1);
+    let y = read(b, rs2);
+    let sum = add32(b, x, y);
+    step_cwp(b, 1);
+    write(b, rd, sum);
     Ok(())
 }

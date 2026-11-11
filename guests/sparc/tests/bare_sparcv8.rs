@@ -128,3 +128,24 @@ fn ba_without_annul_runs_delay_slot() {
     assert_eq!(env.backend.get(sem::pc_ref()), 0x2000);
     assert_eq!(env.backend.get(sem::npc_ref()), 0x2004);
 }
+
+#[test]
+fn save_maps_out_to_next_in() {
+    let mut env = env();
+    // cwp 0 の o0（見える番号 8）は物理番号 8。
+    env.backend.set(Gpr(8).state(), 0x11);
+    env.step(|b| sem::save(b, Gpr(0), Gpr(0), Gpr(0))).unwrap();
+    assert_eq!(env.backend.get(sem::cwp_ref()), 3);
+    // 新しいウィンドウの i0（見える番号 24）が、直前の o0 を読む。
+    env.step(|b| sem::or(b, Gpr(1), Gpr(24), Gpr(0))).unwrap();
+    assert_eq!(g(&mut env, 1), 0x11);
+    // callee の l0 は caller の l0 と別の物理レジスタ。
+    env.step(|b| sem::sethi(b, Gpr(16), 1)).unwrap();
+    env.step(|b| sem::restore(b, Gpr(0), Gpr(0), Gpr(0)))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::cwp_ref()), 0);
+    env.step(|b| sem::or(b, Gpr(1), Gpr(8), Gpr(0))).unwrap();
+    assert_eq!(g(&mut env, 1), 0x11);
+    env.step(|b| sem::or(b, Gpr(2), Gpr(16), Gpr(0))).unwrap();
+    assert_eq!(g(&mut env, 2), 0);
+}
