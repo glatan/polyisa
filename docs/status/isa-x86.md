@@ -86,7 +86,7 @@
 | fxch | fxch_st | 真 | alu |
 | hlt | hlt | 真 | system |
 | idiv | idiv_rm32 | 真 | div |
-| imul | imul_r_imm、imul_r_imm8、imul_r_imm8_rip、imul_r_imm8_sibd、imul_r_imm_mem8、imul_r_imm_sib、imul_r_imm_sibd、imul_r_rm | 真 | alu |
+| imul | imul_r_imm、imul_r_imm8、imul_r_imm8_rip、imul_r_imm8_sib、imul_r_imm8_sibd、imul_r_imm_mem8、imul_r_imm_sib、imul_r_imm_sibd、imul_r_rm | 真 | alu |
 | imul | imul_r_mem32、imul_r_mem8、imul_r_memnd、imul_r_rip、imul_r_sibd | 真 | load |
 | imul | imul_rm32 | 真 | mult |
 | inc | inc_eax、inc_ebp、inc_ebx、inc_ecx、inc_edi、inc_edx、inc_esi、inc_esp、inc_r8、inc_rm、inc_rm_mem32、inc_rm_mem8、inc_rm_memnd、inc_rm_rip、inc_rm_sib、inc_rm_sibd、inc_rm_sibd32 | 真 | alu |

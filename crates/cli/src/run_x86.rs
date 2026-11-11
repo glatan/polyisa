@@ -637,8 +637,15 @@ fn fetch_len(
             if md == 3 {
                 Some(3)
             } else if rm == 4 {
-                // IMUL r, [SIB+disp8], imm8。iostat 0x44897d の 6B 44 24 28 58。5B.
-                if md == 1 { Some(5) } else { None }
+                // mod=01 は SIB+disp8+imm8 (5B)。mod=00 は SIB+imm8 (4B)。base=5 は disp32。
+                if md == 1 {
+                    Some(5)
+                } else if md == 0 {
+                    let t = third?;
+                    if t & 7 == 5 { None } else { Some(4) }
+                } else {
+                    None
+                }
             } else if md == 0 && rm == 5 {
                 Some(7)
             } else {
@@ -1630,6 +1637,7 @@ pub fn run_mode(
                 | 0x83
                 | 0x81
                 | 0x69
+                | 0x6B
                 | 0x63
                 | 0x01
                 | 0x03
@@ -7586,6 +7594,16 @@ fn dispatch<B: Backend>(
                 sem::imul_r64_imm_sibd(b, reg(), base, disp, imm32())
             } else {
                 sem::imul_r32_imm_sibd(b, reg(), base, disp, imm32())
+            }
+        }
+        Insn::ImulRImm8Sib => {
+            // 6B /r SIB mod=00 + imm8。mpstat 0x449c01 の imul $0x48, (%rsp), %rbp。フラグは変えない。
+            let imm = (word & 0xff) as u8 as i8;
+            let base = sib_base();
+            if rex_w {
+                sem::imul_r64_imm8_memnd(b, reg(), base, imm)
+            } else {
+                sem::imul_r32_imm8_memnd(b, reg(), base, imm)
             }
         }
         Insn::ImulRImm8Sibd => {

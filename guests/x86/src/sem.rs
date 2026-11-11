@@ -14548,6 +14548,32 @@ pub fn imul_r32_imm8_sibd<B: Backend>(
     Ok(())
 }
 
+/// IMUL r32, m32, imm8 [base] (6B /r SIB mod=00, no_index)。imm8 は符号拡張する。フラグは変えない。
+pub fn imul_r32_imm8_memnd<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, imm: i8) -> Flow<B> {
+    let addr = read64(b, base);
+    let x: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let y = b.konst::<W32>(imm as i32 as u32);
+    let x64 = b.sext::<W32, W64>(x);
+    let y64 = b.sext::<W32, W64>(y);
+    let p64 = b.mul::<W64>(x64, y64);
+    let v: B::V<W32> = b.trunc::<W64, W32>(p64);
+    write(b, dst, v);
+    Ok(())
+}
+
+/// IMUL r64, m64, imm8 [base] (6B /r SIB mod=00, no_index, REX.W)。mpstat 0x449c01 対応.
+pub fn imul_r64_imm8_memnd<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, imm: i8) -> Flow<B> {
+    let addr = read64(b, base);
+    let x: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let y = b.konst::<W64>(imm as i64 as u64);
+    let x128 = b.sext::<W64, W128>(x);
+    let y128 = b.sext::<W64, W128>(y);
+    let p128 = b.mul::<W128>(x128, y128);
+    let v: B::V<W64> = b.trunc::<W128, W64>(p128);
+    write64(b, dst, v);
+    Ok(())
+}
+
 /// IMUL r64, m64, imm8 SIB+disp8 (no_index, REX.W)。imm8 は符号拡張する。iostat 0x44897d 対応.
 pub fn imul_r64_imm8_sibd<B: Backend>(
     b: &mut B,
