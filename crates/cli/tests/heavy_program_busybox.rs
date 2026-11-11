@@ -338,6 +338,17 @@ fn text_applets_match_host() {
         &["cmp", f, f],
         &["sort", f],
         &["fgrep", "ab", f],
+        &["false"],
+        &["pwd"],
+        &["factor", "12"],
+        &["unexpand", t],
+        &["egrep", "a.", f],
+        &["env"],
+        &["sha1sum", f],
+        &["wc", "-c", f],
+        &["printf", "%x\n", "255"],
+        &["arch"],
+        &["uniq", "-c", f],
     ];
     for args in cases {
         let argv: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
