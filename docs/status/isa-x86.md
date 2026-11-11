@@ -184,7 +184,7 @@
 | seto | seto | 真 | alu |
 | setp | setp | 真 | alu |
 | sets | sets | 真 | alu |
-| shl | shl_m8_1_mem32、shl_rm32_1、shl_rm32_cl、shl_rm32_imm8 | 真 | alu |
+| shl | shl_m32_imm8_mem8、shl_m8_1_mem32、shl_rm32_1、shl_rm32_cl、shl_rm32_imm8 | 真 | alu |
 | shld | shld_r32_cl | 真 | alu |
 | shr | shr_rm32_1、shr_rm32_cl、shr_rm32_imm8、shr_rm8_1、shr_rm8_imm8 | 真 | alu |
 | shrd | shrd_r32_cl | 真 | alu |

@@ -1339,10 +1339,19 @@ fn fetch_len(
                 Some(2)
             }
         }
-        // 0xC1 (シフト) は register-direct のみ 3B。
+        // 0xC1 (シフト)。reg-direct は 3B。mod=01 は disp8+imm8 で 4B。
+        // bzip2 0x480237 の shll $8, 0x70(%rdi)。
         0xC1 => {
             let s = second?;
-            if s >> 6 == 3 { Some(3) } else { None }
+            let md = s >> 6;
+            let rm = s & 7;
+            if md == 3 {
+                Some(3)
+            } else if md == 1 && rm != 4 {
+                Some(4)
+            } else {
+                None
+            }
         }
         // 0xD1 (/n シフト 1) は register-direct のみ 2B。/0 ROL、/1 ROR、/4 SHL、/5 SHR、/7 SAR。
         0xD1 => {
@@ -4551,6 +4560,18 @@ fn dispatch<B: Backend>(
                 sem::shl_rm64_imm8(b, rm(), word as u8)
             } else {
                 sem::shl_rm32_imm8(b, rm(), word as u8)
+            }
+        }
+        Insn::ShlM32Imm8Mem8 => {
+            // C1 /4 mod=01 [base+disp8],imm8。bzip2 0x480237 の shll $8, 0x70(%rdi)。
+            let rm_f = ((word >> 16) & 7) as u8;
+            let base = Gpr(rm_f | ((rex & 1) << 3));
+            let disp = ((word >> 8) & 0xff) as u8 as i8;
+            let imm = (word & 0xff) as u8;
+            if rex_w {
+                sem::shl_m64_imm8_mem8(b, base, disp, imm)
+            } else {
+                sem::shl_m32_imm8_mem8(b, base, disp, imm)
             }
         }
         Insn::ShrRm32Imm8 => {
