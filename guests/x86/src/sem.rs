@@ -4238,6 +4238,182 @@ pub fn adc_rm32_imm8<B: Backend>(b: &mut B, dst: Gpr, imm: i8) -> Flow<B> {
 }
 
 /// SBB r/m32, imm8。CF を借りて 6 旗を更新する。
+/// SBB m32, imm8 [base+disp8] (83 /3 SIB mod=01, no_index)。imm8 は符号拡張し、CF も引く。
+pub fn sbb_rm32_imm8_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8, imm: i8) -> Flow<B> {
+    let addr = eff_addr(b, base, disp);
+    let x: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let y = b.konst::<W32>(imm as i32 as u32);
+    let c = cf_num(b);
+    let y1 = b.add::<W32>(y, c);
+    let x64 = b.zext::<W32, W64>(x);
+    let y64 = b.zext::<W32, W64>(y);
+    let c64 = b.zext::<W32, W64>(c);
+    let t1 = b.sub::<W64>(x64, y64);
+    let t2 = b.sub::<W64>(t1, c64);
+    let v: B::V<W32> = b.trunc::<W64, W32>(t2);
+    b.store::<W32>(addr, v, DATA_WRITE)?;
+    let n32 = b.konst::<W64>(32);
+    let borrow = b.shr_l::<W64>(t2, n32);
+    let zero64 = b.konst::<W64>(0);
+    let cf_take = b.cmp::<W64>(Cmp::Ne, borrow, zero64);
+    let cf = pick(b, cf_take, FLAG_CF);
+    let a = b.xor::<W32>(x, y1);
+    let c2 = b.xor::<W32>(x, v);
+    let s = b.and::<W32>(a, c2);
+    let n31 = b.konst::<W32>(31);
+    let s31 = b.shr_l::<W32>(s, n31);
+    let zero = b.konst::<W32>(0);
+    let of_take = b.cmp::<W32>(Cmp::Ne, s31, zero);
+    let of = pick(b, of_take, FLAG_OF);
+    let af = af_bit(b, x, y1, v);
+    let szp = szp_bits(b, v);
+    let old: B::V<W32> = b.get(eflags_ref());
+    let clear_mask = b.konst::<W32>(!FLAG_OSZPCA);
+    let mut f = b.and::<W32>(old, clear_mask);
+    f = b.or::<W32>(f, cf);
+    f = b.or::<W32>(f, of);
+    f = b.or::<W32>(f, af);
+    f = b.or::<W32>(f, szp);
+    b.set(eflags_ref(), f);
+    Ok(())
+}
+
+/// SBB m64, imm8 [base+disp8] (83 /3 SIB mod=01, no_index, REX.W)。
+pub fn sbb_rm64_imm8_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8, imm: i8) -> Flow<B> {
+    let addr = eff_addr(b, base, disp);
+    let x: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let y = b.konst::<W64>(imm as i64 as u64);
+    let c = cf_num(b);
+    let x128 = b.zext::<W64, W128>(x);
+    let y128 = b.zext::<W64, W128>(y);
+    let c128 = b.zext::<W32, W128>(c);
+    let t1 = b.sub::<W128>(x128, y128);
+    let t = b.sub::<W128>(t1, c128);
+    let v: B::V<W64> = b.trunc::<W128, W64>(t);
+    b.store::<W64>(addr, v, DATA_WRITE)?;
+    let n64 = b.konst::<W128>(64);
+    let borrow = b.shr_l::<W128>(t, n64);
+    let zero128 = b.konst::<W128>(W128::from_u128(0));
+    let cf_take = b.cmp::<W128>(Cmp::Ne, borrow, zero128);
+    let cf = pick(b, cf_take, FLAG_CF);
+    let c64 = b.trunc::<W128, W64>(c128);
+    let y1 = b.add::<W64>(y, c64);
+    let a = b.xor::<W64>(x, y1);
+    let c2 = b.xor::<W64>(x, v);
+    let acc = b.and::<W64>(a, c2);
+    let n63 = b.konst::<W64>(63);
+    let s63 = b.shr_l::<W64>(acc, n63);
+    let zero = b.konst::<W64>(0);
+    let of_take = b.cmp::<W64>(Cmp::Ne, s63, zero);
+    let of = pick(b, of_take, FLAG_OF);
+    let af = af_bit(b, x, y1, v);
+    let szp = szp_bits(b, v);
+    let old: B::V<W32> = b.get(eflags_ref());
+    let clear_mask = b.konst::<W32>(!FLAG_OSZPCA);
+    let mut f = b.and::<W32>(old, clear_mask);
+    f = b.or::<W32>(f, cf);
+    f = b.or::<W32>(f, of);
+    f = b.or::<W32>(f, af);
+    f = b.or::<W32>(f, szp);
+    b.set(eflags_ref(), f);
+    Ok(())
+}
+
+/// SBB m32, imm8 [base+index*scale+disp8] (83 /3 SIB mod=01)。
+pub fn sbb_rm32_imm8_sibd<B: Backend>(
+    b: &mut B,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i8,
+    imm: i8,
+) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, disp as i32, base, idx);
+    let x: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let y = b.konst::<W32>(imm as i32 as u32);
+    let c = cf_num(b);
+    let y1 = b.add::<W32>(y, c);
+    let x64 = b.zext::<W32, W64>(x);
+    let y64 = b.zext::<W32, W64>(y);
+    let c64 = b.zext::<W32, W64>(c);
+    let t1 = b.sub::<W64>(x64, y64);
+    let t2 = b.sub::<W64>(t1, c64);
+    let v: B::V<W32> = b.trunc::<W64, W32>(t2);
+    b.store::<W32>(addr, v, DATA_WRITE)?;
+    let n32 = b.konst::<W64>(32);
+    let borrow = b.shr_l::<W64>(t2, n32);
+    let zero64 = b.konst::<W64>(0);
+    let cf_take = b.cmp::<W64>(Cmp::Ne, borrow, zero64);
+    let cf = pick(b, cf_take, FLAG_CF);
+    let a = b.xor::<W32>(x, y1);
+    let c2 = b.xor::<W32>(x, v);
+    let s = b.and::<W32>(a, c2);
+    let n31 = b.konst::<W32>(31);
+    let s31 = b.shr_l::<W32>(s, n31);
+    let zero = b.konst::<W32>(0);
+    let of_take = b.cmp::<W32>(Cmp::Ne, s31, zero);
+    let of = pick(b, of_take, FLAG_OF);
+    let af = af_bit(b, x, y1, v);
+    let szp = szp_bits(b, v);
+    let old: B::V<W32> = b.get(eflags_ref());
+    let clear_mask = b.konst::<W32>(!FLAG_OSZPCA);
+    let mut f = b.and::<W32>(old, clear_mask);
+    f = b.or::<W32>(f, cf);
+    f = b.or::<W32>(f, of);
+    f = b.or::<W32>(f, af);
+    f = b.or::<W32>(f, szp);
+    b.set(eflags_ref(), f);
+    Ok(())
+}
+
+/// SBB m64, imm8 [base+index*scale+disp8] (83 /3 SIB mod=01, REX.W)。
+pub fn sbb_rm64_imm8_sibd<B: Backend>(
+    b: &mut B,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i8,
+    imm: i8,
+) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, disp as i32, base, idx);
+    let x: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let y = b.konst::<W64>(imm as i64 as u64);
+    let c = cf_num(b);
+    let x128 = b.zext::<W64, W128>(x);
+    let y128 = b.zext::<W64, W128>(y);
+    let c128 = b.zext::<W32, W128>(c);
+    let t1 = b.sub::<W128>(x128, y128);
+    let t = b.sub::<W128>(t1, c128);
+    let v: B::V<W64> = b.trunc::<W128, W64>(t);
+    b.store::<W64>(addr, v, DATA_WRITE)?;
+    let n64 = b.konst::<W128>(64);
+    let borrow = b.shr_l::<W128>(t, n64);
+    let zero128 = b.konst::<W128>(W128::from_u128(0));
+    let cf_take = b.cmp::<W128>(Cmp::Ne, borrow, zero128);
+    let cf = pick(b, cf_take, FLAG_CF);
+    let c64 = b.trunc::<W128, W64>(c128);
+    let y1 = b.add::<W64>(y, c64);
+    let a = b.xor::<W64>(x, y1);
+    let c2 = b.xor::<W64>(x, v);
+    let acc = b.and::<W64>(a, c2);
+    let n63 = b.konst::<W64>(63);
+    let s63 = b.shr_l::<W64>(acc, n63);
+    let zero = b.konst::<W64>(0);
+    let of_take = b.cmp::<W64>(Cmp::Ne, s63, zero);
+    let of = pick(b, of_take, FLAG_OF);
+    let af = af_bit(b, x, y1, v);
+    let szp = szp_bits(b, v);
+    let old: B::V<W32> = b.get(eflags_ref());
+    let clear_mask = b.konst::<W32>(!FLAG_OSZPCA);
+    let mut f = b.and::<W32>(old, clear_mask);
+    f = b.or::<W32>(f, cf);
+    f = b.or::<W32>(f, of);
+    f = b.or::<W32>(f, af);
+    f = b.or::<W32>(f, szp);
+    b.set(eflags_ref(), f);
+    Ok(())
+}
+
 pub fn sbb_rm32_imm8<B: Backend>(b: &mut B, dst: Gpr, imm: i8) -> Flow<B> {
     let x = read(b, dst);
     let y = b.konst::<W32>(imm as i32 as u32);

@@ -689,6 +689,10 @@ fn fetch_len(
             if md == 3 {
                 Some(3)
             } else if rm == 4 {
+                if reg == 3 && md == 1 {
+                    // SBB m32,imm8 SIB+disp8。fsck 0x4d272f の 83 5C 24 14 FF。5B.
+                    return Some(5);
+                }
                 if reg == 5 && md == 1 {
                     // SUB m32,imm8 SIB+disp8。seq 0x4d0bfa の 83 6C 24 58 1C。5B.
                     return Some(5);
@@ -5057,6 +5061,27 @@ fn dispatch<B: Backend>(
                 sem::sub_rm64_imm8_mem32(b, rm(), disp, imm)
             } else {
                 sem::sub_rm32_imm8_mem32(b, rm(), disp, imm)
+            }
+        }
+        Insn::SbbRmImm8Sibd => {
+            // 83 /3 SIB mod=01。fsck 0x4d272f の sbbl $-1, 0x14(%rsp)。
+            let sib_v = ((word >> 16) & 0xff) as u8;
+            let d8 = ((word >> 8) & 0xff) as u8 as i8;
+            let imm = (word & 0xff) as u8 as i8;
+            let shift = ((sib_v >> 6) & 3) as u32;
+            let idx_raw = (sib_v >> 3) & 7;
+            let idx = Gpr(idx_raw | (((rex >> 1) & 1) << 3));
+            let base = Gpr((sib_v & 7) | ((rex & 1) << 3));
+            if idx_raw == 4 && (rex >> 1) & 1 == 0 {
+                if rex_w {
+                    sem::sbb_rm64_imm8_mem8(b, base, d8, imm)
+                } else {
+                    sem::sbb_rm32_imm8_mem8(b, base, d8, imm)
+                }
+            } else if rex_w {
+                sem::sbb_rm64_imm8_sibd(b, base, idx, shift, d8, imm)
+            } else {
+                sem::sbb_rm32_imm8_sibd(b, base, idx, shift, d8, imm)
             }
         }
         Insn::SubRmImm8Sibd => {
