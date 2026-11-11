@@ -409,6 +409,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("inc_rm_memnd", "MR", "11111111 00000...", "inc r/m", "alu"),
         // INC m32 [base+index*scale+disp8] (FF /0 SIB mod=01)。
         ("inc_rm_sibd", "S8", "11111111 01000100 ........ ........", "inc r/m", "alu"),
+        // INC m32 [base+index*scale+disp32] (FF /0 SIB mod=10)。basename 0x4899d0 対応.
+        ("inc_rm_sibd32", "D32", "11111111 10000100 ........ ................................", "inc r/m", "alu"),
         // DEC m32 [base+index*scale+disp8] (FF /1 SIB mod=01)。
         ("dec_rm_sibd", "S8", "11111111 01001100 ........ ........", "dec r/m", "alu"),
         // INC m32 [base+disp8] (FF /0 mod=01、SIBなし)。

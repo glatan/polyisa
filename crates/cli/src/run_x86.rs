@@ -1986,6 +1986,14 @@ fn dispatch<B: Backend>(
                 sem::inc_r32_sibd(b, sib_base(), sib_idx(), sib_shift(), disp8())
             }
         }
+        Insn::IncRmSibd32 => {
+            // FF /0 SIB mod=10 [base+index*scale+disp32]。basename 0x4899d0 対応.
+            if no_index() {
+                sem::inc_r32_mem32(b, sib_base(), disp32())
+            } else {
+                sem::inc_r32_sibd32(b, sib_base(), sib_idx(), sib_shift(), disp32())
+            }
+        }
         Insn::DecRm => {
             // FF /1 reg-direct。
             if rex_w {
