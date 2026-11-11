@@ -1984,6 +1984,8 @@ pub fn run_mode(
                     | Insn::CmpRmMemnd
                     // CMP m16, r16 SIB (66 39 /r mod=00).
                     | Insn::CmpM32R32Sib
+                    // MOV r16, [base] (66 8B mod=00).
+                    | Insn::MovEaxMemnd
                     // AND m16,imm8 SIB+disp8 (66 83 /4 mod=01).
                     | Insn::AndRmImm8Sibd
                     // SUB m16,imm8 SIB+disp8 (66 83 /5 mod=01).
@@ -2550,7 +2552,10 @@ fn dispatch<B: Backend>(
             }
         }
         Insn::MovEaxMemnd => {
-            if let Some(base) = fs {
+            if has66 {
+                // 66 8B mod=00。gzip 0x4847b6 の movw (%rsi), %ax。上位は残す。
+                sem::mov_r16_m16_memnd(b, reg(), rm())
+            } else if let Some(base) = fs {
                 if rex_w {
                     sem::mov_r64_fs_memnd(b, reg(), base, rm())
                 } else {

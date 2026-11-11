@@ -5171,6 +5171,30 @@ fn run_cmp_m16_r16_sib() {
 }
 
 #[test]
+fn run_mov_r16_m16_memnd() {
+    // 66 8B 06 = movw (%rsi), %ax。gzip 0x4847b6。上位16ビットは残す。
+    // Ref: SPEC-X86-INTEL-SDM (v093).
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(6).state(), 0x2000);
+    env.backend.set(Gpr(0).state(), 0x1111_0000);
+    env.backend
+        .mem
+        .write(VirtAddr(0x2000), &[0xEF, 0xBE])
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0x66, 0x8B, 0x06])
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x1003 });
+    assert_eq!(env.backend.get(Gpr(0).state()), 0x1111_BEEF);
+}
+
+#[test]
 fn run_imul_r64_imm_sibd() {
     // 48 69 44 24 08 01 00 01 00 = imulq $0x10001, 0x8(%rsp), %rax。3*0x10001=0x30003。
     // mktemp 0x4d85cf。Ref: SPEC-X86-INTEL-SDM (v093).

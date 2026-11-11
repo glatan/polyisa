@@ -586,6 +586,8 @@ mod tests {
         assert_eq!(decode(0x3903, 16), Some(Insn::CmpRmMemnd));
         // CMP [base+index*scale], r。gzip 0x4845a8 の 39 24 AF。
         assert_eq!(decode(0x3924af, 24), Some(Insn::CmpM32R32Sib));
+        // MOV r16, [base]。gzip 0x4847b6 の 8B 06。
+        assert_eq!(decode(0x8b06, 16), Some(Insn::MovEaxMemnd));
         assert_eq!(decode(0x6B1567FD1A0038, 56), Some(Insn::ImulRImm8Rip));
         assert_eq!(decode(0x6BF638, 24), Some(Insn::ImulRImm8));
         assert_eq!(decode(0x00C1F908, 24), Some(Insn::SarRm32Imm8));
