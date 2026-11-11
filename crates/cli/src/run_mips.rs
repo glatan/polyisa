@@ -37,6 +37,16 @@ impl MipsModel {
         }
     }
 
+    /// リトルエンディアンの R3000。ロード遅延はビッグエンディアンと同じ。
+    #[must_use]
+    pub const fn mips1_le() -> Self {
+        Self {
+            feats: 0,
+            endian: Endian::Le,
+            load_delay: true,
+        }
+    }
+
     /// MIPS32 Release 2。符号化は MIPS I のまま、ロード遅延はない。フェッチはリトルエンディアン。
     #[must_use]
     pub const fn mips32r2() -> Self {
@@ -255,7 +265,10 @@ fn exec(
         Insn::Lwr => load_gpr(env, rt, model, in_slot, |b| {
             sem::lwr(b, rt, rs, imm, model.endian)
         }),
-        Insn::Sw => step(env, in_slot, |b| sem::sw(b, rt, rs, imm)).map(|()| none),
+        Insn::Sw => step(env, in_slot, |b| {
+            sem::sw_endian(b, rt, rs, imm, model.endian)
+        })
+        .map(|()| none),
         Insn::Sb => step(env, in_slot, |b| sem::sb(b, rt, rs, imm, model.endian)).map(|()| none),
         Insn::Sh => step(env, in_slot, |b| sem::sh(b, rt, rs, imm, model.endian)).map(|()| none),
         Insn::Swl => step(env, in_slot, |b| sem::swl(b, rt, rs, imm, model.endian)).map(|()| none),
@@ -301,7 +314,9 @@ fn load_word(
     model: MipsModel,
     in_slot: bool,
 ) -> Result<Effect, Stop> {
-    load_gpr(env, rt, model, in_slot, |b| sem::lw(b, rt, rs, imm))
+    load_gpr(env, rt, model, in_slot, |b| {
+        sem::lw_endian(b, rt, rs, imm, model.endian)
+    })
 }
 
 fn load_gpr<F>(
@@ -433,10 +448,26 @@ mod tests {
     }
 
     fn poke(env: &mut BareEnv, addr: u64, word: u32) {
-        env.backend
-            .mem
-            .write(VirtAddr(addr), &word.to_be_bytes())
-            .unwrap();
+        poke_endian(env, addr, word, Endian::Be);
+    }
+
+    fn poke_endian(env: &mut BareEnv, addr: u64, word: u32, endian: Endian) {
+        let bytes = match endian {
+            Endian::Be => word.to_be_bytes(),
+            Endian::Le => word.to_le_bytes(),
+        };
+        env.backend.mem.write(VirtAddr(addr), &bytes).unwrap();
+    }
+
+    fn raw_word(env: &BareEnv, addr: u64) -> [u8; 4] {
+        let mut buf = [0u8; 4];
+        let acc = Access {
+            endian: Endian::Be,
+            align: Align::Unaligned,
+            kind: AccessKind::DataRead,
+        };
+        env.backend.mem.read(VirtAddr(addr), &mut buf, acc).unwrap();
+        buf
     }
 
     fn mem_word(env: &BareEnv, addr: u64) -> u32 {
@@ -639,6 +670,54 @@ mod tests {
         assert!(!MipsModel::mips32r2().load_delay);
         assert!(!MipsModel::r6().load_delay);
         assert!(MipsModel::mips1_be().load_delay);
+    }
+
+    #[test]
+    fn the_same_bytes_decode_differently_by_endian() {
+        // バイト列 24 02 00 01。BE は addiu r2, zero, 1。LE は beq。
+        let mut be_env = env_at(0x1000);
+        poke(&mut be_env, 0x1000, 0x2402_0001);
+        poke(&mut be_env, 0x1004, 0xffff_ffff);
+        let be = run(&mut be_env, 0x1000, MipsModel::mips1_be());
+        assert!(matches!(be, MipsOutcome::Unimplemented { pc: 0x1004, .. }));
+        assert_eq!(reg(&mut be_env, 2), 1);
+
+        let mut le_env = env_at(0x1000);
+        poke(&mut le_env, 0x1000, 0x2402_0001);
+        poke(&mut le_env, 0x1004, 0xffff_ffff);
+        let le = run(&mut le_env, 0x1000, MipsModel::mips1_le());
+        assert!(matches!(le, MipsOutcome::Unimplemented { pc: 0x1004, .. }));
+        assert_eq!(reg(&mut le_env, 2), 0);
+    }
+
+    #[test]
+    fn lw_sw_roundtrip_follows_the_model_endian() {
+        for model in [
+            MipsModel::mips1_be(),
+            MipsModel::mips1_le(),
+            MipsModel::mips32r2(),
+        ] {
+            let mut env = env_at(0x1000);
+            poke_endian(&mut env, 0x1000, 0xac82_0000, model.endian);
+            poke_endian(&mut env, 0x1004, 0x8c83_0000, model.endian);
+            poke_endian(&mut env, 0x1008, 0x0000_0000, model.endian);
+            poke_endian(&mut env, 0x100c, 0xffff_ffff, model.endian);
+            set_reg(&mut env, 2, 0x1122_3344);
+            set_reg(&mut env, 4, 0x1800);
+            let outcome = run(&mut env, 0x1000, model);
+            assert!(
+                matches!(outcome, MipsOutcome::Unimplemented { pc: 0x100c, .. }),
+                "{outcome:?} endian={:?}",
+                model.endian
+            );
+            assert_eq!(reg(&mut env, 3), 0x1122_3344);
+            let bytes = raw_word(&env, 0x1800);
+            let expect = match model.endian {
+                Endian::Be => [0x11, 0x22, 0x33, 0x44],
+                Endian::Le => [0x44, 0x33, 0x22, 0x11],
+            };
+            assert_eq!(bytes, expect);
+        }
     }
 
     fn load_then_use(model: MipsModel) -> (u64, u64, u64) {

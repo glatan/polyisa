@@ -59,6 +59,41 @@ fn shift_uses_low_5bits() {
 }
 
 #[test]
+fn load_store_le_roundtrip_and_lwl() {
+    let mut env = env();
+    env.backend.set(Gpr(1).state(), 0x100);
+    env.backend.set(Gpr(2).state(), 0x1122_3344);
+    env.step(|b| sem::sw_endian(b, Gpr(2), Gpr(1), 0, Endian::Le))
+        .unwrap();
+    let mut bytes = [0u8; 4];
+    env.backend
+        .mem
+        .read(
+            polyisa_mem::VirtAddr(0x100),
+            &mut bytes,
+            polyisa_mem::Access {
+                endian: Endian::Le,
+                align: polyisa_mem::Align::Unaligned,
+                kind: polyisa_mem::AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(bytes, [0x44, 0x33, 0x22, 0x11]);
+    env.step(|b| sem::lw_endian(b, Gpr(3), Gpr(1), 0, Endian::Le))
+        .unwrap();
+    assert_eq!(g(&mut env, 3), 0x1122_3344);
+    // LE の LWL、オフセット 0。最上位バイトだけがメモリの先頭バイトになる。
+    env.backend
+        .mem
+        .write(polyisa_mem::VirtAddr(0x100), &[0x11, 0x22, 0x33, 0x44])
+        .unwrap();
+    env.backend.set(Gpr(3).state(), 0x00ee_eeee);
+    env.step(|b| sem::lwl(b, Gpr(3), Gpr(1), 0, Endian::Le))
+        .unwrap();
+    assert_eq!(g(&mut env, 3), 0x11ee_eeee);
+}
+
+#[test]
 fn load_store_be_roundtrip() {
     let mut env = env();
     env.backend.set(Gpr(1).state(), 0x100);

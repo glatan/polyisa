@@ -6,7 +6,7 @@
 // ADD/SUB は符号付き溢れでトラップする。ADDU/SUBU/ADDI/ADDIU は包む。
 // 0 除算は CpuState.div_zero_writes_zero に従う。0 は HI/LO を保つ。
 // ロード遅延は R3000 の実行ループだけが持つ。mips32r2 と r6 は持たない。
-// エンディアンの切り替え、o32、R6 の新しい符号化は後の回で足す。
+// フェッチとデータのエンディアンは実行ループのモデルが持つ。o32 と R6 の新しい符号化は後の回で足す。
 // 出典は SPEC-MIPS-IV Rev 3.2 (1995-09) と SPEC-MIPS-R6 Rev 6.06 である。
 // Ref: SPEC-MIPS-IV (Rev 3.2).
 // Ref: SPEC-MIPS-R6 (Rev 6.06).

@@ -4,8 +4,7 @@
 //!
 //! 遅延スロットは pc/npc の組で表す。分岐・ジャンプは npc だけを書き換え、
 //! 遅延スロットの1命令を実行してから `commit` で pc を進める。
-//! FPU、R6 の残り（BOVC/BEQC 等）、両エンディアン切り替えは本格実装で足す（HI/LO 乗除算は
-//! pre-R6 のみで有効な本格相当の最小形）。
+//! 語のロードとストアはエンディアンを引数に取る。引数なしの `lw` と `sw` はビッグエンディアン。
 //!
 //! 出典は SPEC-MIPS-IV Rev 3.2 (1995-09) である。
 //! Ref: SPEC-MIPS-IV (Rev 3.2).
@@ -74,17 +73,21 @@ fn const_w64<B: Backend>(b: &mut B, v: u64) -> B::V<W64> {
     b.konst::<W64>(v)
 }
 
-const DATA_READ: Access = Access {
-    endian: Endian::Be,
-    align: Align::Natural,
-    kind: AccessKind::DataRead,
-};
+fn word_read(endian: Endian) -> Access {
+    Access {
+        endian,
+        align: Align::Natural,
+        kind: AccessKind::DataRead,
+    }
+}
 
-const DATA_WRITE: Access = Access {
-    endian: Endian::Be,
-    align: Align::Natural,
-    kind: AccessKind::DataWrite,
-};
+fn word_write(endian: Endian) -> Access {
+    Access {
+        endian,
+        align: Align::Natural,
+        kind: AccessKind::DataWrite,
+    }
+}
 
 /// ADDU。32ビットで包む（trap なし。ADD/SUB の trap は本格実装で足す）。
 pub fn addu<B: Backend>(b: &mut B, rd: Gpr, rs: Gpr, rt: Gpr) -> Flow<B> {
@@ -305,25 +308,35 @@ pub fn beqzalc<B: Backend>(b: &mut B, _rs: Gpr, rt: Gpr, pc: u64, disp: i32) -> 
     Ok(())
 }
 
-/// LW。BE・整列要求。
+/// LW。ビッグエンディアン・整列要求。既存の呼び出し向け。
 pub fn lw<B: Backend>(b: &mut B, rt: Gpr, rs: Gpr, imm: i32) -> Flow<B> {
+    lw_endian(b, rt, rs, imm, Endian::Be)
+}
+
+/// LW。エンディアンはモデルが渡す。
+pub fn lw_endian<B: Backend>(b: &mut B, rt: Gpr, rs: Gpr, imm: i32, endian: Endian) -> Flow<B> {
     let base = read(b, rs);
     let off = b.konst::<W64>(imm as i64 as u64);
     let addr = b.add::<W64>(base, off);
-    let v: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let v: B::V<W32> = b.load::<W32>(addr, word_read(endian))?;
     let w = b.zext::<W32, W64>(v);
     write(b, rt, w);
     Ok(())
 }
 
-/// SW。BE・整列要求。
+/// SW。ビッグエンディアン・整列要求。既存の呼び出し向け。
 pub fn sw<B: Backend>(b: &mut B, rt: Gpr, rs: Gpr, imm: i32) -> Flow<B> {
+    sw_endian(b, rt, rs, imm, Endian::Be)
+}
+
+/// SW。エンディアンはモデルが渡す。
+pub fn sw_endian<B: Backend>(b: &mut B, rt: Gpr, rs: Gpr, imm: i32, endian: Endian) -> Flow<B> {
     let base = read(b, rs);
     let off = b.konst::<W64>(imm as i64 as u64);
     let addr = b.add::<W64>(base, off);
     let v: B::V<W64> = read(b, rt);
     let lo: B::V<W32> = b.trunc::<W64, W32>(v);
-    b.store::<W32>(addr, lo, DATA_WRITE)?;
+    b.store::<W32>(addr, lo, word_write(endian))?;
     Ok(())
 }
 
