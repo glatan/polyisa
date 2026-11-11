@@ -198,8 +198,8 @@ fn fetch_len(
                     } else {
                         None
                     }
-                } else if s == 0x46 && md == 1 && rm != 4 {
-                    // CMOVBE [base+disp8] (test 0x4d2874)。
+                } else if (s == 0x46 || s == 0x45) && md == 1 && rm != 4 {
+                    // CMOVBE / CMOVNE [base+disp8]。ed 0x4b5cd8 の 0F 45 43 30。
                     Some(4)
                 } else {
                     None
@@ -7286,6 +7286,14 @@ fn dispatch<B: Backend>(
                 sem::cmovbe_r64(b, reg0f_as_gpr(), rm0f())
             } else {
                 sem::cmovbe_r32(b, reg0f_as_gpr(), rm0f())
+            }
+        }
+        Insn::CmovneMem8 => {
+            // 0F 45 mod=01 [base+disp8]。ed 0x4b5cd8 の cmovne 0x30(%rbx), %rax。
+            if rex_w {
+                sem::cmovne_r64_mem8(b, reg0f_as_gpr(), rm0f(), disp8())
+            } else {
+                sem::cmovne_r32_mem8(b, reg0f_as_gpr(), rm0f(), disp8())
             }
         }
         Insn::CmovbeMem8 => {

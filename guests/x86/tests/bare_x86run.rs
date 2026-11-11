@@ -10284,6 +10284,35 @@ fn run_xchg_r8_swaps_bytes() {
 }
 
 #[test]
+fn run_cmovne_r64_mem8() {
+    // 48 0F 45 43 30 = cmovne 0x30(%rbx), %rax。ZF=0 のときだけ移す。ed 0x4b5cd8。
+    // Ref: SPEC-X86-INTEL-SDM (v093).
+    let run = |flags: u32| {
+        let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+        polyisa_guest_x86::sem::write64(&mut env.backend, Gpr(3), 0x2000);
+        polyisa_guest_x86::sem::write64(&mut env.backend, Gpr(0), 1);
+        env.backend.set(polyisa_guest_x86::sem::eflags_ref(), flags);
+        env.backend
+            .mem
+            .write(VirtAddr(0x2030), &0x99u64.to_le_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x1000), &[0x48, 0x0F, 0x45, 0x43, 0x30])
+            .unwrap();
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+        assert_eq!(out, Outcome::StepLimit { eip: 0x1005 });
+        polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(0))
+    };
+    assert_eq!(run(0), 0x99);
+    assert_eq!(run(0x40), 1);
+}
+
+#[test]
 fn run_cmovs_r32_sib_rsp() {
     // 0F 48 0C 24 = cmovsl (%rsp), %ecx。SF=1 のときだけ移す。sed 0x4c9eb0。
     // Ref: SPEC-X86-INTEL-SDM (v093).
