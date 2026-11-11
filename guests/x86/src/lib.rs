@@ -85,7 +85,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数117件。
-        assert_eq!(INSNS.len(), 691);
+        assert_eq!(INSNS.len(), 692);
     }
 
     #[test]
@@ -792,6 +792,9 @@ mod tests {
         // FNSTCW m16 SIB+disp8 (D9 /7)。seq 0x4d0c17 の D9 7C 24 4E。
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0xD97C244E, 32), Some(Insn::FnstcwSibd));
+        // FLDCW m16 SIB+disp8 (D9 /5)。seq 0x4d0c2d の D9 6C 24 4C。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0xD96C244C, 32), Some(Insn::FldcwSibd));
         assert_eq!(decode(0x35_0000_00FF, 40), Some(Insn::XorImm));
         // シフト：SHL EAX,imm8 (C1 E0 ib)、SHR EAX,imm8 (C1 E8 ib)。
         // Ref: SPEC-X86-INTEL-SDM (v093).

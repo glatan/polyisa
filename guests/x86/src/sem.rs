@@ -11814,6 +11814,14 @@ pub fn fldcw_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8) -> Flow<B> {
     Ok(())
 }
 
+/// FLDCW m16 [base+index*scale+disp8] (D9 /5 SIB mod=01)。seq 0x4d0c2d 対応.
+pub fn fldcw_sibd<B: Backend>(b: &mut B, base: Gpr, idx: Gpr, shift: u32, disp: i8) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, disp as i32, base, idx);
+    let v: B::V<W16> = b.load::<W16>(addr, DATA_READ)?;
+    b.set(fcw_ref(), v);
+    Ok(())
+}
+
 /// FLDCW m16 [base+disp32] (D9 /5 mod=10)。
 pub fn fldcw_mem32<B: Backend>(b: &mut B, base: Gpr, disp: i32) -> Flow<B> {
     let addr = eff_addr32(b, base, disp);

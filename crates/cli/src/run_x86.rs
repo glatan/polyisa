@@ -854,6 +854,10 @@ fn fetch_len(
                 // FNSTCW m16 SIB+disp8。seq 0x4d0c17 の D9 7C 24 4E。4B.
                 return Some(4);
             }
+            if reg == 5 && md == 1 && rm == 4 {
+                // FLDCW m16 SIB+disp8。seq 0x4d0c2d の D9 6C 24 4C。4B.
+                return Some(4);
+            }
             if reg != 5 && reg != 7 {
                 return None;
             }
@@ -6254,6 +6258,14 @@ fn dispatch<B: Backend>(
         Insn::FnstcwMem32 => sem::fnstcw_mem32(b, rm(), disp32()),
         Insn::FldcwMemnd => sem::fldcw_memnd(b, rm()),
         Insn::FldcwMem8 => sem::fldcw_mem8(b, rm(), disp8()),
+        Insn::FldcwSibd => {
+            // D9 /5 SIB mod=01。seq 0x4d0c2d の fldcw 0x4c(%rsp)。
+            if no_index() {
+                sem::fldcw_mem8(b, sib_base(), disp8())
+            } else {
+                sem::fldcw_sibd(b, sib_base(), sib_idx(), sib_shift(), disp8())
+            }
+        }
         Insn::FldcwMem32 => sem::fldcw_mem32(b, rm(), disp32()),
         Insn::Pcmpeqb => sem::pcmpeqb_xmm(b, xmm_reg_r(), xmm_rm_b()),
         Insn::Pcmpeqd => sem::pcmpeqd_xmm(b, xmm_reg_r(), xmm_rm_b()),

@@ -8923,3 +8923,32 @@ fn run_fnstcw_sibd_rsp() {
         .unwrap();
     assert_eq!(u16::from_le_bytes(got), 0x037F);
 }
+
+#[test]
+fn run_fldcw_sibd_rsp() {
+    // D9 6C 24 4C = fldcw 0x4c(%rsp)。制御ワードを読む。seq 0x4d0c2d。
+    // Ref: SPEC-X86-INTEL-SDM (v093).
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(4), 0x2000);
+        let v = b.konst::<polyisa_sem::W16>(0x037F);
+        b.set(polyisa_guest_x86::sem::fcw_ref(), v);
+        Ok(())
+    })
+    .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x204C), &0x0C00u16.to_le_bytes())
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0xD9, 0x6C, 0x24, 0x4C])
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x1004 });
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::fcw_ref()), 0x0C00);
+}
