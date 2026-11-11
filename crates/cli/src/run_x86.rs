@@ -1758,6 +1758,7 @@ pub fn run_mode(
                     | Insn::MovAbsEax
                     | Insn::MovEaxAbs
                     | Insn::MovRm16ImmM32
+                    | Insn::MovRm16ImmMemnd
                     | Insn::MovRm16ImmMem8
                     | Insn::MovRm16ImmSibd
                     | Insn::MovRm16ImmSib
@@ -1823,6 +1824,7 @@ pub fn run_mode(
                     | Insn::Punpcklqdq
                     | Insn::MovqR64Xmm
                     | Insn::MovRm16ImmM32
+                    | Insn::MovRm16ImmMemnd
                     | Insn::MovRm16ImmMem8
                     | Insn::MovRm16ImmSibd
                     | Insn::MovRm16ImmSib
@@ -6225,6 +6227,11 @@ fn dispatch<B: Backend>(
             let disp = ((word >> 16) as u32).swap_bytes() as i32;
             let imm = ((word & 0xffff) as u16).swap_bytes();
             sem::mov_rm16_imm_mem32(b, Gpr(5 | ((rex & 1) << 3)), disp, imm)
+        }
+        Insn::MovRm16ImmMemnd => {
+            // 66 C7 /0 mod=00 [base],imm16。xxd 0x4b240f 対応。imm は最下位16 LE.
+            let imm = ((word & 0xffff) as u16).swap_bytes();
+            sem::mov_m16_imm_memnd(b, rm(), imm)
         }
         Insn::MovRm16ImmMem8 => {
             // 66 C7 43 5C 01 01 [RBX+0x5C],imm16 (40b+66)。hexdump 0x5c84f9 対応.

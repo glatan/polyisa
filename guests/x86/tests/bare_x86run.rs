@@ -6603,6 +6603,38 @@ fn run_div_rm32_sib_quotient_remainder() {
 }
 
 #[test]
+fn run_mov_rm16_imm_memnd() {
+    // 66 41 C7 07 6C 6C = movw $0x6c6c, (%r15)。xxd 0x4b240f。
+    // Ref: SPEC-X86-INTEL-SDM (v093).
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(15).state(), 0x2000u32);
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0x66, 0x41, 0xC7, 0x07, 0x6C, 0x6C])
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x1006 });
+    let mut got = [0u8; 2];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x2000),
+            &mut got,
+            polyisa_mem::Access {
+                endian: polyisa_mem::Endian::Le,
+                align: polyisa_mem::Align::Natural,
+                kind: polyisa_mem::AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(u16::from_le_bytes(got), 0x6c6c);
+}
+
+#[test]
 fn run_div_rm32_sibd_quotient_remainder() {
     // DIV EAX,[RSP+0x0C] (F7 74 24 0C) をdispatch経由で回す.
     // EDX:EAX=17、[0x10C]=5 -> EAX=3、EDX=2、eip は 0x1004 に進む.
