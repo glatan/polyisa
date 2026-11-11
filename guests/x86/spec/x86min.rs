@@ -2124,6 +2124,14 @@ pub fn build_model() -> polyisa_isadl::Model {
             "store",
         ),
         (
+            "and_m32_r32_sib",
+            "N8",
+            "00100001 00...100 ........",
+            vec![wc("n8_base", WhereOp::Ne, 5)],
+            "and [r/m+sib], r32",
+            "alu",
+        ),
+        (
             "or_m32_r32_sib",
             "N8",
             "00001001 00...100 ........",

@@ -1291,6 +1291,11 @@ fn fetch_len(
                 if first == 0x29 && md == 1 {
                     return Some(4);
                 }
+                // AND m,r SIB mod=00。bzip2 0x47f93d の 21 0C 94。base=5 は disp32。
+                if first == 0x21 && md == 0 {
+                    let t = third?;
+                    return Some(if t & 7 == 5 { 7 } else { 3 });
+                }
                 return None;
             }
             Some(
@@ -1566,6 +1571,7 @@ pub fn run_mode(
                 | 0x01
                 | 0x03
                 | 0x09
+                | 0x21
                 | 0x0B
                 | 0x39
                 | 0x3B
@@ -6133,6 +6139,20 @@ fn dispatch<B: Backend>(
                 sem::or_m64_r64_sibd32(b, sib_base(), sib_idx(), sib_shift(), disp32(), reg())
             } else {
                 sem::or_m32_r32_sibd32(b, sib_base(), sib_idx(), sib_shift(), disp32(), reg())
+            }
+        }
+        Insn::AndM32R32Sib => {
+            // 21 /r SIB mod=00 [base+index*scale]。bzip2 0x47f93d の andl %ecx, (%r12,%rdx,4)。
+            if no_index() {
+                if rex_w {
+                    sem::and_m64_r64_memnd(b, sib_base(), reg())
+                } else {
+                    sem::and_m32_r32_memnd(b, sib_base(), reg())
+                }
+            } else if rex_w {
+                sem::and_m64_r64_sib(b, sib_base(), sib_idx(), sib_shift(), reg())
+            } else {
+                sem::and_m32_r32_sib(b, sib_base(), sib_idx(), sib_shift(), reg())
             }
         }
         Insn::OrM32R32Sib => {

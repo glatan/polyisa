@@ -17164,6 +17164,62 @@ pub fn or_m64_r64_sibd32<B: Backend>(
 }
 
 /// OR m32,r32 [base+index*scale] (09 /r SIB mod=00)。
+/// AND m32,r32 [base] (21 /r SIB mod=00 no_index)。
+pub fn and_m32_r32_memnd<B: Backend>(b: &mut B, base: Gpr, src: Gpr) -> Flow<B> {
+    let addr = read64(b, base);
+    let x: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let y = read(b, src);
+    let v = b.and::<W32>(x, y);
+    b.store::<W32>(addr, v, DATA_WRITE)?;
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// AND m64,r64 [base] (REX.W 21 /r SIB mod=00 no_index)。
+pub fn and_m64_r64_memnd<B: Backend>(b: &mut B, base: Gpr, src: Gpr) -> Flow<B> {
+    let addr = read64(b, base);
+    let x: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let y = read64(b, src);
+    let v = b.and::<W64>(x, y);
+    b.store::<W64>(addr, v, DATA_WRITE)?;
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// AND m32,r32 [base+index*scale] (21 /r SIB mod=00)。bzip2 0x47f93d 対応。
+pub fn and_m32_r32_sib<B: Backend>(
+    b: &mut B,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    src: Gpr,
+) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, 0, base, idx);
+    let x: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let y = read(b, src);
+    let v = b.and::<W32>(x, y);
+    b.store::<W32>(addr, v, DATA_WRITE)?;
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// AND m64,r64 [base+index*scale] (REX.W 21 /r SIB mod=00)。
+pub fn and_m64_r64_sib<B: Backend>(
+    b: &mut B,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    src: Gpr,
+) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, 0, base, idx);
+    let x: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let y = read64(b, src);
+    let v = b.and::<W64>(x, y);
+    b.store::<W64>(addr, v, DATA_WRITE)?;
+    update_logic_flags(b, v);
+    Ok(())
+}
+
 pub fn or_m32_r32_sib<B: Backend>(b: &mut B, base: Gpr, idx: Gpr, shift: u32, src: Gpr) -> Flow<B> {
     let addr = sib_addr_scaled(b, shift, 0, base, idx);
     let x: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
