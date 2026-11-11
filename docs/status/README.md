@@ -2,7 +2,7 @@
 
 このファイルは `task status` が生成する。手で編集しない。
 
-生成の元は、ISADL の記述（`guests/*/spec/`）、ロードマップの完了条件、設計との差の台帳、システムコールの表（`crates/cli/src/run.rs` の `RV64_SYSCALLS`、`crates/cli/src/run_x86.rs` の `X86_64_SYSCALLS` と `I386_SYSCALLS`）である。テストの結果は含めない。
+生成の元は、ISADL の記述（`guests/*/spec/`）、ロードマップの完了条件、設計との差の台帳、システムコールの表（`crates/cli/src/run.rs` の `RV64_SYSCALLS`、`crates/cli/src/run_x86.rs` の `X86_64_SYSCALLS` と `I386_SYSCALLS`、`crates/cli/src/run_mips.rs` の `MIPS_O32_SYSCALLS`）である。テストの結果は含めない。
 
 ## 段階の完了条件
 
@@ -45,6 +45,7 @@
 | rv64 | 3 | [syscalls.md](syscalls.md) |
 | x86_64 | 68 | [syscalls.md](syscalls.md) |
 | i386 | 43 | [syscalls.md](syscalls.md) |
+| mips_o32 | 2 | [syscalls.md](syscalls.md) |
 
 ## 設計との差
 

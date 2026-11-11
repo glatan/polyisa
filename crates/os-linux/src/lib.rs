@@ -16,6 +16,15 @@ pub enum GuestAbi {
     Rv64Linux,
     X86_64Linux,
     I386Linux,
+    MipsO32,
+}
+
+/// MIPS o32 のシステムコール番号。基準 4000 に表の通し番号を足した値。
+/// exit は 1、write は 4。
+// Ref: SRC-LINUX (7.3).
+pub mod mips_o32 {
+    pub const EXIT: u64 = 4001;
+    pub const WRITE: u64 = 4004;
 }
 
 /// RISC-V（asm-generic）のシステムコール番号。
@@ -435,6 +444,11 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             x86_64::KILL => Some("kill"),
             _ => None,
         },
+        GuestAbi::MipsO32 => match nr {
+            mips_o32::EXIT => Some("exit"),
+            mips_o32::WRITE => Some("write"),
+            _ => None,
+        },
         GuestAbi::Unknown => None,
     }
 }
@@ -626,5 +640,20 @@ mod tests {
         assert_eq!(&img[at(a0)..at(a0) + 4], b"prog");
         assert_eq!(&img[at(a1)..at(a1) + 2], b"hi");
         assert_eq!(syscall_name(GuestAbi::Unknown, 64), None);
+    }
+
+    #[test]
+    fn mips_o32_numbers() {
+        assert_eq!(mips_o32::EXIT, 4001);
+        assert_eq!(mips_o32::WRITE, 4004);
+        assert_eq!(
+            syscall_name(GuestAbi::MipsO32, mips_o32::WRITE),
+            Some("write")
+        );
+        assert_eq!(
+            syscall_name(GuestAbi::MipsO32, mips_o32::EXIT),
+            Some("exit")
+        );
+        assert_eq!(syscall_name(GuestAbi::MipsO32, 4000), None);
     }
 }

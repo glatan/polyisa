@@ -4,7 +4,8 @@
 //!
 //! 分岐とジャンプは `npc` だけを書き換え、スロットの命令を実行してから `commit` する。
 //! スロット内の例外は `in_delay_slot` を立てて戻す。R3000 のロード遅延は
-//! 命令のあとにレジスタを戻し、次の命令が古い値を読む。o32 は後の回で足す。
+//! 命令のあとにレジスタを戻し、次の命令が古い値を読む。syscall は o32 の
+//! write と exit を処理し、成功は a3=0 と v0、失敗は a3=1 と正の errno で返す。
 //! Ref: SPEC-MIPS-IV (Rev 3.2).
 
 use polyisa_engine::bare::BareEnv;
@@ -87,8 +88,20 @@ enum Stop {
     Exception(GuestException),
 }
 
-/// `entry` から `model` で実行する。`syscall` はまだ命令がないので来ない。
+/// o32 の write が集めたバイト。標準出力と標準エラーを分ける。
+#[derive(Default)]
+pub struct O32Io {
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+}
+
+/// `entry` から `model` で実行する。システムコールの出力は捨てる。
 pub fn run(env: &mut BareEnv, entry: u64, model: MipsModel) -> MipsOutcome {
+    run_os(env, entry, model, &mut O32Io::default())
+}
+
+/// `entry` から `model` で実行する。syscall は o32 の write と exit だけを処理する。
+pub fn run_os(env: &mut BareEnv, entry: u64, model: MipsModel, io: &mut O32Io) -> MipsOutcome {
     set_u64(env, sem::pc_ref().offset(), entry);
     set_u64(env, sem::npc_ref().offset(), entry.wrapping_add(4));
     let mut pending: Option<(u8, u64)> = None;
@@ -104,6 +117,17 @@ pub fn run(env: &mut BareEnv, entry: u64, model: MipsModel) -> MipsOutcome {
         let Some(insn) = decode_model_ex(u128::from(word), 32, true, model.feats) else {
             return MipsOutcome::Unimplemented { pc, word };
         };
+        if insn == Insn::Syscall {
+            match o32_syscall(env, model, io, pending, pc, word) {
+                Ok((O32Cont::Next, next)) => pending = next,
+                Ok((O32Cont::Exit(code), _)) => return MipsOutcome::Exit(code),
+                Err(stop) => return stop_outcome(stop),
+            }
+            if let Err(stop) = commit(env) {
+                return stop_outcome(stop);
+            }
+            continue;
+        }
         if has_delay_slot(insn) {
             let branch_effect = match exec(env, insn, word, pc, model, false) {
                 Ok(effect) => effect,
@@ -126,6 +150,17 @@ pub fn run(env: &mut BareEnv, entry: u64, model: MipsModel) -> MipsOutcome {
                     pc: slot_pc,
                     word: slot,
                 };
+            }
+            if slot_insn == Insn::Syscall {
+                match o32_syscall(env, model, io, pending, slot_pc, slot) {
+                    Ok((O32Cont::Next, next)) => pending = next,
+                    Ok((O32Cont::Exit(code), _)) => return MipsOutcome::Exit(code),
+                    Err(stop) => return stop_outcome(stop),
+                }
+                if let Err(stop) = commit(env) {
+                    return stop_outcome(stop);
+                }
+                continue;
             }
             match exec(env, slot_insn, slot, slot_pc, model, true) {
                 Ok(effect) => pending = retire(env, pending, effect),
@@ -398,6 +433,96 @@ fn fetch(env: &BareEnv, pc: u64, endian: Endian, in_slot: bool) -> Result<u32, S
     })
 }
 
+enum O32Cont {
+    Next,
+    Exit(u64),
+}
+
+type MipsSysFn = fn(&mut O32Io, &mut BareEnv, MipsModel) -> Result<O32Cont, ()>;
+
+#[rustfmt::skip]
+const MIPS_O32_SYSCALLS: &[(&str, MipsSysFn)] = &[
+    ("write", sys_write),
+    ("exit", sys_exit),
+];
+
+fn o32_syscall(
+    env: &mut BareEnv,
+    model: MipsModel,
+    io: &mut O32Io,
+    pending: Option<(u8, u64)>,
+    pc: u64,
+    word: u32,
+) -> Result<(O32Cont, Option<(u8, u64)>), Stop> {
+    let nr = reg(env, 2) & 0xffff_ffff;
+    let name = polyisa_os_linux::syscall_name(polyisa_os_linux::GuestAbi::MipsO32, nr);
+    if let Some(name) = name
+        && let Some((_, handler)) = MIPS_O32_SYSCALLS.iter().find(|(n, _)| *n == name)
+        && let Ok(cont) = handler(io, env, model)
+    {
+        let pending = release_pending(env, pending, &[2, 7]);
+        return Ok((cont, pending));
+    }
+    if let Some(name) = polyisa_os_linux::syscall_name(polyisa_os_linux::GuestAbi::MipsO32, nr) {
+        eprintln!("run: unhandled mips o32 syscall {nr} ({name})");
+    } else {
+        eprintln!("run: unhandled mips o32 syscall {nr}");
+    }
+    Err(Stop::Unimplemented { pc, word })
+}
+
+fn sys_write(io: &mut O32Io, env: &mut BareEnv, model: MipsModel) -> Result<O32Cont, ()> {
+    let fd = reg(env, 4) & 0xffff_ffff;
+    let buf = reg(env, 5) & 0xffff_ffff;
+    let len = (reg(env, 6) & 0xffff_ffff) as usize;
+    if fd != 1 && fd != 2 {
+        return Ok(o32_fail(env, 9));
+    }
+    if len > 1 << 20 {
+        return Ok(o32_fail(env, 14));
+    }
+    let mut data = vec![0u8; len];
+    let acc = Access {
+        endian: model.endian,
+        align: Align::Unaligned,
+        kind: AccessKind::DataRead,
+    };
+    if env.backend.mem.read(VirtAddr(buf), &mut data, acc).is_err() {
+        return Ok(o32_fail(env, 14));
+    }
+    if fd == 1 {
+        io.stdout.extend_from_slice(&data);
+    } else {
+        io.stderr.extend_from_slice(&data);
+    }
+    set_reg(env, 2, data.len() as u64);
+    set_reg(env, 7, 0);
+    Ok(O32Cont::Next)
+}
+
+fn o32_fail(env: &mut BareEnv, errno: u64) -> O32Cont {
+    set_reg(env, 2, errno);
+    set_reg(env, 7, 1);
+    O32Cont::Next
+}
+
+fn sys_exit(_io: &mut O32Io, env: &mut BareEnv, _model: MipsModel) -> Result<O32Cont, ()> {
+    Ok(O32Cont::Exit(reg(env, 4) & 0xffff_ffff))
+}
+
+fn release_pending(
+    env: &mut BareEnv,
+    pending: Option<(u8, u64)>,
+    keep: &[u8],
+) -> Option<(u8, u64)> {
+    if let Some((reg, value)) = pending
+        && !keep.contains(&reg)
+    {
+        set_reg(env, reg, value);
+    }
+    None
+}
+
 fn j_target(pc: u64, word: u32) -> u64 {
     let region = pc.wrapping_add(4) & 0xf000_0000;
     region | (u64::from(word & 0x03ff_ffff) << 2)
@@ -433,6 +558,52 @@ fn set_u64(env: &mut BareEnv, offset: usize, value: u64) {
         polyisa_sem::StateRef::<polyisa_sem::W64>::from_offset(offset),
         value,
     );
+}
+
+/// 静的な MIPS ELF を実行する。機械番号 8。エンディアンはヘッダから取る。
+/// LE は Release 2、BE は R3000。引数はまだ渡さない。
+pub fn run_elf_mips(path: &str, _argv: &[String]) -> Result<u64, String> {
+    use polyisa_mem::{Perms, VirtAddr};
+
+    let bytes = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
+    let ehdr = polyisa_loader::elf::parse_ehdr32(&bytes).map_err(|e| format!("ehdr: {e:?}"))?;
+    // EM_MIPS = 8。Ref: SRC-LINUX (7.3).
+    if ehdr.machine != 8 {
+        return Err(format!("未対応の e_machine: {}", ehdr.machine));
+    }
+    let phdrs =
+        polyisa_loader::elf::parse_phdrs32(&bytes, &ehdr).map_err(|e| format!("phdrs: {e:?}"))?;
+    if polyisa_loader::elf::parse_interp(&bytes, &phdrs).is_some() {
+        return Err("動的リンクは未対応".to_string());
+    }
+    let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_mips::CpuState>());
+    polyisa_loader::elf::load_segments(&bytes, &phdrs, &mut env.backend.mem)
+        .map_err(|e| format!("load: {e:?}"))?;
+    let sp = 0x7fff_0000u64;
+    let page = sp & !(polyisa_mem::PAGE_SIZE - 1);
+    env.backend
+        .mem
+        .map(VirtAddr(page), 1, Perms(Perms::R.0 | Perms::W.0))
+        .map_err(|e| format!("stack map: {e:?}"))?;
+    env.backend
+        .mem
+        .write(VirtAddr(sp), &[0, 0, 0, 0])
+        .map_err(|e| format!("stack write: {e:?}"))?;
+    set_reg(&mut env, 29, sp);
+    let model = if ehdr.little {
+        MipsModel::mips32r2()
+    } else {
+        MipsModel::mips1_be()
+    };
+    let mut io = O32Io::default();
+    match run_os(&mut env, ehdr.entry, model, &mut io) {
+        MipsOutcome::Exit(code) => Ok(code),
+        MipsOutcome::Unimplemented { pc, word } => {
+            Err(format!("unimplemented at {pc:#x}: {word:#x}"))
+        }
+        MipsOutcome::StepLimit { pc } => Err(format!("step limit at {pc:#x}")),
+        MipsOutcome::Exception(exception) => Err(format!("exception {exception:?}")),
+    }
 }
 
 #[cfg(test)]
@@ -735,5 +906,94 @@ mod tests {
             MipsOutcome::Unimplemented { pc: 0x100c, .. }
         ));
         (reg(&mut env, 1), reg(&mut env, 2), reg(&mut env, 3))
+    }
+
+    fn write_then(exit: bool) -> (MipsOutcome, O32Io) {
+        let mut env = env_at(0x1000);
+        poke(&mut env, 0x1000, 0x3405_1800);
+        poke(&mut env, 0x1004, 0x2404_0001);
+        poke(&mut env, 0x1008, 0x2406_0001);
+        poke(&mut env, 0x100c, 0x2402_0fa4);
+        poke(&mut env, 0x1010, 0x0000_000c);
+        if exit {
+            poke(&mut env, 0x1014, 0x90a4_0000);
+            poke(&mut env, 0x1018, 0x0000_0000);
+            poke(&mut env, 0x101c, 0x2402_0fa1);
+            poke(&mut env, 0x1020, 0x0000_000c);
+        } else {
+            poke(&mut env, 0x1014, 0xffff_ffff);
+        }
+        env.backend.mem.write(VirtAddr(0x1800), &[7]).unwrap();
+        let mut io = O32Io::default();
+        let outcome = run_os(&mut env, 0x1000, MipsModel::mips1_be(), &mut io);
+        if !exit {
+            assert_eq!(reg(&mut env, 2), 1);
+            assert_eq!(reg(&mut env, 7), 0);
+        }
+        (outcome, io)
+    }
+
+    #[test]
+    fn o32_write_sets_success_flag_and_exit_uses_that_byte() {
+        let (stopped, io) = write_then(false);
+        assert!(matches!(
+            stopped,
+            MipsOutcome::Unimplemented { pc: 0x1014, .. }
+        ));
+        assert_eq!(io.stdout, [7]);
+        let (exited, io) = write_then(true);
+        assert_eq!(exited, MipsOutcome::Exit(7));
+        assert_eq!(io.stdout, [7]);
+    }
+
+    #[test]
+    fn o32_unknown_number_stops() {
+        let mut env = env_at(0x1000);
+        poke(&mut env, 0x1000, 0x2402_0063);
+        poke(&mut env, 0x1004, 0x0000_000c);
+        let mut io = O32Io::default();
+        let outcome = run_os(&mut env, 0x1000, MipsModel::mips1_be(), &mut io);
+        assert!(matches!(
+            outcome,
+            MipsOutcome::Unimplemented { pc: 0x1004, .. }
+        ));
+    }
+
+    #[test]
+    fn elf_mips_be_exits() {
+        let code = [0x2402_0fa1u32, 0x2404_0003, 0x0000_000c];
+        let mut file = vec![0u8; 84];
+        file[0..4].copy_from_slice(&polyisa_loader::elf::MAGIC);
+        file[4] = polyisa_loader::elf::CLASS_32;
+        file[5] = polyisa_loader::elf::DATA_BE;
+        file[6] = 1;
+        let be32 = |file: &mut [u8], off: usize, v: u32| {
+            file[off..off + 4].copy_from_slice(&v.to_be_bytes());
+        };
+        let be16 = |file: &mut [u8], off: usize, v: u16| {
+            file[off..off + 2].copy_from_slice(&v.to_be_bytes());
+        };
+        be16(&mut file, 16, 2);
+        be16(&mut file, 18, 8);
+        be32(&mut file, 20, 1);
+        be32(&mut file, 24, 0x1000);
+        be32(&mut file, 28, 52);
+        be16(&mut file, 40, 52);
+        be16(&mut file, 42, 32);
+        be16(&mut file, 44, 1);
+        be32(&mut file, 52, 1);
+        be32(&mut file, 56, 84);
+        be32(&mut file, 60, 0x1000);
+        be32(&mut file, 68, 12);
+        be32(&mut file, 72, 12);
+        be32(&mut file, 76, 5);
+        be32(&mut file, 80, 0x1000);
+        for word in code {
+            file.extend(word.to_be_bytes());
+        }
+        let path = std::env::temp_dir().join("polyisa-mips-exit.elf");
+        std::fs::write(&path, &file).unwrap();
+        let code = run_elf_mips(path.to_str().unwrap(), &[]).unwrap();
+        assert_eq!(code, 3);
     }
 }

@@ -2,7 +2,7 @@
 
 このファイルは `task status` が生成する。手で編集しない。
 
-生成の元は `crates/cli/src/run.rs` の `RV64_SYSCALLS` と、`crates/cli/src/run_x86.rs` の `X86_64_SYSCALLS`、`I386_SYSCALLS` である。
+生成の元は `crates/cli/src/run.rs` の `RV64_SYSCALLS` と、`crates/cli/src/run_x86.rs` の `X86_64_SYSCALLS`、`I386_SYSCALLS`、`crates/cli/src/run_mips.rs` の `MIPS_O32_SYSCALLS` である。
 
 ## rv64
 
@@ -126,4 +126,9 @@
 - utimensat
 - write
 - writev
+
+## mips_o32
+
+- exit
+- write
 

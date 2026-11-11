@@ -8,7 +8,7 @@ pub mod run;
 pub mod run_mips;
 pub mod run_x86;
 
-/// ELF を選んで実行する。`EI_CLASS` と `e_machine` で RISC-V と x86 を振り分ける。
+/// ELF を選んで実行する。`EI_CLASS` と `e_machine` で RISC-V、x86、MIPS を振り分ける。
 /// 番号表の出典は各 `run_elf_*` 側にある。RV32 を含むそれ以外の組み合わせは
 /// 未対応として拒否する（従来の `run_elf` も RV32 を受け付けない）。
 pub fn run_path(path: &str, argv: &[String]) -> Result<u64, String> {
@@ -24,6 +24,9 @@ pub fn run_path(path: &str, argv: &[String]) -> Result<u64, String> {
             // EM_386=3。Ref: SRC-LINUX (7.3).
             if ehdr.machine == 3 {
                 run_x86::run_elf_x86(path, argv)
+            } else if ehdr.machine == 8 {
+                // EM_MIPS。エンディアンは ELF ヘッダから取る。Ref: SRC-LINUX (7.3)。
+                run_mips::run_elf_mips(path, argv)
             } else {
                 Err(format!("未対応の e_machine: {}", ehdr.machine))
             }
