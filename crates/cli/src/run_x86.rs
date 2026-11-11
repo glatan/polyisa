@@ -1288,7 +1288,12 @@ fn fetch_len(
             } else {
                 let reg = (s >> 3) & 7;
                 if reg == 0 {
-                    Some(6)
+                    if has66 {
+                        // TEST r16,imm16 (66 F7 /0 mod=11、4B)。gunzip 0x48b06a の test r14w, 0x200。
+                        Some(4)
+                    } else {
+                        Some(6)
+                    }
                 } else if reg == 2 || reg == 3 || reg == 4 || reg == 5 || reg == 6 || reg == 7 {
                     Some(2)
                 } else {
@@ -1998,6 +2003,7 @@ pub fn run_mode(
                     | Insn::Nopl
                     | Insn::TestRm32
                     | Insn::TestM16ImmMemnd
+                    | Insn::TestRm16Imm
                     | Insn::TestM16ImmMem8
                     | Insn::TestM16ImmRip
                     | Insn::MovlpdXmmM64Memnd
@@ -4250,6 +4256,11 @@ fn dispatch<B: Backend>(
             } else {
                 sem::test_rm32_imm(b, rm(), imm32())
             }
+        }
+        Insn::TestRm16Imm => {
+            // 66 F7 /0 mod=11。gunzip 0x48b06a の test r14w, imm16。imm は最下位16 LE。
+            let imm = ((word & 0xffff) as u16).swap_bytes();
+            sem::test_rm16_imm(b, rm(), imm)
         }
         Insn::TestRm32ImmMem8 => {
             // F7 /0 mod=01 [base+disp8],imm32。echo 0x4bfb84 対応.

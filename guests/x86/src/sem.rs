@@ -17897,6 +17897,17 @@ pub fn movzx_r64_m16_memnd<B: Backend>(b: &mut B, dst: Gpr, base: Gpr) -> Flow<B
     Ok(())
 }
 
+/// TEST r16,imm16 (66 F7 /0 mod=11)。16ビット AND の結果で 5 旗を更新する（CF=0、OF=0）。レジスタは変えない。
+pub fn test_rm16_imm<B: Backend>(b: &mut B, dst: Gpr, imm: u16) -> Flow<B> {
+    use polyisa_sem::W16;
+    let x32 = read(b, dst);
+    let x: B::V<W16> = b.trunc::<W32, W16>(x32);
+    let y = b.konst::<W16>(imm);
+    let v = b.and::<W16>(x, y);
+    update_logic_flags(b, v);
+    Ok(())
+}
+
 /// TEST r16,r16 (66 85 /r reg-direct)。AND 結果で 5 旗を更新する（CF=0、OF=0）.
 pub fn test_rm16<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
     use polyisa_sem::W16;

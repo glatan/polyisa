@@ -825,6 +825,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         // TEST r/m32,r32 (85 /r)。
         ("test_rm32", "F1", "10000101 11......", "test r/m32, r32", "alu"),
         ("test_rm32_imm", "F1", "11110111 11000... ................................", "test r/m32, {imm}", "alu"),
+        // TEST r16,imm16 (66 F7 /0 mod=11)。gunzip 0x48b06a 対応。66 は実行側で剥がす。
+        ("test_rm16_imm", "F1", "11110111 11000... ................", "test r/m16, {imm}", "alu"),
         // TEST m16,imm16 mod=00 [base] (66 F7 /0)。66 接頭辞は実行側で剥がす.
         ("test_m16_imm_memnd", "F1", "11110111 00000... ................", "test m16, {imm}", "alu"),
         // TEST m16,imm16 mod=01 [base+disp8] (66 F7 /0)。hexdump 0x5c8822 対応.

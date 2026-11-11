@@ -5738,6 +5738,27 @@ fn run_imul_r64_imm_sib() {
 }
 
 #[test]
+fn run_test_r14w_imm() {
+    // 66 41 F7 C6 00 02 = test r14w, 0x200。下位16が 0 なので ZF。上位は残る。gunzip 0x48b06a。
+    // Ref: SPEC-X86-INTEL-SDM (v093).
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    polyisa_guest_x86::sem::write64(&mut env.backend, Gpr(14), 0x1111_2222_3333_0000);
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0x66, 0x41, 0xF7, 0xC6, 0x00, 0x02])
+        .unwrap();
+    env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 1);
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x1006 });
+    let r14: u64 = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(14));
+    assert_eq!(r14, 0x1111_2222_3333_0000);
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::eflags_ref()), 0x44);
+}
+
+#[test]
 fn run_cmp_m16_imm_rbx_disp8() {
     // 66 83 7B 04 0A = cmpw $0xa, 0x4(%rbx)。等しいので ZF。メモリと rbx は残る。ping 0x42e7b3。
     // Ref: SPEC-X86-INTEL-SDM (v093).
