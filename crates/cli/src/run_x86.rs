@@ -6485,6 +6485,14 @@ fn dispatch<B: Backend>(
                 sem::xor_m32_r32_mem8(b, rm(), disp8(), reg())
             }
         }
+        Insn::XorM32R32Mem32 => {
+            // 31 /r mod=10 [base+disp32]。sha3sum 0x4b45c4 の xorq %rcx, 0xa0(%rdx)。
+            if rex_w {
+                sem::xor_m64_r64_mem32(b, rm(), disp32(), reg())
+            } else {
+                sem::xor_m32_r32_mem32(b, rm(), disp32(), reg())
+            }
+        }
         Insn::AndM32R32Memnd => {
             // 21 /r mod=00 [base]。chat 0x4d3473 の andq %rax, (%rdi)。
             if rex_w {
