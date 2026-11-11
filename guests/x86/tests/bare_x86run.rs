@@ -7374,3 +7374,28 @@ fn run_cmp_di_imm16_sets_zf() {
         0x40
     );
 }
+
+#[test]
+fn run_test_rm32_imm_rip_sets_zf() {
+    // F7 05 disp32 imm32 = testl $0x231, 0xff6(%rip)。メモリは 0 なので ZF=1、CF は消える。
+    // 番地は next_rip+disp = 0x2000。ls 0x4963b6。Ref: SPEC-X86-INTEL-SDM (v093).
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 1u32);
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x1000),
+            &[0xF7, 0x05, 0xF6, 0x0F, 0x00, 0x00, 0x31, 0x02, 0x00, 0x00],
+        )
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x100A });
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x41,
+        0x40
+    );
+}

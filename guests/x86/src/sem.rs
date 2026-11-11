@@ -13965,6 +13965,40 @@ pub fn test_m16_imm_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8, imm: u16) -
     Ok(())
 }
 
+/// TEST m32,imm32 RIP (F7 05 + disp32 + imm32)。[RIP+disp] の32ビット AND で 5 旗を更新する.
+pub fn test_rm32_imm_rip<B: Backend>(b: &mut B, next_rip: u64, disp: i32, imm: u32) -> Flow<B> {
+    let base = b.konst::<W64>(next_rip);
+    let d = b.konst::<W64>(disp as i64 as u64);
+    let addr = b.add::<W64>(base, d);
+    let x: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let y = b.konst::<W32>(imm);
+    let v = b.and::<W32>(x, y);
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// TEST m64,imm32 RIP (REX.W F7 05)。imm32 は符号拡張する.
+pub fn test_rm64_imm_rip<B: Backend>(b: &mut B, next_rip: u64, disp: i32, imm: u32) -> Flow<B> {
+    let base = b.konst::<W64>(next_rip);
+    let d = b.konst::<W64>(disp as i64 as u64);
+    let addr = b.add::<W64>(base, d);
+    let x: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let y = b.konst::<W64>(imm as i32 as u64);
+    let v = b.and::<W64>(x, y);
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// TEST m32,imm32 [disp32] (32ビット絶対番地).
+pub fn test_rm32_imm_abs<B: Backend>(b: &mut B, addr32: u32, imm: u32) -> Flow<B> {
+    let addr = b.konst::<W64>(addr32 as u64);
+    let x: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let y = b.konst::<W32>(imm);
+    let v = b.and::<W32>(x, y);
+    update_logic_flags(b, v);
+    Ok(())
+}
+
 /// TEST m16,imm16 RIP (66 F7 05 + disp32 + imm16)。[RIP+disp] の16ビット AND で 5 旗を更新する.
 pub fn test_m16_imm_rip<B: Backend>(b: &mut B, next_rip: u64, disp: i32, imm: u16) -> Flow<B> {
     use polyisa_sem::W16;

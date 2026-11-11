@@ -76,7 +76,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数117件。
-        assert_eq!(INSNS.len(), 652);
+        assert_eq!(INSNS.len(), 653);
     }
 
     #[test]
@@ -961,6 +961,12 @@ mod tests {
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0xF705000000003102, 64), Some(Insn::TestM16ImmRip));
         assert_eq!(decode(0xF705000000003102, 56), None);
+        // TEST m32,imm32 RIP (F7 05 + disp32 + imm32)。ls 0x4963b6 の F7 05 FC DB 27 00 31 02 00 00。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(
+            decode(0xF705FCDB270031020000, 80),
+            Some(Insn::TestRm32ImmRip)
+        );
         // CMOVNE r,m64 SIB+disp8 no_index (0F 45 mod=01)。
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x0F45442450, 40), Some(Insn::CmovneR64Sibd));
