@@ -1559,6 +1559,14 @@ pub fn build_model() -> polyisa_isadl::Model {
             "alu",
         ),
         (
+            "fld_m80_sib",
+            "N8",
+            "11011011 00101100 ........",
+            vec![wc("n8_base", WhereOp::Ne, 5)],
+            "fld m80",
+            "alu",
+        ),
+        (
             "fld_st",
             "F1",
             "11011001 11000...",

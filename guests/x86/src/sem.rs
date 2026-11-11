@@ -10844,6 +10844,26 @@ pub fn fld_m80_sibd32<B: Backend>(
     push_ext(b, sig, exp)
 }
 
+/// FLD m80 [base] (DB /5 SIB mod=00, no_index)。seq 0x4d74d4 対応.
+pub fn fld_m80_memnd<B: Backend>(b: &mut B, base: Gpr) -> Flow<B> {
+    let addr = read64(b, base);
+    let sig: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let eight = b.konst::<W64>(8);
+    let exp_addr = b.add::<W64>(addr, eight);
+    let exp: B::V<W16> = b.load::<W16>(exp_addr, DATA_READ)?;
+    push_ext(b, sig, exp)
+}
+
+/// FLD m80 [base+index*scale] (DB /5 SIB mod=00)。
+pub fn fld_m80_sib<B: Backend>(b: &mut B, base: Gpr, idx: Gpr, shift: u32) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, 0, base, idx);
+    let sig: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let eight = b.konst::<W64>(8);
+    let exp_addr = b.add::<W64>(addr, eight);
+    let exp: B::V<W16> = b.load::<W16>(exp_addr, DATA_READ)?;
+    push_ext(b, sig, exp)
+}
+
 /// FLD m80 [base+disp8] (DB /5 SIB mod=01, no_index)。seq 0x4d7466 対応.
 pub fn fld_m80_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8) -> Flow<B> {
     let addr = eff_addr(b, base, disp);
