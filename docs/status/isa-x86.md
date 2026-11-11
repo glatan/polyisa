@@ -70,6 +70,7 @@
 | fld | fld_m32_rip、fld_m64_memnd、fld_m80_sib、fld_m80_sibd、fld_m80_sibd32、fld_st | 真 | alu |
 | fldcw | fldcw_mem32、fldcw_mem8、fldcw_memnd | 真 | alu |
 | fldz | fldz | 真 | alu |
+| fmul | fmul_m32_rip | 真 | alu |
 | fmulp | fmulp_st | 真 | alu |
 | fnstcw | fnstcw_mem32、fnstcw_mem8、fnstcw_memnd | 真 | alu |
 | fstp | fstp_m64_sibd、fstp_m80_memnd、fstp_m80_sib、fstp_m80_sibd、fstp_m80_sibd32、fstp_st | 真 | alu |

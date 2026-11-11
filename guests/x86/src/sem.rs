@@ -10488,7 +10488,7 @@ pub fn fnstcw_mem32<B: Backend>(b: &mut B, base: Gpr, disp: i32) -> Flow<B> {
 }
 
 /// binary32 のビットを 80 ビットへ伸ばし、TOP を 1 減らしてから ST(0) へ書く。
-fn push_f32<B: Backend>(b: &mut B, bits: B::V<W32>) -> Flow<B> {
+fn f32_to_ext<B: Backend>(b: &mut B, bits: B::V<W32>) -> (B::V<W64>, B::V<W16>) {
     let s31 = b.konst::<W32>(31);
     let sign = b.shr_l::<W32>(bits, s31);
     let s23 = b.konst::<W32>(23);
@@ -10549,7 +10549,12 @@ fn push_f32<B: Backend>(b: &mut B, bits: B::V<W32>) -> Flow<B> {
     let sign_bit = b.shl::<W32>(sign, s15);
     let exp_word32 = b.or::<W32>(exp_final, sign_bit);
     let exp_word: B::V<W16> = b.trunc::<W32, W16>(exp_word32);
-    push_ext(b, sig_final, exp_word)
+    (sig_final, exp_word)
+}
+
+fn push_f32<B: Backend>(b: &mut B, bits: B::V<W32>) -> Flow<B> {
+    let (sig, exp) = f32_to_ext(b, bits);
+    push_ext(b, sig, exp)
 }
 
 /// 80 ビット値を x87 スタックへ載せる。TOP を 1 減らしてから書く。
@@ -10755,6 +10760,40 @@ pub fn fld_m32_rip<B: Backend>(b: &mut B, next_rip: u64, disp: i32) -> Flow<B> {
     let addr = b.add::<W64>(base, d);
     let bits: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
     push_f32(b, bits)
+}
+
+/// FMUL m32 [RIP+disp32] (D8 /1 mod=00 rm=101)。ST(0) に単精度を掛ける。seq 0x4d0bf4 対応.
+pub fn fmul_m32_rip<B: Backend>(b: &mut B, next_rip: u64, disp: i32) -> Flow<B> {
+    let base = b.konst::<W64>(next_rip);
+    let d = b.konst::<W64>(disp as i64 as u64);
+    let addr = b.add::<W64>(base, d);
+    let bits: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    fmul_m32_bits(b, bits)
+}
+
+/// FMUL m32 [disp32] (D8 /1 mod=00 rm=101、32ビット)。
+pub fn fmul_m32_abs<B: Backend>(b: &mut B, addr32: u32) -> Flow<B> {
+    let addr = b.konst::<W64>(addr32 as u64);
+    let bits: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    fmul_m32_bits(b, bits)
+}
+
+fn fmul_m32_bits<B: Backend>(b: &mut B, bits: B::V<W32>) -> Flow<B> {
+    let (sig_m, exp_m) = f32_to_ext(b, bits);
+    let top = b.get(top_ref());
+    let (sig0, exp0) = read_st(b, top);
+    let (sig_p, exp_p) = mul_ext(b, sig0, exp0, sig_m, exp_m);
+    for slot in 0..8 {
+        let idx = b.konst::<W16>(slot as u16);
+        let hit = b.cmp::<W16>(Cmp::Eq, top, idx);
+        let old_sig = b.get(st_sig_ref(slot));
+        let old_exp = b.get(st_exp_ref(slot));
+        let new_sig = b.select::<W64>(hit, sig_p, old_sig);
+        let new_exp = b.select::<W16>(hit, exp_p, old_exp);
+        b.set(st_sig_ref(slot), new_sig);
+        b.set(st_exp_ref(slot), new_exp);
+    }
+    Ok(())
 }
 
 /// FLDL [base] (DD /0 mod=00)。seq 0x4d0723 の fldl (%rax)。

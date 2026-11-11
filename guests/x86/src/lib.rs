@@ -85,7 +85,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数117件。
-        assert_eq!(INSNS.len(), 688);
+        assert_eq!(INSNS.len(), 689);
     }
 
     #[test]
@@ -783,6 +783,9 @@ mod tests {
         // FUCOMI ST(1) (DB E9)。seq 0x4d0983。
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0xDBE9, 16), Some(Insn::FucomiSt));
+        // FMUL m32 RIP (D8 /1)。seq 0x4d0bf4 の D8 0D FA 0F 00 00。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0xD80DFA0F0000, 48), Some(Insn::FmulM32Rip));
         assert_eq!(decode(0x35_0000_00FF, 40), Some(Insn::XorImm));
         // シフト：SHL EAX,imm8 (C1 E0 ib)、SHR EAX,imm8 (C1 E8 ib)。
         // Ref: SPEC-X86-INTEL-SDM (v093).

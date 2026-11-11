@@ -8813,3 +8813,40 @@ fn run_fucomi_st1_sets_flags() {
     assert_eq!(once(0, 0, 0x8000, 0), 0x42);
     assert_eq!(once(0x7FFF, 0xC000_0000_0000_0000, 0x3FFF, one), 0x47);
 }
+
+#[test]
+fn run_fmul_m32_rip_three_times_two() {
+    // D8 0D FA 0F 00 00 = fmuls 0xffa(%rip)。ST(0) の 3 に 2.0 を掛ける。seq 0x4d0bf4。
+    // Ref: SPEC-X86-INTEL-SDM (v093).
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+    env.backend
+        .set(polyisa_guest_x86::sem::st_exp_ref(0), 0x4000u16);
+    env.backend.set(
+        polyisa_guest_x86::sem::st_sig_ref(0),
+        (1u64 << 63) | (1u64 << 62),
+    );
+    env.backend
+        .mem
+        .write(VirtAddr(0x2000), &0x40000000u32.to_le_bytes())
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0xD8, 0x0D, 0xFA, 0x0F, 0x00, 0x00])
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x1006 });
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::top_ref()), 0);
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::st_exp_ref(0)),
+        0x4001
+    );
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)),
+        (1u64 << 63) | (1u64 << 62)
+    );
+}

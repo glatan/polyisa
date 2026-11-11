@@ -912,10 +912,15 @@ fn fetch_len(
             }
         }
         // D8 C0+i (FADD ST(0), ST(i))。reg-direct 2B のみ。seq 0x4d097d の D8 C0。
+        // D8 /1 mod=00 rm=5 (FMUL m32 RIP)。seq 0x4d0bf4 の D8 0D。6B.
         0xD8 => {
             let s = second?;
             let md = s >> 6;
             let reg = (s >> 3) & 7;
+            let rm = s & 7;
+            if reg == 1 && md == 0 && rm == 5 {
+                return Some(6);
+            }
             if md == 3 && reg == 0 { Some(2) } else { None }
         }
         // DE C8+i (FMULP ST(i))。reg-direct 2B のみ。seq 0x4018c7 の DE C9。
@@ -3412,6 +3417,15 @@ fn dispatch<B: Backend>(
         Insn::FucomiSt => {
             // DB E8+i。seq 0x4d0983 の DB E9 は FUCOMI ST(0), ST(1)。
             sem::fucomi_st(b, (word & 7) as u8)
+        }
+        Insn::FmulM32Rip => {
+            // D8 /1 mod=00 rm=101。seq 0x4d0bf4 の fmuls disp32(%rip)。
+            let disp = (word as u32).swap_bytes() as i32;
+            if is64 {
+                sem::fmul_m32_rip(b, eip as u64 + nbytes, disp)
+            } else {
+                sem::fmul_m32_abs(b, (word as u32).swap_bytes())
+            }
         }
         Insn::FldSt => {
             // D9 C0+i。seq 0x4d0867 の D9 C0 は FLD ST(0)。
