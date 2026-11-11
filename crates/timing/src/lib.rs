@@ -34,6 +34,10 @@ pub struct InstrEvent {
     pub branch_taken: Option<bool>,
     /// 意味論が渡した手がかり（例：乗数の 1 の数）。
     pub hint: u64,
+    /// 読むレジスタ。ビットの割り当ては送り手が決める。
+    pub reads: u64,
+    /// 書くレジスタ。ビットの割り当ては送り手が決める。
+    pub writes: u64,
 }
 
 impl InstrEvent {
@@ -45,7 +49,21 @@ impl InstrEvent {
             mem_addrs: Vec::new(),
             branch_taken: None,
             hint: 0,
+            reads: 0,
+            writes: 0,
         }
+    }
+
+    #[must_use]
+    pub fn reads(mut self, reads: u64) -> Self {
+        self.reads = reads;
+        self
+    }
+
+    #[must_use]
+    pub fn writes(mut self, writes: u64) -> Self {
+        self.writes = writes;
+        self
     }
 }
 
@@ -104,6 +122,124 @@ impl TimingModel for CpiModel {
     }
 }
 
+/// 分類ごとの発行コストと、結果が使えるまでの距離。
+/// `ready` は命令の開始時点からのサイクル数。発行コストと同じなら、次の命令は待たない。
+#[derive(Clone, Copy, Debug)]
+pub struct ClassCost {
+    pub class: &'static str,
+    pub issue: u64,
+    pub ready: u64,
+}
+
+/// 発行コストを足し、結果を待つ命令だけを止める。パイプラインの重なりはモデルしない。
+#[derive(Clone, Debug)]
+pub struct ExactModel {
+    time: u64,
+    ready_at: [u64; 64],
+    costs: &'static [ClassCost],
+}
+
+/// 設計文書の R3000 の例。ロードは開始+2、乗算は開始+12、除算は開始+35、syscall は 0。
+/// Ref: SPEC-MIPS-R3000 (Rev 1.0).
+pub const R3000_COSTS: &[ClassCost] = &[
+    ClassCost {
+        class: "alu",
+        issue: 1,
+        ready: 1,
+    },
+    ClassCost {
+        class: "store",
+        issue: 1,
+        ready: 1,
+    },
+    ClassCost {
+        class: "branch",
+        issue: 1,
+        ready: 1,
+    },
+    ClassCost {
+        class: "jump",
+        issue: 1,
+        ready: 1,
+    },
+    ClassCost {
+        class: "load",
+        issue: 1,
+        ready: 2,
+    },
+    ClassCost {
+        class: "mult",
+        issue: 1,
+        ready: 12,
+    },
+    ClassCost {
+        class: "div",
+        issue: 1,
+        ready: 35,
+    },
+    ClassCost {
+        class: "system",
+        issue: 0,
+        ready: 0,
+    },
+];
+
+impl ExactModel {
+    #[must_use]
+    pub const fn new(costs: &'static [ClassCost]) -> Self {
+        Self {
+            time: 0,
+            ready_at: [0; 64],
+            costs,
+        }
+    }
+
+    /// 設計文書の R3000 の表。
+    #[must_use]
+    pub const fn r3000() -> Self {
+        Self::new(R3000_COSTS)
+    }
+
+    fn cost(&self, class: &str) -> (u64, u64) {
+        for row in self.costs {
+            if row.class == class {
+                return (row.issue, row.ready);
+            }
+        }
+        (1, 1)
+    }
+}
+
+impl TimingModel for ExactModel {
+    fn observe(&mut self, ev: &InstrEvent) {
+        let mut start = self.time;
+        let mut bit = 0;
+        let mut reads = ev.reads;
+        while reads != 0 {
+            if reads & 1 != 0 {
+                start = start.max(self.ready_at[bit]);
+            }
+            reads >>= 1;
+            bit += 1;
+        }
+        let (issue, ready) = self.cost(ev.class);
+        self.time = start + issue;
+        let mut writes = ev.writes;
+        bit = 0;
+        while writes != 0 {
+            if writes & 1 != 0 {
+                self.ready_at[bit] = start + ready;
+            }
+            writes >>= 1;
+            bit += 1;
+        }
+    }
+
+    fn now(&self) -> VirtualTime {
+        VirtualTime(self.time)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -122,5 +258,32 @@ mod tests {
         m.observe(&InstrEvent::new(0, "alu"));
         m.observe(&InstrEvent::new(4, "load"));
         assert_eq!(m.now(), VirtualTime(4));
+    }
+
+    #[test]
+    fn r3000_stalls_only_for_a_result_that_is_not_ready() {
+        let mut load_use = ExactModel::r3000();
+        load_use.observe(&InstrEvent::new(0, "load").writes(1 << 1));
+        load_use.observe(&InstrEvent::new(4, "alu").reads(1 << 1).writes(1 << 2));
+        assert_eq!(load_use.now(), VirtualTime(3));
+
+        let mut load_other = ExactModel::r3000();
+        load_other.observe(&InstrEvent::new(0, "load").writes(1 << 1));
+        load_other.observe(&InstrEvent::new(4, "alu").reads(1 << 2).writes(1 << 3));
+        assert_eq!(load_other.now(), VirtualTime(2));
+
+        let mut mult = ExactModel::r3000();
+        mult.observe(&InstrEvent::new(0, "mult").writes(1 << 33));
+        mult.observe(&InstrEvent::new(4, "alu").reads(1 << 33).writes(1 << 2));
+        assert_eq!(mult.now(), VirtualTime(13));
+
+        let mut div = ExactModel::r3000();
+        div.observe(&InstrEvent::new(0, "div").writes(1 << 33));
+        div.observe(&InstrEvent::new(4, "alu").reads(1 << 33));
+        assert_eq!(div.now(), VirtualTime(36));
+
+        let mut sys = ExactModel::r3000();
+        sys.observe(&InstrEvent::new(0, "system"));
+        assert_eq!(sys.now(), VirtualTime(0));
     }
 }
