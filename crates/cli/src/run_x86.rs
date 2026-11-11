@@ -826,6 +826,10 @@ fn fetch_len(
                 // FLDS [RIP+disp32] (D9 /0)。seq 0x402335 対応。6B.
                 return Some(6);
             }
+            if reg == 0 && md == 3 {
+                // FLD ST(i) (D9 C0+i)。seq 0x4d0867 の D9 C0。
+                return Some(2);
+            }
             if reg != 5 && reg != 7 {
                 return None;
             }
@@ -3310,6 +3314,10 @@ fn dispatch<B: Backend>(
             } else {
                 sem::push_reg(b, push_r())
             }
+        }
+        Insn::FldSt => {
+            // D9 C0+i。seq 0x4d0867 の D9 C0 は FLD ST(0)。
+            sem::fld_st(b, (word & 7) as u8)
         }
         Insn::FldM80Sibd32 => {
             // DB /5 SIB mod=10。seq 0x4d0853 の fldt 0x1d80(%rsp)。

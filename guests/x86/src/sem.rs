@@ -10787,6 +10787,17 @@ pub fn fld_m80_sibd32<B: Backend>(
     push_ext(b, sig, exp)
 }
 
+/// FLD ST(i) (D9 C0+i)。ST(i) の複製を載せる。元の段は残す。seq 0x4d0867 対応.
+pub fn fld_st<B: Backend>(b: &mut B, i: u8) -> Flow<B> {
+    let top = b.get(top_ref());
+    let ii = b.konst::<W16>(i as u16);
+    let summed = b.add::<W16>(top, ii);
+    let seven = b.konst::<W16>(7);
+    let src = b.and::<W16>(summed, seven);
+    let (sig, exp) = read_st(b, src);
+    push_ext(b, sig, exp)
+}
+
 /// FLDS [disp32] (D9 /0 mod=00 rm=101、32ビット)。
 pub fn fld_m32_abs<B: Backend>(b: &mut B, addr32: u32) -> Flow<B> {
     let addr = b.konst::<W64>(addr32 as u64);
