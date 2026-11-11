@@ -592,15 +592,23 @@ fn fetch_len(
             }
         }
         // 0x69 /r id (IMUL r,r/m,imm32)。reg-direct 6B、SIB+disp8 は 8B。
+        // mod=00 SIB+imm32 は 7B。base=5 は disp32 が付く。dd 0x4067c3 対応。
         0x69 => {
             let s = second?;
             let md = s >> 6;
             let rm = s & 7;
             if md == 3 {
                 Some(6)
-            } else if md == 1 && rm == 4 {
-                // mktemp 0x4d85cf の imulq $0x10001, 0x8(%rsp), %rax。
-                Some(8)
+            } else if rm == 4 {
+                let t = third?;
+                if md == 1 {
+                    // mktemp 0x4d85cf の imulq $0x10001, 0x8(%rsp), %rax。
+                    Some(8)
+                } else if md == 0 && t & 7 != 5 {
+                    Some(7)
+                } else {
+                    None
+                }
             } else {
                 None
             }
@@ -1579,6 +1587,7 @@ pub fn run_mode(
                 | 0x85
                 | 0x83
                 | 0x81
+                | 0x69
                 | 0x63
                 | 0x01
                 | 0x03
@@ -7343,6 +7352,20 @@ fn dispatch<B: Backend>(
                 sem::imul_r64_imm(b, reg(), rm(), imm32())
             } else {
                 sem::imul_r32_imm(b, reg(), rm(), imm32())
+            }
+        }
+        Insn::ImulRImmSib => {
+            // 69 /r SIB mod=00 + imm32。dd 0x4067c3 の imulq $0xf4240, (%rsp), %rcx。
+            if no_index() {
+                if rex_w {
+                    sem::imul_r64_imm_memnd(b, reg(), sib_base(), imm32())
+                } else {
+                    sem::imul_r32_imm_memnd(b, reg(), sib_base(), imm32())
+                }
+            } else if rex_w {
+                sem::imul_r64_imm_sib(b, reg(), sib_base(), sib_idx(), sib_shift(), imm32())
+            } else {
+                sem::imul_r32_imm_sib(b, reg(), sib_base(), sib_idx(), sib_shift(), imm32())
             }
         }
         Insn::ImulRImmSibd => {

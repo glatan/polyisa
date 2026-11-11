@@ -2189,6 +2189,15 @@ pub fn build_model() -> polyisa_isadl::Model {
             "or [r/m+sib+disp32], r32",
             "alu",
         ),
+        // IMUL r, [SIB], imm32 (69 /r mod=00)。base=5 は disp32 が付く。dd 0x4067c3 対応。
+        (
+            "imul_r_imm_sib",
+            "D32",
+            "01101001 00...100 ........ ................................",
+            vec![wc("d32_base", WhereOp::Ne, 5)],
+            "imul r, m, {imm}",
+            "alu",
+        ),
         // ADD m32,r32 [index*scale+disp32] (01 /r SIB mod=00 base=直接番地)。echo 0x4c08d1 対応.
         // CMP m32,r32 [index*scale+disp32] (39 /r SIB mod=00 base=直接番地)。id 0x4bfd44 対応.
         (

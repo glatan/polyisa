@@ -5663,6 +5663,36 @@ fn run_shl_m32_imm8_mem8() {
 }
 
 #[test]
+fn run_imul_r64_imm_sib() {
+    // 48 69 0C 24 40 42 0F 00 = imulq $0xf4240, (%rsp), %rcx。2*1000000=2000000。
+    // dd 0x4067c3。Ref: SPEC-X86-INTEL-SDM (v093).
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 1);
+    env.backend
+        .mem
+        .write(VirtAddr(0x2000), &2u64.to_le_bytes())
+        .unwrap();
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x1000),
+            &[0x48, 0x69, 0x0C, 0x24, 0x40, 0x42, 0x0F, 0x00],
+        )
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x1008 });
+    let lo = env.backend.get(Gpr(1).state()) as u64;
+    let hi = env.backend.get(polyisa_guest_x86::sem::hi_ref(Gpr(1))) as u64;
+    assert_eq!((hi << 32) | lo, 0x1E_8480);
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 1, 1);
+}
+
+#[test]
 fn run_imul_r64_imm_sibd() {
     // 48 69 44 24 08 01 00 01 00 = imulq $0x10001, 0x8(%rsp), %rax。3*0x10001=0x30003。
     // mktemp 0x4d85cf。Ref: SPEC-X86-INTEL-SDM (v093).
