@@ -405,6 +405,7 @@ fn text_applets_match_host() {
         &["rdev"],
         &["script"],
         &["sha3sum", f],
+        &["awk", "{print}", f],
         &["printenv"],
         &["which", "true"],
         &["install", "-m", "644", f, installed_s],

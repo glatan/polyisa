@@ -11261,6 +11261,70 @@ pub fn imul_r64_rip<B: Backend>(b: &mut B, dst: Gpr, next_rip: u64, disp: i32) -
     Ok(())
 }
 
+/// IMUL r32, [index*scale+disp32] (0F AF SIB mod=00 base=直接番地)。フラグは変えない。
+pub fn imul_r32_sibabs<B: Backend>(
+    b: &mut B,
+    dst: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i32,
+) -> Flow<B> {
+    let addr = sib_addr_scaled_abs(b, shift, disp, idx);
+    let y: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let x = read(b, dst);
+    let x64 = b.sext::<W32, W64>(x);
+    let y64 = b.sext::<W32, W64>(y);
+    let p64 = b.mul::<W64>(x64, y64);
+    let v: B::V<W32> = b.trunc::<W64, W32>(p64);
+    write(b, dst, v);
+    Ok(())
+}
+
+/// IMUL r64, [index*scale+disp32] (0F AF SIB mod=00 base=直接番地, REX.W)。フラグは変えない。
+pub fn imul_r64_sibabs<B: Backend>(
+    b: &mut B,
+    dst: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i32,
+) -> Flow<B> {
+    let addr = sib_addr_scaled_abs(b, shift, disp, idx);
+    let y: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let x = read64(b, dst);
+    let x128 = b.sext::<W64, W128>(x);
+    let y128 = b.sext::<W64, W128>(y);
+    let p128 = b.mul::<W128>(x128, y128);
+    let v: B::V<W64> = b.trunc::<W128, W64>(p128);
+    write64(b, dst, v);
+    Ok(())
+}
+
+/// IMUL r32, [disp32] (0F AF SIB mod=00 base=直接番地, no_index)。符号拡張した disp32。
+pub fn imul_r32_dispabs<B: Backend>(b: &mut B, dst: Gpr, disp: i32) -> Flow<B> {
+    let addr = b.konst::<W64>(disp as i64 as u64);
+    let y: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let x = read(b, dst);
+    let x64 = b.sext::<W32, W64>(x);
+    let y64 = b.sext::<W32, W64>(y);
+    let p64 = b.mul::<W64>(x64, y64);
+    let v: B::V<W32> = b.trunc::<W64, W32>(p64);
+    write(b, dst, v);
+    Ok(())
+}
+
+/// IMUL r64, [disp32] (0F AF SIB mod=00 base=直接番地, no_index, REX.W)。
+pub fn imul_r64_dispabs<B: Backend>(b: &mut B, dst: Gpr, disp: i32) -> Flow<B> {
+    let addr = b.konst::<W64>(disp as i64 as u64);
+    let y: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let x = read64(b, dst);
+    let x128 = b.sext::<W64, W128>(x);
+    let y128 = b.sext::<W64, W128>(y);
+    let p128 = b.mul::<W128>(x128, y128);
+    let v: B::V<W64> = b.trunc::<W128, W64>(p128);
+    write64(b, dst, v);
+    Ok(())
+}
+
 /// IMUL r32, [disp32] abs (32ビット)。
 pub fn imul_r32_abs<B: Backend>(b: &mut B, dst: Gpr, addr32: u32) -> Flow<B> {
     let addr = b.konst::<W64>(addr32 as u64);

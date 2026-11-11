@@ -5738,6 +5738,53 @@ fn run_imul_r64_imm_sib() {
 }
 
 #[test]
+fn run_imul_eax_rdx_scale_disp32() {
+    // 0F AF 04 95 00 20 00 00 = imul eax, [rdx*4+0x2000]。3*5=15。上位は消える。フラグは残る。awk 0x4d6114。
+    // Ref: SPEC-X86-INTEL-SDM (v093).
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    polyisa_guest_x86::sem::write64(&mut env.backend, Gpr(0), 0x9ABC_0000_0000_0003);
+    polyisa_guest_x86::sem::write64(&mut env.backend, Gpr(2), 1);
+    env.backend
+        .mem
+        .write(VirtAddr(0x2004), &5u32.to_le_bytes())
+        .unwrap();
+    env.backend.mem.write(VirtAddr(0x2008), &[0xAB]).unwrap();
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x1000),
+            &[0x0F, 0xAF, 0x04, 0x95, 0x00, 0x20, 0x00, 0x00],
+        )
+        .unwrap();
+    env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 1);
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x1008 });
+    let eax: u64 = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(0));
+    assert_eq!(eax, 15);
+    let rdx: u64 = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(2));
+    assert_eq!(rdx, 1);
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::eflags_ref()), 1);
+    let mut nb = [0u8; 1];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x2008),
+            &mut nb,
+            polyisa_mem::Access {
+                endian: polyisa_mem::Endian::Le,
+                align: polyisa_mem::Align::Unaligned,
+                kind: polyisa_mem::AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(nb[0], 0xAB);
+}
+
+#[test]
 fn run_cvtsi2sd_rsp_nodisp() {
     // F2 48 0F 2A 0C 24 = cvtsi2sdq (%rsp), %xmm1。整数 2 は 2.0。上位 64 は残る。ntpd 0x42cb3e。
     // Ref: SPEC-X86-INTEL-SDM (v093).

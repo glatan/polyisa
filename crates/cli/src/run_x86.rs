@@ -7910,6 +7910,20 @@ fn dispatch<B: Backend>(
                 sem::imul_r32_sibd_indexed(b, reg0f_as_gpr(), base, idx, shift, d8)
             }
         }
+        Insn::ImulRSibabs => {
+            // 0F AF SIB mod=00 base=101。awk 0x4d6114 の imul eax, [rdx*4+disp32]。
+            if sib0f_no_index() {
+                if rex_w {
+                    sem::imul_r64_dispabs(b, reg0f_as_gpr(), disp32())
+                } else {
+                    sem::imul_r32_dispabs(b, reg0f_as_gpr(), disp32())
+                }
+            } else if rex_w {
+                sem::imul_r64_sibabs(b, reg0f_as_gpr(), sib0f_idx(), sib0f_shift(), disp32())
+            } else {
+                sem::imul_r32_sibabs(b, reg0f_as_gpr(), sib0f_idx(), sib0f_shift(), disp32())
+            }
+        }
         Insn::ImulRRip => {
             if rex_w {
                 sem::imul_r64_rip(b, reg0f_as_gpr(), eip as u64 + nbytes, disp32())
@@ -8801,6 +8815,7 @@ fn dispatch<B: Backend>(
             | Insn::ImulRMem8
             | Insn::ImulRMem32
             | Insn::ImulRSibd
+            | Insn::ImulRSibabs
             | Insn::ImulRRip
             | Insn::BsfRRm
             | Insn::BsfRMemnd
@@ -8899,7 +8914,7 @@ fn dispatch<B: Backend>(
                         | Insn::MovsxdSibd
                         | Insn::MovsxdSibd32
                 ))
-                || (rex_w && matches!(insn, Insn::RolRm32Cl))
+                || (rex_w && matches!(insn, Insn::RolRm32Cl | Insn::ImulRSibabs))
                 || (has66 && matches!(insn, Insn::XorRm32 | Insn::RolRm32Imm8));
             if !skip {
                 sem::clear_hi(b, d);

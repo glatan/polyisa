@@ -85,7 +85,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数117件。
-        assert_eq!(INSNS.len(), 749);
+        assert_eq!(INSNS.len(), 750);
     }
 
     #[test]
@@ -1239,6 +1239,7 @@ mod tests {
         // 下位32は ImulRMem8 に一致するため否定は24で行う.
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x0FAF6C2414, 40), Some(Insn::ImulRSibd));
+        assert_eq!(decode(0x0FAF049500200000, 64), Some(Insn::ImulRSibabs));
         assert_eq!(decode(0x0FAF6C2414, 24), None);
         // XOR r/m8,r8 reg-direct (30 /r)。
         // Ref: SPEC-X86-INTEL-SDM (v093).
