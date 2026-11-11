@@ -5044,6 +5044,23 @@ pub fn sub_rm32_imm8_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8, imm: i8) -
     Ok(())
 }
 
+/// SUB m16, r16 [base+disp8] (66 29 /r mod=01)。16ビットだけ引き、隣のバイトは残す。lpq 0x4c3385 対応.
+pub fn sub_m16_r16_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8, src: Gpr) -> Flow<B> {
+    let addr = eff_addr(b, base, disp);
+    let x: B::V<W16> = b.load::<W16>(addr, DATA_READ)?;
+    let y = if src.0 < 8 {
+        let y32 = read(b, src);
+        b.trunc::<W32, W16>(y32)
+    } else {
+        let y64 = read64(b, src);
+        b.trunc::<W64, W16>(y64)
+    };
+    let v = b.sub::<W16>(x, y);
+    b.store::<W16>(addr, v, DATA_WRITE)?;
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
 /// SUB m16, imm8 [base+disp8] (66 83 /5 mod=01)。
 pub fn sub_m16_imm8_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8, imm: i8) -> Flow<B> {
     let addr = eff_addr(b, base, disp);

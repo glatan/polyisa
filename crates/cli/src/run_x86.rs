@@ -2047,6 +2047,8 @@ pub fn run_mode(
                     | Insn::RolRm32Imm8
                     // CMP r/m16, r16 (66 39 /r mod=11) は CmpRm32 を共用する.
                     | Insn::CmpRm32
+                    // SUB m16, r16 (66 29 /r mod=01)。lpq 0x4c3385 の subw %bx, 0x52(%rbp)。
+                    | Insn::SubM32R32Mem8
                     | Insn::CmpRmImm8Rip
                     // MOV [base+disp32],r16 (66 89 mod=10) は MovMemEax32 を共用する.
                     | Insn::MovMemEax32
@@ -2636,7 +2638,9 @@ fn dispatch<B: Backend>(
         }
         Insn::SubM32R32Mem8 => {
             // 29 /r mod=01 [base+disp8]。src は reg フィールド.
-            if rex_w {
+            if has66 {
+                sem::sub_m16_r16_mem8(b, rm(), disp8(), reg())
+            } else if rex_w {
                 sem::sub_m64_r64_mem8(b, rm(), disp8(), reg())
             } else {
                 sem::sub_m32_r32_mem8(b, rm(), disp8(), reg())
