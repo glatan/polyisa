@@ -1,16 +1,14 @@
 // Copyright (c) polyisa contributors
 // SPDX-License-Identifier: MIT OR Apache-2.0
-// MIPS I 試作の ISADL モデル（段階3の最小）。
+// MIPS I の整数命令と、R6 が外した符号化のゲート、R6 の BEQZALC。
 //
-// MIPS I の整数17件と ADDI/ADDIU、R6 の BEQZALC（計20件）に絞る。遅延スロットは pc/npc で表す。
-// R6 の BEQZALC は遅延スロットを持たない。
-// ADD/SUB（trap あり）は扱わず WRAP する ADDU/SUBU のみ持つ。trap は本格実装で足す。
-// R6 の割り当て直しの残り・microMIPS・FPU・ロード遅延・branch likely・LE切替は本格実装で足す。
-// HI/LO と乗除算は本格相当の最小形を持つ（ div-by-zero は UNPREDICTABLE のため
-// HI/LO 不変とし、挙動パラメータ化は本格実装で足す）。
-// FI は lw/sw/beq を一形式に統合する試作の簡略化。imm16/target/shamt の切り出しは本格実装で足す。
-// 出典は SPEC-MIPS-IV Rev 3.2 (1995-09) である。
+// 遅延スロットは pc/npc で表す。R6 の BEQZALC は遅延スロットを持たない。
+// ADD/SUB は符号付き溢れでトラップする。ADDU/SUBU/ADDI/ADDIU は包む。
+// 0 除算は CpuState.div_zero_writes_zero に従う。0 は HI/LO を保つ。
+// ロード遅延、エンディアンの切り替え、o32、R6 の新しい符号化は後の回で足す。
+// 出典は SPEC-MIPS-IV Rev 3.2 (1995-09) と SPEC-MIPS-R6 Rev 6.06 である。
 // Ref: SPEC-MIPS-IV (Rev 3.2).
+// Ref: SPEC-MIPS-R6 (Rev 6.06).
 
 use polyisa_isadl::model::*;
 use polyisa_isadl::pattern::Pattern;
@@ -20,7 +18,7 @@ use polyisa_isadl::pred::Pred;
 pub fn build_model() -> polyisa_isadl::Model {
     let mut m = polyisa_isadl::Model::new();
 
-    for class in ["alu", "load", "store", "branch", "jump", "mult", "div"] {
+    for class in ["alu", "load", "store", "branch", "jump", "mult", "div", "system"] {
         m.timing_classes.push(class.to_string());
     }
 
@@ -121,6 +119,45 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("sw", "FI", "101011 ..... ..... ................", "sw {rt}, {imm}({rs})", "store"),
         ("beq", "FI", "000100 ..... ..... ................", "beq {rs}, {rt}, {imm}", "branch"),
         ("j", "FJ", "000010 ..........................", "j {imm}", "jump"),
+        ("srl", "FR", "000000 00000 ..... ..... ..... 000010", "srl {rd}, {rt}, {shamt}", "alu"),
+        ("sra", "FR", "000000 00000 ..... ..... ..... 000011", "sra {rd}, {rt}, {shamt}", "alu"),
+        ("sllv", "FR", "000000 ..... ..... ..... 00000 000100", "sllv {rd}, {rt}, {rs}", "alu"),
+        ("srlv", "FR", "000000 ..... ..... ..... 00000 000110", "srlv {rd}, {rt}, {rs}", "alu"),
+        ("srav", "FR", "000000 ..... ..... ..... 00000 000111", "srav {rd}, {rt}, {rs}", "alu"),
+        ("add", "FR", "000000 ..... ..... ..... ..... 100000", "add {rd}, {rs}, {rt}", "alu"),
+        ("sub", "FR", "000000 ..... ..... ..... ..... 100010", "sub {rd}, {rs}, {rt}", "alu"),
+        ("xor", "FR", "000000 ..... ..... ..... ..... 100110", "xor {rd}, {rs}, {rt}", "alu"),
+        ("nor", "FR", "000000 ..... ..... ..... ..... 100111", "nor {rd}, {rs}, {rt}", "alu"),
+        ("slt", "FR", "000000 ..... ..... ..... ..... 101010", "slt {rd}, {rs}, {rt}", "alu"),
+        ("sltu", "FR", "000000 ..... ..... ..... ..... 101011", "sltu {rd}, {rs}, {rt}", "alu"),
+        ("jr", "FR", "000000 ..... 00000 00000 00000 001000", "jr {rs}", "jump"),
+        ("jalr", "FR", "000000 ..... 00000 ..... 00000 001001", "jalr {rd}, {rs}", "jump"),
+        ("syscall", "FR", "000000 ..... ..... ..... ..... 001100", "syscall", "system"),
+        ("break", "FR", "000000 ..... ..... ..... ..... 001101", "break", "system"),
+        ("jal", "FJ", "000011 ..........................", "jal {imm}", "jump"),
+        ("bne", "FI", "000101 ..... ..... ................", "bne {rs}, {rt}, {imm}", "branch"),
+        ("blez", "FI", "000110 ..... 00000 ................", "blez {rs}, {imm}", "branch"),
+        ("bgtz", "FI", "000111 ..... 00000 ................", "bgtz {rs}, {imm}", "branch"),
+        ("bltz", "FI", "000001 ..... 00000 ................", "bltz {rs}, {imm}", "branch"),
+        ("bgez", "FI", "000001 ..... 00001 ................", "bgez {rs}, {imm}", "branch"),
+        ("bltzal", "FI", "000001 ..... 10000 ................", "bltzal {rs}, {imm}", "branch"),
+        ("bgezal", "FI", "000001 ..... 10001 ................", "bgezal {rs}, {imm}", "branch"),
+        ("slti", "FI", "001010 ..... ..... ................", "slti {rt}, {rs}, {imm}", "alu"),
+        ("sltiu", "FI", "001011 ..... ..... ................", "sltiu {rt}, {rs}, {imm}", "alu"),
+        ("andi", "FI", "001100 ..... ..... ................", "andi {rt}, {rs}, {imm}", "alu"),
+        ("ori", "FI", "001101 ..... ..... ................", "ori {rt}, {rs}, {imm}", "alu"),
+        ("xori", "FI", "001110 ..... ..... ................", "xori {rt}, {rs}, {imm}", "alu"),
+        ("lui", "FI", "001111 ..... ..... ................", "lui {rt}, {imm}", "alu"),
+        ("lb", "FI", "100000 ..... ..... ................", "lb {rt}, {imm}({rs})", "load"),
+        ("lh", "FI", "100001 ..... ..... ................", "lh {rt}, {imm}({rs})", "load"),
+        ("lwl", "FI", "100010 ..... ..... ................", "lwl {rt}, {imm}({rs})", "load"),
+        ("lbu", "FI", "100100 ..... ..... ................", "lbu {rt}, {imm}({rs})", "load"),
+        ("lhu", "FI", "100101 ..... ..... ................", "lhu {rt}, {imm}({rs})", "load"),
+        ("lwr", "FI", "100110 ..... ..... ................", "lwr {rt}, {imm}({rs})", "load"),
+        ("sb", "FI", "101000 ..... ..... ................", "sb {rt}, {imm}({rs})", "store"),
+        ("sh", "FI", "101001 ..... ..... ................", "sh {rt}, {imm}({rs})", "store"),
+        ("swl", "FI", "101010 ..... ..... ................", "swl {rt}, {imm}({rs})", "store"),
+        ("swr", "FI", "101110 ..... ..... ................", "swr {rt}, {imm}({rs})", "store"),
     ];
     for (name, format, pattern, syntax, timing) in insns {
         m.insns.push(Insn {
@@ -140,6 +177,29 @@ pub fn build_model() -> polyisa_isadl::Model {
         if matches!(
             insn.name.as_str(),
             "mult" | "multu" | "div" | "divu" | "mfhi" | "mflo" | "mthi" | "mtlo"
+        ) {
+            insn.when = Pred::Not(Box::new(Pred::Flag("mips_r6".to_string())));
+        }
+        // Release 6 が遅延スロット付きの分岐・ジャンプと非整列ロードを外した符号化。
+        // 割り当て先の命令は、コンパイラ出力を見てから足す。
+        // Ref: SPEC-MIPS-R6 (Rev 6.06).
+        if matches!(
+            insn.name.as_str(),
+            "beq"
+                | "bne"
+                | "blez"
+                | "bgtz"
+                | "bltz"
+                | "bgez"
+                | "bltzal"
+                | "bgezal"
+                | "j"
+                | "jal"
+                | "jr"
+                | "lwl"
+                | "lwr"
+                | "swl"
+                | "swr"
         ) {
             insn.when = Pred::Not(Box::new(Pred::Flag("mips_r6".to_string())));
         }

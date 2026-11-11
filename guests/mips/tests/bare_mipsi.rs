@@ -5,9 +5,11 @@
 //! Ref: SPEC-MIPS-IV (Rev 3.2).
 
 use polyisa_engine::bare::BareEnv;
+use polyisa_engine::interp::InterpExit;
 use polyisa_guest_mips::CpuState;
 use polyisa_guest_mips::sem::{self, Gpr};
-use polyisa_sem::Backend as _;
+use polyisa_mem::Endian;
+use polyisa_sem::{Backend as _, ExceptionKind};
 
 fn env() -> BareEnv {
     let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
@@ -199,4 +201,135 @@ fn jump_defers_one_slot() {
     env.step(sem::commit).unwrap();
     assert_eq!(env.backend.get(sem::pc_ref()), 0x3000);
     assert_eq!(env.backend.get(sem::npc_ref()), 0x3004);
+}
+
+#[test]
+fn logic_shift_and_slt() {
+    let mut env = env();
+    env.backend.set(Gpr(1).state(), 0xffff_ffff);
+    env.backend.set(Gpr(2).state(), 1);
+    env.step(|b| sem::xor(b, Gpr(3), Gpr(1), Gpr(2))).unwrap();
+    assert_eq!(g(&mut env, 3), 0xffff_fffe);
+    env.step(|b| sem::nor(b, Gpr(3), Gpr(1), Gpr(2))).unwrap();
+    assert_eq!(g(&mut env, 3), 0);
+    env.step(|b| sem::slt(b, Gpr(3), Gpr(1), Gpr(2))).unwrap();
+    assert_eq!(g(&mut env, 3), 1);
+    env.step(|b| sem::sltu(b, Gpr(3), Gpr(1), Gpr(2))).unwrap();
+    assert_eq!(g(&mut env, 3), 0);
+    env.step(|b| sem::srl(b, Gpr(3), Gpr(1), 4)).unwrap();
+    assert_eq!(g(&mut env, 3), 0x0fff_ffff);
+    env.step(|b| sem::sra(b, Gpr(3), Gpr(1), 4)).unwrap();
+    assert_eq!(g(&mut env, 3), 0xffff_ffff);
+}
+
+#[test]
+fn andi_lui_and_sltiu_extend_immediate() {
+    let mut env = env();
+    env.backend.set(Gpr(1).state(), 0xffff_0000);
+    env.step(|b| sem::andi(b, Gpr(2), Gpr(1), 0x00ff)).unwrap();
+    assert_eq!(g(&mut env, 2), 0);
+    env.step(|b| sem::lui(b, Gpr(2), 0x1234)).unwrap();
+    assert_eq!(g(&mut env, 2), 0x1234_0000);
+    // SLTIU は即値を符号拡張してから符号なしで比べる。即値 1 なら rs==0 のときだけ真。
+    env.backend.set(Gpr(1).state(), 0);
+    env.step(|b| sem::sltiu(b, Gpr(2), Gpr(1), 1)).unwrap();
+    assert_eq!(g(&mut env, 2), 1);
+    env.backend.set(Gpr(1).state(), 1);
+    env.step(|b| sem::sltiu(b, Gpr(2), Gpr(1), 1)).unwrap();
+    assert_eq!(g(&mut env, 2), 0);
+    env.backend.set(Gpr(1).state(), 0);
+    env.step(|b| sem::sltiu(b, Gpr(2), Gpr(1), -1)).unwrap();
+    assert_eq!(g(&mut env, 2), 1);
+}
+
+#[test]
+fn bltz_runs_with_delay() {
+    let mut env = env();
+    env.backend.set(sem::pc_ref(), 0x1000);
+    env.backend.set(sem::npc_ref(), 0x1008);
+    env.backend.set(Gpr(1).state(), 0xffff_ffff);
+    env.step(|b| sem::bltz_delay(b, Gpr(1), 0x1000, 4)).unwrap();
+    assert_eq!(env.backend.get(sem::npc_ref()), 0x1014);
+    env.backend.set(Gpr(1).state(), 0);
+    env.backend.set(sem::pc_ref(), 0x1000);
+    env.step(|b| sem::bltz_delay(b, Gpr(1), 0x1000, 4)).unwrap();
+    assert_eq!(env.backend.get(sem::npc_ref()), 0x1008);
+}
+
+#[test]
+fn jal_links_past_the_delay_slot() {
+    let mut env = env();
+    env.step(|b| sem::jal_delay(b, 0x1000, 0x3000)).unwrap();
+    assert_eq!(g(&mut env, 31), 0x1008);
+    assert_eq!(env.backend.get(sem::npc_ref()), 0x3000);
+}
+
+#[test]
+fn lb_sign_extends_into_low_32() {
+    let mut env = env();
+    env.backend.set(Gpr(1).state(), 0x100);
+    env.backend.set(Gpr(2).state(), 0xff);
+    env.step(|b| sem::sb(b, Gpr(2), Gpr(1), 0, Endian::Be))
+        .unwrap();
+    env.step(|b| sem::lb(b, Gpr(3), Gpr(1), 0, Endian::Be))
+        .unwrap();
+    assert_eq!(g(&mut env, 3), 0xffff_ffff);
+}
+
+#[test]
+fn lwl_swl_merge_big_endian_word() {
+    let mut env = env();
+    env.backend.set(Gpr(1).state(), 0x100);
+    env.backend.set(Gpr(2).state(), 0x1122_3344);
+    env.step(|b| sem::sw(b, Gpr(2), Gpr(1), 0)).unwrap();
+    env.backend.set(Gpr(3).state(), 0xee);
+    env.step(|b| sem::lwl(b, Gpr(3), Gpr(1), 1, Endian::Be))
+        .unwrap();
+    assert_eq!(g(&mut env, 3), 0x2233_44ee);
+    env.backend.set(Gpr(4).state(), 0xaabb_ccdd);
+    env.step(|b| sem::swl(b, Gpr(4), Gpr(1), 1, Endian::Be))
+        .unwrap();
+    env.step(|b| sem::lw(b, Gpr(5), Gpr(1), 0)).unwrap();
+    assert_eq!(g(&mut env, 5), 0x11aa_bbcc);
+}
+
+#[test]
+fn add_overflow_leaves_destination() {
+    let mut env = env();
+    env.backend.set(Gpr(1).state(), 0x7fff_ffff);
+    env.backend.set(Gpr(2).state(), 1);
+    env.backend.set(Gpr(3).state(), 0x11);
+    let err = env.step(|b| sem::add(b, Gpr(3), Gpr(1), Gpr(2)));
+    match err {
+        Err(InterpExit::Exception(e)) => assert_eq!(e.kind, ExceptionKind::Trap),
+        other => panic!("overflow should trap, got {other:?}"),
+    }
+    assert_eq!(g(&mut env, 3), 0x11);
+}
+
+#[test]
+fn div_zero_can_clear_hi_lo() {
+    let mut env = env();
+    env.backend.set(Gpr(1).state(), 7);
+    env.backend.set(Gpr(2).state(), 3);
+    env.step(|b| sem::div(b, Gpr(1), Gpr(2))).unwrap();
+    env.backend.set(sem::div_zero_writes_zero_ref(), 1);
+    env.step(|b| sem::div(b, Gpr(1), Gpr(0))).unwrap();
+    env.step(|b| sem::mflo(b, Gpr(3))).unwrap();
+    env.step(|b| sem::mfhi(b, Gpr(4))).unwrap();
+    assert_eq!(g(&mut env, 3), 0);
+    assert_eq!(g(&mut env, 4), 0);
+}
+
+#[test]
+fn syscall_raises_break() {
+    let mut env = env();
+    let err = env.step(sem::syscall);
+    match err {
+        Err(InterpExit::Exception(e)) => {
+            assert_eq!(e.kind, ExceptionKind::Break);
+            assert_eq!(e.code, 1);
+        }
+        other => panic!("syscall should raise, got {other:?}"),
+    }
 }

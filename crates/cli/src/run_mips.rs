@@ -123,7 +123,21 @@ pub fn run(env: &mut BareEnv, entry: u64, model: MipsModel) -> MipsOutcome {
 }
 
 fn has_delay_slot(insn: Insn) -> bool {
-    matches!(insn, Insn::Beq | Insn::J)
+    matches!(
+        insn,
+        Insn::Beq
+            | Insn::Bne
+            | Insn::Blez
+            | Insn::Bgtz
+            | Insn::Bltz
+            | Insn::Bgez
+            | Insn::Bltzal
+            | Insn::Bgezal
+            | Insn::J
+            | Insn::Jal
+            | Insn::Jr
+            | Insn::Jalr
+    )
 }
 
 fn stop_outcome(stop: Stop) -> MipsOutcome {
@@ -168,8 +182,31 @@ fn exec(
         Insn::And => step(env, in_slot, |b| sem::and(b, rd, rs, rt)).map(|()| wrote(rd)),
         Insn::Or => step(env, in_slot, |b| sem::or(b, rd, rs, rt)).map(|()| wrote(rd)),
         Insn::Sll => step(env, in_slot, |b| sem::sll(b, rd, rt, shamt)).map(|()| wrote(rd)),
+        Insn::Srl => step(env, in_slot, |b| sem::srl(b, rd, rt, shamt)).map(|()| wrote(rd)),
+        Insn::Sra => step(env, in_slot, |b| sem::sra(b, rd, rt, shamt)).map(|()| wrote(rd)),
+        Insn::Sllv => step(env, in_slot, |b| sem::sllv(b, rd, rt, rs)).map(|()| wrote(rd)),
+        Insn::Srlv => step(env, in_slot, |b| sem::srlv(b, rd, rt, rs)).map(|()| wrote(rd)),
+        Insn::Srav => step(env, in_slot, |b| sem::srav(b, rd, rt, rs)).map(|()| wrote(rd)),
+        Insn::Add => step(env, in_slot, |b| sem::add(b, rd, rs, rt)).map(|()| wrote(rd)),
+        Insn::Sub => step(env, in_slot, |b| sem::sub(b, rd, rs, rt)).map(|()| wrote(rd)),
+        Insn::Xor => step(env, in_slot, |b| sem::xor(b, rd, rs, rt)).map(|()| wrote(rd)),
+        Insn::Nor => step(env, in_slot, |b| sem::nor(b, rd, rs, rt)).map(|()| wrote(rd)),
+        Insn::Slt => step(env, in_slot, |b| sem::slt(b, rd, rs, rt)).map(|()| wrote(rd)),
+        Insn::Sltu => step(env, in_slot, |b| sem::sltu(b, rd, rs, rt)).map(|()| wrote(rd)),
         Insn::Addi => step(env, in_slot, |b| sem::addi(b, rt, rs, imm)).map(|()| wrote(rt)),
         Insn::Addiu => step(env, in_slot, |b| sem::addiu(b, rt, rs, imm)).map(|()| wrote(rt)),
+        Insn::Slti => step(env, in_slot, |b| sem::slti(b, rt, rs, imm)).map(|()| wrote(rt)),
+        Insn::Sltiu => step(env, in_slot, |b| sem::sltiu(b, rt, rs, imm)).map(|()| wrote(rt)),
+        Insn::Andi => {
+            step(env, in_slot, |b| sem::andi(b, rt, rs, imm as u16 as u32)).map(|()| wrote(rt))
+        }
+        Insn::Ori => {
+            step(env, in_slot, |b| sem::ori(b, rt, rs, imm as u16 as u32)).map(|()| wrote(rt))
+        }
+        Insn::Xori => {
+            step(env, in_slot, |b| sem::xori(b, rt, rs, imm as u16 as u32)).map(|()| wrote(rt))
+        }
+        Insn::Lui => step(env, in_slot, |b| sem::lui(b, rt, imm as u16 as u32)).map(|()| wrote(rt)),
         Insn::Mult => step(env, in_slot, |b| sem::mult(b, rs, rt)).map(|()| none),
         Insn::Multu => step(env, in_slot, |b| sem::multu(b, rs, rt)).map(|()| none),
         Insn::Div => step(env, in_slot, |b| sem::div(b, rs, rt)).map(|()| none),
@@ -179,12 +216,53 @@ fn exec(
         Insn::Mthi => step(env, in_slot, |b| sem::mthi(b, rs)).map(|()| none),
         Insn::Mtlo => step(env, in_slot, |b| sem::mtlo(b, rs)).map(|()| none),
         Insn::Lw => load_word(env, rt, rs, imm, model, in_slot),
+        Insn::Lb => load_gpr(env, rt, model, in_slot, |b| {
+            sem::lb(b, rt, rs, imm, model.endian)
+        }),
+        Insn::Lbu => load_gpr(env, rt, model, in_slot, |b| {
+            sem::lbu(b, rt, rs, imm, model.endian)
+        }),
+        Insn::Lh => load_gpr(env, rt, model, in_slot, |b| {
+            sem::lh(b, rt, rs, imm, model.endian)
+        }),
+        Insn::Lhu => load_gpr(env, rt, model, in_slot, |b| {
+            sem::lhu(b, rt, rs, imm, model.endian)
+        }),
+        Insn::Lwl => load_gpr(env, rt, model, in_slot, |b| {
+            sem::lwl(b, rt, rs, imm, model.endian)
+        }),
+        Insn::Lwr => load_gpr(env, rt, model, in_slot, |b| {
+            sem::lwr(b, rt, rs, imm, model.endian)
+        }),
         Insn::Sw => step(env, in_slot, |b| sem::sw(b, rt, rs, imm)).map(|()| none),
+        Insn::Sb => step(env, in_slot, |b| sem::sb(b, rt, rs, imm, model.endian)).map(|()| none),
+        Insn::Sh => step(env, in_slot, |b| sem::sh(b, rt, rs, imm, model.endian)).map(|()| none),
+        Insn::Swl => step(env, in_slot, |b| sem::swl(b, rt, rs, imm, model.endian)).map(|()| none),
+        Insn::Swr => step(env, in_slot, |b| sem::swr(b, rt, rs, imm, model.endian)).map(|()| none),
         Insn::Beq => step(env, in_slot, |b| sem::beq_delay(b, rs, rt, pc, imm)).map(|()| none),
+        Insn::Bne => step(env, in_slot, |b| sem::bne_delay(b, rs, rt, pc, imm)).map(|()| none),
+        Insn::Blez => step(env, in_slot, |b| sem::blez_delay(b, rs, pc, imm)).map(|()| none),
+        Insn::Bgtz => step(env, in_slot, |b| sem::bgtz_delay(b, rs, pc, imm)).map(|()| none),
+        Insn::Bltz => step(env, in_slot, |b| sem::bltz_delay(b, rs, pc, imm)).map(|()| none),
+        Insn::Bgez => step(env, in_slot, |b| sem::bgez_delay(b, rs, pc, imm)).map(|()| none),
+        Insn::Bltzal => {
+            step(env, in_slot, |b| sem::bltzal_delay(b, rs, pc, imm)).map(|()| wrote(Gpr(31)))
+        }
+        Insn::Bgezal => {
+            step(env, in_slot, |b| sem::bgezal_delay(b, rs, pc, imm)).map(|()| wrote(Gpr(31)))
+        }
         Insn::J => {
             let target = j_target(pc, word);
             step(env, in_slot, |b| sem::j_delay(b, target)).map(|()| none)
         }
+        Insn::Jal => {
+            let target = j_target(pc, word);
+            step(env, in_slot, |b| sem::jal_delay(b, pc, target)).map(|()| wrote(Gpr(31)))
+        }
+        Insn::Jr => step(env, in_slot, |b| sem::jr_delay(b, rs)).map(|()| none),
+        Insn::Jalr => step(env, in_slot, |b| sem::jalr_delay(b, rd, rs, pc)).map(|()| wrote(rd)),
+        Insn::Syscall => step(env, in_slot, sem::syscall).map(|()| none),
+        Insn::Break => step(env, in_slot, sem::break_).map(|()| none),
         Insn::Beqzalc => {
             step(env, in_slot, |b| sem::beqzalc(b, rs, rt, pc, imm)).map(|()| Effect {
                 wrote: Some(31),
@@ -202,8 +280,21 @@ fn load_word(
     model: MipsModel,
     in_slot: bool,
 ) -> Result<Effect, Stop> {
+    load_gpr(env, rt, model, in_slot, |b| sem::lw(b, rt, rs, imm))
+}
+
+fn load_gpr<F>(
+    env: &mut BareEnv,
+    rt: Gpr,
+    model: MipsModel,
+    in_slot: bool,
+    f: F,
+) -> Result<Effect, Stop>
+where
+    F: FnOnce(&mut polyisa_engine::interp::InterpBackend) -> Result<(), InterpExit>,
+{
     let old = reg(env, rt.0);
-    step(env, in_slot, |b| sem::lw(b, rt, rs, imm))?;
+    step(env, in_slot, f)?;
     if model.load_delay && rt.0 != 0 {
         let new = reg(env, rt.0);
         set_reg(env, rt.0, old);
@@ -411,5 +502,29 @@ mod tests {
             other => panic!("expected exception, got {other:?}"),
         }
         assert_eq!(reg(&mut env, 5), 0);
+    }
+
+    #[test]
+    fn jal_links_pc_plus_8_and_runs_the_slot() {
+        // 0x1000 jal 0x100C。リンクはスロットの次。
+        // 0x1004 addiu r2, zero, 1
+        // 0x1008 addiu r3, zero, 7  実行しない。
+        // 0x100C 未定義で停止。
+        let mut env = env_at(0x1000);
+        poke(&mut env, 0x1000, 0x0c00_0403);
+        poke(&mut env, 0x1004, 0x2402_0001);
+        poke(&mut env, 0x1008, 0x2403_0007);
+        poke(&mut env, 0x100c, 0xffff_ffff);
+        let outcome = run(&mut env, 0x1000, MipsModel::mips1_be());
+        assert_eq!(
+            outcome,
+            MipsOutcome::Unimplemented {
+                pc: 0x100c,
+                word: 0xffff_ffff,
+            }
+        );
+        assert_eq!(reg(&mut env, 31), 0x1008);
+        assert_eq!(reg(&mut env, 2), 1);
+        assert_eq!(reg(&mut env, 3), 0);
     }
 }

@@ -51,6 +51,11 @@ pub fn lo_ref() -> StateRef<W64> {
     StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, lo))
 }
 
+/// 0 除算で HI/LO に 0 を書くかの旗。0 は保つ。
+pub fn div_zero_writes_zero_ref() -> StateRef<W64> {
+    StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, div_zero_writes_zero))
+}
+
 fn read<B: Backend>(b: &mut B, r: Gpr) -> B::V<W64> {
     if r.is_zero() {
         b.konst::<W64>(0)
@@ -173,8 +178,8 @@ pub fn multu<B: Backend>(b: &mut B, rs: Gpr, rt: Gpr) -> Flow<B> {
 }
 
 // Gap: GAP-0013
-/// DIV。LO=商、HI=剰余。0 除算は UNPREDICTABLE のため HI/LO 不変とする
-///（挙動パラメータ化は本格実装で足す）。
+/// DIV。LO=商、HI=剰余。0 除算は `div_zero_writes_zero` が 0 なら HI/LO を保ち、
+/// 0 以外なら HI と LO に 0 を書く。
 pub fn div<B: Backend>(b: &mut B, rs: Gpr, rt: Gpr) -> Flow<B> {
     let x = read(b, rs);
     let y = read(b, rt);
@@ -194,14 +199,13 @@ pub fn div<B: Backend>(b: &mut B, rs: Gpr, rt: Gpr) -> Flow<B> {
     let new_hi = b.zext::<W32, W64>(r32);
     let old_lo: B::V<W64> = b.get(lo_ref());
     let old_hi: B::V<W64> = b.get(hi_ref());
-    let fin_lo = b.select::<W64>(is_zero, old_lo, new_lo);
-    let fin_hi = b.select::<W64>(is_zero, old_hi, new_hi);
+    let (fin_lo, fin_hi) = div_zero_result(b, is_zero, old_lo, old_hi, new_lo, new_hi);
     b.set(lo_ref(), fin_lo);
     b.set(hi_ref(), fin_hi);
     Ok(())
 }
 
-/// DIVU。LO=商、HI=剰余。0 除算は HI/LO 不変とする。
+/// DIVU。LO=商、HI=剰余。0 除算は `div_zero_writes_zero` に従う。
 pub fn divu<B: Backend>(b: &mut B, rs: Gpr, rt: Gpr) -> Flow<B> {
     let x = read(b, rs);
     let y = read(b, rt);
@@ -221,8 +225,7 @@ pub fn divu<B: Backend>(b: &mut B, rs: Gpr, rt: Gpr) -> Flow<B> {
     let new_hi = b.zext::<W32, W64>(r32);
     let old_lo: B::V<W64> = b.get(lo_ref());
     let old_hi: B::V<W64> = b.get(hi_ref());
-    let fin_lo = b.select::<W64>(is_zero, old_lo, new_lo);
-    let fin_hi = b.select::<W64>(is_zero, old_hi, new_hi);
+    let (fin_lo, fin_hi) = div_zero_result(b, is_zero, old_lo, old_hi, new_lo, new_hi);
     b.set(lo_ref(), fin_lo);
     b.set(hi_ref(), fin_hi);
     Ok(())
@@ -357,3 +360,24 @@ pub fn commit<B: Backend>(b: &mut B) -> Flow<B> {
     b.set(npc_ref(), next);
     Ok(())
 }
+
+fn div_zero_result<B: Backend>(
+    b: &mut B,
+    is_zero: B::B,
+    old_lo: B::V<W64>,
+    old_hi: B::V<W64>,
+    new_lo: B::V<W64>,
+    new_hi: B::V<W64>,
+) -> (B::V<W64>, B::V<W64>) {
+    let flag: B::V<W64> = b.get(div_zero_writes_zero_ref());
+    let zero = b.konst::<W64>(0);
+    let clear = b.cmp::<W64>(Cmp::Ne, flag, zero);
+    let kept_lo = b.select::<W64>(clear, zero, old_lo);
+    let kept_hi = b.select::<W64>(clear, zero, old_hi);
+    let lo = b.select::<W64>(is_zero, kept_lo, new_lo);
+    let hi = b.select::<W64>(is_zero, kept_hi, new_hi);
+    (lo, hi)
+}
+
+mod sem_int;
+pub use sem_int::*;

@@ -1,12 +1,9 @@
 // Copyright (c) polyisa contributors
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! MIPS I 試作のゲスト ISA。段階3の最小であり、裸実行で遅延スロットを確かめる。
+//! MIPS I の整数命令。遅延スロット、符号付き溢れ、非整列ロードを裸実行で確かめる。
 //!
-//! R 形式の整数演算と LW/SW・BEQ・J・HI/LO 乗除算に加え、R6 の割り当て直しの
-//! 最小形（ADDI の pre-R6 ゲート、ADDIU の保持、BEQZALC）を持つ。BOVC/BEQC は
-//! field 間比較の where が要るため先送りする。FPU、microMIPS、ロード遅延、
-//! branch likely、両エンディアンの切り替えは本格実装で足す。HI/LO 乗除算は
-//! pre-R6 のみで有効である。
+//! R6 は遅延スロット付きの分岐とジャンプ、非整列ロード、HI/LO 乗除算を復号しない。
+//! BEQZALC だけが R6 側の命令である。ロード遅延、エンディアンの切り替え、o32 は後の回で足す。
 
 #![forbid(unsafe_code)]
 
@@ -39,6 +36,10 @@ pub struct CpuState {
     pub hi: u64,
     /// LO レジスタ（乗除算の下位・商。下位32ビットを使う）。
     pub lo: u64,
+    /// 0 除算の挙動。0 は HI/LO を保つ。0 以外は HI と LO に 0 を書く。
+    /// ゼロ埋めの裸実行は 0 なので、従来の「不変」と同じになる。
+    /// Ref: SPEC-MIPS-IV (Rev 3.2) の DIV の UNPREDICTABLE。
+    pub div_zero_writes_zero: u64,
 }
 
 impl Default for CpuState {
@@ -49,6 +50,7 @@ impl Default for CpuState {
             npc: 4,
             hi: 0,
             lo: 0,
+            div_zero_writes_zero: 0,
         }
     }
 }
@@ -70,12 +72,16 @@ mod tests {
         assert_eq!(core::mem::offset_of!(CpuState, npc), 32 * 8 + 8);
         assert_eq!(core::mem::offset_of!(CpuState, hi), 32 * 8 + 16);
         assert_eq!(core::mem::offset_of!(CpuState, lo), 32 * 8 + 24);
+        assert_eq!(
+            core::mem::offset_of!(CpuState, div_zero_writes_zero),
+            32 * 8 + 32
+        );
     }
 
     #[test]
     fn insn_count() {
-        // 試作の整数20件（nop は sll $0,$0,0 の別名として扱う）。
-        assert_eq!(INSNS.len(), 20);
+        // MIPS I の整数命令。nop は sll $0,$0,0 の別名。R6 の beqzalc を1件含む。
+        assert_eq!(INSNS.len(), 59);
     }
 
     #[test]
@@ -120,6 +126,10 @@ mod tests {
         );
         // R6 で BOVC/BEQC になる符号化は未実装のため None（現 r6 は大部分 illegal）。
         assert_eq!(decode_model_ex(0x2043_0010, 32, true, FEAT_MIPS_R6), None);
+        // Release 6 は遅延スロット付きの BEQ を外す。LUI は残る。
+        assert_eq!(decode(0x3c01_0001, 32), Some(Insn::Lui));
+        assert_eq!(decode(0x1022_0004, 32), Some(Insn::Beq));
+        assert_eq!(decode_model_ex(0x1022_0004, 32, true, FEAT_MIPS_R6), None);
         assert_eq!(decode(0xffff_ffff, 32), None);
     }
 
