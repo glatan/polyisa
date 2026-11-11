@@ -7274,6 +7274,15 @@ pub fn run_elf_x86_64(path: &str, argv: &[String]) -> Result<u64, String> {
     run_image_x86_64(&bytes, path, argv, &mut sys)
 }
 
+/// ELF64 を実行し、終了コードと fd 1 の出力を返す。ホストの stdout には書かない。
+pub fn run_elf_x86_64_captured(path: &str, argv: &[String]) -> Result<(u64, Vec<u8>), String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
+    let mut sys = CliLinux::x86_64();
+    sys.capture_out = Some(Vec::new());
+    let code = run_image_x86_64(&bytes, path, argv, &mut sys)?;
+    Ok((code, sys.capture_out.unwrap_or_default()))
+}
+
 /// ゲストの NUL 終端文字列を読む。上限を超えるか読めなければ None。
 fn guest_c_string(env: &mut BareEnv, addr: u64) -> Option<String> {
     let acc = polyisa_mem::Access {
@@ -7339,6 +7348,8 @@ pub struct CliLinux {
     fd_paths: Vec<Option<String>>,
     /// 標準 fd に付け替えたファイルのホストパス。
     std_paths: [Option<String>; 3],
+    /// Some のとき、fd 1 の出力をここへ溜める。None のときはホストの stdout。
+    capture_out: Option<Vec<u8>>,
 }
 
 impl CliLinux {
@@ -7452,6 +7463,15 @@ impl CliLinux {
             *slot = None;
         }
         self.dir_done.retain(|d| *d != fd);
+    }
+
+    /// fd 1 へ書く。capture_out があるときはそこへ溜める。
+    fn write_fd1(&mut self, bytes: &[u8]) -> usize {
+        if let Some(buf) = self.capture_out.as_mut() {
+            buf.extend_from_slice(bytes);
+            return bytes.len();
+        }
+        std::io::Write::write(&mut std::io::stdout(), bytes).unwrap_or(0)
     }
 
     /// 開ファイルを複製し、覚えてあるパスも返す。
@@ -7865,7 +7885,7 @@ fn sys_write(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapO
                 return Some(TrapOutcome::Unimplemented);
             }
             let n = match fd {
-                1 => std::io::Write::write(&mut std::io::stdout(), &chunk[..take]).unwrap_or(0),
+                1 => sys.write_fd1(&chunk[..take]),
                 _ => std::io::Write::write(&mut std::io::stderr(), &chunk[..take]).unwrap_or(0),
             };
             done += n as u64;
@@ -7992,7 +8012,7 @@ fn sys_writev(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Trap
                 return Some(TrapOutcome::Unimplemented);
             }
             let n = match fd {
-                1 => std::io::Write::write(&mut std::io::stdout(), &chunk[..take]).unwrap_or(0),
+                1 => sys.write_fd1(&chunk[..take]),
                 _ => std::io::Write::write(&mut std::io::stderr(), &chunk[..take]).unwrap_or(0),
             };
             done += n as u64;
@@ -8519,25 +8539,32 @@ fn sys_sendfile(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Tr
     }
     // 付け替えた stdin はファイルから読む。真の stdin は空読みのまま.
     let in_empty = in_fd == 0 && sys.std_attached(0);
-    let Some(file) = sys.file_mut(in_fd) else {
+    if sys.file_ref(in_fd).is_none() {
         if in_empty {
             set64(env, Gpr(0), 0);
             return Some(TrapOutcome::Handled);
         }
         set64(env, Gpr(0), cx.neg(EBADF));
         return Some(TrapOutcome::Handled);
-    };
+    }
     let mut done = 0u64;
     let mut chunk = vec![0u8; IO_CHUNK];
     while left > 0 {
         let take = left.min(IO_CHUNK as u64) as usize;
-        let n = match std::io::Read::read(file, &mut chunk[..take]) {
-            Ok(0) => break,
-            Ok(n) => n,
-            Err(_) => break,
+        let n = {
+            let Some(file) = sys.file_mut(in_fd) else {
+                break;
+            };
+            match std::io::Read::read(file, &mut chunk[..take]) {
+                Ok(n) => n,
+                Err(_) => break,
+            }
         };
+        if n == 0 {
+            break;
+        }
         let w = match out_fd {
-            1 => std::io::Write::write(&mut std::io::stdout(), &chunk[..n]).unwrap_or(0),
+            1 => sys.write_fd1(&chunk[..n]),
             _ => std::io::Write::write(&mut std::io::stderr(), &chunk[..n]).unwrap_or(0),
         };
         done += n as u64;
