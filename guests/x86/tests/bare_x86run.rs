@@ -7436,3 +7436,42 @@ fn run_sub_m64_r64_sibd() {
         .unwrap();
     assert_eq!(u64::from_le_bytes(got), 7);
 }
+
+#[test]
+fn run_movaps_store_sib() {
+    // 0F 29 04 24 = movaps (%rsp), xmm0。0F 29 44 24 D8 = movaps -0x28(%rsp), xmm0。
+    // od 0x49788f と sed 0x400d19。Ref: SPEC-X86-INTEL-SDM (v093).
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 2, rwx).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000u32);
+    env.backend.set(Gpr(6).state(), 0x1122_3344u32);
+    let prog: &[u8] = &[
+        0x66, 0x0F, 0x6E, 0xC6, // movd xmm0, esi
+        0x0F, 0x29, 0x04, 0x24, // movaps (%rsp), xmm0
+        0x0F, 0x29, 0x44, 0x24, 0xD8, // movaps -0x28(%rsp), xmm0
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov $60, %rax
+        0x48, 0x31, 0xFF, // xor %rdi, %rdi
+        0x0F, 0x05,
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 20, true);
+    assert_eq!(out, Outcome::Exit(0));
+    let acc = polyisa_mem::Access {
+        endian: polyisa_mem::Endian::Le,
+        align: polyisa_mem::Align::Unaligned,
+        kind: polyisa_mem::AccessKind::DataRead,
+    };
+    let mut back = [0u8; 4];
+    env.backend
+        .mem
+        .read(VirtAddr(0x2000), &mut back, acc)
+        .unwrap();
+    assert_eq!(u32::from_le_bytes(back), 0x1122_3344);
+    env.backend
+        .mem
+        .read(VirtAddr(0x1FD8), &mut back, acc)
+        .unwrap();
+    assert_eq!(u32::from_le_bytes(back), 0x1122_3344);
+}

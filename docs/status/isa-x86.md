@@ -98,7 +98,7 @@
 | mov | mov_eax_abs、mov_eax_mem32、mov_eax_mem8、mov_eax_memnd、mov_eax_sib、mov_eax_sibabs、mov_eax_sibd、mov_eax_sibd32、mov_r8_imm、mov_r8_m8、mov_r8_m8_mem32、mov_r8_m8_mem8、mov_r8_m8_memnd、mov_r8_m8_rip、mov_r8_m8_sib、mov_r8_m8_sibd、mov_r8_m8_sibd32 | 真 | load |
 | mov | mov_abs_eax、mov_m8_r8、mov_m8_r8_mem32、mov_m8_r8_mem8、mov_m8_r8_memnd、mov_m8_r8_rip、mov_m8_r8_sib、mov_m8_r8_sibd、mov_m8_r8_sibd32、mov_mem_eax32、mov_mem_eax8、mov_memnd_eax、mov_rm8_imm_mem32、mov_rm8_imm_mem8、mov_rm8_imm_memnd、mov_rm8_imm_rip、mov_rm8_imm_sib、mov_rm8_imm_sibd、mov_rm8_imm_sibd32、mov_sib_eax、mov_sibabs_eax、mov_sibabs_r8、mov_sibd32_eax、mov_sibd_eax | 真 | store |
 | movaps | movaps_load_mem32、movaps_load_mem8、movaps_load_memnd、movaps_load_rip、movaps_load_xmm | 真 | load |
-| movaps | movaps_store_mem32、movaps_store_mem8、movaps_store_memnd、movaps_store_rip、movaps_store_sibd32 | 真 | store |
+| movaps | movaps_store_mem32、movaps_store_mem8、movaps_store_memnd、movaps_store_rip、movaps_store_sib、movaps_store_sibd、movaps_store_sibd32 | 真 | store |
 | movd | movd_xmm、movd_xmm_m32、movd_xmm_rip | 真 | load |
 | movdqa | movdqa_load_rip | 真 | load |
 | movdqu | movdqu_load_mem32、movdqu_load_mem8、movdqu_load_memnd、movdqu_load_sib、movdqu_load_xmm | 真 | load |

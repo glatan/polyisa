@@ -2538,6 +2538,14 @@ pub fn build_model() -> polyisa_isadl::Model {
             "store",
         ),
         (
+            "movaps_store_sib",
+            "N8",
+            "00001111 00101001 00...100 ........",
+            vec![wc("n8_base", WhereOp::Ne, 5)],
+            "movaps [r/m+sib], xmm",
+            "store",
+        ),
+        (
             "movups_load_sibd",
             "S8",
             "00001111 00010000 01...100 ........ ........",
@@ -2551,6 +2559,14 @@ pub fn build_model() -> polyisa_isadl::Model {
             "00001111 00010001 01...100 ........ ........",
             vec![],
             "movups [r/m+sib+disp8], xmm",
+            "store",
+        ),
+        (
+            "movaps_store_sibd",
+            "S8",
+            "00001111 00101001 01...100 ........ ........",
+            vec![],
+            "movaps [r/m+sib+disp8], xmm",
             "store",
         ),
         (

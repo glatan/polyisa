@@ -5843,6 +5843,29 @@ fn dispatch<B: Backend>(
                 )
             }
         }
+        Insn::MovapsStoreSib => {
+            // 0F 29 SIB mod=00。od 0x49788f 対応。MOVUPS と同じ 128 ビット転送.
+            if sib0f_no_index() {
+                sem::movups_store_memnd(b, xmm_reg_r(), sib0f_base())
+            } else {
+                sem::movups_store_sib(b, xmm_reg_r(), sib0f_base(), sib0f_idx(), sib0f_shift())
+            }
+        }
+        Insn::MovapsStoreSibd => {
+            // 0F 29 SIB mod=01。sed 0x400d19 対応.
+            if sib0f_no_index() {
+                sem::movups_store_mem8(b, xmm_reg_r(), sib0f_base(), disp8())
+            } else {
+                sem::movups_store_sibd(
+                    b,
+                    xmm_reg_r(),
+                    sib0f_base(),
+                    sib0f_idx(),
+                    sib0f_shift(),
+                    disp8(),
+                )
+            }
+        }
         Insn::MovapsStoreSibd32 => {
             if sib0f_no_index() {
                 sem::movups_store_mem32(b, xmm_reg_r(), sib0f_base(), disp32())
