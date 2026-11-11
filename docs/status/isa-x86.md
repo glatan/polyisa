@@ -153,7 +153,7 @@
 | pminub | pminub | 真 | alu |
 | pminub | pminub_mem32、pminub_mem8、pminub_memnd | 真 | load |
 | pmovmskb | pmovmskb | 真 | load |
-| pop | pop_eax、pop_ebp、pop_ebx、pop_ecx、pop_edi、pop_edx、pop_esi、pop_esp | 真 | load |
+| pop | pop_eax、pop_ebp、pop_ebx、pop_ecx、pop_edi、pop_edx、pop_esi、pop_esp、pop_m64_mem8 | 真 | load |
 | por | por | 真 | alu |
 | por | por_mem32、por_mem8、por_memnd、por_sibd32 | 真 | load |
 | pshufd | pshufd | 真 | alu |

@@ -5738,6 +5738,53 @@ fn run_imul_r64_imm_sib() {
 }
 
 #[test]
+fn run_pop_m64_rdi_disp8() {
+    // 8F 47 40 = popq 0x40(%rdi)。スタックの 8 バイトを写し、RSP は 8 進む。旗は残る。vi 0x4ce187。
+    // Ref: SPEC-X86-INTEL-SDM (v093).
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    polyisa_guest_x86::sem::write64(&mut env.backend, Gpr(4), 0x2100);
+    polyisa_guest_x86::sem::write64(&mut env.backend, Gpr(7), 0x2000);
+    env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 1);
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x2100),
+            &[0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11],
+        )
+        .unwrap();
+    env.backend.mem.write(VirtAddr(0x2048), &[0xAB]).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0x8F, 0x47, 0x40])
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x1003 });
+    let mut got = [0u8; 9];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x2040),
+            &mut got,
+            polyisa_mem::Access {
+                endian: polyisa_mem::Endian::Le,
+                align: polyisa_mem::Align::Unaligned,
+                kind: polyisa_mem::AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(got, [0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, 0xAB]);
+    assert_eq!(
+        polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(4)),
+        0x2108
+    );
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::eflags_ref()), 1);
+}
+
+#[test]
 fn run_and_rm32_imm_rbx() {
     // 81 23 FF FA FF FF = andl $0xfffffaff, (%rbx)。0x500 は 0。rbx は残る。vi 0x40511c。
     // Ref: SPEC-X86-INTEL-SDM (v093).

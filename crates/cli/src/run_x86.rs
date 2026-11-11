@@ -652,6 +652,18 @@ fn fetch_len(
                 None
             }
         }
+        // 0x8F /0 (POP m64)。mod=01 [base+disp8] は 3B。vi 0x4ce187 の popq 0x40(%rdi)。
+        0x8F => {
+            let s = second?;
+            let md = s >> 6;
+            let reg = (s >> 3) & 7;
+            let rm = s & 7;
+            if reg == 0 && md == 1 && rm != 4 {
+                Some(3)
+            } else {
+                None
+            }
+        }
         // 0x81 /r id (算術 imm32 群)。
         // has66 (66 81) は imm16 のため 2B 短くなる.
         0x81 => {
@@ -1593,6 +1605,7 @@ pub fn run_mode(
                 | 0x69
                 | 0x6B
                 | 0x8D
+                | 0x8F
                 | 0x0F
                 | 0xF7
                 | 0xF6
@@ -1864,6 +1877,7 @@ pub fn run_mode(
                     | 0x0D
                     | 0x35
                     | 0x8D
+                    | 0x8F
                     | 0xC7
                     | 0x83
                     | 0x81
@@ -3853,6 +3867,14 @@ fn dispatch<B: Backend>(
                 sem::pop_reg64(b, push_r())
             } else {
                 sem::pop_reg(b, push_r())
+            }
+        }
+        Insn::PopM64Mem8 => {
+            // 8F /0 mod=01。vi 0x4ce187 の popq 0x40(%rdi)。
+            if is64 {
+                sem::pop_m64_mem8(b, rm(), disp8())
+            } else {
+                sem::pop_m32_mem8(b, rm(), disp8())
             }
         }
         Insn::CallRel32 => {

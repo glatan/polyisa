@@ -5982,6 +5982,39 @@ pub fn pop_reg64<B: Backend>(b: &mut B, rd: Gpr) -> Flow<B> {
     Ok(())
 }
 
+/// POP m64 [base+disp8] (8F /0 mod=01)。スタックから 8 バイトを変位付きの番地へ書き、RSP を 8 進める。
+/// ベースが RSP のときは進めた後の値で番地を計算する。
+pub fn pop_m64_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8) -> Flow<B> {
+    let rsp = read64(b, Gpr(4));
+    let v: B::V<W64> = b.load::<W64>(rsp, DATA_READ)?;
+    let eight = b.konst::<W64>(8);
+    let next = b.add::<W64>(rsp, eight);
+    write64(b, Gpr(4), next);
+    let addr = eff_addr(b, base, disp);
+    b.store::<W64>(addr, v, DATA_WRITE)?;
+    Ok(())
+}
+
+/// POP m32 [base+disp8] (8F /0 mod=01)。32ビットでは 4 バイト進める。
+pub fn pop_m32_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8) -> Flow<B> {
+    let esp = read(b, Gpr(4));
+    let src = b.zext::<W32, W64>(esp);
+    let v: B::V<W32> = b.load::<W32>(src, DATA_READ)?;
+    let four = b.konst::<W32>(4);
+    let next = b.add::<W32>(esp, four);
+    b.set(esp_ref(), next);
+    let addr = if base.0 == 4 {
+        b.zext::<W32, W64>(next)
+    } else {
+        let base_v = read(b, base);
+        b.zext::<W32, W64>(base_v)
+    };
+    let disp_v = b.konst::<W64>(disp as i64 as u64);
+    let addr = b.add::<W64>(addr, disp_v);
+    b.store::<W32>(addr, v, DATA_WRITE)?;
+    Ok(())
+}
+
 /// CALL rel32 (64ビット)。戻り（次 RIP）を積み、次 RIP+disp に飛ぶ。
 /// next_rip は接頭辞込みの次命令先頭である。RIP は 4GB 未満を想定し、
 /// 下位で eip を更新する。

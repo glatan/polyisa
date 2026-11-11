@@ -208,6 +208,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("pop_ebp", "F1", "01011101", "pop ebp", "load"),
         ("pop_esi", "F1", "01011110", "pop esi", "load"),
         ("pop_edi", "F1", "01011111", "pop edi", "load"),
+        // POP m64 [base+disp8] (8F /0 mod=01)。vi 0x4ce187 の popq 0x40(%rdi)。
+        ("pop_m64_mem8", "M8", "10001111 01000... ........", "pop m64", "load"),
         ("call_rel32", "F1", "11101000 ................................", "call {imm}", "jump"),
         ("ret", "F1", "11000011", "ret", "jump"),
         ("cmp_eax", "F1", "00111101 ................................", "cmp eax, {imm}", "alu"),
