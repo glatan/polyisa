@@ -13014,6 +13014,15 @@ pub fn mov_r16_m16_mem8<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, disp: i8) ->
 }
 
 /// XCHG r32,r/m32 reg-direct。dst=reg, src=rm を交換.
+/// XCHG r8, r8 (86 /r mod=11)。フラグは変えない。同じレジスタの上下バイトも交換できる。
+pub fn xchg_r8<B: Backend>(b: &mut B, a: Gpr, a_high: bool, c: Gpr, c_high: bool) -> Flow<B> {
+    let av = read8(b, a, a_high);
+    let cv = read8(b, c, c_high);
+    write8(b, a, a_high, cv);
+    write8(b, c, c_high, av);
+    Ok(())
+}
+
 pub fn xchg_r32<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
     let a = read(b, dst);
     let c = read(b, src);

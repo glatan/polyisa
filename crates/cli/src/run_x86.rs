@@ -1309,7 +1309,7 @@ fn fetch_len(
         }
         // register-direct と ModRMメモリ (SIBなし) に対応するALU opcode。
         // SIB付き (rm==4) は未対応で None。mod=01は+1、mod=10は+4、mod=00 rm=5は+4。
-        0x29 | 0x31 | 0x21 | 0x11 | 0x19 | 0x87 => {
+        0x29 | 0x31 | 0x21 | 0x11 | 0x19 | 0x86 | 0x87 => {
             let s = second?;
             let md = s >> 6;
             let rm = s & 7;
@@ -1535,6 +1535,7 @@ pub fn run_mode(
                 | 0x13
                 | 0x1B
                 | 0x87
+                | 0x86
                 | 0xFF
                 | 0x09
                 | 0x11
@@ -2418,6 +2419,26 @@ fn dispatch<B: Backend>(
             } else {
                 sem::add_rm32(b, rm(), reg())
             }
+        }
+        Insn::XchgR8 => {
+            // 86 /r mod=11。base64 0x4bd97a の xchg %ch, %cl。
+            let reg_f = (modrm() >> 3) & 7;
+            let rm_f = modrm() & 7;
+            let (reg_r, reg_high) = if rex != 0 {
+                (Gpr(reg_f | ((rex >> 2) & 1) << 3), false)
+            } else if reg_f < 4 {
+                (Gpr(reg_f), false)
+            } else {
+                (Gpr(reg_f - 4), true)
+            };
+            let (rm_r, rm_high) = if rex != 0 {
+                (Gpr(rm_f | ((rex & 1) << 3)), false)
+            } else if rm_f < 4 {
+                (Gpr(rm_f), false)
+            } else {
+                (Gpr(rm_f - 4), true)
+            };
+            sem::xchg_r8(b, rm_r, rm_high, reg_r, reg_high)
         }
         Insn::XchgRRm => {
             if rex_w {

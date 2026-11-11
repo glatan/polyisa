@@ -318,6 +318,9 @@ fn text_applets_match_host() {
     let installed = dir.join("installed");
     let installed_s = installed.to_str().expect("utf-8");
     let dd_if = format!("if={f}");
+    let b64 = dir.join("b64");
+    std::fs::write(&b64, b"YWIK\n").unwrap();
+    let b64_s = b64.to_str().expect("utf-8");
     let copied_s = copied.to_str().expect("utf-8");
     let touched_s = touched.to_str().expect("utf-8");
     let link = dir.join("link");
@@ -390,6 +393,7 @@ fn text_applets_match_host() {
         &["bc"],
         &["sync"],
         &["sed", "/cd/d", f],
+        &["base64", "-d", b64_s],
         &["printenv"],
         &["which", "true"],
         &["install", "-m", "644", f, installed_s],

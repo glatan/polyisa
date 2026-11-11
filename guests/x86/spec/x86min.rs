@@ -495,6 +495,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("call_r_sibd32", "F1", "11111111 10010100 ........ ................................", "call r/m64", "jump"),
         // XCHG r32,r/m32 (87 /r)。reg-direct・mod=00/01/10/RIP (SIBなし).
         ("xchg_r_rm", "F1", "10000111 11......", "xchg r32, r/m32", "alu"),
+        // XCHG r8, r/m8 (86 /r mod=11)。base64 0x4bd97a の 86 E9。
+        ("xchg_r8", "F1", "10000110 11......", "xchg r8, r/m8", "alu"),
         ("xchg_r_memnd", "MR", "10000111 00......", "xchg r32, [r/m]", "alu"),
         ("xchg_r_mem8", "M8", "10000111 01...... ........", "xchg r32, m32", "alu"),
         ("xchg_r_mem32", "M32", "10000111 10...... ................................", "xchg r32, m32", "alu"),
