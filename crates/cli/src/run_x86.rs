@@ -2131,6 +2131,8 @@ pub fn run_mode(
                     | Insn::CmpM32R32Sib
                     // MOV r16, [base] (66 8B mod=00).
                     | Insn::MovEaxMemnd
+                    // MOV r16, [base+disp8] (66 8B mod=01)。pgrep 0x44b629 の movw 0x12(%r14), %dx。
+                    | Insn::MovEaxMem8
                     // ADD r16, [base] (66 03 /r mod=00).
                     | Insn::AddRMemnd
                     // AND m16,imm8 SIB+disp8 (66 83 /4 mod=01).
@@ -2759,7 +2761,10 @@ fn dispatch<B: Backend>(
             }
         }
         Insn::MovEaxMem8 => {
-            if rex_w {
+            if has66 {
+                // 66 8B mod=01。pgrep 0x44b629 の movw 0x12(%r14), %dx。上位は残す。
+                sem::mov_r16_m16_mem8(b, reg(), rm(), disp8())
+            } else if rex_w {
                 sem::mov_r64_mem8(b, reg(), rm(), disp8())
             } else {
                 sem::mov_eax_mem8(b, reg(), rm(), disp8())
@@ -9002,7 +9007,7 @@ fn dispatch<B: Backend>(
                             | Insn::MovsxR32M8Sibd32
                             | Insn::ImulRImmRip
                     ))
-                || (has66 && matches!(insn, Insn::XorRm32 | Insn::RolRm32Imm8));
+                || (has66 && matches!(insn, Insn::XorRm32 | Insn::RolRm32Imm8 | Insn::MovEaxMem8));
             if !skip {
                 sem::clear_hi(b, d);
             }

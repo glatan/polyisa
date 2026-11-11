@@ -413,6 +413,7 @@ fn text_applets_match_host() {
         &["more", f],
         &["xxd", f],
         &["cryptpw", "secret", "sa"],
+        &["pgrep", "nosuchname123"],
         &["printenv"],
         &["which", "true"],
         &["install", "-m", "644", f, installed_s],
