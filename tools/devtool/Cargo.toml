@@ -9,5 +9,9 @@ rust-version = "1.99"
 name = "devtool"
 path = "src/main.rs"
 
+[dependencies]
+polyisa-isadl = { path = "../../crates/isadl" }
+polyisa-isagen = { path = "../../crates/isagen" }
+
 [lints]
 workspace = true

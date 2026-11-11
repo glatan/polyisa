@@ -1,0 +1,121 @@
+# 実装状況：システムコール
+
+このファイルは `task status` が生成する。手で編集しない。
+
+生成の元は `crates/cli/src/run.rs` の `RV64_SYSCALLS` と、`crates/cli/src/run_x86.rs` の `X86_64_SYSCALLS`、`I386_SYSCALLS` である。
+
+## rv64
+
+- exit
+- exit_group
+- write
+
+## x86_64
+
+- access
+- arch_prctl
+- brk
+- chmod
+- clock_gettime
+- clock_nanosleep
+- close
+- dup
+- dup2
+- dup3
+- exit
+- exit_group
+- faccessat
+- fchmod
+- fchmodat
+- fcntl
+- fstat
+- ftruncate
+- getcwd
+- getdents64
+- getegid
+- geteuid
+- getgid
+- getgroups
+- getpid
+- getrandom
+- gettid
+- getuid
+- ioctl
+- lseek
+- mkdir
+- mkdirat
+- mmap
+- mprotect
+- munmap
+- newfstatat
+- openat
+- prlimit64
+- read
+- readlink
+- readlinkat
+- readv
+- rename
+- rmdir
+- rseq
+- rt_sigaction
+- rt_sigprocmask
+- sendfile
+- set_robust_list
+- set_tid_address
+- symlink
+- tgkill
+- time
+- umask
+- uname
+- unlink
+- unlinkat
+- utimensat
+- write
+- writev
+
+## i386
+
+- access
+- brk
+- chmod
+- close
+- dup
+- dup2
+- dup3
+- exit
+- exit_group
+- faccessat
+- fchmod
+- fchmodat
+- fcntl
+- ftruncate
+- getcwd
+- getegid
+- geteuid
+- getgid
+- getpid
+- gettid
+- getuid
+- mkdir
+- mkdirat
+- mprotect
+- munmap
+- openat
+- read
+- readlink
+- readlinkat
+- readv
+- rename
+- rmdir
+- rt_sigaction
+- rt_sigprocmask
+- symlink
+- tgkill
+- umask
+- uname
+- unlink
+- unlinkat
+- utimensat
+- write
+- writev
+

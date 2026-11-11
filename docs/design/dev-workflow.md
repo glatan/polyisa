@@ -20,7 +20,7 @@ Task と cargo-nextest は外部のツールであり、[参照資料の台帳](
 
 | タスク | 内容 |
 |---|---|
-| `task check` | rustfmt の検査、clippy、devtool による規則の検査（外部依存の禁止、クレート間の依存規則、`cfg` の使用の規則、台帳の検査、設計との差の台帳の検査、完了条件の検査） |
+| `task check` | rustfmt の検査、clippy、devtool による規則の検査（外部依存の禁止、クレート間の依存規則、`cfg` の使用の規則、台帳の検査、設計との差の台帳の検査、完了条件の検査、spec の表と `build.rs` の一致、実装状況の鮮度の検査） |
 | `task check:targets` | ビッグエンディアンのターゲットと 32 ビットのターゲットでの `cargo check`（[ホスト抽象化](host.md)） |
 | `task refs:check` | 台帳の検査だけを行う（[参照資料の台帳](../references.md)） |
 | `task test` | nextest の `default` プロファイルによる軽いテストと、`cargo test --doc` |
@@ -28,9 +28,14 @@ Task と cargo-nextest は外部のツールであり、[参照資料の台帳](
 | `task test:layer LAYER=<層の名前>` | 重いテストのうち、一つの層のテストバイナリだけを `full` プロファイルで実行する。オラクルの扱いは `task test:full` と同じ |
 | `task testdata:fetch` | 取得定義に従ってテストデータを取得し、チェックサムを検証する |
 | `task isagen:dump ISA=<ISA の名前>` | ISADL から生成したコードを書き出す（[ワークスペース](workspace.md)） |
+| `task status` | 実装状況を `docs/status/` に生成する |
 | `task bench` | 性能の計測（[実行エンジン](execution-engine.md)） |
 | `task doctor` | 外部のツールと Rust のターゲットの有無と版を表示する |
 | `task hooks:install` | Git のコミット前のフックを入れる |
+
+## 実装状況の生成
+
+`task status` は、追跡しているファイルだけから `docs/status/` を生成する。生成の元は、ISADL の記述、ロードマップの完了条件、設計との差の台帳、cli のシステムコールの表（`RV64_SYSCALLS`、`X86_64_SYSCALLS`、`I386_SYSCALLS`）である。テストの結果は含めない。生成物はコミットする。生成の元を変えた変更では、同じ変更の中で `task status` を実行し直す。`task check` は、生成し直した結果と `docs/status/` を比べ、食い違えば失敗する。
 
 テストは nextest で実行する。エディタから個別のテストを `cargo test` で実行してもよいが、テストの範囲と時間の上限は nextest の設定にだけ書くので、全体の検証には `cargo test` を使わない。nextest は doctest を実行しないので、doctest だけは `task test` が `cargo test --doc` で実行する。
 

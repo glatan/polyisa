@@ -48,9 +48,14 @@ tasks:
   isagen:dump:
     desc: "ISADL から生成したコードを書き出す (例: task isagen:dump ISA=riscv)"
     cmds:
-      - echo "isagen:dump は段階0の isagen 実装後に有効になる (ISA={{.ISA}})"
+      - cargo run -q -p polyisa-devtool -- isagen:dump {{.ISA}}
     requires:
       vars: [ISA]
+
+  status:
+    desc: "実装状況を docs/status/ に生成する"
+    cmds:
+      - cargo run -q -p polyisa-devtool -- status
 
   bench:
     desc: "性能の計測（汎用意味論と直接実装の比較。判定は結果を見て行い、記録は ADR-0012）"

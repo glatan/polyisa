@@ -1,0 +1,186 @@
+# 実装状況：x86
+
+このファイルは `task status` が生成する。手で編集しない。
+
+生成の元は `guests/x86/spec/x86min.rs` である。
+
+## CPU モデル
+
+| 名前 | 親 | 足す機能 | 除く機能 |
+|---|---|---|---|
+| generic32 |  | i386 |  |
+
+## 機能
+
+- i386
+
+## 命令
+
+| ニーモニック | 記述 | 条件 | タイミング |
+|---|---|---|---|
+| adc | adc_r_mem32、adc_r_mem8、adc_r_memnd、adc_r_rip、adc_rm32、adc_rm32_imm、adc_rm_imm8 | 真 | alu |
+| add | add_eax、add_m16_imm_sib、add_m32_r32_mem32、add_m32_r32_mem8、add_m32_r32_memnd、add_m32_r32_rip、add_m32_r32_sibd、add_r_mem32、add_r_mem8、add_r_memnd、add_r_rip、add_r_sib、add_r_sibabs、add_r_sibd、add_rm16_imm、add_rm32、add_rm32_imm、add_rm32_imm8_rip、add_rm32_rip、add_rm64_imm、add_rm_imm8、add_rm_imm8_mem32、add_rm_imm8_mem8、add_rm_imm8_memnd、add_rm_imm8_sibd | 真 | alu |
+| addsd | addsd | 真 | alu |
+| addsd | addsd_m64_sib、addsd_xmm_m64_rip | 真 | load |
+| and | and_ax_imm16、and_eax、and_m8_r8、and_r8_m8_mem32、and_r_mem32、and_r_mem8、and_r_memnd、and_r_rip、and_rm16_imm、and_rm32、and_rm32_imm、and_rm32_rip、and_rm8_imm、and_rm8_imm_mem32、and_rm8_imm_mem8、and_rm8_imm_sibd、and_rm_imm8、and_rm_imm8_mem32、and_rm_imm8_mem8、and_rm_imm8_memnd、and_rm_imm8_rip、and_rm_imm8_sib、and_rm_imm8_sibd | 真 | alu |
+| andpd | andpd | 真 | alu |
+| andpd | andpd_rip | 真 | load |
+| bsf | bsf_r_rm | 真 | alu |
+| bsf | bsf_r_mem32、bsf_r_mem8、bsf_r_memnd、bsf_r_rip | 真 | load |
+| bsr | bsr_r_rm | 真 | alu |
+| bsr | bsr_r_mem32、bsr_r_mem8、bsr_r_memnd、bsr_r_rip | 真 | load |
+| bswap | bswap | 真 | alu |
+| bt | bt_m32_imm、bt_m32_imm_sibd、bt_r32_imm、bt_r32_rm | 真 | alu |
+| bts | bts_r32_imm、bts_r32_rm | 真 | alu |
+| call | call_r_mem32、call_r_mem8、call_r_memnd、call_r_rip、call_r_rm、call_r_sib、call_r_sibd、call_r_sibd32、call_rel32 | 真 | jump |
+| cdq | cdq | 真 | alu |
+| cmova | cmova | 真 | alu |
+| cmovae | cmovae | 真 | alu |
+| cmovae | cmovae_m64 | 真 | load |
+| cmovb | cmovb | 真 | alu |
+| cmovbe | cmovbe | 真 | alu |
+| cmove | cmove | 真 | alu |
+| cmove | cmove_m64、cmove_r64_sibd、cmove_rip | 真 | load |
+| cmovg | cmovg | 真 | alu |
+| cmovge | cmovge | 真 | alu |
+| cmovl | cmovl | 真 | alu |
+| cmovle | cmovle | 真 | alu |
+| cmovne | cmovne | 真 | alu |
+| cmovne | cmovne_m64、cmovne_r64_sibd、cmovne_rip | 真 | load |
+| cmovno | cmovno | 真 | alu |
+| cmovnp | cmovnp | 真 | alu |
+| cmovns | cmovns | 真 | alu |
+| cmovo | cmovo | 真 | alu |
+| cmovp | cmovp | 真 | alu |
+| cmovs | cmovs | 真 | alu |
+| cmp | cmp_al_imm、cmp_ax_imm16、cmp_eax、cmp_m32_r32_sib、cmp_m32_r32_sibd、cmp_m8_r8、cmp_m8_r8_mem32、cmp_m8_r8_mem8、cmp_m8_r8_memnd、cmp_m8_r8_sib、cmp_m8_r8_sibd、cmp_m8_r8_sibd32、cmp_r8_m8、cmp_r8_m8_mem32、cmp_r8_m8_mem8、cmp_r8_m8_memnd、cmp_r8_m8_sib、cmp_r8_m8_sibd、cmp_r8_m8_sibd32、cmp_r_mem32、cmp_r_mem8、cmp_r_memnd、cmp_r_rip、cmp_r_sib、cmp_r_sibabs、cmp_r_sibd、cmp_r_sibd32、cmp_rm32、cmp_rm32_imm、cmp_rm32_imm_mem32、cmp_rm32_imm_mem8、cmp_rm32_imm_memnd、cmp_rm64_imm、cmp_rm8_imm、cmp_rm8_imm_mem32、cmp_rm8_imm_mem8、cmp_rm8_imm_memnd、cmp_rm8_imm_rip、cmp_rm8_imm_sib、cmp_rm8_imm_sibd、cmp_rm8_imm_sibd32、cmp_rm_imm8、cmp_rm_imm8_mem32、cmp_rm_imm8_memnd、cmp_rm_imm8_rip、cmp_rm_imm8_sib、cmp_rm_imm8_sibd、cmp_rm_imm8m8、cmp_rm_mem32、cmp_rm_mem8、cmp_rm_memnd、cmp_rm_rip | 真 | alu |
+| cmpxchg | cmpxchg_r_mem32、cmpxchg_r_mem8、cmpxchg_r_memnd、cmpxchg_r_rip、cmpxchg_r_rm | 真 | alu |
+| comisd | comisd | 真 | alu |
+| cpuid | cpuid | 真 | system |
+| cvtsi2sd | cvtsi2sd_m32_mem8、cvtsi2sd_r64 | 真 | load |
+| cvttsd2si | cvttsd2si_r64 | 真 | load |
+| cwde | cwde | 真 | alu |
+| dec | dec_eax、dec_ebp、dec_ebx、dec_ecx、dec_edi、dec_edx、dec_esi、dec_esp、dec_rm、dec_rm_mem8、dec_rm_rip、dec_rm_sibd | 真 | alu |
+| div | div_rm32、div_rm32_mem8、div_rm32_sibd | 真 | div |
+| endbr64 | endbr64 | 真 | alu |
+| fldcw | fldcw_mem32、fldcw_mem8、fldcw_memnd | 真 | alu |
+| fnstcw | fnstcw_mem32、fnstcw_mem8、fnstcw_memnd | 真 | alu |
+| idiv | idiv_rm32 | 真 | div |
+| imul | imul_r_imm、imul_r_imm8、imul_r_imm8_rip、imul_r_rm | 真 | alu |
+| imul | imul_r_mem32、imul_r_mem8、imul_r_memnd、imul_r_rip、imul_r_sibd | 真 | load |
+| imul | imul_rm32 | 真 | mult |
+| inc | inc_eax、inc_ebp、inc_ebx、inc_ecx、inc_edi、inc_edx、inc_esi、inc_esp、inc_rm、inc_rm_mem8、inc_rm_memnd、inc_rm_rip、inc_rm_sibd | 真 | alu |
+| int | int80 | 真 | system |
+| ja | ja、ja_rel32 | 真 | jump |
+| jae | jae、jae_rel32 | 真 | jump |
+| jb | jb、jb_rel32 | 真 | jump |
+| jbe | jbe、jbe_rel32 | 真 | jump |
+| je | je、je_rel32 | 真 | jump |
+| jg | jg、jg_rel32 | 真 | jump |
+| jge | jge、jge_rel32 | 真 | jump |
+| jl | jl、jl_rel32 | 真 | jump |
+| jle | jle、jle_rel32 | 真 | jump |
+| jmp | jmp8、jmp_r_mem32、jmp_r_mem8、jmp_r_memnd、jmp_r_rip、jmp_r_rm、jmp_r_sib、jmp_rel32 | 真 | jump |
+| jne | jne、jne_rel32 | 真 | jump |
+| jno | jno、jno_rel32 | 真 | jump |
+| jnp | jnp、jnp_rel32 | 真 | jump |
+| jns | jns、jns_rel32 | 真 | jump |
+| jo | jo、jo_rel32 | 真 | jump |
+| jp | jp、jp_rel32 | 真 | jump |
+| js | js、js_rel32 | 真 | jump |
+| lea | lea_abs、lea_m32、lea_m8、lea_mnd、lea_sib、lea_sibabs、lea_sibd、lea_sibd32 | 真 | alu |
+| leave | leave | 真 | alu |
+| loop | loop | 真 | jump |
+| mov | mov_mr32、mov_r32_imm、mov_r64_imm64、mov_rm16_imm_m32、mov_rm16_imm_mem8、mov_rm16_imm_rip、mov_rm16_imm_sib、mov_rm16_imm_sibd、mov_rm32、mov_rm_imm、mov_rm_imm_m32、mov_rm_imm_m8、mov_rm_imm_memnd、mov_rm_imm_rip、mov_rm_imm_sib、mov_rm_imm_sibabs、mov_rm_imm_sibd、mov_rm_imm_sibd32 | 真 | alu |
+| mov | mov_eax_abs、mov_eax_mem32、mov_eax_mem8、mov_eax_memnd、mov_eax_sib、mov_eax_sibabs、mov_eax_sibd、mov_eax_sibd32、mov_r8_imm、mov_r8_m8、mov_r8_m8_mem32、mov_r8_m8_mem8、mov_r8_m8_memnd、mov_r8_m8_rip、mov_r8_m8_sib、mov_r8_m8_sibd、mov_r8_m8_sibd32 | 真 | load |
+| mov | mov_abs_eax、mov_m8_r8、mov_m8_r8_mem32、mov_m8_r8_mem8、mov_m8_r8_memnd、mov_m8_r8_rip、mov_m8_r8_sib、mov_m8_r8_sibd、mov_m8_r8_sibd32、mov_mem_eax32、mov_mem_eax8、mov_memnd_eax、mov_rm8_imm_mem32、mov_rm8_imm_mem8、mov_rm8_imm_memnd、mov_rm8_imm_rip、mov_rm8_imm_sib、mov_rm8_imm_sibd、mov_rm8_imm_sibd32、mov_sib_eax、mov_sibabs_eax、mov_sibabs_r8、mov_sibd32_eax、mov_sibd_eax | 真 | store |
+| movaps | movaps_load_mem32、movaps_load_mem8、movaps_load_memnd、movaps_load_rip、movaps_load_xmm | 真 | load |
+| movaps | movaps_store_mem32、movaps_store_mem8、movaps_store_memnd、movaps_store_rip、movaps_store_sibd32 | 真 | store |
+| movd | movd_xmm、movd_xmm_m32、movd_xmm_rip | 真 | load |
+| movdqa | movdqa_load_rip | 真 | load |
+| movdqu | movdqu_load_mem32、movdqu_load_mem8、movdqu_load_memnd、movdqu_load_sib、movdqu_load_xmm | 真 | load |
+| movdqu | movdqu_store_mem32、movdqu_store_mem8、movdqu_store_memnd、movdqu_store_sib、movdqu_store_xmm | 真 | store |
+| movhps | movhps_xmm_m64_mem8 | 真 | load |
+| movlpd | movlpd_xmm_m64_memnd | 真 | load |
+| movntdq | movntdq_store_mem8、movntdq_store_memnd | 真 | store |
+| movq | movq_r64_xmm、movq_xmm_m64_mem8、movq_xmm_m64_rip | 真 | load |
+| movq | movq_m64_xmm_mem32、movq_m64_xmm_mem8、movq_m64_xmm_memnd、movq_m64_xmm_rip | 真 | store |
+| movsb | movsb | 真 | load |
+| movsd | movsd | 真 | load |
+| movsx | movsx_r32_m8_mem8、movsx_r32_m8_memnd、movsx_r32_m8_rip、movsx_r32_m8_sib、movsx_r32_m8_sibd、movsx_r32_r8 | 真 | load |
+| movsxd | movsxd | 真 | alu |
+| movsxd | movsxd_mem32、movsxd_mem8、movsxd_memnd、movsxd_rip、movsxd_sib、movsxd_sibd、movsxd_sibd32 | 真 | load |
+| movups | movups_load_mem32、movups_load_mem8、movups_load_memnd、movups_load_rip、movups_load_sib、movups_load_sibd、movups_load_sibd32、movups_load_xmm | 真 | load |
+| movups | movups_store_mem32、movups_store_mem8、movups_store_memnd、movups_store_rip、movups_store_sib、movups_store_sibd、movups_store_sibd32、movups_store_xmm | 真 | store |
+| movzx | movzx_r32_m16_mem32、movzx_r32_m16_mem8、movzx_r32_m16_memnd、movzx_r32_m16_rip、movzx_r32_m16_sib、movzx_r32_m16_sibd、movzx_r32_m8_mem32、movzx_r32_m8_mem8、movzx_r32_m8_memnd、movzx_r32_m8_rip、movzx_r32_m8_sib、movzx_r32_m8_sibd、movzx_r32_m8_sibd32、movzx_r32_r16、movzx_r32_r8 | 真 | load |
+| mul | mul_rm32 | 真 | mult |
+| mulsd | mulsd | 真 | alu |
+| mulsd | mulsd_xmm_m64_rip | 真 | load |
+| neg | neg_rm32 | 真 | alu |
+| nop | nop | 真 | alu |
+| nopl | nopl、nopl_mem32、nopl_mem8、nopl_sib、nopl_sibd、nopl_sibd32 | 真 | alu |
+| not | not_rm32 | 真 | alu |
+| or | or_al_imm、or_eax、or_m32_r32_mem32、or_m32_r32_mem8、or_m32_r32_memnd、or_m32_r32_sib、or_m32_r32_sibd32、or_m8_r8、or_m_rip、or_r8_r8、or_r_mem32、or_r_mem8、or_r_memnd、or_r_rip、or_r_sib、or_rm32、or_rm32_imm、or_rm32_imm_mem8、or_rm32_imm_memnd、or_rm32_rip、or_rm8_imm、or_rm8_imm_mem32、or_rm8_imm_mem8、or_rm8_imm_memnd、or_rm8_imm_sib、or_rm8_imm_sibd、or_rm_imm8、or_rm_imm8_mem32、or_rm_imm8_mem8、or_rm_imm8_memnd、or_rm_imm8_rip、or_rm_imm8_sibd | 真 | alu |
+| or | or_r8_m8_rip、or_r8_m8_sibd | 真 | load |
+| paddb | paddb | 真 | alu |
+| pand | pand | 真 | alu |
+| pandn | pandn | 真 | alu |
+| pcmpeqb | pcmpeqb | 真 | alu |
+| pcmpeqb | pcmpeqb_mem32、pcmpeqb_mem8、pcmpeqb_memnd | 真 | load |
+| pcmpeqd | pcmpeqd | 真 | alu |
+| pcmpgtb | pcmpgtb | 真 | alu |
+| pmaxub | pmaxub | 真 | alu |
+| pminub | pminub | 真 | alu |
+| pminub | pminub_mem32、pminub_mem8、pminub_memnd | 真 | load |
+| pmovmskb | pmovmskb | 真 | load |
+| pop | pop_eax、pop_ebp、pop_ebx、pop_ecx、pop_edi、pop_edx、pop_esi、pop_esp | 真 | load |
+| por | por | 真 | alu |
+| por | por_mem32、por_mem8、por_memnd、por_sibd32 | 真 | load |
+| pshufd | pshufd | 真 | alu |
+| pslldq | pslldq | 真 | alu |
+| psrldq | psrldq | 真 | alu |
+| psubb | psubb | 真 | alu |
+| punpcklbw | punpcklbw | 真 | alu |
+| punpckldq | punpckldq | 真 | alu |
+| punpcklqdq | punpcklqdq | 真 | alu |
+| punpcklwd | punpcklwd | 真 | alu |
+| push | push_eax、push_ebp、push_ebx、push_ecx、push_edi、push_edx、push_esi、push_esp、push_imm32、push_imm8 | 真 | store |
+| pxor | pxor | 真 | alu |
+| rdsspq | rdsspq | 真 | system |
+| ret | ret | 真 | jump |
+| rol | rol_rm32_1、rol_rm32_imm8 | 真 | alu |
+| ror | ror_rm32_imm8 | 真 | alu |
+| sar | sar_rm32_1、sar_rm32_cl、sar_rm32_imm8 | 真 | alu |
+| sbb | sbb_r_mem32、sbb_r_mem8、sbb_r_memnd、sbb_r_rip、sbb_rm32、sbb_rm32_imm、sbb_rm_imm8 | 真 | alu |
+| seta | seta | 真 | alu |
+| setae | setae | 真 | alu |
+| setb | setb | 真 | alu |
+| setbe | setbe | 真 | alu |
+| sete | sete、sete_m8_mem32、sete_m8_mem8、sete_m8_sibd | 真 | alu |
+| setg | setg | 真 | alu |
+| setge | setge | 真 | alu |
+| setl | setl | 真 | alu |
+| setle | setle、setle_m8_mem32 | 真 | alu |
+| setne | setne、setne_m8_mem32、setne_m8_sibd | 真 | alu |
+| setno | setno | 真 | alu |
+| setnp | setnp | 真 | alu |
+| setns | setns | 真 | alu |
+| seto | seto | 真 | alu |
+| setp | setp | 真 | alu |
+| sets | sets | 真 | alu |
+| shl | shl_rm32_1、shl_rm32_cl、shl_rm32_imm8 | 真 | alu |
+| shld | shld_r32_cl | 真 | alu |
+| shr | shr_rm32_1、shr_rm32_cl、shr_rm32_imm8、shr_rm8_1、shr_rm8_imm8 | 真 | alu |
+| shrd | shrd_r32_cl | 真 | alu |
+| stosb | stosb | 真 | store |
+| stosd | stosd | 真 | store |
+| sub | sub_eax、sub_m32_r32_mem8、sub_m8_r8、sub_r_mem32、sub_r_mem8、sub_r_memnd、sub_r_rip、sub_r_sibabs、sub_r_sibd、sub_rm32、sub_rm32_imm、sub_rm64_imm、sub_rm_imm8、sub_rm_imm8_mem32、sub_rm_imm8_mem8、sub_rm_imm8_memnd、sub_rm_imm8_rip | 真 | alu |
+| subsd | subsd | 真 | alu |
+| syscall | syscall | 真 | system |
+| test | test_al_imm、test_eax_imm、test_m16_imm_mem8、test_m16_imm_memnd、test_m16_imm_rip、test_m8_imm_mem32、test_m8_imm_mem8、test_m8_imm_memnd、test_m8_imm_rip、test_m8_imm_sib、test_m8_imm_sibd、test_m8_r8_mem32、test_m8_r8_mem8、test_m8_r8_memnd、test_r8_r8、test_r_mem8、test_r_sibd、test_r_sibd32、test_rm32、test_rm32_imm、test_rm32_imm_memnd、test_rm32_memnd、test_rm8_imm | 真 | alu |
+| ucomisd | ucomisd | 真 | alu |
+| ucomisd | ucomisd_mem32、ucomisd_mem8、ucomisd_memnd、ucomisd_rip | 真 | load |
+| xadd | xadd_r32_memnd、xadd_r32_rip | 真 | alu |
+| xchg | xchg_r_mem32、xchg_r_mem8、xchg_r_memnd、xchg_r_rip、xchg_r_rm、xchg_rbp_ax、xchg_rbx_ax、xchg_rcx_ax、xchg_rdi_ax、xchg_rdx_ax、xchg_rsi_ax、xchg_rsp_ax | 真 | alu |
+| xor | xor_imm、xor_m8_r8、xor_r8_m8_memnd、xor_r_mem32、xor_r_mem8、xor_r_memnd、xor_r_rip、xor_r_sib、xor_r_sibd、xor_r_sibd32、xor_rm32、xor_rm32_imm、xor_rm_imm8、xor_rm_imm8_mem32、xor_rm_imm8_mem8、xor_rm_imm8_memnd | 真 | alu |
+| xorps | xorps | 真 | alu |

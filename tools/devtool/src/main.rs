@@ -4,7 +4,10 @@
 //!
 //! タスクから呼ぶ薄い入口にし、条件分岐とデータ処理はここに書く.
 
+mod dump;
 mod gaps;
+mod specs;
+mod status;
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -15,9 +18,13 @@ fn main() {
         "doctor" => cmd_doctor(),
         "testdata:fetch" => cmd_testdata_fetch(),
         "hooks:install" => cmd_hooks_install(),
+        "status" => cmd_status(),
+        "isagen:dump" => cmd_isagen_dump(args.next()),
         _ => {
             eprintln!("unknown subcommand: {cmd}");
-            eprintln!("usage: devtool <check|refs:check|doctor|testdata:fetch|hooks:install>");
+            eprintln!(
+                "usage: devtool <check|refs:check|doctor|testdata:fetch|hooks:install|status|isagen:dump>"
+            );
             1
         }
     };
@@ -25,7 +32,9 @@ fn main() {
 }
 
 fn usage_and_exit() -> ! {
-    eprintln!("usage: devtool <check|refs:check|doctor|testdata:fetch|hooks:install>");
+    eprintln!(
+        "usage: devtool <check|refs:check|doctor|testdata:fetch|hooks:install|status|isagen:dump>"
+    );
     std::process::exit(2);
 }
 
@@ -39,6 +48,41 @@ fn workspace_root() -> std::path::PathBuf {
         match dir.parent() {
             Some(p) => dir = p.to_path_buf(),
             None => return std::path::PathBuf::from("."),
+        }
+    }
+}
+
+fn cmd_status() -> i32 {
+    match status::write_status(&workspace_root()) {
+        Ok(paths) => {
+            for path in paths {
+                println!("{}", path.display());
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("status: {e}");
+            1
+        }
+    }
+}
+
+fn cmd_isagen_dump(isa: Option<String>) -> i32 {
+    let Some(isa) = isa else {
+        eprintln!("usage: devtool isagen:dump <isa>");
+        return 2;
+    };
+    let root = workspace_root();
+    match dump::cmd_isagen_dump(&root, &isa) {
+        Ok(paths) => {
+            for path in paths {
+                println!("{}", path.display());
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("isagen:dump: {e}");
+            1
         }
     }
 }
@@ -69,6 +113,17 @@ fn cmd_check() -> i32 {
     }
     if let Err(e) = gaps::check_completion(&root) {
         eprintln!("check: 完了条件: {e}");
+        failed = true;
+    }
+    if let Err(e) = specs::check_spec_table(&root) {
+        eprintln!("check: spec の表: {e}");
+        failed = true;
+    }
+    if let Err(e) = status::check_syscall_tables(&root) {
+        eprintln!("check: システムコールの表: {e}");
+        failed = true;
+    } else if let Err(e) = status::check_fresh(&root) {
+        eprintln!("check: 実装状況の鮮度: {e}");
         failed = true;
     }
     if failed {
