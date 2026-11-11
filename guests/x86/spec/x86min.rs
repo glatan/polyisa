@@ -453,6 +453,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         // CMOVNE r64/r32, m64/m32 [RIP+disp32] (0F 45 05 + disp32)。ln 0x5a9e44 対応。REX.W で64bit.
         ("cmovne_rip", "F1", "00001111 01000101 00...101 ................................", "cmovne r, m", "load"),
         ("imul_r_imm", "F1", "01101001 11...... ................................", "imul r, r/m, {imm}", "alu"),
+        // IMUL r, [SIB+disp8], imm32 (69 /r)。mktemp 0x4d85cf の 48 69 44 24 08 01 00 01 00。
+        ("imul_r_imm_sibd", "F1", "01101001 01...100 ..100... ........ ................................", "imul r, m, {imm}", "alu"),
         // IMUL r32/r64, r/m32/r/m64, imm8 reg-direct (6B /r ib mod=11)。REX.W で64bit.
         ("imul_r_imm8", "F1", "01101011 11...... ........", "imul r, r/m, {imm}", "alu"),
         // IMUL r64,r/m64,imm8 RIP (6B /r ib + disp32 + imm8)。REX.W で64bit.

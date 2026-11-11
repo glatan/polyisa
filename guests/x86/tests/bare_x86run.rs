@@ -4879,6 +4879,35 @@ fn run_movsx_r64_m8_memnd() {
 }
 
 #[test]
+fn run_imul_r64_imm_sibd() {
+    // 48 69 44 24 08 01 00 01 00 = imulq $0x10001, 0x8(%rsp), %rax。3*0x10001=0x30003。
+    // mktemp 0x4d85cf。Ref: SPEC-X86-INTEL-SDM (v093).
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    env.backend
+        .mem
+        .write(VirtAddr(0x2008), &3u64.to_le_bytes())
+        .unwrap();
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x1000),
+            &[0x48, 0x69, 0x44, 0x24, 0x08, 0x01, 0x00, 0x01, 0x00],
+        )
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x1009 });
+    assert_eq!(
+        polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(0)),
+        0x30003
+    );
+}
+
+#[test]
 fn run_ror_rm64_by1() {
     // 48 D1 C9 = rorq %rcx。下位1ビットが最上位へ回る。sha512sum 0x4b47c4。
     // Ref: SPEC-X86-INTEL-SDM (v093).

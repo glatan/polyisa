@@ -85,7 +85,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数117件。
-        assert_eq!(INSNS.len(), 704);
+        assert_eq!(INSNS.len(), 705);
     }
 
     #[test]
@@ -561,6 +561,9 @@ mod tests {
         assert_eq!(decode(0x0F458558FFFFFF, 56), Some(Insn::CmovneM64));
         assert_eq!(decode(0x0F458558FFFFFF, 48), None);
         assert_eq!(decode(0x69C788000000, 48), Some(Insn::ImulRImm));
+        // IMUL r64, [SIB+disp8], imm32。mktemp 0x4d85cf の 69 44 24 08 01 00 01 00。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x6944240801000100, 64), Some(Insn::ImulRImmSibd));
         assert_eq!(decode(0x6B1567FD1A0038, 56), Some(Insn::ImulRImm8Rip));
         assert_eq!(decode(0x6BF638, 24), Some(Insn::ImulRImm8));
         assert_eq!(decode(0x00C1F908, 24), Some(Insn::SarRm32Imm8));

@@ -591,10 +591,19 @@ fn fetch_len(
                 Some(2)
             }
         }
-        // 0x69 /r id (IMUL r,r/m,imm32)。reg-direct のみ 6B.
+        // 0x69 /r id (IMUL r,r/m,imm32)。reg-direct 6B、SIB+disp8 は 8B。
         0x69 => {
             let s = second?;
-            if s >> 6 == 3 { Some(6) } else { None }
+            let md = s >> 6;
+            let rm = s & 7;
+            if md == 3 {
+                Some(6)
+            } else if md == 1 && rm == 4 {
+                // mktemp 0x4d85cf の imulq $0x10001, 0x8(%rsp), %rax。
+                Some(8)
+            } else {
+                None
+            }
         }
         // 0x6B /r ib (IMUL r,r/m,imm8)。reg-direct 3B、RIP 7B。SIB は未対応.
         0x6B => {
@@ -7119,6 +7128,16 @@ fn dispatch<B: Backend>(
                 sem::imul_r64_imm(b, reg(), rm(), imm32())
             } else {
                 sem::imul_r32_imm(b, reg(), rm(), imm32())
+            }
+        }
+        Insn::ImulRImmSibd => {
+            // 69 /r SIB mod=01 + imm32。disp は imm32 の直前。mktemp 0x4d85cf。
+            let disp = ((word >> 32) & 0xff) as u8 as i8;
+            let base = sib_base();
+            if rex_w {
+                sem::imul_r64_imm_sibd(b, reg(), base, disp, imm32())
+            } else {
+                sem::imul_r32_imm_sibd(b, reg(), base, disp, imm32())
             }
         }
         Insn::ImulRImm8 => {
