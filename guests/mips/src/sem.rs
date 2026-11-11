@@ -180,7 +180,6 @@ pub fn multu<B: Backend>(b: &mut B, rs: Gpr, rt: Gpr) -> Flow<B> {
     Ok(())
 }
 
-// Gap: GAP-0013
 /// DIV。LO=商、HI=剰余。0 除算は `div_zero_writes_zero` が 0 なら HI/LO を保ち、
 /// 0 以外なら HI と LO に 0 を書く。
 pub fn div<B: Backend>(b: &mut B, rs: Gpr, rt: Gpr) -> Flow<B> {

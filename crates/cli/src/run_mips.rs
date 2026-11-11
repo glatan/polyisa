@@ -492,8 +492,10 @@ fn sys_write(io: &mut O32Io, env: &mut BareEnv, model: MipsModel) -> Result<O32C
     }
     if fd == 1 {
         io.stdout.extend_from_slice(&data);
+        let _ = std::io::Write::write(&mut std::io::stdout(), &data);
     } else {
         io.stderr.extend_from_slice(&data);
+        let _ = std::io::Write::write(&mut std::io::stderr(), &data);
     }
     set_reg(env, 2, data.len() as u64);
     set_reg(env, 7, 0);
@@ -560,24 +562,49 @@ fn set_u64(env: &mut BareEnv, offset: usize, value: u64) {
     );
 }
 
-/// 静的な MIPS ELF を実行する。機械番号 8。エンディアンはヘッダから取る。
-/// LE は Release 2、BE は R3000。引数はまだ渡さない。
+/// 静的な MIPS ELF を実行する。機械番号 8。LE は Release 2、BE は R3000。
 pub fn run_elf_mips(path: &str, _argv: &[String]) -> Result<u64, String> {
-    use polyisa_mem::{Perms, VirtAddr};
-
     let bytes = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
     let ehdr = polyisa_loader::elf::parse_ehdr32(&bytes).map_err(|e| format!("ehdr: {e:?}"))?;
+    let model = if ehdr.little {
+        MipsModel::mips32r2()
+    } else {
+        MipsModel::mips1_be()
+    };
+    run_loaded(&bytes, &ehdr, model, &mut O32Io::default())
+}
+
+/// モデルを指定して静的な MIPS ELF を実行する。エンディアンはヘッダと一致させる。
+pub fn run_elf_model(path: &str, model: MipsModel, io: &mut O32Io) -> Result<u64, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
+    let ehdr = polyisa_loader::elf::parse_ehdr32(&bytes).map_err(|e| format!("ehdr: {e:?}"))?;
+    run_loaded(&bytes, &ehdr, model, io)
+}
+
+fn run_loaded(
+    bytes: &[u8],
+    ehdr: &polyisa_loader::elf::Ehdr,
+    model: MipsModel,
+    io: &mut O32Io,
+) -> Result<u64, String> {
+    use polyisa_mem::{Perms, VirtAddr};
+
     // EM_MIPS = 8。Ref: SRC-LINUX (7.3).
     if ehdr.machine != 8 {
         return Err(format!("未対応の e_machine: {}", ehdr.machine));
     }
+    let header_le = ehdr.little;
+    let model_le = matches!(model.endian, Endian::Le);
+    if header_le != model_le {
+        return Err("ELF のエンディアンとモデルが違う".to_string());
+    }
     let phdrs =
-        polyisa_loader::elf::parse_phdrs32(&bytes, &ehdr).map_err(|e| format!("phdrs: {e:?}"))?;
-    if polyisa_loader::elf::parse_interp(&bytes, &phdrs).is_some() {
+        polyisa_loader::elf::parse_phdrs32(bytes, ehdr).map_err(|e| format!("phdrs: {e:?}"))?;
+    if polyisa_loader::elf::parse_interp(bytes, &phdrs).is_some() {
         return Err("動的リンクは未対応".to_string());
     }
     let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_mips::CpuState>());
-    polyisa_loader::elf::load_segments(&bytes, &phdrs, &mut env.backend.mem)
+    polyisa_loader::elf::load_segments(bytes, &phdrs, &mut env.backend.mem)
         .map_err(|e| format!("load: {e:?}"))?;
     let sp = 0x7fff_0000u64;
     let page = sp & !(polyisa_mem::PAGE_SIZE - 1);
@@ -590,13 +617,7 @@ pub fn run_elf_mips(path: &str, _argv: &[String]) -> Result<u64, String> {
         .write(VirtAddr(sp), &[0, 0, 0, 0])
         .map_err(|e| format!("stack write: {e:?}"))?;
     set_reg(&mut env, 29, sp);
-    let model = if ehdr.little {
-        MipsModel::mips32r2()
-    } else {
-        MipsModel::mips1_be()
-    };
-    let mut io = O32Io::default();
-    match run_os(&mut env, ehdr.entry, model, &mut io) {
+    match run_os(&mut env, ehdr.entry, model, io) {
         MipsOutcome::Exit(code) => Ok(code),
         MipsOutcome::Unimplemented { pc, word } => {
             Err(format!("unimplemented at {pc:#x}: {word:#x}"))
