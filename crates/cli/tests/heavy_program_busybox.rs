@@ -395,3 +395,44 @@ fn text_applets_match_host() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn link_matches_host() {
+    // ゲストとホストは別の木を変える。同じパスだと先に作った側が EEXIST になる。
+    let path = busybox();
+    let path = path.to_str().expect("utf-8 path");
+    let root = std::env::temp_dir().join(format!("polyisa-link-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let guest_dir = root.join("guest");
+    let host_dir = root.join("host");
+    std::fs::create_dir_all(&guest_dir).unwrap();
+    std::fs::create_dir_all(&host_dir).unwrap();
+    let guest_src = guest_dir.join("f");
+    let host_src = host_dir.join("f");
+    std::fs::write(&guest_src, b"ab\n").unwrap();
+    std::fs::write(&host_src, b"ab\n").unwrap();
+    let guest_dst = guest_dir.join("hard");
+    let host_dst = host_dir.join("hard");
+    let args = [
+        "link",
+        guest_src.to_str().expect("utf-8"),
+        guest_dst.to_str().expect("utf-8"),
+    ];
+    let argv: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
+    let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)
+        .unwrap_or_else(|e| panic!("link: {e}"));
+    let host = Command::new(path)
+        .args([
+            "link",
+            host_src.to_str().expect("utf-8"),
+            host_dst.to_str().expect("utf-8"),
+        ])
+        .env_clear()
+        .output()
+        .expect("host link");
+    assert_eq!(code, host.status.code().unwrap_or(1) as u64);
+    assert_eq!(out.as_slice(), host.stdout.as_slice());
+    assert_eq!(std::fs::read(&guest_dst).unwrap(), b"ab\n");
+    assert_eq!(std::fs::read(&host_dst).unwrap(), b"ab\n");
+    let _ = std::fs::remove_dir_all(&root);
+}

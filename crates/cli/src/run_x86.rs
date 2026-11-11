@@ -9448,6 +9448,7 @@ const X86_64_SYSCALLS: &[(&str, SysFn)] = &[
     ("mkdirat", sys_mkdirat),
     ("rename", sys_rename),
     ("symlink", sys_symlink),
+    ("link", sys_link),
     ("rmdir", sys_rmdir),
     ("unlink", sys_unlink),
     ("unlinkat", sys_unlinkat),
@@ -11431,6 +11432,36 @@ fn sys_rename(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Tra
         Err(e) => {
             let no = match e.kind() {
                 std::io::ErrorKind::NotFound => ENOENT,
+                std::io::ErrorKind::PermissionDenied => EACCES,
+                _ => EINVAL,
+            };
+            set64(env, Gpr(0), cx.neg(no));
+            TrapOutcome::Handled
+        }
+    })
+}
+
+fn sys_link(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // link(oldpath, newpath)。ハードリンク。busybox の `link` が使う。
+    let old_addr = get64(env, cx.r_a);
+    let new_addr = get64(env, cx.r_b);
+    let old_path = match guest_c_string(env, old_addr) {
+        Some(p) => p,
+        None => return Some(TrapOutcome::Unimplemented),
+    };
+    let new_path = match guest_c_string(env, new_addr) {
+        Some(p) => p,
+        None => return Some(TrapOutcome::Unimplemented),
+    };
+    Some(match std::fs::hard_link(&old_path, &new_path) {
+        Ok(()) => {
+            set64(env, Gpr(0), 0);
+            TrapOutcome::Handled
+        }
+        Err(e) => {
+            let no = match e.kind() {
+                std::io::ErrorKind::NotFound => ENOENT,
+                std::io::ErrorKind::AlreadyExists => 17,
                 std::io::ErrorKind::PermissionDenied => EACCES,
                 _ => EINVAL,
             };
@@ -13635,6 +13666,63 @@ mod tests {
             .write(VirtAddr(0x200 + bad.len() as u64), &[0])
             .unwrap();
         set64(&mut env, Gpr(0), abi::SYMLINK);
+        set64(&mut env, Gpr(7), 0x100);
+        set64(&mut env, Gpr(6), 0x200);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(ENOENT));
+        let _ = std::fs::remove_file(&new);
+    }
+
+    #[test]
+    fn link_roundtrip() {
+        // link(old, new) はハードリンクを作って 0 を返す。busybox の `link` で使う。
+        use polyisa_os_linux::x86_64 as abi;
+        let mut sys = CliLinux::x86_64();
+        let mut env = bare();
+        let old = format!("/tmp/polyisa_link_old_{}", std::process::id());
+        let new = format!("/tmp/polyisa_link_new_{}", std::process::id());
+        let _ = std::fs::remove_file(&old);
+        let _ = std::fs::remove_file(&new);
+        std::fs::write(&old, b"ab").unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x100), old.as_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x100 + old.len() as u64), &[0])
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x200), new.as_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x200 + new.len() as u64), &[0])
+            .unwrap();
+        set64(&mut env, Gpr(0), abi::LINK);
+        set64(&mut env, Gpr(7), 0x100);
+        set64(&mut env, Gpr(6), 0x200);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        assert_eq!(std::fs::read(&new).unwrap(), b"ab");
+        set64(&mut env, Gpr(0), abi::LINK);
+        set64(&mut env, Gpr(7), 0x100);
+        set64(&mut env, Gpr(6), 0x200);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(17));
+        let _ = std::fs::remove_file(&old);
+        assert_eq!(std::fs::read(&new).unwrap(), b"ab");
+        let missing = format!("/tmp/polyisa_link_missing_{}", std::process::id());
+        env.backend
+            .mem
+            .write(VirtAddr(0x100), missing.as_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x100 + missing.len() as u64), &[0])
+            .unwrap();
+        set64(&mut env, Gpr(0), abi::LINK);
         set64(&mut env, Gpr(7), 0x100);
         set64(&mut env, Gpr(6), 0x200);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));

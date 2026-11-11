@@ -46,6 +46,7 @@
 - getuid
 - ioctl
 - kill
+- link
 - lseek
 - lstat
 - mkdir
