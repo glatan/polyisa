@@ -9,9 +9,7 @@
 
 #![forbid(unsafe_code)]
 
-/// 対応するゲスト ABI の名前。段階1は RV64 のみ。
-/// x86_64 は番号表のみを持ち、実行は段階4の範囲である。
-/// i386 は番号表のみを持ち、実行は段階4の範囲である。
+/// ゲストの ABI。システムコール番号の表を選ぶときに使う。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum GuestAbi {
     Unknown,
@@ -20,7 +18,7 @@ pub enum GuestAbi {
     I386Linux,
 }
 
-/// 段階1で使うシステムコール番号（RISC-V・asm-generic）。
+/// RISC-V（asm-generic）のシステムコール番号。
 /// 値はカーネルの UAPI 表由来の事実である。
 pub mod rv64 {
     pub const READ: u64 = 63;
@@ -64,9 +62,8 @@ pub mod rv64 {
     pub const CLOCK_NANOSLEEP: u64 = 115;
 }
 
-/// 段階4の準備としての x86_64 番号表（Linux・64ビット）。
+/// x86_64（Linux・64ビット）のシステムコール番号。
 /// 値はカーネルの UAPI 由来の事実であり、`heavy_abi_uapi` で突き合わせる。
-/// 実行時の規約（`syscall` 命令、レジスタ割当て）は段階4の範囲である。
 // Ref: SRC-LINUX (7.3).
 pub mod x86_64 {
     pub const READ: u64 = 0;
@@ -139,7 +136,7 @@ pub mod x86_64 {
     pub const FSTATFS: u64 = 138;
 }
 
-/// 段階4の準備としての i386 番号表（Linux・32ビット）。
+/// i386（Linux・32ビット）のシステムコール番号。
 /// 値はカーネルの UAPI 由来の事実である。新旧 stat 系は i386 の実態に合わせ、
 /// newfstatat（i386 に存在しない）の代わりに fstatat64 を持つ。
 // Ref: SRC-LINUX (7.3).
@@ -214,7 +211,7 @@ pub mod i386 {
     pub const FSTATFS64: u64 = 269;
 }
 
-/// ABI と番号から名前を引く。段階1の範囲と x86_64・i386 の番号表のみ。
+/// ABI と番号から名前を引く。
 #[must_use]
 pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
     match abi {
@@ -384,6 +381,10 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             x86_64::FTRUNCATE => Some("ftruncate"),
             x86_64::RENAME => Some("rename"),
             x86_64::SYMLINK => Some("symlink"),
+            x86_64::ARCH_PRCTL => Some("arch_prctl"),
+            x86_64::SET_ROBUST_LIST => Some("set_robust_list"),
+            x86_64::RSEQ => Some("rseq"),
+            x86_64::PRLIMIT64 => Some("prlimit64"),
             x86_64::STATFS => Some("statfs"),
             x86_64::FSTATFS => Some("fstatfs"),
             _ => None,
@@ -508,6 +509,17 @@ mod tests {
         assert_eq!(syscall_name(GuestAbi::X86_64Linux, 137), Some("statfs"));
         assert_eq!(x86_64::FSTATFS, 138);
         assert_eq!(syscall_name(GuestAbi::X86_64Linux, 138), Some("fstatfs"));
+        assert_eq!(x86_64::ARCH_PRCTL, 158);
+        assert_eq!(syscall_name(GuestAbi::X86_64Linux, 158), Some("arch_prctl"));
+        assert_eq!(x86_64::SET_ROBUST_LIST, 273);
+        assert_eq!(
+            syscall_name(GuestAbi::X86_64Linux, 273),
+            Some("set_robust_list")
+        );
+        assert_eq!(x86_64::RSEQ, 334);
+        assert_eq!(syscall_name(GuestAbi::X86_64Linux, 334), Some("rseq"));
+        assert_eq!(x86_64::PRLIMIT64, 302);
+        assert_eq!(syscall_name(GuestAbi::X86_64Linux, 302), Some("prlimit64"));
     }
 
     #[test]

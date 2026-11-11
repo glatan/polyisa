@@ -13,6 +13,7 @@ use polyisa_mem::{Access, AccessKind, Align, Endian, VirtAddr};
 use polyisa_sem::{Backend, ExceptionKind};
 
 use polyisa_guest_x86::sem;
+use polyisa_guest_x86::sem::Gpr;
 use polyisa_guest_x86::{Insn, decode};
 
 /// 実行の結果。
@@ -7539,6 +7540,1920 @@ fn stat144(m: &std::fs::Metadata) -> [u8; 144] {
     st
 }
 
+/// 1 回のシステムコールで共通に使う値。
+struct SysCtx {
+    r_a: Gpr,
+    r_b: Gpr,
+    r_c: Gpr,
+    is64: bool,
+    at_fdcwd: u64,
+}
+
+impl SysCtx {
+    /// dirfd が AT_FDCWD か。x86-64 は下位 32 ビット、i386 は値そのものを比べる。
+    fn is_at_fdcwd(&self, dirfd: u64) -> bool {
+        if self.is64 {
+            (dirfd as u32) == AT_FDCWD_U32
+        } else {
+            dirfd == self.at_fdcwd
+        }
+    }
+
+    /// 戻り値の負 errno。x86-64 は 64 ビット符号拡張、i386 は 32 ビット。
+    fn neg(&self, n: u32) -> u64 {
+        if self.is64 {
+            neg_errno64(n)
+        } else {
+            u64::from(neg_errno(n))
+        }
+    }
+}
+
+type SysFn = fn(&mut CliLinux, &mut BareEnv, &SysCtx) -> Option<TrapOutcome>;
+
+const X86_64_SYSCALLS: &[(&str, SysFn)] = &[
+    ("openat", sys_openat),
+    ("read", sys_read),
+    ("close", sys_close),
+    ("write", sys_write),
+    ("writev", sys_writev),
+    ("readv", sys_readv),
+    ("exit", sys_exit),
+    ("exit_group", sys_exit_group),
+    ("mmap", sys_mmap),
+    ("set_tid_address", sys_set_tid_address),
+    ("gettid", sys_gettid),
+    ("getpid", sys_getpid),
+    ("uname", sys_uname),
+    ("getuid", sys_getuid),
+    ("geteuid", sys_geteuid),
+    ("getgid", sys_getgid),
+    ("getegid", sys_getegid),
+    ("getcwd", sys_getcwd),
+    ("getdents64", sys_getdents64),
+    ("fstat", sys_fstat),
+    ("newfstatat", sys_newfstatat),
+    ("sendfile", sys_sendfile),
+    ("lseek", sys_lseek),
+    ("ftruncate", sys_ftruncate),
+    ("getgroups", sys_getgroups),
+    ("mprotect", sys_mprotect),
+    ("munmap", sys_munmap),
+    ("rt_sigaction", sys_rt_sigaction),
+    ("rt_sigprocmask", sys_rt_sigprocmask),
+    ("tgkill", sys_tgkill),
+    ("set_robust_list", sys_set_robust_list),
+    ("rseq", sys_rseq),
+    ("getrandom", sys_getrandom),
+    ("prlimit64", sys_prlimit64),
+    ("time", sys_time),
+    ("ioctl", sys_ioctl),
+    ("clock_nanosleep", sys_clock_nanosleep),
+    ("clock_gettime", sys_clock_gettime),
+    ("readlinkat", sys_readlinkat),
+    ("readlink", sys_readlink),
+    ("arch_prctl", sys_arch_prctl),
+    ("dup", sys_dup),
+    ("dup2", sys_dup2),
+    ("dup3", sys_dup3),
+    ("mkdir", sys_mkdir),
+    ("mkdirat", sys_mkdirat),
+    ("rename", sys_rename),
+    ("symlink", sys_symlink),
+    ("rmdir", sys_rmdir),
+    ("unlink", sys_unlink),
+    ("unlinkat", sys_unlinkat),
+    ("access", sys_access),
+    ("faccessat", sys_faccessat),
+    ("utimensat", sys_utimensat),
+    ("chmod", sys_chmod),
+    ("fchmod", sys_fchmod),
+    ("fchmodat", sys_fchmodat),
+    ("umask", sys_umask),
+    ("fcntl", sys_fcntl),
+    ("brk", sys_brk),
+];
+
+const I386_SYSCALLS: &[(&str, SysFn)] = &[
+    ("openat", sys_openat),
+    ("read", sys_read),
+    ("close", sys_close),
+    ("write", sys_write),
+    ("writev", sys_writev),
+    ("readv", sys_readv),
+    ("exit", sys_exit),
+    ("exit_group", sys_exit_group),
+    ("gettid", sys_gettid),
+    ("getpid", sys_getpid),
+    ("uname", sys_uname),
+    ("getuid", sys_getuid),
+    ("geteuid", sys_geteuid),
+    ("getgid", sys_getgid),
+    ("getegid", sys_getegid),
+    ("getcwd", sys_getcwd),
+    ("ftruncate", sys_ftruncate),
+    ("mprotect", sys_mprotect),
+    ("munmap", sys_munmap),
+    ("rt_sigaction", sys_rt_sigaction),
+    ("rt_sigprocmask", sys_rt_sigprocmask),
+    ("tgkill", sys_tgkill),
+    ("readlinkat", sys_readlinkat),
+    ("readlink", sys_readlink),
+    ("dup", sys_dup),
+    ("dup2", sys_dup2),
+    ("dup3", sys_dup3),
+    ("mkdir", sys_mkdir),
+    ("mkdirat", sys_mkdirat),
+    ("rename", sys_rename),
+    ("symlink", sys_symlink),
+    ("rmdir", sys_rmdir),
+    ("unlink", sys_unlink),
+    ("unlinkat", sys_unlinkat),
+    ("access", sys_access),
+    ("faccessat", sys_faccessat),
+    ("utimensat", sys_utimensat),
+    ("chmod", sys_chmod),
+    ("fchmod", sys_fchmod),
+    ("fchmodat", sys_fchmodat),
+    ("umask", sys_umask),
+    ("fcntl", sys_fcntl),
+    ("brk", sys_brk),
+];
+
+fn sys_openat(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // Gap: GAP-0002
+    let dirfd = get64(env, cx.r_a);
+    let path_addr = get64(env, cx.r_b);
+    let flags = get64(env, cx.r_c) as u32;
+    if !cx.is_at_fdcwd(dirfd) {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    // 書込み・生成・切詰めを受け付ける。O_NONBLOCK/O_CLOEXEC/O_DIRECTORY/O_NOFOLLOW 等は無視する。
+    // truncate/cp/split が O_WRONLY|O_CREAT 等で開く。Ref: SRC-LINUX (7.3).
+    const O_ACCMODE: u32 = 3;
+    const O_CREAT: u32 = 0o100;
+    const O_EXCL: u32 = 0o200;
+    const O_TRUNC: u32 = 0o1000;
+    const O_APPEND: u32 = 0o2000;
+    let acc = flags & O_ACCMODE;
+    if acc > 2 {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    let path = match guest_c_string(env, path_addr) {
+        Some(p) => p,
+        None => return Some(TrapOutcome::Unimplemented),
+    };
+    if !path.starts_with('/') {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    let want_write = acc != 0 || flags & (O_CREAT | O_TRUNC | O_APPEND) != 0;
+    let opened = if want_write {
+        let mut opts = std::fs::OpenOptions::new();
+        opts.read(acc != 1);
+        opts.write(true);
+        if flags & O_CREAT != 0 {
+            if flags & O_EXCL != 0 {
+                opts.create_new(true);
+            } else {
+                opts.create(true);
+            }
+        }
+        opts.truncate(flags & O_TRUNC != 0);
+        opts.append(flags & O_APPEND != 0);
+        opts.open(&path)
+    } else {
+        std::fs::File::open(&path)
+    };
+    Some(match opened {
+        Ok(f) => {
+            let fd = sys.alloc_fd(f);
+            set64(env, Gpr(0), fd as u64);
+            TrapOutcome::Handled
+        }
+        Err(e) => {
+            let no = match e.kind() {
+                std::io::ErrorKind::NotFound => ENOENT,
+                std::io::ErrorKind::PermissionDenied => EACCES,
+                std::io::ErrorKind::AlreadyExists => 17,
+                _ => EINVAL,
+            };
+            set64(env, Gpr(0), cx.neg(no));
+            TrapOutcome::Handled
+        }
+    })
+}
+
+fn sys_read(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    let fd = get64(env, cx.r_a) as u32;
+    let buf = get64(env, cx.r_b);
+    let mut left = get64(env, cx.r_c);
+    // 付け替えた標準 fd はファイルから読む。真の stdin は空読みのまま.
+    let stdin_empty = fd == 0 && sys.std_attached(0);
+    let Some(file) = sys.file_mut(fd) else {
+        if stdin_empty {
+            set64(env, Gpr(0), 0);
+            return Some(TrapOutcome::Handled);
+        }
+        set64(env, Gpr(0), cx.neg(EBADF));
+        return Some(TrapOutcome::Handled);
+    };
+    let mut done = 0u64;
+    let mut chunk = vec![0u8; IO_CHUNK];
+    while left > 0 {
+        let take = left.min(IO_CHUNK as u64) as usize;
+        let n = match std::io::Read::read(file, &mut chunk[..take]) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(_) => break,
+        };
+        if env
+            .backend
+            .mem
+            .write(VirtAddr(buf + done), &chunk[..n])
+            .is_err()
+        {
+            return Some(TrapOutcome::Unimplemented);
+        }
+        done += n as u64;
+        left -= n as u64;
+        if n < take {
+            break;
+        }
+    }
+    set64(env, Gpr(0), done);
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_close(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 標準 fd の close も成功させる。uniq は stdin を閉じて開き直す.
+    let fd = get64(env, cx.r_a) as u32;
+    Some(if sys.close_fd(fd) {
+        set64(env, Gpr(0), 0);
+        TrapOutcome::Handled
+    } else {
+        set64(env, Gpr(0), cx.neg(EBADF));
+        TrapOutcome::Handled
+    })
+}
+
+fn sys_write(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    let fd = get64(env, cx.r_a) as u32;
+    let buf = get64(env, cx.r_b);
+    let mut left = get64(env, cx.r_c);
+    if (fd == 1 || fd == 2) && sys.std_files[fd as usize].is_none() {
+        let mut done = 0u64;
+        let mut chunk = vec![0u8; IO_CHUNK];
+        while left > 0 {
+            let take = left.min(IO_CHUNK as u64) as usize;
+            if env
+                .backend
+                .mem
+                .read(VirtAddr(buf + done), &mut chunk[..take], data_access())
+                .is_err()
+            {
+                return Some(TrapOutcome::Unimplemented);
+            }
+            let n = match fd {
+                1 => std::io::Write::write(&mut std::io::stdout(), &chunk[..take]).unwrap_or(0),
+                _ => std::io::Write::write(&mut std::io::stderr(), &chunk[..take]).unwrap_or(0),
+            };
+            done += n as u64;
+            left -= n as u64;
+            if n < take {
+                break;
+            }
+        }
+        set64(env, Gpr(0), done);
+        return Some(TrapOutcome::Handled);
+    }
+    // 開ファイル (opened fd・付け替え先。dup2 で stdout に置いた出力先を含む)
+    // への write はホストに書く。読取り専用で開いた場合は EBADF になる。
+    let Some(file) = sys.file_mut(fd) else {
+        set64(env, Gpr(0), cx.neg(EBADF));
+        return Some(TrapOutcome::Handled);
+    };
+    let mut done = 0u64;
+    let mut chunk = vec![0u8; IO_CHUNK];
+    let mut err_no: Option<u32> = None;
+    while left > 0 {
+        let take = left.min(IO_CHUNK as u64) as usize;
+        if env
+            .backend
+            .mem
+            .read(VirtAddr(buf + done), &mut chunk[..take], data_access())
+            .is_err()
+        {
+            return Some(TrapOutcome::Unimplemented);
+        }
+        match std::io::Write::write(file, &chunk[..take]) {
+            Ok(0) => break,
+            Ok(n) => {
+                done += n as u64;
+                left -= n as u64;
+                if n < take {
+                    break;
+                }
+            }
+            Err(e) => {
+                err_no = Some(match e.raw_os_error() {
+                    Some(9) => EBADF,
+                    Some(13) => EACCES,
+                    _ => EINVAL,
+                });
+                break;
+            }
+        }
+    }
+    if done == 0 {
+        if let Some(no) = err_no {
+            set64(env, Gpr(0), cx.neg(no));
+        } else {
+            set64(env, Gpr(0), 0);
+        }
+    } else {
+        set64(env, Gpr(0), done);
+    }
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_writev(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // writev/readv (x86-64: 20/19, i386: 146/145)。iovec 配列を辿って転送する.
+    // fd 1/2 (writev) と opened fd/stdin (readv) のみ受け付ける.
+    let fd = get64(env, cx.r_a) as u32;
+    let iov = get64(env, cx.r_b);
+    let iovcnt = get64(env, cx.r_c);
+    // 付け替えた標準 fd は読取り専用のため EBADF。
+    if fd < 3 && sys.std_files[fd as usize].is_some() {
+        set64(env, Gpr(0), cx.neg(EBADF));
+        return Some(TrapOutcome::Handled);
+    }
+    if fd != 1 && fd != 2 {
+        set64(env, Gpr(0), cx.neg(EBADF));
+        return Some(TrapOutcome::Handled);
+    }
+    const IOV_MAX: u64 = 1024;
+    if iovcnt > IOV_MAX {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    let mut done = 0u64;
+    let mut chunk = vec![0u8; IO_CHUNK];
+    for idx in 0..iovcnt {
+        let (base, len) = if cx.is64 {
+            let mut ent = [0u8; 16];
+            if env
+                .backend
+                .mem
+                .read(VirtAddr(iov + idx * 16), &mut ent, data_access())
+                .is_err()
+            {
+                return Some(TrapOutcome::Unimplemented);
+            }
+            (
+                u64::from_le_bytes(ent[..8].try_into().unwrap()),
+                u64::from_le_bytes(ent[8..].try_into().unwrap()),
+            )
+        } else {
+            let mut ent = [0u8; 8];
+            if env
+                .backend
+                .mem
+                .read(VirtAddr(iov + idx * 8), &mut ent, data_access())
+                .is_err()
+            {
+                return Some(TrapOutcome::Unimplemented);
+            }
+            (
+                u64::from(u32::from_le_bytes(ent[..4].try_into().unwrap())),
+                u64::from(u32::from_le_bytes(ent[4..].try_into().unwrap())),
+            )
+        };
+        let mut left = len;
+        let mut off = 0u64;
+        while left > 0 {
+            let take = left.min(IO_CHUNK as u64) as usize;
+            if env
+                .backend
+                .mem
+                .read(VirtAddr(base + off), &mut chunk[..take], data_access())
+                .is_err()
+            {
+                return Some(TrapOutcome::Unimplemented);
+            }
+            let n = match fd {
+                1 => std::io::Write::write(&mut std::io::stdout(), &chunk[..take]).unwrap_or(0),
+                _ => std::io::Write::write(&mut std::io::stderr(), &chunk[..take]).unwrap_or(0),
+            };
+            done += n as u64;
+            left -= n as u64;
+            off += n as u64;
+            if n < take {
+                break;
+            }
+        }
+    }
+    set64(env, Gpr(0), done);
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_readv(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    let fd = get64(env, cx.r_a) as u32;
+    let iov = get64(env, cx.r_b);
+    let iovcnt = get64(env, cx.r_c);
+    const IOV_MAX: u64 = 1024;
+    if iovcnt > IOV_MAX {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    // 付け替えた標準 fd はファイルから読む。真の stdin は空読みのまま.
+    let empty_stdin = fd == 0 && sys.std_attached(0);
+    if !empty_stdin && sys.file_ref(fd).is_none() {
+        set64(env, Gpr(0), cx.neg(EBADF));
+        return Some(TrapOutcome::Handled);
+    }
+    let mut done = 0u64;
+    let mut chunk = vec![0u8; IO_CHUNK];
+    for idx in 0..iovcnt {
+        let (base, len) = if cx.is64 {
+            let mut ent = [0u8; 16];
+            if env
+                .backend
+                .mem
+                .read(VirtAddr(iov + idx * 16), &mut ent, data_access())
+                .is_err()
+            {
+                return Some(TrapOutcome::Unimplemented);
+            }
+            (
+                u64::from_le_bytes(ent[..8].try_into().unwrap()),
+                u64::from_le_bytes(ent[8..].try_into().unwrap()),
+            )
+        } else {
+            let mut ent = [0u8; 8];
+            if env
+                .backend
+                .mem
+                .read(VirtAddr(iov + idx * 8), &mut ent, data_access())
+                .is_err()
+            {
+                return Some(TrapOutcome::Unimplemented);
+            }
+            (
+                u64::from(u32::from_le_bytes(ent[..4].try_into().unwrap())),
+                u64::from(u32::from_le_bytes(ent[4..].try_into().unwrap())),
+            )
+        };
+        let mut left = len;
+        let mut off = 0u64;
+        while left > 0 {
+            let take = left.min(IO_CHUNK as u64) as usize;
+            let n = if empty_stdin {
+                0
+            } else {
+                let f = sys.file_mut(fd).unwrap();
+                match std::io::Read::read(f, &mut chunk[..take]) {
+                    Ok(0) => 0,
+                    Ok(n) => n,
+                    Err(_) => 0,
+                }
+            };
+            if n == 0 {
+                break;
+            }
+            if env
+                .backend
+                .mem
+                .write(VirtAddr(base + off), &chunk[..n])
+                .is_err()
+            {
+                return Some(TrapOutcome::Unimplemented);
+            }
+            done += n as u64;
+            left -= n as u64;
+            off += n as u64;
+            if n < take {
+                break;
+            }
+        }
+        // 真の stdin は空読みとして次へ進む.
+        if empty_stdin {
+            continue;
+        }
+    }
+    set64(env, Gpr(0), done);
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_exit(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    Some(TrapOutcome::Exit(get64(env, cx.r_a) as u32))
+}
+
+fn sys_exit_group(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    sys_exit(sys, env, cx)
+}
+
+fn sys_mmap(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // mmap(addr, len, prot, flags, fd, offset)。匿名のみ受け付ける.
+    // ファイル-backed は未対応のため EINVAL.
+    // prot は寛容に RW で写像する (PROT_NONE 予約後の mprotect 前でも動くため).
+    use polyisa_mem::{PAGE_SIZE, Perms, VirtAddr};
+    let addr = get64(env, Gpr(7));
+    let len = get64(env, Gpr(6));
+    let _prot = get64(env, Gpr(2));
+    let flags = get64(env, Gpr(10));
+    let fd = get64(env, Gpr(8)) as i64;
+    let offset = get64(env, Gpr(9));
+    const MAP_ANONYMOUS: u64 = 0x20;
+    const MAP_FIXED: u64 = 0x10;
+    if len == 0 {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    if offset & (PAGE_SIZE - 1) != 0 {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    if flags & MAP_ANONYMOUS == 0 && fd != -1 {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    // 拡張しすぎは失敗扱い.
+    const MAX_MMAP: u64 = 1024 * 1024 * 1024;
+    if len > MAX_MMAP {
+        set64(env, Gpr(0), cx.neg(ENOMEM));
+        return Some(TrapOutcome::Handled);
+    }
+    let aligned_len = len.next_multiple_of(PAGE_SIZE);
+    let count = aligned_len / PAGE_SIZE;
+    if flags & MAP_FIXED != 0 {
+        if addr & (PAGE_SIZE - 1) != 0 {
+            set64(env, Gpr(0), cx.neg(EINVAL));
+            return Some(TrapOutcome::Handled);
+        }
+        // MAP_FIXED は既存写像を置換する。先に外してから写像する.
+        env.backend.mem.unmap(VirtAddr(addr), count);
+        if env
+            .backend
+            .mem
+            .map(VirtAddr(addr), count, Perms::RW)
+            .is_err()
+        {
+            set64(env, Gpr(0), cx.neg(ENOMEM));
+            return Some(TrapOutcome::Handled);
+        }
+        // heap_end より後ろに伸ばしたら追随する (brk との衝突回避).
+        if sys.heap_end == 0 {
+            sys.heap_end = (addr + aligned_len).next_multiple_of(PAGE_SIZE);
+        } else {
+            sys.heap_end = sys
+                .heap_end
+                .max((addr + aligned_len).next_multiple_of(PAGE_SIZE));
+        }
+        set64(env, Gpr(0), addr);
+        return Some(TrapOutcome::Handled);
+    }
+    if addr == 0 {
+        if sys.heap_end == 0 {
+            sys.heap_end = 0x6000_0000;
+        }
+        // 縮小で残った写像を上書きしないよう空きを探す.
+        let Some(base) = sys.find_free_run(env, sys.heap_end, count) else {
+            set64(env, Gpr(0), cx.neg(ENOMEM));
+            return Some(TrapOutcome::Handled);
+        };
+        if env
+            .backend
+            .mem
+            .map(VirtAddr(base), count, Perms::RW)
+            .is_err()
+        {
+            set64(env, Gpr(0), cx.neg(ENOMEM));
+            return Some(TrapOutcome::Handled);
+        }
+        sys.heap_end = base + aligned_len;
+        set64(env, Gpr(0), base);
+        return Some(TrapOutcome::Handled);
+    }
+    // ヒント付き: 範囲全体が空きのときだけ要求番地に写像し、
+    // 占有があれば heap_end から first-fit で取る (上書きしない).
+    let hint = addr & !(PAGE_SIZE - 1);
+    let hint_free = {
+        use polyisa_mem::PageNo;
+        let mut i = 0u64;
+        while i < count {
+            let page = (hint / PAGE_SIZE).checked_add(i);
+            match page {
+                Some(no) if !env.backend.mem.is_mapped(PageNo(no)) => i += 1,
+                _ => break,
+            }
+        }
+        i == count
+    };
+    if hint_free
+        && env
+            .backend
+            .mem
+            .map(VirtAddr(hint), count, Perms::RW)
+            .is_ok()
+    {
+        if sys.heap_end == 0 {
+            sys.heap_end = (hint + aligned_len).next_multiple_of(PAGE_SIZE);
+        } else {
+            sys.heap_end = sys
+                .heap_end
+                .max((hint + aligned_len).next_multiple_of(PAGE_SIZE));
+        }
+        set64(env, Gpr(0), hint);
+        return Some(TrapOutcome::Handled);
+    }
+    if sys.heap_end == 0 {
+        sys.heap_end = 0x6000_0000;
+    }
+    let Some(base) = sys.find_free_run(env, sys.heap_end, count) else {
+        set64(env, Gpr(0), cx.neg(ENOMEM));
+        return Some(TrapOutcome::Handled);
+    };
+    if env
+        .backend
+        .mem
+        .map(VirtAddr(base), count, Perms::RW)
+        .is_err()
+    {
+        set64(env, Gpr(0), cx.neg(ENOMEM));
+        return Some(TrapOutcome::Handled);
+    }
+    sys.heap_end = base + aligned_len;
+    set64(env, Gpr(0), base);
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_set_tid_address(
+    _sys: &mut CliLinux,
+    env: &mut BareEnv,
+    _cx: &SysCtx,
+) -> Option<TrapOutcome> {
+    // 単一スレッド実装としてホスト PID を TID として返す。
+    // 本物は clear_child_tid を記録し終了時に書き込むが、試作では値返却のみ行う。
+    set64(env, Gpr(0), std::process::id() as u64);
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_gettid(_sys: &mut CliLinux, env: &mut BareEnv, _cx: &SysCtx) -> Option<TrapOutcome> {
+    // 単一スレッド実装としてホスト PID を TID として返す。
+    set64(env, Gpr(0), std::process::id() as u64);
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_getpid(_sys: &mut CliLinux, env: &mut BareEnv, _cx: &SysCtx) -> Option<TrapOutcome> {
+    set64(env, Gpr(0), std::process::id() as u64);
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_uname(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // uname(buf)。struct utsname (65B x 5) を固定値で埋めて 0 を返す.
+    // Ref: SRC-LINUX (7.3).
+    let buf = get64(env, cx.r_a);
+    let fields: [&[u8]; 5] = [b"Linux", b"localhost", b"6.0.0", b"#1", b"x86_64"];
+    let mut out = [0u8; 65 * 5];
+    for (i, f) in fields.iter().enumerate() {
+        let base = i * 65;
+        out[base..base + f.len()].copy_from_slice(f);
+    }
+    if env.backend.mem.write(VirtAddr(buf), &out).is_err() {
+        return Some(TrapOutcome::Unimplemented);
+    }
+    set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_getuid(_sys: &mut CliLinux, env: &mut BareEnv, _cx: &SysCtx) -> Option<TrapOutcome> {
+    // root として uid 0 を返す.
+    set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_geteuid(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    sys_getuid(sys, env, cx)
+}
+
+fn sys_getgid(_sys: &mut CliLinux, env: &mut BareEnv, _cx: &SysCtx) -> Option<TrapOutcome> {
+    set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_getegid(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    sys_getgid(sys, env, cx)
+}
+
+fn sys_getcwd(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // getcwd(buf, size)。ホスト cwd を返し、NUL 込み長さを返す.
+    let buf = get64(env, cx.r_a);
+    let size = get64(env, cx.r_b);
+    if buf == 0 || size == 0 {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    let cwd = std::env::current_dir()
+        .ok()
+        .and_then(|p| p.into_os_string().into_string().ok())
+        .unwrap_or_else(|| "/".to_string());
+    let bytes = cwd.as_bytes();
+    let need = (bytes.len() as u64) + 1;
+    if size < need {
+        set64(env, Gpr(0), cx.neg(ERANGE));
+        return Some(TrapOutcome::Handled);
+    }
+    if env
+        .backend
+        .mem
+        .write(polyisa_mem::VirtAddr(buf), bytes)
+        .is_err()
+    {
+        return Some(TrapOutcome::Unimplemented);
+    }
+    if env
+        .backend
+        .mem
+        .write(polyisa_mem::VirtAddr(buf + bytes.len() as u64), &[0u8])
+        .is_err()
+    {
+        return Some(TrapOutcome::Unimplemented);
+    }
+    set64(env, Gpr(0), need);
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_getdents64(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // getdents64(fd, dirp, count)。ホストのディレクトリ列挙を
+    // linux_dirent64 形式で書く。一度に全件返し、2回目以降は 0 を返す.
+    // d_ino は 0、d_off は累積オフセット、種別は dir/file/link のみ判別する.
+    // Ref: SRC-LINUX (7.3).
+    let fd = get64(env, cx.r_a) as u32;
+    let dirp = get64(env, cx.r_b);
+    let count = get64(env, cx.r_c);
+    if sys.dir_done.contains(&fd) {
+        set64(env, Gpr(0), 0);
+        return Some(TrapOutcome::Handled);
+    }
+    // opened fd のみ受け付ける。stdin/stdout (0-2) は EBADF。
+    let slot = fd.wrapping_sub(3) as usize;
+    if sys.fds.get(slot).and_then(|f| f.as_ref()).is_none() {
+        set64(env, Gpr(0), cx.neg(EBADF));
+        return Some(TrapOutcome::Handled);
+    }
+    let link = format!("/proc/self/fd/{fd}");
+    let dir_path = match std::fs::read_link(&link) {
+        Ok(p) => p,
+        Err(_) => {
+            set64(env, Gpr(0), cx.neg(EBADF));
+            return Some(TrapOutcome::Handled);
+        }
+    };
+    let rd = match std::fs::read_dir(&dir_path) {
+        Ok(rd) => rd,
+        Err(e) => {
+            let no = match e.kind() {
+                std::io::ErrorKind::NotFound => ENOENT,
+                std::io::ErrorKind::PermissionDenied => EACCES,
+                _ => EINVAL,
+            };
+            set64(env, Gpr(0), cx.neg(no));
+            return Some(TrapOutcome::Handled);
+        }
+    };
+    // "." と ".." を先頭に置く（カーネルと同様）。
+    let mut names: Vec<(Vec<u8>, u8)> = vec![(b".".to_vec(), 4), (b"..".to_vec(), 4)];
+    for ent in rd.flatten() {
+        let name = ent
+            .file_name()
+            .into_string()
+            .unwrap_or_default()
+            .into_bytes();
+        if name.is_empty() {
+            continue;
+        }
+        let ty = ent
+            .file_type()
+            .map(|t| {
+                if t.is_dir() {
+                    4u8
+                } else if t.is_symlink() {
+                    10u8
+                } else {
+                    8u8
+                }
+            })
+            .unwrap_or(0);
+        names.push((name, ty));
+    }
+    // 名前順に並べ替えて決定的にする（カーネルの順序は不定だが、ls は自前で整列する）。
+    names[2..].sort_by(|a, b| a.0.cmp(&b.0));
+    let mut out = Vec::new();
+    let mut off = 0u64;
+    for (name, ty) in &names {
+        let reclen = ((19 + name.len() + 1) as u64).next_multiple_of(8);
+        if out.len() as u64 + reclen > count {
+            break;
+        }
+        off += reclen;
+        out.extend_from_slice(&0u64.to_le_bytes());
+        out.extend_from_slice(&off.to_le_bytes());
+        out.extend_from_slice(&(reclen as u16).to_le_bytes());
+        out.push(*ty);
+        out.extend_from_slice(name);
+        out.push(0);
+        while !(out.len() as u64).is_multiple_of(8) {
+            out.push(0);
+        }
+    }
+    if !out.is_empty() && env.backend.mem.write(VirtAddr(dirp), &out).is_err() {
+        return Some(TrapOutcome::Unimplemented);
+    }
+    sys.dir_done.push(fd);
+    set64(env, Gpr(0), out.len() as u64);
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_fstat(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // fstat(fd, struct stat *)。x86-64 struct stat (144B) を書く.
+    // レイアウトは musl/glibc 共通のカーネル ABI 由来である.
+    // ホスト依存の詳細は std の可搬 API だけでは取れないため、
+    // 種別 (st_mode) と大きさ (st_size) のみ実値を入れ、残りは 0 とする.
+    // Ref: SRC-LINUX (7.3).
+    let fd = get64(env, cx.r_a) as u32;
+    let stat_addr = get64(env, cx.r_b);
+    let meta: std::io::Result<std::fs::Metadata> = if fd < 3 {
+        // 付け替えた標準 fd はファイルのメタデータを返す。
+        match sys.std_files[fd as usize].as_ref() {
+            Some(f) => f.metadata(),
+            None => std::fs::metadata(format!("/proc/self/fd/{fd}")),
+        }
+    } else {
+        let slot = fd.wrapping_sub(3) as usize;
+        match sys.fds.get(slot).and_then(|f| f.as_ref()) {
+            Some(f) => f.metadata(),
+            None => {
+                set64(env, Gpr(0), cx.neg(EBADF));
+                return Some(TrapOutcome::Handled);
+            }
+        }
+    };
+    let m = match meta {
+        Ok(m) => m,
+        Err(_) => {
+            set64(env, Gpr(0), cx.neg(EBADF));
+            return Some(TrapOutcome::Handled);
+        }
+    };
+    let st = stat144(&m);
+    if env.backend.mem.write(VirtAddr(stat_addr), &st).is_err() {
+        return Some(TrapOutcome::Unimplemented);
+    }
+    set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_newfstatat(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // newfstatat(dirfd, path, statbuf, flags)。AT_FDCWD+絶対パスのみ.
+    // ホスト metadata から struct stat (144B) を書いて 0 を返す.
+    // flags (AT_SYMLINK_NOFOLLOW 等) は無視してたどる.
+    // Ref: SRC-LINUX (7.3).
+    let dirfd = get64(env, Gpr(7));
+    let path_addr = get64(env, Gpr(6));
+    let stat_addr = get64(env, Gpr(2));
+    if !cx.is_at_fdcwd(dirfd) {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    let path = match guest_c_string(env, path_addr) {
+        Some(p) => p,
+        None => return Some(TrapOutcome::Unimplemented),
+    };
+    if !path.starts_with('/') {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    let m = match std::fs::metadata(&path) {
+        Ok(m) => m,
+        Err(e) => {
+            let no = match e.kind() {
+                std::io::ErrorKind::NotFound => ENOENT,
+                std::io::ErrorKind::PermissionDenied => EACCES,
+                _ => EINVAL,
+            };
+            set64(env, Gpr(0), cx.neg(no));
+            return Some(TrapOutcome::Handled);
+        }
+    };
+    let st = stat144(&m);
+    if env.backend.mem.write(VirtAddr(stat_addr), &st).is_err() {
+        return Some(TrapOutcome::Unimplemented);
+    }
+    set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_sendfile(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // sendfile(out_fd, in_fd, offset, count)。offset==NULL のみ受け付ける.
+    // in_fd から読んで out_fd (1/2) へ書き、転送バイト数を返す.
+    // Ref: SRC-LINUX (7.3).
+    let out_fd = get64(env, Gpr(7)) as u32;
+    let in_fd = get64(env, Gpr(6)) as u32;
+    let offset = get64(env, Gpr(2));
+    let mut left = get64(env, Gpr(10));
+    if offset != 0 {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    if out_fd != 1 && out_fd != 2 {
+        set64(env, Gpr(0), cx.neg(EBADF));
+        return Some(TrapOutcome::Handled);
+    }
+    // 付け替えた標準出力は読取り専用のため EBADF。
+    if sys.std_files[out_fd as usize].is_some() {
+        set64(env, Gpr(0), cx.neg(EBADF));
+        return Some(TrapOutcome::Handled);
+    }
+    // 付け替えた stdin はファイルから読む。真の stdin は空読みのまま.
+    let in_empty = in_fd == 0 && sys.std_attached(0);
+    let Some(file) = sys.file_mut(in_fd) else {
+        if in_empty {
+            set64(env, Gpr(0), 0);
+            return Some(TrapOutcome::Handled);
+        }
+        set64(env, Gpr(0), cx.neg(EBADF));
+        return Some(TrapOutcome::Handled);
+    };
+    let mut done = 0u64;
+    let mut chunk = vec![0u8; IO_CHUNK];
+    while left > 0 {
+        let take = left.min(IO_CHUNK as u64) as usize;
+        let n = match std::io::Read::read(file, &mut chunk[..take]) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(_) => break,
+        };
+        let w = match out_fd {
+            1 => std::io::Write::write(&mut std::io::stdout(), &chunk[..n]).unwrap_or(0),
+            _ => std::io::Write::write(&mut std::io::stderr(), &chunk[..n]).unwrap_or(0),
+        };
+        done += n as u64;
+        left -= n as u64;
+        if n < take || w < n {
+            break;
+        }
+    }
+    set64(env, Gpr(0), done);
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_lseek(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // lseek(fd, offset, whence)。opened fd の位置を動かし、新位置を返す.
+    // Ref: SRC-LINUX (7.3).
+    use std::io::Seek;
+    let fd = get64(env, Gpr(7)) as u32;
+    let offset = get64(env, Gpr(6)) as i64;
+    let whence = get64(env, Gpr(2)) as u32;
+    let Some(file) = sys.file_mut(fd) else {
+        set64(env, Gpr(0), cx.neg(EBADF));
+        return Some(TrapOutcome::Handled);
+    };
+    let pos = match whence {
+        0 => std::io::SeekFrom::Start(offset as u64),
+        1 => std::io::SeekFrom::Current(offset),
+        2 => std::io::SeekFrom::End(offset),
+        _ => {
+            set64(env, Gpr(0), cx.neg(EINVAL));
+            return Some(TrapOutcome::Handled);
+        }
+    };
+    match file.seek(pos) {
+        Ok(n) => set64(env, Gpr(0), n),
+        Err(_) => set64(env, Gpr(0), cx.neg(EINVAL)),
+    }
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_ftruncate(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // ftruncate(fd, length)。truncate -s で使う。ホストの set_len に直結する.
+    let fd = get64(env, cx.r_a) as u32;
+    let len = get64(env, cx.r_b);
+    let Some(file) = sys.file_mut(fd) else {
+        set64(env, Gpr(0), cx.neg(EBADF));
+        return Some(TrapOutcome::Handled);
+    };
+    Some(match file.set_len(len) {
+        Ok(()) => {
+            set64(env, Gpr(0), 0);
+            TrapOutcome::Handled
+        }
+        Err(e) if e.raw_os_error() == Some(EBADF as i32) => {
+            set64(env, Gpr(0), cx.neg(EBADF));
+            TrapOutcome::Handled
+        }
+        Err(e) => {
+            let no = match e.kind() {
+                std::io::ErrorKind::NotFound => ENOENT,
+                std::io::ErrorKind::PermissionDenied => EACCES,
+                _ => EINVAL,
+            };
+            set64(env, Gpr(0), cx.neg(no));
+            TrapOutcome::Handled
+        }
+    })
+}
+
+fn sys_getgroups(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // getgroups(size, list)。所属グループは root (0) のみとみなす.
+    // size==0 では必要数を返し、そうでなければ GID 0 を書く.
+    // Ref: SRC-LINUX (7.3).
+    let size = get64(env, cx.r_a);
+    let list = get64(env, cx.r_b);
+    if size == 0 {
+        set64(env, Gpr(0), 1);
+        return Some(TrapOutcome::Handled);
+    }
+    if list == 0 {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    if env
+        .backend
+        .mem
+        .write(VirtAddr(list), &0u32.to_le_bytes())
+        .is_err()
+    {
+        return Some(TrapOutcome::Unimplemented);
+    }
+    set64(env, Gpr(0), 1.min(size));
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_mprotect(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // mprotect(addr, len, prot)。試作では権限変更を無視して 0 を返す.
+    // addr/len の検証のみ行う (len==0 は EINVAL).
+    let len = if cx.is64 {
+        get64(env, Gpr(6))
+    } else {
+        u64::from(env.backend.get(Gpr(1).state()))
+    };
+    if len == 0 {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_munmap(_sys: &mut CliLinux, env: &mut BareEnv, _cx: &SysCtx) -> Option<TrapOutcome> {
+    // munmap(addr, len)。試作では写像解除せず 0 を返す.
+    set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_rt_sigaction(_sys: &mut CliLinux, env: &mut BareEnv, _cx: &SysCtx) -> Option<TrapOutcome> {
+    // シグナルハンドラ設定は無視して 0 を返す (試作はシグナルなし).
+    set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_rt_sigprocmask(_sys: &mut CliLinux, env: &mut BareEnv, _cx: &SysCtx) -> Option<TrapOutcome> {
+    // シグナルマスク変更は無視して 0 を返す.
+    set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_tgkill(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // tgkill(tgid, tid, sig)。単一スレッド試作として sig==0 は 0 を返す.
+    // シグナル番号が範囲外なら EINVAL.
+    let sig = if cx.is64 {
+        get64(env, Gpr(2))
+    } else {
+        u64::from(env.backend.get(Gpr(2).state()))
+    };
+    if sig > 64 {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    // sig==0 は存在確認であり 0 を返す。他のシグナルは無視して 0 とする.
+    set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_set_robust_list(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // robust futex リスト先頭を記録して 0 を返す。
+    // 長さは struct robust_list_head (24バイト) のはずであり、異なる場合は EINVAL.
+    const ROBUST_LIST_HEAD_LEN: u64 = 24;
+    if get64(env, cx.r_b) != ROBUST_LIST_HEAD_LEN {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    sys.robust_head = get64(env, cx.r_a);
+    set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_rseq(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // rseq 領域を記録して 0 を返す。署名検証はしない.
+    // rseq_len は 32 (struct rseq) のはずであり、異なる場合は EINVAL.
+    // flags は 0 のみ受け付ける.
+    const RSEQ_LEN: u64 = 32;
+    if get64(env, cx.r_b) != RSEQ_LEN || get64(env, cx.r_c) != 0 {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    sys.rseq_addr = get64(env, cx.r_a);
+    set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_getrandom(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // getrandom(buf, len, flags)。試作では 0 埋めして len を返す.
+    // flags は GRND_NONBLOCK(1)/GRND_RANDOM(2)/GRND_INSECURE(4) のみ受け付ける.
+    let buf = get64(env, cx.r_a);
+    let len = get64(env, cx.r_b);
+    let flags = get64(env, cx.r_c);
+    if flags & !7 != 0 {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    // 拡張しすぎは失敗扱い (0 を返す)。
+    const MAX_GETRANDOM: u64 = 256 * 1024;
+    if len > MAX_GETRANDOM {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    let zeros = vec![0u8; len as usize];
+    if len != 0
+        && env
+            .backend
+            .mem
+            .write(polyisa_mem::VirtAddr(buf), &zeros)
+            .is_err()
+    {
+        return Some(TrapOutcome::Unimplemented);
+    }
+    set64(env, Gpr(0), len);
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_prlimit64(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // prlimit64(pid, resource, new_limit, old_limit)。
+    // 試作では new_limit の設定は無視し、old_limit には無制限を書く.
+    // resource は 0..16 (RLIM_NLIMITS) のみ受け付ける.
+    const RLIM_NLIMITS: u64 = 16;
+    const RLIM_INFINITY: u64 = 0xffff_ffff_ffff_ffff;
+    let resource = get64(env, cx.r_b);
+    if resource >= RLIM_NLIMITS {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    let old_limit = get64(env, Gpr(10));
+    if old_limit != 0 {
+        let buf = RLIM_INFINITY.to_le_bytes();
+        // rlim_cur (8B) + rlim_max (8B) = 16B.
+        let mut both = [0u8; 16];
+        both[..8].copy_from_slice(&buf);
+        both[8..].copy_from_slice(&buf);
+        if env
+            .backend
+            .mem
+            .write(polyisa_mem::VirtAddr(old_limit), &both)
+            .is_err()
+        {
+            return Some(TrapOutcome::Unimplemented);
+        }
+    }
+    set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_time(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // time(tloc)。ホスト時刻の秒を返し、tloc!=NULL なら書き込む.
+    // clock_gettime の ENOSYS フォールバックで呼ばれる.
+    let tloc = get64(env, cx.r_a);
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    if tloc != 0
+        && env
+            .backend
+            .mem
+            .write(VirtAddr(tloc), &secs.to_le_bytes())
+            .is_err()
+    {
+        return Some(TrapOutcome::Unimplemented);
+    }
+    set64(env, Gpr(0), secs as u64);
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_ioctl(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // ioctl(fd, request, ...)。試作では端末なしとして ENOTTY を返す.
+    // ls の画面幅取得などは失敗扱いで継続する.
+    // Ref: SRC-LINUX (7.3).
+    set64(env, Gpr(0), cx.neg(ENOTTY));
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_clock_nanosleep(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // clock_nanosleep(clock_id, flags, req, rem)。試作では待たずに 0 を返す.
+    // clock_id は CLOCK_REALTIME(0)/MONOTONIC(1) のみ受け付ける.
+    let clock_id = get64(env, cx.r_a);
+    if clock_id > 1 {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_clock_gettime(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // clock_gettime(clk_id, tp)。ホスト時刻を書いて 0 を返す.
+    // 0 固定では時刻待ちループが回り続けるため、実時刻を進める.
+    let tp = get64(env, cx.r_b);
+    if tp != 0 {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        let mut both = [0u8; 16];
+        both[..8].copy_from_slice(&(now.as_secs() as i64).to_le_bytes());
+        both[8..].copy_from_slice(&(now.subsec_nanos() as i64).to_le_bytes());
+        if env
+            .backend
+            .mem
+            .write(polyisa_mem::VirtAddr(tp), &both)
+            .is_err()
+        {
+            return Some(TrapOutcome::Unimplemented);
+        }
+    }
+    set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_readlinkat(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // readlinkat(dirfd, pathname, buf, bufsiz)。AT_FDCWD+絶対パスのみ.
+    // ホストの read_link に直結し、切詰めて返す（NUL 終端なし）。
+    let (dirfd, path_addr, buf, bufsiz) = if cx.is64 {
+        (
+            get64(env, Gpr(7)),
+            get64(env, Gpr(6)),
+            get64(env, Gpr(2)),
+            get64(env, Gpr(10)),
+        )
+    } else {
+        (
+            u64::from(env.backend.get(Gpr(3).state())),
+            u64::from(env.backend.get(Gpr(1).state())),
+            u64::from(env.backend.get(Gpr(2).state())),
+            u64::from(env.backend.get(Gpr(6).state())),
+        )
+    };
+    if !cx.is_at_fdcwd(dirfd) {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    if bufsiz == 0 {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    let path = match guest_c_string(env, path_addr) {
+        Some(p) => p,
+        None => return Some(TrapOutcome::Unimplemented),
+    };
+    if !path.starts_with('/') {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    // 拡張しすぎは失敗扱い.
+    const MAX_READLINK: u64 = 4096;
+    if bufsiz > MAX_READLINK {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    // /proc/self/exe はゲスト実行ファイル自身を返す (ホスト exe ではない).
+    // 空の exe_path (単体テスト) ではホストに直結する.
+    let target = if path == "/proc/self/exe" && !sys.exe_path.is_empty() {
+        sys.exe_path.clone()
+    } else {
+        match std::fs::read_link(&path) {
+            Ok(p) => p.into_os_string().into_string().unwrap_or_default(),
+            Err(e) => {
+                let no = match e.kind() {
+                    std::io::ErrorKind::NotFound => ENOENT,
+                    std::io::ErrorKind::PermissionDenied => EACCES,
+                    _ => EINVAL,
+                };
+                set64(env, Gpr(0), cx.neg(no));
+                return Some(TrapOutcome::Handled);
+            }
+        }
+    };
+    let bytes = target.as_bytes();
+    let take = (bytes.len() as u64).min(bufsiz) as usize;
+    if env
+        .backend
+        .mem
+        .write(polyisa_mem::VirtAddr(buf), &bytes[..take])
+        .is_err()
+    {
+        return Some(TrapOutcome::Unimplemented);
+    }
+    set64(env, Gpr(0), take as u64);
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_readlink(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // readlink(pathname, buf, bufsiz)。readlinkat から dirfd 検証を除いた形.
+    let (path_addr, buf, bufsiz) = if cx.is64 {
+        (get64(env, Gpr(7)), get64(env, Gpr(6)), get64(env, Gpr(2)))
+    } else {
+        (
+            u64::from(env.backend.get(Gpr(3).state())),
+            u64::from(env.backend.get(Gpr(1).state())),
+            u64::from(env.backend.get(Gpr(2).state())),
+        )
+    };
+    if bufsiz == 0 {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    let path = match guest_c_string(env, path_addr) {
+        Some(p) => p,
+        None => return Some(TrapOutcome::Unimplemented),
+    };
+    const MAX_READLINK: u64 = 4096;
+    if bufsiz > MAX_READLINK {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    let target = if path == "/proc/self/exe" && !sys.exe_path.is_empty() {
+        sys.exe_path.clone()
+    } else {
+        match std::fs::read_link(&path) {
+            Ok(p) => p.into_os_string().into_string().unwrap_or_default(),
+            Err(e) => {
+                let no = match e.kind() {
+                    std::io::ErrorKind::NotFound => ENOENT,
+                    std::io::ErrorKind::PermissionDenied => EACCES,
+                    _ => EINVAL,
+                };
+                set64(env, Gpr(0), cx.neg(no));
+                return Some(TrapOutcome::Handled);
+            }
+        }
+    };
+    let bytes = target.as_bytes();
+    let take = (bytes.len() as u64).min(bufsiz) as usize;
+    if env
+        .backend
+        .mem
+        .write(polyisa_mem::VirtAddr(buf), &bytes[..take])
+        .is_err()
+    {
+        return Some(TrapOutcome::Unimplemented);
+    }
+    set64(env, Gpr(0), take as u64);
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_arch_prctl(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // arch_prctl (x86-64 のみ)。TLS の FS ベース設定を受け付ける。
+    // Ref: SRC-LINUX (7.3) arch/x86/include/uapi/asm/prctl.h.
+    const ARCH_SET_FS: u64 = 0x1002;
+    const ARCH_GET_FS: u64 = 0x1003;
+    let op = get64(env, cx.r_a);
+    if op == ARCH_SET_FS {
+        sys.fs_base = get64(env, cx.r_b);
+        set64(env, Gpr(0), 0);
+        return Some(TrapOutcome::Handled);
+    }
+    if op == ARCH_GET_FS {
+        let base = sys.fs_base;
+        let dst = get64(env, cx.r_b);
+        let buf = base.to_le_bytes();
+        if env
+            .backend
+            .mem
+            .write(polyisa_mem::VirtAddr(dst), &buf)
+            .is_err()
+        {
+            return Some(TrapOutcome::Unimplemented);
+        }
+        set64(env, Gpr(0), 0);
+        return Some(TrapOutcome::Handled);
+    }
+    set64(env, Gpr(0), cx.neg(EINVAL));
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_dup(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // dup(oldfd)。開ファイルは try_clone して最下位空きに置く (freopen 対応)。
+    // 真の 1/2 (ファイルなし) は旧来通り oldfd を返す.
+    let oldfd = get64(env, cx.r_a) as u32;
+    if !sys.fd_valid(oldfd) {
+        set64(env, Gpr(0), cx.neg(EBADF));
+        return Some(TrapOutcome::Handled);
+    }
+    if let Some(cloned) = sys.file_ref(oldfd).and_then(|f| f.try_clone().ok()) {
+        for (i, slot) in sys.std_files.iter_mut().enumerate() {
+            if slot.is_none() && sys.std_closed[i] {
+                *slot = Some(cloned);
+                sys.std_closed[i] = false;
+                set64(env, Gpr(0), i as u64);
+                return Some(TrapOutcome::Handled);
+            }
+        }
+        if let Some(idx) = sys.fds.iter().position(|f| f.is_none()) {
+            sys.fds[idx] = Some(cloned);
+            set64(env, Gpr(0), (3 + idx) as u64);
+            return Some(TrapOutcome::Handled);
+        }
+        sys.fds.push(Some(cloned));
+        set64(env, Gpr(0), (3 + sys.fds.len() - 1) as u64);
+        return Some(TrapOutcome::Handled);
+    }
+    if oldfd == 1 || oldfd == 2 {
+        set64(env, Gpr(0), oldfd as u64);
+        return Some(TrapOutcome::Handled);
+    }
+    set64(env, Gpr(0), cx.neg(EBADF));
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_dup2(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // dup2(oldfd, newfd)。1/2 同士の複製は newfd を返して継続する.
+    // --list の dup2(1,2) は出力先の付け替えだが、試作では写像せず継続する.
+    let oldfd = get64(env, cx.r_a) as u32;
+    let newfd = get64(env, cx.r_b) as u32;
+    // 閉じた標準 fd は不正。接続中・付け替え中と opened fd が真.
+    let valid = |fd: u32| sys.fd_valid(fd);
+    if !valid(oldfd) || newfd > 1024 {
+        set64(env, Gpr(0), cx.neg(EBADF));
+        return Some(TrapOutcome::Handled);
+    }
+    if oldfd == newfd {
+        set64(env, Gpr(0), newfd as u64);
+        return Some(TrapOutcome::Handled);
+    }
+    if let Some(cloned) = sys.file_ref(oldfd).and_then(|f| f.try_clone().ok()) {
+        if newfd < 3 {
+            let i = newfd as usize;
+            sys.std_files[i] = Some(cloned);
+            sys.std_closed[i] = false;
+        } else {
+            let idx = newfd.wrapping_sub(3) as usize;
+            while sys.fds.len() <= idx {
+                sys.fds.push(None);
+            }
+            sys.fds[idx] = Some(cloned);
+        }
+        set64(env, Gpr(0), newfd as u64);
+        return Some(TrapOutcome::Handled);
+    }
+    if (oldfd == 1 || oldfd == 2) && (newfd == 1 || newfd == 2) {
+        set64(env, Gpr(0), newfd as u64);
+        return Some(TrapOutcome::Handled);
+    }
+    set64(env, Gpr(0), cx.neg(EBADF));
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_dup3(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // dup3(oldfd, newfd, flags)。hexdump の libbb 準備で使う.
+    // flags は O_CLOEXEC のみ無視して継続。oldfd==newfd は EINVAL.
+    let oldfd = get64(env, cx.r_a) as u32;
+    let newfd = get64(env, cx.r_b) as u32;
+    let flags = get64(env, cx.r_c) as u32;
+    const O_CLOEXEC: u32 = 0x80000;
+    if flags & !O_CLOEXEC != 0 {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    if oldfd == newfd {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    let valid = |fd: u32| sys.fd_valid(fd);
+    if !valid(oldfd) || newfd > 1024 {
+        set64(env, Gpr(0), cx.neg(EBADF));
+        return Some(TrapOutcome::Handled);
+    }
+    if let Some(cloned) = sys.file_ref(oldfd).and_then(|f| f.try_clone().ok()) {
+        if newfd < 3 {
+            let i = newfd as usize;
+            sys.std_files[i] = Some(cloned);
+            sys.std_closed[i] = false;
+        } else {
+            let idx = newfd.wrapping_sub(3) as usize;
+            while sys.fds.len() <= idx {
+                sys.fds.push(None);
+            }
+            sys.fds[idx] = Some(cloned);
+        }
+        set64(env, Gpr(0), newfd as u64);
+        return Some(TrapOutcome::Handled);
+    }
+    if (oldfd == 1 || oldfd == 2) && (newfd == 1 || newfd == 2) {
+        set64(env, Gpr(0), newfd as u64);
+        return Some(TrapOutcome::Handled);
+    }
+    set64(env, Gpr(0), cx.neg(EBADF));
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_mkdir(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // mkdir(path, mode)。ホストの create_dir に直結する.
+    let path_addr = get64(env, cx.r_a);
+    let path = match guest_c_string(env, path_addr) {
+        Some(p) => p,
+        None => return Some(TrapOutcome::Unimplemented),
+    };
+    Some(match std::fs::create_dir(&path) {
+        Ok(()) => {
+            set64(env, Gpr(0), 0);
+            TrapOutcome::Handled
+        }
+        Err(e) => {
+            let no = match e.kind() {
+                std::io::ErrorKind::NotFound => ENOENT,
+                std::io::ErrorKind::AlreadyExists => 17,
+                std::io::ErrorKind::PermissionDenied => EACCES,
+                _ => EINVAL,
+            };
+            set64(env, Gpr(0), cx.neg(no));
+            TrapOutcome::Handled
+        }
+    })
+}
+
+fn sys_mkdirat(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // mkdirat(dirfd, path, mode)。AT_FDCWD+絶対/相対パスを受け付ける.
+    let (dirfd, path_addr) = (get64(env, cx.r_a), get64(env, cx.r_b));
+    if !cx.is_at_fdcwd(dirfd) {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    let path = match guest_c_string(env, path_addr) {
+        Some(p) => p,
+        None => return Some(TrapOutcome::Unimplemented),
+    };
+    Some(match std::fs::create_dir(&path) {
+        Ok(()) => {
+            set64(env, Gpr(0), 0);
+            TrapOutcome::Handled
+        }
+        Err(e) => {
+            let no = match e.kind() {
+                std::io::ErrorKind::NotFound => ENOENT,
+                std::io::ErrorKind::AlreadyExists => 17,
+                std::io::ErrorKind::PermissionDenied => EACCES,
+                _ => EINVAL,
+            };
+            set64(env, Gpr(0), cx.neg(no));
+            TrapOutcome::Handled
+        }
+    })
+}
+
+fn sys_rename(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // rename(oldpath, newpath)。ホストの rename に直結する.
+    let old_addr = get64(env, cx.r_a);
+    let new_addr = get64(env, cx.r_b);
+    let old_path = match guest_c_string(env, old_addr) {
+        Some(p) => p,
+        None => return Some(TrapOutcome::Unimplemented),
+    };
+    let new_path = match guest_c_string(env, new_addr) {
+        Some(p) => p,
+        None => return Some(TrapOutcome::Unimplemented),
+    };
+    Some(match std::fs::rename(&old_path, &new_path) {
+        Ok(()) => {
+            set64(env, Gpr(0), 0);
+            TrapOutcome::Handled
+        }
+        Err(e) => {
+            let no = match e.kind() {
+                std::io::ErrorKind::NotFound => ENOENT,
+                std::io::ErrorKind::PermissionDenied => EACCES,
+                _ => EINVAL,
+            };
+            set64(env, Gpr(0), cx.neg(no));
+            TrapOutcome::Handled
+        }
+    })
+}
+
+fn sys_symlink(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // symlink(oldpath, newpath)。`ln -s` で使う。
+    // 可搬 API がないため実体はクリエート host の helper に置く。
+    let old_addr = get64(env, cx.r_a);
+    let new_addr = get64(env, cx.r_b);
+    let old_path = match guest_c_string(env, old_addr) {
+        Some(p) => p,
+        None => return Some(TrapOutcome::Unimplemented),
+    };
+    let new_path = match guest_c_string(env, new_addr) {
+        Some(p) => p,
+        None => return Some(TrapOutcome::Unimplemented),
+    };
+    Some(match polyisa_host::symlink(&old_path, &new_path) {
+        Ok(()) => {
+            set64(env, Gpr(0), 0);
+            TrapOutcome::Handled
+        }
+        Err(e) => {
+            let no = match e.kind() {
+                std::io::ErrorKind::NotFound => ENOENT,
+                std::io::ErrorKind::AlreadyExists => 17,
+                std::io::ErrorKind::PermissionDenied => EACCES,
+                _ => EINVAL,
+            };
+            set64(env, Gpr(0), cx.neg(no));
+            TrapOutcome::Handled
+        }
+    })
+}
+
+fn sys_rmdir(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // rmdir(path)。ホストの remove_dir に直結する.
+    let path_addr = get64(env, cx.r_a);
+    let path = match guest_c_string(env, path_addr) {
+        Some(p) => p,
+        None => return Some(TrapOutcome::Unimplemented),
+    };
+    Some(match std::fs::remove_dir(&path) {
+        Ok(()) => {
+            set64(env, Gpr(0), 0);
+            TrapOutcome::Handled
+        }
+        Err(e) => {
+            let no = match e.kind() {
+                std::io::ErrorKind::NotFound => ENOENT,
+                std::io::ErrorKind::PermissionDenied => EACCES,
+                _ => EINVAL,
+            };
+            set64(env, Gpr(0), cx.neg(no));
+            TrapOutcome::Handled
+        }
+    })
+}
+
+fn sys_unlink(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // unlink(path)。ホストの remove_file に直結する.
+    let path_addr = get64(env, cx.r_a);
+    let path = match guest_c_string(env, path_addr) {
+        Some(p) => p,
+        None => return Some(TrapOutcome::Unimplemented),
+    };
+    Some(match std::fs::remove_file(&path) {
+        Ok(()) => {
+            set64(env, Gpr(0), 0);
+            TrapOutcome::Handled
+        }
+        Err(e) => {
+            let no = match e.kind() {
+                std::io::ErrorKind::NotFound => ENOENT,
+                std::io::ErrorKind::PermissionDenied => EACCES,
+                _ => EINVAL,
+            };
+            set64(env, Gpr(0), cx.neg(no));
+            TrapOutcome::Handled
+        }
+    })
+}
+
+fn sys_unlinkat(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // unlinkat(dirfd, path, flags)。AT_FDCWD のみ、flags は 0/AT_REMOVEDIR(0x200) を受け付ける.
+    // ディレクトリ指定は remove_dir、以外は remove_file に直結する.
+    let (dirfd, path_addr, flags) = if cx.is64 {
+        (get64(env, Gpr(7)), get64(env, Gpr(6)), get64(env, Gpr(2)))
+    } else {
+        (
+            u64::from(env.backend.get(Gpr(3).state())),
+            u64::from(env.backend.get(Gpr(1).state())),
+            u64::from(env.backend.get(Gpr(2).state())),
+        )
+    };
+    if !cx.is_at_fdcwd(dirfd) || flags & !0x200 != 0 {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    let path = match guest_c_string(env, path_addr) {
+        Some(p) => p,
+        None => return Some(TrapOutcome::Unimplemented),
+    };
+    let res = if flags & 0x200 != 0 {
+        std::fs::remove_dir(&path)
+    } else {
+        std::fs::remove_file(&path)
+    };
+    Some(match res {
+        Ok(()) => {
+            set64(env, Gpr(0), 0);
+            TrapOutcome::Handled
+        }
+        Err(e) => {
+            let no = match e.kind() {
+                std::io::ErrorKind::NotFound => ENOENT,
+                std::io::ErrorKind::PermissionDenied => EACCES,
+                _ => EINVAL,
+            };
+            set64(env, Gpr(0), cx.neg(no));
+            TrapOutcome::Handled
+        }
+    })
+}
+
+fn sys_access(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // access(path, mode)。存在確認のみ行い、存在すれば 0 を返す.
+    // X_OK 等の実行権限の厳密判定はしない（試作の割り切り）。
+    let path_addr = get64(env, cx.r_a);
+    let path = match guest_c_string(env, path_addr) {
+        Some(p) => p,
+        None => return Some(TrapOutcome::Unimplemented),
+    };
+    Some(match std::fs::metadata(&path) {
+        Ok(_) => {
+            set64(env, Gpr(0), 0);
+            TrapOutcome::Handled
+        }
+        Err(e) => {
+            let no = match e.kind() {
+                std::io::ErrorKind::NotFound => ENOENT,
+                std::io::ErrorKind::PermissionDenied => EACCES,
+                _ => EINVAL,
+            };
+            set64(env, Gpr(0), cx.neg(no));
+            TrapOutcome::Handled
+        }
+    })
+}
+
+fn sys_faccessat(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // faccessat(dirfd, path, mode)。AT_FDCWD のみ、存在確認のみ行う.
+    let (dirfd, path_addr) = if cx.is64 {
+        (get64(env, Gpr(7)), get64(env, Gpr(6)))
+    } else {
+        (
+            u64::from(env.backend.get(Gpr(3).state())),
+            u64::from(env.backend.get(Gpr(1).state())),
+        )
+    };
+    if !cx.is_at_fdcwd(dirfd) {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    let path = match guest_c_string(env, path_addr) {
+        Some(p) => p,
+        None => return Some(TrapOutcome::Unimplemented),
+    };
+    Some(match std::fs::metadata(&path) {
+        Ok(_) => {
+            set64(env, Gpr(0), 0);
+            TrapOutcome::Handled
+        }
+        Err(e) => {
+            let no = match e.kind() {
+                std::io::ErrorKind::NotFound => ENOENT,
+                std::io::ErrorKind::PermissionDenied => EACCES,
+                _ => EINVAL,
+            };
+            set64(env, Gpr(0), cx.neg(no));
+            TrapOutcome::Handled
+        }
+    })
+}
+
+fn sys_utimensat(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // utimensat(dirfd, path, times, flags)。AT_FDCWD のみ受け付ける.
+    // times==NULL は現在時刻のつもりで、存在すれば 0、なければ空作成して 0 を返す.
+    // times!=NULL は無視して同様に扱う（touch の継続が目的の試作）。
+    let (dirfd, path_addr) = if cx.is64 {
+        (get64(env, Gpr(7)), get64(env, Gpr(6)))
+    } else {
+        (
+            u64::from(env.backend.get(Gpr(3).state())),
+            u64::from(env.backend.get(Gpr(1).state())),
+        )
+    };
+    if !cx.is_at_fdcwd(dirfd) {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    let path = match guest_c_string(env, path_addr) {
+        Some(p) => p,
+        None => return Some(TrapOutcome::Unimplemented),
+    };
+    if std::fs::metadata(&path).is_ok() {
+        set64(env, Gpr(0), 0);
+        return Some(TrapOutcome::Handled);
+    }
+    Some(match std::fs::File::create(&path) {
+        Ok(_) => {
+            set64(env, Gpr(0), 0);
+            TrapOutcome::Handled
+        }
+        Err(e) => {
+            let no = match e.kind() {
+                std::io::ErrorKind::NotFound => ENOENT,
+                std::io::ErrorKind::PermissionDenied => EACCES,
+                _ => EINVAL,
+            };
+            set64(env, Gpr(0), cx.neg(no));
+            TrapOutcome::Handled
+        }
+    })
+}
+
+fn sys_chmod(_sys: &mut CliLinux, env: &mut BareEnv, _cx: &SysCtx) -> Option<TrapOutcome> {
+    // chmod/fchmod/fchmodat。試作では権限変更を無視して 0 を返す.
+    set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_fchmod(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    sys_chmod(sys, env, cx)
+}
+
+fn sys_fchmodat(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    sys_chmod(sys, env, cx)
+}
+
+fn sys_umask(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // umask(mask)。旧マスクを返して更新する。mkdir -p の保存・復元で使う.
+    // ホストの umask は触らない.
+    let mask = get64(env, cx.r_a) as u32 & 0o777;
+    let old = sys.umask;
+    sys.umask = mask;
+    set64(env, Gpr(0), u64::from(old));
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_fcntl(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // fcntl(fd, cmd, ...)。接続中・付け替え中の標準 fd と opened fd に対して 0 を返す.
+    // printf の stdout 設定などで呼ばれる。複製やロックは行わない.
+    let fd = get64(env, cx.r_a) as u32;
+    let valid = sys.fd_valid(fd);
+    if !valid {
+        set64(env, Gpr(0), cx.neg(EBADF));
+        return Some(TrapOutcome::Handled);
+    }
+    set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_brk(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    use polyisa_mem::{PAGE_SIZE, Perms, VirtAddr};
+    let addr = get64(env, cx.r_a);
+    // 未初期化の非常口：像末尾を知らないため要求値を切り上げて使う。
+    // run_image 経由では init_brk 済みのため通常は通らない。
+    if sys.heap_end == 0 {
+        sys.heap_end = addr.next_multiple_of(PAGE_SIZE);
+        set64(env, Gpr(0), sys.heap_end);
+        return Some(TrapOutcome::Handled);
+    }
+    if addr == 0 {
+        // brk(0) は問い合わせであり現ブレークを返す。
+        set64(env, Gpr(0), sys.heap_end);
+        return Some(TrapOutcome::Handled);
+    }
+    let aligned = addr.next_multiple_of(PAGE_SIZE);
+    if aligned > sys.heap_end {
+        // 拡張しすぎは失敗扱い（現ブレークを返す）。
+        const MAX_GROW: u64 = 256 * 1024 * 1024;
+        if aligned - sys.heap_end > MAX_GROW {
+            set64(env, Gpr(0), sys.heap_end);
+            return Some(TrapOutcome::Handled);
+        }
+        // 縮小で残った写像は消さず、欠けたページだけ足す。
+        // 実 brk は縮小で内容を捨てないため、再拡張で上書きしない.
+        use polyisa_mem::PageNo;
+        let mut cur = sys.heap_end;
+        while cur < aligned {
+            if !env.backend.mem.is_mapped(PageNo(cur / PAGE_SIZE))
+                && env.backend.mem.map(VirtAddr(cur), 1, Perms::RW).is_err()
+            {
+                set64(env, Gpr(0), sys.heap_end);
+                return Some(TrapOutcome::Handled);
+            }
+            cur += PAGE_SIZE;
+        }
+        sys.heap_end = aligned;
+    } else {
+        // 縮小は受け付ける（写像は残す）。
+        sys.heap_end = aligned;
+    }
+    set64(env, Gpr(0), sys.heap_end);
+    Some(TrapOutcome::Handled)
+}
+
 // Gap: GAP-0001
 impl TrapHandler for CliLinux {
     fn fs_base(&self) -> u64 {
@@ -7555,29 +9470,6 @@ impl TrapHandler for CliLinux {
         } else {
             (Gpr(3), Gpr(1), Gpr(2))
         };
-        let (n_openat, n_read, n_close, n_write, n_exit, n_exit_group, n_brk) = if self.is64 {
-            use polyisa_os_linux::x86_64 as abi;
-            (
-                abi::OPENAT,
-                abi::READ,
-                abi::CLOSE,
-                abi::WRITE,
-                abi::EXIT,
-                abi::EXIT_GROUP,
-                abi::BRK,
-            )
-        } else {
-            use polyisa_os_linux::i386 as abi;
-            (
-                abi::OPENAT,
-                abi::READ,
-                abi::CLOSE,
-                abi::WRITE,
-                abi::EXIT,
-                abi::EXIT_GROUP,
-                abi::BRK,
-            )
-        };
         let guest_abi = if self.is64 {
             polyisa_os_linux::GuestAbi::X86_64Linux
         } else {
@@ -7590,1802 +9482,29 @@ impl TrapHandler for CliLinux {
         } else {
             u64::from(AT_FDCWD_U32)
         };
-        let is_at_fdcwd = |dirfd: u64| -> bool {
-            if self.is64 {
-                (dirfd as u32) == AT_FDCWD_U32
-            } else {
-                dirfd == at_fdcwd
-            }
-        };
-        // 戻り値の負 errno：x86-64 は 64ビット符号拡張、i386 は 32ビット。
-        // is64 を先に写す。neg が self を借りると後の &mut self と衝突するため.
-        let is64 = self.is64;
-        let neg = |n: u32| -> u64 {
-            if is64 {
-                neg_errno64(n)
-            } else {
-                u64::from(neg_errno(n))
-            }
+        let cx = SysCtx {
+            r_a,
+            r_b,
+            r_c,
+            is64: self.is64,
+            at_fdcwd,
         };
         let nr = get64(env, Gpr(0));
-        // Gap: GAP-0002
-        if nr == n_openat {
-            let dirfd = get64(env, r_a);
-            let path_addr = get64(env, r_b);
-            let flags = get64(env, r_c) as u32;
-            if !is_at_fdcwd(dirfd) {
-                set64(env, Gpr(0), neg(EINVAL));
-                return TrapOutcome::Handled;
-            }
-            // 書込み・生成・切詰めを受け付ける。O_NONBLOCK/O_CLOEXEC/O_DIRECTORY/O_NOFOLLOW 等は無視する。
-            // truncate/cp/split が O_WRONLY|O_CREAT 等で開く。Ref: SRC-LINUX (7.3).
-            const O_ACCMODE: u32 = 3;
-            const O_CREAT: u32 = 0o100;
-            const O_EXCL: u32 = 0o200;
-            const O_TRUNC: u32 = 0o1000;
-            const O_APPEND: u32 = 0o2000;
-            let acc = flags & O_ACCMODE;
-            if acc > 2 {
-                set64(env, Gpr(0), neg(EINVAL));
-                return TrapOutcome::Handled;
-            }
-            let path = match guest_c_string(env, path_addr) {
-                Some(p) => p,
-                None => return TrapOutcome::Unimplemented,
-            };
-            if !path.starts_with('/') {
-                set64(env, Gpr(0), neg(EINVAL));
-                return TrapOutcome::Handled;
-            }
-            let want_write = acc != 0 || flags & (O_CREAT | O_TRUNC | O_APPEND) != 0;
-            let opened = if want_write {
-                let mut opts = std::fs::OpenOptions::new();
-                opts.read(acc != 1);
-                opts.write(true);
-                if flags & O_CREAT != 0 {
-                    if flags & O_EXCL != 0 {
-                        opts.create_new(true);
-                    } else {
-                        opts.create(true);
-                    }
-                }
-                opts.truncate(flags & O_TRUNC != 0);
-                opts.append(flags & O_APPEND != 0);
-                opts.open(&path)
-            } else {
-                std::fs::File::open(&path)
-            };
-            return match opened {
-                Ok(f) => {
-                    let fd = self.alloc_fd(f);
-                    set64(env, Gpr(0), fd as u64);
-                    TrapOutcome::Handled
-                }
-                Err(e) => {
-                    let no = match e.kind() {
-                        std::io::ErrorKind::NotFound => ENOENT,
-                        std::io::ErrorKind::PermissionDenied => EACCES,
-                        std::io::ErrorKind::AlreadyExists => 17,
-                        _ => EINVAL,
-                    };
-                    set64(env, Gpr(0), neg(no));
-                    TrapOutcome::Handled
-                }
-            };
-        }
-        if nr == n_read {
-            let fd = get64(env, r_a) as u32;
-            let buf = get64(env, r_b);
-            let mut left = get64(env, r_c);
-            // 付け替えた標準 fd はファイルから読む。真の stdin は空読みのまま.
-            let stdin_empty = fd == 0 && self.std_attached(0);
-            let Some(file) = self.file_mut(fd) else {
-                if stdin_empty {
-                    set64(env, Gpr(0), 0);
-                    return TrapOutcome::Handled;
-                }
-                set64(env, Gpr(0), neg(EBADF));
-                return TrapOutcome::Handled;
-            };
-            let mut done = 0u64;
-            let mut chunk = vec![0u8; IO_CHUNK];
-            while left > 0 {
-                let take = left.min(IO_CHUNK as u64) as usize;
-                let n = match std::io::Read::read(file, &mut chunk[..take]) {
-                    Ok(0) => break,
-                    Ok(n) => n,
-                    Err(_) => break,
-                };
-                if env
-                    .backend
-                    .mem
-                    .write(VirtAddr(buf + done), &chunk[..n])
-                    .is_err()
-                {
-                    return TrapOutcome::Unimplemented;
-                }
-                done += n as u64;
-                left -= n as u64;
-                if n < take {
-                    break;
-                }
-            }
-            set64(env, Gpr(0), done);
-            return TrapOutcome::Handled;
-        }
-        if nr == n_close {
-            // 標準 fd の close も成功させる。uniq は stdin を閉じて開き直す.
-            let fd = get64(env, r_a) as u32;
-            return if self.close_fd(fd) {
-                set64(env, Gpr(0), 0);
-                TrapOutcome::Handled
-            } else {
-                set64(env, Gpr(0), neg(EBADF));
-                TrapOutcome::Handled
-            };
-        }
-        if nr == n_write {
-            let fd = get64(env, r_a) as u32;
-            let buf = get64(env, r_b);
-            let mut left = get64(env, r_c);
-            if (fd == 1 || fd == 2) && self.std_files[fd as usize].is_none() {
-                let mut done = 0u64;
-                let mut chunk = vec![0u8; IO_CHUNK];
-                while left > 0 {
-                    let take = left.min(IO_CHUNK as u64) as usize;
-                    if env
-                        .backend
-                        .mem
-                        .read(VirtAddr(buf + done), &mut chunk[..take], data_access())
-                        .is_err()
-                    {
-                        return TrapOutcome::Unimplemented;
-                    }
-                    let n = match fd {
-                        1 => std::io::Write::write(&mut std::io::stdout(), &chunk[..take])
-                            .unwrap_or(0),
-                        _ => std::io::Write::write(&mut std::io::stderr(), &chunk[..take])
-                            .unwrap_or(0),
-                    };
-                    done += n as u64;
-                    left -= n as u64;
-                    if n < take {
-                        break;
-                    }
-                }
-                set64(env, Gpr(0), done);
-                return TrapOutcome::Handled;
-            }
-            // 開ファイル (opened fd・付け替え先。dup2 で stdout に置いた出力先を含む)
-            // への write はホストに書く。読取り専用で開いた場合は EBADF になる。
-            let Some(file) = self.file_mut(fd) else {
-                set64(env, Gpr(0), neg(EBADF));
-                return TrapOutcome::Handled;
-            };
-            let mut done = 0u64;
-            let mut chunk = vec![0u8; IO_CHUNK];
-            let mut err_no: Option<u32> = None;
-            while left > 0 {
-                let take = left.min(IO_CHUNK as u64) as usize;
-                if env
-                    .backend
-                    .mem
-                    .read(VirtAddr(buf + done), &mut chunk[..take], data_access())
-                    .is_err()
-                {
-                    return TrapOutcome::Unimplemented;
-                }
-                match std::io::Write::write(file, &chunk[..take]) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        done += n as u64;
-                        left -= n as u64;
-                        if n < take {
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        err_no = Some(match e.raw_os_error() {
-                            Some(9) => EBADF,
-                            Some(13) => EACCES,
-                            _ => EINVAL,
-                        });
-                        break;
-                    }
-                }
-            }
-            if done == 0 {
-                if let Some(no) = err_no {
-                    set64(env, Gpr(0), neg(no));
-                } else {
-                    set64(env, Gpr(0), 0);
-                }
-            } else {
-                set64(env, Gpr(0), done);
-            }
-            return TrapOutcome::Handled;
-        }
-        // writev/readv (x86-64: 20/19, i386: 146/145)。iovec 配列を辿って転送する.
-        // fd 1/2 (writev) と opened fd/stdin (readv) のみ受け付ける.
-        let (n_readv, n_writev) = if self.is64 {
-            use polyisa_os_linux::x86_64 as abi;
-            (abi::READV, abi::WRITEV)
+        let name = polyisa_os_linux::syscall_name(guest_abi, nr);
+        let table = if self.is64 {
+            X86_64_SYSCALLS
         } else {
-            use polyisa_os_linux::i386 as abi;
-            (abi::READV, abi::WRITEV)
+            I386_SYSCALLS
         };
-        if nr == n_writev {
-            let fd = get64(env, r_a) as u32;
-            let iov = get64(env, r_b);
-            let iovcnt = get64(env, r_c);
-            // 付け替えた標準 fd は読取り専用のため EBADF。
-            if fd < 3 && self.std_files[fd as usize].is_some() {
-                set64(env, Gpr(0), neg(EBADF));
-                return TrapOutcome::Handled;
-            }
-            if fd != 1 && fd != 2 {
-                set64(env, Gpr(0), neg(EBADF));
-                return TrapOutcome::Handled;
-            }
-            const IOV_MAX: u64 = 1024;
-            if iovcnt > IOV_MAX {
-                set64(env, Gpr(0), neg(EINVAL));
-                return TrapOutcome::Handled;
-            }
-            let mut done = 0u64;
-            let mut chunk = vec![0u8; IO_CHUNK];
-            for idx in 0..iovcnt {
-                let (base, len) = if self.is64 {
-                    let mut ent = [0u8; 16];
-                    if env
-                        .backend
-                        .mem
-                        .read(VirtAddr(iov + idx * 16), &mut ent, data_access())
-                        .is_err()
-                    {
-                        return TrapOutcome::Unimplemented;
-                    }
-                    (
-                        u64::from_le_bytes(ent[..8].try_into().unwrap()),
-                        u64::from_le_bytes(ent[8..].try_into().unwrap()),
-                    )
-                } else {
-                    let mut ent = [0u8; 8];
-                    if env
-                        .backend
-                        .mem
-                        .read(VirtAddr(iov + idx * 8), &mut ent, data_access())
-                        .is_err()
-                    {
-                        return TrapOutcome::Unimplemented;
-                    }
-                    (
-                        u64::from(u32::from_le_bytes(ent[..4].try_into().unwrap())),
-                        u64::from(u32::from_le_bytes(ent[4..].try_into().unwrap())),
-                    )
-                };
-                let mut left = len;
-                let mut off = 0u64;
-                while left > 0 {
-                    let take = left.min(IO_CHUNK as u64) as usize;
-                    if env
-                        .backend
-                        .mem
-                        .read(VirtAddr(base + off), &mut chunk[..take], data_access())
-                        .is_err()
-                    {
-                        return TrapOutcome::Unimplemented;
-                    }
-                    let n = match fd {
-                        1 => std::io::Write::write(&mut std::io::stdout(), &chunk[..take])
-                            .unwrap_or(0),
-                        _ => std::io::Write::write(&mut std::io::stderr(), &chunk[..take])
-                            .unwrap_or(0),
-                    };
-                    done += n as u64;
-                    left -= n as u64;
-                    off += n as u64;
-                    if n < take {
-                        break;
-                    }
-                }
-            }
-            set64(env, Gpr(0), done);
-            return TrapOutcome::Handled;
-        }
-        if nr == n_readv {
-            let fd = get64(env, r_a) as u32;
-            let iov = get64(env, r_b);
-            let iovcnt = get64(env, r_c);
-            const IOV_MAX: u64 = 1024;
-            if iovcnt > IOV_MAX {
-                set64(env, Gpr(0), neg(EINVAL));
-                return TrapOutcome::Handled;
-            }
-            // 付け替えた標準 fd はファイルから読む。真の stdin は空読みのまま.
-            let empty_stdin = fd == 0 && self.std_attached(0);
-            if !empty_stdin && self.file_ref(fd).is_none() {
-                set64(env, Gpr(0), neg(EBADF));
-                return TrapOutcome::Handled;
-            }
-            let mut done = 0u64;
-            let mut chunk = vec![0u8; IO_CHUNK];
-            for idx in 0..iovcnt {
-                let (base, len) = if self.is64 {
-                    let mut ent = [0u8; 16];
-                    if env
-                        .backend
-                        .mem
-                        .read(VirtAddr(iov + idx * 16), &mut ent, data_access())
-                        .is_err()
-                    {
-                        return TrapOutcome::Unimplemented;
-                    }
-                    (
-                        u64::from_le_bytes(ent[..8].try_into().unwrap()),
-                        u64::from_le_bytes(ent[8..].try_into().unwrap()),
-                    )
-                } else {
-                    let mut ent = [0u8; 8];
-                    if env
-                        .backend
-                        .mem
-                        .read(VirtAddr(iov + idx * 8), &mut ent, data_access())
-                        .is_err()
-                    {
-                        return TrapOutcome::Unimplemented;
-                    }
-                    (
-                        u64::from(u32::from_le_bytes(ent[..4].try_into().unwrap())),
-                        u64::from(u32::from_le_bytes(ent[4..].try_into().unwrap())),
-                    )
-                };
-                let mut left = len;
-                let mut off = 0u64;
-                while left > 0 {
-                    let take = left.min(IO_CHUNK as u64) as usize;
-                    let n = if empty_stdin {
-                        0
-                    } else {
-                        let f = self.file_mut(fd).unwrap();
-                        match std::io::Read::read(f, &mut chunk[..take]) {
-                            Ok(0) => 0,
-                            Ok(n) => n,
-                            Err(_) => 0,
-                        }
-                    };
-                    if n == 0 {
-                        break;
-                    }
-                    if env
-                        .backend
-                        .mem
-                        .write(VirtAddr(base + off), &chunk[..n])
-                        .is_err()
-                    {
-                        return TrapOutcome::Unimplemented;
-                    }
-                    done += n as u64;
-                    left -= n as u64;
-                    off += n as u64;
-                    if n < take {
-                        break;
-                    }
-                }
-                // 真の stdin は空読みとして次へ進む.
-                if empty_stdin {
-                    continue;
-                }
-            }
-            set64(env, Gpr(0), done);
-            return TrapOutcome::Handled;
-        }
-        if nr == n_exit || nr == n_exit_group {
-            return TrapOutcome::Exit(get64(env, r_a) as u32);
-        }
-        if self.is64 && nr == polyisa_os_linux::x86_64::MMAP {
-            // mmap(addr, len, prot, flags, fd, offset)。匿名のみ受け付ける.
-            // ファイル-backed は未対応のため EINVAL.
-            // prot は寛容に RW で写像する (PROT_NONE 予約後の mprotect 前でも動くため).
-            use polyisa_mem::{PAGE_SIZE, Perms, VirtAddr};
-            let addr = get64(env, Gpr(7));
-            let len = get64(env, Gpr(6));
-            let _prot = get64(env, Gpr(2));
-            let flags = get64(env, Gpr(10));
-            let fd = get64(env, Gpr(8)) as i64;
-            let offset = get64(env, Gpr(9));
-            const MAP_ANONYMOUS: u64 = 0x20;
-            const MAP_FIXED: u64 = 0x10;
-            if len == 0 {
-                set64(env, Gpr(0), neg(EINVAL));
-                return TrapOutcome::Handled;
-            }
-            if offset & (PAGE_SIZE - 1) != 0 {
-                set64(env, Gpr(0), neg(EINVAL));
-                return TrapOutcome::Handled;
-            }
-            if flags & MAP_ANONYMOUS == 0 && fd != -1 {
-                set64(env, Gpr(0), neg(EINVAL));
-                return TrapOutcome::Handled;
-            }
-            // 拡張しすぎは失敗扱い.
-            const MAX_MMAP: u64 = 1024 * 1024 * 1024;
-            if len > MAX_MMAP {
-                set64(env, Gpr(0), neg(ENOMEM));
-                return TrapOutcome::Handled;
-            }
-            let aligned_len = len.next_multiple_of(PAGE_SIZE);
-            let count = aligned_len / PAGE_SIZE;
-            if flags & MAP_FIXED != 0 {
-                if addr & (PAGE_SIZE - 1) != 0 {
-                    set64(env, Gpr(0), neg(EINVAL));
-                    return TrapOutcome::Handled;
-                }
-                // MAP_FIXED は既存写像を置換する。先に外してから写像する.
-                env.backend.mem.unmap(VirtAddr(addr), count);
-                if env
-                    .backend
-                    .mem
-                    .map(VirtAddr(addr), count, Perms::RW)
-                    .is_err()
-                {
-                    set64(env, Gpr(0), neg(ENOMEM));
-                    return TrapOutcome::Handled;
-                }
-                // heap_end より後ろに伸ばしたら追随する (brk との衝突回避).
-                if self.heap_end == 0 {
-                    self.heap_end = (addr + aligned_len).next_multiple_of(PAGE_SIZE);
-                } else {
-                    self.heap_end = self
-                        .heap_end
-                        .max((addr + aligned_len).next_multiple_of(PAGE_SIZE));
-                }
-                set64(env, Gpr(0), addr);
-                return TrapOutcome::Handled;
-            }
-            if addr == 0 {
-                if self.heap_end == 0 {
-                    self.heap_end = 0x6000_0000;
-                }
-                // 縮小で残った写像を上書きしないよう空きを探す.
-                let Some(base) = self.find_free_run(env, self.heap_end, count) else {
-                    set64(env, Gpr(0), neg(ENOMEM));
-                    return TrapOutcome::Handled;
-                };
-                if env
-                    .backend
-                    .mem
-                    .map(VirtAddr(base), count, Perms::RW)
-                    .is_err()
-                {
-                    set64(env, Gpr(0), neg(ENOMEM));
-                    return TrapOutcome::Handled;
-                }
-                self.heap_end = base + aligned_len;
-                set64(env, Gpr(0), base);
-                return TrapOutcome::Handled;
-            }
-            // ヒント付き: 範囲全体が空きのときだけ要求番地に写像し、
-            // 占有があれば heap_end から first-fit で取る (上書きしない).
-            let hint = addr & !(PAGE_SIZE - 1);
-            let hint_free = {
-                use polyisa_mem::PageNo;
-                let mut i = 0u64;
-                while i < count {
-                    let page = (hint / PAGE_SIZE).checked_add(i);
-                    match page {
-                        Some(no) if !env.backend.mem.is_mapped(PageNo(no)) => i += 1,
-                        _ => break,
-                    }
-                }
-                i == count
-            };
-            if hint_free
-                && env
-                    .backend
-                    .mem
-                    .map(VirtAddr(hint), count, Perms::RW)
-                    .is_ok()
-            {
-                if self.heap_end == 0 {
-                    self.heap_end = (hint + aligned_len).next_multiple_of(PAGE_SIZE);
-                } else {
-                    self.heap_end = self
-                        .heap_end
-                        .max((hint + aligned_len).next_multiple_of(PAGE_SIZE));
-                }
-                set64(env, Gpr(0), hint);
-                return TrapOutcome::Handled;
-            }
-            if self.heap_end == 0 {
-                self.heap_end = 0x6000_0000;
-            }
-            let Some(base) = self.find_free_run(env, self.heap_end, count) else {
-                set64(env, Gpr(0), neg(ENOMEM));
-                return TrapOutcome::Handled;
-            };
-            if env
-                .backend
-                .mem
-                .map(VirtAddr(base), count, Perms::RW)
-                .is_err()
-            {
-                set64(env, Gpr(0), neg(ENOMEM));
-                return TrapOutcome::Handled;
-            }
-            self.heap_end = base + aligned_len;
-            set64(env, Gpr(0), base);
-            return TrapOutcome::Handled;
-        }
-        if self.is64 && nr == polyisa_os_linux::x86_64::SET_TID_ADDRESS {
-            // 単一スレッド実装としてホスト PID を TID として返す。
-            // 本物は clear_child_tid を記録し終了時に書き込むが、試作では値返却のみ行う。
-            set64(env, Gpr(0), std::process::id() as u64);
-            return TrapOutcome::Handled;
-        }
-        if nr == polyisa_os_linux::x86_64::GETTID && self.is64
-            || nr == polyisa_os_linux::i386::GETTID && !self.is64
+        if let Some(name) = name
+            && let Some((_, handler)) = table.iter().find(|(n, _)| *n == name)
+            && let Some(out) = handler(self, env, &cx)
         {
-            // 単一スレッド実装としてホスト PID を TID として返す。
-            set64(env, Gpr(0), std::process::id() as u64);
-            return TrapOutcome::Handled;
-        }
-        if nr == polyisa_os_linux::x86_64::GETPID && self.is64
-            || nr == polyisa_os_linux::i386::GETPID && !self.is64
-        {
-            set64(env, Gpr(0), std::process::id() as u64);
-            return TrapOutcome::Handled;
-        }
-        if nr == polyisa_os_linux::x86_64::UNAME && self.is64
-            || nr == polyisa_os_linux::i386::UNAME && !self.is64
-        {
-            // uname(buf)。struct utsname (65B x 5) を固定値で埋めて 0 を返す.
-            // Ref: SRC-LINUX (7.3).
-            let buf = get64(env, r_a);
-            let fields: [&[u8]; 5] = [b"Linux", b"localhost", b"6.0.0", b"#1", b"x86_64"];
-            let mut out = [0u8; 65 * 5];
-            for (i, f) in fields.iter().enumerate() {
-                let base = i * 65;
-                out[base..base + f.len()].copy_from_slice(f);
-            }
-            if env.backend.mem.write(VirtAddr(buf), &out).is_err() {
-                return TrapOutcome::Unimplemented;
-            }
-            set64(env, Gpr(0), 0);
-            return TrapOutcome::Handled;
-        }
-        if nr == polyisa_os_linux::x86_64::GETUID && self.is64
-            || nr == polyisa_os_linux::i386::GETUID && !self.is64
-            || nr == polyisa_os_linux::x86_64::GETEUID && self.is64
-            || nr == polyisa_os_linux::i386::GETEUID && !self.is64
-        {
-            // root として uid 0 を返す.
-            set64(env, Gpr(0), 0);
-            return TrapOutcome::Handled;
-        }
-        if nr == polyisa_os_linux::x86_64::GETGID && self.is64
-            || nr == polyisa_os_linux::i386::GETGID && !self.is64
-            || nr == polyisa_os_linux::x86_64::GETEGID && self.is64
-            || nr == polyisa_os_linux::i386::GETEGID && !self.is64
-        {
-            set64(env, Gpr(0), 0);
-            return TrapOutcome::Handled;
-        }
-        if nr == polyisa_os_linux::x86_64::GETCWD && self.is64
-            || nr == polyisa_os_linux::i386::GETCWD && !self.is64
-        {
-            // getcwd(buf, size)。ホスト cwd を返し、NUL 込み長さを返す.
-            let buf = get64(env, r_a);
-            let size = get64(env, r_b);
-            if buf == 0 || size == 0 {
-                set64(env, Gpr(0), neg(EINVAL));
-                return TrapOutcome::Handled;
-            }
-            let cwd = std::env::current_dir()
-                .ok()
-                .and_then(|p| p.into_os_string().into_string().ok())
-                .unwrap_or_else(|| "/".to_string());
-            let bytes = cwd.as_bytes();
-            let need = (bytes.len() as u64) + 1;
-            if size < need {
-                set64(env, Gpr(0), neg(ERANGE));
-                return TrapOutcome::Handled;
-            }
-            if env
-                .backend
-                .mem
-                .write(polyisa_mem::VirtAddr(buf), bytes)
-                .is_err()
-            {
-                return TrapOutcome::Unimplemented;
-            }
-            if env
-                .backend
-                .mem
-                .write(polyisa_mem::VirtAddr(buf + bytes.len() as u64), &[0u8])
-                .is_err()
-            {
-                return TrapOutcome::Unimplemented;
-            }
-            set64(env, Gpr(0), need);
-            return TrapOutcome::Handled;
-        }
-        if self.is64 && nr == polyisa_os_linux::x86_64::GETDENTS64 {
-            // getdents64(fd, dirp, count)。ホストのディレクトリ列挙を
-            // linux_dirent64 形式で書く。一度に全件返し、2回目以降は 0 を返す.
-            // d_ino は 0、d_off は累積オフセット、種別は dir/file/link のみ判別する.
-            // Ref: SRC-LINUX (7.3).
-            let fd = get64(env, r_a) as u32;
-            let dirp = get64(env, r_b);
-            let count = get64(env, r_c);
-            if self.dir_done.contains(&fd) {
-                set64(env, Gpr(0), 0);
-                return TrapOutcome::Handled;
-            }
-            // opened fd のみ受け付ける。stdin/stdout (0-2) は EBADF。
-            let slot = fd.wrapping_sub(3) as usize;
-            if self.fds.get(slot).and_then(|f| f.as_ref()).is_none() {
-                set64(env, Gpr(0), neg(EBADF));
-                return TrapOutcome::Handled;
-            }
-            let link = format!("/proc/self/fd/{fd}");
-            let dir_path = match std::fs::read_link(&link) {
-                Ok(p) => p,
-                Err(_) => {
-                    set64(env, Gpr(0), neg(EBADF));
-                    return TrapOutcome::Handled;
-                }
-            };
-            let rd = match std::fs::read_dir(&dir_path) {
-                Ok(rd) => rd,
-                Err(e) => {
-                    let no = match e.kind() {
-                        std::io::ErrorKind::NotFound => ENOENT,
-                        std::io::ErrorKind::PermissionDenied => EACCES,
-                        _ => EINVAL,
-                    };
-                    set64(env, Gpr(0), neg(no));
-                    return TrapOutcome::Handled;
-                }
-            };
-            // "." と ".." を先頭に置く（カーネルと同様）。
-            let mut names: Vec<(Vec<u8>, u8)> = vec![(b".".to_vec(), 4), (b"..".to_vec(), 4)];
-            for ent in rd.flatten() {
-                let name = ent
-                    .file_name()
-                    .into_string()
-                    .unwrap_or_default()
-                    .into_bytes();
-                if name.is_empty() {
-                    continue;
-                }
-                let ty = ent
-                    .file_type()
-                    .map(|t| {
-                        if t.is_dir() {
-                            4u8
-                        } else if t.is_symlink() {
-                            10u8
-                        } else {
-                            8u8
-                        }
-                    })
-                    .unwrap_or(0);
-                names.push((name, ty));
-            }
-            // 名前順に並べ替えて決定的にする（カーネルの順序は不定だが、ls は自前で整列する）。
-            names[2..].sort_by(|a, b| a.0.cmp(&b.0));
-            let mut out = Vec::new();
-            let mut off = 0u64;
-            for (name, ty) in &names {
-                let reclen = ((19 + name.len() + 1) as u64).next_multiple_of(8);
-                if out.len() as u64 + reclen > count {
-                    break;
-                }
-                off += reclen;
-                out.extend_from_slice(&0u64.to_le_bytes());
-                out.extend_from_slice(&off.to_le_bytes());
-                out.extend_from_slice(&(reclen as u16).to_le_bytes());
-                out.push(*ty);
-                out.extend_from_slice(name);
-                out.push(0);
-                while !(out.len() as u64).is_multiple_of(8) {
-                    out.push(0);
-                }
-            }
-            if !out.is_empty() && env.backend.mem.write(VirtAddr(dirp), &out).is_err() {
-                return TrapOutcome::Unimplemented;
-            }
-            self.dir_done.push(fd);
-            set64(env, Gpr(0), out.len() as u64);
-            return TrapOutcome::Handled;
-        }
-        if self.is64 && nr == polyisa_os_linux::x86_64::FSTAT {
-            // fstat(fd, struct stat *)。x86-64 struct stat (144B) を書く.
-            // レイアウトは musl/glibc 共通のカーネル ABI 由来である.
-            // ホスト依存の詳細は std の可搬 API だけでは取れないため、
-            // 種別 (st_mode) と大きさ (st_size) のみ実値を入れ、残りは 0 とする.
-            // Ref: SRC-LINUX (7.3).
-            let fd = get64(env, r_a) as u32;
-            let stat_addr = get64(env, r_b);
-            let meta: std::io::Result<std::fs::Metadata> = if fd < 3 {
-                // 付け替えた標準 fd はファイルのメタデータを返す。
-                match self.std_files[fd as usize].as_ref() {
-                    Some(f) => f.metadata(),
-                    None => std::fs::metadata(format!("/proc/self/fd/{fd}")),
-                }
-            } else {
-                let slot = fd.wrapping_sub(3) as usize;
-                match self.fds.get(slot).and_then(|f| f.as_ref()) {
-                    Some(f) => f.metadata(),
-                    None => {
-                        set64(env, Gpr(0), neg(EBADF));
-                        return TrapOutcome::Handled;
-                    }
-                }
-            };
-            let m = match meta {
-                Ok(m) => m,
-                Err(_) => {
-                    set64(env, Gpr(0), neg(EBADF));
-                    return TrapOutcome::Handled;
-                }
-            };
-            let st = stat144(&m);
-            if env.backend.mem.write(VirtAddr(stat_addr), &st).is_err() {
-                return TrapOutcome::Unimplemented;
-            }
-            set64(env, Gpr(0), 0);
-            return TrapOutcome::Handled;
-        }
-        if self.is64 && nr == polyisa_os_linux::x86_64::NEWFSTATAT {
-            // newfstatat(dirfd, path, statbuf, flags)。AT_FDCWD+絶対パスのみ.
-            // ホスト metadata から struct stat (144B) を書いて 0 を返す.
-            // flags (AT_SYMLINK_NOFOLLOW 等) は無視してたどる.
-            // Ref: SRC-LINUX (7.3).
-            let dirfd = get64(env, Gpr(7));
-            let path_addr = get64(env, Gpr(6));
-            let stat_addr = get64(env, Gpr(2));
-            if !is_at_fdcwd(dirfd) {
-                set64(env, Gpr(0), neg(EINVAL));
-                return TrapOutcome::Handled;
-            }
-            let path = match guest_c_string(env, path_addr) {
-                Some(p) => p,
-                None => return TrapOutcome::Unimplemented,
-            };
-            if !path.starts_with('/') {
-                set64(env, Gpr(0), neg(EINVAL));
-                return TrapOutcome::Handled;
-            }
-            let m = match std::fs::metadata(&path) {
-                Ok(m) => m,
-                Err(e) => {
-                    let no = match e.kind() {
-                        std::io::ErrorKind::NotFound => ENOENT,
-                        std::io::ErrorKind::PermissionDenied => EACCES,
-                        _ => EINVAL,
-                    };
-                    set64(env, Gpr(0), neg(no));
-                    return TrapOutcome::Handled;
-                }
-            };
-            let st = stat144(&m);
-            if env.backend.mem.write(VirtAddr(stat_addr), &st).is_err() {
-                return TrapOutcome::Unimplemented;
-            }
-            set64(env, Gpr(0), 0);
-            return TrapOutcome::Handled;
-        }
-        if self.is64 && nr == polyisa_os_linux::x86_64::SENDFILE {
-            // sendfile(out_fd, in_fd, offset, count)。offset==NULL のみ受け付ける.
-            // in_fd から読んで out_fd (1/2) へ書き、転送バイト数を返す.
-            // Ref: SRC-LINUX (7.3).
-            let out_fd = get64(env, Gpr(7)) as u32;
-            let in_fd = get64(env, Gpr(6)) as u32;
-            let offset = get64(env, Gpr(2));
-            let mut left = get64(env, Gpr(10));
-            if offset != 0 {
-                set64(env, Gpr(0), neg(EINVAL));
-                return TrapOutcome::Handled;
-            }
-            if out_fd != 1 && out_fd != 2 {
-                set64(env, Gpr(0), neg(EBADF));
-                return TrapOutcome::Handled;
-            }
-            // 付け替えた標準出力は読取り専用のため EBADF。
-            if self.std_files[out_fd as usize].is_some() {
-                set64(env, Gpr(0), neg(EBADF));
-                return TrapOutcome::Handled;
-            }
-            // 付け替えた stdin はファイルから読む。真の stdin は空読みのまま.
-            let in_empty = in_fd == 0 && self.std_attached(0);
-            let Some(file) = self.file_mut(in_fd) else {
-                if in_empty {
-                    set64(env, Gpr(0), 0);
-                    return TrapOutcome::Handled;
-                }
-                set64(env, Gpr(0), neg(EBADF));
-                return TrapOutcome::Handled;
-            };
-            let mut done = 0u64;
-            let mut chunk = vec![0u8; IO_CHUNK];
-            while left > 0 {
-                let take = left.min(IO_CHUNK as u64) as usize;
-                let n = match std::io::Read::read(file, &mut chunk[..take]) {
-                    Ok(0) => break,
-                    Ok(n) => n,
-                    Err(_) => break,
-                };
-                let w = match out_fd {
-                    1 => std::io::Write::write(&mut std::io::stdout(), &chunk[..n]).unwrap_or(0),
-                    _ => std::io::Write::write(&mut std::io::stderr(), &chunk[..n]).unwrap_or(0),
-                };
-                done += n as u64;
-                left -= n as u64;
-                if n < take || w < n {
-                    break;
-                }
-            }
-            set64(env, Gpr(0), done);
-            return TrapOutcome::Handled;
-        }
-        if self.is64 && nr == polyisa_os_linux::x86_64::LSEEK {
-            // lseek(fd, offset, whence)。opened fd の位置を動かし、新位置を返す.
-            // Ref: SRC-LINUX (7.3).
-            use std::io::Seek;
-            let fd = get64(env, Gpr(7)) as u32;
-            let offset = get64(env, Gpr(6)) as i64;
-            let whence = get64(env, Gpr(2)) as u32;
-            let Some(file) = self.file_mut(fd) else {
-                set64(env, Gpr(0), neg(EBADF));
-                return TrapOutcome::Handled;
-            };
-            let pos = match whence {
-                0 => std::io::SeekFrom::Start(offset as u64),
-                1 => std::io::SeekFrom::Current(offset),
-                2 => std::io::SeekFrom::End(offset),
-                _ => {
-                    set64(env, Gpr(0), neg(EINVAL));
-                    return TrapOutcome::Handled;
-                }
-            };
-            match file.seek(pos) {
-                Ok(n) => set64(env, Gpr(0), n),
-                Err(_) => set64(env, Gpr(0), neg(EINVAL)),
-            }
-            return TrapOutcome::Handled;
-        }
-        if nr == polyisa_os_linux::x86_64::FTRUNCATE && self.is64
-            || nr == polyisa_os_linux::i386::FTRUNCATE && !self.is64
-        {
-            // ftruncate(fd, length)。truncate -s で使う。ホストの set_len に直結する.
-            let fd = get64(env, r_a) as u32;
-            let len = get64(env, r_b);
-            let Some(file) = self.file_mut(fd) else {
-                set64(env, Gpr(0), neg(EBADF));
-                return TrapOutcome::Handled;
-            };
-            return match file.set_len(len) {
-                Ok(()) => {
-                    set64(env, Gpr(0), 0);
-                    TrapOutcome::Handled
-                }
-                Err(e) if e.raw_os_error() == Some(EBADF as i32) => {
-                    set64(env, Gpr(0), neg(EBADF));
-                    TrapOutcome::Handled
-                }
-                Err(e) => {
-                    let no = match e.kind() {
-                        std::io::ErrorKind::NotFound => ENOENT,
-                        std::io::ErrorKind::PermissionDenied => EACCES,
-                        _ => EINVAL,
-                    };
-                    set64(env, Gpr(0), neg(no));
-                    TrapOutcome::Handled
-                }
-            };
-        }
-        if self.is64 && nr == polyisa_os_linux::x86_64::GETGROUPS {
-            // getgroups(size, list)。所属グループは root (0) のみとみなす.
-            // size==0 では必要数を返し、そうでなければ GID 0 を書く.
-            // Ref: SRC-LINUX (7.3).
-            let size = get64(env, r_a);
-            let list = get64(env, r_b);
-            if size == 0 {
-                set64(env, Gpr(0), 1);
-                return TrapOutcome::Handled;
-            }
-            if list == 0 {
-                set64(env, Gpr(0), neg(EINVAL));
-                return TrapOutcome::Handled;
-            }
-            if env
-                .backend
-                .mem
-                .write(VirtAddr(list), &0u32.to_le_bytes())
-                .is_err()
-            {
-                return TrapOutcome::Unimplemented;
-            }
-            set64(env, Gpr(0), 1.min(size));
-            return TrapOutcome::Handled;
-        }
-        if nr == polyisa_os_linux::x86_64::MPROTECT && self.is64
-            || nr == polyisa_os_linux::i386::MPROTECT && !self.is64
-        {
-            // mprotect(addr, len, prot)。試作では権限変更を無視して 0 を返す.
-            // addr/len の検証のみ行う (len==0 は EINVAL).
-            let len = if self.is64 {
-                get64(env, Gpr(6))
-            } else {
-                u64::from(env.backend.get(Gpr(1).state()))
-            };
-            if len == 0 {
-                set64(env, Gpr(0), neg(EINVAL));
-                return TrapOutcome::Handled;
-            }
-            set64(env, Gpr(0), 0);
-            return TrapOutcome::Handled;
-        }
-        if nr == polyisa_os_linux::x86_64::MUNMAP && self.is64
-            || nr == polyisa_os_linux::i386::MUNMAP && !self.is64
-        {
-            // munmap(addr, len)。試作では写像解除せず 0 を返す.
-            set64(env, Gpr(0), 0);
-            return TrapOutcome::Handled;
-        }
-        if nr == polyisa_os_linux::x86_64::RT_SIGACTION && self.is64
-            || nr == polyisa_os_linux::i386::RT_SIGACTION && !self.is64
-        {
-            // シグナルハンドラ設定は無視して 0 を返す (試作はシグナルなし).
-            set64(env, Gpr(0), 0);
-            return TrapOutcome::Handled;
-        }
-        if nr == polyisa_os_linux::x86_64::RT_SIGPROCMASK && self.is64
-            || nr == polyisa_os_linux::i386::RT_SIGPROCMASK && !self.is64
-        {
-            // シグナルマスク変更は無視して 0 を返す.
-            set64(env, Gpr(0), 0);
-            return TrapOutcome::Handled;
-        }
-        if nr == polyisa_os_linux::x86_64::TGKILL && self.is64
-            || nr == polyisa_os_linux::i386::TGKILL && !self.is64
-        {
-            // tgkill(tgid, tid, sig)。単一スレッド試作として sig==0 は 0 を返す.
-            // シグナル番号が範囲外なら EINVAL.
-            let sig = if self.is64 {
-                get64(env, Gpr(2))
-            } else {
-                u64::from(env.backend.get(Gpr(2).state()))
-            };
-            if sig > 64 {
-                set64(env, Gpr(0), neg(EINVAL));
-                return TrapOutcome::Handled;
-            }
-            // sig==0 は存在確認であり 0 を返す。他のシグナルは無視して 0 とする.
-            set64(env, Gpr(0), 0);
-            return TrapOutcome::Handled;
-        }
-        if self.is64 && nr == polyisa_os_linux::x86_64::SET_ROBUST_LIST {
-            // robust futex リスト先頭を記録して 0 を返す。
-            // 長さは struct robust_list_head (24バイト) のはずであり、異なる場合は EINVAL.
-            const ROBUST_LIST_HEAD_LEN: u64 = 24;
-            if get64(env, r_b) != ROBUST_LIST_HEAD_LEN {
-                set64(env, Gpr(0), neg(EINVAL));
-                return TrapOutcome::Handled;
-            }
-            self.robust_head = get64(env, r_a);
-            set64(env, Gpr(0), 0);
-            return TrapOutcome::Handled;
-        }
-        if self.is64 && nr == polyisa_os_linux::x86_64::RSEQ {
-            // rseq 領域を記録して 0 を返す。署名検証はしない.
-            // rseq_len は 32 (struct rseq) のはずであり、異なる場合は EINVAL.
-            // flags は 0 のみ受け付ける.
-            const RSEQ_LEN: u64 = 32;
-            if get64(env, r_b) != RSEQ_LEN || get64(env, r_c) != 0 {
-                set64(env, Gpr(0), neg(EINVAL));
-                return TrapOutcome::Handled;
-            }
-            self.rseq_addr = get64(env, r_a);
-            set64(env, Gpr(0), 0);
-            return TrapOutcome::Handled;
-        }
-        if self.is64 && nr == polyisa_os_linux::x86_64::GETRANDOM {
-            // getrandom(buf, len, flags)。試作では 0 埋めして len を返す.
-            // flags は GRND_NONBLOCK(1)/GRND_RANDOM(2)/GRND_INSECURE(4) のみ受け付ける.
-            let buf = get64(env, r_a);
-            let len = get64(env, r_b);
-            let flags = get64(env, r_c);
-            if flags & !7 != 0 {
-                set64(env, Gpr(0), neg(EINVAL));
-                return TrapOutcome::Handled;
-            }
-            // 拡張しすぎは失敗扱い (0 を返す)。
-            const MAX_GETRANDOM: u64 = 256 * 1024;
-            if len > MAX_GETRANDOM {
-                set64(env, Gpr(0), neg(EINVAL));
-                return TrapOutcome::Handled;
-            }
-            let zeros = vec![0u8; len as usize];
-            if len != 0
-                && env
-                    .backend
-                    .mem
-                    .write(polyisa_mem::VirtAddr(buf), &zeros)
-                    .is_err()
-            {
-                return TrapOutcome::Unimplemented;
-            }
-            set64(env, Gpr(0), len);
-            return TrapOutcome::Handled;
-        }
-        if self.is64 && nr == polyisa_os_linux::x86_64::PRLIMIT64 {
-            // prlimit64(pid, resource, new_limit, old_limit)。
-            // 試作では new_limit の設定は無視し、old_limit には無制限を書く.
-            // resource は 0..16 (RLIM_NLIMITS) のみ受け付ける.
-            const RLIM_NLIMITS: u64 = 16;
-            const RLIM_INFINITY: u64 = 0xffff_ffff_ffff_ffff;
-            let resource = get64(env, r_b);
-            if resource >= RLIM_NLIMITS {
-                set64(env, Gpr(0), neg(EINVAL));
-                return TrapOutcome::Handled;
-            }
-            let old_limit = get64(env, Gpr(10));
-            if old_limit != 0 {
-                let buf = RLIM_INFINITY.to_le_bytes();
-                // rlim_cur (8B) + rlim_max (8B) = 16B.
-                let mut both = [0u8; 16];
-                both[..8].copy_from_slice(&buf);
-                both[8..].copy_from_slice(&buf);
-                if env
-                    .backend
-                    .mem
-                    .write(polyisa_mem::VirtAddr(old_limit), &both)
-                    .is_err()
-                {
-                    return TrapOutcome::Unimplemented;
-                }
-            }
-            set64(env, Gpr(0), 0);
-            return TrapOutcome::Handled;
-        }
-        if self.is64 && nr == polyisa_os_linux::x86_64::TIME {
-            // time(tloc)。ホスト時刻の秒を返し、tloc!=NULL なら書き込む.
-            // clock_gettime の ENOSYS フォールバックで呼ばれる.
-            let tloc = get64(env, r_a);
-            let secs = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs() as i64;
-            if tloc != 0
-                && env
-                    .backend
-                    .mem
-                    .write(VirtAddr(tloc), &secs.to_le_bytes())
-                    .is_err()
-            {
-                return TrapOutcome::Unimplemented;
-            }
-            set64(env, Gpr(0), secs as u64);
-            return TrapOutcome::Handled;
-        }
-        if self.is64 && nr == polyisa_os_linux::x86_64::IOCTL {
-            // ioctl(fd, request, ...)。試作では端末なしとして ENOTTY を返す.
-            // ls の画面幅取得などは失敗扱いで継続する.
-            // Ref: SRC-LINUX (7.3).
-            set64(env, Gpr(0), neg(ENOTTY));
-            return TrapOutcome::Handled;
-        }
-        if self.is64 && nr == polyisa_os_linux::x86_64::CLOCK_NANOSLEEP {
-            // clock_nanosleep(clock_id, flags, req, rem)。試作では待たずに 0 を返す.
-            // clock_id は CLOCK_REALTIME(0)/MONOTONIC(1) のみ受け付ける.
-            let clock_id = get64(env, r_a);
-            if clock_id > 1 {
-                set64(env, Gpr(0), neg(EINVAL));
-                return TrapOutcome::Handled;
-            }
-            set64(env, Gpr(0), 0);
-            return TrapOutcome::Handled;
-        }
-        if self.is64 && nr == polyisa_os_linux::x86_64::CLOCK_GETTIME {
-            // clock_gettime(clk_id, tp)。ホスト時刻を書いて 0 を返す.
-            // 0 固定では時刻待ちループが回り続けるため、実時刻を進める.
-            let tp = get64(env, r_b);
-            if tp != 0 {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default();
-                let mut both = [0u8; 16];
-                both[..8].copy_from_slice(&(now.as_secs() as i64).to_le_bytes());
-                both[8..].copy_from_slice(&(now.subsec_nanos() as i64).to_le_bytes());
-                if env
-                    .backend
-                    .mem
-                    .write(polyisa_mem::VirtAddr(tp), &both)
-                    .is_err()
-                {
-                    return TrapOutcome::Unimplemented;
-                }
-            }
-            set64(env, Gpr(0), 0);
-            return TrapOutcome::Handled;
-        }
-        if nr == polyisa_os_linux::x86_64::READLINKAT && self.is64
-            || nr == polyisa_os_linux::i386::READLINKAT && !self.is64
-        {
-            // readlinkat(dirfd, pathname, buf, bufsiz)。AT_FDCWD+絶対パスのみ.
-            // ホストの read_link に直結し、切詰めて返す（NUL 終端なし）。
-            let (dirfd, path_addr, buf, bufsiz) = if self.is64 {
-                (
-                    get64(env, Gpr(7)),
-                    get64(env, Gpr(6)),
-                    get64(env, Gpr(2)),
-                    get64(env, Gpr(10)),
-                )
-            } else {
-                (
-                    u64::from(env.backend.get(Gpr(3).state())),
-                    u64::from(env.backend.get(Gpr(1).state())),
-                    u64::from(env.backend.get(Gpr(2).state())),
-                    u64::from(env.backend.get(Gpr(6).state())),
-                )
-            };
-            if !is_at_fdcwd(dirfd) {
-                set64(env, Gpr(0), neg(EINVAL));
-                return TrapOutcome::Handled;
-            }
-            if bufsiz == 0 {
-                set64(env, Gpr(0), neg(EINVAL));
-                return TrapOutcome::Handled;
-            }
-            let path = match guest_c_string(env, path_addr) {
-                Some(p) => p,
-                None => return TrapOutcome::Unimplemented,
-            };
-            if !path.starts_with('/') {
-                set64(env, Gpr(0), neg(EINVAL));
-                return TrapOutcome::Handled;
-            }
-            // 拡張しすぎは失敗扱い.
-            const MAX_READLINK: u64 = 4096;
-            if bufsiz > MAX_READLINK {
-                set64(env, Gpr(0), neg(EINVAL));
-                return TrapOutcome::Handled;
-            }
-            // /proc/self/exe はゲスト実行ファイル自身を返す (ホスト exe ではない).
-            // 空の exe_path (単体テスト) ではホストに直結する.
-            let target = if path == "/proc/self/exe" && !self.exe_path.is_empty() {
-                self.exe_path.clone()
-            } else {
-                match std::fs::read_link(&path) {
-                    Ok(p) => p.into_os_string().into_string().unwrap_or_default(),
-                    Err(e) => {
-                        let no = match e.kind() {
-                            std::io::ErrorKind::NotFound => ENOENT,
-                            std::io::ErrorKind::PermissionDenied => EACCES,
-                            _ => EINVAL,
-                        };
-                        set64(env, Gpr(0), neg(no));
-                        return TrapOutcome::Handled;
-                    }
-                }
-            };
-            let bytes = target.as_bytes();
-            let take = (bytes.len() as u64).min(bufsiz) as usize;
-            if env
-                .backend
-                .mem
-                .write(polyisa_mem::VirtAddr(buf), &bytes[..take])
-                .is_err()
-            {
-                return TrapOutcome::Unimplemented;
-            }
-            set64(env, Gpr(0), take as u64);
-            return TrapOutcome::Handled;
-        }
-        if nr == polyisa_os_linux::x86_64::READLINK && self.is64
-            || nr == polyisa_os_linux::i386::READLINK && !self.is64
-        {
-            // readlink(pathname, buf, bufsiz)。readlinkat から dirfd 検証を除いた形.
-            let (path_addr, buf, bufsiz) = if self.is64 {
-                (get64(env, Gpr(7)), get64(env, Gpr(6)), get64(env, Gpr(2)))
-            } else {
-                (
-                    u64::from(env.backend.get(Gpr(3).state())),
-                    u64::from(env.backend.get(Gpr(1).state())),
-                    u64::from(env.backend.get(Gpr(2).state())),
-                )
-            };
-            if bufsiz == 0 {
-                set64(env, Gpr(0), neg(EINVAL));
-                return TrapOutcome::Handled;
-            }
-            let path = match guest_c_string(env, path_addr) {
-                Some(p) => p,
-                None => return TrapOutcome::Unimplemented,
-            };
-            const MAX_READLINK: u64 = 4096;
-            if bufsiz > MAX_READLINK {
-                set64(env, Gpr(0), neg(EINVAL));
-                return TrapOutcome::Handled;
-            }
-            let target = if path == "/proc/self/exe" && !self.exe_path.is_empty() {
-                self.exe_path.clone()
-            } else {
-                match std::fs::read_link(&path) {
-                    Ok(p) => p.into_os_string().into_string().unwrap_or_default(),
-                    Err(e) => {
-                        let no = match e.kind() {
-                            std::io::ErrorKind::NotFound => ENOENT,
-                            std::io::ErrorKind::PermissionDenied => EACCES,
-                            _ => EINVAL,
-                        };
-                        set64(env, Gpr(0), neg(no));
-                        return TrapOutcome::Handled;
-                    }
-                }
-            };
-            let bytes = target.as_bytes();
-            let take = (bytes.len() as u64).min(bufsiz) as usize;
-            if env
-                .backend
-                .mem
-                .write(polyisa_mem::VirtAddr(buf), &bytes[..take])
-                .is_err()
-            {
-                return TrapOutcome::Unimplemented;
-            }
-            set64(env, Gpr(0), take as u64);
-            return TrapOutcome::Handled;
-        }
-        // arch_prctl (x86-64 のみ)。TLS の FS ベース設定を受け付ける。
-        // Ref: SRC-LINUX (7.3) arch/x86/include/uapi/asm/prctl.h.
-        if self.is64 && nr == polyisa_os_linux::x86_64::ARCH_PRCTL {
-            const ARCH_SET_FS: u64 = 0x1002;
-            const ARCH_GET_FS: u64 = 0x1003;
-            let op = get64(env, r_a);
-            if op == ARCH_SET_FS {
-                self.fs_base = get64(env, r_b);
-                set64(env, Gpr(0), 0);
-                return TrapOutcome::Handled;
-            }
-            if op == ARCH_GET_FS {
-                let base = self.fs_base;
-                let dst = get64(env, r_b);
-                let buf = base.to_le_bytes();
-                if env
-                    .backend
-                    .mem
-                    .write(polyisa_mem::VirtAddr(dst), &buf)
-                    .is_err()
-                {
-                    return TrapOutcome::Unimplemented;
-                }
-                set64(env, Gpr(0), 0);
-                return TrapOutcome::Handled;
-            }
-            set64(env, Gpr(0), neg(EINVAL));
-            return TrapOutcome::Handled;
-        }
-        if nr == polyisa_os_linux::x86_64::DUP && self.is64
-            || nr == polyisa_os_linux::i386::DUP && !self.is64
-        {
-            // dup(oldfd)。開ファイルは try_clone して最下位空きに置く (freopen 対応)。
-            // 真の 1/2 (ファイルなし) は旧来通り oldfd を返す.
-            let oldfd = get64(env, r_a) as u32;
-            if !self.fd_valid(oldfd) {
-                set64(env, Gpr(0), neg(EBADF));
-                return TrapOutcome::Handled;
-            }
-            if let Some(cloned) = self.file_ref(oldfd).and_then(|f| f.try_clone().ok()) {
-                for (i, slot) in self.std_files.iter_mut().enumerate() {
-                    if slot.is_none() && self.std_closed[i] {
-                        *slot = Some(cloned);
-                        self.std_closed[i] = false;
-                        set64(env, Gpr(0), i as u64);
-                        return TrapOutcome::Handled;
-                    }
-                }
-                if let Some(idx) = self.fds.iter().position(|f| f.is_none()) {
-                    self.fds[idx] = Some(cloned);
-                    set64(env, Gpr(0), (3 + idx) as u64);
-                    return TrapOutcome::Handled;
-                }
-                self.fds.push(Some(cloned));
-                set64(env, Gpr(0), (3 + self.fds.len() - 1) as u64);
-                return TrapOutcome::Handled;
-            }
-            if oldfd == 1 || oldfd == 2 {
-                set64(env, Gpr(0), oldfd as u64);
-                return TrapOutcome::Handled;
-            }
-            set64(env, Gpr(0), neg(EBADF));
-            return TrapOutcome::Handled;
-        }
-        if nr == polyisa_os_linux::x86_64::DUP2 && self.is64
-            || nr == polyisa_os_linux::i386::DUP2 && !self.is64
-        {
-            // dup2(oldfd, newfd)。1/2 同士の複製は newfd を返して継続する.
-            // --list の dup2(1,2) は出力先の付け替えだが、試作では写像せず継続する.
-            let oldfd = get64(env, r_a) as u32;
-            let newfd = get64(env, r_b) as u32;
-            // 閉じた標準 fd は不正。接続中・付け替え中と opened fd が真.
-            let valid = |fd: u32| self.fd_valid(fd);
-            if !valid(oldfd) || newfd > 1024 {
-                set64(env, Gpr(0), neg(EBADF));
-                return TrapOutcome::Handled;
-            }
-            if oldfd == newfd {
-                set64(env, Gpr(0), newfd as u64);
-                return TrapOutcome::Handled;
-            }
-            if let Some(cloned) = self.file_ref(oldfd).and_then(|f| f.try_clone().ok()) {
-                if newfd < 3 {
-                    let i = newfd as usize;
-                    self.std_files[i] = Some(cloned);
-                    self.std_closed[i] = false;
-                } else {
-                    let idx = newfd.wrapping_sub(3) as usize;
-                    while self.fds.len() <= idx {
-                        self.fds.push(None);
-                    }
-                    self.fds[idx] = Some(cloned);
-                }
-                set64(env, Gpr(0), newfd as u64);
-                return TrapOutcome::Handled;
-            }
-            if (oldfd == 1 || oldfd == 2) && (newfd == 1 || newfd == 2) {
-                set64(env, Gpr(0), newfd as u64);
-                return TrapOutcome::Handled;
-            }
-            set64(env, Gpr(0), neg(EBADF));
-            return TrapOutcome::Handled;
-        }
-        if nr == polyisa_os_linux::x86_64::DUP3 && self.is64
-            || nr == polyisa_os_linux::i386::DUP3 && !self.is64
-        {
-            // dup3(oldfd, newfd, flags)。hexdump の libbb 準備で使う.
-            // flags は O_CLOEXEC のみ無視して継続。oldfd==newfd は EINVAL.
-            let oldfd = get64(env, r_a) as u32;
-            let newfd = get64(env, r_b) as u32;
-            let flags = get64(env, r_c) as u32;
-            const O_CLOEXEC: u32 = 0x80000;
-            if flags & !O_CLOEXEC != 0 {
-                set64(env, Gpr(0), neg(EINVAL));
-                return TrapOutcome::Handled;
-            }
-            if oldfd == newfd {
-                set64(env, Gpr(0), neg(EINVAL));
-                return TrapOutcome::Handled;
-            }
-            let valid = |fd: u32| self.fd_valid(fd);
-            if !valid(oldfd) || newfd > 1024 {
-                set64(env, Gpr(0), neg(EBADF));
-                return TrapOutcome::Handled;
-            }
-            if let Some(cloned) = self.file_ref(oldfd).and_then(|f| f.try_clone().ok()) {
-                if newfd < 3 {
-                    let i = newfd as usize;
-                    self.std_files[i] = Some(cloned);
-                    self.std_closed[i] = false;
-                } else {
-                    let idx = newfd.wrapping_sub(3) as usize;
-                    while self.fds.len() <= idx {
-                        self.fds.push(None);
-                    }
-                    self.fds[idx] = Some(cloned);
-                }
-                set64(env, Gpr(0), newfd as u64);
-                return TrapOutcome::Handled;
-            }
-            if (oldfd == 1 || oldfd == 2) && (newfd == 1 || newfd == 2) {
-                set64(env, Gpr(0), newfd as u64);
-                return TrapOutcome::Handled;
-            }
-            set64(env, Gpr(0), neg(EBADF));
-            return TrapOutcome::Handled;
-        }
-        if nr == polyisa_os_linux::x86_64::MKDIR && self.is64
-            || nr == polyisa_os_linux::i386::MKDIR && !self.is64
-        {
-            // mkdir(path, mode)。ホストの create_dir に直結する.
-            let path_addr = get64(env, r_a);
-            let path = match guest_c_string(env, path_addr) {
-                Some(p) => p,
-                None => return TrapOutcome::Unimplemented,
-            };
-            return match std::fs::create_dir(&path) {
-                Ok(()) => {
-                    set64(env, Gpr(0), 0);
-                    TrapOutcome::Handled
-                }
-                Err(e) => {
-                    let no = match e.kind() {
-                        std::io::ErrorKind::NotFound => ENOENT,
-                        std::io::ErrorKind::AlreadyExists => 17,
-                        std::io::ErrorKind::PermissionDenied => EACCES,
-                        _ => EINVAL,
-                    };
-                    set64(env, Gpr(0), neg(no));
-                    TrapOutcome::Handled
-                }
-            };
-        }
-        if nr == polyisa_os_linux::x86_64::MKDIRAT && self.is64
-            || nr == polyisa_os_linux::i386::MKDIRAT && !self.is64
-        {
-            // mkdirat(dirfd, path, mode)。AT_FDCWD+絶対/相対パスを受け付ける.
-            let (dirfd, path_addr) = (get64(env, r_a), get64(env, r_b));
-            if !is_at_fdcwd(dirfd) {
-                set64(env, Gpr(0), neg(EINVAL));
-                return TrapOutcome::Handled;
-            }
-            let path = match guest_c_string(env, path_addr) {
-                Some(p) => p,
-                None => return TrapOutcome::Unimplemented,
-            };
-            return match std::fs::create_dir(&path) {
-                Ok(()) => {
-                    set64(env, Gpr(0), 0);
-                    TrapOutcome::Handled
-                }
-                Err(e) => {
-                    let no = match e.kind() {
-                        std::io::ErrorKind::NotFound => ENOENT,
-                        std::io::ErrorKind::AlreadyExists => 17,
-                        std::io::ErrorKind::PermissionDenied => EACCES,
-                        _ => EINVAL,
-                    };
-                    set64(env, Gpr(0), neg(no));
-                    TrapOutcome::Handled
-                }
-            };
-        }
-        if nr == polyisa_os_linux::x86_64::RENAME && self.is64
-            || nr == polyisa_os_linux::i386::RENAME && !self.is64
-        {
-            // rename(oldpath, newpath)。ホストの rename に直結する.
-            let old_addr = get64(env, r_a);
-            let new_addr = get64(env, r_b);
-            let old_path = match guest_c_string(env, old_addr) {
-                Some(p) => p,
-                None => return TrapOutcome::Unimplemented,
-            };
-            let new_path = match guest_c_string(env, new_addr) {
-                Some(p) => p,
-                None => return TrapOutcome::Unimplemented,
-            };
-            return match std::fs::rename(&old_path, &new_path) {
-                Ok(()) => {
-                    set64(env, Gpr(0), 0);
-                    TrapOutcome::Handled
-                }
-                Err(e) => {
-                    let no = match e.kind() {
-                        std::io::ErrorKind::NotFound => ENOENT,
-                        std::io::ErrorKind::PermissionDenied => EACCES,
-                        _ => EINVAL,
-                    };
-                    set64(env, Gpr(0), neg(no));
-                    TrapOutcome::Handled
-                }
-            };
-        }
-        if nr == polyisa_os_linux::x86_64::SYMLINK && self.is64
-            || nr == polyisa_os_linux::i386::SYMLINK && !self.is64
-        {
-            // symlink(oldpath, newpath)。`ln -s` で使う。
-            // 可搬 API がないため実体はクリエート host の helper に置く。
-            let old_addr = get64(env, r_a);
-            let new_addr = get64(env, r_b);
-            let old_path = match guest_c_string(env, old_addr) {
-                Some(p) => p,
-                None => return TrapOutcome::Unimplemented,
-            };
-            let new_path = match guest_c_string(env, new_addr) {
-                Some(p) => p,
-                None => return TrapOutcome::Unimplemented,
-            };
-            return match polyisa_host::symlink(&old_path, &new_path) {
-                Ok(()) => {
-                    set64(env, Gpr(0), 0);
-                    TrapOutcome::Handled
-                }
-                Err(e) => {
-                    let no = match e.kind() {
-                        std::io::ErrorKind::NotFound => ENOENT,
-                        std::io::ErrorKind::AlreadyExists => 17,
-                        std::io::ErrorKind::PermissionDenied => EACCES,
-                        _ => EINVAL,
-                    };
-                    set64(env, Gpr(0), neg(no));
-                    TrapOutcome::Handled
-                }
-            };
-        }
-        if nr == polyisa_os_linux::x86_64::RMDIR && self.is64
-            || nr == polyisa_os_linux::i386::RMDIR && !self.is64
-        {
-            // rmdir(path)。ホストの remove_dir に直結する.
-            let path_addr = get64(env, r_a);
-            let path = match guest_c_string(env, path_addr) {
-                Some(p) => p,
-                None => return TrapOutcome::Unimplemented,
-            };
-            return match std::fs::remove_dir(&path) {
-                Ok(()) => {
-                    set64(env, Gpr(0), 0);
-                    TrapOutcome::Handled
-                }
-                Err(e) => {
-                    let no = match e.kind() {
-                        std::io::ErrorKind::NotFound => ENOENT,
-                        std::io::ErrorKind::PermissionDenied => EACCES,
-                        _ => EINVAL,
-                    };
-                    set64(env, Gpr(0), neg(no));
-                    TrapOutcome::Handled
-                }
-            };
-        }
-        if nr == polyisa_os_linux::x86_64::UNLINK && self.is64
-            || nr == polyisa_os_linux::i386::UNLINK && !self.is64
-        {
-            // unlink(path)。ホストの remove_file に直結する.
-            let path_addr = get64(env, r_a);
-            let path = match guest_c_string(env, path_addr) {
-                Some(p) => p,
-                None => return TrapOutcome::Unimplemented,
-            };
-            return match std::fs::remove_file(&path) {
-                Ok(()) => {
-                    set64(env, Gpr(0), 0);
-                    TrapOutcome::Handled
-                }
-                Err(e) => {
-                    let no = match e.kind() {
-                        std::io::ErrorKind::NotFound => ENOENT,
-                        std::io::ErrorKind::PermissionDenied => EACCES,
-                        _ => EINVAL,
-                    };
-                    set64(env, Gpr(0), neg(no));
-                    TrapOutcome::Handled
-                }
-            };
-        }
-        if nr == polyisa_os_linux::x86_64::UNLINKAT && self.is64
-            || nr == polyisa_os_linux::i386::UNLINKAT && !self.is64
-        {
-            // unlinkat(dirfd, path, flags)。AT_FDCWD のみ、flags は 0/AT_REMOVEDIR(0x200) を受け付ける.
-            // ディレクトリ指定は remove_dir、以外は remove_file に直結する.
-            let (dirfd, path_addr, flags) = if self.is64 {
-                (get64(env, Gpr(7)), get64(env, Gpr(6)), get64(env, Gpr(2)))
-            } else {
-                (
-                    u64::from(env.backend.get(Gpr(3).state())),
-                    u64::from(env.backend.get(Gpr(1).state())),
-                    u64::from(env.backend.get(Gpr(2).state())),
-                )
-            };
-            if !is_at_fdcwd(dirfd) || flags & !0x200 != 0 {
-                set64(env, Gpr(0), neg(EINVAL));
-                return TrapOutcome::Handled;
-            }
-            let path = match guest_c_string(env, path_addr) {
-                Some(p) => p,
-                None => return TrapOutcome::Unimplemented,
-            };
-            let res = if flags & 0x200 != 0 {
-                std::fs::remove_dir(&path)
-            } else {
-                std::fs::remove_file(&path)
-            };
-            return match res {
-                Ok(()) => {
-                    set64(env, Gpr(0), 0);
-                    TrapOutcome::Handled
-                }
-                Err(e) => {
-                    let no = match e.kind() {
-                        std::io::ErrorKind::NotFound => ENOENT,
-                        std::io::ErrorKind::PermissionDenied => EACCES,
-                        _ => EINVAL,
-                    };
-                    set64(env, Gpr(0), neg(no));
-                    TrapOutcome::Handled
-                }
-            };
-        }
-        if nr == polyisa_os_linux::x86_64::ACCESS && self.is64
-            || nr == polyisa_os_linux::i386::ACCESS && !self.is64
-        {
-            // access(path, mode)。存在確認のみ行い、存在すれば 0 を返す.
-            // X_OK 等の実行権限の厳密判定はしない（試作の割り切り）。
-            let path_addr = get64(env, r_a);
-            let path = match guest_c_string(env, path_addr) {
-                Some(p) => p,
-                None => return TrapOutcome::Unimplemented,
-            };
-            return match std::fs::metadata(&path) {
-                Ok(_) => {
-                    set64(env, Gpr(0), 0);
-                    TrapOutcome::Handled
-                }
-                Err(e) => {
-                    let no = match e.kind() {
-                        std::io::ErrorKind::NotFound => ENOENT,
-                        std::io::ErrorKind::PermissionDenied => EACCES,
-                        _ => EINVAL,
-                    };
-                    set64(env, Gpr(0), neg(no));
-                    TrapOutcome::Handled
-                }
-            };
-        }
-        if nr == polyisa_os_linux::x86_64::FACCESSAT && self.is64
-            || nr == polyisa_os_linux::i386::FACCESSAT && !self.is64
-        {
-            // faccessat(dirfd, path, mode)。AT_FDCWD のみ、存在確認のみ行う.
-            let (dirfd, path_addr) = if self.is64 {
-                (get64(env, Gpr(7)), get64(env, Gpr(6)))
-            } else {
-                (
-                    u64::from(env.backend.get(Gpr(3).state())),
-                    u64::from(env.backend.get(Gpr(1).state())),
-                )
-            };
-            if !is_at_fdcwd(dirfd) {
-                set64(env, Gpr(0), neg(EINVAL));
-                return TrapOutcome::Handled;
-            }
-            let path = match guest_c_string(env, path_addr) {
-                Some(p) => p,
-                None => return TrapOutcome::Unimplemented,
-            };
-            return match std::fs::metadata(&path) {
-                Ok(_) => {
-                    set64(env, Gpr(0), 0);
-                    TrapOutcome::Handled
-                }
-                Err(e) => {
-                    let no = match e.kind() {
-                        std::io::ErrorKind::NotFound => ENOENT,
-                        std::io::ErrorKind::PermissionDenied => EACCES,
-                        _ => EINVAL,
-                    };
-                    set64(env, Gpr(0), neg(no));
-                    TrapOutcome::Handled
-                }
-            };
-        }
-        if nr == polyisa_os_linux::x86_64::UTIMENSAT && self.is64
-            || nr == polyisa_os_linux::i386::UTIMENSAT && !self.is64
-        {
-            // utimensat(dirfd, path, times, flags)。AT_FDCWD のみ受け付ける.
-            // times==NULL は現在時刻のつもりで、存在すれば 0、なければ空作成して 0 を返す.
-            // times!=NULL は無視して同様に扱う（touch の継続が目的の試作）。
-            let (dirfd, path_addr) = if self.is64 {
-                (get64(env, Gpr(7)), get64(env, Gpr(6)))
-            } else {
-                (
-                    u64::from(env.backend.get(Gpr(3).state())),
-                    u64::from(env.backend.get(Gpr(1).state())),
-                )
-            };
-            if !is_at_fdcwd(dirfd) {
-                set64(env, Gpr(0), neg(EINVAL));
-                return TrapOutcome::Handled;
-            }
-            let path = match guest_c_string(env, path_addr) {
-                Some(p) => p,
-                None => return TrapOutcome::Unimplemented,
-            };
-            if std::fs::metadata(&path).is_ok() {
-                set64(env, Gpr(0), 0);
-                return TrapOutcome::Handled;
-            }
-            return match std::fs::File::create(&path) {
-                Ok(_) => {
-                    set64(env, Gpr(0), 0);
-                    TrapOutcome::Handled
-                }
-                Err(e) => {
-                    let no = match e.kind() {
-                        std::io::ErrorKind::NotFound => ENOENT,
-                        std::io::ErrorKind::PermissionDenied => EACCES,
-                        _ => EINVAL,
-                    };
-                    set64(env, Gpr(0), neg(no));
-                    TrapOutcome::Handled
-                }
-            };
-        }
-        if nr == polyisa_os_linux::x86_64::CHMOD && self.is64
-            || nr == polyisa_os_linux::i386::CHMOD && !self.is64
-            || nr == polyisa_os_linux::x86_64::FCHMOD && self.is64
-            || nr == polyisa_os_linux::i386::FCHMOD && !self.is64
-            || nr == polyisa_os_linux::x86_64::FCHMODAT && self.is64
-            || nr == polyisa_os_linux::i386::FCHMODAT && !self.is64
-        {
-            // chmod/fchmod/fchmodat。試作では権限変更を無視して 0 を返す.
-            set64(env, Gpr(0), 0);
-            return TrapOutcome::Handled;
-        }
-        if nr == polyisa_os_linux::x86_64::UMASK && self.is64
-            || nr == polyisa_os_linux::i386::UMASK && !self.is64
-        {
-            // umask(mask)。旧マスクを返して更新する。mkdir -p の保存・復元で使う.
-            // ホストの umask は触らない.
-            let mask = get64(env, r_a) as u32 & 0o777;
-            let old = self.umask;
-            self.umask = mask;
-            set64(env, Gpr(0), u64::from(old));
-            return TrapOutcome::Handled;
-        }
-        if nr == polyisa_os_linux::x86_64::FCNTL && self.is64
-            || nr == polyisa_os_linux::i386::FCNTL && !self.is64
-        {
-            // fcntl(fd, cmd, ...)。接続中・付け替え中の標準 fd と opened fd に対して 0 を返す.
-            // printf の stdout 設定などで呼ばれる。複製やロックは行わない.
-            let fd = get64(env, r_a) as u32;
-            let valid = self.fd_valid(fd);
-            if !valid {
-                set64(env, Gpr(0), neg(EBADF));
-                return TrapOutcome::Handled;
-            }
-            set64(env, Gpr(0), 0);
-            return TrapOutcome::Handled;
-        }
-        if nr == n_brk {
-            use polyisa_mem::{PAGE_SIZE, Perms, VirtAddr};
-            let addr = get64(env, r_a);
-            // 未初期化の非常口：像末尾を知らないため要求値を切り上げて使う。
-            // run_image 経由では init_brk 済みのため通常は通らない。
-            if self.heap_end == 0 {
-                self.heap_end = addr.next_multiple_of(PAGE_SIZE);
-                set64(env, Gpr(0), self.heap_end);
-                return TrapOutcome::Handled;
-            }
-            if addr == 0 {
-                // brk(0) は問い合わせであり現ブレークを返す。
-                set64(env, Gpr(0), self.heap_end);
-                return TrapOutcome::Handled;
-            }
-            let aligned = addr.next_multiple_of(PAGE_SIZE);
-            if aligned > self.heap_end {
-                // 拡張しすぎは失敗扱い（現ブレークを返す）。
-                const MAX_GROW: u64 = 256 * 1024 * 1024;
-                if aligned - self.heap_end > MAX_GROW {
-                    set64(env, Gpr(0), self.heap_end);
-                    return TrapOutcome::Handled;
-                }
-                // 縮小で残った写像は消さず、欠けたページだけ足す。
-                // 実 brk は縮小で内容を捨てないため、再拡張で上書きしない.
-                use polyisa_mem::PageNo;
-                let mut cur = self.heap_end;
-                while cur < aligned {
-                    if !env.backend.mem.is_mapped(PageNo(cur / PAGE_SIZE))
-                        && env.backend.mem.map(VirtAddr(cur), 1, Perms::RW).is_err()
-                    {
-                        set64(env, Gpr(0), self.heap_end);
-                        return TrapOutcome::Handled;
-                    }
-                    cur += PAGE_SIZE;
-                }
-                self.heap_end = aligned;
-            } else {
-                // 縮小は受け付ける（写像は残す）。
-                self.heap_end = aligned;
-            }
-            set64(env, Gpr(0), self.heap_end);
-            return TrapOutcome::Handled;
+            return out;
         }
         // Gap: GAP-0003
         if !self.reported.contains(&nr) {
             self.reported.push(nr);
-            let name = polyisa_os_linux::syscall_name(guest_abi, nr);
             eprintln!("run: unhandled syscall {nr} ({})", name.unwrap_or("?"));
         }
         TrapOutcome::Unimplemented
@@ -11179,5 +11298,30 @@ mod tests {
         env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
         let out = run_mode(&mut env, 0x1000, &mut sys, 100, true);
         assert_eq!(out, Outcome::Exit(0x1234_5678));
+    }
+
+    #[test]
+    fn syscall_tables_are_unique_and_named_in_os_linux() {
+        assert_syscall_table(X86_64_SYSCALLS, polyisa_os_linux::GuestAbi::X86_64Linux);
+        assert_syscall_table(I386_SYSCALLS, polyisa_os_linux::GuestAbi::I386Linux);
+    }
+
+    fn assert_syscall_table(table: &[(&str, SysFn)], abi: polyisa_os_linux::GuestAbi) {
+        let mut seen = std::collections::BTreeSet::new();
+        let known = os_linux_names(abi);
+        for (name, _) in table {
+            assert!(seen.insert(*name), "名前が重複している: {name}");
+            assert!(known.contains(name), "{name} は {abi:?} の番号表にない");
+        }
+    }
+
+    fn os_linux_names(abi: polyisa_os_linux::GuestAbi) -> std::collections::BTreeSet<&'static str> {
+        let mut names = std::collections::BTreeSet::new();
+        for nr in 0..4096 {
+            if let Some(name) = polyisa_os_linux::syscall_name(abi, nr) {
+                names.insert(name);
+            }
+        }
+        names
     }
 }
