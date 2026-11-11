@@ -5747,6 +5747,16 @@ fn dispatch<B: Backend>(
                 sem::cmp_rm32_imm_memnd(b, rm(), imm)
             }
         }
+        Insn::CmpRm32ImmSibd => {
+            // 81 /7 SIB mod=01。nc 0x4c68d6 の cmpl $0xff, 0xc(%rsp)。
+            let disp = ((word >> 32) & 0xff) as u8 as i8;
+            let imm = ((word & 0xffff_ffff) as u32).swap_bytes();
+            if no_index() {
+                sem::cmp_rm32_imm_mem8(b, sib_base(), disp, imm)
+            } else {
+                sem::cmp_rm32_imm_sibd(b, sib_base(), sib_idx(), sib_shift(), disp, imm)
+            }
+        }
         Insn::CmpRm32ImmMem8 => {
             // 81 /7 mod=01 [base+disp8],imm32 (56b)。disp は (word>>32) 下位8、imm は下位32 LE.
             let d8 = ((word >> 32) & 0xff) as u8 as i8;

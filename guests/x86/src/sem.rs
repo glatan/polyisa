@@ -18837,6 +18837,23 @@ pub fn cmp_rm32_imm_memnd<B: Backend>(b: &mut B, base: Gpr, imm: u32) -> Flow<B>
     Ok(())
 }
 
+/// CMP m32,imm32 [base+index*scale+disp8] (81 /7 SIB mod=01)。dst は変えず 6 旗を更新する.
+pub fn cmp_rm32_imm_sibd<B: Backend>(
+    b: &mut B,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i8,
+    imm: u32,
+) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, disp as i32, base, idx);
+    let x: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let y = b.konst::<W32>(imm);
+    let v = b.sub::<W32>(x, y);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
 /// CMP m32,imm32 [base+disp8] (81 /7 mod=01)。dst は変えず 6 旗を更新する.
 pub fn cmp_rm32_imm_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8, imm: u32) -> Flow<B> {
     let addr = eff_addr(b, base, disp);
