@@ -287,23 +287,22 @@ pub fn addiu<B: Backend>(b: &mut B, rt: Gpr, rs: Gpr, imm: i32) -> Flow<B> {
     Ok(())
 }
 
-/// BEQZALC。R6 の遅延スロットなし分岐・リンク。rt==0 のときだけ分岐し、
-/// $31 へのリンク（pc+4）は無条件に行う。1 命令で終わり commit は不要。
+/// BEQZALC。R6 の遅延スロットなし分岐・リンク。rt==0 のときだけ飛び、
+/// $31 へのリンク（pc+4）は無条件に書く。不成立でも pc は次の命令へ進む。
+/// npc は変えない。
 pub fn beqzalc<B: Backend>(b: &mut B, _rs: Gpr, rt: Gpr, pc: u64, disp: i32) -> Flow<B> {
     // デコードが rs==0 を保証する。分岐条件 rt==0 はここで調べる。
     let y = read(b, rt);
     let zero = b.konst::<W64>(0);
     let take = b.cmp::<W64>(polyisa_sem::Cmp::Eq, y, zero);
-    let ret = const_w64(b, pc.wrapping_add(4));
-    write(b, Gpr(31), ret);
+    let fall = const_w64(b, pc.wrapping_add(4));
+    write(b, Gpr(31), fall);
     let target = pc
         .wrapping_add(4)
         .wrapping_add((disp as i64 as u64).wrapping_mul(4));
-    let t = const_w64(b, target);
-    b.if_then(take, |b| {
-        b.set(pc_ref(), t);
-        Ok(())
-    })?;
+    let dest = const_w64(b, target);
+    let next = b.select::<W64>(take, dest, fall);
+    b.set(pc_ref(), next);
     Ok(())
 }
 

@@ -215,14 +215,14 @@ fn beqzalc_links_and_branches_without_delay_slot() {
         .unwrap();
     assert_eq!(env.backend.get(sem::pc_ref()), 0x1014);
     assert_eq!(g(&mut env, 31), 0x1004);
-    // npc には触らない（commit 不要）。
+    // npc には触らない。
     assert_eq!(env.backend.get(sem::npc_ref()), 0xdead_beef);
-    // rt!=0 のときは分岐せず、リンクだけ書く。
+    // rt!=0 のときは分岐せず、pc を次の命令へ進めてリンクを書く。
     env.backend.set(sem::pc_ref(), 0x2000);
     env.backend.set(Gpr(1).state(), 7);
     env.step(|b| sem::beqzalc(b, Gpr(0), Gpr(1), 0x2000, 4))
         .unwrap();
-    assert_eq!(env.backend.get(sem::pc_ref()), 0x2000);
+    assert_eq!(env.backend.get(sem::pc_ref()), 0x2004);
     assert_eq!(g(&mut env, 31), 0x2004);
 }
 

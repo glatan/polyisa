@@ -25,7 +25,7 @@ pub fn run_path(path: &str, argv: &[String]) -> Result<u64, String> {
             if ehdr.machine == 3 {
                 run_x86::run_elf_x86(path, argv)
             } else if ehdr.machine == 8 {
-                // EM_MIPS。エンディアンは ELF ヘッダから取る。Ref: SRC-LINUX (7.3)。
+                // EM_MIPS。Ref: SRC-LINUX (7.3)。アーキテクチャとエンディアンは ELF ヘッダから取る。
                 run_mips::run_elf_mips(path, argv)
             } else {
                 Err(format!("未対応の e_machine: {}", ehdr.machine))

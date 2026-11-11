@@ -562,16 +562,28 @@ fn set_u64(env: &mut BareEnv, offset: usize, value: u64) {
     );
 }
 
-/// 静的な MIPS ELF を実行する。機械番号 8。LE は Release 2、BE は R3000。
+/// 静的な MIPS ELF を実行する。機械番号 8。モデルは `e_flags` のアーキテクチャとエンディアンから選ぶ。
 pub fn run_elf_mips(path: &str, _argv: &[String]) -> Result<u64, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
     let ehdr = polyisa_loader::elf::parse_ehdr32(&bytes).map_err(|e| format!("ehdr: {e:?}"))?;
-    let model = if ehdr.little {
-        MipsModel::mips32r2()
-    } else {
-        MipsModel::mips1_be()
-    };
+    let model = model_from_flags(ehdr.little, ehdr.flags)?;
     run_loaded(&bytes, &ehdr, model, &mut O32Io::default())
+}
+
+/// `e_flags` の上位 4 ビットとエンディアンから CPU モデルを決める。
+/// clang 23 は MIPS I を 0、Release 2 を 0x7、Release 6 を 0x9 と書く。
+fn model_from_flags(little: bool, flags: u32) -> Result<MipsModel, String> {
+    let arch = flags & 0xf000_0000;
+    let mut model = match arch {
+        0x0000_0000 => MipsModel::mips1_be(),
+        0x7000_0000 => MipsModel::mips32r2(),
+        0x9000_0000 => MipsModel::r6(),
+        _ => {
+            return Err(format!("未対応の MIPS アーキテクチャフラグ: {arch:#x}"));
+        }
+    };
+    model.endian = if little { Endian::Le } else { Endian::Be };
+    Ok(model)
 }
 
 /// モデルを指定して静的な MIPS ELF を実行する。エンディアンはヘッダと一致させる。
@@ -865,6 +877,28 @@ mod tests {
     }
 
     #[test]
+    fn untaken_beqzalc_advances_to_the_next_instruction() {
+        // 0x1000 addiu r1, zero, 1
+        // 0x1004 beqzalc r1, +4     r1 は 0 ではない。
+        // 0x1008 addiu r2, zero, 9  これを実行して止まる。
+        let mut env = env_at(0x1000);
+        poke(&mut env, 0x1000, 0x2401_0001);
+        poke(&mut env, 0x1004, 0x2001_0004);
+        poke(&mut env, 0x1008, 0x2402_0009);
+        poke(&mut env, 0x100c, 0xffff_ffff);
+        let outcome = run(&mut env, 0x1000, be(MipsModel::r6()));
+        assert_eq!(
+            outcome,
+            MipsOutcome::Unimplemented {
+                pc: 0x100c,
+                word: 0xffff_ffff,
+            }
+        );
+        assert_eq!(reg(&mut env, 2), 9);
+        assert_eq!(reg(&mut env, 31), 0x1008);
+    }
+
+    #[test]
     fn the_same_bytes_decode_differently_by_endian() {
         // バイト列 24 02 00 01。BE は addiu r2, zero, 1。LE は beq。
         let mut be_env = env_at(0x1000);
@@ -1016,5 +1050,63 @@ mod tests {
         std::fs::write(&path, &file).unwrap();
         let code = run_elf_mips(path.to_str().unwrap(), &[]).unwrap();
         assert_eq!(code, 3);
+    }
+
+    fn elf_be(flags: u32, code: &[u32], memsz: u32) -> std::path::PathBuf {
+        let mut file = vec![0u8; 84 + code.len() * 4];
+        file[0..4].copy_from_slice(&polyisa_loader::elf::MAGIC);
+        file[4] = polyisa_loader::elf::CLASS_32;
+        file[5] = polyisa_loader::elf::DATA_BE;
+        file[6] = 1;
+        let be32 = |file: &mut [u8], off: usize, v: u32| {
+            file[off..off + 4].copy_from_slice(&v.to_be_bytes());
+        };
+        let be16 = |file: &mut [u8], off: usize, v: u16| {
+            file[off..off + 2].copy_from_slice(&v.to_be_bytes());
+        };
+        be16(&mut file, 16, 2);
+        be16(&mut file, 18, 8);
+        be32(&mut file, 20, 1);
+        be32(&mut file, 24, 0x1000);
+        be32(&mut file, 28, 52);
+        be32(&mut file, 36, flags);
+        be16(&mut file, 40, 52);
+        be16(&mut file, 42, 32);
+        be16(&mut file, 44, 1);
+        be32(&mut file, 52, 1);
+        be32(&mut file, 56, 84);
+        be32(&mut file, 60, 0x1000);
+        be32(&mut file, 68, (code.len() * 4) as u32);
+        be32(&mut file, 72, memsz);
+        be32(&mut file, 76, 5);
+        be32(&mut file, 80, 0x1000);
+        for (i, word) in code.iter().enumerate() {
+            be32(&mut file, 84 + i * 4, *word);
+        }
+        let path = std::env::temp_dir().join(format!("polyisa-mips-{flags:x}.elf"));
+        std::fs::write(&path, &file).unwrap();
+        path
+    }
+
+    #[test]
+    fn elf_flags_pick_load_delay() {
+        // lw の直後にそのレジスタを足す。R3000 は旧値 7、Release 2 はロード値 0x42。
+        let code = [
+            0x3404_1100u32,
+            0x2401_0007,
+            0x2403_0042,
+            0xac83_0000,
+            0x8c81_0000,
+            0x2428_0001,
+            0x0100_2021,
+            0x2402_0fa1,
+            0x0000_000c,
+        ];
+        let r3000 = elf_be(0, &code, 0x200);
+        assert_eq!(run_elf_mips(r3000.to_str().unwrap(), &[]).unwrap(), 8);
+        let r2 = elf_be(0x7000_0000, &code, 0x200);
+        assert_eq!(run_elf_mips(r2.to_str().unwrap(), &[]).unwrap(), 0x43);
+        let unknown = elf_be(0x5000_0000, &[0x2402_0fa1, 0x2404_0000, 0x0000_000c], 12);
+        assert!(run_elf_mips(unknown.to_str().unwrap(), &[]).is_err());
     }
 }
