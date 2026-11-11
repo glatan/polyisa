@@ -27,6 +27,7 @@ pub enum Ctrl {
 }
 
 /// 具体的な値で実行するバックエンド。
+#[derive(Clone)]
 pub struct InterpBackend {
     /// CPU 状態の素直なバイト列。配置は生成コードの `StateRef` に従う。
     pub state: Vec<u8>,

@@ -129,6 +129,9 @@ pub mod x86_64 {
     pub const FTRUNCATE: u64 = 77;
     pub const RENAME: u64 = 82;
     pub const SYMLINK: u64 = 88;
+    pub const CLONE: u64 = 56;
+    pub const EXECVE: u64 = 59;
+    pub const WAIT4: u64 = 61;
     // Gap: GAP-0004
     // statfs 系。busybox の `df` が呼ぶ。
     // Ref: SRC-LINUX (7.3).
@@ -209,6 +212,23 @@ pub mod i386 {
     pub const FSTATFS: u64 = 100;
     pub const STATFS64: u64 = 268;
     pub const FSTATFS64: u64 = 269;
+    // 番号だけを置く。実行のテストは x86_64 にある。
+    pub const CLONE: u64 = 120;
+    pub const EXECVE: u64 = 11;
+    pub const WAIT4: u64 = 114;
+}
+
+/// Linux の `clone` フラグ。アドレス空間の共有はプロセス生成では使わない。
+// Ref: SRC-LINUX (7.3).
+pub mod clone_flag {
+    pub const VM: u64 = 0x100;
+    pub const THREAD: u64 = 0x0001_0000;
+}
+
+/// 正常終了の wait ステータス。終了コードは 8–15 ビットに置く。
+#[must_use]
+pub fn exited_wait_status(code: u32) -> u32 {
+    (code & 0xff) << 8
 }
 
 /// ABI と番号から名前を引く。
@@ -320,6 +340,9 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             i386::FSTATFS => Some("fstatfs"),
             i386::STATFS64 => Some("statfs64"),
             i386::FSTATFS64 => Some("fstatfs64"),
+            i386::CLONE => Some("clone"),
+            i386::EXECVE => Some("execve"),
+            i386::WAIT4 => Some("wait4"),
             _ => None,
         },
         GuestAbi::X86_64Linux => match nr {
@@ -387,6 +410,9 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             x86_64::PRLIMIT64 => Some("prlimit64"),
             x86_64::STATFS => Some("statfs"),
             x86_64::FSTATFS => Some("fstatfs"),
+            x86_64::CLONE => Some("clone"),
+            x86_64::EXECVE => Some("execve"),
+            x86_64::WAIT4 => Some("wait4"),
             _ => None,
         },
         GuestAbi::Unknown => None,

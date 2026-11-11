@@ -7350,6 +7350,18 @@ pub struct CliLinux {
     std_paths: [Option<String>; 3],
     /// Some のとき、fd 1 の出力をここへ溜める。None のときはホストの stdout。
     capture_out: Option<Vec<u8>>,
+    /// ゲストプロセス表。fork した子と共有する。
+    procs: std::rc::Rc<std::cell::RefCell<polyisa_kernel::ProcessTable>>,
+    /// 0 は未登録。clone のときに 1 から採番する。
+    pid: u64,
+    /// clone で複製し、wait4 まで止めておく子。同時に一人。
+    parked: Option<Box<ParkedChild>>,
+}
+
+/// clone で止めた子の実行環境。
+struct ParkedChild {
+    env: BareEnv,
+    linux: CliLinux,
 }
 
 impl CliLinux {
@@ -7534,6 +7546,43 @@ impl CliLinux {
         }
         None
     }
+
+    /// 未登録ならプロセス表へ載せる。
+    fn ensure_self(&mut self) -> polyisa_kernel::ProcessId {
+        if self.pid == 0 {
+            let id = self.procs.borrow_mut().spawn(None);
+            self.pid = id.0;
+            id
+        } else {
+            polyisa_kernel::ProcessId(self.pid)
+        }
+    }
+
+    /// ファイル記述子を複製した子の状態。プロセス表は共有し、止めた子は持たない。
+    fn duplicate(&self) -> Self {
+        let clone_file =
+            |f: &Option<std::fs::File>| f.as_ref().and_then(|file| file.try_clone().ok());
+        Self {
+            reported: self.reported.clone(),
+            fds: self.fds.iter().map(clone_file).collect(),
+            std_files: std::array::from_fn(|i| clone_file(&self.std_files[i])),
+            std_closed: self.std_closed,
+            umask: self.umask,
+            is64: self.is64,
+            heap_end: self.heap_end,
+            fs_base: self.fs_base,
+            robust_head: self.robust_head,
+            rseq_addr: self.rseq_addr,
+            exe_path: self.exe_path.clone(),
+            dir_done: self.dir_done.clone(),
+            fd_paths: self.fd_paths.clone(),
+            std_paths: self.std_paths.clone(),
+            capture_out: self.capture_out.clone(),
+            procs: std::rc::Rc::clone(&self.procs),
+            pid: self.pid,
+            parked: None,
+        }
+    }
 }
 
 /// 旧名。`CliLinux` を使うこと。
@@ -7549,7 +7598,11 @@ const IO_CHUNK: usize = 65536;
 /// Linux 汎用の errno 番号の一部。負数で返す。
 /// Ref: SRC-LINUX (7.3).
 const ENOENT: u32 = 2;
+const ENOEXEC: u32 = 8;
 const EBADF: u32 = 9;
+const ECHILD: u32 = 10;
+const EAGAIN: u32 = 11;
+const EFAULT: u32 = 14;
 const EACCES: u32 = 13;
 const ENOMEM: u32 = 12;
 const EINVAL: u32 = 22;
@@ -7647,6 +7700,9 @@ const X86_64_SYSCALLS: &[(&str, SysFn)] = &[
     ("readv", sys_readv),
     ("exit", sys_exit),
     ("exit_group", sys_exit_group),
+    ("clone", sys_clone),
+    ("execve", sys_execve),
+    ("wait4", sys_wait4),
     ("mmap", sys_mmap),
     ("set_tid_address", sys_set_tid_address),
     ("gettid", sys_gettid),
@@ -8115,8 +8171,14 @@ fn sys_readv(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapO
     Some(TrapOutcome::Handled)
 }
 
-fn sys_exit(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    Some(TrapOutcome::Exit(get64(env, cx.r_a) as u32))
+fn sys_exit(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    let code = get64(env, cx.r_a) as u32;
+    if sys.pid != 0 {
+        sys.procs
+            .borrow_mut()
+            .exit(polyisa_kernel::ProcessId(sys.pid), code);
+    }
+    Some(TrapOutcome::Exit(code))
 }
 
 fn sys_exit_group(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
@@ -9534,6 +9596,199 @@ fn sys_brk(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOut
     }
     set64(env, Gpr(0), sys.heap_end);
     Some(TrapOutcome::Handled)
+}
+
+/// プロセスの clone。アドレス空間を共有するフラグは受けない。
+/// 子は wait4 まで止め、親には子の識別子を返す。
+fn sys_clone(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    let flags = get64(env, cx.r_a);
+    let stack = get64(env, cx.r_b);
+    if flags & (polyisa_os_linux::clone_flag::VM | polyisa_os_linux::clone_flag::THREAD) != 0 {
+        return Some(TrapOutcome::Unimplemented);
+    }
+    if sys.parked.is_some() {
+        set64(env, Gpr(0), cx.neg(EAGAIN));
+        return Some(TrapOutcome::Handled);
+    }
+    let parent = sys.ensure_self();
+    let child_pid = sys.procs.borrow_mut().fork(parent);
+    let mut child_env = env.clone();
+    set64(&mut child_env, Gpr(0), 0);
+    if stack != 0 {
+        set64(&mut child_env, Gpr(4), stack);
+    }
+    // SYSCALL と INT 0x80 はどちらも 2 バイト。子は次の命令から始める。
+    let eip = eip_of(&mut child_env);
+    child_env
+        .backend
+        .set(polyisa_guest_x86::sem::eip_ref(), eip.wrapping_add(2));
+    let mut child_linux = sys.duplicate();
+    child_linux.pid = child_pid.0;
+    set64(env, Gpr(0), child_pid.0);
+    sys.parked = Some(Box::new(ParkedChild {
+        env: child_env,
+        linux: child_linux,
+    }));
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_execve(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    let path_addr = get64(env, cx.r_a);
+    let argv_addr = get64(env, cx.r_b);
+    let envp_addr = get64(env, cx.r_c);
+    let Some(path) = guest_c_string(env, path_addr) else {
+        set64(env, Gpr(0), cx.neg(EFAULT));
+        return Some(TrapOutcome::Handled);
+    };
+    let argv = match read_cstr_array(env, argv_addr) {
+        Ok(v) => v,
+        Err(()) => {
+            set64(env, Gpr(0), cx.neg(EFAULT));
+            return Some(TrapOutcome::Handled);
+        }
+    };
+    let envp = match read_cstr_array(env, envp_addr) {
+        Ok(v) => v,
+        Err(()) => {
+            set64(env, Gpr(0), cx.neg(EFAULT));
+            return Some(TrapOutcome::Handled);
+        }
+    };
+    let bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            set64(env, Gpr(0), cx.neg(ENOENT));
+            return Some(TrapOutcome::Handled);
+        }
+        Err(_) => {
+            set64(env, Gpr(0), cx.neg(EACCES));
+            return Some(TrapOutcome::Handled);
+        }
+    };
+    match install_exec(sys, env, &bytes, &path, &argv, &envp) {
+        Ok(()) => Some(TrapOutcome::Handled),
+        Err(errno) => {
+            set64(env, Gpr(0), cx.neg(errno));
+            Some(TrapOutcome::Handled)
+        }
+    }
+}
+
+fn sys_wait4(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    let which = get64(env, cx.r_a) as i64;
+    let status_ptr = get64(env, cx.r_b);
+    let run_child = sys
+        .parked
+        .as_ref()
+        .is_some_and(|child| which == -1 || which as u64 == child.linux.pid);
+    if run_child && let Some(mut child) = sys.parked.take() {
+        let entry = eip_of(&mut child.env);
+        let is64 = child.linux.is64;
+        let out = run_mode(&mut child.env, entry, &mut child.linux, 30_000_000, is64);
+        if !matches!(out, Outcome::Exit(_)) {
+            return Some(TrapOutcome::Unimplemented);
+        }
+    }
+    match sys
+        .procs
+        .borrow_mut()
+        .try_reap(polyisa_kernel::ProcessId(sys.pid), which)
+    {
+        polyisa_kernel::Reap::Exited { pid, code } => {
+            if status_ptr != 0 {
+                let st = polyisa_os_linux::exited_wait_status(code);
+                if env
+                    .backend
+                    .mem
+                    .write(VirtAddr(status_ptr), &st.to_le_bytes())
+                    .is_err()
+                {
+                    set64(env, Gpr(0), cx.neg(EFAULT));
+                    return Some(TrapOutcome::Handled);
+                }
+            }
+            set64(env, Gpr(0), pid.0);
+            Some(TrapOutcome::Handled)
+        }
+        polyisa_kernel::Reap::Pending | polyisa_kernel::Reap::NoChild => {
+            set64(env, Gpr(0), cx.neg(ECHILD));
+            Some(TrapOutcome::Handled)
+        }
+    }
+}
+
+/// ゲストのポインタ配列を NUL 終端まで読む。失敗は `Err(())`。
+fn read_cstr_array(env: &mut BareEnv, addr: u64) -> Result<Vec<Vec<u8>>, ()> {
+    if addr == 0 {
+        return Err(());
+    }
+    let acc = data_access();
+    let mut out = Vec::new();
+    for i in 0..64u64 {
+        let mut word = [0u8; 8];
+        if env
+            .backend
+            .mem
+            .read(VirtAddr(addr + i * 8), &mut word, acc)
+            .is_err()
+        {
+            return Err(());
+        }
+        let ptr = u64::from_le_bytes(word);
+        if ptr == 0 {
+            return Ok(out);
+        }
+        let Some(text) = guest_c_string(env, ptr) else {
+            return Err(());
+        };
+        out.push(text.into_bytes());
+    }
+    Err(())
+}
+
+/// 現在のアドレス空間を静的 ELF で置き換え、入口へ eip を移す。
+fn install_exec(
+    sys: &mut CliLinux,
+    env: &mut BareEnv,
+    bytes: &[u8],
+    path: &str,
+    argv: &[Vec<u8>],
+    envp: &[Vec<u8>],
+) -> Result<(), u32> {
+    use polyisa_mem::{PAGE_SIZE, Perms};
+    let ehdr = polyisa_loader::elf::parse_ehdr(bytes).map_err(|_| ENOEXEC)?;
+    const EM_X86_64: u16 = 62;
+    if !ehdr.little || ehdr.machine != EM_X86_64 || ehdr.entry > u64::from(u32::MAX) {
+        return Err(ENOEXEC);
+    }
+    let phdrs = polyisa_loader::elf::parse_phdrs(bytes, &ehdr).map_err(|_| ENOEXEC)?;
+    let mut mem = polyisa_mem::AddressSpace::new();
+    polyisa_loader::elf::load_segments(bytes, &phdrs, &mut mem).map_err(|_| ENOEXEC)?;
+    let mut image_end = 0u64;
+    for ph in &phdrs {
+        if ph.seg_type == 1 {
+            image_end = image_end.max(ph.vaddr.saturating_add(ph.memsz));
+        }
+    }
+    let top = 0x7fff_0000u64;
+    let (img, sp) = polyisa_os_linux::build_initial_stack(top, argv, envp, &[(6, 0x1000)]);
+    const STACK_SIZE: u64 = 8 * 1024 * 1024;
+    let base = top - STACK_SIZE;
+    let end = top.next_multiple_of(PAGE_SIZE);
+    let count = (end - base) / PAGE_SIZE;
+    mem.map(VirtAddr(base), count, Perms(Perms::R.0 | Perms::W.0))
+        .map_err(|_| ENOMEM)?;
+    mem.write(VirtAddr(sp), &img).map_err(|_| EFAULT)?;
+    env.backend.mem = mem;
+    env.backend.reservation = polyisa_mem::Reservation::empty();
+    polyisa_guest_x86::sem::write64(&mut env.backend, Gpr(4), sp);
+    set64(env, Gpr(0), 0);
+    env.backend
+        .set(polyisa_guest_x86::sem::eip_ref(), ehdr.entry as u32);
+    sys.init_brk(image_end);
+    sys.exe_path = path.to_string();
+    sys.fs_base = 0;
+    Ok(())
 }
 
 // Gap: GAP-0001
@@ -11380,6 +11635,103 @@ mod tests {
         env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
         let out = run_mode(&mut env, 0x1000, &mut sys, 100, true);
         assert_eq!(out, Outcome::Exit(0x1234_5678));
+    }
+
+    #[test]
+    fn parent_receives_exec_child_exit_code() {
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("polyisa-exit42");
+        std::fs::write(&file, exit_elf(42)).unwrap();
+        let path = file.to_str().unwrap();
+
+        let mut sys = CliLinux::x86_64();
+        let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_x86::CpuState>());
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 3, rwx).unwrap();
+
+        let path_addr = 0x2000u64;
+        let argv_addr = 0x2100u64;
+        let envp_addr = 0x2200u64;
+        let status_addr = 0x3000u64;
+        env.backend
+            .mem
+            .write(VirtAddr(path_addr), path.as_bytes())
+            .unwrap();
+        let mut argv = [0u8; 16];
+        argv[..8].copy_from_slice(&path_addr.to_le_bytes());
+        env.backend.mem.write(VirtAddr(argv_addr), &argv).unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(envp_addr), &[0u8; 8])
+            .unwrap();
+
+        let mut code = Vec::new();
+        push_mov_imm(&mut code, 0xC0, 56);
+        push_mov_imm(&mut code, 0xC7, 17);
+        push_mov_imm(&mut code, 0xC6, 0);
+        code.extend_from_slice(&[0x0F, 0x05, 0x48, 0x85, 0xC0]);
+        let jne_at = code.len();
+        code.extend_from_slice(&[0x75, 0]);
+        let child_at = code.len();
+        push_mov_imm(&mut code, 0xC0, 59);
+        push_mov_imm(&mut code, 0xC7, path_addr as u32);
+        push_mov_imm(&mut code, 0xC6, argv_addr as u32);
+        push_mov_imm(&mut code, 0xC2, envp_addr as u32);
+        code.extend_from_slice(&[0x0F, 0x05]);
+        push_mov_imm(&mut code, 0xC0, 60);
+        push_mov_imm(&mut code, 0xC7, 127);
+        code.extend_from_slice(&[0x0F, 0x05]);
+        let parent_at = code.len();
+        code[jne_at + 1] = u8::try_from(parent_at - child_at).unwrap();
+        code.extend_from_slice(&[0x48, 0x89, 0xC7]);
+        push_mov_imm(&mut code, 0xC6, status_addr as u32);
+        push_mov_imm(&mut code, 0xC2, 0);
+        push_mov_imm(&mut code, 0xC0, 61);
+        code.extend_from_slice(&[0x0F, 0x05, 0x8B, 0x06, 0xC1, 0xE8, 0x08, 0x48, 0x89, 0xC7]);
+        push_mov_imm(&mut code, 0xC0, 60);
+        code.extend_from_slice(&[0x0F, 0x05]);
+
+        env.backend.mem.write(VirtAddr(0x1000), &code).unwrap();
+        let out = run_mode(&mut env, 0x1000, &mut sys, 1000, true);
+        assert_eq!(out, Outcome::Exit(42));
+    }
+
+    fn push_mov_imm(code: &mut Vec<u8>, modrm: u8, imm: u32) {
+        code.extend_from_slice(&[0x48, 0xC7, modrm]);
+        code.extend_from_slice(&imm.to_le_bytes());
+    }
+
+    /// 指定した終了コードで exit する x86_64 の静的 ELF。
+    fn exit_elf(code: u32) -> Vec<u8> {
+        let mut body = vec![0x48, 0xC7, 0xC0, 60, 0, 0, 0, 0x48, 0xC7, 0xC7];
+        body.extend_from_slice(&code.to_le_bytes());
+        body.extend_from_slice(&[0x0F, 0x05]);
+        let mut file = vec![0u8; 120];
+        file.extend_from_slice(&body);
+        file[0..4].copy_from_slice(b"\x7fELF");
+        file[4] = 2;
+        file[5] = 1;
+        file[6] = 1;
+        file[16..18].copy_from_slice(&2u16.to_le_bytes());
+        file[18..20].copy_from_slice(&62u16.to_le_bytes());
+        file[20..24].copy_from_slice(&1u32.to_le_bytes());
+        let entry = 0x400000u64 + 120;
+        file[24..32].copy_from_slice(&entry.to_le_bytes());
+        file[32..40].copy_from_slice(&64u64.to_le_bytes());
+        file[52..54].copy_from_slice(&64u16.to_le_bytes());
+        file[54..56].copy_from_slice(&56u16.to_le_bytes());
+        file[56..58].copy_from_slice(&1u16.to_le_bytes());
+        let ph = 64;
+        file[ph..ph + 4].copy_from_slice(&1u32.to_le_bytes());
+        file[ph + 4..ph + 8].copy_from_slice(&5u32.to_le_bytes());
+        file[ph + 16..ph + 24].copy_from_slice(&0x400000u64.to_le_bytes());
+        file[ph + 24..ph + 32].copy_from_slice(&0x400000u64.to_le_bytes());
+        let len = file.len() as u64;
+        file[ph + 32..ph + 40].copy_from_slice(&len.to_le_bytes());
+        file[ph + 40..ph + 48].copy_from_slice(&len.to_le_bytes());
+        file[ph + 48..ph + 56].copy_from_slice(&0x1000u64.to_le_bytes());
+        file
     }
 
     #[test]

@@ -10,6 +10,7 @@ use polyisa_mem::{AddressSpace, Perms, VirtAddr};
 use crate::interp::{Ctrl, InterpBackend, InterpExit};
 
 /// 裸実行の harness。`state_len` はゲストの CPU 状態のバイト数。
+#[derive(Clone)]
 pub struct BareEnv {
     pub backend: InterpBackend,
     /// 次に実行する仮想アドレス。テストが設定する。

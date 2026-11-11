@@ -34,7 +34,7 @@
 
 | ID | 設計 | 現在の実装 | 区分 | 解消の条件 |
 |---|---|---|---|---|
-| GAP-0001 | [ユーザーモード「構成」](design/user-mode.md#構成) | システムコールの処理は `crates/cli/src/run.rs` の `CliEcall`（RISC-V）と `crates/cli/src/run_x86.rs` の `CliLinux`（x86）にある。`kernel` は `ProcessId`、`ThreadId`、`Scheduler` だけを持つ。`os-linux` は番号表と `build_initial_stack` を持つ | 代替 | 段階 4 の終わりの共通の抽象の見直し（S4-2）までに `kernel` と `os-linux` へ移す |
+| GAP-0001 | [ユーザーモード「構成」](design/user-mode.md#構成) | `kernel` はプロセス表（生成、fork、終了、wait の回収）を持つ。`os-linux` は番号表、`build_initial_stack`、終了ステータスの符号化を持つ。clone（プロセス）、execve、wait4 はそこを呼ぶ。残りのシステムコールの処理は `crates/cli/src/run.rs` の `CliEcall`（RISC-V）と `crates/cli/src/run_x86.rs` の `CliLinux`（x86）にある | 代替 | 段階 4 の終わりの共通の抽象の見直し（S4-2）までに `kernel` と `os-linux` へ移す |
 | GAP-0002 | [ユーザーモード「仮想ファイルシステム」](design/user-mode.md#仮想ファイルシステム) | ゲストのルートの割り当てはない。`openat` は絶対パスの文字列をホストのパスとして `std::fs` で開く。`/proc/self/exe` の合成は `readlink` と `readlinkat` だけで、`exe_path` が空でなければゲスト実行ファイルのホストパスを返す。`/proc/self/maps`、`/proc/cpuinfo`、`/dev` の合成はない。`/proc/self/fd/<fd>` はホストのそのパスを開く | 代替 | S1-1（条件に「ゲストのルートを使って」を含む） |
 | GAP-0003 | [ユーザーモード「未実装のシステムコール」](design/user-mode.md#未実装のシステムコール) | `ENOSYS` を返さず、番号を一度だけ標準エラーへ報告して実行を止める。RISC-V は `EcallOutcome::Unimplemented`、x86 は `TrapOutcome::Unimplemented` を、それぞれの `run` が `Outcome::Unimplemented` にして戻る | 代替 | GAP-0001 の解消と同時 |
 | GAP-0004 | [ホスト抽象化「必要なホストの機能」](design/host.md#必要なホストの機能) | x86_64 の statfs（137）と fstatfs（138）、i386 の statfs（99）、fstatfs（100）、statfs64（268）、fstatfs64（269）は番号表と `syscall_name` だけにあり、トラップ処理に分岐はない。処理しない番号は報告のあと実行を止める。busybox の `df` は x86_64 の statfs（137）で止まる。i386 の到達経路は確かめていない | 対象外 | ADR-0014 |

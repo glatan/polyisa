@@ -18,10 +18,12 @@
 - chmod
 - clock_gettime
 - clock_nanosleep
+- clone
 - close
 - dup
 - dup2
 - dup3
+- execve
 - exit
 - exit_group
 - faccessat
@@ -70,6 +72,7 @@
 - unlink
 - unlinkat
 - utimensat
+- wait4
 - write
 - writev
 
