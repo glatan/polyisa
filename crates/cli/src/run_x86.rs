@@ -5627,6 +5627,14 @@ fn dispatch<B: Backend>(
                 sem::sbb_rm32_imm(b, rm(), imm32())
             }
         }
+        Insn::AndRm32ImmMemnd => {
+            // 81 /4 mod=00 [base],imm32。vi 0x40511c の andl $0xfffffaff, (%rbx)。
+            if rex_w {
+                sem::and_rm64_imm_memnd(b, rm(), imm32())
+            } else {
+                sem::and_rm32_imm_memnd(b, rm(), imm32())
+            }
+        }
         Insn::AndRm32Imm => {
             if rex_w {
                 sem::and_rm64_imm(b, rm(), imm32())

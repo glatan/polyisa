@@ -18667,6 +18667,28 @@ pub fn or_rm64_imm_sibd<B: Backend>(
     Ok(())
 }
 
+/// AND m32,imm32 [base] (81 /4 mod=00)。
+pub fn and_rm32_imm_memnd<B: Backend>(b: &mut B, base: Gpr, imm: u32) -> Flow<B> {
+    let addr = read64(b, base);
+    let x: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let y = b.konst::<W32>(imm);
+    let v = b.and::<W32>(x, y);
+    b.store::<W32>(addr, v, DATA_WRITE)?;
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// AND m64,imm32 [base] (81 /4 mod=00, REX.W)。imm32 は符号拡張する.
+pub fn and_rm64_imm_memnd<B: Backend>(b: &mut B, base: Gpr, imm: u32) -> Flow<B> {
+    let addr = read64(b, base);
+    let x: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let y = b.konst::<W64>(imm as i32 as u64);
+    let v = b.and::<W64>(x, y);
+    b.store::<W64>(addr, v, DATA_WRITE)?;
+    update_logic_flags(b, v);
+    Ok(())
+}
+
 /// AND m32,imm32 [base+disp8] (81 /4 mod=01)。
 pub fn and_rm32_imm_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8, imm: u32) -> Flow<B> {
     let addr = eff_addr(b, base, disp);
