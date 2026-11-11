@@ -555,6 +555,14 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("or_rm32_imm_memnd", "MR", "10000001 00001... ................................", "or r/m32, {imm}", "alu"),
         // OR m32,imm32 SIB mod=00 [base+index*scale] (81 /1)。awk 0x4a4354 対応。base=5 は長さが違う.
         ("or_rm32_imm_sib", "F1", "10000001 00001100 ........ ................................", "or r/m32, {imm}", "alu"),
+        // ADD m32,imm32 SIB mod=01 [base+index*scale+disp8] (81 /0)。bzip2 0x480dcd 対応。
+        (
+            "add_rm32_imm_sibd",
+            "F1",
+            "10000001 01000100 ........ ........ ................................",
+            "add r/m32, {imm}",
+            "alu",
+        ),
         // CMP m32,imm32 mod=00 [base] (81 /7)。REX.W で64bit.
         ("cmp_rm32_imm_memnd", "MR", "10000001 00111... ................................", "cmp r/m32, {imm}", "alu"),
         // OR m32,imm32 mod=01 [base+disp8] (81 /1)。SIB は fetch で弾く.

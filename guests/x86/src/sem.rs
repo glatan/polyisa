@@ -4455,6 +4455,64 @@ pub fn add_rm64_imm<B: Backend>(b: &mut B, dst: Gpr, imm: u32) -> Flow<B> {
     Ok(())
 }
 
+/// ADD m32,imm32 [base+disp8] (81 /0 SIB mod=01、index なし)。
+pub fn add_rm32_imm_disp8<B: Backend>(b: &mut B, base: Gpr, disp: i8, imm: u32) -> Flow<B> {
+    let addr = eff_addr(b, base, disp);
+    let x: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let y = b.konst::<W32>(imm);
+    let v = b.add::<W32>(x, y);
+    b.store::<W32>(addr, v, DATA_WRITE)?;
+    update_add_flags(b, x, y, v);
+    Ok(())
+}
+
+/// ADD m64,imm32 [base+disp8] (81 /0 SIB mod=01、REX.W、index なし)。imm32 は符号拡張する.
+pub fn add_rm64_imm_disp8<B: Backend>(b: &mut B, base: Gpr, disp: i8, imm: u32) -> Flow<B> {
+    let addr = eff_addr(b, base, disp);
+    let x: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let y = b.konst::<W64>(imm as i32 as u64);
+    let v = b.add::<W64>(x, y);
+    b.store::<W64>(addr, v, DATA_WRITE)?;
+    update_add_flags(b, x, y, v);
+    Ok(())
+}
+
+/// ADD m32,imm32 [base+index*scale+disp8] (81 /0 SIB mod=01)。
+pub fn add_rm32_imm_sibd<B: Backend>(
+    b: &mut B,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i8,
+    imm: u32,
+) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, disp as i32, base, idx);
+    let x: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let y = b.konst::<W32>(imm);
+    let v = b.add::<W32>(x, y);
+    b.store::<W32>(addr, v, DATA_WRITE)?;
+    update_add_flags(b, x, y, v);
+    Ok(())
+}
+
+/// ADD m64,imm32 [base+index*scale+disp8] (81 /0 SIB mod=01、REX.W)。imm32 は符号拡張する.
+pub fn add_rm64_imm_sibd<B: Backend>(
+    b: &mut B,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i8,
+    imm: u32,
+) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, disp as i32, base, idx);
+    let x: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let y = b.konst::<W64>(imm as i32 as u64);
+    let v = b.add::<W64>(x, y);
+    b.store::<W64>(addr, v, DATA_WRITE)?;
+    update_add_flags(b, x, y, v);
+    Ok(())
+}
+
 /// OR r/m32, imm32。5 旗を更新する（CF=0、OF=0）.
 pub fn or_rm32_imm<B: Backend>(b: &mut B, dst: Gpr, imm: u32) -> Flow<B> {
     let x = read(b, dst);

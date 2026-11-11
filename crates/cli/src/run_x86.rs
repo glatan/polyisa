@@ -620,7 +620,7 @@ fn fetch_len(
                 None
             }
         }
-        // 0x81 /r id (算術 imm32 群)。SIB 付きは未対応。
+        // 0x81 /r id (算術 imm32 群)。
         // has66 (66 81) は imm16 のため 2B 短くなる.
         0x81 => {
             let s = second?;
@@ -631,8 +631,11 @@ fn fetch_len(
                 Some(6 - sub)
             } else if rm == 4 {
                 // mod=00 SIB+imm32 (7B)。base=5 は disp32 が付く。awk 0x4a4354 対応.
+                // mod=01 は SIB+disp8+imm32 (8B)。bzip2 0x480dcd の addq $0x102, 0x28(%rsp)。
                 if has66 {
                     None
+                } else if md == 1 {
+                    Some(8)
                 } else {
                     let t = third?;
                     if md == 0 && t & 7 != 5 { Some(7) } else { None }
@@ -5272,6 +5275,22 @@ fn dispatch<B: Backend>(
                 sem::add_rm64_imm(b, rm(), imm32())
             } else {
                 sem::add_rm32_imm(b, rm(), imm32())
+            }
+        }
+        Insn::AddRm32ImmSibd => {
+            // 81 /0 SIB mod=01 [base+disp8],imm32。bzip2 0x480dcd の addq $0x102, 0x28(%rsp)。
+            let disp = ((word >> 32) & 0xff) as u8 as i8;
+            let imm = ((word & 0xffff_ffff) as u32).swap_bytes();
+            if no_index() {
+                if rex_w {
+                    sem::add_rm64_imm_disp8(b, sib_base(), disp, imm)
+                } else {
+                    sem::add_rm32_imm_disp8(b, sib_base(), disp, imm)
+                }
+            } else if rex_w {
+                sem::add_rm64_imm_sibd(b, sib_base(), sib_idx(), sib_shift(), disp, imm)
+            } else {
+                sem::add_rm32_imm_sibd(b, sib_base(), sib_idx(), sib_shift(), disp, imm)
             }
         }
         Insn::AddRm64Imm => sem::add_rm64_imm(b, rm(), imm32()),
