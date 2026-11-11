@@ -899,6 +899,13 @@ fn fetch_len(
                 None
             }
         }
+        // D8 C0+i (FADD ST(0), ST(i))。reg-direct 2B のみ。seq 0x4d097d の D8 C0。
+        0xD8 => {
+            let s = second?;
+            let md = s >> 6;
+            let reg = (s >> 3) & 7;
+            if md == 3 && reg == 0 { Some(2) } else { None }
+        }
         // DE C8+i (FMULP ST(i))。reg-direct 2B のみ。seq 0x4018c7 の DE C9。
         0xDE => {
             let s = second?;
@@ -1441,6 +1448,7 @@ pub fn run_mode(
                 | 0xDB
                 | 0xDF
                 | 0xDE
+                | 0xD8
                 | 0xDD
                 | 0x0A
                 | 0xC0
@@ -3029,6 +3037,10 @@ fn dispatch<B: Backend>(
             } else {
                 sem::fstp_m64_sibd(b, sib_base(), sib_idx(), sib_shift(), disp8())
             }
+        }
+        Insn::FaddSt => {
+            // D8 C0+i。seq 0x4d097d の D8 C0 は FADD ST(0), ST(0)。
+            sem::fadd_st(b, (word & 7) as u8)
         }
         Insn::FmulpSt => {
             // DE C8+i。seq 0x4018c7 の DE C9 は FMULP ST(1)。

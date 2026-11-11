@@ -11106,6 +11106,313 @@ fn mul_ext<B: Backend>(
     (sig_out, exp_word)
 }
 
+fn bit_or<B: Backend>(b: &mut B, x: B::B, y: B::B) -> B::B {
+    let zero = b.konst::<W64>(0);
+    let one = b.konst::<W64>(1);
+    let xn = b.select::<W64>(x, one, zero);
+    let yn = b.select::<W64>(y, one, zero);
+    let combined = b.or::<W64>(xn, yn);
+    b.cmp::<W64>(Cmp::Ne, combined, zero)
+}
+
+fn bit_and<B: Backend>(b: &mut B, x: B::B, y: B::B) -> B::B {
+    let zero = b.konst::<W64>(0);
+    let one = b.konst::<W64>(1);
+    let xn = b.select::<W64>(x, one, zero);
+    let yn = b.select::<W64>(y, one, zero);
+    let combined = b.and::<W64>(xn, yn);
+    b.cmp::<W64>(Cmp::Ne, combined, zero)
+}
+
+fn bit_not<B: Backend>(b: &mut B, x: B::B) -> B::B {
+    let zero = b.konst::<W64>(0);
+    let one = b.konst::<W64>(1);
+    let xn = b.select::<W64>(x, zero, one);
+    b.cmp::<W64>(Cmp::Ne, xn, zero)
+}
+
+/// 0 のとき 64。上位から見て最初の 1 までのゼロの数。
+fn clz64<B: Backend>(b: &mut B, x: B::V<W64>) -> B::V<W64> {
+    let zero = b.konst::<W64>(0);
+    let n32 = b.konst::<W64>(32);
+    let n16 = b.konst::<W64>(16);
+    let n8 = b.konst::<W64>(8);
+    let n4 = b.konst::<W64>(4);
+    let n2 = b.konst::<W64>(2);
+    let n1 = b.konst::<W64>(1);
+    let n64 = b.konst::<W64>(64);
+    let s32 = b.konst::<W64>(32);
+    let s48 = b.konst::<W64>(48);
+    let s56 = b.konst::<W64>(56);
+    let s60 = b.konst::<W64>(60);
+    let s62 = b.konst::<W64>(62);
+    let s63 = b.konst::<W64>(63);
+
+    let hi32 = b.shr_l::<W64>(x, s32);
+    let z32 = b.cmp::<W64>(Cmp::Eq, hi32, zero);
+    let n = b.select::<W64>(z32, n32, zero);
+    let x32 = b.shl::<W64>(x, s32);
+    let y = b.select::<W64>(z32, x32, x);
+
+    let hi16 = b.shr_l::<W64>(y, s48);
+    let z16 = b.cmp::<W64>(Cmp::Eq, hi16, zero);
+    let add16 = b.select::<W64>(z16, n16, zero);
+    let n = b.add::<W64>(n, add16);
+    let y16 = b.shl::<W64>(y, n16);
+    let y = b.select::<W64>(z16, y16, y);
+
+    let hi8 = b.shr_l::<W64>(y, s56);
+    let z8 = b.cmp::<W64>(Cmp::Eq, hi8, zero);
+    let add8 = b.select::<W64>(z8, n8, zero);
+    let n = b.add::<W64>(n, add8);
+    let y8 = b.shl::<W64>(y, n8);
+    let y = b.select::<W64>(z8, y8, y);
+
+    let hi4 = b.shr_l::<W64>(y, s60);
+    let z4 = b.cmp::<W64>(Cmp::Eq, hi4, zero);
+    let add4 = b.select::<W64>(z4, n4, zero);
+    let n = b.add::<W64>(n, add4);
+    let y4 = b.shl::<W64>(y, n4);
+    let y = b.select::<W64>(z4, y4, y);
+
+    let hi2 = b.shr_l::<W64>(y, s62);
+    let z2 = b.cmp::<W64>(Cmp::Eq, hi2, zero);
+    let add2 = b.select::<W64>(z2, n2, zero);
+    let n = b.add::<W64>(n, add2);
+    let y2 = b.shl::<W64>(y, n2);
+    let y = b.select::<W64>(z2, y2, y);
+
+    let hi1 = b.shr_l::<W64>(y, s63);
+    let z1 = b.cmp::<W64>(Cmp::Eq, hi1, zero);
+    let add1 = b.select::<W64>(z1, n1, zero);
+    let n = b.add::<W64>(n, add1);
+    let is_zero = b.cmp::<W64>(Cmp::Eq, x, zero);
+    b.select::<W64>(is_zero, n64, n)
+}
+
+/// 正規化済み 80 ビット同士の加算。最近接偶数へ丸め、ゼロと無限大だけ特別扱いする。
+/// 非正規化数はゼロとみなす。仮数の 128 ビットより下は sticky に潰す。
+fn add_ext<B: Backend>(
+    b: &mut B,
+    sig_a: B::V<W64>,
+    exp_a: B::V<W16>,
+    sig_b: B::V<W64>,
+    exp_b: B::V<W16>,
+) -> (B::V<W64>, B::V<W16>) {
+    let zero = b.konst::<W64>(0);
+    let one = b.konst::<W64>(1);
+    let mask15 = b.konst::<W64>(0x7fff);
+    let special = b.konst::<W64>(0x7fff);
+    let s15 = b.konst::<W64>(15);
+    let s63 = b.konst::<W64>(63);
+    let s64 = b.konst::<W64>(64);
+    let int_bit = b.konst::<W64>(1u64 << 63);
+    let nan_sig = b.konst::<W64>(0xC000_0000_0000_0000);
+    let m63 = b.konst::<W64>((1u64 << 63) - 1);
+    let max64 = b.konst::<W64>(u64::MAX);
+
+    let exp_a64 = b.zext::<W16, W64>(exp_a);
+    let exp_b64 = b.zext::<W16, W64>(exp_b);
+    let ea = b.and::<W64>(exp_a64, mask15);
+    let eb = b.and::<W64>(exp_b64, mask15);
+    let sign_a = b.shr_l::<W64>(exp_a64, s15);
+    let sign_b = b.shr_l::<W64>(exp_b64, s15);
+
+    let sp_a = b.cmp::<W64>(Cmp::Eq, ea, special);
+    let sp_b = b.cmp::<W64>(Cmp::Eq, eb, special);
+    let z_a = b.cmp::<W64>(Cmp::Eq, ea, zero);
+    let z_b = b.cmp::<W64>(Cmp::Eq, eb, zero);
+    let any_sp = bit_or(b, sp_a, sp_b);
+
+    let exp_gt = b.cmp::<W64>(Cmp::GtU, ea, eb);
+    let exp_eq = b.cmp::<W64>(Cmp::Eq, ea, eb);
+    let sig_ge = b.cmp::<W64>(Cmp::GeU, sig_a, sig_b);
+    let eq_and_ge = bit_and(b, exp_eq, sig_ge);
+    let a_is_big = bit_or(b, exp_gt, eq_and_ge);
+    let sig_big = b.select::<W64>(a_is_big, sig_a, sig_b);
+    let sig_small = b.select::<W64>(a_is_big, sig_b, sig_a);
+    let exp_big = b.select::<W64>(a_is_big, ea, eb);
+    let exp_small = b.select::<W64>(a_is_big, eb, ea);
+    let sign_big = b.select::<W64>(a_is_big, sign_a, sign_b);
+    let sign_small = b.select::<W64>(a_is_big, sign_b, sign_a);
+    let same_sign = b.cmp::<W64>(Cmp::Eq, sign_big, sign_small);
+    let diff = b.sub::<W64>(exp_big, exp_small);
+
+    let d_lt64 = b.cmp::<W64>(Cmp::LtU, diff, s64);
+    let d_lt128_lim = b.konst::<W64>(128);
+    let d_lt128 = b.cmp::<W64>(Cmp::LtU, diff, d_lt128_lim);
+    let d_ge64 = bit_not(b, d_lt64);
+    let d_mid = bit_and(b, d_ge64, d_lt128);
+    let d_ge128 = bit_not(b, d_lt128);
+
+    let diff_from_64 = b.sub::<W64>(s64, diff);
+    let sh_down = b.select::<W64>(d_lt64, diff_from_64, zero);
+    let hi_lt = b.shr_l::<W64>(sig_small, diff);
+    let lo_lt_raw = b.shl::<W64>(sig_small, sh_down);
+    let lo_lt = b.select::<W64>(d_lt64, lo_lt_raw, zero);
+
+    let diff_minus_64 = b.sub::<W64>(diff, s64);
+    let sh_mid = b.select::<W64>(d_ge64, diff_minus_64, zero);
+    let lo_mid_raw = b.shr_l::<W64>(sig_small, sh_mid);
+    let lo_mid = b.select::<W64>(d_mid, lo_mid_raw, zero);
+    let k_pos = b.cmp::<W64>(Cmp::Ne, sh_mid, zero);
+    let k_from_64 = b.sub::<W64>(s64, sh_mid);
+    let sh_sticky = b.select::<W64>(k_pos, k_from_64, s64);
+    let dropped = b.shl::<W64>(sig_small, sh_sticky);
+    let dropped_nz = b.cmp::<W64>(Cmp::Ne, dropped, zero);
+    let mid_and_k = bit_and(b, d_mid, k_pos);
+    let sticky_mid = bit_and(b, mid_and_k, dropped_nz);
+    let small_nz = b.cmp::<W64>(Cmp::Ne, sig_small, zero);
+    let sticky_far = bit_and(b, d_ge128, small_nz);
+
+    let hi_s = b.select::<W64>(d_lt64, hi_lt, zero);
+    let lo_s = b.select::<W64>(d_lt64, lo_lt, lo_mid);
+    let sticky_s = bit_or(b, sticky_mid, sticky_far);
+
+    let sum = b.add::<W64>(sig_big, hi_s);
+    let carry = b.cmp::<W64>(Cmp::LtU, sum, sig_big);
+    let lo_bit0 = b.and::<W64>(lo_s, one);
+    let hi_bit0 = b.and::<W64>(sum, one);
+    let lo_shr = b.shr_l::<W64>(lo_s, one);
+    let hi_into_lo = b.shl::<W64>(hi_bit0, s63);
+    let add_lo_c = b.or::<W64>(lo_shr, hi_into_lo);
+    let sum_shr = b.shr_l::<W64>(sum, one);
+    let add_hi_c = b.or::<W64>(sum_shr, int_bit);
+    let add_hi = b.select::<W64>(carry, add_hi_c, sum);
+    let add_lo = b.select::<W64>(carry, add_lo_c, lo_s);
+    let fell = b.cmp::<W64>(Cmp::Eq, lo_bit0, one);
+    let fell_on_carry = bit_and(b, carry, fell);
+    let sticky_add = bit_or(b, sticky_s, fell_on_carry);
+    let exp_plus = b.add::<W64>(exp_big, one);
+    let exp_add = b.select::<W64>(carry, exp_plus, exp_big);
+
+    let lo_nz = b.cmp::<W64>(Cmp::Ne, lo_s, zero);
+    let neg_lo = b.sub::<W64>(zero, lo_s);
+    let sub_lo = b.select::<W64>(lo_nz, neg_lo, zero);
+    let hi_minus = b.sub::<W64>(sig_big, hi_s);
+    let hi_minus_b = b.sub::<W64>(hi_minus, one);
+    let sub_hi = b.select::<W64>(lo_nz, hi_minus_b, hi_minus);
+
+    let hi0 = b.select::<W64>(same_sign, add_hi, sub_hi);
+    let lo0 = b.select::<W64>(same_sign, add_lo, sub_lo);
+    let sticky_add_n = b.select::<W64>(sticky_add, one, zero);
+    let sticky_sub_n = b.select::<W64>(sticky_s, one, zero);
+    let sticky0 = b.select::<W64>(same_sign, sticky_add_n, sticky_sub_n);
+    let sticky0_b = b.cmp::<W64>(Cmp::Ne, sticky0, zero);
+    let exp0 = b.select::<W64>(same_sign, exp_add, exp_big);
+
+    let hi_zero = b.cmp::<W64>(Cmp::Eq, hi0, zero);
+    let lo_zero = b.cmp::<W64>(Cmp::Eq, lo0, zero);
+    let both_zero = bit_and(b, hi_zero, lo_zero);
+    let clz_hi = clz64(b, hi0);
+    let clz_lo = clz64(b, lo0);
+    let sh_comp = b.sub::<W64>(s64, clz_hi);
+    let hi_shl = b.shl::<W64>(hi0, clz_hi);
+    let lo_into_hi = b.shr_l::<W64>(lo0, sh_comp);
+    let hi_norm = b.or::<W64>(hi_shl, lo_into_hi);
+    let lo_norm = b.shl::<W64>(lo0, clz_hi);
+    let hi_from_lo = b.shl::<W64>(lo0, clz_lo);
+    let hi_n_src = b.select::<W64>(hi_zero, hi_from_lo, hi_norm);
+    let lo_n_src = b.select::<W64>(hi_zero, zero, lo_norm);
+    let hi_n = b.select::<W64>(both_zero, zero, hi_n_src);
+    let lo_n = b.select::<W64>(both_zero, zero, lo_n_src);
+    let shift_lo = b.add::<W64>(s64, clz_lo);
+    let shift = b.select::<W64>(hi_zero, shift_lo, clz_hi);
+    let exp_gt_shift = b.cmp::<W64>(Cmp::GtU, exp0, shift);
+    let exp_subbed = b.sub::<W64>(exp0, shift);
+    let exp_n_raw = b.select::<W64>(exp_gt_shift, exp_subbed, zero);
+    let exp_n = b.select::<W64>(both_zero, zero, exp_n_raw);
+
+    let round_bit = b.shr_l::<W64>(lo_n, s63);
+    let rest = b.and::<W64>(lo_n, m63);
+    let rest_nz = b.cmp::<W64>(Cmp::Ne, rest, zero);
+    let sticky_f = bit_or(b, sticky0_b, rest_nz);
+    let lsb = b.and::<W64>(hi_n, one);
+    let lsb_set = b.cmp::<W64>(Cmp::Eq, lsb, one);
+    let round_set = b.cmp::<W64>(Cmp::Eq, round_bit, one);
+    let tie = bit_or(b, sticky_f, lsb_set);
+    let round_up = bit_and(b, round_set, tie);
+    let exp_live = b.cmp::<W64>(Cmp::Ne, exp_n, zero);
+    let do_up = bit_and(b, round_up, exp_live);
+    let hi_up = b.add::<W64>(hi_n, one);
+    let at_max = b.cmp::<W64>(Cmp::Eq, hi_n, max64);
+    let ov = bit_and(b, do_up, at_max);
+    let hi_rounded_raw = b.select::<W64>(do_up, hi_up, hi_n);
+    let hi_rounded = b.select::<W64>(ov, int_bit, hi_rounded_raw);
+    let exp_up = b.add::<W64>(exp_n, one);
+    let exp_rounded = b.select::<W64>(ov, exp_up, exp_n);
+    let exp_is_zero = b.cmp::<W64>(Cmp::Eq, exp_rounded, zero);
+    let exp_ovf = b.cmp::<W64>(Cmp::GeU, exp_rounded, special);
+    let sig_or_inf = b.select::<W64>(exp_ovf, int_bit, hi_rounded);
+    let sig_mag = b.select::<W64>(exp_is_zero, zero, sig_or_inf);
+    let exp_mag = b.select::<W64>(exp_ovf, special, exp_rounded);
+    let sign_num = b.select::<W64>(exp_is_zero, zero, sign_big);
+
+    let not_zb = bit_not(b, z_b);
+    let use_b = bit_and(b, z_a, not_zb);
+    let not_za = bit_not(b, z_a);
+    let use_a = bit_and(b, z_b, not_za);
+    let both_z = bit_and(b, z_a, z_b);
+    let sig_zero_b = b.select::<W64>(use_b, sig_b, zero);
+    let sig_zero_case = b.select::<W64>(use_a, sig_a, sig_zero_b);
+    let exp_zero_b = b.select::<W64>(use_b, eb, zero);
+    let exp_zero_case = b.select::<W64>(use_a, ea, exp_zero_b);
+    let sign_and = b.and::<W64>(sign_a, sign_b);
+    let sign_zero_b = b.select::<W64>(use_b, sign_b, sign_and);
+    let sign_zero_case = b.select::<W64>(use_a, sign_a, sign_zero_b);
+    let use_ab = bit_or(b, use_a, use_b);
+    let use_zero_raw = bit_or(b, use_ab, both_z);
+    let not_sp = bit_not(b, any_sp);
+    let use_zero = bit_and(b, use_zero_raw, not_sp);
+    let sig_after_z = b.select::<W64>(use_zero, sig_zero_case, sig_mag);
+    let exp_after_z = b.select::<W64>(use_zero, exp_zero_case, exp_mag);
+    let sign_after_z = b.select::<W64>(use_zero, sign_zero_case, sign_num);
+
+    let sig_a_not_inf = b.cmp::<W64>(Cmp::Ne, sig_a, int_bit);
+    let nan_a = bit_and(b, sp_a, sig_a_not_inf);
+    let sig_b_not_inf = b.cmp::<W64>(Cmp::Ne, sig_b, int_bit);
+    let nan_b = bit_and(b, sp_b, sig_b_not_inf);
+    let signs_differ = b.cmp::<W64>(Cmp::Ne, sign_a, sign_b);
+    let both_sp = bit_and(b, sp_a, sp_b);
+    let inf_cancel = bit_and(b, both_sp, signs_differ);
+    let nan_either = bit_or(b, nan_a, nan_b);
+    let any_nan = bit_or(b, nan_either, inf_cancel);
+    let sp_sig = b.select::<W64>(any_nan, nan_sig, int_bit);
+    let sp_sign = b.select::<W64>(sp_a, sign_a, sign_b);
+    let nan_sign = b.select::<W64>(any_nan, sign_a, sp_sign);
+    let sig_final = b.select::<W64>(any_sp, sp_sig, sig_after_z);
+    let exp_final = b.select::<W64>(any_sp, special, exp_after_z);
+    let sign_final = b.select::<W64>(any_sp, nan_sign, sign_after_z);
+
+    let sign_bit = b.shl::<W64>(sign_final, s15);
+    let packed = b.or::<W64>(exp_final, sign_bit);
+    let exp_word = b.trunc::<W64, W16>(packed);
+    (sig_final, exp_word)
+}
+
+/// FADD ST(0), ST(i) (D8 C0+i)。ST(0) に和を書き、スタックは戻さない。seq 0x4d097d 対応.
+pub fn fadd_st<B: Backend>(b: &mut B, i: u8) -> Flow<B> {
+    let top = b.get(top_ref());
+    let (sig0, exp0) = read_st(b, top);
+    let ii = b.konst::<W16>(i as u16);
+    let summed = b.add::<W16>(top, ii);
+    let seven = b.konst::<W16>(7);
+    let src = b.and::<W16>(summed, seven);
+    let (sig1, exp1) = read_st(b, src);
+    let (sig_s, exp_s) = add_ext(b, sig0, exp0, sig1, exp1);
+    for slot in 0..8 {
+        let idx = b.konst::<W16>(slot as u16);
+        let hit = b.cmp::<W16>(Cmp::Eq, top, idx);
+        let old_sig = b.get(st_sig_ref(slot));
+        let old_exp = b.get(st_exp_ref(slot));
+        let new_sig = b.select::<W64>(hit, sig_s, old_sig);
+        let new_exp = b.select::<W16>(hit, exp_s, old_exp);
+        b.set(st_sig_ref(slot), new_sig);
+        b.set(st_exp_ref(slot), new_exp);
+    }
+    Ok(())
+}
+
 /// FMULP ST(i), ST(0) (DE C8+i)。ST(i) に積を書いてからスタックを一つ捨てる。seq 0x4018c7 対応.
 pub fn fmulp_st<B: Backend>(b: &mut B, i: u8) -> Flow<B> {
     let top = b.get(top_ref());

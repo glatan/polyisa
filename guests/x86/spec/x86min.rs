@@ -1615,6 +1615,14 @@ pub fn build_model() -> polyisa_isadl::Model {
             "alu",
         ),
         (
+            "fadd_st",
+            "F1",
+            "11011000 11000...",
+            vec![],
+            "fadd st",
+            "alu",
+        ),
+        (
             "fstp_m64_sibd",
             "S8",
             "11011101 01011100 ........ ........",
