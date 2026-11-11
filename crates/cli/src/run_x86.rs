@@ -636,9 +636,10 @@ fn fetch_len(
                     // mod=00 base=直接番地 + disp32 + imm8 (8B)。id 0x4c0a78 対応.
                     Some(8)
                 } else if (reg == 4 || reg == 7 || reg == 1 || reg == 0)
-                    && t & 7 != 5
-                    && (md == 1 || md == 0)
+                    && (md == 1 || (md == 0 && t & 7 != 5))
                 {
+                    // mod=01 の base=5 は %rbp。直接番地になるのは mod=00 だけ。
+                    // sed 0x4c93bc の 83 7C 35 C8 00 は base=rbp。
                     Some(if md == 1 { 5 } else { 4 })
                 } else if has66 && reg == 0 && md == 0 && t & 7 != 5 {
                     Some(4)

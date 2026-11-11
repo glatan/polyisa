@@ -7513,3 +7513,27 @@ fn run_or_m64_r64_sibd() {
         .unwrap();
     assert_eq!(u64::from_le_bytes(got), 0x17);
 }
+
+#[test]
+fn run_cmp_rm_imm8_sibd_rbp() {
+    // 83 7C 35 C8 00 = cmpl $0, -0x38(%rbp,%rsi)。0 と比べて ZF=1、CF は消える。
+    // sed 0x4c93bc。Ref: SPEC-X86-INTEL-SDM (v093).
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(5).state(), 0x2080u32);
+    env.backend.set(Gpr(6).state(), 8u32);
+    env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 1u32);
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0x83, 0x7C, 0x35, 0xC8, 0x00])
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x1005 });
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x41,
+        0x40
+    );
+}
