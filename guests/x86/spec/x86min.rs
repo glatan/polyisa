@@ -855,6 +855,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("xor_rm8_imm_sibd", "F1", "10000000 01110100 ........ ........ ........", "xor r/m8, {imm}", "alu"),
         // XORB [base+index*scale],imm8 (80 /6 SIB mod=00)。sha3sum 0x4b4f14 の 80 34 07 06。base=5 は長さが違う.
         ("xor_rm8_imm_sib", "F1", "10000000 00110100 ........ ........", "xor r/m8, {imm}", "alu"),
+        // ADDB [base+index*scale],imm8 (80 /0 SIB mod=00)。sha3sum 0x4b4f20 の 80 04 07 80。base=5 は長さが違う.
+        ("add_rm8_imm_sib", "F1", "10000000 00000100 ........ ........", "add r/m8, {imm}", "alu"),
         // CMPB m8,imm8 SIB mod=10 [base+index*scale+disp32] (80 /7)。stat 0x429875 対応.8B.
         ("cmp_rm8_imm_sibd32", "F1", "10000000 10111100 ........ ................................ ........", "cmp r/m8, {imm}", "alu"),
         ("test_m8_imm_rip", "F1", "11110110 00000101 ................................ ........", "test m8, {imm}", "alu"),

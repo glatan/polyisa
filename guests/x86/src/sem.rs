@@ -1633,6 +1633,30 @@ pub fn xor_rm8_imm_sibd<B: Backend>(
     Ok(())
 }
 
+/// ADD [base],imm8 (80 /0 SIB mod=00, no_index)。8ビット加算.
+pub fn add_rm8_imm_memnd<B: Backend>(b: &mut B, base: Gpr, imm: u8) -> Flow<B> {
+    use polyisa_sem::W8;
+    let addr = read64(b, base);
+    let x: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
+    let y = b.konst::<W8>(imm);
+    let v = b.add::<W8>(x, y);
+    b.store::<W8>(addr, v, DATA_WRITE)?;
+    update_add_flags(b, x, y, v);
+    Ok(())
+}
+
+/// ADD [base+index*scale],imm8 (80 /0 SIB mod=00)。8ビット加算.
+pub fn add_rm8_imm_sib<B: Backend>(b: &mut B, base: Gpr, idx: Gpr, shift: u32, imm: u8) -> Flow<B> {
+    use polyisa_sem::W8;
+    let addr = sib_addr_scaled(b, shift, 0, base, idx);
+    let x: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
+    let y = b.konst::<W8>(imm);
+    let v = b.add::<W8>(x, y);
+    b.store::<W8>(addr, v, DATA_WRITE)?;
+    update_add_flags(b, x, y, v);
+    Ok(())
+}
+
 /// XOR [base],imm8 (80 /6 SIB mod=00, no_index)。8ビット XOR.
 pub fn xor_rm8_imm_memnd<B: Backend>(b: &mut B, base: Gpr, imm: u8) -> Flow<B> {
     use polyisa_sem::W8;
