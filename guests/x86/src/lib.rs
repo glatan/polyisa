@@ -596,6 +596,8 @@ mod tests {
         assert_eq!(decode(0x2983f82a0000, 48), Some(Insn::SubM32R32Mem32));
         // INC [base+disp32]。66 付きは16ビット。gzip 0x484a42 の FF 82 A8 13 00 00。
         assert_eq!(decode(0xff82a8130000, 48), Some(Insn::IncRmMem32));
+        // ADD [base+index*scale+disp32], r。gzip 0x484a11 の 01 8C 82 64 13 00 00。
+        assert_eq!(decode(0x018c8264130000, 56), Some(Insn::AddM32R32Sibd32));
         assert_eq!(decode(0x6B1567FD1A0038, 56), Some(Insn::ImulRImm8Rip));
         assert_eq!(decode(0x6BF638, 24), Some(Insn::ImulRImm8));
         assert_eq!(decode(0x00C1F908, 24), Some(Insn::SarRm32Imm8));

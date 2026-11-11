@@ -5365,6 +5365,56 @@ fn run_inc_r16_mem32() {
 }
 
 #[test]
+fn run_add_m16_r16_sibd32() {
+    // 66 42 01 8C 82 64 13 00 00 = addw %cx, 0x1364(%rdx,%r8,4)。gzip 0x484a11。
+    // 0x7fff+1 は 0x8000 になり OF と SF が立つ。%ecx の上位は残る。
+    // Ref: SPEC-X86-INTEL-SDM (v093).
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    for (mem, flags, outb) in [
+        ([0x02, 0x00], 0x04u32, [0x03, 0x00]),
+        ([0xFF, 0x7F], 0x894, [0x00, 0x80]),
+    ] {
+        let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.mem.map(VirtAddr(0x3000), 1, Perms::RW).unwrap();
+        env.backend.set(Gpr(2).state(), 0x2000);
+        polyisa_guest_x86::sem::write64(&mut env.backend, Gpr(8), 1);
+        env.backend.set(Gpr(1).state(), 0x1111_0001);
+        env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 0);
+        env.backend.mem.write(VirtAddr(0x3368), &mem).unwrap();
+        env.backend
+            .mem
+            .write(
+                VirtAddr(0x1000),
+                &[0x66, 0x42, 0x01, 0x8C, 0x82, 0x64, 0x13, 0x00, 0x00],
+            )
+            .unwrap();
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+        assert_eq!(out, Outcome::StepLimit { eip: 0x1009 });
+        assert_eq!(env.backend.get(Gpr(1).state()), 0x1111_0001);
+        assert_eq!(
+            env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x8D5,
+            flags
+        );
+        let mut back = [0u8; 2];
+        env.backend
+            .mem
+            .read(
+                VirtAddr(0x3368),
+                &mut back,
+                polyisa_mem::Access {
+                    endian: polyisa_mem::Endian::Le,
+                    align: polyisa_mem::Align::Unaligned,
+                    kind: polyisa_mem::AccessKind::DataRead,
+                },
+            )
+            .unwrap();
+        assert_eq!(back, outb);
+    }
+}
+
+#[test]
 fn run_imul_r64_imm_sibd() {
     // 48 69 44 24 08 01 00 01 00 = imulq $0x10001, 0x8(%rsp), %rax。3*0x10001=0x30003。
     // mktemp 0x4d85cf。Ref: SPEC-X86-INTEL-SDM (v093).

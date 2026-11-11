@@ -7413,6 +7413,49 @@ pub fn add_m32_r32_sibd<B: Backend>(
 }
 
 /// ADD m32,r32 [base+index*scale+disp32] (01 /r SIB mod=10)。
+/// ADD m16, r16 [base+disp32] (66 01 /r mod=10)。上位は触らない。
+pub fn add_m16_r16_mem32<B: Backend>(b: &mut B, base: Gpr, disp: i32, src: Gpr) -> Flow<B> {
+    use polyisa_sem::W16;
+    let addr = eff_addr32(b, base, disp);
+    let x: B::V<W16> = b.load::<W16>(addr, DATA_READ)?;
+    let y = if src.0 < 8 {
+        let y32 = read(b, src);
+        b.trunc::<W32, W16>(y32)
+    } else {
+        let y64 = read64(b, src);
+        b.trunc::<W64, W16>(y64)
+    };
+    let v = b.add::<W16>(x, y);
+    b.store::<W16>(addr, v, DATA_WRITE)?;
+    update_add_flags(b, x, y, v);
+    Ok(())
+}
+
+/// ADD m16, r16 [base+index*scale+disp32] (66 01 /r SIB mod=10)。gzip 0x484a11 対応。
+pub fn add_m16_r16_sibd32<B: Backend>(
+    b: &mut B,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i32,
+    src: Gpr,
+) -> Flow<B> {
+    use polyisa_sem::W16;
+    let addr = sib_addr_scaled(b, shift, disp, base, idx);
+    let x: B::V<W16> = b.load::<W16>(addr, DATA_READ)?;
+    let y = if src.0 < 8 {
+        let y32 = read(b, src);
+        b.trunc::<W32, W16>(y32)
+    } else {
+        let y64 = read64(b, src);
+        b.trunc::<W64, W16>(y64)
+    };
+    let v = b.add::<W16>(x, y);
+    b.store::<W16>(addr, v, DATA_WRITE)?;
+    update_add_flags(b, x, y, v);
+    Ok(())
+}
+
 pub fn add_m32_r32_sibd32<B: Backend>(
     b: &mut B,
     base: Gpr,

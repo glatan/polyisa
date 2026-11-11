@@ -1903,6 +1903,7 @@ pub fn run_mode(
                     | Insn::MovSibd32Eax
                     | Insn::IncRmSibd32
                     | Insn::IncRmMem32
+                    | Insn::AddM32R32Sibd32
                     | Insn::MovEaxSibd
                     | Insn::Punpcklqdq
                     | Insn::MovqR64Xmm
@@ -2460,7 +2461,14 @@ fn dispatch<B: Backend>(
         }
         Insn::AddM32R32Sibd32 => {
             // 01 /r SIB mod=10 [base+index*scale+disp32]。basename 0x48995c 対応.
-            if no_index() {
+            // 66 付きは16ビット。gzip 0x484a11 の addw %cx, 0x1364(%rdx,%r8,4)。
+            if has66 {
+                if no_index() {
+                    sem::add_m16_r16_mem32(b, sib_base(), disp32(), reg())
+                } else {
+                    sem::add_m16_r16_sibd32(b, sib_base(), sib_idx(), sib_shift(), disp32(), reg())
+                }
+            } else if no_index() {
                 if rex_w {
                     sem::add_m64_r64_mem32(b, sib_base(), disp32(), reg())
                 } else {
