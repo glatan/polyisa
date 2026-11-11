@@ -809,6 +809,36 @@ pub fn test_m8_imm_mem32<B: Backend>(b: &mut B, base: Gpr, disp: i32, imm: u8) -
     Ok(())
 }
 
+/// CMP [RIP+disp32], r8 (38 /r mod=00 rm=101)。grep 0x4aec6d 対応.
+pub fn cmp_m8_r8_rip<B: Backend>(
+    b: &mut B,
+    next_rip: u64,
+    disp: i32,
+    src: Gpr,
+    high: bool,
+) -> Flow<B> {
+    use polyisa_sem::W8;
+    let base = b.konst::<W64>(next_rip);
+    let d = b.konst::<W64>(disp as i64 as u64);
+    let addr = b.add::<W64>(base, d);
+    let x: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
+    let y = read8(b, src, high);
+    let v = b.sub::<W8>(x, y);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
+/// CMP [disp32], r8 (38 /r mod=00 rm=101、32ビット)。
+pub fn cmp_m8_r8_abs<B: Backend>(b: &mut B, addr32: u32, src: Gpr, high: bool) -> Flow<B> {
+    use polyisa_sem::W8;
+    let addr = b.konst::<W64>(addr32 as u64);
+    let x: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
+    let y = read8(b, src, high);
+    let v = b.sub::<W8>(x, y);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
 /// CMPB m8,imm8 RIP (80 3D)。8ビットを読んで比較し、6 旗を更新する.
 pub fn cmp_rm8_imm_rip<B: Backend>(b: &mut B, next_rip: u64, disp: i32, imm: u8) -> Flow<B> {
     use polyisa_sem::W8;

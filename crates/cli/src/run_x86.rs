@@ -2910,6 +2910,24 @@ fn dispatch<B: Backend>(
             };
             sem::and_m8_r8(b, dst, dst_high, src, src_high)
         }
+        Insn::CmpM8R8Rip => {
+            // 38 /r mod=00 rm=101 [RIP+disp32], r8。grep 0x4aec6d 対応.
+            // disp は下位32 LE。src は reg フィールド。REX があると高位バイトは使わない.
+            let reg_f = (modrm() >> 3) & 7;
+            let (src, high) = if rex != 0 {
+                (Gpr(reg_f | ((rex >> 2) & 1) << 3), false)
+            } else if reg_f < 4 {
+                (Gpr(reg_f), false)
+            } else {
+                (Gpr(reg_f - 4), true)
+            };
+            let disp = (word as u32).swap_bytes() as i32;
+            if is64 {
+                sem::cmp_m8_r8_rip(b, eip as u64 + nbytes, disp, src, high)
+            } else {
+                sem::cmp_m8_r8_abs(b, (word as u32).swap_bytes(), src, high)
+            }
+        }
         Insn::CmpM8R8Memnd => {
             // 38 /r mod=00 [base],r8。src は reg フィールド.
             let reg_f = (modrm() >> 3) & 7;

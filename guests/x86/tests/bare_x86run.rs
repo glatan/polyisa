@@ -6673,6 +6673,34 @@ fn run_dec_rm_sib_keeps_cf() {
 }
 
 #[test]
+fn run_cmp_m8_r8_rip_sets_zf() {
+    // 44 38 35 F9 0F 00 00 = cmpb %r14b, 0xff9(%rip)。次の RIP 0x1007 から 0x2000。
+    // 両方 0x10 で ZF=1、CF は消える。grep 0x4aec6d。
+    // Ref: SPEC-X86-INTEL-SDM (v093).
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.mem.write(VirtAddr(0x2000), &[0x10]).unwrap();
+    env.backend.set(Gpr(14).state(), 0x10u32);
+    env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 1u32);
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x1000),
+            &[0x44, 0x38, 0x35, 0xF9, 0x0F, 0x00, 0x00],
+        )
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x1007 });
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x41,
+        0x40
+    );
+}
+
+#[test]
 fn run_div_rm32_sibd_quotient_remainder() {
     // DIV EAX,[RSP+0x0C] (F7 74 24 0C) をdispatch経由で回す.
     // EDX:EAX=17、[0x10C]=5 -> EAX=3、EDX=2、eip は 0x1004 に進む.
