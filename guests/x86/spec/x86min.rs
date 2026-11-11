@@ -814,6 +814,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("and_ax_imm16", "F1", "00100101 ................", "and ax, {imm}", "alu"),
         // CMP AX,imm16 (66 3D + imm16)。66 接頭辞は実行側で剥がす.
         ("cmp_ax_imm16", "F1", "00111101 ................", "cmp ax, {imm}", "alu"),
+        // OR AX,imm16 (66 0D + imm16)。66 接頭辞は実行側で剥がす。seq 0x4d74c9。
+        ("or_ax_imm16", "F1", "00001101 ................", "or ax, {imm}", "alu"),
         // ADD r/m16,imm16 (66 81 /0 mod=11)。66 接頭辞は実行側で剥がす.
         ("add_rm16_imm", "F1", "10000001 11000... ................", "add r/m16, {imm}", "alu"),
         // AND r/m16,imm16 (66 81 /4 mod=11)。66 接頭辞は実行側で剥がす.

@@ -102,7 +102,15 @@ fn fetch_len(
         0x68 => Some(5),
         0xEB | 0x70 | 0x71 | 0x72 | 0x73 | 0x74 | 0x75 | 0x76 | 0x77 | 0x78 | 0x79 | 0x7A
         | 0x7B | 0x7C | 0x7D | 0x7E | 0x7F | 0xE2 | 0xCD | 0x3C | 0x0C => Some(2),
-        0x05 | 0x2D | 0xE8 | 0xE9 | 0x0D | 0x35 | 0xA9 => Some(5),
+        0x05 | 0x2D | 0xE8 | 0xE9 | 0x35 | 0xA9 => Some(5),
+        // 0x0D (OR EAX,imm32)。66 接頭辞では OR AX,imm16 (3B)。seq 0x4d74c9。
+        0x0D => {
+            if has66 {
+                Some(3)
+            } else {
+                Some(5)
+            }
+        }
         // 0x25 (AND EAX,imm32)。66 接頭辞では AND AX,imm16 (3B)。
         0x25 => {
             if has66 {
@@ -1857,6 +1865,7 @@ pub fn run_mode(
                     | Insn::AndAxImm16
                     | Insn::ShrRm32Imm8
                     | Insn::CmpAxImm16
+                    | Insn::OrAxImm16
                     | Insn::AddRm16Imm
                     | Insn::AndRm16Imm
                     | Insn::CmpRm16Imm
@@ -4264,6 +4273,10 @@ fn dispatch<B: Backend>(
         Insn::CmpAxImm16 => {
             // 66 3D + imm16 (24b、66 接頭辞は剥がし済み)。imm は最下位16 LE.
             sem::cmp_ax_imm16(b, ((word & 0xffff) as u16).swap_bytes())
+        }
+        Insn::OrAxImm16 => {
+            // 66 0D + imm16 (24b、66 接頭辞は剥がし済み)。seq 0x4d74c9 の orw $0x3ffe,%ax。
+            sem::or_ax_imm16(b, ((word & 0xffff) as u16).swap_bytes())
         }
         Insn::AddRm16Imm => {
             // 66 81 /0 mod=11 + imm16 (32b、66 接頭辞は剥がし済み)。imm は最下位16 LE.

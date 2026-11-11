@@ -8484,3 +8484,21 @@ fn run_fld_m80_sibd_pushes_three() {
         (1u64 << 63) | (1u64 << 62)
     );
 }
+
+#[test]
+fn run_or_ax_imm16_keeps_high() {
+    // 66 0D FE 3F = orw $0x3ffe, %ax。上位は残る。seq 0x4d74c9。
+    // Ref: SPEC-X86-INTEL-SDM (v093).
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.set(Gpr(0).state(), 0x1234_0001);
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0x66, 0x0D, 0xFE, 0x3F])
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x1004 });
+    assert_eq!(env.backend.get(Gpr(0).state()), 0x1234_3FFF);
+}

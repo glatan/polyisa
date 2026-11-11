@@ -2783,6 +2783,21 @@ pub fn and_eax<B: Backend>(b: &mut B, imm: u32) -> Flow<B> {
     Ok(())
 }
 
+/// OR AX,imm16 (66 0D)。AX のみ書き換え、上位16ビットは保持. seq 0x4d74c9 対応.
+pub fn or_ax_imm16<B: Backend>(b: &mut B, imm: u16) -> Flow<B> {
+    let x32 = read(b, Gpr(0));
+    let x: B::V<W16> = b.trunc::<W32, W16>(x32);
+    let y = b.konst::<W16>(imm);
+    let v = b.or::<W16>(x, y);
+    let mask = b.konst::<W32>(0xFFFF_0000);
+    let preserved = b.and::<W32>(x32, mask);
+    let ext32 = b.zext::<W16, W32>(v);
+    let nv = b.or::<W32>(preserved, ext32);
+    write(b, Gpr(0), nv);
+    update_logic_flags(b, v);
+    Ok(())
+}
+
 /// OR EAX, imm32。結果を書き、5 旗を更新する（CF=0、OF=0）。
 pub fn or_eax<B: Backend>(b: &mut B, imm: u32) -> Flow<B> {
     let x = read(b, Gpr(0));
