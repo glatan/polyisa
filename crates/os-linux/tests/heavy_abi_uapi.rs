@@ -185,6 +185,8 @@ fn syscall_numbers_match_uapi_x86_64() {
         ("__NR_readlinkat", polyisa_os_linux::x86_64::READLINKAT),
         ("__NR_newfstatat", polyisa_os_linux::x86_64::NEWFSTATAT),
         ("__NR_fstat", polyisa_os_linux::x86_64::FSTAT),
+        ("__NR_stat", polyisa_os_linux::x86_64::STAT),
+        ("__NR_lstat", polyisa_os_linux::x86_64::LSTAT),
         ("__NR_statx", polyisa_os_linux::x86_64::STATX),
         ("__NR_getgroups", polyisa_os_linux::x86_64::GETGROUPS),
         ("__NR_statfs", polyisa_os_linux::x86_64::STATFS),

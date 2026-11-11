@@ -112,6 +112,8 @@ pub mod x86_64 {
     pub const READLINK: u64 = 89;
     pub const NEWFSTATAT: u64 = 262;
     pub const FSTAT: u64 = 5;
+    pub const STAT: u64 = 4;
+    pub const LSTAT: u64 = 6;
     pub const STATX: u64 = 332;
     pub const ARCH_PRCTL: u64 = 158;
     pub const SET_ROBUST_LIST: u64 = 273;
@@ -406,6 +408,8 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             x86_64::READLINK => Some("readlink"),
             x86_64::NEWFSTATAT => Some("newfstatat"),
             x86_64::FSTAT => Some("fstat"),
+            x86_64::STAT => Some("stat"),
+            x86_64::LSTAT => Some("lstat"),
             x86_64::STATX => Some("statx"),
             x86_64::READV => Some("readv"),
             x86_64::WRITEV => Some("writev"),
@@ -571,6 +575,10 @@ mod tests {
         assert_eq!(syscall_name(GuestAbi::X86_64Linux, 137), Some("statfs"));
         assert_eq!(x86_64::FSTATFS, 138);
         assert_eq!(syscall_name(GuestAbi::X86_64Linux, 138), Some("fstatfs"));
+        assert_eq!(x86_64::STAT, 4);
+        assert_eq!(syscall_name(GuestAbi::X86_64Linux, 4), Some("stat"));
+        assert_eq!(x86_64::LSTAT, 6);
+        assert_eq!(syscall_name(GuestAbi::X86_64Linux, 6), Some("lstat"));
         assert_eq!(x86_64::ARCH_PRCTL, 158);
         assert_eq!(syscall_name(GuestAbi::X86_64Linux, 158), Some("arch_prctl"));
         assert_eq!(x86_64::SET_ROBUST_LIST, 273);

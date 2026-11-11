@@ -47,6 +47,7 @@
 - ioctl
 - kill
 - lseek
+- lstat
 - mkdir
 - mkdirat
 - mmap
@@ -70,6 +71,7 @@
 - set_robust_list
 - set_tid_address
 - setpgid
+- stat
 - symlink
 - tgkill
 - time

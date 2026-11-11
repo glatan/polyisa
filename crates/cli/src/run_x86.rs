@@ -8462,6 +8462,8 @@ const X86_64_SYSCALLS: &[(&str, SysFn)] = &[
     ("getcwd", sys_getcwd),
     ("getdents64", sys_getdents64),
     ("fstat", sys_fstat),
+    ("stat", sys_stat),
+    ("lstat", sys_lstat),
     ("newfstatat", sys_newfstatat),
     ("sendfile", sys_sendfile),
     ("lseek", sys_lseek),
@@ -9529,6 +9531,68 @@ fn sys_fstat(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapO
         Ok(m) => m,
         Err(_) => {
             set64(env, Gpr(0), cx.neg(EBADF));
+            return Some(TrapOutcome::Handled);
+        }
+    };
+    let st = stat144(&m);
+    if env.backend.mem.write(VirtAddr(stat_addr), &st).is_err() {
+        return Some(TrapOutcome::Unimplemented);
+    }
+    set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_stat(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // stat(path, statbuf)。作業ディレクトリから辿り、struct stat (144B) を書く.
+    // シンボリックリンクは辿る。Ref: SRC-LINUX (7.3).
+    let path_addr = get64(env, cx.r_a);
+    let stat_addr = get64(env, cx.r_b);
+    let path = match guest_c_string(env, path_addr) {
+        Some(p) => p,
+        None => return Some(TrapOutcome::Unimplemented),
+    };
+    sys.ensure_cwd();
+    let path = join_guest_path(&sys.cwd, &path);
+    let m = match std::fs::metadata(&path) {
+        Ok(m) => m,
+        Err(e) => {
+            let no = match e.kind() {
+                std::io::ErrorKind::NotFound => ENOENT,
+                std::io::ErrorKind::PermissionDenied => EACCES,
+                _ => EINVAL,
+            };
+            set64(env, Gpr(0), cx.neg(no));
+            return Some(TrapOutcome::Handled);
+        }
+    };
+    let st = stat144(&m);
+    if env.backend.mem.write(VirtAddr(stat_addr), &st).is_err() {
+        return Some(TrapOutcome::Unimplemented);
+    }
+    set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_lstat(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // lstat(path, statbuf)。リンク自体の struct stat (144B) を書く.
+    // Ref: SRC-LINUX (7.3).
+    let path_addr = get64(env, cx.r_a);
+    let stat_addr = get64(env, cx.r_b);
+    let path = match guest_c_string(env, path_addr) {
+        Some(p) => p,
+        None => return Some(TrapOutcome::Unimplemented),
+    };
+    sys.ensure_cwd();
+    let path = join_guest_path(&sys.cwd, &path);
+    let m = match std::fs::symlink_metadata(&path) {
+        Ok(m) => m,
+        Err(e) => {
+            let no = match e.kind() {
+                std::io::ErrorKind::NotFound => ENOENT,
+                std::io::ErrorKind::PermissionDenied => EACCES,
+                _ => EINVAL,
+            };
+            set64(env, Gpr(0), cx.neg(no));
             return Some(TrapOutcome::Handled);
         }
     };
@@ -12036,6 +12100,79 @@ mod tests {
         set64(&mut env, Gpr(6), 3);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EBADF));
+    }
+
+    #[test]
+    fn stat_root_is_dir() {
+        use polyisa_os_linux::x86_64 as abi;
+        let mut sys = CliLinux::x86_64();
+        let mut env = bare();
+        env.backend.mem.write(VirtAddr(0x100), b"/\0").unwrap();
+        // stat("/", 0x200) は 0 を返し、st_mode に S_IFDIR を書く。
+        set64(&mut env, Gpr(0), abi::STAT);
+        set64(&mut env, Gpr(7), 0x100);
+        set64(&mut env, Gpr(6), 0x200);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        let mut back = [0u8; 4];
+        env.backend
+            .mem
+            .read(VirtAddr(0x218), &mut back, data_access())
+            .unwrap();
+        assert_eq!(u32::from_le_bytes(back) & 0o170000, 0o040000);
+        // 存在しないパスは ENOENT。
+        env.backend
+            .mem
+            .write(VirtAddr(0x100), b"/no/such/file\0")
+            .unwrap();
+        set64(&mut env, Gpr(0), abi::STAT);
+        set64(&mut env, Gpr(7), 0x100);
+        set64(&mut env, Gpr(6), 0x200);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(ENOENT));
+    }
+
+    #[test]
+    fn lstat_sees_the_link() {
+        use polyisa_os_linux::x86_64 as abi;
+        let dir = std::env::temp_dir().join(format!("polyisa-lstat-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir).unwrap();
+        let target = dir.join("file");
+        let link = dir.join("link");
+        std::fs::write(&target, b"ab").unwrap();
+        polyisa_host::symlink(
+            target.to_str().expect("utf-8"),
+            link.to_str().expect("utf-8"),
+        )
+        .unwrap();
+        let mut path = link.into_os_string().into_encoded_bytes();
+        path.push(0);
+        let mut sys = CliLinux::x86_64();
+        let mut env = bare();
+        env.backend.mem.write(VirtAddr(0x100), &path).unwrap();
+        set64(&mut env, Gpr(0), abi::LSTAT);
+        set64(&mut env, Gpr(7), 0x100);
+        set64(&mut env, Gpr(6), 0x200);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        let mut back = [0u8; 4];
+        env.backend
+            .mem
+            .read(VirtAddr(0x218), &mut back, data_access())
+            .unwrap();
+        assert_eq!(u32::from_le_bytes(back) & 0o170000, 0o120000);
+        set64(&mut env, Gpr(0), abi::STAT);
+        set64(&mut env, Gpr(7), 0x100);
+        set64(&mut env, Gpr(6), 0x200);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        env.backend
+            .mem
+            .read(VirtAddr(0x218), &mut back, data_access())
+            .unwrap();
+        assert_eq!(u32::from_le_bytes(back) & 0o170000, 0o100000);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
