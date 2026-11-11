@@ -1121,6 +1121,10 @@ fn fetch_len(
             let md = s >> 6;
             let reg = (s >> 3) & 7;
             let rm = s & 7;
+            if reg == 6 && md == 1 && rm == 4 {
+                // PUSH m SIB+disp8。seq 0x4d1a81 の FF 74 24 68。
+                return Some(4);
+            }
             if reg != 0 && reg != 1 && reg != 2 && reg != 4 {
                 return None;
             }
@@ -3301,6 +3305,20 @@ fn dispatch<B: Backend>(
                 sem::push_reg64(b, push_r())
             } else {
                 sem::push_reg(b, push_r())
+            }
+        }
+        Insn::PushRmSibd => {
+            // FF /6 SIB mod=01。seq 0x4d1a81 の pushq 0x68(%rsp)。番地は減算前。
+            if no_index() {
+                if is64 {
+                    sem::push_m64_mem8(b, sib_base(), disp8())
+                } else {
+                    sem::push_m32_mem8(b, sib_base(), disp8())
+                }
+            } else if is64 {
+                sem::push_m64_sibd(b, sib_base(), sib_idx(), sib_shift(), disp8())
+            } else {
+                sem::push_m32_sibd(b, sib_base(), sib_idx(), sib_shift(), disp8())
             }
         }
         Insn::PushImm8 => {
