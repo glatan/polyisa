@@ -5,7 +5,8 @@
 // 遅延スロットは pc/npc で表す。R6 の BEQZALC は遅延スロットを持たない。
 // ADD/SUB は符号付き溢れでトラップする。ADDU/SUBU/ADDI/ADDIU は包む。
 // 0 除算は CpuState.div_zero_writes_zero に従う。0 は HI/LO を保つ。
-// ロード遅延、エンディアンの切り替え、o32、R6 の新しい符号化は後の回で足す。
+// ロード遅延は R3000 の実行ループだけが持つ。mips32r2 と r6 は持たない。
+// エンディアンの切り替え、o32、R6 の新しい符号化は後の回で足す。
 // 出典は SPEC-MIPS-IV Rev 3.2 (1995-09) と SPEC-MIPS-R6 Rev 6.06 である。
 // Ref: SPEC-MIPS-IV (Rev 3.2).
 // Ref: SPEC-MIPS-R6 (Rev 6.06).
@@ -38,6 +39,13 @@ pub fn build_model() -> polyisa_isadl::Model {
     });
     m.models.push(ModelDef {
         name: "r3000".to_string(),
+        parent: String::new(),
+        add_features: vec!["mips1".to_string()],
+        remove_features: vec![],
+    });
+    // Release 2 は MIPS I の符号化を残し、ロード遅延は持たない。遅延の有無は実行ループが持つ。
+    m.models.push(ModelDef {
+        name: "mips32r2".to_string(),
         parent: String::new(),
         add_features: vec!["mips1".to_string()],
         remove_features: vec![],

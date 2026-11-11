@@ -3,7 +3,8 @@
 //! MIPS I の整数命令。遅延スロット、符号付き溢れ、非整列ロードを裸実行で確かめる。
 //!
 //! R6 は遅延スロット付きの分岐とジャンプ、非整列ロード、HI/LO 乗除算を復号しない。
-//! BEQZALC だけが R6 側の命令である。ロード遅延、エンディアンの切り替え、o32 は後の回で足す。
+//! BEQZALC だけが R6 側の命令である。ロード遅延は R3000 の実行ループだけが持つ。
+//! エンディアンの切り替えと o32 は後の回で足す。
 
 #![forbid(unsafe_code)]
 
@@ -138,6 +139,7 @@ mod tests {
         assert!(FEATURES.contains(&"mips1"));
         assert!(FEATURES.contains(&"mips_r6"));
         assert!(MODELS.contains(&"r3000"));
+        assert!(MODELS.contains(&"mips32r2"));
         assert!(MODELS.contains(&"r6"));
     }
 }

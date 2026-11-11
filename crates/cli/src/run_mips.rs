@@ -3,7 +3,8 @@
 //! MIPS のフェッチから次のフェッチまで。遅延スロットは分岐と同じステップで実行する。
 //!
 //! 分岐とジャンプは `npc` だけを書き換え、スロットの命令を実行してから `commit` する。
-//! スロット内の例外は `in_delay_slot` を立てて戻す。ロード遅延と o32 は後の回で足す。
+//! スロット内の例外は `in_delay_slot` を立てて戻す。R3000 のロード遅延は
+//! 命令のあとにレジスタを戻し、次の命令が古い値を読む。o32 は後の回で足す。
 //! Ref: SPEC-MIPS-IV (Rev 3.2).
 
 use polyisa_engine::bare::BareEnv;
@@ -21,17 +22,37 @@ pub struct MipsModel {
     /// `decode_model_ex` に渡す機能ビット。
     pub feats: u64,
     pub endian: Endian,
-    /// R3000 のロード遅延。この回では false のまま使う。
+    /// R3000 だけが真。Release 2 と Release 6 は偽。
     pub load_delay: bool,
 }
 
 impl MipsModel {
-    /// ビッグエンディアンの MIPS I。ロード遅延はまだ無効。
+    /// ビッグエンディアンの R3000。ロードの結果は次の命令には見えず、その次から見える。
     #[must_use]
     pub const fn mips1_be() -> Self {
         Self {
             feats: 0,
             endian: Endian::Be,
+            load_delay: true,
+        }
+    }
+
+    /// MIPS32 Release 2。符号化は MIPS I のまま、ロード遅延はない。フェッチはリトルエンディアン。
+    #[must_use]
+    pub const fn mips32r2() -> Self {
+        Self {
+            feats: 0,
+            endian: Endian::Le,
+            load_delay: false,
+        }
+    }
+
+    /// Release 6。コンパクト分岐を復号し、ロード遅延はない。フェッチはリトルエンディアン。
+    #[must_use]
+    pub const fn r6() -> Self {
+        Self {
+            feats: polyisa_guest_mips::FEAT_MIPS_R6,
+            endian: Endian::Le,
             load_delay: false,
         }
     }
@@ -526,5 +547,114 @@ mod tests {
         assert_eq!(reg(&mut env, 31), 0x1008);
         assert_eq!(reg(&mut env, 2), 1);
         assert_eq!(reg(&mut env, 3), 0);
+    }
+
+    fn be(mut model: MipsModel) -> MipsModel {
+        model.endian = Endian::Be;
+        model
+    }
+
+    #[test]
+    fn r3000_load_is_invisible_to_the_next_instruction() {
+        // 0x1000 lw r1, 0(r4)     メモリは 0x42。r1 の旧値は 7。
+        // 0x1004 addiu r2, r1, 1  遅延スロット。R3000 は 7 を読む。
+        // 0x1008 addiu r3, r1, 1  ここでは 0x42 が見える。
+        let (r1, r2, r3) = load_then_use(MipsModel::mips1_be());
+        assert_eq!(r1, 0x42);
+        assert_eq!(r2, 8);
+        assert_eq!(r3, 0x43);
+        let (r1, r2, r3) = load_then_use(be(MipsModel::mips32r2()));
+        assert_eq!(r1, 0x42);
+        assert_eq!(r2, 0x43);
+        assert_eq!(r3, 0x43);
+    }
+
+    #[test]
+    fn r3000_discards_a_load_when_the_slot_writes_the_same_reg() {
+        let mut env = env_at(0x1000);
+        poke(&mut env, 0x1000, 0x8c81_0000);
+        poke(&mut env, 0x1004, 0x2421_0001);
+        poke(&mut env, 0x1008, 0x2422_0000);
+        poke(&mut env, 0x100c, 0xffff_ffff);
+        poke(&mut env, 0x1800, 0x42);
+        set_reg(&mut env, 1, 7);
+        set_reg(&mut env, 4, 0x1800);
+        let outcome = run(&mut env, 0x1000, MipsModel::mips1_be());
+        assert!(matches!(
+            outcome,
+            MipsOutcome::Unimplemented { pc: 0x100c, .. }
+        ));
+        assert_eq!(reg(&mut env, 1), 8);
+        assert_eq!(reg(&mut env, 2), 8);
+    }
+
+    #[test]
+    fn r3000_branch_slot_sees_a_load_from_before_the_branch() {
+        // lw の遅延スロットが beq。beq は r1 を書かないので、beq のスロットはロード値を読む。
+        let mut env = env_at(0x1000);
+        poke(&mut env, 0x1000, 0x8c81_0000);
+        poke(&mut env, 0x1004, 0x1000_0001);
+        poke(&mut env, 0x1008, 0x2422_0001);
+        poke(&mut env, 0x100c, 0x2423_0001);
+        poke(&mut env, 0x1010, 0xffff_ffff);
+        poke(&mut env, 0x1800, 0x42);
+        set_reg(&mut env, 1, 7);
+        set_reg(&mut env, 4, 0x1800);
+        let outcome = run(&mut env, 0x1000, MipsModel::mips1_be());
+        assert!(matches!(
+            outcome,
+            MipsOutcome::Unimplemented { pc: 0x1010, .. }
+        ));
+        assert_eq!(reg(&mut env, 2), 0x43);
+        assert_eq!(reg(&mut env, 3), 0x43);
+    }
+
+    #[test]
+    fn r6_compact_branch_sees_the_loaded_value() {
+        // 0x1000 lw r1, 0(r4)          メモリは 0。r1 の旧値は 1。
+        // 0x1004 beqzalc r1, +4        ロード値 0 を見て分岐する。
+        // 0x1008 addiu r2, zero, 1     不成立のときだけ実行する。
+        // 0x1018 addiu r3, zero, 2     飛び先。
+        let mut env = env_at(0x1000);
+        poke(&mut env, 0x1000, 0x8c81_0000);
+        poke(&mut env, 0x1004, 0x2001_0004);
+        poke(&mut env, 0x1008, 0x2402_0001);
+        poke(&mut env, 0x1018, 0x2403_0002);
+        poke(&mut env, 0x101c, 0xffff_ffff);
+        poke(&mut env, 0x1800, 0);
+        set_reg(&mut env, 1, 1);
+        set_reg(&mut env, 4, 0x1800);
+        let outcome = run(&mut env, 0x1000, be(MipsModel::r6()));
+        assert_eq!(
+            outcome,
+            MipsOutcome::Unimplemented {
+                pc: 0x101c,
+                word: 0xffff_ffff,
+            }
+        );
+        assert_eq!(reg(&mut env, 1), 0);
+        assert_eq!(reg(&mut env, 2), 0);
+        assert_eq!(reg(&mut env, 3), 2);
+        assert_eq!(reg(&mut env, 31), 0x1008);
+        assert!(!MipsModel::mips32r2().load_delay);
+        assert!(!MipsModel::r6().load_delay);
+        assert!(MipsModel::mips1_be().load_delay);
+    }
+
+    fn load_then_use(model: MipsModel) -> (u64, u64, u64) {
+        let mut env = env_at(0x1000);
+        poke(&mut env, 0x1000, 0x8c81_0000);
+        poke(&mut env, 0x1004, 0x2422_0001);
+        poke(&mut env, 0x1008, 0x2423_0001);
+        poke(&mut env, 0x100c, 0xffff_ffff);
+        poke(&mut env, 0x1800, 0x42);
+        set_reg(&mut env, 1, 7);
+        set_reg(&mut env, 4, 0x1800);
+        let outcome = run(&mut env, 0x1000, model);
+        assert!(matches!(
+            outcome,
+            MipsOutcome::Unimplemented { pc: 0x100c, .. }
+        ));
+        (reg(&mut env, 1), reg(&mut env, 2), reg(&mut env, 3))
     }
 }
