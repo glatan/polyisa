@@ -7368,6 +7368,15 @@ fn dispatch<B: Backend>(
                 sem::cmovl_r32_sib(b, reg0f_as_gpr(), base)
             }
         }
+        Insn::CmovsR32Sib => {
+            // 0F 48 SIB mod=00 [base] no_index。sed 0x4c9eb0 の cmovsl (%rsp), %ecx。
+            let base = sib0f_base();
+            if rex_w {
+                sem::cmovs_r64_sib(b, reg0f_as_gpr(), base)
+            } else {
+                sem::cmovs_r32_sib(b, reg0f_as_gpr(), base)
+            }
+        }
         Insn::CmoveRip => {
             if rex_w {
                 sem::cmove_r64_rip(b, reg0f_as_gpr(), eip as u64 + nbytes, disp32())

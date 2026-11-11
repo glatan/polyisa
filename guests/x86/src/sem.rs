@@ -13675,6 +13675,28 @@ pub fn cmovs_r32<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
     Ok(())
 }
 
+/// CMOVS r32, m32 SIB mod=00 (no_index)。SF=1 なら mem32 を dst に移す。sed 0x4c9eb0 対応.
+pub fn cmovs_r32_sib<B: Backend>(b: &mut B, dst: Gpr, base: Gpr) -> Flow<B> {
+    let addr = eff_addr(b, base, 0);
+    let srcv: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let take = read_sf(b);
+    let dstv = read(b, dst);
+    let v = b.select::<W32>(take, srcv, dstv);
+    write(b, dst, v);
+    Ok(())
+}
+
+/// CMOVS r64, m64 SIB mod=00 (no_index, REX.W)。SF=1 なら mem64 を dst に移す.
+pub fn cmovs_r64_sib<B: Backend>(b: &mut B, dst: Gpr, base: Gpr) -> Flow<B> {
+    let addr = eff_addr(b, base, 0);
+    let srcv: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let take = read_sf(b);
+    let dstv = read64(b, dst);
+    let v = b.select::<W64>(take, srcv, dstv);
+    write64(b, dst, v);
+    Ok(())
+}
+
 /// CMOVS r64 (REX.W)。
 pub fn cmovs_r64<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
     let take = read_sf(b);

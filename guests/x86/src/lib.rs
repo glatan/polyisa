@@ -85,7 +85,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数117件。
-        assert_eq!(INSNS.len(), 720);
+        assert_eq!(INSNS.len(), 721);
     }
 
     #[test]
@@ -1193,6 +1193,8 @@ mod tests {
         // CMOVL r32, [SIB] mod=00 no_index (0F 4C)。cut 0x492257 の 44 0F 4C 14 24。
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x0F4C1424, 32), Some(Insn::CmovlR32Sib));
+        // CMOVS (%rsp), %ecx。sed 0x4c9eb0 の 0F 48 0C 24。
+        assert_eq!(decode(0x0F480C24, 32), Some(Insn::CmovsR32Sib));
         assert_eq!(decode(0x0F4C1424, 24), None);
         // IMUL r,m32 SIB+disp8 (0F AF mod=01)。hexdump 0x5c8ca2 対応.
         // 0F AF 6C 24 14 は imul ebp,[r12+0x14] (REX.B 剥がし済み)。

@@ -389,6 +389,7 @@ fn text_applets_match_host() {
         &["usleep", "0"],
         &["bc"],
         &["sync"],
+        &["sed", "/cd/d", f],
         &["printenv"],
         &["which", "true"],
         &["install", "-m", "644", f, installed_s],
