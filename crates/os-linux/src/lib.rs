@@ -93,6 +93,7 @@ pub mod x86_64 {
     pub const LSEEK: u64 = 8;
     pub const GETDENTS64: u64 = 217;
     pub const GETCWD: u64 = 79;
+    pub const CHDIR: u64 = 80;
     pub const DUP3: u64 = 292;
     pub const FCNTL: u64 = 72;
     pub const IOCTL: u64 = 16;
@@ -222,6 +223,7 @@ pub mod i386 {
     pub const PIPE2: u64 = 331;
     pub const SETPGID: u64 = 57;
     pub const GETPGID: u64 = 132;
+    pub const CHDIR: u64 = 12;
 }
 
 /// Linux の `clone` フラグ。アドレス空間の共有はプロセス生成では使わない。
@@ -352,6 +354,7 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             i386::PIPE2 => Some("pipe2"),
             i386::SETPGID => Some("setpgid"),
             i386::GETPGID => Some("getpgid"),
+            i386::CHDIR => Some("chdir"),
             _ => None,
         },
         GuestAbi::X86_64Linux => match nr {
@@ -425,6 +428,7 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             x86_64::PIPE2 => Some("pipe2"),
             x86_64::SETPGID => Some("setpgid"),
             x86_64::GETPGID => Some("getpgid"),
+            x86_64::CHDIR => Some("chdir"),
             _ => None,
         },
         GuestAbi::Unknown => None,

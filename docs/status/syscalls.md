@@ -15,6 +15,7 @@
 - access
 - arch_prctl
 - brk
+- chdir
 - chmod
 - clock_gettime
 - clock_nanosleep

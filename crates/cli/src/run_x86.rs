@@ -7341,8 +7341,8 @@ fn guest_c_string(env: &mut BareEnv, addr: u64) -> Option<String> {
 ///
 /// 試作の合意事項：仮想カーネル・VFS・ゲストルートの適用は後の段階である。
 /// ここではホストのファイルに直接触る（裸実行の延長）。パスの隔離はしないので、
-/// 信頼できないゲストバイナリには使わないこと。絶対パスの O_RDONLY のみ受け付け、
-/// 1 回の転送は 64 KiB ずつに区切る。
+/// 信頼できないゲストバイナリには使わないこと。絶対パスはホストのパスとして開き、
+/// 相対パスはプロセスの作業ディレクトリから開く。1 回の転送は 64 KiB ずつに区切る。
 #[derive(Default)]
 pub struct CliLinux {
     reported: Vec<u64>,
@@ -7395,6 +7395,8 @@ pub struct CliLinux {
     pipe_ends: Vec<Option<PipeEnd>>,
     /// 空のパイプを読もうとして待っているパイプ。
     pipe_wait: Option<u64>,
+    /// このプロセスの作業ディレクトリ。空はまだホストの作業ディレクトリを写していない。
+    cwd: String,
 }
 
 /// `wait4` を完了するときに使う引数。
@@ -7737,6 +7739,17 @@ impl CliLinux {
         }
     }
 
+    /// 作業ディレクトリが空なら、ホストの現在位置を写す。
+    fn ensure_cwd(&mut self) {
+        if !self.cwd.is_empty() {
+            return;
+        }
+        self.cwd = std::env::current_dir()
+            .ok()
+            .and_then(|path| path.into_os_string().into_string().ok())
+            .unwrap_or_else(|| "/".to_string());
+    }
+
     /// ファイル記述子を複製した子の状態。プロセス表は共有し、止めた子は持たない。
     fn duplicate(&self) -> Self {
         let clone_file =
@@ -7766,6 +7779,7 @@ impl CliLinux {
             pipes: self.pipes.clone(),
             pipe_ends: self.pipe_ends.clone(),
             pipe_wait: None,
+            cwd: self.cwd.clone(),
         };
         for end in child.pipe_ends.iter().flatten() {
             child.pipes.0.borrow_mut().dup(end.id, end.read);
@@ -7960,6 +7974,7 @@ const ECHILD: u32 = 10;
 const EFAULT: u32 = 14;
 const EACCES: u32 = 13;
 const ENOMEM: u32 = 12;
+const ENOTDIR: u32 = 20;
 const EINVAL: u32 = 22;
 const EPIPE: u32 = 32;
 const ERANGE: u32 = 34;
@@ -8062,6 +8077,7 @@ const X86_64_SYSCALLS: &[(&str, SysFn)] = &[
     ("pipe2", sys_pipe2),
     ("setpgid", sys_setpgid),
     ("getpgid", sys_getpgid),
+    ("chdir", sys_chdir),
     ("mmap", sys_mmap),
     ("set_tid_address", sys_set_tid_address),
     ("gettid", sys_gettid),
@@ -8187,10 +8203,8 @@ fn sys_openat(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Trap
         Some(p) => p,
         None => return Some(TrapOutcome::Unimplemented),
     };
-    if !path.starts_with('/') {
-        set64(env, Gpr(0), cx.neg(EINVAL));
-        return Some(TrapOutcome::Handled);
-    }
+    sys.ensure_cwd();
+    let path = join_guest_path(&sys.cwd, &path);
     let want_write = acc != 0 || flags & (O_CREAT | O_TRUNC | O_APPEND) != 0;
     let opened = if want_write {
         let mut opts = std::fs::OpenOptions::new();
@@ -8887,19 +8901,26 @@ fn sys_getegid(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Tra
     sys_getgid(sys, env, cx)
 }
 
-fn sys_getcwd(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // getcwd(buf, size)。ホスト cwd を返し、NUL 込み長さを返す.
+fn join_guest_path(cwd: &str, path: &str) -> String {
+    if path.starts_with('/') || cwd.is_empty() {
+        return path.to_string();
+    }
+    if cwd == "/" {
+        return format!("/{path}");
+    }
+    format!("{}/{}", cwd.trim_end_matches('/'), path)
+}
+
+fn sys_getcwd(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // getcwd(buf, size)。プロセスの作業ディレクトリを返し、NUL 込み長さを返す.
     let buf = get64(env, cx.r_a);
     let size = get64(env, cx.r_b);
     if buf == 0 || size == 0 {
         set64(env, Gpr(0), cx.neg(EINVAL));
         return Some(TrapOutcome::Handled);
     }
-    let cwd = std::env::current_dir()
-        .ok()
-        .and_then(|p| p.into_os_string().into_string().ok())
-        .unwrap_or_else(|| "/".to_string());
-    let bytes = cwd.as_bytes();
+    sys.ensure_cwd();
+    let bytes = sys.cwd.as_bytes();
     let need = (bytes.len() as u64) + 1;
     if size < need {
         set64(env, Gpr(0), cx.neg(ERANGE));
@@ -8922,6 +8943,34 @@ fn sys_getcwd(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Tra
         return Some(TrapOutcome::Unimplemented);
     }
     set64(env, Gpr(0), need);
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_chdir(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    let path_addr = get64(env, cx.r_a);
+    let Some(path) = guest_c_string(env, path_addr) else {
+        return Some(TrapOutcome::Unimplemented);
+    };
+    if path.is_empty() {
+        set64(env, Gpr(0), cx.neg(ENOENT));
+        return Some(TrapOutcome::Handled);
+    }
+    sys.ensure_cwd();
+    let host = join_guest_path(&sys.cwd, &path);
+    let errno = match std::fs::metadata(&host) {
+        Ok(meta) if meta.is_dir() => {
+            sys.cwd = host;
+            set64(env, Gpr(0), 0);
+            return Some(TrapOutcome::Handled);
+        }
+        Ok(_) => ENOTDIR,
+        Err(err) => match err.kind() {
+            std::io::ErrorKind::NotFound => ENOENT,
+            std::io::ErrorKind::PermissionDenied => EACCES,
+            _ => ENOENT,
+        },
+    };
+    set64(env, Gpr(0), cx.neg(errno));
     Some(TrapOutcome::Handled)
 }
 
@@ -11282,6 +11331,77 @@ mod tests {
         set64(&mut env, Gpr(6), 1);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(ERANGE));
+    }
+
+    #[test]
+    fn chdir_updates_getcwd_and_relative_openat() {
+        use polyisa_os_linux::x86_64 as abi;
+        let dir = std::env::temp_dir().join(format!("polyisa-chdir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("note"), b"Q").unwrap();
+        let path = dir.to_str().unwrap();
+
+        let mut sys = CliLinux::x86_64();
+        let mut env = bare();
+        set64(&mut env, Gpr(0), abi::GETCWD);
+        set64(&mut env, Gpr(7), 0x100);
+        set64(&mut env, Gpr(6), 0x100);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let n = get64(&mut env, Gpr(0)) as usize;
+        let mut back = vec![0u8; n];
+        env.backend
+            .mem
+            .read(VirtAddr(0x100), &mut back, data_access())
+            .unwrap();
+        let host = std::env::current_dir().unwrap();
+        assert_eq!(&back[..n - 1], host.to_str().unwrap().as_bytes());
+
+        env.backend
+            .mem
+            .write(VirtAddr(0x300), path.as_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x300 + path.len() as u64), &[0])
+            .unwrap();
+        set64(&mut env, Gpr(0), abi::CHDIR);
+        set64(&mut env, Gpr(7), 0x300);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+
+        set64(&mut env, Gpr(0), abi::GETCWD);
+        set64(&mut env, Gpr(7), 0x100);
+        set64(&mut env, Gpr(6), 0x100);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let n = get64(&mut env, Gpr(0)) as usize;
+        let mut back = vec![0u8; n];
+        env.backend
+            .mem
+            .read(VirtAddr(0x100), &mut back, data_access())
+            .unwrap();
+        assert_eq!(&back[..n - 1], path.as_bytes());
+
+        env.backend.mem.write(VirtAddr(0x400), b"note\0").unwrap();
+        set64(&mut env, Gpr(0), abi::OPENAT);
+        set64(&mut env, Gpr(7), u64::from(AT_FDCWD_U32));
+        set64(&mut env, Gpr(6), 0x400);
+        set64(&mut env, Gpr(2), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let fd = get64(&mut env, Gpr(0));
+        set64(&mut env, Gpr(0), abi::READ);
+        set64(&mut env, Gpr(7), fd);
+        set64(&mut env, Gpr(6), 0x500);
+        set64(&mut env, Gpr(2), 1);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 1);
+        let mut byte = [0u8; 1];
+        env.backend
+            .mem
+            .read(VirtAddr(0x500), &mut byte, data_access())
+            .unwrap();
+        assert_eq!(byte, *b"Q");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
