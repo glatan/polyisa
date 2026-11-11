@@ -941,6 +941,10 @@ fn fetch_len(
                 // FUCOMI ST(0), ST(i) (DB E8+i)。seq 0x4d0983 の DB E9。
                 return Some(2);
             }
+            if reg == 5 && md == 0 && rm == 5 {
+                // FLD m80 [RIP+disp32] (DB /5)。dd 0x4d0e58 の DB 2D。6B.
+                return Some(6);
+            }
             if reg == 5 && md == 0 && rm == 4 {
                 // FLD m80 SIB。seq 0x4d74d4 の DB 2C 24。base=5 は disp32。
                 let sib = third?;
@@ -3632,6 +3636,15 @@ fn dispatch<B: Backend>(
         Insn::FldSt => {
             // D9 C0+i。seq 0x4d0867 の D9 C0 は FLD ST(0)。
             sem::fld_st(b, (word & 7) as u8)
+        }
+        Insn::FldM80Rip => {
+            // DB /5 mod=00 rm=5。dd 0x4d0e58 の fldt [rip+disp]。
+            let disp = (word as u32).swap_bytes() as i32;
+            if is64 {
+                sem::fld_m80_rip(b, eip as u64 + nbytes, disp)
+            } else {
+                sem::fld_m80_abs(b, (word as u32).swap_bytes())
+            }
         }
         Insn::FldM80Sib => {
             // DB /5 SIB mod=00。seq 0x4d74d4 の fldt (%rsp)。

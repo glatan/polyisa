@@ -11671,6 +11671,28 @@ pub fn fld_m80_sibd32<B: Backend>(
     push_ext(b, sig, exp)
 }
 
+/// FLD m80 [RIP+disp32] (DB /5 mod=00 rm=5)。10 バイトを載せる。dd 0x4d0e58 対応.
+pub fn fld_m80_rip<B: Backend>(b: &mut B, next_rip: u64, disp: i32) -> Flow<B> {
+    let base = b.konst::<W64>(next_rip);
+    let d = b.konst::<W64>(disp as i64 as u64);
+    let addr = b.add::<W64>(base, d);
+    let sig: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let eight = b.konst::<W64>(8);
+    let exp_addr = b.add::<W64>(addr, eight);
+    let exp: B::V<W16> = b.load::<W16>(exp_addr, DATA_READ)?;
+    push_ext(b, sig, exp)
+}
+
+/// FLD m80 [disp32] (DB /5 mod=00 rm=5、32ビット)。
+pub fn fld_m80_abs<B: Backend>(b: &mut B, addr32: u32) -> Flow<B> {
+    let addr = b.konst::<W64>(addr32 as u64);
+    let sig: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let eight = b.konst::<W64>(8);
+    let exp_addr = b.add::<W64>(addr, eight);
+    let exp: B::V<W16> = b.load::<W16>(exp_addr, DATA_READ)?;
+    push_ext(b, sig, exp)
+}
+
 /// FLD m80 [base] (DB /5 SIB mod=00, no_index)。seq 0x4d74d4 対応.
 pub fn fld_m80_memnd<B: Backend>(b: &mut B, base: Gpr) -> Flow<B> {
     let addr = read64(b, base);

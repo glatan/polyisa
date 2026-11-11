@@ -9193,6 +9193,43 @@ fn run_push_m64_sibd_from_rsp() {
 }
 
 #[test]
+fn run_fld_m80_rip_pushes_ten_bytes() {
+    // DB 2D FA 0F 00 00 = fldt [rip+0xffa]。次命令 0x1006、宛先 0x2000。dd 0x4d0e58。
+    // Ref: SPEC-X86-INTEL-SDM (v093).
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x2000),
+            &((1u64 << 63) | (1u64 << 62)).to_le_bytes(),
+        )
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2008), &0x4000u16.to_le_bytes())
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0xDB, 0x2D, 0xFA, 0x0F, 0x00, 0x00])
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x1006 });
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::top_ref()), 7);
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::st_exp_ref(7)),
+        0x4000
+    );
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::st_sig_ref(7)),
+        (1u64 << 63) | (1u64 << 62)
+    );
+}
+
+#[test]
 fn run_fld_m80_sibd32_pushes_three() {
     // DB AC 24 80 1D 00 00 = fldt 0x1d80(%rsp)。10 バイトを載せる。seq 0x4d0853。
     // Ref: SPEC-X86-INTEL-SDM (v093).

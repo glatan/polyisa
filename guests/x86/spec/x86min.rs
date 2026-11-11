@@ -1675,6 +1675,15 @@ pub fn build_model() -> polyisa_isadl::Model {
             "fld m80",
             "alu",
         ),
+        // FLD m80 [RIP+disp32] (DB /5 mod=00 rm=5)。dd 0x4d0e58 対応。
+        (
+            "fld_m80_rip",
+            "F1",
+            "11011011 00101101 ................................",
+            vec![],
+            "fld m80",
+            "alu",
+        ),
         (
             "fld_st",
             "F1",
