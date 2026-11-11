@@ -3621,6 +3621,31 @@ fn cmovbe_moves_on_carry_or_zero() {
 }
 
 #[test]
+fn cmovbe_mem8_takes_cf_or_zf() {
+    // 48 0F 46 6B 08 相当。8(%rbx) の mem64 を ZF=1 で取り、CF=ZF=0 では残す.
+    let mut env = env();
+    env.backend
+        .mem
+        .map(VirtAddr(0x2000), 1, polyisa_mem::Perms::RW)
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2008), &0x42u64.to_le_bytes())
+        .unwrap();
+    env.backend.set(Gpr(3).state(), 0x2000u32);
+    env.backend.set(Gpr(5).state(), 7u32);
+    env.backend.set(sem::eflags_ref(), 0x40);
+    env.step(|b| sem::cmovbe_r64_mem8(b, Gpr(5), Gpr(3), 8))
+        .unwrap();
+    assert_eq!(env.backend.get(Gpr(5).state()), 0x42);
+    env.backend.set(Gpr(5).state(), 7u32);
+    env.backend.set(sem::eflags_ref(), 0);
+    env.step(|b| sem::cmovbe_r64_mem8(b, Gpr(5), Gpr(3), 8))
+        .unwrap();
+    assert_eq!(env.backend.get(Gpr(5).state()), 7);
+}
+
+#[test]
 fn adc_sbb_rm32_carry() {
     // ADC: CF=1, 1+2+1=4.
     let mut env = env();

@@ -182,6 +182,9 @@ fn fetch_len(
                     let t = fourth?;
                     // no_index (index=100) のみ.
                     if (t >> 3) & 7 == 4 { Some(5) } else { None }
+                } else if s == 0x46 && md == 1 && rm != 4 {
+                    // CMOVBE [base+disp8] (test 0x4d2874)。
+                    Some(4)
                 } else {
                     None
                 }
@@ -1550,6 +1553,7 @@ pub fn run_mode(
                     | 0x0F
                     | 0xA4
                     | 0xA5
+                    | 0xA9
                     | 0xAA
                     | 0xAB
                     | 0xB8..=0xBF
@@ -4928,6 +4932,20 @@ fn dispatch<B: Backend>(
                 sem::sub_r32_mem8(b, reg(), rm(), disp8())
             }
         }
+        Insn::SubRSib => {
+            // 2B /r SIB mod=00 [base+index*scale]。basename 0x4898fc 対応. no_index は [base].
+            if no_index() {
+                if rex_w {
+                    sem::sub_r64_memnd(b, reg(), sib_base())
+                } else {
+                    sem::sub_r32_memnd(b, reg(), sib_base())
+                }
+            } else if rex_w {
+                sem::sub_r64_sib(b, reg(), sib_base(), sib_idx(), sib_shift())
+            } else {
+                sem::sub_r32_sib(b, reg(), sib_base(), sib_idx(), sib_shift())
+            }
+        }
         Insn::SubRSibd => {
             // 2B SIB mod=01 [base+index*scale+disp8] (32b)。no_index は base+disp8 のみ.
             // disp は最下位8。dst は reg フィールド.
@@ -6168,6 +6186,14 @@ fn dispatch<B: Backend>(
                 sem::cmovbe_r64(b, reg0f_as_gpr(), rm0f())
             } else {
                 sem::cmovbe_r32(b, reg0f_as_gpr(), rm0f())
+            }
+        }
+        Insn::CmovbeMem8 => {
+            // 0F 46 mod=01 [base+disp8]。test 0x4d2874 対応.
+            if rex_w {
+                sem::cmovbe_r64_mem8(b, reg0f_as_gpr(), rm0f(), disp8())
+            } else {
+                sem::cmovbe_r32_mem8(b, reg0f_as_gpr(), rm0f(), disp8())
             }
         }
         Insn::Cmova => {

@@ -6094,6 +6094,21 @@ pub fn cmovbe_r32<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
     Ok(())
 }
 
+/// CMOVBE r32, m32 [base+disp8]。CF=1 または ZF=1 なら mem32 を dst に移す.
+pub fn cmovbe_r32_mem8<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, disp: i8) -> Flow<B> {
+    let addr = eff_addr(b, base, disp);
+    let srcv: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let cf = cf_num(b);
+    let zf = zf_num(b);
+    let either = b.or::<W32>(cf, zf);
+    let zero = b.konst::<W32>(0);
+    let take = b.cmp::<W32>(Cmp::Ne, either, zero);
+    let dstv = read(b, dst);
+    let v = b.select::<W32>(take, srcv, dstv);
+    write(b, dst, v);
+    Ok(())
+}
+
 /// CMOVBE r64, r/m64。CF=1 または ZF=1 なら src を dst に移す（REX.W）.
 pub fn cmovbe_r64<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
     let cf = cf_num(b);
@@ -6102,6 +6117,21 @@ pub fn cmovbe_r64<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
     let zero = b.konst::<W32>(0);
     let take = b.cmp::<W32>(Cmp::Ne, either, zero);
     let srcv = read64(b, src);
+    let dstv = read64(b, dst);
+    let v = b.select::<W64>(take, srcv, dstv);
+    write64(b, dst, v);
+    Ok(())
+}
+
+/// CMOVBE r64, m64 [base+disp8]。CF=1 または ZF=1 なら mem64 を dst に移す.
+pub fn cmovbe_r64_mem8<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, disp: i8) -> Flow<B> {
+    let addr = eff_addr(b, base, disp);
+    let srcv: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let cf = cf_num(b);
+    let zf = zf_num(b);
+    let either = b.or::<W32>(cf, zf);
+    let zero = b.konst::<W32>(0);
+    let take = b.cmp::<W32>(Cmp::Ne, either, zero);
     let dstv = read64(b, dst);
     let v = b.select::<W64>(take, srcv, dstv);
     write64(b, dst, v);
@@ -6705,6 +6735,28 @@ pub fn add_r64_mem32<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, disp: i32) -> F
     let v = b.add::<W64>(x, y);
     write64(b, dst, v);
     update_add_flags(b, x, y, v);
+    Ok(())
+}
+
+/// SUB r32, [base+index*scale] (2B /r SIB mod=00)。basename 系 0x4898fc 対応.
+pub fn sub_r32_sib<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, idx: Gpr, shift: u32) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, 0, base, idx);
+    let y: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let x = read(b, dst);
+    let v = b.sub::<W32>(x, y);
+    write(b, dst, v);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
+/// SUB r64, [base+index*scale] (2B /r SIB mod=00, REX.W)。
+pub fn sub_r64_sib<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, idx: Gpr, shift: u32) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, 0, base, idx);
+    let y: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let x = read64(b, dst);
+    let v = b.sub::<W64>(x, y);
+    write64(b, dst, v);
+    update_sub_flags(b, x, y, v);
     Ok(())
 }
 

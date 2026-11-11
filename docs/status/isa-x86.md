@@ -40,6 +40,7 @@
 | cmovae | cmovae_m64 | 真 | load |
 | cmovb | cmovb | 真 | alu |
 | cmovbe | cmovbe | 真 | alu |
+| cmovbe | cmovbe_mem8 | 真 | load |
 | cmove | cmove | 真 | alu |
 | cmove | cmove_m64、cmove_r64_sibd、cmove_rip | 真 | load |
 | cmovg | cmovg | 真 | alu |
@@ -177,7 +178,7 @@
 | std | std | 真 | alu |
 | stosb | stosb | 真 | store |
 | stosd | stosd | 真 | store |
-| sub | sub_eax、sub_m32_r32_mem8、sub_m8_r8、sub_r_mem32、sub_r_mem8、sub_r_memnd、sub_r_rip、sub_r_sibabs、sub_r_sibd、sub_rm32、sub_rm32_imm、sub_rm64_imm、sub_rm_imm8、sub_rm_imm8_mem32、sub_rm_imm8_mem8、sub_rm_imm8_memnd、sub_rm_imm8_rip | 真 | alu |
+| sub | sub_eax、sub_m32_r32_mem8、sub_m8_r8、sub_r_mem32、sub_r_mem8、sub_r_memnd、sub_r_rip、sub_r_sib、sub_r_sibabs、sub_r_sibd、sub_rm32、sub_rm32_imm、sub_rm64_imm、sub_rm_imm8、sub_rm_imm8_mem32、sub_rm_imm8_mem8、sub_rm_imm8_memnd、sub_rm_imm8_rip | 真 | alu |
 | subsd | subsd | 真 | alu |
 | syscall | syscall | 真 | system |
 | test | test_al_imm、test_eax_imm、test_m16_imm_mem8、test_m16_imm_memnd、test_m16_imm_rip、test_m8_imm_mem32、test_m8_imm_mem8、test_m8_imm_memnd、test_m8_imm_rip、test_m8_imm_sib、test_m8_imm_sibd、test_m8_r8_mem32、test_m8_r8_mem8、test_m8_r8_memnd、test_r8_r8、test_r_mem8、test_r_sibd、test_r_sibd32、test_rm32、test_rm32_imm、test_rm32_imm_mem8、test_rm32_imm_memnd、test_rm32_memnd、test_rm8_imm | 真 | alu |

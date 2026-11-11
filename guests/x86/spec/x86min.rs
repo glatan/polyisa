@@ -326,6 +326,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         // CMOVNS r32/r64, r/m32/r/m64 (0F 49 /r)。reg-direct のみ.
         ("cmovns", "F1", "00001111 01001001 11......", "cmovns r, r/m", "alu"),
         ("cmovbe", "F1", "00001111 01000110 11......", "cmovbe r, r/m", "alu"),
+        // CMOVBE r, [base+disp8] (0F 46 mod=01 rm!=4)。test 0x4d2874 対応.
+        ("cmovbe_mem8", "F1", "00001111 01000110 01...... ........", "cmovbe r, m", "load"),
         ("cmova", "F1", "00001111 01000111 11......", "cmova r, r/m", "alu"),
         ("cmovae", "F1", "00001111 01000011 11......", "cmovae r, r/m", "alu"),
         ("cmovs", "F1", "00001111 01001000 11......", "cmovs r, r/m", "alu"),
@@ -1131,6 +1133,14 @@ pub fn build_model() -> polyisa_isadl::Model {
             "00110011 00...100 ........",
             vec![wc("n8_base", WhereOp::Ne, 5)],
             "xor r32, [r/m+sib]",
+            "alu",
+        ),
+        (
+            "sub_r_sib",
+            "N8",
+            "00101011 00...100 ........",
+            vec![wc("n8_base", WhereOp::Ne, 5)],
+            "sub r32, [r/m+sib]",
             "alu",
         ),
         (

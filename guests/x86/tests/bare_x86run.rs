@@ -7187,3 +7187,85 @@ fn run_pmaxub_reg_direct() {
     })
     .unwrap();
 }
+
+#[test]
+fn run_cmovbe_mem8() {
+    // 48 0F 46 6B 08 = cmovbq 8(%rbx), %rbp。ZF=1 で 0x42 を取り exit する.
+    // Ref: SPEC-X86-INTEL-SDM (v093). test 0x4d2874.
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2008), &0x42u64.to_le_bytes())
+        .unwrap();
+    env.backend.set(Gpr(3).state(), 0x2000u32);
+    env.backend.set(Gpr(5).state(), 7u32);
+    env.backend
+        .set(polyisa_guest_x86::sem::eflags_ref(), 0x40u32);
+    let prog: &[u8] = &[
+        0x48, 0x0F, 0x46, 0x6B, 0x08, // cmovbq 8(%rbx), %rbp
+        0x48, 0x89, 0xEF, // mov %rbp, %rdi
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov $60, %rax
+        0x0F, 0x05, // syscall
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 20, true);
+    assert_eq!(out, Outcome::Exit(0x42));
+}
+
+#[test]
+fn run_test_rax_imm32_sign_extends() {
+    // 48 A9 00 F0 FF FF = test rax, 0xfffff000。imm32 は符号拡張され、
+    // bit63 だけ立った rax と AND すると ZF=0。basename 0x4bff3f 対応.
+    // Ref: SPEC-X86-INTEL-SDM (v093).
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.set(Gpr(0).state(), 0u32);
+    env.backend
+        .set(polyisa_guest_x86::sem::hi_ref(Gpr(0)), 0x8000_0000u32);
+    let prog: &[u8] = &[
+        0x48, 0xA9, 0x00, 0xF0, 0xFF, 0xFF, // test rax, 0xfffff000
+        0x75, 0x10, // jne success
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov $60, %rax
+        0x48, 0xC7, 0xC7, 0x01, 0x00, 0x00, 0x00, // mov $1, %rdi
+        0x0F, 0x05, // syscall exit(1)
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov $60, %rax
+        0x48, 0x31, 0xFF, // xor %rdi, %rdi
+        0x0F, 0x05, // syscall exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 20, true);
+    assert_eq!(out, Outcome::Exit(0));
+}
+
+#[test]
+fn run_sub_r32_sib() {
+    // 2B 04 32 = sub eax, [rdx+rsi]。8-5=3。basename 0x4898fc 対応.
+    // Ref: SPEC-X86-INTEL-SDM (v093).
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2008), &5u32.to_le_bytes())
+        .unwrap();
+    env.backend.set(Gpr(0).state(), 8u32);
+    env.backend.set(Gpr(2).state(), 0x2000u32);
+    env.backend.set(Gpr(6).state(), 8u32);
+    let prog: &[u8] = &[
+        0x2B, 0x04, 0x32, // sub eax, [rdx+rsi]
+        0x89, 0xC7, // mov edi, eax
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov $60, %rax
+        0x0F, 0x05,
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 20, true);
+    assert_eq!(out, Outcome::Exit(3));
+}
