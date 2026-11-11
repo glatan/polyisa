@@ -1902,6 +1902,7 @@ pub fn run_mode(
                     | Insn::MovSibdEax
                     | Insn::MovSibd32Eax
                     | Insn::IncRmSibd32
+                    | Insn::IncRmMem32
                     | Insn::MovEaxSibd
                     | Insn::Punpcklqdq
                     | Insn::MovqR64Xmm
@@ -2285,7 +2286,12 @@ fn dispatch<B: Backend>(
         }
         Insn::IncRmMem32 => {
             // FF /0 mod=10 [base+disp32]。uname 0x4b3c4a 対応.
-            sem::inc_r32_mem32(b, rm(), disp32())
+            // 66 付きは16ビット。gzip 0x484a42 の incw 0x13a8(%rdx)。
+            if has66 {
+                sem::inc_r16_mem32(b, rm(), disp32())
+            } else {
+                sem::inc_r32_mem32(b, rm(), disp32())
+            }
         }
         Insn::DecRmMem32 => {
             // FF /1 mod=10 [base+disp32]。gzip 0x484714 の decl 0x2af4(%rbx)。CF は残す。
