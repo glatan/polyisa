@@ -26,6 +26,7 @@ struct Proc {
     id: ProcessId,
     parent: Option<ProcessId>,
     exit_code: Option<u32>,
+    pgid: u64,
 }
 
 /// `wait` の結果。
@@ -48,8 +49,35 @@ impl ProcessTable {
             id,
             parent,
             exit_code: None,
+            pgid: id.0,
         });
         id
+    }
+
+    /// プロセスグループ。作ったときの値は自分の識別子。
+    #[must_use]
+    pub fn pgid(&self, id: ProcessId) -> Option<u64> {
+        self.procs
+            .iter()
+            .find(|proc| proc.id == id)
+            .map(|proc| proc.pgid)
+    }
+
+    /// グループを変える。対象がいなければ偽。
+    pub fn set_pgid(&mut self, id: ProcessId, pgid: u64) -> bool {
+        let Some(proc) = self.procs.iter_mut().find(|proc| proc.id == id) else {
+            return false;
+        };
+        proc.pgid = pgid;
+        true
+    }
+
+    /// 自分、または自分の子なら真。
+    #[must_use]
+    pub fn owns(&self, me: ProcessId, id: ProcessId) -> bool {
+        self.procs
+            .iter()
+            .any(|proc| proc.id == id && (id == me || proc.parent == Some(me)))
     }
 
     /// `parent` の子を作る。
@@ -403,5 +431,19 @@ mod tests {
         assert_eq!(pipes.read(id, 4), PipeRead::Eof);
         pipes.close(id, true);
         assert_eq!(pipes.write(id, b"z"), None);
+    }
+
+    #[test]
+    fn process_group_starts_as_own_pid() {
+        let mut table = ProcessTable::default();
+        let parent = table.spawn(None);
+        let child = table.fork(parent);
+        assert_eq!(table.pgid(parent), Some(parent.0));
+        assert_eq!(table.pgid(child), Some(child.0));
+        assert!(table.owns(parent, child));
+        assert!(table.set_pgid(child, parent.0));
+        assert_eq!(table.pgid(child), Some(parent.0));
+        assert!(!table.set_pgid(ProcessId(99), 1));
+        assert!(!table.owns(parent, ProcessId(99)));
     }
 }

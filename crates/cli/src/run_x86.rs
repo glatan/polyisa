@@ -7951,7 +7951,9 @@ const IO_CHUNK: usize = 65536;
 
 /// Linux 汎用の errno 番号の一部。負数で返す。
 /// Ref: SRC-LINUX (7.3).
+const EPERM: u32 = 1;
 const ENOENT: u32 = 2;
+const ESRCH: u32 = 3;
 const ENOEXEC: u32 = 8;
 const EBADF: u32 = 9;
 const ECHILD: u32 = 10;
@@ -8058,6 +8060,8 @@ const X86_64_SYSCALLS: &[(&str, SysFn)] = &[
     ("execve", sys_execve),
     ("wait4", sys_wait4),
     ("pipe2", sys_pipe2),
+    ("setpgid", sys_setpgid),
+    ("getpgid", sys_getpgid),
     ("mmap", sys_mmap),
     ("set_tid_address", sys_set_tid_address),
     ("gettid", sys_gettid),
@@ -8806,6 +8810,44 @@ fn sys_gettid(sys: &mut CliLinux, env: &mut BareEnv, _cx: &SysCtx) -> Option<Tra
 
 fn sys_getpid(sys: &mut CliLinux, env: &mut BareEnv, _cx: &SysCtx) -> Option<TrapOutcome> {
     set64(env, Gpr(0), guest_pid(sys));
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_setpgid(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    let pid = get64(env, cx.r_a) as i64;
+    let pgid = get64(env, cx.r_b) as i64;
+    if pid < 0 || pgid < 0 {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    let me = sys.ensure_self();
+    let target = polyisa_kernel::ProcessId(if pid == 0 { me.0 } else { pid as u64 });
+    let group = if pgid == 0 { target.0 } else { pgid as u64 };
+    if sys.procs.borrow().pgid(target).is_none() {
+        set64(env, Gpr(0), cx.neg(ESRCH));
+        return Some(TrapOutcome::Handled);
+    }
+    if !sys.procs.borrow().owns(me, target) {
+        set64(env, Gpr(0), cx.neg(EPERM));
+        return Some(TrapOutcome::Handled);
+    }
+    sys.procs.borrow_mut().set_pgid(target, group);
+    set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_getpgid(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    let pid = get64(env, cx.r_a) as i64;
+    if pid < 0 {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    let me = sys.ensure_self();
+    let target = polyisa_kernel::ProcessId(if pid == 0 { me.0 } else { pid as u64 });
+    match sys.procs.borrow().pgid(target) {
+        Some(pgid) => set64(env, Gpr(0), pgid),
+        None => set64(env, Gpr(0), cx.neg(ESRCH)),
+    }
     Some(TrapOutcome::Handled)
 }
 
@@ -12327,6 +12369,56 @@ mod tests {
         env.backend.mem.write(VirtAddr(0x1000), &code).unwrap();
         let out = run_mode(&mut env, 0x1000, &mut sys, 8_000, true);
         assert_eq!(out, Outcome::Exit(u32::from(b'A')));
+    }
+
+    #[test]
+    fn parent_sets_child_group_before_the_slice_ends() {
+        let mut sys = CliLinux::x86_64();
+        let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_x86::CpuState>());
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        let mut code = Vec::new();
+        push_mov_imm(&mut code, 0xC0, 56);
+        push_mov_imm(&mut code, 0xC7, 17);
+        push_mov_imm(&mut code, 0xC6, 0);
+        code.extend_from_slice(&[0x0F, 0x05, 0x48, 0x85, 0xC0]);
+        let jnz_at = code.len();
+        code.extend_from_slice(&[0x75, 0]);
+        push_mov_imm(&mut code, 0xC0, 60);
+        push_mov_imm(&mut code, 0xC7, 0);
+        code.extend_from_slice(&[0x0F, 0x05]);
+        let parent_at = code.len();
+        code[jnz_at + 1] = u8::try_from(parent_at - (jnz_at + 2)).unwrap();
+        code.extend_from_slice(&[0x48, 0x89, 0xC7, 0x48, 0x89, 0xC6]);
+        push_mov_imm(&mut code, 0xC0, 109);
+        code.extend_from_slice(&[0x0F, 0x05, 0x48, 0x85, 0xC0]);
+        let fail_set = code.len();
+        code.extend_from_slice(&[0x75, 0]);
+        push_mov_imm(&mut code, 0xC0, 121);
+        code.extend_from_slice(&[0x0F, 0x05, 0x48, 0x89, 0xC3, 0x48, 0x89, 0xC6]);
+        push_mov_imm(&mut code, 0xC7, 0);
+        push_mov_imm(&mut code, 0xC0, 109);
+        code.extend_from_slice(&[0x0F, 0x05, 0x48, 0x85, 0xC0]);
+        let fail_join = code.len();
+        code.extend_from_slice(&[0x75, 0]);
+        push_mov_imm(&mut code, 0xC7, 0);
+        push_mov_imm(&mut code, 0xC0, 121);
+        code.extend_from_slice(&[0x0F, 0x05, 0x48, 0x39, 0xD8]);
+        let fail_cmp = code.len();
+        code.extend_from_slice(&[0x75, 0]);
+        code.extend_from_slice(&[0x48, 0x89, 0xC7]);
+        push_mov_imm(&mut code, 0xC0, 60);
+        code.extend_from_slice(&[0x0F, 0x05]);
+        let fail_at = code.len();
+        code[fail_set + 1] = u8::try_from(fail_at - (fail_set + 2)).unwrap();
+        code[fail_join + 1] = u8::try_from(fail_at - (fail_join + 2)).unwrap();
+        code[fail_cmp + 1] = u8::try_from(fail_at - (fail_cmp + 2)).unwrap();
+        push_mov_imm(&mut code, 0xC0, 60);
+        push_mov_imm(&mut code, 0xC7, 1);
+        code.extend_from_slice(&[0x0F, 0x05]);
+        env.backend.mem.write(VirtAddr(0x1000), &code).unwrap();
+        let out = run_mode(&mut env, 0x1000, &mut sys, 8_000, true);
+        assert_eq!(out, Outcome::Exit(2));
     }
 
     #[test]

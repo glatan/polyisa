@@ -38,6 +38,7 @@
 - geteuid
 - getgid
 - getgroups
+- getpgid
 - getpid
 - getrandom
 - gettid
@@ -65,6 +66,7 @@
 - sendfile
 - set_robust_list
 - set_tid_address
+- setpgid
 - symlink
 - tgkill
 - time
