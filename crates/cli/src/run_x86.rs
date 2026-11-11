@@ -7904,9 +7904,9 @@ impl CliLinux {
             .borrow_mut()
             .try_reap(polyisa_kernel::ProcessId(self.pid), wait.which)
         {
-            polyisa_kernel::Reap::Exited { pid, code } => {
+            polyisa_kernel::Reap::Exited { pid, code, signal } => {
                 if wait.status_ptr != 0 {
-                    let st = polyisa_os_linux::exited_wait_status(code);
+                    let st = reap_status(code, signal);
                     if env
                         .backend
                         .mem
@@ -7979,6 +7979,13 @@ const EINVAL: u32 = 22;
 const EPIPE: u32 = 32;
 const ERANGE: u32 = 34;
 const ENOTTY: u32 = 25;
+
+fn reap_status(code: u32, signal: Option<u32>) -> u32 {
+    match signal {
+        Some(sig) => sig & 0x7f,
+        None => polyisa_os_linux::exited_wait_status(code),
+    }
+}
 
 fn neg_errno(n: u32) -> u32 {
     (n as i32).wrapping_neg() as u32
@@ -8078,6 +8085,7 @@ const X86_64_SYSCALLS: &[(&str, SysFn)] = &[
     ("setpgid", sys_setpgid),
     ("getpgid", sys_getpgid),
     ("chdir", sys_chdir),
+    ("kill", sys_kill),
     ("mmap", sys_mmap),
     ("set_tid_address", sys_set_tid_address),
     ("gettid", sys_gettid),
@@ -8862,6 +8870,41 @@ fn sys_getpgid(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Tra
         Some(pgid) => set64(env, Gpr(0), pgid),
         None => set64(env, Gpr(0), cx.neg(ESRCH)),
     }
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_kill(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    const SIGKILL: i64 = 9;
+    let pid = get64(env, cx.r_a) as i64;
+    let sig = get64(env, cx.r_b) as i64;
+    if sig != SIGKILL {
+        return Some(TrapOutcome::Unimplemented);
+    }
+    if pid <= 0 {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    let me = sys.ensure_self();
+    let target = polyisa_kernel::ProcessId(pid as u64);
+    if !sys.procs.borrow().owns(me, target) {
+        let errno = if sys.procs.borrow().pgid(target).is_none() {
+            ESRCH
+        } else {
+            EPERM
+        };
+        set64(env, Gpr(0), cx.neg(errno));
+        return Some(TrapOutcome::Handled);
+    }
+    sys.procs.borrow_mut().kill(target, SIGKILL as u32);
+    sys.queue
+        .0
+        .borrow_mut()
+        .meta
+        .mark_exited(polyisa_kernel::ThreadId(target.0));
+    if target == me {
+        return Some(TrapOutcome::Exit(SIGKILL as u32));
+    }
+    set64(env, Gpr(0), 0);
     Some(TrapOutcome::Handled)
 }
 
@@ -10270,9 +10313,9 @@ fn sys_wait4(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapO
         polyisa_kernel::ProcessId(sys.pid)
     };
     match sys.procs.borrow_mut().try_reap(parent, which) {
-        polyisa_kernel::Reap::Exited { pid, code } => {
+        polyisa_kernel::Reap::Exited { pid, code, signal } => {
             if status_ptr != 0 {
-                let st = polyisa_os_linux::exited_wait_status(code);
+                let st = reap_status(code, signal);
                 if env
                     .backend
                     .mem
@@ -12539,6 +12582,38 @@ mod tests {
         env.backend.mem.write(VirtAddr(0x1000), &code).unwrap();
         let out = run_mode(&mut env, 0x1000, &mut sys, 8_000, true);
         assert_eq!(out, Outcome::Exit(2));
+    }
+
+    #[test]
+    fn parent_sigkill_stops_a_looping_child() {
+        let mut sys = CliLinux::x86_64();
+        let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_x86::CpuState>());
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        let mut code = Vec::new();
+        push_mov_imm(&mut code, 0xC0, 56);
+        push_mov_imm(&mut code, 0xC7, 17);
+        push_mov_imm(&mut code, 0xC6, 0);
+        code.extend_from_slice(&[0x0F, 0x05, 0x48, 0x85, 0xC0]);
+        let jnz_at = code.len();
+        code.extend_from_slice(&[0x75, 0]);
+        code.extend_from_slice(&[0xEB, 0xFE]);
+        let parent_at = code.len();
+        code[jnz_at + 1] = u8::try_from(parent_at - (jnz_at + 2)).unwrap();
+        code.extend_from_slice(&[0x48, 0x89, 0xC7]);
+        code.extend(std::iter::repeat_n(0x90, (SCHED_SLICE + 16) as usize));
+        push_mov_imm(&mut code, 0xC6, 9);
+        push_mov_imm(&mut code, 0xC0, 62);
+        code.extend_from_slice(&[0x0F, 0x05]);
+        push_mov_imm(&mut code, 0xC6, 0x1800);
+        push_mov_imm(&mut code, 0xC2, 0);
+        push_mov_imm(&mut code, 0xC0, 61);
+        code.extend_from_slice(&[0x0F, 0x05, 0x8B, 0x06, 0x48, 0x89, 0xC7]);
+        push_mov_imm(&mut code, 0xC0, 60);
+        code.extend_from_slice(&[0x0F, 0x05]);
+        env.backend.mem.write(VirtAddr(0x1000), &code).unwrap();
+        let out = run_mode(&mut env, 0x1000, &mut sys, 8_000, true);
+        assert_eq!(out, Outcome::Exit(9));
     }
 
     #[test]

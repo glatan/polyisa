@@ -133,6 +133,7 @@ pub mod x86_64 {
     pub const CLONE: u64 = 56;
     pub const EXECVE: u64 = 59;
     pub const WAIT4: u64 = 61;
+    pub const KILL: u64 = 62;
     pub const SETPGID: u64 = 109;
     pub const GETPGID: u64 = 121;
     pub const PIPE2: u64 = 293;
@@ -224,6 +225,7 @@ pub mod i386 {
     pub const SETPGID: u64 = 57;
     pub const GETPGID: u64 = 132;
     pub const CHDIR: u64 = 12;
+    pub const KILL: u64 = 37;
 }
 
 /// Linux の `clone` フラグ。アドレス空間の共有はプロセス生成では使わない。
@@ -355,6 +357,7 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             i386::SETPGID => Some("setpgid"),
             i386::GETPGID => Some("getpgid"),
             i386::CHDIR => Some("chdir"),
+            i386::KILL => Some("kill"),
             _ => None,
         },
         GuestAbi::X86_64Linux => match nr {
@@ -429,6 +432,7 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             x86_64::SETPGID => Some("setpgid"),
             x86_64::GETPGID => Some("getpgid"),
             x86_64::CHDIR => Some("chdir"),
+            x86_64::KILL => Some("kill"),
             _ => None,
         },
         GuestAbi::Unknown => None,

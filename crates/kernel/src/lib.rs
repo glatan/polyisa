@@ -26,14 +26,19 @@ struct Proc {
     id: ProcessId,
     parent: Option<ProcessId>,
     exit_code: Option<u32>,
+    signal: Option<u32>,
     pgid: u64,
 }
 
 /// `wait` の結果。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Reap {
-    /// 子は終了済みで、表から外した。
-    Exited { pid: ProcessId, code: u32 },
+    /// 子は終了済みで、表から外した。`signal` があるときはシグナルで死んでいる。
+    Exited {
+        pid: ProcessId,
+        code: u32,
+        signal: Option<u32>,
+    },
     /// 一致する子はいるが、まだ終了していない。
     Pending,
     /// 一致する子がいない。
@@ -49,6 +54,7 @@ impl ProcessTable {
             id,
             parent,
             exit_code: None,
+            signal: None,
             pgid: id.0,
         });
         id
@@ -85,11 +91,24 @@ impl ProcessTable {
         self.spawn(Some(parent))
     }
 
-    /// 終了コードを記録する。既に終了していれば上書きする。
+    /// 終了コードを記録する。シグナルで死んでいれば変えない。
     pub fn exit(&mut self, id: ProcessId, code: u32) {
-        if let Some(proc) = self.procs.iter_mut().find(|proc| proc.id == id) {
+        if let Some(proc) = self.procs.iter_mut().find(|proc| proc.id == id)
+            && proc.signal.is_none()
+        {
             proc.exit_code = Some(code);
         }
+    }
+
+    /// シグナルの既定動作で止める。対象がいなければ偽。
+    pub fn kill(&mut self, id: ProcessId, signal: u32) -> bool {
+        let Some(proc) = self.procs.iter_mut().find(|proc| proc.id == id) else {
+            return false;
+        };
+        if proc.exit_code.is_none() && proc.signal.is_none() {
+            proc.signal = Some(signal);
+        }
+        true
     }
 
     /// 親のないプロセスなら真。表にいなければ偽。
@@ -108,12 +127,13 @@ impl ProcessTable {
         if let Some(idx) = self
             .procs
             .iter()
-            .position(|proc| matches(proc) && proc.exit_code.is_some())
+            .position(|proc| matches(proc) && (proc.exit_code.is_some() || proc.signal.is_some()))
         {
             let proc = self.procs.remove(idx);
             return Reap::Exited {
                 pid: proc.id,
                 code: proc.exit_code.unwrap_or(0),
+                signal: proc.signal,
             };
         }
         if self.procs.iter().any(matches) {
@@ -397,6 +417,7 @@ mod tests {
             Reap::Exited {
                 pid: child,
                 code: 42,
+                signal: None,
             }
         );
         assert_eq!(table.try_reap(parent, -1), Reap::NoChild);
@@ -445,5 +466,21 @@ mod tests {
         assert_eq!(table.pgid(child), Some(parent.0));
         assert!(!table.set_pgid(ProcessId(99), 1));
         assert!(!table.owns(parent, ProcessId(99)));
+    }
+
+    #[test]
+    fn kill_reaps_as_a_signal() {
+        let mut table = ProcessTable::default();
+        let parent = table.spawn(None);
+        let child = table.fork(parent);
+        assert!(table.kill(child, 9));
+        assert_eq!(
+            table.try_reap(parent, -1),
+            Reap::Exited {
+                pid: child,
+                code: 0,
+                signal: Some(9),
+            }
+        );
     }
 }

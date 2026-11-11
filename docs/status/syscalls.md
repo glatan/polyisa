@@ -45,6 +45,7 @@
 - gettid
 - getuid
 - ioctl
+- kill
 - lseek
 - mkdir
 - mkdirat
