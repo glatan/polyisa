@@ -367,6 +367,12 @@ fn text_applets_match_host() {
         &["readlink", link_s],
         &["cmp", f, g],
         &["diff", "-q", f, g],
+        &["cal", "1", "2000"],
+        &["logname"],
+        &["tty"],
+        &["base32", f],
+        &["crc32", f],
+        &["hd", f],
     ];
     for args in cases {
         let argv: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
