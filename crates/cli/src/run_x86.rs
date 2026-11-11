@@ -2044,6 +2044,14 @@ fn dispatch<B: Backend>(
                 sem::dec_r32(b, rm())
             }
         }
+        Insn::DecRmSib => {
+            // FF /1 SIB mod=00 [base+index*scale]。xxd 0x4b2bee 対応。CF は残す.
+            if no_index() {
+                sem::dec_r32_memnd(b, sib_base())
+            } else {
+                sem::dec_r32_sib(b, sib_base(), sib_idx(), sib_shift())
+            }
+        }
         Insn::DecRmSibd => {
             // FF /1 SIB mod=01 [base+index*scale+disp8]。CF 以外の 5 旗を更新する.
             if no_index() {

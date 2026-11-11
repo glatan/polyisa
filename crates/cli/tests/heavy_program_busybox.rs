@@ -219,3 +219,27 @@ fn awk_print_matches_host() {
     assert_eq!(code, 0);
     assert_eq!(out.as_slice(), host.stdout.as_slice());
 }
+
+#[test]
+fn xxd_one_file_matches_host() {
+    let path = busybox();
+    let path = path.to_str().expect("utf-8 path");
+    let dir = std::env::temp_dir().join(format!("polyisa-xxd-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir(&dir).unwrap();
+    let file = dir.join("f");
+    std::fs::write(&file, b"ab\ncd\n").unwrap();
+    let args = ["xxd", file.to_str().expect("utf-8")];
+    let argv: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
+    let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)
+        .unwrap_or_else(|e| panic!("xxd: {e}"));
+    let host = Command::new(path)
+        .args(args)
+        .env_clear()
+        .output()
+        .expect("host xxd");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(host.status.success());
+    assert_eq!(code, 0);
+    assert_eq!(out.as_slice(), host.stdout.as_slice());
+}
