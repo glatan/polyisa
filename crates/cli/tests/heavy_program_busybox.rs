@@ -406,6 +406,12 @@ fn text_applets_match_host() {
         &["script"],
         &["sha3sum", f],
         &["awk", "{print}", f],
+        &["seq", "1", "3"],
+        &["od", f],
+        &["grep", "ab", f],
+        &["ls", f],
+        &["more", f],
+        &["xxd", f],
         &["printenv"],
         &["which", "true"],
         &["install", "-m", "644", f, installed_s],
@@ -469,5 +475,106 @@ fn link_matches_host() {
     assert_eq!(out.as_slice(), host.stdout.as_slice());
     assert_eq!(std::fs::read(&guest_dst).unwrap(), b"ab\n");
     assert_eq!(std::fs::read(&host_dst).unwrap(), b"ab\n");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn file_ops_match_host() {
+    // ゲストとホストは別の木を変える。同じパスだと先に作った側が EEXIST になる。
+    let path = busybox();
+    let path = path.to_str().expect("utf-8 path");
+    let root = std::env::temp_dir().join(format!("polyisa-fileops-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let guest_dir = root.join("guest");
+    let host_dir = root.join("host");
+    std::fs::create_dir_all(&guest_dir).unwrap();
+    std::fs::create_dir_all(&host_dir).unwrap();
+    let pair = |guest_args: &[&str], host_args: &[&str]| {
+        let argv: Vec<String> = guest_args.iter().map(|s| (*s).to_string()).collect();
+        let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)
+            .unwrap_or_else(|e| panic!("{}: {e}", guest_args.join(" ")));
+        let host = Command::new(path)
+            .args(host_args)
+            .env_clear()
+            .output()
+            .unwrap_or_else(|e| panic!("host {}: {e}", host_args[0]));
+        assert_eq!(
+            code,
+            host.status.code().unwrap_or(1) as u64,
+            "{}",
+            guest_args[0]
+        );
+        assert_eq!(out.as_slice(), host.stdout.as_slice(), "{}", guest_args[0]);
+    };
+    let guest_made = guest_dir.join("made");
+    let host_made = host_dir.join("made");
+    pair(
+        &["mkdir", guest_made.to_str().expect("utf-8")],
+        &["mkdir", host_made.to_str().expect("utf-8")],
+    );
+    assert!(guest_made.is_dir());
+    assert!(host_made.is_dir());
+    pair(
+        &["rmdir", guest_made.to_str().expect("utf-8")],
+        &["rmdir", host_made.to_str().expect("utf-8")],
+    );
+    assert!(!guest_made.exists());
+    assert!(!host_made.exists());
+    let guest_file = guest_dir.join("f");
+    let host_file = host_dir.join("f");
+    std::fs::write(&guest_file, b"ab\n").unwrap();
+    std::fs::write(&host_file, b"ab\n").unwrap();
+    pair(
+        &["rm", guest_file.to_str().expect("utf-8")],
+        &["rm", host_file.to_str().expect("utf-8")],
+    );
+    assert!(!guest_file.exists());
+    assert!(!host_file.exists());
+    std::fs::write(&guest_file, b"ab\n").unwrap();
+    std::fs::write(&host_file, b"ab\n").unwrap();
+    let guest_moved = guest_dir.join("g");
+    let host_moved = host_dir.join("g");
+    pair(
+        &[
+            "mv",
+            guest_file.to_str().expect("utf-8"),
+            guest_moved.to_str().expect("utf-8"),
+        ],
+        &[
+            "mv",
+            host_file.to_str().expect("utf-8"),
+            host_moved.to_str().expect("utf-8"),
+        ],
+    );
+    assert_eq!(std::fs::read(&guest_moved).unwrap(), b"ab\n");
+    assert_eq!(std::fs::read(&host_moved).unwrap(), b"ab\n");
+    assert!(!guest_file.exists());
+    assert!(!host_file.exists());
+    std::fs::write(&guest_file, b"ab\n").unwrap();
+    std::fs::write(&host_file, b"ab\n").unwrap();
+    let guest_link = guest_dir.join("l");
+    let host_link = host_dir.join("l");
+    pair(
+        &[
+            "ln",
+            "-s",
+            guest_file.to_str().expect("utf-8"),
+            guest_link.to_str().expect("utf-8"),
+        ],
+        &[
+            "ln",
+            "-s",
+            host_file.to_str().expect("utf-8"),
+            host_link.to_str().expect("utf-8"),
+        ],
+    );
+    assert_eq!(
+        std::fs::read_link(&guest_link).unwrap(),
+        guest_file.as_os_str()
+    );
+    assert_eq!(
+        std::fs::read_link(&host_link).unwrap(),
+        host_file.as_os_str()
+    );
     let _ = std::fs::remove_dir_all(&root);
 }
