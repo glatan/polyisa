@@ -2122,6 +2122,8 @@ pub fn run_mode(
                     | Insn::OrAxImm16
                     | Insn::AddRm16Imm
                     | Insn::AndRm16Imm
+                    // AND r16, [base+index*scale+disp32] (66 23 /r SIB mod=10)。gunzip 0x48a957。
+                    | Insn::AndRSibd32
                     | Insn::CmpRm16Imm
                     // ROL r16,imm8 (66 C1 /0)。httpd 0x4be767 の rol $8, %bp。
                     | Insn::RolRm32Imm8
@@ -6045,6 +6047,24 @@ fn dispatch<B: Backend>(
                 sem::and_r32_mem32(b, reg(), rm(), disp32())
             }
         }
+        Insn::AndRSibd32 => {
+            // 23 /r SIB mod=10。gunzip 0x48a957 の and ax, [r12+r12+disp32]。
+            if no_index() {
+                if has66 && !rex_w {
+                    sem::and_r16_mem32(b, reg(), sib_base(), disp32())
+                } else if rex_w {
+                    sem::and_r64_mem32(b, reg(), sib_base(), disp32())
+                } else {
+                    sem::and_r32_mem32(b, reg(), sib_base(), disp32())
+                }
+            } else if has66 && !rex_w {
+                sem::and_r16_sibd32(b, reg(), sib_base(), sib_idx(), sib_shift(), disp32())
+            } else if rex_w {
+                sem::and_r64_sibd32(b, reg(), sib_base(), sib_idx(), sib_shift(), disp32())
+            } else {
+                sem::and_r32_sibd32(b, reg(), sib_base(), sib_idx(), sib_shift(), disp32())
+            }
+        }
         Insn::AndRRip => {
             if rex_w {
                 sem::and_r64_rip(b, reg(), eip as u64 + nbytes, disp32())
@@ -9009,6 +9029,7 @@ fn dispatch<B: Backend>(
             | Insn::AndRMemnd
             | Insn::AndRMem8
             | Insn::AndRMem32
+            | Insn::AndRSibd32
             | Insn::AndRRip
             | Insn::AdcRMemnd
             | Insn::AdcRMem8
@@ -9081,7 +9102,11 @@ fn dispatch<B: Backend>(
                             | Insn::ImulRImmRip
                             | Insn::CmovbeMemnd
                     ))
-                || (has66 && matches!(insn, Insn::XorRm32 | Insn::RolRm32Imm8 | Insn::MovEaxMem8));
+                || (has66
+                    && matches!(
+                        insn,
+                        Insn::XorRm32 | Insn::RolRm32Imm8 | Insn::MovEaxMem8 | Insn::AndRSibd32
+                    ));
             if !skip {
                 sem::clear_hi(b, d);
             }

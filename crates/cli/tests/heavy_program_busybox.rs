@@ -324,6 +324,22 @@ fn text_applets_match_host() {
     let b64 = dir.join("b64");
     std::fs::write(&b64, b"YWIK\n").unwrap();
     let b64_s = b64.to_str().expect("utf-8");
+    let gz = dir.join("f.gz");
+    let gz_out = Command::new(path)
+        .args(["gzip", "-c", f])
+        .env_clear()
+        .output()
+        .expect("host gzip");
+    std::fs::write(&gz, &gz_out.stdout).unwrap();
+    let gz_s = gz.to_str().expect("utf-8");
+    let bz = dir.join("f.bz2");
+    let bz_out = Command::new(path)
+        .args(["bzip2", "-c", f])
+        .env_clear()
+        .output()
+        .expect("host bzip2");
+    std::fs::write(&bz, &bz_out.stdout).unwrap();
+    let bz_s = bz.to_str().expect("utf-8");
     let copied_s = copied.to_str().expect("utf-8");
     let touched_s = touched.to_str().expect("utf-8");
     let link = dir.join("link");
@@ -414,6 +430,14 @@ fn text_applets_match_host() {
         &["xxd", f],
         &["cryptpw", "secret", "sa"],
         &["pgrep", "nosuchname123"],
+        &["gunzip", "-c", gz_s],
+        &["bzcat", bz_s],
+        &["lzop", "-c", f],
+        &["kill", "-l"],
+        &["pidof", "nosuchname123"],
+        &["stat", "-c", "%s", f],
+        &["du", "-b", f],
+        &["fsck"],
         &["printenv"],
         &["which", "true"],
         &["install", "-m", "644", f, installed_s],

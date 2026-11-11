@@ -8754,6 +8754,83 @@ pub fn and_r32_mem32<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, disp: i32) -> F
     Ok(())
 }
 
+/// AND r16, [base+disp32] (66 23 /r mod=10)。下位 16 だけを更新し、上位は残す。
+pub fn and_r16_mem32<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, disp: i32) -> Flow<B> {
+    use polyisa_sem::W16;
+    let addr = eff_addr32(b, base, disp);
+    let y: B::V<W16> = b.load::<W16>(addr, DATA_READ)?;
+    let cur32 = read(b, dst);
+    let x: B::V<W16> = b.trunc::<W32, W16>(cur32);
+    let v16 = b.and::<W16>(x, y);
+    update_logic_flags(b, v16);
+    let mask = b.konst::<W32>(0xffff_0000);
+    let preserved = b.and::<W32>(cur32, mask);
+    let ext32 = b.zext::<W16, W32>(v16);
+    let v = b.or::<W32>(preserved, ext32);
+    write(b, dst, v);
+    Ok(())
+}
+
+/// AND r32, [base+index*scale+disp32] (23 /r SIB mod=10)。
+pub fn and_r32_sibd32<B: Backend>(
+    b: &mut B,
+    dst: Gpr,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i32,
+) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, disp, base, idx);
+    let y: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let x = read(b, dst);
+    let v = b.and::<W32>(x, y);
+    write(b, dst, v);
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// AND r64, [base+index*scale+disp32] (23 /r SIB mod=10, REX.W)。
+pub fn and_r64_sibd32<B: Backend>(
+    b: &mut B,
+    dst: Gpr,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i32,
+) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, disp, base, idx);
+    let y: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let x = read64(b, dst);
+    let v = b.and::<W64>(x, y);
+    write64(b, dst, v);
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// AND r16, [base+index*scale+disp32] (66 23 /r SIB mod=10)。下位 16 だけを更新し、上位は残す。
+pub fn and_r16_sibd32<B: Backend>(
+    b: &mut B,
+    dst: Gpr,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i32,
+) -> Flow<B> {
+    use polyisa_sem::W16;
+    let addr = sib_addr_scaled(b, shift, disp, base, idx);
+    let y: B::V<W16> = b.load::<W16>(addr, DATA_READ)?;
+    let cur32 = read(b, dst);
+    let x: B::V<W16> = b.trunc::<W32, W16>(cur32);
+    let v16 = b.and::<W16>(x, y);
+    update_logic_flags(b, v16);
+    let mask = b.konst::<W32>(0xffff_0000);
+    let preserved = b.and::<W32>(cur32, mask);
+    let ext32 = b.zext::<W16, W32>(v16);
+    let v = b.or::<W32>(preserved, ext32);
+    write(b, dst, v);
+    Ok(())
+}
+
 /// AND r64, [base+disp32] (23 /r mod=10, REX.W)。
 pub fn and_r64_mem32<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, disp: i32) -> Flow<B> {
     let addr = eff_addr32(b, base, disp);

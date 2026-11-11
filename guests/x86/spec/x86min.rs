@@ -1418,6 +1418,15 @@ pub fn build_model() -> polyisa_isadl::Model {
             "and r32, m32",
             "alu",
         ),
+        // AND r, [base+index*scale+disp32] (23 /r SIB mod=10)。gunzip 0x48a957 の and ax, [r12+r12+disp32]。
+        (
+            "and_r_sibd32",
+            "D32",
+            "00100011 10...100 ........ ................................",
+            vec![],
+            "and r32, [r/m+sib+disp32]",
+            "alu",
+        ),
         // INC m32 mod=10 [base+disp32] (FF /0)。uname 0x4b3c4a 対応.
         (
             "inc_rm_mem32",
