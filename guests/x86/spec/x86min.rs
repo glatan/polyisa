@@ -2010,6 +2010,15 @@ pub fn build_model() -> polyisa_isadl::Model {
             "or r32, m32",
             "alu",
         ),
+        // OR r32/r64, [base+index*scale+disp32] (0B /r SIB mod=10)。bzip2 0x480ec8 対応。
+        (
+            "or_r_sibd32",
+            "D32",
+            "00001011 10...100 ........ ................................",
+            vec![],
+            "or r32, [r/m+sib+disp32]",
+            "alu",
+        ),
         // OR r32,[base+index*scale] (0B /r mod=00 SIB)。sed 0x5be0c9 対応.
         (
             "or_r_sib",

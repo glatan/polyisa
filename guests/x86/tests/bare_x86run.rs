@@ -5505,6 +5505,38 @@ fn run_and_m32_r32_sib() {
 }
 
 #[test]
+fn run_or_r64_sibd32() {
+    // 48 0B 94 07 98 00 00 00 = orq 0x98(%rdi,%rax), %rdx。bzip2 0x480ec8。
+    // Ref: SPEC-X86-INTEL-SDM (v093).
+    let code = [0x48u8, 0x0B, 0x94, 0x07, 0x98, 0x00, 0x00, 0x00];
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    for (rdx, mem, flags, out) in [(0x0Fu32, 0xF0u64, 0x04u32, 0xFFu64), (0, 0, 0x44, 0)] {
+        let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+        env.backend.set(Gpr(7).state(), 0x2000);
+        env.backend.set(Gpr(0).state(), 1);
+        env.backend.set(Gpr(2).state(), rdx);
+        env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 0);
+        env.backend
+            .mem
+            .write(VirtAddr(0x2099), &mem.to_le_bytes())
+            .unwrap();
+        env.backend.mem.write(VirtAddr(0x1000), &code).unwrap();
+        let mut sys = X64Exit;
+        let got = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+        assert_eq!(got, Outcome::StepLimit { eip: 0x1008 });
+        assert_eq!(
+            env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x8C5,
+            flags
+        );
+        let lo = env.backend.get(Gpr(2).state()) as u64;
+        let hi = env.backend.get(polyisa_guest_x86::sem::hi_ref(Gpr(2))) as u64;
+        assert_eq!((hi << 32) | lo, out);
+    }
+}
+
+#[test]
 fn run_add_rm64_imm_sibd() {
     // 48 81 44 24 28 02 01 00 00 = addq $0x102, 0x28(%rsp)。bzip2 0x480dcd。
     // Ref: SPEC-X86-INTEL-SDM (v093).

@@ -8524,6 +8524,42 @@ pub fn or_r64_mem32<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, disp: i32) -> Fl
     Ok(())
 }
 
+/// OR r32, [base+index*scale+disp32] (0B /r SIB mod=10)。
+pub fn or_r32_sibd32<B: Backend>(
+    b: &mut B,
+    dst: Gpr,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i32,
+) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, disp, base, idx);
+    let y: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let x = read(b, dst);
+    let v = b.or::<W32>(x, y);
+    write(b, dst, v);
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// OR r64, [base+index*scale+disp32] (0B /r SIB mod=10, REX.W)。bzip2 0x480ec8 対応。
+pub fn or_r64_sibd32<B: Backend>(
+    b: &mut B,
+    dst: Gpr,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i32,
+) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, disp, base, idx);
+    let y: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let x = read64(b, dst);
+    let v = b.or::<W64>(x, y);
+    write64(b, dst, v);
+    update_logic_flags(b, v);
+    Ok(())
+}
+
 /// ADD r32, [disp32] (32ビット絶対番地).
 pub fn add_r32_abs<B: Backend>(b: &mut B, dst: Gpr, addr32: u32) -> Flow<B> {
     let addr = b.konst::<W64>(addr32 as u64);

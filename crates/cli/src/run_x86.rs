@@ -5783,6 +5783,20 @@ fn dispatch<B: Backend>(
                 sem::or_r32_mem32(b, reg(), rm(), disp32())
             }
         }
+        Insn::OrRSibd32 => {
+            // 0B /r SIB mod=10。bzip2 0x480ec8 の orq 0x98(%rdi,%rax), %rdx。
+            if no_index() {
+                if rex_w {
+                    sem::or_r64_mem32(b, reg(), sib_base(), disp32())
+                } else {
+                    sem::or_r32_mem32(b, reg(), sib_base(), disp32())
+                }
+            } else if rex_w {
+                sem::or_r64_sibd32(b, reg(), sib_base(), sib_idx(), sib_shift(), disp32())
+            } else {
+                sem::or_r32_sibd32(b, reg(), sib_base(), sib_idx(), sib_shift(), disp32())
+            }
+        }
         Insn::OrRSib => {
             // 0B /r SIB mod=00 [base+index*scale]。sed 0x5be0c9 対応. no_index は [base].
             if no_index() {

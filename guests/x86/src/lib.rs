@@ -85,7 +85,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数117件。
-        assert_eq!(INSNS.len(), 713);
+        assert_eq!(INSNS.len(), 714);
     }
 
     #[test]
@@ -606,6 +606,8 @@ mod tests {
         assert_eq!(decode(0xC1677008, 32), Some(Insn::ShlM32Imm8Mem8));
         // ADD [SIB+disp8],imm32。bzip2 0x480dcd の 81 44 24 28 02 01 00 00。
         assert_eq!(decode(0x8144242802010000, 64), Some(Insn::AddRm32ImmSibd));
+        // OR r, [SIB+disp32]。bzip2 0x480ec8 の 0B 94 07 98 00 00 00。
+        assert_eq!(decode(0x0B940798000000, 56), Some(Insn::OrRSibd32));
         assert_eq!(decode(0x6B1567FD1A0038, 56), Some(Insn::ImulRImm8Rip));
         assert_eq!(decode(0x6BF638, 24), Some(Insn::ImulRImm8));
         assert_eq!(decode(0x00C1F908, 24), Some(Insn::SarRm32Imm8));

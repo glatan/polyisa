@@ -374,6 +374,7 @@ fn text_applets_match_host() {
         &["crc32", f],
         &["hd", f],
         &["gzip", "-c", f],
+        &["bzip2", "-c", f],
     ];
     for args in cases {
         let argv: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
