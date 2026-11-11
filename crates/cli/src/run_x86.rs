@@ -5691,8 +5691,14 @@ fn dispatch<B: Backend>(
         }
         Insn::OrM32R32Sib => {
             // 09 /r SIB mod=00 [base+index*scale] (24b)。src は reg フィールド.
-            // SIB は最下位8。REX.B で base を拡張する.
-            if rex_w {
+            // SIB は最下位8。REX.B で base を拡張する。index=4 は基底だけ。seq 0x499151。
+            if no_index() {
+                if rex_w {
+                    sem::or_m64_r64_memnd(b, sib_base(), reg())
+                } else {
+                    sem::or_m32_r32_memnd(b, sib_base(), reg())
+                }
+            } else if rex_w {
                 sem::or_m64_r64_sib(b, sib_base(), sib_idx(), sib_shift(), reg())
             } else {
                 sem::or_m32_r32_sib(b, sib_base(), sib_idx(), sib_shift(), reg())

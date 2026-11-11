@@ -8094,3 +8094,44 @@ fn run_fstp_m64_sibd_stores_three() {
         .unwrap();
     assert_eq!(u64::from_le_bytes(back), 0x4008_0000_0000_0000);
 }
+
+#[test]
+fn run_or_m32_r32_sib_no_index_r12() {
+    // 41 09 04 24 = orl %eax, (%r12)。index=4 は基底だけ。seq 0x499151。
+    // Ref: SPEC-X86-INTEL-SDM (v093).
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(12), 0x2000);
+        Ok(())
+    })
+    .unwrap();
+    env.backend.set(Gpr(0).state(), 0x2);
+    env.backend
+        .mem
+        .write(VirtAddr(0x2000), &1u32.to_le_bytes())
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0x41, 0x09, 0x04, 0x24])
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x1004 });
+    let mut back = [0u8; 4];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x2000),
+            &mut back,
+            polyisa_mem::Access {
+                endian: polyisa_mem::Endian::Le,
+                align: polyisa_mem::Align::Unaligned,
+                kind: polyisa_mem::AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(u32::from_le_bytes(back), 3);
+}
