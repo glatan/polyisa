@@ -336,6 +336,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("cmovbe", "F1", "00001111 01000110 11......", "cmovbe r, r/m", "alu"),
         // CMOVBE r, [base+disp8] (0F 46 mod=01 rm!=4)。test 0x4d2874 対応.
         ("cmovbe_mem8", "F1", "00001111 01000110 01...... ........", "cmovbe r, m", "load"),
+        // CMOVBE r, [base] (0F 46 mod=00 rm!=4,5)。gunzip 0x48a025 対応。
+        ("cmovbe_memnd", "F1", "00001111 01000110 00......", "cmovbe r, m", "load"),
         // CMOVNE r, [base+disp8] (0F 45 mod=01 rm!=4)。ed 0x4b5cd8 の 0F 45 43 30。
         ("cmovne_mem8", "F1", "00001111 01000101 01...... ........", "cmovne r, m", "load"),
         ("cmova", "F1", "00001111 01000111 11......", "cmova r, r/m", "alu"),

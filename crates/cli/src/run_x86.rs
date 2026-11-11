@@ -201,6 +201,9 @@ fn fetch_len(
                 } else if (s == 0x46 || s == 0x45) && md == 1 && rm != 4 {
                     // CMOVBE / CMOVNE [base+disp8]。ed 0x4b5cd8 の 0F 45 43 30。
                     Some(4)
+                } else if s == 0x46 && md == 0 && rm != 4 && rm != 5 {
+                    // CMOVBE r, [base] (0F 46 mod=00)。gunzip 0x48a025 の cmovbe edx, [r8]。3B。
+                    Some(3)
                 } else {
                     None
                 }
@@ -7703,6 +7706,14 @@ fn dispatch<B: Backend>(
                 sem::cmovbe_r32_mem8(b, reg0f_as_gpr(), rm0f(), disp8())
             }
         }
+        Insn::CmovbeMemnd => {
+            // 0F 46 mod=00 [base]。gunzip 0x48a025 の cmovbe edx, [r8]。
+            if rex_w {
+                sem::cmovbe_r64_memnd(b, reg0f_as_gpr(), rm0f())
+            } else {
+                sem::cmovbe_r32_memnd(b, reg0f_as_gpr(), rm0f())
+            }
+        }
         Insn::Cmova => {
             if rex_w {
                 sem::cmova_r64(b, reg0f_as_gpr(), rm0f())
@@ -8909,6 +8920,7 @@ fn dispatch<B: Backend>(
             | Insn::Cmove
             | Insn::Cmovns
             | Insn::Cmovbe
+            | Insn::CmovbeMemnd
             | Insn::Cmova
             | Insn::Cmovae
             | Insn::Cmovo
@@ -9049,6 +9061,7 @@ fn dispatch<B: Backend>(
                             | Insn::OrRSibabs
                             | Insn::MovsxR32M8Sibd32
                             | Insn::ImulRImmRip
+                            | Insn::CmovbeMemnd
                     ))
                 || (has66 && matches!(insn, Insn::XorRm32 | Insn::RolRm32Imm8 | Insn::MovEaxMem8));
             if !skip {

@@ -7204,6 +7204,36 @@ pub fn cmovbe_r32<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
     Ok(())
 }
 
+/// CMOVBE r32, m32 [base]。CF=1 または ZF=1 なら mem32 を dst に移す.
+pub fn cmovbe_r32_memnd<B: Backend>(b: &mut B, dst: Gpr, base: Gpr) -> Flow<B> {
+    let addr = read64(b, base);
+    let srcv: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let cf = cf_num(b);
+    let zf = zf_num(b);
+    let either = b.or::<W32>(cf, zf);
+    let zero = b.konst::<W32>(0);
+    let take = b.cmp::<W32>(Cmp::Ne, either, zero);
+    let dstv = read(b, dst);
+    let v = b.select::<W32>(take, srcv, dstv);
+    write(b, dst, v);
+    Ok(())
+}
+
+/// CMOVBE r64, m64 [base]。CF=1 または ZF=1 なら mem64 を dst に移す.
+pub fn cmovbe_r64_memnd<B: Backend>(b: &mut B, dst: Gpr, base: Gpr) -> Flow<B> {
+    let addr = read64(b, base);
+    let srcv: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let cf = cf_num(b);
+    let zf = zf_num(b);
+    let either = b.or::<W32>(cf, zf);
+    let zero = b.konst::<W32>(0);
+    let take = b.cmp::<W32>(Cmp::Ne, either, zero);
+    let dstv = read64(b, dst);
+    let v = b.select::<W64>(take, srcv, dstv);
+    write64(b, dst, v);
+    Ok(())
+}
+
 /// CMOVBE r32, m32 [base+disp8]。CF=1 または ZF=1 なら mem32 を dst に移す.
 pub fn cmovbe_r32_mem8<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, disp: i8) -> Flow<B> {
     let addr = eff_addr(b, base, disp);
