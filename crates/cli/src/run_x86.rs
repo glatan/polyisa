@@ -1982,6 +1982,8 @@ pub fn run_mode(
                     | Insn::AddM16ImmSib
                     // CMP m16,imm8 SIB (66 83 /7 mod=00).
                     | Insn::CmpRmImm8Sib
+                    // CMP m16,imm8 SIB+disp32 (66 83 /7 mod=10).
+                    | Insn::CmpRmImm8Sibd32
                     // CMP m16, r16 [base] (66 39 /r mod=00).
                     | Insn::CmpRmMemnd
                     // CMP m16, r16 SIB (66 39 /r mod=00).
@@ -5066,7 +5068,14 @@ fn dispatch<B: Backend>(
             let idx_raw = (sib_v >> 3) & 7;
             let idx = Gpr(idx_raw | (((rex >> 1) & 1) << 3));
             let base = Gpr((sib_v & 7) | ((rex & 1) << 3));
-            if idx_raw == 4 && (rex >> 1) & 1 == 0 {
+            if has66 {
+                // 66 83 /7。gzip 0x485212 の cmpw $0, 0x1366(%r12,%rcx,4)。
+                if idx_raw == 4 && (rex >> 1) & 1 == 0 {
+                    sem::cmp_m16_imm8_mem32(b, base, disp, imm)
+                } else {
+                    sem::cmp_m16_imm8_sibd32(b, base, idx, shift, disp, imm)
+                }
+            } else if idx_raw == 4 && (rex >> 1) & 1 == 0 {
                 if rex_w {
                     sem::cmp_rm64_imm8_mem32(b, base, disp, imm)
                 } else {
