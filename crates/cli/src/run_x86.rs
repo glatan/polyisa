@@ -1196,6 +1196,9 @@ fn fetch_len(
             } else if md == 0 && reg == 7 && rm != 4 && rm != 5 {
                 // mod=00 [base],imm8 (3B) の /7 CMPB のみ (SIBなし).
                 Some(3)
+            } else if md == 0 && reg == 6 && rm != 4 && rm != 5 {
+                // mod=00 [base],imm8 (3B) の /6 XORB。nmeter 0x44a570 の xor BYTE PTR [rax], 0x1。
+                Some(3)
             } else {
                 None
             }
@@ -4364,6 +4367,11 @@ fn dispatch<B: Backend>(
             } else {
                 sem::add_rm8_imm_sib(b, sib_base(), sib_idx(), sib_shift(), imm)
             }
+        }
+        Insn::XorRm8ImmMemnd => {
+            // 80 /6 mod=00 [base],imm8 (24b)。nmeter 0x44a570 の xorb $1, (%rax)。
+            let imm = (word & 0xff) as u8;
+            sem::xor_rm8_imm_memnd(b, rm(), imm)
         }
         Insn::XorRm8ImmSib => {
             // 80 /6 SIB mod=00。sha3sum 0x4b4f14 の xorb $6, (%rdi,%rax,1)。

@@ -2838,6 +2838,15 @@ pub fn build_model() -> polyisa_isadl::Model {
             "or r/m8, {imm}",
             "alu",
         ),
+        // XORB m8,imm8 mod=00 [base] (80 /6)。SIBなし。nmeter 0x44a570 対応。
+        (
+            "xor_rm8_imm_memnd",
+            "F1",
+            "10000000 00110... ........",
+            vec![],
+            "xor r/m8, {imm}",
+            "alu",
+        ),
         (
             "or_rm8_imm_sib",
             "F1",
