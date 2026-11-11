@@ -779,6 +779,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("and_rm_imm8_sibd", "F1", "10000011 01100100 ........ ........ ........", "and r/m, {imm}", "alu"),
         // OR m32/m64,imm8 SIB mod=01 [base+disp8] (83 /1)。index有無は問わずdispatchで切替.
         ("or_rm_imm8_sibd", "F1", "10000011 01001100 ........ ........ ........", "or r/m, {imm}", "alu"),
+        // OR m32/m64,imm8 SIB mod=00 [base+index*scale] (83 /1)。awk 0x4a1704 対応。base=5 は長さが違う.
+        ("or_rm_imm8_sib", "F1", "10000011 00001100 ........ ........", "or r/m, {imm}", "alu"),
         // AND m32/m64,imm8 SIB mod=00 [base] (83 /4)。index有無は問わずdispatchで切替.
         ("and_rm_imm8_sib", "F1", "10000011 00100100 ........ ........", "and r/m, {imm}", "alu"),
         ("cmp_rm8_imm_sibd", "F1", "10000000 01111100 ........ ........ ........", "cmp r/m8, {imm}", "alu"),
