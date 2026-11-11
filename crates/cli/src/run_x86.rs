@@ -7996,6 +7996,14 @@ fn dispatch<B: Backend>(
                 sem::movsx_r32_m8_mem8(b, reg0f_as_gpr(), rm0f(), disp8())
             }
         }
+        Insn::MovsxR32M16Mem8 => {
+            // 0F BF mod=01。lpq 0x4c336d の movswq 0x50(%rbp), %rax。
+            if rex_w {
+                sem::movsx_r64_m16_mem8(b, reg0f_as_gpr(), rm0f(), disp8())
+            } else {
+                sem::movsx_r32_m16_mem8(b, reg0f_as_gpr(), rm0f(), disp8())
+            }
+        }
         Insn::MovsxR32M16Sibd32 => {
             // 0F BF SIB mod=10。iostat 0x4be9fb の movswq disp(%rax,%rax,1), %rax。
             if sib0f_no_index() {

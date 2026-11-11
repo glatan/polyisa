@@ -1537,6 +1537,15 @@ pub fn build_model() -> polyisa_isadl::Model {
             "movzx r32, m16",
             "load",
         ),
+        // MOVSX r32/r64, m16 mod=01。lpq 0x4c336d の 48 0F BF 45 50。SIB は長さが違う.
+        (
+            "movsx_r32_m16_mem8",
+            "M8",
+            "00001111 10111111 01...... ........",
+            vec![wc("m8_rm", WhereOp::Ne, 4)],
+            "movsx r32, m16",
+            "load",
+        ),
         (
             "movzx_r32_m8_mem32",
             "M32",

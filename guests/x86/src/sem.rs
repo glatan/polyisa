@@ -9784,6 +9784,24 @@ pub fn movsx_r32_m16_mem32<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, disp: i32
     Ok(())
 }
 
+/// MOVSX r32,m16 [base+disp8] (0F BF mod=01)。16ビットを符号拡張する.
+pub fn movsx_r32_m16_mem8<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, disp: i8) -> Flow<B> {
+    let addr = eff_addr(b, base, disp);
+    let v16: B::V<W16> = b.load::<W16>(addr, DATA_READ)?;
+    let v = b.sext::<W16, W32>(v16);
+    write(b, dst, v);
+    Ok(())
+}
+
+/// MOVSX r64,m16 [base+disp8] (0F BF mod=01, REX.W)。lpq 0x4c336d 対応.
+pub fn movsx_r64_m16_mem8<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, disp: i8) -> Flow<B> {
+    let addr = eff_addr(b, base, disp);
+    let v16: B::V<W16> = b.load::<W16>(addr, DATA_READ)?;
+    let v = b.sext::<W16, W64>(v16);
+    write64(b, dst, v);
+    Ok(())
+}
+
 /// MOVSX r64,m16 [base+disp32] (0F BF SIB mod=10, no_index, REX.W)。
 pub fn movsx_r64_m16_mem32<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, disp: i32) -> Flow<B> {
     let addr = eff_addr32(b, base, disp);
