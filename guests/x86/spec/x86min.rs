@@ -1316,6 +1316,15 @@ pub fn build_model() -> polyisa_isadl::Model {
             "inc r/m",
             "alu",
         ),
+        // DEC m32 mod=10 [base+disp32] (FF /1)。gzip 0x484714 の decl 0x2af4(%rbx)。
+        (
+            "dec_rm_mem32",
+            "M32",
+            "11111111 10001... ................................",
+            vec![wc("m32_rm", WhereOp::Ne, 4)],
+            "dec r/m",
+            "alu",
+        ),
         (
             "adc_r_memnd",
             "MR",

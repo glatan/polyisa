@@ -2287,6 +2287,10 @@ fn dispatch<B: Backend>(
             // FF /0 mod=10 [base+disp32]。uname 0x4b3c4a 対応.
             sem::inc_r32_mem32(b, rm(), disp32())
         }
+        Insn::DecRmMem32 => {
+            // FF /1 mod=10 [base+disp32]。gzip 0x484714 の decl 0x2af4(%rbx)。CF は残す。
+            sem::dec_r32_mem32(b, rm(), disp32())
+        }
         Insn::IncRmMem8 => {
             // FF /0 mod=01 [base+disp8] (SIBなし)。CF 以外の 5 旗を更新する.
             sem::inc_r32_mem8(b, rm(), disp8())
