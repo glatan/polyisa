@@ -34,6 +34,8 @@ pub enum TrapOutcome {
     Handled,
     /// 終了コード付きで抜ける。
     Exit(u32),
+    /// このスレッドは待っている。実行ループが他のスレッドへ切り替える。
+    Blocked,
     /// 未実装として止める。
     Unimplemented,
 }
@@ -46,6 +48,19 @@ pub trait TrapHandler {
     /// ハンドラ以外は 0 を返す。
     fn fs_base(&self) -> u64 {
         0
+    }
+
+    /// 1 命令を実行したあと。既定では何もしない。
+    fn after_step(&mut self, _env: &mut BareEnv) {}
+
+    /// 待っているスレッドから切り替える。切り替えたら真。
+    fn on_block(&mut self, _env: &mut BareEnv) -> bool {
+        false
+    }
+
+    /// 終了を別のスレッドの実行へ引き継ぐなら真。既定では終了で抜ける。
+    fn take_exit(&mut self, _env: &mut BareEnv, _code: u32) -> bool {
+        false
     }
 }
 
@@ -1150,6 +1165,8 @@ pub fn run_mode(
     is64: bool,
 ) -> Outcome {
     env.backend.set(polyisa_guest_x86::sem::eip_ref(), entry);
+    // 呼び出し前に wait4 で止まっていれば、子から再開する。
+    let _ = sys.on_block(env);
     for _ in 0..limit {
         let pc = eip_of(env) as u64;
         let mut head = [0u8; 1];
@@ -1813,7 +1830,16 @@ pub fn run_mode(
                             );
                         }
                     }
-                    TrapOutcome::Exit(code) => return Outcome::Exit(code),
+                    TrapOutcome::Exit(code) => {
+                        if !sys.take_exit(env, code) {
+                            return Outcome::Exit(code);
+                        }
+                    }
+                    TrapOutcome::Blocked => {
+                        if !sys.on_block(env) {
+                            return Outcome::Unimplemented { eip, word };
+                        }
+                    }
                     TrapOutcome::Unimplemented => {
                         return Outcome::Unimplemented { eip, word };
                     }
@@ -1825,6 +1851,7 @@ pub fn run_mode(
                 return Outcome::Unimplemented { eip, word };
             }
         }
+        sys.after_step(env);
     }
     Outcome::StepLimit { eip: eip_of(env) }
 }
@@ -7354,17 +7381,48 @@ pub struct CliLinux {
     capture_out: Option<Vec<u8>>,
     /// ゲストプロセス表。fork した子と共有する。
     procs: std::rc::Rc<std::cell::RefCell<polyisa_kernel::ProcessTable>>,
-    /// 0 は未登録。clone のときに 1 から採番する。
+    /// 0 は未登録。最初のシステムコールか命令で 1 から採番する。
     pid: u64,
-    /// clone で複製し、wait4 まで止めておく子。同時に一人。
-    parked: Option<Box<ParkedChild>>,
+    /// このスレッドが実行した命令数。選択の正は `queue` のスケジューラ。
+    steps: u64,
+    /// `wait4` で待っているときの引数。
+    wait: Option<WaitSlot>,
+    /// 自分以外のスレッド。スケジューラと環境を共有する。
+    queue: SharedQueue,
 }
 
-/// clone で止めた子の実行環境。
-struct ParkedChild {
+/// `wait4` を完了するときに使う引数。
+struct WaitSlot {
+    which: i64,
+    status_ptr: u64,
+}
+
+/// 今は走っていないスレッドの実行環境。
+struct ParkedTask {
     env: BareEnv,
     linux: CliLinux,
 }
+
+/// ステップ数で選ぶスケジューラと、止まっている実行環境。
+#[derive(Default)]
+struct SchedQueue {
+    meta: polyisa_kernel::GuestScheduler,
+    parked: Vec<ParkedTask>,
+}
+
+#[derive(Clone)]
+struct SharedQueue(std::rc::Rc<std::cell::RefCell<SchedQueue>>);
+
+impl Default for SharedQueue {
+    fn default() -> Self {
+        Self(std::rc::Rc::new(std::cell::RefCell::new(
+            SchedQueue::default(),
+        )))
+    }
+}
+
+/// この回数ごとに、ステップ数がより少ない実行可能なスレッドへ切り替える。
+const SCHED_SLICE: u64 = 64;
 
 impl CliLinux {
     /// i386 用ハンドラ。
@@ -7568,14 +7626,25 @@ impl CliLinux {
         None
     }
 
-    /// 未登録ならプロセス表へ載せる。
+    /// 未登録ならプロセス表とスケジューラへ載せる。
     fn ensure_self(&mut self) -> polyisa_kernel::ProcessId {
         if self.pid == 0 {
             let id = self.procs.borrow_mut().spawn(None);
             self.pid = id.0;
+            self.queue
+                .0
+                .borrow_mut()
+                .meta
+                .insert(polyisa_kernel::ThreadId(id.0));
             id
         } else {
-            polyisa_kernel::ProcessId(self.pid)
+            let id = polyisa_kernel::ProcessId(self.pid);
+            self.queue
+                .0
+                .borrow_mut()
+                .meta
+                .insert(polyisa_kernel::ThreadId(id.0));
+            id
         }
     }
 
@@ -7602,8 +7671,175 @@ impl CliLinux {
             capture_out: self.capture_out.clone(),
             procs: std::rc::Rc::clone(&self.procs),
             pid: self.pid,
-            parked: None,
+            steps: 0,
+            wait: None,
+            queue: self.queue.clone(),
         }
+    }
+
+    /// 止まっているスレッドの識別子。
+    #[cfg(test)]
+    fn task_pids(&self) -> Vec<u64> {
+        self.queue
+            .0
+            .borrow()
+            .parked
+            .iter()
+            .map(|task| task.linux.pid)
+            .collect()
+    }
+
+    /// 1 命令を数え、区切りでより短いスレッドへ切り替える。
+    fn step_and_maybe_preempt(&mut self, env: &mut BareEnv) {
+        let id = self.ensure_self();
+        let steps = {
+            let mut queue = self.queue.0.borrow_mut();
+            queue.meta.add_step(polyisa_kernel::ThreadId(id.0))
+        };
+        self.steps = steps;
+        if steps.is_multiple_of(SCHED_SLICE) {
+            let _ = self.preempt(env);
+        }
+    }
+
+    /// 自分よりステップ数が少ない実行可能なスレッドと入れ替える。
+    fn preempt(&mut self, env: &mut BareEnv) -> bool {
+        let next = {
+            let queue = self.queue.0.borrow();
+            queue.meta.next(polyisa_kernel::ThreadId(self.pid))
+        };
+        let Some(next) = next else {
+            return false;
+        };
+        self.swap_in(env, next.0)
+    }
+
+    fn swap_in(&mut self, env: &mut BareEnv, pid: u64) -> bool {
+        let queue = self.queue.clone();
+        let mut other = {
+            let mut borrowed = queue.0.borrow_mut();
+            let Some(idx) = borrowed
+                .parked
+                .iter()
+                .position(|task| task.linux.pid == pid)
+            else {
+                return false;
+            };
+            borrowed.parked.remove(idx)
+        };
+        std::mem::swap(self, &mut other.linux);
+        std::mem::swap(env, &mut other.env);
+        let exited = queue
+            .0
+            .borrow()
+            .meta
+            .is_exited(polyisa_kernel::ThreadId(other.linux.pid));
+        if !exited {
+            queue.0.borrow_mut().parked.push(other);
+        }
+        true
+    }
+
+    /// 子の終了を記録し、親か残りの実行可能なスレッドへ戻る。
+    /// 戻る相手がいるときだけ真。初期プロセスの終了は偽で、呼び出し側へ渡す。
+    fn yield_on_exit(&mut self, env: &mut BareEnv, code: u32) -> bool {
+        let me = self.ensure_self();
+        self.procs.borrow_mut().exit(me, code);
+        let root = self.procs.borrow().is_root(me);
+        self.queue
+            .0
+            .borrow_mut()
+            .meta
+            .mark_exited(polyisa_kernel::ThreadId(me.0));
+        if root {
+            return false;
+        }
+        let target = {
+            let queue = self.queue.0.borrow();
+            let waiter = queue.parked.iter().find_map(|task| {
+                task.linux.wait.as_ref().and_then(|wait| {
+                    if wait.which == -1 || wait.which as u64 == me.0 {
+                        Some(task.linux.pid)
+                    } else {
+                        None
+                    }
+                })
+            });
+            waiter.or_else(|| queue.meta.least_runnable().map(|id| id.0))
+        };
+        let Some(pid) = target else {
+            return false;
+        };
+        if !self.swap_in(env, pid) {
+            return false;
+        }
+        if self.wait.is_some() {
+            self.complete_wait(env);
+        }
+        true
+    }
+
+    /// 待っていた `wait4` を、記録済みの終了コードで完了する。
+    fn complete_wait(&mut self, env: &mut BareEnv) {
+        let Some(wait) = self.wait.take() else {
+            return;
+        };
+        self.queue
+            .0
+            .borrow_mut()
+            .meta
+            .unblock(polyisa_kernel::ThreadId(self.pid));
+        match self
+            .procs
+            .borrow_mut()
+            .try_reap(polyisa_kernel::ProcessId(self.pid), wait.which)
+        {
+            polyisa_kernel::Reap::Exited { pid, code } => {
+                if wait.status_ptr != 0 {
+                    let st = polyisa_os_linux::exited_wait_status(code);
+                    if env
+                        .backend
+                        .mem
+                        .write(VirtAddr(wait.status_ptr), &st.to_le_bytes())
+                        .is_err()
+                    {
+                        self.set_errno(env, EFAULT);
+                        self.advance_past_syscall(env);
+                        return;
+                    }
+                }
+                set64(env, Gpr(0), pid.0);
+                self.advance_past_syscall(env);
+            }
+            polyisa_kernel::Reap::NoChild => {
+                self.set_errno(env, ECHILD);
+                self.advance_past_syscall(env);
+            }
+            polyisa_kernel::Reap::Pending => {
+                let which = wait.which;
+                self.wait = Some(wait);
+                self.queue.0.borrow_mut().meta.block(
+                    polyisa_kernel::ThreadId(self.pid),
+                    polyisa_kernel::ThreadWait::Child { which },
+                );
+            }
+        }
+    }
+
+    fn set_errno(&self, env: &mut BareEnv, errno: u32) {
+        let value = if self.is64 {
+            neg_errno64(errno)
+        } else {
+            u64::from(neg_errno(errno))
+        };
+        set64(env, Gpr(0), value);
+    }
+
+    /// SYSCALL と INT 0x80 は 2 バイト。完了した呼び出しの次へ進める。
+    fn advance_past_syscall(&self, env: &mut BareEnv) {
+        let eip = eip_of(env);
+        env.backend
+            .set(polyisa_guest_x86::sem::eip_ref(), eip.wrapping_add(2));
     }
 }
 
@@ -7623,7 +7859,6 @@ const ENOENT: u32 = 2;
 const ENOEXEC: u32 = 8;
 const EBADF: u32 = 9;
 const ECHILD: u32 = 10;
-const EAGAIN: u32 = 11;
 const EFAULT: u32 = 14;
 const EACCES: u32 = 13;
 const ENOMEM: u32 = 12;
@@ -8342,13 +8577,9 @@ fn sys_mmap(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOu
     Some(TrapOutcome::Handled)
 }
 
-/// ゲストのプロセス識別子。未採番のときはホストの pid を返す。
-fn guest_pid(sys: &CliLinux) -> u64 {
-    if sys.pid != 0 {
-        sys.pid
-    } else {
-        u64::from(std::process::id())
-    }
+/// ゲストのプロセス識別子。未登録ならプロセス表へ載せる。
+fn guest_pid(sys: &mut CliLinux) -> u64 {
+    sys.ensure_self().0
 }
 
 fn sys_set_tid_address(sys: &mut CliLinux, env: &mut BareEnv, _cx: &SysCtx) -> Option<TrapOutcome> {
@@ -9647,16 +9878,12 @@ fn sys_brk(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOut
 }
 
 /// プロセスの clone。アドレス空間を共有するフラグは受けない。
-/// 子は wait4 まで止め、親には子の識別子を返す。
+/// 子は実行可能なスレッドとして置き、親には子の識別子を返す。
 fn sys_clone(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     let flags = get64(env, cx.r_a);
     let stack = get64(env, cx.r_b);
     if flags & (polyisa_os_linux::clone_flag::VM | polyisa_os_linux::clone_flag::THREAD) != 0 {
         return Some(TrapOutcome::Unimplemented);
-    }
-    if sys.parked.is_some() {
-        set64(env, Gpr(0), cx.neg(EAGAIN));
-        return Some(TrapOutcome::Handled);
     }
     let parent = sys.ensure_self();
     let child_pid = sys.procs.borrow_mut().fork(parent);
@@ -9672,11 +9899,18 @@ fn sys_clone(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapO
         .set(polyisa_guest_x86::sem::eip_ref(), eip.wrapping_add(2));
     let mut child_linux = sys.duplicate();
     child_linux.pid = child_pid.0;
-    set64(env, Gpr(0), child_pid.0);
-    sys.parked = Some(Box::new(ParkedChild {
+    child_linux.steps = 0;
+    child_linux.wait = None;
+    sys.queue
+        .0
+        .borrow_mut()
+        .meta
+        .insert(polyisa_kernel::ThreadId(child_pid.0));
+    sys.queue.0.borrow_mut().parked.push(ParkedTask {
         env: child_env,
         linux: child_linux,
-    }));
+    });
+    set64(env, Gpr(0), child_pid.0);
     Some(TrapOutcome::Handled)
 }
 
@@ -9729,25 +9963,13 @@ fn sys_wait4(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapO
     let status_ptr = get64(env, cx.r_b);
     let options = get64(env, cx.r_c);
     let wnohang = options & WNOHANG != 0;
-    let run_child = !wnohang
-        && sys
-            .parked
-            .as_ref()
-            .is_some_and(|child| which == -1 || which as u64 == child.linux.pid);
-    if run_child && let Some(mut child) = sys.parked.take() {
-        let entry = eip_of(&mut child.env);
-        let is64 = child.linux.is64;
-        let out = run_mode(&mut child.env, entry, &mut child.linux, 30_000_000, is64);
-        if !matches!(out, Outcome::Exit(_)) {
-            sys.parked = Some(child);
-            return Some(TrapOutcome::Unimplemented);
-        }
-    }
-    match sys
-        .procs
-        .borrow_mut()
-        .try_reap(polyisa_kernel::ProcessId(sys.pid), which)
-    {
+    let parent = if sys.pid == 0 {
+        set64(env, Gpr(0), cx.neg(ECHILD));
+        return Some(TrapOutcome::Handled);
+    } else {
+        polyisa_kernel::ProcessId(sys.pid)
+    };
+    match sys.procs.borrow_mut().try_reap(parent, which) {
         polyisa_kernel::Reap::Exited { pid, code } => {
             if status_ptr != 0 {
                 let st = polyisa_os_linux::exited_wait_status(code);
@@ -9773,7 +9995,12 @@ fn sys_wait4(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapO
                 set64(env, Gpr(0), 0);
                 Some(TrapOutcome::Handled)
             } else {
-                Some(TrapOutcome::Unimplemented)
+                sys.wait = Some(WaitSlot { which, status_ptr });
+                sys.queue.0.borrow_mut().meta.block(
+                    polyisa_kernel::ThreadId(sys.pid),
+                    polyisa_kernel::ThreadWait::Child { which },
+                );
+                Some(TrapOutcome::Blocked)
             }
         }
     }
@@ -9857,6 +10084,18 @@ fn install_exec(
 impl TrapHandler for CliLinux {
     fn fs_base(&self) -> u64 {
         self.fs_base
+    }
+
+    fn after_step(&mut self, env: &mut BareEnv) {
+        self.step_and_maybe_preempt(env);
+    }
+
+    fn on_block(&mut self, env: &mut BareEnv) -> bool {
+        self.preempt(env)
+    }
+
+    fn take_exit(&mut self, env: &mut BareEnv, code: u32) -> bool {
+        self.yield_on_exit(env, code)
     }
 
     fn handle_trap(&mut self, env: &mut BareEnv, code: u32) -> TrapOutcome {
@@ -10570,7 +10809,7 @@ mod tests {
         set64(&mut env, Gpr(0), abi::SET_TID_ADDRESS);
         set64(&mut env, Gpr(7), 0x100);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
-        assert_eq!(get64(&mut env, Gpr(0)), std::process::id() as u64);
+        assert_eq!(get64(&mut env, Gpr(0)), 1);
     }
 
     #[test]
@@ -10580,7 +10819,7 @@ mod tests {
         let mut env = bare();
         set64(&mut env, Gpr(0), abi::GETTID);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
-        assert_eq!(get64(&mut env, Gpr(0)), std::process::id() as u64);
+        assert_eq!(get64(&mut env, Gpr(0)), 1);
     }
 
     #[test]
@@ -10652,7 +10891,7 @@ mod tests {
         let mut env = bare();
         set64(&mut env, Gpr(0), abi::GETPID);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
-        assert_eq!(get64(&mut env, Gpr(0)), std::process::id() as u64);
+        assert_eq!(get64(&mut env, Gpr(0)), 1);
     }
 
     #[test]
@@ -10678,16 +10917,13 @@ mod tests {
         set64(&mut env, Gpr(0), abi::GETTID);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), sys.pid);
-        // 子は終了しない。wait4 のあとでも parked に残る。
+        // 子は終了しない。wait4 は子を残して待つ。
         set64(&mut env, Gpr(0), abi::WAIT4);
         set64(&mut env, Gpr(7), child);
         set64(&mut env, Gpr(6), 0);
         set64(&mut env, Gpr(2), 0);
-        assert!(matches!(
-            sys.handle_trap(&mut env, 0),
-            TrapOutcome::Unimplemented
-        ));
-        assert!(sys.parked.is_some());
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Blocked));
+        assert!(sys.task_pids().contains(&child));
     }
 
     #[test]
@@ -10716,20 +10952,22 @@ mod tests {
         set64(&mut env, Gpr(2), 1);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), 0);
-        assert!(sys.parked.is_some());
+        assert!(sys.task_pids().contains(&child));
+        // ブロックする wait4 は、実行ループが子を走らせてから回収する。
         set64(&mut env, Gpr(0), abi::WAIT4);
         set64(&mut env, Gpr(7), child);
         set64(&mut env, Gpr(6), 0x1800);
         set64(&mut env, Gpr(2), 0);
-        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
-        assert_eq!(get64(&mut env, Gpr(0)), child);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Blocked));
+        let entry = eip_of(&mut env);
+        let _ = run_mode(&mut env, entry, &mut sys, 100, true);
         let mut st = [0u8; 4];
         env.backend
             .mem
             .read(VirtAddr(0x1800), &mut st, data_access())
             .unwrap();
         assert_eq!(u32::from_le_bytes(st), 9 << 8);
-        assert!(sys.parked.is_none());
+        assert!(!sys.task_pids().contains(&child));
     }
 
     #[test]
@@ -11788,6 +12026,99 @@ mod tests {
         env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
         let out = run_mode(&mut env, 0x1000, &mut sys, 100, true);
         assert_eq!(out, Outcome::Exit(0x1234_5678));
+    }
+
+    #[test]
+    fn child_runs_across_a_step_slice_before_wait() {
+        let mut sys = CliLinux::x86_64();
+        let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_x86::CpuState>());
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        let mut code = Vec::new();
+        push_mov_imm(&mut code, 0xC0, 56);
+        push_mov_imm(&mut code, 0xC7, 17);
+        push_mov_imm(&mut code, 0xC6, 0);
+        code.extend_from_slice(&[0x0F, 0x05, 0x48, 0x85, 0xC0]);
+        let jnz_at = code.len();
+        code.extend_from_slice(&[0x75, 0]);
+        push_mov_imm(&mut code, 0xC0, 60);
+        push_mov_imm(&mut code, 0xC7, 7);
+        code.extend_from_slice(&[0x0F, 0x05]);
+        let parent_at = code.len();
+        code[jnz_at + 1] = u8::try_from(parent_at - (jnz_at + 2)).unwrap();
+        code.extend_from_slice(&[0x48, 0x89, 0xC7]);
+        code.extend(std::iter::repeat_n(0x90, (SCHED_SLICE + 16) as usize));
+        push_mov_imm(&mut code, 0xC6, 0x1800);
+        push_mov_imm(&mut code, 0xC2, 1);
+        push_mov_imm(&mut code, 0xC0, 61);
+        code.extend_from_slice(&[0x0F, 0x05, 0x48, 0x85, 0xC0]);
+        let jz_at = code.len();
+        code.extend_from_slice(&[0x74, 0]);
+        code.extend_from_slice(&[0x8B, 0x06, 0xC1, 0xE8, 0x08, 0x48, 0x89, 0xC7]);
+        push_mov_imm(&mut code, 0xC0, 60);
+        code.extend_from_slice(&[0x0F, 0x05]);
+        let fail_at = code.len();
+        code[jz_at + 1] = u8::try_from(fail_at - (jz_at + 2)).unwrap();
+        push_mov_imm(&mut code, 0xC0, 60);
+        push_mov_imm(&mut code, 0xC7, 1);
+        code.extend_from_slice(&[0x0F, 0x05]);
+        env.backend.mem.write(VirtAddr(0x1000), &code).unwrap();
+        let out = run_mode(&mut env, 0x1000, &mut sys, 4_000, true);
+        assert_eq!(out, Outcome::Exit(7));
+    }
+
+    #[test]
+    fn parent_reaps_two_children() {
+        let mut sys = CliLinux::x86_64();
+        let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_x86::CpuState>());
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 3, rwx).unwrap();
+        let mut code = Vec::new();
+        push_mov_imm(&mut code, 0xC0, 56);
+        push_mov_imm(&mut code, 0xC7, 17);
+        push_mov_imm(&mut code, 0xC6, 0);
+        code.extend_from_slice(&[0x0F, 0x05, 0x48, 0x85, 0xC0]);
+        let jnz_a = code.len();
+        code.extend_from_slice(&[0x75, 0]);
+        push_mov_imm(&mut code, 0xC0, 60);
+        push_mov_imm(&mut code, 0xC7, 3);
+        code.extend_from_slice(&[0x0F, 0x05]);
+        let parent_a = code.len();
+        code[jnz_a + 1] = u8::try_from(parent_a - (jnz_a + 2)).unwrap();
+        push_mov_imm(&mut code, 0xC0, 56);
+        push_mov_imm(&mut code, 0xC7, 17);
+        push_mov_imm(&mut code, 0xC6, 0);
+        code.extend_from_slice(&[0x0F, 0x05, 0x48, 0x85, 0xC0]);
+        let jnz_b = code.len();
+        code.extend_from_slice(&[0x75, 0]);
+        push_mov_imm(&mut code, 0xC0, 60);
+        push_mov_imm(&mut code, 0xC7, 4);
+        code.extend_from_slice(&[0x0F, 0x05]);
+        let parent_b = code.len();
+        code[jnz_b + 1] = u8::try_from(parent_b - (jnz_b + 2)).unwrap();
+        push_mov_imm(&mut code, 0xC7, u32::MAX);
+        push_mov_imm(&mut code, 0xC6, 0x3100);
+        push_mov_imm(&mut code, 0xC2, 0);
+        push_mov_imm(&mut code, 0xC0, 61);
+        code.extend_from_slice(&[0x0F, 0x05]);
+        push_mov_imm(&mut code, 0xC7, u32::MAX);
+        push_mov_imm(&mut code, 0xC6, 0x3104);
+        push_mov_imm(&mut code, 0xC2, 0);
+        push_mov_imm(&mut code, 0xC0, 61);
+        code.extend_from_slice(&[0x0F, 0x05]);
+        push_mov_imm(&mut code, 0xC7, 0);
+        push_mov_imm(&mut code, 0xC0, 60);
+        code.extend_from_slice(&[0x0F, 0x05]);
+        env.backend.mem.write(VirtAddr(0x1000), &code).unwrap();
+        let out = run_mode(&mut env, 0x1000, &mut sys, 4_000, true);
+        assert_eq!(out, Outcome::Exit(0));
+        let mut st = [0u8; 8];
+        env.backend
+            .mem
+            .read(VirtAddr(0x3100), &mut st, data_access())
+            .unwrap();
+        assert_eq!(u32::from_le_bytes(st[0..4].try_into().unwrap()), 3 << 8);
+        assert_eq!(u32::from_le_bytes(st[4..8].try_into().unwrap()), 4 << 8);
     }
 
     #[test]

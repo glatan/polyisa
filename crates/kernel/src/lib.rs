@@ -64,6 +64,14 @@ impl ProcessTable {
         }
     }
 
+    /// 親のないプロセスなら真。表にいなければ偽。
+    #[must_use]
+    pub fn is_root(&self, id: ProcessId) -> bool {
+        self.procs
+            .iter()
+            .any(|proc| proc.id == id && proc.parent.is_none())
+    }
+
     /// `parent` の子を回収する。`which` が -1 のときはどの子でもよい。
     /// 0 や正で一致しない識別子は子がいても `NoChild` である。
     pub fn try_reap(&mut self, parent: ProcessId, which: i64) -> Reap {
@@ -85,6 +93,114 @@ impl ProcessTable {
         } else {
             Reap::NoChild
         }
+    }
+}
+
+/// ゲストスレッドが待っている理由。アドレス空間は呼び出し側が持つ。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ThreadWait {
+    /// `wait`。`which` が -1 のときはどの子でもよい。
+    Child { which: i64 },
+}
+
+#[derive(Debug)]
+struct GThread {
+    id: ThreadId,
+    steps: u64,
+    wait: Option<ThreadWait>,
+    exited: bool,
+}
+
+/// タイミングが無効のときのスケジューラ。ステップ数が最も少ない実行可能なスレッドを選ぶ。
+#[derive(Debug, Default)]
+pub struct GuestScheduler {
+    threads: Vec<GThread>,
+}
+
+impl GuestScheduler {
+    /// いなければステップ数 0 で加える。既にあれば変えない。
+    pub fn insert(&mut self, id: ThreadId) {
+        if self.threads.iter().any(|thread| thread.id == id) {
+            return;
+        }
+        self.threads.push(GThread {
+            id,
+            steps: 0,
+            wait: None,
+            exited: false,
+        });
+    }
+
+    /// 1 ステップ足して、足したあとの値を返す。
+    pub fn add_step(&mut self, id: ThreadId) -> u64 {
+        self.insert(id);
+        let Some(thread) = self.threads.iter_mut().find(|thread| thread.id == id) else {
+            return 0;
+        };
+        thread.steps += 1;
+        thread.steps
+    }
+
+    pub fn block(&mut self, id: ThreadId, wait: ThreadWait) {
+        if let Some(thread) = self.threads.iter_mut().find(|thread| thread.id == id) {
+            thread.wait = Some(wait);
+        }
+    }
+
+    pub fn unblock(&mut self, id: ThreadId) {
+        if let Some(thread) = self.threads.iter_mut().find(|thread| thread.id == id) {
+            thread.wait = None;
+        }
+    }
+
+    pub fn mark_exited(&mut self, id: ThreadId) {
+        if let Some(thread) = self.threads.iter_mut().find(|thread| thread.id == id) {
+            thread.exited = true;
+            thread.wait = None;
+        }
+    }
+
+    #[must_use]
+    pub fn is_exited(&self, id: ThreadId) -> bool {
+        self.threads
+            .iter()
+            .any(|thread| thread.id == id && thread.exited)
+    }
+
+    /// `current` の代わりに走らせるスレッド。`current` を続けるなら `None`。
+    #[must_use]
+    pub fn next(&self, current: ThreadId) -> Option<ThreadId> {
+        let me = self.threads.iter().find(|thread| thread.id == current)?;
+        let best = self.least_runnable()?;
+        if !me.exited && me.wait.is_none() {
+            if best != current && self.steps_of(best) < me.steps {
+                Some(best)
+            } else {
+                None
+            }
+        } else if best == current {
+            None
+        } else {
+            Some(best)
+        }
+    }
+
+    /// 終了しておらず、待ってもいないスレッドのうち、ステップ数が最小のもの。
+    #[must_use]
+    pub fn least_runnable(&self) -> Option<ThreadId> {
+        self.threads
+            .iter()
+            .filter(|thread| !thread.exited && thread.wait.is_none())
+            .min_by_key(|thread| (thread.steps, thread.id.0))
+            .map(|thread| thread.id)
+    }
+
+    fn steps_of(&self, id: ThreadId) -> u64 {
+        self.threads
+            .iter()
+            .find(|thread| thread.id == id)
+            .map(|thread| thread.steps)
+            .unwrap_or(0)
     }
 }
 
@@ -140,6 +256,8 @@ mod tests {
         let child = table.fork(parent);
         assert_eq!(table.try_reap(parent, -1), Reap::Pending);
         assert_eq!(table.try_reap(parent, 99), Reap::NoChild);
+        assert!(table.is_root(parent));
+        assert!(!table.is_root(child));
         table.exit(child, 42);
         assert_eq!(
             table.try_reap(parent, child.0 as i64),
@@ -149,5 +267,22 @@ mod tests {
             }
         );
         assert_eq!(table.try_reap(parent, -1), Reap::NoChild);
+    }
+
+    #[test]
+    fn fewer_steps_run_before_a_longer_thread() {
+        let mut sched = GuestScheduler::default();
+        sched.insert(ThreadId(1));
+        sched.insert(ThreadId(2));
+        for _ in 0..5 {
+            sched.add_step(ThreadId(1));
+        }
+        assert_eq!(sched.next(ThreadId(1)), Some(ThreadId(2)));
+        sched.block(ThreadId(2), ThreadWait::Child { which: -1 });
+        assert_eq!(sched.next(ThreadId(1)), None);
+        sched.mark_exited(ThreadId(1));
+        assert_eq!(sched.least_runnable(), None);
+        sched.unblock(ThreadId(2));
+        assert_eq!(sched.least_runnable(), Some(ThreadId(2)));
     }
 }
