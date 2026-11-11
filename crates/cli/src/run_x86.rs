@@ -599,7 +599,13 @@ fn fetch_len(
             if md == 3 {
                 Some(6 - sub)
             } else if rm == 4 {
-                None
+                // mod=00 SIB+imm32 (7B)。base=5 は disp32 が付く。awk 0x4a4354 対応.
+                if has66 {
+                    None
+                } else {
+                    let t = third?;
+                    if md == 0 && t & 7 != 5 { Some(7) } else { None }
+                }
             } else {
                 Some(
                     2 + match md {
@@ -1355,6 +1361,7 @@ pub fn run_mode(
                 | 0x3A
                 | 0x87
                 | 0x83
+                | 0x81
                 | 0x63
                 | 0x01
                 | 0x03
@@ -4663,6 +4670,21 @@ fn dispatch<B: Backend>(
                 sem::or_rm64_imm(b, rm(), imm32())
             } else {
                 sem::or_rm32_imm(b, rm(), imm32())
+            }
+        }
+        Insn::OrRm32ImmSib => {
+            // 81 /1 SIB mod=00 [base+index*scale],imm32。awk 0x4a4354 対応。imm は下位32 LE.
+            let imm = ((word & 0xffff_ffff) as u32).swap_bytes();
+            if no_index() {
+                if rex_w {
+                    sem::or_rm64_imm_memnd(b, sib_base(), imm)
+                } else {
+                    sem::or_rm32_imm_memnd(b, sib_base(), imm)
+                }
+            } else if rex_w {
+                sem::or_rm64_imm_sib(b, sib_base(), sib_idx(), sib_shift(), imm)
+            } else {
+                sem::or_rm32_imm_sib(b, sib_base(), sib_idx(), sib_shift(), imm)
             }
         }
         Insn::OrRm32ImmMemnd => {
