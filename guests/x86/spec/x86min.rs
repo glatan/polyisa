@@ -2619,6 +2619,14 @@ pub fn build_model() -> polyisa_isadl::Model {
             "alu",
         ),
         (
+            "or_m8_r8_mem8",
+            "M8",
+            "00001000 01...... ........",
+            vec![wc("m8_rm", WhereOp::Ne, 4)],
+            "or [r/m+disp8], r8",
+            "alu",
+        ),
+        (
             "or_m8_r8_sibd",
             "S8",
             "00001000 01...100 ........ ........",

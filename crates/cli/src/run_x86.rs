@@ -825,6 +825,9 @@ fn fetch_len(
                 Some(2)
             } else if rm == 4 && md == 1 {
                 Some(4)
+            } else if md == 1 {
+                // powertop 0x44c15c の orb %al, 0x18(%rbx)。
+                Some(3)
             } else {
                 None
             }
@@ -3538,6 +3541,18 @@ fn dispatch<B: Backend>(
             } else {
                 sem::cmp_m8_r8_sib(b, sib_base(), sib_idx(), sib_shift(), src, high)
             }
+        }
+        Insn::OrM8R8Mem8 => {
+            // 08 /r mod=01 [base+disp8], r8。powertop 0x44c15c の orb %al, 0x18(%rbx)。
+            let reg_f = (modrm() >> 3) & 7;
+            let (src, high) = if rex != 0 {
+                (Gpr(reg_f | ((rex >> 2) & 1) << 3), false)
+            } else if reg_f < 4 {
+                (Gpr(reg_f), false)
+            } else {
+                (Gpr(reg_f - 4), true)
+            };
+            sem::or_m8_r8_mem8(b, rm(), disp8(), src, high)
         }
         Insn::OrM8R8Sibd => {
             // 08 /r SIB mod=01 [base+index*scale+disp8], r8。sed 0x4a87dd 対応.
