@@ -3530,6 +3530,29 @@ pub fn cmp_rm64_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8, src: Gpr) -> Fl
     Ok(())
 }
 
+/// CMP m16, r16 [base+index*scale] (66 39 /r SIB mod=00)。gzip 0x4845a8 対応.
+pub fn cmp_m16_r16_sib<B: Backend>(
+    b: &mut B,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    src: Gpr,
+) -> Flow<B> {
+    use polyisa_sem::W16;
+    let addr = sib_addr_scaled(b, shift, 0, base, idx);
+    let x: B::V<W16> = b.load::<W16>(addr, DATA_READ)?;
+    let y = if src.0 < 8 {
+        let y32 = read(b, src);
+        b.trunc::<W32, W16>(y32)
+    } else {
+        let y64 = read64(b, src);
+        b.trunc::<W64, W16>(y64)
+    };
+    let v = b.sub::<W16>(x, y);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
 /// CMP m32, r32 [base+index*scale] (39 /r SIB mod=00)。paste 0x5ad26b 対応.
 pub fn cmp_m32_r32_sib<B: Backend>(
     b: &mut B,
@@ -3626,6 +3649,23 @@ pub fn cmp_m64_r64_sibd<B: Backend>(
     let x: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
     let y = read64(b, src);
     let v = b.sub::<W64>(x, y);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
+/// CMP m16, r16 [base] (66 39 /r mod=00)。gzip 0x4845d8 の cmpw %r8w, (%r11)。
+pub fn cmp_m16_r16_memnd<B: Backend>(b: &mut B, base: Gpr, src: Gpr) -> Flow<B> {
+    use polyisa_sem::W16;
+    let addr = read64(b, base);
+    let x: B::V<W16> = b.load::<W16>(addr, DATA_READ)?;
+    let y = if src.0 < 8 {
+        let y32 = read(b, src);
+        b.trunc::<W32, W16>(y32)
+    } else {
+        let y64 = read64(b, src);
+        b.trunc::<W64, W16>(y64)
+    };
+    let v = b.sub::<W16>(x, y);
     update_sub_flags(b, x, y, v);
     Ok(())
 }
@@ -4850,6 +4890,34 @@ pub fn cmp_rm32_imm8_sib<B: Backend>(
     let x: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
     let y = b.konst::<W32>(imm as i32 as u32);
     let v = b.sub::<W32>(x, y);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
+/// CMP m16,imm8 [base+index*scale] (66 83 /7 SIB mod=00)。gzip 0x4846ab 対応。
+pub fn cmp_m16_imm8_sib<B: Backend>(
+    b: &mut B,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    imm: i8,
+) -> Flow<B> {
+    use polyisa_sem::W16;
+    let addr = sib_addr_scaled(b, shift, 0, base, idx);
+    let x: B::V<W16> = b.load::<W16>(addr, DATA_READ)?;
+    let y = b.konst::<W16>(imm as i16 as u16);
+    let v = b.sub::<W16>(x, y);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
+/// CMP m16,imm8 [base] (66 83 /7 SIB mod=00 no_index)。
+pub fn cmp_m16_imm8_memnd<B: Backend>(b: &mut B, base: Gpr, imm: i8) -> Flow<B> {
+    use polyisa_sem::W16;
+    let addr = read64(b, base);
+    let x: B::V<W16> = b.load::<W16>(addr, DATA_READ)?;
+    let y = b.konst::<W16>(imm as i16 as u16);
+    let v = b.sub::<W16>(x, y);
     update_sub_flags(b, x, y, v);
     Ok(())
 }

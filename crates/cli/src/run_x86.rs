@@ -1978,6 +1978,12 @@ pub fn run_mode(
                     | Insn::MovMemEax8
                     // ADD m16,imm8 SIB (66 83 /0 mod=00).
                     | Insn::AddM16ImmSib
+                    // CMP m16,imm8 SIB (66 83 /7 mod=00).
+                    | Insn::CmpRmImm8Sib
+                    // CMP m16, r16 [base] (66 39 /r mod=00).
+                    | Insn::CmpRmMemnd
+                    // CMP m16, r16 SIB (66 39 /r mod=00).
+                    | Insn::CmpM32R32Sib
                     // AND m16,imm8 SIB+disp8 (66 83 /4 mod=01).
                     | Insn::AndRmImm8Sibd
                     // SUB m16,imm8 SIB+disp8 (66 83 /5 mod=01).
@@ -5155,7 +5161,14 @@ fn dispatch<B: Backend>(
             let idx_raw = (sib_v >> 3) & 7;
             let idx = Gpr(idx_raw | (((rex >> 1) & 1) << 3));
             let base = Gpr((sib_v & 7) | ((rex & 1) << 3));
-            if idx_raw == 4 && (rex >> 1) & 1 == 0 {
+            if has66 {
+                // 66 83 /7。gzip 0x4846ab の cmpw $0, (%rdi,%rax,4)。
+                if idx_raw == 4 && (rex >> 1) & 1 == 0 {
+                    sem::cmp_m16_imm8_memnd(b, base, imm)
+                } else {
+                    sem::cmp_m16_imm8_sib(b, base, idx, shift, imm)
+                }
+            } else if idx_raw == 4 && (rex >> 1) & 1 == 0 {
                 if rex_w {
                     sem::cmp_rm64_imm8_memnd(b, base, imm)
                 } else {
@@ -5961,7 +5974,14 @@ fn dispatch<B: Backend>(
         }
         Insn::CmpM32R32Sib => {
             // 39 /r SIB mod=00 [base+index*scale]。paste 0x5ad26b 対応. no_index は [base].
-            if no_index() {
+            // 66 付きは16ビット。gzip 0x4845a8 の cmpw %r12w, (%rdi,%r13,4)。
+            if has66 {
+                if no_index() {
+                    sem::cmp_m16_r16_memnd(b, sib_base(), reg())
+                } else {
+                    sem::cmp_m16_r16_sib(b, sib_base(), sib_idx(), sib_shift(), reg())
+                }
+            } else if no_index() {
                 if rex_w {
                     sem::cmp_rm64_memnd(b, sib_base(), reg())
                 } else {
@@ -5974,7 +5994,10 @@ fn dispatch<B: Backend>(
             }
         }
         Insn::CmpRmMemnd => {
-            if rex_w {
+            if has66 {
+                // 66 39 /r mod=00。gzip 0x4845d8 の cmpw %r8w, (%r11)。
+                sem::cmp_m16_r16_memnd(b, rm(), reg())
+            } else if rex_w {
                 sem::cmp_rm64_memnd(b, rm(), reg())
             } else {
                 sem::cmp_rm32_memnd(b, rm(), reg())

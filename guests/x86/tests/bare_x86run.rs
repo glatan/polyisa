@@ -5073,6 +5073,104 @@ fn run_shl_m8_1_mem32() {
 }
 
 #[test]
+fn run_cmp_m16_imm8_sib() {
+    // 66 83 3C 87 00 = cmpw $0, (%rdi,%rax,4)。gzip 0x4846ab。
+    // 0 との比較は ZF を立て、0 以外は立てない。メモリは変えない。
+    // Ref: SPEC-X86-INTEL-SDM (v093).
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    for (mem, flags) in [([0x00, 0x00], 0x44u32), ([0x01, 0x00], 0x00)] {
+        let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+        env.backend.set(Gpr(7).state(), 0x2000);
+        env.backend.set(Gpr(0).state(), 1);
+        env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 0);
+        env.backend.mem.write(VirtAddr(0x2004), &mem).unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x1000), &[0x66, 0x83, 0x3C, 0x87, 0x00])
+            .unwrap();
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+        assert_eq!(out, Outcome::StepLimit { eip: 0x1005 });
+        assert_eq!(
+            env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x8D5,
+            flags
+        );
+        let mut back = [0u8; 2];
+        env.backend
+            .mem
+            .read(
+                VirtAddr(0x2004),
+                &mut back,
+                polyisa_mem::Access {
+                    endian: polyisa_mem::Endian::Le,
+                    align: polyisa_mem::Align::Unaligned,
+                    kind: polyisa_mem::AccessKind::DataRead,
+                },
+            )
+            .unwrap();
+        assert_eq!(back, mem);
+    }
+}
+
+#[test]
+fn run_cmp_m16_r16_memnd() {
+    // 66 45 39 03 = cmpw %r8w, (%r11)。gzip 0x4845d8。
+    // 同値は ZF。差が 1 のときは旗が立たない。
+    // Ref: SPEC-X86-INTEL-SDM (v093).
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    for (mem, src, flags) in [([0xAB, 0x00], 0xABu64, 0x44u32), ([0x02, 0x00], 0x01, 0x00)] {
+        let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+        polyisa_guest_x86::sem::write64(&mut env.backend, Gpr(11), 0x2000);
+        polyisa_guest_x86::sem::write64(&mut env.backend, Gpr(8), src);
+        env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 0);
+        env.backend.mem.write(VirtAddr(0x2000), &mem).unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x1000), &[0x66, 0x45, 0x39, 0x03])
+            .unwrap();
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+        assert_eq!(out, Outcome::StepLimit { eip: 0x1004 });
+        assert_eq!(
+            env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x8D5,
+            flags
+        );
+    }
+}
+
+#[test]
+fn run_cmp_m16_r16_sib() {
+    // 66 46 39 24 AF = cmpw %r12w, (%rdi,%r13,4)。gzip 0x4845a8。
+    // Ref: SPEC-X86-INTEL-SDM (v093).
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    for (mem, src, flags) in [([0xAB, 0x00], 0xABu64, 0x44u32), ([0x02, 0x00], 0x01, 0x00)] {
+        let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+        env.backend.set(Gpr(7).state(), 0x2000);
+        polyisa_guest_x86::sem::write64(&mut env.backend, Gpr(13), 1);
+        polyisa_guest_x86::sem::write64(&mut env.backend, Gpr(12), src);
+        env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 0);
+        env.backend.mem.write(VirtAddr(0x2004), &mem).unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x1000), &[0x66, 0x46, 0x39, 0x24, 0xAF])
+            .unwrap();
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+        assert_eq!(out, Outcome::StepLimit { eip: 0x1005 });
+        assert_eq!(
+            env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x8D5,
+            flags
+        );
+    }
+}
+
+#[test]
 fn run_imul_r64_imm_sibd() {
     // 48 69 44 24 08 01 00 01 00 = imulq $0x10001, 0x8(%rsp), %rax。3*0x10001=0x30003。
     // mktemp 0x4d85cf。Ref: SPEC-X86-INTEL-SDM (v093).

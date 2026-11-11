@@ -580,6 +580,12 @@ mod tests {
         assert_eq!(decode(0xff84b084040000, 56), Some(Insn::IncRmSibd32));
         // SHL m8,1 [base+disp32]。gzip 0x484b2e の D0 A0 F1 2A 00 00。
         assert_eq!(decode(0xD0A0F12A0000, 48), Some(Insn::ShlM81Mem32));
+        // CMPW [base+index*scale],imm8。gzip 0x4846ab の 83 3C 87 00。
+        assert_eq!(decode(0x833c8700, 32), Some(Insn::CmpRmImm8Sib));
+        // CMP [base], r。66 付きは16ビット。gzip 0x4845d8 の 39 03。
+        assert_eq!(decode(0x3903, 16), Some(Insn::CmpRmMemnd));
+        // CMP [base+index*scale], r。gzip 0x4845a8 の 39 24 AF。
+        assert_eq!(decode(0x3924af, 24), Some(Insn::CmpM32R32Sib));
         assert_eq!(decode(0x6B1567FD1A0038, 56), Some(Insn::ImulRImm8Rip));
         assert_eq!(decode(0x6BF638, 24), Some(Insn::ImulRImm8));
         assert_eq!(decode(0x00C1F908, 24), Some(Insn::SarRm32Imm8));
