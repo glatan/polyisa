@@ -376,6 +376,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("add_r_sibd", "F1", "00000011 01...100 ........ ........", "add r, m", "alu"),
         // ADD m32,r32 SIB+disp32 (01 mod=10)。basename 0x48995c 対応.
         ("add_m32_r32_sibd32", "D32", "00000001 10...100 ........ ................................", "add m, r", "alu"),
+        // SUB m32/m64,r32/r64 SIB+disp8 (29 mod=01)。wc 0x49e1db 対応。REX.W で64bit.
+        ("sub_m_r_sibd", "F1", "00101001 01...100 ........ ........", "sub m, r", "alu"),
         // ADD m32,r32 SIB+disp8 (01 mod=01)。
         ("add_m32_r32_sibd", "F1", "00000001 01...100 ........ ........", "add m, r", "alu"),
         // CMP m32,r32 SIB+disp8 (39 mod=01)。

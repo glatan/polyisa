@@ -1079,6 +1079,11 @@ fn fetch_len(
                 return Some(2);
             }
             if rm == 4 {
+                // SUB m,r SIB+disp8 (29 /r mod=01)。wc 0x49e1db 対応.
+                // mod=01 は SIB の base に依らず disp8 が付く。
+                if first == 0x29 && md == 1 {
+                    return Some(4);
+                }
                 return None;
             }
             Some(
@@ -2192,6 +2197,20 @@ fn dispatch<B: Backend>(
                 sem::add_m32_r32_mem8(b, base, d8, reg())
             } else {
                 sem::add_m32_r32_sibd(b, base, idx, shift, d8, reg())
+            }
+        }
+        Insn::SubMRSibd => {
+            // 29 /r SIB mod=01 [base+index*scale+disp8]。wc 0x49e1db 対応.
+            if no_index() {
+                if rex_w {
+                    sem::sub_m64_r64_mem8(b, sib_base(), disp8(), reg())
+                } else {
+                    sem::sub_m32_r32_mem8(b, sib_base(), disp8(), reg())
+                }
+            } else if rex_w {
+                sem::sub_m64_r64_sibd(b, sib_base(), sib_idx(), sib_shift(), disp8(), reg())
+            } else {
+                sem::sub_m32_r32_sibd(b, sib_base(), sib_idx(), sib_shift(), disp8(), reg())
             }
         }
         Insn::SubM32R32Mem8 => {

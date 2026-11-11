@@ -7399,3 +7399,40 @@ fn run_test_rm32_imm_rip_sets_zf() {
         0x40
     );
 }
+
+#[test]
+fn run_sub_m64_r64_sibd() {
+    // 48 29 44 24 78 = subq %rax, 0x78(%rsp)。10-3=7。wc 0x49e1db。
+    // Ref: SPEC-X86-INTEL-SDM (v093).
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2078), &10u64.to_le_bytes())
+        .unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000u32);
+    env.backend.set(Gpr(0).state(), 3u32);
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0x48, 0x29, 0x44, 0x24, 0x78])
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x1005 });
+    let mut got = [0u8; 8];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x2078),
+            &mut got,
+            polyisa_mem::Access {
+                endian: polyisa_mem::Endian::Le,
+                align: polyisa_mem::Align::Natural,
+                kind: polyisa_mem::AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(u64::from_le_bytes(got), 7);
+}
