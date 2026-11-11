@@ -5738,6 +5738,42 @@ fn run_imul_r64_imm_sib() {
 }
 
 #[test]
+fn run_cvtsi2sd_rsp_disp8() {
+    // F2 48 0F 2A 44 24 08 = cvtsi2sdq 0x8(%rsp), %xmm0。整数 2 は 2.0。上位 64 は残る。ntpd 0x42cb2f。
+    // Ref: SPEC-X86-INTEL-SDM (v093).
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    polyisa_guest_x86::sem::write64(&mut env.backend, Gpr(4), 0x2000);
+    env.backend
+        .mem
+        .write(VirtAddr(0x2008), &2i64.to_le_bytes())
+        .unwrap();
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x1000),
+            &[0xF2, 0x48, 0x0F, 0x2A, 0x44, 0x24, 0x08],
+        )
+        .unwrap();
+    env.backend.set(
+        polyisa_guest_x86::sem::xmm_ref(polyisa_guest_x86::sem::Xmm(0)),
+        0x1111_2222_3333_4444_u128 << 64,
+    );
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x1007 });
+    let v: u128 = env.backend.get(polyisa_guest_x86::sem::xmm_ref(
+        polyisa_guest_x86::sem::Xmm(0),
+    ));
+    assert_eq!(
+        v,
+        (0x1111_2222_3333_4444_u128 << 64) | 0x4000_0000_0000_0000
+    );
+}
+
+#[test]
 fn run_or_m8_al_rbx() {
     // 08 43 18 = orb %al, 0x18(%rbx)。0x03 と 0x01 は 0x03。AL は残る。powertop 0x44c15c。
     // Ref: SPEC-X86-INTEL-SDM (v093).

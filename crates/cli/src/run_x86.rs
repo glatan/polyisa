@@ -314,6 +314,9 @@ fn fetch_len(
                 let rm = m & 7;
                 if md == 3 {
                     Some(3)
+                } else if md == 1 && rm == 4 {
+                    // ntpd 0x42cb2f の cvtsi2sdq 0x8(%rsp), %xmm0。SIB+disp8 で 5B。
+                    Some(5)
                 } else if md == 1 && rm != 4 {
                     Some(4)
                 } else {
@@ -2196,7 +2199,7 @@ pub fn run_mode(
         // CVTSI2SD (F2 0F 2A) と SUBPS (0F 2A) は符号化を共用する。F2 なしは未対応.
         if matches!(
             insn,
-            Insn::Cvtsi2sdM32Mem8 | Insn::DivsdXmmM64Rip | Insn::Divsd
+            Insn::Cvtsi2sdM32Mem8 | Insn::Cvtsi2sdM32Sibd | Insn::DivsdXmmM64Rip | Insn::Divsd
         ) && !has_f2
         {
             return Outcome::Unimplemented {
@@ -6802,6 +6805,34 @@ fn dispatch<B: Backend>(
                 sem::cvtsi2sd_xmm_m64_mem8(b, xmm_reg_r(), rm0f(), disp8())
             } else {
                 sem::cvtsi2sd_xmm_m32_mem8(b, xmm_reg_r(), rm0f(), disp8())
+            }
+        }
+        Insn::Cvtsi2sdM32Sibd => {
+            // F2 0F 2A SIB mod=01。ntpd 0x42cb2f の cvtsi2sdq 0x8(%rsp), %xmm0。
+            if sib0f_no_index() {
+                if rex_w {
+                    sem::cvtsi2sd_xmm_m64_mem8(b, xmm_reg_r(), sib0f_base(), disp8())
+                } else {
+                    sem::cvtsi2sd_xmm_m32_mem8(b, xmm_reg_r(), sib0f_base(), disp8())
+                }
+            } else if rex_w {
+                sem::cvtsi2sd_xmm_m64_sibd(
+                    b,
+                    xmm_reg_r(),
+                    sib0f_base(),
+                    sib0f_idx(),
+                    sib0f_shift(),
+                    disp8(),
+                )
+            } else {
+                sem::cvtsi2sd_xmm_m32_sibd(
+                    b,
+                    xmm_reg_r(),
+                    sib0f_base(),
+                    sib0f_idx(),
+                    sib0f_shift(),
+                    disp8(),
+                )
             }
         }
         // ADDSD xmm,xmm (F2 0F 58 /r reg-direct)。F2 は剥がし済み.
