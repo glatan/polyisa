@@ -10709,6 +10709,151 @@ pub fn fstp_st<B: Backend>(b: &mut B, i: u8) -> Flow<B> {
     Ok(())
 }
 
+fn read_st<B: Backend>(b: &mut B, slot_sel: B::V<W16>) -> (B::V<W64>, B::V<W16>) {
+    let mut sig = b.konst::<W64>(0);
+    let mut exp = b.konst::<W16>(0);
+    for slot in 0..8 {
+        let idx = b.konst::<W16>(slot as u16);
+        let hit = b.cmp::<W16>(Cmp::Eq, slot_sel, idx);
+        let got_sig = b.get(st_sig_ref(slot));
+        let got_exp = b.get(st_exp_ref(slot));
+        sig = b.select::<W64>(hit, got_sig, sig);
+        exp = b.select::<W16>(hit, got_exp, exp);
+    }
+    (sig, exp)
+}
+
+/// 正規化済み 80 ビット同士の乗算。最近接偶数へ丸め、ゼロと無限大だけ特別扱いする。
+fn mul_ext<B: Backend>(
+    b: &mut B,
+    sig_a: B::V<W64>,
+    exp_a: B::V<W16>,
+    sig_b: B::V<W64>,
+    exp_b: B::V<W16>,
+) -> (B::V<W64>, B::V<W16>) {
+    let exp_a64 = b.zext::<W16, W64>(exp_a);
+    let exp_b64 = b.zext::<W16, W64>(exp_b);
+    let mask15 = b.konst::<W64>(0x7fff);
+    let ea = b.and::<W64>(exp_a64, mask15);
+    let eb = b.and::<W64>(exp_b64, mask15);
+    let s15 = b.konst::<W64>(15);
+    let sign_a = b.shr_l::<W64>(exp_a64, s15);
+    let sign_b = b.shr_l::<W64>(exp_b64, s15);
+    let sign = b.xor::<W64>(sign_a, sign_b);
+    let sign_bit = b.shl::<W64>(sign, s15);
+    let zero64 = b.konst::<W64>(0);
+    let one64 = b.konst::<W64>(1);
+    let special_exp = b.konst::<W64>(0x7fff);
+    let sp_a = b.cmp::<W64>(Cmp::Eq, ea, special_exp);
+    let sp_b = b.cmp::<W64>(Cmp::Eq, eb, special_exp);
+    let sp_a_n = b.select::<W64>(sp_a, one64, zero64);
+    let sp_b_n = b.select::<W64>(sp_b, one64, zero64);
+    let sp_or = b.or::<W64>(sp_a_n, sp_b_n);
+    let is_special = b.cmp::<W64>(Cmp::Ne, sp_or, zero64);
+    let z_a = b.cmp::<W64>(Cmp::Eq, ea, zero64);
+    let z_b = b.cmp::<W64>(Cmp::Eq, eb, zero64);
+    let z_a_n = b.select::<W64>(z_a, one64, zero64);
+    let z_b_n = b.select::<W64>(z_b, one64, zero64);
+    let z_or = b.or::<W64>(z_a_n, z_b_n);
+    let is_zero = b.cmp::<W64>(Cmp::Ne, z_or, zero64);
+    let lo = b.mul::<W64>(sig_a, sig_b);
+    let hi = b.mulhu::<W64>(sig_a, sig_b);
+    let s63 = b.konst::<W64>(63);
+    let hi_top = b.shr_l::<W64>(hi, s63);
+    let ge = b.cmp::<W64>(Cmp::Eq, hi_top, one64);
+    let hi_sh = b.shl::<W64>(hi, one64);
+    let lo_top = b.shr_l::<W64>(lo, s63);
+    let sig_narrow = b.or::<W64>(hi_sh, lo_top);
+    let sig_raw = b.select::<W64>(ge, hi, sig_narrow);
+    let s62 = b.konst::<W64>(62);
+    let rb_wide = b.and::<W64>(lo_top, one64);
+    let lo_r = b.shr_l::<W64>(lo, s62);
+    let rb_narrow = b.and::<W64>(lo_r, one64);
+    let round_bit = b.select::<W64>(ge, rb_wide, rb_narrow);
+    let m63 = b.konst::<W64>((1u64 << 63) - 1);
+    let m62 = b.konst::<W64>((1u64 << 62) - 1);
+    let st_wide = b.and::<W64>(lo, m63);
+    let st_narrow = b.and::<W64>(lo, m62);
+    let sticky_bits = b.select::<W64>(ge, st_wide, st_narrow);
+    let sticky = b.cmp::<W64>(Cmp::Ne, sticky_bits, zero64);
+    let lsb = b.and::<W64>(sig_raw, one64);
+    let sticky_n = b.select::<W64>(sticky, one64, zero64);
+    let tie = b.or::<W64>(sticky_n, lsb);
+    let round_set = b.cmp::<W64>(Cmp::Eq, round_bit, one64);
+    let up_n = b.select::<W64>(round_set, tie, zero64);
+    let do_up = b.cmp::<W64>(Cmp::Ne, up_n, zero64);
+    let sig_plus = b.add::<W64>(sig_raw, one64);
+    let sig_rounded = b.select::<W64>(do_up, sig_plus, sig_raw);
+    let max64 = b.konst::<W64>(u64::MAX);
+    let at_max = b.cmp::<W64>(Cmp::Eq, sig_raw, max64);
+    let at_max_n = b.select::<W64>(at_max, one64, zero64);
+    let ov_n = b.select::<W64>(do_up, at_max_n, zero64);
+    let round_ov = b.cmp::<W64>(Cmp::Ne, ov_n, zero64);
+    let int_bit = b.konst::<W64>(1u64 << 63);
+    let sig_norm = b.select::<W64>(round_ov, int_bit, sig_rounded);
+    let adj0 = b.select::<W64>(ge, one64, zero64);
+    let adj1 = b.add::<W64>(adj0, one64);
+    let adj = b.select::<W64>(round_ov, adj1, adj0);
+    let exp_sum0 = b.add::<W64>(ea, eb);
+    let exp_sum = b.add::<W64>(exp_sum0, adj);
+    let bias = b.konst::<W64>(16383);
+    let under = b.cmp::<W64>(Cmp::LeU, exp_sum, bias);
+    let biased = b.sub::<W64>(exp_sum, bias);
+    let ov_lim = b.konst::<W64>(16383 + 0x7fff);
+    let over = b.cmp::<W64>(Cmp::GeU, exp_sum, ov_lim);
+    let exp_over = b.select::<W64>(over, special_exp, biased);
+    let exp_num = b.select::<W64>(under, zero64, exp_over);
+    let sig_under = b.select::<W64>(under, zero64, sig_norm);
+    let sig_num = b.select::<W64>(over, int_bit, sig_under);
+    let exp_fin = b.select::<W64>(is_zero, zero64, exp_num);
+    let sig_fin = b.select::<W64>(is_zero, zero64, sig_num);
+    let nan_sig = b.konst::<W64>(0xC000_0000_0000_0000);
+    let exp_mag = b.select::<W64>(is_special, special_exp, exp_fin);
+    let sig_out = b.select::<W64>(is_special, nan_sig, sig_fin);
+    let exp_word64 = b.or::<W64>(exp_mag, sign_bit);
+    let exp_word = b.trunc::<W64, W16>(exp_word64);
+    (sig_out, exp_word)
+}
+
+/// FMULP ST(i), ST(0) (DE C8+i)。ST(i) に積を書いてからスタックを一つ捨てる。seq 0x4018c7 対応.
+pub fn fmulp_st<B: Backend>(b: &mut B, i: u8) -> Flow<B> {
+    let top = b.get(top_ref());
+    let (sig0, exp0) = read_st(b, top);
+    let ii = b.konst::<W16>(i as u16);
+    let summed = b.add::<W16>(top, ii);
+    let seven = b.konst::<W16>(7);
+    let dst = b.and::<W16>(summed, seven);
+    let (sig1, exp1) = read_st(b, dst);
+    let (sig_p, exp_p) = mul_ext(b, sig0, exp0, sig1, exp1);
+    for slot in 0..8 {
+        let idx = b.konst::<W16>(slot as u16);
+        let hit = b.cmp::<W16>(Cmp::Eq, dst, idx);
+        let old_sig = b.get(st_sig_ref(slot));
+        let old_exp = b.get(st_exp_ref(slot));
+        let new_sig = b.select::<W64>(hit, sig_p, old_sig);
+        let new_exp = b.select::<W16>(hit, exp_p, old_exp);
+        b.set(st_sig_ref(slot), new_sig);
+        b.set(st_exp_ref(slot), new_exp);
+    }
+    let zero64 = b.konst::<W64>(0);
+    let zero16 = b.konst::<W16>(0);
+    for slot in 0..8 {
+        let idx = b.konst::<W16>(slot as u16);
+        let hit = b.cmp::<W16>(Cmp::Eq, top, idx);
+        let old_sig = b.get(st_sig_ref(slot));
+        let old_exp = b.get(st_exp_ref(slot));
+        let new_sig = b.select::<W64>(hit, zero64, old_sig);
+        let new_exp = b.select::<W16>(hit, zero16, old_exp);
+        b.set(st_sig_ref(slot), new_sig);
+        b.set(st_exp_ref(slot), new_exp);
+    }
+    let one = b.konst::<W16>(1);
+    let inc = b.add::<W16>(top, one);
+    let new_top = b.and::<W16>(inc, seven);
+    b.set(top_ref(), new_top);
+    Ok(())
+}
+
 /// FLDCW m16 [base] (D9 /5 mod=00)。x87 制御ワードを読む.
 pub fn fldcw_memnd<B: Backend>(b: &mut B, base: Gpr) -> Flow<B> {
     let addr = read64(b, base);

@@ -852,6 +852,13 @@ fn fetch_len(
                 None
             }
         }
+        // DE C8+i (FMULP ST(i))。reg-direct 2B のみ。seq 0x4018c7 の DE C9。
+        0xDE => {
+            let s = second?;
+            let md = s >> 6;
+            let reg = (s >> 3) & 7;
+            if md == 3 && reg == 1 { Some(2) } else { None }
+        }
         // DF /5 SIB mod=00 (FILD m64)。seq 0x4018c4 の DF 2C 24。base=5 は disp32。
         0xDF => {
             let s = second?;
@@ -1371,6 +1378,7 @@ pub fn run_mode(
                 | 0xD9
                 | 0xDB
                 | 0xDF
+                | 0xDE
                 | 0xDD
                 | 0x0A
                 | 0xC0
@@ -2949,6 +2957,10 @@ fn dispatch<B: Backend>(
                 (Gpr(rm_f - 4), true)
             };
             sem::and_m8_r8(b, dst, dst_high, src, src_high)
+        }
+        Insn::FmulpSt => {
+            // DE C8+i。seq 0x4018c7 の DE C9 は FMULP ST(1)。
+            sem::fmulp_st(b, (word & 7) as u8)
         }
         Insn::FildM64Sib => {
             // DF /5 SIB mod=00 [base+index*scale]。seq 0x4018c4 の fildq (%rsp)。

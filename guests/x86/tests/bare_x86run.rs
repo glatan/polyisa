@@ -7983,3 +7983,76 @@ fn run_fild_m64_sib_pushes_2_pow_40() {
         1u64 << 63
     );
 }
+
+#[test]
+fn run_fmulp_st1_three_times_one() {
+    // DE C9 = fmulp %st(1)。3 * 1 を ST(1) に残して ST(0) を捨てる。seq 0x4018c7。
+    // Ref: SPEC-X86-INTEL-SDM (v093).
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+    env.backend
+        .set(polyisa_guest_x86::sem::st_exp_ref(0), 0x4000u16);
+    env.backend.set(
+        polyisa_guest_x86::sem::st_sig_ref(0),
+        (1u64 << 63) | (1u64 << 62),
+    );
+    env.backend
+        .set(polyisa_guest_x86::sem::st_exp_ref(1), 0x3fffu16);
+    env.backend
+        .set(polyisa_guest_x86::sem::st_sig_ref(1), 1u64 << 63);
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0xDE, 0xC9])
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x1002 });
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::top_ref()), 1);
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::st_exp_ref(0)), 0);
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)), 0);
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::st_exp_ref(1)),
+        0x4000
+    );
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::st_sig_ref(1)),
+        (1u64 << 63) | (1u64 << 62)
+    );
+}
+
+#[test]
+fn run_fmulp_st1_one_and_a_half_squared() {
+    // 1.5 * 1.5 = 2.25。積が 2 以上なので指数が一つ増える。
+    // Ref: SPEC-X86-INTEL-SDM (v093).
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.set(polyisa_guest_x86::sem::top_ref(), 0u16);
+    let one_and_half = (1u64 << 63) | (1u64 << 62);
+    env.backend
+        .set(polyisa_guest_x86::sem::st_exp_ref(0), 0x3fffu16);
+    env.backend
+        .set(polyisa_guest_x86::sem::st_sig_ref(0), one_and_half);
+    env.backend
+        .set(polyisa_guest_x86::sem::st_exp_ref(1), 0x3fffu16);
+    env.backend
+        .set(polyisa_guest_x86::sem::st_sig_ref(1), one_and_half);
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0xDE, 0xC9])
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x1002 });
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::top_ref()), 1);
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::st_exp_ref(1)),
+        0x4000
+    );
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::st_sig_ref(1)),
+        (1u64 << 63) | (1u64 << 60)
+    );
+}

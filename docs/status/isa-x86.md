@@ -68,6 +68,7 @@
 | fild | fild_m32_sibd、fild_m64_sib | 真 | alu |
 | fld | fld_m32_rip | 真 | alu |
 | fldcw | fldcw_mem32、fldcw_mem8、fldcw_memnd | 真 | alu |
+| fmulp | fmulp_st | 真 | alu |
 | fnstcw | fnstcw_mem32、fnstcw_mem8、fnstcw_memnd | 真 | alu |
 | fstp | fstp_st | 真 | alu |
 | hlt | hlt | 真 | system |
