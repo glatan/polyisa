@@ -6298,6 +6298,14 @@ fn dispatch<B: Backend>(
                 sem::or_m32_r32_sibd32(b, sib_base(), sib_idx(), sib_shift(), disp32(), reg())
             }
         }
+        Insn::AndM32R32Memnd => {
+            // 21 /r mod=00 [base]。chat 0x4d3473 の andq %rax, (%rdi)。
+            if rex_w {
+                sem::and_m64_r64_memnd(b, rm(), reg())
+            } else {
+                sem::and_m32_r32_memnd(b, rm(), reg())
+            }
+        }
         Insn::AndM32R32Sib => {
             // 21 /r SIB mod=00 [base+index*scale]。bzip2 0x47f93d の andl %ecx, (%r12,%rdx,4)。
             if no_index() {

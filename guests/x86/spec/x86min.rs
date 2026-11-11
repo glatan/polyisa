@@ -509,6 +509,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("call_r_rip", "F1", "11111111 00010101 ................................", "call r/m64", "jump"),
         // ADD m32,r32 mod=00 [base] (01 /r)。REX.W で64bit.
         ("add_m32_r32_memnd", "MR", "00000001 00......", "add m32, r32", "alu"),
+        // AND m32,r32 mod=00 [base] (21 /r)。chat 0x4d3473 の andq %rax, (%rdi)。
+        ("and_m32_r32_memnd", "MR", "00100001 00......", "and m32, r32", "alu"),
         // ADD m32,r32 mod=01 [base+disp8] (01 /r)。
         ("add_m32_r32_mem8", "M8", "00000001 01...... ........", "add m32, r32", "alu"),
         // ADD m32,r32 mod=10 [base+disp32] (01 /r)。

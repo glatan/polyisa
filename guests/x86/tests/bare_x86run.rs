@@ -5460,6 +5460,51 @@ fn run_cmp_m16_imm8_sibd32() {
 }
 
 #[test]
+fn run_and_m64_r64_memnd() {
+    // 48 21 07 = andq %rax, (%rdi)。0xff & 0x0f = 0x0f。%rax は変わらない。chat 0x4d3473。
+    // Ref: SPEC-X86-INTEL-SDM (v093).
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    polyisa_guest_x86::sem::write64(&mut env.backend, Gpr(7), 0x2000);
+    polyisa_guest_x86::sem::write64(&mut env.backend, Gpr(0), 0x0F);
+    env.backend
+        .mem
+        .write(VirtAddr(0x2000), &0xFFu64.to_le_bytes())
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0x48, 0x21, 0x07])
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x1003 });
+    assert_eq!(
+        polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(0)),
+        0x0F
+    );
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x8C5,
+        0x04
+    );
+    let mut back = [0u8; 8];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x2000),
+            &mut back,
+            polyisa_mem::Access {
+                endian: polyisa_mem::Endian::Le,
+                align: polyisa_mem::Align::Unaligned,
+                kind: polyisa_mem::AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(u64::from_le_bytes(back), 0x0F);
+}
+
+#[test]
 fn run_and_m32_r32_sib() {
     // 41 21 0C 94 = andl %ecx, (%r12,%rdx,4)。bzip2 0x47f93d。
     // 0xff & 0x0f = 0x0f。%ecx は変わらない。
