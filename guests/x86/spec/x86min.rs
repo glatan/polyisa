@@ -587,6 +587,14 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("cmp_rm32_imm_memnd", "MR", "10000001 00111... ................................", "cmp r/m32, {imm}", "alu"),
         // OR m32,imm32 mod=01 [base+disp8] (81 /1)。SIB は fetch で弾く.
         ("or_rm32_imm_mem8", "M8", "10000001 01001... ........ ................................", "or r/m32, {imm}", "alu"),
+        // OR m32/m64,imm32 SIB+disp8 (81 /1 mod=01)。resize 0x490ea6 の orl $0x880, 0x1c(%rsp)。
+        (
+            "or_rm32_imm_sibd",
+            "F1",
+            "10000001 01001100 ........ ........ ................................",
+            "or r/m32, {imm}",
+            "alu",
+        ),
         // AND m32/m64,imm32 mod=01 [base+disp8] (81 /4)。echo/id 0x4c08a2 対応.
         (
             "and_rm32_imm_mem8",

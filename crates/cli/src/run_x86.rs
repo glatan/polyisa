@@ -5472,6 +5472,22 @@ fn dispatch<B: Backend>(
             }
         }
         Insn::AddRm64Imm => sem::add_rm64_imm(b, rm(), imm32()),
+        Insn::OrRm32ImmSibd => {
+            // 81 /1 SIB mod=01。resize 0x490ea6 の orl $0x880, 0x1c(%rsp)。
+            let disp = ((word >> 32) & 0xff) as u8 as i8;
+            let imm = ((word & 0xffff_ffff) as u32).swap_bytes();
+            if no_index() {
+                if rex_w {
+                    sem::or_rm64_imm_mem8(b, sib_base(), disp, imm)
+                } else {
+                    sem::or_rm32_imm_mem8(b, sib_base(), disp, imm)
+                }
+            } else if rex_w {
+                sem::or_rm64_imm_sibd(b, sib_base(), sib_idx(), sib_shift(), disp, imm)
+            } else {
+                sem::or_rm32_imm_sibd(b, sib_base(), sib_idx(), sib_shift(), disp, imm)
+            }
+        }
         Insn::OrRm32Imm => {
             if rex_w {
                 sem::or_rm64_imm(b, rm(), imm32())
