@@ -850,6 +850,10 @@ fn fetch_len(
             let md = s >> 6;
             let reg = (s >> 3) & 7;
             let rm = s & 7;
+            if reg == 5 && md == 1 && rm == 4 {
+                // FLD m80 SIB+disp8。seq 0x4d7466 の DB 6C 24 20。4B.
+                return Some(4);
+            }
             if reg == 5 && md == 2 && rm == 4 {
                 // FLD m80 SIB+disp32。seq 0x4d0853 の DB AC 24 80 1D 00 00。7B.
                 return Some(7);
@@ -3347,6 +3351,14 @@ fn dispatch<B: Backend>(
         Insn::FldSt => {
             // D9 C0+i。seq 0x4d0867 の D9 C0 は FLD ST(0)。
             sem::fld_st(b, (word & 7) as u8)
+        }
+        Insn::FldM80Sibd => {
+            // DB /5 SIB mod=01。seq 0x4d7466 の fldt 0x20(%rsp)。
+            if no_index() {
+                sem::fld_m80_mem8(b, sib_base(), disp8())
+            } else {
+                sem::fld_m80_sibd(b, sib_base(), sib_idx(), sib_shift(), disp8())
+            }
         }
         Insn::FldM80Sibd32 => {
             // DB /5 SIB mod=10。seq 0x4d0853 の fldt 0x1d80(%rsp)。

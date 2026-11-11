@@ -10829,6 +10829,26 @@ pub fn fld_m80_sibd32<B: Backend>(
     push_ext(b, sig, exp)
 }
 
+/// FLD m80 [base+disp8] (DB /5 SIB mod=01, no_index)。seq 0x4d7466 対応.
+pub fn fld_m80_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8) -> Flow<B> {
+    let addr = eff_addr(b, base, disp);
+    let sig: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let eight = b.konst::<W64>(8);
+    let exp_addr = b.add::<W64>(addr, eight);
+    let exp: B::V<W16> = b.load::<W16>(exp_addr, DATA_READ)?;
+    push_ext(b, sig, exp)
+}
+
+/// FLD m80 [base+index*scale+disp8] (DB /5 SIB mod=01)。
+pub fn fld_m80_sibd<B: Backend>(b: &mut B, base: Gpr, idx: Gpr, shift: u32, disp: i8) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, disp as i32, base, idx);
+    let sig: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let eight = b.konst::<W64>(8);
+    let exp_addr = b.add::<W64>(addr, eight);
+    let exp: B::V<W16> = b.load::<W16>(exp_addr, DATA_READ)?;
+    push_ext(b, sig, exp)
+}
+
 /// FLD ST(i) (D9 C0+i)。ST(i) の複製を載せる。元の段は残す。seq 0x4d0867 対応.
 pub fn fld_st<B: Backend>(b: &mut B, i: u8) -> Flow<B> {
     let top = b.get(top_ref());
