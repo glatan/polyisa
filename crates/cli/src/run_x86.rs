@@ -831,10 +831,19 @@ fn fetch_len(
             let s = second?;
             if s >> 6 == 3 { Some(3) } else { None }
         }
-        // 0xD0 /5 (SHR r/m8,1)。reg-direct 2B のみ。sed 0x5bdd7d 対応.
+        // 0xD0 /4 (SHL r/m8,1) と /5 (SHR r/m8,1)。
+        // reg-direct は 2B。mod=10 のメモリは disp32 で 6B。gzip 0x484b2e の shlb。
         0xD0 => {
             let s = second?;
-            if s >> 6 == 3 { Some(2) } else { None }
+            let md = s >> 6;
+            let rm = s & 7;
+            if md == 3 {
+                Some(2)
+            } else if md == 2 && rm != 4 {
+                Some(6)
+            } else {
+                None
+            }
         }
         // 0x84 /r (TEST r/m8,r8)。reg-direct 2B、mod=00 base 2B / abs 6B、
         // mod=01 base+disp8 3B、mod=10 base+disp32 6B。SIB は未対応で None.
@@ -4519,6 +4528,12 @@ fn dispatch<B: Backend>(
             } else {
                 sem::shl_rm32_imm8(b, rm(), 1)
             }
+        }
+        Insn::ShlM81Mem32 => {
+            // D0 /4 mod=10 [base+disp32]。gzip 0x484b2e の shlb 0x2af1(%rax)。
+            let rm_f = ((word >> 32) & 7) as u8;
+            let base = Gpr(rm_f | ((rex & 1) << 3));
+            sem::shl_m8_1_mem32(b, base, disp32())
         }
         Insn::RolRm321 => {
             if rex_w {

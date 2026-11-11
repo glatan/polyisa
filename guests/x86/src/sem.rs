@@ -3114,6 +3114,36 @@ pub fn shr_rm64_imm8<B: Backend>(b: &mut B, dst: Gpr, n: u8) -> Flow<B> {
     Ok(())
 }
 
+/// SHL m8,1 [base+disp32] (D0 /4 mod=10)。gzip 0x484b2e 対応。CF は追い出した bit7、OF は結果の bit7 との不一致。
+pub fn shl_m8_1_mem32<B: Backend>(b: &mut B, base: Gpr, disp: i32) -> Flow<B> {
+    use polyisa_sem::W8;
+    let addr = eff_addr32(b, base, disp);
+    let x: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
+    let one = b.konst::<W8>(1);
+    let v = b.shl::<W8>(x, one);
+    b.store::<W8>(addr, v, DATA_WRITE)?;
+    let old: B::V<W32> = b.get(eflags_ref());
+    let zero = b.konst::<W8>(0);
+    let n7 = b.konst::<W8>(7);
+    let top = b.shr_l::<W8>(x, n7);
+    let cf_bit = b.and::<W8>(top, one);
+    let cf_take = b.cmp::<W8>(Cmp::Ne, cf_bit, zero);
+    let cf = pick(b, cf_take, FLAG_CF);
+    let v_top = b.shr_l::<W8>(v, n7);
+    let v_bit = b.and::<W8>(v_top, one);
+    let xor = b.xor::<W8>(v_bit, cf_bit);
+    let of_take = b.cmp::<W8>(Cmp::Ne, xor, zero);
+    let of = pick(b, of_take, FLAG_OF);
+    let szp = szp_bits(b, v);
+    let clear_mask = b.konst::<W32>(!FLAG_OSZPC);
+    let mut new_flags = b.and::<W32>(old, clear_mask);
+    new_flags = b.or::<W32>(new_flags, cf);
+    new_flags = b.or::<W32>(new_flags, of);
+    new_flags = b.or::<W32>(new_flags, szp);
+    b.set(eflags_ref(), new_flags);
+    Ok(())
+}
+
 /// SHL r/m64,imm8 (REX.W C1 /4)。論理左シフトし、CF/OF/SZP を更新する.
 pub fn shl_rm64_imm8<B: Backend>(b: &mut B, dst: Gpr, n: u8) -> Flow<B> {
     let x = read64(b, dst);

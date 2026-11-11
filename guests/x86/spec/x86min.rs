@@ -949,6 +949,14 @@ pub fn build_model() -> polyisa_isadl::Model {
             "alu",
         ),
         (
+            "shl_m8_1_mem32",
+            "M32",
+            "11010000 10100... ................................",
+            vec![wc("m32_rm", WhereOp::Ne, 4)],
+            "shl r/m8, 1",
+            "alu",
+        ),
+        (
             "mov_eax_mem8",
             "M8",
             "10001011 01...... ........",
