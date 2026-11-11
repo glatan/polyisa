@@ -4,7 +4,7 @@
 // Hexagon 最小の ISADL モデル（段階2の試作）。
 //
 // スロット整数6件に絞る。試作パターンは実符号化の簡略化であり、
-// parse ビット・duplex・imm 拡張・HW ループは本格実装で足す。
+// ループ終端の判定は sem の commit で行う。duplex・imm 拡張は試作に含まない。
 // パケットのステップ構成と .new 転送の検証が目的である。
 // 出典は SPEC-HEXAGON-PRM V73 (80-N2040-53) である。
 // Ref: SPEC-HEXAGON-PRM (V73).

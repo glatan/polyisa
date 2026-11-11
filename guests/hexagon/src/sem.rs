@@ -6,12 +6,13 @@
 //! スロット命令はレジスタに直接書かずパケットバッファに溜め、
 //! パケットの終わりで `commit` して一括反映する。
 //! `.new` オペランドは同じパケットの一時値（バッファ）を読む。
-//! duplex・imm 拡張・HW ループ・HVX は本格実装で足す。
+//! ループ終端のパケットでは、commit が LC0 と SA0 から次の pc を決める。
+//! duplex・imm 拡張・HVX は試作に含まない。
 //!
 //! 出典は SPEC-HEXAGON-PRM V73 (80-N2040-53) である。
 //! Ref: SPEC-HEXAGON-PRM (V73).
 
-use polyisa_sem::{Backend, Flow, StateRef, W32};
+use polyisa_sem::{Backend, Cmp, Flow, StateRef, W32};
 
 use super::CpuState;
 
@@ -37,6 +38,28 @@ pub fn pc_ref() -> StateRef<W32> {
 
 fn pkt_valid_ref() -> StateRef<W32> {
     StateRef::<W32>::from_offset(core::mem::offset_of!(CpuState, pkt_valid))
+}
+
+/// ループ 0 の開始アドレス。
+pub fn sa0_ref() -> StateRef<W32> {
+    StateRef::<W32>::from_offset(core::mem::offset_of!(CpuState, sa0))
+}
+
+/// ループ 0 の残り回数。
+pub fn lc0_ref() -> StateRef<W32> {
+    StateRef::<W32>::from_offset(core::mem::offset_of!(CpuState, lc0))
+}
+
+/// パケットがループ 0 の終端なら 1。
+pub fn loop_end_ref() -> StateRef<W32> {
+    StateRef::<W32>::from_offset(core::mem::offset_of!(CpuState, loop_end))
+}
+
+/// このパケットをループ 0 の終端にする。次の commit が回数を見て pc を決める。
+pub fn mark_loop_end<B: Backend>(b: &mut B) -> Flow<B> {
+    let one = b.konst::<W32>(1);
+    b.set(loop_end_ref(), one);
+    Ok(())
 }
 
 fn read_reg<B: Backend>(b: &mut B, r: R) -> B::V<W32> {
@@ -129,6 +152,36 @@ pub fn commit<B: Backend>(b: &mut B) -> Flow<B> {
     }
     let zero = b.konst::<W32>(0);
     b.set(pkt_valid_ref(), zero);
+    apply_loop_end(b)?;
+    Ok(())
+}
+
+/// 終端パケットの次 pc。LC0 が 2 以上なら SA0 へ戻り、1 なら回数だけ消して pc は維持する。
+fn apply_loop_end<B: Backend>(b: &mut B) -> Flow<B> {
+    let end: B::V<W32> = b.get(loop_end_ref());
+    let zero = b.konst::<W32>(0);
+    let is_end = b.cmp::<W32>(Cmp::Ne, end, zero);
+    b.if_then(is_end, |b| {
+        let lc: B::V<W32> = b.get(lc0_ref());
+        let one = b.konst::<W32>(1);
+        let cont = b.cmp::<W32>(Cmp::GtU, lc, one);
+        let last = b.cmp::<W32>(Cmp::Eq, lc, one);
+        b.if_then(cont, |b| {
+            let sa: B::V<W32> = b.get(sa0_ref());
+            b.set(pc_ref(), sa);
+            let dec = b.sub::<W32>(lc, one);
+            b.set(lc0_ref(), dec);
+            Ok(())
+        })?;
+        b.if_then(last, |b| {
+            let z = b.konst::<W32>(0);
+            b.set(lc0_ref(), z);
+            Ok(())
+        })?;
+        Ok(())
+    })?;
+    let clear = b.konst::<W32>(0);
+    b.set(loop_end_ref(), clear);
     Ok(())
 }
 
@@ -139,7 +192,7 @@ pub fn mov_imm<B: Backend>(b: &mut B, rd: R, imm: u32) -> Flow<B> {
     Ok(())
 }
 
-/// JUMP。試作では pc を直接進める（HW ループ終端判定は本格実装で足す）。
+/// JUMP。pc を書き、ループ終端の上書きは commit が行う。
 pub fn jump<B: Backend>(b: &mut B, target: u32) -> Flow<B> {
     let t = b.konst::<W32>(target);
     b.set(pc_ref(), t);

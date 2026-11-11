@@ -2,9 +2,10 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! Hexagon 最小のゲスト ISA。段階2の試作であり、パケットの一括反映を確かめる。
 //!
-//! スロット整数演算のみ持つ。parse ビット・duplex・imm 拡張・HW ループ・
-//! HVX・複数スレッドは本格実装で足す。パケットは2スロットを想定し、
-//! 書き込みの一括反映と .new 転送を sem で表す。
+//! スロット整数演算と、ループ 0 の終端判定を持つ。duplex・imm 拡張・
+//! HVX・複数スレッドは試作に含まない。パケットは2スロットを想定し、
+//! 書き込みの一括反映と .new 転送を sem で表す。終端のパケットでは、
+//! commit が LC0 と SA0 から次の pc を決める。
 
 #![forbid(unsafe_code)]
 
@@ -34,6 +35,12 @@ pub struct CpuState {
     pub pkt: [u32; 32],
     /// パケットの有効マスク（1ビットが1レジスタに対応する）。
     pub pkt_valid: u32,
+    /// ハードウェアループ 0 の開始アドレス。
+    pub sa0: u32,
+    /// ハードウェアループ 0 の残り回数。
+    pub lc0: u32,
+    /// このパケットがループ 0 の終端なら 1。
+    pub loop_end: u32,
 }
 
 #[cfg(test)]
@@ -51,10 +58,11 @@ mod tests {
         assert_eq!(core::mem::offset_of!(CpuState, r), 0);
         assert_eq!(core::mem::offset_of!(CpuState, pc), 32 * 4);
         assert_eq!(core::mem::offset_of!(CpuState, pkt), 32 * 4 + 4);
-        assert_eq!(
-            core::mem::offset_of!(CpuState, pkt_valid),
-            32 * 4 + 4 + 32 * 4
-        );
+        let pkt_valid = 32 * 4 + 4 + 32 * 4;
+        assert_eq!(core::mem::offset_of!(CpuState, pkt_valid), pkt_valid);
+        assert_eq!(core::mem::offset_of!(CpuState, sa0), pkt_valid + 4);
+        assert_eq!(core::mem::offset_of!(CpuState, lc0), pkt_valid + 8);
+        assert_eq!(core::mem::offset_of!(CpuState, loop_end), pkt_valid + 12);
     }
 
     #[test]

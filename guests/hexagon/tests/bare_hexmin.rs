@@ -77,3 +77,24 @@ fn jump_sets_pc() {
     env.step(|b| sem::jump(b, 0x1000)).unwrap();
     assert_eq!(env.backend.get(sem::pc_ref()), 0x1000);
 }
+
+#[test]
+fn loop_end_returns_until_last_iteration() {
+    let mut env = env();
+    env.backend.set(sem::sa0_ref(), 0x100);
+    env.backend.set(sem::lc0_ref(), 2);
+    env.step(sem::mark_loop_end).unwrap();
+    env.step(|b| sem::jump(b, 0x2000)).unwrap();
+    assert_eq!(env.backend.get(sem::pc_ref()), 0x2000);
+    // LC0 が 2 なので、終端の commit は jump の pc を SA0 で上書きし、回数を 1 にする。
+    env.step(sem::commit).unwrap();
+    assert_eq!(env.backend.get(sem::pc_ref()), 0x100);
+    assert_eq!(env.backend.get(sem::lc0_ref()), 1);
+    assert_eq!(env.backend.get(sem::loop_end_ref()), 0);
+    // 最後の 1 回は戻らず、jump の pc を残して回数を 0 にする。
+    env.step(sem::mark_loop_end).unwrap();
+    env.step(|b| sem::jump(b, 0x2000)).unwrap();
+    env.step(sem::commit).unwrap();
+    assert_eq!(env.backend.get(sem::pc_ref()), 0x2000);
+    assert_eq!(env.backend.get(sem::lc0_ref()), 0);
+}
