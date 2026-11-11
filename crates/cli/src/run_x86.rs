@@ -840,6 +840,18 @@ fn fetch_len(
                 Some(2)
             }
         }
+        // DB /0 SIB mod=01 (FILD m32)。seq 0x4018bc の DB 44 24 20。4B.
+        0xDB => {
+            let s = second?;
+            let md = s >> 6;
+            let reg = (s >> 3) & 7;
+            let rm = s & 7;
+            if reg == 0 && md == 1 && rm == 4 {
+                Some(4)
+            } else {
+                None
+            }
+        }
         // DD D8+i (FSTP ST(i))。reg-direct 2B のみ。seq 0x4024ee 対応.
         0xDD => {
             let s = second?;
@@ -1344,6 +1356,7 @@ pub fn run_mode(
                 | 0x22
                 | 0x84
                 | 0xD9
+                | 0xDB
                 | 0xDD
                 | 0x0A
                 | 0xC0
@@ -2921,6 +2934,14 @@ fn dispatch<B: Backend>(
                 (Gpr(rm_f - 4), true)
             };
             sem::and_m8_r8(b, dst, dst_high, src, src_high)
+        }
+        Insn::FildM32Sibd => {
+            // DB /0 SIB mod=01 [base+index*scale+disp8]。seq 0x4018bc 対応.
+            if no_index() {
+                sem::fild_m32_mem8(b, sib_base(), disp8())
+            } else {
+                sem::fild_m32_sibd(b, sib_base(), sib_idx(), sib_shift(), disp8())
+            }
         }
         Insn::FstpSt => {
             // DD D8+i。seq 0x4024ee の DD D8 は FSTP ST(0)。

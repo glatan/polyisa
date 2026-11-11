@@ -1509,6 +1509,14 @@ pub fn build_model() -> polyisa_isadl::Model {
             "alu",
         ),
         (
+            "fild_m32_sibd",
+            "S8",
+            "11011011 01000100 ........ ........",
+            vec![],
+            "fild m32",
+            "alu",
+        ),
+        (
             "pcmpeqb_memnd",
             "MR",
             "00001111 01110100 00......",

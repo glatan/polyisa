@@ -10484,6 +10484,11 @@ fn push_f32<B: Backend>(b: &mut B, bits: B::V<W32>) -> Flow<B> {
     let sign_bit = b.shl::<W32>(sign, s15);
     let exp_word32 = b.or::<W32>(exp_final, sign_bit);
     let exp_word: B::V<W16> = b.trunc::<W32, W16>(exp_word32);
+    push_ext(b, sig_final, exp_word)
+}
+
+/// 80 ビット値を x87 スタックへ載せる。TOP を 1 減らしてから書く。
+fn push_ext<B: Backend>(b: &mut B, sig: B::V<W64>, exp_word: B::V<W16>) -> Flow<B> {
     let top = b.get(top_ref());
     let one16 = b.konst::<W16>(1);
     let dec = b.sub::<W16>(top, one16);
@@ -10495,12 +10500,68 @@ fn push_f32<B: Backend>(b: &mut B, bits: B::V<W32>) -> Flow<B> {
         let hit = b.cmp::<W16>(Cmp::Eq, new_top, slot);
         let old_sig = b.get(st_sig_ref(i));
         let old_exp = b.get(st_exp_ref(i));
-        let sig_i = b.select::<W64>(hit, sig_final, old_sig);
+        let sig_i = b.select::<W64>(hit, sig, old_sig);
         let exp_i = b.select::<W16>(hit, exp_word, old_exp);
         b.set(st_sig_ref(i), sig_i);
         b.set(st_exp_ref(i), exp_i);
     }
     Ok(())
+}
+
+/// 符号付き 32 ビット整数を 80 ビットへ伸ばしてスタックへ載せる。
+fn push_i32<B: Backend>(b: &mut B, bits: B::V<W32>) -> Flow<B> {
+    let s31 = b.konst::<W32>(31);
+    let sign = b.shr_l::<W32>(bits, s31);
+    let one32 = b.konst::<W32>(1);
+    let neg_flag = b.cmp::<W32>(Cmp::Eq, sign, one32);
+    let zero32 = b.konst::<W32>(0);
+    let neg = b.sub::<W32>(zero32, bits);
+    let mag = b.select::<W32>(neg_flag, neg, bits);
+    let m31 = b.konst::<W32>(0x7fff_ffff);
+    let mag31 = b.and::<W32>(mag, m31);
+    let min_bits = b.konst::<W32>(0x8000_0000);
+    let is_min = b.cmp::<W32>(Cmp::Eq, bits, min_bits);
+    let mag_zero = b.cmp::<W32>(Cmp::Eq, mag31, zero32);
+    let mut v = mag31;
+    let mut n = zero32;
+    for (k, mask) in [
+        (16u32, 0x7fff_8000u32),
+        (8, 0x7f80_0000),
+        (4, 0x7800_0000),
+        (2, 0x6000_0000),
+        (1, 0x4000_0000),
+    ] {
+        let m = b.konst::<W32>(mask);
+        let high = b.and::<W32>(v, m);
+        let empty = b.cmp::<W32>(Cmp::Eq, high, zero32);
+        let kk = b.konst::<W32>(k);
+        let shifted = b.shl::<W32>(v, kk);
+        v = b.select::<W32>(empty, shifted, v);
+        let n2 = b.add::<W32>(n, kk);
+        n = b.select::<W32>(empty, n2, n);
+    }
+    let bias = b.konst::<W32>(16413);
+    let exp_norm = b.sub::<W32>(bias, n);
+    let mfrac = b.konst::<W32>(0x3fff_ffff);
+    let frac = b.and::<W32>(v, mfrac);
+    let frac64 = b.zext::<W32, W64>(frac);
+    let sh33 = b.konst::<W64>(33);
+    let frac_sh = b.shl::<W64>(frac64, sh33);
+    let int_bit = b.konst::<W64>(1u64 << 63);
+    let sig_norm = b.or::<W64>(int_bit, frac_sh);
+    let min_exp = b.konst::<W32>(16414);
+    let exp_or_min = b.select::<W32>(is_min, min_exp, exp_norm);
+    let sig_or_min = b.select::<W64>(is_min, int_bit, sig_norm);
+    let exp_if_zero = b.select::<W32>(is_min, min_exp, zero32);
+    let zero64 = b.konst::<W64>(0);
+    let sig_if_zero = b.select::<W64>(is_min, int_bit, zero64);
+    let exp_final = b.select::<W32>(mag_zero, exp_if_zero, exp_or_min);
+    let sig_final = b.select::<W64>(mag_zero, sig_if_zero, sig_or_min);
+    let s15 = b.konst::<W32>(15);
+    let sign_bit = b.shl::<W32>(sign, s15);
+    let exp_word32 = b.or::<W32>(exp_final, sign_bit);
+    let exp_word: B::V<W16> = b.trunc::<W32, W16>(exp_word32);
+    push_ext(b, sig_final, exp_word)
 }
 
 /// FLDS [RIP+disp32] (D9 /0 mod=00 rm=101)。seq 0x402335 対応.
@@ -10517,6 +10578,20 @@ pub fn fld_m32_abs<B: Backend>(b: &mut B, addr32: u32) -> Flow<B> {
     let addr = b.konst::<W64>(addr32 as u64);
     let bits: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
     push_f32(b, bits)
+}
+
+/// FILD m32 [base+disp8] (DB /0 SIB mod=01, no_index)。seq 0x4018bc 対応.
+pub fn fild_m32_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8) -> Flow<B> {
+    let addr = eff_addr(b, base, disp);
+    let bits: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    push_i32(b, bits)
+}
+
+/// FILD m32 [base+index*scale+disp8] (DB /0 SIB mod=01)。
+pub fn fild_m32_sibd<B: Backend>(b: &mut B, base: Gpr, idx: Gpr, shift: u32, disp: i8) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, disp as i32, base, idx);
+    let bits: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    push_i32(b, bits)
 }
 
 /// FSTP ST(i) (DD D8+i)。ST(0) を ST(i) へ写してからスタックを一つ捨てる。seq 0x4024ee 対応.
