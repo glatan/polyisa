@@ -13113,6 +13113,40 @@ pub fn cmovge_r64<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
     Ok(())
 }
 
+/// CMOVGE r32, m32 SIB+disp8 (no_index)。SF==OF なら mem32 を dst に移す。seq 0x4d137a 対応.
+pub fn cmovge_r32_sibd<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, disp: i8) -> Flow<B> {
+    let addr = eff_addr(b, base, disp);
+    let srcv: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let sf = read_sf(b);
+    let of = read_of(b);
+    let zero = b.konst::<W32>(0);
+    let one = b.konst::<W32>(1);
+    let sf_n = b.select::<W32>(sf, one, zero);
+    let of_n = b.select::<W32>(of, one, zero);
+    let take = b.cmp::<W32>(Cmp::Eq, sf_n, of_n);
+    let dstv = read(b, dst);
+    let v = b.select::<W32>(take, srcv, dstv);
+    write(b, dst, v);
+    Ok(())
+}
+
+/// CMOVGE r64, m64 SIB+disp8 (no_index, REX.W)。SF==OF なら mem64 を dst に移す.
+pub fn cmovge_r64_sibd<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, disp: i8) -> Flow<B> {
+    let addr = eff_addr(b, base, disp);
+    let srcv: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let sf = read_sf(b);
+    let of = read_of(b);
+    let zero = b.konst::<W32>(0);
+    let one = b.konst::<W32>(1);
+    let sf_n = b.select::<W32>(sf, one, zero);
+    let of_n = b.select::<W32>(of, one, zero);
+    let take = b.cmp::<W32>(Cmp::Eq, sf_n, of_n);
+    let dstv = read64(b, dst);
+    let v = b.select::<W64>(take, srcv, dstv);
+    write64(b, dst, v);
+    Ok(())
+}
+
 /// CMOVLE r32。ZF=1 または SF!=OF なら移す.
 pub fn cmovle_r32<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
     let zf = read_zf(b);

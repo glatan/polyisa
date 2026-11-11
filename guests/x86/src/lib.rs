@@ -85,7 +85,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数117件。
-        assert_eq!(INSNS.len(), 696);
+        assert_eq!(INSNS.len(), 697);
     }
 
     #[test]
@@ -1108,6 +1108,10 @@ mod tests {
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x0F45442450, 40), Some(Insn::CmovneR64Sibd));
         assert_eq!(decode(0x0F45442450, 32), None);
+        // CMOVGE r32, [SIB+disp8] (0F 4D)。seq 0x4d137a の 0F 4D 44 24 10。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x0F4D442410, 40), Some(Insn::CmovgeR32Sibd));
+        assert_eq!(decode(0x0F4D442410, 32), None);
         // IMUL r,m32 SIB+disp8 (0F AF mod=01)。hexdump 0x5c8ca2 対応.
         // 0F AF 6C 24 14 は imul ebp,[r12+0x14] (REX.B 剥がし済み)。
         // 下位32は ImulRMem8 に一致するため否定は24で行う.

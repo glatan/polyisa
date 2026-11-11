@@ -45,6 +45,7 @@
 | cmove | cmove_m64、cmove_r64_sibd、cmove_rip | 真 | load |
 | cmovg | cmovg | 真 | alu |
 | cmovge | cmovge | 真 | alu |
+| cmovge | cmovge_r32_sibd | 真 | load |
 | cmovl | cmovl | 真 | alu |
 | cmovle | cmovle | 真 | alu |
 | cmovne | cmovne | 真 | alu |

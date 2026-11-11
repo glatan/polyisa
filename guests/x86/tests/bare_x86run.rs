@@ -9107,3 +9107,33 @@ fn run_and_r_sibd_edi() {
     assert_eq!(flags & 1, 0);
     assert_eq!(flags & 0x40, 0);
 }
+
+#[test]
+fn run_cmovge_r32_sibd_moves_when_sf_eq_of() {
+    // 0F 4D 44 24 10 = cmovgel 0x10(%rsp), %eax。SF==OF のときだけ移す。seq 0x4d137a。
+    // Ref: SPEC-X86-INTEL-SDM (v093).
+    let run = |flags: u32| {
+        let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+        env.backend.set(Gpr(4).state(), 0x2000);
+        env.backend.set(Gpr(0).state(), 1);
+        env.backend.set(polyisa_guest_x86::sem::eflags_ref(), flags);
+        env.backend
+            .mem
+            .write(VirtAddr(0x2010), &0x42u32.to_le_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x1000), &[0x0F, 0x4D, 0x44, 0x24, 0x10])
+            .unwrap();
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+        assert_eq!(out, Outcome::StepLimit { eip: 0x1005 });
+        env.backend.get(Gpr(0).state())
+    };
+    assert_eq!(run(0), 0x42);
+    assert_eq!(run(0x880), 0x42);
+    assert_eq!(run(0x80), 1);
+}
