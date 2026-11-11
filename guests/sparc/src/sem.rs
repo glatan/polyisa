@@ -4,14 +4,15 @@
 //!
 //! 段階2の目的は遅延スロットのステップ構成を確かめることである。
 //! 分岐は即時に飛ばず npc だけを書き換え、遅延スロットの1命令を実行してから
-//! `commit` で pc を npc に進める。レジスタウィンドウと annul の取り消しは
-//! 本格実装で足す（annul は保持のみ）。
+//! `commit` で pc を npc に進める。BA の annul が立っているときは、
+//! `delay_slot` が遅延スロットの命令を実行しない。レジスタウィンドウは
+//! 本格実装で足す。
 //!
 //! 出典は SPEC-SPARC-V8 (Version 8, 1992) である。
 //! Ref: SPEC-SPARC-V8 (Version 8).
 
 use polyisa_mem::{Access, AccessKind, Align, Endian};
-use polyisa_sem::{Backend, Flow, StateRef, W32, W64};
+use polyisa_sem::{Backend, Cmp, Flow, StateRef, W32, W64};
 
 use super::CpuState;
 
@@ -39,6 +40,11 @@ pub fn pc_ref() -> StateRef<W64> {
 /// npc を指す。
 pub fn npc_ref() -> StateRef<W64> {
     StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, npc))
+}
+
+/// annul ビットを指す。1 のとき、次の遅延スロットは実行しない。
+pub fn annul_ref() -> StateRef<W64> {
+    StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, annul))
 }
 
 fn read<B: Backend>(b: &mut B, r: Gpr) -> B::V<W64> {
@@ -164,11 +170,33 @@ pub fn jmpl<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr, pc: u64) -> Flow
     Ok(())
 }
 
-/// BA。常に成立する分岐。遅延スロットの1命令は必ず実行する。
+/// BA。常に成立する分岐。annul は 0 なので、遅延スロットの1命令は実行する。
 pub fn ba_delay<B: Backend>(b: &mut B, target: u64) -> Flow<B> {
     let t = const_w64(b, target);
     b.set(npc_ref(), t);
+    let zero = b.konst::<W64>(0);
+    b.set(annul_ref(), zero);
     Ok(())
+}
+
+/// BA,a。無条件分岐で annul が立っていると、遅延スロットは実行しない。
+/// Ref: SPEC-SPARC-V8 (Version 8).
+pub fn ba_annul<B: Backend>(b: &mut B, target: u64) -> Flow<B> {
+    let t = const_w64(b, target);
+    b.set(npc_ref(), t);
+    let one = b.konst::<W64>(1);
+    b.set(annul_ref(), one);
+    Ok(())
+}
+
+/// 遅延スロットのステップ。annul が 0 のときだけ `slot` を実行し、ビットを消してから commit する。
+pub fn delay_slot<B: Backend>(b: &mut B, slot: impl FnOnce(&mut B) -> Flow<B>) -> Flow<B> {
+    let annul = b.get(annul_ref());
+    let zero = b.konst::<W64>(0);
+    let run = b.cmp::<W64>(Cmp::Eq, annul, zero);
+    b.if_then(run, slot)?;
+    b.set(annul_ref(), zero);
+    commit(b)
 }
 
 /// 遅延スロットの実行後に pc を npc に進め、npc を +4 する。

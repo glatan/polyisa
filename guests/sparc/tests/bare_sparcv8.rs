@@ -97,3 +97,34 @@ fn jmpl_writes_return_and_defers_jump() {
     env.step(sem::commit).unwrap();
     assert_eq!(env.backend.get(sem::pc_ref()), 0x3008);
 }
+
+#[test]
+fn annulled_ba_skips_delay_slot() {
+    let mut env = env();
+    env.backend.set(sem::pc_ref(), 0x1000);
+    env.backend.set(sem::npc_ref(), 0x1004);
+    env.step(|b| sem::ba_annul(b, 0x2000)).unwrap();
+    assert_eq!(env.backend.get(sem::annul_ref()), 1);
+    assert_eq!(env.backend.get(sem::npc_ref()), 0x2000);
+    // 遅延スロットの sethi は取り消され、pc は飛び先へ進む。
+    env.step(|b| sem::delay_slot(b, |b| sem::sethi(b, Gpr(1), 1)))
+        .unwrap();
+    assert_eq!(g(&mut env, 1), 0);
+    assert_eq!(env.backend.get(sem::annul_ref()), 0);
+    assert_eq!(env.backend.get(sem::pc_ref()), 0x2000);
+    assert_eq!(env.backend.get(sem::npc_ref()), 0x2004);
+}
+
+#[test]
+fn ba_without_annul_runs_delay_slot() {
+    let mut env = env();
+    env.backend.set(sem::pc_ref(), 0x1000);
+    env.backend.set(sem::npc_ref(), 0x1004);
+    env.step(|b| sem::ba_delay(b, 0x2000)).unwrap();
+    assert_eq!(env.backend.get(sem::annul_ref()), 0);
+    env.step(|b| sem::delay_slot(b, |b| sem::sethi(b, Gpr(1), 1)))
+        .unwrap();
+    assert_eq!(g(&mut env, 1), 0x400);
+    assert_eq!(env.backend.get(sem::pc_ref()), 0x2000);
+    assert_eq!(env.backend.get(sem::npc_ref()), 0x2004);
+}
