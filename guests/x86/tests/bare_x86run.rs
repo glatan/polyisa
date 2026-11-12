@@ -6213,6 +6213,55 @@ fn run_xor_rsp_disp8_ecx() {
 }
 
 #[test]
+fn run_cmovae_rax_rsi_disp8() {
+    // 48 0F 43 46 08 = cmovae rax, [rsi+8]。CF=0 なら移す。CF=1 なら残す。旗は不変。
+    // dc 0x40bc13。Ref: SPEC-X86-INTEL-SDM (v093).
+    let code = [0x48u8, 0x0F, 0x43, 0x46, 0x08];
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    for (flags, rax) in [(0u32, 0x1111_2222_3333_4444u64), (1, 0xAAAA_BBBB_CCCC_DDDD)] {
+        let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+        env.step(|b| {
+            polyisa_guest_x86::sem::write64(b, Gpr(0), 0xAAAA_BBBB_CCCC_DDDD);
+            polyisa_guest_x86::sem::write64(b, Gpr(6), 0x2000);
+            Ok(())
+        })
+        .unwrap();
+        env.backend.set(polyisa_guest_x86::sem::eflags_ref(), flags);
+        env.backend
+            .mem
+            .write(VirtAddr(0x2008), &0x1111_2222_3333_4444u64.to_le_bytes())
+            .unwrap();
+        env.backend.mem.write(VirtAddr(0x2010), &[0xAB]).unwrap();
+        env.backend.mem.write(VirtAddr(0x1000), &code).unwrap();
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+        assert_eq!(out, Outcome::StepLimit { eip: 0x1005 });
+        let got: u64 = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(0));
+        assert_eq!(got, rax);
+        let rsi: u64 = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(6));
+        assert_eq!(rsi, 0x2000);
+        assert_eq!(env.backend.get(polyisa_guest_x86::sem::eflags_ref()), flags);
+        let mut nb = [0u8; 9];
+        env.backend
+            .mem
+            .read(
+                VirtAddr(0x2008),
+                &mut nb,
+                polyisa_mem::Access {
+                    endian: polyisa_mem::Endian::Le,
+                    align: polyisa_mem::Align::Unaligned,
+                    kind: polyisa_mem::AccessKind::DataRead,
+                },
+            )
+            .unwrap();
+        assert_eq!(&nb[..8], &0x1111_2222_3333_4444u64.to_le_bytes());
+        assert_eq!(nb[8], 0xAB);
+    }
+}
+
+#[test]
 fn run_cmovbe_edx_r8() {
     // 41 0F 46 10 = cmovbe edx, DWORD PTR [r8]。CF があるので移す。上位 32 は消える。gunzip 0x48a025。
     // Ref: SPEC-X86-INTEL-SDM (v093).

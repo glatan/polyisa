@@ -344,6 +344,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("cmovne_mem8", "F1", "00001111 01000101 01...... ........", "cmovne r, m", "load"),
         ("cmova", "F1", "00001111 01000111 11......", "cmova r, r/m", "alu"),
         ("cmovae", "F1", "00001111 01000011 11......", "cmovae r, r/m", "alu"),
+        // CMOVAE r, [base+disp8] (0F 43 mod=01 rm!=4)。dc 0x40bc13 の cmovae rax, [rsi+8]。
+        ("cmovae_mem8", "F1", "00001111 01000011 01...... ........", "cmovae r, m", "load"),
         ("cmovs", "F1", "00001111 01001000 11......", "cmovs r, r/m", "alu"),
         ("cmovp", "F1", "00001111 01001010 11......", "cmovp r, r/m", "alu"),
         ("cmovnp", "F1", "00001111 01001011 11......", "cmovnp r, r/m", "alu"),

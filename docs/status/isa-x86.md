@@ -37,7 +37,7 @@
 | cld | cld | 真 | alu |
 | cmova | cmova | 真 | alu |
 | cmovae | cmovae | 真 | alu |
-| cmovae | cmovae_m64 | 真 | load |
+| cmovae | cmovae_m64、cmovae_mem8 | 真 | load |
 | cmovb | cmovb | 真 | alu |
 | cmovbe | cmovbe | 真 | alu |
 | cmovbe | cmovbe_mem8、cmovbe_memnd | 真 | load |
