@@ -1107,6 +1107,10 @@ fn fetch_len(
             if reg == 0 && md == 0 && rm != 4 && rm != 5 {
                 // FLDL [base] (DD /0)。seq 0x4d0723 の DD 00。
                 Some(2)
+            } else if reg == 0 && md == 0 && rm == 4 {
+                // FLD m64 SIB。awk length 0x401b17 の DD 04 24。base=5 は disp32。
+                let sib = third?;
+                if sib & 7 != 5 { Some(3) } else { None }
             } else if md == 3 && reg == 3 {
                 Some(2)
             } else if reg == 3 && md == 1 && rm == 4 {
@@ -1731,6 +1735,7 @@ pub fn run_mode(
                 | 0xF7
                 | 0xFF
                 | 0xDB
+                | 0xDD
                 | 0xDF
         ) && matches!(second, Some(s) if s & 7 == 4 && s >> 6 != 3))
             || (head[0] == 0x0F
@@ -3523,6 +3528,14 @@ fn dispatch<B: Backend>(
         Insn::FldM64Memnd => {
             // DD /0 mod=00 [base]。seq 0x4d0723 の fldl (%rax)。
             sem::fld_m64_memnd(b, rm())
+        }
+        Insn::FldM64Sib => {
+            // DD /0 SIB mod=00。awk length 0x401b17 の fld QWORD PTR [rsp]。
+            if no_index() {
+                sem::fld_m64_memnd(b, sib_base())
+            } else {
+                sem::fld_m64_sib(b, sib_base(), sib_idx(), sib_shift())
+            }
         }
         Insn::FldM32Rip => {
             // D9 /0 mod=00 rm=101 [RIP+disp32]。seq 0x402335 対応。disp は下位32 LE.

@@ -12646,6 +12646,13 @@ pub fn fld_m64_memnd<B: Backend>(b: &mut B, base: Gpr) -> Flow<B> {
     push_f64(b, bits)
 }
 
+/// FLDL [base+index*scale] (DD /0 SIB mod=00)。index なしの (%rsp) は memnd 側。
+pub fn fld_m64_sib<B: Backend>(b: &mut B, base: Gpr, idx: Gpr, shift: u32) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, 0, base, idx);
+    let bits: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    push_f64(b, bits)
+}
+
 /// FSTP m80 [base] (DB /7 mod=00)。仮数 8 バイトと指数 2 バイトを書いて捨てる。seq 0x4d0725 対応.
 pub fn fstp_m80_memnd<B: Backend>(b: &mut B, base: Gpr) -> Flow<B> {
     let top = b.get(top_ref());
