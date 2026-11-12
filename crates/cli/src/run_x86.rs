@@ -10850,6 +10850,13 @@ const X86_64_SYSCALLS: &[(&str, SysFn)] = &[
     ("swapoff", sys_swapoff),
     ("pivot_root", sys_pivot_root),
     ("umount2", sys_umount2),
+    ("flock", sys_flock),
+    ("shmget", sys_shmget),
+    ("shmctl", sys_shmctl),
+    ("semget", sys_semget),
+    ("semctl", sys_semctl),
+    ("msgget", sys_msgget),
+    ("msgctl", sys_msgctl),
     ("uname", sys_uname),
     ("getuid", sys_getuid),
     ("geteuid", sys_geteuid),
@@ -11882,6 +11889,43 @@ fn sys_umount2(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Tra
         ENOENT
     };
     set64(env, Gpr(0), cx.neg(err));
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_flock(_sys: &mut CliLinux, env: &mut BareEnv, _cx: &SysCtx) -> Option<TrapOutcome> {
+    // flock(fd, op)。単一ゲストでは競合がないので常に成功。
+    set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_shmget(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // shmget。セグメントは持たず ENOENT。ipcrm -M が呼ぶ。
+    set64(env, Gpr(0), cx.neg(ENOENT));
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_shmctl(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    set64(env, Gpr(0), cx.neg(EINVAL));
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_semget(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    set64(env, Gpr(0), cx.neg(ENOENT));
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_semctl(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    set64(env, Gpr(0), cx.neg(EINVAL));
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_msgget(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    set64(env, Gpr(0), cx.neg(ENOENT));
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_msgctl(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    set64(env, Gpr(0), cx.neg(EINVAL));
     Some(TrapOutcome::Handled)
 }
 

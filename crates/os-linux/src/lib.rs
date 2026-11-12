@@ -182,6 +182,13 @@ pub mod x86_64 {
     pub const SWAPOFF: u64 = 168;
     pub const PIVOT_ROOT: u64 = 155;
     pub const UMOUNT2: u64 = 166;
+    pub const FLOCK: u64 = 73;
+    pub const SHMGET: u64 = 29;
+    pub const SHMCTL: u64 = 31;
+    pub const SEMGET: u64 = 64;
+    pub const SEMCTL: u64 = 66;
+    pub const MSGGET: u64 = 68;
+    pub const MSGCTL: u64 = 71;
     pub const SCHED_SETPARAM: u64 = 142;
     pub const SCHED_GETPARAM: u64 = 143;
     pub const SCHED_SETSCHEDULER: u64 = 144;
@@ -522,6 +529,13 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             x86_64::SWAPOFF => Some("swapoff"),
             x86_64::PIVOT_ROOT => Some("pivot_root"),
             x86_64::UMOUNT2 => Some("umount2"),
+            x86_64::FLOCK => Some("flock"),
+            x86_64::SHMGET => Some("shmget"),
+            x86_64::SHMCTL => Some("shmctl"),
+            x86_64::SEMGET => Some("semget"),
+            x86_64::SEMCTL => Some("semctl"),
+            x86_64::MSGGET => Some("msgget"),
+            x86_64::MSGCTL => Some("msgctl"),
             x86_64::SCHED_SETPARAM => Some("sched_setparam"),
             x86_64::SCHED_GETPARAM => Some("sched_getparam"),
             x86_64::SCHED_SETSCHEDULER => Some("sched_setscheduler"),

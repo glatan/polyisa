@@ -39,6 +39,7 @@
 - fcntl
 - fdatasync
 - finit_module
+- flock
 - fork
 - fstat
 - fsync
@@ -70,6 +71,8 @@
 - mknod
 - mmap
 - mprotect
+- msgctl
+- msgget
 - munmap
 - nanosleep
 - newfstatat
@@ -98,6 +101,8 @@
 - sched_setaffinity
 - sched_setparam
 - sched_setscheduler
+- semctl
+- semget
 - sendfile
 - set_robust_list
 - set_tid_address
@@ -105,6 +110,8 @@
 - setpgid
 - setpriority
 - setsid
+- shmctl
+- shmget
 - stat
 - swapoff
 - swapon
