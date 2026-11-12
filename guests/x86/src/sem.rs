@@ -17233,6 +17233,53 @@ pub fn subsd_xmm_m64_rip<B: Backend>(b: &mut B, dst: Xmm, next_rip: u64, disp: i
     Ok(())
 }
 
+/// SUBSD xmm,m64 [base+disp8] (F2 0F 5C SIB mod=01, no_index)。上位64は dst のまま.
+pub fn subsd_xmm_m64_mem8<B: Backend>(b: &mut B, dst: Xmm, base: Gpr, disp: i8) -> Flow<B> {
+    use polyisa_sem::F64;
+    let a128: B::V<W128> = b.get(xmm_ref(dst));
+    let alo64: B::V<W64> = b.trunc::<W128, W64>(a128);
+    let a: B::V<F64> = b.trunc::<W64, F64>(alo64);
+    let addr = eff_addr(b, base, disp);
+    let m64: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let c: B::V<F64> = b.trunc::<W64, F64>(m64);
+    let v = b.fsub(a, c);
+    let vlo64: B::V<W64> = b.trunc::<F64, W64>(v);
+    let lo = b.zext::<W64, W128>(vlo64);
+    let hi_shift = b.konst::<W128>(64);
+    let hi = b.shr_l::<W128>(a128, hi_shift);
+    let hi_back = b.shl::<W128>(hi, hi_shift);
+    let res = b.or::<W128>(hi_back, lo);
+    b.set(xmm_ref(dst), res);
+    Ok(())
+}
+
+/// SUBSD xmm,m64 [base+index*scale+disp8] (F2 0F 5C SIB mod=01)。上位64は dst のまま.
+pub fn subsd_xmm_m64_sibd<B: Backend>(
+    b: &mut B,
+    dst: Xmm,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i8,
+) -> Flow<B> {
+    use polyisa_sem::F64;
+    let a128: B::V<W128> = b.get(xmm_ref(dst));
+    let alo64: B::V<W64> = b.trunc::<W128, W64>(a128);
+    let a: B::V<F64> = b.trunc::<W64, F64>(alo64);
+    let addr = sib_addr_scaled(b, shift, disp as i32, base, idx);
+    let m64: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let c: B::V<F64> = b.trunc::<W64, F64>(m64);
+    let v = b.fsub(a, c);
+    let vlo64: B::V<W64> = b.trunc::<F64, W64>(v);
+    let lo = b.zext::<W64, W128>(vlo64);
+    let hi_shift = b.konst::<W128>(64);
+    let hi = b.shr_l::<W128>(a128, hi_shift);
+    let hi_back = b.shl::<W128>(hi, hi_shift);
+    let res = b.or::<W128>(hi_back, lo);
+    b.set(xmm_ref(dst), res);
+    Ok(())
+}
+
 /// SUBSD xmm,m64 [base+disp32] (F2 0F 5C mod=10)。上位64は dst のまま.
 pub fn subsd_xmm_m64_mem32<B: Backend>(b: &mut B, dst: Xmm, base: Gpr, disp: i32) -> Flow<B> {
     use polyisa_sem::F64;

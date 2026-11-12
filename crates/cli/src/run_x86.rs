@@ -403,6 +403,9 @@ fn fetch_len(
                 } else if md == 2 && rm != 4 {
                     // SUBSD xmm,m64 [base+disp32]。awk log 0x4c161e の subsd xmm2, [rcx+disp32]。7B.
                     Some(7)
+                } else if rm == 4 && md == 1 {
+                    // SUBSD xmm,m64 SIB+disp8。awk の 2^3 が 0x4c199c で使う subsd xmm0, [rsp+0x10]。5B.
+                    Some(5)
                 } else {
                     None
                 }
@@ -7129,6 +7132,21 @@ fn dispatch<B: Backend>(
         Insn::SubsdXmmM64Mem32 => {
             // F2 0F 5C /r mod=10。awk log 0x4c161e の subsd xmm2, [rcx+disp32]。
             sem::subsd_xmm_m64_mem32(b, xmm_reg_r(), rm0f(), disp32())
+        }
+        Insn::SubsdXmmM64Sibd => {
+            // F2 0F 5C SIB mod=01。awk の 2^3 が 0x4c199c で使う subsd xmm0, [rsp+0x10]。
+            if sib0f_no_index() {
+                sem::subsd_xmm_m64_mem8(b, xmm_reg_r(), sib0f_base(), disp8())
+            } else {
+                sem::subsd_xmm_m64_sibd(
+                    b,
+                    xmm_reg_r(),
+                    sib0f_base(),
+                    sib0f_idx(),
+                    sib0f_shift(),
+                    disp8(),
+                )
+            }
         }
         // MULSD xmm,xmm (F2 0F 59 /r reg-direct)。F2 は剥がし済み.
         Insn::Mulsd => sem::mulsd_xmm(b, xmm_reg_r(), xmm_rm_b()),

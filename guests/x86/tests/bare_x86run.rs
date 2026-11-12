@@ -12683,6 +12683,55 @@ fn run_mulsd_xmm_m64_sibd_three_times_two() {
 }
 
 #[test]
+fn run_subsd_xmm0_rsp_disp8() {
+    // F2 0F 5C 44 24 10 = subsd xmm0, [rsp+0x10]。3.0-1.0 は 2.0。上位64は残る。
+    // awk の 2^3 が 0x4c199c で使う。Ref: SPEC-X86-INTEL-SDM (v093).
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    env.backend.set(
+        polyisa_guest_x86::sem::xmm_ref(polyisa_guest_x86::sem::Xmm(0)),
+        0xAAAA_AAAA_AAAA_AAAA_4008_0000_0000_0000,
+    );
+    env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 1);
+    env.backend
+        .mem
+        .write(VirtAddr(0x2010), &0x3FF0_0000_0000_0000u64.to_le_bytes())
+        .unwrap();
+    env.backend.mem.write(VirtAddr(0x2018), &[0xAB]).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0xF2, 0x0F, 0x5C, 0x44, 0x24, 0x10])
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x1006 });
+    let v: u128 = env.backend.get(polyisa_guest_x86::sem::xmm_ref(
+        polyisa_guest_x86::sem::Xmm(0),
+    ));
+    assert_eq!(v, 0xAAAA_AAAA_AAAA_AAAA_4000_0000_0000_0000);
+    assert_eq!(env.backend.get(Gpr(4).state()), 0x2000);
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::eflags_ref()), 1);
+    let mut nb = [0u8; 9];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x2010),
+            &mut nb,
+            polyisa_mem::Access {
+                endian: polyisa_mem::Endian::Le,
+                align: polyisa_mem::Align::Unaligned,
+                kind: polyisa_mem::AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(&nb[..8], &0x3FF0_0000_0000_0000u64.to_le_bytes());
+    assert_eq!(nb[8], 0xAB);
+}
+
+#[test]
 fn run_addsd_xmm_m64_sibd_three_plus_two() {
     // F2 0F 58 44 24 10 = addsd 0x10(%rsp), %xmm0。3.0+2.0=5.0。上位64は残す。seq 0x499253。
     // Ref: SPEC-X86-INTEL-SDM (v093).
