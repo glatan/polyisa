@@ -9676,6 +9676,26 @@ pub fn or_r8_m8_rip<B: Backend>(
     Ok(())
 }
 
+/// MOVSX r32,r16 reg-direct (0F BF)。16ビットを符号拡張する。32ビット書込みは上位を消す。
+pub fn movsx_r32_r16<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
+    use polyisa_sem::W16;
+    let src32 = read(b, src);
+    let v16: B::V<W16> = b.trunc::<W32, W16>(src32);
+    let v = b.sext::<W16, W32>(v16);
+    write(b, dst, v);
+    Ok(())
+}
+
+/// MOVSX r64,r16 reg-direct (0F BF, REX.W)。16ビットを符号拡張する。
+pub fn movsx_r64_r16<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
+    use polyisa_sem::W16;
+    let src32 = read(b, src);
+    let v16: B::V<W16> = b.trunc::<W32, W16>(src32);
+    let v = b.sext::<W16, W64>(v16);
+    write64(b, dst, v);
+    Ok(())
+}
+
 /// MOVZX r32,r16 reg-direct (0F B7)。16ビットを読んでゼロ拡張する.
 pub fn movzx_r32_r16<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
     use polyisa_sem::W16;

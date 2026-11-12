@@ -8359,6 +8359,14 @@ fn dispatch<B: Backend>(
             // 0F B7 /r mod=11 reg-direct。dst は reg、src は rm.
             sem::movzx_r32_r16(b, reg0f_as_gpr(), rm0f())
         }
+        Insn::MovsxR32R16 => {
+            // 0F BF /r mod=11。man 0x4d80c6 の movsx esi, si。
+            if rex_w {
+                sem::movsx_r64_r16(b, reg0f_as_gpr(), rm0f())
+            } else {
+                sem::movsx_r32_r16(b, reg0f_as_gpr(), rm0f())
+            }
+        }
         Insn::MovzxR32M16Sib => {
             // 0F B7 SIB mod=00 [base+index*scale]。no_index は [base].
             if sib0f_no_index() {
@@ -8994,6 +9002,7 @@ fn dispatch<B: Backend>(
             | Insn::MovzxR32M8Sibd
             | Insn::MovzxR32M8Sibd32
             | Insn::MovzxR32R8
+            | Insn::MovsxR32R16
             | Insn::ImulRRm
             | Insn::ImulRMemnd
             | Insn::ImulRMem8
@@ -9109,6 +9118,7 @@ fn dispatch<B: Backend>(
                             | Insn::MovsxR32M8Sibd32
                             | Insn::ImulRImmRip
                             | Insn::CmovbeMemnd
+                            | Insn::MovsxR32R16
                     ))
                 || (has66
                     && matches!(

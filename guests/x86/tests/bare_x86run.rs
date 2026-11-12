@@ -5738,6 +5738,27 @@ fn run_imul_r64_imm_sib() {
 }
 
 #[test]
+fn run_movsx_esi_si() {
+    // 0F BF F6 = movsx esi, si。0x8000 は 0xffff8000。上位 32 は消える。man 0x4d80c6。
+    // Ref: SPEC-X86-INTEL-SDM (v093).
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    polyisa_guest_x86::sem::write64(&mut env.backend, Gpr(6), 0x1111_2222_3333_8000);
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0x0F, 0xBF, 0xF6])
+        .unwrap();
+    env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 1);
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x1003 });
+    let rsi: u64 = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(6));
+    assert_eq!(rsi, 0xFFFF_8000);
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::eflags_ref()), 1);
+}
+
+#[test]
 fn run_div_dl() {
     // F6 F2 = div dl。AX=0x107、DL=5 なら商 0x34、剰余 3。上位とフラグと DL は残る。lzcat 0x48b6ef。
     // Ref: SPEC-X86-INTEL-SDM (v093).

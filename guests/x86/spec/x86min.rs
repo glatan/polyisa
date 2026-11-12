@@ -683,6 +683,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("movzx_r32_r8", "F1", "00001111 10110110 11......", "movzx r32, r/m8", "load"),
         // MOVZX r32,r16 reg-direct (0F B7 /r mod=11)。
         ("movzx_r32_r16", "F1", "00001111 10110111 11......", "movzx r32, r16", "load"),
+        // MOVSX r32,r16 reg-direct (0F BF /r mod=11)。man 0x4d80c6 の movsx esi, si。
+        ("movsx_r32_r16", "F1", "00001111 10111111 11......", "movsx r32, r16", "load"),
         // BT r32,imm8 (0F BA /4 ib reg-direct)。
         ("bt_r32_imm", "F1", "00001111 10111010 11100... ........", "bt r32, {imm}", "alu"),
         // BT m32,imm8 mod=00 [base] (0F BA /4)。SIB/RIP は取得長で分離するため固定不要.
