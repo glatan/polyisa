@@ -115,6 +115,7 @@
 - tgkill
 - time
 - umask
+- umount2
 - uname
 - unlink
 - unlinkat

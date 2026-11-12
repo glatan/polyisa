@@ -544,6 +544,7 @@ fn device_and_fs_fail_matches_host() {
         ("raidautorun", ["raidautorun", f].as_slice()),
         ("resume", ["resume", f].as_slice()),
         ("setkeycodes", ["setkeycodes", "0", "0"].as_slice()),
+        ("umount", ["umount", f].as_slice()),
     ] {
         let argv: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
         let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)

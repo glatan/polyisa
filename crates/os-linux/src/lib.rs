@@ -181,6 +181,7 @@ pub mod x86_64 {
     pub const SWAPON: u64 = 167;
     pub const SWAPOFF: u64 = 168;
     pub const PIVOT_ROOT: u64 = 155;
+    pub const UMOUNT2: u64 = 166;
     pub const SCHED_SETPARAM: u64 = 142;
     pub const SCHED_GETPARAM: u64 = 143;
     pub const SCHED_SETSCHEDULER: u64 = 144;
@@ -520,6 +521,7 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             x86_64::SWAPON => Some("swapon"),
             x86_64::SWAPOFF => Some("swapoff"),
             x86_64::PIVOT_ROOT => Some("pivot_root"),
+            x86_64::UMOUNT2 => Some("umount2"),
             x86_64::SCHED_SETPARAM => Some("sched_setparam"),
             x86_64::SCHED_GETPARAM => Some("sched_getparam"),
             x86_64::SCHED_SETSCHEDULER => Some("sched_setscheduler"),

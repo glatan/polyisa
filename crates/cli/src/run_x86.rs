@@ -10849,6 +10849,7 @@ const X86_64_SYSCALLS: &[(&str, SysFn)] = &[
     ("swapon", sys_swapon),
     ("swapoff", sys_swapoff),
     ("pivot_root", sys_pivot_root),
+    ("umount2", sys_umount2),
     ("uname", sys_uname),
     ("getuid", sys_getuid),
     ("geteuid", sys_geteuid),
@@ -11863,6 +11864,24 @@ fn sys_swapoff(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Tr
 
 fn sys_pivot_root(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     set64(env, Gpr(0), cx.neg(EPERM));
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_umount2(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // umount2(target, flags)。実アンマウントはせず、無い道は ENOENT、有る道は EPERM。
+    let addr = get64(env, cx.r_a);
+    let path = match guest_c_string(env, addr) {
+        Some(p) => p,
+        None => return Some(TrapOutcome::Unimplemented),
+    };
+    sys.ensure_cwd();
+    let host = join_guest_path(&sys.cwd, &path);
+    let err = if std::path::Path::new(&host).exists() {
+        EPERM
+    } else {
+        ENOENT
+    };
+    set64(env, Gpr(0), cx.neg(err));
     Some(TrapOutcome::Handled)
 }
 
