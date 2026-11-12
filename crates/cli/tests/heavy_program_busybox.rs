@@ -626,6 +626,8 @@ fn true_echo_uname_id_match() {
         ("klogd", ["klogd", "-c", "9"].as_slice()),
         // chat の expect-send 空対。標準出力は CR 1 バイト。
         ("chat", ["chat", "", ""].as_slice()),
+        // man -w はページのパスだけを出す（端末ページャ不要）。
+        ("man", ["man", "-w", "true"].as_slice()),
     ] {
         let argv: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
         let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)
