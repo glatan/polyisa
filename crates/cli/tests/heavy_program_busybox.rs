@@ -439,6 +439,7 @@ fn text_applets_match_host() {
         &["stat", "-c", "%s", f],
         &["du", "-b", f],
         &["fsck"],
+        &["ipcalc", "-n", "10.0.0.1/24"],
         &["printenv"],
         &["which", "true"],
         &["install", "-m", "644", f, installed_s],
@@ -554,6 +555,14 @@ fn file_ops_match_host() {
     pair(
         &["rm", guest_file.to_str().expect("utf-8")],
         &["rm", host_file.to_str().expect("utf-8")],
+    );
+    assert!(!guest_file.exists());
+    assert!(!host_file.exists());
+    std::fs::write(&guest_file, b"ab\n").unwrap();
+    std::fs::write(&host_file, b"ab\n").unwrap();
+    pair(
+        &["unlink", guest_file.to_str().expect("utf-8")],
+        &["unlink", host_file.to_str().expect("utf-8")],
     );
     assert!(!guest_file.exists());
     assert!(!host_file.exists());
