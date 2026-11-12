@@ -371,6 +371,24 @@ fn text_applets_match_host() {
     )
     .unwrap();
     let lz_s = lz.to_str().expect("utf-8");
+    let tar_path = dir.join("f.tar");
+    let tar_ok = Command::new("tar")
+        .current_dir(&dir)
+        .args(["-cf", "f.tar", "f"])
+        .status()
+        .expect("host tar")
+        .success();
+    assert!(tar_ok);
+    let tar_s = tar_path.to_str().expect("utf-8");
+    let ar_path = dir.join("f.a");
+    let ar_ok = Command::new("ar")
+        .current_dir(&dir)
+        .args(["cr", "f.a", "f"])
+        .status()
+        .expect("host ar")
+        .success();
+    assert!(ar_ok);
+    let ar_s = ar_path.to_str().expect("utf-8");
     let copied_s = copied.to_str().expect("utf-8");
     let touched_s = touched.to_str().expect("utf-8");
     let link = dir.join("link");
@@ -472,6 +490,8 @@ fn text_applets_match_host() {
         &["unxz", "-c", xz_s],
         &["lzcat", lz_s],
         &["unlzma", "-c", lz_s],
+        &["tar", "-tf", tar_s],
+        &["ar", "t", ar_s],
         &["mkpasswd", "secret", "sa"],
         &["kill", "-l"],
         &["pidof", "nosuchname123"],
