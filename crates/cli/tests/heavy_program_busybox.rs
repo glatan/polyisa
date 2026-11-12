@@ -422,6 +422,11 @@ fn true_echo_uname_id_match() {
         ("deallocvt", ["deallocvt", "1"].as_slice()),
         ("openvt", ["openvt", "true"].as_slice()),
         ("renice", ["renice", "0", "1"].as_slice()),
+        ("cttyhack", ["cttyhack"].as_slice()),
+        ("login", ["login", "-h", "x"].as_slice()),
+        ("lpd", ["lpd"].as_slice()),
+        ("sendmail", ["sendmail"].as_slice()),
+        ("popmaildir", ["popmaildir"].as_slice()),
     ] {
         let argv: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
         let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)
@@ -555,6 +560,7 @@ fn device_and_fs_fail_matches_host() {
         ("umount", ["umount", f].as_slice()),
         ("flock", ["flock", "-u", f].as_slice()),
         ("flash_lock", ["flash_lock", f, "0", "1"].as_slice()),
+        ("microcom", ["microcom", f].as_slice()),
     ] {
         let argv: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
         let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)
