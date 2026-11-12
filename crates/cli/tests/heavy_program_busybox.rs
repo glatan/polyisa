@@ -2488,3 +2488,15 @@ fn makemime_matches_fixed() {
     );
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn ts_matches_fixed() {
+    // 時刻は CLOCK_REALTIME の固定値 (01:00:00)。ホストとは比べない。
+    let path = busybox();
+    let path = path.to_str().expect("utf-8 path");
+    let argv = ["ts".to_string(), "%H:%M:%S".to_string()];
+    let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured_in(path, &argv, b"hello\n")
+        .unwrap_or_else(|e| panic!("ts: {e}"));
+    assert_eq!(code, 0);
+    assert_eq!(out.as_slice(), b"01:00:00 hello\n");
+}
