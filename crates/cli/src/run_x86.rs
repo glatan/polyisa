@@ -10068,6 +10068,10 @@ pub struct CliLinux {
     /// Some のとき、fd 1 の出力をここへ溜める。None のときはホストの stdout。
     /// fork した子と親で同じバッファを使う。
     capture_out: Option<std::rc::Rc<std::cell::RefCell<Vec<u8>>>>,
+    /// dup2(2,1) 後。fd 1 への write を stderr に流す（time の集計など）。
+    stdout_is_stderr: bool,
+    /// dup2(1,2) 後。fd 2 への write を fd 1（capture）に流す。
+    stderr_is_stdout: bool,
     /// 真の stdin へ供給するバイト。空なら空読み（端末は奪わない）。
     stdin_buf: Vec<u8>,
     /// `stdin_buf` の次に読む位置。
@@ -10441,11 +10445,23 @@ impl CliLinux {
 
     /// fd 1 へ書く。capture_out があるときはそこへ溜める。
     fn write_fd1(&mut self, bytes: &[u8]) -> usize {
+        if self.stdout_is_stderr {
+            return std::io::Write::write(&mut std::io::stderr(), bytes).unwrap_or(0);
+        }
         if let Some(buf) = self.capture_out.as_ref() {
             buf.borrow_mut().extend_from_slice(bytes);
             return bytes.len();
         }
         std::io::Write::write(&mut std::io::stdout(), bytes).unwrap_or(0)
+    }
+
+    /// 標準 fd 1/2 への write。dup2 による付け替えを反映する。
+    fn write_stdio(&mut self, fd: u32, bytes: &[u8]) -> usize {
+        match fd {
+            1 => self.write_fd1(bytes),
+            2 if self.stderr_is_stdout => self.write_fd1(bytes),
+            _ => std::io::Write::write(&mut std::io::stderr(), bytes).unwrap_or(0),
+        }
     }
 
     /// 開ファイルを複製し、覚えてあるパスも返す。
@@ -10580,6 +10596,8 @@ impl CliLinux {
             fd_paths: self.fd_paths.clone(),
             std_paths: self.std_paths.clone(),
             capture_out: self.capture_out.clone(),
+            stdout_is_stderr: self.stdout_is_stderr,
+            stderr_is_stdout: self.stderr_is_stdout,
             stdin_buf: self.stdin_buf.clone(),
             stdin_pos: self.stdin_pos,
             procs: std::rc::Rc::clone(&self.procs),
@@ -11546,10 +11564,7 @@ fn sys_write(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapO
             {
                 return Some(TrapOutcome::Unimplemented);
             }
-            let n = match fd {
-                1 => sys.write_fd1(&chunk[..take]),
-                _ => std::io::Write::write(&mut std::io::stderr(), &chunk[..take]).unwrap_or(0),
-            };
+            let n = sys.write_stdio(fd, &chunk[..take]);
             done += n as u64;
             left -= n as u64;
             if n < take {
@@ -11769,10 +11784,7 @@ fn sys_writev(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Trap
             {
                 return Some(TrapOutcome::Unimplemented);
             }
-            let n = match fd {
-                1 => sys.write_fd1(&chunk[..take]),
-                _ => std::io::Write::write(&mut std::io::stderr(), &chunk[..take]).unwrap_or(0),
-            };
+            let n = sys.write_stdio(fd, &chunk[..take]);
             done += n as u64;
             left -= n as u64;
             off += n as u64;
@@ -14077,6 +14089,14 @@ fn sys_dup2(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOu
         return Some(TrapOutcome::Handled);
     }
     if (oldfd == 1 || oldfd == 2) && (newfd == 1 || newfd == 2) {
+        // time は dup2(2,1) のあと printf で集計を出す。--list は dup2(1,2)。
+        if oldfd == 2 && newfd == 1 {
+            sys.stdout_is_stderr = true;
+            sys.stderr_is_stdout = false;
+        } else if oldfd == 1 && newfd == 2 {
+            sys.stderr_is_stdout = true;
+            sys.stdout_is_stderr = false;
+        }
         set64(env, Gpr(0), newfd as u64);
         return Some(TrapOutcome::Handled);
     }
@@ -14123,6 +14143,13 @@ fn sys_dup3(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOu
         return Some(TrapOutcome::Handled);
     }
     if (oldfd == 1 || oldfd == 2) && (newfd == 1 || newfd == 2) {
+        if oldfd == 2 && newfd == 1 {
+            sys.stdout_is_stderr = true;
+            sys.stderr_is_stdout = false;
+        } else if oldfd == 1 && newfd == 2 {
+            sys.stderr_is_stdout = true;
+            sys.stdout_is_stderr = false;
+        }
         set64(env, Gpr(0), newfd as u64);
         return Some(TrapOutcome::Handled);
     }

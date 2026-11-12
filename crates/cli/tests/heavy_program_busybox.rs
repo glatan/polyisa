@@ -628,6 +628,8 @@ fn true_echo_uname_id_match() {
         ("chat", ["chat", "", ""].as_slice()),
         // man -w はページのパスだけを出す（端末ページャ不要）。
         ("man", ["man", "-w", "true"].as_slice()),
+        // time は dup2(2,1) 後に集計を stderr へ出す。標準出力は子の出力のみ。
+        ("time", ["time", path, "echo", "z"].as_slice()),
     ] {
         let argv: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
         let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)
