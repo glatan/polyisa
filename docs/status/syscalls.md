@@ -80,6 +80,7 @@
 - readlink
 - readlinkat
 - readv
+- reboot
 - rename
 - rmdir
 - rseq

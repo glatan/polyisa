@@ -309,6 +309,35 @@ fn true_echo_uname_id_match() {
     assert_eq!(code, host.status.code().unwrap_or(1) as u64);
     assert_eq!(out.as_slice(), host.stdout.as_slice());
     assert!(out.starts_with(b"/dev/loop"));
+    // reboot は EPERM。-f で直接 reboot を呼ぶ。標準出力は空、終了コードは 1。
+    for (name, args) in [
+        ("halt -f", ["halt", "-f"].as_slice()),
+        ("poweroff -f", ["poweroff", "-f"].as_slice()),
+        ("reboot -f", ["reboot", "-f"].as_slice()),
+    ] {
+        let argv: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
+        let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        let host = Command::new(path)
+            .args(args)
+            .env_clear()
+            .output()
+            .unwrap_or_else(|e| panic!("host {name}: {e}"));
+        assert_eq!(code, host.status.code().unwrap_or(1) as u64);
+        assert_eq!(out.as_slice(), host.stdout.as_slice());
+        assert_eq!(code, 1);
+        assert!(out.is_empty());
+    }
+    // uptime は sysinfo と CLOCK_REALTIME の固定値。ホストとは比べない。
+    let uptime = ["uptime"];
+    let argv: Vec<String> = uptime.iter().map(|s| (*s).to_string()).collect();
+    let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)
+        .unwrap_or_else(|e| panic!("uptime: {e}"));
+    assert_eq!(code, 0);
+    assert_eq!(
+        out.as_slice(),
+        b" 01:00:00 up  1:00,  0 users,  load average: 0.00, 0.00, 0.00\n"
+    );
 }
 
 #[test]

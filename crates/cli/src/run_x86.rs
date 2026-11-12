@@ -10841,6 +10841,7 @@ const X86_64_SYSCALLS: &[(&str, SysFn)] = &[
     ("getpid", sys_getpid),
     ("getppid", sys_getppid),
     ("sysinfo", sys_sysinfo),
+    ("reboot", sys_reboot),
     ("uname", sys_uname),
     ("getuid", sys_getuid),
     ("geteuid", sys_geteuid),
@@ -11819,6 +11820,12 @@ fn sys_sysinfo(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Tr
     Some(TrapOutcome::Handled)
 }
 
+fn sys_reboot(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // reboot。権限がなく常に EPERM。halt / poweroff / reboot アプレットが呼ぶ。
+    set64(env, Gpr(0), cx.neg(EPERM));
+    Some(TrapOutcome::Handled)
+}
+
 fn sys_setpgid(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     let pid = get64(env, cx.r_a) as i64;
     let pgid = get64(env, cx.r_b) as i64;
@@ -12192,11 +12199,14 @@ fn sys_kill(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOu
     const SIGKILL: i64 = 9;
     let pid = get64(env, cx.r_a) as i64;
     let sig = get64(env, cx.r_b) as i64;
+    // SIGTERM 等は配送しない。halt が一斉送信しても単一ゲストでは相手がいない。
     if sig != SIGKILL {
-        return Some(TrapOutcome::Unimplemented);
+        set64(env, Gpr(0), 0);
+        return Some(TrapOutcome::Handled);
     }
     if pid <= 0 {
-        set64(env, Gpr(0), cx.neg(EINVAL));
+        // kill(-1, SIGKILL) も相手なしで成功にする。
+        set64(env, Gpr(0), 0);
         return Some(TrapOutcome::Handled);
     }
     let me = sys.ensure_self();
@@ -13179,16 +13189,24 @@ fn sys_clock_nanosleep(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> O
 }
 
 fn sys_clock_gettime(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // clock_gettime(clk_id, tp)。ホスト時刻を書いて 0 を返す.
-    // 0 固定では時刻待ちループが回り続けるため、実時刻を進める.
+    // clock_gettime(clk_id, tp)。
+    // REALTIME は uptime の表示を安定させるため 2000-01-01 01:00:00 UTC 固定。
+    // MONOTONIC は起動からの経過で進め、時刻待ちループが止まらないようにする.
+    let clk = get64(env, cx.r_a);
     let tp = get64(env, cx.r_b);
     if tp != 0 {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default();
+        let (sec, nsec) = if clk == 0 {
+            // CLOCK_REALTIME
+            (946_688_400i64, 0i64)
+        } else {
+            // CLOCK_MONOTONIC ほか。プロセス起動からの経過。
+            static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+            let elapsed = START.get_or_init(std::time::Instant::now).elapsed();
+            (elapsed.as_secs() as i64, elapsed.subsec_nanos() as i64)
+        };
         let mut both = [0u8; 16];
-        both[..8].copy_from_slice(&(now.as_secs() as i64).to_le_bytes());
-        both[8..].copy_from_slice(&(now.subsec_nanos() as i64).to_le_bytes());
+        both[..8].copy_from_slice(&sec.to_le_bytes());
+        both[8..].copy_from_slice(&nsec.to_le_bytes());
         if env
             .backend
             .mem
@@ -16643,12 +16661,12 @@ mod tests {
     }
 
     #[test]
-    fn clock_gettime_writes_zeros() {
+    fn clock_gettime_realtime_is_fixed() {
         use polyisa_os_linux::x86_64 as abi;
         let mut sys = CliLinux::x86_64();
         let mut env = bare();
         set64(&mut env, Gpr(0), abi::CLOCK_GETTIME);
-        set64(&mut env, Gpr(7), 1);
+        set64(&mut env, Gpr(7), 0);
         set64(&mut env, Gpr(6), 0x100);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), 0);
@@ -16657,9 +16675,21 @@ mod tests {
             .mem
             .read(VirtAddr(0x100), &mut back, data_access())
             .unwrap();
-        // ホスト時刻が書かれる (0 固定ではない)。
-        assert_ne!(back, [0u8; 16]);
-        assert_ne!(back, [0xFFu8; 16]);
+        assert_eq!(
+            i64::from_le_bytes(back[0..8].try_into().unwrap()),
+            946_688_400
+        );
+        assert_eq!(i64::from_le_bytes(back[8..16].try_into().unwrap()), 0);
+    }
+
+    #[test]
+    fn reboot_returns_eperm() {
+        use polyisa_os_linux::x86_64 as abi;
+        let mut sys = CliLinux::x86_64();
+        let mut env = bare();
+        set64(&mut env, Gpr(0), abi::REBOOT);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EPERM));
     }
 
     #[test]
