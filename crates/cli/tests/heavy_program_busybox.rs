@@ -442,6 +442,16 @@ fn true_echo_uname_id_match() {
         ("ping", ["ping", "-c1", "127.0.0.1"].as_slice()),
         ("ping6", ["ping6", "-c1", "::1"].as_slice()),
         ("telnet", ["telnet", "127.0.0.1"].as_slice()),
+        ("conspy", ["conspy"].as_slice()),
+        ("mim", ["mim"].as_slice()),
+        ("wget", ["wget", "http://127.0.0.1/"].as_slice()),
+        ("rx", ["rx", "-h"].as_slice()),
+        ("[[", ["[["].as_slice()),
+        ("arp", ["arp", "-h"].as_slice()),
+        ("ifconfig", ["ifconfig", "-h"].as_slice()),
+        ("tc", ["tc", "-h"].as_slice()),
+        ("dpkg", ["dpkg", "-l"].as_slice()),
+        ("hexedit", ["hexedit", "/tmp"].as_slice()),
     ] {
         let argv: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
         let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)
