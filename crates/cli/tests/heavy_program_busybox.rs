@@ -343,6 +343,39 @@ fn true_echo_uname_id_match() {
         )
         .as_bytes()
     );
+    // ps / pstree / top は合成 /proc の固定値。ホストとは比べない。
+    let ps = ["ps"];
+    let argv: Vec<String> = ps.iter().map(|s| (*s).to_string()).collect();
+    let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)
+        .unwrap_or_else(|e| panic!("ps: {e}"));
+    assert_eq!(code, 0);
+    assert_eq!(
+        out.as_slice(),
+        b"PID   USER     TIME  COMMAND\n    1 root      0:00 /sbin/init\n"
+    );
+    let pstree = ["pstree"];
+    let argv: Vec<String> = pstree.iter().map(|s| (*s).to_string()).collect();
+    let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)
+        .unwrap_or_else(|e| panic!("pstree: {e}"));
+    assert_eq!(code, 0);
+    assert_eq!(out.as_slice(), b"init\n");
+    let top = ["top", "-bn1"];
+    let argv: Vec<String> = top.iter().map(|s| (*s).to_string()).collect();
+    let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)
+        .unwrap_or_else(|e| panic!("top: {e}"));
+    assert_eq!(code, 0);
+    assert_eq!(
+        out.as_slice(),
+        concat!(
+            "Mem: 524288K used, 524288K free, 0K shrd, 0K buff, 0K cached\n",
+            "CPU:   0% usr   0% sys   0% nic   0% idle   0% io   0% irq   0% sirq\n",
+            "Load average: 0.00 0.00 0.00 1/1 1\n",
+            "  PID  PPID USER     STAT   VSZ %VSZ CPU %CPU COMMAND\n",
+            "    1     0 root     SW       0   0%   0   0% /sbin/init\n",
+            "\n",
+        )
+        .as_bytes()
+    );
     // 偽の比較は終了コード 1、標準出力は空。
     for (name, args) in [
         ("[", ["[", "1", "-eq", "2", "]"].as_slice()),
@@ -447,8 +480,8 @@ fn true_echo_uname_id_match() {
         ("kbdrate", ["kbdrate"].as_slice()),
         ("pipesz", ["pipesz"].as_slice()),
         ("lspci", ["lspci"].as_slice()),
-        ("pmap", ["pmap", "1"].as_slice()),
-        ("pwdx", ["pwdx", "1"].as_slice()),
+        ("pmap", ["pmap", "999999"].as_slice()),
+        ("pwdx", ["pwdx", "999999"].as_slice()),
         ("add-shell", ["add-shell"].as_slice()),
         ("depmod", ["depmod"].as_slice()),
         ("dumpleases", ["dumpleases"].as_slice()),

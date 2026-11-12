@@ -11300,6 +11300,55 @@ fn open_at_cwd(
     if path == "/proc/diskstats" {
         return open_synth_diskstats(sys, env, cx);
     }
+    if path == "/proc/loadavg" {
+        return open_synth_bytes(sys, env, cx, "loadavg", b"0.00 0.00 0.00 1/1 1\n");
+    }
+    // ps / top / pstree 用。ホストの PID 一覧は見せず、pid 1 だけを固定する。
+    if path == "/proc/1/stat"
+        || path == "/proc/self/stat"
+        || path == "/proc/1/task/1/stat"
+        || path == "/proc/self/task/1/stat"
+    {
+        return open_synth_bytes(
+            sys,
+            env,
+            cx,
+            "pidstat",
+            b"1 (init) S 0 1 1 0 -1 4194560 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n",
+        );
+    }
+    if path == "/proc/1/cmdline" || path == "/proc/self/cmdline" {
+        return open_synth_bytes(sys, env, cx, "pidcmd", b"/sbin/init\0");
+    }
+    if path == "/proc/1/status" || path == "/proc/self/status" {
+        return open_synth_bytes(
+            sys,
+            env,
+            cx,
+            "pidstatus",
+            b"\
+Name:\tinit
+Uid:\t0\t0\t0\t0
+Gid:\t0\t0\t0\t0
+PPid:\t0
+Threads:\t1
+Cpus_allowed:\t1
+Cpus_allowed_list:\t0
+",
+        );
+    }
+    if path == "/proc/1/comm" || path == "/proc/self/comm" {
+        return open_synth_bytes(sys, env, cx, "pidcomm", b"init\n");
+    }
+    if path == "/proc/1/smaps"
+        || path == "/proc/self/smaps"
+        || path == "/proc/1/maps"
+        || path == "/proc/self/maps"
+    {
+        // pmap は maps が無いとき見出しだけ出す（ホストの pid 1 も maps を読めない環境がある）。
+        set64(env, Gpr(0), cx.neg(ENOENT));
+        return Some(TrapOutcome::Handled);
+    }
     if path == "/etc/hosts" {
         return open_synth_bytes(
             sys,
@@ -13012,28 +13061,44 @@ fn sys_getdents64(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<
     };
     // "." と ".." を先頭に置く（カーネルと同様）。
     let mut names: Vec<(Vec<u8>, u8)> = vec![(b".".to_vec(), 4), (b"..".to_vec(), 4)];
-    for ent in rd.flatten() {
-        let name = ent
-            .file_name()
-            .into_string()
-            .unwrap_or_default()
-            .into_bytes();
-        if name.is_empty() {
-            continue;
+    let proc_root = dir_path == std::path::Path::new("/proc");
+    let proc_one_task = dir_path == std::path::Path::new("/proc/1/task")
+        || dir_path == std::path::Path::new("/proc/self/task");
+    if proc_root {
+        // ホストの PID は隠す。ps/top の期待値を固定するため pid 1 と self だけ返す。
+        names.push((b"1".to_vec(), 4));
+        names.push((b"self".to_vec(), 10));
+        names.push((b"diskstats".to_vec(), 8));
+        names.push((b"loadavg".to_vec(), 8));
+        names.push((b"meminfo".to_vec(), 8));
+        names.push((b"stat".to_vec(), 8));
+        names.push((b"uptime".to_vec(), 8));
+    } else if proc_one_task {
+        names.push((b"1".to_vec(), 4));
+    } else {
+        for ent in rd.flatten() {
+            let name = ent
+                .file_name()
+                .into_string()
+                .unwrap_or_default()
+                .into_bytes();
+            if name.is_empty() {
+                continue;
+            }
+            let ty = ent
+                .file_type()
+                .map(|t| {
+                    if t.is_dir() {
+                        4u8
+                    } else if t.is_symlink() {
+                        10u8
+                    } else {
+                        8u8
+                    }
+                })
+                .unwrap_or(0);
+            names.push((name, ty));
         }
-        let ty = ent
-            .file_type()
-            .map(|t| {
-                if t.is_dir() {
-                    4u8
-                } else if t.is_symlink() {
-                    10u8
-                } else {
-                    8u8
-                }
-            })
-            .unwrap_or(0);
-        names.push((name, ty));
     }
     // 名前順に並べ替えて決定的にする（カーネルの順序は不定だが、ls は自前で整列する）。
     names[2..].sort_by(|a, b| a.0.cmp(&b.0));
