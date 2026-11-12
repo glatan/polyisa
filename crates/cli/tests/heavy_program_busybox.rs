@@ -514,6 +514,17 @@ fn device_and_fs_fail_matches_host() {
         ("i2cdump", ["i2cdump", "0", "0x50"].as_slice()),
         ("i2cget", ["i2cget", "0", "0x50"].as_slice()),
         ("i2cset", ["i2cset", "0", "0x50", "0", "0"].as_slice()),
+        ("mke2fs", ["mke2fs", f].as_slice()),
+        ("mkfs.ext2", ["mkfs.ext2", f].as_slice()),
+        ("mktemp", ["mktemp", f].as_slice()),
+        ("mpstat", ["mpstat", f].as_slice()),
+        ("su", ["su", f].as_slice()),
+        ("ipaddr", ["ipaddr", f].as_slice()),
+        ("iplink", ["iplink", f].as_slice()),
+        ("ipneigh", ["ipneigh", f].as_slice()),
+        ("iproute", ["iproute", f].as_slice()),
+        ("iprule", ["iprule", f].as_slice()),
+        ("iptunnel", ["iptunnel", f].as_slice()),
     ] {
         let argv: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
         let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)
