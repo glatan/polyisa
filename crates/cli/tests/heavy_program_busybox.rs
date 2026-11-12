@@ -428,6 +428,7 @@ fn text_applets_match_host() {
         &["ls", f],
         &["more", f],
         &["xxd", f],
+        &["uuencode", f],
         &["cryptpw", "secret", "sa"],
         &["pgrep", "nosuchname123"],
         &["gunzip", "-c", gz_s],
