@@ -431,6 +431,31 @@ fn chgrp_unknown_group_matches_host() {
 }
 
 #[test]
+fn chown_unknown_user_matches_host() {
+    let path = busybox();
+    let path = path.to_str().expect("utf-8 path");
+    let dir = std::env::temp_dir().join(format!("polyisa-chown-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir(&dir).unwrap();
+    let f = dir.join("f");
+    std::fs::write(&f, b"x").unwrap();
+    let args = ["chown", "nosuchuser", f.to_str().expect("utf-8")];
+    let argv: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
+    let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)
+        .unwrap_or_else(|e| panic!("chown: {e}"));
+    let host = Command::new(path)
+        .args(args)
+        .env_clear()
+        .output()
+        .expect("host chown");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(code, host.status.code().unwrap_or(1) as u64);
+    assert_eq!(out.as_slice(), host.stdout.as_slice());
+    assert_eq!(code, 1);
+    assert!(out.is_empty());
+}
+
+#[test]
 fn ls_one_file_matches_host() {
     let path = busybox();
     let path = path.to_str().expect("utf-8 path");
