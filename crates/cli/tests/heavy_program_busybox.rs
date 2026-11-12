@@ -726,3 +726,51 @@ fn file_ops_match_host() {
     );
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn dos2unix_matches_host() {
+    // 標準出力は空で、変換したファイルが一致する。別の木へ書く。
+    let path = busybox();
+    let path = path.to_str().expect("utf-8 path");
+    let root = std::env::temp_dir().join(format!("polyisa-dos2unix-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let guest_dir = root.join("guest");
+    let host_dir = root.join("host");
+    std::fs::create_dir_all(&guest_dir).unwrap();
+    std::fs::create_dir_all(&host_dir).unwrap();
+    let guest_crlf = guest_dir.join("crlf");
+    let host_crlf = host_dir.join("crlf");
+    std::fs::write(&guest_crlf, b"ab\r\ncd\r\n").unwrap();
+    std::fs::write(&host_crlf, b"ab\r\ncd\r\n").unwrap();
+    let guest_lf = guest_dir.join("lf");
+    let host_lf = host_dir.join("lf");
+    std::fs::write(&guest_lf, b"ab\ncd\n").unwrap();
+    std::fs::write(&host_lf, b"ab\ncd\n").unwrap();
+    let guest_args = ["dos2unix", guest_crlf.to_str().expect("utf-8")];
+    let argv: Vec<String> = guest_args.iter().map(|s| (*s).to_string()).collect();
+    let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)
+        .unwrap_or_else(|e| panic!("dos2unix: {e}"));
+    let host = Command::new(path)
+        .args(["dos2unix", host_crlf.to_str().expect("utf-8")])
+        .env_clear()
+        .output()
+        .expect("host dos2unix");
+    assert_eq!(code, host.status.code().unwrap_or(1) as u64);
+    assert_eq!(out.as_slice(), host.stdout.as_slice());
+    assert_eq!(std::fs::read(&guest_crlf).unwrap(), b"ab\ncd\n");
+    assert_eq!(std::fs::read(&host_crlf).unwrap(), b"ab\ncd\n");
+    let guest_args = ["unix2dos", guest_lf.to_str().expect("utf-8")];
+    let argv: Vec<String> = guest_args.iter().map(|s| (*s).to_string()).collect();
+    let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)
+        .unwrap_or_else(|e| panic!("unix2dos: {e}"));
+    let host = Command::new(path)
+        .args(["unix2dos", host_lf.to_str().expect("utf-8")])
+        .env_clear()
+        .output()
+        .expect("host unix2dos");
+    assert_eq!(code, host.status.code().unwrap_or(1) as u64);
+    assert_eq!(out.as_slice(), host.stdout.as_slice());
+    assert_eq!(std::fs::read(&guest_lf).unwrap(), b"ab\r\ncd\r\n");
+    assert_eq!(std::fs::read(&host_lf).unwrap(), b"ab\r\ncd\r\n");
+    let _ = std::fs::remove_dir_all(&root);
+}

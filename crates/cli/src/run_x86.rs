@@ -10951,9 +10951,106 @@ fn sys_write(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapO
     Some(TrapOutcome::Handled)
 }
 
+fn writev_opened(
+    sys: &mut CliLinux,
+    env: &mut BareEnv,
+    cx: &SysCtx,
+    fd: u32,
+    iov: u64,
+    iovcnt: u64,
+) -> Option<TrapOutcome> {
+    // 開いたファイルへの writev。dos2unix は一時ファイルへ stdio の writev で書く。
+    const IOV_MAX: u64 = 1024;
+    if sys.file_ref(fd).is_none() {
+        set64(env, Gpr(0), cx.neg(EBADF));
+        return Some(TrapOutcome::Handled);
+    }
+    if iovcnt > IOV_MAX {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    let mut done = 0u64;
+    let mut chunk = vec![0u8; IO_CHUNK];
+    for idx in 0..iovcnt {
+        let (base, len) = if cx.is64 {
+            let mut ent = [0u8; 16];
+            if env
+                .backend
+                .mem
+                .read(VirtAddr(iov + idx * 16), &mut ent, data_access())
+                .is_err()
+            {
+                return Some(TrapOutcome::Unimplemented);
+            }
+            (
+                u64::from_le_bytes(ent[..8].try_into().unwrap()),
+                u64::from_le_bytes(ent[8..].try_into().unwrap()),
+            )
+        } else {
+            let mut ent = [0u8; 8];
+            if env
+                .backend
+                .mem
+                .read(VirtAddr(iov + idx * 8), &mut ent, data_access())
+                .is_err()
+            {
+                return Some(TrapOutcome::Unimplemented);
+            }
+            (
+                u64::from(u32::from_le_bytes(ent[..4].try_into().unwrap())),
+                u64::from(u32::from_le_bytes(ent[4..].try_into().unwrap())),
+            )
+        };
+        let mut left = len;
+        let mut off = 0u64;
+        while left > 0 {
+            let take = left.min(IO_CHUNK as u64) as usize;
+            if env
+                .backend
+                .mem
+                .read(VirtAddr(base + off), &mut chunk[..take], data_access())
+                .is_err()
+            {
+                return Some(TrapOutcome::Unimplemented);
+            }
+            let file = sys.file_mut(fd).expect("opened fd");
+            match std::io::Write::write(file, &chunk[..take]) {
+                Ok(0) => {
+                    set64(env, Gpr(0), done);
+                    return Some(TrapOutcome::Handled);
+                }
+                Ok(n) => {
+                    done += n as u64;
+                    left -= n as u64;
+                    off += n as u64;
+                    if n < take {
+                        set64(env, Gpr(0), done);
+                        return Some(TrapOutcome::Handled);
+                    }
+                }
+                Err(e) => {
+                    if done == 0 {
+                        let no = match e.raw_os_error() {
+                            Some(9) => EBADF,
+                            Some(13) => EACCES,
+                            _ => EINVAL,
+                        };
+                        set64(env, Gpr(0), cx.neg(no));
+                    } else {
+                        set64(env, Gpr(0), done);
+                    }
+                    return Some(TrapOutcome::Handled);
+                }
+            }
+        }
+    }
+    set64(env, Gpr(0), done);
+    Some(TrapOutcome::Handled)
+}
+
 fn sys_writev(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     // writev/readv (x86-64: 20/19, i386: 146/145)。iovec 配列を辿って転送する.
-    // fd 1/2 (writev) と opened fd/stdin (readv) のみ受け付ける.
+    // fd 1/2 は標準出力へ、開いたファイルはホストのファイルへ書く。
     let fd = get64(env, cx.r_a) as u32;
     let iov = get64(env, cx.r_b);
     let iovcnt = get64(env, cx.r_c);
@@ -10963,8 +11060,7 @@ fn sys_writev(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Trap
         return Some(TrapOutcome::Handled);
     }
     if fd != 1 && fd != 2 {
-        set64(env, Gpr(0), cx.neg(EBADF));
-        return Some(TrapOutcome::Handled);
+        return writev_opened(sys, env, cx, fd, iov, iovcnt);
     }
     const IOV_MAX: u64 = 1024;
     if iovcnt > IOV_MAX {
@@ -13255,6 +13351,40 @@ mod tests {
         set64(&mut env, Gpr(2), 2);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EBADF));
+    }
+
+    #[test]
+    fn writev_opened_fd_writes_file() {
+        use polyisa_os_linux::x86_64 as abi;
+        let mut sys = CliLinux::x86_64();
+        let mut env = bare();
+        let path = std::env::temp_dir().join(format!("polyisa-writev-{}", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)
+            .unwrap();
+        let fd = sys.alloc_fd(file);
+        env.backend.mem.write(VirtAddr(0x100), b"hi").unwrap();
+        env.backend.mem.write(VirtAddr(0x110), b"!").unwrap();
+        let mut iov = [0u8; 32];
+        iov[..8].copy_from_slice(&0x100u64.to_le_bytes());
+        iov[8..16].copy_from_slice(&2u64.to_le_bytes());
+        iov[16..24].copy_from_slice(&0x110u64.to_le_bytes());
+        iov[24..32].copy_from_slice(&1u64.to_le_bytes());
+        env.backend.mem.write(VirtAddr(0x200), &iov).unwrap();
+        set64(&mut env, Gpr(0), abi::WRITEV);
+        set64(&mut env, Gpr(7), u64::from(fd));
+        set64(&mut env, Gpr(6), 0x200);
+        set64(&mut env, Gpr(2), 2);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 3);
+        drop(sys);
+        assert_eq!(std::fs::read(&path).unwrap(), b"hi!");
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
