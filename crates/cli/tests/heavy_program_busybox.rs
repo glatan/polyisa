@@ -587,6 +587,8 @@ fn true_echo_uname_id_match() {
         ),
         ("ubiattach", ["ubiattach", "/no"].as_slice()),
         ("ubidetach", ["ubidetach", "/no"].as_slice()),
+        // tty: 寸法指定の使用形（標準出力は改行のみ）。
+        ("ttysize", ["ttysize", "80", "24"].as_slice()),
     ] {
         let argv: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
         let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)
