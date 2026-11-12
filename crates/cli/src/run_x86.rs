@@ -9782,6 +9782,8 @@ pub struct CliLinux {
     std_closed: [bool; 3],
     /// ファイル作成マスク。umask で更新する。初期値は 022.
     umask: u32,
+    /// personality。初期値は PER_LINUX (0)。実行形式は変えない。
+    personality: u64,
     is64: bool,
     /// プログラムブレーク（ヒープ末尾）。0 は未初期化。
     /// `run_image_x86_64` がロード後に像末尾へ進める。
@@ -10305,6 +10307,7 @@ impl CliLinux {
             std_files: std::array::from_fn(|i| clone_file(&self.std_files[i])),
             std_closed: self.std_closed,
             umask: self.umask,
+            personality: self.personality,
             is64: self.is64,
             heap_end: self.heap_end,
             fs_base: self.fs_base,
@@ -10692,6 +10695,7 @@ const X86_64_SYSCALLS: &[(&str, SysFn)] = &[
     ("getpgid", sys_getpgid),
     ("getpriority", sys_getpriority),
     ("setpriority", sys_setpriority),
+    ("personality", sys_personality),
     ("sched_setparam", sys_sched_setparam),
     ("sched_getparam", sys_sched_getparam),
     ("sched_setscheduler", sys_sched_setscheduler),
@@ -11661,6 +11665,18 @@ fn sys_setpriority(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Optio
         return Some(TrapOutcome::Handled);
     }
     set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_personality(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // personality(persona)。0xffffffff は現在値を返すだけ。実行形式は変えない。
+    // Ref: SRC-LINUX (7.3).
+    let persona = get64(env, cx.r_a);
+    let old = sys.personality;
+    if persona != 0xffff_ffff && persona != u64::MAX {
+        sys.personality = persona;
+    }
+    set64(env, Gpr(0), old);
     Some(TrapOutcome::Handled)
 }
 
@@ -15120,6 +15136,21 @@ mod tests {
         set64(&mut env, Gpr(2), 0x200);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), 0);
+    }
+
+    #[test]
+    fn personality_returns_previous() {
+        use polyisa_os_linux::x86_64 as abi;
+        let mut sys = CliLinux::x86_64();
+        let mut env = bare();
+        set64(&mut env, Gpr(0), abi::PERSONALITY);
+        set64(&mut env, Gpr(7), 8);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        set64(&mut env, Gpr(0), abi::PERSONALITY);
+        set64(&mut env, Gpr(7), 0xffff_ffff);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 8);
     }
 
     #[test]

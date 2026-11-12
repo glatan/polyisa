@@ -65,6 +65,7 @@
 - newfstatat
 - open
 - openat
+- personality
 - pipe
 - pipe2
 - prlimit64
