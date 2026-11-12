@@ -10597,6 +10597,7 @@ const X86_64_SYSCALLS: &[(&str, SysFn)] = &[
     ("sendfile", sys_sendfile),
     ("lseek", sys_lseek),
     ("ftruncate", sys_ftruncate),
+    ("fallocate", sys_fallocate),
     ("getgroups", sys_getgroups),
     ("mprotect", sys_mprotect),
     ("munmap", sys_munmap),
@@ -12030,6 +12031,52 @@ fn sys_ftruncate(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<T
             TrapOutcome::Handled
         }
     })
+}
+
+fn sys_fallocate(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // fallocate(fd, mode, offset, len)。長さを offset+len まで伸ばす。
+    // mode が 0 以外（穴あけ等）は EOPNOTSUPP。
+    let fd = get64(env, cx.r_a) as u32;
+    let mode = get64(env, cx.r_b);
+    let offset = get64(env, cx.r_c);
+    let len = get64(env, Gpr(10));
+    const EOPNOTSUPP: u32 = 95;
+    if mode != 0 {
+        set64(env, Gpr(0), cx.neg(EOPNOTSUPP));
+        return Some(TrapOutcome::Handled);
+    }
+    let Some(end) = offset.checked_add(len) else {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    };
+    let Some(file) = sys.file_mut(fd) else {
+        set64(env, Gpr(0), cx.neg(EBADF));
+        return Some(TrapOutcome::Handled);
+    };
+    let cur = match file.metadata() {
+        Ok(m) => m.len(),
+        Err(_) => {
+            set64(env, Gpr(0), cx.neg(EBADF));
+            return Some(TrapOutcome::Handled);
+        }
+    };
+    if end > cur {
+        if file.set_len(end).is_err() {
+            set64(env, Gpr(0), cx.neg(EINVAL));
+            return Some(TrapOutcome::Handled);
+        }
+        if end > 0 {
+            use std::io::{Seek, Write};
+            if file.seek(std::io::SeekFrom::Start(end - 1)).is_err()
+                || file.write_all(&[0]).is_err()
+            {
+                set64(env, Gpr(0), cx.neg(EINVAL));
+                return Some(TrapOutcome::Handled);
+            }
+        }
+    }
+    set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
 }
 
 fn sys_getgroups(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
@@ -15030,6 +15077,34 @@ mod tests {
         set64(&mut env, Gpr(6), 3);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EBADF));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn fallocate_extends_file() {
+        // fallocate(fd, 0, 0, 8) は長さ 8 にする。mode が 0 以外は EOPNOTSUPP。
+        use polyisa_os_linux::x86_64 as abi;
+        let mut sys = CliLinux::x86_64();
+        let mut env = bare();
+        let path = format!("/tmp/polyisa_fallocate_{}", std::process::id());
+        let _ = std::fs::remove_file(&path);
+        let f = std::fs::File::create(&path).unwrap();
+        sys.fds.push(Some(f));
+        set64(&mut env, Gpr(0), abi::FALLOCATE);
+        set64(&mut env, Gpr(7), 3);
+        set64(&mut env, Gpr(6), 0);
+        set64(&mut env, Gpr(2), 0);
+        set64(&mut env, Gpr(10), 8);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 8);
+        set64(&mut env, Gpr(0), abi::FALLOCATE);
+        set64(&mut env, Gpr(7), 3);
+        set64(&mut env, Gpr(6), 1);
+        set64(&mut env, Gpr(2), 0);
+        set64(&mut env, Gpr(10), 8);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(95));
         let _ = std::fs::remove_file(&path);
     }
 

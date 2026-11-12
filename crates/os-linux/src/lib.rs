@@ -144,6 +144,7 @@ pub mod x86_64 {
     pub const FCHMODAT: u64 = 268;
     pub const UMASK: u64 = 95;
     pub const FTRUNCATE: u64 = 77;
+    pub const FALLOCATE: u64 = 285;
     pub const RENAME: u64 = 82;
     pub const SYMLINK: u64 = 88;
     pub const LINK: u64 = 86;
@@ -442,6 +443,7 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             x86_64::FCHMODAT => Some("fchmodat"),
             x86_64::UMASK => Some("umask"),
             x86_64::FTRUNCATE => Some("ftruncate"),
+            x86_64::FALLOCATE => Some("fallocate"),
             x86_64::RENAME => Some("rename"),
             x86_64::SYMLINK => Some("symlink"),
             x86_64::LINK => Some("link"),

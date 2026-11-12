@@ -1055,3 +1055,39 @@ fn mkfifo_matches_host() {
     }
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn fallocate_matches_host() {
+    // 標準出力は空で、確保した長さが一致する。
+    let path = busybox();
+    let path = path.to_str().expect("utf-8 path");
+    let root = std::env::temp_dir().join(format!("polyisa-fallocate-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let guest_dir = root.join("guest");
+    let host_dir = root.join("host");
+    std::fs::create_dir_all(&guest_dir).unwrap();
+    std::fs::create_dir_all(&host_dir).unwrap();
+    let guest_f = guest_dir.join("f");
+    let host_f = host_dir.join("f");
+    let guest_args = [
+        "fallocate".to_string(),
+        "-l".to_string(),
+        "8".to_string(),
+        guest_f.to_str().unwrap().to_string(),
+    ];
+    let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &guest_args)
+        .unwrap_or_else(|e| panic!("fallocate: {e}"));
+    let host = Command::new(path)
+        .args(["fallocate", "-l", "8", host_f.to_str().unwrap()])
+        .env_clear()
+        .output()
+        .expect("host fallocate");
+    assert_eq!(code, host.status.code().unwrap_or(1) as u64);
+    assert_eq!(out.as_slice(), host.stdout.as_slice());
+    assert_eq!(
+        std::fs::metadata(&guest_f).unwrap().len(),
+        std::fs::metadata(&host_f).unwrap().len()
+    );
+    assert_eq!(std::fs::metadata(&guest_f).unwrap().len(), 8);
+    let _ = std::fs::remove_dir_all(&root);
+}

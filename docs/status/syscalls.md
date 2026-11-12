@@ -28,6 +28,7 @@
 - exit
 - exit_group
 - faccessat
+- fallocate
 - fchmod
 - fchmodat
 - fchown
