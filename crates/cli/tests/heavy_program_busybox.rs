@@ -732,6 +732,126 @@ fn file_ops_match_host() {
 }
 
 #[test]
+fn more_file_results_match_host() {
+    // 標準出力は空で、ファイルの結果が一致する。別の木へ書く。
+    let path = busybox();
+    let path = path.to_str().expect("utf-8 path");
+    let root = std::env::temp_dir().join(format!("polyisa-morefiles-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let guest_dir = root.join("guest");
+    let host_dir = root.join("host");
+    std::fs::create_dir_all(&guest_dir).unwrap();
+    std::fs::create_dir_all(&host_dir).unwrap();
+    let pair = |guest_args: &[&str], host_args: &[&str]| {
+        let argv: Vec<String> = guest_args.iter().map(|s| (*s).to_string()).collect();
+        let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)
+            .unwrap_or_else(|e| panic!("{}: {e}", guest_args.join(" ")));
+        let host = Command::new(path)
+            .args(host_args)
+            .env_clear()
+            .output()
+            .unwrap_or_else(|e| panic!("host {}: {e}", host_args[0]));
+        assert_eq!(
+            code,
+            host.status.code().unwrap_or(1) as u64,
+            "{}",
+            guest_args[0]
+        );
+        assert_eq!(out.as_slice(), host.stdout.as_slice(), "{}", guest_args[0]);
+    };
+    let g = guest_dir.join("ln");
+    let h = host_dir.join("ln");
+    std::fs::create_dir_all(&g).unwrap();
+    std::fs::create_dir_all(&h).unwrap();
+    let gsrc = g.join("a");
+    let hsrc = h.join("a");
+    std::fs::write(&gsrc, b"ab\n").unwrap();
+    std::fs::write(&hsrc, b"ab\n").unwrap();
+    pair(
+        &[
+            "ln",
+            gsrc.to_str().expect("utf-8"),
+            g.join("b").to_str().expect("utf-8"),
+        ],
+        &[
+            "ln",
+            hsrc.to_str().expect("utf-8"),
+            h.join("b").to_str().expect("utf-8"),
+        ],
+    );
+    assert_eq!(std::fs::read(g.join("b")).unwrap(), b"ab\n");
+    assert_eq!(std::fs::read(h.join("b")).unwrap(), b"ab\n");
+
+    let g = guest_dir.join("gz");
+    let h = host_dir.join("gz");
+    std::fs::create_dir_all(&g).unwrap();
+    std::fs::create_dir_all(&h).unwrap();
+    std::fs::write(g.join("f"), b"ab\ncd\n").unwrap();
+    std::fs::write(h.join("f"), b"ab\ncd\n").unwrap();
+    pair(
+        &["gzip", g.join("f").to_str().expect("utf-8")],
+        &["gzip", h.join("f").to_str().expect("utf-8")],
+    );
+    assert!(!g.join("f").exists());
+    assert_eq!(
+        std::fs::read(g.join("f.gz")).unwrap(),
+        std::fs::read(h.join("f.gz")).unwrap()
+    );
+
+    let g = guest_dir.join("bz");
+    let h = host_dir.join("bz");
+    std::fs::create_dir_all(&g).unwrap();
+    std::fs::create_dir_all(&h).unwrap();
+    std::fs::write(g.join("f"), b"ab\ncd\n").unwrap();
+    std::fs::write(h.join("f"), b"ab\ncd\n").unwrap();
+    pair(
+        &["bzip2", g.join("f").to_str().expect("utf-8")],
+        &["bzip2", h.join("f").to_str().expect("utf-8")],
+    );
+    assert!(!g.join("f").exists());
+    assert_eq!(
+        std::fs::read(g.join("f.bz2")).unwrap(),
+        std::fs::read(h.join("f.bz2")).unwrap()
+    );
+
+    let g = guest_dir.join("sed");
+    let h = host_dir.join("sed");
+    std::fs::create_dir_all(&g).unwrap();
+    std::fs::create_dir_all(&h).unwrap();
+    std::fs::write(g.join("f"), b"ab\ncd\n").unwrap();
+    std::fs::write(h.join("f"), b"ab\ncd\n").unwrap();
+    pair(
+        &["sed", "-i", "/cd/d", g.join("f").to_str().expect("utf-8")],
+        &["sed", "-i", "/cd/d", h.join("f").to_str().expect("utf-8")],
+    );
+    assert_eq!(std::fs::read(g.join("f")).unwrap(), b"ab\n");
+    assert_eq!(std::fs::read(h.join("f")).unwrap(), b"ab\n");
+
+    let g = guest_dir.join("mk");
+    let h = host_dir.join("mk");
+    pair(
+        &["mkdir", "-p", g.join("a/b").to_str().expect("utf-8")],
+        &["mkdir", "-p", h.join("a/b").to_str().expect("utf-8")],
+    );
+    assert!(g.join("a/b").is_dir());
+    assert!(h.join("a/b").is_dir());
+
+    let g = guest_dir.join("rm");
+    let h = host_dir.join("rm");
+    std::fs::create_dir_all(g.join("a/b")).unwrap();
+    std::fs::create_dir_all(h.join("a/b")).unwrap();
+    std::fs::write(g.join("a/b/c"), b"x\n").unwrap();
+    std::fs::write(h.join("a/b/c"), b"x\n").unwrap();
+    pair(
+        &["rm", "-r", g.join("a").to_str().expect("utf-8")],
+        &["rm", "-r", h.join("a").to_str().expect("utf-8")],
+    );
+    assert!(!g.join("a").exists());
+    assert!(!h.join("a").exists());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn dos2unix_matches_host() {
     // 標準出力は空で、変換したファイルが一致する。別の木へ書く。
     let path = busybox();
