@@ -34,8 +34,10 @@
 - fchmodat
 - fchown
 - fcntl
+- fdatasync
 - fork
 - fstat
+- fsync
 - ftruncate
 - getcwd
 - getdents64

@@ -1183,6 +1183,61 @@ fn cp_archive_link_symlink_match_host() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+#[test]
+fn shred_zero_and_unlink_match_host() {
+    // -n 0 -z は中身を 0 にし、-u -n 0 は消す。乱数上書きの内容は比べない。
+    let path = busybox();
+    let path = path.to_str().expect("utf-8 path");
+    let root = std::env::temp_dir().join(format!("polyisa-shred-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let guest = root.join("guest");
+    let host = root.join("host");
+    std::fs::create_dir_all(&guest).unwrap();
+    std::fs::create_dir_all(&host).unwrap();
+    std::fs::write(guest.join("z"), b"ab\ncd\n").unwrap();
+    std::fs::write(host.join("z"), b"ab\ncd\n").unwrap();
+    let guest_args = [
+        "shred".to_string(),
+        "-n".to_string(),
+        "0".to_string(),
+        "-z".to_string(),
+        guest.join("z").to_str().unwrap().to_string(),
+    ];
+    let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &guest_args)
+        .unwrap_or_else(|e| panic!("shred -z: {e}"));
+    let host_out = Command::new(path)
+        .args(["shred", "-n", "0", "-z", host.join("z").to_str().unwrap()])
+        .env_clear()
+        .output()
+        .expect("host shred -z");
+    assert_eq!(code, host_out.status.code().unwrap_or(1) as u64);
+    assert_eq!(out.as_slice(), host_out.stdout.as_slice());
+    assert_eq!(std::fs::read(guest.join("z")).unwrap(), vec![0u8; 6]);
+    assert_eq!(std::fs::read(host.join("z")).unwrap(), vec![0u8; 6]);
+
+    std::fs::write(guest.join("u"), b"ab\ncd\n").unwrap();
+    std::fs::write(host.join("u"), b"ab\ncd\n").unwrap();
+    let guest_args = [
+        "shred".to_string(),
+        "-u".to_string(),
+        "-n".to_string(),
+        "0".to_string(),
+        guest.join("u").to_str().unwrap().to_string(),
+    ];
+    let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &guest_args)
+        .unwrap_or_else(|e| panic!("shred -u: {e}"));
+    let host_out = Command::new(path)
+        .args(["shred", "-u", "-n", "0", host.join("u").to_str().unwrap()])
+        .env_clear()
+        .output()
+        .expect("host shred -u");
+    assert_eq!(code, host_out.status.code().unwrap_or(1) as u64);
+    assert_eq!(out.as_slice(), host_out.stdout.as_slice());
+    assert!(!guest.join("u").exists());
+    assert!(!host.join("u").exists());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 fn crc32(data: &[u8]) -> u32 {
     let mut crc = 0xffff_ffffu32;
     for &byte in data {

@@ -10739,6 +10739,8 @@ const X86_64_SYSCALLS: &[(&str, SysFn)] = &[
     ("sched_setaffinity", sys_sched_setaffinity),
     ("ioprio_set", sys_ioprio_set),
     ("ioprio_get", sys_ioprio_get),
+    ("fsync", sys_fsync),
+    ("fdatasync", sys_fdatasync),
     ("sched_setparam", sys_sched_setparam),
     ("sched_getparam", sys_sched_getparam),
     ("sched_setscheduler", sys_sched_setscheduler),
@@ -11787,6 +11789,23 @@ fn sys_ioprio_get(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<
     };
     set64(env, Gpr(0), prio);
     Some(TrapOutcome::Handled)
+}
+
+fn sys_fsync(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // fsync(fd)。ホストへは流さず、開いている fd なら 0。
+    // Ref: SRC-LINUX (7.3).
+    let fd = get64(env, cx.r_a) as u32;
+    if !sys.fd_valid(fd) {
+        set64(env, Gpr(0), cx.neg(EBADF));
+        return Some(TrapOutcome::Handled);
+    }
+    set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_fdatasync(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // fdatasync(fd)。shred が毎回呼ぶ。実体は fsync と同じ。
+    sys_fsync(sys, env, cx)
 }
 
 fn sys_sched_setaffinity(
@@ -15366,6 +15385,26 @@ mod tests {
         set64(&mut env, Gpr(2), 7 << 13);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EINVAL));
+    }
+
+    #[test]
+    fn fsync_and_fdatasync_accept_open_fd() {
+        use polyisa_os_linux::x86_64 as abi;
+        let mut sys = CliLinux::x86_64();
+        let mut env = bare();
+        // 標準出力は開いている。
+        set64(&mut env, Gpr(0), abi::FSYNC);
+        set64(&mut env, Gpr(7), 1);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        set64(&mut env, Gpr(0), abi::FDATASYNC);
+        set64(&mut env, Gpr(7), 1);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        set64(&mut env, Gpr(0), abi::FSYNC);
+        set64(&mut env, Gpr(7), 99);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EBADF));
     }
 
     #[test]
