@@ -2421,3 +2421,37 @@ fn fallocate_matches_host() {
     assert_eq!(std::fs::metadata(&guest_f).unwrap().len(), 8);
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn makemime_matches_fixed() {
+    // 境界文字列はゲストの固定時計・乱数に依存する。ホストとは比べない。
+    let path = busybox();
+    let path = path.to_str().expect("utf-8 path");
+    let root = std::env::temp_dir().join(format!("polyisa-makemime-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let f = root.join("mime-in");
+    std::fs::write(&f, b"x\n").unwrap();
+    let argv = ["makemime".to_string(), f.to_str().unwrap().to_string()];
+    let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)
+        .unwrap_or_else(|e| panic!("makemime: {e}"));
+    assert_eq!(code, 0);
+    assert_eq!(
+        out.as_slice(),
+        concat!(
+            "Mime-Version: 1.0\n",
+            "Content-Type: multipart/mixed; boundary=\"1407788582-2025915578-2049033599\"\n",
+            "\n",
+            "--1407788582-2025915578-2049033599\n",
+            "Content-Type: application/octet-stream; charset=us-ascii\n",
+            "Content-Disposition: inline; filename=\"mime-in\"\n",
+            "Content-Transfer-Encoding: base64\n",
+            "\n",
+            "eAo=\n",
+            "--1407788582-2025915578-2049033599--\n",
+            "\n",
+        )
+        .as_bytes()
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
