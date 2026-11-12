@@ -488,6 +488,7 @@ fn device_and_fs_fail_matches_host() {
     let f = f.to_str().expect("utf-8");
     let d = dir.to_str().expect("utf-8");
     let put_old = put_old.to_str().expect("utf-8");
+    let flash_out = format!("{d}/flashcp-out");
     for (name, args) in [
         ("chattr", ["chattr", "-V", f].as_slice()),
         ("mkswap", ["mkswap", f].as_slice()),
@@ -507,6 +508,12 @@ fn device_and_fs_fail_matches_host() {
         ("swapon", ["swapon", f].as_slice()),
         ("swapoff", ["swapoff", f].as_slice()),
         ("pivot_root", ["pivot_root", d, put_old].as_slice()),
+        ("flash_unlock", ["flash_unlock", f].as_slice()),
+        ("flash_eraseall", ["flash_eraseall", f].as_slice()),
+        ("flashcp", ["flashcp", f, flash_out.as_str()].as_slice()),
+        ("i2cdump", ["i2cdump", "0", "0x50"].as_slice()),
+        ("i2cget", ["i2cget", "0", "0x50"].as_slice()),
+        ("i2cset", ["i2cset", "0", "0x50", "0", "0"].as_slice()),
     ] {
         let argv: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
         let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)
