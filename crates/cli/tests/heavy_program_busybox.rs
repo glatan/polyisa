@@ -188,6 +188,25 @@ fn true_echo_uname_id_match() {
     assert_eq!(code, host.status.code().unwrap_or(1) as u64);
     assert_eq!(out.as_slice(), host.stdout.as_slice());
     assert_eq!(out.as_slice(), b"hi\n");
+    for (name, args) in [
+        ("softlimit", ["softlimit", path, "echo", "hi"].as_slice()),
+        (
+            "envuidgid",
+            ["envuidgid", "0:0", path, "echo", "hi"].as_slice(),
+        ),
+    ] {
+        let argv: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
+        let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        let host = Command::new(path)
+            .args(args)
+            .env_clear()
+            .output()
+            .unwrap_or_else(|e| panic!("host {name}: {e}"));
+        assert_eq!(code, host.status.code().unwrap_or(1) as u64);
+        assert_eq!(out.as_slice(), host.stdout.as_slice());
+        assert_eq!(out.as_slice(), b"hi\n");
+    }
 }
 
 #[test]
@@ -1047,6 +1066,114 @@ fn cp_recursive_matches_host() {
     assert_eq!(
         std::fs::read(guest_dir.join("copy/sub/g")).unwrap(),
         b"zz\n"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn cp_archive_link_symlink_match_host() {
+    // cp -a はシンボリックリンクを保ち、cp -l はハードリンク、cp -s はリンクを作る。
+    let path = busybox();
+    let path = path.to_str().expect("utf-8 path");
+    let root = std::env::temp_dir().join(format!("polyisa-cpa-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let guest = root.join("guest");
+    let host = root.join("host");
+    std::fs::create_dir_all(guest.join("tree/sub")).unwrap();
+    std::fs::create_dir_all(host.join("tree/sub")).unwrap();
+    std::fs::write(guest.join("tree/f"), b"ab\n").unwrap();
+    std::fs::write(host.join("tree/f"), b"ab\n").unwrap();
+    std::fs::write(guest.join("tree/sub/g"), b"zz\n").unwrap();
+    std::fs::write(host.join("tree/sub/g"), b"zz\n").unwrap();
+    polyisa_host::symlink("f", guest.join("tree/link").to_str().unwrap()).unwrap();
+    polyisa_host::symlink("f", host.join("tree/link").to_str().unwrap()).unwrap();
+    let guest_args = [
+        "cp".to_string(),
+        "-a".to_string(),
+        guest.join("tree").to_str().unwrap().to_string(),
+        guest.join("copy").to_str().unwrap().to_string(),
+    ];
+    let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &guest_args)
+        .unwrap_or_else(|e| panic!("cp -a: {e}"));
+    let host_out = Command::new(path)
+        .args([
+            "cp",
+            "-a",
+            host.join("tree").to_str().unwrap(),
+            host.join("copy").to_str().unwrap(),
+        ])
+        .env_clear()
+        .output()
+        .expect("host cp -a");
+    assert_eq!(code, host_out.status.code().unwrap_or(1) as u64);
+    assert_eq!(out.as_slice(), host_out.stdout.as_slice());
+    assert_eq!(
+        std::fs::read(guest.join("copy/f")).unwrap(),
+        std::fs::read(host.join("copy/f")).unwrap()
+    );
+    assert_eq!(std::fs::read(guest.join("copy/sub/g")).unwrap(), b"zz\n");
+    assert_eq!(
+        std::fs::read_link(guest.join("copy/link")).unwrap(),
+        std::fs::read_link(host.join("copy/link")).unwrap()
+    );
+
+    std::fs::write(guest.join("src"), b"ab\n").unwrap();
+    std::fs::write(host.join("src"), b"ab\n").unwrap();
+    let guest_args = [
+        "cp".to_string(),
+        "-l".to_string(),
+        guest.join("src").to_str().unwrap().to_string(),
+        guest.join("hard").to_str().unwrap().to_string(),
+    ];
+    let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &guest_args)
+        .unwrap_or_else(|e| panic!("cp -l: {e}"));
+    let host_out = Command::new(path)
+        .args([
+            "cp",
+            "-l",
+            host.join("src").to_str().unwrap(),
+            host.join("hard").to_str().unwrap(),
+        ])
+        .env_clear()
+        .output()
+        .expect("host cp -l");
+    assert_eq!(code, host_out.status.code().unwrap_or(1) as u64);
+    assert_eq!(out.as_slice(), host_out.stdout.as_slice());
+    std::fs::write(guest.join("hard"), b"zz\n").unwrap();
+    assert_eq!(std::fs::read(guest.join("src")).unwrap(), b"zz\n");
+    std::fs::write(host.join("hard"), b"zz\n").unwrap();
+    assert_eq!(std::fs::read(host.join("src")).unwrap(), b"zz\n");
+
+    std::fs::write(guest.join("src2"), b"ab\n").unwrap();
+    std::fs::write(host.join("src2"), b"ab\n").unwrap();
+    let guest_args = [
+        "cp".to_string(),
+        "-s".to_string(),
+        guest.join("src2").to_str().unwrap().to_string(),
+        guest.join("sym").to_str().unwrap().to_string(),
+    ];
+    let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &guest_args)
+        .unwrap_or_else(|e| panic!("cp -s: {e}"));
+    let host_out = Command::new(path)
+        .args([
+            "cp",
+            "-s",
+            host.join("src2").to_str().unwrap(),
+            host.join("sym").to_str().unwrap(),
+        ])
+        .env_clear()
+        .output()
+        .expect("host cp -s");
+    assert_eq!(code, host_out.status.code().unwrap_or(1) as u64);
+    assert_eq!(out.as_slice(), host_out.stdout.as_slice());
+    // 絶対パスのリンクになるので、それぞれの src2 を指していることだけ見る。
+    assert_eq!(
+        std::fs::read_link(guest.join("sym")).unwrap(),
+        guest.join("src2")
+    );
+    assert_eq!(
+        std::fs::read_link(host.join("sym")).unwrap(),
+        host.join("src2")
     );
     let _ = std::fs::remove_dir_all(&root);
 }
