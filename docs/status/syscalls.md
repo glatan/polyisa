@@ -14,6 +14,7 @@
 
 - access
 - arch_prctl
+- bind
 - brk
 - chdir
 - chmod
@@ -23,6 +24,7 @@
 - clock_nanosleep
 - clone
 - close
+- connect
 - delete_module
 - dup
 - dup2
@@ -56,6 +58,7 @@
 - getppid
 - getpriority
 - getrandom
+- getsockname
 - gettid
 - getuid
 - init_module
@@ -89,6 +92,7 @@
 - readlinkat
 - readv
 - reboot
+- recvfrom
 - rename
 - rmdir
 - rseq
@@ -105,6 +109,7 @@
 - semctl
 - semget
 - sendfile
+- sendto
 - set_robust_list
 - set_tid_address
 - setgroups
@@ -114,6 +119,8 @@
 - setsid
 - shmctl
 - shmget
+- socket
+- socketpair
 - stat
 - swapoff
 - swapon

@@ -191,6 +191,13 @@ pub mod x86_64 {
     pub const MSGCTL: u64 = 71;
     pub const GETITIMER: u64 = 36;
     pub const SETITIMER: u64 = 38;
+    pub const SOCKET: u64 = 41;
+    pub const SOCKETPAIR: u64 = 53;
+    pub const BIND: u64 = 49;
+    pub const CONNECT: u64 = 42;
+    pub const SENDTO: u64 = 44;
+    pub const RECVFROM: u64 = 45;
+    pub const GETSOCKNAME: u64 = 51;
     pub const SCHED_SETPARAM: u64 = 142;
     pub const SCHED_GETPARAM: u64 = 143;
     pub const SCHED_SETSCHEDULER: u64 = 144;
@@ -540,6 +547,13 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             x86_64::MSGCTL => Some("msgctl"),
             x86_64::GETITIMER => Some("getitimer"),
             x86_64::SETITIMER => Some("setitimer"),
+            x86_64::SOCKET => Some("socket"),
+            x86_64::SOCKETPAIR => Some("socketpair"),
+            x86_64::BIND => Some("bind"),
+            x86_64::CONNECT => Some("connect"),
+            x86_64::SENDTO => Some("sendto"),
+            x86_64::RECVFROM => Some("recvfrom"),
+            x86_64::GETSOCKNAME => Some("getsockname"),
             x86_64::SCHED_SETPARAM => Some("sched_setparam"),
             x86_64::SCHED_GETPARAM => Some("sched_getparam"),
             x86_64::SCHED_SETSCHEDULER => Some("sched_setscheduler"),

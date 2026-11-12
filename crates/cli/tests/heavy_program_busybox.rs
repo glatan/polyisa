@@ -427,6 +427,21 @@ fn true_echo_uname_id_match() {
         ("lpd", ["lpd"].as_slice()),
         ("sendmail", ["sendmail"].as_slice()),
         ("popmaildir", ["popmaildir"].as_slice()),
+        ("vconfig", ["vconfig", "rem", "eth0.1"].as_slice()),
+        ("lpq", ["lpq"].as_slice()),
+        ("lpr", ["lpr"].as_slice()),
+        ("rdate", ["rdate", "-p", "127.0.0.1"].as_slice()),
+        ("nc", ["nc"].as_slice()),
+        ("arping", ["arping"].as_slice()),
+        ("nslookup", ["nslookup", "localhost"].as_slice()),
+        ("traceroute", ["traceroute", "127.0.0.1"].as_slice()),
+        ("httpd", ["httpd"].as_slice()),
+        ("dnsd", ["dnsd"].as_slice()),
+        ("sulogin", ["sulogin"].as_slice()),
+        ("traceroute6", ["traceroute6", "::1"].as_slice()),
+        ("ping", ["ping", "-c1", "127.0.0.1"].as_slice()),
+        ("ping6", ["ping6", "-c1", "::1"].as_slice()),
+        ("telnet", ["telnet", "127.0.0.1"].as_slice()),
     ] {
         let argv: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
         let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)

@@ -10859,6 +10859,13 @@ const X86_64_SYSCALLS: &[(&str, SysFn)] = &[
     ("msgctl", sys_msgctl),
     ("getitimer", sys_getitimer),
     ("setitimer", sys_setitimer),
+    ("socket", sys_socket),
+    ("socketpair", sys_socketpair),
+    ("bind", sys_bind),
+    ("connect", sys_connect),
+    ("sendto", sys_sendto),
+    ("recvfrom", sys_recvfrom),
+    ("getsockname", sys_getsockname),
     ("uname", sys_uname),
     ("getuid", sys_getuid),
     ("geteuid", sys_geteuid),
@@ -11955,6 +11962,36 @@ fn sys_setitimer(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<
     }
     set64(env, Gpr(0), 0);
     Some(TrapOutcome::Handled)
+}
+
+fn sys_socket(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // socket 系。段階 C までの暫定で常に EPERM。失敗形のアプレット合わせに使う。
+    set64(env, Gpr(0), cx.neg(EPERM));
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_socketpair(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    sys_socket(sys, env, cx)
+}
+
+fn sys_bind(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    sys_socket(sys, env, cx)
+}
+
+fn sys_connect(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    sys_socket(sys, env, cx)
+}
+
+fn sys_sendto(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    sys_socket(sys, env, cx)
+}
+
+fn sys_recvfrom(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    sys_socket(sys, env, cx)
+}
+
+fn sys_getsockname(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    sys_socket(sys, env, cx)
 }
 
 fn sys_syslog(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
