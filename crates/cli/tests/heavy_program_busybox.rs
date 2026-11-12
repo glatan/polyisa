@@ -992,3 +992,66 @@ fn pipe_progress_matches_host() {
     assert_eq!(out.as_slice(), host.stdout.as_slice());
     assert_eq!(out.as_slice(), b"abcd");
 }
+
+#[test]
+fn mkfifo_matches_host() {
+    // 標準出力は空で、作った名前付きパイプの種別と許可が一致する。
+    let path = busybox();
+    let path = path.to_str().expect("utf-8 path");
+    let root = std::env::temp_dir().join(format!("polyisa-fifo-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let guest_dir = root.join("guest");
+    let host_dir = root.join("host");
+    std::fs::create_dir_all(&guest_dir).unwrap();
+    std::fs::create_dir_all(&host_dir).unwrap();
+    let pairs = [
+        (
+            vec![
+                "mkfifo".to_string(),
+                guest_dir.join("p").to_str().unwrap().to_string(),
+            ],
+            vec![
+                "mkfifo".to_string(),
+                host_dir.join("p").to_str().unwrap().to_string(),
+            ],
+            guest_dir.join("p"),
+            host_dir.join("p"),
+        ),
+        (
+            vec![
+                "mknod".to_string(),
+                guest_dir.join("n").to_str().unwrap().to_string(),
+                "p".to_string(),
+            ],
+            vec![
+                "mknod".to_string(),
+                host_dir.join("n").to_str().unwrap().to_string(),
+                "p".to_string(),
+            ],
+            guest_dir.join("n"),
+            host_dir.join("n"),
+        ),
+    ];
+    for (guest_args, host_args, guest_f, host_f) in pairs {
+        let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &guest_args)
+            .unwrap_or_else(|e| panic!("{}: {e}", guest_args[0]));
+        let host = Command::new(path)
+            .args(&host_args)
+            .env_clear()
+            .output()
+            .expect("host fifo");
+        assert_eq!(code, host.status.code().unwrap_or(1) as u64);
+        assert_eq!(out.as_slice(), host.stdout.as_slice());
+        let guest_kind = std::process::Command::new("stat")
+            .args(["-c", "%F %a", guest_f.to_str().unwrap()])
+            .output()
+            .unwrap();
+        let host_kind = std::process::Command::new("stat")
+            .args(["-c", "%F %a", host_f.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert_eq!(guest_kind.stdout, host_kind.stdout);
+        assert!(guest_kind.stdout.starts_with(b"fifo "));
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}

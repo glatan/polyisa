@@ -10621,6 +10621,7 @@ const X86_64_SYSCALLS: &[(&str, SysFn)] = &[
     ("dup3", sys_dup3),
     ("mkdir", sys_mkdir),
     ("mkdirat", sys_mkdirat),
+    ("mknod", sys_mknod),
     ("rename", sys_rename),
     ("symlink", sys_symlink),
     ("link", sys_link),
@@ -12711,6 +12712,49 @@ fn sys_mkdir(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Trap
             TrapOutcome::Handled
         }
     })
+}
+
+fn sys_mknod(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // mknod(path, mode, dev)。名前付きパイプだけ作る。デバイスノードは EPERM。
+    // このクレートは unsafe を使わないので、ホストの mkfifo に委譲する。
+    let path_addr = get64(env, cx.r_a);
+    let mode = get64(env, cx.r_b) as u32;
+    const S_IFMT: u32 = 0o170000;
+    const S_IFIFO: u32 = 0o010000;
+    if mode & S_IFMT != S_IFIFO {
+        set64(env, Gpr(0), cx.neg(EPERM));
+        return Some(TrapOutcome::Handled);
+    }
+    let path = match guest_c_string(env, path_addr) {
+        Some(p) => p,
+        None => return Some(TrapOutcome::Unimplemented),
+    };
+    let perm = (mode & 0o777) & !sys.umask;
+    let status = std::process::Command::new("mkfifo")
+        .arg("-m")
+        .arg(format!("{perm:03o}"))
+        .arg(&path)
+        .status();
+    let no = match status {
+        Ok(st) if st.success() => {
+            set64(env, Gpr(0), 0);
+            return Some(TrapOutcome::Handled);
+        }
+        Ok(_) if std::fs::metadata(&path).is_ok() => 17,
+        Ok(_)
+            if std::fs::metadata(
+                std::path::Path::new(&path)
+                    .parent()
+                    .unwrap_or(std::path::Path::new(".")),
+            )
+            .is_err() =>
+        {
+            ENOENT
+        }
+        _ => EACCES,
+    };
+    set64(env, Gpr(0), cx.neg(no));
+    Some(TrapOutcome::Handled)
 }
 
 fn sys_mkdirat(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
@@ -14907,6 +14951,41 @@ mod tests {
         set64(&mut env, Gpr(7), 0x100);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), 0);
+    }
+
+    #[test]
+    fn mknod_fifo_and_rejects_device() {
+        use polyisa_os_linux::x86_64 as abi;
+        let mut sys = CliLinux::x86_64();
+        let mut env = bare();
+        let path = format!("/tmp/polyisa_fifo_{}", std::process::id());
+        let _ = std::fs::remove_file(&path);
+        env.backend
+            .mem
+            .write(VirtAddr(0x100), path.as_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x100 + path.len() as u64), &[0])
+            .unwrap();
+        set64(&mut env, Gpr(0), abi::MKNOD);
+        set64(&mut env, Gpr(7), 0x100);
+        set64(&mut env, Gpr(6), 0o010000 | 0o666);
+        set64(&mut env, Gpr(2), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        let kind = std::process::Command::new("stat")
+            .args(["-c", "%F", &path])
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8(kind.stdout).unwrap().trim(), "fifo");
+        set64(&mut env, Gpr(0), abi::MKNOD);
+        set64(&mut env, Gpr(7), 0x100);
+        set64(&mut env, Gpr(6), 0o020000 | 0o666);
+        set64(&mut env, Gpr(2), 0x103);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EPERM));
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

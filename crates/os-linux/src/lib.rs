@@ -129,6 +129,7 @@ pub mod x86_64 {
     pub const GETGROUPS: u64 = 115;
     pub const MKDIR: u64 = 83;
     pub const RMDIR: u64 = 84;
+    pub const MKNOD: u64 = 133;
     pub const UNLINK: u64 = 87;
     pub const ACCESS: u64 = 21;
     pub const UTIMENSAT: u64 = 280;
@@ -426,6 +427,7 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             x86_64::GETGROUPS => Some("getgroups"),
             x86_64::MKDIR => Some("mkdir"),
             x86_64::RMDIR => Some("rmdir"),
+            x86_64::MKNOD => Some("mknod"),
             x86_64::UNLINK => Some("unlink"),
             x86_64::ACCESS => Some("access"),
             x86_64::UTIMENSAT => Some("utimensat"),

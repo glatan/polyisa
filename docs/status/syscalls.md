@@ -52,6 +52,7 @@
 - lstat
 - mkdir
 - mkdirat
+- mknod
 - mmap
 - mprotect
 - munmap
