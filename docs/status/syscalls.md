@@ -49,6 +49,7 @@
 - getgroups
 - getpgid
 - getpid
+- getppid
 - getpriority
 - getrandom
 - gettid

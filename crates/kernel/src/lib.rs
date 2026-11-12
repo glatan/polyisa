@@ -119,6 +119,15 @@ impl ProcessTable {
             .any(|proc| proc.id == id && proc.parent.is_none())
     }
 
+    /// 親の識別子。根や表にいないときは `None`。
+    #[must_use]
+    pub fn parent_of(&self, id: ProcessId) -> Option<ProcessId> {
+        self.procs
+            .iter()
+            .find(|proc| proc.id == id)
+            .and_then(|proc| proc.parent)
+    }
+
     /// `which` がこの子を待っているか。`-1` はどの子でも、`0` は親と同じグループ、
     /// 正は子の識別子、それより小さい値はプロセスグループの識別子である。
     #[must_use]

@@ -1840,6 +1840,25 @@ pub fn and_rm8_imm_sibd<B: Backend>(
     Ok(())
 }
 
+/// AND r/m8,imm8 SIB+disp32 (80 /4 SIB mod=10)。nologin 0x454247 対応.
+pub fn and_rm8_imm_sibd32<B: Backend>(
+    b: &mut B,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i32,
+    imm: u8,
+) -> Flow<B> {
+    use polyisa_sem::W8;
+    let addr = sib_addr_scaled(b, shift, disp, base, idx);
+    let x: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
+    let y = b.konst::<W8>(imm);
+    let v = b.and::<W8>(x, y);
+    b.store::<W8>(addr, v, DATA_WRITE)?;
+    update_logic_flags(b, v);
+    Ok(())
+}
+
 /// CMP r/m8,imm8 [base+disp32] (80 /7 mod=10)。メモリを読んで比較する.
 pub fn cmp_rm8_imm_mem32<B: Backend>(b: &mut B, base: Gpr, disp: i32, imm: u8) -> Flow<B> {
     use polyisa_sem::W8;
@@ -2283,6 +2302,28 @@ pub fn inc_r8<B: Backend>(b: &mut B, rd: Gpr, high: bool) -> Flow<B> {
     let one = b.konst::<W8>(1);
     let v = b.add::<W8>(x, one);
     write8(b, rd, high, v);
+    update_add_flags(b, x, one, v);
+    let f = b.get(eflags_ref());
+    let not_cf = b.konst::<W32>(!FLAG_CF);
+    let cleared = b.and::<W32>(f, not_cf);
+    let restored = b.or::<W32>(cleared, saved_cf);
+    b.set(eflags_ref(), restored);
+    Ok(())
+}
+
+/// INC m8 [RIP+disp32] (FE /0 mod=00 rm=101)。nologin 0x45972a 対応.
+pub fn inc_m8_rip<B: Backend>(b: &mut B, next_rip: u64, disp: i32) -> Flow<B> {
+    use polyisa_sem::W8;
+    let cf_mask = b.konst::<W32>(FLAG_CF);
+    let all_flags = b.get(eflags_ref());
+    let saved_cf = b.and::<W32>(all_flags, cf_mask);
+    let base = b.konst::<W64>(next_rip);
+    let d = b.konst::<W64>(disp as i64 as u64);
+    let addr = b.add::<W64>(base, d);
+    let x: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
+    let one = b.konst::<W8>(1);
+    let v = b.add::<W8>(x, one);
+    b.store::<W8>(addr, v, DATA_WRITE)?;
     update_add_flags(b, x, one, v);
     let f = b.get(eflags_ref());
     let not_cf = b.konst::<W32>(!FLAG_CF);
@@ -16649,6 +16690,18 @@ pub fn and_m8_r8<B: Backend>(
     let y = read8(b, src, src_high);
     let v = b.and::<W8>(x, y);
     write8(b, dst, dst_high, v);
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// AND [base+disp8], r8 (20 /r mod=01)。nologin 0x45a07d の and %al,-0x1(%rdi)。
+pub fn and_m8_r8_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8, src: Gpr, high: bool) -> Flow<B> {
+    use polyisa_sem::W8;
+    let addr = eff_addr(b, base, disp);
+    let x: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
+    let y = read8(b, src, high);
+    let v = b.and::<W8>(x, y);
+    b.store::<W8>(addr, v, DATA_WRITE)?;
     update_logic_flags(b, v);
     Ok(())
 }

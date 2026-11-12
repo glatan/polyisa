@@ -4707,6 +4707,114 @@ fn run_inc_rm_mem8_nosib() {
 }
 
 #[test]
+fn run_and_rm8_imm_sibd32_rsp() {
+    // 41 80 A4 24 B1 00 00 00 F7 は andb $0xf7,0xb1(%r12)。nologin 0x454247。
+    // R12=0x2000、[0x20b1]=0xff -> 0xf7、exit(0)。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.mem.write(VirtAddr(0x20b1), &[0xFFu8]).unwrap();
+    env.backend.set(Gpr(12).state(), 0x2000);
+    let prog: &[u8] = &[
+        0x41, 0x80, 0xA4, 0x24, 0xB1, 0x00, 0x00, 0x00, 0xF7, // andb $0xf7,0xb1(%r12)
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
+        0x0F, 0x05, // syscall
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0));
+    let mut back = [0u8; 1];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x20b1),
+            &mut back,
+            polyisa_mem::Access {
+                endian: polyisa_mem::Endian::Le,
+                align: polyisa_mem::Align::Unaligned,
+                kind: polyisa_mem::AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(back[0], 0xF7);
+}
+
+#[test]
+fn run_and_m8_r8_mem8() {
+    // 20 47 FF は and %al, -0x1(%rdi)。nologin 0x45a07d。
+    // RDI=0x2001、[0x2000]=0xFF、AL=0x0F -> [0x2000]=0x0F、exit(0)。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.mem.write(VirtAddr(0x2000), &[0xFFu8]).unwrap();
+    env.backend.set(Gpr(7).state(), 0x2001);
+    env.backend.set(Gpr(0).state(), 0x0F);
+    let prog: &[u8] = &[
+        0x20, 0x47, 0xFF, // and %al, -0x1(%rdi)
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
+        0x0F, 0x05, // syscall
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0));
+    let mut back = [0u8; 1];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x2000),
+            &mut back,
+            polyisa_mem::Access {
+                endian: polyisa_mem::Endian::Le,
+                align: polyisa_mem::Align::Unaligned,
+                kind: polyisa_mem::AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(back[0], 0x0F);
+}
+
+#[test]
+fn run_inc_m8_rip() {
+    // run 経由で FE 05 FA 0F 00 00 (incb 0xFFA(%rip)) を回す。nologin 0x45972a 対応.
+    // [0x2000]=0 -> 1 になり、exit(0)。RIP=0x1006 が next_rip.
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.mem.write(VirtAddr(0x2000), &[0u8]).unwrap();
+    let prog: &[u8] = &[
+        0xFE, 0x05, 0xFA, 0x0F, 0x00, 0x00, // incb 0xFFA(%rip) -> [0x2000]
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
+        0x0F, 0x05, // syscall -> exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0));
+    let mut back = [0u8; 1];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x2000),
+            &mut back,
+            polyisa_mem::Access {
+                endian: polyisa_mem::Endian::Le,
+                align: polyisa_mem::Align::Unaligned,
+                kind: polyisa_mem::AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(back[0], 1);
+}
+
+#[test]
 fn run_inc_rm_rip() {
     // run 経由で FF 05 FA 0F 00 00 (INCL 0xFFA(%rip)) を回す。sed 0x5bdcc0 対応.
     // [0x2000]=0 -> 1 になり、exit(0)。RIP=0x1006 が next_rip.

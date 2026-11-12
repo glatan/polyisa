@@ -877,11 +877,20 @@ fn fetch_len(
                 None
             }
         }
-        // 0x20 /r (AND r/m8,r8) は reg-direct 2B のみ。
+        // 0x20 /r (AND r/m8,r8)。reg-direct 2B、mod=01 [base+disp8] 3B（SIBなし）。
         // 0x28 /r (SUB r/m8,r8) は reg-direct 2B と、mod=00 SIB (3B、base=5 以外)。dc 0x40abb4。
         0x20 => {
             let s = second?;
-            if s >> 6 == 3 { Some(2) } else { None }
+            let md = s >> 6;
+            let rm = s & 7;
+            if md == 3 {
+                Some(2)
+            } else if md == 1 && rm != 4 {
+                // AND m8,r8 [base+disp8]。nologin 0x45a07d の and %al,-0x1(%rdi)。
+                Some(3)
+            } else {
+                None
+            }
         }
         0x28 => {
             let s = second?;
@@ -1264,7 +1273,8 @@ fn fetch_len(
                 } else if md == 0 && (reg == 0 || reg == 1 || reg == 6 || reg == 7) {
                     let t = third?;
                     if t & 7 != 5 { Some(4) } else { None }
-                } else if md == 2 && reg == 7 {
+                } else if md == 2 && (reg == 7 || reg == 4) {
+                    // /7 CMPB と /4 ANDB。nologin 0x454247 の andb $imm,disp32(%r12)。
                     Some(8)
                 } else {
                     None
@@ -1496,6 +1506,9 @@ fn fetch_len(
             } else if md == 0 && reg == 1 && rm != 4 && rm != 5 {
                 // DEC m8 [base]。dc 0x40abca の dec byte [rcx]。
                 Some(2)
+            } else if md == 0 && reg == 0 && rm == 5 {
+                // INC m8 [RIP+disp32]。nologin 0x45972a の incb disp32(%rip)。
+                Some(6)
             } else {
                 None
             }
@@ -2693,6 +2706,10 @@ fn dispatch<B: Backend>(
             };
             sem::inc_r8(b, rd, high)
         }
+        Insn::IncM8Rip => {
+            // FE /0 mod=00 rm=101 [RIP+disp32]。nologin 0x45972a 対応.
+            sem::inc_m8_rip(b, eip as u64 + nbytes, disp32())
+        }
         Insn::XchgR8 => {
             // 86 /r mod=11。base64 0x4bd97a の xchg %ch, %cl。
             let reg_f = (modrm() >> 3) & 7;
@@ -3567,6 +3584,18 @@ fn dispatch<B: Backend>(
                 (Gpr(rm_f - 4), true)
             };
             sem::and_m8_r8(b, dst, dst_high, src, src_high)
+        }
+        Insn::AndM8R8Mem8 => {
+            // 20 /r mod=01 [base+disp8], r8。nologin 0x45a07d の and %al,-0x1(%rdi)。
+            let reg_f = (modrm() >> 3) & 7;
+            let (src, high) = if rex != 0 {
+                (Gpr(reg_f | ((rex >> 2) & 1) << 3), false)
+            } else if reg_f < 4 {
+                (Gpr(reg_f), false)
+            } else {
+                (Gpr(reg_f - 4), true)
+            };
+            sem::and_m8_r8_mem8(b, rm(), disp8(), src, high)
         }
         Insn::FstpM64Sibd => {
             // DD /3 SIB mod=01。seq 0x4d3169 の fstpl 0x8(%rsp)。
@@ -4962,6 +4991,21 @@ fn dispatch<B: Backend>(
                 sem::and_rm8_imm_mem8(b, base, d8, imm)
             } else {
                 sem::and_rm8_imm_sibd(b, base, idx, shift, d8, imm)
+            }
+        }
+        Insn::AndRm8ImmSibd32 => {
+            // 80 /4 SIB mod=10 [base+index*scale+disp32],imm8 (64b)。nologin 0x454247 対応.
+            let sib_v = ((word >> 40) & 0xff) as u8;
+            let disp = (((word >> 8) as u32).swap_bytes()) as i32;
+            let imm = (word & 0xff) as u8;
+            let shift = ((sib_v >> 6) & 3) as u32;
+            let idx_raw = (sib_v >> 3) & 7;
+            let idx = Gpr(idx_raw | (((rex >> 1) & 1) << 3));
+            let base = Gpr((sib_v & 7) | ((rex & 1) << 3));
+            if idx_raw == 4 && (rex >> 1) & 1 == 0 {
+                sem::and_rm8_imm_mem32(b, base, disp, imm)
+            } else {
+                sem::and_rm8_imm_sibd32(b, base, idx, shift, disp, imm)
             }
         }
         Insn::CmpRm8ImmMem32 => {
@@ -10757,6 +10801,7 @@ const X86_64_SYSCALLS: &[(&str, SysFn)] = &[
     ("set_tid_address", sys_set_tid_address),
     ("gettid", sys_gettid),
     ("getpid", sys_getpid),
+    ("getppid", sys_getppid),
     ("uname", sys_uname),
     ("getuid", sys_getuid),
     ("geteuid", sys_geteuid),
@@ -11659,6 +11704,14 @@ fn sys_gettid(sys: &mut CliLinux, env: &mut BareEnv, _cx: &SysCtx) -> Option<Tra
 
 fn sys_getpid(sys: &mut CliLinux, env: &mut BareEnv, _cx: &SysCtx) -> Option<TrapOutcome> {
     set64(env, Gpr(0), guest_pid(sys));
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_getppid(sys: &mut CliLinux, env: &mut BareEnv, _cx: &SysCtx) -> Option<TrapOutcome> {
+    // 根は親がいないので 0。fork 後の子は親の識別子を返す。
+    let me = sys.ensure_self();
+    let ppid = sys.procs.borrow().parent_of(me).map(|id| id.0).unwrap_or(0);
+    set64(env, Gpr(0), ppid);
     Some(TrapOutcome::Handled)
 }
 
@@ -14936,6 +14989,16 @@ mod tests {
         set64(&mut env, Gpr(0), abi::GETPID);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), 1);
+    }
+
+    #[test]
+    fn getppid_returns_zero_for_root() {
+        use polyisa_os_linux::x86_64 as abi;
+        let mut sys = CliLinux::x86_64();
+        let mut env = bare();
+        set64(&mut env, Gpr(0), abi::GETPPID);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
     }
 
     #[test]

@@ -162,6 +162,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("dec_m8_memnd", "F1", "11111110 00001...", "dec m8", "alu"),
         // INC r8 (FE /0 mod=11)。同じオペコードの増分。
         ("inc_r8", "F1", "11111110 11000...", "inc r8", "alu"),
+        // INC m8 [RIP+disp32] (FE /0 mod=00 rm=101)。nologin 0x45972a の incb 0x2ba031(%rip)。
+        ("inc_m8_rip", "F1", "11111110 00000101 ................................", "inc m8", "alu"),
         ("dec_eax", "F1", "01001000", "dec eax", "alu"),
         ("dec_ecx", "F1", "01001001", "dec ecx", "alu"),
         ("dec_edx", "F1", "01001010", "dec edx", "alu"),
@@ -2719,6 +2721,14 @@ pub fn build_model() -> polyisa_isadl::Model {
             "alu",
         ),
         (
+            "and_m8_r8_mem8",
+            "M8",
+            "00100000 01...... ........",
+            vec![wc("m8_rm", WhereOp::Ne, 4)],
+            "and [r/m+disp8], r8",
+            "alu",
+        ),
+        (
             "xor_m8_r8",
             "F1",
             "00110000 11......",
@@ -3023,6 +3033,15 @@ pub fn build_model() -> polyisa_isadl::Model {
             "and_rm8_imm_sibd",
             "F1",
             "10000000 01100100 ........ ........ ........",
+            vec![],
+            "and r/m8, {imm}",
+            "alu",
+        ),
+        // ANDB m8,imm8 SIB mod=10 [base+index*scale+disp32] (80 /4)。nologin 0x454247 の andb $0xf7,0xb1(%r12)。
+        (
+            "and_rm8_imm_sibd32",
+            "F1",
+            "10000000 10100100 ........ ................................ ........",
             vec![],
             "and r/m8, {imm}",
             "alu",
