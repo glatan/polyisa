@@ -2258,6 +2258,7 @@ pub fn run_mode(
                     // AND r16, [base+index*scale+disp32] (66 23 /r SIB mod=10)。gunzip 0x48a957。
                     | Insn::AndRSibd32
                     | Insn::CmpRm16Imm
+                    | Insn::CmpRm16ImmMem8
                     // ROL r16,imm8 (66 C1 /0)。httpd 0x4be767 の rol $8, %bp。
                     | Insn::RolRm32Imm8
                     // CMP r/m16, r16 (66 39 /r mod=11) は CmpRm32 を共用する.
@@ -6148,6 +6149,21 @@ fn dispatch<B: Backend>(
             } else {
                 sem::and_rm32_abs(b, ((word >> 32) as u32).swap_bytes(), imm32())
             }
+        }
+        Insn::CmpRm32ImmRip => {
+            // 81 3D + disp32 + imm32 (80b)。udhcpd 0x445747 対応.
+            let disp = ((word >> 32) as u32).swap_bytes() as i32;
+            if is64 {
+                sem::cmp_rm32_imm_rip(b, eip as u64 + nbytes, disp, imm32())
+            } else {
+                sem::cmp_rm32_imm_abs(b, ((word >> 32) as u32).swap_bytes(), imm32())
+            }
+        }
+        Insn::CmpRm16ImmMem8 => {
+            // 66 81 /7 mod=01 [base+disp8],imm16。blkid 0x47d6bf 対応.
+            let d8 = ((word >> 16) & 0xff) as u8 as i8;
+            let imm = ((word & 0xffff) as u16).swap_bytes();
+            sem::cmp_rm16_imm_mem8(b, rm(), d8, imm)
         }
         Insn::AddRm32Rip => {
             let disp = ((word >> 32) as u32).swap_bytes() as i32;
@@ -10910,6 +10926,7 @@ const X86_64_SYSCALLS: &[(&str, SysFn)] = &[
     ("inotify_init1", sys_inotify_init1),
     ("inotify_init", sys_inotify_init),
     ("inotify_add_watch", sys_inotify_add_watch),
+    ("adjtimex", sys_adjtimex),
     ("uname", sys_uname),
     ("getuid", sys_getuid),
     ("geteuid", sys_geteuid),
@@ -12125,6 +12142,20 @@ fn sys_inotify_add_watch(
     cx: &SysCtx,
 ) -> Option<TrapOutcome> {
     set64(env, Gpr(0), cx.neg(EPERM));
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_adjtimex(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // adjtimex(timex)。時計は動かさず、バッファがあれば 0 埋めして成功する。
+    let addr = get64(env, cx.r_a);
+    if addr != 0 {
+        let zeros = [0u8; 208];
+        if env.backend.mem.write(VirtAddr(addr), &zeros).is_err() {
+            set64(env, Gpr(0), cx.neg(EFAULT));
+            return Some(TrapOutcome::Handled);
+        }
+    }
+    set64(env, Gpr(0), 0);
     Some(TrapOutcome::Handled)
 }
 

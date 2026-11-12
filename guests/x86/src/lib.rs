@@ -546,6 +546,17 @@ mod tests {
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x0F460570252C00, 56), Some(Insn::CmovbeRip));
         assert_eq!(decode(0x0F460570252C00, 48), None);
+        // CMP m32,imm32 RIP (81 3D + disp32 + imm32)。udhcpd 0x445747。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(
+            decode(0x813D13E12C009BC42000, 80),
+            Some(Insn::CmpRm32ImmRip)
+        );
+        assert_eq!(decode(0x813D13E12C009BC42000, 72), None);
+        // CMP m16,imm16 mod=01 (66 81 /7)。blkid 0x47d6bf の 66 81 7D 38 53 EF。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x817D3853EF, 40), Some(Insn::CmpRm16ImmMem8));
+        assert_eq!(decode(0x817D3853EF, 32), None);
         assert_eq!(decode(0x0F450534000C00, 48), None);
         // XOR r8,[base] (32 /r mod=00)。32 06 は XOR AL,[RSI].
         // cksum 0x5c7fc7 対応.

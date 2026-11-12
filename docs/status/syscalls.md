@@ -13,6 +13,7 @@
 ## x86_64
 
 - access
+- adjtimex
 - arch_prctl
 - bind
 - brk

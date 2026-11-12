@@ -36,14 +36,14 @@
 | riscv | 196 | 196 | rv64gc、rv64imac | [isa-riscv.md](isa-riscv.md) |
 | sparc | 10 | 10 | generic | [isa-sparc.md](isa-sparc.md) |
 | wasm | 8 | 8 | generic | [isa-wasm.md](isa-wasm.md) |
-| x86 | 799 | 164 | generic32 | [isa-x86.md](isa-x86.md) |
+| x86 | 801 | 164 | generic32 | [isa-x86.md](isa-x86.md) |
 
 ## システムコール
 
 | ゲスト ABI | 処理するシステムコール | 詳細 |
 |---|---|---|
 | rv64 | 3 | [syscalls.md](syscalls.md) |
-| x86_64 | 138 | [syscalls.md](syscalls.md) |
+| x86_64 | 139 | [syscalls.md](syscalls.md) |
 | i386 | 43 | [syscalls.md](syscalls.md) |
 | mips_o32 | 2 | [syscalls.md](syscalls.md) |
 

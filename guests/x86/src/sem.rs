@@ -10917,6 +10917,39 @@ pub fn and_rm32_rip<B: Backend>(b: &mut B, next_rip: u64, disp: i32, imm: u32) -
     Ok(())
 }
 
+/// CMP m32, imm32 RIP (81 3D)。dst は変えず 6 旗を更新する。udhcpd 0x445747 対応.
+pub fn cmp_rm32_imm_rip<B: Backend>(b: &mut B, next_rip: u64, disp: i32, imm: u32) -> Flow<B> {
+    let base = b.konst::<W64>(next_rip);
+    let d = b.konst::<W64>(disp as i64 as u64);
+    let addr = b.add::<W64>(base, d);
+    let x: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let y = b.konst::<W32>(imm);
+    let v = b.sub::<W32>(x, y);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
+/// CMP [disp32], imm32 (32ビット絶対番地).
+pub fn cmp_rm32_imm_abs<B: Backend>(b: &mut B, addr32: u32, imm: u32) -> Flow<B> {
+    let addr = b.konst::<W64>(addr32 as u64);
+    let x: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let y = b.konst::<W32>(imm);
+    let v = b.sub::<W32>(x, y);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
+/// CMP m16, imm16 [base+disp8] (66 81 /7 mod=01)。blkid 0x47d6bf 対応.
+pub fn cmp_rm16_imm_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8, imm: u16) -> Flow<B> {
+    use polyisa_sem::W16;
+    let addr = eff_addr(b, base, disp);
+    let x: B::V<W16> = b.load::<W16>(addr, DATA_READ)?;
+    let y = b.konst::<W16>(imm);
+    let v = b.sub::<W16>(x, y);
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
 /// AND [disp32], imm32 (32ビット絶対番地).
 pub fn and_rm32_abs<B: Backend>(b: &mut B, addr32: u32, imm: u32) -> Flow<B> {
     let addr = b.konst::<W64>(addr32 as u64);

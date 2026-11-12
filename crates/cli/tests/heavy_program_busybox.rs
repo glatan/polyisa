@@ -526,6 +526,7 @@ fn true_echo_uname_id_match() {
         ("fuser", ["fuser", "-k", "/no"].as_slice()),
         ("sv", ["sv", "check", "/no"].as_slice()),
         ("svc", ["svc", "-d", "/no"].as_slice()),
+        ("udhcpd", ["udhcpd", "-f", "/no"].as_slice()),
     ] {
         let argv: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
         let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)
