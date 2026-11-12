@@ -407,6 +407,8 @@ fn true_echo_uname_id_match() {
         ("mt", ["mt"].as_slice()),
         ("mt status", ["mt", "status"].as_slice()),
         ("rmmod", ["rmmod", "x"].as_slice()),
+        ("modprobe", ["modprobe", "x"].as_slice()),
+        ("modprobe -r", ["modprobe", "-r", "x"].as_slice()),
     ] {
         let argv: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
         let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)
