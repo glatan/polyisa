@@ -105,6 +105,8 @@
 - setpriority
 - setsid
 - stat
+- swapoff
+- swapon
 - symlink
 - sync
 - sysinfo

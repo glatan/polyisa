@@ -501,6 +501,8 @@ fn device_and_fs_fail_matches_host() {
         ("setfont", ["setfont", f].as_slice()),
         ("fdformat", ["fdformat", f].as_slice()),
         ("insmod", ["insmod", f].as_slice()),
+        ("swapon", ["swapon", f].as_slice()),
+        ("swapoff", ["swapoff", f].as_slice()),
     ] {
         let argv: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
         let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)

@@ -10846,6 +10846,8 @@ const X86_64_SYSCALLS: &[(&str, SysFn)] = &[
     ("init_module", sys_init_module),
     ("delete_module", sys_delete_module),
     ("finit_module", sys_finit_module),
+    ("swapon", sys_swapon),
+    ("swapoff", sys_swapoff),
     ("uname", sys_uname),
     ("getuid", sys_getuid),
     ("geteuid", sys_geteuid),
@@ -11844,6 +11846,16 @@ fn sys_finit_module(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Optio
 
 fn module_eperm(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     // モジュールは扱わず常に EPERM。insmod / rmmod が呼ぶ。
+    set64(env, Gpr(0), cx.neg(EPERM));
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_swapon(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    set64(env, Gpr(0), cx.neg(EPERM));
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_swapoff(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     set64(env, Gpr(0), cx.neg(EPERM));
     Some(TrapOutcome::Handled)
 }
