@@ -5777,6 +5777,55 @@ fn run_or_r64_sibd32() {
 }
 
 #[test]
+fn run_addq_rbx_disp8_imm32() {
+    // 48 81 43 50 00 02 00 00 = addq $0x200, 0x50(%rbx)。tar -tf 0x48e5e8。
+    // Ref: SPEC-X86-INTEL-SDM (v093).
+    let code = [0x48u8, 0x81, 0x43, 0x50, 0x00, 0x02, 0x00, 0x00];
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    for (mem, flags, outb) in [(1u64, 0u32, 0x201u64), (0xFFFF_FFFF_FFFF_FF00, 0x05, 0x100)] {
+        let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+        env.step(|b| {
+            polyisa_guest_x86::sem::write64(b, Gpr(3), 0x2000);
+            Ok(())
+        })
+        .unwrap();
+        env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 0);
+        env.backend
+            .mem
+            .write(VirtAddr(0x2050), &mem.to_le_bytes())
+            .unwrap();
+        env.backend.mem.write(VirtAddr(0x2058), &[0xAB]).unwrap();
+        env.backend.mem.write(VirtAddr(0x1000), &code).unwrap();
+        let mut sys = X64Exit;
+        let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+        assert_eq!(out, Outcome::StepLimit { eip: 0x1008 });
+        assert_eq!(
+            env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x8D5,
+            flags
+        );
+        let rbx: u64 = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(3));
+        assert_eq!(rbx, 0x2000);
+        let mut back = [0u8; 9];
+        env.backend
+            .mem
+            .read(
+                VirtAddr(0x2050),
+                &mut back,
+                polyisa_mem::Access {
+                    endian: polyisa_mem::Endian::Le,
+                    align: polyisa_mem::Align::Unaligned,
+                    kind: polyisa_mem::AccessKind::DataRead,
+                },
+            )
+            .unwrap();
+        assert_eq!(&back[..8], &outb.to_le_bytes());
+        assert_eq!(back[8], 0xAB);
+    }
+}
+
+#[test]
 fn run_add_rm64_imm_sibd() {
     // 48 81 44 24 28 02 01 00 00 = addq $0x102, 0x28(%rsp)。bzip2 0x480dcd。
     // Ref: SPEC-X86-INTEL-SDM (v093).

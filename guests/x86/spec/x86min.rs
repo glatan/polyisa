@@ -601,6 +601,14 @@ pub fn build_model() -> polyisa_isadl::Model {
             "add r/m32, {imm}",
             "alu",
         ),
+        // ADD m32,imm32 mod=01 [base+disp8] (81 /0)。SIBなし。tar -tf 0x48e5e8 の addq $0x200, 0x50(%rbx)。
+        (
+            "add_rm32_imm_mem8",
+            "F1",
+            "10000001 01000... ........ ................................",
+            "add r/m32, {imm}",
+            "alu",
+        ),
         // CMP m32,imm32 mod=00 [base] (81 /7)。REX.W で64bit.
         ("cmp_rm32_imm_memnd", "MR", "10000001 00111... ................................", "cmp r/m32, {imm}", "alu"),
         // CMP m32,imm32 SIB mod=00 [base+index*scale] (81 /7)。awk 0x4a205a の cmpl $0x25072000, (%r12)。

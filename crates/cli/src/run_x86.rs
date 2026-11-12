@@ -5759,6 +5759,16 @@ fn dispatch<B: Backend>(
                 sem::add_rm32_imm_sibd(b, sib_base(), sib_idx(), sib_shift(), disp, imm)
             }
         }
+        Insn::AddRm32ImmMem8 => {
+            // 81 /0 mod=01 [base+disp8],imm32。tar -tf 0x48e5e8 の addq $0x200, 0x50(%rbx)。
+            let d8 = ((word >> 32) & 0xff) as u8 as i8;
+            let imm = ((word & 0xffff_ffff) as u32).swap_bytes();
+            if rex_w {
+                sem::add_rm64_imm_disp8(b, rm(), d8, imm)
+            } else {
+                sem::add_rm32_imm_disp8(b, rm(), d8, imm)
+            }
+        }
         Insn::AddRm64Imm => sem::add_rm64_imm(b, rm(), imm32()),
         Insn::OrRm32ImmSibd => {
             // 81 /1 SIB mod=01。resize 0x490ea6 の orl $0x880, 0x1c(%rsp)。
