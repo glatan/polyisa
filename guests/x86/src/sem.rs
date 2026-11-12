@@ -17816,6 +17816,33 @@ pub fn subsd_xmm_m64_sibd<B: Backend>(
     Ok(())
 }
 
+/// SUBSD xmm,m64 [base+index*scale+disp32] (F2 0F 5C SIB mod=10)。ntpd 0x42c207 対応.
+pub fn subsd_xmm_m64_sibd32<B: Backend>(
+    b: &mut B,
+    dst: Xmm,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i32,
+) -> Flow<B> {
+    use polyisa_sem::F64;
+    let a128: B::V<W128> = b.get(xmm_ref(dst));
+    let alo64: B::V<W64> = b.trunc::<W128, W64>(a128);
+    let a: B::V<F64> = b.trunc::<W64, F64>(alo64);
+    let addr = sib_addr_scaled(b, shift, disp, base, idx);
+    let m64: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let c: B::V<F64> = b.trunc::<W64, F64>(m64);
+    let v = b.fsub(a, c);
+    let vlo64: B::V<W64> = b.trunc::<F64, W64>(v);
+    let lo = b.zext::<W64, W128>(vlo64);
+    let hi_shift = b.konst::<W128>(64);
+    let hi = b.shr_l::<W128>(a128, hi_shift);
+    let hi_back = b.shl::<W128>(hi, hi_shift);
+    let res = b.or::<W128>(hi_back, lo);
+    b.set(xmm_ref(dst), res);
+    Ok(())
+}
+
 /// SUBSD xmm,m64 [base+disp32] (F2 0F 5C mod=10)。上位64は dst のまま.
 pub fn subsd_xmm_m64_mem32<B: Backend>(b: &mut B, dst: Xmm, base: Gpr, disp: i32) -> Flow<B> {
     use polyisa_sem::F64;
@@ -17924,6 +17951,24 @@ pub fn cvtsd2ss_xmm<B: Backend>(b: &mut B, dst: Xmm, src: Xmm) -> Flow<B> {
     let keep = b.konst::<W128>(!0xFFFF_FFFFu128);
     let hi = b.and::<W128>(a128, keep);
     let res = b.or::<W128>(hi, lo);
+    b.set(xmm_ref(dst), res);
+    Ok(())
+}
+
+/// CVTSS2SD xmm,xmm (F3 0F 5A /r)。src の下位32の単精度を倍精度にして dst の下位64へ書く。上位64は dst のまま.
+pub fn cvtss2sd_xmm<B: Backend>(b: &mut B, dst: Xmm, src: Xmm) -> Flow<B> {
+    use polyisa_sem::{F32, F64};
+    let a128: B::V<W128> = b.get(xmm_ref(dst));
+    let c128: B::V<W128> = b.get(xmm_ref(src));
+    let clo32: B::V<W32> = b.trunc::<W128, W32>(c128);
+    let c: B::V<F32> = b.trunc::<W32, F32>(clo32);
+    let d: B::V<F64> = b.fcvt_ff(c, 0);
+    let d64: B::V<W64> = b.trunc::<F64, W64>(d);
+    let lo = b.zext::<W64, W128>(d64);
+    let hi_shift = b.konst::<W128>(64);
+    let hi = b.shr_l::<W128>(a128, hi_shift);
+    let hi_back = b.shl::<W128>(hi, hi_shift);
+    let res = b.or::<W128>(hi_back, lo);
     b.set(xmm_ref(dst), res);
     Ok(())
 }

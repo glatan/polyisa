@@ -1132,6 +1132,13 @@ mod tests {
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x0F5808, 24), Some(Insn::AddsdXmmM64Memnd));
         assert_eq!(decode(0x0F584010, 32), Some(Insn::AddsdXmmM64Mem8));
+        // SUBSD xmm, [base+index*scale+disp32] (F2 0F 5C SIB mod=10)。ntpd 0x42c207。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(
+            decode(0x0F5C940780000000, 64),
+            Some(Insn::SubsdXmmM64Sibd32)
+        );
+        assert_eq!(decode(0x0F5C940780000000, 56), None);
         assert_eq!(decode(0x0F5CC1, 16), None);
         // MULSD xmm,m64 RIP (F2 0F 59 05 + disp32)。F2 は実行側で剥がす.
         // Ref: SPEC-X86-INTEL-SDM (v093).

@@ -427,6 +427,9 @@ fn fetch_len(
                 } else if md == 2 && rm != 4 {
                     // SUBSD xmm,m64 [base+disp32]。awk log 0x4c161e の subsd xmm2, [rcx+disp32]。7B.
                     Some(7)
+                } else if rm == 4 && md == 2 {
+                    // SUBSD xmm,m64 SIB+disp32。ntpd 0x42c207 の F2 0F 5C 94 07 80 00 00 00。8B.
+                    Some(8)
                 } else if rm == 4 && md == 1 {
                     // SUBSD xmm,m64 SIB+disp8。awk の 2^3 が 0x4c199c で使う subsd xmm0, [rsp+0x10]。5B.
                     Some(5)
@@ -2380,6 +2383,7 @@ pub fn run_mode(
             };
         }
         // CVTSI2SD (F2 0F 2A) と SUBPS (0F 2A) は符号化を共用する。F2 なしは未対応.
+        // CVTSD2SS/CVTSS2SD (0F 5A mod=11) は F2/F3 のいずれかが必須。
         if matches!(
             insn,
             Insn::Cvtsi2sdM32Mem8
@@ -2389,9 +2393,14 @@ pub fn run_mode(
                 | Insn::Divsd
                 | Insn::Minsd
                 | Insn::Sqrtsd
-                | Insn::Cvtsd2ss
         ) && !has_f2
         {
+            return Outcome::Unimplemented {
+                eip: pc as u32,
+                word,
+            };
+        }
+        if matches!(insn, Insn::Cvtsd2ss) && !has_f2 && !rep {
             return Outcome::Unimplemented {
                 eip: pc as u32,
                 word,
@@ -7457,10 +7466,32 @@ fn dispatch<B: Backend>(
             // F2 0F 5C /r mod=01 [base+disp8]。ntpd 0x42c1ce 対応.
             sem::subsd_xmm_m64_mem8(b, xmm_reg_r(), rm0f(), disp8())
         }
+        Insn::SubsdXmmM64Sibd32 => {
+            // F2 0F 5C SIB mod=10。ntpd 0x42c207 の subsd xmm2, [rdi+rax*1+0x80]。
+            if sib0f_no_index() {
+                sem::subsd_xmm_m64_mem32(b, xmm_reg_r(), sib0f_base(), disp32())
+            } else {
+                sem::subsd_xmm_m64_sibd32(
+                    b,
+                    xmm_reg_r(),
+                    sib0f_base(),
+                    sib0f_idx(),
+                    sib0f_shift(),
+                    disp32(),
+                )
+            }
+        }
         // MULSD xmm,xmm (F2 0F 59 /r reg-direct)。F2 は剥がし済み.
         Insn::Mulsd => sem::mulsd_xmm(b, xmm_reg_r(), xmm_rm_b()),
         Insn::Sqrtsd => sem::sqrtsd_xmm(b, xmm_reg_r(), xmm_rm_b()),
-        Insn::Cvtsd2ss => sem::cvtsd2ss_xmm(b, xmm_reg_r(), xmm_rm_b()),
+        Insn::Cvtsd2ss => {
+            // F2 0F 5A = CVTSD2SS、F3 0F 5A = CVTSS2SD（同一 ModRM 形）。ntpd 0x42c158 対応.
+            if rep {
+                sem::cvtss2sd_xmm(b, xmm_reg_r(), xmm_rm_b())
+            } else {
+                sem::cvtsd2ss_xmm(b, xmm_reg_r(), xmm_rm_b())
+            }
+        }
         Insn::Cvtss2sdM32 => {
             // F3 0F 5A mod=00。od -tfF 0x4973b5 の cvtss2sd xmm0, [rbx]。F2 は m64 からの CVTSD2SS。
             if rep {

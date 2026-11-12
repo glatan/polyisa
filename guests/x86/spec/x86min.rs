@@ -789,6 +789,14 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("subsd_xmm_m64_mem32", "M32", "00001111 01011100 10...... ................................", "subsd xmm, m64", "load"),
         // SUBSD xmm,m64 SIB+disp8 (F2 0F 5C mod=01 rm=4)。awk の 2^3 が 0x4c199c で使う。
         ("subsd_xmm_m64_sibd", "F1", "00001111 01011100 01...100 ........ ........", "subsd xmm, m64", "load"),
+        // SUBSD xmm,m64 SIB+disp32 (F2 0F 5C mod=10 rm=4)。ntpd 0x42c207 対応。
+        (
+            "subsd_xmm_m64_sibd32",
+            "F1",
+            "00001111 01011100 10...100 ........ ................................",
+            "subsd xmm, m64",
+            "load",
+        ),
         // MULSD xmm,m64 RIP (F2 0F 59 05 + disp32)。F2 接頭辞は実行側で剥がす.
         ("mulsd_xmm_m64_rip", "F1", "00001111 01011001 00...101 ................................", "mulsd xmm, m64", "load"),
         // MULSD xmm,m64 [base+disp32] (F2 0F 59 mod=10)。awk log 0x4c1636 対応。
