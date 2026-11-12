@@ -533,6 +533,16 @@ fn true_echo_uname_id_match() {
         ("timeout nosuch", ["timeout", "1", "nosuch"].as_slice()),
         ("xargs", ["xargs", path, "echo"].as_slice()),
         ("xargs -n1", ["xargs", "-n1", path, "echo"].as_slice()),
+        ("link", ["link", "/no", "/no2"].as_slice()),
+        ("ln", ["ln", "/no", "/no2"].as_slice()),
+        ("mv", ["mv", "/no", "/no2"].as_slice()),
+        ("patch", ["patch", "-p0", "-i", "/no"].as_slice()),
+        (
+            "rtcwake",
+            ["rtcwake", "-l", "-d", "/no", "-s", "1"].as_slice(),
+        ),
+        ("ubiattach", ["ubiattach", "/no"].as_slice()),
+        ("ubidetach", ["ubidetach", "/no"].as_slice()),
     ] {
         let argv: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
         let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)
@@ -2229,6 +2239,102 @@ fn mkfifo_matches_host() {
         assert_eq!(guest_kind.stdout, host_kind.stdout);
         assert!(guest_kind.stdout.starts_with(b"fifo "));
     }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn ln_link_mv_matches_host() {
+    // 標準出力は空で、作ったリンクと移動先が一致する。
+    let path = busybox();
+    let path = path.to_str().expect("utf-8 path");
+    let root = std::env::temp_dir().join(format!("polyisa-lnmv-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let guest_dir = root.join("guest");
+    let host_dir = root.join("host");
+    std::fs::create_dir_all(&guest_dir).unwrap();
+    std::fs::create_dir_all(&host_dir).unwrap();
+    std::fs::write(guest_dir.join("a"), b"x").unwrap();
+    std::fs::write(host_dir.join("a"), b"x").unwrap();
+    std::fs::write(guest_dir.join("d"), b"y").unwrap();
+    std::fs::write(host_dir.join("d"), b"y").unwrap();
+    let cases = [
+        (
+            vec![
+                "ln".to_string(),
+                "-s".to_string(),
+                "a".to_string(),
+                guest_dir.join("b").to_str().unwrap().to_string(),
+            ],
+            vec![
+                "ln".to_string(),
+                "-s".to_string(),
+                "a".to_string(),
+                host_dir.join("b").to_str().unwrap().to_string(),
+            ],
+            guest_dir.join("b"),
+            host_dir.join("b"),
+        ),
+        (
+            vec![
+                "link".to_string(),
+                guest_dir.join("a").to_str().unwrap().to_string(),
+                guest_dir.join("c").to_str().unwrap().to_string(),
+            ],
+            vec![
+                "link".to_string(),
+                host_dir.join("a").to_str().unwrap().to_string(),
+                host_dir.join("c").to_str().unwrap().to_string(),
+            ],
+            guest_dir.join("c"),
+            host_dir.join("c"),
+        ),
+        (
+            vec![
+                "mv".to_string(),
+                guest_dir.join("d").to_str().unwrap().to_string(),
+                guest_dir.join("e").to_str().unwrap().to_string(),
+            ],
+            vec![
+                "mv".to_string(),
+                host_dir.join("d").to_str().unwrap().to_string(),
+                host_dir.join("e").to_str().unwrap().to_string(),
+            ],
+            guest_dir.join("e"),
+            host_dir.join("e"),
+        ),
+    ];
+    for (guest_args, host_args, guest_f, host_f) in cases {
+        let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &guest_args)
+            .unwrap_or_else(|e| panic!("{}: {e}", guest_args[0]));
+        let host = Command::new(path)
+            .args(&host_args)
+            .env_clear()
+            .output()
+            .expect("host ln/link/mv");
+        assert_eq!(code, host.status.code().unwrap_or(1) as u64);
+        assert_eq!(out.as_slice(), host.stdout.as_slice());
+        assert_eq!(code, 0);
+        assert!(out.is_empty());
+        let guest_meta = std::fs::symlink_metadata(&guest_f).unwrap();
+        let host_meta = std::fs::symlink_metadata(&host_f).unwrap();
+        assert_eq!(
+            guest_meta.file_type().is_symlink(),
+            host_meta.file_type().is_symlink()
+        );
+        if guest_meta.file_type().is_symlink() {
+            assert_eq!(
+                std::fs::read_link(&guest_f).unwrap(),
+                std::fs::read_link(&host_f).unwrap()
+            );
+        } else {
+            assert_eq!(
+                std::fs::read(&guest_f).unwrap(),
+                std::fs::read(&host_f).unwrap()
+            );
+        }
+    }
+    assert!(!guest_dir.join("d").exists());
+    assert!(!host_dir.join("d").exists());
     let _ = std::fs::remove_dir_all(&root);
 }
 
