@@ -43,6 +43,7 @@
 - finit_module
 - flock
 - fork
+- fsetxattr
 - fstat
 - fsync
 - ftruncate
@@ -69,11 +70,13 @@
 - lchown
 - link
 - lseek
+- lsetxattr
 - lstat
 - mkdir
 - mkdirat
 - mknod
 - mmap
+- mount
 - mprotect
 - msgctl
 - msgget
@@ -117,6 +120,7 @@
 - setpgid
 - setpriority
 - setsid
+- setxattr
 - shmctl
 - shmget
 - socket

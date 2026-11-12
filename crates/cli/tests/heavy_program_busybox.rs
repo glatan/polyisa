@@ -464,6 +464,36 @@ fn true_echo_uname_id_match() {
         ),
         ("ash", ["ash", "-c", "exit 2"].as_slice()),
         ("sh", ["sh", "-c", "exit 2"].as_slice()),
+        ("setfattr", ["setfattr", "-n", "user.x", "/no"].as_slice()),
+        (
+            "mount",
+            ["mount", "-t", "ext4", "/etc/passwd", "/tmp"].as_slice(),
+        ),
+        (
+            "switch_root",
+            ["switch_root", "/no", "/bin/true"].as_slice(),
+        ),
+        ("run-init", ["run-init", "/no", "/bin/true"].as_slice()),
+        ("ssl_client", ["ssl_client", "-s", "127.0.0.1"].as_slice()),
+        (
+            "ftpget",
+            ["ftpget", "-u", "x", "127.0.0.1", "/tmp/x", "/x"].as_slice(),
+        ),
+        ("zcip", ["zcip", "eth0", "/tmp/zcip"].as_slice()),
+        ("tcpsvd", ["tcpsvd", "127.0.0.1", "9", "true"].as_slice()),
+        ("udpsvd", ["udpsvd", "127.0.0.1", "9", "true"].as_slice()),
+        ("dhcprelay", ["dhcprelay", "eth0", "127.0.0.1"].as_slice()),
+        ("ifplugd", ["ifplugd", "-i", "lo", "-n"].as_slice()),
+        ("syslogd", ["syslogd", "-n"].as_slice()),
+        ("crond", ["crond", "-f", "-L", "/dev/null"].as_slice()),
+        ("telnetd", ["telnetd", "-F"].as_slice()),
+        (
+            "i2ctransfer",
+            ["i2ctransfer", "-y", "0", "w1@0x48"].as_slice(),
+        ),
+        ("svlogd", ["svlogd", "/no"].as_slice()),
+        ("pscan", ["pscan", "-p", "1-2", "127.0.0.1"].as_slice()),
+        ("acpid", ["acpid", "-d"].as_slice()),
     ] {
         let argv: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
         let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)

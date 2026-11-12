@@ -10866,6 +10866,10 @@ const X86_64_SYSCALLS: &[(&str, SysFn)] = &[
     ("sendto", sys_sendto),
     ("recvfrom", sys_recvfrom),
     ("getsockname", sys_getsockname),
+    ("setxattr", sys_setxattr),
+    ("lsetxattr", sys_lsetxattr),
+    ("fsetxattr", sys_fsetxattr),
+    ("mount", sys_mount),
     ("uname", sys_uname),
     ("getuid", sys_getuid),
     ("geteuid", sys_geteuid),
@@ -11992,6 +11996,59 @@ fn sys_recvfrom(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Tr
 
 fn sys_getsockname(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     sys_socket(sys, env, cx)
+}
+
+fn sys_setxattr(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // setxattr(path, ...)。属性は付けず、無い道は ENOENT、有る道は EPERM。
+    let addr = get64(env, cx.r_a);
+    let path = match guest_c_string(env, addr) {
+        Some(p) => p,
+        None => return Some(TrapOutcome::Unimplemented),
+    };
+    sys.ensure_cwd();
+    let host = join_guest_path(&sys.cwd, &path);
+    let err = if std::path::Path::new(&host).exists() {
+        EPERM
+    } else {
+        ENOENT
+    };
+    set64(env, Gpr(0), cx.neg(err));
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_lsetxattr(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    sys_setxattr(sys, env, cx)
+}
+
+fn sys_fsetxattr(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // fsetxattr(fd, ...)。fd 経由でも属性は付けず EPERM。
+    set64(env, Gpr(0), cx.neg(EPERM));
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_mount(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // mount(source, target, ...)。実マウントはせず、無い道は ENOENT、有る道は EPERM。
+    let src_addr = get64(env, cx.r_a);
+    let tgt_addr = get64(env, cx.r_b);
+    let src = match guest_c_string(env, src_addr) {
+        Some(p) => p,
+        None => return Some(TrapOutcome::Unimplemented),
+    };
+    let tgt = match guest_c_string(env, tgt_addr) {
+        Some(p) => p,
+        None => return Some(TrapOutcome::Unimplemented),
+    };
+    sys.ensure_cwd();
+    let src_host = join_guest_path(&sys.cwd, &src);
+    let tgt_host = join_guest_path(&sys.cwd, &tgt);
+    let err =
+        if std::path::Path::new(&src_host).exists() && std::path::Path::new(&tgt_host).exists() {
+            EPERM
+        } else {
+            ENOENT
+        };
+    set64(env, Gpr(0), cx.neg(err));
+    Some(TrapOutcome::Handled)
 }
 
 fn sys_syslog(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
