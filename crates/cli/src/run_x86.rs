@@ -380,6 +380,9 @@ fn fetch_len(
                     } else {
                         None
                     }
+                } else if md == 2 {
+                    // ADDSD xmm,m64 [base+disp32]。awk log 0x4c163e の addsd xmm3, [rdx+disp32]。7B.
+                    Some(7)
                 } else {
                     None
                 }
@@ -7102,6 +7105,10 @@ fn dispatch<B: Backend>(
             } else {
                 sem::addsd_xmm_m64_abs(b, xmm_reg_r(), imm32())
             }
+        }
+        Insn::AddsdXmmM64Mem32 => {
+            // F2 0F 58 /r mod=10。awk log 0x4c163e の addsd xmm3, [rdx+disp32]。
+            sem::addsd_xmm_m64_mem32(b, xmm_reg_r(), rm0f(), disp32())
         }
         // SUBSD xmm,xmm (F2 0F 5C /r reg-direct)。F2 は剥がし済み.
         Insn::Subsd => sem::subsd_xmm(b, xmm_reg_r(), xmm_rm_b()),
