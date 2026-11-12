@@ -161,6 +161,12 @@ pub mod x86_64 {
     pub const GETPGID: u64 = 121;
     pub const GETPRIORITY: u64 = 140;
     pub const SETPRIORITY: u64 = 141;
+    pub const SCHED_SETPARAM: u64 = 142;
+    pub const SCHED_GETPARAM: u64 = 143;
+    pub const SCHED_SETSCHEDULER: u64 = 144;
+    pub const SCHED_GETSCHEDULER: u64 = 145;
+    pub const SCHED_GET_PRIORITY_MAX: u64 = 146;
+    pub const SCHED_GET_PRIORITY_MIN: u64 = 147;
     pub const PIPE2: u64 = 293;
     pub const PIPE: u64 = 22;
     // Gap: GAP-0004
@@ -474,6 +480,12 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             x86_64::GETPGID => Some("getpgid"),
             x86_64::GETPRIORITY => Some("getpriority"),
             x86_64::SETPRIORITY => Some("setpriority"),
+            x86_64::SCHED_SETPARAM => Some("sched_setparam"),
+            x86_64::SCHED_GETPARAM => Some("sched_getparam"),
+            x86_64::SCHED_SETSCHEDULER => Some("sched_setscheduler"),
+            x86_64::SCHED_GETSCHEDULER => Some("sched_getscheduler"),
+            x86_64::SCHED_GET_PRIORITY_MAX => Some("sched_get_priority_max"),
+            x86_64::SCHED_GET_PRIORITY_MIN => Some("sched_get_priority_min"),
             x86_64::CHDIR => Some("chdir"),
             x86_64::KILL => Some("kill"),
             _ => None,

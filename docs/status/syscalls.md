@@ -77,7 +77,13 @@
 - rseq
 - rt_sigaction
 - rt_sigprocmask
+- sched_get_priority_max
+- sched_get_priority_min
 - sched_getaffinity
+- sched_getparam
+- sched_getscheduler
+- sched_setparam
+- sched_setscheduler
 - sendfile
 - set_robust_list
 - set_tid_address

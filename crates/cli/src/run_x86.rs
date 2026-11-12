@@ -10692,6 +10692,12 @@ const X86_64_SYSCALLS: &[(&str, SysFn)] = &[
     ("getpgid", sys_getpgid),
     ("getpriority", sys_getpriority),
     ("setpriority", sys_setpriority),
+    ("sched_setparam", sys_sched_setparam),
+    ("sched_getparam", sys_sched_getparam),
+    ("sched_setscheduler", sys_sched_setscheduler),
+    ("sched_getscheduler", sys_sched_getscheduler),
+    ("sched_get_priority_max", sys_sched_get_priority_max),
+    ("sched_get_priority_min", sys_sched_get_priority_min),
     ("chdir", sys_chdir),
     ("kill", sys_kill),
     ("mmap", sys_mmap),
@@ -11652,6 +11658,146 @@ fn sys_setpriority(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Optio
     let which = get64(env, cx.r_a);
     if which > 2 {
         set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
+}
+
+/// SCHED_OTHER/BATCH/IDLE は 0、FIFO/RR は 1..=99。未知の方針は None。
+fn sched_priority_bounds(policy: u64) -> Option<(i32, i32)> {
+    match policy {
+        0 | 3 | 5 => Some((0, 0)),
+        1 | 2 => Some((1, 99)),
+        _ => None,
+    }
+}
+
+fn sys_sched_get_priority_max(
+    _sys: &mut CliLinux,
+    env: &mut BareEnv,
+    cx: &SysCtx,
+) -> Option<TrapOutcome> {
+    // sched_get_priority_max(policy)。chrt が方針の上限を読む。Ref: SRC-LINUX (7.3).
+    let Some((_, max)) = sched_priority_bounds(get64(env, cx.r_a)) else {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    };
+    set64(env, Gpr(0), max as u64);
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_sched_get_priority_min(
+    _sys: &mut CliLinux,
+    env: &mut BareEnv,
+    cx: &SysCtx,
+) -> Option<TrapOutcome> {
+    let Some((min, _)) = sched_priority_bounds(get64(env, cx.r_a)) else {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    };
+    set64(env, Gpr(0), min as u64);
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_sched_getscheduler(
+    sys: &mut CliLinux,
+    env: &mut BareEnv,
+    cx: &SysCtx,
+) -> Option<TrapOutcome> {
+    // いまの方針は SCHED_OTHER。pid 0 は自分。
+    let pid = get64(env, cx.r_a);
+    let me = sys.ensure_self().0;
+    if pid != 0 && pid != me {
+        set64(env, Gpr(0), cx.neg(ESRCH));
+        return Some(TrapOutcome::Handled);
+    }
+    set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
+}
+
+fn read_sched_priority(env: &mut BareEnv, addr: u64) -> Option<i32> {
+    if addr == 0 {
+        return None;
+    }
+    let mut buf = [0u8; 4];
+    if env
+        .backend
+        .mem
+        .read(polyisa_mem::VirtAddr(addr), &mut buf, data_access())
+        .is_err()
+    {
+        return None;
+    }
+    Some(i32::from_le_bytes(buf))
+}
+
+fn sys_sched_setscheduler(
+    sys: &mut CliLinux,
+    env: &mut BareEnv,
+    cx: &SysCtx,
+) -> Option<TrapOutcome> {
+    // sched_setscheduler(pid, policy, param)。方針は変えず、範囲だけ確かめて 0 を返す。
+    let pid = get64(env, cx.r_a);
+    let policy = get64(env, cx.r_b);
+    let param = get64(env, cx.r_c);
+    let me = sys.ensure_self().0;
+    if pid != 0 && pid != me {
+        set64(env, Gpr(0), cx.neg(ESRCH));
+        return Some(TrapOutcome::Handled);
+    }
+    let Some((min, max)) = sched_priority_bounds(policy) else {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    };
+    let Some(prio) = read_sched_priority(env, param) else {
+        set64(env, Gpr(0), cx.neg(EFAULT));
+        return Some(TrapOutcome::Handled);
+    };
+    if prio < min || prio > max {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_sched_setparam(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // sched_setparam(pid, param)。現方針 OTHER の優先度 0 だけ受理する。
+    let pid = get64(env, cx.r_a);
+    let param = get64(env, cx.r_b);
+    let me = sys.ensure_self().0;
+    if pid != 0 && pid != me {
+        set64(env, Gpr(0), cx.neg(ESRCH));
+        return Some(TrapOutcome::Handled);
+    }
+    let Some(prio) = read_sched_priority(env, param) else {
+        set64(env, Gpr(0), cx.neg(EFAULT));
+        return Some(TrapOutcome::Handled);
+    };
+    if prio != 0 {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_sched_getparam(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    let pid = get64(env, cx.r_a);
+    let param = get64(env, cx.r_b);
+    let me = sys.ensure_self().0;
+    if pid != 0 && pid != me {
+        set64(env, Gpr(0), cx.neg(ESRCH));
+        return Some(TrapOutcome::Handled);
+    }
+    if env
+        .backend
+        .mem
+        .write(polyisa_mem::VirtAddr(param), &0i32.to_le_bytes())
+        .is_err()
+    {
+        set64(env, Gpr(0), cx.neg(EFAULT));
         return Some(TrapOutcome::Handled);
     }
     set64(env, Gpr(0), 0);
@@ -14941,6 +15087,39 @@ mod tests {
         set64(&mut env, Gpr(7), 3);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EINVAL));
+    }
+
+    #[test]
+    fn sched_priority_bounds_for_other_and_fifo() {
+        use polyisa_os_linux::x86_64 as abi;
+        let mut sys = CliLinux::x86_64();
+        let mut env = bare();
+        set64(&mut env, Gpr(0), abi::SCHED_GET_PRIORITY_MAX);
+        set64(&mut env, Gpr(7), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        set64(&mut env, Gpr(0), abi::SCHED_GET_PRIORITY_MAX);
+        set64(&mut env, Gpr(7), 1);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 99);
+        set64(&mut env, Gpr(0), abi::SCHED_GET_PRIORITY_MIN);
+        set64(&mut env, Gpr(7), 1);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 1);
+        set64(&mut env, Gpr(0), abi::SCHED_GET_PRIORITY_MAX);
+        set64(&mut env, Gpr(7), 9);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EINVAL));
+        env.backend
+            .mem
+            .write(VirtAddr(0x200), &0i32.to_le_bytes())
+            .unwrap();
+        set64(&mut env, Gpr(0), abi::SCHED_SETSCHEDULER);
+        set64(&mut env, Gpr(7), 0);
+        set64(&mut env, Gpr(6), 0);
+        set64(&mut env, Gpr(2), 0x200);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
     }
 
     #[test]
