@@ -189,6 +189,8 @@ pub mod x86_64 {
     pub const SEMCTL: u64 = 66;
     pub const MSGGET: u64 = 68;
     pub const MSGCTL: u64 = 71;
+    pub const GETITIMER: u64 = 36;
+    pub const SETITIMER: u64 = 38;
     pub const SCHED_SETPARAM: u64 = 142;
     pub const SCHED_GETPARAM: u64 = 143;
     pub const SCHED_SETSCHEDULER: u64 = 144;
@@ -536,6 +538,8 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             x86_64::SEMCTL => Some("semctl"),
             x86_64::MSGGET => Some("msgget"),
             x86_64::MSGCTL => Some("msgctl"),
+            x86_64::GETITIMER => Some("getitimer"),
+            x86_64::SETITIMER => Some("setitimer"),
             x86_64::SCHED_SETPARAM => Some("sched_setparam"),
             x86_64::SCHED_GETPARAM => Some("sched_getparam"),
             x86_64::SCHED_SETSCHEDULER => Some("sched_setscheduler"),

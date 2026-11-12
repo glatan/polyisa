@@ -50,6 +50,7 @@
 - geteuid
 - getgid
 - getgroups
+- getitimer
 - getpgid
 - getpid
 - getppid
@@ -107,6 +108,7 @@
 - set_robust_list
 - set_tid_address
 - setgroups
+- setitimer
 - setpgid
 - setpriority
 - setsid

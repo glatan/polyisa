@@ -10857,6 +10857,8 @@ const X86_64_SYSCALLS: &[(&str, SysFn)] = &[
     ("semctl", sys_semctl),
     ("msgget", sys_msgget),
     ("msgctl", sys_msgctl),
+    ("getitimer", sys_getitimer),
+    ("setitimer", sys_setitimer),
     ("uname", sys_uname),
     ("getuid", sys_getuid),
     ("geteuid", sys_geteuid),
@@ -11926,6 +11928,32 @@ fn sys_msgget(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Tra
 
 fn sys_msgctl(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     set64(env, Gpr(0), cx.neg(EINVAL));
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_getitimer(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // getitimer(which, curr). ゼロの itimerval を書く。
+    let curr = get64(env, cx.r_b);
+    if curr != 0 {
+        let zeros = [0u8; 32];
+        if env.backend.mem.write(VirtAddr(curr), &zeros).is_err() {
+            return Some(TrapOutcome::Unimplemented);
+        }
+    }
+    set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_setitimer(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // setitimer(which, new, old)。タイマーは動かさず、old があればゼロを書く。
+    let old = get64(env, cx.r_c);
+    if old != 0 {
+        let zeros = [0u8; 32];
+        if env.backend.mem.write(VirtAddr(old), &zeros).is_err() {
+            return Some(TrapOutcome::Unimplemented);
+        }
+    }
+    set64(env, Gpr(0), 0);
     Some(TrapOutcome::Handled)
 }
 
