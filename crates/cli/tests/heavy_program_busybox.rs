@@ -1282,6 +1282,47 @@ fn envdir_printenv_matches_host() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+#[test]
+fn run_parts_test_lists_match_host() {
+    // --test は実行せず名前だけ出す。パスが違うので DIR に置き換えて比べる。
+    let path = busybox();
+    let path = path.to_str().expect("utf-8 path");
+    let root = std::env::temp_dir().join(format!("polyisa-rp-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let guest = root.join("guest");
+    let host = root.join("host");
+    std::fs::create_dir_all(&guest).unwrap();
+    std::fs::create_dir_all(&host).unwrap();
+    std::fs::write(guest.join("a"), b"#!/bin/true\n").unwrap();
+    std::fs::write(host.join("a"), b"#!/bin/true\n").unwrap();
+    // crates/ では std::os を使えないので chmod で実行ビットを付ける。
+    for p in [guest.join("a"), host.join("a")] {
+        Command::new("chmod")
+            .args(["755", p.to_str().unwrap()])
+            .status()
+            .expect("chmod");
+    }
+    let guest_args = [
+        "run-parts".to_string(),
+        "--test".to_string(),
+        guest.to_str().unwrap().to_string(),
+    ];
+    let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &guest_args)
+        .unwrap_or_else(|e| panic!("run-parts: {e}"));
+    let host_out = Command::new(path)
+        .args(["run-parts", "--test", host.to_str().unwrap()])
+        .env_clear()
+        .output()
+        .expect("host run-parts");
+    assert_eq!(code, host_out.status.code().unwrap_or(1) as u64);
+    let guest_text = String::from_utf8_lossy(&out).replace(guest.to_str().unwrap(), "DIR");
+    let host_text =
+        String::from_utf8_lossy(&host_out.stdout).replace(host.to_str().unwrap(), "DIR");
+    assert_eq!(guest_text, host_text);
+    assert_eq!(guest_text, "DIR/a\n");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 fn crc32(data: &[u8]) -> u32 {
     let mut crc = 0xffff_ffffu32;
     for &byte in data {
