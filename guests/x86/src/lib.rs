@@ -542,6 +542,10 @@ mod tests {
         // 48 0F 45 05 34 00 0C 00 は REX.W 剥がし済み.
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x0F450534000C00, 56), Some(Insn::CmovneRip));
+        // CMOVBE r, [rip+disp32] (0F 46 05 + disp32)。sv 0x4512c9 の 0F 46 05 70 25 2C 00。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x0F460570252C00, 56), Some(Insn::CmovbeRip));
+        assert_eq!(decode(0x0F460570252C00, 48), None);
         assert_eq!(decode(0x0F450534000C00, 48), None);
         // XOR r8,[base] (32 /r mod=00)。32 06 は XOR AL,[RSI].
         // cksum 0x5c7fc7 対応.

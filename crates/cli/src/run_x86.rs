@@ -8416,6 +8416,16 @@ fn dispatch<B: Backend>(
                 sem::cmovne_r32_abs(b, reg0f_as_gpr(), imm32())
             }
         }
+        Insn::CmovbeRip => {
+            // CMOVBE r64/r32, m64/m32 [RIP+disp32] (0F 46 05 + disp32)。sv 0x4512c9 対応.
+            if rex_w {
+                sem::cmovbe_r64_rip(b, reg0f_as_gpr(), eip as u64 + nbytes, disp32())
+            } else if is64 {
+                sem::cmovbe_r32_rip(b, reg0f_as_gpr(), eip as u64 + nbytes, disp32())
+            } else {
+                sem::cmovbe_r32_abs(b, reg0f_as_gpr(), imm32())
+            }
+        }
         Insn::CmovaeM64 => {
             if rex_w {
                 sem::cmovae_r64_mem32(b, reg0f_as_gpr(), rm0f(), disp32())

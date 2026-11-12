@@ -16299,6 +16299,55 @@ pub fn cmovne_r32_rip<B: Backend>(b: &mut B, dst: Gpr, next_rip: u64, disp: i32)
     Ok(())
 }
 
+/// CMOVBE r32, m32 [RIP+disp32]。CF=1 または ZF=1 なら移す。sv 0x4512c9 対応.
+pub fn cmovbe_r32_rip<B: Backend>(b: &mut B, dst: Gpr, next_rip: u64, disp: i32) -> Flow<B> {
+    let base = b.konst::<W64>(next_rip);
+    let d = b.konst::<W64>(disp as i64 as u64);
+    let addr = b.add::<W64>(base, d);
+    let srcv: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let cf = cf_num(b);
+    let zf = zf_num(b);
+    let either = b.or::<W32>(cf, zf);
+    let zero = b.konst::<W32>(0);
+    let take = b.cmp::<W32>(Cmp::Ne, either, zero);
+    let dstv = read(b, dst);
+    let v = b.select::<W32>(take, srcv, dstv);
+    write(b, dst, v);
+    Ok(())
+}
+
+/// CMOVBE r64, m64 [RIP+disp32]。CF=1 または ZF=1 なら移す.
+pub fn cmovbe_r64_rip<B: Backend>(b: &mut B, dst: Gpr, next_rip: u64, disp: i32) -> Flow<B> {
+    let base = b.konst::<W64>(next_rip);
+    let d = b.konst::<W64>(disp as i64 as u64);
+    let addr = b.add::<W64>(base, d);
+    let srcv: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let cf = cf_num(b);
+    let zf = zf_num(b);
+    let either = b.or::<W32>(cf, zf);
+    let zero = b.konst::<W32>(0);
+    let take = b.cmp::<W32>(Cmp::Ne, either, zero);
+    let dstv = read64(b, dst);
+    let v = b.select::<W64>(take, srcv, dstv);
+    write64(b, dst, v);
+    Ok(())
+}
+
+/// CMOVBE r32, m32 [disp32] abs (32ビット)。
+pub fn cmovbe_r32_abs<B: Backend>(b: &mut B, dst: Gpr, addr32: u32) -> Flow<B> {
+    let addr = b.konst::<W64>(addr32 as u64);
+    let srcv: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let cf = cf_num(b);
+    let zf = zf_num(b);
+    let either = b.or::<W32>(cf, zf);
+    let zero = b.konst::<W32>(0);
+    let take = b.cmp::<W32>(Cmp::Ne, either, zero);
+    let dstv = read(b, dst);
+    let v = b.select::<W32>(take, srcv, dstv);
+    write(b, dst, v);
+    Ok(())
+}
+
 /// CMOVNE r32, m32 [disp32] abs (32ビット)。
 pub fn cmovne_r32_abs<B: Backend>(b: &mut B, dst: Gpr, addr32: u32) -> Flow<B> {
     let addr = b.konst::<W64>(addr32 as u64);
