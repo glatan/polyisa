@@ -83,6 +83,7 @@
 - sched_getaffinity
 - sched_getparam
 - sched_getscheduler
+- sched_setaffinity
 - sched_setparam
 - sched_setscheduler
 - sendfile

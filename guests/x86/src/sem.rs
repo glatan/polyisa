@@ -1197,6 +1197,25 @@ pub fn test_m8_r8_mem8<B: Backend>(
     Ok(())
 }
 
+/// TEST [base+index*scale+disp8], r8 (84 /r SIB mod=01)。メモリは変えない。
+pub fn test_m8_r8_sibd<B: Backend>(
+    b: &mut B,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i8,
+    src: Gpr,
+    high: bool,
+) -> Flow<B> {
+    use polyisa_sem::W8;
+    let addr = sib_addr_scaled(b, shift, i32::from(disp), base, idx);
+    let x: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
+    let y = read8(b, src, high);
+    let v = b.and::<W8>(x, y);
+    update_logic_flags(b, v);
+    Ok(())
+}
+
 /// TEST [base+disp32], r8 (84 /r mod=10)。
 pub fn test_m8_r8_mem32<B: Backend>(
     b: &mut B,

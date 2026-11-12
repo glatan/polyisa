@@ -1016,7 +1016,8 @@ fn fetch_len(
             }
         }
         // 0x84 /r (TEST r/m8,r8)。reg-direct 2B、mod=00 base 2B / abs 6B、
-        // mod=01 base+disp8 3B、mod=10 base+disp32 6B。SIB は未対応で None.
+        // mod=01 base+disp8 3B、mod=10 base+disp32 6B。
+        // SIB mod=01 は 4B。taskset 0x47c686 の 84 44 24 0c。
         0x84 => {
             let s = second?;
             let md = s >> 6;
@@ -1024,7 +1025,7 @@ fn fetch_len(
             if md == 3 {
                 Some(2)
             } else if rm == 4 {
-                None
+                if md == 1 { Some(4) } else { None }
             } else if md == 1 {
                 Some(3)
             } else if md == 2 || rm == 5 {
@@ -3956,6 +3957,29 @@ fn dispatch<B: Backend>(
                 (Gpr(reg_f - 4), true)
             };
             sem::test_m8_r8_mem8(b, rm(), disp8(), src, high)
+        }
+        Insn::TestM8R8Sibd => {
+            // 84 /r SIB mod=01 [base+index*scale+disp8], r8。taskset 0x47c686。
+            // SIB は (word>>8) 下位8、disp8 は最下位8。
+            let reg_f = (modrm() >> 3) & 7;
+            let (src, high) = if rex != 0 {
+                (Gpr(reg_f | ((rex >> 2) & 1) << 3), false)
+            } else if reg_f < 4 {
+                (Gpr(reg_f), false)
+            } else {
+                (Gpr(reg_f - 4), true)
+            };
+            let sib_v = ((word >> 8) & 0xff) as u8;
+            let d8 = (word & 0xff) as u8 as i8;
+            let shift = ((sib_v >> 6) & 3) as u32;
+            let idx_raw = (sib_v >> 3) & 7;
+            let idx = Gpr(idx_raw | (((rex >> 1) & 1) << 3));
+            let base = Gpr((sib_v & 7) | ((rex & 1) << 3));
+            if idx_raw == 4 && (rex >> 1) & 1 == 0 {
+                sem::test_m8_r8_mem8(b, base, d8, src, high)
+            } else {
+                sem::test_m8_r8_sibd(b, base, idx, shift, d8, src, high)
+            }
         }
         Insn::TestM8R8Mem32 => {
             // 84 /r mod=10 [base+disp32],r8.
@@ -10696,6 +10720,7 @@ const X86_64_SYSCALLS: &[(&str, SysFn)] = &[
     ("getpriority", sys_getpriority),
     ("setpriority", sys_setpriority),
     ("personality", sys_personality),
+    ("sched_setaffinity", sys_sched_setaffinity),
     ("sched_setparam", sys_sched_setparam),
     ("sched_getparam", sys_sched_getparam),
     ("sched_setscheduler", sys_sched_setscheduler),
@@ -11677,6 +11702,58 @@ fn sys_personality(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option
         sys.personality = persona;
     }
     set64(env, Gpr(0), old);
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_sched_setaffinity(
+    sys: &mut CliLinux,
+    env: &mut BareEnv,
+    cx: &SysCtx,
+) -> Option<TrapOutcome> {
+    // sched_setaffinity(pid, len, mask)。空集合と、ホストに無い CPU は EINVAL。
+    // CPU は実際には固定しない。taskset が続けて exec できるように 0 を返す。
+    // Ref: SRC-LINUX (7.3).
+    let pid = get64(env, cx.r_a);
+    let len = get64(env, cx.r_b);
+    let mask = get64(env, cx.r_c);
+    let me = guest_pid(sys);
+    if pid != 0 && pid != me {
+        set64(env, Gpr(0), cx.neg(ESRCH));
+        return Some(TrapOutcome::Handled);
+    }
+    const MAX_MASK: u64 = 65536;
+    if len == 0 || !len.is_multiple_of(8) || len > MAX_MASK || mask == 0 {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    let mut buf = vec![0u8; len as usize];
+    if env
+        .backend
+        .mem
+        .read(polyisa_mem::VirtAddr(mask), &mut buf, data_access())
+        .is_err()
+    {
+        set64(env, Gpr(0), cx.neg(EFAULT));
+        return Some(TrapOutcome::Handled);
+    }
+    let host = host_affinity_mask();
+    let mut any = false;
+    for (i, byte) in buf.iter().enumerate() {
+        if *byte == 0 {
+            continue;
+        }
+        any = true;
+        let allowed = host.get(i).copied().unwrap_or(0);
+        if byte & !allowed != 0 {
+            set64(env, Gpr(0), cx.neg(EINVAL));
+            return Some(TrapOutcome::Handled);
+        }
+    }
+    if !any {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    set64(env, Gpr(0), 0);
     Some(TrapOutcome::Handled)
 }
 
@@ -15151,6 +15228,30 @@ mod tests {
         set64(&mut env, Gpr(7), 0xffff_ffff);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), 8);
+    }
+
+    #[test]
+    fn sched_setaffinity_accepts_cpu0() {
+        use polyisa_os_linux::x86_64 as abi;
+        let mut sys = CliLinux::x86_64();
+        let mut env = bare();
+        env.backend
+            .mem
+            .write(VirtAddr(0x200), &1u64.to_le_bytes())
+            .unwrap();
+        set64(&mut env, Gpr(0), abi::SCHED_SETAFFINITY);
+        set64(&mut env, Gpr(7), 0);
+        set64(&mut env, Gpr(6), 8);
+        set64(&mut env, Gpr(2), 0x200);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        env.backend
+            .mem
+            .write(VirtAddr(0x200), &0u64.to_le_bytes())
+            .unwrap();
+        set64(&mut env, Gpr(0), abi::SCHED_SETAFFINITY);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EINVAL));
     }
 
     #[test]

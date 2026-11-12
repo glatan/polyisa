@@ -2715,6 +2715,44 @@ fn run_setne_m8_sibd() {
 }
 
 #[test]
+fn run_test_m8_r8_sibd_rsp() {
+    // 84 44 24 0C は test %al, 0xc(%rsp)。taskset 0x47c686。
+    // RSP=0x1500、[0x150c]=0xF0、AL=0 なので結果は 0 で ZF が立つ。メモリは変えない。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(4), 0x1500);
+        Ok(())
+    })
+    .unwrap();
+    env.backend.mem.write(VirtAddr(0x150c), &[0xF0u8]).unwrap();
+    let prog: &[u8] = &[0x84, 0x44, 0x24, 0x0C];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x1004 });
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0xC5,
+        0x44
+    );
+    let mut back = [0u8; 1];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x150c),
+            &mut back,
+            polyisa_mem::Access {
+                endian: polyisa_mem::Endian::Le,
+                align: polyisa_mem::Align::Unaligned,
+                kind: polyisa_mem::AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(back, [0xF0]);
+}
+
+#[test]
 fn run_test_m8_imm_sib() {
     // run 経由で 41 F6 04 24 04 (TESTB $0x04,(%r12)) を回す。ls -l 0x40e342 対応.
     // R12=0x1500、[0x1500]=0x04 -> ZF=0、eip は 0x1005 に進み exit(0)。

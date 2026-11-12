@@ -458,6 +458,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("dec_rm_rip", "F1", "11111111 00001101 ................................", "dec r/m", "alu"),
         // OR r8,m8 SIB mod=01 [base+index*scale+disp8] (0A /r)。dst は reg.
         ("or_r8_m8_sibd", "S8", "00001010 01...100 ........ ........", "or r8, m8", "load"),
+        // TEST m8,r8 SIB mod=01 [base+index*scale+disp8] (84 /r)。taskset 0x47c686 の test %al,0xc(%rsp)。
+        ("test_m8_r8_sibd", "S8", "10000100 01...100 ........ ........", "test m8, r8", "alu"),
         // OR r8,m8 SIB+disp32 (0A /r mod=10 rm=4)。tar -tf 0x48e5f4 の or al, [rsp+disp32]。
         ("or_r8_m8_sibd32", "F1", "00001010 10...100 ........ ................................", "or r8, m8", "load"),
         // OR r8, [base+disp8] (0A /r mod=01、SIBなし)。uudecode 0x49da3e 対応。
