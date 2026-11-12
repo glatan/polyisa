@@ -747,6 +747,7 @@ fn device_and_fs_fail_matches_host() {
         ("fdisk", ["fdisk", f].as_slice()),
         ("losetup file", ["losetup", f].as_slice()),
         ("mkfs.reiser", ["mkfs.reiser", f].as_slice()),
+        ("tune2fs", ["tune2fs", "-L", "x", f].as_slice()),
         ("dpkg-deb", ["dpkg-deb", f].as_slice()),
         ("makedevs", ["makedevs", f].as_slice()),
         ("scriptreplay", ["scriptreplay", f].as_slice()),

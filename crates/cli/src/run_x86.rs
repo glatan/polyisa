@@ -11013,6 +11013,8 @@ const X86_64_SYSCALLS: &[(&str, SysFn)] = &[
     ("fsetxattr", sys_fsetxattr),
     ("mount", sys_mount),
     ("poll", sys_poll),
+    ("select", sys_select),
+    ("pselect6", sys_pselect6),
     ("sysfs", sys_sysfs),
     ("tkill", sys_tkill),
     ("inotify_init1", sys_inotify_init1),
@@ -11259,7 +11261,11 @@ fn open_at_cwd(
     }
     let path = match guest_c_string(env, path_addr) {
         Some(p) => p,
-        None => return Some(TrapOutcome::Unimplemented),
+        None => {
+            // NULL や読めないパスは Linux と同様 EFAULT。
+            set64(env, Gpr(0), cx.neg(EFAULT));
+            return Some(TrapOutcome::Handled);
+        }
     };
     sys.ensure_cwd();
     let path = join_guest_path(&sys.cwd, &path);
@@ -12278,6 +12284,16 @@ fn sys_poll(_sys: &mut CliLinux, env: &mut BareEnv, _cx: &SysCtx) -> Option<Trap
     // poll。待ちはせずタイムアウトとして 0 を返す。top / powertop の前進用。
     set64(env, Gpr(0), 0);
     Some(TrapOutcome::Handled)
+}
+
+fn sys_select(_sys: &mut CliLinux, env: &mut BareEnv, _cx: &SysCtx) -> Option<TrapOutcome> {
+    // select。待ちはせずタイムアウトとして 0 を返す。vi / inetd の前進用。
+    set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_pselect6(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    sys_select(sys, env, cx)
 }
 
 fn sys_sysfs(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {

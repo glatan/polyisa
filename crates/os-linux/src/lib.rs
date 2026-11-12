@@ -206,6 +206,8 @@ pub mod x86_64 {
     pub const FSETXATTR: u64 = 190;
     pub const MOUNT: u64 = 165;
     pub const POLL: u64 = 7;
+    pub const SELECT: u64 = 23;
+    pub const PSELECT6: u64 = 270;
     pub const SYSFS: u64 = 119;
     pub const TKILL: u64 = 200;
     pub const INOTIFY_INIT1: u64 = 294;
@@ -582,6 +584,8 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             x86_64::FSETXATTR => Some("fsetxattr"),
             x86_64::MOUNT => Some("mount"),
             x86_64::POLL => Some("poll"),
+            x86_64::SELECT => Some("select"),
+            x86_64::PSELECT6 => Some("pselect6"),
             x86_64::SYSFS => Some("sysfs"),
             x86_64::TKILL => Some("tkill"),
             x86_64::INOTIFY_INIT1 => Some("inotify_init1"),

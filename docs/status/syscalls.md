@@ -95,6 +95,7 @@
 - pivot_root
 - poll
 - prlimit64
+- pselect6
 - read
 - readlink
 - readlinkat
@@ -116,6 +117,7 @@
 - sched_setaffinity
 - sched_setparam
 - sched_setscheduler
+- select
 - semctl
 - semget
 - sendfile
