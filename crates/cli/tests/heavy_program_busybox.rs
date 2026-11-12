@@ -429,6 +429,13 @@ fn true_echo_uname_id_match() {
         )
         .as_bytes()
     );
+    // lsscsi は合成 /sys/bus/scsi の固定 1 台。ホストとは比べない。
+    let lsscsi = ["lsscsi"];
+    let argv: Vec<String> = lsscsi.iter().map(|s| (*s).to_string()).collect();
+    let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)
+        .unwrap_or_else(|e| panic!("lsscsi: {e}"));
+    assert_eq!(code, 0);
+    assert_eq!(out.as_slice(), b"[0:0:0:0]\tdisk\tPolyISA\tDisk\t1.0\n");
     // 偽の比較は終了コード 1、標準出力は空。
     for (name, args) in [
         ("[", ["[", "1", "-eq", "2", "]"].as_slice()),

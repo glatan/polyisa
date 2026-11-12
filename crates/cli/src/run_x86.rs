@@ -11345,6 +11345,19 @@ fn open_at_cwd(
             b"Num       RefCount Protocol Flags    Type St Inode Path\n",
         );
     }
+    // lsscsi 用。ホストの SCSI 一覧は見せず、1 台だけ固定する。
+    if let Some(rest) = path.strip_prefix("/sys/bus/scsi/devices/0:0:0:0/") {
+        let body: &[u8] = match rest {
+            "vendor" => b"PolyISA\n",
+            "model" => b"Disk\n",
+            "rev" => b"1.0\n",
+            "type" => b"0\n",
+            _ => b"",
+        };
+        if !body.is_empty() {
+            return open_synth_bytes(sys, env, cx, "scsi", body);
+        }
+    }
     // ps / top / pstree 用。ホストの PID 一覧は見せず、pid 1 だけを固定する。
     if path == "/proc/1/stat"
         || path == "/proc/self/stat"
@@ -13106,6 +13119,8 @@ fn sys_getdents64(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<
     let proc_root = dir_path == std::path::Path::new("/proc");
     let proc_one_task = dir_path == std::path::Path::new("/proc/1/task")
         || dir_path == std::path::Path::new("/proc/self/task");
+    let scsi_devices = dir_path == std::path::Path::new("/sys/bus/scsi/devices")
+        || dir_path == std::path::Path::new("/sys/bus/scsi/devices/.");
     if proc_root {
         // ホストの PID は隠す。ps/top の期待値を固定するため pid 1 と self だけ返す。
         names.push((b"1".to_vec(), 4));
@@ -13117,6 +13132,8 @@ fn sys_getdents64(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<
         names.push((b"uptime".to_vec(), 8));
     } else if proc_one_task {
         names.push((b"1".to_vec(), 4));
+    } else if scsi_devices {
+        names.push((b"0:0:0:0".to_vec(), 4));
     } else {
         for ent in rd.flatten() {
             let name = ent
