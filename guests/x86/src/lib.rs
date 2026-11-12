@@ -85,7 +85,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数117件。
-        assert_eq!(INSNS.len(), 766);
+        assert_eq!(INSNS.len(), 767);
     }
 
     #[test]
@@ -1198,6 +1198,7 @@ mod tests {
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0xDD00, 16), Some(Insn::FldM64Memnd));
         assert_eq!(decode(0xDD0424, 24), Some(Insn::FldM64Sib));
+        assert_eq!(decode(0x813C2400200725, 56), Some(Insn::CmpRm32ImmSib));
         // FSTP m80 (%rdi) (DB /7)。seq 0x4d0725 の DB 3F。
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0xDB3F, 16), Some(Insn::FstpM80Memnd));

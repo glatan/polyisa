@@ -5847,6 +5847,21 @@ fn dispatch<B: Backend>(
                 sem::cmp_rm32_imm_memnd(b, rm(), imm)
             }
         }
+        Insn::CmpRm32ImmSib => {
+            // 81 /7 SIB mod=00。awk 0x4a205a の cmpl $0x25072000, DWORD PTR [r12]。
+            let imm = ((word & 0xffff_ffff) as u32).swap_bytes();
+            if no_index() {
+                if rex_w {
+                    sem::cmp_rm64_imm_memnd(b, sib_base(), imm)
+                } else {
+                    sem::cmp_rm32_imm_memnd(b, sib_base(), imm)
+                }
+            } else if rex_w {
+                sem::cmp_rm64_imm_sib(b, sib_base(), sib_idx(), sib_shift(), imm)
+            } else {
+                sem::cmp_rm32_imm_sib(b, sib_base(), sib_idx(), sib_shift(), imm)
+            }
+        }
         Insn::CmpRm32ImmSibd => {
             // 81 /7 SIB mod=01。nc 0x4c68d6 の cmpl $0xff, 0xc(%rsp)。
             let disp = ((word >> 32) & 0xff) as u8 as i8;
