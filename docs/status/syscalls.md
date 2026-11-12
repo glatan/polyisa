@@ -81,6 +81,7 @@
 - set_robust_list
 - set_tid_address
 - setpgid
+- setsid
 - stat
 - symlink
 - sync

@@ -157,6 +157,7 @@ pub mod x86_64 {
     pub const WAIT4: u64 = 61;
     pub const KILL: u64 = 62;
     pub const SETPGID: u64 = 109;
+    pub const SETSID: u64 = 112;
     pub const GETPGID: u64 = 121;
     pub const PIPE2: u64 = 293;
     pub const PIPE: u64 = 22;
@@ -467,6 +468,7 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             x86_64::PIPE2 => Some("pipe2"),
             x86_64::PIPE => Some("pipe"),
             x86_64::SETPGID => Some("setpgid"),
+            x86_64::SETSID => Some("setsid"),
             x86_64::GETPGID => Some("getpgid"),
             x86_64::CHDIR => Some("chdir"),
             x86_64::KILL => Some("kill"),

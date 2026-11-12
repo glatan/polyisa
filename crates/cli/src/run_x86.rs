@@ -10688,6 +10688,7 @@ const X86_64_SYSCALLS: &[(&str, SysFn)] = &[
     ("pipe2", sys_pipe2),
     ("pipe", sys_pipe),
     ("setpgid", sys_setpgid),
+    ("setsid", sys_setsid),
     ("getpgid", sys_getpgid),
     ("chdir", sys_chdir),
     ("kill", sys_kill),
@@ -11620,6 +11621,15 @@ fn sys_setpgid(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Tra
     }
     sys.procs.borrow_mut().set_pgid(target, group);
     set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_setsid(sys: &mut CliLinux, env: &mut BareEnv, _cx: &SysCtx) -> Option<TrapOutcome> {
+    // setsid()。自分をプロセスグループの先頭にし、その番号を返す。
+    // setsid echo が先にこれを呼ぶ。Ref: SRC-LINUX (7.3).
+    let me = sys.ensure_self();
+    let _ = sys.procs.borrow_mut().set_pgid(me, me.0);
+    set64(env, Gpr(0), me.0);
     Some(TrapOutcome::Handled)
 }
 
@@ -13616,6 +13626,10 @@ fn install_exec(
         return Err(ENOEXEC);
     }
     let phdrs = polyisa_loader::elf::parse_phdrs(bytes, &ehdr).map_err(|_| ENOEXEC)?;
+    // 動的リンク（PT_INTERP あり）は実行できない。ENOEXEC で探索を続けさせる。
+    if phdrs.iter().any(|ph| ph.seg_type == 3) {
+        return Err(ENOEXEC);
+    }
     let mut mem = polyisa_mem::AddressSpace::new();
     polyisa_loader::elf::load_segments(bytes, &phdrs, &mut mem).map_err(|_| ENOEXEC)?;
     let mut image_end = 0u64;
@@ -14870,6 +14884,16 @@ mod tests {
             .read(VirtAddr(0x100), &mut back, data_access())
             .unwrap();
         assert_eq!(u32::from_le_bytes(back), 0);
+    }
+
+    #[test]
+    fn setsid_returns_pid() {
+        use polyisa_os_linux::x86_64 as abi;
+        let mut sys = CliLinux::x86_64();
+        let mut env = bare();
+        set64(&mut env, Gpr(0), abi::SETSID);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 1);
     }
 
     #[test]
