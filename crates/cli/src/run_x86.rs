@@ -11303,6 +11303,48 @@ fn open_at_cwd(
     if path == "/proc/loadavg" {
         return open_synth_bytes(sys, env, cx, "loadavg", b"0.00 0.00 0.00 1/1 1\n");
     }
+    if path == "/proc/modules" {
+        // lsmod。モジュール無しの固定表。
+        return open_synth_bytes(sys, env, cx, "modules", b"");
+    }
+    if path == "/proc/sys/kernel/tainted" {
+        return open_synth_bytes(sys, env, cx, "tainted", b"0\n");
+    }
+    if path == "/proc/net/route" {
+        // route。宛先無しの見出しだけを出す入力。
+        return open_synth_bytes(
+            sys,
+            env,
+            cx,
+            "netroute",
+            b"Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\tWindow\tIRTT\n",
+        );
+    }
+    if path == "/proc/net/tcp"
+        || path == "/proc/net/tcp6"
+        || path == "/proc/net/udp"
+        || path == "/proc/net/udp6"
+        || path == "/proc/net/raw"
+        || path == "/proc/net/raw6"
+    {
+        // netstat。接続無しの見出し行のみ。
+        return open_synth_bytes(
+            sys,
+            env,
+            cx,
+            "nettcp",
+            b"  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n",
+        );
+    }
+    if path == "/proc/net/unix" {
+        return open_synth_bytes(
+            sys,
+            env,
+            cx,
+            "netunix",
+            b"Num       RefCount Protocol Flags    Type St Inode Path\n",
+        );
+    }
     // ps / top / pstree 用。ホストの PID 一覧は見せず、pid 1 だけを固定する。
     if path == "/proc/1/stat"
         || path == "/proc/self/stat"

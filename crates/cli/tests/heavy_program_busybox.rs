@@ -391,6 +391,44 @@ fn true_echo_uname_id_match() {
         .unwrap_or_else(|e| panic!("uevent: {e}"));
     assert_eq!(code, 1);
     assert!(out.is_empty());
+    // lsmod / route / netstat は合成 /proc の固定値。ホストとは比べない。
+    let lsmod = ["lsmod"];
+    let argv: Vec<String> = lsmod.iter().map(|s| (*s).to_string()).collect();
+    let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)
+        .unwrap_or_else(|e| panic!("lsmod: {e}"));
+    assert_eq!(code, 0);
+    assert_eq!(
+        out.as_slice(),
+        b"Module                  Size  Used by    Not tainted\n"
+    );
+    let route = ["route"];
+    let argv: Vec<String> = route.iter().map(|s| (*s).to_string()).collect();
+    let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)
+        .unwrap_or_else(|e| panic!("route: {e}"));
+    assert_eq!(code, 0);
+    assert_eq!(
+        out.as_slice(),
+        concat!(
+            "Kernel IP routing table\n",
+            "Destination     Gateway         Genmask         Flags Metric Ref    Use Iface\n",
+        )
+        .as_bytes()
+    );
+    let netstat = ["netstat"];
+    let argv: Vec<String> = netstat.iter().map(|s| (*s).to_string()).collect();
+    let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)
+        .unwrap_or_else(|e| panic!("netstat: {e}"));
+    assert_eq!(code, 0);
+    assert_eq!(
+        out.as_slice(),
+        concat!(
+            "Active Internet connections (w/o servers)\n",
+            "Proto Recv-Q Send-Q Local Address           Foreign Address         State       \n",
+            "Active UNIX domain sockets (w/o servers)\n",
+            "Proto RefCnt Flags       Type       State         I-Node Path\n",
+        )
+        .as_bytes()
+    );
     // 偽の比較は終了コード 1、標準出力は空。
     for (name, args) in [
         ("[", ["[", "1", "-eq", "2", "]"].as_slice()),
