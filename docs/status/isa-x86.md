@@ -62,6 +62,7 @@
 | cmpxchg | cmpxchg_r_mem32、cmpxchg_r_mem8、cmpxchg_r_memnd、cmpxchg_r_rip、cmpxchg_r_rm | 真 | alu |
 | comisd | comisd | 真 | alu |
 | cpuid | cpuid | 真 | system |
+| cvtsd2ss | cvtsd2ss | 真 | alu |
 | cvtsi2sd | cvtsi2sd_m32_mem8、cvtsi2sd_m32_sib、cvtsi2sd_m32_sibd、cvtsi2sd_r64 | 真 | load |
 | cvttsd2si | cvttsd2si_m64_sib、cvttsd2si_r64 | 真 | load |
 | cwde | cwde | 真 | alu |

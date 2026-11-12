@@ -361,6 +361,10 @@ fn fetch_len(
                 } else {
                     None
                 }
+            } else if s == 0x5A {
+                // CVTSD2SS xmm,xmm (F2 0F 5A /r reg-direct)。awk atan2 0x4d7244 の cvtsd2ss xmm1,xmm0。
+                let m = third?;
+                if m >> 6 == 3 { Some(3) } else { None }
             } else if s == 0x51 {
                 // SQRTSD xmm,xmm (F2 0F 51 /r reg-direct)。awk sqrt 0x4c1dd9 の sqrtsd xmm0,xmm0。
                 let m = third?;
@@ -1807,6 +1811,7 @@ pub fn run_mode(
                             | 0x2A
                             | 0x58
                             | 0x51
+                            | 0x5A
                             | 0x2E
                             | 0x2F
                             | 0x2C
@@ -2307,6 +2312,7 @@ pub fn run_mode(
                 | Insn::Divsd
                 | Insn::Minsd
                 | Insn::Sqrtsd
+                | Insn::Cvtsd2ss
         ) && !has_f2
         {
             return Outcome::Unimplemented {
@@ -7151,6 +7157,7 @@ fn dispatch<B: Backend>(
         // MULSD xmm,xmm (F2 0F 59 /r reg-direct)。F2 は剥がし済み.
         Insn::Mulsd => sem::mulsd_xmm(b, xmm_reg_r(), xmm_rm_b()),
         Insn::Sqrtsd => sem::sqrtsd_xmm(b, xmm_reg_r(), xmm_rm_b()),
+        Insn::Cvtsd2ss => sem::cvtsd2ss_xmm(b, xmm_reg_r(), xmm_rm_b()),
         Insn::MulsdM64Sib => {
             // F2 0F 59 SIB mod=00。awk 乗算 0x4a327c の mulsd xmm1, QWORD PTR [rsp]。
             if sib0f_no_index() {

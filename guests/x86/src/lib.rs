@@ -85,7 +85,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数117件。
-        assert_eq!(INSNS.len(), 776);
+        assert_eq!(INSNS.len(), 777);
     }
 
     #[test]
@@ -1108,6 +1108,7 @@ mod tests {
         assert_eq!(decode(0x0F580500000000, 56), Some(Insn::AddsdXmmM64Rip));
         assert_eq!(decode(0x0F589A10000000, 56), Some(Insn::AddsdXmmM64Mem32));
         assert_eq!(decode(0x0F51C0, 24), Some(Insn::Sqrtsd));
+        assert_eq!(decode(0x0F5AC8, 24), Some(Insn::Cvtsd2ss));
         assert_eq!(decode(0x0F580500000000, 48), None);
         // CVTTSD2SI r64,xmm reg-direct (F2 REX.W 0F 2C /r)。F2/REX は実行側で剥がす.
         // Ref: SPEC-X86-INTEL-SDM (v093).

@@ -17340,6 +17340,23 @@ pub fn subsd_xmm<B: Backend>(b: &mut B, dst: Xmm, src: Xmm) -> Flow<B> {
     Ok(())
 }
 
+/// CVTSD2SS xmm,xmm (F2 0F 5A /r)。src の下位64の倍精度を単精度にして dst の下位32へ書く。上位96は dst のまま.
+pub fn cvtsd2ss_xmm<B: Backend>(b: &mut B, dst: Xmm, src: Xmm) -> Flow<B> {
+    use polyisa_sem::{F32, F64};
+    let a128: B::V<W128> = b.get(xmm_ref(dst));
+    let c128: B::V<W128> = b.get(xmm_ref(src));
+    let clo64: B::V<W64> = b.trunc::<W128, W64>(c128);
+    let c: B::V<F64> = b.trunc::<W64, F64>(clo64);
+    let s: B::V<F32> = b.fcvt_ff(c, 0);
+    let s32: B::V<W32> = b.trunc::<F32, W32>(s);
+    let lo = b.zext::<W32, W128>(s32);
+    let keep = b.konst::<W128>(!0xFFFF_FFFFu128);
+    let hi = b.and::<W128>(a128, keep);
+    let res = b.or::<W128>(hi, lo);
+    b.set(xmm_ref(dst), res);
+    Ok(())
+}
+
 /// SQRTSD xmm,xmm (F2 0F 51 /r)。src の下位64の平方根を dst の下位64へ書く。上位64は dst のまま.
 pub fn sqrtsd_xmm<B: Backend>(b: &mut B, dst: Xmm, src: Xmm) -> Flow<B> {
     use polyisa_sem::F64;

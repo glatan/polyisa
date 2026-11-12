@@ -757,6 +757,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("divsd", "F1", "00001111 01011110 11......", "divsd xmm, xmm", "alu"),
         // SQRTSD xmm,xmm (F2 0F 51 /r reg-direct)。awk sqrt 0x4c1dd9 対応。F2 なしは SQRTPS。
         ("sqrtsd", "F1", "00001111 01010001 11......", "sqrtsd xmm, xmm", "alu"),
+        // CVTSD2SS xmm,xmm (F2 0F 5A /r reg-direct)。awk atan2 0x4d7244 対応。F2 なしは CVTPS2PD。
+        ("cvtsd2ss", "F1", "00001111 01011010 11......", "cvtsd2ss xmm, xmm", "alu"),
         // MINSD xmm,xmm (F2 0F 5D /r reg-direct)。F2 は剥がし済み。ping 0x42e6d9 対応。
         ("minsd", "F1", "00001111 01011101 11......", "minsd xmm, xmm", "alu"),
         ("mulsd_xmm_m64_sibd", "F1", "00001111 01011001 01...100 ........ ........", "mulsd xmm, m64", "load"),
