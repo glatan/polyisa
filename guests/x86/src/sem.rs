@@ -10028,6 +10028,22 @@ pub fn bt_m32_imm<B: Backend>(b: &mut B, base: Gpr, imm: u8) -> Flow<B> {
     Ok(())
 }
 
+/// BT m32,imm8 [base+index*scale] (0F BA /4 SIB mod=00)。指定ビットを CF に入れる.
+pub fn bt_m32_imm_sib<B: Backend>(b: &mut B, base: Gpr, idx: Gpr, shift: u32, imm: u8) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, 0, base, idx);
+    let x32: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let n = b.konst::<W32>(u32::from(imm & 31));
+    let sh = b.shr_l::<W32>(x32, n);
+    let one = b.konst::<W32>(1);
+    let bit = b.and::<W32>(sh, one);
+    let f: B::V<W32> = b.get(eflags_ref());
+    let not_cf = b.konst::<W32>(!FLAG_CF);
+    let cleared = b.and::<W32>(f, not_cf);
+    let restored = b.or::<W32>(cleared, bit);
+    b.set(eflags_ref(), restored);
+    Ok(())
+}
+
 /// BT m32,imm8 [base+disp8] (0F BA /4 SIB mod=01 no_index)。指定ビットを CF に入れる.
 pub fn bt_m32_imm_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8, imm: u8) -> Flow<B> {
     let addr = eff_addr(b, base, disp);

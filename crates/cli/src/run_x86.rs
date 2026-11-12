@@ -581,6 +581,10 @@ fn fetch_len(
                     Some(4)
                 } else if md == 1 && reg == 4 && rm == 4 {
                     Some(6)
+                } else if md == 0 && reg == 4 && rm == 4 {
+                    // BT m32,imm8 SIB mod=00。tar 0x488fa7 の 41 0F BA 24 24 09。base=5 は disp32。
+                    let t = fourth?;
+                    if t & 7 == 5 { None } else { Some(5) }
                 } else {
                     None
                 }
@@ -1934,6 +1938,7 @@ pub fn run_mode(
                         | 0x2A
                         | 0x2C
                         | 0xEB
+                        | 0xBA
                 )
             )
             || matches!(second, Some(0x40..=0x4F))
@@ -7405,6 +7410,21 @@ fn dispatch<B: Backend>(
                 sem::bt_m32_imm_sibd(b, base, idx, shift, d8, imm)
             }
         }
+        Insn::BtM32ImmSib => {
+            // BT m32,imm8 SIB mod=00 (0F BA /4 + ModRM + SIB + imm8、5B)。
+            // SIB は (word>>8) 下位8、imm は最下位8。index=4 かつ REX.X=0 は [base]。
+            let sib_v = ((word >> 8) & 0xff) as u8;
+            let imm = (word & 0xff) as u8;
+            let shift = ((sib_v >> 6) & 3) as u32;
+            let idx_raw = (sib_v >> 3) & 7;
+            let idx = Gpr(idx_raw | (((rex >> 1) & 1) << 3));
+            let base = Gpr((sib_v & 7) | ((rex & 1) << 3));
+            if idx_raw == 4 && (rex >> 1) & 1 == 0 {
+                sem::bt_m32_imm(b, base, imm)
+            } else {
+                sem::bt_m32_imm_sib(b, base, idx, shift, imm)
+            }
+        }
         Insn::BtsR32Imm => {
             // BTS r32/r64,imm8 (0F BA /5 ib reg-direct、4B)。imm は最下位8。REX.W で64ビット.
             let imm = (word & 0xff) as u8;
@@ -10686,7 +10706,9 @@ const X86_64_SYSCALLS: &[(&str, SysFn)] = &[
     ("utimensat", sys_utimensat),
     ("chmod", sys_chmod),
     ("fchmod", sys_fchmod),
+    ("chown", sys_chown),
     ("fchown", sys_fchown),
+    ("lchown", sys_lchown),
     ("fchmodat", sys_fchmodat),
     ("umask", sys_umask),
     ("fcntl", sys_fcntl),
@@ -12860,13 +12882,15 @@ fn sys_dup3(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOu
     Some(TrapOutcome::Handled)
 }
 
-fn sys_mkdir(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // mkdir(path, mode)。ホストの create_dir に直結する.
+fn sys_mkdir(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // mkdir(path, mode)。chdir 後の相対パスは作業ディレクトリから作る。
     let path_addr = get64(env, cx.r_a);
     let path = match guest_c_string(env, path_addr) {
         Some(p) => p,
         None => return Some(TrapOutcome::Unimplemented),
     };
+    sys.ensure_cwd();
+    let path = join_guest_path(&sys.cwd, &path);
     Some(match std::fs::create_dir(&path) {
         Ok(()) => {
             set64(env, Gpr(0), 0);
@@ -12928,8 +12952,8 @@ fn sys_mknod(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapO
     Some(TrapOutcome::Handled)
 }
 
-fn sys_mkdirat(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // mkdirat(dirfd, path, mode)。AT_FDCWD+絶対/相対パスを受け付ける.
+fn sys_mkdirat(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // mkdirat(dirfd, path, mode)。AT_FDCWD の相対パスは作業ディレクトリから作る。
     let (dirfd, path_addr) = (get64(env, cx.r_a), get64(env, cx.r_b));
     if !cx.is_at_fdcwd(dirfd) {
         set64(env, Gpr(0), cx.neg(EINVAL));
@@ -12939,6 +12963,8 @@ fn sys_mkdirat(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Tr
         Some(p) => p,
         None => return Some(TrapOutcome::Unimplemented),
     };
+    sys.ensure_cwd();
+    let path = join_guest_path(&sys.cwd, &path);
     Some(match std::fs::create_dir(&path) {
         Ok(()) => {
             set64(env, Gpr(0), 0);
@@ -13077,13 +13103,15 @@ fn sys_rmdir(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Trap
     })
 }
 
-fn sys_unlink(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // unlink(path)。ホストの remove_file に直結する.
+fn sys_unlink(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // unlink(path)。chdir 後の相対パスは作業ディレクトリから外す。
     let path_addr = get64(env, cx.r_a);
     let path = match guest_c_string(env, path_addr) {
         Some(p) => p,
         None => return Some(TrapOutcome::Unimplemented),
     };
+    sys.ensure_cwd();
+    let path = join_guest_path(&sys.cwd, &path);
     Some(match std::fs::remove_file(&path) {
         Ok(()) => {
             set64(env, Gpr(0), 0);
@@ -13101,9 +13129,9 @@ fn sys_unlink(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Tra
     })
 }
 
-fn sys_unlinkat(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // unlinkat(dirfd, path, flags)。AT_FDCWD のみ、flags は 0/AT_REMOVEDIR(0x200) を受け付ける.
-    // ディレクトリ指定は remove_dir、以外は remove_file に直結する.
+fn sys_unlinkat(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // unlinkat(dirfd, path, flags)。flags は 0/AT_REMOVEDIR(0x200)。
+    // AT_FDCWD は作業ディレクトリ、開いたディレクトリは覚えたパスから外す。
     let (dirfd, path_addr, flags) = if cx.is64 {
         (get64(env, Gpr(7)), get64(env, Gpr(6)), get64(env, Gpr(2)))
     } else {
@@ -13113,7 +13141,7 @@ fn sys_unlinkat(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<T
             u64::from(env.backend.get(Gpr(2).state())),
         )
     };
-    if !cx.is_at_fdcwd(dirfd) || flags & !0x200 != 0 {
+    if flags & !0x200 != 0 {
         set64(env, Gpr(0), cx.neg(EINVAL));
         return Some(TrapOutcome::Handled);
     }
@@ -13121,6 +13149,19 @@ fn sys_unlinkat(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<T
         Some(p) => p,
         None => return Some(TrapOutcome::Unimplemented),
     };
+    let base = if cx.is_at_fdcwd(dirfd) {
+        sys.ensure_cwd();
+        sys.cwd.clone()
+    } else {
+        match sys.path_of(dirfd as u32) {
+            Some(p) => p.to_string(),
+            None => {
+                set64(env, Gpr(0), cx.neg(EBADF));
+                return Some(TrapOutcome::Handled);
+            }
+        }
+    };
+    let path = join_guest_path(&base, &path);
     let res = if flags & 0x200 != 0 {
         std::fs::remove_dir(&path)
     } else {
@@ -13258,9 +13299,17 @@ fn sys_fchmodat(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Tr
     sys_chmod(sys, env, cx)
 }
 
+fn sys_chown(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    sys_fchown(sys, env, cx)
+}
+
+fn sys_lchown(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    sys_fchown(sys, env, cx)
+}
+
 fn sys_fchown(_sys: &mut CliLinux, env: &mut BareEnv, _cx: &SysCtx) -> Option<TrapOutcome> {
-    // fchown(fd, uid, gid)。dos2unix が書き換え後に所有者を戻す。
-    // 試作では所有者変更を無視して 0 を返す。
+    // chown/lchown/fchown。所有者変更を無視して 0 を返す。
+    // tar の展開が chown を呼ぶ。dos2unix は fchown で所有者を戻す。
     set64(env, Gpr(0), 0);
     Some(TrapOutcome::Handled)
 }
@@ -14779,6 +14828,19 @@ mod tests {
             .read(VirtAddr(0x100), &mut back, data_access())
             .unwrap();
         assert_eq!(u32::from_le_bytes(back), 0);
+    }
+
+    #[test]
+    fn chown_returns_zero() {
+        use polyisa_os_linux::x86_64 as abi;
+        let mut sys = CliLinux::x86_64();
+        let mut env = bare();
+        set64(&mut env, Gpr(0), abi::CHOWN);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        set64(&mut env, Gpr(0), abi::LCHOWN);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
     }
 
     #[test]

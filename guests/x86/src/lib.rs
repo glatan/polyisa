@@ -85,7 +85,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数117件。
-        assert_eq!(INSNS.len(), 787);
+        assert_eq!(INSNS.len(), 788);
     }
 
     #[test]
@@ -1152,6 +1152,10 @@ mod tests {
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x0FBAE31E, 32), Some(Insn::BtR32Imm));
         assert_eq!(decode(0x0FBAE31E, 24), None);
+        // BT m32,imm8 SIB mod=00 (0F BA /4)。tar 0x488fa7 の 0F BA 24 24 09。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x0FBA242409, 40), Some(Insn::BtM32ImmSib));
+        assert_eq!(decode(0x0FBA242409, 32), None);
         // BTS r32/r64,imm8 reg-direct (0F BA /5 ib)。REX.W で64ビット.
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x0FBAEB34, 32), Some(Insn::BtsR32Imm));

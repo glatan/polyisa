@@ -17,6 +17,7 @@
 - brk
 - chdir
 - chmod
+- chown
 - clock_gettime
 - clock_nanosleep
 - clone
@@ -49,6 +50,7 @@
 - getuid
 - ioctl
 - kill
+- lchown
 - link
 - lseek
 - lstat

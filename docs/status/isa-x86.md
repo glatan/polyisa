@@ -30,7 +30,7 @@
 | bsr | bsr_r_rm | 真 | alu |
 | bsr | bsr_r_mem32、bsr_r_mem8、bsr_r_memnd、bsr_r_rip | 真 | load |
 | bswap | bswap | 真 | alu |
-| bt | bt_m32_imm、bt_m32_imm_sibd、bt_r32_imm、bt_r32_rm | 真 | alu |
+| bt | bt_m32_imm、bt_m32_imm_sib、bt_m32_imm_sibd、bt_r32_imm、bt_r32_rm | 真 | alu |
 | bts | bts_r32_imm、bts_r32_rm | 真 | alu |
 | call | call_r_mem32、call_r_mem8、call_r_memnd、call_r_rip、call_r_rm、call_r_sib、call_r_sibabs、call_r_sibd、call_r_sibd32、call_rel32 | 真 | jump |
 | cdq | cdq | 真 | alu |

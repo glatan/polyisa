@@ -711,6 +711,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("bt_m32_imm", "F1", "00001111 10111010 00100... ........", "bt m32, {imm}", "alu"),
         // BT m32,imm8 SIB mod=01 [base+disp8] (0F BA /4 + ModRM + SIB + disp8 + imm8)。
         ("bt_m32_imm_sibd", "F1", "00001111 10111010 01100100 ........ ........ ........", "bt m32, {imm}", "alu"),
+        // BT m32,imm8 SIB mod=00 [base] または [base+index*scale] (0F BA /4)。base=5 は disp32 なので取得長で除外.
+        ("bt_m32_imm_sib", "F1", "00001111 10111010 00100100 ........ ........", "bt m32, {imm}", "alu"),
         // BTS r32/r64,imm8 (0F BA /5 ib reg-direct)。REX.W で64ビット.
         ("bts_r32_imm", "F1", "00001111 10111010 11101... ........", "bts r32, {imm}", "alu"),
         // BT r/m32,r32 (0F A3 /r mod=11)。REX.R/B で 8-15 に拡張.

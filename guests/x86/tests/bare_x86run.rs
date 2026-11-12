@@ -10276,6 +10276,32 @@ fn run_bt_m32_imm_sets_cf() {
 }
 
 #[test]
+fn run_bt_m32_imm_sib_r12_sets_cf() {
+    // BT [R12],9 (41 0F BA 24 24 09)。R12=0x100、[0x100]=0x200 (bit9) -> CF=1。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x0), 1, Perms::RW).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0x41, 0x0F, 0xBA, 0x24, 0x24, 0x09])
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x100), &0x200u32.to_le_bytes())
+        .unwrap();
+    env.backend.set(Gpr(12).state(), 0x100);
+    env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 0);
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x1006 });
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x1,
+        0x1
+    );
+}
+
+#[test]
 fn run_bt_m32_imm_rbx_sets_cf() {
     // BT [RBX],0x0B (0F BA 23 0B) を32ビットで回す.
     // RBX=0x100、[0x100]=0x800 (bit11) -> CF=1、eip は 0x1004 に進む.
