@@ -776,3 +776,54 @@ fn dos2unix_matches_host() {
     assert_eq!(std::fs::read(&host_lf).unwrap(), b"ab\r\ncd\r\n");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn uudecode_matches_host() {
+    // 標準出力は空で、復元したファイルが一致する。別の木へ書く。
+    let path = busybox();
+    let path = path.to_str().expect("utf-8 path");
+    let root = std::env::temp_dir().join(format!("polyisa-uudecode-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let guest_dir = root.join("guest");
+    let host_dir = root.join("host");
+    std::fs::create_dir_all(&guest_dir).unwrap();
+    std::fs::create_dir_all(&host_dir).unwrap();
+    let src = root.join("src");
+    std::fs::write(&src, b"ab\ncd\n").unwrap();
+    let encoded = Command::new(path)
+        .args(["uuencode", src.to_str().expect("utf-8"), "name"])
+        .env_clear()
+        .output()
+        .expect("host uuencode");
+    assert!(encoded.status.success());
+    let guest_uu = guest_dir.join("f.uu");
+    let host_uu = host_dir.join("f.uu");
+    std::fs::write(&guest_uu, &encoded.stdout).unwrap();
+    std::fs::write(&host_uu, &encoded.stdout).unwrap();
+    let guest_out = guest_dir.join("out");
+    let host_out = host_dir.join("out");
+    let guest_args = [
+        "uudecode",
+        "-o",
+        guest_out.to_str().expect("utf-8"),
+        guest_uu.to_str().expect("utf-8"),
+    ];
+    let argv: Vec<String> = guest_args.iter().map(|s| (*s).to_string()).collect();
+    let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)
+        .unwrap_or_else(|e| panic!("uudecode: {e}"));
+    let host = Command::new(path)
+        .args([
+            "uudecode",
+            "-o",
+            host_out.to_str().expect("utf-8"),
+            host_uu.to_str().expect("utf-8"),
+        ])
+        .env_clear()
+        .output()
+        .expect("host uudecode");
+    assert_eq!(code, host.status.code().unwrap_or(1) as u64);
+    assert_eq!(out.as_slice(), host.stdout.as_slice());
+    assert_eq!(std::fs::read(&guest_out).unwrap(), b"ab\ncd\n");
+    assert_eq!(std::fs::read(&host_out).unwrap(), b"ab\ncd\n");
+    let _ = std::fs::remove_dir_all(&root);
+}
