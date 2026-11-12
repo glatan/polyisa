@@ -12265,11 +12265,18 @@ fn sys_kill(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOu
 }
 
 fn sys_uname(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // uname(buf)。struct utsname (65B x 5) を固定値で埋めて 0 を返す.
+    // uname(buf)。struct utsname (65B x 6、domainname 含む) を固定値で埋めて 0 を返す.
     // Ref: SRC-LINUX (7.3).
     let buf = get64(env, cx.r_a);
-    let fields: [&[u8]; 5] = [b"Linux", b"localhost", b"6.0.0", b"#1", b"x86_64"];
-    let mut out = [0u8; 65 * 5];
+    let fields: [&[u8]; 6] = [
+        b"Linux",
+        b"localhost",
+        b"6.0.0",
+        b"#1",
+        b"x86_64",
+        b"localdomain",
+    ];
+    let mut out = [0u8; 65 * 6];
     for (i, f) in fields.iter().enumerate() {
         let base = i * 65;
         out[base..base + f.len()].copy_from_slice(f);
@@ -15291,13 +15298,14 @@ mod tests {
         set64(&mut env, Gpr(7), 0x100);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), 0);
-        let mut back = [0u8; 65 * 5];
+        let mut back = [0u8; 65 * 6];
         env.backend
             .mem
             .read(VirtAddr(0x100), &mut back, data_access())
             .unwrap();
         assert_eq!(&back[..6], b"Linux\0");
         assert_eq!(&back[65..75], b"localhost\0");
+        assert_eq!(&back[65 * 5..65 * 5 + 12], b"localdomain\0");
     }
 
     #[test]
