@@ -85,7 +85,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数117件。
-        assert_eq!(INSNS.len(), 764);
+        assert_eq!(INSNS.len(), 765);
     }
 
     #[test]
@@ -1310,6 +1310,7 @@ mod tests {
         // OR r8,m8 SIB mod=01 (0A /r)。head の停止点 0x5a96cc に対応.
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x0A44240A, 32), Some(Insn::OrR8M8Sibd));
+        assert_eq!(decode(0x0A71FF, 24), Some(Insn::OrR8M8Mem8));
         assert_eq!(decode(0x0A44240A, 24), None);
         // OR r8,m8 RIP (0A 05 + disp32)。find 0x5c44a7 対応.
         // 0A 05 F5 E3 0A 00 は OR AL,[RIP+0xAE3F5].

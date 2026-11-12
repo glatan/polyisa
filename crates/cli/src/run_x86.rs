@@ -904,6 +904,9 @@ fn fetch_len(
                 Some(2)
             } else if md == 1 && rm == 4 {
                 Some(4)
+            } else if md == 1 {
+                // OR r8, [base+disp8] (0A /r mod=01、3B)。uudecode 0x49da3e の or sil, [rcx-1]。
+                Some(3)
             } else if md == 0 && rm == 5 {
                 // OR r8,[RIP+disp32] (0A 05 + disp32)。find 0x5c44a7 対応.
                 Some(6)
@@ -1908,6 +1911,7 @@ pub fn run_mode(
                     | 0x30
                     | 0x32
                     | 0x08
+                    | 0x0A
                     | 0x87
                     | 0x84
                     | 0xC0
@@ -4604,6 +4608,18 @@ fn dispatch<B: Backend>(
             } else {
                 sem::or_rm8_imm_sibd(b, base, idx, shift, d8, imm)
             }
+        }
+        Insn::OrR8M8Mem8 => {
+            // 0A /r mod=01。uudecode 0x49da3e の or sil, BYTE PTR [rcx-1]。
+            let reg_f = (modrm() >> 3) & 7;
+            let (dst, dst_high) = if rex != 0 {
+                (Gpr(reg_f | ((rex >> 2) & 1) << 3), false)
+            } else if reg_f < 4 {
+                (Gpr(reg_f), false)
+            } else {
+                (Gpr(reg_f - 4), true)
+            };
+            sem::or_r8_m8_mem8(b, dst, dst_high, rm(), disp8())
         }
         Insn::OrR8M8Sibd => {
             // 0A /r SIB mod=01 [base+index*scale+disp8] (32b)。dst は reg フィールド.

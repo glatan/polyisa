@@ -454,6 +454,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("dec_rm_rip", "F1", "11111111 00001101 ................................", "dec r/m", "alu"),
         // OR r8,m8 SIB mod=01 [base+index*scale+disp8] (0A /r)。dst は reg.
         ("or_r8_m8_sibd", "S8", "00001010 01...100 ........ ........", "or r8, m8", "load"),
+        // OR r8, [base+disp8] (0A /r mod=01、SIBなし)。uudecode 0x49da3e 対応。
+        ("or_r8_m8_mem8", "M8", "00001010 01...... ........", "or r8, m8", "alu"),
         // OR r8,r/m8 reg-direct (0A /r mod=11)。
         ("or_r8_r8", "F1", "00001010 11......", "or r8, r/m8", "alu"),
         // SHR r/m8,imm8 (C0 /5 mod=11)。REX なしの 4-7 は上位8ビット.
