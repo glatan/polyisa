@@ -11253,6 +11253,15 @@ fn open_at_cwd(
     if path == "/proc/diskstats" {
         return open_synth_diskstats(sys, env, cx);
     }
+    if path == "/etc/hosts" {
+        return open_synth_bytes(
+            sys,
+            env,
+            cx,
+            "hosts",
+            b"127.0.0.1 localhost.localdomain localhost\n",
+        );
+    }
     let want_write = acc != 0 || flags & (O_CREAT | O_TRUNC | O_APPEND) != 0;
     let opened = if want_write {
         let mut opts = std::fs::OpenOptions::new();

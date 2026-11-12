@@ -316,6 +316,13 @@ fn true_echo_uname_id_match() {
         )
         .as_bytes()
     );
+    // dnsdomainname は合成 /etc/hosts の固定値。ホストとは比べない。
+    let dnsdomainname = ["dnsdomainname"];
+    let argv: Vec<String> = dnsdomainname.iter().map(|s| (*s).to_string()).collect();
+    let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)
+        .unwrap_or_else(|e| panic!("dnsdomainname: {e}"));
+    assert_eq!(code, 0);
+    assert_eq!(out.as_slice(), b"localdomain\n");
     // iostat は合成 /proc/{stat,uptime,diskstats} の固定値。ホストとは比べない。
     let iostat = ["iostat"];
     let argv: Vec<String> = iostat.iter().map(|s| (*s).to_string()).collect();
