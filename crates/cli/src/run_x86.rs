@@ -10574,10 +10574,11 @@ fn set64(env: &mut BareEnv, r: polyisa_guest_x86::sem::Gpr, v: u64) {
 }
 
 /// ホスト metadata から x86-64 struct stat (144B) を合成する。
-/// 種別 (st_mode) と大きさ (st_size) のみ実値を入れ、残りは 0 とする.
-/// レイアウトは musl/glibc 共通のカーネル ABI 由来である.
+/// 種別 (st_mode) と大きさ (st_size) と、パスから決めた st_ino を入れる。
+/// 同じパスは同じ inode になり、ディレクトリの再帰判定が分かれる。
+/// レイアウトは musl/glibc 共通のカーネル ABI 由来である。
 /// Ref: SRC-LINUX (7.3).
-fn stat144(m: &std::fs::Metadata) -> [u8; 144] {
+fn stat144(m: &std::fs::Metadata, ino: u64) -> [u8; 144] {
     let mut st = [0u8; 144];
     // S_IFDIR/S_IFREG/S_IFLNK。fifo 等の判別は可搬 API にないため、
     // ディレクトリでもシンボリックリンクでもなければ通常ファイルとみなす.
@@ -10593,10 +10594,50 @@ fn stat144(m: &std::fs::Metadata) -> [u8; 144] {
     } else {
         S_IFREG
     };
+    st[8..16].copy_from_slice(&ino.to_le_bytes());
     st[24..28].copy_from_slice(&(kind | 0o700).to_le_bytes());
     st[48..56].copy_from_slice(&(m.len() as i64).to_le_bytes());
-    // 残り (st_dev/st_ino/st_nlink/st_uid/st_gid/st_rdev/時刻等) は 0 のまま.
     st
+}
+
+/// パスから安定した非ゼロの inode を作る。`.` と `..` を畳んだ同じ場所は同じ値になる。
+fn path_ino(path: &str) -> u64 {
+    let folded = fold_path(path);
+    let mut h = 0xcbf29ce484222325u64;
+    for b in folded.as_bytes() {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h | 1
+}
+
+/// `.` と `..` と余分な区切りを除いたパス。シンボリックリンクは辿らない。
+fn fold_path(path: &str) -> String {
+    let abs = path.starts_with('/');
+    let mut parts: Vec<&str> = Vec::new();
+    for part in path.split('/') {
+        if part.is_empty() || part == "." {
+            continue;
+        }
+        if part == ".." {
+            if parts.pop().is_none() && !abs {
+                parts.push("..");
+            }
+            continue;
+        }
+        parts.push(part);
+    }
+    if abs {
+        if parts.is_empty() {
+            "/".to_string()
+        } else {
+            format!("/{}", parts.join("/"))
+        }
+    } else if parts.is_empty() {
+        ".".to_string()
+    } else {
+        parts.join("/")
+    }
 }
 
 /// 1 回のシステムコールで共通に使う値。
@@ -11875,7 +11916,8 @@ fn sys_fstat(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapO
             return Some(TrapOutcome::Handled);
         }
     };
-    let st = stat144(&m);
+    let ino = sys.path_of(fd).map(path_ino).unwrap_or(u64::from(fd) | 1);
+    let st = stat144(&m, ino);
     if env.backend.mem.write(VirtAddr(stat_addr), &st).is_err() {
         return Some(TrapOutcome::Unimplemented);
     }
@@ -11906,7 +11948,7 @@ fn sys_stat(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOu
             return Some(TrapOutcome::Handled);
         }
     };
-    let st = stat144(&m);
+    let st = stat144(&m, path_ino(&path));
     if env.backend.mem.write(VirtAddr(stat_addr), &st).is_err() {
         return Some(TrapOutcome::Unimplemented);
     }
@@ -11937,7 +11979,7 @@ fn sys_lstat(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapO
             return Some(TrapOutcome::Handled);
         }
     };
-    let st = stat144(&m);
+    let st = stat144(&m, path_ino(&path));
     if env.backend.mem.write(VirtAddr(stat_addr), &st).is_err() {
         return Some(TrapOutcome::Unimplemented);
     }
@@ -11977,7 +12019,7 @@ fn sys_newfstatat(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option
             return Some(TrapOutcome::Handled);
         }
     };
-    let st = stat144(&m);
+    let st = stat144(&m, path_ino(&path));
     if env.backend.mem.write(VirtAddr(stat_addr), &st).is_err() {
         return Some(TrapOutcome::Unimplemented);
     }
@@ -14995,6 +15037,32 @@ mod tests {
             .read(VirtAddr(0x218), &mut back, data_access())
             .unwrap();
         assert_eq!(u32::from_le_bytes(back) & 0o170000, 0o040000);
+        let mut ino = [0u8; 8];
+        env.backend
+            .mem
+            .read(VirtAddr(0x208), &mut ino, data_access())
+            .unwrap();
+        let root_ino = u64::from_le_bytes(ino);
+        assert_ne!(root_ino, 0);
+        set64(&mut env, Gpr(0), abi::STAT);
+        set64(&mut env, Gpr(7), 0x100);
+        set64(&mut env, Gpr(6), 0x300);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        env.backend
+            .mem
+            .read(VirtAddr(0x308), &mut ino, data_access())
+            .unwrap();
+        assert_eq!(u64::from_le_bytes(ino), root_ino);
+        env.backend.mem.write(VirtAddr(0x100), b"/..\0").unwrap();
+        set64(&mut env, Gpr(0), abi::STAT);
+        set64(&mut env, Gpr(7), 0x100);
+        set64(&mut env, Gpr(6), 0x300);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        env.backend
+            .mem
+            .read(VirtAddr(0x308), &mut ino, data_access())
+            .unwrap();
+        assert_eq!(u64::from_le_bytes(ino), root_ino);
         // 存在しないパスは ENOENT。
         env.backend
             .mem

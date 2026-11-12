@@ -916,6 +916,52 @@ fn tar_extract_matches_host() {
 }
 
 #[test]
+fn cp_recursive_matches_host() {
+    // 標準出力は空で、コピーした木が一致する。別の木へ書く。
+    let path = busybox();
+    let path = path.to_str().expect("utf-8 path");
+    let root = std::env::temp_dir().join(format!("polyisa-cpr-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let guest_dir = root.join("guest");
+    let host_dir = root.join("host");
+    std::fs::create_dir_all(guest_dir.join("tree/sub")).unwrap();
+    std::fs::create_dir_all(host_dir.join("tree/sub")).unwrap();
+    std::fs::write(guest_dir.join("tree/f"), b"ab\n").unwrap();
+    std::fs::write(host_dir.join("tree/f"), b"ab\n").unwrap();
+    std::fs::write(guest_dir.join("tree/sub/g"), b"zz\n").unwrap();
+    std::fs::write(host_dir.join("tree/sub/g"), b"zz\n").unwrap();
+    let guest_args = [
+        "cp".to_string(),
+        "-r".to_string(),
+        guest_dir.join("tree").to_str().unwrap().to_string(),
+        guest_dir.join("copy").to_str().unwrap().to_string(),
+    ];
+    let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &guest_args)
+        .unwrap_or_else(|e| panic!("cp: {e}"));
+    let host = Command::new(path)
+        .args([
+            "cp",
+            "-r",
+            host_dir.join("tree").to_str().unwrap(),
+            host_dir.join("copy").to_str().unwrap(),
+        ])
+        .env_clear()
+        .output()
+        .expect("host cp");
+    assert_eq!(code, host.status.code().unwrap_or(1) as u64);
+    assert_eq!(out.as_slice(), host.stdout.as_slice());
+    assert_eq!(
+        std::fs::read(guest_dir.join("copy/f")).unwrap(),
+        std::fs::read(host_dir.join("copy/f")).unwrap()
+    );
+    assert_eq!(
+        std::fs::read(guest_dir.join("copy/sub/g")).unwrap(),
+        b"zz\n"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn dos2unix_matches_host() {
     // 標準出力は空で、変換したファイルが一致する。別の木へ書く。
     let path = busybox();
