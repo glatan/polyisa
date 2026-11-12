@@ -505,6 +505,22 @@ fn true_echo_uname_id_match() {
             "nbd-client",
             ["nbd-client", "127.0.0.1", "1024", "/dev/null"].as_slice(),
         ),
+        ("modinfo", ["modinfo", "/lib/modules"].as_slice()),
+        ("ip", ["ip", "address", "help"].as_slice()),
+        ("ubirename", ["ubirename", "/no", "a", "b"].as_slice()),
+        (
+            "ubimkvol",
+            ["ubimkvol", "/no", "-N", "x", "-s", "1"].as_slice(),
+        ),
+        ("ubirmvol", ["ubirmvol", "/no", "-N", "x"].as_slice()),
+        (
+            "ubirsvol",
+            ["ubirsvol", "/no", "-N", "x", "-s", "1"].as_slice(),
+        ),
+        (
+            "ubiupdatevol",
+            ["ubiupdatevol", "/no", "/etc/passwd"].as_slice(),
+        ),
     ] {
         let argv: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
         let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)

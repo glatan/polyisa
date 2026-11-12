@@ -298,6 +298,9 @@ mod tests {
         );
         assert_eq!(decode(0x0FB70500000000, 56), Some(Insn::MovzxR32M16Rip));
         assert_eq!(decode(0x0FB60576641700, 56), Some(Insn::MovzxR32M8Rip));
+        // MOVZX r32, m8 mod=00 [rdi] (0F B6 /r)。udhcpc6 0x400890 の 0F B6 17。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x0FB617, 24), Some(Insn::MovzxR32M8Memnd));
         assert_eq!(decode(0x0FB6F6, 24), Some(Insn::MovzxR32R8));
         assert_eq!(decode(0x0FB69500F0FFFF, 56), Some(Insn::MovzxR32M8Mem32));
         assert_eq!(decode(0x0FB60406, 32), Some(Insn::MovzxR32M8Sib));

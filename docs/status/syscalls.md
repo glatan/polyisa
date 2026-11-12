@@ -63,6 +63,9 @@
 - gettid
 - getuid
 - init_module
+- inotify_add_watch
+- inotify_init
+- inotify_init1
 - ioctl
 - ioprio_get
 - ioprio_set
@@ -136,6 +139,7 @@
 - syslog
 - tgkill
 - time
+- tkill
 - umask
 - umount2
 - uname

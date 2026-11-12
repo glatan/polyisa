@@ -10896,6 +10896,10 @@ const X86_64_SYSCALLS: &[(&str, SysFn)] = &[
     ("mount", sys_mount),
     ("poll", sys_poll),
     ("sysfs", sys_sysfs),
+    ("tkill", sys_tkill),
+    ("inotify_init1", sys_inotify_init1),
+    ("inotify_init", sys_inotify_init),
+    ("inotify_add_watch", sys_inotify_add_watch),
     ("uname", sys_uname),
     ("getuid", sys_getuid),
     ("geteuid", sys_geteuid),
@@ -12086,6 +12090,31 @@ fn sys_poll(_sys: &mut CliLinux, env: &mut BareEnv, _cx: &SysCtx) -> Option<Trap
 fn sys_sysfs(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     // sysfs（廃止）。常に EINVAL。wall が呼ぶことがある。
     set64(env, Gpr(0), cx.neg(EINVAL));
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_tkill(_sys: &mut CliLinux, env: &mut BareEnv, _cx: &SysCtx) -> Option<TrapOutcome> {
+    // tkill。単一ゲストでは対象が自分以外に無く、成功として無視する。
+    set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_inotify_init1(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // inotify。監視は持たず EPERM。inotifyd の失敗形合わせ。
+    set64(env, Gpr(0), cx.neg(EPERM));
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_inotify_init(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    sys_inotify_init1(sys, env, cx)
+}
+
+fn sys_inotify_add_watch(
+    _sys: &mut CliLinux,
+    env: &mut BareEnv,
+    cx: &SysCtx,
+) -> Option<TrapOutcome> {
+    set64(env, Gpr(0), cx.neg(EPERM));
     Some(TrapOutcome::Handled)
 }
 
