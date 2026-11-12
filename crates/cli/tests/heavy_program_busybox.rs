@@ -391,6 +391,12 @@ fn true_echo_uname_id_match() {
         ("uncompress", ["uncompress"].as_slice()),
         ("uudecode", ["uudecode"].as_slice()),
         ("vlock", ["vlock"].as_slice()),
+        ("addgroup", ["addgroup", "nosuch"].as_slice()),
+        ("adduser", ["adduser", "-D", "nosuch"].as_slice()),
+        ("delgroup", ["delgroup", "nosuch"].as_slice()),
+        ("deluser", ["deluser", "nosuch"].as_slice()),
+        ("crontab", ["crontab", "-l"].as_slice()),
+        ("devmem", ["devmem", "0"].as_slice()),
     ] {
         let argv: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
         let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)
@@ -453,6 +459,48 @@ fn chown_unknown_user_matches_host() {
     assert_eq!(out.as_slice(), host.stdout.as_slice());
     assert_eq!(code, 1);
     assert!(out.is_empty());
+}
+
+#[test]
+fn device_and_fs_fail_matches_host() {
+    // 通常ファイルやディレクトリに対して失敗し、標準出力は空のまま揃うもの。
+    let path = busybox();
+    let path = path.to_str().expect("utf-8 path");
+    let dir = std::env::temp_dir().join(format!("polyisa-fsfail-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir(&dir).unwrap();
+    let f = dir.join("f");
+    std::fs::write(&f, b"hello\n").unwrap();
+    let f = f.to_str().expect("utf-8");
+    let d = dir.to_str().expect("utf-8");
+    for (name, args) in [
+        ("chattr", ["chattr", "-V", f].as_slice()),
+        ("mkswap", ["mkswap", f].as_slice()),
+        ("rpm", ["rpm", "-qp", f].as_slice()),
+        ("fatattr", ["fatattr", f].as_slice()),
+        ("blkdiscard", ["blkdiscard", f].as_slice()),
+        ("partprobe", ["partprobe", f].as_slice()),
+        ("fsck.minix", ["fsck.minix", f].as_slice()),
+        ("mkfs.minix", ["mkfs.minix", f].as_slice()),
+        ("mkfs.vfat", ["mkfs.vfat", f].as_slice()),
+        ("mkdosfs", ["mkdosfs", f].as_slice()),
+        ("fsfreeze", ["fsfreeze", "--freeze", d].as_slice()),
+        ("fstrim", ["fstrim", d].as_slice()),
+        ("setfont", ["setfont", f].as_slice()),
+    ] {
+        let argv: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
+        let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        let host = Command::new(path)
+            .args(args)
+            .env_clear()
+            .output()
+            .unwrap_or_else(|e| panic!("host {name}: {e}"));
+        assert_eq!(code, host.status.code().unwrap_or(1) as u64, "{name}");
+        assert_eq!(out.as_slice(), host.stdout.as_slice(), "{name}");
+        assert!(out.is_empty(), "{name}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
