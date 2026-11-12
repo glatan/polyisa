@@ -8381,6 +8381,32 @@ fn run_addsd_m64_sib() {
 }
 
 #[test]
+fn run_sqrtsd_xmm0() {
+    // F2 0F 51 C0 = sqrtsd xmm0,xmm0。4.0 の平方根は 2.0。上位64は残る。awk sqrt 0x4c1dd9。
+    // Ref: SPEC-X86-INTEL-SDM (v093).
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.set(
+        polyisa_guest_x86::sem::xmm_ref(polyisa_guest_x86::sem::Xmm(0)),
+        0xAAAA_AAAA_AAAA_AAAA_4010_0000_0000_0000,
+    );
+    env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 1);
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0xF2, 0x0F, 0x51, 0xC0])
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x1004 });
+    let v: u128 = env.backend.get(polyisa_guest_x86::sem::xmm_ref(
+        polyisa_guest_x86::sem::Xmm(0),
+    ));
+    assert_eq!(v, 0xAAAA_AAAA_AAAA_AAAA_4000_0000_0000_0000);
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::eflags_ref()), 1);
+}
+
+#[test]
 fn run_addsd_xmm3_rdx_disp32() {
     // F2 0F 58 9A 10 00 00 00 = addsd xmm3, [rdx+0x10]。3.0+2.0 は 5.0。上位64は残る。
     // awk log 0x4c163e。Ref: SPEC-X86-INTEL-SDM (v093).

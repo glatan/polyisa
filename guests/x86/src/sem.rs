@@ -17266,6 +17266,24 @@ pub fn subsd_xmm<B: Backend>(b: &mut B, dst: Xmm, src: Xmm) -> Flow<B> {
     Ok(())
 }
 
+/// SQRTSD xmm,xmm (F2 0F 51 /r)。src の下位64の平方根を dst の下位64へ書く。上位64は dst のまま.
+pub fn sqrtsd_xmm<B: Backend>(b: &mut B, dst: Xmm, src: Xmm) -> Flow<B> {
+    use polyisa_sem::F64;
+    let a128: B::V<W128> = b.get(xmm_ref(dst));
+    let c128: B::V<W128> = b.get(xmm_ref(src));
+    let clo64: B::V<W64> = b.trunc::<W128, W64>(c128);
+    let c: B::V<F64> = b.trunc::<W64, F64>(clo64);
+    let v = b.fsqrt(c);
+    let vlo64: B::V<W64> = b.trunc::<F64, W64>(v);
+    let lo = b.zext::<W64, W128>(vlo64);
+    let hi_shift = b.konst::<W128>(64);
+    let hi = b.shr_l::<W128>(a128, hi_shift);
+    let hi_back = b.shl::<W128>(hi, hi_shift);
+    let res = b.or::<W128>(hi_back, lo);
+    b.set(xmm_ref(dst), res);
+    Ok(())
+}
+
 /// MULSD xmm1, xmm2 (F2 0F 59 /r reg-direct)。下位64の倍精度乗算。上位64は dst のまま.
 pub fn mulsd_xmm<B: Backend>(b: &mut B, dst: Xmm, src: Xmm) -> Flow<B> {
     use polyisa_sem::F64;

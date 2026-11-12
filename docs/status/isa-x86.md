@@ -193,6 +193,7 @@
 | shld | shld_r32_cl | 真 | alu |
 | shr | shr_rm32_1、shr_rm32_cl、shr_rm32_imm8、shr_rm8_1、shr_rm8_imm8 | 真 | alu |
 | shrd | shrd_r32_cl | 真 | alu |
+| sqrtsd | sqrtsd | 真 | alu |
 | std | std | 真 | alu |
 | stosb | stosb | 真 | store |
 | stosd | stosd | 真 | store |
