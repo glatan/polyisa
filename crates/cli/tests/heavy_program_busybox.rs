@@ -404,6 +404,8 @@ fn true_echo_uname_id_match() {
         ("deluser", ["deluser", "nosuch"].as_slice()),
         ("crontab", ["crontab", "-l"].as_slice()),
         ("devmem", ["devmem", "0"].as_slice()),
+        ("mt", ["mt"].as_slice()),
+        ("mt status", ["mt", "status"].as_slice()),
     ] {
         let argv: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
         let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)
@@ -494,6 +496,7 @@ fn device_and_fs_fail_matches_host() {
         ("fsfreeze", ["fsfreeze", "--freeze", d].as_slice()),
         ("fstrim", ["fstrim", d].as_slice()),
         ("setfont", ["setfont", f].as_slice()),
+        ("fdformat", ["fdformat", f].as_slice()),
     ] {
         let argv: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
         let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)
