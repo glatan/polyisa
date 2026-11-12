@@ -393,6 +393,9 @@ fn fetch_len(
                     Some(3)
                 } else if md == 0 && rm == 5 {
                     Some(7)
+                } else if md == 2 && rm != 4 {
+                    // SUBSD xmm,m64 [base+disp32]。awk log 0x4c161e の subsd xmm2, [rcx+disp32]。7B.
+                    Some(7)
                 } else {
                     None
                 }
@@ -7106,6 +7109,10 @@ fn dispatch<B: Backend>(
             } else {
                 sem::subsd_xmm_m64_abs(b, xmm_reg_r(), imm32())
             }
+        }
+        Insn::SubsdXmmM64Mem32 => {
+            // F2 0F 5C /r mod=10。awk log 0x4c161e の subsd xmm2, [rcx+disp32]。
+            sem::subsd_xmm_m64_mem32(b, xmm_reg_r(), rm0f(), disp32())
         }
         // MULSD xmm,xmm (F2 0F 59 /r reg-direct)。F2 は剥がし済み.
         Insn::Mulsd => sem::mulsd_xmm(b, xmm_reg_r(), xmm_rm_b()),
