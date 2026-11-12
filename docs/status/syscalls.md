@@ -103,6 +103,7 @@
 - stat
 - symlink
 - sync
+- sysinfo
 - tgkill
 - time
 - umask

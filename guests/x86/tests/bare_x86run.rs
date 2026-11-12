@@ -8380,6 +8380,34 @@ fn run_add_rm16_imm() {
 }
 
 #[test]
+fn run_cmovne_r32_sibd32_rsp() {
+    // 0F 45 8C 24 88 00 00 00 は cmovne 0x88(%rsp), %ecx。free 0x44801c。
+    // ZF=0、RSP=0x2000、[0x2088]=0x42、ECX=0 -> ECX=0x42、exit(0)。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2088), &0x42u32.to_le_bytes())
+        .unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    env.backend.set(Gpr(1).state(), 0);
+    env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 0); // ZF=0
+    let prog: &[u8] = &[
+        0x0F, 0x45, 0x8C, 0x24, 0x88, 0x00, 0x00, 0x00, // cmovne 0x88(%rsp),%ecx
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
+        0x0F, 0x05, // syscall
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0));
+    assert_eq!(env.backend.get(Gpr(1).state()), 0x42);
+}
+
+#[test]
 fn run_xor_rm32_imm_sibd_rsp() {
     // 81 74 24 04 00 01 00 00 は xorl $0x100,0x4(%rsp)。mim 0x45a165。
     // RSP=0x2000、[0x2004]=0 -> 0x100、exit(0)。

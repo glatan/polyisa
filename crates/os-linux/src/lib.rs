@@ -172,6 +172,7 @@ pub mod x86_64 {
     pub const SETGROUPS: u64 = 116;
     pub const CHROOT: u64 = 161;
     pub const GETPPID: u64 = 110;
+    pub const SYSINFO: u64 = 99;
     pub const SCHED_SETPARAM: u64 = 142;
     pub const SCHED_GETPARAM: u64 = 143;
     pub const SCHED_SETSCHEDULER: u64 = 144;
@@ -502,6 +503,7 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             x86_64::SETGROUPS => Some("setgroups"),
             x86_64::CHROOT => Some("chroot"),
             x86_64::GETPPID => Some("getppid"),
+            x86_64::SYSINFO => Some("sysinfo"),
             x86_64::SCHED_SETPARAM => Some("sched_setparam"),
             x86_64::SCHED_GETPARAM => Some("sched_getparam"),
             x86_64::SCHED_SETSCHEDULER => Some("sched_setscheduler"),

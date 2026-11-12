@@ -190,6 +190,10 @@ fn fetch_len(
                     let t = fourth?;
                     // no_index (index=100) のみ.
                     if (t >> 3) & 7 == 4 { Some(5) } else { None }
+                } else if md == 2 && rm == 4 {
+                    let t = fourth?;
+                    // CMOVNE SIB+disp32 no_index。free 0x44801c の cmovne 0x88(%rsp), %ecx。8B.
+                    if (t >> 3) & 7 == 4 { Some(8) } else { None }
                 } else if md == 0 && rm == 4 {
                     let t = fourth?;
                     // no_index かつ base≠5。cut 0x492257 の cmovll (%rsp), %r10d。4B.
@@ -8316,6 +8320,18 @@ fn dispatch<B: Backend>(
                 sem::cmovne_r32_sibd(b, reg0f_as_gpr(), base, d8)
             }
         }
+        Insn::CmovneR32Sibd32 => {
+            // 0F 45 SIB mod=10 [base+disp32] no_index (64b)。free 0x44801c。
+            // SIB は (word>>32) 下位8、disp32 は最下位32 LE。
+            let sib_v = ((word >> 32) & 0xff) as u8;
+            let disp = (word as u32).swap_bytes() as i32;
+            let base = Gpr((sib_v & 7) | ((rex & 1) << 3));
+            if rex_w {
+                sem::cmovne_r64_sibd32(b, reg0f_as_gpr(), base, disp)
+            } else {
+                sem::cmovne_r32_sibd32(b, reg0f_as_gpr(), base, disp)
+            }
+        }
         Insn::CmoveR64Sibd => {
             // 0F 44 SIB mod=01 [base+disp8] no_index (40b)。
             // SIB は (word>>8) 下位8、disp は最下位8。base は SIB 下位3 + REX.B。
@@ -10824,6 +10840,7 @@ const X86_64_SYSCALLS: &[(&str, SysFn)] = &[
     ("gettid", sys_gettid),
     ("getpid", sys_getpid),
     ("getppid", sys_getppid),
+    ("sysinfo", sys_sysinfo),
     ("uname", sys_uname),
     ("getuid", sys_getuid),
     ("geteuid", sys_geteuid),
@@ -10950,6 +10967,42 @@ fn sys_openat(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Trap
     open_at_cwd(sys, env, cx, path_addr, flags)
 }
 
+fn open_synth_meminfo(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // sysinfo の固定値（1 GiB / 512 MiB）に揃えた kB 表記。
+    let body = b"\
+MemTotal:        1048576 kB
+MemFree:          524288 kB
+MemAvailable:     524288 kB
+Buffers:               0 kB
+Cached:                0 kB
+SwapCached:            0 kB
+SwapTotal:             0 kB
+SwapFree:              0 kB
+Shmem:                 0 kB
+";
+    let path = std::env::temp_dir().join(format!(
+        "polyisa-meminfo-{}-{}",
+        std::process::id(),
+        sys.pid
+    ));
+    if std::fs::write(&path, body).is_err() {
+        set64(env, Gpr(0), cx.neg(EACCES));
+        return Some(TrapOutcome::Handled);
+    }
+    match std::fs::File::open(&path) {
+        Ok(f) => {
+            let fd = sys.alloc_fd(f);
+            sys.remember_path(fd, path.to_string_lossy().into_owned());
+            set64(env, Gpr(0), fd as u64);
+            Some(TrapOutcome::Handled)
+        }
+        Err(_) => {
+            set64(env, Gpr(0), cx.neg(ENOENT));
+            Some(TrapOutcome::Handled)
+        }
+    }
+}
+
 fn open_at_cwd(
     sys: &mut CliLinux,
     env: &mut BareEnv,
@@ -10975,6 +11028,11 @@ fn open_at_cwd(
     };
     sys.ensure_cwd();
     let path = join_guest_path(&sys.cwd, &path);
+    // ホストの /proc/meminfo を見せると free の数値が揺らぐ。sysinfo の固定値に合わせた
+    // 合成ファイルを開く。
+    if path == "/proc/meminfo" {
+        return open_synth_meminfo(sys, env, cx);
+    }
     let want_write = acc != 0 || flags & (O_CREAT | O_TRUNC | O_APPEND) != 0;
     let opened = if want_write {
         let mut opts = std::fs::OpenOptions::new();
@@ -11734,6 +11792,30 @@ fn sys_getppid(sys: &mut CliLinux, env: &mut BareEnv, _cx: &SysCtx) -> Option<Tr
     let me = sys.ensure_self();
     let ppid = sys.procs.borrow().parent_of(me).map(|id| id.0).unwrap_or(0);
     set64(env, Gpr(0), ppid);
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_sysinfo(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // sysinfo(info)。メモリと稼働時間はゲストの固定値。free / uptime が読む。
+    // 配置は UAPI の struct sysinfo（x86-64 で 112 バイト）。Ref: SRC-LINUX (7.3).
+    let buf = get64(env, cx.r_a);
+    if buf == 0 {
+        set64(env, Gpr(0), cx.neg(EFAULT));
+        return Some(TrapOutcome::Handled);
+    }
+    let mut out = [0u8; 112];
+    // uptime = 3600 秒。
+    out[0..8].copy_from_slice(&3600i64.to_le_bytes());
+    // totalram = 1 GiB、freeram = 512 MiB、mem_unit = 1。
+    out[32..40].copy_from_slice(&(1024u64 * 1024 * 1024).to_le_bytes());
+    out[40..48].copy_from_slice(&(512u64 * 1024 * 1024).to_le_bytes());
+    // procs = 1。
+    out[80..82].copy_from_slice(&1u16.to_le_bytes());
+    out[104..108].copy_from_slice(&1u32.to_le_bytes());
+    if env.backend.mem.write(VirtAddr(buf), &out).is_err() {
+        return Some(TrapOutcome::Unimplemented);
+    }
+    set64(env, Gpr(0), 0);
     Some(TrapOutcome::Handled)
 }
 
@@ -15021,6 +15103,41 @@ mod tests {
         set64(&mut env, Gpr(0), abi::GETPPID);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), 0);
+    }
+
+    #[test]
+    fn sysinfo_writes_fixed_layout() {
+        use polyisa_os_linux::x86_64 as abi;
+        let mut sys = CliLinux::x86_64();
+        let mut env = bare();
+        set64(&mut env, Gpr(0), abi::SYSINFO);
+        set64(&mut env, Gpr(7), 0x200);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        let mut buf = [0u8; 112];
+        env.backend
+            .mem
+            .read(
+                VirtAddr(0x200),
+                &mut buf,
+                polyisa_mem::Access {
+                    endian: polyisa_mem::Endian::Le,
+                    align: polyisa_mem::Align::Unaligned,
+                    kind: polyisa_mem::AccessKind::DataRead,
+                },
+            )
+            .unwrap();
+        assert_eq!(i64::from_le_bytes(buf[0..8].try_into().unwrap()), 3600);
+        assert_eq!(
+            u64::from_le_bytes(buf[32..40].try_into().unwrap()),
+            1024 * 1024 * 1024
+        );
+        assert_eq!(
+            u64::from_le_bytes(buf[40..48].try_into().unwrap()),
+            512 * 1024 * 1024
+        );
+        assert_eq!(u16::from_le_bytes(buf[80..82].try_into().unwrap()), 1);
+        assert_eq!(u32::from_le_bytes(buf[104..108].try_into().unwrap()), 1);
     }
 
     #[test]
