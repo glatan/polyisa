@@ -33,6 +33,7 @@
 - fchmodat
 - fchown
 - fcntl
+- fork
 - fstat
 - ftruncate
 - getcwd
@@ -61,6 +62,7 @@
 - newfstatat
 - open
 - openat
+- pipe
 - pipe2
 - prlimit64
 - read

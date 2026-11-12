@@ -9707,13 +9707,14 @@ fn run_elf_x86_64_at(
 ) -> Result<(u64, Vec<u8>), String> {
     let bytes = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
     let mut sys = CliLinux::x86_64();
-    sys.capture_out = Some(Vec::new());
+    let captured = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    sys.capture_out = Some(std::rc::Rc::clone(&captured));
     sys.stdin_buf = stdin.to_vec();
     if let Some(dir) = dir {
         sys.cwd = dir.to_string();
     }
     let code = run_image_x86_64(&bytes, path, argv, &mut sys)?;
-    Ok((code, sys.capture_out.unwrap_or_default()))
+    Ok((code, captured.borrow().clone()))
 }
 
 /// ゲストの NUL 終端文字列を読む。上限を超えるか読めなければ None。
@@ -9784,7 +9785,8 @@ pub struct CliLinux {
     /// 標準 fd に付け替えたファイルのホストパス。
     std_paths: [Option<String>; 3],
     /// Some のとき、fd 1 の出力をここへ溜める。None のときはホストの stdout。
-    capture_out: Option<Vec<u8>>,
+    /// fork した子と親で同じバッファを使う。
+    capture_out: Option<std::rc::Rc<std::cell::RefCell<Vec<u8>>>>,
     /// 真の stdin へ供給するバイト。空なら空読み（端末は奪わない）。
     stdin_buf: Vec<u8>,
     /// `stdin_buf` の次に読む位置。
@@ -9803,6 +9805,8 @@ pub struct CliLinux {
     pipes: SharedPipes,
     /// fd 3 以降のパイプ端。ホストのファイルと同時には持たない。
     pipe_ends: Vec<Option<PipeEnd>>,
+    /// 標準 fd 0/1/2 に載せたパイプ端。
+    std_pipes: [Option<PipeEnd>; 3],
     /// 空のパイプを読もうとして待っているパイプ。
     pipe_wait: Option<u64>,
     /// このプロセスの作業ディレクトリ。空はまだホストの作業ディレクトリを写していない。
@@ -9925,7 +9929,7 @@ impl CliLinux {
 
     fn pipe_end(&self, fd: u32) -> Option<PipeEnd> {
         if fd < 3 {
-            return None;
+            return self.std_pipes[fd as usize];
         }
         self.pipe_ends
             .get(fd.wrapping_sub(3) as usize)
@@ -9945,21 +9949,50 @@ impl CliLinux {
             return (3 + idx) as u32;
         }
         self.fds.push(None);
-        self.pipe_ends.push(Some(end));
-        (3 + self.fds.len() - 1) as u32
+        let idx = self.fds.len() - 1;
+        while self.pipe_ends.len() <= idx {
+            self.pipe_ends.push(None);
+        }
+        self.pipe_ends[idx] = Some(end);
+        (3 + idx) as u32
     }
 
     fn close_pipe(&mut self, fd: u32) {
-        let Some(idx) = fd.checked_sub(3).map(|n| n as usize) else {
-            return;
+        let end = if fd < 3 {
+            self.std_pipes[fd as usize].take()
+        } else {
+            let idx = fd.wrapping_sub(3) as usize;
+            self.pipe_ends.get_mut(idx).and_then(|slot| slot.take())
         };
-        let Some(end) = self.pipe_ends.get_mut(idx).and_then(|slot| slot.take()) else {
+        let Some(end) = end else {
             return;
         };
         self.pipes.0.borrow_mut().close(end.id, end.read);
         if !end.read {
             self.wake_pipe(end.id);
         }
+    }
+
+    /// パイプ端を `newfd` へ増やす。呼び出し側は先に旧 `newfd` を閉じる。
+    fn install_pipe(&mut self, end: PipeEnd, newfd: u32) {
+        self.pipes.0.borrow_mut().dup(end.id, end.read);
+        if newfd < 3 {
+            let i = newfd as usize;
+            self.std_files[i] = None;
+            self.std_paths[i] = None;
+            self.std_closed[i] = false;
+            self.std_pipes[i] = Some(end);
+            return;
+        }
+        let idx = newfd.wrapping_sub(3) as usize;
+        while self.fds.len() <= idx {
+            self.fds.push(None);
+        }
+        while self.pipe_ends.len() <= idx {
+            self.pipe_ends.push(None);
+        }
+        self.fds[idx] = None;
+        self.pipe_ends[idx] = Some(end);
     }
 
     /// そのパイプの読みを待っているスレッドを実行可能に戻す。
@@ -10127,8 +10160,8 @@ impl CliLinux {
 
     /// fd 1 へ書く。capture_out があるときはそこへ溜める。
     fn write_fd1(&mut self, bytes: &[u8]) -> usize {
-        if let Some(buf) = self.capture_out.as_mut() {
-            buf.extend_from_slice(bytes);
+        if let Some(buf) = self.capture_out.as_ref() {
+            buf.borrow_mut().extend_from_slice(bytes);
             return bytes.len();
         }
         std::io::Write::write(&mut std::io::stdout(), bytes).unwrap_or(0)
@@ -10145,7 +10178,12 @@ impl CliLinux {
     fn close_fd(&mut self, fd: u32) -> bool {
         if fd < 3 {
             let i = fd as usize;
-            if self.std_files[i].is_some() {
+            if self.std_pipes[i].is_some() {
+                self.close_pipe(fd);
+                self.std_closed[i] = true;
+                self.forget_path(fd);
+                true
+            } else if self.std_files[i].is_some() {
                 self.std_files[i] = None;
                 self.std_closed[i] = true;
                 self.forget_path(fd);
@@ -10267,10 +10305,14 @@ impl CliLinux {
             queue: self.queue.clone(),
             pipes: self.pipes.clone(),
             pipe_ends: self.pipe_ends.clone(),
+            std_pipes: self.std_pipes,
             pipe_wait: None,
             cwd: self.cwd.clone(),
         };
         for end in child.pipe_ends.iter().flatten() {
+            child.pipes.0.borrow_mut().dup(end.id, end.read);
+        }
+        for end in child.std_pipes.iter().flatten() {
             child.pipes.0.borrow_mut().dup(end.id, end.read);
         }
         child
@@ -10343,6 +10385,13 @@ impl CliLinux {
     /// 戻る相手がいるときだけ真。初期プロセスの終了は偽で、呼び出し側へ渡す。
     fn yield_on_exit(&mut self, env: &mut BareEnv, code: u32) -> bool {
         let me = self.ensure_self();
+        let nfd = self.fds.len();
+        for fd in 0..3u32 {
+            self.close_fd(fd);
+        }
+        for idx in 0..nfd {
+            self.close_fd(3 + idx as u32);
+        }
         self.procs.borrow_mut().exit(me, code);
         let root = self.procs.borrow().is_root(me);
         self.queue
@@ -10572,9 +10621,11 @@ const X86_64_SYSCALLS: &[(&str, SysFn)] = &[
     ("exit", sys_exit),
     ("exit_group", sys_exit_group),
     ("clone", sys_clone),
+    ("fork", sys_fork),
     ("execve", sys_execve),
     ("wait4", sys_wait4),
     ("pipe2", sys_pipe2),
+    ("pipe", sys_pipe),
     ("setpgid", sys_setpgid),
     ("getpgid", sys_getpgid),
     ("chdir", sys_chdir),
@@ -10852,9 +10903,23 @@ fn pipe_write(
     }
 }
 
+fn sys_pipe(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // pipe(pipefd)。pipe2 の flags=0 と同じ。zcat が使う。
+    open_pipe(sys, env, cx, 0)
+}
+
 fn sys_pipe2(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    let addr = get64(env, cx.r_a);
     let flags = get64(env, cx.r_b);
+    open_pipe(sys, env, cx, flags)
+}
+
+fn open_pipe(
+    sys: &mut CliLinux,
+    env: &mut BareEnv,
+    cx: &SysCtx,
+    flags: u64,
+) -> Option<TrapOutcome> {
+    let addr = get64(env, cx.r_a);
     if flags != 0 {
         set64(env, Gpr(0), cx.neg(EINVAL));
         return Some(TrapOutcome::Handled);
@@ -11919,6 +11984,46 @@ fn sys_sendfile(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Tr
         set64(env, Gpr(0), cx.neg(EBADF));
         return Some(TrapOutcome::Handled);
     }
+    if let Some(end) = sys.pipe_end(in_fd) {
+        if !end.read {
+            set64(env, Gpr(0), cx.neg(EBADF));
+            return Some(TrapOutcome::Handled);
+        }
+        let mut done = 0u64;
+        while left > 0 {
+            let max = usize::try_from(left.min(4096)).unwrap_or(0);
+            let got = sys.pipes.0.borrow_mut().read(end.id, max);
+            match got {
+                polyisa_kernel::PipeRead::Bytes(bytes) => {
+                    let n = bytes.len();
+                    let w = match out_fd {
+                        1 => sys.write_fd1(&bytes),
+                        _ => std::io::Write::write(&mut std::io::stderr(), &bytes).unwrap_or(0),
+                    };
+                    done += n as u64;
+                    left -= n as u64;
+                    if w < n {
+                        break;
+                    }
+                }
+                polyisa_kernel::PipeRead::Eof => break,
+                polyisa_kernel::PipeRead::Empty => {
+                    if done > 0 {
+                        break;
+                    }
+                    let id = sys.ensure_self();
+                    sys.pipe_wait = Some(end.id);
+                    sys.queue.0.borrow_mut().meta.block(
+                        polyisa_kernel::ThreadId(id.0),
+                        polyisa_kernel::ThreadWait::Pipe { id: end.id },
+                    );
+                    return Some(TrapOutcome::Blocked);
+                }
+            }
+        }
+        set64(env, Gpr(0), done);
+        return Some(TrapOutcome::Handled);
+    }
     // 付け替えた stdin はファイルから読む。真の stdin は供給バッファから読む。
     let in_empty = in_fd == 0 && sys.std_attached(0);
     if sys.file_ref(in_fd).is_none() {
@@ -12614,6 +12719,19 @@ fn sys_dup(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOut
         set64(env, Gpr(0), cx.neg(EBADF));
         return Some(TrapOutcome::Handled);
     }
+    if let Some(end) = sys.pipe_end(oldfd) {
+        if let Some(i) = (0..3).find(|&i| {
+            sys.std_closed[i] && sys.std_files[i].is_none() && sys.std_pipes[i].is_none()
+        }) {
+            sys.install_pipe(end, i as u32);
+            set64(env, Gpr(0), i as u64);
+            return Some(TrapOutcome::Handled);
+        }
+        let fd = sys.alloc_pipe_fd(end);
+        sys.pipes.0.borrow_mut().dup(end.id, end.read);
+        set64(env, Gpr(0), fd as u64);
+        return Some(TrapOutcome::Handled);
+    }
     if let Some((cloned, path)) = sys.clone_open(oldfd) {
         if let Some(i) = (0..3).find(|&i| sys.std_files[i].is_none() && sys.std_closed[i]) {
             sys.std_files[i] = Some(cloned);
@@ -12661,6 +12779,12 @@ fn sys_dup2(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOu
         return Some(TrapOutcome::Handled);
     }
     if oldfd == newfd {
+        set64(env, Gpr(0), newfd as u64);
+        return Some(TrapOutcome::Handled);
+    }
+    if let Some(end) = sys.pipe_end(oldfd) {
+        sys.close_fd(newfd);
+        sys.install_pipe(end, newfd);
         set64(env, Gpr(0), newfd as u64);
         return Some(TrapOutcome::Handled);
     }
@@ -13211,12 +13335,21 @@ fn sys_brk(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOut
 
 /// プロセスの clone。アドレス空間を共有するフラグは受けない。
 /// 子は実行可能なスレッドとして置き、親には子の識別子を返す。
+fn sys_fork(sys: &mut CliLinux, env: &mut BareEnv, _cx: &SysCtx) -> Option<TrapOutcome> {
+    // fork()。アドレス空間は複製する。CLONE_VM の vfork は受けない。
+    spawn_child(sys, env, 0)
+}
+
 fn sys_clone(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     let flags = get64(env, cx.r_a);
     let stack = get64(env, cx.r_b);
     if flags & (polyisa_os_linux::clone_flag::VM | polyisa_os_linux::clone_flag::THREAD) != 0 {
         return Some(TrapOutcome::Unimplemented);
     }
+    spawn_child(sys, env, stack)
+}
+
+fn spawn_child(sys: &mut CliLinux, env: &mut BareEnv, stack: u64) -> Option<TrapOutcome> {
     let parent = sys.ensure_self();
     let child_pid = sys.procs.borrow_mut().fork(parent);
     let mut child_env = env.clone();
@@ -13238,6 +13371,10 @@ fn sys_clone(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapO
         .borrow_mut()
         .meta
         .insert(polyisa_kernel::ThreadId(child_pid.0));
+    sys.queue.0.borrow_mut().meta.copy_steps(
+        polyisa_kernel::ThreadId(parent.0),
+        polyisa_kernel::ThreadId(child_pid.0),
+    );
     sys.queue.0.borrow_mut().parked.push(ParkedTask {
         env: child_env,
         linux: child_linux,
@@ -13707,7 +13844,7 @@ mod tests {
             TrapOutcome::Handled
         ));
         assert_eq!(env.backend.get(Gpr(0).state()), neg_errno(EINVAL));
-        // 相対パスは受け付けない。
+        // 相対パスは作業ディレクトリから開く。ここには無いので ENOENT。
         env.backend.mem.write(VirtAddr(0x100), b"rel\0").unwrap();
         set_regs(
             &mut env,
@@ -13720,7 +13857,7 @@ mod tests {
             sys.handle_trap(&mut env, 0x80),
             TrapOutcome::Handled
         ));
-        assert_eq!(env.backend.get(Gpr(0).state()), neg_errno(EINVAL));
+        assert_eq!(env.backend.get(Gpr(0).state()), neg_errno(ENOENT));
     }
 
     #[test]
@@ -14301,6 +14438,22 @@ mod tests {
         set64(&mut env, Gpr(6), 0);
         set64(&mut env, Gpr(2), 0);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Blocked));
+        assert!(sys.task_pids().contains(&child));
+    }
+
+    #[test]
+    fn fork_returns_child_pid() {
+        use polyisa_os_linux::x86_64 as abi;
+        let mut sys = CliLinux::x86_64();
+        let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_x86::CpuState>());
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.set(polyisa_guest_x86::sem::eip_ref(), 0x1000);
+        env.backend.mem.write(VirtAddr(0x1002), &[0x06]).unwrap();
+        set64(&mut env, Gpr(0), abi::FORK);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let child = get64(&mut env, Gpr(0));
+        assert!(child > 1, "child pid {child}");
         assert!(sys.task_pids().contains(&child));
     }
 
@@ -15853,6 +16006,82 @@ mod tests {
             .read(VirtAddr(0x400), &mut byte, data_access())
             .unwrap();
         assert_eq!(byte, *b"Z");
+    }
+
+    #[test]
+    fn pipe_returns_two_fds() {
+        use polyisa_os_linux::x86_64 as abi;
+        let mut sys = CliLinux::x86_64();
+        let mut env = bare();
+        set64(&mut env, Gpr(0), abi::PIPE);
+        set64(&mut env, Gpr(7), 0x200);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        let mut fds = [0u8; 8];
+        env.backend
+            .mem
+            .read(VirtAddr(0x200), &mut fds, data_access())
+            .unwrap();
+        let read_fd = u32::from_le_bytes(fds[0..4].try_into().unwrap());
+        let write_fd = u32::from_le_bytes(fds[4..8].try_into().unwrap());
+        assert_ne!(read_fd, write_fd);
+        assert!(read_fd >= 3 && write_fd >= 3);
+        // ファイルが先に開いているとき、両端は別の番号になる。
+        let mut sys = CliLinux::x86_64();
+        let mut env = bare();
+        sys.fds
+            .push(Some(std::fs::File::open("/dev/null").unwrap()));
+        set64(&mut env, Gpr(0), abi::PIPE);
+        set64(&mut env, Gpr(7), 0x200);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let mut again = [0u8; 8];
+        env.backend
+            .mem
+            .read(VirtAddr(0x200), &mut again, data_access())
+            .unwrap();
+        let read2 = u32::from_le_bytes(again[0..4].try_into().unwrap());
+        let write2 = u32::from_le_bytes(again[4..8].try_into().unwrap());
+        assert_eq!((read2, write2), (4, 5));
+    }
+
+    #[test]
+    fn dup2_pipe_onto_stdin_reads() {
+        use polyisa_os_linux::x86_64 as abi;
+        let mut sys = CliLinux::x86_64();
+        let mut env = bare();
+        set64(&mut env, Gpr(0), abi::PIPE);
+        set64(&mut env, Gpr(7), 0x200);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let mut fds = [0u8; 8];
+        env.backend
+            .mem
+            .read(VirtAddr(0x200), &mut fds, data_access())
+            .unwrap();
+        let read_fd = u32::from_le_bytes(fds[0..4].try_into().unwrap());
+        let write_fd = u32::from_le_bytes(fds[4..8].try_into().unwrap());
+        set64(&mut env, Gpr(0), abi::DUP2);
+        set64(&mut env, Gpr(7), read_fd.into());
+        set64(&mut env, Gpr(6), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        env.backend.mem.write(VirtAddr(0x300), b"Q").unwrap();
+        set64(&mut env, Gpr(0), abi::WRITE);
+        set64(&mut env, Gpr(7), write_fd.into());
+        set64(&mut env, Gpr(6), 0x300);
+        set64(&mut env, Gpr(2), 1);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        set64(&mut env, Gpr(0), abi::READ);
+        set64(&mut env, Gpr(7), 0);
+        set64(&mut env, Gpr(6), 0x400);
+        set64(&mut env, Gpr(2), 1);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 1);
+        let mut byte = [0u8; 1];
+        env.backend
+            .mem
+            .read(VirtAddr(0x400), &mut byte, data_access())
+            .unwrap();
+        assert_eq!(byte, *b"Q");
     }
 
     #[test]

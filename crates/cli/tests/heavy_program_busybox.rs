@@ -525,6 +525,7 @@ fn text_applets_match_host() {
         &["cryptpw", "secret", "sa"],
         &["pgrep", "nosuchname123"],
         &["gunzip", "-c", gz_s],
+        &["zcat", gz_s],
         &["bzcat", bz_s],
         &["bunzip2", "-c", bz_s],
         &["lzop", "-c", f],

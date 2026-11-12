@@ -207,6 +207,14 @@ impl GuestScheduler {
         });
     }
 
+    /// `to` のステップ数を `from` に合わせる。fork 直後に親が子より先に進むため。
+    pub fn copy_steps(&mut self, from: ThreadId, to: ThreadId) {
+        let steps = self.steps_of(from);
+        if let Some(thread) = self.threads.iter_mut().find(|thread| thread.id == to) {
+            thread.steps = steps;
+        }
+    }
+
     /// 1 ステップ足して、足したあとの値を返す。
     pub fn add_step(&mut self, id: ThreadId) -> u64 {
         self.insert(id);

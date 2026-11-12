@@ -150,12 +150,14 @@ pub mod x86_64 {
     pub const LINK: u64 = 86;
     pub const SYNC: u64 = 162;
     pub const CLONE: u64 = 56;
+    pub const FORK: u64 = 57;
     pub const EXECVE: u64 = 59;
     pub const WAIT4: u64 = 61;
     pub const KILL: u64 = 62;
     pub const SETPGID: u64 = 109;
     pub const GETPGID: u64 = 121;
     pub const PIPE2: u64 = 293;
+    pub const PIPE: u64 = 22;
     // Gap: GAP-0004
     // statfs 系。busybox の `df` が呼ぶ。
     // Ref: SRC-LINUX (7.3).
@@ -455,9 +457,11 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             x86_64::STATFS => Some("statfs"),
             x86_64::FSTATFS => Some("fstatfs"),
             x86_64::CLONE => Some("clone"),
+            x86_64::FORK => Some("fork"),
             x86_64::EXECVE => Some("execve"),
             x86_64::WAIT4 => Some("wait4"),
             x86_64::PIPE2 => Some("pipe2"),
+            x86_64::PIPE => Some("pipe"),
             x86_64::SETPGID => Some("setpgid"),
             x86_64::GETPGID => Some("getpgid"),
             x86_64::CHDIR => Some("chdir"),
