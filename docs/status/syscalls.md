@@ -105,6 +105,7 @@
 - uname
 - unlink
 - unlinkat
+- unshare
 - utimensat
 - wait4
 - write
