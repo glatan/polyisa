@@ -348,6 +348,29 @@ fn text_applets_match_host() {
         .expect("host lzop");
     std::fs::write(&lzo, &lzo_out.stdout).unwrap();
     let lzo_s = lzo.to_str().expect("utf-8");
+    // BusyBox 1.35 の xz / lzma は展開専用。同じ 9 バイトから作ったストリームを埋め込む。
+    let xz = dir.join("f.xz");
+    std::fs::write(
+        &xz,
+        [
+            253, 55, 122, 88, 90, 0, 0, 4, 230, 214, 180, 70, 4, 192, 13, 9, 33, 1, 22, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 95, 79, 51, 228, 1, 0, 8, 97, 98, 10, 99, 100, 10, 97, 98, 10, 0, 0, 0,
+            0, 109, 228, 144, 139, 163, 56, 240, 229, 0, 1, 41, 9, 100, 146, 28, 29, 31, 182, 243,
+            125, 1, 0, 0, 0, 0, 4, 89, 90,
+        ],
+    )
+    .unwrap();
+    let xz_s = xz.to_str().expect("utf-8");
+    let lz = dir.join("f.lzma");
+    std::fs::write(
+        &lz,
+        [
+            93, 0, 0, 128, 0, 255, 255, 255, 255, 255, 255, 255, 255, 0, 48, 152, 125, 69, 251, 49,
+            19, 221, 58, 16, 89, 254, 123, 255, 255, 55, 160, 0, 0,
+        ],
+    )
+    .unwrap();
+    let lz_s = lz.to_str().expect("utf-8");
     let copied_s = copied.to_str().expect("utf-8");
     let touched_s = touched.to_str().expect("utf-8");
     let link = dir.join("link");
@@ -445,6 +468,10 @@ fn text_applets_match_host() {
         &["lzop", "-c", f],
         &["lzopcat", lzo_s],
         &["unlzop", "-c", lzo_s],
+        &["xzcat", xz_s],
+        &["unxz", "-c", xz_s],
+        &["lzcat", lz_s],
+        &["unlzma", "-c", lz_s],
         &["mkpasswd", "secret", "sa"],
         &["kill", "-l"],
         &["pidof", "nosuchname123"],
