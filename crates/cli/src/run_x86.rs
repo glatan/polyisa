@@ -362,9 +362,16 @@ fn fetch_len(
                     None
                 }
             } else if s == 0x5A {
-                // CVTSD2SS xmm,xmm (F2 0F 5A /r reg-direct)。awk atan2 0x4d7244 の cvtsd2ss xmm1,xmm0。
+                // CVTSD2SS / CVTSS2SD (F2/F3 0F 5A /r)。reg-direct は 3B。
+                // mod=00 で rm が 4/5 以外も 3B。od -tfF 0x4973b5 の cvtss2sd xmm0, [rbx]。
                 let m = third?;
-                if m >> 6 == 3 { Some(3) } else { None }
+                let md = m >> 6;
+                let rm = m & 7;
+                if md == 3 || (md == 0 && rm != 4 && rm != 5) {
+                    Some(3)
+                } else {
+                    None
+                }
             } else if s == 0x51 {
                 // SQRTSD xmm,xmm (F2 0F 51 /r reg-direct)。awk sqrt 0x4c1dd9 の sqrtsd xmm0,xmm0。
                 let m = third?;
@@ -2315,6 +2322,13 @@ pub fn run_mode(
                 | Insn::Cvtsd2ss
         ) && !has_f2
         {
+            return Outcome::Unimplemented {
+                eip: pc as u32,
+                word,
+            };
+        }
+        // 0F 5A mod=00 は F3 なら CVTSS2SD m32、F2 なら CVTSD2SS m64。接頭辞なしは CVTPS2PD。
+        if matches!(insn, Insn::Cvtss2sdM32) && has_f2 == rep {
             return Outcome::Unimplemented {
                 eip: pc as u32,
                 word,
@@ -7158,6 +7172,14 @@ fn dispatch<B: Backend>(
         Insn::Mulsd => sem::mulsd_xmm(b, xmm_reg_r(), xmm_rm_b()),
         Insn::Sqrtsd => sem::sqrtsd_xmm(b, xmm_reg_r(), xmm_rm_b()),
         Insn::Cvtsd2ss => sem::cvtsd2ss_xmm(b, xmm_reg_r(), xmm_rm_b()),
+        Insn::Cvtss2sdM32 => {
+            // F3 0F 5A mod=00。od -tfF 0x4973b5 の cvtss2sd xmm0, [rbx]。F2 は m64 からの CVTSD2SS。
+            if rep {
+                sem::cvtss2sd_xmm_m32(b, xmm_reg_r(), rm0f())
+            } else {
+                sem::cvtsd2ss_xmm_m64(b, xmm_reg_r(), rm0f())
+            }
+        }
         Insn::MulsdM64Sib => {
             // F2 0F 59 SIB mod=00。awk 乗算 0x4a327c の mulsd xmm1, QWORD PTR [rsp]。
             if sib0f_no_index() {

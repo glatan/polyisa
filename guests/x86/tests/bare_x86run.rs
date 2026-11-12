@@ -12683,6 +12683,114 @@ fn run_mulsd_xmm_m64_sibd_three_times_two() {
 }
 
 #[test]
+fn run_cvtss2sd_xmm0_rbx() {
+    // F3 0F 5A 03 = cvtss2sd xmm0, [rbx]。単精度 1.0 は倍精度 1.0。上位64は残る。
+    // od -tfF 0x4973b5。Ref: SPEC-X86-INTEL-SDM (v093).
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(3), 0x2000);
+        Ok(())
+    })
+    .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2000), &0x3f80_0000u32.to_le_bytes())
+        .unwrap();
+    env.backend.mem.write(VirtAddr(0x2004), &[0xAB]).unwrap();
+    env.backend.set(
+        polyisa_guest_x86::sem::xmm_ref(polyisa_guest_x86::sem::Xmm(0)),
+        0xAAAA_AAAA_AAAA_AAAA_1111_1111_1111_1111,
+    );
+    env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 1);
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0xF3, 0x0F, 0x5A, 0x03])
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x1004 });
+    let v: u128 = env.backend.get(polyisa_guest_x86::sem::xmm_ref(
+        polyisa_guest_x86::sem::Xmm(0),
+    ));
+    assert_eq!(v, 0xAAAA_AAAA_AAAA_AAAA_3FF0_0000_0000_0000);
+    let rbx: u64 = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(3));
+    assert_eq!(rbx, 0x2000);
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::eflags_ref()), 1);
+    let mut nb = [0u8; 5];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x2000),
+            &mut nb,
+            polyisa_mem::Access {
+                endian: polyisa_mem::Endian::Le,
+                align: polyisa_mem::Align::Unaligned,
+                kind: polyisa_mem::AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(&nb[..4], &0x3f80_0000u32.to_le_bytes());
+    assert_eq!(nb[4], 0xAB);
+}
+
+#[test]
+fn run_cvtsd2ss_xmm0_m64_rbx() {
+    // F2 0F 5A 03 = cvtsd2ss xmm0, [rbx]。倍精度 4.0 は単精度 4.0。上位96は残る。
+    // Ref: SPEC-X86-INTEL-SDM (v093).
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(3), 0x2000);
+        Ok(())
+    })
+    .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2000), &0x4010_0000_0000_0000u64.to_le_bytes())
+        .unwrap();
+    env.backend.mem.write(VirtAddr(0x2008), &[0xAB]).unwrap();
+    env.backend.set(
+        polyisa_guest_x86::sem::xmm_ref(polyisa_guest_x86::sem::Xmm(0)),
+        0xBBBB_BBBB_CCCC_CCCC_DDDD_DDDD_1111_1111,
+    );
+    env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 1);
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0xF2, 0x0F, 0x5A, 0x03])
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x1004 });
+    let v: u128 = env.backend.get(polyisa_guest_x86::sem::xmm_ref(
+        polyisa_guest_x86::sem::Xmm(0),
+    ));
+    assert_eq!(v, 0xBBBB_BBBB_CCCC_CCCC_DDDD_DDDD_4080_0000);
+    let rbx: u64 = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(3));
+    assert_eq!(rbx, 0x2000);
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::eflags_ref()), 1);
+    let mut nb = [0u8; 9];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x2000),
+            &mut nb,
+            polyisa_mem::Access {
+                endian: polyisa_mem::Endian::Le,
+                align: polyisa_mem::Align::Unaligned,
+                kind: polyisa_mem::AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(&nb[..8], &0x4010_0000_0000_0000u64.to_le_bytes());
+    assert_eq!(nb[8], 0xAB);
+}
+
+#[test]
 fn run_cvtsd2ss_xmm1_from_xmm0() {
     // F2 0F 5A C8 = cvtsd2ss xmm1,xmm0。4.0 の倍精度は単精度 4.0。上位96は残る。
     // awk atan2 0x4d7244。Ref: SPEC-X86-INTEL-SDM (v093).

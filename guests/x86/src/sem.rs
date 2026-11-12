@@ -17340,6 +17340,41 @@ pub fn subsd_xmm<B: Backend>(b: &mut B, dst: Xmm, src: Xmm) -> Flow<B> {
     Ok(())
 }
 
+/// CVTSS2SD xmm,m32 (F3 0F 5A mod=00)。[base] の単精度を倍精度にして dst の下位64へ書く。上位64は dst のまま.
+pub fn cvtss2sd_xmm_m32<B: Backend>(b: &mut B, dst: Xmm, base: Gpr) -> Flow<B> {
+    use polyisa_sem::{F32, F64};
+    let a128: B::V<W128> = b.get(xmm_ref(dst));
+    let addr = read64(b, base);
+    let m32: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let s: B::V<F32> = b.trunc::<W32, F32>(m32);
+    let d: B::V<F64> = b.fcvt_ff(s, 0);
+    let d64: B::V<W64> = b.trunc::<F64, W64>(d);
+    let lo = b.zext::<W64, W128>(d64);
+    let hi_shift = b.konst::<W128>(64);
+    let hi = b.shr_l::<W128>(a128, hi_shift);
+    let hi_back = b.shl::<W128>(hi, hi_shift);
+    let res = b.or::<W128>(hi_back, lo);
+    b.set(xmm_ref(dst), res);
+    Ok(())
+}
+
+/// CVTSD2SS xmm,m64 (F2 0F 5A mod=00)。[base] の倍精度を単精度にして dst の下位32へ書く。上位96は dst のまま.
+pub fn cvtsd2ss_xmm_m64<B: Backend>(b: &mut B, dst: Xmm, base: Gpr) -> Flow<B> {
+    use polyisa_sem::{F32, F64};
+    let a128: B::V<W128> = b.get(xmm_ref(dst));
+    let addr = read64(b, base);
+    let m64: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let c: B::V<F64> = b.trunc::<W64, F64>(m64);
+    let s: B::V<F32> = b.fcvt_ff(c, 0);
+    let s32: B::V<W32> = b.trunc::<F32, W32>(s);
+    let lo = b.zext::<W32, W128>(s32);
+    let keep = b.konst::<W128>(!0xFFFF_FFFFu128);
+    let hi = b.and::<W128>(a128, keep);
+    let res = b.or::<W128>(hi, lo);
+    b.set(xmm_ref(dst), res);
+    Ok(())
+}
+
 /// CVTSD2SS xmm,xmm (F2 0F 5A /r)。src の下位64の倍精度を単精度にして dst の下位32へ書く。上位96は dst のまま.
 pub fn cvtsd2ss_xmm<B: Backend>(b: &mut B, dst: Xmm, src: Xmm) -> Flow<B> {
     use polyisa_sem::{F32, F64};
