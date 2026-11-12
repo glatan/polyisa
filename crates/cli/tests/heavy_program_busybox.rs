@@ -612,6 +612,7 @@ fn true_echo_uname_id_match() {
         ("wget", ["wget", "http://127.0.0.1/"].as_slice()),
         ("rx", ["rx", "-h"].as_slice()),
         ("bootchartd", ["bootchartd", "-h"].as_slice()),
+        ("inetd", ["inetd", "-h"].as_slice()),
         ("[[", ["[["].as_slice()),
         ("arp", ["arp", "-h"].as_slice()),
         ("ifconfig", ["ifconfig", "-h"].as_slice()),
