@@ -167,7 +167,7 @@
 | punpckldq | punpckldq | 真 | alu |
 | punpcklqdq | punpcklqdq | 真 | alu |
 | punpcklwd | punpcklwd | 真 | alu |
-| push | push_eax、push_ebp、push_ebx、push_ecx、push_edi、push_edx、push_esi、push_esp、push_imm32、push_imm8、push_rm_mem8、push_rm_sibd | 真 | store |
+| push | push_eax、push_ebp、push_ebx、push_ecx、push_edi、push_edx、push_esi、push_esp、push_imm32、push_imm8、push_rm_mem8、push_rm_sibd、push_rm_sibd32 | 真 | store |
 | pxor | pxor | 真 | alu |
 | rdsspq | rdsspq | 真 | system |
 | ret | ret | 真 | jump |

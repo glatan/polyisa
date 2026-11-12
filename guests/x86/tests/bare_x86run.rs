@@ -4959,6 +4959,67 @@ fn run_cmovne_r64_rip() {
 }
 
 #[test]
+fn run_push_qword_rsp_disp32() {
+    // FF B4 24 10 01 00 00 = push qword [rsp+0x110]。top 0x44e0d6。
+    // Ref: SPEC-X86-INTEL-SDM (v093).
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(4), 0x2100);
+        Ok(())
+    })
+    .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2210), &0x1111_2222_3333_4444u64.to_le_bytes())
+        .unwrap();
+    env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 1);
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x1000),
+            &[0xFF, 0xB4, 0x24, 0x10, 0x01, 0x00, 0x00],
+        )
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x1007 });
+    let rsp: u64 = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(4));
+    assert_eq!(rsp, 0x20F8);
+    let mut slot = [0u8; 8];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x20F8),
+            &mut slot,
+            polyisa_mem::Access {
+                endian: polyisa_mem::Endian::Le,
+                align: polyisa_mem::Align::Unaligned,
+                kind: polyisa_mem::AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(u64::from_le_bytes(slot), 0x1111_2222_3333_4444);
+    let mut src = [0u8; 8];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x2210),
+            &mut src,
+            polyisa_mem::Access {
+                endian: polyisa_mem::Endian::Le,
+                align: polyisa_mem::Align::Unaligned,
+                kind: polyisa_mem::AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(u64::from_le_bytes(src), 0x1111_2222_3333_4444);
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::eflags_ref()), 1);
+}
+
+#[test]
 fn run_dec_byte_rcx() {
     // FE 09 = dec byte [rcx]。0x10 は 0x0F。CF は残る。dc 0x40abca。
     // Ref: SPEC-X86-INTEL-SDM (v093).

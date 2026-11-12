@@ -1444,6 +1444,10 @@ fn fetch_len(
                 // PUSH m [base+disp8]。vi 0x4ce196 の FF 73 40。
                 return Some(3);
             }
+            if reg == 6 && md == 2 && rm == 4 {
+                // PUSH m64 SIB+disp32。top 0x44e0d6 の push qword [rsp+0x110]。
+                return Some(7);
+            }
             if reg != 0 && reg != 1 && reg != 2 && reg != 4 {
                 return None;
             }
@@ -4032,6 +4036,20 @@ fn dispatch<B: Backend>(
                 sem::push_m64_sibd(b, sib_base(), sib_idx(), sib_shift(), disp8())
             } else {
                 sem::push_m32_sibd(b, sib_base(), sib_idx(), sib_shift(), disp8())
+            }
+        }
+        Insn::PushRmSibd32 => {
+            // FF /6 SIB mod=10。top 0x44e0d6 の push qword [rsp+0x110]。番地は減算前。
+            if no_index() {
+                if is64 {
+                    sem::push_m64_mem32(b, sib_base(), disp32())
+                } else {
+                    sem::push_m32_mem32(b, sib_base(), disp32())
+                }
+            } else if is64 {
+                sem::push_m64_sibd32(b, sib_base(), sib_idx(), sib_shift(), disp32())
+            } else {
+                sem::push_m32_sibd32(b, sib_base(), sib_idx(), sib_shift(), disp32())
             }
         }
         Insn::PushImm8 => {

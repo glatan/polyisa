@@ -6016,6 +6016,68 @@ pub fn push_m32_sibd<B: Backend>(b: &mut B, base: Gpr, idx: Gpr, shift: u32, dis
     Ok(())
 }
 
+/// PUSH m64 [base+disp32] (FF /6 SIB mod=10, no_index)。番地は減算前の RSP。
+pub fn push_m64_mem32<B: Backend>(b: &mut B, base: Gpr, disp: i32) -> Flow<B> {
+    let addr = eff_addr32(b, base, disp);
+    let v: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let rsp = read64(b, Gpr(4));
+    let eight = b.konst::<W64>(8);
+    let next = b.sub::<W64>(rsp, eight);
+    write64(b, Gpr(4), next);
+    b.store::<W64>(next, v, DATA_WRITE)?;
+    Ok(())
+}
+
+/// PUSH m64 [base+index*scale+disp32] (FF /6 SIB mod=10)。
+pub fn push_m64_sibd32<B: Backend>(
+    b: &mut B,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i32,
+) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, disp, base, idx);
+    let v: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let rsp = read64(b, Gpr(4));
+    let eight = b.konst::<W64>(8);
+    let next = b.sub::<W64>(rsp, eight);
+    write64(b, Gpr(4), next);
+    b.store::<W64>(next, v, DATA_WRITE)?;
+    Ok(())
+}
+
+/// PUSH m32 [base+disp32] (FF /6 SIB mod=10, no_index、32ビット)。
+pub fn push_m32_mem32<B: Backend>(b: &mut B, base: Gpr, disp: i32) -> Flow<B> {
+    let addr = eff_addr32(b, base, disp);
+    let v: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let esp = read(b, Gpr(4));
+    let four = b.konst::<W32>(4);
+    let next = b.sub::<W32>(esp, four);
+    b.set(esp_ref(), next);
+    let slot = b.zext::<W32, W64>(next);
+    b.store::<W32>(slot, v, DATA_WRITE)?;
+    Ok(())
+}
+
+/// PUSH m32 [base+index*scale+disp32] (FF /6 SIB mod=10、32ビット)。
+pub fn push_m32_sibd32<B: Backend>(
+    b: &mut B,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i32,
+) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, disp, base, idx);
+    let v: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let esp = read(b, Gpr(4));
+    let four = b.konst::<W32>(4);
+    let next = b.sub::<W32>(esp, four);
+    b.set(esp_ref(), next);
+    let slot = b.zext::<W32, W64>(next);
+    b.store::<W32>(slot, v, DATA_WRITE)?;
+    Ok(())
+}
+
 /// POP r64。読んでから RSP を 8 進める。
 pub fn pop_reg64<B: Backend>(b: &mut B, rd: Gpr) -> Flow<B> {
     let rsp = read64(b, Gpr(4));
