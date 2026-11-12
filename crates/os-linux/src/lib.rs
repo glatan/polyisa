@@ -168,6 +168,7 @@ pub mod x86_64 {
     pub const FSYNC: u64 = 74;
     pub const FDATASYNC: u64 = 75;
     pub const UNSHARE: u64 = 272;
+    pub const FCHDIR: u64 = 81;
     pub const SCHED_SETPARAM: u64 = 142;
     pub const SCHED_GETPARAM: u64 = 143;
     pub const SCHED_SETSCHEDULER: u64 = 144;
@@ -494,6 +495,7 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             x86_64::FSYNC => Some("fsync"),
             x86_64::FDATASYNC => Some("fdatasync"),
             x86_64::UNSHARE => Some("unshare"),
+            x86_64::FCHDIR => Some("fchdir"),
             x86_64::SCHED_SETPARAM => Some("sched_setparam"),
             x86_64::SCHED_GETPARAM => Some("sched_getparam"),
             x86_64::SCHED_SETSCHEDULER => Some("sched_setscheduler"),

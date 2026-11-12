@@ -30,6 +30,7 @@
 - exit_group
 - faccessat
 - fallocate
+- fchdir
 - fchmod
 - fchmodat
 - fchown

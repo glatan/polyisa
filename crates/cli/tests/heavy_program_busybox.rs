@@ -1240,6 +1240,39 @@ fn shred_zero_and_unlink_match_host() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+#[test]
+fn envdir_printenv_matches_host() {
+    // ディレクトリ内の MSG ファイルを環境変数にして printenv する。
+    let path = busybox();
+    let path = path.to_str().expect("utf-8 path");
+    let root = std::env::temp_dir().join(format!("polyisa-envdir-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let guest = root.join("guest");
+    let host = root.join("host");
+    std::fs::create_dir_all(&guest).unwrap();
+    std::fs::create_dir_all(&host).unwrap();
+    std::fs::write(guest.join("MSG"), b"hi\n").unwrap();
+    std::fs::write(host.join("MSG"), b"hi\n").unwrap();
+    let guest_args = [
+        "envdir".to_string(),
+        guest.to_str().unwrap().to_string(),
+        path.to_string(),
+        "printenv".to_string(),
+        "MSG".to_string(),
+    ];
+    let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &guest_args)
+        .unwrap_or_else(|e| panic!("envdir: {e}"));
+    let host_out = Command::new(path)
+        .args(["envdir", host.to_str().unwrap(), path, "printenv", "MSG"])
+        .env_clear()
+        .output()
+        .expect("host envdir");
+    assert_eq!(code, host_out.status.code().unwrap_or(1) as u64);
+    assert_eq!(out.as_slice(), host_out.stdout.as_slice());
+    assert_eq!(out.as_slice(), b"hi\n");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 fn crc32(data: &[u8]) -> u32 {
     let mut crc = 0xffff_ffffu32;
     for &byte in data {

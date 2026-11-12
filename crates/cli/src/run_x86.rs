@@ -10749,6 +10749,7 @@ const X86_64_SYSCALLS: &[(&str, SysFn)] = &[
     ("sched_get_priority_max", sys_sched_get_priority_max),
     ("sched_get_priority_min", sys_sched_get_priority_min),
     ("chdir", sys_chdir),
+    ("fchdir", sys_fchdir),
     ("kill", sys_kill),
     ("mmap", sys_mmap),
     ("set_tid_address", sys_set_tid_address),
@@ -12157,6 +12158,31 @@ fn sys_chdir(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapO
     let errno = match std::fs::metadata(&host) {
         Ok(meta) if meta.is_dir() => {
             sys.cwd = host;
+            set64(env, Gpr(0), 0);
+            return Some(TrapOutcome::Handled);
+        }
+        Ok(_) => ENOTDIR,
+        Err(err) => match err.kind() {
+            std::io::ErrorKind::NotFound => ENOENT,
+            std::io::ErrorKind::PermissionDenied => EACCES,
+            _ => ENOENT,
+        },
+    };
+    set64(env, Gpr(0), cx.neg(errno));
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_fchdir(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // fchdir(fd)。覚えたパスがディレクトリなら cwd にする。envdir が使う。
+    // Ref: SRC-LINUX (7.3).
+    let fd = get64(env, cx.r_a) as u32;
+    let Some(path) = sys.path_of(fd).map(str::to_owned) else {
+        set64(env, Gpr(0), cx.neg(EBADF));
+        return Some(TrapOutcome::Handled);
+    };
+    let errno = match std::fs::metadata(&path) {
+        Ok(meta) if meta.is_dir() => {
+            sys.cwd = path;
             set64(env, Gpr(0), 0);
             return Some(TrapOutcome::Handled);
         }
@@ -15117,6 +15143,37 @@ mod tests {
             .read(VirtAddr(0x500), &mut byte, data_access())
             .unwrap();
         assert_eq!(byte, *b"Q");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fchdir_sets_cwd_from_dir_fd() {
+        use polyisa_os_linux::x86_64 as abi;
+        let dir = std::env::temp_dir().join(format!("polyisa-fchdir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.to_str().unwrap();
+        let mut sys = CliLinux::x86_64();
+        let mut env = bare();
+        let mut cpath = path.as_bytes().to_vec();
+        cpath.push(0);
+        env.backend.mem.write(VirtAddr(0x200), &cpath).unwrap();
+        set64(&mut env, Gpr(0), abi::OPENAT);
+        set64(&mut env, Gpr(7), u64::from(AT_FDCWD_U32));
+        set64(&mut env, Gpr(6), 0x200);
+        set64(&mut env, Gpr(2), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let fd = get64(&mut env, Gpr(0));
+        assert!(fd >= 3);
+        set64(&mut env, Gpr(0), abi::FCHDIR);
+        set64(&mut env, Gpr(7), fd);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        assert_eq!(sys.cwd, path);
+        set64(&mut env, Gpr(0), abi::FCHDIR);
+        set64(&mut env, Gpr(7), 99);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EBADF));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
