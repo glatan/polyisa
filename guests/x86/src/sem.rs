@@ -16603,6 +16603,24 @@ pub fn or_m8_r8_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8, src: Gpr, high:
     Ok(())
 }
 
+/// OR [base+disp32], r8 (08 /r mod=10)。udhcpc 0x44426d 対応.
+pub fn or_m8_r8_mem32<B: Backend>(
+    b: &mut B,
+    base: Gpr,
+    disp: i32,
+    src: Gpr,
+    high: bool,
+) -> Flow<B> {
+    use polyisa_sem::W8;
+    let addr = eff_addr32(b, base, disp);
+    let x: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
+    let y = read8(b, src, high);
+    let v = b.or::<W8>(x, y);
+    b.store::<W8>(addr, v, DATA_WRITE)?;
+    update_logic_flags(b, v);
+    Ok(())
+}
+
 /// OR [base+index*scale+disp8], r8 (08 /r SIB mod=01)。
 pub fn or_m8_r8_sibd<B: Backend>(
     b: &mut B,

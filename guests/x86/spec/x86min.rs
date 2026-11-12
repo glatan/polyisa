@@ -1653,6 +1653,15 @@ pub fn build_model() -> polyisa_isadl::Model {
             "test r, m",
             "alu",
         ),
+        // TEST r, [base+disp32] (85 /r mod=10)。hush 0x45e8d9 の 85 91 d4 00 00 00。
+        (
+            "test_r_mem32",
+            "M32",
+            "10000101 10...... ................................",
+            vec![wc("m32_rm", WhereOp::Ne, 4)],
+            "test r, m",
+            "alu",
+        ),
         (
             "test_r_sibd",
             "S8",
@@ -2825,6 +2834,15 @@ pub fn build_model() -> polyisa_isadl::Model {
             "00001000 01...... ........",
             vec![wc("m8_rm", WhereOp::Ne, 4)],
             "or [r/m+disp8], r8",
+            "alu",
+        ),
+        // OR [base+disp32], r8 (08 /r mod=10)。udhcpc 0x44426d の 40 08 b0 ...。
+        (
+            "or_m8_r8_mem32",
+            "M32",
+            "00001000 10...... ................................",
+            vec![wc("m32_rm", WhereOp::Ne, 4)],
+            "or [r/m+disp32], r8",
             "alu",
         ),
         (

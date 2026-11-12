@@ -202,6 +202,8 @@ pub mod x86_64 {
     pub const LSETXATTR: u64 = 189;
     pub const FSETXATTR: u64 = 190;
     pub const MOUNT: u64 = 165;
+    pub const POLL: u64 = 7;
+    pub const SYSFS: u64 = 119;
     pub const SCHED_SETPARAM: u64 = 142;
     pub const SCHED_GETPARAM: u64 = 143;
     pub const SCHED_SETSCHEDULER: u64 = 144;
@@ -562,6 +564,8 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             x86_64::LSETXATTR => Some("lsetxattr"),
             x86_64::FSETXATTR => Some("fsetxattr"),
             x86_64::MOUNT => Some("mount"),
+            x86_64::POLL => Some("poll"),
+            x86_64::SYSFS => Some("sysfs"),
             x86_64::SCHED_SETPARAM => Some("sched_setparam"),
             x86_64::SCHED_GETPARAM => Some("sched_getparam"),
             x86_64::SCHED_SETSCHEDULER => Some("sched_setscheduler"),

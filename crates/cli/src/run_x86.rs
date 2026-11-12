@@ -923,6 +923,7 @@ fn fetch_len(
             }
         }
         // 0x08 /r (OR r/m8,r8)。reg-direct 2B、SIB mod=01 +disp8 4B。sed 0x4a87dd 対応.
+        // mod=10 base+disp32 6B。udhcpc 0x44426d 対応.
         0x08 => {
             let s = second?;
             let md = s >> 6;
@@ -934,6 +935,8 @@ fn fetch_len(
             } else if md == 1 {
                 // powertop 0x44c15c の orb %al, 0x18(%rbx)。
                 Some(3)
+            } else if md == 2 && rm != 4 {
+                Some(6)
             } else if md == 0 && rm == 5 {
                 // OR [rip+disp32], r8。hdparm 0x417721 の or byte [rip+disp32], al。
                 Some(6)
@@ -3788,6 +3791,18 @@ fn dispatch<B: Backend>(
             };
             sem::or_m8_r8_mem8(b, rm(), disp8(), src, high)
         }
+        Insn::OrM8R8Mem32 => {
+            // 08 /r mod=10 [base+disp32], r8。udhcpc 0x44426d 対応.
+            let reg_f = (modrm() >> 3) & 7;
+            let (src, high) = if rex != 0 {
+                (Gpr(reg_f | ((rex >> 2) & 1) << 3), false)
+            } else if reg_f < 4 {
+                (Gpr(reg_f), false)
+            } else {
+                (Gpr(reg_f - 4), true)
+            };
+            sem::or_m8_r8_mem32(b, rm(), disp32(), src, high)
+        }
         Insn::OrM8R8Sibd => {
             // 08 /r SIB mod=01 [base+index*scale+disp8], r8。sed 0x4a87dd 対応.
             let reg_f = (modrm() >> 3) & 7;
@@ -4443,6 +4458,15 @@ fn dispatch<B: Backend>(
                 sem::test_r64_m64_mem8(b, reg(), rm(), d8)
             } else {
                 sem::test_r32_m32_mem8(b, reg(), rm(), d8)
+            }
+        }
+        Insn::TestRMem32 => {
+            // 85 /r mod=10 [base+disp32]。hush 0x45e8d9 対応.
+            let d32 = disp32();
+            if rex_w {
+                sem::test_r64_m64_mem32(b, reg(), rm(), d32)
+            } else {
+                sem::test_r32_m32_mem32(b, reg(), rm(), d32)
             }
         }
         Insn::TestRm32Memnd => {
@@ -10870,6 +10894,8 @@ const X86_64_SYSCALLS: &[(&str, SysFn)] = &[
     ("lsetxattr", sys_lsetxattr),
     ("fsetxattr", sys_fsetxattr),
     ("mount", sys_mount),
+    ("poll", sys_poll),
+    ("sysfs", sys_sysfs),
     ("uname", sys_uname),
     ("getuid", sys_getuid),
     ("geteuid", sys_geteuid),
@@ -12048,6 +12074,18 @@ fn sys_mount(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapO
             ENOENT
         };
     set64(env, Gpr(0), cx.neg(err));
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_poll(_sys: &mut CliLinux, env: &mut BareEnv, _cx: &SysCtx) -> Option<TrapOutcome> {
+    // poll。待ちはせずタイムアウトとして 0 を返す。top / powertop の前進用。
+    set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_sysfs(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // sysfs（廃止）。常に EINVAL。wall が呼ぶことがある。
+    set64(env, Gpr(0), cx.neg(EINVAL));
     Some(TrapOutcome::Handled)
 }
 

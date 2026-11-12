@@ -143,7 +143,7 @@
 | nop | nop | 真 | alu |
 | nopl | nopl、nopl_mem32、nopl_mem8、nopl_sib、nopl_sibd、nopl_sibd32 | 真 | alu |
 | not | not_rm32 | 真 | alu |
-| or | or_al_imm、or_ax_imm16、or_eax、or_m32_r32_mem32、or_m32_r32_mem8、or_m32_r32_memnd、or_m32_r32_sib、or_m32_r32_sibabs、or_m32_r32_sibd、or_m32_r32_sibd32、or_m8_r8、or_m8_r8_mem8、or_m8_r8_rip、or_m8_r8_sibd、or_m_rip、or_r8_m8_mem8、or_r8_r8、or_r_mem32、or_r_mem8、or_r_memnd、or_r_rip、or_r_sib、or_r_sibabs、or_r_sibd、or_r_sibd32、or_rm32、or_rm32_imm、or_rm32_imm_mem8、or_rm32_imm_memnd、or_rm32_imm_sib、or_rm32_imm_sibd、or_rm32_rip、or_rm8_imm、or_rm8_imm_mem32、or_rm8_imm_mem8、or_rm8_imm_memnd、or_rm8_imm_sib、or_rm8_imm_sibd、or_rm_imm8、or_rm_imm8_mem32、or_rm_imm8_mem8、or_rm_imm8_memnd、or_rm_imm8_rip、or_rm_imm8_sib、or_rm_imm8_sibd | 真 | alu |
+| or | or_al_imm、or_ax_imm16、or_eax、or_m32_r32_mem32、or_m32_r32_mem8、or_m32_r32_memnd、or_m32_r32_sib、or_m32_r32_sibabs、or_m32_r32_sibd、or_m32_r32_sibd32、or_m8_r8、or_m8_r8_mem32、or_m8_r8_mem8、or_m8_r8_rip、or_m8_r8_sibd、or_m_rip、or_r8_m8_mem8、or_r8_r8、or_r_mem32、or_r_mem8、or_r_memnd、or_r_rip、or_r_sib、or_r_sibabs、or_r_sibd、or_r_sibd32、or_rm32、or_rm32_imm、or_rm32_imm_mem8、or_rm32_imm_memnd、or_rm32_imm_sib、or_rm32_imm_sibd、or_rm32_rip、or_rm8_imm、or_rm8_imm_mem32、or_rm8_imm_mem8、or_rm8_imm_memnd、or_rm8_imm_sib、or_rm8_imm_sibd、or_rm_imm8、or_rm_imm8_mem32、or_rm_imm8_mem8、or_rm_imm8_memnd、or_rm_imm8_rip、or_rm_imm8_sib、or_rm_imm8_sibd | 真 | alu |
 | or | or_r8_m8_rip、or_r8_m8_sibd、or_r8_m8_sibd32 | 真 | load |
 | paddb | paddb | 真 | alu |
 | pand | pand | 真 | alu |
@@ -203,7 +203,7 @@
 | subsd | subsd | 真 | alu |
 | subsd | subsd_xmm_m64_mem32、subsd_xmm_m64_rip、subsd_xmm_m64_sibd | 真 | load |
 | syscall | syscall | 真 | system |
-| test | test_al_imm、test_eax_imm、test_m16_imm_mem8、test_m16_imm_memnd、test_m16_imm_rip、test_m8_imm_mem32、test_m8_imm_mem8、test_m8_imm_memnd、test_m8_imm_rip、test_m8_imm_sib、test_m8_imm_sibd、test_m8_imm_sibd32、test_m8_r8_mem32、test_m8_r8_mem8、test_m8_r8_memnd、test_m8_r8_sibd、test_r8_r8、test_r_mem8、test_r_sib、test_r_sibabs、test_r_sibd、test_r_sibd32、test_rm16_imm、test_rm32、test_rm32_imm、test_rm32_imm_mem8、test_rm32_imm_memnd、test_rm32_imm_rip、test_rm32_memnd、test_rm8_imm | 真 | alu |
+| test | test_al_imm、test_eax_imm、test_m16_imm_mem8、test_m16_imm_memnd、test_m16_imm_rip、test_m8_imm_mem32、test_m8_imm_mem8、test_m8_imm_memnd、test_m8_imm_rip、test_m8_imm_sib、test_m8_imm_sibd、test_m8_imm_sibd32、test_m8_r8_mem32、test_m8_r8_mem8、test_m8_r8_memnd、test_m8_r8_sibd、test_r8_r8、test_r_mem32、test_r_mem8、test_r_sib、test_r_sibabs、test_r_sibd、test_r_sibd32、test_rm16_imm、test_rm32、test_rm32_imm、test_rm32_imm_mem8、test_rm32_imm_memnd、test_rm32_imm_rip、test_rm32_memnd、test_rm8_imm | 真 | alu |
 | ucomisd | ucomisd | 真 | alu |
 | ucomisd | ucomisd_mem32、ucomisd_mem8、ucomisd_memnd、ucomisd_rip | 真 | load |
 | xadd | xadd_r32_memnd、xadd_r32_rip | 真 | alu |

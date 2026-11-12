@@ -1255,6 +1255,10 @@ mod tests {
         assert_eq!(decode(0x0844242F, 32), Some(Insn::OrM8R8Sibd));
         assert_eq!(decode(0x08050A100000, 48), Some(Insn::OrM8R8Rip));
         assert_eq!(decode(0x084318, 24), Some(Insn::OrM8R8Mem8));
+        // OR [base+disp32], r8 (08 /r mod=10)。udhcpc 0x44426d の 08 B0 F0 3B 71 00。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x08B0F03B7100, 48), Some(Insn::OrM8R8Mem32));
+        assert_eq!(decode(0x08B0F03B7100, 40), None);
         assert_eq!(decode(0x0F2A442408, 40), Some(Insn::Cvtsi2sdM32Sibd));
         assert_eq!(decode(0x0F2A0C24, 32), Some(Insn::Cvtsi2sdM32Sib));
         // OR m32,imm32 SIB mod=00 (81 /1)。awk 0x4a4354 の 81 0C 24 00 04 00 00。
@@ -1489,6 +1493,10 @@ mod tests {
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x857804, 24), Some(Insn::TestRMem8));
         assert_eq!(decode(0x857804, 32), None);
+        // TEST r, [base+disp32] (85 /r mod=10)。hush 0x45e8d9 の 85 91 D4 00 00 00。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x8591D4000000, 48), Some(Insn::TestRMem32));
+        assert_eq!(decode(0x8591D4000000, 40), None);
         // OR m32,imm32 mod=00 [base] (81 /1)。
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x810F0C240000, 48), Some(Insn::OrRm32ImmMemnd));

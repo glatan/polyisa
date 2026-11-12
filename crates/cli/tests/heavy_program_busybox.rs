@@ -494,6 +494,17 @@ fn true_echo_uname_id_match() {
         ("svlogd", ["svlogd", "/no"].as_slice()),
         ("pscan", ["pscan", "-p", "1-2", "127.0.0.1"].as_slice()),
         ("acpid", ["acpid", "-d"].as_slice()),
+        ("udhcpc", ["udhcpc", "-n", "-q", "-i", "lo"].as_slice()),
+        ("hush", ["hush", "-c", "exit 3"].as_slice()),
+        ("wall", ["wall", "hello"].as_slice()),
+        (
+            "ftpput",
+            ["ftpput", "-u", "x", "127.0.0.1", "/x", "/etc/passwd"].as_slice(),
+        ),
+        (
+            "nbd-client",
+            ["nbd-client", "127.0.0.1", "1024", "/dev/null"].as_slice(),
+        ),
     ] {
         let argv: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
         let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)

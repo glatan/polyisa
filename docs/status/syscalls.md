@@ -89,6 +89,7 @@
 - pipe
 - pipe2
 - pivot_root
+- poll
 - prlimit64
 - read
 - readlink
@@ -130,6 +131,7 @@
 - swapon
 - symlink
 - sync
+- sysfs
 - sysinfo
 - syslog
 - tgkill
