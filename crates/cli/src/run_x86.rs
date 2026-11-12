@@ -12033,10 +12033,16 @@ fn sys_getpriority(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Optio
 }
 
 fn sys_setpriority(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // setpriority(which, who, prio)。スケジューリングは変えず 0 を返す。
+    // setpriority(which, who, prio)。自プロセス (who=0) は受け、他は EPERM。
+    // nice は self、renice <pid> は他プロセス向け。
     let which = get64(env, cx.r_a);
+    let who = get64(env, cx.r_b) as i64;
     if which > 2 {
         set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    if who != 0 {
+        set64(env, Gpr(0), cx.neg(EPERM));
         return Some(TrapOutcome::Handled);
     }
     set64(env, Gpr(0), 0);
@@ -15757,6 +15763,12 @@ mod tests {
         set64(&mut env, Gpr(2), 0);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), 0);
+        set64(&mut env, Gpr(0), abi::SETPRIORITY);
+        set64(&mut env, Gpr(7), 0);
+        set64(&mut env, Gpr(6), 1);
+        set64(&mut env, Gpr(2), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EPERM));
         set64(&mut env, Gpr(0), abi::GETPRIORITY);
         set64(&mut env, Gpr(7), 3);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
