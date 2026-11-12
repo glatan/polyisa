@@ -522,6 +522,10 @@ fn text_applets_match_host() {
         &["which", "true"],
         &["install", "-m", "644", f, installed_s],
         &["truncate", "-s", "2", trunc_s],
+        &["mountpoint", "/"],
+        &["[", "-f", "nosuch123", "]"],
+        &["findfs", "LABEL=nope"],
+        &["envdir", f, "true"],
     ];
     for args in cases {
         let argv: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
