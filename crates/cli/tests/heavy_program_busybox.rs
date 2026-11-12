@@ -340,6 +340,14 @@ fn text_applets_match_host() {
         .expect("host bzip2");
     std::fs::write(&bz, &bz_out.stdout).unwrap();
     let bz_s = bz.to_str().expect("utf-8");
+    let lzo = dir.join("f.lzo");
+    let lzo_out = Command::new(path)
+        .args(["lzop", "-c", f])
+        .env_clear()
+        .output()
+        .expect("host lzop");
+    std::fs::write(&lzo, &lzo_out.stdout).unwrap();
+    let lzo_s = lzo.to_str().expect("utf-8");
     let copied_s = copied.to_str().expect("utf-8");
     let touched_s = touched.to_str().expect("utf-8");
     let link = dir.join("link");
@@ -435,6 +443,9 @@ fn text_applets_match_host() {
         &["bzcat", bz_s],
         &["bunzip2", "-c", bz_s],
         &["lzop", "-c", f],
+        &["lzopcat", lzo_s],
+        &["unlzop", "-c", lzo_s],
+        &["mkpasswd", "secret", "sa"],
         &["kill", "-l"],
         &["pidof", "nosuchname123"],
         &["stat", "-c", "%s", f],
