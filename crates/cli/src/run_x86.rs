@@ -10843,6 +10843,9 @@ const X86_64_SYSCALLS: &[(&str, SysFn)] = &[
     ("sysinfo", sys_sysinfo),
     ("reboot", sys_reboot),
     ("syslog", sys_syslog),
+    ("init_module", sys_init_module),
+    ("delete_module", sys_delete_module),
+    ("finit_module", sys_finit_module),
     ("uname", sys_uname),
     ("getuid", sys_getuid),
     ("geteuid", sys_geteuid),
@@ -11823,6 +11826,24 @@ fn sys_sysinfo(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Tr
 
 fn sys_reboot(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     // reboot。権限がなく常に EPERM。halt / poweroff / reboot アプレットが呼ぶ。
+    set64(env, Gpr(0), cx.neg(EPERM));
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_init_module(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    module_eperm(sys, env, cx)
+}
+
+fn sys_delete_module(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    module_eperm(sys, env, cx)
+}
+
+fn sys_finit_module(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    module_eperm(sys, env, cx)
+}
+
+fn module_eperm(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // モジュールは扱わず常に EPERM。insmod / rmmod が呼ぶ。
     set64(env, Gpr(0), cx.neg(EPERM));
     Some(TrapOutcome::Handled)
 }

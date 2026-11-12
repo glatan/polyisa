@@ -23,6 +23,7 @@
 - clock_nanosleep
 - clone
 - close
+- delete_module
 - dup
 - dup2
 - dup3
@@ -37,6 +38,7 @@
 - fchown
 - fcntl
 - fdatasync
+- finit_module
 - fork
 - fstat
 - fsync
@@ -54,6 +56,7 @@
 - getrandom
 - gettid
 - getuid
+- init_module
 - ioctl
 - ioprio_get
 - ioprio_set

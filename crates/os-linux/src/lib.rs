@@ -175,6 +175,9 @@ pub mod x86_64 {
     pub const SYSINFO: u64 = 99;
     pub const REBOOT: u64 = 169;
     pub const SYSLOG: u64 = 103;
+    pub const INIT_MODULE: u64 = 175;
+    pub const DELETE_MODULE: u64 = 176;
+    pub const FINIT_MODULE: u64 = 313;
     pub const SCHED_SETPARAM: u64 = 142;
     pub const SCHED_GETPARAM: u64 = 143;
     pub const SCHED_SETSCHEDULER: u64 = 144;
@@ -508,6 +511,9 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             x86_64::SYSINFO => Some("sysinfo"),
             x86_64::REBOOT => Some("reboot"),
             x86_64::SYSLOG => Some("syslog"),
+            x86_64::INIT_MODULE => Some("init_module"),
+            x86_64::DELETE_MODULE => Some("delete_module"),
+            x86_64::FINIT_MODULE => Some("finit_module"),
             x86_64::SCHED_SETPARAM => Some("sched_setparam"),
             x86_64::SCHED_GETPARAM => Some("sched_getparam"),
             x86_64::SCHED_SETSCHEDULER => Some("sched_setscheduler"),
