@@ -219,6 +219,9 @@ fn fetch_len(
                     Some(3)
                 } else if s == 0x94 && md == 2 {
                     Some(7)
+                } else if s == 0x94 && md == 0 && rm == 5 {
+                    // SETE [rip+disp32]。hdparm 0x417940。
+                    Some(7)
                 } else if s == 0x94 && md == 1 && rm != 4 {
                     Some(4)
                 } else if (s == 0x95 || s == 0x9E) && md == 2 && rm != 4 {
@@ -9028,6 +9031,15 @@ fn dispatch<B: Backend>(
         Insn::SeteM8Mem8 => {
             // 0F 94 mod=01 [base+disp8] (32b)。grep 0x442245 対応.
             sem::sete_m8_mem8(b, rm0f(), disp8())
+        }
+        Insn::SeteM8Rip => {
+            // 0F 94 mod=00 rm=101。hdparm 0x417940 の sete byte [rip+disp32]。
+            let disp = (word as u32).swap_bytes() as i32;
+            if is64 {
+                sem::sete_m8_rip(b, eip as u64 + nbytes, disp)
+            } else {
+                sem::sete_m8_abs(b, (word as u32).swap_bytes())
+            }
         }
         Insn::SetneM8Mem32 => {
             // 0F 95 mod=10 [base+disp32] (56b)。grep 0x43ddc1 対応.

@@ -179,7 +179,7 @@
 | setae | setae | 真 | alu |
 | setb | setb | 真 | alu |
 | setbe | setbe | 真 | alu |
-| sete | sete、sete_m8_mem32、sete_m8_mem8、sete_m8_sibd | 真 | alu |
+| sete | sete、sete_m8_mem32、sete_m8_mem8、sete_m8_rip、sete_m8_sibd | 真 | alu |
 | setg | setg | 真 | alu |
 | setge | setge | 真 | alu |
 | setl | setl | 真 | alu |

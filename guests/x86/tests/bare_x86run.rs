@@ -4959,6 +4959,56 @@ fn run_cmovne_r64_rip() {
 }
 
 #[test]
+fn run_sete_byte_rip() {
+    // 0F 94 05 09 10 00 00 = sete byte [rip+0x1009]。ZF のとき 1。hdparm 0x417940。
+    // Ref: SPEC-X86-INTEL-SDM (v093).
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x1000),
+            &[0x0F, 0x94, 0x05, 0x09, 0x10, 0x00, 0x00],
+        )
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2010), &[0xAB, 0xCD])
+        .unwrap();
+    env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 0x40);
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x1007 });
+    let mut nb = [0u8; 2];
+    let access = polyisa_mem::Access {
+        endian: polyisa_mem::Endian::Le,
+        align: polyisa_mem::Align::Unaligned,
+        kind: polyisa_mem::AccessKind::DataRead,
+    };
+    env.backend
+        .mem
+        .read(VirtAddr(0x2010), &mut nb, access)
+        .unwrap();
+    assert_eq!(nb, [1, 0xCD]);
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::eflags_ref()), 0x40);
+    env.backend
+        .mem
+        .write(VirtAddr(0x2010), &[0xAB, 0xCD])
+        .unwrap();
+    env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 0);
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x1007 });
+    env.backend
+        .mem
+        .read(VirtAddr(0x2010), &mut nb, access)
+        .unwrap();
+    assert_eq!(nb, [0, 0xCD]);
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::eflags_ref()), 0);
+}
+
+#[test]
 fn run_or_byte_rip_al() {
     // 08 05 0A 10 00 00 = or byte [rip+0x100a], al。0xF0|0x0F は 0xFF。hdparm 0x417721。
     // Ref: SPEC-X86-INTEL-SDM (v093).
