@@ -17607,6 +17607,62 @@ pub fn ucomisd_xmm_rip<B: Backend>(b: &mut B, dst: Xmm, next_rip: u64, disp: i32
     Ok(())
 }
 
+/// CVTTSD2SI r64, m64 [base] (F2 REX.W 0F 2C /r SIB mod=00、index なし)。切り捨て変換.
+pub fn cvttsd2si_r64_memnd<B: Backend>(b: &mut B, dst: Gpr, base: Gpr) -> Flow<B> {
+    use polyisa_sem::F64;
+    let addr = read64(b, base);
+    let m64: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let c: B::V<F64> = b.trunc::<W64, F64>(m64);
+    let v = b.fcvt_s64(c, 1);
+    write64(b, dst, v);
+    Ok(())
+}
+
+/// CVTTSD2SI r32, m64 [base]。32ビット結果は上位を clear_hi が消す.
+pub fn cvttsd2si_r32_memnd<B: Backend>(b: &mut B, dst: Gpr, base: Gpr) -> Flow<B> {
+    use polyisa_sem::F64;
+    let addr = read64(b, base);
+    let m64: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let c: B::V<F64> = b.trunc::<W64, F64>(m64);
+    let v = b.fcvt_s32(c, 1);
+    write(b, dst, v);
+    Ok(())
+}
+
+/// CVTTSD2SI r64, m64 [base+index*scale]。
+pub fn cvttsd2si_r64_sib<B: Backend>(
+    b: &mut B,
+    dst: Gpr,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+) -> Flow<B> {
+    use polyisa_sem::F64;
+    let addr = sib_addr_scaled(b, shift, 0, base, idx);
+    let m64: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let c: B::V<F64> = b.trunc::<W64, F64>(m64);
+    let v = b.fcvt_s64(c, 1);
+    write64(b, dst, v);
+    Ok(())
+}
+
+/// CVTTSD2SI r32, m64 [base+index*scale]。
+pub fn cvttsd2si_r32_sib<B: Backend>(
+    b: &mut B,
+    dst: Gpr,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+) -> Flow<B> {
+    use polyisa_sem::F64;
+    let addr = sib_addr_scaled(b, shift, 0, base, idx);
+    let m64: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let c: B::V<F64> = b.trunc::<W64, F64>(m64);
+    let v = b.fcvt_s32(c, 1);
+    write(b, dst, v);
+    Ok(())
+}
+
 /// CVTTSD2SI r64, xmm (F2 REX.W 0F 2C /r reg-direct)。倍精度を64ビット整数に切り捨て変換.
 pub fn cvttsd2si_r64<B: Backend>(b: &mut B, dst: Gpr, src: Xmm) -> Flow<B> {
     use polyisa_sem::F64;

@@ -85,7 +85,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数117件。
-        assert_eq!(INSNS.len(), 768);
+        assert_eq!(INSNS.len(), 769);
     }
 
     #[test]
@@ -1105,6 +1105,7 @@ mod tests {
         // CVTTSD2SI r64,xmm reg-direct (F2 REX.W 0F 2C /r)。F2/REX は実行側で剥がす.
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x0F2CC0, 24), Some(Insn::Cvttsd2siR64));
+        assert_eq!(decode(0x0F2C0424, 32), Some(Insn::Cvttsd2siM64Sib));
         assert_eq!(decode(0x0F2CC0, 16), None);
         // AND m,imm8 SIB mod=01 no_index (83 /4 + SIB + disp8 + imm8)。
         // Ref: SPEC-X86-INTEL-SDM (v093).

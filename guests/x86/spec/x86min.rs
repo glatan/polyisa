@@ -761,6 +761,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("ucomisd_rip", "F1", "00001111 00101110 00...101 ................................", "ucomisd xmm, m64", "load"),
         // CVTTSD2SI r64,xmm (F2 REX.W 0F 2C /r reg-direct)。F2 接頭辞は実行側で剥がす.
         ("cvttsd2si_r64", "F1", "00001111 00101100 11......", "cvttsd2si r64, xmm", "load"),
+        // CVTTSD2SI r,m64 SIB mod=00。awk int 0x4a345e の cvttsd2si rax, [rsp]。base=5 は長さが違う.
+        ("cvttsd2si_m64_sib", "F1", "00001111 00101100 00...100 ........", "cvttsd2si r64, m64", "load"),
         // PMINUB xmm,xmm (66 0F DA /r)。reg-direct のみ.
         ("pminub", "F1", "00001111 11011010 11......", "pminub xmm, xmm", "alu"),
         // PMAXUB xmm,xmm (66 0F DE /r)。df 0x4d0bcd 対応。reg-direct のみ.

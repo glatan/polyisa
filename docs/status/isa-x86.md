@@ -63,7 +63,7 @@
 | comisd | comisd | 真 | alu |
 | cpuid | cpuid | 真 | system |
 | cvtsi2sd | cvtsi2sd_m32_mem8、cvtsi2sd_m32_sib、cvtsi2sd_m32_sibd、cvtsi2sd_r64 | 真 | load |
-| cvttsd2si | cvttsd2si_r64 | 真 | load |
+| cvttsd2si | cvttsd2si_m64_sib、cvttsd2si_r64 | 真 | load |
 | cwde | cwde | 真 | alu |
 | dec | dec_eax、dec_ebp、dec_ebx、dec_ecx、dec_edi、dec_edx、dec_esi、dec_esp、dec_r8、dec_rm、dec_rm_mem32、dec_rm_mem8、dec_rm_rip、dec_rm_sib、dec_rm_sibd | 真 | alu |
 | div | div_rm32、div_rm32_mem8、div_rm32_sib、div_rm32_sibd、div_rm8 | 真 | div |

@@ -343,11 +343,24 @@ fn fetch_len(
                     | 0x57
                     | 0xFC
                     | 0x2F
-                    | 0x2C
             ) {
                 // XMM reg-direct のみ（66 接頭辞は剥がし済み）。
                 let m = third?;
                 if m >> 6 == 3 { Some(3) } else { None }
+            } else if s == 0x2C {
+                // CVTTSD2SI r,m64。reg-direct 3B、SIB mod=00 は 4B。base=5 は disp32。
+                // awk int 0x4a345e の cvttsd2si rax, QWORD PTR [rsp]。
+                let m = third?;
+                let md = m >> 6;
+                let rm = m & 7;
+                if md == 3 {
+                    Some(3)
+                } else if md == 0 && rm == 4 {
+                    let t = fourth?;
+                    if t & 7 != 5 { Some(4) } else { None }
+                } else {
+                    None
+                }
             } else if s == 0x58 {
                 // ADDSD xmm,m64 RIP (F2 0F 58 05 + disp32、7B) と reg-direct (3B)、SIB mod=00 (4B、直接番地は disp32 付き 7B)。
                 let m = third?;
@@ -1853,6 +1866,7 @@ pub fn run_mode(
                         | 0xB1
                         | 0x58
                         | 0x2A
+                        | 0x2C
                         | 0xEB
                 )
             )
@@ -7133,6 +7147,20 @@ fn dispatch<B: Backend>(
         Insn::UcomisdRip => sem::ucomisd_xmm_rip(b, xmm_reg_r(), eip as u64 + nbytes, disp32()),
         // CVTTSD2SI r64,xmm (F2 REX.W 0F 2C /r reg-direct)。F2 は剥がし済み.
         Insn::Cvttsd2siR64 => sem::cvttsd2si_r64(b, reg0f_as_gpr(), xmm_rm_b()),
+        Insn::Cvttsd2siM64Sib => {
+            // F2 REX.W 0F 2C /r SIB mod=00。awk int 0x4a345e の cvttsd2si rax, [rsp]。
+            if sib0f_no_index() {
+                if rex_w {
+                    sem::cvttsd2si_r64_memnd(b, reg0f_as_gpr(), sib0f_base())
+                } else {
+                    sem::cvttsd2si_r32_memnd(b, reg0f_as_gpr(), sib0f_base())
+                }
+            } else if rex_w {
+                sem::cvttsd2si_r64_sib(b, reg0f_as_gpr(), sib0f_base(), sib0f_idx(), sib0f_shift())
+            } else {
+                sem::cvttsd2si_r32_sib(b, reg0f_as_gpr(), sib0f_base(), sib0f_idx(), sib0f_shift())
+            }
+        }
         Insn::BtR32Imm => {
             // BT r32,imm8 (0F BA /4 ib reg-direct、4B)。imm は最下位8.
             let imm = (word & 0xff) as u8;
@@ -9094,7 +9122,8 @@ fn dispatch<B: Backend>(
             | Insn::BsrRMemnd
             | Insn::BsrRMem8
             | Insn::BsrRMem32
-            | Insn::BsrRRip => Some(reg0f_as_gpr()),
+            | Insn::BsrRRip
+            | Insn::Cvttsd2siM64Sib => Some(reg0f_as_gpr()),
             Insn::XaddR32Memnd
             | Insn::XaddR32Rip
             | Insn::ShldR32Cl
@@ -9194,6 +9223,7 @@ fn dispatch<B: Backend>(
                             | Insn::ImulRImmRip
                             | Insn::CmovbeMemnd
                             | Insn::MovsxR32R16
+                            | Insn::Cvttsd2siM64Sib
                     ))
                 || (has66
                     && matches!(

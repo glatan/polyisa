@@ -1388,6 +1388,55 @@ fn run_comisd_reg_direct() {
 }
 
 #[test]
+fn run_cvttsd2si_rax_rsp() {
+    // F2 48 0F 2C 04 24 = cvttsd2si rax, QWORD PTR [rsp]。-1.9 は -1 に切り捨てる。
+    // awk int 0x4a345e。Ref: SPEC-X86-INTEL-SDM (v093).
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(4), 0x2000);
+        polyisa_guest_x86::sem::write64(b, Gpr(0), 0x1111_2222_3333_4444);
+        Ok(())
+    })
+    .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2000), &0xBFFE_6666_6666_6666u64.to_le_bytes())
+        .unwrap();
+    env.backend.mem.write(VirtAddr(0x2008), &[0xAB]).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0xF2, 0x48, 0x0F, 0x2C, 0x04, 0x24])
+        .unwrap();
+    env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 1);
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x1006 });
+    let rax: u64 = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(0));
+    let rsp: u64 = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(4));
+    assert_eq!(rax, u64::MAX);
+    assert_eq!(rsp, 0x2000);
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::eflags_ref()), 1);
+    let mut nb = [0u8; 9];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x2000),
+            &mut nb,
+            polyisa_mem::Access {
+                endian: polyisa_mem::Endian::Le,
+                align: polyisa_mem::Align::Unaligned,
+                kind: polyisa_mem::AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(&nb[..8], &0xBFFE_6666_6666_6666u64.to_le_bytes());
+    assert_eq!(nb[8], 0xAB);
+}
+
+#[test]
 fn run_cvttsd2si_r64() {
     // run 経由で F2 REX.W 0F 2C C0 (CVTTSD2SI rax,xmm0) を回す。
     // xmm0 下位=3.9 -> RAX=3、exit(0)。
