@@ -2157,6 +2157,26 @@ pub fn dec_r8<B: Backend>(b: &mut B, rd: Gpr, high: bool) -> Flow<B> {
     Ok(())
 }
 
+/// DEC m8 [base] (FE /1 mod=00)。CF は残し、残りの演算旗を 8 ビットで更新する。
+pub fn dec_m8_memnd<B: Backend>(b: &mut B, base: Gpr) -> Flow<B> {
+    use polyisa_sem::W8;
+    let cf_mask = b.konst::<W32>(FLAG_CF);
+    let all_flags = b.get(eflags_ref());
+    let saved_cf = b.and::<W32>(all_flags, cf_mask);
+    let addr = read64(b, base);
+    let x: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
+    let one = b.konst::<W8>(1);
+    let v = b.sub::<W8>(x, one);
+    b.store::<W8>(addr, v, DATA_WRITE)?;
+    update_sub_flags(b, x, one, v);
+    let f = b.get(eflags_ref());
+    let not_cf = b.konst::<W32>(!FLAG_CF);
+    let cleared = b.and::<W32>(f, not_cf);
+    let restored = b.or::<W32>(cleared, saved_cf);
+    b.set(eflags_ref(), restored);
+    Ok(())
+}
+
 /// INC r8 (FE /0 mod=11)。CF は残し、残りの演算旗を 8 ビットで更新する.
 pub fn inc_r8<B: Backend>(b: &mut B, rd: Gpr, high: bool) -> Flow<B> {
     let cf_mask = b.konst::<W32>(FLAG_CF);

@@ -1474,8 +1474,12 @@ fn fetch_len(
             let s = second?;
             let md = s >> 6;
             let reg = (s >> 3) & 7;
+            let rm = s & 7;
             // INC/DEC r8 (FE /0,/1 mod=11)。dc 0x40efa1 の FE CA。
             if md == 3 && (reg == 0 || reg == 1) {
+                Some(2)
+            } else if md == 0 && reg == 1 && rm != 4 && rm != 5 {
+                // DEC m8 [base]。dc 0x40abca の dec byte [rcx]。
                 Some(2)
             } else {
                 None
@@ -2656,6 +2660,10 @@ fn dispatch<B: Backend>(
                 (Gpr(rm_f - 4), true)
             };
             sem::dec_r8(b, rd, high)
+        }
+        Insn::DecM8Memnd => {
+            // FE /1 mod=00 [base]。dc 0x40abca の dec byte [rcx]。CF は残す。
+            sem::dec_m8_memnd(b, rm())
         }
         Insn::IncR8 => {
             let rm_f = modrm() & 7;

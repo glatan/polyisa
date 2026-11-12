@@ -158,6 +158,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("dec_rm", "F1", "11111111 11001...", "dec r/m", "alu"),
         // DEC r8 (FE /1 mod=11)。dc 0x40efa1 の FE CA。
         ("dec_r8", "F1", "11111110 11001...", "dec r8", "alu"),
+        // DEC m8 [base] (FE /1 mod=00 rm!=4,5)。dc 0x40abca 対応。
+        ("dec_m8_memnd", "F1", "11111110 00001...", "dec m8", "alu"),
         // INC r8 (FE /0 mod=11)。同じオペコードの増分。
         ("inc_r8", "F1", "11111110 11000...", "inc r8", "alu"),
         ("dec_eax", "F1", "01001000", "dec eax", "alu"),
