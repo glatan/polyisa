@@ -371,6 +371,19 @@ fn text_applets_match_host() {
     )
     .unwrap();
     let lz_s = lz.to_str().expect("utf-8");
+    let zip = dir.join("f.zip");
+    std::fs::write(
+        &zip,
+        [
+            80, 75, 3, 4, 20, 0, 0, 0, 0, 0, 64, 78, 108, 93, 240, 116, 203, 232, 9, 0, 0, 0, 9, 0,
+            0, 0, 1, 0, 0, 0, 102, 97, 98, 10, 99, 100, 10, 97, 98, 10, 80, 75, 1, 2, 20, 3, 20, 0,
+            0, 0, 0, 0, 64, 78, 108, 93, 240, 116, 203, 232, 9, 0, 0, 0, 9, 0, 0, 0, 1, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 164, 129, 0, 0, 0, 0, 102, 80, 75, 5, 6, 0, 0, 0, 0, 1, 0, 1, 0,
+            47, 0, 0, 0, 40, 0, 0, 0, 0, 0,
+        ],
+    )
+    .unwrap();
+    let zip_s = zip.to_str().expect("utf-8");
     let tar_path = dir.join("f.tar");
     let tar_ok = Command::new("tar")
         .current_dir(&dir)
@@ -492,6 +505,12 @@ fn text_applets_match_host() {
         &["unlzma", "-c", lz_s],
         &["tar", "-tf", tar_s],
         &["ar", "t", ar_s],
+        &["lzma", "-d", "-c", lz_s],
+        &["xz", "-d", "-c", xz_s],
+        &["unzip", "-l", zip_s],
+        &["shuf", "-e", "only"],
+        &["killall", "-l"],
+        &["pkill", "nosuchname123"],
         &["mkpasswd", "secret", "sa"],
         &["kill", "-l"],
         &["pidof", "nosuchname123"],
