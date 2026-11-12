@@ -9952,6 +9952,16 @@ pub fn run_elf_x86_64_captured_dir(
     run_elf_x86_64_at(path, argv, &[], Some(dir))
 }
 
+/// 作業ディレクトリと標準入力を渡して ELF64 を実行する。
+pub fn run_elf_x86_64_captured_dir_in(
+    path: &str,
+    argv: &[String],
+    dir: &str,
+    stdin: &[u8],
+) -> Result<(u64, Vec<u8>), String> {
+    run_elf_x86_64_at(path, argv, stdin, Some(dir))
+}
+
 fn run_elf_x86_64_at(
     path: &str,
     argv: &[String],

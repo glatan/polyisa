@@ -2504,6 +2504,40 @@ fn ts_matches_fixed() {
 }
 
 #[test]
+fn reformime_extracts_fixed() {
+    // -x PREFIX で filename 付き部を PREFIX+name に書く。ホストの副ファイル名は揺らぐため比べない。
+    let path = busybox();
+    let path = path.to_str().expect("utf-8 path");
+    let root = std::env::temp_dir().join(format!("polyisa-reformime-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let mime = concat!(
+        "Mime-Version: 1.0\n",
+        "Content-Type: multipart/mixed; boundary=\"B\"\n",
+        "\n",
+        "--B\n",
+        "Content-Type: application/octet-stream\n",
+        "Content-Disposition: inline; filename=\"f\"\n",
+        "Content-Transfer-Encoding: base64\n",
+        "\n",
+        "eAo=\n",
+        "--B--\n",
+    );
+    let argv = ["reformime".to_string(), "-x".to_string(), "x".to_string()];
+    let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured_dir_in(
+        path,
+        &argv,
+        root.to_str().unwrap(),
+        mime.as_bytes(),
+    )
+    .unwrap_or_else(|e| panic!("reformime: {e}"));
+    assert_eq!(code, 0);
+    assert!(out.is_empty());
+    assert_eq!(std::fs::read(root.join("xf")).unwrap(), b"x\n");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn nuke_matches_host() {
     // 標準出力は空で、指定ディレクトリが消える。
     let path = busybox();
