@@ -9678,6 +9678,44 @@ pub fn or_r8_m8_mem8<B: Backend>(
     Ok(())
 }
 
+/// OR r8,m8 [base+disp32] (0A /r SIB mod=10, no_index)。
+pub fn or_r8_m8_mem32<B: Backend>(
+    b: &mut B,
+    dst: Gpr,
+    dst_high: bool,
+    base: Gpr,
+    disp: i32,
+) -> Flow<B> {
+    use polyisa_sem::W8;
+    let addr = eff_addr32(b, base, disp);
+    let y: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
+    let x = read8(b, dst, dst_high);
+    let v = b.or::<W8>(x, y);
+    write8(b, dst, dst_high, v);
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// OR r8,m8 [base+index*scale+disp32] (0A /r SIB mod=10)。
+pub fn or_r8_m8_sibd32<B: Backend>(
+    b: &mut B,
+    dst: Gpr,
+    dst_high: bool,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i32,
+) -> Flow<B> {
+    use polyisa_sem::W8;
+    let addr = sib_addr_scaled(b, shift, disp, base, idx);
+    let y: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
+    let x = read8(b, dst, dst_high);
+    let v = b.or::<W8>(x, y);
+    write8(b, dst, dst_high, v);
+    update_logic_flags(b, v);
+    Ok(())
+}
+
 /// OR r8,m8 [base+index*scale+disp8] (0A /r SIB mod=01)。
 pub fn or_r8_m8_sibd<B: Backend>(
     b: &mut B,

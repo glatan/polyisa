@@ -966,6 +966,9 @@ fn fetch_len(
             } else if md == 0 && rm == 5 {
                 // OR r8,[RIP+disp32] (0A 05 + disp32)。find 0x5c44a7 対応.
                 Some(6)
+            } else if md == 2 && rm == 4 {
+                // OR r8,m8 SIB+disp32。tar -tf 0x48e5f4 の or al, [rsp+disp32]。7B.
+                Some(7)
             } else {
                 None
             }
@@ -4725,6 +4728,28 @@ fn dispatch<B: Backend>(
                 sem::or_r8_m8_mem8(b, dst, dst_high, base, d8)
             } else {
                 sem::or_r8_m8_sibd(b, dst, dst_high, base, idx, shift, d8)
+            }
+        }
+        Insn::OrR8M8Sibd32 => {
+            // 0A /r SIB mod=10。tar -tf 0x48e5f4 の or al, [rsp+disp32]。
+            let reg_f = (modrm() >> 3) & 7;
+            let (dst, dst_high) = if rex != 0 {
+                (Gpr(reg_f | ((rex >> 2) & 1) << 3), false)
+            } else if reg_f < 4 {
+                (Gpr(reg_f), false)
+            } else {
+                (Gpr(reg_f - 4), true)
+            };
+            let sib_v = ((word >> 32) & 0xff) as u8;
+            let disp = (word as u32).swap_bytes() as i32;
+            let shift = ((sib_v >> 6) & 3) as u32;
+            let idx_raw = (sib_v >> 3) & 7;
+            let idx = Gpr(idx_raw | (((rex >> 1) & 1) << 3));
+            let base = Gpr((sib_v & 7) | ((rex & 1) << 3));
+            if idx_raw == 4 && (rex >> 1) & 1 == 0 {
+                sem::or_r8_m8_mem32(b, dst, dst_high, base, disp)
+            } else {
+                sem::or_r8_m8_sibd32(b, dst, dst_high, base, idx, shift, disp)
             }
         }
         Insn::OrR8M8Rip => {
