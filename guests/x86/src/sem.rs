@@ -6662,6 +6662,20 @@ pub fn movaps_store_mem32<B: Backend>(b: &mut B, src: Xmm, base: Gpr, disp: i32)
     Ok(())
 }
 
+/// MOVUPS xmm, [index*scale+disp32] (0F 10 SIB mod=00 base=101)。base は使わない。
+pub fn movups_load_sibabs<B: Backend>(
+    b: &mut B,
+    dst: Xmm,
+    idx: Gpr,
+    shift: u32,
+    disp: i32,
+) -> Flow<B> {
+    let addr = sib_addr_scaled_abs(b, shift, disp, idx);
+    let v = load128(b, addr)?;
+    b.set(xmm_ref(dst), v);
+    Ok(())
+}
+
 /// MOVUPS xmm, [base+index*scale] (SIB mod=00)。
 pub fn movups_load_sib<B: Backend>(
     b: &mut B,
@@ -6887,6 +6901,19 @@ pub fn movsd_store_sibd<B: Backend>(
     let v: B::V<W64> = b.trunc::<W128, W64>(v128);
     b.store::<W64>(addr, v, DATA_WRITE)?;
     Ok(())
+}
+
+/// MOVSD xmm,m64 [index*scale+disp32] (F2 0F 10 SIB mod=00 base=101)。base は使わない。
+pub fn movsd_load_sibabs<B: Backend>(
+    b: &mut B,
+    dst: Xmm,
+    idx: Gpr,
+    shift: u32,
+    disp: i32,
+) -> Flow<B> {
+    let addr = sib_addr_scaled_abs(b, shift, disp, idx);
+    let v64: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    movsd_merge(b, dst, v64)
 }
 
 /// MOVSD xmm,m64 [base+index*scale+disp32] (F2 0F 10 SIB mod=10)。

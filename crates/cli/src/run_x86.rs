@@ -7519,6 +7519,20 @@ fn dispatch<B: Backend>(
         // mod=00/01/10 は Movdqu とバイト列が同一のため decode は Movdqu 側に寄る.
         // 66 接頭辞の許可のみ行い、分岐は Movdqu 側で処理する.
         Insn::MovdqaLoadRip => sem::movups_load_rip(b, xmm_reg_r(), eip as u64 + nbytes, disp32()),
+        Insn::MovupsLoadSibabs => {
+            // 0F 10 SIB mod=00 base=101。awk exp 0x4c12f4 の movsd xmm3, [rcx*8+disp32]。
+            if sib0f_no_index() {
+                if has_f2 {
+                    sem::movsd_load_abs(b, xmm_reg_r(), disp32() as u32)
+                } else {
+                    sem::movups_load_abs(b, xmm_reg_r(), disp32() as u32)
+                }
+            } else if has_f2 {
+                sem::movsd_load_sibabs(b, xmm_reg_r(), sib0f_idx(), sib0f_shift(), disp32())
+            } else {
+                sem::movups_load_sibabs(b, xmm_reg_r(), sib0f_idx(), sib0f_shift(), disp32())
+            }
+        }
         Insn::MovupsLoadSib => {
             if has_f2 {
                 if sib0f_no_index() {

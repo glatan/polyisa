@@ -672,6 +672,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("mov_rm_imm_sibd", "F1", "11000111 01...100 ........ ........ ................................", "mov r/m, {imm}", "alu"),
         // MOVUPS SIB+disp32 (8バイト)。
         ("movups_load_sibd32", "F1", "00001111 00010000 10...100 ........ ................................", "movups xmm, [r/m+sib+disp32]", "load"),
+        // MOVUPS/MOVSD xmm, [index*scale+disp32] (0F 10 SIB mod=00 base=101)。awk exp 0x4c12f4 対応。
+        ("movups_load_sibabs", "F1", "00001111 00010000 00...100 .....101 ................................", "movups xmm, [sib+disp32]", "load"),
         ("movups_store_sibd32", "F1", "00001111 00010001 10...100 ........ ................................", "movups [r/m+sib+disp32], xmm", "store"),
         // MOVAPS SIB+disp32 (8バイト)。
         ("movaps_store_sibd32", "F1", "00001111 00101001 10...100 ........ ................................", "movaps [r/m+sib+disp32], xmm", "store"),

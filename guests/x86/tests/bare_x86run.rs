@@ -8381,6 +8381,63 @@ fn run_addsd_m64_sib() {
 }
 
 #[test]
+fn run_movsd_xmm3_rcx_scaled() {
+    // F2 0F 10 1C CD 10 00 00 00 = movsd xmm3, [rcx*8+0x10]。下位64を読み、上位64は残る。
+    // awk exp 0x4c12f4。Ref: SPEC-X86-INTEL-SDM (v093).
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(1), 0x400);
+        Ok(())
+    })
+    .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2010), &0x4000_0000_0000_0000u64.to_le_bytes())
+        .unwrap();
+    env.backend.mem.write(VirtAddr(0x2018), &[0xAB]).unwrap();
+    env.backend.set(
+        polyisa_guest_x86::sem::xmm_ref(polyisa_guest_x86::sem::Xmm(3)),
+        0xAAAA_AAAA_AAAA_AAAA_1111_1111_1111_1111,
+    );
+    env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 1);
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x1000),
+            &[0xF2, 0x0F, 0x10, 0x1C, 0xCD, 0x10, 0x00, 0x00, 0x00],
+        )
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x1009 });
+    let v: u128 = env.backend.get(polyisa_guest_x86::sem::xmm_ref(
+        polyisa_guest_x86::sem::Xmm(3),
+    ));
+    assert_eq!(v, 0xAAAA_AAAA_AAAA_AAAA_4000_0000_0000_0000);
+    let rcx: u64 = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(1));
+    assert_eq!(rcx, 0x400);
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::eflags_ref()), 1);
+    let mut nb = [0u8; 9];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x2010),
+            &mut nb,
+            polyisa_mem::Access {
+                endian: polyisa_mem::Endian::Le,
+                align: polyisa_mem::Align::Unaligned,
+                kind: polyisa_mem::AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(&nb[..8], &0x4000_0000_0000_0000u64.to_le_bytes());
+    assert_eq!(nb[8], 0xAB);
+}
+
+#[test]
 fn run_sqrtsd_xmm0() {
     // F2 0F 51 C0 = sqrtsd xmm0,xmm0。4.0 の平方根は 2.0。上位64は残る。awk sqrt 0x4c1dd9。
     // Ref: SPEC-X86-INTEL-SDM (v093).
