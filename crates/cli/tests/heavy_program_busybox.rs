@@ -961,6 +961,131 @@ fn cp_recursive_matches_host() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+fn crc32(data: &[u8]) -> u32 {
+    let mut crc = 0xffff_ffffu32;
+    for &byte in data {
+        crc ^= u32::from(byte);
+        for _ in 0..8 {
+            let mask = (crc & 1).wrapping_neg();
+            crc = (crc >> 1) ^ (0xedb8_8320 & mask);
+        }
+    }
+    !crc
+}
+
+/// 圧縮しない ZIP。BusyBox の unzip が展開できる最小の形。
+fn stored_zip(files: &[(&str, &[u8])]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut central = Vec::new();
+    for (name, data) in files {
+        let crc = crc32(data);
+        let local_at = u32::try_from(out.len()).unwrap();
+        let size = u32::try_from(data.len()).unwrap();
+        let name_len = u16::try_from(name.len()).unwrap();
+        out.extend_from_slice(b"PK\x03\x04");
+        out.extend_from_slice(&20u16.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&crc.to_le_bytes());
+        out.extend_from_slice(&size.to_le_bytes());
+        out.extend_from_slice(&size.to_le_bytes());
+        out.extend_from_slice(&name_len.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(name.as_bytes());
+        out.extend_from_slice(data);
+        central.extend_from_slice(b"PK\x01\x02");
+        central.extend_from_slice(&20u16.to_le_bytes());
+        central.extend_from_slice(&20u16.to_le_bytes());
+        central.extend_from_slice(&0u16.to_le_bytes());
+        central.extend_from_slice(&0u16.to_le_bytes());
+        central.extend_from_slice(&0u16.to_le_bytes());
+        central.extend_from_slice(&0u16.to_le_bytes());
+        central.extend_from_slice(&crc.to_le_bytes());
+        central.extend_from_slice(&size.to_le_bytes());
+        central.extend_from_slice(&size.to_le_bytes());
+        central.extend_from_slice(&name_len.to_le_bytes());
+        central.extend_from_slice(&0u16.to_le_bytes());
+        central.extend_from_slice(&0u16.to_le_bytes());
+        central.extend_from_slice(&0u16.to_le_bytes());
+        central.extend_from_slice(&0u16.to_le_bytes());
+        central.extend_from_slice(&0u32.to_le_bytes());
+        central.extend_from_slice(&local_at.to_le_bytes());
+        central.extend_from_slice(name.as_bytes());
+    }
+    let cd_at = u32::try_from(out.len()).unwrap();
+    let cd_len = u32::try_from(central.len()).unwrap();
+    let count = u16::try_from(files.len()).unwrap();
+    out.extend_from_slice(&central);
+    out.extend_from_slice(b"PK\x05\x06");
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out.extend_from_slice(&count.to_le_bytes());
+    out.extend_from_slice(&count.to_le_bytes());
+    out.extend_from_slice(&cd_len.to_le_bytes());
+    out.extend_from_slice(&cd_at.to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out
+}
+
+#[test]
+fn unzip_matches_host() {
+    // 標準出力は書庫のパスを含む。パスを置き換えてから、展開結果と一緒に比べる。
+    let path = busybox();
+    let path = path.to_str().expect("utf-8 path");
+    let root = std::env::temp_dir().join(format!("polyisa-unzip-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let guest_dir = root.join("guest");
+    let host_dir = root.join("host");
+    std::fs::create_dir_all(&guest_dir).unwrap();
+    std::fs::create_dir_all(&host_dir).unwrap();
+    let zip = stored_zip(&[("tree/f", b"ab\ncd\n"), ("tree/sub/g", b"zz\n")]);
+    let guest_zip = guest_dir.join("a.zip");
+    let host_zip = host_dir.join("a.zip");
+    std::fs::write(&guest_zip, &zip).unwrap();
+    std::fs::write(&host_zip, &zip).unwrap();
+    let guest_args = [
+        "unzip".to_string(),
+        "-o".to_string(),
+        guest_zip.to_str().unwrap().to_string(),
+        "-d".to_string(),
+        guest_dir.to_str().unwrap().to_string(),
+    ];
+    let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &guest_args)
+        .unwrap_or_else(|e| panic!("unzip: {e}"));
+    let host = Command::new(path)
+        .args([
+            "unzip",
+            "-o",
+            host_zip.to_str().unwrap(),
+            "-d",
+            host_dir.to_str().unwrap(),
+        ])
+        .env_clear()
+        .output()
+        .expect("host unzip");
+    assert_eq!(code, host.status.code().unwrap_or(1) as u64);
+    let guest_msg = String::from_utf8(out)
+        .unwrap()
+        .replace(guest_zip.to_str().unwrap(), "ARCHIVE");
+    let host_msg = String::from_utf8(host.stdout)
+        .unwrap()
+        .replace(host_zip.to_str().unwrap(), "ARCHIVE");
+    assert_eq!(guest_msg, host_msg);
+    assert_eq!(
+        std::fs::read(guest_dir.join("tree/f")).unwrap(),
+        b"ab\ncd\n"
+    );
+    assert_eq!(std::fs::read(host_dir.join("tree/f")).unwrap(), b"ab\ncd\n");
+    assert_eq!(
+        std::fs::read(guest_dir.join("tree/sub/g")).unwrap(),
+        b"zz\n"
+    );
+    assert_eq!(std::fs::read(host_dir.join("tree/sub/g")).unwrap(), b"zz\n");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[test]
 fn dos2unix_matches_host() {
     // 標準出力は空で、変換したファイルが一致する。別の木へ書く。
