@@ -316,6 +316,26 @@ fn true_echo_uname_id_match() {
         )
         .as_bytes()
     );
+    // iostat は合成 /proc/{stat,uptime,diskstats} の固定値。ホストとは比べない。
+    let iostat = ["iostat"];
+    let argv: Vec<String> = iostat.iter().map(|s| (*s).to_string()).collect();
+    let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)
+        .unwrap_or_else(|e| panic!("iostat: {e}"));
+    assert_eq!(code, 0);
+    assert_eq!(
+        out.as_slice(),
+        concat!(
+            "Linux 6.0.0 (localhost) \t01/01/00 \t_x86_64_\t(1 CPU)\n",
+            "\n",
+            "avg-cpu:  %user   %nice %system %iowait  %steal   %idle\n",
+            "           0.00    0.00    0.00    0.00    0.00    0.00\n",
+            "\n",
+            "Device:            tps   Blk_read/s   Blk_wrtn/s   Blk_read   Blk_wrtn\n",
+            "sda             100.00       800.00         0.00          8          0\n",
+            "\n",
+        )
+        .as_bytes()
+    );
     // 偽の比較は終了コード 1、標準出力は空。
     for (name, args) in [
         ("[", ["[", "1", "-eq", "2", "]"].as_slice()),

@@ -11132,24 +11132,15 @@ fn sys_openat(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Trap
     open_at_cwd(sys, env, cx, path_addr, flags)
 }
 
-fn open_synth_meminfo(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // sysinfo の固定値（1 GiB / 512 MiB）に揃えた kB 表記。
-    let body = b"\
-MemTotal:        1048576 kB
-MemFree:          524288 kB
-MemAvailable:     524288 kB
-Buffers:               0 kB
-Cached:                0 kB
-SwapCached:            0 kB
-SwapTotal:             0 kB
-SwapFree:              0 kB
-Shmem:                 0 kB
-";
-    let path = std::env::temp_dir().join(format!(
-        "polyisa-meminfo-{}-{}",
-        std::process::id(),
-        sys.pid
-    ));
+fn open_synth_bytes(
+    sys: &mut CliLinux,
+    env: &mut BareEnv,
+    cx: &SysCtx,
+    tag: &str,
+    body: &[u8],
+) -> Option<TrapOutcome> {
+    let path =
+        std::env::temp_dir().join(format!("polyisa-{tag}-{}-{}", std::process::id(), sys.pid));
     if std::fs::write(&path, body).is_err() {
         set64(env, Gpr(0), cx.neg(EACCES));
         return Some(TrapOutcome::Handled);
@@ -11166,6 +11157,62 @@ Shmem:                 0 kB
             Some(TrapOutcome::Handled)
         }
     }
+}
+
+fn open_synth_meminfo(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // sysinfo の固定値（1 GiB / 512 MiB）に揃えた kB 表記。
+    open_synth_bytes(
+        sys,
+        env,
+        cx,
+        "meminfo",
+        b"\
+MemTotal:        1048576 kB
+MemFree:          524288 kB
+MemAvailable:     524288 kB
+Buffers:               0 kB
+Cached:                0 kB
+SwapCached:            0 kB
+SwapTotal:             0 kB
+SwapFree:              0 kB
+Shmem:                 0 kB
+",
+    )
+}
+
+fn open_synth_stat(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // iostat 用。CPU 1 個・全カウンタ 0。
+    open_synth_bytes(
+        sys,
+        env,
+        cx,
+        "stat",
+        b"\
+cpu  0 0 0 0 0 0 0 0 0 0
+cpu0 0 0 0 0 0 0 0 0 0 0
+intr 0
+ctxt 0
+btime 946688400
+processes 0
+procs_running 1
+procs_blocked 0
+",
+    )
+}
+
+fn open_synth_uptime(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    open_synth_bytes(sys, env, cx, "uptime", b"1000.00 1000.00\n")
+}
+
+fn open_synth_diskstats(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // major minor name ... 全 0。iostat の Device 行を固定する。
+    open_synth_bytes(
+        sys,
+        env,
+        cx,
+        "diskstats",
+        b"   8       0 sda 1 0 8 0 0 0 0 0 0 0 0 0 0 0 0\n",
+    )
 }
 
 fn open_at_cwd(
@@ -11193,10 +11240,18 @@ fn open_at_cwd(
     };
     sys.ensure_cwd();
     let path = join_guest_path(&sys.cwd, &path);
-    // ホストの /proc/meminfo を見せると free の数値が揺らぐ。sysinfo の固定値に合わせた
-    // 合成ファイルを開く。
+    // ホストの /proc を見せると free/iostat の数値が揺らぐ。固定の合成ファイルを開く。
     if path == "/proc/meminfo" {
         return open_synth_meminfo(sys, env, cx);
+    }
+    if path == "/proc/stat" {
+        return open_synth_stat(sys, env, cx);
+    }
+    if path == "/proc/uptime" {
+        return open_synth_uptime(sys, env, cx);
+    }
+    if path == "/proc/diskstats" {
+        return open_synth_diskstats(sys, env, cx);
     }
     let want_write = acc != 0 || flags & (O_CREAT | O_TRUNC | O_APPEND) != 0;
     let opened = if want_write {
