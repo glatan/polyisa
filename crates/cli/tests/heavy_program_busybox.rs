@@ -483,8 +483,11 @@ fn device_and_fs_fail_matches_host() {
     std::fs::create_dir(&dir).unwrap();
     let f = dir.join("f");
     std::fs::write(&f, b"hello\n").unwrap();
+    let put_old = dir.join("put_old");
+    std::fs::create_dir(&put_old).unwrap();
     let f = f.to_str().expect("utf-8");
     let d = dir.to_str().expect("utf-8");
+    let put_old = put_old.to_str().expect("utf-8");
     for (name, args) in [
         ("chattr", ["chattr", "-V", f].as_slice()),
         ("mkswap", ["mkswap", f].as_slice()),
@@ -503,6 +506,7 @@ fn device_and_fs_fail_matches_host() {
         ("insmod", ["insmod", f].as_slice()),
         ("swapon", ["swapon", f].as_slice()),
         ("swapoff", ["swapoff", f].as_slice()),
+        ("pivot_root", ["pivot_root", d, put_old].as_slice()),
     ] {
         let argv: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
         let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)

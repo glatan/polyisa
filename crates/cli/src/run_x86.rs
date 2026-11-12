@@ -10848,6 +10848,7 @@ const X86_64_SYSCALLS: &[(&str, SysFn)] = &[
     ("finit_module", sys_finit_module),
     ("swapon", sys_swapon),
     ("swapoff", sys_swapoff),
+    ("pivot_root", sys_pivot_root),
     ("uname", sys_uname),
     ("getuid", sys_getuid),
     ("geteuid", sys_geteuid),
@@ -11856,6 +11857,11 @@ fn sys_swapon(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Tra
 }
 
 fn sys_swapoff(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    set64(env, Gpr(0), cx.neg(EPERM));
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_pivot_root(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     set64(env, Gpr(0), cx.neg(EPERM));
     Some(TrapOutcome::Handled)
 }

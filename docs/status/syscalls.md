@@ -78,6 +78,7 @@
 - personality
 - pipe
 - pipe2
+- pivot_root
 - prlimit64
 - read
 - readlink
