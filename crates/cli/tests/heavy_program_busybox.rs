@@ -529,6 +529,16 @@ fn device_and_fs_fail_matches_host() {
         ("brctl", ["brctl", f].as_slice()),
         ("fdisk", ["fdisk", f].as_slice()),
         ("losetup file", ["losetup", f].as_slice()),
+        ("mkfs.reiser", ["mkfs.reiser", f].as_slice()),
+        ("dpkg-deb", ["dpkg-deb", f].as_slice()),
+        ("makedevs", ["makedevs", f].as_slice()),
+        ("scriptreplay", ["scriptreplay", f].as_slice()),
+        ("fbsplash", ["fbsplash", "-s", f].as_slice()),
+        ("fdflush", ["fdflush", f].as_slice()),
+        ("freeramdisk", ["freeramdisk", f].as_slice()),
+        ("raidautorun", ["raidautorun", f].as_slice()),
+        ("resume", ["resume", f].as_slice()),
+        ("setkeycodes", ["setkeycodes", "0", "0"].as_slice()),
     ] {
         let argv: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
         let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)
