@@ -272,6 +272,50 @@ fn true_echo_uname_id_match() {
         )
         .as_bytes()
     );
+    // ipcs は IPC 未実装の固定文。ホストの実キューとは比べない。
+    let ipcs = ["ipcs"];
+    let argv: Vec<String> = ipcs.iter().map(|s| (*s).to_string()).collect();
+    let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)
+        .unwrap_or_else(|e| panic!("ipcs: {e}"));
+    assert_eq!(code, 0);
+    assert_eq!(
+        out.as_slice(),
+        concat!(
+            "\n",
+            "kernel not configured for message queues\n",
+            "\n",
+            "kernel not configured for shared memory\n",
+            "\n",
+            "kernel not configured for semaphores\n",
+            "\n",
+        )
+        .as_bytes()
+    );
+    // adjtimex は時刻調整の仮応答（全ゼロ）の固定文。ホストとは比べない。
+    let adjtimex = ["adjtimex"];
+    let argv: Vec<String> = adjtimex.iter().map(|s| (*s).to_string()).collect();
+    let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)
+        .unwrap_or_else(|e| panic!("adjtimex: {e}"));
+    assert_eq!(code, 0);
+    assert_eq!(
+        out.as_slice(),
+        concat!(
+            "    mode:         0\n",
+            "-o  offset:       0 us\n",
+            "-f  freq.adjust:  0 (65536 = 1ppm)\n",
+            "    maxerror:     0\n",
+            "    esterror:     0\n",
+            "    status:       0 ()\n",
+            "-p  timeconstant: 0\n",
+            "    precision:    0 us\n",
+            "    tolerance:    0\n",
+            "-t  tick:         0 us\n",
+            "    time.tv_sec:  0\n",
+            "    time.tv_usec: 0\n",
+            "    return value: 0 (clock synchronized)\n",
+        )
+        .as_bytes()
+    );
     // 偽の比較は終了コード 1、標準出力は空。
     for (name, args) in [
         ("[", ["[", "1", "-eq", "2", "]"].as_slice()),
