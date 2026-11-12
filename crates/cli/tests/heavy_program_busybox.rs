@@ -827,3 +827,50 @@ fn uudecode_matches_host() {
     assert_eq!(std::fs::read(&host_out).unwrap(), b"ab\ncd\n");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn patch_matches_host() {
+    // 標準出力は適用先のパスを含む。ファイルの中身と終了コードを別の木で比べる。
+    let path = busybox();
+    let path = path.to_str().expect("utf-8 path");
+    let root = std::env::temp_dir().join(format!("polyisa-patch-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let guest_dir = root.join("guest");
+    let host_dir = root.join("host");
+    std::fs::create_dir_all(&guest_dir).unwrap();
+    std::fs::create_dir_all(&host_dir).unwrap();
+    let diff = root.join("p.diff");
+    std::fs::write(&diff, b"--- a\n+++ b\n@@ -1,2 +1,2 @@\n ab\n-cd\n+xx\n").unwrap();
+    let guest_f = guest_dir.join("f");
+    let host_f = host_dir.join("f");
+    std::fs::write(&guest_f, b"ab\ncd\n").unwrap();
+    std::fs::write(&host_f, b"ab\ncd\n").unwrap();
+    let guest_args = [
+        "patch",
+        guest_f.to_str().expect("utf-8"),
+        diff.to_str().expect("utf-8"),
+    ];
+    let argv: Vec<String> = guest_args.iter().map(|s| (*s).to_string()).collect();
+    let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)
+        .unwrap_or_else(|e| panic!("patch: {e}"));
+    let host = Command::new(path)
+        .args([
+            "patch",
+            host_f.to_str().expect("utf-8"),
+            diff.to_str().expect("utf-8"),
+        ])
+        .env_clear()
+        .output()
+        .expect("host patch");
+    assert_eq!(code, host.status.code().unwrap_or(1) as u64);
+    let guest_msg = String::from_utf8(out)
+        .unwrap()
+        .replace(guest_f.to_str().unwrap(), "FILE");
+    let host_msg = String::from_utf8(host.stdout)
+        .unwrap()
+        .replace(host_f.to_str().unwrap(), "FILE");
+    assert_eq!(guest_msg, host_msg);
+    assert_eq!(std::fs::read(&guest_f).unwrap(), b"ab\nxx\n");
+    assert_eq!(std::fs::read(&host_f).unwrap(), b"ab\nxx\n");
+    let _ = std::fs::remove_dir_all(&root);
+}
