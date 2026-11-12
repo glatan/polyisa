@@ -9511,6 +9511,38 @@ pub fn movzx_r32_m16_rip<B: Backend>(b: &mut B, dst: Gpr, next_rip: u64, disp: i
     Ok(())
 }
 
+/// MOVZX r32,m16 [index*scale+disp32] (0F B7 SIB mod=00 base=5)。16ビットをゼロ拡張する。
+pub fn movzx_r32_m16_sibabs<B: Backend>(
+    b: &mut B,
+    dst: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i32,
+) -> Flow<B> {
+    use polyisa_sem::W16;
+    let addr = sib_addr_scaled_abs(b, shift, disp, idx);
+    let v16: B::V<W16> = b.load::<W16>(addr, DATA_READ)?;
+    let v = b.zext::<W16, W32>(v16);
+    write(b, dst, v);
+    Ok(())
+}
+
+/// MOVZX r64,m16 [index*scale+disp32] (0F B7 SIB mod=00 base=5, REX.W)。
+pub fn movzx_r64_m16_sibabs<B: Backend>(
+    b: &mut B,
+    dst: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i32,
+) -> Flow<B> {
+    use polyisa_sem::W16;
+    let addr = sib_addr_scaled_abs(b, shift, disp, idx);
+    let v16: B::V<W16> = b.load::<W16>(addr, DATA_READ)?;
+    let v = b.zext::<W16, W64>(v16);
+    write64(b, dst, v);
+    Ok(())
+}
+
 /// MOVZX r32,m16 絶対番地 (32ビット)。
 pub fn movzx_r32_m16_abs<B: Backend>(b: &mut B, dst: Gpr, addr32: u32) -> Flow<B> {
     use polyisa_sem::W16;

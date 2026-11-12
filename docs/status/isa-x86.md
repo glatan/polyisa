@@ -133,7 +133,7 @@
 | movsxd | movsxd_mem32、movsxd_mem8、movsxd_memnd、movsxd_rip、movsxd_sib、movsxd_sibd、movsxd_sibd32 | 真 | load |
 | movups | movups_load_mem32、movups_load_mem8、movups_load_memnd、movups_load_rip、movups_load_sib、movups_load_sibd、movups_load_sibd32、movups_load_xmm | 真 | load |
 | movups | movups_store_mem32、movups_store_mem8、movups_store_memnd、movups_store_rip、movups_store_sib、movups_store_sibd、movups_store_sibd32、movups_store_xmm | 真 | store |
-| movzx | movzx_r32_m16_mem32、movzx_r32_m16_mem8、movzx_r32_m16_memnd、movzx_r32_m16_rip、movzx_r32_m16_sib、movzx_r32_m16_sibd、movzx_r32_m16_sibd32、movzx_r32_m8_mem32、movzx_r32_m8_mem8、movzx_r32_m8_memnd、movzx_r32_m8_rip、movzx_r32_m8_sib、movzx_r32_m8_sibd、movzx_r32_m8_sibd32、movzx_r32_r16、movzx_r32_r8 | 真 | load |
+| movzx | movzx_r32_m16_mem32、movzx_r32_m16_mem8、movzx_r32_m16_memnd、movzx_r32_m16_rip、movzx_r32_m16_sib、movzx_r32_m16_sibabs、movzx_r32_m16_sibd、movzx_r32_m16_sibd32、movzx_r32_m8_mem32、movzx_r32_m8_mem8、movzx_r32_m8_memnd、movzx_r32_m8_rip、movzx_r32_m8_sib、movzx_r32_m8_sibd、movzx_r32_m8_sibd32、movzx_r32_r16、movzx_r32_r8 | 真 | load |
 | mul | mul_rm32 | 真 | mult |
 | mulsd | mulsd | 真 | alu |
 | mulsd | mulsd_xmm_m64_rip、mulsd_xmm_m64_sibd | 真 | load |

@@ -2082,6 +2082,15 @@ pub fn build_model() -> polyisa_isadl::Model {
             "movzx r32, m16",
             "load",
         ),
+        // MOVZX r32, m16 [index*scale+disp32] (0F B7 SIB mod=00 base=5)。microcom 0x4bc4f2。
+        (
+            "movzx_r32_m16_sibabs",
+            "D32",
+            "00001111 10110111 00...100 ........ ................................",
+            vec![wc("d32_base", WhereOp::Eq, 5)],
+            "movzx r32, m16",
+            "load",
+        ),
         (
             "movsxd_sib",
             "N8",

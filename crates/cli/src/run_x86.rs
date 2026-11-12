@@ -8367,6 +8367,16 @@ fn dispatch<B: Backend>(
                 sem::movsx_r32_r16(b, reg0f_as_gpr(), rm0f())
             }
         }
+        Insn::MovzxR32M16Sibabs => {
+            // 0F B7 SIB mod=00 base=5。microcom 0x4bc4f2 の movzx r9d, WORD PTR [rdx*4+disp32]。
+            if sib0f_no_index() {
+                sem::movzx_r32_m16_abs(b, reg0f_as_gpr(), disp32() as u32)
+            } else if rex_w {
+                sem::movzx_r64_m16_sibabs(b, reg0f_as_gpr(), sib0f_idx(), sib0f_shift(), disp32())
+            } else {
+                sem::movzx_r32_m16_sibabs(b, reg0f_as_gpr(), sib0f_idx(), sib0f_shift(), disp32())
+            }
+        }
         Insn::MovzxR32M16Sib => {
             // 0F B7 SIB mod=00 [base+index*scale]。no_index は [base].
             if sib0f_no_index() {
@@ -8989,6 +8999,7 @@ fn dispatch<B: Backend>(
             | Insn::MovzxR32M16Mem32
             | Insn::MovzxR32M16Memnd
             | Insn::MovzxR32M16Sib
+            | Insn::MovzxR32M16Sibabs
             | Insn::MovzxR32M16Sibd
             | Insn::MovzxR32M16Sibd32
             | Insn::MovsxR32M8Mem32
