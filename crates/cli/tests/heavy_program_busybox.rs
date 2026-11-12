@@ -525,6 +525,10 @@ fn device_and_fs_fail_matches_host() {
         ("iproute", ["iproute", f].as_slice()),
         ("iprule", ["iprule", f].as_slice()),
         ("iptunnel", ["iptunnel", f].as_slice()),
+        ("slattach", ["slattach", f].as_slice()),
+        ("brctl", ["brctl", f].as_slice()),
+        ("fdisk", ["fdisk", f].as_slice()),
+        ("losetup file", ["losetup", f].as_slice()),
     ] {
         let argv: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
         let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)
