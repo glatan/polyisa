@@ -290,6 +290,25 @@ fn true_echo_uname_id_match() {
         assert_eq!(code, 1);
         assert!(out.is_empty());
     }
+    // groups はゲストを root とみなす合成値。
+    let groups = ["groups"];
+    let argv: Vec<String> = groups.iter().map(|s| (*s).to_string()).collect();
+    let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)
+        .unwrap_or_else(|e| panic!("groups: {e}"));
+    assert_eq!(code, 0);
+    assert_eq!(out.as_slice(), b"root\n");
+    let losetup = ["losetup", "-f"];
+    let argv: Vec<String> = losetup.iter().map(|s| (*s).to_string()).collect();
+    let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)
+        .unwrap_or_else(|e| panic!("losetup -f: {e}"));
+    let host = Command::new(path)
+        .args(losetup)
+        .env_clear()
+        .output()
+        .expect("host losetup -f");
+    assert_eq!(code, host.status.code().unwrap_or(1) as u64);
+    assert_eq!(out.as_slice(), host.stdout.as_slice());
+    assert!(out.starts_with(b"/dev/loop"));
 }
 
 #[test]
