@@ -159,6 +159,8 @@ pub mod x86_64 {
     pub const SETPGID: u64 = 109;
     pub const SETSID: u64 = 112;
     pub const GETPGID: u64 = 121;
+    pub const GETPRIORITY: u64 = 140;
+    pub const SETPRIORITY: u64 = 141;
     pub const PIPE2: u64 = 293;
     pub const PIPE: u64 = 22;
     // Gap: GAP-0004
@@ -470,6 +472,8 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             x86_64::SETPGID => Some("setpgid"),
             x86_64::SETSID => Some("setsid"),
             x86_64::GETPGID => Some("getpgid"),
+            x86_64::GETPRIORITY => Some("getpriority"),
+            x86_64::SETPRIORITY => Some("setpriority"),
             x86_64::CHDIR => Some("chdir"),
             x86_64::KILL => Some("kill"),
             _ => None,

@@ -111,6 +111,18 @@ fn true_echo_uname_id_match() {
     assert_eq!(code, host.status.code().unwrap_or(1) as u64);
     assert_eq!(out.as_slice(), host.stdout.as_slice());
     assert_eq!(out.as_slice(), b"hi\n");
+    let nice = ["nice", "-n", "0", path, "echo", "hi"];
+    let argv: Vec<String> = nice.iter().map(|s| (*s).to_string()).collect();
+    let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)
+        .unwrap_or_else(|e| panic!("nice: {e}"));
+    let host = Command::new(path)
+        .args(nice)
+        .env_clear()
+        .output()
+        .expect("host nice");
+    assert_eq!(code, host.status.code().unwrap_or(1) as u64);
+    assert_eq!(out.as_slice(), host.stdout.as_slice());
+    assert_eq!(out.as_slice(), b"hi\n");
 }
 
 #[test]

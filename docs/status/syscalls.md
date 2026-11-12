@@ -45,6 +45,7 @@
 - getgroups
 - getpgid
 - getpid
+- getpriority
 - getrandom
 - gettid
 - getuid
@@ -81,6 +82,7 @@
 - set_robust_list
 - set_tid_address
 - setpgid
+- setpriority
 - setsid
 - stat
 - symlink

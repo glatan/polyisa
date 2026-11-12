@@ -10690,6 +10690,8 @@ const X86_64_SYSCALLS: &[(&str, SysFn)] = &[
     ("setpgid", sys_setpgid),
     ("setsid", sys_setsid),
     ("getpgid", sys_getpgid),
+    ("getpriority", sys_getpriority),
+    ("setpriority", sys_setpriority),
     ("chdir", sys_chdir),
     ("kill", sys_kill),
     ("mmap", sys_mmap),
@@ -11630,6 +11632,29 @@ fn sys_setsid(sys: &mut CliLinux, env: &mut BareEnv, _cx: &SysCtx) -> Option<Tra
     let me = sys.ensure_self();
     let _ = sys.procs.borrow_mut().set_pgid(me, me.0);
     set64(env, Gpr(0), me.0);
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_getpriority(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // getpriority(which, who)。カーネルは nice に 20 を足した値を返す。
+    // ここでの nice は 0 なので 20。Ref: SRC-LINUX (7.3).
+    let which = get64(env, cx.r_a);
+    if which > 2 {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    set64(env, Gpr(0), 20);
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_setpriority(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // setpriority(which, who, prio)。スケジューリングは変えず 0 を返す。
+    let which = get64(env, cx.r_a);
+    if which > 2 {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    set64(env, Gpr(0), 0);
     Some(TrapOutcome::Handled)
 }
 
@@ -14894,6 +14919,28 @@ mod tests {
         set64(&mut env, Gpr(0), abi::SETSID);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), 1);
+    }
+
+    #[test]
+    fn getpriority_returns_niceness_plus_twenty() {
+        use polyisa_os_linux::x86_64 as abi;
+        let mut sys = CliLinux::x86_64();
+        let mut env = bare();
+        set64(&mut env, Gpr(0), abi::GETPRIORITY);
+        set64(&mut env, Gpr(7), 0);
+        set64(&mut env, Gpr(6), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 20);
+        set64(&mut env, Gpr(0), abi::SETPRIORITY);
+        set64(&mut env, Gpr(7), 0);
+        set64(&mut env, Gpr(6), 0);
+        set64(&mut env, Gpr(2), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        set64(&mut env, Gpr(0), abi::GETPRIORITY);
+        set64(&mut env, Gpr(7), 3);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EINVAL));
     }
 
     #[test]
