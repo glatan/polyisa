@@ -10910,6 +10910,7 @@ const X86_64_SYSCALLS: &[(&str, SysFn)] = &[
     ("exit_group", sys_exit_group),
     ("clone", sys_clone),
     ("fork", sys_fork),
+    ("vfork", sys_vfork),
     ("execve", sys_execve),
     ("wait4", sys_wait4),
     ("pipe2", sys_pipe2),
@@ -14499,6 +14500,12 @@ fn sys_brk(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOut
 fn sys_fork(sys: &mut CliLinux, env: &mut BareEnv, _cx: &SysCtx) -> Option<TrapOutcome> {
     // fork()。アドレス空間は複製する。CLONE_VM の vfork は受けない。
     spawn_child(sys, env, 0)
+}
+
+fn sys_vfork(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // vfork()。共有アドレス空間は持たず、fork と同じ複製で進める。
+    // CLONE_VM 経由の vfork は sys_clone 側で拒む。time / timeout / xargs が呼ぶ。
+    sys_fork(sys, env, cx)
 }
 
 fn sys_clone(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {

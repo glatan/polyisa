@@ -529,6 +529,10 @@ fn true_echo_uname_id_match() {
         ("udhcpd", ["udhcpd", "-f", "/no"].as_slice()),
         ("who", ["who", "-H"].as_slice()),
         ("passwd", ["passwd", "-d", "root"].as_slice()),
+        ("timeout false", ["timeout", "1", path, "false"].as_slice()),
+        ("timeout nosuch", ["timeout", "1", "nosuch"].as_slice()),
+        ("xargs", ["xargs", path, "echo"].as_slice()),
+        ("xargs -n1", ["xargs", "-n1", path, "echo"].as_slice()),
     ] {
         let argv: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
         let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)

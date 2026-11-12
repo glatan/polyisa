@@ -153,6 +153,7 @@ pub mod x86_64 {
     pub const SYNC: u64 = 162;
     pub const CLONE: u64 = 56;
     pub const FORK: u64 = 57;
+    pub const VFORK: u64 = 58;
     pub const EXECVE: u64 = 59;
     pub const WAIT4: u64 = 61;
     pub const KILL: u64 = 62;
@@ -525,6 +526,7 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             x86_64::FSTATFS => Some("fstatfs"),
             x86_64::CLONE => Some("clone"),
             x86_64::FORK => Some("fork"),
+            x86_64::VFORK => Some("vfork"),
             x86_64::EXECVE => Some("execve"),
             x86_64::WAIT4 => Some("wait4"),
             x86_64::PIPE2 => Some("pipe2"),

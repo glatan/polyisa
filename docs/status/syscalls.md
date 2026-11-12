@@ -154,6 +154,7 @@
 - unlinkat
 - unshare
 - utimensat
+- vfork
 - wait4
 - write
 - writev
