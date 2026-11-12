@@ -10927,6 +10927,51 @@ fn run_cmovbe_mem8() {
 }
 
 #[test]
+fn run_cmovbe_r64_sibd_rsp() {
+    // 48 0F 46 5C 24 18 = cmovbe rbx, [rsp+0x18]。softlimit 0x44eece。
+    // CF=1 なので [rsp+0x18] の 0x99 を rbx に移す。メモリは変えない。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(4), 0x1500);
+        polyisa_guest_x86::sem::write64(b, Gpr(3), 0x11);
+        Ok(())
+    })
+    .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1518), &0x99u64.to_le_bytes())
+        .unwrap();
+    env.backend
+        .set(polyisa_guest_x86::sem::eflags_ref(), 0x1u32);
+    let prog: &[u8] = &[0x48, 0x0F, 0x46, 0x5C, 0x24, 0x18];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x1006 });
+    env.step(|b| {
+        assert_eq!(polyisa_guest_x86::sem::read64(b, Gpr(3)), 0x99);
+        Ok(())
+    })
+    .unwrap();
+    let mut got = [0u8; 8];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x1518),
+            &mut got,
+            polyisa_mem::Access {
+                endian: polyisa_mem::Endian::Le,
+                align: polyisa_mem::Align::Unaligned,
+                kind: polyisa_mem::AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(u64::from_le_bytes(got), 0x99);
+}
+
+#[test]
 fn run_test_rax_imm32_sign_extends() {
     // 48 A9 00 F0 FF FF = test rax, 0xfffff000。imm32 は符号拡張され、
     // bit63 だけ立った rax と AND すると ZF=0。basename 0x4bff3f 対応.

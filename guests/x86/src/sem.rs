@@ -7513,6 +7513,16 @@ pub fn cmovbe_r64_mem8<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, disp: i8) -> 
     Ok(())
 }
 
+/// CMOVBE r64, m64 SIB+disp8 (no_index)。CF か ZF なら mem64 を dst に移す。
+pub fn cmovbe_r64_sibd<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, disp: i8) -> Flow<B> {
+    cmovbe_r64_mem8(b, dst, base, disp)
+}
+
+/// CMOVBE r32, m32 SIB+disp8 (no_index)。
+pub fn cmovbe_r32_sibd<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, disp: i8) -> Flow<B> {
+    cmovbe_r32_mem8(b, dst, base, disp)
+}
+
 /// CMOVA r32, r/m32。CF=0 かつ ZF=0 なら src を dst に移す.
 pub fn cmova_r32<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
     let cf = cf_num(b);

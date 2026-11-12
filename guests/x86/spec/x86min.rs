@@ -386,6 +386,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         // CMOVNE r64,m64 mod=10 [base+disp32] (0F 45)。grep 0x442f5f 対応.
         ("cmovne_m64", "M32", "00001111 01000101 10...... ................................", "cmovne r64, m64", "load"),
         ("cmovne_r64_sibd", "F1", "00001111 01000101 01...100 ..100... ........", "cmovne r, m64", "load"),
+        // CMOVBE r64, [base+disp8] SIB no_index (0F 46)。softlimit -m 0x44eece の cmovbe 0x18(%rsp), %rbx。
+        ("cmovbe_r64_sibd", "F1", "00001111 01000110 01...100 ..100... ........", "cmovbe r, m64", "load"),
         ("cmovge_r32_sibd", "F1", "00001111 01001101 01...100 ..100... ........", "cmovge r, m32", "load"),
         // CMOVL r32, [SIB] mod=00 no_index。cut 0x492257 の 44 0F 4C 14 24。変位なし。base=5 は長さが違う.
         ("cmovl_r32_sib", "F1", "00001111 01001100 00...100 ..100...", "cmovl r, m32", "load"),

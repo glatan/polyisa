@@ -40,7 +40,7 @@
 | cmovae | cmovae_m64、cmovae_mem8 | 真 | load |
 | cmovb | cmovb | 真 | alu |
 | cmovbe | cmovbe | 真 | alu |
-| cmovbe | cmovbe_mem8、cmovbe_memnd | 真 | load |
+| cmovbe | cmovbe_mem8、cmovbe_memnd、cmovbe_r64_sibd | 真 | load |
 | cmove | cmove | 真 | alu |
 | cmove | cmove_m64、cmove_r64_sibd、cmove_rip | 真 | load |
 | cmovg | cmovg | 真 | alu |

@@ -8119,6 +8119,17 @@ fn dispatch<B: Backend>(
                 sem::cmovbe_r32_mem8(b, reg0f_as_gpr(), rm0f(), disp8())
             }
         }
+        Insn::CmovbeR64Sibd => {
+            // 0F 46 SIB mod=01 [base+disp8] no_index。softlimit 0x44eece。
+            let sib_v = ((word >> 8) & 0xff) as u8;
+            let d8 = (word & 0xff) as u8 as i8;
+            let base = Gpr((sib_v & 7) | ((rex & 1) << 3));
+            if rex_w {
+                sem::cmovbe_r64_sibd(b, reg0f_as_gpr(), base, d8)
+            } else {
+                sem::cmovbe_r32_sibd(b, reg0f_as_gpr(), base, d8)
+            }
+        }
         Insn::CmovbeMemnd => {
             // 0F 46 mod=00 [base]。gunzip 0x48a025 の cmovbe edx, [r8]。
             if rex_w {

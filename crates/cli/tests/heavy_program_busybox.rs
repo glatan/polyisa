@@ -191,6 +191,10 @@ fn true_echo_uname_id_match() {
     for (name, args) in [
         ("softlimit", ["softlimit", path, "echo", "hi"].as_slice()),
         (
+            "softlimit -m",
+            ["softlimit", "-m", "1000000000", path, "echo", "hi"].as_slice(),
+        ),
+        (
             "envuidgid",
             ["envuidgid", "0:0", path, "echo", "hi"].as_slice(),
         ),
