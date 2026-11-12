@@ -16416,6 +16416,38 @@ pub fn or_m8_r8_sibd<B: Backend>(
     Ok(())
 }
 
+/// OR [rip+disp32], r8 (08 /r mod=00 rm=101)。hdparm 0x417721 対応.
+pub fn or_m8_r8_rip<B: Backend>(
+    b: &mut B,
+    next_rip: u64,
+    disp: i32,
+    src: Gpr,
+    high: bool,
+) -> Flow<B> {
+    use polyisa_sem::W8;
+    let base = b.konst::<W64>(next_rip);
+    let d = b.konst::<W64>(disp as i64 as u64);
+    let addr = b.add::<W64>(base, d);
+    let x: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
+    let y = read8(b, src, high);
+    let v = b.or::<W8>(x, y);
+    b.store::<W8>(addr, v, DATA_WRITE)?;
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// OR [disp32], r8 (08 /r mod=00 rm=101、32ビット)。
+pub fn or_m8_r8_abs<B: Backend>(b: &mut B, addr32: u32, src: Gpr, high: bool) -> Flow<B> {
+    use polyisa_sem::W8;
+    let addr = b.konst::<W64>(addr32 as u64);
+    let x: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
+    let y = read8(b, src, high);
+    let v = b.or::<W8>(x, y);
+    b.store::<W8>(addr, v, DATA_WRITE)?;
+    update_logic_flags(b, v);
+    Ok(())
+}
+
 /// OR r/m8, r8 reg-direct (08 /r mod=11)。dst rm と src reg の OR で 5 旗を更新する.
 pub fn or_m8_r8<B: Backend>(
     b: &mut B,

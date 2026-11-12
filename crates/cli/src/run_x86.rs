@@ -914,6 +914,9 @@ fn fetch_len(
             } else if md == 1 {
                 // powertop 0x44c15c の orb %al, 0x18(%rbx)。
                 Some(3)
+            } else if md == 0 && rm == 5 {
+                // OR [rip+disp32], r8。hdparm 0x417721 の or byte [rip+disp32], al。
+                Some(6)
             } else {
                 None
             }
@@ -3754,6 +3757,23 @@ fn dispatch<B: Backend>(
                 sem::or_m8_r8_mem8(b, sib_base(), disp8(), src, high)
             } else {
                 sem::or_m8_r8_sibd(b, sib_base(), sib_idx(), sib_shift(), disp8(), src, high)
+            }
+        }
+        Insn::OrM8R8Rip => {
+            // 08 /r mod=00 rm=101。hdparm 0x417721 の or byte [rip+disp32], al。
+            let reg_f = (modrm() >> 3) & 7;
+            let (src, high) = if rex != 0 {
+                (Gpr(reg_f | ((rex >> 2) & 1) << 3), false)
+            } else if reg_f < 4 {
+                (Gpr(reg_f), false)
+            } else {
+                (Gpr(reg_f - 4), true)
+            };
+            let disp = (word as u32).swap_bytes() as i32;
+            if is64 {
+                sem::or_m8_r8_rip(b, eip as u64 + nbytes, disp, src, high)
+            } else {
+                sem::or_m8_r8_abs(b, (word as u32).swap_bytes(), src, high)
             }
         }
         Insn::CmpM8R8Sibd => {
