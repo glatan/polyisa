@@ -503,6 +503,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("imul_r_imm8", "F1", "01101011 11...... ........", "imul r, r/m, {imm}", "alu"),
         // IMUL r, [SIB+disp8], imm8 (6B /r)。iostat 0x44897d の 48 6B 44 24 28 58。索引なし。
         ("imul_r_imm8_sibd", "F1", "01101011 01...100 ..100... ........ ........", "imul r, m, {imm}", "alu"),
+        // IMUL r, [base+disp8], imm8 (6B /r mod=01 rm≠4)。nmeter 0x44a5eb の 6B 48 1C 0A。
+        ("imul_r_imm8_mem8", "F1", "01101011 01...... ........ ........", "imul r, m, {imm}", "alu"),
         // IMUL r, [SIB], imm8 (6B /r mod=00)。mpstat 0x449c01 の 48 6B 2C 24 48。索引なし。base=5 は長さが違う.
         ("imul_r_imm8_sib", "F1", "01101011 00...100 ..100... ........", "imul r, m, {imm}", "alu"),
         // IMUL r64,r/m64,imm8 RIP (6B /r ib + disp32 + imm8)。REX.W で64bit.

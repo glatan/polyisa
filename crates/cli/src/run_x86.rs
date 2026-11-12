@@ -725,7 +725,8 @@ fn fetch_len(
                 None
             }
         }
-        // 0x6B /r ib (IMUL r,r/m,imm8)。reg-direct 3B、RIP 7B、SIB+disp8 は 5B.
+        // 0x6B /r ib (IMUL r,r/m,imm8)。reg-direct 3B、RIP 7B、SIB+disp8 は 5B、
+        // [base+disp8]+imm8 は 4B (nmeter 0x44a5eb)。
         0x6B => {
             let s = second?;
             let md = s >> 6;
@@ -744,6 +745,8 @@ fn fetch_len(
                 }
             } else if md == 0 && rm == 5 {
                 Some(7)
+            } else if md == 1 {
+                Some(4)
             } else {
                 None
             }
@@ -8562,6 +8565,16 @@ fn dispatch<B: Backend>(
                 sem::imul_r32_imm8_sibd(b, reg(), base, disp, imm)
             }
         }
+        Insn::ImulRImm8Mem8 => {
+            // 6B /r mod=01 [base+disp8] + imm8。nmeter 0x44a5eb。フラグは変えない。
+            let disp = ((word >> 8) & 0xff) as u8 as i8;
+            let imm = (word & 0xff) as u8 as i8;
+            if rex_w {
+                sem::imul_r64_imm8_mem8(b, reg(), rm(), disp, imm)
+            } else {
+                sem::imul_r32_imm8_mem8(b, reg(), rm(), disp, imm)
+            }
+        }
         Insn::ImulRImm8 => {
             if rex_w {
                 sem::imul_r64_imm8(b, reg(), rm(), disp8())
@@ -9556,6 +9569,7 @@ fn dispatch<B: Backend>(
             | Insn::MovsxdSibd32
             | Insn::ImulRImm
             | Insn::ImulRImm8
+            | Insn::ImulRImm8Mem8
             | Insn::ImulRImm8Rip
             | Insn::ImulRImmRip => Some(reg()),
             Insn::Cmovb

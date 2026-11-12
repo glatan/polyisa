@@ -15555,6 +15555,29 @@ pub fn imul_r32_imm8_sibd<B: Backend>(
     Ok(())
 }
 
+/// IMUL r32, [base+disp8], imm8 (6B /r mod=01)。imm8 は符号拡張する。フラグは変えない。
+/// nmeter 0x44a5eb の `imul $0xa, 0x1c(%rax), %ecx` 対応.
+pub fn imul_r32_imm8_mem8<B: Backend>(
+    b: &mut B,
+    dst: Gpr,
+    base: Gpr,
+    disp: i8,
+    imm: i8,
+) -> Flow<B> {
+    imul_r32_imm8_sibd(b, dst, base, disp, imm)
+}
+
+/// IMUL r64, [base+disp8], imm8 (6B /r mod=01, REX.W)。imm8 は符号拡張する。
+pub fn imul_r64_imm8_mem8<B: Backend>(
+    b: &mut B,
+    dst: Gpr,
+    base: Gpr,
+    disp: i8,
+    imm: i8,
+) -> Flow<B> {
+    imul_r64_imm8_sibd(b, dst, base, disp, imm)
+}
+
 /// IMUL r32, m32, imm8 [base] (6B /r SIB mod=00, no_index)。imm8 は符号拡張する。フラグは変えない。
 pub fn imul_r32_imm8_memnd<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, imm: i8) -> Flow<B> {
     let addr = read64(b, base);

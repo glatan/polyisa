@@ -684,6 +684,8 @@ mod tests {
         assert_eq!(decode(0x6905F60F000005000000, 80), Some(Insn::ImulRImmRip));
         assert_eq!(decode(0x6BF638, 24), Some(Insn::ImulRImm8));
         assert_eq!(decode(0x6B44242858, 40), Some(Insn::ImulRImm8Sibd));
+        // IMUL $0xa, 0x1c(%rax), %ecx。nmeter 0x44a5eb の 6B 48 1C 0A。
+        assert_eq!(decode(0x6B481C0A, 32), Some(Insn::ImulRImm8Mem8));
         assert_eq!(decode(0x6B2C2448, 32), Some(Insn::ImulRImm8Sib));
         assert_eq!(decode(0x814C241C80080000, 64), Some(Insn::OrRm32ImmSibd));
         assert_eq!(decode(0x8164241400FEFFFF, 64), Some(Insn::AndRm32ImmSibd));
