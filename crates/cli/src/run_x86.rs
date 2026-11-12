@@ -405,6 +405,12 @@ fn fetch_len(
                 } else if md == 2 {
                     // ADDSD xmm,m64 [base+disp32]。awk log 0x4c163e の addsd xmm3, [rdx+disp32]。7B.
                     Some(7)
+                } else if md == 1 && rm != 4 {
+                    // ADDSD xmm,m64 [base+disp8]。ntpd の F2 0F 58 40 10。4B.
+                    Some(4)
+                } else if md == 0 && rm != 4 && rm != 5 {
+                    // ADDSD xmm,m64 [base]。ntpd 0x42c1d3 の F2 0F 58 08。3B.
+                    Some(3)
                 } else {
                     None
                 }
@@ -424,6 +430,9 @@ fn fetch_len(
                 } else if rm == 4 && md == 1 {
                     // SUBSD xmm,m64 SIB+disp8。awk の 2^3 が 0x4c199c で使う subsd xmm0, [rsp+0x10]。5B.
                     Some(5)
+                } else if md == 1 && rm != 4 {
+                    // SUBSD xmm,m64 [base+disp8]。ntpd 0x42c1ce の F2 0F 5C 40 08。4B.
+                    Some(4)
                 } else {
                     None
                 }
@@ -7407,6 +7416,14 @@ fn dispatch<B: Backend>(
             // F2 0F 58 /r mod=10。awk log 0x4c163e の addsd xmm3, [rdx+disp32]。
             sem::addsd_xmm_m64_mem32(b, xmm_reg_r(), rm0f(), disp32())
         }
+        Insn::AddsdXmmM64Memnd => {
+            // F2 0F 58 /r mod=00 [base]。ntpd 0x42c1d3 対応.
+            sem::addsd_xmm_m64_memnd(b, xmm_reg_r(), rm0f())
+        }
+        Insn::AddsdXmmM64Mem8 => {
+            // F2 0F 58 /r mod=01 [base+disp8]。ntpd の F2 0F 58 40 10。
+            sem::addsd_xmm_m64_mem8(b, xmm_reg_r(), rm0f(), disp8())
+        }
         // SUBSD xmm,xmm (F2 0F 5C /r reg-direct)。F2 は剥がし済み.
         Insn::Subsd => sem::subsd_xmm(b, xmm_reg_r(), xmm_rm_b()),
         Insn::SubsdXmmM64Rip => {
@@ -7435,6 +7452,10 @@ fn dispatch<B: Backend>(
                     disp8(),
                 )
             }
+        }
+        Insn::SubsdXmmM64Mem8 => {
+            // F2 0F 5C /r mod=01 [base+disp8]。ntpd 0x42c1ce 対応.
+            sem::subsd_xmm_m64_mem8(b, xmm_reg_r(), rm0f(), disp8())
         }
         // MULSD xmm,xmm (F2 0F 59 /r reg-direct)。F2 は剥がし済み.
         Insn::Mulsd => sem::mulsd_xmm(b, xmm_reg_r(), xmm_rm_b()),

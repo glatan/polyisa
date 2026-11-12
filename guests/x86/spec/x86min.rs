@@ -1103,6 +1103,33 @@ pub fn build_model() -> polyisa_isadl::Model {
     // (名前, 形式, パターン, where, 構文, 分類)
     type MemDef<'a> = (&'a str, &'a str, &'a str, Vec<WhereClause>, &'a str, &'a str);
     let mem: &[MemDef] = &[
+        // SUBSD xmm,m64 [base+disp8] (F2 0F 5C mod=01)。ntpd 0x42c1ce の F2 0F 5C 40 08。
+        (
+            "subsd_xmm_m64_mem8",
+            "M8",
+            "00001111 01011100 01...... ........",
+            vec![wc("m8_rm", WhereOp::Ne, 4)],
+            "subsd xmm, m64",
+            "load",
+        ),
+        // ADDSD xmm,m64 [base] (F2 0F 58 mod=00)。ntpd 0x42c1d3 の F2 0F 58 08。
+        (
+            "addsd_xmm_m64_memnd",
+            "MR",
+            "00001111 01011000 00......",
+            vec![wc("mr_rm", WhereOp::Ne, 4), wc("mr_rm", WhereOp::Ne, 5)],
+            "addsd xmm, m64",
+            "load",
+        ),
+        // ADDSD xmm,m64 [base+disp8] (F2 0F 58 mod=01)。ntpd の F2 0F 58 40 10。
+        (
+            "addsd_xmm_m64_mem8",
+            "M8",
+            "00001111 01011000 01...... ........",
+            vec![wc("m8_rm", WhereOp::Ne, 4)],
+            "addsd xmm, m64",
+            "load",
+        ),
         (
             "mov_rm16_imm_m32",
             "F1",

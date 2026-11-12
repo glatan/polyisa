@@ -1124,6 +1124,14 @@ mod tests {
         assert_eq!(decode(0x0F5C0500000000, 56), Some(Insn::SubsdXmmM64Rip));
         assert_eq!(decode(0x0F5C9110000000, 56), Some(Insn::SubsdXmmM64Mem32));
         assert_eq!(decode(0x0F5C442410, 40), Some(Insn::SubsdXmmM64Sibd));
+        // SUBSD xmm, [base+disp8] (F2 0F 5C mod=01)。ntpd 0x42c1ce の F2 0F 5C 40 08。
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x0F5C4008, 32), Some(Insn::SubsdXmmM64Mem8));
+        assert_eq!(decode(0x0F5C4008, 24), None);
+        // ADDSD xmm, [base] / [base+disp8] (F2 0F 58)。ntpd 対応.
+        // Ref: SPEC-X86-INTEL-SDM (v093).
+        assert_eq!(decode(0x0F5808, 24), Some(Insn::AddsdXmmM64Memnd));
+        assert_eq!(decode(0x0F584010, 32), Some(Insn::AddsdXmmM64Mem8));
         assert_eq!(decode(0x0F5CC1, 16), None);
         // MULSD xmm,m64 RIP (F2 0F 59 05 + disp32)。F2 は実行側で剥がす.
         // Ref: SPEC-X86-INTEL-SDM (v093).
