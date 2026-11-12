@@ -7,6 +7,7 @@
 //! アプレットの終了コードと標準出力は、このテストでは見ない。
 //! バイナリはリポジトリに含めない。ファイルが無いときは失敗する。
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -402,6 +403,34 @@ fn text_applets_match_host() {
         .success();
     assert!(ar_ok);
     let ar_s = ar_path.to_str().expect("utf-8");
+    let cin = dir.join("cin");
+    std::fs::create_dir(&cin).unwrap();
+    std::fs::write(cin.join("f"), b"ab\n").unwrap();
+    let names = Command::new("find")
+        .current_dir(&cin)
+        .arg(".")
+        .output()
+        .expect("host find");
+    assert!(names.status.success());
+    let mut cpio_child = Command::new("cpio")
+        .current_dir(&cin)
+        .args(["-o", "-H", "newc"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("host cpio");
+    cpio_child
+        .stdin
+        .take()
+        .expect("cpio stdin")
+        .write_all(&names.stdout)
+        .expect("cpio names");
+    let archived = cpio_child.wait_with_output().expect("cpio wait");
+    assert!(archived.status.success());
+    let cpio_path = dir.join("f.cpio");
+    std::fs::write(&cpio_path, &archived.stdout).unwrap();
+    let cpio_s = cpio_path.to_str().expect("utf-8");
     let copied_s = copied.to_str().expect("utf-8");
     let touched_s = touched.to_str().expect("utf-8");
     let link = dir.join("link");
@@ -526,6 +555,7 @@ fn text_applets_match_host() {
         &["[", "-f", "nosuch123", "]"],
         &["findfs", "LABEL=nope"],
         &["envdir", f, "true"],
+        &["cpio", "-t", "-F", cpio_s],
     ];
     for args in cases {
         let argv: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
