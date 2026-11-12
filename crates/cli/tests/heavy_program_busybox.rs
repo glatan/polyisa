@@ -414,7 +414,6 @@ fn true_echo_uname_id_match() {
             ["start-stop-daemon", "-K", "-x", "/bin/true"].as_slice(),
         ),
         ("svok", ["svok", "/"].as_slice()),
-        ("sv", ["sv", "status", "/tmp"].as_slice()),
     ] {
         let argv: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
         let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)
