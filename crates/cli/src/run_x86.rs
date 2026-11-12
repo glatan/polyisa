@@ -10842,6 +10842,7 @@ const X86_64_SYSCALLS: &[(&str, SysFn)] = &[
     ("getppid", sys_getppid),
     ("sysinfo", sys_sysinfo),
     ("reboot", sys_reboot),
+    ("syslog", sys_syslog),
     ("uname", sys_uname),
     ("getuid", sys_getuid),
     ("geteuid", sys_geteuid),
@@ -11822,6 +11823,37 @@ fn sys_sysinfo(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Tr
 
 fn sys_reboot(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     // reboot。権限がなく常に EPERM。halt / poweroff / reboot アプレットが呼ぶ。
+    set64(env, Gpr(0), cx.neg(EPERM));
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_syslog(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // syslog / klogctl。リングバッファは固定の 1 行。dmesg が読む。
+    // type: 3=READ_ALL, 2=READ, 4=READ_CLEAR, 10=SIZE_BUFFER。Ref: SRC-LINUX (7.3).
+    const MSG: &[u8] = b"[    0.000000] polyisa\n";
+    let typ = get64(env, cx.r_a) as i32;
+    let buf = get64(env, cx.r_b);
+    let len = get64(env, cx.r_c) as i64;
+    if typ == 10 {
+        set64(env, Gpr(0), MSG.len() as u64);
+        return Some(TrapOutcome::Handled);
+    }
+    if matches!(typ, 2..=4) {
+        if len < 0 {
+            set64(env, Gpr(0), cx.neg(EINVAL));
+            return Some(TrapOutcome::Handled);
+        }
+        if buf == 0 {
+            set64(env, Gpr(0), cx.neg(EFAULT));
+            return Some(TrapOutcome::Handled);
+        }
+        let n = core::cmp::min(MSG.len(), len as usize);
+        if env.backend.mem.write(VirtAddr(buf), &MSG[..n]).is_err() {
+            return Some(TrapOutcome::Unimplemented);
+        }
+        set64(env, Gpr(0), n as u64);
+        return Some(TrapOutcome::Handled);
+    }
     set64(env, Gpr(0), cx.neg(EPERM));
     Some(TrapOutcome::Handled)
 }
@@ -16690,6 +16722,25 @@ mod tests {
         set64(&mut env, Gpr(0), abi::REBOOT);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EPERM));
+    }
+
+    #[test]
+    fn syslog_read_all_writes_fixed_line() {
+        use polyisa_os_linux::x86_64 as abi;
+        let mut sys = CliLinux::x86_64();
+        let mut env = bare();
+        set64(&mut env, Gpr(0), abi::SYSLOG);
+        set64(&mut env, Gpr(7), 3);
+        set64(&mut env, Gpr(6), 0x100);
+        set64(&mut env, Gpr(2), 64);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 23);
+        let mut back = [0u8; 23];
+        env.backend
+            .mem
+            .read(VirtAddr(0x100), &mut back, data_access())
+            .unwrap();
+        assert_eq!(&back, b"[    0.000000] polyisa\n");
     }
 
     #[test]

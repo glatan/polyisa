@@ -351,6 +351,13 @@ fn true_echo_uname_id_match() {
         .unwrap_or_else(|e| panic!("hostname: {e}"));
     assert_eq!(code, 0);
     assert_eq!(out.as_slice(), b"localhost\n");
+    // dmesg は syslog の固定 1 行。ホストとは比べない。
+    let dmesg = ["dmesg"];
+    let argv: Vec<String> = dmesg.iter().map(|s| (*s).to_string()).collect();
+    let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)
+        .unwrap_or_else(|e| panic!("dmesg: {e}"));
+    assert_eq!(code, 0);
+    assert_eq!(out.as_slice(), b"[    0.000000] polyisa\n");
     // ホストと揃う。hwclock / rpm2cpio は失敗で標準出力が空。
     for (name, args) in [
         ("hwclock", ["hwclock"].as_slice()),

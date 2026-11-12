@@ -105,6 +105,7 @@
 - symlink
 - sync
 - sysinfo
+- syslog
 - tgkill
 - time
 - umask
