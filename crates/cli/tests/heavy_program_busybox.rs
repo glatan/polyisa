@@ -376,6 +376,14 @@ fn true_echo_uname_id_match() {
         )
         .as_bytes()
     );
+    // smemcap は合成 /proc 上の固定バイナリ。ホストとは比べない。
+    let smemcap = ["smemcap"];
+    let argv: Vec<String> = smemcap.iter().map(|s| (*s).to_string()).collect();
+    let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)
+        .unwrap_or_else(|e| panic!("smemcap: {e}"));
+    assert_eq!(code, 0);
+    assert_eq!(out.len(), 4608, "smemcap len");
+    assert_eq!(&out[..7], b"meminfo");
     // 偽の比較は終了コード 1、標準出力は空。
     for (name, args) in [
         ("[", ["[", "1", "-eq", "2", "]"].as_slice()),
