@@ -120,11 +120,17 @@
 - sendto
 - set_robust_list
 - set_tid_address
+- setgid
 - setgroups
 - setitimer
 - setpgid
 - setpriority
+- setregid
+- setresgid
+- setresuid
+- setreuid
 - setsid
+- setuid
 - setxattr
 - shmctl
 - shmget

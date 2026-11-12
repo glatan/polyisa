@@ -10979,6 +10979,12 @@ const X86_64_SYSCALLS: &[(&str, SysFn)] = &[
     ("inotify_init", sys_inotify_init),
     ("inotify_add_watch", sys_inotify_add_watch),
     ("adjtimex", sys_adjtimex),
+    ("setuid", sys_setuid),
+    ("setgid", sys_setgid),
+    ("setreuid", sys_setreuid),
+    ("setregid", sys_setregid),
+    ("setresuid", sys_setresuid),
+    ("setresgid", sys_setresgid),
     ("uname", sys_uname),
     ("getuid", sys_getuid),
     ("geteuid", sys_geteuid),
@@ -12209,6 +12215,32 @@ fn sys_adjtimex(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<T
     }
     set64(env, Gpr(0), 0);
     Some(TrapOutcome::Handled)
+}
+
+fn sys_setuid(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // setuid 系。資格は変えず常に EPERM。passwd / chpasswd の失敗形合わせ。
+    set64(env, Gpr(0), cx.neg(EPERM));
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_setgid(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    sys_setuid(sys, env, cx)
+}
+
+fn sys_setreuid(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    sys_setuid(sys, env, cx)
+}
+
+fn sys_setregid(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    sys_setuid(sys, env, cx)
+}
+
+fn sys_setresuid(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    sys_setuid(sys, env, cx)
+}
+
+fn sys_setresgid(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    sys_setuid(sys, env, cx)
 }
 
 fn sys_syslog(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {

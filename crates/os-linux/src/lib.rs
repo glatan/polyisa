@@ -209,6 +209,12 @@ pub mod x86_64 {
     pub const INOTIFY_INIT: u64 = 253;
     pub const INOTIFY_ADD_WATCH: u64 = 254;
     pub const ADJTIMEX: u64 = 159;
+    pub const SETUID: u64 = 105;
+    pub const SETGID: u64 = 106;
+    pub const SETREUID: u64 = 113;
+    pub const SETREGID: u64 = 114;
+    pub const SETRESUID: u64 = 117;
+    pub const SETRESGID: u64 = 118;
     pub const SCHED_SETPARAM: u64 = 142;
     pub const SCHED_GETPARAM: u64 = 143;
     pub const SCHED_SETSCHEDULER: u64 = 144;
@@ -576,6 +582,12 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             x86_64::INOTIFY_INIT => Some("inotify_init"),
             x86_64::INOTIFY_ADD_WATCH => Some("inotify_add_watch"),
             x86_64::ADJTIMEX => Some("adjtimex"),
+            x86_64::SETUID => Some("setuid"),
+            x86_64::SETGID => Some("setgid"),
+            x86_64::SETREUID => Some("setreuid"),
+            x86_64::SETREGID => Some("setregid"),
+            x86_64::SETRESUID => Some("setresuid"),
+            x86_64::SETRESGID => Some("setresgid"),
             x86_64::SCHED_SETPARAM => Some("sched_setparam"),
             x86_64::SCHED_GETPARAM => Some("sched_getparam"),
             x86_64::SCHED_SETSCHEDULER => Some("sched_setscheduler"),
