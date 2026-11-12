@@ -1415,6 +1415,53 @@ fn run_cvttsd2si_r64() {
 }
 
 #[test]
+fn run_subsd_xmm0_rip() {
+    // F2 0F 5C 05 F8 04 00 00 = subsd xmm0, [rip+0x4f8]。3.0-1.0 は 2.0。上位64は残る。
+    // awk substr 0x4a3cbb。Ref: SPEC-X86-INTEL-SDM (v093).
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1500), &0x3FF0_0000_0000_0000u64.to_le_bytes())
+        .unwrap();
+    env.backend.set(
+        polyisa_guest_x86::sem::xmm_ref(polyisa_guest_x86::sem::Xmm(0)),
+        0xAAAA_AAAA_AAAA_AAAA_4008_0000_0000_0000,
+    );
+    env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 1);
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x1000),
+            &[0xF2, 0x0F, 0x5C, 0x05, 0xF8, 0x04, 0x00, 0x00],
+        )
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x1008 });
+    let v: u128 = env.backend.get(polyisa_guest_x86::sem::xmm_ref(
+        polyisa_guest_x86::sem::Xmm(0),
+    ));
+    assert_eq!(v, 0xAAAA_AAAA_AAAA_AAAA_4000_0000_0000_0000);
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::eflags_ref()), 1);
+    let mut nb = [0u8; 8];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x1500),
+            &mut nb,
+            polyisa_mem::Access {
+                endian: polyisa_mem::Endian::Le,
+                align: polyisa_mem::Align::Unaligned,
+                kind: polyisa_mem::AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(u64::from_le_bytes(nb), 0x3FF0_0000_0000_0000);
+}
+
+#[test]
 fn run_subsd_reg_direct() {
     // run 経由で F2 0F 5C C8 (SUBSD xmm1,xmm0) を回す。
     // xmm1=3.0、xmm0=1.0 で下位=2.0 になることを確かめる。

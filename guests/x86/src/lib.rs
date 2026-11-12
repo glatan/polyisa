@@ -85,7 +85,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数117件。
-        assert_eq!(INSNS.len(), 767);
+        assert_eq!(INSNS.len(), 768);
     }
 
     #[test]
@@ -1088,6 +1088,7 @@ mod tests {
         // SUBSD xmm,xmm reg-direct (F2 0F 5C /r)。F2 は実行側で剥がす.
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x0F5CC1, 24), Some(Insn::Subsd));
+        assert_eq!(decode(0x0F5C0500000000, 56), Some(Insn::SubsdXmmM64Rip));
         assert_eq!(decode(0x0F5CC1, 16), None);
         // MULSD xmm,m64 RIP (F2 0F 59 05 + disp32)。F2 は実行側で剥がす.
         // Ref: SPEC-X86-INTEL-SDM (v093).

@@ -344,7 +344,6 @@ fn fetch_len(
                     | 0xFC
                     | 0x2F
                     | 0x2C
-                    | 0x5C
             ) {
                 // XMM reg-direct のみ（66 接頭辞は剥がし済み）。
                 let m = third?;
@@ -368,6 +367,19 @@ fn fetch_len(
                     } else {
                         None
                     }
+                } else {
+                    None
+                }
+            } else if s == 0x5C {
+                // SUBSD xmm,m64 RIP (F2 0F 5C 05 + disp32、7B) と reg-direct (3B)。
+                // awk substr 0x4a3cbb の subsd xmm0, [rip+disp32]。
+                let m = third?;
+                let md = m >> 6;
+                let rm = m & 7;
+                if md == 3 {
+                    Some(3)
+                } else if md == 0 && rm == 5 {
+                    Some(7)
                 } else {
                     None
                 }
@@ -7068,6 +7080,14 @@ fn dispatch<B: Backend>(
         }
         // SUBSD xmm,xmm (F2 0F 5C /r reg-direct)。F2 は剥がし済み.
         Insn::Subsd => sem::subsd_xmm(b, xmm_reg_r(), xmm_rm_b()),
+        Insn::SubsdXmmM64Rip => {
+            // F2 0F 5C 05 + disp32。awk substr 0x4a3cbb の subsd xmm0, [rip+disp32]。
+            if is64 {
+                sem::subsd_xmm_m64_rip(b, xmm_reg_r(), eip as u64 + nbytes, disp32())
+            } else {
+                sem::subsd_xmm_m64_abs(b, xmm_reg_r(), imm32())
+            }
+        }
         // MULSD xmm,xmm (F2 0F 59 /r reg-direct)。F2 は剥がし済み.
         Insn::Mulsd => sem::mulsd_xmm(b, xmm_reg_r(), xmm_rm_b()),
         Insn::MulsdXmmM64Rip => {
