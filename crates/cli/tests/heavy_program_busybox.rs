@@ -484,6 +484,8 @@ fn text_applets_match_host() {
         &["wc", "-l", f],
         &["date", "-u", "-d", "@0", "+%s"],
         &["readlink", link_s],
+        &["readlink", "-f", f],
+        &["realpath", f],
         &["cmp", f, g],
         &["diff", "-q", f, g],
         &["cal", "1", "2000"],

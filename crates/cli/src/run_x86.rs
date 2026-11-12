@@ -12284,6 +12284,32 @@ fn sys_clock_gettime(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Opt
     Some(TrapOutcome::Handled)
 }
 
+fn guest_readlink_target(sys: &CliLinux, path: &str) -> Result<String, u32> {
+    if path == "/proc/self/exe" && !sys.exe_path.is_empty() {
+        return Ok(sys.exe_path.clone());
+    }
+    // musl の realpath は開いた fd を /proc/self/fd/N の readlink で読む。
+    // ホストの同じ番号は別物なので、開いたときに覚えたパスを返す。
+    if let Some(rest) = path.strip_prefix("/proc/self/fd/")
+        && !rest.is_empty()
+        && rest.bytes().all(|b| b.is_ascii_digit())
+        && let Ok(fd) = rest.parse::<u32>()
+    {
+        return match sys.path_of(fd) {
+            Some(p) => Ok(p.to_string()),
+            None => Err(ENOENT),
+        };
+    }
+    match std::fs::read_link(path) {
+        Ok(p) => Ok(p.into_os_string().into_string().unwrap_or_default()),
+        Err(e) => Err(match e.kind() {
+            std::io::ErrorKind::NotFound => ENOENT,
+            std::io::ErrorKind::PermissionDenied => EACCES,
+            _ => EINVAL,
+        }),
+    }
+}
+
 fn sys_readlinkat(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     // readlinkat(dirfd, pathname, buf, bufsiz)。AT_FDCWD+絶対パスのみ.
     // ホストの read_link に直結し、切詰めて返す（NUL 終端なし）。
@@ -12326,20 +12352,11 @@ fn sys_readlinkat(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<
     }
     // /proc/self/exe はゲスト実行ファイル自身を返す (ホスト exe ではない).
     // 空の exe_path (単体テスト) ではホストに直結する.
-    let target = if path == "/proc/self/exe" && !sys.exe_path.is_empty() {
-        sys.exe_path.clone()
-    } else {
-        match std::fs::read_link(&path) {
-            Ok(p) => p.into_os_string().into_string().unwrap_or_default(),
-            Err(e) => {
-                let no = match e.kind() {
-                    std::io::ErrorKind::NotFound => ENOENT,
-                    std::io::ErrorKind::PermissionDenied => EACCES,
-                    _ => EINVAL,
-                };
-                set64(env, Gpr(0), cx.neg(no));
-                return Some(TrapOutcome::Handled);
-            }
+    let target = match guest_readlink_target(sys, &path) {
+        Ok(p) => p,
+        Err(no) => {
+            set64(env, Gpr(0), cx.neg(no));
+            return Some(TrapOutcome::Handled);
         }
     };
     let bytes = target.as_bytes();
@@ -12380,20 +12397,11 @@ fn sys_readlink(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Tr
         set64(env, Gpr(0), cx.neg(EINVAL));
         return Some(TrapOutcome::Handled);
     }
-    let target = if path == "/proc/self/exe" && !sys.exe_path.is_empty() {
-        sys.exe_path.clone()
-    } else {
-        match std::fs::read_link(&path) {
-            Ok(p) => p.into_os_string().into_string().unwrap_or_default(),
-            Err(e) => {
-                let no = match e.kind() {
-                    std::io::ErrorKind::NotFound => ENOENT,
-                    std::io::ErrorKind::PermissionDenied => EACCES,
-                    _ => EINVAL,
-                };
-                set64(env, Gpr(0), cx.neg(no));
-                return Some(TrapOutcome::Handled);
-            }
+    let target = match guest_readlink_target(sys, &path) {
+        Ok(p) => p,
+        Err(no) => {
+            set64(env, Gpr(0), cx.neg(no));
+            return Some(TrapOutcome::Handled);
         }
     };
     let bytes = target.as_bytes();
@@ -15293,6 +15301,39 @@ mod tests {
             .read(VirtAddr(0x200), &mut back, data_access())
             .unwrap();
         assert_eq!(&back, b"/tmp/opencode/work/busybox-1.37.0/busybox");
+    }
+
+    #[test]
+    fn readlink_proc_self_fd_returns_opened_path() {
+        use polyisa_os_linux::x86_64 as abi;
+        let mut sys = CliLinux::x86_64();
+        let mut env = bare();
+        let path = std::env::temp_dir().join(format!("polyisa-fdlink-{}", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let file = std::fs::File::create(&path).unwrap();
+        let fd = sys.alloc_fd(file);
+        let host = path.to_str().unwrap().to_string();
+        sys.remember_path(fd, host.clone());
+        let proc = format!("/proc/self/fd/{fd}\0");
+        env.backend
+            .mem
+            .write(VirtAddr(0x100), proc.as_bytes())
+            .unwrap();
+        set64(&mut env, Gpr(0), abi::READLINK);
+        set64(&mut env, Gpr(7), 0x100);
+        set64(&mut env, Gpr(6), 0x200);
+        set64(&mut env, Gpr(2), 0x100);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let n = get64(&mut env, Gpr(0));
+        assert_eq!(n, host.len() as u64);
+        let mut back = vec![0u8; n as usize];
+        env.backend
+            .mem
+            .read(VirtAddr(0x200), &mut back, data_access())
+            .unwrap();
+        assert_eq!(back, host.as_bytes());
+        drop(sys);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
