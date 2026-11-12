@@ -452,6 +452,18 @@ fn true_echo_uname_id_match() {
         ("tc", ["tc", "-h"].as_slice()),
         ("dpkg", ["dpkg", "-l"].as_slice()),
         ("hexedit", ["hexedit", "/tmp"].as_slice()),
+        ("nameif", ["nameif", "eth9", "00:00:00:00:00:00"].as_slice()),
+        ("ifenslave", ["ifenslave", "eth0", "eth1"].as_slice()),
+        ("mkfifo", ["mkfifo", "/tmp/no/fifo"].as_slice()),
+        ("mknod", ["mknod", "/tmp/no/node", "c", "1", "1"].as_slice()),
+        ("fsync", ["fsync", "/no/such"].as_slice()),
+        ("runsv", ["runsv", "/no"].as_slice()),
+        (
+            "whois",
+            ["whois", "-h", "127.0.0.1", "example.com"].as_slice(),
+        ),
+        ("ash", ["ash", "-c", "exit 2"].as_slice()),
+        ("sh", ["sh", "-c", "exit 2"].as_slice()),
     ] {
         let argv: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
         let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)
