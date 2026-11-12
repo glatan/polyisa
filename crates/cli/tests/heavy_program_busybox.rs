@@ -357,6 +357,20 @@ fn true_echo_uname_id_match() {
         ("rpm2cpio", ["rpm2cpio"].as_slice()),
         ("users", ["users"].as_slice()),
         ("w", ["w"].as_slice()),
+        (
+            "blockdev",
+            ["blockdev", "--getsize64", "/dev/null"].as_slice(),
+        ),
+        ("volname", ["volname"].as_slice()),
+        ("dumpkmap", ["dumpkmap"].as_slice()),
+        ("loadkmap", ["loadkmap"].as_slice()),
+        ("eject", ["eject"].as_slice()),
+        ("fbset", ["fbset"].as_slice()),
+        ("kbdrate", ["kbdrate"].as_slice()),
+        ("pipesz", ["pipesz"].as_slice()),
+        ("lspci", ["lspci"].as_slice()),
+        ("pmap", ["pmap", "1"].as_slice()),
+        ("pwdx", ["pwdx", "1"].as_slice()),
     ] {
         let argv: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
         let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)
@@ -369,6 +383,31 @@ fn true_echo_uname_id_match() {
         assert_eq!(code, host.status.code().unwrap_or(1) as u64);
         assert_eq!(out.as_slice(), host.stdout.as_slice());
     }
+}
+
+#[test]
+fn chgrp_unknown_group_matches_host() {
+    let path = busybox();
+    let path = path.to_str().expect("utf-8 path");
+    let dir = std::env::temp_dir().join(format!("polyisa-chgrp-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir(&dir).unwrap();
+    let f = dir.join("f");
+    std::fs::write(&f, b"x").unwrap();
+    let args = ["chgrp", "nogroup", f.to_str().expect("utf-8")];
+    let argv: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
+    let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)
+        .unwrap_or_else(|e| panic!("chgrp: {e}"));
+    let host = Command::new(path)
+        .args(args)
+        .env_clear()
+        .output()
+        .expect("host chgrp");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(code, host.status.code().unwrap_or(1) as u64);
+    assert_eq!(out.as_slice(), host.stdout.as_slice());
+    assert_eq!(code, 1);
+    assert!(out.is_empty());
 }
 
 #[test]
