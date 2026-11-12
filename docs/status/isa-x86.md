@@ -22,7 +22,7 @@
 | add | add_eax、add_m16_imm_sib、add_m32_r32_mem32、add_m32_r32_mem8、add_m32_r32_memnd、add_m32_r32_rip、add_m32_r32_sib、add_m32_r32_sibabs、add_m32_r32_sibd、add_m32_r32_sibd32、add_r_mem32、add_r_mem8、add_r_memnd、add_r_rip、add_r_sib、add_r_sibabs、add_r_sibd、add_r_sibd32、add_rm16_imm、add_rm32、add_rm32_imm、add_rm32_imm8_rip、add_rm32_imm_mem8、add_rm32_imm_sibd、add_rm32_rip、add_rm64_imm、add_rm8_imm_sib、add_rm_imm8、add_rm_imm8_mem32、add_rm_imm8_mem8、add_rm_imm8_memnd、add_rm_imm8_sibd | 真 | alu |
 | addsd | addsd | 真 | alu |
 | addsd | addsd_m64_sib、addsd_xmm_m64_mem32、addsd_xmm_m64_rip、addsd_xmm_m64_sibd | 真 | load |
-| and | and_ax_imm16、and_eax、and_m32_r32_memnd、and_m32_r32_sib、and_m8_r8、and_m8_r8_mem8、and_r8_m8_mem32、and_r_mem32、and_r_mem8、and_r_memnd、and_r_rip、and_r_sibd、and_r_sibd32、and_rm16_imm、and_rm32、and_rm32_imm、and_rm32_imm_mem8、and_rm32_imm_memnd、and_rm32_imm_sibd、and_rm32_rip、and_rm8_imm、and_rm8_imm_mem32、and_rm8_imm_mem8、and_rm8_imm_sibd、and_rm8_imm_sibd32、and_rm_imm8、and_rm_imm8_mem32、and_rm_imm8_mem8、and_rm_imm8_memnd、and_rm_imm8_rip、and_rm_imm8_sib、and_rm_imm8_sibd | 真 | alu |
+| and | and_ax_imm16、and_eax、and_m32_r32_memnd、and_m32_r32_sib、and_m8_r8、and_m8_r8_mem8、and_r8_m8_mem32、and_r_mem32、and_r_mem8、and_r_memnd、and_r_rip、and_r_sibd、and_r_sibd32、and_rm16_imm、and_rm16_imm_memnd、and_rm32、and_rm32_imm、and_rm32_imm_mem8、and_rm32_imm_memnd、and_rm32_imm_sibd、and_rm32_rip、and_rm8_imm、and_rm8_imm_mem32、and_rm8_imm_mem8、and_rm8_imm_sibd、and_rm8_imm_sibd32、and_rm_imm8、and_rm_imm8_mem32、and_rm_imm8_mem8、and_rm_imm8_memnd、and_rm_imm8_rip、and_rm_imm8_sib、and_rm_imm8_sibd | 真 | alu |
 | andpd | andpd | 真 | alu |
 | andpd | andpd_rip | 真 | load |
 | bsf | bsf_r_rm | 真 | alu |
@@ -208,5 +208,5 @@
 | ucomisd | ucomisd_mem32、ucomisd_mem8、ucomisd_memnd、ucomisd_rip | 真 | load |
 | xadd | xadd_r32_memnd、xadd_r32_rip | 真 | alu |
 | xchg | xchg_r8、xchg_r_mem32、xchg_r_mem8、xchg_r_memnd、xchg_r_rip、xchg_r_rm、xchg_rbp_ax、xchg_rbx_ax、xchg_rcx_ax、xchg_rdi_ax、xchg_rdx_ax、xchg_rsi_ax、xchg_rsp_ax | 真 | alu |
-| xor | xor_imm、xor_m32_r32_mem32、xor_m32_r32_mem8、xor_m32_r32_memnd、xor_m32_r32_sibd、xor_m8_r8、xor_m8_r8_sib、xor_r8_m8_memnd、xor_r_mem32、xor_r_mem8、xor_r_memnd、xor_r_rip、xor_r_sib、xor_r_sibd、xor_r_sibd32、xor_rm32、xor_rm32_imm、xor_rm8_imm_memnd、xor_rm8_imm_sib、xor_rm8_imm_sibd、xor_rm_imm8、xor_rm_imm8_mem32、xor_rm_imm8_mem8、xor_rm_imm8_memnd、xor_rm_imm8_sibd | 真 | alu |
+| xor | xor_imm、xor_m32_r32_mem32、xor_m32_r32_mem8、xor_m32_r32_memnd、xor_m32_r32_sibd、xor_m8_r8、xor_m8_r8_sib、xor_r8_m8_memnd、xor_r_mem32、xor_r_mem8、xor_r_memnd、xor_r_rip、xor_r_sib、xor_r_sibd、xor_r_sibd32、xor_rm32、xor_rm32_imm、xor_rm32_imm_sibd、xor_rm8_imm_memnd、xor_rm8_imm_sib、xor_rm8_imm_sibd、xor_rm_imm8、xor_rm_imm8_mem32、xor_rm_imm8_mem8、xor_rm_imm8_memnd、xor_rm_imm8_sibd | 真 | alu |
 | xorps | xorps | 真 | alu |

@@ -2006,6 +2006,7 @@ pub fn run_mode(
                     | 0x13
                     | 0x1B
                     | 0xFF
+                    | 0xFE
                     | 0x11
                     | 0x19
                     | 0x29
@@ -2246,6 +2247,7 @@ pub fn run_mode(
                     | Insn::OrAxImm16
                     | Insn::AddRm16Imm
                     | Insn::AndRm16Imm
+                    | Insn::AndRm16ImmMemnd
                     // AND r16, [base+index*scale+disp32] (66 23 /r SIB mod=10)。gunzip 0x48a957。
                     | Insn::AndRSibd32
                     | Insn::CmpRm16Imm
@@ -5153,6 +5155,10 @@ fn dispatch<B: Backend>(
             // 66 81 /4 mod=11 + imm16 (32b、66 接頭辞は剥がし済み)。imm は最下位16 LE.
             sem::and_rm16_imm(b, rm(), ((word & 0xffff) as u16).swap_bytes())
         }
+        Insn::AndRm16ImmMemnd => {
+            // 66 81 /4 mod=00 [base],imm16。mim 0x458c3a の andw $0xfb00,(%rbx)。
+            sem::and_rm16_imm_memnd(b, rm(), ((word & 0xffff) as u16).swap_bytes())
+        }
         Insn::CmpRm16Imm => {
             // 66 81 /7 mod=11 + imm16 (32b、66 接頭辞は剥がし済み)。basename 0x4bfaa8 対応.
             sem::cmp_rm16_imm(b, rm(), ((word & 0xffff) as u16).swap_bytes())
@@ -6023,6 +6029,22 @@ fn dispatch<B: Backend>(
                 sem::and_rm64_imm_sibd(b, sib_base(), sib_idx(), sib_shift(), disp, imm)
             } else {
                 sem::and_rm32_imm_sibd(b, sib_base(), sib_idx(), sib_shift(), disp, imm)
+            }
+        }
+        Insn::XorRm32ImmSibd => {
+            // 81 /6 SIB mod=01。mim 0x45a165 の xorl $0x100,0x4(%rsp)。
+            let disp = ((word >> 32) & 0xff) as u8 as i8;
+            let imm = ((word & 0xffff_ffff) as u32).swap_bytes();
+            if no_index() {
+                if rex_w {
+                    sem::xor_rm64_imm_mem8(b, sib_base(), disp, imm)
+                } else {
+                    sem::xor_rm32_imm_mem8(b, sib_base(), disp, imm)
+                }
+            } else if rex_w {
+                sem::xor_rm64_imm_sibd(b, sib_base(), sib_idx(), sib_shift(), disp, imm)
+            } else {
+                sem::xor_rm32_imm_sibd(b, sib_base(), sib_idx(), sib_shift(), disp, imm)
             }
         }
         Insn::AndRm32ImmMem8 => {

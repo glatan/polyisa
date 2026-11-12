@@ -244,6 +244,18 @@ fn true_echo_uname_id_match() {
         assert_eq!(code, 1);
         assert!(out.is_empty());
     }
+    let killall5 = ["killall5", "-l"];
+    let argv: Vec<String> = killall5.iter().map(|s| (*s).to_string()).collect();
+    let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)
+        .unwrap_or_else(|e| panic!("killall5 -l: {e}"));
+    let host = Command::new(path)
+        .args(killall5)
+        .env_clear()
+        .output()
+        .expect("host killall5 -l");
+    assert_eq!(code, host.status.code().unwrap_or(1) as u64);
+    assert_eq!(out.as_slice(), host.stdout.as_slice());
+    assert!(out.starts_with(b" 1) HUP\n"));
 }
 
 #[test]

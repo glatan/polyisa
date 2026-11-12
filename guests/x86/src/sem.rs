@@ -402,6 +402,18 @@ pub fn and_rm16_imm<B: Backend>(b: &mut B, dst: Gpr, imm: u16) -> Flow<B> {
     Ok(())
 }
 
+/// AND m16,imm16 [base] (66 81 /4 mod=00)。mim 0x458c3a 対応.
+pub fn and_rm16_imm_memnd<B: Backend>(b: &mut B, base: Gpr, imm: u16) -> Flow<B> {
+    use polyisa_sem::W16;
+    let addr = read64(b, base);
+    let x: B::V<W16> = b.load::<W16>(addr, DATA_READ)?;
+    let y = b.konst::<W16>(imm);
+    let v = b.and::<W16>(x, y);
+    b.store::<W16>(addr, v, DATA_WRITE)?;
+    update_logic_flags(b, v);
+    Ok(())
+}
+
 /// TEST r/m32,r32。AND 結果で 5 旗を更新する（CF=0、OF=0）。dst/src は変えない.
 pub fn test_rm32<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
     let x = read(b, dst);
@@ -20095,6 +20107,64 @@ pub fn and_rm32_imm_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8, imm: u32) -
     let y = b.konst::<W32>(imm);
     let v = b.and::<W32>(x, y);
     b.store::<W32>(addr, v, DATA_WRITE)?;
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// XOR m32,imm32 [base+disp8] (81 /6 mod=01)。mim 0x45a165 の no_index 経路。
+pub fn xor_rm32_imm_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8, imm: u32) -> Flow<B> {
+    let addr = eff_addr(b, base, disp);
+    let x: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let y = b.konst::<W32>(imm);
+    let v = b.xor::<W32>(x, y);
+    b.store::<W32>(addr, v, DATA_WRITE)?;
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// XOR m64,imm32 [base+disp8] (81 /6 mod=01、REX.W)。imm32 は符号拡張する.
+pub fn xor_rm64_imm_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8, imm: u32) -> Flow<B> {
+    let addr = eff_addr(b, base, disp);
+    let x: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let y = b.konst::<W64>(imm as i32 as u64);
+    let v = b.xor::<W64>(x, y);
+    b.store::<W64>(addr, v, DATA_WRITE)?;
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// XOR m32,imm32 [base+index*scale+disp8] (81 /6 SIB mod=01)。
+pub fn xor_rm32_imm_sibd<B: Backend>(
+    b: &mut B,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i8,
+    imm: u32,
+) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, disp as i32, base, idx);
+    let x: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let y = b.konst::<W32>(imm);
+    let v = b.xor::<W32>(x, y);
+    b.store::<W32>(addr, v, DATA_WRITE)?;
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// XOR m64,imm32 [base+index*scale+disp8] (81 /6 SIB mod=01, REX.W)。imm32 は符号拡張する.
+pub fn xor_rm64_imm_sibd<B: Backend>(
+    b: &mut B,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i8,
+    imm: u32,
+) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, disp as i32, base, idx);
+    let x: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let y = b.konst::<W64>(imm as i32 as u64);
+    let v = b.xor::<W64>(x, y);
+    b.store::<W64>(addr, v, DATA_WRITE)?;
     update_logic_flags(b, v);
     Ok(())
 }
