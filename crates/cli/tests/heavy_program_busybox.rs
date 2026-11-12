@@ -223,6 +223,27 @@ fn true_echo_uname_id_match() {
         assert_eq!(out.as_slice(), host.stdout.as_slice());
         assert_eq!(out.as_slice(), b"hi\n");
     }
+    // 権限がなく失敗する。標準出力は空、終了コードは 1。
+    for (name, args) in [
+        (
+            "setuidgid",
+            ["setuidgid", "65534", path, "echo", "hi"].as_slice(),
+        ),
+        ("chroot", ["chroot", "/", path, "echo", "hi"].as_slice()),
+    ] {
+        let argv: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
+        let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        let host = Command::new(path)
+            .args(args)
+            .env_clear()
+            .output()
+            .unwrap_or_else(|e| panic!("host {name}: {e}"));
+        assert_eq!(code, host.status.code().unwrap_or(1) as u64);
+        assert_eq!(out.as_slice(), host.stdout.as_slice());
+        assert_eq!(code, 1);
+        assert!(out.is_empty());
+    }
 }
 
 #[test]

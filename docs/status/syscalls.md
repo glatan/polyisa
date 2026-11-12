@@ -18,6 +18,7 @@
 - chdir
 - chmod
 - chown
+- chroot
 - clock_gettime
 - clock_nanosleep
 - clone
@@ -94,6 +95,7 @@
 - sendfile
 - set_robust_list
 - set_tid_address
+- setgroups
 - setpgid
 - setpriority
 - setsid

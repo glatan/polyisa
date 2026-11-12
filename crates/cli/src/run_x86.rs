@@ -10750,6 +10750,8 @@ const X86_64_SYSCALLS: &[(&str, SysFn)] = &[
     ("sched_get_priority_min", sys_sched_get_priority_min),
     ("chdir", sys_chdir),
     ("fchdir", sys_fchdir),
+    ("setgroups", sys_setgroups),
+    ("chroot", sys_chroot),
     ("kill", sys_kill),
     ("mmap", sys_mmap),
     ("set_tid_address", sys_set_tid_address),
@@ -12194,6 +12196,22 @@ fn sys_fchdir(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Trap
         },
     };
     set64(env, Gpr(0), cx.neg(errno));
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_setgroups(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // setgroups(size, list)。権限がないので常に EPERM。setuidgid がここで止まる。
+    // Ref: SRC-LINUX (7.3).
+    let _ = get64(env, cx.r_a);
+    let _ = get64(env, cx.r_b);
+    set64(env, Gpr(0), cx.neg(EPERM));
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_chroot(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // chroot(path)。ルートは移さず EPERM。サンドボックスのホストと同じ。
+    let _ = get64(env, cx.r_a);
+    set64(env, Gpr(0), cx.neg(EPERM));
     Some(TrapOutcome::Handled)
 }
 
@@ -15488,6 +15506,22 @@ mod tests {
         assert_eq!(get64(&mut env, Gpr(0)), 0);
         set64(&mut env, Gpr(0), abi::UNSHARE);
         set64(&mut env, Gpr(7), 0x20000);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EPERM));
+    }
+
+    #[test]
+    fn setgroups_and_chroot_return_eperm() {
+        use polyisa_os_linux::x86_64 as abi;
+        let mut sys = CliLinux::x86_64();
+        let mut env = bare();
+        set64(&mut env, Gpr(0), abi::SETGROUPS);
+        set64(&mut env, Gpr(7), 0);
+        set64(&mut env, Gpr(6), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EPERM));
+        set64(&mut env, Gpr(0), abi::CHROOT);
+        set64(&mut env, Gpr(7), 0x100);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EPERM));
     }
