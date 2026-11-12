@@ -5056,6 +5056,57 @@ fn run_or_byte_rip_al() {
 }
 
 #[test]
+fn run_test_dword_rbx_scale_disp32() {
+    // 85 2C 9D 10 20 00 00 = test dword [rbx*4+0x2010], ebp。0xF0&0x0F は 0。lsattr 0x49f5e5。
+    // Ref: SPEC-X86-INTEL-SDM (v093).
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(3), 0);
+        polyisa_guest_x86::sem::write64(b, Gpr(5), 0x0F);
+        Ok(())
+    })
+    .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2010), &[0xF0, 0x00, 0x00, 0x00, 0xAB])
+        .unwrap();
+    env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 1);
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x1000),
+            &[0x85, 0x2C, 0x9D, 0x10, 0x20, 0x00, 0x00],
+        )
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { eip: 0x1007 });
+    let mut nb = [0u8; 5];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x2010),
+            &mut nb,
+            polyisa_mem::Access {
+                endian: polyisa_mem::Endian::Le,
+                align: polyisa_mem::Align::Unaligned,
+                kind: polyisa_mem::AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(nb, [0xF0, 0x00, 0x00, 0x00, 0xAB]);
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x8D5,
+        0x44
+    );
+    let ebp: u64 = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(5));
+    assert_eq!(ebp, 0x0F);
+}
+
+#[test]
 fn run_push_qword_rsp_disp32() {
     // FF B4 24 10 01 00 00 = push qword [rsp+0x110]。top 0x44e0d6。
     // Ref: SPEC-X86-INTEL-SDM (v093).

@@ -558,6 +558,7 @@ fn text_applets_match_host() {
         &["findfs", "LABEL=nope"],
         &["envdir", f, "true"],
         &["cpio", "-t", "-F", cpio_s],
+        &["lsattr", f],
     ];
     for args in cases {
         let argv: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
@@ -924,4 +925,70 @@ fn tr_and_tee_match_host() {
     assert_eq!(std::fs::read(&guest_f).unwrap(), b"ab\ncd\n");
     assert_eq!(std::fs::read(&host_f).unwrap(), b"ab\ncd\n");
     let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn split_matches_host() {
+    // 標準出力は空で、分割したファイルが一致する。作業ディレクトリを分けて書く。
+    let path = busybox();
+    let path = path.to_str().expect("utf-8 path");
+    let root = std::env::temp_dir().join(format!("polyisa-split-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let guest_dir = root.join("guest");
+    let host_dir = root.join("host");
+    std::fs::create_dir_all(&guest_dir).unwrap();
+    std::fs::create_dir_all(&host_dir).unwrap();
+    std::fs::write(guest_dir.join("f"), b"ab\ncd\nef\n").unwrap();
+    std::fs::write(host_dir.join("f"), b"ab\ncd\nef\n").unwrap();
+    let argv = ["split", "-l", "1", "f"]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect::<Vec<_>>();
+    let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured_dir(
+        path,
+        &argv,
+        guest_dir.to_str().expect("utf-8"),
+    )
+    .unwrap_or_else(|e| panic!("split: {e}"));
+    let host = Command::new(path)
+        .args(["split", "-l", "1", "f"])
+        .env_clear()
+        .current_dir(&host_dir)
+        .output()
+        .expect("host split");
+    assert_eq!(code, host.status.code().unwrap_or(1) as u64);
+    assert_eq!(out.as_slice(), host.stdout.as_slice());
+    for name in ["xaa", "xab", "xac"] {
+        assert_eq!(
+            std::fs::read(guest_dir.join(name)).unwrap(),
+            std::fs::read(host_dir.join(name)).unwrap(),
+            "{name}"
+        );
+    }
+    assert_eq!(std::fs::read(guest_dir.join("xaa")).unwrap(), b"ab\n");
+    assert_eq!(std::fs::read(guest_dir.join("xac")).unwrap(), b"ef\n");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn pipe_progress_matches_host() {
+    // 標準入力をそのまま標準出力へ写す。
+    let path = busybox();
+    let path = path.to_str().expect("utf-8 path");
+    let input = b"abcd";
+    let argv = ["pipe_progress".to_string()];
+    let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured_in(path, &argv, input)
+        .unwrap_or_else(|e| panic!("pipe_progress: {e}"));
+    let input_path = std::env::temp_dir().join(format!("polyisa-pipe-{}", std::process::id()));
+    std::fs::write(&input_path, input).unwrap();
+    let host = Command::new(path)
+        .args(["pipe_progress"])
+        .env_clear()
+        .stdin(std::fs::File::open(&input_path).unwrap())
+        .output()
+        .expect("host pipe_progress");
+    let _ = std::fs::remove_file(&input_path);
+    assert_eq!(code, host.status.code().unwrap_or(1) as u64);
+    assert_eq!(out.as_slice(), host.stdout.as_slice());
+    assert_eq!(out.as_slice(), b"abcd");
 }

@@ -1642,6 +1642,15 @@ pub fn build_model() -> polyisa_isadl::Model {
             "test r, [r/m+sib]",
             "alu",
         ),
+        // TEST r, [index*scale+disp32] (85 /r SIB mod=00 base=5)。lsattr 0x49f5e5。
+        (
+            "test_r_sibabs",
+            "D32",
+            "10000101 00...100 ........ ................................",
+            vec![wc("d32_base", WhereOp::Eq, 5)],
+            "test r, [sib+disp32]",
+            "alu",
+        ),
         // TEST r,m SIB+disp32 (85 /r mod=10 rm=100)。grep 0x43d250 対応.7B(+REX).
         (
             "test_r_sibd32",

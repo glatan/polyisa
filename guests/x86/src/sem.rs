@@ -456,6 +456,58 @@ pub fn test_r32_m32_sib<B: Backend>(
     Ok(())
 }
 
+/// TEST r32, [index*scale+disp32] (85 /r SIB mod=00 base=5)。lsattr 対応.
+pub fn test_r32_m32_sibabs<B: Backend>(
+    b: &mut B,
+    dst: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i32,
+) -> Flow<B> {
+    let addr = sib_addr_scaled_abs(b, shift, disp, idx);
+    let y: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let x = read(b, dst);
+    let v = b.and::<W32>(x, y);
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// TEST r64, [index*scale+disp32] (85 /r SIB mod=00 base=5, REX.W)。
+pub fn test_r64_m64_sibabs<B: Backend>(
+    b: &mut B,
+    dst: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i32,
+) -> Flow<B> {
+    let addr = sib_addr_scaled_abs(b, shift, disp, idx);
+    let y: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let x = read64(b, dst);
+    let v = b.and::<W64>(x, y);
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// TEST r32, [disp32] (85 /r SIB mod=00 base=5、index なし)。
+pub fn test_r32_abs<B: Backend>(b: &mut B, disp: i32, dst: Gpr) -> Flow<B> {
+    let addr = b.konst::<W64>(disp as i64 as u64);
+    let y: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let x = read(b, dst);
+    let v = b.and::<W32>(x, y);
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// TEST r64, [disp32] (85 /r SIB mod=00 base=5、index なし, REX.W)。
+pub fn test_r64_abs<B: Backend>(b: &mut B, disp: i32, dst: Gpr) -> Flow<B> {
+    let addr = b.konst::<W64>(disp as i64 as u64);
+    let y: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let x = read64(b, dst);
+    let v = b.and::<W64>(x, y);
+    update_logic_flags(b, v);
+    Ok(())
+}
+
 /// TEST r64,m64 [base+index*scale] (85 /r SIB mod=00, REX.W)。
 pub fn test_r64_m64_sib<B: Backend>(
     b: &mut B,

@@ -85,7 +85,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 試作の整数117件。
-        assert_eq!(INSNS.len(), 786);
+        assert_eq!(INSNS.len(), 787);
     }
 
     #[test]
@@ -154,6 +154,7 @@ mod tests {
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x3D_0000_0001, 40), Some(Insn::CmpEax));
         assert_eq!(decode(0x85C0, 16), Some(Insn::TestRm32));
+        assert_eq!(decode(0x852C9DB0A54E00, 56), Some(Insn::TestRSibabs));
         // TEST r/m32,r32 mod=00 [base] (85 /r)。find 0x5d17f7 対応.
         // 85 07 は TEST EAX,(RDI).
         // Ref: SPEC-X86-INTEL-SDM (v093).

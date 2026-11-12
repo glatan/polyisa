@@ -1533,8 +1533,9 @@ fn fetch_len(
                 },
             )
         }
-        // 0x85 /r (TEST r,m)。reg-direct 2B、SIB mod=00 3B、SIB mod=01 +disp8 4B、SIB mod=10 +disp32 7B、
-        // mod=01 base+disp8 3B、mod=10 base+disp32 6B、mod=00 base 2B / abs disp32 6B。SIB mod=00 base=5 は未対応.
+        // 0x85 /r (TEST r,m)。reg-direct 2B、SIB mod=00 3B、SIB mod=00 base=5 +disp32 7B、
+        // SIB mod=01 +disp8 4B、SIB mod=10 +disp32 7B、
+        // mod=01 base+disp8 3B、mod=10 base+disp32 6B、mod=00 base 2B / abs disp32 6B。
         0x85 => {
             let s = second?;
             let md = s >> 6;
@@ -1548,9 +1549,9 @@ fn fetch_len(
                     // SIB+disp32 (85 /r mod=10 rm=100)。grep 0x43d250 対応.
                     Some(7)
                 } else {
-                    // mod=00 SIB (3B)。base=5 は disp32。awk 0x4a1c82 対応.
+                    // mod=00 SIB。base=5 は disp32 で 7B。lsattr 0x49f5e5 対応.
                     let t = third?;
-                    if t & 7 != 5 { Some(3) } else { None }
+                    if t & 7 != 5 { Some(3) } else { Some(7) }
                 }
             } else if md == 1 {
                 Some(3)
@@ -4397,6 +4398,20 @@ fn dispatch<B: Backend>(
                 sem::test_r64_m64_sib(b, reg(), sib_base(), sib_idx(), sib_shift())
             } else {
                 sem::test_r32_m32_sib(b, reg(), sib_base(), sib_idx(), sib_shift())
+            }
+        }
+        Insn::TestRSibabs => {
+            // 85 /r SIB mod=00 base=5。[index*scale+disp32]。lsattr 0x49f5e5 対応.
+            if no_index() {
+                if rex_w {
+                    sem::test_r64_abs(b, disp32(), reg())
+                } else {
+                    sem::test_r32_abs(b, disp32(), reg())
+                }
+            } else if rex_w {
+                sem::test_r64_m64_sibabs(b, reg(), sib_idx(), sib_shift(), disp32())
+            } else {
+                sem::test_r32_m32_sibabs(b, reg(), sib_idx(), sib_shift(), disp32())
             }
         }
         Insn::TestRSibd => {
@@ -9672,10 +9687,31 @@ pub fn run_elf_x86_64_captured_in(
     argv: &[String],
     stdin: &[u8],
 ) -> Result<(u64, Vec<u8>), String> {
+    run_elf_x86_64_at(path, argv, stdin, None)
+}
+
+/// 作業ディレクトリを `dir` にして ELF64 を実行し、終了コードと fd 1 の出力を返す。
+pub fn run_elf_x86_64_captured_dir(
+    path: &str,
+    argv: &[String],
+    dir: &str,
+) -> Result<(u64, Vec<u8>), String> {
+    run_elf_x86_64_at(path, argv, &[], Some(dir))
+}
+
+fn run_elf_x86_64_at(
+    path: &str,
+    argv: &[String],
+    stdin: &[u8],
+    dir: Option<&str>,
+) -> Result<(u64, Vec<u8>), String> {
     let bytes = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
     let mut sys = CliLinux::x86_64();
     sys.capture_out = Some(Vec::new());
     sys.stdin_buf = stdin.to_vec();
+    if let Some(dir) = dir {
+        sys.cwd = dir.to_string();
+    }
     let code = run_image_x86_64(&bytes, path, argv, &mut sys)?;
     Ok((code, sys.capture_out.unwrap_or_default()))
 }
@@ -12182,9 +12218,18 @@ fn sys_time(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapO
 }
 
 fn sys_ioctl(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // ioctl(fd, request, ...)。試作では端末なしとして ENOTTY を返す.
-    // ls の画面幅取得などは失敗扱いで継続する.
-    // Ref: SRC-LINUX (7.3).
+    // ioctl(fd, request, ...)。端末要求は ENOTTY。
+    // FS_IOC_GETFLAGS はフラグなしを返す。lsattr がこれでダッシュを出す。
+    // Ref: SRC-LINUX (7.3). linux/fs.h の _IOR('f', 1, long)。
+    const FS_IOC_GETFLAGS: u32 = 0x8008_6601;
+    if cx.is64 && get64(env, cx.r_b) as u32 == FS_IOC_GETFLAGS {
+        let ptr = get64(env, cx.r_c);
+        if env.backend.mem.write(VirtAddr(ptr), &[0u8; 8]).is_err() {
+            return Some(TrapOutcome::Unimplemented);
+        }
+        set64(env, Gpr(0), 0);
+        return Some(TrapOutcome::Handled);
+    }
     set64(env, Gpr(0), cx.neg(ENOTTY));
     Some(TrapOutcome::Handled)
 }
@@ -14591,6 +14636,20 @@ mod tests {
         set64(&mut env, Gpr(2), 0x100);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(ENOTTY));
+        // FS_IOC_GETFLAGS は 8 バイトの 0 を書いて成功する。
+        env.backend.mem.write(VirtAddr(0x100), &[0xff; 8]).unwrap();
+        set64(&mut env, Gpr(0), abi::IOCTL);
+        set64(&mut env, Gpr(7), 1);
+        set64(&mut env, Gpr(6), 0xffff_ffff_8008_6601);
+        set64(&mut env, Gpr(2), 0x100);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        let mut flags = [0xffu8; 8];
+        env.backend
+            .mem
+            .read(VirtAddr(0x100), &mut flags, data_access())
+            .unwrap();
+        assert_eq!(flags, [0; 8]);
     }
 
     #[test]
