@@ -623,6 +623,7 @@ fn true_echo_uname_id_match() {
             ["setserial", "/dev/ttyS0", "IRQ", "3"].as_slice(),
         ),
         ("logger", ["logger", "-p", "bad", "hi"].as_slice()),
+        ("klogd", ["klogd", "-c", "9"].as_slice()),
     ] {
         let argv: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
         let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)
