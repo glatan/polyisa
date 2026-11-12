@@ -30,6 +30,7 @@
 - faccessat
 - fchmod
 - fchmodat
+- fchown
 - fcntl
 - fstat
 - ftruncate

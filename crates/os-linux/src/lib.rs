@@ -139,6 +139,7 @@ pub mod x86_64 {
     pub const FACCESSAT: u64 = 269;
     pub const CHMOD: u64 = 90;
     pub const FCHMOD: u64 = 91;
+    pub const FCHOWN: u64 = 93;
     pub const FCHMODAT: u64 = 268;
     pub const UMASK: u64 = 95;
     pub const FTRUNCATE: u64 = 77;
@@ -435,6 +436,7 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             x86_64::FACCESSAT => Some("faccessat"),
             x86_64::CHMOD => Some("chmod"),
             x86_64::FCHMOD => Some("fchmod"),
+            x86_64::FCHOWN => Some("fchown"),
             x86_64::FCHMODAT => Some("fchmodat"),
             x86_64::UMASK => Some("umask"),
             x86_64::FTRUNCATE => Some("ftruncate"),

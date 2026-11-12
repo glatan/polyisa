@@ -10572,6 +10572,7 @@ const X86_64_SYSCALLS: &[(&str, SysFn)] = &[
     ("utimensat", sys_utimensat),
     ("chmod", sys_chmod),
     ("fchmod", sys_fchmod),
+    ("fchown", sys_fchown),
     ("fchmodat", sys_fchmodat),
     ("umask", sys_umask),
     ("fcntl", sys_fcntl),
@@ -12828,6 +12829,13 @@ fn sys_fchmodat(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Tr
     sys_chmod(sys, env, cx)
 }
 
+fn sys_fchown(_sys: &mut CliLinux, env: &mut BareEnv, _cx: &SysCtx) -> Option<TrapOutcome> {
+    // fchown(fd, uid, gid)。dos2unix が書き換え後に所有者を戻す。
+    // 試作では所有者変更を無視して 0 を返す。
+    set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
+}
+
 fn sys_umask(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     // umask(mask)。旧マスクを返して更新する。mkdir -p の保存・復元で使う.
     // ホストの umask は触らない.
@@ -14919,6 +14927,13 @@ mod tests {
         set64(&mut env, Gpr(0), abi::CHMOD);
         set64(&mut env, Gpr(7), 0x100);
         set64(&mut env, Gpr(6), 0o755);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        // fchown は無視して 0 を返す。dos2unix の所有者の戻し.
+        set64(&mut env, Gpr(0), abi::FCHOWN);
+        set64(&mut env, Gpr(7), 1);
+        set64(&mut env, Gpr(6), u64::MAX);
+        set64(&mut env, Gpr(2), u64::MAX);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), 0);
     }
