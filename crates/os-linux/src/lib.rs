@@ -260,6 +260,8 @@ pub mod i386 {
     pub const GETEGID: u64 = 50;
     pub const RT_SIGACTION: u64 = 174;
     pub const RT_SIGPROCMASK: u64 = 175;
+    pub const RT_SIGTIMEDWAIT: u64 = 177;
+    pub const RT_SIGSUSPEND: u64 = 179;
     pub const CLOCK_GETTIME: u64 = 265;
     pub const GETRANDOM: u64 = 355;
     pub const OPENAT: u64 = 295;
@@ -398,6 +400,8 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             i386::GETEGID => Some("getegid"),
             i386::RT_SIGACTION => Some("rt_sigaction"),
             i386::RT_SIGPROCMASK => Some("rt_sigprocmask"),
+            i386::RT_SIGTIMEDWAIT => Some("rt_sigtimedwait"),
+            i386::RT_SIGSUSPEND => Some("rt_sigsuspend"),
             i386::CLOCK_GETTIME => Some("clock_gettime"),
             i386::GETRANDOM => Some("getrandom"),
             i386::OPENAT => Some("openat"),
@@ -717,7 +721,8 @@ mod tests {
         assert_eq!(syscall_name(GuestAbi::X86_64Linux, 1), Some("write"));
         assert_eq!(syscall_name(GuestAbi::X86_64Linux, 332), Some("statx"));
         assert_eq!(syscall_name(GuestAbi::X86_64Linux, 217), Some("getdents64"));
-        assert_eq!(syscall_name(GuestAbi::X86_64Linux, 64), None);
+        assert_eq!(x86_64::SEMGET, 64);
+        assert_eq!(syscall_name(GuestAbi::X86_64Linux, 64), Some("semget"));
         assert_eq!(x86_64::SENDFILE, 40);
         assert_eq!(syscall_name(GuestAbi::X86_64Linux, 40), Some("sendfile"));
         assert_eq!(x86_64::TIME, 201);
