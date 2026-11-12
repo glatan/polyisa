@@ -673,6 +673,14 @@ fn true_echo_uname_id_match() {
         ("time", ["time", path, "echo", "z"].as_slice()),
         // watchdog は DEV なしの使用法（終了 1・標準出力空）。
         ("watchdog", ["watchdog"].as_slice()),
+        // 端末・ソケット・常駐が要るものの使用法（終了 1・標準出力空）。
+        ("mdev", ["mdev"].as_slice()),
+        ("runsvdir", ["runsvdir"].as_slice()),
+        ("ftpd", ["ftpd"].as_slice()),
+        ("tftp", ["tftp"].as_slice()),
+        ("tftpd", ["tftpd"].as_slice()),
+        ("getty", ["getty"].as_slice()),
+        ("nmeter", ["nmeter"].as_slice()),
     ] {
         let argv: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
         let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)
