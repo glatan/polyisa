@@ -136,7 +136,7 @@
 | movzx | movzx_r32_m16_mem32、movzx_r32_m16_mem8、movzx_r32_m16_memnd、movzx_r32_m16_rip、movzx_r32_m16_sib、movzx_r32_m16_sibabs、movzx_r32_m16_sibd、movzx_r32_m16_sibd32、movzx_r32_m8_mem32、movzx_r32_m8_mem8、movzx_r32_m8_memnd、movzx_r32_m8_rip、movzx_r32_m8_sib、movzx_r32_m8_sibd、movzx_r32_m8_sibd32、movzx_r32_r16、movzx_r32_r8 | 真 | load |
 | mul | mul_rm32 | 真 | mult |
 | mulsd | mulsd | 真 | alu |
-| mulsd | mulsd_m64_sib、mulsd_xmm_m64_rip、mulsd_xmm_m64_sibd | 真 | load |
+| mulsd | mulsd_m64_sib、mulsd_xmm_m64_mem32、mulsd_xmm_m64_rip、mulsd_xmm_m64_sibd | 真 | load |
 | neg | neg_rm32 | 真 | alu |
 | nop | nop | 真 | alu |
 | nopl | nopl、nopl_mem32、nopl_mem8、nopl_sib、nopl_sibd、nopl_sibd32 | 真 | alu |

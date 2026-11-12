@@ -513,6 +513,9 @@ fn fetch_len(
                     // MULSD xmm,m64 SIB。awk 乗算 0x4a327c の mulsd xmm1, [rsp]。base=5 は disp32。
                     let t = fourth?;
                     if t & 7 != 5 { Some(4) } else { None }
+                } else if md == 2 && rm != 4 {
+                    // MULSD xmm,m64 [base+disp32]。awk log 0x4c1636 の mulsd xmm2, [rdx+disp32]。7B.
+                    Some(7)
                 } else {
                     None
                 }
@@ -7131,6 +7134,10 @@ fn dispatch<B: Backend>(
             } else {
                 sem::mulsd_xmm_m64_abs(b, xmm_reg_r(), imm32())
             }
+        }
+        Insn::MulsdXmmM64Mem32 => {
+            // F2 0F 59 /r mod=10。awk log 0x4c1636 の mulsd xmm2, [rdx+disp32]。
+            sem::mulsd_xmm_m64_mem32(b, xmm_reg_r(), rm0f(), disp32())
         }
         Insn::Divsd => sem::divsd_xmm(b, xmm_reg_r(), xmm_rm_b()),
         Insn::Minsd => sem::minsd_xmm(b, xmm_reg_r(), xmm_rm_b()),

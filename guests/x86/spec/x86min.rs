@@ -743,6 +743,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("subsd_xmm_m64_mem32", "M32", "00001111 01011100 10...... ................................", "subsd xmm, m64", "load"),
         // MULSD xmm,m64 RIP (F2 0F 59 05 + disp32)。F2 接頭辞は実行側で剥がす.
         ("mulsd_xmm_m64_rip", "F1", "00001111 01011001 00...101 ................................", "mulsd xmm, m64", "load"),
+        // MULSD xmm,m64 [base+disp32] (F2 0F 59 mod=10)。awk log 0x4c1636 対応。
+        ("mulsd_xmm_m64_mem32", "M32", "00001111 01011001 10...... ................................", "mulsd xmm, m64", "load"),
         // DIVSD xmm,m64 RIP (F2 0F 5E 05 + disp32)。F2 接頭辞は実行側で剥がす。dd 0x4928e8 対応.
         ("divsd_xmm_m64_rip", "F1", "00001111 01011110 00...101 ................................", "divsd xmm, m64", "load"),
         // DIVSD xmm,xmm (F2 0F 5E /r reg-direct)。F2 接頭辞は実行側で剥がす。dd 0x492911 対応.
