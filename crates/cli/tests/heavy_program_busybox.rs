@@ -176,6 +176,18 @@ fn true_echo_uname_id_match() {
     assert_eq!(code, host.status.code().unwrap_or(1) as u64);
     assert_eq!(out.as_slice(), host.stdout.as_slice());
     assert_eq!(out.as_slice(), b"hi\n");
+    let ionice = ["ionice", "-c", "3", path, "echo", "hi"];
+    let argv: Vec<String> = ionice.iter().map(|s| (*s).to_string()).collect();
+    let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)
+        .unwrap_or_else(|e| panic!("ionice: {e}"));
+    let host = Command::new(path)
+        .args(ionice)
+        .env_clear()
+        .output()
+        .expect("host ionice");
+    assert_eq!(code, host.status.code().unwrap_or(1) as u64);
+    assert_eq!(out.as_slice(), host.stdout.as_slice());
+    assert_eq!(out.as_slice(), b"hi\n");
 }
 
 #[test]

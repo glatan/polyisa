@@ -163,6 +163,8 @@ pub mod x86_64 {
     pub const SETPRIORITY: u64 = 141;
     pub const PERSONALITY: u64 = 135;
     pub const SCHED_SETAFFINITY: u64 = 203;
+    pub const IOPRIO_SET: u64 = 251;
+    pub const IOPRIO_GET: u64 = 252;
     pub const SCHED_SETPARAM: u64 = 142;
     pub const SCHED_GETPARAM: u64 = 143;
     pub const SCHED_SETSCHEDULER: u64 = 144;
@@ -484,6 +486,8 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             x86_64::SETPRIORITY => Some("setpriority"),
             x86_64::PERSONALITY => Some("personality"),
             x86_64::SCHED_SETAFFINITY => Some("sched_setaffinity"),
+            x86_64::IOPRIO_SET => Some("ioprio_set"),
+            x86_64::IOPRIO_GET => Some("ioprio_get"),
             x86_64::SCHED_SETPARAM => Some("sched_setparam"),
             x86_64::SCHED_GETPARAM => Some("sched_getparam"),
             x86_64::SCHED_SETSCHEDULER => Some("sched_setscheduler"),

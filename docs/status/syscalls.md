@@ -50,6 +50,8 @@
 - gettid
 - getuid
 - ioctl
+- ioprio_get
+- ioprio_set
 - kill
 - lchown
 - link

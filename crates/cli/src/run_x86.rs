@@ -9808,6 +9808,9 @@ pub struct CliLinux {
     umask: u32,
     /// personality。初期値は PER_LINUX (0)。実行形式は変えない。
     personality: u64,
+    /// ioprio_set で覚えた値。未設定のときは best-effort 4 を返す。
+    ioprio: u32,
+    ioprio_known: bool,
     is64: bool,
     /// プログラムブレーク（ヒープ末尾）。0 は未初期化。
     /// `run_image_x86_64` がロード後に像末尾へ進める。
@@ -10332,6 +10335,8 @@ impl CliLinux {
             std_closed: self.std_closed,
             umask: self.umask,
             personality: self.personality,
+            ioprio: self.ioprio,
+            ioprio_known: self.ioprio_known,
             is64: self.is64,
             heap_end: self.heap_end,
             fs_base: self.fs_base,
@@ -10721,6 +10726,8 @@ const X86_64_SYSCALLS: &[(&str, SysFn)] = &[
     ("setpriority", sys_setpriority),
     ("personality", sys_personality),
     ("sched_setaffinity", sys_sched_setaffinity),
+    ("ioprio_set", sys_ioprio_set),
+    ("ioprio_get", sys_ioprio_get),
     ("sched_setparam", sys_sched_setparam),
     ("sched_getparam", sys_sched_getparam),
     ("sched_setscheduler", sys_sched_setscheduler),
@@ -11702,6 +11709,72 @@ fn sys_personality(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option
         sys.personality = persona;
     }
     set64(env, Gpr(0), old);
+    Some(TrapOutcome::Handled)
+}
+
+/// クラス 0 は data 0、RT/BE は 0..=7、IDLE は data を問わない。
+fn ioprio_ok(prio: u64) -> bool {
+    if prio > 0xffff {
+        return false;
+    }
+    let class = prio >> 13;
+    let data = prio & 0x1fff;
+    match class {
+        0 => data == 0,
+        1 | 2 => data <= 7,
+        3 => true,
+        _ => false,
+    }
+}
+
+fn ioprio_target_ok(sys: &mut CliLinux, which: u64, who: i64) -> Result<(), u32> {
+    if !(1..=3).contains(&which) {
+        return Err(EINVAL);
+    }
+    let me = guest_pid(sys) as i64;
+    if which == 1 && who != 0 && who != me {
+        return Err(ESRCH);
+    }
+    if which != 1 && who != 0 {
+        return Err(ESRCH);
+    }
+    Ok(())
+}
+
+fn sys_ioprio_set(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // ioprio_set(which, who, ioprio)。入出力の優先度は変えず、範囲だけ確かめる。
+    // Ref: SRC-LINUX (7.3).
+    let which = get64(env, cx.r_a);
+    let who = get64(env, cx.r_b) as i64;
+    let prio = get64(env, cx.r_c);
+    if let Err(err) = ioprio_target_ok(sys, which, who) {
+        set64(env, Gpr(0), cx.neg(err));
+        return Some(TrapOutcome::Handled);
+    }
+    if !ioprio_ok(prio) {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    sys.ioprio = prio as u32;
+    sys.ioprio_known = true;
+    set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_ioprio_get(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // ioprio_get(which, who)。未設定なら best-effort の 4。
+    let which = get64(env, cx.r_a);
+    let who = get64(env, cx.r_b) as i64;
+    if let Err(err) = ioprio_target_ok(sys, which, who) {
+        set64(env, Gpr(0), cx.neg(err));
+        return Some(TrapOutcome::Handled);
+    }
+    let prio = if sys.ioprio_known {
+        u64::from(sys.ioprio)
+    } else {
+        (2 << 13) | 4
+    };
+    set64(env, Gpr(0), prio);
     Some(TrapOutcome::Handled)
 }
 
@@ -15250,6 +15323,36 @@ mod tests {
             .write(VirtAddr(0x200), &0u64.to_le_bytes())
             .unwrap();
         set64(&mut env, Gpr(0), abi::SCHED_SETAFFINITY);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EINVAL));
+    }
+
+    #[test]
+    fn ioprio_set_and_get_roundtrip() {
+        use polyisa_os_linux::x86_64 as abi;
+        let mut sys = CliLinux::x86_64();
+        let mut env = bare();
+        // 未設定なら best-effort の 4。
+        set64(&mut env, Gpr(0), abi::IOPRIO_GET);
+        set64(&mut env, Gpr(7), 1);
+        set64(&mut env, Gpr(6), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), (2 << 13) | 4);
+        // IDLE class 3。
+        set64(&mut env, Gpr(0), abi::IOPRIO_SET);
+        set64(&mut env, Gpr(7), 1);
+        set64(&mut env, Gpr(6), 0);
+        set64(&mut env, Gpr(2), 3 << 13);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        set64(&mut env, Gpr(0), abi::IOPRIO_GET);
+        set64(&mut env, Gpr(7), 1);
+        set64(&mut env, Gpr(6), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 3 << 13);
+        // 未知のクラスは EINVAL。
+        set64(&mut env, Gpr(0), abi::IOPRIO_SET);
+        set64(&mut env, Gpr(2), 7 << 13);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EINVAL));
     }
