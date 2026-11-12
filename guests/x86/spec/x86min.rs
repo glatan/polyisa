@@ -748,6 +748,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         // MINSD xmm,xmm (F2 0F 5D /r reg-direct)。F2 は剥がし済み。ping 0x42e6d9 対応。
         ("minsd", "F1", "00001111 01011101 11......", "minsd xmm, xmm", "alu"),
         ("mulsd_xmm_m64_sibd", "F1", "00001111 01011001 01...100 ........ ........", "mulsd xmm, m64", "load"),
+        // MULSD xmm,m64 SIB mod=00。awk 乗算 0x4a327c の mulsd xmm1, [rsp]。base=5 は長さが違う.
+        ("mulsd_m64_sib", "F1", "00001111 01011001 00...100 ........", "mulsd xmm, m64", "load"),
         // MULSD xmm,xmm (F2 0F 59 /r reg-direct)。F2 は剥がし済み.
         ("mulsd", "F1", "00001111 01011001 11......", "mulsd xmm, xmm", "alu"),
         // COMISD xmm,xmm (66 0F 2F /r reg-direct)。

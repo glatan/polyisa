@@ -506,6 +506,10 @@ fn fetch_len(
                     Some(5)
                 } else if md == 0 && rm == 5 {
                     Some(7)
+                } else if md == 0 && rm == 4 {
+                    // MULSD xmm,m64 SIB。awk 乗算 0x4a327c の mulsd xmm1, [rsp]。base=5 は disp32。
+                    let t = fourth?;
+                    if t & 7 != 5 { Some(4) } else { None }
                 } else {
                     None
                 }
@@ -1865,6 +1869,7 @@ pub fn run_mode(
                         | 0xBD
                         | 0xB1
                         | 0x58
+                        | 0x59
                         | 0x2A
                         | 0x2C
                         | 0xEB
@@ -7104,6 +7109,14 @@ fn dispatch<B: Backend>(
         }
         // MULSD xmm,xmm (F2 0F 59 /r reg-direct)。F2 は剥がし済み.
         Insn::Mulsd => sem::mulsd_xmm(b, xmm_reg_r(), xmm_rm_b()),
+        Insn::MulsdM64Sib => {
+            // F2 0F 59 SIB mod=00。awk 乗算 0x4a327c の mulsd xmm1, QWORD PTR [rsp]。
+            if sib0f_no_index() {
+                sem::mulsd_xmm_m64_memnd(b, xmm_reg_r(), sib0f_base())
+            } else {
+                sem::mulsd_xmm_m64_sib(b, xmm_reg_r(), sib0f_base(), sib0f_idx(), sib0f_shift())
+            }
+        }
         Insn::MulsdXmmM64Rip => {
             // F2 0F 59 05 + disp32 (mod=00 RIP)。F2 は剥がし済み.
             if is64 {
