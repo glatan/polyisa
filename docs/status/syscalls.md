@@ -106,6 +106,8 @@
 - rseq
 - rt_sigaction
 - rt_sigprocmask
+- rt_sigsuspend
+- rt_sigtimedwait
 - sched_get_priority_max
 - sched_get_priority_min
 - sched_getaffinity
@@ -195,6 +197,8 @@
 - rmdir
 - rt_sigaction
 - rt_sigprocmask
+- rt_sigsuspend
+- rt_sigtimedwait
 - symlink
 - tgkill
 - umask

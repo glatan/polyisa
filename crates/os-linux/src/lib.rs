@@ -95,6 +95,8 @@ pub mod x86_64 {
     pub const GETEGID: u64 = 108;
     pub const RT_SIGACTION: u64 = 13;
     pub const RT_SIGPROCMASK: u64 = 14;
+    pub const RT_SIGTIMEDWAIT: u64 = 128;
+    pub const RT_SIGSUSPEND: u64 = 130;
     pub const CLOCK_GETTIME: u64 = 228;
     pub const GETRANDOM: u64 = 318;
     pub const OPENAT: u64 = 257;
@@ -468,6 +470,8 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             x86_64::GETEGID => Some("getegid"),
             x86_64::RT_SIGACTION => Some("rt_sigaction"),
             x86_64::RT_SIGPROCMASK => Some("rt_sigprocmask"),
+            x86_64::RT_SIGTIMEDWAIT => Some("rt_sigtimedwait"),
+            x86_64::RT_SIGSUSPEND => Some("rt_sigsuspend"),
             x86_64::CLOCK_GETTIME => Some("clock_gettime"),
             x86_64::GETRANDOM => Some("getrandom"),
             x86_64::OPENAT => Some("openat"),

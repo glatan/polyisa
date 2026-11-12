@@ -10773,6 +10773,8 @@ const ESRCH: u32 = 3;
 const ENOEXEC: u32 = 8;
 const EBADF: u32 = 9;
 const ECHILD: u32 = 10;
+const EAGAIN: u32 = 11;
+const EINTR: u32 = 4;
 const EFAULT: u32 = 14;
 const EACCES: u32 = 13;
 const ENOMEM: u32 = 12;
@@ -11020,6 +11022,8 @@ const X86_64_SYSCALLS: &[(&str, SysFn)] = &[
     ("munmap", sys_munmap),
     ("rt_sigaction", sys_rt_sigaction),
     ("rt_sigprocmask", sys_rt_sigprocmask),
+    ("rt_sigtimedwait", sys_rt_sigtimedwait),
+    ("rt_sigsuspend", sys_rt_sigsuspend),
     ("tgkill", sys_tgkill),
     ("set_robust_list", sys_set_robust_list),
     ("rseq", sys_rseq),
@@ -11083,6 +11087,8 @@ const I386_SYSCALLS: &[(&str, SysFn)] = &[
     ("munmap", sys_munmap),
     ("rt_sigaction", sys_rt_sigaction),
     ("rt_sigprocmask", sys_rt_sigprocmask),
+    ("rt_sigtimedwait", sys_rt_sigtimedwait),
+    ("rt_sigsuspend", sys_rt_sigsuspend),
     ("tgkill", sys_tgkill),
     ("readlinkat", sys_readlinkat),
     ("readlink", sys_readlink),
@@ -13382,6 +13388,18 @@ fn sys_rt_sigaction(_sys: &mut CliLinux, env: &mut BareEnv, _cx: &SysCtx) -> Opt
 fn sys_rt_sigprocmask(_sys: &mut CliLinux, env: &mut BareEnv, _cx: &SysCtx) -> Option<TrapOutcome> {
     // シグナルマスク変更は無視して 0 を返す.
     set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_rt_sigtimedwait(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 待ち受けはせず、期限切れとして EAGAIN を返す。init が呼ぶ。本格は段階 B。
+    set64(env, Gpr(0), cx.neg(EAGAIN));
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_rt_sigsuspend(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // シグナル待ちはせず EINTR を返す。本格は段階 B。
+    set64(env, Gpr(0), cx.neg(EINTR));
     Some(TrapOutcome::Handled)
 }
 
@@ -16544,6 +16562,12 @@ mod tests {
         set64(&mut env, Gpr(0), abi::RT_SIGPROCMASK);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), 0);
+        set64(&mut env, Gpr(0), abi::RT_SIGTIMEDWAIT);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EAGAIN));
+        set64(&mut env, Gpr(0), abi::RT_SIGSUSPEND);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EINTR));
     }
 
     #[test]

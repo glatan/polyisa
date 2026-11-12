@@ -43,8 +43,8 @@
 | ゲスト ABI | 処理するシステムコール | 詳細 |
 |---|---|---|
 | rv64 | 3 | [syscalls.md](syscalls.md) |
-| x86_64 | 146 | [syscalls.md](syscalls.md) |
-| i386 | 43 | [syscalls.md](syscalls.md) |
+| x86_64 | 148 | [syscalls.md](syscalls.md) |
+| i386 | 45 | [syscalls.md](syscalls.md) |
 | mips_o32 | 2 | [syscalls.md](syscalls.md) |
 
 ## 設計との差
