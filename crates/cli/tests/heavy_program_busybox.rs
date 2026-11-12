@@ -202,6 +202,14 @@ fn true_echo_uname_id_match() {
         ("setpriv", ["setpriv", path, "echo", "hi"].as_slice()),
         ("unshare", ["unshare", path, "echo", "hi"].as_slice()),
         ("nsenter", ["nsenter", path, "echo", "hi"].as_slice()),
+        (
+            "setarch linux64",
+            ["setarch", "linux64", path, "echo", "hi"].as_slice(),
+        ),
+        (
+            "setarch linux32",
+            ["setarch", "linux32", path, "echo", "hi"].as_slice(),
+        ),
     ] {
         let argv: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
         let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)
