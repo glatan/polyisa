@@ -102,7 +102,15 @@ fn fetch_len(
         0x68 => Some(5),
         0xEB | 0x70 | 0x71 | 0x72 | 0x73 | 0x74 | 0x75 | 0x76 | 0x77 | 0x78 | 0x79 | 0x7A
         | 0x7B | 0x7C | 0x7D | 0x7E | 0x7F | 0xE2 | 0xCD | 0x3C | 0x0C => Some(2),
-        0x05 | 0x2D | 0xE8 | 0xE9 | 0x35 | 0xA9 => Some(5),
+        0x05 | 0x2D | 0xE8 | 0xE9 | 0x35 => Some(5),
+        // 0xA9 (TEST EAX,imm32)。66 接頭辞では TEST AX,imm16 (3B)。blkid 0x47d8f3。
+        0xA9 => {
+            if has66 {
+                Some(3)
+            } else {
+                Some(5)
+            }
+        }
         // 0x0D (OR EAX,imm32)。66 接頭辞では OR AX,imm16 (3B)。seq 0x4d74c9。
         0x0D => {
             if has66 {
@@ -2264,6 +2272,7 @@ pub fn run_mode(
                     | Insn::MovRm16ImmSib
                     | Insn::MovRm16ImmRip
                     | Insn::AndAxImm16
+                    | Insn::TestAxImm16
                     | Insn::ShrRm32Imm8
                     | Insn::CmpAxImm16
                     | Insn::OrAxImm16
@@ -5145,6 +5154,10 @@ fn dispatch<B: Backend>(
             } else {
                 sem::test_eax_imm(b, imm32())
             }
+        }
+        Insn::TestAxImm16 => {
+            // 66 A9 + imm16 (24b、66 接頭辞は剥がし済み)。imm は最下位16 LE。
+            sem::test_ax_imm16(b, ((word & 0xffff) as u16).swap_bytes())
         }
         Insn::Je => sem::je(b, eip, disp8()),
         Insn::Jne => sem::jne(b, eip, disp8()),

@@ -994,6 +994,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("sub_rm_imm8_rip", "F1", "10000011 00101101 ................................ ........", "sub r/m, {imm}", "alu"),
         ("test_al_imm", "F1", "10101000 ........", "test al, {imm}", "alu"),
         ("test_eax_imm", "F1", "10101001 ................................", "test eax, {imm}", "alu"),
+        // TEST AX,imm16 (66 A9 + imm16)。blkid 0x47d8f3 の 66 A9 FF FD。
+        ("test_ax_imm16", "F1", "10101001 ................", "test ax, {imm}", "alu"),
         // AND AX,imm16 (66 25 + imm16)。66 接頭辞は実行側で剥がす.
         ("and_ax_imm16", "F1", "00100101 ................", "and ax, {imm}", "alu"),
         // CMP AX,imm16 (66 3D + imm16)。66 接頭辞は実行側で剥がす.

@@ -2504,6 +2504,35 @@ fn ts_matches_fixed() {
 }
 
 #[test]
+fn blkid_vfat_matches_host() {
+    // mkfs.vfat した像を blkid し、TYPE=vfat が一致する。
+    let path = busybox();
+    let path = path.to_str().expect("utf-8 path");
+    let root = std::env::temp_dir().join(format!("polyisa-blkid-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let img = root.join("disk.img");
+    std::fs::write(&img, vec![0u8; 64 * 1024]).unwrap();
+    let mkfs = ["mkfs.vfat".to_string(), img.to_str().unwrap().to_string()];
+    let (code, _) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &mkfs)
+        .unwrap_or_else(|e| panic!("mkfs.vfat: {e}"));
+    assert_eq!(code, 0);
+    let argv = ["blkid".to_string(), img.to_str().unwrap().to_string()];
+    let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)
+        .unwrap_or_else(|e| panic!("blkid: {e}"));
+    let host = Command::new(path)
+        .args(&argv)
+        .env_clear()
+        .output()
+        .expect("host blkid");
+    assert_eq!(code, host.status.code().unwrap_or(1) as u64);
+    assert_eq!(out.as_slice(), host.stdout.as_slice());
+    assert_eq!(code, 0);
+    assert!(out.windows(11).any(|w| w == b"TYPE=\"vfat\""));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn reformime_extracts_fixed() {
     // -x PREFIX で filename 付き部を PREFIX+name に書く。ホストの副ファイル名は揺らぐため比べない。
     let path = busybox();

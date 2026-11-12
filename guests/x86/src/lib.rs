@@ -520,6 +520,8 @@ mod tests {
         assert_eq!(decode(0xC7076C6C, 32), Some(Insn::MovRm16ImmMemnd));
         assert_eq!(decode(0xF774240C, 24), None);
         assert_eq!(decode(0xA900000001, 40), Some(Insn::TestEaxImm));
+        // TEST $0xfdff, %ax。blkid 0x47d8f3 の 66 A9 FF FD。
+        assert_eq!(decode(0xA9FFFD, 24), Some(Insn::TestAxImm16));
         assert_eq!(decode(0x0B1500000000, 48), Some(Insn::OrRRip));
         assert_eq!(decode(0x090500000000, 48), Some(Insn::OrMRip));
         // OR r32,[base+index*scale] (0B /r mod=00 SIB)。0B 04 24 は orl (%rsp),%eax.

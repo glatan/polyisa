@@ -774,6 +774,16 @@ pub fn test_eax_imm<B: Backend>(b: &mut B, imm: u32) -> Flow<B> {
     Ok(())
 }
 
+/// TEST AX,imm16 (66 A9)。下位16の AND で旗を更新し、レジスタは変えない。
+pub fn test_ax_imm16<B: Backend>(b: &mut B, imm: u16) -> Flow<B> {
+    let x32 = read(b, Gpr(0));
+    let x: B::V<W16> = b.trunc::<W32, W16>(x32);
+    let y = b.konst::<W16>(imm);
+    let v = b.and::<W16>(x, y);
+    update_logic_flags(b, v);
+    Ok(())
+}
+
 /// OR m32,imm8 RIP (83 0D)。32ビット OR し、5 旗を更新する.
 pub fn or_rm32_imm8_rip<B: Backend>(b: &mut B, next_rip: u64, disp: i32, imm: i8) -> Flow<B> {
     let base = b.konst::<W64>(next_rip);
