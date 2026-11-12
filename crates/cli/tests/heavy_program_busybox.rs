@@ -371,6 +371,14 @@ fn true_echo_uname_id_match() {
         ("lspci", ["lspci"].as_slice()),
         ("pmap", ["pmap", "1"].as_slice()),
         ("pwdx", ["pwdx", "1"].as_slice()),
+        ("add-shell", ["add-shell"].as_slice()),
+        ("depmod", ["depmod"].as_slice()),
+        ("dumpleases", ["dumpleases"].as_slice()),
+        ("fgconsole", ["fgconsole"].as_slice()),
+        ("hdparm", ["hdparm"].as_slice()),
+        ("kbd_mode", ["kbd_mode"].as_slice()),
+        ("last", ["last"].as_slice()),
+        ("loadfont", ["loadfont"].as_slice()),
     ] {
         let argv: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
         let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)
