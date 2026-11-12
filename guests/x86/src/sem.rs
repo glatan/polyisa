@@ -16271,6 +16271,37 @@ pub fn sub_m8_r8<B: Backend>(
     Ok(())
 }
 
+/// SUB [base], r8 (28 /r SIB mod=00, no_index)。
+pub fn sub_m8_r8_memnd<B: Backend>(b: &mut B, base: Gpr, src: Gpr, high: bool) -> Flow<B> {
+    use polyisa_sem::W8;
+    let addr = read64(b, base);
+    let x: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
+    let y = read8(b, src, high);
+    let v = b.sub::<W8>(x, y);
+    b.store::<W8>(addr, v, DATA_WRITE)?;
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
+/// SUB [base+index*scale], r8 (28 /r SIB mod=00)。
+pub fn sub_m8_r8_sib<B: Backend>(
+    b: &mut B,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    src: Gpr,
+    high: bool,
+) -> Flow<B> {
+    use polyisa_sem::W8;
+    let addr = sib_addr_scaled(b, shift, 0, base, idx);
+    let x: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
+    let y = read8(b, src, high);
+    let v = b.sub::<W8>(x, y);
+    b.store::<W8>(addr, v, DATA_WRITE)?;
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
 /// OR [base+disp8], r8 (08 /r SIB mod=01, no_index)。sed 0x4a87dd 対応.
 pub fn or_m8_r8_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8, src: Gpr, high: bool) -> Flow<B> {
     use polyisa_sem::W8;

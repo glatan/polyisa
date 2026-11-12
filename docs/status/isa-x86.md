@@ -199,7 +199,7 @@
 | std | std | 真 | alu |
 | stosb | stosb | 真 | store |
 | stosd | stosd | 真 | store |
-| sub | sub_eax、sub_m32_r32_mem32、sub_m32_r32_mem8、sub_m8_r8、sub_m_r_sibd、sub_r_mem32、sub_r_mem8、sub_r_memnd、sub_r_rip、sub_r_sib、sub_r_sibabs、sub_r_sibd、sub_r_sibd32、sub_rm32、sub_rm32_imm、sub_rm64_imm、sub_rm_imm8、sub_rm_imm8_mem32、sub_rm_imm8_mem8、sub_rm_imm8_memnd、sub_rm_imm8_rip、sub_rm_imm8_sibd | 真 | alu |
+| sub | sub_eax、sub_m32_r32_mem32、sub_m32_r32_mem8、sub_m8_r8、sub_m8_r8_sib、sub_m_r_sibd、sub_r_mem32、sub_r_mem8、sub_r_memnd、sub_r_rip、sub_r_sib、sub_r_sibabs、sub_r_sibd、sub_r_sibd32、sub_rm32、sub_rm32_imm、sub_rm64_imm、sub_rm_imm8、sub_rm_imm8_mem32、sub_rm_imm8_mem8、sub_rm_imm8_memnd、sub_rm_imm8_rip、sub_rm_imm8_sibd | 真 | alu |
 | subsd | subsd | 真 | alu |
 | subsd | subsd_xmm_m64_mem32、subsd_xmm_m64_rip、subsd_xmm_m64_sibd | 真 | load |
 | syscall | syscall | 真 | system |

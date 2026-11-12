@@ -870,11 +870,24 @@ fn fetch_len(
                 None
             }
         }
-        // 0x20 /r (AND r/m8,r8)、0x28 /r (SUB r/m8,r8) は reg-direct 2B のみ。
-        // 0x30 /r (XOR r/m8,r8) は reg-direct 2B と、mod=00 SIB (3B、base=5 以外)。sha3sum 0x4b4edd。
-        0x20 | 0x28 => {
+        // 0x20 /r (AND r/m8,r8) は reg-direct 2B のみ。
+        // 0x28 /r (SUB r/m8,r8) は reg-direct 2B と、mod=00 SIB (3B、base=5 以外)。dc 0x40abb4。
+        0x20 => {
             let s = second?;
             if s >> 6 == 3 { Some(2) } else { None }
+        }
+        0x28 => {
+            let s = second?;
+            let md = s >> 6;
+            let rm = s & 7;
+            if md == 3 {
+                Some(2)
+            } else if rm == 4 && md == 0 {
+                let t = third?;
+                if t & 7 != 5 { Some(3) } else { None }
+            } else {
+                None
+            }
         }
         0x30 => {
             let s = second?;
@@ -1789,6 +1802,7 @@ pub fn run_mode(
                 | 0x13
                 | 0x1B
                 | 0x80
+                | 0x28
                 | 0x30
                 | 0xF6
                 | 0xF7
@@ -3424,6 +3438,22 @@ fn dispatch<B: Backend>(
                 (Gpr(rm_f - 4), true)
             };
             sem::sub_m8_r8(b, dst, dst_high, src, src_high)
+        }
+        Insn::SubM8R8Sib => {
+            // 28 /r SIB mod=00。dc 0x40abb4 の sub [rdi+rax], cl。
+            let reg_f = (modrm() >> 3) & 7;
+            let (src, high) = if rex != 0 {
+                (Gpr(reg_f | ((rex >> 2) & 1) << 3), false)
+            } else if reg_f < 4 {
+                (Gpr(reg_f), false)
+            } else {
+                (Gpr(reg_f - 4), true)
+            };
+            if no_index() {
+                sem::sub_m8_r8_memnd(b, sib_base(), src, high)
+            } else {
+                sem::sub_m8_r8_sib(b, sib_base(), sib_idx(), sib_shift(), src, high)
+            }
         }
         Insn::AndR8M8Mem32 => {
             // 22 /r mod=10 [base+disp32]。dst は reg フィールド.
