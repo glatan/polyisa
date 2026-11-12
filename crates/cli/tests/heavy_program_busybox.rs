@@ -2500,3 +2500,40 @@ fn ts_matches_fixed() {
     assert_eq!(code, 0);
     assert_eq!(out.as_slice(), b"01:00:00 hello\n");
 }
+
+#[test]
+fn nuke_matches_host() {
+    // 標準出力は空で、指定ディレクトリが消える。
+    let path = busybox();
+    let path = path.to_str().expect("utf-8 path");
+    let root = std::env::temp_dir().join(format!("polyisa-nuke-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let guest_dir = root.join("guest");
+    let host_dir = root.join("host");
+    std::fs::create_dir_all(guest_dir.join("a")).unwrap();
+    std::fs::create_dir_all(host_dir.join("a")).unwrap();
+    std::fs::write(guest_dir.join("a/f"), b"x").unwrap();
+    std::fs::write(host_dir.join("a/f"), b"x").unwrap();
+    let guest_args = [
+        "nuke".to_string(),
+        guest_dir.join("a").to_str().unwrap().to_string(),
+    ];
+    let host_args = [
+        "nuke".to_string(),
+        host_dir.join("a").to_str().unwrap().to_string(),
+    ];
+    let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &guest_args)
+        .unwrap_or_else(|e| panic!("nuke: {e}"));
+    let host = Command::new(path)
+        .args(&host_args)
+        .env_clear()
+        .output()
+        .expect("host nuke");
+    assert_eq!(code, host.status.code().unwrap_or(1) as u64);
+    assert_eq!(out.as_slice(), host.stdout.as_slice());
+    assert_eq!(code, 0);
+    assert!(out.is_empty());
+    assert!(!guest_dir.join("a").exists());
+    assert!(!host_dir.join("a").exists());
+    let _ = std::fs::remove_dir_all(&root);
+}
