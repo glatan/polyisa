@@ -671,6 +671,8 @@ fn true_echo_uname_id_match() {
         ("man", ["man", "-w", "true"].as_slice()),
         // time は dup2(2,1) 後に集計を stderr へ出す。標準出力は子の出力のみ。
         ("time", ["time", path, "echo", "z"].as_slice()),
+        // watchdog は DEV なしの使用法（終了 1・標準出力空）。
+        ("watchdog", ["watchdog"].as_slice()),
     ] {
         let argv: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
         let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)
