@@ -874,3 +874,54 @@ fn patch_matches_host() {
     assert_eq!(std::fs::read(&host_f).unwrap(), b"ab\nxx\n");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn tr_and_tee_match_host() {
+    // 標準入力のバイトを変換し、tee は同じバイトをファイルへも書く。
+    let path = busybox();
+    let path = path.to_str().expect("utf-8 path");
+    let input = b"ab\ncd\n";
+    let root = std::env::temp_dir().join(format!("polyisa-tee-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let input_path = root.join("in");
+    std::fs::write(&input_path, input).unwrap();
+    let argv = ["tr", "a-z", "A-Z"]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect::<Vec<_>>();
+    let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured_in(path, &argv, input)
+        .unwrap_or_else(|e| panic!("tr: {e}"));
+    let host = Command::new(path)
+        .args(["tr", "a-z", "A-Z"])
+        .env_clear()
+        .stdin(std::fs::File::open(&input_path).unwrap())
+        .output()
+        .expect("host tr");
+    assert_eq!(code, host.status.code().unwrap_or(1) as u64);
+    assert_eq!(out.as_slice(), host.stdout.as_slice());
+    assert_eq!(out.as_slice(), b"AB\nCD\n");
+    let guest_dir = root.join("guest");
+    let host_dir = root.join("host");
+    std::fs::create_dir_all(&guest_dir).unwrap();
+    std::fs::create_dir_all(&host_dir).unwrap();
+    let guest_f = guest_dir.join("out");
+    let host_f = host_dir.join("out");
+    let guest_args = ["tee", guest_f.to_str().expect("utf-8")]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect::<Vec<_>>();
+    let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured_in(path, &guest_args, input)
+        .unwrap_or_else(|e| panic!("tee: {e}"));
+    let host = Command::new(path)
+        .args(["tee", host_f.to_str().expect("utf-8")])
+        .env_clear()
+        .stdin(std::fs::File::open(&input_path).unwrap())
+        .output()
+        .expect("host tee");
+    assert_eq!(code, host.status.code().unwrap_or(1) as u64);
+    assert_eq!(out.as_slice(), host.stdout.as_slice());
+    assert_eq!(std::fs::read(&guest_f).unwrap(), b"ab\ncd\n");
+    assert_eq!(std::fs::read(&host_f).unwrap(), b"ab\ncd\n");
+    let _ = std::fs::remove_dir_all(&root);
+}

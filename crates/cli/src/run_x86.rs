@@ -9663,9 +9663,19 @@ pub fn run_elf_x86_64(path: &str, argv: &[String]) -> Result<u64, String> {
 
 /// ELF64 を実行し、終了コードと fd 1 の出力を返す。ホストの stdout には書かない。
 pub fn run_elf_x86_64_captured(path: &str, argv: &[String]) -> Result<(u64, Vec<u8>), String> {
+    run_elf_x86_64_captured_in(path, argv, &[])
+}
+
+/// 標準入力へ `stdin` を渡して ELF64 を実行し、終了コードと fd 1 の出力を返す。
+pub fn run_elf_x86_64_captured_in(
+    path: &str,
+    argv: &[String],
+    stdin: &[u8],
+) -> Result<(u64, Vec<u8>), String> {
     let bytes = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
     let mut sys = CliLinux::x86_64();
     sys.capture_out = Some(Vec::new());
+    sys.stdin_buf = stdin.to_vec();
     let code = run_image_x86_64(&bytes, path, argv, &mut sys)?;
     Ok((code, sys.capture_out.unwrap_or_default()))
 }
@@ -9739,6 +9749,10 @@ pub struct CliLinux {
     std_paths: [Option<String>; 3],
     /// Some のとき、fd 1 の出力をここへ溜める。None のときはホストの stdout。
     capture_out: Option<Vec<u8>>,
+    /// 真の stdin へ供給するバイト。空なら空読み（端末は奪わない）。
+    stdin_buf: Vec<u8>,
+    /// `stdin_buf` の次に読む位置。
+    stdin_pos: usize,
     /// ゲストプロセス表。fork した子と共有する。
     procs: std::rc::Rc<std::cell::RefCell<polyisa_kernel::ProcessTable>>,
     /// 0 は未登録。最初のシステムコールか命令で 1 から採番する。
@@ -10066,6 +10080,15 @@ impl CliLinux {
         }
     }
 
+    /// 真の stdin から `dst` へ読む。供給が尽きたら 0。
+    fn take_stdin(&mut self, dst: &mut [u8]) -> usize {
+        let start = self.stdin_pos.min(self.stdin_buf.len());
+        let n = (self.stdin_buf.len() - start).min(dst.len());
+        dst[..n].copy_from_slice(&self.stdin_buf[start..start + n]);
+        self.stdin_pos = start + n;
+        n
+    }
+
     /// fd 1 へ書く。capture_out があるときはそこへ溜める。
     fn write_fd1(&mut self, bytes: &[u8]) -> usize {
         if let Some(buf) = self.capture_out.as_mut() {
@@ -10199,6 +10222,8 @@ impl CliLinux {
             fd_paths: self.fd_paths.clone(),
             std_paths: self.std_paths.clone(),
             capture_out: self.capture_out.clone(),
+            stdin_buf: self.stdin_buf.clone(),
+            stdin_pos: self.stdin_pos,
             procs: std::rc::Rc::clone(&self.procs),
             pid: self.pid,
             steps: 0,
@@ -10819,13 +10844,35 @@ fn sys_read(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOu
     if let Some(end) = sys.pipe_end(fd) {
         return pipe_read(sys, env, cx, end, buf, left);
     }
-    // 付け替えた標準 fd はファイルから読む。真の stdin は空読みのまま.
+    // 付け替えた標準 fd はファイルから読む。真の stdin は供給バッファから読む。
     let stdin_empty = fd == 0 && sys.std_attached(0);
-    let Some(file) = sys.file_mut(fd) else {
-        if stdin_empty {
-            set64(env, Gpr(0), 0);
-            return Some(TrapOutcome::Handled);
+    if stdin_empty {
+        let mut done = 0u64;
+        let mut chunk = vec![0u8; IO_CHUNK];
+        while left > 0 {
+            let take = left.min(IO_CHUNK as u64) as usize;
+            let n = sys.take_stdin(&mut chunk[..take]);
+            if n == 0 {
+                break;
+            }
+            if env
+                .backend
+                .mem
+                .write(VirtAddr(buf + done), &chunk[..n])
+                .is_err()
+            {
+                return Some(TrapOutcome::Unimplemented);
+            }
+            done += n as u64;
+            left -= n as u64;
+            if n < take {
+                break;
+            }
         }
+        set64(env, Gpr(0), done);
+        return Some(TrapOutcome::Handled);
+    }
+    let Some(file) = sys.file_mut(fd) else {
         set64(env, Gpr(0), cx.neg(EBADF));
         return Some(TrapOutcome::Handled);
     };
@@ -11179,7 +11226,7 @@ fn sys_readv(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapO
         while left > 0 {
             let take = left.min(IO_CHUNK as u64) as usize;
             let n = if empty_stdin {
-                0
+                sys.take_stdin(&mut chunk[..take])
             } else {
                 let f = sys.file_mut(fd).unwrap();
                 match std::io::Read::read(f, &mut chunk[..take]) {
@@ -11834,11 +11881,29 @@ fn sys_sendfile(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Tr
         set64(env, Gpr(0), cx.neg(EBADF));
         return Some(TrapOutcome::Handled);
     }
-    // 付け替えた stdin はファイルから読む。真の stdin は空読みのまま.
+    // 付け替えた stdin はファイルから読む。真の stdin は供給バッファから読む。
     let in_empty = in_fd == 0 && sys.std_attached(0);
     if sys.file_ref(in_fd).is_none() {
         if in_empty {
-            set64(env, Gpr(0), 0);
+            let mut done = 0u64;
+            let mut chunk = vec![0u8; IO_CHUNK];
+            while left > 0 {
+                let take = left.min(IO_CHUNK as u64) as usize;
+                let n = sys.take_stdin(&mut chunk[..take]);
+                if n == 0 {
+                    break;
+                }
+                let w = match out_fd {
+                    1 => sys.write_fd1(&chunk[..n]),
+                    _ => std::io::Write::write(&mut std::io::stderr(), &chunk[..n]).unwrap_or(0),
+                };
+                done += n as u64;
+                left -= n as u64;
+                if n < take || w < n {
+                    break;
+                }
+            }
+            set64(env, Gpr(0), done);
             return Some(TrapOutcome::Handled);
         }
         set64(env, Gpr(0), cx.neg(EBADF));
@@ -15276,6 +15341,32 @@ mod tests {
         set64(&mut env, Gpr(10), 0);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EINVAL));
+    }
+
+    #[test]
+    fn read_stdin_buffer_returns_bytes() {
+        use polyisa_os_linux::x86_64 as abi;
+        let mut sys = CliLinux::x86_64();
+        sys.stdin_buf = b"ab\n".to_vec();
+        let mut env = bare();
+        set64(&mut env, Gpr(0), abi::READ);
+        set64(&mut env, Gpr(7), 0);
+        set64(&mut env, Gpr(6), 0x200);
+        set64(&mut env, Gpr(2), 8);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 3);
+        let mut back = [0u8; 3];
+        env.backend
+            .mem
+            .read(VirtAddr(0x200), &mut back, data_access())
+            .unwrap();
+        assert_eq!(&back, b"ab\n");
+        set64(&mut env, Gpr(0), abi::READ);
+        set64(&mut env, Gpr(7), 0);
+        set64(&mut env, Gpr(6), 0x200);
+        set64(&mut env, Gpr(2), 8);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
     }
 
     #[test]
