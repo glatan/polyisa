@@ -13,7 +13,7 @@ use polyisa_mem::{Access, AccessKind, Align, Endian, VirtAddr};
 use polyisa_os_linux::x86::{
     AT_FDCWD_U32, EACCES, EBADF, ECHILD, EFAULT, EINVAL, ENOENT, ENOEXEC, ENOMEM, ENOTDIR, ENOTTY,
     EPERM, EPIPE, ERANGE, ESRCH, SysCtx, data_access, get64, guest_c_string, neg_errno,
-    neg_errno64, set64,
+    neg_errno64, resolve_guest_path, set64,
 };
 use polyisa_sem::{Backend, ExceptionKind};
 
@@ -12876,44 +12876,6 @@ fn sys_getegid(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Tra
     sys_getgid(sys, env, cx)
 }
 
-fn join_guest_path(cwd: &str, path: &str) -> String {
-    if path.starts_with('/') || cwd.is_empty() {
-        return path.to_string();
-    }
-    if cwd == "/" {
-        return format!("/{path}");
-    }
-    format!("{}/{}", cwd.trim_end_matches('/'), path)
-}
-
-/// ゲストパスの解決（WP1: VFS最小スパイク）。`root` が空のときは
-/// `join_guest_path` と同じ結果を返し、振る舞いを変えない。
-/// `root` 指定時は語彙的に正規化して `root` 配下に閉じ込め、
-/// はみ出すときは `None` を返す（呼び出し側で EPERM 等にする）。
-fn resolve_guest_path(root: &str, cwd: &str, path: &str) -> Option<String> {
-    if root.is_empty() {
-        return Some(join_guest_path(cwd, path));
-    }
-    let joined = join_guest_path(cwd, path);
-    let mut parts: Vec<&str> = Vec::new();
-    for comp in joined.split('/') {
-        match comp {
-            "" | "." => {}
-            ".." => {
-                parts.pop()?;
-            }
-            _ => parts.push(comp),
-        }
-    }
-    let root_trim = root.trim_end_matches('/');
-    let mut out = String::from(root_trim);
-    for part in parts {
-        out.push('/');
-        out.push_str(part);
-    }
-    Some(out)
-}
-
 fn sys_getcwd(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     // getcwd(buf, size)。プロセスの作業ディレクトリを返し、NUL 込み長さを返す.
     let buf = get64(env, cx.r_a);
@@ -14220,153 +14182,36 @@ fn sys_dup3(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOu
 }
 
 fn sys_mkdir(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // mkdir(path, mode)。chdir 後の相対パスは作業ディレクトリから作る。
-    let path_addr = get64(env, cx.r_a);
-    let path = match guest_c_string(env, path_addr) {
-        Some(p) => p,
-        None => return Some(TrapOutcome::Unimplemented),
-    };
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
     sys.ensure_cwd();
-    let Some(path) = sys.resolve_path(&path) else {
-        set64(env, Gpr(0), cx.neg(EPERM));
-        return Some(TrapOutcome::Handled);
-    };
-    Some(match std::fs::create_dir(&path) {
-        Ok(()) => {
-            set64(env, Gpr(0), 0);
-            TrapOutcome::Handled
-        }
-        Err(e) => {
-            let no = match e.kind() {
-                std::io::ErrorKind::NotFound => ENOENT,
-                std::io::ErrorKind::AlreadyExists => 17,
-                std::io::ErrorKind::PermissionDenied => EACCES,
-                _ => EINVAL,
-            };
-            set64(env, Gpr(0), cx.neg(no));
-            TrapOutcome::Handled
-        }
-    })
+    let root = sys.guest_root.clone();
+    let cwd = sys.cwd.clone();
+    polyisa_os_linux::x86::sys_mkdir(&root, &cwd, env, cx)
 }
 
 fn sys_mknod(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // mknod(path, mode, dev)。名前付きパイプだけ作る。デバイスノードは EPERM。
-    // このクレートは unsafe を使わないので、ホストの mkfifo に委譲する。
-    let path_addr = get64(env, cx.r_a);
-    let mode = get64(env, cx.r_b) as u32;
-    const S_IFMT: u32 = 0o170000;
-    const S_IFIFO: u32 = 0o010000;
-    if mode & S_IFMT != S_IFIFO {
-        set64(env, Gpr(0), cx.neg(EPERM));
-        return Some(TrapOutcome::Handled);
-    }
-    let path = match guest_c_string(env, path_addr) {
-        Some(p) => p,
-        None => return Some(TrapOutcome::Unimplemented),
-    };
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
     sys.ensure_cwd();
-    let Some(path) = sys.resolve_path(&path) else {
-        set64(env, Gpr(0), cx.neg(EPERM));
-        return Some(TrapOutcome::Handled);
-    };
-    let perm = (mode & 0o777) & !sys.umask;
-    let status = std::process::Command::new("mkfifo")
-        .arg("-m")
-        .arg(format!("{perm:03o}"))
-        .arg(&path)
-        .status();
-    let no = match status {
-        Ok(st) if st.success() => {
-            set64(env, Gpr(0), 0);
-            return Some(TrapOutcome::Handled);
-        }
-        Ok(_) if std::fs::metadata(&path).is_ok() => 17,
-        Ok(_)
-            if std::fs::metadata(
-                std::path::Path::new(&path)
-                    .parent()
-                    .unwrap_or(std::path::Path::new(".")),
-            )
-            .is_err() =>
-        {
-            ENOENT
-        }
-        _ => EACCES,
-    };
-    set64(env, Gpr(0), cx.neg(no));
-    Some(TrapOutcome::Handled)
+    let root = sys.guest_root.clone();
+    let cwd = sys.cwd.clone();
+    let umask = sys.umask;
+    polyisa_os_linux::x86::sys_mknod(&root, &cwd, umask, env, cx)
 }
 
 fn sys_mkdirat(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // mkdirat(dirfd, path, mode)。AT_FDCWD の相対パスは作業ディレクトリから作る。
-    let (dirfd, path_addr) = (get64(env, cx.r_a), get64(env, cx.r_b));
-    if !cx.is_at_fdcwd(dirfd) {
-        set64(env, Gpr(0), cx.neg(EINVAL));
-        return Some(TrapOutcome::Handled);
-    }
-    let path = match guest_c_string(env, path_addr) {
-        Some(p) => p,
-        None => return Some(TrapOutcome::Unimplemented),
-    };
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
     sys.ensure_cwd();
-    let Some(path) = sys.resolve_path(&path) else {
-        set64(env, Gpr(0), cx.neg(EPERM));
-        return Some(TrapOutcome::Handled);
-    };
-    Some(match std::fs::create_dir(&path) {
-        Ok(()) => {
-            set64(env, Gpr(0), 0);
-            TrapOutcome::Handled
-        }
-        Err(e) => {
-            let no = match e.kind() {
-                std::io::ErrorKind::NotFound => ENOENT,
-                std::io::ErrorKind::AlreadyExists => 17,
-                std::io::ErrorKind::PermissionDenied => EACCES,
-                _ => EINVAL,
-            };
-            set64(env, Gpr(0), cx.neg(no));
-            TrapOutcome::Handled
-        }
-    })
+    let root = sys.guest_root.clone();
+    let cwd = sys.cwd.clone();
+    polyisa_os_linux::x86::sys_mkdirat(&root, &cwd, env, cx)
 }
 
 fn sys_rename(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // rename(oldpath, newpath)。ホストの rename に直結する.
-    let old_addr = get64(env, cx.r_a);
-    let new_addr = get64(env, cx.r_b);
-    let old_path = match guest_c_string(env, old_addr) {
-        Some(p) => p,
-        None => return Some(TrapOutcome::Unimplemented),
-    };
-    let new_path = match guest_c_string(env, new_addr) {
-        Some(p) => p,
-        None => return Some(TrapOutcome::Unimplemented),
-    };
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
     sys.ensure_cwd();
-    let Some(old_path) = sys.resolve_path(&old_path) else {
-        set64(env, Gpr(0), cx.neg(EPERM));
-        return Some(TrapOutcome::Handled);
-    };
-    let Some(new_path) = sys.resolve_path(&new_path) else {
-        set64(env, Gpr(0), cx.neg(EPERM));
-        return Some(TrapOutcome::Handled);
-    };
-    Some(match std::fs::rename(&old_path, &new_path) {
-        Ok(()) => {
-            set64(env, Gpr(0), 0);
-            TrapOutcome::Handled
-        }
-        Err(e) => {
-            let no = match e.kind() {
-                std::io::ErrorKind::NotFound => ENOENT,
-                std::io::ErrorKind::PermissionDenied => EACCES,
-                _ => EINVAL,
-            };
-            set64(env, Gpr(0), cx.neg(no));
-            TrapOutcome::Handled
-        }
-    })
+    let root = sys.guest_root.clone();
+    let cwd = sys.cwd.clone();
+    polyisa_os_linux::x86::sys_rename(&root, &cwd, env, cx)
 }
 
 fn sys_sync(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
@@ -14375,42 +14220,11 @@ fn sys_sync(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapO
 }
 
 fn sys_link(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // link(oldpath, newpath)。ハードリンク。busybox の `link` が使う。
-    let old_addr = get64(env, cx.r_a);
-    let new_addr = get64(env, cx.r_b);
-    let old_path = match guest_c_string(env, old_addr) {
-        Some(p) => p,
-        None => return Some(TrapOutcome::Unimplemented),
-    };
-    let new_path = match guest_c_string(env, new_addr) {
-        Some(p) => p,
-        None => return Some(TrapOutcome::Unimplemented),
-    };
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
     sys.ensure_cwd();
-    let Some(old_path) = sys.resolve_path(&old_path) else {
-        set64(env, Gpr(0), cx.neg(EPERM));
-        return Some(TrapOutcome::Handled);
-    };
-    let Some(new_path) = sys.resolve_path(&new_path) else {
-        set64(env, Gpr(0), cx.neg(EPERM));
-        return Some(TrapOutcome::Handled);
-    };
-    Some(match std::fs::hard_link(&old_path, &new_path) {
-        Ok(()) => {
-            set64(env, Gpr(0), 0);
-            TrapOutcome::Handled
-        }
-        Err(e) => {
-            let no = match e.kind() {
-                std::io::ErrorKind::NotFound => ENOENT,
-                std::io::ErrorKind::AlreadyExists => 17,
-                std::io::ErrorKind::PermissionDenied => EACCES,
-                _ => EINVAL,
-            };
-            set64(env, Gpr(0), cx.neg(no));
-            TrapOutcome::Handled
-        }
-    })
+    let root = sys.guest_root.clone();
+    let cwd = sys.cwd.clone();
+    polyisa_os_linux::x86::sys_link(&root, &cwd, env, cx)
 }
 
 fn sys_symlink(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
@@ -14451,61 +14265,19 @@ fn sys_symlink(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Tra
 }
 
 fn sys_rmdir(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // rmdir(path)。ホストの remove_dir に直結する.
-    let path_addr = get64(env, cx.r_a);
-    let path = match guest_c_string(env, path_addr) {
-        Some(p) => p,
-        None => return Some(TrapOutcome::Unimplemented),
-    };
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
     sys.ensure_cwd();
-    let Some(path) = sys.resolve_path(&path) else {
-        set64(env, Gpr(0), cx.neg(EPERM));
-        return Some(TrapOutcome::Handled);
-    };
-    Some(match std::fs::remove_dir(&path) {
-        Ok(()) => {
-            set64(env, Gpr(0), 0);
-            TrapOutcome::Handled
-        }
-        Err(e) => {
-            let no = match e.kind() {
-                std::io::ErrorKind::NotFound => ENOENT,
-                std::io::ErrorKind::PermissionDenied => EACCES,
-                _ => EINVAL,
-            };
-            set64(env, Gpr(0), cx.neg(no));
-            TrapOutcome::Handled
-        }
-    })
+    let root = sys.guest_root.clone();
+    let cwd = sys.cwd.clone();
+    polyisa_os_linux::x86::sys_rmdir(&root, &cwd, env, cx)
 }
 
 fn sys_unlink(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // unlink(path)。chdir 後の相対パスは作業ディレクトリから外す。
-    let path_addr = get64(env, cx.r_a);
-    let path = match guest_c_string(env, path_addr) {
-        Some(p) => p,
-        None => return Some(TrapOutcome::Unimplemented),
-    };
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
     sys.ensure_cwd();
-    let Some(path) = sys.resolve_path(&path) else {
-        set64(env, Gpr(0), cx.neg(EPERM));
-        return Some(TrapOutcome::Handled);
-    };
-    Some(match std::fs::remove_file(&path) {
-        Ok(()) => {
-            set64(env, Gpr(0), 0);
-            TrapOutcome::Handled
-        }
-        Err(e) => {
-            let no = match e.kind() {
-                std::io::ErrorKind::NotFound => ENOENT,
-                std::io::ErrorKind::PermissionDenied => EACCES,
-                _ => EINVAL,
-            };
-            set64(env, Gpr(0), cx.neg(no));
-            TrapOutcome::Handled
-        }
-    })
+    let root = sys.guest_root.clone();
+    let cwd = sys.cwd.clone();
+    polyisa_os_linux::x86::sys_unlink(&root, &cwd, env, cx)
 }
 
 fn sys_unlinkat(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
@@ -14567,119 +14339,27 @@ fn sys_unlinkat(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Tr
 }
 
 fn sys_access(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // access(path, mode)。存在確認のみ行い、存在すれば 0 を返す.
-    // X_OK 等の実行権限の厳密判定はしない（試作の割り切り）。
-    let path_addr = get64(env, cx.r_a);
-    let path = match guest_c_string(env, path_addr) {
-        Some(p) => p,
-        None => return Some(TrapOutcome::Unimplemented),
-    };
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
     sys.ensure_cwd();
-    let Some(path) = sys.resolve_path(&path) else {
-        set64(env, Gpr(0), cx.neg(EPERM));
-        return Some(TrapOutcome::Handled);
-    };
-    Some(match std::fs::metadata(&path) {
-        Ok(_) => {
-            set64(env, Gpr(0), 0);
-            TrapOutcome::Handled
-        }
-        Err(e) => {
-            let no = match e.kind() {
-                std::io::ErrorKind::NotFound => ENOENT,
-                std::io::ErrorKind::PermissionDenied => EACCES,
-                _ => EINVAL,
-            };
-            set64(env, Gpr(0), cx.neg(no));
-            TrapOutcome::Handled
-        }
-    })
+    let root = sys.guest_root.clone();
+    let cwd = sys.cwd.clone();
+    polyisa_os_linux::x86::sys_access(&root, &cwd, env, cx)
 }
 
 fn sys_faccessat(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // faccessat(dirfd, path, mode)。AT_FDCWD のみ、存在確認のみ行う.
-    let (dirfd, path_addr) = if cx.is64 {
-        (get64(env, Gpr(7)), get64(env, Gpr(6)))
-    } else {
-        (
-            u64::from(env.backend.get(Gpr(3).state())),
-            u64::from(env.backend.get(Gpr(1).state())),
-        )
-    };
-    if !cx.is_at_fdcwd(dirfd) {
-        set64(env, Gpr(0), cx.neg(EINVAL));
-        return Some(TrapOutcome::Handled);
-    }
-    let path = match guest_c_string(env, path_addr) {
-        Some(p) => p,
-        None => return Some(TrapOutcome::Unimplemented),
-    };
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
     sys.ensure_cwd();
-    let Some(path) = sys.resolve_path(&path) else {
-        set64(env, Gpr(0), cx.neg(EPERM));
-        return Some(TrapOutcome::Handled);
-    };
-    Some(match std::fs::metadata(&path) {
-        Ok(_) => {
-            set64(env, Gpr(0), 0);
-            TrapOutcome::Handled
-        }
-        Err(e) => {
-            let no = match e.kind() {
-                std::io::ErrorKind::NotFound => ENOENT,
-                std::io::ErrorKind::PermissionDenied => EACCES,
-                _ => EINVAL,
-            };
-            set64(env, Gpr(0), cx.neg(no));
-            TrapOutcome::Handled
-        }
-    })
+    let root = sys.guest_root.clone();
+    let cwd = sys.cwd.clone();
+    polyisa_os_linux::x86::sys_faccessat(&root, &cwd, env, cx)
 }
 
 fn sys_utimensat(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // utimensat(dirfd, path, times, flags)。AT_FDCWD のみ受け付ける.
-    // times==NULL は現在時刻のつもりで、存在すれば 0、なければ空作成して 0 を返す.
-    // times!=NULL は無視して同様に扱う（touch の継続が目的の試作）。
-    let (dirfd, path_addr) = if cx.is64 {
-        (get64(env, Gpr(7)), get64(env, Gpr(6)))
-    } else {
-        (
-            u64::from(env.backend.get(Gpr(3).state())),
-            u64::from(env.backend.get(Gpr(1).state())),
-        )
-    };
-    if !cx.is_at_fdcwd(dirfd) {
-        set64(env, Gpr(0), cx.neg(EINVAL));
-        return Some(TrapOutcome::Handled);
-    }
-    let path = match guest_c_string(env, path_addr) {
-        Some(p) => p,
-        None => return Some(TrapOutcome::Unimplemented),
-    };
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
     sys.ensure_cwd();
-    let Some(path) = sys.resolve_path(&path) else {
-        set64(env, Gpr(0), cx.neg(EPERM));
-        return Some(TrapOutcome::Handled);
-    };
-    if std::fs::metadata(&path).is_ok() {
-        set64(env, Gpr(0), 0);
-        return Some(TrapOutcome::Handled);
-    }
-    Some(match std::fs::File::create(&path) {
-        Ok(_) => {
-            set64(env, Gpr(0), 0);
-            TrapOutcome::Handled
-        }
-        Err(e) => {
-            let no = match e.kind() {
-                std::io::ErrorKind::NotFound => ENOENT,
-                std::io::ErrorKind::PermissionDenied => EACCES,
-                _ => EINVAL,
-            };
-            set64(env, Gpr(0), cx.neg(no));
-            TrapOutcome::Handled
-        }
-    })
+    let root = sys.guest_root.clone();
+    let cwd = sys.cwd.clone();
+    polyisa_os_linux::x86::sys_utimensat(&root, &cwd, env, cx)
 }
 
 fn sys_chmod(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
@@ -15118,7 +14798,7 @@ mod tests {
     use super::*;
     use polyisa_guest_x86::sem::Gpr;
     use polyisa_mem::{Perms, VirtAddr};
-    use polyisa_os_linux::x86::{EAGAIN, EINTR};
+    use polyisa_os_linux::x86::{EAGAIN, EINTR, join_guest_path};
 
     fn bare() -> BareEnv {
         let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_x86::CpuState>());
