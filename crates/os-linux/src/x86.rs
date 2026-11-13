@@ -1233,6 +1233,59 @@ pub fn sys_lstat(
     set64(env, Gpr(0), 0);
     Some(TrapOutcome::Handled)
 }
+
+/// newfstatat(dirfd, path, statbuf, flags)。AT_FDCWD+絶対パスのみ.
+/// ホスト metadata から struct stat (144B) を書いて 0 を返す.
+/// flags (AT_SYMLINK_NOFOLLOW 等) は無視してたどる.
+/// Ref: SRC-LINUX (7.3).
+pub fn sys_newfstatat(
+    root: &str,
+    cwd: &str,
+    exe_path: &str,
+    env: &mut BareEnv,
+    cx: &SysCtx,
+) -> Option<TrapOutcome> {
+    let dirfd = get64(env, Gpr(7));
+    let path_addr = get64(env, Gpr(6));
+    let stat_addr = get64(env, Gpr(2));
+    if !cx.is_at_fdcwd(dirfd) {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    let path = match guest_c_string(env, path_addr) {
+        Some(p) => p,
+        None => return Some(TrapOutcome::Unimplemented),
+    };
+    if !path.starts_with('/') {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    let path = match resolve_guest_path(root, cwd, &path) {
+        Some(p) => guest_exe_redirect(exe_path, &p).unwrap_or(p),
+        None => {
+            set64(env, Gpr(0), cx.neg(EPERM));
+            return Some(TrapOutcome::Handled);
+        }
+    };
+    let m = match std::fs::metadata(&path) {
+        Ok(m) => m,
+        Err(e) => {
+            let no = match e.kind() {
+                std::io::ErrorKind::NotFound => ENOENT,
+                std::io::ErrorKind::PermissionDenied => EACCES,
+                _ => EINVAL,
+            };
+            set64(env, Gpr(0), cx.neg(no));
+            return Some(TrapOutcome::Handled);
+        }
+    };
+    let st = stat144(&m, path_ino(&path));
+    if env.backend.mem.write(VirtAddr(stat_addr), &st).is_err() {
+        return Some(TrapOutcome::Unimplemented);
+    }
+    set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
+}
 pub fn sys_mount(root: &str, cwd: &str, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     // mount(source, target, ...)。実マウントはせず、無い道は ENOENT、有る道は EPERM。
     let src_addr = get64(env, cx.r_a);
