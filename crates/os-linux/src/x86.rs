@@ -1233,3 +1233,158 @@ pub fn sys_lstat(
     set64(env, Gpr(0), 0);
     Some(TrapOutcome::Handled)
 }
+pub fn sys_mount(root: &str, cwd: &str, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // mount(source, target, ...)。実マウントはせず、無い道は ENOENT、有る道は EPERM。
+    let src_addr = get64(env, cx.r_a);
+    let tgt_addr = get64(env, cx.r_b);
+    let src = match guest_c_string(env, src_addr) {
+        Some(p) => p,
+        None => return Some(TrapOutcome::Unimplemented),
+    };
+    let tgt = match guest_c_string(env, tgt_addr) {
+        Some(p) => p,
+        None => return Some(TrapOutcome::Unimplemented),
+    };
+    let Some(src_host) = resolve_guest_path(root, cwd, &src) else {
+        set64(env, Gpr(0), cx.neg(EPERM));
+        return Some(TrapOutcome::Handled);
+    };
+    let Some(tgt_host) = resolve_guest_path(root, cwd, &tgt) else {
+        set64(env, Gpr(0), cx.neg(EPERM));
+        return Some(TrapOutcome::Handled);
+    };
+    let err =
+        if std::path::Path::new(&src_host).exists() && std::path::Path::new(&tgt_host).exists() {
+            EPERM
+        } else {
+            ENOENT
+        };
+    set64(env, Gpr(0), cx.neg(err));
+    Some(TrapOutcome::Handled)
+}
+pub fn sys_umount2(root: &str, cwd: &str, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // umount2(target, flags)。実アンマウントはせず、無い道は ENOENT、有る道は EPERM。
+    let addr = get64(env, cx.r_a);
+    let path = match guest_c_string(env, addr) {
+        Some(p) => p,
+        None => return Some(TrapOutcome::Unimplemented),
+    };
+    let Some(host) = resolve_guest_path(root, cwd, &path) else {
+        set64(env, Gpr(0), cx.neg(EPERM));
+        return Some(TrapOutcome::Handled);
+    };
+    let err = if std::path::Path::new(&host).exists() {
+        EPERM
+    } else {
+        ENOENT
+    };
+    set64(env, Gpr(0), cx.neg(err));
+    Some(TrapOutcome::Handled)
+}
+pub fn sys_setxattr(root: &str, cwd: &str, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // setxattr(path, ...)。属性は付けず、無い道は ENOENT、有る道は EPERM。
+    let addr = get64(env, cx.r_a);
+    let path = match guest_c_string(env, addr) {
+        Some(p) => p,
+        None => return Some(TrapOutcome::Unimplemented),
+    };
+    let Some(host) = resolve_guest_path(root, cwd, &path) else {
+        set64(env, Gpr(0), cx.neg(EPERM));
+        return Some(TrapOutcome::Handled);
+    };
+    let err = if std::path::Path::new(&host).exists() {
+        EPERM
+    } else {
+        ENOENT
+    };
+    set64(env, Gpr(0), cx.neg(err));
+    Some(TrapOutcome::Handled)
+}
+pub fn sys_chdir(
+    root: &str,
+    cwd: &mut String,
+    env: &mut BareEnv,
+    cx: &SysCtx,
+) -> Option<TrapOutcome> {
+    let path_addr = get64(env, cx.r_a);
+    let Some(path) = guest_c_string(env, path_addr) else {
+        return Some(TrapOutcome::Unimplemented);
+    };
+    if path.is_empty() {
+        set64(env, Gpr(0), cx.neg(ENOENT));
+        return Some(TrapOutcome::Handled);
+    }
+    let Some(host) = resolve_guest_path(root, cwd, &path) else {
+        set64(env, Gpr(0), cx.neg(EPERM));
+        return Some(TrapOutcome::Handled);
+    };
+    let errno = match std::fs::metadata(&host) {
+        Ok(meta) if meta.is_dir() => {
+            cwd.clear();
+            cwd.push_str(&host);
+            set64(env, Gpr(0), 0);
+            return Some(TrapOutcome::Handled);
+        }
+        Ok(_) => ENOTDIR,
+        Err(err) => match err.kind() {
+            std::io::ErrorKind::NotFound => ENOENT,
+            std::io::ErrorKind::PermissionDenied => EACCES,
+            _ => ENOENT,
+        },
+    };
+    set64(env, Gpr(0), cx.neg(errno));
+    Some(TrapOutcome::Handled)
+}
+pub fn sys_getcwd(cwd: &str, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // getcwd(buf, size)。プロセスの作業ディレクトリを返し、NUL 込み長さを返す.
+    let buf = get64(env, cx.r_a);
+    let size = get64(env, cx.r_b);
+    if buf == 0 || size == 0 {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    let bytes = cwd.as_bytes();
+    let need = (bytes.len() as u64) + 1;
+    if size < need {
+        set64(env, Gpr(0), cx.neg(ERANGE));
+        return Some(TrapOutcome::Handled);
+    }
+    if env
+        .backend
+        .mem
+        .write(polyisa_mem::VirtAddr(buf), bytes)
+        .is_err()
+    {
+        return Some(TrapOutcome::Unimplemented);
+    }
+    if env
+        .backend
+        .mem
+        .write(polyisa_mem::VirtAddr(buf + bytes.len() as u64), &[0u8])
+        .is_err()
+    {
+        return Some(TrapOutcome::Unimplemented);
+    }
+    set64(env, Gpr(0), need);
+    Some(TrapOutcome::Handled)
+}
+pub fn sys_umask(umask: &mut u32, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // umask(mask)。旧マスクを返して更新する。mkdir -p の保存・復元で使う.
+    // ホストの umask は触らない.
+    let mask = get64(env, cx.r_a) as u32 & 0o777;
+    let old = *umask;
+    *umask = mask;
+    set64(env, Gpr(0), u64::from(old));
+    Some(TrapOutcome::Handled)
+}
+pub fn sys_personality(state: &mut u64, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // personality(persona)。0xffffffff は現在値を返すだけ。実行形式は変えない。
+    // Ref: SRC-LINUX (7.3).
+    let persona = get64(env, cx.r_a);
+    let old = *state;
+    if persona != 0xffff_ffff && persona != u64::MAX {
+        *state = persona;
+    }
+    set64(env, Gpr(0), old);
+    Some(TrapOutcome::Handled)
+}
