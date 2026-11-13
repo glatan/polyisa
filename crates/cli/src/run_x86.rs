@@ -10098,7 +10098,11 @@ pub struct CliLinux {
     /// 空のパイプを読もうとして待っているパイプ。
     pipe_wait: Option<u64>,
     /// このプロセスの作業ディレクトリ。空はまだホストの作業ディレクトリを写していない。
+    /// 当面ホスト表記のまま持つ。guest_root 設定時はゲスト表記への見直しが要る (follow-up)。
     cwd: String,
+    /// ゲストのルート。空は隔離なし（従来動作）。WP1 で導入し、設定手段は後の段階で足す。
+    /// root 設定時は /proc 合成の比較や exe リダイレクトも解決前後で見直す (follow-up)。
+    guest_root: String,
     /// MONOTONIC 時計の起点。ゲスト実行ごとに取り直す。fork した子は親と共有する。
     /// makemime は srand(monotonic_us()) で境界を作るため、起点の共有は出力を揺らす.
     mono_start: Option<std::time::Instant>,
@@ -10178,6 +10182,11 @@ impl CliLinux {
     pub fn init_brk(&mut self, image_end: u64) {
         use polyisa_mem::PAGE_SIZE;
         self.heap_end = image_end.next_multiple_of(PAGE_SIZE);
+    }
+
+    /// ゲストパスをホストパスへ解決する。root 空は従来通り。はみ出しは None。
+    fn resolve_path(&self, path: &str) -> Option<String> {
+        resolve_guest_path(&self.guest_root, &self.cwd, path)
     }
 
     /// fd に対応する開ファイルの参照。標準 fd の付け替え先も見る.
@@ -10622,6 +10631,7 @@ impl CliLinux {
             std_pipes: self.std_pipes,
             pipe_wait: None,
             cwd: self.cwd.clone(),
+            guest_root: self.guest_root.clone(),
             mono_start: self.mono_start,
         };
         for end in child.pipe_ends.iter().flatten() {
@@ -11299,7 +11309,10 @@ fn open_at_cwd(
         }
     };
     sys.ensure_cwd();
-    let path = join_guest_path(&sys.cwd, &path);
+    let Some(path) = sys.resolve_path(&path) else {
+        set64(env, Gpr(0), cx.neg(EPERM));
+        return Some(TrapOutcome::Handled);
+    };
     // ホストの /proc を見せると free/iostat の数値が揺らぐ。固定の合成ファイルを開く。
     if path == "/proc/meminfo" {
         return open_synth_meminfo(sys, env, cx);
@@ -12292,7 +12305,10 @@ fn sys_umount2(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Tra
         None => return Some(TrapOutcome::Unimplemented),
     };
     sys.ensure_cwd();
-    let host = join_guest_path(&sys.cwd, &path);
+    let Some(host) = sys.resolve_path(&path) else {
+        set64(env, Gpr(0), cx.neg(EPERM));
+        return Some(TrapOutcome::Handled);
+    };
     let err = if std::path::Path::new(&host).exists() {
         EPERM
     } else {
@@ -12403,7 +12419,10 @@ fn sys_setxattr(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Tr
         None => return Some(TrapOutcome::Unimplemented),
     };
     sys.ensure_cwd();
-    let host = join_guest_path(&sys.cwd, &path);
+    let Some(host) = sys.resolve_path(&path) else {
+        set64(env, Gpr(0), cx.neg(EPERM));
+        return Some(TrapOutcome::Handled);
+    };
     let err = if std::path::Path::new(&host).exists() {
         EPERM
     } else {
@@ -12436,8 +12455,14 @@ fn sys_mount(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapO
         None => return Some(TrapOutcome::Unimplemented),
     };
     sys.ensure_cwd();
-    let src_host = join_guest_path(&sys.cwd, &src);
-    let tgt_host = join_guest_path(&sys.cwd, &tgt);
+    let Some(src_host) = sys.resolve_path(&src) else {
+        set64(env, Gpr(0), cx.neg(EPERM));
+        return Some(TrapOutcome::Handled);
+    };
+    let Some(tgt_host) = sys.resolve_path(&tgt) else {
+        set64(env, Gpr(0), cx.neg(EPERM));
+        return Some(TrapOutcome::Handled);
+    };
     let err =
         if std::path::Path::new(&src_host).exists() && std::path::Path::new(&tgt_host).exists() {
             EPERM
@@ -13031,6 +13056,34 @@ fn join_guest_path(cwd: &str, path: &str) -> String {
     format!("{}/{}", cwd.trim_end_matches('/'), path)
 }
 
+/// ゲストパスの解決（WP1: VFS最小スパイク）。`root` が空のときは
+/// `join_guest_path` と同じ結果を返し、振る舞いを変えない。
+/// `root` 指定時は語彙的に正規化して `root` 配下に閉じ込め、
+/// はみ出すときは `None` を返す（呼び出し側で EPERM 等にする）。
+fn resolve_guest_path(root: &str, cwd: &str, path: &str) -> Option<String> {
+    if root.is_empty() {
+        return Some(join_guest_path(cwd, path));
+    }
+    let joined = join_guest_path(cwd, path);
+    let mut parts: Vec<&str> = Vec::new();
+    for comp in joined.split('/') {
+        match comp {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            _ => parts.push(comp),
+        }
+    }
+    let root_trim = root.trim_end_matches('/');
+    let mut out = String::from(root_trim);
+    for part in parts {
+        out.push('/');
+        out.push_str(part);
+    }
+    Some(out)
+}
+
 fn sys_getcwd(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     // getcwd(buf, size)。プロセスの作業ディレクトリを返し、NUL 込み長さを返す.
     let buf = get64(env, cx.r_a);
@@ -13076,7 +13129,10 @@ fn sys_chdir(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapO
         return Some(TrapOutcome::Handled);
     }
     sys.ensure_cwd();
-    let host = join_guest_path(&sys.cwd, &path);
+    let Some(host) = sys.resolve_path(&path) else {
+        set64(env, Gpr(0), cx.neg(EPERM));
+        return Some(TrapOutcome::Handled);
+    };
     let errno = match std::fs::metadata(&host) {
         Ok(meta) if meta.is_dir() => {
             sys.cwd = host;
@@ -13309,7 +13365,10 @@ fn sys_stat(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOu
         None => return Some(TrapOutcome::Unimplemented),
     };
     sys.ensure_cwd();
-    let path = join_guest_path(&sys.cwd, &path);
+    let Some(path) = sys.resolve_path(&path) else {
+        set64(env, Gpr(0), cx.neg(EPERM));
+        return Some(TrapOutcome::Handled);
+    };
     let path = guest_exe_redirect(sys, &path).unwrap_or(path);
     let m = match std::fs::metadata(&path) {
         Ok(m) => m,
@@ -13341,7 +13400,10 @@ fn sys_lstat(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapO
         None => return Some(TrapOutcome::Unimplemented),
     };
     sys.ensure_cwd();
-    let path = join_guest_path(&sys.cwd, &path);
+    let Some(path) = sys.resolve_path(&path) else {
+        set64(env, Gpr(0), cx.neg(EPERM));
+        return Some(TrapOutcome::Handled);
+    };
     let path = guest_exe_redirect(sys, &path).unwrap_or(path);
     let m = match std::fs::symlink_metadata(&path) {
         Ok(m) => m,
@@ -14371,7 +14433,10 @@ fn sys_mkdir(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapO
         None => return Some(TrapOutcome::Unimplemented),
     };
     sys.ensure_cwd();
-    let path = join_guest_path(&sys.cwd, &path);
+    let Some(path) = sys.resolve_path(&path) else {
+        set64(env, Gpr(0), cx.neg(EPERM));
+        return Some(TrapOutcome::Handled);
+    };
     Some(match std::fs::create_dir(&path) {
         Ok(()) => {
             set64(env, Gpr(0), 0);
@@ -14445,7 +14510,10 @@ fn sys_mkdirat(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Tra
         None => return Some(TrapOutcome::Unimplemented),
     };
     sys.ensure_cwd();
-    let path = join_guest_path(&sys.cwd, &path);
+    let Some(path) = sys.resolve_path(&path) else {
+        set64(env, Gpr(0), cx.neg(EPERM));
+        return Some(TrapOutcome::Handled);
+    };
     Some(match std::fs::create_dir(&path) {
         Ok(()) => {
             set64(env, Gpr(0), 0);
@@ -14592,7 +14660,10 @@ fn sys_unlink(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Trap
         None => return Some(TrapOutcome::Unimplemented),
     };
     sys.ensure_cwd();
-    let path = join_guest_path(&sys.cwd, &path);
+    let Some(path) = sys.resolve_path(&path) else {
+        set64(env, Gpr(0), cx.neg(EPERM));
+        return Some(TrapOutcome::Handled);
+    };
     Some(match std::fs::remove_file(&path) {
         Ok(()) => {
             set64(env, Gpr(0), 0);
@@ -16280,6 +16351,45 @@ mod tests {
             .unwrap();
         assert_eq!(byte, *b"Q");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_guest_path_matches_join_without_root() {
+        // root 空は従来の join と同じ結果。振る舞い不変の担保.
+        for (cwd, path) in [
+            ("", "/etc/passwd"),
+            ("", "rel"),
+            ("/", "/etc/passwd"),
+            ("/", "rel"),
+            ("/a/b", "c"),
+            ("/a/b", "/etc/passwd"),
+            ("/a/b/", "c"),
+        ] {
+            assert_eq!(
+                resolve_guest_path("", cwd, path),
+                Some(join_guest_path(cwd, path)),
+                "cwd={cwd:?} path={path:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_guest_path_confines_under_root() {
+        assert_eq!(
+            resolve_guest_path("/jail", "/", "/etc/passwd"),
+            Some("/jail/etc/passwd".to_string())
+        );
+        assert_eq!(
+            resolve_guest_path("/jail/", "/a", "b/../c"),
+            Some("/jail/a/c".to_string())
+        );
+        assert_eq!(resolve_guest_path("/jail", "/", ".."), None,);
+        assert_eq!(resolve_guest_path("/jail", "/", "/../x"), None,);
+        assert_eq!(resolve_guest_path("/jail", "/a", "../../x"), None,);
+        assert_eq!(
+            resolve_guest_path("/jail", "/", "."),
+            Some("/jail".to_string()),
+        );
     }
 
     #[test]
