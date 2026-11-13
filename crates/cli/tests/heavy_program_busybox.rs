@@ -1433,6 +1433,15 @@ fn text_applets_match_host() {
         assert_eq!(code, 0);
         assert!(out.is_empty());
     }
+    // nologin は未実装命令 (eip 0x40052c 付近の 88 10 系) で停止する。
+    // ホストと比べない。P3 のデコーダ対応時に Ok 側へ移す。
+    {
+        let args = ["nologin"];
+        let argv: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
+        let res = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv);
+        let err = res.expect_err("nologin は現状 unimplemented で止まる");
+        assert!(err.contains("unimplemented"), "nologin: {err}");
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 
