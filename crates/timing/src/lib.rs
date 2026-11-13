@@ -95,26 +95,52 @@ impl TimingModel for NullModel {
     }
 }
 
+/// 分類ごとの CPI。`CpiModel` の表の行。
+#[derive(Clone, Copy, Debug)]
+pub struct ClassCpi {
+    pub class: &'static str,
+    pub cpi: u64,
+}
+
 /// 分類ごとの固定値を足すモデル（`cpi`）。
+/// 表にない分類は `default_cpi` を使う。
 #[derive(Clone, Debug)]
 pub struct CpiModel {
     cycles: u64,
     default_cpi: u64,
+    table: &'static [ClassCpi],
 }
 
 impl CpiModel {
+    /// 分類表のない均一 CPI。
     #[must_use]
     pub const fn new(default_cpi: u64) -> Self {
+        Self::with_table(default_cpi, &[])
+    }
+
+    /// 分類ごとの CPI 表を使う。
+    #[must_use]
+    pub const fn with_table(default_cpi: u64, table: &'static [ClassCpi]) -> Self {
         Self {
             cycles: 0,
             default_cpi,
+            table,
         }
+    }
+
+    fn cpi(&self, class: &str) -> u64 {
+        for row in self.table {
+            if row.class == class {
+                return row.cpi;
+            }
+        }
+        self.default_cpi
     }
 }
 
 impl TimingModel for CpiModel {
-    fn observe(&mut self, _ev: &InstrEvent) {
-        self.cycles += self.default_cpi;
+    fn observe(&mut self, ev: &InstrEvent) {
+        self.cycles += self.cpi(ev.class);
     }
 
     fn now(&self) -> VirtualTime {
@@ -258,6 +284,26 @@ mod tests {
         m.observe(&InstrEvent::new(0, "alu"));
         m.observe(&InstrEvent::new(4, "load"));
         assert_eq!(m.now(), VirtualTime(4));
+    }
+
+    #[test]
+    fn cpi_uses_class_table() {
+        static TABLE: &[ClassCpi] = &[
+            ClassCpi {
+                class: "alu",
+                cpi: 1,
+            },
+            ClassCpi {
+                class: "mult",
+                cpi: 4,
+            },
+        ];
+        let mut m = CpiModel::with_table(2, TABLE);
+        m.observe(&InstrEvent::new(0, "alu"));
+        m.observe(&InstrEvent::new(4, "mult"));
+        // 表にない分類は既定値。
+        m.observe(&InstrEvent::new(8, "load"));
+        assert_eq!(m.now(), VirtualTime(7));
     }
 
     #[test]
