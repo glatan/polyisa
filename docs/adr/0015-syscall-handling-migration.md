@@ -5,11 +5,11 @@
 
 ## 背景
 
-GAP-0001 のとおり、システムコールの処理は `crates/cli/src/run.rs` の `CliEcall`（RISC-V）と `crates/cli/src/run_x86.rs` の `CliLinux`（x86）にある。x86 側は 18,545 行、`sys_*` 関数 150 件、番号表は x86_64 が 150 件・i386 が 45 件である（`docs/status/README.md` の生成値と一致）。
+GAP-0001 のとおり、システムコールの処理は `crates/cli/src/run.rs` の `CliEcall`（RISC-V）と `crates/cli/src/run_x86.rs` の `CliLinux`（x86）にある。x86 側は 18,545 行、`sys_*` 関数 150 件、番号表は x86_64 が 150 件・x86_32 が 45 件である（`docs/status/README.md` の生成値と一致）。
 
 150 件の実測分類（本体で `sys` 識別子を使わないもの）では、59 件が状態を使わない固定応答のスタブ（例：`sys_socket` は常に EPERM）であり、91 件が `CliLinux` の状態（fd 表、stdio 経路と capture、cwd と exe_path、スケジューラとパイプ、brk と TLS、時計起点）に依存する。open 系などは構造体全体を補助関数へ渡す形で依存する。
 
-レビュー指摘のとおり、VFS（GAP-0002）の解決なしに移管を進めるとパス解決を作り直す手戻りになる。また共通抽象の変更は RISC-V と MIPS に波及するため、x86 用の変更は `GuestAbi::X86_64Linux`・`I386Linux` モジュール内に閉じ込める必要がある。
+レビュー指摘のとおり、VFS（GAP-0002）の解決なしに移管を進めるとパス解決を作り直す手戻りになる。また共通抽象の変更は RISC-V と MIPS に波及するため、x86 用の変更は `GuestAbi::X86_64Linux`・`X86_32Linux` モジュール内に閉じ込める必要がある。
 
 ## 決定
 
@@ -24,7 +24,7 @@ GAP-0001 のとおり、システムコールの処理は `crates/cli/src/run.rs
 
 - `run_x86.rs` は実行ループと配線に縮み、GAP-0001 の解消条件（段階 4 の終わりの共通抽象の見直し、S4-2）の一部を満たす。
 - `guest_root` が空でない運用ができるまで、隔離の主張はしない。`guest_root` 設定時の `cwd` 表記と `/proc` 合成は follow-up として残る。
-- i386 の到達経路（GAP-0022）は本移管の対象に含めるか別 ADR で確定させる。
+- x86-32 の到達経路（GAP-0022）は本移管の対象に含めるか別 ADR で確定させる。
 
 ## 検討した代替案
 

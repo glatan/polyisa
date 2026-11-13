@@ -35,7 +35,7 @@ Task と cargo-nextest は外部のツールであり、[参照資料の台帳](
 
 ## 実装状況の生成
 
-`task status` は、追跡しているファイルだけから `docs/status/` を生成する。生成の元は、ISADL の記述、ロードマップの完了条件、設計との差の台帳、cli のシステムコールの表（`RV64_SYSCALLS`、`X86_64_SYSCALLS`、`I386_SYSCALLS`）である。テストの結果は含めない。生成物はコミットする。生成の元を変えた変更では、同じ変更の中で `task status` を実行し直す。`task check` は、生成し直した結果と `docs/status/` を比べ、食い違えば失敗する。
+`task status` は、追跡しているファイルだけから `docs/status/` を生成する。生成の元は、ISADL の記述、ロードマップの完了条件、設計との差の台帳、cli のシステムコールの表（`RV64_SYSCALLS`、`X86_64_SYSCALLS`、`X86_32_SYSCALLS`）である。テストの結果は含めない。生成物はコミットする。生成の元を変えた変更では、同じ変更の中で `task status` を実行し直す。`task check` は、生成し直した結果と `docs/status/` を比べ、食い違えば失敗する。
 
 テストは nextest で実行する。エディタから個別のテストを `cargo test` で実行してもよいが、テストの範囲と時間の上限は nextest の設定にだけ書くので、全体の検証には `cargo test` を使わない。nextest は doctest を実行しないので、doctest だけは `task test` が `cargo test --doc` で実行する。
 

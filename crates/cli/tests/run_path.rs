@@ -64,7 +64,7 @@ fn hello_x86_32() -> Vec<u8> {
 }
 
 #[test]
-fn run_path_executes_i386_hello() {
+fn run_path_executes_x86_32_hello() {
     let path = write_temp("hello386", &hello_x86_32());
     let r = polyisa_cli::run_path(&path.to_string_lossy(), &[]);
     let _ = std::fs::remove_file(&path);
