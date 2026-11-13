@@ -33,42 +33,7 @@ pub enum Outcome {
     Deadlock,
 }
 
-/// トラップの処理結果。
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum TrapOutcome {
-    /// 処理して次の命令から続ける。
-    Handled,
-    /// 終了コード付きで抜ける。
-    Exit(u32),
-    /// このスレッドは待っている。実行ループが他のスレッドへ切り替える。
-    Blocked,
-    /// 未実装として止める。
-    Unimplemented,
-}
-
-/// SYSCALL と INT 0x80 を処理する。EAX などの読み書きはここで行う。
-pub trait TrapHandler {
-    fn handle_trap(&mut self, env: &mut BareEnv, code: u32) -> TrapOutcome;
-
-    /// FS ベース（TLS）を返す。arch_prctl(ARCH_SET_FS) を処理する
-    /// ハンドラ以外は 0 を返す。
-    fn fs_base(&self) -> u64 {
-        0
-    }
-
-    /// 1 命令を実行したあと。既定では何もしない。
-    fn after_step(&mut self, _env: &mut BareEnv) {}
-
-    /// 待っているスレッドから切り替える。切り替えたら真。
-    fn on_block(&mut self, _env: &mut BareEnv) -> bool {
-        false
-    }
-
-    /// 終了を別のスレッドの実行へ引き継ぐなら真。既定では終了で抜ける。
-    fn take_exit(&mut self, _env: &mut BareEnv, _code: u32) -> bool {
-        false
-    }
-}
+pub use polyisa_os_linux::{TrapHandler, TrapOutcome};
 
 fn acc_fetch() -> Access {
     Access {
