@@ -2561,3 +2561,29 @@ pub fn sys_setresuid(env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
 pub fn sys_pselect6(env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     sys_select(env, cx)
 }
+pub fn sys_fsync(valid: bool, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // fsync(fd)。ホストへは流さず、開いている fd なら 0。
+    // Ref: SRC-LINUX (7.3).
+    if !valid {
+        set64(env, Gpr(0), cx.neg(EBADF));
+        return Some(TrapOutcome::Handled);
+    }
+    set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
+}
+
+pub fn sys_fcntl(valid: bool, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // fcntl(fd, cmd, ...)。接続中・付け替え中の標準 fd と opened fd に対して 0 を返す.
+    // printf の stdout 設定などで呼ばれる。複製やロックは行わない.
+    if !valid {
+        set64(env, Gpr(0), cx.neg(EBADF));
+        return Some(TrapOutcome::Handled);
+    }
+    set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
+}
+
+pub fn sys_fdatasync(valid: bool, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // fdatasync(fd)。shred が毎回呼ぶ。実体は fsync と同じ.
+    sys_fsync(valid, env, cx)
+}

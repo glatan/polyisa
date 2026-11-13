@@ -12279,20 +12279,19 @@ fn sys_ioprio_get(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<
 }
 
 fn sys_fsync(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // fsync(fd)。ホストへは流さず、開いている fd なら 0。
-    // Ref: SRC-LINUX (7.3).
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    // 有効性判定は状態を束ねる cli 側、実処理は os-linux 側.
     let fd = get64(env, cx.r_a) as u32;
-    if !sys.fd_valid(fd) {
-        set64(env, Gpr(0), cx.neg(EBADF));
-        return Some(TrapOutcome::Handled);
-    }
-    set64(env, Gpr(0), 0);
-    Some(TrapOutcome::Handled)
+    let valid = sys.fd_valid(fd);
+    polyisa_os_linux::x86::sys_fsync(valid, env, cx)
 }
 
 fn sys_fdatasync(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // fdatasync(fd)。shred が毎回呼ぶ。実体は fsync と同じ。
-    sys_fsync(sys, env, cx)
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    // 有効性判定は状態を束ねる cli 側、実処理は os-linux 側.
+    let fd = get64(env, cx.r_a) as u32;
+    let valid = sys.fd_valid(fd);
+    polyisa_os_linux::x86::sys_fdatasync(valid, env, cx)
 }
 
 fn sys_unshare(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
@@ -13130,16 +13129,11 @@ fn sys_umask(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapO
 }
 
 fn sys_fcntl(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // fcntl(fd, cmd, ...)。接続中・付け替え中の標準 fd と opened fd に対して 0 を返す.
-    // printf の stdout 設定などで呼ばれる。複製やロックは行わない.
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    // 有効性判定は状態を束ねる cli 側、実処理は os-linux 側.
     let fd = get64(env, cx.r_a) as u32;
     let valid = sys.fd_valid(fd);
-    if !valid {
-        set64(env, Gpr(0), cx.neg(EBADF));
-        return Some(TrapOutcome::Handled);
-    }
-    set64(env, Gpr(0), 0);
-    Some(TrapOutcome::Handled)
+    polyisa_os_linux::x86::sys_fcntl(valid, env, cx)
 }
 
 fn sys_brk(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
