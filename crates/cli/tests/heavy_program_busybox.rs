@@ -614,6 +614,7 @@ fn true_echo_uname_id_match() {
         ("bootchartd", ["bootchartd", "-h"].as_slice()),
         ("inetd", ["inetd", "-h"].as_slice()),
         ("reset", ["reset", "-h"].as_slice()),
+        ("lsusb", ["lsusb", "-h"].as_slice()),
         ("[[", ["[["].as_slice()),
         ("arp", ["arp", "-h"].as_slice()),
         ("ifconfig", ["ifconfig", "-h"].as_slice()),
