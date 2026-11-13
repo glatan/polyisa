@@ -2587,3 +2587,201 @@ pub fn sys_fdatasync(valid: bool, env: &mut BareEnv, cx: &SysCtx) -> Option<Trap
     // fdatasync(fd)。shred が毎回呼ぶ。実体は fsync と同じ.
     sys_fsync(valid, env, cx)
 }
+/// start 以降で count ページ連続の空きを探す。見つからなければ None.
+/// brk 縮小で残った写像や固定写像の上書きを避ける first-fit.
+/// MAP_FIXED でない mmap は空きを選ぶ (Ref: SRC-LINUX (7.3)).
+pub fn find_free_run(env: &BareEnv, start: u64, count: u64) -> Option<u64> {
+    use polyisa_mem::{PAGE_SIZE, PageNo};
+    // 走査上限（4GB 分）。通常は先頭で見つかる.
+    const SCAN_CAP_PAGES: u64 = 1 << 20;
+    let mut base = start.next_multiple_of(PAGE_SIZE);
+    let mut scanned = 0u64;
+    while scanned < SCAN_CAP_PAGES {
+        let mut i = 0u64;
+        while i < count {
+            let page = (base / PAGE_SIZE).checked_add(i)?;
+            if env.backend.mem.is_mapped(PageNo(page)) {
+                break;
+            }
+            i += 1;
+        }
+        if i == count {
+            return Some(base);
+        }
+        base = base.checked_add((i + 1) * PAGE_SIZE)?;
+        scanned += i + 1;
+    }
+    None
+}
+pub fn sys_brk(heap_end: &mut u64, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    use polyisa_mem::{PAGE_SIZE, Perms, VirtAddr};
+    let addr = get64(env, cx.r_a);
+    // 未初期化の非常口：像末尾を知らないため要求値を切り上げて使う。
+    // run_image 経由では init_brk 済みのため通常は通らない。
+    if *heap_end == 0 {
+        (*heap_end) = addr.next_multiple_of(PAGE_SIZE);
+        set64(env, Gpr(0), *heap_end);
+        return Some(TrapOutcome::Handled);
+    }
+    if addr == 0 {
+        // brk(0) は問い合わせであり現ブレークを返す。
+        set64(env, Gpr(0), *heap_end);
+        return Some(TrapOutcome::Handled);
+    }
+    let aligned = addr.next_multiple_of(PAGE_SIZE);
+    if aligned > *heap_end {
+        // 拡張しすぎは失敗扱い（現ブレークを返す）。
+        const MAX_GROW: u64 = 256 * 1024 * 1024;
+        if aligned - *heap_end > MAX_GROW {
+            set64(env, Gpr(0), *heap_end);
+            return Some(TrapOutcome::Handled);
+        }
+        // 縮小で残った写像は消さず、欠けたページだけ足す。
+        // 実 brk は縮小で内容を捨てないため、再拡張で上書きしない.
+        use polyisa_mem::PageNo;
+        let mut cur = *heap_end;
+        while cur < aligned {
+            if !env.backend.mem.is_mapped(PageNo(cur / PAGE_SIZE))
+                && env.backend.mem.map(VirtAddr(cur), 1, Perms::RW).is_err()
+            {
+                set64(env, Gpr(0), *heap_end);
+                return Some(TrapOutcome::Handled);
+            }
+            cur += PAGE_SIZE;
+        }
+        (*heap_end) = aligned;
+    } else {
+        // 縮小は受け付ける（写像は残す）。
+        (*heap_end) = aligned;
+    }
+    set64(env, Gpr(0), *heap_end);
+    Some(TrapOutcome::Handled)
+}
+pub fn sys_mmap(heap_end: &mut u64, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // mmap(addr, len, prot, flags, fd, offset)。匿名のみ受け付ける.
+    // ファイル-backed は未対応のため EINVAL.
+    // prot は寛容に RW で写像する (PROT_NONE 予約後の mprotect 前でも動くため).
+    use polyisa_mem::{PAGE_SIZE, Perms, VirtAddr};
+    let addr = get64(env, Gpr(7));
+    let len = get64(env, Gpr(6));
+    let _prot = get64(env, Gpr(2));
+    let flags = get64(env, Gpr(10));
+    let fd = get64(env, Gpr(8)) as i64;
+    let offset = get64(env, Gpr(9));
+    const MAP_ANONYMOUS: u64 = 0x20;
+    const MAP_FIXED: u64 = 0x10;
+    if len == 0 {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    if offset & (PAGE_SIZE - 1) != 0 {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    if flags & MAP_ANONYMOUS == 0 && fd != -1 {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    // 拡張しすぎは失敗扱い.
+    const MAX_MMAP: u64 = 1024 * 1024 * 1024;
+    if len > MAX_MMAP {
+        set64(env, Gpr(0), cx.neg(ENOMEM));
+        return Some(TrapOutcome::Handled);
+    }
+    let aligned_len = len.next_multiple_of(PAGE_SIZE);
+    let count = aligned_len / PAGE_SIZE;
+    if flags & MAP_FIXED != 0 {
+        if addr & (PAGE_SIZE - 1) != 0 {
+            set64(env, Gpr(0), cx.neg(EINVAL));
+            return Some(TrapOutcome::Handled);
+        }
+        // MAP_FIXED は既存写像を置換する。先に外してから写像する.
+        env.backend.mem.unmap(VirtAddr(addr), count);
+        if env
+            .backend
+            .mem
+            .map(VirtAddr(addr), count, Perms::RW)
+            .is_err()
+        {
+            set64(env, Gpr(0), cx.neg(ENOMEM));
+            return Some(TrapOutcome::Handled);
+        }
+        // heap_end より後ろに伸ばしたら追随する (brk との衝突回避).
+        let grown = (addr + aligned_len).next_multiple_of(PAGE_SIZE);
+        if *heap_end == 0 || grown > *heap_end {
+            *heap_end = grown;
+        }
+        set64(env, Gpr(0), addr);
+        return Some(TrapOutcome::Handled);
+    }
+    if addr == 0 {
+        if *heap_end == 0 {
+            (*heap_end) = 0x6000_0000;
+        }
+        // 縮小で残った写像を上書きしないよう空きを探す.
+        let Some(base) = find_free_run(env, *heap_end, count) else {
+            set64(env, Gpr(0), cx.neg(ENOMEM));
+            return Some(TrapOutcome::Handled);
+        };
+        if env
+            .backend
+            .mem
+            .map(VirtAddr(base), count, Perms::RW)
+            .is_err()
+        {
+            set64(env, Gpr(0), cx.neg(ENOMEM));
+            return Some(TrapOutcome::Handled);
+        }
+        (*heap_end) = base + aligned_len;
+        set64(env, Gpr(0), base);
+        return Some(TrapOutcome::Handled);
+    }
+    // ヒント付き: 範囲全体が空きのときだけ要求番地に写像し、
+    // 占有があれば heap_end から first-fit で取る (上書きしない).
+    let hint = addr & !(PAGE_SIZE - 1);
+    let hint_free = {
+        use polyisa_mem::PageNo;
+        let mut i = 0u64;
+        while i < count {
+            let page = (hint / PAGE_SIZE).checked_add(i);
+            match page {
+                Some(no) if !env.backend.mem.is_mapped(PageNo(no)) => i += 1,
+                _ => break,
+            }
+        }
+        i == count
+    };
+    if hint_free
+        && env
+            .backend
+            .mem
+            .map(VirtAddr(hint), count, Perms::RW)
+            .is_ok()
+    {
+        let grown = (hint + aligned_len).next_multiple_of(PAGE_SIZE);
+        if *heap_end == 0 || grown > *heap_end {
+            *heap_end = grown;
+        }
+        set64(env, Gpr(0), hint);
+        return Some(TrapOutcome::Handled);
+    }
+    if *heap_end == 0 {
+        (*heap_end) = 0x6000_0000;
+    }
+    let Some(base) = find_free_run(env, *heap_end, count) else {
+        set64(env, Gpr(0), cx.neg(ENOMEM));
+        return Some(TrapOutcome::Handled);
+    };
+    if env
+        .backend
+        .mem
+        .map(VirtAddr(base), count, Perms::RW)
+        .is_err()
+    {
+        set64(env, Gpr(0), cx.neg(ENOMEM));
+        return Some(TrapOutcome::Handled);
+    }
+    (*heap_end) = base + aligned_len;
+    set64(env, Gpr(0), base);
+    Some(TrapOutcome::Handled)
+}
