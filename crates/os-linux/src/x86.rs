@@ -829,3 +829,268 @@ pub fn sys_utimensat(root: &str, cwd: &str, env: &mut BareEnv, cx: &SysCtx) -> O
         }
     })
 }
+pub fn sys_adjtimex(env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // adjtimex(timex)。時計は動かさず、バッファがあれば 0 埋めして成功する。
+    let addr = get64(env, cx.r_a);
+    if addr != 0 {
+        let zeros = [0u8; 208];
+        if env.backend.mem.write(VirtAddr(addr), &zeros).is_err() {
+            set64(env, Gpr(0), cx.neg(EFAULT));
+            return Some(TrapOutcome::Handled);
+        }
+    }
+    set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
+}
+pub fn sys_fsetxattr(env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // fsetxattr(fd, ...)。fd 経由でも属性は付けず EPERM。
+    set64(env, Gpr(0), cx.neg(EPERM));
+    Some(TrapOutcome::Handled)
+}
+pub fn sys_getgroups(env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // getgroups(size, list)。所属グループは root (0) のみとみなす.
+    // size==0 では必要数を返し、そうでなければ GID 0 を書く.
+    // Ref: SRC-LINUX (7.3).
+    let size = get64(env, cx.r_a);
+    let list = get64(env, cx.r_b);
+    if size == 0 {
+        set64(env, Gpr(0), 1);
+        return Some(TrapOutcome::Handled);
+    }
+    if list == 0 {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    if env
+        .backend
+        .mem
+        .write(VirtAddr(list), &0u32.to_le_bytes())
+        .is_err()
+    {
+        return Some(TrapOutcome::Unimplemented);
+    }
+    set64(env, Gpr(0), 1.min(size));
+    Some(TrapOutcome::Handled)
+}
+pub fn sys_getitimer(env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // getitimer(which, curr). ゼロの itimerval を書く。
+    let curr = get64(env, cx.r_b);
+    if curr != 0 {
+        let zeros = [0u8; 32];
+        if env.backend.mem.write(VirtAddr(curr), &zeros).is_err() {
+            return Some(TrapOutcome::Unimplemented);
+        }
+    }
+    set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
+}
+pub fn sys_getrandom(env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // getrandom(buf, len, flags)。試作では 0 埋めして len を返す.
+    // flags は GRND_NONBLOCK(1)/GRND_RANDOM(2)/GRND_INSECURE(4) のみ受け付ける.
+    let buf = get64(env, cx.r_a);
+    let len = get64(env, cx.r_b);
+    let flags = get64(env, cx.r_c);
+    if flags & !7 != 0 {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    // 拡張しすぎは失敗扱い (0 を返す)。
+    const MAX_GETRANDOM: u64 = 256 * 1024;
+    if len > MAX_GETRANDOM {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    let zeros = vec![0u8; len as usize];
+    if len != 0
+        && env
+            .backend
+            .mem
+            .write(polyisa_mem::VirtAddr(buf), &zeros)
+            .is_err()
+    {
+        return Some(TrapOutcome::Unimplemented);
+    }
+    set64(env, Gpr(0), len);
+    Some(TrapOutcome::Handled)
+}
+pub fn sys_ioctl(env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // ioctl(fd, request, ...)。端末要求は ENOTTY。
+    // FS_IOC_GETFLAGS はフラグなしを返す。lsattr がこれでダッシュを出す。
+    // Ref: SRC-LINUX (7.3). linux/fs.h の _IOR('f', 1, long)。
+    const FS_IOC_GETFLAGS: u32 = 0x8008_6601;
+    if cx.is64 && get64(env, cx.r_b) as u32 == FS_IOC_GETFLAGS {
+        let ptr = get64(env, cx.r_c);
+        if env.backend.mem.write(VirtAddr(ptr), &[0u8; 8]).is_err() {
+            return Some(TrapOutcome::Unimplemented);
+        }
+        set64(env, Gpr(0), 0);
+        return Some(TrapOutcome::Handled);
+    }
+    set64(env, Gpr(0), cx.neg(ENOTTY));
+    Some(TrapOutcome::Handled)
+}
+pub fn sys_nanosleep(env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // nanosleep(req, rem)。req の timespec を読んで、不正なら EINVAL。
+    // 試作では待たずに 0 を返す。sleep 0 はこれで正しい。
+    // Ref: SRC-LINUX (7.3).
+    let req = get64(env, cx.r_a);
+    if req == 0 {
+        set64(env, Gpr(0), cx.neg(EFAULT));
+        return Some(TrapOutcome::Handled);
+    }
+    let mut buf = [0u8; 16];
+    if env
+        .backend
+        .mem
+        .read(VirtAddr(req), &mut buf, data_access())
+        .is_err()
+    {
+        return Some(TrapOutcome::Unimplemented);
+    }
+    let sec = i64::from_le_bytes(buf[..8].try_into().unwrap());
+    let nsec = i64::from_le_bytes(buf[8..].try_into().unwrap());
+    if sec < 0 || !(0..1_000_000_000).contains(&nsec) {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
+}
+pub fn sys_prlimit64(env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // prlimit64(pid, resource, new_limit, old_limit)。
+    // 試作では new_limit の設定は無視し、old_limit には無制限を書く.
+    // resource は 0..16 (RLIM_NLIMITS) のみ受け付ける.
+    const RLIM_NLIMITS: u64 = 16;
+    const RLIM_INFINITY: u64 = 0xffff_ffff_ffff_ffff;
+    let resource = get64(env, cx.r_b);
+    if resource >= RLIM_NLIMITS {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    let old_limit = get64(env, Gpr(10));
+    if old_limit != 0 {
+        let buf = RLIM_INFINITY.to_le_bytes();
+        // rlim_cur (8B) + rlim_max (8B) = 16B.
+        let mut both = [0u8; 16];
+        both[..8].copy_from_slice(&buf);
+        both[8..].copy_from_slice(&buf);
+        if env
+            .backend
+            .mem
+            .write(polyisa_mem::VirtAddr(old_limit), &both)
+            .is_err()
+        {
+            return Some(TrapOutcome::Unimplemented);
+        }
+    }
+    set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
+}
+pub fn sys_setitimer(env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // setitimer(which, new, old)。タイマーは動かさず、old があればゼロを書く。
+    let old = get64(env, cx.r_c);
+    if old != 0 {
+        let zeros = [0u8; 32];
+        if env.backend.mem.write(VirtAddr(old), &zeros).is_err() {
+            return Some(TrapOutcome::Unimplemented);
+        }
+    }
+    set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
+}
+pub fn sys_sysinfo(env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // sysinfo(info)。メモリと稼働時間はゲストの固定値。free / uptime が読む。
+    // 配置は UAPI の struct sysinfo（x86-64 で 112 バイト）。Ref: SRC-LINUX (7.3).
+    let buf = get64(env, cx.r_a);
+    if buf == 0 {
+        set64(env, Gpr(0), cx.neg(EFAULT));
+        return Some(TrapOutcome::Handled);
+    }
+    let mut out = [0u8; 112];
+    // uptime = 3600 秒。
+    out[0..8].copy_from_slice(&3600i64.to_le_bytes());
+    // totalram = 1 GiB、freeram = 512 MiB、mem_unit = 1。
+    out[32..40].copy_from_slice(&(1024u64 * 1024 * 1024).to_le_bytes());
+    out[40..48].copy_from_slice(&(512u64 * 1024 * 1024).to_le_bytes());
+    // procs = 1。
+    out[80..82].copy_from_slice(&1u16.to_le_bytes());
+    out[104..108].copy_from_slice(&1u32.to_le_bytes());
+    if env.backend.mem.write(VirtAddr(buf), &out).is_err() {
+        return Some(TrapOutcome::Unimplemented);
+    }
+    set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
+}
+pub fn sys_syslog(env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // syslog / klogctl。リングバッファは固定の 1 行。dmesg が読む。
+    // type: 3=READ_ALL, 2=READ, 4=READ_CLEAR, 10=SIZE_BUFFER。Ref: SRC-LINUX (7.3).
+    const MSG: &[u8] = b"[    0.000000] polyisa\n";
+    let typ = get64(env, cx.r_a) as i32;
+    let buf = get64(env, cx.r_b);
+    let len = get64(env, cx.r_c) as i64;
+    if typ == 10 {
+        set64(env, Gpr(0), MSG.len() as u64);
+        return Some(TrapOutcome::Handled);
+    }
+    if matches!(typ, 2..=4) {
+        if len < 0 {
+            set64(env, Gpr(0), cx.neg(EINVAL));
+            return Some(TrapOutcome::Handled);
+        }
+        if buf == 0 {
+            set64(env, Gpr(0), cx.neg(EFAULT));
+            return Some(TrapOutcome::Handled);
+        }
+        let n = core::cmp::min(MSG.len(), len as usize);
+        if env.backend.mem.write(VirtAddr(buf), &MSG[..n]).is_err() {
+            return Some(TrapOutcome::Unimplemented);
+        }
+        set64(env, Gpr(0), n as u64);
+        return Some(TrapOutcome::Handled);
+    }
+    set64(env, Gpr(0), cx.neg(EPERM));
+    Some(TrapOutcome::Handled)
+}
+pub fn sys_time(env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // time(tloc)。ホスト時刻の秒を返し、tloc!=NULL なら書き込む.
+    // clock_gettime の ENOSYS フォールバックで呼ばれる.
+    let tloc = get64(env, cx.r_a);
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    if tloc != 0
+        && env
+            .backend
+            .mem
+            .write(VirtAddr(tloc), &secs.to_le_bytes())
+            .is_err()
+    {
+        return Some(TrapOutcome::Unimplemented);
+    }
+    set64(env, Gpr(0), secs as u64);
+    Some(TrapOutcome::Handled)
+}
+pub fn sys_uname(env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // uname(buf)。struct utsname (65B x 6、domainname 含む) を固定値で埋めて 0 を返す.
+    // Ref: SRC-LINUX (7.3).
+    let buf = get64(env, cx.r_a);
+    let fields: [&[u8]; 6] = [
+        b"Linux",
+        b"localhost",
+        b"6.0.0",
+        b"#1",
+        b"x86_64",
+        b"localdomain",
+    ];
+    let mut out = [0u8; 65 * 6];
+    for (i, f) in fields.iter().enumerate() {
+        let base = i * 65;
+        out[base..base + f.len()].copy_from_slice(f);
+    }
+    if env.backend.mem.write(VirtAddr(buf), &out).is_err() {
+        return Some(TrapOutcome::Unimplemented);
+    }
+    set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
+}
