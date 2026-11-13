@@ -44,11 +44,6 @@ pub struct Linux {
     /// プログラムブレーク（ヒープ末尾）。0 は未初期化。
     /// `run_image_x86_64` がロード後に像末尾へ進める。
     heap_end: u64,
-    /// FS ベース（TLS）。arch_prctl(ARCH_SET_FS) で記録する。
-    /// FS 相対アドレッシングは未対応のため、値の保持のみ行う。
-    pub fs_base: u64,
-    /// GS ベース（i386 TLS）。set_thread_area の user_desc.base_addr を記録する。
-    pub gs_base: u64,
     /// robust futex リスト先頭。set_robust_list で記録する。
     /// 終了時の書き戻しは未対応のため、値の保持のみ行う。
     robust_head: u64,
@@ -523,8 +518,6 @@ impl Linux {
             ioprio_known: self.ioprio_known,
             is64: self.is64,
             heap_end: self.heap_end,
-            fs_base: self.fs_base,
-            gs_base: self.gs_base,
             robust_head: self.robust_head,
             rseq_addr: self.rseq_addr,
             exe_path: self.exe_path.clone(),
@@ -1884,7 +1877,7 @@ fn sys_set_tid_address(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Optio
     crate::x86::sys_set_tid_address(me, env, cx)
 }
 
-fn sys_set_thread_area(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+fn sys_set_thread_area(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     // set_thread_area(user_desc*)。entry_number=-1 のとき最初の TLS スロット 6 を
     // 割り当てて書き戻し、base_addr を GS ベースとして記憶する。i386 musl の TLS 初期化.
     // Ref: SRC-LINUX (7.3).
@@ -1909,7 +1902,10 @@ fn sys_set_thread_area(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Optio
         set64(env, Gpr(0), cx.neg(EFAULT));
         return Some(TrapOutcome::Handled);
     }
-    sys.gs_base = u32::from_le_bytes(desc[4..8].try_into().unwrap()) as u64;
+    env.backend.set(
+        polyisa_guest_x86::sem::gs_base_ref(),
+        u64::from(u32::from_le_bytes(desc[4..8].try_into().unwrap())),
+    );
     set64(env, Gpr(0), 0);
     Some(TrapOutcome::Handled)
 }
@@ -2743,12 +2739,9 @@ fn sys_readlink(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapO
     crate::x86::sys_readlink(&root, &cwd, &exe, &sys.fds, &sys.std_paths, env, cx)
 }
 
-fn sys_arch_prctl(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
-    let mut v = sys.fs_base;
-    let r = crate::x86::sys_arch_prctl(&mut v, env, cx);
-    sys.fs_base = v;
-    r
+fn sys_arch_prctl(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // FS ベースは CPU 状態に置く。実体は `os-linux` にある.
+    crate::x86::sys_arch_prctl(env, cx)
 }
 
 fn sys_dup(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
@@ -3356,19 +3349,11 @@ fn install_exec(
         .set(polyisa_guest_x86::sem::eip_ref(), ehdr.entry as u32);
     sys.init_brk(image_end);
     sys.exe_path = path.to_string();
-    sys.fs_base = 0;
+    env.backend.set(polyisa_guest_x86::sem::fs_base_ref(), 0);
     Ok(())
 }
 
 impl TrapHandler for Linux {
-    fn fs_base(&self) -> u64 {
-        self.fs_base
-    }
-
-    fn gs_base(&self) -> u64 {
-        self.gs_base
-    }
-
     fn init_brk(&mut self, image_end: u64) {
         Linux::init_brk(self, image_end);
     }
@@ -4173,7 +4158,10 @@ mod tests {
         set64(&mut env, Gpr(6), 0x5000);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), 0);
-        assert_eq!(sys.fs_base, 0x5000);
+        assert_eq!(
+            env.backend.get(polyisa_guest_x86::sem::fs_base_ref()),
+            0x5000
+        );
         // ARCH_GET_FS(0x1003) は記録値を [addr] に書いて 0 を返す。
         set64(&mut env, Gpr(0), abi::ARCH_PRCTL);
         set64(&mut env, Gpr(7), 0x1003);

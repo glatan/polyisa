@@ -52,6 +52,11 @@ pub struct CpuState {
     pub st_exp: [u16; 8],
     /// x87 レジスタの仮数。bit63 が整数ビット。
     pub st_sig: [u64; 8],
+    /// FS セグメントのベース（TLS）。arch_prctl(ARCH_SET_FS) 相当で設定する。
+    /// 実機ではセグメントディスクリプタキャッシュに対応する CPU 状態。
+    pub fs_base: u64,
+    /// GS セグメントのベース（i386 TLS）。set_thread_area で設定する。
+    pub gs_base: u64,
 }
 
 #[cfg(test)]
@@ -82,6 +87,8 @@ mod tests {
         assert_eq!(core::mem::offset_of!(CpuState, top), 394);
         assert_eq!(core::mem::offset_of!(CpuState, st_exp), 396);
         assert_eq!(core::mem::offset_of!(CpuState, st_sig), 416);
+        assert_eq!(core::mem::offset_of!(CpuState, fs_base), 480);
+        assert_eq!(core::mem::offset_of!(CpuState, gs_base), 488);
     }
 
     #[test]

@@ -2547,9 +2547,10 @@ fn step_x86(
     // REX 拡張は reg/rm/SIB 抽出で対応済み (R/R/B/X)。W は rex_w で切替.
     let _ = rex;
     // FS/GS 上書きの有無とベース。dispatch 側でセグメント相対アドレッシングに使う.
-    // i386 musl は GS (TLS)、x86-64 は FS を使う。
-    let fs = has_fs.then(|| sys.fs_base());
-    let seg = fs.or(has_gs.then(|| sys.gs_base()));
+    // i386 musl は GS (TLS)、x86-64 は FS を使う。ベースは CPU 状態の
+    // セグメントベースレジスタを読む（arch_prctl / set_thread_area が書く）。
+    let fs = has_fs.then(|| env.backend.get(sem::fs_base_ref()));
+    let seg = fs.or(has_gs.then(|| env.backend.get(sem::gs_base_ref())));
     // imm/disp の取り出し。32ビット値は LE 実バイト列から復元する。
     let imm32 = || (word as u32).swap_bytes();
     let disp8 = || (word & 0xff) as u8 as i8;
@@ -10765,8 +10766,8 @@ mod tests {
         // FS 絶対番地のため disp=target-fs_base=0x500 (RIP相対ではない)。
         // fs_base=0x1000、disp=0x500 で [0x1500] を読み、exit(低32)。
         let mut sys = Linux::x86_64();
-        sys.fs_base = 0x1000;
         let mut env = bare();
+        env.backend.set(sem::fs_base_ref(), 0x1000);
         let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
         env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
         env.backend
@@ -10790,8 +10791,8 @@ mod tests {
         // FS 上書き + REX.W 89 SIB直接番地 (MOV FS:[disp32],RAX) を run する。
         // fs_base=0x1000、disp=0x500 で [0x1500] へ64bit格納し、exit(0)。
         let mut sys = Linux::x86_64();
-        sys.fs_base = 0x1000;
         let mut env = bare();
+        env.backend.set(sem::fs_base_ref(), 0x1000);
         let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
         env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
         let prog: &[u8] = &[
@@ -10819,8 +10820,8 @@ mod tests {
         // fs_base=0x1000、disp=0x500 で [0x1500]=0x11223344 になり、exit(0)。
         // SIB=0x25 (no_index) の mod=00 形。fetch 長 11B+接頭辞の経路検証も兼ねる。
         let mut sys = Linux::x86_64();
-        sys.fs_base = 0x1000;
         let mut env = bare();
+        env.backend.set(sem::fs_base_ref(), 0x1000);
         let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
         env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
         let prog: &[u8] = &[
@@ -10846,8 +10847,8 @@ mod tests {
         // FS 上書き + 88 SIB 直接番地 (MOV FS:[disp32],r8) を run する。
         // fs_base=0x1000、disp=0x611、AL=0x77 -> [0x1611]=0x77、exit(0)。
         let mut sys = Linux::x86_64();
-        sys.fs_base = 0x1000;
         let mut env = bare();
+        env.backend.set(sem::fs_base_ref(), 0x1000);
         let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
         env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
         env.backend.set(Gpr(0).state(), 0x77);
@@ -10873,8 +10874,8 @@ mod tests {
         // FS 上書き + REX.W 03 SIB 直接番地 (ADD RDX,FS:[disp32]) を run する。
         // fs_base=0x1000、disp=0 として [0x1000]=0x40 を RDX=0x10 に加え、exit(0x50)。
         let mut sys = Linux::x86_64();
-        sys.fs_base = 0x1000;
         let mut env = bare();
+        env.backend.set(sem::fs_base_ref(), 0x1000);
         let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
         env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
         env.backend
@@ -10897,8 +10898,8 @@ mod tests {
     fn fs_relative_mov_eax_memnd() {
         // FS 上書き + 8B mod=00 [base] (MOV EAX,FS:[RAX]) を run する.
         let mut sys = Linux::x86_64();
-        sys.fs_base = 0x1000;
         let mut env = bare();
+        env.backend.set(sem::fs_base_ref(), 0x1000);
         let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
         env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
         env.backend

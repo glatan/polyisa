@@ -1606,19 +1606,21 @@ pub fn read_sched_priority(env: &mut BareEnv, addr: u64) -> Option<i32> {
     }
     Some(i32::from_le_bytes(buf))
 }
-pub fn sys_arch_prctl(fs_base: &mut u64, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+pub fn sys_arch_prctl(env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     // arch_prctl (x86-64 のみ)。TLS の FS ベース設定を受け付ける。
+    // FS ベースは CPU 状態（`CpuState::fs_base`）に置く。
     // Ref: SRC-LINUX (7.3) arch/x86/include/uapi/asm/prctl.h.
     const ARCH_SET_FS: u64 = 0x1002;
     const ARCH_GET_FS: u64 = 0x1003;
     let op = get64(env, cx.r_a);
     if op == ARCH_SET_FS {
-        *fs_base = get64(env, cx.r_b);
+        let base = get64(env, cx.r_b);
+        env.backend.set(polyisa_guest_x86::sem::fs_base_ref(), base);
         set64(env, Gpr(0), 0);
         return Some(TrapOutcome::Handled);
     }
     if op == ARCH_GET_FS {
-        let base = *fs_base;
+        let base = env.backend.get(polyisa_guest_x86::sem::fs_base_ref());
         let dst = get64(env, cx.r_b);
         let buf = base.to_le_bytes();
         if env
@@ -2897,8 +2899,8 @@ pub fn sys_mmap(heap_end: &mut u64, env: &mut BareEnv, cx: &SysCtx) -> Option<Tr
     Some(TrapOutcome::Handled)
 }
 
-/// eip レジスタの読み出し（`cli` 側の実行ループからは `fs_base` 等の状態が
-/// `TrapHandler` 経由で届くため、トラップ側では eip をここで取り出す）。
+/// eip レジスタの読み出し。FS/GS ベースは `CpuState` のレジスタなので、
+/// トラップ側からも実行ループ側からも同じ `env.backend` 経由で届く。
 pub fn eip_of(env: &mut BareEnv) -> u32 {
     env.backend.get(polyisa_guest_x86::sem::eip_ref())
 }

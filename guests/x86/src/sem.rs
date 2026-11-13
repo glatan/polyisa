@@ -78,6 +78,16 @@ pub fn x_ref(r: Gpr) -> StateRef<W64> {
     StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, x) + ((r.0 - 8) as usize) * 8)
 }
 
+/// FS セグメントベースを指す（x86-64 TLS）。
+pub fn fs_base_ref() -> StateRef<W64> {
+    StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, fs_base))
+}
+
+/// GS セグメントベースを指す（i386 TLS）。
+pub fn gs_base_ref() -> StateRef<W64> {
+    StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, gs_base))
+}
+
 /// 64ビットレジスタを読む（0-7 は上位 h と下位 g を結合し、8-15 は x を読む）。
 pub fn read64<B: Backend>(b: &mut B, r: Gpr) -> B::V<W64> {
     if r.0 < 8 {

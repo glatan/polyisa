@@ -41,18 +41,6 @@ pub enum TrapOutcome {
 pub trait TrapHandler {
     fn handle_trap(&mut self, env: &mut BareEnv, code: u32) -> TrapOutcome;
 
-    /// FS ベース（TLS）を返す。arch_prctl(ARCH_SET_FS) を処理する
-    /// ハンドラ以外は 0 を返す。
-    fn fs_base(&self) -> u64 {
-        0
-    }
-
-    /// GS ベース（i386 TLS）を返す。set_thread_area を処理する
-    /// ハンドラ以外は 0 を返す。
-    fn gs_base(&self) -> u64 {
-        0
-    }
-
     /// プログラムブレークの初期値を伝える。ヒープを持つ
     /// ハンドラだけが実装する。既定では何もしない。
     fn init_brk(&mut self, _image_end: u64) {}
