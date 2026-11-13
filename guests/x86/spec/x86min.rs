@@ -3,7 +3,8 @@
 // Gap: GAP-0015
 // x86 最小の ISADL モデル（段階4の最小）。
 //
-// i386 の105件に ModRM/SIB 汎用 23件と string・NOP・MOVSXD・C7・83 を加えた計106件。
+// 初期の最小構成（i386 の105件に ModRM/SIB 汎用 23件等を加えた計106件）から
+// 段階4の拡張で増えた。記述数は `task status` の生成値（docs/status/isa-x86.md）を参照。
 // REX 接頭辞はデコード前に剥がし、Insは共有して意味論で切り替える。
 // 可変長（8/16/24/32/40/48/56ビット）のデコード入口と
 // ModRM/SIB は base/index/scale 汎用形（where 付き）で確かめる。
