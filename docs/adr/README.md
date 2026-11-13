@@ -7,7 +7,7 @@
 | 番号 | 判断 | 状態 |
 |---|---|---|
 | [0001](0001-no-external-crates.md) | 外部クレートに依存しない | 承認 |
-| [0002](0002-isa-description-language.md) | ISA の静的な性質を ISADL で記述し、`build.rs` で Rust のコードを生成する | 承認 |
+| [0002](0002-isa-description-language.md) | ISA の静的な性質を ISADL で記述し、`build.rs` で Rust のコードを生成する | 置き換え済み（ADR-0017） |
 | [0003](0003-semantics-generic-over-backend.md) | 命令意味論をバックエンドトレイトに対して総称的に一度だけ書く | 承認 |
 | [0004](0004-user-mode-virtual-kernel.md) | ユーザーモードの OS のサービスをプロセス内の仮想カーネルで実装する | 承認 |
 | [0005](0005-functional-first-timing.md) | 機能の実行とタイミングモデルを分離し、命令イベントで接続する | 承認 |
@@ -22,6 +22,8 @@
 | [0014](0014-statfs-number-table-only.md) | statfs 系は番号表だけを持ち、実行しない | 提案 |
 | [0015](0015-syscall-handling-migration.md) | システムコールの処理を cli から kernel と os-linux へ移す | 承認 |
 | [0016](0016-execution-loop-driver.md) | 実行ループの駆動を engine に置き、ISA 別の step は呼び出し側に残す | 承認 |
+| [0017](0017-isadl-rust-dsl.md) | ISADL の記述面は Rust で組み立てる `Model` を正規とする | 承認 |
+| [0018](0018-x86min-enumerated-encoding.md) | x86-min のエンコーディングは変形ごとの列挙で書き、ModRM/SIB フックは将来に置く | 承認 |
 
 ## 書き方
 

@@ -1,11 +1,11 @@
 // Copyright (c) polyisa contributors
 // SPDX-License-Identifier: MIT OR Apache-2.0
-// Gap: GAP-0006
-//! ISADL の検査済みモデル。字句解析と構文解析は後の段階で足す。
+//! ISADL の検査済みモデル。記述面は `guests/<isa>/spec/*.rs` がこのモデルを
+//! 組み立てる Rust DSL とする（ADR-0017）。`.isadl` テキストの構文解析は
+//! 実装せず、設計文書の文法はフロントエンドの設計として残る。
 //!
 //! 詳しくは [ISA 記述言語](../../../docs/design/isa-description.md) を見る。
 //! この骨格は、ビットパターンの照合、述語の評価、静的検査の核を提供する。
-//! ファイル単位の構文解析（`.isadl` の全文法）は `isadl` 実装時に文法の参照文書として確定させる。
 
 #![forbid(unsafe_code)]
 

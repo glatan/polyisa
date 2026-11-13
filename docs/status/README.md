@@ -49,7 +49,7 @@
 
 ## 設計との差
 
-台帳は [設計との差の台帳](../gaps.md) にある。未着手は 4 件、代替は 10 件、対象外は 1 件である。
+台帳は [設計との差の台帳](../gaps.md) にある。未着手は 4 件、代替は 8 件、対象外は 3 件である。
 
 | ID | 区分 | 設計 |
 |---|---|---|
@@ -57,7 +57,7 @@
 | GAP-0002 | 代替 | [ユーザーモード「仮想ファイルシステム」](../design/user-mode.md#仮想ファイルシステム) |
 | GAP-0004 | 対象外 | [ホスト抽象化「必要なホストの機能」](../design/host.md#必要なホストの機能) |
 | GAP-0005 | 代替 | [開発作業とローカル検証「オラクルがない場合の扱い」](../design/dev-workflow.md#オラクルがない場合の扱い) |
-| GAP-0006 | 代替 | [ISA 記述言語（ISADL）「ファイルの配置」](../design/isa-description.md#ファイルの配置) |
+| GAP-0006 | 対象外 | [ISA 記述言語（ISADL）「ファイルの配置」](../design/isa-description.md#ファイルの配置) |
 | GAP-0007 | 代替 | [実行エンジン「実行ループ」](../design/execution-engine.md#実行ループ) |
 | GAP-0008 | 未着手 | [実行エンジン「観測点」](../design/execution-engine.md#観測点) |
 | GAP-0009 | 代替 | [浮動小数点と十進演算「検証」](../design/floating-point.md#検証) |
@@ -65,6 +65,6 @@
 | GAP-0011 | 未着手 | [検証戦略「7. プログラム単位のテスト」](../design/testing.md#7-プログラム単位のテスト) |
 | GAP-0012 | 代替 | [ワークスペース構成「依存規則」](../design/workspace.md#依存規則) |
 | GAP-0014 | 代替 | [ISA 記述言語（ISADL）「形式と命令」](../design/isa-description.md#形式と命令) |
-| GAP-0015 | 代替 | [ISA 記述言語（ISADL）「オペコード表」](../design/isa-description.md#オペコード表)、[同「フィールドとオペランド」](../design/isa-description.md#フィールドとオペランド) |
+| GAP-0015 | 対象外 | [ISA 記述言語（ISADL）「オペコード表」](../design/isa-description.md#オペコード表)、[同「フィールドとオペランド」](../design/isa-description.md#フィールドとオペランド) |
 | GAP-0021 | 未着手 | [検証戦略「テストの網羅の記録」](../design/testing.md#テストの網羅の記録) |
 | GAP-0022 | 代替 | [ロードマップ「段階 4：x86」](../design/roadmap.md#段階-4x86) |

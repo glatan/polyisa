@@ -1710,7 +1710,8 @@ pub fn run_mode(
 
 /// 1 命令ぶんのフェッチ・解読・意味論とトラップ境界の解決。
 /// 継続なら `Ok(())`、退出なら退出理由を返す。
-// Gap: GAP-0015（fetch_len・dispatch の手組みのバイト取り出しを ISADL に乗せる）
+/// 命令長の判定（`fetch_len`）とオペランドの取り出し（`dispatch`）は
+/// 手で書く。ISADL 側への乗せ換えは ADR-0018 で先送りした。
 #[allow(clippy::too_many_lines)]
 fn step_x86(
     env: &mut BareEnv,

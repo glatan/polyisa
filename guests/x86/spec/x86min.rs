@@ -1,7 +1,10 @@
 // Copyright (c) polyisa contributors
 // SPDX-License-Identifier: MIT OR Apache-2.0
-// Gap: GAP-0015
 // x86 最小の ISADL モデル（段階4の最小）。
+//
+// オペコード表と ModRM/SIB フックは使わず、オペランドの置き方ごとに
+// 命令を列挙する方針を採る（ADR-0018）。命令長の判定とオペランドの
+// 取り出しは実行側（`cli` の `step_x86`）が担う。
 //
 // 初期の最小構成（i386 の105件に ModRM/SIB 汎用 23件等を加えた計106件）から
 // 段階4の拡張で増えた。記述数は `task status` の生成値（docs/status/isa-x86.md）を参照。
