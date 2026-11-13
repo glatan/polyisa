@@ -16374,6 +16374,67 @@ mod tests {
     }
 
     #[test]
+    fn guest_root_confines_openat_and_chdir() {
+        use polyisa_os_linux::x86_64 as abi;
+        let root = std::env::temp_dir().join(format!("polyisa-jail-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let jail = root.join("jail");
+        std::fs::create_dir_all(jail.join("sub")).unwrap();
+        std::fs::write(jail.join("f"), b"Q").unwrap();
+        std::fs::write(root.join("evil"), b"X").unwrap();
+
+        let mut sys = CliLinux::x86_64();
+        sys.guest_root = jail.to_str().unwrap().to_string();
+        sys.cwd = "/".to_string();
+        let mut env = bare();
+        // openat("f") は jail/f を開く。
+        env.backend.mem.write(VirtAddr(0x300), b"f\0").unwrap();
+        set64(&mut env, Gpr(0), abi::OPENAT);
+        set64(&mut env, Gpr(7), u64::from(AT_FDCWD_U32));
+        set64(&mut env, Gpr(6), 0x300);
+        set64(&mut env, Gpr(2), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let fd = get64(&mut env, Gpr(0));
+        assert!(fd < 0x1000, "openat jail/f: {fd:#x}");
+        set64(&mut env, Gpr(0), abi::READ);
+        set64(&mut env, Gpr(7), fd);
+        set64(&mut env, Gpr(6), 0x500);
+        set64(&mut env, Gpr(2), 1);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 1);
+        let mut byte = [0u8; 1];
+        env.backend
+            .mem
+            .read(VirtAddr(0x500), &mut byte, data_access())
+            .unwrap();
+        assert_eq!(byte, *b"Q");
+        // jail 外への脱出は EPERM。兄弟の evil は開かない。
+        env.backend
+            .mem
+            .write(VirtAddr(0x300), b"../evil\0")
+            .unwrap();
+        set64(&mut env, Gpr(0), abi::OPENAT);
+        set64(&mut env, Gpr(7), u64::from(AT_FDCWD_U32));
+        set64(&mut env, Gpr(6), 0x300);
+        set64(&mut env, Gpr(2), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EPERM));
+        // chdir("sub") は成功、"/" からの ".." は EPERM。
+        env.backend.mem.write(VirtAddr(0x300), b"sub\0").unwrap();
+        set64(&mut env, Gpr(0), abi::CHDIR);
+        set64(&mut env, Gpr(7), 0x300);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        sys.cwd = "/".to_string();
+        env.backend.mem.write(VirtAddr(0x300), b"..\0").unwrap();
+        set64(&mut env, Gpr(0), abi::CHDIR);
+        set64(&mut env, Gpr(7), 0x300);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EPERM));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn resolve_guest_path_confines_under_root() {
         assert_eq!(
             resolve_guest_path("/jail", "/", "/etc/passwd"),
