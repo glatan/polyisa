@@ -566,3 +566,179 @@ mod tests {
         );
     }
 }
+
+/// 開いたファイルの表。ゲスト fd 3 以降に対応し、ホストパスを覚える。
+/// 標準入出力 (0/1/2) は含まない。パイプ端の表とは別であり、呼び出し側で番号を揃える。
+#[derive(Debug, Default)]
+pub struct FdTable {
+    files: Vec<Option<std::fs::File>>,
+    paths: Vec<Option<String>>,
+}
+
+impl FdTable {
+    /// ゲスト fd に対応する配列添字。3 未満は範囲外として扱う.
+    fn index(fd: u32) -> Option<usize> {
+        fd.checked_sub(3).map(|i| i as usize)
+    }
+
+    /// 開いているファイルの数ではなく、スロット数である.
+    pub fn len(&self) -> usize {
+        self.files.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.files.is_empty()
+    }
+
+    /// 空きスロットを探す。`extra_free` が真のものだけ使う（パイプ端との共有確認用）.
+    pub fn first_hole_where(&self, mut extra_free: impl FnMut(usize) -> bool) -> Option<usize> {
+        self.files
+            .iter()
+            .enumerate()
+            .position(|(i, f)| f.is_none() && extra_free(i))
+    }
+
+    /// 空きスロットか末尾に置き、ゲスト fd を返す.
+    pub fn alloc_where(
+        &mut self,
+        file: Option<std::fs::File>,
+        extra_free: impl FnMut(usize) -> bool,
+    ) -> u32 {
+        match self.first_hole_where(extra_free) {
+            Some(i) => {
+                self.files[i] = file;
+                (3 + i) as u32
+            }
+            None => {
+                self.files.push(file);
+                (3 + self.files.len() - 1) as u32
+            }
+        }
+    }
+
+    /// 空きスロットか末尾に置く。パイプ端と番号を共有しない用途向け.
+    pub fn alloc(&mut self, file: Option<std::fs::File>) -> u32 {
+        self.alloc_where(file, |_| true)
+    }
+
+    /// 指定のゲスト fd に置く。足りない分は空きで伸ばす（dup2・install_pipe 用）.
+    /// 3 未満は何もしない.
+    pub fn place(&mut self, fd: u32, file: Option<std::fs::File>) {
+        let Some(i) = Self::index(fd) else {
+            return;
+        };
+        while self.files.len() <= i {
+            self.files.push(None);
+        }
+        self.files[i] = file;
+    }
+
+    /// 指定のゲスト fd を空ける。範囲外と 3 未満は何もしない.
+    pub fn clear(&mut self, fd: u32) {
+        if let Some(i) = Self::index(fd)
+            && let Some(slot) = self.files.get_mut(i)
+        {
+            *slot = None;
+        }
+    }
+
+    pub fn get(&self, fd: u32) -> Option<&std::fs::File> {
+        Self::index(fd)
+            .and_then(|i| self.files.get(i))
+            .and_then(|f| f.as_ref())
+    }
+
+    pub fn get_mut(&mut self, fd: u32) -> Option<&mut std::fs::File> {
+        Self::index(fd)
+            .and_then(|i| self.files.get_mut(i))
+            .and_then(|f| f.as_mut())
+    }
+
+    /// ゲスト fd にホストパスを覚える。3 未満は何もしない.
+    pub fn remember_path(&mut self, fd: u32, path: String) {
+        let Some(i) = Self::index(fd) else {
+            return;
+        };
+        while self.paths.len() <= i {
+            self.paths.push(None);
+        }
+        self.paths[i] = Some(path);
+    }
+
+    /// ゲスト fd のパスを捨てる。範囲外と 3 未満は何もしない.
+    pub fn forget_path(&mut self, fd: u32) {
+        if let Some(i) = Self::index(fd)
+            && let Some(slot) = self.paths.get_mut(i)
+        {
+            *slot = None;
+        }
+    }
+
+    /// ゲスト fd に覚えたホストパス.
+    pub fn path_of(&self, fd: u32) -> Option<&str> {
+        Self::index(fd)
+            .and_then(|i| self.paths.get(i))
+            .and_then(|p| p.as_deref())
+    }
+
+    /// 開ファイルの複製を持つ表。fork した子の初期状態に使う.
+    /// 複製に失敗したファイルは空きスロットとして扱う.
+    pub fn try_clone(&self) -> Self {
+        Self {
+            files: self
+                .files
+                .iter()
+                .map(|f| f.as_ref().and_then(|f| f.try_clone().ok()))
+                .collect(),
+            paths: self.paths.clone(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod fd_table_tests {
+    use super::*;
+
+    fn temp_file() -> std::fs::File {
+        let path = std::env::temp_dir().join(format!("polyisa-fdtable-{}", std::process::id()));
+        std::fs::File::create(&path).unwrap()
+    }
+
+    #[test]
+    fn alloc_reuses_closed_holes() {
+        let mut t = FdTable::default();
+        assert_eq!(t.alloc(Some(temp_file())), 3);
+        assert_eq!(t.alloc(Some(temp_file())), 4);
+        t.clear(3);
+        assert_eq!(t.alloc(Some(temp_file())), 3);
+        assert_eq!(t.alloc_where(None, |_| true), 5);
+        assert!(t.get(4).is_some());
+        assert!(t.get(9).is_none());
+        assert!(t.get(2).is_none());
+    }
+
+    #[test]
+    fn paths_follow_fds() {
+        let mut t = FdTable::default();
+        t.remember_path(3, "a".to_string());
+        assert_eq!(t.path_of(3), Some("a"));
+        t.forget_path(3);
+        assert_eq!(t.path_of(3), None);
+        t.remember_path(2, "std".to_string());
+        assert_eq!(t.path_of(2), None);
+    }
+
+    #[test]
+    fn clone_keeps_paths_and_files() {
+        let mut t = FdTable::default();
+        t.remember_path(3, "a".to_string());
+        t.alloc(Some(temp_file()));
+        let u = t.try_clone();
+        assert_eq!(u.path_of(3), Some("a"));
+        assert!(u.get(3).is_some());
+        assert!(u.get(4).is_none());
+        let _ = std::fs::remove_file(
+            std::env::temp_dir().join(format!("polyisa-fdtable-{}", std::process::id())),
+        );
+    }
+}

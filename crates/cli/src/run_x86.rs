@@ -9975,7 +9975,8 @@ fn run_elf_x86_64_at(
 #[derive(Default)]
 pub struct CliLinux {
     reported: Vec<u64>,
-    fds: Vec<Option<std::fs::File>>,
+    /// 開いたファイルの表（ゲスト fd 3 以降）。仮想カーネルの fd 管理を使う.
+    fds: polyisa_kernel::FdTable,
     /// 標準 fd (0/1/2) の付け替え先。close 後に open したファイルが入る.
     /// uniq のように stdin をファイルに付け替える applet のため.
     /// 読取り用・書込み用いずれのファイルも入る.
@@ -10010,8 +10011,6 @@ pub struct CliLinux {
     dir_done: Vec<u32>,
     /// getdents64 の続き。fd と、次に返す名前の添字。
     dir_pos: Vec<(u32, usize)>,
-    /// openat で開いたホストパス。ゲスト fd とホストの fd 番号は一致しない。
-    fd_paths: Vec<Option<String>>,
     /// 標準 fd に付け替えたファイルのホストパス。
     std_paths: [Option<String>; 3],
     /// Some のとき、fd 1 の出力をここへ溜める。None のときはホストの stdout。
@@ -10140,9 +10139,7 @@ impl CliLinux {
         if fd < 3 {
             self.std_files[fd as usize].as_ref()
         } else {
-            self.fds
-                .get(fd.wrapping_sub(3) as usize)
-                .and_then(|f| f.as_ref())
+            self.fds.get(fd)
         }
     }
 
@@ -10151,9 +10148,7 @@ impl CliLinux {
         if fd < 3 {
             self.std_files[fd as usize].as_mut()
         } else {
-            self.fds
-                .get_mut(fd.wrapping_sub(3) as usize)
-                .and_then(|f| f.as_mut())
+            self.fds.get_mut(fd)
         }
     }
 
@@ -10166,11 +10161,7 @@ impl CliLinux {
     fn fd_valid(&self, fd: u32) -> bool {
         self.pipe_end(fd).is_some()
             || (fd < 3 && (!self.std_closed[fd as usize] || self.std_files[fd as usize].is_some()))
-            || self
-                .fds
-                .get(fd.wrapping_sub(3) as usize)
-                .and_then(|f| f.as_ref())
-                .is_some()
+            || self.fds.get(fd).is_some()
     }
 
     fn pipe_end(&self, fd: u32) -> Option<PipeEnd> {
@@ -10184,23 +10175,15 @@ impl CliLinux {
     }
 
     fn alloc_pipe_fd(&mut self, end: PipeEnd) -> u32 {
-        let hole = self.fds.iter().enumerate().position(|(idx, file)| {
-            file.is_none() && self.pipe_ends.get(idx).is_none_or(|slot| slot.is_none())
+        let fd = self.fds.alloc_where(None, |idx| {
+            self.pipe_ends.get(idx).is_none_or(|slot| slot.is_none())
         });
-        if let Some(idx) = hole {
-            while self.pipe_ends.len() <= idx {
-                self.pipe_ends.push(None);
-            }
-            self.pipe_ends[idx] = Some(end);
-            return (3 + idx) as u32;
-        }
-        self.fds.push(None);
-        let idx = self.fds.len() - 1;
+        let idx = fd.wrapping_sub(3) as usize;
         while self.pipe_ends.len() <= idx {
             self.pipe_ends.push(None);
         }
         self.pipe_ends[idx] = Some(end);
-        (3 + idx) as u32
+        fd
     }
 
     fn close_pipe(&mut self, fd: u32) {
@@ -10232,13 +10215,10 @@ impl CliLinux {
             return;
         }
         let idx = newfd.wrapping_sub(3) as usize;
-        while self.fds.len() <= idx {
-            self.fds.push(None);
-        }
         while self.pipe_ends.len() <= idx {
             self.pipe_ends.push(None);
         }
-        self.fds[idx] = None;
+        self.fds.place(newfd, None);
         self.pipe_ends[idx] = Some(end);
     }
 
@@ -10334,14 +10314,9 @@ impl CliLinux {
                 return i as u32;
             }
         }
-        if let Some(idx) = self.fds.iter().enumerate().position(|(idx, file)| {
-            file.is_none() && self.pipe_ends.get(idx).is_none_or(|slot| slot.is_none())
-        }) {
-            self.fds[idx] = Some(f);
-            return (3 + idx) as u32;
-        }
-        self.fds.push(Some(f));
-        (3 + self.fds.len() - 1) as u32
+        self.fds.alloc_where(Some(f), |idx| {
+            self.pipe_ends.get(idx).is_none_or(|slot| slot.is_none())
+        })
     }
 
     /// ゲスト fd に、openat が開いたホストパスを覚える。
@@ -10350,11 +10325,7 @@ impl CliLinux {
             self.std_paths[fd as usize] = Some(path);
             return;
         }
-        let idx = fd.wrapping_sub(3) as usize;
-        while self.fd_paths.len() <= idx {
-            self.fd_paths.push(None);
-        }
-        self.fd_paths[idx] = Some(path);
+        self.fds.remember_path(fd, path);
     }
 
     /// ゲスト fd に覚えたホストパス。
@@ -10362,9 +10333,7 @@ impl CliLinux {
         if fd < 3 {
             self.std_paths[fd as usize].as_deref()
         } else {
-            self.fd_paths
-                .get(fd.wrapping_sub(3) as usize)
-                .and_then(|p| p.as_deref())
+            self.fds.path_of(fd)
         }
     }
 
@@ -10372,8 +10341,8 @@ impl CliLinux {
     fn forget_path(&mut self, fd: u32) {
         if fd < 3 {
             self.std_paths[fd as usize] = None;
-        } else if let Some(slot) = self.fd_paths.get_mut(fd.wrapping_sub(3) as usize) {
-            *slot = None;
+        } else {
+            self.fds.forget_path(fd);
         }
         self.dir_done.retain(|d| *d != fd);
         self.dir_pos.retain(|(id, _)| *id != fd);
@@ -10458,22 +10427,18 @@ impl CliLinux {
                 false
             }
         } else {
-            let idx = fd.wrapping_sub(3) as usize;
             if self.pipe_end(fd).is_some() {
                 self.close_pipe(fd);
-                if let Some(slot) = self.fds.get_mut(idx) {
-                    *slot = None;
-                }
+                self.fds.clear(fd);
                 self.forget_path(fd);
                 return true;
             }
-            match self.fds.get_mut(idx) {
-                Some(f) if f.is_some() => {
-                    *f = None;
-                    self.forget_path(fd);
-                    true
-                }
-                _ => false,
+            if self.fds.get_mut(fd).is_some() {
+                self.fds.clear(fd);
+                self.forget_path(fd);
+                true
+            } else {
+                false
             }
         }
     }
@@ -10544,7 +10509,7 @@ impl CliLinux {
             |f: &Option<std::fs::File>| f.as_ref().and_then(|file| file.try_clone().ok());
         let child = Self {
             reported: self.reported.clone(),
-            fds: self.fds.iter().map(clone_file).collect(),
+            fds: self.fds.try_clone(),
             std_files: std::array::from_fn(|i| clone_file(&self.std_files[i])),
             std_is_stdin: self.std_is_stdin,
             std_closed: self.std_closed,
@@ -10560,7 +10525,6 @@ impl CliLinux {
             exe_path: self.exe_path.clone(),
             dir_done: self.dir_done.clone(),
             dir_pos: self.dir_pos.clone(),
-            fd_paths: self.fd_paths.clone(),
             std_paths: self.std_paths.clone(),
             capture_out: self.capture_out.clone(),
             stdout_is_stderr: self.stdout_is_stderr,
@@ -12734,8 +12698,7 @@ fn sys_fstat(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapO
             None => std::fs::metadata(format!("/proc/self/fd/{fd}")),
         }
     } else {
-        let slot = fd.wrapping_sub(3) as usize;
-        match sys.fds.get(slot).and_then(|f| f.as_ref()) {
+        match sys.fds.get(fd) {
             Some(f) => f.metadata(),
             None => {
                 set64(env, Gpr(0), cx.neg(EBADF));
@@ -13401,17 +13364,7 @@ fn sys_dup(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOut
             set64(env, Gpr(0), i as u64);
             return Some(TrapOutcome::Handled);
         }
-        if let Some(idx) = sys.fds.iter().position(|f| f.is_none()) {
-            sys.fds[idx] = Some(cloned);
-            let fd = (3 + idx) as u32;
-            if let Some(p) = path {
-                sys.remember_path(fd, p);
-            }
-            set64(env, Gpr(0), fd as u64);
-            return Some(TrapOutcome::Handled);
-        }
-        sys.fds.push(Some(cloned));
-        let fd = (3 + sys.fds.len() - 1) as u32;
+        let fd = sys.fds.alloc(Some(cloned));
         if let Some(p) = path {
             sys.remember_path(fd, p);
         }
@@ -13454,11 +13407,7 @@ fn sys_dup2(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOu
             sys.std_closed[i] = false;
             sys.std_is_stdin[i] = false;
         } else {
-            let idx = newfd.wrapping_sub(3) as usize;
-            while sys.fds.len() <= idx {
-                sys.fds.push(None);
-            }
-            sys.fds[idx] = Some(cloned);
+            sys.fds.place(newfd, Some(cloned));
         }
         if let Some(p) = path {
             sys.remember_path(newfd, p);
@@ -13524,11 +13473,7 @@ fn sys_dup3(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOu
             sys.std_files[i] = Some(cloned);
             sys.std_closed[i] = false;
         } else {
-            let idx = newfd.wrapping_sub(3) as usize;
-            while sys.fds.len() <= idx {
-                sys.fds.push(None);
-            }
-            sys.fds[idx] = Some(cloned);
+            sys.fds.place(newfd, Some(cloned));
         }
         if let Some(p) = path {
             sys.remember_path(newfd, p);
@@ -15582,7 +15527,7 @@ mod tests {
         let mut sys = CliLinux::x86_64();
         // /proc/self/exe を入力に積む（必ず存在する実行ファイル）。
         let f = std::fs::File::open("/proc/self/exe").unwrap();
-        sys.fds.push(Some(f));
+        assert_eq!(sys.fds.alloc(Some(f)), 3);
         let mut env = bare();
         // sendfile(1, 3, NULL, 16) は 16 を返して stdout に書く。
         set64(&mut env, Gpr(0), abi::SENDFILE);
@@ -15623,7 +15568,7 @@ mod tests {
         use polyisa_os_linux::x86_64 as abi;
         let mut sys = CliLinux::x86_64();
         let f = std::fs::File::open("/proc/self/exe").unwrap();
-        sys.fds.push(Some(f));
+        assert_eq!(sys.fds.alloc(Some(f)), 3);
         let mut env = bare();
         // lseek(3, 16, SEEK_SET) は 16 を返す。
         set64(&mut env, Gpr(0), abi::LSEEK);
@@ -16367,7 +16312,7 @@ mod tests {
         let path = format!("/tmp/polyisa_ftruncate_{}", std::process::id());
         std::fs::write(&path, b"abcdef").unwrap();
         let f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
-        sys.fds.push(Some(f));
+        assert_eq!(sys.fds.alloc(Some(f)), 3);
         // ftruncate(3, 3) -> 0、大きさ 3.
         set64(&mut env, Gpr(0), abi::FTRUNCATE);
         set64(&mut env, Gpr(7), 3);
@@ -16393,7 +16338,7 @@ mod tests {
         let path = format!("/tmp/polyisa_fallocate_{}", std::process::id());
         let _ = std::fs::remove_file(&path);
         let f = std::fs::File::create(&path).unwrap();
-        sys.fds.push(Some(f));
+        assert_eq!(sys.fds.alloc(Some(f)), 3);
         set64(&mut env, Gpr(0), abi::FALLOCATE);
         set64(&mut env, Gpr(7), 3);
         set64(&mut env, Gpr(6), 0);
@@ -17211,8 +17156,11 @@ mod tests {
         // ファイルが先に開いているとき、両端は別の番号になる。
         let mut sys = CliLinux::x86_64();
         let mut env = bare();
-        sys.fds
-            .push(Some(std::fs::File::open("/dev/null").unwrap()));
+        assert_eq!(
+            sys.fds
+                .alloc(Some(std::fs::File::open("/dev/null").unwrap())),
+            3
+        );
         set64(&mut env, Gpr(0), abi::PIPE);
         set64(&mut env, Gpr(7), 0x200);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
