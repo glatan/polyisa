@@ -11413,6 +11413,31 @@ Cpus_allowed_list:\t0
             b"127.0.0.1 localhost.localdomain localhost\n",
         );
     }
+    // /proc/self/exe はゲスト実行ファイル自身を開く（ホスト exe ではない）。
+    // readlink と同じ合成。書込み付きは Linux と同様に EACCES。
+    if let Some(real) = guest_exe_redirect(sys, &path) {
+        if acc != 0 || flags & (O_CREAT | O_TRUNC | O_APPEND) != 0 {
+            set64(env, Gpr(0), cx.neg(EACCES));
+            return Some(TrapOutcome::Handled);
+        }
+        return Some(match std::fs::File::open(&real) {
+            Ok(f) => {
+                let fd = sys.alloc_fd(f);
+                sys.remember_path(fd, path);
+                set64(env, Gpr(0), fd as u64);
+                TrapOutcome::Handled
+            }
+            Err(e) => {
+                let no = match e.kind() {
+                    std::io::ErrorKind::NotFound => ENOENT,
+                    std::io::ErrorKind::PermissionDenied => EACCES,
+                    _ => EINVAL,
+                };
+                set64(env, Gpr(0), cx.neg(no));
+                TrapOutcome::Handled
+            }
+        });
+    }
     let want_write = acc != 0 || flags & (O_CREAT | O_TRUNC | O_APPEND) != 0;
     let opened = if want_write {
         let mut opts = std::fs::OpenOptions::new();
@@ -13258,6 +13283,7 @@ fn sys_stat(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOu
     };
     sys.ensure_cwd();
     let path = join_guest_path(&sys.cwd, &path);
+    let path = guest_exe_redirect(sys, &path).unwrap_or(path);
     let m = match std::fs::metadata(&path) {
         Ok(m) => m,
         Err(e) => {
@@ -13289,6 +13315,7 @@ fn sys_lstat(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapO
     };
     sys.ensure_cwd();
     let path = join_guest_path(&sys.cwd, &path);
+    let path = guest_exe_redirect(sys, &path).unwrap_or(path);
     let m = match std::fs::symlink_metadata(&path) {
         Ok(m) => m,
         Err(e) => {
@@ -13309,7 +13336,7 @@ fn sys_lstat(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapO
     Some(TrapOutcome::Handled)
 }
 
-fn sys_newfstatat(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+fn sys_newfstatat(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     // newfstatat(dirfd, path, statbuf, flags)。AT_FDCWD+絶対パスのみ.
     // ホスト metadata から struct stat (144B) を書いて 0 を返す.
     // flags (AT_SYMLINK_NOFOLLOW 等) は無視してたどる.
@@ -13329,6 +13356,7 @@ fn sys_newfstatat(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option
         set64(env, Gpr(0), cx.neg(EINVAL));
         return Some(TrapOutcome::Handled);
     }
+    let path = guest_exe_redirect(sys, &path).unwrap_or(path);
     let m = match std::fs::metadata(&path) {
         Ok(m) => m,
         Err(e) => {
@@ -13951,6 +13979,16 @@ fn sys_clock_gettime(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Opt
     }
     set64(env, Gpr(0), 0);
     Some(TrapOutcome::Handled)
+}
+
+/// /proc/self/exe をゲスト実行ファイルのホストパスへ読み替える。
+/// readlink と同じ合成。exe_path が空（単体テスト）のときは None.
+// Ref: SRC-LINUX (7.3).
+fn guest_exe_redirect(sys: &CliLinux, path: &str) -> Option<String> {
+    if path == "/proc/self/exe" && !sys.exe_path.is_empty() {
+        return Some(sys.exe_path.clone());
+    }
+    None
 }
 
 fn guest_readlink_target(sys: &CliLinux, path: &str) -> Result<String, u32> {
@@ -14845,6 +14883,8 @@ fn sys_execve(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Trap
         set64(env, Gpr(0), cx.neg(EFAULT));
         return Some(TrapOutcome::Handled);
     };
+    // /proc/self/exe はゲスト実行ファイル自身を読む（ホスト exe ではない）。
+    let path = guest_exe_redirect(sys, &path).unwrap_or(path);
     let argv = match read_cstr_array(env, argv_addr) {
         Ok(v) => v,
         Err(()) => {

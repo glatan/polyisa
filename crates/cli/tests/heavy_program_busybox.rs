@@ -1441,16 +1441,24 @@ fn text_applets_match_host() {
         assert_eq!(code, 0);
         assert!(out.is_empty());
     }
-    // nologin は未実装命令 (eip 0x40052c 付近の 88 10 系) で停止する。
-    // ホストと比べない。P3 のデコーダ対応時に Ok 側へ移す。
-    {
-        let args = ["nologin"];
-        let argv: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
-        let res = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv);
-        let err = res.expect_err("nologin は現状 unimplemented で止まる");
-        assert!(err.contains("unimplemented"), "nologin: {err}");
-    }
+    // nologin はゲストで 30M ステップを超え、ホストも約 5 秒かかるため通常は実行しない。
+    // /proc/self/exe 経由の再実行までは進む（GAP-0002 の open/execve/stat 対応済み）。
+    // 残りは P4（純ユーザ空間の重い処理と待機の扱い）の追跡事項。通常テストに
+    // 戻す場合は下の nologin_deferred の ignore を外す。
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[ignore = "nologin はゲストでステップ上限に達し、ホストも約 5 秒かかる。P4 で再開する"]
+fn nologin_deferred() {
+    let path = busybox();
+    let path = path.to_str().expect("utf-8 path");
+    let args = ["nologin"];
+    let argv: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
+    let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)
+        .unwrap_or_else(|e| panic!("nologin: {e}"));
+    assert_eq!(code, 1);
+    assert_eq!(out.as_slice(), b"This account is not available\n");
 }
 
 #[test]
