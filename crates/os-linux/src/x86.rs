@@ -53,21 +53,26 @@ pub fn data_access() -> Access {
 /// ゲストの NUL 終端文字列を読む。上限を超えるか読めなければ None。
 pub fn guest_c_string(env: &mut BareEnv, addr: u64) -> Option<String> {
     let acc = data_access();
-    // 1バイトずつ読む。まとめて読むと写像の境界で失敗するため.
-    // 上限は 4096 バイト（NUL がなければ失敗扱い）。
+    // 上限は 4096 バイト（NUL がなければ失敗扱い）。未写像ページまで読むと
+    // read 全体が失敗するので、ページ境界ごとに読んで NUL を探す。
+    const LIMIT: u64 = polyisa_mem::PAGE_SIZE;
     let mut buf = Vec::new();
-    for i in 0..4096u64 {
-        let mut b = [0u8; 1];
-        env.backend.mem.read(VirtAddr(addr + i), &mut b, acc).ok()?;
-        if b[0] == 0 {
-            break;
+    let mut cur = addr;
+    let end = cur.checked_add(LIMIT)?;
+    while cur < end {
+        let n = (polyisa_mem::PAGE_SIZE - (cur % polyisa_mem::PAGE_SIZE)).min(end - cur);
+        let mut chunk = vec![0u8; n as usize];
+        env.backend.mem.read(VirtAddr(cur), &mut chunk, acc).ok()?;
+        match chunk.iter().position(|&b| b == 0) {
+            Some(i) => {
+                buf.extend_from_slice(&chunk[..i]);
+                return String::from_utf8(buf).ok();
+            }
+            None => buf.extend_from_slice(&chunk),
         }
-        buf.push(b[0]);
+        cur += n;
     }
-    if buf.len() == 4096 {
-        return None;
-    }
-    String::from_utf8(buf).ok()
+    None
 }
 
 /// dirfd の AT_FDCWD を 32 ビットで比べるときの値。
@@ -2909,3 +2914,35 @@ pub fn eip_of(env: &mut BareEnv) -> u32 {
 pub mod sys;
 
 pub use sys::{Linux, SCHED_SLICE};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use polyisa_mem::Perms;
+
+    #[test]
+    fn c_string_spans_pages() {
+        let mut env = BareEnv::new(8);
+        env.backend.mem.map(VirtAddr(0), 2, Perms::RW).unwrap();
+        // ページをまたぐ文字列（0x0FF8 から）。
+        let s = b"hello-span\0";
+        env.backend.mem.write(VirtAddr(0x0FF8), s).unwrap();
+        assert_eq!(
+            guest_c_string(&mut env, 0x0FF8).as_deref(),
+            Some("hello-span")
+        );
+    }
+
+    #[test]
+    fn c_string_stops_at_unmapped_page() {
+        let mut env = BareEnv::new(8);
+        env.backend.mem.map(VirtAddr(0), 1, Perms::RW).unwrap();
+        // NUL なしでページ末尾まで埋めると、次ページは未写像なので None。
+        let s = vec![b'a'; polyisa_mem::PAGE_SIZE as usize];
+        env.backend.mem.write(VirtAddr(0), &s).unwrap();
+        assert_eq!(guest_c_string(&mut env, 0), None);
+        // 途中に NUL があればその手前まで読める。
+        env.backend.mem.write(VirtAddr(0x0FFE), &[0u8]).unwrap();
+        assert_eq!(guest_c_string(&mut env, 0).map(|s| s.len()), Some(4094));
+    }
+}
