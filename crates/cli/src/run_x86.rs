@@ -14096,7 +14096,12 @@ fn guest_readlink_target(sys: &CliLinux, path: &str) -> Result<String, u32> {
             None => Err(ENOENT),
         };
     }
-    match std::fs::read_link(path) {
+    // それ以外のパスはゲストルート配下で解決する。はみ出しは EPERM。
+    let path = match resolve_guest_path(&sys.guest_root, &sys.cwd, path) {
+        Some(p) => p,
+        None => return Err(EPERM),
+    };
+    match std::fs::read_link(&path) {
         Ok(p) => Ok(p.into_os_string().into_string().unwrap_or_default()),
         Err(e) => Err(match e.kind() {
             std::io::ErrorKind::NotFound => ENOENT,
@@ -14470,6 +14475,11 @@ fn sys_mknod(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapO
         Some(p) => p,
         None => return Some(TrapOutcome::Unimplemented),
     };
+    sys.ensure_cwd();
+    let Some(path) = sys.resolve_path(&path) else {
+        set64(env, Gpr(0), cx.neg(EPERM));
+        return Some(TrapOutcome::Handled);
+    };
     let perm = (mode & 0o777) & !sys.umask;
     let status = std::process::Command::new("mkfifo")
         .arg("-m")
@@ -14532,7 +14542,7 @@ fn sys_mkdirat(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Tra
     })
 }
 
-fn sys_rename(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+fn sys_rename(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     // rename(oldpath, newpath)。ホストの rename に直結する.
     let old_addr = get64(env, cx.r_a);
     let new_addr = get64(env, cx.r_b);
@@ -14543,6 +14553,15 @@ fn sys_rename(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Tra
     let new_path = match guest_c_string(env, new_addr) {
         Some(p) => p,
         None => return Some(TrapOutcome::Unimplemented),
+    };
+    sys.ensure_cwd();
+    let Some(old_path) = sys.resolve_path(&old_path) else {
+        set64(env, Gpr(0), cx.neg(EPERM));
+        return Some(TrapOutcome::Handled);
+    };
+    let Some(new_path) = sys.resolve_path(&new_path) else {
+        set64(env, Gpr(0), cx.neg(EPERM));
+        return Some(TrapOutcome::Handled);
     };
     Some(match std::fs::rename(&old_path, &new_path) {
         Ok(()) => {
@@ -14567,7 +14586,7 @@ fn sys_sync(_sys: &mut CliLinux, env: &mut BareEnv, _cx: &SysCtx) -> Option<Trap
     Some(TrapOutcome::Handled)
 }
 
-fn sys_link(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+fn sys_link(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     // link(oldpath, newpath)。ハードリンク。busybox の `link` が使う。
     let old_addr = get64(env, cx.r_a);
     let new_addr = get64(env, cx.r_b);
@@ -14578,6 +14597,15 @@ fn sys_link(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapO
     let new_path = match guest_c_string(env, new_addr) {
         Some(p) => p,
         None => return Some(TrapOutcome::Unimplemented),
+    };
+    sys.ensure_cwd();
+    let Some(old_path) = sys.resolve_path(&old_path) else {
+        set64(env, Gpr(0), cx.neg(EPERM));
+        return Some(TrapOutcome::Handled);
+    };
+    let Some(new_path) = sys.resolve_path(&new_path) else {
+        set64(env, Gpr(0), cx.neg(EPERM));
+        return Some(TrapOutcome::Handled);
     };
     Some(match std::fs::hard_link(&old_path, &new_path) {
         Ok(()) => {
@@ -14597,9 +14625,10 @@ fn sys_link(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapO
     })
 }
 
-fn sys_symlink(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+fn sys_symlink(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     // symlink(oldpath, newpath)。`ln -s` で使う。
     // 可搬 API がないため実体はクリエート host の helper に置く。
+    // 作成先だけ解決し、指し先は verbatim に保つ。
     let old_addr = get64(env, cx.r_a);
     let new_addr = get64(env, cx.r_b);
     let old_path = match guest_c_string(env, old_addr) {
@@ -14609,6 +14638,11 @@ fn sys_symlink(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Tr
     let new_path = match guest_c_string(env, new_addr) {
         Some(p) => p,
         None => return Some(TrapOutcome::Unimplemented),
+    };
+    sys.ensure_cwd();
+    let Some(new_path) = sys.resolve_path(&new_path) else {
+        set64(env, Gpr(0), cx.neg(EPERM));
+        return Some(TrapOutcome::Handled);
     };
     Some(match polyisa_host::symlink(&old_path, &new_path) {
         Ok(()) => {
@@ -14628,12 +14662,17 @@ fn sys_symlink(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Tr
     })
 }
 
-fn sys_rmdir(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+fn sys_rmdir(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     // rmdir(path)。ホストの remove_dir に直結する.
     let path_addr = get64(env, cx.r_a);
     let path = match guest_c_string(env, path_addr) {
         Some(p) => p,
         None => return Some(TrapOutcome::Unimplemented),
+    };
+    sys.ensure_cwd();
+    let Some(path) = sys.resolve_path(&path) else {
+        set64(env, Gpr(0), cx.neg(EPERM));
+        return Some(TrapOutcome::Handled);
     };
     Some(match std::fs::remove_dir(&path) {
         Ok(()) => {
@@ -14713,7 +14752,10 @@ fn sys_unlinkat(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Tr
             }
         }
     };
-    let path = join_guest_path(&base, &path);
+    let Some(path) = resolve_guest_path(&sys.guest_root, &base, &path) else {
+        set64(env, Gpr(0), cx.neg(EPERM));
+        return Some(TrapOutcome::Handled);
+    };
     let res = if flags & 0x200 != 0 {
         std::fs::remove_dir(&path)
     } else {
@@ -14736,13 +14778,18 @@ fn sys_unlinkat(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Tr
     })
 }
 
-fn sys_access(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+fn sys_access(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     // access(path, mode)。存在確認のみ行い、存在すれば 0 を返す.
     // X_OK 等の実行権限の厳密判定はしない（試作の割り切り）。
     let path_addr = get64(env, cx.r_a);
     let path = match guest_c_string(env, path_addr) {
         Some(p) => p,
         None => return Some(TrapOutcome::Unimplemented),
+    };
+    sys.ensure_cwd();
+    let Some(path) = sys.resolve_path(&path) else {
+        set64(env, Gpr(0), cx.neg(EPERM));
+        return Some(TrapOutcome::Handled);
     };
     Some(match std::fs::metadata(&path) {
         Ok(_) => {
@@ -14761,7 +14808,7 @@ fn sys_access(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Tra
     })
 }
 
-fn sys_faccessat(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+fn sys_faccessat(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     // faccessat(dirfd, path, mode)。AT_FDCWD のみ、存在確認のみ行う.
     let (dirfd, path_addr) = if cx.is64 {
         (get64(env, Gpr(7)), get64(env, Gpr(6)))
@@ -14778,6 +14825,11 @@ fn sys_faccessat(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<
     let path = match guest_c_string(env, path_addr) {
         Some(p) => p,
         None => return Some(TrapOutcome::Unimplemented),
+    };
+    sys.ensure_cwd();
+    let Some(path) = sys.resolve_path(&path) else {
+        set64(env, Gpr(0), cx.neg(EPERM));
+        return Some(TrapOutcome::Handled);
     };
     Some(match std::fs::metadata(&path) {
         Ok(_) => {
@@ -15011,6 +15063,11 @@ fn sys_execve(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Trap
             set64(env, Gpr(0), cx.neg(EFAULT));
             return Some(TrapOutcome::Handled);
         }
+    };
+    sys.ensure_cwd();
+    let Some(path) = sys.resolve_path(&path) else {
+        set64(env, Gpr(0), cx.neg(EPERM));
+        return Some(TrapOutcome::Handled);
     };
     let envp = match read_cstr_array(env, envp_addr) {
         Ok(v) => v,
@@ -16496,6 +16553,72 @@ mod tests {
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EPERM));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn relative_fs_ops_resolve_under_cwd_and_jail() {
+        use polyisa_os_linux::x86_64 as abi;
+        let root = std::env::temp_dir().join(format!("polyisa-relfs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let jail = root.join("jail");
+        std::fs::create_dir_all(&jail).unwrap();
+        std::fs::write(jail.join("f"), b"ab\n").unwrap();
+
+        let mut sys = CliLinux::x86_64();
+        sys.guest_root = jail.to_str().unwrap().to_string();
+        sys.cwd = "/".to_string();
+        let mut env = bare();
+        let cstr = |env: &mut BareEnv, addr: u64, s: &[u8]| {
+            env.backend.mem.write(VirtAddr(addr), s).unwrap();
+            env.backend
+                .mem
+                .write(VirtAddr(addr + s.len() as u64), &[0])
+                .unwrap();
+        };
+        // access("f") は jail/f を見る。
+        cstr(&mut env, 0x300, b"f");
+        set64(&mut env, Gpr(0), abi::ACCESS);
+        set64(&mut env, Gpr(7), 0x300);
+        set64(&mut env, Gpr(6), 4);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        // link("f", "hard") は jail 内で成功する。
+        cstr(&mut env, 0x300, b"f");
+        cstr(&mut env, 0x310, b"hard");
+        set64(&mut env, Gpr(0), abi::LINK);
+        set64(&mut env, Gpr(7), 0x300);
+        set64(&mut env, Gpr(6), 0x310);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        assert_eq!(std::fs::read(jail.join("hard")).unwrap(), b"ab\n");
+        // rename("hard", "g") は jail 内で成功する。
+        cstr(&mut env, 0x300, b"hard");
+        cstr(&mut env, 0x310, b"g");
+        set64(&mut env, Gpr(0), abi::RENAME);
+        set64(&mut env, Gpr(7), 0x300);
+        set64(&mut env, Gpr(6), 0x310);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        assert!(jail.join("g").is_file());
+        // symlink は作成先だけ解決し、指し先は verbatim。
+        cstr(&mut env, 0x300, b"g");
+        cstr(&mut env, 0x310, b"ln");
+        set64(&mut env, Gpr(0), abi::SYMLINK);
+        set64(&mut env, Gpr(7), 0x300);
+        set64(&mut env, Gpr(6), 0x310);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        assert_eq!(
+            std::fs::read_link(jail.join("ln")).unwrap(),
+            std::path::PathBuf::from("g")
+        );
+        // rmdir("..") の脱出は EPERM。
+        cstr(&mut env, 0x300, b"..");
+        set64(&mut env, Gpr(0), abi::RMDIR);
+        set64(&mut env, Gpr(7), 0x300);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EPERM));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
