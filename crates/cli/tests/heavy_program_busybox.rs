@@ -1441,16 +1441,12 @@ fn text_applets_match_host() {
         assert_eq!(code, 0);
         assert!(out.is_empty());
     }
-    // nologin はゲストで高速に exit 1 するが、標準出力の文言が出ない。
-    // /proc/self/exe 経由の再実行までは進む（GAP-0002 の open/execve/stat 対応済み）。
-    // dup2(0,2) の扱い（P4）を直して再試行ループは抜けたが、文言の write が
-    // 親子いずれかで欠落する。ホストも約 5 秒かかるため通常は実行しない。
-    // 直す場合は下の nologin_deferred の ignore を外して再現させる。
+    // nologin は動的バイナリの読み替えで文言まで一致する。nanosleep は
+    // 待たずに 0 を返すため高速に exit 1 する。ホストは約 5 秒かかる。
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
-#[ignore = "nologin は exit 1 するが文言が出ない。直したら ignore を外す"]
 fn nologin_deferred() {
     let path = busybox();
     let path = path.to_str().expect("utf-8 path");

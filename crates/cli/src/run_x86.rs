@@ -14953,6 +14953,26 @@ fn sys_execve(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Trap
     match install_exec(sys, env, &bytes, &path, &argv, &envp) {
         Ok(()) => Some(TrapOutcome::Handled),
         Err(errno) => {
+            // ホストの動的バイナリ（/sbin/cat 等）は PT_INTERP のため ENOEXEC。
+            // ゲスト環境では同名の BusyBox アプレットのはずなので、
+            // 同じ argv で実行ファイル（BusyBox 静的）へ読み替える。
+            // スクリプト（非 ELF）は ash の解釈へ委ねるため対象外。
+            if errno == ENOEXEC && path != sys.exe_path && !sys.exe_path.is_empty() {
+                let is_dynamic = polyisa_loader::elf::parse_ehdr(&bytes)
+                    .ok()
+                    .and_then(|ehdr| {
+                        polyisa_loader::elf::parse_phdrs(&bytes, &ehdr)
+                            .ok()
+                            .map(|phdrs| phdrs.iter().any(|ph| ph.seg_type == 3))
+                    })
+                    .unwrap_or(false);
+                if is_dynamic
+                    && let Ok(busy) = std::fs::read(sys.exe_path.clone())
+                    && install_exec(sys, env, &busy, &sys.exe_path.clone(), &argv, &envp).is_ok()
+                {
+                    return Some(TrapOutcome::Handled);
+                }
+            }
             set64(env, Gpr(0), cx.neg(errno));
             Some(TrapOutcome::Handled)
         }
