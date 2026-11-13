@@ -52,9 +52,11 @@ fn fetch_len(
         | 0xFC
         | 0xFD => Some(1),
         0x6A | 0xB0..=0xB7 => Some(2),
+        // RET imm16 (C2 iw)。i386 musl の stdcall 風呼出し.
+        0xC2 => Some(3),
         0x68 => Some(5),
         0xEB | 0x70 | 0x71 | 0x72 | 0x73 | 0x74 | 0x75 | 0x76 | 0x77 | 0x78 | 0x79 | 0x7A
-        | 0x7B | 0x7C | 0x7D | 0x7E | 0x7F | 0xE2 | 0xCD | 0x3C | 0x0C | 0x14 => Some(2),
+        | 0x7B | 0x7C | 0x7D | 0x7E | 0x7F | 0xE2 | 0xE3 | 0xCD | 0x3C | 0x0C | 0x14 => Some(2),
         0x05 | 0x2D | 0xE8 | 0xE9 | 0x35 => Some(5),
         // MOV moffs (A0-A3)。i386 は moffs32 (5B)、x64 は moffs64 (9B)。i386 musl の a3 対応。
         0xA0..=0xA3 => {
@@ -544,8 +546,8 @@ fn fetch_len(
                 // SHLD/SHRD r/m32,r32,CL (0F A5/AD /r mod=11)。REX.W で64ビット.
                 let m = third?;
                 if m >> 6 == 3 { Some(3) } else { None }
-            } else if s == 0xAC {
-                // SHRD r/m32,r32,imm8 (0F AC /r ib mod=11)。i386 musl 0x80fe4f1。4B.
+            } else if s == 0xAC || s == 0xA4 {
+                // SHRD/SHLD r/m32,r32,imm8 (0F AC/A4 /r ib mod=11)。i386 musl 0x80fe4f1。4B.
                 let m = third?;
                 if m >> 6 == 3 { Some(4) } else { None }
             } else if s == 0xA3 {
@@ -720,6 +722,9 @@ fn fetch_len(
                 Some(7)
             } else if md == 1 {
                 Some(4)
+            } else if md == 2 && rm != 4 {
+                // mod=10 [base+disp32]+imm8 (7B)。i386 iostat 0x808b648 対応.
+                Some(7)
             } else {
                 None
             }
@@ -811,7 +816,7 @@ fn fetch_len(
                 } else if md == 0 && reg == 7 && t & 7 == 5 {
                     // mod=00 base=直接番地 + disp32 + imm8 (8B)。id 0x4c0a78 対応.
                     Some(8)
-                } else if (reg == 4 || reg == 7 || reg == 1 || reg == 0)
+                } else if (reg == 4 || reg == 7 || reg == 1 || reg == 0 || reg == 2)
                     && (md == 1 || (md == 0 && t & 7 != 5))
                 {
                     // mod=01 の base=5 は %rbp。直接番地になるのは mod=00 だけ。
@@ -1004,6 +1009,9 @@ fn fetch_len(
             } else if md == 2 && rm == 4 {
                 // OR r8,m8 SIB+disp32。tar -tf 0x48e5f4 の or al, [rsp+disp32]。7B.
                 Some(7)
+            } else if md == 2 && rm != 4 {
+                // OR r8, [base+disp32] (0A /r mod=10、6B)。i386 showkey 0x810d301 対応.
+                Some(6)
             } else {
                 None
             }
@@ -1271,7 +1279,7 @@ fn fetch_len(
                 // mod=00 SIB [base+index*scale] +imm8 (4B) の /0 ADDB と /1 ORB と /6 XORB と /7 CMPB。
                 // base=5 は disp32 が付く。sha3sum 0x4b4f20 の addb $-128, (%rdi,%rax,1)。
                 // mod=10 SIB+disp32+imm8 (8B) の /7 CMPB (stat 0x429875 対応).
-                if md == 1 && (reg == 7 || reg == 6 || reg == 1 || reg == 4) {
+                if md == 1 && (reg == 7 || reg == 6 || reg == 1 || reg == 4 || reg == 0) {
                     Some(5)
                 } else if md == 0 && (reg == 0 || reg == 1 || reg == 6 || reg == 7) {
                     let t = third?;
@@ -1299,6 +1307,9 @@ fn fetch_len(
                 Some(7)
             } else if md == 2 && reg == 7 {
                 // mod=10 [base+disp32],imm8 (7B) の /7 CMPB のみ.
+                Some(7)
+            } else if md == 2 && reg == 6 {
+                // mod=10 [base+disp32],imm8 (7B) の /6 XORB。i386 iostat 0x808b743 対応.
                 Some(7)
             } else if md == 0 && rm == 5 && reg == 7 {
                 // mod=00 RIP [RIP+disp32],imm8 (7B) の /7 CMPB のみ.
@@ -1381,6 +1392,14 @@ fn fetch_len(
                 } else if md == 1 && reg == 0 && rm != 4 {
                     // TEST m32,imm32 mod=01 [base+disp8] (7B)。echo 0x4bfb84 対応.
                     Some(7)
+                } else if md == 0 && reg == 0 && rm == 4 {
+                    // TEST m32,imm32 SIB mod=00 (F7 /0 + ModRM + SIB + imm32、7B)。i386 ls 0x80d11e0 対応.
+                    let t = third?;
+                    if t & 7 == 5 { None } else { Some(7) }
+                } else if md == 1 && reg == 0 && rm == 4 {
+                    // TEST m32,imm32 SIB mod=01 (+SIB+disp8+imm32、8B)。i386 musl 0x80fe3a9 対応.
+                    let _ = third?;
+                    Some(8)
                 } else if md == 1 && reg == 6 && rm != 4 {
                     // DIV r/m32 mod=01 [base+disp8] (3B: F7 /6 + ModRM + disp8).
                     Some(3)
@@ -1561,6 +1580,18 @@ fn fetch_len(
                 }
                 // ADC/SBB m,r SIB+disp8 (11/19 /r mod=01)。i386 musl の 64bit 演算（wc 0x80dba0a）。
                 if (first == 0x11 || first == 0x19) && md == 1 {
+                    return Some(4);
+                }
+                // ADC m,r SIB+disp32 (11 /r mod=10)。i386 iostat 0x808b68d 対応。7B.
+                if first == 0x11 && md == 2 {
+                    return Some(7);
+                }
+                // SUB m,r SIB+disp32 (29 /r mod=10)。i386 deluser 0x804fce9 対応。7B.
+                if first == 0x29 && md == 2 {
+                    return Some(7);
+                }
+                // AND m,r SIB+disp8 (21 /r mod=01)。i386 nologin 0x80968e5 対応。4B.
+                if first == 0x21 && md == 1 {
                     return Some(4);
                 }
                 // AND m,r SIB mod=00。bzip2 0x47f93d の 21 0C 94。base=5 は disp32。
@@ -1971,6 +2002,7 @@ fn step_x86(
                         | 0xA5
                         | 0xAD
                         | 0xAC
+                        | 0xA4
                         | 0xA3
                         | 0xAB
                 )
@@ -2247,6 +2279,7 @@ fn step_x86(
                 | Insn::CmpRmImm8m8
                 | Insn::CmpM32R32Sib
                 | Insn::AddRMemnd
+                | Insn::AddRMem8
                 | Insn::AddM32R32Sibd32
                 | Insn::SubM32R32Mem8
                 | Insn::SubRmImm8Sibd
@@ -3059,6 +3092,22 @@ fn dispatch<B: Backend>(
             let imm = (word & 0xff) as u8 as i8;
             sem::adc_m32_imm8_mem8(b, rm(), d8, imm)
         }
+        Insn::AdcM32Imm8Sibd => {
+            // 83 /2 SIB mod=01 [base+index*scale+disp8],imm8 (5B)。i386 strings 0x806359d 対応.
+            // SIB は (word>>16) 下位8、disp は (word>>8) 下位8、imm は最下位8.
+            let sib_v = ((word >> 16) & 0xff) as u8;
+            let d8 = ((word >> 8) & 0xff) as u8 as i8;
+            let imm = (word & 0xff) as u8 as i8;
+            let shift = ((sib_v >> 6) & 3) as u32;
+            let idx_raw = (sib_v >> 3) & 7;
+            let idx = Gpr(idx_raw | (((rex >> 1) & 1) << 3));
+            let base = Gpr((sib_v & 7) | ((rex & 1) << 3));
+            if idx_raw == 4 && (rex >> 1) & 1 == 0 {
+                sem::adc_m32_imm8_mem8(b, base, d8, imm)
+            } else {
+                sem::adc_m32_imm8_sibd(b, base, idx, shift, d8, imm)
+            }
+        }
         Insn::AdcAlImm => sem::adc_al_imm(b, (word & 0xff) as u8),
         Insn::SbbM32R32Mem8 => {
             // 19 /r mod=01 [base+disp8]。src は reg フィールド。i386 musl の 64bit 演算で使う。
@@ -3072,11 +3121,75 @@ fn dispatch<B: Backend>(
                 sem::adc_m32_r32_sibd(b, sib_base(), sib_idx(), sib_shift(), disp8(), reg())
             }
         }
+        Insn::AdcM32R32Sibd32 => {
+            // 11 /r SIB mod=10 [base+index*scale+disp32]。i386 iostat 0x808b68d 対応.
+            if no_index() {
+                if rex_w {
+                    sem::adc_m64_r64_mem32(b, sib_base(), disp32(), reg())
+                } else {
+                    sem::adc_m32_r32_mem32(b, sib_base(), disp32(), reg())
+                }
+            } else if rex_w {
+                sem::adc_m64_r64_sibd32(b, sib_base(), sib_idx(), sib_shift(), disp32(), reg())
+            } else {
+                sem::adc_m32_r32_sibd32(b, sib_base(), sib_idx(), sib_shift(), disp32(), reg())
+            }
+        }
+        Insn::AdcM32R32Mem32 => {
+            // 11 /r mod=10 [base+disp32]。
+            if rex_w {
+                sem::adc_m64_r64_mem32(b, rm(), disp32(), reg())
+            } else {
+                sem::adc_m32_r32_mem32(b, rm(), disp32(), reg())
+            }
+        }
         Insn::SbbM32R32Sibd => {
             if no_index() {
                 sem::sbb_m32_r32_mem8(b, sib_base(), disp8(), reg())
             } else {
                 sem::sbb_m32_r32_sibd(b, sib_base(), sib_idx(), sib_shift(), disp8(), reg())
+            }
+        }
+        Insn::AdcRSibd => {
+            // 13 /r SIB mod=01 [base+index*scale+disp8]。i386 musl の 64bit 演算（free 0x804bfce）。
+            if no_index() {
+                if rex_w {
+                    sem::adc_r64_mem8(b, reg(), sib_base(), disp8())
+                } else {
+                    sem::adc_r32_mem8(b, reg(), sib_base(), disp8())
+                }
+            } else if rex_w {
+                sem::adc_r64_sibd(b, reg(), sib_base(), sib_idx(), sib_shift(), disp8())
+            } else {
+                sem::adc_r32_sibd(b, reg(), sib_base(), sib_idx(), sib_shift(), disp8())
+            }
+        }
+        Insn::AdcRSibabs => {
+            // 13 /r SIB mod=00 base=101 [index*scale+disp32]。i386 sha512sum 0x80effe5 対応.
+            if no_index() {
+                if rex_w {
+                    sem::adc_r64_abs(b, reg(), disp32() as u32)
+                } else {
+                    sem::adc_r32_abs(b, reg(), disp32() as u32)
+                }
+            } else if rex_w {
+                sem::adc_r64_sibabs(b, reg(), sib_idx(), sib_shift(), disp32())
+            } else {
+                sem::adc_r32_sibabs(b, reg(), sib_idx(), sib_shift(), disp32())
+            }
+        }
+        Insn::AndRSib => {
+            // 23 /r SIB mod=00 [base+index*scale]。md5sum 0x9fd9e9 の and (%esp),%ebx.
+            if no_index() {
+                if rex_w {
+                    sem::and_r64_memnd(b, reg(), sib_base())
+                } else {
+                    sem::and_r32_memnd(b, reg(), sib_base())
+                }
+            } else if rex_w {
+                sem::and_r64_sib(b, reg(), sib_base(), sib_idx(), sib_shift())
+            } else {
+                sem::and_r32_sib(b, reg(), sib_base(), sib_idx(), sib_shift())
             }
         }
         Insn::SubM32Imm8Sibd32 => {
@@ -3095,6 +3208,20 @@ fn dispatch<B: Backend>(
                 sem::sub_m64_r64_mem32(b, rm(), disp32(), reg())
             } else {
                 sem::sub_m32_r32_mem32(b, rm(), disp32(), reg())
+            }
+        }
+        Insn::SubM32R32Sibd32 => {
+            // 29 /r SIB mod=10 [base+index*scale+disp32]。i386 deluser 0x804fce9 対応.
+            if no_index() {
+                if rex_w {
+                    sem::sub_m64_r64_mem32(b, sib_base(), disp32(), reg())
+                } else {
+                    sem::sub_m32_r32_mem32(b, sib_base(), disp32(), reg())
+                }
+            } else if rex_w {
+                sem::sub_m64_r64_sibd32(b, sib_base(), sib_idx(), sib_shift(), disp32(), reg())
+            } else {
+                sem::sub_m32_r32_sibd32(b, sib_base(), sib_idx(), sib_shift(), disp32(), reg())
             }
         }
         Insn::AddM32R32Mem32 => {
@@ -3637,8 +3764,8 @@ fn dispatch<B: Backend>(
             if is64 {
                 sem::mov_r8_m8_rip(b, dst, high, eip as u64 + nbytes, disp32())
             } else {
-                // 32ビット絶対番地は未対応 (8A は RIP 想定のため暫定)。
-                sem::mov_r8_m8_memnd(b, dst, high, rm())
+                // 32ビット絶対番地 (8A 0d + disp32)。i386 nologin 0x8096afb 対応。
+                sem::mov_r8_m8_abs(b, dst, high, imm32())
             }
         }
         Insn::MovR8M8Sib => {
@@ -4453,6 +4580,21 @@ fn dispatch<B: Backend>(
                 sem::push_m32_sibd32(b, sib_base(), sib_idx(), sib_shift(), disp32())
             }
         }
+        Insn::PushRmSibabs => {
+            // FF /6 SIB mod=00 base=直接番地 [index*scale+disp32] (7B)。i386 ifconfig 対応.
+            if no_index() {
+                if is64 {
+                    // 64bit の SIB 直接番地は disp32 を符号拡張した絶対番地.
+                    sem::push_m64_rip(b, 0, disp32())
+                } else {
+                    sem::push_m32_abs(b, imm32())
+                }
+            } else if is64 {
+                sem::push_m64_sibabs(b, sib_idx(), sib_shift(), disp32())
+            } else {
+                sem::push_m32_sibabs(b, sib_idx(), sib_shift(), disp32())
+            }
+        }
         Insn::PushImm8 => {
             let imm = (word & 0xff) as u8 as i8;
             if is64 {
@@ -4726,6 +4868,15 @@ fn dispatch<B: Backend>(
                 sem::ret(b)
             }
         }
+        Insn::RetImm => {
+            // C2 iw (3B)。imm16 は最下位16 LE。POP 後に SP を imm 分だけ上げる.
+            let n = ((word & 0xffff) as u16).swap_bytes();
+            if is64 {
+                sem::ret64_imm(b, n)
+            } else {
+                sem::ret_imm(b, n)
+            }
+        }
         Insn::CmpEax => {
             if rex_w {
                 sem::cmp_rm64_imm(b, Gpr(0), imm32())
@@ -4859,6 +5010,49 @@ fn dispatch<B: Backend>(
                 sem::test_rm64_imm_mem8(b, rm(), d8, imm)
             } else {
                 sem::test_rm32_imm_mem8(b, rm(), d8, imm)
+            }
+        }
+        Insn::TestRm32ImmSib => {
+            // F7 /0 SIB mod=00 + imm32 (7B)。i386 ls 0x80d11e0 対応.
+            // SIB は (word>>32) 下位8、imm は最下位32 LE.
+            let sib_v = ((word >> 32) & 0xff) as u8;
+            let imm = (word as u32).swap_bytes();
+            let shift = ((sib_v >> 6) & 3) as u32;
+            let idx_raw = (sib_v >> 3) & 7;
+            let idx = Gpr(idx_raw | (((rex >> 1) & 1) << 3));
+            let base = Gpr((sib_v & 7) | ((rex & 1) << 3));
+            if idx_raw == 4 && (rex >> 1) & 1 == 0 {
+                if rex_w {
+                    sem::test_rm64_imm_memnd(b, base, imm)
+                } else {
+                    sem::test_rm32_imm_memnd(b, base, imm)
+                }
+            } else if rex_w {
+                sem::test_rm64_imm_sib(b, base, idx, shift, imm)
+            } else {
+                sem::test_rm32_imm_sib(b, base, idx, shift, imm)
+            }
+        }
+        Insn::TestRm32ImmSibd => {
+            // F7 /0 SIB mod=01 + disp8 + imm32 (8B)。i386 musl 0x80fe3a9 対応.
+            // SIB は (word>>40) 下位8、disp は (word>>32) 下位8、imm は最下位32 LE.
+            let sib_v = ((word >> 40) & 0xff) as u8;
+            let d8 = ((word >> 32) & 0xff) as u8 as i8;
+            let imm = (word as u32).swap_bytes();
+            let shift = ((sib_v >> 6) & 3) as u32;
+            let idx_raw = (sib_v >> 3) & 7;
+            let idx = Gpr(idx_raw | (((rex >> 1) & 1) << 3));
+            let base = Gpr((sib_v & 7) | ((rex & 1) << 3));
+            if idx_raw == 4 && (rex >> 1) & 1 == 0 {
+                if rex_w {
+                    sem::test_rm64_imm_mem8(b, base, d8, imm)
+                } else {
+                    sem::test_rm32_imm_mem8(b, base, d8, imm)
+                }
+            } else if rex_w {
+                sem::test_rm64_imm_sibd(b, base, idx, shift, d8, imm)
+            } else {
+                sem::test_rm32_imm_sibd(b, base, idx, shift, d8, imm)
             }
         }
         Insn::TestRm32ImmMemnd => {
@@ -5001,10 +5195,33 @@ fn dispatch<B: Backend>(
                 sem::add_rm8_imm_sib(b, sib_base(), sib_idx(), sib_shift(), imm)
             }
         }
+        Insn::AddRm8ImmSibd => {
+            // 80 /0 SIB mod=01 + disp8 + imm8 (5B)。i386 sha3sum 0x80f0868 対応.
+            // SIB は (word>>16) 下位8、disp は (word>>8) 下位8、imm は最下位8.
+            let sib_v = ((word >> 16) & 0xff) as u8;
+            let d8 = ((word >> 8) & 0xff) as u8 as i8;
+            let imm = (word & 0xff) as u8;
+            let shift = ((sib_v >> 6) & 3) as u32;
+            let idx_raw = (sib_v >> 3) & 7;
+            let idx = Gpr(idx_raw | (((rex >> 1) & 1) << 3));
+            let base = Gpr((sib_v & 7) | ((rex & 1) << 3));
+            if idx_raw == 4 && (rex >> 1) & 1 == 0 {
+                sem::add_rm8_imm_mem8(b, base, d8, imm)
+            } else {
+                sem::add_rm8_imm_sibd(b, base, idx, shift, d8, imm)
+            }
+        }
         Insn::XorRm8ImmMemnd => {
             // 80 /6 mod=00 [base],imm8 (24b)。nmeter 0x44a570 の xorb $1, (%rax)。
             let imm = (word & 0xff) as u8;
             sem::xor_rm8_imm_memnd(b, rm(), imm)
+        }
+        Insn::XorRm8ImmMem32 => {
+            // 80 /6 mod=10 [base+disp32],imm8 (7B)。i386 iostat 0x808b743 対応.
+            // disp32 は word 下位9–40ビット LE、imm8 は最下位8.
+            let d32 = (((word >> 8) & 0xffff_ffff) as u32).swap_bytes() as i32;
+            let imm = (word & 0xff) as u8;
+            sem::xor_rm8_imm_mem32(b, rm(), d32, imm)
         }
         Insn::XorRm8ImmSib => {
             // 80 /6 SIB mod=00。sha3sum 0x4b4f14 の xorb $6, (%rdi,%rax,1)。
@@ -5205,6 +5422,18 @@ fn dispatch<B: Backend>(
             };
             sem::or_r8_m8_mem8(b, dst, dst_high, rm(), disp8())
         }
+        Insn::OrR8M8Mem32 => {
+            // 0A /r mod=10 [base+disp32]。i386 showkey 0x810d301 対応.
+            let reg_f = (modrm() >> 3) & 7;
+            let (dst, dst_high) = if rex != 0 {
+                (Gpr(reg_f | ((rex >> 2) & 1) << 3), false)
+            } else if reg_f < 4 {
+                (Gpr(reg_f), false)
+            } else {
+                (Gpr(reg_f - 4), true)
+            };
+            sem::or_r8_m8_mem32(b, dst, dst_high, rm(), disp32())
+        }
         Insn::OrR8M8Sibd => {
             // 0A /r SIB mod=01 [base+index*scale+disp8] (32b)。dst は reg フィールド.
             // SIB は (word>>8) 下位8、disp は最下位8.
@@ -5262,7 +5491,12 @@ fn dispatch<B: Backend>(
             } else {
                 (Gpr(reg_f - 4), true)
             };
-            sem::or_r8_m8_rip(b, dst, dst_high, eip as u64 + nbytes, disp32())
+            if is64 {
+                sem::or_r8_m8_rip(b, dst, dst_high, eip as u64 + nbytes, disp32())
+            } else {
+                // 32ビット絶対番地 (0A 05 + disp32)。i386 find 0x80ea86e 対応。
+                sem::or_r8_m8_abs(b, dst, dst_high, imm32())
+            }
         }
         Insn::OrR8R8 => {
             // 0A /r mod=11 reg-direct。dst は reg、src は rm フィールド (REX.R/B で拡張)。
@@ -5447,6 +5681,14 @@ fn dispatch<B: Backend>(
         }
         Insn::Je => sem::je(b, eip, disp8()),
         Insn::Jne => sem::jne(b, eip, disp8()),
+        Insn::Jcxz => {
+            // E3 cb。i386 は ECX、64bit は RCX を検査する。vi 0x8109740 対応。
+            if is64 {
+                sem::jcxz64(b, eip, disp8())
+            } else {
+                sem::jcxz32(b, eip, disp8())
+            }
+        }
         Insn::Jo => sem::jo(b, eip, disp8()),
         Insn::Jno => sem::jno(b, eip, disp8()),
         Insn::Jb => sem::jb(b, eip, disp8()),
@@ -6395,6 +6637,27 @@ fn dispatch<B: Backend>(
                 sem::and_rm32_imm_sibd(b, sib_base(), sib_idx(), sib_shift(), disp, imm)
             }
         }
+        Insn::AndRm32ImmMem32 => {
+            // 81 /4 mod=10 [base+disp32],imm32 (10B)。i386 script 0x80baad6 対応.
+            // disp は (word>>32) 下位32 LE、imm は最下位32 LE.
+            let disp = ((word >> 32) as u32).swap_bytes() as i32;
+            let imm = (word as u32).swap_bytes();
+            if rex_w {
+                sem::and_rm64_imm_mem32(b, rm(), disp, imm)
+            } else {
+                sem::and_rm32_imm_mem32(b, rm(), disp, imm)
+            }
+        }
+        Insn::AddRm32ImmMem32 => {
+            // 81 /0 mod=10 [base+disp32],imm32 (10B)。i386 script 0x80baae0 対応.
+            let disp = ((word >> 32) as u32).swap_bytes() as i32;
+            let imm = (word as u32).swap_bytes();
+            if rex_w {
+                sem::add_rm64_imm_mem32(b, rm(), disp, imm)
+            } else {
+                sem::add_rm32_imm_mem32(b, rm(), disp, imm)
+            }
+        }
         Insn::XorRm32ImmSibd => {
             // 81 /6 SIB mod=01。mim 0x45a165 の xorl $0x100,0x4(%rsp)。
             let disp = ((word >> 32) & 0xff) as u8 as i8;
@@ -6588,7 +6851,10 @@ fn dispatch<B: Backend>(
             }
         }
         Insn::AddRMem8 => {
-            if rex_w {
+            if has66 {
+                // 66 03 /r mod=01 (3B)。i386 gzip 0x80c381f 対応.
+                sem::add_r16_mem8(b, reg(), rm(), disp8())
+            } else if rex_w {
                 sem::add_r64_mem8(b, reg(), rm(), disp8())
             } else {
                 sem::add_r32_mem8(b, reg(), rm(), disp8())
@@ -7445,6 +7711,28 @@ fn dispatch<B: Backend>(
                 sem::and_m32_r32_sib(b, sib_base(), sib_idx(), sib_shift(), reg())
             }
         }
+        Insn::AndM32R32Sibd => {
+            // 21 /r SIB mod=01 [base+index*scale+disp8]。i386 nologin 0x80968e5 対応.
+            if no_index() {
+                if rex_w {
+                    sem::and_m64_r64_mem8(b, sib_base(), disp8(), reg())
+                } else {
+                    sem::and_m32_r32_mem8(b, sib_base(), disp8(), reg())
+                }
+            } else if rex_w {
+                sem::and_m64_r64_sibd(b, sib_base(), sib_idx(), sib_shift(), disp8(), reg())
+            } else {
+                sem::and_m32_r32_sibd(b, sib_base(), sib_idx(), sib_shift(), disp8(), reg())
+            }
+        }
+        Insn::AndM32R32Mem8 => {
+            // 21 /r mod=01 [base+disp8]。
+            if rex_w {
+                sem::and_m64_r64_mem8(b, rm(), disp8(), reg())
+            } else {
+                sem::and_m32_r32_mem8(b, rm(), disp8(), reg())
+            }
+        }
         Insn::OrM32R32Sibabs => {
             // 09 /r SIB mod=00 base=101。dd 0x4cde65 の lock orq %rax, disp(,%rcx,8)。
             if no_index() {
@@ -7502,6 +7790,30 @@ fn dispatch<B: Backend>(
                 sem::mul_rm64(b, rm())
             } else {
                 sem::mul_rm32(b, rm())
+            }
+        }
+        Insn::MulRm32Sib => {
+            // F7 /4 SIB mod=00 [base+index*scale] (3B)。i386 musl の mull (%esp)。base=5 は fetch が 7B にする.
+            if no_index() {
+                if rex_w {
+                    sem::mul_rm64_memnd(b, sib_base())
+                } else {
+                    sem::mul_rm32_memnd(b, sib_base())
+                }
+            } else if rex_w {
+                sem::mul_rm64_sib(b, sib_base(), sib_idx(), sib_shift())
+            } else {
+                sem::mul_rm32_sib(b, sib_base(), sib_idx(), sib_shift())
+            }
+        }
+        Insn::MulRm32Rip => {
+            // F7 25 + disp32。64bit は RIP 相対、i386 は絶対番地。i386 makemime 0x8103307 対応.
+            if rex_w {
+                sem::mul_rm64_rip(b, eip as u64 + nbytes, disp32())
+            } else if is64 {
+                sem::mul_rm32_rip(b, eip as u64 + nbytes, disp32())
+            } else {
+                sem::mul_rm32_abs(b, imm32())
             }
         }
         Insn::ImulRmMem8 => {
@@ -8002,6 +8314,15 @@ fn dispatch<B: Backend>(
                 sem::shrd_r64_imm8(b, rm0f(), reg0f_as_gpr(), n)
             } else {
                 sem::shrd_r32_imm8(b, rm0f(), reg0f_as_gpr(), n)
+            }
+        }
+        Insn::ShldR32Imm8 => {
+            // SHLD r/m32,r32,imm8 (0F A4 /r ib mod=11)。REX.W で64ビット.
+            let n = (word & 0xff) as u8;
+            if rex_w {
+                sem::shld_r64_imm8(b, rm0f(), reg0f_as_gpr(), n)
+            } else {
+                sem::shld_r32_imm8(b, rm0f(), reg0f_as_gpr(), n)
             }
         }
         Insn::BtR32Rm => {
@@ -8935,6 +9256,16 @@ fn dispatch<B: Backend>(
                 sem::imul_r64_imm8(b, reg(), rm(), disp8())
             } else {
                 sem::imul_r32_imm8(b, reg(), rm(), disp8())
+            }
+        }
+        Insn::ImulRImm8Mem32 => {
+            // 6B /r mod=10 [base+disp32] + imm8 (7B)。i386 iostat 0x808b648。フラグは変えない。
+            let d32 = (((word >> 8) & 0xffff_ffff) as u32).swap_bytes() as i32;
+            let imm = (word & 0xff) as u8 as i8;
+            if rex_w {
+                sem::imul_r64_imm8_mem32(b, reg(), rm(), d32, imm)
+            } else {
+                sem::imul_r32_imm8_mem32(b, reg(), rm(), d32, imm)
             }
         }
         Insn::ImulRRm => {
@@ -9926,6 +10257,7 @@ fn dispatch<B: Backend>(
             | Insn::ImulRImm
             | Insn::ImulRImm8
             | Insn::ImulRImm8Mem8
+            | Insn::ImulRImm8Mem32
             | Insn::ImulRImm8Rip
             | Insn::ImulRImmRip => Some(reg()),
             Insn::Cmovb
@@ -9985,6 +10317,7 @@ fn dispatch<B: Backend>(
             Insn::XaddR32Memnd
             | Insn::XaddR32Rip
             | Insn::ShldR32Cl
+            | Insn::ShldR32Imm8
             | Insn::ShrdR32Cl
             | Insn::ShrdR32Imm8
             | Insn::BtsR32Rm
@@ -10009,11 +10342,14 @@ fn dispatch<B: Backend>(
             | Insn::AndRMemnd
             | Insn::AndRMem8
             | Insn::AndRMem32
+            | Insn::AndRSib
             | Insn::AndRSibd32
             | Insn::AndRRip
             | Insn::AdcRMemnd
             | Insn::AdcRMem8
             | Insn::AdcRMem32
+            | Insn::AdcRSibd
+            | Insn::AdcRSibabs
             | Insn::AdcRRip
             | Insn::SbbRMemnd
             | Insn::SbbRMem8
@@ -10099,6 +10435,7 @@ fn dispatch<B: Backend>(
             && matches!(
                 insn,
                 Insn::MulRm32
+                    | Insn::MulRm32Sib
                     | Insn::ImulRm32
                     | Insn::DivRm32
                     | Insn::IdivRm32

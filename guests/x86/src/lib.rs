@@ -84,8 +84,8 @@ mod tests {
 
     #[test]
     fn insn_count() {
-        // 段階4の x86 最小。ModRM/SIB 展開で 830 件。
-        assert_eq!(INSNS.len(), 830);
+        // 段階4の x86 最小。ModRM/SIB 展開で 853 件。
+        assert_eq!(INSNS.len(), 853);
     }
 
     #[test]

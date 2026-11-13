@@ -183,6 +183,9 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("mov_eax_abs", "F1", "10001011 00...101 ................................", "mov eax, [disp32]", "load"),
         ("mov_abs_eax", "F1", "10001001 00...101 ................................", "mov [disp32], eax", "store"),
         ("mul_rm32", "F1", "11110111 11100...", "mul eax, r/m32", "mult"),
+        // MUL eax, [disp32] (F7 25 + disp32)。64bit では RIP 相対、i386 では絶対番地。
+        // makemime 0x8103307 対応.
+        ("mul_rm32_rip", "F1", "11110111 00100101 ................................", "mul eax, m32", "mult"),
         ("imul_rm32", "F1", "11110111 11101...", "imul eax, r/m32", "mult"),
         ("div_rm32", "F1", "11110111 11110...", "div eax, r/m32", "div"),
         // DIV r/m8 (F6 /6 mod=11)。lzcat 0x48b6ef の div dl。
@@ -252,6 +255,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("pop_m64_mem8", "M8", "10001111 01000... ........", "pop m64", "load"),
         ("call_rel32", "F1", "11101000 ................................", "call {imm}", "jump"),
         ("ret", "F1", "11000011", "ret", "jump"),
+        // RET imm16 (C2 iw)。i386 musl の stdcall 風呼出しで多用される.
+        ("ret_imm", "F1", "11000010 ................", "ret {imm}", "jump"),
         ("cmp_eax", "F1", "00111101 ................................", "cmp eax, {imm}", "alu"),
         ("cmp_al_imm", "F1", "00111100 ........", "cmp al, {imm}", "alu"),
         // OR AL,imm8 (0C ib)。
@@ -275,6 +280,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("jle", "F1", "01111110 ........", "jle {imm}", "jump"),
         ("jg", "F1", "01111111 ........", "jg {imm}", "jump"),
         ("loop", "F1", "11100010 ........", "loop {imm}", "jump"),
+        ("jcxz", "F1", "11100011 ........", "jcxz {imm}", "jump"),
         ("jmp_rel32", "F1", "11101001 ................................", "jmp {imm}", "jump"),
         ("xor_rm32", "F1", "00110001 11......", "xor r/m32, r32", "alu"),
         ("and_eax", "F1", "00100101 ................................", "and eax, {imm}", "alu"),
@@ -526,6 +532,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("shrd_r32_cl", "F1", "00001111 10101101 11......", "shrd r/m, r, cl", "alu"),
         // SHRD r/m32,r32,imm8 (0F AC /r ib mod=11)。i386 musl の 64bit 値分解.
         ("shrd_r32_imm8", "F1", "00001111 10101100 11...... ........", "shrd r/m, r, {imm}", "alu"),
+        // SHLD r/m32,r32,imm8 (0F A4 /r ib mod=11)。i386 sha 系の 64bit シフト.
+        ("shld_r32_imm8", "F1", "00001111 10100100 11...... ........", "shld r/m, r, {imm}", "alu"),
         // CMOVE r64/r32, m64/m32 [RIP+disp32] (0F 44 05/0D... + disp32)。REX.W で64bit.
         ("cmove_rip", "F1", "00001111 01000100 00...101 ................................", "cmove r, m", "load"),
         // CMOVNE r64/r32, m64/m32 [RIP+disp32] (0F 45 05 + disp32)。ln 0x5a9e44 対応。REX.W で64bit.
@@ -543,6 +551,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("imul_r_imm8_sibd", "F1", "01101011 01...100 ..100... ........ ........", "imul r, m, {imm}", "alu"),
         // IMUL r, [base+disp8], imm8 (6B /r mod=01 rm≠4)。nmeter 0x44a5eb の 6B 48 1C 0A。
         ("imul_r_imm8_mem8", "F1", "01101011 01...... ........ ........", "imul r, m, {imm}", "alu"),
+        // IMUL r, [base+disp32], imm8 (6B /r mod=10 rm≠4)。i386 iostat 0x808b648 対応.
+        ("imul_r_imm8_mem32", "F1", "01101011 10...... ................................ ........", "imul r, m, {imm}", "alu"),
         // IMUL r, [SIB], imm8 (6B /r mod=00)。mpstat 0x449c01 の 48 6B 2C 24 48。索引なし。base=5 は長さが違う.
         ("imul_r_imm8_sib", "F1", "01101011 00...100 ..100... ........", "imul r, m, {imm}", "alu"),
         // IMUL r64,r/m64,imm8 RIP (6B /r ib + disp32 + imm8)。REX.W で64bit.
@@ -617,6 +627,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("sbb_m32_r32_mem8", "M8", "00011001 01...... ........", "sbb m32, r32", "alu"),
         ("adc_m32_r32_sibd", "S8", "00010001 01...100 ........ ........", "adc [sib+disp8], r32", "alu"),
         ("sbb_m32_r32_sibd", "S8", "00011001 01...100 ........ ........", "sbb [sib+disp8], r32", "alu"),
+        // ADC r32, [sib+disp8] (13 /r SIB mod=01)。i386 musl の 64bit 演算。
+        ("adc_r_sibd", "S8", "00010011 01...100 ........ ........", "adc r32, [sib+disp8]", "alu"),
         // OR m32,r32 mod=10 [base+disp32] (09 /r)。
         ("or_m32_r32_mem32", "M32", "00001001 10...... ................................", "or m32, r32", "alu"),
         // ADD m32,r32 RIP (01 05 + disp32)。
@@ -693,6 +705,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         // OR m32,imm32 mod=01 [base+disp8] (81 /1)。SIB は fetch で弾く.
         ("or_rm32_imm_mem8", "M8", "10000001 01001... ........ ................................", "or r/m32, {imm}", "alu"),
         ("adc_m32_imm8_mem8", "M8", "10000011 01010... ........ ........", "adc r/m32, {imm}", "alu"),
+        // ADC m32,imm8 SIB+disp8 (83 /2 mod=01)。i386 strings 0x806359d 対応.
+        ("adc_m32_imm8_sibd", "F1", "10000011 01010100 ........ ........ ........", "adc r/m32, {imm}", "alu"),
         ("sub_m32_imm8_sibd32", "F1", "10000011 10101100 ........ ................................ ........", "sub [sib+disp32], {imm}", "alu"),
         // OR m32/m64,imm32 SIB+disp8 (81 /1 mod=01)。resize 0x490ea6 の orl $0x880, 0x1c(%rsp)。
         (
@@ -716,6 +730,22 @@ pub fn build_model() -> polyisa_isadl::Model {
             "F1",
             "10000001 01100100 ........ ........ ................................",
             "and r/m32, {imm}",
+            "alu",
+        ),
+        // AND m32,imm32 mod=10 [base+disp32] (81 /4)。i386 script 0x80baad6 対応.
+        (
+            "and_rm32_imm_mem32",
+            "F1",
+            "10000001 10100... ................................ ................................",
+            "and r/m32, {imm}",
+            "alu",
+        ),
+        // ADD m32,imm32 mod=10 [base+disp32] (81 /0)。i386 script 0x80baae0 対応.
+        (
+            "add_rm32_imm_mem32",
+            "F1",
+            "10000001 10000... ................................ ................................",
+            "add r/m32, {imm}",
             "alu",
         ),
         // XOR m32/m64,imm32 SIB+disp8 (81 /6 mod=01)。mim 0x45a165 の xorl $0x100,0x4(%rsp)。
@@ -999,6 +1029,10 @@ pub fn build_model() -> polyisa_isadl::Model {
             "test m32, {imm}",
             "alu",
         ),
+        // TEST m32,imm32 SIB mod=00 [base+index*scale] (F7 /0)。i386 ls 0x80d11e0 対応.
+        ("test_rm32_imm_sib", "F1", "11110111 00000100 ........ ................................", "test m32, {imm}", "alu"),
+        // TEST m32,imm32 SIB mod=01 [base+index*scale+disp8] (F7 /0)。i386 musl 0x80fe3a9 対応.
+        ("test_rm32_imm_sibd", "F1", "11110111 01000100 ........ ........ ................................", "test m32, {imm}", "alu"),
         ("not_rm32", "F1", "11110111 11010...", "not r/m32", "alu"),
         ("neg_rm32", "F1", "11110111 11011...", "neg r/m32", "alu"),
         ("test_rm8_imm", "F1", "11110110 11000... ........", "test r/m8, {imm}", "alu"),
@@ -1027,10 +1061,14 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("cmp_rm8_imm_sibd", "F1", "10000000 01111100 ........ ........ ........", "cmp r/m8, {imm}", "alu"),
         // XORB [SIB+disp8],imm8 (80 /6)。iostat 0x448a1f の 80 74 24 1B 01。
         ("xor_rm8_imm_sibd", "F1", "10000000 01110100 ........ ........ ........", "xor r/m8, {imm}", "alu"),
+        // XOR m8,imm8 mod=10 [base+disp32] (80 /6)。i386 iostat 0x808b743 対応.
+        ("xor_rm8_imm_mem32", "F1", "10000000 10110... ................................ ........", "xor r/m8, {imm}", "alu"),
         // XORB [base+index*scale],imm8 (80 /6 SIB mod=00)。sha3sum 0x4b4f14 の 80 34 07 06。base=5 は長さが違う.
         ("xor_rm8_imm_sib", "F1", "10000000 00110100 ........ ........", "xor r/m8, {imm}", "alu"),
         // ADDB [base+index*scale],imm8 (80 /0 SIB mod=00)。sha3sum 0x4b4f20 の 80 04 07 80。base=5 は長さが違う.
         ("add_rm8_imm_sib", "F1", "10000000 00000100 ........ ........", "add r/m8, {imm}", "alu"),
+        // ADDB [base+index*scale+disp8],imm8 (80 /0 SIB mod=01)。i386 sha3sum 0x80f0868 対応.
+        ("add_rm8_imm_sibd", "F1", "10000000 01000100 ........ ........ ........", "add r/m8, {imm}", "alu"),
         // CMPB m8,imm8 SIB mod=10 [base+index*scale+disp32] (80 /7)。stat 0x429875 対応.8B.
         ("cmp_rm8_imm_sibd32", "F1", "10000000 10111100 ........ ................................ ........", "cmp r/m8, {imm}", "alu"),
         ("test_m8_imm_rip", "F1", "11110110 00000101 ................................ ........", "test m8, {imm}", "alu"),
@@ -1464,6 +1502,15 @@ pub fn build_model() -> polyisa_isadl::Model {
             "div eax, r/m32",
             "div",
         ),
+        // MUL eax, [base+index*scale] (F7 /4 SIB mod=00)。i386 musl の mull (%esp)。
+        (
+            "mul_rm32_sib",
+            "N8",
+            "11110111 00100100 ........",
+            vec![wc("n8_base", WhereOp::Ne, 5)],
+            "mul eax, r/m32",
+            "mult",
+        ),
         (
             "cvtsi2sd_m32_mem8",
             "M8",
@@ -1620,6 +1667,15 @@ pub fn build_model() -> polyisa_isadl::Model {
             "and r32, [r/m+sib+disp8]",
             "alu",
         ),
+        // AND r32, [base+index*scale] (23 /r SIB mod=00)。md5sum 0x9fd9e9 の and (%esp),%ebx.
+        (
+            "and_r_sib",
+            "N8",
+            "00100011 00...100 ........",
+            vec![wc("n8_base", WhereOp::Ne, 5)],
+            "and r32, [r/m+sib]",
+            "alu",
+        ),
         (
             "and_r_mem32",
             "M32",
@@ -1677,6 +1733,35 @@ pub fn build_model() -> polyisa_isadl::Model {
             "00010011 10...... ................................",
             vec![wc("m32_rm", WhereOp::Ne, 4)],
             "adc r32, m32",
+            "alu",
+        ),
+        // ADC r32, [index*scale+disp32] (13 /r SIB mod=00 base=101)。
+        // i386 sha512sum 0x80effe5 の adc 0x811c6f4(,%esi,8),%edx.
+        (
+            "adc_r_sibabs",
+            "D32",
+            "00010011 00...100 ........ ................................",
+            vec![wc("d32_base", WhereOp::Eq, 5)],
+            "adc r32, [idx*scale+disp32]",
+            "alu",
+        ),
+        // ADC m32,r32 [base+index*scale+disp32] (11 /r SIB mod=10)。
+        // i386 iostat 0x808b68d の adc %ebx,-0x474(%ebp,%esi,1).
+        (
+            "adc_m32_r32_sibd32",
+            "D32",
+            "00010001 10...100 ........ ................................",
+            vec![],
+            "adc [sib+disp32], r32",
+            "alu",
+        ),
+        // ADC m32,r32 mod=10 [base+disp32] (11 /r)。
+        (
+            "adc_m32_r32_mem32",
+            "M32",
+            "00010001 10...... ................................",
+            vec![wc("m32_rm", WhereOp::Ne, 4)],
+            "adc m32, r32",
             "alu",
         ),
         (
@@ -2001,6 +2086,15 @@ pub fn build_model() -> polyisa_isadl::Model {
             "F1",
             "11111111 00110100 ........",
             vec![],
+            "push m",
+            "store",
+        ),
+        // PUSH m [index*scale+disp32] (FF /6 SIB mod=00 base=直接番地)。i386 ifconfig 対応.
+        (
+            "push_rm_sibabs",
+            "D32",
+            "11111111 00110100 ........ ................................",
+            vec![wc("d32_base", WhereOp::Eq, 5)],
             "push m",
             "store",
         ),
@@ -2430,6 +2524,24 @@ pub fn build_model() -> polyisa_isadl::Model {
             "sub m32, r32",
             "alu",
         ),
+        // SUB m32,r32 [base+index*scale+disp32] (29 /r SIB mod=10)。i386 deluser 0x804fce9 対応.
+        (
+            "sub_m32_r32_sibd32",
+            "F1",
+            "00101001 10...100 ........ ................................",
+            vec![],
+            "sub m32, r32",
+            "alu",
+        ),
+        // OR r8, [base+disp32] (0A /r mod=10、SIBなし)。i386 showkey 0x810d301 対応.
+        (
+            "or_r8_m8_mem32",
+            "M32",
+            "00001010 10...... ................................",
+            vec![wc("m32_rm", WhereOp::Ne, 4)],
+            "or r8, m8",
+            "load",
+        ),
         (
             "sub_r_mem32",
             "M32",
@@ -2623,6 +2735,23 @@ pub fn build_model() -> polyisa_isadl::Model {
             "00001001 00...100 ........",
             vec![wc("n8_base", WhereOp::Ne, 5)],
             "or [r/m+sib], r32",
+            "alu",
+        ),
+        (
+            "and_m32_r32_sibd",
+            "S8",
+            "00100001 01...100 ........ ........",
+            vec![],
+            "and [sib+disp8], r32",
+            "alu",
+        ),
+        // AND m32,r32 mod=01 [base+disp8] (21 /r)。
+        (
+            "and_m32_r32_mem8",
+            "M8",
+            "00100001 01...... ........",
+            vec![wc("m8_rm", WhereOp::Ne, 4)],
+            "and m32, r32",
             "alu",
         ),
         (

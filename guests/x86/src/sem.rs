@@ -738,6 +738,72 @@ pub fn test_rm64_imm_memnd<B: Backend>(b: &mut B, base: Gpr, imm: u32) -> Flow<B
     Ok(())
 }
 
+/// TEST m32,imm32 [base+index*scale] (F7 /0 SIB mod=00)。i386 ls 0x80d11e0 対応.
+pub fn test_rm32_imm_sib<B: Backend>(
+    b: &mut B,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    imm: u32,
+) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, 0, base, idx);
+    let x: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let y = b.konst::<W32>(imm);
+    let v = b.and::<W32>(x, y);
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// TEST m64,imm32 [base+index*scale] (F7 /0 SIB mod=00, REX.W)。imm32 は符号拡張する.
+pub fn test_rm64_imm_sib<B: Backend>(
+    b: &mut B,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    imm: u32,
+) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, 0, base, idx);
+    let x: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let y = b.konst::<W64>(imm as i32 as u64);
+    let v = b.and::<W64>(x, y);
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// TEST m32,imm32 [base+index*scale+disp8] (F7 /0 SIB mod=01)。i386 musl 0x80fe3a9 対応.
+pub fn test_rm32_imm_sibd<B: Backend>(
+    b: &mut B,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i8,
+    imm: u32,
+) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, disp as i32, base, idx);
+    let x: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let y = b.konst::<W32>(imm);
+    let v = b.and::<W32>(x, y);
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// TEST m64,imm32 [base+index*scale+disp8] (F7 /0 SIB mod=01, REX.W)。imm32 は符号拡張する.
+pub fn test_rm64_imm_sibd<B: Backend>(
+    b: &mut B,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i8,
+    imm: u32,
+) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, disp as i32, base, idx);
+    let x: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let y = b.konst::<W64>(imm as i32 as u64);
+    let v = b.and::<W64>(x, y);
+    update_logic_flags(b, v);
+    Ok(())
+}
+
 /// 8ビット GPR を読む。REX ありは低8ビット、REX なしの 4-7 は上位8ビット (AH/CH/DH/BH).
 fn read8<B: Backend>(b: &mut B, r: Gpr, high: bool) -> B::V<W8> {
     if high {
@@ -1743,6 +1809,18 @@ pub fn xor_rm8_imm_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8, imm: u8) -> 
     Ok(())
 }
 
+/// XOR m8,imm8 [base+disp32] (80 /6 mod=10)。i386 iostat 0x808b743 対応.
+pub fn xor_rm8_imm_mem32<B: Backend>(b: &mut B, base: Gpr, disp: i32, imm: u8) -> Flow<B> {
+    use polyisa_sem::W8;
+    let addr = eff_addr32(b, base, disp);
+    let x: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
+    let y = b.konst::<W8>(imm);
+    let v = b.xor::<W8>(x, y);
+    b.store::<W8>(addr, v, DATA_WRITE)?;
+    update_logic_flags(b, v);
+    Ok(())
+}
+
 /// XOR [base+index*scale+disp8],imm8 (80 /6 SIB mod=01)。8ビット XOR.
 pub fn xor_rm8_imm_sibd<B: Backend>(
     b: &mut B,
@@ -1778,6 +1856,37 @@ pub fn add_rm8_imm_memnd<B: Backend>(b: &mut B, base: Gpr, imm: u8) -> Flow<B> {
 pub fn add_rm8_imm_sib<B: Backend>(b: &mut B, base: Gpr, idx: Gpr, shift: u32, imm: u8) -> Flow<B> {
     use polyisa_sem::W8;
     let addr = sib_addr_scaled(b, shift, 0, base, idx);
+    let x: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
+    let y = b.konst::<W8>(imm);
+    let v = b.add::<W8>(x, y);
+    b.store::<W8>(addr, v, DATA_WRITE)?;
+    update_add_flags(b, x, y, v);
+    Ok(())
+}
+
+/// ADD [base+disp8],imm8 (80 /0 mod=01)。8ビット加算.
+pub fn add_rm8_imm_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8, imm: u8) -> Flow<B> {
+    use polyisa_sem::W8;
+    let addr = eff_addr(b, base, disp);
+    let x: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
+    let y = b.konst::<W8>(imm);
+    let v = b.add::<W8>(x, y);
+    b.store::<W8>(addr, v, DATA_WRITE)?;
+    update_add_flags(b, x, y, v);
+    Ok(())
+}
+
+/// ADD [base+index*scale+disp8],imm8 (80 /0 SIB mod=01)。i386 sha3sum 0x80f0868 対応.
+pub fn add_rm8_imm_sibd<B: Backend>(
+    b: &mut B,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i8,
+    imm: u8,
+) -> Flow<B> {
+    use polyisa_sem::W8;
+    let addr = sib_addr_scaled(b, shift, disp as i32, base, idx);
     let x: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
     let y = b.konst::<W8>(imm);
     let v = b.add::<W8>(x, y);
@@ -1986,6 +2095,38 @@ pub fn je<B: Backend>(b: &mut B, eip: u32, disp: i8) -> Flow<B> {
     let t = b.konst::<W32>(target);
     let tj = b.konst::<W64>(target as u64);
     b.if_then(zf, |b| {
+        b.set(eip_ref(), t);
+        b.jump(tj);
+        Ok(())
+    })?;
+    Ok(())
+}
+
+/// JECXZ rel8 (E3)。ECX=0 なら eip+2+disp に飛ぶ。i386 vi 0x8109740 対応.
+pub fn jcxz32<B: Backend>(b: &mut B, eip: u32, disp: i8) -> Flow<B> {
+    let x = read(b, Gpr(1));
+    let zero = b.konst::<W32>(0);
+    let take = b.cmp::<W32>(Cmp::Eq, x, zero);
+    let target = eip.wrapping_add(2).wrapping_add(disp as i32 as u32);
+    let t = b.konst::<W32>(target);
+    let tj = b.konst::<W64>(target as u64);
+    b.if_then(take, |b| {
+        b.set(eip_ref(), t);
+        b.jump(tj);
+        Ok(())
+    })?;
+    Ok(())
+}
+
+/// JRCXZ rel8 (E3、64ビット)。RCX=0 なら eip+2+disp に飛ぶ。
+pub fn jcxz64<B: Backend>(b: &mut B, eip: u32, disp: i8) -> Flow<B> {
+    let x = read64(b, Gpr(1));
+    let zero = b.konst::<W64>(0);
+    let take = b.cmp::<W64>(Cmp::Eq, x, zero);
+    let target = eip.wrapping_add(2).wrapping_add(disp as i32 as u32);
+    let t = b.konst::<W32>(target);
+    let tj = b.konst::<W64>(target as u64);
+    b.if_then(take, |b| {
         b.set(eip_ref(), t);
         b.jump(tj);
         Ok(())
@@ -4683,6 +4824,31 @@ pub fn adc_m32_imm8_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8, imm: i8) ->
     Ok(())
 }
 
+/// ADC m32, imm8 [base+index*scale+disp8] (83 /2 SIB mod=01)。i386 strings 0x806359d 対応.
+pub fn adc_m32_imm8_sibd<B: Backend>(
+    b: &mut B,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i8,
+    imm: i8,
+) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, disp as i32, base, idx);
+    let x: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let y = b.konst::<W32>(imm as i32 as u32);
+    let c = cf_num(b);
+    let y1 = b.add::<W32>(y, c);
+    let x64 = b.zext::<W32, W64>(x);
+    let y64 = b.zext::<W32, W64>(y);
+    let c64 = b.zext::<W32, W64>(c);
+    let t1 = b.add::<W64>(x64, y64);
+    let t = b.add::<W64>(t1, c64);
+    let v: B::V<W32> = b.trunc::<W64, W32>(t);
+    b.store::<W32>(addr, v, DATA_WRITE)?;
+    adc_flags32(b, t, x, y1, v);
+    Ok(())
+}
+
 /// SBB m32, r32 [base+disp8] (19 /r mod=01)。CF を借りて 6 旗を更新する。
 /// i386 musl の 64 ビット減算が連鎖して使う。
 pub fn sbb_m32_r32_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8, src: Gpr) -> Flow<B> {
@@ -6054,6 +6220,130 @@ pub fn mul_rm64<B: Backend>(b: &mut B, rm: Gpr) -> Flow<B> {
     Ok(())
 }
 
+/// MUL EAX, [base] (F7 /4 mod=00、32ビット)。SIB の index 欠落経路からも使う.
+pub fn mul_rm32_memnd<B: Backend>(b: &mut B, base: Gpr) -> Flow<B> {
+    let addr = read64(b, base);
+    let y: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let x = read(b, Gpr(0));
+    let x64 = b.zext::<W32, W64>(x);
+    let y64 = b.zext::<W32, W64>(y);
+    let p = b.mul::<W64>(x64, y64);
+    let lo32: B::V<W32> = b.trunc::<W64, W32>(p);
+    write(b, Gpr(0), lo32);
+    let shift = b.konst::<W64>(32);
+    let hi64 = b.shr_l::<W64>(p, shift);
+    let hi32: B::V<W32> = b.trunc::<W64, W32>(hi64);
+    write(b, Gpr(2), hi32);
+    Ok(())
+}
+
+/// MUL RAX, [base] (F7 /4 mod=00、REX.W)。
+pub fn mul_rm64_memnd<B: Backend>(b: &mut B, base: Gpr) -> Flow<B> {
+    let addr = read64(b, base);
+    let y: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let x = read64(b, Gpr(0));
+    let x128 = b.zext::<W64, W128>(x);
+    let y128 = b.zext::<W64, W128>(y);
+    let p = b.mul::<W128>(x128, y128);
+    let lo64: B::V<W64> = b.trunc::<W128, W64>(p);
+    write64(b, Gpr(0), lo64);
+    let shift = b.konst::<W128>(64);
+    let hi128 = b.shr_l::<W128>(p, shift);
+    let hi64: B::V<W64> = b.trunc::<W128, W64>(hi128);
+    write64(b, Gpr(2), hi64);
+    Ok(())
+}
+
+/// MUL EAX, [base+index*scale] (F7 /4 SIB mod=00、32ビット)。i386 musl の mull (%esp)。
+pub fn mul_rm32_sib<B: Backend>(b: &mut B, base: Gpr, idx: Gpr, shift: u32) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, 0, base, idx);
+    let y: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let x = read(b, Gpr(0));
+    let x64 = b.zext::<W32, W64>(x);
+    let y64 = b.zext::<W32, W64>(y);
+    let p = b.mul::<W64>(x64, y64);
+    let lo32: B::V<W32> = b.trunc::<W64, W32>(p);
+    write(b, Gpr(0), lo32);
+    let shift = b.konst::<W64>(32);
+    let hi64 = b.shr_l::<W64>(p, shift);
+    let hi32: B::V<W32> = b.trunc::<W64, W32>(hi64);
+    write(b, Gpr(2), hi32);
+    Ok(())
+}
+
+/// MUL RAX, [base+index*scale] (F7 /4 SIB mod=00、REX.W)。
+pub fn mul_rm64_sib<B: Backend>(b: &mut B, base: Gpr, idx: Gpr, shift: u32) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, 0, base, idx);
+    let y: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let x = read64(b, Gpr(0));
+    let x128 = b.zext::<W64, W128>(x);
+    let y128 = b.zext::<W64, W128>(y);
+    let p = b.mul::<W128>(x128, y128);
+    let lo64: B::V<W64> = b.trunc::<W128, W64>(p);
+    write64(b, Gpr(0), lo64);
+    let shift = b.konst::<W128>(64);
+    let hi128 = b.shr_l::<W128>(p, shift);
+    let hi64: B::V<W64> = b.trunc::<W128, W64>(hi128);
+    write64(b, Gpr(2), hi64);
+    Ok(())
+}
+
+/// MUL EAX, [disp32] (F7 25、i386 直接番地)。符号なし積の64ビットを EDX:EAX に置く.
+/// i386 makemime 0x8103307 対応.
+pub fn mul_rm32_abs<B: Backend>(b: &mut B, addr32: u32) -> Flow<B> {
+    let addr = b.konst::<W64>(addr32 as u64);
+    let y: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let x = read(b, Gpr(0));
+    let x64 = b.zext::<W32, W64>(x);
+    let y64 = b.zext::<W32, W64>(y);
+    let p = b.mul::<W64>(x64, y64);
+    let lo32: B::V<W32> = b.trunc::<W64, W32>(p);
+    write(b, Gpr(0), lo32);
+    let shift = b.konst::<W64>(32);
+    let hi64 = b.shr_l::<W64>(p, shift);
+    let hi32: B::V<W32> = b.trunc::<W64, W32>(hi64);
+    write(b, Gpr(2), hi32);
+    Ok(())
+}
+
+/// MUL EAX, [RIP+disp32] (F7 25、64ビット)。
+pub fn mul_rm32_rip<B: Backend>(b: &mut B, next_rip: u64, disp: i32) -> Flow<B> {
+    let base = b.konst::<W64>(next_rip);
+    let d = b.konst::<W64>(disp as i64 as u64);
+    let addr = b.add::<W64>(base, d);
+    let y: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let x = read(b, Gpr(0));
+    let x64 = b.zext::<W32, W64>(x);
+    let y64 = b.zext::<W32, W64>(y);
+    let p = b.mul::<W64>(x64, y64);
+    let lo32: B::V<W32> = b.trunc::<W64, W32>(p);
+    write(b, Gpr(0), lo32);
+    let shift = b.konst::<W64>(32);
+    let hi64 = b.shr_l::<W64>(p, shift);
+    let hi32: B::V<W32> = b.trunc::<W64, W32>(hi64);
+    write(b, Gpr(2), hi32);
+    Ok(())
+}
+
+/// MUL RAX, [RIP+disp32] (F7 25、REX.W)。符号なし積の128ビットを RDX:RAX に置く.
+pub fn mul_rm64_rip<B: Backend>(b: &mut B, next_rip: u64, disp: i32) -> Flow<B> {
+    let base = b.konst::<W64>(next_rip);
+    let d = b.konst::<W64>(disp as i64 as u64);
+    let addr = b.add::<W64>(base, d);
+    let y: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let x = read64(b, Gpr(0));
+    let x128 = b.zext::<W64, W128>(x);
+    let y128 = b.zext::<W64, W128>(y);
+    let p = b.mul::<W128>(x128, y128);
+    let lo64: B::V<W64> = b.trunc::<W128, W64>(p);
+    write64(b, Gpr(0), lo64);
+    let shift = b.konst::<W128>(64);
+    let hi128 = b.shr_l::<W128>(p, shift);
+    let hi64: B::V<W64> = b.trunc::<W128, W64>(hi128);
+    write64(b, Gpr(2), hi64);
+    Ok(())
+}
+
 /// IMUL EAX, r/m32 (F7 /5)。符号付き積の64ビットを EDX:EAX に置く.
 pub fn imul_rm32<B: Backend>(b: &mut B, rm: Gpr) -> Flow<B> {
     let y = read(b, rm);
@@ -6496,6 +6786,20 @@ pub fn ret<B: Backend>(b: &mut B) -> Flow<B> {
     Ok(())
 }
 
+/// RET imm16 (C2 iw、32ビット)。戻り番地を POP してから ESP を imm16 分だけ上げる。
+pub fn ret_imm<B: Backend>(b: &mut B, imm: u16) -> Flow<B> {
+    let esp = read(b, Gpr(4));
+    let addr = b.zext::<W32, W64>(esp);
+    let v: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    b.set(eip_ref(), v);
+    let w = b.zext::<W32, W64>(v);
+    b.jump(w);
+    let n = b.konst::<W32>(4u32.wrapping_add(u32::from(imm)));
+    let next = b.add::<W32>(esp, n);
+    b.set(esp_ref(), next);
+    Ok(())
+}
+
 pub fn esp_ref() -> StateRef<W32> {
     Gpr(4).state()
 }
@@ -6650,6 +6954,31 @@ pub fn push_m32_abs<B: Backend>(b: &mut B, addr32: u32) -> Flow<B> {
     Ok(())
 }
 
+/// PUSH m32 [index*scale+disp32] (FF /6 SIB mod=00 base=直接番地、32ビット)。i386 ifconfig 対応.
+pub fn push_m32_sibabs<B: Backend>(b: &mut B, idx: Gpr, shift: u32, disp: i32) -> Flow<B> {
+    let addr = sib_addr_scaled_abs(b, shift, disp, idx);
+    let v: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let esp = read(b, Gpr(4));
+    let four = b.konst::<W32>(4);
+    let next = b.sub::<W32>(esp, four);
+    b.set(esp_ref(), next);
+    let slot = b.zext::<W32, W64>(next);
+    b.store::<W32>(slot, v, DATA_WRITE)?;
+    Ok(())
+}
+
+/// PUSH m64 [index*scale+disp32] (FF /6 SIB mod=00 base=直接番地、64ビット)。
+pub fn push_m64_sibabs<B: Backend>(b: &mut B, idx: Gpr, shift: u32, disp: i32) -> Flow<B> {
+    let addr = sib_addr_scaled_abs(b, shift, disp, idx);
+    let v: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let rsp = read64(b, Gpr(4));
+    let eight = b.konst::<W64>(8);
+    let next = b.sub::<W64>(rsp, eight);
+    write64(b, Gpr(4), next);
+    b.store::<W64>(next, v, DATA_WRITE)?;
+    Ok(())
+}
+
 /// POP r64。読んでから RSP を 8 進める。
 pub fn pop_reg64<B: Backend>(b: &mut B, rd: Gpr) -> Flow<B> {
     let rsp = read64(b, Gpr(4));
@@ -6726,6 +7055,19 @@ pub fn ret64<B: Backend>(b: &mut B) -> Flow<B> {
     b.jump(v);
     let eight = b.konst::<W64>(8);
     let next = b.add::<W64>(rsp, eight);
+    write64(b, Gpr(4), next);
+    Ok(())
+}
+
+/// RET imm16 (C2 iw、64ビット)。戻り番地を POP してから RSP を imm16 分だけ上げる。
+pub fn ret64_imm<B: Backend>(b: &mut B, imm: u16) -> Flow<B> {
+    let rsp = read64(b, Gpr(4));
+    let v: B::V<W64> = b.load::<W64>(rsp, DATA_READ)?;
+    let lo: B::V<W32> = b.trunc::<W64, W32>(v);
+    b.set(eip_ref(), lo);
+    b.jump(v);
+    let n = b.konst::<W64>(8u64 + u64::from(imm));
+    let next = b.add::<W64>(rsp, n);
     write64(b, Gpr(4), next);
     Ok(())
 }
@@ -8685,6 +9027,35 @@ pub fn add_r16_memnd<B: Backend>(b: &mut B, dst: Gpr, base: Gpr) -> Flow<B> {
     Ok(())
 }
 
+/// ADD r16, [base+disp8] (66 03 /r mod=01)。i386 gzip 0x80c381f 対応.
+pub fn add_r16_mem8<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, disp: i8) -> Flow<B> {
+    use polyisa_sem::W16;
+    let addr = eff_addr(b, base, disp);
+    let y: B::V<W16> = b.load::<W16>(addr, DATA_READ)?;
+    if dst.0 < 8 {
+        let x32 = read(b, dst);
+        let x = b.trunc::<W32, W16>(x32);
+        let v = b.add::<W16>(x, y);
+        let mask = b.konst::<W32>(0xFFFF_0000);
+        let preserved = b.and::<W32>(x32, mask);
+        let ext32 = b.zext::<W16, W32>(v);
+        let nv = b.or::<W32>(preserved, ext32);
+        write(b, dst, nv);
+        update_add_flags(b, x, y, v);
+    } else {
+        let x64 = read64(b, dst);
+        let x = b.trunc::<W64, W16>(x64);
+        let v = b.add::<W16>(x, y);
+        let mask = b.konst::<W64>(0xFFFF_FFFF_FFFF_0000);
+        let preserved = b.and::<W64>(x64, mask);
+        let ext64 = b.zext::<W16, W64>(v);
+        let nv = b.or::<W64>(preserved, ext64);
+        write64(b, dst, nv);
+        update_add_flags(b, x, y, v);
+    }
+    Ok(())
+}
+
 pub fn add_r32_memnd<B: Backend>(b: &mut B, dst: Gpr, base: Gpr) -> Flow<B> {
     let addr = read64(b, base);
     let y: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
@@ -9528,6 +9899,16 @@ pub fn and_r64_sibd<B: Backend>(
     Ok(())
 }
 
+/// AND r32, [base+index*scale] (23 /r SIB mod=00)。md5sum 0x9fd9e9 対応.
+pub fn and_r32_sib<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, idx: Gpr, shift: u32) -> Flow<B> {
+    and_r32_sibd(b, dst, base, idx, shift, 0)
+}
+
+/// AND r64, [base+index*scale] (23 /r SIB mod=00、REX.W)。
+pub fn and_r64_sib<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, idx: Gpr, shift: u32) -> Flow<B> {
+    and_r64_sibd(b, dst, base, idx, shift, 0)
+}
+
 /// AND r32, [base+disp32] (23 /r mod=10)。
 pub fn and_r32_mem32<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, disp: i32) -> Flow<B> {
     let addr = eff_addr32(b, base, disp);
@@ -9685,6 +10066,49 @@ pub fn adc_r64_mem8<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, disp: i8) -> Flo
     Ok(())
 }
 
+/// ADC r32, [base+index*scale+disp8] (13 /r SIB mod=01)。i386 musl の 64bit 演算。
+pub fn adc_r32_sibd<B: Backend>(
+    b: &mut B,
+    dst: Gpr,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i8,
+) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, disp as i32, base, idx);
+    let y: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let x = read(b, dst);
+    let cf = cf_num(b);
+    let y1 = b.add::<W32>(y, cf);
+    let v0 = b.add::<W32>(x, y);
+    let v = b.add::<W32>(v0, cf);
+    write(b, dst, v);
+    update_add_flags(b, x, y1, v);
+    Ok(())
+}
+
+/// ADC r64, [base+index*scale+disp8] (13 /r SIB mod=01, REX.W)。
+pub fn adc_r64_sibd<B: Backend>(
+    b: &mut B,
+    dst: Gpr,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i8,
+) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, disp as i32, base, idx);
+    let y: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let x = read64(b, dst);
+    let cf = cf_num(b);
+    let c64 = b.zext::<W32, W64>(cf);
+    let y1 = b.add::<W64>(y, c64);
+    let v0 = b.add::<W64>(x, y);
+    let v = b.add::<W64>(v0, c64);
+    write64(b, dst, v);
+    update_add_flags(b, x, y1, v);
+    Ok(())
+}
+
 /// ADC r32, [base+disp32] (13 /r mod=10)。
 pub fn adc_r32_mem32<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, disp: i32) -> Flow<B> {
     let addr = eff_addr32(b, base, disp);
@@ -9702,6 +10126,50 @@ pub fn adc_r32_mem32<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, disp: i32) -> F
 /// ADC r64, [base+disp32] (13 /r mod=10, REX.W)。
 pub fn adc_r64_mem32<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, disp: i32) -> Flow<B> {
     let addr = eff_addr32(b, base, disp);
+    let y: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let x = read64(b, dst);
+    let cf = cf_num(b);
+    let c64 = b.zext::<W32, W64>(cf);
+    let y1 = b.add::<W64>(y, c64);
+    let v0 = b.add::<W64>(x, y);
+    let v = b.add::<W64>(v0, c64);
+    write64(b, dst, v);
+    update_add_flags(b, x, y1, v);
+    Ok(())
+}
+
+/// ADC r32, [index*scale+disp32] (13 /r SIB mod=00 base=101)。i386 sha512sum 0x80effe5 対応.
+pub fn adc_r32_sibabs<B: Backend>(b: &mut B, dst: Gpr, idx: Gpr, shift: u32, disp: i32) -> Flow<B> {
+    let addr = sib_addr_scaled_abs(b, shift, disp, idx);
+    let y: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let x = read(b, dst);
+    let cf = cf_num(b);
+    let y1 = b.add::<W32>(y, cf);
+    let v0 = b.add::<W32>(x, y);
+    let v = b.add::<W32>(v0, cf);
+    write(b, dst, v);
+    update_add_flags(b, x, y1, v);
+    Ok(())
+}
+
+/// ADC r64, [index*scale+disp32] (13 /r SIB mod=00 base=101、REX.W)。
+pub fn adc_r64_sibabs<B: Backend>(b: &mut B, dst: Gpr, idx: Gpr, shift: u32, disp: i32) -> Flow<B> {
+    let addr = sib_addr_scaled_abs(b, shift, disp, idx);
+    let y: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let x = read64(b, dst);
+    let cf = cf_num(b);
+    let c64 = b.zext::<W32, W64>(cf);
+    let y1 = b.add::<W64>(y, c64);
+    let v0 = b.add::<W64>(x, y);
+    let v = b.add::<W64>(v0, c64);
+    write64(b, dst, v);
+    update_add_flags(b, x, y1, v);
+    Ok(())
+}
+
+/// ADC r64, [disp32] (13 /r 直接番地、REX.W)。
+pub fn adc_r64_abs<B: Backend>(b: &mut B, dst: Gpr, addr32: u32) -> Flow<B> {
+    let addr = b.konst::<W64>(addr32 as u64);
     let y: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
     let x = read64(b, dst);
     let cf = cf_num(b);
@@ -10494,6 +10962,18 @@ pub fn or_r8_m8_rip<B: Backend>(
     let base = b.konst::<W64>(next_rip);
     let d = b.konst::<W64>(disp as i64 as u64);
     let addr = b.add::<W64>(base, d);
+    let y: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
+    let x = read8(b, dst, dst_high);
+    let v = b.or::<W8>(x, y);
+    write8(b, dst, dst_high, v);
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// OR r8, [disp32] (0A /r、i386 直接番地)。i386 find 0x80ea86e の or [abs],al 対応.
+pub fn or_r8_m8_abs<B: Backend>(b: &mut B, dst: Gpr, dst_high: bool, addr32: u32) -> Flow<B> {
+    use polyisa_sem::W8;
+    let addr = b.konst::<W64>(addr32 as u64);
     let y: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
     let x = read8(b, dst, dst_high);
     let v = b.or::<W8>(x, y);
@@ -16047,6 +16527,44 @@ pub fn imul_r64_imm8_memnd<B: Backend>(b: &mut B, dst: Gpr, base: Gpr, imm: i8) 
     Ok(())
 }
 
+/// IMUL r32, [base+disp32], imm8 (6B /r mod=10)。imm8 は符号拡張する。i386 iostat 0x808b648 対応.
+pub fn imul_r32_imm8_mem32<B: Backend>(
+    b: &mut B,
+    dst: Gpr,
+    base: Gpr,
+    disp: i32,
+    imm: i8,
+) -> Flow<B> {
+    let addr = eff_addr32(b, base, disp);
+    let x: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let y = b.konst::<W32>(imm as i32 as u32);
+    let x64 = b.sext::<W32, W64>(x);
+    let y64 = b.sext::<W32, W64>(y);
+    let p64 = b.mul::<W64>(x64, y64);
+    let v: B::V<W32> = b.trunc::<W64, W32>(p64);
+    write(b, dst, v);
+    Ok(())
+}
+
+/// IMUL r64, [base+disp32], imm8 (6B /r mod=10、REX.W)。imm8 は符号拡張する.
+pub fn imul_r64_imm8_mem32<B: Backend>(
+    b: &mut B,
+    dst: Gpr,
+    base: Gpr,
+    disp: i32,
+    imm: i8,
+) -> Flow<B> {
+    let addr = eff_addr32(b, base, disp);
+    let x: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let y = b.konst::<W64>(imm as i64 as u64);
+    let x128 = b.sext::<W64, W128>(x);
+    let y128 = b.sext::<W64, W128>(y);
+    let p128 = b.mul::<W128>(x128, y128);
+    let v: B::V<W64> = b.trunc::<W128, W64>(p128);
+    write64(b, dst, v);
+    Ok(())
+}
+
 /// IMUL r64, m64, imm8 SIB+disp8 (no_index, REX.W)。imm8 は符号拡張する。iostat 0x44897d 対応.
 pub fn imul_r64_imm8_sibd<B: Backend>(
     b: &mut B,
@@ -17618,6 +18136,95 @@ pub fn shrd_r64_imm8<B: Backend>(b: &mut B, dst: Gpr, src: Gpr, n: u8) -> Flow<B
     let out_top = b.and::<W64>(out_shift, one64);
     let cf01: B::V<W32> = b.trunc::<W64, W32>(out_top);
     let of_raw = b.cmp::<W32>(Cmp::Ne, v63_32, cf01);
+    let of_new = pick(b, of_raw, FLAG_OF);
+    let of_mask = b.konst::<W32>(FLAG_OF);
+    let old_of = b.and::<W32>(old, of_mask);
+    let of = if n == 1 { of_new } else { old_of };
+    let szp = szp_bits(b, v);
+    let clear_mask = b.konst::<W32>(!FLAG_OSZPC);
+    let mut new_flags = b.and::<W32>(old, clear_mask);
+    new_flags = b.or::<W32>(new_flags, cf);
+    new_flags = b.or::<W32>(new_flags, of);
+    new_flags = b.or::<W32>(new_flags, szp);
+    b.set(eflags_ref(), new_flags);
+    Ok(())
+}
+
+/// SHLD r/m32,r32,imm8 (0F A4 /r ib mod=11)。i386 sha 系の 64bit シフト.
+pub fn shld_r32_imm8<B: Backend>(b: &mut B, dst: Gpr, src: Gpr, n: u8) -> Flow<B> {
+    let n = n & 31;
+    if n == 0 {
+        return Ok(());
+    }
+    let x = read(b, dst);
+    let y = read(b, src);
+    let c = b.konst::<W32>(n as u32);
+    let r = b.konst::<W32>(32 - n as u32);
+    let xshl = b.shl::<W32>(x, c);
+    let yshr = b.shr_l::<W32>(y, r);
+    let v = b.or::<W32>(xshl, yshr);
+    write(b, dst, v);
+    let old: B::V<W32> = b.get(eflags_ref());
+    let one = b.konst::<W32>(1);
+    // CF = 追い出された最後のビット = 元の bit(32-n)。
+    let c1 = b.konst::<W32>(32 - n as u32);
+    let shifted = b.shr_l::<W32>(x, c1);
+    let low = b.and::<W32>(shifted, one);
+    let zero = b.konst::<W32>(0);
+    let cf_take = b.cmp::<W32>(Cmp::Ne, low, zero);
+    let cf = pick(b, cf_take, FLAG_CF);
+    // OF (n==1) = 符号変化 = v の bit31 != x の bit31。
+    let n31 = b.konst::<W32>(31);
+    let v_top = b.shr_l::<W32>(v, n31);
+    let v31 = b.and::<W32>(v_top, one);
+    let x_top = b.shr_l::<W32>(x, n31);
+    let x31 = b.and::<W32>(x_top, one);
+    let of_raw = b.cmp::<W32>(Cmp::Ne, v31, x31);
+    let of_new = pick(b, of_raw, FLAG_OF);
+    let of_mask = b.konst::<W32>(FLAG_OF);
+    let old_of = b.and::<W32>(old, of_mask);
+    let of = if n == 1 { of_new } else { old_of };
+    let szp = szp_bits(b, v);
+    let clear_mask = b.konst::<W32>(!FLAG_OSZPC);
+    let mut new_flags = b.and::<W32>(old, clear_mask);
+    new_flags = b.or::<W32>(new_flags, cf);
+    new_flags = b.or::<W32>(new_flags, of);
+    new_flags = b.or::<W32>(new_flags, szp);
+    b.set(eflags_ref(), new_flags);
+    Ok(())
+}
+
+/// SHLD r/m64,r64,imm8 (0F A4 /r ib mod=11、REX.W)。
+pub fn shld_r64_imm8<B: Backend>(b: &mut B, dst: Gpr, src: Gpr, n: u8) -> Flow<B> {
+    let n = n & 63;
+    if n == 0 {
+        return Ok(());
+    }
+    let x = read64(b, dst);
+    let y = read64(b, src);
+    let c = b.konst::<W64>(n as u64);
+    let r = b.konst::<W64>(64 - n as u64);
+    let xshl = b.shl::<W64>(x, c);
+    let yshr = b.shr_l::<W64>(y, r);
+    let v = b.or::<W64>(xshl, yshr);
+    write64(b, dst, v);
+    let old: B::V<W32> = b.get(eflags_ref());
+    let one64 = b.konst::<W64>(1);
+    let c1 = b.konst::<W64>(64 - n as u64);
+    let shifted = b.shr_l::<W64>(x, c1);
+    let low = b.and::<W64>(shifted, one64);
+    let zero32 = b.konst::<W32>(0);
+    let low32: B::V<W32> = b.trunc::<W64, W32>(low);
+    let cf_take = b.cmp::<W32>(Cmp::Ne, low32, zero32);
+    let cf = pick(b, cf_take, FLAG_CF);
+    let n63 = b.konst::<W64>(63);
+    let v_top = b.shr_l::<W64>(v, n63);
+    let v63 = b.and::<W64>(v_top, one64);
+    let v63_32: B::V<W32> = b.trunc::<W64, W32>(v63);
+    let x_top = b.shr_l::<W64>(x, n63);
+    let x63 = b.and::<W64>(x_top, one64);
+    let x63_32: B::V<W32> = b.trunc::<W64, W32>(x63);
+    let of_raw = b.cmp::<W32>(Cmp::Ne, v63_32, x63_32);
     let of_new = pick(b, of_raw, FLAG_OF);
     let of_mask = b.konst::<W32>(FLAG_OF);
     let old_of = b.and::<W32>(old, of_mask);
@@ -20315,6 +20922,182 @@ pub fn sub_m64_r64_sibd<B: Backend>(
     Ok(())
 }
 
+/// SUB m32,r32 [base+index*scale+disp32] (29 /r SIB mod=10)。i386 deluser 0x804fce9 対応.
+pub fn sub_m32_r32_sibd32<B: Backend>(
+    b: &mut B,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i32,
+    src: Gpr,
+) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, disp, base, idx);
+    let x: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let y = read(b, src);
+    let v = b.sub::<W32>(x, y);
+    b.store::<W32>(addr, v, DATA_WRITE)?;
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
+/// SUB m64,r64 [base+index*scale+disp32] (29 /r SIB mod=10, REX.W)。
+pub fn sub_m64_r64_sibd32<B: Backend>(
+    b: &mut B,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i32,
+    src: Gpr,
+) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, disp, base, idx);
+    let x: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let y = read64(b, src);
+    let v = b.sub::<W64>(x, y);
+    b.store::<W64>(addr, v, DATA_WRITE)?;
+    update_sub_flags(b, x, y, v);
+    Ok(())
+}
+
+/// ADC m32,r32 [base+index*scale+disp32] (11 /r SIB mod=10)。i386 iostat 0x808b68d 対応.
+pub fn adc_m32_r32_sibd32<B: Backend>(
+    b: &mut B,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i32,
+    src: Gpr,
+) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, disp, base, idx);
+    let x: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let y = read(b, src);
+    let c = cf_num(b);
+    let y1 = b.add::<W32>(y, c);
+    let x64 = b.zext::<W32, W64>(x);
+    let y64 = b.zext::<W32, W64>(y);
+    let c64 = b.zext::<W32, W64>(c);
+    let t1 = b.add::<W64>(x64, y64);
+    let t = b.add::<W64>(t1, c64);
+    let v: B::V<W32> = b.trunc::<W64, W32>(t);
+    b.store::<W32>(addr, v, DATA_WRITE)?;
+    adc_flags32(b, t, x, y1, v);
+    Ok(())
+}
+
+/// ADC m64,r64 [base+index*scale+disp32] (11 /r SIB mod=10, REX.W)。
+pub fn adc_m64_r64_sibd32<B: Backend>(
+    b: &mut B,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i32,
+    src: Gpr,
+) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, disp, base, idx);
+    let x: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let y = read64(b, src);
+    let cf = cf_num(b);
+    let c64 = b.zext::<W32, W64>(cf);
+    let y1 = b.add::<W64>(y, c64);
+    let x64 = b.zext::<W64, W128>(x);
+    let y164 = b.zext::<W64, W128>(y1);
+    let t = b.add::<W128>(x64, y164);
+    let v: B::V<W64> = b.trunc::<W128, W64>(t);
+    b.store::<W64>(addr, v, DATA_WRITE)?;
+    update_add_flags(b, x, y1, v);
+    Ok(())
+}
+
+/// ADC m32,r32 [base+disp32] (11 /r mod=10)。
+pub fn adc_m32_r32_mem32<B: Backend>(b: &mut B, base: Gpr, disp: i32, src: Gpr) -> Flow<B> {
+    let addr = eff_addr32(b, base, disp);
+    let x: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let y = read(b, src);
+    let c = cf_num(b);
+    let y1 = b.add::<W32>(y, c);
+    let x64 = b.zext::<W32, W64>(x);
+    let y64 = b.zext::<W32, W64>(y);
+    let c64 = b.zext::<W32, W64>(c);
+    let t1 = b.add::<W64>(x64, y64);
+    let t = b.add::<W64>(t1, c64);
+    let v: B::V<W32> = b.trunc::<W64, W32>(t);
+    b.store::<W32>(addr, v, DATA_WRITE)?;
+    adc_flags32(b, t, x, y1, v);
+    Ok(())
+}
+
+/// ADC m64,r64 [base+disp32] (11 /r mod=10, REX.W)。
+pub fn adc_m64_r64_mem32<B: Backend>(b: &mut B, base: Gpr, disp: i32, src: Gpr) -> Flow<B> {
+    let addr = eff_addr32(b, base, disp);
+    let x: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let y = read64(b, src);
+    let cf = cf_num(b);
+    let c64 = b.zext::<W32, W64>(cf);
+    let y1 = b.add::<W64>(y, c64);
+    let v0 = b.add::<W64>(x, y);
+    let v = b.add::<W64>(v0, c64);
+    b.store::<W64>(addr, v, DATA_WRITE)?;
+    update_add_flags(b, x, y1, v);
+    Ok(())
+}
+
+/// AND m32,r32 [base+index*scale+disp8] (21 /r SIB mod=01)。i386 nologin 0x80968e5 対応.
+pub fn and_m32_r32_sibd<B: Backend>(
+    b: &mut B,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i8,
+    src: Gpr,
+) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, disp as i32, base, idx);
+    let x: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let y = read(b, src);
+    let v = b.and::<W32>(x, y);
+    b.store::<W32>(addr, v, DATA_WRITE)?;
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// AND m64,r64 [base+index*scale+disp8] (21 /r SIB mod=01, REX.W)。
+pub fn and_m64_r64_sibd<B: Backend>(
+    b: &mut B,
+    base: Gpr,
+    idx: Gpr,
+    shift: u32,
+    disp: i8,
+    src: Gpr,
+) -> Flow<B> {
+    let addr = sib_addr_scaled(b, shift, disp as i32, base, idx);
+    let x: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let y = read64(b, src);
+    let v = b.and::<W64>(x, y);
+    b.store::<W64>(addr, v, DATA_WRITE)?;
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// AND m32,r32 [base+disp8] (21 /r mod=01)。
+pub fn and_m32_r32_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8, src: Gpr) -> Flow<B> {
+    let addr = eff_addr(b, base, disp);
+    let x: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let y = read(b, src);
+    let v = b.and::<W32>(x, y);
+    b.store::<W32>(addr, v, DATA_WRITE)?;
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// AND m64,r64 [base+disp8] (21 /r mod=01, REX.W)。
+pub fn and_m64_r64_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8, src: Gpr) -> Flow<B> {
+    let addr = eff_addr(b, base, disp);
+    let x: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let y = read64(b, src);
+    let v = b.and::<W64>(x, y);
+    b.store::<W64>(addr, v, DATA_WRITE)?;
+    update_logic_flags(b, v);
+    Ok(())
+}
+
 /// SUB m64,r64 [base+disp8] (29 /r mod=01, REX.W)。
 pub fn sub_m64_r64_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8, src: Gpr) -> Flow<B> {
     let addr = eff_addr(b, base, disp);
@@ -21018,6 +21801,50 @@ pub fn and_rm64_imm_sibd<B: Backend>(
     let v = b.and::<W64>(x, y);
     b.store::<W64>(addr, v, DATA_WRITE)?;
     update_logic_flags(b, v);
+    Ok(())
+}
+
+/// AND m32,imm32 [base+disp32] (81 /4 mod=10)。i386 script 0x80baad6 対応.
+pub fn and_rm32_imm_mem32<B: Backend>(b: &mut B, base: Gpr, disp: i32, imm: u32) -> Flow<B> {
+    let addr = eff_addr32(b, base, disp);
+    let x: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let y = b.konst::<W32>(imm);
+    let v = b.and::<W32>(x, y);
+    b.store::<W32>(addr, v, DATA_WRITE)?;
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// AND m64,imm32 [base+disp32] (81 /4 mod=10、REX.W)。imm32 は符号拡張する.
+pub fn and_rm64_imm_mem32<B: Backend>(b: &mut B, base: Gpr, disp: i32, imm: u32) -> Flow<B> {
+    let addr = eff_addr32(b, base, disp);
+    let x: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let y = b.konst::<W64>(imm as i32 as u64);
+    let v = b.and::<W64>(x, y);
+    b.store::<W64>(addr, v, DATA_WRITE)?;
+    update_logic_flags(b, v);
+    Ok(())
+}
+
+/// ADD m32,imm32 [base+disp32] (81 /0 mod=10)。i386 script 0x80baae0 対応.
+pub fn add_rm32_imm_mem32<B: Backend>(b: &mut B, base: Gpr, disp: i32, imm: u32) -> Flow<B> {
+    let addr = eff_addr32(b, base, disp);
+    let x: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let y = b.konst::<W32>(imm);
+    let v = b.add::<W32>(x, y);
+    b.store::<W32>(addr, v, DATA_WRITE)?;
+    update_add_flags(b, x, y, v);
+    Ok(())
+}
+
+/// ADD m64,imm32 [base+disp32] (81 /0 mod=10、REX.W)。imm32 は符号拡張する.
+pub fn add_rm64_imm_mem32<B: Backend>(b: &mut B, base: Gpr, disp: i32, imm: u32) -> Flow<B> {
+    let addr = eff_addr32(b, base, disp);
+    let x: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let y = b.konst::<W64>(imm as i32 as u64);
+    let v = b.add::<W64>(x, y);
+    b.store::<W64>(addr, v, DATA_WRITE)?;
+    update_add_flags(b, x, y, v);
     Ok(())
 }
 
