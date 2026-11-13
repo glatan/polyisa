@@ -10,6 +10,7 @@ polyisa-kernel = { path = "../kernel" }
 polyisa-loader = { path = "../loader" }
 polyisa-engine = { path = "../engine" }
 polyisa-guest = { path = "../guest" }
+polyisa-mem = { path = "../mem" }
 polyisa-sem = { path = "../sem" }
 polyisa-guest-x86 = { path = "../../guests/x86", optional = true }
 

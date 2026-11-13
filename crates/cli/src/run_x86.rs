@@ -12,7 +12,8 @@ use polyisa_engine::interp::InterpExit;
 use polyisa_mem::{Access, AccessKind, Align, Endian, VirtAddr};
 use polyisa_os_linux::x86::{
     AT_FDCWD_U32, EACCES, EBADF, ECHILD, EFAULT, EINVAL, ENOENT, ENOEXEC, ENOMEM, ENOTDIR, ENOTTY,
-    EPERM, EPIPE, ERANGE, ESRCH, SysCtx, get64, neg_errno, neg_errno64, set64,
+    EPERM, EPIPE, ERANGE, ESRCH, SysCtx, data_access, get64, guest_c_string, neg_errno,
+    neg_errno64, set64,
 };
 use polyisa_sem::{Backend, ExceptionKind};
 
@@ -9962,30 +9963,6 @@ fn run_elf_x86_64_at(
     Ok((code, captured.borrow().clone()))
 }
 
-/// ゲストの NUL 終端文字列を読む。上限を超えるか読めなければ None。
-fn guest_c_string(env: &mut BareEnv, addr: u64) -> Option<String> {
-    let acc = polyisa_mem::Access {
-        endian: polyisa_mem::Endian::Le,
-        align: polyisa_mem::Align::Unaligned,
-        kind: polyisa_mem::AccessKind::DataRead,
-    };
-    // 1バイトずつ読む。まとめて読むと写像の境界で失敗するため.
-    // 上限は 4096 バイト（NUL がなければ失敗扱い）。
-    let mut buf = Vec::new();
-    for i in 0..4096u64 {
-        let mut b = [0u8; 1];
-        env.backend.mem.read(VirtAddr(addr + i), &mut b, acc).ok()?;
-        if b[0] == 0 {
-            break;
-        }
-        buf.push(b[0]);
-    }
-    if buf.len() == 4096 {
-        return None;
-    }
-    String::from_utf8(buf).ok()
-}
-
 /// `cli run` の Linux 用 ecall 処理。openat/read/write/close と
 /// exit/exit_group をホストに直結して受け、ほかは未対応として報告する。
 /// i386（`is64=false`）と x86-64（`is64=true`）で番号表と引数レジスタが変わる。
@@ -10799,14 +10776,6 @@ fn reap_status(code: u32, signal: Option<u32>) -> u32 {
     match signal {
         Some(sig) => sig & 0x7f,
         None => polyisa_os_linux::exited_wait_status(code),
-    }
-}
-
-fn data_access() -> polyisa_mem::Access {
-    polyisa_mem::Access {
-        endian: polyisa_mem::Endian::Le,
-        align: polyisa_mem::Align::Unaligned,
-        kind: polyisa_mem::AccessKind::DataRead,
     }
 }
 

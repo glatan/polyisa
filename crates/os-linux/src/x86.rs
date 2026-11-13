@@ -9,6 +9,7 @@
 
 use polyisa_engine::bare::BareEnv;
 use polyisa_guest_x86::sem::Gpr;
+use polyisa_mem::{Access, AccessKind, Align, Endian, VirtAddr};
 use polyisa_sem::Backend;
 
 use super::TrapOutcome;
@@ -38,6 +39,34 @@ pub fn get64(env: &mut BareEnv, r: Gpr) -> u64 {
 
 pub fn set64(env: &mut BareEnv, r: Gpr, v: u64) {
     polyisa_guest_x86::sem::write64(&mut env.backend, r, v)
+}
+
+pub fn data_access() -> Access {
+    Access {
+        endian: Endian::Le,
+        align: Align::Unaligned,
+        kind: AccessKind::DataRead,
+    }
+}
+
+/// ゲストの NUL 終端文字列を読む。上限を超えるか読めなければ None。
+pub fn guest_c_string(env: &mut BareEnv, addr: u64) -> Option<String> {
+    let acc = data_access();
+    // 1バイトずつ読む。まとめて読むと写像の境界で失敗するため.
+    // 上限は 4096 バイト（NUL がなければ失敗扱い）。
+    let mut buf = Vec::new();
+    for i in 0..4096u64 {
+        let mut b = [0u8; 1];
+        env.backend.mem.read(VirtAddr(addr + i), &mut b, acc).ok()?;
+        if b[0] == 0 {
+            break;
+        }
+        buf.push(b[0]);
+    }
+    if buf.len() == 4096 {
+        return None;
+    }
+    String::from_utf8(buf).ok()
 }
 
 /// dirfd の AT_FDCWD を 32 ビットで比べるときの値。
