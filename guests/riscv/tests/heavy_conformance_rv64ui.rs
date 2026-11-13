@@ -168,17 +168,13 @@ fn check_one_in(sub: &str, name: &str) {
         }
     }
     let root = testdata();
-    if !root.join(format!("isa/{sub}/{name}.S")).exists() {
-        // Gap: GAP-0005
-        eprintln!("skip: .testdata/riscv-tests がないため未実行");
-        return;
-    }
+    assert!(
+        root.join(format!("isa/{sub}/{name}.S")).exists(),
+        ".testdata/riscv-tests がない（未実行の決定は devtool test:plan が担う）"
+    );
     let rv32 = sub.starts_with("rv32");
-    let Some(bytes) = build_elf_in(sub, name) else {
-        // Gap: GAP-0005
-        eprintln!("skip: 組み立て器がないため未実行");
-        return;
-    };
+    let bytes =
+        build_elf_in(sub, name).expect("riscv-tests の組み立てに失敗（clang/rust-lld を確認）");
     let (ehdr, phdrs) = if rv32 {
         let ehdr = polyisa_loader::elf::parse_ehdr32(&bytes).expect("ELFヘッダ");
         let phdrs = polyisa_loader::elf::parse_phdrs32(&bytes, &ehdr).expect("PHDR");

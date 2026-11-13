@@ -29,14 +29,24 @@ tasks:
 
   test:full:
     desc: "オラクルの有無を調べて full プロファイルで実行する"
+    vars:
+      # 要件が揃わない重いテストバイナリを外すフィルタ式（不足なしは all()）。
+      # 外したバイナリと理由は devtool が stderr に「未実行」として出す。
+      TEST_FILTER:
+        sh: cargo run -q -p polyisa-devtool -- test:plan --filter
     cmds:
-      # Gap: GAP-0005
-      - cargo nextest run --profile full --config-file .config/nextest.toml --cargo-profile heavy
+      # 結果の末尾に未実行の一覧を出す（nextest が失敗しても出る）。
+      - defer: cargo run -q -p polyisa-devtool -- test:plan
+      - cargo nextest run --profile full --config-file .config/nextest.toml --cargo-profile heavy -E '{{.TEST_FILTER}}'
 
   test:layer:
     desc: "重いテストのうち一層だけを実行する"
+    vars:
+      TEST_FILTER:
+        sh: cargo run -q -p polyisa-devtool -- test:plan --filter
     cmds:
-      - cargo nextest run --profile full --config-file .config/nextest.toml --cargo-profile heavy -E 'binary(/^heavy_{{.LAYER}}_/)'
+      - defer: cargo run -q -p polyisa-devtool -- test:plan
+      - cargo nextest run --profile full --config-file .config/nextest.toml --cargo-profile heavy -E 'binary(/^heavy_{{.LAYER}}_/) and ({{.TEST_FILTER}})'
     requires:
       vars: [LAYER]
 

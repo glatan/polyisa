@@ -19,11 +19,12 @@ fn main() {
         "testdata:fetch" => cmd_testdata_fetch(),
         "hooks:install" => cmd_hooks_install(),
         "status" => cmd_status(),
+        "test:plan" => cmd_test_plan(args.next().as_deref()),
         "isagen:dump" => cmd_isagen_dump(args.next()),
         _ => {
             eprintln!("unknown subcommand: {cmd}");
             eprintln!(
-                "usage: devtool <check|refs:check|doctor|testdata:fetch|hooks:install|status|isagen:dump>"
+                "usage: devtool <check|refs:check|doctor|testdata:fetch|hooks:install|status|isagen:dump|test:plan>"
             );
             1
         }
@@ -33,7 +34,7 @@ fn main() {
 
 fn usage_and_exit() -> ! {
     eprintln!(
-        "usage: devtool <check|refs:check|doctor|testdata:fetch|hooks:install|status|isagen:dump>"
+        "usage: devtool <check|refs:check|doctor|testdata:fetch|hooks:install|status|isagen:dump|test:plan>"
     );
     std::process::exit(2);
 }
@@ -65,6 +66,35 @@ fn cmd_status() -> i32 {
             1
         }
     }
+}
+
+/// `task test:full` / `task test:layer` の前段。重いテストバイナリが
+/// 必要とするツールとデータを `polyisa_testkit::reqs` の表で調べ、
+/// 揃わないバイナリを「未実行」として stderr に出す。`--filter` を
+/// 付けると、外す対象の nextest フィルタ式を stdout に出す
+/// （不足がなければ `all()`）。
+fn cmd_test_plan(arg: Option<&str>) -> i32 {
+    let root = workspace_root();
+    let missing = polyisa_testkit::reqs::unavailable(&root);
+    for (binary, why) in &missing {
+        eprintln!("未実行: {binary}（{why}）");
+    }
+    if arg == Some("--filter") {
+        if missing.is_empty() {
+            println!("all()");
+        } else {
+            let mut bins: Vec<&str> = missing.iter().map(|(b, _)| *b).collect();
+            bins.sort_unstable();
+            bins.dedup();
+            let expr = bins
+                .iter()
+                .map(|b| format!("binary({b})"))
+                .collect::<Vec<_>>()
+                .join(" or ");
+            println!("not ({expr})");
+        }
+    }
+    0
 }
 
 fn cmd_isagen_dump(isa: Option<String>) -> i32 {

@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 polyisa-isadl = { path = "../../crates/isadl" }
 polyisa-isagen = { path = "../../crates/isagen" }
+polyisa-testkit = { path = "../../crates/testkit" }
 
 [lints]
 workspace = true

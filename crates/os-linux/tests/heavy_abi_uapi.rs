@@ -5,7 +5,7 @@
 //! 手順は検証戦略の層6の簡易版である。本来はカーネルソースから UAPI を生成して
 //! `sizeof`/`offsetof` と番号を比較するが、ここではホストの
 //! `<asm-generic/unistd.h>` を clang で展開し、番号表と突き合わせる。
-//! ヘッダや clang がなければスキップして通す（未実行扱い）。
+//! clang がなければ `devtool test:plan` がこのバイナリを実行対象から外す。
 //!
 //! 対象は台帳 SRC-LINUX（用途F・確認済み）と TOOL-RUST（用途X・確認済み）.
 
@@ -97,11 +97,7 @@ fn uapi_numbers_x86_64(clang: &str, macros: &[&str]) -> Option<Vec<u64>> {
 
 #[test]
 fn syscall_numbers_match_uapi() {
-    let Some(cc) = clang() else {
-        // Gap: GAP-0005
-        eprintln!("skip: clang がないため未実行");
-        return;
-    };
+    let cc = clang().expect("clang がない（未実行の決定は devtool test:plan が担う）");
     // (UAPI マクロ, polyisa の値)。
     let cases: &[(&str, u64)] = &[
         ("__NR_read", polyisa_os_linux::rv64::READ),
@@ -134,11 +130,7 @@ fn syscall_numbers_match_uapi() {
         ("__NR_statx", polyisa_os_linux::rv64::STATX),
     ];
     let macros: Vec<&str> = cases.iter().map(|(m, _)| *m).collect();
-    let Some(got) = uapi_numbers(&cc, &macros) else {
-        // Gap: GAP-0005
-        eprintln!("skip: UAPI ヘッダの展開に失敗したため未実行");
-        return;
-    };
+    let got = uapi_numbers(&cc, &macros).expect("UAPI ヘッダの展開に失敗");
     assert_eq!(got.len(), cases.len(), "展開数が一致しない: {got:?}");
     for (i, (m, want)) in cases.iter().enumerate() {
         assert_eq!(got[i], *want, "{m} の番号が UAPI と食い違う");
@@ -147,11 +139,7 @@ fn syscall_numbers_match_uapi() {
 
 #[test]
 fn syscall_numbers_match_uapi_x86_64() {
-    let Some(cc) = clang() else {
-        // Gap: GAP-0005
-        eprintln!("skip: clang がないため未実行");
-        return;
-    };
+    let cc = clang().expect("clang がない（未実行の決定は devtool test:plan が担う）");
     // (UAPI マクロ, polyisa の値)。x86_64 固有の表である。
     let cases: &[(&str, u64)] = &[
         ("__NR_read", polyisa_os_linux::x86_64::READ),
@@ -203,11 +191,7 @@ fn syscall_numbers_match_uapi_x86_64() {
         ("__NR_sync", polyisa_os_linux::x86_64::SYNC),
     ];
     let macros: Vec<&str> = cases.iter().map(|(m, _)| *m).collect();
-    let Some(got) = uapi_numbers_x86_64(&cc, &macros) else {
-        // Gap: GAP-0005
-        eprintln!("skip: UAPI ヘッダの展開に失敗したため未実行");
-        return;
-    };
+    let got = uapi_numbers_x86_64(&cc, &macros).expect("UAPI ヘッダの展開に失敗");
     assert_eq!(got.len(), cases.len(), "展開数が一致しない: {got:?}");
     for (i, (m, want)) in cases.iter().enumerate() {
         assert_eq!(got[i], *want, "{m} の番号が UAPI と食い違う");
@@ -251,11 +235,7 @@ fn uapi_numbers_x86_32(clang: &str, macros: &[&str]) -> Option<Vec<u64>> {
 
 #[test]
 fn syscall_numbers_match_uapi_x86_32() {
-    let Some(cc) = clang() else {
-        // Gap: GAP-0005
-        eprintln!("skip: clang がないため未実行");
-        return;
-    };
+    let cc = clang().expect("clang がない（未実行の決定は devtool test:plan が担う）");
     // (UAPI マクロ, polyisa の値)。x86-32 固有の表である。
     let cases: &[(&str, u64)] = &[
         ("__NR_read", polyisa_os_linux::x86_32::READ),
@@ -300,11 +280,7 @@ fn syscall_numbers_match_uapi_x86_32() {
         ("__NR_wait4", polyisa_os_linux::x86_32::WAIT4),
     ];
     let macros: Vec<&str> = cases.iter().map(|(m, _)| *m).collect();
-    let Some(got) = uapi_numbers_x86_32(&cc, &macros) else {
-        // Gap: GAP-0005
-        eprintln!("skip: UAPI ヘッダの展開に失敗したため未実行");
-        return;
-    };
+    let got = uapi_numbers_x86_32(&cc, &macros).expect("UAPI ヘッダの展開に失敗");
     assert_eq!(got.len(), cases.len(), "展開数が一致しない: {got:?}");
     for (i, (m, want)) in cases.iter().enumerate() {
         assert_eq!(got[i], *want, "{m} の番号が UAPI と食い違う");

@@ -5,7 +5,7 @@
 //! 手順は検証戦略の層4に従う。llvm-mc で組み立てた命令語を
 //! polyisa のデコーダで読み、有効な命令になることを確かめる。
 //! ニーモニックの厳密な一致は逆アセンブラの operand 対応の後に行う。
-//! ツールがなければスキップして通す（オラクル不足は未実行扱い）。
+//! ツールがなければ `devtool test:plan` がこのバイナリを実行対象から外す。
 //!
 //! 使う外部ツールは台帳 TOOL-LLVM（用途X・確認済み）。
 //! テストデータは使わない.
@@ -57,11 +57,8 @@ fn mc_encode(mc: &str, asm: &str) -> Option<Vec<u8>> {
 
 #[test]
 fn llvm_oracle_spot_checks() {
-    let Some(mc) = bin(&["llvm-mc", "/usr/sbin/llvm-mc", "/usr/bin/llvm-mc"]) else {
-        // Gap: GAP-0005
-        eprintln!("skip: llvm-mc がないため未実行");
-        return;
-    };
+    let mc = bin(&["llvm-mc", "/usr/sbin/llvm-mc", "/usr/bin/llvm-mc"])
+        .expect("llvm-mc がない（未実行の決定は devtool test:plan が担う）");
     // 代表命令。いずれも RV64GC で有効なはずである。
     for asm in [
         "add x1, x2, x3\n",
@@ -70,8 +67,7 @@ fn llvm_oracle_spot_checks() {
         "c.addi x1, 1\n",
     ] {
         let Some(bytes) = mc_encode(&mc, asm) else {
-            eprintln!("skip: 組み立てに失敗 ({asm:?})");
-            return;
+            panic!("llvm-mc での組み立てに失敗 ({asm:?})");
         };
         let (w, len) = if bytes.len() == 2 {
             (u16::from_le_bytes([bytes[0], bytes[1]]) as u128, 16)
@@ -81,8 +77,7 @@ fn llvm_oracle_spot_checks() {
                 32,
             )
         } else {
-            eprintln!("skip: 想定外の長さ ({asm:?} len={})", bytes.len());
-            return;
+            panic!("想定外の長さ ({asm:?} len={})", bytes.len());
         };
         assert!(
             polyisa_guest_riscv::decode(w, len).is_some(),

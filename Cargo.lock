@@ -37,6 +37,7 @@ version = "0.0.0"
 dependencies = [
  "polyisa-isadl",
  "polyisa-isagen",
+ "polyisa-testkit",
 ]
 
 [[package]]
