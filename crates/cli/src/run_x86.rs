@@ -14796,7 +14796,7 @@ fn sys_faccessat(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<
     })
 }
 
-fn sys_utimensat(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+fn sys_utimensat(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     // utimensat(dirfd, path, times, flags)。AT_FDCWD のみ受け付ける.
     // times==NULL は現在時刻のつもりで、存在すれば 0、なければ空作成して 0 を返す.
     // times!=NULL は無視して同様に扱う（touch の継続が目的の試作）。
@@ -14815,6 +14815,11 @@ fn sys_utimensat(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<
     let path = match guest_c_string(env, path_addr) {
         Some(p) => p,
         None => return Some(TrapOutcome::Unimplemented),
+    };
+    sys.ensure_cwd();
+    let Some(path) = sys.resolve_path(&path) else {
+        set64(env, Gpr(0), cx.neg(EPERM));
+        return Some(TrapOutcome::Handled);
     };
     if std::fs::metadata(&path).is_ok() {
         set64(env, Gpr(0), 0);
@@ -16451,6 +16456,46 @@ mod tests {
             resolve_guest_path("/jail", "/", "."),
             Some("/jail".to_string()),
         );
+    }
+
+    #[test]
+    fn utimensat_resolves_relative_to_cwd() {
+        use polyisa_os_linux::x86_64 as abi;
+        let dir = std::env::temp_dir().join(format!("polyisa-utime-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut sys = CliLinux::x86_64();
+        sys.cwd = dir.to_str().unwrap().to_string();
+        let mut env = bare();
+        // times==NULL、存在しない相対パスは cwd 配下に空作成する。カレントには作らない。
+        env.backend
+            .mem
+            .write(VirtAddr(0x300), b"newfile\0")
+            .unwrap();
+        set64(&mut env, Gpr(0), abi::UTIMENSAT);
+        set64(&mut env, Gpr(7), u64::from(AT_FDCWD_U32));
+        set64(&mut env, Gpr(6), 0x300);
+        set64(&mut env, Gpr(2), 0);
+        set64(&mut env, Gpr(1), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        assert!(dir.join("newfile").is_file());
+        // guest_root 配下からの脱出は EPERM。
+        sys.guest_root = dir.to_str().unwrap().to_string();
+        sys.cwd = "/".to_string();
+        env.backend
+            .mem
+            .write(VirtAddr(0x300), b"../evil\0")
+            .unwrap();
+        set64(&mut env, Gpr(0), abi::UTIMENSAT);
+        set64(&mut env, Gpr(7), u64::from(AT_FDCWD_U32));
+        set64(&mut env, Gpr(6), 0x300);
+        set64(&mut env, Gpr(2), 0);
+        set64(&mut env, Gpr(1), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EPERM));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
