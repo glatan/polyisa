@@ -319,11 +319,12 @@ impl Backend for IrBackend {
         Ok(IrCond(self.ir.next))
     }
 
-    fn if_then<F>(&mut self, _c: Self::B, _then: F) -> Result<(), Self::Exit>
+    fn if_then_else<F, G>(&mut self, _c: Self::B, _then: F, _els: G) -> Result<(), Self::Exit>
     where
         F: FnOnce(&mut Self) -> Result<(), Self::Exit>,
+        G: FnOnce(&mut Self) -> Result<(), Self::Exit>,
     {
-        Ok(())
+        todo!("IR の分岐ノードがない。実装までは失敗させて黙って本体を落とさない")
     }
 
     fn jump(&mut self, _target: Self::V<W64>) {}

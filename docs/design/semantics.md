@@ -69,6 +69,10 @@ pub trait Backend {
         -> Result<Self::V<W>, Self::Exit>;
 
     // 制御
+    fn if_then_else<F, G>(&mut self, c: Self::B, then: F, els: G) -> Result<(), Self::Exit>
+    where
+        F: FnOnce(&mut Self) -> Result<(), Self::Exit>,
+        G: FnOnce(&mut Self) -> Result<(), Self::Exit>;
     fn if_then<F>(&mut self, c: Self::B, then: F) -> Result<(), Self::Exit>
     where F: FnOnce(&mut Self) -> Result<(), Self::Exit>;
     fn jump(&mut self, target: Self::V<W64>);

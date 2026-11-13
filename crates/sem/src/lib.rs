@@ -333,9 +333,19 @@ pub trait Backend {
     ) -> Result<Self::B, Self::Exit>;
 
     // 制御
+    /// 実行時の値 `c` で分岐する。インタプリタでは片側だけを実行し、
+    /// IR では両側を分岐ノードとして記録する。
+    fn if_then_else<F, G>(&mut self, c: Self::B, then: F, els: G) -> Result<(), Self::Exit>
+    where
+        F: FnOnce(&mut Self) -> Result<(), Self::Exit>,
+        G: FnOnce(&mut Self) -> Result<(), Self::Exit>;
+    /// 肯定側だけの `if_then_else`。
     fn if_then<F>(&mut self, c: Self::B, then: F) -> Result<(), Self::Exit>
     where
-        F: FnOnce(&mut Self) -> Result<(), Self::Exit>;
+        F: FnOnce(&mut Self) -> Result<(), Self::Exit>,
+    {
+        self.if_then_else(c, then, |_| Ok(()))
+    }
     fn jump(&mut self, target: Self::V<W64>);
     fn branch(&mut self, c: Self::B, target: u64);
     fn raise(&mut self, e: GuestException) -> Self::Exit;

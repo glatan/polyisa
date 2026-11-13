@@ -634,12 +634,15 @@ impl Backend for InterpBackend {
         Ok(ok)
     }
 
-    fn if_then<F>(&mut self, c: Self::B, then: F) -> Result<(), Self::Exit>
+    fn if_then_else<F, G>(&mut self, c: Self::B, then: F, els: G) -> Result<(), Self::Exit>
     where
         F: FnOnce(&mut Self) -> Result<(), Self::Exit>,
+        G: FnOnce(&mut Self) -> Result<(), Self::Exit>,
     {
         if c {
-            then(self)?;
+            then(self)?
+        } else {
+            els(self)?
         }
         Ok(())
     }
@@ -912,6 +915,38 @@ mod tests {
         assert_eq!(v, 0xdead_beef);
         // 整列違反は例外。
         assert!(b.load::<W32>(0x1001, acc).is_err());
+    }
+
+    #[test]
+    fn if_then_else_picks_one_side() {
+        let mut b = backend();
+        let r = StateRef::<W64>::from_offset(0);
+        b.if_then_else(
+            true,
+            |b| {
+                b.set(r, 1);
+                Ok(())
+            },
+            |b| {
+                b.set(r, 2);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(b.get(r), 1);
+        b.if_then_else(
+            false,
+            |b| {
+                b.set(r, 1);
+                Ok(())
+            },
+            |b| {
+                b.set(r, 2);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(b.get(r), 2);
     }
 
     #[test]
