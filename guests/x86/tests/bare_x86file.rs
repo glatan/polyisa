@@ -12,10 +12,10 @@ use polyisa_guest_x86::sem::Gpr;
 use polyisa_mem::{Perms, VirtAddr};
 use polyisa_sem::Backend as _;
 
-/// 標準出力だけを取り込む CliX86 の包み。openat/read/close/exit の
-/// 実装自体は本番の `CliX86` を使い、テストでは出力を検査する。
+/// 標準出力だけを取り込む Linux の包み。openat/read/close/exit の
+/// 実装自体は本番の `Linux` を使い、テストでは出力を検査する。
 struct FileCat {
-    inner: polyisa_cli::run_x86::CliX86,
+    inner: polyisa_os_linux::x86::Linux,
     out: Vec<u8>,
 }
 
@@ -107,7 +107,7 @@ fn cat_file_through_guest() {
     ];
     env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
     let mut sys = FileCat {
-        inner: polyisa_cli::run_x86::CliX86::default(),
+        inner: polyisa_os_linux::x86::Linux::default(),
         out: Vec::new(),
     };
     let out = run_x86::run(&mut env, 0x1000, &mut sys, 1000);

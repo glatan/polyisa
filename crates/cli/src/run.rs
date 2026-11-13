@@ -42,6 +42,18 @@ pub trait EcallHandler {
     fn handle_ecall(&mut self, env: &mut BareEnv, word: u32) -> EcallOutcome;
 }
 
+/// `os-linux` の `TrapHandler` をこの実行ループの `EcallHandler` に適合する。
+/// Linux パーソナリティは `polyisa_os_linux::rv64::sys::Linux` にある。
+impl EcallHandler for polyisa_os_linux::rv64::sys::Linux {
+    fn handle_ecall(&mut self, env: &mut BareEnv, word: u32) -> EcallOutcome {
+        match polyisa_os_linux::TrapHandler::handle_trap(self, env, word) {
+            polyisa_os_linux::TrapOutcome::Handled => EcallOutcome::Handled,
+            polyisa_os_linux::TrapOutcome::Exit(code) => EcallOutcome::Exit(u64::from(code)),
+            _ => EcallOutcome::Unimplemented,
+        }
+    }
+}
+
 fn acc_fetch() -> Access {
     Access {
         endian: Endian::Le,
@@ -1583,103 +1595,10 @@ pub fn run_elf(path: &str, argv: &[String]) -> Result<u64, String> {
         .write(polyisa_mem::VirtAddr(sp), &img)
         .map_err(|e| format!("stack write: {e:?}"))?;
     env.backend.set(Gpr(2).state(), sp);
-    let mut sys = CliEcall::default();
+    let mut sys = polyisa_os_linux::rv64::sys::Linux::default();
     match run(&mut env, ehdr.entry, false, &mut sys) {
         Outcome::Exit(code) => Ok(code),
         Outcome::Unimplemented { pc, word } => Err(format!("unimplemented at {pc:#x}: {word:#x}")),
         Outcome::StepLimit { pc } => Err(format!("step limit at {pc:#x}")),
-    }
-}
-
-/// `cli run` の ecall 処理。write（fd 1/2）と exit_group を受け、
-/// ほかは未対応として報告する。ENOSYS での継続は後の段階で足す
-///（[ユーザーモード](../../docs/design/user-mode.md)）。
-#[derive(Default)]
-pub struct CliEcall {
-    reported: Vec<u64>,
-}
-
-type RvSysFn = fn(&mut CliEcall, &mut BareEnv) -> Option<EcallOutcome>;
-
-const RV64_SYSCALLS: &[(&str, RvSysFn)] = &[
-    ("write", sys_write),
-    ("exit", sys_exit),
-    ("exit_group", sys_exit_group),
-];
-
-fn sys_write(_sys: &mut CliEcall, env: &mut BareEnv) -> Option<EcallOutcome> {
-    let fd = reg(env, 10);
-    let buf = reg(env, 11);
-    let len = reg(env, 12) as usize;
-    let mut data = vec![0u8; len];
-    let acc = polyisa_mem::Access {
-        endian: polyisa_mem::Endian::Le,
-        align: polyisa_mem::Align::Unaligned,
-        kind: polyisa_mem::AccessKind::DataRead,
-    };
-    if env
-        .backend
-        .mem
-        .read(polyisa_mem::VirtAddr(buf), &mut data, acc)
-        .is_err()
-    {
-        return Some(EcallOutcome::Unimplemented);
-    }
-    let done = match fd {
-        1 => std::io::Write::write(&mut std::io::stdout(), &data).unwrap_or(0),
-        2 => std::io::Write::write(&mut std::io::stderr(), &data).unwrap_or(0),
-        _ => return Some(EcallOutcome::Unimplemented),
-    };
-    env.backend.set(Gpr(10).state(), done as u64);
-    Some(EcallOutcome::Handled)
-}
-
-fn sys_exit(_sys: &mut CliEcall, env: &mut BareEnv) -> Option<EcallOutcome> {
-    Some(EcallOutcome::Exit(reg(env, 10)))
-}
-
-fn sys_exit_group(sys: &mut CliEcall, env: &mut BareEnv) -> Option<EcallOutcome> {
-    sys_exit(sys, env)
-}
-
-// Gap: GAP-0001
-impl EcallHandler for CliEcall {
-    fn handle_ecall(&mut self, env: &mut BareEnv, _word: u32) -> EcallOutcome {
-        let nr = reg(env, 17);
-        let name = polyisa_os_linux::syscall_name(polyisa_os_linux::GuestAbi::Rv64Linux, nr);
-        if let Some(name) = name
-            && let Some((_, handler)) = RV64_SYSCALLS.iter().find(|(n, _)| *n == name)
-            && let Some(out) = handler(self, env)
-        {
-            return out;
-        }
-        // Gap: GAP-0003
-        if !self.reported.contains(&nr) {
-            self.reported.push(nr);
-            eprintln!("run: unhandled syscall {nr} ({})", name.unwrap_or("?"));
-        }
-        EcallOutcome::Unimplemented
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn rv64_syscall_table_is_unique_and_named_in_os_linux() {
-        let mut seen = std::collections::BTreeSet::new();
-        let mut known = std::collections::BTreeSet::new();
-        for nr in 0..4096 {
-            if let Some(name) =
-                polyisa_os_linux::syscall_name(polyisa_os_linux::GuestAbi::Rv64Linux, nr)
-            {
-                known.insert(name);
-            }
-        }
-        for (name, _) in RV64_SYSCALLS {
-            assert!(seen.insert(*name), "名前が重複している: {name}");
-            assert!(known.contains(name), "{name} は rv64 の番号表にない");
-        }
     }
 }

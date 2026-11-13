@@ -162,6 +162,7 @@ BSD 系の資産は `D` と `C` を許可できる。GPL 系の資産と Arm の
 | ID | 名称 | 発行者 | 版 | 対象 | 利用条件 | 用途 | 確認 | 備考 |
 |---|---|---|---|---|---|---|---|---|
 | BIN-DISTRO | BusyBox 公式静的バイナリ 1.35.0 x86_64-linux-musl（2022-01-17） | BusyBox 開発者 | 1.35.0 | os-linux のプログラム単位のテスト（x86_64 初回） | GNU GPL version 2（busybox.net/license.html で確認。再配布時はソース提供義務あり） | T | 2026-11-09 glatan | 取得してテストの入力に使う。リポジトリに含めない。再配布しない。他ディストロ・他 ISA は使うときに項目を追加する |
+| BIN-DISTRO-I386 | BusyBox 公式静的バイナリ 1.35.0 i686-linux-musl（2022-01-17） | BusyBox 開発者 | 1.35.0 | os-linux のプログラム単位のテスト（x86-32） | GNU GPL version 2（busybox.net/license.html で確認。再配布時はソース提供義務あり） | T | 2026-11-14 glatan | 取得してテストの入力に使う（`.testdata/bin-distro-i386/busybox`）。リポジトリに含めない。再配布しない |
 
 ### 計測データ
 

@@ -1,6 +1,6 @@
 # ADR-0015：システムコールの処理を cli から kernel と os-linux へ移す
 
-- 状態：提案
+- 状態：採用
 - 日付：2026-11-13
 
 ## 背景
@@ -22,9 +22,15 @@ GAP-0001 のとおり、システムコールの処理は `crates/cli/src/run.rs
 
 ## 帰結
 
-- `run_x86.rs` は実行ループと配線に縮み、GAP-0001 の解消条件（段階 4 の終わりの共通抽象の見直し、S4-2）の一部を満たす。
-- `guest_root` が空でない運用ができるまで、隔離の主張はしない。`guest_root` 設定時の `cwd` 表記と `/proc` 合成は follow-up として残る。
-- x86-32 の到達経路（GAP-0022）は本移管の対象に含めるか別 ADR で確定させる。
+実装は次の形で行われた（2026-11-14）。
+
+- `CliLinux` は `os-linux` の `x86::sys::Linux` へ、`CliEcall` は `rv64::sys::Linux` へ移した。番号表（`X86_64_SYSCALLS`、`X86_32_SYSCALLS`、`RV64_SYSCALLS`）と `TrapHandler` の実装も `os-linux` にある。`cli` の `run` ループのインターフェースは `TrapHandler`（x86）と `EcallHandler`（RV64。`rv64::sys::Linux` への薄い適合のみ cli に残る）である。
+- `run_x86.rs` は実行ループと ELF ロード・配線に縮んだ。GAP-0001 は MIPS o32（`o32_syscall` と `O32Io`、段階 5 で移す）に絞って残る。
+- 状態依存の syscall は、個別の抽象ではなく `Linux` 状態機械ごと移した。fd 表は `kernel::FdTable`、プロセス表は `kernel::ProcessTable`、スケジューラは `kernel::GuestScheduler` を使う。標準 fd（0/1/2）の付け替えと入出力 capture は `Linux` が持ち、`kernel` への独立した抽象は作っていない。
+- `sys_symlink` は `polyisa_host::symlink` を呼ぶため、`os-linux → polyisa-host` の依存を依存規則（`docs/design/workspace.md`）に追加した。
+- 未実装の番号は既定で `ENOSYS` を返して続ける（GAP-0003 解消）。受け入れテストは `x86::sys` と `rv64::sys` の `unimplemented_syscall_returns_enosys_*`。
+- `guest_root` が空でない運用ができるまで、隔離の主張はしない。`guest_root` 設定手段、`cwd` 表記、`/proc` 合成は GAP-0002 として残る。
+- x86-32 の到達経路（GAP-0022）は別の扱いとした。i386 静的バイナリは台帳へ登録したが、`x86min` の命令網羅が不足していて起動コードで未実装になるため、x86-32 の busybox 到達は命令側の持ち越しである。
 
 ## 検討した代替案
 

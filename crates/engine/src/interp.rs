@@ -39,6 +39,10 @@ pub struct InterpBackend {
     pub reservation: polyisa_mem::Reservation,
     /// 蓄積した浮動小数点例外フラグ。sem が読み出して fcsr に積む。
     pub fp_flags: u8,
+    /// ゲストアドレスに掛けるマスク。32 ビットゲストは実効アドレスが
+    /// 32 ビットで折り返すので、意味論が 64 ビットで組み立てたアドレスを
+    /// アクセス直前に切る。JIT 経路はこの層を通らないため別途対応が要る。
+    pub addr_mask: u64,
 }
 
 impl InterpBackend {
@@ -50,6 +54,7 @@ impl InterpBackend {
             ctrl: Ctrl::Fallthrough,
             reservation: polyisa_mem::Reservation::empty(),
             fp_flags: 0,
+            addr_mask: u64::MAX,
         }
     }
 
@@ -508,6 +513,7 @@ impl Backend for InterpBackend {
         addr: Self::V<W64>,
         acc: Access,
     ) -> Result<Self::V<W>, Self::Exit> {
+        let addr = addr & self.addr_mask;
         let bytes = (W::BITS / 8) as usize;
         if bytes <= 8 {
             return self
@@ -543,6 +549,7 @@ impl Backend for InterpBackend {
         v: Self::V<W>,
         acc: Access,
     ) -> Result<(), Self::Exit> {
+        let addr = addr & self.addr_mask;
         let bytes = (W::BITS / 8) as usize;
         self.break_reservation(addr, bytes as u32);
         if bytes <= 8 {
@@ -572,6 +579,7 @@ impl Backend for InterpBackend {
     }
 
     fn probe(&mut self, addr: Self::V<W64>, len: u32, acc: Access) -> Result<(), Self::Exit> {
+        let addr = addr & self.addr_mask;
         // 全範囲の可否を確かめるため、読み出して捨てる。
         let mut tmp = vec![0u8; len as usize];
         self.mem
@@ -599,6 +607,7 @@ impl Backend for InterpBackend {
         addr: Self::V<W64>,
         acc: Access,
     ) -> Result<Self::V<W>, Self::Exit> {
+        let addr = addr & self.addr_mask;
         let v: Self::V<W> = self.load::<W>(addr, acc)?;
         self.reservation = polyisa_mem::Reservation {
             addr: VirtAddr(addr),
@@ -614,6 +623,7 @@ impl Backend for InterpBackend {
         v: Self::V<W>,
         acc: Access,
     ) -> Result<Self::B, Self::Exit> {
+        let addr = addr & self.addr_mask;
         let r = self.reservation;
         // 条件付きストアの実行で予約は解除される。
         self.reservation.valid = false;

@@ -2,7 +2,7 @@
 
 このファイルは `task status` が生成する。手で編集しない。
 
-生成の元は、ISADL の記述（`guests/*/spec/`）、ロードマップの完了条件、設計との差の台帳、システムコールの表（`crates/cli/src/run.rs` の `RV64_SYSCALLS`、`crates/cli/src/run_x86.rs` の `X86_64_SYSCALLS` と `X86_32_SYSCALLS`、`crates/cli/src/run_mips.rs` の `MIPS_O32_SYSCALLS`）である。テストの結果は含めない。
+生成の元は、ISADL の記述（`guests/*/spec/`）、ロードマップの完了条件、設計との差の台帳、システムコールの表（`crates/os-linux/src/rv64/sys.rs` の `RV64_SYSCALLS`、`crates/os-linux/src/x86/sys.rs` の `X86_64_SYSCALLS` と `X86_32_SYSCALLS`、`crates/cli/src/run_mips.rs` の `MIPS_O32_SYSCALLS`）である。テストの結果は含めない。
 
 ## 段階の完了条件
 
@@ -36,7 +36,7 @@
 | riscv | 196 | 196 | rv64gc、rv64imac | [isa-riscv.md](isa-riscv.md) |
 | sparc | 10 | 10 | generic | [isa-sparc.md](isa-sparc.md) |
 | wasm | 8 | 8 | generic | [isa-wasm.md](isa-wasm.md) |
-| x86 | 807 | 164 | generic32 | [isa-x86.md](isa-x86.md) |
+| x86 | 830 | 164 | generic32 | [isa-x86.md](isa-x86.md) |
 
 ## システムコール
 
@@ -44,18 +44,17 @@
 |---|---|---|
 | rv64 | 3 | [syscalls.md](syscalls.md) |
 | x86_64 | 150 | [syscalls.md](syscalls.md) |
-| x86_32 | 45 | [syscalls.md](syscalls.md) |
+| x86_32 | 83 | [syscalls.md](syscalls.md) |
 | mips_o32 | 2 | [syscalls.md](syscalls.md) |
 
 ## 設計との差
 
-台帳は [設計との差の台帳](../gaps.md) にある。未着手は 5 件、代替は 10 件、対象外は 1 件である。
+台帳は [設計との差の台帳](../gaps.md) にある。未着手は 4 件、代替は 10 件、対象外は 1 件である。
 
 | ID | 区分 | 設計 |
 |---|---|---|
 | GAP-0001 | 代替 | [ユーザーモード「構成」](../design/user-mode.md#構成) |
 | GAP-0002 | 代替 | [ユーザーモード「仮想ファイルシステム」](../design/user-mode.md#仮想ファイルシステム) |
-| GAP-0003 | 代替 | [ユーザーモード「未実装のシステムコール」](../design/user-mode.md#未実装のシステムコール) |
 | GAP-0004 | 対象外 | [ホスト抽象化「必要なホストの機能」](../design/host.md#必要なホストの機能) |
 | GAP-0005 | 代替 | [開発作業とローカル検証「オラクルがない場合の扱い」](../design/dev-workflow.md#オラクルがない場合の扱い) |
 | GAP-0006 | 代替 | [ISA 記述言語（ISADL）「ファイルの配置」](../design/isa-description.md#ファイルの配置) |
@@ -68,4 +67,4 @@
 | GAP-0014 | 代替 | [ISA 記述言語（ISADL）「形式と命令」](../design/isa-description.md#形式と命令) |
 | GAP-0015 | 代替 | [ISA 記述言語（ISADL）「オペコード表」](../design/isa-description.md#オペコード表)、[同「フィールドとオペランド」](../design/isa-description.md#フィールドとオペランド) |
 | GAP-0021 | 未着手 | [検証戦略「テストの網羅の記録」](../design/testing.md#テストの網羅の記録) |
-| GAP-0022 | 未着手 | [ロードマップ「段階 4：x86」](../design/roadmap.md#段階-4x86) |
+| GAP-0022 | 代替 | [ロードマップ「段階 4：x86」](../design/roadmap.md#段階-4x86) |

@@ -1,0 +1,6407 @@
+// Copyright (c) polyisa contributors
+// SPDX-License-Identifier: MIT OR Apache-2.0
+//! x86 Linux の syscall 処理全体。ゲスト状態機械とプロセス/スケジューラ統合を
+//! `kernel` の抽象の上に組み立て、`cli` の `run` ループから SYSCALL/INT 0x80
+//! トラップを委譲される。
+
+use super::*;
+use crate::{TrapHandler, TrapOutcome};
+use polyisa_engine::bare::BareEnv;
+use polyisa_guest_x86::sem::Gpr;
+use polyisa_mem::VirtAddr;
+
+/// Linux の syscall 処理全体。`cli` の `run` ループからopenat/read/write/close と
+/// exit/exit_group をホストに直結して受け、ほかは未対応として報告する。
+/// x86-32（`is64=false`）と x86-64（`is64=true`）で番号表と引数レジスタが変わる。
+/// x86-64 の引数は RDI/RSI/RDX（Gpr 7/6/2）、番号は RAX（Gpr 0）にある。
+///
+/// 試作の合意事項：仮想カーネル・VFS・ゲストルートの適用は後の段階である。
+/// ここではホストのファイルに直接触る（裸実行の延長）。パスの隔離はしないので、
+/// 信頼できないゲストバイナリには使わないこと。絶対パスはホストのパスとして開き、
+/// 相対パスはプロセスの作業ディレクトリから開く。1 回の転送は 64 KiB ずつに区切る。
+#[derive(Default)]
+pub struct Linux {
+    reported: Vec<u64>,
+    /// 開いたファイルの表（ゲスト fd 3 以降）。仮想カーネルの fd 管理を使う.
+    fds: polyisa_kernel::FdTable,
+    /// 標準 fd (0/1/2) の付け替え先。close 後に open したファイルが入る.
+    /// uniq のように stdin をファイルに付け替える applet のため.
+    /// 読取り用・書込み用いずれのファイルも入る.
+    std_files: [Option<std::fs::File>; 3],
+    /// dup2(0,n) 後。n からの read は stdin_buf、write は EBADF。
+    /// 標準入力は開ファイルを持たないため、付け替え先として覚える.
+    std_is_stdin: [bool; 3],
+    /// 標準 fd の閉鎖状態。初期 (stdio 接続) は false。close で true になる.
+    std_closed: [bool; 3],
+    /// ファイル作成マスク。umask で更新する。初期値は 022.
+    umask: u32,
+    /// personality。初期値は PER_LINUX (0)。実行形式は変えない。
+    personality: u64,
+    /// ioprio_set で覚えた値。未設定のときは best-effort 4 を返す。
+    ioprio: u32,
+    ioprio_known: bool,
+    is64: bool,
+    /// プログラムブレーク（ヒープ末尾）。0 は未初期化。
+    /// `run_image_x86_64` がロード後に像末尾へ進める。
+    heap_end: u64,
+    /// FS ベース（TLS）。arch_prctl(ARCH_SET_FS) で記録する。
+    /// FS 相対アドレッシングは未対応のため、値の保持のみ行う。
+    pub fs_base: u64,
+    /// GS ベース（i386 TLS）。set_thread_area の user_desc.base_addr を記録する。
+    pub gs_base: u64,
+    /// robust futex リスト先頭。set_robust_list で記録する。
+    /// 終了時の書き戻しは未対応のため、値の保持のみ行う。
+    robust_head: u64,
+    /// rseq 領域先頭。rseq で記録する。終了時の書き戻しは未対応.
+    rseq_addr: u64,
+    /// ゲスト実行ファイルのホストパス。/proc/self/exe の readlinkat に答える.
+    pub exe_path: String,
+    /// getdents64 で最後まで読んだ fd。次の呼び出しは 0 (EOF) を返す.
+    dir_done: Vec<u32>,
+    /// getdents64 の続き。fd と、次に返す名前の添字。
+    dir_pos: Vec<(u32, usize)>,
+    /// 標準 fd に付け替えたファイルのホストパス。
+    std_paths: [Option<String>; 3],
+    /// Some のとき、fd 1 の出力をここへ溜める。None のときはホストの stdout。
+    /// fork した子と親で同じバッファを使う。
+    pub capture_out: Option<std::rc::Rc<std::cell::RefCell<Vec<u8>>>>,
+    /// dup2(2,1) 後。fd 1 への write を stderr に流す（time の集計など）。
+    stdout_is_stderr: bool,
+    /// dup2(1,2) 後。fd 2 への write を fd 1（capture）に流す。
+    stderr_is_stdout: bool,
+    /// 真の stdin へ供給するバイト。空なら空読み（端末は奪わない）。
+    pub stdin_buf: Vec<u8>,
+    /// `stdin_buf` の次に読む位置。
+    stdin_pos: usize,
+    /// ゲストプロセス表。fork した子と共有する。
+    procs: std::rc::Rc<std::cell::RefCell<polyisa_kernel::ProcessTable>>,
+    /// 0 は未登録。最初のシステムコールか命令で 1 から採番する。
+    pid: u64,
+    /// このスレッドが実行した命令数。選択の正は `queue` のスケジューラ。
+    steps: u64,
+    /// `wait4` で待っているときの引数。
+    wait: Option<WaitSlot>,
+    /// 自分以外のスレッド。スケジューラと環境を共有する。
+    queue: SharedQueue,
+    /// プロセス間で共有するパイプ。
+    pipes: SharedPipes,
+    /// fd 3 以降のパイプ端。ホストのファイルと同時には持たない。
+    pipe_ends: Vec<Option<PipeEnd>>,
+    /// 標準 fd 0/1/2 に載せたパイプ端。
+    std_pipes: [Option<PipeEnd>; 3],
+    /// 空のパイプを読もうとして待っているパイプ。
+    pipe_wait: Option<u64>,
+    /// このプロセスの作業ディレクトリ。空はまだホストの作業ディレクトリを写していない。
+    /// 当面ホスト表記のまま持つ。guest_root 設定時はゲスト表記への見直しが要る (follow-up)。
+    pub cwd: String,
+    /// ゲストのルート。空は隔離なし（従来動作）。WP1 で導入し、設定手段は後の段階で足す。
+    /// root 設定時は /proc 合成の比較や exe リダイレクトも解決前後で見直す (follow-up)。
+    guest_root: String,
+    /// MONOTONIC 時計の起点。ゲスト実行ごとに取り直す。fork した子は親と共有する。
+    /// makemime は srand(monotonic_us()) で境界を作るため、起点の共有は出力を揺らす.
+    mono_start: Option<std::time::Instant>,
+}
+
+/// `wait4` を完了するときに使う引数。
+struct WaitSlot {
+    which: i64,
+    status_ptr: u64,
+}
+
+/// 今は走っていないスレッドの実行環境。
+struct ParkedTask {
+    env: BareEnv,
+    linux: Linux,
+}
+
+/// ステップ数で選ぶスケジューラと、止まっている実行環境。
+#[derive(Default)]
+struct SchedQueue {
+    meta: polyisa_kernel::GuestScheduler,
+    parked: Vec<ParkedTask>,
+}
+
+#[derive(Clone)]
+struct SharedQueue(std::rc::Rc<std::cell::RefCell<SchedQueue>>);
+
+impl Default for SharedQueue {
+    fn default() -> Self {
+        Self(std::rc::Rc::new(std::cell::RefCell::new(
+            SchedQueue::default(),
+        )))
+    }
+}
+
+/// この回数ごとに、ステップ数がより少ない実行可能なスレッドへ切り替える。
+pub const SCHED_SLICE: u64 = 64;
+
+/// パイプの端。バッファは `SharedPipes` が持つ。
+#[derive(Clone, Copy)]
+struct PipeEnd {
+    id: u64,
+    read: bool,
+}
+
+#[derive(Clone)]
+struct SharedPipes(std::rc::Rc<std::cell::RefCell<polyisa_kernel::PipeTable>>);
+
+impl Default for SharedPipes {
+    fn default() -> Self {
+        Self(std::rc::Rc::new(std::cell::RefCell::new(
+            polyisa_kernel::PipeTable::default(),
+        )))
+    }
+}
+
+impl Linux {
+    /// x86-32 用ハンドラ。
+    pub fn x86_32() -> Self {
+        Self {
+            umask: 0o22,
+            ..Self::default()
+        }
+    }
+
+    /// x86-64 用ハンドラ。
+    pub fn x86_64() -> Self {
+        Self {
+            is64: true,
+            umask: 0o22,
+            ..Self::default()
+        }
+    }
+
+    /// プログラムブレークの初期値を置く。像末尾をページ境界に切り上げる。
+    /// `run_image_x86_64` がセグメント配置の直後に呼ぶ。
+    pub fn init_brk(&mut self, image_end: u64) {
+        use polyisa_mem::PAGE_SIZE;
+        self.heap_end = image_end.next_multiple_of(PAGE_SIZE);
+    }
+
+    /// ゲストパスをホストパスへ解決する。root 空は従来通り。はみ出しは None。
+    fn resolve_path(&self, path: &str) -> Option<String> {
+        resolve_guest_path(&self.guest_root, &self.cwd, path)
+    }
+
+    /// fd に対応する開ファイルの参照。標準 fd の付け替え先も見る.
+    fn file_ref(&self, fd: u32) -> Option<&std::fs::File> {
+        if fd < 3 {
+            self.std_files[fd as usize].as_ref()
+        } else {
+            self.fds.get(fd)
+        }
+    }
+
+    /// fd に対応する開ファイルの可変参照。標準 fd の付け替え先も見る.
+    fn file_mut(&mut self, fd: u32) -> Option<&mut std::fs::File> {
+        if fd < 3 {
+            self.std_files[fd as usize].as_mut()
+        } else {
+            self.fds.get_mut(fd)
+        }
+    }
+
+    /// 真の標準入出力に繋がっているか（閉じても付け替えてもいない）。
+    fn std_attached(&self, fd: u32) -> bool {
+        fd < 3 && !self.std_closed[fd as usize] && self.std_files[fd as usize].is_none()
+    }
+
+    /// fcntl・dup2 の妥当性。接続中・付け替え中の標準 fd と opened fd が真.
+    fn fd_valid(&self, fd: u32) -> bool {
+        self.pipe_end(fd).is_some()
+            || (fd < 3 && (!self.std_closed[fd as usize] || self.std_files[fd as usize].is_some()))
+            || self.fds.get(fd).is_some()
+    }
+
+    fn pipe_end(&self, fd: u32) -> Option<PipeEnd> {
+        if fd < 3 {
+            return self.std_pipes[fd as usize];
+        }
+        self.pipe_ends
+            .get(fd.wrapping_sub(3) as usize)
+            .copied()
+            .flatten()
+    }
+
+    fn alloc_pipe_fd(&mut self, end: PipeEnd) -> u32 {
+        let fd = self.fds.alloc_where(None, |idx| {
+            self.pipe_ends.get(idx).is_none_or(|slot| slot.is_none())
+        });
+        let idx = fd.wrapping_sub(3) as usize;
+        while self.pipe_ends.len() <= idx {
+            self.pipe_ends.push(None);
+        }
+        self.pipe_ends[idx] = Some(end);
+        fd
+    }
+
+    fn close_pipe(&mut self, fd: u32) {
+        let end = if fd < 3 {
+            self.std_pipes[fd as usize].take()
+        } else {
+            let idx = fd.wrapping_sub(3) as usize;
+            self.pipe_ends.get_mut(idx).and_then(|slot| slot.take())
+        };
+        let Some(end) = end else {
+            return;
+        };
+        self.pipes.0.borrow_mut().close(end.id, end.read);
+        if !end.read {
+            self.wake_pipe(end.id);
+        }
+    }
+
+    /// パイプ端を `newfd` へ増やす。呼び出し側は先に旧 `newfd` を閉じる。
+    fn install_pipe(&mut self, end: PipeEnd, newfd: u32) {
+        self.pipes.0.borrow_mut().dup(end.id, end.read);
+        if newfd < 3 {
+            let i = newfd as usize;
+            self.std_files[i] = None;
+            self.std_paths[i] = None;
+            self.std_closed[i] = false;
+            self.std_is_stdin[i] = false;
+            self.std_pipes[i] = Some(end);
+            return;
+        }
+        let idx = newfd.wrapping_sub(3) as usize;
+        while self.pipe_ends.len() <= idx {
+            self.pipe_ends.push(None);
+        }
+        self.fds.place(newfd, None);
+        self.pipe_ends[idx] = Some(end);
+    }
+
+    /// そのパイプの読みを待っているスレッドを実行可能に戻す。
+    fn wake_pipe(&mut self, id: u64) {
+        self.queue.0.borrow_mut().meta.unblock_pipe(id);
+        let queue = self.queue.clone();
+        for task in &mut queue.0.borrow_mut().parked {
+            if task.linux.pipe_wait == Some(id) {
+                task.linux.pipe_wait = None;
+            }
+        }
+        if self.pipe_wait == Some(id) {
+            self.pipe_wait = None;
+        }
+    }
+
+    /// 実行できない理由を一度報告する。
+    fn note_deadlock(&self) {
+        eprintln!("run: deadlock");
+        for (id, wait) in self.queue.0.borrow().meta.blocked() {
+            match wait {
+                polyisa_kernel::ThreadWait::Child { which } => {
+                    eprintln!("run: pid {} waits for child {which}", id.0);
+                }
+                polyisa_kernel::ThreadWait::Pipe { id: pipe } => {
+                    eprintln!("run: pid {} waits for pipe {pipe}", id.0);
+                }
+            }
+        }
+    }
+
+    /// 止めたスレッドの実行環境を外し、パイプの端を閉じる。
+    fn release_parked(&mut self, pid: u64) {
+        let queue = self.queue.clone();
+        let mut task = {
+            let mut borrowed = queue.0.borrow_mut();
+            let Some(idx) = borrowed
+                .parked
+                .iter()
+                .position(|task| task.linux.pid == pid)
+            else {
+                return;
+            };
+            borrowed.parked.remove(idx)
+        };
+        let fds: Vec<u32> = task
+            .linux
+            .pipe_ends
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, end)| end.map(|_| (idx as u32) + 3))
+            .collect();
+        for fd in fds {
+            task.linux.close_pipe(fd);
+        }
+    }
+
+    /// この子を待っているスレッドを、再び実行できるようにする。
+    fn wake_child_waiters(&mut self, child: polyisa_kernel::ProcessId) {
+        let queue = self.queue.clone();
+        let waiters: Vec<u64> = queue
+            .0
+            .borrow()
+            .parked
+            .iter()
+            .filter_map(|task| {
+                let which = task.linux.wait.as_ref().map(|wait| wait.which)?;
+                if self.procs.borrow().waits_for(
+                    polyisa_kernel::ProcessId(task.linux.pid),
+                    which,
+                    child,
+                ) {
+                    Some(task.linux.pid)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let mut queue = queue.0.borrow_mut();
+        for pid in waiters {
+            queue.meta.unblock(polyisa_kernel::ThreadId(pid));
+        }
+    }
+
+    /// 最下位の空き番号を割り当てる。閉じた標準 fd・空きスロットを再利用する.
+    fn alloc_fd(&mut self, f: std::fs::File) -> u32 {
+        for (i, slot) in self.std_files.iter_mut().enumerate() {
+            if slot.is_none() && self.std_closed[i] {
+                *slot = Some(f);
+                self.std_closed[i] = false;
+                self.std_is_stdin[i] = false;
+                return i as u32;
+            }
+        }
+        self.fds.alloc_where(Some(f), |idx| {
+            self.pipe_ends.get(idx).is_none_or(|slot| slot.is_none())
+        })
+    }
+
+    /// ゲスト fd に、openat が開いたホストパスを覚える。
+    fn remember_path(&mut self, fd: u32, path: String) {
+        if fd < 3 {
+            self.std_paths[fd as usize] = Some(path);
+            return;
+        }
+        self.fds.remember_path(fd, path);
+    }
+
+    /// ゲスト fd に覚えたホストパス。
+    fn path_of(&self, fd: u32) -> Option<&str> {
+        if fd < 3 {
+            self.std_paths[fd as usize].as_deref()
+        } else {
+            self.fds.path_of(fd)
+        }
+    }
+
+    /// ゲスト fd のパスと、getdents64 の読み終わり印を捨てる。
+    fn forget_path(&mut self, fd: u32) {
+        if fd < 3 {
+            self.std_paths[fd as usize] = None;
+        } else {
+            self.fds.forget_path(fd);
+        }
+        self.dir_done.retain(|d| *d != fd);
+        self.dir_pos.retain(|(id, _)| *id != fd);
+    }
+
+    /// 真の stdin から `dst` へ読む。供給が尽きたら 0。
+    fn take_stdin(&mut self, dst: &mut [u8]) -> usize {
+        let start = self.stdin_pos.min(self.stdin_buf.len());
+        let n = (self.stdin_buf.len() - start).min(dst.len());
+        dst[..n].copy_from_slice(&self.stdin_buf[start..start + n]);
+        self.stdin_pos = start + n;
+        n
+    }
+
+    /// fd 1 へ書く。capture_out があるときはそこへ溜める。
+    fn write_fd1(&mut self, bytes: &[u8]) -> usize {
+        if self.stdout_is_stderr {
+            return std::io::Write::write(&mut std::io::stderr(), bytes).unwrap_or(0);
+        }
+        if let Some(buf) = self.capture_out.as_ref() {
+            buf.borrow_mut().extend_from_slice(bytes);
+            return bytes.len();
+        }
+        std::io::Write::write(&mut std::io::stdout(), bytes).unwrap_or(0)
+    }
+
+    /// 標準 fd 1/2 への write。dup2 による付け替えを反映する。
+    fn write_stdio(&mut self, fd: u32, bytes: &[u8]) -> usize {
+        match fd {
+            1 => self.write_fd1(bytes),
+            2 if self.stderr_is_stdout => self.write_fd1(bytes),
+            _ => std::io::Write::write(&mut std::io::stderr(), bytes).unwrap_or(0),
+        }
+    }
+
+    /// 開ファイルを複製し、覚えてあるパスも返す。
+    fn clone_open(&self, fd: u32) -> Option<(std::fs::File, Option<String>)> {
+        let file = self.file_ref(fd)?.try_clone().ok()?;
+        let path = self.path_of(fd).map(str::to_string);
+        Some((file, path))
+    }
+
+    /// fd を閉じる。標準 fd の初回 close も成功させる。閉じたら真.
+    fn close_fd(&mut self, fd: u32) -> bool {
+        if fd < 3 {
+            let i = fd as usize;
+            if self.std_pipes[i].is_some() {
+                self.close_pipe(fd);
+                self.std_closed[i] = true;
+                self.std_is_stdin[i] = false;
+                self.forget_path(fd);
+                true
+            } else if self.std_files[i].is_some() {
+                self.std_files[i] = None;
+                self.std_closed[i] = true;
+                self.std_is_stdin[i] = false;
+                self.forget_path(fd);
+                true
+            } else if !self.std_closed[i] {
+                self.std_closed[i] = true;
+                self.std_is_stdin[i] = false;
+                true
+            } else {
+                false
+            }
+        } else {
+            if self.pipe_end(fd).is_some() {
+                self.close_pipe(fd);
+                self.fds.clear(fd);
+                self.forget_path(fd);
+                return true;
+            }
+            if self.fds.get_mut(fd).is_some() {
+                self.fds.clear(fd);
+                self.forget_path(fd);
+                true
+            } else {
+                false
+            }
+        }
+    }
+
+    /// 未登録ならプロセス表とスケジューラへ載せる。
+    fn ensure_self(&mut self) -> polyisa_kernel::ProcessId {
+        if self.pid == 0 {
+            let id = self.procs.borrow_mut().spawn(None);
+            self.pid = id.0;
+            self.queue
+                .0
+                .borrow_mut()
+                .meta
+                .insert(polyisa_kernel::ThreadId(id.0));
+            id
+        } else {
+            let id = polyisa_kernel::ProcessId(self.pid);
+            self.queue
+                .0
+                .borrow_mut()
+                .meta
+                .insert(polyisa_kernel::ThreadId(id.0));
+            id
+        }
+    }
+
+    /// 作業ディレクトリが空なら、ホストの現在位置を写す。
+    fn ensure_cwd(&mut self) {
+        if !self.cwd.is_empty() {
+            return;
+        }
+        self.cwd = std::env::current_dir()
+            .ok()
+            .and_then(|path| path.into_os_string().into_string().ok())
+            .unwrap_or_else(|| "/".to_string());
+    }
+
+    /// ファイル記述子を複製した子の状態。プロセス表は共有し、止めた子は持たない。
+    fn duplicate(&self) -> Self {
+        let clone_file =
+            |f: &Option<std::fs::File>| f.as_ref().and_then(|file| file.try_clone().ok());
+        let child = Self {
+            reported: self.reported.clone(),
+            fds: self.fds.try_clone(),
+            std_files: std::array::from_fn(|i| clone_file(&self.std_files[i])),
+            std_is_stdin: self.std_is_stdin,
+            std_closed: self.std_closed,
+            umask: self.umask,
+            personality: self.personality,
+            ioprio: self.ioprio,
+            ioprio_known: self.ioprio_known,
+            is64: self.is64,
+            heap_end: self.heap_end,
+            fs_base: self.fs_base,
+            gs_base: self.gs_base,
+            robust_head: self.robust_head,
+            rseq_addr: self.rseq_addr,
+            exe_path: self.exe_path.clone(),
+            dir_done: self.dir_done.clone(),
+            dir_pos: self.dir_pos.clone(),
+            std_paths: self.std_paths.clone(),
+            capture_out: self.capture_out.clone(),
+            stdout_is_stderr: self.stdout_is_stderr,
+            stderr_is_stdout: self.stderr_is_stdout,
+            stdin_buf: self.stdin_buf.clone(),
+            stdin_pos: self.stdin_pos,
+            procs: std::rc::Rc::clone(&self.procs),
+            pid: self.pid,
+            steps: 0,
+            wait: None,
+            queue: self.queue.clone(),
+            pipes: self.pipes.clone(),
+            pipe_ends: self.pipe_ends.clone(),
+            std_pipes: self.std_pipes,
+            pipe_wait: None,
+            cwd: self.cwd.clone(),
+            guest_root: self.guest_root.clone(),
+            mono_start: self.mono_start,
+        };
+        for end in child.pipe_ends.iter().flatten() {
+            child.pipes.0.borrow_mut().dup(end.id, end.read);
+        }
+        for end in child.std_pipes.iter().flatten() {
+            child.pipes.0.borrow_mut().dup(end.id, end.read);
+        }
+        child
+    }
+
+    /// 止まっているスレッドの識別子。
+    pub fn task_pids(&self) -> Vec<u64> {
+        self.queue
+            .0
+            .borrow()
+            .parked
+            .iter()
+            .map(|task| task.linux.pid)
+            .collect()
+    }
+
+    /// 1 命令を数え、区切りでより短いスレッドへ切り替える。
+    fn step_and_maybe_preempt(&mut self, env: &mut BareEnv) {
+        let id = self.ensure_self();
+        let steps = {
+            let mut queue = self.queue.0.borrow_mut();
+            queue.meta.add_step(polyisa_kernel::ThreadId(id.0))
+        };
+        self.steps = steps;
+        if steps.is_multiple_of(SCHED_SLICE) {
+            let _ = self.preempt(env);
+        }
+    }
+
+    /// 自分よりステップ数が少ない実行可能なスレッドと入れ替える。
+    fn preempt(&mut self, env: &mut BareEnv) -> bool {
+        let next = {
+            let queue = self.queue.0.borrow();
+            queue.meta.next(polyisa_kernel::ThreadId(self.pid))
+        };
+        let Some(next) = next else {
+            return false;
+        };
+        self.swap_in(env, next.0)
+    }
+
+    fn swap_in(&mut self, env: &mut BareEnv, pid: u64) -> bool {
+        let queue = self.queue.clone();
+        let mut other = {
+            let mut borrowed = queue.0.borrow_mut();
+            let Some(idx) = borrowed
+                .parked
+                .iter()
+                .position(|task| task.linux.pid == pid)
+            else {
+                return false;
+            };
+            borrowed.parked.remove(idx)
+        };
+        std::mem::swap(self, &mut other.linux);
+        std::mem::swap(env, &mut other.env);
+        let exited = queue
+            .0
+            .borrow()
+            .meta
+            .is_exited(polyisa_kernel::ThreadId(other.linux.pid));
+        if !exited {
+            queue.0.borrow_mut().parked.push(other);
+        }
+        true
+    }
+
+    /// 子の終了を記録し、親か残りの実行可能なスレッドへ戻る。
+    /// 戻る相手がいるときだけ真。初期プロセスの終了は偽で、呼び出し側へ渡す。
+    fn yield_on_exit(&mut self, env: &mut BareEnv, code: u32) -> bool {
+        let me = self.ensure_self();
+        let nfd = self.fds.len();
+        for fd in 0..3u32 {
+            self.close_fd(fd);
+        }
+        for idx in 0..nfd {
+            self.close_fd(3 + idx as u32);
+        }
+        self.procs.borrow_mut().exit(me, code);
+        let root = self.procs.borrow().is_root(me);
+        self.queue
+            .0
+            .borrow_mut()
+            .meta
+            .mark_exited(polyisa_kernel::ThreadId(me.0));
+        if root {
+            return false;
+        }
+        let target = {
+            let queue = self.queue.0.borrow();
+            let waiter = queue.parked.iter().find_map(|task| {
+                let which = task.linux.wait.as_ref().map(|wait| wait.which)?;
+                if self.procs.borrow().waits_for(
+                    polyisa_kernel::ProcessId(task.linux.pid),
+                    which,
+                    me,
+                ) {
+                    Some(task.linux.pid)
+                } else {
+                    None
+                }
+            });
+            waiter.or_else(|| queue.meta.least_runnable().map(|id| id.0))
+        };
+        let Some(pid) = target else {
+            return false;
+        };
+        if !self.swap_in(env, pid) {
+            return false;
+        }
+        if self.wait.is_some() {
+            self.complete_wait(env);
+        }
+        true
+    }
+
+    /// 待っていた `wait4` を、記録済みの終了コードで完了する。
+    fn complete_wait(&mut self, env: &mut BareEnv) {
+        let Some(wait) = self.wait.take() else {
+            return;
+        };
+        self.queue
+            .0
+            .borrow_mut()
+            .meta
+            .unblock(polyisa_kernel::ThreadId(self.pid));
+        match self
+            .procs
+            .borrow_mut()
+            .try_reap(polyisa_kernel::ProcessId(self.pid), wait.which)
+        {
+            polyisa_kernel::Reap::Exited { pid, code, signal } => {
+                if wait.status_ptr != 0 {
+                    let st = reap_status(code, signal);
+                    if env
+                        .backend
+                        .mem
+                        .write(VirtAddr(wait.status_ptr), &st.to_le_bytes())
+                        .is_err()
+                    {
+                        self.set_errno(env, EFAULT);
+                        self.advance_past_syscall(env);
+                        return;
+                    }
+                }
+                set64(env, Gpr(0), pid.0);
+                self.advance_past_syscall(env);
+            }
+            polyisa_kernel::Reap::NoChild => {
+                self.set_errno(env, ECHILD);
+                self.advance_past_syscall(env);
+            }
+            polyisa_kernel::Reap::Pending => {
+                let which = wait.which;
+                self.wait = Some(wait);
+                self.queue.0.borrow_mut().meta.block(
+                    polyisa_kernel::ThreadId(self.pid),
+                    polyisa_kernel::ThreadWait::Child { which },
+                );
+            }
+        }
+    }
+
+    fn set_errno(&self, env: &mut BareEnv, errno: u32) {
+        let value = if self.is64 {
+            neg_errno64(errno)
+        } else {
+            u64::from(neg_errno(errno))
+        };
+        set64(env, Gpr(0), value);
+    }
+
+    /// SYSCALL と INT 0x80 は 2 バイト。完了した呼び出しの次へ進める。
+    fn advance_past_syscall(&self, env: &mut BareEnv) {
+        let eip = eip_of(env);
+        env.backend
+            .set(polyisa_guest_x86::sem::eip_ref(), eip.wrapping_add(2));
+    }
+}
+
+/// 1 回の read/write でホストに確保する上限（バイト）。ゲスト指定の
+/// 長さが大きくても、この刻みで分割して転送する。
+const IO_CHUNK: usize = 65536;
+
+fn reap_status(code: u32, signal: Option<u32>) -> u32 {
+    match signal {
+        Some(sig) => sig & 0x7f,
+        None => crate::exited_wait_status(code),
+    }
+}
+
+/// ホスト metadata から x86-64 struct stat (144B) を合成する。
+/// 種別 (st_mode) と大きさ (st_size) と、パスから決めた st_ino を入れる。
+/// 同じパスは同じ inode になり、ディレクトリの再帰判定が分かれる。
+/// レイアウトは musl/glibc 共通のカーネル ABI 由来である。
+type SysFn = fn(&mut Linux, &mut BareEnv, &SysCtx) -> Option<TrapOutcome>;
+
+const X86_64_SYSCALLS: &[(&str, SysFn)] = &[
+    ("openat", sys_openat),
+    ("open", sys_open),
+    ("read", sys_read),
+    ("close", sys_close),
+    ("write", sys_write),
+    ("writev", sys_writev),
+    ("readv", sys_readv),
+    ("exit", sys_exit),
+    ("exit_group", sys_exit_group),
+    ("clone", sys_clone),
+    ("fork", sys_fork),
+    ("vfork", sys_vfork),
+    ("execve", sys_execve),
+    ("wait4", sys_wait4),
+    ("pipe2", sys_pipe2),
+    ("pipe", sys_pipe),
+    ("setpgid", sys_setpgid),
+    ("setsid", sys_setsid),
+    ("getpgid", sys_getpgid),
+    ("getpriority", sys_getpriority),
+    ("setpriority", sys_setpriority),
+    ("personality", sys_personality),
+    ("sched_setaffinity", sys_sched_setaffinity),
+    ("ioprio_set", sys_ioprio_set),
+    ("ioprio_get", sys_ioprio_get),
+    ("fsync", sys_fsync),
+    ("fdatasync", sys_fdatasync),
+    ("unshare", sys_unshare),
+    ("sched_setparam", sys_sched_setparam),
+    ("sched_getparam", sys_sched_getparam),
+    ("sched_setscheduler", sys_sched_setscheduler),
+    ("sched_getscheduler", sys_sched_getscheduler),
+    ("sched_get_priority_max", sys_sched_get_priority_max),
+    ("sched_get_priority_min", sys_sched_get_priority_min),
+    ("chdir", sys_chdir),
+    ("fchdir", sys_fchdir),
+    ("setgroups", sys_setgroups),
+    ("chroot", sys_chroot),
+    ("kill", sys_kill),
+    ("mmap", sys_mmap),
+    ("set_tid_address", sys_set_tid_address),
+    ("gettid", sys_gettid),
+    ("getpid", sys_getpid),
+    ("getppid", sys_getppid),
+    ("sysinfo", sys_sysinfo),
+    ("reboot", sys_reboot),
+    ("syslog", sys_syslog),
+    ("init_module", sys_init_module),
+    ("delete_module", sys_delete_module),
+    ("finit_module", sys_finit_module),
+    ("swapon", sys_swapon),
+    ("swapoff", sys_swapoff),
+    ("pivot_root", sys_pivot_root),
+    ("umount2", sys_umount2),
+    ("flock", sys_flock),
+    ("shmget", sys_shmget),
+    ("shmctl", sys_shmctl),
+    ("semget", sys_semget),
+    ("semctl", sys_semctl),
+    ("msgget", sys_msgget),
+    ("msgctl", sys_msgctl),
+    ("getitimer", sys_getitimer),
+    ("setitimer", sys_setitimer),
+    ("socket", sys_socket),
+    ("socketpair", sys_socketpair),
+    ("bind", sys_bind),
+    ("connect", sys_connect),
+    ("sendto", sys_sendto),
+    ("recvfrom", sys_recvfrom),
+    ("getsockname", sys_getsockname),
+    ("setxattr", sys_setxattr),
+    ("lsetxattr", sys_lsetxattr),
+    ("fsetxattr", sys_fsetxattr),
+    ("mount", sys_mount),
+    ("poll", sys_poll),
+    ("select", sys_select),
+    ("pselect6", sys_pselect6),
+    ("sysfs", sys_sysfs),
+    ("tkill", sys_tkill),
+    ("inotify_init1", sys_inotify_init1),
+    ("inotify_init", sys_inotify_init),
+    ("inotify_add_watch", sys_inotify_add_watch),
+    ("adjtimex", sys_adjtimex),
+    ("setuid", sys_setuid),
+    ("setgid", sys_setgid),
+    ("setreuid", sys_setreuid),
+    ("setregid", sys_setregid),
+    ("setresuid", sys_setresuid),
+    ("setresgid", sys_setresgid),
+    ("uname", sys_uname),
+    ("getuid", sys_getuid),
+    ("geteuid", sys_geteuid),
+    ("getgid", sys_getgid),
+    ("getegid", sys_getegid),
+    ("getcwd", sys_getcwd),
+    ("getdents64", sys_getdents64),
+    ("fstat", sys_fstat),
+    ("stat", sys_stat),
+    ("lstat", sys_lstat),
+    ("newfstatat", sys_newfstatat),
+    ("sendfile", sys_sendfile),
+    ("lseek", sys_lseek),
+    ("ftruncate", sys_ftruncate),
+    ("fallocate", sys_fallocate),
+    ("getgroups", sys_getgroups),
+    ("mprotect", sys_mprotect),
+    ("munmap", sys_munmap),
+    ("rt_sigaction", sys_rt_sigaction),
+    ("rt_sigprocmask", sys_rt_sigprocmask),
+    ("rt_sigtimedwait", sys_rt_sigtimedwait),
+    ("rt_sigsuspend", sys_rt_sigsuspend),
+    ("tgkill", sys_tgkill),
+    ("set_robust_list", sys_set_robust_list),
+    ("rseq", sys_rseq),
+    ("getrandom", sys_getrandom),
+    ("prlimit64", sys_prlimit64),
+    ("time", sys_time),
+    ("ioctl", sys_ioctl),
+    ("clock_nanosleep", sys_clock_nanosleep),
+    ("nanosleep", sys_nanosleep),
+    ("sched_getaffinity", sys_sched_getaffinity),
+    ("clock_gettime", sys_clock_gettime),
+    ("readlinkat", sys_readlinkat),
+    ("readlink", sys_readlink),
+    ("arch_prctl", sys_arch_prctl),
+    ("dup", sys_dup),
+    ("dup2", sys_dup2),
+    ("dup3", sys_dup3),
+    ("mkdir", sys_mkdir),
+    ("mkdirat", sys_mkdirat),
+    ("mknod", sys_mknod),
+    ("rename", sys_rename),
+    ("symlink", sys_symlink),
+    ("link", sys_link),
+    ("sync", sys_sync),
+    ("rmdir", sys_rmdir),
+    ("unlink", sys_unlink),
+    ("unlinkat", sys_unlinkat),
+    ("access", sys_access),
+    ("faccessat", sys_faccessat),
+    ("utimensat", sys_utimensat),
+    ("chmod", sys_chmod),
+    ("fchmod", sys_fchmod),
+    ("chown", sys_chown),
+    ("fchown", sys_fchown),
+    ("lchown", sys_lchown),
+    ("fchmodat", sys_fchmodat),
+    ("umask", sys_umask),
+    ("fcntl", sys_fcntl),
+    ("brk", sys_brk),
+];
+
+const X86_32_SYSCALLS: &[(&str, SysFn)] = &[
+    ("openat", sys_openat),
+    ("open", sys_open),
+    ("read", sys_read),
+    ("close", sys_close),
+    ("write", sys_write),
+    ("writev", sys_writev),
+    ("readv", sys_readv),
+    ("exit", sys_exit),
+    ("exit_group", sys_exit_group),
+    ("gettid", sys_gettid),
+    ("getpid", sys_getpid),
+    ("getppid", sys_getppid),
+    ("uname", sys_uname),
+    ("set_thread_area", sys_set_thread_area),
+    ("set_tid_address", sys_set_tid_address),
+    ("getuid", sys_getuid),
+    ("geteuid", sys_geteuid),
+    ("getgid", sys_getgid),
+    ("getegid", sys_getegid),
+    ("setuid", sys_setuid),
+    ("setgid", sys_setgid),
+    ("getgroups", sys_getgroups),
+    ("getgroups32", sys_getgroups32),
+    ("setgroups", sys_setgroups),
+    ("getcwd", sys_getcwd),
+    ("chdir", sys_chdir),
+    ("fchdir", sys_fchdir),
+    ("ftruncate", sys_ftruncate),
+    ("mprotect", sys_mprotect),
+    ("munmap", sys_munmap),
+    ("rt_sigaction", sys_rt_sigaction),
+    ("rt_sigprocmask", sys_rt_sigprocmask),
+    ("rt_sigtimedwait", sys_rt_sigtimedwait),
+    ("rt_sigsuspend", sys_rt_sigsuspend),
+    ("tgkill", sys_tgkill),
+    ("readlinkat", sys_readlinkat),
+    ("readlink", sys_readlink),
+    ("dup", sys_dup),
+    ("dup2", sys_dup2),
+    ("dup3", sys_dup3),
+    ("mkdir", sys_mkdir),
+    ("mkdirat", sys_mkdirat),
+    ("rename", sys_rename),
+    ("symlink", sys_symlink),
+    ("rmdir", sys_rmdir),
+    ("unlink", sys_unlink),
+    ("unlinkat", sys_unlinkat),
+    ("access", sys_access),
+    ("faccessat", sys_faccessat),
+    ("utimensat", sys_utimensat),
+    ("chmod", sys_chmod),
+    ("fchmod", sys_fchmod),
+    ("fchmodat", sys_fchmodat),
+    ("umask", sys_umask),
+    ("fcntl", sys_fcntl),
+    ("ioctl", sys_ioctl),
+    ("getrandom", sys_getrandom),
+    ("lseek", sys_lseek),
+    ("llseek", sys_llseek),
+    ("getdents64", sys_getdents64),
+    ("sendfile", sys_sendfile),
+    ("time", sys_time),
+    ("gettimeofday", sys_gettimeofday),
+    ("clock_gettime", sys_clock_gettime),
+    ("stat", sys_stat),
+    ("lstat", sys_lstat),
+    ("fstat", sys_fstat),
+    ("fstatat64", sys_fstatat64),
+    ("sysinfo", sys_sysinfo),
+    ("personality", sys_personality),
+    ("fork", sys_fork),
+    ("vfork", sys_vfork),
+    ("clone", sys_clone),
+    ("execve", sys_execve),
+    ("wait4", sys_wait4),
+    ("pipe", sys_pipe),
+    ("pipe2", sys_pipe2),
+    ("setpgid", sys_setpgid),
+    ("getpgid", sys_getpgid),
+    ("setsid", sys_setsid),
+    ("kill", sys_kill),
+    ("brk", sys_brk),
+    ("mmap", sys_mmap),
+];
+
+fn sys_open(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // open は dirfd を持たない。パスは AT_FDCWD からの相対パスとして開く。
+    let path_addr = get64(env, cx.r_a);
+    let flags = get64(env, cx.r_b) as u32;
+    open_at_cwd(sys, env, cx, path_addr, flags)
+}
+
+fn sys_openat(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // Gap: GAP-0002
+    let dirfd = get64(env, cx.r_a);
+    let path_addr = get64(env, cx.r_b);
+    let flags = get64(env, cx.r_c) as u32;
+    if !cx.is_at_fdcwd(dirfd) {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    open_at_cwd(sys, env, cx, path_addr, flags)
+}
+
+fn open_synth_bytes(
+    sys: &mut Linux,
+    env: &mut BareEnv,
+    cx: &SysCtx,
+    tag: &str,
+    body: &[u8],
+) -> Option<TrapOutcome> {
+    let path =
+        std::env::temp_dir().join(format!("polyisa-{tag}-{}-{}", std::process::id(), sys.pid));
+    if std::fs::write(&path, body).is_err() {
+        set64(env, Gpr(0), cx.neg(EACCES));
+        return Some(TrapOutcome::Handled);
+    }
+    match std::fs::File::open(&path) {
+        Ok(f) => {
+            let fd = sys.alloc_fd(f);
+            sys.remember_path(fd, path.to_string_lossy().into_owned());
+            set64(env, Gpr(0), fd as u64);
+            Some(TrapOutcome::Handled)
+        }
+        Err(_) => {
+            set64(env, Gpr(0), cx.neg(ENOENT));
+            Some(TrapOutcome::Handled)
+        }
+    }
+}
+
+fn open_synth_meminfo(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // sysinfo の固定値（1 GiB / 512 MiB）に揃えた kB 表記。
+    open_synth_bytes(
+        sys,
+        env,
+        cx,
+        "meminfo",
+        b"\
+MemTotal:        1048576 kB
+MemFree:          524288 kB
+MemAvailable:     524288 kB
+Buffers:               0 kB
+Cached:                0 kB
+SwapCached:            0 kB
+SwapTotal:             0 kB
+SwapFree:              0 kB
+Shmem:                 0 kB
+",
+    )
+}
+
+fn open_synth_stat(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // iostat 用。CPU 1 個・全カウンタ 0。
+    open_synth_bytes(
+        sys,
+        env,
+        cx,
+        "stat",
+        b"\
+cpu  0 0 0 0 0 0 0 0 0 0
+cpu0 0 0 0 0 0 0 0 0 0 0
+intr 0
+ctxt 0
+btime 946688400
+processes 0
+procs_running 1
+procs_blocked 0
+",
+    )
+}
+
+fn open_synth_uptime(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    open_synth_bytes(sys, env, cx, "uptime", b"1000.00 1000.00\n")
+}
+
+fn open_synth_diskstats(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // major minor name ... 全 0。iostat の Device 行を固定する。
+    open_synth_bytes(
+        sys,
+        env,
+        cx,
+        "diskstats",
+        b"   8       0 sda 1 0 8 0 0 0 0 0 0 0 0 0 0 0 0\n",
+    )
+}
+
+fn open_at_cwd(
+    sys: &mut Linux,
+    env: &mut BareEnv,
+    cx: &SysCtx,
+    path_addr: u64,
+    flags: u32,
+) -> Option<TrapOutcome> {
+    // 書込み・生成・切詰めを受け付ける。O_NONBLOCK/O_CLOEXEC/O_DIRECTORY/O_NOFOLLOW 等は無視する。
+    // truncate/cp/split が O_WRONLY|O_CREAT 等で開く。Ref: SRC-LINUX (7.3).
+    const O_ACCMODE: u32 = 3;
+    const O_CREAT: u32 = 0o100;
+    const O_EXCL: u32 = 0o200;
+    const O_TRUNC: u32 = 0o1000;
+    const O_APPEND: u32 = 0o2000;
+    let acc = flags & O_ACCMODE;
+    if acc > 2 {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    let path = match guest_c_string(env, path_addr) {
+        Some(p) => p,
+        None => {
+            // NULL や読めないパスは Linux と同様 EFAULT。
+            set64(env, Gpr(0), cx.neg(EFAULT));
+            return Some(TrapOutcome::Handled);
+        }
+    };
+    sys.ensure_cwd();
+    let Some(path) = sys.resolve_path(&path) else {
+        set64(env, Gpr(0), cx.neg(EPERM));
+        return Some(TrapOutcome::Handled);
+    };
+    // ホストの /proc を見せると free/iostat の数値が揺らぐ。固定の合成ファイルを開く。
+    if path == "/proc/meminfo" {
+        return open_synth_meminfo(sys, env, cx);
+    }
+    if path == "/proc/stat" {
+        return open_synth_stat(sys, env, cx);
+    }
+    if path == "/proc/uptime" {
+        return open_synth_uptime(sys, env, cx);
+    }
+    if path == "/proc/diskstats" {
+        return open_synth_diskstats(sys, env, cx);
+    }
+    if path == "/proc/loadavg" {
+        return open_synth_bytes(sys, env, cx, "loadavg", b"0.00 0.00 0.00 1/1 1\n");
+    }
+    if path == "/proc/modules" {
+        // lsmod。モジュール無しの固定表。
+        return open_synth_bytes(sys, env, cx, "modules", b"");
+    }
+    if path == "/proc/sys/kernel/tainted" {
+        return open_synth_bytes(sys, env, cx, "tainted", b"0\n");
+    }
+    if path == "/proc/net/route" {
+        // route。宛先無しの見出しだけを出す入力。
+        return open_synth_bytes(
+            sys,
+            env,
+            cx,
+            "netroute",
+            b"Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\tWindow\tIRTT\n",
+        );
+    }
+    if path == "/proc/net/tcp"
+        || path == "/proc/net/tcp6"
+        || path == "/proc/net/udp"
+        || path == "/proc/net/udp6"
+        || path == "/proc/net/raw"
+        || path == "/proc/net/raw6"
+    {
+        // netstat。接続無しの見出し行のみ。
+        return open_synth_bytes(
+            sys,
+            env,
+            cx,
+            "nettcp",
+            b"  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n",
+        );
+    }
+    if path == "/proc/net/unix" {
+        return open_synth_bytes(
+            sys,
+            env,
+            cx,
+            "netunix",
+            b"Num       RefCount Protocol Flags    Type St Inode Path\n",
+        );
+    }
+    // lsscsi 用。ホストの SCSI 一覧は見せず、1 台だけ固定する。
+    if let Some(rest) = path.strip_prefix("/sys/bus/scsi/devices/0:0:0:0/") {
+        let body: &[u8] = match rest {
+            "vendor" => b"PolyISA\n",
+            "model" => b"Disk\n",
+            "rev" => b"1.0\n",
+            "type" => b"0\n",
+            _ => b"",
+        };
+        if !body.is_empty() {
+            return open_synth_bytes(sys, env, cx, "scsi", body);
+        }
+    }
+    // ps / top / pstree 用。ホストの PID 一覧は見せず、pid 1 だけを固定する。
+    if path == "/proc/1/stat"
+        || path == "/proc/self/stat"
+        || path == "/proc/1/task/1/stat"
+        || path == "/proc/self/task/1/stat"
+    {
+        return open_synth_bytes(
+            sys,
+            env,
+            cx,
+            "pidstat",
+            b"1 (init) S 0 1 1 0 -1 4194560 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n",
+        );
+    }
+    if path == "/proc/1/cmdline" || path == "/proc/self/cmdline" {
+        return open_synth_bytes(sys, env, cx, "pidcmd", b"/sbin/init\0");
+    }
+    if path == "/proc/1/status" || path == "/proc/self/status" {
+        return open_synth_bytes(
+            sys,
+            env,
+            cx,
+            "pidstatus",
+            b"\
+Name:\tinit
+Uid:\t0\t0\t0\t0
+Gid:\t0\t0\t0\t0
+PPid:\t0
+Threads:\t1
+Cpus_allowed:\t1
+Cpus_allowed_list:\t0
+",
+        );
+    }
+    if path == "/proc/1/comm" || path == "/proc/self/comm" {
+        return open_synth_bytes(sys, env, cx, "pidcomm", b"init\n");
+    }
+    if path == "/proc/1/smaps"
+        || path == "/proc/self/smaps"
+        || path == "/proc/1/maps"
+        || path == "/proc/self/maps"
+    {
+        // pmap は maps が無いとき見出しだけ出す（ホストの pid 1 も maps を読めない環境がある）。
+        set64(env, Gpr(0), cx.neg(ENOENT));
+        return Some(TrapOutcome::Handled);
+    }
+    if path == "/etc/hosts" {
+        return open_synth_bytes(
+            sys,
+            env,
+            cx,
+            "hosts",
+            b"127.0.0.1 localhost.localdomain localhost\n",
+        );
+    }
+    // /proc/self/exe はゲスト実行ファイル自身を開く（ホスト exe ではない）。
+    // readlink と同じ合成。書込み付きは Linux と同様に EACCES。
+    if let Some(real) = guest_exe_redirect(&sys.exe_path, &path) {
+        if acc != 0 || flags & (O_CREAT | O_TRUNC | O_APPEND) != 0 {
+            set64(env, Gpr(0), cx.neg(EACCES));
+            return Some(TrapOutcome::Handled);
+        }
+        return Some(match std::fs::File::open(&real) {
+            Ok(f) => {
+                let fd = sys.alloc_fd(f);
+                sys.remember_path(fd, path);
+                set64(env, Gpr(0), fd as u64);
+                TrapOutcome::Handled
+            }
+            Err(e) => {
+                let no = match e.kind() {
+                    std::io::ErrorKind::NotFound => ENOENT,
+                    std::io::ErrorKind::PermissionDenied => EACCES,
+                    _ => EINVAL,
+                };
+                set64(env, Gpr(0), cx.neg(no));
+                TrapOutcome::Handled
+            }
+        });
+    }
+    let want_write = acc != 0 || flags & (O_CREAT | O_TRUNC | O_APPEND) != 0;
+    let opened = if want_write {
+        let mut opts = std::fs::OpenOptions::new();
+        opts.read(acc != 1);
+        opts.write(true);
+        if flags & O_CREAT != 0 {
+            if flags & O_EXCL != 0 {
+                opts.create_new(true);
+            } else {
+                opts.create(true);
+            }
+        }
+        opts.truncate(flags & O_TRUNC != 0);
+        opts.append(flags & O_APPEND != 0);
+        opts.open(&path)
+    } else {
+        std::fs::File::open(&path)
+    };
+    Some(match opened {
+        Ok(f) => {
+            let fd = sys.alloc_fd(f);
+            sys.remember_path(fd, path);
+            set64(env, Gpr(0), fd as u64);
+            TrapOutcome::Handled
+        }
+        Err(e) => {
+            let no = match e.kind() {
+                std::io::ErrorKind::NotFound => ENOENT,
+                std::io::ErrorKind::PermissionDenied => EACCES,
+                std::io::ErrorKind::AlreadyExists => 17,
+                _ => EINVAL,
+            };
+            set64(env, Gpr(0), cx.neg(no));
+            TrapOutcome::Handled
+        }
+    })
+}
+
+fn pipe_read(
+    sys: &mut Linux,
+    env: &mut BareEnv,
+    cx: &SysCtx,
+    end: PipeEnd,
+    buf: u64,
+    left: u64,
+) -> Option<TrapOutcome> {
+    if !end.read {
+        set64(env, Gpr(0), cx.neg(EBADF));
+        return Some(TrapOutcome::Handled);
+    }
+    if left == 0 {
+        set64(env, Gpr(0), 0);
+        return Some(TrapOutcome::Handled);
+    }
+    let max = usize::try_from(left.min(4096)).unwrap_or(0);
+    let got = sys.pipes.0.borrow_mut().read(end.id, max);
+    match got {
+        polyisa_kernel::PipeRead::Bytes(bytes) => {
+            if env.backend.mem.write(VirtAddr(buf), &bytes).is_err() {
+                return Some(TrapOutcome::Unimplemented);
+            }
+            set64(env, Gpr(0), bytes.len() as u64);
+            Some(TrapOutcome::Handled)
+        }
+        polyisa_kernel::PipeRead::Eof => {
+            set64(env, Gpr(0), 0);
+            Some(TrapOutcome::Handled)
+        }
+        polyisa_kernel::PipeRead::Empty => {
+            let id = sys.ensure_self();
+            sys.pipe_wait = Some(end.id);
+            sys.queue.0.borrow_mut().meta.block(
+                polyisa_kernel::ThreadId(id.0),
+                polyisa_kernel::ThreadWait::Pipe { id: end.id },
+            );
+            Some(TrapOutcome::Blocked)
+        }
+    }
+}
+
+fn pipe_write(
+    sys: &mut Linux,
+    env: &mut BareEnv,
+    cx: &SysCtx,
+    end: PipeEnd,
+    buf: u64,
+    left: u64,
+) -> Option<TrapOutcome> {
+    if end.read {
+        set64(env, Gpr(0), cx.neg(EBADF));
+        return Some(TrapOutcome::Handled);
+    }
+    if left == 0 {
+        set64(env, Gpr(0), 0);
+        return Some(TrapOutcome::Handled);
+    }
+    let take = usize::try_from(left.min(4096)).unwrap_or(0);
+    let mut chunk = vec![0u8; take];
+    if env
+        .backend
+        .mem
+        .read(VirtAddr(buf), &mut chunk, data_access())
+        .is_err()
+    {
+        return Some(TrapOutcome::Unimplemented);
+    }
+    let wrote = sys.pipes.0.borrow_mut().write(end.id, &chunk);
+    match wrote {
+        None => {
+            set64(env, Gpr(0), cx.neg(EPIPE));
+            Some(TrapOutcome::Handled)
+        }
+        Some(n) => {
+            sys.wake_pipe(end.id);
+            set64(env, Gpr(0), n as u64);
+            Some(TrapOutcome::Handled)
+        }
+    }
+}
+
+fn sys_pipe(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // pipe(pipefd)。pipe2 の flags=0 と同じ。zcat が使う。
+    open_pipe(sys, env, cx, 0)
+}
+
+fn sys_pipe2(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    let flags = get64(env, cx.r_b);
+    open_pipe(sys, env, cx, flags)
+}
+
+fn open_pipe(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx, flags: u64) -> Option<TrapOutcome> {
+    let addr = get64(env, cx.r_a);
+    if flags != 0 {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    let id = sys.pipes.0.borrow_mut().open();
+    let read_fd = sys.alloc_pipe_fd(PipeEnd { id, read: true });
+    let write_fd = sys.alloc_pipe_fd(PipeEnd { id, read: false });
+    let mut bytes = [0u8; 8];
+    bytes[..4].copy_from_slice(&read_fd.to_le_bytes());
+    bytes[4..].copy_from_slice(&write_fd.to_le_bytes());
+    if env.backend.mem.write(VirtAddr(addr), &bytes).is_err() {
+        sys.close_fd(read_fd);
+        sys.close_fd(write_fd);
+        set64(env, Gpr(0), cx.neg(EFAULT));
+        return Some(TrapOutcome::Handled);
+    }
+    set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_read(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    let fd = get64(env, cx.r_a) as u32;
+    let buf = get64(env, cx.r_b);
+    let mut left = get64(env, cx.r_c);
+    if let Some(end) = sys.pipe_end(fd) {
+        return pipe_read(sys, env, cx, end, buf, left);
+    }
+    // 付け替えた標準 fd はファイルから読む。真の stdin は供給バッファから読む。
+    // dup2(0,n) で stdin を指す fd も同様。
+    let stdin_empty =
+        (fd == 0 || (fd < 3 && sys.std_is_stdin[fd as usize])) && sys.std_attached(fd);
+    if stdin_empty {
+        let mut done = 0u64;
+        let mut chunk = vec![0u8; IO_CHUNK];
+        while left > 0 {
+            let take = left.min(IO_CHUNK as u64) as usize;
+            let n = sys.take_stdin(&mut chunk[..take]);
+            if n == 0 {
+                break;
+            }
+            if env
+                .backend
+                .mem
+                .write(VirtAddr(buf + done), &chunk[..n])
+                .is_err()
+            {
+                return Some(TrapOutcome::Unimplemented);
+            }
+            done += n as u64;
+            left -= n as u64;
+            if n < take {
+                break;
+            }
+        }
+        set64(env, Gpr(0), done);
+        return Some(TrapOutcome::Handled);
+    }
+    let Some(file) = sys.file_mut(fd) else {
+        set64(env, Gpr(0), cx.neg(EBADF));
+        return Some(TrapOutcome::Handled);
+    };
+    let mut done = 0u64;
+    let mut chunk = vec![0u8; IO_CHUNK];
+    while left > 0 {
+        let take = left.min(IO_CHUNK as u64) as usize;
+        let n = match std::io::Read::read(file, &mut chunk[..take]) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(_) => break,
+        };
+        if env
+            .backend
+            .mem
+            .write(VirtAddr(buf + done), &chunk[..n])
+            .is_err()
+        {
+            return Some(TrapOutcome::Unimplemented);
+        }
+        done += n as u64;
+        left -= n as u64;
+        if n < take {
+            break;
+        }
+    }
+    set64(env, Gpr(0), done);
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_close(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 標準 fd の close も成功させる。uniq は stdin を閉じて開き直す.
+    let fd = get64(env, cx.r_a) as u32;
+    Some(if sys.close_fd(fd) {
+        set64(env, Gpr(0), 0);
+        TrapOutcome::Handled
+    } else {
+        set64(env, Gpr(0), cx.neg(EBADF));
+        TrapOutcome::Handled
+    })
+}
+
+fn sys_write(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    let fd = get64(env, cx.r_a) as u32;
+    let buf = get64(env, cx.r_b);
+    let mut left = get64(env, cx.r_c);
+    if let Some(end) = sys.pipe_end(fd) {
+        return pipe_write(sys, env, cx, end, buf, left);
+    }
+    // dup2(0,n) で stdin を指す fd への write は EBADF（O_RDONLY）。
+    if fd < 3 && sys.std_is_stdin[fd as usize] {
+        set64(env, Gpr(0), cx.neg(EBADF));
+        return Some(TrapOutcome::Handled);
+    }
+    if (fd == 1 || fd == 2) && sys.std_files[fd as usize].is_none() {
+        let mut done = 0u64;
+        let mut chunk = vec![0u8; IO_CHUNK];
+        while left > 0 {
+            let take = left.min(IO_CHUNK as u64) as usize;
+            if env
+                .backend
+                .mem
+                .read(VirtAddr(buf + done), &mut chunk[..take], data_access())
+                .is_err()
+            {
+                return Some(TrapOutcome::Unimplemented);
+            }
+            let n = sys.write_stdio(fd, &chunk[..take]);
+            done += n as u64;
+            left -= n as u64;
+            if n < take {
+                break;
+            }
+        }
+        set64(env, Gpr(0), done);
+        return Some(TrapOutcome::Handled);
+    }
+    // 開ファイル (opened fd・付け替え先。dup2 で stdout に置いた出力先を含む)
+    // への write はホストに書く。読取り専用で開いた場合は EBADF になる。
+    let Some(file) = sys.file_mut(fd) else {
+        set64(env, Gpr(0), cx.neg(EBADF));
+        return Some(TrapOutcome::Handled);
+    };
+    let mut done = 0u64;
+    let mut chunk = vec![0u8; IO_CHUNK];
+    let mut err_no: Option<u32> = None;
+    while left > 0 {
+        let take = left.min(IO_CHUNK as u64) as usize;
+        if env
+            .backend
+            .mem
+            .read(VirtAddr(buf + done), &mut chunk[..take], data_access())
+            .is_err()
+        {
+            return Some(TrapOutcome::Unimplemented);
+        }
+        match std::io::Write::write(file, &chunk[..take]) {
+            Ok(0) => break,
+            Ok(n) => {
+                done += n as u64;
+                left -= n as u64;
+                if n < take {
+                    break;
+                }
+            }
+            Err(e) => {
+                err_no = Some(match e.raw_os_error() {
+                    Some(9) => EBADF,
+                    Some(13) => EACCES,
+                    _ => EINVAL,
+                });
+                break;
+            }
+        }
+    }
+    if done == 0 {
+        if let Some(no) = err_no {
+            set64(env, Gpr(0), cx.neg(no));
+        } else {
+            set64(env, Gpr(0), 0);
+        }
+    } else {
+        set64(env, Gpr(0), done);
+    }
+    Some(TrapOutcome::Handled)
+}
+
+fn writev_opened(
+    sys: &mut Linux,
+    env: &mut BareEnv,
+    cx: &SysCtx,
+    fd: u32,
+    iov: u64,
+    iovcnt: u64,
+) -> Option<TrapOutcome> {
+    // 開いたファイルへの writev。dos2unix は一時ファイルへ stdio の writev で書く。
+    const IOV_MAX: u64 = 1024;
+    if sys.file_ref(fd).is_none() {
+        set64(env, Gpr(0), cx.neg(EBADF));
+        return Some(TrapOutcome::Handled);
+    }
+    if iovcnt > IOV_MAX {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    let mut done = 0u64;
+    let mut chunk = vec![0u8; IO_CHUNK];
+    for idx in 0..iovcnt {
+        let (base, len) = if cx.is64 {
+            let mut ent = [0u8; 16];
+            if env
+                .backend
+                .mem
+                .read(VirtAddr(iov + idx * 16), &mut ent, data_access())
+                .is_err()
+            {
+                return Some(TrapOutcome::Unimplemented);
+            }
+            (
+                u64::from_le_bytes(ent[..8].try_into().unwrap()),
+                u64::from_le_bytes(ent[8..].try_into().unwrap()),
+            )
+        } else {
+            let mut ent = [0u8; 8];
+            if env
+                .backend
+                .mem
+                .read(VirtAddr(iov + idx * 8), &mut ent, data_access())
+                .is_err()
+            {
+                return Some(TrapOutcome::Unimplemented);
+            }
+            (
+                u64::from(u32::from_le_bytes(ent[..4].try_into().unwrap())),
+                u64::from(u32::from_le_bytes(ent[4..].try_into().unwrap())),
+            )
+        };
+        let mut left = len;
+        let mut off = 0u64;
+        while left > 0 {
+            let take = left.min(IO_CHUNK as u64) as usize;
+            if env
+                .backend
+                .mem
+                .read(VirtAddr(base + off), &mut chunk[..take], data_access())
+                .is_err()
+            {
+                return Some(TrapOutcome::Unimplemented);
+            }
+            let file = sys.file_mut(fd).expect("opened fd");
+            match std::io::Write::write(file, &chunk[..take]) {
+                Ok(0) => {
+                    set64(env, Gpr(0), done);
+                    return Some(TrapOutcome::Handled);
+                }
+                Ok(n) => {
+                    done += n as u64;
+                    left -= n as u64;
+                    off += n as u64;
+                    if n < take {
+                        set64(env, Gpr(0), done);
+                        return Some(TrapOutcome::Handled);
+                    }
+                }
+                Err(e) => {
+                    if done == 0 {
+                        let no = match e.raw_os_error() {
+                            Some(9) => EBADF,
+                            Some(13) => EACCES,
+                            _ => EINVAL,
+                        };
+                        set64(env, Gpr(0), cx.neg(no));
+                    } else {
+                        set64(env, Gpr(0), done);
+                    }
+                    return Some(TrapOutcome::Handled);
+                }
+            }
+        }
+    }
+    set64(env, Gpr(0), done);
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_writev(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // writev/readv (x86-64: 20/19, x86-32: 146/145)。iovec 配列を辿って転送する.
+    // fd 1/2 は標準出力へ、開いたファイルはホストのファイルへ書く。
+    let fd = get64(env, cx.r_a) as u32;
+    let iov = get64(env, cx.r_b);
+    let iovcnt = get64(env, cx.r_c);
+    // dup2(0,n) で stdin を指す fd への writev は EBADF（O_RDONLY）。
+    if fd < 3 && sys.std_is_stdin[fd as usize] {
+        set64(env, Gpr(0), cx.neg(EBADF));
+        return Some(TrapOutcome::Handled);
+    }
+    // 付け替えた標準 fd への writev は開ファイルへ書く（sys_write と同じ）。
+    // 読取り専用で開いた場合は writev_opened が EBADF を返す。
+    if (fd == 1 || fd == 2) && sys.std_files[fd as usize].is_some() {
+        return writev_opened(sys, env, cx, fd, iov, iovcnt);
+    }
+    if fd != 1 && fd != 2 {
+        return writev_opened(sys, env, cx, fd, iov, iovcnt);
+    }
+    const IOV_MAX: u64 = 1024;
+    if iovcnt > IOV_MAX {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    let mut done = 0u64;
+    let mut chunk = vec![0u8; IO_CHUNK];
+    for idx in 0..iovcnt {
+        let (base, len) = if cx.is64 {
+            let mut ent = [0u8; 16];
+            if env
+                .backend
+                .mem
+                .read(VirtAddr(iov + idx * 16), &mut ent, data_access())
+                .is_err()
+            {
+                return Some(TrapOutcome::Unimplemented);
+            }
+            (
+                u64::from_le_bytes(ent[..8].try_into().unwrap()),
+                u64::from_le_bytes(ent[8..].try_into().unwrap()),
+            )
+        } else {
+            let mut ent = [0u8; 8];
+            if env
+                .backend
+                .mem
+                .read(VirtAddr(iov + idx * 8), &mut ent, data_access())
+                .is_err()
+            {
+                return Some(TrapOutcome::Unimplemented);
+            }
+            (
+                u64::from(u32::from_le_bytes(ent[..4].try_into().unwrap())),
+                u64::from(u32::from_le_bytes(ent[4..].try_into().unwrap())),
+            )
+        };
+        let mut left = len;
+        let mut off = 0u64;
+        while left > 0 {
+            let take = left.min(IO_CHUNK as u64) as usize;
+            if env
+                .backend
+                .mem
+                .read(VirtAddr(base + off), &mut chunk[..take], data_access())
+                .is_err()
+            {
+                return Some(TrapOutcome::Unimplemented);
+            }
+            let n = sys.write_stdio(fd, &chunk[..take]);
+            done += n as u64;
+            left -= n as u64;
+            off += n as u64;
+            if n < take {
+                break;
+            }
+        }
+    }
+    set64(env, Gpr(0), done);
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_readv(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    let fd = get64(env, cx.r_a) as u32;
+    let iov = get64(env, cx.r_b);
+    let iovcnt = get64(env, cx.r_c);
+    const IOV_MAX: u64 = 1024;
+    if iovcnt > IOV_MAX {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    // 付け替えた標準 fd はファイルから読む。真の stdin は空読みのまま.
+    // dup2(0,n) で stdin を指す fd も同様。
+    let empty_stdin =
+        (fd == 0 || (fd < 3 && sys.std_is_stdin[fd as usize])) && sys.std_attached(fd);
+    if !empty_stdin && sys.file_ref(fd).is_none() {
+        set64(env, Gpr(0), cx.neg(EBADF));
+        return Some(TrapOutcome::Handled);
+    }
+    let mut done = 0u64;
+    let mut chunk = vec![0u8; IO_CHUNK];
+    for idx in 0..iovcnt {
+        let (base, len) = if cx.is64 {
+            let mut ent = [0u8; 16];
+            if env
+                .backend
+                .mem
+                .read(VirtAddr(iov + idx * 16), &mut ent, data_access())
+                .is_err()
+            {
+                return Some(TrapOutcome::Unimplemented);
+            }
+            (
+                u64::from_le_bytes(ent[..8].try_into().unwrap()),
+                u64::from_le_bytes(ent[8..].try_into().unwrap()),
+            )
+        } else {
+            let mut ent = [0u8; 8];
+            if env
+                .backend
+                .mem
+                .read(VirtAddr(iov + idx * 8), &mut ent, data_access())
+                .is_err()
+            {
+                return Some(TrapOutcome::Unimplemented);
+            }
+            (
+                u64::from(u32::from_le_bytes(ent[..4].try_into().unwrap())),
+                u64::from(u32::from_le_bytes(ent[4..].try_into().unwrap())),
+            )
+        };
+        let mut left = len;
+        let mut off = 0u64;
+        while left > 0 {
+            let take = left.min(IO_CHUNK as u64) as usize;
+            let n = if empty_stdin {
+                sys.take_stdin(&mut chunk[..take])
+            } else {
+                let f = sys.file_mut(fd).unwrap();
+                match std::io::Read::read(f, &mut chunk[..take]) {
+                    Ok(0) => 0,
+                    Ok(n) => n,
+                    Err(_) => 0,
+                }
+            };
+            if n == 0 {
+                break;
+            }
+            if env
+                .backend
+                .mem
+                .write(VirtAddr(base + off), &chunk[..n])
+                .is_err()
+            {
+                return Some(TrapOutcome::Unimplemented);
+            }
+            done += n as u64;
+            left -= n as u64;
+            off += n as u64;
+            if n < take {
+                break;
+            }
+        }
+        // 真の stdin は空読みとして次へ進む.
+        if empty_stdin {
+            continue;
+        }
+    }
+    set64(env, Gpr(0), done);
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_exit(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    let code = get64(env, cx.r_a) as u32;
+    if sys.pid != 0 {
+        sys.procs
+            .borrow_mut()
+            .exit(polyisa_kernel::ProcessId(sys.pid), code);
+    }
+    Some(TrapOutcome::Exit(code))
+}
+
+fn sys_exit_group(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    sys_exit(sys, env, cx)
+}
+
+fn sys_mmap(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_mmap(&mut sys.heap_end, env, cx)
+}
+
+fn sys_set_tid_address(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    let me = sys.ensure_self().0;
+    crate::x86::sys_set_tid_address(me, env, cx)
+}
+
+fn sys_set_thread_area(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // set_thread_area(user_desc*)。entry_number=-1 のとき最初の TLS スロット 6 を
+    // 割り当てて書き戻し、base_addr を GS ベースとして記憶する。i386 musl の TLS 初期化.
+    // Ref: SRC-LINUX (7.3).
+    let u = get64(env, cx.r_a);
+    let mut desc = [0u8; 8];
+    if env
+        .backend
+        .mem
+        .read(VirtAddr(u), &mut desc, data_access())
+        .is_err()
+    {
+        set64(env, Gpr(0), cx.neg(EFAULT));
+        return Some(TrapOutcome::Handled);
+    }
+    if u32::from_le_bytes(desc[0..4].try_into().unwrap()) == u32::MAX
+        && env
+            .backend
+            .mem
+            .write(VirtAddr(u), &6u32.to_le_bytes())
+            .is_err()
+    {
+        set64(env, Gpr(0), cx.neg(EFAULT));
+        return Some(TrapOutcome::Handled);
+    }
+    sys.gs_base = u32::from_le_bytes(desc[4..8].try_into().unwrap()) as u64;
+    set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_gettid(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    let me = sys.ensure_self().0;
+    crate::x86::sys_gettid(me, env, cx)
+}
+
+fn sys_getpid(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    let me = sys.ensure_self().0;
+    crate::x86::sys_getpid(me, env, cx)
+}
+
+fn sys_getppid(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    let me = sys.ensure_self().0;
+    let borrowed = sys.procs.borrow();
+    crate::x86::sys_getppid(&borrowed, me, env, cx)
+}
+
+fn sys_sysinfo(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_sysinfo(env, cx)
+}
+
+fn sys_reboot(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_reboot(env, cx)
+}
+
+fn sys_init_module(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_init_module(env, cx)
+}
+
+fn sys_delete_module(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_delete_module(env, cx)
+}
+
+fn sys_finit_module(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_finit_module(env, cx)
+}
+
+fn sys_swapon(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_swapon(env, cx)
+}
+
+fn sys_swapoff(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_swapoff(env, cx)
+}
+
+fn sys_pivot_root(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_pivot_root(env, cx)
+}
+
+fn sys_umount2(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    sys.ensure_cwd();
+    let root = sys.guest_root.clone();
+    let cwd = sys.cwd.clone();
+    crate::x86::sys_umount2(&root, &cwd, env, cx)
+}
+
+fn sys_flock(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_flock(env, cx)
+}
+
+fn sys_shmget(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_shmget(env, cx)
+}
+
+fn sys_shmctl(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_shmctl(env, cx)
+}
+
+fn sys_semget(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_semget(env, cx)
+}
+
+fn sys_semctl(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_semctl(env, cx)
+}
+
+fn sys_msgget(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_msgget(env, cx)
+}
+
+fn sys_msgctl(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_msgctl(env, cx)
+}
+
+fn sys_getitimer(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_getitimer(env, cx)
+}
+
+fn sys_setitimer(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_setitimer(env, cx)
+}
+
+fn sys_socket(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_socket(env, cx)
+}
+
+fn sys_socketpair(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_socketpair(env, cx)
+}
+
+fn sys_bind(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_bind(env, cx)
+}
+
+fn sys_connect(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_connect(env, cx)
+}
+
+fn sys_sendto(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_sendto(env, cx)
+}
+
+fn sys_recvfrom(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_recvfrom(env, cx)
+}
+
+fn sys_getsockname(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_getsockname(env, cx)
+}
+
+fn sys_setxattr(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    sys.ensure_cwd();
+    let root = sys.guest_root.clone();
+    let cwd = sys.cwd.clone();
+    crate::x86::sys_setxattr(&root, &cwd, env, cx)
+}
+
+fn sys_lsetxattr(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層。
+    // lsetxattr はシンボリックリンク自体に付けるが、試作では区別しない。
+    sys.ensure_cwd();
+    let root = sys.guest_root.clone();
+    let cwd = sys.cwd.clone();
+    crate::x86::sys_lsetxattr(&root, &cwd, env, cx)
+}
+
+fn sys_fsetxattr(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_fsetxattr(env, cx)
+}
+
+fn sys_mount(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    sys.ensure_cwd();
+    let root = sys.guest_root.clone();
+    let cwd = sys.cwd.clone();
+    crate::x86::sys_mount(&root, &cwd, env, cx)
+}
+
+fn sys_poll(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_poll(env, cx)
+}
+
+fn sys_select(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_select(env, cx)
+}
+
+fn sys_pselect6(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は os-linux に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_pselect6(env, cx)
+}
+
+fn sys_sysfs(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_sysfs(env, cx)
+}
+
+fn sys_tkill(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_tkill(env, cx)
+}
+
+fn sys_inotify_init1(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_inotify_init1(env, cx)
+}
+
+fn sys_inotify_init(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は os-linux に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_inotify_init(env, cx)
+}
+
+fn sys_inotify_add_watch(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_inotify_add_watch(env, cx)
+}
+
+fn sys_adjtimex(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_adjtimex(env, cx)
+}
+
+fn sys_setuid(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_setuid(env, cx)
+}
+
+fn sys_setgid(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は os-linux に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_setgid(env, cx)
+}
+
+fn sys_setreuid(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は os-linux に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_setreuid(env, cx)
+}
+
+fn sys_setregid(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は os-linux に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_setregid(env, cx)
+}
+
+fn sys_setresuid(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は os-linux に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_setresuid(env, cx)
+}
+
+fn sys_setresgid(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は os-linux に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_setresgid(env, cx)
+}
+
+fn sys_syslog(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_syslog(env, cx)
+}
+
+fn sys_setpgid(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    let me = sys.ensure_self().0;
+    let mut borrowed = sys.procs.borrow_mut();
+    crate::x86::sys_setpgid(&mut borrowed, me, env, cx)
+}
+
+fn sys_setsid(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    let me = sys.ensure_self().0;
+    let mut borrowed = sys.procs.borrow_mut();
+    crate::x86::sys_setsid(&mut borrowed, me, env, cx)
+}
+
+fn sys_getpriority(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_getpriority(env, cx)
+}
+
+fn sys_setpriority(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_setpriority(env, cx)
+}
+
+fn sys_personality(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    let mut v = sys.personality;
+    let r = crate::x86::sys_personality(&mut v, env, cx);
+    sys.personality = v;
+    r
+}
+
+fn sys_ioprio_set(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // ioprio_set(which, who, ioprio)。実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    let me = sys.ensure_self().0;
+    let mut io = crate::x86::IoPriority {
+        prio: sys.ioprio,
+        known: sys.ioprio_known,
+    };
+    let r = crate::x86::sys_ioprio_set(&mut io, me, env, cx);
+    sys.ioprio = io.prio;
+    sys.ioprio_known = io.known;
+    r
+}
+
+fn sys_ioprio_get(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // ioprio_get(which, who)。実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    let me = sys.ensure_self().0;
+    let io = crate::x86::IoPriority {
+        prio: sys.ioprio,
+        known: sys.ioprio_known,
+    };
+    crate::x86::sys_ioprio_get(&io, me, env, cx)
+}
+
+fn sys_fsync(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    // 有効性判定は状態を束ねる cli 側、実処理は os-linux 側.
+    let fd = get64(env, cx.r_a) as u32;
+    let valid = sys.fd_valid(fd);
+    crate::x86::sys_fsync(valid, env, cx)
+}
+
+fn sys_fdatasync(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    // 有効性判定は状態を束ねる cli 側、実処理は os-linux 側.
+    let fd = get64(env, cx.r_a) as u32;
+    let valid = sys.fd_valid(fd);
+    crate::x86::sys_fdatasync(valid, env, cx)
+}
+
+fn sys_unshare(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_unshare(env, cx)
+}
+
+fn sys_sched_setaffinity(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    let me = sys.ensure_self().0;
+    crate::x86::sys_sched_setaffinity(me, env, cx)
+}
+
+fn sys_sched_get_priority_max(
+    _sys: &mut Linux,
+    env: &mut BareEnv,
+    cx: &SysCtx,
+) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_sched_get_priority_max(env, cx)
+}
+
+fn sys_sched_get_priority_min(
+    _sys: &mut Linux,
+    env: &mut BareEnv,
+    cx: &SysCtx,
+) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_sched_get_priority_min(env, cx)
+}
+
+fn sys_sched_getscheduler(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    let me = sys.ensure_self().0;
+    crate::x86::sys_sched_getscheduler(me, env, cx)
+}
+
+fn sys_sched_setscheduler(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    let me = sys.ensure_self().0;
+    crate::x86::sys_sched_setscheduler(me, env, cx)
+}
+
+fn sys_sched_setparam(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    let me = sys.ensure_self().0;
+    crate::x86::sys_sched_setparam(me, env, cx)
+}
+
+fn sys_sched_getparam(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    let me = sys.ensure_self().0;
+    crate::x86::sys_sched_getparam(me, env, cx)
+}
+
+fn sys_getpgid(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    let me = sys.ensure_self().0;
+    let borrowed = sys.procs.borrow();
+    crate::x86::sys_getpgid(&borrowed, me, env, cx)
+}
+
+fn sys_kill(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    const SIGKILL: i64 = 9;
+    let pid = get64(env, cx.r_a) as i64;
+    let sig = get64(env, cx.r_b) as i64;
+    // SIGTERM 等は配送しない。halt が一斉送信しても単一ゲストでは相手がいない。
+    if sig != SIGKILL {
+        set64(env, Gpr(0), 0);
+        return Some(TrapOutcome::Handled);
+    }
+    if pid <= 0 {
+        // kill(-1, SIGKILL) も相手なしで成功にする。
+        set64(env, Gpr(0), 0);
+        return Some(TrapOutcome::Handled);
+    }
+    let me = sys.ensure_self();
+    let target = polyisa_kernel::ProcessId(pid as u64);
+    if sys.procs.borrow().pgid(target).is_none() {
+        set64(env, Gpr(0), cx.neg(ESRCH));
+        return Some(TrapOutcome::Handled);
+    }
+    sys.procs.borrow_mut().kill(target, SIGKILL as u32);
+    sys.queue
+        .0
+        .borrow_mut()
+        .meta
+        .mark_exited(polyisa_kernel::ThreadId(target.0));
+    if target != me {
+        sys.release_parked(target.0);
+    }
+    sys.wake_child_waiters(target);
+    if target == me {
+        return Some(TrapOutcome::Exit(SIGKILL as u32));
+    }
+    set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_uname(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_uname(env, cx)
+}
+
+fn sys_getuid(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_getuid(env, cx)
+}
+
+fn sys_geteuid(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は os-linux に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_geteuid(env, cx)
+}
+
+fn sys_getgid(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_getgid(env, cx)
+}
+
+fn sys_getegid(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は os-linux に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_getegid(env, cx)
+}
+
+fn sys_getcwd(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    sys.ensure_cwd();
+    let cwd = sys.cwd.clone();
+    crate::x86::sys_getcwd(&cwd, env, cx)
+}
+
+fn sys_chdir(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    sys.ensure_cwd();
+    let root = sys.guest_root.clone();
+    crate::x86::sys_chdir(&root, &mut sys.cwd, env, cx)
+}
+
+fn sys_fchdir(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    let mut cwd = sys.cwd.clone();
+    let r = crate::x86::sys_fchdir(&sys.fds, &sys.std_paths, &mut cwd, env, cx);
+    sys.cwd = cwd;
+    r
+}
+
+fn sys_setgroups(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_setgroups(env, cx)
+}
+
+fn sys_chroot(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_chroot(env, cx)
+}
+
+fn sys_getdents64(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_getdents64(
+        &sys.fds,
+        &sys.std_paths,
+        &mut sys.dir_pos,
+        &mut sys.dir_done,
+        env,
+        cx,
+    )
+}
+
+fn sys_fstat(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    let fd = get64(env, cx.r_a) as u32;
+    let std = if fd < 3 {
+        sys.std_files[fd as usize].as_ref()
+    } else {
+        None
+    };
+    crate::x86::sys_fstat(&sys.fds, std, &sys.std_paths, env, cx)
+}
+
+fn sys_stat(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    sys.ensure_cwd();
+    let root = sys.guest_root.clone();
+    let cwd = sys.cwd.clone();
+    let exe = sys.exe_path.clone();
+    crate::x86::sys_stat(&root, &cwd, &exe, env, cx)
+}
+
+fn sys_lstat(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    sys.ensure_cwd();
+    let root = sys.guest_root.clone();
+    let cwd = sys.cwd.clone();
+    let exe = sys.exe_path.clone();
+    crate::x86::sys_lstat(&root, &cwd, &exe, env, cx)
+}
+
+fn sys_newfstatat(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    // AT_FDCWD+絶対パスのみ受ける点も実体側に寄せる。
+    sys.ensure_cwd();
+    let root = sys.guest_root.clone();
+    let cwd = sys.cwd.clone();
+    let exe = sys.exe_path.clone();
+    crate::x86::sys_newfstatat(&root, &cwd, &exe, env, cx)
+}
+
+fn sys_sendfile(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // sendfile(out_fd, in_fd, offset, count)。offset==NULL のみ受け付ける.
+    // in_fd から読んで out_fd (1/2) へ書き、転送バイト数を返す.
+    // Ref: SRC-LINUX (7.3).
+    let out_fd = get64(env, cx.r_a) as u32;
+    let in_fd = get64(env, cx.r_b) as u32;
+    let offset = get64(env, cx.r_c);
+    let mut left = get64(env, cx.r_d);
+    if offset != 0 {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    if out_fd != 1 && out_fd != 2 {
+        set64(env, Gpr(0), cx.neg(EBADF));
+        return Some(TrapOutcome::Handled);
+    }
+    // 付け替えた標準出力は読取り専用のため EBADF。
+    if sys.std_files[out_fd as usize].is_some() {
+        set64(env, Gpr(0), cx.neg(EBADF));
+        return Some(TrapOutcome::Handled);
+    }
+    if let Some(end) = sys.pipe_end(in_fd) {
+        if !end.read {
+            set64(env, Gpr(0), cx.neg(EBADF));
+            return Some(TrapOutcome::Handled);
+        }
+        let mut done = 0u64;
+        while left > 0 {
+            let max = usize::try_from(left.min(4096)).unwrap_or(0);
+            let got = sys.pipes.0.borrow_mut().read(end.id, max);
+            match got {
+                polyisa_kernel::PipeRead::Bytes(bytes) => {
+                    let n = bytes.len();
+                    let w = match out_fd {
+                        1 => sys.write_fd1(&bytes),
+                        _ => std::io::Write::write(&mut std::io::stderr(), &bytes).unwrap_or(0),
+                    };
+                    done += n as u64;
+                    left -= n as u64;
+                    if w < n {
+                        break;
+                    }
+                }
+                polyisa_kernel::PipeRead::Eof => break,
+                polyisa_kernel::PipeRead::Empty => {
+                    if done > 0 {
+                        break;
+                    }
+                    let id = sys.ensure_self();
+                    sys.pipe_wait = Some(end.id);
+                    sys.queue.0.borrow_mut().meta.block(
+                        polyisa_kernel::ThreadId(id.0),
+                        polyisa_kernel::ThreadWait::Pipe { id: end.id },
+                    );
+                    return Some(TrapOutcome::Blocked);
+                }
+            }
+        }
+        set64(env, Gpr(0), done);
+        return Some(TrapOutcome::Handled);
+    }
+    // 付け替えた stdin はファイルから読む。真の stdin は供給バッファから読む。
+    let in_empty = in_fd == 0 && sys.std_attached(0);
+    if sys.file_ref(in_fd).is_none() {
+        if in_empty {
+            let mut done = 0u64;
+            let mut chunk = vec![0u8; IO_CHUNK];
+            while left > 0 {
+                let take = left.min(IO_CHUNK as u64) as usize;
+                let n = sys.take_stdin(&mut chunk[..take]);
+                if n == 0 {
+                    break;
+                }
+                let w = match out_fd {
+                    1 => sys.write_fd1(&chunk[..n]),
+                    _ => std::io::Write::write(&mut std::io::stderr(), &chunk[..n]).unwrap_or(0),
+                };
+                done += n as u64;
+                left -= n as u64;
+                if n < take || w < n {
+                    break;
+                }
+            }
+            set64(env, Gpr(0), done);
+            return Some(TrapOutcome::Handled);
+        }
+        set64(env, Gpr(0), cx.neg(EBADF));
+        return Some(TrapOutcome::Handled);
+    }
+    let mut done = 0u64;
+    let mut chunk = vec![0u8; IO_CHUNK];
+    while left > 0 {
+        let take = left.min(IO_CHUNK as u64) as usize;
+        let n = {
+            let Some(file) = sys.file_mut(in_fd) else {
+                break;
+            };
+            match std::io::Read::read(file, &mut chunk[..take]) {
+                Ok(n) => n,
+                Err(_) => break,
+            }
+        };
+        if n == 0 {
+            break;
+        }
+        let w = match out_fd {
+            1 => sys.write_fd1(&chunk[..n]),
+            _ => std::io::Write::write(&mut std::io::stderr(), &chunk[..n]).unwrap_or(0),
+        };
+        done += n as u64;
+        left -= n as u64;
+        if n < take || w < n {
+            break;
+        }
+    }
+    set64(env, Gpr(0), done);
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_lseek(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    // 標準 fd かは cx.r_a（第1引数の fd）で判定する。実体側と同じ番号を使う.
+    let fd = get64(env, cx.r_a) as u32;
+    let std = if fd < 3 {
+        sys.std_files[fd as usize].as_mut()
+    } else {
+        None
+    };
+    crate::x86::sys_lseek(&mut sys.fds, std, env, cx)
+}
+
+fn sys_llseek(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // _llseek。標準 fd かは cx.r_a（第1引数の fd）で判定する。実体側と同じ番号を使う.
+    let fd = get64(env, cx.r_a) as u32;
+    let std = if fd < 3 {
+        sys.std_files[fd as usize].as_mut()
+    } else {
+        None
+    };
+    crate::x86::sys_llseek(&mut sys.fds, std, env, cx)
+}
+
+fn sys_ftruncate(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    // 標準 fd かは実体と同じ番号（cx.r_a）で判定する。
+    let fd = get64(env, cx.r_a) as u32;
+    let std = if fd < 3 {
+        sys.std_files[fd as usize].as_mut()
+    } else {
+        None
+    };
+    crate::x86::sys_ftruncate(&mut sys.fds, std, env, cx)
+}
+
+fn sys_fallocate(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    // 標準 fd かは実体と同じ番号（cx.r_a）で判定する。
+    let fd = get64(env, cx.r_a) as u32;
+    let std = if fd < 3 {
+        sys.std_files[fd as usize].as_mut()
+    } else {
+        None
+    };
+    crate::x86::sys_fallocate(&mut sys.fds, std, env, cx)
+}
+
+fn sys_getgroups(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_getgroups(env, cx)
+}
+
+fn sys_getgroups32(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // getgroups32。gid リストの型が違うだけで `getgroups` と同じ実体を使う。
+    crate::x86::sys_getgroups(env, cx)
+}
+
+fn sys_fstatat64(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // fstatat64。i386 の newfstatat。実体は `os-linux` に置く。
+    crate::x86::sys_newfstatat(&sys.guest_root, &sys.cwd, &sys.exe_path, env, cx)
+}
+
+fn sys_mprotect(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_mprotect(env, cx)
+}
+
+fn sys_munmap(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_munmap(env, cx)
+}
+
+fn sys_rt_sigaction(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_rt_sigaction(env, cx)
+}
+
+fn sys_rt_sigprocmask(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_rt_sigprocmask(env, cx)
+}
+
+fn sys_rt_sigtimedwait(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_rt_sigtimedwait(env, cx)
+}
+
+fn sys_rt_sigsuspend(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_rt_sigsuspend(env, cx)
+}
+
+fn sys_tgkill(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_tgkill(env, cx)
+}
+
+fn sys_set_robust_list(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    let mut v = sys.robust_head;
+    let r = crate::x86::sys_set_robust_list(&mut v, env, cx);
+    sys.robust_head = v;
+    r
+}
+
+fn sys_rseq(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    let mut v = sys.rseq_addr;
+    let r = crate::x86::sys_rseq(&mut v, env, cx);
+    sys.rseq_addr = v;
+    r
+}
+
+fn sys_getrandom(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_getrandom(env, cx)
+}
+
+fn sys_prlimit64(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_prlimit64(env, cx)
+}
+
+fn sys_time(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_time(env, cx)
+}
+
+fn sys_ioctl(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_ioctl(env, cx)
+}
+
+fn sys_nanosleep(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_nanosleep(env, cx)
+}
+
+/// `/proc/self/status` の `Cpus_allowed` を、CPU 0 が最下位ビットのバイト列にする。
+fn sys_sched_getaffinity(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    let me = sys.ensure_self().0;
+    crate::x86::sys_sched_getaffinity(me, env, cx)
+}
+
+fn sys_clock_nanosleep(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_clock_nanosleep(env, cx)
+}
+
+fn sys_gettimeofday(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    crate::x86::sys_gettimeofday(env, cx)
+}
+
+fn sys_clock_gettime(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_clock_gettime(&mut sys.mono_start, env, cx)
+}
+
+fn sys_readlinkat(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    sys.ensure_cwd();
+    let root = sys.guest_root.clone();
+    let cwd = sys.cwd.clone();
+    let exe = sys.exe_path.clone();
+    crate::x86::sys_readlinkat(&root, &cwd, &exe, &sys.fds, &sys.std_paths, env, cx)
+}
+
+fn sys_readlink(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    sys.ensure_cwd();
+    let root = sys.guest_root.clone();
+    let cwd = sys.cwd.clone();
+    let exe = sys.exe_path.clone();
+    crate::x86::sys_readlink(&root, &cwd, &exe, &sys.fds, &sys.std_paths, env, cx)
+}
+
+fn sys_arch_prctl(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    let mut v = sys.fs_base;
+    let r = crate::x86::sys_arch_prctl(&mut v, env, cx);
+    sys.fs_base = v;
+    r
+}
+
+fn sys_dup(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // dup(oldfd)。開ファイルは try_clone して最下位空きに置く (freopen 対応)。
+    // 真の 1/2 (ファイルなし) は旧来通り oldfd を返す.
+    let oldfd = get64(env, cx.r_a) as u32;
+    if !sys.fd_valid(oldfd) {
+        set64(env, Gpr(0), cx.neg(EBADF));
+        return Some(TrapOutcome::Handled);
+    }
+    if let Some(end) = sys.pipe_end(oldfd) {
+        if let Some(i) = (0..3).find(|&i| {
+            sys.std_closed[i] && sys.std_files[i].is_none() && sys.std_pipes[i].is_none()
+        }) {
+            sys.install_pipe(end, i as u32);
+            set64(env, Gpr(0), i as u64);
+            return Some(TrapOutcome::Handled);
+        }
+        let fd = sys.alloc_pipe_fd(end);
+        sys.pipes.0.borrow_mut().dup(end.id, end.read);
+        set64(env, Gpr(0), fd as u64);
+        return Some(TrapOutcome::Handled);
+    }
+    if let Some((cloned, path)) = sys.clone_open(oldfd) {
+        if let Some(i) = (0..3).find(|&i| sys.std_files[i].is_none() && sys.std_closed[i]) {
+            sys.std_files[i] = Some(cloned);
+            sys.std_closed[i] = false;
+            if let Some(p) = path {
+                sys.remember_path(i as u32, p);
+            }
+            set64(env, Gpr(0), i as u64);
+            return Some(TrapOutcome::Handled);
+        }
+        let fd = sys.fds.alloc(Some(cloned));
+        if let Some(p) = path {
+            sys.remember_path(fd, p);
+        }
+        set64(env, Gpr(0), fd as u64);
+        return Some(TrapOutcome::Handled);
+    }
+    if oldfd == 1 || oldfd == 2 {
+        set64(env, Gpr(0), oldfd as u64);
+        return Some(TrapOutcome::Handled);
+    }
+    set64(env, Gpr(0), cx.neg(EBADF));
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_dup2(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // dup2(oldfd, newfd)。1/2 同士の複製は newfd を返して継続する.
+    // --list の dup2(1,2) は出力先の付け替えだが、試作では写像せず継続する.
+    let oldfd = get64(env, cx.r_a) as u32;
+    let newfd = get64(env, cx.r_b) as u32;
+    // 閉じた標準 fd は不正。接続中・付け替え中と opened fd が真.
+    let valid = |fd: u32| sys.fd_valid(fd);
+    if !valid(oldfd) || newfd > 1024 {
+        set64(env, Gpr(0), cx.neg(EBADF));
+        return Some(TrapOutcome::Handled);
+    }
+    if oldfd == newfd {
+        set64(env, Gpr(0), newfd as u64);
+        return Some(TrapOutcome::Handled);
+    }
+    if let Some(end) = sys.pipe_end(oldfd) {
+        sys.close_fd(newfd);
+        sys.install_pipe(end, newfd);
+        set64(env, Gpr(0), newfd as u64);
+        return Some(TrapOutcome::Handled);
+    }
+    if let Some((cloned, path)) = sys.clone_open(oldfd) {
+        if newfd < 3 {
+            let i = newfd as usize;
+            sys.std_files[i] = Some(cloned);
+            sys.std_closed[i] = false;
+            sys.std_is_stdin[i] = false;
+        } else {
+            sys.fds.place(newfd, Some(cloned));
+        }
+        if let Some(p) = path {
+            sys.remember_path(newfd, p);
+        }
+        set64(env, Gpr(0), newfd as u64);
+        return Some(TrapOutcome::Handled);
+    }
+    if (oldfd == 1 || oldfd == 2) && (newfd == 1 || newfd == 2) {
+        // time は dup2(2,1) のあと printf で集計を出す。--list は dup2(1,2)。
+        if oldfd == 2 && newfd == 1 {
+            sys.stdout_is_stderr = true;
+            sys.stderr_is_stdout = false;
+        } else if oldfd == 1 && newfd == 2 {
+            sys.stderr_is_stdout = true;
+            sys.stdout_is_stderr = false;
+        }
+        sys.std_is_stdin[newfd as usize] = false;
+        set64(env, Gpr(0), newfd as u64);
+        return Some(TrapOutcome::Handled);
+    }
+    // dup2(0,n)。stdin は開ファイルを持たないが有効な fd であり、成功させる。
+    // n は stdin を指す。read は stdin_buf、write は EBADF（O_RDONLY）。
+    // dup(0) は未対応（開ファイルがないため複製先を作れない）。
+    if oldfd == 0 && newfd < 3 {
+        if !sys.std_attached(0) {
+            set64(env, Gpr(0), cx.neg(EBADF));
+            return Some(TrapOutcome::Handled);
+        }
+        sys.close_fd(newfd);
+        sys.std_closed[newfd as usize] = false;
+        sys.std_is_stdin[newfd as usize] = true;
+        sys.forget_path(newfd);
+        set64(env, Gpr(0), newfd as u64);
+        return Some(TrapOutcome::Handled);
+    }
+    set64(env, Gpr(0), cx.neg(EBADF));
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_dup3(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // dup3(oldfd, newfd, flags)。hexdump の libbb 準備で使う.
+    // flags は O_CLOEXEC のみ無視して継続。oldfd==newfd は EINVAL.
+    let oldfd = get64(env, cx.r_a) as u32;
+    let newfd = get64(env, cx.r_b) as u32;
+    let flags = get64(env, cx.r_c) as u32;
+    const O_CLOEXEC: u32 = 0x80000;
+    if flags & !O_CLOEXEC != 0 {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    if oldfd == newfd {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    let valid = |fd: u32| sys.fd_valid(fd);
+    if !valid(oldfd) || newfd > 1024 {
+        set64(env, Gpr(0), cx.neg(EBADF));
+        return Some(TrapOutcome::Handled);
+    }
+    if let Some((cloned, path)) = sys.clone_open(oldfd) {
+        if newfd < 3 {
+            let i = newfd as usize;
+            sys.std_files[i] = Some(cloned);
+            sys.std_closed[i] = false;
+        } else {
+            sys.fds.place(newfd, Some(cloned));
+        }
+        if let Some(p) = path {
+            sys.remember_path(newfd, p);
+        }
+        set64(env, Gpr(0), newfd as u64);
+        return Some(TrapOutcome::Handled);
+    }
+    if (oldfd == 1 || oldfd == 2) && (newfd == 1 || newfd == 2) {
+        if oldfd == 2 && newfd == 1 {
+            sys.stdout_is_stderr = true;
+            sys.stderr_is_stdout = false;
+        } else if oldfd == 1 && newfd == 2 {
+            sys.stderr_is_stdout = true;
+            sys.stdout_is_stderr = false;
+        }
+        set64(env, Gpr(0), newfd as u64);
+        return Some(TrapOutcome::Handled);
+    }
+    set64(env, Gpr(0), cx.neg(EBADF));
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_mkdir(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    sys.ensure_cwd();
+    let root = sys.guest_root.clone();
+    let cwd = sys.cwd.clone();
+    crate::x86::sys_mkdir(&root, &cwd, env, cx)
+}
+
+fn sys_mknod(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    sys.ensure_cwd();
+    let root = sys.guest_root.clone();
+    let cwd = sys.cwd.clone();
+    let umask = sys.umask;
+    crate::x86::sys_mknod(&root, &cwd, umask, env, cx)
+}
+
+fn sys_mkdirat(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    sys.ensure_cwd();
+    let root = sys.guest_root.clone();
+    let cwd = sys.cwd.clone();
+    crate::x86::sys_mkdirat(&root, &cwd, env, cx)
+}
+
+fn sys_rename(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    sys.ensure_cwd();
+    let root = sys.guest_root.clone();
+    let cwd = sys.cwd.clone();
+    crate::x86::sys_rename(&root, &cwd, env, cx)
+}
+
+fn sys_sync(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_sync(env, cx)
+}
+
+fn sys_link(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    sys.ensure_cwd();
+    let root = sys.guest_root.clone();
+    let cwd = sys.cwd.clone();
+    crate::x86::sys_link(&root, &cwd, env, cx)
+}
+
+fn sys_symlink(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // symlink(oldpath, newpath)。`ln -s` で使う。
+    // 可搬 API がないため実体はクリエート host の helper に置く。
+    // host 依存は cli のみに限る設計（workspace.md「依存規則」）のため、
+    // 解決済みでも os-linux へは移さずここに残す。
+    // 作成先だけ解決し、指し先は verbatim に保つ。
+    let old_addr = get64(env, cx.r_a);
+    let new_addr = get64(env, cx.r_b);
+    let old_path = match guest_c_string(env, old_addr) {
+        Some(p) => p,
+        None => return Some(TrapOutcome::Unimplemented),
+    };
+    let new_path = match guest_c_string(env, new_addr) {
+        Some(p) => p,
+        None => return Some(TrapOutcome::Unimplemented),
+    };
+    sys.ensure_cwd();
+    let Some(new_path) = sys.resolve_path(&new_path) else {
+        set64(env, Gpr(0), cx.neg(EPERM));
+        return Some(TrapOutcome::Handled);
+    };
+    Some(match polyisa_host::symlink(&old_path, &new_path) {
+        Ok(()) => {
+            set64(env, Gpr(0), 0);
+            TrapOutcome::Handled
+        }
+        Err(e) => {
+            let no = match e.kind() {
+                std::io::ErrorKind::NotFound => ENOENT,
+                std::io::ErrorKind::AlreadyExists => 17,
+                std::io::ErrorKind::PermissionDenied => EACCES,
+                _ => EINVAL,
+            };
+            set64(env, Gpr(0), cx.neg(no));
+            TrapOutcome::Handled
+        }
+    })
+}
+
+fn sys_rmdir(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    sys.ensure_cwd();
+    let root = sys.guest_root.clone();
+    let cwd = sys.cwd.clone();
+    crate::x86::sys_rmdir(&root, &cwd, env, cx)
+}
+
+fn sys_unlink(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    sys.ensure_cwd();
+    let root = sys.guest_root.clone();
+    let cwd = sys.cwd.clone();
+    crate::x86::sys_unlink(&root, &cwd, env, cx)
+}
+
+fn sys_unlinkat(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    sys.ensure_cwd();
+    let root = sys.guest_root.clone();
+    let cwd = sys.cwd.clone();
+    crate::x86::sys_unlinkat(&root, &cwd, &sys.fds, &sys.std_paths, env, cx)
+}
+
+fn sys_access(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    sys.ensure_cwd();
+    let root = sys.guest_root.clone();
+    let cwd = sys.cwd.clone();
+    crate::x86::sys_access(&root, &cwd, env, cx)
+}
+
+fn sys_faccessat(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    sys.ensure_cwd();
+    let root = sys.guest_root.clone();
+    let cwd = sys.cwd.clone();
+    crate::x86::sys_faccessat(&root, &cwd, env, cx)
+}
+
+fn sys_utimensat(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    sys.ensure_cwd();
+    let root = sys.guest_root.clone();
+    let cwd = sys.cwd.clone();
+    crate::x86::sys_utimensat(&root, &cwd, env, cx)
+}
+
+fn sys_chmod(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_chmod(env, cx)
+}
+
+fn sys_fchmod(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_fchmod(env, cx)
+}
+
+fn sys_fchmodat(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は os-linux に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_fchmodat(env, cx)
+}
+
+fn sys_chown(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_chown(env, cx)
+}
+
+fn sys_lchown(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_lchown(env, cx)
+}
+
+fn sys_fchown(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_fchown(env, cx)
+}
+
+fn sys_umask(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    let mut v = sys.umask;
+    let r = crate::x86::sys_umask(&mut v, env, cx);
+    sys.umask = v;
+    r
+}
+
+fn sys_fcntl(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    // 有効性判定は状態を束ねる cli 側、実処理は os-linux 側.
+    let fd = get64(env, cx.r_a) as u32;
+    let valid = sys.fd_valid(fd);
+    crate::x86::sys_fcntl(valid, env, cx)
+}
+
+fn sys_brk(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_brk(&mut sys.heap_end, env, cx)
+}
+
+/// プロセスの clone。アドレス空間を共有するフラグは受けない。
+/// 子は実行可能なスレッドとして置き、親には子の識別子を返す。
+fn sys_fork(sys: &mut Linux, env: &mut BareEnv, _cx: &SysCtx) -> Option<TrapOutcome> {
+    // fork()。アドレス空間は複製する。CLONE_VM の vfork は受けない。
+    spawn_child(sys, env, 0)
+}
+
+fn sys_vfork(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // vfork()。共有アドレス空間は持たず、fork と同じ複製で進める。
+    // CLONE_VM 経由の vfork は sys_clone 側で拒む。time / timeout / xargs が呼ぶ。
+    sys_fork(sys, env, cx)
+}
+
+fn sys_clone(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    let flags = get64(env, cx.r_a);
+    let stack = get64(env, cx.r_b);
+    if flags & (crate::clone_flag::VM | crate::clone_flag::THREAD) != 0 {
+        return Some(TrapOutcome::Unimplemented);
+    }
+    spawn_child(sys, env, stack)
+}
+
+fn spawn_child(sys: &mut Linux, env: &mut BareEnv, stack: u64) -> Option<TrapOutcome> {
+    let parent = sys.ensure_self();
+    let child_pid = sys.procs.borrow_mut().fork(parent);
+    let mut child_env = env.clone();
+    set64(&mut child_env, Gpr(0), 0);
+    if stack != 0 {
+        set64(&mut child_env, Gpr(4), stack);
+    }
+    // SYSCALL と INT 0x80 はどちらも 2 バイト。子は次の命令から始める。
+    let eip = eip_of(&mut child_env);
+    child_env
+        .backend
+        .set(polyisa_guest_x86::sem::eip_ref(), eip.wrapping_add(2));
+    let mut child_linux = sys.duplicate();
+    child_linux.pid = child_pid.0;
+    child_linux.steps = 0;
+    child_linux.wait = None;
+    sys.queue
+        .0
+        .borrow_mut()
+        .meta
+        .insert(polyisa_kernel::ThreadId(child_pid.0));
+    sys.queue.0.borrow_mut().meta.copy_steps(
+        polyisa_kernel::ThreadId(parent.0),
+        polyisa_kernel::ThreadId(child_pid.0),
+    );
+    sys.queue.0.borrow_mut().parked.push(ParkedTask {
+        env: child_env,
+        linux: child_linux,
+    });
+    set64(env, Gpr(0), child_pid.0);
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_execve(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    let path_addr = get64(env, cx.r_a);
+    let argv_addr = get64(env, cx.r_b);
+    let envp_addr = get64(env, cx.r_c);
+    let Some(path) = guest_c_string(env, path_addr) else {
+        set64(env, Gpr(0), cx.neg(EFAULT));
+        return Some(TrapOutcome::Handled);
+    };
+    // /proc/self/exe はゲスト実行ファイル自身を読む（ホスト exe ではない）。
+    let path = guest_exe_redirect(&sys.exe_path, &path).unwrap_or(path);
+    let argv = match read_cstr_array(env, argv_addr) {
+        Ok(v) => v,
+        Err(()) => {
+            set64(env, Gpr(0), cx.neg(EFAULT));
+            return Some(TrapOutcome::Handled);
+        }
+    };
+    sys.ensure_cwd();
+    let Some(path) = sys.resolve_path(&path) else {
+        set64(env, Gpr(0), cx.neg(EPERM));
+        return Some(TrapOutcome::Handled);
+    };
+    let envp = match read_cstr_array(env, envp_addr) {
+        Ok(v) => v,
+        Err(()) => {
+            set64(env, Gpr(0), cx.neg(EFAULT));
+            return Some(TrapOutcome::Handled);
+        }
+    };
+    let bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            set64(env, Gpr(0), cx.neg(ENOENT));
+            return Some(TrapOutcome::Handled);
+        }
+        Err(_) => {
+            set64(env, Gpr(0), cx.neg(EACCES));
+            return Some(TrapOutcome::Handled);
+        }
+    };
+    match install_exec(sys, env, &bytes, &path, &argv, &envp) {
+        Ok(()) => Some(TrapOutcome::Handled),
+        Err(errno) => {
+            // ホストの動的バイナリ（/sbin/cat 等）は PT_INTERP のため ENOEXEC。
+            // ゲスト環境では同名の BusyBox アプレットのはずなので、
+            // 同じ argv で実行ファイル（BusyBox 静的）へ読み替える。
+            // スクリプト（非 ELF）は ash の解釈へ委ねるため対象外。
+            if errno == ENOEXEC && path != sys.exe_path && !sys.exe_path.is_empty() {
+                let is_dynamic = polyisa_loader::elf::parse_ehdr(&bytes)
+                    .ok()
+                    .and_then(|ehdr| {
+                        polyisa_loader::elf::parse_phdrs(&bytes, &ehdr)
+                            .ok()
+                            .map(|phdrs| phdrs.iter().any(|ph| ph.seg_type == 3))
+                    })
+                    .unwrap_or(false);
+                if is_dynamic
+                    && let Ok(busy) = std::fs::read(sys.exe_path.clone())
+                    && install_exec(sys, env, &busy, &sys.exe_path.clone(), &argv, &envp).is_ok()
+                {
+                    return Some(TrapOutcome::Handled);
+                }
+            }
+            set64(env, Gpr(0), cx.neg(errno));
+            Some(TrapOutcome::Handled)
+        }
+    }
+}
+
+fn sys_wait4(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // WNOHANG。子がまだ終了していなければ 0 を返す。
+    const WNOHANG: u64 = 1;
+    let which = get64(env, cx.r_a) as i64;
+    let status_ptr = get64(env, cx.r_b);
+    let options = get64(env, cx.r_c);
+    let wnohang = options & WNOHANG != 0;
+    if sys.pid == 0 {
+        set64(env, Gpr(0), cx.neg(ECHILD));
+        return Some(TrapOutcome::Handled);
+    }
+    sys.wait = None;
+    sys.queue
+        .0
+        .borrow_mut()
+        .meta
+        .unblock(polyisa_kernel::ThreadId(sys.pid));
+    let parent = polyisa_kernel::ProcessId(sys.pid);
+    match sys.procs.borrow_mut().try_reap(parent, which) {
+        polyisa_kernel::Reap::Exited { pid, code, signal } => {
+            if status_ptr != 0 {
+                let st = reap_status(code, signal);
+                if env
+                    .backend
+                    .mem
+                    .write(VirtAddr(status_ptr), &st.to_le_bytes())
+                    .is_err()
+                {
+                    set64(env, Gpr(0), cx.neg(EFAULT));
+                    return Some(TrapOutcome::Handled);
+                }
+            }
+            set64(env, Gpr(0), pid.0);
+            Some(TrapOutcome::Handled)
+        }
+        polyisa_kernel::Reap::NoChild => {
+            set64(env, Gpr(0), cx.neg(ECHILD));
+            Some(TrapOutcome::Handled)
+        }
+        polyisa_kernel::Reap::Pending => {
+            if wnohang {
+                set64(env, Gpr(0), 0);
+                Some(TrapOutcome::Handled)
+            } else {
+                sys.wait = Some(WaitSlot { which, status_ptr });
+                sys.queue.0.borrow_mut().meta.block(
+                    polyisa_kernel::ThreadId(sys.pid),
+                    polyisa_kernel::ThreadWait::Child { which },
+                );
+                Some(TrapOutcome::Blocked)
+            }
+        }
+    }
+}
+
+/// ゲストのポインタ配列を NUL 終端まで読む。失敗は `Err(())`。
+fn read_cstr_array(env: &mut BareEnv, addr: u64) -> Result<Vec<Vec<u8>>, ()> {
+    if addr == 0 {
+        return Err(());
+    }
+    let acc = data_access();
+    let mut out = Vec::new();
+    for i in 0..64u64 {
+        let mut word = [0u8; 8];
+        if env
+            .backend
+            .mem
+            .read(VirtAddr(addr + i * 8), &mut word, acc)
+            .is_err()
+        {
+            return Err(());
+        }
+        let ptr = u64::from_le_bytes(word);
+        if ptr == 0 {
+            return Ok(out);
+        }
+        let Some(text) = guest_c_string(env, ptr) else {
+            return Err(());
+        };
+        out.push(text.into_bytes());
+    }
+    Err(())
+}
+
+/// 現在のアドレス空間を静的 ELF で置き換え、入口へ eip を移す。
+fn install_exec(
+    sys: &mut Linux,
+    env: &mut BareEnv,
+    bytes: &[u8],
+    path: &str,
+    argv: &[Vec<u8>],
+    envp: &[Vec<u8>],
+) -> Result<(), u32> {
+    use polyisa_mem::{PAGE_SIZE, Perms};
+    let ehdr = polyisa_loader::elf::parse_ehdr(bytes).map_err(|_| ENOEXEC)?;
+    const EM_X86_64: u16 = 62;
+    if !ehdr.little || ehdr.machine != EM_X86_64 || ehdr.entry > u64::from(u32::MAX) {
+        return Err(ENOEXEC);
+    }
+    let phdrs = polyisa_loader::elf::parse_phdrs(bytes, &ehdr).map_err(|_| ENOEXEC)?;
+    // 動的リンク（PT_INTERP あり）は実行できない。ENOEXEC で探索を続けさせる。
+    if phdrs.iter().any(|ph| ph.seg_type == 3) {
+        return Err(ENOEXEC);
+    }
+    let mut mem = polyisa_mem::AddressSpace::new();
+    polyisa_loader::elf::load_segments(bytes, &phdrs, &mut mem).map_err(|_| ENOEXEC)?;
+    let mut image_end = 0u64;
+    for ph in &phdrs {
+        if ph.seg_type == 1 {
+            image_end = image_end.max(ph.vaddr.saturating_add(ph.memsz));
+        }
+    }
+    let top = 0x7fff_0000u64;
+    let (img, sp) = if sys.is64 {
+        crate::build_initial_stack(top, argv, envp, &[(6, 0x1000)])
+    } else {
+        crate::build_initial_stack32(top, argv, envp, &[(6, 0x1000)])
+    };
+    const STACK_SIZE: u64 = 8 * 1024 * 1024;
+    let base = top - STACK_SIZE;
+    let end = top.next_multiple_of(PAGE_SIZE);
+    let count = (end - base) / PAGE_SIZE;
+    mem.map(VirtAddr(base), count, Perms(Perms::R.0 | Perms::W.0))
+        .map_err(|_| ENOMEM)?;
+    mem.write(VirtAddr(sp), &img).map_err(|_| EFAULT)?;
+    env.backend.mem = mem;
+    env.backend.reservation = polyisa_mem::Reservation::empty();
+    polyisa_guest_x86::sem::write64(&mut env.backend, Gpr(4), sp);
+    set64(env, Gpr(0), 0);
+    env.backend
+        .set(polyisa_guest_x86::sem::eip_ref(), ehdr.entry as u32);
+    sys.init_brk(image_end);
+    sys.exe_path = path.to_string();
+    sys.fs_base = 0;
+    Ok(())
+}
+
+impl TrapHandler for Linux {
+    fn fs_base(&self) -> u64 {
+        self.fs_base
+    }
+
+    fn gs_base(&self) -> u64 {
+        self.gs_base
+    }
+
+    fn init_brk(&mut self, image_end: u64) {
+        Linux::init_brk(self, image_end);
+    }
+
+    fn after_step(&mut self, env: &mut BareEnv) {
+        self.step_and_maybe_preempt(env);
+    }
+
+    fn on_block(&mut self, env: &mut BareEnv) -> bool {
+        let blocked = self.wait.is_some() || self.pipe_wait.is_some();
+        if self.preempt(env) {
+            return true;
+        }
+        if blocked {
+            self.note_deadlock();
+        }
+        false
+    }
+
+    fn take_exit(&mut self, env: &mut BareEnv, code: u32) -> bool {
+        self.yield_on_exit(env, code)
+    }
+
+    fn handle_trap(&mut self, env: &mut BareEnv, code: u32) -> TrapOutcome {
+        use polyisa_guest_x86::sem::Gpr;
+        // INT 0x80 (code 0x80) と SYSCALL (code 0) のどちらも番号は RAX/EAX にある。
+        let _ = code;
+        // 引数レジスタ：x86-32 は EBX/ECX/EDX/ESI/EDI/EBP、
+        // x86-64 は RDI/RSI/RDX/R10/R8/R9。
+        let (r_a, r_b, r_c, r_d, r_e, r_f) = if self.is64 {
+            (Gpr(7), Gpr(6), Gpr(2), Gpr(10), Gpr(8), Gpr(9))
+        } else {
+            (Gpr(3), Gpr(1), Gpr(2), Gpr(6), Gpr(7), Gpr(5))
+        };
+        let guest_abi = if self.is64 {
+            crate::GuestAbi::X86_64Linux
+        } else {
+            crate::GuestAbi::X86_32Linux
+        };
+        // dirfd の AT_FDCWD：x86-32 は 32ビット、x86-64 は 64ビットの -100。
+        // 32ビット mov で設定された場合 (RDI=0xffffff9c) も受け付けるため下位32で比較する.
+        let at_fdcwd: u64 = if self.is64 {
+            0xffff_ffff_ffff_ff9c
+        } else {
+            u64::from(AT_FDCWD_U32)
+        };
+        let cx = SysCtx {
+            r_a,
+            r_b,
+            r_c,
+            r_d,
+            r_e,
+            r_f,
+            is64: self.is64,
+            at_fdcwd,
+        };
+        let nr = get64(env, Gpr(0));
+        let name = crate::syscall_name(guest_abi, nr);
+        let table = if self.is64 {
+            X86_64_SYSCALLS
+        } else {
+            X86_32_SYSCALLS
+        };
+        if let Some(name) = name
+            && let Some((_, handler)) = table.iter().find(|(n, _)| *n == name)
+            && let Some(out) = handler(self, env, &cx)
+        {
+            return out;
+        }
+        // 未実装は既定で ENOSYS を返して続ける（設計: user-mode.md）。
+        if !self.reported.contains(&nr) {
+            self.reported.push(nr);
+            eprintln!("run: unhandled syscall {nr} ({})", name.unwrap_or("?"));
+        }
+        set64(env, Gpr(0), cx.neg(crate::ENOSYS));
+        TrapOutcome::Handled
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use polyisa_engine::bare::BareEnv;
+    use polyisa_guest_x86::sem::Gpr;
+    use polyisa_mem::{Perms, VirtAddr};
+
+    fn bare() -> BareEnv {
+        let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_x86::CpuState>());
+        env.backend.mem.map(VirtAddr(0), 2, Perms::RW).unwrap();
+        env
+    }
+
+    fn set_regs(env: &mut BareEnv, nr: u32, a: u32, b: u32, c: u32) {
+        env.backend.set(Gpr(0).state(), nr);
+        env.backend.set(Gpr(3).state(), a);
+        env.backend.set(Gpr(1).state(), b);
+        env.backend.set(Gpr(2).state(), c);
+    }
+
+    fn assert_syscall_table(table: &[(&str, SysFn)], abi: crate::GuestAbi) {
+        let mut seen = std::collections::BTreeSet::new();
+        let known = os_linux_names(abi);
+        for (name, _) in table {
+            assert!(seen.insert(*name), "名前が重複している: {name}");
+            assert!(known.contains(name), "{name} は {abi:?} の番号表にない");
+        }
+    }
+
+    fn os_linux_names(abi: crate::GuestAbi) -> std::collections::BTreeSet<&'static str> {
+        let mut names = std::collections::BTreeSet::new();
+        for nr in 0..4096 {
+            if let Some(name) = crate::syscall_name(abi, nr) {
+                names.insert(name);
+            }
+        }
+        names
+    }
+
+    #[test]
+    fn write_stdout_and_bad_fd() {
+        let mut sys = Linux::default();
+        let mut env = bare();
+        env.backend.mem.write(VirtAddr(0x100), b"hi").unwrap();
+        // write(1, 0x100, 2) は受理し、書いたバイト数を返す。
+        set_regs(&mut env, crate::x86_32::WRITE as u32, 1, 0x100, 2);
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(env.backend.get(Gpr(0).state()), 2);
+        // 存在しない fd への write は EBADF。
+        set_regs(&mut env, crate::x86_32::WRITE as u32, 9, 0x100, 2);
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(env.backend.get(Gpr(0).state()), neg_errno(EBADF));
+    }
+
+    #[test]
+    fn writev_two_iovecs() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        env.backend.mem.write(VirtAddr(0x100), b"hi").unwrap();
+        env.backend.mem.write(VirtAddr(0x110), b"!").unwrap();
+        // iov[0]={0x100,2}, iov[1]={0x110,1} at 0x200.
+        let mut iov = [0u8; 32];
+        iov[..8].copy_from_slice(&0x100u64.to_le_bytes());
+        iov[8..16].copy_from_slice(&2u64.to_le_bytes());
+        iov[16..24].copy_from_slice(&0x110u64.to_le_bytes());
+        iov[24..32].copy_from_slice(&1u64.to_le_bytes());
+        env.backend.mem.write(VirtAddr(0x200), &iov).unwrap();
+        set64(&mut env, Gpr(0), abi::WRITEV);
+        set64(&mut env, Gpr(7), 2);
+        set64(&mut env, Gpr(6), 0x200);
+        set64(&mut env, Gpr(2), 2);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 3);
+        // fd=9 は EBADF。
+        set64(&mut env, Gpr(0), abi::WRITEV);
+        set64(&mut env, Gpr(7), 9);
+        set64(&mut env, Gpr(6), 0x200);
+        set64(&mut env, Gpr(2), 2);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EBADF));
+    }
+
+    #[test]
+    fn writev_opened_fd_writes_file() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        let path = std::env::temp_dir().join(format!("polyisa-writev-{}", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)
+            .unwrap();
+        let fd = sys.alloc_fd(file);
+        env.backend.mem.write(VirtAddr(0x100), b"hi").unwrap();
+        env.backend.mem.write(VirtAddr(0x110), b"!").unwrap();
+        let mut iov = [0u8; 32];
+        iov[..8].copy_from_slice(&0x100u64.to_le_bytes());
+        iov[8..16].copy_from_slice(&2u64.to_le_bytes());
+        iov[16..24].copy_from_slice(&0x110u64.to_le_bytes());
+        iov[24..32].copy_from_slice(&1u64.to_le_bytes());
+        env.backend.mem.write(VirtAddr(0x200), &iov).unwrap();
+        set64(&mut env, Gpr(0), abi::WRITEV);
+        set64(&mut env, Gpr(7), u64::from(fd));
+        set64(&mut env, Gpr(6), 0x200);
+        set64(&mut env, Gpr(2), 2);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 3);
+        drop(sys);
+        assert_eq!(std::fs::read(&path).unwrap(), b"hi!");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn dup2_stdin_marks_and_transfers() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        sys.stdin_buf = b"hi".to_vec();
+        let mut env = bare();
+        // dup2(0, 2) は成功し、fd 2 を stdin 付けにする。
+        set64(&mut env, Gpr(0), abi::DUP2);
+        set64(&mut env, Gpr(7), 0);
+        set64(&mut env, Gpr(6), 2);
+        set64(&mut env, Gpr(2), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 2);
+        // read(2, 0x100, 16) は stdin_buf から読む。
+        env.backend
+            .mem
+            .write(VirtAddr(0x100), b"..........")
+            .unwrap();
+        set64(&mut env, Gpr(0), abi::READ);
+        set64(&mut env, Gpr(7), 2);
+        set64(&mut env, Gpr(6), 0x100);
+        set64(&mut env, Gpr(2), 16);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 2);
+        let mut got = [0u8; 2];
+        env.backend
+            .mem
+            .read(VirtAddr(0x100), &mut got, data_access())
+            .unwrap();
+        assert_eq!(&got, b"hi");
+        // write(2, ...) は EBADF（stdin は O_RDONLY 相当）。
+        set64(&mut env, Gpr(0), abi::WRITE);
+        set64(&mut env, Gpr(7), 2);
+        set64(&mut env, Gpr(6), 0x100);
+        set64(&mut env, Gpr(2), 2);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EBADF));
+    }
+
+    #[test]
+    fn mmap_anonymous_returns_addr() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        sys.heap_end = 0x6000_0000;
+        let mut env = bare();
+        // mmap(NULL, 0x1000, PROT_READ|WRITE, MAP_PRIVATE|ANONYMOUS, -1, 0).
+        set64(&mut env, Gpr(0), abi::MMAP);
+        set64(&mut env, Gpr(7), 0);
+        set64(&mut env, Gpr(6), 0x1000);
+        set64(&mut env, Gpr(2), 3);
+        set64(&mut env, Gpr(10), 0x22);
+        set64(&mut env, Gpr(8), 0xffff_ffff_ffff_ffff);
+        set64(&mut env, Gpr(9), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let base = get64(&mut env, Gpr(0));
+        assert_eq!(base, 0x6000_0000);
+        // len=0 は EINVAL。
+        set64(&mut env, Gpr(0), abi::MMAP);
+        set64(&mut env, Gpr(7), 0);
+        set64(&mut env, Gpr(6), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EINVAL));
+    }
+
+    #[test]
+    fn mmap_null_skips_mapped() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        sys.heap_end = 0x6000_0000;
+        let mut env = bare();
+        // 先に 0x60000000 を写像して内容を書く（縮小で残った写像を模す）。
+        env.backend
+            .mem
+            .map(VirtAddr(0x6000_0000), 1, Perms::RW)
+            .unwrap();
+        env.backend.mem.write(VirtAddr(0x6000_0000), b"hi").unwrap();
+        // mmap(NULL, 0x1000, ...) は占有を避けて次のページを返す。
+        set64(&mut env, Gpr(0), abi::MMAP);
+        set64(&mut env, Gpr(7), 0);
+        set64(&mut env, Gpr(6), 0x1000);
+        set64(&mut env, Gpr(2), 3);
+        set64(&mut env, Gpr(10), 0x22);
+        set64(&mut env, Gpr(8), 0xffff_ffff_ffff_ffff);
+        set64(&mut env, Gpr(9), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0x6000_1000);
+        // 既存内容は残っている。
+        let mut back = [0u8; 2];
+        env.backend
+            .mem
+            .read(VirtAddr(0x6000_0000), &mut back, data_access())
+            .unwrap();
+        assert_eq!(&back, b"hi");
+    }
+
+    #[test]
+    fn openat_reads_string_near_map_edge() {
+        // 写像の末尾近くに置いたパスも読める（まとめて読むと境界で失敗するため）。
+        let mut sys = Linux::default();
+        let mut env = bare();
+        env.backend.mem.write(VirtAddr(0x1FFD), b"/x\0").unwrap();
+        set_regs(
+            &mut env,
+            crate::x86_32::OPENAT as u32,
+            0xffff_ff9c,
+            0x1FFD,
+            0,
+        );
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        // /x は存在しないため ENOENT。読めなければ Unimplemented になる。
+        assert_eq!(env.backend.get(Gpr(0).state()), neg_errno(ENOENT));
+    }
+
+    #[test]
+    fn openat_missing_is_enoent() {
+        let mut sys = Linux::default();
+        let mut env = bare();
+        env.backend
+            .mem
+            .write(VirtAddr(0x100), b"/no/such/file\0")
+            .unwrap();
+        set_regs(
+            &mut env,
+            crate::x86_32::OPENAT as u32,
+            0xffff_ff9c,
+            0x100,
+            0,
+        );
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(env.backend.get(Gpr(0).state()), neg_errno(ENOENT));
+    }
+
+    #[test]
+    fn openat_rejects_bad_dirfd_and_relpath() {
+        let mut sys = Linux::default();
+        let mut env = bare();
+        env.backend.mem.write(VirtAddr(0x100), b"/x\0").unwrap();
+        // dirfd が AT_FDCWD ではない。
+        set_regs(&mut env, crate::x86_32::OPENAT as u32, 3, 0x100, 0);
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(env.backend.get(Gpr(0).state()), neg_errno(EINVAL));
+        // 相対パスは作業ディレクトリから開く。ここには無いので ENOENT。
+        env.backend.mem.write(VirtAddr(0x100), b"rel\0").unwrap();
+        set_regs(
+            &mut env,
+            crate::x86_32::OPENAT as u32,
+            0xffff_ff9c,
+            0x100,
+            0,
+        );
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(env.backend.get(Gpr(0).state()), neg_errno(ENOENT));
+    }
+
+    #[test]
+    fn openat_creat_wronly_write_roundtrip() {
+        // truncate/cp/split の前段: O_WRONLY|O_CREAT|O_TRUNC で作り、write して read で戻る.
+        // O_EXCL 付きの既存作成は EEXIST(17)。旧実装は書込み系 flags を EINVAL で拒否した.
+        let dir = std::env::temp_dir().join(format!("polyisa-unit-open-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir).unwrap();
+        let path_s = dir.join("f.txt").to_string_lossy().into_owned();
+        let mut sys = Linux::default();
+        let mut env = bare();
+        env.backend
+            .mem
+            .write(VirtAddr(0x100), path_s.as_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x100 + path_s.len() as u64), &[0])
+            .unwrap();
+        env.backend.mem.write(VirtAddr(0x200), b"abcdef").unwrap();
+        // 存在しない path の O_WRONLY のみは ENOENT。
+        set_regs(
+            &mut env,
+            crate::x86_32::OPENAT as u32,
+            0xffff_ff9c,
+            0x100,
+            1,
+        );
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(env.backend.get(Gpr(0).state()), neg_errno(ENOENT));
+        // O_WRONLY|O_CREAT|O_TRUNC (1|0o100|0o1000=0o1101) で作成 -> fd 3。
+        set_regs(
+            &mut env,
+            crate::x86_32::OPENAT as u32,
+            0xffff_ff9c,
+            0x100,
+            0o1101,
+        );
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(env.backend.get(Gpr(0).state()), 3);
+        // write(3, 0x200, 6) -> 6。
+        set_regs(&mut env, crate::x86_32::WRITE as u32, 3, 0x200, 6);
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(env.backend.get(Gpr(0).state()), 6);
+        // close(3) -> 0。
+        set_regs(&mut env, crate::x86_32::CLOSE as u32, 3, 0, 0);
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(env.backend.get(Gpr(0).state()), 0);
+        // O_RDONLY で開き直して read -> "abcdef"。
+        set_regs(
+            &mut env,
+            crate::x86_32::OPENAT as u32,
+            0xffff_ff9c,
+            0x100,
+            0,
+        );
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(env.backend.get(Gpr(0).state()), 3);
+        set_regs(&mut env, crate::x86_32::READ as u32, 3, 0x300, 6);
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(env.backend.get(Gpr(0).state()), 6);
+        let mut back = [0u8; 6];
+        env.backend
+            .mem
+            .read(VirtAddr(0x300), &mut back, data_access())
+            .unwrap();
+        assert_eq!(&back, b"abcdef");
+        // O_RDWR で開いて追記位置を読書きできる。
+        set_regs(&mut env, crate::x86_32::CLOSE as u32, 3, 0, 0);
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        set_regs(
+            &mut env,
+            crate::x86_32::OPENAT as u32,
+            0xffff_ff9c,
+            0x100,
+            2,
+        );
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(env.backend.get(Gpr(0).state()), 3);
+        // O_CREAT|O_EXCL の既存作成は EEXIST(17)。
+        set_regs(
+            &mut env,
+            crate::x86_32::OPENAT as u32,
+            0xffff_ff9c,
+            0x100,
+            0o300,
+        );
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(env.backend.get(Gpr(0).state()), neg_errno(17));
+        // O_TRUNC で空になる。
+        set_regs(&mut env, crate::x86_32::CLOSE as u32, 3, 0, 0);
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        set_regs(
+            &mut env,
+            crate::x86_32::OPENAT as u32,
+            0xffff_ff9c,
+            0x100,
+            0o1101,
+        );
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(env.backend.get(Gpr(0).state()), 3);
+        set_regs(&mut env, crate::x86_32::READ as u32, 3, 0x300, 6);
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(env.backend.get(Gpr(0).state()), 0);
+        // 読取り専用 fd への write は EBADF。
+        set_regs(&mut env, crate::x86_32::CLOSE as u32, 3, 0, 0);
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        set_regs(
+            &mut env,
+            crate::x86_32::OPENAT as u32,
+            0xffff_ff9c,
+            0x100,
+            0,
+        );
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(env.backend.get(Gpr(0).state()), 3);
+        set_regs(&mut env, crate::x86_32::WRITE as u32, 3, 0x200, 6);
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(env.backend.get(Gpr(0).state()), neg_errno(EBADF));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn openat_accepts_o_directory() {
+        // O_DIRECTORY 付きでも開ける（opendir が付ける旗）。
+        let mut sys = Linux::default();
+        let mut env = bare();
+        env.backend.mem.write(VirtAddr(0x100), b"/\0").unwrap();
+        set_regs(
+            &mut env,
+            crate::x86_32::OPENAT as u32,
+            0xffff_ff9c,
+            0x100,
+            0x4000,
+        );
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        // fd (3) が返る。ENOENT/EINVAL ではない。
+        assert_eq!(env.backend.get(Gpr(0).state()), 3);
+    }
+
+    #[test]
+    fn read_write_close_roundtrip() {
+        let path = std::env::temp_dir().join(format!("polyisa-unit-{}", std::process::id()));
+        std::fs::write(&path, b"abcdef").unwrap();
+        let path_s = path.to_string_lossy().into_owned();
+        let mut sys = Linux::default();
+        let mut env = bare();
+        env.backend
+            .mem
+            .write(VirtAddr(0x100), path_s.as_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x100 + path_s.len() as u64), &[0])
+            .unwrap();
+        // openat -> fd 3。
+        set_regs(
+            &mut env,
+            crate::x86_32::OPENAT as u32,
+            0xffff_ff9c,
+            0x100,
+            0,
+        );
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(env.backend.get(Gpr(0).state()), 3);
+        // read(fd=3, buf=0x200, 64) -> 6。
+        set_regs(&mut env, crate::x86_32::READ as u32, 3, 0x200, 64);
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(env.backend.get(Gpr(0).state()), 6);
+        // close(3) -> 0、もう一度 close(3) -> EBADF。
+        set_regs(&mut env, crate::x86_32::CLOSE as u32, 3, 0, 0);
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(env.backend.get(Gpr(0).state()), 0);
+        set_regs(&mut env, crate::x86_32::CLOSE as u32, 3, 0, 0);
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(env.backend.get(Gpr(0).state()), neg_errno(EBADF));
+        // read(closed fd=3) -> EBADF。
+        set_regs(&mut env, crate::x86_32::READ as u32, 3, 0x200, 64);
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(env.backend.get(Gpr(0).state()), neg_errno(EBADF));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn stdin_close_open_read_serves_file() {
+        // uniq の stdin 付け替え回帰: close(0) -> 0、open -> 0、read(0) で内容が読める.
+        // 旧実装は close(0) で EBADF、read(0) で空読み 0 を返した.
+        let path = std::env::temp_dir().join(format!("polyisa-unit-stdin-{}", std::process::id()));
+        std::fs::write(&path, b"abcdef").unwrap();
+        let path_s = path.to_string_lossy().into_owned();
+        let mut sys = Linux::default();
+        let mut env = bare();
+        env.backend
+            .mem
+            .write(VirtAddr(0x100), path_s.as_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x100 + path_s.len() as u64), &[0])
+            .unwrap();
+        // close(0) -> 0。
+        set_regs(&mut env, crate::x86_32::CLOSE as u32, 0, 0, 0);
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(env.backend.get(Gpr(0).state()), 0);
+        // openat -> 最下位の空き 0。
+        set_regs(
+            &mut env,
+            crate::x86_32::OPENAT as u32,
+            0xffff_ff9c,
+            0x100,
+            0,
+        );
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(env.backend.get(Gpr(0).state()), 0);
+        // read(0) -> 6（付け替えたファイルから読む）。
+        set_regs(&mut env, crate::x86_32::READ as u32, 0, 0x200, 64);
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(env.backend.get(Gpr(0).state()), 6);
+        // fcntl(0) -> 0（付け替え中は妥当）。
+        set_regs(&mut env, crate::x86_32::FCNTL as u32, 0, 3, 0);
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(env.backend.get(Gpr(0).state()), 0);
+        // close(0) -> 0、read(0) -> EBADF、もう一度 close(0) -> EBADF。
+        set_regs(&mut env, crate::x86_32::CLOSE as u32, 0, 0, 0);
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(env.backend.get(Gpr(0).state()), 0);
+        set_regs(&mut env, crate::x86_32::READ as u32, 0, 0x200, 64);
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(env.backend.get(Gpr(0).state()), neg_errno(EBADF));
+        set_regs(&mut env, crate::x86_32::CLOSE as u32, 0, 0, 0);
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(env.backend.get(Gpr(0).state()), neg_errno(EBADF));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn open_reuses_freed_slot() {
+        // 最下位の空き番号を再利用する: open -> 3、close(3) -> 0、open -> 3.
+        // 旧実装は常に末尾へ積み、2回目は 4 を返した.
+        let path = std::env::temp_dir().join(format!("polyisa-unit-reuse-{}", std::process::id()));
+        std::fs::write(&path, b"abcdef").unwrap();
+        let path_s = path.to_string_lossy().into_owned();
+        let mut sys = Linux::default();
+        let mut env = bare();
+        env.backend
+            .mem
+            .write(VirtAddr(0x100), path_s.as_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x100 + path_s.len() as u64), &[0])
+            .unwrap();
+        let openat = (crate::x86_32::OPENAT as u32, 0xffff_ff9c, 0x100, 0);
+        set_regs(&mut env, openat.0, openat.1, openat.2, openat.3);
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(env.backend.get(Gpr(0).state()), 3);
+        set_regs(&mut env, crate::x86_32::CLOSE as u32, 3, 0, 0);
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(env.backend.get(Gpr(0).state()), 0);
+        set_regs(&mut env, openat.0, openat.1, openat.2, openat.3);
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x80),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(env.backend.get(Gpr(0).state()), 3);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn brk_query_extend_shrink() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        sys.init_brk(0x1234);
+        assert_eq!(sys.heap_end, 0x2000);
+        let mut env = bare();
+        // brk(0) は問い合わせであり現ブレークを返す。
+        set64(&mut env, Gpr(0), abi::BRK);
+        set64(&mut env, Gpr(7), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0x2000);
+        // brk(0x2100) は 0x3000 まで拡張する。
+        set64(&mut env, Gpr(0), abi::BRK);
+        set64(&mut env, Gpr(7), 0x2100);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0x3000);
+        assert_eq!(sys.heap_end, 0x3000);
+        // 拡張域は零初期化され、読み書きできる。
+        env.backend.mem.write(VirtAddr(0x2FF0), b"hi").unwrap();
+        let mut back = [0u8; 2];
+        env.backend
+            .mem
+            .read(VirtAddr(0x2FF0), &mut back, data_access())
+            .unwrap();
+        assert_eq!(&back, b"hi");
+        // 縮小は受け付ける。
+        set64(&mut env, Gpr(0), abi::BRK);
+        set64(&mut env, Gpr(7), 0x2000);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0x2000);
+        // 拡張しすぎは失敗扱い（現ブレークを返す）。
+        set64(&mut env, Gpr(0), abi::BRK);
+        set64(&mut env, Gpr(7), 0x2000 + 256 * 1024 * 1024 + 1);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0x2000);
+        assert_eq!(sys.heap_end, 0x2000);
+    }
+
+    #[test]
+    fn brk_shrink_regrow_keeps_data() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        sys.init_brk(0x1234);
+        let mut env = bare();
+        // brk で 0x3000 まで拡張し、書き込んでから縮小・再拡張する。
+        set64(&mut env, Gpr(0), abi::BRK);
+        set64(&mut env, Gpr(7), 0x3000);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0x3000);
+        env.backend.mem.write(VirtAddr(0x2FF0), b"hi").unwrap();
+        set64(&mut env, Gpr(0), abi::BRK);
+        set64(&mut env, Gpr(7), 0x2000);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0x2000);
+        set64(&mut env, Gpr(0), abi::BRK);
+        set64(&mut env, Gpr(7), 0x3000);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0x3000);
+        // 縮小前の内容が残っている（ゼロ化されない）。
+        let mut back = [0u8; 2];
+        env.backend
+            .mem
+            .read(VirtAddr(0x2FF0), &mut back, data_access())
+            .unwrap();
+        assert_eq!(&back, b"hi");
+    }
+
+    #[test]
+    fn arch_prctl_set_get_fs() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        // ARCH_SET_FS(0x1002) は base を記録して 0 を返す。
+        set64(&mut env, Gpr(0), abi::ARCH_PRCTL);
+        set64(&mut env, Gpr(7), 0x1002);
+        set64(&mut env, Gpr(6), 0x5000);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        assert_eq!(sys.fs_base, 0x5000);
+        // ARCH_GET_FS(0x1003) は記録値を [addr] に書いて 0 を返す。
+        set64(&mut env, Gpr(0), abi::ARCH_PRCTL);
+        set64(&mut env, Gpr(7), 0x1003);
+        set64(&mut env, Gpr(6), 0x100);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        let mut back = [0u8; 8];
+        env.backend
+            .mem
+            .read(VirtAddr(0x100), &mut back, data_access())
+            .unwrap();
+        assert_eq!(u64::from_le_bytes(back), 0x5000);
+        // 不明な op は EINVAL。
+        set64(&mut env, Gpr(0), abi::ARCH_PRCTL);
+        set64(&mut env, Gpr(7), 0x9999);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EINVAL));
+    }
+
+    #[test]
+    fn set_tid_address_returns_tid() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        set64(&mut env, Gpr(0), abi::SET_TID_ADDRESS);
+        set64(&mut env, Gpr(7), 0x100);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 1);
+    }
+
+    #[test]
+    fn gettid_returns_tid() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        set64(&mut env, Gpr(0), abi::GETTID);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 1);
+    }
+
+    #[test]
+    fn getdents64_lists_dir() {
+        use crate::x86_64 as abi;
+        // 一時ディレクトリを作り、openat 経由で開いて列挙する。
+        let dir = std::env::temp_dir().join(format!("polyisa-getdents-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), b"hi").unwrap();
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        let path = dir.to_str().unwrap().to_string() + "\0";
+        env.backend
+            .mem
+            .write(VirtAddr(0x100), path.as_bytes())
+            .unwrap();
+        // openat(AT_FDCWD, dir, O_RDONLY) -> fd 3。
+        set64(&mut env, Gpr(0), abi::OPENAT);
+        set64(&mut env, Gpr(7), 0xffff_ffff_ffff_ff9c);
+        set64(&mut env, Gpr(6), 0x100);
+        set64(&mut env, Gpr(2), 0);
+        set64(&mut env, Gpr(10), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 3);
+        // 1 件も入らない count は EINVAL。読み位置は進めない。
+        set64(&mut env, Gpr(0), abi::GETDENTS64);
+        set64(&mut env, Gpr(7), 3);
+        set64(&mut env, Gpr(6), 0x400);
+        set64(&mut env, Gpr(2), 8);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EINVAL));
+        // "." 1 件だけ入る。残りは次の呼び出しに残る。
+        set64(&mut env, Gpr(0), abi::GETDENTS64);
+        set64(&mut env, Gpr(7), 3);
+        set64(&mut env, Gpr(6), 0x400);
+        set64(&mut env, Gpr(2), 24);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 24);
+        // getdents64(3, 0x400, 0x500) は残りの件数を返す。
+        set64(&mut env, Gpr(0), abi::GETDENTS64);
+        set64(&mut env, Gpr(7), 3);
+        set64(&mut env, Gpr(6), 0x400);
+        set64(&mut env, Gpr(2), 0x500);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let n = get64(&mut env, Gpr(0));
+        assert!(n > 0 && n < 0x1_0000, "getdents64 returned {n:#x}");
+        let mut back = vec![0u8; n as usize];
+        env.backend
+            .mem
+            .read(VirtAddr(0x400), &mut back, data_access())
+            .unwrap();
+        // "a.txt" が含まれること。
+        assert!(back.windows(5).any(|w| w == b"a.txt"));
+        // 2回目は 0 (EOF)。
+        set64(&mut env, Gpr(0), abi::GETDENTS64);
+        set64(&mut env, Gpr(7), 3);
+        set64(&mut env, Gpr(6), 0x400);
+        set64(&mut env, Gpr(2), 0x500);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn getpid_returns_pid() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        set64(&mut env, Gpr(0), abi::GETPID);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 1);
+    }
+
+    #[test]
+    fn getppid_returns_zero_for_root() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        set64(&mut env, Gpr(0), abi::GETPPID);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+    }
+
+    #[test]
+    fn sysinfo_writes_fixed_layout() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        set64(&mut env, Gpr(0), abi::SYSINFO);
+        set64(&mut env, Gpr(7), 0x200);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        let mut buf = [0u8; 112];
+        env.backend
+            .mem
+            .read(
+                VirtAddr(0x200),
+                &mut buf,
+                polyisa_mem::Access {
+                    endian: polyisa_mem::Endian::Le,
+                    align: polyisa_mem::Align::Unaligned,
+                    kind: polyisa_mem::AccessKind::DataRead,
+                },
+            )
+            .unwrap();
+        assert_eq!(i64::from_le_bytes(buf[0..8].try_into().unwrap()), 3600);
+        assert_eq!(
+            u64::from_le_bytes(buf[32..40].try_into().unwrap()),
+            1024 * 1024 * 1024
+        );
+        assert_eq!(
+            u64::from_le_bytes(buf[40..48].try_into().unwrap()),
+            512 * 1024 * 1024
+        );
+        assert_eq!(u16::from_le_bytes(buf[80..82].try_into().unwrap()), 1);
+        assert_eq!(u32::from_le_bytes(buf[104..108].try_into().unwrap()), 1);
+    }
+
+    #[test]
+    fn clone_pid_matches_getpid() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_x86::CpuState>());
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.set(polyisa_guest_x86::sem::eip_ref(), 0x1000);
+        // 子は未実装命令で止まり、wait4 は子を戻す。
+        env.backend.mem.write(VirtAddr(0x1002), &[0x06]).unwrap();
+        set64(&mut env, Gpr(0), abi::CLONE);
+        set64(&mut env, Gpr(7), 17);
+        set64(&mut env, Gpr(6), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let child = get64(&mut env, Gpr(0));
+        assert!(child > 1, "child pid {child}");
+        set64(&mut env, Gpr(0), abi::GETPID);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), sys.pid);
+        assert_ne!(sys.pid, u64::from(std::process::id()));
+        set64(&mut env, Gpr(0), abi::GETTID);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), sys.pid);
+        // 子は終了しない。wait4 は子を残して待つ。
+        set64(&mut env, Gpr(0), abi::WAIT4);
+        set64(&mut env, Gpr(7), child);
+        set64(&mut env, Gpr(6), 0);
+        set64(&mut env, Gpr(2), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Blocked));
+        assert!(sys.task_pids().contains(&child));
+    }
+
+    #[test]
+    fn fork_returns_child_pid() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_x86::CpuState>());
+        let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+        env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+        env.backend.set(polyisa_guest_x86::sem::eip_ref(), 0x1000);
+        env.backend.mem.write(VirtAddr(0x1002), &[0x06]).unwrap();
+        set64(&mut env, Gpr(0), abi::FORK);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let child = get64(&mut env, Gpr(0));
+        assert!(child > 1, "child pid {child}");
+        assert!(sys.task_pids().contains(&child));
+    }
+
+    #[test]
+    fn uname_writes_utsname() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        set64(&mut env, Gpr(0), abi::UNAME);
+        set64(&mut env, Gpr(7), 0x100);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        let mut back = [0u8; 65 * 6];
+        env.backend
+            .mem
+            .read(VirtAddr(0x100), &mut back, data_access())
+            .unwrap();
+        assert_eq!(&back[..6], b"Linux\0");
+        assert_eq!(&back[65..75], b"localhost\0");
+        assert_eq!(&back[65 * 5..65 * 5 + 12], b"localdomain\0");
+    }
+
+    #[test]
+    fn getuid_gid_return_zero() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        for nr in [abi::GETUID, abi::GETGID, abi::GETEUID, abi::GETEGID] {
+            set64(&mut env, Gpr(0), nr);
+            assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+            assert_eq!(get64(&mut env, Gpr(0)), 0);
+        }
+    }
+
+    #[test]
+    fn getcwd_returns_host_cwd() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        set64(&mut env, Gpr(0), abi::GETCWD);
+        set64(&mut env, Gpr(7), 0x100);
+        set64(&mut env, Gpr(6), 0x100);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let n = get64(&mut env, Gpr(0)) as usize;
+        assert!(n > 1);
+        let mut back = vec![0u8; n];
+        env.backend
+            .mem
+            .read(
+                VirtAddr(0x100),
+                &mut back,
+                polyisa_mem::Access {
+                    endian: polyisa_mem::Endian::Le,
+                    align: polyisa_mem::Align::Unaligned,
+                    kind: polyisa_mem::AccessKind::DataRead,
+                },
+            )
+            .unwrap();
+        assert_eq!(back[n - 1], 0);
+        // ERANGE: サイズ不足.
+        set64(&mut env, Gpr(0), abi::GETCWD);
+        set64(&mut env, Gpr(7), 0x100);
+        set64(&mut env, Gpr(6), 1);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(ERANGE));
+    }
+
+    #[test]
+    fn chdir_updates_getcwd_and_relative_openat() {
+        use crate::x86_64 as abi;
+        let dir = std::env::temp_dir().join(format!("polyisa-chdir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("note"), b"Q").unwrap();
+        let path = dir.to_str().unwrap();
+
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        set64(&mut env, Gpr(0), abi::GETCWD);
+        set64(&mut env, Gpr(7), 0x100);
+        set64(&mut env, Gpr(6), 0x100);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let n = get64(&mut env, Gpr(0)) as usize;
+        let mut back = vec![0u8; n];
+        env.backend
+            .mem
+            .read(VirtAddr(0x100), &mut back, data_access())
+            .unwrap();
+        let host = std::env::current_dir().unwrap();
+        assert_eq!(&back[..n - 1], host.to_str().unwrap().as_bytes());
+
+        env.backend
+            .mem
+            .write(VirtAddr(0x300), path.as_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x300 + path.len() as u64), &[0])
+            .unwrap();
+        set64(&mut env, Gpr(0), abi::CHDIR);
+        set64(&mut env, Gpr(7), 0x300);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+
+        set64(&mut env, Gpr(0), abi::GETCWD);
+        set64(&mut env, Gpr(7), 0x100);
+        set64(&mut env, Gpr(6), 0x100);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let n = get64(&mut env, Gpr(0)) as usize;
+        let mut back = vec![0u8; n];
+        env.backend
+            .mem
+            .read(VirtAddr(0x100), &mut back, data_access())
+            .unwrap();
+        assert_eq!(&back[..n - 1], path.as_bytes());
+
+        env.backend.mem.write(VirtAddr(0x400), b"note\0").unwrap();
+        set64(&mut env, Gpr(0), abi::OPENAT);
+        set64(&mut env, Gpr(7), u64::from(AT_FDCWD_U32));
+        set64(&mut env, Gpr(6), 0x400);
+        set64(&mut env, Gpr(2), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let fd = get64(&mut env, Gpr(0));
+        set64(&mut env, Gpr(0), abi::READ);
+        set64(&mut env, Gpr(7), fd);
+        set64(&mut env, Gpr(6), 0x500);
+        set64(&mut env, Gpr(2), 1);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 1);
+        let mut byte = [0u8; 1];
+        env.backend
+            .mem
+            .read(VirtAddr(0x500), &mut byte, data_access())
+            .unwrap();
+        assert_eq!(byte, *b"Q");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_guest_path_matches_join_without_root() {
+        // root 空は従来の join と同じ結果。振る舞い不変の担保.
+        for (cwd, path) in [
+            ("", "/etc/passwd"),
+            ("", "rel"),
+            ("/", "/etc/passwd"),
+            ("/", "rel"),
+            ("/a/b", "c"),
+            ("/a/b", "/etc/passwd"),
+            ("/a/b/", "c"),
+        ] {
+            assert_eq!(
+                resolve_guest_path("", cwd, path),
+                Some(join_guest_path(cwd, path)),
+                "cwd={cwd:?} path={path:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn guest_root_confines_openat_and_chdir() {
+        use crate::x86_64 as abi;
+        let root = std::env::temp_dir().join(format!("polyisa-jail-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let jail = root.join("jail");
+        std::fs::create_dir_all(jail.join("sub")).unwrap();
+        std::fs::write(jail.join("f"), b"Q").unwrap();
+        std::fs::write(root.join("evil"), b"X").unwrap();
+
+        let mut sys = Linux::x86_64();
+        sys.guest_root = jail.to_str().unwrap().to_string();
+        sys.cwd = "/".to_string();
+        let mut env = bare();
+        // openat("f") は jail/f を開く。
+        env.backend.mem.write(VirtAddr(0x300), b"f\0").unwrap();
+        set64(&mut env, Gpr(0), abi::OPENAT);
+        set64(&mut env, Gpr(7), u64::from(AT_FDCWD_U32));
+        set64(&mut env, Gpr(6), 0x300);
+        set64(&mut env, Gpr(2), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let fd = get64(&mut env, Gpr(0));
+        assert!(fd < 0x1000, "openat jail/f: {fd:#x}");
+        set64(&mut env, Gpr(0), abi::READ);
+        set64(&mut env, Gpr(7), fd);
+        set64(&mut env, Gpr(6), 0x500);
+        set64(&mut env, Gpr(2), 1);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 1);
+        let mut byte = [0u8; 1];
+        env.backend
+            .mem
+            .read(VirtAddr(0x500), &mut byte, data_access())
+            .unwrap();
+        assert_eq!(byte, *b"Q");
+        // jail 外への脱出は EPERM。兄弟の evil は開かない。
+        env.backend
+            .mem
+            .write(VirtAddr(0x300), b"../evil\0")
+            .unwrap();
+        set64(&mut env, Gpr(0), abi::OPENAT);
+        set64(&mut env, Gpr(7), u64::from(AT_FDCWD_U32));
+        set64(&mut env, Gpr(6), 0x300);
+        set64(&mut env, Gpr(2), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EPERM));
+        // chdir("sub") は成功、"/" からの ".." は EPERM。
+        env.backend.mem.write(VirtAddr(0x300), b"sub\0").unwrap();
+        set64(&mut env, Gpr(0), abi::CHDIR);
+        set64(&mut env, Gpr(7), 0x300);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        sys.cwd = "/".to_string();
+        env.backend.mem.write(VirtAddr(0x300), b"..\0").unwrap();
+        set64(&mut env, Gpr(0), abi::CHDIR);
+        set64(&mut env, Gpr(7), 0x300);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EPERM));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn resolve_guest_path_confines_under_root() {
+        assert_eq!(
+            resolve_guest_path("/jail", "/", "/etc/passwd"),
+            Some("/jail/etc/passwd".to_string())
+        );
+        assert_eq!(
+            resolve_guest_path("/jail/", "/a", "b/../c"),
+            Some("/jail/a/c".to_string())
+        );
+        assert_eq!(resolve_guest_path("/jail", "/", ".."), None,);
+        assert_eq!(resolve_guest_path("/jail", "/", "/../x"), None,);
+        assert_eq!(resolve_guest_path("/jail", "/a", "../../x"), None,);
+        assert_eq!(
+            resolve_guest_path("/jail", "/", "."),
+            Some("/jail".to_string()),
+        );
+    }
+
+    #[test]
+    fn utimensat_resolves_relative_to_cwd() {
+        use crate::x86_64 as abi;
+        let dir = std::env::temp_dir().join(format!("polyisa-utime-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut sys = Linux::x86_64();
+        sys.cwd = dir.to_str().unwrap().to_string();
+        let mut env = bare();
+        // times==NULL、存在しない相対パスは cwd 配下に空作成する。カレントには作らない。
+        env.backend
+            .mem
+            .write(VirtAddr(0x300), b"newfile\0")
+            .unwrap();
+        set64(&mut env, Gpr(0), abi::UTIMENSAT);
+        set64(&mut env, Gpr(7), u64::from(AT_FDCWD_U32));
+        set64(&mut env, Gpr(6), 0x300);
+        set64(&mut env, Gpr(2), 0);
+        set64(&mut env, Gpr(1), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        assert!(dir.join("newfile").is_file());
+        // guest_root 配下からの脱出は EPERM。
+        sys.guest_root = dir.to_str().unwrap().to_string();
+        sys.cwd = "/".to_string();
+        env.backend
+            .mem
+            .write(VirtAddr(0x300), b"../evil\0")
+            .unwrap();
+        set64(&mut env, Gpr(0), abi::UTIMENSAT);
+        set64(&mut env, Gpr(7), u64::from(AT_FDCWD_U32));
+        set64(&mut env, Gpr(6), 0x300);
+        set64(&mut env, Gpr(2), 0);
+        set64(&mut env, Gpr(1), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EPERM));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn relative_fs_ops_resolve_under_cwd_and_jail() {
+        use crate::x86_64 as abi;
+        let root = std::env::temp_dir().join(format!("polyisa-relfs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let jail = root.join("jail");
+        std::fs::create_dir_all(&jail).unwrap();
+        std::fs::write(jail.join("f"), b"ab\n").unwrap();
+
+        let mut sys = Linux::x86_64();
+        sys.guest_root = jail.to_str().unwrap().to_string();
+        sys.cwd = "/".to_string();
+        let mut env = bare();
+        let cstr = |env: &mut BareEnv, addr: u64, s: &[u8]| {
+            env.backend.mem.write(VirtAddr(addr), s).unwrap();
+            env.backend
+                .mem
+                .write(VirtAddr(addr + s.len() as u64), &[0])
+                .unwrap();
+        };
+        // access("f") は jail/f を見る。
+        cstr(&mut env, 0x300, b"f");
+        set64(&mut env, Gpr(0), abi::ACCESS);
+        set64(&mut env, Gpr(7), 0x300);
+        set64(&mut env, Gpr(6), 4);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        // link("f", "hard") は jail 内で成功する。
+        cstr(&mut env, 0x300, b"f");
+        cstr(&mut env, 0x310, b"hard");
+        set64(&mut env, Gpr(0), abi::LINK);
+        set64(&mut env, Gpr(7), 0x300);
+        set64(&mut env, Gpr(6), 0x310);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        assert_eq!(std::fs::read(jail.join("hard")).unwrap(), b"ab\n");
+        // rename("hard", "g") は jail 内で成功する。
+        cstr(&mut env, 0x300, b"hard");
+        cstr(&mut env, 0x310, b"g");
+        set64(&mut env, Gpr(0), abi::RENAME);
+        set64(&mut env, Gpr(7), 0x300);
+        set64(&mut env, Gpr(6), 0x310);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        assert!(jail.join("g").is_file());
+        // symlink は作成先だけ解決し、指し先は verbatim。
+        cstr(&mut env, 0x300, b"g");
+        cstr(&mut env, 0x310, b"ln");
+        set64(&mut env, Gpr(0), abi::SYMLINK);
+        set64(&mut env, Gpr(7), 0x300);
+        set64(&mut env, Gpr(6), 0x310);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        assert_eq!(
+            std::fs::read_link(jail.join("ln")).unwrap(),
+            std::path::PathBuf::from("g")
+        );
+        // rmdir("..") の脱出は EPERM。
+        cstr(&mut env, 0x300, b"..");
+        set64(&mut env, Gpr(0), abi::RMDIR);
+        set64(&mut env, Gpr(7), 0x300);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EPERM));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn fchdir_sets_cwd_from_dir_fd() {
+        use crate::x86_64 as abi;
+        let dir = std::env::temp_dir().join(format!("polyisa-fchdir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.to_str().unwrap();
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        let mut cpath = path.as_bytes().to_vec();
+        cpath.push(0);
+        env.backend.mem.write(VirtAddr(0x200), &cpath).unwrap();
+        set64(&mut env, Gpr(0), abi::OPENAT);
+        set64(&mut env, Gpr(7), u64::from(AT_FDCWD_U32));
+        set64(&mut env, Gpr(6), 0x200);
+        set64(&mut env, Gpr(2), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let fd = get64(&mut env, Gpr(0));
+        assert!(fd >= 3);
+        set64(&mut env, Gpr(0), abi::FCHDIR);
+        set64(&mut env, Gpr(7), fd);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        assert_eq!(sys.cwd, path);
+        set64(&mut env, Gpr(0), abi::FCHDIR);
+        set64(&mut env, Gpr(7), 99);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EBADF));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fstat_stdout_writes_stat() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        // fstat(1, 0x100) は 0 を返し、struct stat (144B) を書く。
+        set64(&mut env, Gpr(0), abi::FSTAT);
+        set64(&mut env, Gpr(7), 1);
+        set64(&mut env, Gpr(6), 0x100);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        let mut back = [0u8; 144];
+        env.backend
+            .mem
+            .read(VirtAddr(0x100), &mut back, data_access())
+            .unwrap();
+        // st_mode (オフセット 24) は何かしら非0のはず。
+        assert_ne!(u32::from_le_bytes(back[24..28].try_into().unwrap()), 0);
+        // 不正 fd は EBADF。
+        set64(&mut env, Gpr(0), abi::FSTAT);
+        set64(&mut env, Gpr(7), 99);
+        set64(&mut env, Gpr(6), 0x100);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EBADF));
+    }
+
+    #[test]
+    fn sendfile_file_to_stdout() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        // /proc/self/exe を入力に積む（必ず存在する実行ファイル）。
+        let f = std::fs::File::open("/proc/self/exe").unwrap();
+        assert_eq!(sys.fds.alloc(Some(f)), 3);
+        let mut env = bare();
+        // sendfile(1, 3, NULL, 16) は 16 を返して stdout に書く。
+        set64(&mut env, Gpr(0), abi::SENDFILE);
+        set64(&mut env, Gpr(7), 1);
+        set64(&mut env, Gpr(6), 3);
+        set64(&mut env, Gpr(2), 0);
+        set64(&mut env, Gpr(10), 16);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 16);
+        // offset 非NULL は EINVAL。
+        set64(&mut env, Gpr(0), abi::SENDFILE);
+        set64(&mut env, Gpr(7), 1);
+        set64(&mut env, Gpr(6), 3);
+        set64(&mut env, Gpr(2), 0x100);
+        set64(&mut env, Gpr(10), 16);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EINVAL));
+        // 不正な入力 fd は EBADF。
+        set64(&mut env, Gpr(0), abi::SENDFILE);
+        set64(&mut env, Gpr(7), 1);
+        set64(&mut env, Gpr(6), 99);
+        set64(&mut env, Gpr(2), 0);
+        set64(&mut env, Gpr(10), 16);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EBADF));
+        // stdin (0) は空読みとして 0 を返す。
+        set64(&mut env, Gpr(0), abi::SENDFILE);
+        set64(&mut env, Gpr(7), 1);
+        set64(&mut env, Gpr(6), 0);
+        set64(&mut env, Gpr(2), 0);
+        set64(&mut env, Gpr(10), 16);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+    }
+
+    #[test]
+    fn lseek_moves_position() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let f = std::fs::File::open("/proc/self/exe").unwrap();
+        assert_eq!(sys.fds.alloc(Some(f)), 3);
+        let mut env = bare();
+        // lseek(3, 16, SEEK_SET) は 16 を返す。
+        set64(&mut env, Gpr(0), abi::LSEEK);
+        set64(&mut env, Gpr(7), 3);
+        set64(&mut env, Gpr(6), 16);
+        set64(&mut env, Gpr(2), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 16);
+        // 不正な whence は EINVAL、不正 fd は EBADF。
+        set64(&mut env, Gpr(0), abi::LSEEK);
+        set64(&mut env, Gpr(7), 3);
+        set64(&mut env, Gpr(6), 0);
+        set64(&mut env, Gpr(2), 99);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EINVAL));
+        set64(&mut env, Gpr(0), abi::LSEEK);
+        set64(&mut env, Gpr(7), 99);
+        set64(&mut env, Gpr(6), 0);
+        set64(&mut env, Gpr(2), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EBADF));
+    }
+
+    #[test]
+    fn time_returns_host_secs() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        // time(NULL) は 0 より大きい秒を返す。
+        set64(&mut env, Gpr(0), abi::TIME);
+        set64(&mut env, Gpr(7), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let secs = get64(&mut env, Gpr(0));
+        assert!(secs > 0);
+        // time(0x100) は同じ秒を [0x100] に書く。
+        set64(&mut env, Gpr(0), abi::TIME);
+        set64(&mut env, Gpr(7), 0x100);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), secs);
+        let mut back = [0u8; 8];
+        env.backend
+            .mem
+            .read(VirtAddr(0x100), &mut back, data_access())
+            .unwrap();
+        assert_eq!(i64::from_le_bytes(back) as u64, secs);
+    }
+
+    #[test]
+    fn getgroups_returns_root() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        // getgroups(0, NULL) は必要数 1 を返す。
+        set64(&mut env, Gpr(0), abi::GETGROUPS);
+        set64(&mut env, Gpr(7), 0);
+        set64(&mut env, Gpr(6), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 1);
+        // getgroups(1, 0x100) は 1 を返し、GID 0 を書く。
+        set64(&mut env, Gpr(0), abi::GETGROUPS);
+        set64(&mut env, Gpr(7), 1);
+        set64(&mut env, Gpr(6), 0x100);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 1);
+        let mut back = [0u8; 4];
+        env.backend
+            .mem
+            .read(VirtAddr(0x100), &mut back, data_access())
+            .unwrap();
+        assert_eq!(u32::from_le_bytes(back), 0);
+    }
+
+    #[test]
+    fn setsid_returns_pid() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        set64(&mut env, Gpr(0), abi::SETSID);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 1);
+    }
+
+    #[test]
+    fn getpriority_returns_niceness_plus_twenty() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        set64(&mut env, Gpr(0), abi::GETPRIORITY);
+        set64(&mut env, Gpr(7), 0);
+        set64(&mut env, Gpr(6), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 20);
+        set64(&mut env, Gpr(0), abi::SETPRIORITY);
+        set64(&mut env, Gpr(7), 0);
+        set64(&mut env, Gpr(6), 0);
+        set64(&mut env, Gpr(2), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        set64(&mut env, Gpr(0), abi::SETPRIORITY);
+        set64(&mut env, Gpr(7), 0);
+        set64(&mut env, Gpr(6), 1);
+        set64(&mut env, Gpr(2), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EPERM));
+        set64(&mut env, Gpr(0), abi::GETPRIORITY);
+        set64(&mut env, Gpr(7), 3);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EINVAL));
+    }
+
+    #[test]
+    fn sched_priority_bounds_for_other_and_fifo() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        set64(&mut env, Gpr(0), abi::SCHED_GET_PRIORITY_MAX);
+        set64(&mut env, Gpr(7), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        set64(&mut env, Gpr(0), abi::SCHED_GET_PRIORITY_MAX);
+        set64(&mut env, Gpr(7), 1);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 99);
+        set64(&mut env, Gpr(0), abi::SCHED_GET_PRIORITY_MIN);
+        set64(&mut env, Gpr(7), 1);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 1);
+        set64(&mut env, Gpr(0), abi::SCHED_GET_PRIORITY_MAX);
+        set64(&mut env, Gpr(7), 9);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EINVAL));
+        env.backend
+            .mem
+            .write(VirtAddr(0x200), &0i32.to_le_bytes())
+            .unwrap();
+        set64(&mut env, Gpr(0), abi::SCHED_SETSCHEDULER);
+        set64(&mut env, Gpr(7), 0);
+        set64(&mut env, Gpr(6), 0);
+        set64(&mut env, Gpr(2), 0x200);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+    }
+
+    #[test]
+    fn personality_returns_previous() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        set64(&mut env, Gpr(0), abi::PERSONALITY);
+        set64(&mut env, Gpr(7), 8);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        set64(&mut env, Gpr(0), abi::PERSONALITY);
+        set64(&mut env, Gpr(7), 0xffff_ffff);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 8);
+    }
+
+    #[test]
+    fn sched_setaffinity_accepts_cpu0() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        env.backend
+            .mem
+            .write(VirtAddr(0x200), &1u64.to_le_bytes())
+            .unwrap();
+        set64(&mut env, Gpr(0), abi::SCHED_SETAFFINITY);
+        set64(&mut env, Gpr(7), 0);
+        set64(&mut env, Gpr(6), 8);
+        set64(&mut env, Gpr(2), 0x200);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        env.backend
+            .mem
+            .write(VirtAddr(0x200), &0u64.to_le_bytes())
+            .unwrap();
+        set64(&mut env, Gpr(0), abi::SCHED_SETAFFINITY);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EINVAL));
+    }
+
+    #[test]
+    fn ioprio_set_and_get_roundtrip() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        // 未設定なら best-effort の 4。
+        set64(&mut env, Gpr(0), abi::IOPRIO_GET);
+        set64(&mut env, Gpr(7), 1);
+        set64(&mut env, Gpr(6), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), (2 << 13) | 4);
+        // IDLE class 3。
+        set64(&mut env, Gpr(0), abi::IOPRIO_SET);
+        set64(&mut env, Gpr(7), 1);
+        set64(&mut env, Gpr(6), 0);
+        set64(&mut env, Gpr(2), 3 << 13);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        set64(&mut env, Gpr(0), abi::IOPRIO_GET);
+        set64(&mut env, Gpr(7), 1);
+        set64(&mut env, Gpr(6), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 3 << 13);
+        // 未知のクラスは EINVAL。
+        set64(&mut env, Gpr(0), abi::IOPRIO_SET);
+        set64(&mut env, Gpr(2), 7 << 13);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EINVAL));
+    }
+
+    #[test]
+    fn fsync_and_fdatasync_accept_open_fd() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        // 標準出力は開いている。
+        set64(&mut env, Gpr(0), abi::FSYNC);
+        set64(&mut env, Gpr(7), 1);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        set64(&mut env, Gpr(0), abi::FDATASYNC);
+        set64(&mut env, Gpr(7), 1);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        set64(&mut env, Gpr(0), abi::FSYNC);
+        set64(&mut env, Gpr(7), 99);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EBADF));
+    }
+
+    #[test]
+    fn unshare_accepts_zero_flags() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        set64(&mut env, Gpr(0), abi::UNSHARE);
+        set64(&mut env, Gpr(7), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        set64(&mut env, Gpr(0), abi::UNSHARE);
+        set64(&mut env, Gpr(7), 0x20000);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EPERM));
+    }
+
+    #[test]
+    fn setgroups_and_chroot_return_eperm() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        set64(&mut env, Gpr(0), abi::SETGROUPS);
+        set64(&mut env, Gpr(7), 0);
+        set64(&mut env, Gpr(6), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EPERM));
+        set64(&mut env, Gpr(0), abi::CHROOT);
+        set64(&mut env, Gpr(7), 0x100);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EPERM));
+    }
+
+    #[test]
+    fn chown_returns_zero() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        set64(&mut env, Gpr(0), abi::CHOWN);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        set64(&mut env, Gpr(0), abi::LCHOWN);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+    }
+
+    #[test]
+    fn sync_returns_zero() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        set64(&mut env, Gpr(0), abi::SYNC);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+    }
+
+    #[test]
+    fn nanosleep_zero_returns_zero() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        // nanosleep({0, 0}, NULL) は待たずに 0 を返す。sleep 0 が使う。
+        env.backend.mem.write(VirtAddr(0x100), &[0u8; 16]).unwrap();
+        set64(&mut env, Gpr(0), abi::NANOSLEEP);
+        set64(&mut env, Gpr(7), 0x100);
+        set64(&mut env, Gpr(6), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        // tv_nsec が範囲外なら EINVAL。
+        let bad = 1_000_000_000i64.to_le_bytes();
+        env.backend.mem.write(VirtAddr(0x108), &bad).unwrap();
+        set64(&mut env, Gpr(0), abi::NANOSLEEP);
+        set64(&mut env, Gpr(7), 0x100);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EINVAL));
+        // req が NULL なら EFAULT。
+        set64(&mut env, Gpr(0), abi::NANOSLEEP);
+        set64(&mut env, Gpr(7), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EFAULT));
+    }
+
+    #[test]
+    fn sched_getaffinity_copies_host_mask() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        let want = crate::x86::host_affinity_mask();
+        // sched_getaffinity(0, 128, 0x200) はホストのマスクを書き、バイト数を返す。
+        set64(&mut env, Gpr(0), abi::SCHED_GETAFFINITY);
+        set64(&mut env, Gpr(7), 0);
+        set64(&mut env, Gpr(6), 128);
+        set64(&mut env, Gpr(2), 0x200);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), want.len() as u64);
+        let mut back = vec![0u8; want.len()];
+        env.backend
+            .mem
+            .read(VirtAddr(0x200), &mut back, data_access())
+            .unwrap();
+        assert_eq!(back, want);
+        // 長さ 0 は EINVAL。知らない pid は ESRCH。
+        set64(&mut env, Gpr(0), abi::SCHED_GETAFFINITY);
+        set64(&mut env, Gpr(6), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EINVAL));
+        set64(&mut env, Gpr(0), abi::SCHED_GETAFFINITY);
+        set64(&mut env, Gpr(7), 0x1000);
+        set64(&mut env, Gpr(6), 128);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(ESRCH));
+    }
+
+    #[test]
+    fn clock_nanosleep_returns_zero() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        // clock_nanosleep(0, 0, req, rem) は待たずに 0 を返す。
+        set64(&mut env, Gpr(0), abi::CLOCK_NANOSLEEP);
+        set64(&mut env, Gpr(7), 0);
+        set64(&mut env, Gpr(6), 0);
+        set64(&mut env, Gpr(2), 0x100);
+        set64(&mut env, Gpr(10), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        // 不正な clock_id は EINVAL。
+        set64(&mut env, Gpr(0), abi::CLOCK_NANOSLEEP);
+        set64(&mut env, Gpr(7), 99);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EINVAL));
+    }
+
+    #[test]
+    fn ioctl_returns_enotty() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        // ioctl(1, TIOCGWINSZ, ...) は端末なしとして ENOTTY を返す。
+        set64(&mut env, Gpr(0), abi::IOCTL);
+        set64(&mut env, Gpr(7), 1);
+        set64(&mut env, Gpr(6), 0x5413);
+        set64(&mut env, Gpr(2), 0x100);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(ENOTTY));
+        // FS_IOC_GETFLAGS は 8 バイトの 0 を書いて成功する。
+        env.backend.mem.write(VirtAddr(0x100), &[0xff; 8]).unwrap();
+        set64(&mut env, Gpr(0), abi::IOCTL);
+        set64(&mut env, Gpr(7), 1);
+        set64(&mut env, Gpr(6), 0xffff_ffff_8008_6601);
+        set64(&mut env, Gpr(2), 0x100);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        let mut flags = [0xffu8; 8];
+        env.backend
+            .mem
+            .read(VirtAddr(0x100), &mut flags, data_access())
+            .unwrap();
+        assert_eq!(flags, [0; 8]);
+    }
+
+    #[test]
+    fn fcntl_stdout_returns_zero() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        // fcntl(1, F_GETFL) は 0 を返して継続する。printf の stdout 設定で使う.
+        set64(&mut env, Gpr(0), abi::FCNTL);
+        set64(&mut env, Gpr(7), 1);
+        set64(&mut env, Gpr(6), 3);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        // 不正 fd は EBADF。
+        set64(&mut env, Gpr(0), abi::FCNTL);
+        set64(&mut env, Gpr(7), 99);
+        set64(&mut env, Gpr(6), 3);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EBADF));
+    }
+
+    #[test]
+    fn stat_root_is_dir() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        env.backend.mem.write(VirtAddr(0x100), b"/\0").unwrap();
+        // stat("/", 0x200) は 0 を返し、st_mode に S_IFDIR を書く。
+        set64(&mut env, Gpr(0), abi::STAT);
+        set64(&mut env, Gpr(7), 0x100);
+        set64(&mut env, Gpr(6), 0x200);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        let mut back = [0u8; 4];
+        env.backend
+            .mem
+            .read(VirtAddr(0x218), &mut back, data_access())
+            .unwrap();
+        assert_eq!(u32::from_le_bytes(back) & 0o170000, 0o040000);
+        let mut ino = [0u8; 8];
+        env.backend
+            .mem
+            .read(VirtAddr(0x208), &mut ino, data_access())
+            .unwrap();
+        let root_ino = u64::from_le_bytes(ino);
+        assert_ne!(root_ino, 0);
+        set64(&mut env, Gpr(0), abi::STAT);
+        set64(&mut env, Gpr(7), 0x100);
+        set64(&mut env, Gpr(6), 0x300);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        env.backend
+            .mem
+            .read(VirtAddr(0x308), &mut ino, data_access())
+            .unwrap();
+        assert_eq!(u64::from_le_bytes(ino), root_ino);
+        env.backend.mem.write(VirtAddr(0x100), b"/..\0").unwrap();
+        set64(&mut env, Gpr(0), abi::STAT);
+        set64(&mut env, Gpr(7), 0x100);
+        set64(&mut env, Gpr(6), 0x300);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        env.backend
+            .mem
+            .read(VirtAddr(0x308), &mut ino, data_access())
+            .unwrap();
+        assert_eq!(u64::from_le_bytes(ino), root_ino);
+        // 存在しないパスは ENOENT。
+        env.backend
+            .mem
+            .write(VirtAddr(0x100), b"/no/such/file\0")
+            .unwrap();
+        set64(&mut env, Gpr(0), abi::STAT);
+        set64(&mut env, Gpr(7), 0x100);
+        set64(&mut env, Gpr(6), 0x200);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(ENOENT));
+    }
+
+    #[test]
+    fn lstat_sees_the_link() {
+        use crate::x86_64 as abi;
+        let dir = std::env::temp_dir().join(format!("polyisa-lstat-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir).unwrap();
+        let target = dir.join("file");
+        let link = dir.join("link");
+        std::fs::write(&target, b"ab").unwrap();
+        polyisa_host::symlink(
+            target.to_str().expect("utf-8"),
+            link.to_str().expect("utf-8"),
+        )
+        .unwrap();
+        let mut path = link.into_os_string().into_encoded_bytes();
+        path.push(0);
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        env.backend.mem.write(VirtAddr(0x100), &path).unwrap();
+        set64(&mut env, Gpr(0), abi::LSTAT);
+        set64(&mut env, Gpr(7), 0x100);
+        set64(&mut env, Gpr(6), 0x200);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        let mut back = [0u8; 4];
+        env.backend
+            .mem
+            .read(VirtAddr(0x218), &mut back, data_access())
+            .unwrap();
+        assert_eq!(u32::from_le_bytes(back) & 0o170000, 0o120000);
+        set64(&mut env, Gpr(0), abi::STAT);
+        set64(&mut env, Gpr(7), 0x100);
+        set64(&mut env, Gpr(6), 0x200);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        env.backend
+            .mem
+            .read(VirtAddr(0x218), &mut back, data_access())
+            .unwrap();
+        assert_eq!(u32::from_le_bytes(back) & 0o170000, 0o100000);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn newfstatat_root_is_dir() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        env.backend.mem.write(VirtAddr(0x100), b"/\0").unwrap();
+        // newfstatat(AT_FDCWD, "/", 0x200, 0) は 0 を返し、st_mode に S_IFDIR を書く。
+        set64(&mut env, Gpr(0), abi::NEWFSTATAT);
+        set64(&mut env, Gpr(7), 0xffff_ffff_ffff_ff9c);
+        set64(&mut env, Gpr(6), 0x100);
+        set64(&mut env, Gpr(2), 0x200);
+        set64(&mut env, Gpr(10), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        let mut back = [0u8; 4];
+        env.backend
+            .mem
+            .read(VirtAddr(0x218), &mut back, data_access())
+            .unwrap();
+        assert_eq!(u32::from_le_bytes(back) & 0o170000, 0o040000);
+        // 存在しないパスは ENOENT。
+        env.backend
+            .mem
+            .write(VirtAddr(0x100), b"/no/such/file\0")
+            .unwrap();
+        set64(&mut env, Gpr(0), abi::NEWFSTATAT);
+        set64(&mut env, Gpr(7), 0xffff_ffff_ffff_ff9c);
+        set64(&mut env, Gpr(6), 0x100);
+        set64(&mut env, Gpr(2), 0x200);
+        set64(&mut env, Gpr(10), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(ENOENT));
+    }
+
+    #[test]
+    fn mprotect_munmap_return_zero() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        set64(&mut env, Gpr(0), abi::MPROTECT);
+        set64(&mut env, Gpr(6), 0x1000);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        set64(&mut env, Gpr(0), abi::MPROTECT);
+        set64(&mut env, Gpr(6), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EINVAL));
+        set64(&mut env, Gpr(0), abi::MUNMAP);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+    }
+
+    #[test]
+    fn rt_sig_returns_zero() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        set64(&mut env, Gpr(0), abi::RT_SIGACTION);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        set64(&mut env, Gpr(0), abi::RT_SIGPROCMASK);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        set64(&mut env, Gpr(0), abi::RT_SIGTIMEDWAIT);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EAGAIN));
+        set64(&mut env, Gpr(0), abi::RT_SIGSUSPEND);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EINTR));
+    }
+
+    #[test]
+    fn tgkill_zero_returns_zero() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        set64(&mut env, Gpr(0), abi::TGKILL);
+        set64(&mut env, Gpr(7), 100);
+        set64(&mut env, Gpr(6), 100);
+        set64(&mut env, Gpr(2), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        // sig 範囲外は EINVAL。
+        set64(&mut env, Gpr(0), abi::TGKILL);
+        set64(&mut env, Gpr(2), 100);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EINVAL));
+    }
+
+    #[test]
+    fn rseq_records_addr() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        set64(&mut env, Gpr(0), abi::RSEQ);
+        set64(&mut env, Gpr(7), 0x5000);
+        set64(&mut env, Gpr(6), 32);
+        set64(&mut env, Gpr(2), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        assert_eq!(sys.rseq_addr, 0x5000);
+        // 長さが 32 でなければ EINVAL。
+        set64(&mut env, Gpr(0), abi::RSEQ);
+        set64(&mut env, Gpr(7), 0x5000);
+        set64(&mut env, Gpr(6), 16);
+        set64(&mut env, Gpr(2), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EINVAL));
+    }
+
+    #[test]
+    fn getrandom_fills_zeros() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        set64(&mut env, Gpr(0), abi::GETRANDOM);
+        set64(&mut env, Gpr(7), 0x100);
+        set64(&mut env, Gpr(6), 8);
+        set64(&mut env, Gpr(2), 1);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 8);
+        let mut back = [0xFFu8; 8];
+        env.backend
+            .mem
+            .read(VirtAddr(0x100), &mut back, data_access())
+            .unwrap();
+        assert_eq!(back, [0u8; 8]);
+        // 不明な flags は EINVAL。
+        set64(&mut env, Gpr(0), abi::GETRANDOM);
+        set64(&mut env, Gpr(7), 0x100);
+        set64(&mut env, Gpr(6), 8);
+        set64(&mut env, Gpr(2), 8);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EINVAL));
+    }
+
+    #[test]
+    fn mkdir_rmdir_roundtrip() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        let path = format!("/tmp/polyisa_mkdir_{}", std::process::id());
+        let _ = std::fs::remove_dir(&path);
+        env.backend
+            .mem
+            .write(VirtAddr(0x100), path.as_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x100 + path.len() as u64), &[0])
+            .unwrap();
+        // mkdir(path) は 0 を返す.
+        set64(&mut env, Gpr(0), abi::MKDIR);
+        set64(&mut env, Gpr(7), 0x100);
+        set64(&mut env, Gpr(6), 0o777);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        assert!(std::fs::metadata(&path).is_ok());
+        // 二重作成は EEXIST (17).
+        set64(&mut env, Gpr(0), abi::MKDIR);
+        set64(&mut env, Gpr(7), 0x100);
+        set64(&mut env, Gpr(6), 0o777);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(17));
+        // rmdir(path) は 0 を返す.
+        set64(&mut env, Gpr(0), abi::RMDIR);
+        set64(&mut env, Gpr(7), 0x100);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+    }
+
+    #[test]
+    fn mknod_fifo_and_rejects_device() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        let path = format!("/tmp/polyisa_fifo_{}", std::process::id());
+        let _ = std::fs::remove_file(&path);
+        env.backend
+            .mem
+            .write(VirtAddr(0x100), path.as_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x100 + path.len() as u64), &[0])
+            .unwrap();
+        set64(&mut env, Gpr(0), abi::MKNOD);
+        set64(&mut env, Gpr(7), 0x100);
+        set64(&mut env, Gpr(6), 0o010000 | 0o666);
+        set64(&mut env, Gpr(2), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        let kind = std::process::Command::new("stat")
+            .args(["-c", "%F", &path])
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8(kind.stdout).unwrap().trim(), "fifo");
+        set64(&mut env, Gpr(0), abi::MKNOD);
+        set64(&mut env, Gpr(7), 0x100);
+        set64(&mut env, Gpr(6), 0o020000 | 0o666);
+        set64(&mut env, Gpr(2), 0x103);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EPERM));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn umask_roundtrip() {
+        // umask(mask) は旧マスクを返して更新する。mkdir -p の保存・復元で使う.
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        sys.umask = 0o22;
+        // umask(0o77) -> 0o22。
+        set64(&mut env, Gpr(0), abi::UMASK);
+        set64(&mut env, Gpr(7), 0o77);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0o22);
+        // umask(0o22) -> 0o77。
+        set64(&mut env, Gpr(0), abi::UMASK);
+        set64(&mut env, Gpr(7), 0o22);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0o77);
+    }
+
+    #[test]
+    fn ftruncate_roundtrip() {
+        // ftruncate(fd, len) は長さを変えて 0 を返す。truncate -s で使う.
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        let path = format!("/tmp/polyisa_ftruncate_{}", std::process::id());
+        std::fs::write(&path, b"abcdef").unwrap();
+        let f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        assert_eq!(sys.fds.alloc(Some(f)), 3);
+        // ftruncate(3, 3) -> 0、大きさ 3.
+        set64(&mut env, Gpr(0), abi::FTRUNCATE);
+        set64(&mut env, Gpr(7), 3);
+        set64(&mut env, Gpr(6), 3);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 3);
+        // 不正 fd は EBADF。
+        set64(&mut env, Gpr(0), abi::FTRUNCATE);
+        set64(&mut env, Gpr(7), 99);
+        set64(&mut env, Gpr(6), 3);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EBADF));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn fallocate_extends_file() {
+        // fallocate(fd, 0, 0, 8) は長さ 8 にする。mode が 0 以外は EOPNOTSUPP。
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        let path = format!("/tmp/polyisa_fallocate_{}", std::process::id());
+        let _ = std::fs::remove_file(&path);
+        let f = std::fs::File::create(&path).unwrap();
+        assert_eq!(sys.fds.alloc(Some(f)), 3);
+        set64(&mut env, Gpr(0), abi::FALLOCATE);
+        set64(&mut env, Gpr(7), 3);
+        set64(&mut env, Gpr(6), 0);
+        set64(&mut env, Gpr(2), 0);
+        set64(&mut env, Gpr(10), 8);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 8);
+        set64(&mut env, Gpr(0), abi::FALLOCATE);
+        set64(&mut env, Gpr(7), 3);
+        set64(&mut env, Gpr(6), 1);
+        set64(&mut env, Gpr(2), 0);
+        set64(&mut env, Gpr(10), 8);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(95));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn neg_errno_sign_extends() {
+        // 負 errno は符号拡張する。x86-64 の誤り (+errno) を回帰で防ぐ.
+        assert_eq!(neg_errno(22), 0xFFFF_FFEAu32);
+        assert_eq!(neg_errno64(22), 0xFFFF_FFFF_FFFF_FFEAu64);
+        assert_eq!(neg_errno64(0), 0);
+    }
+
+    #[test]
+    fn rename_roundtrip() {
+        // rename(old, new) は移動して 0 を返す。mv で使う.
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        let old = format!("/tmp/polyisa_rename_old_{}", std::process::id());
+        let new = format!("/tmp/polyisa_rename_new_{}", std::process::id());
+        let _ = std::fs::remove_file(&new);
+        std::fs::write(&old, b"data").unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x100), old.as_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x100 + old.len() as u64), &[0])
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x200), new.as_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x200 + new.len() as u64), &[0])
+            .unwrap();
+        // rename(old, new) -> 0、old は消えて new ができる.
+        set64(&mut env, Gpr(0), abi::RENAME);
+        set64(&mut env, Gpr(7), 0x100);
+        set64(&mut env, Gpr(6), 0x200);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        assert!(std::fs::metadata(&old).is_err());
+        assert_eq!(std::fs::read(&new).unwrap(), b"data");
+        // 存在しない old は ENOENT。
+        let missing = format!("/tmp/polyisa_rename_missing_{}", std::process::id());
+        env.backend
+            .mem
+            .write(VirtAddr(0x100), missing.as_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x100 + missing.len() as u64), &[0])
+            .unwrap();
+        set64(&mut env, Gpr(0), abi::RENAME);
+        set64(&mut env, Gpr(7), 0x100);
+        set64(&mut env, Gpr(6), 0x200);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(ENOENT));
+        let _ = std::fs::remove_file(&new);
+    }
+
+    #[test]
+    fn symlink_roundtrip() {
+        // symlink(old, new) はリンクを作って 0 を返す。`ln -s` で使う.
+        // 実体は host helper のためここでは番号経路と結果の写像を確かめる.
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        let old = String::from("/tmp/symlink_target_exists");
+        let new = format!("/tmp/polyisa_symlink_{}", std::process::id());
+        let _ = std::fs::remove_file(&new);
+        env.backend
+            .mem
+            .write(VirtAddr(0x100), old.as_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x100 + old.len() as u64), &[0])
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x200), new.as_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x200 + new.len() as u64), &[0])
+            .unwrap();
+        // symlink(old, new) -> 0、new は old へのリンク.
+        set64(&mut env, Gpr(0), abi::SYMLINK);
+        set64(&mut env, Gpr(7), 0x100);
+        set64(&mut env, Gpr(6), 0x200);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        assert_eq!(
+            std::fs::read_link(&new).unwrap(),
+            std::path::PathBuf::from(old.as_str())
+        );
+        // 同じ new の再作成は EEXIST(17)。
+        set64(&mut env, Gpr(0), abi::SYMLINK);
+        set64(&mut env, Gpr(7), 0x100);
+        set64(&mut env, Gpr(6), 0x200);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(17));
+        // 存在しない親の下は ENOENT。
+        let bad = format!("/tmp/polyisa_no_dir_{}/link", std::process::id());
+        env.backend
+            .mem
+            .write(VirtAddr(0x200), bad.as_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x200 + bad.len() as u64), &[0])
+            .unwrap();
+        set64(&mut env, Gpr(0), abi::SYMLINK);
+        set64(&mut env, Gpr(7), 0x100);
+        set64(&mut env, Gpr(6), 0x200);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(ENOENT));
+        let _ = std::fs::remove_file(&new);
+    }
+
+    #[test]
+    fn link_roundtrip() {
+        // link(old, new) はハードリンクを作って 0 を返す。busybox の `link` で使う。
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        let old = format!("/tmp/polyisa_link_old_{}", std::process::id());
+        let new = format!("/tmp/polyisa_link_new_{}", std::process::id());
+        let _ = std::fs::remove_file(&old);
+        let _ = std::fs::remove_file(&new);
+        std::fs::write(&old, b"ab").unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x100), old.as_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x100 + old.len() as u64), &[0])
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x200), new.as_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x200 + new.len() as u64), &[0])
+            .unwrap();
+        set64(&mut env, Gpr(0), abi::LINK);
+        set64(&mut env, Gpr(7), 0x100);
+        set64(&mut env, Gpr(6), 0x200);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        assert_eq!(std::fs::read(&new).unwrap(), b"ab");
+        set64(&mut env, Gpr(0), abi::LINK);
+        set64(&mut env, Gpr(7), 0x100);
+        set64(&mut env, Gpr(6), 0x200);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(17));
+        let _ = std::fs::remove_file(&old);
+        assert_eq!(std::fs::read(&new).unwrap(), b"ab");
+        let missing = format!("/tmp/polyisa_link_missing_{}", std::process::id());
+        env.backend
+            .mem
+            .write(VirtAddr(0x100), missing.as_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x100 + missing.len() as u64), &[0])
+            .unwrap();
+        set64(&mut env, Gpr(0), abi::LINK);
+        set64(&mut env, Gpr(7), 0x100);
+        set64(&mut env, Gpr(6), 0x200);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(ENOENT));
+        let _ = std::fs::remove_file(&new);
+    }
+
+    #[test]
+    fn unlink_access_utimensat_roundtrip() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        let path = format!("/tmp/polyisa_utimens_{}", std::process::id());
+        let _ = std::fs::remove_file(&path);
+        env.backend
+            .mem
+            .write(VirtAddr(0x100), path.as_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x100 + path.len() as u64), &[0])
+            .unwrap();
+        // utimensat(AT_FDCWD, path) は空作成して 0 を返す.
+        set64(&mut env, Gpr(0), abi::UTIMENSAT);
+        set64(&mut env, Gpr(7), 0xffff_ffff_ffff_ff9c);
+        set64(&mut env, Gpr(6), 0x100);
+        set64(&mut env, Gpr(2), 0);
+        set64(&mut env, Gpr(10), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        assert!(std::fs::metadata(&path).is_ok());
+        // access(path) は 0 を返す.
+        set64(&mut env, Gpr(0), abi::ACCESS);
+        set64(&mut env, Gpr(7), 0x100);
+        set64(&mut env, Gpr(6), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        // unlink(path) は 0 を返す.
+        set64(&mut env, Gpr(0), abi::UNLINK);
+        set64(&mut env, Gpr(7), 0x100);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        // 存在しない access は ENOENT.
+        set64(&mut env, Gpr(0), abi::ACCESS);
+        set64(&mut env, Gpr(7), 0x100);
+        set64(&mut env, Gpr(6), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(ENOENT));
+    }
+
+    #[test]
+    fn dup2_std_alias_returns_newfd() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        // dup2(1, 2) は 2 を返す (--list の画面幅取得の前段).
+        set64(&mut env, Gpr(0), abi::DUP2);
+        set64(&mut env, Gpr(7), 1);
+        set64(&mut env, Gpr(6), 2);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 2);
+        // chmod/fchmodat は無視して 0 を返す.
+        set64(&mut env, Gpr(0), abi::CHMOD);
+        set64(&mut env, Gpr(7), 0x100);
+        set64(&mut env, Gpr(6), 0o755);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        // fchown は無視して 0 を返す。dos2unix の所有者の戻し.
+        set64(&mut env, Gpr(0), abi::FCHOWN);
+        set64(&mut env, Gpr(7), 1);
+        set64(&mut env, Gpr(6), u64::MAX);
+        set64(&mut env, Gpr(2), u64::MAX);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+    }
+
+    #[test]
+    fn dup3_std_alias_returns_newfd() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        // dup3(1, 2, 0) は 2 を返す (hexdump の前段).
+        set64(&mut env, Gpr(0), abi::DUP3);
+        set64(&mut env, Gpr(7), 1);
+        set64(&mut env, Gpr(6), 2);
+        set64(&mut env, Gpr(2), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 2);
+        // oldfd==newfd は EINVAL.
+        set64(&mut env, Gpr(0), abi::DUP3);
+        set64(&mut env, Gpr(7), 1);
+        set64(&mut env, Gpr(6), 1);
+        set64(&mut env, Gpr(2), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EINVAL));
+        // 不正 flags は EINVAL.
+        set64(&mut env, Gpr(0), abi::DUP3);
+        set64(&mut env, Gpr(7), 1);
+        set64(&mut env, Gpr(6), 2);
+        set64(&mut env, Gpr(2), 0xFFFF);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EINVAL));
+    }
+
+    #[test]
+    fn dup2_opened_fd_onto_stdin_serves_file() {
+        // freopen 相当の付け替え回帰: open -> fd 3、close(0)、dup2(3, 0) -> 0、read(0) で読める.
+        // hexdump の Bad file descriptor 対応。旧実装は opened fd の dup2 で EBADF.
+        use crate::x86_64 as abi;
+        let path = std::env::temp_dir().join(format!("polyisa-unit-dup2-{}", std::process::id()));
+        std::fs::write(&path, b"abcdef").unwrap();
+        let path_s = path.to_string_lossy().into_owned();
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        env.backend
+            .mem
+            .write(VirtAddr(0x100), path_s.as_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x100 + path_s.len() as u64), &[0])
+            .unwrap();
+        // openat(AT_FDCWD, path, O_RDONLY) -> fd 3.
+        set64(&mut env, Gpr(0), abi::OPENAT);
+        set64(&mut env, Gpr(7), AT_FDCWD_U32 as u64);
+        set64(&mut env, Gpr(6), 0x100);
+        set64(&mut env, Gpr(2), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 3);
+        // close(0) -> 0。
+        set64(&mut env, Gpr(0), abi::CLOSE);
+        set64(&mut env, Gpr(7), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        // dup2(3, 0) -> 0。
+        set64(&mut env, Gpr(0), abi::DUP2);
+        set64(&mut env, Gpr(7), 3);
+        set64(&mut env, Gpr(6), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        // dup(3) -> 最下位空き 4。
+        set64(&mut env, Gpr(0), abi::DUP);
+        set64(&mut env, Gpr(7), 3);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 4);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn write_to_remapped_stdout_serves_file() {
+        // split の出力 pattern: open(WRONLY|CREAT) -> fd、dup2(fd, 1)、write(1) で書ける.
+        // 旧実装は付け替え後もホスト stdout に書いたため出力が空になった.
+        use crate::x86_64 as abi;
+        let dir = std::env::temp_dir().join(format!("polyisa-unit-wstdout-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir).unwrap();
+        let path_s = dir.join("o.txt").to_string_lossy().into_owned();
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        env.backend
+            .mem
+            .write(VirtAddr(0x100), path_s.as_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x100 + path_s.len() as u64), &[0])
+            .unwrap();
+        env.backend.mem.write(VirtAddr(0x200), b"abcdef").unwrap();
+        // openat(AT_FDCWD, path, O_WRONLY|O_CREAT|O_TRUNC) -> fd 3.
+        set64(&mut env, Gpr(0), abi::OPENAT);
+        set64(&mut env, Gpr(7), AT_FDCWD_U32 as u64);
+        set64(&mut env, Gpr(6), 0x100);
+        set64(&mut env, Gpr(2), 0o1101);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 3);
+        // dup2(3, 1) -> 1。
+        set64(&mut env, Gpr(0), abi::DUP2);
+        set64(&mut env, Gpr(7), 3);
+        set64(&mut env, Gpr(6), 1);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 1);
+        // write(1, 0x200, 6) -> 6。ホスト stdout ではなくファイルに書く。
+        set64(&mut env, Gpr(0), abi::WRITE);
+        set64(&mut env, Gpr(7), 1);
+        set64(&mut env, Gpr(6), 0x200);
+        set64(&mut env, Gpr(2), 6);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 6);
+        assert_eq!(std::fs::read(dir.join("o.txt")).unwrap(), b"abcdef");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn prlimit64_writes_infinity() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        set64(&mut env, Gpr(0), abi::PRLIMIT64);
+        set64(&mut env, Gpr(7), 0);
+        set64(&mut env, Gpr(6), 3);
+        set64(&mut env, Gpr(2), 0);
+        set64(&mut env, Gpr(10), 0x100);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        let mut back = [0u8; 16];
+        env.backend
+            .mem
+            .read(VirtAddr(0x100), &mut back, data_access())
+            .unwrap();
+        assert_eq!(
+            u64::from_le_bytes(back[..8].try_into().unwrap()),
+            0xFFFF_FFFF_FFFF_FFFF
+        );
+        assert_eq!(
+            u64::from_le_bytes(back[8..].try_into().unwrap()),
+            0xFFFF_FFFF_FFFF_FFFF
+        );
+        // resource 範囲外は EINVAL。
+        set64(&mut env, Gpr(0), abi::PRLIMIT64);
+        set64(&mut env, Gpr(7), 0);
+        set64(&mut env, Gpr(6), 16);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EINVAL));
+    }
+
+    #[test]
+    fn clock_gettime_realtime_is_fixed() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        set64(&mut env, Gpr(0), abi::CLOCK_GETTIME);
+        set64(&mut env, Gpr(7), 0);
+        set64(&mut env, Gpr(6), 0x100);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        let mut back = [0xFFu8; 16];
+        env.backend
+            .mem
+            .read(VirtAddr(0x100), &mut back, data_access())
+            .unwrap();
+        assert_eq!(
+            i64::from_le_bytes(back[0..8].try_into().unwrap()),
+            946_688_400
+        );
+        assert_eq!(i64::from_le_bytes(back[8..16].try_into().unwrap()), 0);
+    }
+
+    #[test]
+    fn reboot_returns_eperm() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        set64(&mut env, Gpr(0), abi::REBOOT);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EPERM));
+    }
+
+    #[test]
+    fn syslog_read_all_writes_fixed_line() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        set64(&mut env, Gpr(0), abi::SYSLOG);
+        set64(&mut env, Gpr(7), 3);
+        set64(&mut env, Gpr(6), 0x100);
+        set64(&mut env, Gpr(2), 64);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 23);
+        let mut back = [0u8; 23];
+        env.backend
+            .mem
+            .read(VirtAddr(0x100), &mut back, data_access())
+            .unwrap();
+        assert_eq!(&back, b"[    0.000000] polyisa\n");
+    }
+
+    #[test]
+    fn readlinkat_proc_self_exe() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        env.backend
+            .mem
+            .write(VirtAddr(0x100), b"/proc/self/exe\0")
+            .unwrap();
+        set64(&mut env, Gpr(0), abi::READLINKAT);
+        set64(&mut env, Gpr(7), 0xffff_ffff_ffff_ff9c);
+        set64(&mut env, Gpr(6), 0x100);
+        set64(&mut env, Gpr(2), 0x200);
+        set64(&mut env, Gpr(10), 0x100);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let n = get64(&mut env, Gpr(0));
+        assert!(n > 0 && n < 0x100);
+        let mut back = vec![0u8; n as usize];
+        env.backend
+            .mem
+            .read(VirtAddr(0x200), &mut back, data_access())
+            .unwrap();
+        assert!(back.starts_with(b"/"));
+        // bufsiz=0 は EINVAL。
+        set64(&mut env, Gpr(0), abi::READLINKAT);
+        set64(&mut env, Gpr(7), 0xffff_ffff_ffff_ff9c);
+        set64(&mut env, Gpr(6), 0x100);
+        set64(&mut env, Gpr(2), 0x200);
+        set64(&mut env, Gpr(10), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EINVAL));
+    }
+
+    #[test]
+    fn read_stdin_buffer_returns_bytes() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        sys.stdin_buf = b"ab\n".to_vec();
+        let mut env = bare();
+        set64(&mut env, Gpr(0), abi::READ);
+        set64(&mut env, Gpr(7), 0);
+        set64(&mut env, Gpr(6), 0x200);
+        set64(&mut env, Gpr(2), 8);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 3);
+        let mut back = [0u8; 3];
+        env.backend
+            .mem
+            .read(VirtAddr(0x200), &mut back, data_access())
+            .unwrap();
+        assert_eq!(&back, b"ab\n");
+        set64(&mut env, Gpr(0), abi::READ);
+        set64(&mut env, Gpr(7), 0);
+        set64(&mut env, Gpr(6), 0x200);
+        set64(&mut env, Gpr(2), 8);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+    }
+
+    #[test]
+    fn readlink_proc_self_exe() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        sys.exe_path = "/tmp/opencode/work/busybox-1.37.0/busybox".to_string();
+        let mut env = bare();
+        env.backend
+            .mem
+            .write(VirtAddr(0x100), b"/proc/self/exe\0")
+            .unwrap();
+        set64(&mut env, Gpr(0), abi::READLINK);
+        set64(&mut env, Gpr(7), 0x100);
+        set64(&mut env, Gpr(6), 0x200);
+        set64(&mut env, Gpr(2), 0x100);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let n = get64(&mut env, Gpr(0));
+        assert_eq!(n, 0x29);
+        let mut back = vec![0u8; n as usize];
+        env.backend
+            .mem
+            .read(VirtAddr(0x200), &mut back, data_access())
+            .unwrap();
+        assert_eq!(&back, b"/tmp/opencode/work/busybox-1.37.0/busybox");
+    }
+
+    #[test]
+    fn readlink_proc_self_fd_returns_opened_path() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        let path = std::env::temp_dir().join(format!("polyisa-fdlink-{}", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let file = std::fs::File::create(&path).unwrap();
+        let fd = sys.alloc_fd(file);
+        let host = path.to_str().unwrap().to_string();
+        sys.remember_path(fd, host.clone());
+        let proc = format!("/proc/self/fd/{fd}\0");
+        env.backend
+            .mem
+            .write(VirtAddr(0x100), proc.as_bytes())
+            .unwrap();
+        set64(&mut env, Gpr(0), abi::READLINK);
+        set64(&mut env, Gpr(7), 0x100);
+        set64(&mut env, Gpr(6), 0x200);
+        set64(&mut env, Gpr(2), 0x100);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let n = get64(&mut env, Gpr(0));
+        assert_eq!(n, host.len() as u64);
+        let mut back = vec![0u8; n as usize];
+        env.backend
+            .mem
+            .read(VirtAddr(0x200), &mut back, data_access())
+            .unwrap();
+        assert_eq!(back, host.as_bytes());
+        drop(sys);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn set_robust_list_records_head() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        set64(&mut env, Gpr(0), abi::SET_ROBUST_LIST);
+        set64(&mut env, Gpr(7), 0x5000);
+        set64(&mut env, Gpr(6), 24);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        assert_eq!(sys.robust_head, 0x5000);
+        // 長さが 24 でなければ EINVAL。
+        set64(&mut env, Gpr(0), abi::SET_ROBUST_LIST);
+        set64(&mut env, Gpr(7), 0x5000);
+        set64(&mut env, Gpr(6), 16);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EINVAL));
+    }
+
+    #[test]
+    fn pipe2_roundtrip_in_one_process() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        set64(&mut env, Gpr(0), abi::PIPE2);
+        set64(&mut env, Gpr(7), 0x200);
+        set64(&mut env, Gpr(6), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        let mut fds = [0u8; 8];
+        env.backend
+            .mem
+            .read(VirtAddr(0x200), &mut fds, data_access())
+            .unwrap();
+        let read_fd = u32::from_le_bytes(fds[0..4].try_into().unwrap());
+        let write_fd = u32::from_le_bytes(fds[4..8].try_into().unwrap());
+        env.backend.mem.write(VirtAddr(0x300), b"Z").unwrap();
+        set64(&mut env, Gpr(0), abi::WRITE);
+        set64(&mut env, Gpr(7), write_fd.into());
+        set64(&mut env, Gpr(6), 0x300);
+        set64(&mut env, Gpr(2), 1);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 1);
+        set64(&mut env, Gpr(0), abi::READ);
+        set64(&mut env, Gpr(7), read_fd.into());
+        set64(&mut env, Gpr(6), 0x400);
+        set64(&mut env, Gpr(2), 1);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 1);
+        let mut byte = [0u8; 1];
+        env.backend
+            .mem
+            .read(VirtAddr(0x400), &mut byte, data_access())
+            .unwrap();
+        assert_eq!(byte, *b"Z");
+    }
+
+    #[test]
+    fn pipe_returns_two_fds() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        set64(&mut env, Gpr(0), abi::PIPE);
+        set64(&mut env, Gpr(7), 0x200);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        let mut fds = [0u8; 8];
+        env.backend
+            .mem
+            .read(VirtAddr(0x200), &mut fds, data_access())
+            .unwrap();
+        let read_fd = u32::from_le_bytes(fds[0..4].try_into().unwrap());
+        let write_fd = u32::from_le_bytes(fds[4..8].try_into().unwrap());
+        assert_ne!(read_fd, write_fd);
+        assert!(read_fd >= 3 && write_fd >= 3);
+        // ファイルが先に開いているとき、両端は別の番号になる。
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        assert_eq!(
+            sys.fds
+                .alloc(Some(std::fs::File::open("/dev/null").unwrap())),
+            3
+        );
+        set64(&mut env, Gpr(0), abi::PIPE);
+        set64(&mut env, Gpr(7), 0x200);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let mut again = [0u8; 8];
+        env.backend
+            .mem
+            .read(VirtAddr(0x200), &mut again, data_access())
+            .unwrap();
+        let read2 = u32::from_le_bytes(again[0..4].try_into().unwrap());
+        let write2 = u32::from_le_bytes(again[4..8].try_into().unwrap());
+        assert_eq!((read2, write2), (4, 5));
+    }
+
+    #[test]
+    fn dup2_pipe_onto_stdin_reads() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        set64(&mut env, Gpr(0), abi::PIPE);
+        set64(&mut env, Gpr(7), 0x200);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let mut fds = [0u8; 8];
+        env.backend
+            .mem
+            .read(VirtAddr(0x200), &mut fds, data_access())
+            .unwrap();
+        let read_fd = u32::from_le_bytes(fds[0..4].try_into().unwrap());
+        let write_fd = u32::from_le_bytes(fds[4..8].try_into().unwrap());
+        set64(&mut env, Gpr(0), abi::DUP2);
+        set64(&mut env, Gpr(7), read_fd.into());
+        set64(&mut env, Gpr(6), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        env.backend.mem.write(VirtAddr(0x300), b"Q").unwrap();
+        set64(&mut env, Gpr(0), abi::WRITE);
+        set64(&mut env, Gpr(7), write_fd.into());
+        set64(&mut env, Gpr(6), 0x300);
+        set64(&mut env, Gpr(2), 1);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        set64(&mut env, Gpr(0), abi::READ);
+        set64(&mut env, Gpr(7), 0);
+        set64(&mut env, Gpr(6), 0x400);
+        set64(&mut env, Gpr(2), 1);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 1);
+        let mut byte = [0u8; 1];
+        env.backend
+            .mem
+            .read(VirtAddr(0x400), &mut byte, data_access())
+            .unwrap();
+        assert_eq!(byte, *b"Q");
+    }
+
+    #[test]
+    fn kill_drops_the_parked_child() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        set64(&mut env, Gpr(0), abi::CLONE);
+        set64(&mut env, Gpr(7), 17);
+        set64(&mut env, Gpr(6), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let child = get64(&mut env, Gpr(0));
+        assert!(sys.task_pids().contains(&child));
+        set64(&mut env, Gpr(0), abi::KILL);
+        set64(&mut env, Gpr(7), child);
+        set64(&mut env, Gpr(6), 9);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        assert!(!sys.task_pids().contains(&child));
+        set64(&mut env, Gpr(0), abi::WAIT4);
+        set64(&mut env, Gpr(7), child);
+        set64(&mut env, Gpr(6), 0x100);
+        set64(&mut env, Gpr(2), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), child);
+        let mut status = [0u8; 4];
+        env.backend
+            .mem
+            .read(VirtAddr(0x100), &mut status, data_access())
+            .unwrap();
+        assert_eq!(u32::from_le_bytes(status), 9);
+    }
+
+    #[test]
+    fn wait4_zero_reaps_a_child_in_the_same_group() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        set64(&mut env, Gpr(0), abi::CLONE);
+        set64(&mut env, Gpr(7), 17);
+        set64(&mut env, Gpr(6), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let child = get64(&mut env, Gpr(0));
+        set64(&mut env, Gpr(0), abi::WAIT4);
+        set64(&mut env, Gpr(7), 0);
+        set64(&mut env, Gpr(6), 0);
+        set64(&mut env, Gpr(2), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(ECHILD));
+        set64(&mut env, Gpr(0), abi::SETPGID);
+        set64(&mut env, Gpr(7), child);
+        set64(&mut env, Gpr(6), sys.pid);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        sys.procs
+            .borrow_mut()
+            .exit(polyisa_kernel::ProcessId(child), 4);
+        set64(&mut env, Gpr(0), abi::WAIT4);
+        set64(&mut env, Gpr(7), 0);
+        set64(&mut env, Gpr(6), 0x100);
+        set64(&mut env, Gpr(2), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), child);
+        let mut status = [0u8; 4];
+        env.backend
+            .mem
+            .read(VirtAddr(0x100), &mut status, data_access())
+            .unwrap();
+        assert_eq!(u32::from_le_bytes(status), 4 << 8);
+    }
+
+    #[test]
+    fn syscall_tables_are_unique_and_named_in_os_linux() {
+        assert_syscall_table(X86_64_SYSCALLS, crate::GuestAbi::X86_64Linux);
+        assert_syscall_table(X86_32_SYSCALLS, crate::GuestAbi::X86_32Linux);
+    }
+    #[test]
+    fn unimplemented_syscall_returns_enosys_and_continues() {
+        // 未知番号は一度だけ報告し、ENOSYS を返して実行を続ける（user-mode.md）。
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        set64(&mut env, Gpr(0), 9999);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(crate::ENOSYS));
+    }
+
+    #[test]
+    fn unimplemented_syscall_returns_enosys_x86_32() {
+        let mut sys = Linux::x86_32();
+        let mut env = bare();
+        set64(&mut env, Gpr(0), 9999);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), u64::from(neg_errno(crate::ENOSYS)));
+    }
+}

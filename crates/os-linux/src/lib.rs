@@ -15,6 +15,10 @@
 #[cfg(feature = "x86")]
 pub mod x86;
 
+/// 未実装のシステムコールに返す errno（asm-generic の ENOSYS）。
+/// 設計: `docs/design/user-mode.md` の「未実装のシステムコール」。
+pub const ENOSYS: u32 = 38;
+
 /// ゲストの ABI。システムコール番号の表を選ぶときに使う。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum GuestAbi {
@@ -48,6 +52,16 @@ pub trait TrapHandler {
         0
     }
 
+    /// GS ベース（i386 TLS）を返す。set_thread_area を処理する
+    /// ハンドラ以外は 0 を返す。
+    fn gs_base(&self) -> u64 {
+        0
+    }
+
+    /// プログラムブレークの初期値を伝える。ヒープを持つ
+    /// ハンドラだけが実装する。既定では何もしない。
+    fn init_brk(&mut self, _image_end: u64) {}
+
     /// 1 命令を実行したあと。既定では何もしない。
     fn after_step(&mut self, _env: &mut polyisa_engine::bare::BareEnv) {}
 
@@ -71,48 +85,7 @@ pub mod mips_o32 {
 }
 
 /// RISC-V（asm-generic）のシステムコール番号。
-/// 値はカーネルの UAPI 表由来の事実である。
-pub mod rv64 {
-    pub const READ: u64 = 63;
-    pub const WRITE: u64 = 64;
-    pub const CLOSE: u64 = 57;
-    pub const MMAP: u64 = 222;
-    pub const MPROTECT: u64 = 226;
-    pub const MUNMAP: u64 = 215;
-    pub const BRK: u64 = 214;
-    pub const EXIT: u64 = 93;
-    pub const EXIT_GROUP: u64 = 94;
-    pub const UNAME: u64 = 160;
-    pub const SET_TID_ADDRESS: u64 = 96;
-    pub const GETTID: u64 = 178;
-    pub const GETPID: u64 = 172;
-    pub const TGKILL: u64 = 131;
-    pub const GETUID: u64 = 174;
-    pub const GETEUID: u64 = 175;
-    pub const GETGID: u64 = 176;
-    pub const GETEGID: u64 = 177;
-    pub const RT_SIGACTION: u64 = 134;
-    pub const RT_SIGPROCMASK: u64 = 135;
-    pub const CLOCK_GETTIME: u64 = 113;
-    pub const GETRANDOM: u64 = 278;
-    pub const OPENAT: u64 = 56;
-    // 段階2（ファイル操作・動的リンク）。
-    pub const LSEEK: u64 = 62;
-    pub const GETDENTS64: u64 = 61;
-    pub const GETCWD: u64 = 17;
-    pub const DUP3: u64 = 24;
-    pub const FCNTL: u64 = 25;
-    pub const IOCTL: u64 = 29;
-    pub const PREAD64: u64 = 67;
-    pub const READLINKAT: u64 = 78;
-    pub const NEWFSTATAT: u64 = 79;
-    pub const FSTAT: u64 = 80;
-    pub const STATX: u64 = 291;
-    pub const READV: u64 = 65;
-    pub const WRITEV: u64 = 66;
-    pub const SENDFILE: u64 = 71;
-    pub const CLOCK_NANOSLEEP: u64 = 115;
-}
+pub mod rv64;
 
 /// x86_64（Linux・64ビット）のシステムコール番号。
 /// 値はカーネルの UAPI 由来の事実であり、`heavy_abi_uapi` で突き合わせる。
@@ -287,12 +260,15 @@ pub mod x86_32 {
     pub const WRITE: u64 = 4;
     pub const CLOSE: u64 = 6;
     pub const MMAP: u64 = 90;
+    /// mmap2/mmap_pgoff。offset はページ単位（musl i386 はこちらを使う）。
+    pub const MMAP_PG: u64 = 192;
     pub const MPROTECT: u64 = 125;
     pub const MUNMAP: u64 = 91;
     pub const BRK: u64 = 45;
     pub const EXIT: u64 = 1;
     pub const EXIT_GROUP: u64 = 252;
     pub const UNAME: u64 = 122;
+    pub const SET_THREAD_AREA: u64 = 243;
     pub const SET_TID_ADDRESS: u64 = 258;
     pub const GETTID: u64 = 224;
     pub const GETPID: u64 = 20;
@@ -328,6 +304,11 @@ pub mod x86_32 {
     pub const NANOSLEEP: u64 = 162;
     pub const GETGROUPS: u64 = 80;
     pub const GETGROUPS32: u64 = 205;
+    pub const SETGROUPS32: u64 = 206;
+    pub const FCHDIR: u64 = 133;
+    pub const SYSINFO: u64 = 116;
+    pub const PERSONALITY: u64 = 136;
+    pub const SETSID: u64 = 66;
     pub const MKDIR: u64 = 39;
     pub const RMDIR: u64 = 40;
     pub const UNLINK: u64 = 10;
@@ -362,6 +343,25 @@ pub mod x86_32 {
     pub const GETPGID: u64 = 132;
     pub const CHDIR: u64 = 12;
     pub const KILL: u64 = 37;
+    // i386 musl が使う旧番号・32系・time64 の番号。
+    pub const OPEN: u64 = 5;
+    pub const FORK: u64 = 2;
+    pub const VFORK: u64 = 190;
+    pub const PIPE: u64 = 42;
+    pub const GETPPID: u64 = 64;
+    pub const GETTIMEOFDAY: u64 = 78;
+    pub const LLSEEK: u64 = 140;
+    pub const STAT64: u64 = 195;
+    pub const LSTAT64: u64 = 196;
+    pub const FSTAT64: u64 = 197;
+    pub const GETUID32: u64 = 199;
+    pub const GETGID32: u64 = 200;
+    pub const GETEUID32: u64 = 201;
+    pub const GETEGID32: u64 = 202;
+    pub const SETUID32: u64 = 213;
+    pub const SETGID32: u64 = 214;
+    pub const FCNTL64: u64 = 221;
+    pub const CLOCK_GETTIME64: u64 = 403;
 }
 
 /// Linux の `clone` フラグ。アドレス空間の共有はプロセス生成では使わない。
@@ -427,12 +427,14 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             x86_32::WRITE => Some("write"),
             x86_32::CLOSE => Some("close"),
             x86_32::MMAP => Some("mmap"),
+            x86_32::MMAP_PG => Some("mmap"),
             x86_32::MPROTECT => Some("mprotect"),
             x86_32::MUNMAP => Some("munmap"),
             x86_32::BRK => Some("brk"),
             x86_32::EXIT => Some("exit"),
             x86_32::EXIT_GROUP => Some("exit_group"),
             x86_32::UNAME => Some("uname"),
+            x86_32::SET_THREAD_AREA => Some("set_thread_area"),
             x86_32::SET_TID_ADDRESS => Some("set_tid_address"),
             x86_32::GETTID => Some("gettid"),
             x86_32::GETPID => Some("getpid"),
@@ -467,6 +469,11 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             x86_32::NANOSLEEP => Some("nanosleep"),
             x86_32::GETGROUPS => Some("getgroups"),
             x86_32::GETGROUPS32 => Some("getgroups32"),
+            x86_32::SETGROUPS32 => Some("setgroups"),
+            x86_32::FCHDIR => Some("fchdir"),
+            x86_32::SYSINFO => Some("sysinfo"),
+            x86_32::PERSONALITY => Some("personality"),
+            x86_32::SETSID => Some("setsid"),
             x86_32::MKDIR => Some("mkdir"),
             x86_32::RMDIR => Some("rmdir"),
             x86_32::UNLINK => Some("unlink"),
@@ -496,6 +503,24 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             x86_32::GETPGID => Some("getpgid"),
             x86_32::CHDIR => Some("chdir"),
             x86_32::KILL => Some("kill"),
+            x86_32::OPEN => Some("open"),
+            x86_32::FORK => Some("fork"),
+            x86_32::VFORK => Some("vfork"),
+            x86_32::PIPE => Some("pipe"),
+            x86_32::GETPPID => Some("getppid"),
+            x86_32::GETTIMEOFDAY => Some("gettimeofday"),
+            x86_32::LLSEEK => Some("llseek"),
+            x86_32::STAT64 => Some("stat"),
+            x86_32::LSTAT64 => Some("lstat"),
+            x86_32::FSTAT64 => Some("fstat"),
+            x86_32::GETUID32 => Some("getuid"),
+            x86_32::GETGID32 => Some("getgid"),
+            x86_32::GETEUID32 => Some("geteuid"),
+            x86_32::GETEGID32 => Some("getegid"),
+            x86_32::SETUID32 => Some("setuid"),
+            x86_32::SETGID32 => Some("setgid"),
+            x86_32::FCNTL64 => Some("fcntl"),
+            x86_32::CLOCK_GETTIME64 => Some("clock_gettime"),
             _ => None,
         },
         GuestAbi::X86_64Linux => match nr {
@@ -675,15 +700,35 @@ pub fn build_initial_stack(
     env: &[Vec<u8>],
     auxv: &[(u64, u64)],
 ) -> (Vec<u8>, u64) {
-    fn w64(out: &mut [u8], off: usize, v: u64) {
-        out[off..off + 8].copy_from_slice(&v.to_le_bytes());
-    }
+    build_initial_stack_ws(top, args, env, auxv, 8)
+}
+
+/// i386 の初期スタック。エントリ幅が 4 バイト（argc/argv/envp/auxv すべて u32）。
+pub fn build_initial_stack32(
+    top: u64,
+    args: &[Vec<u8>],
+    env: &[Vec<u8>],
+    auxv: &[(u64, u64)],
+) -> (Vec<u8>, u64) {
+    build_initial_stack_ws(top, args, env, auxv, 4)
+}
+
+fn build_initial_stack_ws(
+    top: u64,
+    args: &[Vec<u8>],
+    env: &[Vec<u8>],
+    auxv: &[(u64, u64)],
+    ws: usize,
+) -> (Vec<u8>, u64) {
+    let w = |out: &mut [u8], off: usize, v: u64| {
+        out[off..off + ws].copy_from_slice(&v.to_le_bytes()[..ws]);
+    };
     let strings_len: usize = args.iter().map(|a| a.len() + 1).sum::<usize>()
         + env.iter().map(|e| e.len() + 1).sum::<usize>();
     // AT_EXECFN を args[0] 向けに1件足す（args 空では付けない）。
-    let execfn_extra: usize = if args.is_empty() { 0 } else { 16 };
+    let execfn_extra: usize = if args.is_empty() { 0 } else { 2 * ws };
     let arrays_len: usize =
-        8 * (1 + (args.len() + 1) + (env.len() + 1)) + 16 * (auxv.len() + 1) + execfn_extra;
+        ws * (1 + (args.len() + 1) + (env.len() + 1)) + 2 * ws * (auxv.len() + 1) + execfn_extra;
     let total = arrays_len + strings_len;
     let aligned = total.next_multiple_of(16);
     let sp = top - aligned as u64;
@@ -700,30 +745,30 @@ pub fn build_initial_stack(
     }
     // 配列部。
     let mut off = 0usize;
-    w64(&mut img, off, args.len() as u64);
-    off += 8;
+    w(&mut img, off, args.len() as u64);
+    off += ws;
     for addr in addrs.iter().take(args.len()) {
-        w64(&mut img, off, *addr);
-        off += 8;
+        w(&mut img, off, *addr);
+        off += ws;
     }
-    off += 8; // argv NULL.
+    off += ws; // argv NULL.
     for i in 0..env.len() {
-        w64(&mut img, off, addrs[args.len() + i]);
-        off += 8;
+        w(&mut img, off, addrs[args.len() + i]);
+        off += ws;
     }
-    off += 8; // envp NULL.
+    off += ws; // envp NULL.
     for (k, v) in auxv {
-        w64(&mut img, off, *k);
-        w64(&mut img, off + 8, *v);
-        off += 16;
+        w(&mut img, off, *k);
+        w(&mut img, off + ws, *v);
+        off += 2 * ws;
     }
     // AT_EXECFN (31) は args[0] の番地を指す。静的 glibc の _dl_get_origin が参照する.
     // args が空の単体テストでは付けない.
     if !args.is_empty() {
         const AT_EXECFN: u64 = 31;
-        w64(&mut img, off, AT_EXECFN);
-        w64(&mut img, off + 8, addrs[0]);
-        off += 16;
+        w(&mut img, off, AT_EXECFN);
+        w(&mut img, off + ws, addrs[0]);
+        off += 2 * ws;
     }
     // AT_NULL 終端は img のゼロ初期化で表す.
     let _ = (off, pos);
@@ -821,7 +866,7 @@ mod tests {
         assert_eq!(syscall_name(GuestAbi::X86_32Linux, 383), Some("statx"));
         assert_eq!(syscall_name(GuestAbi::X86_32Linux, 300), Some("fstatat64"));
         assert_eq!(syscall_name(GuestAbi::X86_32Linux, 220), Some("getdents64"));
-        assert_eq!(syscall_name(GuestAbi::X86_32Linux, 64), None);
+        assert_eq!(syscall_name(GuestAbi::X86_32Linux, 64), Some("getppid"));
         assert_eq!(x86_32::SENDFILE, 187);
         assert_eq!(syscall_name(GuestAbi::X86_32Linux, 187), Some("sendfile"));
         assert_eq!(x86_32::TIME, 13);

@@ -84,8 +84,8 @@ mod tests {
 
     #[test]
     fn insn_count() {
-        // 段階4の x86 最小。ModRM/SIB 展開で 807 件。
-        assert_eq!(INSNS.len(), 807);
+        // 段階4の x86 最小。ModRM/SIB 展開で 830 件。
+        assert_eq!(INSNS.len(), 830);
     }
 
     #[test]
@@ -1473,7 +1473,8 @@ mod tests {
         // MOV [base+index*scale],r8 SIB mod=00 (88 /r)。
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x881407, 24), Some(Insn::MovM8R8Sib));
-        assert_eq!(decode(0x881407, 16), None);
+        // 16ビット切り詰めは SIB バイト不足で None（0x1407 だと adc al,imm8 と解読される）。
+        assert_eq!(decode(0x8814, 16), None);
         assert_eq!(decode(0x88B41400000000, 56), Some(Insn::MovM8R8Sibd32));
         // MOV [base+index*scale+disp8],r8 SIB mod=01 (88 /r)。88 44 31 FF は [RCX+RSI-1],AL.
         // Ref: SPEC-X86-INTEL-SDM (v093).

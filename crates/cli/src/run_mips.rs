@@ -440,6 +440,7 @@ enum O32Cont {
 
 type MipsSysFn = fn(&mut O32Io, &mut BareEnv, MipsModel) -> Result<O32Cont, ()>;
 
+// Gap: GAP-0001（MIPS o32 の syscall 処理は cli に残る。段階 5 で os-linux へ移す）
 #[rustfmt::skip]
 const MIPS_O32_SYSCALLS: &[(&str, MipsSysFn)] = &[
     ("write", sys_write),

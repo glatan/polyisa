@@ -2,7 +2,7 @@
 
 このファイルは `task status` が生成する。手で編集しない。
 
-生成の元は `crates/cli/src/run.rs` の `RV64_SYSCALLS` と、`crates/cli/src/run_x86.rs` の `X86_64_SYSCALLS`、`X86_32_SYSCALLS`、`crates/cli/src/run_mips.rs` の `MIPS_O32_SYSCALLS` である。
+生成の元は `crates/os-linux/src/rv64/sys.rs` の `RV64_SYSCALLS` と、`crates/os-linux/src/x86/sys.rs` の `X86_64_SYSCALLS`、`X86_32_SYSCALLS`、`crates/cli/src/run_mips.rs` の `MIPS_O32_SYSCALLS` である。
 
 ## rv64
 
@@ -167,30 +167,55 @@
 
 - access
 - brk
+- chdir
 - chmod
+- clock_gettime
+- clone
 - close
 - dup
 - dup2
 - dup3
+- execve
 - exit
 - exit_group
 - faccessat
+- fchdir
 - fchmod
 - fchmodat
 - fcntl
+- fork
+- fstat
+- fstatat64
 - ftruncate
 - getcwd
+- getdents64
 - getegid
 - geteuid
 - getgid
+- getgroups
+- getgroups32
+- getpgid
 - getpid
+- getppid
+- getrandom
 - gettid
+- gettimeofday
 - getuid
+- ioctl
+- kill
+- llseek
+- lseek
+- lstat
 - mkdir
 - mkdirat
+- mmap
 - mprotect
 - munmap
+- open
 - openat
+- personality
+- pipe
+- pipe2
 - read
 - readlink
 - readlinkat
@@ -201,13 +226,26 @@
 - rt_sigprocmask
 - rt_sigsuspend
 - rt_sigtimedwait
+- sendfile
+- set_thread_area
+- set_tid_address
+- setgid
+- setgroups
+- setpgid
+- setsid
+- setuid
+- stat
 - symlink
+- sysinfo
 - tgkill
+- time
 - umask
 - uname
 - unlink
 - unlinkat
 - utimensat
+- vfork
+- wait4
 - write
 - writev
 

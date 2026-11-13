@@ -567,7 +567,7 @@ fn run_rex64_gas_absorbed() {
         0x0F, 0x05, // syscall -> exit(7)
     ];
     env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
-    let mut sys = run_x86::CliLinux::x86_64();
+    let mut sys = polyisa_os_linux::x86::Linux::x86_64();
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
     assert_eq!(out, Outcome::Exit(7));
 }

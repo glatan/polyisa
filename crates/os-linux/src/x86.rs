@@ -88,6 +88,11 @@ pub struct SysCtx {
     pub r_a: Gpr,
     pub r_b: Gpr,
     pub r_c: Gpr,
+    /// 第4〜6引数のレジスタ（x86-64 は R10/R8/R9、x86-32 は ESI/EDI/EBP）。
+    /// 3引数までしか使わないハンドラは見なくてよい。
+    pub r_d: Gpr,
+    pub r_e: Gpr,
+    pub r_f: Gpr,
     pub is64: bool,
     pub at_fdcwd: u64,
 }
@@ -968,7 +973,7 @@ pub fn sys_prlimit64(env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
         set64(env, Gpr(0), cx.neg(EINVAL));
         return Some(TrapOutcome::Handled);
     }
-    let old_limit = get64(env, Gpr(10));
+    let old_limit = get64(env, cx.r_d);
     if old_limit != 0 {
         let buf = RLIM_INFINITY.to_le_bytes();
         // rlim_cur (8B) + rlim_max (8B) = 16B.
@@ -1114,6 +1119,64 @@ pub fn stat144(m: &std::fs::Metadata, ino: u64) -> [u8; 144] {
     st[48..56].copy_from_slice(&(m.len() as i64).to_le_bytes());
     st
 }
+
+/// i386 の `struct stat64`（96B）。stat144 と同じ最小限の実値を入れる.
+/// レイアウト: dev@0 ino@8 mode@16 nlink@20 uid@24 gid@28 rdev@32 pad@40
+/// size@48 blksize@56 pad@60 blocks@64 atime@72/+4 mtime@80/+4 ctime@88/+4.
+/// Ref: SRC-LINUX (7.3). arch/x86/include/uapi/asm/stat.h.
+pub fn stat64(m: &std::fs::Metadata, ino: u64) -> [u8; 96] {
+    let mut st = [0u8; 96];
+    const S_IFDIR: u32 = 0o040000;
+    const S_IFREG: u32 = 0o100000;
+    const S_IFLNK: u32 = 0o120000;
+    let ft = m.file_type();
+    let kind = if ft.is_dir() {
+        S_IFDIR
+    } else if ft.is_symlink() {
+        S_IFLNK
+    } else {
+        S_IFREG
+    };
+    st[8..16].copy_from_slice(&ino.to_le_bytes());
+    st[16..20].copy_from_slice(&(kind | 0o700).to_le_bytes());
+    st[48..56].copy_from_slice(&(m.len() as i64).to_le_bytes());
+    st
+}
+
+/// ABI に合う struct stat バイト列を選ぶ。stat64/struct stat のみ対応.
+pub fn stat_buf(m: &std::fs::Metadata, ino: u64, is64: bool) -> Vec<u8> {
+    if is64 {
+        stat144(m, ino).to_vec()
+    } else {
+        stat64(m, ino).to_vec()
+    }
+}
+
+/// gettimeofday(tv, tz)。CLOCK_REALTIME と同じ固定値を返す.
+/// i386 は {i32 sec, i32 usec} の8B、x86-64 は {i64,i64} の16B を書く.
+/// Ref: SRC-LINUX (7.3).
+pub fn sys_gettimeofday(env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    let tv = get64(env, cx.r_a);
+    if tv != 0 {
+        let secs = 946_688_400i64;
+        let buf: Vec<u8> = if cx.is64 {
+            let mut v = Vec::with_capacity(16);
+            v.extend_from_slice(&secs.to_le_bytes());
+            v.extend_from_slice(&0i64.to_le_bytes());
+            v
+        } else {
+            let mut v = Vec::with_capacity(8);
+            v.extend_from_slice(&(secs as i32).to_le_bytes());
+            v.extend_from_slice(&0i32.to_le_bytes());
+            v
+        };
+        if env.backend.mem.write(VirtAddr(tv), &buf).is_err() {
+            return Some(TrapOutcome::Unimplemented);
+        }
+    }
+    set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
+}
 pub fn path_ino(path: &str) -> u64 {
     let folded = fold_path(path);
     let mut h = 0xcbf29ce484222325u64;
@@ -1188,7 +1251,7 @@ pub fn sys_stat(
             return Some(TrapOutcome::Handled);
         }
     };
-    let st = stat144(&m, path_ino(&path));
+    let st = stat_buf(&m, path_ino(&path), cx.is64);
     if env.backend.mem.write(VirtAddr(stat_addr), &st).is_err() {
         return Some(TrapOutcome::Unimplemented);
     }
@@ -1227,7 +1290,7 @@ pub fn sys_lstat(
             return Some(TrapOutcome::Handled);
         }
     };
-    let st = stat144(&m, path_ino(&path));
+    let st = stat_buf(&m, path_ino(&path), cx.is64);
     if env.backend.mem.write(VirtAddr(stat_addr), &st).is_err() {
         return Some(TrapOutcome::Unimplemented);
     }
@@ -1236,7 +1299,7 @@ pub fn sys_lstat(
 }
 
 /// newfstatat(dirfd, path, statbuf, flags)。AT_FDCWD+絶対パスのみ.
-/// ホスト metadata から struct stat (144B) を書いて 0 を返す.
+/// ホスト metadata から ABI 幅の struct stat を書いて 0 を返す.
 /// flags (AT_SYMLINK_NOFOLLOW 等) は無視してたどる.
 /// Ref: SRC-LINUX (7.3).
 pub fn sys_newfstatat(
@@ -1246,9 +1309,9 @@ pub fn sys_newfstatat(
     env: &mut BareEnv,
     cx: &SysCtx,
 ) -> Option<TrapOutcome> {
-    let dirfd = get64(env, Gpr(7));
-    let path_addr = get64(env, Gpr(6));
-    let stat_addr = get64(env, Gpr(2));
+    let dirfd = get64(env, cx.r_a);
+    let path_addr = get64(env, cx.r_b);
+    let stat_addr = get64(env, cx.r_c);
     if !cx.is_at_fdcwd(dirfd) {
         set64(env, Gpr(0), cx.neg(EINVAL));
         return Some(TrapOutcome::Handled);
@@ -1280,7 +1343,7 @@ pub fn sys_newfstatat(
             return Some(TrapOutcome::Handled);
         }
     };
-    let st = stat144(&m, path_ino(&path));
+    let st = stat_buf(&m, path_ino(&path), cx.is64);
     if env.backend.mem.write(VirtAddr(stat_addr), &st).is_err() {
         return Some(TrapOutcome::Unimplemented);
     }
@@ -2199,7 +2262,7 @@ pub fn sys_fstat(
         fds.path_of(fd).map(path_ino)
     }
     .unwrap_or(u64::from(fd) | 1);
-    let st = stat144(&m, ino);
+    let st = stat_buf(&m, ino, cx.is64);
     if env.backend.mem.write(VirtAddr(stat_addr), &st).is_err() {
         return Some(TrapOutcome::Unimplemented);
     }
@@ -2254,7 +2317,7 @@ pub fn sys_fallocate(
     let fd = get64(env, cx.r_a) as u32;
     let mode = get64(env, cx.r_b);
     let offset = get64(env, cx.r_c);
-    let len = get64(env, Gpr(10));
+    let len = get64(env, cx.r_d);
     const EOPNOTSUPP: u32 = 95;
     if mode != 0 {
         set64(env, Gpr(0), cx.neg(EOPNOTSUPP));
@@ -2337,9 +2400,9 @@ pub fn sys_lseek(
     // lseek(fd, offset, whence)。opened fd の位置を動かし、新位置を返す.
     // Ref: SRC-LINUX (7.3).
     use std::io::Seek;
-    let fd = get64(env, Gpr(7)) as u32;
-    let offset = get64(env, Gpr(6)) as i64;
-    let whence = get64(env, Gpr(2)) as u32;
+    let fd = get64(env, cx.r_a) as u32;
+    let offset = get64(env, cx.r_b) as i64;
+    let whence = get64(env, cx.r_c) as u32;
     let file = if fd < 3 { std } else { fds.get_mut(fd) };
     let Some(file) = file else {
         set64(env, Gpr(0), cx.neg(EBADF));
@@ -2356,6 +2419,50 @@ pub fn sys_lseek(
     };
     match file.seek(pos) {
         Ok(n) => set64(env, Gpr(0), n),
+        Err(_) => set64(env, Gpr(0), cx.neg(EINVAL)),
+    }
+    Some(TrapOutcome::Handled)
+}
+/// _llseek(fd, offset_hi, offset_lo, result*, whence)。i386 の 64 ビットシーク。
+/// 成功時は result に 8 バイトを書き、戻り値は 0。fd 3 未満は標準入出力の付け替え先を見る。
+pub fn sys_llseek(
+    fds: &mut FdTable,
+    std: Option<&mut std::fs::File>,
+    env: &mut BareEnv,
+    cx: &SysCtx,
+) -> Option<TrapOutcome> {
+    use std::io::Seek;
+    let fd = get64(env, cx.r_a) as u32;
+    let off = (get64(env, cx.r_b) << 32) | get64(env, cx.r_c);
+    let res = get64(env, cx.r_d);
+    let whence = get64(env, cx.r_e) as u32;
+    let file = if fd < 3 { std } else { fds.get_mut(fd) };
+    let Some(file) = file else {
+        set64(env, Gpr(0), cx.neg(EBADF));
+        return Some(TrapOutcome::Handled);
+    };
+    let pos = match whence {
+        0 => std::io::SeekFrom::Start(off),
+        1 => std::io::SeekFrom::Current(off as i64),
+        2 => std::io::SeekFrom::End(off as i64),
+        _ => {
+            set64(env, Gpr(0), cx.neg(EINVAL));
+            return Some(TrapOutcome::Handled);
+        }
+    };
+    match file.seek(pos) {
+        Ok(n) => {
+            if env
+                .backend
+                .mem
+                .write(VirtAddr(res), &n.to_le_bytes())
+                .is_err()
+            {
+                set64(env, Gpr(0), cx.neg(EFAULT));
+            } else {
+                set64(env, Gpr(0), 0);
+            }
+        }
         Err(_) => set64(env, Gpr(0), cx.neg(EINVAL)),
     }
     Some(TrapOutcome::Handled)
@@ -2662,12 +2769,12 @@ pub fn sys_mmap(heap_end: &mut u64, env: &mut BareEnv, cx: &SysCtx) -> Option<Tr
     // ファイル-backed は未対応のため EINVAL.
     // prot は寛容に RW で写像する (PROT_NONE 予約後の mprotect 前でも動くため).
     use polyisa_mem::{PAGE_SIZE, Perms, VirtAddr};
-    let addr = get64(env, Gpr(7));
-    let len = get64(env, Gpr(6));
-    let _prot = get64(env, Gpr(2));
-    let flags = get64(env, Gpr(10));
-    let fd = get64(env, Gpr(8)) as i64;
-    let offset = get64(env, Gpr(9));
+    let addr = get64(env, cx.r_a);
+    let len = get64(env, cx.r_b);
+    let _prot = get64(env, cx.r_c);
+    let flags = get64(env, cx.r_d);
+    let fd = get64(env, cx.r_e) as i64;
+    let offset = get64(env, cx.r_f);
     const MAP_ANONYMOUS: u64 = 0x20;
     const MAP_FIXED: u64 = 0x10;
     if len == 0 {
@@ -2785,3 +2892,14 @@ pub fn sys_mmap(heap_end: &mut u64, env: &mut BareEnv, cx: &SysCtx) -> Option<Tr
     set64(env, Gpr(0), base);
     Some(TrapOutcome::Handled)
 }
+
+/// eip レジスタの読み出し（`cli` 側の実行ループからは `fs_base` 等の状態が
+/// `TrapHandler` 経由で届くため、トラップ側では eip をここで取り出す）。
+pub fn eip_of(env: &mut BareEnv) -> u32 {
+    env.backend.get(polyisa_guest_x86::sem::eip_ref())
+}
+
+/// Linux の syscall 処理（`cli` から移管した `Linux` 状態機械）。
+pub mod sys;
+
+pub use sys::{Linux, SCHED_SLICE};

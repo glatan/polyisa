@@ -81,7 +81,7 @@ ISA 基盤層   isagen → isadl
              （build-dependency として isagen。ホストの命令のエンコーダだけを生成する）
 OS 層        loader → bits
              kernel → mem, engine, guest, timing, host
-             os-linux → kernel, loader, engine, guest, guests/*（機能フラグで選択）
+             os-linux → kernel, loader, engine, guest, host, guests/*（機能フラグで選択）
              os-wasi → kernel, engine, guest, guests/wasm
 ツール層     trace → engine, guest
              gdbstub → engine, guest

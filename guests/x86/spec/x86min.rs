@@ -193,6 +193,36 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("push_ebp", "F1", "01010101", "push ebp", "store"),
         ("push_esi", "F1", "01010110", "push esi", "store"),
         ("push_edi", "F1", "01010111", "push edi", "store"),
+        // MOV moffs32 (A1/A3)。i386 musl のグローバル変数アクセス。x64 は moffs64 で長さが違う.
+        (
+            "mov_eax_moffs",
+            "F1",
+            "10100001 ................................",
+            "mov eax, [moffs32]",
+            "load",
+        ),
+        (
+            "mov_moffs_eax",
+            "F1",
+            "10100011 ................................",
+            "mov [moffs32], eax",
+            "store",
+        ),
+        // MOV moffs8 (A0/A2)。i386 musl のバイト単位グローバルアクセス.
+        (
+            "mov_al_moffs",
+            "F1",
+            "10100000 ................................",
+            "mov al, [moffs32]",
+            "load",
+        ),
+        (
+            "mov_moffs_al",
+            "F1",
+            "10100010 ................................",
+            "mov [moffs32], al",
+            "store",
+        ),
         // PUSH imm32 (68 id)。64ビットでは符号拡張して8バイト積む.
         ("push_imm32", "F1", "01101000 ................................", "push {imm}", "store"),
         // PUSH imm8 (6A ib)。64ビットでは符号拡張して8バイト積む.
@@ -223,6 +253,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("cmp_al_imm", "F1", "00111100 ........", "cmp al, {imm}", "alu"),
         // OR AL,imm8 (0C ib)。
         ("or_al_imm", "F1", "00001100 ........", "or al, {imm}", "alu"),
+        ("adc_al_imm", "F1", "00010100 ........", "adc al, {imm}", "alu"),
         
         ("je", "F1", "01110100 ........", "je {imm}", "jump"),
         ("jne", "F1", "01110101 ........", "jne {imm}", "jump"),
@@ -457,6 +488,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("inc_rm_sibd", "S8", "11111111 01000100 ........ ........", "inc r/m", "alu"),
         // INC m32 [base+index*scale+disp32] (FF /0 SIB mod=10)。basename 0x4899d0 対応.
         ("inc_rm_sibd32", "D32", "11111111 10000100 ........ ................................", "inc r/m", "alu"),
+        ("dec_rm_sibd32", "D32", "11111111 10001100 ........ ................................", "dec r/m", "alu"),
         // DEC m32 [base+index*scale] (FF /1 SIB mod=00)。xxd 0x4b2bee 対応。base=5 は長さが違う.
         ("dec_rm_sib", "F1", "11111111 00001100 ........", "dec r/m", "alu"),
         // DEC m32 [base+index*scale+disp8] (FF /1 SIB mod=01)。
@@ -489,6 +521,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("shld_r32_cl", "F1", "00001111 10100101 11......", "shld r/m, r, cl", "alu"),
         // SHRD r/m32,r32,CL (0F AD /r mod=11)。seq 10 の停止点 0x4c4425 対応。REX.W で64ビット.
         ("shrd_r32_cl", "F1", "00001111 10101101 11......", "shrd r/m, r, cl", "alu"),
+        // SHRD r/m32,r32,imm8 (0F AC /r ib mod=11)。i386 musl の 64bit 値分解.
+        ("shrd_r32_imm8", "F1", "00001111 10101100 11...... ........", "shrd r/m, r, {imm}", "alu"),
         // CMOVE r64/r32, m64/m32 [RIP+disp32] (0F 44 05/0D... + disp32)。REX.W で64bit.
         ("cmove_rip", "F1", "00001111 01000100 00...101 ................................", "cmove r, m", "load"),
         // CMOVNE r64/r32, m64/m32 [RIP+disp32] (0F 45 05 + disp32)。ln 0x5a9e44 対応。REX.W で64bit.
@@ -538,6 +572,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("call_r_memnd", "MR", "11111111 00010...", "call r/m64", "jump"),
         // CALL r/m64 reg-direct (FF /2 mod=11)。レジスタ間接コール.
         ("call_r_rm", "F1", "11111111 11010...", "call r/m64", "jump"),
+        // MOV Sreg,r16 (8E /r mod=11)。フラットモデルで no-op。i386 musl の mov gs,eax 対応.
+        ("mov_sreg_r", "F1", "10001110 11......", "mov sreg, r16", "alu"),
         // CALL [base+index*scale] (FF /2 SIB mod=00)。64ビット間接コール.
         ("call_r_sib", "N8", "11111111 00010100 ........", "call r/m64", "jump"),
         // JMP [base+index*scale] (FF /4 SIB mod=00)。64ビット間接ジャンプ.
@@ -574,6 +610,10 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("or_m32_r32_memnd", "MR", "00001001 00......", "or m32, r32", "alu"),
         // OR m32,r32 mod=01 [base+disp8] (09 /r)。
         ("or_m32_r32_mem8", "M8", "00001001 01...... ........", "or m32, r32", "alu"),
+        ("adc_m32_r32_mem8", "M8", "00010001 01...... ........", "adc m32, r32", "alu"),
+        ("sbb_m32_r32_mem8", "M8", "00011001 01...... ........", "sbb m32, r32", "alu"),
+        ("adc_m32_r32_sibd", "S8", "00010001 01...100 ........ ........", "adc [sib+disp8], r32", "alu"),
+        ("sbb_m32_r32_sibd", "S8", "00011001 01...100 ........ ........", "sbb [sib+disp8], r32", "alu"),
         // OR m32,r32 mod=10 [base+disp32] (09 /r)。
         ("or_m32_r32_mem32", "M32", "00001001 10...... ................................", "or m32, r32", "alu"),
         // ADD m32,r32 RIP (01 05 + disp32)。
@@ -602,8 +642,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("jmp_r_memnd", "MR", "11111111 00100...", "jmp r/m64", "jump"),
         // JMP [base+disp8] (FF /4 mod=01)。
         ("jmp_r_mem8", "M8", "11111111 01100... ........", "jmp r/m64", "jump"),
-        // JMP [base+disp32] (FF /4 mod=10)。
-        ("jmp_r_mem32", "M32", "11111111 00110... ................................", "jmp r/m64", "jump"),
+        // JMP [base+disp32] (FF /4 mod=10) は mem 表にある（SIB 除外のため）。
         // JMP [RIP+disp32] (FF /4 RIP)。
         ("jmp_r_rip", "F1", "11111111 00100101 ................................", "jmp r/m64", "jump"),
         // OR m32,r32 RIP (09 05 + disp32)。
@@ -620,6 +659,14 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("or_rm32_imm_memnd", "MR", "10000001 00001... ................................", "or r/m32, {imm}", "alu"),
         // OR m32,imm32 SIB mod=00 [base+index*scale] (81 /1)。awk 0x4a4354 対応。base=5 は長さが違う.
         ("or_rm32_imm_sib", "F1", "10000001 00001100 ........ ................................", "or r/m32, {imm}", "alu"),
+        // ADD m32,imm32 SIB mod=00 [base+index*scale] (81 /0)。i386 musl の _start 対応。base=5 は長さが違う.
+        (
+            "add_rm32_imm_sib",
+            "F1",
+            "10000001 00000100 ........ ................................",
+            "add r/m32, {imm}",
+            "alu",
+        ),
         // ADD m32,imm32 SIB mod=01 [base+index*scale+disp8] (81 /0)。bzip2 0x480dcd 対応。
         (
             "add_rm32_imm_sibd",
@@ -642,6 +689,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("cmp_rm32_imm_sib", "F1", "10000001 00111100 ........ ................................", "cmp r/m32, {imm}", "alu"),
         // OR m32,imm32 mod=01 [base+disp8] (81 /1)。SIB は fetch で弾く.
         ("or_rm32_imm_mem8", "M8", "10000001 01001... ........ ................................", "or r/m32, {imm}", "alu"),
+        ("adc_m32_imm8_mem8", "M8", "10000011 01010... ........ ........", "adc r/m32, {imm}", "alu"),
+        ("sub_m32_imm8_sibd32", "F1", "10000011 10101100 ........ ................................ ........", "sub [sib+disp32], {imm}", "alu"),
         // OR m32/m64,imm32 SIB+disp8 (81 /1 mod=01)。resize 0x490ea6 の orl $0x880, 0x1c(%rsp)。
         (
             "or_rm32_imm_sibd",
@@ -695,6 +744,14 @@ pub fn build_model() -> polyisa_isadl::Model {
             "cmp_rm32_imm_mem32",
             "M32",
             "10000001 10111... ................................ ................................",
+            "cmp r/m32, {imm}",
+            "alu"
+        ),
+        // CMP m32,imm32 SIB mod=10 [base+index*scale+disp32] (81 /7)。i386 musl 対応。11B.
+        (
+            "cmp_rm32_imm_sibd32",
+            "F1",
+            "10000001 10111100 ........ ................................ ................................",
             "cmp r/m32, {imm}",
             "alu"
         ),
@@ -945,6 +1002,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("and_rm8_imm", "F1", "10000000 11100... ........", "and r/m8, {imm}", "alu"),
         ("or_rm8_imm", "F1", "10000000 11001... ........", "or r/m8, {imm}", "alu"),
         ("cmp_rm8_imm", "F1", "10000000 11111... ........", "cmp r/m8, {imm}", "alu"),
+        // XOR r/m8,imm8 (80 /6 mod=11)。i386 musl の 80 F4 (xor ah,imm) 対応.
+        ("xor_rm8_imm", "F1", "10000000 11110... ........", "xor r/m8, {imm}", "alu"),
         // CMPB [base],imm8 SIB mod=00 (80 /7)。index有無は問わずdispatchで切替.
         // grep 0x43e0e4 (indexed) 対応。80 3C 13 00 は CMPB $0x00,(%rbx,%rdx).
         ("cmp_rm8_imm_sib", "F1", "10000000 00111100 ........ ........", "cmp r/m8, {imm}", "alu"),
@@ -1360,6 +1419,22 @@ pub fn build_model() -> polyisa_isadl::Model {
             "00000011 01...... ........",
             vec![wc("m8_rm", WhereOp::Ne, 4)],
             "add r32, m32",
+            "alu",
+        ),
+        (
+            "imul_rm_mem8",
+            "M8",
+            "11110111 01101... ........",
+            vec![wc("m8_rm", WhereOp::Ne, 4)],
+            "imul eax, r/m32",
+            "alu",
+        ),
+        (
+            "imul_rm_sibd",
+            "S8",
+            "11110111 01101100 ........ ........",
+            vec![],
+            "imul eax, r/m32",
             "alu",
         ),
         (
@@ -1911,6 +1986,22 @@ pub fn build_model() -> polyisa_isadl::Model {
             "alu",
         ),
         (
+            "push_rm_memnd",
+            "MR",
+            "11111111 00110...",
+            vec![wc("mr_rm", WhereOp::Ne, 4), wc("mr_rm", WhereOp::Ne, 5)],
+            "push m",
+            "store",
+        ),
+        (
+            "push_rm_sib",
+            "F1",
+            "11111111 00110100 ........",
+            vec![],
+            "push m",
+            "store",
+        ),
+        (
             "push_rm_mem8",
             "M8",
             "11111111 01110... ........",
@@ -1933,6 +2024,32 @@ pub fn build_model() -> polyisa_isadl::Model {
             vec![],
             "push m",
             "store",
+        ),
+        (
+            "push_rm_mem32",
+            "M32",
+            "11111111 10110... ................................",
+            vec![wc("m32_rm", WhereOp::Ne, 4)],
+            "push m",
+            "store",
+        ),
+        // PUSH m [disp32] (FF /6 mod=00 rm=101)。32ビットは絶対番地、64ビットは RIP 相対。
+        (
+            "push_rm_abs",
+            "F1",
+            "11111111 00110101 ................................",
+            vec![],
+            "push m",
+            "store",
+        ),
+        // JMP [base+disp32] (FF /4 mod=10)。SIB は未対応なので除外。
+        (
+            "jmp_r_mem32",
+            "M32",
+            "11111111 10100... ................................",
+            vec![wc("m32_rm", WhereOp::Ne, 4)],
+            "jmp r/m64",
+            "jump",
         ),
         (
             "fld_m80_sibd32",

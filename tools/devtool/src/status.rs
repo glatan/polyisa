@@ -166,7 +166,7 @@ fn render_index(
     let mut s = String::new();
     push_generated_heading(&mut s, "# 実装状況");
     s.push_str(
-        "生成の元は、ISADL の記述（`guests/*/spec/`）、ロードマップの完了条件、設計との差の台帳、システムコールの表（`crates/cli/src/run.rs` の `RV64_SYSCALLS`、`crates/cli/src/run_x86.rs` の `X86_64_SYSCALLS` と `X86_32_SYSCALLS`、`crates/cli/src/run_mips.rs` の `MIPS_O32_SYSCALLS`）である。テストの結果は含めない。\n\n",
+        "生成の元は、ISADL の記述（`guests/*/spec/`）、ロードマップの完了条件、設計との差の台帳、システムコールの表（`crates/os-linux/src/rv64/sys.rs` の `RV64_SYSCALLS`、`crates/os-linux/src/x86/sys.rs` の `X86_64_SYSCALLS` と `X86_32_SYSCALLS`、`crates/cli/src/run_mips.rs` の `MIPS_O32_SYSCALLS`）である。テストの結果は含めない。\n\n",
     );
     s.push_str("## 段階の完了条件\n\n");
     s.push_str("条件の文言は [ロードマップ](../design/roadmap.md) にある。\n\n");
@@ -508,8 +508,8 @@ pub(crate) struct GuestSyscalls {
 }
 
 fn load_syscall_tables(root: &Path) -> Result<Vec<GuestSyscalls>, String> {
-    let rv = read_to_string(&root.join("crates/cli/src/run.rs"))?;
-    let x86 = read_to_string(&root.join("crates/cli/src/run_x86.rs"))?;
+    let rv = read_to_string(&root.join("crates/os-linux/src/rv64/sys.rs"))?;
+    let x86 = read_to_string(&root.join("crates/os-linux/src/x86/sys.rs"))?;
     let mips = read_to_string(&root.join("crates/cli/src/run_mips.rs"))?;
     Ok(vec![
         GuestSyscalls {
@@ -518,11 +518,11 @@ fn load_syscall_tables(root: &Path) -> Result<Vec<GuestSyscalls>, String> {
         },
         GuestSyscalls {
             abi: "x86_64",
-            names: parse_sys_table(&x86, "X86_64_SYSCALLS", "crates/cli/src/run_x86.rs")?,
+            names: parse_sys_table(&x86, "X86_64_SYSCALLS", "crates/os-linux/src/x86/sys.rs")?,
         },
         GuestSyscalls {
             abi: "x86_32",
-            names: parse_sys_table(&x86, "X86_32_SYSCALLS", "crates/cli/src/run_x86.rs")?,
+            names: parse_sys_table(&x86, "X86_32_SYSCALLS", "crates/os-linux/src/x86/sys.rs")?,
         },
         GuestSyscalls {
             abi: "mips_o32",
@@ -585,7 +585,7 @@ fn render_syscalls(tables: &[GuestSyscalls]) -> String {
     let mut s = String::new();
     push_generated_heading(&mut s, "# 実装状況：システムコール");
     s.push_str(
-        "生成の元は `crates/cli/src/run.rs` の `RV64_SYSCALLS` と、`crates/cli/src/run_x86.rs` の `X86_64_SYSCALLS`、`X86_32_SYSCALLS`、`crates/cli/src/run_mips.rs` の `MIPS_O32_SYSCALLS` である。\n\n",
+        "生成の元は `crates/os-linux/src/rv64/sys.rs` の `RV64_SYSCALLS` と、`crates/os-linux/src/x86/sys.rs` の `X86_64_SYSCALLS`、`X86_32_SYSCALLS`、`crates/cli/src/run_mips.rs` の `MIPS_O32_SYSCALLS` である。\n\n",
     );
     for table in tables {
         s.push_str(&format!("## {}\n\n", table.abi));
