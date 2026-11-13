@@ -12,8 +12,8 @@ use polyisa_engine::interp::InterpExit;
 use polyisa_mem::{Access, AccessKind, Align, Endian, VirtAddr};
 use polyisa_os_linux::x86::{
     AT_FDCWD_U32, EACCES, EBADF, ECHILD, EFAULT, EINVAL, ENOENT, ENOEXEC, ENOMEM, ENOTDIR, EPERM,
-    EPIPE, ERANGE, ESRCH, SysCtx, data_access, get64, guest_c_string, neg_errno, neg_errno64,
-    resolve_guest_path, set64,
+    EPIPE, ERANGE, ESRCH, SysCtx, data_access, get64, guest_c_string, guest_exe_redirect,
+    neg_errno, neg_errno64, path_ino, resolve_guest_path, set64, stat144,
 };
 use polyisa_sem::{Backend, ExceptionKind};
 
@@ -10783,69 +10783,6 @@ fn reap_status(code: u32, signal: Option<u32>) -> u32 {
 /// 種別 (st_mode) と大きさ (st_size) と、パスから決めた st_ino を入れる。
 /// 同じパスは同じ inode になり、ディレクトリの再帰判定が分かれる。
 /// レイアウトは musl/glibc 共通のカーネル ABI 由来である。
-/// Ref: SRC-LINUX (7.3).
-fn stat144(m: &std::fs::Metadata, ino: u64) -> [u8; 144] {
-    let mut st = [0u8; 144];
-    // S_IFDIR/S_IFREG/S_IFLNK。fifo 等の判別は可搬 API にないため、
-    // ディレクトリでもシンボリックリンクでもなければ通常ファイルとみなす.
-    // 許可ビットは所有者の読み書き実行を仮定する（試作）。
-    const S_IFDIR: u32 = 0o040000;
-    const S_IFREG: u32 = 0o100000;
-    const S_IFLNK: u32 = 0o120000;
-    let ft = m.file_type();
-    let kind = if ft.is_dir() {
-        S_IFDIR
-    } else if ft.is_symlink() {
-        S_IFLNK
-    } else {
-        S_IFREG
-    };
-    st[8..16].copy_from_slice(&ino.to_le_bytes());
-    st[24..28].copy_from_slice(&(kind | 0o700).to_le_bytes());
-    st[48..56].copy_from_slice(&(m.len() as i64).to_le_bytes());
-    st
-}
-
-/// パスから安定した非ゼロの inode を作る。`.` と `..` を畳んだ同じ場所は同じ値になる。
-fn path_ino(path: &str) -> u64 {
-    let folded = fold_path(path);
-    let mut h = 0xcbf29ce484222325u64;
-    for b in folded.as_bytes() {
-        h ^= u64::from(*b);
-        h = h.wrapping_mul(0x100000001b3);
-    }
-    h | 1
-}
-
-/// `.` と `..` と余分な区切りを除いたパス。シンボリックリンクは辿らない。
-fn fold_path(path: &str) -> String {
-    let abs = path.starts_with('/');
-    let mut parts: Vec<&str> = Vec::new();
-    for part in path.split('/') {
-        if part.is_empty() || part == "." {
-            continue;
-        }
-        if part == ".." {
-            if parts.pop().is_none() && !abs {
-                parts.push("..");
-            }
-            continue;
-        }
-        parts.push(part);
-    }
-    if abs {
-        if parts.is_empty() {
-            "/".to_string()
-        } else {
-            format!("/{}", parts.join("/"))
-        }
-    } else if parts.is_empty() {
-        ".".to_string()
-    } else {
-        parts.join("/")
-    }
-}
-
 type SysFn = fn(&mut CliLinux, &mut BareEnv, &SysCtx) -> Option<TrapOutcome>;
 
 const X86_64_SYSCALLS: &[(&str, SysFn)] = &[
@@ -11311,7 +11248,7 @@ Cpus_allowed_list:\t0
     }
     // /proc/self/exe はゲスト実行ファイル自身を開く（ホスト exe ではない）。
     // readlink と同じ合成。書込み付きは Linux と同様に EACCES。
-    if let Some(real) = guest_exe_redirect(sys, &path) {
+    if let Some(real) = guest_exe_redirect(&sys.exe_path, &path) {
         if acc != 0 || flags & (O_CREAT | O_TRUNC | O_APPEND) != 0 {
             set64(env, Gpr(0), cx.neg(EACCES));
             return Some(TrapOutcome::Handled);
@@ -13052,73 +12989,21 @@ fn sys_fstat(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapO
 }
 
 fn sys_stat(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // stat(path, statbuf)。作業ディレクトリから辿り、struct stat (144B) を書く.
-    // シンボリックリンクは辿る。Ref: SRC-LINUX (7.3).
-    let path_addr = get64(env, cx.r_a);
-    let stat_addr = get64(env, cx.r_b);
-    let path = match guest_c_string(env, path_addr) {
-        Some(p) => p,
-        None => return Some(TrapOutcome::Unimplemented),
-    };
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
     sys.ensure_cwd();
-    let Some(path) = sys.resolve_path(&path) else {
-        set64(env, Gpr(0), cx.neg(EPERM));
-        return Some(TrapOutcome::Handled);
-    };
-    let path = guest_exe_redirect(sys, &path).unwrap_or(path);
-    let m = match std::fs::metadata(&path) {
-        Ok(m) => m,
-        Err(e) => {
-            let no = match e.kind() {
-                std::io::ErrorKind::NotFound => ENOENT,
-                std::io::ErrorKind::PermissionDenied => EACCES,
-                _ => EINVAL,
-            };
-            set64(env, Gpr(0), cx.neg(no));
-            return Some(TrapOutcome::Handled);
-        }
-    };
-    let st = stat144(&m, path_ino(&path));
-    if env.backend.mem.write(VirtAddr(stat_addr), &st).is_err() {
-        return Some(TrapOutcome::Unimplemented);
-    }
-    set64(env, Gpr(0), 0);
-    Some(TrapOutcome::Handled)
+    let root = sys.guest_root.clone();
+    let cwd = sys.cwd.clone();
+    let exe = sys.exe_path.clone();
+    polyisa_os_linux::x86::sys_stat(&root, &cwd, &exe, env, cx)
 }
 
 fn sys_lstat(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // lstat(path, statbuf)。リンク自体の struct stat (144B) を書く.
-    // Ref: SRC-LINUX (7.3).
-    let path_addr = get64(env, cx.r_a);
-    let stat_addr = get64(env, cx.r_b);
-    let path = match guest_c_string(env, path_addr) {
-        Some(p) => p,
-        None => return Some(TrapOutcome::Unimplemented),
-    };
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
     sys.ensure_cwd();
-    let Some(path) = sys.resolve_path(&path) else {
-        set64(env, Gpr(0), cx.neg(EPERM));
-        return Some(TrapOutcome::Handled);
-    };
-    let path = guest_exe_redirect(sys, &path).unwrap_or(path);
-    let m = match std::fs::symlink_metadata(&path) {
-        Ok(m) => m,
-        Err(e) => {
-            let no = match e.kind() {
-                std::io::ErrorKind::NotFound => ENOENT,
-                std::io::ErrorKind::PermissionDenied => EACCES,
-                _ => EINVAL,
-            };
-            set64(env, Gpr(0), cx.neg(no));
-            return Some(TrapOutcome::Handled);
-        }
-    };
-    let st = stat144(&m, path_ino(&path));
-    if env.backend.mem.write(VirtAddr(stat_addr), &st).is_err() {
-        return Some(TrapOutcome::Unimplemented);
-    }
-    set64(env, Gpr(0), 0);
-    Some(TrapOutcome::Handled)
+    let root = sys.guest_root.clone();
+    let cwd = sys.cwd.clone();
+    let exe = sys.exe_path.clone();
+    polyisa_os_linux::x86::sys_lstat(&root, &cwd, &exe, env, cx)
 }
 
 fn sys_newfstatat(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
@@ -13141,7 +13026,7 @@ fn sys_newfstatat(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<
         set64(env, Gpr(0), cx.neg(EINVAL));
         return Some(TrapOutcome::Handled);
     }
-    let path = guest_exe_redirect(sys, &path).unwrap_or(path);
+    let path = guest_exe_redirect(&sys.exe_path, &path).unwrap_or(path);
     let m = match std::fs::metadata(&path) {
         Ok(m) => m,
         Err(e) => {
@@ -13608,17 +13493,8 @@ fn sys_clock_gettime(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Opti
     Some(TrapOutcome::Handled)
 }
 
-/// /proc/self/exe をゲスト実行ファイルのホストパスへ読み替える。
-/// readlink と同じ合成。exe_path が空（単体テスト）のときは None.
-// Ref: SRC-LINUX (7.3).
-fn guest_exe_redirect(sys: &CliLinux, path: &str) -> Option<String> {
-    if path == "/proc/self/exe" && !sys.exe_path.is_empty() {
-        return Some(sys.exe_path.clone());
-    }
-    None
-}
-
 fn guest_readlink_target(sys: &CliLinux, path: &str) -> Result<String, u32> {
+    // /proc/self/exe はゲスト実行ファイルのホストパスへ読み替える。
     if path == "/proc/self/exe" && !sys.exe_path.is_empty() {
         return Ok(sys.exe_path.clone());
     }
@@ -14311,7 +14187,7 @@ fn sys_execve(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Trap
         return Some(TrapOutcome::Handled);
     };
     // /proc/self/exe はゲスト実行ファイル自身を読む（ホスト exe ではない）。
-    let path = guest_exe_redirect(sys, &path).unwrap_or(path);
+    let path = guest_exe_redirect(&sys.exe_path, &path).unwrap_or(path);
     let argv = match read_cstr_array(env, argv_addr) {
         Ok(v) => v,
         Err(()) => {

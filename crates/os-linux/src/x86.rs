@@ -1094,3 +1094,144 @@ pub fn sys_uname(env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     set64(env, Gpr(0), 0);
     Some(TrapOutcome::Handled)
 }
+pub fn stat144(m: &std::fs::Metadata, ino: u64) -> [u8; 144] {
+    let mut st = [0u8; 144];
+    // S_IFDIR/S_IFREG/S_IFLNK。fifo 等の判別は可搬 API にないため、
+    // ディレクトリでもシンボリックリンクでもなければ通常ファイルとみなす.
+    // 許可ビットは所有者の読み書き実行を仮定する（試作）。
+    const S_IFDIR: u32 = 0o040000;
+    const S_IFREG: u32 = 0o100000;
+    const S_IFLNK: u32 = 0o120000;
+    let ft = m.file_type();
+    let kind = if ft.is_dir() {
+        S_IFDIR
+    } else if ft.is_symlink() {
+        S_IFLNK
+    } else {
+        S_IFREG
+    };
+    st[8..16].copy_from_slice(&ino.to_le_bytes());
+    st[24..28].copy_from_slice(&(kind | 0o700).to_le_bytes());
+    st[48..56].copy_from_slice(&(m.len() as i64).to_le_bytes());
+    st
+}
+pub fn path_ino(path: &str) -> u64 {
+    let folded = fold_path(path);
+    let mut h = 0xcbf29ce484222325u64;
+    for b in folded.as_bytes() {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h | 1
+}
+pub fn fold_path(path: &str) -> String {
+    let abs = path.starts_with('/');
+    let mut parts: Vec<&str> = Vec::new();
+    for part in path.split('/') {
+        if part.is_empty() || part == "." {
+            continue;
+        }
+        if part == ".." {
+            if parts.pop().is_none() && !abs {
+                parts.push("..");
+            }
+            continue;
+        }
+        parts.push(part);
+    }
+    if abs {
+        if parts.is_empty() {
+            "/".to_string()
+        } else {
+            format!("/{}", parts.join("/"))
+        }
+    } else if parts.is_empty() {
+        ".".to_string()
+    } else {
+        parts.join("/")
+    }
+}
+pub fn guest_exe_redirect(exe_path: &str, path: &str) -> Option<String> {
+    if path == "/proc/self/exe" && !exe_path.is_empty() {
+        return Some(exe_path.to_string());
+    }
+    None
+}
+pub fn sys_stat(
+    root: &str,
+    cwd: &str,
+    exe_path: &str,
+    env: &mut BareEnv,
+    cx: &SysCtx,
+) -> Option<TrapOutcome> {
+    // stat(path, statbuf)。作業ディレクトリから辿り、struct stat (144B) を書く.
+    // シンボリックリンクは辿る。Ref: SRC-LINUX (7.3).
+    let path_addr = get64(env, cx.r_a);
+    let stat_addr = get64(env, cx.r_b);
+    let path = match guest_c_string(env, path_addr) {
+        Some(p) => p,
+        None => return Some(TrapOutcome::Unimplemented),
+    };
+    let Some(path) = resolve_guest_path(root, cwd, &path) else {
+        set64(env, Gpr(0), cx.neg(EPERM));
+        return Some(TrapOutcome::Handled);
+    };
+    let path = guest_exe_redirect(exe_path, &path).unwrap_or(path);
+    let m = match std::fs::metadata(&path) {
+        Ok(m) => m,
+        Err(e) => {
+            let no = match e.kind() {
+                std::io::ErrorKind::NotFound => ENOENT,
+                std::io::ErrorKind::PermissionDenied => EACCES,
+                _ => EINVAL,
+            };
+            set64(env, Gpr(0), cx.neg(no));
+            return Some(TrapOutcome::Handled);
+        }
+    };
+    let st = stat144(&m, path_ino(&path));
+    if env.backend.mem.write(VirtAddr(stat_addr), &st).is_err() {
+        return Some(TrapOutcome::Unimplemented);
+    }
+    set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
+}
+pub fn sys_lstat(
+    root: &str,
+    cwd: &str,
+    exe_path: &str,
+    env: &mut BareEnv,
+    cx: &SysCtx,
+) -> Option<TrapOutcome> {
+    // lstat(path, statbuf)。リンク自体の struct stat (144B) を書く.
+    // Ref: SRC-LINUX (7.3).
+    let path_addr = get64(env, cx.r_a);
+    let stat_addr = get64(env, cx.r_b);
+    let path = match guest_c_string(env, path_addr) {
+        Some(p) => p,
+        None => return Some(TrapOutcome::Unimplemented),
+    };
+    let Some(path) = resolve_guest_path(root, cwd, &path) else {
+        set64(env, Gpr(0), cx.neg(EPERM));
+        return Some(TrapOutcome::Handled);
+    };
+    let path = guest_exe_redirect(exe_path, &path).unwrap_or(path);
+    let m = match std::fs::symlink_metadata(&path) {
+        Ok(m) => m,
+        Err(e) => {
+            let no = match e.kind() {
+                std::io::ErrorKind::NotFound => ENOENT,
+                std::io::ErrorKind::PermissionDenied => EACCES,
+                _ => EINVAL,
+            };
+            set64(env, Gpr(0), cx.neg(no));
+            return Some(TrapOutcome::Handled);
+        }
+    };
+    let st = stat144(&m, path_ino(&path));
+    if env.backend.mem.write(VirtAddr(stat_addr), &st).is_err() {
+        return Some(TrapOutcome::Unimplemented);
+    }
+    set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
+}
