@@ -1415,6 +1415,16 @@ fn text_applets_match_host() {
         let _ = std::fs::remove_file("typescript");
         let _ = host_out;
     }
+    // lsof はホストのプロセス/fd一覧でホスト固有のため比べない。
+    // ゲストは空一覧を返し終了 0（固定値）。/proc 合成時に見直す。
+    {
+        let args = ["lsof"];
+        let argv: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
+        let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)
+            .unwrap_or_else(|e| panic!("lsof: {e}"));
+        assert_eq!(code, 0);
+        assert!(out.is_empty());
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 
