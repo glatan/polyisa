@@ -618,6 +618,7 @@ fn true_echo_uname_id_match() {
         ("ntpd", ["ntpd", "-h"].as_slice()),
         ("udhcpc6", ["udhcpc6", "-h"].as_slice()),
         ("yes", ["yes", "--help"].as_slice()),
+        ("init", ["init", "--help"].as_slice()),
         ("[[", ["[["].as_slice()),
         ("arp", ["arp", "-h"].as_slice()),
         ("ifconfig", ["ifconfig", "-h"].as_slice()),
