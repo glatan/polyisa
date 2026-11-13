@@ -2103,3 +2103,374 @@ pub fn sys_sched_getaffinity(me: u64, env: &mut BareEnv, cx: &SysCtx) -> Option<
     set64(env, Gpr(0), ret);
     Some(TrapOutcome::Handled)
 }
+
+/// clock_gettime 相当の時刻取得。MONOTONIC の起点は呼び出し側が保持する.
+pub fn sys_clock_gettime(
+    mono: &mut Option<std::time::Instant>,
+    env: &mut BareEnv,
+    cx: &SysCtx,
+) -> Option<TrapOutcome> {
+    // clock_gettime(clk_id, tp)。
+    // REALTIME は uptime の表示を安定させるため 2000-01-01 01:00:00 UTC 固定。
+    // MONOTONIC は起動からの経過で進め、時刻待ちループが止まらないようにする.
+    let clk = get64(env, cx.r_a);
+    let tp = get64(env, cx.r_b);
+    if tp != 0 {
+        let (sec, nsec) = if clk == 0 {
+            // CLOCK_REALTIME
+            (946_688_400i64, 0i64)
+        } else {
+            // CLOCK_MONOTONIC ほか。ゲスト実行の起点からの経過。
+            let start = *mono.get_or_insert_with(std::time::Instant::now);
+            let elapsed = start.elapsed();
+            (elapsed.as_secs() as i64, elapsed.subsec_nanos() as i64)
+        };
+        let mut both = [0u8; 16];
+        both[..8].copy_from_slice(&sec.to_le_bytes());
+        both[8..].copy_from_slice(&nsec.to_le_bytes());
+        if env.backend.mem.write(VirtAddr(tp), &both).is_err() {
+            return Some(TrapOutcome::Unimplemented);
+        }
+    }
+    set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
+}
+
+/// fstat(fd, struct stat *)。x86-64 struct stat (144B) を書く.
+/// レイアウトは musl/glibc 共通のカーネル ABI 由来である.
+/// ホスト依存の詳細は std の可搬 API だけでは取れないため、
+/// 種別 (st_mode) と大きさ (st_size) のみ実値を入れ、残りは 0 とする.
+/// Ref: SRC-LINUX (7.3).
+pub fn sys_fstat(
+    fds: &FdTable,
+    std: Option<&std::fs::File>,
+    env: &mut BareEnv,
+    cx: &SysCtx,
+) -> Option<TrapOutcome> {
+    let fd = get64(env, cx.r_a) as u32;
+    let stat_addr = get64(env, cx.r_b);
+    let meta: std::io::Result<std::fs::Metadata> = if fd < 3 {
+        // 付け替えた標準 fd はファイルのメタデータを返す。
+        match std {
+            Some(f) => f.metadata(),
+            None => std::fs::metadata(format!("/proc/self/fd/{fd}")),
+        }
+    } else {
+        match fds.get(fd) {
+            Some(f) => f.metadata(),
+            None => {
+                set64(env, Gpr(0), cx.neg(EBADF));
+                return Some(TrapOutcome::Handled);
+            }
+        }
+    };
+    let m = match meta {
+        Ok(m) => m,
+        Err(_) => {
+            set64(env, Gpr(0), cx.neg(EBADF));
+            return Some(TrapOutcome::Handled);
+        }
+    };
+    let ino = fds.path_of(fd).map(path_ino).unwrap_or(u64::from(fd) | 1);
+    let st = stat144(&m, ino);
+    if env.backend.mem.write(VirtAddr(stat_addr), &st).is_err() {
+        return Some(TrapOutcome::Unimplemented);
+    }
+    set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
+}
+
+pub fn module_eperm(env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // モジュールは扱わず常に EPERM。insmod / rmmod が呼ぶ。
+    set64(env, Gpr(0), cx.neg(EPERM));
+    Some(TrapOutcome::Handled)
+}
+
+pub fn sys_init_module(env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    module_eperm(env, cx)
+}
+
+pub fn sys_delete_module(env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    module_eperm(env, cx)
+}
+
+pub fn sys_finit_module(env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    module_eperm(env, cx)
+}
+pub fn dir_cursor(dir_pos: &[(u32, usize)], fd: u32) -> usize {
+    dir_pos
+        .iter()
+        .find(|(id, _)| *id == fd)
+        .map(|(_, n)| *n)
+        .unwrap_or(0)
+}
+pub fn set_dir_cursor(dir_pos: &mut Vec<(u32, usize)>, fd: u32, next: usize) {
+    if let Some(slot) = dir_pos.iter_mut().find(|(id, _)| *id == fd) {
+        slot.1 = next;
+    } else {
+        dir_pos.push((fd, next));
+    }
+}
+pub fn sys_lsetxattr(root: &str, cwd: &str, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // lsetxattr(path, ...) は setxattr と同じ扱いにする.
+    // シンボリックリンク自体への付与は区別しない（試作の割り切り...）。方針は呼び出し側と同じ.
+    sys_setxattr(root, cwd, env, cx)
+}
+pub fn sys_fallocate(fds: &mut FdTable, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // fallocate(fd, mode, offset, len)。長さを offset+len まで伸ばす。
+    // mode が 0 以外（穴あけ等）は EOPNOTSUPP。
+    let fd = get64(env, cx.r_a) as u32;
+    let mode = get64(env, cx.r_b);
+    let offset = get64(env, cx.r_c);
+    let len = get64(env, Gpr(10));
+    const EOPNOTSUPP: u32 = 95;
+    if mode != 0 {
+        set64(env, Gpr(0), cx.neg(EOPNOTSUPP));
+        return Some(TrapOutcome::Handled);
+    }
+    let Some(end) = offset.checked_add(len) else {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    };
+    let Some(file) = fds.get_mut(fd) else {
+        set64(env, Gpr(0), cx.neg(EBADF));
+        return Some(TrapOutcome::Handled);
+    };
+    let cur = match file.metadata() {
+        Ok(m) => m.len(),
+        Err(_) => {
+            set64(env, Gpr(0), cx.neg(EBADF));
+            return Some(TrapOutcome::Handled);
+        }
+    };
+    if end > cur {
+        if file.set_len(end).is_err() {
+            set64(env, Gpr(0), cx.neg(EINVAL));
+            return Some(TrapOutcome::Handled);
+        }
+        if end > 0 {
+            use std::io::{Seek, Write};
+            if file.seek(std::io::SeekFrom::Start(end - 1)).is_err()
+                || file.write_all(&[0]).is_err()
+            {
+                set64(env, Gpr(0), cx.neg(EINVAL));
+                return Some(TrapOutcome::Handled);
+            }
+        }
+    }
+    set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
+}
+pub fn sys_ftruncate(fds: &mut FdTable, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // ftruncate(fd, length)。truncate -s で使う。ホストの set_len に直結する.
+    let fd = get64(env, cx.r_a) as u32;
+    let len = get64(env, cx.r_b);
+    let Some(file) = fds.get_mut(fd) else {
+        set64(env, Gpr(0), cx.neg(EBADF));
+        return Some(TrapOutcome::Handled);
+    };
+    Some(match file.set_len(len) {
+        Ok(()) => {
+            set64(env, Gpr(0), 0);
+            TrapOutcome::Handled
+        }
+        Err(e) if e.raw_os_error() == Some(EBADF as i32) => {
+            set64(env, Gpr(0), cx.neg(EBADF));
+            TrapOutcome::Handled
+        }
+        Err(e) => {
+            let no = match e.kind() {
+                std::io::ErrorKind::NotFound => ENOENT,
+                std::io::ErrorKind::PermissionDenied => EACCES,
+                _ => EINVAL,
+            };
+            set64(env, Gpr(0), cx.neg(no));
+            TrapOutcome::Handled
+        }
+    })
+}
+pub fn sys_lseek(fds: &mut FdTable, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // lseek(fd, offset, whence)。opened fd の位置を動かし、新位置を返す.
+    // Ref: SRC-LINUX (7.3).
+    use std::io::Seek;
+    let fd = get64(env, Gpr(7)) as u32;
+    let offset = get64(env, Gpr(6)) as i64;
+    let whence = get64(env, Gpr(2)) as u32;
+    let Some(file) = fds.get_mut(fd) else {
+        set64(env, Gpr(0), cx.neg(EBADF));
+        return Some(TrapOutcome::Handled);
+    };
+    let pos = match whence {
+        0 => std::io::SeekFrom::Start(offset as u64),
+        1 => std::io::SeekFrom::Current(offset),
+        2 => std::io::SeekFrom::End(offset),
+        _ => {
+            set64(env, Gpr(0), cx.neg(EINVAL));
+            return Some(TrapOutcome::Handled);
+        }
+    };
+    match file.seek(pos) {
+        Ok(n) => set64(env, Gpr(0), n),
+        Err(_) => set64(env, Gpr(0), cx.neg(EINVAL)),
+    }
+    Some(TrapOutcome::Handled)
+}
+pub fn sys_fchdir(
+    fds: &FdTable,
+    cwd: &mut String,
+    env: &mut BareEnv,
+    cx: &SysCtx,
+) -> Option<TrapOutcome> {
+    // fchdir(fd)。覚えたパスがディレクトリなら cwd にする。envdir が使う。
+    // Ref: SRC-LINUX (7.3).
+    let fd = get64(env, cx.r_a) as u32;
+    let Some(path) = fds.path_of(fd).map(str::to_owned) else {
+        set64(env, Gpr(0), cx.neg(EBADF));
+        return Some(TrapOutcome::Handled);
+    };
+    let errno = match std::fs::metadata(&path) {
+        Ok(meta) if meta.is_dir() => {
+            cwd.clear();
+            cwd.push_str(&path);
+            set64(env, Gpr(0), 0);
+            return Some(TrapOutcome::Handled);
+        }
+        Ok(_) => ENOTDIR,
+        Err(err) => match err.kind() {
+            std::io::ErrorKind::NotFound => ENOENT,
+            std::io::ErrorKind::PermissionDenied => EACCES,
+            _ => ENOENT,
+        },
+    };
+    set64(env, Gpr(0), cx.neg(errno));
+    Some(TrapOutcome::Handled)
+}
+pub fn sys_getdents64(
+    fds: &FdTable,
+    dir_pos: &mut Vec<(u32, usize)>,
+    dir_done: &mut Vec<u32>,
+    env: &mut BareEnv,
+    cx: &SysCtx,
+) -> Option<TrapOutcome> {
+    // getdents64(fd, dirp, count)。ホストのディレクトリ列挙を
+    // linux_dirent64 形式で書く。入り切った分だけ返し、残りは次の呼び出しに残す。
+    // 1 件も入らなければ EINVAL で、読み位置は進めない。最後まで読んだあとは 0 を返す。
+    // d_ino は 0、d_off は累積オフセット、種別は dir/file/link のみ判別する.
+    // Ref: SRC-LINUX (7.3).
+    let fd = get64(env, cx.r_a) as u32;
+    let dirp = get64(env, cx.r_b);
+    let count = get64(env, cx.r_c);
+    if dir_done.contains(&fd) {
+        set64(env, Gpr(0), 0);
+        return Some(TrapOutcome::Handled);
+    }
+    // opened fd のみ受け付ける。stdin/stdout (0-2) は、パスを覚えていなければ EBADF。
+    // ゲスト fd を /proc/self/fd のホスト fd とみなすと、別の記述子を開く。
+    let Some(dir_path) = fds.path_of(fd).map(std::path::PathBuf::from) else {
+        set64(env, Gpr(0), cx.neg(EBADF));
+        return Some(TrapOutcome::Handled);
+    };
+    let rd = match std::fs::read_dir(&dir_path) {
+        Ok(rd) => rd,
+        Err(e) => {
+            let no = match e.kind() {
+                std::io::ErrorKind::NotFound => ENOENT,
+                std::io::ErrorKind::PermissionDenied => EACCES,
+                _ => EINVAL,
+            };
+            set64(env, Gpr(0), cx.neg(no));
+            return Some(TrapOutcome::Handled);
+        }
+    };
+    // "." と ".." を先頭に置く（カーネルと同様）。
+    let mut names: Vec<(Vec<u8>, u8)> = vec![(b".".to_vec(), 4), (b"..".to_vec(), 4)];
+    let proc_root = dir_path == std::path::Path::new("/proc");
+    let proc_one_task = dir_path == std::path::Path::new("/proc/1/task")
+        || dir_path == std::path::Path::new("/proc/self/task");
+    let scsi_devices = dir_path == std::path::Path::new("/sys/bus/scsi/devices")
+        || dir_path == std::path::Path::new("/sys/bus/scsi/devices/.");
+    if proc_root {
+        // ホストの PID は隠す。ps/top の期待値を固定するため pid 1 と self だけ返す。
+        names.push((b"1".to_vec(), 4));
+        names.push((b"self".to_vec(), 10));
+        names.push((b"diskstats".to_vec(), 8));
+        names.push((b"loadavg".to_vec(), 8));
+        names.push((b"meminfo".to_vec(), 8));
+        names.push((b"stat".to_vec(), 8));
+        names.push((b"uptime".to_vec(), 8));
+    } else if proc_one_task {
+        names.push((b"1".to_vec(), 4));
+    } else if scsi_devices {
+        names.push((b"0:0:0:0".to_vec(), 4));
+    } else {
+        for ent in rd.flatten() {
+            let name = ent
+                .file_name()
+                .into_string()
+                .unwrap_or_default()
+                .into_bytes();
+            if name.is_empty() {
+                continue;
+            }
+            let ty = ent
+                .file_type()
+                .map(|t| {
+                    if t.is_dir() {
+                        4u8
+                    } else if t.is_symlink() {
+                        10u8
+                    } else {
+                        8u8
+                    }
+                })
+                .unwrap_or(0);
+            names.push((name, ty));
+        }
+    }
+    // 名前順に並べ替えて決定的にする（カーネルの順序は不定だが、ls は自前で整列する）。
+    names[2..].sort_by(|a, b| a.0.cmp(&b.0));
+    let start = dir_cursor(dir_pos, fd);
+    if start >= names.len() {
+        if !dir_done.contains(&fd) {
+            dir_done.push(fd);
+        }
+        set64(env, Gpr(0), 0);
+        return Some(TrapOutcome::Handled);
+    }
+    let mut out = Vec::new();
+    let mut off = 0u64;
+    let mut taken = 0usize;
+    for (name, ty) in names.iter().skip(start) {
+        let reclen = ((19 + name.len() + 1) as u64).next_multiple_of(8);
+        if out.len() as u64 + reclen > count {
+            break;
+        }
+        off += reclen;
+        out.extend_from_slice(&0u64.to_le_bytes());
+        out.extend_from_slice(&off.to_le_bytes());
+        out.extend_from_slice(&(reclen as u16).to_le_bytes());
+        out.push(*ty);
+        out.extend_from_slice(name);
+        out.push(0);
+        while !(out.len() as u64).is_multiple_of(8) {
+            out.push(0);
+        }
+        taken += 1;
+    }
+    if taken == 0 {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    if env.backend.mem.write(VirtAddr(dirp), &out).is_err() {
+        return Some(TrapOutcome::Unimplemented);
+    }
+    let next = start + taken;
+    if next >= names.len() {
+        dir_done.push(fd);
+        dir_pos.retain(|(id, _)| *id != fd);
+    } else {
+        set_dir_cursor(dir_pos, fd, next);
+    }
+    set64(env, Gpr(0), out.len() as u64);
+    Some(TrapOutcome::Handled)
+}
