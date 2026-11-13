@@ -10099,6 +10099,9 @@ pub struct CliLinux {
     pipe_wait: Option<u64>,
     /// このプロセスの作業ディレクトリ。空はまだホストの作業ディレクトリを写していない。
     cwd: String,
+    /// MONOTONIC 時計の起点。ゲスト実行ごとに取り直す。fork した子は親と共有する。
+    /// makemime は srand(monotonic_us()) で境界を作るため、起点の共有は出力を揺らす.
+    mono_start: Option<std::time::Instant>,
 }
 
 /// `wait4` を完了するときに使う引数。
@@ -10619,6 +10622,7 @@ impl CliLinux {
             std_pipes: self.std_pipes,
             pipe_wait: None,
             cwd: self.cwd.clone(),
+            mono_start: self.mono_start,
         };
         for end in child.pipe_ends.iter().flatten() {
             child.pipes.0.borrow_mut().dup(end.id, end.read);
@@ -13972,7 +13976,7 @@ fn sys_clock_nanosleep(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> O
     Some(TrapOutcome::Handled)
 }
 
-fn sys_clock_gettime(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+fn sys_clock_gettime(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     // clock_gettime(clk_id, tp)。
     // REALTIME は uptime の表示を安定させるため 2000-01-01 01:00:00 UTC 固定。
     // MONOTONIC は起動からの経過で進め、時刻待ちループが止まらないようにする.
@@ -13983,9 +13987,9 @@ fn sys_clock_gettime(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Opt
             // CLOCK_REALTIME
             (946_688_400i64, 0i64)
         } else {
-            // CLOCK_MONOTONIC ほか。プロセス起動からの経過。
-            static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-            let elapsed = START.get_or_init(std::time::Instant::now).elapsed();
+            // CLOCK_MONOTONIC ほか。ゲスト実行の起点からの経過。
+            let start = *sys.mono_start.get_or_insert_with(std::time::Instant::now);
+            let elapsed = start.elapsed();
             (elapsed.as_secs() as i64, elapsed.subsec_nanos() as i64)
         };
         let mut both = [0u8; 16];
