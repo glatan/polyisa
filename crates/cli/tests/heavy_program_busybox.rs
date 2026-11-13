@@ -765,6 +765,14 @@ fn true_echo_uname_id_match() {
         .unwrap_or_else(|e| panic!("nslookup: {e}"));
     assert_eq!(code, 1);
     assert!(out.is_empty());
+    // powertop は計測待ちで低速・ホスト固有のため比べない。
+    // ゲストは空出力で終了 0（約13秒）。/proc 合成時に見直す。
+    let powertop = ["powertop", "--help"];
+    let argv: Vec<String> = powertop.iter().map(|s| (*s).to_string()).collect();
+    let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)
+        .unwrap_or_else(|e| panic!("powertop: {e}"));
+    assert_eq!(code, 0);
+    assert!(out.is_empty());
 }
 
 #[test]
