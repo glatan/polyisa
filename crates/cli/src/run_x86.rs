@@ -10,7 +10,10 @@
 use polyisa_engine::bare::BareEnv;
 use polyisa_engine::interp::InterpExit;
 use polyisa_mem::{Access, AccessKind, Align, Endian, VirtAddr};
-use polyisa_os_linux::x86::{AT_FDCWD_U32, SysCtx, neg_errno, neg_errno64};
+use polyisa_os_linux::x86::{
+    AT_FDCWD_U32, EACCES, EAGAIN, EBADF, ECHILD, EFAULT, EINTR, EINVAL, ENOENT, ENOEXEC, ENOMEM,
+    ENOTDIR, ENOTTY, EPERM, EPIPE, ERANGE, ESRCH, SysCtx, get64, neg_errno, neg_errno64, set64,
+};
 use polyisa_sem::{Backend, ExceptionKind};
 
 use polyisa_guest_x86::sem;
@@ -10827,25 +10830,6 @@ pub type CliX86 = CliLinux;
 /// 長さが大きくても、この刻みで分割して転送する。
 const IO_CHUNK: usize = 65536;
 
-/// Linux 汎用の errno 番号の一部。負数で返す。
-/// Ref: SRC-LINUX (7.3).
-const EPERM: u32 = 1;
-const ENOENT: u32 = 2;
-const ESRCH: u32 = 3;
-const ENOEXEC: u32 = 8;
-const EBADF: u32 = 9;
-const ECHILD: u32 = 10;
-const EAGAIN: u32 = 11;
-const EINTR: u32 = 4;
-const EFAULT: u32 = 14;
-const EACCES: u32 = 13;
-const ENOMEM: u32 = 12;
-const ENOTDIR: u32 = 20;
-const EINVAL: u32 = 22;
-const EPIPE: u32 = 32;
-const ERANGE: u32 = 34;
-const ENOTTY: u32 = 25;
-
 fn reap_status(code: u32, signal: Option<u32>) -> u32 {
     match signal {
         Some(sig) => sig & 0x7f,
@@ -10859,14 +10843,6 @@ fn data_access() -> polyisa_mem::Access {
         align: polyisa_mem::Align::Unaligned,
         kind: polyisa_mem::AccessKind::DataRead,
     }
-}
-
-fn get64(env: &mut BareEnv, r: polyisa_guest_x86::sem::Gpr) -> u64 {
-    polyisa_guest_x86::sem::read64(&mut env.backend, r)
-}
-
-fn set64(env: &mut BareEnv, r: polyisa_guest_x86::sem::Gpr, v: u64) {
-    polyisa_guest_x86::sem::write64(&mut env.backend, r, v);
 }
 
 /// ホスト metadata から x86-64 struct stat (144B) を合成する。

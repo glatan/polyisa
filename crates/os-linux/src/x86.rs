@@ -7,7 +7,35 @@
 
 // Ref: SRC-LINUX (7.3).
 
+use polyisa_engine::bare::BareEnv;
 use polyisa_guest_x86::sem::Gpr;
+
+/// Linux 汎用の errno 番号の一部。負数で返す。
+// Ref: SRC-LINUX (7.3).
+pub const EPERM: u32 = 1;
+pub const ENOENT: u32 = 2;
+pub const ESRCH: u32 = 3;
+pub const ENOEXEC: u32 = 8;
+pub const EBADF: u32 = 9;
+pub const ECHILD: u32 = 10;
+pub const EAGAIN: u32 = 11;
+pub const EINTR: u32 = 4;
+pub const EFAULT: u32 = 14;
+pub const EACCES: u32 = 13;
+pub const ENOMEM: u32 = 12;
+pub const ENOTDIR: u32 = 20;
+pub const EINVAL: u32 = 22;
+pub const EPIPE: u32 = 32;
+pub const ERANGE: u32 = 34;
+pub const ENOTTY: u32 = 25;
+
+pub fn get64(env: &mut BareEnv, r: Gpr) -> u64 {
+    polyisa_guest_x86::sem::read64(&mut env.backend, r)
+}
+
+pub fn set64(env: &mut BareEnv, r: Gpr, v: u64) {
+    polyisa_guest_x86::sem::write64(&mut env.backend, r, v)
+}
 
 /// dirfd の AT_FDCWD を 32 ビットで比べるときの値。
 pub const AT_FDCWD_U32: u32 = 0xffff_ff9c;
