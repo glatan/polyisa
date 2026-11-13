@@ -12149,8 +12149,9 @@ fn sys_select(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Tra
     polyisa_os_linux::x86::sys_select(env, cx)
 }
 
-fn sys_pselect6(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    sys_select(sys, env, cx)
+fn sys_pselect6(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は os-linux に置く。WP2 の移管が終わるまでの適合層.
+    polyisa_os_linux::x86::sys_pselect6(env, cx)
 }
 
 fn sys_sysfs(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
@@ -12168,8 +12169,9 @@ fn sys_inotify_init1(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Opt
     polyisa_os_linux::x86::sys_inotify_init1(env, cx)
 }
 
-fn sys_inotify_init(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    sys_inotify_init1(sys, env, cx)
+fn sys_inotify_init(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は os-linux に置く。WP2 の移管が終わるまでの適合層.
+    polyisa_os_linux::x86::sys_inotify_init(env, cx)
 }
 
 fn sys_inotify_add_watch(
@@ -12191,24 +12193,29 @@ fn sys_setuid(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Tra
     polyisa_os_linux::x86::sys_setuid(env, cx)
 }
 
-fn sys_setgid(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    sys_setuid(sys, env, cx)
+fn sys_setgid(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は os-linux に置く。WP2 の移管が終わるまでの適合層.
+    polyisa_os_linux::x86::sys_setgid(env, cx)
 }
 
-fn sys_setreuid(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    sys_setuid(sys, env, cx)
+fn sys_setreuid(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は os-linux に置く。WP2 の移管が終わるまでの適合層.
+    polyisa_os_linux::x86::sys_setreuid(env, cx)
 }
 
-fn sys_setregid(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    sys_setuid(sys, env, cx)
+fn sys_setregid(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は os-linux に置く。WP2 の移管が終わるまでの適合層.
+    polyisa_os_linux::x86::sys_setregid(env, cx)
 }
 
-fn sys_setresuid(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    sys_setuid(sys, env, cx)
+fn sys_setresuid(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は os-linux に置く。WP2 の移管が終わるまでの適合層.
+    polyisa_os_linux::x86::sys_setresuid(env, cx)
 }
 
-fn sys_setresgid(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    sys_setuid(sys, env, cx)
+fn sys_setresgid(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は os-linux に置く。WP2 の移管が終わるまでの適合層.
+    polyisa_os_linux::x86::sys_setresgid(env, cx)
 }
 
 fn sys_syslog(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
@@ -12407,8 +12414,9 @@ fn sys_getuid(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Tra
     polyisa_os_linux::x86::sys_getuid(env, cx)
 }
 
-fn sys_geteuid(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    sys_getuid(sys, env, cx)
+fn sys_geteuid(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は os-linux に置く。WP2 の移管が終わるまでの適合層.
+    polyisa_os_linux::x86::sys_geteuid(env, cx)
 }
 
 fn sys_getgid(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
@@ -12416,8 +12424,9 @@ fn sys_getgid(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Tra
     polyisa_os_linux::x86::sys_getgid(env, cx)
 }
 
-fn sys_getegid(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    sys_getgid(sys, env, cx)
+fn sys_getegid(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は os-linux に置く。WP2 の移管が終わるまでの適合層.
+    polyisa_os_linux::x86::sys_getegid(env, cx)
 }
 
 fn sys_getcwd(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
@@ -13092,8 +13101,9 @@ fn sys_fchmod(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Tra
     polyisa_os_linux::x86::sys_fchmod(env, cx)
 }
 
-fn sys_fchmodat(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    sys_chmod(sys, env, cx)
+fn sys_fchmodat(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は os-linux に置く。WP2 の移管が終わるまでの適合層.
+    polyisa_os_linux::x86::sys_fchmodat(env, cx)
 }
 
 fn sys_chown(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {

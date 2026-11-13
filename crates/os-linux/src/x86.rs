@@ -2531,3 +2531,33 @@ pub fn sys_getdents64(
     set64(env, Gpr(0), out.len() as u64);
     Some(TrapOutcome::Handled)
 }
+pub fn sys_fchmodat(env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    sys_chmod(env, cx)
+}
+pub fn sys_getegid(env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    sys_getgid(env, cx)
+}
+pub fn sys_geteuid(env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    sys_getuid(env, cx)
+}
+pub fn sys_inotify_init(env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    sys_inotify_init1(env, cx)
+}
+pub fn sys_setgid(env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    sys_setuid(env, cx)
+}
+pub fn sys_setregid(env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    sys_setuid(env, cx)
+}
+pub fn sys_setresgid(env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    sys_setuid(env, cx)
+}
+pub fn sys_setreuid(env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    sys_setuid(env, cx)
+}
+pub fn sys_setresuid(env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    sys_setuid(env, cx)
+}
+pub fn sys_pselect6(env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    sys_select(env, cx)
+}
