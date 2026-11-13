@@ -13600,6 +13600,8 @@ fn sys_link(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOu
 fn sys_symlink(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     // symlink(oldpath, newpath)。`ln -s` で使う。
     // 可搬 API がないため実体はクリエート host の helper に置く。
+    // host 依存は cli のみに限る設計（workspace.md「依存規則」）のため、
+    // 解決済みでも os-linux へは移さずここに残す。
     // 作成先だけ解決し、指し先は verbatim に保つ。
     let old_addr = get64(env, cx.r_a);
     let new_addr = get64(env, cx.r_b);
