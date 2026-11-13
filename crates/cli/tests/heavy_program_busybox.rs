@@ -773,6 +773,14 @@ fn true_echo_uname_id_match() {
         .unwrap_or_else(|e| panic!("powertop: {e}"));
     assert_eq!(code, 0);
     assert!(out.is_empty());
+    // linuxrc はホスト実行がハングするため比べない。
+    // ゲストは空出力で終了 0。init 系の合成時に見直す。
+    let linuxrc = ["linuxrc", "--help"];
+    let argv: Vec<String> = linuxrc.iter().map(|s| (*s).to_string()).collect();
+    let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)
+        .unwrap_or_else(|e| panic!("linuxrc: {e}"));
+    assert_eq!(code, 0);
+    assert!(out.is_empty());
 }
 
 #[test]
