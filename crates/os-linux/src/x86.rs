@@ -9,6 +9,7 @@
 
 use polyisa_engine::bare::BareEnv;
 use polyisa_guest_x86::sem::Gpr;
+use polyisa_kernel::FdTable;
 use polyisa_mem::{Access, AccessKind, Align, Endian, VirtAddr};
 use polyisa_sem::Backend;
 
@@ -1667,4 +1668,223 @@ pub fn sys_sched_setscheduler(me: u64, env: &mut BareEnv, cx: &SysCtx) -> Option
     }
     set64(env, Gpr(0), 0);
     Some(TrapOutcome::Handled)
+}
+pub fn guest_readlink_target(
+    root: &str,
+    cwd: &str,
+    exe_path: &str,
+    fds: &FdTable,
+    path: &str,
+) -> Result<String, u32> {
+    // /proc/self/exe はゲスト実行ファイルのホストパスへ読み替える。
+    if path == "/proc/self/exe" && !exe_path.is_empty() {
+        return Ok(exe_path.to_string());
+    }
+    // musl の realpath は開いた fd を /proc/self/fd/N の readlink で読む。
+    // ホストの同じ番号は別物なので、開いたときに覚えたパスを返す。
+    if let Some(rest) = path.strip_prefix("/proc/self/fd/")
+        && !rest.is_empty()
+        && rest.bytes().all(|b| b.is_ascii_digit())
+        && let Ok(fd) = rest.parse::<u32>()
+    {
+        return match fds.path_of(fd) {
+            Some(p) => Ok(p.to_string()),
+            None => Err(ENOENT),
+        };
+    }
+    // それ以外のパスはゲストルート配下で解決する。はみ出しは EPERM。
+    let path = match resolve_guest_path(root, cwd, path) {
+        Some(p) => p,
+        None => return Err(EPERM),
+    };
+    match std::fs::read_link(&path) {
+        Ok(p) => Ok(p.into_os_string().into_string().unwrap_or_default()),
+        Err(e) => Err(match e.kind() {
+            std::io::ErrorKind::NotFound => ENOENT,
+            std::io::ErrorKind::PermissionDenied => EACCES,
+            _ => EINVAL,
+        }),
+    }
+}
+pub fn sys_readlink(
+    root: &str,
+    cwd: &str,
+    exe_path: &str,
+    fds: &FdTable,
+    env: &mut BareEnv,
+    cx: &SysCtx,
+) -> Option<TrapOutcome> {
+    // readlink(pathname, buf, bufsiz)。readlinkat から dirfd 検証を除いた形.
+    let (path_addr, buf, bufsiz) = if cx.is64 {
+        (get64(env, Gpr(7)), get64(env, Gpr(6)), get64(env, Gpr(2)))
+    } else {
+        (
+            u64::from(env.backend.get(Gpr(3).state())),
+            u64::from(env.backend.get(Gpr(1).state())),
+            u64::from(env.backend.get(Gpr(2).state())),
+        )
+    };
+    if bufsiz == 0 {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    let path = match guest_c_string(env, path_addr) {
+        Some(p) => p,
+        None => return Some(TrapOutcome::Unimplemented),
+    };
+    const MAX_READLINK: u64 = 4096;
+    if bufsiz > MAX_READLINK {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    let target = match guest_readlink_target(root, cwd, exe_path, fds, &path) {
+        Ok(p) => p,
+        Err(no) => {
+            set64(env, Gpr(0), cx.neg(no));
+            return Some(TrapOutcome::Handled);
+        }
+    };
+    let bytes = target.as_bytes();
+    let take = (bytes.len() as u64).min(bufsiz) as usize;
+    if env
+        .backend
+        .mem
+        .write(polyisa_mem::VirtAddr(buf), &bytes[..take])
+        .is_err()
+    {
+        return Some(TrapOutcome::Unimplemented);
+    }
+    set64(env, Gpr(0), take as u64);
+    Some(TrapOutcome::Handled)
+}
+pub fn sys_readlinkat(
+    root: &str,
+    cwd: &str,
+    exe_path: &str,
+    fds: &FdTable,
+    env: &mut BareEnv,
+    cx: &SysCtx,
+) -> Option<TrapOutcome> {
+    // readlinkat(dirfd, pathname, buf, bufsiz)。AT_FDCWD+絶対パスのみ.
+    // ホストの read_link に直結し、切詰めて返す（NUL 終端なし）。
+    let (dirfd, path_addr, buf, bufsiz) = if cx.is64 {
+        (
+            get64(env, Gpr(7)),
+            get64(env, Gpr(6)),
+            get64(env, Gpr(2)),
+            get64(env, Gpr(10)),
+        )
+    } else {
+        (
+            u64::from(env.backend.get(Gpr(3).state())),
+            u64::from(env.backend.get(Gpr(1).state())),
+            u64::from(env.backend.get(Gpr(2).state())),
+            u64::from(env.backend.get(Gpr(6).state())),
+        )
+    };
+    if !cx.is_at_fdcwd(dirfd) {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    if bufsiz == 0 {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    let path = match guest_c_string(env, path_addr) {
+        Some(p) => p,
+        None => return Some(TrapOutcome::Unimplemented),
+    };
+    if !path.starts_with('/') {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    // 拡張しすぎは失敗扱い.
+    const MAX_READLINK: u64 = 4096;
+    if bufsiz > MAX_READLINK {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    // /proc/self/exe はゲスト実行ファイル自身を返す (ホスト exe ではない).
+    // 空の exe_path (単体テスト) ではホストに直結する.
+    let target = match guest_readlink_target(root, cwd, exe_path, fds, &path) {
+        Ok(p) => p,
+        Err(no) => {
+            set64(env, Gpr(0), cx.neg(no));
+            return Some(TrapOutcome::Handled);
+        }
+    };
+    let bytes = target.as_bytes();
+    let take = (bytes.len() as u64).min(bufsiz) as usize;
+    if env
+        .backend
+        .mem
+        .write(polyisa_mem::VirtAddr(buf), &bytes[..take])
+        .is_err()
+    {
+        return Some(TrapOutcome::Unimplemented);
+    }
+    set64(env, Gpr(0), take as u64);
+    Some(TrapOutcome::Handled)
+}
+pub fn sys_unlinkat(
+    root: &str,
+    cwd: &str,
+    fds: &FdTable,
+    env: &mut BareEnv,
+    cx: &SysCtx,
+) -> Option<TrapOutcome> {
+    // unlinkat(dirfd, path, flags)。flags は 0/AT_REMOVEDIR(0x200)。
+    // AT_FDCWD は作業ディレクトリ、開いたディレクトリは覚えたパスから外す。
+    let (dirfd, path_addr, flags) = if cx.is64 {
+        (get64(env, Gpr(7)), get64(env, Gpr(6)), get64(env, Gpr(2)))
+    } else {
+        (
+            u64::from(env.backend.get(Gpr(3).state())),
+            u64::from(env.backend.get(Gpr(1).state())),
+            u64::from(env.backend.get(Gpr(2).state())),
+        )
+    };
+    if flags & !0x200 != 0 {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    let path = match guest_c_string(env, path_addr) {
+        Some(p) => p,
+        None => return Some(TrapOutcome::Unimplemented),
+    };
+    let base = if cx.is_at_fdcwd(dirfd) {
+        cwd.to_string()
+    } else {
+        match fds.path_of(dirfd as u32) {
+            Some(p) => p.to_string(),
+            None => {
+                set64(env, Gpr(0), cx.neg(EBADF));
+                return Some(TrapOutcome::Handled);
+            }
+        }
+    };
+    let Some(path) = resolve_guest_path(root, &base, &path) else {
+        set64(env, Gpr(0), cx.neg(EPERM));
+        return Some(TrapOutcome::Handled);
+    };
+    let res = if flags & 0x200 != 0 {
+        std::fs::remove_dir(&path)
+    } else {
+        std::fs::remove_file(&path)
+    };
+    Some(match res {
+        Ok(()) => {
+            set64(env, Gpr(0), 0);
+            TrapOutcome::Handled
+        }
+        Err(e) => {
+            let no = match e.kind() {
+                std::io::ErrorKind::NotFound => ENOENT,
+                std::io::ErrorKind::PermissionDenied => EACCES,
+                _ => EINVAL,
+            };
+            set64(env, Gpr(0), cx.neg(no));
+            TrapOutcome::Handled
+        }
+    })
 }

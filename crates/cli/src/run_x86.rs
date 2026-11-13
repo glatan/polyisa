@@ -13185,144 +13185,22 @@ fn sys_clock_gettime(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Opti
     Some(TrapOutcome::Handled)
 }
 
-fn guest_readlink_target(sys: &CliLinux, path: &str) -> Result<String, u32> {
-    // /proc/self/exe はゲスト実行ファイルのホストパスへ読み替える。
-    if path == "/proc/self/exe" && !sys.exe_path.is_empty() {
-        return Ok(sys.exe_path.clone());
-    }
-    // musl の realpath は開いた fd を /proc/self/fd/N の readlink で読む。
-    // ホストの同じ番号は別物なので、開いたときに覚えたパスを返す。
-    if let Some(rest) = path.strip_prefix("/proc/self/fd/")
-        && !rest.is_empty()
-        && rest.bytes().all(|b| b.is_ascii_digit())
-        && let Ok(fd) = rest.parse::<u32>()
-    {
-        return match sys.path_of(fd) {
-            Some(p) => Ok(p.to_string()),
-            None => Err(ENOENT),
-        };
-    }
-    // それ以外のパスはゲストルート配下で解決する。はみ出しは EPERM。
-    let path = match resolve_guest_path(&sys.guest_root, &sys.cwd, path) {
-        Some(p) => p,
-        None => return Err(EPERM),
-    };
-    match std::fs::read_link(&path) {
-        Ok(p) => Ok(p.into_os_string().into_string().unwrap_or_default()),
-        Err(e) => Err(match e.kind() {
-            std::io::ErrorKind::NotFound => ENOENT,
-            std::io::ErrorKind::PermissionDenied => EACCES,
-            _ => EINVAL,
-        }),
-    }
-}
-
 fn sys_readlinkat(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // readlinkat(dirfd, pathname, buf, bufsiz)。AT_FDCWD+絶対パスのみ.
-    // ホストの read_link に直結し、切詰めて返す（NUL 終端なし）。
-    let (dirfd, path_addr, buf, bufsiz) = if cx.is64 {
-        (
-            get64(env, Gpr(7)),
-            get64(env, Gpr(6)),
-            get64(env, Gpr(2)),
-            get64(env, Gpr(10)),
-        )
-    } else {
-        (
-            u64::from(env.backend.get(Gpr(3).state())),
-            u64::from(env.backend.get(Gpr(1).state())),
-            u64::from(env.backend.get(Gpr(2).state())),
-            u64::from(env.backend.get(Gpr(6).state())),
-        )
-    };
-    if !cx.is_at_fdcwd(dirfd) {
-        set64(env, Gpr(0), cx.neg(EINVAL));
-        return Some(TrapOutcome::Handled);
-    }
-    if bufsiz == 0 {
-        set64(env, Gpr(0), cx.neg(EINVAL));
-        return Some(TrapOutcome::Handled);
-    }
-    let path = match guest_c_string(env, path_addr) {
-        Some(p) => p,
-        None => return Some(TrapOutcome::Unimplemented),
-    };
-    if !path.starts_with('/') {
-        set64(env, Gpr(0), cx.neg(EINVAL));
-        return Some(TrapOutcome::Handled);
-    }
-    // 拡張しすぎは失敗扱い.
-    const MAX_READLINK: u64 = 4096;
-    if bufsiz > MAX_READLINK {
-        set64(env, Gpr(0), cx.neg(EINVAL));
-        return Some(TrapOutcome::Handled);
-    }
-    // /proc/self/exe はゲスト実行ファイル自身を返す (ホスト exe ではない).
-    // 空の exe_path (単体テスト) ではホストに直結する.
-    let target = match guest_readlink_target(sys, &path) {
-        Ok(p) => p,
-        Err(no) => {
-            set64(env, Gpr(0), cx.neg(no));
-            return Some(TrapOutcome::Handled);
-        }
-    };
-    let bytes = target.as_bytes();
-    let take = (bytes.len() as u64).min(bufsiz) as usize;
-    if env
-        .backend
-        .mem
-        .write(polyisa_mem::VirtAddr(buf), &bytes[..take])
-        .is_err()
-    {
-        return Some(TrapOutcome::Unimplemented);
-    }
-    set64(env, Gpr(0), take as u64);
-    Some(TrapOutcome::Handled)
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    sys.ensure_cwd();
+    let root = sys.guest_root.clone();
+    let cwd = sys.cwd.clone();
+    let exe = sys.exe_path.clone();
+    polyisa_os_linux::x86::sys_readlinkat(&root, &cwd, &exe, &sys.fds, env, cx)
 }
 
 fn sys_readlink(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // readlink(pathname, buf, bufsiz)。readlinkat から dirfd 検証を除いた形.
-    let (path_addr, buf, bufsiz) = if cx.is64 {
-        (get64(env, Gpr(7)), get64(env, Gpr(6)), get64(env, Gpr(2)))
-    } else {
-        (
-            u64::from(env.backend.get(Gpr(3).state())),
-            u64::from(env.backend.get(Gpr(1).state())),
-            u64::from(env.backend.get(Gpr(2).state())),
-        )
-    };
-    if bufsiz == 0 {
-        set64(env, Gpr(0), cx.neg(EINVAL));
-        return Some(TrapOutcome::Handled);
-    }
-    let path = match guest_c_string(env, path_addr) {
-        Some(p) => p,
-        None => return Some(TrapOutcome::Unimplemented),
-    };
-    const MAX_READLINK: u64 = 4096;
-    if bufsiz > MAX_READLINK {
-        set64(env, Gpr(0), cx.neg(EINVAL));
-        return Some(TrapOutcome::Handled);
-    }
-    let target = match guest_readlink_target(sys, &path) {
-        Ok(p) => p,
-        Err(no) => {
-            set64(env, Gpr(0), cx.neg(no));
-            return Some(TrapOutcome::Handled);
-        }
-    };
-    let bytes = target.as_bytes();
-    let take = (bytes.len() as u64).min(bufsiz) as usize;
-    if env
-        .backend
-        .mem
-        .write(polyisa_mem::VirtAddr(buf), &bytes[..take])
-        .is_err()
-    {
-        return Some(TrapOutcome::Unimplemented);
-    }
-    set64(env, Gpr(0), take as u64);
-    Some(TrapOutcome::Handled)
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    sys.ensure_cwd();
+    let root = sys.guest_root.clone();
+    let cwd = sys.cwd.clone();
+    let exe = sys.exe_path.clone();
+    polyisa_os_linux::x86::sys_readlink(&root, &cwd, &exe, &sys.fds, env, cx)
 }
 
 fn sys_arch_prctl(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
@@ -13598,61 +13476,11 @@ fn sys_unlink(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Trap
 }
 
 fn sys_unlinkat(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // unlinkat(dirfd, path, flags)。flags は 0/AT_REMOVEDIR(0x200)。
-    // AT_FDCWD は作業ディレクトリ、開いたディレクトリは覚えたパスから外す。
-    let (dirfd, path_addr, flags) = if cx.is64 {
-        (get64(env, Gpr(7)), get64(env, Gpr(6)), get64(env, Gpr(2)))
-    } else {
-        (
-            u64::from(env.backend.get(Gpr(3).state())),
-            u64::from(env.backend.get(Gpr(1).state())),
-            u64::from(env.backend.get(Gpr(2).state())),
-        )
-    };
-    if flags & !0x200 != 0 {
-        set64(env, Gpr(0), cx.neg(EINVAL));
-        return Some(TrapOutcome::Handled);
-    }
-    let path = match guest_c_string(env, path_addr) {
-        Some(p) => p,
-        None => return Some(TrapOutcome::Unimplemented),
-    };
-    let base = if cx.is_at_fdcwd(dirfd) {
-        sys.ensure_cwd();
-        sys.cwd.clone()
-    } else {
-        match sys.path_of(dirfd as u32) {
-            Some(p) => p.to_string(),
-            None => {
-                set64(env, Gpr(0), cx.neg(EBADF));
-                return Some(TrapOutcome::Handled);
-            }
-        }
-    };
-    let Some(path) = resolve_guest_path(&sys.guest_root, &base, &path) else {
-        set64(env, Gpr(0), cx.neg(EPERM));
-        return Some(TrapOutcome::Handled);
-    };
-    let res = if flags & 0x200 != 0 {
-        std::fs::remove_dir(&path)
-    } else {
-        std::fs::remove_file(&path)
-    };
-    Some(match res {
-        Ok(()) => {
-            set64(env, Gpr(0), 0);
-            TrapOutcome::Handled
-        }
-        Err(e) => {
-            let no = match e.kind() {
-                std::io::ErrorKind::NotFound => ENOENT,
-                std::io::ErrorKind::PermissionDenied => EACCES,
-                _ => EINVAL,
-            };
-            set64(env, Gpr(0), cx.neg(no));
-            TrapOutcome::Handled
-        }
-    })
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    sys.ensure_cwd();
+    let root = sys.guest_root.clone();
+    let cwd = sys.cwd.clone();
+    polyisa_os_linux::x86::sys_unlinkat(&root, &cwd, &sys.fds, env, cx)
 }
 
 fn sys_access(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
