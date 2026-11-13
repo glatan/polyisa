@@ -781,6 +781,8 @@ fn true_echo_uname_id_match() {
         .unwrap_or_else(|e| panic!("linuxrc: {e}"));
     assert_eq!(code, 0);
     assert!(out.is_empty());
+    // rx -h はホストもゲストもカレントに空ファイル -h を作る。残骸は消す。
+    let _ = std::fs::remove_file("-h");
 }
 
 #[test]
