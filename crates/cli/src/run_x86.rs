@@ -14,7 +14,7 @@ use polyisa_os_linux::x86::Linux;
 use polyisa_sem::{Backend, ExceptionKind};
 
 use polyisa_guest_x86::sem;
-use polyisa_guest_x86::{Insn, decode};
+use polyisa_guest_x86::{Insn, decode_model_ex};
 
 pub use polyisa_engine::run::{Outcome, TrapHandler, TrapOutcome};
 
@@ -1722,6 +1722,19 @@ pub fn run_mode(
     limit: u64,
     is64: bool,
 ) -> Outcome {
+    run_mode_ex(env, entry, sys, limit, is64, 0)
+}
+
+/// `run_mode` に機能集合を渡す。`feats` は生成した `FEAT_*` のビット和で
+/// `decode_model_ex` に渡る（ADR-0006、`--cpu` の配線）。
+pub fn run_mode_ex(
+    env: &mut BareEnv,
+    entry: u32,
+    sys: &mut impl TrapHandler,
+    limit: u64,
+    is64: bool,
+    feats: u64,
+) -> Outcome {
     env.backend.set(polyisa_guest_x86::sem::eip_ref(), entry);
     // 32 ビットゲストの実効アドレスは 32 ビットで折り返す。負のオフセットを含む
     // 加算が 4GiB を越えても未映射判定にならないよう、アクセス幅をここで絞る。
@@ -1735,7 +1748,7 @@ pub fn run_mode(
         sys,
         limit,
         |env| u64::from(eip_of(env)),
-        |env, sys| step_x86(env, sys, is64, &mut hist),
+        |env, sys| step_x86(env, sys, is64, feats, &mut hist),
     )
 }
 
@@ -1748,6 +1761,7 @@ fn step_x86(
     env: &mut BareEnv,
     sys: &mut dyn TrapHandler,
     is64: bool,
+    feats: u64,
     hist: &mut std::collections::VecDeque<(u32, String)>,
 ) -> Result<(), Outcome> {
     let pc = eip_of(env) as u64;
@@ -2215,7 +2229,7 @@ fn step_x86(
         word = (word << 8) | bytes[i as usize] as u128;
     }
     let len_bits = (base * 8) as u32;
-    let Some(insn) = decode(word, len_bits) else {
+    let Some(insn) = decode_model_ex(word, len_bits, true, feats) else {
         return Err(Outcome::Unimplemented { pc, word });
     };
     if std::env::var_os("POLYISA_HIST").is_some()
@@ -10480,6 +10494,17 @@ pub fn run_image_x86_32(
     argv: &[String],
     sys: &mut impl TrapHandler,
 ) -> Result<u64, String> {
+    run_image_x86_32_ex(bytes, prog, argv, sys, 0)
+}
+
+/// `run_image_x86_32` に機能集合を渡す（`--cpu` の配線）。
+pub fn run_image_x86_32_ex(
+    bytes: &[u8],
+    prog: &str,
+    argv: &[String],
+    sys: &mut impl TrapHandler,
+    feats: u64,
+) -> Result<u64, String> {
     use polyisa_guest_x86::sem::Gpr;
     use polyisa_mem::{PAGE_SIZE, Perms};
 
@@ -10554,7 +10579,7 @@ pub fn run_image_x86_32(
     env.backend.set(Gpr(4).state(), sp as u32);
     // x87 制御ワードの初期値（丸め最近接の 0x037F）。FNSTCW/FLDCW で使う.
     env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037F);
-    match run(&mut env, ehdr.entry as u32, sys, 1_000_000) {
+    match run_mode_ex(&mut env, ehdr.entry as u32, sys, 1_000_000, false, feats) {
         Outcome::Exit(code) => Ok(code),
         Outcome::Unimplemented { pc, word } => Err(format!("unimplemented at {pc:#x}: {word:#x}")),
         Outcome::StepLimit { pc } => Err(format!("step limit at {pc:#x}")),
@@ -10564,9 +10589,18 @@ pub fn run_image_x86_32(
 
 /// ELF ファイルを実行する。`run_elf` の x86 版である。
 pub fn run_elf_x86_32(path: &str, argv: &[String]) -> Result<u64, String> {
+    run_elf_x86_32_sel(path, argv, None)
+}
+
+/// `run_elf_x86_32` に CPU モデルの選択を渡す（`--cpu` の配線）。
+pub fn run_elf_x86_32_sel(
+    path: &str,
+    argv: &[String],
+    sel: Option<&polyisa_isadl::select::CpuSel>,
+) -> Result<u64, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
     let mut sys = Linux::x86_32();
-    run_image_x86_32(&bytes, path, argv, &mut sys)
+    run_image_x86_32_ex(&bytes, path, argv, &mut sys, sel.map_or(0, |s| s.feats))
 }
 
 /// ELF32 を実行し、終了コードと fd 1 の出力を返す。ホストの stdout には書かない。
@@ -10587,6 +10621,17 @@ pub fn run_image_x86_64(
     prog: &str,
     argv: &[String],
     sys: &mut Linux,
+) -> Result<u64, String> {
+    run_image_x86_64_ex(bytes, prog, argv, sys, 0)
+}
+
+/// `run_image_x86_64` に機能集合を渡す（`--cpu` の配線）。
+pub fn run_image_x86_64_ex(
+    bytes: &[u8],
+    prog: &str,
+    argv: &[String],
+    sys: &mut Linux,
+    feats: u64,
 ) -> Result<u64, String> {
     use polyisa_guest_x86::sem::Gpr;
     use polyisa_mem::{PAGE_SIZE, Perms};
@@ -10644,7 +10689,7 @@ pub fn run_image_x86_64(
     polyisa_guest_x86::sem::write64(&mut env.backend, Gpr(4), sp);
     // x87 制御ワードの初期値（丸め最近接の 0x037F）。FNSTCW/FLDCW で使う.
     env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037F);
-    match run_mode(&mut env, ehdr.entry as u32, sys, 30_000_000, true) {
+    match run_mode_ex(&mut env, ehdr.entry as u32, sys, 30_000_000, true, feats) {
         Outcome::Exit(code) => Ok(code),
         Outcome::Unimplemented { pc, word } => Err(format!("unimplemented at {pc:#x}: {word:#x}")),
         Outcome::StepLimit { pc } => Err(format!("step limit at {pc:#x}")),
@@ -10654,9 +10699,18 @@ pub fn run_image_x86_64(
 
 /// ELF64 ファイルを実行する。`run_elf_x86_32` の x86-64 版である。
 pub fn run_elf_x86_64(path: &str, argv: &[String]) -> Result<u64, String> {
+    run_elf_x86_64_sel(path, argv, None)
+}
+
+/// `run_elf_x86_64` に CPU モデルの選択を渡す（`--cpu` の配線）。
+pub fn run_elf_x86_64_sel(
+    path: &str,
+    argv: &[String],
+    sel: Option<&polyisa_isadl::select::CpuSel>,
+) -> Result<u64, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
     let mut sys = Linux::x86_64();
-    run_image_x86_64(&bytes, path, argv, &mut sys)
+    run_image_x86_64_ex(&bytes, path, argv, &mut sys, sel.map_or(0, |s| s.feats))
 }
 
 /// ELF64 を実行し、終了コードと fd 1 の出力を返す。ホストの stdout には書かない。

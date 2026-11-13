@@ -12,6 +12,7 @@ polyisa-guest-mips = { path = "../../guests/mips" }
 polyisa-guest-riscv = { path = "../../guests/riscv" }
 polyisa-guest-x86 = { path = "../../guests/x86" }
 polyisa-host = { path = "../host" }
+polyisa-isadl = { path = "../isadl" }
 polyisa-kernel = { path = "../kernel" }
 polyisa-loader = { path = "../loader" }
 polyisa-mem = { path = "../mem" }

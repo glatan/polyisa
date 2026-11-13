@@ -86,6 +86,12 @@ fn gen_decoder(model: &Model) -> Result<String, GenError> {
             i
         ));
     }
+    // 機能名から feats のビットへの対応。CPU モデルの解決が使う。
+    s.push_str("pub const FEAT_BITS: &[(&str, u64)] = &[\n");
+    for name in &extra {
+        s.push_str(&format!("    ({name:?}, {}),\n", feat_const(name)));
+    }
+    s.push_str("];\n");
     s.push_str(
         "pub fn decode_model_ex(word: u128, len: u32, is_rv64: bool, feats: u64) -> Option<Insn> {\n",
     );
@@ -374,9 +380,48 @@ fn gen_metadata(model: &Model) -> String {
         s.push_str(&format!("    {:?},\n", f.name));
     }
     s.push_str("];\n");
+    // 機能の宣言全体（implies/conflicts 込み）。`--cpu` の解決が使う。
+    s.push_str("pub const FEATURE_DEFS: &[(&str, &[&str], &[&str])] = &[\n");
+    for f in &model.features {
+        let list = |v: &[String]| {
+            let inner = v
+                .iter()
+                .map(|s| format!("{s:?}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("&[{inner}]")
+        };
+        s.push_str(&format!(
+            "    ({:?}, {}, {}),\n",
+            f.name,
+            list(&f.implies),
+            list(&f.conflicts)
+        ));
+    }
+    s.push_str("];\n");
     s.push_str("pub const MODELS: &[&str] = &[\n");
     for m in &model.models {
         s.push_str(&format!("    {:?},\n", m.name));
+    }
+    s.push_str("];\n");
+    // CPU モデルの定義全体（親と機能の足し引き）。`--cpu` の解決が使う。
+    s.push_str("pub const MODEL_DEFS: &[(&str, &str, &[&str], &[&str])] = &[\n");
+    for m in &model.models {
+        let list = |v: &[String]| {
+            let inner = v
+                .iter()
+                .map(|s| format!("{s:?}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("&[{inner}]")
+        };
+        s.push_str(&format!(
+            "    ({:?}, {:?}, {}, {}),\n",
+            m.name,
+            m.parent,
+            list(&m.add_features),
+            list(&m.remove_features)
+        ));
     }
     s.push_str("];\n");
     s

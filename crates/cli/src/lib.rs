@@ -12,21 +12,121 @@ pub mod run_x86;
 /// 番号表の出典は各 `run_elf_*` 側にある。RV32 を含むそれ以外の組み合わせは
 /// 未対応として拒否する（従来の `run_elf` も RV32 を受け付けない）。
 pub fn run_path(path: &str, argv: &[String]) -> Result<u64, String> {
+    run_path_with(path, argv, None)
+}
+
+/// `--cpu` の指定。文法は cpu-models.md の「実行時の選択」:
+/// `<ISA ファミリ>:<CPU モデル>[,+<機能>][,-<機能>][,<パラメータ>=<値>]`。
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct CpuSpec {
+    pub family: String,
+    pub model: String,
+    pub add: Vec<String>,
+    pub remove: Vec<String>,
+    /// `パラメータ=値`。挙動パラメータの宣言はまだない（GAP-0027）。
+    pub params: Vec<(String, String)>,
+}
+
+/// `--cpu` の値を解析する。`+機能`、`-機能`、`パラメータ=値` を列に分ける。
+pub fn parse_cpu_spec(s: &str) -> Result<CpuSpec, String> {
+    let Some((family, rest)) = s.split_once(':') else {
+        return Err(format!("--cpu は <ファミリ>:<モデル> の形: {s}"));
+    };
+    let mut it = rest.split(',');
+    let model = it.next().unwrap_or_default().to_string();
+    let mut spec = CpuSpec {
+        family: family.to_string(),
+        model,
+        add: Vec::new(),
+        remove: Vec::new(),
+        params: Vec::new(),
+    };
+    for item in it {
+        if let Some(f) = item.strip_prefix('+') {
+            spec.add.push(f.to_string());
+        } else if let Some(f) = item.strip_prefix('-') {
+            spec.remove.push(f.to_string());
+        } else if let Some((k, v)) = item.split_once('=') {
+            spec.params.push((k.to_string(), v.to_string()));
+        } else {
+            return Err(format!(
+                "--cpu の項は +機能、-機能、パラメータ=値 の形: {item}"
+            ));
+        }
+    }
+    Ok(spec)
+}
+
+/// モデル名と機能の足し引きを、そのファミリの生成表で `CpuSel` に解決する。
+fn resolve_sel(
+    family: &str,
+    models: &[polyisa_isadl::select::ModelRow],
+    features: &[polyisa_isadl::select::FeatureRow],
+    feat_bits: &[(&str, u64)],
+    spec: &CpuSpec,
+) -> Result<polyisa_isadl::select::CpuSel, String> {
+    if !spec.params.is_empty() {
+        let (k, _) = &spec.params[0];
+        return Err(format!("挙動パラメータ {k} は宣言されていない（GAP-0027）"));
+    }
+    let add: Vec<&str> = spec.add.iter().map(String::as_str).collect();
+    let remove: Vec<&str> = spec.remove.iter().map(String::as_str).collect();
+    polyisa_isadl::select::resolve(models, features, feat_bits, &spec.model, &add, &remove)
+        .map_err(|e| format!("{family}: {e}"))
+}
+
+/// `run_path` に `--cpu` の指定を加える。`cpu` は `parse_cpu_spec` の
+/// 入力と同じ文字列。ファミリが ELF の `e_machine` と合わなければ拒否する。
+pub fn run_path_with(path: &str, argv: &[String], cpu: Option<&str>) -> Result<u64, String> {
     use polyisa_loader::elf::{CLASS_32, CLASS_64, MAGIC};
+    let spec = cpu.map(parse_cpu_spec).transpose()?;
     let bytes = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
     if bytes.len() < 6 || bytes[0..4] != MAGIC {
         return Err(format!("{path} は ELF ではない"));
     }
+    let check = |want: &str| match &spec {
+        Some(s) if s.family != want => Err(format!(
+            "--cpu のファミリ {} は ELF の {want} と合わない",
+            s.family
+        )),
+        _ => Ok(()),
+    };
     match bytes[4] {
         CLASS_32 => {
             let ehdr =
                 polyisa_loader::elf::parse_ehdr32(&bytes).map_err(|e| format!("ehdr: {e:?}"))?;
             // EM_386=3。Ref: SRC-LINUX (7.3).
             if ehdr.machine == 3 {
-                run_x86::run_elf_x86_32(path, argv)
+                check("x86")?;
+                let sel = spec
+                    .as_ref()
+                    .map(|s| {
+                        resolve_sel(
+                            "x86",
+                            polyisa_guest_x86::MODEL_DEFS,
+                            polyisa_guest_x86::FEATURE_DEFS,
+                            polyisa_guest_x86::FEAT_BITS,
+                            s,
+                        )
+                    })
+                    .transpose()?;
+                run_x86::run_elf_x86_32_sel(path, argv, sel.as_ref())
             } else if ehdr.machine == 8 {
                 // EM_MIPS。Ref: SRC-LINUX (7.3)。アーキテクチャとエンディアンは ELF ヘッダから取る。
-                run_mips::run_elf_mips(path, argv)
+                check("mips")?;
+                let sel = spec
+                    .as_ref()
+                    .map(|s| {
+                        resolve_sel(
+                            "mips",
+                            polyisa_guest_mips::MODEL_DEFS,
+                            polyisa_guest_mips::FEATURE_DEFS,
+                            polyisa_guest_mips::FEAT_BITS,
+                            s,
+                        )
+                    })
+                    .transpose()?;
+                run_mips::run_elf_mips_sel(path, argv, sel.as_ref())
             } else {
                 Err(format!("未対応の e_machine: {}", ehdr.machine))
             }
@@ -36,10 +136,36 @@ pub fn run_path(path: &str, argv: &[String]) -> Result<u64, String> {
                 polyisa_loader::elf::parse_ehdr(&bytes).map_err(|e| format!("ehdr: {e:?}"))?;
             // EM_RISCV=243。Ref: SPEC-RISCV-PSABI (v1.0).
             if ehdr.machine == 243 {
-                run::run_elf(path, argv)
+                check("riscv")?;
+                let sel = spec
+                    .as_ref()
+                    .map(|s| {
+                        resolve_sel(
+                            "riscv",
+                            polyisa_guest_riscv::MODEL_DEFS,
+                            polyisa_guest_riscv::FEATURE_DEFS,
+                            polyisa_guest_riscv::FEAT_BITS,
+                            s,
+                        )
+                    })
+                    .transpose()?;
+                run::run_elf_sel(path, argv, sel.as_ref())
             } else if ehdr.machine == 62 {
                 // EM_X86_64。Ref: SRC-LINUX (7.3)。
-                run_x86::run_elf_x86_64(path, argv)
+                check("x86")?;
+                let sel = spec
+                    .as_ref()
+                    .map(|s| {
+                        resolve_sel(
+                            "x86",
+                            polyisa_guest_x86::MODEL_DEFS,
+                            polyisa_guest_x86::FEATURE_DEFS,
+                            polyisa_guest_x86::FEAT_BITS,
+                            s,
+                        )
+                    })
+                    .transpose()?;
+                run_x86::run_elf_x86_64_sel(path, argv, sel.as_ref())
             } else {
                 Err(format!("未対応の e_machine: {}", ehdr.machine))
             }
@@ -115,6 +241,18 @@ mod tests {
         );
         assert_eq!(disassemble_riscv(0x0085), Some("c.addi {rd}, {imm}"));
         assert_eq!(disassemble_riscv(0xffff_ffff), None);
+    }
+
+    #[test]
+    fn cpu_spec_parses() {
+        let s = parse_cpu_spec("riscv:rv64gc,+zba,-d,foo=1").unwrap();
+        assert_eq!(s.family, "riscv");
+        assert_eq!(s.model, "rv64gc");
+        assert_eq!(s.add, ["zba"]);
+        assert_eq!(s.remove, ["d"]);
+        assert_eq!(s.params, [("foo".to_string(), "1".to_string())]);
+        assert!(parse_cpu_spec("nocolon").is_err());
+        assert!(parse_cpu_spec("x86:generic32,bad").is_err());
     }
 
     #[test]

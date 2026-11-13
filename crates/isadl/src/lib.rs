@@ -12,6 +12,7 @@
 pub mod model;
 pub mod pattern;
 pub mod pred;
+pub mod select;
 pub mod validate;
 
 pub use model::Model;

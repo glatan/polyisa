@@ -11,7 +11,7 @@
 use polyisa_engine::bare::BareEnv;
 use polyisa_engine::interp::Ctrl;
 use polyisa_guest_riscv::sem::{Csr, Fpr, Gpr};
-use polyisa_guest_riscv::{CpuState, Insn, decode, decode_model, sem};
+use polyisa_guest_riscv::{CpuState, Insn, decode_model_ex, sem};
 use polyisa_mem::{Access, AccessKind, Align, Endian, VirtAddr};
 use polyisa_sem::{Backend as _, StateRef, W64};
 
@@ -112,20 +112,38 @@ fn off_j(word: u32) -> i64 {
 /// エントリから実行する。`rv32` は RV32 モデルを選ぶ。
 /// ecall は `sys` に委ね、それ以外は意味論で実行する。
 pub fn run(env: &mut BareEnv, entry: u64, rv32: bool, sys: &mut impl EcallHandler) -> Outcome {
+    run_ex(env, entry, rv32, 0, sys)
+}
+
+/// `run` に機能集合を渡す。`feats` は生成した `FEAT_*` のビット和で、
+/// `decode_model_ex` に渡る（ADR-0006）。CPU モデルの選択からの変換は
+/// `polyisa_isadl::select::resolve` が行う。
+pub fn run_ex(
+    env: &mut BareEnv,
+    entry: u64,
+    rv32: bool,
+    feats: u64,
+    sys: &mut impl EcallHandler,
+) -> Outcome {
     env.pc = entry;
     polyisa_engine::run::run(
         env,
         sys,
         STEP_LIMIT,
         |env| env.pc,
-        |env, sys| step_rv(env, sys, rv32),
+        |env, sys| step_rv(env, sys, rv32, feats),
     )
 }
 
 /// 1 命令ぶんのフェッチ・解読・意味論と ecall 境界の解決。
 /// 継続なら `Ok(())`、退出なら退出理由を返す。
 #[allow(clippy::too_many_lines)]
-fn step_rv(env: &mut BareEnv, sys: &mut impl EcallHandler, rv32: bool) -> Result<(), Outcome> {
+fn step_rv(
+    env: &mut BareEnv,
+    sys: &mut impl EcallHandler,
+    rv32: bool,
+    feats: u64,
+) -> Result<(), Outcome> {
     // 16 ビット単位でフェッチする（C 拡張のため）。32 ビット命令は
     // 下位 2 ビットが 0b11 である。
     let mut h = [0u8; 2];
@@ -170,12 +188,12 @@ fn step_rv(env: &mut BareEnv, sys: &mut impl EcallHandler, rv32: bool) -> Result
     if ilen == 2 {
         // 16 ビット命令は C 拡張の実行器に渡す。RV32 と重なる符号化の
         // 振り分けもそちらで行う（デコーダ自体は RV64 優先のまま）。
-        if let Some(o) = step_c(env, word as u16, rv32) {
+        if let Some(o) = step_c(env, word as u16, rv32, feats) {
             return Err(o);
         }
         return Ok(());
     }
-    let Some(insn) = decode(word as u128, 32) else {
+    let Some(insn) = decode_model_ex(word as u128, 32, !rv32, feats) else {
         return Err(Outcome::Unimplemented {
             pc: env.pc,
             word: u128::from(word),
@@ -1100,9 +1118,9 @@ fn step_rv(env: &mut BareEnv, sys: &mut impl EcallHandler, rv32: bool) -> Result
 /// RV32/RV64 で符号化が重なる命令は、モデル対応デコード（`decode_model`、
 /// ADR-0006）が `when` の述語で振り分ける。
 /// Ref: SPEC-RISCV-UNPRIV (20250508) §C.
-fn step_c(env: &mut BareEnv, w16: u16, rv32: bool) -> Option<Outcome> {
+fn step_c(env: &mut BareEnv, w16: u16, rv32: bool, feats: u64) -> Option<Outcome> {
     let word = u32::from(w16);
-    let Some(insn) = decode_model(u128::from(word), 16, !rv32) else {
+    let Some(insn) = decode_model_ex(u128::from(word), 16, !rv32, feats) else {
         return Some(Outcome::Unimplemented {
             pc: env.pc,
             word: u128::from(word),
@@ -1712,6 +1730,17 @@ fn run_c(env: &mut BareEnv, insn: Insn, word: u32, rv32: bool) -> Result<(), Out
 /// `CliEcall` が処理する（write/exit_group のみ。ほかは未対応として
 /// 報告し、未実装で止める）。動的リンク・VFS・シグナルは後の段階。
 pub fn run_elf(path: &str, argv: &[String]) -> Result<u64, String> {
+    run_elf_sel(path, argv, None)
+}
+
+/// `run_elf` に CPU モデルの選択を渡す。`sel` の `feats` が
+/// `decode_model_ex` に届く（`--cpu` の配線）。`is_rv64` が
+/// `Some(false)` の RV32 は入口で拒否される既存の規則のままとする。
+pub fn run_elf_sel(
+    path: &str,
+    argv: &[String],
+    sel: Option<&polyisa_isadl::select::CpuSel>,
+) -> Result<u64, String> {
     use polyisa_guest_riscv::sem::Gpr;
     use polyisa_mem::{PAGE_SIZE, Perms};
 
@@ -1756,7 +1785,8 @@ pub fn run_elf(path: &str, argv: &[String]) -> Result<u64, String> {
         .map_err(|e| format!("stack write: {e:?}"))?;
     env.backend.set(Gpr(2).state(), sp);
     let mut sys = polyisa_os_linux::rv64::sys::Linux::default();
-    match run(&mut env, ehdr.entry, false, &mut sys) {
+    let feats = sel.map_or(0, |s| s.feats);
+    match run_ex(&mut env, ehdr.entry, false, feats, &mut sys) {
         Outcome::Exit(code) => Ok(code),
         Outcome::Unimplemented { pc, word } => Err(format!("unimplemented at {pc:#x}: {word:#x}")),
         Outcome::StepLimit { pc } => Err(format!("step limit at {pc:#x}")),

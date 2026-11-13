@@ -566,9 +566,34 @@ fn set_u64(env: &mut BareEnv, offset: usize, value: u64) {
 
 /// 静的な MIPS ELF を実行する。機械番号 8。モデルは `e_flags` のアーキテクチャとエンディアンから選ぶ。
 pub fn run_elf_mips(path: &str, _argv: &[String]) -> Result<u64, String> {
+    run_elf_mips_sel(path, _argv, None)
+}
+
+/// `run_elf_mips` に CPU モデルの選択を渡す（`--cpu` の配線）。
+/// モデルは生成した `MODEL_DEFS` の名前で決め、ロード遅延の有無は
+/// モデル名から取る。エンディアンは ELF のヘッダと一致させる。
+pub fn run_elf_mips_sel(
+    path: &str,
+    _argv: &[String],
+    sel: Option<&polyisa_isadl::select::CpuSel>,
+) -> Result<u64, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
     let ehdr = polyisa_loader::elf::parse_ehdr32(&bytes).map_err(|e| format!("ehdr: {e:?}"))?;
-    let model = model_from_flags(ehdr.little, ehdr.flags)?;
+    let model = match sel {
+        Some(s) => {
+            let load_delay = match s.name.as_str() {
+                "r3000" => true,
+                "mips32r2" | "r6" => false,
+                name => return Err(format!("mips のモデル {name} は実行できない")),
+            };
+            MipsModel {
+                feats: s.feats,
+                endian: if ehdr.little { Endian::Le } else { Endian::Be },
+                load_delay,
+            }
+        }
+        None => model_from_flags(ehdr.little, ehdr.flags)?,
+    };
     run_loaded(&bytes, &ehdr, model, &mut O32Io::default())
 }
 
