@@ -11,8 +11,8 @@ use polyisa_engine::bare::BareEnv;
 use polyisa_engine::interp::InterpExit;
 use polyisa_mem::{Access, AccessKind, Align, Endian, VirtAddr};
 use polyisa_os_linux::x86::{
-    AT_FDCWD_U32, EACCES, EAGAIN, EBADF, ECHILD, EFAULT, EINTR, EINVAL, ENOENT, ENOEXEC, ENOMEM,
-    ENOTDIR, ENOTTY, EPERM, EPIPE, ERANGE, ESRCH, SysCtx, get64, neg_errno, neg_errno64, set64,
+    AT_FDCWD_U32, EACCES, EBADF, ECHILD, EFAULT, EINVAL, ENOENT, ENOEXEC, ENOMEM, ENOTDIR, ENOTTY,
+    EPERM, EPIPE, ERANGE, ESRCH, SysCtx, get64, neg_errno, neg_errno64, set64,
 };
 use polyisa_sem::{Backend, ExceptionKind};
 
@@ -12160,9 +12160,8 @@ fn sys_sysinfo(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Tr
 }
 
 fn sys_reboot(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // reboot。権限がなく常に EPERM。halt / poweroff / reboot アプレットが呼ぶ。
-    set64(env, Gpr(0), cx.neg(EPERM));
-    Some(TrapOutcome::Handled)
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    polyisa_os_linux::x86::sys_reboot(env, cx)
 }
 
 fn sys_init_module(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
@@ -12184,18 +12183,18 @@ fn module_eperm(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<T
 }
 
 fn sys_swapon(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    set64(env, Gpr(0), cx.neg(EPERM));
-    Some(TrapOutcome::Handled)
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    polyisa_os_linux::x86::sys_swapon(env, cx)
 }
 
 fn sys_swapoff(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    set64(env, Gpr(0), cx.neg(EPERM));
-    Some(TrapOutcome::Handled)
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    polyisa_os_linux::x86::sys_swapoff(env, cx)
 }
 
 fn sys_pivot_root(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    set64(env, Gpr(0), cx.neg(EPERM));
-    Some(TrapOutcome::Handled)
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    polyisa_os_linux::x86::sys_pivot_root(env, cx)
 }
 
 fn sys_umount2(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
@@ -12219,41 +12218,39 @@ fn sys_umount2(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Tra
     Some(TrapOutcome::Handled)
 }
 
-fn sys_flock(_sys: &mut CliLinux, env: &mut BareEnv, _cx: &SysCtx) -> Option<TrapOutcome> {
-    // flock(fd, op)。単一ゲストでは競合がないので常に成功。
-    set64(env, Gpr(0), 0);
-    Some(TrapOutcome::Handled)
+fn sys_flock(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    polyisa_os_linux::x86::sys_flock(env, cx)
 }
 
 fn sys_shmget(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // shmget。セグメントは持たず ENOENT。ipcrm -M が呼ぶ。
-    set64(env, Gpr(0), cx.neg(ENOENT));
-    Some(TrapOutcome::Handled)
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    polyisa_os_linux::x86::sys_shmget(env, cx)
 }
 
 fn sys_shmctl(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    set64(env, Gpr(0), cx.neg(EINVAL));
-    Some(TrapOutcome::Handled)
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    polyisa_os_linux::x86::sys_shmctl(env, cx)
 }
 
 fn sys_semget(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    set64(env, Gpr(0), cx.neg(ENOENT));
-    Some(TrapOutcome::Handled)
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    polyisa_os_linux::x86::sys_semget(env, cx)
 }
 
 fn sys_semctl(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    set64(env, Gpr(0), cx.neg(EINVAL));
-    Some(TrapOutcome::Handled)
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    polyisa_os_linux::x86::sys_semctl(env, cx)
 }
 
 fn sys_msgget(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    set64(env, Gpr(0), cx.neg(ENOENT));
-    Some(TrapOutcome::Handled)
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    polyisa_os_linux::x86::sys_msgget(env, cx)
 }
 
 fn sys_msgctl(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    set64(env, Gpr(0), cx.neg(EINVAL));
-    Some(TrapOutcome::Handled)
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    polyisa_os_linux::x86::sys_msgctl(env, cx)
 }
 
 fn sys_getitimer(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
@@ -12379,16 +12376,14 @@ fn sys_mount(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapO
     Some(TrapOutcome::Handled)
 }
 
-fn sys_poll(_sys: &mut CliLinux, env: &mut BareEnv, _cx: &SysCtx) -> Option<TrapOutcome> {
-    // poll。待ちはせずタイムアウトとして 0 を返す。top / powertop の前進用。
-    set64(env, Gpr(0), 0);
-    Some(TrapOutcome::Handled)
+fn sys_poll(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    polyisa_os_linux::x86::sys_poll(env, cx)
 }
 
-fn sys_select(_sys: &mut CliLinux, env: &mut BareEnv, _cx: &SysCtx) -> Option<TrapOutcome> {
-    // select。待ちはせずタイムアウトとして 0 を返す。vi / inetd の前進用。
-    set64(env, Gpr(0), 0);
-    Some(TrapOutcome::Handled)
+fn sys_select(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    polyisa_os_linux::x86::sys_select(env, cx)
 }
 
 fn sys_pselect6(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
@@ -12396,21 +12391,18 @@ fn sys_pselect6(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Tr
 }
 
 fn sys_sysfs(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // sysfs（廃止）。常に EINVAL。wall が呼ぶことがある。
-    set64(env, Gpr(0), cx.neg(EINVAL));
-    Some(TrapOutcome::Handled)
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    polyisa_os_linux::x86::sys_sysfs(env, cx)
 }
 
-fn sys_tkill(_sys: &mut CliLinux, env: &mut BareEnv, _cx: &SysCtx) -> Option<TrapOutcome> {
-    // tkill。単一ゲストでは対象が自分以外に無く、成功として無視する。
-    set64(env, Gpr(0), 0);
-    Some(TrapOutcome::Handled)
+fn sys_tkill(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    polyisa_os_linux::x86::sys_tkill(env, cx)
 }
 
 fn sys_inotify_init1(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // inotify。監視は持たず EPERM。inotifyd の失敗形合わせ。
-    set64(env, Gpr(0), cx.neg(EPERM));
-    Some(TrapOutcome::Handled)
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    polyisa_os_linux::x86::sys_inotify_init1(env, cx)
 }
 
 fn sys_inotify_init(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
@@ -12422,8 +12414,8 @@ fn sys_inotify_add_watch(
     env: &mut BareEnv,
     cx: &SysCtx,
 ) -> Option<TrapOutcome> {
-    set64(env, Gpr(0), cx.neg(EPERM));
-    Some(TrapOutcome::Handled)
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    polyisa_os_linux::x86::sys_inotify_add_watch(env, cx)
 }
 
 fn sys_adjtimex(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
@@ -12441,9 +12433,8 @@ fn sys_adjtimex(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<T
 }
 
 fn sys_setuid(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // setuid 系。資格は変えず常に EPERM。passwd / chpasswd の失敗形合わせ。
-    set64(env, Gpr(0), cx.neg(EPERM));
-    Some(TrapOutcome::Handled)
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    polyisa_os_linux::x86::sys_setuid(env, cx)
 }
 
 fn sys_setgid(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
@@ -12530,32 +12521,13 @@ fn sys_setsid(sys: &mut CliLinux, env: &mut BareEnv, _cx: &SysCtx) -> Option<Tra
 }
 
 fn sys_getpriority(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // getpriority(which, who)。カーネルは nice に 20 を足した値を返す。
-    // ここでの nice は 0 なので 20。Ref: SRC-LINUX (7.3).
-    let which = get64(env, cx.r_a);
-    if which > 2 {
-        set64(env, Gpr(0), cx.neg(EINVAL));
-        return Some(TrapOutcome::Handled);
-    }
-    set64(env, Gpr(0), 20);
-    Some(TrapOutcome::Handled)
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    polyisa_os_linux::x86::sys_getpriority(env, cx)
 }
 
 fn sys_setpriority(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // setpriority(which, who, prio)。自プロセス (who=0) は受け、他は EPERM。
-    // nice は self、renice <pid> は他プロセス向け。
-    let which = get64(env, cx.r_a);
-    let who = get64(env, cx.r_b) as i64;
-    if which > 2 {
-        set64(env, Gpr(0), cx.neg(EINVAL));
-        return Some(TrapOutcome::Handled);
-    }
-    if who != 0 {
-        set64(env, Gpr(0), cx.neg(EPERM));
-        return Some(TrapOutcome::Handled);
-    }
-    set64(env, Gpr(0), 0);
-    Some(TrapOutcome::Handled)
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    polyisa_os_linux::x86::sys_setpriority(env, cx)
 }
 
 fn sys_personality(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
@@ -12654,15 +12626,8 @@ fn sys_fdatasync(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<T
 }
 
 fn sys_unshare(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // unshare(flags)。flags=0 だけ受理し、名前空間は作らない。
-    // 特権が要るフラグは EPERM。Ref: SRC-LINUX (7.3).
-    let flags = get64(env, cx.r_a);
-    if flags != 0 {
-        set64(env, Gpr(0), cx.neg(EPERM));
-        return Some(TrapOutcome::Handled);
-    }
-    set64(env, Gpr(0), 0);
-    Some(TrapOutcome::Handled)
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    polyisa_os_linux::x86::sys_unshare(env, cx)
 }
 
 fn sys_sched_setaffinity(
@@ -12731,13 +12696,8 @@ fn sys_sched_get_priority_max(
     env: &mut BareEnv,
     cx: &SysCtx,
 ) -> Option<TrapOutcome> {
-    // sched_get_priority_max(policy)。chrt が方針の上限を読む。Ref: SRC-LINUX (7.3).
-    let Some((_, max)) = sched_priority_bounds(get64(env, cx.r_a)) else {
-        set64(env, Gpr(0), cx.neg(EINVAL));
-        return Some(TrapOutcome::Handled);
-    };
-    set64(env, Gpr(0), max as u64);
-    Some(TrapOutcome::Handled)
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    polyisa_os_linux::x86::sys_sched_get_priority_max(env, cx)
 }
 
 fn sys_sched_get_priority_min(
@@ -12745,12 +12705,8 @@ fn sys_sched_get_priority_min(
     env: &mut BareEnv,
     cx: &SysCtx,
 ) -> Option<TrapOutcome> {
-    let Some((min, _)) = sched_priority_bounds(get64(env, cx.r_a)) else {
-        set64(env, Gpr(0), cx.neg(EINVAL));
-        return Some(TrapOutcome::Handled);
-    };
-    set64(env, Gpr(0), min as u64);
-    Some(TrapOutcome::Handled)
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    polyisa_os_linux::x86::sys_sched_get_priority_min(env, cx)
 }
 
 fn sys_sched_getscheduler(
@@ -12933,19 +12889,18 @@ fn sys_uname(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Trap
     Some(TrapOutcome::Handled)
 }
 
-fn sys_getuid(_sys: &mut CliLinux, env: &mut BareEnv, _cx: &SysCtx) -> Option<TrapOutcome> {
-    // root として uid 0 を返す.
-    set64(env, Gpr(0), 0);
-    Some(TrapOutcome::Handled)
+fn sys_getuid(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    polyisa_os_linux::x86::sys_getuid(env, cx)
 }
 
 fn sys_geteuid(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     sys_getuid(sys, env, cx)
 }
 
-fn sys_getgid(_sys: &mut CliLinux, env: &mut BareEnv, _cx: &SysCtx) -> Option<TrapOutcome> {
-    set64(env, Gpr(0), 0);
-    Some(TrapOutcome::Handled)
+fn sys_getgid(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    polyisa_os_linux::x86::sys_getgid(env, cx)
 }
 
 fn sys_getegid(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
@@ -13082,19 +13037,13 @@ fn sys_fchdir(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Trap
 }
 
 fn sys_setgroups(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // setgroups(size, list)。権限がないので常に EPERM。setuidgid がここで止まる。
-    // Ref: SRC-LINUX (7.3).
-    let _ = get64(env, cx.r_a);
-    let _ = get64(env, cx.r_b);
-    set64(env, Gpr(0), cx.neg(EPERM));
-    Some(TrapOutcome::Handled)
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    polyisa_os_linux::x86::sys_setgroups(env, cx)
 }
 
 fn sys_chroot(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // chroot(path)。ルートは移さず EPERM。サンドボックスのホストと同じ。
-    let _ = get64(env, cx.r_a);
-    set64(env, Gpr(0), cx.neg(EPERM));
-    Some(TrapOutcome::Handled)
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    polyisa_os_linux::x86::sys_chroot(env, cx)
 }
 
 fn sys_getdents64(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
@@ -13620,66 +13569,38 @@ fn sys_getgroups(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<
 }
 
 fn sys_mprotect(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // mprotect(addr, len, prot)。試作では権限変更を無視して 0 を返す.
-    // addr/len の検証のみ行う (len==0 は EINVAL).
-    let len = if cx.is64 {
-        get64(env, Gpr(6))
-    } else {
-        u64::from(env.backend.get(Gpr(1).state()))
-    };
-    if len == 0 {
-        set64(env, Gpr(0), cx.neg(EINVAL));
-        return Some(TrapOutcome::Handled);
-    }
-    set64(env, Gpr(0), 0);
-    Some(TrapOutcome::Handled)
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    polyisa_os_linux::x86::sys_mprotect(env, cx)
 }
 
-fn sys_munmap(_sys: &mut CliLinux, env: &mut BareEnv, _cx: &SysCtx) -> Option<TrapOutcome> {
-    // munmap(addr, len)。試作では写像解除せず 0 を返す.
-    set64(env, Gpr(0), 0);
-    Some(TrapOutcome::Handled)
+fn sys_munmap(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    polyisa_os_linux::x86::sys_munmap(env, cx)
 }
 
-fn sys_rt_sigaction(_sys: &mut CliLinux, env: &mut BareEnv, _cx: &SysCtx) -> Option<TrapOutcome> {
-    // シグナルハンドラ設定は無視して 0 を返す (試作はシグナルなし).
-    set64(env, Gpr(0), 0);
-    Some(TrapOutcome::Handled)
+fn sys_rt_sigaction(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    polyisa_os_linux::x86::sys_rt_sigaction(env, cx)
 }
 
-fn sys_rt_sigprocmask(_sys: &mut CliLinux, env: &mut BareEnv, _cx: &SysCtx) -> Option<TrapOutcome> {
-    // シグナルマスク変更は無視して 0 を返す.
-    set64(env, Gpr(0), 0);
-    Some(TrapOutcome::Handled)
+fn sys_rt_sigprocmask(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    polyisa_os_linux::x86::sys_rt_sigprocmask(env, cx)
 }
 
 fn sys_rt_sigtimedwait(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // 待ち受けはせず、期限切れとして EAGAIN を返す。init が呼ぶ。本格は段階 B。
-    set64(env, Gpr(0), cx.neg(EAGAIN));
-    Some(TrapOutcome::Handled)
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    polyisa_os_linux::x86::sys_rt_sigtimedwait(env, cx)
 }
 
 fn sys_rt_sigsuspend(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // シグナル待ちはせず EINTR を返す。本格は段階 B。
-    set64(env, Gpr(0), cx.neg(EINTR));
-    Some(TrapOutcome::Handled)
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    polyisa_os_linux::x86::sys_rt_sigsuspend(env, cx)
 }
 
 fn sys_tgkill(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // tgkill(tgid, tid, sig)。単一スレッド試作として sig==0 は 0 を返す.
-    // シグナル番号が範囲外なら EINVAL.
-    let sig = if cx.is64 {
-        get64(env, Gpr(2))
-    } else {
-        u64::from(env.backend.get(Gpr(2).state()))
-    };
-    if sig > 64 {
-        set64(env, Gpr(0), cx.neg(EINVAL));
-        return Some(TrapOutcome::Handled);
-    }
-    // sig==0 は存在確認であり 0 を返す。他のシグナルは無視して 0 とする.
-    set64(env, Gpr(0), 0);
-    Some(TrapOutcome::Handled)
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    polyisa_os_linux::x86::sys_tgkill(env, cx)
 }
 
 fn sys_set_robust_list(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
@@ -13933,15 +13854,8 @@ fn sys_sched_getaffinity(
 }
 
 fn sys_clock_nanosleep(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // clock_nanosleep(clock_id, flags, req, rem)。試作では待たずに 0 を返す.
-    // clock_id は CLOCK_REALTIME(0)/MONOTONIC(1) のみ受け付ける.
-    let clock_id = get64(env, cx.r_a);
-    if clock_id > 1 {
-        set64(env, Gpr(0), cx.neg(EINVAL));
-        return Some(TrapOutcome::Handled);
-    }
-    set64(env, Gpr(0), 0);
-    Some(TrapOutcome::Handled)
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    polyisa_os_linux::x86::sys_clock_nanosleep(env, cx)
 }
 
 fn sys_clock_gettime(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
@@ -14486,10 +14400,9 @@ fn sys_rename(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Trap
     })
 }
 
-fn sys_sync(_sys: &mut CliLinux, env: &mut BareEnv, _cx: &SysCtx) -> Option<TrapOutcome> {
-    // sync()。ゲストの書き込みは既にホストのファイルへ届いている。dirty な頁は持たない。
-    set64(env, Gpr(0), 0);
-    Some(TrapOutcome::Handled)
+fn sys_sync(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    polyisa_os_linux::x86::sys_sync(env, cx)
 }
 
 fn sys_link(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
@@ -14800,33 +14713,33 @@ fn sys_utimensat(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<T
     })
 }
 
-fn sys_chmod(_sys: &mut CliLinux, env: &mut BareEnv, _cx: &SysCtx) -> Option<TrapOutcome> {
-    // chmod/fchmod/fchmodat。試作では権限変更を無視して 0 を返す.
-    set64(env, Gpr(0), 0);
-    Some(TrapOutcome::Handled)
+fn sys_chmod(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    polyisa_os_linux::x86::sys_chmod(env, cx)
 }
 
-fn sys_fchmod(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    sys_chmod(sys, env, cx)
+fn sys_fchmod(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    polyisa_os_linux::x86::sys_fchmod(env, cx)
 }
 
 fn sys_fchmodat(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     sys_chmod(sys, env, cx)
 }
 
-fn sys_chown(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    sys_fchown(sys, env, cx)
+fn sys_chown(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    polyisa_os_linux::x86::sys_chown(env, cx)
 }
 
-fn sys_lchown(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    sys_fchown(sys, env, cx)
+fn sys_lchown(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    polyisa_os_linux::x86::sys_lchown(env, cx)
 }
 
-fn sys_fchown(_sys: &mut CliLinux, env: &mut BareEnv, _cx: &SysCtx) -> Option<TrapOutcome> {
-    // chown/lchown/fchown。所有者変更を無視して 0 を返す。
-    // tar の展開が chown を呼ぶ。dos2unix は fchown で所有者を戻す。
-    set64(env, Gpr(0), 0);
-    Some(TrapOutcome::Handled)
+fn sys_fchown(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    polyisa_os_linux::x86::sys_fchown(env, cx)
 }
 
 fn sys_umask(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
@@ -15236,6 +15149,7 @@ mod tests {
     use super::*;
     use polyisa_guest_x86::sem::Gpr;
     use polyisa_mem::{Perms, VirtAddr};
+    use polyisa_os_linux::x86::{EAGAIN, EINTR};
 
     fn bare() -> BareEnv {
         let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_x86::CpuState>());
