@@ -10034,6 +10034,9 @@ pub struct CliLinux {
     /// uniq のように stdin をファイルに付け替える applet のため.
     /// 読取り用・書込み用いずれのファイルも入る.
     std_files: [Option<std::fs::File>; 3],
+    /// dup2(0,n) 後。n からの read は stdin_buf、write は EBADF。
+    /// 標準入力は開ファイルを持たないため、付け替え先として覚える.
+    std_is_stdin: [bool; 3],
     /// 標準 fd の閉鎖状態。初期 (stdio 接続) は false。close で true になる.
     std_closed: [bool; 3],
     /// ファイル作成マスク。umask で更新する。初期値は 022.
@@ -10266,6 +10269,7 @@ impl CliLinux {
             self.std_files[i] = None;
             self.std_paths[i] = None;
             self.std_closed[i] = false;
+            self.std_is_stdin[i] = false;
             self.std_pipes[i] = Some(end);
             return;
         }
@@ -10368,6 +10372,7 @@ impl CliLinux {
             if slot.is_none() && self.std_closed[i] {
                 *slot = Some(f);
                 self.std_closed[i] = false;
+                self.std_is_stdin[i] = false;
                 return i as u32;
             }
         }
@@ -10478,15 +10483,18 @@ impl CliLinux {
             if self.std_pipes[i].is_some() {
                 self.close_pipe(fd);
                 self.std_closed[i] = true;
+                self.std_is_stdin[i] = false;
                 self.forget_path(fd);
                 true
             } else if self.std_files[i].is_some() {
                 self.std_files[i] = None;
                 self.std_closed[i] = true;
+                self.std_is_stdin[i] = false;
                 self.forget_path(fd);
                 true
             } else if !self.std_closed[i] {
                 self.std_closed[i] = true;
+                self.std_is_stdin[i] = false;
                 true
             } else {
                 false
@@ -10580,6 +10588,7 @@ impl CliLinux {
             reported: self.reported.clone(),
             fds: self.fds.iter().map(clone_file).collect(),
             std_files: std::array::from_fn(|i| clone_file(&self.std_files[i])),
+            std_is_stdin: self.std_is_stdin,
             std_closed: self.std_closed,
             umask: self.umask,
             personality: self.personality,
@@ -11603,7 +11612,9 @@ fn sys_read(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOu
         return pipe_read(sys, env, cx, end, buf, left);
     }
     // 付け替えた標準 fd はファイルから読む。真の stdin は供給バッファから読む。
-    let stdin_empty = fd == 0 && sys.std_attached(0);
+    // dup2(0,n) で stdin を指す fd も同様。
+    let stdin_empty =
+        (fd == 0 || (fd < 3 && sys.std_is_stdin[fd as usize])) && sys.std_attached(fd);
     if stdin_empty {
         let mut done = 0u64;
         let mut chunk = vec![0u8; IO_CHUNK];
@@ -11679,6 +11690,11 @@ fn sys_write(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapO
     let mut left = get64(env, cx.r_c);
     if let Some(end) = sys.pipe_end(fd) {
         return pipe_write(sys, env, cx, end, buf, left);
+    }
+    // dup2(0,n) で stdin を指す fd への write は EBADF（O_RDONLY）。
+    if fd < 3 && sys.std_is_stdin[fd as usize] {
+        set64(env, Gpr(0), cx.neg(EBADF));
+        return Some(TrapOutcome::Handled);
     }
     if (fd == 1 || fd == 2) && sys.std_files[fd as usize].is_none() {
         let mut done = 0u64;
@@ -11856,6 +11872,11 @@ fn sys_writev(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Trap
     let fd = get64(env, cx.r_a) as u32;
     let iov = get64(env, cx.r_b);
     let iovcnt = get64(env, cx.r_c);
+    // dup2(0,n) で stdin を指す fd への writev は EBADF（O_RDONLY）。
+    if fd < 3 && sys.std_is_stdin[fd as usize] {
+        set64(env, Gpr(0), cx.neg(EBADF));
+        return Some(TrapOutcome::Handled);
+    }
     // 付け替えた標準 fd への writev は開ファイルへ書く（sys_write と同じ）。
     // 読取り専用で開いた場合は writev_opened が EBADF を返す。
     if (fd == 1 || fd == 2) && sys.std_files[fd as usize].is_some() {
@@ -11936,7 +11957,9 @@ fn sys_readv(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapO
         return Some(TrapOutcome::Handled);
     }
     // 付け替えた標準 fd はファイルから読む。真の stdin は空読みのまま.
-    let empty_stdin = fd == 0 && sys.std_attached(0);
+    // dup2(0,n) で stdin を指す fd も同様。
+    let empty_stdin =
+        (fd == 0 || (fd < 3 && sys.std_is_stdin[fd as usize])) && sys.std_attached(fd);
     if !empty_stdin && sys.file_ref(fd).is_none() {
         set64(env, Gpr(0), cx.neg(EBADF));
         return Some(TrapOutcome::Handled);
@@ -14237,6 +14260,7 @@ fn sys_dup2(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOu
             let i = newfd as usize;
             sys.std_files[i] = Some(cloned);
             sys.std_closed[i] = false;
+            sys.std_is_stdin[i] = false;
         } else {
             let idx = newfd.wrapping_sub(3) as usize;
             while sys.fds.len() <= idx {
@@ -14259,6 +14283,22 @@ fn sys_dup2(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOu
             sys.stderr_is_stdout = true;
             sys.stdout_is_stderr = false;
         }
+        sys.std_is_stdin[newfd as usize] = false;
+        set64(env, Gpr(0), newfd as u64);
+        return Some(TrapOutcome::Handled);
+    }
+    // dup2(0,n)。stdin は開ファイルを持たないが有効な fd であり、成功させる。
+    // n は stdin を指す。read は stdin_buf、write は EBADF（O_RDONLY）。
+    // dup(0) は未対応（開ファイルがないため複製先を作れない）。
+    if oldfd == 0 && newfd < 3 {
+        if !sys.std_attached(0) {
+            set64(env, Gpr(0), cx.neg(EBADF));
+            return Some(TrapOutcome::Handled);
+        }
+        sys.close_fd(newfd);
+        sys.std_closed[newfd as usize] = false;
+        sys.std_is_stdin[newfd as usize] = true;
+        sys.forget_path(newfd);
         set64(env, Gpr(0), newfd as u64);
         return Some(TrapOutcome::Handled);
     }
@@ -15229,6 +15269,45 @@ mod tests {
         drop(sys);
         assert_eq!(std::fs::read(&path).unwrap(), b"hi!");
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn dup2_stdin_marks_and_transfers() {
+        use polyisa_os_linux::x86_64 as abi;
+        let mut sys = CliLinux::x86_64();
+        sys.stdin_buf = b"hi".to_vec();
+        let mut env = bare();
+        // dup2(0, 2) は成功し、fd 2 を stdin 付けにする。
+        set64(&mut env, Gpr(0), abi::DUP2);
+        set64(&mut env, Gpr(7), 0);
+        set64(&mut env, Gpr(6), 2);
+        set64(&mut env, Gpr(2), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 2);
+        // read(2, 0x100, 16) は stdin_buf から読む。
+        env.backend
+            .mem
+            .write(VirtAddr(0x100), b"..........")
+            .unwrap();
+        set64(&mut env, Gpr(0), abi::READ);
+        set64(&mut env, Gpr(7), 2);
+        set64(&mut env, Gpr(6), 0x100);
+        set64(&mut env, Gpr(2), 16);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 2);
+        let mut got = [0u8; 2];
+        env.backend
+            .mem
+            .read(VirtAddr(0x100), &mut got, data_access())
+            .unwrap();
+        assert_eq!(&got, b"hi");
+        // write(2, ...) は EBADF（stdin は O_RDONLY 相当）。
+        set64(&mut env, Gpr(0), abi::WRITE);
+        set64(&mut env, Gpr(7), 2);
+        set64(&mut env, Gpr(6), 0x100);
+        set64(&mut env, Gpr(2), 2);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EBADF));
     }
 
     #[test]

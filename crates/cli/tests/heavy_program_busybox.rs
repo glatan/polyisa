@@ -1441,15 +1441,16 @@ fn text_applets_match_host() {
         assert_eq!(code, 0);
         assert!(out.is_empty());
     }
-    // nologin はゲストで 30M ステップを超え、ホストも約 5 秒かかるため通常は実行しない。
+    // nologin はゲストで高速に exit 1 するが、標準出力の文言が出ない。
     // /proc/self/exe 経由の再実行までは進む（GAP-0002 の open/execve/stat 対応済み）。
-    // 残りは P4（純ユーザ空間の重い処理と待機の扱い）の追跡事項。通常テストに
-    // 戻す場合は下の nologin_deferred の ignore を外す。
+    // dup2(0,2) の扱い（P4）を直して再試行ループは抜けたが、文言の write が
+    // 親子いずれかで欠落する。ホストも約 5 秒かかるため通常は実行しない。
+    // 直す場合は下の nologin_deferred の ignore を外して再現させる。
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
-#[ignore = "nologin はゲストでステップ上限に達し、ホストも約 5 秒かかる。P4 で再開する"]
+#[ignore = "nologin は exit 1 するが文言が出ない。直したら ignore を外す"]
 fn nologin_deferred() {
     let path = busybox();
     let path = path.to_str().expect("utf-8 path");
