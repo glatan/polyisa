@@ -214,10 +214,10 @@ fn syscall_numbers_match_uapi_x86_64() {
     }
 }
 
-/// UAPI の `__NR_*` を i386 向けに展開して値列を返す。
+/// UAPI の `__NR_*` を x86-32 向けに展開して値列を返す。
 /// `<asm/unistd_32.h>` を素直に読む。ホスト依存ではなく、i386 固定である。
-/// newfstatat は i386 に存在しないため fstatat64 で突き合わせる。
-fn uapi_numbers_i386(clang: &str, macros: &[&str]) -> Option<Vec<u64>> {
+/// newfstatat は x86-32 に存在しないため fstatat64 で突き合わせる。
+fn uapi_numbers_x86_32(clang: &str, macros: &[&str]) -> Option<Vec<u64>> {
     let mut src = String::from("#include <asm/unistd_32.h>\n");
     src.push_str(&macros.join(" "));
     src.push('\n');
@@ -250,54 +250,57 @@ fn uapi_numbers_i386(clang: &str, macros: &[&str]) -> Option<Vec<u64>> {
 }
 
 #[test]
-fn syscall_numbers_match_uapi_i386() {
+fn syscall_numbers_match_uapi_x86_32() {
     let Some(cc) = clang() else {
         // Gap: GAP-0005
         eprintln!("skip: clang がないため未実行");
         return;
     };
-    // (UAPI マクロ, polyisa の値)。i386 固有の表である。
+    // (UAPI マクロ, polyisa の値)。x86-32 固有の表である。
     let cases: &[(&str, u64)] = &[
-        ("__NR_read", polyisa_os_linux::i386::READ),
-        ("__NR_write", polyisa_os_linux::i386::WRITE),
-        ("__NR_close", polyisa_os_linux::i386::CLOSE),
-        ("__NR_openat", polyisa_os_linux::i386::OPENAT),
-        ("__NR_mmap", polyisa_os_linux::i386::MMAP),
-        ("__NR_mprotect", polyisa_os_linux::i386::MPROTECT),
-        ("__NR_munmap", polyisa_os_linux::i386::MUNMAP),
-        ("__NR_brk", polyisa_os_linux::i386::BRK),
-        ("__NR_exit", polyisa_os_linux::i386::EXIT),
-        ("__NR_exit_group", polyisa_os_linux::i386::EXIT_GROUP),
-        ("__NR_uname", polyisa_os_linux::i386::UNAME),
+        ("__NR_read", polyisa_os_linux::x86_32::READ),
+        ("__NR_write", polyisa_os_linux::x86_32::WRITE),
+        ("__NR_close", polyisa_os_linux::x86_32::CLOSE),
+        ("__NR_openat", polyisa_os_linux::x86_32::OPENAT),
+        ("__NR_mmap", polyisa_os_linux::x86_32::MMAP),
+        ("__NR_mprotect", polyisa_os_linux::x86_32::MPROTECT),
+        ("__NR_munmap", polyisa_os_linux::x86_32::MUNMAP),
+        ("__NR_brk", polyisa_os_linux::x86_32::BRK),
+        ("__NR_exit", polyisa_os_linux::x86_32::EXIT),
+        ("__NR_exit_group", polyisa_os_linux::x86_32::EXIT_GROUP),
+        ("__NR_uname", polyisa_os_linux::x86_32::UNAME),
         (
             "__NR_set_tid_address",
-            polyisa_os_linux::i386::SET_TID_ADDRESS,
+            polyisa_os_linux::x86_32::SET_TID_ADDRESS,
         ),
-        ("__NR_clock_gettime", polyisa_os_linux::i386::CLOCK_GETTIME),
-        ("__NR_getrandom", polyisa_os_linux::i386::GETRANDOM),
-        ("__NR_lseek", polyisa_os_linux::i386::LSEEK),
-        ("__NR_getdents64", polyisa_os_linux::i386::GETDENTS64),
-        ("__NR_getcwd", polyisa_os_linux::i386::GETCWD),
-        ("__NR_dup3", polyisa_os_linux::i386::DUP3),
-        ("__NR_fcntl", polyisa_os_linux::i386::FCNTL),
-        ("__NR_ioctl", polyisa_os_linux::i386::IOCTL),
-        ("__NR_pread64", polyisa_os_linux::i386::PREAD64),
-        ("__NR_readlinkat", polyisa_os_linux::i386::READLINKAT),
-        ("__NR_fstatat64", polyisa_os_linux::i386::FSTATAT64),
-        ("__NR_fstat", polyisa_os_linux::i386::FSTAT),
-        ("__NR_statx", polyisa_os_linux::i386::STATX),
-        ("__NR_getgroups", polyisa_os_linux::i386::GETGROUPS),
-        ("__NR_getgroups32", polyisa_os_linux::i386::GETGROUPS32),
-        ("__NR_statfs", polyisa_os_linux::i386::STATFS),
-        ("__NR_fstatfs", polyisa_os_linux::i386::FSTATFS),
-        ("__NR_statfs64", polyisa_os_linux::i386::STATFS64),
-        ("__NR_fstatfs64", polyisa_os_linux::i386::FSTATFS64),
-        ("__NR_clone", polyisa_os_linux::i386::CLONE),
-        ("__NR_execve", polyisa_os_linux::i386::EXECVE),
-        ("__NR_wait4", polyisa_os_linux::i386::WAIT4),
+        (
+            "__NR_clock_gettime",
+            polyisa_os_linux::x86_32::CLOCK_GETTIME,
+        ),
+        ("__NR_getrandom", polyisa_os_linux::x86_32::GETRANDOM),
+        ("__NR_lseek", polyisa_os_linux::x86_32::LSEEK),
+        ("__NR_getdents64", polyisa_os_linux::x86_32::GETDENTS64),
+        ("__NR_getcwd", polyisa_os_linux::x86_32::GETCWD),
+        ("__NR_dup3", polyisa_os_linux::x86_32::DUP3),
+        ("__NR_fcntl", polyisa_os_linux::x86_32::FCNTL),
+        ("__NR_ioctl", polyisa_os_linux::x86_32::IOCTL),
+        ("__NR_pread64", polyisa_os_linux::x86_32::PREAD64),
+        ("__NR_readlinkat", polyisa_os_linux::x86_32::READLINKAT),
+        ("__NR_fstatat64", polyisa_os_linux::x86_32::FSTATAT64),
+        ("__NR_fstat", polyisa_os_linux::x86_32::FSTAT),
+        ("__NR_statx", polyisa_os_linux::x86_32::STATX),
+        ("__NR_getgroups", polyisa_os_linux::x86_32::GETGROUPS),
+        ("__NR_getgroups32", polyisa_os_linux::x86_32::GETGROUPS32),
+        ("__NR_statfs", polyisa_os_linux::x86_32::STATFS),
+        ("__NR_fstatfs", polyisa_os_linux::x86_32::FSTATFS),
+        ("__NR_statfs64", polyisa_os_linux::x86_32::STATFS64),
+        ("__NR_fstatfs64", polyisa_os_linux::x86_32::FSTATFS64),
+        ("__NR_clone", polyisa_os_linux::x86_32::CLONE),
+        ("__NR_execve", polyisa_os_linux::x86_32::EXECVE),
+        ("__NR_wait4", polyisa_os_linux::x86_32::WAIT4),
     ];
     let macros: Vec<&str> = cases.iter().map(|(m, _)| *m).collect();
-    let Some(got) = uapi_numbers_i386(&cc, &macros) else {
+    let Some(got) = uapi_numbers_x86_32(&cc, &macros) else {
         // Gap: GAP-0005
         eprintln!("skip: UAPI ヘッダの展開に失敗したため未実行");
         return;

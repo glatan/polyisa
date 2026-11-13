@@ -92,7 +92,7 @@ pub struct SysCtx {
 }
 
 impl SysCtx {
-    /// dirfd が AT_FDCWD か。x86-64 は下位 32 ビット、i386 は値そのものを比べる.
+    /// dirfd が AT_FDCWD か。x86-64 は下位 32 ビット、x86-32 は値そのものを比べる.
     pub fn is_at_fdcwd(&self, dirfd: u64) -> bool {
         if self.is64 {
             (dirfd as u32) == AT_FDCWD_U32
@@ -101,7 +101,7 @@ impl SysCtx {
         }
     }
 
-    /// 戻り値の負 errno。x86-64 は 64 ビット符号拡張、i386 は 32 ビット。
+    /// 戻り値の負 errno。x86-64 は 64 ビット符号拡張、x86-32 は 32 ビット。
     pub fn neg(&self, n: u32) -> u64 {
         if self.is64 {
             neg_errno64(n)

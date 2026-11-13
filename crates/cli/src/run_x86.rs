@@ -9761,8 +9761,8 @@ fn dispatch<B: Backend>(
 }
 
 /// ELF32 イメージを実行する。`run_elf` の x86 版であり、EM_386 の静的実行を
-/// 受け持つ。番号表は i386 Linux のものを使う。
-pub fn run_image_x86(
+/// 受け持つ。番号表は 32ビット Linux（i386 ABI）のものを使う。
+pub fn run_image_x86_32(
     bytes: &[u8],
     prog: &str,
     argv: &[String],
@@ -9824,10 +9824,10 @@ pub fn run_image_x86(
 }
 
 /// ELF ファイルを実行する。`run_elf` の x86 版である。
-pub fn run_elf_x86(path: &str, argv: &[String]) -> Result<u64, String> {
+pub fn run_elf_x86_32(path: &str, argv: &[String]) -> Result<u64, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
-    let mut sys = CliLinux::i386();
-    run_image_x86(&bytes, path, argv, &mut sys)
+    let mut sys = CliLinux::x86_32();
+    run_image_x86_32(&bytes, path, argv, &mut sys)
 }
 
 /// ELF64 イメージを実行する。EM_X86_64 の静的実行を受け持つ。
@@ -9905,7 +9905,7 @@ pub fn run_image_x86_64(
     }
 }
 
-/// ELF64 ファイルを実行する。`run_elf_x86` の x86-64 版である。
+/// ELF64 ファイルを実行する。`run_elf_x86_32` の x86-64 版である。
 pub fn run_elf_x86_64(path: &str, argv: &[String]) -> Result<u64, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
     let mut sys = CliLinux::x86_64();
@@ -9965,7 +9965,7 @@ fn run_elf_x86_64_at(
 
 /// `cli run` の Linux 用 ecall 処理。openat/read/write/close と
 /// exit/exit_group をホストに直結して受け、ほかは未対応として報告する。
-/// i386（`is64=false`）と x86-64（`is64=true`）で番号表と引数レジスタが変わる。
+/// x86-32（`is64=false`）と x86-64（`is64=true`）で番号表と引数レジスタが変わる。
 /// x86-64 の引数は RDI/RSI/RDX（Gpr 7/6/2）、番号は RAX（Gpr 0）にある。
 ///
 /// 試作の合意事項：仮想カーネル・VFS・ゲストルートの適用は後の段階である。
@@ -10106,8 +10106,8 @@ impl Default for SharedPipes {
 }
 
 impl CliLinux {
-    /// i386 用ハンドラ。
-    pub fn i386() -> Self {
+    /// x86-32 用ハンドラ。
+    pub fn x86_32() -> Self {
         Self {
             umask: 0o22,
             ..Self::default()
@@ -10938,7 +10938,7 @@ const X86_64_SYSCALLS: &[(&str, SysFn)] = &[
     ("brk", sys_brk),
 ];
 
-const I386_SYSCALLS: &[(&str, SysFn)] = &[
+const X86_32_SYSCALLS: &[(&str, SysFn)] = &[
     ("openat", sys_openat),
     ("read", sys_read),
     ("close", sys_close),
@@ -11691,7 +11691,7 @@ fn writev_opened(
 }
 
 fn sys_writev(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // writev/readv (x86-64: 20/19, i386: 146/145)。iovec 配列を辿って転送する.
+    // writev/readv (x86-64: 20/19, x86-32: 146/145)。iovec 配列を辿って転送する.
     // fd 1/2 は標準出力へ、開いたファイルはホストのファイルへ書く。
     let fd = get64(env, cx.r_a) as u32;
     let iov = get64(env, cx.r_b);
@@ -14116,7 +14116,7 @@ impl TrapHandler for CliLinux {
         use polyisa_guest_x86::sem::Gpr;
         // INT 0x80 (code 0x80) と SYSCALL (code 0) のどちらも番号は RAX/EAX にある。
         let _ = code;
-        // 引数レジスタ：i386 は EBX/ECX/EDX、x86-64 は RDI/RSI/RDX。
+        // 引数レジスタ：x86-32 は EBX/ECX/EDX、x86-64 は RDI/RSI/RDX。
         let (r_a, r_b, r_c) = if self.is64 {
             (Gpr(7), Gpr(6), Gpr(2))
         } else {
@@ -14125,9 +14125,9 @@ impl TrapHandler for CliLinux {
         let guest_abi = if self.is64 {
             polyisa_os_linux::GuestAbi::X86_64Linux
         } else {
-            polyisa_os_linux::GuestAbi::I386Linux
+            polyisa_os_linux::GuestAbi::X86_32Linux
         };
-        // dirfd の AT_FDCWD：i386 は 32ビット、x86-64 は 64ビットの -100。
+        // dirfd の AT_FDCWD：x86-32 は 32ビット、x86-64 は 64ビットの -100。
         // 32ビット mov で設定された場合 (RDI=0xffffff9c) も受け付けるため下位32で比較する.
         let at_fdcwd: u64 = if self.is64 {
             0xffff_ffff_ffff_ff9c
@@ -14146,7 +14146,7 @@ impl TrapHandler for CliLinux {
         let table = if self.is64 {
             X86_64_SYSCALLS
         } else {
-            I386_SYSCALLS
+            X86_32_SYSCALLS
         };
         if let Some(name) = name
             && let Some((_, handler)) = table.iter().find(|(n, _)| *n == name)
@@ -14189,14 +14189,26 @@ mod tests {
         let mut env = bare();
         env.backend.mem.write(VirtAddr(0x100), b"hi").unwrap();
         // write(1, 0x100, 2) は受理し、書いたバイト数を返す。
-        set_regs(&mut env, polyisa_os_linux::i386::WRITE as u32, 1, 0x100, 2);
+        set_regs(
+            &mut env,
+            polyisa_os_linux::x86_32::WRITE as u32,
+            1,
+            0x100,
+            2,
+        );
         assert!(matches!(
             sys.handle_trap(&mut env, 0x80),
             TrapOutcome::Handled
         ));
         assert_eq!(env.backend.get(Gpr(0).state()), 2);
         // 存在しない fd への write は EBADF。
-        set_regs(&mut env, polyisa_os_linux::i386::WRITE as u32, 9, 0x100, 2);
+        set_regs(
+            &mut env,
+            polyisa_os_linux::x86_32::WRITE as u32,
+            9,
+            0x100,
+            2,
+        );
         assert!(matches!(
             sys.handle_trap(&mut env, 0x80),
             TrapOutcome::Handled
@@ -14370,7 +14382,7 @@ mod tests {
         env.backend.mem.write(VirtAddr(0x1FFD), b"/x\0").unwrap();
         set_regs(
             &mut env,
-            polyisa_os_linux::i386::OPENAT as u32,
+            polyisa_os_linux::x86_32::OPENAT as u32,
             0xffff_ff9c,
             0x1FFD,
             0,
@@ -14393,7 +14405,7 @@ mod tests {
             .unwrap();
         set_regs(
             &mut env,
-            polyisa_os_linux::i386::OPENAT as u32,
+            polyisa_os_linux::x86_32::OPENAT as u32,
             0xffff_ff9c,
             0x100,
             0,
@@ -14411,7 +14423,13 @@ mod tests {
         let mut env = bare();
         env.backend.mem.write(VirtAddr(0x100), b"/x\0").unwrap();
         // dirfd が AT_FDCWD ではない。
-        set_regs(&mut env, polyisa_os_linux::i386::OPENAT as u32, 3, 0x100, 0);
+        set_regs(
+            &mut env,
+            polyisa_os_linux::x86_32::OPENAT as u32,
+            3,
+            0x100,
+            0,
+        );
         assert!(matches!(
             sys.handle_trap(&mut env, 0x80),
             TrapOutcome::Handled
@@ -14421,7 +14439,7 @@ mod tests {
         env.backend.mem.write(VirtAddr(0x100), b"rel\0").unwrap();
         set_regs(
             &mut env,
-            polyisa_os_linux::i386::OPENAT as u32,
+            polyisa_os_linux::x86_32::OPENAT as u32,
             0xffff_ff9c,
             0x100,
             0,
@@ -14455,7 +14473,7 @@ mod tests {
         // 存在しない path の O_WRONLY のみは ENOENT。
         set_regs(
             &mut env,
-            polyisa_os_linux::i386::OPENAT as u32,
+            polyisa_os_linux::x86_32::OPENAT as u32,
             0xffff_ff9c,
             0x100,
             1,
@@ -14468,7 +14486,7 @@ mod tests {
         // O_WRONLY|O_CREAT|O_TRUNC (1|0o100|0o1000=0o1101) で作成 -> fd 3。
         set_regs(
             &mut env,
-            polyisa_os_linux::i386::OPENAT as u32,
+            polyisa_os_linux::x86_32::OPENAT as u32,
             0xffff_ff9c,
             0x100,
             0o1101,
@@ -14479,14 +14497,20 @@ mod tests {
         ));
         assert_eq!(env.backend.get(Gpr(0).state()), 3);
         // write(3, 0x200, 6) -> 6。
-        set_regs(&mut env, polyisa_os_linux::i386::WRITE as u32, 3, 0x200, 6);
+        set_regs(
+            &mut env,
+            polyisa_os_linux::x86_32::WRITE as u32,
+            3,
+            0x200,
+            6,
+        );
         assert!(matches!(
             sys.handle_trap(&mut env, 0x80),
             TrapOutcome::Handled
         ));
         assert_eq!(env.backend.get(Gpr(0).state()), 6);
         // close(3) -> 0。
-        set_regs(&mut env, polyisa_os_linux::i386::CLOSE as u32, 3, 0, 0);
+        set_regs(&mut env, polyisa_os_linux::x86_32::CLOSE as u32, 3, 0, 0);
         assert!(matches!(
             sys.handle_trap(&mut env, 0x80),
             TrapOutcome::Handled
@@ -14495,7 +14519,7 @@ mod tests {
         // O_RDONLY で開き直して read -> "abcdef"。
         set_regs(
             &mut env,
-            polyisa_os_linux::i386::OPENAT as u32,
+            polyisa_os_linux::x86_32::OPENAT as u32,
             0xffff_ff9c,
             0x100,
             0,
@@ -14505,7 +14529,7 @@ mod tests {
             TrapOutcome::Handled
         ));
         assert_eq!(env.backend.get(Gpr(0).state()), 3);
-        set_regs(&mut env, polyisa_os_linux::i386::READ as u32, 3, 0x300, 6);
+        set_regs(&mut env, polyisa_os_linux::x86_32::READ as u32, 3, 0x300, 6);
         assert!(matches!(
             sys.handle_trap(&mut env, 0x80),
             TrapOutcome::Handled
@@ -14518,14 +14542,14 @@ mod tests {
             .unwrap();
         assert_eq!(&back, b"abcdef");
         // O_RDWR で開いて追記位置を読書きできる。
-        set_regs(&mut env, polyisa_os_linux::i386::CLOSE as u32, 3, 0, 0);
+        set_regs(&mut env, polyisa_os_linux::x86_32::CLOSE as u32, 3, 0, 0);
         assert!(matches!(
             sys.handle_trap(&mut env, 0x80),
             TrapOutcome::Handled
         ));
         set_regs(
             &mut env,
-            polyisa_os_linux::i386::OPENAT as u32,
+            polyisa_os_linux::x86_32::OPENAT as u32,
             0xffff_ff9c,
             0x100,
             2,
@@ -14538,7 +14562,7 @@ mod tests {
         // O_CREAT|O_EXCL の既存作成は EEXIST(17)。
         set_regs(
             &mut env,
-            polyisa_os_linux::i386::OPENAT as u32,
+            polyisa_os_linux::x86_32::OPENAT as u32,
             0xffff_ff9c,
             0x100,
             0o300,
@@ -14549,14 +14573,14 @@ mod tests {
         ));
         assert_eq!(env.backend.get(Gpr(0).state()), neg_errno(17));
         // O_TRUNC で空になる。
-        set_regs(&mut env, polyisa_os_linux::i386::CLOSE as u32, 3, 0, 0);
+        set_regs(&mut env, polyisa_os_linux::x86_32::CLOSE as u32, 3, 0, 0);
         assert!(matches!(
             sys.handle_trap(&mut env, 0x80),
             TrapOutcome::Handled
         ));
         set_regs(
             &mut env,
-            polyisa_os_linux::i386::OPENAT as u32,
+            polyisa_os_linux::x86_32::OPENAT as u32,
             0xffff_ff9c,
             0x100,
             0o1101,
@@ -14566,21 +14590,21 @@ mod tests {
             TrapOutcome::Handled
         ));
         assert_eq!(env.backend.get(Gpr(0).state()), 3);
-        set_regs(&mut env, polyisa_os_linux::i386::READ as u32, 3, 0x300, 6);
+        set_regs(&mut env, polyisa_os_linux::x86_32::READ as u32, 3, 0x300, 6);
         assert!(matches!(
             sys.handle_trap(&mut env, 0x80),
             TrapOutcome::Handled
         ));
         assert_eq!(env.backend.get(Gpr(0).state()), 0);
         // 読取り専用 fd への write は EBADF。
-        set_regs(&mut env, polyisa_os_linux::i386::CLOSE as u32, 3, 0, 0);
+        set_regs(&mut env, polyisa_os_linux::x86_32::CLOSE as u32, 3, 0, 0);
         assert!(matches!(
             sys.handle_trap(&mut env, 0x80),
             TrapOutcome::Handled
         ));
         set_regs(
             &mut env,
-            polyisa_os_linux::i386::OPENAT as u32,
+            polyisa_os_linux::x86_32::OPENAT as u32,
             0xffff_ff9c,
             0x100,
             0,
@@ -14590,7 +14614,13 @@ mod tests {
             TrapOutcome::Handled
         ));
         assert_eq!(env.backend.get(Gpr(0).state()), 3);
-        set_regs(&mut env, polyisa_os_linux::i386::WRITE as u32, 3, 0x200, 6);
+        set_regs(
+            &mut env,
+            polyisa_os_linux::x86_32::WRITE as u32,
+            3,
+            0x200,
+            6,
+        );
         assert!(matches!(
             sys.handle_trap(&mut env, 0x80),
             TrapOutcome::Handled
@@ -14607,7 +14637,7 @@ mod tests {
         env.backend.mem.write(VirtAddr(0x100), b"/\0").unwrap();
         set_regs(
             &mut env,
-            polyisa_os_linux::i386::OPENAT as u32,
+            polyisa_os_linux::x86_32::OPENAT as u32,
             0xffff_ff9c,
             0x100,
             0x4000,
@@ -14638,7 +14668,7 @@ mod tests {
         // openat -> fd 3。
         set_regs(
             &mut env,
-            polyisa_os_linux::i386::OPENAT as u32,
+            polyisa_os_linux::x86_32::OPENAT as u32,
             0xffff_ff9c,
             0x100,
             0,
@@ -14649,27 +14679,39 @@ mod tests {
         ));
         assert_eq!(env.backend.get(Gpr(0).state()), 3);
         // read(fd=3, buf=0x200, 64) -> 6。
-        set_regs(&mut env, polyisa_os_linux::i386::READ as u32, 3, 0x200, 64);
+        set_regs(
+            &mut env,
+            polyisa_os_linux::x86_32::READ as u32,
+            3,
+            0x200,
+            64,
+        );
         assert!(matches!(
             sys.handle_trap(&mut env, 0x80),
             TrapOutcome::Handled
         ));
         assert_eq!(env.backend.get(Gpr(0).state()), 6);
         // close(3) -> 0、もう一度 close(3) -> EBADF。
-        set_regs(&mut env, polyisa_os_linux::i386::CLOSE as u32, 3, 0, 0);
+        set_regs(&mut env, polyisa_os_linux::x86_32::CLOSE as u32, 3, 0, 0);
         assert!(matches!(
             sys.handle_trap(&mut env, 0x80),
             TrapOutcome::Handled
         ));
         assert_eq!(env.backend.get(Gpr(0).state()), 0);
-        set_regs(&mut env, polyisa_os_linux::i386::CLOSE as u32, 3, 0, 0);
+        set_regs(&mut env, polyisa_os_linux::x86_32::CLOSE as u32, 3, 0, 0);
         assert!(matches!(
             sys.handle_trap(&mut env, 0x80),
             TrapOutcome::Handled
         ));
         assert_eq!(env.backend.get(Gpr(0).state()), neg_errno(EBADF));
         // read(closed fd=3) -> EBADF。
-        set_regs(&mut env, polyisa_os_linux::i386::READ as u32, 3, 0x200, 64);
+        set_regs(
+            &mut env,
+            polyisa_os_linux::x86_32::READ as u32,
+            3,
+            0x200,
+            64,
+        );
         assert!(matches!(
             sys.handle_trap(&mut env, 0x80),
             TrapOutcome::Handled
@@ -14696,7 +14738,7 @@ mod tests {
             .write(VirtAddr(0x100 + path_s.len() as u64), &[0])
             .unwrap();
         // close(0) -> 0。
-        set_regs(&mut env, polyisa_os_linux::i386::CLOSE as u32, 0, 0, 0);
+        set_regs(&mut env, polyisa_os_linux::x86_32::CLOSE as u32, 0, 0, 0);
         assert!(matches!(
             sys.handle_trap(&mut env, 0x80),
             TrapOutcome::Handled
@@ -14705,7 +14747,7 @@ mod tests {
         // openat -> 最下位の空き 0。
         set_regs(
             &mut env,
-            polyisa_os_linux::i386::OPENAT as u32,
+            polyisa_os_linux::x86_32::OPENAT as u32,
             0xffff_ff9c,
             0x100,
             0,
@@ -14716,33 +14758,45 @@ mod tests {
         ));
         assert_eq!(env.backend.get(Gpr(0).state()), 0);
         // read(0) -> 6（付け替えたファイルから読む）。
-        set_regs(&mut env, polyisa_os_linux::i386::READ as u32, 0, 0x200, 64);
+        set_regs(
+            &mut env,
+            polyisa_os_linux::x86_32::READ as u32,
+            0,
+            0x200,
+            64,
+        );
         assert!(matches!(
             sys.handle_trap(&mut env, 0x80),
             TrapOutcome::Handled
         ));
         assert_eq!(env.backend.get(Gpr(0).state()), 6);
         // fcntl(0) -> 0（付け替え中は妥当）。
-        set_regs(&mut env, polyisa_os_linux::i386::FCNTL as u32, 0, 3, 0);
+        set_regs(&mut env, polyisa_os_linux::x86_32::FCNTL as u32, 0, 3, 0);
         assert!(matches!(
             sys.handle_trap(&mut env, 0x80),
             TrapOutcome::Handled
         ));
         assert_eq!(env.backend.get(Gpr(0).state()), 0);
         // close(0) -> 0、read(0) -> EBADF、もう一度 close(0) -> EBADF。
-        set_regs(&mut env, polyisa_os_linux::i386::CLOSE as u32, 0, 0, 0);
+        set_regs(&mut env, polyisa_os_linux::x86_32::CLOSE as u32, 0, 0, 0);
         assert!(matches!(
             sys.handle_trap(&mut env, 0x80),
             TrapOutcome::Handled
         ));
         assert_eq!(env.backend.get(Gpr(0).state()), 0);
-        set_regs(&mut env, polyisa_os_linux::i386::READ as u32, 0, 0x200, 64);
+        set_regs(
+            &mut env,
+            polyisa_os_linux::x86_32::READ as u32,
+            0,
+            0x200,
+            64,
+        );
         assert!(matches!(
             sys.handle_trap(&mut env, 0x80),
             TrapOutcome::Handled
         ));
         assert_eq!(env.backend.get(Gpr(0).state()), neg_errno(EBADF));
-        set_regs(&mut env, polyisa_os_linux::i386::CLOSE as u32, 0, 0, 0);
+        set_regs(&mut env, polyisa_os_linux::x86_32::CLOSE as u32, 0, 0, 0);
         assert!(matches!(
             sys.handle_trap(&mut env, 0x80),
             TrapOutcome::Handled
@@ -14768,14 +14822,19 @@ mod tests {
             .mem
             .write(VirtAddr(0x100 + path_s.len() as u64), &[0])
             .unwrap();
-        let openat = (polyisa_os_linux::i386::OPENAT as u32, 0xffff_ff9c, 0x100, 0);
+        let openat = (
+            polyisa_os_linux::x86_32::OPENAT as u32,
+            0xffff_ff9c,
+            0x100,
+            0,
+        );
         set_regs(&mut env, openat.0, openat.1, openat.2, openat.3);
         assert!(matches!(
             sys.handle_trap(&mut env, 0x80),
             TrapOutcome::Handled
         ));
         assert_eq!(env.backend.get(Gpr(0).state()), 3);
-        set_regs(&mut env, polyisa_os_linux::i386::CLOSE as u32, 3, 0, 0);
+        set_regs(&mut env, polyisa_os_linux::x86_32::CLOSE as u32, 3, 0, 0);
         assert!(matches!(
             sys.handle_trap(&mut env, 0x80),
             TrapOutcome::Handled
@@ -17699,7 +17758,7 @@ mod tests {
     #[test]
     fn syscall_tables_are_unique_and_named_in_os_linux() {
         assert_syscall_table(X86_64_SYSCALLS, polyisa_os_linux::GuestAbi::X86_64Linux);
-        assert_syscall_table(I386_SYSCALLS, polyisa_os_linux::GuestAbi::I386Linux);
+        assert_syscall_table(X86_32_SYSCALLS, polyisa_os_linux::GuestAbi::X86_32Linux);
     }
 
     fn assert_syscall_table(table: &[(&str, SysFn)], abi: polyisa_os_linux::GuestAbi) {

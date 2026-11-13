@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! x86 ユーザーモード実行の結合テスト。手組みの ELF32 静的バイナリを
 //! ローダで読み、実行ループで回し、write/exit_group を検証する。
-//! ELF32 の配置は SPEC-ELF-GABI、番号は i386 UAPI の事実を使う。
+//! ELF32 の配置は SPEC-ELF-GABI、番号は 32ビット Linux（i386 ABI）の UAPI の事実を使う。
 //! Ref: SPEC-ELF-GABI (Edition 4.1).
 //! Ref: SRC-LINUX (7.3).
 
@@ -19,7 +19,7 @@ struct Capture {
 impl TrapHandler for Capture {
     fn handle_trap(&mut self, env: &mut BareEnv, _code: u32) -> TrapOutcome {
         let nr = env.backend.get(Gpr(0).state()) as u64;
-        if nr == polyisa_os_linux::i386::WRITE {
+        if nr == polyisa_os_linux::x86_32::WRITE {
             let fd: u32 = env.backend.get(Gpr(3).state());
             if fd != 1 && fd != 2 {
                 return TrapOutcome::Unimplemented;
@@ -44,7 +44,7 @@ impl TrapHandler for Capture {
             env.backend.set(Gpr(0).state(), len as u32);
             return TrapOutcome::Handled;
         }
-        if nr == polyisa_os_linux::i386::EXIT || nr == polyisa_os_linux::i386::EXIT_GROUP {
+        if nr == polyisa_os_linux::x86_32::EXIT || nr == polyisa_os_linux::x86_32::EXIT_GROUP {
             return TrapOutcome::Exit(env.backend.get(Gpr(3).state()));
         }
         TrapOutcome::Unimplemented
@@ -113,7 +113,7 @@ fn hello_elf() -> Vec<u8> {
 fn hello_exits_zero_with_output() {
     let img = hello_elf();
     let mut sys = Capture { out: Vec::new() };
-    let r = run_x86::run_image_x86(&img, "hello", &[], &mut sys);
+    let r = run_x86::run_image_x86_32(&img, "hello", &[], &mut sys);
     assert_eq!(r, Ok(0));
     assert_eq!(sys.out, b"Hello, poly!\n");
 }
@@ -125,6 +125,6 @@ fn rejects_non_386() {
     img[18] = 243;
     img[19] = 0;
     let mut sys = Capture { out: Vec::new() };
-    let r = run_x86::run_image_x86(&img, "hello", &[], &mut sys);
+    let r = run_x86::run_image_x86_32(&img, "hello", &[], &mut sys);
     assert!(r.is_err());
 }

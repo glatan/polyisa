@@ -23,7 +23,7 @@ pub fn run_path(path: &str, argv: &[String]) -> Result<u64, String> {
                 polyisa_loader::elf::parse_ehdr32(&bytes).map_err(|e| format!("ehdr: {e:?}"))?;
             // EM_386=3。Ref: SRC-LINUX (7.3).
             if ehdr.machine == 3 {
-                run_x86::run_elf_x86(path, argv)
+                run_x86::run_elf_x86_32(path, argv)
             } else if ehdr.machine == 8 {
                 // EM_MIPS。Ref: SRC-LINUX (7.3)。アーキテクチャとエンディアンは ELF ヘッダから取る。
                 run_mips::run_elf_mips(path, argv)

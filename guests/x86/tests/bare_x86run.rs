@@ -366,7 +366,7 @@ fn run_signed_branch() {
 #[test]
 fn run_gas_absorbed_cell() {
     // 実アセンブラ由来のバイト列をそのまま埋め込んだ統合テスト。
-    // 由来：Binutils GAS (as --32) + ld -m elf_i386 でリンクした静的 i386 バイナリの
+    // 由来：Binutils GAS (as --32) + ld -m elf_x86_32 でリンクした静的 x86-32 バイナリの
     // .text（leal cell,%ebx / movl $0x77,%eax / mov %eax,(%ebx) / mov (%ebx),%eax /
     // mov %eax,%ebx / movl $1,%eax / int $0x80）。cell = 0x804b028。
     // gas は disp8=0 を mod=00（89 03 / 8B 03）に畳む。dst=EBX の LEA を含む。

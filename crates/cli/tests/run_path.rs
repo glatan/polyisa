@@ -12,7 +12,7 @@ fn write_temp(name: &str, bytes: &[u8]) -> std::path::PathBuf {
     p
 }
 
-fn hello_i386() -> Vec<u8> {
+fn hello_x86_32() -> Vec<u8> {
     let code: &[u8] = &[
         0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax,1
         0x50, // push eax
@@ -65,7 +65,7 @@ fn hello_i386() -> Vec<u8> {
 
 #[test]
 fn run_path_executes_i386_hello() {
-    let path = write_temp("hello386", &hello_i386());
+    let path = write_temp("hello386", &hello_x86_32());
     let r = polyisa_cli::run_path(&path.to_string_lossy(), &[]);
     let _ = std::fs::remove_file(&path);
     assert_eq!(r, Ok(0));
@@ -82,7 +82,7 @@ fn run_path_rejects_non_elf() {
 #[test]
 fn run_path_rejects_unknown_machine() {
     // ELF32 だが EM_386 ではない (EM_ARM=40)。
-    let mut img = hello_i386();
+    let mut img = hello_x86_32();
     img[18] = 40;
     img[19] = 0;
     let path = write_temp("badmachine", &img);

@@ -21,7 +21,7 @@ pub enum GuestAbi {
     Unknown,
     Rv64Linux,
     X86_64Linux,
-    I386Linux,
+    X86_32Linux,
     MipsO32,
 }
 
@@ -278,11 +278,11 @@ pub mod x86_64 {
     pub const FSTATFS: u64 = 138;
 }
 
-/// i386（Linux・32ビット）のシステムコール番号。
-/// 値はカーネルの UAPI 由来の事実である。新旧 stat 系は i386 の実態に合わせ、
-/// newfstatat（i386 に存在しない）の代わりに fstatat64 を持つ。
+/// x86 の 32ビット（Linux の i386 ABI、EM_386）のシステムコール番号。
+/// 値はカーネルの UAPI 由来の事実である。新旧 stat 系は 32ビットの実態に合わせ、
+/// newfstatat（32ビットに存在しない）の代わりに fstatat64 を持つ。
 // Ref: SRC-LINUX (7.3).
-pub mod i386 {
+pub mod x86_32 {
     pub const READ: u64 = 3;
     pub const WRITE: u64 = 4;
     pub const CLOSE: u64 = 6;
@@ -422,80 +422,80 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             rv64::CLOCK_NANOSLEEP => Some("clock_nanosleep"),
             _ => None,
         },
-        GuestAbi::I386Linux => match nr {
-            i386::READ => Some("read"),
-            i386::WRITE => Some("write"),
-            i386::CLOSE => Some("close"),
-            i386::MMAP => Some("mmap"),
-            i386::MPROTECT => Some("mprotect"),
-            i386::MUNMAP => Some("munmap"),
-            i386::BRK => Some("brk"),
-            i386::EXIT => Some("exit"),
-            i386::EXIT_GROUP => Some("exit_group"),
-            i386::UNAME => Some("uname"),
-            i386::SET_TID_ADDRESS => Some("set_tid_address"),
-            i386::GETTID => Some("gettid"),
-            i386::GETPID => Some("getpid"),
-            i386::TGKILL => Some("tgkill"),
-            i386::GETUID => Some("getuid"),
-            i386::GETEUID => Some("geteuid"),
-            i386::GETGID => Some("getgid"),
-            i386::GETEGID => Some("getegid"),
-            i386::RT_SIGACTION => Some("rt_sigaction"),
-            i386::RT_SIGPROCMASK => Some("rt_sigprocmask"),
-            i386::RT_SIGTIMEDWAIT => Some("rt_sigtimedwait"),
-            i386::RT_SIGSUSPEND => Some("rt_sigsuspend"),
-            i386::CLOCK_GETTIME => Some("clock_gettime"),
-            i386::GETRANDOM => Some("getrandom"),
-            i386::OPENAT => Some("openat"),
-            i386::LSEEK => Some("lseek"),
-            i386::GETDENTS64 => Some("getdents64"),
-            i386::GETCWD => Some("getcwd"),
-            i386::DUP3 => Some("dup3"),
-            i386::FCNTL => Some("fcntl"),
-            i386::IOCTL => Some("ioctl"),
-            i386::PREAD64 => Some("pread64"),
-            i386::READLINKAT => Some("readlinkat"),
-            i386::READLINK => Some("readlink"),
-            i386::FSTATAT64 => Some("fstatat64"),
-            i386::FSTAT => Some("fstat"),
-            i386::STATX => Some("statx"),
-            i386::READV => Some("readv"),
-            i386::WRITEV => Some("writev"),
-            i386::SENDFILE => Some("sendfile"),
-            i386::TIME => Some("time"),
-            i386::NANOSLEEP => Some("nanosleep"),
-            i386::GETGROUPS => Some("getgroups"),
-            i386::GETGROUPS32 => Some("getgroups32"),
-            i386::MKDIR => Some("mkdir"),
-            i386::RMDIR => Some("rmdir"),
-            i386::UNLINK => Some("unlink"),
-            i386::ACCESS => Some("access"),
-            i386::UTIMENSAT => Some("utimensat"),
-            i386::DUP => Some("dup"),
-            i386::DUP2 => Some("dup2"),
-            i386::MKDIRAT => Some("mkdirat"),
-            i386::UNLINKAT => Some("unlinkat"),
-            i386::FACCESSAT => Some("faccessat"),
-            i386::CHMOD => Some("chmod"),
-            i386::FCHMOD => Some("fchmod"),
-            i386::FCHMODAT => Some("fchmodat"),
-            i386::UMASK => Some("umask"),
-            i386::FTRUNCATE => Some("ftruncate"),
-            i386::RENAME => Some("rename"),
-            i386::SYMLINK => Some("symlink"),
-            i386::STATFS => Some("statfs"),
-            i386::FSTATFS => Some("fstatfs"),
-            i386::STATFS64 => Some("statfs64"),
-            i386::FSTATFS64 => Some("fstatfs64"),
-            i386::CLONE => Some("clone"),
-            i386::EXECVE => Some("execve"),
-            i386::WAIT4 => Some("wait4"),
-            i386::PIPE2 => Some("pipe2"),
-            i386::SETPGID => Some("setpgid"),
-            i386::GETPGID => Some("getpgid"),
-            i386::CHDIR => Some("chdir"),
-            i386::KILL => Some("kill"),
+        GuestAbi::X86_32Linux => match nr {
+            x86_32::READ => Some("read"),
+            x86_32::WRITE => Some("write"),
+            x86_32::CLOSE => Some("close"),
+            x86_32::MMAP => Some("mmap"),
+            x86_32::MPROTECT => Some("mprotect"),
+            x86_32::MUNMAP => Some("munmap"),
+            x86_32::BRK => Some("brk"),
+            x86_32::EXIT => Some("exit"),
+            x86_32::EXIT_GROUP => Some("exit_group"),
+            x86_32::UNAME => Some("uname"),
+            x86_32::SET_TID_ADDRESS => Some("set_tid_address"),
+            x86_32::GETTID => Some("gettid"),
+            x86_32::GETPID => Some("getpid"),
+            x86_32::TGKILL => Some("tgkill"),
+            x86_32::GETUID => Some("getuid"),
+            x86_32::GETEUID => Some("geteuid"),
+            x86_32::GETGID => Some("getgid"),
+            x86_32::GETEGID => Some("getegid"),
+            x86_32::RT_SIGACTION => Some("rt_sigaction"),
+            x86_32::RT_SIGPROCMASK => Some("rt_sigprocmask"),
+            x86_32::RT_SIGTIMEDWAIT => Some("rt_sigtimedwait"),
+            x86_32::RT_SIGSUSPEND => Some("rt_sigsuspend"),
+            x86_32::CLOCK_GETTIME => Some("clock_gettime"),
+            x86_32::GETRANDOM => Some("getrandom"),
+            x86_32::OPENAT => Some("openat"),
+            x86_32::LSEEK => Some("lseek"),
+            x86_32::GETDENTS64 => Some("getdents64"),
+            x86_32::GETCWD => Some("getcwd"),
+            x86_32::DUP3 => Some("dup3"),
+            x86_32::FCNTL => Some("fcntl"),
+            x86_32::IOCTL => Some("ioctl"),
+            x86_32::PREAD64 => Some("pread64"),
+            x86_32::READLINKAT => Some("readlinkat"),
+            x86_32::READLINK => Some("readlink"),
+            x86_32::FSTATAT64 => Some("fstatat64"),
+            x86_32::FSTAT => Some("fstat"),
+            x86_32::STATX => Some("statx"),
+            x86_32::READV => Some("readv"),
+            x86_32::WRITEV => Some("writev"),
+            x86_32::SENDFILE => Some("sendfile"),
+            x86_32::TIME => Some("time"),
+            x86_32::NANOSLEEP => Some("nanosleep"),
+            x86_32::GETGROUPS => Some("getgroups"),
+            x86_32::GETGROUPS32 => Some("getgroups32"),
+            x86_32::MKDIR => Some("mkdir"),
+            x86_32::RMDIR => Some("rmdir"),
+            x86_32::UNLINK => Some("unlink"),
+            x86_32::ACCESS => Some("access"),
+            x86_32::UTIMENSAT => Some("utimensat"),
+            x86_32::DUP => Some("dup"),
+            x86_32::DUP2 => Some("dup2"),
+            x86_32::MKDIRAT => Some("mkdirat"),
+            x86_32::UNLINKAT => Some("unlinkat"),
+            x86_32::FACCESSAT => Some("faccessat"),
+            x86_32::CHMOD => Some("chmod"),
+            x86_32::FCHMOD => Some("fchmod"),
+            x86_32::FCHMODAT => Some("fchmodat"),
+            x86_32::UMASK => Some("umask"),
+            x86_32::FTRUNCATE => Some("ftruncate"),
+            x86_32::RENAME => Some("rename"),
+            x86_32::SYMLINK => Some("symlink"),
+            x86_32::STATFS => Some("statfs"),
+            x86_32::FSTATFS => Some("fstatfs"),
+            x86_32::STATFS64 => Some("statfs64"),
+            x86_32::FSTATFS64 => Some("fstatfs64"),
+            x86_32::CLONE => Some("clone"),
+            x86_32::EXECVE => Some("execve"),
+            x86_32::WAIT4 => Some("wait4"),
+            x86_32::PIPE2 => Some("pipe2"),
+            x86_32::SETPGID => Some("setpgid"),
+            x86_32::GETPGID => Some("getpgid"),
+            x86_32::CHDIR => Some("chdir"),
+            x86_32::KILL => Some("kill"),
             _ => None,
         },
         GuestAbi::X86_64Linux => match nr {
@@ -810,36 +810,39 @@ mod tests {
     }
 
     #[test]
-    fn i386_stage1_numbers() {
-        // 代表的な番号が i386 の UAPI と一致する（全体は層6で突合せ）。
-        // newfstatat は i386 に存在しないため fstatat64 を持つ。
-        assert_eq!(i386::WRITE, 4);
-        assert_eq!(i386::EXIT_GROUP, 252);
-        assert_eq!(i386::MMAP, 90);
-        assert_eq!(i386::BRK, 45);
-        assert_eq!(syscall_name(GuestAbi::I386Linux, 4), Some("write"));
-        assert_eq!(syscall_name(GuestAbi::I386Linux, 383), Some("statx"));
-        assert_eq!(syscall_name(GuestAbi::I386Linux, 300), Some("fstatat64"));
-        assert_eq!(syscall_name(GuestAbi::I386Linux, 220), Some("getdents64"));
-        assert_eq!(syscall_name(GuestAbi::I386Linux, 64), None);
-        assert_eq!(i386::SENDFILE, 187);
-        assert_eq!(syscall_name(GuestAbi::I386Linux, 187), Some("sendfile"));
-        assert_eq!(i386::TIME, 13);
-        assert_eq!(syscall_name(GuestAbi::I386Linux, 13), Some("time"));
-        assert_eq!(i386::NANOSLEEP, 162);
-        assert_eq!(syscall_name(GuestAbi::I386Linux, 162), Some("nanosleep"));
-        assert_eq!(i386::GETGROUPS, 80);
-        assert_eq!(syscall_name(GuestAbi::I386Linux, 80), Some("getgroups"));
-        assert_eq!(i386::GETGROUPS32, 205);
-        assert_eq!(syscall_name(GuestAbi::I386Linux, 205), Some("getgroups32"));
-        assert_eq!(i386::STATFS, 99);
-        assert_eq!(syscall_name(GuestAbi::I386Linux, 99), Some("statfs"));
-        assert_eq!(i386::FSTATFS, 100);
-        assert_eq!(syscall_name(GuestAbi::I386Linux, 100), Some("fstatfs"));
-        assert_eq!(i386::STATFS64, 268);
-        assert_eq!(syscall_name(GuestAbi::I386Linux, 268), Some("statfs64"));
-        assert_eq!(i386::FSTATFS64, 269);
-        assert_eq!(syscall_name(GuestAbi::I386Linux, 269), Some("fstatfs64"));
+    fn x86_32_stage1_numbers() {
+        // 代表的な番号が 32ビットの UAPI と一致する（全体は層6で突合せ）。
+        // newfstatat は 32ビットに存在しないため fstatat64 を持つ。
+        assert_eq!(x86_32::WRITE, 4);
+        assert_eq!(x86_32::EXIT_GROUP, 252);
+        assert_eq!(x86_32::MMAP, 90);
+        assert_eq!(x86_32::BRK, 45);
+        assert_eq!(syscall_name(GuestAbi::X86_32Linux, 4), Some("write"));
+        assert_eq!(syscall_name(GuestAbi::X86_32Linux, 383), Some("statx"));
+        assert_eq!(syscall_name(GuestAbi::X86_32Linux, 300), Some("fstatat64"));
+        assert_eq!(syscall_name(GuestAbi::X86_32Linux, 220), Some("getdents64"));
+        assert_eq!(syscall_name(GuestAbi::X86_32Linux, 64), None);
+        assert_eq!(x86_32::SENDFILE, 187);
+        assert_eq!(syscall_name(GuestAbi::X86_32Linux, 187), Some("sendfile"));
+        assert_eq!(x86_32::TIME, 13);
+        assert_eq!(syscall_name(GuestAbi::X86_32Linux, 13), Some("time"));
+        assert_eq!(x86_32::NANOSLEEP, 162);
+        assert_eq!(syscall_name(GuestAbi::X86_32Linux, 162), Some("nanosleep"));
+        assert_eq!(x86_32::GETGROUPS, 80);
+        assert_eq!(syscall_name(GuestAbi::X86_32Linux, 80), Some("getgroups"));
+        assert_eq!(x86_32::GETGROUPS32, 205);
+        assert_eq!(
+            syscall_name(GuestAbi::X86_32Linux, 205),
+            Some("getgroups32")
+        );
+        assert_eq!(x86_32::STATFS, 99);
+        assert_eq!(syscall_name(GuestAbi::X86_32Linux, 99), Some("statfs"));
+        assert_eq!(x86_32::FSTATFS, 100);
+        assert_eq!(syscall_name(GuestAbi::X86_32Linux, 100), Some("fstatfs"));
+        assert_eq!(x86_32::STATFS64, 268);
+        assert_eq!(syscall_name(GuestAbi::X86_32Linux, 268), Some("statfs64"));
+        assert_eq!(x86_32::FSTATFS64, 269);
+        assert_eq!(syscall_name(GuestAbi::X86_32Linux, 269), Some("fstatfs64"));
     }
 
     #[test]

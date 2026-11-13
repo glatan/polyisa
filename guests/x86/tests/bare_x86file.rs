@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! x86 ファイル入出力の結合テスト。手組みの命令列で openat/read/write を回す.
 //!
-//! 番号表は i386 Linux の UAPI 由来の事実であり、自前の表現で書く。
+//! 番号表は 32ビット Linux（i386 ABI）の UAPI 由来の事実であり、自前の表現で書く。
 //! Ref: SRC-LINUX (7.3).
 
 use polyisa_cli::run_x86::{self, TrapHandler, TrapOutcome};
@@ -21,9 +21,9 @@ struct FileCat {
 
 impl TrapHandler for FileCat {
     fn handle_trap(&mut self, env: &mut BareEnv, code: u32) -> TrapOutcome {
-        use polyisa_os_linux::i386;
+        use polyisa_os_linux::x86_32;
         let nr: u64 = env.backend.get(Gpr(0).state()) as u64;
-        if nr == i386::WRITE && env.backend.get(Gpr(3).state()) == 1 {
+        if nr == x86_32::WRITE && env.backend.get(Gpr(3).state()) == 1 {
             let buf = env.backend.get(Gpr(1).state()) as u64;
             let len = env.backend.get(Gpr(2).state()) as usize;
             let mut data = vec![0u8; len];

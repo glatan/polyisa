@@ -120,7 +120,7 @@ pub fn clear_hi<B: Backend>(b: &mut B, rd: Gpr) {
     }
 }
 
-/// EFLAGS のビット位置（i386）。
+/// EFLAGS のビット位置（x86 共通）。
 const FLAG_CF: u32 = 0x1;
 const FLAG_PF: u32 = 0x4;
 const FLAG_AF: u32 = 0x10;
@@ -6004,7 +6004,7 @@ pub fn mov_r32_imm<B: Backend>(b: &mut B, dst: Gpr, imm: u32) -> Flow<B> {
     Ok(())
 }
 
-/// INT 0x80。i386 のシステムコール命令。OS パーソナリティが処理する退出を返す。
+/// INT 0x80。x86-32 のシステムコール命令。OS パーソナリティが処理する退出を返す。
 /// 呼び出し規約は eax=番号・ebx,ecx,edx,esi,edi,ebp=引数、戻りは eax（負が errno）。
 /// IDT 経由のベクタ分岐と特権検査は本格実装で足す。
 pub fn int80<B: Backend>(b: &mut B, eip: u32) -> Flow<B> {

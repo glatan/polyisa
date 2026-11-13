@@ -166,7 +166,7 @@ fn render_index(
     let mut s = String::new();
     push_generated_heading(&mut s, "# 実装状況");
     s.push_str(
-        "生成の元は、ISADL の記述（`guests/*/spec/`）、ロードマップの完了条件、設計との差の台帳、システムコールの表（`crates/cli/src/run.rs` の `RV64_SYSCALLS`、`crates/cli/src/run_x86.rs` の `X86_64_SYSCALLS` と `I386_SYSCALLS`、`crates/cli/src/run_mips.rs` の `MIPS_O32_SYSCALLS`）である。テストの結果は含めない。\n\n",
+        "生成の元は、ISADL の記述（`guests/*/spec/`）、ロードマップの完了条件、設計との差の台帳、システムコールの表（`crates/cli/src/run.rs` の `RV64_SYSCALLS`、`crates/cli/src/run_x86.rs` の `X86_64_SYSCALLS` と `X86_32_SYSCALLS`、`crates/cli/src/run_mips.rs` の `MIPS_O32_SYSCALLS`）である。テストの結果は含めない。\n\n",
     );
     s.push_str("## 段階の完了条件\n\n");
     s.push_str("条件の文言は [ロードマップ](../design/roadmap.md) にある。\n\n");
@@ -521,8 +521,8 @@ fn load_syscall_tables(root: &Path) -> Result<Vec<GuestSyscalls>, String> {
             names: parse_sys_table(&x86, "X86_64_SYSCALLS", "crates/cli/src/run_x86.rs")?,
         },
         GuestSyscalls {
-            abi: "i386",
-            names: parse_sys_table(&x86, "I386_SYSCALLS", "crates/cli/src/run_x86.rs")?,
+            abi: "x86_32",
+            names: parse_sys_table(&x86, "X86_32_SYSCALLS", "crates/cli/src/run_x86.rs")?,
         },
         GuestSyscalls {
             abi: "mips_o32",
@@ -585,7 +585,7 @@ fn render_syscalls(tables: &[GuestSyscalls]) -> String {
     let mut s = String::new();
     push_generated_heading(&mut s, "# 実装状況：システムコール");
     s.push_str(
-        "生成の元は `crates/cli/src/run.rs` の `RV64_SYSCALLS` と、`crates/cli/src/run_x86.rs` の `X86_64_SYSCALLS`、`I386_SYSCALLS`、`crates/cli/src/run_mips.rs` の `MIPS_O32_SYSCALLS` である。\n\n",
+        "生成の元は `crates/cli/src/run.rs` の `RV64_SYSCALLS` と、`crates/cli/src/run_x86.rs` の `X86_64_SYSCALLS`、`X86_32_SYSCALLS`、`crates/cli/src/run_mips.rs` の `MIPS_O32_SYSCALLS` である。\n\n",
     );
     for table in tables {
         s.push_str(&format!("## {}\n\n", table.abi));
