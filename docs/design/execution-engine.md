@@ -13,6 +13,8 @@ pub enum Stop {
     BudgetExhausted,            // 実行予算を使い切った
     Breakpoint(u64),            // デバッガのブレークポイントに達した
     Unimplemented(Unimpl),      // 未実装の命令や機能に達した
+    Exit(u64),                  // ゲストが終了した（OS が解決済みの終了コード）
+    Deadlock,                   // 実行できるスレッドがない
 }
 
 pub trait VcpuRunner {
@@ -75,6 +77,8 @@ vCPU は次のものを持つ。
 4. 実行予算を確認し、使い切っていれば `Stop::BudgetExhausted` を返す。
 
 実行予算の確認はブロックの終わりで行う。ブロックの長さには上限があるので、予算の超過は高々 1 ブロック分である。超過分は次の実行予算から差し引き、スケジューリングの位置を決定的に保つ。
+
+現状の実装はブロックとジャンプキャッシュの構築に先立つ段階であり、1 命令ずつ進める駆動を `engine::run::run` が担う。繰り返しと実行予算・退出の判定は `engine` にあり、フェッチ・解読・意味論とトラップ境界の解決は ISA ごとの `step` 実装（`cli` の `step_x86`・`step_rv`）が渡す。`engine` はゲスト ISA に依存できない依存規則（[ワークスペース構成](workspace.md)）のため、この分離が最小の形である。`engine::run::StepRunner` がこの駆動を `VcpuRunner` に適合する。トラップの境界は `engine::run::TrapHandler` が定め、OS パーソナリティ（`os-linux`）が実装する。
 
 ## 自己書き換えコード
 

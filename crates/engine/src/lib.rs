@@ -9,6 +9,7 @@
 pub mod bare;
 pub mod cache;
 pub mod interp;
+pub mod run;
 
 use polyisa_mem::Tlb;
 
@@ -39,6 +40,10 @@ pub enum Stop {
     Breakpoint(u64),
     /// 未実装の命令や機能に達した。
     Unimplemented(Unimpl),
+    /// ゲストが終了した。終了コードは OS パーソナリティが解決済みである。
+    Exit(u64),
+    /// 実行できるスレッドがない。
+    Deadlock,
 }
 
 /// ブロックキー。ページフレームの識別子、ページ内オフセット、実行モード、

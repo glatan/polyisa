@@ -29,52 +29,8 @@ pub enum GuestAbi {
     MipsO32,
 }
 
-/// トラップの処理結果。`cli` の実行ループと共有する。
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum TrapOutcome {
-    /// 処理して次の命令から続ける。
-    Handled,
-    /// 終了コード付きで抜ける。
-    Exit(u32),
-    /// このスレッドは待っている。実行ループが他のスレッドへ切り替える。
-    Blocked,
-    /// 未実装として止める。
-    Unimplemented,
-}
-
-/// SYSCALL と INT 0x80 を処理する。EAX などの読み書きはここで行う。
-pub trait TrapHandler {
-    fn handle_trap(&mut self, env: &mut polyisa_engine::bare::BareEnv, code: u32) -> TrapOutcome;
-
-    /// FS ベース（TLS）を返す。arch_prctl(ARCH_SET_FS) を処理する
-    /// ハンドラ以外は 0 を返す。
-    fn fs_base(&self) -> u64 {
-        0
-    }
-
-    /// GS ベース（i386 TLS）を返す。set_thread_area を処理する
-    /// ハンドラ以外は 0 を返す。
-    fn gs_base(&self) -> u64 {
-        0
-    }
-
-    /// プログラムブレークの初期値を伝える。ヒープを持つ
-    /// ハンドラだけが実装する。既定では何もしない。
-    fn init_brk(&mut self, _image_end: u64) {}
-
-    /// 1 命令を実行したあと。既定では何もしない。
-    fn after_step(&mut self, _env: &mut polyisa_engine::bare::BareEnv) {}
-
-    /// 待っているスレッドから切り替える。切り替えたら真。
-    fn on_block(&mut self, _env: &mut polyisa_engine::bare::BareEnv) -> bool {
-        false
-    }
-
-    /// 終了を別のスレッドの実行へ引き継ぐなら真。既定では終了で抜ける。
-    fn take_exit(&mut self, _env: &mut polyisa_engine::bare::BareEnv, _code: u32) -> bool {
-        false
-    }
-}
+/// 実行ループとの境界。定義は実行エンジンにある。
+pub use polyisa_engine::run::{TrapHandler, TrapOutcome};
 
 /// MIPS o32 のシステムコール番号。基準 4000 に表の通し番号を足した値。
 /// exit は 1、write は 4。

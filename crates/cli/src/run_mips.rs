@@ -96,6 +96,7 @@ pub struct O32Io {
 }
 
 /// `entry` から `model` で実行する。システムコールの出力は捨てる。
+// Gap: GAP-0007（MIPS の実行ループは遅延スロットの構造が独自で、段階 5 で engine へ移す）
 pub fn run(env: &mut BareEnv, entry: u64, model: MipsModel) -> MipsOutcome {
     run_os(env, entry, model, &mut O32Io::default())
 }

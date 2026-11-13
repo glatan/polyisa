@@ -20,7 +20,8 @@
 | [0012](0012-generic-backend-overhead.md) | 総称バックエンド経由の加算の上乗せを受け入れる | 承認 |
 | [0013](0013-license-mit-or-apache.md) | ライセンスを MIT OR Apache-2.0 とする | 承認 |
 | [0014](0014-statfs-number-table-only.md) | statfs 系は番号表だけを持ち、実行しない | 提案 |
-| [0015](0015-syscall-handling-migration.md) | システムコールの処理を cli から kernel と os-linux へ移す | 提案 |
+| [0015](0015-syscall-handling-migration.md) | システムコールの処理を cli から kernel と os-linux へ移す | 承認 |
+| [0016](0016-execution-loop-driver.md) | 実行ループの駆動を engine に置き、ISA 別の step は呼び出し側に残す | 承認 |
 
 ## 書き方
 

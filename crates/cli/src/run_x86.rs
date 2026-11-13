@@ -16,20 +16,7 @@ use polyisa_sem::{Backend, ExceptionKind};
 use polyisa_guest_x86::sem;
 use polyisa_guest_x86::{Insn, decode};
 
-/// 実行の結果。
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Outcome {
-    /// 終了コード付きの正常終了。
-    Exit(u32),
-    /// 未実装の到達点。
-    Unimplemented { eip: u32, word: u128 },
-    /// 上限を超えた。
-    StepLimit { eip: u32 },
-    /// 実行できるスレッドがない。待ちの対象は報告済み。
-    Deadlock,
-}
-
-pub use polyisa_os_linux::{TrapHandler, TrapOutcome};
+pub use polyisa_engine::run::{Outcome, TrapHandler, TrapOutcome};
 
 fn acc_fetch() -> Access {
     Access {
@@ -1690,7 +1677,6 @@ fn fetch_len(
 }
 
 /// eip から実行する。fallthrough は eip を命令長だけ進める。
-// Gap: GAP-0007
 pub fn run(env: &mut BareEnv, entry: u32, sys: &mut impl TrapHandler, limit: u64) -> Outcome {
     run_mode(env, entry, sys, limit, false)
 }
@@ -1713,120 +1699,389 @@ pub fn run_mode(
     let _ = sys.on_block(env);
     // 直近の eip を記録する（POLYISA_HIST でフェッチ失敗時に吐出す診断）。
     let mut hist = std::collections::VecDeque::<(u32, String)>::with_capacity(33);
-    for _ in 0..limit {
-        let pc = eip_of(env) as u64;
-        if std::env::var_os("POLYISA_HIST").is_some() {
-            if hist.len() == 32 {
-                hist.pop_front();
-            }
-            hist.push_back((pc as u32, String::new()));
+    polyisa_engine::run::run(
+        env,
+        sys,
+        limit,
+        |env| u64::from(eip_of(env)),
+        |env, sys| step_x86(env, sys, is64, &mut hist),
+    )
+}
+
+/// 1 命令ぶんのフェッチ・解読・意味論とトラップ境界の解決。
+/// 継続なら `Ok(())`、退出なら退出理由を返す。
+// Gap: GAP-0015（fetch_len・dispatch の手組みのバイト取り出しを ISADL に乗せる）
+#[allow(clippy::too_many_lines)]
+fn step_x86(
+    env: &mut BareEnv,
+    sys: &mut dyn TrapHandler,
+    is64: bool,
+    hist: &mut std::collections::VecDeque<(u32, String)>,
+) -> Result<(), Outcome> {
+    let pc = eip_of(env) as u64;
+    if std::env::var_os("POLYISA_HIST").is_some() {
+        if hist.len() == 32 {
+            hist.pop_front();
         }
-        let mut head = [0u8; 1];
+        hist.push_back((pc as u32, String::new()));
+    }
+    let mut head = [0u8; 1];
+    if env
+        .backend
+        .mem
+        .read(VirtAddr(pc), &mut head, acc_fetch())
+        .is_err()
+    {
+        for (e, i) in hist.iter() {
+            eprintln!("hist {e:#x} {i}");
+        }
+        return Err(Outcome::Unimplemented { pc, word: 0 });
+    }
+    // 接頭辞（F0/F3・REX・0x66・0x67・セグメント）をデコード前に剥がす。順不同に対応する。
+    // 0x67 は 64ビットモードのみ受け付け、32ビットアドレス指定とみなす
+    // （4GB 未満では u64 演算と等価のため意味論への影響はない）。
+    // F3 は string 命令でのみ意味を持つ。0x66 は NOP/XMM 系でのみ受け付ける。
+    // F0 (LOCK) は単一スレッド試作として無視する。
+    // FS 上書き（0x64）は記録し、対応するメモリ形式で FS ベースを加算する。
+    // その他のセグメント上書き（2E/3E/26/65/36）は無視する（4GB 未満では等価）。
+    let mut off: u64 = 0;
+    let mut rep = false;
+    let mut rex: u8 = 0;
+    let mut has66 = false;
+    let mut has_f2 = false;
+    let mut has_fs = false;
+    let mut has_gs = false;
+    loop {
+        if head[0] == 0xF3 && !rep {
+            rep = true;
+        } else if head[0] == 0xF2 && !has_f2 {
+            // REPNE 接頭辞。string 反復と SSE (PSHUFLW) で使う.
+            has_f2 = true;
+        } else if head[0] == 0xF0 {
+            // LOCK 接頭辞。単一スレッドのため無視する.
+        } else if is64 && (0x40..=0x4F).contains(&head[0]) && rex == 0 {
+            rex = head[0];
+        } else if head[0] == 0x66 {
+            // オペランドサイズ接頭辞。NOP/XMM 系でのみ受け付ける（追随者はゲートで絞る）。
+            has66 = true;
+        } else if is64 && head[0] == 0x67 {
+            // アドレスサイズ接頭辞。複数あっても1バイトずつ剥がす。
+        } else if head[0] == 0x64 && !has_fs {
+            // FS 上書き。dispatch 側で FS ベースを加算する。
+            has_fs = true;
+        } else if head[0] == 0x65 && !has_gs {
+            // GS 上書き。i386 musl は GS を TLS に使う。
+            has_gs = true;
+        } else if matches!(head[0], 0x2E | 0x3E | 0x26 | 0x36) {
+            // セグメント上書き。4GB 未満では無視してよい。
+        } else {
+            break;
+        }
+        off += 1;
         if env
             .backend
             .mem
-            .read(VirtAddr(pc), &mut head, acc_fetch())
+            .read(VirtAddr(pc + off), &mut head, acc_fetch())
             .is_err()
         {
-            for (e, i) in &hist {
-                eprintln!("hist {e:#x} {i}");
-            }
-            return Outcome::Unimplemented {
-                eip: pc as u32,
-                word: 0,
-            };
+            return Err(Outcome::Unimplemented {
+                pc,
+                word: head[0] as u128,
+            });
         }
-        // 接頭辞（F0/F3・REX・0x66・0x67・セグメント）をデコード前に剥がす。順不同に対応する。
-        // 0x67 は 64ビットモードのみ受け付け、32ビットアドレス指定とみなす
-        // （4GB 未満では u64 演算と等価のため意味論への影響はない）。
-        // F3 は string 命令でのみ意味を持つ。0x66 は NOP/XMM 系でのみ受け付ける。
-        // F0 (LOCK) は単一スレッド試作として無視する。
-        // FS 上書き（0x64）は記録し、対応するメモリ形式で FS ベースを加算する。
-        // その他のセグメント上書き（2E/3E/26/65/36）は無視する（4GB 未満では等価）。
-        let mut off: u64 = 0;
-        let mut rep = false;
-        let mut rex: u8 = 0;
-        let mut has66 = false;
-        let mut has_f2 = false;
-        let mut has_fs = false;
-        let mut has_gs = false;
-        loop {
-            if head[0] == 0xF3 && !rep {
-                rep = true;
-            } else if head[0] == 0xF2 && !has_f2 {
-                // REPNE 接頭辞。string 反復と SSE (PSHUFLW) で使う.
-                has_f2 = true;
-            } else if head[0] == 0xF0 {
-                // LOCK 接頭辞。単一スレッドのため無視する.
-            } else if is64 && (0x40..=0x4F).contains(&head[0]) && rex == 0 {
-                rex = head[0];
-            } else if head[0] == 0x66 {
-                // オペランドサイズ接頭辞。NOP/XMM 系でのみ受け付ける（追随者はゲートで絞る）。
-                has66 = true;
-            } else if is64 && head[0] == 0x67 {
-                // アドレスサイズ接頭辞。複数あっても1バイトずつ剥がす。
-            } else if head[0] == 0x64 && !has_fs {
-                // FS 上書き。dispatch 側で FS ベースを加算する。
-                has_fs = true;
-            } else if head[0] == 0x65 && !has_gs {
-                // GS 上書き。i386 musl は GS を TLS に使う。
-                has_gs = true;
-            } else if matches!(head[0], 0x2E | 0x3E | 0x26 | 0x36) {
-                // セグメント上書き。4GB 未満では無視してよい。
-            } else {
-                break;
-            }
-            off += 1;
-            if env
-                .backend
-                .mem
-                .read(VirtAddr(pc + off), &mut head, acc_fetch())
-                .is_err()
-            {
-                return Outcome::Unimplemented {
-                    eip: pc as u32,
-                    word: head[0] as u128,
-                };
-            }
+    }
+    let mut peek = [0u8; 1];
+    let second = if matches!(
+        head[0],
+        0x01 | 0x8B
+            | 0x29
+            | 0x31
+            | 0x39
+            | 0x21
+            | 0x85
+            | 0x89
+            | 0x03
+            | 0x0B
+            | 0x3B
+            | 0x2B
+            | 0x33
+            | 0x23
+            | 0x13
+            | 0x1B
+            | 0x87
+            | 0x86
+            | 0x8E
+            | 0xFE
+            | 0xFF
+            | 0x09
+            | 0x11
+            | 0x19
+            | 0xC1
+            | 0xD1
+            | 0xD3
+            | 0xC7
+            | 0x81
+            | 0x83
+            | 0x63
+            | 0x69
+            | 0x6B
+            | 0x8D
+            | 0x8F
+            | 0x0F
+            | 0xF7
+            | 0xF6
+            | 0x80
+            | 0xC6
+            | 0x88
+            | 0x8A
+            | 0x38
+            | 0x3A
+            | 0x20
+            | 0x28
+            | 0x30
+            | 0x32
+            | 0x08
+            | 0x22
+            | 0x84
+            | 0xD9
+            | 0xDB
+            | 0xDF
+            | 0xDE
+            | 0xD8
+            | 0xDD
+            | 0x0A
+            | 0xC0
+            | 0xD0
+    ) {
+        if env
+            .backend
+            .mem
+            .read(VirtAddr(pc + off + 1), &mut peek, acc_fetch())
+            .is_err()
+        {
+            return Err(Outcome::Unimplemented {
+                pc,
+                word: head[0] as u128,
+            });
         }
-        let mut peek = [0u8; 1];
-        let second = if matches!(
+        Some(peek[0])
+    } else {
+        None
+    };
+    // SIB 付き（mod≠11 かつ rm=100）は第3バイト（SIB）で長さが変わる。
+    // 2バイトオペコード（0F）では third=ModRM、fourth=SIB である。
+    // C7/0x88/0x8A/0x38/0x3A は SIB の base で mod=00 の長さが変わるため同様に読む。
+    let third = if (matches!(
+        head[0],
+        0x8B | 0x89
+            | 0x8D
+            | 0xC7
+            | 0xC6
+            | 0x88
+            | 0x8A
+            | 0x38
+            | 0x3A
+            | 0x87
+            | 0x85
+            | 0x83
+            | 0x81
+            | 0x69
+            | 0x6B
+            | 0x63
+            | 0x01
+            | 0x03
+            | 0x09
+            | 0x21
+            | 0x0B
+            | 0x39
+            | 0x3B
+            | 0x2B
+            | 0x33
+            | 0x23
+            | 0x13
+            | 0x1B
+            | 0x80
+            | 0x28
+            | 0x30
+            | 0xF6
+            | 0xF7
+            | 0xFF
+            | 0xDB
+            | 0xDD
+            | 0xDF
+    ) && matches!(second, Some(s) if s & 7 == 4 && s >> 6 != 3))
+        || (head[0] == 0x0F
+            && (matches!(
+                second,
+                Some(
+                    0x1F | 0x6E
+                        | 0x6F
+                        | 0x7F
+                        | 0x60
+                        | 0x61
+                        | 0x62
+                        | 0x6C
+                        | 0x70
+                        | 0x73
+                        | 0x74
+                        | 0x64
+                        | 0x76
+                        | 0x12
+                        | 0x16
+                        | 0x57
+                        | 0xDF
+                        | 0xFC
+                        | 0x2A
+                        | 0x58
+                        | 0x51
+                        | 0x5A
+                        | 0x2E
+                        | 0x2F
+                        | 0x2C
+                        | 0x54
+                        | 0x5C
+                        | 0x59
+                        | 0x5D
+                        | 0x5E
+                        | 0xBA
+                        | 0xC1
+                        | 0x7E
+                        | 0xD7
+                        | 0xDA
+                        | 0xDE
+                        | 0xDB
+                        | 0xEB
+                        | 0xEF
+                        | 0xF8
+                        | 0xD6
+                        | 0x10
+                        | 0x11
+                        | 0x28
+                        | 0x29
+                        | 0xE7
+                        | 0xB6
+                        | 0xB7
+                        | 0xBE
+                        | 0xBF
+                        | 0xAF
+                        | 0xBC
+                        | 0xBD
+                        | 0xB1
+                        | 0xA5
+                        | 0xAD
+                        | 0xAC
+                        | 0xA3
+                        | 0xAB
+                )
+            ) || matches!(second, Some(0x40..=0x4F))
+                || matches!(second, Some(0x90..=0x9F))))
+    {
+        let mut modrm = [0u8; 1];
+        if env
+            .backend
+            .mem
+            .read(VirtAddr(pc + off + 2), &mut modrm, acc_fetch())
+            .is_err()
+        {
+            return Err(Outcome::Unimplemented {
+                pc,
+                word: head[0] as u128,
+            });
+        }
+        Some(modrm[0])
+    } else {
+        None
+    };
+    // 0F MOVUPS/MOVNTDQ/NOP の SIB 付きは第4バイト（SIB）で長さが変わる。
+    let fourth = if head[0] == 0x0F
+        && matches!(
+            second,
+            Some(
+                0x10 | 0x11
+                    | 0x28
+                    | 0x29
+                    | 0x6F
+                    | 0x7F
+                    | 0x94
+                    | 0x95
+                    | 0xE7
+                    | 0x1F
+                    | 0xB6
+                    | 0xB7
+                    | 0xBE
+                    | 0xBF
+                    | 0xAF
+                    | 0xBC
+                    | 0xBD
+                    | 0xB1
+                    | 0x58
+                    | 0x59
+                    | 0x2A
+                    | 0x2C
+                    | 0xEB
+                    | 0xBA
+            )
+        )
+        || matches!(second, Some(0x40..=0x4F))
+            && matches!(third, Some(m) if m & 7 == 4 && m >> 6 != 3)
+    {
+        let mut sib = [0u8; 1];
+        if env
+            .backend
+            .mem
+            .read(VirtAddr(pc + off + 3), &mut sib, acc_fetch())
+            .is_err()
+        {
+            return Err(Outcome::Unimplemented {
+                pc,
+                word: head[0] as u128,
+            });
+        }
+        Some(sib[0])
+    } else {
+        None
+    };
+    let rex_w = rex & 8 != 0;
+    let Some(base) = fetch_len(head[0], second, third, fourth, has66, rex_w, is64) else {
+        return Err(Outcome::Unimplemented {
+            pc,
+            word: head[0] as u128,
+        });
+    };
+    // 接頭辞付きの追随者は reg-direct 系・C7/83・string・0F・PUSH/POP・CALL/JMP のみ。
+    // REX.SIB・REXメモリ形式は未対応。F3 付きは string・ENDBR64 のみ受け付ける。
+    if off >= 1
+        && !matches!(
             head[0],
-            0x01 | 0x8B
-                | 0x29
-                | 0x31
-                | 0x39
-                | 0x21
-                | 0x85
-                | 0x89
+            0x8B | 0x89
+                | 0x90
+                | 0x91
+                | 0x92
+                | 0x93
+                | 0x94
+                | 0x95
+                | 0x96
+                | 0x97
+                | 0x01
                 | 0x03
                 | 0x0B
                 | 0x3B
                 | 0x2B
                 | 0x33
                 | 0x23
+                | 0x22
                 | 0x13
                 | 0x1B
-                | 0x87
-                | 0x86
-                | 0x8E
-                | 0xFE
                 | 0xFF
-                | 0x09
+                | 0xFE
                 | 0x11
                 | 0x19
-                | 0xC1
-                | 0xD1
-                | 0xD3
-                | 0xC7
-                | 0x81
-                | 0x83
-                | 0x63
-                | 0x69
-                | 0x6B
-                | 0x8D
-                | 0x8F
-                | 0x0F
+                | 0x29
+                | 0x31
+                | 0x39
+                | 0x21
+                | 0x09
+                | 0x85
                 | 0xF7
                 | 0xF6
                 | 0x80
@@ -1840,772 +2095,499 @@ pub fn run_mode(
                 | 0x30
                 | 0x32
                 | 0x08
-                | 0x22
-                | 0x84
-                | 0xD9
-                | 0xDB
-                | 0xDF
-                | 0xDE
-                | 0xD8
-                | 0xDD
                 | 0x0A
+                | 0x87
+                | 0x84
                 | 0xC0
                 | 0xD0
-        ) {
-            if env
-                .backend
-                .mem
-                .read(VirtAddr(pc + off + 1), &mut peek, acc_fetch())
-                .is_err()
-            {
-                return Outcome::Unimplemented {
-                    eip: pc as u32,
-                    word: head[0] as u128,
-                };
-            }
-            Some(peek[0])
-        } else {
-            None
-        };
-        // SIB 付き（mod≠11 かつ rm=100）は第3バイト（SIB）で長さが変わる。
-        // 2バイトオペコード（0F）では third=ModRM、fourth=SIB である。
-        // C7/0x88/0x8A/0x38/0x3A は SIB の base で mod=00 の長さが変わるため同様に読む。
-        let third = if (matches!(
-            head[0],
-            0x8B | 0x89
+                | 0xC1
+                | 0xD1
+                | 0xD3
+                | 0x05
+                | 0x2D
+                | 0x3D
+                | 0x25
+                | 0x0D
+                | 0x35
                 | 0x8D
+                | 0x8F
                 | 0xC7
-                | 0xC6
-                | 0x88
-                | 0x8A
-                | 0x38
-                | 0x3A
-                | 0x87
-                | 0x85
                 | 0x83
                 | 0x81
+                | 0x63
                 | 0x69
                 | 0x6B
-                | 0x63
-                | 0x01
-                | 0x03
-                | 0x09
-                | 0x21
-                | 0x0B
-                | 0x39
-                | 0x3B
-                | 0x2B
-                | 0x33
-                | 0x23
-                | 0x13
-                | 0x1B
-                | 0x80
-                | 0x28
-                | 0x30
-                | 0xF6
-                | 0xF7
-                | 0xFF
-                | 0xDB
-                | 0xDD
-                | 0xDF
-        ) && matches!(second, Some(s) if s & 7 == 4 && s >> 6 != 3))
-            || (head[0] == 0x0F
-                && (matches!(
-                    second,
-                    Some(
-                        0x1F | 0x6E
-                            | 0x6F
-                            | 0x7F
-                            | 0x60
-                            | 0x61
-                            | 0x62
-                            | 0x6C
-                            | 0x70
-                            | 0x73
-                            | 0x74
-                            | 0x64
-                            | 0x76
-                            | 0x12
-                            | 0x16
-                            | 0x57
-                            | 0xDF
-                            | 0xFC
-                            | 0x2A
-                            | 0x58
-                            | 0x51
-                            | 0x5A
-                            | 0x2E
-                            | 0x2F
-                            | 0x2C
-                            | 0x54
-                            | 0x5C
-                            | 0x59
-                            | 0x5D
-                            | 0x5E
-                            | 0xBA
-                            | 0xC1
-                            | 0x7E
-                            | 0xD7
-                            | 0xDA
-                            | 0xDE
-                            | 0xDB
-                            | 0xEB
-                            | 0xEF
-                            | 0xF8
-                            | 0xD6
-                            | 0x10
-                            | 0x11
-                            | 0x28
-                            | 0x29
-                            | 0xE7
-                            | 0xB6
-                            | 0xB7
-                            | 0xBE
-                            | 0xBF
-                            | 0xAF
-                            | 0xBC
-                            | 0xBD
-                            | 0xB1
-                            | 0xA5
-                            | 0xAD
-                            | 0xAC
-                            | 0xA3
-                            | 0xAB
-                    )
-                ) || matches!(second, Some(0x40..=0x4F))
-                    || matches!(second, Some(0x90..=0x9F))))
-        {
-            let mut modrm = [0u8; 1];
-            if env
-                .backend
-                .mem
-                .read(VirtAddr(pc + off + 2), &mut modrm, acc_fetch())
-                .is_err()
-            {
-                return Outcome::Unimplemented {
-                    eip: pc as u32,
-                    word: head[0] as u128,
-                };
-            }
-            Some(modrm[0])
-        } else {
-            None
-        };
-        // 0F MOVUPS/MOVNTDQ/NOP の SIB 付きは第4バイト（SIB）で長さが変わる。
-        let fourth = if head[0] == 0x0F
-            && matches!(
-                second,
-                Some(
-                    0x10 | 0x11
-                        | 0x28
-                        | 0x29
-                        | 0x6F
-                        | 0x7F
-                        | 0x94
-                        | 0x95
-                        | 0xE7
-                        | 0x1F
-                        | 0xB6
-                        | 0xB7
-                        | 0xBE
-                        | 0xBF
-                        | 0xAF
-                        | 0xBC
-                        | 0xBD
-                        | 0xB1
-                        | 0x58
-                        | 0x59
-                        | 0x2A
-                        | 0x2C
-                        | 0xEB
-                        | 0xBA
-                )
-            )
-            || matches!(second, Some(0x40..=0x4F))
-                && matches!(third, Some(m) if m & 7 == 4 && m >> 6 != 3)
-        {
-            let mut sib = [0u8; 1];
-            if env
-                .backend
-                .mem
-                .read(VirtAddr(pc + off + 3), &mut sib, acc_fetch())
-                .is_err()
-            {
-                return Outcome::Unimplemented {
-                    eip: pc as u32,
-                    word: head[0] as u128,
-                };
-            }
-            Some(sib[0])
-        } else {
-            None
-        };
-        let rex_w = rex & 8 != 0;
-        let Some(base) = fetch_len(head[0], second, third, fourth, has66, rex_w, is64) else {
-            return Outcome::Unimplemented {
-                eip: pc as u32,
-                word: head[0] as u128,
-            };
-        };
-        // 接頭辞付きの追随者は reg-direct 系・C7/83・string・0F・PUSH/POP・CALL/JMP のみ。
-        // REX.SIB・REXメモリ形式は未対応。F3 付きは string・ENDBR64 のみ受け付ける。
-        if off >= 1
-            && !matches!(
-                head[0],
-                0x8B | 0x89
-                    | 0x90
-                    | 0x91
-                    | 0x92
-                    | 0x93
-                    | 0x94
-                    | 0x95
-                    | 0x96
-                    | 0x97
-                    | 0x01
-                    | 0x03
-                    | 0x0B
-                    | 0x3B
-                    | 0x2B
-                    | 0x33
-                    | 0x23
-                    | 0x22
-                    | 0x13
-                    | 0x1B
-                    | 0xFF
-                    | 0xFE
-                    | 0x11
-                    | 0x19
-                    | 0x29
-                    | 0x31
-                    | 0x39
-                    | 0x21
-                    | 0x09
-                    | 0x85
-                    | 0xF7
-                    | 0xF6
-                    | 0x80
-                    | 0xC6
-                    | 0x88
-                    | 0x8A
-                    | 0x38
-                    | 0x3A
-                    | 0x20
-                    | 0x28
-                    | 0x30
-                    | 0x32
-                    | 0x08
-                    | 0x0A
-                    | 0x87
-                    | 0x84
-                    | 0xC0
-                    | 0xD0
-                    | 0xC1
-                    | 0xD1
-                    | 0xD3
-                    | 0x05
-                    | 0x2D
-                    | 0x3D
-                    | 0x25
-                    | 0x0D
-                    | 0x35
-                    | 0x8D
-                    | 0x8F
-                    | 0xC7
-                    | 0x83
-                    | 0x81
-                    | 0x63
-                    | 0x69
-                    | 0x6B
-                    | 0x98
-                    | 0x99
-                    | 0x0F
-                    | 0xA0..=0xA3
-                    | 0xA4
-                    | 0xA5
-                    | 0xA9
-                    | 0xAA
-                    | 0xAB
-                    | 0xB8..=0xBF
-                    | 0xB0..=0xB7
-                    | 0x6A
-                    | 0x68
-                    | 0x50..=0x5F | 0xE8 | 0xE9
-            )
-        {
-            return Outcome::Unimplemented {
-                eip: pc as u32,
-                word: head[0] as u128,
-            };
-        }
-        // REX はデコード前に剥がす。nbytes は eip 進行用に接頭辞を含む。
-        let nbytes = base + off;
-        let mut bytes = [0u8; 16];
-        bytes[0] = head[0];
-        if base >= 2 {
-            // 長さ判定用のぞき見を使う。なければ読み直す。
-            bytes[1] = second.unwrap_or(0);
-        }
-        if base >= 3 {
-            bytes[2] = third.unwrap_or(0);
-        }
-        if base >= 4 {
-            bytes[3] = fourth.unwrap_or(0);
-        }
-        for i in 1..base {
-            if i == 1 && second.is_some() {
-                continue;
-            }
-            if i == 2 && third.is_some() {
-                continue;
-            }
-            if i == 3 && fourth.is_some() {
-                continue;
-            }
-            let mut b = [0u8; 1];
-            if env
-                .backend
-                .mem
-                .read(VirtAddr(pc + off + i), &mut b, acc_fetch())
-                .is_err()
-            {
-                return Outcome::Unimplemented {
-                    eip: pc as u32,
-                    word: head[0] as u128,
-                };
-            }
-            bytes[i as usize] = b[0];
-        }
-        // ISADL の word 組立（opcode 上位詰め）に合わせる。
-        let mut word: u128 = 0;
-        for i in 0..base {
-            word = (word << 8) | bytes[i as usize] as u128;
-        }
-        let len_bits = (base * 8) as u32;
-        let Some(insn) = decode(word, len_bits) else {
-            return Outcome::Unimplemented {
-                eip: pc as u32,
-                word,
-            };
-        };
-        if std::env::var_os("POLYISA_HIST").is_some()
-            && let Some(h) = hist.back_mut()
-        {
-            *h = (pc as u32, format!("{insn:?}"));
-        }
-        // 0x66 接頭辞は XMM/NOP/16bit-RIP 系でのみ有効。それ以外は未対応。
-        // 32ビットでの 0x66 は operand-size override（16ビット動作）。
-        // 16ビット意味論を持つ命令だけを通す。
-        if has66
-            && !is64
-            && !matches!(
-                insn,
-                Insn::Nop
-                    | Insn::Nopl
-                    | Insn::TestRm32
-                    | Insn::TestRm16Imm
-                    | Insn::TestM16ImmMemnd
-                    | Insn::TestM16ImmMem8
-                    | Insn::TestM16ImmRip
-                    | Insn::TestAxImm16
-                    | Insn::AndAxImm16
-                    | Insn::CmpAxImm16
-                    | Insn::OrAxImm16
-                    | Insn::AddRm16Imm
-                    | Insn::AndRm16Imm
-                    | Insn::AndRm16ImmMemnd
-                    | Insn::CmpRm16Imm
-                    | Insn::CmpRm16ImmMem8
-                    | Insn::MovRm16ImmMemnd
-                    | Insn::MovRm16ImmMem8
-                    | Insn::MovRm16ImmSibd
-                    | Insn::MovRm16ImmSibd32
-                    | Insn::MovRm16ImmSib
-                    | Insn::MovRm16ImmRip
-                    | Insn::MovRm16ImmM32
-                    | Insn::MovRm16ImmDisp32
-                    | Insn::MovEaxSib
-                    | Insn::MovEaxSibd
-                    | Insn::MovEaxSibd32
-                    | Insn::MovSibEax
-                    | Insn::MovSibdEax
-                    | Insn::MovSibd32Eax
-                    | Insn::MovEaxMemnd
-                    | Insn::MovEaxMem8
-                    | Insn::MovEaxMem32
-                    | Insn::MovMemndEax
-                    | Insn::MovMemEax32
-                    | Insn::MovMemEax8
-                    | Insn::MovAbsEax
-                    | Insn::MovEaxAbs
-                    | Insn::CmpRm32
-                    | Insn::CmpRmMemnd
-                    | Insn::CmpRmImm8
-                    | Insn::CmpRmImm8Memnd
-                    | Insn::CmpRmImm8Rip
-                    | Insn::CmpRmImm8Sib
-                    | Insn::CmpRmImm8Sibd
-                    | Insn::CmpRmImm8Sibd32
-                    | Insn::CmpRmImm8m8
-                    | Insn::CmpM32R32Sib
-                    | Insn::AddRMemnd
-                    | Insn::AddM32R32Sibd32
-                    | Insn::SubM32R32Mem8
-                    | Insn::SubRmImm8Sibd
-                    | Insn::AndRSibd32
-                    | Insn::AndRmImm8Sibd
-                    | Insn::XorRm32
-                    | Insn::RolRm32Imm8
-                    | Insn::ShrRm32Imm8
-                    | Insn::IncRmSibd32
-                    | Insn::IncRmMem32
-            )
-        {
-            return Outcome::Unimplemented {
-                eip: pc as u32,
-                word,
-            };
-        }
-        if has66
-            && is64
-            && !matches!(
-                insn,
-                Insn::Nop
-                    | Insn::Nopl
-                    | Insn::TestRm32
-                    | Insn::TestM16ImmMemnd
-                    | Insn::TestRm16Imm
-                    | Insn::TestM16ImmMem8
-                    | Insn::TestM16ImmRip
-                    | Insn::MovlpdXmmM64Memnd
-                    | Insn::MovdXmm
-                    | Insn::MovdXmmM32
-                    | Insn::MovdXmmRip
-                    | Insn::Punpcklbw
-                    | Insn::Punpcklwd
-                    | Insn::Punpckldq
-                    | Insn::MovqM64XmmRip
-                    | Insn::MovqM64XmmMemnd
-                    | Insn::MovqM64XmmMem8
-                    | Insn::MovqM64XmmMem32
-                    // MOVHPD (66 0F 16) は MOVHPS (0F 16) と等価のため Insn を共用する.
-                    | Insn::MovhpsXmmM64Mem8
-                    | Insn::Pshufd
-                    | Insn::Pslldq
-                    | Insn::Psrldq
-                    | Insn::Psubb
-                    | Insn::Paddb
-                    | Insn::Pcmpgtb
-                    | Insn::Pxor
-                    | Insn::Pand
-                    | Insn::Pandn
-                    | Insn::Pminub
-                    | Insn::Pmaxub
-                    | Insn::Pcmpeqb
-                    | Insn::Pcmpeqd
-                    | Insn::Por
-                    | Insn::Pmovmskb
-                    | Insn::PcmpeqbMemnd
-                    | Insn::PcmpeqbMem8
-                    | Insn::PcmpeqbMem32
-                    | Insn::PminubMemnd
-                    | Insn::PminubMem8
-                    | Insn::PminubMem32
-                    | Insn::PorMemnd
-                    | Insn::PorMem8
-                    | Insn::PorMem32
-                    | Insn::PorSibd32
-                    | Insn::MovSibdEax
-                    | Insn::MovSibd32Eax
-                    | Insn::IncRmSibd32
-                    | Insn::IncRmMem32
-                    | Insn::AddM32R32Sibd32
-                    | Insn::MovEaxSibd
-                    | Insn::Punpcklqdq
-                    | Insn::MovqR64Xmm
-                    | Insn::MovupsLoadXmm
-                    | Insn::MovupsStoreXmm
-                    // MOVAPD (66 0F 28) は MOVAPS と等価のため Insn を共用する.
-                    | Insn::MovapsLoadXmm
-                    | Insn::MovupsLoadMemnd
-                    | Insn::MovupsStoreMemnd
-                    | Insn::MovupsLoadMem8
-                    | Insn::MovupsStoreMem8
-                    | Insn::MovupsLoadMem32
-                    | Insn::MovupsStoreMem32
-                    | Insn::MovupsLoadSib
-                    | Insn::MovupsStoreSib
-                    | Insn::MovupsLoadSibd
-                    | Insn::MovupsStoreSibd
-                    | Insn::MovntdqStoreMemnd
-                    | Insn::MovntdqStoreMem8
-                    | Insn::MovapsStoreMemnd
-                    | Insn::MovapsStoreMem8
-                    | Insn::MovapsStoreMem32
-                    | Insn::MovSibEax
-                    | Insn::MovEaxSib
-                    | Insn::NoplSib
-                    | Insn::NoplSibd
-                    | Insn::NoplSibd32
-                    | Insn::MovupsLoadRip
-                    | Insn::MovupsStoreRip
-                    | Insn::MovdqaLoadRip
-                    | Insn::Comisd
-                    | Insn::Ucomisd
-                    | Insn::UcomisdMemnd
-                    | Insn::UcomisdMem8
-                    | Insn::UcomisdMem32
-                    | Insn::UcomisdRip
-                    | Insn::Andpd
-                    | Insn::AndpdRip
-                    // MOV [base],r16 (66 89 mod=00) は MovMemndEax を共用する.
-                    | Insn::MovMemndEax
-                    | Insn::MovdquLoadXmm
-                    | Insn::MovdquLoadMemnd
-                    | Insn::MovdquLoadMem8
-                    | Insn::MovdquLoadMem32
-                    | Insn::MovdquLoadSib
-                    | Insn::MovdquStoreXmm
-                    | Insn::MovdquStoreMemnd
-                    | Insn::MovdquStoreMem8
-                    | Insn::MovdquStoreMem32
-                    | Insn::MovdquStoreSib
-                    | Insn::MovAbsEax
-                    | Insn::MovEaxAbs
-                    | Insn::MovRm16ImmM32
-                    | Insn::MovRm16ImmMemnd
-                    | Insn::MovRm16ImmMem8
-                    | Insn::MovRm16ImmSibd
-                    | Insn::MovRm16ImmSibd32
-                    | Insn::MovRm16ImmDisp32
-                    | Insn::MovRm16ImmSib
-                    | Insn::MovRm16ImmRip
-                    | Insn::AndAxImm16
-                    | Insn::TestAxImm16
-                    | Insn::ShrRm32Imm8
-                    | Insn::CmpAxImm16
-                    | Insn::OrAxImm16
-                    | Insn::AddRm16Imm
-                    | Insn::AndRm16Imm
-                    | Insn::AndRm16ImmMemnd
-                    // AND r16, [base+index*scale+disp32] (66 23 /r SIB mod=10)。gunzip 0x48a957。
-                    | Insn::AndRSibd32
-                    | Insn::CmpRm16Imm
-                    | Insn::CmpRm16ImmMem8
-                    // ROL r16,imm8 (66 C1 /0)。httpd 0x4be767 の rol $8, %bp。
-                    | Insn::RolRm32Imm8
-                    // CMP r/m16, r16 (66 39 /r mod=11) は CmpRm32 を共用する.
-                    | Insn::CmpRm32
-                    // SUB m16, r16 (66 29 /r mod=01)。lpq 0x4c3385 の subw %bx, 0x52(%rbp)。
-                    | Insn::SubM32R32Mem8
-                    // XOR r16, r16 (66 31 /r mod=11)。pgrep 0x44b572 の xor %r13w, %r13w。
-                    | Insn::XorRm32
-                    | Insn::CmpRmImm8Rip
-                    // MOV [base+disp32],r16 (66 89 mod=10) は MovMemEax32 を共用する.
-                    | Insn::MovMemEax32
-                    // MOV [base+disp8],r16 (66 89 mod=01) は MovMemEax8 を共用する.
-                    | Insn::MovMemEax8
-                    // ADD m16,imm8 SIB (66 83 /0 mod=00).
-                    | Insn::AddM16ImmSib
-                    // CMP m16,imm8 SIB (66 83 /7 mod=00).
-                    | Insn::CmpRmImm8Sib
-                    // CMP r16,imm8 (66 83 /7 mod=11)。iostat 0x4bea1d の cmp $-1, %ax。
-                    | Insn::CmpRmImm8
-                    // CMP m16,imm8 SIB+disp32 (66 83 /7 mod=10).
-                    | Insn::CmpRmImm8Sibd32
-                    // CMP m16,imm8 SIB+disp8 (66 83 /7 mod=01)。rdev 0x4b3703 の cmpw $0x2e, 0x14(%r12)。
-                    | Insn::CmpRmImm8Sibd
-                    // CMP m16, r16 [base] (66 39 /r mod=00).
-                    | Insn::CmpRmMemnd
-                    // CMP m16, r16 SIB (66 39 /r mod=00).
-                    | Insn::CmpM32R32Sib
-                    // MOV r16, [base] (66 8B mod=00).
-                    | Insn::MovEaxMemnd
-                    // MOV r16, [base+disp8] (66 8B mod=01)。pgrep 0x44b629 の movw 0x12(%r14), %dx。
-                    | Insn::MovEaxMem8
-                    // CMP m16,imm8 [base] (66 83 /7 mod=00)。ping 0x4be1f1 の cmpw $2, (%rdi)。
-                    | Insn::CmpRmImm8Memnd
-                    // CMP m16,imm8 [base+disp8] (66 83 /7 mod=01)。ping 0x42e7b3 の cmpw $0xa, 0x4(%rbx)。
-                    | Insn::CmpRmImm8m8
-                    // ADD r16, [base] (66 03 /r mod=00).
-                    | Insn::AddRMemnd
-                    // AND m16,imm8 SIB+disp8 (66 83 /4 mod=01).
-                    | Insn::AndRmImm8Sibd
-                    // SUB m16,imm8 SIB+disp8 (66 83 /5 mod=01).
-                    | Insn::SubRmImm8Sibd
-            )
-        {
-            return Outcome::Unimplemented {
-                eip: pc as u32,
-                word,
-            };
-        }
-        // XMM 系は 0x66 が必須（MOVUPS を除く）。剥がし忘れを防ぐ。
-        // PSHUFD は F2 (PSHUFLW) でも有効のため、ここでは除いて後段で判定する.
-        if !has66
-            && matches!(
-                insn,
-                Insn::MovdXmm
-                    | Insn::MovdXmmM32
-                    | Insn::MovdXmmRip
-                    | Insn::Punpcklbw
-                    | Insn::Punpcklwd
-                    | Insn::Punpckldq
-                    | Insn::MovqM64XmmRip
-                    | Insn::MovqM64XmmMemnd
-                    | Insn::MovqM64XmmMem8
-                    | Insn::MovqM64XmmMem32
-                    | Insn::Pslldq
-                    | Insn::Psrldq
-                    | Insn::Psubb
-                    | Insn::Pxor
-                    | Insn::Pand
-                    | Insn::Pminub
-                    | Insn::Pmaxub
-                    | Insn::Pcmpeqb
-                    | Insn::Pcmpeqd
-                    | Insn::Por
-                    | Insn::Pmovmskb
-                    | Insn::PcmpeqbMemnd
-                    | Insn::PcmpeqbMem8
-                    | Insn::PcmpeqbMem32
-                    | Insn::PminubMemnd
-                    | Insn::PminubMem8
-                    | Insn::PminubMem32
-                    | Insn::PorMemnd
-                    | Insn::PorMem8
-                    | Insn::PorMem32
-                    | Insn::PorSibd32
-                    | Insn::Punpcklqdq
-                    | Insn::MovqR64Xmm
-                    | Insn::MovRm16ImmM32
-                    | Insn::MovRm16ImmMemnd
-                    | Insn::MovRm16ImmMem8
-                    | Insn::MovRm16ImmSibd
-                    | Insn::MovRm16ImmSibd32
-                    | Insn::MovRm16ImmDisp32
-                    | Insn::MovRm16ImmSib
-                    | Insn::MovRm16ImmRip
-                    | Insn::MovntdqStoreMemnd
-                    | Insn::MovntdqStoreMem8
-                    | Insn::MovdqaLoadRip
-            )
-        {
-            return Outcome::Unimplemented {
-                eip: pc as u32,
-                word,
-            };
-        }
-        // PSHUFD/PSHUFLW は 66/F2 のいずれかが必須。
-        if matches!(insn, Insn::Pshufd) && !has66 && !has_f2 {
-            return Outcome::Unimplemented {
-                eip: pc as u32,
-                word,
-            };
-        }
-        // CVTSI2SD (F2 0F 2A) と SUBPS (0F 2A) は符号化を共用する。F2 なしは未対応.
-        // CVTSD2SS/CVTSS2SD (0F 5A mod=11) は F2/F3 のいずれかが必須。
-        if matches!(
-            insn,
-            Insn::Cvtsi2sdM32Mem8
-                | Insn::Cvtsi2sdM32Sibd
-                | Insn::Cvtsi2sdM32Sib
-                | Insn::DivsdXmmM64Rip
-                | Insn::Divsd
-                | Insn::Minsd
-                | Insn::Sqrtsd
-        ) && !has_f2
-        {
-            return Outcome::Unimplemented {
-                eip: pc as u32,
-                word,
-            };
-        }
-        if matches!(insn, Insn::Cvtsd2ss) && !has_f2 && !rep {
-            return Outcome::Unimplemented {
-                eip: pc as u32,
-                word,
-            };
-        }
-        // 0F 5A mod=00 は F3 なら CVTSS2SD m32、F2 なら CVTSD2SS m64。接頭辞なしは CVTPS2PD。
-        if matches!(insn, Insn::Cvtss2sdM32) && has_f2 == rep {
-            return Outcome::Unimplemented {
-                eip: pc as u32,
-                word,
-            };
-        }
-        // REX 拡張は reg/rm/SIB 抽出で対応済み (R/R/B/X)。W は rex_w で切替.
-        let _ = rex;
-        // FS/GS 上書きの有無とベース。dispatch 側でセグメント相対アドレッシングに使う.
-        // i386 musl は GS (TLS)、x86-64 は FS を使う。
-        let fs = has_fs.then(|| sys.fs_base());
-        let seg = fs.or(has_gs.then(|| sys.gs_base()));
-        // imm/disp の取り出し。32ビット値は LE 実バイト列から復元する。
-        let imm32 = || (word as u32).swap_bytes();
-        let disp8 = || (word & 0xff) as u8 as i8;
-        let eip = pc as u32;
-        // 意味論が分岐を取ると backend.ctrl に Jump が残る（取らなければ
-        // Fallthrough）。eip 等値での判定は自己ループで誤るため使わない。
-        use polyisa_engine::interp::Ctrl;
-        let r = env.step(|b| {
-            dispatch(
-                b, insn, eip, word, nbytes, off, is64, rex, has66, has_f2, rep, seg, imm32, disp8,
-            )
+                | 0x98
+                | 0x99
+                | 0x0F
+                | 0xA0..=0xA3
+                | 0xA4
+                | 0xA5
+                | 0xA9
+                | 0xAA
+                | 0xAB
+                | 0xB8..=0xBF
+                | 0xB0..=0xB7
+                | 0x6A
+                | 0x68
+                | 0x50..=0x5F | 0xE8 | 0xE9
+        )
+    {
+        return Err(Outcome::Unimplemented {
+            pc,
+            word: head[0] as u128,
         });
-        match r {
-            Ok(()) => match env.backend.ctrl {
-                Ctrl::Jump(_) => {}
-                Ctrl::Fallthrough => {
-                    env.backend.set(
-                        polyisa_guest_x86::sem::eip_ref(),
-                        eip.wrapping_add(nbytes as u32),
-                    );
-                }
-            },
-            Err(InterpExit::Exception(e)) if e.kind == ExceptionKind::Trap => {
-                match sys.handle_trap(env, e.code as u32) {
-                    TrapOutcome::Handled => {
-                        // ハンドラが eip を動かさなければ次の命令へ進む。
-                        if eip_of(env) == eip {
-                            env.backend.set(
-                                polyisa_guest_x86::sem::eip_ref(),
-                                eip.wrapping_add(nbytes as u32),
-                            );
-                        }
-                    }
-                    TrapOutcome::Exit(code) => {
-                        if !sys.take_exit(env, code) {
-                            return Outcome::Exit(code);
-                        }
-                    }
-                    TrapOutcome::Blocked => {
-                        if !sys.on_block(env) {
-                            return Outcome::Deadlock;
-                        }
-                    }
-                    TrapOutcome::Unimplemented => {
-                        return Outcome::Unimplemented { eip, word };
-                    }
-                }
+    }
+    // REX はデコード前に剥がす。nbytes は eip 進行用に接頭辞を含む。
+    let nbytes = base + off;
+    let mut bytes = [0u8; 16];
+    bytes[0] = head[0];
+    if base >= 2 {
+        // 長さ判定用のぞき見を使う。なければ読み直す。
+        bytes[1] = second.unwrap_or(0);
+    }
+    if base >= 3 {
+        bytes[2] = third.unwrap_or(0);
+    }
+    if base >= 4 {
+        bytes[3] = fourth.unwrap_or(0);
+    }
+    for i in 1..base {
+        if i == 1 && second.is_some() {
+            continue;
+        }
+        if i == 2 && third.is_some() {
+            continue;
+        }
+        if i == 3 && fourth.is_some() {
+            continue;
+        }
+        let mut b = [0u8; 1];
+        if env
+            .backend
+            .mem
+            .read(VirtAddr(pc + off + i), &mut b, acc_fetch())
+            .is_err()
+        {
+            return Err(Outcome::Unimplemented {
+                pc,
+                word: head[0] as u128,
+            });
+        }
+        bytes[i as usize] = b[0];
+    }
+    // ISADL の word 組立（opcode 上位詰め）に合わせる。
+    let mut word: u128 = 0;
+    for i in 0..base {
+        word = (word << 8) | bytes[i as usize] as u128;
+    }
+    let len_bits = (base * 8) as u32;
+    let Some(insn) = decode(word, len_bits) else {
+        return Err(Outcome::Unimplemented { pc, word });
+    };
+    if std::env::var_os("POLYISA_HIST").is_some()
+        && let Some(h) = hist.back_mut()
+    {
+        *h = (pc as u32, format!("{insn:?}"));
+    }
+    // 0x66 接頭辞は XMM/NOP/16bit-RIP 系でのみ有効。それ以外は未対応。
+    // 32ビットでの 0x66 は operand-size override（16ビット動作）。
+    // 16ビット意味論を持つ命令だけを通す。
+    if has66
+        && !is64
+        && !matches!(
+            insn,
+            Insn::Nop
+                | Insn::Nopl
+                | Insn::TestRm32
+                | Insn::TestRm16Imm
+                | Insn::TestM16ImmMemnd
+                | Insn::TestM16ImmMem8
+                | Insn::TestM16ImmRip
+                | Insn::TestAxImm16
+                | Insn::AndAxImm16
+                | Insn::CmpAxImm16
+                | Insn::OrAxImm16
+                | Insn::AddRm16Imm
+                | Insn::AndRm16Imm
+                | Insn::AndRm16ImmMemnd
+                | Insn::CmpRm16Imm
+                | Insn::CmpRm16ImmMem8
+                | Insn::MovRm16ImmMemnd
+                | Insn::MovRm16ImmMem8
+                | Insn::MovRm16ImmSibd
+                | Insn::MovRm16ImmSibd32
+                | Insn::MovRm16ImmSib
+                | Insn::MovRm16ImmRip
+                | Insn::MovRm16ImmM32
+                | Insn::MovRm16ImmDisp32
+                | Insn::MovEaxSib
+                | Insn::MovEaxSibd
+                | Insn::MovEaxSibd32
+                | Insn::MovSibEax
+                | Insn::MovSibdEax
+                | Insn::MovSibd32Eax
+                | Insn::MovEaxMemnd
+                | Insn::MovEaxMem8
+                | Insn::MovEaxMem32
+                | Insn::MovMemndEax
+                | Insn::MovMemEax32
+                | Insn::MovMemEax8
+                | Insn::MovAbsEax
+                | Insn::MovEaxAbs
+                | Insn::CmpRm32
+                | Insn::CmpRmMemnd
+                | Insn::CmpRmImm8
+                | Insn::CmpRmImm8Memnd
+                | Insn::CmpRmImm8Rip
+                | Insn::CmpRmImm8Sib
+                | Insn::CmpRmImm8Sibd
+                | Insn::CmpRmImm8Sibd32
+                | Insn::CmpRmImm8m8
+                | Insn::CmpM32R32Sib
+                | Insn::AddRMemnd
+                | Insn::AddM32R32Sibd32
+                | Insn::SubM32R32Mem8
+                | Insn::SubRmImm8Sibd
+                | Insn::AndRSibd32
+                | Insn::AndRmImm8Sibd
+                | Insn::XorRm32
+                | Insn::RolRm32Imm8
+                | Insn::ShrRm32Imm8
+                | Insn::IncRmSibd32
+                | Insn::IncRmMem32
+        )
+    {
+        return Err(Outcome::Unimplemented { pc, word });
+    }
+    if has66
+        && is64
+        && !matches!(
+            insn,
+            Insn::Nop
+                | Insn::Nopl
+                | Insn::TestRm32
+                | Insn::TestM16ImmMemnd
+                | Insn::TestRm16Imm
+                | Insn::TestM16ImmMem8
+                | Insn::TestM16ImmRip
+                | Insn::MovlpdXmmM64Memnd
+                | Insn::MovdXmm
+                | Insn::MovdXmmM32
+                | Insn::MovdXmmRip
+                | Insn::Punpcklbw
+                | Insn::Punpcklwd
+                | Insn::Punpckldq
+                | Insn::MovqM64XmmRip
+                | Insn::MovqM64XmmMemnd
+                | Insn::MovqM64XmmMem8
+                | Insn::MovqM64XmmMem32
+                // MOVHPD (66 0F 16) は MOVHPS (0F 16) と等価のため Insn を共用する.
+                | Insn::MovhpsXmmM64Mem8
+                | Insn::Pshufd
+                | Insn::Pslldq
+                | Insn::Psrldq
+                | Insn::Psubb
+                | Insn::Paddb
+                | Insn::Pcmpgtb
+                | Insn::Pxor
+                | Insn::Pand
+                | Insn::Pandn
+                | Insn::Pminub
+                | Insn::Pmaxub
+                | Insn::Pcmpeqb
+                | Insn::Pcmpeqd
+                | Insn::Por
+                | Insn::Pmovmskb
+                | Insn::PcmpeqbMemnd
+                | Insn::PcmpeqbMem8
+                | Insn::PcmpeqbMem32
+                | Insn::PminubMemnd
+                | Insn::PminubMem8
+                | Insn::PminubMem32
+                | Insn::PorMemnd
+                | Insn::PorMem8
+                | Insn::PorMem32
+                | Insn::PorSibd32
+                | Insn::MovSibdEax
+                | Insn::MovSibd32Eax
+                | Insn::IncRmSibd32
+                | Insn::IncRmMem32
+                | Insn::AddM32R32Sibd32
+                | Insn::MovEaxSibd
+                | Insn::Punpcklqdq
+                | Insn::MovqR64Xmm
+                | Insn::MovupsLoadXmm
+                | Insn::MovupsStoreXmm
+                // MOVAPD (66 0F 28) は MOVAPS と等価のため Insn を共用する.
+                | Insn::MovapsLoadXmm
+                | Insn::MovupsLoadMemnd
+                | Insn::MovupsStoreMemnd
+                | Insn::MovupsLoadMem8
+                | Insn::MovupsStoreMem8
+                | Insn::MovupsLoadMem32
+                | Insn::MovupsStoreMem32
+                | Insn::MovupsLoadSib
+                | Insn::MovupsStoreSib
+                | Insn::MovupsLoadSibd
+                | Insn::MovupsStoreSibd
+                | Insn::MovntdqStoreMemnd
+                | Insn::MovntdqStoreMem8
+                | Insn::MovapsStoreMemnd
+                | Insn::MovapsStoreMem8
+                | Insn::MovapsStoreMem32
+                | Insn::MovSibEax
+                | Insn::MovEaxSib
+                | Insn::NoplSib
+                | Insn::NoplSibd
+                | Insn::NoplSibd32
+                | Insn::MovupsLoadRip
+                | Insn::MovupsStoreRip
+                | Insn::MovdqaLoadRip
+                | Insn::Comisd
+                | Insn::Ucomisd
+                | Insn::UcomisdMemnd
+                | Insn::UcomisdMem8
+                | Insn::UcomisdMem32
+                | Insn::UcomisdRip
+                | Insn::Andpd
+                | Insn::AndpdRip
+                // MOV [base],r16 (66 89 mod=00) は MovMemndEax を共用する.
+                | Insn::MovMemndEax
+                | Insn::MovdquLoadXmm
+                | Insn::MovdquLoadMemnd
+                | Insn::MovdquLoadMem8
+                | Insn::MovdquLoadMem32
+                | Insn::MovdquLoadSib
+                | Insn::MovdquStoreXmm
+                | Insn::MovdquStoreMemnd
+                | Insn::MovdquStoreMem8
+                | Insn::MovdquStoreMem32
+                | Insn::MovdquStoreSib
+                | Insn::MovAbsEax
+                | Insn::MovEaxAbs
+                | Insn::MovRm16ImmM32
+                | Insn::MovRm16ImmMemnd
+                | Insn::MovRm16ImmMem8
+                | Insn::MovRm16ImmSibd
+                | Insn::MovRm16ImmSibd32
+                | Insn::MovRm16ImmDisp32
+                | Insn::MovRm16ImmSib
+                | Insn::MovRm16ImmRip
+                | Insn::AndAxImm16
+                | Insn::TestAxImm16
+                | Insn::ShrRm32Imm8
+                | Insn::CmpAxImm16
+                | Insn::OrAxImm16
+                | Insn::AddRm16Imm
+                | Insn::AndRm16Imm
+                | Insn::AndRm16ImmMemnd
+                // AND r16, [base+index*scale+disp32] (66 23 /r SIB mod=10)。gunzip 0x48a957。
+                | Insn::AndRSibd32
+                | Insn::CmpRm16Imm
+                | Insn::CmpRm16ImmMem8
+                // ROL r16,imm8 (66 C1 /0)。httpd 0x4be767 の rol $8, %bp。
+                | Insn::RolRm32Imm8
+                // CMP r/m16, r16 (66 39 /r mod=11) は CmpRm32 を共用する.
+                | Insn::CmpRm32
+                // SUB m16, r16 (66 29 /r mod=01)。lpq 0x4c3385 の subw %bx, 0x52(%rbp)。
+                | Insn::SubM32R32Mem8
+                // XOR r16, r16 (66 31 /r mod=11)。pgrep 0x44b572 の xor %r13w, %r13w。
+                | Insn::XorRm32
+                | Insn::CmpRmImm8Rip
+                // MOV [base+disp32],r16 (66 89 mod=10) は MovMemEax32 を共用する.
+                | Insn::MovMemEax32
+                // MOV [base+disp8],r16 (66 89 mod=01) は MovMemEax8 を共用する.
+                | Insn::MovMemEax8
+                // ADD m16,imm8 SIB (66 83 /0 mod=00).
+                | Insn::AddM16ImmSib
+                // CMP m16,imm8 SIB (66 83 /7 mod=00).
+                | Insn::CmpRmImm8Sib
+                // CMP r16,imm8 (66 83 /7 mod=11)。iostat 0x4bea1d の cmp $-1, %ax。
+                | Insn::CmpRmImm8
+                // CMP m16,imm8 SIB+disp32 (66 83 /7 mod=10).
+                | Insn::CmpRmImm8Sibd32
+                // CMP m16,imm8 SIB+disp8 (66 83 /7 mod=01)。rdev 0x4b3703 の cmpw $0x2e, 0x14(%r12)。
+                | Insn::CmpRmImm8Sibd
+                // CMP m16, r16 [base] (66 39 /r mod=00).
+                | Insn::CmpRmMemnd
+                // CMP m16, r16 SIB (66 39 /r mod=00).
+                | Insn::CmpM32R32Sib
+                // MOV r16, [base] (66 8B mod=00).
+                | Insn::MovEaxMemnd
+                // MOV r16, [base+disp8] (66 8B mod=01)。pgrep 0x44b629 の movw 0x12(%r14), %dx。
+                | Insn::MovEaxMem8
+                // CMP m16,imm8 [base] (66 83 /7 mod=00)。ping 0x4be1f1 の cmpw $2, (%rdi)。
+                | Insn::CmpRmImm8Memnd
+                // CMP m16,imm8 [base+disp8] (66 83 /7 mod=01)。ping 0x42e7b3 の cmpw $0xa, 0x4(%rbx)。
+                | Insn::CmpRmImm8m8
+                // ADD r16, [base] (66 03 /r mod=00).
+                | Insn::AddRMemnd
+                // AND m16,imm8 SIB+disp8 (66 83 /4 mod=01).
+                | Insn::AndRmImm8Sibd
+                // SUB m16,imm8 SIB+disp8 (66 83 /5 mod=01).
+                | Insn::SubRmImm8Sibd
+        )
+    {
+        return Err(Outcome::Unimplemented { pc, word });
+    }
+    // XMM 系は 0x66 が必須（MOVUPS を除く）。剥がし忘れを防ぐ。
+    // PSHUFD は F2 (PSHUFLW) でも有効のため、ここでは除いて後段で判定する.
+    if !has66
+        && matches!(
+            insn,
+            Insn::MovdXmm
+                | Insn::MovdXmmM32
+                | Insn::MovdXmmRip
+                | Insn::Punpcklbw
+                | Insn::Punpcklwd
+                | Insn::Punpckldq
+                | Insn::MovqM64XmmRip
+                | Insn::MovqM64XmmMemnd
+                | Insn::MovqM64XmmMem8
+                | Insn::MovqM64XmmMem32
+                | Insn::Pslldq
+                | Insn::Psrldq
+                | Insn::Psubb
+                | Insn::Pxor
+                | Insn::Pand
+                | Insn::Pminub
+                | Insn::Pmaxub
+                | Insn::Pcmpeqb
+                | Insn::Pcmpeqd
+                | Insn::Por
+                | Insn::Pmovmskb
+                | Insn::PcmpeqbMemnd
+                | Insn::PcmpeqbMem8
+                | Insn::PcmpeqbMem32
+                | Insn::PminubMemnd
+                | Insn::PminubMem8
+                | Insn::PminubMem32
+                | Insn::PorMemnd
+                | Insn::PorMem8
+                | Insn::PorMem32
+                | Insn::PorSibd32
+                | Insn::Punpcklqdq
+                | Insn::MovqR64Xmm
+                | Insn::MovRm16ImmM32
+                | Insn::MovRm16ImmMemnd
+                | Insn::MovRm16ImmMem8
+                | Insn::MovRm16ImmSibd
+                | Insn::MovRm16ImmSibd32
+                | Insn::MovRm16ImmDisp32
+                | Insn::MovRm16ImmSib
+                | Insn::MovRm16ImmRip
+                | Insn::MovntdqStoreMemnd
+                | Insn::MovntdqStoreMem8
+                | Insn::MovdqaLoadRip
+        )
+    {
+        return Err(Outcome::Unimplemented { pc, word });
+    }
+    // PSHUFD/PSHUFLW は 66/F2 のいずれかが必須。
+    if matches!(insn, Insn::Pshufd) && !has66 && !has_f2 {
+        return Err(Outcome::Unimplemented { pc, word });
+    }
+    // CVTSI2SD (F2 0F 2A) と SUBPS (0F 2A) は符号化を共用する。F2 なしは未対応.
+    // CVTSD2SS/CVTSS2SD (0F 5A mod=11) は F2/F3 のいずれかが必須。
+    if matches!(
+        insn,
+        Insn::Cvtsi2sdM32Mem8
+            | Insn::Cvtsi2sdM32Sibd
+            | Insn::Cvtsi2sdM32Sib
+            | Insn::DivsdXmmM64Rip
+            | Insn::Divsd
+            | Insn::Minsd
+            | Insn::Sqrtsd
+    ) && !has_f2
+    {
+        return Err(Outcome::Unimplemented { pc, word });
+    }
+    if matches!(insn, Insn::Cvtsd2ss) && !has_f2 && !rep {
+        return Err(Outcome::Unimplemented { pc, word });
+    }
+    // 0F 5A mod=00 は F3 なら CVTSS2SD m32、F2 なら CVTSD2SS m64。接頭辞なしは CVTPS2PD。
+    if matches!(insn, Insn::Cvtss2sdM32) && has_f2 == rep {
+        return Err(Outcome::Unimplemented { pc, word });
+    }
+    // REX 拡張は reg/rm/SIB 抽出で対応済み (R/R/B/X)。W は rex_w で切替.
+    let _ = rex;
+    // FS/GS 上書きの有無とベース。dispatch 側でセグメント相対アドレッシングに使う.
+    // i386 musl は GS (TLS)、x86-64 は FS を使う。
+    let fs = has_fs.then(|| sys.fs_base());
+    let seg = fs.or(has_gs.then(|| sys.gs_base()));
+    // imm/disp の取り出し。32ビット値は LE 実バイト列から復元する。
+    let imm32 = || (word as u32).swap_bytes();
+    let disp8 = || (word & 0xff) as u8 as i8;
+    let eip = pc as u32;
+    // 意味論が分岐を取ると backend.ctrl に Jump が残る（取らなければ
+    // Fallthrough）。eip 等値での判定は自己ループで誤るため使わない。
+    use polyisa_engine::interp::Ctrl;
+    let r = env.step(|b| {
+        dispatch(
+            b, insn, eip, word, nbytes, off, is64, rex, has66, has_f2, rep, seg, imm32, disp8,
+        )
+    });
+    match r {
+        Ok(()) => match env.backend.ctrl {
+            Ctrl::Jump(_) => {}
+            Ctrl::Fallthrough => {
+                env.backend.set(
+                    polyisa_guest_x86::sem::eip_ref(),
+                    eip.wrapping_add(nbytes as u32),
+                );
             }
-            // #DE 等の Trap 以外の退出（未実装命令を含む）は区別せず止める。
-            // 本格実装では DivZero をシグナルに変える。
-            Err(ex) => {
-                if std::env::var_os("POLYISA_HIST").is_some() {
-                    for (e, i) in &hist {
-                        eprintln!("hist {e:#x} {i}");
-                    }
-                    eprintln!("hist exit {ex:?}");
-                    for r in 0..8u8 {
-                        let g = polyisa_guest_x86::sem::Gpr(r);
-                        eprintln!("  r{r} = {:#x}", env.backend.get(g.state()));
+        },
+        Err(InterpExit::Exception(e)) if e.kind == ExceptionKind::Trap => {
+            match sys.handle_trap(env, e.code as u32) {
+                TrapOutcome::Handled => {
+                    // ハンドラが eip を動かさなければ次の命令へ進む。
+                    if eip_of(env) == eip {
+                        env.backend.set(
+                            polyisa_guest_x86::sem::eip_ref(),
+                            eip.wrapping_add(nbytes as u32),
+                        );
                     }
                 }
-                return Outcome::Unimplemented { eip, word };
+                TrapOutcome::Exit(code) => {
+                    if !sys.take_exit(env, code) {
+                        return Err(Outcome::Exit(u64::from(code)));
+                    }
+                }
+                TrapOutcome::Blocked => {
+                    if !sys.on_block(env) {
+                        return Err(Outcome::Deadlock);
+                    }
+                }
+                TrapOutcome::Unimplemented => {
+                    return Err(Outcome::Unimplemented {
+                        pc: u64::from(eip),
+                        word,
+                    });
+                }
             }
         }
-        sys.after_step(env);
+        // #DE 等の Trap 以外の退出（未実装命令を含む）は区別せず止める。
+        // 本格実装では DivZero をシグナルに変える。
+        Err(ex) => {
+            if std::env::var_os("POLYISA_HIST").is_some() {
+                for (e, i) in hist.iter() {
+                    eprintln!("hist {e:#x} {i}");
+                }
+                eprintln!("hist exit {ex:?}");
+                for r in 0..8u8 {
+                    let g = polyisa_guest_x86::sem::Gpr(r);
+                    eprintln!("  r{r} = {:#x}", env.backend.get(g.state()));
+                }
+            }
+            return Err(Outcome::Unimplemented {
+                pc: u64::from(eip),
+                word,
+            });
+        }
     }
-    Outcome::StepLimit { eip: eip_of(env) }
+    sys.after_step(env);
+    Ok(())
 }
 
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
@@ -10234,11 +10216,9 @@ pub fn run_image_x86_32(
     // x87 制御ワードの初期値（丸め最近接の 0x037F）。FNSTCW/FLDCW で使う.
     env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037F);
     match run(&mut env, ehdr.entry as u32, sys, 1_000_000) {
-        Outcome::Exit(code) => Ok(code as u64),
-        Outcome::Unimplemented { eip, word } => {
-            Err(format!("unimplemented at {eip:#x}: {word:#x}"))
-        }
-        Outcome::StepLimit { eip } => Err(format!("step limit at {eip:#x}")),
+        Outcome::Exit(code) => Ok(code),
+        Outcome::Unimplemented { pc, word } => Err(format!("unimplemented at {pc:#x}: {word:#x}")),
+        Outcome::StepLimit { pc } => Err(format!("step limit at {pc:#x}")),
         Outcome::Deadlock => Err("deadlock".to_string()),
     }
 }
@@ -10326,11 +10306,9 @@ pub fn run_image_x86_64(
     // x87 制御ワードの初期値（丸め最近接の 0x037F）。FNSTCW/FLDCW で使う.
     env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037F);
     match run_mode(&mut env, ehdr.entry as u32, sys, 30_000_000, true) {
-        Outcome::Exit(code) => Ok(code as u64),
-        Outcome::Unimplemented { eip, word } => {
-            Err(format!("unimplemented at {eip:#x}: {word:#x}"))
-        }
-        Outcome::StepLimit { eip } => Err(format!("step limit at {eip:#x}")),
+        Outcome::Exit(code) => Ok(code),
+        Outcome::Unimplemented { pc, word } => Err(format!("unimplemented at {pc:#x}: {word:#x}")),
+        Outcome::StepLimit { pc } => Err(format!("step limit at {pc:#x}")),
         Outcome::Deadlock => Err("deadlock".to_string()),
     }
 }
@@ -10931,7 +10909,7 @@ mod tests {
         code.extend_from_slice(&[0x0F, 0x05]);
         env.backend.mem.write(VirtAddr(0x1000), &code).unwrap();
         let out = run_mode(&mut env, 0x1000, &mut sys, 8_000, true);
-        assert_eq!(out, Outcome::Exit(u32::from(b'A')));
+        assert_eq!(out, Outcome::Exit(u64::from(b'A')));
     }
 
     #[test]

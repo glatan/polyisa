@@ -219,6 +219,7 @@ fn check_one_in(sub: &str, name: &str) {
             panic!("{name}: 未実装に到達 pc={pc:#x} word={word:#x}")
         }
         Outcome::StepLimit { pc } => panic!("{name}: 予算切れ pc={pc:#x}"),
+        Outcome::Deadlock => panic!("{name}: deadlock"),
     }
 }
 

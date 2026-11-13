@@ -62,7 +62,7 @@ fn self_loop_hits_step_limit_without_advancing() {
         .write(VirtAddr(0x1000), &[0xEB, 0xFE])
         .unwrap();
     let out = run_x86::run(&mut env, 0x1000, &mut ExitOne, 100);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1000 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1000 });
 }
 
 #[test]
@@ -487,7 +487,7 @@ fn run_imul_rm64() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1003 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1003 });
     env.step(|b| {
         let lo = polyisa_guest_x86::sem::read64(b, Gpr(0));
         assert_eq!(lo, 42);
@@ -1413,7 +1413,7 @@ fn run_cvttsd2si_rax_rsp() {
     env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 1);
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1006 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1006 });
     let rax: u64 = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(0));
     let rsp: u64 = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(4));
     assert_eq!(rax, u64::MAX);
@@ -1495,7 +1495,7 @@ fn run_subsd_xmm2_rcx_disp32() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1008 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1008 });
     let v: u128 = env.backend.get(polyisa_guest_x86::sem::xmm_ref(
         polyisa_guest_x86::sem::Xmm(2),
     ));
@@ -1545,7 +1545,7 @@ fn run_subsd_xmm0_rip() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1008 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1008 });
     let v: u128 = env.backend.get(polyisa_guest_x86::sem::xmm_ref(
         polyisa_guest_x86::sem::Xmm(0),
     ));
@@ -2731,7 +2731,7 @@ fn run_test_m8_r8_sibd_rsp() {
     env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1004 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1004 });
     assert_eq!(
         env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0xC5,
         0x44
@@ -5126,7 +5126,7 @@ fn run_sete_byte_rip() {
     env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 0x40);
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1007 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1007 });
     let mut nb = [0u8; 2];
     let access = polyisa_mem::Access {
         endian: polyisa_mem::Endian::Le,
@@ -5145,7 +5145,7 @@ fn run_sete_byte_rip() {
         .unwrap();
     env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 0);
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1007 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1007 });
     env.backend
         .mem
         .read(VirtAddr(0x2010), &mut nb, access)
@@ -5178,7 +5178,7 @@ fn run_or_byte_rip_al() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1006 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1006 });
     let mut nb = [0u8; 2];
     env.backend
         .mem
@@ -5229,7 +5229,7 @@ fn run_test_dword_rbx_scale_disp32() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1007 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1007 });
     let mut nb = [0u8; 5];
     env.backend
         .mem
@@ -5279,7 +5279,7 @@ fn run_push_qword_rsp_disp32() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1007 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1007 });
     let rsp: u64 = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(4));
     assert_eq!(rsp, 0x20F8);
     let mut slot = [0u8; 8];
@@ -5337,7 +5337,7 @@ fn run_dec_byte_rcx() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1002 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
     let mut nb = [0u8; 2];
     env.backend
         .mem
@@ -5386,7 +5386,7 @@ fn run_sub_byte_rdi_rax_cl() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1003 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1003 });
     let mut nb = [0u8; 2];
     env.backend
         .mem
@@ -5505,7 +5505,7 @@ fn run_mov_rm16_imm_sibd32() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x100A });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x100A });
     let mut back = [0u8; 2];
     env.backend
         .mem
@@ -5541,7 +5541,7 @@ fn run_mov_rm16_imm_disp32() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1009 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1009 });
     let mut back = [0u8; 2];
     env.backend
         .mem
@@ -5579,7 +5579,7 @@ fn run_mov_m16_r16_sibd32() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1008 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1008 });
     let mut back = [0u8; 2];
     env.backend
         .mem
@@ -5621,7 +5621,7 @@ fn run_inc_r16_sibd32() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1008 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1008 });
     let mut back = [0u8; 2];
     env.backend
         .mem
@@ -5659,7 +5659,7 @@ fn run_shl_m8_1_mem32() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1006 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1006 });
     let mut back = [0u8; 1];
     env.backend
         .mem
@@ -5700,7 +5700,7 @@ fn run_cmp_m16_imm8_sib() {
             .unwrap();
         let mut sys = X64Exit;
         let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-        assert_eq!(out, Outcome::StepLimit { eip: 0x1005 });
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1005 });
         assert_eq!(
             env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x8D5,
             flags
@@ -5742,7 +5742,7 @@ fn run_cmp_m16_r16_memnd() {
             .unwrap();
         let mut sys = X64Exit;
         let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-        assert_eq!(out, Outcome::StepLimit { eip: 0x1004 });
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1004 });
         assert_eq!(
             env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x8D5,
             flags
@@ -5770,7 +5770,7 @@ fn run_cmp_m16_r16_sib() {
             .unwrap();
         let mut sys = X64Exit;
         let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-        assert_eq!(out, Outcome::StepLimit { eip: 0x1005 });
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1005 });
         assert_eq!(
             env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x8D5,
             flags
@@ -5798,7 +5798,7 @@ fn run_mov_r16_m16_memnd() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1003 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1003 });
     assert_eq!(env.backend.get(Gpr(0).state()), 0x1111_BEEF);
 }
 
@@ -5825,7 +5825,7 @@ fn run_add_r16_memnd() {
             .unwrap();
         let mut sys = X64Exit;
         let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-        assert_eq!(out, Outcome::StepLimit { eip: 0x1003 });
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1003 });
         assert_eq!(env.backend.get(Gpr(0).state()), eax);
         assert_eq!(
             env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x8D5,
@@ -5855,7 +5855,7 @@ fn run_dec_rm_mem32() {
             .unwrap();
         let mut sys = X64Exit;
         let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-        assert_eq!(out, Outcome::StepLimit { eip: 0x1006 });
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1006 });
         assert_eq!(
             env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x8D5,
             flags
@@ -5904,7 +5904,7 @@ fn run_sub_m32_r32_mem32() {
             .unwrap();
         let mut sys = X64Exit;
         let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-        assert_eq!(out, Outcome::StepLimit { eip: 0x1006 });
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1006 });
         assert_eq!(env.backend.get(Gpr(0).state()), eax);
         assert_eq!(
             env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x8D5,
@@ -5951,7 +5951,7 @@ fn run_inc_r16_mem32() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1007 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1007 });
     let mut back = [0u8; 2];
     env.backend
         .mem
@@ -5999,7 +5999,7 @@ fn run_add_m16_r16_sibd32() {
             .unwrap();
         let mut sys = X64Exit;
         let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-        assert_eq!(out, Outcome::StepLimit { eip: 0x1009 });
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1009 });
         assert_eq!(env.backend.get(Gpr(1).state()), 0x1111_0001);
         assert_eq!(
             env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x8D5,
@@ -6045,7 +6045,7 @@ fn run_cmp_m16_imm8_sibd32() {
             .unwrap();
         let mut sys = X64Exit;
         let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-        assert_eq!(out, Outcome::StepLimit { eip: 0x100A });
+        assert_eq!(out, Outcome::StepLimit { pc: 0x100A });
         assert_eq!(
             env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x8D5,
             flags
@@ -6087,7 +6087,7 @@ fn run_and_m64_r64_memnd() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1003 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1003 });
     assert_eq!(
         polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(0)),
         0x0F
@@ -6135,7 +6135,7 @@ fn run_and_m32_r32_sib() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1004 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1004 });
     assert_eq!(env.backend.get(Gpr(1).state()), 0x1111_000F);
     assert_eq!(
         env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x8C5,
@@ -6177,7 +6177,7 @@ fn run_or_m64_r64_sibabs() {
         env.backend.mem.write(VirtAddr(0x1000), &code).unwrap();
         let mut sys = X64Exit;
         let got = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-        assert_eq!(got, Outcome::StepLimit { eip: 0x1009 });
+        assert_eq!(got, Outcome::StepLimit { pc: 0x1009 });
         assert_eq!(
             env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x8C5,
             flags
@@ -6220,7 +6220,7 @@ fn run_or_r64_sibd32() {
         env.backend.mem.write(VirtAddr(0x1000), &code).unwrap();
         let mut sys = X64Exit;
         let got = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-        assert_eq!(got, Outcome::StepLimit { eip: 0x1008 });
+        assert_eq!(got, Outcome::StepLimit { pc: 0x1008 });
         assert_eq!(
             env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x8C5,
             flags
@@ -6255,7 +6255,7 @@ fn run_addq_rbx_disp8_imm32() {
         env.backend.mem.write(VirtAddr(0x1000), &code).unwrap();
         let mut sys = X64Exit;
         let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-        assert_eq!(out, Outcome::StepLimit { eip: 0x1008 });
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1008 });
         assert_eq!(
             env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x8D5,
             flags
@@ -6299,7 +6299,7 @@ fn run_add_rm64_imm_sibd() {
         env.backend.mem.write(VirtAddr(0x1000), &code).unwrap();
         let mut sys = X64Exit;
         let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-        assert_eq!(out, Outcome::StepLimit { eip: 0x1009 });
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1009 });
         assert_eq!(
             env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x8D5,
             flags
@@ -6342,7 +6342,7 @@ fn run_shl_m32_imm8_mem8() {
             .unwrap();
         let mut sys = X64Exit;
         let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-        assert_eq!(out, Outcome::StepLimit { eip: 0x1004 });
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1004 });
         assert_eq!(
             env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x8C5,
             flags
@@ -6387,7 +6387,7 @@ fn run_imul_r64_imm_sib() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1008 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1008 });
     let lo = env.backend.get(Gpr(1).state()) as u64;
     let hi = env.backend.get(polyisa_guest_x86::sem::hi_ref(Gpr(1))) as u64;
     assert_eq!((hi << 32) | lo, 0x1E_8480);
@@ -6420,7 +6420,7 @@ fn run_or_al_rsp_disp32() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1007 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1007 });
     let rax: u64 = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(0));
     assert_eq!(rax, 0x1111_2222_3333_00FF);
     let rsp: u64 = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(4));
@@ -6464,7 +6464,7 @@ fn run_or_sil_rcx_disp8() {
     env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 1);
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1004 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1004 });
     let rsi: u64 = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(6));
     let rcx: u64 = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(1));
     assert_eq!(rsi, 0x1111_2222_3333_00FF);
@@ -6511,7 +6511,7 @@ fn run_movzx_r9d_rdx_scale_abs() {
     env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 1);
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1009 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1009 });
     let r9: u64 = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(9));
     let rdx: u64 = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(2));
     assert_eq!(r9, 0x8001);
@@ -6548,7 +6548,7 @@ fn run_movsx_esi_si() {
     env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 1);
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1003 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1003 });
     let rsi: u64 = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(6));
     assert_eq!(rsi, 0xFFFF_8000);
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::eflags_ref()), 1);
@@ -6570,7 +6570,7 @@ fn run_div_dl() {
     env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 1);
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1002 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
     let rax: u64 = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(0));
     let rdx: u64 = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(2));
     assert_eq!(rax, 0x1111_2222_3333_0334);
@@ -6603,7 +6603,7 @@ fn run_and_ax_r12_scale_disp32() {
     env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 1);
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1009 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1009 });
     let rax: u64 = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(0));
     assert_eq!(rax, 0x1111_2222_FFFF_000F);
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::eflags_ref()), 0x04);
@@ -6645,7 +6645,7 @@ fn run_xor_rsp_disp8_ecx() {
     env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 1);
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1004 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1004 });
     let rsp: u64 = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(4));
     let rcx: u64 = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(1));
     assert_eq!(rsp, 0x2000);
@@ -6692,7 +6692,7 @@ fn run_cmovae_rax_rsi_disp8() {
         env.backend.mem.write(VirtAddr(0x1000), &code).unwrap();
         let mut sys = X64Exit;
         let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-        assert_eq!(out, Outcome::StepLimit { eip: 0x1005 });
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1005 });
         let got: u64 = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(0));
         assert_eq!(got, rax);
         let rsi: u64 = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(6));
@@ -6738,7 +6738,7 @@ fn run_cmovbe_edx_r8() {
     env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 1);
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1004 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1004 });
     let rdx: u64 = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(2));
     assert_eq!(rdx, 0xAABBCCDD);
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::eflags_ref()), 1);
@@ -6773,7 +6773,7 @@ fn run_test_r14w_imm() {
     env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 1);
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1006 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1006 });
     let r14: u64 = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(14));
     assert_eq!(r14, 0x1111_2222_3333_0000);
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::eflags_ref()), 0x44);
@@ -6800,7 +6800,7 @@ fn run_cmp_m16_imm_rbx_disp8() {
     env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 1);
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1005 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1005 });
     let rbx: u64 = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(3));
     assert_eq!(rbx, 0x2000);
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::eflags_ref()), 0x44);
@@ -6843,7 +6843,7 @@ fn run_test_m8_imm_rsp_disp32() {
     env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 1);
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1008 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1008 });
     let rsp: u64 = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(4));
     assert_eq!(rsp, 0x2000);
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::eflags_ref()), 0x44);
@@ -6884,7 +6884,7 @@ fn run_cmp_m16_imm_rdi() {
     env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 1);
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1004 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1004 });
     let rdi: u64 = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(7));
     assert_eq!(rdi, 0x2000);
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::eflags_ref()), 0x44);
@@ -6926,7 +6926,7 @@ fn run_minsd_xmm() {
     env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 1);
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1004 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1004 });
     let v: u128 = env.backend.get(polyisa_guest_x86::sem::xmm_ref(
         polyisa_guest_x86::sem::Xmm(0),
     ));
@@ -6959,7 +6959,7 @@ fn run_mov_dx_r14_disp8() {
     env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 1);
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1005 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1005 });
     let edx: u64 = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(2));
     assert_eq!(edx, 0x1111_2222_3333_ABCD);
     let r14: u64 = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(14));
@@ -7005,7 +7005,7 @@ fn run_imul_eax_rip_imm32() {
     env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 1);
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x100A });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x100A });
     let eax: u64 = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(0));
     assert_eq!(eax, 15);
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::eflags_ref()), 1);
@@ -7045,7 +7045,7 @@ fn run_xor_rm8_imm_rax() {
     env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 1);
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1003 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1003 });
     let rax: u64 = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(0));
     assert_eq!(rax, 0x2000);
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::eflags_ref()), 0x44);
@@ -7089,7 +7089,7 @@ fn run_cmp_imm_rsp_disp8() {
     env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 1);
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1008 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1008 });
     let rsp: u64 = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(4));
     assert_eq!(rsp, 0x2000);
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::eflags_ref()), 0x44);
@@ -7133,7 +7133,7 @@ fn run_movsx_eax_rsp_disp32() {
     env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 1);
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1008 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1008 });
     let eax: u64 = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(0));
     assert_eq!(eax, 0xffff_ff80);
     let rsp: u64 = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(4));
@@ -7180,7 +7180,7 @@ fn run_or_r11d_rdx_scale_disp32() {
     env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 1);
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1008 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1008 });
     let r11: u64 = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(11));
     assert_eq!(r11, 3);
     let rdx: u64 = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(2));
@@ -7227,7 +7227,7 @@ fn run_imul_eax_rdx_scale_disp32() {
     env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 1);
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1008 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1008 });
     let eax: u64 = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(0));
     assert_eq!(eax, 15);
     let rdx: u64 = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(2));
@@ -7272,7 +7272,7 @@ fn run_cvtsi2sd_rsp_nodisp() {
     );
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1006 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1006 });
     let v: u128 = env.backend.get(polyisa_guest_x86::sem::xmm_ref(
         polyisa_guest_x86::sem::Xmm(1),
     ));
@@ -7308,7 +7308,7 @@ fn run_cvtsi2sd_rsp_disp8() {
     );
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1007 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1007 });
     let v: u128 = env.backend.get(polyisa_guest_x86::sem::xmm_ref(
         polyisa_guest_x86::sem::Xmm(0),
     ));
@@ -7339,7 +7339,7 @@ fn run_or_m8_al_rbx() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1003 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1003 });
     let mut got = [0u8; 2];
     env.backend
         .mem
@@ -7382,7 +7382,7 @@ fn run_push_m64_rbx_disp8() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1003 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1003 });
     let mut got = [0u8; 8];
     env.backend
         .mem
@@ -7443,7 +7443,7 @@ fn run_pop_m64_rdi_disp8() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1003 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1003 });
     let mut got = [0u8; 9];
     env.backend
         .mem
@@ -7485,7 +7485,7 @@ fn run_and_rm32_imm_rbx() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1006 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1006 });
     let mut got = [0u8; 5];
     env.backend
         .mem
@@ -7523,7 +7523,7 @@ fn run_rol_r12_cl() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1003 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1003 });
     assert_eq!(
         polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(12)),
         0x1_0000_0010
@@ -7533,7 +7533,7 @@ fn run_rol_r12_cl() {
     polyisa_guest_x86::sem::write64(&mut env.backend, Gpr(1), 0);
     env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 1);
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1003 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1003 });
     assert_eq!(
         polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(12)),
         0x1000_0001
@@ -7568,7 +7568,7 @@ fn run_xor_m64_rcx_rdx_disp32() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1007 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1007 });
     let mut got = [0u8; 9];
     env.backend
         .mem
@@ -7614,7 +7614,7 @@ fn run_xor_m64_rcx_rdx_disp8() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1004 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1004 });
     let mut got = [0u8; 9];
     env.backend
         .mem
@@ -7660,7 +7660,7 @@ fn run_xor_m64_rcx_rdx() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1003 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1003 });
     let mut got = [0u8; 9];
     env.backend
         .mem
@@ -7703,7 +7703,7 @@ fn run_add_rm8_imm_rdi_rax() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1004 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1004 });
     let mut got = [0u8; 2];
     env.backend
         .mem
@@ -7743,7 +7743,7 @@ fn run_xor_m8_r9_rdi_rdx() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1004 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1004 });
     let mut got = [0u8; 2];
     env.backend
         .mem
@@ -7786,7 +7786,7 @@ fn run_xor_rm8_imm_rdi_rax() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1004 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1004 });
     let mut got = [0u8; 2];
     env.backend
         .mem
@@ -7827,7 +7827,7 @@ fn run_and_rm32_imm_rsp() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1008 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1008 });
     let mut got = [0u8; 5];
     env.backend
         .mem
@@ -7868,7 +7868,7 @@ fn run_or_rm32_imm_rsp() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1008 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1008 });
     let mut got = [0u8; 5];
     env.backend
         .mem
@@ -7909,7 +7909,7 @@ fn run_cmp_m16_imm8_r12() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1007 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1007 });
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::eflags_ref()), 0x44);
     let mut got = [0u8; 3];
     env.backend
@@ -7942,7 +7942,7 @@ fn run_xor_r13w_self() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1004 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1004 });
     assert_eq!(
         polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(13)),
         0x1234_0000_0000_0000
@@ -7970,7 +7970,7 @@ fn run_imul_r64_imm8_rsp_nodisp() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1005 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1005 });
     assert_eq!(
         polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(5)),
         144
@@ -7999,7 +7999,7 @@ fn run_sub_m16_r16_mem8() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1004 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1004 });
     let mut got = [0u8; 4];
     env.backend
         .mem
@@ -8038,7 +8038,7 @@ fn run_movsx_r64_m16_mem8() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1005 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1005 });
     assert_eq!(
         polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(0)),
         u64::MAX
@@ -8061,7 +8061,7 @@ fn run_rol_bp_imm8() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1004 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1004 });
     assert_eq!(env.backend.get(Gpr(5).state()), 0x1234_AB00);
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::eflags_ref()), 0x84);
 }
@@ -8091,7 +8091,7 @@ fn run_sub_r64_sibd32() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1008 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1008 });
     assert_eq!(
         polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(5)),
         u64::MAX
@@ -8119,7 +8119,7 @@ fn run_xor_rm8_imm_rsp() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1005 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1005 });
     let mut got = [0u8; 2];
     env.backend
         .mem
@@ -8157,7 +8157,7 @@ fn run_imul_r64_imm8_rsp() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1006 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1006 });
     assert_eq!(
         polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(0)),
         176
@@ -8181,7 +8181,7 @@ fn run_cmp_ax_imm8_sets_flags() {
             .unwrap();
         let mut sys = X64Exit;
         let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-        assert_eq!(out, Outcome::StepLimit { eip: 0x1004 });
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1004 });
         assert_eq!(env.backend.get(Gpr(0).state()), ax);
         env.backend.get(polyisa_guest_x86::sem::eflags_ref())
     };
@@ -8211,7 +8211,7 @@ fn run_movsx_r64_m16_sibd32() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1009 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1009 });
     assert_eq!(
         polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(0)),
         u64::MAX
@@ -8238,7 +8238,7 @@ fn run_sbb_rm32_imm8_rsp() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1005 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1005 });
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::eflags_ref()), 0x11);
     let mut back = [0u8; 4];
     env.backend
@@ -8280,7 +8280,7 @@ fn run_imul_r32_imm_mem8() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1007 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1007 });
     assert_eq!(env.backend.get(Gpr(0).state()), 2000);
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 1, 1);
 }
@@ -8307,7 +8307,7 @@ fn run_imul_r64_imm_sibd() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1009 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1009 });
     assert_eq!(
         polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(0)),
         0x30003
@@ -8328,7 +8328,7 @@ fn run_ror_rm64_by1() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1003 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1003 });
     assert_eq!(
         polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(1)),
         0x8000_0000_0000_0001
@@ -8962,7 +8962,7 @@ fn run_divsd_xmm() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1004 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1004 });
     let v: u128 = env.backend.get(polyisa_guest_x86::sem::xmm_ref(
         polyisa_guest_x86::sem::Xmm(1),
     ));
@@ -8999,7 +8999,7 @@ fn run_divsd_xmm_m64_rip() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1008 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1008 });
     let v: u128 = env.backend.get(polyisa_guest_x86::sem::xmm_ref(
         polyisa_guest_x86::sem::Xmm(0),
     ));
@@ -9122,7 +9122,7 @@ fn run_movsd_xmm3_rcx_scaled() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1009 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1009 });
     let v: u128 = env.backend.get(polyisa_guest_x86::sem::xmm_ref(
         polyisa_guest_x86::sem::Xmm(3),
     ));
@@ -9165,7 +9165,7 @@ fn run_sqrtsd_xmm0() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1004 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1004 });
     let v: u128 = env.backend.get(polyisa_guest_x86::sem::xmm_ref(
         polyisa_guest_x86::sem::Xmm(0),
     ));
@@ -9205,7 +9205,7 @@ fn run_addsd_xmm3_rdx_disp32() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1008 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1008 });
     let v: u128 = env.backend.get(polyisa_guest_x86::sem::xmm_ref(
         polyisa_guest_x86::sem::Xmm(3),
     ));
@@ -10191,7 +10191,7 @@ fn run_pop_rbx_1p0_keeps_hi() {
     .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1001 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1001 });
     env.step(|b| {
         let v = polyisa_guest_x86::sem::read64(b, Gpr(3));
         assert_eq!(v, 0x3ff0_0000_0000_0000);
@@ -10229,7 +10229,7 @@ fn run_mov_rm8_imm_sibd32_stores_byte() {
     .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1008 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1008 });
     let mut back = [0u8; 1];
     env.backend
         .mem
@@ -10275,7 +10275,7 @@ fn run_cmove_r64_sibd_moves_on_z() {
     env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 0x40);
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1006 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1006 });
     env.step(|b| {
         let v = polyisa_guest_x86::sem::read64(b, Gpr(0));
         assert_eq!(v, 0x1122_3344_5566_7788);
@@ -10315,7 +10315,7 @@ fn run_cmovne_r64_mem32_moves_on_nz() {
     env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 0);
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1008 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1008 });
     env.step(|b| {
         let v = polyisa_guest_x86::sem::read64(b, Gpr(0));
         assert_eq!(v, 0x1122_3344_5566_7788);
@@ -10345,7 +10345,7 @@ fn run_div_rm32_mem8_quotient_remainder() {
     env.backend.set(Gpr(0).state(), 17);
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1003 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1003 });
     assert_eq!(env.backend.get(Gpr(0).state()), 3);
     assert_eq!(env.backend.get(Gpr(2).state()), 2);
 }
@@ -10371,7 +10371,7 @@ fn run_div_rm32_sib_quotient_remainder() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1003 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1003 });
     assert_eq!(env.backend.get(Gpr(0).state()), 3);
     assert_eq!(env.backend.get(Gpr(2).state()), 2);
 }
@@ -10391,7 +10391,7 @@ fn run_mov_rm16_imm_memnd() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1006 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1006 });
     let mut got = [0u8; 2];
     env.backend
         .mem
@@ -10428,7 +10428,7 @@ fn run_dec_rm_sib_keeps_cf() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1003 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1003 });
     let mut got = [0u8; 4];
     env.backend
         .mem
@@ -10467,7 +10467,7 @@ fn run_cmp_m8_r8_rip_sets_zf() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1007 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1007 });
     assert_eq!(
         env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x41,
         0x40
@@ -10495,7 +10495,7 @@ fn run_div_rm32_sibd_quotient_remainder() {
     env.backend.set(Gpr(0).state(), 17);
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1004 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1004 });
     assert_eq!(env.backend.get(Gpr(0).state()), 3);
     assert_eq!(env.backend.get(Gpr(2).state()), 2);
 }
@@ -10520,7 +10520,7 @@ fn run_bt_m32_imm_sets_cf() {
     env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 0);
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1004 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1004 });
     assert_eq!(
         env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x1,
         0x1
@@ -10546,7 +10546,7 @@ fn run_bt_m32_imm_sib_r12_sets_cf() {
     env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 0);
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1006 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1006 });
     assert_eq!(
         env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x1,
         0x1
@@ -10573,7 +10573,7 @@ fn run_bt_m32_imm_rbx_sets_cf() {
     env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 0);
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1004 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1004 });
     assert_eq!(
         env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x1,
         0x1
@@ -10606,7 +10606,7 @@ fn run_or_rm32_imm_mem8_ors() {
     .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1008 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1008 });
     let mut back = [0u8; 4];
     env.backend
         .mem
@@ -10650,7 +10650,7 @@ fn run_cmp_rm32_imm_memnd_sets_zf() {
     env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 0);
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1007 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1007 });
     assert_eq!(
         env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x40,
         0x40
@@ -10680,7 +10680,7 @@ fn run_cmp_rm32_imm_mem32_sets_zf() {
     env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 0);
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x100A });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x100A });
     assert_eq!(
         env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x40,
         0x40
@@ -10706,7 +10706,7 @@ fn run_cvtsi2sd_m32_mem8_converts() {
     env.backend.set(Gpr(3).state(), 0x100);
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1005 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1005 });
     let v: u128 = env.backend.get(polyisa_guest_x86::sem::xmm_ref(
         polyisa_guest_x86::sem::Xmm(0),
     ));
@@ -10736,7 +10736,7 @@ fn run_andw_sibd_zeroes() {
     .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1006 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1006 });
     let mut back = [0u8; 2];
     env.backend
         .mem
@@ -10777,7 +10777,7 @@ fn run_bts_r64_rm_sets_bit() {
     env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 0);
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1004 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1004 });
     env.step(|b| {
         let v = polyisa_guest_x86::sem::read64(b, Gpr(2));
         assert_eq!(v, 0x20);
@@ -10814,7 +10814,7 @@ fn run_bt_m32_imm_sibd_sets_cf() {
     env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 0);
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1006 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1006 });
     assert_eq!(
         env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x1,
         0x1
@@ -10853,7 +10853,7 @@ fn run_cmp_r64_sibd32_sets_zf() {
     env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 0);
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1008 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1008 });
     assert_eq!(
         env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x40,
         0x40
@@ -10874,7 +10874,7 @@ fn run_bswap_ecx() {
     env.backend.set(Gpr(1).state(), 0x1234_5678);
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1002 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
     assert_eq!(env.backend.get(Gpr(1).state()), 0x7856_3412);
 }
 
@@ -10932,7 +10932,7 @@ fn run_bt_r64_rm_rexw() {
     env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 0x40);
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1004 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1004 });
     assert_eq!(
         env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x1,
         1
@@ -11101,7 +11101,7 @@ fn run_pmaxub_reg_direct() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1004 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1004 });
     env.step(|b| {
         let v: u128 = b.get(polyisa_guest_x86::sem::xmm_ref(
             polyisa_guest_x86::sem::Xmm(3),
@@ -11163,7 +11163,7 @@ fn run_cmovbe_r64_sibd_rsp() {
     env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1006 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1006 });
     env.step(|b| {
         assert_eq!(polyisa_guest_x86::sem::read64(b, Gpr(3)), 0x99);
         Ok(())
@@ -11263,7 +11263,7 @@ fn run_inc_rm_sibd32_keeps_cf() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1007 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1007 });
     let mut got = [0u8; 4];
     env.backend
         .mem
@@ -11305,7 +11305,7 @@ fn run_add_m32_r32_sibd32() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1007 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1007 });
     let mut got = [0u8; 4];
     env.backend
         .mem
@@ -11336,7 +11336,7 @@ fn run_cmp_di_imm16_sets_zf() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1005 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1005 });
     assert_eq!(env.backend.get(Gpr(7).state()), 0x1111_0FC0u32);
     assert_eq!(
         env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x40,
@@ -11362,7 +11362,7 @@ fn run_test_rm32_imm_rip_sets_zf() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x100A });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x100A });
     assert_eq!(
         env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x41,
         0x40
@@ -11389,7 +11389,7 @@ fn run_sub_m64_r64_sibd() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1005 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1005 });
     let mut got = [0u8; 8];
     env.backend
         .mem
@@ -11466,7 +11466,7 @@ fn run_or_m64_r64_sibd() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1005 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1005 });
     let mut got = [0u8; 8];
     env.backend
         .mem
@@ -11500,7 +11500,7 @@ fn run_cmp_rm_imm8_sibd_rbp() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1005 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1005 });
     assert_eq!(
         env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x41,
         0x40
@@ -11527,7 +11527,7 @@ fn run_or_r32_sibd_r12() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1005 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1005 });
     assert_eq!(env.backend.get(Gpr(0).state()), 0x17u32);
 }
 
@@ -11552,7 +11552,7 @@ fn run_inc_rm_sib_keeps_cf() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1003 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1003 });
     let mut got = [0u8; 4];
     env.backend
         .mem
@@ -11588,7 +11588,7 @@ fn run_or_m8_r8_sibd() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1004 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1004 });
     let mut got = [0u8; 1];
     env.backend
         .mem
@@ -11629,7 +11629,7 @@ fn run_or_rm32_imm_sib() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1008 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1008 });
     let mut got = [0u8; 4];
     env.backend
         .mem
@@ -11667,7 +11667,7 @@ fn run_or_rm32_imm8_sib() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1005 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1005 });
     let mut got = [0u8; 4];
     env.backend
         .mem
@@ -11702,7 +11702,7 @@ fn run_test_r32_sib_r14() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1004 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1004 });
     assert_eq!(
         env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x41,
         0x40
@@ -11728,7 +11728,7 @@ fn run_fld_m32_rip_pushes_one() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1006 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1006 });
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::top_ref()), 7);
     assert_eq!(
         env.backend.get(polyisa_guest_x86::sem::st_exp_ref(7)),
@@ -11761,7 +11761,7 @@ fn run_fstp_st0_pops() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 2, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1008 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1008 });
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::top_ref()), 0);
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::st_sig_ref(7)), 0);
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::st_exp_ref(7)), 0);
@@ -11786,7 +11786,7 @@ fn run_fild_m32_sibd_pushes_three() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1004 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1004 });
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::top_ref()), 7);
     assert_eq!(
         env.backend.get(polyisa_guest_x86::sem::st_exp_ref(7)),
@@ -11817,7 +11817,7 @@ fn run_fild_m64_sib_pushes_2_pow_40() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1003 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1003 });
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::top_ref()), 7);
     assert_eq!(
         env.backend.get(polyisa_guest_x86::sem::st_exp_ref(7)),
@@ -11853,7 +11853,7 @@ fn run_fmulp_st1_three_times_one() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1002 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::top_ref()), 1);
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::st_exp_ref(0)), 0);
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)), 0);
@@ -11890,7 +11890,7 @@ fn run_fmulp_st1_one_and_a_half_squared() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1002 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::top_ref()), 1);
     assert_eq!(
         env.backend.get(polyisa_guest_x86::sem::st_exp_ref(1)),
@@ -11924,7 +11924,7 @@ fn run_fstp_m64_sibd_stores_three() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1004 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1004 });
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::top_ref()), 1);
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)), 0);
     let acc = polyisa_mem::Access {
@@ -11964,7 +11964,7 @@ fn run_or_m32_r32_sib_no_index_r12() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1004 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1004 });
     let mut back = [0u8; 4];
     env.backend
         .mem
@@ -12009,7 +12009,7 @@ fn run_cmp_r12_imm32() {
     env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 1);
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1008 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1008 });
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::eflags_ref()), 0x44);
     let r12: u64 = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(12));
     assert_eq!(r12, 0x2000);
@@ -12052,7 +12052,7 @@ fn run_fld_m64_rsp_pushes_three() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1003 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1003 });
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::top_ref()), 7);
     assert_eq!(
         env.backend.get(polyisa_guest_x86::sem::st_exp_ref(7)),
@@ -12089,7 +12089,7 @@ fn run_fld_m64_memnd_pushes_three() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1002 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::top_ref()), 7);
     assert_eq!(
         env.backend.get(polyisa_guest_x86::sem::st_exp_ref(7)),
@@ -12127,7 +12127,7 @@ fn run_fstp_m80_memnd_stores_three() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1002 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::top_ref()), 1);
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)), 0);
     let acc = polyisa_mem::Access {
@@ -12172,7 +12172,7 @@ fn run_push_m64_sibd_from_rsp() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1004 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1004 });
     assert_eq!(env.backend.get(Gpr(4).state()), 0x20f8);
     let acc = polyisa_mem::Access {
         endian: polyisa_mem::Endian::Le,
@@ -12212,7 +12212,7 @@ fn run_fld_m80_rip_pushes_ten_bytes() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1006 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1006 });
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::top_ref()), 7);
     assert_eq!(
         env.backend.get(polyisa_guest_x86::sem::st_exp_ref(7)),
@@ -12258,7 +12258,7 @@ fn run_fld_m80_sibd32_pushes_three() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1007 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1007 });
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::top_ref()), 7);
     assert_eq!(
         env.backend.get(polyisa_guest_x86::sem::st_exp_ref(7)),
@@ -12290,7 +12290,7 @@ fn run_fld_st0_duplicates() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1002 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::top_ref()), 7);
     assert_eq!(
         env.backend.get(polyisa_guest_x86::sem::st_exp_ref(0)),
@@ -12336,7 +12336,7 @@ fn run_fstp_m80_sib_stores_three() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1003 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1003 });
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::top_ref()), 1);
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)), 0);
     let acc = polyisa_mem::Access {
@@ -12388,7 +12388,7 @@ fn run_fstp_m80_sibd32_stores_three() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1007 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1007 });
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::top_ref()), 1);
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)), 0);
     let acc = polyisa_mem::Access {
@@ -12440,7 +12440,7 @@ fn run_fld_m80_sibd_pushes_three() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1004 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1004 });
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::top_ref()), 7);
     assert_eq!(
         env.backend.get(polyisa_guest_x86::sem::st_exp_ref(7)),
@@ -12466,7 +12466,7 @@ fn run_or_ax_imm16_keeps_high() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1004 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1004 });
     assert_eq!(env.backend.get(Gpr(0).state()), 0x1234_3FFF);
 }
 
@@ -12500,7 +12500,7 @@ fn run_fld_m80_sib_pushes_three() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1003 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1003 });
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::top_ref()), 7);
     assert_eq!(
         env.backend.get(polyisa_guest_x86::sem::st_exp_ref(7)),
@@ -12538,7 +12538,7 @@ fn run_fstp_m80_sibd_stores_three() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1004 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1004 });
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::top_ref()), 1);
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)), 0);
     let acc = polyisa_mem::Access {
@@ -12580,7 +12580,7 @@ fn run_fadd_st0_doubles_three() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1002 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::top_ref()), 0);
     assert_eq!(
         env.backend.get(polyisa_guest_x86::sem::st_exp_ref(0)),
@@ -12616,7 +12616,7 @@ fn run_fadd_st1_one_plus_three() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1002 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::top_ref()), 0);
     assert_eq!(
         env.backend.get(polyisa_guest_x86::sem::st_exp_ref(0)),
@@ -12656,7 +12656,7 @@ fn run_fadd_st1_three_minus_one() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1002 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
     assert_eq!(
         env.backend.get(polyisa_guest_x86::sem::st_exp_ref(0)),
         0x4000
@@ -12691,7 +12691,7 @@ fn run_fldz_pushes_zero() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1002 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::top_ref()), 7);
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::st_exp_ref(7)), 0);
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::st_sig_ref(7)), 0);
@@ -12725,7 +12725,7 @@ fn run_fxch_st1_swaps_three_and_one() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1002 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::top_ref()), 0);
     assert_eq!(
         env.backend.get(polyisa_guest_x86::sem::st_exp_ref(0)),
@@ -12769,7 +12769,7 @@ fn run_fucomip_st1_pops() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1002 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::eflags_ref()), 0x42);
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::top_ref()), 1);
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::st_exp_ref(0)), 0);
@@ -12804,7 +12804,7 @@ fn run_fucomi_st1_sets_flags() {
             .unwrap();
         let mut sys = X64Exit;
         let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-        assert_eq!(out, Outcome::StepLimit { eip: 0x1002 });
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
         assert_eq!(env.backend.get(polyisa_guest_x86::sem::top_ref()), 0);
         assert_eq!(env.backend.get(polyisa_guest_x86::sem::st_exp_ref(0)), exp0);
         assert_eq!(env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)), sig0);
@@ -12845,7 +12845,7 @@ fn run_fmul_m32_rip_three_times_two() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1006 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1006 });
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::top_ref()), 0);
     assert_eq!(
         env.backend.get(polyisa_guest_x86::sem::st_exp_ref(0)),
@@ -12880,7 +12880,7 @@ fn run_sub_rm_imm8_sibd_rsp() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1005 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1005 });
     let acc = polyisa_mem::Access {
         endian: polyisa_mem::Endian::Le,
         align: polyisa_mem::Align::Unaligned,
@@ -12916,7 +12916,7 @@ fn run_fnstcw_sibd_rsp() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1004 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1004 });
     let acc = polyisa_mem::Access {
         endian: polyisa_mem::Endian::Le,
         align: polyisa_mem::Align::Unaligned,
@@ -12955,7 +12955,7 @@ fn run_fldcw_sibd_rsp() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1004 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1004 });
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::fcw_ref()), 0x0C00);
 }
 
@@ -12985,7 +12985,7 @@ fn run_fistp_m64_sibd_honors_rounding() {
             .unwrap();
         let mut sys = X64Exit;
         let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-        assert_eq!(out, Outcome::StepLimit { eip: 0x1004 });
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1004 });
         assert_eq!(env.backend.get(polyisa_guest_x86::sem::top_ref()), 1);
         assert_eq!(env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)), 0);
         let acc = polyisa_mem::Access {
@@ -13035,7 +13035,7 @@ fn run_fild_m64_sibd_pushes_three() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1004 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1004 });
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::top_ref()), 7);
     assert_eq!(
         env.backend.get(polyisa_guest_x86::sem::st_exp_ref(7)),
@@ -13072,7 +13072,7 @@ fn run_fsubp_st1_subtracts_and_pops() {
             .unwrap();
         let mut sys = X64Exit;
         let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-        assert_eq!(out, Outcome::StepLimit { eip: 0x1002 });
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
         assert_eq!(env.backend.get(polyisa_guest_x86::sem::top_ref()), 1);
         assert_eq!(env.backend.get(polyisa_guest_x86::sem::st_exp_ref(0)), 0);
         assert_eq!(env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0)), 0);
@@ -13107,7 +13107,7 @@ fn run_and_r_sibd_edi() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1004 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1004 });
     assert_eq!(env.backend.get(Gpr(7).state()), 0x34);
     let flags = env.backend.get(polyisa_guest_x86::sem::eflags_ref());
     assert_eq!(flags & 1, 0);
@@ -13136,7 +13136,7 @@ fn run_cmovge_r32_sibd_moves_when_sf_eq_of() {
             .unwrap();
         let mut sys = X64Exit;
         let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-        assert_eq!(out, Outcome::StepLimit { eip: 0x1005 });
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1005 });
         env.backend.get(Gpr(0).state())
     };
     assert_eq!(run(0), 0x42);
@@ -13160,7 +13160,7 @@ fn run_mov_r32_imm_clears_high() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1005 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1005 });
     assert_eq!(
         polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(6)),
         0x80
@@ -13182,7 +13182,7 @@ fn run_dec_r8_preserves_carry() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1002 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
     assert_eq!(env.backend.get(Gpr(2).state()), 0xAB00);
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::eflags_ref()), 0x47);
 
@@ -13195,7 +13195,7 @@ fn run_dec_r8_preserves_carry() {
         .write(VirtAddr(0x1000), &[0xFE, 0xC2])
         .unwrap();
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1002 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
     assert_eq!(env.backend.get(Gpr(2).state()), 0x81);
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 1, 1);
 }
@@ -13215,7 +13215,7 @@ fn run_xchg_r8_swaps_bytes() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1002 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
     assert_eq!(env.backend.get(Gpr(1).state()), 0xABCD_3412);
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::eflags_ref()), 0x8D5);
 
@@ -13228,7 +13228,7 @@ fn run_xchg_r8_swaps_bytes() {
         .write(VirtAddr(0x1000), &[0x86, 0xD8])
         .unwrap();
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1002 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
     assert_eq!(env.backend.get(Gpr(0).state()), 0xAA22);
     assert_eq!(env.backend.get(Gpr(3).state()), 0xBB11);
 }
@@ -13255,7 +13255,7 @@ fn run_cmovne_r64_mem8() {
             .unwrap();
         let mut sys = X64Exit;
         let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-        assert_eq!(out, Outcome::StepLimit { eip: 0x1005 });
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1005 });
         polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(0))
     };
     assert_eq!(run(0), 0x99);
@@ -13284,7 +13284,7 @@ fn run_cmovs_r32_sib_rsp() {
             .unwrap();
         let mut sys = X64Exit;
         let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-        assert_eq!(out, Outcome::StepLimit { eip: 0x1004 });
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1004 });
         env.backend.get(Gpr(1).state())
     };
     assert_eq!(run(0), 0x22);
@@ -13313,7 +13313,7 @@ fn run_cmovl_r32_sib_rsp() {
             .unwrap();
         let mut sys = X64Exit;
         let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-        assert_eq!(out, Outcome::StepLimit { eip: 0x1005 });
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1005 });
         env.backend.get(Gpr(10).state())
     };
     assert_eq!(run(0), 1);
@@ -13354,7 +13354,7 @@ fn run_mulsd_xmm2_rdx_disp32() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1008 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1008 });
     let v: u128 = env.backend.get(polyisa_guest_x86::sem::xmm_ref(
         polyisa_guest_x86::sem::Xmm(2),
     ));
@@ -13408,7 +13408,7 @@ fn run_mulsd_xmm1_rsp() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1005 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1005 });
     let v: u128 = env.backend.get(polyisa_guest_x86::sem::xmm_ref(
         polyisa_guest_x86::sem::Xmm(1),
     ));
@@ -13456,7 +13456,7 @@ fn run_mulsd_xmm_m64_sibd_three_times_two() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1006 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1006 });
     let v: u128 = env.backend.get(polyisa_guest_x86::sem::xmm_ref(
         polyisa_guest_x86::sem::Xmm(0),
     ));
@@ -13492,7 +13492,7 @@ fn run_cvtss2sd_xmm0_rbx() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1004 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1004 });
     let v: u128 = env.backend.get(polyisa_guest_x86::sem::xmm_ref(
         polyisa_guest_x86::sem::Xmm(0),
     ));
@@ -13546,7 +13546,7 @@ fn run_cvtsd2ss_xmm0_m64_rbx() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1004 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1004 });
     let v: u128 = env.backend.get(polyisa_guest_x86::sem::xmm_ref(
         polyisa_guest_x86::sem::Xmm(0),
     ));
@@ -13593,7 +13593,7 @@ fn run_cvtsd2ss_xmm1_from_xmm0() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1004 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1004 });
     let src: u128 = env.backend.get(polyisa_guest_x86::sem::xmm_ref(
         polyisa_guest_x86::sem::Xmm(0),
     ));
@@ -13630,7 +13630,7 @@ fn run_subsd_xmm0_rsp_disp8() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1006 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1006 });
     let v: u128 = env.backend.get(polyisa_guest_x86::sem::xmm_ref(
         polyisa_guest_x86::sem::Xmm(0),
     ));
@@ -13677,7 +13677,7 @@ fn run_addsd_xmm_m64_sibd_three_plus_two() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1006 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1006 });
     let v: u128 = env.backend.get(polyisa_guest_x86::sem::xmm_ref(
         polyisa_guest_x86::sem::Xmm(0),
     ));
@@ -13709,7 +13709,7 @@ fn run_add_m64_r64_sib_scaled() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1004 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1004 });
     let mut got = [0u8; 8];
     env.backend
         .mem
@@ -13746,7 +13746,7 @@ fn run_xor_rm_imm8_sibd_rsp() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1006 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1006 });
     let mut got = [0u8; 8];
     env.backend
         .mem
@@ -13784,7 +13784,7 @@ fn run_movaps_load_sibd_rsp() {
         .unwrap();
     let mut sys = X64Exit;
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-    assert_eq!(out, Outcome::StepLimit { eip: 0x1005 });
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1005 });
     assert_eq!(
         env.backend.get(polyisa_guest_x86::sem::xmm_ref(
             polyisa_guest_x86::sem::Xmm(0)
@@ -13809,7 +13809,7 @@ fn run_cmp_si_dx_sets_flags() {
             .unwrap();
         let mut sys = X64Exit;
         let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
-        assert_eq!(out, Outcome::StepLimit { eip: 0x1003 });
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1003 });
         assert_eq!(env.backend.get(Gpr(6).state()), si);
         assert_eq!(env.backend.get(Gpr(2).state()), dx);
         env.backend.get(polyisa_guest_x86::sem::eflags_ref())
