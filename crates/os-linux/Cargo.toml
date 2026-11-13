@@ -10,6 +10,10 @@ polyisa-kernel = { path = "../kernel" }
 polyisa-loader = { path = "../loader" }
 polyisa-engine = { path = "../engine" }
 polyisa-guest = { path = "../guest" }
+polyisa-guest-x86 = { path = "../../guests/x86", optional = true }
+
+[features]
+x86 = ["dep:polyisa-guest-x86"]
 
 [lints]
 workspace = true

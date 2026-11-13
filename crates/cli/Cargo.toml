@@ -15,7 +15,7 @@ polyisa-host = { path = "../host" }
 polyisa-kernel = { path = "../kernel" }
 polyisa-loader = { path = "../loader" }
 polyisa-mem = { path = "../mem" }
-polyisa-os-linux = { path = "../os-linux" }
+polyisa-os-linux = { path = "../os-linux", features = ["x86"] }
 polyisa-sem = { path = "../sem" }
 polyisa-trace = { path = "../trace" }
 

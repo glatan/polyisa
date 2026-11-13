@@ -735,6 +735,7 @@ fn allowed_deps(pkg: &str) -> Option<&'static [&'static str]> {
             "polyisa-loader",
             "polyisa-engine",
             "polyisa-guest",
+            "polyisa-guest-x86",
         ],
         "polyisa-os-wasi" => &["polyisa-kernel", "polyisa-engine", "polyisa-guest"],
         "polyisa-host" => &[],

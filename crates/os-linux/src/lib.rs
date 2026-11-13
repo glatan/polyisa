@@ -9,6 +9,12 @@
 
 #![forbid(unsafe_code)]
 
+/// x86 用のシステムコール文脈。`x86` 機能で有効になる。
+/// 設計の依存規則（`docs/design/workspace.md` の「依存規則」）が
+/// `os-linux` の `guests/*` 依存を機能フラグ付きで認めている。
+#[cfg(feature = "x86")]
+pub mod x86;
+
 /// ゲストの ABI。システムコール番号の表を選ぶときに使う。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum GuestAbi {

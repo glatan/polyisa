@@ -10,6 +10,7 @@
 use polyisa_engine::bare::BareEnv;
 use polyisa_engine::interp::InterpExit;
 use polyisa_mem::{Access, AccessKind, Align, Endian, VirtAddr};
+use polyisa_os_linux::x86::{AT_FDCWD_U32, SysCtx, neg_errno, neg_errno64};
 use polyisa_sem::{Backend, ExceptionKind};
 
 use polyisa_guest_x86::sem;
@@ -10822,9 +10823,6 @@ impl CliLinux {
 /// 旧名。`CliLinux` を使うこと。
 pub type CliX86 = CliLinux;
 
-/// i386 の openat の引数。dirfd が -100 (AT_FDCWD) のときだけ受け付ける。
-const AT_FDCWD_U32: u32 = 0xffff_ff9c;
-
 /// 1 回の read/write でホストに確保する上限（バイト）。ゲスト指定の
 /// 長さが大きくても、この刻みで分割して転送する。
 const IO_CHUNK: usize = 65536;
@@ -10855,21 +10853,12 @@ fn reap_status(code: u32, signal: Option<u32>) -> u32 {
     }
 }
 
-fn neg_errno(n: u32) -> u32 {
-    (n as i32).wrapping_neg() as u32
-}
-
 fn data_access() -> polyisa_mem::Access {
     polyisa_mem::Access {
         endian: polyisa_mem::Endian::Le,
         align: polyisa_mem::Align::Unaligned,
         kind: polyisa_mem::AccessKind::DataRead,
     }
-}
-
-/// 64ビットの負 errno（符号拡張する）。
-fn neg_errno64(n: u32) -> u64 {
-    (n as i32).wrapping_neg() as i64 as u64
 }
 
 fn get64(env: &mut BareEnv, r: polyisa_guest_x86::sem::Gpr) -> u64 {
@@ -10944,35 +10933,6 @@ fn fold_path(path: &str) -> String {
         ".".to_string()
     } else {
         parts.join("/")
-    }
-}
-
-/// 1 回のシステムコールで共通に使う値。
-struct SysCtx {
-    r_a: Gpr,
-    r_b: Gpr,
-    r_c: Gpr,
-    is64: bool,
-    at_fdcwd: u64,
-}
-
-impl SysCtx {
-    /// dirfd が AT_FDCWD か。x86-64 は下位 32 ビット、i386 は値そのものを比べる。
-    fn is_at_fdcwd(&self, dirfd: u64) -> bool {
-        if self.is64 {
-            (dirfd as u32) == AT_FDCWD_U32
-        } else {
-            dirfd == self.at_fdcwd
-        }
-    }
-
-    /// 戻り値の負 errno。x86-64 は 64 ビット符号拡張、i386 は 32 ビット。
-    fn neg(&self, n: u32) -> u64 {
-        if self.is64 {
-            neg_errno64(n)
-        } else {
-            u64::from(neg_errno(n))
-        }
     }
 }
 
