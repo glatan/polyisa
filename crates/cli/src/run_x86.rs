@@ -12421,15 +12421,6 @@ fn sys_sched_setaffinity(
     Some(TrapOutcome::Handled)
 }
 
-/// SCHED_OTHER/BATCH/IDLE は 0、FIFO/RR は 1..=99。未知の方針は None。
-fn sched_priority_bounds(policy: u64) -> Option<(i32, i32)> {
-    match policy {
-        0 | 3 | 5 => Some((0, 0)),
-        1 | 2 => Some((1, 99)),
-        _ => None,
-    }
-}
-
 fn sys_sched_get_priority_max(
     _sys: &mut CliLinux,
     env: &mut BareEnv,
@@ -12453,31 +12444,9 @@ fn sys_sched_getscheduler(
     env: &mut BareEnv,
     cx: &SysCtx,
 ) -> Option<TrapOutcome> {
-    // いまの方針は SCHED_OTHER。pid 0 は自分。
-    let pid = get64(env, cx.r_a);
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
     let me = sys.ensure_self().0;
-    if pid != 0 && pid != me {
-        set64(env, Gpr(0), cx.neg(ESRCH));
-        return Some(TrapOutcome::Handled);
-    }
-    set64(env, Gpr(0), 0);
-    Some(TrapOutcome::Handled)
-}
-
-fn read_sched_priority(env: &mut BareEnv, addr: u64) -> Option<i32> {
-    if addr == 0 {
-        return None;
-    }
-    let mut buf = [0u8; 4];
-    if env
-        .backend
-        .mem
-        .read(polyisa_mem::VirtAddr(addr), &mut buf, data_access())
-        .is_err()
-    {
-        return None;
-    }
-    Some(i32::from_le_bytes(buf))
+    polyisa_os_linux::x86::sys_sched_getscheduler(me, env, cx)
 }
 
 fn sys_sched_setscheduler(
@@ -12485,71 +12454,21 @@ fn sys_sched_setscheduler(
     env: &mut BareEnv,
     cx: &SysCtx,
 ) -> Option<TrapOutcome> {
-    // sched_setscheduler(pid, policy, param)。方針は変えず、範囲だけ確かめて 0 を返す。
-    let pid = get64(env, cx.r_a);
-    let policy = get64(env, cx.r_b);
-    let param = get64(env, cx.r_c);
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
     let me = sys.ensure_self().0;
-    if pid != 0 && pid != me {
-        set64(env, Gpr(0), cx.neg(ESRCH));
-        return Some(TrapOutcome::Handled);
-    }
-    let Some((min, max)) = sched_priority_bounds(policy) else {
-        set64(env, Gpr(0), cx.neg(EINVAL));
-        return Some(TrapOutcome::Handled);
-    };
-    let Some(prio) = read_sched_priority(env, param) else {
-        set64(env, Gpr(0), cx.neg(EFAULT));
-        return Some(TrapOutcome::Handled);
-    };
-    if prio < min || prio > max {
-        set64(env, Gpr(0), cx.neg(EINVAL));
-        return Some(TrapOutcome::Handled);
-    }
-    set64(env, Gpr(0), 0);
-    Some(TrapOutcome::Handled)
+    polyisa_os_linux::x86::sys_sched_setscheduler(me, env, cx)
 }
 
 fn sys_sched_setparam(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // sched_setparam(pid, param)。現方針 OTHER の優先度 0 だけ受理する。
-    let pid = get64(env, cx.r_a);
-    let param = get64(env, cx.r_b);
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
     let me = sys.ensure_self().0;
-    if pid != 0 && pid != me {
-        set64(env, Gpr(0), cx.neg(ESRCH));
-        return Some(TrapOutcome::Handled);
-    }
-    let Some(prio) = read_sched_priority(env, param) else {
-        set64(env, Gpr(0), cx.neg(EFAULT));
-        return Some(TrapOutcome::Handled);
-    };
-    if prio != 0 {
-        set64(env, Gpr(0), cx.neg(EINVAL));
-        return Some(TrapOutcome::Handled);
-    }
-    set64(env, Gpr(0), 0);
-    Some(TrapOutcome::Handled)
+    polyisa_os_linux::x86::sys_sched_setparam(me, env, cx)
 }
 
 fn sys_sched_getparam(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    let pid = get64(env, cx.r_a);
-    let param = get64(env, cx.r_b);
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
     let me = sys.ensure_self().0;
-    if pid != 0 && pid != me {
-        set64(env, Gpr(0), cx.neg(ESRCH));
-        return Some(TrapOutcome::Handled);
-    }
-    if env
-        .backend
-        .mem
-        .write(polyisa_mem::VirtAddr(param), &0i32.to_le_bytes())
-        .is_err()
-    {
-        set64(env, Gpr(0), cx.neg(EFAULT));
-        return Some(TrapOutcome::Handled);
-    }
-    set64(env, Gpr(0), 0);
-    Some(TrapOutcome::Handled)
+    polyisa_os_linux::x86::sys_sched_getparam(me, env, cx)
 }
 
 fn sys_getpgid(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
@@ -13161,30 +13080,19 @@ fn sys_tgkill(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Tra
 }
 
 fn sys_set_robust_list(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // robust futex リスト先頭を記録して 0 を返す。
-    // 長さは struct robust_list_head (24バイト) のはずであり、異なる場合は EINVAL.
-    const ROBUST_LIST_HEAD_LEN: u64 = 24;
-    if get64(env, cx.r_b) != ROBUST_LIST_HEAD_LEN {
-        set64(env, Gpr(0), cx.neg(EINVAL));
-        return Some(TrapOutcome::Handled);
-    }
-    sys.robust_head = get64(env, cx.r_a);
-    set64(env, Gpr(0), 0);
-    Some(TrapOutcome::Handled)
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    let mut v = sys.robust_head;
+    let r = polyisa_os_linux::x86::sys_set_robust_list(&mut v, env, cx);
+    sys.robust_head = v;
+    r
 }
 
 fn sys_rseq(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // rseq 領域を記録して 0 を返す。署名検証はしない.
-    // rseq_len は 32 (struct rseq) のはずであり、異なる場合は EINVAL.
-    // flags は 0 のみ受け付ける.
-    const RSEQ_LEN: u64 = 32;
-    if get64(env, cx.r_b) != RSEQ_LEN || get64(env, cx.r_c) != 0 {
-        set64(env, Gpr(0), cx.neg(EINVAL));
-        return Some(TrapOutcome::Handled);
-    }
-    sys.rseq_addr = get64(env, cx.r_a);
-    set64(env, Gpr(0), 0);
-    Some(TrapOutcome::Handled)
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    let mut v = sys.rseq_addr;
+    let r = polyisa_os_linux::x86::sys_rseq(&mut v, env, cx);
+    sys.rseq_addr = v;
+    r
 }
 
 fn sys_getrandom(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
@@ -13486,33 +13394,11 @@ fn sys_readlink(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Tr
 }
 
 fn sys_arch_prctl(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // arch_prctl (x86-64 のみ)。TLS の FS ベース設定を受け付ける。
-    // Ref: SRC-LINUX (7.3) arch/x86/include/uapi/asm/prctl.h.
-    const ARCH_SET_FS: u64 = 0x1002;
-    const ARCH_GET_FS: u64 = 0x1003;
-    let op = get64(env, cx.r_a);
-    if op == ARCH_SET_FS {
-        sys.fs_base = get64(env, cx.r_b);
-        set64(env, Gpr(0), 0);
-        return Some(TrapOutcome::Handled);
-    }
-    if op == ARCH_GET_FS {
-        let base = sys.fs_base;
-        let dst = get64(env, cx.r_b);
-        let buf = base.to_le_bytes();
-        if env
-            .backend
-            .mem
-            .write(polyisa_mem::VirtAddr(dst), &buf)
-            .is_err()
-        {
-            return Some(TrapOutcome::Unimplemented);
-        }
-        set64(env, Gpr(0), 0);
-        return Some(TrapOutcome::Handled);
-    }
-    set64(env, Gpr(0), cx.neg(EINVAL));
-    Some(TrapOutcome::Handled)
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    let mut v = sys.fs_base;
+    let r = polyisa_os_linux::x86::sys_arch_prctl(&mut v, env, cx);
+    sys.fs_base = v;
+    r
 }
 
 fn sys_dup(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
