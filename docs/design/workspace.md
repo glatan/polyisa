@@ -121,7 +121,7 @@ OS 層        loader → bits
 
 ## `unsafe` の扱い
 
-`unsafe` を使ってよいクレートは `mem`、`engine`、`jit`、`host` に限り、それ以外のクレートは `#![forbid(unsafe_code)]` を宣言する。許可する理由はそれぞれ次のとおりである。
+`unsafe` を使ってよいクレートは `mem`、`engine`、`jit`、`host` に限る。ワークスペースの lint 既定は `unsafe_code = "deny"` で、許可する 4 クレートは `#![allow(unsafe_code)]`、それ以外のクレートは `#![forbid(unsafe_code)]` を宣言する。許可する理由はそれぞれ次のとおりである。
 
 - `mem`：ソフトウェア TLB の高速経路で、ページフレームへのホストポインタを直接読み書きする。
 - `engine`：インタプリタのバックエンドが、CPU 状態のフィールドにオフセットでアクセスする（[命令意味論](semantics.md)）。

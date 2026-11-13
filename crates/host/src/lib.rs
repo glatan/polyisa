@@ -4,7 +4,9 @@
 //!
 //! FFI 宣言は後の段階で足す。ここでは OS 非依存の問い合わせだけを提供する。
 
-#![forbid(unsafe_code)]
+// unsafe 許可クレート（docs/design/workspace.md「`unsafe` の扱い」）。
+// 自前の FFI 宣言を呼ぶため。
+#![allow(unsafe_code)]
 
 /// 利用可能な並列数。作業スレッドの数の目安に使う。
 #[must_use]

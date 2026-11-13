@@ -4,7 +4,9 @@
 //!
 //! 詳しくは [ゲストメモリ](../../docs/design/memory.md) を見る。
 
-#![forbid(unsafe_code)]
+// unsafe 許可クレート（docs/design/workspace.md「`unsafe` の扱い」）。
+// TLB 高速経路でページフレームのホストポインタを直接読み書きするため。
+#![allow(unsafe_code)]
 
 use std::collections::BTreeMap;
 use std::sync::Arc;

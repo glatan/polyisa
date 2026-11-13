@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! JIT。IR からホストの機械語を生成し、実行する。後の段階で実装する。
 
-#![forbid(unsafe_code)]
+// unsafe 許可クレート（docs/design/workspace.md「`unsafe` の扱い」）。
+// 生成した機械語を実行するため。
+#![allow(unsafe_code)]
 
 /// コンパイル済みの入口。機械語の生成は後の段階で足す。
 #[derive(Debug, Default)]

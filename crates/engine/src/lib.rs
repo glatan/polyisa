@@ -4,7 +4,9 @@
 //!
 //! 詳しくは [実行エンジン](../../docs/design/execution-engine.md) を見る。
 
-#![forbid(unsafe_code)]
+// unsafe 許可クレート（docs/design/workspace.md「`unsafe` の扱い」）。
+// バックエンドが CPU 状態のフィールドへオフセットでアクセスするため。
+#![allow(unsafe_code)]
 
 pub mod bare;
 pub mod cache;

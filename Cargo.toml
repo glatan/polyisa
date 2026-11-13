@@ -39,7 +39,9 @@ rust-version = "1.99"
 license = "MIT OR Apache-2.0"
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+# 既定は deny。unsafe を許可するクレート（mem, engine, jit, host）は
+# クレート側で #![allow(unsafe_code)] を宣言する（docs/design/workspace.md）。
+unsafe_code = "deny"
 
 [workspace.lints.clippy]
 all = "warn"
