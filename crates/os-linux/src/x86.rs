@@ -1674,6 +1674,7 @@ pub fn guest_readlink_target(
     cwd: &str,
     exe_path: &str,
     fds: &FdTable,
+    std_paths: &[Option<String>; 3],
     path: &str,
 ) -> Result<String, u32> {
     // /proc/self/exe はゲスト実行ファイルのホストパスへ読み替える。
@@ -1682,12 +1683,18 @@ pub fn guest_readlink_target(
     }
     // musl の realpath は開いた fd を /proc/self/fd/N の readlink で読む。
     // ホストの同じ番号は別物なので、開いたときに覚えたパスを返す。
+    // 標準 fd は付け替え先のパスを見る。
     if let Some(rest) = path.strip_prefix("/proc/self/fd/")
         && !rest.is_empty()
         && rest.bytes().all(|b| b.is_ascii_digit())
         && let Ok(fd) = rest.parse::<u32>()
     {
-        return match fds.path_of(fd) {
+        let found = if fd < 3 {
+            std_paths.get(fd as usize).and_then(|p| p.as_deref())
+        } else {
+            fds.path_of(fd)
+        };
+        return match found {
             Some(p) => Ok(p.to_string()),
             None => Err(ENOENT),
         };
@@ -1711,6 +1718,7 @@ pub fn sys_readlink(
     cwd: &str,
     exe_path: &str,
     fds: &FdTable,
+    std_paths: &[Option<String>; 3],
     env: &mut BareEnv,
     cx: &SysCtx,
 ) -> Option<TrapOutcome> {
@@ -1737,7 +1745,7 @@ pub fn sys_readlink(
         set64(env, Gpr(0), cx.neg(EINVAL));
         return Some(TrapOutcome::Handled);
     }
-    let target = match guest_readlink_target(root, cwd, exe_path, fds, &path) {
+    let target = match guest_readlink_target(root, cwd, exe_path, fds, std_paths, &path) {
         Ok(p) => p,
         Err(no) => {
             set64(env, Gpr(0), cx.neg(no));
@@ -1762,6 +1770,7 @@ pub fn sys_readlinkat(
     cwd: &str,
     exe_path: &str,
     fds: &FdTable,
+    std_paths: &[Option<String>; 3],
     env: &mut BareEnv,
     cx: &SysCtx,
 ) -> Option<TrapOutcome> {
@@ -1806,7 +1815,7 @@ pub fn sys_readlinkat(
     }
     // /proc/self/exe はゲスト実行ファイル自身を返す (ホスト exe ではない).
     // 空の exe_path (単体テスト) ではホストに直結する.
-    let target = match guest_readlink_target(root, cwd, exe_path, fds, &path) {
+    let target = match guest_readlink_target(root, cwd, exe_path, fds, std_paths, &path) {
         Ok(p) => p,
         Err(no) => {
             set64(env, Gpr(0), cx.neg(no));
@@ -1830,6 +1839,7 @@ pub fn sys_unlinkat(
     root: &str,
     cwd: &str,
     fds: &FdTable,
+    std_paths: &[Option<String>; 3],
     env: &mut BareEnv,
     cx: &SysCtx,
 ) -> Option<TrapOutcome> {
@@ -1854,6 +1864,14 @@ pub fn sys_unlinkat(
     };
     let base = if cx.is_at_fdcwd(dirfd) {
         cwd.to_string()
+    } else if dirfd < 3 {
+        match std_paths.get(dirfd as usize).and_then(|p| p.as_ref()) {
+            Some(p) => p.clone(),
+            None => {
+                set64(env, Gpr(0), cx.neg(EBADF));
+                return Some(TrapOutcome::Handled);
+            }
+        }
     } else {
         match fds.path_of(dirfd as u32) {
             Some(p) => p.to_string(),
@@ -2144,6 +2162,7 @@ pub fn sys_clock_gettime(
 pub fn sys_fstat(
     fds: &FdTable,
     std: Option<&std::fs::File>,
+    std_paths: &[Option<String>; 3],
     env: &mut BareEnv,
     cx: &SysCtx,
 ) -> Option<TrapOutcome> {
@@ -2171,7 +2190,15 @@ pub fn sys_fstat(
             return Some(TrapOutcome::Handled);
         }
     };
-    let ino = fds.path_of(fd).map(path_ino).unwrap_or(u64::from(fd) | 1);
+    let ino = if fd < 3 {
+        std_paths
+            .get(fd as usize)
+            .and_then(|p| p.as_deref())
+            .map(path_ino)
+    } else {
+        fds.path_of(fd).map(path_ino)
+    }
+    .unwrap_or(u64::from(fd) | 1);
     let st = stat144(&m, ino);
     if env.backend.mem.write(VirtAddr(stat_addr), &st).is_err() {
         return Some(TrapOutcome::Unimplemented);
@@ -2216,7 +2243,12 @@ pub fn sys_lsetxattr(root: &str, cwd: &str, env: &mut BareEnv, cx: &SysCtx) -> O
     // シンボリックリンク自体への付与は区別しない（試作の割り切り...）。方針は呼び出し側と同じ.
     sys_setxattr(root, cwd, env, cx)
 }
-pub fn sys_fallocate(fds: &mut FdTable, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+pub fn sys_fallocate(
+    fds: &mut FdTable,
+    std: Option<&mut std::fs::File>,
+    env: &mut BareEnv,
+    cx: &SysCtx,
+) -> Option<TrapOutcome> {
     // fallocate(fd, mode, offset, len)。長さを offset+len まで伸ばす。
     // mode が 0 以外（穴あけ等）は EOPNOTSUPP。
     let fd = get64(env, cx.r_a) as u32;
@@ -2232,7 +2264,8 @@ pub fn sys_fallocate(fds: &mut FdTable, env: &mut BareEnv, cx: &SysCtx) -> Optio
         set64(env, Gpr(0), cx.neg(EINVAL));
         return Some(TrapOutcome::Handled);
     };
-    let Some(file) = fds.get_mut(fd) else {
+    let file = if fd < 3 { std } else { fds.get_mut(fd) };
+    let Some(file) = file else {
         set64(env, Gpr(0), cx.neg(EBADF));
         return Some(TrapOutcome::Handled);
     };
@@ -2261,11 +2294,17 @@ pub fn sys_fallocate(fds: &mut FdTable, env: &mut BareEnv, cx: &SysCtx) -> Optio
     set64(env, Gpr(0), 0);
     Some(TrapOutcome::Handled)
 }
-pub fn sys_ftruncate(fds: &mut FdTable, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+pub fn sys_ftruncate(
+    fds: &mut FdTable,
+    std: Option<&mut std::fs::File>,
+    env: &mut BareEnv,
+    cx: &SysCtx,
+) -> Option<TrapOutcome> {
     // ftruncate(fd, length)。truncate -s で使う。ホストの set_len に直結する.
     let fd = get64(env, cx.r_a) as u32;
     let len = get64(env, cx.r_b);
-    let Some(file) = fds.get_mut(fd) else {
+    let file = if fd < 3 { std } else { fds.get_mut(fd) };
+    let Some(file) = file else {
         set64(env, Gpr(0), cx.neg(EBADF));
         return Some(TrapOutcome::Handled);
     };
@@ -2289,14 +2328,20 @@ pub fn sys_ftruncate(fds: &mut FdTable, env: &mut BareEnv, cx: &SysCtx) -> Optio
         }
     })
 }
-pub fn sys_lseek(fds: &mut FdTable, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+pub fn sys_lseek(
+    fds: &mut FdTable,
+    std: Option<&mut std::fs::File>,
+    env: &mut BareEnv,
+    cx: &SysCtx,
+) -> Option<TrapOutcome> {
     // lseek(fd, offset, whence)。opened fd の位置を動かし、新位置を返す.
     // Ref: SRC-LINUX (7.3).
     use std::io::Seek;
     let fd = get64(env, Gpr(7)) as u32;
     let offset = get64(env, Gpr(6)) as i64;
     let whence = get64(env, Gpr(2)) as u32;
-    let Some(file) = fds.get_mut(fd) else {
+    let file = if fd < 3 { std } else { fds.get_mut(fd) };
+    let Some(file) = file else {
         set64(env, Gpr(0), cx.neg(EBADF));
         return Some(TrapOutcome::Handled);
     };
@@ -2317,6 +2362,7 @@ pub fn sys_lseek(fds: &mut FdTable, env: &mut BareEnv, cx: &SysCtx) -> Option<Tr
 }
 pub fn sys_fchdir(
     fds: &FdTable,
+    std_paths: &[Option<String>; 3],
     cwd: &mut String,
     env: &mut BareEnv,
     cx: &SysCtx,
@@ -2324,7 +2370,12 @@ pub fn sys_fchdir(
     // fchdir(fd)。覚えたパスがディレクトリなら cwd にする。envdir が使う。
     // Ref: SRC-LINUX (7.3).
     let fd = get64(env, cx.r_a) as u32;
-    let Some(path) = fds.path_of(fd).map(str::to_owned) else {
+    let path = if fd < 3 {
+        std_paths.get(fd as usize).and_then(|p| p.as_deref())
+    } else {
+        fds.path_of(fd)
+    };
+    let Some(path) = path.map(str::to_owned) else {
         set64(env, Gpr(0), cx.neg(EBADF));
         return Some(TrapOutcome::Handled);
     };
@@ -2347,6 +2398,7 @@ pub fn sys_fchdir(
 }
 pub fn sys_getdents64(
     fds: &FdTable,
+    std_paths: &[Option<String>; 3],
     dir_pos: &mut Vec<(u32, usize)>,
     dir_done: &mut Vec<u32>,
     env: &mut BareEnv,
@@ -2366,7 +2418,12 @@ pub fn sys_getdents64(
     }
     // opened fd のみ受け付ける。stdin/stdout (0-2) は、パスを覚えていなければ EBADF。
     // ゲスト fd を /proc/self/fd のホスト fd とみなすと、別の記述子を開く。
-    let Some(dir_path) = fds.path_of(fd).map(std::path::PathBuf::from) else {
+    let dir_path = if fd < 3 {
+        std_paths.get(fd as usize).and_then(|p| p.as_deref())
+    } else {
+        fds.path_of(fd)
+    };
+    let Some(dir_path) = dir_path.map(std::path::PathBuf::from) else {
         set64(env, Gpr(0), cx.neg(EBADF));
         return Some(TrapOutcome::Handled);
     };

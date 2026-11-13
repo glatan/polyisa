@@ -12437,7 +12437,7 @@ fn sys_chdir(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapO
 fn sys_fchdir(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
     let mut cwd = sys.cwd.clone();
-    let r = polyisa_os_linux::x86::sys_fchdir(&sys.fds, &mut cwd, env, cx);
+    let r = polyisa_os_linux::x86::sys_fchdir(&sys.fds, &sys.std_paths, &mut cwd, env, cx);
     sys.cwd = cwd;
     r
 }
@@ -12454,7 +12454,14 @@ fn sys_chroot(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Tra
 
 fn sys_getdents64(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
-    polyisa_os_linux::x86::sys_getdents64(&sys.fds, &mut sys.dir_pos, &mut sys.dir_done, env, cx)
+    polyisa_os_linux::x86::sys_getdents64(
+        &sys.fds,
+        &sys.std_paths,
+        &mut sys.dir_pos,
+        &mut sys.dir_done,
+        env,
+        cx,
+    )
 }
 
 fn sys_fstat(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
@@ -12465,7 +12472,7 @@ fn sys_fstat(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapO
     } else {
         None
     };
-    polyisa_os_linux::x86::sys_fstat(&sys.fds, std, env, cx)
+    polyisa_os_linux::x86::sys_fstat(&sys.fds, std, &sys.std_paths, env, cx)
 }
 
 fn sys_stat(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
@@ -12617,17 +12624,38 @@ fn sys_sendfile(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Tr
 
 fn sys_lseek(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
-    polyisa_os_linux::x86::sys_lseek(&mut sys.fds, env, cx)
+    // 標準 fd かは Gpr(7)（x86-64 の fd 位置）で判定する。実体側と同じ番号を使う.
+    let fd = get64(env, Gpr(7)) as u32;
+    let std = if fd < 3 {
+        sys.std_files[fd as usize].as_mut()
+    } else {
+        None
+    };
+    polyisa_os_linux::x86::sys_lseek(&mut sys.fds, std, env, cx)
 }
 
 fn sys_ftruncate(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
-    polyisa_os_linux::x86::sys_ftruncate(&mut sys.fds, env, cx)
+    // 標準 fd かは実体と同じ番号（cx.r_a）で判定する。
+    let fd = get64(env, cx.r_a) as u32;
+    let std = if fd < 3 {
+        sys.std_files[fd as usize].as_mut()
+    } else {
+        None
+    };
+    polyisa_os_linux::x86::sys_ftruncate(&mut sys.fds, std, env, cx)
 }
 
 fn sys_fallocate(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
-    polyisa_os_linux::x86::sys_fallocate(&mut sys.fds, env, cx)
+    // 標準 fd かは実体と同じ番号（cx.r_a）で判定する。
+    let fd = get64(env, cx.r_a) as u32;
+    let std = if fd < 3 {
+        sys.std_files[fd as usize].as_mut()
+    } else {
+        None
+    };
+    polyisa_os_linux::x86::sys_fallocate(&mut sys.fds, std, env, cx)
 }
 
 fn sys_getgroups(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
@@ -12738,7 +12766,7 @@ fn sys_readlinkat(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<
     let root = sys.guest_root.clone();
     let cwd = sys.cwd.clone();
     let exe = sys.exe_path.clone();
-    polyisa_os_linux::x86::sys_readlinkat(&root, &cwd, &exe, &sys.fds, env, cx)
+    polyisa_os_linux::x86::sys_readlinkat(&root, &cwd, &exe, &sys.fds, &sys.std_paths, env, cx)
 }
 
 fn sys_readlink(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
@@ -12747,7 +12775,7 @@ fn sys_readlink(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Tr
     let root = sys.guest_root.clone();
     let cwd = sys.cwd.clone();
     let exe = sys.exe_path.clone();
-    polyisa_os_linux::x86::sys_readlink(&root, &cwd, &exe, &sys.fds, env, cx)
+    polyisa_os_linux::x86::sys_readlink(&root, &cwd, &exe, &sys.fds, &sys.std_paths, env, cx)
 }
 
 fn sys_arch_prctl(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
@@ -13027,7 +13055,7 @@ fn sys_unlinkat(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Tr
     sys.ensure_cwd();
     let root = sys.guest_root.clone();
     let cwd = sys.cwd.clone();
-    polyisa_os_linux::x86::sys_unlinkat(&root, &cwd, &sys.fds, env, cx)
+    polyisa_os_linux::x86::sys_unlinkat(&root, &cwd, &sys.fds, &sys.std_paths, env, cx)
 }
 
 fn sys_access(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
