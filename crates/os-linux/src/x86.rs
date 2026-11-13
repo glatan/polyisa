@@ -1052,13 +1052,11 @@ pub fn sys_syslog(env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     Some(TrapOutcome::Handled)
 }
 pub fn sys_time(env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // time(tloc)。ホスト時刻の秒を返し、tloc!=NULL なら書き込む.
-    // clock_gettime の ENOSYS フォールバックで呼ばれる.
+    // time(tloc)。CLOCK_REALTIME と同じ固定値（2000-01-01 01:00:00 UTC）を返す.
+    // 設計（ユーザーモード「時計と乱数」）のとおり既定は仮想時刻であり、
+    // ホストの実時間は使わない。tloc!=NULL なら書き込む。
     let tloc = get64(env, cx.r_a);
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64;
+    let secs = 946_688_400i64;
     if tloc != 0
         && env
             .backend
