@@ -61,6 +61,7 @@ pub struct BlockKey {
 }
 
 /// vCPU が持つ実行の状態。ゲスト ISA の CPU 状態は外から渡す。
+// Gap: GAP-0028
 #[derive(Debug)]
 pub struct Vcpu {
     /// 現在の実行モード。

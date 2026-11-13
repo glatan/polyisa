@@ -32,6 +32,7 @@ pub enum EcallOutcome {
 }
 
 /// ecall の処理器。OS パーソナリティやテストハーネスが実装する。
+// Gap: GAP-0024
 pub trait EcallHandler {
     fn handle_ecall(&mut self, env: &mut BareEnv, word: u32) -> EcallOutcome;
 }

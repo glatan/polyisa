@@ -1,8 +1,9 @@
 // Copyright (c) polyisa contributors
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! x86 最小のゲスト ISA。段階4の最小であり、可変長デコードを確かめる。
+//! x86 のゲスト ISA。段階4の範囲（i386 ベースラインに SSE 最小を加えたもの）で、
+//! 可変長デコードを確かめる。
 //!
-//! x86 の807件を持つ（i386 ベースラインを含む）。ModRM/SIB 汎用・XMM最小・near Jcc・MOVZX・CMOVB・ADD RIP等を含む。
+//! x86 の853件を持つ（i386 ベースラインを含む）。ModRM/SIB 汎用・XMM最小・near Jcc・MOVZX・CMOVB・ADD RIP等を含む。
 //! REX 接頭辞はデコード前に剥がし、Insは共有して64ビット意味論に切り替える。
 //! SYSCALL/CPUID は最小形、ModRM は register-direct（全組合せ）・mod=01+disp8・
 //! mod=10+disp32・絶対番地と SIB base+index 形（スケール付き、disp8/disp32・disp なしを含む）を持ち、
@@ -33,6 +34,7 @@ pub struct CpuState {
     /// 汎用レジスタ 8本の下位32ビット。
     pub g: [u32; 8],
     /// 命令ポインタの下位32ビット（64ビット実行でも上位は不変とする試作）。
+    // Gap: GAP-0029
     pub eip: u32,
     /// フラグレジスタ（CF bit0、PF bit2、AF bit4、ZF bit6、SF bit7、OF bit11 を使う）。
     pub eflags: u32,

@@ -665,6 +665,7 @@ impl Backend for InterpBackend {
         Err(InterpExit::Unimplemented("helper".to_string()))
     }
 
+    // Gap: GAP-0027
     fn param<P: Param>(&mut self) -> P::Value {
         panic!("param: 挙動パラメータは CPU モデルの結び付け後に読む")
     }

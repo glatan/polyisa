@@ -49,7 +49,7 @@
 
 ## 設計との差
 
-台帳は [設計との差の台帳](../gaps.md) にある。未着手は 4 件、代替は 8 件、対象外は 3 件である。
+台帳は [設計との差の台帳](../gaps.md) にある。未着手は 7 件、代替は 15 件、対象外は 3 件である。
 
 | ID | 区分 | 設計 |
 |---|---|---|
@@ -68,3 +68,13 @@
 | GAP-0015 | 対象外 | [ISA 記述言語（ISADL）「オペコード表」](../design/isa-description.md#オペコード表)、[同「フィールドとオペランド」](../design/isa-description.md#フィールドとオペランド) |
 | GAP-0021 | 未着手 | [検証戦略「テストの網羅の記録」](../design/testing.md#テストの網羅の記録) |
 | GAP-0022 | 代替 | [ロードマップ「段階 4：x86」](../design/roadmap.md#段階-4x86) |
+| GAP-0023 | 代替 | [ISA 記述言語（ISADL）「生成物」](../design/isa-description.md#生成物) |
+| GAP-0024 | 代替 | [実行エンジン「実行ループ」](../design/execution-engine.md#実行ループ) |
+| GAP-0025 | 代替 | [ユーザーモード「ファイル記述子」](../design/user-mode.md#ファイル記述子) |
+| GAP-0026 | 代替 | [ユーザーモード「シグナル」](../design/user-mode.md#シグナル) |
+| GAP-0027 | 代替 | [CPU モデルとバージョンの表現「挙動パラメータ」](../design/cpu-models.md#挙動パラメータ) |
+| GAP-0028 | 未着手 | [実行エンジン「ブロックとデコードキャッシュ」](../design/execution-engine.md#ブロックとデコードキャッシュ) |
+| GAP-0029 | 代替 | [ISA 記述言語（ISADL）「実行モード」](../design/isa-description.md#実行モード) |
+| GAP-0030 | 未着手 | [検証戦略「8. 実行の差分テスト」](../design/testing.md#8-実行の差分テスト) |
+| GAP-0031 | 未着手 | [検証戦略「11. 決定性のテスト」](../design/testing.md#11-決定性のテスト) |
+| GAP-0032 | 代替 | [ユーザーモード「ゲスト ABI」](../design/user-mode.md#ゲスト-abi) |

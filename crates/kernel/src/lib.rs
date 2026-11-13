@@ -569,6 +569,7 @@ mod tests {
 
 /// 開いたファイルの表。ゲスト fd 3 以降に対応し、ホストパスを覚える。
 /// 標準入出力 (0/1/2) は含まない。パイプ端の表とは別であり、呼び出し側で番号を揃える。
+// Gap: GAP-0025
 #[derive(Debug, Default)]
 pub struct FdTable {
     files: Vec<Option<std::fs::File>>,

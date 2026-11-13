@@ -1,6 +1,6 @@
 // Copyright (c) polyisa contributors
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! x86 最小の実行ループ（`cli run` の x86 版）。ゲストメモリからフェッチし、デコードして意味論を実行する。
+//! x86 の実行ループ（`cli run` の x86 版）。ゲストメモリからフェッチし、デコードして意味論を実行する。
 //!
 //! 可変長（1〜5バイト）の入口と eip の進行を受け持つ。imm32/disp32 は
 //! リトルエンディアンの実バイト列から復元する（ISADL の word 組立は

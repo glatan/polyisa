@@ -84,6 +84,7 @@ pub fn neg_errno64(n: u32) -> u64 {
 }
 
 /// 1 回のシステムコールで共通に使う値。
+// Gap: GAP-0032
 pub struct SysCtx {
     pub r_a: Gpr,
     pub r_b: Gpr,
@@ -117,7 +118,9 @@ impl SysCtx {
     }
 }
 
-/// socket 系。段階 C までの暫定で常に EPERM。失敗形のアプレット合わせに使う。
+/// socket 系。[ユーザーモード](../../../docs/design/user-mode.md) の
+/// 「Linux のシステムコールの実装の段階」の段階 5（ネットワークと待ち合わせ）までの
+/// 暫定で常に EPERM。失敗形のアプレット合わせに使う。
 pub fn sys_socket(env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     set64(env, Gpr(0), cx.neg(EPERM));
     Some(TrapOutcome::Handled)
@@ -297,6 +300,7 @@ pub fn sys_reboot(env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
 }
 
 pub fn sys_rt_sigaction(env: &mut BareEnv, _cx: &SysCtx) -> Option<TrapOutcome> {
+    // Gap: GAP-0026
     // シグナルハンドラ設定は無視して 0 を返す (試作はシグナルなし).
     set64(env, Gpr(0), 0);
     Some(TrapOutcome::Handled)
@@ -309,13 +313,13 @@ pub fn sys_rt_sigprocmask(env: &mut BareEnv, _cx: &SysCtx) -> Option<TrapOutcome
 }
 
 pub fn sys_rt_sigsuspend(env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // シグナル待ちはせず EINTR を返す。本格は段階 B。
+    // シグナル待ちはせず EINTR を返す。本格は GAP-0026 のシグナル機構の実装時。
     set64(env, Gpr(0), cx.neg(EINTR));
     Some(TrapOutcome::Handled)
 }
 
 pub fn sys_rt_sigtimedwait(env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // 待ち受けはせず、期限切れとして EAGAIN を返す。init が呼ぶ。本格は段階 B。
+    // 待ち受けはせず、期限切れとして EAGAIN を返す。init が呼ぶ。本格は GAP-0026。
     set64(env, Gpr(0), cx.neg(EAGAIN));
     Some(TrapOutcome::Handled)
 }
