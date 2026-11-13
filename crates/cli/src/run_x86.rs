@@ -11974,35 +11974,29 @@ fn sys_mmap(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOu
     Some(TrapOutcome::Handled)
 }
 
-/// ゲストのプロセス識別子。未登録ならプロセス表へ載せる。
-fn guest_pid(sys: &mut CliLinux) -> u64 {
-    sys.ensure_self().0
+fn sys_set_tid_address(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    let me = sys.ensure_self().0;
+    polyisa_os_linux::x86::sys_set_tid_address(me, env, cx)
 }
 
-fn sys_set_tid_address(sys: &mut CliLinux, env: &mut BareEnv, _cx: &SysCtx) -> Option<TrapOutcome> {
-    // 本物は clear_child_tid を記録し終了時に書き込む。試作は識別子の返却だけを行う。
-    // 単一スレッドなので tid は pid と同じ値である。
-    set64(env, Gpr(0), guest_pid(sys));
-    Some(TrapOutcome::Handled)
+fn sys_gettid(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    let me = sys.ensure_self().0;
+    polyisa_os_linux::x86::sys_gettid(me, env, cx)
 }
 
-fn sys_gettid(sys: &mut CliLinux, env: &mut BareEnv, _cx: &SysCtx) -> Option<TrapOutcome> {
-    // 単一スレッドなので tid は pid と同じ値である。
-    set64(env, Gpr(0), guest_pid(sys));
-    Some(TrapOutcome::Handled)
+fn sys_getpid(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    let me = sys.ensure_self().0;
+    polyisa_os_linux::x86::sys_getpid(me, env, cx)
 }
 
-fn sys_getpid(sys: &mut CliLinux, env: &mut BareEnv, _cx: &SysCtx) -> Option<TrapOutcome> {
-    set64(env, Gpr(0), guest_pid(sys));
-    Some(TrapOutcome::Handled)
-}
-
-fn sys_getppid(sys: &mut CliLinux, env: &mut BareEnv, _cx: &SysCtx) -> Option<TrapOutcome> {
-    // 根は親がいないので 0。fork 後の子は親の識別子を返す。
-    let me = sys.ensure_self();
-    let ppid = sys.procs.borrow().parent_of(me).map(|id| id.0).unwrap_or(0);
-    set64(env, Gpr(0), ppid);
-    Some(TrapOutcome::Handled)
+fn sys_getppid(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    let me = sys.ensure_self().0;
+    let borrowed = sys.procs.borrow();
+    polyisa_os_linux::x86::sys_getppid(&borrowed, me, env, cx)
 }
 
 fn sys_sysinfo(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
@@ -12239,35 +12233,17 @@ fn sys_syslog(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Tra
 }
 
 fn sys_setpgid(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    let pid = get64(env, cx.r_a) as i64;
-    let pgid = get64(env, cx.r_b) as i64;
-    if pid < 0 || pgid < 0 {
-        set64(env, Gpr(0), cx.neg(EINVAL));
-        return Some(TrapOutcome::Handled);
-    }
-    let me = sys.ensure_self();
-    let target = polyisa_kernel::ProcessId(if pid == 0 { me.0 } else { pid as u64 });
-    let group = if pgid == 0 { target.0 } else { pgid as u64 };
-    if sys.procs.borrow().pgid(target).is_none() {
-        set64(env, Gpr(0), cx.neg(ESRCH));
-        return Some(TrapOutcome::Handled);
-    }
-    if !sys.procs.borrow().owns(me, target) {
-        set64(env, Gpr(0), cx.neg(EPERM));
-        return Some(TrapOutcome::Handled);
-    }
-    sys.procs.borrow_mut().set_pgid(target, group);
-    set64(env, Gpr(0), 0);
-    Some(TrapOutcome::Handled)
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    let me = sys.ensure_self().0;
+    let mut borrowed = sys.procs.borrow_mut();
+    polyisa_os_linux::x86::sys_setpgid(&mut borrowed, me, env, cx)
 }
 
-fn sys_setsid(sys: &mut CliLinux, env: &mut BareEnv, _cx: &SysCtx) -> Option<TrapOutcome> {
-    // setsid()。自分をプロセスグループの先頭にし、その番号を返す。
-    // setsid echo が先にこれを呼ぶ。Ref: SRC-LINUX (7.3).
-    let me = sys.ensure_self();
-    let _ = sys.procs.borrow_mut().set_pgid(me, me.0);
-    set64(env, Gpr(0), me.0);
-    Some(TrapOutcome::Handled)
+fn sys_setsid(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    let me = sys.ensure_self().0;
+    let mut borrowed = sys.procs.borrow_mut();
+    polyisa_os_linux::x86::sys_setsid(&mut borrowed, me, env, cx)
 }
 
 fn sys_getpriority(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
@@ -12338,51 +12314,9 @@ fn sys_sched_setaffinity(
     env: &mut BareEnv,
     cx: &SysCtx,
 ) -> Option<TrapOutcome> {
-    // sched_setaffinity(pid, len, mask)。空集合と、ホストに無い CPU は EINVAL。
-    // CPU は実際には固定しない。taskset が続けて exec できるように 0 を返す。
-    // Ref: SRC-LINUX (7.3).
-    let pid = get64(env, cx.r_a);
-    let len = get64(env, cx.r_b);
-    let mask = get64(env, cx.r_c);
-    let me = guest_pid(sys);
-    if pid != 0 && pid != me {
-        set64(env, Gpr(0), cx.neg(ESRCH));
-        return Some(TrapOutcome::Handled);
-    }
-    const MAX_MASK: u64 = 65536;
-    if len == 0 || !len.is_multiple_of(8) || len > MAX_MASK || mask == 0 {
-        set64(env, Gpr(0), cx.neg(EINVAL));
-        return Some(TrapOutcome::Handled);
-    }
-    let mut buf = vec![0u8; len as usize];
-    if env
-        .backend
-        .mem
-        .read(polyisa_mem::VirtAddr(mask), &mut buf, data_access())
-        .is_err()
-    {
-        set64(env, Gpr(0), cx.neg(EFAULT));
-        return Some(TrapOutcome::Handled);
-    }
-    let host = host_affinity_mask();
-    let mut any = false;
-    for (i, byte) in buf.iter().enumerate() {
-        if *byte == 0 {
-            continue;
-        }
-        any = true;
-        let allowed = host.get(i).copied().unwrap_or(0);
-        if byte & !allowed != 0 {
-            set64(env, Gpr(0), cx.neg(EINVAL));
-            return Some(TrapOutcome::Handled);
-        }
-    }
-    if !any {
-        set64(env, Gpr(0), cx.neg(EINVAL));
-        return Some(TrapOutcome::Handled);
-    }
-    set64(env, Gpr(0), 0);
-    Some(TrapOutcome::Handled)
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    let me = sys.ensure_self().0;
+    polyisa_os_linux::x86::sys_sched_setaffinity(me, env, cx)
 }
 
 fn sys_sched_get_priority_max(
@@ -12436,18 +12370,10 @@ fn sys_sched_getparam(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Opt
 }
 
 fn sys_getpgid(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    let pid = get64(env, cx.r_a) as i64;
-    if pid < 0 {
-        set64(env, Gpr(0), cx.neg(EINVAL));
-        return Some(TrapOutcome::Handled);
-    }
-    let me = sys.ensure_self();
-    let target = polyisa_kernel::ProcessId(if pid == 0 { me.0 } else { pid as u64 });
-    match sys.procs.borrow().pgid(target) {
-        Some(pgid) => set64(env, Gpr(0), pgid),
-        None => set64(env, Gpr(0), cx.neg(ESRCH)),
-    }
-    Some(TrapOutcome::Handled)
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    let me = sys.ensure_self().0;
+    let borrowed = sys.procs.borrow();
+    polyisa_os_linux::x86::sys_getpgid(&borrowed, me, env, cx)
 }
 
 fn sys_kill(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
@@ -13053,99 +12979,14 @@ fn sys_nanosleep(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<
 }
 
 /// `/proc/self/status` の `Cpus_allowed` を、CPU 0 が最下位ビットのバイト列にする。
-/// 長さは 8 の倍数に揃える。読めなければ CPU 0 だけを立てる。
-fn host_affinity_mask() -> Vec<u8> {
-    let fallback = vec![1, 0, 0, 0, 0, 0, 0, 0];
-    let Ok(text) = std::fs::read_to_string("/proc/self/status") else {
-        return fallback;
-    };
-    let Some(line) = text
-        .lines()
-        .find(|l| l.starts_with("Cpus_allowed:") && !l.starts_with("Cpus_allowed_list:"))
-    else {
-        return fallback;
-    };
-    let rest = line.split_once(':').map(|(_, r)| r.trim()).unwrap_or("");
-    let groups: Vec<&str> = rest
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .collect();
-    if groups.is_empty() {
-        return fallback;
-    }
-    let mut bytes = Vec::new();
-    let mut bit_at = 0u32;
-    for (from_low, group) in groups.iter().rev().enumerate() {
-        let Ok(val) = u32::from_str_radix(group, 16) else {
-            return fallback;
-        };
-        let width = if from_low + 1 < groups.len() {
-            32
-        } else {
-            group.len().saturating_mul(4).max(1) as u32
-        };
-        for b in 0..width {
-            if (val >> b) & 1 == 1 {
-                let idx = bit_at + b;
-                let byte = (idx / 8) as usize;
-                if bytes.len() <= byte {
-                    bytes.resize(byte + 1, 0);
-                }
-                bytes[byte] |= 1 << (idx % 8);
-            }
-        }
-        bit_at += width;
-    }
-    if bytes.is_empty() {
-        return fallback;
-    }
-    while bytes.len() % 8 != 0 {
-        bytes.push(0);
-    }
-    bytes
-}
-
 fn sys_sched_getaffinity(
     sys: &mut CliLinux,
     env: &mut BareEnv,
     cx: &SysCtx,
 ) -> Option<TrapOutcome> {
-    // sched_getaffinity(pid, cpusetsize, mask)。
-    // 生の戻り値はコピーしたバイト数。musl は残りを 0 にして利用者へは 0 を返す。
-    // 0 を返すとマスク全体が消えるので、バイト数を返す。nproc がビットを数える。
-    // Ref: SRC-LINUX (7.3).
-    let pid = get64(env, cx.r_a);
-    let len = get64(env, cx.r_b);
-    let mask = get64(env, cx.r_c);
-    let me = guest_pid(sys);
-    if pid != 0 && pid != me {
-        set64(env, Gpr(0), cx.neg(ESRCH));
-        return Some(TrapOutcome::Handled);
-    }
-    // nproc は 0x2000 バイトを渡す。それより大きい要求は受けない。
-    const MAX_MASK: u64 = 65536;
-    if len == 0 || !len.is_multiple_of(8) || len > MAX_MASK || mask == 0 {
-        set64(env, Gpr(0), cx.neg(EINVAL));
-        return Some(TrapOutcome::Handled);
-    }
-    let affinity = host_affinity_mask();
-    let highest = affinity.iter().rposition(|b| *b != 0).unwrap_or(0) as u64;
-    if highest >= len {
-        set64(env, Gpr(0), cx.neg(EINVAL));
-        return Some(TrapOutcome::Handled);
-    }
-    // 戻り値はカーネルと同じくマスクのバイト数。バッファの残りは 0 にする。
-    // 呼び出し側が戻り値を見ずに len バイトを数えるため。
-    let ret = (affinity.len() as u64).min(len);
-    let mut buf = vec![0u8; len as usize];
-    let n = affinity.len().min(len as usize);
-    buf[..n].copy_from_slice(&affinity[..n]);
-    if env.backend.mem.write(VirtAddr(mask), &buf).is_err() {
-        return Some(TrapOutcome::Unimplemented);
-    }
-    set64(env, Gpr(0), ret);
-    Some(TrapOutcome::Handled)
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    let me = sys.ensure_self().0;
+    polyisa_os_linux::x86::sys_sched_getaffinity(me, env, cx)
 }
 
 fn sys_clock_nanosleep(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
@@ -15714,7 +15555,7 @@ mod tests {
         use polyisa_os_linux::x86_64 as abi;
         let mut sys = CliLinux::x86_64();
         let mut env = bare();
-        let want = host_affinity_mask();
+        let want = polyisa_os_linux::x86::host_affinity_mask();
         // sched_getaffinity(0, 128, 0x200) はホストのマスクを書き、バイト数を返す。
         set64(&mut env, Gpr(0), abi::SCHED_GETAFFINITY);
         set64(&mut env, Gpr(7), 0);

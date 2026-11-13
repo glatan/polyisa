@@ -9,7 +9,7 @@
 
 use polyisa_engine::bare::BareEnv;
 use polyisa_guest_x86::sem::Gpr;
-use polyisa_kernel::FdTable;
+use polyisa_kernel::{FdTable, ProcessId, ProcessTable};
 use polyisa_mem::{Access, AccessKind, Align, Endian, VirtAddr};
 use polyisa_sem::Backend;
 
@@ -1887,4 +1887,219 @@ pub fn sys_unlinkat(
             TrapOutcome::Handled
         }
     })
+}
+pub fn host_affinity_mask() -> Vec<u8> {
+    let fallback = vec![1, 0, 0, 0, 0, 0, 0, 0];
+    let Ok(text) = std::fs::read_to_string("/proc/self/status") else {
+        return fallback;
+    };
+    let Some(line) = text
+        .lines()
+        .find(|l| l.starts_with("Cpus_allowed:") && !l.starts_with("Cpus_allowed_list:"))
+    else {
+        return fallback;
+    };
+    let rest = line.split_once(':').map(|(_, r)| r.trim()).unwrap_or("");
+    let groups: Vec<&str> = rest
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if groups.is_empty() {
+        return fallback;
+    }
+    let mut bytes = Vec::new();
+    let mut bit_at = 0u32;
+    for (from_low, group) in groups.iter().rev().enumerate() {
+        let Ok(val) = u32::from_str_radix(group, 16) else {
+            return fallback;
+        };
+        let width = if from_low + 1 < groups.len() {
+            32
+        } else {
+            group.len().saturating_mul(4).max(1) as u32
+        };
+        for b in 0..width {
+            if (val >> b) & 1 == 1 {
+                let idx = bit_at + b;
+                let byte = (idx / 8) as usize;
+                if bytes.len() <= byte {
+                    bytes.resize(byte + 1, 0);
+                }
+                bytes[byte] |= 1 << (idx % 8);
+            }
+        }
+        bit_at += width;
+    }
+    if bytes.is_empty() {
+        return fallback;
+    }
+    while bytes.len() % 8 != 0 {
+        bytes.push(0);
+    }
+    bytes
+}
+pub fn sys_getpid(me: u64, env: &mut BareEnv, _cx: &SysCtx) -> Option<TrapOutcome> {
+    set64(env, Gpr(0), me);
+    Some(TrapOutcome::Handled)
+}
+pub fn sys_gettid(me: u64, env: &mut BareEnv, _cx: &SysCtx) -> Option<TrapOutcome> {
+    // 単一スレッドなので tid は pid と同じ値である。
+    set64(env, Gpr(0), me);
+    Some(TrapOutcome::Handled)
+}
+pub fn sys_set_tid_address(me: u64, env: &mut BareEnv, _cx: &SysCtx) -> Option<TrapOutcome> {
+    // 本物は clear_child_tid を記録し終了時に書き込む。試作は識別子の返却だけを行う。
+    // 単一スレッドなので tid は pid と同じ値である。
+    set64(env, Gpr(0), me);
+    Some(TrapOutcome::Handled)
+}
+pub fn sys_getppid(
+    procs: &ProcessTable,
+    me: u64,
+    env: &mut BareEnv,
+    _cx: &SysCtx,
+) -> Option<TrapOutcome> {
+    // 根は親がいないので 0。fork 後の子は親の識別子を返す。
+    let ppid = procs.parent_of(ProcessId(me)).map(|id| id.0).unwrap_or(0);
+    set64(env, Gpr(0), ppid);
+    Some(TrapOutcome::Handled)
+}
+pub fn sys_getpgid(
+    procs: &ProcessTable,
+    me: u64,
+    env: &mut BareEnv,
+    cx: &SysCtx,
+) -> Option<TrapOutcome> {
+    let pid = get64(env, cx.r_a) as i64;
+    if pid < 0 {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    let target = ProcessId(if pid == 0 { me } else { pid as u64 });
+    match procs.pgid(target) {
+        Some(pgid) => set64(env, Gpr(0), pgid),
+        None => set64(env, Gpr(0), cx.neg(ESRCH)),
+    }
+    Some(TrapOutcome::Handled)
+}
+pub fn sys_setpgid(
+    procs: &mut ProcessTable,
+    me: u64,
+    env: &mut BareEnv,
+    cx: &SysCtx,
+) -> Option<TrapOutcome> {
+    let pid = get64(env, cx.r_a) as i64;
+    let pgid = get64(env, cx.r_b) as i64;
+    if pid < 0 || pgid < 0 {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    let target = ProcessId(if pid == 0 { me } else { pid as u64 });
+    let group = if pgid == 0 { target.0 } else { pgid as u64 };
+    if procs.pgid(target).is_none() {
+        set64(env, Gpr(0), cx.neg(ESRCH));
+        return Some(TrapOutcome::Handled);
+    }
+    if !procs.owns(ProcessId(me), target) {
+        set64(env, Gpr(0), cx.neg(EPERM));
+        return Some(TrapOutcome::Handled);
+    }
+    procs.set_pgid(target, group);
+    set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
+}
+pub fn sys_setsid(
+    procs: &mut ProcessTable,
+    me: u64,
+    env: &mut BareEnv,
+    _cx: &SysCtx,
+) -> Option<TrapOutcome> {
+    // setsid()。自分をプロセスグループの先頭にし、その番号を返す。
+    // setsid echo が先にこれを呼ぶ。Ref: SRC-LINUX (7.3).
+    let _ = procs.set_pgid(ProcessId(me), me);
+    set64(env, Gpr(0), me);
+    Some(TrapOutcome::Handled)
+}
+pub fn sys_sched_setaffinity(me: u64, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // sched_setaffinity(pid, len, mask)。空集合と、ホストに無い CPU は EINVAL。
+    // CPU は実際には固定しない。taskset が続けて exec できるように 0 を返す。
+    // Ref: SRC-LINUX (7.3).
+    let pid = get64(env, cx.r_a);
+    let len = get64(env, cx.r_b);
+    let mask = get64(env, cx.r_c);
+    if pid != 0 && pid != me {
+        set64(env, Gpr(0), cx.neg(ESRCH));
+        return Some(TrapOutcome::Handled);
+    }
+    const MAX_MASK: u64 = 65536;
+    if len == 0 || !len.is_multiple_of(8) || len > MAX_MASK || mask == 0 {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    let mut buf = vec![0u8; len as usize];
+    if env
+        .backend
+        .mem
+        .read(polyisa_mem::VirtAddr(mask), &mut buf, data_access())
+        .is_err()
+    {
+        set64(env, Gpr(0), cx.neg(EFAULT));
+        return Some(TrapOutcome::Handled);
+    }
+    let host = host_affinity_mask();
+    let mut any = false;
+    for (i, byte) in buf.iter().enumerate() {
+        if *byte == 0 {
+            continue;
+        }
+        any = true;
+        let allowed = host.get(i).copied().unwrap_or(0);
+        if byte & !allowed != 0 {
+            set64(env, Gpr(0), cx.neg(EINVAL));
+            return Some(TrapOutcome::Handled);
+        }
+    }
+    if !any {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
+}
+pub fn sys_sched_getaffinity(me: u64, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // sched_getaffinity(pid, cpusetsize, mask)。
+    // 生の戻り値はコピーしたバイト数。musl は残りを 0 にして利用者へは 0 を返す。
+    // 0 を返すとマスク全体が消えるので、バイト数を返す。nproc がビットを数える。
+    // Ref: SRC-LINUX (7.3).
+    let pid = get64(env, cx.r_a);
+    let len = get64(env, cx.r_b);
+    let mask = get64(env, cx.r_c);
+    if pid != 0 && pid != me {
+        set64(env, Gpr(0), cx.neg(ESRCH));
+        return Some(TrapOutcome::Handled);
+    }
+    // nproc は 0x2000 バイトを渡す。それより大きい要求は受けない。
+    const MAX_MASK: u64 = 65536;
+    if len == 0 || !len.is_multiple_of(8) || len > MAX_MASK || mask == 0 {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    let affinity = host_affinity_mask();
+    let highest = affinity.iter().rposition(|b| *b != 0).unwrap_or(0) as u64;
+    if highest >= len {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    // 戻り値はカーネルと同じくマスクのバイト数。バッファの残りは 0 にする。
+    // 呼び出し側が戻り値を見ずに len バイトを数えるため。
+    let ret = (affinity.len() as u64).min(len);
+    let mut buf = vec![0u8; len as usize];
+    let n = affinity.len().min(len as usize);
+    buf[..n].copy_from_slice(&affinity[..n]);
+    if env.backend.mem.write(VirtAddr(mask), &buf).is_err() {
+        return Some(TrapOutcome::Unimplemented);
+    }
+    set64(env, Gpr(0), ret);
+    Some(TrapOutcome::Handled)
 }
