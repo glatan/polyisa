@@ -11856,10 +11856,10 @@ fn sys_writev(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<Trap
     let fd = get64(env, cx.r_a) as u32;
     let iov = get64(env, cx.r_b);
     let iovcnt = get64(env, cx.r_c);
-    // 付け替えた標準 fd は読取り専用のため EBADF。
-    if fd < 3 && sys.std_files[fd as usize].is_some() {
-        set64(env, Gpr(0), cx.neg(EBADF));
-        return Some(TrapOutcome::Handled);
+    // 付け替えた標準 fd への writev は開ファイルへ書く（sys_write と同じ）。
+    // 読取り専用で開いた場合は writev_opened が EBADF を返す。
+    if (fd == 1 || fd == 2) && sys.std_files[fd as usize].is_some() {
+        return writev_opened(sys, env, cx, fd, iov, iovcnt);
     }
     if fd != 1 && fd != 2 {
         return writev_opened(sys, env, cx, fd, iov, iovcnt);
