@@ -12283,33 +12283,38 @@ fn sys_setitimer(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<
 }
 
 fn sys_socket(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // socket 系。段階 C までの暫定で常に EPERM。失敗形のアプレット合わせに使う。
-    set64(env, Gpr(0), cx.neg(EPERM));
-    Some(TrapOutcome::Handled)
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    polyisa_os_linux::x86::sys_socket(env, cx)
 }
 
-fn sys_socketpair(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    sys_socket(sys, env, cx)
+fn sys_socketpair(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    polyisa_os_linux::x86::sys_socketpair(env, cx)
 }
 
-fn sys_bind(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    sys_socket(sys, env, cx)
+fn sys_bind(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    polyisa_os_linux::x86::sys_bind(env, cx)
 }
 
-fn sys_connect(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    sys_socket(sys, env, cx)
+fn sys_connect(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    polyisa_os_linux::x86::sys_connect(env, cx)
 }
 
-fn sys_sendto(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    sys_socket(sys, env, cx)
+fn sys_sendto(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    polyisa_os_linux::x86::sys_sendto(env, cx)
 }
 
-fn sys_recvfrom(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    sys_socket(sys, env, cx)
+fn sys_recvfrom(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    polyisa_os_linux::x86::sys_recvfrom(env, cx)
 }
 
-fn sys_getsockname(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    sys_socket(sys, env, cx)
+fn sys_getsockname(_sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    polyisa_os_linux::x86::sys_getsockname(env, cx)
 }
 
 fn sys_setxattr(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {

@@ -10,6 +10,8 @@
 use polyisa_engine::bare::BareEnv;
 use polyisa_guest_x86::sem::Gpr;
 
+use super::TrapOutcome;
+
 /// Linux 汎用の errno 番号の一部。負数で返す。
 // Ref: SRC-LINUX (7.3).
 pub const EPERM: u32 = 1;
@@ -77,4 +79,40 @@ impl SysCtx {
             u64::from(neg_errno(n))
         }
     }
+}
+
+/// socket 系。段階 C までの暫定で常に EPERM。失敗形のアプレット合わせに使う。
+pub fn sys_socket(env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    set64(env, Gpr(0), cx.neg(EPERM));
+    Some(TrapOutcome::Handled)
+}
+
+/// socketpair。`sys_socket` に委ねる。
+pub fn sys_socketpair(env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    sys_socket(env, cx)
+}
+
+/// bind。`sys_socket` に委ねる。
+pub fn sys_bind(env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    sys_socket(env, cx)
+}
+
+/// connect。`sys_socket` に委ねる。
+pub fn sys_connect(env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    sys_socket(env, cx)
+}
+
+/// sendto。`sys_socket` に委ねる。
+pub fn sys_sendto(env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    sys_socket(env, cx)
+}
+
+/// recvfrom。`sys_socket` に委ねる。
+pub fn sys_recvfrom(env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    sys_socket(env, cx)
+}
+
+/// getsockname。`sys_socket` に委ねる。
+pub fn sys_getsockname(env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    sys_socket(env, cx)
 }
