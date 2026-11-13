@@ -1388,3 +1388,85 @@ pub fn sys_personality(state: &mut u64, env: &mut BareEnv, cx: &SysCtx) -> Optio
     set64(env, Gpr(0), old);
     Some(TrapOutcome::Handled)
 }
+
+/// 入出力優先度の保持値。未設定時は best-effort 4 を返す。
+#[derive(Clone, Copy, Debug, Default)]
+pub struct IoPriority {
+    pub prio: u32,
+    pub known: bool,
+}
+
+pub fn ioprio_ok(prio: u64) -> bool {
+    if prio > 0xffff {
+        return false;
+    }
+    let class = prio >> 13;
+    let data = prio & 0x1fff;
+    match class {
+        0 => data == 0,
+        1 | 2 => data <= 7,
+        3 => true,
+        _ => false,
+    }
+}
+
+pub fn ioprio_target_ok(which: u64, who: i64, me: u64) -> Result<(), u32> {
+    if !(1..=3).contains(&which) {
+        return Err(EINVAL);
+    }
+    let me = me as i64;
+    if which == 1 && who != 0 && who != me {
+        return Err(ESRCH);
+    }
+    if which != 1 && who != 0 {
+        return Err(ESRCH);
+    }
+    Ok(())
+}
+
+/// ioprio_set(which, who, ioprio)。入出力の優先度は変えず、範囲だけ確かめる。
+/// Ref: SRC-LINUX (7.3).
+pub fn sys_ioprio_set(
+    io: &mut IoPriority,
+    me: u64,
+    env: &mut BareEnv,
+    cx: &SysCtx,
+) -> Option<TrapOutcome> {
+    let which = get64(env, cx.r_a);
+    let who = get64(env, cx.r_b) as i64;
+    let prio = get64(env, cx.r_c);
+    if let Err(err) = ioprio_target_ok(which, who, me) {
+        set64(env, Gpr(0), cx.neg(err));
+        return Some(TrapOutcome::Handled);
+    }
+    if !ioprio_ok(prio) {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    io.prio = prio as u32;
+    io.known = true;
+    set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
+}
+
+/// ioprio_get(which, who)。未設定なら best-effort の 4。
+pub fn sys_ioprio_get(
+    io: &IoPriority,
+    me: u64,
+    env: &mut BareEnv,
+    cx: &SysCtx,
+) -> Option<TrapOutcome> {
+    let which = get64(env, cx.r_a);
+    let who = get64(env, cx.r_b) as i64;
+    if let Err(err) = ioprio_target_ok(which, who, me) {
+        set64(env, Gpr(0), cx.neg(err));
+        return Some(TrapOutcome::Handled);
+    }
+    let prio = if io.known {
+        u64::from(io.prio)
+    } else {
+        (2 << 13) | 4
+    };
+    set64(env, Gpr(0), prio);
+    Some(TrapOutcome::Handled)
+}

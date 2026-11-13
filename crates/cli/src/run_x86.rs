@@ -12324,70 +12324,27 @@ fn sys_personality(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option
     r
 }
 
-/// クラス 0 は data 0、RT/BE は 0..=7、IDLE は data を問わない。
-fn ioprio_ok(prio: u64) -> bool {
-    if prio > 0xffff {
-        return false;
-    }
-    let class = prio >> 13;
-    let data = prio & 0x1fff;
-    match class {
-        0 => data == 0,
-        1 | 2 => data <= 7,
-        3 => true,
-        _ => false,
-    }
-}
-
-fn ioprio_target_ok(sys: &mut CliLinux, which: u64, who: i64) -> Result<(), u32> {
-    if !(1..=3).contains(&which) {
-        return Err(EINVAL);
-    }
-    let me = guest_pid(sys) as i64;
-    if which == 1 && who != 0 && who != me {
-        return Err(ESRCH);
-    }
-    if which != 1 && who != 0 {
-        return Err(ESRCH);
-    }
-    Ok(())
-}
-
 fn sys_ioprio_set(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // ioprio_set(which, who, ioprio)。入出力の優先度は変えず、範囲だけ確かめる。
-    // Ref: SRC-LINUX (7.3).
-    let which = get64(env, cx.r_a);
-    let who = get64(env, cx.r_b) as i64;
-    let prio = get64(env, cx.r_c);
-    if let Err(err) = ioprio_target_ok(sys, which, who) {
-        set64(env, Gpr(0), cx.neg(err));
-        return Some(TrapOutcome::Handled);
-    }
-    if !ioprio_ok(prio) {
-        set64(env, Gpr(0), cx.neg(EINVAL));
-        return Some(TrapOutcome::Handled);
-    }
-    sys.ioprio = prio as u32;
-    sys.ioprio_known = true;
-    set64(env, Gpr(0), 0);
-    Some(TrapOutcome::Handled)
+    // ioprio_set(which, who, ioprio)。実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    let me = sys.ensure_self().0;
+    let mut io = polyisa_os_linux::x86::IoPriority {
+        prio: sys.ioprio,
+        known: sys.ioprio_known,
+    };
+    let r = polyisa_os_linux::x86::sys_ioprio_set(&mut io, me, env, cx);
+    sys.ioprio = io.prio;
+    sys.ioprio_known = io.known;
+    r
 }
 
 fn sys_ioprio_get(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // ioprio_get(which, who)。未設定なら best-effort の 4。
-    let which = get64(env, cx.r_a);
-    let who = get64(env, cx.r_b) as i64;
-    if let Err(err) = ioprio_target_ok(sys, which, who) {
-        set64(env, Gpr(0), cx.neg(err));
-        return Some(TrapOutcome::Handled);
-    }
-    let prio = if sys.ioprio_known {
-        u64::from(sys.ioprio)
-    } else {
-        (2 << 13) | 4
+    // ioprio_get(which, who)。実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    let me = sys.ensure_self().0;
+    let io = polyisa_os_linux::x86::IoPriority {
+        prio: sys.ioprio,
+        known: sys.ioprio_known,
     };
-    set64(env, Gpr(0), prio);
-    Some(TrapOutcome::Handled)
+    polyisa_os_linux::x86::sys_ioprio_get(&io, me, env, cx)
 }
 
 fn sys_fsync(sys: &mut CliLinux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
