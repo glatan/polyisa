@@ -256,6 +256,7 @@ dependencies = [
  "polyisa-guest-x86",
  "polyisa-kernel",
  "polyisa-loader",
+ "polyisa-sem",
 ]
 
 [[package]]
