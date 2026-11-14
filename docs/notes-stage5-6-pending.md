@@ -1,8 +1,119 @@
 # 段階 5・6 作業メモ（ユーザー確認待ち）
 
-段階 5（MIPS 本実装）の作業中に持ち越した確認事項と未完了の作業。
+段階 5（MIPS 本実装）と段階 6（AArch64）の作業で、所有者の確認・判断を
+待っている事項を一か所にまとめた一覧。番号は確認待ち全体で通しである。
+完了した作業と検証の記録は後半に残す。
 
-## 完了した作業
+## 確認待ち
+
+### 台帳の「確認」欄（所有者のみが埋められる）
+
+1. **BIN-DISTRO-AARCH64**: Alpine minirootfs 3.21.9 aarch64（musl +
+   BusyBox 1.37.0、動的リンク一式）を `.testdata/bin-distro-aarch64` に
+   配置済みで `heavy_program_aarch64` が使用する。台帳には登録したが
+   確認欄は空欄。取得手順の manifest 化は未取得定義（git clone 形式の
+   定義しかないため、tarball 系の取得は定義の拡張か手順書が要る）。
+2. **SPEC-MIPS32R2 / SPEC-MIPS64**: r2 拡張（ext/ins/seb 等）と
+   MIPS64r2 拡張（dext/dins/dsbh 等）の一次根拠として台帳に未確認登録済み。
+   条文確認は所有者の仕事。
+3. **SPEC-MIPS-ABI-N32**: n32/n64 ABI の一次根拠。台帳に未確認のまま。
+
+### 所有者の作業
+
+4. **`stage-6` タグ**: 段階の完了は注釈付きタグ `stage-6` で表す規約
+   （dev-workflow「検証の記録」）。`stage-4` は所有者が付けており、
+   メッセージに検証記録と所有者の確認を書く形式のため、エージェント側は
+   作成していない。メッセージに転記する検証結果は後半の
+   「検証記録（段階6）」に残す。
+
+### 仕様・設計の判断
+
+5. **`--root` 時の ELF パス解釈**: 実行対象のパスをゲスト名前空間として
+   解決する実装にした（chroot と同じ規則。`resolve_guest_path_links`）。
+   ホストパスで渡す呼び方とは互換でない点に注意。x86/mips は `--root`
+   未対応のため影響なし。この解釈で確定してよいか。
+6. **重いテストのバイナリ命名**: oracle 系の重いテストバイナリ名は
+   `heavy_oracle_llvm` で各パッケージ共通とした。roadmap の S7-以降の
+   命名（`heavy_oracle_arm` 等）はその段階でこの規約に揃えるか、
+   個別名を採るか。
+7. **R6 コンパクト分岐の 2R 形式の `rs>rt`**: BLEZ/BGTZ/BLEZL/BGTZL 群の
+   2R 命令（BGEUC/BLTUC/BGEC/BLTC）は、`rs!=0 && rs!=rt` をすべて受ける。
+   SPEC-MIPS-R6 の符号化表では `rs>rt` が予約の可能性があり、QEMU は寛容に
+   受理する（本実装も同じ）。仕様書の条文で `rs>rt` が予約ならデコードで
+   落とすよう厳格化するか判断したい。
+8. **o32 `mmap` の旧引数順**: o32 の mmap（番号 90）は fd/offset を
+   スタック引数で受ける。実装は `args[4]`/`args[5]`（スタック経由）と
+   してあるが、glibc の実使用は `mmap2`（210）。旧 mmap の挙動差異は
+   テスト不足。
+9. **`do_statfs` の中身**: MIPS の `statfs` 構造体は 120B でレイアウト固有。
+   現状は最小限（f_type=EXT2、bsize=4096 等）のみ。
+10. **`polyisa-host` の OS 依存 API**: `Stat`/`pread`/`pwrite`/`dirent_ino`/
+    `symlink` を host クレートに集約した（cfg 規則対応）。`std::os::unix`
+    を `os-linux` で使わない方針でよいか確認したい（x86 側は `std::fs` の
+    portable API のみで stat を組み立てている）。
+11. **`lui` の厳格化の緩和**: LUI の rs フィールドは 00000 固定が正しい
+    （旧実装は任意値を許容していたため修正）。pre-R6 で rs!=0 の 001111 は
+    LUI ではなく予約として扱うようになった。実シリコンの受理挙動と異なる
+    可能性は低いが、互換性のために緩めたい場合は別途検討する。
+12. **R6 オプション命令の範囲**: LLWP/SCWP（ペア LL/SC、特定コアのみ）と
+    LLE/SCE（EVA 版、ユーザモードでは LL/SC と同義）は実装していない。
+    実シリコン依存の拡張のため今回の範囲外とした。必要なら別途追加する。
+
+### 未完了・保留の作業
+
+13. **スタック成長（aarch64）**: 現状は固定 1 MiB を先行確保
+    （`run_aarch64.rs`）。ページフォルト駆動の成長
+    （fault → TrapHandler 経路）は未実装。容量の適性と成長方式の
+    設計判断を要する。
+14. **FP/AdvSIMD の残り（aarch64）**: musl の動的リンクが要求した
+    部分集合のみ実装。それ以外の FP/AdvSIMD 命令は未実装。
+    必要になった時点で台帳とともに追加する。
+15. **BE エンディアン（aarch64）**: FEAT_BE 宣言のみ。データフェッチ/
+    ロードストアのエンディアン切替と ELF の EI_DATA 確認は未接続
+    （現状 LE 固定・BE 拒否）。
+16. **MRS/MSR の ID レジスタ（aarch64）**: MRS/MSR の枠は実装済み。
+    `DCZID_EL0` は DZP=1（`dc zva` 不可）を返して musl の zva 経路を
+    回避させている。ID_AA64 系の個別値は未整備（実装した機能に応じた
+    値の台帳が要る）。
+17. **busybox の MIPS 版・n32/n64 の実バイナリ検証**: `heavy_program_mips`
+    は裸 ELF（write/exit のみ）。dist コマンド実行は `.testdata` に
+    MIPS 版の配布物がないため未実行。n32/n64 の ELF も同様に実バイナリ
+    での検証がない。使う配布物の選定と台帳への登録が先決。
+
+## 解消済み（記録）
+
+- **`MIPS_O32_SYSCALLS` の後継**: status 生成が `mips_o32.rs` 等の
+  `SYSCALLS` 表を読むように変更した。`syscall_entry_name` は
+  `(nr, "name")` 形も受理するよう拡張済み。aarch64 も同じ表形式に揃えた。
+- **`MipsModel::is64` の扱い**: `--cpu mips64r2`/`mips64r6` と
+  EF_MIPS_ARCH からの自動選択で is64 モデルが選べる。n32/n64 の ELF は
+  `abi_from_elf` が ABI を選び is64 モデルを要求する。
+- **`rv32ud_p_move` の除外**: `test:full` で唯一失敗していた。上流
+  riscv-tests の `rv32ud/Makefrag` は `move`（と `structural`）を
+  rv32 向けに未実装として対象外にしており、`rv32ud/move.S` は
+  `rv64ud/move.S` を include するだけで `fmv.d.x`/`fmv.x.d` が
+  rv32g では組み立てられない。polyisa のテスト一覧から除去した
+  （上流の一覧と一致）。段階6以前からの既存失敗であり、aarch64 作業とは
+  無関係。
+
+## 検証記録（段階6）
+
+`stage-6` タグのメッセージに転記するための実行結果。
+
+- `task check`: fmt / clippy(-D warnings) / devtool check すべて ok
+- `task check:targets`: powerpc64 / i686 / wasm32 で `cargo check` 通過
+- `task doctor`: rustc/cargo 1.100.0、go-task 3.54.0、nextest 0.9.151、
+  git 2.56.1、clang・llvm-mc は重いテストの実行で確認
+- `task testdata:fetch`: TEST-RISCV-TESTS / TEST-RISCV-ARCH-TEST /
+  TEST-TESTFLOAT いずれも版が一致
+- `task test:full`: test:plan が要件を調べ `all()`（除外なし）。
+  1483 tests run: 1483 passed, 0 failed, 0 skipped（約 42 秒）
+- `task bench`: generic_vs_direct iters=200000
+  direct=38.031µs generic=55.324µs fadd=72.676µs
+
+## 完了した作業（記録）
+
+### 段階 5
 
 - **GAP-0001 解消**: MIPS の syscall 処理を `crates/cli/src/run_mips.rs` から
   `crates/os-linux/src/mips/sys.rs`（`mips::sys::Linux`、`TrapHandler` 実装）へ移管。
@@ -35,18 +146,7 @@
 - `heavy_program_mips`（4 モデル）・`heavy_timing_r3000` 通過。
   `task check`（fmt/clippy/devtool）通過。
 
-## 確認待ち・未完了（段階 5 残件）
-
-1. **`MIPS_O32_SYSCALLS` の後継**: status 生成が `mips_o32.rs` 等の `SYSCALLS` 表を
-   読むように変更した。`syscall_entry_name` は `(nr, "name")` 形も受理するよう拡張済み。
-2. **busybox の MIPS 版**: `heavy_program_mips` は裸 ELF（write/exit のみ）。
-   dist コマンド実行は `.testdata/bin-distro` に MIPS 版がないため未実行。
-   n32/n64 の ELF も同様に実バイナリでの検証がない。
-3. **R6 オプション命令は対象外**: LLWP/SCWP（ペア LL/SC、特定コアのみ）と
-   LLE/SCE（EVA 版、ユーザモードでは LL/SC と同義）は実装していない。
-   実シリコン依存の拡張のため今回の範囲外とした。必要なら別途追加する。
-
-## 段階 6 の進捗（AArch64）
+### 段階 6
 
 - **guests/aarch64**: ISADL spec（a64i.rs）と `sem.rs`。整数命令一式
   （分岐/加減算/論理/ビットフィールド/乗算/ロードストア全アドレッシング/
@@ -95,85 +195,9 @@
   ゲストルート絶対リンク・各種意味論の回帰）。
 - `SPEC-AARCH64-ELF` を確認済みに更新（2025Q4 daa7a94）。
 
-## 確認待ち・未完了（段階 6 残件）
-
-5. **スタック成長**: 現状は固定 1 MiB を先行確保（`run_aarch64.rs`）。
-   ページフォルト駆動の成長（fault → TrapHandler 経路）は未実装。
-   容量の適性と成長方式の設計判断を要する。
-6. **FP/AdvSIMD の残り**: musl の動的リンクが要求した部分集合のみ実装。
-   それ以外の FP/AdvSIMD 命令は未実装。必要になった時点で台帳とともに追加する。
-7. **BE エンディアン**: FEAT_BE 宣言のみ。データフェッチ/ロードストアの
-   エンディアン切替と ELF の EI_DATA 確認は未接続（現状 LE 固定・BE 拒否）。
-8. **MRS/MSR の ID レジスタ**: MRS/MSR の枠は実装済み。`DCZID_EL0` は
-   DZP=1（`dc zva` 不可）を返して musl の zva 経路を回避させている。
-   ID_AA64 系の個別値は未整備（実装した機能に応じた値の台帳が要る）。
-9. **BIN-DISTRO-AARCH64 の確認**: Alpine minirootfs 3.21.9 aarch64 を
-   `.testdata/bin-distro-aarch64` に配置済みで `heavy_program_aarch64` が
-   使用する。台帳には登録したが確認欄は空欄（所有者の確認待ち）。
-   取得手順の manifest 化は未取得定義（git clone 形式でないため）。
-10. **`--root` 時の ELF パス解釈**: 実行対象のパスをゲスト名前空間として
-    解決する実装にした（chroot と同じ規則）。ホストパスで渡す従来の呼び方とは
-    互換でない点に注意。x86/mips は `--root` 未対応のため影響なし。
-    oracle 系の重いテストバイナリ名は `heavy_oracle_llvm` で各パッケージ
-    共通（roadmap の S7-以降の命名 `heavy_oracle_arm` 等はその段階で揃える）。
-11. **`stage-6` タグ**: 段階の完了は注釈付きタグ `stage-6` で表す規約
-    （dev-workflow「検証の記録」）。`stage-4` は所有者が付けており、
-    メッセージに検証記録と所有者の確認を書く形式のため、エージェント側は
-    作成していない。メッセージ用の検証結果は下記「検証記録（段階6）」に残す。
-12. **`rv32ud_p_move` の除外（解消）**: `test:full` で唯一失敗していた。
-    上流 riscv-tests の `rv32ud/Makefrag` は `move`（と `structural`）を
-    rv32 向けに未実装として対象外にしており、`rv32ud/move.S` は
-    `rv64ud/move.S` を include するだけで `fmv.d.x`/`fmv.x.d` が
-    rv32g では組み立てられない。polyisa のテスト一覧から除去した
-    （上流の一覧と一致）。段階6以前からの既存失敗であり、aarch64 作業とは
-    無関係。
-
-## 検証記録（段階6）
-
-`stage-6` タグのメッセージに転記するための実行結果。
-
-- `task check`: fmt / clippy(-D warnings) / devtool check すべて ok
-- `task check:targets`: powerpc64 / i686 / wasm32 で `cargo check` 通過
-- `task doctor`: rustc/cargo 1.100.0、go-task 3.54.0、nextest 0.9.151、
-  git 2.56.1、clang・llvm-mc は重いテストの実行で確認
-- `task testdata:fetch`: TEST-RISCV-TESTS / TEST-RISCV-ARCH-TEST /
-  TEST-TESTFLOAT いずれも版が一致
-- `task test:full`: test:plan が要件を調べ `all()`（除外なし）。
-  1483 tests run: 1483 passed, 0 failed, 0 skipped（約 42 秒）
-- `task bench`: generic_vs_direct iters=200000
-  direct=38.031µs generic=55.324µs fadd=72.676µs
-
-## 確認を要する判断
-
-6. **`MipsModel::is64` の扱い（解消）**: `--cpu mips64r2`/`mips64r6` と
-   EF_MIPS_ARCH からの自動選択で is64 モデルが選べる。n32/n64 の ELF は
-   `abi_from_elf` が ABI を選び is64 モデルを要求する。実バイナリでの
-   検証は残る（上記 2 番）。
-7. **o32 `mmap` の旧引数順**: o32 の mmap（番号 90）は fd/offset をスタック引数で受ける。
-   実装は `args[4]`/`args[5]`（スタック経由）としてあるが、glibc の実使用は `mmap2`（210）。
-   旧 mmap の挙動差異はテスト不足。
-8. **`do_statfs` の中身**: MIPS の `statfs` 構造体は 120B でレイアウト固有。
-   現状は最小限（f_type=EXT2、bsize=4096 等）のみ。
-9. **`polyisa-host` の OS 依存 API**: `Stat`/`pread`/`pwrite`/`dirent_ino` を host クレートに
-   追加した（cfg 規則対応）。`std::os::unix` を `os-linux` で使わない方針でよいか確認したい
-   （x86 側は `std::fs` の portable API のみで stat を組み立てている）。
-10. **R6 コンパクト分岐の 2R 形式の `rs>rt`**: BLEZ/BGTZ/BLEZL/BGTZL 群の
-    2R 命令（BGEUC/BLTUC/BGEC/BLTC）は、`rs!=0 && rs!=rt` をすべて受ける。
-    SPEC-MIPS-R6 の符号化表では `rs>rt` が予約の可能性があり、QEMU は寛容に
-    受理する（本実装も同じ）。仕様書の条文で `rs>rt` が予約ならデコードで
-    落とすよう厳格化するか判断したい。
-11. **SPEC-MIPS32R2 / SPEC-MIPS64 の確認**: r2 拡張（ext/ins/seb 等）と
-    MIPS64r2 拡張（dext/dins/dsbh 等）の一次根拠として台帳に未確認登録済み。
-    条文確認は所有者の仕事。
-12. **lui の符号化修正**: LUI の rs フィールドは 00000 固定が正しい
-    （旧実装は任意値を許容していたため修正）。pre-R6 で rs!=0 の 001111 は
-    LUI ではなく予約として扱うようになった。実シリコンの受理挙動と異なる
-    可能性は低いが、互換性のために緩めたい場合は別途検討する。
-
 ## 参考
 
 - Linux UAPI 6.19（`syscall_o32.tbl`/`n32.tbl`/`n64.tbl`、`asm/unistd.h`）が番号表の根拠。
-- 台帳 `SPEC-MIPS-ABI-N32`（n32/n64 ABI）は未確認のまま。
 - R6 コンパクト分岐の分解規則は QEMU `gen_compute_compact_branch`
   （target/mips/tcg/translate.c）と LLVM Mips32r6InstrInfo.td の OPGROUP 表で確認した。
 - R6 の SPECIAL3 LL/SC（0x36/0x26/0x37/0x27）と DAHI/DATI/DAUI は
