@@ -46,6 +46,12 @@ pub struct CpuState {
     /// CC の読み出しはカウントレジスタの代わりにステップ数を使う。
     /// Ref: SRC-LINUX (7.3) の `arch/mips/kernel/traps.c` の HW レジスタ。
     pub hwr: [u64; 4],
+    /// branch-likely 命令が不成立だったとき 1。遅延スロットを実行せず
+    /// pc を pc+8 に進める。成立時・通常命令では 0。
+    pub nullify: u64,
+    /// 64 ビットモデルなら 1。32 ビット命令の結果は MIPS64 では
+    /// 符号拡張して GPR に置く決まりがあるため、意味論が正規化に使う。
+    pub is64: u64,
 }
 
 impl Default for CpuState {
@@ -58,6 +64,8 @@ impl Default for CpuState {
             lo: 0,
             div_zero_writes_zero: 0,
             hwr: [0; 4],
+            nullify: 0,
+            is64: 0,
         }
     }
 }
@@ -88,9 +96,9 @@ mod tests {
 
     #[test]
     fn insn_count() {
-        // MIPS I + MIPS32r2 + MIPS64 + Release 6（コンパクト分岐と
-        // EVA・語対の LL/SC 含む）。nop は sll $0,$0,0 の別名。
-        assert_eq!(INSNS.len(), 191);
+        // MIPS I + MIPS32r2 + MIPS64 + Release 6（コンパクト分岐・
+        // EVA・語対の LL/SC・branch-likely 含む）。nop は sll $0,$0,0 の別名。
+        assert_eq!(INSNS.len(), 199);
     }
 
     #[test]

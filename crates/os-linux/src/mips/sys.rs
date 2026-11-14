@@ -1736,6 +1736,8 @@ impl Linux {
             }
             // stat64 213-215 handled, fcntl64=220 handled, gettid=222 handled
             // fadvise64=223? o32 216? fadvise64=254?
+            // uname=122
+            122 => ret(self.do_uname(env, args[0])),
             // set_thread_area=283
             283 => {
                 let addr = args[0];

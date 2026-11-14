@@ -57,6 +57,16 @@ pub fn div_zero_writes_zero_ref() -> StateRef<W64> {
     StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, div_zero_writes_zero))
 }
 
+/// branch-likely の遅延スロット無効化フラグを指す。
+pub fn nullify_ref() -> StateRef<W64> {
+    StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, nullify))
+}
+
+/// 64 ビットモデルかどうかのフラグを指す。
+pub fn is64_ref() -> StateRef<W64> {
+    StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, is64))
+}
+
 /// ユーザーモードの HW レジスタ `hwr[i]` を指す（RDHWR $0〜$3）。
 pub fn hwr_ref(i: u8) -> StateRef<W64> {
     StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, hwr) + usize::from(i) * 8)
@@ -101,8 +111,7 @@ pub fn addu<B: Backend>(b: &mut B, rd: Gpr, rs: Gpr, rt: Gpr) -> Flow<B> {
     let x = read(b, rs);
     let y = read(b, rt);
     let s = b.add::<W64>(x, y);
-    let lo = b.konst::<W64>(0xffff_ffff);
-    let masked = b.and::<W64>(s, lo);
+    let masked = mask32(b, s);
     write(b, rd, masked);
     Ok(())
 }
@@ -112,8 +121,7 @@ pub fn subu<B: Backend>(b: &mut B, rd: Gpr, rs: Gpr, rt: Gpr) -> Flow<B> {
     let x = read(b, rs);
     let y = read(b, rt);
     let s = b.sub::<W64>(x, y);
-    let lo = b.konst::<W64>(0xffff_ffff);
-    let masked = b.and::<W64>(s, lo);
+    let masked = mask32(b, s);
     write(b, rd, masked);
     Ok(())
 }
@@ -141,8 +149,7 @@ pub fn sll<B: Backend>(b: &mut B, rd: Gpr, rt: Gpr, shamt: u32) -> Flow<B> {
     let y = read(b, rt);
     let n = b.konst::<W64>((shamt & 31) as u64);
     let v = b.shl::<W64>(y, n);
-    let lo = b.konst::<W64>(0xffff_ffff);
-    let masked = b.and::<W64>(v, lo);
+    let masked = mask32(b, v);
     write(b, rd, masked);
     Ok(())
 }
@@ -277,8 +284,7 @@ pub fn addi<B: Backend>(b: &mut B, rt: Gpr, rs: Gpr, imm: i32) -> Flow<B> {
     let base = read(b, rs);
     let off = b.konst::<W64>(imm as i64 as u64);
     let s = b.add::<W64>(base, off);
-    let lo = b.konst::<W64>(0xffff_ffff);
-    let masked = b.and::<W64>(s, lo);
+    let masked = mask32(b, s);
     write(b, rt, masked);
     Ok(())
 }
@@ -288,8 +294,7 @@ pub fn addiu<B: Backend>(b: &mut B, rt: Gpr, rs: Gpr, imm: i32) -> Flow<B> {
     let base = read(b, rs);
     let off = b.konst::<W64>(imm as i64 as u64);
     let s = b.add::<W64>(base, off);
-    let lo = b.konst::<W64>(0xffff_ffff);
-    let masked = b.and::<W64>(s, lo);
+    let masked = mask32(b, s);
     write(b, rt, masked);
     Ok(())
 }
@@ -397,9 +402,17 @@ fn div_zero_result<B: Backend>(
     (lo, hi)
 }
 
+/// 32 ビット命令の結果をレジスタ約束に正規化する。
+/// 64 ビットモデルでは MIPS64 の規約どおり符号拡張、
+/// 32 ビットモデルでは従来どおり下位 32 ビットのゼロ拡張。
 fn mask32<B: Backend>(b: &mut B, v: B::V<W64>) -> B::V<W64> {
+    let s = sext32(b, v);
     let lo = b.konst::<W64>(0xffff_ffff);
-    b.and::<W64>(v, lo)
+    let z = b.and::<W64>(v, lo);
+    let flag: B::V<W64> = b.get(is64_ref());
+    let zero = b.konst::<W64>(0);
+    let is64 = b.cmp::<W64>(Cmp::Ne, flag, zero);
+    b.select::<W64>(is64, s, z)
 }
 
 fn sext32<B: Backend>(b: &mut B, v: B::V<W64>) -> B::V<W64> {
@@ -605,10 +618,17 @@ fn cmp_regs<B: Backend>(b: &mut B, op: Cmp, rs: Gpr, rt: Gpr) -> B::B {
         }
         _ => {
             let x = read(b, rs);
-            let x = mask32(b, x);
             let y = read(b, rt);
-            let y = mask32(b, y);
-            b.cmp::<W64>(op, x, y)
+            // 64 ビットモデルはレジスタが正規化済みなので生の比較が HW と一致する。
+            // 32 ビットモデルは下位 32 ビットで比較する。
+            let flag: B::V<W64> = b.get(is64_ref());
+            let zero = b.konst::<W64>(0);
+            let is64 = b.cmp::<W64>(Cmp::Ne, flag, zero);
+            let xm = mask32(b, x);
+            let ym = mask32(b, y);
+            let xsel = b.select::<W64>(is64, x, xm);
+            let ysel = b.select::<W64>(is64, y, ym);
+            b.cmp::<W64>(op, xsel, ysel)
         }
     }
 }
@@ -671,21 +691,101 @@ pub fn jal_delay<B: Backend>(b: &mut B, pc: u64, target: u64) -> Flow<B> {
     Ok(())
 }
 
-/// JR。飛び先は rs の下位 32 ビットを語境界に揃えた値。
-pub fn jr_delay<B: Backend>(b: &mut B, rs: Gpr) -> Flow<B> {
+/// branch-likely の共通処理。成立すれば遅延スロットを実行して target へ、
+/// 不成立なら遅延スロットを無効化して pc+8 へ進む。
+/// `link` が立つ *all 形式は成立・不成立にかかわらず ra=pc+8 にリンクする。
+fn likely_delay<B: Backend>(b: &mut B, pc: u64, disp: i32, take: B::B, link: bool) -> Flow<B> {
+    if link {
+        let linked = const_w64(b, pc.wrapping_add(8));
+        write(b, Gpr(31), linked);
+    }
+    let target = pc
+        .wrapping_add(4)
+        .wrapping_add((disp as i64 as u64).wrapping_mul(4));
+    let taken = const_w64(b, target);
+    let fall = const_w64(b, pc.wrapping_add(8));
+    let chosen = b.select::<W64>(take, taken, fall);
+    b.set(npc_ref(), chosen);
+    let one = b.konst::<W64>(1);
+    let zero = b.konst::<W64>(0);
+    let flag = b.select::<W64>(take, zero, one);
+    b.set(nullify_ref(), flag);
+    Ok(())
+}
+
+/// BEQL。不成立なら遅延スロットを無効化する。
+pub fn beql_delay<B: Backend>(b: &mut B, rs: Gpr, rt: Gpr, pc: u64, disp: i32) -> Flow<B> {
+    let take = cmp_regs(b, Cmp::Eq, rs, rt);
+    likely_delay(b, pc, disp, take, false)
+}
+
+/// BNEL。
+pub fn bnel_delay<B: Backend>(b: &mut B, rs: Gpr, rt: Gpr, pc: u64, disp: i32) -> Flow<B> {
+    let take = cmp_regs(b, Cmp::Ne, rs, rt);
+    likely_delay(b, pc, disp, take, false)
+}
+
+/// BLEZL。rs<=0 で成立。
+pub fn blezl_delay<B: Backend>(b: &mut B, rs: Gpr, pc: u64, disp: i32) -> Flow<B> {
+    let take = cmp_zero(b, Cmp::LeS, rs);
+    likely_delay(b, pc, disp, take, false)
+}
+
+/// BGTZL。rs>0 で成立。
+pub fn bgtzl_delay<B: Backend>(b: &mut B, rs: Gpr, pc: u64, disp: i32) -> Flow<B> {
+    let take = cmp_zero(b, Cmp::GtS, rs);
+    likely_delay(b, pc, disp, take, false)
+}
+
+/// BLTZL。
+pub fn bltzl_delay<B: Backend>(b: &mut B, rs: Gpr, pc: u64, disp: i32) -> Flow<B> {
+    let take = cmp_zero(b, Cmp::LtS, rs);
+    likely_delay(b, pc, disp, take, false)
+}
+
+/// BGEZL。
+pub fn bgezl_delay<B: Backend>(b: &mut B, rs: Gpr, pc: u64, disp: i32) -> Flow<B> {
+    let take = cmp_zero(b, Cmp::GeS, rs);
+    likely_delay(b, pc, disp, take, false)
+}
+
+/// BLTZALL。成立・不成立にかかわらずリンクする。
+pub fn bltzall_delay<B: Backend>(b: &mut B, rs: Gpr, pc: u64, disp: i32) -> Flow<B> {
+    let take = cmp_zero(b, Cmp::LtS, rs);
+    likely_delay(b, pc, disp, take, true)
+}
+
+/// BGEZALL。
+pub fn bgezall_delay<B: Backend>(b: &mut B, rs: Gpr, pc: u64, disp: i32) -> Flow<B> {
+    let take = cmp_zero(b, Cmp::GeS, rs);
+    likely_delay(b, pc, disp, take, true)
+}
+
+/// JR。32 ビットモデルでは飛び先は rs の下位 32 ビットを語境界に揃えた値、
+/// 64 ビットモデルでは rs 全体を語境界に揃えた値。
+pub fn jr_delay<B: Backend>(b: &mut B, rs: Gpr, is64: bool) -> Flow<B> {
     let dest = read(b, rs);
-    let dest = mask32(b, dest);
-    let align = b.konst::<W64>(0xffff_fffc);
+    let dest = if is64 { dest } else { mask32(b, dest) };
+    let align = b.konst::<W64>(if is64 {
+        0xffff_ffff_ffff_fffc
+    } else {
+        0xffff_fffc
+    });
     let target = b.and::<W64>(dest, align);
     b.set(npc_ref(), target);
     Ok(())
 }
 
 /// JALR。リンクは pc+8。飛び先は書き込み前の rs を語境界に揃えた値。
-pub fn jalr_delay<B: Backend>(b: &mut B, rd: Gpr, rs: Gpr, pc: u64) -> Flow<B> {
+/// `is64` では rs 全体を使う。
+pub fn jalr_delay<B: Backend>(b: &mut B, rd: Gpr, rs: Gpr, pc: u64, is64: bool) -> Flow<B> {
     let dest = read(b, rs);
-    let dest = mask32(b, dest);
-    let align = b.konst::<W64>(0xffff_fffc);
+    let dest = if is64 { dest } else { mask32(b, dest) };
+    let align = b.konst::<W64>(if is64 {
+        0xffff_ffff_ffff_fffc
+    } else {
+        0xffff_fffc
+    });
     let target = b.and::<W64>(dest, align);
     let linked = const_w64(b, pc.wrapping_add(8));
     write(b, rd, linked);
@@ -1248,11 +1348,13 @@ pub fn ins<B: Backend>(b: &mut B, rt: Gpr, rs: Gpr, lsb: u32, msb: u32) -> Flow<
 }
 
 /// RDHWR rt,rd。ユーザーの HW レジスタを読む。
+/// rd=0〜3 は HWREna 対応の hwr[rd]、rd=29 は ULR（TLS ポインタ）で、
+/// `set_thread_area` が hwr[3] に置く値を返す。rd=30/31 は 0 を返す。
 pub fn rdhwr<B: Backend>(b: &mut B, rt: Gpr, rd: u32) -> Flow<B> {
-    let v: B::V<W64> = if rd < 4 {
-        b.get(hwr_ref(rd as u8))
-    } else {
-        b.konst::<W64>(0)
+    let v: B::V<W64> = match rd {
+        0..=3 => b.get(hwr_ref(rd as u8)),
+        29 => b.get(hwr_ref(3)),
+        _ => b.konst::<W64>(0),
     };
     let z = sext32(b, v);
     write(b, rt, z);

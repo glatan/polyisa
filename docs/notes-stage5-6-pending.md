@@ -45,42 +45,52 @@
    スタック引数で受ける。実装は `args[4]`/`args[5]`（スタック経由）と
    してあるが、glibc の実使用は `mmap2`（210）。旧 mmap の挙動差異は
    テスト不足。
-9. **`do_statfs` の中身**: MIPS の `statfs` 構造体は 120B でレイアウト固有。
-   現状は最小限（f_type=EXT2、bsize=4096 等）のみ。
-10. **`polyisa-host` の OS 依存 API**: `Stat`/`pread`/`pwrite`/`dirent_ino`/
+9. **`polyisa-host` の OS 依存 API**: `Stat`/`pread`/`pwrite`/`dirent_ino`/
     `symlink` を host クレートに集約した（cfg 規則対応）。`std::os::unix`
     を `os-linux` で使わない方針でよいか確認したい（x86 側は `std::fs` の
     portable API のみで stat を組み立てている）。
-11. **`lui` の厳格化の緩和**: LUI の rs フィールドは 00000 固定が正しい
+10. **`lui` の厳格化の緩和**: LUI の rs フィールドは 00000 固定が正しい
     （旧実装は任意値を許容していたため修正）。pre-R6 で rs!=0 の 001111 は
     LUI ではなく予約として扱うようになった。実シリコンの受理挙動と異なる
     可能性は低いが、互換性のために緩めたい場合は別途検討する。
-12. **R6 オプション命令の範囲**: LLWP/SCWP（ペア LL/SC、特定コアのみ）と
-    LLE/SCE（EVA 版、ユーザモードでは LL/SC と同義）は実装していない。
-    実シリコン依存の拡張のため今回の範囲外とした。必要なら別途追加する。
 
 ### 未完了・保留の作業
 
-13. **スタック成長（aarch64）**: 現状は固定 1 MiB を先行確保
-    （`run_aarch64.rs`）。ページフォルト駆動の成長
-    （fault → TrapHandler 経路）は未実装。容量の適性と成長方式の
-    設計判断を要する。
-14. **FP/AdvSIMD の残り（aarch64）**: musl の動的リンクが要求した
-    部分集合のみ実装。それ以外の FP/AdvSIMD 命令は未実装。
-    必要になった時点で台帳とともに追加する。
-15. **BE エンディアン（aarch64）**: FEAT_BE 宣言のみ。データフェッチ/
-    ロードストアのエンディアン切替と ELF の EI_DATA 確認は未接続
-    （現状 LE 固定・BE 拒否）。
-16. **MRS/MSR の ID レジスタ（aarch64）**: MRS/MSR の枠は実装済み。
-    `DCZID_EL0` は DZP=1（`dc zva` 不可）を返して musl の zva 経路を
-    回避させている。ID_AA64 系の個別値は未整備（実装した機能に応じた
-    値の台帳が要る）。
-17. **busybox の MIPS 版・n32/n64 の実バイナリ検証**: `heavy_program_mips`
-    は裸 ELF（write/exit のみ）。dist コマンド実行は `.testdata` に
-    MIPS 版の配布物がないため未実行。n32/n64 の ELF も同様に実バイナリ
-    での検証がない。使う配布物の選定と台帳への登録が先決。
+11. **FP/AdvSIMD の残り（aarch64）**: FP スカラー一式（算術・比較・
+    変換・条件選択）は実装済み。AdvSIMD は musl の動的リンクが要求した
+    部分集合（dup/ins/umov/movi・load/store 系）のみで、ベクトル演算系は
+    未実装。必要になった時点で台帳とともに追加する。
+12. **busybox の MIPS 版・n32/n64 の実バイナリ検証**: `heavy_program_mips`
+    は裸 ELF（write/exit のみ）。実バイナリ検証を開始し
+    `.testdata/bin-distro-mipsel`（o32 LE）と `.testdata/bin-distro-mips64`
+    （n64 BE）を取得済み。台帳登録と配布物の正式選定は未了。
+    現状: o32 は `echo`/`--help` 等が動作。`uname`(122) は配線済みだが
+    FPU 命令（0xe7b40300、cop1 系）で停止 — 多くのアプレットが FPU
+    エミュレーションを要する。n64 BE は起動後に 64bit ポインタの下位
+    32bit 切り出し（0x20194714）で PageFault — 32bit 演算結果の
+    正規化（is64 時の符号拡張）を実装済みだが、残る切り詰め経路が
+    ある。n32 ELF は未取得。残作業: 64bit ポインタ切り詰めの残経路、
+    cop1/FPU 命令群、n32 実バイナリ、台帳登録。
 
 ## 解消済み（記録）
+
+- **aarch64 残件**: ID_AA64 系レジスタ値の整備（実装機能に整合する値 +
+  MRS テスト）、BE エンディアン（EI_DATA 受理・データアクセス反転・
+  手組み BE ELF テスト）、スタック成長（ページフォルト駆動・上限
+  8 MiB）、FP スカラー一式（fadd/fsub/fmul/fdiv/fmuladd 系・fcmp/fccmp/
+  fcsel・fcvt 系・fmov imm/int 往復・llvm oracle 拡充）は全て実装済み。
+- **MIPS ABI 精査**: o32 の 64bit 引数は偶数語対（truncate64/ftruncate64
+  は a2/a3、pread64/pwrite64 はスタック lo/hi）に修正、n32 は単一
+  64bit レジスタに修正。`do_statfs` を本レイアウト（o32=68B /
+  statfs64=92B / n64=128B）で実装し `ustat` も配線。
+- **MIPS R6 オプション命令**: LLWP/SCWP（語対）と LLE/SCE（EVA）を
+  実装（paired 形は rd フィールド+bit6=1）。branch-likely 8 命令
+  （beql/bnel/blezl/bgtzl/bltzl/bgezl/bltzall/bgezall）を非 R6 で実装し
+  遅延スロット nullify を追加。
+- **MIPS 実バイナリ向け修正**: 初期スタックを 8 MiB+argv/envp/auxv に、
+  `rdhwr $29`（ULR→set_thread_area の TLS）、n64 の jr/jalr・J/JAL
+  ターゲットの上位ビット、o32 `uname`(122) 配線、is64 時の 32bit
+  演算結果の符号拡張正規化（mask32）。
 
 - **`MIPS_O32_SYSCALLS` の後継**: status 生成が `mips_o32.rs` 等の
   `SYSCALLS` 表を読むように変更した。`syscall_entry_name` は

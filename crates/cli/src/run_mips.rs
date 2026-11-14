@@ -164,6 +164,14 @@ impl MipsStep {
                 Err(stop) => return Err(self.stop_outcome(stop)),
             };
             self.pending = retire(env, self.pending, effect);
+            // branch-likely 不成立時は遅延スロットを実行せず pc+8 へ進む。
+            if get_u64(env, sem::nullify_ref().offset()) != 0 {
+                set_u64(env, sem::nullify_ref().offset(), 0);
+                return match commit(env) {
+                    Ok(()) => Ok(()),
+                    Err(stop) => Err(self.stop_outcome(stop)),
+                };
+            }
             let slot_pc = pc.wrapping_add(4);
             let slot = match fetch(env, slot_pc, model.endian, true) {
                 Ok(w) => w,
@@ -327,6 +335,14 @@ fn has_delay_slot(insn: Insn) -> bool {
             | Insn::Bgez
             | Insn::Bltzal
             | Insn::Bgezal
+            | Insn::Beql
+            | Insn::Bnel
+            | Insn::Blezl
+            | Insn::Bgtzl
+            | Insn::Bltzl
+            | Insn::Bgezl
+            | Insn::Bltzall
+            | Insn::Bgezall
             | Insn::J
             | Insn::Jal
             | Insn::Jr
@@ -472,19 +488,33 @@ fn exec(
         Insn::Bltzal => {
             step(env, in_slot, |b| sem::bltzal_delay(b, rs, pc, imm)).map(|()| wrote(Gpr(31)))
         }
+        Insn::Beql => step(env, in_slot, |b| sem::beql_delay(b, rs, rt, pc, imm)).map(|()| none),
+        Insn::Bnel => step(env, in_slot, |b| sem::bnel_delay(b, rs, rt, pc, imm)).map(|()| none),
+        Insn::Blezl => step(env, in_slot, |b| sem::blezl_delay(b, rs, pc, imm)).map(|()| none),
+        Insn::Bgtzl => step(env, in_slot, |b| sem::bgtzl_delay(b, rs, pc, imm)).map(|()| none),
+        Insn::Bltzl => step(env, in_slot, |b| sem::bltzl_delay(b, rs, pc, imm)).map(|()| none),
+        Insn::Bgezl => step(env, in_slot, |b| sem::bgezl_delay(b, rs, pc, imm)).map(|()| none),
+        Insn::Bltzall => {
+            step(env, in_slot, |b| sem::bltzall_delay(b, rs, pc, imm)).map(|()| wrote(Gpr(31)))
+        }
+        Insn::Bgezall => {
+            step(env, in_slot, |b| sem::bgezall_delay(b, rs, pc, imm)).map(|()| wrote(Gpr(31)))
+        }
         Insn::Bgezal => {
             step(env, in_slot, |b| sem::bgezal_delay(b, rs, pc, imm)).map(|()| wrote(Gpr(31)))
         }
         Insn::J => {
-            let target = j_target(pc, word);
+            let target = j_target(pc, word, model.is64);
             step(env, in_slot, |b| sem::j_delay(b, target)).map(|()| none)
         }
         Insn::Jal => {
-            let target = j_target(pc, word);
+            let target = j_target(pc, word, model.is64);
             step(env, in_slot, |b| sem::jal_delay(b, pc, target)).map(|()| wrote(Gpr(31)))
         }
-        Insn::Jr => step(env, in_slot, |b| sem::jr_delay(b, rs)).map(|()| none),
-        Insn::Jalr => step(env, in_slot, |b| sem::jalr_delay(b, rd, rs, pc)).map(|()| wrote(rd)),
+        Insn::Jr => step(env, in_slot, |b| sem::jr_delay(b, rs, model.is64)).map(|()| none),
+        Insn::Jalr => {
+            step(env, in_slot, |b| sem::jalr_delay(b, rd, rs, pc, model.is64)).map(|()| wrote(rd))
+        }
         Insn::Syscall => step(env, in_slot, sem::syscall).map(|()| none),
         Insn::Break => step(env, in_slot, sem::break_).map(|()| none),
         Insn::Beqzalc => {
@@ -895,8 +925,14 @@ fn release_pending(
     None
 }
 
-fn j_target(pc: u64, word: u32) -> u64 {
-    let region = pc.wrapping_add(4) & 0xf000_0000;
+fn j_target(pc: u64, word: u32, is64: bool) -> u64 {
+    // J 型の飛び先は遅延スロットの PC 上位と instr_index<<2 の合成。
+    // 32 ビットは (PC+4)[31:28]、64 ビットは (PC+4)[63:28] を使う。
+    let region = if is64 {
+        pc.wrapping_add(4) & !0x0fff_ffff
+    } else {
+        pc.wrapping_add(4) & 0xf000_0000
+    };
     region | (u64::from(word & 0x03ff_ffff) << 2)
 }
 
@@ -942,7 +978,7 @@ pub fn run_elf_mips(path: &str, _argv: &[String]) -> Result<u64, String> {
 /// モデル名から取る。エンディアンは ELF のヘッダと一致させる。
 pub fn run_elf_mips_sel(
     path: &str,
-    _argv: &[String],
+    argv: &[String],
     sel: Option<&polyisa_isadl::select::CpuSel>,
 ) -> Result<u64, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
@@ -973,7 +1009,7 @@ pub fn run_elf_mips_sel(
         }
         None => model_from_flags(ehdr.little, ehdr.flags)?,
     };
-    run_loaded(&bytes, &ehdr, class64, model)
+    run_loaded(&bytes, &ehdr, class64, model, path, argv)
 }
 
 /// ELF のクラスと `e_flags` からゲスト ABI を決める。
@@ -1007,6 +1043,11 @@ fn model_from_flags(little: bool, flags: u32) -> Result<MipsModel, String> {
     let arch = flags & 0xf000_0000;
     let mut model = match arch {
         0x0000_0000 => MipsModel::mips1_be(),
+        // MIPS II は ll/sc まで入る 32 ビット拡張。r2 モデルで代用する。
+        0x1000_0000 => MipsModel::mips32r2(),
+        // MIPS III/IV/V は 64 ビット ISA の祖先。MIPS64r2 の下位集合なので
+        // r2 モデルで代用する（r2 は上位互換）。
+        0x2000_0000 | 0x3000_0000 | 0x4000_0000 => MipsModel::mips64r2(),
         // MIPS32/MIPS64 の r1 は r2 モデルで代用する（r2 は上位互換）。
         0x5000_0000 | 0x7000_0000 => MipsModel::mips32r2(),
         0x6000_0000 | 0x8000_0000 => MipsModel::mips64r2(),
@@ -1033,7 +1074,7 @@ pub fn run_elf_model(
     } else {
         polyisa_loader::elf::parse_ehdr32(&bytes).map_err(|e| format!("ehdr: {e:?}"))?
     };
-    run_loaded_sys(&bytes, &ehdr, class64, model, sys)
+    run_loaded_sys(&bytes, &ehdr, class64, model, sys, path, &[])
 }
 
 fn run_loaded(
@@ -1041,6 +1082,8 @@ fn run_loaded(
     ehdr: &polyisa_loader::elf::Ehdr,
     class64: bool,
     model: MipsModel,
+    prog: &str,
+    argv: &[String],
 ) -> Result<u64, String> {
     let abi = abi_from_elf(class64, ehdr.flags)?;
     let is64abi = !matches!(abi, polyisa_os_linux::mips::sys::Abi::O32);
@@ -1049,7 +1092,7 @@ fn run_loaded(
     }
     let mut sys = polyisa_os_linux::mips::sys::Linux::new(abi, model.endian);
     sys.exe_path = String::new();
-    run_loaded_sys(bytes, ehdr, class64, model, &mut sys)
+    run_loaded_sys(bytes, ehdr, class64, model, &mut sys, prog, argv)
 }
 
 fn run_loaded_sys(
@@ -1058,6 +1101,8 @@ fn run_loaded_sys(
     class64: bool,
     model: MipsModel,
     sys: &mut polyisa_os_linux::mips::sys::Linux,
+    prog: &str,
+    argv: &[String],
 ) -> Result<u64, String> {
     use polyisa_mem::{Perms, VirtAddr};
 
@@ -1088,18 +1133,42 @@ fn run_loaded_sys(
     polyisa_loader::elf::load_segments(bytes, &phdrs, &mut env.backend.mem)
         .map_err(|e| format!("load: {e:?}"))?;
     sys.init_brk(image_end);
-    let sp = 0x7fff_0000u64;
-    let page = sp & !(polyisa_mem::PAGE_SIZE - 1);
+    set_u64(&mut env, sem::is64_ref().offset(), u64::from(model.is64));
+    // 初期スタックを組む。エントリ幅は o32/n32 が 4 バイト、n64 が 8 バイト。
+    // スタックは 8MB 確保する（x86 経路と同じ。RLIMIT_STACK 既定相当）。
+    let top = 0x7fff_0000u64;
+    let mut arg_bytes = vec![prog.as_bytes().to_vec()];
+    for a in argv {
+        arg_bytes.push(a.as_bytes().to_vec());
+    }
+    let (img, sp) = if class64 {
+        polyisa_os_linux::build_initial_stack_endian(
+            top,
+            &arg_bytes,
+            &[],
+            &[(6, 0x1000)],
+            model.endian,
+        )
+    } else {
+        polyisa_os_linux::build_initial_stack32_endian(
+            top,
+            &arg_bytes,
+            &[],
+            &[(6, 0x1000)],
+            model.endian,
+        )
+    };
+    const STACK_SIZE: u64 = 8 * 1024 * 1024;
+    let base = top - STACK_SIZE;
+    let end = top.next_multiple_of(polyisa_mem::PAGE_SIZE);
+    let count = (end - base) / polyisa_mem::PAGE_SIZE;
     env.backend
         .mem
-        .map(VirtAddr(page), 8, Perms(Perms::R.0 | Perms::W.0))
+        .map(VirtAddr(base), count, Perms(Perms::R.0 | Perms::W.0))
         .map_err(|e| format!("stack map: {e:?}"))?;
-    // 最小の初期スタック（argc=0, argv=NULL, envp=NULL, auxv AT_NULL）。
-    // 8 バイト書けば o32/n32 の 4 バイト項目も n64 の 8 バイト項目も
-    // argc=0 と最初の NULL で終わる。
     env.backend
         .mem
-        .write(VirtAddr(sp), &[0; 8])
+        .write(VirtAddr(sp), &img)
         .map_err(|e| format!("stack write: {e:?}"))?;
     set_reg(&mut env, 29, sp);
     match run(&mut env, ehdr.entry, model, sys) {
@@ -1590,12 +1659,12 @@ mod tests {
         assert_eq!(run_elf_mips(r3000.to_str().unwrap(), &[]).unwrap(), 8);
         let r2 = elf_be(0x7000_0000, &code, 0x200);
         assert_eq!(run_elf_mips(r2.to_str().unwrap(), &[]).unwrap(), 0x43);
-        // MIPS32 (0x5) は r2 モデルで代用して受理する。MIPS II (0x1) は未対応。
+        // MIPS32 (0x5) と MIPS II (0x1) は r2 モデルで代用して受理する。
         // addiu $a0,$0,0x42; addiu $v0,$0,4001; syscall → exit(0x42)。
         let mips32 = elf_be(0x5000_0000, &[0x2404_0042, 0x2402_0fa1, 0x0000_000c], 12);
         assert_eq!(run_elf_mips(mips32.to_str().unwrap(), &[]).unwrap(), 0x42);
-        let unknown = elf_be(0x1000_0000, &[0x2402_0fa1, 0x2404_0000, 0x0000_000c], 12);
-        assert!(run_elf_mips(unknown.to_str().unwrap(), &[]).is_err());
+        let mips2 = elf_be(0x1000_0000, &[0x2404_0042, 0x2402_0fa1, 0x0000_000c], 12);
+        assert_eq!(run_elf_mips(mips2.to_str().unwrap(), &[]).unwrap(), 0x42);
     }
 
     #[test]

@@ -431,6 +431,19 @@ pub fn build_initial_stack32(
     build_initial_stack_ws(top, args, env, auxv, 4, Endian::Le)
 }
 
+/// `build_initial_stack32` にゲストのデータエンディアンを添える形。
+/// o32/n32 の MIPS はエントリ幅が 4 バイト。
+#[must_use]
+pub fn build_initial_stack32_endian(
+    top: u64,
+    args: &[Vec<u8>],
+    env: &[Vec<u8>],
+    auxv: &[(u64, u64)],
+    endian: Endian,
+) -> (Vec<u8>, u64) {
+    build_initial_stack_ws(top, args, env, auxv, 4, endian)
+}
+
 fn build_initial_stack_ws(
     top: u64,
     args: &[Vec<u8>],

@@ -192,6 +192,14 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("bgez", "FI", "000001 ..... 00001 ................", "bgez {rs}, {imm}", "branch"),
         ("bltzal", "FI", "000001 ..... 10000 ................", "bltzal {rs}, {imm}", "branch"),
         ("bgezal", "FI", "000001 ..... 10001 ................", "bgezal {rs}, {imm}", "branch"),
+        ("bltzl", "FI", "000001 ..... 00010 ................", "bltzl {rs}, {imm}", "branch"),
+        ("bgezl", "FI", "000001 ..... 00011 ................", "bgezl {rs}, {imm}", "branch"),
+        ("bltzall", "FI", "000001 ..... 10010 ................", "bltzall {rs}, {imm}", "branch"),
+        ("bgezall", "FI", "000001 ..... 10011 ................", "bgezall {rs}, {imm}", "branch"),
+        ("beql", "FI", "010100 ..... ..... ................", "beql {rs}, {rt}, {imm}", "branch"),
+        ("bnel", "FI", "010101 ..... ..... ................", "bnel {rs}, {rt}, {imm}", "branch"),
+        ("blezl", "FI", "010110 ..... 00000 ................", "blezl {rs}, {imm}", "branch"),
+        ("bgtzl", "FI", "010111 ..... 00000 ................", "bgtzl {rs}, {imm}", "branch"),
         ("slti", "FI", "001010 ..... ..... ................", "slti {rt}, {rs}, {imm}", "alu"),
         ("sltiu", "FI", "001011 ..... ..... ................", "sltiu {rt}, {rs}, {imm}", "alu"),
         ("andi", "FI", "001100 ..... ..... ................", "andi {rt}, {rs}, {imm}", "alu"),
@@ -246,6 +254,14 @@ pub fn build_model() -> polyisa_isadl::Model {
                 | "bgez"
                 | "bltzal"
                 | "bgezal"
+                | "bltzl"
+                | "bgezl"
+                | "bltzall"
+                | "bgezall"
+                | "beql"
+                | "bnel"
+                | "blezl"
+                | "bgtzl"
                 | "lwl"
                 | "lwr"
                 | "swl"
