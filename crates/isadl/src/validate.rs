@@ -64,18 +64,22 @@ pub fn validate(model: &Model) -> Report {
             });
         }
         for w in &insn.wheres {
-            match fields.get(w.field.as_str()) {
+            let check = |name: &str, errors: &mut Vec<ValidationError>| match fields.get(name) {
                 Some(f) => match f.kind {
                     crate::model::FieldKind::Bits { .. } => {}
                     _ => errors.push(ValidationError::Unresolved {
                         kind: "where-hook".to_string(),
-                        name: w.field.clone(),
+                        name: name.to_string(),
                     }),
                 },
                 None => errors.push(ValidationError::Unresolved {
                     kind: "where-field".to_string(),
-                    name: w.field.clone(),
+                    name: name.to_string(),
                 }),
+            };
+            check(&w.field, &mut errors);
+            if let crate::model::WhereRhs::Field(name) = &w.rhs {
+                check(name, &mut errors);
             }
         }
     }
@@ -165,17 +169,61 @@ pub fn validate(model: &Model) -> Report {
 }
 
 /// `where` 句の組が互いに排他かどうか。同一フィールドへの矛盾があれば真。
+/// 右辺がフィールドの句は、同じフィールドの組への矛盾があれば真とする
+/// （`rs < rt` と `rs >= rt`、`rs == rt` と `rs != rt` など）。
 fn wheres_disjoint(a: &[crate::model::WhereClause], b: &[crate::model::WhereClause]) -> bool {
-    use crate::model::WhereOp::{Eq, Ne};
+    use crate::model::{WhereOp, WhereRhs};
+    use WhereOp::{Eq, Ge, Gt, Le, Lt, Ne};
     for x in a {
         for y in b {
-            if x.field != y.field {
-                continue;
-            }
-            match (x.op, y.op) {
-                (Eq, Eq) if x.value != y.value => return true,
-                (Eq, Ne) if x.value == y.value => return true,
-                (Ne, Eq) if x.value == y.value => return true,
+            match (&x.rhs, &y.rhs) {
+                (WhereRhs::Lit(v), WhereRhs::Lit(w)) if x.field == y.field => match (x.op, y.op) {
+                    (Eq, Eq) if v != w => return true,
+                    (Eq, Ne) | (Ne, Eq) if v == w => return true,
+                    _ => {}
+                },
+                (WhereRhs::Field(g), WhereRhs::Field(h)) => {
+                    // 同順の対（x: f1 R1 f2, y: f1 R2 f2）と
+                    // 逆順の対（x: f1 R1 f2, y: f2 R2 f1）で、
+                    // R1 ∧ R2 が充足不能なら排他。
+                    let ops: &[(WhereOp, WhereOp)] = &[
+                        (Eq, Ne),
+                        (Eq, Lt),
+                        (Eq, Gt),
+                        (Lt, Gt),
+                        (Lt, Ge),
+                        (Le, Gt),
+                        (Ge, Lt),
+                        (Gt, Le),
+                        (Gt, Lt),
+                        (Ne, Eq),
+                        (Lt, Eq),
+                        (Gt, Eq),
+                    ];
+                    if x.field == y.field && g == h {
+                        if ops.contains(&(x.op, y.op)) {
+                            return true;
+                        }
+                    } else if x.field == *h && g == &y.field {
+                        let rev: &[(WhereOp, WhereOp)] = &[
+                            (Eq, Ne),
+                            (Eq, Lt),
+                            (Eq, Gt),
+                            (Lt, Lt),
+                            (Lt, Le),
+                            (Le, Lt),
+                            (Gt, Gt),
+                            (Gt, Ge),
+                            (Ge, Gt),
+                            (Ne, Eq),
+                            (Lt, Eq),
+                            (Gt, Eq),
+                        ];
+                        if rev.contains(&(x.op, y.op)) {
+                            return true;
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -313,7 +361,7 @@ mod tests {
         m.insns[0].wheres = vec![WhereClause {
             field: "rs2".to_string(),
             op: WhereOp::Eq,
-            value: 0,
+            rhs: WhereRhs::Lit(0),
         }];
         m.insns.push(Insn {
             name: "add_alias".to_string(),
@@ -323,7 +371,7 @@ mod tests {
             wheres: vec![WhereClause {
                 field: "rs2".to_string(),
                 op: WhereOp::Ne,
-                value: 0,
+                rhs: WhereRhs::Lit(0),
             }],
             syntax: "add".to_string(),
             timing: "alu".to_string(),

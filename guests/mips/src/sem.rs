@@ -10,7 +10,9 @@
 //! Ref: SPEC-MIPS-IV (Rev 3.2).
 
 use polyisa_mem::{Access, AccessKind, Align, Endian};
-use polyisa_sem::{Backend, Cmp, ExceptionKind, Flow, GuestException, StateRef, W8, W16, W32, W64};
+use polyisa_sem::{
+    Backend, Cmp, ExceptionKind, Flow, GuestException, StateRef, W8, W16, W32, W64, Width,
+};
 
 use super::CpuState;
 
@@ -997,4 +999,1247 @@ pub fn swr<B: Backend>(b: &mut B, rt: Gpr, rs: Gpr, imm: i32, endian: Endian) ->
     let written = b.and::<W64>(rt_part, not_mask);
     let merged = b.or::<W64>(kept, written);
     store_aligned_word(b, aligned, merged, endian)
+}
+
+// ---- MIPS32r2 / MIPS64 / Release 6 の追加命令 ----
+// 符号化の根拠は SPEC-MIPS32R2・SPEC-MIPS64・SPEC-MIPS-R6。
+// 32 ビット命令の結果は MIPS64 の規則どおり符号拡張する。
+// Ref: SPEC-MIPS-IV (Rev 3.2).
+// Ref: SPEC-MIPS-R6 (Rev 6.06).
+
+/// NOP。
+pub fn nop<B: Backend>(_b: &mut B) -> Flow<B> {
+    Ok(())
+}
+
+/// MOVZ rd,rs,rt。
+pub fn movz<B: Backend>(b: &mut B, rd: Gpr, rs: Gpr, rt: Gpr) -> Flow<B> {
+    let y = read(b, rt);
+    let zero = b.konst::<W64>(0);
+    let take = b.cmp::<W64>(Cmp::Eq, y, zero);
+    let x = read(b, rs);
+    let old = read(b, rd);
+    let v = b.select::<W64>(take, x, old);
+    write(b, rd, v);
+    Ok(())
+}
+
+/// MOVN rd,rs,rt。
+pub fn movn<B: Backend>(b: &mut B, rd: Gpr, rs: Gpr, rt: Gpr) -> Flow<B> {
+    let y = read(b, rt);
+    let zero = b.konst::<W64>(0);
+    let take = b.cmp::<W64>(Cmp::Ne, y, zero);
+    let x = read(b, rs);
+    let old = read(b, rd);
+    let v = b.select::<W64>(take, x, old);
+    write(b, rd, v);
+    Ok(())
+}
+
+/// MUL rd,rs,rt（SPECIAL2/R6 共通）。下位 32 ビットを符号拡張。HI/LO は変えない。
+pub fn mul<B: Backend>(b: &mut B, rd: Gpr, rs: Gpr, rt: Gpr) -> Flow<B> {
+    let x = read(b, rs);
+    let y = read(b, rt);
+    let p = b.mul::<W64>(x, y);
+    let v = sext32(b, p);
+    write(b, rd, v);
+    Ok(())
+}
+
+/// MADD rs,rt。
+pub fn madd<B: Backend>(b: &mut B, rs: Gpr, rt: Gpr) -> Flow<B> {
+    madd_inner(b, rs, rt, false, false)
+}
+
+/// MADDU。
+pub fn maddu<B: Backend>(b: &mut B, rs: Gpr, rt: Gpr) -> Flow<B> {
+    madd_inner(b, rs, rt, false, true)
+}
+
+/// MSUB。
+pub fn msub<B: Backend>(b: &mut B, rs: Gpr, rt: Gpr) -> Flow<B> {
+    madd_inner(b, rs, rt, true, false)
+}
+
+/// MSUBU。
+pub fn msubu<B: Backend>(b: &mut B, rs: Gpr, rt: Gpr) -> Flow<B> {
+    madd_inner(b, rs, rt, true, true)
+}
+
+fn madd_inner<B: Backend>(b: &mut B, rs: Gpr, rt: Gpr, negate: bool, unsigned: bool) -> Flow<B> {
+    let xr = read(b, rs);
+    let xw: B::V<W32> = b.trunc::<W64, W32>(xr);
+    let x: B::V<W64> = if unsigned {
+        b.zext::<W32, W64>(xw)
+    } else {
+        b.sext::<W32, W64>(xw)
+    };
+    let yr = read(b, rt);
+    let yw: B::V<W32> = b.trunc::<W64, W32>(yr);
+    let y: B::V<W64> = if unsigned {
+        b.zext::<W32, W64>(yw)
+    } else {
+        b.sext::<W32, W64>(yw)
+    };
+    let p = b.mul::<W64>(x, y);
+    let hi: B::V<W64> = b.get(hi_ref());
+    let lo: B::V<W64> = b.get(lo_ref());
+    let k32 = b.konst::<W64>(32);
+    let hi_sh = b.shl::<W64>(hi, k32);
+    let lo_w: B::V<W32> = b.trunc::<W64, W32>(lo);
+    let lo_z = b.zext::<W32, W64>(lo_w);
+    let acc = b.or::<W64>(hi_sh, lo_z);
+    let sum = if negate {
+        b.sub::<W64>(acc, p)
+    } else {
+        b.add::<W64>(acc, p)
+    };
+    let new_hi_raw = b.shr_l::<W64>(sum, k32);
+    let new_lo_w: B::V<W32> = b.trunc::<W64, W32>(sum);
+    let new_hi = sext32(b, new_hi_raw);
+    let new_lo = b.sext::<W32, W64>(new_lo_w);
+    b.set(hi_ref(), new_hi);
+    b.set(lo_ref(), new_lo);
+    Ok(())
+}
+
+/// CLZ rd,rs。
+pub fn clz<B: Backend>(b: &mut B, rd: Gpr, rs: Gpr) -> Flow<B> {
+    cl_inner(b, rd, rs, true, false)
+}
+
+/// CLO rd,rs。
+pub fn clo<B: Backend>(b: &mut B, rd: Gpr, rs: Gpr) -> Flow<B> {
+    cl_inner(b, rd, rs, false, false)
+}
+
+/// DCLZ rd,rs。
+pub fn dclz<B: Backend>(b: &mut B, rd: Gpr, rs: Gpr) -> Flow<B> {
+    cl_inner(b, rd, rs, true, true)
+}
+
+/// DCLO rd,rs。
+pub fn dclo<B: Backend>(b: &mut B, rd: Gpr, rs: Gpr) -> Flow<B> {
+    cl_inner(b, rd, rs, false, true)
+}
+
+fn cl_inner<B: Backend>(b: &mut B, rd: Gpr, rs: Gpr, zeros: bool, wide: bool) -> Flow<B> {
+    if wide {
+        let v = read(b, rs);
+        let src = if zeros { v } else { b.not::<W64>(v) };
+        let c = clz_count::<B, W64>(b, src);
+        write(b, rd, c);
+    } else {
+        let v = read(b, rs);
+        let w: B::V<W32> = b.trunc::<W64, W32>(v);
+        let src = if zeros { w } else { b.not::<W32>(w) };
+        let c = clz_count::<B, W32>(b, src);
+        let z = b.zext::<W32, W64>(c);
+        write(b, rd, z);
+    }
+    Ok(())
+}
+
+/// 先頭の連続する 0 ビット数を二分探索で数える。src==0 のとき語幅を返す。
+fn clz_count<B: Backend, W: Width>(b: &mut B, x0: B::V<W>) -> B::V<W> {
+    let bits = (core::mem::size_of::<W::Repr>() * 8) as u64;
+    let mut x = x0;
+    let zero = b.konst::<W>(W::from_u128(0));
+    let mut c = zero;
+    let mut sh = bits / 2;
+    while sh > 0 {
+        let mask = (!0u128) << (bits - sh);
+        let m = b.konst::<W>(W::from_u128(mask));
+        let top = b.and::<W>(x, m);
+        let isz = b.cmp::<W>(Cmp::Eq, top, zero);
+        let k = b.konst::<W>(W::from_u128(u128::from(sh)));
+        let shifted = b.shl::<W>(x, k);
+        x = b.select::<W>(isz, shifted, x);
+        let c2 = b.add::<W>(c, k);
+        c = b.select::<W>(isz, c2, c);
+        sh /= 2;
+    }
+    c
+}
+
+/// SEB rd,rt。
+pub fn seb<B: Backend>(b: &mut B, rd: Gpr, rt: Gpr) -> Flow<B> {
+    let v = read(b, rt);
+    let w: B::V<W32> = b.trunc::<W64, W32>(v);
+    let k8 = b.konst::<W32>(0xff);
+    let byte = b.and::<W32>(w, k8);
+    let k24 = b.konst::<W32>(24);
+    let e = b.shl::<W32>(byte, k24);
+    let s = b.shr_a::<W32>(e, k24);
+    let z = b.sext::<W32, W64>(s);
+    write(b, rd, z);
+    Ok(())
+}
+
+/// SEH rd,rt。
+pub fn seh<B: Backend>(b: &mut B, rd: Gpr, rt: Gpr) -> Flow<B> {
+    let v = read(b, rt);
+    let w: B::V<W32> = b.trunc::<W64, W32>(v);
+    let m = b.konst::<W32>(0xffff);
+    let h = b.and::<W32>(w, m);
+    let k16 = b.konst::<W32>(16);
+    let e = b.shl::<W32>(h, k16);
+    let s = b.shr_a::<W32>(e, k16);
+    let z = b.sext::<W32, W64>(s);
+    write(b, rd, z);
+    Ok(())
+}
+
+/// WSBH rd,rt。各半語内のバイトを入れ替える。
+pub fn wsbh<B: Backend>(b: &mut B, rd: Gpr, rt: Gpr) -> Flow<B> {
+    let v = read(b, rt);
+    let w: B::V<W32> = b.trunc::<W64, W32>(v);
+    let m = b.konst::<W32>(0x00ff_00ff);
+    let k8 = b.konst::<W32>(8);
+    let lo = b.and::<W32>(w, m);
+    let up = b.shl::<W32>(lo, k8);
+    let down = b.shr_l::<W32>(w, k8);
+    let dn = b.and::<W32>(down, m);
+    let r = b.or::<W32>(up, dn);
+    let z = b.sext::<W32, W64>(r);
+    write(b, rd, z);
+    Ok(())
+}
+
+/// EXT rt,rs,pos,size。`lsb`=位置(10:6)、`msbd`=size-1(15:11)。
+pub fn ext<B: Backend>(b: &mut B, rt: Gpr, rs: Gpr, lsb: u32, msbd: u32) -> Flow<B> {
+    let size = u64::from(msbd) + 1;
+    let mask: u64 = if size >= 32 {
+        0xffff_ffff
+    } else {
+        (1u64 << size) - 1
+    };
+    let v = read(b, rs);
+    let n = b.konst::<W64>(u64::from(lsb));
+    let sh = b.shr_l::<W64>(v, n);
+    let mk = b.konst::<W64>(mask);
+    let m = b.and::<W64>(sh, mk);
+    let z = sext32(b, m);
+    write(b, rt, z);
+    Ok(())
+}
+
+/// INS rt,rs,pos,size。`lsb`=位置(10:6)、`msb`=pos+size-1(15:11)。
+pub fn ins<B: Backend>(b: &mut B, rt: Gpr, rs: Gpr, lsb: u32, msb: u32) -> Flow<B> {
+    let size = u64::from(msb) + 1 - u64::from(lsb);
+    let mask: u64 = if size >= 32 {
+        0xffff_ffff
+    } else {
+        (1u64 << size) - 1
+    };
+    let src = read(b, rs);
+    let mk = b.konst::<W64>(mask);
+    let field = b.and::<W64>(src, mk);
+    let n = b.konst::<W64>(u64::from(lsb));
+    let shifted = b.shl::<W64>(field, n);
+    let keep: u64 = !(mask << lsb) & 0xffff_ffff;
+    let old = read(b, rt);
+    let kk = b.konst::<W64>(keep);
+    let kept = b.and::<W64>(old, kk);
+    let merged = b.or::<W64>(kept, shifted);
+    let z = sext32(b, merged);
+    write(b, rt, z);
+    Ok(())
+}
+
+/// RDHWR rt,rd。ユーザーの HW レジスタを読む。
+pub fn rdhwr<B: Backend>(b: &mut B, rt: Gpr, rd: u32) -> Flow<B> {
+    let v: B::V<W64> = if rd < 4 {
+        b.get(hwr_ref(rd as u8))
+    } else {
+        b.konst::<W64>(0)
+    };
+    let z = sext32(b, v);
+    write(b, rt, z);
+    Ok(())
+}
+
+/// SYNC。インタプリタは逐次なので順序づけだけが残り、何もしない。
+pub fn sync<B: Backend>(_b: &mut B) -> Flow<B> {
+    Ok(())
+}
+
+/// PREF。プリフェッチは性能ヒントなので何もしない。
+pub fn pref<B: Backend>(_b: &mut B) -> Flow<B> {
+    Ok(())
+}
+
+/// LL rt,off(rs)。排他制御は持たずロードとして振る舞う。
+pub fn ll<B: Backend>(b: &mut B, rt: Gpr, rs: Gpr, imm: i32, endian: Endian) -> Flow<B> {
+    lw_endian(b, rt, rs, imm, endian)
+}
+
+/// SC rt,off(rs)。ストアして rt に 1 を返す（単一スレッドなので常に成功）。
+pub fn sc<B: Backend>(b: &mut B, rt: Gpr, rs: Gpr, imm: i32, endian: Endian) -> Flow<B> {
+    let base = read(b, rs);
+    let off = b.konst::<W64>(imm as i64 as u64);
+    let addr = b.add::<W64>(base, off);
+    let v: B::V<W64> = read(b, rt);
+    let w: B::V<W32> = b.trunc::<W64, W32>(v);
+    b.store::<W32>(addr, w, word_write(endian))?;
+    let one = const_w64(b, 1);
+    write(b, rt, one);
+    Ok(())
+}
+
+/// TEQ rs,rt。等しければトラップ。
+pub fn teq<B: Backend>(b: &mut B, rs: Gpr, rt: Gpr) -> Flow<B> {
+    let x = read(b, rs);
+    let y = read(b, rt);
+    let eq = b.cmp::<W64>(Cmp::Eq, x, y);
+    b.if_then(eq, |b| raise_trap(b))
+}
+
+// ---- MIPS64 ----
+
+/// DADDU rd,rs,rt。
+pub fn daddu<B: Backend>(b: &mut B, rd: Gpr, rs: Gpr, rt: Gpr) -> Flow<B> {
+    let x = read(b, rs);
+    let y = read(b, rt);
+    let v = b.add::<W64>(x, y);
+    write(b, rd, v);
+    Ok(())
+}
+
+/// DSUBU rd,rs,rt。
+pub fn dsubu<B: Backend>(b: &mut B, rd: Gpr, rs: Gpr, rt: Gpr) -> Flow<B> {
+    let x = read(b, rs);
+    let y = read(b, rt);
+    let v = b.sub::<W64>(x, y);
+    write(b, rd, v);
+    Ok(())
+}
+
+/// DADD rd,rs,rt。64 ビットの符号付き溢れはトラップ。
+pub fn dadd<B: Backend>(b: &mut B, rd: Gpr, rs: Gpr, rt: Gpr) -> Flow<B> {
+    let x = read(b, rs);
+    let y = read(b, rt);
+    let s = b.add::<W64>(x, y);
+    doverflow(b, x, y, s, false)?;
+    write(b, rd, s);
+    Ok(())
+}
+
+/// DSUB rd,rs,rt。
+pub fn dsub<B: Backend>(b: &mut B, rd: Gpr, rs: Gpr, rt: Gpr) -> Flow<B> {
+    let x = read(b, rs);
+    let y = read(b, rt);
+    let d = b.sub::<W64>(x, y);
+    doverflow(b, x, y, d, true)?;
+    write(b, rd, d);
+    Ok(())
+}
+
+fn doverflow<B: Backend>(
+    b: &mut B,
+    x: B::V<W64>,
+    y: B::V<W64>,
+    r: B::V<W64>,
+    sub: bool,
+) -> Flow<B> {
+    let sign = b.konst::<W64>(0x8000_0000_0000_0000);
+    let sx = b.and::<W64>(x, sign);
+    let sy = b.and::<W64>(y, sign);
+    let ss = b.and::<W64>(r, sign);
+    let pre = if sub {
+        b.cmp::<W64>(Cmp::Ne, sx, sy)
+    } else {
+        b.cmp::<W64>(Cmp::Eq, sx, sy)
+    };
+    let post = b.cmp::<W64>(Cmp::Ne, sx, ss);
+    b.if_then(pre, |b| {
+        b.if_then(post, |b| raise_trap(b))?;
+        Ok(())
+    })
+}
+
+/// DADDIU rt,rs,imm。
+pub fn daddiu<B: Backend>(b: &mut B, rt: Gpr, rs: Gpr, imm: i32) -> Flow<B> {
+    let x = read(b, rs);
+    let y = b.konst::<W64>(imm as i64 as u64);
+    let v = b.add::<W64>(x, y);
+    write(b, rt, v);
+    Ok(())
+}
+
+/// DMULT rs,rt。HI<-上位、LO<-下位。
+pub fn dmult<B: Backend>(b: &mut B, rs: Gpr, rt: Gpr) -> Flow<B> {
+    let x = read(b, rs);
+    let y = read(b, rt);
+    let lo = b.mul::<W64>(x, y);
+    let hi = b.mulh::<W64>(x, y);
+    b.set(hi_ref(), hi);
+    b.set(lo_ref(), lo);
+    Ok(())
+}
+
+/// DMULTU。
+pub fn dmultu<B: Backend>(b: &mut B, rs: Gpr, rt: Gpr) -> Flow<B> {
+    let x = read(b, rs);
+    let y = read(b, rt);
+    let lo = b.mul::<W64>(x, y);
+    let hi = b.mulhu::<W64>(x, y);
+    b.set(hi_ref(), hi);
+    b.set(lo_ref(), lo);
+    Ok(())
+}
+
+/// DDIV rs,rt。LO<-商、HI<-剰余。0 除算は div_zero_writes_zero に従う。
+pub fn ddiv<B: Backend>(b: &mut B, rs: Gpr, rt: Gpr) -> Flow<B> {
+    ddiv_inner(b, rs, rt, false)
+}
+
+/// DDIVU。
+pub fn ddivu<B: Backend>(b: &mut B, rs: Gpr, rt: Gpr) -> Flow<B> {
+    ddiv_inner(b, rs, rt, true)
+}
+
+fn ddiv_inner<B: Backend>(b: &mut B, rs: Gpr, rt: Gpr, unsigned: bool) -> Flow<B> {
+    let x = read(b, rs);
+    let y = read(b, rt);
+    let zero = b.konst::<W64>(0);
+    let dz = b.cmp::<W64>(Cmp::Eq, y, zero);
+    b.if_then(dz, |b| {
+        let flag: B::V<W64> = b.get(div_zero_writes_zero_ref());
+        let z0 = b.konst::<W64>(0);
+        let nz = b.cmp::<W64>(Cmp::Ne, flag, z0);
+        b.if_then(nz, |b| {
+            let z = b.konst::<W64>(0);
+            b.set(hi_ref(), z);
+            b.set(lo_ref(), z);
+            Ok(())
+        })
+    })?;
+    let nz = b.cmp::<W64>(Cmp::Ne, y, zero);
+    b.if_then(nz, |b| {
+        let (q, r) = if unsigned {
+            (b.udiv::<W64>(x, y), b.urem::<W64>(x, y))
+        } else {
+            (b.sdiv::<W64>(x, y), b.srem::<W64>(x, y))
+        };
+        b.set(lo_ref(), q);
+        b.set(hi_ref(), r);
+        Ok(())
+    })
+}
+
+/// DSLL rd,rt,sa。
+pub fn dsll<B: Backend>(b: &mut B, rd: Gpr, rt: Gpr, sa: u32) -> Flow<B> {
+    dshift_imm(b, rd, rt, sa, Shift::Left)
+}
+
+/// DSRL rd,rt,sa。
+pub fn dsrl<B: Backend>(b: &mut B, rd: Gpr, rt: Gpr, sa: u32) -> Flow<B> {
+    dshift_imm(b, rd, rt, sa, Shift::RightL)
+}
+
+/// DSRA rd,rt,sa。
+pub fn dsra<B: Backend>(b: &mut B, rd: Gpr, rt: Gpr, sa: u32) -> Flow<B> {
+    dshift_imm(b, rd, rt, sa, Shift::RightA)
+}
+
+/// DSLL32 rd,rt,sa（sa+32）。
+pub fn dsll32<B: Backend>(b: &mut B, rd: Gpr, rt: Gpr, sa: u32) -> Flow<B> {
+    dshift_imm(b, rd, rt, sa + 32, Shift::Left)
+}
+
+/// DSRL32 rd,rt,sa。
+pub fn dsrl32<B: Backend>(b: &mut B, rd: Gpr, rt: Gpr, sa: u32) -> Flow<B> {
+    dshift_imm(b, rd, rt, sa + 32, Shift::RightL)
+}
+
+/// DSRA32 rd,rt,sa。
+pub fn dsra32<B: Backend>(b: &mut B, rd: Gpr, rt: Gpr, sa: u32) -> Flow<B> {
+    dshift_imm(b, rd, rt, sa + 32, Shift::RightA)
+}
+
+/// DSLLV rd,rt,rs。
+pub fn dsllv<B: Backend>(b: &mut B, rd: Gpr, rt: Gpr, rs: Gpr) -> Flow<B> {
+    dshift_var(b, rd, rt, rs, Shift::Left)
+}
+
+/// DSRLV。
+pub fn dsrlv<B: Backend>(b: &mut B, rd: Gpr, rt: Gpr, rs: Gpr) -> Flow<B> {
+    dshift_var(b, rd, rt, rs, Shift::RightL)
+}
+
+/// DSRAV。
+pub fn dsrav<B: Backend>(b: &mut B, rd: Gpr, rt: Gpr, rs: Gpr) -> Flow<B> {
+    dshift_var(b, rd, rt, rs, Shift::RightA)
+}
+
+enum Shift {
+    Left,
+    RightL,
+    RightA,
+}
+
+fn dshift_imm<B: Backend>(b: &mut B, rd: Gpr, rt: Gpr, sa: u32, dir: Shift) -> Flow<B> {
+    let v = read(b, rt);
+    let n = b.konst::<W64>(u64::from(sa));
+    let r = match dir {
+        Shift::Left => b.shl::<W64>(v, n),
+        Shift::RightL => b.shr_l::<W64>(v, n),
+        Shift::RightA => b.shr_a::<W64>(v, n),
+    };
+    write(b, rd, r);
+    Ok(())
+}
+
+fn dshift_var<B: Backend>(b: &mut B, rd: Gpr, rt: Gpr, rs: Gpr, dir: Shift) -> Flow<B> {
+    let v = read(b, rt);
+    let s = read(b, rs);
+    let m = b.konst::<W64>(63);
+    let n = b.and::<W64>(s, m);
+    let r = match dir {
+        Shift::Left => b.shl::<W64>(v, n),
+        Shift::RightL => b.shr_l::<W64>(v, n),
+        Shift::RightA => b.shr_a::<W64>(v, n),
+    };
+    write(b, rd, r);
+    Ok(())
+}
+
+/// LD rt,off(rs)。
+pub fn ld<B: Backend>(b: &mut B, rt: Gpr, rs: Gpr, imm: i32, endian: Endian) -> Flow<B> {
+    let base = read(b, rs);
+    let off = b.konst::<W64>(imm as i64 as u64);
+    let addr = b.add::<W64>(base, off);
+    let v: B::V<W64> = b.load::<W64>(addr, word_read(endian))?;
+    write(b, rt, v);
+    Ok(())
+}
+
+/// LWU rt,off(rs)。
+pub fn lwu<B: Backend>(b: &mut B, rt: Gpr, rs: Gpr, imm: i32, endian: Endian) -> Flow<B> {
+    let base = read(b, rs);
+    let off = b.konst::<W64>(imm as i64 as u64);
+    let addr = b.add::<W64>(base, off);
+    let v: B::V<W32> = b.load::<W32>(addr, word_read(endian))?;
+    let z = b.zext::<W32, W64>(v);
+    write(b, rt, z);
+    Ok(())
+}
+
+/// LLD。
+pub fn lld<B: Backend>(b: &mut B, rt: Gpr, rs: Gpr, imm: i32, endian: Endian) -> Flow<B> {
+    ld(b, rt, rs, imm, endian)
+}
+
+/// SCD。ストアして rt に 1 を返す。
+pub fn scd<B: Backend>(b: &mut B, rt: Gpr, rs: Gpr, imm: i32, endian: Endian) -> Flow<B> {
+    let base = read(b, rs);
+    let off = b.konst::<W64>(imm as i64 as u64);
+    let addr = b.add::<W64>(base, off);
+    let v: B::V<W64> = read(b, rt);
+    b.store::<W64>(addr, v, word_write(endian))?;
+    let one = const_w64(b, 1);
+    write(b, rt, one);
+    Ok(())
+}
+
+/// SD rt,off(rs)。
+pub fn sd<B: Backend>(b: &mut B, rt: Gpr, rs: Gpr, imm: i32, endian: Endian) -> Flow<B> {
+    let base = read(b, rs);
+    let off = b.konst::<W64>(imm as i64 as u64);
+    let addr = b.add::<W64>(base, off);
+    let v: B::V<W64> = read(b, rt);
+    b.store::<W64>(addr, v, word_write(endian))?;
+    Ok(())
+}
+
+/// LDL/LDR/SDR/SDL。部分レジスタ結合の非整列アクセス。
+/// 現在は非整列幅全体アクセスとして近似する（精度の上限はメモ参照）。
+pub fn ldl<B: Backend>(b: &mut B, rt: Gpr, rs: Gpr, imm: i32, endian: Endian) -> Flow<B> {
+    ld_unaligned(b, rt, rs, imm, endian)
+}
+
+/// LDR。
+pub fn ldr<B: Backend>(b: &mut B, rt: Gpr, rs: Gpr, imm: i32, endian: Endian) -> Flow<B> {
+    ld_unaligned(b, rt, rs, imm, endian)
+}
+
+fn ld_unaligned<B: Backend>(b: &mut B, rt: Gpr, rs: Gpr, imm: i32, endian: Endian) -> Flow<B> {
+    let base = read(b, rs);
+    let off = b.konst::<W64>(imm as i64 as u64);
+    let addr = b.add::<W64>(base, off);
+    let ac = Access {
+        endian,
+        align: Align::Unaligned,
+        kind: AccessKind::DataRead,
+    };
+    let v: B::V<W64> = b.load::<W64>(addr, ac)?;
+    write(b, rt, v);
+    Ok(())
+}
+
+/// SDL。
+pub fn sdl<B: Backend>(b: &mut B, rt: Gpr, rs: Gpr, imm: i32, endian: Endian) -> Flow<B> {
+    sd_unaligned(b, rt, rs, imm, endian)
+}
+
+/// SDR。
+pub fn sdr<B: Backend>(b: &mut B, rt: Gpr, rs: Gpr, imm: i32, endian: Endian) -> Flow<B> {
+    sd_unaligned(b, rt, rs, imm, endian)
+}
+
+fn sd_unaligned<B: Backend>(b: &mut B, rt: Gpr, rs: Gpr, imm: i32, endian: Endian) -> Flow<B> {
+    let base = read(b, rs);
+    let off = b.konst::<W64>(imm as i64 as u64);
+    let addr = b.add::<W64>(base, off);
+    let ac = Access {
+        endian,
+        align: Align::Unaligned,
+        kind: AccessKind::DataWrite,
+    };
+    let v: B::V<W64> = read(b, rt);
+    b.store::<W64>(addr, v, ac)?;
+    Ok(())
+}
+
+/// DEXT rt,rs,pos,size。
+pub fn dext<B: Backend>(b: &mut B, rt: Gpr, rs: Gpr, lsb: u32, msbd: u32) -> Flow<B> {
+    let size = u64::from(msbd) + 1;
+    let mask: u64 = if size >= 64 {
+        u64::MAX
+    } else {
+        (1u64 << size) - 1
+    };
+    let v = read(b, rs);
+    let n = b.konst::<W64>(u64::from(lsb));
+    let sh = b.shr_l::<W64>(v, n);
+    let mk = b.konst::<W64>(mask);
+    let m = b.and::<W64>(sh, mk);
+    write(b, rt, m);
+    Ok(())
+}
+
+/// DINS rt,rs,pos,size。
+pub fn dins<B: Backend>(b: &mut B, rt: Gpr, rs: Gpr, lsb: u32, msb: u32) -> Flow<B> {
+    let size = u64::from(msb) + 1 - u64::from(lsb);
+    let mask: u64 = if size >= 64 {
+        u64::MAX
+    } else {
+        (1u64 << size) - 1
+    };
+    let src = read(b, rs);
+    let mk = b.konst::<W64>(mask);
+    let field = b.and::<W64>(src, mk);
+    let n = b.konst::<W64>(u64::from(lsb));
+    let shifted = b.shl::<W64>(field, n);
+    let keep: u64 = !(mask << lsb);
+    let old = read(b, rt);
+    let kk = b.konst::<W64>(keep);
+    let kept = b.and::<W64>(old, kk);
+    let merged = b.or::<W64>(kept, shifted);
+    write(b, rt, merged);
+    Ok(())
+}
+
+/// DSBH rd,rt。各半語内のバイトを入れ替える。
+pub fn dsbh<B: Backend>(b: &mut B, rd: Gpr, rt: Gpr) -> Flow<B> {
+    let v = read(b, rt);
+    let m = b.konst::<W64>(0x00ff_00ff_00ff_00ff);
+    let k8 = b.konst::<W64>(8);
+    let lo = b.and::<W64>(v, m);
+    let up = b.shl::<W64>(lo, k8);
+    let down = b.shr_l::<W64>(v, k8);
+    let dn = b.and::<W64>(down, m);
+    let r = b.or::<W64>(up, dn);
+    write(b, rd, r);
+    Ok(())
+}
+
+/// DSHD rd,rt。各 32 ビット語内で半語を入れ替える。
+pub fn dshd<B: Backend>(b: &mut B, rd: Gpr, rt: Gpr) -> Flow<B> {
+    let v = read(b, rt);
+    let m = b.konst::<W64>(0x0000_ffff_0000_ffff);
+    let k16 = b.konst::<W64>(16);
+    let lo = b.and::<W64>(v, m);
+    let up = b.shl::<W64>(lo, k16);
+    let down = b.shr_l::<W64>(v, k16);
+    let dn = b.and::<W64>(down, m);
+    let r = b.or::<W64>(up, dn);
+    write(b, rd, r);
+    Ok(())
+}
+
+// ---- Release 6 ----
+
+/// SELEQZ rd,rs,rt。
+pub fn seleqz<B: Backend>(b: &mut B, rd: Gpr, rs: Gpr, rt: Gpr) -> Flow<B> {
+    let y = read(b, rt);
+    let zero = b.konst::<W64>(0);
+    let take = b.cmp::<W64>(Cmp::Eq, y, zero);
+    let x = read(b, rs);
+    let z = b.konst::<W64>(0);
+    let v = b.select::<W64>(take, x, z);
+    write(b, rd, v);
+    Ok(())
+}
+
+/// SELNEZ。
+pub fn selnez<B: Backend>(b: &mut B, rd: Gpr, rs: Gpr, rt: Gpr) -> Flow<B> {
+    let y = read(b, rt);
+    let zero = b.konst::<W64>(0);
+    let take = b.cmp::<W64>(Cmp::Ne, y, zero);
+    let x = read(b, rs);
+    let z = b.konst::<W64>(0);
+    let v = b.select::<W64>(take, x, z);
+    write(b, rd, v);
+    Ok(())
+}
+
+/// MULU（R6）。
+pub fn mulu<B: Backend>(b: &mut B, rd: Gpr, rs: Gpr, rt: Gpr) -> Flow<B> {
+    mul(b, rd, rs, rt)
+}
+
+/// MUH rd,rs,rt。符号付き積の上位 32 ビット。
+pub fn muh<B: Backend>(b: &mut B, rd: Gpr, rs: Gpr, rt: Gpr) -> Flow<B> {
+    muh_inner(b, rd, rs, rt, false, false)
+}
+
+/// MUHU。
+pub fn muhu<B: Backend>(b: &mut B, rd: Gpr, rs: Gpr, rt: Gpr) -> Flow<B> {
+    muh_inner(b, rd, rs, rt, false, true)
+}
+
+/// DMUL。
+pub fn dmul<B: Backend>(b: &mut B, rd: Gpr, rs: Gpr, rt: Gpr) -> Flow<B> {
+    let x = read(b, rs);
+    let y = read(b, rt);
+    let v = b.mul::<W64>(x, y);
+    write(b, rd, v);
+    Ok(())
+}
+
+/// DMULU。
+pub fn dmulu<B: Backend>(b: &mut B, rd: Gpr, rs: Gpr, rt: Gpr) -> Flow<B> {
+    dmul(b, rd, rs, rt)
+}
+
+/// DMUH。
+pub fn dmuh<B: Backend>(b: &mut B, rd: Gpr, rs: Gpr, rt: Gpr) -> Flow<B> {
+    let x = read(b, rs);
+    let y = read(b, rt);
+    let v = b.mulh::<W64>(x, y);
+    write(b, rd, v);
+    Ok(())
+}
+
+/// DMUHU。
+pub fn dmuhu<B: Backend>(b: &mut B, rd: Gpr, rs: Gpr, rt: Gpr) -> Flow<B> {
+    let x = read(b, rs);
+    let y = read(b, rt);
+    let v = b.mulhu::<W64>(x, y);
+    write(b, rd, v);
+    Ok(())
+}
+
+fn muh_inner<B: Backend>(
+    b: &mut B,
+    rd: Gpr,
+    rs: Gpr,
+    rt: Gpr,
+    wide: bool,
+    unsigned: bool,
+) -> Flow<B> {
+    let xr = read(b, rs);
+    let xw: B::V<W32> = b.trunc::<W64, W32>(xr);
+    let x: B::V<W64> = if wide { xr } else { b.sext::<W32, W64>(xw) };
+    let yr = read(b, rt);
+    let yw: B::V<W32> = b.trunc::<W64, W32>(yr);
+    let y: B::V<W64> = if wide { yr } else { b.sext::<W32, W64>(yw) };
+    let hi = if unsigned {
+        b.mulhu::<W64>(x, y)
+    } else {
+        b.mulh::<W64>(x, y)
+    };
+    let r = if wide { hi } else { sext32(b, hi) };
+    write(b, rd, r);
+    Ok(())
+}
+
+/// DIV（R6）rd,rs,rt。0 除算の結果は未定義（アーキテクチャが結果を規定しない）。
+pub fn div_r6<B: Backend>(b: &mut B, rd: Gpr, rs: Gpr, rt: Gpr) -> Flow<B> {
+    r6_div(b, rd, rs, rt, false, false, false)
+}
+
+/// MOD。
+pub fn mod_<B: Backend>(b: &mut B, rd: Gpr, rs: Gpr, rt: Gpr) -> Flow<B> {
+    r6_div(b, rd, rs, rt, true, false, false)
+}
+
+/// DIVU（R6）。
+pub fn divu_r6<B: Backend>(b: &mut B, rd: Gpr, rs: Gpr, rt: Gpr) -> Flow<B> {
+    r6_div(b, rd, rs, rt, false, true, false)
+}
+
+/// MODU。
+pub fn modu<B: Backend>(b: &mut B, rd: Gpr, rs: Gpr, rt: Gpr) -> Flow<B> {
+    r6_div(b, rd, rs, rt, true, true, false)
+}
+
+/// DDIV（R6）。
+pub fn ddiv_r6<B: Backend>(b: &mut B, rd: Gpr, rs: Gpr, rt: Gpr) -> Flow<B> {
+    r6_div(b, rd, rs, rt, false, false, true)
+}
+
+/// DMOD。
+pub fn dmod<B: Backend>(b: &mut B, rd: Gpr, rs: Gpr, rt: Gpr) -> Flow<B> {
+    r6_div(b, rd, rs, rt, true, false, true)
+}
+
+/// DDIVU（R6）。
+pub fn ddivu_r6<B: Backend>(b: &mut B, rd: Gpr, rs: Gpr, rt: Gpr) -> Flow<B> {
+    r6_div(b, rd, rs, rt, false, true, true)
+}
+
+/// DMODU。
+pub fn dmodu<B: Backend>(b: &mut B, rd: Gpr, rs: Gpr, rt: Gpr) -> Flow<B> {
+    r6_div(b, rd, rs, rt, true, true, true)
+}
+
+fn r6_div<B: Backend>(
+    b: &mut B,
+    rd: Gpr,
+    rs: Gpr,
+    rt: Gpr,
+    rem: bool,
+    unsigned: bool,
+    wide: bool,
+) -> Flow<B> {
+    let xr = read(b, rs);
+    let xw: B::V<W32> = b.trunc::<W64, W32>(xr);
+    let x: B::V<W64> = if wide { xr } else { b.sext::<W32, W64>(xw) };
+    let yr = read(b, rt);
+    let yw: B::V<W32> = b.trunc::<W64, W32>(yr);
+    let y: B::V<W64> = if wide { yr } else { b.sext::<W32, W64>(yw) };
+    let r = match (rem, unsigned) {
+        (false, false) => b.sdiv::<W64>(x, y),
+        (true, false) => b.srem::<W64>(x, y),
+        (false, true) => b.udiv::<W64>(x, y),
+        (true, true) => b.urem::<W64>(x, y),
+    };
+    let out = if wide { r } else { sext32(b, r) };
+    write(b, rd, out);
+    Ok(())
+}
+
+/// LSA rd,rs,rt,sa。rd <- (rs << sa) + rt。sa は実シフト量（符号化値+1 は呼び出し側）。
+pub fn lsa<B: Backend>(b: &mut B, rd: Gpr, rs: Gpr, rt: Gpr, sa: u32) -> Flow<B> {
+    let x = read(b, rs);
+    let n = b.konst::<W64>(u64::from(sa));
+    let sh = b.shl::<W64>(x, n);
+    let y = read(b, rt);
+    let v = b.add::<W64>(sh, y);
+    let z = sext32(b, v);
+    write(b, rd, z);
+    Ok(())
+}
+
+/// DLSA。
+pub fn dlsa<B: Backend>(b: &mut B, rd: Gpr, rs: Gpr, rt: Gpr, sa: u32) -> Flow<B> {
+    let x = read(b, rs);
+    let n = b.konst::<W64>(u64::from(sa));
+    let sh = b.shl::<W64>(x, n);
+    let y = read(b, rt);
+    let v = b.add::<W64>(sh, y);
+    write(b, rd, v);
+    Ok(())
+}
+
+/// AUIPC rd,imm16。rd <- pc + (imm16 << 16)。
+pub fn auipc<B: Backend>(b: &mut B, rd: Gpr, imm: i32, pc: u64) -> Flow<B> {
+    let off = (imm as i64 as u64) << 16;
+    let a = const_w64(b, pc.wrapping_add(off));
+    let z = sext32(b, a);
+    write(b, rd, z);
+    Ok(())
+}
+
+/// ALUIPC rd,imm16。rd <- (pc + (imm16 << 16)) & ~0xffff。
+pub fn aluipc<B: Backend>(b: &mut B, rd: Gpr, imm: i32, pc: u64) -> Flow<B> {
+    let off = (imm as i64 as u64) << 16;
+    let a = pc.wrapping_add(off) & !0xffffu64;
+    let v = const_w64(b, a);
+    let z = sext32(b, v);
+    write(b, rd, z);
+    Ok(())
+}
+
+/// ADDIUPC rd,imm19。rd <- pc + (imm19 << 2)。
+pub fn addiupc<B: Backend>(b: &mut B, rd: Gpr, imm: i32, pc: u64) -> Flow<B> {
+    let off = (imm as i64 as u64) << 2;
+    let a = const_w64(b, pc.wrapping_add(off));
+    let z = sext32(b, a);
+    write(b, rd, z);
+    Ok(())
+}
+
+/// LWPC rt,off19。pc 相対の 32 ビットロード。
+pub fn lwpc<B: Backend>(b: &mut B, rt: Gpr, imm19: u32, endian: Endian, pc: u64) -> Flow<B> {
+    let off = (((imm19 as i32) << 13) >> 13) as i64 as u64;
+    let addr = pc.wrapping_add(off << 2).wrapping_add(4);
+    let a = const_w64(b, addr);
+    let v: B::V<W32> = b.load::<W32>(a, word_read(endian))?;
+    let z = b.sext::<W32, W64>(v);
+    write(b, rt, z);
+    Ok(())
+}
+
+/// LWUPC。ゼロ拡張版。
+pub fn lwupc<B: Backend>(b: &mut B, rt: Gpr, imm19: u32, endian: Endian, pc: u64) -> Flow<B> {
+    let off = (((imm19 as i32) << 13) >> 13) as i64 as u64;
+    let addr = pc.wrapping_add(off << 2).wrapping_add(4);
+    let a = const_w64(b, addr);
+    let v: B::V<W32> = b.load::<W32>(a, word_read(endian))?;
+    let z = b.zext::<W32, W64>(v);
+    write(b, rt, z);
+    Ok(())
+}
+
+/// LDPC rt,off18。pc 相対の 64 ビットロード。
+pub fn ldpc<B: Backend>(b: &mut B, rt: Gpr, imm18: u32, endian: Endian, pc: u64) -> Flow<B> {
+    let off = (((imm18 as i32) << 14) >> 14) as i64 as u64;
+    let addr = pc.wrapping_add(off << 3).wrapping_add(4);
+    let a = const_w64(b, addr);
+    let v: B::V<W64> = b.load::<W64>(a, word_read(endian))?;
+    write(b, rt, v);
+    Ok(())
+}
+
+/// ALIGN rd,rs,rt,bp。{rs:rt} を右に 8*bp シフトし下位 32 ビットを取る。bp=0 は rd<-rt。
+pub fn align<B: Backend>(b: &mut B, rd: Gpr, rs: Gpr, rt: Gpr, bp: u32) -> Flow<B> {
+    let x = read(b, rs);
+    let y = read(b, rt);
+    if bp == 0 {
+        let z = sext32(b, y);
+        write(b, rd, z);
+        return Ok(());
+    }
+    let k = u64::from(bp) * 8;
+    let n1 = b.konst::<W64>(k);
+    let down = b.shr_l::<W64>(y, n1);
+    let n2 = b.konst::<W64>(32 - k);
+    let up = b.shl::<W64>(x, n2);
+    let v = b.or::<W64>(down, up);
+    let z = sext32(b, v);
+    write(b, rd, z);
+    Ok(())
+}
+
+/// DALIGN rd,rs,rt,bp。{rs:rt} を右に 8*bp シフトし下位 64 ビットを取る。bp=0 は rd<-rt。
+pub fn dalign<B: Backend>(b: &mut B, rd: Gpr, rs: Gpr, rt: Gpr, bp: u32) -> Flow<B> {
+    let x = read(b, rs);
+    let y = read(b, rt);
+    let bp = bp & 7;
+    if bp == 0 {
+        write(b, rd, y);
+        return Ok(());
+    }
+    let k = u64::from(bp) * 8;
+    let n1 = b.konst::<W64>(k);
+    let down = b.shr_l::<W64>(y, n1);
+    let n2 = b.konst::<W64>(64 - k);
+    let up = b.shl::<W64>(x, n2);
+    let v = b.or::<W64>(down, up);
+    write(b, rd, v);
+    Ok(())
+}
+
+/// BITSWAP rd,rt。各バイト内のビット順を反転する。
+pub fn bitswap<B: Backend>(b: &mut B, rd: Gpr, rt: Gpr) -> Flow<B> {
+    let v = read(b, rt);
+    let w: B::V<W32> = b.trunc::<W64, W32>(v);
+    let r = bswap_bits32(b, w);
+    let z = b.sext::<W32, W64>(r);
+    write(b, rd, z);
+    Ok(())
+}
+
+/// DBITSWAP。
+pub fn dbitswap<B: Backend>(b: &mut B, rd: Gpr, rt: Gpr) -> Flow<B> {
+    let v = read(b, rt);
+    let lo: B::V<W32> = b.trunc::<W64, W32>(v);
+    let k32 = b.konst::<W64>(32);
+    let hv = b.shr_l::<W64>(v, k32);
+    let hi: B::V<W32> = b.trunc::<W64, W32>(hv);
+    let l = bswap_bits32(b, lo);
+    let h = bswap_bits32(b, hi);
+    let lz = b.zext::<W32, W64>(l);
+    let hz = b.zext::<W32, W64>(h);
+    let hs = b.shl::<W64>(hz, k32);
+    let r = b.or::<W64>(hs, lz);
+    write(b, rd, r);
+    Ok(())
+}
+
+fn bswap_bits32<B: Backend>(b: &mut B, w: B::V<W32>) -> B::V<W32> {
+    let m1 = b.konst::<W32>(0x5555_5555);
+    let m2 = b.konst::<W32>(0x3333_3333);
+    let m4 = b.konst::<W32>(0x0f0f_0f0f);
+    let k1 = b.konst::<W32>(1);
+    let k2 = b.konst::<W32>(2);
+    let k4 = b.konst::<W32>(4);
+    let a1 = b.and::<W32>(w, m1);
+    let a2 = b.shl::<W32>(a1, k1);
+    let n1 = b.not::<W32>(m1);
+    let a3 = b.and::<W32>(w, n1);
+    let a4 = b.shr_l::<W32>(a3, k1);
+    let a = b.or::<W32>(a2, a4);
+    let c1 = b.and::<W32>(a, m2);
+    let c2 = b.shl::<W32>(c1, k2);
+    let n2 = b.not::<W32>(m2);
+    let c3 = b.and::<W32>(a, n2);
+    let c4 = b.shr_l::<W32>(c3, k2);
+    let c = b.or::<W32>(c2, c4);
+    let e1 = b.and::<W32>(c, m4);
+    let e2 = b.shl::<W32>(e1, k4);
+    let n3 = b.not::<W32>(m4);
+    let e3 = b.and::<W32>(c, n3);
+    let e4 = b.shr_l::<W32>(e3, k4);
+    b.or::<W32>(e2, e4)
+}
+
+/// BC off26。遅延スロットなしの無条件分岐。pc を直接書き換える。
+pub fn bc<B: Backend>(b: &mut B, target: u64) -> Flow<B> {
+    let t = const_w64(b, target);
+    b.set(pc_ref(), t);
+    Ok(())
+}
+
+/// BALC off26。リンク（pc+4）して飛ぶ。
+pub fn balc<B: Backend>(b: &mut B, pc: u64, target: u64) -> Flow<B> {
+    let l = const_w64(b, pc.wrapping_add(4));
+    write(b, Gpr(31), l);
+    let t = const_w64(b, target);
+    b.set(pc_ref(), t);
+    Ok(())
+}
+
+/// JIC rt,off。遅延スロットなしのレジスタジャンプ（pc<-rt+off）。
+pub fn jic<B: Backend>(b: &mut B, rt: Gpr, off: i32) -> Flow<B> {
+    let v = read(b, rt);
+    let o = b.konst::<W64>(off as i64 as u64);
+    let t = b.add::<W64>(v, o);
+    b.set(pc_ref(), t);
+    Ok(())
+}
+
+/// JIALC rt,off。リンクして飛ぶ。
+pub fn jialc<B: Backend>(b: &mut B, rt: Gpr, pc: u64, off: i32) -> Flow<B> {
+    let l = const_w64(b, pc.wrapping_add(4));
+    write(b, Gpr(31), l);
+    let v = read(b, rt);
+    let o = b.konst::<W64>(off as i64 as u64);
+    let t = b.add::<W64>(v, o);
+    b.set(pc_ref(), t);
+    Ok(())
+}
+
+/// BEQZC rs,off21。遅延スロットなし。rs==0 で飛ぶ。
+pub fn beqzc<B: Backend>(b: &mut B, rs: Gpr, pc: u64, target: u64) -> Flow<B> {
+    let v = read(b, rs);
+    let zero = b.konst::<W64>(0);
+    let take = b.cmp::<W64>(Cmp::Eq, v, zero);
+    let fall = const_w64(b, pc.wrapping_add(4));
+    let t = const_w64(b, target);
+    let n = b.select::<W64>(take, t, fall);
+    b.set(pc_ref(), n);
+    Ok(())
+}
+
+/// BNEZC。
+pub fn bnezc<B: Backend>(b: &mut B, rs: Gpr, pc: u64, target: u64) -> Flow<B> {
+    let v = read(b, rs);
+    let zero = b.konst::<W64>(0);
+    let take = b.cmp::<W64>(Cmp::Ne, v, zero);
+    let fall = const_w64(b, pc.wrapping_add(4));
+    let t = const_w64(b, target);
+    let n = b.select::<W64>(take, t, fall);
+    b.set(pc_ref(), n);
+    Ok(())
+}
+
+/// DADDI rt,rs,imm。64 ビットの符号付き溢れはトラップ。
+pub fn daddi<B: Backend>(b: &mut B, rt: Gpr, rs: Gpr, imm: i32) -> Flow<B> {
+    let x = read(b, rs);
+    let y = b.konst::<W64>(imm as i64 as u64);
+    let s = b.add::<W64>(x, y);
+    doverflow(b, x, y, s, false)?;
+    write(b, rt, s);
+    Ok(())
+}
+
+// ---- R6 のコンパクト分岐（比較・リンク・ゼロ比較）----
+// フィールド値の分解（rs==0 / rs==rt / rs<rt 等）はデコードで保証される。
+// pc に次の実行先を直接置き、npc は変えない（step が npc=pc+4 を張る）。
+// Ref: SPEC-MIPS-R6 (Rev 6.06).
+
+/// 条件 take なら target、不成立なら pc+4。link は無条件に $31=pc+4。
+fn cbranch<B: Backend>(b: &mut B, take: B::B, pc: u64, target: u64, link: bool) -> Flow<B> {
+    let fall = const_w64(b, pc.wrapping_add(4));
+    if link {
+        write(b, Gpr(31), fall);
+    }
+    let t = const_w64(b, target);
+    let n = b.select::<W64>(take, t, fall);
+    b.set(pc_ref(), n);
+    Ok(())
+}
+
+/// BEQC。rs==rt で飛ぶ。
+pub fn beqc<B: Backend>(b: &mut B, rs: Gpr, rt: Gpr, pc: u64, target: u64) -> Flow<B> {
+    let x = read(b, rs);
+    let y = read(b, rt);
+    let take = b.cmp::<W64>(Cmp::Eq, x, y);
+    cbranch(b, take, pc, target, false)
+}
+
+/// BNEC。rs!=rt で飛ぶ。
+pub fn bnec<B: Backend>(b: &mut B, rs: Gpr, rt: Gpr, pc: u64, target: u64) -> Flow<B> {
+    let x = read(b, rs);
+    let y = read(b, rt);
+    let take = b.cmp::<W64>(Cmp::Ne, x, y);
+    cbranch(b, take, pc, target, false)
+}
+
+/// 32 ビット加算の符号付き溢れ。低 32 ビットの和が i32 に収まらなければ真。
+fn ovf32<B: Backend>(b: &mut B, rs: Gpr, rt: Gpr) -> B::B {
+    let x = read(b, rs);
+    let y = read(b, rt);
+    let sx = sext32(b, x);
+    let sy = sext32(b, y);
+    let ss = b.add::<W64>(sx, sy);
+    let back = sext32(b, ss);
+    b.cmp::<W64>(Cmp::Ne, ss, back)
+}
+
+/// BOVC。rs+rt が 32 ビット符号付き溢れなら飛ぶ。
+pub fn bovc<B: Backend>(b: &mut B, rs: Gpr, rt: Gpr, pc: u64, target: u64) -> Flow<B> {
+    let take = ovf32(b, rs, rt);
+    cbranch(b, take, pc, target, false)
+}
+
+/// BNVC。溢れなければ飛ぶ。
+pub fn bnvc<B: Backend>(b: &mut B, rs: Gpr, rt: Gpr, pc: u64, target: u64) -> Flow<B> {
+    let x = read(b, rs);
+    let y = read(b, rt);
+    let sx = sext32(b, x);
+    let sy = sext32(b, y);
+    let ss = b.add::<W64>(sx, sy);
+    let back = sext32(b, ss);
+    let take = b.cmp::<W64>(Cmp::Eq, ss, back);
+    cbranch(b, take, pc, target, false)
+}
+
+/// BNEZALC。rt!=0 でリンクして飛ぶ。
+pub fn bnezalc<B: Backend>(b: &mut B, rt: Gpr, pc: u64, target: u64) -> Flow<B> {
+    let y = read(b, rt);
+    let zero = b.konst::<W64>(0);
+    let take = b.cmp::<W64>(Cmp::Ne, y, zero);
+    cbranch(b, take, pc, target, true)
+}
+
+/// BLEZALC。rt<=0（符号付き）でリンクして飛ぶ。
+pub fn blezalc<B: Backend>(b: &mut B, rt: Gpr, pc: u64, target: u64) -> Flow<B> {
+    let y = read(b, rt);
+    let zero = b.konst::<W64>(0);
+    let take = b.cmp::<W64>(Cmp::LeS, y, zero);
+    cbranch(b, take, pc, target, true)
+}
+
+/// BGEZALC。rt>=0 でリンクして飛ぶ。
+pub fn bgezalc<B: Backend>(b: &mut B, rt: Gpr, pc: u64, target: u64) -> Flow<B> {
+    let y = read(b, rt);
+    let zero = b.konst::<W64>(0);
+    let take = b.cmp::<W64>(Cmp::GeS, y, zero);
+    cbranch(b, take, pc, target, true)
+}
+
+/// BGEUC。rs>=rt（符号なし）で飛ぶ。
+pub fn bgeuc<B: Backend>(b: &mut B, rs: Gpr, rt: Gpr, pc: u64, target: u64) -> Flow<B> {
+    let x = read(b, rs);
+    let y = read(b, rt);
+    let take = b.cmp::<W64>(Cmp::GeU, x, y);
+    cbranch(b, take, pc, target, false)
+}
+
+/// BGTZALC。rt>0 でリンクして飛ぶ。
+pub fn bgtzalc<B: Backend>(b: &mut B, rt: Gpr, pc: u64, target: u64) -> Flow<B> {
+    let y = read(b, rt);
+    let zero = b.konst::<W64>(0);
+    let take = b.cmp::<W64>(Cmp::GtS, y, zero);
+    cbranch(b, take, pc, target, true)
+}
+
+/// BLTZALC。rt<0 でリンクして飛ぶ。
+pub fn bltzalc<B: Backend>(b: &mut B, rt: Gpr, pc: u64, target: u64) -> Flow<B> {
+    let y = read(b, rt);
+    let zero = b.konst::<W64>(0);
+    let take = b.cmp::<W64>(Cmp::LtS, y, zero);
+    cbranch(b, take, pc, target, true)
+}
+
+/// BLTUC。rs<rt（符号なし）で飛ぶ。
+pub fn bltuc<B: Backend>(b: &mut B, rs: Gpr, rt: Gpr, pc: u64, target: u64) -> Flow<B> {
+    let x = read(b, rs);
+    let y = read(b, rt);
+    let take = b.cmp::<W64>(Cmp::LtU, x, y);
+    cbranch(b, take, pc, target, false)
+}
+
+/// BLEZC。rt<=0 で飛ぶ。
+pub fn blezc<B: Backend>(b: &mut B, rt: Gpr, pc: u64, target: u64) -> Flow<B> {
+    let y = read(b, rt);
+    let zero = b.konst::<W64>(0);
+    let take = b.cmp::<W64>(Cmp::LeS, y, zero);
+    cbranch(b, take, pc, target, false)
+}
+
+/// BGEZC。rt>=0 で飛ぶ。
+pub fn bgezc<B: Backend>(b: &mut B, rt: Gpr, pc: u64, target: u64) -> Flow<B> {
+    let y = read(b, rt);
+    let zero = b.konst::<W64>(0);
+    let take = b.cmp::<W64>(Cmp::GeS, y, zero);
+    cbranch(b, take, pc, target, false)
+}
+
+/// BGEC。rs>=rt（符号付き）で飛ぶ。
+pub fn bgec<B: Backend>(b: &mut B, rs: Gpr, rt: Gpr, pc: u64, target: u64) -> Flow<B> {
+    let x = read(b, rs);
+    let y = read(b, rt);
+    let take = b.cmp::<W64>(Cmp::GeS, x, y);
+    cbranch(b, take, pc, target, false)
+}
+
+/// BGTZC。rt>0 で飛ぶ。
+pub fn bgtzc<B: Backend>(b: &mut B, rt: Gpr, pc: u64, target: u64) -> Flow<B> {
+    let y = read(b, rt);
+    let zero = b.konst::<W64>(0);
+    let take = b.cmp::<W64>(Cmp::GtS, y, zero);
+    cbranch(b, take, pc, target, false)
+}
+
+/// BLTZC。rt<0 で飛ぶ。
+pub fn bltzc<B: Backend>(b: &mut B, rt: Gpr, pc: u64, target: u64) -> Flow<B> {
+    let y = read(b, rt);
+    let zero = b.konst::<W64>(0);
+    let take = b.cmp::<W64>(Cmp::LtS, y, zero);
+    cbranch(b, take, pc, target, false)
+}
+
+/// BLTC。rs<rt（符号付き）で飛ぶ。
+pub fn bltc<B: Backend>(b: &mut B, rs: Gpr, rt: Gpr, pc: u64, target: u64) -> Flow<B> {
+    let x = read(b, rs);
+    let y = read(b, rt);
+    let take = b.cmp::<W64>(Cmp::LtS, x, y);
+    cbranch(b, take, pc, target, false)
 }

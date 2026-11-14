@@ -83,14 +83,26 @@ pub struct Format {
 pub enum WhereOp {
     Eq,
     Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+}
+
+/// `where` の右辺。リテラル値か、同じ形式の別フィールド。
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum WhereRhs {
+    Lit(u128),
+    Field(String),
 }
 
 /// フィールド値の制約（`where`）1 件。`field` は形式のフィールド名である。
+/// `rhs` が `Field` のときはフィールド同士の比較（MIPS R6 の BOVC/BEQC 等）。
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct WhereClause {
     pub field: String,
     pub op: WhereOp,
-    pub value: u128,
+    pub rhs: WhereRhs,
 }
 
 /// 命令。

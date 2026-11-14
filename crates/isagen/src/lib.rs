@@ -175,8 +175,41 @@ fn gen_decoder(model: &Model) -> Result<String, GenError> {
                 let op = match w.op {
                     polyisa_isadl::model::WhereOp::Eq => "==",
                     polyisa_isadl::model::WhereOp::Ne => "!=",
+                    polyisa_isadl::model::WhereOp::Lt => "<",
+                    polyisa_isadl::model::WhereOp::Le => "<=",
+                    polyisa_isadl::model::WhereOp::Gt => ">",
+                    polyisa_isadl::model::WhereOp::Ge => ">=",
                 };
-                conds.push(format!("w_{tag}_{k} {op} {:#x}", w.value));
+                match &w.rhs {
+                    polyisa_isadl::model::WhereRhs::Lit(value) => {
+                        conds.push(format!("w_{tag}_{k} {op} {value:#x}"));
+                    }
+                    polyisa_isadl::model::WhereRhs::Field(name) => {
+                        let (hi2, lo2) = match model.fields.iter().find(|f| f.name == *name) {
+                            Some(f) => match f.kind {
+                                polyisa_isadl::model::FieldKind::Bits { hi, lo } => (hi, lo),
+                                _ => (0, 0),
+                            },
+                            None => (0, 0),
+                        };
+                        let width2 = hi2 - lo2 + 1;
+                        let mask2: u128 = if width2 >= 128 {
+                            u128::MAX
+                        } else {
+                            (1u128 << width2) - 1
+                        };
+                        if lo2 == 0 {
+                            s.push_str(&format!(
+                                "                let w2_{tag}_{k} = word & {mask2:#x};\n"
+                            ));
+                        } else {
+                            s.push_str(&format!(
+                                "                let w2_{tag}_{k} = (word >> {lo2}) & {mask2:#x};\n"
+                            ));
+                        }
+                        conds.push(format!("w_{tag}_{k} {op} w2_{tag}_{k}"));
+                    }
+                }
             }
             s.push_str(&format!(
                 "                if {} {{\n                    return Some(Insn::{});\n                }}\n            }}\n",
@@ -533,7 +566,7 @@ mod tests {
         m.insns[0].wheres = vec![WhereClause {
             field: "rs2".to_string(),
             op: WhereOp::Eq,
-            value: 0,
+            rhs: WhereRhs::Lit(0),
         }];
         let g = generate(&m).unwrap();
         assert!(g.decoder.contains("w_add_0 == 0x0"));

@@ -88,8 +88,9 @@ mod tests {
 
     #[test]
     fn insn_count() {
-        // MIPS I の整数命令。nop は sll $0,$0,0 の別名。R6 の beqzalc を1件含む。
-        assert_eq!(INSNS.len(), 59);
+        // MIPS I + MIPS32r2 + MIPS64 + Release 6（コンパクト分岐含む）。
+        // nop は sll $0,$0,0 の別名。
+        assert_eq!(INSNS.len(), 174);
     }
 
     #[test]
@@ -132,8 +133,11 @@ mod tests {
             decode_model_ex(0x2001_0004, 32, true, FEAT_MIPS_R6),
             Some(Insn::Beqzalc)
         );
-        // R6 で BOVC/BEQC になる符号化は未実装のため None（現 r6 は大部分 illegal）。
-        assert_eq!(decode_model_ex(0x2043_0010, 32, true, FEAT_MIPS_R6), None);
+        // R6 では 001000 が BOVC/BEQZALC/BEQC。0x2043 は rs=2<rt=3 で BEQC。
+        assert_eq!(
+            decode_model_ex(0x2043_0010, 32, true, FEAT_MIPS_R6),
+            Some(Insn::Beqc)
+        );
         // Release 6 は遅延スロット付きの BEQ を外す。LUI は残る。
         assert_eq!(decode(0x3c01_0001, 32), Some(Insn::Lui));
         assert_eq!(decode(0x1022_0004, 32), Some(Insn::Beq));
@@ -144,9 +148,160 @@ mod tests {
     #[test]
     fn cpu_models() {
         assert!(FEATURES.contains(&"mips1"));
+        assert!(FEATURES.contains(&"mips32r2"));
+        assert!(FEATURES.contains(&"mips64"));
         assert!(FEATURES.contains(&"mips_r6"));
         assert!(MODELS.contains(&"r3000"));
         assert!(MODELS.contains(&"mips32r2"));
         assert!(MODELS.contains(&"r6"));
+        assert!(MODELS.contains(&"mips64r2"));
+        assert!(MODELS.contains(&"mips64r6"));
+    }
+
+    /// Release 2 / MIPS64 / Release 6 の追加命令の復号。
+    /// 命令語はビット配置から手で組み立てる。Ref: SPEC-MIPS-IV, SPEC-MIPS-R6。
+    /// r2/MIPS64r2 拡張の一次根拠は台帳の SPEC-MIPS32R2・SPEC-MIPS64（未確認）。
+    #[test]
+    fn decode_release_ext() {
+        let f = |w: u32, feats: u64| decode_model_ex(u128::from(w), 32, true, feats);
+        const R2: u64 = FEAT_MIPS32R2;
+        const M64: u64 = FEAT_MIPS32R2 | FEAT_MIPS64;
+        const R6: u64 = FEAT_MIPS32R2 | FEAT_MIPS_R6;
+        const M64R6: u64 = FEAT_MIPS32R2 | FEAT_MIPS64 | FEAT_MIPS_R6;
+
+        // R2 で残る命令（r6 のモデルでも有効）。
+        assert_eq!(f(0x0022_180a, R2), Some(Insn::Movz));
+        assert_eq!(f(0x0022_180b, R2), Some(Insn::Movn));
+        assert_eq!(f(0x0022_48f4, R2), Some(Insn::Teq));
+        assert_eq!(f(0x0000_000f, R2), Some(Insn::Sync));
+        assert_eq!(f(0x7c22_2880, R2), Some(Insn::Ext));
+        assert_eq!(f(0x7c22_2884, R2), Some(Insn::Ins));
+        assert_eq!(f(0x7c02_183b, R2), Some(Insn::Rdhwr));
+        assert_eq!(f(0x7c02_1c20, R2), Some(Insn::Seb));
+        assert_eq!(f(0x7c02_1e20, R2), Some(Insn::Seh));
+        assert_eq!(f(0x7c02_18a0, R2), Some(Insn::Wsbh));
+        assert_eq!(f(0xc041_0010, R2), Some(Insn::Ll));
+        assert_eq!(f(0xe041_0010, R2), Some(Insn::Sc));
+        assert_eq!(f(0xcc41_0010, R2), Some(Insn::Pref));
+        // SPECIAL2（r6 では除去される）。
+        assert_eq!(f(0x7022_1802, R2), Some(Insn::MulR2));
+        assert_eq!(f(0x7022_0000, R2), Some(Insn::Madd));
+        assert_eq!(f(0x7022_0001, R2), Some(Insn::Maddu));
+        assert_eq!(f(0x7022_0004, R2), Some(Insn::Msub));
+        assert_eq!(f(0x7022_0005, R2), Some(Insn::Msubu));
+        assert_eq!(f(0x7020_1820, R2), Some(Insn::ClzR2));
+        assert_eq!(f(0x7020_1821, R2), Some(Insn::CloR2));
+        assert_eq!(f(0x7022_1802, R6), None);
+        // MIPS64 の演算とロード/ストア。
+        assert_eq!(f(0x0022_182d, M64), Some(Insn::Daddu));
+        assert_eq!(f(0x0022_182f, M64), Some(Insn::Dsubu));
+        assert_eq!(f(0x0022_182c, M64), Some(Insn::Dadd));
+        assert_eq!(f(0x0022_182e, M64), Some(Insn::Dsub));
+        assert_eq!(f(0x0022_1814, M64), Some(Insn::Dsllv));
+        assert_eq!(f(0x0002_19b8, M64), Some(Insn::Dsll));
+        assert_eq!(f(0x0002_19fb, M64), Some(Insn::Dsra));
+        assert_eq!(f(0x0002_19fc, M64), Some(Insn::Dsll32));
+        assert_eq!(f(0x6441_0010, M64), Some(Insn::Daddiu));
+        assert_eq!(f(0x6041_0010, M64), Some(Insn::Daddi));
+        assert_eq!(f(0x0022_001c, M64), Some(Insn::Dmult));
+        assert_eq!(f(0x0022_001d, M64), Some(Insn::Dmultu));
+        assert_eq!(f(0x0022_001e, M64), Some(Insn::Ddiv));
+        assert_eq!(f(0x0022_001f, M64), Some(Insn::Ddivu));
+        assert_eq!(f(0xdc41_0010, M64), Some(Insn::Ld));
+        assert_eq!(f(0x9c41_0010, M64), Some(Insn::Lwu));
+        assert_eq!(f(0xd041_0010, M64), Some(Insn::Lld));
+        assert_eq!(f(0xfc41_0010, M64), Some(Insn::Sd));
+        assert_eq!(f(0xf041_0010, M64), Some(Insn::Scd));
+        assert_eq!(f(0x6841_0010, M64), Some(Insn::Ldl));
+        assert_eq!(f(0x6c41_0010, M64), Some(Insn::Ldr));
+        assert_eq!(f(0xb041_0010, M64), Some(Insn::Sdl));
+        assert_eq!(f(0xb441_0010, M64), Some(Insn::Sdr));
+        assert_eq!(f(0x7c22_50c2, M64), Some(Insn::Dext));
+        assert_eq!(f(0x7c22_50c1, M64), Some(Insn::Dextm));
+        assert_eq!(f(0x7c22_50c3, M64), Some(Insn::Dextu));
+        assert_eq!(f(0x7c22_50c6, M64), Some(Insn::Dins));
+        assert_eq!(f(0x7c22_50c5, M64), Some(Insn::Dinsm));
+        assert_eq!(f(0x7c22_50c7, M64), Some(Insn::Dinsu));
+        assert_eq!(f(0x7c02_18a4, M64), Some(Insn::Dsbh));
+        assert_eq!(f(0x7c02_1964, M64), Some(Insn::Dshd));
+        assert_eq!(f(0x7020_1824, M64), Some(Insn::DclzR2));
+        // R6 の乗除算・選択・シフト加算。
+        assert_eq!(f(0x0022_1898, R6), Some(Insn::Mul));
+        assert_eq!(f(0x0022_1899, R6), Some(Insn::Mulu));
+        assert_eq!(f(0x0022_189a, R6), Some(Insn::DivR6));
+        assert_eq!(f(0x0022_189b, R6), Some(Insn::DivuR6));
+        assert_eq!(f(0x0022_18d8, R6), Some(Insn::Muh));
+        assert_eq!(f(0x0022_18d9, R6), Some(Insn::Muhu));
+        assert_eq!(f(0x0022_18da, R6), Some(Insn::Mod));
+        assert_eq!(f(0x0022_18db, R6), Some(Insn::Modu));
+        assert_eq!(f(0x0022_1835, R6), Some(Insn::Seleqz));
+        assert_eq!(f(0x0022_1837, R6), Some(Insn::Selnez));
+        assert_eq!(f(0x0022_1805, R6), Some(Insn::Lsa));
+        assert_eq!(f(0x0022_18c5, R6), Some(Insn::Lsa));
+        assert_eq!(f(0x0020_1850, R6), Some(Insn::Clz));
+        assert_eq!(f(0x0020_1851, R6), Some(Insn::Clo));
+        assert_eq!(f(0x0022_189c, M64R6), Some(Insn::Dmul));
+        assert_eq!(f(0x0022_18dc, M64R6), Some(Insn::Dmuh));
+        assert_eq!(f(0x0022_189e, M64R6), Some(Insn::DdivR6));
+        assert_eq!(f(0x0022_18de, M64R6), Some(Insn::Dmod));
+        assert_eq!(f(0x0020_1852, M64R6), Some(Insn::Dclz));
+        assert_eq!(f(0x0020_1853, M64R6), Some(Insn::Dclo));
+        assert_eq!(f(0x0022_1815, M64R6), Some(Insn::Dlsa));
+        // R6 のビット操作と PC 相対。
+        assert_eq!(f(0x7c22_18a0, R6), Some(Insn::Align));
+        assert_eq!(f(0x7c22_1924, M64R6), Some(Insn::Dalign));
+        assert_eq!(f(0x7c02_1820, R6), Some(Insn::Bitswap));
+        assert_eq!(f(0x7c02_1824, M64R6), Some(Insn::Dbitswap));
+        assert_eq!(f(0xec5e_0000, R6), Some(Insn::Auipc));
+        assert_eq!(f(0xec5f_0000, R6), Some(Insn::Aluipc));
+        assert_eq!(f(0xec41_2345, R6), Some(Insn::Addiupc));
+        assert_eq!(f(0xec48_0000, R6), Some(Insn::Lwpc));
+        assert_eq!(f(0xec50_0000, R6), Some(Insn::Lwupc));
+        assert_eq!(f(0xec58_0000, M64R6), Some(Insn::Ldpc));
+        assert_eq!(f(0xec58_0000, R6), None);
+        // R6 の遅延スロットなし制御。
+        assert_eq!(f(0xc800_0004, R6), Some(Insn::Bc));
+        assert_eq!(f(0xe800_0004, R6), Some(Insn::Balc));
+        assert_eq!(f(0xd840_0004, R6), Some(Insn::Jic));
+        assert_eq!(f(0xd841_0000, R6), Some(Insn::Beqzc));
+        assert_eq!(f(0xf840_0004, R6), Some(Insn::Jialc));
+        assert_eq!(f(0xf841_0000, R6), Some(Insn::Bnezc));
+        // R6 のコンパクト分岐。フィールド間比較で分解する。
+        // 001000: rs>=rt は BOVC、0<rs<rt は BEQC、rs=0&rt!=0 は BEQZALC。
+        assert_eq!(f(0x2062_0004, R6), Some(Insn::Bovc));
+        assert_eq!(f(0x2042_0004, R6), Some(Insn::Bovc));
+        assert_eq!(f(0x2043_0004, R6), Some(Insn::Beqc));
+        assert_eq!(f(0x2001_0004, R6), Some(Insn::Beqzalc));
+        assert_eq!(f(0x2020_0004, R6), Some(Insn::Bovc));
+        // 011000: BNVC / BNEC / BNEZALC。
+        assert_eq!(f(0x6062_0004, R6), Some(Insn::Bnvc));
+        assert_eq!(f(0x6043_0004, R6), Some(Insn::Bnec));
+        assert_eq!(f(0x6001_0004, R6), Some(Insn::Bnezalc));
+        // 000110: rs=0 は BLEZALC、rs=rt は BGEZALC、その他は BGEUC。
+        // rt=0 は R6 では復号しない。
+        assert_eq!(f(0x1803_0004, R6), Some(Insn::Blezalc));
+        assert_eq!(f(0x1842_0004, R6), Some(Insn::Bgezalc));
+        assert_eq!(f(0x1823_0004, R6), Some(Insn::Bgeuc));
+        assert_eq!(f(0x1800_0004, R6), None);
+        // 000111: BGTZALC / BLTZALC / BLTUC。
+        assert_eq!(f(0x1c03_0004, R6), Some(Insn::Bgtzalc));
+        assert_eq!(f(0x1c42_0004, R6), Some(Insn::Bltzalc));
+        assert_eq!(f(0x1c23_0004, R6), Some(Insn::Bltuc));
+        assert_eq!(f(0x1c00_0004, R6), None);
+        // 010110: BLEZC / BGEZC / BGEC。
+        assert_eq!(f(0x5803_0004, R6), Some(Insn::Blezc));
+        assert_eq!(f(0x5842_0004, R6), Some(Insn::Bgezc));
+        assert_eq!(f(0x5823_0004, R6), Some(Insn::Bgec));
+        assert_eq!(f(0x5800_0004, R6), None);
+        // 010111: BGTZC / BLTZC / BLTC。
+        assert_eq!(f(0x5c03_0004, R6), Some(Insn::Bgtzc));
+        assert_eq!(f(0x5c42_0004, R6), Some(Insn::Bltzc));
+        assert_eq!(f(0x5c23_0004, R6), Some(Insn::Bltc));
+        assert_eq!(f(0x5c00_0004, R6), None);
+        // R6 でなければコンパクト分岐は復号しない（001000 は ADDI）。
+        assert_eq!(f(0x2043_0004, R2), Some(Insn::Addi));
+        // 64 ビット命令は 32 ビットモデルでは復号しない。
+        assert_eq!(f(0x0022_182d, R2), None);
+        assert_eq!(f(0xdc41_0010, R6), None);
     }
 }

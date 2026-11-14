@@ -51,7 +51,18 @@
     追加した（cfg 規則対応）。`std::os::unix` を `os-linux` で使わない方針でよいか確認したい
     （x86 側は `std::fs` の portable API のみで stat を組み立てている）。
 
+11. **R6 コンパクト分岐の 2R 形式の `rs>rt`**: BLEZ/BGTZ/BLEZL/BGTZL 群の
+    2R 命令（BGEUC/BLTUC/BGEC/BLTC）は、`rs!=0 && rs!=rt` をすべて受ける。
+    SPEC-MIPS-R6 の符号化表では `rs>rt` が予約の可能性があり、QEMU は寛容に
+    受理する（本実装も同じ）。仕様書の条文で `rs>rt` が予約ならデコードで
+    落とすよう厳格化するか判断したい。
+12. **SPEC-MIPS32R2 / SPEC-MIPS64 の確認**: r2 拡張（ext/ins/seb 等）と
+    MIPS64r2 拡張（dext/dins/dsbh 等）の一次根拠として台帳に未確認登録済み。
+    条文確認は所有者の仕事。
+
 ## 参考
 
 - Linux UAPI 6.19（`syscall_o32.tbl`/`n32.tbl`/`n64.tbl`、`asm/unistd.h`）が番号表の根拠。
 - 台帳 `SPEC-MIPS-ABI-N32`（n32/n64 ABI）は未確認のまま。
+- R6 コンパクト分岐の分解規則は QEMU `gen_compute_compact_branch`（target/mips/tcg/translate.c）と
+  LLVM Mips32r6InstrInfo.td の OPGROUP 表で確認した。

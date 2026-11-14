@@ -56,11 +56,11 @@ impl MipsModel {
         }
     }
 
-    /// MIPS32 Release 2。符号化は MIPS I のまま、ロード遅延はない。フェッチはリトルエンディアン。
+    /// MIPS32 Release 2。符号化は MIPS I に R2 追加命令を足したもの、ロード遅延はない。
     #[must_use]
     pub const fn mips32r2() -> Self {
         Self {
-            feats: 0,
+            feats: polyisa_guest_mips::FEAT_MIPS32R2,
             endian: Endian::Le,
             load_delay: false,
             is64: false,
@@ -71,7 +71,7 @@ impl MipsModel {
     #[must_use]
     pub const fn r6() -> Self {
         Self {
-            feats: polyisa_guest_mips::FEAT_MIPS_R6,
+            feats: polyisa_guest_mips::FEAT_MIPS32R2 | polyisa_guest_mips::FEAT_MIPS_R6,
             endian: Endian::Le,
             load_delay: false,
             is64: false,
@@ -82,7 +82,7 @@ impl MipsModel {
     #[must_use]
     pub const fn mips64r2() -> Self {
         Self {
-            feats: 0,
+            feats: polyisa_guest_mips::FEAT_MIPS32R2 | polyisa_guest_mips::FEAT_MIPS64,
             endian: Endian::Be,
             load_delay: false,
             is64: true,
@@ -93,7 +93,9 @@ impl MipsModel {
     #[must_use]
     pub const fn mips64r6() -> Self {
         Self {
-            feats: polyisa_guest_mips::FEAT_MIPS_R6,
+            feats: polyisa_guest_mips::FEAT_MIPS32R2
+                | polyisa_guest_mips::FEAT_MIPS64
+                | polyisa_guest_mips::FEAT_MIPS_R6,
             endian: Endian::Be,
             load_delay: false,
             is64: true,
@@ -173,7 +175,7 @@ impl MipsStep {
                     word: u128::from(slot),
                 });
             };
-            if has_delay_slot(slot_insn) || slot_insn == Insn::Beqzalc {
+            if has_delay_slot(slot_insn) || is_compact(slot_insn) {
                 return Err(Outcome::Unimplemented {
                     pc: slot_pc,
                     word: u128::from(slot),
@@ -191,7 +193,7 @@ impl MipsStep {
                 Err(stop) => Err(self.stop_outcome(stop)),
             };
         }
-        let direct = insn == Insn::Beqzalc;
+        let direct = is_compact(insn);
         match exec(env, insn, word, pc, model, false) {
             Ok(effect) => self.pending = retire(env, self.pending, effect),
             Err(stop) => return Err(self.stop_outcome(stop)),
@@ -332,6 +334,38 @@ fn has_delay_slot(insn: Insn) -> bool {
     )
 }
 
+/// pc を直接書き換える遅延スロットなしの制御命令（Release 6）。
+/// BEQZALC と同じく step が pc 更新後に npc=pc+4 を張る。
+fn is_compact(insn: Insn) -> bool {
+    matches!(
+        insn,
+        Insn::Beqzalc
+            | Insn::Bnezalc
+            | Insn::Bc
+            | Insn::Balc
+            | Insn::Jic
+            | Insn::Jialc
+            | Insn::Beqzc
+            | Insn::Bnezc
+            | Insn::Bovc
+            | Insn::Bnvc
+            | Insn::Beqc
+            | Insn::Bnec
+            | Insn::Bgeuc
+            | Insn::Bltuc
+            | Insn::Bgec
+            | Insn::Bltc
+            | Insn::Blezalc
+            | Insn::Bgezalc
+            | Insn::Bltzalc
+            | Insn::Bgtzalc
+            | Insn::Blezc
+            | Insn::Bgtzc
+            | Insn::Bgezc
+            | Insn::Bltzc
+    )
+}
+
 fn retire(env: &mut BareEnv, pending: Option<(u8, u64)>, effect: Effect) -> Option<(u8, u64)> {
     if let Some((reg, value)) = pending
         && effect.wrote != Some(reg)
@@ -457,7 +491,255 @@ fn exec(
                 delayed: None,
             })
         }
+        // ---- MIPS32r2 ----
+        Insn::Movz => step(env, in_slot, |b| sem::movz(b, rd, rs, rt)).map(|()| wrote(rd)),
+        Insn::Movn => step(env, in_slot, |b| sem::movn(b, rd, rs, rt)).map(|()| wrote(rd)),
+        Insn::Teq => step(env, in_slot, |b| sem::teq(b, rs, rt)).map(|()| none),
+        Insn::Sync => step(env, in_slot, sem::sync).map(|()| none),
+        Insn::Pref => step(env, in_slot, sem::pref).map(|()| none),
+        Insn::Seb => step(env, in_slot, |b| sem::seb(b, rd, rt)).map(|()| wrote(rd)),
+        Insn::Seh => step(env, in_slot, |b| sem::seh(b, rd, rt)).map(|()| wrote(rd)),
+        Insn::Wsbh => step(env, in_slot, |b| sem::wsbh(b, rd, rt)).map(|()| wrote(rd)),
+        Insn::Ext => step(env, in_slot, |b| {
+            sem::ext(b, rt, rs, shamt, field_u(word, 11))
+        })
+        .map(|()| wrote(rt)),
+        Insn::Ins => step(env, in_slot, |b| {
+            sem::ins(b, rt, rs, shamt, field_u(word, 11))
+        })
+        .map(|()| wrote(rt)),
+        Insn::Rdhwr => step(env, in_slot, |b| sem::rdhwr(b, rt, rd.0.into())).map(|()| wrote(rt)),
+        Insn::Ll => load_gpr(env, rt, model, in_slot, |b| {
+            sem::ll(b, rt, rs, imm, model.endian)
+        }),
+        Insn::Sc => {
+            step(env, in_slot, |b| sem::sc(b, rt, rs, imm, model.endian)).map(|()| wrote(rt))
+        }
+        Insn::MulR2 => step(env, in_slot, |b| sem::mul(b, rd, rs, rt)).map(|()| wrote(rd)),
+        Insn::Madd => step(env, in_slot, |b| sem::madd(b, rs, rt)).map(|()| none),
+        Insn::Maddu => step(env, in_slot, |b| sem::maddu(b, rs, rt)).map(|()| none),
+        Insn::Msub => step(env, in_slot, |b| sem::msub(b, rs, rt)).map(|()| none),
+        Insn::Msubu => step(env, in_slot, |b| sem::msubu(b, rs, rt)).map(|()| none),
+        Insn::ClzR2 => step(env, in_slot, |b| sem::clz(b, rd, rs)).map(|()| wrote(rd)),
+        Insn::CloR2 => step(env, in_slot, |b| sem::clo(b, rd, rs)).map(|()| wrote(rd)),
+        // ---- MIPS64 ----
+        Insn::Daddu => step(env, in_slot, |b| sem::daddu(b, rd, rs, rt)).map(|()| wrote(rd)),
+        Insn::Dsubu => step(env, in_slot, |b| sem::dsubu(b, rd, rs, rt)).map(|()| wrote(rd)),
+        Insn::Dadd => step(env, in_slot, |b| sem::dadd(b, rd, rs, rt)).map(|()| wrote(rd)),
+        Insn::Dsub => step(env, in_slot, |b| sem::dsub(b, rd, rs, rt)).map(|()| wrote(rd)),
+        Insn::Daddiu => step(env, in_slot, |b| sem::daddiu(b, rt, rs, imm)).map(|()| wrote(rt)),
+        Insn::Daddi => step(env, in_slot, |b| sem::daddi(b, rt, rs, imm)).map(|()| wrote(rt)),
+        Insn::Dmult => step(env, in_slot, |b| sem::dmult(b, rs, rt)).map(|()| none),
+        Insn::Dmultu => step(env, in_slot, |b| sem::dmultu(b, rs, rt)).map(|()| none),
+        Insn::Ddiv => step(env, in_slot, |b| sem::ddiv(b, rs, rt)).map(|()| none),
+        Insn::Ddivu => step(env, in_slot, |b| sem::ddivu(b, rs, rt)).map(|()| none),
+        Insn::Dsll => step(env, in_slot, |b| sem::dsll(b, rd, rt, shamt)).map(|()| wrote(rd)),
+        Insn::Dsrl => step(env, in_slot, |b| sem::dsrl(b, rd, rt, shamt)).map(|()| wrote(rd)),
+        Insn::Dsra => step(env, in_slot, |b| sem::dsra(b, rd, rt, shamt)).map(|()| wrote(rd)),
+        Insn::Dsll32 => step(env, in_slot, |b| sem::dsll32(b, rd, rt, shamt)).map(|()| wrote(rd)),
+        Insn::Dsrl32 => step(env, in_slot, |b| sem::dsrl32(b, rd, rt, shamt)).map(|()| wrote(rd)),
+        Insn::Dsra32 => step(env, in_slot, |b| sem::dsra32(b, rd, rt, shamt)).map(|()| wrote(rd)),
+        Insn::Dsllv => step(env, in_slot, |b| sem::dsllv(b, rd, rt, rs)).map(|()| wrote(rd)),
+        Insn::Dsrlv => step(env, in_slot, |b| sem::dsrlv(b, rd, rt, rs)).map(|()| wrote(rd)),
+        Insn::Dsrav => step(env, in_slot, |b| sem::dsrav(b, rd, rt, rs)).map(|()| wrote(rd)),
+        Insn::Ld => load_gpr(env, rt, model, in_slot, |b| {
+            sem::ld(b, rt, rs, imm, model.endian)
+        }),
+        Insn::Lwu => load_gpr(env, rt, model, in_slot, |b| {
+            sem::lwu(b, rt, rs, imm, model.endian)
+        }),
+        Insn::Lld => load_gpr(env, rt, model, in_slot, |b| {
+            sem::lld(b, rt, rs, imm, model.endian)
+        }),
+        Insn::Sd => step(env, in_slot, |b| sem::sd(b, rt, rs, imm, model.endian)).map(|()| none),
+        Insn::Scd => {
+            step(env, in_slot, |b| sem::scd(b, rt, rs, imm, model.endian)).map(|()| wrote(rt))
+        }
+        Insn::Ldl => load_gpr(env, rt, model, in_slot, |b| {
+            sem::ldl(b, rt, rs, imm, model.endian)
+        }),
+        Insn::Ldr => load_gpr(env, rt, model, in_slot, |b| {
+            sem::ldr(b, rt, rs, imm, model.endian)
+        }),
+        Insn::Sdl => step(env, in_slot, |b| sem::sdl(b, rt, rs, imm, model.endian)).map(|()| none),
+        Insn::Sdr => step(env, in_slot, |b| sem::sdr(b, rt, rs, imm, model.endian)).map(|()| none),
+        Insn::Dext => step(env, in_slot, |b| {
+            sem::dext(b, rt, rs, shamt, field_u(word, 11))
+        })
+        .map(|()| wrote(rt)),
+        Insn::Dextm => step(env, in_slot, |b| {
+            sem::dext(b, rt, rs, shamt, field_u(word, 11) + 32)
+        })
+        .map(|()| wrote(rt)),
+        Insn::Dextu => step(env, in_slot, |b| {
+            sem::dext(b, rt, rs, shamt + 32, field_u(word, 11))
+        })
+        .map(|()| wrote(rt)),
+        Insn::Dins => step(env, in_slot, |b| {
+            sem::dins(b, rt, rs, shamt, field_u(word, 11))
+        })
+        .map(|()| wrote(rt)),
+        Insn::Dinsm => step(env, in_slot, |b| {
+            sem::dins(b, rt, rs, shamt, field_u(word, 11) + 32)
+        })
+        .map(|()| wrote(rt)),
+        Insn::Dinsu => step(env, in_slot, |b| {
+            sem::dins(b, rt, rs, shamt + 32, field_u(word, 11))
+        })
+        .map(|()| wrote(rt)),
+        Insn::DclzR2 | Insn::Dclz => {
+            step(env, in_slot, |b| sem::dclz(b, rd, rs)).map(|()| wrote(rd))
+        }
+        Insn::DcloR2 | Insn::Dclo => {
+            step(env, in_slot, |b| sem::dclo(b, rd, rs)).map(|()| wrote(rd))
+        }
+        Insn::Dsbh => step(env, in_slot, |b| sem::dsbh(b, rd, rt)).map(|()| wrote(rd)),
+        Insn::Dshd => step(env, in_slot, |b| sem::dshd(b, rd, rt)).map(|()| wrote(rd)),
+        // ---- Release 6 ----
+        Insn::Seleqz => step(env, in_slot, |b| sem::seleqz(b, rd, rs, rt)).map(|()| wrote(rd)),
+        Insn::Selnez => step(env, in_slot, |b| sem::selnez(b, rd, rs, rt)).map(|()| wrote(rd)),
+        Insn::Mul | Insn::Mulu => {
+            step(env, in_slot, |b| sem::mul(b, rd, rs, rt)).map(|()| wrote(rd))
+        }
+        Insn::Muh => step(env, in_slot, |b| sem::muh(b, rd, rs, rt)).map(|()| wrote(rd)),
+        Insn::Muhu => step(env, in_slot, |b| sem::muhu(b, rd, rs, rt)).map(|()| wrote(rd)),
+        Insn::DivR6 => step(env, in_slot, |b| sem::div_r6(b, rd, rs, rt)).map(|()| wrote(rd)),
+        Insn::Mod => step(env, in_slot, |b| sem::mod_(b, rd, rs, rt)).map(|()| wrote(rd)),
+        Insn::DivuR6 => step(env, in_slot, |b| sem::divu_r6(b, rd, rs, rt)).map(|()| wrote(rd)),
+        Insn::Modu => step(env, in_slot, |b| sem::modu(b, rd, rs, rt)).map(|()| wrote(rd)),
+        Insn::Dmul | Insn::Dmulu => {
+            step(env, in_slot, |b| sem::dmul(b, rd, rs, rt)).map(|()| wrote(rd))
+        }
+        Insn::Dmuh => step(env, in_slot, |b| sem::dmuh(b, rd, rs, rt)).map(|()| wrote(rd)),
+        Insn::Dmuhu => step(env, in_slot, |b| sem::dmuhu(b, rd, rs, rt)).map(|()| wrote(rd)),
+        Insn::DdivR6 => step(env, in_slot, |b| sem::ddiv_r6(b, rd, rs, rt)).map(|()| wrote(rd)),
+        Insn::Dmod => step(env, in_slot, |b| sem::dmod(b, rd, rs, rt)).map(|()| wrote(rd)),
+        Insn::DdivuR6 => step(env, in_slot, |b| sem::ddivu_r6(b, rd, rs, rt)).map(|()| wrote(rd)),
+        Insn::Dmodu => step(env, in_slot, |b| sem::dmodu(b, rd, rs, rt)).map(|()| wrote(rd)),
+        Insn::Lsa => {
+            step(env, in_slot, |b| sem::lsa(b, rd, rs, rt, (shamt & 3) + 1)).map(|()| wrote(rd))
+        }
+        Insn::Dlsa => {
+            step(env, in_slot, |b| sem::dlsa(b, rd, rs, rt, (shamt & 3) + 1)).map(|()| wrote(rd))
+        }
+        Insn::Clz => step(env, in_slot, |b| sem::clz(b, rd, rs)).map(|()| wrote(rd)),
+        Insn::Clo => step(env, in_slot, |b| sem::clo(b, rd, rs)).map(|()| wrote(rd)),
+        Insn::Auipc => step(env, in_slot, |b| sem::auipc(b, rs, imm, pc)).map(|()| wrote(rs)),
+        Insn::Aluipc => step(env, in_slot, |b| sem::aluipc(b, rs, imm, pc)).map(|()| wrote(rs)),
+        Insn::Addiupc => {
+            let imm19 = sext_bits(word, 19);
+            step(env, in_slot, |b| sem::addiupc(b, rs, imm19, pc)).map(|()| wrote(rs))
+        }
+        Insn::Lwpc => {
+            let imm19 = word & 0x7_ffff;
+            load_gpr(env, rs, model, in_slot, |b| {
+                sem::lwpc(b, rs, imm19, model.endian, pc)
+            })
+        }
+        Insn::Lwupc => {
+            let imm19 = word & 0x7_ffff;
+            load_gpr(env, rs, model, in_slot, |b| {
+                sem::lwupc(b, rs, imm19, model.endian, pc)
+            })
+        }
+        Insn::Ldpc => {
+            let imm18 = word & 0x3_ffff;
+            load_gpr(env, rs, model, in_slot, |b| {
+                sem::ldpc(b, rs, imm18, model.endian, pc)
+            })
+        }
+        Insn::Bitswap => step(env, in_slot, |b| sem::bitswap(b, rd, rt)).map(|()| wrote(rd)),
+        Insn::Dbitswap => step(env, in_slot, |b| sem::dbitswap(b, rd, rt)).map(|()| wrote(rd)),
+        Insn::Align => {
+            step(env, in_slot, |b| sem::align(b, rd, rs, rt, shamt & 3)).map(|()| wrote(rd))
+        }
+        Insn::Dalign => {
+            step(env, in_slot, |b| sem::dalign(b, rd, rs, rt, shamt & 7)).map(|()| wrote(rd))
+        }
+        Insn::Bc => {
+            let target = pc
+                .wrapping_add(4)
+                .wrapping_add(((sext_bits(word, 26) as i64) << 2) as u64);
+            step(env, in_slot, |b| sem::bc(b, target)).map(|()| none)
+        }
+        Insn::Balc => {
+            let target = pc
+                .wrapping_add(4)
+                .wrapping_add(((sext_bits(word, 26) as i64) << 2) as u64);
+            step(env, in_slot, |b| sem::balc(b, pc, target)).map(|()| wrote(Gpr(31)))
+        }
+        Insn::Jic => step(env, in_slot, |b| sem::jic(b, rs, imm)).map(|()| none),
+        Insn::Jialc => step(env, in_slot, |b| sem::jialc(b, rs, pc, imm)).map(|()| wrote(Gpr(31))),
+        Insn::Beqzc => {
+            let target = pc
+                .wrapping_add(4)
+                .wrapping_add(((sext_bits(word, 21) as i64) << 2) as u64);
+            step(env, in_slot, |b| sem::beqzc(b, rs, pc, target)).map(|()| none)
+        }
+        Insn::Bnezc => {
+            let target = pc
+                .wrapping_add(4)
+                .wrapping_add(((sext_bits(word, 21) as i64) << 2) as u64);
+            step(env, in_slot, |b| sem::bnezc(b, rs, pc, target)).map(|()| none)
+        }
+        // ---- R6 のコンパクト分岐（imm16 << 2 の pc 相対）----
+        Insn::Bovc
+        | Insn::Bnvc
+        | Insn::Beqc
+        | Insn::Bnec
+        | Insn::Bgeuc
+        | Insn::Bltuc
+        | Insn::Bgec
+        | Insn::Bltc
+        | Insn::Blezalc
+        | Insn::Bnezalc
+        | Insn::Bgezalc
+        | Insn::Bltzalc
+        | Insn::Bgtzalc
+        | Insn::Blezc
+        | Insn::Bgtzc
+        | Insn::Bgezc
+        | Insn::Bltzc => {
+            let target = pc.wrapping_add(4).wrapping_add(((imm as i64) << 2) as u64);
+            let link = matches!(
+                insn,
+                Insn::Blezalc | Insn::Bnezalc | Insn::Bgezalc | Insn::Bltzalc | Insn::Bgtzalc
+            );
+            step(env, in_slot, |b| match insn {
+                Insn::Bovc => sem::bovc(b, rs, rt, pc, target),
+                Insn::Bnvc => sem::bnvc(b, rs, rt, pc, target),
+                Insn::Beqc => sem::beqc(b, rs, rt, pc, target),
+                Insn::Bnec => sem::bnec(b, rs, rt, pc, target),
+                Insn::Bgeuc => sem::bgeuc(b, rs, rt, pc, target),
+                Insn::Bltuc => sem::bltuc(b, rs, rt, pc, target),
+                Insn::Bgec => sem::bgec(b, rs, rt, pc, target),
+                Insn::Bltc => sem::bltc(b, rs, rt, pc, target),
+                Insn::Blezalc => sem::blezalc(b, rt, pc, target),
+                Insn::Bnezalc => sem::bnezalc(b, rt, pc, target),
+                Insn::Bgezalc => sem::bgezalc(b, rt, pc, target),
+                Insn::Bltzalc => sem::bltzalc(b, rt, pc, target),
+                Insn::Bgtzalc => sem::bgtzalc(b, rt, pc, target),
+                Insn::Blezc => sem::blezc(b, rt, pc, target),
+                Insn::Bgtzc => sem::bgtzc(b, rt, pc, target),
+                Insn::Bgezc => sem::bgezc(b, rt, pc, target),
+                Insn::Bltzc => sem::bltzc(b, rt, pc, target),
+                _ => unreachable!("compact branch arm"),
+            })
+            .map(|()| Effect {
+                wrote: if link { Some(31) } else { None },
+                delayed: None,
+            })
+        }
     }
+}
+
+fn field_u(word: u32, shift: u32) -> u32 {
+    (word >> shift) & 31
+}
+
+fn sext_bits(word: u32, bits: u32) -> i32 {
+    let shift = 32 - bits;
+    ((word << shift) as i32) >> shift
 }
 
 fn load_word(

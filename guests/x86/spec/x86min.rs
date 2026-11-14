@@ -1211,7 +1211,7 @@ pub fn build_model() -> polyisa_isadl::Model {
     let wc = |field: &str, op: WhereOp, value: u128| WhereClause {
         field: field.to_string(),
         op,
-        value,
+        rhs: WhereRhs::Lit(value),
     };
     // (名前, 形式, パターン, where, 構文, 分類)
     type MemDef<'a> = (&'a str, &'a str, &'a str, Vec<WhereClause>, &'a str, &'a str);

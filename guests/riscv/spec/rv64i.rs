@@ -373,7 +373,7 @@ pub fn build_model() -> polyisa_isadl::Model {
     let cr = |op: WhereOp, field: &str, value: u128| WhereClause {
         field: field.to_string(),
         op,
-        value,
+        rhs: WhereRhs::Lit(value),
     };
     for (name, bit12, w1, w2, syntax, timing) in [
         (
