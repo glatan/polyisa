@@ -357,6 +357,25 @@ pub fn run_ex(
         (Outcome::Exit(code), _) => MipsOutcome::Exit(code),
         (Outcome::Unimplemented { pc, word }, _) => {
             st.dump_regs(env);
+            if st.trace {
+                let f = get_u64(env, Gpr(16).state().offset());
+                let mut buf = [0u8; 0xf0];
+                let acc = polyisa_mem::Access::DATA_LE;
+                if env
+                    .backend
+                    .mem
+                    .read(polyisa_mem::VirtAddr(f), &mut buf, acc)
+                    .is_ok()
+                {
+                    for (i, b) in buf.chunks(8).enumerate() {
+                        eprintln!(
+                            "  f+{:#04x}: {:#x}",
+                            i * 8,
+                            u64::from_be_bytes(b.try_into().unwrap())
+                        );
+                    }
+                }
+            }
             MipsOutcome::Unimplemented {
                 pc,
                 word: word as u32,
@@ -1515,6 +1534,18 @@ mod tests {
         };
         env.backend.mem.read(VirtAddr(addr), &mut buf, acc).unwrap();
         u32::from_be_bytes(buf)
+    }
+
+    #[test]
+    fn dsll32_daddiu_materializes_int64_max() {
+        // addiu $2,$0,-1 ; dsll32 $2,$2,31 ; daddiu $2,$2,-1 ; trap
+        let mut env = env_at(0x1000);
+        poke(&mut env, 0x1000, 0x2402_ffff);
+        poke(&mut env, 0x1004, 0x0002_17fc);
+        poke(&mut env, 0x1008, 0x6442_ffff);
+        poke(&mut env, 0x100c, 0xffff_ffff);
+        let _outcome = run_bare(&mut env, 0x1000, MipsModel::mips64r2());
+        assert_eq!(get_u64(&mut env, Gpr(2).state().offset()), i64::MAX as u64);
     }
 
     #[test]

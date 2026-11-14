@@ -65,26 +65,31 @@
     `.testdata/bin-distro-mipsel`（o32 LE）と `.testdata/bin-distro-mips64`
     （n64 BE）を取得済み。台帳登録と配布物の正式選定は未了。
     現状: cop1 (FPU) を実装済み（FR=1 全幅・約70命令）。o32 は
-    `echo`/`uname`/`date`/`id`/`ls`/`ls -l`/`ls /etc`/`ls /home` が
+    `echo`/`uname`/`date`/`id`/`ls`/`ls -l`/`cat`/`head`/`whoami` が
     動作（`/tmp` のような千件級ディレクトリは整形処理が O(n²) で
     ステップ上限に達するのみ）。n64 BE は
-    `echo`/`uname`/`uname -a`/`cat`/`pwd`/`true`/`basename`/`dirname`/
-    `seq`/`wc`/`yes` が動作。
-    残バグ（n64）: `date`/`head`/`id -un`/`whoami` は musl の stdio
-    FILE 初期化経路で `f->read`(+0x40)/`f->write`(+0x48) が NULL または
-    ヒープ番地（0x1201950e0）になり jalr で停止 — 同一根因とみて調査中。
-    `ls` はオプション解釈で "NO OPT" を出し、別箇の PageFault も残る。
+    `echo`/`uname`/`uname -a`/`cat`/`wc`/`basename`/`dirname`/`seq`/
+    `yes`/`true`/`pwd` に加え `date`/`head`/`id`/`id -un`/`whoami` が
+    動作。
+    大きな根因は `slt`/`sltu`/`slti`/`sltiu` と分岐・トラップ系の
+    符号比較（`cmp_regs`/`cmp_zero`）が 64 ビットモデルでも被演算子を
+    32 ビットに正規化していた点で、上位アドレス（0x120xxxxxx・スタック
+    0x7ffexxxx）同士のポインタ比較が常に誤判定になっていた。
+    musl の疑似 FILE（sh_fromstring: rpos=s, rend=s+INT64_MAX）で
+    `shgetc` マクロの `rpos != shend` 判定が壊れ、`__uflow` → 未初期化
+    `f->read` への jalr で止まっていた。`sext_w`/`zext_w` ヘルパーで
+    is64 時に全幅比較へ修正済み。
+    残バグ（n64）: `ls` は getopt 出力で "NO OPT"（argv/文字列経路の
+    別問題）、`cut`/`sed`/`grep` は 0x1200066xx のロック+ハッシュ走査
+    ループでステップ上限（ll/sc スピンロック周辺の調査が残る）。
     既に確定させた修正: `do_readv`/`do_writev` の iovec ストライド
-    （`w`→`2*w`、n64 で後続エントリを別物として読んでいた）、
-    `getdents64` の fd ごとのディレクトリ位置追跡（同じエントリを
-    返し続けて readdir ループが終わらなかった）、`do_brk` が既マップ
-    ページを `map()` でゼロ上書きしてヒープを壊していた問題（既存
-    heap_end の次ページからのみマップ）、`mmap_next` が brk ヒープと
-    衝突していた問題（image_end+0x800_0000 に移動）。
+    （`w`→`2*w`）、`getdents64` の fd ごとのディレクトリ位置追跡、
+    `do_brk` の既マップページ上書き、`mmap_next` の衝突回避、
+    `sendfile`/`sendfile64`（cat 用、offset==NULL）の実装。
     回帰テスト: `n64_readv_iovec_stride`・`getdents64_advances_position`
     を `mips::sys::tests` に追加。
-    残作業: 上記 stdio FILE 個別バグの根因特定、n32 実バイナリ、
-    台帳登録。
+    残作業: 上記個別バグ（ls NO OPT・ハッシュ走査スピン）、n32 実
+    バイナリ、台帳登録。
 
 ## 解消済み（記録）
 

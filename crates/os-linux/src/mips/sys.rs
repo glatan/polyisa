@@ -837,6 +837,85 @@ impl Linux {
         }
     }
 
+    /// `sendfile`/`sendfile64`。offset==NULL のみ受け付ける（cat が使う形）。
+    /// in_fd からチャンク読みして out_fd の writer へ流し、転送数を返す。
+    fn do_sendfile(
+        &mut self,
+        env: &mut BareEnv,
+        out_fd: u32,
+        in_fd: u32,
+        off: u64,
+        cnt: u64,
+    ) -> u64 {
+        if off != 0 {
+            return self.fail(env, mips::errno::EINVAL);
+        }
+        let mut left = cnt.min(1 << 22) as usize;
+        let mut done = 0u64;
+        while left > 0 {
+            let n = left.min(64 * 1024);
+            let mut buf = vec![0u8; n];
+            let got = {
+                let r = match self.reader(in_fd) {
+                    Ok(r) => r,
+                    Err(e) => return self.fail(env, e),
+                };
+                match r {
+                    ReadFd::Stdin => {
+                        let avail = self.stdin_buf.len().saturating_sub(self.stdin_pos);
+                        let take = avail.min(n);
+                        buf[..take].copy_from_slice(
+                            &self.stdin_buf[self.stdin_pos..self.stdin_pos + take],
+                        );
+                        self.stdin_pos += take;
+                        take
+                    }
+                    ReadFd::File(f) => match f.read(&mut buf) {
+                        Ok(n) => n,
+                        Err(e) => {
+                            return self.fail_host(
+                                env,
+                                e.raw_os_error().unwrap_or(mips::errno::EIO as i32),
+                            );
+                        }
+                    },
+                }
+            };
+            if got == 0 {
+                break;
+            }
+            let w = match self.writer(out_fd) {
+                Ok(w) => w,
+                Err(e) => return self.fail(env, e),
+            };
+            let put = match w {
+                WriteFd::Stdout => {
+                    self.io.stdout.extend_from_slice(&buf[..got]);
+                    let _ = std::io::Write::write_all(&mut std::io::stdout(), &buf[..got]);
+                    got
+                }
+                WriteFd::Stderr => {
+                    self.io.stderr.extend_from_slice(&buf[..got]);
+                    let _ = std::io::Write::write_all(&mut std::io::stderr(), &buf[..got]);
+                    got
+                }
+                WriteFd::File(f) => match f.write(&buf[..got]) {
+                    Ok(n) => n,
+                    Err(e) => {
+                        return self
+                            .fail_host(env, e.raw_os_error().unwrap_or(mips::errno::EIO as i32));
+                    }
+                },
+            };
+            done += put as u64;
+            left -= got;
+            if put < got {
+                break;
+            }
+        }
+        Self::ret(env, done)
+    }
+
     /// `readv`/`writev`。
     fn do_readv(&mut self, env: &mut BareEnv, fd: u32, iov: u64, cnt: u64) -> u64 {
         let mut total = 0u64;
@@ -1758,8 +1837,10 @@ impl Linux {
                     Err(e) => self.fail_ret(env, e),
                 }
             }
-            // sendfile=207
-            207 => self.fail_ret(env, mips::errno::ENOSYS),
+            // sendfile=207, sendfile64=237
+            207 | 237 => {
+                ret(self.do_sendfile(env, args[0] as u32, args[1] as u32, args[2], args[3]))
+            }
             // mmap2=210
             210 => {
                 let addr = args[0];
@@ -2219,7 +2300,9 @@ impl Linux {
                 ret(self.do_statfs(env, args[1], layout))
             }
             "statfs64" | "fstatfs64" => ret(self.do_statfs(env, args[1], FsLayout::W64)),
-            "sendfile" => self.fail_ret(env, mips::errno::ENOSYS),
+            "sendfile" | "sendfile64" => {
+                ret(self.do_sendfile(env, args[0] as u32, args[1] as u32, args[2], args[3]))
+            }
             "personality" | "prctl" | "acct" | "mount" | "umount" | "umount2" | "pivot_root"
             | "reboot" | "swapon" | "swapoff" | "quotactl" | "quotactl_fd" | "capget"
             | "capset" | "sigaltstack" | "syslog" | "init_module" | "delete_module"

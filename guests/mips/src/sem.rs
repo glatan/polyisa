@@ -453,6 +453,26 @@ fn sext32<B: Backend>(b: &mut B, v: B::V<W64>) -> B::V<W64> {
     b.sext::<W32, W64>(w)
 }
 
+/// 全幅比較（slt/分岐・トラップの符号比較）のオペランド。
+/// 64 ビットモデルは全幅、32 ビットモデルは符号拡張 32 ビットで比較する。
+fn sext_w<B: Backend>(b: &mut B, v: B::V<W64>) -> B::V<W64> {
+    let s = sext32(b, v);
+    let flag: B::V<W64> = b.get(is64_ref());
+    let zero = b.konst::<W64>(0);
+    let is64 = b.cmp::<W64>(Cmp::Ne, flag, zero);
+    b.select::<W64>(is64, v, s)
+}
+
+/// 全幅比較（sltu/sltiu）のオペランド。
+/// 64 ビットモデルは全幅、32 ビットモデルはゼロ拡張 32 ビットで比較する。
+fn zext_w<B: Backend>(b: &mut B, v: B::V<W64>) -> B::V<W64> {
+    let m = mask32(b, v);
+    let flag: B::V<W64> = b.get(is64_ref());
+    let zero = b.konst::<W64>(0);
+    let is64 = b.cmp::<W64>(Cmp::Ne, flag, zero);
+    b.select::<W64>(is64, v, m)
+}
+
 fn set01<B: Backend>(b: &mut B, rd: Gpr, cond: B::B) {
     let one = b.konst::<W64>(1);
     let zero = b.konst::<W64>(0);
@@ -545,9 +565,9 @@ pub fn nor<B: Backend>(b: &mut B, rd: Gpr, rs: Gpr, rt: Gpr) -> Flow<B> {
 /// SLT。真なら 1。
 pub fn slt<B: Backend>(b: &mut B, rd: Gpr, rs: Gpr, rt: Gpr) -> Flow<B> {
     let x = read(b, rs);
-    let x = sext32(b, x);
+    let x = sext_w(b, x);
     let y = read(b, rt);
-    let y = sext32(b, y);
+    let y = sext_w(b, y);
     let cond = b.cmp::<W64>(Cmp::LtS, x, y);
     set01(b, rd, cond);
     Ok(())
@@ -556,9 +576,9 @@ pub fn slt<B: Backend>(b: &mut B, rd: Gpr, rs: Gpr, rt: Gpr) -> Flow<B> {
 /// SLTU。
 pub fn sltu<B: Backend>(b: &mut B, rd: Gpr, rs: Gpr, rt: Gpr) -> Flow<B> {
     let x = read(b, rs);
-    let x = mask32(b, x);
+    let x = zext_w(b, x);
     let y = read(b, rt);
-    let y = mask32(b, y);
+    let y = zext_w(b, y);
     let cond = b.cmp::<W64>(Cmp::LtU, x, y);
     set01(b, rd, cond);
     Ok(())
@@ -644,9 +664,9 @@ fn cmp_regs<B: Backend>(b: &mut B, op: Cmp, rs: Gpr, rt: Gpr) -> B::B {
     match op {
         Cmp::LtS | Cmp::GtS | Cmp::LeS | Cmp::GeS => {
             let x = read(b, rs);
-            let x = sext32(b, x);
+            let x = sext_w(b, x);
             let y = read(b, rt);
-            let y = sext32(b, y);
+            let y = sext_w(b, y);
             b.cmp::<W64>(op, x, y)
         }
         _ => {
@@ -668,7 +688,7 @@ fn cmp_regs<B: Backend>(b: &mut B, op: Cmp, rs: Gpr, rt: Gpr) -> B::B {
 
 fn cmp_zero<B: Backend>(b: &mut B, op: Cmp, rs: Gpr) -> B::B {
     let x = read(b, rs);
-    let x = sext32(b, x);
+    let x = sext_w(b, x);
     let zero = b.konst::<W64>(0);
     b.cmp::<W64>(op, x, zero)
 }
@@ -848,20 +868,20 @@ pub fn break_<B: Backend>(b: &mut B) -> Flow<B> {
 /// SLTI。即値は符号拡張。
 pub fn slti<B: Backend>(b: &mut B, rt: Gpr, rs: Gpr, imm: i32) -> Flow<B> {
     let x = read(b, rs);
-    let x = sext32(b, x);
+    let x = sext_w(b, x);
     let imm_v = b.konst::<W64>(imm as i64 as u64);
-    let imm_v = sext32(b, imm_v);
+    let imm_v = sext_w(b, imm_v);
     let cond = b.cmp::<W64>(Cmp::LtS, x, imm_v);
     set01(b, rt, cond);
     Ok(())
 }
 
-/// SLTIU。即値は符号拡張してから、32 ビット符号なしで比べる。
+/// SLTIU。即値は符号拡張してから、モデル幅の符号なしで比べる。
 pub fn sltiu<B: Backend>(b: &mut B, rt: Gpr, rs: Gpr, imm: i32) -> Flow<B> {
     let x = read(b, rs);
-    let x = mask32(b, x);
+    let x = zext_w(b, x);
     let imm_v = b.konst::<W64>(imm as i64 as u64);
-    let imm_v = mask32(b, imm_v);
+    let imm_v = zext_w(b, imm_v);
     let cond = b.cmp::<W64>(Cmp::LtU, x, imm_v);
     set01(b, rt, cond);
     Ok(())
