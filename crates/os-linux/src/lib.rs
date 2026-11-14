@@ -9,11 +9,28 @@
 
 #![forbid(unsafe_code)]
 
-/// x86 用のシステムコール文脈。`x86` 機能で有効になる。
+/// x86 のシステムコール実装。`guest-x86` 機能で有効になる。
 /// 設計の依存規則（`docs/design/workspace.md` の「依存規則」）が
 /// `os-linux` の `guests/*` 依存を機能フラグ付きで認めている。
-#[cfg(feature = "x86")]
+/// 番号表は ABI 名のモジュール（`x86_64`・`x86_32`）に、実装はこのモジュールに置く
+/// （x86-32 と x86-64 の両 ABI を一つの実装で扱う）。
+#[cfg(feature = "guest-x86")]
 pub mod x86;
+
+/// MIPS o32 のシステムコール番号。
+// Ref: SRC-LINUX (7.3).
+pub mod mips_o32;
+
+/// RISC-V（asm-generic）のシステムコール番号と syscall 処理。
+pub mod rv64;
+
+/// x86 の 32ビット（Linux の i386 ABI、EM_386）のシステムコール番号。
+// Ref: SRC-LINUX (7.3).
+pub mod x86_32;
+
+/// x86_64（Linux・64ビット）のシステムコール番号。
+// Ref: SRC-LINUX (7.3).
+pub mod x86_64;
 
 /// 未実装のシステムコールに返す errno（asm-generic の ENOSYS）。
 /// 設計: `docs/design/user-mode.md` の「未実装のシステムコール」。
@@ -31,294 +48,6 @@ pub enum GuestAbi {
 
 /// 実行ループとの境界。定義は実行エンジンにある。
 pub use polyisa_engine::run::{TrapHandler, TrapOutcome};
-
-/// MIPS o32 のシステムコール番号。基準 4000 に表の通し番号を足した値。
-/// exit は 1、write は 4。
-// Ref: SRC-LINUX (7.3).
-pub mod mips_o32 {
-    pub const EXIT: u64 = 4001;
-    pub const WRITE: u64 = 4004;
-}
-
-/// RISC-V（asm-generic）のシステムコール番号。
-pub mod rv64;
-
-/// x86_64（Linux・64ビット）のシステムコール番号。
-/// 値はカーネルの UAPI 由来の事実であり、`heavy_abi_uapi` で突き合わせる。
-// Ref: SRC-LINUX (7.3).
-pub mod x86_64 {
-    pub const READ: u64 = 0;
-    pub const WRITE: u64 = 1;
-    pub const CLOSE: u64 = 3;
-    pub const MMAP: u64 = 9;
-    pub const MPROTECT: u64 = 10;
-    pub const MUNMAP: u64 = 11;
-    pub const BRK: u64 = 12;
-    pub const EXIT: u64 = 60;
-    pub const EXIT_GROUP: u64 = 231;
-    pub const UNAME: u64 = 63;
-    pub const SET_TID_ADDRESS: u64 = 218;
-    pub const GETTID: u64 = 186;
-    pub const GETPID: u64 = 39;
-    pub const TGKILL: u64 = 234;
-    pub const GETUID: u64 = 102;
-    pub const GETGID: u64 = 104;
-    pub const GETEUID: u64 = 107;
-    pub const GETEGID: u64 = 108;
-    pub const RT_SIGACTION: u64 = 13;
-    pub const RT_SIGPROCMASK: u64 = 14;
-    pub const RT_SIGTIMEDWAIT: u64 = 128;
-    pub const RT_SIGSUSPEND: u64 = 130;
-    pub const CLOCK_GETTIME: u64 = 228;
-    pub const GETRANDOM: u64 = 318;
-    pub const OPENAT: u64 = 257;
-    pub const OPEN: u64 = 2;
-    // 段階2相当（ファイル操作）。
-    pub const LSEEK: u64 = 8;
-    pub const GETDENTS64: u64 = 217;
-    pub const GETCWD: u64 = 79;
-    pub const CHDIR: u64 = 80;
-    pub const DUP3: u64 = 292;
-    pub const FCNTL: u64 = 72;
-    pub const IOCTL: u64 = 16;
-    pub const PREAD64: u64 = 17;
-    pub const READLINKAT: u64 = 267;
-    pub const READLINK: u64 = 89;
-    pub const NEWFSTATAT: u64 = 262;
-    pub const FSTAT: u64 = 5;
-    pub const STAT: u64 = 4;
-    pub const LSTAT: u64 = 6;
-    pub const STATX: u64 = 332;
-    pub const ARCH_PRCTL: u64 = 158;
-    pub const SET_ROBUST_LIST: u64 = 273;
-    pub const RSEQ: u64 = 334;
-    pub const PRLIMIT64: u64 = 302;
-    pub const READV: u64 = 19;
-    pub const WRITEV: u64 = 20;
-    pub const SENDFILE: u64 = 40;
-    pub const TIME: u64 = 201;
-    pub const NANOSLEEP: u64 = 35;
-    pub const CLOCK_NANOSLEEP: u64 = 230;
-    pub const SCHED_GETAFFINITY: u64 = 204;
-    pub const GETGROUPS: u64 = 115;
-    pub const MKDIR: u64 = 83;
-    pub const RMDIR: u64 = 84;
-    pub const MKNOD: u64 = 133;
-    pub const UNLINK: u64 = 87;
-    pub const ACCESS: u64 = 21;
-    pub const UTIMENSAT: u64 = 280;
-    pub const DUP: u64 = 32;
-    pub const DUP2: u64 = 33;
-    pub const MKDIRAT: u64 = 258;
-    pub const UNLINKAT: u64 = 263;
-    pub const FACCESSAT: u64 = 269;
-    pub const CHMOD: u64 = 90;
-    pub const FCHMOD: u64 = 91;
-    pub const CHOWN: u64 = 92;
-    pub const FCHOWN: u64 = 93;
-    pub const LCHOWN: u64 = 94;
-    pub const FCHMODAT: u64 = 268;
-    pub const UMASK: u64 = 95;
-    pub const FTRUNCATE: u64 = 77;
-    pub const FALLOCATE: u64 = 285;
-    pub const RENAME: u64 = 82;
-    pub const SYMLINK: u64 = 88;
-    pub const LINK: u64 = 86;
-    pub const SYNC: u64 = 162;
-    pub const CLONE: u64 = 56;
-    pub const FORK: u64 = 57;
-    pub const VFORK: u64 = 58;
-    pub const EXECVE: u64 = 59;
-    pub const WAIT4: u64 = 61;
-    pub const KILL: u64 = 62;
-    pub const SETPGID: u64 = 109;
-    pub const SETSID: u64 = 112;
-    pub const GETPGID: u64 = 121;
-    pub const GETPRIORITY: u64 = 140;
-    pub const SETPRIORITY: u64 = 141;
-    pub const PERSONALITY: u64 = 135;
-    pub const SCHED_SETAFFINITY: u64 = 203;
-    pub const IOPRIO_SET: u64 = 251;
-    pub const IOPRIO_GET: u64 = 252;
-    pub const FSYNC: u64 = 74;
-    pub const FDATASYNC: u64 = 75;
-    pub const UNSHARE: u64 = 272;
-    pub const FCHDIR: u64 = 81;
-    pub const SETGROUPS: u64 = 116;
-    pub const CHROOT: u64 = 161;
-    pub const GETPPID: u64 = 110;
-    pub const SYSINFO: u64 = 99;
-    pub const REBOOT: u64 = 169;
-    pub const SYSLOG: u64 = 103;
-    pub const INIT_MODULE: u64 = 175;
-    pub const DELETE_MODULE: u64 = 176;
-    pub const FINIT_MODULE: u64 = 313;
-    pub const SWAPON: u64 = 167;
-    pub const SWAPOFF: u64 = 168;
-    pub const PIVOT_ROOT: u64 = 155;
-    pub const UMOUNT2: u64 = 166;
-    pub const FLOCK: u64 = 73;
-    pub const SHMGET: u64 = 29;
-    pub const SHMCTL: u64 = 31;
-    pub const SEMGET: u64 = 64;
-    pub const SEMCTL: u64 = 66;
-    pub const MSGGET: u64 = 68;
-    pub const MSGCTL: u64 = 71;
-    pub const GETITIMER: u64 = 36;
-    pub const SETITIMER: u64 = 38;
-    pub const SOCKET: u64 = 41;
-    pub const SOCKETPAIR: u64 = 53;
-    pub const BIND: u64 = 49;
-    pub const CONNECT: u64 = 42;
-    pub const SENDTO: u64 = 44;
-    pub const RECVFROM: u64 = 45;
-    pub const GETSOCKNAME: u64 = 51;
-    pub const SETXATTR: u64 = 188;
-    pub const LSETXATTR: u64 = 189;
-    pub const FSETXATTR: u64 = 190;
-    pub const MOUNT: u64 = 165;
-    pub const POLL: u64 = 7;
-    pub const SELECT: u64 = 23;
-    pub const PSELECT6: u64 = 270;
-    pub const SYSFS: u64 = 119;
-    pub const TKILL: u64 = 200;
-    pub const INOTIFY_INIT1: u64 = 294;
-    pub const INOTIFY_INIT: u64 = 253;
-    pub const INOTIFY_ADD_WATCH: u64 = 254;
-    pub const ADJTIMEX: u64 = 159;
-    pub const SETUID: u64 = 105;
-    pub const SETGID: u64 = 106;
-    pub const SETREUID: u64 = 113;
-    pub const SETREGID: u64 = 114;
-    pub const SETRESUID: u64 = 117;
-    pub const SETRESGID: u64 = 118;
-    pub const SCHED_SETPARAM: u64 = 142;
-    pub const SCHED_GETPARAM: u64 = 143;
-    pub const SCHED_SETSCHEDULER: u64 = 144;
-    pub const SCHED_GETSCHEDULER: u64 = 145;
-    pub const SCHED_GET_PRIORITY_MAX: u64 = 146;
-    pub const SCHED_GET_PRIORITY_MIN: u64 = 147;
-    pub const PIPE2: u64 = 293;
-    pub const PIPE: u64 = 22;
-    // Gap: GAP-0004
-    // statfs 系。busybox の `df` が呼ぶ。
-    // Ref: SRC-LINUX (7.3).
-    pub const STATFS: u64 = 137;
-    pub const FSTATFS: u64 = 138;
-}
-
-/// x86 の 32ビット（Linux の i386 ABI、EM_386）のシステムコール番号。
-/// 値はカーネルの UAPI 由来の事実である。新旧 stat 系は 32ビットの実態に合わせ、
-/// newfstatat（32ビットに存在しない）の代わりに fstatat64 を持つ。
-// Ref: SRC-LINUX (7.3).
-pub mod x86_32 {
-    pub const READ: u64 = 3;
-    pub const WRITE: u64 = 4;
-    pub const CLOSE: u64 = 6;
-    pub const MMAP: u64 = 90;
-    /// mmap2/mmap_pgoff。offset はページ単位（musl i386 はこちらを使う）。
-    pub const MMAP_PG: u64 = 192;
-    pub const MPROTECT: u64 = 125;
-    pub const MUNMAP: u64 = 91;
-    pub const BRK: u64 = 45;
-    pub const EXIT: u64 = 1;
-    pub const EXIT_GROUP: u64 = 252;
-    pub const UNAME: u64 = 122;
-    pub const SET_THREAD_AREA: u64 = 243;
-    pub const SET_TID_ADDRESS: u64 = 258;
-    pub const GETTID: u64 = 224;
-    pub const GETPID: u64 = 20;
-    pub const TGKILL: u64 = 270;
-    pub const GETUID: u64 = 24;
-    pub const GETGID: u64 = 47;
-    pub const GETEUID: u64 = 49;
-    pub const GETEGID: u64 = 50;
-    pub const RT_SIGACTION: u64 = 174;
-    pub const RT_SIGPROCMASK: u64 = 175;
-    pub const RT_SIGTIMEDWAIT: u64 = 177;
-    pub const RT_SIGSUSPEND: u64 = 179;
-    pub const CLOCK_GETTIME: u64 = 265;
-    pub const GETRANDOM: u64 = 355;
-    pub const OPENAT: u64 = 295;
-    pub const READV: u64 = 145;
-    pub const WRITEV: u64 = 146;
-    // 段階2相当（ファイル操作）。
-    pub const LSEEK: u64 = 19;
-    pub const GETDENTS64: u64 = 220;
-    pub const GETCWD: u64 = 183;
-    pub const DUP3: u64 = 330;
-    pub const FCNTL: u64 = 55;
-    pub const IOCTL: u64 = 54;
-    pub const PREAD64: u64 = 180;
-    pub const READLINKAT: u64 = 305;
-    pub const READLINK: u64 = 85;
-    pub const FSTATAT64: u64 = 300;
-    pub const FSTAT: u64 = 108;
-    pub const STATX: u64 = 383;
-    pub const SENDFILE: u64 = 187;
-    pub const TIME: u64 = 13;
-    pub const NANOSLEEP: u64 = 162;
-    pub const GETGROUPS: u64 = 80;
-    pub const GETGROUPS32: u64 = 205;
-    pub const SETGROUPS32: u64 = 206;
-    pub const FCHDIR: u64 = 133;
-    pub const SYSINFO: u64 = 116;
-    pub const PERSONALITY: u64 = 136;
-    pub const SETSID: u64 = 66;
-    pub const MKDIR: u64 = 39;
-    pub const RMDIR: u64 = 40;
-    pub const UNLINK: u64 = 10;
-    pub const ACCESS: u64 = 33;
-    pub const UTIMENSAT: u64 = 320;
-    pub const DUP: u64 = 41;
-    pub const DUP2: u64 = 63;
-    pub const MKDIRAT: u64 = 296;
-    pub const UNLINKAT: u64 = 301;
-    pub const FACCESSAT: u64 = 307;
-    pub const CHMOD: u64 = 15;
-    pub const FCHMOD: u64 = 94;
-    pub const FCHMODAT: u64 = 306;
-    pub const UMASK: u64 = 60;
-    pub const FTRUNCATE: u64 = 93;
-    pub const RENAME: u64 = 38;
-    pub const SYMLINK: u64 = 83;
-    // Gap: GAP-0004
-    // statfs 系。busybox の `df` が呼ぶ。statfs/fstatfs (99/100) と
-    // 64 系 (268/269) を持つ。GETGROUPS=80 と区別する.
-    // Ref: SRC-LINUX (7.3).
-    pub const STATFS: u64 = 99;
-    pub const FSTATFS: u64 = 100;
-    pub const STATFS64: u64 = 268;
-    pub const FSTATFS64: u64 = 269;
-    // 番号だけを置く。実行のテストは x86_64 にある。
-    pub const CLONE: u64 = 120;
-    pub const EXECVE: u64 = 11;
-    pub const WAIT4: u64 = 114;
-    pub const PIPE2: u64 = 331;
-    pub const SETPGID: u64 = 57;
-    pub const GETPGID: u64 = 132;
-    pub const CHDIR: u64 = 12;
-    pub const KILL: u64 = 37;
-    // i386 musl が使う旧番号・32系・time64 の番号。
-    pub const OPEN: u64 = 5;
-    pub const FORK: u64 = 2;
-    pub const VFORK: u64 = 190;
-    pub const PIPE: u64 = 42;
-    pub const GETPPID: u64 = 64;
-    pub const GETTIMEOFDAY: u64 = 78;
-    pub const LLSEEK: u64 = 140;
-    pub const STAT64: u64 = 195;
-    pub const LSTAT64: u64 = 196;
-    pub const FSTAT64: u64 = 197;
-    pub const GETUID32: u64 = 199;
-    pub const GETGID32: u64 = 200;
-    pub const GETEUID32: u64 = 201;
-    pub const GETEGID32: u64 = 202;
-    pub const SETUID32: u64 = 213;
-    pub const SETGID32: u64 = 214;
-    pub const FCNTL64: u64 = 221;
-    pub const CLOCK_GETTIME64: u64 = 403;
-}
 
 /// Linux の `clone` フラグ。アドレス空間の共有はプロセス生成では使わない。
 // Ref: SRC-LINUX (7.3).

@@ -1,9 +1,11 @@
 // Copyright (c) polyisa contributors
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! x86 用のシステムコール文脈。`cli` の実行側と共有する。
+//! x86 の Linux システムコール。文脈（`SysCtx`）と、状態を持たない
+//! 個別の `sys_*` 処理を置く。fd・プロセス・スケジューラの状態機械は
+//! `x86::sys`（`Linux`）にあり、実行ループからのトラップはそこが受ける。
+//! 分割の軸は ADR-0015（無状態スタブ対状態機械）による。
 //!
-//! GAP-0001（ADR-0015）の移管の最初の一片として、`run_x86.rs` にあった
-//! 定義を移す。番号表は従来どおり `super`（`GuestAbi`）に置く。
+//! 番号表は ABI 名のモジュール（`x86_64`・`x86_32`）に置く。
 
 // Ref: SRC-LINUX (7.3).
 

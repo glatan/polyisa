@@ -59,7 +59,7 @@ pub const TEST_REQUIREMENTS: &[TestBinary] = &[
         needs: &[Req::Data(".testdata/bin-distro-i386/busybox")],
     },
     TestBinary {
-        binary: "heavy_i386_applet_probe",
+        binary: "heavy_program_i386_applet_probe",
         needs: &[Req::Data(".testdata/bin-distro-i386/busybox")],
     },
     TestBinary {

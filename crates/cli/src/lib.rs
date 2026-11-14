@@ -4,8 +4,11 @@
 
 #![forbid(unsafe_code)]
 
-pub mod run;
+#[cfg(feature = "guest-mips")]
 pub mod run_mips;
+#[cfg(feature = "guest-riscv")]
+pub mod run_riscv;
+#[cfg(feature = "guest-x86")]
 pub mod run_x86;
 
 /// ELF を選んで実行する。`EI_CLASS` と `e_machine` で RISC-V、x86、MIPS を振り分ける。
@@ -58,6 +61,7 @@ pub fn parse_cpu_spec(s: &str) -> Result<CpuSpec, String> {
 }
 
 /// モデル名と機能の足し引きを、そのファミリの生成表で `CpuSel` に解決する。
+#[cfg(any(feature = "guest-mips", feature = "guest-riscv", feature = "guest-x86"))]
 fn resolve_sel(
     family: &str,
     models: &[polyisa_isadl::select::ModelRow],
@@ -73,6 +77,90 @@ fn resolve_sel(
     let remove: Vec<&str> = spec.remove.iter().map(String::as_str).collect();
     polyisa_isadl::select::resolve(models, features, feat_bits, &spec.model, &add, &remove)
         .map_err(|e| format!("{family}: {e}"))
+}
+
+#[cfg(feature = "guest-x86")]
+fn run_x86_32_elf(path: &str, argv: &[String], spec: Option<&CpuSpec>) -> Result<u64, String> {
+    let sel = spec
+        .map(|s| {
+            resolve_sel(
+                "x86",
+                polyisa_guest_x86::MODEL_DEFS,
+                polyisa_guest_x86::FEATURE_DEFS,
+                polyisa_guest_x86::FEAT_BITS,
+                s,
+            )
+        })
+        .transpose()?;
+    run_x86::run_elf_x86_32_sel(path, argv, sel.as_ref())
+}
+
+#[cfg(not(feature = "guest-x86"))]
+fn run_x86_32_elf(_path: &str, _argv: &[String], _spec: Option<&CpuSpec>) -> Result<u64, String> {
+    Err("この polyisa は x86 ゲストなしでビルドされた".to_string())
+}
+
+#[cfg(feature = "guest-x86")]
+fn run_x86_64_elf(path: &str, argv: &[String], spec: Option<&CpuSpec>) -> Result<u64, String> {
+    let sel = spec
+        .map(|s| {
+            resolve_sel(
+                "x86",
+                polyisa_guest_x86::MODEL_DEFS,
+                polyisa_guest_x86::FEATURE_DEFS,
+                polyisa_guest_x86::FEAT_BITS,
+                s,
+            )
+        })
+        .transpose()?;
+    run_x86::run_elf_x86_64_sel(path, argv, sel.as_ref())
+}
+
+#[cfg(not(feature = "guest-x86"))]
+fn run_x86_64_elf(_path: &str, _argv: &[String], _spec: Option<&CpuSpec>) -> Result<u64, String> {
+    Err("この polyisa は x86 ゲストなしでビルドされた".to_string())
+}
+
+#[cfg(feature = "guest-mips")]
+fn run_mips_elf(path: &str, argv: &[String], spec: Option<&CpuSpec>) -> Result<u64, String> {
+    let sel = spec
+        .map(|s| {
+            resolve_sel(
+                "mips",
+                polyisa_guest_mips::MODEL_DEFS,
+                polyisa_guest_mips::FEATURE_DEFS,
+                polyisa_guest_mips::FEAT_BITS,
+                s,
+            )
+        })
+        .transpose()?;
+    run_mips::run_elf_mips_sel(path, argv, sel.as_ref())
+}
+
+#[cfg(not(feature = "guest-mips"))]
+fn run_mips_elf(_path: &str, _argv: &[String], _spec: Option<&CpuSpec>) -> Result<u64, String> {
+    Err("この polyisa は mips ゲストなしでビルドされた".to_string())
+}
+
+#[cfg(feature = "guest-riscv")]
+fn run_riscv_elf(path: &str, argv: &[String], spec: Option<&CpuSpec>) -> Result<u64, String> {
+    let sel = spec
+        .map(|s| {
+            resolve_sel(
+                "riscv",
+                polyisa_guest_riscv::MODEL_DEFS,
+                polyisa_guest_riscv::FEATURE_DEFS,
+                polyisa_guest_riscv::FEAT_BITS,
+                s,
+            )
+        })
+        .transpose()?;
+    run_riscv::run_elf_sel(path, argv, sel.as_ref())
+}
+
+#[cfg(not(feature = "guest-riscv"))]
+fn run_riscv_elf(_path: &str, _argv: &[String], _spec: Option<&CpuSpec>) -> Result<u64, String> {
+    Err("この polyisa は riscv ゲストなしでビルドされた".to_string())
 }
 
 /// `run_path` に `--cpu` の指定を加える。`cpu` は `parse_cpu_spec` の
@@ -98,35 +186,11 @@ pub fn run_path_with(path: &str, argv: &[String], cpu: Option<&str>) -> Result<u
             // EM_386=3。Ref: SRC-LINUX (7.3).
             if ehdr.machine == 3 {
                 check("x86")?;
-                let sel = spec
-                    .as_ref()
-                    .map(|s| {
-                        resolve_sel(
-                            "x86",
-                            polyisa_guest_x86::MODEL_DEFS,
-                            polyisa_guest_x86::FEATURE_DEFS,
-                            polyisa_guest_x86::FEAT_BITS,
-                            s,
-                        )
-                    })
-                    .transpose()?;
-                run_x86::run_elf_x86_32_sel(path, argv, sel.as_ref())
+                run_x86_32_elf(path, argv, spec.as_ref())
             } else if ehdr.machine == 8 {
                 // EM_MIPS。Ref: SRC-LINUX (7.3)。アーキテクチャとエンディアンは ELF ヘッダから取る。
                 check("mips")?;
-                let sel = spec
-                    .as_ref()
-                    .map(|s| {
-                        resolve_sel(
-                            "mips",
-                            polyisa_guest_mips::MODEL_DEFS,
-                            polyisa_guest_mips::FEATURE_DEFS,
-                            polyisa_guest_mips::FEAT_BITS,
-                            s,
-                        )
-                    })
-                    .transpose()?;
-                run_mips::run_elf_mips_sel(path, argv, sel.as_ref())
+                run_mips_elf(path, argv, spec.as_ref())
             } else {
                 Err(format!("未対応の e_machine: {}", ehdr.machine))
             }
@@ -137,35 +201,11 @@ pub fn run_path_with(path: &str, argv: &[String], cpu: Option<&str>) -> Result<u
             // EM_RISCV=243。Ref: SPEC-RISCV-PSABI (v1.0).
             if ehdr.machine == 243 {
                 check("riscv")?;
-                let sel = spec
-                    .as_ref()
-                    .map(|s| {
-                        resolve_sel(
-                            "riscv",
-                            polyisa_guest_riscv::MODEL_DEFS,
-                            polyisa_guest_riscv::FEATURE_DEFS,
-                            polyisa_guest_riscv::FEAT_BITS,
-                            s,
-                        )
-                    })
-                    .transpose()?;
-                run::run_elf_sel(path, argv, sel.as_ref())
+                run_riscv_elf(path, argv, spec.as_ref())
             } else if ehdr.machine == 62 {
                 // EM_X86_64。Ref: SRC-LINUX (7.3)。
                 check("x86")?;
-                let sel = spec
-                    .as_ref()
-                    .map(|s| {
-                        resolve_sel(
-                            "x86",
-                            polyisa_guest_x86::MODEL_DEFS,
-                            polyisa_guest_x86::FEATURE_DEFS,
-                            polyisa_guest_x86::FEAT_BITS,
-                            s,
-                        )
-                    })
-                    .transpose()?;
-                run_x86::run_elf_x86_64_sel(path, argv, sel.as_ref())
+                run_x86_64_elf(path, argv, spec.as_ref())
             } else {
                 Err(format!("未対応の e_machine: {}", ehdr.machine))
             }
@@ -195,7 +235,8 @@ pub fn parse_command(args: &[String]) -> Command {
 }
 
 /// 16進の1語を逆アセンブルする。長さは下位2ビットで判定する
-///（`0b11` 以外は16ビット）。RISC-V のみ。
+///（`0b11` 以外は16ビット）。RISC-V のみ。`guest-riscv` 機能で有効になる。
+#[cfg(feature = "guest-riscv")]
 #[must_use]
 pub fn disassemble_riscv(word: u128) -> Option<&'static str> {
     let len = if word & 0b11 == 0b11 { 32 } else { 16 };
@@ -232,6 +273,7 @@ mod tests {
         assert_eq!(parse_command(&empty), Command::Help);
     }
 
+    #[cfg(feature = "guest-riscv")]
     #[test]
     fn disasm_add_and_c_addi() {
         // add x1,x2,x3 と c.addi x1,1（llvm-mc の符号化と一致）。

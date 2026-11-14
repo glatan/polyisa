@@ -63,6 +63,7 @@ fn hello_x86_32() -> Vec<u8> {
     f
 }
 
+#[cfg(feature = "guest-x86")]
 #[test]
 fn run_path_executes_x86_32_hello() {
     let path = write_temp("hello386", &hello_x86_32());
@@ -91,6 +92,7 @@ fn run_path_rejects_unknown_machine() {
     assert!(r.is_err());
 }
 
+#[cfg(feature = "guest-x86")]
 fn hello_x86_64() -> Vec<u8> {
     // REX.W 最小形だけの静的 x86-64 バイナリ。write(1, msg, 13) して exit(7)。
     let code: &[u8] = &[
@@ -137,6 +139,7 @@ fn hello_x86_64() -> Vec<u8> {
     f
 }
 
+#[cfg(feature = "guest-x86")]
 #[test]
 fn run_path_executes_x86_64_hello() {
     let path = write_temp("hello64", &hello_x86_64());

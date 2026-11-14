@@ -1727,8 +1727,8 @@ fn run_c(env: &mut BareEnv, insn: Insn, word: u32, rv32: bool) -> Result<(), Out
 ///
 /// 段取り（`cli run` の垂直スライス）：ELF を読み、セグメントを写像し、
 /// 初期スタックを置き、エントリから `run` で回す。ecall は
-/// `CliEcall` が処理する（write/exit_group のみ。ほかは未対応として
-/// 報告し、未実装で止める）。動的リンク・VFS・シグナルは後の段階。
+/// `os_linux::rv64::sys::Linux` が処理する（未実装のものは ENOSYS）。
+/// 動的リンク・VFS・シグナルは後の段階。
 pub fn run_elf(path: &str, argv: &[String]) -> Result<u64, String> {
     run_elf_sel(path, argv, None)
 }

@@ -42,6 +42,6 @@ pub const WRITEV: u64 = 66;
 pub const SENDFILE: u64 = 71;
 pub const CLOCK_NANOSLEEP: u64 = 115;
 
-/// o32 相当の RISC-V Linux の syscall 処理。`riscv` 機能で有効になる。
-#[cfg(feature = "riscv")]
+/// RISC-V Linux の syscall 処理。`guest-riscv` 機能で有効になる。
+#[cfg(feature = "guest-riscv")]
 pub mod sys;

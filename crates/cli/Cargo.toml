@@ -8,17 +8,40 @@ rust-version = "1.99"
 [dependencies]
 polyisa-engine = { path = "../engine" }
 polyisa-guest = { path = "../guest" }
-polyisa-guest-mips = { path = "../../guests/mips" }
-polyisa-guest-riscv = { path = "../../guests/riscv" }
-polyisa-guest-x86 = { path = "../../guests/x86" }
+polyisa-guest-mips = { path = "../../guests/mips", optional = true }
+polyisa-guest-riscv = { path = "../../guests/riscv", optional = true }
+polyisa-guest-x86 = { path = "../../guests/x86", optional = true }
 polyisa-host = { path = "../host" }
 polyisa-isadl = { path = "../isadl" }
 polyisa-kernel = { path = "../kernel" }
 polyisa-loader = { path = "../loader" }
 polyisa-mem = { path = "../mem" }
-polyisa-os-linux = { path = "../os-linux", features = ["x86", "riscv"] }
+polyisa-os-linux = { path = "../os-linux" }
 polyisa-sem = { path = "../sem" }
 polyisa-trace = { path = "../trace" }
+
+[features]
+default = ["guest-mips", "guest-riscv", "guest-x86"]
+guest-mips = ["dep:polyisa-guest-mips"]
+guest-riscv = ["dep:polyisa-guest-riscv", "polyisa-os-linux/guest-riscv"]
+guest-x86 = ["dep:polyisa-guest-x86", "polyisa-os-linux/guest-x86"]
+
+# 各 heavy_* テストは対象ゲストの feature が有効なときだけビルドする。
+[[test]]
+name = "heavy_program_busybox"
+required-features = ["guest-x86"]
+
+[[test]]
+name = "heavy_program_busybox_i386"
+required-features = ["guest-x86"]
+
+[[test]]
+name = "heavy_program_i386_applet_probe"
+required-features = ["guest-x86"]
+
+[[test]]
+name = "heavy_program_mips"
+required-features = ["guest-mips"]
 
 [lints]
 workspace = true

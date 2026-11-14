@@ -3,7 +3,7 @@
 //! riscv-tests の RV64UI 実行（層5・conformance）。
 //!
 //! `.testdata/riscv-tests` の1件を clang＋rust-lld でビルドし、製品の
-//! run loop（`polyisa-cli::run`、fetch/decode/dispatch）で実行して合否を見る。
+//! run loop（`polyisa-cli::run_riscv`、fetch/decode/dispatch）で実行して合否を見る。
 //! 終了規約は `ecall`（a7=93）の a0（0=成功）である（`env/p/riscv_test.h` の
 //! RVTEST_PASS/FAIL）。
 //!
@@ -14,7 +14,7 @@
 //! `fence_i` の自己書き換えは、PMP のない M モードの写像（全 LOAD に R+W+X）で通る。
 //! `ma_data` の非整列アクセスは、非整列を許す実装（`DATA_READ`/`DATA_WRITE` の `Unaligned`。不可分操作は整列要求のまま）で通る。
 
-use polyisa_cli::run::{EcallHandler, EcallOutcome, Outcome, run};
+use polyisa_cli::run_riscv::{EcallHandler, EcallOutcome, Outcome, run};
 use polyisa_engine::bare::BareEnv;
 use polyisa_guest_riscv::CpuState;
 use polyisa_mem::VirtAddr;
@@ -160,9 +160,9 @@ fn check_one_in(sub: &str, name: &str) {
     struct TestEcall;
     impl EcallHandler for TestEcall {
         fn handle_ecall(&mut self, env: &mut BareEnv, _word: u32) -> EcallOutcome {
-            let a7 = polyisa_cli::run::reg(env, 17);
+            let a7 = polyisa_cli::run_riscv::reg(env, 17);
             if a7 == 93 {
-                return EcallOutcome::Exit(polyisa_cli::run::reg(env, 10));
+                return EcallOutcome::Exit(polyisa_cli::run_riscv::reg(env, 10));
             }
             EcallOutcome::Unimplemented
         }

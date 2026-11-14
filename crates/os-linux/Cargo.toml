@@ -17,8 +17,8 @@ polyisa-guest-riscv = { path = "../../guests/riscv", optional = true }
 polyisa-guest-x86 = { path = "../../guests/x86", optional = true }
 
 [features]
-riscv = ["dep:polyisa-guest-riscv"]
-x86 = ["dep:polyisa-guest-x86"]
+guest-riscv = ["dep:polyisa-guest-riscv"]
+guest-x86 = ["dep:polyisa-guest-x86"]
 
 [lints]
 workspace = true

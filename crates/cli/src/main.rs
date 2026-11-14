@@ -36,27 +36,38 @@ fn main() {
             }
         }
         polyisa_cli::Command::Cpus => {
+            #[cfg(feature = "guest-x86")]
             for m in polyisa_guest_x86::MODELS {
                 println!("x86:{m}");
             }
+            #[cfg(feature = "guest-riscv")]
             for m in polyisa_guest_riscv::MODELS {
                 println!("riscv:{m}");
             }
+            #[cfg(feature = "guest-mips")]
             for m in polyisa_guest_mips::MODELS {
                 println!("mips:{m}");
             }
         }
         polyisa_cli::Command::Disasm => {
-            let Some(word) = args.get(1).and_then(|s| polyisa_cli::parse_hex_word(s)) else {
-                eprintln!("usage: polyisa disasm <hex-word>");
-                std::process::exit(2);
-            };
-            match polyisa_cli::disassemble_riscv(word) {
-                Some(s) => println!("{s}"),
-                None => {
-                    eprintln!("unknown instruction: {word:#x}");
-                    std::process::exit(1);
+            #[cfg(feature = "guest-riscv")]
+            {
+                let Some(word) = args.get(1).and_then(|s| polyisa_cli::parse_hex_word(s)) else {
+                    eprintln!("usage: polyisa disasm <hex-word>");
+                    std::process::exit(2);
+                };
+                match polyisa_cli::disassemble_riscv(word) {
+                    Some(s) => println!("{s}"),
+                    None => {
+                        eprintln!("unknown instruction: {word:#x}");
+                        std::process::exit(1);
+                    }
                 }
+            }
+            #[cfg(not(feature = "guest-riscv"))]
+            {
+                eprintln!("disasm は riscv ゲストを有効にしたビルドが必要");
+                std::process::exit(1);
             }
         }
         polyisa_cli::Command::Help => {

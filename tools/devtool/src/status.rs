@@ -514,7 +514,7 @@ fn load_syscall_tables(root: &Path) -> Result<Vec<GuestSyscalls>, String> {
     Ok(vec![
         GuestSyscalls {
             abi: "rv64",
-            names: parse_sys_table(&rv, "RV64_SYSCALLS", "crates/cli/src/run.rs")?,
+            names: parse_sys_table(&rv, "RV64_SYSCALLS", "crates/os-linux/src/rv64/sys.rs")?,
         },
         GuestSyscalls {
             abi: "x86_64",
@@ -749,13 +749,13 @@ mod tests {
     #[test]
     fn syscall_table_rejects_a_broken_line() {
         let src = "const X86_64_SYSCALLS: &[(&str, SysFn)] = &[\n    (\"read\", sys_read),\n    read,\n];\n";
-        let err = parse_sys_table(src, "X86_64_SYSCALLS", "run_x86.rs").unwrap_err();
+        let err = parse_sys_table(src, "X86_64_SYSCALLS", "x86/sys.rs").unwrap_err();
         assert!(err.contains("行の形が違う"), "{err}");
     }
 
     #[test]
     fn syscall_table_rejects_a_missing_const() {
-        let err = parse_sys_table("", "RV64_SYSCALLS", "run.rs").unwrap_err();
+        let err = parse_sys_table("", "RV64_SYSCALLS", "rv64/sys.rs").unwrap_err();
         assert!(err.contains("がない"), "{err}");
     }
 
