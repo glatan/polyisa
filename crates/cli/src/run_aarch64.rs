@@ -171,6 +171,7 @@ fn step_a64(
     let hw = (word >> 21) & 3;
     let nzcv_in = word & 0xf;
     let n_bit = (word >> 22) & 1;
+    let dbl = n_bit != 0;
     let immr = (word >> 16) & 0x3f;
     let imms = (word >> 10) & 0x3f;
     let shift = (word >> 22) & 3;
@@ -565,6 +566,46 @@ fn step_a64(
         Insn::FmovDX => env.step(|b| sem::fmov_to_v(b, rd.0, rn, 64, false)),
         Insn::FmovXDhi => env.step(|b| sem::fmov_to_g(b, rd, rn.0, true, true)),
         Insn::FmovDhiX => env.step(|b| sem::fmov_to_v(b, rd.0, rn, 64, true)),
+        // スカラー FP。dbl は ptype[22]（0=S,1=D）。
+        Insn::Fp3 => env.step(|b| sem::fp3(b, rd.0, rn.0, rm.0, cond_hi, dbl)),
+        Insn::Fp1 => {
+            let opc = (word >> 15) & 0x3f;
+            if opc == 4 || opc == 5 {
+                env.step(|b| sem::fp1_cvt(b, rd.0, rn.0, opc))
+            } else {
+                env.step(|b| sem::fp1(b, rd.0, rn.0, opc, dbl))
+            }
+        }
+        Insn::Fma => {
+            let neg_p = (word >> 21) & 1 != 0;
+            let neg_a = (word >> 15) & 1 != 0;
+            env.step(|b| sem::fma(b, rd.0, rn.0, rm.0, ra.0, neg_p, neg_a, dbl))
+        }
+        Insn::Fcvt | Insn::FcvtA => {
+            let op = (word >> 16) & 7;
+            if op == 2 || op == 3 {
+                // scvtf/ucvtf: 汎用レジスタ → FP。
+                env.step(|b| sem::int2fp(b, rd.0, rn, dbl, op == 3, sf))
+            } else {
+                // fcvt{*,a}{s,u}: FP → 汎用レジスタ。
+                env.step(|b| {
+                    sem::fp2int(
+                        b,
+                        rd,
+                        rn.0,
+                        (word >> 19) & 3,
+                        op & 1 != 0,
+                        insn == Insn::FcvtA,
+                        dbl,
+                        sf,
+                    )
+                })
+            }
+        }
+        Insn::Fcmp => env.step(|b| sem::fcmp(b, rn.0, rm.0, word & 0x1f, dbl)),
+        Insn::Fccmp => env.step(|b| sem::fccmp(b, rn.0, rm.0, cond_hi, u64::from(word & 0xf), dbl)),
+        Insn::Fcsel => env.step(|b| sem::fcsel(b, rd.0, rn.0, rm.0, cond_hi, dbl)),
+        Insn::FmovImm => env.step(|b| sem::fmov_imm(b, rd.0, (word >> 13) & 0xff, dbl)),
         Insn::ModImm => {
             let q = (word >> 30) & 1 != 0;
             let op = (word >> 29) & 1 != 0;
@@ -1147,5 +1188,142 @@ mod tests {
             .unwrap();
         assert_eq!(&buf[..8], &0xaaaau64.to_le_bytes());
         assert_eq!(&buf[8..], &0xbbbbu64.to_le_bytes());
+    }
+
+    // ---- スカラー FP ----
+
+    fn vref_of(i: u8) -> polyisa_sem::StateRef<polyisa_sem::W128> {
+        polyisa_sem::StateRef::from_offset(
+            core::mem::offset_of!(polyisa_guest_aarch64::CpuState, v) + usize::from(i) * 16,
+        )
+    }
+
+    fn vget(env: &mut BareEnv, i: u8) -> u128 {
+        env.backend.get(vref_of(i))
+    }
+
+    fn vset(env: &mut BareEnv, i: u8, v: u128) {
+        env.backend.set(vref_of(i), v);
+    }
+
+    fn run_n(env: &mut BareEnv, n: u64) {
+        let mut sys = NoSys;
+        let _ = polyisa_engine::run::run(
+            env,
+            &mut sys,
+            n,
+            |e| e.pc,
+            |e, s| step_a64(e, s, 0, Endian::Le, None),
+        );
+    }
+
+    #[test]
+    fn fp_scalar_arith() {
+        // s0=1.5, s1=2.25。演算結果は f32 ビット列で検査する。
+        let mut env = env_at(0x1_0000);
+        vset(&mut env, 0, 0x3fc0_0000);
+        vset(&mut env, 1, 0x4010_0000);
+        poke(&mut env, 0x1_0000, 0x1e21_2802); // fadd s2,s0,s1 = 3.75
+        poke(&mut env, 0x1_0004, 0x1e21_3803); // fsub s3,s0,s1 = -0.75
+        poke(&mut env, 0x1_0008, 0x1e21_0804); // fmul s4,s0,s1 = 3.375
+        poke(&mut env, 0x1_000c, 0x1e21_1805); // fdiv s5,s0,s1 = 2/3
+        poke(&mut env, 0x1_0010, 0x1e21_4806); // fmax s6 = 2.25
+        poke(&mut env, 0x1_0014, 0x1e21_5807); // fmin s7 = 1.5
+        poke(&mut env, 0x1_0018, 0x1e21_680d); // fmaxnm s13 = 2.25
+        poke(&mut env, 0x1_001c, 0x1e21_880e); // fnmul s14 = -3.375
+        env.pc = 0x1_0000;
+        run_n(&mut env, 8);
+        assert_eq!(vget(&mut env, 2) as u32, 0x4070_0000);
+        assert_eq!(vget(&mut env, 3) as u32, 0xbf40_0000);
+        assert_eq!(vget(&mut env, 4) as u32, 0x4058_0000);
+        assert_eq!(vget(&mut env, 5) as u32, 0x3f2a_aaab);
+        assert_eq!(vget(&mut env, 6) as u32, 0x4010_0000);
+        assert_eq!(vget(&mut env, 7) as u32, 0x3fc0_0000);
+        assert_eq!(vget(&mut env, 13) as u32, 0x4010_0000);
+        assert_eq!(vget(&mut env, 14) as u32, 0xc058_0000);
+        // スカラー結果は上位レーンを 0 にする。
+        assert_eq!(vget(&mut env, 2) >> 32, 0);
+    }
+
+    #[test]
+    fn fp_scalar_fma_unary_imm() {
+        let mut env = env_at(0x1_0000);
+        vset(&mut env, 0, 0x3fc0_0000); // 1.5
+        vset(&mut env, 1, 0x4010_0000); // 2.25
+        vset(&mut env, 3, 0x3f20_0000); // 0.625
+        vset(&mut env, 15, 0xc000_0000); // -2.0
+        vset(&mut env, 16, 0x4006_0000_0000_0000); // 2.75 (d)
+        poke(&mut env, 0x1_0000, 0x1f01_0c02); // fmadd s2,s0,s1,s3 = 4.0
+        poke(&mut env, 0x1_0004, 0x1f01_880b); // fmsub s11,s0,s1,s2 = -0.625
+        poke(&mut env, 0x1_0008, 0x1f21_0c0c); // fnmadd s12,s0,s1,s3 = -2.75
+        poke(&mut env, 0x1_000c, 0x1e21_c029); // fsqrt s9,s1 = 1.5
+        poke(&mut env, 0x1_0010, 0x1e20_c1e7); // fabs s7,s15 = 2.0
+        poke(&mut env, 0x1_0014, 0x1e21_41e8); // fneg s8,s15 = 2.0
+        poke(&mut env, 0x1_0018, 0x1e65_c206); // frintz d6,d16 = 2.0
+        poke(&mut env, 0x1_001c, 0x1e2f_1004); // fmov s4,#1.5
+        poke(&mut env, 0x1_0020, 0x1e70_9005); // fmov d5,#-2.5
+        env.pc = 0x1_0000;
+        run_n(&mut env, 9);
+        assert_eq!(vget(&mut env, 2) as u32, 0x4080_0000);
+        assert_eq!(vget(&mut env, 11) as u32, 0xbf20_0000);
+        assert_eq!(vget(&mut env, 12) as u32, 0xc030_0000);
+        assert_eq!(vget(&mut env, 9) as u32, 0x3fc0_0000);
+        assert_eq!(vget(&mut env, 7) as u32, 0x4000_0000);
+        assert_eq!(vget(&mut env, 8) as u32, 0x4000_0000);
+        assert_eq!(vget(&mut env, 6), 0x4000_0000_0000_0000);
+        assert_eq!(vget(&mut env, 4) as u32, 0x3fc0_0000);
+        assert_eq!(vget(&mut env, 5), 0xc004_0000_0000_0000);
+    }
+
+    #[test]
+    fn fp_scalar_cvt_cmp() {
+        let mut env = env_at(0x1_0000);
+        env.backend.set(Gpr(0).state(), 42);
+        vset(&mut env, 1, 0x3fc0_0000); // 1.5
+        vset(&mut env, 16, 0x4002_0000_0000_0000); // 2.25 (d)
+        poke(&mut env, 0x1_0000, 0x1e22_0000); // scvtf s0,w0 = 42.0
+        poke(&mut env, 0x1_0004, 0x9e62_0009); // scvtf d9,x0 = 42.0
+        poke(&mut env, 0x1_0008, 0x1e38_0021); // fcvtzs w1,s1 = 1
+        poke(&mut env, 0x1_000c, 0x1e20_0023); // fcvtns w3,s1 = 2 (RNE)
+        poke(&mut env, 0x1_0010, 0x1e24_0024); // fcvtas w4,s1 = 2 (away)
+        poke(&mut env, 0x1_0014, 0x1e22_c022); // fcvt d2,s1 = 1.5
+        poke(&mut env, 0x1_0018, 0x1e62_4203); // fcvt s3,d16 = 2.25
+        poke(&mut env, 0x1_001c, 0x9e79_0042); // fcvtzu x2,d2 = 1
+        env.pc = 0x1_0000;
+        run_n(&mut env, 8);
+        assert_eq!(vget(&mut env, 0) as u32, 0x4228_0000);
+        assert_eq!(vget(&mut env, 9) as u64, 0x4045_0000_0000_0000);
+        assert_eq!(xreg(&mut env, 1), 1);
+        assert_eq!(xreg(&mut env, 3), 2);
+        assert_eq!(xreg(&mut env, 4), 2);
+        assert_eq!(vget(&mut env, 2), 0x3ff8_0000_0000_0000);
+        assert_eq!(vget(&mut env, 3) as u32, 0x4010_0000);
+        assert_eq!(xreg(&mut env, 2), 1);
+    }
+
+    #[test]
+    fn fp_scalar_cmp_sel() {
+        let mut env = env_at(0x1_0000);
+        vset(&mut env, 0, 0x3fc0_0000); // 1.5
+        vset(&mut env, 1, 0x4010_0000); // 2.25
+        vset(&mut env, 15, 0x7fc0_0000); // qNaN
+        poke(&mut env, 0x1_0000, 0x1e21_2000); // fcmp s0,s1 → lt: N=1 → 0b1000
+        poke(&mut env, 0x1_0004, 0x1e20_2000); // fcmp s0,s0 → eq: ZC → 0b0110
+        poke(&mut env, 0x1_0008, 0x1e20_2008); // fcmp s0,#0.0 → gt: C → 0b0010
+        poke(&mut env, 0x1_000c, 0x1e20_21e0); // fcmp s15,s0 → un: CV → 0b0011
+        poke(&mut env, 0x1_0010, 0x1e21_140a); // fccmp s0,s1,#0xa,ne（cond 成立→比較）
+        poke(&mut env, 0x1_0014, 0x1e21_0c0a); // fcsel s10,s0,s1,eq（直前は lt → s1）
+        env.pc = 0x1_0000;
+        run_n(&mut env, 6);
+        // 直前の fccmp: ne が成立して比較実行 → lt: N=1。
+        assert_eq!(env.backend.get(sem::nzcv_ref()) & 0xf, 0x8);
+        assert_eq!(vget(&mut env, 10) as u32, 0x4010_0000);
+        // 個別フラグの再検査: eq なら fcsel は s0 側を取る。
+        poke(&mut env, 0x1_0018, 0x1e20_2000); // fcmp s0,s0
+        poke(&mut env, 0x1_001c, 0x1e21_0c0a); // fcsel s10,s0,s1,eq
+        env.pc = 0x1_0018;
+        run_n(&mut env, 2);
+        assert_eq!(env.backend.get(sem::nzcv_ref()) & 0xf, 0x6);
+        assert_eq!(vget(&mut env, 10) as u32, 0x3fc0_0000);
     }
 }

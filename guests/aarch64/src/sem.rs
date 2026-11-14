@@ -13,7 +13,8 @@
 
 use polyisa_mem::{Access, AccessKind, Align, Endian};
 use polyisa_sem::{
-    Backend, Cmp, ExceptionKind, Flow, GuestException, StateRef, W8, W16, W32, W64, W128, Width,
+    Backend, Cmp, ExceptionKind, F32, F64, Flow, GuestException, StateRef, W8, W16, W32, W64, W128,
+    Width,
 };
 
 use super::CpuState;
@@ -2198,4 +2199,436 @@ pub fn fmov_to_g<B: Backend>(b: &mut B, rd: Gpr, rn: u8, is64: bool, hi: bool) -
         write_w(b, rd, t, false);
     }
     Ok(())
+}
+
+// ---- スカラー浮動小数点 ----
+// Ref: SPEC-ARM-ARM-A (Armv9-A ARM ARM 2024-09).
+// 丸めモードは polyisa_softfloat::Rm の番号（RISC-V と同じ）:
+// 0=Rne, 1=Rtz, 2=Rdn, 3=Rup, 4=Rmm。
+const RM_RNE: u8 = 0;
+const RM_RTZ: u8 = 1;
+const RM_RDN: u8 = 2;
+const RM_RUP: u8 = 3;
+const RM_RMM: u8 = 4;
+
+/// FP レジスタの下位レーンを F32/F64 として読む。
+fn fpget<B: Backend, F: Width>(b: &mut B, r: u8) -> B::V<F> {
+    let v: B::V<W128> = b.get(vref(r));
+    b.trunc::<W128, F>(v)
+}
+
+/// スカラー結果を書く。上位レーンは 0 にクリアする。
+fn fpput<B: Backend, F: Width>(b: &mut B, r: u8, v: B::V<F>) {
+    let e: B::V<W128> = b.zext::<F, W128>(v);
+    b.set(vref(r), e);
+}
+
+fn fneg_v<B: Backend, F: Width>(b: &mut B, a: B::V<F>) -> B::V<F> {
+    let sign = b.konst::<F>(F::from_u128(1u128 << (F::BITS - 1)));
+    b.xor(a, sign)
+}
+
+fn fabs_v<B: Backend, F: Width>(b: &mut B, a: B::V<F>) -> B::V<F> {
+    let mask = b.konst::<F>(F::from_u128((1u128 << (F::BITS - 1)) - 1));
+    b.and(a, mask)
+}
+
+/// FP 3 項（fmul/fdiv/fadd/fsub/fmax/fmin/fmaxnm/fminnm/fnmul）。
+/// `dbl` が真なら F64、偽なら F32。結果の上位レーンは 0。
+/// Ref: SPEC-ARM-ARM-A (Armv9-A ARM ARM 2024-09).
+pub fn fp3<B: Backend>(b: &mut B, d: u8, n: u8, m: u8, opc: u32, dbl: bool) -> Flow<B> {
+    if dbl {
+        fp3_f::<B, F64>(b, d, n, m, opc)
+    } else {
+        fp3_f::<B, F32>(b, d, n, m, opc)
+    }
+}
+
+fn fp3_f<B: Backend, F: Width>(b: &mut B, d: u8, n: u8, m: u8, opc: u32) -> Flow<B> {
+    let a = fpget::<B, F>(b, n);
+    let c = fpget::<B, F>(b, m);
+    let v = match opc {
+        0 => b.fmul::<F>(a, c),
+        1 => b.fdiv::<F>(a, c),
+        2 => b.fadd::<F>(a, c),
+        3 => b.fsub::<F>(a, c),
+        4..=7 => {
+            let basic = if opc == 4 || opc == 6 {
+                b.fmax::<F>(a, c)
+            } else {
+                b.fmin::<F>(a, c)
+            };
+            if opc < 6 {
+                basic
+            } else {
+                // NM 版は片側 NaN なら数値側、両方 NaN なら a を返す。
+                let na = b.feq::<F>(a, a);
+                let nc = b.feq::<F>(c, c);
+                let inner = b.select::<F>(nc, basic, a);
+                let alt = b.select::<F>(nc, c, a);
+                b.select::<F>(na, inner, alt)
+            }
+        }
+        _ => {
+            let p = b.fmul::<F>(a, c);
+            fneg_v::<B, F>(b, p)
+        }
+    };
+    fpput::<B, F>(b, d, v);
+    Ok(())
+}
+
+/// FP 1 項。opc: 0=fmov reg, 1=fabs, 2=fneg, 3=fsqrt、
+/// 8..15=frintn/p/m/z/a/-/x/i（x/i は FPCR 未実装のため Rne）。
+/// fcvt（opc 4/5）は源と目的で幅が違うため `fp1_cvt` 側で扱う。
+/// Ref: SPEC-ARM-ARM-A (Armv9-A ARM ARM 2024-09).
+pub fn fp1<B: Backend>(b: &mut B, d: u8, n: u8, opc: u32, dbl: bool) -> Flow<B> {
+    if dbl {
+        fp1_f::<B, F64>(b, d, n, opc)
+    } else {
+        fp1_f::<B, F32>(b, d, n, opc)
+    }
+}
+
+fn fp1_f<B: Backend, F: Width>(b: &mut B, d: u8, n: u8, opc: u32) -> Flow<B> {
+    let a = fpget::<B, F>(b, n);
+    match opc {
+        0 => fpput::<B, F>(b, d, a),
+        1 => {
+            let v = fabs_v::<B, F>(b, a);
+            fpput::<B, F>(b, d, v);
+        }
+        2 => {
+            let v = fneg_v::<B, F>(b, a);
+            fpput::<B, F>(b, d, v);
+        }
+        3 => {
+            let v = b.fsqrt::<F>(a);
+            fpput::<B, F>(b, d, v);
+        }
+        _ => {
+            // FRINT 群。丸めモードは opc で決まる。
+            let rm = match opc {
+                9 => RM_RUP,
+                10 => RM_RDN,
+                11 => RM_RTZ,
+                12 => RM_RMM,
+                _ => RM_RNE,
+            };
+            let v = frint::<B, F>(b, a, rm);
+            fpput::<B, F>(b, d, v);
+        }
+    }
+    Ok(())
+}
+
+/// FRINT。i64 経由で丸める。|a| >= 2^63 や NaN/Inf は値をそのまま返す
+/// （その大きさでは全ての浮動小数点数が整数である）。NaN 判定は a==a。
+fn frint<B: Backend, F: Width>(b: &mut B, a: B::V<F>, rm: u8) -> B::V<F> {
+    // 2^63 のビット列。F32=0x5F000000、F64=0x43E0000000000000。
+    let lim_bits: u128 = if F::BITS == 64 {
+        0x43e0_0000_0000_0000
+    } else {
+        0x5f00_0000
+    };
+    let lim = b.konst::<F>(F::from_u128(lim_bits));
+    let abs = fabs_v::<B, F>(b, a);
+    let small = b.flt::<F>(abs, lim);
+    let i = b.fcvt_s64::<F>(a, rm);
+    let r = b.fcvt_from_s64::<F>(i, RM_RNE);
+    let via_int = b.select::<F>(small, r, a);
+    let ordered = b.feq::<F>(a, a);
+    b.select::<F>(ordered, via_int, a)
+}
+
+/// FCVT（fp1 の opc 4/5）。4 は D→S（源 ptype=1）、5 は S→D（源 ptype=0）。
+/// 結果は RNE。Ref: SPEC-ARM-ARM-A (Armv9-A ARM ARM 2024-09).
+pub fn fp1_cvt<B: Backend>(b: &mut B, d: u8, n: u8, opc: u32) -> Flow<B> {
+    if opc == 4 {
+        let a = fpget::<B, F64>(b, n);
+        let v = b.fcvt_ff::<F64, F32>(a, RM_RNE);
+        fpput::<B, F32>(b, d, v);
+    } else {
+        let a = fpget::<B, F32>(b, n);
+        let v = b.fcvt_ff::<F32, F64>(a, RM_RNE);
+        fpput::<B, F64>(b, d, v);
+    }
+    Ok(())
+}
+
+/// FMA。`neg_p` は積の否定（fnm*）、`neg_a` は加算項の否定（*msub）。
+/// -n*m = (-n)*m なので積の否定は n の符号反転で行う。
+/// Ref: SPEC-ARM-ARM-A (Armv9-A ARM ARM 2024-09).
+#[allow(clippy::too_many_arguments)]
+pub fn fma<B: Backend>(
+    b: &mut B,
+    d: u8,
+    n: u8,
+    m: u8,
+    a: u8,
+    neg_p: bool,
+    neg_a: bool,
+    dbl: bool,
+) -> Flow<B> {
+    if dbl {
+        fma_f::<B, F64>(b, d, n, m, a, neg_p, neg_a)
+    } else {
+        fma_f::<B, F32>(b, d, n, m, a, neg_p, neg_a)
+    }
+}
+
+fn fma_f<B: Backend, F: Width>(
+    b: &mut B,
+    d: u8,
+    n: u8,
+    m: u8,
+    a: u8,
+    neg_p: bool,
+    neg_a: bool,
+) -> Flow<B> {
+    let x = fpget::<B, F>(b, n);
+    let x = if neg_p { fneg_v::<B, F>(b, x) } else { x };
+    let y = fpget::<B, F>(b, m);
+    let z = fpget::<B, F>(b, a);
+    let z = if neg_a { fneg_v::<B, F>(b, z) } else { z };
+    let v = b.fmadd::<F>(x, y, z);
+    fpput::<B, F>(b, d, v);
+    Ok(())
+}
+
+/// 整数→FP（scvtf/ucvtf）。src は汎用レジスタ（w64 で幅を選ぶ）。
+/// Ref: SPEC-ARM-ARM-A (Armv9-A ARM ARM 2024-09).
+pub fn int2fp<B: Backend>(
+    b: &mut B,
+    d: u8,
+    rn: Gpr,
+    dbl: bool,
+    unsigned: bool,
+    w64: bool,
+) -> Flow<B> {
+    if w64 {
+        let x = read(b, rn, false);
+        int2fp_w::<B, W64>(b, d, x, dbl, unsigned)
+    } else {
+        let x = read_w(b, rn, false);
+        int2fp_w::<B, W32>(b, d, x, dbl, unsigned)
+    }
+}
+
+fn int2fp_w<B: Backend, W: Width>(
+    b: &mut B,
+    d: u8,
+    x: B::V<W>,
+    dbl: bool,
+    unsigned: bool,
+) -> Flow<B> {
+    let x64 = if unsigned {
+        b.zext::<W, W64>(x)
+    } else {
+        b.sext::<W, W64>(x)
+    };
+    if dbl {
+        let v = if unsigned {
+            b.fcvt_from_u64::<F64>(x64, RM_RNE)
+        } else {
+            b.fcvt_from_s64::<F64>(x64, RM_RNE)
+        };
+        fpput::<B, F64>(b, d, v);
+    } else {
+        let v = if unsigned {
+            b.fcvt_from_u64::<F32>(x64, RM_RNE)
+        } else {
+            b.fcvt_from_s64::<F32>(x64, RM_RNE)
+        };
+        fpput::<B, F32>(b, d, v);
+    }
+    Ok(())
+}
+
+/// FP→整数（fcvt{n,p,m,a,z}{s,u}）。`rmode` は命令の rmode フィールド
+/// （0=N,1=P,2=M,3=Z）。`away` は A 変種（opc 4/5）で真。
+/// `w64` は出力整数幅、`dbl` は源 FP 幅、sf と関係なく読みは FP 側。
+/// Ref: SPEC-ARM-ARM-A (Armv9-A ARM ARM 2024-09).
+#[allow(clippy::too_many_arguments)]
+pub fn fp2int<B: Backend>(
+    b: &mut B,
+    rd: Gpr,
+    n: u8,
+    rmode: u32,
+    unsigned: bool,
+    away: bool,
+    dbl: bool,
+    w64: bool,
+) -> Flow<B> {
+    let rm = if away {
+        RM_RMM
+    } else {
+        match rmode {
+            1 => RM_RUP,
+            2 => RM_RDN,
+            3 => RM_RTZ,
+            _ => RM_RNE,
+        }
+    };
+    if dbl {
+        let a = fpget::<B, F64>(b, n);
+        fp2int_w::<B, F64>(b, rd, a, rm, unsigned, w64)
+    } else {
+        let a = fpget::<B, F32>(b, n);
+        fp2int_w::<B, F32>(b, rd, a, rm, unsigned, w64)
+    }
+}
+
+fn fp2int_w<B: Backend, F: Width>(
+    b: &mut B,
+    rd: Gpr,
+    a: B::V<F>,
+    rm: u8,
+    unsigned: bool,
+    w64: bool,
+) -> Flow<B> {
+    if w64 {
+        let v = if unsigned {
+            b.fcvt_u64::<F>(a, rm)
+        } else {
+            b.fcvt_s64::<F>(a, rm)
+        };
+        write(b, rd, v, false);
+    } else {
+        let v = if unsigned {
+            b.fcvt_u32::<F>(a, rm)
+        } else {
+            b.fcvt_s32::<F>(a, rm)
+        };
+        write_w(b, rd, v, false);
+    }
+    Ok(())
+}
+
+/// 順序なし判定。NaN を含む比較で真。
+fn un_ord<B: Backend, F: Width>(b: &mut B, a: B::V<F>, c: B::V<F>) -> B::B {
+    // un = !(a<c | a==c | a>c)。select で 0/1 の W64 にして cmp する。
+    let one = b.konst::<W64>(1);
+    let zero = b.konst::<W64>(0);
+    let lt = b.flt::<F>(a, c);
+    let o1 = b.select::<W64>(lt, one, zero);
+    let eq = b.feq::<F>(a, c);
+    let o2 = b.select::<W64>(eq, one, o1);
+    let gt = b.flt::<F>(c, a);
+    let o3 = b.select::<W64>(gt, one, o2);
+    b.cmp::<W64>(Cmp::Eq, o3, zero)
+}
+
+/// FCMP/FCMPE。op2[4] が fcmpe（ここでは同じ扱い）、op2[3] が #0.0 比較。
+/// NZCV: lt→N, eq→ZC, gt→C, unordered→CV。
+/// Ref: SPEC-ARM-ARM-A (Armv9-A ARM ARM 2024-09).
+pub fn fcmp<B: Backend>(b: &mut B, n: u8, m: u8, op2: u32, dbl: bool) -> Flow<B> {
+    if dbl {
+        fcmp_f::<B, F64>(b, n, m, op2)
+    } else {
+        fcmp_f::<B, F32>(b, n, m, op2)
+    }
+}
+
+fn fcmp_f<B: Backend, F: Width>(b: &mut B, n: u8, m: u8, op2: u32) -> Flow<B> {
+    let a = fpget::<B, F>(b, n);
+    let c = if op2 & 8 != 0 {
+        b.konst::<F>(F::from_u128(0))
+    } else {
+        fpget::<B, F>(b, m)
+    };
+    let lt = b.flt::<F>(a, c);
+    let eq = b.feq::<F>(a, c);
+    let un = un_ord::<B, F>(b, a, c);
+    // C = !lt。B を 0/1 の W64 にして否定する。
+    let one = b.konst::<W64>(1);
+    let zero = b.konst::<W64>(0);
+    let cl = b.select::<W64>(lt, zero, one);
+    let cb = b.cmp::<W64>(Cmp::Ne, cl, zero);
+    let bits = nzcv_bits(b, lt, eq, cb, un);
+    b.set(nzcv_ref(), bits);
+    Ok(())
+}
+
+/// FCCMP/FCCMPE。cond 成立で FCMP 相当、不成立で nzcv をそのまま書く。
+/// op2[4] が fccmpe。Ref: SPEC-ARM-ARM-A (Armv9-A ARM ARM 2024-09).
+pub fn fccmp<B: Backend>(b: &mut B, n: u8, m: u8, cond: u32, nzcv: u64, dbl: bool) -> Flow<B> {
+    let c = cond_eval(b, cond);
+    if dbl {
+        fccmp_f::<B, F64>(b, n, m, c, nzcv)
+    } else {
+        fccmp_f::<B, F32>(b, n, m, c, nzcv)
+    }
+}
+
+fn fccmp_f<B: Backend, F: Width>(b: &mut B, n: u8, m: u8, c: B::B, nzcv: u64) -> Flow<B> {
+    let a = fpget::<B, F>(b, n);
+    let v = fpget::<B, F>(b, m);
+    let lt = b.flt::<F>(a, v);
+    let eq = b.feq::<F>(a, v);
+    let un = un_ord::<B, F>(b, a, v);
+    let one = b.konst::<W64>(1);
+    let zero = b.konst::<W64>(0);
+    let cl = b.select::<W64>(lt, zero, one);
+    let cb = b.cmp::<W64>(Cmp::Ne, cl, zero);
+    let cmp_bits = nzcv_bits(b, lt, eq, cb, un);
+    let imm = b.konst::<W64>(nzcv & 0xf);
+    let bits = b.select::<W64>(c, cmp_bits, imm);
+    b.set(nzcv_ref(), bits);
+    Ok(())
+}
+
+/// FCSEL。cond 成立で rn、不成立で rm。
+/// Ref: SPEC-ARM-ARM-A (Armv9-A ARM ARM 2024-09).
+pub fn fcsel<B: Backend>(b: &mut B, d: u8, n: u8, m: u8, cond: u32, dbl: bool) -> Flow<B> {
+    let c = cond_eval(b, cond);
+    if dbl {
+        let x = fpget::<B, F64>(b, n);
+        let y = fpget::<B, F64>(b, m);
+        let v = b.select::<F64>(c, x, y);
+        fpput::<B, F64>(b, d, v);
+    } else {
+        let x = fpget::<B, F32>(b, n);
+        let y = fpget::<B, F32>(b, m);
+        let v = b.select::<F32>(c, x, y);
+        fpput::<B, F32>(b, d, v);
+    }
+    Ok(())
+}
+
+/// FMOV 即値。FP8 展開（VFPExpandImm）。
+/// value = (-1)^s × (16+f)/16 × 2^e、e = (NOT(imm8[6])<<2 | imm8[5:4]) - 3。
+/// Ref: SPEC-ARM-ARM-A (Armv9-A ARM ARM 2024-09).
+pub fn fmov_imm<B: Backend>(b: &mut B, d: u8, imm8: u32, dbl: bool) -> Flow<B> {
+    let s = u64::from(imm8 >> 7);
+    let e = (((imm8 >> 6) & 1) ^ 1) * 4 + ((imm8 >> 4) & 3);
+    let f = u64::from(imm8 & 0xf);
+    let bits = fp8_bits(s, u64::from(e), f, dbl);
+    let v = b.konst::<W64>(bits);
+    let e128 = b.zext::<W64, W128>(v);
+    b.set(vref(d), e128);
+    Ok(())
+}
+
+/// FP8 展開のビット列。f32/f64 の正規数または非正規数を組み立てる。
+fn fp8_bits(s: u64, e: u64, f: u64, dbl: bool) -> u64 {
+    let (ebits, mbits): (u32, u32) = if dbl { (11, 52) } else { (8, 23) };
+    let bias = (1u64 << (ebits - 1)) - 1;
+    let sig = 16 + f;
+    // value = sig/16 × 2^(e-3)。sig は 16..31 で 1.x の形式。
+    let exp = e as i64 - 3 + bias as i64;
+    if exp >= (1i64 << ebits) - 1 {
+        // オーバーフローは無限大。
+        return s << (ebits + mbits) | (((1u64 << ebits) - 1) << mbits);
+    }
+    if exp >= 1 {
+        let mant = sig - 16;
+        let field = mant << (mbits - 4);
+        return s << (ebits + mbits) | ((exp as u64) << mbits) | field;
+    }
+    // 非正規数側。sig/16 × 2^(e-3) は 2^(exp-52+4) に直す。
+    let sh = 1 - exp;
+    let mant = sig << 48;
+    let field = mant >> (sh + 4);
+    s << (ebits + mbits) | field
 }

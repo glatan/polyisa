@@ -425,6 +425,28 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("fmov_d_x", "FL", "10011110 01100111 000000 ..... .....", "fmov {rd}, {rn}", "alu"),
         ("fmov_x_dhi", "FL", "10011110 10101110 000000 ..... .....", "fmov {rd}, {rn}", "alu"),
         ("fmov_dhi_x", "FL", "10011110 10101111 000000 ..... .....", "fmov {rd}, {rn}", "alu"),
+        // スカラー FP 3 項。ptype[23:22]=0x が S/D、opc[15:12] が演算。
+        // 0=fmul 1=fdiv 2=fadd 3=fsub 4=fmax 5=fmin 6=fmaxnm 7=fminnm 8=fnmul。
+        ("fp3", "FN", "00011110 0. 1 ..... .... 10 ..... .....", "fp3 {rd}, {rn}, {rm}", "alu"),
+        // スカラー FP 1 項。opc[20:15] が演算（0=fmov 1=fabs 2=fneg 3=fsqrt
+        // 4=fcvt d→s 5=fcvt s→d 8..15=frintn/p/m/z/a/-/x/i）。
+        ("fp1", "FN", "00011110 0. 1 ...... 10000 ..... .....", "fp1 {rd}, {rn}", "alu"),
+        // FMA。bit21=積の否定（fn*）、bit15=加算項の否定（*msub）。
+        ("fma", "FN", "00011111 0. . ..... . ..... ..... .....", "fma {rd}, {rn}, {rm}, {ra}", "alu"),
+        // 整数↔FP 変換。opc[18:16]=010/011 が int→fp（scvtf/ucvtf）、
+        // 0/1（rmode[20:19] 付き）が fp→int（fcvt{n,p,m,a,z}{s,u}）。
+        // sf=整数幅、ptype=FP 側。opc=110/111 は未割当なので bit18=0 に限定。
+        ("fcvt", "FN", ". 00 11110 0. 1 ..0.. 000000 ..... .....", "fcvt {rd}, {rn}", "alu"),
+        // FCVTA* は rmode=00 + opc=10x の別スロット。
+        ("fcvt_a", "FN", ". 00 11110 0. 1 0010. 000000 ..... .....", "fcvta {rd}, {rn}", "alu"),
+        // FP 比較。op2[4]=fcmpe（NV 時の例外。ここでは同じ扱い）、op2[3]=#0.0。
+        ("fcmp", "FN", "00011110 0. 1 ..... 001000 ..... .....", "fcmp {rn}, {rm}", "alu"),
+        // FP 条件付き比較。op[4]=fccmpe。不成立時は nzcv[3:0] を書く。
+        ("fccmp", "FN", "00011110 0. 1 ..... .... 01 ..... .....", "fccmp {rn}, {rm}", "alu"),
+        // FP 条件選択。cond[15:12]。
+        ("fcsel", "FN", "00011110 0. 1 ..... .... 11 ..... .....", "fcsel {rd}, {rn}, {rm}", "alu"),
+        // FP 即値（FP8 展開）。imm8[20:13]。
+        ("fmov_imm", "FN", "00011110 0. 1 ........ 100 00000 .....", "fmov {rd}, #imm", "alu"),
         // 排他ロード・ストア。[29:23]=0010000、bit22=L、bit15=o0（aq）。Rt2=11111。
         ("stxr_w", "FL", "10 001000 00 0 ..... 0 11111 ..... .....", "stxr {rs}, {rt}, [{rn}]", "store"),
         ("ldxr_w", "FL", "10 001000 01 0 11111 0 11111 ..... .....", "ldxr {rt}, [{rn}]", "load"),

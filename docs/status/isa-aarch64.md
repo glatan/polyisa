@@ -52,7 +52,15 @@
 | eon | eon_sh | 真 | alu |
 | eor | eor_imm、eor_sh | 真 | alu |
 | extr | extr | 真 | alu |
-| fmov | fmov_d_x、fmov_dhi_x、fmov_s_w、fmov_w_s、fmov_x_d、fmov_x_dhi | 真 | alu |
+| fccmp | fccmp | 真 | alu |
+| fcmp | fcmp | 真 | alu |
+| fcsel | fcsel | 真 | alu |
+| fcvt | fcvt | 真 | alu |
+| fcvta | fcvt_a | 真 | alu |
+| fma | fma | 真 | alu |
+| fmov | fmov_d_x、fmov_dhi_x、fmov_imm、fmov_s_w、fmov_w_s、fmov_x_d、fmov_x_dhi | 真 | alu |
+| fp1 | fp1 | 真 | alu |
+| fp3 | fp3 | 真 | alu |
 | hlt | hlt | 真 | system |
 | hvc | hvc | 真 | system |
 | ins | ins_gen | 真 | alu |
