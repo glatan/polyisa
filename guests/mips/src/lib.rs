@@ -88,9 +88,9 @@ mod tests {
 
     #[test]
     fn insn_count() {
-        // MIPS I + MIPS32r2 + MIPS64 + Release 6（コンパクト分岐含む）。
-        // nop は sll $0,$0,0 の別名。
-        assert_eq!(INSNS.len(), 185);
+        // MIPS I + MIPS32r2 + MIPS64 + Release 6（コンパクト分岐と
+        // EVA・語対の LL/SC 含む）。nop は sll $0,$0,0 の別名。
+        assert_eq!(INSNS.len(), 191);
     }
 
     #[test]
@@ -315,6 +315,15 @@ mod tests {
         assert_eq!(f(0x7c43_0837, R6), None);
         assert_eq!(f(0xc041_0010, R6), None);
         assert_eq!(f(0x7c43_0836, R2), None);
+        // R6 の EVA 版と語対の LL/SC。語対形は bit6=1 で [15:11] が第二レジスタ。
+        assert_eq!(f(0x7c43_082e, R6), Some(Insn::Lle));
+        assert_eq!(f(0x7c43_081e, R6), Some(Insn::Sce));
+        assert_eq!(f(0x7c43_5076, R6), Some(Insn::Llwp));
+        assert_eq!(f(0x7c43_5066, R6), Some(Insn::Scwp));
+        assert_eq!(f(0x7c43_506e, R6), Some(Insn::Llwpe));
+        assert_eq!(f(0x7c43_505e, R6), Some(Insn::Scwpe));
+        // bit6=1 の符号化は単独形では復号しない（語対として読む）。
+        assert_eq!(f(0x7c43_0876, R6), Some(Insn::Llwp));
         // R6 の REGIMM 系と上位即値。NAL/BAL は rs=0 固定。
         assert_eq!(f(0x0410_0010, R6), Some(Insn::Nal));
         assert_eq!(f(0x0411_0010, R6), Some(Insn::Bal));

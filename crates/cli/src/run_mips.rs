@@ -753,6 +753,24 @@ fn exec(
             let off = sext_bits(word >> 7, 9);
             step(env, in_slot, |b| sem::scd(b, rt, rs, off, model.endian)).map(|()| wrote(rt))
         }
+        Insn::Lle => {
+            let off = sext_bits(word >> 7, 9);
+            load_gpr(env, rt, model, in_slot, |b| {
+                sem::lle(b, rt, rs, off, model.endian)
+            })
+        }
+        Insn::Sce => {
+            let off = sext_bits(word >> 7, 9);
+            step(env, in_slot, |b| sem::sce(b, rt, rs, off, model.endian)).map(|()| wrote(rt))
+        }
+        // llwp/llwpe は R6 専用（ロード遅延を持つモデルでは復号しない）。
+        // rt と rd の両方に書くが、遅延追跡が要るのは rt 側だけで足りる。
+        Insn::Llwp | Insn::Llwpe => load_gpr(env, rt, model, in_slot, |b| {
+            sem::llwp(b, rt, rd, rs, model.endian)
+        }),
+        Insn::Scwp | Insn::Scwpe => {
+            step(env, in_slot, |b| sem::scwp(b, rt, rd, rs, model.endian)).map(|()| wrote(rt))
+        }
         Insn::Nal => step(env, in_slot, |b| sem::nal(b, pc)).map(|()| wrote(Gpr(31))),
         Insn::Bal => step(env, in_slot, |b| sem::bal_delay(b, pc, imm)).map(|()| wrote(Gpr(31))),
         Insn::Dahi => step(env, in_slot, |b| sem::dahi(b, rs, imm)).map(|()| wrote(rs)),

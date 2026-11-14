@@ -1287,6 +1287,52 @@ pub fn sc<B: Backend>(b: &mut B, rt: Gpr, rs: Gpr, imm: i32, endian: Endian) -> 
     Ok(())
 }
 
+/// LLE rt,off(rs)。EVA 版 LL。ユーザモードでは LL と同義。
+pub fn lle<B: Backend>(b: &mut B, rt: Gpr, rs: Gpr, imm: i32, endian: Endian) -> Flow<B> {
+    ll(b, rt, rs, imm, endian)
+}
+
+/// SCE rt,off(rs)。EVA 版 SC。ユーザモードでは SC と同義。
+pub fn sce<B: Backend>(b: &mut B, rt: Gpr, rs: Gpr, imm: i32, endian: Endian) -> Flow<B> {
+    sc(b, rt, rs, imm, endian)
+}
+
+/// LLWP rt,rd,(rs)。語対の排他ロード。オフセットはなく、
+/// rt に下位語、rd に上位語を 32 ビット符号拡張で書く。
+/// 排他制御は持たずロードとして振る舞う。
+pub fn llwp<B: Backend>(b: &mut B, rt: Gpr, rd: Gpr, rs: Gpr, endian: Endian) -> Flow<B> {
+    let addr = read(b, rs);
+    let v: B::V<W64> = b.load::<W64>(addr, word_read(endian))?;
+    let lo: B::V<W32> = b.trunc::<W64, W32>(v);
+    let shift = b.konst::<W64>(32);
+    let hi64 = b.shr_l::<W64>(v, shift);
+    let hi: B::V<W32> = b.trunc::<W64, W32>(hi64);
+    let rt_v = b.sext::<W32, W64>(lo);
+    let rd_v = b.sext::<W32, W64>(hi);
+    write(b, rt, rt_v);
+    write(b, rd, rd_v);
+    Ok(())
+}
+
+/// SCWP rt,rd,(rs)。語対の排他ストア。{rt,rd} の下位 32 ビットを
+/// 語対として書き、rt に 1 を返す（単一スレッドなので常に成功）。
+pub fn scwp<B: Backend>(b: &mut B, rt: Gpr, rd: Gpr, rs: Gpr, endian: Endian) -> Flow<B> {
+    let addr = read(b, rs);
+    let rt_v = read(b, rt);
+    let rd_v = read(b, rd);
+    let lo32: B::V<W32> = b.trunc::<W64, W32>(rt_v);
+    let hi32: B::V<W32> = b.trunc::<W64, W32>(rd_v);
+    let lo: B::V<W64> = b.zext::<W32, W64>(lo32);
+    let hi: B::V<W64> = b.zext::<W32, W64>(hi32);
+    let shift = b.konst::<W64>(32);
+    let hi_sh = b.shl::<W64>(hi, shift);
+    let v = b.or::<W64>(lo, hi_sh);
+    b.store::<W64>(addr, v, word_write(endian))?;
+    let one = const_w64(b, 1);
+    write(b, rt, one);
+    Ok(())
+}
+
 /// TEQ rs,rt。等しければトラップ。
 pub fn teq<B: Backend>(b: &mut B, rs: Gpr, rt: Gpr) -> Flow<B> {
     let x = read(b, rs);

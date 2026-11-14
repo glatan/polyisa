@@ -3,8 +3,9 @@
 //! MIPS Linux の syscall 処理。o32・n32・n64 を一つの実装で扱う。
 //!
 //! o32 は引数を a0–a3 とスタック（sp+16 以降）から取り、n32/n64 は
-//! a0–a5 から取る。64 ビット引数は o32 が偶数位置の二語、n32 が連続する
-//! 二語、n64 が一語である。エラーは a3=1 と v0=errno で返す。
+//! a0–a5 から取る。o32 の 64 ビット引数は偶数位置の語対で渡り、奇数位置に
+//! 来るものはパッド語を一つ挟む。n32/n64 では 64 ビット引数は一本の
+//! レジスタで渡る。エラーは a3=1 と v0=errno で返す。
 //! errno は `mips::host_to_mips_errno` で MIPS の値に直す。
 //!
 //! 試作の合意事項：仮想カーネル・VFS・ゲストルートの適用は後の段階である。
@@ -160,10 +161,10 @@ impl Linux {
     }
 
     /// 取り出した引数列から 64 ビット引数を組み立てる。
-    /// o32 は偶数位置の二語、n32 は連続する二語、n64 は一語。
+    /// n32/n64 は一語（レジスタは 64 ビット）、o32 は偶数位置の二語。
     fn a64(&self, args: &[u64; 8], slot: usize) -> u64 {
         match self.abi {
-            Abi::N64 => args[slot],
+            Abi::N32 | Abi::N64 => args[slot],
             _ => {
                 let a = args[slot] & 0xffff_ffff;
                 let b = args[slot + 1] & 0xffff_ffff;
@@ -940,25 +941,101 @@ impl Linux {
         }
     }
 
-    /// `statfs64`/`fstatfs64`（120 バイトの mips 形式は複雑なため最小の埋め方）。
-    fn do_statfs(&mut self, env: &mut BareEnv, addr: u64) -> u64 {
-        let mut b = [0u8; 120];
-        // f_type = EXT2_SUPER_MAGIC 0xEF53、残りは妥当な値を置く。
-        let w = |v: u64| match self.endian {
+    /// `statfs`/`fstatfs`/`statfs64`/`fstatfs64`。
+    /// MIPS の形式は汎用と並びが違い、f_frsize が f_bsize の直後に来る。
+    /// layout は `FsLayout` を見る。値は合成（実 fs を反映しない）。
+    fn do_statfs(&mut self, env: &mut BareEnv, addr: u64, layout: FsLayout) -> u64 {
+        let w32 = |v: u32| match self.endian {
             Endian::Be => v.to_be_bytes(),
             Endian::Le => v.to_le_bytes(),
         };
-        b[0..8].copy_from_slice(&w(0xEF53));
-        b[8..16].copy_from_slice(&w(4096));
-        b[16..24].copy_from_slice(&w(1 << 20));
-        b[24..32].copy_from_slice(&w(1 << 20));
-        b[32..40].copy_from_slice(&w(1 << 20));
-        b[40..48].copy_from_slice(&w(1 << 20));
-        b[48..56].copy_from_slice(&w(0));
-        b[56..64].copy_from_slice(&w(255));
+        let w64 = |v: u64| match self.endian {
+            Endian::Be => v.to_be_bytes(),
+            Endian::Le => v.to_le_bytes(),
+        };
+        // フィールド（type, bsize, frsize, blocks, bfree, files, ffree,
+        // bavail, namelen）の合成値。
+        let fields = [
+            0xEF53u64,
+            4096,
+            4096,
+            1 << 22,
+            1 << 21,
+            1 << 20,
+            1 << 19,
+            1 << 20,
+            255,
+        ];
+        let mut b = vec![0u8; layout.size()];
+        match layout {
+            FsLayout::Short => {
+                // u32 の列 + fsid(8B) + namelen + spare[6]。68 バイト。
+                for (i, v) in fields[..8].iter().enumerate() {
+                    b[i * 4..i * 4 + 4].copy_from_slice(&w32(*v as u32));
+                }
+                b[40..44].copy_from_slice(&w32(fields[8] as u32));
+            }
+            FsLayout::W64 => {
+                // u32 三つ + pad + u64 五つ + fsid(8B) + namelen + spare[6]。
+                // 92 バイト。
+                for (i, v) in fields[..3].iter().enumerate() {
+                    b[i * 4..i * 4 + 4].copy_from_slice(&w32(*v as u32));
+                }
+                for (i, v) in fields[3..8].iter().enumerate() {
+                    b[16 + i * 8..24 + i * 8].copy_from_slice(&w64(*v));
+                }
+                b[64..68].copy_from_slice(&w32(fields[8] as u32));
+            }
+            FsLayout::Full => {
+                // u64 の列 + fsid(8B) + namelen + spare[6]u64。128 バイト。
+                for (i, v) in fields[..8].iter().enumerate() {
+                    b[i * 8..i * 8 + 8].copy_from_slice(&w64(*v));
+                }
+                b[72..80].copy_from_slice(&w64(fields[8]));
+            }
+        }
         match self.write_bytes(env, addr, &b) {
             Ok(()) => Self::ret(env, 0),
             Err(e) => self.fail(env, e),
+        }
+    }
+
+    /// `ustat`。f_tfree/f_tinode はポインタ幅、f_fname/f_fpack は 6B の列。
+    fn do_ustat(&mut self, env: &mut BareEnv, addr: u64) -> u64 {
+        let ptr = (self.abi.ptr_bits() / 8) as usize;
+        let mut b = vec![0u8; ptr * 2 + 12];
+        let w = |v: u64| match (self.abi.ptr_bits(), self.endian) {
+            (32, Endian::Be) => (v as u32).to_be_bytes().to_vec(),
+            (32, Endian::Le) => (v as u32).to_le_bytes().to_vec(),
+            (_, Endian::Be) => v.to_be_bytes().to_vec(),
+            (_, Endian::Le) => v.to_le_bytes().to_vec(),
+        };
+        b[..ptr].copy_from_slice(&w(1 << 20));
+        b[ptr..ptr * 2].copy_from_slice(&w(1 << 20));
+        match self.write_bytes(env, addr, &b) {
+            Ok(()) => Self::ret(env, 0),
+            Err(e) => self.fail(env, e),
+        }
+    }
+}
+
+/// `statfs` 系のバッファ形式。MIPS の uapi が定める三つの並び。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FsLayout {
+    /// o32/n32 の `statfs`: u32 の列。68 バイト。
+    Short,
+    /// 32 ビット ABI の `statfs64`: u32 頭 + パッド + u64 群。92 バイト。
+    W64,
+    /// n64 の `statfs`: u64 の列。128 バイト。
+    Full,
+}
+
+impl FsLayout {
+    fn size(self) -> usize {
+        match self {
+            FsLayout::Short => 68,
+            FsLayout::W64 => 92,
+            FsLayout::Full => 128,
         }
     }
 }
@@ -1349,8 +1426,7 @@ impl Linux {
                 self.umask = args[0] as u32 & 0o777;
                 ret(Self::ret(env, u64::from(old)))
             }
-            // ustat=62
-            62 => self.fail_ret(env, mips::errno::ENOSYS),
+            // ustat=62 → do_ustat
             // dup2=63 handled, getppid=64, getpgrp=65
             65 => ret(Self::ret(env, self.pid())),
             // sigaction=67, sigsuspend=72, sigpending=73
@@ -1470,7 +1546,8 @@ impl Linux {
                     Ok(p) => p,
                     Err(e) => return self.fail_ret(env, e),
                 };
-                let len = self.a64(&args, 1);
+                // o32: len は奇数位置なので a1 にパッド、a2/a3 の語対。
+                let len = self.a64(&args, 2);
                 match std::fs::OpenOptions::new()
                     .write(true)
                     .open(self.host_path(&path))
@@ -1482,7 +1559,8 @@ impl Linux {
             }
             212 => {
                 let fd = args[0] as u32;
-                let len = self.a64(&args, 1);
+                // o32: len は奇数位置なので a1 にパッド、a2/a3 の語対。
+                let len = self.a64(&args, 2);
                 match self.file_of(fd) {
                     Ok(f) => match f.set_len(len) {
                         Ok(()) => ret(Self::ret(env, 0)),
@@ -1491,8 +1569,11 @@ impl Linux {
                     Err(e) => self.fail_ret(env, e),
                 }
             }
-            // statfs=99, fstatfs=100, statfs64=255, fstatfs64=256, ustat=62 handled
-            99 | 100 | 255 | 256 => ret(self.do_statfs(env, args[1])),
+            // ustat=62（dev 番号は使わない。arg1 のバッファだけを埋める）
+            62 => ret(self.do_ustat(env, args[1])),
+            // statfs=99, fstatfs=100（68B）、statfs64=255, fstatfs64=256（92B）
+            99 | 100 => ret(self.do_statfs(env, args[1], FsLayout::Short)),
+            255 | 256 => ret(self.do_statfs(env, args[1], FsLayout::W64)),
             // socketcall=102 — MIPS o32 には個別 socket 番号がない。ソケットは ENOSYS
             102 => self.fail_ret(env, mips::errno::ENOSYS),
             // stat=106, lstat=107, fstat=108
@@ -1604,14 +1685,16 @@ impl Linux {
                 let fd = args[0] as u32;
                 let buf = args[1];
                 let len = args[2];
-                let pos = self.a64(&args, 3);
+                // o32: pos は a3 にパッドを挟み、スタックの二語（sp+16/sp+20）。
+                let pos = self.a64(&args, 4);
                 ret(self.do_pread(env, fd, buf, len, pos))
             }
             201 => {
                 let fd = args[0] as u32;
                 let buf = args[1];
                 let len = args[2];
-                let pos = self.a64(&args, 3);
+                // o32: pos は a3 にパッドを挟み、スタックの二語（sp+16/sp+20）。
+                let pos = self.a64(&args, 4);
                 ret(self.do_pwrite(env, fd, buf, len, pos))
             }
             // getcwd=203
@@ -2081,7 +2164,16 @@ impl Linux {
                 ret(Self::ret(env, 0))
             }
             "cacheflush" | "cachectl" | "sysmips" => ret(Self::ret(env, 0)),
-            "statfs" | "fstatfs" | "statfs64" | "fstatfs64" => ret(self.do_statfs(env, args[1])),
+            "ustat" => ret(self.do_ustat(env, args[1])),
+            "statfs" | "fstatfs" => {
+                // n64 は 128B の long 形式、n32 は 68B の u32 形式。
+                let layout = match self.abi {
+                    Abi::N64 => FsLayout::Full,
+                    _ => FsLayout::Short,
+                };
+                ret(self.do_statfs(env, args[1], layout))
+            }
+            "statfs64" | "fstatfs64" => ret(self.do_statfs(env, args[1], FsLayout::W64)),
             "sendfile" => self.fail_ret(env, mips::errno::ENOSYS),
             "personality" | "prctl" | "acct" | "mount" | "umount" | "umount2" | "pivot_root"
             | "reboot" | "swapon" | "swapoff" | "quotactl" | "quotactl_fd" | "capget"
@@ -2298,5 +2390,199 @@ impl Linux {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| (d.as_secs(), u64::from(d.subsec_micros())))
             .unwrap_or((0, 0))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn env() -> BareEnv {
+        BareEnv::new(core::mem::size_of::<polyisa_guest_mips::CpuState>())
+    }
+
+    fn set_reg(env: &mut BareEnv, i: u8, v: u64) {
+        super::set_reg(env, i, v);
+    }
+
+    fn map(env: &mut BareEnv, addr: u64, pages: u64) {
+        env.backend
+            .mem
+            .map(VirtAddr(addr), pages, Perms::RW)
+            .unwrap();
+    }
+
+    fn acc() -> Access {
+        Access {
+            endian: Endian::Le,
+            align: Align::Unaligned,
+            kind: AccessKind::DataRead,
+        }
+    }
+
+    fn put32(env: &mut BareEnv, addr: u64, v: u32) {
+        env.backend
+            .mem
+            .write(VirtAddr(addr), &v.to_le_bytes())
+            .unwrap();
+    }
+
+    fn tmpfile(data: &[u8]) -> std::path::PathBuf {
+        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let p = std::env::temp_dir().join(format!(
+            "polyisa-mips-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::write(&p, data).unwrap();
+        p
+    }
+
+    /// o32 の pread64 は 64 ビット引数がスタックの語対（a3 はパッド）。
+    /// sp+16/sp+20 を読み、a3 をパッドとして扱う回帰。
+    #[test]
+    fn o32_pread64_reads_offset_from_stack() {
+        let p = tmpfile(b"0123456789abcdef");
+        let mut sys = Linux::o32(Endian::Le);
+        let mut env = env();
+        let fd = sys.fds.alloc(Some(std::fs::File::open(&p).unwrap()));
+        map(&mut env, 0x5000, 1); // buf
+        map(&mut env, 0x9000, 1); // スタック
+        set_reg(&mut env, 29, 0x9000);
+        put32(&mut env, 0x9010, 6); // pos_lo
+        put32(&mut env, 0x9014, 0); // pos_hi
+        set_reg(&mut env, 2, 4200);
+        set_reg(&mut env, 4, u64::from(fd));
+        set_reg(&mut env, 5, 0x5000);
+        set_reg(&mut env, 6, 8);
+        set_reg(&mut env, 7, 0xdead_beef); // a3 = パッド（値は読まない）
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(reg(&mut env, 7), 0, "成功は a3=0");
+        assert_eq!(reg(&mut env, 2), 8);
+        let mut out = [0u8; 8];
+        env.backend
+            .mem
+            .read(VirtAddr(0x5000), &mut out, acc())
+            .unwrap();
+        assert_eq!(&out, b"6789abcd");
+    }
+
+    /// o32 の truncate64 は長さが奇数位置なので a1 にパッド、a2/a3 の語対。
+    #[test]
+    fn o32_truncate64_uses_aligned_pair() {
+        let p = tmpfile(b"0123456789abcdef");
+        let mut sys = Linux::o32(Endian::Le);
+        let mut env = env();
+        map(&mut env, 0x6000, 1);
+        let s = p.to_str().unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x6000), s.as_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x6000 + s.len() as u64), &[0])
+            .unwrap();
+        set_reg(&mut env, 2, 4211);
+        set_reg(&mut env, 4, 0x6000);
+        set_reg(&mut env, 5, 0); // a1 = パッド
+        set_reg(&mut env, 6, 7); // len_lo
+        set_reg(&mut env, 7, 0); // len_hi
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(reg(&mut env, 7), 0);
+        assert_eq!(std::fs::metadata(&p).unwrap().len(), 7);
+    }
+
+    /// n64/n32 の pread64 は pos を一本のレジスタ（a3）で受ける。
+    #[test]
+    fn n64_pread64_single_word_offset() {
+        let p = tmpfile(b"0123456789abcdef");
+        let mut sys = Linux::n64(Endian::Le);
+        let mut env = env();
+        let fd = sys.fds.alloc(Some(std::fs::File::open(&p).unwrap()));
+        map(&mut env, 0x5000, 1);
+        set_reg(&mut env, 2, 5016);
+        set_reg(&mut env, 4, u64::from(fd));
+        set_reg(&mut env, 5, 0x5000);
+        set_reg(&mut env, 6, 8);
+        set_reg(&mut env, 7, 6); // pos
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(reg(&mut env, 7), 0);
+        assert_eq!(reg(&mut env, 2), 8);
+        let mut out = [0u8; 8];
+        env.backend
+            .mem
+            .read(VirtAddr(0x5000), &mut out, acc())
+            .unwrap();
+        assert_eq!(&out, b"6789abcd");
+    }
+
+    /// o32 の mmap=90 は fd/offset をスタック引数（sp+16/sp+20）で受ける。
+    #[test]
+    fn o32_mmap_takes_stack_args() {
+        let mut sys = Linux::o32(Endian::Le);
+        let mut env = env();
+        sys.init_brk(0x1_0000);
+        map(&mut env, 0x9000, 1);
+        set_reg(&mut env, 29, 0x9000);
+        put32(&mut env, 0x9010, 0xffff_ffff); // fd
+        put32(&mut env, 0x9014, 0); // offset
+        set_reg(&mut env, 2, 4090);
+        set_reg(&mut env, 4, 0);
+        set_reg(&mut env, 5, 0x1000);
+        set_reg(&mut env, 6, 3); // R|W
+        set_reg(
+            &mut env,
+            7,
+            u64::from(mips::mflag::PRIVATE | mips::mflag::ANONYMOUS),
+        );
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(reg(&mut env, 7), 0, "無名 mmap は成功");
+        assert_ne!(reg(&mut env, 2), 0);
+        // ファイル写像は ENODEV（スタックの fd を読む経路に入る）。
+        set_reg(&mut env, 2, 4090);
+        set_reg(&mut env, 7, u64::from(mips::mflag::PRIVATE));
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(reg(&mut env, 7), 1);
+        assert_eq!(reg(&mut env, 2), u64::from(mips::errno::ENODEV));
+    }
+
+    /// statfs 系のレイアウト。o32 statfs=68B、statfs64=92B、n64 statfs=128B。
+    #[test]
+    fn statfs_layouts() {
+        let mut sys = Linux::o32(Endian::Le);
+        let mut env = env();
+        map(&mut env, 0x5000, 1);
+        // o32 statfs（68B）: namelen は offset 40。
+        assert_eq!(sys.do_statfs(&mut env, 0x5000, FsLayout::Short), 0);
+        let mut b = [0u8; 68];
+        env.backend
+            .mem
+            .read(VirtAddr(0x5000), &mut b, acc())
+            .unwrap();
+        assert_eq!(u32::from_le_bytes(b[0..4].try_into().unwrap()), 0xEF53);
+        assert_eq!(u32::from_le_bytes(b[4..8].try_into().unwrap()), 4096);
+        assert_eq!(u32::from_le_bytes(b[8..12].try_into().unwrap()), 4096);
+        assert_eq!(u32::from_le_bytes(b[40..44].try_into().unwrap()), 255);
+        // statfs64（92B）: pad の後ろに u64 群、namelen は offset 64。
+        assert_eq!(sys.do_statfs(&mut env, 0x5000, FsLayout::W64), 0);
+        let mut b = [0u8; 92];
+        env.backend
+            .mem
+            .read(VirtAddr(0x5000), &mut b, acc())
+            .unwrap();
+        assert_eq!(u32::from_le_bytes(b[0..4].try_into().unwrap()), 0xEF53);
+        assert_eq!(u64::from_le_bytes(b[16..24].try_into().unwrap()), 1 << 22);
+        assert_eq!(u32::from_le_bytes(b[64..68].try_into().unwrap()), 255);
+        // n64（128B）: namelen は offset 72。
+        let mut sys64 = Linux::n64(Endian::Le);
+        assert_eq!(sys64.do_statfs(&mut env, 0x5000, FsLayout::Full), 0);
+        let mut b = [0u8; 128];
+        env.backend
+            .mem
+            .read(VirtAddr(0x5000), &mut b, acc())
+            .unwrap();
+        assert_eq!(u64::from_le_bytes(b[0..8].try_into().unwrap()), 0xEF53);
+        assert_eq!(u64::from_le_bytes(b[72..80].try_into().unwrap()), 255);
     }
 }

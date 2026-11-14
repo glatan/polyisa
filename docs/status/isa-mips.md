@@ -142,6 +142,9 @@
 | ll | ll_r6 | mips_r6 | load |
 | lld | lld | mips64 && !mips_r6 | load |
 | lld | lld_r6 | mips_r6 && mips64 | load |
+| lle | lle | mips_r6 | load |
+| llwp | llwp | mips_r6 | load |
+| llwpe | llwpe | mips_r6 | load |
 | lsa | lsa | mips_r6 | alu |
 | lui | lui | 真 | alu |
 | lw | lw | 真 | load |
@@ -180,6 +183,9 @@
 | sc | sc_r6 | mips_r6 | store |
 | scd | scd | mips64 && !mips_r6 | store |
 | scd | scd_r6 | mips_r6 && mips64 | store |
+| sce | sce | mips_r6 | store |
+| scwp | scwp | mips_r6 | store |
+| scwpe | scwpe | mips_r6 | store |
 | sd | sd | mips64 | store |
 | sdl | sdl | mips64 && !mips_r6 | store |
 | sdr | sdr | mips64 && !mips_r6 | store |
