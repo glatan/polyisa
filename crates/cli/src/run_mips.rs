@@ -928,7 +928,16 @@ pub fn run_elf_mips_sel(
     sel: Option<&polyisa_isadl::select::CpuSel>,
 ) -> Result<u64, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
-    let ehdr = polyisa_loader::elf::parse_ehdr32(&bytes).map_err(|e| format!("ehdr: {e:?}"))?;
+    let class64 = match bytes.get(4) {
+        Some(1) => false,
+        Some(2) => true,
+        _ => return Err("ehdr: 不明な EI_CLASS".to_string()),
+    };
+    let ehdr = if class64 {
+        polyisa_loader::elf::parse_ehdr(&bytes).map_err(|e| format!("ehdr: {e:?}"))?
+    } else {
+        polyisa_loader::elf::parse_ehdr32(&bytes).map_err(|e| format!("ehdr: {e:?}"))?
+    };
     let model = match sel {
         Some(s) => {
             let (load_delay, is64) = match s.name.as_str() {
@@ -946,18 +955,44 @@ pub fn run_elf_mips_sel(
         }
         None => model_from_flags(ehdr.little, ehdr.flags)?,
     };
-    run_loaded(&bytes, &ehdr, model)
+    run_loaded(&bytes, &ehdr, class64, model)
 }
 
-/// `e_flags` の上位 4 ビットとエンディアンから CPU モデルを決める。
-/// clang 23 は MIPS I を 0、Release 2 を 0x7、Release 6 を 0x9 と書く。
+/// ELF のクラスと `e_flags` からゲスト ABI を決める。
+/// ELFCLASS64 は n64、ELFCLASS32 + EF_MIPS_ABI2 (0x20) は n32、それ以外は o32。
+/// Ref: SPEC-MIPS-ABI（o32）と SRC-LINUX (7.3) の `arch/mips/kernel/elf.c`。
+fn abi_from_elf(class64: bool, flags: u32) -> Result<polyisa_os_linux::mips::sys::Abi, String> {
+    const EF_MIPS_ABI2: u32 = 0x20;
+    // EF_MIPS_ABI マスク: o32=0x1000, o64=0x2000, eabi32=0x3000, eabi64=0x4000。
+    // Ref: SRC-LINUX (7.3) と binutils elf/mips.h。
+    match flags & 0xf000 {
+        0x0000 | 0x1000 => {}
+        abi => {
+            return Err(format!("未対応の MIPS ABI フラグ: {abi:#x}"));
+        }
+    }
+    Ok(if class64 {
+        polyisa_os_linux::mips::sys::Abi::N64
+    } else if flags & EF_MIPS_ABI2 != 0 {
+        polyisa_os_linux::mips::sys::Abi::N32
+    } else {
+        polyisa_os_linux::mips::sys::Abi::O32
+    })
+}
+
+/// `e_flags` の EF_MIPS_ARCH とエンディアンから CPU モデルを決める。
+/// 値は binutils `include/elf/mips.h`（LLVM `BinaryFormat/ELF.h` と同じ）:
+/// 0=MIPS1, 1-4=MIPS2/3/4/5, 5=MIPS32, 6=MIPS64, 7=MIPS32r2,
+/// 8=MIPS64r2, 9=MIPS32r6, a=MIPS64r6。
+/// Ref: SRC-LINUX (7.3)。
 fn model_from_flags(little: bool, flags: u32) -> Result<MipsModel, String> {
     let arch = flags & 0xf000_0000;
     let mut model = match arch {
         0x0000_0000 => MipsModel::mips1_be(),
-        0x7000_0000 => MipsModel::mips32r2(),
+        // MIPS32/MIPS64 の r1 は r2 モデルで代用する（r2 は上位互換）。
+        0x5000_0000 | 0x7000_0000 => MipsModel::mips32r2(),
+        0x6000_0000 | 0x8000_0000 => MipsModel::mips64r2(),
         0x9000_0000 => MipsModel::r6(),
-        0x5000_0000 => MipsModel::mips64r2(),
         0xa000_0000 => MipsModel::mips64r6(),
         _ => {
             return Err(format!("未対応の MIPS アーキテクチャフラグ: {arch:#x}"));
@@ -974,28 +1009,35 @@ pub fn run_elf_model(
     sys: &mut polyisa_os_linux::mips::sys::Linux,
 ) -> Result<u64, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
-    let ehdr = polyisa_loader::elf::parse_ehdr32(&bytes).map_err(|e| format!("ehdr: {e:?}"))?;
-    run_loaded_sys(&bytes, &ehdr, model, sys)
+    let class64 = matches!(bytes.get(4), Some(2));
+    let ehdr = if class64 {
+        polyisa_loader::elf::parse_ehdr(&bytes).map_err(|e| format!("ehdr: {e:?}"))?
+    } else {
+        polyisa_loader::elf::parse_ehdr32(&bytes).map_err(|e| format!("ehdr: {e:?}"))?
+    };
+    run_loaded_sys(&bytes, &ehdr, class64, model, sys)
 }
 
 fn run_loaded(
     bytes: &[u8],
     ehdr: &polyisa_loader::elf::Ehdr,
+    class64: bool,
     model: MipsModel,
 ) -> Result<u64, String> {
-    let abi = if model.is64 {
-        polyisa_os_linux::mips::sys::Abi::N64
-    } else {
-        polyisa_os_linux::mips::sys::Abi::O32
-    };
+    let abi = abi_from_elf(class64, ehdr.flags)?;
+    let is64abi = !matches!(abi, polyisa_os_linux::mips::sys::Abi::O32);
+    if is64abi && !model.is64 {
+        return Err("n32/n64 の ELF には 64 ビットモデルが要る".to_string());
+    }
     let mut sys = polyisa_os_linux::mips::sys::Linux::new(abi, model.endian);
     sys.exe_path = String::new();
-    run_loaded_sys(bytes, ehdr, model, &mut sys)
+    run_loaded_sys(bytes, ehdr, class64, model, &mut sys)
 }
 
 fn run_loaded_sys(
     bytes: &[u8],
     ehdr: &polyisa_loader::elf::Ehdr,
+    class64: bool,
     model: MipsModel,
     sys: &mut polyisa_os_linux::mips::sys::Linux,
 ) -> Result<u64, String> {
@@ -1010,8 +1052,11 @@ fn run_loaded_sys(
     if header_le != model_le {
         return Err("ELF のエンディアンとモデルが違う".to_string());
     }
-    let phdrs =
-        polyisa_loader::elf::parse_phdrs32(bytes, ehdr).map_err(|e| format!("phdrs: {e:?}"))?;
+    let phdrs = if class64 {
+        polyisa_loader::elf::parse_phdrs(bytes, ehdr).map_err(|e| format!("phdrs: {e:?}"))?
+    } else {
+        polyisa_loader::elf::parse_phdrs32(bytes, ehdr).map_err(|e| format!("phdrs: {e:?}"))?
+    };
     if polyisa_loader::elf::parse_interp(bytes, &phdrs).is_some() {
         return Err("動的リンクは未対応".to_string());
     }
@@ -1032,9 +1077,11 @@ fn run_loaded_sys(
         .map(VirtAddr(page), 8, Perms(Perms::R.0 | Perms::W.0))
         .map_err(|e| format!("stack map: {e:?}"))?;
     // 最小の初期スタック（argc=0, argv=NULL, envp=NULL, auxv AT_NULL）。
+    // 8 バイト書けば o32/n32 の 4 バイト項目も n64 の 8 バイト項目も
+    // argc=0 と最初の NULL で終わる。
     env.backend
         .mem
-        .write(VirtAddr(sp), &[0, 0, 0, 0])
+        .write(VirtAddr(sp), &[0; 8])
         .map_err(|e| format!("stack write: {e:?}"))?;
     set_reg(&mut env, 29, sp);
     match run(&mut env, ehdr.entry, model, sys) {
@@ -1525,7 +1572,29 @@ mod tests {
         assert_eq!(run_elf_mips(r3000.to_str().unwrap(), &[]).unwrap(), 8);
         let r2 = elf_be(0x7000_0000, &code, 0x200);
         assert_eq!(run_elf_mips(r2.to_str().unwrap(), &[]).unwrap(), 0x43);
-        let unknown = elf_be(0x5000_0000, &[0x2402_0fa1, 0x2404_0000, 0x0000_000c], 12);
+        // MIPS32 (0x5) は r2 モデルで代用して受理する。MIPS II (0x1) は未対応。
+        // addiu $a0,$0,0x42; addiu $v0,$0,4001; syscall → exit(0x42)。
+        let mips32 = elf_be(0x5000_0000, &[0x2404_0042, 0x2402_0fa1, 0x0000_000c], 12);
+        assert_eq!(run_elf_mips(mips32.to_str().unwrap(), &[]).unwrap(), 0x42);
+        let unknown = elf_be(0x1000_0000, &[0x2402_0fa1, 0x2404_0000, 0x0000_000c], 12);
         assert!(run_elf_mips(unknown.to_str().unwrap(), &[]).is_err());
+    }
+
+    #[test]
+    fn elf_class_and_flags_pick_abi() {
+        use polyisa_os_linux::mips::sys::Abi;
+        // ELFCLASS64 → n64、ELFCLASS32 + EF_MIPS_ABI2 → n32、それ以外 → o32。
+        assert!(matches!(abi_from_elf(true, 0x8000_0000).unwrap(), Abi::N64));
+        assert!(matches!(
+            abi_from_elf(false, 0x8000_0020).unwrap(),
+            Abi::N32
+        ));
+        assert!(matches!(
+            abi_from_elf(false, 0x7000_1000).unwrap(),
+            Abi::O32
+        ));
+        // o64/eabi は未対応として落とす。
+        assert!(abi_from_elf(false, 0x7000_2000).is_err());
+        assert!(abi_from_elf(false, 0x7000_3000).is_err());
     }
 }

@@ -24,6 +24,14 @@
   R6 コンパクト分岐の rs/rt 制約を宣言的に記述。
 - `is_compact()` でコンパクト制御を遅延スロットなし実行、
   `has_delay_slot()` で遅延分岐群を区別。
+- **n32/n64 ABI 経路**: ELF クラス（EI_CLASS）で `parse_ehdr`/`parse_ehdr32` を
+  派分し、`abi_from_elf` で CLASS64→n64・CLASS32+EF_MIPS_ABI2→n32・他→o32 を選択。
+  o64/eabi は未対応エラー。n32/n64 は 64 ビットモデル必須。
+  CLASS_64 の EM_MIPS を `run_path_with` に追加。`--cpu mips64r2`/`mips64r6` が
+  is64 モデルとして選択可能。
+- **`model_from_flags` 修正**: EF_MIPS_ARCH の値を binutils 定義に合わせた
+  （0x5=MIPS32, 0x8=MIPS64r2 を追加、0x5→mips64r2 の誤マップを解消）。
+  MIPS32/MIPS64 r1 は r2 モデルで代用。
 - `heavy_program_mips`（4 モデル）・`heavy_timing_r3000` 通過。
   `task check`（fmt/clippy/devtool）通過。
 
@@ -33,9 +41,8 @@
    読むように変更した。`syscall_entry_name` は `(nr, "name")` 形も受理するよう拡張済み。
 2. **busybox の MIPS 版**: `heavy_program_mips` は裸 ELF（write/exit のみ）。
    dist コマンド実行は `.testdata/bin-distro` に MIPS 版がないため未実行。
-3. **n32/n64 実行経路**: syscall 番号表は揃ったが、n32/n64 用の初期スタック/
-   auxv/ELF 派分の接続は未着手（`os-linux::mips` の ABI 選択経路）。
-4. **R6 オプション命令は対象外**: LLWP/SCWP（ペア LL/SC、特定コアのみ）と
+   n32/n64 の ELF も同様に実バイナリでの検証がない。
+3. **R6 オプション命令は対象外**: LLWP/SCWP（ペア LL/SC、特定コアのみ）と
    LLE/SCE（EVA 版、ユーザモードでは LL/SC と同義）は実装していない。
    実シリコン依存の拡張のため今回の範囲外とした。必要なら別途追加する。
 
@@ -48,9 +55,10 @@
 
 ## 確認を要する判断
 
-6. **`MipsModel::is64` の扱い**: n32/n64 の番号表は揃えたが、MIPS64 命令の
-   意味論は追加済みでも `--cpu` で is64 モデルを選ぶ経路は未接続の可能性がある。
-   n64 ELF を実行できるか確認したい。
+6. **`MipsModel::is64` の扱い（解消）**: `--cpu mips64r2`/`mips64r6` と
+   EF_MIPS_ARCH からの自動選択で is64 モデルが選べる。n32/n64 の ELF は
+   `abi_from_elf` が ABI を選び is64 モデルを要求する。実バイナリでの
+   検証は残る（上記 2 番）。
 7. **o32 `mmap` の旧引数順**: o32 の mmap（番号 90）は fd/offset をスタック引数で受ける。
    実装は `args[4]`/`args[5]`（スタック経由）としてあるが、glibc の実使用は `mmap2`（210）。
    旧 mmap の挙動差異はテスト不足。

@@ -206,6 +206,10 @@ pub fn run_path_with(path: &str, argv: &[String], cpu: Option<&str>) -> Result<u
                 // EM_X86_64。Ref: SRC-LINUX (7.3)。
                 check("x86")?;
                 run_x86_64_elf(path, argv, spec.as_ref())
+            } else if ehdr.machine == 8 {
+                // EM_MIPS の 64 ビット（n64 ABI）。Ref: SRC-LINUX (7.3)。
+                check("mips")?;
+                run_mips_elf(path, argv, spec.as_ref())
             } else {
                 Err(format!("未対応の e_machine: {}", ehdr.machine))
             }
