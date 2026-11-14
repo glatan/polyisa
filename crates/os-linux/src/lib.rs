@@ -454,10 +454,11 @@ fn build_initial_stack_ws(
 ) -> (Vec<u8>, u64) {
     let w = |out: &mut [u8], off: usize, v: u64| {
         let b = match endian {
-            Endian::Be => v.to_be_bytes(),
-            Endian::Le => v.to_le_bytes(),
+            // 8 バイト値の下位 ws バイトを取り出す。BE は末尾側。
+            Endian::Be => v.to_be_bytes()[8 - ws..].to_vec(),
+            Endian::Le => v.to_le_bytes()[..ws].to_vec(),
         };
-        out[off..off + ws].copy_from_slice(&b[..ws]);
+        out[off..off + ws].copy_from_slice(&b);
     };
     let strings_len: usize = args.iter().map(|a| a.len() + 1).sum::<usize>()
         + env.iter().map(|e| e.len() + 1).sum::<usize>();
@@ -514,6 +515,30 @@ fn build_initial_stack_ws(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stack32_be_writes_low_bytes() {
+        // BE 32 ビット環境の初期スタックでは、argc/argv/auxv の各ワードは
+        // 8 バイト値の下位 4 バイトでなければならない。上位を取ると
+        // すべて 0 になり、auxv が読めず musl の libc.page_size が 0 になる
+        // （n32 の mallocng が pagesize-1=0xffffffff でマスクして崩壊する）。
+        let (img, sp) =
+            build_initial_stack32_endian(0x8000, &[b"p".to_vec()], &[], &[(6, 0x1000)], Endian::Be);
+        // sp からの配列: argc=1, argv[0]=文字列番地, argv NULL, auxv(6,0x1000),
+        // AT_EXECFN(31), AT_NULL.
+        let u32be = |off: usize| u32::from_be_bytes(img[off..off + 4].try_into().unwrap());
+        assert_eq!(u32be(0), 1, "argc");
+        let argv0 = u32be(4);
+        assert!(
+            argv0 > sp as u32 && argv0 < 0x8000,
+            "argv[0] ptr {argv0:#x}"
+        );
+        assert_eq!(u32be(8), 0, "argv NULL");
+        assert_eq!(u32be(12), 0, "envp NULL");
+        assert_eq!(u32be(16), 6, "AT_PAGESZ key");
+        assert_eq!(u32be(20), 0x1000, "AT_PAGESZ value");
+        assert_eq!(u32be(24), 31, "AT_EXECFN key");
+    }
 
     #[test]
     fn rv64_stage1_numbers() {

@@ -97,7 +97,21 @@
     33 KiB 出力のデコードが 5M ステップを超えるだけで、意味論のバグ
     ではなかった（`STEP_LIMIT` を 256M に引き上げて完走を確認、
     usage 出力と終了コード 1 が正しい）。
-    残作業: n32 実バイナリ、台帳登録。
+    n32 実バイナリは musl.cc の `mips64-linux-musln32-cross` で
+    生成した BE ELF32（abi2/mips3、flags 0x20000027）で検証。
+    malloc/free・fopen/fclose・ファイル読取・`uname`・アロケータの
+    反復チャーン（free/malloc 200 回）まで動作することを確認した。
+    当初 exit 経路で `get_meta` 内の `teq`/PageFault に落ちていたが、
+    原因はエミュレータ側の初期スタック構築だった: `build_initial_stack_ws`
+    が BE+ワード幅4B のとき 8 バイト値の**上位**4 バイトを書いており、
+    argc/argv/envp/auxv がすべて 0 化していた。musl は auxv を
+    AT_NULL 直後と誤認して `libc.page_size=0` のまま動き、mallocng の
+    `needed += -needed & (pagesize-1)` が `needed=0` を返して
+    `mmap(0,0)` → `maplen=0` のメタが生まれ、free 時に
+    `get_meta(g->mem)` が先行ガードページを読んで死亡する連鎖だった。
+    BE は下位バイトを書くよう修正（`stack32_be_writes_low_bytes`
+    回帰テスト追加）。なお o32(LE)・n64(ws=8) は無影響。
+    残作業: 台帳登録（下記）。
 
 ## 解消済み（記録）
 
