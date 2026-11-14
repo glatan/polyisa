@@ -54,46 +54,6 @@ fn sext(v: u32, bits: u32) -> i64 {
     (((v << (32 - bits)) as i32) >> (32 - bits)) as i64
 }
 
-/// Arm ARM `DecodeBitMasks`（wmask のみ使う）。`len` は N:~imms の最上位セット
-/// ビット。即値論理では imms==levels は予約。
-/// Ref: SPEC-ARM-ARM-A (Armv9-A ARM ARM 2024-09) shared/functions。
-pub fn decode_bit_masks(n: u32, imms: u32, immr: u32, is64: bool) -> Option<u64> {
-    let m: u32 = if is64 { 64 } else { 32 };
-    let concat = ((n << 6) | (!imms & 0x3f)) & 0x7f;
-    if concat == 0 {
-        return None;
-    }
-    let len = 31 - concat.leading_zeros();
-    if len < 1 || m < (1u32 << len) {
-        return None;
-    }
-    let levels = (1u32 << len) - 1;
-    if (imms & levels) == levels {
-        return None;
-    }
-    let s = imms & levels;
-    let r = immr & levels;
-    let esize = 1u64 << len;
-    let emask = esize - 1;
-    let welem = if s >= 63 {
-        u64::MAX
-    } else {
-        (1u64 << (s + 1)) - 1
-    };
-    let wrot = if r == 0 {
-        welem
-    } else {
-        ((welem >> r) | (welem << (esize as u32 - r))) & emask
-    };
-    let mut out = 0u64;
-    let mut pos = 0u32;
-    while pos < m {
-        out |= wrot << pos;
-        pos += esize as u32;
-    }
-    Some(out)
-}
-
 /// `svc` の imm16 によるトラップ委譲。`TrapOutcome` を `Outcome` へ写す。
 fn svc<H: ?Sized + TrapHandler>(
     env: &mut BareEnv,
@@ -178,6 +138,7 @@ fn step_a64(env: &mut BareEnv, sys: &mut impl TrapHandler, feats: u64) -> Result
     let c_tgt = pc.wrapping_add((imm19 << 2) as u64);
     let t_tgt = pc.wrapping_add((imm14 << 2) as u64);
     let cond = word & 0xf;
+    let cond_hi = (word >> 12) & 0xf;
     let sh = (word >> 22) & 1;
     let imm_s = u64::from(imm12) << (sh * 12);
     let hw = (word >> 21) & 3;
@@ -221,7 +182,7 @@ fn step_a64(env: &mut BareEnv, sys: &mut impl TrapHandler, feats: u64) -> Result
                 Insn::EorImm => 2,
                 _ => 3,
             };
-            let Some(mask) = decode_bit_masks(n_bit, imms, immr, sf) else {
+            let Some(mask) = sem::decode_bit_masks(n_bit, imms, immr, sf) else {
                 return Err(unimpl(env));
             };
             env.step(|b| sem::log_imm(b, rd, rn, mask, op, sf))
@@ -258,10 +219,10 @@ fn step_a64(env: &mut BareEnv, sys: &mut impl TrapHandler, feats: u64) -> Result
         Insn::AddsExt => env.step(|b| sem::add_ext(b, rd, rn, rm, option, imm3, sf, false, true)),
         Insn::SubExt => env.step(|b| sem::add_ext(b, rd, rn, rm, option, imm3, sf, true, false)),
         Insn::SubsExt => env.step(|b| sem::add_ext(b, rd, rn, rm, option, imm3, sf, true, true)),
-        Insn::Csel => env.step(|b| sem::csel(b, rd, rn, rm, cond, 0, sf)),
-        Insn::Csinc => env.step(|b| sem::csel(b, rd, rn, rm, cond, 1, sf)),
-        Insn::Csinv => env.step(|b| sem::csel(b, rd, rn, rm, cond, 2, sf)),
-        Insn::Csneg => env.step(|b| sem::csel(b, rd, rn, rm, cond, 3, sf)),
+        Insn::Csel => env.step(|b| sem::csel(b, rd, rn, rm, cond_hi, 0, sf)),
+        Insn::Csinc => env.step(|b| sem::csel(b, rd, rn, rm, cond_hi, 1, sf)),
+        Insn::Csinv => env.step(|b| sem::csel(b, rd, rn, rm, cond_hi, 2, sf)),
+        Insn::Csneg => env.step(|b| sem::csel(b, rd, rn, rm, cond_hi, 3, sf)),
         Insn::CcmnReg => {
             let c = (word >> 12) & 0xf;
             env.step(|b| sem::ccmp(b, rn, rm, 0, nzcv_in, c, sf, false, false))
@@ -302,42 +263,37 @@ fn step_a64(env: &mut BareEnv, sys: &mut impl TrapHandler, feats: u64) -> Result
         Insn::Smulh => env.step(|b| sem::mulh(b, rd, rn, rm, true)),
         Insn::Umulh => env.step(|b| sem::mulh(b, rd, rn, rm, false)),
         Insn::StrbU => {
-            env.step(|b| sem::ls_unsigned(b, rt, rn, i64::from(imm12), 1, true, false, false, le))
+            env.step(|b| sem::ls_unsigned(b, rt, rn, imm12 as i64, 1, true, false, false, le))
         }
         Insn::LdrbU => {
-            env.step(|b| sem::ls_unsigned(b, rt, rn, i64::from(imm12), 1, false, false, false, le))
+            env.step(|b| sem::ls_unsigned(b, rt, rn, imm12 as i64, 1, false, false, false, le))
         }
         Insn::LdrsbUX => {
-            env.step(|b| sem::ls_unsigned(b, rt, rn, i64::from(imm12), 1, false, true, true, le))
+            env.step(|b| sem::ls_unsigned(b, rt, rn, imm12 as i64, 1, false, true, true, le))
         }
         Insn::LdrsbUW => {
-            env.step(|b| sem::ls_unsigned(b, rt, rn, i64::from(imm12), 1, false, true, false, le))
+            env.step(|b| sem::ls_unsigned(b, rt, rn, imm12 as i64, 1, false, true, false, le))
         }
-        Insn::StrhU => env.step(|b| {
-            sem::ls_unsigned(b, rt, rn, i64::from(imm12) << 1, 2, true, false, false, le)
-        }),
-        Insn::LdrhU => env.step(|b| {
-            sem::ls_unsigned(b, rt, rn, i64::from(imm12) << 1, 2, false, false, false, le)
-        }),
-        Insn::LdrshUX => env
-            .step(|b| sem::ls_unsigned(b, rt, rn, i64::from(imm12) << 1, 2, false, true, true, le)),
-        Insn::LdrshUW => env.step(|b| {
-            sem::ls_unsigned(b, rt, rn, i64::from(imm12) << 1, 2, false, true, false, le)
-        }),
-        Insn::StrUW => env.step(|b| {
-            sem::ls_unsigned(b, rt, rn, i64::from(imm12) << 2, 4, true, false, false, le)
-        }),
-        Insn::LdrUW => env.step(|b| {
-            sem::ls_unsigned(b, rt, rn, i64::from(imm12) << 2, 4, false, false, false, le)
-        }),
-        Insn::LdrswU => env
-            .step(|b| sem::ls_unsigned(b, rt, rn, i64::from(imm12) << 2, 4, false, true, true, le)),
-        Insn::StrUX => env.step(|b| {
-            sem::ls_unsigned(b, rt, rn, i64::from(imm12) << 3, 8, true, false, false, le)
-        }),
-        Insn::LdrUX => env.step(|b| {
-            sem::ls_unsigned(b, rt, rn, i64::from(imm12) << 3, 8, false, false, false, le)
-        }),
+        Insn::StrhU => env
+            .step(|b| sem::ls_unsigned(b, rt, rn, (imm12 as i64) << 1, 2, true, false, false, le)),
+        Insn::LdrhU => env
+            .step(|b| sem::ls_unsigned(b, rt, rn, (imm12 as i64) << 1, 2, false, false, false, le)),
+        Insn::LdrshUX => {
+            env.step(|b| sem::ls_unsigned(b, rt, rn, (imm12 as i64) << 1, 2, false, true, true, le))
+        }
+        Insn::LdrshUW => env
+            .step(|b| sem::ls_unsigned(b, rt, rn, (imm12 as i64) << 1, 2, false, true, false, le)),
+        Insn::StrUW => env
+            .step(|b| sem::ls_unsigned(b, rt, rn, (imm12 as i64) << 2, 4, true, false, false, le)),
+        Insn::LdrUW => env
+            .step(|b| sem::ls_unsigned(b, rt, rn, (imm12 as i64) << 2, 4, false, false, false, le)),
+        Insn::LdrswU => {
+            env.step(|b| sem::ls_unsigned(b, rt, rn, (imm12 as i64) << 2, 4, false, true, true, le))
+        }
+        Insn::StrUX => env
+            .step(|b| sem::ls_unsigned(b, rt, rn, (imm12 as i64) << 3, 8, true, false, false, le)),
+        Insn::LdrUX => env
+            .step(|b| sem::ls_unsigned(b, rt, rn, (imm12 as i64) << 3, 8, false, false, false, le)),
         Insn::Sturb => env.step(|b| sem::ls_imm9(b, rt, rn, imm9, 1, true, false, false, 0, le)),
         Insn::Ldurb => env.step(|b| sem::ls_imm9(b, rt, rn, imm9, 1, false, false, false, 0, le)),
         Insn::LdursbX => env.step(|b| sem::ls_imm9(b, rt, rn, imm9, 1, false, true, true, 0, le)),
@@ -398,74 +354,40 @@ fn step_a64(env: &mut BareEnv, sys: &mut impl TrapHandler, feats: u64) -> Result
         Insn::StrPreX => env.step(|b| sem::ls_imm9(b, rt, rn, imm9, 8, true, false, false, 3, le)),
         Insn::LdrPreX => env.step(|b| sem::ls_imm9(b, rt, rn, imm9, 8, false, false, false, 3, le)),
         Insn::StrbReg => {
-            env.step(|b| sem::ls_regoff(b, rt, rn, rm, option, s_bit, 1, true, false, false, le))
+            env.step(|b| sem::ls_regoff(b, rt, rn, rm, option, 0, 1, true, false, false, le))
         }
         Insn::LdrbReg => {
-            env.step(|b| sem::ls_regoff(b, rt, rn, rm, option, s_bit, 1, false, false, false, le))
+            env.step(|b| sem::ls_regoff(b, rt, rn, rm, option, 0, 1, false, false, false, le))
         }
         Insn::LdrsbRegX => {
-            env.step(|b| sem::ls_regoff(b, rt, rn, rm, option, s_bit, 1, false, true, true, le))
+            env.step(|b| sem::ls_regoff(b, rt, rn, rm, option, 0, 1, false, true, true, le))
         }
         Insn::LdrsbRegW => {
-            env.step(|b| sem::ls_regoff(b, rt, rn, rm, option, s_bit, 1, false, true, false, le))
+            env.step(|b| sem::ls_regoff(b, rt, rn, rm, option, 0, 1, false, true, false, le))
         }
-        Insn::StrhReg => env
-            .step(|b| sem::ls_regoff(b, rt, rn, rm, option, s_bit << 1, 2, true, false, false, le)),
-        Insn::LdrhReg => env.step(|b| {
-            sem::ls_regoff(
-                b,
-                rt,
-                rn,
-                rm,
-                option,
-                s_bit << 1,
-                2,
-                false,
-                false,
-                false,
-                le,
-            )
-        }),
-        Insn::LdrshRegX => env
-            .step(|b| sem::ls_regoff(b, rt, rn, rm, option, s_bit << 1, 2, false, true, true, le)),
-        Insn::LdrshRegW => env
-            .step(|b| sem::ls_regoff(b, rt, rn, rm, option, s_bit << 1, 2, false, true, false, le)),
+        Insn::StrhReg => {
+            env.step(|b| sem::ls_regoff(b, rt, rn, rm, option, s_bit, 2, true, false, false, le))
+        }
+        Insn::LdrhReg => {
+            env.step(|b| sem::ls_regoff(b, rt, rn, rm, option, s_bit, 2, false, false, false, le))
+        }
+        Insn::LdrshRegX => {
+            env.step(|b| sem::ls_regoff(b, rt, rn, rm, option, s_bit, 2, false, true, true, le))
+        }
+        Insn::LdrshRegW => {
+            env.step(|b| sem::ls_regoff(b, rt, rn, rm, option, s_bit, 2, false, true, false, le))
+        }
         Insn::StrRegW => env
-            .step(|b| sem::ls_regoff(b, rt, rn, rm, option, s_bit << 2, 4, true, false, false, le)),
-        Insn::LdrRegW => env.step(|b| {
-            sem::ls_regoff(
-                b,
-                rt,
-                rn,
-                rm,
-                option,
-                s_bit << 2,
-                4,
-                false,
-                false,
-                false,
-                le,
-            )
-        }),
-        Insn::LdrswReg => env
-            .step(|b| sem::ls_regoff(b, rt, rn, rm, option, s_bit << 2, 4, false, true, true, le)),
+            .step(|b| sem::ls_regoff(b, rt, rn, rm, option, s_bit * 2, 4, true, false, false, le)),
+        Insn::LdrRegW => env
+            .step(|b| sem::ls_regoff(b, rt, rn, rm, option, s_bit * 2, 4, false, false, false, le)),
+        Insn::LdrswReg => {
+            env.step(|b| sem::ls_regoff(b, rt, rn, rm, option, s_bit * 2, 4, false, true, true, le))
+        }
         Insn::StrRegX => env
-            .step(|b| sem::ls_regoff(b, rt, rn, rm, option, s_bit << 3, 8, true, false, false, le)),
-        Insn::LdrRegX => env.step(|b| {
-            sem::ls_regoff(
-                b,
-                rt,
-                rn,
-                rm,
-                option,
-                s_bit << 3,
-                8,
-                false,
-                false,
-                false,
-                le,
-            )
-        }),
+            .step(|b| sem::ls_regoff(b, rt, rn, rm, option, s_bit * 3, 8, true, false, false, le)),
+        Insn::LdrRegX => env
+            .step(|b| sem::ls_regoff(b, rt, rn, rm, option, s_bit * 3, 8, false, false, false, le)),
         Insn::LdrWLit => env.step(|b| sem::ls_lit(b, rt, c_tgt, 4, false, false, le)),
         Insn::LdrXLit => env.step(|b| sem::ls_lit(b, rt, c_tgt, 8, false, false, le)),
         Insn::LdrswLit => env.step(|b| sem::ls_lit(b, rt, c_tgt, 4, true, true, le)),
@@ -489,6 +411,140 @@ fn step_a64(env: &mut BareEnv, sys: &mut impl TrapHandler, feats: u64) -> Result
         Insn::Stxrb | Insn::Stlxrb => env.step(|b| sem::stxr(b, rs, rt, rn, 1, le)),
         Insn::Ldxrh | Insn::Ldaxrh => env.step(|b| sem::ldxr(b, rt, rn, 2, le)),
         Insn::Stxrh | Insn::Stlxrh => env.step(|b| sem::stxr(b, rs, rt, rn, 2, le)),
+        // ---- FP/SIMD ----
+        Insn::StpSOff => env.step(|b| sem::vls_pair(b, rt.0, rt2.0, rn, imm7 << 2, 4, true, 2, le)),
+        Insn::LdpSOff => {
+            env.step(|b| sem::vls_pair(b, rt.0, rt2.0, rn, imm7 << 2, 4, false, 2, le))
+        }
+        Insn::StpDOff => env.step(|b| sem::vls_pair(b, rt.0, rt2.0, rn, imm7 << 3, 8, true, 2, le)),
+        Insn::LdpDOff => {
+            env.step(|b| sem::vls_pair(b, rt.0, rt2.0, rn, imm7 << 3, 8, false, 2, le))
+        }
+        Insn::StpQOff => {
+            env.step(|b| sem::vls_pair(b, rt.0, rt2.0, rn, imm7 << 4, 16, true, 2, le))
+        }
+        Insn::LdpQOff => {
+            env.step(|b| sem::vls_pair(b, rt.0, rt2.0, rn, imm7 << 4, 16, false, 2, le))
+        }
+        Insn::StpSPost => {
+            env.step(|b| sem::vls_pair(b, rt.0, rt2.0, rn, imm7 << 2, 4, true, 1, le))
+        }
+        Insn::LdpSPost => {
+            env.step(|b| sem::vls_pair(b, rt.0, rt2.0, rn, imm7 << 2, 4, false, 1, le))
+        }
+        Insn::StpDPost => {
+            env.step(|b| sem::vls_pair(b, rt.0, rt2.0, rn, imm7 << 3, 8, true, 1, le))
+        }
+        Insn::LdpDPost => {
+            env.step(|b| sem::vls_pair(b, rt.0, rt2.0, rn, imm7 << 3, 8, false, 1, le))
+        }
+        Insn::StpQPost => {
+            env.step(|b| sem::vls_pair(b, rt.0, rt2.0, rn, imm7 << 4, 16, true, 1, le))
+        }
+        Insn::LdpQPost => {
+            env.step(|b| sem::vls_pair(b, rt.0, rt2.0, rn, imm7 << 4, 16, false, 1, le))
+        }
+        Insn::StpSPre => env.step(|b| sem::vls_pair(b, rt.0, rt2.0, rn, imm7 << 2, 4, true, 3, le)),
+        Insn::LdpSPre => {
+            env.step(|b| sem::vls_pair(b, rt.0, rt2.0, rn, imm7 << 2, 4, false, 3, le))
+        }
+        Insn::StpDPre => env.step(|b| sem::vls_pair(b, rt.0, rt2.0, rn, imm7 << 3, 8, true, 3, le)),
+        Insn::LdpDPre => {
+            env.step(|b| sem::vls_pair(b, rt.0, rt2.0, rn, imm7 << 3, 8, false, 3, le))
+        }
+        Insn::StpQPre => {
+            env.step(|b| sem::vls_pair(b, rt.0, rt2.0, rn, imm7 << 4, 16, true, 3, le))
+        }
+        Insn::LdpQPre => {
+            env.step(|b| sem::vls_pair(b, rt.0, rt2.0, rn, imm7 << 4, 16, false, 3, le))
+        }
+        Insn::StrBVu => env.step(|b| sem::vls_unsigned(b, rt.0, rn, imm12 as i64, 1, true, le)),
+        Insn::LdrBVu => env.step(|b| sem::vls_unsigned(b, rt.0, rn, imm12 as i64, 1, false, le)),
+        Insn::StrHVu => {
+            env.step(|b| sem::vls_unsigned(b, rt.0, rn, (imm12 * 2) as i64, 2, true, le))
+        }
+        Insn::LdrHVu => {
+            env.step(|b| sem::vls_unsigned(b, rt.0, rn, (imm12 * 2) as i64, 2, false, le))
+        }
+        Insn::StrSVu => {
+            env.step(|b| sem::vls_unsigned(b, rt.0, rn, (imm12 * 4) as i64, 4, true, le))
+        }
+        Insn::LdrSVu => {
+            env.step(|b| sem::vls_unsigned(b, rt.0, rn, (imm12 * 4) as i64, 4, false, le))
+        }
+        Insn::StrDVu => {
+            env.step(|b| sem::vls_unsigned(b, rt.0, rn, (imm12 * 8) as i64, 8, true, le))
+        }
+        Insn::LdrDVu => {
+            env.step(|b| sem::vls_unsigned(b, rt.0, rn, (imm12 * 8) as i64, 8, false, le))
+        }
+        Insn::StrQVu => {
+            env.step(|b| sem::vls_unsigned(b, rt.0, rn, (imm12 * 16) as i64, 16, true, le))
+        }
+        Insn::LdrQVu => {
+            env.step(|b| sem::vls_unsigned(b, rt.0, rn, (imm12 * 16) as i64, 16, false, le))
+        }
+        Insn::SturB => env.step(|b| sem::vls_imm9(b, rt.0, rn, imm9, 1, true, 0, le)),
+        Insn::LdurB => env.step(|b| sem::vls_imm9(b, rt.0, rn, imm9, 1, false, 0, le)),
+        Insn::SturH => env.step(|b| sem::vls_imm9(b, rt.0, rn, imm9, 2, true, 0, le)),
+        Insn::LdurH => env.step(|b| sem::vls_imm9(b, rt.0, rn, imm9, 2, false, 0, le)),
+        Insn::SturS => env.step(|b| sem::vls_imm9(b, rt.0, rn, imm9, 4, true, 0, le)),
+        Insn::LdurS => env.step(|b| sem::vls_imm9(b, rt.0, rn, imm9, 4, false, 0, le)),
+        Insn::SturD => env.step(|b| sem::vls_imm9(b, rt.0, rn, imm9, 8, true, 0, le)),
+        Insn::LdurD => env.step(|b| sem::vls_imm9(b, rt.0, rn, imm9, 8, false, 0, le)),
+        Insn::SturQ => env.step(|b| sem::vls_imm9(b, rt.0, rn, imm9, 16, true, 0, le)),
+        Insn::LdurQ => env.step(|b| sem::vls_imm9(b, rt.0, rn, imm9, 16, false, 0, le)),
+        Insn::StrBPostV => env.step(|b| sem::vls_imm9(b, rt.0, rn, imm9, 1, true, 1, le)),
+        Insn::LdrBPostV => env.step(|b| sem::vls_imm9(b, rt.0, rn, imm9, 1, false, 1, le)),
+        Insn::StrHPostV => env.step(|b| sem::vls_imm9(b, rt.0, rn, imm9, 2, true, 1, le)),
+        Insn::LdrHPostV => env.step(|b| sem::vls_imm9(b, rt.0, rn, imm9, 2, false, 1, le)),
+        Insn::StrSPostV => env.step(|b| sem::vls_imm9(b, rt.0, rn, imm9, 4, true, 1, le)),
+        Insn::LdrSPostV => env.step(|b| sem::vls_imm9(b, rt.0, rn, imm9, 4, false, 1, le)),
+        Insn::StrDPostV => env.step(|b| sem::vls_imm9(b, rt.0, rn, imm9, 8, true, 1, le)),
+        Insn::LdrDPostV => env.step(|b| sem::vls_imm9(b, rt.0, rn, imm9, 8, false, 1, le)),
+        Insn::StrQPostV => env.step(|b| sem::vls_imm9(b, rt.0, rn, imm9, 16, true, 1, le)),
+        Insn::LdrQPostV => env.step(|b| sem::vls_imm9(b, rt.0, rn, imm9, 16, false, 1, le)),
+        Insn::StrBPreV => env.step(|b| sem::vls_imm9(b, rt.0, rn, imm9, 1, true, 3, le)),
+        Insn::LdrBPreV => env.step(|b| sem::vls_imm9(b, rt.0, rn, imm9, 1, false, 3, le)),
+        Insn::StrHPreV => env.step(|b| sem::vls_imm9(b, rt.0, rn, imm9, 2, true, 3, le)),
+        Insn::LdrHPreV => env.step(|b| sem::vls_imm9(b, rt.0, rn, imm9, 2, false, 3, le)),
+        Insn::StrSPreV => env.step(|b| sem::vls_imm9(b, rt.0, rn, imm9, 4, true, 3, le)),
+        Insn::LdrSPreV => env.step(|b| sem::vls_imm9(b, rt.0, rn, imm9, 4, false, 3, le)),
+        Insn::StrDPreV => env.step(|b| sem::vls_imm9(b, rt.0, rn, imm9, 8, true, 3, le)),
+        Insn::LdrDPreV => env.step(|b| sem::vls_imm9(b, rt.0, rn, imm9, 8, false, 3, le)),
+        Insn::StrQPreV => env.step(|b| sem::vls_imm9(b, rt.0, rn, imm9, 16, true, 3, le)),
+        Insn::LdrQPreV => env.step(|b| sem::vls_imm9(b, rt.0, rn, imm9, 16, false, 3, le)),
+        Insn::DupGen => {
+            let imm5 = (word >> 16) & 0x1f;
+            let esz = imm5.trailing_zeros();
+            let q = (word >> 30) & 1 != 0;
+            env.step(|b| sem::vdup_gpr(b, rd.0, rn, esz, q))
+        }
+        Insn::InsGen => {
+            let imm5 = (word >> 16) & 0x1f;
+            let esz = imm5.trailing_zeros();
+            let idx = imm5 >> (esz + 1);
+            env.step(|b| sem::vins_gpr(b, rd.0, rn, esz, idx))
+        }
+        Insn::Umov => {
+            let imm5 = (word >> 16) & 0x1f;
+            let esz = imm5.trailing_zeros();
+            let idx = imm5 >> (esz + 1);
+            env.step(|b| sem::vext_gpr(b, rd, rn.0, esz, idx))
+        }
+        Insn::FmovWS => env.step(|b| sem::fmov_to_g(b, rd, rn.0, false, false)),
+        Insn::FmovSW => env.step(|b| sem::fmov_to_v(b, rd.0, rn, 32, false)),
+        Insn::FmovXD => env.step(|b| sem::fmov_to_g(b, rd, rn.0, true, false)),
+        Insn::FmovDX => env.step(|b| sem::fmov_to_v(b, rd.0, rn, 64, false)),
+        Insn::FmovXDhi => env.step(|b| sem::fmov_to_g(b, rd, rn.0, true, true)),
+        Insn::FmovDhiX => env.step(|b| sem::fmov_to_v(b, rd.0, rn, 64, true)),
+        Insn::ModImm => {
+            let q = (word >> 30) & 1 != 0;
+            let op = (word >> 29) & 1 != 0;
+            let cmode = (word >> 12) & 0xf;
+            let imm8 = u64::from((((word >> 16) & 7) << 5) | ((word >> 5) & 0x1f));
+            env.step(|b| sem::mod_imm(b, rd.0, q, op, cmode, imm8))
+        }
         Insn::Svc => unreachable!("svc は先に振り分け済み"),
     };
     if ok.is_err() {
@@ -503,7 +559,7 @@ fn step_a64(env: &mut BareEnv, sys: &mut impl TrapHandler, feats: u64) -> Result
 
 /// 静的な AArch64 ELF を実行する。機械番号 183（EM_AARCH64）。
 /// `sys` は `os_linux::aarch64::sys::Linux` が処理する（未実装は ENOSYS）。
-/// 動的リンク・VFS・シグナルは後の段階。
+/// 動的リンクは `run_elf_aarch64_root` が `--root` でゲストルートを受けて扱う。
 /// Ref: SPEC-AARCH64-ELF（AAELF64）。
 pub fn run_elf_aarch64(path: &str, argv: &[String]) -> Result<u64, String> {
     run_elf_aarch64_sel(path, argv, None)
@@ -520,6 +576,18 @@ pub fn run_elf_aarch64_sel(
     run_elf_aarch64_sys(path, argv, sel, &mut sys)
 }
 
+/// `run_elf_aarch64_sel` にゲストルートを渡す形（`--root` の配線）。
+/// `root` は PT_INTERP の指す動的ローダと、syscall 経路のパス解決の両方で使う。
+pub fn run_elf_aarch64_root(
+    path: &str,
+    argv: &[String],
+    sel: Option<&polyisa_isadl::select::CpuSel>,
+    root: Option<&str>,
+) -> Result<u64, String> {
+    let mut sys = polyisa_os_linux::aarch64::sys::Linux::default();
+    run_elf_aarch64_impl(path, argv, sel, &mut sys, root)
+}
+
 /// `run_elf_aarch64_sel` に OS パーソナリティを差し込む形。
 /// テストが syscall の結果（`sys.io` 等）を検査する用途に使う。
 pub fn run_elf_aarch64_sys(
@@ -528,10 +596,41 @@ pub fn run_elf_aarch64_sys(
     sel: Option<&polyisa_isadl::select::CpuSel>,
     sys: &mut polyisa_os_linux::aarch64::sys::Linux,
 ) -> Result<u64, String> {
+    run_elf_aarch64_impl(path, argv, sel, sys, None)
+}
+
+/// `run_elf_aarch64_sys` にゲストルートを添える形。
+/// PT_INTERP 経路の動的リンクと root 内のファイル参照を試すテストに使う。
+pub fn run_elf_aarch64_sys_root(
+    path: &str,
+    argv: &[String],
+    sel: Option<&polyisa_isadl::select::CpuSel>,
+    sys: &mut polyisa_os_linux::aarch64::sys::Linux,
+    root: Option<&str>,
+) -> Result<u64, String> {
+    run_elf_aarch64_impl(path, argv, sel, sys, root)
+}
+
+/// `run_elf_aarch64_sys` にゲストルートを添えた実体。
+/// `root` は PT_INTERP の動的ローダ解決と `sys` のパス閉じ込めに使う。
+fn run_elf_aarch64_impl(
+    path: &str,
+    argv: &[String],
+    sel: Option<&polyisa_isadl::select::CpuSel>,
+    sys: &mut polyisa_os_linux::aarch64::sys::Linux,
+    root: Option<&str>,
+) -> Result<u64, String> {
     use polyisa_guest_aarch64::sem;
     use polyisa_mem::{PAGE_SIZE, Perms};
 
-    let bytes = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
+    // root 指定時は ELF のパスもゲストの名前空間（chroot と同じ規則）。
+    // `/bin/sh` のような絶対リンクは root 内で解決される。
+    let host_elf = match root {
+        Some(root) => polyisa_os_linux::guest_path::resolve_guest_path_links(root, "/", path)
+            .ok_or_else(|| format!("{path}: ゲストルートの外を指す"))?,
+        None => path.to_string(),
+    };
+    let bytes = std::fs::read(&host_elf).map_err(|e| format!("read {path}: {e}"))?;
     if !matches!(bytes.get(4), Some(2)) {
         return Err("AArch64 は ELFCLASS64 のみ対応".to_string());
     }
@@ -546,18 +645,98 @@ pub fn run_elf_aarch64_sys(
     }
     let phdrs =
         polyisa_loader::elf::parse_phdrs(&bytes, &ehdr).map_err(|e| format!("phdrs: {e:?}"))?;
-    if polyisa_loader::elf::parse_interp(&bytes, &phdrs).is_some() {
-        return Err("動的リンクは未対応".to_string());
+    let interp_path = polyisa_loader::elf::parse_interp(&bytes, &phdrs);
+    if let Some(r) = root {
+        sys.set_guest_root(r);
+    } else if interp_path.is_some() {
+        return Err("PT_INTERP のある ELF には --root が必要".to_string());
     }
     let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_aarch64::CpuState>());
+    // ET_DYN の主像は固定基盤へ寄せる（PIE）。ET_EXEC は p_vaddr どおり。
+    const MAIN_DYN_BASE: u64 = 0x0000_5500_0000_0000;
+    const ET_DYN: u16 = 3;
+    let min_vaddr = phdrs
+        .iter()
+        .filter(|p| p.seg_type == 1)
+        .map(|p| p.vaddr & !(PAGE_SIZE - 1))
+        .min()
+        .unwrap_or(0);
+    let main_bias = if ehdr.file_type == ET_DYN {
+        MAIN_DYN_BASE - min_vaddr
+    } else {
+        0
+    };
     let image_end = phdrs
         .iter()
         .filter(|p| p.seg_type == 1)
         .map(|p| p.vaddr + p.memsz)
         .max()
-        .unwrap_or(0);
-    polyisa_loader::elf::load_segments(&bytes, &phdrs, &mut env.backend.mem)
+        .unwrap_or(0)
+        + main_bias;
+    polyisa_loader::elf::load_segments_bias(&bytes, &phdrs, &mut env.backend.mem, main_bias)
         .map_err(|e| format!("load: {e:?}"))?;
+    // 主像の phdr 表のゲスト内番地（AT_PHDR）。表は先頭の PT_LOAD が覆うのが
+    // 普通だが、覆わない最小像は像の直後へ表だけ別置きする。
+    // Ref: SPEC-ELF-GABI (Edition 4.1＋2001-04-24 DRAFT).
+    let phdr_addr = match phdrs
+        .iter()
+        .find(|p| p.seg_type == 1 && p.offset <= ehdr.phoff && ehdr.phoff < p.offset + p.filesz)
+    {
+        Some(p) => main_bias + p.vaddr + (ehdr.phoff - p.offset),
+        None => {
+            // brk/mmap の割当と衝突しないよう像の直下のページに置く。
+            let at = (main_bias + min_vaddr)
+                .checked_sub(PAGE_SIZE)
+                .ok_or_else(|| "phdr 表の置き場がない".to_string())?;
+            let lo = ehdr.phoff as usize;
+            let hi = lo + ehdr.phnum as usize * 56;
+            env.backend
+                .mem
+                .map(VirtAddr(at), 1, Perms::RW)
+                .map_err(|_| "phdr 表の写像に失敗".to_string())?;
+            env.backend
+                .mem
+                .write(VirtAddr(at), &bytes[lo..hi])
+                .map_err(|_| "phdr 表の書き込みに失敗".to_string())?;
+            let _ = env.backend.mem.protect(VirtAddr(at), 1, Perms::R);
+            at
+        }
+    };
+    // PT_INTERP の動的ローダを像として読み、その入口から始める。
+    // Ref: SPEC-ELF-GABI (Edition 4.1＋2001-04-24 DRAFT).
+    const INTERP_BASE: u64 = 0x0000_6f00_0000_0000;
+    let (entry, interp_bias) = if let Some(gpath) = interp_path {
+        let host =
+            polyisa_os_linux::guest_path::resolve_guest_path(root.unwrap_or(""), "/", &gpath)
+                .ok_or_else(|| format!("interp {gpath} が root 外を指す"))?;
+        let ibytes = std::fs::read(&host).map_err(|e| format!("read interp {host}: {e}"))?;
+        if !matches!(ibytes.get(4), Some(2)) {
+            return Err(format!("interp {host} は ELFCLASS64 ではない"));
+        }
+        let iehdr =
+            polyisa_loader::elf::parse_ehdr(&ibytes).map_err(|e| format!("interp ehdr: {e:?}"))?;
+        if !iehdr.little || iehdr.machine != EM_AARCH64 {
+            return Err(format!("interp {host} は aarch64 の ELF ではない"));
+        }
+        let iphdrs = polyisa_loader::elf::parse_phdrs(&ibytes, &iehdr)
+            .map_err(|e| format!("interp phdrs: {e:?}"))?;
+        let imin = iphdrs
+            .iter()
+            .filter(|p| p.seg_type == 1)
+            .map(|p| p.vaddr & !(PAGE_SIZE - 1))
+            .min()
+            .unwrap_or(0);
+        let ibias = if iehdr.file_type == ET_DYN {
+            INTERP_BASE - imin
+        } else {
+            0
+        };
+        polyisa_loader::elf::load_segments_bias(&ibytes, &iphdrs, &mut env.backend.mem, ibias)
+            .map_err(|e| format!("interp load: {e:?}"))?;
+        (ibias + iehdr.entry, ibias)
+    } else {
+        (main_bias + ehdr.entry, 0)
+    };
     // 初期スタックを写像する。`build_initial_stack` の返す像を置く。
     // 下方向の成長分は固定で先に確保する（ページフォルト駆動の成長は
     // 未実装。大きさはメモの保留事項を参照）。
@@ -566,22 +745,63 @@ pub fn run_elf_aarch64_sys(
     for a in argv {
         arg_bytes.push(a.as_bytes().to_vec());
     }
-    let (img, sp) = polyisa_os_linux::build_initial_stack(top, &arg_bytes, &[], &[(6, 0x1000)]);
     let stack_pages = 256u64;
     let base = top - stack_pages * PAGE_SIZE;
+    // 像の直上はゲストが sp より上へ書く領域（呼出し側フレーム）として空ける。
+    // 実カーネルのスタック VMA も像の上に余裕がある。
+    let img_top = top - 0x1_0000;
     env.backend
         .mem
         .map(VirtAddr(base), stack_pages, Perms(Perms::R.0 | Perms::W.0))
         .map_err(|e| format!("stack map: {e:?}"))?;
+    // auxv。AT_RANDOM (25) が指す 16 バイトは像の末尾の文字列領域に置く。
+    // sp 直下はゲストのローカル領域になり上書きされるため使えない。
+    // Ref: SPEC-AARCH64-ELF（AAELF64）§6、SRC-LINUX (7.3)。
+    let mut auxv: Vec<(u64, u64)> = vec![
+        (3, phdr_addr),              // AT_PHDR
+        (4, 56),                     // AT_PHENT
+        (5, u64::from(ehdr.phnum)),  // AT_PHNUM
+        (6, 0x1000),                 // AT_PAGESZ
+        (8, 0),                      // AT_FLAGS
+        (9, main_bias + ehdr.entry), // AT_ENTRY
+        (11, 0),                     // AT_UID
+        (12, 0),                     // AT_EUID
+        (13, 0),                     // AT_GID
+        (14, 0),                     // AT_EGID
+        (16, 0),                     // AT_HWCAP
+        (17, 100),                   // AT_CLKTCK
+        (23, 0),                     // AT_SECURE
+        (25, 0),                     // AT_RANDOM（後で実番地に差し替え）
+    ];
+    if interp_bias != 0 {
+        auxv.push((7, interp_bias)); // AT_BASE
+    }
+    let rand_addr = top - 16;
+    for (k, v) in auxv.iter_mut() {
+        if *k == 25 {
+            *v = rand_addr;
+        }
+    }
+    let (img, sp) = polyisa_os_linux::build_initial_stack(img_top, &arg_bytes, &[], &auxv);
     env.backend
         .mem
         .write(VirtAddr(sp), &img)
+        .map_err(|e| format!("stack write: {e:?}"))?;
+    env.backend
+        .mem
+        .write(
+            VirtAddr(rand_addr),
+            &[
+                0x70, 0x6f, 0x6c, 0x79, 0x69, 0x73, 0x61, 0x2d, 0x61, 0x61, 0x72, 0x63, 0x68, 0x36,
+                0x34, 0x21,
+            ],
+        )
         .map_err(|e| format!("stack write: {e:?}"))?;
     env.backend.set(sem::sp_ref(), sp);
     sys.exe_path = path.to_string();
     sys.init_brk(image_end);
     let feats = sel.map_or(0, |s| s.feats);
-    match run_ex(&mut env, ehdr.entry, feats, sys) {
+    match run_ex(&mut env, entry, feats, sys) {
         Outcome::Exit(code) => Ok(code),
         Outcome::Unimplemented { pc, word } => Err(format!("unimplemented at {pc:#x}: {word:#x}")),
         Outcome::StepLimit { pc } => Err(format!("step limit at {pc:#x}")),
@@ -660,5 +880,87 @@ mod tests {
         env.pc = 0x1_0000;
         let _ = polyisa_engine::run::run(&mut env, &mut sys, 1, |e| e.pc, |e, s| step_a64(e, s, 0));
         assert_eq!(env.backend.get(sem::sp_ref()), 0x7010);
+    }
+
+    #[test]
+    fn subs_ext_rn31_reads_sp_not_zr() {
+        // cmp sp, x2（subs 拡張形式）: Rn=31 は S ビットに関わらず常に SP。
+        // SP==x2 なら Z=1。ZR として読むと不一致になる。
+        let mut env = env_at(0x1_0000);
+        env.backend.set(sem::sp_ref(), 0x9000);
+        env.backend.set(Gpr(2).state(), 0x9000);
+        poke(&mut env, 0x1_0000, 0xeb22_63ff); // cmp sp, x2
+        let mut sys = NoSys;
+        env.pc = 0x1_0000;
+        let _ = polyisa_engine::run::run(&mut env, &mut sys, 1, |e| e.pc, |e, s| step_a64(e, s, 0));
+        assert_eq!(env.backend.get(sem::nzcv_ref()) & 4, 4, "Z=1 で一致");
+    }
+
+    #[test]
+    fn csel_reads_cond_from_bits_15_12() {
+        // csel x3, x4, x5, hs: cond は bits[15:12]。rd=3 の下位ビット（=3、lo 条件）
+        // と取り違えると C=1 のとき rm を選んでしまう。
+        let mut env = env_at(0x1_0000);
+        env.backend.set(sem::nzcv_ref(), 0x2); // C=1
+        env.backend.set(Gpr(4).state(), 111);
+        env.backend.set(Gpr(5).state(), 222);
+        poke(&mut env, 0x1_0000, 0x9a85_2083); // csel x3, x4, x5, hs
+        let mut sys = NoSys;
+        env.pc = 0x1_0000;
+        let _ = polyisa_engine::run::run(&mut env, &mut sys, 1, |e| e.pc, |e, s| step_a64(e, s, 0));
+        assert_eq!(xreg(&mut env, 3), 111, "hs 成立で rn を選択");
+    }
+
+    #[test]
+    fn clz_counts_leading_zeros() {
+        // clz w2, w1 / clz x3, x1。w1=1 → 31、x1=1 → 63。
+        let mut env = env_at(0x1_0000);
+        env.backend.set(Gpr(1).state(), 1);
+        poke(&mut env, 0x1_0000, 0x5ac0_1022); // clz w2, w1
+        poke(&mut env, 0x1_0004, 0xdac0_1023); // clz x3, x1
+        let mut sys = NoSys;
+        env.pc = 0x1_0000;
+        let _ = polyisa_engine::run::run(&mut env, &mut sys, 2, |e| e.pc, |e, s| step_a64(e, s, 0));
+        assert_eq!(xreg(&mut env, 2), 31);
+        assert_eq!(xreg(&mut env, 3), 63);
+    }
+
+    #[test]
+    fn ldp_post_index_writes_back_sp() {
+        // ldp x25, x26, [sp], #0x40: 読み出し後に base を更新する。
+        let mut env = env_at(0x1_0000);
+        env.backend.set(sem::sp_ref(), 0x1_0080);
+        env.backend
+            .mem
+            .write(VirtAddr(0x1_0080), &0x1111u64.to_le_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x1_0088), &0x2222u64.to_le_bytes())
+            .unwrap();
+        poke(&mut env, 0x1_0000, 0xa8c4_6bf9); // ldp x25, x26, [sp], #0x40
+        let mut sys = NoSys;
+        env.pc = 0x1_0000;
+        let _ = polyisa_engine::run::run(&mut env, &mut sys, 1, |e| e.pc, |e, s| step_a64(e, s, 0));
+        assert_eq!(xreg(&mut env, 25), 0x1111);
+        assert_eq!(xreg(&mut env, 26), 0x2222);
+        assert_eq!(env.backend.get(sem::sp_ref()), 0x1_00c0, "SP += 0x40");
+    }
+
+    #[test]
+    fn ldr_reg_lsl_scales_index() {
+        // ldr x5, [x0, x2, lsl #3]: オフセットは x2<<3。
+        let mut env = env_at(0x1_0000);
+        env.backend.set(Gpr(0).state(), 0x1_0100);
+        env.backend.set(Gpr(2).state(), 2);
+        env.backend
+            .mem
+            .write(VirtAddr(0x1_0110), &0xbeefu64.to_le_bytes())
+            .unwrap();
+        poke(&mut env, 0x1_0000, 0xf862_7805); // ldr x5, [x0, x2, lsl #3]
+        let mut sys = NoSys;
+        env.pc = 0x1_0000;
+        let _ = polyisa_engine::run::run(&mut env, &mut sys, 1, |e| e.pc, |e, s| step_a64(e, s, 0));
+        assert_eq!(xreg(&mut env, 5), 0xbeef);
     }
 }

@@ -41,6 +41,9 @@ pub struct CpuState {
     /// スレッドローカル記憶への指針（TPIDR_EL0）。`set_thread_area` が書く。
     /// Ref: SRC-LINUX (7.3) の `arch/arm64/kernel/ptrace.c`。
     pub tpidr: u64,
+    /// FP/SIMD レジスタ v0〜v31。各 128 ビット。
+    /// B/H/S/D/Q アクセスは末尾からの部分ビューとして扱う。
+    pub v: [u128; 32],
 }
 
 #[cfg(test)]
@@ -62,6 +65,8 @@ mod tests {
         assert_eq!(core::mem::offset_of!(CpuState, fpcr), 34 * 8);
         assert_eq!(core::mem::offset_of!(CpuState, fpsr), 35 * 8);
         assert_eq!(core::mem::offset_of!(CpuState, tpidr), 36 * 8);
+        // u128 の 16 バイト整列で 296→304 にパディングされる。
+        assert_eq!(core::mem::offset_of!(CpuState, v), 304);
     }
 
     #[test]

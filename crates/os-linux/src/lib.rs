@@ -49,6 +49,9 @@ pub mod x86_32;
 // Ref: SRC-LINUX (7.3).
 pub mod x86_64;
 
+/// ゲストパスをホストパスへ写す補助（cwd 連結とルート閉じ込め）。
+pub mod guest_path;
+
 /// 未実装のシステムコールに返す errno（asm-generic の ENOSYS）。
 /// 設計: `docs/design/user-mode.md` の「未実装のシステムコール」。
 pub const ENOSYS: u32 = 38;

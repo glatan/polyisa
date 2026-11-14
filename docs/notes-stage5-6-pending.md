@@ -48,28 +48,51 @@
 
 ## 段階 6 の進捗（AArch64）
 
-- **guests/aarch64**: ISADL spec（a64i.rs、約 90 命令: 分岐/加減算/論理/
-  ビットフィールド/乗算/ロードストア全アドレッシング/ペア/排他/システム）と
-  `sem.rs` を実装。レジスタ 31 の SP/ZR 文脈分岐、NZCV、DecodeBitMasks を
-  exec 側で計算。モデル `generic`/`generic_v81`。
+- **guests/aarch64**: ISADL spec（a64i.rs）と `sem.rs`。整数命令一式
+  （分岐/加減算/論理/ビットフィールド/乗算/ロードストア全アドレッシング/
+  ペア/排他/システム）に加え、musl の動的リンクが要求する AdvSIMD 部分集合
+  （dup/umov/ins/fmov、Q/D/S/B/H の load/store、ldp/stp の Q/D/S、
+  modified immediate 群）を実装。レジスタ 31 の SP/ZR 文脈分岐、NZCV、
+  DecodeBitMasks（`sem::decode_bit_masks`）。モデル `generic`/`generic_v81`。
 - **意味論の修正（実バイナリで発見）**: `add_imm`/`add_sh`/`add_ext`/`log_imm`/
   `log_sh` が flags 設定時に rd へ結果を書き戻していなかった（`subs x8, x8, #1`
   が x8 を更新せず無限再帰 → スタック溢れ）。S 形式は ZR 文脈・結果は常に
   書き戻す（rd=31 は ZR として破棄）に統一。
 - **ADR/ADRP のオフセット**: `immhi<<2|immlo` の 21 ビット符号付きが正しい
   （初版はフィールド結合が誤りで clang 生成の後方参照 ADR が壊れていた）。
+- **musl/BusyBox 実走行で発見して修正した意味論**: `DecodeBitMasks` の
+  `emask`（要素幅のマスクが `(1<<esize)-1` でなく `esize-1` になっていた。
+  `tst` が常に Z を立て haszero を見逃し）、UBFM/SBFM のマスク導出
+  （`immr<=imms` 抽出系と `immr>imms` 挿入系の区別、符号位置は元ソースの
+  bit imms）、`csel` の cond 抽出（bits[15:12]、B.cond の bits[3:0] を
+  流用していた）、`add_ext`/`subs_ext` の Rn=31 は常に SP（flags 有無と
+  無関係）、`ls_pair` のポストインデックス書き戻し、`clz32`/`clz64` の
+  +1 ずれ、`umulh` の spec パターン（bits[30:29]）、`ldp` の rt2。
 - **os-linux::aarch64**: asm-generic 番号表（`aarch64.rs`）、LP64 ABI
   （x8=nr、x0-x5=引数、x0=返り値、負 errno）、`sys::Linux`（TrapHandler）。
   read/write/openat/close/lseek/fstat/mmap/munmap/mprotect/brk/uname/
   exit/exit_group/identity/clock_gettime/getrandom/getdents64/dup/dup3/
   fcntl/ioctl/signal 最小スタブ。未知番号は ENOSYS を返して続行。
-- **cli**: `run_aarch64.rs`（step_aarch64、EM_AARCH64=183 派分、
-  `--cpu aarch64:` モデル解決、初期スタック、svc → TrapHandler）、
-  `run_elf_aarch64`/`run_elf_aarch64_sel`/`run_elf_aarch64_sys`。
-- **テスト**: `heavy_program_aarch64`（clang 23 aarch64-linux-gnu:
-  write+exit_group で "hi\n"、再帰 fib(10)=55 で "55\n"）、
-  `run_path` の手組み EM_AARCH64 ELF 派分テスト、裸実行の
-  movz/add/subs/b.cond/sp-zr 単体テスト。
+  `getdents64` は fd ごとのディレクトリ位置（`dir_pos`）を追跡して
+  EOF を返す。`mmap` は `find_free_run` で brk 成長・既存マップと衝突
+  しない領域を選ぶ。
+- **ゲストパス**: `os-linux::guest_path` に `resolve_guest_path`（root
+  閉じ込め）と `resolve_guest_path_links`（シンボリックリンク追跡。
+  絶対ターゲットはゲストルートへ結び直す chroot 規則）を集約。
+  `--root` 時の ELF パスと PT_INTERP の指す ld.so はゲスト名前空間で
+  解決する。syscall 側の open/stat 等は `host_path_followed` 経由。
+- **cli**: `run_aarch64.rs`（`engine::run::run` 経路、EM_AARCH64=183 派分、
+  `--cpu aarch64:` モデル解決、PT_INTERP 動的ロード、初期スタック、
+  svc → TrapHandler）。`run_elf_aarch64`/`_sel`/`_sys`/`_sys_root`/`_root`。
+- **初期スタック**: AT_RANDOM の 16 バイトはスタック最上端（`top-16`）に置く。
+  musl のスタックプロービングが sp 直下を使うため像の直上にもマージンを確保。
+- **テスト**: `heavy_program_aarch64`（静的 "hi\n"、fib(10)=55、
+  Alpine minirootfs の BusyBox コマンド群を `--root` で実行）、
+  `heavy_abi_aarch64`（asm-generic UAPI との番号突合）、
+  `heavy_oracle_llvm`（llvm-mc/objdump とのデコード差分）、
+  `guests/aarch64/tests/{decode,bit_masks}.rs`、`run_path` の手組み ELF、
+  sys.rs/run_aarch64.rs の `mod tests`（getdents 位置・mmap/brk 衝突・
+  ゲストルート絶対リンク・各種意味論の回帰）。
 - `SPEC-AARCH64-ELF` を確認済みに更新（2025Q4 daa7a94）。
 
 ## 確認待ち・未完了（段階 6 残件）
@@ -77,16 +100,22 @@
 5. **スタック成長**: 現状は固定 1 MiB を先行確保（`run_aarch64.rs`）。
    ページフォルト駆動の成長（fault → TrapHandler 経路）は未実装。
    容量の適性と成長方式の設計判断を要する。
-6. **FP/AdvSIMD**: FEATURE `fp`/`asimd` は宣言済みだが命令未実装
-   （モデル generic の既定機能が空でない点に注意。decode が要求しないため
-   現状影響なし。実装時に MODEL_DEFS の既定を見直す）。
+6. **FP/AdvSIMD の残り**: musl の動的リンクが要求した部分集合のみ実装。
+   それ以外の FP/AdvSIMD 命令は未実装。必要になった時点で台帳とともに追加する。
 7. **BE エンディアン**: FEAT_BE 宣言のみ。データフェッチ/ロードストアの
    エンディアン切替と ELF の EI_DATA 確認は未接続（現状 LE 固定・BE 拒否）。
-8. **MRS/MSR の ID レジスタ**: MRS/MSR の枠は実装済みだが ID_AA64 系の
-   個別値は未整備（実装した機能に応じた値の台帳が要る）。
-9. **heavy_abi / heavy_oracle / 動的リンク**: 段階 6 の完了条件表に
-   残る heavy_abi_aarch64（引数・スタック規約の機械検証）と
-   heavy_oracle（QEMU/実機との結果突合）、および PT_INTERP 経路は未着手。
+8. **MRS/MSR の ID レジスタ**: MRS/MSR の枠は実装済み。`DCZID_EL0` は
+   DZP=1（`dc zva` 不可）を返して musl の zva 経路を回避させている。
+   ID_AA64 系の個別値は未整備（実装した機能に応じた値の台帳が要る）。
+9. **BIN-DISTRO-AARCH64 の確認**: Alpine minirootfs 3.21.9 aarch64 を
+   `.testdata/bin-distro-aarch64` に配置済みで `heavy_program_aarch64` が
+   使用する。台帳には登録したが確認欄は空欄（所有者の確認待ち）。
+   取得手順の manifest 化は未取得定義（git clone 形式でないため）。
+10. **`--root` 時の ELF パス解釈**: 実行対象のパスをゲスト名前空間として
+    解決する実装にした（chroot と同じ規則）。ホストパスで渡す従来の呼び方とは
+    互換でない点に注意。x86/mips は `--root` 未対応のため影響なし。
+    oracle 系の重いテストバイナリ名は `heavy_oracle_llvm` で各パッケージ
+    共通（roadmap の S7-以降の命名 `heavy_oracle_arm` 等はその段階で揃える）。
 
 ## 確認を要する判断
 

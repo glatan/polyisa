@@ -242,6 +242,17 @@ pub fn load_segments(
     phdrs: &[Phdr],
     mem: &mut polyisa_mem::AddressSpace,
 ) -> Result<(), Error> {
+    load_segments_bias(bytes, phdrs, mem, 0)
+}
+
+/// `load_segments` に写像の偏位を足す。ET_DYN の像を `bias` だけずらす。
+/// Ref: SPEC-ELF-GABI (Edition 4.1＋2001-04-24 DRAFT).
+pub fn load_segments_bias(
+    bytes: &[u8],
+    phdrs: &[Phdr],
+    mem: &mut polyisa_mem::AddressSpace,
+    bias: u64,
+) -> Result<(), Error> {
     use polyisa_mem::{PAGE_SIZE, Perms, VirtAddr};
     for ph in phdrs {
         if ph.seg_type != 1 {
@@ -266,8 +277,9 @@ pub fn load_segments(
         }
         // ロード時の書き込みのため W を足す。権限の絞り込みは後の段階で足す。
         perms = Perms(perms.0 | Perms::W.0);
-        let base = ph.vaddr & !(PAGE_SIZE - 1);
-        let end = ph.vaddr.checked_add(ph.memsz).ok_or(Error::Truncated)?;
+        let vaddr = ph.vaddr.checked_add(bias).ok_or(Error::Truncated)?;
+        let base = vaddr & !(PAGE_SIZE - 1);
+        let end = vaddr.checked_add(ph.memsz).ok_or(Error::Truncated)?;
         let end_aligned =
             end.checked_add(PAGE_SIZE - 1).ok_or(Error::Truncated)? & !(PAGE_SIZE - 1);
         let count = (end_aligned - base) / PAGE_SIZE;
@@ -278,7 +290,7 @@ pub fn load_segments(
             .map_err(|_| Error::Truncated)?;
         if ph.filesz > 0 {
             let src = &bytes[ph.offset as usize..end_off as usize];
-            mem.write(VirtAddr(ph.vaddr), src)
+            mem.write(VirtAddr(vaddr), src)
                 .map_err(|_| Error::Truncated)?;
         }
     }

@@ -193,6 +193,7 @@ BSD 系の資産は `D` と `C` を許可できる。GPL 系の資産と Arm の
 |---|---|---|---|---|---|---|---|---|
 | BIN-DISTRO | BusyBox 公式静的バイナリ 1.35.0 x86_64-linux-musl（2022-01-17） | BusyBox 開発者 | 1.35.0 | os-linux のプログラム単位のテスト（x86_64 初回） | GNU GPL version 2（busybox.net/license.html で確認。再配布時はソース提供義務あり） | T | 2026-11-09 glatan | 取得してテストの入力に使う。リポジトリに含めない。再配布しない。他ディストロ・他 ISA は使うときに項目を追加する |
 | BIN-DISTRO-I386 | BusyBox 公式静的バイナリ 1.35.0 i686-linux-musl（2022-01-17） | BusyBox 開発者 | 1.35.0 | os-linux のプログラム単位のテスト（x86-32） | GNU GPL version 2（busybox.net/license.html で確認。再配布時はソース提供義務あり） | T | 2026-11-14 glatan | 取得してテストの入力に使う（`.testdata/bin-distro-i386/busybox`）。リポジトリに含めない。再配布しない |
+| BIN-DISTRO-AARCH64 | Alpine minirootfs aarch64（musl + BusyBox 1.37.0、動的リンクのルートファイルシステム一式） | Alpine Linux プロジェクト | 3.21.9 | os-linux のプログラム単位のテスト（aarch64、動的リンク・ゲストルート） | 同梱物ごとのライセンスに従う（busybox は GPLv2、musl は MIT。busybox.net/license.html で確認。再配布時はソース提供義務あり） | T | | 取得してテストの入力に使う（`.testdata/bin-distro-aarch64`）。リポジトリに含めない。再配布しない。所有者の確認待ち |
 
 ### 計測データ
 

@@ -465,38 +465,9 @@ pub fn sys_unshare(env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     set64(env, Gpr(0), 0);
     Some(TrapOutcome::Handled)
 }
-pub fn join_guest_path(cwd: &str, path: &str) -> String {
-    if path.starts_with('/') || cwd.is_empty() {
-        return path.to_string();
-    }
-    if cwd == "/" {
-        return format!("/{path}");
-    }
-    format!("{}/{}", cwd.trim_end_matches('/'), path)
-}
-pub fn resolve_guest_path(root: &str, cwd: &str, path: &str) -> Option<String> {
-    if root.is_empty() {
-        return Some(join_guest_path(cwd, path));
-    }
-    let joined = join_guest_path(cwd, path);
-    let mut parts: Vec<&str> = Vec::new();
-    for comp in joined.split('/') {
-        match comp {
-            "" | "." => {}
-            ".." => {
-                parts.pop()?;
-            }
-            _ => parts.push(comp),
-        }
-    }
-    let root_trim = root.trim_end_matches('/');
-    let mut out = String::from(root_trim);
-    for part in parts {
-        out.push('/');
-        out.push_str(part);
-    }
-    Some(out)
-}
+// ゲストパス解決は feature 非依存のため `guest_path` が正本。
+// 既存の呼び出し経路（crate::x86::*）のため再エクスポートする。
+pub use crate::guest_path::{join_guest_path, resolve_guest_path};
 pub fn sys_access(root: &str, cwd: &str, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     // access(path, mode)。存在確認のみ行い、存在すれば 0 を返す.
     // X_OK 等の実行権限の厳密判定はしない（試作の割り切り）。

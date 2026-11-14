@@ -2,7 +2,7 @@
 
 このファイルは `task status` が生成する。手で編集しない。
 
-生成の元は、ISADL の記述（`guests/*/spec/`）、ロードマップの完了条件、設計との差の台帳、システムコールの表（`crates/os-linux/src/rv64/sys.rs` の `RV64_SYSCALLS`、`crates/os-linux/src/x86/sys.rs` の `X86_64_SYSCALLS` と `X86_32_SYSCALLS`、`crates/os-linux/src/mips_o32.rs`・`mips_n32.rs`・`mips_n64.rs` の各 `SYSCALLS`）である。テストの結果は含めない。
+生成の元は、ISADL の記述（`guests/*/spec/`）、ロードマップの完了条件、設計との差の台帳、システムコールの表（`crates/os-linux/src/rv64/sys.rs` の `RV64_SYSCALLS`、`crates/os-linux/src/x86/sys.rs` の `X86_64_SYSCALLS` と `X86_32_SYSCALLS`、`crates/os-linux/src/mips_o32.rs`・`mips_n32.rs`・`mips_n64.rs`・`aarch64.rs` の各 `SYSCALLS`）である。テストの結果は含めない。
 
 ## 段階の完了条件
 
@@ -23,9 +23,9 @@
 | S4-2 | 所有者 |
 | S5-1 | テスト：`heavy_program_mips`、`heavy_timing_r3000` |
 | S5-2 | 所有者 |
-| S6-1 | 未整備 |
-| S6-2 | 未整備 |
-| S6-3 | 未整備 |
+| S6-1 | テスト：`heavy_program_aarch64` |
+| S6-2 | テスト：`heavy_abi_aarch64` |
+| S6-3 | テスト：`heavy_oracle_llvm` |
 | S7-1 | 未整備 |
 | S7-2 | 未整備 |
 | S7-3 | 未整備 |
@@ -90,7 +90,7 @@
 
 | ISA | 命令の記述 | ニーモニック | CPU モデル | 詳細 |
 |---|---|---|---|---|
-| aarch64 | 178 | 100 | generic、generic_v81 | [isa-aarch64.md](isa-aarch64.md) |
+| aarch64 | 246 | 105 | generic、generic_v81 | [isa-aarch64.md](isa-aarch64.md) |
 | hexagon | 6 | 6 | generic | [isa-hexagon.md](isa-hexagon.md) |
 | ia64 | 6 | 5 | generic | [isa-ia64.md](isa-ia64.md) |
 | mips | 185 | 172 | r3000、mips32r2、r6、mips64r2、mips64r6 | [isa-mips.md](isa-mips.md) |
@@ -109,6 +109,7 @@
 | mips_o32 | 444 | [syscalls.md](syscalls.md) |
 | mips_n32 | 398 | [syscalls.md](syscalls.md) |
 | mips_n64 | 374 | [syscalls.md](syscalls.md) |
+| aarch64 | 122 | [syscalls.md](syscalls.md) |
 
 ## 設計との差
 

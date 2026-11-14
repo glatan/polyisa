@@ -28,6 +28,10 @@ pub struct TestBinary {
 /// 手で組み立てたデータだけで動くバイナリは書かない。
 pub const TEST_REQUIREMENTS: &[TestBinary] = &[
     TestBinary {
+        binary: "heavy_abi_aarch64",
+        needs: &[Req::Tool("clang")],
+    },
+    TestBinary {
         binary: "heavy_abi_uapi",
         needs: &[Req::Tool("clang")],
     },
@@ -61,6 +65,13 @@ pub const TEST_REQUIREMENTS: &[TestBinary] = &[
     TestBinary {
         binary: "heavy_program_i386_applet_probe",
         needs: &[Req::Data(".testdata/bin-distro-i386/busybox")],
+    },
+    TestBinary {
+        binary: "heavy_program_aarch64",
+        needs: &[
+            Req::Tool("clang"),
+            Req::Data(".testdata/bin-distro-aarch64"),
+        ],
     },
     TestBinary {
         binary: "heavy_program_mips",

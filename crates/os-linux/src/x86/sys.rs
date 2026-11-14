@@ -4503,26 +4503,6 @@ mod tests {
     }
 
     #[test]
-    fn resolve_guest_path_matches_join_without_root() {
-        // root 空は従来の join と同じ結果。振る舞い不変の担保.
-        for (cwd, path) in [
-            ("", "/etc/passwd"),
-            ("", "rel"),
-            ("/", "/etc/passwd"),
-            ("/", "rel"),
-            ("/a/b", "c"),
-            ("/a/b", "/etc/passwd"),
-            ("/a/b/", "c"),
-        ] {
-            assert_eq!(
-                resolve_guest_path("", cwd, path),
-                Some(join_guest_path(cwd, path)),
-                "cwd={cwd:?} path={path:?}",
-            );
-        }
-    }
-
-    #[test]
     fn guest_root_confines_openat_and_chdir() {
         use crate::x86_64 as abi;
         let root = std::env::temp_dir().join(format!("polyisa-jail-{}", std::process::id()));
@@ -4581,25 +4561,6 @@ mod tests {
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EPERM));
         let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn resolve_guest_path_confines_under_root() {
-        assert_eq!(
-            resolve_guest_path("/jail", "/", "/etc/passwd"),
-            Some("/jail/etc/passwd".to_string())
-        );
-        assert_eq!(
-            resolve_guest_path("/jail/", "/a", "b/../c"),
-            Some("/jail/a/c".to_string())
-        );
-        assert_eq!(resolve_guest_path("/jail", "/", ".."), None,);
-        assert_eq!(resolve_guest_path("/jail", "/", "/../x"), None,);
-        assert_eq!(resolve_guest_path("/jail", "/a", "../../x"), None,);
-        assert_eq!(
-            resolve_guest_path("/jail", "/", "."),
-            Some("/jail".to_string()),
-        );
     }
 
     #[test]

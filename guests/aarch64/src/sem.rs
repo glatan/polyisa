@@ -13,7 +13,7 @@
 
 use polyisa_mem::{Access, AccessKind, Align, Endian};
 use polyisa_sem::{
-    Backend, Cmp, ExceptionKind, Flow, GuestException, StateRef, W8, W16, W32, W64, Width,
+    Backend, Cmp, ExceptionKind, Flow, GuestException, StateRef, W8, W16, W32, W64, W128, Width,
 };
 
 use super::CpuState;
@@ -464,8 +464,10 @@ pub fn mrs<B: Backend>(b: &mut B, rt: Gpr, sysop: u32) -> Flow<B> {
         0xE001 => 1_000_000,
         // CNTVCT_EL0 = S3_3_C14_C0_2: 0 を返す（正確な時計は後の段階）
         0xE002 => 0,
-        // DCZID_EL0 = S3_3_C0_C0_7: BS=4（16 バイトブロック）
-        0xC007 => 4,
+        // DCZID_EL0 = S3_3_C0_C0_7: DZP=1（EL0 で DC ZVA 禁止）にし、
+        // libc に ZVA 経路を選ばせない（SYS の cache op は no-op のため
+        // ゼロ化されず壊れる）。
+        0xC007 => 0x10,
         // CTR_EL0 = S3_3_C0_C0_1: IminLine/DminLine=4（64 バイト）他 0
         0xC001 => 0x8444_c004,
         // ID_AA64ISAR0_EL1 等の ID レジスタは 0（OS 側の補完と同じ）。
@@ -537,6 +539,51 @@ pub fn add_imm<B: Backend>(
         write_w(b, rd, res, use_sp);
     }
     Ok(())
+}
+
+/// Arm ARM `DecodeBitMasks`（wmask のみ使う）。`len` は N:~imms の最上位セット
+/// ビット。即値論理では imms==levels は予約。
+/// Ref: SPEC-ARM-ARM-A (Armv9-A ARM ARM 2024-09) shared/functions。
+pub fn decode_bit_masks(n: u32, imms: u32, immr: u32, is64: bool) -> Option<u64> {
+    let m: u32 = if is64 { 64 } else { 32 };
+    let concat = ((n << 6) | (!imms & 0x3f)) & 0x7f;
+    if concat == 0 {
+        return None;
+    }
+    let len = 31 - concat.leading_zeros();
+    if len < 1 || m < (1u32 << len) {
+        return None;
+    }
+    let levels = (1u32 << len) - 1;
+    if (imms & levels) == levels {
+        return None;
+    }
+    let s = imms & levels;
+    let r = immr & levels;
+    let esize = 1u64 << len;
+    // esize ビット幅の要素マスク。esize=64 のとき全ビット。
+    let emask = if esize >= 64 {
+        u64::MAX
+    } else {
+        (1u64 << esize) - 1
+    };
+    let welem = if s >= 63 {
+        u64::MAX
+    } else {
+        (1u64 << (s + 1)) - 1
+    };
+    let wrot = if r == 0 {
+        welem
+    } else {
+        ((welem >> r) | (welem << (esize as u32 - r))) & emask
+    };
+    let mut out = 0u64;
+    let mut pos = 0u32;
+    while pos < m {
+        out |= wrot << pos;
+        pos += esize as u32;
+    }
+    Some(out)
 }
 
 /// 論理即値。`mask` はビットマスク即値の展開済み（exec が DecodeBitMasks で計算）。
@@ -667,11 +714,22 @@ pub fn bitfield<B: Backend>(
     Ok(())
 }
 
+/// UBFM/SBFM/BFM の wmask。`immr <= imms` は抽出形（ubfx/lsr/uxt*）、
+/// `immr > imms` は左挿入形（lsl/ubfiz）。Ref: SPEC-A64-ISA（UBFM/SBFM/BFM）。
+fn bfm_mask(immr: u32, imms: u32, esize: u32) -> u64 {
+    let ones = |w: u32| -> u64 { if w >= 64 { u64::MAX } else { (1u64 << w) - 1 } };
+    let m = if immr <= imms {
+        ones(imms - immr + 1)
+    } else {
+        ones(imms + 1) << (esize - immr)
+    };
+    m & ones(esize)
+}
+
 fn bitfield64<B: Backend>(b: &mut B, rd: Gpr, rn: Gpr, immr: u32, imms: u32, op: u32) {
     let src = read(b, rn, false);
     let r = ror64(b, src, immr);
-    let w = imms.saturating_add(1).min(64);
-    let maskv: u64 = if w >= 64 { u64::MAX } else { (1u64 << w) - 1 };
+    let maskv = bfm_mask(immr, imms, 64);
     let m = k64(b, maskv);
     match op {
         2 => {
@@ -687,9 +745,10 @@ fn bitfield64<B: Backend>(b: &mut B, rd: Gpr, rn: Gpr, immr: u32, imms: u32, op:
             write(b, rd, res, false);
         }
         _ => {
+            // 符号は「ローテート前」の src<imms> で決める。
             let low = b.and(r, m);
             let sp = k64(b, 1u64 << imms);
-            let s = b.and(low, sp);
+            let s = b.and(src, sp);
             let zero = k64(b, 0);
             let is_neg = b.cmp::<W64>(Cmp::Ne, s, zero);
             let ext = k64(b, !maskv);
@@ -703,9 +762,8 @@ fn bitfield64<B: Backend>(b: &mut B, rd: Gpr, rn: Gpr, immr: u32, imms: u32, op:
 fn bitfield32<B: Backend>(b: &mut B, rd: Gpr, rn: Gpr, immr: u32, imms: u32, op: u32) {
     let src = read_w(b, rn, false);
     let r = ror32(b, src, immr);
-    let w = imms.saturating_add(1).min(32);
-    let maskv: u32 = if w >= 32 { u32::MAX } else { (1u32 << w) - 1 };
-    let m = k32(b, maskv);
+    let maskv = bfm_mask(immr, imms, 32);
+    let m = k32(b, maskv as u32);
     match op {
         2 => {
             let res = b.and(r, m);
@@ -722,10 +780,10 @@ fn bitfield32<B: Backend>(b: &mut B, rd: Gpr, rn: Gpr, immr: u32, imms: u32, op:
         _ => {
             let low = b.and(r, m);
             let sp = k32(b, 1u32 << imms);
-            let s = b.and(low, sp);
+            let s = b.and(src, sp);
             let zero = k32(b, 0);
             let is_neg = b.cmp::<W32>(Cmp::Ne, s, zero);
-            let ext = k32(b, !maskv);
+            let ext = k32(b, !(maskv as u32));
             let hi = b.or(low, ext);
             let res = b.select::<W32>(is_neg, hi, low);
             write_w(b, rd, res, false);
@@ -934,10 +992,10 @@ pub fn add_ext<B: Backend>(
     flags: bool,
 ) -> Flow<B> {
     let y = extend64(b, rm, option, imm3);
-    // add_imm と同じく、S 形式は ZR 文脈・非 S 形式は SP 文脈。
-    let use_sp = !flags;
+    // 拡張レジスタ形式では rn は常に SP 文脈（S ビットと無関係）。
+    // rd は非 S 形式のみ SP 文脈（S 形式は ZR=捨てる）。
     if is64 {
-        let x = read(b, rn, use_sp);
+        let x = read(b, rn, true);
         let (res, cry, ovf) = if sub {
             let ny = b.not(y);
             let c = true_b(b);
@@ -949,9 +1007,9 @@ pub fn add_ext<B: Backend>(
         if flags {
             set_nzcv_arith::<B, W64>(b, res, cry, ovf);
         }
-        write(b, rd, res, use_sp);
+        write(b, rd, res, !flags);
     } else {
-        let x = read_w(b, rn, use_sp);
+        let x = read_w(b, rn, true);
         let yw = b.trunc::<W64, W32>(y);
         let (res, cry, ovf) = if sub {
             let ny = b.not(yw);
@@ -964,7 +1022,7 @@ pub fn add_ext<B: Backend>(
         if flags {
             set_nzcv_arith::<B, W32>(b, res, cry, ovf);
         }
-        write_w(b, rd, res, use_sp);
+        write_w(b, rd, res, !flags);
     }
     Ok(())
 }
@@ -1252,7 +1310,7 @@ fn bitrev32<B: Backend>(b: &mut B, v: B::V<W32>) -> B::V<W32> {
 fn clz64<B: Backend>(b: &mut B, v: B::V<W64>) -> B::V<W64> {
     let mut count = k64(b, 64);
     let mut rem = v;
-    for w in [32u64, 16, 8, 4, 2, 1] {
+    for w in [32u64, 16, 8, 4, 2] {
         let wv = k64(b, w);
         let hi = b.shr_l(rem, wv);
         let zero = k64(b, 0);
@@ -1261,13 +1319,22 @@ fn clz64<B: Backend>(b: &mut B, v: B::V<W64>) -> B::V<W64> {
         count = b.select::<W64>(nz, sub, count);
         rem = b.select::<W64>(nz, hi, rem);
     }
-    count
+    // 残り 2 ビットの最終段は別扱い：rem>>1≠0 なら count-2、
+    // そうでなければ count-rem（rem は 0 か 1）。
+    let one = k64(b, 1);
+    let hi = b.shr_l(rem, one);
+    let zero = k64(b, 0);
+    let nz = b.cmp::<W64>(Cmp::Ne, hi, zero);
+    let two = k64(b, 2);
+    let a = b.sub(count, two);
+    let e = b.sub(count, rem);
+    b.select::<W64>(nz, a, e)
 }
 
 fn clz32<B: Backend>(b: &mut B, v: B::V<W32>) -> B::V<W32> {
     let mut count = k32(b, 32);
     let mut rem = v;
-    for w in [16u32, 8, 4, 2, 1] {
+    for w in [16u32, 8, 4, 2] {
         let wv = k32(b, w);
         let hi = b.shr_l(rem, wv);
         let zero = k32(b, 0);
@@ -1276,7 +1343,14 @@ fn clz32<B: Backend>(b: &mut B, v: B::V<W32>) -> B::V<W32> {
         count = b.select::<W32>(nz, sub, count);
         rem = b.select::<W32>(nz, hi, rem);
     }
-    count
+    let one = k32(b, 1);
+    let hi = b.shr_l(rem, one);
+    let zero = k32(b, 0);
+    let nz = b.cmp::<W32>(Cmp::Ne, hi, zero);
+    let two = k32(b, 2);
+    let a = b.sub(count, two);
+    let e = b.sub(count, rem);
+    b.select::<W32>(nz, a, e)
 }
 
 fn cls64<B: Backend>(b: &mut B, v: B::V<W64>) -> B::V<W64> {
@@ -1719,7 +1793,11 @@ pub fn ls_pair<B: Backend>(
         let a2 = b.add(addr, sz);
         do_load(b, rt2, a2, size, false, size == 8, endian)?;
     }
-    if idx == 1 || idx == 3 {
+    // 書き戻し: ポスト(1) は base+imm、プレ(3) は addr=base+imm そのもの。
+    if idx == 1 {
+        let wb = b.add(base, io);
+        write(b, rn, wb, true);
+    } else if idx == 3 {
         write(b, rn, addr, true);
     }
     Ok(())
@@ -1783,5 +1861,325 @@ pub fn stxr<B: Backend>(
     let o1 = k32(b, 1);
     let code = b.select::<W32>(ok, z0, o1);
     write_w(b, rs, code, false);
+    Ok(())
+}
+
+// ---- FP/SIMD ----
+
+/// FP/SIMD レジスタ v0〜v31。B/H/S/D/Q は値の下位ビットに対応し、
+/// 書き込みはレジスタ全体を置き換える（スカラー書き込みの上位ゼロ規則）。
+fn vref(r: u8) -> StateRef<W128> {
+    StateRef::<W128>::from_offset(core::mem::offset_of!(CpuState, v) + usize::from(r) * 16)
+}
+
+/// FP/SIMD 単一ロード。size バイトを読み、上位は 0 で埋める。
+fn vdo_load<B: Backend>(b: &mut B, vt: u8, addr: B::V<W64>, size: u32, endian: Endian) -> Flow<B> {
+    let acc = data_read(endian);
+    let v: B::V<W128> = match size {
+        1 => {
+            let t: B::V<W8> = b.load(addr, acc)?;
+            b.zext::<W8, W128>(t)
+        }
+        2 => {
+            let t: B::V<W16> = b.load(addr, acc)?;
+            b.zext::<W16, W128>(t)
+        }
+        4 => {
+            let t: B::V<W32> = b.load(addr, acc)?;
+            b.zext::<W32, W128>(t)
+        }
+        8 => {
+            let t: B::V<W64> = b.load(addr, acc)?;
+            b.zext::<W64, W128>(t)
+        }
+        _ => b.load(addr, acc)?,
+    };
+    b.set(vref(vt), v);
+    Ok(())
+}
+
+/// FP/SIMD 単一ストア。レジスタの下位 size バイトを書く。
+fn vdo_store<B: Backend>(b: &mut B, vt: u8, addr: B::V<W64>, size: u32, endian: Endian) -> Flow<B> {
+    let acc = data_write(endian);
+    let v: B::V<W128> = b.get(vref(vt));
+    b.probe(addr, size, acc)?;
+    match size {
+        1 => {
+            let t = b.trunc::<W128, W8>(v);
+            b.store(addr, t, acc)?
+        }
+        2 => {
+            let t = b.trunc::<W128, W16>(v);
+            b.store(addr, t, acc)?
+        }
+        4 => {
+            let t = b.trunc::<W128, W32>(v);
+            b.store(addr, t, acc)?
+        }
+        8 => {
+            let t = b.trunc::<W128, W64>(v);
+            b.store(addr, t, acc)?
+        }
+        _ => b.store(addr, v, acc)?,
+    }
+    Ok(())
+}
+
+/// FP/SIMD unsigned 即値ロード/ストア。`imm` はスケール済み。
+pub fn vls_unsigned<B: Backend>(
+    b: &mut B,
+    rt: u8,
+    rn: Gpr,
+    imm: i64,
+    size: u32,
+    store: bool,
+    endian: Endian,
+) -> Flow<B> {
+    let addr = addr_of(b, rn, imm);
+    if store {
+        vdo_store(b, rt, addr, size, endian)
+    } else {
+        vdo_load(b, rt, addr, size, endian)
+    }
+}
+
+/// FP/SIMD imm9 ロード/ストア。mode: 0=unscaled, 1=post, 3=pre。
+#[allow(clippy::too_many_arguments)]
+pub fn vls_imm9<B: Backend>(
+    b: &mut B,
+    rt: u8,
+    rn: Gpr,
+    imm: i64,
+    size: u32,
+    store: bool,
+    mode: u32,
+    endian: Endian,
+) -> Flow<B> {
+    let base = read(b, rn, true);
+    match mode {
+        1 => {
+            let res = if store {
+                vdo_store(b, rt, base, size, endian)
+            } else {
+                vdo_load(b, rt, base, size, endian)
+            };
+            let cur = read(b, rn, true);
+            let o = k64(b, imm as u64);
+            let nb = b.add(cur, o);
+            write(b, rn, nb, true);
+            res
+        }
+        3 => {
+            let o = k64(b, imm as u64);
+            let addr = b.add(base, o);
+            write(b, rn, addr, true);
+            if store {
+                vdo_store(b, rt, addr, size, endian)
+            } else {
+                vdo_load(b, rt, addr, size, endian)
+            }
+        }
+        _ => {
+            let o = k64(b, imm as u64);
+            let addr = b.add(base, o);
+            if store {
+                vdo_store(b, rt, addr, size, endian)
+            } else {
+                vdo_load(b, rt, addr, size, endian)
+            }
+        }
+    }
+}
+
+/// FP/SIMD ペアロード/ストア。idx: 1=post,2=off,3=pre。
+#[allow(clippy::too_many_arguments)]
+pub fn vls_pair<B: Backend>(
+    b: &mut B,
+    rt: u8,
+    rt2: u8,
+    rn: Gpr,
+    imm: i64,
+    size: u32,
+    store: bool,
+    idx: u32,
+    endian: Endian,
+) -> Flow<B> {
+    let base = read(b, rn, true);
+    let io = k64(b, imm as u64);
+    let addr = if idx == 1 { base } else { b.add(base, io) };
+    if store {
+        b.probe(addr, size * 2, data_write(endian))?;
+    }
+    if store {
+        vdo_store(b, rt, addr, size, endian)?;
+    } else {
+        vdo_load(b, rt, addr, size, endian)?;
+    }
+    let sz = k64(b, u64::from(size));
+    let a2 = b.add(addr, sz);
+    if store {
+        vdo_store(b, rt2, a2, size, endian)?;
+    } else {
+        vdo_load(b, rt2, a2, size, endian)?;
+    }
+    if idx == 1 {
+        let wb = b.add(base, io);
+        write(b, rn, wb, true);
+    } else if idx == 3 {
+        write(b, rn, addr, true);
+    }
+    Ok(())
+}
+
+/// DUP（汎用レジスタ → 全レーン）。`esz` は log2(要素バイト数)（0=B,1=H,2=S,3=D）。
+/// `q` が真なら 128 ビット分、偽なら下位 64 ビット分だけ複製する。
+/// Ref: SPEC-ARM-ARM-A の DUP (general register)。
+pub fn vdup_gpr<B: Backend>(b: &mut B, rd: u8, rn: Gpr, esz: u32, q: bool) -> Flow<B> {
+    let ebits = 8u32 << esz;
+    let lanes = if q { 128 } else { 64 } / ebits;
+    let g = read(b, rn, false);
+    let e = b.zext::<W64, W128>(g);
+    let m = b.konst::<W128>((1u128 << ebits) - 1);
+    let mut v = b.and(e, m);
+    for i in 1..lanes {
+        let sh = b.konst::<W128>(u128::from(i * ebits));
+        let y = b.shl(v, sh);
+        v = b.or(v, y);
+    }
+    b.set(vref(rd), v);
+    Ok(())
+}
+
+/// UMOV（レーン → 汎用、ゼロ拡張）。`mov Wd/Xd, Vn.T[i]` の別名。
+/// Ref: SPEC-ARM-ARM-A の UMOV。
+pub fn vext_gpr<B: Backend>(b: &mut B, rd: Gpr, rn: u8, esz: u32, idx: u32) -> Flow<B> {
+    let ebits = 8u32 << esz;
+    let v: B::V<W128> = b.get(vref(rn));
+    let sh = b.konst::<W128>(u128::from(idx * ebits));
+    let x = b.shr_l::<W128>(v, sh);
+    let m = b.konst::<W128>((1u128 << ebits) - 1);
+    let x = b.and(x, m);
+    let x64 = b.trunc::<W128, W64>(x);
+    write(b, rd, x64, false);
+    Ok(())
+}
+
+/// INS（汎用 → レーン）。`mov Vd.T[i], Rn` の別名。
+/// Ref: SPEC-ARM-ARM-A の INS (general register)。
+pub fn vins_gpr<B: Backend>(b: &mut B, rd: u8, rn: Gpr, esz: u32, idx: u32) -> Flow<B> {
+    let ebits = 8u32 << esz;
+    let lane: u128 = ((1u128 << ebits) - 1) << (idx * ebits);
+    let cur: B::V<W128> = b.get(vref(rd));
+    let nm = b.konst::<W128>(!lane);
+    let v0 = b.and(cur, nm);
+    let g = read(b, rn, false);
+    let e = b.zext::<W64, W128>(g);
+    let em = b.konst::<W128>((1u128 << ebits) - 1);
+    let e = b.and(e, em);
+    let sh = b.konst::<W128>(u128::from(idx * ebits));
+    let e = b.shl(e, sh);
+    let v = b.or(v0, e);
+    b.set(vref(rd), v);
+    Ok(())
+}
+
+/// FMOV（汎用 → FP/SIMD レジスタ）。`bits` は転送幅（32/64）。
+/// `hi` が真なら V の上位 64 ビット（D[1]）を書き、下位を保持する。
+/// スカラー S/D への書き込みは上位ビットを 0 にする。
+pub fn fmov_to_v<B: Backend>(b: &mut B, rd: u8, rn: Gpr, bits: u32, hi: bool) -> Flow<B> {
+    let g = read(b, rn, false);
+    let e = b.zext::<W64, W128>(g);
+    let e = if bits == 32 {
+        let m = b.konst::<W128>(0xffff_ffff);
+        b.and(e, m)
+    } else {
+        e
+    };
+    let v = if hi {
+        let cur: B::V<W128> = b.get(vref(rd));
+        let keep = b.konst::<W128>(0xffff_ffff_ffff_ffff);
+        let lo = b.and(cur, keep);
+        let sh = b.konst::<W128>(64);
+        let e2 = b.shl(e, sh);
+        b.or(lo, e2)
+    } else {
+        e
+    };
+    b.set(vref(rd), v);
+    Ok(())
+}
+
+/// AdvSIMD 修飾即値（MOVI/MVNI/ORR/BIC の即値形式）。`cmode` が要素幅と
+/// 操作を選ぶ。`op` は movi/orr なら偽、mvni/bic なら真。`q` 偽は 64 ビット。
+/// cmode 12（shifting ones）と 15（fmov 即値）は未実装で Undefined を返す。
+/// Ref: SPEC-ARM-ARM-A (Armv9-A ARM ARM) AdvSIMDExpandImm。
+pub fn mod_imm<B: Backend>(b: &mut B, rd: u8, q: bool, op: bool, cmode: u32, imm8: u64) -> Flow<B> {
+    // (要素ビット幅, imm8 の左シフト量, 合成方法 0=上書き, 1=orr, 2=bic)
+    let (ebits, shift, acc) = match cmode {
+        0..=3 => (32u32, 8 * cmode, 0u32),
+        4..=7 => (32, 8 * (cmode - 4), if op { 2 } else { 1 }),
+        8 | 9 => (16, 8 * (cmode - 8), 0),
+        10 | 11 => (16, 8 * (cmode - 10), if op { 2 } else { 1 }),
+        13 => (8, 0, 0),
+        14 => (8, 0, if op { 2 } else { 1 }),
+        _ => {
+            return Err(b.raise(GuestException {
+                kind: ExceptionKind::Undefined,
+                code: u64::from(cmode),
+                addr: None,
+                in_delay_slot: false,
+            }));
+        }
+    };
+    let lane_mask = (1u128 << ebits) - 1;
+    let mut lane = u128::from(imm8) << shift;
+    if acc == 0 && op {
+        lane = !lane;
+    }
+    lane &= lane_mask;
+    // レーンを全要素分だけ繰り返す。
+    let mut pat = 0u128;
+    let mut off = 0u32;
+    while off < 128 {
+        pat |= lane << off;
+        off += ebits;
+    }
+    let low64 = b.konst::<W128>(u128::from(u64::MAX));
+    let p = b.konst::<W128>(pat);
+    let v = match acc {
+        1 | 2 => {
+            let cur: B::V<W128> = b.get(vref(rd));
+            let cur = if q { cur } else { b.and(cur, low64) };
+            if acc == 1 {
+                b.or(cur, p)
+            } else {
+                let np = b.not(p);
+                b.and(cur, np)
+            }
+        }
+        _ => p,
+    };
+    let v = if q { v } else { b.and(v, low64) };
+    b.set(vref(rd), v);
+    Ok(())
+}
+
+/// FMOV（FP/SIMD → 汎用）。`hi` が真なら V の上位 64 ビットを読む。
+/// Wd 宛ては下位 32 ビットのゼロ拡張。
+pub fn fmov_to_g<B: Backend>(b: &mut B, rd: Gpr, rn: u8, is64: bool, hi: bool) -> Flow<B> {
+    let v: B::V<W128> = b.get(vref(rn));
+    let x = if hi {
+        let sh = b.konst::<W128>(64);
+        b.shr_l::<W128>(v, sh)
+    } else {
+        v
+    };
+    let x64 = b.trunc::<W128, W64>(x);
+    if is64 {
+        write(b, rd, x64, false);
+    } else {
+        let t = b.trunc::<W64, W32>(x64);
+        write_w(b, rd, t, false);
+    }
     Ok(())
 }

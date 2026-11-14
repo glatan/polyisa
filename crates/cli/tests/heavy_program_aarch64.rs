@@ -9,7 +9,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use polyisa_cli::run_aarch64::run_elf_aarch64_sys;
+use polyisa_cli::run_aarch64::{run_elf_aarch64_sys, run_elf_aarch64_sys_root};
 use polyisa_os_linux::aarch64::sys::Linux;
 
 const SRC: &str = r#"
@@ -132,4 +132,55 @@ fn fib_recursion_prints_55() {
         .unwrap_or_else(|e| panic!("aarch64 fib: {e}"));
     assert_eq!(code, 0);
     assert_eq!(sys.io.stdout, b"55\n");
+}
+
+/// 台帳 BIN-DISTRO-AARCH64（Alpine minirootfs、musl + BusyBox 1.37、動的）
+/// のコマンド群をゲストルートで走らせる。PT_INTERP → ld-musl の経路、
+/// 絶対シンボリックリンクの解決、getdents64 の位置管理を通る。
+#[test]
+fn distro_commands_via_guest_root() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../.testdata/bin-distro-aarch64")
+        .canonicalize()
+        .unwrap_or_else(|e| panic!("bin-distro-aarch64: {e}"));
+    assert!(
+        root.join("bin/busybox").is_file() && root.join("lib/ld-musl-aarch64.so.1").is_file(),
+        "BIN-DISTRO-AARCH64 を {} に置く。リポジトリには含めない。",
+        root.display()
+    );
+    // root 指定時、ELF のパスはゲストの名前空間で解釈される。
+    let bb = "/bin/busybox";
+    let root_s = root.to_str().unwrap();
+    // (引数, 出力に含めるはずの断片)。--help は stderr 側に出す
+    // アプレットもあるので stdout+stderr をつないで探す。
+    for (args, needle) in [
+        (&["echo", "hi"][..], &b"hi\n"[..]),
+        (&["uname", "-a"][..], b"polyisa aarch64"),
+        (&["cat", "/etc/os-release"][..], b"ID=alpine"),
+        (&["ls", "/bin"][..], b"busybox"),
+        (&["--help"][..], b"BusyBox"),
+    ] {
+        let argv: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
+        let mut sys = Linux::default();
+        let code = run_elf_aarch64_sys_root(bb, &argv, None, &mut sys, Some(root_s))
+            .unwrap_or_else(|e| panic!("{}: {e}", args.join(" ")));
+        assert_eq!(code, 0, "{}", args.join(" "));
+        let mut both = sys.io.stdout.clone();
+        both.extend_from_slice(&sys.io.stderr);
+        assert!(
+            both.windows(needle.len()).any(|w| w == needle),
+            "{}: 出力に {:?} を含まない: {:?}",
+            args.join(" "),
+            String::from_utf8_lossy(needle),
+            String::from_utf8_lossy(&both[..both.len().min(400)])
+        );
+    }
+    // /bin/echo は /bin/busybox への絶対リンク。ゲストルート内で解決し、
+    // argv[0] の basename から echo アプレットが起動する。
+    let mut sys = Linux::default();
+    let argv = vec!["via-link".to_string()];
+    let code = run_elf_aarch64_sys_root("/bin/echo", &argv, None, &mut sys, Some(root_s))
+        .unwrap_or_else(|e| panic!("echo: {e}"));
+    assert_eq!(code, 0);
+    assert_eq!(sys.io.stdout, b"via-link\n");
 }

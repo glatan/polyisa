@@ -151,7 +151,12 @@ fn run_mips_elf(_path: &str, _argv: &[String], _spec: Option<&CpuSpec>) -> Resul
 }
 
 #[cfg(feature = "guest-aarch64")]
-fn run_aarch64_elf(path: &str, argv: &[String], spec: Option<&CpuSpec>) -> Result<u64, String> {
+fn run_aarch64_elf(
+    path: &str,
+    argv: &[String],
+    spec: Option<&CpuSpec>,
+    root: Option<&str>,
+) -> Result<u64, String> {
     let sel = spec
         .map(|s| {
             resolve_sel(
@@ -163,11 +168,16 @@ fn run_aarch64_elf(path: &str, argv: &[String], spec: Option<&CpuSpec>) -> Resul
             )
         })
         .transpose()?;
-    run_aarch64::run_elf_aarch64_sel(path, argv, sel.as_ref())
+    run_aarch64::run_elf_aarch64_root(path, argv, sel.as_ref(), root)
 }
 
 #[cfg(not(feature = "guest-aarch64"))]
-fn run_aarch64_elf(_path: &str, _argv: &[String], _spec: Option<&CpuSpec>) -> Result<u64, String> {
+fn run_aarch64_elf(
+    _path: &str,
+    _argv: &[String],
+    _spec: Option<&CpuSpec>,
+    _root: Option<&str>,
+) -> Result<u64, String> {
     Err("この polyisa は aarch64 ゲストなしでビルドされた".to_string())
 }
 
@@ -195,9 +205,27 @@ fn run_riscv_elf(_path: &str, _argv: &[String], _spec: Option<&CpuSpec>) -> Resu
 /// `run_path` に `--cpu` の指定を加える。`cpu` は `parse_cpu_spec` の
 /// 入力と同じ文字列。ファミリが ELF の `e_machine` と合わなければ拒否する。
 pub fn run_path_with(path: &str, argv: &[String], cpu: Option<&str>) -> Result<u64, String> {
+    run_path_opts(path, argv, cpu, None)
+}
+
+/// `run_path_with` に `--root` のゲストルートを添える。
+/// 現状は aarch64 のみが `root` を解釈する（PT_INTERP とパス解決）。
+/// `root` 指定時は `path` をゲストの名前空間（chroot と同じ規則）で解決する。
+pub fn run_path_opts(
+    path: &str,
+    argv: &[String],
+    cpu: Option<&str>,
+    root: Option<&str>,
+) -> Result<u64, String> {
     use polyisa_loader::elf::{CLASS_32, CLASS_64, MAGIC};
     let spec = cpu.map(parse_cpu_spec).transpose()?;
-    let bytes = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
+    // e_machine の嗅探も root 内のパス解決を通る（run_aarch64 側と同じ規則）。
+    let host_path = match root {
+        Some(root) => polyisa_os_linux::guest_path::resolve_guest_path_links(root, "/", path)
+            .ok_or_else(|| format!("{path}: ゲストルートの外を指す"))?,
+        None => path.to_string(),
+    };
+    let bytes = std::fs::read(&host_path).map_err(|e| format!("read {path}: {e}"))?;
     if bytes.len() < 6 || bytes[0..4] != MAGIC {
         return Err(format!("{path} は ELF ではない"));
     }
@@ -210,6 +238,9 @@ pub fn run_path_with(path: &str, argv: &[String], cpu: Option<&str>) -> Result<u
     };
     match bytes[4] {
         CLASS_32 => {
+            if root.is_some() {
+                return Err("--root は現状 aarch64 のみ対応".to_string());
+            }
             let ehdr =
                 polyisa_loader::elf::parse_ehdr32(&bytes).map_err(|e| format!("ehdr: {e:?}"))?;
             // EM_386=3。Ref: SRC-LINUX (7.3).
@@ -227,6 +258,9 @@ pub fn run_path_with(path: &str, argv: &[String], cpu: Option<&str>) -> Result<u
         CLASS_64 => {
             let ehdr =
                 polyisa_loader::elf::parse_ehdr(&bytes).map_err(|e| format!("ehdr: {e:?}"))?;
+            if root.is_some() && ehdr.machine != 183 {
+                return Err("--root は現状 aarch64 のみ対応".to_string());
+            }
             // EM_RISCV=243。Ref: SPEC-RISCV-PSABI (v1.0).
             if ehdr.machine == 243 {
                 check("riscv")?;
@@ -242,7 +276,7 @@ pub fn run_path_with(path: &str, argv: &[String], cpu: Option<&str>) -> Result<u
             } else if ehdr.machine == 183 {
                 // EM_AARCH64。Ref: SPEC-AARCH64-ELF（AAELF64）§4.2。
                 check("aarch64")?;
-                run_aarch64_elf(path, argv, spec.as_ref())
+                run_aarch64_elf(path, argv, spec.as_ref(), root)
             } else {
                 Err(format!("未対応の e_machine: {}", ehdr.machine))
             }

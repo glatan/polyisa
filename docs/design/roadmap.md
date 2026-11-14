@@ -136,9 +136,9 @@ AArch64 の本格的な実装と、Linux の aarch64 ゲスト ABI。
 
 | ID | 条件 | 判定 |
 |---|---|---|
-| S6-1 | aarch64 の静的リンクと動的リンクのテストプログラムと、配布物のコマンド群が、ゲストのルートを使って正しい出力を返す（テスト `heavy_program_aarch64`）。 | 未整備 |
-| S6-2 | ABI 表が、UAPI ヘッダからの抽出値と一致する（テスト `heavy_abi_aarch64`）。 | 未整備 |
-| S6-3 | llvm-objdump とのデコーダの差分テストが通る（テスト `heavy_oracle_aarch64`）。 | 未整備 |
+| S6-1 | aarch64 の静的リンクと動的リンクのテストプログラムと、配布物のコマンド群が、ゲストのルートを使って正しい出力を返す（テスト `heavy_program_aarch64`）。 | テスト：`heavy_program_aarch64` |
+| S6-2 | ABI 表が、UAPI ヘッダからの抽出値と一致する（テスト `heavy_abi_aarch64`）。 | テスト：`heavy_abi_aarch64` |
+| S6-3 | llvm-objdump とのデコーダの差分テストが通る（テスト `heavy_oracle_llvm`）。 | テスト：`heavy_oracle_llvm` |
 
 ### 段階 7：ARM
 
