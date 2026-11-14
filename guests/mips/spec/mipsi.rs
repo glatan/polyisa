@@ -49,6 +49,13 @@ pub fn build_model() -> polyisa_isadl::Model {
     // MIPS IV ISA が定義する。
     // Ref: SPEC-MIPS-IV (Rev 3.2).
     // MIPS64r2 拡張の一次根拠は台帳の SPEC-MIPS64（未確認・所有者確認待ち）。
+    // cop1 (FPU)。FR=1 相当の 64 ビット FPR を持つモデルで有効。
+    // R6 の FP 符号化差分（MADDF 系）は本格実装で足す。
+    m.features.push(Feature {
+        name: "fpu".to_string(),
+        implies: vec![],
+        conflicts: vec![],
+    });
     m.features.push(Feature {
         name: "mips64".to_string(),
         implies: vec![],
@@ -64,7 +71,7 @@ pub fn build_model() -> polyisa_isadl::Model {
     m.models.push(ModelDef {
         name: "mips32r2".to_string(),
         parent: String::new(),
-        add_features: vec!["mips1".to_string(), "mips32r2".to_string()],
+        add_features: vec!["mips1".to_string(), "mips32r2".to_string(), "fpu".to_string()],
         remove_features: vec![],
     });
     m.models.push(ModelDef {
@@ -74,6 +81,7 @@ pub fn build_model() -> polyisa_isadl::Model {
             "mips1".to_string(),
             "mips32r2".to_string(),
             "mips_r6".to_string(),
+            "fpu".to_string(),
         ],
         remove_features: vec![],
     });
@@ -84,6 +92,7 @@ pub fn build_model() -> polyisa_isadl::Model {
             "mips1".to_string(),
             "mips32r2".to_string(),
             "mips64".to_string(),
+            "fpu".to_string(),
         ],
         remove_features: vec![],
     });
@@ -95,6 +104,7 @@ pub fn build_model() -> polyisa_isadl::Model {
             "mips32r2".to_string(),
             "mips64".to_string(),
             "mips_r6".to_string(),
+            "fpu".to_string(),
         ],
         remove_features: vec![],
     });
@@ -269,6 +279,106 @@ pub fn build_model() -> polyisa_isadl::Model {
         ) {
             insn.when = Pred::Not(Box::new(Pred::Flag("mips_r6".to_string())));
         }
+    }
+    // cop1 (FPU)。FR=1 相当の FPR を想定し、.s は下位 32 ビットに
+    // 正規化する。fpu 旗を持つモデルのみ有効。
+    // Ref: SPEC-MIPS-IV (Rev 3.2).
+    let fp_insns: &[(&str, &str, &str, &str, &str)] = &[
+        ("lwc1", "FI", "110001 ..... ..... ................", "lwc1 {rt}, {imm}({rs})", "load"),
+        ("swc1", "FI", "111001 ..... ..... ................", "swc1 {rt}, {imm}({rs})", "store"),
+        ("ldc1", "FI", "110101 ..... ..... ................", "ldc1 {rt}, {imm}({rs})", "load"),
+        ("sdc1", "FI", "111101 ..... ..... ................", "sdc1 {rt}, {imm}({rs})", "store"),
+        ("mfc1", "FJ", "010001 00000 ..... ..... 00000000000", "mfc1 {rt}, {rs}", "alu"),
+        ("dmfc1", "FJ", "010001 00001 ..... ..... 00000000000", "dmfc1 {rt}, {rs}", "alu"),
+        ("cfc1", "FJ", "010001 00010 ..... ..... 00000000000", "cfc1 {rt}, {rs}", "alu"),
+        ("mfhc1", "FJ", "010001 00011 ..... ..... 00000000000", "mfhc1 {rt}, {rs}", "alu"),
+        ("mtc1", "FJ", "010001 00100 ..... ..... 00000000000", "mtc1 {rt}, {rs}", "alu"),
+        ("dmtc1", "FJ", "010001 00101 ..... ..... 00000000000", "dmtc1 {rt}, {rs}", "alu"),
+        ("ctc1", "FJ", "010001 00110 ..... ..... 00000000000", "ctc1 {rt}, {rs}", "alu"),
+        ("mthc1", "FJ", "010001 00111 ..... ..... 00000000000", "mthc1 {rt}, {rs}", "alu"),
+        ("bc1f", "FJ", "010001 01000 ...00 ................", "bc1f {cc}, {imm}", "branch"),
+        ("bc1t", "FJ", "010001 01000 ...01 ................", "bc1t {cc}, {imm}", "branch"),
+        ("bc1fl", "FJ", "010001 01000 ...10 ................", "bc1fl {cc}, {imm}", "branch"),
+        ("bc1tl", "FJ", "010001 01000 ...11 ................", "bc1tl {cc}, {imm}", "branch"),
+        ("add_s", "FJ", "010001 10000 ..... ..... ..... 000000", "add.s", "alu"),
+        ("sub_s", "FJ", "010001 10000 ..... ..... ..... 000001", "sub.s", "alu"),
+        ("mul_s", "FJ", "010001 10000 ..... ..... ..... 000010", "mul.s", "alu"),
+        ("div_s", "FJ", "010001 10000 ..... ..... ..... 000011", "div.s", "alu"),
+        ("sqrt_s", "FJ", "010001 10000 ..... ..... ..... 000100", "sqrt.s", "alu"),
+        ("abs_s", "FJ", "010001 10000 ..... ..... ..... 000101", "abs.s", "alu"),
+        ("mov_s", "FJ", "010001 10000 ..... ..... ..... 000110", "mov.s", "alu"),
+        ("neg_s", "FJ", "010001 10000 ..... ..... ..... 000111", "neg.s", "alu"),
+        ("round_l_s", "FJ", "010001 10000 ..... ..... ..... 001000", "round_l.s", "alu"),
+        ("trunc_l_s", "FJ", "010001 10000 ..... ..... ..... 001001", "trunc_l.s", "alu"),
+        ("ceil_l_s", "FJ", "010001 10000 ..... ..... ..... 001010", "ceil_l.s", "alu"),
+        ("floor_l_s", "FJ", "010001 10000 ..... ..... ..... 001011", "floor_l.s", "alu"),
+        ("round_w_s", "FJ", "010001 10000 ..... ..... ..... 001100", "round_w.s", "alu"),
+        ("trunc_w_s", "FJ", "010001 10000 ..... ..... ..... 001101", "trunc_w.s", "alu"),
+        ("ceil_w_s", "FJ", "010001 10000 ..... ..... ..... 001110", "ceil_w.s", "alu"),
+        ("floor_w_s", "FJ", "010001 10000 ..... ..... ..... 001111", "floor_w.s", "alu"),
+        ("movcf_s", "FJ", "010001 10000 ..... ..... ..... 010001", "movcf.s", "alu"),
+        ("movz_s", "FJ", "010001 10000 ..... ..... ..... 010010", "movz.s", "alu"),
+        ("movn_s", "FJ", "010001 10000 ..... ..... ..... 010011", "movn.s", "alu"),
+        ("recip_s", "FJ", "010001 10000 ..... ..... ..... 010101", "recip.s", "alu"),
+        ("rsqrt_s", "FJ", "010001 10000 ..... ..... ..... 010110", "rsqrt.s", "alu"),
+        ("ccond_s", "FJ", "010001 10000 ..... ..... ...0011 ....", "c.cond.s", "alu"),
+        ("add_d", "FJ", "010001 10001 ..... ..... ..... 000000", "add.d", "alu"),
+        ("sub_d", "FJ", "010001 10001 ..... ..... ..... 000001", "sub.d", "alu"),
+        ("mul_d", "FJ", "010001 10001 ..... ..... ..... 000010", "mul.d", "alu"),
+        ("div_d", "FJ", "010001 10001 ..... ..... ..... 000011", "div.d", "alu"),
+        ("sqrt_d", "FJ", "010001 10001 ..... ..... ..... 000100", "sqrt.d", "alu"),
+        ("abs_d", "FJ", "010001 10001 ..... ..... ..... 000101", "abs.d", "alu"),
+        ("mov_d", "FJ", "010001 10001 ..... ..... ..... 000110", "mov.d", "alu"),
+        ("neg_d", "FJ", "010001 10001 ..... ..... ..... 000111", "neg.d", "alu"),
+        ("round_l_d", "FJ", "010001 10001 ..... ..... ..... 001000", "round_l.d", "alu"),
+        ("trunc_l_d", "FJ", "010001 10001 ..... ..... ..... 001001", "trunc_l.d", "alu"),
+        ("ceil_l_d", "FJ", "010001 10001 ..... ..... ..... 001010", "ceil_l.d", "alu"),
+        ("floor_l_d", "FJ", "010001 10001 ..... ..... ..... 001011", "floor_l.d", "alu"),
+        ("round_w_d", "FJ", "010001 10001 ..... ..... ..... 001100", "round_w.d", "alu"),
+        ("trunc_w_d", "FJ", "010001 10001 ..... ..... ..... 001101", "trunc_w.d", "alu"),
+        ("ceil_w_d", "FJ", "010001 10001 ..... ..... ..... 001110", "ceil_w.d", "alu"),
+        ("floor_w_d", "FJ", "010001 10001 ..... ..... ..... 001111", "floor_w.d", "alu"),
+        ("movcf_d", "FJ", "010001 10001 ..... ..... ..... 010001", "movcf.d", "alu"),
+        ("movz_d", "FJ", "010001 10001 ..... ..... ..... 010010", "movz.d", "alu"),
+        ("movn_d", "FJ", "010001 10001 ..... ..... ..... 010011", "movn.d", "alu"),
+        ("recip_d", "FJ", "010001 10001 ..... ..... ..... 010101", "recip.d", "alu"),
+        ("rsqrt_d", "FJ", "010001 10001 ..... ..... ..... 010110", "rsqrt.d", "alu"),
+        ("ccond_d", "FJ", "010001 10001 ..... ..... ...0011 ....", "c.cond.d", "alu"),
+        ("cvt_s_d", "FJ", "010001 10001 00000 ..... ..... 100000", "cvt.s.d", "alu"),
+        ("cvt_s_w", "FJ", "010001 10100 00000 ..... ..... 100000", "cvt.s.w", "alu"),
+        ("cvt_s_l", "FJ", "010001 10101 00000 ..... ..... 100000", "cvt.s.l", "alu"),
+        ("cvt_d_s", "FJ", "010001 10000 00000 ..... ..... 100001", "cvt.d.s", "alu"),
+        ("cvt_d_w", "FJ", "010001 10100 00000 ..... ..... 100001", "cvt.d.w", "alu"),
+        ("cvt_d_l", "FJ", "010001 10101 00000 ..... ..... 100001", "cvt.d.l", "alu"),
+        ("cvt_w_s", "FJ", "010001 10000 00000 ..... ..... 100100", "cvt.w.s", "alu"),
+        ("cvt_w_d", "FJ", "010001 10001 00000 ..... ..... 100100", "cvt.w.d", "alu"),
+        ("cvt_w_l", "FJ", "010001 10101 00000 ..... ..... 100100", "cvt.w.l", "alu"),
+        ("cvt_l_s", "FJ", "010001 10000 00000 ..... ..... 100101", "cvt.l.s", "alu"),
+        ("cvt_l_d", "FJ", "010001 10001 00000 ..... ..... 100101", "cvt.l.d", "alu"),
+        ("cvt_l_w", "FJ", "010001 10100 00000 ..... ..... 100101", "cvt.l.w", "alu"),
+        ("lwxc1", "FJ", "010011 ..... ..... ..... ..... 000000", "lwxc1", "alu"),
+        ("ldxc1", "FJ", "010011 ..... ..... ..... ..... 000001", "ldxc1", "alu"),
+        ("swxc1", "FJ", "010011 ..... ..... ..... ..... 001000", "swxc1", "alu"),
+        ("sdxc1", "FJ", "010011 ..... ..... ..... ..... 001001", "sdxc1", "alu"),
+        ("madd_s", "FJ", "010011 ..... ..... ..... ..... 100000", "madd_s", "alu"),
+        ("madd_d", "FJ", "010011 ..... ..... ..... ..... 100001", "madd_d", "alu"),
+        ("msub_s", "FJ", "010011 ..... ..... ..... ..... 101000", "msub_s", "alu"),
+        ("msub_d", "FJ", "010011 ..... ..... ..... ..... 101001", "msub_d", "alu"),
+        ("nmadd_s", "FJ", "010011 ..... ..... ..... ..... 110000", "nmadd_s", "alu"),
+        ("nmadd_d", "FJ", "010011 ..... ..... ..... ..... 110001", "nmadd_d", "alu"),
+        ("nmsub_s", "FJ", "010011 ..... ..... ..... ..... 111000", "nmsub_s", "alu"),
+        ("nmsub_d", "FJ", "010011 ..... ..... ..... ..... 111001", "nmsub_d", "alu"),
+    ];
+    for (name, format, pattern, syntax, timing) in fp_insns {
+        m.insns.push(Insn {
+            name: name.to_string(),
+            format: format.to_string(),
+            pattern: Pattern::parse(pattern).expect("valid pattern"),
+            when: Pred::Flag("fpu".to_string()),
+            wheres: vec![],
+            syntax: syntax.to_string(),
+            timing: timing.to_string(),
+        });
     }
     // LUI。rs フィールドは 00000 固定（R6 の AUI は rs!=0 で区別する）。
     // where は AUI との排他を静的に証明するために付ける。

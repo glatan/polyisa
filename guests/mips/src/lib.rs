@@ -52,6 +52,12 @@ pub struct CpuState {
     /// 64 ビットモデルなら 1。32 ビット命令の結果は MIPS64 では
     /// 符号拡張して GPR に置く決まりがあるため、意味論が正規化に使う。
     pub is64: u64,
+    /// FPU レジスタ $f0〜$f31（FR=1 の全幅 64 ビットレイアウト）。
+    /// .s 値は下位 32 ビットに置き、上位は 0 に正規化する。
+    pub fpr: [u64; 32],
+    /// FCSR。bit23=FCC0、bits31-25=FCC1-7、bits1-0=RM を保持する。
+    /// その他のフラグ・イネーブルは保持するだけで条件分岐には使わない。
+    pub fcsr: u64,
 }
 
 impl Default for CpuState {
@@ -66,6 +72,8 @@ impl Default for CpuState {
             hwr: [0; 4],
             nullify: 0,
             is64: 0,
+            fpr: [0; 32],
+            fcsr: 0,
         }
     }
 }
@@ -98,7 +106,7 @@ mod tests {
     fn insn_count() {
         // MIPS I + MIPS32r2 + MIPS64 + Release 6（コンパクト分岐・
         // EVA・語対の LL/SC・branch-likely 含む）。nop は sll $0,$0,0 の別名。
-        assert_eq!(INSNS.len(), 199);
+        assert_eq!(INSNS.len(), 283);
     }
 
     #[test]

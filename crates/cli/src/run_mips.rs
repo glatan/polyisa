@@ -60,7 +60,7 @@ impl MipsModel {
     #[must_use]
     pub const fn mips32r2() -> Self {
         Self {
-            feats: polyisa_guest_mips::FEAT_MIPS32R2,
+            feats: polyisa_guest_mips::FEAT_MIPS32R2 | polyisa_guest_mips::FEAT_FPU,
             endian: Endian::Le,
             load_delay: false,
             is64: false,
@@ -71,7 +71,9 @@ impl MipsModel {
     #[must_use]
     pub const fn r6() -> Self {
         Self {
-            feats: polyisa_guest_mips::FEAT_MIPS32R2 | polyisa_guest_mips::FEAT_MIPS_R6,
+            feats: polyisa_guest_mips::FEAT_MIPS32R2
+                | polyisa_guest_mips::FEAT_MIPS_R6
+                | polyisa_guest_mips::FEAT_FPU,
             endian: Endian::Le,
             load_delay: false,
             is64: false,
@@ -82,7 +84,9 @@ impl MipsModel {
     #[must_use]
     pub const fn mips64r2() -> Self {
         Self {
-            feats: polyisa_guest_mips::FEAT_MIPS32R2 | polyisa_guest_mips::FEAT_MIPS64,
+            feats: polyisa_guest_mips::FEAT_MIPS32R2
+                | polyisa_guest_mips::FEAT_MIPS64
+                | polyisa_guest_mips::FEAT_FPU,
             endian: Endian::Be,
             load_delay: false,
             is64: true,
@@ -95,7 +99,8 @@ impl MipsModel {
         Self {
             feats: polyisa_guest_mips::FEAT_MIPS32R2
                 | polyisa_guest_mips::FEAT_MIPS64
-                | polyisa_guest_mips::FEAT_MIPS_R6,
+                | polyisa_guest_mips::FEAT_MIPS_R6
+                | polyisa_guest_mips::FEAT_FPU,
             endian: Endian::Be,
             load_delay: false,
             is64: true,
@@ -363,6 +368,10 @@ fn has_delay_slot(insn: Insn) -> bool {
             | Insn::Bgezl
             | Insn::Bltzall
             | Insn::Bgezall
+            | Insn::Bc1f
+            | Insn::Bc1t
+            | Insn::Bc1fl
+            | Insn::Bc1tl
             | Insn::J
             | Insn::Jal
             | Insn::Jr
@@ -427,6 +436,9 @@ fn exec(
     let rs = field_reg(word, 21);
     let rt = field_reg(word, 16);
     let rd = field_reg(word, 11);
+    let fs = ((word >> 11) & 31) as u8;
+    let ft = ((word >> 16) & 31) as u8;
+    let fd = ((word >> 6) & 31) as u8;
     let imm = (word as i16) as i32;
     let shamt = (word >> 6) & 31;
     let none = Effect {
@@ -820,6 +832,209 @@ fn exec(
         }),
         Insn::Scwp | Insn::Scwpe => {
             step(env, in_slot, |b| sem::scwp(b, rt, rd, rs, model.endian)).map(|()| wrote(rt))
+        }
+        Insn::Lwc1 => step(env, in_slot, |b| {
+            sem::lwc1(b, rt.0, rs, imm, model.endian, false)
+        })
+        .map(|()| none),
+        Insn::Swc1 => step(env, in_slot, |b| {
+            sem::swc1(b, rt.0, rs, imm, model.endian, false)
+        })
+        .map(|()| none),
+        Insn::Ldc1 => step(env, in_slot, |b| {
+            sem::lwc1(b, rt.0, rs, imm, model.endian, true)
+        })
+        .map(|()| none),
+        Insn::Sdc1 => step(env, in_slot, |b| {
+            sem::swc1(b, rt.0, rs, imm, model.endian, true)
+        })
+        .map(|()| none),
+        Insn::Lwxc1 => step(env, in_slot, |b| {
+            sem::lwxc1(b, rd.0, rs, rt, model.endian, false, false)
+        })
+        .map(|()| none),
+        Insn::Ldxc1 => step(env, in_slot, |b| {
+            sem::lwxc1(b, rd.0, rs, rt, model.endian, true, false)
+        })
+        .map(|()| none),
+        Insn::Swxc1 => step(env, in_slot, |b| {
+            sem::lwxc1(b, rd.0, rs, rt, model.endian, false, true)
+        })
+        .map(|()| none),
+        Insn::Sdxc1 => step(env, in_slot, |b| {
+            sem::lwxc1(b, rd.0, rs, rt, model.endian, true, true)
+        })
+        .map(|()| none),
+        Insn::Mfc1 => step(env, in_slot, |b| sem::mfc1(b, rt, rd.0, false)).map(|()| wrote(rt)),
+        Insn::Dmfc1 => step(env, in_slot, |b| sem::mfc1(b, rt, rd.0, true)).map(|()| wrote(rt)),
+        Insn::Mtc1 => step(env, in_slot, |b| sem::mtc1(b, rt, rd.0, false)).map(|()| none),
+        Insn::Dmtc1 => step(env, in_slot, |b| sem::mtc1(b, rt, rd.0, true)).map(|()| none),
+        Insn::Mfhc1 => step(env, in_slot, |b| sem::mfhc1(b, rt, rd.0, false)).map(|()| wrote(rt)),
+        Insn::Mthc1 => step(env, in_slot, |b| sem::mfhc1(b, rt, rd.0, true)).map(|()| none),
+        Insn::Cfc1 => step(env, in_slot, |b| sem::cfc1(b, rt, rd.0)).map(|()| wrote(rt)),
+        Insn::Ctc1 => step(env, in_slot, |b| sem::ctc1(b, rt, rd.0)).map(|()| none),
+        Insn::Bc1f | Insn::Bc1t | Insn::Bc1fl | Insn::Bc1tl => {
+            let cc = ((word >> 18) & 7) as u8;
+            let tf = (word >> 16) & 1 != 0;
+            let nd = (word >> 17) & 1 != 0;
+            step(env, in_slot, |b| sem::bc1_delay(b, pc, imm, cc, tf, nd)).map(|()| none)
+        }
+        Insn::AddS => step(env, in_slot, |b| sem::fp3(b, fd, fs, ft, 0, false)).map(|()| none),
+        Insn::SubS => step(env, in_slot, |b| sem::fp3(b, fd, fs, ft, 1, false)).map(|()| none),
+        Insn::MulS => step(env, in_slot, |b| sem::fp3(b, fd, fs, ft, 2, false)).map(|()| none),
+        Insn::DivS => step(env, in_slot, |b| sem::fp3(b, fd, fs, ft, 3, false)).map(|()| none),
+        Insn::AddD => step(env, in_slot, |b| sem::fp3(b, fd, fs, ft, 0, true)).map(|()| none),
+        Insn::SubD => step(env, in_slot, |b| sem::fp3(b, fd, fs, ft, 1, true)).map(|()| none),
+        Insn::MulD => step(env, in_slot, |b| sem::fp3(b, fd, fs, ft, 2, true)).map(|()| none),
+        Insn::DivD => step(env, in_slot, |b| sem::fp3(b, fd, fs, ft, 3, true)).map(|()| none),
+        Insn::SqrtS => step(env, in_slot, |b| sem::fp1(b, fd, fs, 4, false)).map(|()| none),
+        Insn::SqrtD => step(env, in_slot, |b| sem::fp1(b, fd, fs, 4, true)).map(|()| none),
+        Insn::AbsS => step(env, in_slot, |b| sem::fp1(b, fd, fs, 5, false)).map(|()| none),
+        Insn::AbsD => step(env, in_slot, |b| sem::fp1(b, fd, fs, 5, true)).map(|()| none),
+        Insn::MovS => step(env, in_slot, |b| sem::fp1(b, fd, fs, 6, false)).map(|()| none),
+        Insn::MovD => step(env, in_slot, |b| sem::fp1(b, fd, fs, 6, true)).map(|()| none),
+        Insn::NegS => step(env, in_slot, |b| sem::fp1(b, fd, fs, 7, false)).map(|()| none),
+        Insn::NegD => step(env, in_slot, |b| sem::fp1(b, fd, fs, 7, true)).map(|()| none),
+        Insn::RecipS => step(env, in_slot, |b| sem::fp1(b, fd, fs, 0x15, false)).map(|()| none),
+        Insn::RecipD => step(env, in_slot, |b| sem::fp1(b, fd, fs, 0x15, true)).map(|()| none),
+        Insn::RsqrtS => step(env, in_slot, |b| sem::fp1(b, fd, fs, 0x16, false)).map(|()| none),
+        Insn::RsqrtD => step(env, in_slot, |b| sem::fp1(b, fd, fs, 0x16, true)).map(|()| none),
+        Insn::RoundWS => {
+            step(env, in_slot, |b| sem::fp_round(b, fd, fs, 0, false, false)).map(|()| none)
+        }
+        Insn::TruncWS => {
+            step(env, in_slot, |b| sem::fp_round(b, fd, fs, 1, false, false)).map(|()| none)
+        }
+        Insn::CeilWS => {
+            step(env, in_slot, |b| sem::fp_round(b, fd, fs, 2, false, false)).map(|()| none)
+        }
+        Insn::FloorWS => {
+            step(env, in_slot, |b| sem::fp_round(b, fd, fs, 3, false, false)).map(|()| none)
+        }
+        Insn::RoundWD => {
+            step(env, in_slot, |b| sem::fp_round(b, fd, fs, 0, true, false)).map(|()| none)
+        }
+        Insn::TruncWD => {
+            step(env, in_slot, |b| sem::fp_round(b, fd, fs, 1, true, false)).map(|()| none)
+        }
+        Insn::CeilWD => {
+            step(env, in_slot, |b| sem::fp_round(b, fd, fs, 2, true, false)).map(|()| none)
+        }
+        Insn::FloorWD => {
+            step(env, in_slot, |b| sem::fp_round(b, fd, fs, 3, true, false)).map(|()| none)
+        }
+        Insn::RoundLS => {
+            step(env, in_slot, |b| sem::fp_round(b, fd, fs, 0, false, true)).map(|()| none)
+        }
+        Insn::TruncLS => {
+            step(env, in_slot, |b| sem::fp_round(b, fd, fs, 1, false, true)).map(|()| none)
+        }
+        Insn::CeilLS => {
+            step(env, in_slot, |b| sem::fp_round(b, fd, fs, 2, false, true)).map(|()| none)
+        }
+        Insn::FloorLS => {
+            step(env, in_slot, |b| sem::fp_round(b, fd, fs, 3, false, true)).map(|()| none)
+        }
+        Insn::RoundLD => {
+            step(env, in_slot, |b| sem::fp_round(b, fd, fs, 0, true, true)).map(|()| none)
+        }
+        Insn::TruncLD => {
+            step(env, in_slot, |b| sem::fp_round(b, fd, fs, 1, true, true)).map(|()| none)
+        }
+        Insn::CeilLD => {
+            step(env, in_slot, |b| sem::fp_round(b, fd, fs, 2, true, true)).map(|()| none)
+        }
+        Insn::FloorLD => {
+            step(env, in_slot, |b| sem::fp_round(b, fd, fs, 3, true, true)).map(|()| none)
+        }
+        Insn::MovcfS | Insn::MovcfD => {
+            let cc = ((word >> 18) & 7) as u8;
+            let tf = (word >> 16) & 1 != 0;
+            let dbl = insn == Insn::MovcfD;
+            step(env, in_slot, |b| {
+                sem::fp_movc(b, fd, fs, cc, tf, rt, dbl, true)
+            })
+            .map(|()| none)
+        }
+        Insn::MovzS | Insn::MovnS | Insn::MovzD | Insn::MovnD => {
+            let tf = matches!(insn, Insn::MovnS | Insn::MovnD);
+            let dbl = matches!(insn, Insn::MovzD | Insn::MovnD);
+            step(env, in_slot, |b| {
+                sem::fp_movc(b, fd, fs, 0, tf, rt, dbl, false)
+            })
+            .map(|()| none)
+        }
+        Insn::CcondS => step(env, in_slot, |b| {
+            sem::fp_cond(
+                b,
+                fs,
+                ft,
+                (word & 0xf) as u8,
+                ((word >> 8) & 7) as u8,
+                false,
+            )
+        })
+        .map(|()| none),
+        Insn::CcondD => step(env, in_slot, |b| {
+            sem::fp_cond(b, fs, ft, (word & 0xf) as u8, ((word >> 8) & 7) as u8, true)
+        })
+        .map(|()| none),
+        Insn::CvtSD
+        | Insn::CvtSW
+        | Insn::CvtSL
+        | Insn::CvtDS
+        | Insn::CvtDW
+        | Insn::CvtDL
+        | Insn::CvtWS
+        | Insn::CvtWD
+        | Insn::CvtWL
+        | Insn::CvtLS
+        | Insn::CvtLD
+        | Insn::CvtLW => {
+            let (src, dst) = match insn {
+                Insn::CvtSD => (1, 0),
+                Insn::CvtSW => (2, 0),
+                Insn::CvtSL => (3, 0),
+                Insn::CvtDS => (0, 1),
+                Insn::CvtDW => (2, 1),
+                Insn::CvtDL => (3, 1),
+                Insn::CvtWS => (0, 2),
+                Insn::CvtWD => (1, 2),
+                Insn::CvtWL => (3, 2),
+                Insn::CvtLS => (0, 3),
+                Insn::CvtLD => (1, 3),
+                Insn::CvtLW => (2, 3),
+                _ => (0, 0),
+            };
+            let rm = (get_u64(env, sem::fcsr_ref().offset()) & 3) as u8;
+            step(env, in_slot, |b| sem::fp_cvt(b, fd, fs, dst, src, rm)).map(|()| none)
+        }
+        Insn::MaddS
+        | Insn::MaddD
+        | Insn::MsubS
+        | Insn::MsubD
+        | Insn::NmaddS
+        | Insn::NmaddD
+        | Insn::NmsubS
+        | Insn::NmsubD => {
+            let dbl = matches!(
+                insn,
+                Insn::MaddD | Insn::MsubD | Insn::NmaddD | Insn::NmsubD
+            );
+            let sub = matches!(
+                insn,
+                Insn::MsubS | Insn::MsubD | Insn::NmsubS | Insn::NmsubD
+            );
+            let neg = matches!(
+                insn,
+                Insn::NmaddS | Insn::NmaddD | Insn::NmsubS | Insn::NmsubD
+            );
+            let fr = ((word >> 11) & 31) as u8;
+            let fdst = ((word >> 6) & 31) as u8;
+            step(env, in_slot, |b| {
+                sem::fp_madd(b, fdst, fr, rs.0, rt.0, dbl, sub, neg)
+            })
+            .map(|()| none)
         }
         Insn::Nal => step(env, in_slot, |b| sem::nal(b, pc)).map(|()| wrote(Gpr(31))),
         Insn::Bal => step(env, in_slot, |b| sem::bal_delay(b, pc, imm)).map(|()| wrote(Gpr(31))),

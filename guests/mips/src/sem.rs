@@ -11,7 +11,7 @@
 
 use polyisa_mem::{Access, AccessKind, Align, Endian};
 use polyisa_sem::{
-    Backend, Cmp, ExceptionKind, Flow, GuestException, StateRef, W8, W16, W32, W64, Width,
+    Backend, Cmp, ExceptionKind, F32, F64, Flow, GuestException, StateRef, W8, W16, W32, W64, Width,
 };
 
 use super::CpuState;
@@ -88,6 +88,37 @@ fn write<B: Backend>(b: &mut B, rd: Gpr, v: B::V<W64>) {
 
 fn const_w64<B: Backend>(b: &mut B, v: u64) -> B::V<W64> {
     b.konst::<W64>(v)
+}
+
+fn bnot<B: Backend>(b: &mut B, c: B::B) -> B::B {
+    let t = const_w64(b, 1);
+    let f = const_w64(b, 0);
+    let s = b.select::<W64>(c, f, t);
+    let z = const_w64(b, 0);
+    b.cmp::<W64>(Cmp::Ne, s, z)
+}
+
+fn bor<B: Backend>(b: &mut B, x: B::B, y: B::B) -> B::B {
+    let t = const_w64(b, 1);
+    let f = const_w64(b, 0);
+    let sy = b.select::<W64>(y, t, f);
+    let r = b.select::<W64>(x, t, sy);
+    let z = const_w64(b, 0);
+    b.cmp::<W64>(Cmp::Ne, r, z)
+}
+
+fn band<B: Backend>(b: &mut B, x: B::B, y: B::B) -> B::B {
+    let t = const_w64(b, 1);
+    let f = const_w64(b, 0);
+    let sy = b.select::<W64>(y, t, f);
+    let r = b.select::<W64>(x, sy, f);
+    let z = const_w64(b, 0);
+    b.cmp::<W64>(Cmp::Ne, r, z)
+}
+
+fn bfalse<B: Backend>(b: &mut B) -> B::B {
+    let z = const_w64(b, 0);
+    b.cmp::<W64>(Cmp::Eq, z, z)
 }
 
 fn word_read(endian: Endian) -> Access {
@@ -1706,52 +1737,141 @@ pub fn sd<B: Backend>(b: &mut B, rt: Gpr, rs: Gpr, imm: i32, endian: Endian) -> 
     Ok(())
 }
 
-/// LDL/LDR/SDR/SDL。部分レジスタ結合の非整列アクセス。
-/// 現在は非整列幅全体アクセスとして近似する（精度の上限はメモ参照）。
+/// LDL/LDR/SDR/SDL。整列した 8 バイト語の一部を読み書きする。
+/// まず LE の式で組み立て、BE ではオフセットを 7-b に鏡像化する。
+/// Ref: SPEC-MIPS-IV (Rev 3.2).
+fn dbl_parts<B: Backend>(b: &mut B, rs: Gpr, imm: i32, endian: Endian) -> (B::V<W64>, B::V<W64>) {
+    let addr = ea(b, rs, imm);
+    let seven = b.konst::<W64>(7);
+    let nseven = b.not::<W64>(seven);
+    let base = b.and::<W64>(addr, nseven);
+    let mut off = b.and::<W64>(addr, seven);
+    if endian == Endian::Be {
+        off = b.sub::<W64>(seven, off);
+    }
+    (off, base)
+}
+
+fn load_aligned_dbl<B: Backend>(
+    b: &mut B,
+    aligned: B::V<W64>,
+    endian: Endian,
+) -> Result<B::V<W64>, B::Exit> {
+    let acc = data_acc(endian, Align::Natural, AccessKind::DataRead);
+    b.load::<W64>(aligned, acc)
+}
+
+fn keep_high<B: Backend>(b: &mut B, bits: B::V<W64>) -> B::V<W64> {
+    // bits バイト分を下から保持するマスクの反転（上位側を残す）。
+    let kept = keep_low64(b, bits);
+    b.not::<W64>(kept)
+}
+
+fn keep_low64<B: Backend>(b: &mut B, bits: B::V<W64>) -> B::V<W64> {
+    // 下位 bits ビットを立てるマスク。bits=64 のとき全ビット。
+    let one = b.konst::<W64>(1);
+    let is64c = b.konst::<W64>(64);
+    let full = b.cmp::<W64>(Cmp::GeU, bits, is64c);
+    let shifted = b.shl::<W64>(one, bits);
+    let partial = b.sub::<W64>(shifted, one);
+    let all = b.konst::<W64>(u64::MAX);
+    b.select::<W64>(full, all, partial)
+}
+
+fn shl8<B: Backend>(b: &mut B, v: B::V<W64>, bytes: B::V<W64>) -> B::V<W64> {
+    let eight = b.konst::<W64>(8);
+    let bits = b.mul::<W64>(bytes, eight);
+    b.shl::<W64>(v, bits)
+}
+
+fn shr8<B: Backend>(b: &mut B, v: B::V<W64>, bytes: B::V<W64>) -> B::V<W64> {
+    let eight = b.konst::<W64>(8);
+    let bits = b.mul::<W64>(bytes, eight);
+    b.shr_l::<W64>(v, bits)
+}
+
+/// LDL。mem[base+j] を rt の上位側バイトへ。
 pub fn ldl<B: Backend>(b: &mut B, rt: Gpr, rs: Gpr, imm: i32, endian: Endian) -> Flow<B> {
-    ld_unaligned(b, rt, rs, imm, endian)
-}
-
-/// LDR。
-pub fn ldr<B: Backend>(b: &mut B, rt: Gpr, rs: Gpr, imm: i32, endian: Endian) -> Flow<B> {
-    ld_unaligned(b, rt, rs, imm, endian)
-}
-
-fn ld_unaligned<B: Backend>(b: &mut B, rt: Gpr, rs: Gpr, imm: i32, endian: Endian) -> Flow<B> {
-    let base = read(b, rs);
-    let off = b.konst::<W64>(imm as i64 as u64);
-    let addr = b.add::<W64>(base, off);
-    let ac = Access {
-        endian,
-        align: Align::Unaligned,
-        kind: AccessKind::DataRead,
-    };
-    let v: B::V<W64> = b.load::<W64>(addr, ac)?;
-    write(b, rt, v);
+    let (off, base) = dbl_parts(b, rs, imm, endian);
+    let word = load_aligned_dbl(b, base, endian)?;
+    let old = read(b, rt);
+    // 書き込みバイト数は off+1。上位 (off+1) バイトを word の下位から写す。
+    let one = b.konst::<W64>(1);
+    let cnt = b.add::<W64>(off, one);
+    let eight = b.konst::<W64>(8);
+    let keep_bytes = b.sub::<W64>(eight, cnt);
+    let e8 = b.konst::<W64>(8);
+    let kbits = b.mul::<W64>(keep_bytes, e8);
+    let keep = keep_low64(b, kbits);
+    // word の下位 cnt バイトを rt の上位 cnt バイト位置へ移す。
+    let shifted = shl8(b, word, keep_bytes);
+    let nkeep = b.not::<W64>(keep);
+    let kept = b.and::<W64>(old, keep);
+    let put = b.and::<W64>(shifted, nkeep);
+    let merged = b.or::<W64>(kept, put);
+    write(b, rt, merged);
     Ok(())
 }
 
-/// SDL。
+/// LDR。mem[ea..word_end] を rt の下位側バイトへ。
+pub fn ldr<B: Backend>(b: &mut B, rt: Gpr, rs: Gpr, imm: i32, endian: Endian) -> Flow<B> {
+    let (off, base) = dbl_parts(b, rs, imm, endian);
+    let word = load_aligned_dbl(b, base, endian)?;
+    let old = read(b, rt);
+    let eight = b.konst::<W64>(8);
+    let cnt = b.sub::<W64>(eight, off);
+    // word の上位から cnt バイトを rt の下位 cnt バイトへ。
+    let shifted = shr8(b, word, off);
+    let e8 = b.konst::<W64>(8);
+    let cbits = b.mul::<W64>(cnt, e8);
+    let keep = keep_high(b, cbits);
+    let nkeep = b.not::<W64>(keep);
+    let kept = b.and::<W64>(old, keep);
+    let put = b.and::<W64>(shifted, nkeep);
+    let merged = b.or::<W64>(kept, put);
+    write(b, rt, merged);
+    Ok(())
+}
+
+/// SDL。rt の上位 (off+1) バイトを mem[base+j] へ。
 pub fn sdl<B: Backend>(b: &mut B, rt: Gpr, rs: Gpr, imm: i32, endian: Endian) -> Flow<B> {
-    sd_unaligned(b, rt, rs, imm, endian)
+    let (off, base) = dbl_parts(b, rs, imm, endian);
+    let word = load_aligned_dbl(b, base, endian)?;
+    let src = read(b, rt);
+    let one = b.konst::<W64>(1);
+    let cnt = b.add::<W64>(off, one);
+    let eight = b.konst::<W64>(8);
+    let keep_bytes = b.sub::<W64>(eight, cnt);
+    let e8 = b.konst::<W64>(8);
+    let cbits = b.mul::<W64>(cnt, e8);
+    let keep = keep_high(b, cbits);
+    // rt の上位 cnt バイトを word の下位 cnt バイト位置へ。
+    let part = shr8(b, src, keep_bytes);
+    let nkeep = b.not::<W64>(keep);
+    let kept = b.and::<W64>(word, keep);
+    let put = b.and::<W64>(part, nkeep);
+    let merged = b.or::<W64>(kept, put);
+    let acc = data_acc(endian, Align::Natural, AccessKind::DataWrite);
+    b.store::<W64>(base, merged, acc)?;
+    Ok(())
 }
 
-/// SDR。
+/// SDR。rt の下位 (8-off) バイトを mem[ea..word_end] へ。
 pub fn sdr<B: Backend>(b: &mut B, rt: Gpr, rs: Gpr, imm: i32, endian: Endian) -> Flow<B> {
-    sd_unaligned(b, rt, rs, imm, endian)
-}
-
-fn sd_unaligned<B: Backend>(b: &mut B, rt: Gpr, rs: Gpr, imm: i32, endian: Endian) -> Flow<B> {
-    let base = read(b, rs);
-    let off = b.konst::<W64>(imm as i64 as u64);
-    let addr = b.add::<W64>(base, off);
-    let ac = Access {
-        endian,
-        align: Align::Unaligned,
-        kind: AccessKind::DataWrite,
-    };
-    let v: B::V<W64> = read(b, rt);
-    b.store::<W64>(addr, v, ac)?;
+    let (off, base) = dbl_parts(b, rs, imm, endian);
+    let word = load_aligned_dbl(b, base, endian)?;
+    let src = read(b, rt);
+    let e8 = b.konst::<W64>(8);
+    let kbits = b.mul::<W64>(off, e8);
+    let keep = keep_low64(b, kbits);
+    // rt の下位 cnt バイトを word の上位 cnt バイト位置へ。
+    let part = shl8(b, src, off);
+    let nkeep = b.not::<W64>(keep);
+    let kept = b.and::<W64>(word, keep);
+    let put = b.and::<W64>(part, nkeep);
+    let merged = b.or::<W64>(kept, put);
+    let acc = data_acc(endian, Align::Natural, AccessKind::DataWrite);
+    b.store::<W64>(base, merged, acc)?;
     Ok(())
 }
 
@@ -2452,5 +2572,481 @@ pub fn dati<B: Backend>(b: &mut B, rs: Gpr, imm: i32) -> Flow<B> {
 
 /// SYNCI。命令キャッシュの同期ヒント。ユーザモードでは何もしない。
 pub fn synci<B: Backend>(_b: &mut B, _rs: Gpr, _imm: i32) -> Flow<B> {
+    Ok(())
+}
+
+// ---- FPU (cop1)。FR=1 の全幅レイアウトで扱う ----
+
+/// FPR $fN を指す。
+pub fn fpr_ref(i: u8) -> StateRef<W64> {
+    StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, fpr) + usize::from(i) * 8)
+}
+
+/// FCSR を指す。
+pub fn fcsr_ref() -> StateRef<W64> {
+    StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, fcsr))
+}
+
+fn fget<B: Backend, F: Width>(b: &mut B, r: u8) -> B::V<F> {
+    let v: B::V<W64> = b.get(fpr_ref(r));
+    b.trunc::<W64, F>(v)
+}
+
+fn fput<B: Backend, F: Width>(b: &mut B, r: u8, v: B::V<F>) {
+    let w: B::V<W64> = b.zext::<F, W64>(v);
+    b.set(fpr_ref(r), w);
+}
+
+fn fget_w64<B: Backend>(b: &mut B, r: u8) -> B::V<W64> {
+    b.get(fpr_ref(r))
+}
+
+/// FCC ビットを取り出す。FCC0 は FCSR bit23、FCC1-7 は bits24+cc。
+fn fcc<B: Backend>(b: &mut B, cc: u8) -> B::V<W64> {
+    let fcsr = b.get(fcsr_ref());
+    let bitno = if cc == 0 { 23 } else { 24 + u64::from(cc) };
+    let n = b.konst::<W64>(bitno);
+    let sh = b.shr_l::<W64>(fcsr, n);
+    let one = b.konst::<W64>(1);
+    b.and::<W64>(sh, one)
+}
+
+/// FCC ビットを立てる/倒す。
+fn set_fcc<B: Backend>(b: &mut B, cc: u8, take: B::B) {
+    let fcsr = b.get(fcsr_ref());
+    let bitno = if cc == 0 { 23 } else { 24 + u64::from(cc) };
+    let n = b.konst::<W64>(bitno);
+    let one = b.konst::<W64>(1);
+    let bit = b.shl::<W64>(one, n);
+    let nbit = b.not::<W64>(bit);
+    let cleared = b.and::<W64>(fcsr, nbit);
+    let zero = b.konst::<W64>(0);
+    let tv = b.select::<W64>(take, one, zero);
+    let tv = b.shl::<W64>(tv, n);
+    let merged = b.or::<W64>(cleared, tv);
+    b.set(fcsr_ref(), merged);
+}
+
+/// LWC1/LDC1。fmt=0 で語、1 で倍語。
+pub fn lwc1<B: Backend>(
+    b: &mut B,
+    fs: u8,
+    rs: Gpr,
+    imm: i32,
+    endian: Endian,
+    dbl: bool,
+) -> Flow<B> {
+    let addr = ea(b, rs, imm);
+    if dbl {
+        let v: B::V<W64> = b.load::<W64>(addr, word_read(endian))?;
+        b.set(fpr_ref(fs), v);
+    } else {
+        let v: B::V<W32> = b.load::<W32>(addr, word_read(endian))?;
+        let w = b.zext::<W32, W64>(v);
+        b.set(fpr_ref(fs), w);
+    }
+    Ok(())
+}
+
+/// SWC1/SDC1。
+pub fn swc1<B: Backend>(
+    b: &mut B,
+    fs: u8,
+    rs: Gpr,
+    imm: i32,
+    endian: Endian,
+    dbl: bool,
+) -> Flow<B> {
+    let addr = ea(b, rs, imm);
+    let v = fget_w64(b, fs);
+    if dbl {
+        b.store::<W64>(addr, v, word_write(endian))?;
+    } else {
+        let lo: B::V<W32> = b.trunc::<W64, W32>(v);
+        b.store::<W32>(addr, lo, word_write(endian))?;
+    }
+    Ok(())
+}
+
+/// LWXC1/LDXC1/SWXC1/SDXC1（base+index）。store=1 で書き込み側。
+pub fn lwxc1<B: Backend>(
+    b: &mut B,
+    fs: u8,
+    rs: Gpr,
+    rt: Gpr,
+    endian: Endian,
+    dbl: bool,
+    store: bool,
+) -> Flow<B> {
+    let base = read(b, rs);
+    let idx = read(b, rt);
+    let addr = b.add::<W64>(base, idx);
+    if store {
+        let v = fget_w64(b, fs);
+        if dbl {
+            b.store::<W64>(addr, v, word_write(endian))?;
+        } else {
+            let lo: B::V<W32> = b.trunc::<W64, W32>(v);
+            b.store::<W32>(addr, lo, word_write(endian))?;
+        }
+    } else if dbl {
+        let v: B::V<W64> = b.load::<W64>(addr, word_read(endian))?;
+        b.set(fpr_ref(fs), v);
+    } else {
+        let v: B::V<W32> = b.load::<W32>(addr, word_read(endian))?;
+        let w = b.zext::<W32, W64>(v);
+        b.set(fpr_ref(fs), w);
+    }
+    Ok(())
+}
+
+/// MFC1/DMFC1。FPR を GPR へ。dbl=1 で全幅。
+pub fn mfc1<B: Backend>(b: &mut B, rt: Gpr, fs: u8, dbl: bool) -> Flow<B> {
+    let v = fget_w64(b, fs);
+    let v = if dbl { v } else { sext32(b, v) };
+    write(b, rt, v);
+    Ok(())
+}
+
+/// MTC1/DMTC1。GPR を FPR へ。
+pub fn mtc1<B: Backend>(b: &mut B, rt: Gpr, fs: u8, dbl: bool) -> Flow<B> {
+    let v = read(b, rt);
+    let v = if dbl {
+        v
+    } else {
+        let w: B::V<W32> = b.trunc::<W64, W32>(v);
+        b.zext::<W32, W64>(w)
+    };
+    b.set(fpr_ref(fs), v);
+    Ok(())
+}
+
+/// MFHC1/MTHC1。FPR の上位 32 ビット。
+pub fn mfhc1<B: Backend>(b: &mut B, rt: Gpr, fs: u8, wr: bool) -> Flow<B> {
+    if wr {
+        let v = read(b, rt);
+        let w: B::V<W32> = b.trunc::<W64, W32>(v);
+        let hi = b.zext::<W32, W64>(w);
+        let k32 = b.konst::<W64>(32);
+        let hi = b.shl::<W64>(hi, k32);
+        let old = fget_w64(b, fs);
+        let keep = b.konst::<W64>(0xffff_ffff);
+        let kept = b.and::<W64>(old, keep);
+        let merged = b.or::<W64>(kept, hi);
+        b.set(fpr_ref(fs), merged);
+    } else {
+        let v = fget_w64(b, fs);
+        let k32 = b.konst::<W64>(32);
+        let hi = b.shr_l::<W64>(v, k32);
+        let s = sext32(b, hi);
+        write(b, rt, s);
+    }
+    Ok(())
+}
+
+/// CFC1。FP 制御レジスタを GPR へ。25=FCCR、31=FCSR。
+pub fn cfc1<B: Backend>(b: &mut B, rt: Gpr, fs: u8) -> Flow<B> {
+    let v: B::V<W64> = match fs {
+        25 | 31 => b.get(fcsr_ref()),
+        _ => b.konst::<W64>(0),
+    };
+    let s = sext32(b, v);
+    write(b, rt, s);
+    Ok(())
+}
+
+/// CTC1。GPR を FP 制御レジスタへ。31 は FCSR 全体、25 は FCC 部のみ。
+pub fn ctc1<B: Backend>(b: &mut B, rt: Gpr, fs: u8) -> Flow<B> {
+    let v = read(b, rt);
+    match fs {
+        31 => b.set(fcsr_ref(), v),
+        25 => {
+            let old = b.get(fcsr_ref());
+            let mask = b.konst::<W64>(0xfe80_0000);
+            let nmask = b.not::<W64>(mask);
+            let kept = b.and::<W64>(old, nmask);
+            let put = b.and::<W64>(v, mask);
+            let merged = b.or::<W64>(kept, put);
+            b.set(fcsr_ref(), merged);
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// BC1T/BC1F(/TL/FL)。tf は期待値、likely は遅延スロット無効化。
+pub fn bc1_delay<B: Backend>(
+    b: &mut B,
+    pc: u64,
+    disp: i32,
+    cc: u8,
+    tf: bool,
+    likely: bool,
+) -> Flow<B> {
+    let bit = fcc(b, cc);
+    let want = b.konst::<W64>(u64::from(tf));
+    let take = b.cmp::<W64>(Cmp::Eq, bit, want);
+    if likely {
+        likely_delay(b, pc, disp, take, false)
+    } else {
+        let target = pc
+            .wrapping_add(4)
+            .wrapping_add((disp as i64 as u64).wrapping_mul(4));
+        let taken = const_w64(b, target);
+        let fall = const_w64(b, pc.wrapping_add(8));
+        let chosen = b.select::<W64>(take, taken, fall);
+        b.set(npc_ref(), chosen);
+        Ok(())
+    }
+}
+
+fn fneg_v<B: Backend, F: Width>(b: &mut B, a: B::V<F>) -> B::V<F> {
+    let sign = b.konst::<F>(F::from_u128(1u128 << (F::BITS - 1)));
+    b.xor(a, sign)
+}
+
+fn fabs_v<B: Backend, F: Width>(b: &mut B, a: B::V<F>) -> B::V<F> {
+    let mask = b.konst::<F>(F::from_u128((1u128 << (F::BITS - 1)) - 1));
+    b.and(a, mask)
+}
+
+fn f1_f<B: Backend, F: Width>(b: &mut B, d: u8, s: u8, opc: u32) -> Flow<B> {
+    let a = fget::<B, F>(b, s);
+    let one = b.konst::<F>(F::from_u128(if F::BITS == 32 {
+        0x3f80_0000
+    } else {
+        0x3ff0_0000_0000_0000
+    }));
+    let v = match opc {
+        0x04 => b.fsqrt::<F>(a),
+        0x05 => fabs_v::<B, F>(b, a),
+        0x06 => a,
+        0x07 => fneg_v::<B, F>(b, a),
+        0x15 => b.fdiv::<F>(one, a),
+        0x16 => {
+            let r = b.fsqrt::<F>(a);
+            b.fdiv::<F>(one, r)
+        }
+        _ => return Ok(()),
+    };
+    fput::<B, F>(b, d, v);
+    Ok(())
+}
+
+/// FP 1 項（sqrt/abs/mov/neg/recip/rsqrt）。
+pub fn fp1<B: Backend>(b: &mut B, d: u8, s: u8, opc: u32, dbl: bool) -> Flow<B> {
+    if dbl {
+        f1_f::<B, F64>(b, d, s, opc)
+    } else {
+        f1_f::<B, F32>(b, d, s, opc)
+    }
+}
+
+fn fp3_f<B: Backend, F: Width>(b: &mut B, d: u8, s: u8, t: u8, opc: u32) -> Flow<B> {
+    let a = fget::<B, F>(b, s);
+    let c = fget::<B, F>(b, t);
+    let v = match opc {
+        0 => b.fadd::<F>(a, c),
+        1 => b.fsub::<F>(a, c),
+        2 => b.fmul::<F>(a, c),
+        3 => b.fdiv::<F>(a, c),
+        _ => return Ok(()),
+    };
+    fput::<B, F>(b, d, v);
+    Ok(())
+}
+
+/// FP 3 項（add/sub/mul/div）。
+pub fn fp3<B: Backend>(b: &mut B, d: u8, s: u8, t: u8, opc: u32, dbl: bool) -> Flow<B> {
+    if dbl {
+        fp3_f::<B, F64>(b, d, s, t, opc)
+    } else {
+        fp3_f::<B, F32>(b, d, s, t, opc)
+    }
+}
+
+/// C.cond。cond4 に従い FCC[cc] を更新する。
+pub fn fp_cond<B: Backend>(b: &mut B, s: u8, t: u8, cond: u8, cc: u8, dbl: bool) -> Flow<B> {
+    if dbl {
+        fp_cond_f::<B, F64>(b, s, t, cond, cc)
+    } else {
+        fp_cond_f::<B, F32>(b, s, t, cond, cc)
+    }
+}
+
+fn fp_cond_f<B: Backend, F: Width>(b: &mut B, s: u8, t: u8, cond: u8, cc: u8) -> Flow<B> {
+    let a = fget::<B, F>(b, s);
+    let c = fget::<B, F>(b, t);
+    let eq = b.feq::<F>(a, c);
+    let lt = b.flt::<F>(a, c);
+    let le = b.fle::<F>(a, c);
+    let ge = b.fle::<F>(c, a);
+    // 順序付き = le または ge。非順序付きは NaN を含む。
+    let ord = bor(b, lt, le);
+    let o2 = bor(b, ord, ge);
+    let unord = bnot(b, o2);
+    let res = match cond {
+        0 | 8 => bfalse(b),
+        1 | 9 | 11 => unord,
+        2 | 10 => eq,
+        3 => bor(b, eq, unord),
+        4 | 12 => lt,
+        5 => bor(b, lt, unord),
+        6 | 14 => le,
+        7 => bor(b, le, unord),
+        13 => band(b, ge, ord),
+        15 => band(b, ge, ord),
+        _ => bfalse(b),
+    };
+    set_fcc(b, cc, res);
+    Ok(())
+}
+
+/// MOVCF.fmt / MOVZ / MOVN。cc!=255 なら FCC 条件、さもなくば GPR 条件。
+#[allow(clippy::too_many_arguments)]
+pub fn fp_movc<B: Backend>(
+    b: &mut B,
+    d: u8,
+    s: u8,
+    cc: u8,
+    tf: bool,
+    rt: Gpr,
+    _dbl: bool,
+    use_fcc: bool,
+) -> Flow<B> {
+    let take = if use_fcc {
+        let bit = fcc(b, cc);
+        let want = b.konst::<W64>(u64::from(tf));
+        b.cmp::<W64>(Cmp::Eq, bit, want)
+    } else {
+        let v = read(b, rt);
+        let zero = b.konst::<W64>(0);
+        if tf {
+            b.cmp::<W64>(Cmp::Ne, v, zero)
+        } else {
+            b.cmp::<W64>(Cmp::Eq, v, zero)
+        }
+    };
+    let old = fget_w64(b, d);
+    let src = fget_w64(b, s);
+    let v = b.select::<W64>(take, src, old);
+    b.set(fpr_ref(d), v);
+    Ok(())
+}
+
+/// ROUND/TRUNC/CEIL/FLOOR の .W/.L。to64 で .L 形。
+/// rm: 0=round,1=trunc,2=ceil,3=floor（MIPS の固定丸め）。
+pub fn fp_round<B: Backend>(b: &mut B, d: u8, s: u8, rm: u8, dbl: bool, to64: bool) -> Flow<B> {
+    let fixed = [0u8, 1, 3, 2][rm as usize];
+    macro_rules! go {
+        ($f:ty) => {
+            if to64 {
+                let a = fget::<B, $f>(b, s);
+                let i = b.fcvt_s64::<$f>(a, fixed);
+                b.set(fpr_ref(d), i);
+            } else {
+                let a = fget::<B, $f>(b, s);
+                let i = b.fcvt_s32::<$f>(a, fixed);
+                let w = b.zext::<W32, W64>(i);
+                b.set(fpr_ref(d), w);
+            }
+        };
+    }
+    if dbl {
+        go!(F64);
+    } else {
+        go!(F32);
+    }
+    Ok(())
+}
+
+/// CVT。src: 0=.s 1=.d 2=.w 3=.l、dst: 0=.s 1=.d 2=.w 3=.l。
+/// fcsr_rm は現在の FCSR 丸めモード（cvt.w/cvt.l が使う）。
+pub fn fp_cvt<B: Backend>(b: &mut B, d: u8, s: u8, dst: u8, src: u8, fcsr_rm: u8) -> Flow<B> {
+    let raw = fget_w64(b, s);
+    match (src, dst) {
+        (0, 1) => {
+            let a = fget::<B, F32>(b, s);
+            let v = b.fcvt_ff::<F32, F64>(a, fcsr_rm);
+            fput::<B, F64>(b, d, v);
+        }
+        (1, 0) => {
+            let a = fget::<B, F64>(b, s);
+            let v = b.fcvt_ff::<F64, F32>(a, fcsr_rm);
+            fput::<B, F32>(b, d, v);
+        }
+        (0, 2) => {
+            let a = fget::<B, F32>(b, s);
+            let i = b.fcvt_s32::<F32>(a, fcsr_rm);
+            let w = b.zext::<W32, W64>(i);
+            b.set(fpr_ref(d), w);
+        }
+        (1, 2) => {
+            let a = fget::<B, F64>(b, s);
+            let i = b.fcvt_s32::<F64>(a, fcsr_rm);
+            let w = b.zext::<W32, W64>(i);
+            b.set(fpr_ref(d), w);
+        }
+        (0, 3) => {
+            let a = fget::<B, F32>(b, s);
+            let i = b.fcvt_s64::<F32>(a, fcsr_rm);
+            b.set(fpr_ref(d), i);
+        }
+        (1, 3) => {
+            let a = fget::<B, F64>(b, s);
+            let i = b.fcvt_s64::<F64>(a, fcsr_rm);
+            b.set(fpr_ref(d), i);
+        }
+        (2, 0) => {
+            let w: B::V<W32> = b.trunc::<W64, W32>(raw);
+            let v = b.fcvt_from_s32::<F32>(w, fcsr_rm);
+            fput::<B, F32>(b, d, v);
+        }
+        (2, 1) => {
+            let w: B::V<W32> = b.trunc::<W64, W32>(raw);
+            let v = b.fcvt_from_s32::<F64>(w, fcsr_rm);
+            fput::<B, F64>(b, d, v);
+        }
+        (3, 0) => {
+            let v = b.fcvt_from_s64::<F32>(raw, fcsr_rm);
+            fput::<B, F32>(b, d, v);
+        }
+        (3, 1) => {
+            let v = b.fcvt_from_s64::<F64>(raw, fcsr_rm);
+            fput::<B, F64>(b, d, v);
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// MADD/MSUB/NMADD/NMSUB.fmt。neg で結果反転、sub で積−fr。
+#[allow(clippy::too_many_arguments)]
+pub fn fp_madd<B: Backend>(
+    b: &mut B,
+    d: u8,
+    fr: u8,
+    s: u8,
+    t: u8,
+    dbl: bool,
+    sub: bool,
+    neg: bool,
+) -> Flow<B> {
+    macro_rules! go {
+        ($f:ty) => {{
+            let a = fget::<B, $f>(b, s);
+            let c = fget::<B, $f>(b, t);
+            let acc = fget::<B, $f>(b, fr);
+            let acc = if sub { fneg_v::<B, $f>(b, acc) } else { acc };
+            let v = b.fmadd::<$f>(a, c, acc);
+            let v = if neg { fneg_v::<B, $f>(b, v) } else { v };
+            fput::<B, $f>(b, d, v);
+        }};
+    }
+    if dbl {
+        go!(F64);
+    } else {
+        go!(F32);
+    }
     Ok(())
 }

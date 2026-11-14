@@ -64,13 +64,14 @@
     は裸 ELF（write/exit のみ）。実バイナリ検証を開始し
     `.testdata/bin-distro-mipsel`（o32 LE）と `.testdata/bin-distro-mips64`
     （n64 BE）を取得済み。台帳登録と配布物の正式選定は未了。
-    現状: o32 は `echo`/`--help` 等が動作。`uname`(122) は配線済みだが
-    FPU 命令（0xe7b40300、cop1 系）で停止 — 多くのアプレットが FPU
-    エミュレーションを要する。n64 BE は起動後に 64bit ポインタの下位
-    32bit 切り出し（0x20194714）で PageFault — 32bit 演算結果の
-    正規化（is64 時の符号拡張）を実装済みだが、残る切り詰め経路が
-    ある。n32 ELF は未取得。残作業: 64bit ポインタ切り詰めの残経路、
-    cop1/FPU 命令群、n32 実バイナリ、台帳登録。
+    現状: cop1 (FPU) を実装済み（FR=1 全幅・約70命令）。o32 は
+    `echo`/`uname`/`date`/`id` が動作、`ls` はヒープ上の dlist 走査で
+    PageFault（0x5a1440、負オフセット経路の追跡が残る）。n64 BE は
+    `echo`/`uname`/`cat`/`pwd`/`true`/`--help` が動作。`date` は
+    初期化時に関数ポインタテーブル+0x48 の NULL へ jalr、`ls` は
+    オプション解釈差異（"NO OPT"）と別箇の PageFault、`id` は
+    スピン（ステップ上限）。残作業: 上記個別バグ、n32 実バイナリ、
+    台帳登録。
 
 ## 解消済み（記録）
 
