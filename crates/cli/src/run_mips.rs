@@ -118,6 +118,8 @@ pub struct MipsStep {
     pub model: MipsModel,
     pending: Option<(u8, u64)>,
     last_exc: Option<GuestException>,
+    trace: bool,
+    hist: std::collections::VecDeque<u64>,
 }
 
 impl MipsStep {
@@ -127,6 +129,8 @@ impl MipsStep {
             model,
             pending: None,
             last_exc: None,
+            trace: std::env::var_os("POLYISA_MIPS_TRACE").is_some(),
+            hist: std::collections::VecDeque::new(),
         }
     }
 
@@ -145,6 +149,12 @@ impl MipsStep {
     ) -> Result<(), Outcome> {
         let model = self.model;
         let pc = get_u64(env, sem::pc_ref().offset());
+        if self.trace {
+            self.hist.push_back(pc);
+            if self.hist.len() > 128 {
+                self.hist.pop_front();
+            }
+        }
         let word = match fetch(env, pc, model.endian, false) {
             Ok(w) => w,
             Err(stop) => return Err(self.stop_outcome(stop)),
@@ -257,11 +267,21 @@ impl MipsStep {
 
     fn stop_outcome(&mut self, stop: Stop) -> Outcome {
         match stop {
-            Stop::Unimplemented { pc, word } => Outcome::Unimplemented {
-                pc,
-                word: u128::from(word),
-            },
+            Stop::Unimplemented { pc, word } => {
+                if self.trace {
+                    let h: Vec<String> = self.hist.iter().map(|p| format!("{p:#x}")).collect();
+                    eprintln!("hist: {}", h.join(" "));
+                }
+                Outcome::Unimplemented {
+                    pc,
+                    word: u128::from(word),
+                }
+            }
             Stop::Exception(e) => {
+                if self.trace {
+                    let h: Vec<String> = self.hist.iter().map(|p| format!("{p:#x}")).collect();
+                    eprintln!("hist: {}", h.join(" "));
+                }
                 self.last_exc = Some(e);
                 Outcome::Unimplemented {
                     pc: e.addr.unwrap_or(0),
@@ -876,6 +896,17 @@ where
         Ok(()) => Ok(()),
         Err(InterpExit::Exception(mut exception)) => {
             exception.in_delay_slot = in_slot;
+            if std::env::var_os("POLYISA_MIPS_TRACE").is_some() {
+                let pc = get_u64(env, sem::pc_ref().offset());
+                eprintln!(
+                    "exc {:?} addr={:?} slot={in_slot} pc={pc:#x}",
+                    exception.kind, exception.addr
+                );
+                for r in 0u8..32 {
+                    let v = get_u64(env, Gpr(r).state().offset());
+                    eprintln!("  r{r}={v:#x}");
+                }
+            }
             Err(Stop::Exception(exception))
         }
         Err(InterpExit::Unimplemented(_)) => Err(Stop::Unimplemented {

@@ -330,6 +330,8 @@ pub fn lw_endian<B: Backend>(b: &mut B, rt: Gpr, rs: Gpr, imm: i32, endian: Endi
     let addr = b.add::<W64>(base, off);
     let v: B::V<W32> = b.load::<W32>(addr, word_read(endian))?;
     let w = b.zext::<W32, W64>(v);
+    // is64 では 32 ビットロード結果は符号拡張の規約。
+    let w = mask32(b, w);
     write(b, rt, w);
     Ok(())
 }
@@ -893,6 +895,7 @@ pub fn lb<B: Backend>(b: &mut B, rt: Gpr, rs: Gpr, imm: i32, endian: Endian) -> 
     let v: B::V<W8> = b.load(addr, acc)?;
     let s: B::V<W32> = b.sext::<W8, W32>(v);
     let wide = b.zext::<W32, W64>(s);
+    let wide = mask32(b, wide);
     write(b, rt, wide);
     Ok(())
 }
@@ -914,6 +917,7 @@ pub fn lh<B: Backend>(b: &mut B, rt: Gpr, rs: Gpr, imm: i32, endian: Endian) -> 
     let v: B::V<W16> = b.load(addr, acc)?;
     let s: B::V<W32> = b.sext::<W16, W32>(v);
     let wide = b.zext::<W32, W64>(s);
+    let wide = mask32(b, wide);
     write(b, rt, wide);
     Ok(())
 }
@@ -952,7 +956,7 @@ fn word_parts<B: Backend>(b: &mut B, rs: Gpr, imm: i32) -> (B::V<W64>, B::V<W64>
     let addr = ea(b, rs, imm);
     let mask = b.konst::<W64>(3);
     let low = b.and::<W64>(addr, mask);
-    let align = b.konst::<W64>(0xffff_fffc);
+    let align = b.konst::<W64>(0xffff_ffff_ffff_fffc);
     let aligned = b.and::<W64>(addr, align);
     (low, aligned)
 }
@@ -1351,13 +1355,14 @@ pub fn ins<B: Backend>(b: &mut B, rt: Gpr, rs: Gpr, lsb: u32, msb: u32) -> Flow<
 /// rd=0〜3 は HWREna 対応の hwr[rd]、rd=29 は ULR（TLS ポインタ）で、
 /// `set_thread_area` が hwr[3] に置く値を返す。rd=30/31 は 0 を返す。
 pub fn rdhwr<B: Backend>(b: &mut B, rt: Gpr, rd: u32) -> Flow<B> {
-    let v: B::V<W64> = match rd {
+    let raw: B::V<W64> = match rd {
         0..=3 => b.get(hwr_ref(rd as u8)),
+        // $29 (ULR) は TLS ポインタ。64 ビットモデルでは全幅で返す。
         29 => b.get(hwr_ref(3)),
         _ => b.konst::<W64>(0),
     };
-    let z = sext32(b, v);
-    write(b, rt, z);
+    let v = if rd <= 3 { sext32(b, raw) } else { raw };
+    write(b, rt, v);
     Ok(())
 }
 

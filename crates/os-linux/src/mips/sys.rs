@@ -2162,6 +2162,9 @@ impl Linux {
             "set_tid_address" => ret(Self::ret(env, self.pid())),
             "set_robust_list" | "rseq" | "membarrier" => ret(Self::ret(env, 0)),
             "set_thread_area" => {
+                if std::env::var_os("POLYISA_MIPS_TRACE").is_some() {
+                    eprintln!("set_thread_area arg={:#x}", args[0]);
+                }
                 env.backend.set(sem::hwr_ref(3), args[0]);
                 ret(Self::ret(env, 0))
             }
