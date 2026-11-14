@@ -69,27 +69,32 @@
     動作（`/tmp` のような千件級ディレクトリは整形処理が O(n²) で
     ステップ上限に達するのみ）。n64 BE は
     `echo`/`uname`/`uname -a`/`cat`/`wc`/`basename`/`dirname`/`seq`/
-    `yes`/`true`/`pwd` に加え `date`/`head`/`id`/`id -un`/`whoami` が
-    動作。
-    大きな根因は `slt`/`sltu`/`slti`/`sltiu` と分岐・トラップ系の
+    `yes`/`true`/`pwd`/`date`/`head`/`id`/`id -un`/`whoami` に加え
+    `ls`/`cut`/`sed`/`grep` の実処理も動作するようになった。
+    大きな根因は二つ。(1) `slt`/`sltu`/`slti`/`sltiu` と分岐・トラップ系の
     符号比較（`cmp_regs`/`cmp_zero`）が 64 ビットモデルでも被演算子を
-    32 ビットに正規化していた点で、上位アドレス（0x120xxxxxx・スタック
-    0x7ffexxxx）同士のポインタ比較が常に誤判定になっていた。
-    musl の疑似 FILE（sh_fromstring: rpos=s, rend=s+INT64_MAX）で
-    `shgetc` マクロの `rpos != shend` 判定が壊れ、`__uflow` → 未初期化
-    `f->read` への jalr で止まっていた。`sext_w`/`zext_w` ヘルパーで
-    is64 時に全幅比較へ修正済み。
-    残バグ（n64）: `ls` は getopt 出力で "NO OPT"（argv/文字列経路の
-    別問題）、`cut`/`sed`/`grep` は 0x1200066xx のロック+ハッシュ走査
-    ループでステップ上限（ll/sc スピンロック周辺の調査が残る）。
+    32 ビットに正規化し、上位アドレス同士のポインタ比較を誤判定して
+    いた（`sext_w`/`zext_w` で全幅比較へ修正済み）。
+    (2) `nor`/`xor` 等の 64 ビット論理演算・`andi`/`ori`/`xori`・
+    `sra`/`srl` 系・`mul`/`ext`/`ins`/`seb`/`seh`/`wsbh`/HI・LO 系に
+    32 ビット結果正規化（`mask32`＝is64 時 sext32）が混在し、
+    `~(1<<36)` のような値の上位ビットが失われて musl malloc の
+    binmap/unbin が壊れていた。「32 ビット結果命令のみ `mask32`、
+    64 ビット演算は全幅」を徹底して修正済み（`dsllv_nor_dsra32_
+    unbin_mask` 等の回帰テスト追加）。
+    ELF 自動モデル選択も修正: flags=0 の実用バイナリはロード
+    インタロック前提でスケジュールされているため `mips32r2()` を
+    選ぶ。真の R3000 ロード遅延は `--cpu mips:r3000` で選択可能
+    （`elf_flags_pick_load_delay`/`r3000_model_keeps_load_delay`）。
     既に確定させた修正: `do_readv`/`do_writev` の iovec ストライド
     （`w`→`2*w`）、`getdents64` の fd ごとのディレクトリ位置追跡、
     `do_brk` の既マップページ上書き、`mmap_next` の衝突回避、
     `sendfile`/`sendfile64`（cat 用、offset==NULL）の実装。
     回帰テスト: `n64_readv_iovec_stride`・`getdents64_advances_position`
     を `mips::sys::tests` に追加。
-    残作業: 上記個別バグ（ls NO OPT・ハッシュ走査スピン）、n32 実
-    バイナリ、台帳登録。
+    残作業: `cut --version` のエラー出力終了経路がステップ上限に
+    達する件（FILE 構造体のカウンタ比較ループ、要継続調査）、
+    n32 実バイナリ、台帳登録。
 
 ## 解消済み（記録）
 

@@ -198,8 +198,14 @@ pub fn mult<B: Backend>(b: &mut B, rs: Gpr, rt: Gpr) -> Flow<B> {
     let hi64 = b.shr_l::<W64>(p, shift);
     let hi32: B::V<W32> = b.trunc::<W64, W32>(hi64);
     let lo32: B::V<W32> = b.trunc::<W64, W32>(p);
-    let hi = b.zext::<W32, W64>(hi32);
-    let lo = b.zext::<W32, W64>(lo32);
+    let hi = {
+        let t = b.zext::<W32, W64>(hi32);
+        mask32(b, t)
+    };
+    let lo = {
+        let t = b.zext::<W32, W64>(lo32);
+        mask32(b, t)
+    };
     b.set(hi_ref(), hi);
     b.set(lo_ref(), lo);
     Ok(())
@@ -218,8 +224,14 @@ pub fn multu<B: Backend>(b: &mut B, rs: Gpr, rt: Gpr) -> Flow<B> {
     let hi64 = b.shr_l::<W64>(p, shift);
     let hi32: B::V<W32> = b.trunc::<W64, W32>(hi64);
     let lo32: B::V<W32> = b.trunc::<W64, W32>(p);
-    let hi = b.zext::<W32, W64>(hi32);
-    let lo = b.zext::<W32, W64>(lo32);
+    let hi = {
+        let t = b.zext::<W32, W64>(hi32);
+        mask32(b, t)
+    };
+    let lo = {
+        let t = b.zext::<W32, W64>(lo32);
+        mask32(b, t)
+    };
     b.set(hi_ref(), hi);
     b.set(lo_ref(), lo);
     Ok(())
@@ -242,8 +254,14 @@ pub fn div<B: Backend>(b: &mut B, rs: Gpr, rt: Gpr) -> Flow<B> {
     let r64 = b.srem::<W64>(a, c);
     let q32: B::V<W32> = b.trunc::<W64, W32>(q64);
     let r32: B::V<W32> = b.trunc::<W64, W32>(r64);
-    let new_lo = b.zext::<W32, W64>(q32);
-    let new_hi = b.zext::<W32, W64>(r32);
+    let new_lo = {
+        let t = b.zext::<W32, W64>(q32);
+        mask32(b, t)
+    };
+    let new_hi = {
+        let t = b.zext::<W32, W64>(r32);
+        mask32(b, t)
+    };
     let old_lo: B::V<W64> = b.get(lo_ref());
     let old_hi: B::V<W64> = b.get(hi_ref());
     let (fin_lo, fin_hi) = div_zero_result(b, is_zero, old_lo, old_hi, new_lo, new_hi);
@@ -268,8 +286,14 @@ pub fn divu<B: Backend>(b: &mut B, rs: Gpr, rt: Gpr) -> Flow<B> {
     let r64 = b.urem::<W64>(a, c);
     let q32: B::V<W32> = b.trunc::<W64, W32>(q64);
     let r32: B::V<W32> = b.trunc::<W64, W32>(r64);
-    let new_lo = b.zext::<W32, W64>(q32);
-    let new_hi = b.zext::<W32, W64>(r32);
+    let new_lo = {
+        let t = b.zext::<W32, W64>(q32);
+        mask32(b, t)
+    };
+    let new_hi = {
+        let t = b.zext::<W32, W64>(r32);
+        mask32(b, t)
+    };
     let old_lo: B::V<W64> = b.get(lo_ref());
     let old_hi: B::V<W64> = b.get(hi_ref());
     let (fin_lo, fin_hi) = div_zero_result(b, is_zero, old_lo, old_hi, new_lo, new_hi);
@@ -448,6 +472,22 @@ fn mask32<B: Backend>(b: &mut B, v: B::V<W64>) -> B::V<W64> {
     b.select::<W64>(is64, s, z)
 }
 
+/// 下位 32 ビットのゼロ拡張。
+fn zext32<B: Backend>(b: &mut B, v: B::V<W64>) -> B::V<W64> {
+    let lo = b.konst::<W64>(0xffff_ffff);
+    b.and::<W64>(v, lo)
+}
+
+/// 64 ビット演算の結果をモデル幅に合わせる。
+/// 64 ビットモデルは全幅、32 ビットモデルは下位 32 ビットのゼロ拡張。
+fn keep_w<B: Backend>(b: &mut B, v: B::V<W64>) -> B::V<W64> {
+    let z = zext32(b, v);
+    let flag: B::V<W64> = b.get(is64_ref());
+    let zero = b.konst::<W64>(0);
+    let is64 = b.cmp::<W64>(Cmp::Ne, flag, zero);
+    b.select::<W64>(is64, v, z)
+}
+
 fn sext32<B: Backend>(b: &mut B, v: B::V<W64>) -> B::V<W64> {
     let w: B::V<W32> = b.trunc::<W64, W32>(v);
     b.sext::<W32, W64>(w)
@@ -546,7 +586,7 @@ pub fn xor<B: Backend>(b: &mut B, rd: Gpr, rs: Gpr, rt: Gpr) -> Flow<B> {
     let x = read(b, rs);
     let y = read(b, rt);
     let v = b.xor::<W64>(x, y);
-    let v = mask32(b, v);
+    let v = keep_w(b, v);
     write(b, rd, v);
     Ok(())
 }
@@ -557,7 +597,7 @@ pub fn nor<B: Backend>(b: &mut B, rd: Gpr, rs: Gpr, rt: Gpr) -> Flow<B> {
     let y = read(b, rt);
     let either = b.or::<W64>(x, y);
     let v = b.not::<W64>(either);
-    let v = mask32(b, v);
+    let v = keep_w(b, v);
     write(b, rd, v);
     Ok(())
 }
@@ -587,9 +627,10 @@ pub fn sltu<B: Backend>(b: &mut B, rd: Gpr, rs: Gpr, rt: Gpr) -> Flow<B> {
 /// SRL。論理右シフト。shamt の下位 5 ビット。
 pub fn srl<B: Backend>(b: &mut B, rd: Gpr, rt: Gpr, shamt: u32) -> Flow<B> {
     let y = read(b, rt);
-    let y = mask32(b, y);
+    let y = zext32(b, y);
     let n = b.konst::<W64>((shamt & 31) as u64);
     let v = b.shr_l::<W64>(y, n);
+    let v = mask32(b, v);
     write(b, rd, v);
     Ok(())
 }
@@ -600,7 +641,10 @@ pub fn sra<B: Backend>(b: &mut B, rd: Gpr, rt: Gpr, shamt: u32) -> Flow<B> {
     let y: B::V<W32> = b.trunc::<W64, W32>(y);
     let n = b.konst::<W32>(shamt & 31);
     let shifted: B::V<W32> = b.shr_a::<W32>(y, n);
-    let v = b.zext::<W32, W64>(shifted);
+    let v = {
+        let t = b.zext::<W32, W64>(shifted);
+        mask32(b, t)
+    };
     write(b, rd, v);
     Ok(())
 }
@@ -626,9 +670,10 @@ pub fn sllv<B: Backend>(b: &mut B, rd: Gpr, rt: Gpr, rs: Gpr) -> Flow<B> {
 /// SRLV。
 pub fn srlv<B: Backend>(b: &mut B, rd: Gpr, rt: Gpr, rs: Gpr) -> Flow<B> {
     let y = read(b, rt);
-    let y = mask32(b, y);
+    let y = zext32(b, y);
     let n = shift_var(b, rs);
     let v = b.shr_l::<W64>(y, n);
+    let v = mask32(b, v);
     write(b, rd, v);
     Ok(())
 }
@@ -640,7 +685,10 @@ pub fn srav<B: Backend>(b: &mut B, rd: Gpr, rt: Gpr, rs: Gpr) -> Flow<B> {
     let n = shift_var(b, rs);
     let n: B::V<W32> = b.trunc::<W64, W32>(n);
     let shifted: B::V<W32> = b.shr_a::<W32>(y, n);
-    let v = b.zext::<W32, W64>(shifted);
+    let v = {
+        let t = b.zext::<W32, W64>(shifted);
+        mask32(b, t)
+    };
     write(b, rd, v);
     Ok(())
 }
@@ -890,7 +938,6 @@ pub fn sltiu<B: Backend>(b: &mut B, rt: Gpr, rs: Gpr, imm: i32) -> Flow<B> {
 /// ANDI。即値はゼロ拡張。
 pub fn andi<B: Backend>(b: &mut B, rt: Gpr, rs: Gpr, uimm: u32) -> Flow<B> {
     let x = read(b, rs);
-    let x = mask32(b, x);
     let imm = b.konst::<W64>(u64::from(uimm & 0xffff));
     let v = b.and::<W64>(x, imm);
     write(b, rt, v);
@@ -900,7 +947,6 @@ pub fn andi<B: Backend>(b: &mut B, rt: Gpr, rs: Gpr, uimm: u32) -> Flow<B> {
 /// ORI。即値はゼロ拡張。
 pub fn ori<B: Backend>(b: &mut B, rt: Gpr, rs: Gpr, uimm: u32) -> Flow<B> {
     let x = read(b, rs);
-    let x = mask32(b, x);
     let imm = b.konst::<W64>(u64::from(uimm & 0xffff));
     let v = b.or::<W64>(x, imm);
     write(b, rt, v);
@@ -910,10 +956,9 @@ pub fn ori<B: Backend>(b: &mut B, rt: Gpr, rs: Gpr, uimm: u32) -> Flow<B> {
 /// XORI。即値はゼロ拡張。
 pub fn xori<B: Backend>(b: &mut B, rt: Gpr, rs: Gpr, uimm: u32) -> Flow<B> {
     let x = read(b, rs);
-    let x = mask32(b, x);
     let imm = b.konst::<W64>(u64::from(uimm & 0xffff));
     let v = b.xor::<W64>(x, imm);
-    let v = mask32(b, v);
+    let v = keep_w(b, v);
     write(b, rt, v);
     Ok(())
 }
@@ -921,6 +966,7 @@ pub fn xori<B: Backend>(b: &mut B, rt: Gpr, rs: Gpr, uimm: u32) -> Flow<B> {
 /// LUI。即値を 16 ビット左へ置く。rs は見ない。
 pub fn lui<B: Backend>(b: &mut B, rt: Gpr, uimm: u32) -> Flow<B> {
     let v = b.konst::<W64>(u64::from(uimm & 0xffff) << 16);
+    let v = mask32(b, v);
     write(b, rt, v);
     Ok(())
 }
@@ -1196,7 +1242,7 @@ pub fn mul<B: Backend>(b: &mut B, rd: Gpr, rs: Gpr, rt: Gpr) -> Flow<B> {
     let x = read(b, rs);
     let y = read(b, rt);
     let p = b.mul::<W64>(x, y);
-    let v = sext32(b, p);
+    let v = mask32(b, p);
     write(b, rd, v);
     Ok(())
 }
@@ -1251,8 +1297,11 @@ fn madd_inner<B: Backend>(b: &mut B, rs: Gpr, rt: Gpr, negate: bool, unsigned: b
     };
     let new_hi_raw = b.shr_l::<W64>(sum, k32);
     let new_lo_w: B::V<W32> = b.trunc::<W64, W32>(sum);
-    let new_hi = sext32(b, new_hi_raw);
-    let new_lo = b.sext::<W32, W64>(new_lo_w);
+    let new_hi = mask32(b, new_hi_raw);
+    let new_lo = {
+        let t = b.zext::<W32, W64>(new_lo_w);
+        mask32(b, t)
+    };
     b.set(hi_ref(), new_hi);
     b.set(lo_ref(), new_lo);
     Ok(())
@@ -1326,7 +1375,10 @@ pub fn seb<B: Backend>(b: &mut B, rd: Gpr, rt: Gpr) -> Flow<B> {
     let k24 = b.konst::<W32>(24);
     let e = b.shl::<W32>(byte, k24);
     let s = b.shr_a::<W32>(e, k24);
-    let z = b.sext::<W32, W64>(s);
+    let z = {
+        let t = b.zext::<W32, W64>(s);
+        mask32(b, t)
+    };
     write(b, rd, z);
     Ok(())
 }
@@ -1340,7 +1392,10 @@ pub fn seh<B: Backend>(b: &mut B, rd: Gpr, rt: Gpr) -> Flow<B> {
     let k16 = b.konst::<W32>(16);
     let e = b.shl::<W32>(h, k16);
     let s = b.shr_a::<W32>(e, k16);
-    let z = b.sext::<W32, W64>(s);
+    let z = {
+        let t = b.zext::<W32, W64>(s);
+        mask32(b, t)
+    };
     write(b, rd, z);
     Ok(())
 }
@@ -1356,7 +1411,10 @@ pub fn wsbh<B: Backend>(b: &mut B, rd: Gpr, rt: Gpr) -> Flow<B> {
     let down = b.shr_l::<W32>(w, k8);
     let dn = b.and::<W32>(down, m);
     let r = b.or::<W32>(up, dn);
-    let z = b.sext::<W32, W64>(r);
+    let z = {
+        let t = b.zext::<W32, W64>(r);
+        mask32(b, t)
+    };
     write(b, rd, z);
     Ok(())
 }
@@ -1374,7 +1432,7 @@ pub fn ext<B: Backend>(b: &mut B, rt: Gpr, rs: Gpr, lsb: u32, msbd: u32) -> Flow
     let sh = b.shr_l::<W64>(v, n);
     let mk = b.konst::<W64>(mask);
     let m = b.and::<W64>(sh, mk);
-    let z = sext32(b, m);
+    let z = mask32(b, m);
     write(b, rt, z);
     Ok(())
 }
@@ -1397,7 +1455,7 @@ pub fn ins<B: Backend>(b: &mut B, rt: Gpr, rs: Gpr, lsb: u32, msb: u32) -> Flow<
     let kk = b.konst::<W64>(keep);
     let kept = b.and::<W64>(old, kk);
     let merged = b.or::<W64>(kept, shifted);
-    let z = sext32(b, merged);
+    let z = mask32(b, merged);
     write(b, rt, z);
     Ok(())
 }

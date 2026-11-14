@@ -195,6 +195,15 @@ impl MipsStep {
         if insn == Insn::Syscall {
             return self.syscall(env, sys, pc, word);
         }
+        if std::env::var_os("POLYISA_MIPS_TRACE_INSN").is_some() {
+            eprintln!(
+                "insn@{pc:#x}={insn:?} r28={:#x} r31={:#x} r25={:#x} r5={:#x}",
+                get_u64(env, Gpr(28).state().offset()),
+                get_u64(env, Gpr(31).state().offset()),
+                get_u64(env, Gpr(25).state().offset()),
+                get_u64(env, Gpr(5).state().offset())
+            );
+        }
         if has_delay_slot(insn) {
             let effect = match exec(env, insn, word, pc, model, false) {
                 Ok(effect) => effect,
@@ -344,6 +353,7 @@ pub fn run_ex(
 ) -> MipsOutcome {
     set_u64(env, sem::pc_ref().offset(), entry);
     set_u64(env, sem::npc_ref().offset(), entry.wrapping_add(4));
+    set_u64(env, sem::is64_ref().offset(), u64::from(model.is64));
     let mut st = MipsStep::new(model);
     let out = polyisa_engine::run::run(
         env,
@@ -356,6 +366,7 @@ pub fn run_ex(
         (_, Some(e)) => MipsOutcome::Exception(e),
         (Outcome::Exit(code), _) => MipsOutcome::Exit(code),
         (Outcome::Unimplemented { pc, word }, _) => {
+            st.dump_hist();
             st.dump_regs(env);
             if st.trace {
                 let f = get_u64(env, Gpr(16).state().offset());
@@ -384,6 +395,25 @@ pub fn run_ex(
         (Outcome::StepLimit { pc }, _) => {
             st.dump_hist();
             st.dump_regs(env);
+            if st.trace {
+                let f = get_u64(env, Gpr(23).state().offset());
+                let mut buf = [0u8; 0x20];
+                let acc = polyisa_mem::Access::DATA_LE;
+                if env
+                    .backend
+                    .mem
+                    .read(polyisa_mem::VirtAddr(f), &mut buf, acc)
+                    .is_ok()
+                {
+                    for (i, b) in buf.chunks(8).enumerate() {
+                        eprintln!(
+                            "  r23+{:#04x}: {:#x}",
+                            i * 8,
+                            u64::from_be_bytes(b.try_into().unwrap())
+                        );
+                    }
+                }
+            }
             MipsOutcome::StepLimit { pc }
         }
         (Outcome::Deadlock, _) => {
@@ -558,7 +588,23 @@ fn exec(
         Insn::Sh => step(env, in_slot, |b| sem::sh(b, rt, rs, imm, model.endian)).map(|()| none),
         Insn::Swl => step(env, in_slot, |b| sem::swl(b, rt, rs, imm, model.endian)).map(|()| none),
         Insn::Swr => step(env, in_slot, |b| sem::swr(b, rt, rs, imm, model.endian)).map(|()| none),
-        Insn::Beq => step(env, in_slot, |b| sem::beq_delay(b, rs, rt, pc, imm)).map(|()| none),
+        Insn::Beq => {
+            let dbg = std::env::var_os("POLYISA_MIPS_TRACE").is_some() && pc == 0x1200_059f4;
+            if dbg {
+                eprintln!(
+                    "beq@0x59f4 r{}={:#x} r{}={:#x}",
+                    rs.0,
+                    get_u64(env, rs.state().offset()),
+                    rt.0,
+                    get_u64(env, rt.state().offset())
+                );
+            }
+            let r = step(env, in_slot, |b| sem::beq_delay(b, rs, rt, pc, imm));
+            if dbg {
+                eprintln!("  npc={:#x}", get_u64(env, sem::npc_ref().offset()));
+            }
+            r.map(|()| none)
+        }
         Insn::Bne => step(env, in_slot, |b| sem::bne_delay(b, rs, rt, pc, imm)).map(|()| none),
         Insn::Blez => step(env, in_slot, |b| sem::blez_delay(b, rs, pc, imm)).map(|()| none),
         Insn::Bgtz => step(env, in_slot, |b| sem::bgtz_delay(b, rs, pc, imm)).map(|()| none),
@@ -567,7 +613,18 @@ fn exec(
         Insn::Bltzal => {
             step(env, in_slot, |b| sem::bltzal_delay(b, rs, pc, imm)).map(|()| wrote(Gpr(31)))
         }
-        Insn::Beql => step(env, in_slot, |b| sem::beql_delay(b, rs, rt, pc, imm)).map(|()| none),
+        Insn::Beql => {
+            if std::env::var_os("POLYISA_MIPS_TRACE").is_some() && pc == 0x1200_5ad0 {
+                eprintln!(
+                    "beql@0x5ad0 r4={:#x} r5={:#x} r19={:#x} r3={:#x}",
+                    get_u64(env, Gpr(4).state().offset()),
+                    get_u64(env, Gpr(5).state().offset()),
+                    get_u64(env, Gpr(19).state().offset()),
+                    get_u64(env, Gpr(3).state().offset())
+                );
+            }
+            step(env, in_slot, |b| sem::beql_delay(b, rs, rt, pc, imm)).map(|()| none)
+        }
         Insn::Bnel => step(env, in_slot, |b| sem::bnel_delay(b, rs, rt, pc, imm)).map(|()| none),
         Insn::Blezl => step(env, in_slot, |b| sem::blezl_delay(b, rs, pc, imm)).map(|()| none),
         Insn::Bgtzl => step(env, in_slot, |b| sem::bgtzl_delay(b, rs, pc, imm)).map(|()| none),
@@ -1345,7 +1402,10 @@ fn abi_from_elf(class64: bool, flags: u32) -> Result<polyisa_os_linux::mips::sys
 fn model_from_flags(little: bool, flags: u32) -> Result<MipsModel, String> {
     let arch = flags & 0xf000_0000;
     let mut model = match arch {
-        0x0000_0000 => MipsModel::mips1_be(),
+        // flags=0（mips1 表記）の実バイナリはロード・インタロック前提の
+        // スケジューリングで組まれる（真の R3000 では動かないコードを含む）。
+        // 自動選択は r2 モデルに寄せ、真のロード遅延は --cpu mips:r3000 で選ぶ。
+        0x0000_0000 => MipsModel::mips32r2(),
         // MIPS II は ll/sc まで入る 32 ビット拡張。r2 モデルで代用する。
         0x1000_0000 => MipsModel::mips32r2(),
         // MIPS III/IV/V は 64 ビット ISA の祖先。MIPS64r2 の下位集合なので
@@ -1436,7 +1496,6 @@ fn run_loaded_sys(
     polyisa_loader::elf::load_segments(bytes, &phdrs, &mut env.backend.mem)
         .map_err(|e| format!("load: {e:?}"))?;
     sys.init_brk(image_end);
-    set_u64(&mut env, sem::is64_ref().offset(), u64::from(model.is64));
     // 初期スタックを組む。エントリ幅は o32/n32 が 4 バイト、n64 が 8 バイト。
     // スタックは 8MB 確保する（x86 経路と同じ。RLIMIT_STACK 既定相当）。
     let top = 0x7fff_0000u64;
@@ -1548,6 +1607,107 @@ mod tests {
         assert_eq!(get_u64(&mut env, Gpr(2).state().offset()), i64::MAX as u64);
     }
 
+    #[test]
+    fn dmult_mflo_dsrl32_yields_debruijn_index() {
+        // dmult $3,$4 ; mflo $3 ; dsrl32 $3,$3,26 ; trap
+        // 2^37 * 0x22fdd563cc95386d mod 2^64 >> 58 = 36
+        let mut env = env_at(0x1000);
+        poke(&mut env, 0x1000, 0x0064_001c);
+        poke(&mut env, 0x1004, 0x0000_1812);
+        poke(&mut env, 0x1008, 0x0003_1ebe);
+        poke(&mut env, 0x100c, 0xffff_ffff);
+        set_reg(&mut env, 3, 1u64 << 37);
+        set_reg(&mut env, 4, 0x22fd_d563_cc95_386d);
+        let _outcome = run_bare(&mut env, 0x1000, MipsModel::mips64r2());
+        assert_eq!(reg(&mut env, 3), 36);
+    }
+
+    #[test]
+    fn dsllv_nor_dsra32_unbin_mask() {
+        // dsllv $3,$3,$19 ; nor $3,$0,$3 ; dsra32 $4,$3,0 ; trap
+        // $3=1, $19=36 -> $3=~(1<<36), $4=0xffffffffffffffef
+        let mut env = env_at(0x1000);
+        poke(&mut env, 0x1000, 0x0263_1814);
+        poke(&mut env, 0x1004, 0x0003_1827);
+        poke(&mut env, 0x1008, 0x0003_203f);
+        poke(&mut env, 0x100c, 0xffff_ffff);
+        set_reg(&mut env, 3, 1);
+        set_reg(&mut env, 19, 36);
+        let _outcome = run_bare(&mut env, 0x1000, MipsModel::mips64r2());
+        assert_eq!(reg(&mut env, 4), 0xffff_ffff_ffff_ffef);
+    }
+
+    #[test]
+    fn lw_loads_literal_word() {
+        // lw $5, 0($31) ; trap ; $31=0x1800, mem[0x1800]=0xffe5b528
+        let mut env = env_at(0x1000);
+        poke_endian(&mut env, 0x1000, 0x8fe5_0000, Endian::Le);
+        poke_endian(&mut env, 0x1004, 0xffff_ffff, Endian::Le);
+        poke_endian(&mut env, 0x1800, 0xffe5_b528, Endian::Le);
+        set_reg(&mut env, 31, 0x1800);
+        let _o = run_bare(&mut env, 0x1000, MipsModel::mips32r2());
+        assert_eq!(reg(&mut env, 5), 0xffe5_b528);
+    }
+    #[test]
+    fn pic_prologue_literal_sequence() {
+        // 0x4001b0 相当の PIC プロローグ再現
+        let mut env = env_at(0x400000);
+        let words: [u32; 14] = [
+            0x0411_0004,
+            0x0000_f025,
+            0xffe5_b528,
+            0xffe5_d710,
+            0xffa5_b370,
+            0x8ffc_0000,
+            0x03fc_e023,
+            0x03a0_2025,
+            0x8fe5_0008,
+            0x00bc_2821,
+            0x8ff9_0004,
+            0x033c_c821,
+            0x2401_fff8,
+            0x03a1_e824,
+        ];
+        for (i, w) in words.iter().enumerate() {
+            poke_endian(&mut env, 0x4001b0 + (i as u64) * 4, *w, Endian::Le);
+        }
+        set_reg(&mut env, 29, 0x7ffeffa0);
+        let _o = run_bare(&mut env, 0x4001b0, MipsModel::mips32r2());
+        assert_eq!(reg(&mut env, 28), 0x5a4c90);
+        assert_eq!(reg(&mut env, 5), 0);
+        assert_eq!(reg(&mut env, 25), 0x4023a0);
+    }
+    #[test]
+    fn be_sdl_sdr_ldl_ldr_roundtrip() {
+        // BE: 0x1803 に sdl/sdr で 8 バイト書き、ld で読み戻す。
+        // sdl $3,3($4) ; sdr $3,10($4) → mem[0x1803..0x180b] = rt
+        let mut env = env_at(0x1000);
+        // sdl rt=3, rs=4, imm=3: (0x2c<<26)|4<<21|3<<16|3
+        poke(&mut env, 0x1000, 0xb083_0003);
+        // sdr rt=3, rs=4, imm=10: (0x2d<<26)|4<<21|3<<16|10
+        poke(&mut env, 0x1004, 0xb483_000a);
+        // ldl $5,3($4): 0x6885_0003
+        poke(&mut env, 0x1008, 0x6885_0003);
+        // ldr $5,10($4): 0x6c85_000a
+        poke(&mut env, 0x100c, 0x6c85_000a);
+        poke(&mut env, 0x1010, 0xffff_ffff);
+        set_reg(&mut env, 3, 0x0123_4567_89ab_cdef);
+        set_reg(&mut env, 4, 0x1800);
+        set_reg(&mut env, 5, 0xffff_ffff_ffff_ffff);
+        let _o = run_bare(&mut env, 0x1000, MipsModel::mips64r2());
+        let mut buf = [0u8; 8];
+        let acc = Access {
+            endian: Endian::Be,
+            align: Align::Unaligned,
+            kind: AccessKind::DataRead,
+        };
+        env.backend
+            .mem
+            .read(VirtAddr(0x1803), &mut buf, acc)
+            .unwrap();
+        assert_eq!(buf, [0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef]);
+        assert_eq!(reg(&mut env, 5), 0x0123_4567_89ab_cdef);
+    }
     #[test]
     fn taken_branch_runs_slot_store_then_target() {
         // 0x1000 beq r1, r2, +2
@@ -1958,7 +2118,7 @@ mod tests {
 
     #[test]
     fn elf_flags_pick_load_delay() {
-        // lw の直後にそのレジスタを足す。R3000 は旧値 7、Release 2 はロード値 0x42。
+        // lw の直後にそのレジスタを足す。Release 2 はロード値 0x42。
         let code = [
             0x3404_1100u32,
             0x2401_0007,
@@ -1970,8 +2130,10 @@ mod tests {
             0x2402_0fa1,
             0x0000_000c,
         ];
-        let r3000 = elf_be(0, &code, 0x200);
-        assert_eq!(run_elf_mips(r3000.to_str().unwrap(), &[]).unwrap(), 8);
+        // flags=0 の実バイナリはロード・インタロック前提なので r2 モデルで受理する。
+        // 真の R3000 ロード遅延は r3000_model_keeps_load_delay で確かめる。
+        let flags0 = elf_be(0, &code, 0x200);
+        assert_eq!(run_elf_mips(flags0.to_str().unwrap(), &[]).unwrap(), 0x43);
         let r2 = elf_be(0x7000_0000, &code, 0x200);
         assert_eq!(run_elf_mips(r2.to_str().unwrap(), &[]).unwrap(), 0x43);
         // MIPS32 (0x5) と MIPS II (0x1) は r2 モデルで代用して受理する。
@@ -1980,6 +2142,29 @@ mod tests {
         assert_eq!(run_elf_mips(mips32.to_str().unwrap(), &[]).unwrap(), 0x42);
         let mips2 = elf_be(0x1000_0000, &[0x2404_0042, 0x2402_0fa1, 0x0000_000c], 12);
         assert_eq!(run_elf_mips(mips2.to_str().unwrap(), &[]).unwrap(), 0x42);
+    }
+
+    #[test]
+    fn r3000_model_keeps_load_delay() {
+        // elf_flags_pick_load_delay と同じコード。R3000 モデルでは
+        // lw の結果が1命令遅れて見え、旧値 7 + 1 = 8 で抜ける。
+        let code: [u32; 9] = [
+            0x3404_1100,
+            0x2401_0007,
+            0x2403_0042,
+            0xac83_0000,
+            0x8c81_0000,
+            0x2428_0001,
+            0x0100_2021,
+            0x2402_0fa1,
+            0x0000_000c,
+        ];
+        let mut env = env_at(0x1000);
+        for (i, w) in code.iter().enumerate() {
+            poke(&mut env, 0x1000 + i as u64 * 4, *w);
+        }
+        let outcome = run_bare(&mut env, 0x1000, MipsModel::mips1_be());
+        assert!(matches!(outcome, MipsOutcome::Exit(8)));
     }
 
     #[test]
