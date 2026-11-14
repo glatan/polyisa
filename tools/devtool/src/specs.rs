@@ -7,6 +7,9 @@ use std::path::Path;
 
 use polyisa_isadl::Model;
 
+mod aarch64 {
+    include!("../../../guests/aarch64/spec/a64i.rs");
+}
 mod hexagon {
     include!("../../../guests/hexagon/spec/hexmin.rs");
 }
@@ -36,6 +39,11 @@ pub(crate) struct IsaSpec {
 }
 
 const SPECS: &[IsaSpec] = &[
+    IsaSpec {
+        isa: "aarch64",
+        rel_path: "guests/aarch64/spec/a64i.rs",
+        build: aarch64::build_model,
+    },
     IsaSpec {
         isa: "hexagon",
         rel_path: "guests/hexagon/spec/hexmin.rs",

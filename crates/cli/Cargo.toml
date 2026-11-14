@@ -8,6 +8,7 @@ rust-version = "1.99"
 [dependencies]
 polyisa-engine = { path = "../engine" }
 polyisa-guest = { path = "../guest" }
+polyisa-guest-aarch64 = { path = "../../guests/aarch64", optional = true }
 polyisa-guest-mips = { path = "../../guests/mips", optional = true }
 polyisa-guest-riscv = { path = "../../guests/riscv", optional = true }
 polyisa-guest-x86 = { path = "../../guests/x86", optional = true }
@@ -21,7 +22,8 @@ polyisa-sem = { path = "../sem" }
 polyisa-trace = { path = "../trace" }
 
 [features]
-default = ["guest-mips", "guest-riscv", "guest-x86"]
+default = ["guest-aarch64", "guest-mips", "guest-riscv", "guest-x86"]
+guest-aarch64 = ["dep:polyisa-guest-aarch64", "polyisa-os-linux/guest-aarch64"]
 guest-mips = ["dep:polyisa-guest-mips", "polyisa-os-linux/guest-mips"]
 guest-riscv = ["dep:polyisa-guest-riscv", "polyisa-os-linux/guest-riscv"]
 guest-x86 = ["dep:polyisa-guest-x86", "polyisa-os-linux/guest-x86"]
@@ -42,6 +44,10 @@ required-features = ["guest-x86"]
 [[test]]
 name = "heavy_program_mips"
 required-features = ["guest-mips"]
+
+[[test]]
+name = "heavy_program_aarch64"
+required-features = ["guest-aarch64"]
 
 [lints]
 workspace = true

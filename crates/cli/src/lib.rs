@@ -4,6 +4,8 @@
 
 #![forbid(unsafe_code)]
 
+#[cfg(feature = "guest-aarch64")]
+pub mod run_aarch64;
 #[cfg(feature = "guest-mips")]
 pub mod run_mips;
 #[cfg(feature = "guest-riscv")]
@@ -11,7 +13,8 @@ pub mod run_riscv;
 #[cfg(feature = "guest-x86")]
 pub mod run_x86;
 
-/// ELF を選んで実行する。`EI_CLASS` と `e_machine` で RISC-V、x86、MIPS を振り分ける。
+/// ELF を選んで実行する。`EI_CLASS` と `e_machine` で RISC-V、x86、MIPS、
+/// AArch64 を振り分ける。
 /// 番号表の出典は各 `run_elf_*` 側にある。RV32 を含むそれ以外の組み合わせは
 /// 未対応として拒否する（従来の `run_elf` も RV32 を受け付けない）。
 pub fn run_path(path: &str, argv: &[String]) -> Result<u64, String> {
@@ -61,7 +64,12 @@ pub fn parse_cpu_spec(s: &str) -> Result<CpuSpec, String> {
 }
 
 /// モデル名と機能の足し引きを、そのファミリの生成表で `CpuSel` に解決する。
-#[cfg(any(feature = "guest-mips", feature = "guest-riscv", feature = "guest-x86"))]
+#[cfg(any(
+    feature = "guest-aarch64",
+    feature = "guest-mips",
+    feature = "guest-riscv",
+    feature = "guest-x86"
+))]
 fn resolve_sel(
     family: &str,
     models: &[polyisa_isadl::select::ModelRow],
@@ -142,6 +150,27 @@ fn run_mips_elf(_path: &str, _argv: &[String], _spec: Option<&CpuSpec>) -> Resul
     Err("この polyisa は mips ゲストなしでビルドされた".to_string())
 }
 
+#[cfg(feature = "guest-aarch64")]
+fn run_aarch64_elf(path: &str, argv: &[String], spec: Option<&CpuSpec>) -> Result<u64, String> {
+    let sel = spec
+        .map(|s| {
+            resolve_sel(
+                "aarch64",
+                polyisa_guest_aarch64::MODEL_DEFS,
+                polyisa_guest_aarch64::FEATURE_DEFS,
+                polyisa_guest_aarch64::FEAT_BITS,
+                s,
+            )
+        })
+        .transpose()?;
+    run_aarch64::run_elf_aarch64_sel(path, argv, sel.as_ref())
+}
+
+#[cfg(not(feature = "guest-aarch64"))]
+fn run_aarch64_elf(_path: &str, _argv: &[String], _spec: Option<&CpuSpec>) -> Result<u64, String> {
+    Err("この polyisa は aarch64 ゲストなしでビルドされた".to_string())
+}
+
 #[cfg(feature = "guest-riscv")]
 fn run_riscv_elf(path: &str, argv: &[String], spec: Option<&CpuSpec>) -> Result<u64, String> {
     let sel = spec
@@ -210,6 +239,10 @@ pub fn run_path_with(path: &str, argv: &[String], cpu: Option<&str>) -> Result<u
                 // EM_MIPS の 64 ビット（n64 ABI）。Ref: SRC-LINUX (7.3)。
                 check("mips")?;
                 run_mips_elf(path, argv, spec.as_ref())
+            } else if ehdr.machine == 183 {
+                // EM_AARCH64。Ref: SPEC-AARCH64-ELF（AAELF64）§4.2。
+                check("aarch64")?;
+                run_aarch64_elf(path, argv, spec.as_ref())
             } else {
                 Err(format!("未対応の e_machine: {}", ehdr.machine))
             }

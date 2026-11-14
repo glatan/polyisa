@@ -147,3 +147,58 @@ fn run_path_executes_x86_64_hello() {
     let _ = std::fs::remove_file(&path);
     assert_eq!(r, Ok(7));
 }
+
+#[cfg(feature = "guest-aarch64")]
+fn hello_aarch64() -> Vec<u8> {
+    // 手組みの AArch64 命令列。write(1, msg, 3) して exit_group(7)。
+    // 出典: SRC-LINUX (7.3) の asm-generic 番号（write=64、exit_group=94）。
+    let code: &[u8] = &[
+        0x08, 0x08, 0x80, 0xd2, // movz x8, #64 (write)
+        0x20, 0x00, 0x80, 0xd2, // movz x0, #1
+        0xc1, 0x00, 0x00, 0x10, // adr x1, #24 (msg)
+        0x62, 0x00, 0x80, 0xd2, // movz x2, #3
+        0x01, 0x00, 0x00, 0xd4, // svc #0
+        0xc8, 0x0b, 0x80, 0xd2, // movz x8, #94 (exit_group)
+        0xe0, 0x00, 0x80, 0xd2, // movz x0, #7
+        0x01, 0x00, 0x00, 0xd4, // svc #0
+    ];
+    let msg = b"hi\n";
+    assert_eq!(code.len(), 32);
+    let mut f = Vec::new();
+    f.extend_from_slice(&[0x7f, b'E', b'L', b'F', 2, 1, 1, 0]);
+    f.extend_from_slice(&[0u8; 8]);
+    f.extend_from_slice(&2u16.to_le_bytes());
+    f.extend_from_slice(&183u16.to_le_bytes()); // EM_AARCH64
+    f.extend_from_slice(&1u32.to_le_bytes());
+    f.extend_from_slice(&0x400000u64.to_le_bytes());
+    f.extend_from_slice(&64u64.to_le_bytes());
+    f.extend_from_slice(&0u64.to_le_bytes());
+    f.extend_from_slice(&0u32.to_le_bytes());
+    f.extend_from_slice(&64u16.to_le_bytes());
+    f.extend_from_slice(&56u16.to_le_bytes());
+    f.extend_from_slice(&1u16.to_le_bytes());
+    f.extend_from_slice(&0u16.to_le_bytes());
+    f.extend_from_slice(&0u16.to_le_bytes());
+    f.extend_from_slice(&0u16.to_le_bytes());
+    let seg_len = (code.len() + msg.len()) as u64;
+    f.extend_from_slice(&1u32.to_le_bytes());
+    f.extend_from_slice(&5u32.to_le_bytes());
+    f.extend_from_slice(&120u64.to_le_bytes());
+    f.extend_from_slice(&0x400000u64.to_le_bytes());
+    f.extend_from_slice(&0x400000u64.to_le_bytes());
+    f.extend_from_slice(&seg_len.to_le_bytes());
+    f.extend_from_slice(&seg_len.to_le_bytes());
+    f.extend_from_slice(&0x1000u64.to_le_bytes());
+    f.extend_from_slice(code);
+    f.extend_from_slice(msg);
+    f
+}
+
+#[cfg(feature = "guest-aarch64")]
+#[test]
+fn run_path_executes_aarch64_hello() {
+    let path = write_temp("hello_aarch64", &hello_aarch64());
+    let r = polyisa_cli::run_path(&path.to_string_lossy(), &[]);
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(r, Ok(7));
+}

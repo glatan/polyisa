@@ -23,6 +23,7 @@ members = [
     "crates/gdbstub",
     "crates/cli",
     "crates/jit",
+    "guests/aarch64",
     "guests/riscv",
     "guests/sparc",
     "guests/mips",

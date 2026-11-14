@@ -48,6 +48,10 @@ fn main() {
             for m in polyisa_guest_mips::MODELS {
                 println!("mips:{m}");
             }
+            #[cfg(feature = "guest-aarch64")]
+            for m in polyisa_guest_aarch64::MODELS {
+                println!("aarch64:{m}");
+            }
         }
         polyisa_cli::Command::Disasm => {
             #[cfg(feature = "guest-riscv")]

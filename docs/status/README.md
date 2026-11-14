@@ -90,6 +90,7 @@
 
 | ISA | 命令の記述 | ニーモニック | CPU モデル | 詳細 |
 |---|---|---|---|---|
+| aarch64 | 178 | 100 | generic、generic_v81 | [isa-aarch64.md](isa-aarch64.md) |
 | hexagon | 6 | 6 | generic | [isa-hexagon.md](isa-hexagon.md) |
 | ia64 | 6 | 5 | generic | [isa-ia64.md](isa-ia64.md) |
 | mips | 185 | 172 | r3000、mips32r2、r6、mips64r2、mips64r6 | [isa-mips.md](isa-mips.md) |

@@ -12,6 +12,7 @@ version = "0.0.0"
 dependencies = [
  "polyisa-engine",
  "polyisa-guest",
+ "polyisa-guest-aarch64",
  "polyisa-guest-mips",
  "polyisa-guest-riscv",
  "polyisa-guest-x86",
@@ -71,6 +72,25 @@ version = "0.0.0"
 dependencies = [
  "polyisa-bits",
  "polyisa-sem",
+ "polyisa-timing",
+]
+
+[[package]]
+name = "polyisa-guest-aarch64"
+version = "0.0.0"
+dependencies = [
+ "polyisa-bits",
+ "polyisa-cli",
+ "polyisa-decimal",
+ "polyisa-engine",
+ "polyisa-guest",
+ "polyisa-isadl",
+ "polyisa-isagen",
+ "polyisa-loader",
+ "polyisa-mem",
+ "polyisa-os-linux",
+ "polyisa-sem",
+ "polyisa-softfloat",
  "polyisa-timing",
 ]
 
@@ -255,6 +275,7 @@ version = "0.0.0"
 dependencies = [
  "polyisa-engine",
  "polyisa-guest",
+ "polyisa-guest-aarch64",
  "polyisa-guest-mips",
  "polyisa-guest-riscv",
  "polyisa-guest-x86",

@@ -765,6 +765,7 @@ fn allowed_deps(pkg: &str) -> Option<&'static [&'static str]> {
             "polyisa-loader",
             "polyisa-engine",
             "polyisa-guest",
+            "polyisa-guest-aarch64",
             "polyisa-guest-mips",
             "polyisa-guest-riscv",
             "polyisa-guest-x86",
@@ -779,6 +780,7 @@ fn allowed_deps(pkg: &str) -> Option<&'static [&'static str]> {
         "polyisa-cli" => &[
             "polyisa-engine",
             "polyisa-guest",
+            "polyisa-guest-aarch64",
             "polyisa-guest-mips",
             "polyisa-guest-riscv",
             "polyisa-guest-x86",
@@ -797,6 +799,15 @@ fn allowed_deps(pkg: &str) -> Option<&'static [&'static str]> {
             "polyisa-isadl",
             "polyisa-isagen",
             "polyisa-trace",
+        ],
+        "polyisa-guest-aarch64" => &[
+            "polyisa-bits",
+            "polyisa-softfloat",
+            "polyisa-decimal",
+            "polyisa-mem",
+            "polyisa-sem",
+            "polyisa-guest",
+            "polyisa-timing",
         ],
         "polyisa-guest-riscv" => &[
             "polyisa-bits",

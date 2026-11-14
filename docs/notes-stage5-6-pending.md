@@ -46,12 +46,47 @@
    LLE/SCE（EVA 版、ユーザモードでは LL/SC と同義）は実装していない。
    実シリコン依存の拡張のため今回の範囲外とした。必要なら別途追加する。
 
-## 確認待ち・未着手（段階 6）
+## 段階 6 の進捗（AArch64）
 
-5. **AArch64 全体**: `guests/aarch64`（ISADL+sem）、`step_aarch64`、ELF 派分、
-   `os-linux::aarch64`（asm-generic 番号表・LP64・初期スタック/auxv・シグナルフレーム）、
-   `heavy_program_aarch64`/`heavy_abi_aarch64`/`heavy_oracle_aarch64` が未着手。
-   `SPEC-AARCH64-ELF`（aaelf64）は台帳に登録済みだが未確認。
+- **guests/aarch64**: ISADL spec（a64i.rs、約 90 命令: 分岐/加減算/論理/
+  ビットフィールド/乗算/ロードストア全アドレッシング/ペア/排他/システム）と
+  `sem.rs` を実装。レジスタ 31 の SP/ZR 文脈分岐、NZCV、DecodeBitMasks を
+  exec 側で計算。モデル `generic`/`generic_v81`。
+- **意味論の修正（実バイナリで発見）**: `add_imm`/`add_sh`/`add_ext`/`log_imm`/
+  `log_sh` が flags 設定時に rd へ結果を書き戻していなかった（`subs x8, x8, #1`
+  が x8 を更新せず無限再帰 → スタック溢れ）。S 形式は ZR 文脈・結果は常に
+  書き戻す（rd=31 は ZR として破棄）に統一。
+- **ADR/ADRP のオフセット**: `immhi<<2|immlo` の 21 ビット符号付きが正しい
+  （初版はフィールド結合が誤りで clang 生成の後方参照 ADR が壊れていた）。
+- **os-linux::aarch64**: asm-generic 番号表（`aarch64.rs`）、LP64 ABI
+  （x8=nr、x0-x5=引数、x0=返り値、負 errno）、`sys::Linux`（TrapHandler）。
+  read/write/openat/close/lseek/fstat/mmap/munmap/mprotect/brk/uname/
+  exit/exit_group/identity/clock_gettime/getrandom/getdents64/dup/dup3/
+  fcntl/ioctl/signal 最小スタブ。未知番号は ENOSYS を返して続行。
+- **cli**: `run_aarch64.rs`（step_aarch64、EM_AARCH64=183 派分、
+  `--cpu aarch64:` モデル解決、初期スタック、svc → TrapHandler）、
+  `run_elf_aarch64`/`run_elf_aarch64_sel`/`run_elf_aarch64_sys`。
+- **テスト**: `heavy_program_aarch64`（clang 23 aarch64-linux-gnu:
+  write+exit_group で "hi\n"、再帰 fib(10)=55 で "55\n"）、
+  `run_path` の手組み EM_AARCH64 ELF 派分テスト、裸実行の
+  movz/add/subs/b.cond/sp-zr 単体テスト。
+- `SPEC-AARCH64-ELF` を確認済みに更新（2025Q4 daa7a94）。
+
+## 確認待ち・未完了（段階 6 残件）
+
+5. **スタック成長**: 現状は固定 1 MiB を先行確保（`run_aarch64.rs`）。
+   ページフォルト駆動の成長（fault → TrapHandler 経路）は未実装。
+   容量の適性と成長方式の設計判断を要する。
+6. **FP/AdvSIMD**: FEATURE `fp`/`asimd` は宣言済みだが命令未実装
+   （モデル generic の既定機能が空でない点に注意。decode が要求しないため
+   現状影響なし。実装時に MODEL_DEFS の既定を見直す）。
+7. **BE エンディアン**: FEAT_BE 宣言のみ。データフェッチ/ロードストアの
+   エンディアン切替と ELF の EI_DATA 確認は未接続（現状 LE 固定・BE 拒否）。
+8. **MRS/MSR の ID レジスタ**: MRS/MSR の枠は実装済みだが ID_AA64 系の
+   個別値は未整備（実装した機能に応じた値の台帳が要る）。
+9. **heavy_abi / heavy_oracle / 動的リンク**: 段階 6 の完了条件表に
+   残る heavy_abi_aarch64（引数・スタック規約の機械検証）と
+   heavy_oracle（QEMU/実機との結果突合）、および PT_INTERP 経路は未着手。
 
 ## 確認を要する判断
 
