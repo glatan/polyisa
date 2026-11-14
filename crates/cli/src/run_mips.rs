@@ -19,7 +19,9 @@ use polyisa_guest_mips::{Insn, decode_model_ex};
 use polyisa_mem::{Access, AccessKind, Align, Endian, VirtAddr};
 use polyisa_sem::{Backend as _, ExceptionKind, GuestException};
 
-const STEP_LIMIT: u64 = 5_000_000;
+// 実バイナリの処理量を見込んだ上限。busybox の圧縮 usage 展開（bzip2
+// デコードで 33 KiB 出力）は 5M を超えるため、潰れない大きさにしてある。
+const STEP_LIMIT: u64 = 256_000_000;
 
 /// 実行する CPU モデルの、ループが読む分。
 #[derive(Clone, Copy, Debug)]
@@ -196,13 +198,7 @@ impl MipsStep {
             return self.syscall(env, sys, pc, word);
         }
         if std::env::var_os("POLYISA_MIPS_TRACE_INSN").is_some() {
-            eprintln!(
-                "insn@{pc:#x}={insn:?} r28={:#x} r31={:#x} r25={:#x} r5={:#x}",
-                get_u64(env, Gpr(28).state().offset()),
-                get_u64(env, Gpr(31).state().offset()),
-                get_u64(env, Gpr(25).state().offset()),
-                get_u64(env, Gpr(5).state().offset())
-            );
+            eprintln!("insn@{pc:#x}={insn:?}");
         }
         if has_delay_slot(insn) {
             let effect = match exec(env, insn, word, pc, model, false) {
@@ -368,25 +364,6 @@ pub fn run_ex(
         (Outcome::Unimplemented { pc, word }, _) => {
             st.dump_hist();
             st.dump_regs(env);
-            if st.trace {
-                let f = get_u64(env, Gpr(16).state().offset());
-                let mut buf = [0u8; 0xf0];
-                let acc = polyisa_mem::Access::DATA_LE;
-                if env
-                    .backend
-                    .mem
-                    .read(polyisa_mem::VirtAddr(f), &mut buf, acc)
-                    .is_ok()
-                {
-                    for (i, b) in buf.chunks(8).enumerate() {
-                        eprintln!(
-                            "  f+{:#04x}: {:#x}",
-                            i * 8,
-                            u64::from_be_bytes(b.try_into().unwrap())
-                        );
-                    }
-                }
-            }
             MipsOutcome::Unimplemented {
                 pc,
                 word: word as u32,
@@ -395,25 +372,6 @@ pub fn run_ex(
         (Outcome::StepLimit { pc }, _) => {
             st.dump_hist();
             st.dump_regs(env);
-            if st.trace {
-                let f = get_u64(env, Gpr(23).state().offset());
-                let mut buf = [0u8; 0x20];
-                let acc = polyisa_mem::Access::DATA_LE;
-                if env
-                    .backend
-                    .mem
-                    .read(polyisa_mem::VirtAddr(f), &mut buf, acc)
-                    .is_ok()
-                {
-                    for (i, b) in buf.chunks(8).enumerate() {
-                        eprintln!(
-                            "  r23+{:#04x}: {:#x}",
-                            i * 8,
-                            u64::from_be_bytes(b.try_into().unwrap())
-                        );
-                    }
-                }
-            }
             MipsOutcome::StepLimit { pc }
         }
         (Outcome::Deadlock, _) => {
@@ -588,23 +546,7 @@ fn exec(
         Insn::Sh => step(env, in_slot, |b| sem::sh(b, rt, rs, imm, model.endian)).map(|()| none),
         Insn::Swl => step(env, in_slot, |b| sem::swl(b, rt, rs, imm, model.endian)).map(|()| none),
         Insn::Swr => step(env, in_slot, |b| sem::swr(b, rt, rs, imm, model.endian)).map(|()| none),
-        Insn::Beq => {
-            let dbg = std::env::var_os("POLYISA_MIPS_TRACE").is_some() && pc == 0x1200_059f4;
-            if dbg {
-                eprintln!(
-                    "beq@0x59f4 r{}={:#x} r{}={:#x}",
-                    rs.0,
-                    get_u64(env, rs.state().offset()),
-                    rt.0,
-                    get_u64(env, rt.state().offset())
-                );
-            }
-            let r = step(env, in_slot, |b| sem::beq_delay(b, rs, rt, pc, imm));
-            if dbg {
-                eprintln!("  npc={:#x}", get_u64(env, sem::npc_ref().offset()));
-            }
-            r.map(|()| none)
-        }
+        Insn::Beq => step(env, in_slot, |b| sem::beq_delay(b, rs, rt, pc, imm)).map(|()| none),
         Insn::Bne => step(env, in_slot, |b| sem::bne_delay(b, rs, rt, pc, imm)).map(|()| none),
         Insn::Blez => step(env, in_slot, |b| sem::blez_delay(b, rs, pc, imm)).map(|()| none),
         Insn::Bgtz => step(env, in_slot, |b| sem::bgtz_delay(b, rs, pc, imm)).map(|()| none),
@@ -613,18 +555,7 @@ fn exec(
         Insn::Bltzal => {
             step(env, in_slot, |b| sem::bltzal_delay(b, rs, pc, imm)).map(|()| wrote(Gpr(31)))
         }
-        Insn::Beql => {
-            if std::env::var_os("POLYISA_MIPS_TRACE").is_some() && pc == 0x1200_5ad0 {
-                eprintln!(
-                    "beql@0x5ad0 r4={:#x} r5={:#x} r19={:#x} r3={:#x}",
-                    get_u64(env, Gpr(4).state().offset()),
-                    get_u64(env, Gpr(5).state().offset()),
-                    get_u64(env, Gpr(19).state().offset()),
-                    get_u64(env, Gpr(3).state().offset())
-                );
-            }
-            step(env, in_slot, |b| sem::beql_delay(b, rs, rt, pc, imm)).map(|()| none)
-        }
+        Insn::Beql => step(env, in_slot, |b| sem::beql_delay(b, rs, rt, pc, imm)).map(|()| none),
         Insn::Bnel => step(env, in_slot, |b| sem::bnel_delay(b, rs, rt, pc, imm)).map(|()| none),
         Insn::Blezl => step(env, in_slot, |b| sem::blezl_delay(b, rs, pc, imm)).map(|()| none),
         Insn::Bgtzl => step(env, in_slot, |b| sem::bgtzl_delay(b, rs, pc, imm)).map(|()| none),

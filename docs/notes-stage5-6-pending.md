@@ -92,9 +92,12 @@
     `sendfile`/`sendfile64`（cat 用、offset==NULL）の実装。
     回帰テスト: `n64_readv_iovec_stride`・`getdents64_advances_position`
     を `mips::sys::tests` に追加。
-    残作業: `cut --version` のエラー出力終了経路がステップ上限に
-    達する件（FILE 構造体のカウンタ比較ループ、要継続調査）、
-    n32 実バイナリ、台帳登録。
+    `cut --version` のエラー出力経路も解決: busybox は usage テキストを
+    bzip2 圧縮して保持し、`bb_show_usage` が bunzip2 で展開する。
+    33 KiB 出力のデコードが 5M ステップを超えるだけで、意味論のバグ
+    ではなかった（`STEP_LIMIT` を 256M に引き上げて完走を確認、
+    usage 出力と終了コード 1 が正しい）。
+    残作業: n32 実バイナリ、台帳登録。
 
 ## 解消済み（記録）
 
