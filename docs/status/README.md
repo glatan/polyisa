@@ -92,7 +92,7 @@
 |---|---|---|---|---|
 | hexagon | 6 | 6 | generic | [isa-hexagon.md](isa-hexagon.md) |
 | ia64 | 6 | 5 | generic | [isa-ia64.md](isa-ia64.md) |
-| mips | 174 | 165 | r3000、mips32r2、r6、mips64r2、mips64r6 | [isa-mips.md](isa-mips.md) |
+| mips | 185 | 172 | r3000、mips32r2、r6、mips64r2、mips64r6 | [isa-mips.md](isa-mips.md) |
 | riscv | 196 | 196 | rv64gc、rv64imac | [isa-riscv.md](isa-riscv.md) |
 | sparc | 10 | 10 | generic | [isa-sparc.md](isa-sparc.md) |
 | wasm | 8 | 8 | generic | [isa-wasm.md](isa-wasm.md) |

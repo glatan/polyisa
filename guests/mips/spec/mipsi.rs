@@ -197,7 +197,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("andi", "FI", "001100 ..... ..... ................", "andi {rt}, {rs}, {imm}", "alu"),
         ("ori", "FI", "001101 ..... ..... ................", "ori {rt}, {rs}, {imm}", "alu"),
         ("xori", "FI", "001110 ..... ..... ................", "xori {rt}, {rs}, {imm}", "alu"),
-        ("lui", "FI", "001111 ..... ..... ................", "lui {rt}, {imm}", "alu"),
+        // LUI の rs フィールドは 00000 固定（R6 では rs!=0 が AUI）。
+        // where の都合で表には出せないため末尾で個別に push する。
         ("lb", "FI", "100000 ..... ..... ................", "lb {rt}, {imm}({rs})", "load"),
         ("lh", "FI", "100001 ..... ..... ................", "lh {rt}, {imm}({rs})", "load"),
         ("lwl", "FI", "100010 ..... ..... ................", "lwl {rt}, {imm}({rs})", "load"),
@@ -245,9 +246,6 @@ pub fn build_model() -> polyisa_isadl::Model {
                 | "bgez"
                 | "bltzal"
                 | "bgezal"
-                | "j"
-                | "jal"
-                | "jr"
                 | "lwl"
                 | "lwr"
                 | "swl"
@@ -256,6 +254,22 @@ pub fn build_model() -> polyisa_isadl::Model {
             insn.when = Pred::Not(Box::new(Pred::Flag("mips_r6".to_string())));
         }
     }
+    // LUI。rs フィールドは 00000 固定（R6 の AUI は rs!=0 で区別する）。
+    // where は AUI との排他を静的に証明するために付ける。
+    // Ref: SPEC-MIPS-IV (Rev 3.2).
+    m.insns.push(Insn {
+        name: "lui".to_string(),
+        format: "FI".to_string(),
+        pattern: Pattern::parse("001111 00000 ..... ................").expect("valid pattern"),
+        when: Pred::True,
+        wheres: vec![WhereClause {
+            field: "rs".to_string(),
+            op: WhereOp::Eq,
+            rhs: WhereRhs::Lit(0),
+        }],
+        syntax: "lui {rt}, {imm}".to_string(),
+        timing: "alu".to_string(),
+    });
     // ADDIU は R6 にも残る（trap なし）。ADDI と同じく WRAP で代用する。
     // Ref: SPEC-MIPS-IV (Rev 3.2).
     m.insns.push(Insn {
@@ -440,8 +454,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("daddi", "FI", "011000 ..... ..... ................", "64p", &[], "daddi {rt}, {rs}, {imm}", "alu"),
         ("rdhwr", "FI", "011111 00000 ..... ..... 00000 111011", "r2", &[], "rdhwr {rt}, {rd}", "system"),
         ("pref", "FJ", "110011 ..... ..... ................", "r2", &[], "pref", "load"),
-        ("ll", "FI", "110000 ..... ..... ................", "r2", &[], "ll {rt}, {imm}({rs})", "load"),
-        ("sc", "FI", "111000 ..... ..... ................", "r2", &[], "sc {rt}, {imm}({rs})", "store"),
+        ("ll", "FI", "110000 ..... ..... ................", "r2p", &[], "ll {rt}, {imm}({rs})", "load"),
+        ("sc", "FI", "111000 ..... ..... ................", "r2p", &[], "sc {rt}, {imm}({rs})", "store"),
         // SPECIAL2（R6 で除去）。
         ("mul_r2", "FR", "011100 ..... ..... ..... 00000 000010", "r2p", &[], "mul {rd}, {rs}, {rt}", "mult"),
         ("madd", "FR", "011100 ..... ..... 00000 00000 000000", "r2p", &[], "madd {rs}, {rt}", "mult"),
@@ -467,9 +481,9 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("daddiu", "FI", "011001 ..... ..... ................", "64", &[], "daddiu {rt}, {rs}, {imm}", "alu"),
         ("ld", "FI", "110111 ..... ..... ................", "64", &[], "ld {rt}, {imm}({rs})", "load"),
         ("lwu", "FI", "100111 ..... ..... ................", "64", &[], "lwu {rt}, {imm}({rs})", "load"),
-        ("lld", "FI", "110100 ..... ..... ................", "64", &[], "lld {rt}, {imm}({rs})", "load"),
+        ("lld", "FI", "110100 ..... ..... ................", "64p", &[], "lld {rt}, {imm}({rs})", "load"),
         ("sd", "FI", "111111 ..... ..... ................", "64", &[], "sd {rt}, {imm}({rs})", "store"),
-        ("scd", "FI", "111100 ..... ..... ................", "64", &[], "scd {rt}, {imm}({rs})", "store"),
+        ("scd", "FI", "111100 ..... ..... ................", "64p", &[], "scd {rt}, {imm}({rs})", "store"),
         // R6 で除去される 64 ビット命令。
         ("dadd", "FR", "000000 ..... ..... ..... ..... 101100", "64p", &[], "dadd {rd}, {rs}, {rt}", "alu"),
         ("dsub", "FR", "000000 ..... ..... ..... ..... 101110", "64p", &[], "dsub {rd}, {rs}, {rt}", "alu"),
@@ -521,7 +535,20 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("beqzc", "FI", "110110 ..... ..... ................", "r6", &[("rt", WhereOp::Ne, 0)], "beqzc {rs}, {imm}", "branch"),
         ("jialc", "FI", "111110 ..... ..... ................", "r6", &[("rt", WhereOp::Eq, 0)], "jialc {rs}, {imm}", "jump"),
         ("bnezc", "FI", "111110 ..... ..... ................", "r6", &[("rt", WhereOp::Ne, 0)], "bnezc {rs}, {imm}", "branch"),
-    ];
+            // R6 で SPECIAL3 へ移った LL/SC（offset は [15:7] の 9 ビット符号付き）。
+        ("ll_r6", "FI", "011111 ..... ..... ......... . 110110", "r6", &[], "ll {rt}, {imm}({rs})", "load"),
+        ("sc_r6", "FI", "011111 ..... ..... ......... . 100110", "r6", &[], "sc {rt}, {imm}({rs})", "store"),
+        ("lld_r6", "FI", "011111 ..... ..... ......... . 110111", "r64", &[], "lld {rt}, {imm}({rs})", "load"),
+        ("scd_r6", "FI", "011111 ..... ..... ......... . 100111", "r64", &[], "scd {rt}, {imm}({rs})", "store"),
+        // R6 の REGIMM 系と上位即値。
+        ("nal", "FI", "000001 00000 10000 ................", "r6", &[], "nal", "branch"),
+        ("bal", "FI", "000001 00000 10001 ................", "r6", &[], "bal {imm}", "branch"),
+        ("dahi", "FI", "000001 ..... 00110 ................", "r64", &[], "dahi {rs}, {imm}", "alu"),
+        ("dati", "FI", "000001 ..... 11110 ................", "r64", &[], "dati {rs}, {imm}", "alu"),
+        ("aui", "FI", "001111 ..... ..... ................", "r6", &[("rs", WhereOp::Ne, 0)], "aui {rt}, {rs}, {imm}", "alu"),
+        ("daui", "FI", "011101 ..... ..... ................", "r64", &[("rs", WhereOp::Ne, 0)], "daui {rt}, {rs}, {imm}", "alu"),
+        ("synci", "FI", "000001 ..... 11111 ................", "r2", &[], "synci {imm}({rs})", "system"),
+];
     for (name, format, pattern, pred, wheres, syntax, timing) in ext {
         let when = match *pred {
             "r2" => Pred::Flag("mips32r2".to_string()),

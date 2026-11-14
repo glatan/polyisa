@@ -2243,3 +2243,61 @@ pub fn bltc<B: Backend>(b: &mut B, rs: Gpr, rt: Gpr, pc: u64, target: u64) -> Fl
     let take = b.cmp::<W64>(Cmp::LtS, x, y);
     cbranch(b, take, pc, target, false)
 }
+
+// ---- R6 の REGIMM 系（NAL/BAL/DAHI/DATI）と上位即値（AUI/DAUI）----
+// Ref: SPEC-MIPS-R6 (Rev 6.06).
+
+/// BAL。常に飛ぶリンク分岐（遅延スロット付き）。BGEZAL $0 と同じ意味論。
+pub fn bal_delay<B: Backend>(b: &mut B, pc: u64, disp: i32) -> Flow<B> {
+    let take = cmp_zero(b, Cmp::GeS, Gpr(0));
+    delay_branch(b, pc, disp, take, true)
+}
+
+/// NAL。リンクのみ（$31=pc+8）。分岐しない。
+pub fn nal<B: Backend>(b: &mut B, pc: u64) -> Flow<B> {
+    let linked = const_w64(b, pc.wrapping_add(8));
+    write(b, Gpr(31), linked);
+    Ok(())
+}
+
+/// AUI rt,rs,imm。rt = sext32(rs + sext(imm)<<16)。
+pub fn aui<B: Backend>(b: &mut B, rt: Gpr, rs: Gpr, imm: i32) -> Flow<B> {
+    let x = read(b, rs);
+    let y = b.konst::<W64>(((imm as i64) << 16) as u64);
+    let s = b.add::<W64>(x, y);
+    let s = sext32(b, s);
+    write(b, rt, s);
+    Ok(())
+}
+
+/// DAUI rt,rs,imm。rt = rs + sext(imm)<<16（64 ビット）。
+pub fn daui<B: Backend>(b: &mut B, rt: Gpr, rs: Gpr, imm: i32) -> Flow<B> {
+    let x = read(b, rs);
+    let y = b.konst::<W64>(((imm as i64) << 16) as u64);
+    let s = b.add::<W64>(x, y);
+    write(b, rt, s);
+    Ok(())
+}
+
+/// DAHI rs,imm。rs += sext(imm)<<32。
+pub fn dahi<B: Backend>(b: &mut B, rs: Gpr, imm: i32) -> Flow<B> {
+    let x = read(b, rs);
+    let y = b.konst::<W64>(((imm as i64) << 32) as u64);
+    let s = b.add::<W64>(x, y);
+    write(b, rs, s);
+    Ok(())
+}
+
+/// DATI rs,imm。rs += sext(imm)<<48。
+pub fn dati<B: Backend>(b: &mut B, rs: Gpr, imm: i32) -> Flow<B> {
+    let x = read(b, rs);
+    let y = b.konst::<W64>(((imm as i64) << 48) as u64);
+    let s = b.add::<W64>(x, y);
+    write(b, rs, s);
+    Ok(())
+}
+
+/// SYNCI。命令キャッシュの同期ヒント。ユーザモードでは何もしない。
+pub fn synci<B: Backend>(_b: &mut B, _rs: Gpr, _imm: i32) -> Flow<B> {
+    Ok(())
+}

@@ -34,7 +34,9 @@
 | aluipc | aluipc | mips_r6 | alu |
 | and | and | 真 | alu |
 | andi | andi | 真 | alu |
+| aui | aui | mips_r6 | alu |
 | auipc | auipc | mips_r6 | alu |
+| bal | bal | mips_r6 | branch |
 | balc | balc | mips_r6 | jump |
 | bc | bc | mips_r6 | jump |
 | beq | beq | !mips_r6 | branch |
@@ -75,7 +77,10 @@
 | daddi | daddi | mips64 && !mips_r6 | alu |
 | daddiu | daddiu | mips64 | alu |
 | daddu | daddu | mips64 | alu |
+| dahi | dahi | mips_r6 && mips64 | alu |
 | dalign | dalign | mips_r6 && mips64 | alu |
+| dati | dati | mips_r6 && mips64 | alu |
+| daui | daui | mips_r6 && mips64 | alu |
 | dbitswap | dbitswap | mips_r6 && mips64 | alu |
 | dclo | dclo_r2 | mips64 && !mips_r6 | alu |
 | dclo | dclo | mips_r6 && mips64 | alu |
@@ -119,12 +124,12 @@
 | dsubu | dsubu | mips64 | alu |
 | ext | ext | mips32r2 | alu |
 | ins | ins | mips32r2 | alu |
-| j | j | !mips_r6 | jump |
-| jal | jal | !mips_r6 | jump |
+| j | j | 真 | jump |
+| jal | jal | 真 | jump |
 | jalr | jalr | 真 | jump |
 | jialc | jialc | mips_r6 | jump |
 | jic | jic | mips_r6 | jump |
-| jr | jr | !mips_r6 | jump |
+| jr | jr | 真 | jump |
 | lb | lb | 真 | load |
 | lbu | lbu | 真 | load |
 | ld | ld | mips64 | load |
@@ -133,8 +138,10 @@
 | ldr | ldr | mips64 && !mips_r6 | load |
 | lh | lh | 真 | load |
 | lhu | lhu | 真 | load |
-| ll | ll | mips32r2 | load |
-| lld | lld | mips64 | load |
+| ll | ll | mips32r2 && !mips_r6 | load |
+| ll | ll_r6 | mips_r6 | load |
+| lld | lld | mips64 && !mips_r6 | load |
+| lld | lld_r6 | mips_r6 && mips64 | load |
 | lsa | lsa | mips_r6 | alu |
 | lui | lui | 真 | alu |
 | lw | lw | 真 | load |
@@ -162,14 +169,17 @@
 | mult | mult | !mips_r6 | mult |
 | multu | multu | !mips_r6 | mult |
 | mulu | mulu | mips_r6 | mult |
+| nal | nal | mips_r6 | branch |
 | nor | nor | 真 | alu |
 | or | or | 真 | alu |
 | ori | ori | 真 | alu |
 | pref | pref | mips32r2 | load |
 | rdhwr | rdhwr | mips32r2 | system |
 | sb | sb | 真 | store |
-| sc | sc | mips32r2 | store |
-| scd | scd | mips64 | store |
+| sc | sc | mips32r2 && !mips_r6 | store |
+| sc | sc_r6 | mips_r6 | store |
+| scd | scd | mips64 && !mips_r6 | store |
+| scd | scd_r6 | mips_r6 && mips64 | store |
 | sd | sd | mips64 | store |
 | sdl | sdl | mips64 && !mips_r6 | store |
 | sdr | sdr | mips64 && !mips_r6 | store |
@@ -194,6 +204,7 @@
 | swl | swl | !mips_r6 | store |
 | swr | swr | !mips_r6 | store |
 | sync | sync | mips32r2 | system |
+| synci | synci | mips32r2 | system |
 | syscall | syscall | 真 | system |
 | teq | teq | mips32r2 | system |
 | wsbh | wsbh | mips32r2 | alu |

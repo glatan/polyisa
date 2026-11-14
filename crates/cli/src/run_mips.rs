@@ -331,6 +331,8 @@ fn has_delay_slot(insn: Insn) -> bool {
             | Insn::Jal
             | Insn::Jr
             | Insn::Jalr
+            | Insn::Bal
+            | Insn::Nal
     )
 }
 
@@ -730,6 +732,34 @@ fn exec(
                 delayed: None,
             })
         }
+        // ---- R6 の SPECIAL3 LL/SC と REGIMM 系、上位即値 ----
+        Insn::LlR6 => {
+            let off = sext_bits(word >> 7, 9);
+            load_gpr(env, rt, model, in_slot, |b| {
+                sem::ll(b, rt, rs, off, model.endian)
+            })
+        }
+        Insn::ScR6 => {
+            let off = sext_bits(word >> 7, 9);
+            step(env, in_slot, |b| sem::sc(b, rt, rs, off, model.endian)).map(|()| wrote(rt))
+        }
+        Insn::LldR6 => {
+            let off = sext_bits(word >> 7, 9);
+            load_gpr(env, rt, model, in_slot, |b| {
+                sem::lld(b, rt, rs, off, model.endian)
+            })
+        }
+        Insn::ScdR6 => {
+            let off = sext_bits(word >> 7, 9);
+            step(env, in_slot, |b| sem::scd(b, rt, rs, off, model.endian)).map(|()| wrote(rt))
+        }
+        Insn::Nal => step(env, in_slot, |b| sem::nal(b, pc)).map(|()| wrote(Gpr(31))),
+        Insn::Bal => step(env, in_slot, |b| sem::bal_delay(b, pc, imm)).map(|()| wrote(Gpr(31))),
+        Insn::Dahi => step(env, in_slot, |b| sem::dahi(b, rs, imm)).map(|()| wrote(rs)),
+        Insn::Dati => step(env, in_slot, |b| sem::dati(b, rs, imm)).map(|()| wrote(rs)),
+        Insn::Aui => step(env, in_slot, |b| sem::aui(b, rt, rs, imm)).map(|()| wrote(rt)),
+        Insn::Daui => step(env, in_slot, |b| sem::daui(b, rt, rs, imm)).map(|()| wrote(rt)),
+        Insn::Synci => step(env, in_slot, |b| sem::synci(b, rs, imm)).map(|()| none),
     }
 }
 

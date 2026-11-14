@@ -90,7 +90,7 @@ mod tests {
     fn insn_count() {
         // MIPS I + MIPS32r2 + MIPS64 + Release 6（コンパクト分岐含む）。
         // nop は sll $0,$0,0 の別名。
-        assert_eq!(INSNS.len(), 174);
+        assert_eq!(INSNS.len(), 185);
     }
 
     #[test]
@@ -303,5 +303,32 @@ mod tests {
         // 64 ビット命令は 32 ビットモデルでは復号しない。
         assert_eq!(f(0x0022_182d, R2), None);
         assert_eq!(f(0xdc41_0010, R6), None);
+        // R6 でも J/JAL/JR は残る（遅延スロット付きのまま）。
+        assert_eq!(f(0x0800_0400, R6), Some(Insn::J));
+        assert_eq!(f(0x0c00_0400, R6), Some(Insn::Jal));
+        assert_eq!(f(0x03e0_0008, R6), Some(Insn::Jr));
+        // R6 の SPECIAL3 LL/SC（offset9）。旧主オペコードは R6 では復号しない。
+        assert_eq!(f(0x7c43_0836, R6), Some(Insn::LlR6));
+        assert_eq!(f(0x7c43_0826, R6), Some(Insn::ScR6));
+        assert_eq!(f(0x7c43_0837, M64R6), Some(Insn::LldR6));
+        assert_eq!(f(0x7c43_0827, M64R6), Some(Insn::ScdR6));
+        assert_eq!(f(0x7c43_0837, R6), None);
+        assert_eq!(f(0xc041_0010, R6), None);
+        assert_eq!(f(0x7c43_0836, R2), None);
+        // R6 の REGIMM 系と上位即値。NAL/BAL は rs=0 固定。
+        assert_eq!(f(0x0410_0010, R6), Some(Insn::Nal));
+        assert_eq!(f(0x0411_0010, R6), Some(Insn::Bal));
+        assert_eq!(f(0x3c43_1234, R6), Some(Insn::Aui));
+        assert_eq!(f(0x7443_1234, M64R6), Some(Insn::Daui));
+        assert_eq!(f(0x0446_1234, M64R6), Some(Insn::Dahi));
+        assert_eq!(f(0x045e_1234, M64R6), Some(Insn::Dati));
+        // pre-R6 ではそれぞれ旧命令側（BLTZAL/BGEZAL）か予約。
+        assert_eq!(f(0x0410_0010, R2), Some(Insn::Bltzal));
+        assert_eq!(f(0x0411_0010, R2), Some(Insn::Bgezal));
+        assert_eq!(f(0x3c43_1234, R2), None);
+        assert_eq!(f(0x7443_1234, M64), None);
+        // SYNCI は r2 から有効で R6 でも残る。
+        assert_eq!(f(0x045f_0010, R2), Some(Insn::Synci));
+        assert_eq!(f(0x045f_0010, R6), Some(Insn::Synci));
     }
 }
