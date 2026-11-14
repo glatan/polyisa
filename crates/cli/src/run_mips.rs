@@ -145,6 +145,28 @@ impl MipsStep {
         self.last_exc
     }
 
+    /// トレース有効時、直近の pc 履歴を標準エラーへ出す。
+    pub fn dump_hist(&self) {
+        if self.trace {
+            let h: Vec<String> = self.hist.iter().map(|p| format!("{p:#x}")).collect();
+            eprintln!("hist: {}", h.join(" "));
+        }
+    }
+
+    /// トレース有効時、GPR 全体を標準エラーへ出す。
+    pub fn dump_regs(&self, env: &mut BareEnv) {
+        if self.trace {
+            for r in 0u8..32 {
+                let v = env
+                    .backend
+                    .get(polyisa_sem::StateRef::<polyisa_sem::W64>::from_offset(
+                        Gpr(r).state().offset(),
+                    ));
+                eprintln!("  r{r}={v:#x}");
+            }
+        }
+    }
+
     /// 1 ステップぶんのフェッチ・解読・意味論とトラップ境界の解決。
     /// 遅延スロットは分岐と同じ呼び出しの内側で実行する。
     pub fn step<H: ?Sized + TrapHandler>(
@@ -271,22 +293,13 @@ impl MipsStep {
     }
 
     fn stop_outcome(&mut self, stop: Stop) -> Outcome {
+        self.dump_hist();
         match stop {
-            Stop::Unimplemented { pc, word } => {
-                if self.trace {
-                    let h: Vec<String> = self.hist.iter().map(|p| format!("{p:#x}")).collect();
-                    eprintln!("hist: {}", h.join(" "));
-                }
-                Outcome::Unimplemented {
-                    pc,
-                    word: u128::from(word),
-                }
-            }
+            Stop::Unimplemented { pc, word } => Outcome::Unimplemented {
+                pc,
+                word: u128::from(word),
+            },
             Stop::Exception(e) => {
-                if self.trace {
-                    let h: Vec<String> = self.hist.iter().map(|p| format!("{p:#x}")).collect();
-                    eprintln!("hist: {}", h.join(" "));
-                }
                 self.last_exc = Some(e);
                 Outcome::Unimplemented {
                     pc: e.addr.unwrap_or(0),
@@ -314,7 +327,11 @@ pub fn run(
     model: MipsModel,
     sys: &mut impl TrapHandler,
 ) -> MipsOutcome {
-    run_ex(env, entry, model, sys, STEP_LIMIT)
+    let limit = std::env::var("POLYISA_MIPS_LIMIT")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(STEP_LIMIT);
+    run_ex(env, entry, model, sys, limit)
 }
 
 /// `run` にステップ数の上限を渡す。
@@ -338,14 +355,25 @@ pub fn run_ex(
     match (out, st.last_exception()) {
         (_, Some(e)) => MipsOutcome::Exception(e),
         (Outcome::Exit(code), _) => MipsOutcome::Exit(code),
-        (Outcome::Unimplemented { pc, word }, _) => MipsOutcome::Unimplemented {
-            pc,
-            word: word as u32,
-        },
-        (Outcome::StepLimit { pc }, _) => MipsOutcome::StepLimit { pc },
-        (Outcome::Deadlock, _) => MipsOutcome::StepLimit {
-            pc: get_u64(env, sem::pc_ref().offset()),
-        },
+        (Outcome::Unimplemented { pc, word }, _) => {
+            st.dump_regs(env);
+            MipsOutcome::Unimplemented {
+                pc,
+                word: word as u32,
+            }
+        }
+        (Outcome::StepLimit { pc }, _) => {
+            st.dump_hist();
+            st.dump_regs(env);
+            MipsOutcome::StepLimit { pc }
+        }
+        (Outcome::Deadlock, _) => {
+            st.dump_hist();
+            st.dump_regs(env);
+            MipsOutcome::StepLimit {
+                pc: get_u64(env, sem::pc_ref().offset()),
+            }
+        }
     }
 }
 
@@ -1120,6 +1148,16 @@ where
                 for r in 0u8..32 {
                     let v = get_u64(env, Gpr(r).state().offset());
                     eprintln!("  r{r}={v:#x}");
+                }
+                if let Some(a) = exception.addr {
+                    let base = a & !0xfff;
+                    for d in -4i64..4 {
+                        let p = base.wrapping_add_signed(d * 0x1000);
+                        eprintln!(
+                            "  map {p:#x}: {}",
+                            env.backend.mem.is_mapped(polyisa_mem::PageNo(p >> 12))
+                        );
+                    }
                 }
             }
             Err(Stop::Exception(exception))

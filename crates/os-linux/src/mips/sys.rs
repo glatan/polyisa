@@ -90,6 +90,8 @@ pub struct Linux {
     stdin_pos: usize,
     /// MONOTONIC 時計の起点。
     mono_start: Option<std::time::Instant>,
+    /// ディレクトリ fd の getdents 位置（エントリの通し番号）。
+    dir_pos: std::collections::HashMap<u32, usize>,
 }
 
 impl Linux {
@@ -129,6 +131,7 @@ impl Linux {
             stdin_buf: Vec::new(),
             stdin_pos: 0,
             mono_start: None,
+            dir_pos: std::collections::HashMap::new(),
         }
     }
 
@@ -367,6 +370,9 @@ impl Linux {
             Err(e) => return self.fail(env, e),
         };
         let host = self.host_path(&path);
+        if std::env::var_os("POLYISA_MIPS_SYSCALLS").is_some() {
+            eprintln!("  open {path:?} -> {host:?}");
+        }
         let oo = Self::open_flags(flags);
         let _ = mode;
         match oo.open(&host) {
@@ -592,16 +598,17 @@ impl Linux {
             self.heap_end = addr;
             return self.ret_ptr(env, self.heap_end);
         }
-        let page_base = self.heap_end & !(polyisa_mem::PAGE_SIZE - 1);
-        let need = (addr - page_base).div_ceil(polyisa_mem::PAGE_SIZE);
-        if need > 0
-            && env
+        let page_base = self.heap_end.next_multiple_of(polyisa_mem::PAGE_SIZE);
+        if addr > page_base {
+            let need = (addr - page_base).div_ceil(polyisa_mem::PAGE_SIZE);
+            if env
                 .backend
                 .mem
                 .map(VirtAddr(page_base), need, Perms::RW)
                 .is_err()
-        {
-            return self.fail(env, mips::errno::ENOMEM);
+            {
+                return self.fail(env, mips::errno::ENOMEM);
+            }
         }
         self.heap_end = addr;
         self.ret_ptr(env, self.heap_end)
@@ -707,7 +714,11 @@ impl Linux {
             Endian::Be => v.to_be_bytes(),
             Endian::Le => v.to_le_bytes(),
         };
-        for (i, (ino, name, t)) in all.iter().enumerate() {
+        // ディレクトリ位置を fd ごとに持ち、続きから返す。先頭から
+        // 返し続けると呼び出し側が終了しない。
+        let mut pos = *self.dir_pos.get(&fd).unwrap_or(&0);
+        let mut emitted = 0usize;
+        for (i, (ino, name, t)) in all.iter().enumerate().skip(pos) {
             let reclen = 19 + name.len() + 1;
             let aligned = reclen.next_multiple_of(8);
             if out.len() + aligned > count {
@@ -721,6 +732,11 @@ impl Linux {
             out.extend_from_slice(name.as_bytes());
             out.push(0);
             out.resize(out.len() + (aligned - reclen), 0);
+            pos += 1;
+            emitted += 1;
+        }
+        if emitted > 0 {
+            self.dir_pos.insert(fd, pos);
         }
         match self.write_bytes(env, buf, &out) {
             Ok(()) => Self::ret(env, out.len() as u64),
@@ -824,11 +840,15 @@ impl Linux {
     /// `readv`/`writev`。
     fn do_readv(&mut self, env: &mut BareEnv, fd: u32, iov: u64, cnt: u64) -> u64 {
         let mut total = 0u64;
-        let w = self.abi.ptr_bits() / 8;
+        let w = u64::from(self.abi.ptr_bits() / 8);
+        let dbg = std::env::var_os("POLYISA_MIPS_SYSCALLS").is_some();
         for i in 0..cnt.min(1024) {
-            let base = self.mem_u(env, iov + i * u64::from(w));
-            let len = self.mem_u(env, iov + i * u64::from(w) + u64::from(w));
+            let base = self.mem_u(env, iov + i * 2 * w);
+            let len = self.mem_u(env, iov + i * 2 * w + w);
             let n = self.do_read(env, fd, base, len);
+            if dbg {
+                eprintln!("  readv fd={fd} base={base:#x} len={len:#x} -> {n}");
+            }
             if get_reg(env, 7) != 0 {
                 return n;
             }
@@ -842,10 +862,10 @@ impl Linux {
 
     fn do_writev(&mut self, env: &mut BareEnv, fd: u32, iov: u64, cnt: u64) -> u64 {
         let mut total = 0u64;
-        let w = self.abi.ptr_bits() / 8;
+        let w = u64::from(self.abi.ptr_bits() / 8);
         for i in 0..cnt.min(1024) {
-            let base = self.mem_u(env, iov + i * u64::from(w));
-            let len = self.mem_u(env, iov + i * u64::from(w) + u64::from(w));
+            let base = self.mem_u(env, iov + i * 2 * w);
+            let len = self.mem_u(env, iov + i * 2 * w + w);
             let n = self.do_write(env, fd, base, len);
             if get_reg(env, 7) != 0 {
                 return n;
@@ -857,6 +877,13 @@ impl Linux {
 
     /// `lseek`。
     fn do_lseek(&mut self, env: &mut BareEnv, fd: u32, off: i64, whence: u32) -> u64 {
+        if whence > 2 {
+            return self.fail(env, mips::errno::EINVAL);
+        }
+        // ディレクトリの巻き戻し（rewinddir）は getdents 位置も戻す。
+        if whence == 0 && off == 0 {
+            self.dir_pos.remove(&fd);
+        }
         let f = match self.file_of(fd) {
             Ok(f) => f,
             Err(e) => return self.fail(env, e),
@@ -865,7 +892,7 @@ impl Linux {
             0 => SeekFrom::Start(off as u64),
             1 => SeekFrom::Current(off),
             2 => SeekFrom::End(off),
-            _ => return self.fail(env, mips::errno::EINVAL),
+            _ => unreachable!(),
         };
         match f.seek(w) {
             Ok(p) => Self::ret(env, p),
@@ -1103,7 +1130,10 @@ impl TrapHandler for Linux {
     /// `brk` の初期値。ローダが像の末尾を渡す。
     fn init_brk(&mut self, image_end: u64) {
         self.heap_end = image_end;
-        self.mmap_next = image_end.div_ceil(0x1000) * 0x1000 + 0x1000;
+        // mmap アリーナはヒープ直上には置かない。向上する brk と
+        // 向上する mmap が衝突し、map() の重複書きが既存ページを
+        // ゼロ初期化で上書きするため。
+        self.mmap_next = image_end.div_ceil(0x1000) * 0x1000 + 0x800_0000;
     }
 
     fn handle_trap(&mut self, env: &mut BareEnv, _code: u32) -> TrapOutcome {
@@ -1115,6 +1145,14 @@ impl TrapHandler for Linux {
         };
         let off = nr.wrapping_sub(base);
         let abi = self.abi;
+        if std::env::var_os("POLYISA_MIPS_SYSCALLS").is_some() {
+            let name = abi.name(nr).unwrap_or("?");
+            eprintln!(
+                "sys {nr} {name} a0={:#x} a1={:#x}",
+                reg(env, 4),
+                reg(env, 5)
+            );
+        }
         let r = match abi {
             Abi::O32 => self.dispatch_o32(env, off),
             Abi::N32 => self.dispatch_64(env, off, mips_n32::name(nr)),
@@ -1193,6 +1231,7 @@ impl Linux {
                 }
                 if self.fds.get(fd).is_some() {
                     self.fds.clear(fd);
+                    self.dir_pos.remove(&fd);
                     ret(Self::ret(env, 0))
                 } else {
                     self.fail_ret(env, mips::errno::EBADF)
@@ -1851,6 +1890,7 @@ impl Linux {
                 }
                 if self.fds.get(fd).is_some() {
                     self.fds.clear(fd);
+                    self.dir_pos.remove(&fd);
                     ret(Self::ret(env, 0))
                 } else {
                     self.fail_ret(env, mips::errno::EBADF)
@@ -2589,5 +2629,95 @@ mod tests {
             .unwrap();
         assert_eq!(u64::from_le_bytes(b[0..8].try_into().unwrap()), 0xEF53);
         assert_eq!(u64::from_le_bytes(b[72..80].try_into().unwrap()), 255);
+    }
+
+    /// iovec の要素は {base,len} の対。n64 では 1 要素 16B。
+    /// ストライドを 8B と誤ると前要素の len を base として読む回帰。
+    #[test]
+    fn n64_readv_iovec_stride() {
+        let p = tmpfile(b"0123456789abcdef");
+        let mut sys = Linux::n64(Endian::Le);
+        let mut env = env();
+        let fd = sys.fds.alloc(Some(std::fs::File::open(&p).unwrap()));
+        map(&mut env, 0x6000, 1); // iov
+        map(&mut env, 0x7000, 1); // buf0
+        map(&mut env, 0x8000, 1); // buf1
+        let put64 = |env: &mut BareEnv, addr: u64, v: u64| {
+            env.backend
+                .mem
+                .write(VirtAddr(addr), &v.to_le_bytes())
+                .unwrap();
+        };
+        put64(&mut env, 0x6000, 0x7000);
+        put64(&mut env, 0x6008, 4);
+        put64(&mut env, 0x6010, 0x8000);
+        put64(&mut env, 0x6018, 4);
+        set_reg(&mut env, 2, 5018); // readv
+        set_reg(&mut env, 4, u64::from(fd));
+        set_reg(&mut env, 5, 0x6000);
+        set_reg(&mut env, 6, 2);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(reg(&mut env, 7), 0);
+        assert_eq!(reg(&mut env, 2), 8);
+        let mut b = [0u8; 4];
+        env.backend
+            .mem
+            .read(VirtAddr(0x7000), &mut b, acc())
+            .unwrap();
+        assert_eq!(&b, b"0123");
+        env.backend
+            .mem
+            .read(VirtAddr(0x8000), &mut b, acc())
+            .unwrap();
+        assert_eq!(&b, b"4567");
+    }
+
+    /// getdents64 は呼び出しごとにディレクトリ位置を進める。
+    /// 先頭から返し続けると readdir ループが終わらない。
+    #[test]
+    fn getdents64_advances_position() {
+        let dir = std::env::temp_dir().join(format!("polyisa-dir-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a"), b"x").unwrap();
+        let mut sys = Linux::o32(Endian::Le);
+        let mut env = env();
+        map(&mut env, 0x6000, 1);
+        let s = dir.to_str().unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x6000), s.as_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x6000 + s.len() as u64), &[0])
+            .unwrap();
+        set_reg(&mut env, 2, 4005); // open
+        set_reg(&mut env, 4, 0x6000);
+        set_reg(&mut env, 5, 0); // O_RDONLY
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let fd = reg(&mut env, 2) as u32;
+        map(&mut env, 0x8000, 1);
+        let getdents = |sys: &mut Linux, env: &mut BareEnv| -> u64 {
+            set_reg(env, 2, 4219);
+            set_reg(env, 4, u64::from(fd));
+            set_reg(env, 5, 0x8000);
+            set_reg(env, 6, 0x800);
+            assert!(matches!(sys.handle_trap(env, 0), TrapOutcome::Handled));
+            reg(env, 2)
+        };
+        let n1 = getdents(&mut sys, &mut env);
+        assert!(n1 > 0, "初回はエントリあり: {n1}");
+        let mut n = n1;
+        for _ in 0..8 {
+            let k = getdents(&mut sys, &mut env);
+            if k == 0 {
+                break;
+            }
+            n += k;
+        }
+        assert_eq!(getdents(&mut sys, &mut env), 0, "末尾で 0 を返す");
+        let _ = std::fs::remove_file(dir.join("a"));
+        let _ = std::fs::remove_dir(&dir);
+        let _ = n;
     }
 }

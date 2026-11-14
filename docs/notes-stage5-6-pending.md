@@ -65,12 +65,25 @@
     `.testdata/bin-distro-mipsel`（o32 LE）と `.testdata/bin-distro-mips64`
     （n64 BE）を取得済み。台帳登録と配布物の正式選定は未了。
     現状: cop1 (FPU) を実装済み（FR=1 全幅・約70命令）。o32 は
-    `echo`/`uname`/`date`/`id` が動作、`ls` はヒープ上の dlist 走査で
-    PageFault（0x5a1440、負オフセット経路の追跡が残る）。n64 BE は
-    `echo`/`uname`/`cat`/`pwd`/`true`/`--help` が動作。`date` は
-    初期化時に関数ポインタテーブル+0x48 の NULL へ jalr、`ls` は
-    オプション解釈差異（"NO OPT"）と別箇の PageFault、`id` は
-    スピン（ステップ上限）。残作業: 上記個別バグ、n32 実バイナリ、
+    `echo`/`uname`/`date`/`id`/`ls`/`ls -l`/`ls /etc`/`ls /home` が
+    動作（`/tmp` のような千件級ディレクトリは整形処理が O(n²) で
+    ステップ上限に達するのみ）。n64 BE は
+    `echo`/`uname`/`uname -a`/`cat`/`pwd`/`true`/`basename`/`dirname`/
+    `seq`/`wc`/`yes` が動作。
+    残バグ（n64）: `date`/`head`/`id -un`/`whoami` は musl の stdio
+    FILE 初期化経路で `f->read`(+0x40)/`f->write`(+0x48) が NULL または
+    ヒープ番地（0x1201950e0）になり jalr で停止 — 同一根因とみて調査中。
+    `ls` はオプション解釈で "NO OPT" を出し、別箇の PageFault も残る。
+    既に確定させた修正: `do_readv`/`do_writev` の iovec ストライド
+    （`w`→`2*w`、n64 で後続エントリを別物として読んでいた）、
+    `getdents64` の fd ごとのディレクトリ位置追跡（同じエントリを
+    返し続けて readdir ループが終わらなかった）、`do_brk` が既マップ
+    ページを `map()` でゼロ上書きしてヒープを壊していた問題（既存
+    heap_end の次ページからのみマップ）、`mmap_next` が brk ヒープと
+    衝突していた問題（image_end+0x800_0000 に移動）。
+    回帰テスト: `n64_readv_iovec_stride`・`getdents64_advances_position`
+    を `mips::sys::tests` に追加。
+    残作業: 上記 stdio FILE 個別バグの根因特定、n32 実バイナリ、
     台帳登録。
 
 ## 解消済み（記録）

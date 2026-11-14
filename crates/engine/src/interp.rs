@@ -11,6 +11,18 @@ use polyisa_sem::{
 };
 use polyisa_softfloat::{F32 as SF32, F64 as SF64, Rm as FpRm};
 
+/// デバッグ用のストアアドレスウォッチ。`POLYISA_MEM_WATCH` に 16 進数を
+/// 置くと、そのアドレスを覆うストアごとに出力する。0 は無効。
+fn mem_watch() -> u64 {
+    static WATCH: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *WATCH.get_or_init(|| {
+        std::env::var("POLYISA_MEM_WATCH")
+            .ok()
+            .and_then(|v| u64::from_str_radix(v.trim_start_matches("0x"), 16).ok())
+            .unwrap_or(0)
+    })
+}
+
 /// インタプリタの退出理由。
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum InterpExit {
@@ -552,6 +564,22 @@ impl Backend for InterpBackend {
         let addr = addr & self.addr_mask;
         let bytes = (W::BITS / 8) as usize;
         self.break_reservation(addr, bytes as u32);
+        let w = mem_watch();
+        if w != 0 && addr <= w && w < addr + bytes as u64 {
+            static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            eprintln!(
+                "watch hit {n}: store {bytes}B @{addr:#x} v={:#x}",
+                to_u64::<W>(v)
+            );
+            let skip = std::env::var("POLYISA_MEM_WATCH_SKIP")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(0);
+            if n >= skip {
+                return Err(InterpExit::Unimplemented("watch".to_string()));
+            }
+        }
         if bytes <= 8 {
             return self
                 .mem
