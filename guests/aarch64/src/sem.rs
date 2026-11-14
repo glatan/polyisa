@@ -470,7 +470,23 @@ pub fn mrs<B: Backend>(b: &mut B, rt: Gpr, sysop: u32) -> Flow<B> {
         0xC007 => 0x10,
         // CTR_EL0 = S3_3_C0_C0_1: IminLine/DminLine=4（64 バイト）他 0
         0xC001 => 0x8444_c004,
-        // ID_AA64ISAR0_EL1 等の ID レジスタは 0（OS 側の補完と同じ）。
+        // ---- ID レジスタ群。EL0 からの読み出しは OS がエミュレートする
+        // 領分で、ここでは「この実装が持つ機能」を正直に返す。
+        // MIDR_EL1 = S3_0_C0_C0_0: Implementer='A'(Arm)、Cortex-A53 相当。
+        0xC000 => 0x410f_d034,
+        // MPIDR_EL1 = S3_0_C0_C0_5: U=1（単一スレッド）。
+        0xC005 => 0x8000_0000,
+        // ID_AA64PFR0_EL1 = S3_0_C0_C4_0: EL0 は AArch64 のみ（2）、
+        // FP と AdvSIMD は実装済み（0）。EL1 以上・SVE・RAS 等はなし。
+        0xC020 => 0x2,
+        // MVFR0_EL1 = S3_0_C0_C3_0: 128 ビット SIMD レジスタ 32 本、
+        // 単/倍精度・除算・平方根・最近接丸めあり、トラップなし。
+        0xC018 => 0x1011_0112,
+        // MVFR1_EL1 = S3_0_C0_C3_1: FMAC/SP/整数/ロードストアあり、
+        // 半精度 SIMD はなし、NaN 伝播・FtZ 対応。
+        0xC019 => 0x1011_1011,
+        // その他の ID（PFR1/ZFR0/DFR/AFR/ISAR/MMFR/MVFR2/REVIDR）は
+        // オプション機能を実装していないため 0。
         _ => 0,
     };
     let kv = k64(b, v);

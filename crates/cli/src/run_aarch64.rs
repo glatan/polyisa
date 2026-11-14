@@ -16,11 +16,20 @@ use polyisa_engine::interp::Ctrl;
 use polyisa_engine::run::{Outcome, TrapHandler, TrapOutcome};
 use polyisa_guest_aarch64::sem::{self, Gpr};
 use polyisa_guest_aarch64::{Insn, decode_model_ex};
-use polyisa_mem::{Access, AccessKind, Align, Endian, VirtAddr};
+use polyisa_mem::{Access, AccessKind, Align, Endian, PAGE_SIZE, PageNo, Perms, VirtAddr};
 use polyisa_sem::Backend as _;
 
 /// 1命令の実行上限。無限ループの検出用。
 pub const STEP_LIMIT: u64 = 5_000_000;
+
+/// ページフォルト駆動のスタック成長の設定。
+/// `top` はスタック上端、`limit` は下向き成長の下限（RLIMIT_STACK 相当）。
+/// 窓 `[limit, top)` 内の未写像ページへのフォルトで写像を伸ばす。
+#[derive(Clone, Copy)]
+pub struct StackGrowth {
+    pub top: u64,
+    pub limit: u64,
+}
 
 fn acc_fetch() -> Access {
     Access {
@@ -33,20 +42,29 @@ fn acc_fetch() -> Access {
 /// エントリから実行する。`feats` は生成した `FEAT_*` のビット和で、
 /// `decode_model_ex` に渡る。CPU モデルの選択からの変換は
 /// `polyisa_isadl::select::resolve` が行う。
-pub fn run_ex(env: &mut BareEnv, entry: u64, feats: u64, sys: &mut impl TrapHandler) -> Outcome {
+/// `endian` はデータアクセスのエンディアン（命令フェッチは常に LE）。
+/// `stack` はスタック成長の設定。`None` ならフォルトは従来どおり失敗。
+pub fn run_ex(
+    env: &mut BareEnv,
+    entry: u64,
+    feats: u64,
+    endian: Endian,
+    stack: Option<StackGrowth>,
+    sys: &mut impl TrapHandler,
+) -> Outcome {
     env.pc = entry;
     polyisa_engine::run::run(
         env,
         sys,
         STEP_LIMIT,
         |env| env.pc,
-        |env, sys| step_a64(env, sys, feats),
+        |env, sys| step_a64(env, sys, feats, endian, stack),
     )
 }
 
-/// `run_ex` に機能集合 0 を渡す既定の入口。
+/// `run_ex` に機能集合 0・LE・成長なしを渡す既定の入口。
 pub fn run(env: &mut BareEnv, entry: u64, sys: &mut impl TrapHandler) -> Outcome {
-    run_ex(env, entry, 0, sys)
+    run_ex(env, entry, 0, Endian::Le, None, sys)
 }
 
 /// 即値の符号拡張。`v` の下位 `bits` を符号付きで取る。
@@ -90,8 +108,17 @@ fn svc<H: ?Sized + TrapHandler>(
 
 /// 1 命令ぶんのフェッチ・解読・意味論と svc 境界の解決。
 /// 継続なら `Ok(())`、退出なら退出理由を返す。
+/// `endian` はデータアクセスのエンディアン。フェッチは AArch64 の
+/// 規約どおり常にリトルエンディアン（BE でも命令は LE）。
+// Ref: SPEC-ARM-ARM-A (Armv9-A ARM ARM 2024-09), SRC-LINUX (7.3).
 #[allow(clippy::too_many_lines)]
-fn step_a64(env: &mut BareEnv, sys: &mut impl TrapHandler, feats: u64) -> Result<(), Outcome> {
+fn step_a64(
+    env: &mut BareEnv,
+    sys: &mut impl TrapHandler,
+    feats: u64,
+    endian: Endian,
+    stack: Option<StackGrowth>,
+) -> Result<(), Outcome> {
     let pc = env.pc;
     let mut b4 = [0u8; 4];
     if env
@@ -119,7 +146,7 @@ fn step_a64(env: &mut BareEnv, sys: &mut impl TrapHandler, feats: u64) -> Result
     }
     // フィールドの切り出し。
     let sf = word >> 31 != 0;
-    let le = Endian::Le;
+    let le = endian;
     let rd = Gpr((word & 31) as u8);
     let rn = Gpr(((word >> 5) & 31) as u8);
     let rm = Gpr(((word >> 16) & 31) as u8);
@@ -547,7 +574,14 @@ fn step_a64(env: &mut BareEnv, sys: &mut impl TrapHandler, feats: u64) -> Result
         }
         Insn::Svc => unreachable!("svc は先に振り分け済み"),
     };
-    if ok.is_err() {
+    if let Err(e) = ok {
+        // スタック窓内の未写像フォルトは写像を伸ばして同じ命令をやり直す
+        // （カーネルのスタック VMA 成長に相当）。pc は変えずに戻る。
+        if let polyisa_engine::interp::InterpExit::Exception(ref g) = e
+            && stack_grow(env, stack, g).is_some()
+        {
+            return Ok(());
+        }
         return Err(unimpl(env));
     }
     // 分岐なしは次へ進める（分岐成立は step が pc を置き換える）。
@@ -555,6 +589,39 @@ fn step_a64(env: &mut BareEnv, sys: &mut impl TrapHandler, feats: u64) -> Result
         env.pc += 4;
     }
     Ok(())
+}
+
+/// ページフォルトをスタック成長として処理する。窓 `[limit, top)` 内の
+/// 未写像ページへのフォルトなら、フォルトしたページから最初に写像済みの
+/// ページの手前までを R/W で写像する。処理したなら `Some` を返す。
+// Ref: SRC-LINUX (7.3) — expand_stack の規約（RLIMIT 内の下方成長）。
+fn stack_grow(
+    env: &mut BareEnv,
+    stack: Option<StackGrowth>,
+    e: &polyisa_sem::GuestException,
+) -> Option<()> {
+    let s = stack?;
+    if e.kind != polyisa_sem::ExceptionKind::PageFault {
+        return None;
+    }
+    let a = e.addr?;
+    if a >= s.top || a < s.limit {
+        return None;
+    }
+    let lo = a & !(PAGE_SIZE - 1);
+    // フォルトしたページから上向きに、現状の写像の下端を探す。
+    let mut hi = lo;
+    while hi < s.top && !env.backend.mem.is_mapped(PageNo(hi / PAGE_SIZE)) {
+        hi += PAGE_SIZE;
+    }
+    let pages = (hi - lo) / PAGE_SIZE;
+    if pages == 0 {
+        return None;
+    }
+    env.backend
+        .mem
+        .map(VirtAddr(lo), pages, Perms(Perms::R.0 | Perms::W.0))
+        .ok()
 }
 
 /// 静的な AArch64 ELF を実行する。機械番号 183（EM_AARCH64）。
@@ -637,9 +704,9 @@ fn run_elf_aarch64_impl(
     let ehdr = polyisa_loader::elf::parse_ehdr(&bytes).map_err(|e| format!("ehdr: {e:?}"))?;
     // EM_AARCH64=183。Ref: SPEC-AARCH64-ELF（AAELF64）§4.2。
     const EM_AARCH64: u16 = 183;
-    if !ehdr.little {
-        return Err("big-endian ELF は未対応（FEAT_BE は後の段階）".to_string());
-    }
+    // EI_DATA でデータアクセスのエンディアンを決める。AArch64 BE は
+    // 「命令は LE・データのみ BE」なのでフェッチ経路は変えない。
+    let data_endian = if ehdr.little { Endian::Le } else { Endian::Be };
     if ehdr.machine != EM_AARCH64 {
         return Err(format!("未対応の e_machine: {}", ehdr.machine));
     }
@@ -737,23 +804,18 @@ fn run_elf_aarch64_impl(
     } else {
         (main_bias + ehdr.entry, 0)
     };
-    // 初期スタックを写像する。`build_initial_stack` の返す像を置く。
-    // 下方向の成長分は固定で先に確保する（ページフォルト駆動の成長は
-    // 未実装。大きさはメモの保留事項を参照）。
+    // 初期スタック。像を載せる分だけ先に写像し、下方向の成長は
+    // ページフォルト駆動で伸ばす（limit は RLIMIT_STACK 既定値の 8 MiB
+    // 相当）。像の直上はゲストが sp より上へ書く領域（呼出し側
+    // フレーム）として空ける。
+    // Ref: SRC-LINUX (7.3) — expand_stack。
     let top = 0x0000_7fff_fff0_0000u64;
+    const STACK_LIMIT: u64 = 8 << 20;
     let mut arg_bytes = vec![path.as_bytes().to_vec()];
     for a in argv {
         arg_bytes.push(a.as_bytes().to_vec());
     }
-    let stack_pages = 256u64;
-    let base = top - stack_pages * PAGE_SIZE;
-    // 像の直上はゲストが sp より上へ書く領域（呼出し側フレーム）として空ける。
-    // 実カーネルのスタック VMA も像の上に余裕がある。
     let img_top = top - 0x1_0000;
-    env.backend
-        .mem
-        .map(VirtAddr(base), stack_pages, Perms(Perms::R.0 | Perms::W.0))
-        .map_err(|e| format!("stack map: {e:?}"))?;
     // auxv。AT_RANDOM (25) が指す 16 バイトは像の末尾の文字列領域に置く。
     // sp 直下はゲストのローカル領域になり上書きされるため使えない。
     // Ref: SPEC-AARCH64-ELF（AAELF64）§6、SRC-LINUX (7.3)。
@@ -782,7 +844,21 @@ fn run_elf_aarch64_impl(
             *v = rand_addr;
         }
     }
-    let (img, sp) = polyisa_os_linux::build_initial_stack(img_top, &arg_bytes, &[], &auxv);
+    let (img, sp) =
+        polyisa_os_linux::build_initial_stack_endian(img_top, &arg_bytes, &[], &auxv, data_endian);
+    // 像の置かれる [sp, img_top) と、像の直上の呼出し側スクラッチ
+    // （rand_addr を含む top まで）を先に写像する。sp より下は
+    // ページフォルト駆動の成長で埋まる。
+    let stack_base = sp & !(PAGE_SIZE - 1);
+    let stack_pages = (top - stack_base) / PAGE_SIZE;
+    env.backend
+        .mem
+        .map(
+            VirtAddr(stack_base),
+            stack_pages,
+            Perms(Perms::R.0 | Perms::W.0),
+        )
+        .map_err(|e| format!("stack map: {e:?}"))?;
     env.backend
         .mem
         .write(VirtAddr(sp), &img)
@@ -799,9 +875,14 @@ fn run_elf_aarch64_impl(
         .map_err(|e| format!("stack write: {e:?}"))?;
     env.backend.set(sem::sp_ref(), sp);
     sys.exe_path = path.to_string();
+    sys.set_endian(data_endian);
     sys.init_brk(image_end);
     let feats = sel.map_or(0, |s| s.feats);
-    match run_ex(&mut env, entry, feats, sys) {
+    let growth = Some(StackGrowth {
+        top,
+        limit: top - STACK_LIMIT,
+    });
+    match run_ex(&mut env, entry, feats, data_endian, growth, sys) {
         Outcome::Exit(code) => Ok(code),
         Outcome::Unimplemented { pc, word } => Err(format!("unimplemented at {pc:#x}: {word:#x}")),
         Outcome::StepLimit { pc } => Err(format!("step limit at {pc:#x}")),
@@ -866,7 +947,13 @@ mod tests {
         poke(&mut env, 0x1_000c, 0xd280_0061); // movz x1, #3（分岐先）
         let mut sys = NoSys;
         env.pc = 0x1_0000;
-        let _ = polyisa_engine::run::run(&mut env, &mut sys, 3, |e| e.pc, |e, s| step_a64(e, s, 0));
+        let _ = polyisa_engine::run::run(
+            &mut env,
+            &mut sys,
+            3,
+            |e| e.pc,
+            |e, s| step_a64(e, s, 0, Endian::Le, None),
+        );
         assert_eq!(xreg(&mut env, 1), 3);
     }
 
@@ -878,7 +965,13 @@ mod tests {
         poke(&mut env, 0x1_0000, 0x9100_43ff); // add sp, sp, #16
         let mut sys = NoSys;
         env.pc = 0x1_0000;
-        let _ = polyisa_engine::run::run(&mut env, &mut sys, 1, |e| e.pc, |e, s| step_a64(e, s, 0));
+        let _ = polyisa_engine::run::run(
+            &mut env,
+            &mut sys,
+            1,
+            |e| e.pc,
+            |e, s| step_a64(e, s, 0, Endian::Le, None),
+        );
         assert_eq!(env.backend.get(sem::sp_ref()), 0x7010);
     }
 
@@ -892,7 +985,13 @@ mod tests {
         poke(&mut env, 0x1_0000, 0xeb22_63ff); // cmp sp, x2
         let mut sys = NoSys;
         env.pc = 0x1_0000;
-        let _ = polyisa_engine::run::run(&mut env, &mut sys, 1, |e| e.pc, |e, s| step_a64(e, s, 0));
+        let _ = polyisa_engine::run::run(
+            &mut env,
+            &mut sys,
+            1,
+            |e| e.pc,
+            |e, s| step_a64(e, s, 0, Endian::Le, None),
+        );
         assert_eq!(env.backend.get(sem::nzcv_ref()) & 4, 4, "Z=1 で一致");
     }
 
@@ -907,7 +1006,13 @@ mod tests {
         poke(&mut env, 0x1_0000, 0x9a85_2083); // csel x3, x4, x5, hs
         let mut sys = NoSys;
         env.pc = 0x1_0000;
-        let _ = polyisa_engine::run::run(&mut env, &mut sys, 1, |e| e.pc, |e, s| step_a64(e, s, 0));
+        let _ = polyisa_engine::run::run(
+            &mut env,
+            &mut sys,
+            1,
+            |e| e.pc,
+            |e, s| step_a64(e, s, 0, Endian::Le, None),
+        );
         assert_eq!(xreg(&mut env, 3), 111, "hs 成立で rn を選択");
     }
 
@@ -920,7 +1025,13 @@ mod tests {
         poke(&mut env, 0x1_0004, 0xdac0_1023); // clz x3, x1
         let mut sys = NoSys;
         env.pc = 0x1_0000;
-        let _ = polyisa_engine::run::run(&mut env, &mut sys, 2, |e| e.pc, |e, s| step_a64(e, s, 0));
+        let _ = polyisa_engine::run::run(
+            &mut env,
+            &mut sys,
+            2,
+            |e| e.pc,
+            |e, s| step_a64(e, s, 0, Endian::Le, None),
+        );
         assert_eq!(xreg(&mut env, 2), 31);
         assert_eq!(xreg(&mut env, 3), 63);
     }
@@ -941,7 +1052,13 @@ mod tests {
         poke(&mut env, 0x1_0000, 0xa8c4_6bf9); // ldp x25, x26, [sp], #0x40
         let mut sys = NoSys;
         env.pc = 0x1_0000;
-        let _ = polyisa_engine::run::run(&mut env, &mut sys, 1, |e| e.pc, |e, s| step_a64(e, s, 0));
+        let _ = polyisa_engine::run::run(
+            &mut env,
+            &mut sys,
+            1,
+            |e| e.pc,
+            |e, s| step_a64(e, s, 0, Endian::Le, None),
+        );
         assert_eq!(xreg(&mut env, 25), 0x1111);
         assert_eq!(xreg(&mut env, 26), 0x2222);
         assert_eq!(env.backend.get(sem::sp_ref()), 0x1_00c0, "SP += 0x40");
@@ -960,7 +1077,75 @@ mod tests {
         poke(&mut env, 0x1_0000, 0xf862_7805); // ldr x5, [x0, x2, lsl #3]
         let mut sys = NoSys;
         env.pc = 0x1_0000;
-        let _ = polyisa_engine::run::run(&mut env, &mut sys, 1, |e| e.pc, |e, s| step_a64(e, s, 0));
+        let _ = polyisa_engine::run::run(
+            &mut env,
+            &mut sys,
+            1,
+            |e| e.pc,
+            |e, s| step_a64(e, s, 0, Endian::Le, None),
+        );
         assert_eq!(xreg(&mut env, 5), 0xbeef);
+    }
+
+    #[test]
+    fn mrs_returns_id_registers() {
+        // mrs x0, midr_el1 / mrs x1, id_aa64pfr0_el1 / mrs x2, mvfr0_el1。
+        // ID 値は実装済み機能に整合させる（FP/AdvSIMD=実装済み、EL0 は A64 のみ）。
+        let mut env = env_at(0x1_0000);
+        poke(&mut env, 0x1_0000, 0xd538_0000); // mrs x0, midr_el1
+        poke(&mut env, 0x1_0004, 0xd538_0401); // mrs x1, id_aa64pfr0_el1
+        poke(&mut env, 0x1_0008, 0xd538_0302); // mrs x2, mvfr0_el1
+        let mut sys = NoSys;
+        env.pc = 0x1_0000;
+        let _ = polyisa_engine::run::run(
+            &mut env,
+            &mut sys,
+            3,
+            |e| e.pc,
+            |e, s| step_a64(e, s, 0, Endian::Le, None),
+        );
+        assert_eq!(xreg(&mut env, 0), 0x410f_d034);
+        assert_eq!(xreg(&mut env, 1), 0x2);
+        assert_eq!(xreg(&mut env, 2), 0x1011_0112);
+    }
+
+    #[test]
+    fn stack_grows_on_fault() {
+        // stp で現在の写像の下端を越えて書き、ページフォルト駆動の
+        // スタック成長で継続できるかを確かめる。
+        let mut env = env_at(0x1_0000);
+        let top = 0x1_0000u64;
+        let growth = Some(StackGrowth {
+            top,
+            limit: top - 0x8000,
+        });
+        // sp の指すページのみ写像済みにして、その下への stp をフォルトさせる。
+        env.backend
+            .mem
+            .map(VirtAddr(top - PAGE_SIZE), 1, Perms(Perms::R.0 | Perms::W.0))
+            .unwrap();
+        env.backend.set(sem::sp_ref(), top - PAGE_SIZE);
+        env.backend.set(Gpr(0).state(), 0xaaaa);
+        env.backend.set(Gpr(1).state(), 0xbbbb);
+        // stp x0, x1, [sp, #-0x200]!: 窓内の未写像アドレスへの書き込み。
+        poke(&mut env, 0x1_0000, 0xa9a0_07e0); // stp x0, x1, [sp, #-0x200]!
+        let mut sys = NoSys;
+        env.pc = 0x1_0000;
+        let _ = polyisa_engine::run::run(
+            &mut env,
+            &mut sys,
+            2,
+            |e| e.pc,
+            |e, s| step_a64(e, s, 0, Endian::Le, growth),
+        );
+        // 成長して書き込みが完了し、sp が書き戻されている。
+        assert_eq!(env.backend.get(sem::sp_ref()), top - PAGE_SIZE - 0x200);
+        let mut buf = [0u8; 16];
+        env.backend
+            .mem
+            .read(VirtAddr(top - PAGE_SIZE - 0x200), &mut buf, Access::DATA_LE)
+            .unwrap();
+        assert_eq!(&buf[..8], &0xaaaau64.to_le_bytes());
+        assert_eq!(&buf[8..], &0xbbbbu64.to_le_bytes());
     }
 }

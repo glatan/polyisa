@@ -93,6 +93,12 @@ enum Disp {
 }
 
 impl Linux {
+    /// ELF の `EI_DATA` に合わせてデータエンディアンを切り替える。
+    /// 構造体の読み書き全般に効く。
+    pub fn set_endian(&mut self, endian: Endian) {
+        self.endian = endian;
+    }
+
     /// リトルエンディアンの Linux 状態機械を作る。
     #[must_use]
     pub fn new(endian: Endian) -> Self {

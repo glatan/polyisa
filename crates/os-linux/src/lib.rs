@@ -70,6 +70,8 @@ pub enum GuestAbi {
 /// 実行ループとの境界。定義は実行エンジンにある。
 pub use polyisa_engine::run::{TrapHandler, TrapOutcome};
 
+use polyisa_mem::Endian;
+
 /// Linux の `clone` フラグ。アドレス空間の共有はプロセス生成では使わない。
 // Ref: SRC-LINUX (7.3).
 pub mod clone_flag {
@@ -403,7 +405,20 @@ pub fn build_initial_stack(
     env: &[Vec<u8>],
     auxv: &[(u64, u64)],
 ) -> (Vec<u8>, u64) {
-    build_initial_stack_ws(top, args, env, auxv, 8)
+    build_initial_stack_ws(top, args, env, auxv, 8, Endian::Le)
+}
+
+/// `build_initial_stack` にゲストのデータエンディアンを添える形。
+/// auxv や argv ポインタの各ワードはゲストのエンディアンで書く。
+#[must_use]
+pub fn build_initial_stack_endian(
+    top: u64,
+    args: &[Vec<u8>],
+    env: &[Vec<u8>],
+    auxv: &[(u64, u64)],
+    endian: Endian,
+) -> (Vec<u8>, u64) {
+    build_initial_stack_ws(top, args, env, auxv, 8, endian)
 }
 
 /// i386 の初期スタック。エントリ幅が 4 バイト（argc/argv/envp/auxv すべて u32）。
@@ -413,7 +428,7 @@ pub fn build_initial_stack32(
     env: &[Vec<u8>],
     auxv: &[(u64, u64)],
 ) -> (Vec<u8>, u64) {
-    build_initial_stack_ws(top, args, env, auxv, 4)
+    build_initial_stack_ws(top, args, env, auxv, 4, Endian::Le)
 }
 
 fn build_initial_stack_ws(
@@ -422,9 +437,14 @@ fn build_initial_stack_ws(
     env: &[Vec<u8>],
     auxv: &[(u64, u64)],
     ws: usize,
+    endian: Endian,
 ) -> (Vec<u8>, u64) {
     let w = |out: &mut [u8], off: usize, v: u64| {
-        out[off..off + ws].copy_from_slice(&v.to_le_bytes()[..ws]);
+        let b = match endian {
+            Endian::Be => v.to_be_bytes(),
+            Endian::Le => v.to_le_bytes(),
+        };
+        out[off..off + ws].copy_from_slice(&b[..ws]);
     };
     let strings_len: usize = args.iter().map(|a| a.len() + 1).sum::<usize>()
         + env.iter().map(|e| e.len() + 1).sum::<usize>();

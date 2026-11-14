@@ -202,3 +202,71 @@ fn run_path_executes_aarch64_hello() {
     let _ = std::fs::remove_file(&path);
     assert_eq!(r, Ok(7));
 }
+
+#[cfg(feature = "guest-aarch64")]
+fn be_aarch64(code: &[u8], data: &[u8]) -> Vec<u8> {
+    // ビッグエンディアンの AArch64 ELF。EI_DATA=2 で全ての多バイト
+    // フィールドを BE にする。命令列そのものは AArch64 の規約で
+    // 常にリトルエンディアン。
+    let mut f = Vec::new();
+    f.extend_from_slice(&[0x7f, b'E', b'L', b'F', 2, 2, 1, 0]);
+    f.extend_from_slice(&[0u8; 8]);
+    f.extend_from_slice(&2u16.to_be_bytes());
+    f.extend_from_slice(&183u16.to_be_bytes()); // EM_AARCH64
+    f.extend_from_slice(&1u32.to_be_bytes());
+    f.extend_from_slice(&0x400000u64.to_be_bytes());
+    f.extend_from_slice(&64u64.to_be_bytes());
+    f.extend_from_slice(&0u64.to_be_bytes());
+    f.extend_from_slice(&0u32.to_be_bytes());
+    f.extend_from_slice(&64u16.to_be_bytes());
+    f.extend_from_slice(&56u16.to_be_bytes());
+    f.extend_from_slice(&1u16.to_be_bytes());
+    f.extend_from_slice(&0u16.to_be_bytes());
+    f.extend_from_slice(&0u16.to_be_bytes());
+    f.extend_from_slice(&0u16.to_be_bytes());
+    let seg_len = (code.len() + data.len()) as u64;
+    f.extend_from_slice(&1u32.to_be_bytes());
+    f.extend_from_slice(&7u32.to_be_bytes()); // RWX
+    f.extend_from_slice(&120u64.to_be_bytes());
+    f.extend_from_slice(&0x400000u64.to_be_bytes());
+    f.extend_from_slice(&0x400000u64.to_be_bytes());
+    f.extend_from_slice(&seg_len.to_be_bytes());
+    f.extend_from_slice(&seg_len.to_be_bytes());
+    f.extend_from_slice(&0x1000u64.to_be_bytes());
+    f.extend_from_slice(code);
+    f.extend_from_slice(data);
+    f
+}
+
+#[cfg(feature = "guest-aarch64")]
+#[test]
+fn run_path_executes_aarch64_be_data_access() {
+    // BE のデータ読み出し: ldr x0, [x1] が 0x07 を返し exit(7) になる。
+    // LE として読むと 0x0700_0000_0000_0000 になり終了コードは 0。
+    let code: &[u8] = &[
+        0x81, 0x00, 0x00, 0x10, // adr x1, #16
+        0x20, 0x00, 0x40, 0xf9, // ldr x0, [x1]
+        0xc8, 0x0b, 0x80, 0xd2, // movz x8, #94 (exit_group)
+        0x01, 0x00, 0x00, 0xd4, // svc #0
+    ];
+    let data: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 7]; // BE の u64 = 7
+    let path = write_temp("be_aarch64", &be_aarch64(code, data));
+    let r = polyisa_cli::run_path(&path.to_string_lossy(), &[]);
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(r, Ok(7));
+}
+
+#[cfg(feature = "guest-aarch64")]
+#[test]
+fn run_path_executes_aarch64_be_initial_stack() {
+    // 初期スタックも BE で書かれる: ldr x0, [sp] が argc=1 を読み exit(1)。
+    let code: &[u8] = &[
+        0xe0, 0x03, 0x40, 0xf9, // ldr x0, [sp]
+        0xc8, 0x0b, 0x80, 0xd2, // movz x8, #94 (exit_group)
+        0x01, 0x00, 0x00, 0xd4, // svc #0
+    ];
+    let path = write_temp("be_aarch64_stack", &be_aarch64(code, &[]));
+    let r = polyisa_cli::run_path(&path.to_string_lossy(), &[]);
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(r, Ok(1));
+}
