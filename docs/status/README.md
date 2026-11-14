@@ -2,7 +2,7 @@
 
 このファイルは `task status` が生成する。手で編集しない。
 
-生成の元は、ISADL の記述（`guests/*/spec/`）、ロードマップの完了条件、設計との差の台帳、システムコールの表（`crates/os-linux/src/rv64/sys.rs` の `RV64_SYSCALLS`、`crates/os-linux/src/x86/sys.rs` の `X86_64_SYSCALLS` と `X86_32_SYSCALLS`、`crates/cli/src/run_mips.rs` の `MIPS_O32_SYSCALLS`）である。テストの結果は含めない。
+生成の元は、ISADL の記述（`guests/*/spec/`）、ロードマップの完了条件、設計との差の台帳、システムコールの表（`crates/os-linux/src/rv64/sys.rs` の `RV64_SYSCALLS`、`crates/os-linux/src/x86/sys.rs` の `X86_64_SYSCALLS` と `X86_32_SYSCALLS`、`crates/os-linux/src/mips_o32.rs`・`mips_n32.rs`・`mips_n64.rs` の各 `SYSCALLS`）である。テストの結果は含めない。
 
 ## 段階の完了条件
 
@@ -105,19 +105,19 @@
 | rv64 | 3 | [syscalls.md](syscalls.md) |
 | x86_64 | 150 | [syscalls.md](syscalls.md) |
 | x86_32 | 83 | [syscalls.md](syscalls.md) |
-| mips_o32 | 2 | [syscalls.md](syscalls.md) |
+| mips_o32 | 444 | [syscalls.md](syscalls.md) |
+| mips_n32 | 398 | [syscalls.md](syscalls.md) |
+| mips_n64 | 374 | [syscalls.md](syscalls.md) |
 
 ## 設計との差
 
-台帳は [設計との差の台帳](../gaps.md) にある。未着手は 7 件、代替は 14 件、対象外は 3 件である。
+台帳は [設計との差の台帳](../gaps.md) にある。未着手は 7 件、代替は 12 件、対象外は 3 件である。
 
 | ID | 区分 | 設計 |
 |---|---|---|
-| GAP-0001 | 代替 | [ユーザーモード「構成」](../design/user-mode.md#構成) |
 | GAP-0002 | 代替 | [ユーザーモード「仮想ファイルシステム」](../design/user-mode.md#仮想ファイルシステム) |
 | GAP-0004 | 対象外 | [ホスト抽象化「必要なホストの機能」](../design/host.md#必要なホストの機能) |
 | GAP-0006 | 対象外 | [ISA 記述言語（ISADL）「ファイルの配置」](../design/isa-description.md#ファイルの配置) |
-| GAP-0007 | 代替 | [実行エンジン「実行ループ」](../design/execution-engine.md#実行ループ) |
 | GAP-0008 | 未着手 | [実行エンジン「観測点」](../design/execution-engine.md#観測点) |
 | GAP-0009 | 代替 | [浮動小数点と十進演算「検証」](../design/floating-point.md#検証) |
 | GAP-0010 | 未着手 | [検証戦略「5. 適合テストスイート」](../design/testing.md#5-適合テストスイート) |

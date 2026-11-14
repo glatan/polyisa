@@ -22,7 +22,7 @@ polyisa-trace = { path = "../trace" }
 
 [features]
 default = ["guest-mips", "guest-riscv", "guest-x86"]
-guest-mips = ["dep:polyisa-guest-mips"]
+guest-mips = ["dep:polyisa-guest-mips", "polyisa-os-linux/guest-mips"]
 guest-riscv = ["dep:polyisa-guest-riscv", "polyisa-os-linux/guest-riscv"]
 guest-x86 = ["dep:polyisa-guest-x86", "polyisa-os-linux/guest-x86"]
 

@@ -11,7 +11,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use polyisa_cli::run_mips::{MipsModel, O32Io, run_elf_model};
+use polyisa_cli::run_mips::{MipsModel, run_elf_model};
+use polyisa_os_linux::mips::sys::Linux;
 
 const SRC: &str = r#"
 const char msg[] __attribute__((used)) = "hi\n";
@@ -80,10 +81,10 @@ fn four_models_print_hi() {
     ];
     for (target, march, model) in cases {
         let elf = compile(&dir, target, march, &lld);
-        let mut io = O32Io::default();
-        let code = run_elf_model(elf.to_str().unwrap(), model, &mut io)
+        let mut sys = Linux::o32(model.endian);
+        let code = run_elf_model(elf.to_str().unwrap(), model, &mut sys)
             .unwrap_or_else(|e| panic!("{target} {march}: {e}"));
         assert_eq!(code, 0, "{target} {march}");
-        assert_eq!(io.stdout, b"hi\n", "{target} {march}");
+        assert_eq!(sys.io.stdout, b"hi\n", "{target} {march}");
     }
 }

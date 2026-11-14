@@ -41,6 +41,11 @@ pub struct CpuState {
     /// ゼロ埋めの裸実行は 0 なので、従来の「不変」と同じになる。
     /// Ref: SPEC-MIPS-IV (Rev 3.2) の DIV の UNPREDICTABLE。
     pub div_zero_writes_zero: u64,
+    /// ユーザーモードの HW レジスタ（RDHWR $0〜$3）。`$3` は TLS ポインタで、
+    /// `set_thread_area` が書く。`$0` は CPU 番号、`$1` は SYNCI 単位、`$2` は CC。
+    /// CC の読み出しはカウントレジスタの代わりにステップ数を使う。
+    /// Ref: SRC-LINUX (7.3) の `arch/mips/kernel/traps.c` の HW レジスタ。
+    pub hwr: [u64; 4],
 }
 
 impl Default for CpuState {
@@ -52,6 +57,7 @@ impl Default for CpuState {
             hi: 0,
             lo: 0,
             div_zero_writes_zero: 0,
+            hwr: [0; 4],
         }
     }
 }
@@ -77,6 +83,7 @@ mod tests {
             core::mem::offset_of!(CpuState, div_zero_writes_zero),
             32 * 8 + 32
         );
+        assert_eq!(core::mem::offset_of!(CpuState, hwr), 32 * 8 + 40);
     }
 
     #[test]

@@ -55,6 +55,11 @@ pub fn div_zero_writes_zero_ref() -> StateRef<W64> {
     StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, div_zero_writes_zero))
 }
 
+/// ユーザーモードの HW レジスタ `hwr[i]` を指す（RDHWR $0〜$3）。
+pub fn hwr_ref(i: u8) -> StateRef<W64> {
+    StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, hwr) + usize::from(i) * 8)
+}
+
 fn read<B: Backend>(b: &mut B, r: Gpr) -> B::V<W64> {
     if r.is_zero() {
         b.konst::<W64>(0)

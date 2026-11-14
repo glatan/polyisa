@@ -2,14 +2,18 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! MIPS のフェッチから次のフェッチまで。遅延スロットは分岐と同じステップで実行する。
 //!
+//! 繰り返しと退出の判定は `engine::run::run` に置き、ここでは 1 ステップぶんの
+//! フェッチ・解読・意味論を `step` として提供する（ADR-0016、GAP-0007）。
+//! syscall の処理は `os-linux` の `mips::sys::Linux` に委譲する（GAP-0001）。
+//!
 //! 分岐とジャンプは `npc` だけを書き換え、スロットの命令を実行してから `commit` する。
 //! スロット内の例外は `in_delay_slot` を立てて戻す。R3000 のロード遅延は
-//! 命令のあとにレジスタを戻し、次の命令が古い値を読む。syscall は o32 の
-//! write と exit を処理し、成功は a3=0 と v0、失敗は a3=1 と正の errno で返す。
+//! 命令のあとにレジスタを戻し、次の命令が古い値を読む。
 //! Ref: SPEC-MIPS-IV (Rev 3.2).
 
 use polyisa_engine::bare::BareEnv;
 use polyisa_engine::interp::InterpExit;
+use polyisa_engine::run::{Outcome, TrapHandler, TrapOutcome};
 use polyisa_guest_mips::sem::{self, Gpr};
 use polyisa_guest_mips::{Insn, decode_model_ex};
 use polyisa_mem::{Access, AccessKind, Align, Endian, VirtAddr};
@@ -25,6 +29,8 @@ pub struct MipsModel {
     pub endian: Endian,
     /// R3000 だけが真。Release 2 と Release 6 は偽。
     pub load_delay: bool,
+    /// n32/n64 の MIPS64 命令を有効にする。32 ビットモデルでは偽。
+    pub is64: bool,
 }
 
 impl MipsModel {
@@ -35,6 +41,7 @@ impl MipsModel {
             feats: 0,
             endian: Endian::Be,
             load_delay: true,
+            is64: false,
         }
     }
 
@@ -45,6 +52,7 @@ impl MipsModel {
             feats: 0,
             endian: Endian::Le,
             load_delay: true,
+            is64: false,
         }
     }
 
@@ -55,6 +63,7 @@ impl MipsModel {
             feats: 0,
             endian: Endian::Le,
             load_delay: false,
+            is64: false,
         }
     }
 
@@ -65,6 +74,29 @@ impl MipsModel {
             feats: polyisa_guest_mips::FEAT_MIPS_R6,
             endian: Endian::Le,
             load_delay: false,
+            is64: false,
+        }
+    }
+
+    /// MIPS64 Release 2（n32/n64 を走らせる 64 ビットモデル）。
+    #[must_use]
+    pub const fn mips64r2() -> Self {
+        Self {
+            feats: 0,
+            endian: Endian::Be,
+            load_delay: false,
+            is64: true,
+        }
+    }
+
+    /// MIPS64 Release 6。
+    #[must_use]
+    pub const fn mips64r6() -> Self {
+        Self {
+            feats: polyisa_guest_mips::FEAT_MIPS_R6,
+            endian: Endian::Be,
+            load_delay: false,
+            is64: true,
         }
     }
 }
@@ -78,6 +110,158 @@ pub enum MipsOutcome {
     Exception(GuestException),
 }
 
+/// `engine::run::run` の `step` に渡す MIPS の状態。R3000 の
+/// ロード遅延の保留と、最後の例外を覚える。
+pub struct MipsStep {
+    pub model: MipsModel,
+    pending: Option<(u8, u64)>,
+    last_exc: Option<GuestException>,
+}
+
+impl MipsStep {
+    #[must_use]
+    pub fn new(model: MipsModel) -> Self {
+        Self {
+            model,
+            pending: None,
+            last_exc: None,
+        }
+    }
+
+    /// 最後に起きたゲスト例外。`Outcome::Unimplemented` と同時に立つ。
+    #[must_use]
+    pub fn last_exception(&self) -> Option<GuestException> {
+        self.last_exc
+    }
+
+    /// 1 ステップぶんのフェッチ・解読・意味論とトラップ境界の解決。
+    /// 遅延スロットは分岐と同じ呼び出しの内側で実行する。
+    pub fn step<H: ?Sized + TrapHandler>(
+        &mut self,
+        env: &mut BareEnv,
+        sys: &mut H,
+    ) -> Result<(), Outcome> {
+        let model = self.model;
+        let pc = get_u64(env, sem::pc_ref().offset());
+        let word = match fetch(env, pc, model.endian, false) {
+            Ok(w) => w,
+            Err(stop) => return Err(self.stop_outcome(stop)),
+        };
+        let Some(insn) = decode_model_ex(u128::from(word), 32, true, model.feats) else {
+            return Err(Outcome::Unimplemented {
+                pc,
+                word: u128::from(word),
+            });
+        };
+        if insn == Insn::Syscall {
+            return self.syscall(env, sys, pc, word);
+        }
+        if has_delay_slot(insn) {
+            let effect = match exec(env, insn, word, pc, model, false) {
+                Ok(effect) => effect,
+                Err(stop) => return Err(self.stop_outcome(stop)),
+            };
+            self.pending = retire(env, self.pending, effect);
+            let slot_pc = pc.wrapping_add(4);
+            let slot = match fetch(env, slot_pc, model.endian, true) {
+                Ok(w) => w,
+                Err(stop) => return Err(self.stop_outcome(stop)),
+            };
+            let Some(slot_insn) = decode_model_ex(u128::from(slot), 32, true, model.feats) else {
+                return Err(Outcome::Unimplemented {
+                    pc: slot_pc,
+                    word: u128::from(slot),
+                });
+            };
+            if has_delay_slot(slot_insn) || slot_insn == Insn::Beqzalc {
+                return Err(Outcome::Unimplemented {
+                    pc: slot_pc,
+                    word: u128::from(slot),
+                });
+            }
+            if slot_insn == Insn::Syscall {
+                return self.syscall(env, sys, slot_pc, slot);
+            }
+            match exec(env, slot_insn, slot, slot_pc, model, true) {
+                Ok(effect) => self.pending = retire(env, self.pending, effect),
+                Err(stop) => return Err(self.stop_outcome(stop)),
+            }
+            return match commit(env) {
+                Ok(()) => Ok(()),
+                Err(stop) => Err(self.stop_outcome(stop)),
+            };
+        }
+        let direct = insn == Insn::Beqzalc;
+        match exec(env, insn, word, pc, model, false) {
+            Ok(effect) => self.pending = retire(env, self.pending, effect),
+            Err(stop) => return Err(self.stop_outcome(stop)),
+        }
+        if direct {
+            let now = get_u64(env, sem::pc_ref().offset());
+            set_u64(env, sem::npc_ref().offset(), now.wrapping_add(4));
+            return Ok(());
+        }
+        match commit(env) {
+            Ok(()) => Ok(()),
+            Err(stop) => Err(self.stop_outcome(stop)),
+        }
+    }
+
+    /// syscall の処理。`TrapOutcome` を `Outcome` に写す。
+    /// 処理に成功したときはロード遅延の保留を v0/a3 以外に反映する。
+    fn syscall<H: ?Sized + TrapHandler>(
+        &mut self,
+        env: &mut BareEnv,
+        sys: &mut H,
+        pc: u64,
+        word: u32,
+    ) -> Result<(), Outcome> {
+        match sys.handle_trap(env, word) {
+            TrapOutcome::Handled => {
+                self.pending = release_pending(env, self.pending, &[2, 7]);
+                match commit(env) {
+                    Ok(()) => Ok(()),
+                    Err(stop) => Err(self.stop_outcome(stop)),
+                }
+            }
+            TrapOutcome::Exit(code) => {
+                if sys.take_exit(env, code) {
+                    Ok(())
+                } else {
+                    Err(Outcome::Exit(u64::from(code)))
+                }
+            }
+            TrapOutcome::Blocked => {
+                if sys.on_block(env) {
+                    Ok(())
+                } else {
+                    Err(Outcome::Deadlock)
+                }
+            }
+            TrapOutcome::Unimplemented => Err(Outcome::Unimplemented {
+                pc,
+                word: u128::from(word),
+            }),
+        }
+    }
+
+    fn stop_outcome(&mut self, stop: Stop) -> Outcome {
+        match stop {
+            Stop::Unimplemented { pc, word } => Outcome::Unimplemented {
+                pc,
+                word: u128::from(word),
+            },
+            Stop::Exception(e) => {
+                self.last_exc = Some(e);
+                Outcome::Unimplemented {
+                    pc: e.addr.unwrap_or(0),
+                    word: 0,
+                }
+            }
+        }
+    }
+}
+
 struct Effect {
     wrote: Option<u8>,
     delayed: Option<u64>,
@@ -88,104 +272,45 @@ enum Stop {
     Exception(GuestException),
 }
 
-/// o32 の write が集めたバイト。標準出力と標準エラーを分ける。
-#[derive(Default)]
-pub struct O32Io {
-    pub stdout: Vec<u8>,
-    pub stderr: Vec<u8>,
+/// `entry` から `model` で実行する。`sys` は OS パーソナリティ。
+pub fn run(
+    env: &mut BareEnv,
+    entry: u64,
+    model: MipsModel,
+    sys: &mut impl TrapHandler,
+) -> MipsOutcome {
+    run_ex(env, entry, model, sys, STEP_LIMIT)
 }
 
-/// `entry` から `model` で実行する。システムコールの出力は捨てる。
-// Gap: GAP-0007（MIPS の実行ループは遅延スロットの構造が独自で、段階 5 で engine へ移す）
-pub fn run(env: &mut BareEnv, entry: u64, model: MipsModel) -> MipsOutcome {
-    run_os(env, entry, model, &mut O32Io::default())
-}
-
-/// `entry` から `model` で実行する。syscall は o32 の write と exit だけを処理する。
-pub fn run_os(env: &mut BareEnv, entry: u64, model: MipsModel, io: &mut O32Io) -> MipsOutcome {
+/// `run` にステップ数の上限を渡す。
+pub fn run_ex(
+    env: &mut BareEnv,
+    entry: u64,
+    model: MipsModel,
+    sys: &mut impl TrapHandler,
+    limit: u64,
+) -> MipsOutcome {
     set_u64(env, sem::pc_ref().offset(), entry);
     set_u64(env, sem::npc_ref().offset(), entry.wrapping_add(4));
-    let mut pending: Option<(u8, u64)> = None;
-    for _ in 0..STEP_LIMIT {
-        let pc = get_u64(env, sem::pc_ref().offset());
-        let word = match fetch(env, pc, model.endian, false) {
-            Ok(w) => w,
-            Err(Stop::Unimplemented { pc, word }) => {
-                return MipsOutcome::Unimplemented { pc, word };
-            }
-            Err(Stop::Exception(e)) => return MipsOutcome::Exception(e),
-        };
-        let Some(insn) = decode_model_ex(u128::from(word), 32, true, model.feats) else {
-            return MipsOutcome::Unimplemented { pc, word };
-        };
-        if insn == Insn::Syscall {
-            match o32_syscall(env, model, io, pending, pc, word) {
-                Ok((O32Cont::Next, next)) => pending = next,
-                Ok((O32Cont::Exit(code), _)) => return MipsOutcome::Exit(code),
-                Err(stop) => return stop_outcome(stop),
-            }
-            if let Err(stop) = commit(env) {
-                return stop_outcome(stop);
-            }
-            continue;
-        }
-        if has_delay_slot(insn) {
-            let branch_effect = match exec(env, insn, word, pc, model, false) {
-                Ok(effect) => effect,
-                Err(stop) => return stop_outcome(stop),
-            };
-            pending = retire(env, pending, branch_effect);
-            let slot_pc = pc.wrapping_add(4);
-            let slot = match fetch(env, slot_pc, model.endian, true) {
-                Ok(w) => w,
-                Err(stop) => return stop_outcome(stop),
-            };
-            let Some(slot_insn) = decode_model_ex(u128::from(slot), 32, true, model.feats) else {
-                return MipsOutcome::Unimplemented {
-                    pc: slot_pc,
-                    word: slot,
-                };
-            };
-            if has_delay_slot(slot_insn) || slot_insn == Insn::Beqzalc {
-                return MipsOutcome::Unimplemented {
-                    pc: slot_pc,
-                    word: slot,
-                };
-            }
-            if slot_insn == Insn::Syscall {
-                match o32_syscall(env, model, io, pending, slot_pc, slot) {
-                    Ok((O32Cont::Next, next)) => pending = next,
-                    Ok((O32Cont::Exit(code), _)) => return MipsOutcome::Exit(code),
-                    Err(stop) => return stop_outcome(stop),
-                }
-                if let Err(stop) = commit(env) {
-                    return stop_outcome(stop);
-                }
-                continue;
-            }
-            match exec(env, slot_insn, slot, slot_pc, model, true) {
-                Ok(effect) => pending = retire(env, pending, effect),
-                Err(stop) => return stop_outcome(stop),
-            }
-            if let Err(stop) = commit(env) {
-                return stop_outcome(stop);
-            }
-            continue;
-        }
-        let direct = insn == Insn::Beqzalc;
-        match exec(env, insn, word, pc, model, false) {
-            Ok(effect) => pending = retire(env, pending, effect),
-            Err(stop) => return stop_outcome(stop),
-        }
-        if direct {
-            let now = get_u64(env, sem::pc_ref().offset());
-            set_u64(env, sem::npc_ref().offset(), now.wrapping_add(4));
-        } else if let Err(stop) = commit(env) {
-            return stop_outcome(stop);
-        }
-    }
-    MipsOutcome::StepLimit {
-        pc: get_u64(env, sem::pc_ref().offset()),
+    let mut st = MipsStep::new(model);
+    let out = polyisa_engine::run::run(
+        env,
+        sys,
+        limit,
+        |env| get_u64(env, sem::pc_ref().offset()),
+        |env, sys| st.step(env, sys),
+    );
+    match (out, st.last_exception()) {
+        (_, Some(e)) => MipsOutcome::Exception(e),
+        (Outcome::Exit(code), _) => MipsOutcome::Exit(code),
+        (Outcome::Unimplemented { pc, word }, _) => MipsOutcome::Unimplemented {
+            pc,
+            word: word as u32,
+        },
+        (Outcome::StepLimit { pc }, _) => MipsOutcome::StepLimit { pc },
+        (Outcome::Deadlock, _) => MipsOutcome::StepLimit {
+            pc: get_u64(env, sem::pc_ref().offset()),
+        },
     }
 }
 
@@ -205,13 +330,6 @@ fn has_delay_slot(insn: Insn) -> bool {
             | Insn::Jr
             | Insn::Jalr
     )
-}
-
-fn stop_outcome(stop: Stop) -> MipsOutcome {
-    match stop {
-        Stop::Unimplemented { pc, word } => MipsOutcome::Unimplemented { pc, word },
-        Stop::Exception(e) => MipsOutcome::Exception(e),
-    }
 }
 
 fn retire(env: &mut BareEnv, pending: Option<(u8, u64)>, effect: Effect) -> Option<(u8, u64)> {
@@ -434,86 +552,6 @@ fn fetch(env: &BareEnv, pc: u64, endian: Endian, in_slot: bool) -> Result<u32, S
     })
 }
 
-enum O32Cont {
-    Next,
-    Exit(u64),
-}
-
-type MipsSysFn = fn(&mut O32Io, &mut BareEnv, MipsModel) -> Result<O32Cont, ()>;
-
-// Gap: GAP-0001（MIPS o32 の syscall 処理は cli に残る。段階 5 で os-linux へ移す）
-#[rustfmt::skip]
-const MIPS_O32_SYSCALLS: &[(&str, MipsSysFn)] = &[
-    ("write", sys_write),
-    ("exit", sys_exit),
-];
-
-fn o32_syscall(
-    env: &mut BareEnv,
-    model: MipsModel,
-    io: &mut O32Io,
-    pending: Option<(u8, u64)>,
-    pc: u64,
-    word: u32,
-) -> Result<(O32Cont, Option<(u8, u64)>), Stop> {
-    let nr = reg(env, 2) & 0xffff_ffff;
-    let name = polyisa_os_linux::syscall_name(polyisa_os_linux::GuestAbi::MipsO32, nr);
-    if let Some(name) = name
-        && let Some((_, handler)) = MIPS_O32_SYSCALLS.iter().find(|(n, _)| *n == name)
-        && let Ok(cont) = handler(io, env, model)
-    {
-        let pending = release_pending(env, pending, &[2, 7]);
-        return Ok((cont, pending));
-    }
-    if let Some(name) = polyisa_os_linux::syscall_name(polyisa_os_linux::GuestAbi::MipsO32, nr) {
-        eprintln!("run: unhandled mips o32 syscall {nr} ({name})");
-    } else {
-        eprintln!("run: unhandled mips o32 syscall {nr}");
-    }
-    Err(Stop::Unimplemented { pc, word })
-}
-
-fn sys_write(io: &mut O32Io, env: &mut BareEnv, model: MipsModel) -> Result<O32Cont, ()> {
-    let fd = reg(env, 4) & 0xffff_ffff;
-    let buf = reg(env, 5) & 0xffff_ffff;
-    let len = (reg(env, 6) & 0xffff_ffff) as usize;
-    if fd != 1 && fd != 2 {
-        return Ok(o32_fail(env, 9));
-    }
-    if len > 1 << 20 {
-        return Ok(o32_fail(env, 14));
-    }
-    let mut data = vec![0u8; len];
-    let acc = Access {
-        endian: model.endian,
-        align: Align::Unaligned,
-        kind: AccessKind::DataRead,
-    };
-    if env.backend.mem.read(VirtAddr(buf), &mut data, acc).is_err() {
-        return Ok(o32_fail(env, 14));
-    }
-    if fd == 1 {
-        io.stdout.extend_from_slice(&data);
-        let _ = std::io::Write::write(&mut std::io::stdout(), &data);
-    } else {
-        io.stderr.extend_from_slice(&data);
-        let _ = std::io::Write::write(&mut std::io::stderr(), &data);
-    }
-    set_reg(env, 2, data.len() as u64);
-    set_reg(env, 7, 0);
-    Ok(O32Cont::Next)
-}
-
-fn o32_fail(env: &mut BareEnv, errno: u64) -> O32Cont {
-    set_reg(env, 2, errno);
-    set_reg(env, 7, 1);
-    O32Cont::Next
-}
-
-fn sys_exit(_io: &mut O32Io, env: &mut BareEnv, _model: MipsModel) -> Result<O32Cont, ()> {
-    Ok(O32Cont::Exit(reg(env, 4) & 0xffff_ffff))
-}
-
 fn release_pending(
     env: &mut BareEnv,
     pending: Option<(u8, u64)>,
@@ -561,7 +599,7 @@ fn set_u64(env: &mut BareEnv, offset: usize, value: u64) {
     env.backend.set(
         polyisa_sem::StateRef::<polyisa_sem::W64>::from_offset(offset),
         value,
-    );
+    )
 }
 
 /// 静的な MIPS ELF を実行する。機械番号 8。モデルは `e_flags` のアーキテクチャとエンディアンから選ぶ。
@@ -581,20 +619,22 @@ pub fn run_elf_mips_sel(
     let ehdr = polyisa_loader::elf::parse_ehdr32(&bytes).map_err(|e| format!("ehdr: {e:?}"))?;
     let model = match sel {
         Some(s) => {
-            let load_delay = match s.name.as_str() {
-                "r3000" => true,
-                "mips32r2" | "r6" => false,
+            let (load_delay, is64) = match s.name.as_str() {
+                "r3000" => (true, false),
+                "mips32r2" | "r6" => (false, false),
+                "mips64r2" | "mips64r6" => (false, true),
                 name => return Err(format!("mips のモデル {name} は実行できない")),
             };
             MipsModel {
                 feats: s.feats,
                 endian: if ehdr.little { Endian::Le } else { Endian::Be },
                 load_delay,
+                is64,
             }
         }
         None => model_from_flags(ehdr.little, ehdr.flags)?,
     };
-    run_loaded(&bytes, &ehdr, model, &mut O32Io::default())
+    run_loaded(&bytes, &ehdr, model)
 }
 
 /// `e_flags` の上位 4 ビットとエンディアンから CPU モデルを決める。
@@ -605,6 +645,8 @@ fn model_from_flags(little: bool, flags: u32) -> Result<MipsModel, String> {
         0x0000_0000 => MipsModel::mips1_be(),
         0x7000_0000 => MipsModel::mips32r2(),
         0x9000_0000 => MipsModel::r6(),
+        0x5000_0000 => MipsModel::mips64r2(),
+        0xa000_0000 => MipsModel::mips64r6(),
         _ => {
             return Err(format!("未対応の MIPS アーキテクチャフラグ: {arch:#x}"));
         }
@@ -614,17 +656,36 @@ fn model_from_flags(little: bool, flags: u32) -> Result<MipsModel, String> {
 }
 
 /// モデルを指定して静的な MIPS ELF を実行する。エンディアンはヘッダと一致させる。
-pub fn run_elf_model(path: &str, model: MipsModel, io: &mut O32Io) -> Result<u64, String> {
+pub fn run_elf_model(
+    path: &str,
+    model: MipsModel,
+    sys: &mut polyisa_os_linux::mips::sys::Linux,
+) -> Result<u64, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
     let ehdr = polyisa_loader::elf::parse_ehdr32(&bytes).map_err(|e| format!("ehdr: {e:?}"))?;
-    run_loaded(&bytes, &ehdr, model, io)
+    run_loaded_sys(&bytes, &ehdr, model, sys)
 }
 
 fn run_loaded(
     bytes: &[u8],
     ehdr: &polyisa_loader::elf::Ehdr,
     model: MipsModel,
-    io: &mut O32Io,
+) -> Result<u64, String> {
+    let abi = if model.is64 {
+        polyisa_os_linux::mips::sys::Abi::N64
+    } else {
+        polyisa_os_linux::mips::sys::Abi::O32
+    };
+    let mut sys = polyisa_os_linux::mips::sys::Linux::new(abi, model.endian);
+    sys.exe_path = String::new();
+    run_loaded_sys(bytes, ehdr, model, &mut sys)
+}
+
+fn run_loaded_sys(
+    bytes: &[u8],
+    ehdr: &polyisa_loader::elf::Ehdr,
+    model: MipsModel,
+    sys: &mut polyisa_os_linux::mips::sys::Linux,
 ) -> Result<u64, String> {
     use polyisa_mem::{Perms, VirtAddr};
 
@@ -643,20 +704,28 @@ fn run_loaded(
         return Err("動的リンクは未対応".to_string());
     }
     let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_mips::CpuState>());
+    let image_end = phdrs
+        .iter()
+        .filter(|p| p.seg_type == 1)
+        .map(|p| p.vaddr + p.memsz)
+        .max()
+        .unwrap_or(0);
     polyisa_loader::elf::load_segments(bytes, &phdrs, &mut env.backend.mem)
         .map_err(|e| format!("load: {e:?}"))?;
+    sys.init_brk(image_end);
     let sp = 0x7fff_0000u64;
     let page = sp & !(polyisa_mem::PAGE_SIZE - 1);
     env.backend
         .mem
-        .map(VirtAddr(page), 1, Perms(Perms::R.0 | Perms::W.0))
+        .map(VirtAddr(page), 8, Perms(Perms::R.0 | Perms::W.0))
         .map_err(|e| format!("stack map: {e:?}"))?;
+    // 最小の初期スタック（argc=0, argv=NULL, envp=NULL, auxv AT_NULL）。
     env.backend
         .mem
         .write(VirtAddr(sp), &[0, 0, 0, 0])
         .map_err(|e| format!("stack write: {e:?}"))?;
     set_reg(&mut env, 29, sp);
-    match run_os(&mut env, ehdr.entry, model, io) {
+    match run(&mut env, ehdr.entry, model, sys) {
         MipsOutcome::Exit(code) => Ok(code),
         MipsOutcome::Unimplemented { pc, word } => {
             Err(format!("unimplemented at {pc:#x}: {word:#x}"))
@@ -670,6 +739,12 @@ fn run_loaded(
 mod tests {
     use super::*;
     use polyisa_mem::Perms;
+
+    /// OS なしの実行。テストが syscall を含まないときの簡便な起動。
+    fn run_bare(env: &mut BareEnv, entry: u64, model: MipsModel) -> MipsOutcome {
+        let mut sys = polyisa_os_linux::mips::sys::Linux::o32(model.endian);
+        run(env, entry, model, &mut sys)
+    }
 
     fn env_at(base: u64) -> BareEnv {
         let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_mips::CpuState>());
@@ -729,7 +804,7 @@ mod tests {
         set_reg(&mut env, 2, 5);
         set_reg(&mut env, 3, 0x99);
         set_reg(&mut env, 4, 0x1800);
-        let outcome = run(&mut env, 0x1000, MipsModel::mips1_be());
+        let outcome = run_bare(&mut env, 0x1000, MipsModel::mips1_be());
         assert_eq!(
             outcome,
             MipsOutcome::Unimplemented {
@@ -755,7 +830,7 @@ mod tests {
         set_reg(&mut env, 2, 6);
         set_reg(&mut env, 3, 0x99);
         set_reg(&mut env, 4, 0x1800);
-        let outcome = run(&mut env, 0x1000, MipsModel::mips1_be());
+        let outcome = run_bare(&mut env, 0x1000, MipsModel::mips1_be());
         assert!(matches!(
             outcome,
             MipsOutcome::Unimplemented { pc: 0x1010, .. }
@@ -775,7 +850,7 @@ mod tests {
         set_reg(&mut env, 1, 1);
         set_reg(&mut env, 2, 1);
         set_reg(&mut env, 4, 0x1800);
-        let outcome = run(&mut env, 0x1000, MipsModel::mips1_be());
+        let outcome = run_bare(&mut env, 0x1000, MipsModel::mips1_be());
         match outcome {
             MipsOutcome::Exception(exception) => {
                 assert!(exception.in_delay_slot);
@@ -798,7 +873,7 @@ mod tests {
         poke(&mut env, 0x1004, 0x2402_0001);
         poke(&mut env, 0x1008, 0x2403_0007);
         poke(&mut env, 0x100c, 0xffff_ffff);
-        let outcome = run(&mut env, 0x1000, MipsModel::mips1_be());
+        let outcome = run_bare(&mut env, 0x1000, MipsModel::mips1_be());
         assert_eq!(
             outcome,
             MipsOutcome::Unimplemented {
@@ -841,7 +916,7 @@ mod tests {
         poke(&mut env, 0x1800, 0x42);
         set_reg(&mut env, 1, 7);
         set_reg(&mut env, 4, 0x1800);
-        let outcome = run(&mut env, 0x1000, MipsModel::mips1_be());
+        let outcome = run_bare(&mut env, 0x1000, MipsModel::mips1_be());
         assert!(matches!(
             outcome,
             MipsOutcome::Unimplemented { pc: 0x100c, .. }
@@ -862,7 +937,7 @@ mod tests {
         poke(&mut env, 0x1800, 0x42);
         set_reg(&mut env, 1, 7);
         set_reg(&mut env, 4, 0x1800);
-        let outcome = run(&mut env, 0x1000, MipsModel::mips1_be());
+        let outcome = run_bare(&mut env, 0x1000, MipsModel::mips1_be());
         assert!(matches!(
             outcome,
             MipsOutcome::Unimplemented { pc: 0x1010, .. }
@@ -886,7 +961,7 @@ mod tests {
         poke(&mut env, 0x1800, 0);
         set_reg(&mut env, 1, 1);
         set_reg(&mut env, 4, 0x1800);
-        let outcome = run(&mut env, 0x1000, be(MipsModel::r6()));
+        let outcome = run_bare(&mut env, 0x1000, be(MipsModel::r6()));
         assert_eq!(
             outcome,
             MipsOutcome::Unimplemented {
@@ -913,7 +988,7 @@ mod tests {
         poke(&mut env, 0x1004, 0x2001_0004);
         poke(&mut env, 0x1008, 0x2402_0009);
         poke(&mut env, 0x100c, 0xffff_ffff);
-        let outcome = run(&mut env, 0x1000, be(MipsModel::r6()));
+        let outcome = run_bare(&mut env, 0x1000, be(MipsModel::r6()));
         assert_eq!(
             outcome,
             MipsOutcome::Unimplemented {
@@ -931,14 +1006,14 @@ mod tests {
         let mut be_env = env_at(0x1000);
         poke(&mut be_env, 0x1000, 0x2402_0001);
         poke(&mut be_env, 0x1004, 0xffff_ffff);
-        let be = run(&mut be_env, 0x1000, MipsModel::mips1_be());
+        let be = run_bare(&mut be_env, 0x1000, MipsModel::mips1_be());
         assert!(matches!(be, MipsOutcome::Unimplemented { pc: 0x1004, .. }));
         assert_eq!(reg(&mut be_env, 2), 1);
 
         let mut le_env = env_at(0x1000);
         poke(&mut le_env, 0x1000, 0x2402_0001);
         poke(&mut le_env, 0x1004, 0xffff_ffff);
-        let le = run(&mut le_env, 0x1000, MipsModel::mips1_le());
+        let le = run_bare(&mut le_env, 0x1000, MipsModel::mips1_le());
         assert!(matches!(le, MipsOutcome::Unimplemented { pc: 0x1004, .. }));
         assert_eq!(reg(&mut le_env, 2), 0);
     }
@@ -957,7 +1032,7 @@ mod tests {
             poke_endian(&mut env, 0x100c, 0xffff_ffff, model.endian);
             set_reg(&mut env, 2, 0x1122_3344);
             set_reg(&mut env, 4, 0x1800);
-            let outcome = run(&mut env, 0x1000, model);
+            let outcome = run_bare(&mut env, 0x1000, model);
             assert!(
                 matches!(outcome, MipsOutcome::Unimplemented { pc: 0x100c, .. }),
                 "{outcome:?} endian={:?}",
@@ -982,7 +1057,7 @@ mod tests {
         poke(&mut env, 0x1800, 0x42);
         set_reg(&mut env, 1, 7);
         set_reg(&mut env, 4, 0x1800);
-        let outcome = run(&mut env, 0x1000, model);
+        let outcome = run_bare(&mut env, 0x1000, model);
         assert!(matches!(
             outcome,
             MipsOutcome::Unimplemented { pc: 0x100c, .. }
@@ -990,7 +1065,7 @@ mod tests {
         (reg(&mut env, 1), reg(&mut env, 2), reg(&mut env, 3))
     }
 
-    fn write_then(exit: bool) -> (MipsOutcome, O32Io) {
+    fn write_then(exit: bool) -> (MipsOutcome, polyisa_os_linux::mips::sys::MipsIo) {
         let mut env = env_at(0x1000);
         poke(&mut env, 0x1000, 0x3405_1800);
         poke(&mut env, 0x1004, 0x2404_0001);
@@ -1006,8 +1081,9 @@ mod tests {
             poke(&mut env, 0x1014, 0xffff_ffff);
         }
         env.backend.mem.write(VirtAddr(0x1800), &[7]).unwrap();
-        let mut io = O32Io::default();
-        let outcome = run_os(&mut env, 0x1000, MipsModel::mips1_be(), &mut io);
+        let mut sys = polyisa_os_linux::mips::sys::Linux::o32(Endian::Be);
+        let outcome = run(&mut env, 0x1000, MipsModel::mips1_be(), &mut sys);
+        let io = std::mem::take(&mut sys.io);
         if !exit {
             assert_eq!(reg(&mut env, 2), 1);
             assert_eq!(reg(&mut env, 7), 0);
@@ -1029,16 +1105,20 @@ mod tests {
     }
 
     #[test]
-    fn o32_unknown_number_stops() {
+    fn o32_unknown_number_returns_enosys_and_continues() {
+        // 未実装の番号は ENOSYS（a3=1）を返して実行を続ける。
+        // 設計: `docs/design/user-mode.md` の「未実装のシステムコール」。
         let mut env = env_at(0x1000);
         poke(&mut env, 0x1000, 0x2402_0063);
         poke(&mut env, 0x1004, 0x0000_000c);
-        let mut io = O32Io::default();
-        let outcome = run_os(&mut env, 0x1000, MipsModel::mips1_be(), &mut io);
-        assert!(matches!(
-            outcome,
-            MipsOutcome::Unimplemented { pc: 0x1004, .. }
-        ));
+        poke(&mut env, 0x1008, 0x2402_0fa1);
+        poke(&mut env, 0x100c, 0x2404_0005);
+        poke(&mut env, 0x1010, 0x0000_000c);
+        let mut sys = polyisa_os_linux::mips::sys::Linux::o32(Endian::Be);
+        let outcome = run(&mut env, 0x1000, MipsModel::mips1_be(), &mut sys);
+        assert_eq!(outcome, MipsOutcome::Exit(5));
+        // ENOSYS の失敗で立った a3=1 が残る。
+        assert_eq!(reg(&mut env, 7), 1);
     }
 
     #[test]

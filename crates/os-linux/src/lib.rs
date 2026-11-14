@@ -17,9 +17,22 @@
 #[cfg(feature = "guest-x86")]
 pub mod x86;
 
+/// MIPS の Linux パーソナリティ（o32/n32/n64 の syscall 処理と ABI 定数）。
+// Ref: SRC-LINUX (7.3).
+#[cfg(feature = "guest-mips")]
+pub mod mips;
+
 /// MIPS o32 のシステムコール番号。
 // Ref: SRC-LINUX (7.3).
 pub mod mips_o32;
+
+/// MIPS n32 のシステムコール番号。
+// Ref: SRC-LINUX (7.3).
+pub mod mips_n32;
+
+/// MIPS n64 のシステムコール番号。
+// Ref: SRC-LINUX (7.3).
+pub mod mips_n64;
 
 /// RISC-V（asm-generic）のシステムコール番号と syscall 処理。
 pub mod rv64;
@@ -365,11 +378,7 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             x86_64::KILL => Some("kill"),
             _ => None,
         },
-        GuestAbi::MipsO32 => match nr {
-            mips_o32::EXIT => Some("exit"),
-            mips_o32::WRITE => Some("write"),
-            _ => None,
-        },
+        GuestAbi::MipsO32 => mips_o32::name(nr),
         GuestAbi::Unknown => None,
     }
 }
@@ -604,16 +613,10 @@ mod tests {
 
     #[test]
     fn mips_o32_numbers() {
-        assert_eq!(mips_o32::EXIT, 4001);
-        assert_eq!(mips_o32::WRITE, 4004);
-        assert_eq!(
-            syscall_name(GuestAbi::MipsO32, mips_o32::WRITE),
-            Some("write")
-        );
-        assert_eq!(
-            syscall_name(GuestAbi::MipsO32, mips_o32::EXIT),
-            Some("exit")
-        );
-        assert_eq!(syscall_name(GuestAbi::MipsO32, 4000), None);
+        assert_eq!(mips_o32::name(4001), Some("exit"));
+        assert_eq!(mips_o32::name(4004), Some("write"));
+        assert_eq!(syscall_name(GuestAbi::MipsO32, 4004), Some("write"));
+        assert_eq!(syscall_name(GuestAbi::MipsO32, 4001), Some("exit"));
+        assert_eq!(syscall_name(GuestAbi::MipsO32, 9999), None);
     }
 }
