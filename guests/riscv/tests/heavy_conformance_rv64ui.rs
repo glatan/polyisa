@@ -877,10 +877,9 @@ fn rv32ud_p_ldst() {
     check_rv32d("ldst");
 }
 
-#[test]
-fn rv32ud_p_move() {
-    check_rv32d("move");
-}
+// rv32ud の move は上流の Makefrag が対象外にしている
+// （rv64ud/move.S を include するだけで rv32 向けの実装がなく、
+// fmv.d.x / fmv.x.d は rv32g では組み立てられない）。
 
 #[test]
 fn rv32ud_p_recoding() {

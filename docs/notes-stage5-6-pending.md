@@ -116,6 +116,32 @@
     互換でない点に注意。x86/mips は `--root` 未対応のため影響なし。
     oracle 系の重いテストバイナリ名は `heavy_oracle_llvm` で各パッケージ
     共通（roadmap の S7-以降の命名 `heavy_oracle_arm` 等はその段階で揃える）。
+11. **`stage-6` タグ**: 段階の完了は注釈付きタグ `stage-6` で表す規約
+    （dev-workflow「検証の記録」）。`stage-4` は所有者が付けており、
+    メッセージに検証記録と所有者の確認を書く形式のため、エージェント側は
+    作成していない。メッセージ用の検証結果は下記「検証記録（段階6）」に残す。
+12. **`rv32ud_p_move` の除外（解消）**: `test:full` で唯一失敗していた。
+    上流 riscv-tests の `rv32ud/Makefrag` は `move`（と `structural`）を
+    rv32 向けに未実装として対象外にしており、`rv32ud/move.S` は
+    `rv64ud/move.S` を include するだけで `fmv.d.x`/`fmv.x.d` が
+    rv32g では組み立てられない。polyisa のテスト一覧から除去した
+    （上流の一覧と一致）。段階6以前からの既存失敗であり、aarch64 作業とは
+    無関係。
+
+## 検証記録（段階6）
+
+`stage-6` タグのメッセージに転記するための実行結果。
+
+- `task check`: fmt / clippy(-D warnings) / devtool check すべて ok
+- `task check:targets`: powerpc64 / i686 / wasm32 で `cargo check` 通過
+- `task doctor`: rustc/cargo 1.100.0、go-task 3.54.0、nextest 0.9.151、
+  git 2.56.1、clang・llvm-mc は重いテストの実行で確認
+- `task testdata:fetch`: TEST-RISCV-TESTS / TEST-RISCV-ARCH-TEST /
+  TEST-TESTFLOAT いずれも版が一致
+- `task test:full`: test:plan が要件を調べ `all()`（除外なし）。
+  1483 tests run: 1483 passed, 0 failed, 0 skipped（約 42 秒）
+- `task bench`: generic_vs_direct iters=200000
+  direct=38.031µs generic=55.324µs fadd=72.676µs
 
 ## 確認を要する判断
 
