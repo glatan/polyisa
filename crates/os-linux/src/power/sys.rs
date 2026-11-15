@@ -377,19 +377,25 @@ impl Linux {
         b[16..20].copy_from_slice(&w32(md.nlink as u32));
         b[20..24].copy_from_slice(&w32(md.uid));
         b[24..28].copy_from_slice(&w32(md.gid));
-        b[28..32].copy_from_slice(&w32(md.mode as u16 as u32));
-        b[40..48].copy_from_slice(&w64(md.ino));
-        b[48..56].copy_from_slice(&w64(md.size));
-        b[56..64].copy_from_slice(&w64(md.blocks));
-        b[64..72].copy_from_slice(&w64(0x1fff)); // attributes_mask
-        b[80..88].copy_from_slice(&w64(md.atime as u64));
-        b[88..92].copy_from_slice(&w32(md.atime_nsec as u32));
-        b[112..120].copy_from_slice(&w64(md.ctime as u64));
-        b[120..124].copy_from_slice(&w32(md.ctime_nsec as u32));
-        b[128..136].copy_from_slice(&w64(md.mtime as u64));
-        b[136..140].copy_from_slice(&w32(md.mtime_nsec as u32));
-        b[144..148].copy_from_slice(&w32(md.rdev as u32));
-        b[152..156].copy_from_slice(&w32(md.dev as u32));
+        // Ref: SRC-LINUX — struct statx（include/uapi/linux/stat.h）。
+        b[28..30].copy_from_slice(&w32(md.mode as u16 as u32)[0..2].as_ref());
+        b[32..40].copy_from_slice(&w64(md.ino));
+        b[40..48].copy_from_slice(&w64(md.size));
+        b[48..56].copy_from_slice(&w64(md.blocks));
+        b[56..64].copy_from_slice(&w64(0x1fff)); // attributes_mask
+        b[64..72].copy_from_slice(&w64(md.atime as u64));
+        b[72..76].copy_from_slice(&w32(md.atime_nsec as u32));
+        b[96..104].copy_from_slice(&w64(md.ctime as u64));
+        b[104..108].copy_from_slice(&w32(md.ctime_nsec as u32));
+        b[112..120].copy_from_slice(&w64(md.mtime as u64));
+        b[120..124].copy_from_slice(&w32(md.mtime_nsec as u32));
+        // dev_t の major/minor 分解（UAPI の makedev エンコード）。
+        let major = |d: u64| ((d >> 8) as u32 & 0xfff) | ((d >> 32) as u32 & !0xfff);
+        let minor = |d: u64| (d as u32 & 0xff) | ((d >> 12) as u32 & !0xff);
+        b[128..132].copy_from_slice(&w32(major(md.rdev)));
+        b[132..136].copy_from_slice(&w32(minor(md.rdev)));
+        b[136..140].copy_from_slice(&w32(major(md.dev)));
+        b[140..144].copy_from_slice(&w32(minor(md.dev)));
         match self.write_bytes(env, out, &b) {
             Ok(()) => 0,
             Err(e) => Self::fail(e),
@@ -612,10 +618,11 @@ impl Linux {
         b[0..8].copy_from_slice(&w64(secs));
         b[32..40].copy_from_slice(&w64(4 << 30)); // totalram
         b[40..48].copy_from_slice(&w64(3 << 30)); // freeram
-        b[72..80].copy_from_slice(&w64(1 << 30)); // totalswap
-        b[80..88].copy_from_slice(&w64(1 << 29)); // freeswap
-        b[88..90].copy_from_slice(&w32(1)[0..2].try_into().unwrap_or([0, 0]));
-        b[96..100].copy_from_slice(&w32(1)); // mem_unit
+        // Ref: SRC-LINUX — struct sysinfo の 64bit レイアウト。
+        b[64..72].copy_from_slice(&w64(1 << 30)); // totalswap
+        b[72..80].copy_from_slice(&w64(1 << 29)); // freeswap
+        b[80..82].copy_from_slice(&w32(1)[0..2].as_ref()); // procs
+        b[104..108].copy_from_slice(&w32(1)); // mem_unit
         match self.write_bytes(env, addr, &b) {
             Ok(()) => 0,
             Err(e) => Self::fail(e),
@@ -1021,11 +1028,22 @@ impl Linux {
                 Ok(()) => ret(0),
                 Err(e) => Self::fail_ret_host(e),
             },
-            "access" | "faccessat" | "faccessat2" => ret(if polyisa_host::stat(&host).is_ok() {
-                0
-            } else {
-                Self::fail(errno::ENOENT)
-            }),
+            "access" | "faccessat" | "faccessat2" => {
+                // mode は access=arg1、faccessat*=arg2。
+                let mode = arg(env, if name == "access" { 1 } else { 2 });
+                let st = polyisa_host::stat(&host);
+                // ゲストは uid=0 として動く（getuid 系は 0 を返す）。
+                // root の access: R/W は存在すれば可、X は exec ビットが
+                // どれか一つあれば可（カーネルの規約）。
+                let ok = match st {
+                    Err(_) => false,
+                    Ok(md) => {
+                        let need = mode as u32 & 7; // R_OK=4 W_OK=2 X_OK=1
+                        need & 1 == 0 || md.mode & 0o111 != 0
+                    }
+                };
+                ret(if ok { 0 } else { Self::fail(errno::EACCES) })
+            }
             "fchmodat" => ret(0),
             _ => Self::fail_ret(errno::ENOSYS),
         }
@@ -1440,7 +1458,8 @@ impl Linux {
             "getrandom" => ret(self.do_getrandom(env, args[0], args[1])),
             "set_tid_address" => ret(self.pid()),
             "set_robust_list" | "membarrier" => ret(0),
-            "statfs" | "fstatfs" | "statfs64" | "fstatfs64" => ret(self.do_statfs(env, args[1])),
+            "statfs" | "fstatfs" => ret(self.do_statfs(env, args[1])),
+            "statfs64" | "fstatfs64" => ret(self.do_statfs(env, args[2])),
             "socketcall" | "ipc" | "sysctl" | "llseek" | "io_setup" | "io_destroy"
             | "io_getevents" | "io_submit" | "io_cancel" | "splice" | "tee" | "vmsplice"
             | "copy_file_range" | "perf_event_open" | "seccomp" | "memfd_create" | "signalfd"

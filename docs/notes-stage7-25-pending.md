@@ -75,6 +75,35 @@
      範囲内。musl/Alpine ppc64le の現バイナリでは未到達）。
    - 残件: SPE（e500）・十進 FP・Book E 系は未着手。
 
+- 段階 8 レビュー（サブエージェント）の対応記録:
+  - 修正済: isel の選択極性（C1, 逆だった）、OE 形式の
+    基底 XO 照合（C2）、bclrl が新 LR を飛び先に読む誤り
+    （C3）、lve*/stve*/lvsl/lvsr の未実装（C4, 実装追加）、
+    statx レイアウト（C5）、sysinfo レイアウト（C6）、
+    addic/subfic/mulli/cmpwi/cmplwi/tdi/twi の r0=0 読み
+    （M2）、neg の CA 破壊（M3）、vslo/vsro の 8 倍シフト
+    （M4）、div OE 形式の OV 欠落（M16）、access 系の
+    mode 無視（M14）、statfs64/fstatfs64 の引数位置
+    （M15）、powerpc 固有 ioctl 定数（M1）。
+  - 未対応（確認待ち・次段階案件）: FPSCR/FPCC/CR1 の
+    更新と RN 反映（M7/M8/M9）、lxvl/stxvl の LE 配置
+    （M6）、vinsert*/xvcvsxdsp/xscv*dsp/xxbr*/vsld/vsrd/
+    lqarx/stqcx/stq/mcrxrx/ftdiv/mfocrf 複数フィールド/
+    lswx カウント 0（M5/M10/M11/M12/Minor 群）、
+    xvmadd 系の単一丸め化（M13）、musl 動的アプレットの
+    a_crash 残存（activate_group の assert(!avail_mask)
+    破れ。head meta が prev=next=自己でありながら
+    ctx.active 残留。queue/dequeue のリスト操作または
+    lwarx/stwcx 経路の差分を要調査）、TCGETS 系の
+    termios 実書き込み、O_NOFOLLOW 等 open フラグ、
+    dirfd!=AT_FDCWD、epoll/poll、rt_sigpending、
+    getresuid、setrlimit、sched_getaffinity、prctl、
+    lswi/stswi 残件、scv 区別、ppc32 意味論、ELFv1。
+  - レビュー報告の「検証済み正しい」: bo_ok/CTR/CR、
+    larx/stcx 幅、ldx/stx/bswap_ls、shift 系、
+    lane/put_lane 系ヘルパ、vperm/vsel/vsldoi、
+    x31_arith 大体、lq、put_stat、uname、CR0.SO。
+
 ## 段階ごとの作業記録
 
 ### 段階 7（ARM、A32・EABI）

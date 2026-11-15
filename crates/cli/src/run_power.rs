@@ -144,8 +144,47 @@ fn step_power(
             .unwrap_or(u64::MAX);
         if pc >= lo && pc <= hi {
             eprintln!("insn@{pc:#x}={insn:?} {word:#x}");
+            if std::env::var_os("POLYISA_POWER_DUMP").is_some() {
+                for i in [5u8, 8, 9, 31] {
+                    let r = env.backend.get(Gpr(i).state());
+                    eprintln!("  r{i}={r:#x}");
+                }
+                let r5: u64 = env.backend.get(Gpr(5).state());
+                let mut buf = [0u8; 8];
+                let dacc = Access {
+                    endian: if model.le { Endian::Le } else { Endian::Be },
+                    align: Align::Natural,
+                    kind: AccessKind::DataRead,
+                };
+                let mut mbuf = [0u8; 40];
+                if env.backend.mem.read(VirtAddr(r5), &mut mbuf, dacc).is_ok() {
+                    eprintln!("  mem[r5..+40]={mbuf:02x?}");
+                }
+                if env
+                    .backend
+                    .mem
+                    .read(VirtAddr(r5 + 24), &mut buf, dacc)
+                    .is_ok()
+                {
+                    eprintln!("  mem[r5+24]={buf:02x?}");
+                }
+            }
         }
     }
+    // 一時デバッグ: POLYISA_WATCH_ADDR の 8 バイトを step ごとに比較する。
+    let watch = std::env::var("POLYISA_WATCH_ADDR")
+        .ok()
+        .and_then(|v| u64::from_str_radix(v.trim_start_matches("0x"), 16).ok());
+    let wprev = watch.and_then(|wa| {
+        let mut wb = [0u8; 8];
+        let wacc = Access {
+            endian: if model.le { Endian::Le } else { Endian::Be },
+            align: Align::Natural,
+            kind: AccessKind::DataRead,
+        };
+        env.backend.mem.read(VirtAddr(wa), &mut wb, wacc).ok()?;
+        Some(wb)
+    });
     LAST_EXC.with(|c| c.set(None));
     let le = model.le;
     let ok = match insn {
@@ -207,6 +246,17 @@ fn step_power(
         Insn::X62 => env.step(|b| sem::x62(b, word, pc, le)),
         Insn::X63 => env.step(|b| sem::x63(b, word, pc, le)),
     };
+    if let (Some(wa), Some(prev)) = (watch, wprev) {
+        let wacc = Access {
+            endian: if model.le { Endian::Le } else { Endian::Be },
+            align: Align::Natural,
+            kind: AccessKind::DataRead,
+        };
+        let mut wb = [0u8; 8];
+        if env.backend.mem.read(VirtAddr(wa), &mut wb, wacc).is_ok() && wb != prev {
+            eprintln!("watch {wa:#x}: {prev:02x?} -> {wb:02x?} @pc={pc:#x} w={word:#x}");
+        }
+    }
     match ok {
         Ok(()) => {
             if env.backend.ctrl == Ctrl::Fallthrough {

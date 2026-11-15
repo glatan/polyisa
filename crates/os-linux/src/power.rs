@@ -297,12 +297,16 @@ pub mod mflag {
     pub const ANONYMOUS: u64 = 0x20;
 }
 
-/// `ioctl` の要求番号（汎用値）。
+/// `ioctl` の要求番号（powerpc UAPI の値）。
+// Ref: SRC-LINUX — `arch/powerpc/include/uapi/asm/ioctls.h`。
 pub mod ioc {
-    pub const TCGETS: u64 = 0x5401;
-    pub const TCSETS: u64 = 0x5402;
-    pub const TIOCGWINSZ: u64 = 0x5413;
-    pub const FIONREAD: u64 = 0x541b;
+    pub const TCGETS: u64 = 0x403C_7413;
+    pub const TCSETS: u64 = 0x803C_7414;
+    pub const TCSETSW: u64 = 0x803C_7415;
+    pub const TCSETSF: u64 = 0x803C_7416;
+    pub const TIOCGWINSZ: u64 = 0x4008_7468;
+    pub const TIOCSWINSZ: u64 = 0x8008_7467;
+    pub const FIONREAD: u64 = 0x4004_667F;
     pub const TIOCNOTTY: u64 = 0x5422;
 }
 

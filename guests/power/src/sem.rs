@@ -358,7 +358,7 @@ fn addi_i<B: Backend>(b: &mut B, rt: u8, r: u8, imm: i64, shifted: bool) -> Flow
 
 /// addic/addic.。CA 記録、Rc で CR0 も。
 fn addic_i<B: Backend>(b: &mut B, rt: u8, r: u8, imm: i64, rc: bool) -> Flow<B> {
-    let a = g(b, r);
+    let a = ra(b, r);
     let x = k(b, imm as u64);
     let res = b.add(a, x);
     let cry = b.cmp(Cmp::LtU, res, a);
@@ -372,7 +372,7 @@ fn addic_i<B: Backend>(b: &mut B, rt: u8, r: u8, imm: i64, rc: bool) -> Flow<B> 
 
 /// subfic: rT = imm - rA。CA は imm >=u rA。
 fn subfic_i<B: Backend>(b: &mut B, rt: u8, r: u8, imm: i64) -> Flow<B> {
-    let a = g(b, r);
+    let a = ra(b, r);
     let x = k(b, imm as u64);
     let res = b.sub(x, a);
     let cry = b.cmp(Cmp::LeU, a, x);
@@ -383,7 +383,7 @@ fn subfic_i<B: Backend>(b: &mut B, rt: u8, r: u8, imm: i64) -> Flow<B> {
 
 /// mulli。
 fn mulli_i<B: Backend>(b: &mut B, rt: u8, r: u8, imm: i64) -> Flow<B> {
-    let a = g(b, r);
+    let a = ra(b, r);
     let x = k(b, imm as u64);
     let res = b.mul(a, x);
     s(b, rt, res);
@@ -411,7 +411,7 @@ fn andi_rc_i<B: Backend>(b: &mut B, ra_d: u8, rs: u8, imm: u64) -> Flow<B> {
 
 /// cmpwi/cmpdi。
 fn cmp_imm<B: Backend>(b: &mut B, bf: u8, l: bool, r: u8, imm: i64) -> Flow<B> {
-    let a = g(b, r);
+    let a = ra(b, r);
     let x = k(b, imm as u64);
     do_cmp(b, bf, l, false, a, x);
     Ok(())
@@ -419,7 +419,7 @@ fn cmp_imm<B: Backend>(b: &mut B, bf: u8, l: bool, r: u8, imm: i64) -> Flow<B> {
 
 /// cmplwi/cmpldi。
 fn cmpl_imm<B: Backend>(b: &mut B, bf: u8, l: bool, r: u8, imm: u64) -> Flow<B> {
-    let a = g(b, r);
+    let a = ra(b, r);
     let x = k(b, imm);
     do_cmp(b, bf, l, true, a, x);
     Ok(())
@@ -481,7 +481,7 @@ fn trap_if<B: Backend>(b: &mut B, to: u8, l: bool, a: B::V<W64>, x: B::V<W64>) -
 
 /// tdi/twi。
 fn trap_imm<B: Backend>(b: &mut B, to: u8, l: bool, r: u8, imm: i64) -> Flow<B> {
-    let a = g(b, r);
+    let a = ra(b, r);
     let x = k(b, imm as u64);
     trap_if(b, to, l, a, x)
 }
@@ -538,11 +538,11 @@ fn xl19<B: Backend>(b: &mut B, pc: u64, word: u32) -> Flow<B> {
         // bclr/bclrl。
         16 => {
             let ok = bo_ok(b, bo, bi);
+            let t0 = b.get(lr_ref());
             if lk {
                 let ret = k(b, pc + 4);
                 b.set(lr_ref(), ret);
             }
-            let t0 = b.get(lr_ref());
             let __h32 = k(b, !3u64);
             let t = b.and(t0, __h32);
             b.if_then(ok, |b| {
@@ -1014,7 +1014,7 @@ fn x31_arith<B: Backend>(
     s(b, t, r);
     // CA を更新するのはキャリアウトを定義する形式だけ。
     // subf(40)・add(266) は CA を触らない（subfc/addc/e 系だけが書く）。
-    if matches!(xo, 8 | 10 | 104 | 136 | 138 | 200 | 202 | 232 | 234) {
+    if matches!(xo, 8 | 10 | 136 | 138 | 200 | 202 | 232 | 234) {
         set_ca(b, carry);
     }
     if oe {
@@ -1126,12 +1126,12 @@ fn x31_mul<B: Backend>(b: &mut B, xo: u32, t: u8, a: u8, bb: u8, rc: bool, oe: b
 }
 
 /// 除算・剰余（divd/divdu/divde/divdeu/divw/divwu/divwe/divweu/mod*）。
-fn x31_div<B: Backend>(b: &mut B, xo: u32, t: u8, a: u8, bb: u8, rc: bool) -> Flow<B> {
+fn x31_div<B: Backend>(b: &mut B, xo: u32, t: u8, a: u8, bb: u8, rc: bool, oe: bool) -> Flow<B> {
     let x = g(b, a);
     let y = g(b, bb);
-    let w = matches!(xo, 491 | 459 | 427 | 395 | 267 | 779);
-    let signed = matches!(xo, 489 | 491 | 425 | 427 | 777 | 779);
-    let rem = matches!(xo, 265 | 267 | 777 | 779);
+    let w = matches!(xo, 491 | 459 | 427 | 395 | 267);
+    let signed = matches!(xo, 489 | 491 | 425 | 427 | 267);
+    let rem = matches!(xo, 265 | 267);
     let (xa, xb) = if w {
         if signed {
             let a32 = b.trunc::<W64, W32>(x);
@@ -1167,6 +1167,29 @@ fn x31_div<B: Backend>(b: &mut B, xo: u32, t: u8, a: u8, bb: u8, rc: bool) -> Fl
         q
     };
     s(b, t, r);
+    if oe {
+        // OE 形式は 0 除算と INT_MIN/-1 で OV を立てる。
+        let dzv = bsel64(b, dz, 1, 0);
+        let ov_v = if signed {
+            let min = if w {
+                k(b, u64::MAX << 31)
+            } else {
+                k(b, 1u64 << 63)
+            };
+            let m1 = k(b, u64::MAX);
+            let is_min = b.cmp(Cmp::Eq, xa, min);
+            let is_m1 = b.cmp(Cmp::Eq, xb, m1);
+            let mn = bsel64(b, is_min, 1, 0);
+            let mo = bsel64(b, is_m1, 1, 0);
+            let both = b.and(mn, mo);
+            b.or(dzv, both)
+        } else {
+            dzv
+        };
+        let zero = k(b, 0);
+        let ovfl = b.cmp(Cmp::Ne, ov_v, zero);
+        set_ov(b, ovfl);
+    }
     if rc {
         record_cr0(b, r);
     }
@@ -1680,6 +1703,134 @@ fn x31_stcx<B: Backend>(b: &mut B, xo: u32, t: u8, a: u8, bb: u8, le: bool) -> F
     let __h146 = xer_so(b);
     let f = b.or(f1, __h146);
     set_crf(b, 0, f);
+    Ok(())
+}
+
+/// ベクタ要素ロード・ストア（lvebx/lvehx/lvewx/stvebx/stvehx/stvewx）と
+/// lvsl/lvsr。要素の IBM 番号は EA mod 要素サイズで、要素内部の
+/// バイト順は常に BE 規約（Ref: SPEC-POWER-ISA）。
+fn x31_velem_ls<B: Backend>(b: &mut B, xo: u32, t: u8, a: u8, bb: u8, _le: bool) -> Flow<B> {
+    let base = ra(b, a);
+    let idx = g(b, bb);
+    let ea = b.add(base, idx);
+    match xo {
+        // lvsl: byte[i] = c+i。lvsr: byte[i] = (16-c+i)&15。c = EA mod 16。
+        6 | 38 => {
+            let m15 = k(b, 15);
+            let c64 = b.and(ea, m15);
+            let c = b.zext::<W64, W128>(c64);
+            let ones = k128(b, 0x0101_0101_0101_0101_0101_0101_0101_0101);
+            let seq = k128(b, 0x0001_0203_0405_0607_0809_0A0B_0C0D_0E0F);
+            let v = if xo == 6 {
+                let cc = b.mul(c, ones);
+                b.add(cc, seq)
+            } else {
+                let c16 = k128(b, 16);
+                let bc = b.sub(c16, c);
+                let cc = b.mul(bc, ones);
+                let sum = b.add(cc, seq);
+                let m = k128(b, 0x0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0F);
+                b.and(sum, m)
+            };
+            set_vsr(b, t, v);
+        }
+        // lvebx/lvehx/lvewx。mem[EA] を IBM 要素 (EA mod 16)/sz に置く。
+        7 | 39 | 71 => {
+            let (sz, msk): (u128, u64) = match xo {
+                7 => (8, 15),
+                39 => (16, 14),
+                _ => (32, 12),
+            };
+            let acc = data_acc(false, true);
+            let eidx = {
+                let mm = k(b, msk);
+                let m = b.and(ea, mm);
+                // (EA mod 16)/sz = 要素番号。byte=そのまま、h=>>1、w=>>2。
+                if sz == 8 {
+                    m
+                } else {
+                    let sk = k(b, if sz == 16 { 1 } else { 2 });
+                    b.shr_l(m, sk)
+                }
+            };
+            let old = vsr(b, t);
+            // 要素内部は BE。IBM 要素 i は値ビット (elems-1-i)*sz。
+            let elems = 128 / sz;
+            let v: B::V<W128> = match sz {
+                8 => {
+                    let w = b.load::<W8>(ea, acc)?;
+                    b.zext::<W8, W128>(w)
+                }
+                16 => {
+                    let w = b.load::<W16>(ea, acc)?;
+                    b.zext::<W16, W128>(w)
+                }
+                _ => {
+                    let w = b.load::<W32>(ea, acc)?;
+                    b.zext::<W32, W128>(w)
+                }
+            };
+            let e128 = b.zext::<W64, W128>(eidx);
+            let esz = k128(b, elems - 1);
+            let pos = b.sub(esz, e128);
+            let szk = k128(b, sz);
+            let off = b.mul(pos, szk);
+            let mask = if sz == 128 {
+                u128::MAX
+            } else {
+                (1u128 << sz) - 1
+            };
+            let mk = k128(b, mask);
+            let mshift = b.shl(mk, off);
+            let nm = b.not(mshift);
+            let kept = b.and(old, nm);
+            let em = b.and(v, mk);
+            let put = b.shl(em, off);
+            let nv = b.or(kept, put);
+            set_vsr(b, t, nv);
+        }
+        // stvebx/stvehx/stvewx。
+        _ => {
+            let (sz, msk): (u128, u64) = match xo {
+                135 => (8, 15),
+                167 => (16, 14),
+                _ => (32, 12),
+            };
+            let acc = data_acc(false, false);
+            let eidx = {
+                let mm = k(b, msk);
+                let m = b.and(ea, mm);
+                if sz == 8 {
+                    m
+                } else {
+                    let sk = k(b, if sz == 16 { 1 } else { 2 });
+                    b.shr_l(m, sk)
+                }
+            };
+            let cur = vsr(b, t);
+            let elems = 128 / sz;
+            let e128 = b.zext::<W64, W128>(eidx);
+            let esz = k128(b, elems - 1);
+            let pos = b.sub(esz, e128);
+            let szk = k128(b, sz);
+            let off = b.mul(pos, szk);
+            let shifted = b.shr_l(cur, off);
+            match sz {
+                8 => {
+                    let w = b.trunc::<W128, W8>(shifted);
+                    b.store::<W8>(ea, w, acc)?;
+                }
+                16 => {
+                    let w = b.trunc::<W128, W16>(shifted);
+                    b.store::<W16>(ea, w, acc)?;
+                }
+                _ => {
+                    let w = b.trunc::<W128, W32>(shifted);
+                    b.store::<W32>(ea, w, acc)?;
+                }
+            }
+        }
+    }
     Ok(())
 }
 
@@ -2207,7 +2358,7 @@ fn x31_isel<B: Backend>(b: &mut B, word: u32, t: u8, a: u8, bb: u8) -> Flow<B> {
     let c = cr_bit(b, bc);
     let x = ra(b, a);
     let y = g(b, bb);
-    let v = b.select(c, y, x);
+    let v = b.select(c, x, y);
     s(b, t, v);
     Ok(())
 }
@@ -2275,14 +2426,25 @@ pub fn x31<B: Backend>(b: &mut B, word: u32, _pc: u64, le: bool) -> Flow<B> {
             return Ok(());
         }
         // ---- 加減算 ----
-        8 | 10 | 40 | 136 | 138 | 200 | 202 | 232 | 234 | 266 | 104 => {
-            return x31_arith(b, word, xo, t, a, bb, (rc, oe));
+        // OE 付き形式は XO[9]（語ビット 10）を立てる。基底 XO で照合する。
+        x if matches!(
+            x & 0x1ff,
+            8 | 10 | 40 | 136 | 138 | 200 | 202 | 232 | 234 | 266 | 104
+        ) =>
+        {
+            return x31_arith(b, word, x & 0x1ff, t, a, bb, (rc, oe));
         }
         // ---- 乗算 ----
-        11 | 75 | 9 | 73 | 233 | 235 => return x31_mul(b, xo, t, a, bb, rc, oe),
+        x if matches!(x & 0x1ff, 11 | 75 | 9 | 73 | 233 | 235) => {
+            return x31_mul(b, x & 0x1ff, t, a, bb, rc, oe);
+        }
         // ---- 除算・剰余 ----
-        393 | 395 | 425 | 427 | 457 | 459 | 489 | 491 | 265 | 267 | 777 | 779 => {
-            return x31_div(b, xo, t, a, bb, rc);
+        x if matches!(
+            x & 0x1ff,
+            393 | 395 | 425 | 427 | 457 | 459 | 489 | 491 | 265 | 267
+        ) =>
+        {
+            return x31_div(b, x & 0x1ff, t, a, bb, rc, oe);
         }
         // ---- シフト・拡張・数え上げ ----
         24 | 27 | 536 | 539 | 792 | 824 | 826 | 827 | 26 | 58 | 922 | 954 | 986 | 122 | 378
@@ -2329,7 +2491,7 @@ pub fn x31<B: Backend>(b: &mut B, word: u32, _pc: u64, le: bool) -> Flow<B> {
         // ---- VSR ↔ GPR ----
         179 | 51 | 211 | 115 | 243 | 435 | 307 => x31_vsr_gpr(b, word, xo, t, a),
         // ---- ベクタ要素ロード・ストア（lvebx/lvehx/lvewx/stvebx/…） ----
-        7 | 39 | 71 | 135 | 167 | 199 | 6 | 38 => Ok(()),
+        7 | 39 | 71 | 135 | 167 | 199 | 6 | 38 => x31_velem_ls(b, xo, t, a, bb, le),
         // ---- 文字列転送（lswi/stswi/lswx/stswx） ----
         597 | 725 | 533 | 661 => x31_string_ls(b, word, xo, t, a, bb, le),
         // ---- システム ----
@@ -4722,12 +4884,12 @@ pub fn x4<B: Backend>(b: &mut B, word: u32, _pc: u64, _le: bool) -> Flow<B> {
         // ---- オクテットシフト（vslo=1036, vsro=1100） ----
         1036 | 1100 => {
             let y = vsr(b, bb);
+            // 量は VRB の最後のバイトの上位 4 ビット（オクテット数）。
+            // 数値ビット 3–6 に位置するので、そのままビット数になる。
             let __h386 = k128(b, 127);
             let s0 = b.and(y, __h386);
             let __h387 = k128(b, 0x78);
-            let s = b.and(s0, __h387);
-            let __h388 = k128(b, 3);
-            let bits = b.shl(s, __h388);
+            let bits = b.and(s0, __h387);
             let __h389 = vsr(b, a);
             let v = if xo11 == 1036 {
                 b.shl(__h389, bits)
