@@ -635,12 +635,27 @@ impl Gen<'_> {
                 }
             }
             Inst::Get { d, off, w } => {
-                self.get_field(off, w);
-                self.e.vstore(d, RAX, w);
+                if w == Wid::W128 {
+                    // 128bit は 2 回に分けて動かす。
+                    self.e.mov_rm(RAX, RBP, off as i32);
+                    self.e.mov_mr(RSP, slot(d), RAX);
+                    self.e.mov_rm(RAX, RBP, off as i32 + 8);
+                    self.e.mov_mr(RSP, slot(d) + 8, RAX);
+                } else {
+                    self.get_field(off, w);
+                    self.e.vstore(d, RAX, w);
+                }
             }
             Inst::Set { off, w, v } => {
-                self.e.vload(RAX, v, w);
-                self.set_field(off, w);
+                if w == Wid::W128 {
+                    self.e.mov_rm(RAX, RSP, slot(v));
+                    self.e.mov_mr(RBP, off as i32, RAX);
+                    self.e.mov_rm(RAX, RSP, slot(v) + 8);
+                    self.e.mov_mr(RBP, off as i32 + 8, RAX);
+                } else {
+                    self.e.vload(RAX, v, w);
+                    self.set_field(off, w);
+                }
             }
             Inst::GetIx {
                 d,
@@ -1021,7 +1036,7 @@ impl Gen<'_> {
                     BinOp::ShrA => self.e.vsload(RAX, a, w),
                     _ => self.e.vload(RAX, a, w),
                 }
-                self.e.mov_rm(RCX, RSP, slot(b));
+                self.e.vload(RCX, b, w);
                 self.e.cmp_ri(RCX, w.bits() as i32);
                 // n >= w は別扱い。
                 let big = self.e.jcc(0x3); // jae

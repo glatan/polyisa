@@ -245,8 +245,23 @@ fn simplify(ops: &mut Vec<Inst>, cx: &mut FoldCx) {
 fn fold_bin(cx: &mut FoldCx, op: BinOp, w: Wid, a: Id, b: Id, d: Id) -> Option<Inst> {
     let (x, y) = (cx.konst(a), cx.konst(b));
     let m = w.mask();
+    // FP は丸め環と fp_flags を持つので畳まない。mulh 系の
+    // W128 は eval_bin の >>128 がオーバーフローするので除く。
+    let int_op = !matches!(
+        op,
+        BinOp::Fadd
+            | BinOp::Fsub
+            | BinOp::Fmul
+            | BinOp::Fdiv
+            | BinOp::Fmin
+            | BinOp::Fmax
+            | BinOp::Fsgnj
+            | BinOp::Fsgnjn
+            | BinOp::Fsgnjx
+    ) && !(matches!(op, BinOp::Mulh | BinOp::Mulhsu | BinOp::Mulhu)
+        && w.bits() == 128);
     let folded = match (op, x, y) {
-        (_, Some(x), Some(y)) => Some(eval_bin(op, w, x, y)),
+        (_, Some(x), Some(y)) if int_op => Some(eval_bin(op, w, x, y)),
         (BinOp::Add | BinOp::Or | BinOp::Xor, _, Some(0)) => return alias(cx, d, a),
         (BinOp::Add | BinOp::Or | BinOp::Xor, Some(0), _) => return alias(cx, d, b),
         (BinOp::Sub, _, Some(0)) => return alias(cx, d, a),
