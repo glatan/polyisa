@@ -41,18 +41,19 @@ impl BareEnv {
     }
 
     /// 意味論の断片を 1 ステップとして実行する。`f` が `Ctrl::Jump` を残せば分岐する。
-    pub fn step<F>(&mut self, f: F) -> Result<(), InterpExit>
+    /// `f` の戻り値をそのまま返す（振り分けの結果を運ぶのに使う）。
+    pub fn step<F, T>(&mut self, f: F) -> Result<T, InterpExit>
     where
-        F: FnOnce(&mut InterpBackend) -> Result<(), InterpExit>,
+        F: FnOnce(&mut InterpBackend) -> Result<T, InterpExit>,
     {
         self.backend.ctrl = Ctrl::Fallthrough;
-        f(&mut self.backend)?;
+        let v = f(&mut self.backend)?;
         match self.backend.ctrl {
             Ctrl::Fallthrough => {}
             Ctrl::Jump(target) => self.pc = target,
         }
         self.steps += 1;
-        Ok(())
+        Ok(v)
     }
 }
 

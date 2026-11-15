@@ -17,7 +17,7 @@ use polyisa_engine::run::{Outcome, TrapHandler, TrapOutcome};
 use polyisa_guest_arm::sem::{self, Gpr};
 use polyisa_guest_arm::{Insn, decode_model_ex};
 use polyisa_mem::{Access, AccessKind, Align, Endian, VirtAddr};
-use polyisa_sem::{Backend as _, ExceptionKind, GuestException};
+use polyisa_sem::{Backend, Cmp, ExceptionKind, GuestException, W32};
 
 /// 実バイナリの処理量を見込んだ上限。
 const STEP_LIMIT: u64 = 256_000_000;
@@ -193,28 +193,7 @@ fn step_a32(env: &mut BareEnv, sys: &mut impl TrapHandler, model: ArmModel) -> R
         }
     }
     LAST_EXC.with(|c| c.set(None));
-    let ok = match insn {
-        Insn::DpImm => env.step(|b| sem::dp_imm(b, word, pc)),
-        Insn::DpReg => env.step(|b| sem::dp_reg(b, word, pc)),
-        Insn::DpSreg => env.step(|b| sem::dp_sreg(b, word, pc)),
-        Insn::Mul => env.step(|b| sem::mul(b, word, pc)),
-        Insn::Mull => env.step(|b| sem::mull(b, word, pc)),
-        Insn::Swp => env.step(|b| sem::swp(b, word, pc)),
-        Insn::Excl => env.step(|b| sem::excl(b, word, pc)),
-        Insn::ElsH | Insn::ElsD => env.step(|b| sem::els(b, word, pc)),
-        Insn::LsImm => env.step(|b| sem::ls(b, word, pc, false)),
-        Insn::LsReg => env.step(|b| sem::ls(b, word, pc, true)),
-        Insn::Media => env.step(|b| sem::media(b, word, pc)),
-        Insn::LdmStm => env.step(|b| sem::ldm_stm(b, word, pc)),
-        Insn::B => env.step(|b| sem::b_bl(b, pc, word, false)),
-        Insn::Bl => env.step(|b| sem::b_bl(b, pc, word, true)),
-        Insn::CpLs => env.step(|b| sem::cp_ls(b, word, pc)),
-        Insn::CpDp => env.step(|b| sem::cp_dp(b, word, pc)),
-        Insn::BlxImm => env.step(|b| sem::blx_imm(b, pc, word)),
-        Insn::UncondHint => env.step(|b| sem::uncond_hint(b, word)),
-        Insn::Cp2Ls | Insn::Cp2Dp => env.step(|b| sem::cp2(b, word)),
-        Insn::Svc => unreachable!("svc は先に振り分け済み"),
-    };
+    let ok = env.step(|b| dispatch_a32(b, insn, word, pc));
     match ok {
         Ok(()) => {
             if env.backend.ctrl == Ctrl::Fallthrough {
@@ -243,6 +222,35 @@ fn step_a32(env: &mut BareEnv, sys: &mut impl TrapHandler, model: ArmModel) -> R
     }
 }
 
+/// `insn`/`word` の意味論に振り分ける。フェッチ・cond 評価・svc の前処理は
+/// `step_a32`（実行側）と `ArmTx::record`（記録側）が行う。
+/// `B: Backend` なので記録バックエンドにも同じ表が使える。
+// Ref: SPEC-ARM-ARM-A (Arm ARM A32).
+fn dispatch_a32<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<(), B::Exit> {
+    match insn {
+        Insn::DpImm => sem::dp_imm(b, word, pc),
+        Insn::DpReg => sem::dp_reg(b, word, pc),
+        Insn::DpSreg => sem::dp_sreg(b, word, pc),
+        Insn::Mul => sem::mul(b, word, pc),
+        Insn::Mull => sem::mull(b, word, pc),
+        Insn::Swp => sem::swp(b, word, pc),
+        Insn::Excl => sem::excl(b, word, pc),
+        Insn::ElsH | Insn::ElsD => sem::els(b, word, pc),
+        Insn::LsImm => sem::ls(b, word, pc, false),
+        Insn::LsReg => sem::ls(b, word, pc, true),
+        Insn::Media => sem::media(b, word, pc),
+        Insn::LdmStm => sem::ldm_stm(b, word, pc),
+        Insn::B => sem::b_bl(b, pc, word, false),
+        Insn::Bl => sem::b_bl(b, pc, word, true),
+        Insn::CpLs => sem::cp_ls(b, word, pc),
+        Insn::CpDp => sem::cp_dp(b, word, pc),
+        Insn::BlxImm => sem::blx_imm(b, pc, word),
+        Insn::UncondHint => sem::uncond_hint(b, word),
+        Insn::Cp2Ls | Insn::Cp2Dp => sem::cp2(b, word),
+        Insn::Svc => unreachable!("svc は先に振り分け済み"),
+    }
+}
+
 /// 静的な ARM ELF を実行する。機械番号 40（EM_ARM）。EABI・LE のみ。
 /// `sys` は `os_linux::arm::sys::Linux` が処理する（未実装は ENOSYS）。
 /// Ref: SPEC-ARM-ARM-A, SRC-LINUX (7.3).
@@ -257,7 +265,10 @@ pub fn run_elf_arm_sel(
     sel: Option<&polyisa_isadl::select::CpuSel>,
 ) -> Result<u64, String> {
     let mut sys = polyisa_os_linux::arm::sys::Linux::new();
-    run_elf_arm_sys(path, argv, sel, &mut sys)
+    // JIT は `POLYISA_JIT` 指定時のみ opt-in。既定はインタプリタ。
+    let mut jit_owned = polyisa_jit::Jit::new();
+    let jit = std::env::var_os("POLYISA_JIT").map(|_| &mut jit_owned);
+    run_elf_arm_impl(path, argv, sel, &mut sys, jit)
 }
 
 /// `run_elf_arm_sel` に OS パーソナリティを差し込む形。
@@ -267,6 +278,28 @@ pub fn run_elf_arm_sys(
     argv: &[String],
     sel: Option<&polyisa_isadl::select::CpuSel>,
     sys: &mut polyisa_os_linux::arm::sys::Linux,
+) -> Result<u64, String> {
+    run_elf_arm_impl(path, argv, sel, sys, None)
+}
+
+/// `run_elf_arm_sys` の JIT 版。差分テストが `sys.io` 等を比べるのに使う。
+pub fn run_elf_arm_sys_jit(
+    path: &str,
+    argv: &[String],
+    sel: Option<&polyisa_isadl::select::CpuSel>,
+    sys: &mut polyisa_os_linux::arm::sys::Linux,
+    jit: &mut polyisa_jit::Jit,
+) -> Result<u64, String> {
+    run_elf_arm_impl(path, argv, sel, sys, Some(jit))
+}
+
+/// `run_elf_arm_sys` の実体。`jit` があればブロック実行経路を使う。
+fn run_elf_arm_impl(
+    path: &str,
+    argv: &[String],
+    sel: Option<&polyisa_isadl::select::CpuSel>,
+    sys: &mut polyisa_os_linux::arm::sys::Linux,
+    jit: Option<&mut polyisa_jit::Jit>,
 ) -> Result<u64, String> {
     use polyisa_mem::{PAGE_SIZE, Perms};
 
@@ -417,7 +450,11 @@ pub fn run_elf_arm_sys(
         top,
         limit: top - STACK_LIMIT,
     });
-    match run_with_growth(&mut env, entry, feats, growth, sys) {
+    let out = match jit {
+        Some(jit) => run_with_growth_jit(&mut env, entry, feats, growth, sys, jit),
+        None => run_with_growth(&mut env, entry, feats, growth, sys),
+    };
+    match out {
         Outcome::Exit(code) => Ok(code),
         Outcome::Unimplemented { pc, word } => Err(format!("unimplemented at {pc:#x}: {word:#x}")),
         Outcome::StepLimit { pc } => Err(format!("step limit at {pc:#x}")),
@@ -509,4 +546,229 @@ fn stack_grow(env: &mut BareEnv, stack: Option<StackGrowth>, e: &GuestException)
         .mem
         .map(VirtAddr(lo), pages, Perms(Perms::R.0 | Perms::W.0))
         .ok()
+}
+
+// ---- JIT（段階 9）----
+
+/// 1 ブロックに記録する命令数の上限。
+const MAX_BLOCK_INSNS: usize = 32;
+
+/// `B::B` の否定（`Backend` に bool 演算はないので select で組み立てる）。
+fn inv32<B: Backend>(b: &mut B, c: B::B) -> B::B {
+    let t = b.konst::<W32>(1);
+    let f = b.konst::<W32>(0);
+    let s = b.select::<W32>(c, f, t);
+    let z = b.konst::<W32>(0);
+    b.cmp::<W32>(Cmp::Ne, s, z)
+}
+
+fn band32<B: Backend>(b: &mut B, x: B::B, y: B::B) -> B::B {
+    let t = b.konst::<W32>(1);
+    let f = b.konst::<W32>(0);
+    let sy = b.select::<W32>(y, t, f);
+    let r = b.select::<W32>(x, sy, f);
+    let z = b.konst::<W32>(0);
+    b.cmp::<W32>(Cmp::Ne, r, z)
+}
+
+fn bor32<B: Backend>(b: &mut B, x: B::B, y: B::B) -> B::B {
+    let t = b.konst::<W32>(1);
+    let f = b.konst::<W32>(0);
+    let sy = b.select::<W32>(y, t, f);
+    let r = b.select::<W32>(x, t, sy);
+    let z = b.konst::<W32>(0);
+    b.cmp::<W32>(Cmp::Ne, r, z)
+}
+
+/// 二つの `B::B` を `==`/`!=` で比べる（select で 0/1 に写してから cmp）。
+fn cmp_b<B: Backend>(b: &mut B, op: Cmp, x: B::B, y: B::B) -> B::B {
+    let t = b.konst::<W32>(1);
+    let f = b.konst::<W32>(0);
+    let a = b.select::<W32>(x, t, f);
+    let c = b.select::<W32>(y, t, f);
+    b.cmp::<W32>(op, a, c)
+}
+
+/// cond（bits[31:28]）を `cpsr` から `B::B` として評価する。
+/// 0xf は呼び出し側が先に処理するのでここでは常真としておく。
+/// `cond_pass`（実行時評価）と同じ表を IR 上に組み立てる。
+// Ref: SPEC-ARM-ARM-A (Arm ARM A32) — Condition codes.
+fn cond_expr<B: Backend>(b: &mut B, cond: u32) -> B::B {
+    let cpsr = b.get(sem::cpsr_ref());
+    let zero = b.konst::<W32>(0);
+    let bit = |b: &mut B, n: u32| {
+        let m = b.konst::<W32>(1 << n);
+        let v = b.and(cpsr, m);
+        b.cmp::<W32>(Cmp::Ne, v, zero)
+    };
+    let n = bit(b, 31);
+    let z = bit(b, 30);
+    let c = bit(b, 29);
+    let v = bit(b, 28);
+    match cond {
+        0x0 => z,
+        0x1 => inv32(b, z),
+        0x2 => c,
+        0x3 => inv32(b, c),
+        0x4 => n,
+        0x5 => inv32(b, n),
+        0x6 => v,
+        0x7 => inv32(b, v),
+        0x8 => {
+            let nz = inv32(b, z);
+            band32(b, c, nz)
+        }
+        0x9 => {
+            let nc = inv32(b, c);
+            bor32(b, nc, z)
+        }
+        0xa => cmp_b(b, Cmp::Eq, n, v),
+        0xb => cmp_b(b, Cmp::Ne, n, v),
+        0xc => {
+            let nz = inv32(b, z);
+            let eq = cmp_b(b, Cmp::Eq, n, v);
+            band32(b, nz, eq)
+        }
+        0xd => {
+            let ne = cmp_b(b, Cmp::Ne, n, v);
+            bor32(b, z, ne)
+        }
+        _ => {
+            let one = b.konst::<W32>(1);
+            b.cmp::<W32>(Cmp::Eq, one, one)
+        }
+    }
+}
+
+/// A32 の翻訳器。`feats` は `decode_model_ex` にそのまま渡す。
+pub struct ArmTx {
+    pub feats: u64,
+}
+
+impl polyisa_jit::Translate for ArmTx {
+    fn key(&self, _b: &polyisa_engine::interp::InterpBackend, pc: u64) -> u64 {
+        pc
+    }
+
+    fn record(
+        &self,
+        b: &mut polyisa_engine::interp::InterpBackend,
+        entry: u64,
+    ) -> Option<polyisa_ir::Recorded> {
+        let acc = Access {
+            endian: Endian::Le,
+            align: Align::Natural,
+            kind: AccessKind::Fetch,
+        };
+        let mut irb = polyisa_ir::IrBackend::new();
+        let mut pc = entry;
+        for _ in 0..MAX_BLOCK_INSNS {
+            if !pc.is_multiple_of(4) {
+                break;
+            }
+            let mut b4 = [0u8; 4];
+            if b.mem.read(VirtAddr(pc), &mut b4, acc).is_err() {
+                break;
+            }
+            b.mem.mark_code(VirtAddr(pc));
+            let word = u32::from_le_bytes(b4);
+            let Some(insn) = decode_model_ex(u128::from(word), 32, true, self.feats) else {
+                break;
+            };
+            // `svc` は cond の評価より先には来ないが、cond が真のときだけ
+            // 実行される点で意味論の外側。ブロックの境界として扱い、
+            // インタプリタが cond の評価も含めて処理する。
+            if insn == Insn::Svc {
+                break;
+            }
+            irb.cur_pc = pc;
+            irb.cur_next = pc + 4;
+            let cond = word >> 28;
+            let r = if cond == 0xf {
+                dispatch_a32(&mut irb, insn, word, pc)
+            } else {
+                let c = cond_expr(&mut irb, cond);
+                irb.if_then(c, |b| dispatch_a32(b, insn, word, pc))
+            };
+            match r {
+                Ok(()) => {}
+                Err(e) => {
+                    irb.abort(e);
+                    break;
+                }
+            }
+            if irb.ir.has_flow() {
+                pc += 4;
+                break;
+            }
+            pc += 4;
+        }
+        if irb.ir.ops.is_empty() {
+            return None;
+        }
+        polyisa_ir::optimize(&mut irb.ir);
+        Some(polyisa_ir::Recorded {
+            entry,
+            fall: pc,
+            ir: irb.ir,
+        })
+    }
+}
+
+/// `step_a32` の JIT 版。記録できない入口・例外はインタプリタと同じ解決をする。
+fn step_a32_jit(
+    env: &mut BareEnv,
+    sys: &mut impl TrapHandler,
+    model: ArmModel,
+    stack: Option<StackGrowth>,
+    jit: &mut polyisa_jit::Jit,
+) -> Result<(), Outcome> {
+    let pc = env.pc;
+    let tx = ArmTx { feats: model.feats };
+    match jit.exec_block(&mut env.backend, &tx, pc) {
+        Some(polyisa_jit::BlockExit::Next(next)) => {
+            env.pc = next;
+            env.steps += 1;
+            Ok(())
+        }
+        Some(polyisa_jit::BlockExit::Raise { e, pc, next: _ }) => {
+            env.pc = pc;
+            // インタプリタと同じく、スタック窓内のフォルトは写像を伸ばす。
+            if stack_grow(env, stack, &e).is_some() {
+                return Ok(());
+            }
+            Err(Outcome::Unimplemented {
+                pc,
+                word: 0xffff_ffff,
+            })
+        }
+        Some(polyisa_jit::BlockExit::Unimpl { pc }) => {
+            env.pc = pc;
+            Err(Outcome::Unimplemented {
+                pc,
+                word: 0xffff_ffff,
+            })
+        }
+        None => step_a32(env, sys, model),
+    }
+}
+
+/// `run_with_growth` の JIT 版。
+fn run_with_growth_jit(
+    env: &mut BareEnv,
+    entry: u64,
+    feats: u64,
+    stack: Option<StackGrowth>,
+    sys: &mut impl TrapHandler,
+    jit: &mut polyisa_jit::Jit,
+) -> Outcome {
+    env.pc = entry;
+    let model = ArmModel { feats };
+    polyisa_engine::run::run(
+        env,
+        sys,
+        STEP_LIMIT,
+        |env| env.pc,
+        |env, sys| step_a32_jit(env, sys, model, stack, jit),
+    )
 }

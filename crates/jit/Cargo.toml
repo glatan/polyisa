@@ -8,6 +8,9 @@ rust-version = "1.99"
 [dependencies]
 polyisa-ir = { path = "../ir" }
 polyisa-host = { path = "../host" }
+polyisa-engine = { path = "../engine" }
+polyisa-mem = { path = "../mem" }
+polyisa-sem = { path = "../sem" }
 
 [lints]
 workspace = true

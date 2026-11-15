@@ -17,7 +17,7 @@ use polyisa_engine::run::{Outcome, TrapHandler, TrapOutcome};
 use polyisa_guest_aarch64::sem::{self, Gpr};
 use polyisa_guest_aarch64::{Insn, decode_model_ex};
 use polyisa_mem::{Access, AccessKind, Align, Endian, PAGE_SIZE, PageNo, Perms, VirtAddr};
-use polyisa_sem::Backend as _;
+use polyisa_sem::Backend;
 
 /// 1命令の実行上限。無限ループの検出用。
 pub const STEP_LIMIT: u64 = 5_000_000;
@@ -144,9 +144,44 @@ fn step_a64(
         let imm = (word >> 5) & 0xffff;
         return svc(env, sys, imm, pc, word);
     }
+    let le = endian;
+    let ok = env.step(|b| dispatch_a64(b, insn, word, pc, le));
+    match ok {
+        Err(e) => {
+            // スタック窓内の未写像フォルトは写像を伸ばして同じ命令をやり直す
+            // （カーネルのスタック VMA 成長に相当）。pc は変えずに戻る。
+            if let polyisa_engine::interp::InterpExit::Exception(ref g) = e
+                && stack_grow(env, stack, g).is_some()
+            {
+                return Ok(());
+            }
+            return Err(unimpl(env));
+        }
+        Ok(false) => return Err(unimpl(env)),
+        Ok(true) => {}
+    }
+    // 分岐なしは次へ進める（分岐成立は step が pc を置き換える）。
+    if env.backend.ctrl == Ctrl::Fallthrough {
+        env.pc += 4;
+    }
+    Ok(())
+}
+
+/// `insn`/`word` の意味論に振り分ける。`Ok(false)` は境界
+///（`hvc` やデコード不能など、未実装として扱う）。
+/// フェッチと `svc` の前処理は `step_a64` / 記録側が行う。
+/// `B: Backend` なので記録バックエンドにも同じ表が使える。
+// Ref: SPEC-ARM-ARM-A (Armv9-A ARM ARM 2024-09).
+#[allow(clippy::too_many_lines)]
+fn dispatch_a64<B: Backend>(
+    b: &mut B,
+    insn: Insn,
+    word: u32,
+    pc: u64,
+    le: Endian,
+) -> Result<bool, B::Exit> {
     // フィールドの切り出し。
     let sf = word >> 31 != 0;
-    let le = endian;
     let rd = Gpr((word & 31) as u8);
     let rn = Gpr(((word >> 5) & 31) as u8);
     let rm = Gpr(((word >> 16) & 31) as u8);
@@ -182,27 +217,27 @@ fn step_a64(
     let sysop = (word >> 5) & 0xffff;
     // TBZ/TBNZ のビット番号は b5(bit31)<<5 | b40(bits[23:19])。
     let bit_no = ((word >> 31) & 1) << 5 | ((word >> 19) & 31);
-    let ok = match insn {
-        Insn::B => env.step(|b| sem::b_(b, b_tgt)),
-        Insn::Bl => env.step(|b| sem::bl(b, pc, b_tgt)),
-        Insn::BCond => env.step(|b| sem::b_cond(b, c_tgt, cond)),
-        Insn::Cbz => env.step(|b| sem::cbz(b, rt, c_tgt, sf, false)),
-        Insn::Cbnz => env.step(|b| sem::cbz(b, rt, c_tgt, sf, true)),
-        Insn::Tbz => env.step(|b| sem::tbz(b, rt, t_tgt, bit_no, false)),
-        Insn::Tbnz => env.step(|b| sem::tbz(b, rt, t_tgt, bit_no, true)),
-        Insn::Br => env.step(|b| sem::br(b, rn)),
-        Insn::Blr => env.step(|b| sem::blr(b, rn, pc)),
-        Insn::Ret => env.step(|b| sem::ret(b, rn)),
+    match insn {
+        Insn::B => sem::b_(b, b_tgt),
+        Insn::Bl => sem::bl(b, pc, b_tgt),
+        Insn::BCond => sem::b_cond(b, c_tgt, cond),
+        Insn::Cbz => sem::cbz(b, rt, c_tgt, sf, false),
+        Insn::Cbnz => sem::cbz(b, rt, c_tgt, sf, true),
+        Insn::Tbz => sem::tbz(b, rt, t_tgt, bit_no, false),
+        Insn::Tbnz => sem::tbz(b, rt, t_tgt, bit_no, true),
+        Insn::Br => sem::br(b, rn),
+        Insn::Blr => sem::blr(b, rn, pc),
+        Insn::Ret => sem::ret(b, rn),
         Insn::Hvc | Insn::Smc | Insn::Brk | Insn::Hlt | Insn::Sysl => {
-            return Err(unimpl(env));
+            return Ok(false);
         }
-        Insn::Msr => env.step(|b| sem::msr(b, rt, sysop)),
-        Insn::Mrs => env.step(|b| sem::mrs(b, rt, sysop)),
-        Insn::Sys | Insn::PrfmLit => env.step(sem::sys_op),
-        Insn::AddImm => env.step(|b| sem::add_imm(b, rd, rn, imm_s, sf, false, false)),
-        Insn::AddsImm => env.step(|b| sem::add_imm(b, rd, rn, imm_s, sf, false, true)),
-        Insn::SubImm => env.step(|b| sem::add_imm(b, rd, rn, imm_s, sf, true, false)),
-        Insn::SubsImm => env.step(|b| sem::add_imm(b, rd, rn, imm_s, sf, true, true)),
+        Insn::Msr => sem::msr(b, rt, sysop),
+        Insn::Mrs => sem::mrs(b, rt, sysop),
+        Insn::Sys | Insn::PrfmLit => sem::sys_op(b),
+        Insn::AddImm => sem::add_imm(b, rd, rn, imm_s, sf, false, false),
+        Insn::AddsImm => sem::add_imm(b, rd, rn, imm_s, sf, false, true),
+        Insn::SubImm => sem::add_imm(b, rd, rn, imm_s, sf, true, false),
+        Insn::SubsImm => sem::add_imm(b, rd, rn, imm_s, sf, true, true),
         Insn::AndImm | Insn::OrrImm | Insn::EorImm | Insn::AndsImm => {
             let op = match insn {
                 Insn::AndImm => 0,
@@ -211,384 +246,291 @@ fn step_a64(
                 _ => 3,
             };
             let Some(mask) = sem::decode_bit_masks(n_bit, imms, immr, sf) else {
-                return Err(unimpl(env));
+                return Ok(false);
             };
-            env.step(|b| sem::log_imm(b, rd, rn, mask, op, sf))
+            sem::log_imm(b, rd, rn, mask, op, sf)
         }
-        Insn::Movn => env.step(|b| sem::movn(b, rd, u64::from(imm16) << (16 * hw), sf)),
-        Insn::Movz => env.step(|b| sem::movz(b, rd, u64::from(imm16) << (16 * hw), sf)),
-        Insn::Movk => env.step(|b| sem::movk(b, rd, u64::from(imm16), hw, sf)),
+        Insn::Movn => sem::movn(b, rd, u64::from(imm16) << (16 * hw), sf),
+        Insn::Movz => sem::movz(b, rd, u64::from(imm16) << (16 * hw), sf),
+        Insn::Movk => sem::movk(b, rd, u64::from(imm16), hw, sf),
         Insn::Adr => {
             // immhi(bits[23:5])<<2 | immlo(bits[30:29]) の 21 ビット符号付き。
             let imm21 = (((word >> 5) & 0x7_ffff) << 2) | ((word >> 29) & 3);
-            env.step(|b| sem::adr(b, rd, pc, sext(imm21, 21)))
+            sem::adr(b, rd, pc, sext(imm21, 21))
         }
         Insn::Adrp => {
             let imm21 = (((word >> 5) & 0x7ffff) << 2) | ((word >> 29) & 3);
-            env.step(|b| sem::adr(b, rd, pc & !0xfff, sext(imm21, 21) << 12))
+            sem::adr(b, rd, pc & !0xfff, sext(imm21, 21) << 12)
         }
-        Insn::Sbfm => env.step(|b| sem::bitfield(b, rd, rn, immr, imms, 0, sf)),
-        Insn::Bfm => env.step(|b| sem::bitfield(b, rd, rn, immr, imms, 1, sf)),
-        Insn::Ubfm => env.step(|b| sem::bitfield(b, rd, rn, immr, imms, 2, sf)),
-        Insn::Extr => env.step(|b| sem::extr(b, rd, rn, rm, imms, sf)),
-        Insn::AndSh => env.step(|b| sem::log_sh(b, rd, rn, rm, shift, imm6, 0, false, sf)),
-        Insn::BicSh => env.step(|b| sem::log_sh(b, rd, rn, rm, shift, imm6, 0, true, sf)),
-        Insn::OrrSh => env.step(|b| sem::log_sh(b, rd, rn, rm, shift, imm6, 1, false, sf)),
-        Insn::OrnSh => env.step(|b| sem::log_sh(b, rd, rn, rm, shift, imm6, 1, true, sf)),
-        Insn::EorSh => env.step(|b| sem::log_sh(b, rd, rn, rm, shift, imm6, 2, false, sf)),
-        Insn::EonSh => env.step(|b| sem::log_sh(b, rd, rn, rm, shift, imm6, 2, true, sf)),
-        Insn::AndsSh => env.step(|b| sem::log_sh(b, rd, rn, rm, shift, imm6, 3, false, sf)),
-        Insn::BicsSh => env.step(|b| sem::log_sh(b, rd, rn, rm, shift, imm6, 3, true, sf)),
-        Insn::AddSh => env.step(|b| sem::add_sh(b, rd, rn, rm, shift, imm6, sf, false, false)),
-        Insn::AddsSh => env.step(|b| sem::add_sh(b, rd, rn, rm, shift, imm6, sf, false, true)),
-        Insn::SubSh => env.step(|b| sem::add_sh(b, rd, rn, rm, shift, imm6, sf, true, false)),
-        Insn::SubsSh => env.step(|b| sem::add_sh(b, rd, rn, rm, shift, imm6, sf, true, true)),
-        Insn::AddExt => env.step(|b| sem::add_ext(b, rd, rn, rm, option, imm3, sf, false, false)),
-        Insn::AddsExt => env.step(|b| sem::add_ext(b, rd, rn, rm, option, imm3, sf, false, true)),
-        Insn::SubExt => env.step(|b| sem::add_ext(b, rd, rn, rm, option, imm3, sf, true, false)),
-        Insn::SubsExt => env.step(|b| sem::add_ext(b, rd, rn, rm, option, imm3, sf, true, true)),
-        Insn::Csel => env.step(|b| sem::csel(b, rd, rn, rm, cond_hi, 0, sf)),
-        Insn::Csinc => env.step(|b| sem::csel(b, rd, rn, rm, cond_hi, 1, sf)),
-        Insn::Csinv => env.step(|b| sem::csel(b, rd, rn, rm, cond_hi, 2, sf)),
-        Insn::Csneg => env.step(|b| sem::csel(b, rd, rn, rm, cond_hi, 3, sf)),
+        Insn::Sbfm => sem::bitfield(b, rd, rn, immr, imms, 0, sf),
+        Insn::Bfm => sem::bitfield(b, rd, rn, immr, imms, 1, sf),
+        Insn::Ubfm => sem::bitfield(b, rd, rn, immr, imms, 2, sf),
+        Insn::Extr => sem::extr(b, rd, rn, rm, imms, sf),
+        Insn::AndSh => sem::log_sh(b, rd, rn, rm, shift, imm6, 0, false, sf),
+        Insn::BicSh => sem::log_sh(b, rd, rn, rm, shift, imm6, 0, true, sf),
+        Insn::OrrSh => sem::log_sh(b, rd, rn, rm, shift, imm6, 1, false, sf),
+        Insn::OrnSh => sem::log_sh(b, rd, rn, rm, shift, imm6, 1, true, sf),
+        Insn::EorSh => sem::log_sh(b, rd, rn, rm, shift, imm6, 2, false, sf),
+        Insn::EonSh => sem::log_sh(b, rd, rn, rm, shift, imm6, 2, true, sf),
+        Insn::AndsSh => sem::log_sh(b, rd, rn, rm, shift, imm6, 3, false, sf),
+        Insn::BicsSh => sem::log_sh(b, rd, rn, rm, shift, imm6, 3, true, sf),
+        Insn::AddSh => sem::add_sh(b, rd, rn, rm, shift, imm6, sf, false, false),
+        Insn::AddsSh => sem::add_sh(b, rd, rn, rm, shift, imm6, sf, false, true),
+        Insn::SubSh => sem::add_sh(b, rd, rn, rm, shift, imm6, sf, true, false),
+        Insn::SubsSh => sem::add_sh(b, rd, rn, rm, shift, imm6, sf, true, true),
+        Insn::AddExt => sem::add_ext(b, rd, rn, rm, option, imm3, sf, false, false),
+        Insn::AddsExt => sem::add_ext(b, rd, rn, rm, option, imm3, sf, false, true),
+        Insn::SubExt => sem::add_ext(b, rd, rn, rm, option, imm3, sf, true, false),
+        Insn::SubsExt => sem::add_ext(b, rd, rn, rm, option, imm3, sf, true, true),
+        Insn::Csel => sem::csel(b, rd, rn, rm, cond_hi, 0, sf),
+        Insn::Csinc => sem::csel(b, rd, rn, rm, cond_hi, 1, sf),
+        Insn::Csinv => sem::csel(b, rd, rn, rm, cond_hi, 2, sf),
+        Insn::Csneg => sem::csel(b, rd, rn, rm, cond_hi, 3, sf),
         Insn::CcmnReg => {
             let c = (word >> 12) & 0xf;
-            env.step(|b| sem::ccmp(b, rn, rm, 0, nzcv_in, c, sf, false, false))
+            sem::ccmp(b, rn, rm, 0, nzcv_in, c, sf, false, false)
         }
         Insn::CcmpReg => {
             let c = (word >> 12) & 0xf;
-            env.step(|b| sem::ccmp(b, rn, rm, 0, nzcv_in, c, sf, false, true))
+            sem::ccmp(b, rn, rm, 0, nzcv_in, c, sf, false, true)
         }
         Insn::CcmnImm => {
             let c = (word >> 12) & 0xf;
             let imm5 = u64::from((word >> 16) & 31);
-            env.step(|b| sem::ccmp(b, rn, rm, imm5, nzcv_in, c, sf, true, false))
+            sem::ccmp(b, rn, rm, imm5, nzcv_in, c, sf, true, false)
         }
         Insn::CcmpImm => {
             let c = (word >> 12) & 0xf;
             let imm5 = u64::from((word >> 16) & 31);
-            env.step(|b| sem::ccmp(b, rn, rm, imm5, nzcv_in, c, sf, true, true))
+            sem::ccmp(b, rn, rm, imm5, nzcv_in, c, sf, true, true)
         }
-        Insn::Udiv => env.step(|b| sem::dp2(b, rd, rn, rm, 0, sf)),
-        Insn::Sdiv => env.step(|b| sem::dp2(b, rd, rn, rm, 1, sf)),
-        Insn::Lslv => env.step(|b| sem::dp2(b, rd, rn, rm, 2, sf)),
-        Insn::Lsrv => env.step(|b| sem::dp2(b, rd, rn, rm, 3, sf)),
-        Insn::Asrv => env.step(|b| sem::dp2(b, rd, rn, rm, 4, sf)),
-        Insn::Rorv => env.step(|b| sem::dp2(b, rd, rn, rm, 5, sf)),
-        Insn::Rbit => env.step(|b| sem::dp1(b, rd, rn, 0, sf)),
-        Insn::Rev16 => env.step(|b| sem::dp1(b, rd, rn, 1, sf)),
-        Insn::Rev32 => env.step(|b| sem::dp1(b, rd, rn, 2, true)),
-        Insn::Rev => env.step(|b| sem::dp1(b, rd, rn, 2, false)),
-        Insn::Rev64 => env.step(|b| sem::dp1(b, rd, rn, 3, true)),
-        Insn::Clz => env.step(|b| sem::dp1(b, rd, rn, 4, sf)),
-        Insn::Cls => env.step(|b| sem::dp1(b, rd, rn, 5, sf)),
-        Insn::Madd => env.step(|b| sem::madd(b, rd, rn, rm, ra, false, sf)),
-        Insn::Msub => env.step(|b| sem::madd(b, rd, rn, rm, ra, true, sf)),
-        Insn::Smaddl => env.step(|b| sem::maddl(b, rd, rn, rm, ra, 0)),
-        Insn::Smsubl => env.step(|b| sem::maddl(b, rd, rn, rm, ra, 1)),
-        Insn::Umaddl => env.step(|b| sem::maddl(b, rd, rn, rm, ra, 2)),
-        Insn::Umsubl => env.step(|b| sem::maddl(b, rd, rn, rm, ra, 3)),
-        Insn::Smulh => env.step(|b| sem::mulh(b, rd, rn, rm, true)),
-        Insn::Umulh => env.step(|b| sem::mulh(b, rd, rn, rm, false)),
-        Insn::StrbU => {
-            env.step(|b| sem::ls_unsigned(b, rt, rn, imm12 as i64, 1, true, false, false, le))
+        Insn::Udiv => sem::dp2(b, rd, rn, rm, 0, sf),
+        Insn::Sdiv => sem::dp2(b, rd, rn, rm, 1, sf),
+        Insn::Lslv => sem::dp2(b, rd, rn, rm, 2, sf),
+        Insn::Lsrv => sem::dp2(b, rd, rn, rm, 3, sf),
+        Insn::Asrv => sem::dp2(b, rd, rn, rm, 4, sf),
+        Insn::Rorv => sem::dp2(b, rd, rn, rm, 5, sf),
+        Insn::Rbit => sem::dp1(b, rd, rn, 0, sf),
+        Insn::Rev16 => sem::dp1(b, rd, rn, 1, sf),
+        Insn::Rev32 => sem::dp1(b, rd, rn, 2, true),
+        Insn::Rev => sem::dp1(b, rd, rn, 2, false),
+        Insn::Rev64 => sem::dp1(b, rd, rn, 3, true),
+        Insn::Clz => sem::dp1(b, rd, rn, 4, sf),
+        Insn::Cls => sem::dp1(b, rd, rn, 5, sf),
+        Insn::Madd => sem::madd(b, rd, rn, rm, ra, false, sf),
+        Insn::Msub => sem::madd(b, rd, rn, rm, ra, true, sf),
+        Insn::Smaddl => sem::maddl(b, rd, rn, rm, ra, 0),
+        Insn::Smsubl => sem::maddl(b, rd, rn, rm, ra, 1),
+        Insn::Umaddl => sem::maddl(b, rd, rn, rm, ra, 2),
+        Insn::Umsubl => sem::maddl(b, rd, rn, rm, ra, 3),
+        Insn::Smulh => sem::mulh(b, rd, rn, rm, true),
+        Insn::Umulh => sem::mulh(b, rd, rn, rm, false),
+        Insn::StrbU => sem::ls_unsigned(b, rt, rn, imm12 as i64, 1, true, false, false, le),
+        Insn::LdrbU => sem::ls_unsigned(b, rt, rn, imm12 as i64, 1, false, false, false, le),
+        Insn::LdrsbUX => sem::ls_unsigned(b, rt, rn, imm12 as i64, 1, false, true, true, le),
+        Insn::LdrsbUW => sem::ls_unsigned(b, rt, rn, imm12 as i64, 1, false, true, false, le),
+        Insn::StrhU => sem::ls_unsigned(b, rt, rn, (imm12 as i64) << 1, 2, true, false, false, le),
+        Insn::LdrhU => sem::ls_unsigned(b, rt, rn, (imm12 as i64) << 1, 2, false, false, false, le),
+        Insn::LdrshUX => sem::ls_unsigned(b, rt, rn, (imm12 as i64) << 1, 2, false, true, true, le),
+        Insn::LdrshUW => {
+            sem::ls_unsigned(b, rt, rn, (imm12 as i64) << 1, 2, false, true, false, le)
         }
-        Insn::LdrbU => {
-            env.step(|b| sem::ls_unsigned(b, rt, rn, imm12 as i64, 1, false, false, false, le))
+        Insn::StrUW => sem::ls_unsigned(b, rt, rn, (imm12 as i64) << 2, 4, true, false, false, le),
+        Insn::LdrUW => sem::ls_unsigned(b, rt, rn, (imm12 as i64) << 2, 4, false, false, false, le),
+        Insn::LdrswU => sem::ls_unsigned(b, rt, rn, (imm12 as i64) << 2, 4, false, true, true, le),
+        Insn::StrUX => sem::ls_unsigned(b, rt, rn, (imm12 as i64) << 3, 8, true, false, false, le),
+        Insn::LdrUX => sem::ls_unsigned(b, rt, rn, (imm12 as i64) << 3, 8, false, false, false, le),
+        Insn::Sturb => sem::ls_imm9(b, rt, rn, imm9, 1, true, false, false, 0, le),
+        Insn::Ldurb => sem::ls_imm9(b, rt, rn, imm9, 1, false, false, false, 0, le),
+        Insn::LdursbX => sem::ls_imm9(b, rt, rn, imm9, 1, false, true, true, 0, le),
+        Insn::LdursbW => sem::ls_imm9(b, rt, rn, imm9, 1, false, true, false, 0, le),
+        Insn::Sturh => sem::ls_imm9(b, rt, rn, imm9, 2, true, false, false, 0, le),
+        Insn::Ldurh => sem::ls_imm9(b, rt, rn, imm9, 2, false, false, false, 0, le),
+        Insn::LdurshX => sem::ls_imm9(b, rt, rn, imm9, 2, false, true, true, 0, le),
+        Insn::LdurshW => sem::ls_imm9(b, rt, rn, imm9, 2, false, true, false, 0, le),
+        Insn::SturW => sem::ls_imm9(b, rt, rn, imm9, 4, true, false, false, 0, le),
+        Insn::LdurW => sem::ls_imm9(b, rt, rn, imm9, 4, false, false, false, 0, le),
+        Insn::Ldursw => sem::ls_imm9(b, rt, rn, imm9, 4, false, true, true, 0, le),
+        Insn::SturX => sem::ls_imm9(b, rt, rn, imm9, 8, true, false, false, 0, le),
+        Insn::LdurX => sem::ls_imm9(b, rt, rn, imm9, 8, false, false, false, 0, le),
+        Insn::StrbPost => sem::ls_imm9(b, rt, rn, imm9, 1, true, false, false, 1, le),
+        Insn::LdrbPost => sem::ls_imm9(b, rt, rn, imm9, 1, false, false, false, 1, le),
+        Insn::LdrsbPostX => sem::ls_imm9(b, rt, rn, imm9, 1, false, true, true, 1, le),
+        Insn::LdrsbPostW => sem::ls_imm9(b, rt, rn, imm9, 1, false, true, false, 1, le),
+        Insn::StrhPost => sem::ls_imm9(b, rt, rn, imm9, 2, true, false, false, 1, le),
+        Insn::LdrhPost => sem::ls_imm9(b, rt, rn, imm9, 2, false, false, false, 1, le),
+        Insn::LdrshPostX => sem::ls_imm9(b, rt, rn, imm9, 2, false, true, true, 1, le),
+        Insn::LdrshPostW => sem::ls_imm9(b, rt, rn, imm9, 2, false, true, false, 1, le),
+        Insn::StrPostW => sem::ls_imm9(b, rt, rn, imm9, 4, true, false, false, 1, le),
+        Insn::LdrPostW => sem::ls_imm9(b, rt, rn, imm9, 4, false, false, false, 1, le),
+        Insn::LdrswPost => sem::ls_imm9(b, rt, rn, imm9, 4, false, true, true, 1, le),
+        Insn::StrPostX => sem::ls_imm9(b, rt, rn, imm9, 8, true, false, false, 1, le),
+        Insn::LdrPostX => sem::ls_imm9(b, rt, rn, imm9, 8, false, false, false, 1, le),
+        Insn::StrbPre => sem::ls_imm9(b, rt, rn, imm9, 1, true, false, false, 3, le),
+        Insn::LdrbPre => sem::ls_imm9(b, rt, rn, imm9, 1, false, false, false, 3, le),
+        Insn::LdrsbPreX => sem::ls_imm9(b, rt, rn, imm9, 1, false, true, true, 3, le),
+        Insn::LdrsbPreW => sem::ls_imm9(b, rt, rn, imm9, 1, false, true, false, 3, le),
+        Insn::StrhPre => sem::ls_imm9(b, rt, rn, imm9, 2, true, false, false, 3, le),
+        Insn::LdrhPre => sem::ls_imm9(b, rt, rn, imm9, 2, false, false, false, 3, le),
+        Insn::LdrshPreX => sem::ls_imm9(b, rt, rn, imm9, 2, false, true, true, 3, le),
+        Insn::LdrshPreW => sem::ls_imm9(b, rt, rn, imm9, 2, false, true, false, 3, le),
+        Insn::StrPreW => sem::ls_imm9(b, rt, rn, imm9, 4, true, false, false, 3, le),
+        Insn::LdrPreW => sem::ls_imm9(b, rt, rn, imm9, 4, false, false, false, 3, le),
+        Insn::LdrswPre => sem::ls_imm9(b, rt, rn, imm9, 4, false, true, true, 3, le),
+        Insn::StrPreX => sem::ls_imm9(b, rt, rn, imm9, 8, true, false, false, 3, le),
+        Insn::LdrPreX => sem::ls_imm9(b, rt, rn, imm9, 8, false, false, false, 3, le),
+        Insn::StrbReg => sem::ls_regoff(b, rt, rn, rm, option, 0, 1, true, false, false, le),
+        Insn::LdrbReg => sem::ls_regoff(b, rt, rn, rm, option, 0, 1, false, false, false, le),
+        Insn::LdrsbRegX => sem::ls_regoff(b, rt, rn, rm, option, 0, 1, false, true, true, le),
+        Insn::LdrsbRegW => sem::ls_regoff(b, rt, rn, rm, option, 0, 1, false, true, false, le),
+        Insn::StrhReg => sem::ls_regoff(b, rt, rn, rm, option, s_bit, 2, true, false, false, le),
+        Insn::LdrhReg => sem::ls_regoff(b, rt, rn, rm, option, s_bit, 2, false, false, false, le),
+        Insn::LdrshRegX => sem::ls_regoff(b, rt, rn, rm, option, s_bit, 2, false, true, true, le),
+        Insn::LdrshRegW => sem::ls_regoff(b, rt, rn, rm, option, s_bit, 2, false, true, false, le),
+        Insn::StrRegW => {
+            sem::ls_regoff(b, rt, rn, rm, option, s_bit * 2, 4, true, false, false, le)
         }
-        Insn::LdrsbUX => {
-            env.step(|b| sem::ls_unsigned(b, rt, rn, imm12 as i64, 1, false, true, true, le))
+        Insn::LdrRegW => {
+            sem::ls_regoff(b, rt, rn, rm, option, s_bit * 2, 4, false, false, false, le)
         }
-        Insn::LdrsbUW => {
-            env.step(|b| sem::ls_unsigned(b, rt, rn, imm12 as i64, 1, false, true, false, le))
-        }
-        Insn::StrhU => env
-            .step(|b| sem::ls_unsigned(b, rt, rn, (imm12 as i64) << 1, 2, true, false, false, le)),
-        Insn::LdrhU => env
-            .step(|b| sem::ls_unsigned(b, rt, rn, (imm12 as i64) << 1, 2, false, false, false, le)),
-        Insn::LdrshUX => {
-            env.step(|b| sem::ls_unsigned(b, rt, rn, (imm12 as i64) << 1, 2, false, true, true, le))
-        }
-        Insn::LdrshUW => env
-            .step(|b| sem::ls_unsigned(b, rt, rn, (imm12 as i64) << 1, 2, false, true, false, le)),
-        Insn::StrUW => env
-            .step(|b| sem::ls_unsigned(b, rt, rn, (imm12 as i64) << 2, 4, true, false, false, le)),
-        Insn::LdrUW => env
-            .step(|b| sem::ls_unsigned(b, rt, rn, (imm12 as i64) << 2, 4, false, false, false, le)),
-        Insn::LdrswU => {
-            env.step(|b| sem::ls_unsigned(b, rt, rn, (imm12 as i64) << 2, 4, false, true, true, le))
-        }
-        Insn::StrUX => env
-            .step(|b| sem::ls_unsigned(b, rt, rn, (imm12 as i64) << 3, 8, true, false, false, le)),
-        Insn::LdrUX => env
-            .step(|b| sem::ls_unsigned(b, rt, rn, (imm12 as i64) << 3, 8, false, false, false, le)),
-        Insn::Sturb => env.step(|b| sem::ls_imm9(b, rt, rn, imm9, 1, true, false, false, 0, le)),
-        Insn::Ldurb => env.step(|b| sem::ls_imm9(b, rt, rn, imm9, 1, false, false, false, 0, le)),
-        Insn::LdursbX => env.step(|b| sem::ls_imm9(b, rt, rn, imm9, 1, false, true, true, 0, le)),
-        Insn::LdursbW => env.step(|b| sem::ls_imm9(b, rt, rn, imm9, 1, false, true, false, 0, le)),
-        Insn::Sturh => env.step(|b| sem::ls_imm9(b, rt, rn, imm9, 2, true, false, false, 0, le)),
-        Insn::Ldurh => env.step(|b| sem::ls_imm9(b, rt, rn, imm9, 2, false, false, false, 0, le)),
-        Insn::LdurshX => env.step(|b| sem::ls_imm9(b, rt, rn, imm9, 2, false, true, true, 0, le)),
-        Insn::LdurshW => env.step(|b| sem::ls_imm9(b, rt, rn, imm9, 2, false, true, false, 0, le)),
-        Insn::SturW => env.step(|b| sem::ls_imm9(b, rt, rn, imm9, 4, true, false, false, 0, le)),
-        Insn::LdurW => env.step(|b| sem::ls_imm9(b, rt, rn, imm9, 4, false, false, false, 0, le)),
-        Insn::Ldursw => env.step(|b| sem::ls_imm9(b, rt, rn, imm9, 4, false, true, true, 0, le)),
-        Insn::SturX => env.step(|b| sem::ls_imm9(b, rt, rn, imm9, 8, true, false, false, 0, le)),
-        Insn::LdurX => env.step(|b| sem::ls_imm9(b, rt, rn, imm9, 8, false, false, false, 0, le)),
-        Insn::StrbPost => env.step(|b| sem::ls_imm9(b, rt, rn, imm9, 1, true, false, false, 1, le)),
-        Insn::LdrbPost => {
-            env.step(|b| sem::ls_imm9(b, rt, rn, imm9, 1, false, false, false, 1, le))
-        }
-        Insn::LdrsbPostX => {
-            env.step(|b| sem::ls_imm9(b, rt, rn, imm9, 1, false, true, true, 1, le))
-        }
-        Insn::LdrsbPostW => {
-            env.step(|b| sem::ls_imm9(b, rt, rn, imm9, 1, false, true, false, 1, le))
-        }
-        Insn::StrhPost => env.step(|b| sem::ls_imm9(b, rt, rn, imm9, 2, true, false, false, 1, le)),
-        Insn::LdrhPost => {
-            env.step(|b| sem::ls_imm9(b, rt, rn, imm9, 2, false, false, false, 1, le))
-        }
-        Insn::LdrshPostX => {
-            env.step(|b| sem::ls_imm9(b, rt, rn, imm9, 2, false, true, true, 1, le))
-        }
-        Insn::LdrshPostW => {
-            env.step(|b| sem::ls_imm9(b, rt, rn, imm9, 2, false, true, false, 1, le))
-        }
-        Insn::StrPostW => env.step(|b| sem::ls_imm9(b, rt, rn, imm9, 4, true, false, false, 1, le)),
-        Insn::LdrPostW => {
-            env.step(|b| sem::ls_imm9(b, rt, rn, imm9, 4, false, false, false, 1, le))
-        }
-        Insn::LdrswPost => env.step(|b| sem::ls_imm9(b, rt, rn, imm9, 4, false, true, true, 1, le)),
-        Insn::StrPostX => env.step(|b| sem::ls_imm9(b, rt, rn, imm9, 8, true, false, false, 1, le)),
-        Insn::LdrPostX => {
-            env.step(|b| sem::ls_imm9(b, rt, rn, imm9, 8, false, false, false, 1, le))
-        }
-        Insn::StrbPre => env.step(|b| sem::ls_imm9(b, rt, rn, imm9, 1, true, false, false, 3, le)),
-        Insn::LdrbPre => env.step(|b| sem::ls_imm9(b, rt, rn, imm9, 1, false, false, false, 3, le)),
-        Insn::LdrsbPreX => env.step(|b| sem::ls_imm9(b, rt, rn, imm9, 1, false, true, true, 3, le)),
-        Insn::LdrsbPreW => {
-            env.step(|b| sem::ls_imm9(b, rt, rn, imm9, 1, false, true, false, 3, le))
-        }
-        Insn::StrhPre => env.step(|b| sem::ls_imm9(b, rt, rn, imm9, 2, true, false, false, 3, le)),
-        Insn::LdrhPre => env.step(|b| sem::ls_imm9(b, rt, rn, imm9, 2, false, false, false, 3, le)),
-        Insn::LdrshPreX => env.step(|b| sem::ls_imm9(b, rt, rn, imm9, 2, false, true, true, 3, le)),
-        Insn::LdrshPreW => {
-            env.step(|b| sem::ls_imm9(b, rt, rn, imm9, 2, false, true, false, 3, le))
-        }
-        Insn::StrPreW => env.step(|b| sem::ls_imm9(b, rt, rn, imm9, 4, true, false, false, 3, le)),
-        Insn::LdrPreW => env.step(|b| sem::ls_imm9(b, rt, rn, imm9, 4, false, false, false, 3, le)),
-        Insn::LdrswPre => env.step(|b| sem::ls_imm9(b, rt, rn, imm9, 4, false, true, true, 3, le)),
-        Insn::StrPreX => env.step(|b| sem::ls_imm9(b, rt, rn, imm9, 8, true, false, false, 3, le)),
-        Insn::LdrPreX => env.step(|b| sem::ls_imm9(b, rt, rn, imm9, 8, false, false, false, 3, le)),
-        Insn::StrbReg => {
-            env.step(|b| sem::ls_regoff(b, rt, rn, rm, option, 0, 1, true, false, false, le))
-        }
-        Insn::LdrbReg => {
-            env.step(|b| sem::ls_regoff(b, rt, rn, rm, option, 0, 1, false, false, false, le))
-        }
-        Insn::LdrsbRegX => {
-            env.step(|b| sem::ls_regoff(b, rt, rn, rm, option, 0, 1, false, true, true, le))
-        }
-        Insn::LdrsbRegW => {
-            env.step(|b| sem::ls_regoff(b, rt, rn, rm, option, 0, 1, false, true, false, le))
-        }
-        Insn::StrhReg => {
-            env.step(|b| sem::ls_regoff(b, rt, rn, rm, option, s_bit, 2, true, false, false, le))
-        }
-        Insn::LdrhReg => {
-            env.step(|b| sem::ls_regoff(b, rt, rn, rm, option, s_bit, 2, false, false, false, le))
-        }
-        Insn::LdrshRegX => {
-            env.step(|b| sem::ls_regoff(b, rt, rn, rm, option, s_bit, 2, false, true, true, le))
-        }
-        Insn::LdrshRegW => {
-            env.step(|b| sem::ls_regoff(b, rt, rn, rm, option, s_bit, 2, false, true, false, le))
-        }
-        Insn::StrRegW => env
-            .step(|b| sem::ls_regoff(b, rt, rn, rm, option, s_bit * 2, 4, true, false, false, le)),
-        Insn::LdrRegW => env
-            .step(|b| sem::ls_regoff(b, rt, rn, rm, option, s_bit * 2, 4, false, false, false, le)),
         Insn::LdrswReg => {
-            env.step(|b| sem::ls_regoff(b, rt, rn, rm, option, s_bit * 2, 4, false, true, true, le))
+            sem::ls_regoff(b, rt, rn, rm, option, s_bit * 2, 4, false, true, true, le)
         }
-        Insn::StrRegX => env
-            .step(|b| sem::ls_regoff(b, rt, rn, rm, option, s_bit * 3, 8, true, false, false, le)),
-        Insn::LdrRegX => env
-            .step(|b| sem::ls_regoff(b, rt, rn, rm, option, s_bit * 3, 8, false, false, false, le)),
-        Insn::LdrWLit => env.step(|b| sem::ls_lit(b, rt, c_tgt, 4, false, false, le)),
-        Insn::LdrXLit => env.step(|b| sem::ls_lit(b, rt, c_tgt, 8, false, false, le)),
-        Insn::LdrswLit => env.step(|b| sem::ls_lit(b, rt, c_tgt, 4, true, true, le)),
-        Insn::StpWOff => env.step(|b| sem::ls_pair(b, rt, rt2, rn, imm7 << 2, 4, true, 2, le)),
-        Insn::LdpWOff => env.step(|b| sem::ls_pair(b, rt, rt2, rn, imm7 << 2, 4, false, 2, le)),
-        Insn::StpXOff => env.step(|b| sem::ls_pair(b, rt, rt2, rn, imm7 << 3, 8, true, 2, le)),
-        Insn::LdpXOff => env.step(|b| sem::ls_pair(b, rt, rt2, rn, imm7 << 3, 8, false, 2, le)),
-        Insn::StpWPost => env.step(|b| sem::ls_pair(b, rt, rt2, rn, imm7 << 2, 4, true, 1, le)),
-        Insn::LdpWPost => env.step(|b| sem::ls_pair(b, rt, rt2, rn, imm7 << 2, 4, false, 1, le)),
-        Insn::StpXPost => env.step(|b| sem::ls_pair(b, rt, rt2, rn, imm7 << 3, 8, true, 1, le)),
-        Insn::LdpXPost => env.step(|b| sem::ls_pair(b, rt, rt2, rn, imm7 << 3, 8, false, 1, le)),
-        Insn::StpWPre => env.step(|b| sem::ls_pair(b, rt, rt2, rn, imm7 << 2, 4, true, 3, le)),
-        Insn::LdpWPre => env.step(|b| sem::ls_pair(b, rt, rt2, rn, imm7 << 2, 4, false, 3, le)),
-        Insn::StpXPre => env.step(|b| sem::ls_pair(b, rt, rt2, rn, imm7 << 3, 8, true, 3, le)),
-        Insn::LdpXPre => env.step(|b| sem::ls_pair(b, rt, rt2, rn, imm7 << 3, 8, false, 3, le)),
-        Insn::LdxrW | Insn::LdaxrW => env.step(|b| sem::ldxr(b, rt, rn, 4, le)),
-        Insn::StxrW | Insn::StlxrW => env.step(|b| sem::stxr(b, rs, rt, rn, 4, le)),
-        Insn::LdxrX | Insn::LdaxrX => env.step(|b| sem::ldxr(b, rt, rn, 8, le)),
-        Insn::StxrX | Insn::StlxrX => env.step(|b| sem::stxr(b, rs, rt, rn, 8, le)),
-        Insn::Ldxrb | Insn::Ldaxrb => env.step(|b| sem::ldxr(b, rt, rn, 1, le)),
-        Insn::Stxrb | Insn::Stlxrb => env.step(|b| sem::stxr(b, rs, rt, rn, 1, le)),
-        Insn::Ldxrh | Insn::Ldaxrh => env.step(|b| sem::ldxr(b, rt, rn, 2, le)),
-        Insn::Stxrh | Insn::Stlxrh => env.step(|b| sem::stxr(b, rs, rt, rn, 2, le)),
+        Insn::StrRegX => {
+            sem::ls_regoff(b, rt, rn, rm, option, s_bit * 3, 8, true, false, false, le)
+        }
+        Insn::LdrRegX => {
+            sem::ls_regoff(b, rt, rn, rm, option, s_bit * 3, 8, false, false, false, le)
+        }
+        Insn::LdrWLit => sem::ls_lit(b, rt, c_tgt, 4, false, false, le),
+        Insn::LdrXLit => sem::ls_lit(b, rt, c_tgt, 8, false, false, le),
+        Insn::LdrswLit => sem::ls_lit(b, rt, c_tgt, 4, true, true, le),
+        Insn::StpWOff => sem::ls_pair(b, rt, rt2, rn, imm7 << 2, 4, true, 2, le),
+        Insn::LdpWOff => sem::ls_pair(b, rt, rt2, rn, imm7 << 2, 4, false, 2, le),
+        Insn::StpXOff => sem::ls_pair(b, rt, rt2, rn, imm7 << 3, 8, true, 2, le),
+        Insn::LdpXOff => sem::ls_pair(b, rt, rt2, rn, imm7 << 3, 8, false, 2, le),
+        Insn::StpWPost => sem::ls_pair(b, rt, rt2, rn, imm7 << 2, 4, true, 1, le),
+        Insn::LdpWPost => sem::ls_pair(b, rt, rt2, rn, imm7 << 2, 4, false, 1, le),
+        Insn::StpXPost => sem::ls_pair(b, rt, rt2, rn, imm7 << 3, 8, true, 1, le),
+        Insn::LdpXPost => sem::ls_pair(b, rt, rt2, rn, imm7 << 3, 8, false, 1, le),
+        Insn::StpWPre => sem::ls_pair(b, rt, rt2, rn, imm7 << 2, 4, true, 3, le),
+        Insn::LdpWPre => sem::ls_pair(b, rt, rt2, rn, imm7 << 2, 4, false, 3, le),
+        Insn::StpXPre => sem::ls_pair(b, rt, rt2, rn, imm7 << 3, 8, true, 3, le),
+        Insn::LdpXPre => sem::ls_pair(b, rt, rt2, rn, imm7 << 3, 8, false, 3, le),
+        Insn::LdxrW | Insn::LdaxrW => sem::ldxr(b, rt, rn, 4, le),
+        Insn::StxrW | Insn::StlxrW => sem::stxr(b, rs, rt, rn, 4, le),
+        Insn::LdxrX | Insn::LdaxrX => sem::ldxr(b, rt, rn, 8, le),
+        Insn::StxrX | Insn::StlxrX => sem::stxr(b, rs, rt, rn, 8, le),
+        Insn::Ldxrb | Insn::Ldaxrb => sem::ldxr(b, rt, rn, 1, le),
+        Insn::Stxrb | Insn::Stlxrb => sem::stxr(b, rs, rt, rn, 1, le),
+        Insn::Ldxrh | Insn::Ldaxrh => sem::ldxr(b, rt, rn, 2, le),
+        Insn::Stxrh | Insn::Stlxrh => sem::stxr(b, rs, rt, rn, 2, le),
         // ---- FP/SIMD ----
-        Insn::StpSOff => env.step(|b| sem::vls_pair(b, rt.0, rt2.0, rn, imm7 << 2, 4, true, 2, le)),
-        Insn::LdpSOff => {
-            env.step(|b| sem::vls_pair(b, rt.0, rt2.0, rn, imm7 << 2, 4, false, 2, le))
-        }
-        Insn::StpDOff => env.step(|b| sem::vls_pair(b, rt.0, rt2.0, rn, imm7 << 3, 8, true, 2, le)),
-        Insn::LdpDOff => {
-            env.step(|b| sem::vls_pair(b, rt.0, rt2.0, rn, imm7 << 3, 8, false, 2, le))
-        }
-        Insn::StpQOff => {
-            env.step(|b| sem::vls_pair(b, rt.0, rt2.0, rn, imm7 << 4, 16, true, 2, le))
-        }
-        Insn::LdpQOff => {
-            env.step(|b| sem::vls_pair(b, rt.0, rt2.0, rn, imm7 << 4, 16, false, 2, le))
-        }
-        Insn::StpSPost => {
-            env.step(|b| sem::vls_pair(b, rt.0, rt2.0, rn, imm7 << 2, 4, true, 1, le))
-        }
-        Insn::LdpSPost => {
-            env.step(|b| sem::vls_pair(b, rt.0, rt2.0, rn, imm7 << 2, 4, false, 1, le))
-        }
-        Insn::StpDPost => {
-            env.step(|b| sem::vls_pair(b, rt.0, rt2.0, rn, imm7 << 3, 8, true, 1, le))
-        }
-        Insn::LdpDPost => {
-            env.step(|b| sem::vls_pair(b, rt.0, rt2.0, rn, imm7 << 3, 8, false, 1, le))
-        }
-        Insn::StpQPost => {
-            env.step(|b| sem::vls_pair(b, rt.0, rt2.0, rn, imm7 << 4, 16, true, 1, le))
-        }
-        Insn::LdpQPost => {
-            env.step(|b| sem::vls_pair(b, rt.0, rt2.0, rn, imm7 << 4, 16, false, 1, le))
-        }
-        Insn::StpSPre => env.step(|b| sem::vls_pair(b, rt.0, rt2.0, rn, imm7 << 2, 4, true, 3, le)),
-        Insn::LdpSPre => {
-            env.step(|b| sem::vls_pair(b, rt.0, rt2.0, rn, imm7 << 2, 4, false, 3, le))
-        }
-        Insn::StpDPre => env.step(|b| sem::vls_pair(b, rt.0, rt2.0, rn, imm7 << 3, 8, true, 3, le)),
-        Insn::LdpDPre => {
-            env.step(|b| sem::vls_pair(b, rt.0, rt2.0, rn, imm7 << 3, 8, false, 3, le))
-        }
-        Insn::StpQPre => {
-            env.step(|b| sem::vls_pair(b, rt.0, rt2.0, rn, imm7 << 4, 16, true, 3, le))
-        }
-        Insn::LdpQPre => {
-            env.step(|b| sem::vls_pair(b, rt.0, rt2.0, rn, imm7 << 4, 16, false, 3, le))
-        }
-        Insn::StrBVu => env.step(|b| sem::vls_unsigned(b, rt.0, rn, imm12 as i64, 1, true, le)),
-        Insn::LdrBVu => env.step(|b| sem::vls_unsigned(b, rt.0, rn, imm12 as i64, 1, false, le)),
-        Insn::StrHVu => {
-            env.step(|b| sem::vls_unsigned(b, rt.0, rn, (imm12 * 2) as i64, 2, true, le))
-        }
-        Insn::LdrHVu => {
-            env.step(|b| sem::vls_unsigned(b, rt.0, rn, (imm12 * 2) as i64, 2, false, le))
-        }
-        Insn::StrSVu => {
-            env.step(|b| sem::vls_unsigned(b, rt.0, rn, (imm12 * 4) as i64, 4, true, le))
-        }
-        Insn::LdrSVu => {
-            env.step(|b| sem::vls_unsigned(b, rt.0, rn, (imm12 * 4) as i64, 4, false, le))
-        }
-        Insn::StrDVu => {
-            env.step(|b| sem::vls_unsigned(b, rt.0, rn, (imm12 * 8) as i64, 8, true, le))
-        }
-        Insn::LdrDVu => {
-            env.step(|b| sem::vls_unsigned(b, rt.0, rn, (imm12 * 8) as i64, 8, false, le))
-        }
-        Insn::StrQVu => {
-            env.step(|b| sem::vls_unsigned(b, rt.0, rn, (imm12 * 16) as i64, 16, true, le))
-        }
-        Insn::LdrQVu => {
-            env.step(|b| sem::vls_unsigned(b, rt.0, rn, (imm12 * 16) as i64, 16, false, le))
-        }
-        Insn::SturB => env.step(|b| sem::vls_imm9(b, rt.0, rn, imm9, 1, true, 0, le)),
-        Insn::LdurB => env.step(|b| sem::vls_imm9(b, rt.0, rn, imm9, 1, false, 0, le)),
-        Insn::SturH => env.step(|b| sem::vls_imm9(b, rt.0, rn, imm9, 2, true, 0, le)),
-        Insn::LdurH => env.step(|b| sem::vls_imm9(b, rt.0, rn, imm9, 2, false, 0, le)),
-        Insn::SturS => env.step(|b| sem::vls_imm9(b, rt.0, rn, imm9, 4, true, 0, le)),
-        Insn::LdurS => env.step(|b| sem::vls_imm9(b, rt.0, rn, imm9, 4, false, 0, le)),
-        Insn::SturD => env.step(|b| sem::vls_imm9(b, rt.0, rn, imm9, 8, true, 0, le)),
-        Insn::LdurD => env.step(|b| sem::vls_imm9(b, rt.0, rn, imm9, 8, false, 0, le)),
-        Insn::SturQ => env.step(|b| sem::vls_imm9(b, rt.0, rn, imm9, 16, true, 0, le)),
-        Insn::LdurQ => env.step(|b| sem::vls_imm9(b, rt.0, rn, imm9, 16, false, 0, le)),
-        Insn::StrBPostV => env.step(|b| sem::vls_imm9(b, rt.0, rn, imm9, 1, true, 1, le)),
-        Insn::LdrBPostV => env.step(|b| sem::vls_imm9(b, rt.0, rn, imm9, 1, false, 1, le)),
-        Insn::StrHPostV => env.step(|b| sem::vls_imm9(b, rt.0, rn, imm9, 2, true, 1, le)),
-        Insn::LdrHPostV => env.step(|b| sem::vls_imm9(b, rt.0, rn, imm9, 2, false, 1, le)),
-        Insn::StrSPostV => env.step(|b| sem::vls_imm9(b, rt.0, rn, imm9, 4, true, 1, le)),
-        Insn::LdrSPostV => env.step(|b| sem::vls_imm9(b, rt.0, rn, imm9, 4, false, 1, le)),
-        Insn::StrDPostV => env.step(|b| sem::vls_imm9(b, rt.0, rn, imm9, 8, true, 1, le)),
-        Insn::LdrDPostV => env.step(|b| sem::vls_imm9(b, rt.0, rn, imm9, 8, false, 1, le)),
-        Insn::StrQPostV => env.step(|b| sem::vls_imm9(b, rt.0, rn, imm9, 16, true, 1, le)),
-        Insn::LdrQPostV => env.step(|b| sem::vls_imm9(b, rt.0, rn, imm9, 16, false, 1, le)),
-        Insn::StrBPreV => env.step(|b| sem::vls_imm9(b, rt.0, rn, imm9, 1, true, 3, le)),
-        Insn::LdrBPreV => env.step(|b| sem::vls_imm9(b, rt.0, rn, imm9, 1, false, 3, le)),
-        Insn::StrHPreV => env.step(|b| sem::vls_imm9(b, rt.0, rn, imm9, 2, true, 3, le)),
-        Insn::LdrHPreV => env.step(|b| sem::vls_imm9(b, rt.0, rn, imm9, 2, false, 3, le)),
-        Insn::StrSPreV => env.step(|b| sem::vls_imm9(b, rt.0, rn, imm9, 4, true, 3, le)),
-        Insn::LdrSPreV => env.step(|b| sem::vls_imm9(b, rt.0, rn, imm9, 4, false, 3, le)),
-        Insn::StrDPreV => env.step(|b| sem::vls_imm9(b, rt.0, rn, imm9, 8, true, 3, le)),
-        Insn::LdrDPreV => env.step(|b| sem::vls_imm9(b, rt.0, rn, imm9, 8, false, 3, le)),
-        Insn::StrQPreV => env.step(|b| sem::vls_imm9(b, rt.0, rn, imm9, 16, true, 3, le)),
-        Insn::LdrQPreV => env.step(|b| sem::vls_imm9(b, rt.0, rn, imm9, 16, false, 3, le)),
+        Insn::StpSOff => sem::vls_pair(b, rt.0, rt2.0, rn, imm7 << 2, 4, true, 2, le),
+        Insn::LdpSOff => sem::vls_pair(b, rt.0, rt2.0, rn, imm7 << 2, 4, false, 2, le),
+        Insn::StpDOff => sem::vls_pair(b, rt.0, rt2.0, rn, imm7 << 3, 8, true, 2, le),
+        Insn::LdpDOff => sem::vls_pair(b, rt.0, rt2.0, rn, imm7 << 3, 8, false, 2, le),
+        Insn::StpQOff => sem::vls_pair(b, rt.0, rt2.0, rn, imm7 << 4, 16, true, 2, le),
+        Insn::LdpQOff => sem::vls_pair(b, rt.0, rt2.0, rn, imm7 << 4, 16, false, 2, le),
+        Insn::StpSPost => sem::vls_pair(b, rt.0, rt2.0, rn, imm7 << 2, 4, true, 1, le),
+        Insn::LdpSPost => sem::vls_pair(b, rt.0, rt2.0, rn, imm7 << 2, 4, false, 1, le),
+        Insn::StpDPost => sem::vls_pair(b, rt.0, rt2.0, rn, imm7 << 3, 8, true, 1, le),
+        Insn::LdpDPost => sem::vls_pair(b, rt.0, rt2.0, rn, imm7 << 3, 8, false, 1, le),
+        Insn::StpQPost => sem::vls_pair(b, rt.0, rt2.0, rn, imm7 << 4, 16, true, 1, le),
+        Insn::LdpQPost => sem::vls_pair(b, rt.0, rt2.0, rn, imm7 << 4, 16, false, 1, le),
+        Insn::StpSPre => sem::vls_pair(b, rt.0, rt2.0, rn, imm7 << 2, 4, true, 3, le),
+        Insn::LdpSPre => sem::vls_pair(b, rt.0, rt2.0, rn, imm7 << 2, 4, false, 3, le),
+        Insn::StpDPre => sem::vls_pair(b, rt.0, rt2.0, rn, imm7 << 3, 8, true, 3, le),
+        Insn::LdpDPre => sem::vls_pair(b, rt.0, rt2.0, rn, imm7 << 3, 8, false, 3, le),
+        Insn::StpQPre => sem::vls_pair(b, rt.0, rt2.0, rn, imm7 << 4, 16, true, 3, le),
+        Insn::LdpQPre => sem::vls_pair(b, rt.0, rt2.0, rn, imm7 << 4, 16, false, 3, le),
+        Insn::StrBVu => sem::vls_unsigned(b, rt.0, rn, imm12 as i64, 1, true, le),
+        Insn::LdrBVu => sem::vls_unsigned(b, rt.0, rn, imm12 as i64, 1, false, le),
+        Insn::StrHVu => sem::vls_unsigned(b, rt.0, rn, (imm12 * 2) as i64, 2, true, le),
+        Insn::LdrHVu => sem::vls_unsigned(b, rt.0, rn, (imm12 * 2) as i64, 2, false, le),
+        Insn::StrSVu => sem::vls_unsigned(b, rt.0, rn, (imm12 * 4) as i64, 4, true, le),
+        Insn::LdrSVu => sem::vls_unsigned(b, rt.0, rn, (imm12 * 4) as i64, 4, false, le),
+        Insn::StrDVu => sem::vls_unsigned(b, rt.0, rn, (imm12 * 8) as i64, 8, true, le),
+        Insn::LdrDVu => sem::vls_unsigned(b, rt.0, rn, (imm12 * 8) as i64, 8, false, le),
+        Insn::StrQVu => sem::vls_unsigned(b, rt.0, rn, (imm12 * 16) as i64, 16, true, le),
+        Insn::LdrQVu => sem::vls_unsigned(b, rt.0, rn, (imm12 * 16) as i64, 16, false, le),
+        Insn::SturB => sem::vls_imm9(b, rt.0, rn, imm9, 1, true, 0, le),
+        Insn::LdurB => sem::vls_imm9(b, rt.0, rn, imm9, 1, false, 0, le),
+        Insn::SturH => sem::vls_imm9(b, rt.0, rn, imm9, 2, true, 0, le),
+        Insn::LdurH => sem::vls_imm9(b, rt.0, rn, imm9, 2, false, 0, le),
+        Insn::SturS => sem::vls_imm9(b, rt.0, rn, imm9, 4, true, 0, le),
+        Insn::LdurS => sem::vls_imm9(b, rt.0, rn, imm9, 4, false, 0, le),
+        Insn::SturD => sem::vls_imm9(b, rt.0, rn, imm9, 8, true, 0, le),
+        Insn::LdurD => sem::vls_imm9(b, rt.0, rn, imm9, 8, false, 0, le),
+        Insn::SturQ => sem::vls_imm9(b, rt.0, rn, imm9, 16, true, 0, le),
+        Insn::LdurQ => sem::vls_imm9(b, rt.0, rn, imm9, 16, false, 0, le),
+        Insn::StrBPostV => sem::vls_imm9(b, rt.0, rn, imm9, 1, true, 1, le),
+        Insn::LdrBPostV => sem::vls_imm9(b, rt.0, rn, imm9, 1, false, 1, le),
+        Insn::StrHPostV => sem::vls_imm9(b, rt.0, rn, imm9, 2, true, 1, le),
+        Insn::LdrHPostV => sem::vls_imm9(b, rt.0, rn, imm9, 2, false, 1, le),
+        Insn::StrSPostV => sem::vls_imm9(b, rt.0, rn, imm9, 4, true, 1, le),
+        Insn::LdrSPostV => sem::vls_imm9(b, rt.0, rn, imm9, 4, false, 1, le),
+        Insn::StrDPostV => sem::vls_imm9(b, rt.0, rn, imm9, 8, true, 1, le),
+        Insn::LdrDPostV => sem::vls_imm9(b, rt.0, rn, imm9, 8, false, 1, le),
+        Insn::StrQPostV => sem::vls_imm9(b, rt.0, rn, imm9, 16, true, 1, le),
+        Insn::LdrQPostV => sem::vls_imm9(b, rt.0, rn, imm9, 16, false, 1, le),
+        Insn::StrBPreV => sem::vls_imm9(b, rt.0, rn, imm9, 1, true, 3, le),
+        Insn::LdrBPreV => sem::vls_imm9(b, rt.0, rn, imm9, 1, false, 3, le),
+        Insn::StrHPreV => sem::vls_imm9(b, rt.0, rn, imm9, 2, true, 3, le),
+        Insn::LdrHPreV => sem::vls_imm9(b, rt.0, rn, imm9, 2, false, 3, le),
+        Insn::StrSPreV => sem::vls_imm9(b, rt.0, rn, imm9, 4, true, 3, le),
+        Insn::LdrSPreV => sem::vls_imm9(b, rt.0, rn, imm9, 4, false, 3, le),
+        Insn::StrDPreV => sem::vls_imm9(b, rt.0, rn, imm9, 8, true, 3, le),
+        Insn::LdrDPreV => sem::vls_imm9(b, rt.0, rn, imm9, 8, false, 3, le),
+        Insn::StrQPreV => sem::vls_imm9(b, rt.0, rn, imm9, 16, true, 3, le),
+        Insn::LdrQPreV => sem::vls_imm9(b, rt.0, rn, imm9, 16, false, 3, le),
         Insn::DupGen => {
             let imm5 = (word >> 16) & 0x1f;
             let esz = imm5.trailing_zeros();
             let q = (word >> 30) & 1 != 0;
-            env.step(|b| sem::vdup_gpr(b, rd.0, rn, esz, q))
+            sem::vdup_gpr(b, rd.0, rn, esz, q)
         }
         Insn::InsGen => {
             let imm5 = (word >> 16) & 0x1f;
             let esz = imm5.trailing_zeros();
             let idx = imm5 >> (esz + 1);
-            env.step(|b| sem::vins_gpr(b, rd.0, rn, esz, idx))
+            sem::vins_gpr(b, rd.0, rn, esz, idx)
         }
         Insn::Umov => {
             let imm5 = (word >> 16) & 0x1f;
             let esz = imm5.trailing_zeros();
             let idx = imm5 >> (esz + 1);
-            env.step(|b| sem::vext_gpr(b, rd, rn.0, esz, idx))
+            sem::vext_gpr(b, rd, rn.0, esz, idx)
         }
-        Insn::FmovWS => env.step(|b| sem::fmov_to_g(b, rd, rn.0, false, false)),
-        Insn::FmovSW => env.step(|b| sem::fmov_to_v(b, rd.0, rn, 32, false)),
-        Insn::FmovXD => env.step(|b| sem::fmov_to_g(b, rd, rn.0, true, false)),
-        Insn::FmovDX => env.step(|b| sem::fmov_to_v(b, rd.0, rn, 64, false)),
-        Insn::FmovXDhi => env.step(|b| sem::fmov_to_g(b, rd, rn.0, true, true)),
-        Insn::FmovDhiX => env.step(|b| sem::fmov_to_v(b, rd.0, rn, 64, true)),
+        Insn::FmovWS => sem::fmov_to_g(b, rd, rn.0, false, false),
+        Insn::FmovSW => sem::fmov_to_v(b, rd.0, rn, 32, false),
+        Insn::FmovXD => sem::fmov_to_g(b, rd, rn.0, true, false),
+        Insn::FmovDX => sem::fmov_to_v(b, rd.0, rn, 64, false),
+        Insn::FmovXDhi => sem::fmov_to_g(b, rd, rn.0, true, true),
+        Insn::FmovDhiX => sem::fmov_to_v(b, rd.0, rn, 64, true),
         // スカラー FP。dbl は ptype[22]（0=S,1=D）。
-        Insn::Fp3 => env.step(|b| sem::fp3(b, rd.0, rn.0, rm.0, cond_hi, dbl)),
+        Insn::Fp3 => sem::fp3(b, rd.0, rn.0, rm.0, cond_hi, dbl),
         Insn::Fp1 => {
             let opc = (word >> 15) & 0x3f;
             if opc == 4 || opc == 5 {
-                env.step(|b| sem::fp1_cvt(b, rd.0, rn.0, opc))
+                sem::fp1_cvt(b, rd.0, rn.0, opc)
             } else {
-                env.step(|b| sem::fp1(b, rd.0, rn.0, opc, dbl))
+                sem::fp1(b, rd.0, rn.0, opc, dbl)
             }
         }
         Insn::Fma => {
             let neg_p = (word >> 21) & 1 != 0;
             let neg_a = (word >> 15) & 1 != 0;
-            env.step(|b| sem::fma(b, rd.0, rn.0, rm.0, ra.0, neg_p, neg_a, dbl))
+            sem::fma(b, rd.0, rn.0, rm.0, ra.0, neg_p, neg_a, dbl)
         }
         Insn::Fcvt | Insn::FcvtA => {
             let op = (word >> 16) & 7;
             if op == 2 || op == 3 {
                 // scvtf/ucvtf: 汎用レジスタ → FP。
-                env.step(|b| sem::int2fp(b, rd.0, rn, dbl, op == 3, sf))
+                sem::int2fp(b, rd.0, rn, dbl, op == 3, sf)
             } else {
                 // fcvt{*,a}{s,u}: FP → 汎用レジスタ。
-                env.step(|b| {
+                {
                     sem::fp2int(
                         b,
                         rd,
@@ -599,37 +541,23 @@ fn step_a64(
                         dbl,
                         sf,
                     )
-                })
+                }
             }
         }
-        Insn::Fcmp => env.step(|b| sem::fcmp(b, rn.0, rm.0, word & 0x1f, dbl)),
-        Insn::Fccmp => env.step(|b| sem::fccmp(b, rn.0, rm.0, cond_hi, u64::from(word & 0xf), dbl)),
-        Insn::Fcsel => env.step(|b| sem::fcsel(b, rd.0, rn.0, rm.0, cond_hi, dbl)),
-        Insn::FmovImm => env.step(|b| sem::fmov_imm(b, rd.0, (word >> 13) & 0xff, dbl)),
+        Insn::Fcmp => sem::fcmp(b, rn.0, rm.0, word & 0x1f, dbl),
+        Insn::Fccmp => sem::fccmp(b, rn.0, rm.0, cond_hi, u64::from(word & 0xf), dbl),
+        Insn::Fcsel => sem::fcsel(b, rd.0, rn.0, rm.0, cond_hi, dbl),
+        Insn::FmovImm => sem::fmov_imm(b, rd.0, (word >> 13) & 0xff, dbl),
         Insn::ModImm => {
             let q = (word >> 30) & 1 != 0;
             let op = (word >> 29) & 1 != 0;
             let cmode = (word >> 12) & 0xf;
             let imm8 = u64::from((((word >> 16) & 7) << 5) | ((word >> 5) & 0x1f));
-            env.step(|b| sem::mod_imm(b, rd.0, q, op, cmode, imm8))
+            sem::mod_imm(b, rd.0, q, op, cmode, imm8)
         }
-        Insn::Svc => unreachable!("svc は先に振り分け済み"),
-    };
-    if let Err(e) = ok {
-        // スタック窓内の未写像フォルトは写像を伸ばして同じ命令をやり直す
-        // （カーネルのスタック VMA 成長に相当）。pc は変えずに戻る。
-        if let polyisa_engine::interp::InterpExit::Exception(ref g) = e
-            && stack_grow(env, stack, g).is_some()
-        {
-            return Ok(());
-        }
-        return Err(unimpl(env));
-    }
-    // 分岐なしは次へ進める（分岐成立は step が pc を置き換える）。
-    if env.backend.ctrl == Ctrl::Fallthrough {
-        env.pc += 4;
-    }
-    Ok(())
+        Insn::Svc => return Ok(false),
+    }?;
+    Ok(true)
 }
 
 /// ページフォルトをスタック成長として処理する。窓 `[limit, top)` 内の
@@ -693,7 +621,10 @@ pub fn run_elf_aarch64_root(
     root: Option<&str>,
 ) -> Result<u64, String> {
     let mut sys = polyisa_os_linux::aarch64::sys::Linux::default();
-    run_elf_aarch64_impl(path, argv, sel, &mut sys, root)
+    // JIT は `POLYISA_JIT` 指定時のみ opt-in。既定はインタプリタ。
+    let mut jit_owned = polyisa_jit::Jit::new();
+    let jit = std::env::var_os("POLYISA_JIT").map(|_| &mut jit_owned);
+    run_elf_aarch64_impl(path, argv, sel, &mut sys, root, jit)
 }
 
 /// `run_elf_aarch64_sel` に OS パーソナリティを差し込む形。
@@ -704,7 +635,19 @@ pub fn run_elf_aarch64_sys(
     sel: Option<&polyisa_isadl::select::CpuSel>,
     sys: &mut polyisa_os_linux::aarch64::sys::Linux,
 ) -> Result<u64, String> {
-    run_elf_aarch64_impl(path, argv, sel, sys, None)
+    run_elf_aarch64_impl(path, argv, sel, sys, None, None)
+}
+
+/// `run_elf_aarch64_sys` の JIT 版。差分テストが `sys.io` 等を比べるのに使う。
+/// `jit` は呼び出し側が用意し、コンパイル済みブロックはテスト間で使い回せる。
+pub fn run_elf_aarch64_sys_jit(
+    path: &str,
+    argv: &[String],
+    sel: Option<&polyisa_isadl::select::CpuSel>,
+    sys: &mut polyisa_os_linux::aarch64::sys::Linux,
+    jit: &mut polyisa_jit::Jit,
+) -> Result<u64, String> {
+    run_elf_aarch64_impl(path, argv, sel, sys, None, Some(jit))
 }
 
 /// `run_elf_aarch64_sys` にゲストルートを添える形。
@@ -716,7 +659,7 @@ pub fn run_elf_aarch64_sys_root(
     sys: &mut polyisa_os_linux::aarch64::sys::Linux,
     root: Option<&str>,
 ) -> Result<u64, String> {
-    run_elf_aarch64_impl(path, argv, sel, sys, root)
+    run_elf_aarch64_impl(path, argv, sel, sys, root, None)
 }
 
 /// `run_elf_aarch64_sys` にゲストルートを添えた実体。
@@ -727,6 +670,7 @@ fn run_elf_aarch64_impl(
     sel: Option<&polyisa_isadl::select::CpuSel>,
     sys: &mut polyisa_os_linux::aarch64::sys::Linux,
     root: Option<&str>,
+    jit: Option<&mut polyisa_jit::Jit>,
 ) -> Result<u64, String> {
     use polyisa_guest_aarch64::sem;
     use polyisa_mem::{PAGE_SIZE, Perms};
@@ -923,12 +867,151 @@ fn run_elf_aarch64_impl(
         top,
         limit: top - STACK_LIMIT,
     });
-    match run_ex(&mut env, entry, feats, data_endian, growth, sys) {
+    let out = match jit {
+        Some(jit) => run_ex_jit(&mut env, entry, feats, data_endian, growth, sys, jit),
+        None => run_ex(&mut env, entry, feats, data_endian, growth, sys),
+    };
+    match out {
         Outcome::Exit(code) => Ok(code),
         Outcome::Unimplemented { pc, word } => Err(format!("unimplemented at {pc:#x}: {word:#x}")),
         Outcome::StepLimit { pc } => Err(format!("step limit at {pc:#x}")),
         Outcome::Deadlock => Err("deadlock".to_string()),
     }
+}
+
+// ---- JIT（段階 9）----
+
+/// 1 ブロックに記録する命令数の上限。
+const MAX_BLOCK_INSNS: usize = 32;
+
+/// A64 の翻訳器。`feats`/`endian` は実行と同じ設定で固定する。
+pub struct A64Tx {
+    pub feats: u64,
+    pub endian: Endian,
+}
+
+impl polyisa_jit::Translate for A64Tx {
+    fn key(&self, _b: &polyisa_engine::interp::InterpBackend, pc: u64) -> u64 {
+        pc
+    }
+
+    fn record(
+        &self,
+        b: &mut polyisa_engine::interp::InterpBackend,
+        entry: u64,
+    ) -> Option<polyisa_ir::Recorded> {
+        let mut irb = polyisa_ir::IrBackend::new();
+        let mut pc = entry;
+        for _ in 0..MAX_BLOCK_INSNS {
+            let mut b4 = [0u8; 4];
+            if b.mem.read(VirtAddr(pc), &mut b4, acc_fetch()).is_err() {
+                break;
+            }
+            b.mem.mark_code(VirtAddr(pc));
+            let word = u32::from_le_bytes(b4);
+            let Some(insn) = decode_model_ex(u128::from(word), 32, true, self.feats) else {
+                break;
+            };
+            // `svc` と未実装の命令はブロックの境界。インタプリタが処理する。
+            if insn == Insn::Svc {
+                break;
+            }
+            irb.cur_pc = pc;
+            irb.cur_next = pc + 4;
+            match dispatch_a64(&mut irb, insn, word, pc, self.endian) {
+                Ok(true) => {}
+                Ok(false) => break,
+                Err(e) => {
+                    irb.abort(e);
+                    break;
+                }
+            }
+            // 制御を動かす命令（分岐・ジャンプ）でブロックを閉じる。
+            // その命令自体がブロックの最後の命令になる。
+            if irb.ir.has_flow() {
+                pc += 4;
+                break;
+            }
+            pc += 4;
+        }
+        if irb.ir.ops.is_empty() {
+            return None;
+        }
+        polyisa_ir::optimize(&mut irb.ir);
+        Some(polyisa_ir::Recorded {
+            entry,
+            fall: pc,
+            ir: irb.ir,
+        })
+    }
+}
+
+/// `pc` の命令語を読んで未実装報告を作る（JIT 経路の `unimpl` 相当）。
+fn unimpl_at(env: &BareEnv, pc: u64) -> Outcome {
+    let mut b4 = [0u8; 4];
+    let word = env
+        .backend
+        .mem
+        .read(VirtAddr(pc), &mut b4, acc_fetch())
+        .map(|()| u128::from(u32::from_le_bytes(b4)))
+        .unwrap_or(0xffff_ffff);
+    Outcome::Unimplemented { pc, word }
+}
+
+/// `step_a64` の JIT 版。記録できない入口・例外はインタプリタと同じ解決をする。
+pub fn step_a64_jit(
+    env: &mut BareEnv,
+    sys: &mut impl TrapHandler,
+    jit: &mut polyisa_jit::Jit,
+    feats: u64,
+    endian: Endian,
+    stack: Option<StackGrowth>,
+) -> Result<(), Outcome> {
+    let pc = env.pc;
+    let tx = A64Tx { feats, endian };
+    match jit.exec_block(&mut env.backend, &tx, pc) {
+        Some(polyisa_jit::BlockExit::Next(next)) => {
+            env.pc = next;
+            env.steps += 1;
+            Ok(())
+        }
+        Some(polyisa_jit::BlockExit::Raise { e, pc, next: _ }) => {
+            env.pc = pc;
+            // インタプリタと同じく、スタック窓内のフォルトは写像を伸ばす。
+            if stack_grow(env, stack, &e).is_some() {
+                return Ok(());
+            }
+            Err(unimpl_at(env, pc))
+        }
+        Some(polyisa_jit::BlockExit::Unimpl { pc }) => {
+            env.pc = pc;
+            Err(unimpl_at(env, pc))
+        }
+        // 記録できない入口（svc・境界から始まる命令）は 1 命令ぶん
+        // インタプリタで進める。
+        None => step_a64(env, sys, feats, endian, stack),
+    }
+}
+
+/// `run_ex` の JIT 版。ブロックを IR に記録して機械語で実行する。
+/// 記録できない入口・トラップはインタプリタと同じ解決に落ちる。
+pub fn run_ex_jit(
+    env: &mut BareEnv,
+    entry: u64,
+    feats: u64,
+    endian: Endian,
+    stack: Option<StackGrowth>,
+    sys: &mut impl TrapHandler,
+    jit: &mut polyisa_jit::Jit,
+) -> Outcome {
+    env.pc = entry;
+    polyisa_engine::run::run(
+        env,
+        sys,
+        STEP_LIMIT,
+        |env| env.pc,
+        |env, sys| step_a64_jit(env, sys, jit, feats, endian, stack),
+    )
 }
 
 #[cfg(test)]

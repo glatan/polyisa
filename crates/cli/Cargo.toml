@@ -15,13 +15,14 @@ polyisa-guest-power = { path = "../../guests/power", optional = true }
 polyisa-guest-riscv = { path = "../../guests/riscv", optional = true }
 polyisa-guest-x86 = { path = "../../guests/x86", optional = true }
 polyisa-host = { path = "../host" }
+polyisa-ir = { path = "../ir" }
 polyisa-isadl = { path = "../isadl" }
+polyisa-jit = { path = "../jit" }
 polyisa-kernel = { path = "../kernel" }
 polyisa-loader = { path = "../loader" }
 polyisa-mem = { path = "../mem" }
 polyisa-os-linux = { path = "../os-linux" }
 polyisa-sem = { path = "../sem" }
-polyisa-trace = { path = "../trace" }
 
 [features]
 default = [
@@ -63,6 +64,10 @@ required-features = ["guest-aarch64"]
 [[test]]
 name = "heavy_program_power"
 required-features = ["guest-power"]
+
+[[test]]
+name = "heavy_jit_diff"
+required-features = ["guest-aarch64", "guest-arm", "guest-x86"]
 
 [lints]
 workspace = true

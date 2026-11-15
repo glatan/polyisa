@@ -8,6 +8,8 @@
 // 自前の FFI 宣言を呼ぶため。
 #![allow(unsafe_code)]
 
+pub mod exec_mem;
+
 /// 利用可能な並列数。作業スレッドの数の目安に使う。
 #[must_use]
 pub fn parallelism() -> usize {

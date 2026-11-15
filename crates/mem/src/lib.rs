@@ -351,6 +351,17 @@ impl AddressSpace {
             e.frame.has_code = true;
         }
     }
+
+    /// `addr` のあるページがコードとして使われたか、実行許可を持つか。
+    /// JIT が自己書き換えコード（書き込み→実行）の検出に使う。
+    #[must_use]
+    pub fn may_contain_code(&self, addr: VirtAddr) -> bool {
+        let (no, _) = addr.split();
+        match self.pages.get(&no) {
+            Some(e) => e.perms.contains(Perms::X) || e.frame.has_code,
+            None => false,
+        }
+    }
 }
 
 /// メモリ操作の失敗。

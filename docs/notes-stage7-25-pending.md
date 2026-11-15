@@ -169,6 +169,74 @@
 - 残件（確認待ち #6 と同一案件）: musl 動的の allocator
   teardown 差分、ISA 3.1 接頭辞付き命令、ppc32/ELFv1/SPE。
 
+### 段階 9（IR と JIT）
+
+- 追加: `crates/ir`（`inst.rs` = `Wid`/`Id`/`Inst`/`Ir`/
+  `Recorded` の SSA IR、`rec.rs` = `Backend` を実装する
+  記録器 `IrBackend`、`exec.rs` = 任意の `Concrete` バックエンド
+  上で IR を解釈する `exec`、`opt.rs` = 定数畳み込み・コピー
+  伝播・CSE・死んだストア除去・DCE を回す `optimize`）。
+  `Concrete` は `Backend` に「値 ⇔ u128」「Bool ⇔ bool」
+  「Exit → ExitClass」の橋を足すだけの小さい trait。
+- `IrBackend` の方針: `if_then_else`/`if_then` は両枝を
+  `Inst::If` として記録し、`raise` は `IrExit::Raise`、
+  `abort` で `Exit`/`Unimpl` を確定する。helper と parameter は
+  まだ IR に落とさず、helper は `Unimpl`（ブロック境界で
+  インタプリタへ戻す）、parameter はインタプリタと同じく
+  panic。フォールトし得るメモリ操作には `pc`/`next` を焼く。
+- 追加: `crates/host`（`exec_mem.rs` = mmap で RW 確保→
+  書き込み→`mprotect` で RX にする W^X の実行メモリ）。
+- 追加: `crates/jit`（`ctx.rs` = `#[repr(C)]` の `RtCtx` と
+  例外の詰め替え、`rt.rs` = 生成コードから呼ぶメモリ/重い
+  演算のランタイム関数、`x64.rs` = 命令エミッタと IR→x86-64
+  の `compile`、`lib.rs` = PC を鍵にしたブロックキャッシュ・
+  熱カウンタ・記録→IR 解釈→コンパイル→呼び出しの `Jit`）。
+- 実行経路: ブロックは `Translate::record` で `Recorded` にし、
+  熱くなるまでは `polyisa_ir::exec` で解釈し、しきい値に
+  達したら `x64::compile` して `BlockFn` を呼ぶ。出口は
+  `BlockExit::Next/Raise/Unimpl` に戻し、`Unimpl`・例外・
+  トラップ境界は常にインタプリタ側の処理へ戻す。コード
+  ページへの書き込みは `invalidate` でブロックを破棄する。
+- x64 レイアウトの修正: 値スロットとスクラッチ領域の開始を
+  16 バイト整列（`SCRATCH=16`、`VALS=80`）に直し、`u128`
+  の読み書きで misaligned pointer dereference していた
+  クラッシュを解消。
+- ランナ統合（既定は従来どおりインタプリタ。`POLYISA_JIT`
+  で JIT が有効）:
+  - AArch64: `dispatch_a64<B: Backend>` に意味論を抽出し、
+    `A64Tx` が 32 命令まで記録（`svc`・未対応デコード・
+    フロー操作でブロックを閉じる）。
+  - ARM: `dispatch_a32<B: Backend>` に抽出し、`ArmTx` は
+    CPSR から条件式を作って `if_then` で包むことで条件付き
+    実行を記録。`svc`/未対応で境界。
+  - x86: 既存のデコードと `dispatch` をそのまま `X86Tx` に
+    使い、トラップ/syscall の手前ではインタプリタへ戻して
+    `TrapHandler`・`after_step` の振る舞いを保つ。
+- テスト:
+  - `crates/engine/src/interp.rs` に「同じ意味論を
+    インタプリタ直接と 記録→optimize→exec で比べる」
+    単体テスト 6 件（算術/メモリ/if 両枝/分岐・ジャンプ/
+    例外/メモリフォールト）。
+  - `crates/ir/src/opt.rs` に pass 別の単体テスト 10 件
+    （畳み込み・コピー伝播・CSE・DSE 3 件・Get 転送・DCE・
+    定数条件 If の展開）。
+  - `crates/jit/src/lib.rs` に生成コードを実際に呼ぶ
+    スモーク 2 件（`Next` 経路と `Raise` 経路）。
+  - `crates/cli/tests/heavy_jit_diff.rs` に 3 ISA（AArch64・
+    ARM・x86-64）の interpreter vs JIT 差分テスト。
+    clang -nostdlib の小さい静的 ELF（fib→`55` 表示）を
+    両経路で走らせ、最終状態・出力・終了を突き合わせる。
+    `reqs.rs` に `heavy_jit_diff`（clang 必須）を登録。
+- 設計からの明示的な範囲:
+  - helper/parameter の IR 化は未対応（該当ブロックは
+    インタプリタへフォールバック）。正しさ優先で速度は追わ
+    ない。
+  - フォールト境界を跨ぐメモリ操作の移動はしない
+    （DSE も Store/Exit の手前の Set は消さない）。
+  - 生成コードの最適度は低い（値スロット経由・重い演算は
+    ランタイム呼び出し）。オラクルとの一致を優先。
+- 完了条件: `heavy_jit_diff` の 3 件が green。
+
 ## 参考
 
 - 段階の完了条件は `design/roadmap.md` の各段階の表。

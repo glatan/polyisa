@@ -186,7 +186,7 @@ Power の本格的な実装と、Linux の ppc32、ppc64、ppc64le ゲスト ABI
 
 | ID | 条件 | 判定 |
 |---|---|---|
-| S9-1 | 三つ以上の主対象の ISA で、JIT とインタプリタの実行結果がブロックの境界ごとに一致する（[検証戦略](testing.md) の層 9、テスト `heavy_jit_diff`）。 | 未整備 |
+| S9-1 | 三つ以上の主対象の ISA で、JIT とインタプリタの実行結果がブロックの境界ごとに一致する（[検証戦略](testing.md) の層 9、テスト `heavy_jit_diff`）。 | テスト：`heavy_jit_diff` |
 
 ### 段階 10：十進演算と非 IEEE 浮動小数点
 

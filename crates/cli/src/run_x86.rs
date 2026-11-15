@@ -1756,28 +1756,35 @@ pub fn run_mode_ex(
 /// 継続なら `Ok(())`、退出なら退出理由を返す。
 /// 命令長の判定（`fetch_len`）とオペランドの取り出し（`dispatch`）は
 /// 手で書く。ISADL 側への乗せ換えは ADR-0018 で先送りした。
+/// `step_x86` のフェッチ・接頭辞剥がし・長さ判定・`decode_model_ex` と
+/// 接頭辞ゲートの結果。意味論に必要なものだけを運ぶ。
+struct DecodedX86 {
+    insn: Insn,
+    word: u128,
+    nbytes: u64,
+    off: u64,
+    rex: u8,
+    has66: bool,
+    has_f2: bool,
+    rep: bool,
+    has_fs: bool,
+    has_gs: bool,
+}
+
+/// `pc` の命令をデコードする。接頭辞・長さ・モデルゲートの失敗は
+/// `Outcome::Unimplemented`（`step_x86` と同じ報告）で返す。
+/// `B: Backend` に依存しないので実行・記録の両方から呼べる。
+// Ref: SPEC-ARM-ARM-A 相当の x86 側マニュアル Intel SDM.
 #[allow(clippy::too_many_lines)]
-fn step_x86(
-    env: &mut BareEnv,
-    sys: &mut dyn TrapHandler,
+fn decode_x86(
+    mem: &polyisa_mem::AddressSpace,
+    pc: u64,
     is64: bool,
     feats: u64,
     hist: &mut std::collections::VecDeque<(u32, String)>,
-) -> Result<(), Outcome> {
-    let pc = eip_of(env) as u64;
-    if std::env::var_os("POLYISA_HIST").is_some() {
-        if hist.len() == 32 {
-            hist.pop_front();
-        }
-        hist.push_back((pc as u32, String::new()));
-    }
+) -> Result<DecodedX86, Outcome> {
     let mut head = [0u8; 1];
-    if env
-        .backend
-        .mem
-        .read(VirtAddr(pc), &mut head, acc_fetch())
-        .is_err()
-    {
+    if mem.read(VirtAddr(pc), &mut head, acc_fetch()).is_err() {
         for (e, i) in hist.iter() {
             eprintln!("hist {e:#x} {i}");
         }
@@ -1824,9 +1831,7 @@ fn step_x86(
             break;
         }
         off += 1;
-        if env
-            .backend
-            .mem
+        if mem
             .read(VirtAddr(pc + off), &mut head, acc_fetch())
             .is_err()
         {
@@ -1899,9 +1904,7 @@ fn step_x86(
             | 0xC0
             | 0xD0
     ) {
-        if env
-            .backend
-            .mem
+        if mem
             .read(VirtAddr(pc + off + 1), &mut peek, acc_fetch())
             .is_err()
         {
@@ -2024,9 +2027,7 @@ fn step_x86(
                 || matches!(second, Some(0x90..=0x9F))))
     {
         let mut modrm = [0u8; 1];
-        if env
-            .backend
-            .mem
+        if mem
             .read(VirtAddr(pc + off + 2), &mut modrm, acc_fetch())
             .is_err()
         {
@@ -2073,9 +2074,7 @@ fn step_x86(
             && matches!(third, Some(m) if m & 7 == 4 && m >> 6 != 3)
     {
         let mut sib = [0u8; 1];
-        if env
-            .backend
-            .mem
+        if mem
             .read(VirtAddr(pc + off + 3), &mut sib, acc_fetch())
             .is_err()
         {
@@ -2210,9 +2209,7 @@ fn step_x86(
             continue;
         }
         let mut b = [0u8; 1];
-        if env
-            .backend
-            .mem
+        if mem
             .read(VirtAddr(pc + off + i), &mut b, acc_fetch())
             .is_err()
         {
@@ -2558,6 +2555,49 @@ fn step_x86(
     if matches!(insn, Insn::Cvtss2sdM32) && has_f2 == rep {
         return Err(Outcome::Unimplemented { pc, word });
     }
+    let _ = rex;
+    Ok(DecodedX86 {
+        insn,
+        word,
+        nbytes,
+        off,
+        rex,
+        has66,
+        has_f2,
+        rep,
+        has_fs,
+        has_gs,
+    })
+}
+
+#[allow(clippy::too_many_lines)]
+fn step_x86(
+    env: &mut BareEnv,
+    sys: &mut dyn TrapHandler,
+    is64: bool,
+    feats: u64,
+    hist: &mut std::collections::VecDeque<(u32, String)>,
+) -> Result<(), Outcome> {
+    let pc = eip_of(env) as u64;
+    if std::env::var_os("POLYISA_HIST").is_some() {
+        if hist.len() == 32 {
+            hist.pop_front();
+        }
+        hist.push_back((pc as u32, String::new()));
+    }
+    let d = decode_x86(&env.backend.mem, pc, is64, feats, hist)?;
+    let DecodedX86 {
+        insn,
+        word,
+        nbytes,
+        off,
+        rex,
+        has66,
+        has_f2,
+        rep,
+        has_fs,
+        has_gs,
+    } = d;
     // REX 拡張は reg/rm/SIB 抽出で対応済み (R/R/B/X)。W は rex_w で切替.
     let _ = rex;
     // FS/GS 上書きの有無とベース。dispatch 側でセグメント相対アドレッシングに使う.
@@ -10633,6 +10673,18 @@ pub fn run_image_x86_64_ex(
     sys: &mut Linux,
     feats: u64,
 ) -> Result<u64, String> {
+    run_image_x86_64_impl(bytes, prog, argv, sys, feats, None)
+}
+
+/// `run_image_x86_64_ex` の実体。`jit` があればブロック実行経路を使う。
+fn run_image_x86_64_impl(
+    bytes: &[u8],
+    prog: &str,
+    argv: &[String],
+    sys: &mut Linux,
+    feats: u64,
+    jit: Option<&mut polyisa_jit::Jit>,
+) -> Result<u64, String> {
     use polyisa_guest_x86::sem::Gpr;
     use polyisa_mem::{PAGE_SIZE, Perms};
 
@@ -10689,7 +10741,19 @@ pub fn run_image_x86_64_ex(
     polyisa_guest_x86::sem::write64(&mut env.backend, Gpr(4), sp);
     // x87 制御ワードの初期値（丸め最近接の 0x037F）。FNSTCW/FLDCW で使う.
     env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037F);
-    match run_mode_ex(&mut env, ehdr.entry as u32, sys, 30_000_000, true, feats) {
+    let out = match jit {
+        Some(jit) => run_mode_ex_jit(
+            &mut env,
+            ehdr.entry as u32,
+            sys,
+            30_000_000,
+            true,
+            feats,
+            jit,
+        ),
+        None => run_mode_ex(&mut env, ehdr.entry as u32, sys, 30_000_000, true, feats),
+    };
+    match out {
         Outcome::Exit(code) => Ok(code),
         Outcome::Unimplemented { pc, word } => Err(format!("unimplemented at {pc:#x}: {word:#x}")),
         Outcome::StepLimit { pc } => Err(format!("step limit at {pc:#x}")),
@@ -10710,7 +10774,17 @@ pub fn run_elf_x86_64_sel(
 ) -> Result<u64, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
     let mut sys = Linux::x86_64();
-    run_image_x86_64_ex(&bytes, path, argv, &mut sys, sel.map_or(0, |s| s.feats))
+    // JIT は `POLYISA_JIT` 指定時のみ opt-in。既定はインタプリタ。
+    let mut jit_owned = polyisa_jit::Jit::new();
+    let jit = std::env::var_os("POLYISA_JIT").map(|_| &mut jit_owned);
+    run_image_x86_64_impl(
+        &bytes,
+        path,
+        argv,
+        &mut sys,
+        sel.map_or(0, |s| s.feats),
+        jit,
+    )
 }
 
 /// ELF64 を実行し、終了コードと fd 1 の出力を返す。ホストの stdout には書かない。
@@ -10761,6 +10835,199 @@ fn run_elf_x86_64_at(
         sys.cwd = dir.to_string();
     }
     let code = run_image_x86_64(&bytes, path, argv, &mut sys)?;
+    Ok((code, captured.borrow().clone()))
+}
+
+// ---- JIT（段階 9）----
+
+/// 1 ブロックに記録する命令数の上限。x86 は 1 命令あたりの IR が
+/// 重いので a64/arm より小さく取る。
+const MAX_BLOCK_INSNS: usize = 16;
+
+/// x86/x86-64 の翻訳器。`is64`/`feats` は実行と同じ設定で固定する。
+pub struct X86Tx {
+    pub is64: bool,
+    pub feats: u64,
+}
+
+impl polyisa_jit::Translate for X86Tx {
+    fn key(&self, b: &polyisa_engine::interp::InterpBackend, pc: u64) -> u64 {
+        // FS/GS ベースは記録時に定数として埋め込まれるため、同じ pc でも
+        // ベースが違えば別ブロックにする（syscall でしか変わらない）。
+        // `get` は &mut を要るので、ここでは状態配列から直接読む。
+        let at = sem::fs_base_ref().offset();
+        let fs = u64::from_le_bytes(b.state[at..at + 8].try_into().unwrap_or([0; 8]));
+        let at = sem::gs_base_ref().offset();
+        let gs = u64::from_le_bytes(b.state[at..at + 8].try_into().unwrap_or([0; 8]));
+        pc ^ fs.rotate_left(19) ^ gs.rotate_left(41)
+    }
+
+    fn record(
+        &self,
+        b: &mut polyisa_engine::interp::InterpBackend,
+        entry: u64,
+    ) -> Option<polyisa_ir::Recorded> {
+        let mut irb = polyisa_ir::IrBackend::new();
+        let mut hist = std::collections::VecDeque::new();
+        let mut pc = entry;
+        for _ in 0..MAX_BLOCK_INSNS {
+            let d = match decode_x86(&b.mem, pc, self.is64, self.feats, &mut hist) {
+                Ok(d) => d,
+                Err(_) => break,
+            };
+            b.mem.mark_code(VirtAddr(pc));
+            // セグメントベースはゲスト状態の定数として埋め込む。変わるのは
+            // トラップ経路（arch_prctl/set_thread_area）だけで、それは
+            // ブロックの境界なので新しいベースで別ブロックを記録する。
+            let fs = d.has_fs.then(|| b.get(sem::fs_base_ref()));
+            let seg = fs.or(d.has_gs.then(|| b.get(sem::gs_base_ref())));
+            irb.cur_pc = pc;
+            irb.cur_next = pc + d.nbytes;
+            let imm32 = || (d.word as u32).swap_bytes();
+            let disp8 = || (d.word & 0xff) as u8 as i8;
+            let r = dispatch(
+                &mut irb, d.insn, pc as u32, d.word, d.nbytes, d.off, self.is64, d.rex, d.has66,
+                d.has_f2, d.rep, seg, imm32, disp8,
+            );
+            match r {
+                Ok(()) => {}
+                Err(e) => {
+                    irb.abort(e);
+                    break;
+                }
+            }
+            if irb.ir.has_flow() {
+                pc += d.nbytes;
+                break;
+            }
+            pc += d.nbytes;
+        }
+        if irb.ir.ops.is_empty() {
+            return None;
+        }
+        polyisa_ir::optimize(&mut irb.ir);
+        Some(polyisa_ir::Recorded {
+            entry,
+            fall: pc,
+            ir: irb.ir,
+        })
+    }
+}
+
+/// `step_x86` の JIT 版。Trap（int 0x80/syscall）はインタプリタと同じく
+/// `sys` へ委譲し、記録できない入口は 1 命令ぶんインタプリタで進める。
+fn step_x86_jit(
+    env: &mut BareEnv,
+    sys: &mut dyn TrapHandler,
+    jit: &mut polyisa_jit::Jit,
+    is64: bool,
+    feats: u64,
+    hist: &mut std::collections::VecDeque<(u32, String)>,
+) -> Result<(), Outcome> {
+    let pc = u64::from(eip_of(env));
+    let tx = X86Tx { is64, feats };
+    let Some(exit) = jit.exec_block(&mut env.backend, &tx, pc) else {
+        return step_x86(env, sys, is64, feats, hist);
+    };
+    let r = match exit {
+        polyisa_jit::BlockExit::Next(next) => {
+            env.backend.set(sem::eip_ref(), next as u32);
+            env.pc = next;
+            env.steps += 1;
+            Ok(())
+        }
+        polyisa_jit::BlockExit::Raise { e, pc, next } => {
+            // 例外が起きた命令に eip を合わせる（インタプリタと同じ状態）。
+            env.backend.set(sem::eip_ref(), pc as u32);
+            env.pc = pc;
+            if e.kind == ExceptionKind::Trap {
+                match sys.handle_trap(env, e.code as u32) {
+                    TrapOutcome::Handled => {
+                        // ハンドラが eip を動かさなければ次の命令へ進む。
+                        if u64::from(eip_of(env)) == pc {
+                            env.backend.set(sem::eip_ref(), next as u32);
+                            env.pc = next;
+                        }
+                        Ok(())
+                    }
+                    TrapOutcome::Exit(code) => {
+                        if sys.take_exit(env, code) {
+                            Ok(())
+                        } else {
+                            Err(Outcome::Exit(u64::from(code)))
+                        }
+                    }
+                    TrapOutcome::Blocked => {
+                        if sys.on_block(env) {
+                            Ok(())
+                        } else {
+                            Err(Outcome::Deadlock)
+                        }
+                    }
+                    TrapOutcome::Unimplemented => Err(Outcome::Unimplemented { pc, word: 0 }),
+                }
+            } else {
+                Err(Outcome::Unimplemented { pc, word: 0 })
+            }
+        }
+        polyisa_jit::BlockExit::Unimpl { pc } => {
+            env.backend.set(sem::eip_ref(), pc as u32);
+            env.pc = pc;
+            Err(Outcome::Unimplemented { pc, word: 0 })
+        }
+    };
+    if r.is_ok() {
+        sys.after_step(env);
+    }
+    r
+}
+
+/// `run_mode_ex` の JIT 版。初期設定はインタプリタと同じ。
+pub fn run_mode_ex_jit(
+    env: &mut BareEnv,
+    entry: u32,
+    sys: &mut impl TrapHandler,
+    limit: u64,
+    is64: bool,
+    feats: u64,
+    jit: &mut polyisa_jit::Jit,
+) -> Outcome {
+    env.backend.set(polyisa_guest_x86::sem::eip_ref(), entry);
+    env.backend.addr_mask = if is64 { u64::MAX } else { 0xffff_ffff };
+    let _ = sys.on_block(env);
+    let mut hist = std::collections::VecDeque::<(u32, String)>::with_capacity(33);
+    polyisa_engine::run::run(
+        env,
+        sys,
+        limit,
+        |env| u64::from(eip_of(env)),
+        |env, sys| step_x86_jit(env, sys, jit, is64, feats, &mut hist),
+    )
+}
+
+/// `run_image_x86_64_ex` の JIT 版。差分テストが使う。
+pub fn run_image_x86_64_ex_jit(
+    bytes: &[u8],
+    prog: &str,
+    argv: &[String],
+    sys: &mut Linux,
+    feats: u64,
+    jit: &mut polyisa_jit::Jit,
+) -> Result<u64, String> {
+    run_image_x86_64_impl(bytes, prog, argv, sys, feats, Some(jit))
+}
+
+/// `run_elf_x86_64_captured` の JIT 版。
+pub fn run_elf_x86_64_captured_jit(
+    path: &str,
+    argv: &[String],
+    jit: &mut polyisa_jit::Jit,
+) -> Result<(u64, Vec<u8>), String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
+    let mut sys = Linux::x86_64();
+    let captured = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    sys.capture_out = Some(std::rc::Rc::clone(&captured));
+    let code = run_image_x86_64_ex_jit(&bytes, path, argv, &mut sys, 0, jit)?;
     Ok((code, captured.borrow().clone()))
 }
 

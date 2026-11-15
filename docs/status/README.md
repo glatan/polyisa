@@ -32,7 +32,7 @@
 | S8-1 | テスト：`heavy_program_power` |
 | S8-2 | テスト：`heavy_abi_power` |
 | S8-3 | テスト：`heavy_oracle_power` |
-| S9-1 | 未整備 |
+| S9-1 | テスト：`heavy_jit_diff` |
 | S10-1 | 未整備 |
 | S10-2 | 未整備 |
 | S11-1 | 未整備 |

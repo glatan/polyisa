@@ -59,6 +59,10 @@ pub const TEST_REQUIREMENTS: &[TestBinary] = &[
         needs: &[Req::Data(".testdata/testfloat")],
     },
     TestBinary {
+        binary: "heavy_jit_diff",
+        needs: &[Req::Tool("clang")],
+    },
+    TestBinary {
         binary: "heavy_oracle_llvm",
         needs: &[Req::Tool("llvm-mc")],
     },

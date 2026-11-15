@@ -19,13 +19,14 @@ dependencies = [
  "polyisa-guest-riscv",
  "polyisa-guest-x86",
  "polyisa-host",
+ "polyisa-ir",
  "polyisa-isadl",
+ "polyisa-jit",
  "polyisa-kernel",
  "polyisa-loader",
  "polyisa-mem",
  "polyisa-os-linux",
  "polyisa-sem",
- "polyisa-trace",
 ]
 
 [[package]]
@@ -54,6 +55,7 @@ version = "0.0.0"
 dependencies = [
  "polyisa-bits",
  "polyisa-guest",
+ "polyisa-ir",
  "polyisa-mem",
  "polyisa-sem",
  "polyisa-softfloat",
@@ -251,7 +253,6 @@ version = "0.0.0"
 name = "polyisa-ir"
 version = "0.0.0"
 dependencies = [
- "polyisa-guest",
  "polyisa-mem",
  "polyisa-sem",
 ]
@@ -271,8 +272,11 @@ dependencies = [
 name = "polyisa-jit"
 version = "0.0.0"
 dependencies = [
+ "polyisa-engine",
  "polyisa-host",
  "polyisa-ir",
+ "polyisa-mem",
+ "polyisa-sem",
 ]
 
 [[package]]

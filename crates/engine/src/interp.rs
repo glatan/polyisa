@@ -704,6 +704,29 @@ impl Backend for InterpBackend {
     fn timing_hint(&mut self, _key: HintKey, _v: Self::V<W64>) {}
 }
 
+/// IR の解釈実行と JIT の実行路が `V<W>`/`Exit` と具体値を相互に
+/// 変換するための実装。`W::Repr` は `u128` に載る素直な整数。
+impl polyisa_ir::Concrete for InterpBackend {
+    fn v_to_u128<W: Width>(v: Self::V<W>) -> u128 {
+        W::to_u128(v)
+    }
+    fn v_from_u128<W: Width>(v: u128) -> Self::V<W> {
+        W::from_u128(v)
+    }
+    fn b_to_bool(v: Self::B) -> bool {
+        v
+    }
+    fn b_from_bool(v: bool) -> Self::B {
+        v
+    }
+    fn exit_class(e: Self::Exit) -> polyisa_ir::ExitClass {
+        match e {
+            InterpExit::Exception(g) => polyisa_ir::ExitClass::Raise(g),
+            InterpExit::Unimplemented(_) => polyisa_ir::ExitClass::Unimpl,
+        }
+    }
+}
+
 impl InterpBackend {
     fn mem_exit(&self, addr: u64, e: MemError, acc: Access) -> InterpExit {
         match e {
@@ -904,7 +927,7 @@ const fn mask_i128(bits: u32) -> i128 {
 mod tests {
     use super::*;
     use polyisa_mem::{AccessKind, Align, Endian, Perms};
-    use polyisa_sem::{W32, W64};
+    use polyisa_sem::{Backend, Cmp, ExceptionKind, GuestException, W32, W64};
 
     fn backend() -> InterpBackend {
         InterpBackend::new(64)
@@ -991,5 +1014,193 @@ mod tests {
         assert_eq!(cur, 1);
         let cur = b.cmpxchg::<W32>(0x2000, 1, 3, acc).unwrap();
         assert_eq!(cur, 2);
+    }
+
+    // ---- 段階 9: 記録 → IR 解釈がインタプリタと一致すること ----
+
+    /// `prog` を直接（`ib1`）と、IR に記録して解釈（`ib2`）で走らせ、
+    /// 状態・メモリ内容・制御の出口を比べる。`setup` は両者に同じ
+    /// 初期状態を作る。記録は 1 命令ぶん（pc=0x100, next=0x104）。
+    /// `prog_i`/`prog_r` は同じ意味論をインタプリタと記録器へ渡す口で、
+    /// 呼び出し側が `|b| prog(b)` と包む（意味論の中身は `B: Backend`
+    /// の関数として一度だけ書く）。
+    fn compare(
+        mut setup: impl FnMut(&mut InterpBackend),
+        prog_i: impl FnOnce(&mut InterpBackend) -> Result<(), InterpExit>,
+        prog_r: impl FnOnce(&mut polyisa_ir::IrBackend) -> Result<(), polyisa_ir::IrExit>,
+    ) {
+        let mut ib1 = backend();
+        setup(&mut ib1);
+        let direct = prog_i(&mut ib1);
+        let ctrl1 = ib1.ctrl;
+
+        let mut ib2 = backend();
+        setup(&mut ib2);
+        let mut irb = polyisa_ir::IrBackend::new();
+        irb.cur_pc = 0x100;
+        irb.cur_next = 0x104;
+        if let Err(e) = prog_r(&mut irb) {
+            irb.abort(e);
+        }
+        polyisa_ir::optimize(&mut irb.ir);
+        let out = polyisa_ir::exec(&irb.ir, &mut ib2, 0x104);
+        let ctrl2 = match out {
+            polyisa_ir::IrOutcome::Next(pc) => Some(pc),
+            _ => None,
+        };
+        // 直接実行が `Ok` で `Fallthrough` なら IR 側は `Next(0x104)`。
+        // `jump`/`branch` 成立なら `Next(それ)`。`Err` なら `Raise`。
+        match (&direct, &out) {
+            (Ok(()), polyisa_ir::IrOutcome::Next(_)) => {}
+            (Err(InterpExit::Exception(a)), polyisa_ir::IrOutcome::Raise { e, .. }) => {
+                assert_eq!(a.kind, e.kind, "例外の種類が違う");
+                assert_eq!(a.addr, e.addr, "例外の番地が違う");
+            }
+            _ => panic!("出口の形が違う: direct={direct:?} out={out:?}"),
+        }
+        if let Ok(()) = direct {
+            let want = match ctrl1 {
+                Ctrl::Jump(t) => t,
+                Ctrl::Fallthrough => 0x104,
+            };
+            assert_eq!(ctrl2, Some(want), "継続先が違う");
+        }
+        assert_eq!(ib1.state, ib2.state, "CPU 状態が違う");
+        // テストで触るメモリ範囲の中身を比べる。
+        let mut m1 = [0u8; 0x40];
+        let mut m2 = [0u8; 0x40];
+        let acc = Access {
+            endian: Endian::Le,
+            align: Align::Natural,
+            kind: AccessKind::DataRead,
+        };
+        let _ = ib1.mem.read(VirtAddr(0x2000), &mut m1, acc);
+        let _ = ib2.mem.read(VirtAddr(0x2000), &mut m2, acc);
+        assert_eq!(m1, m2, "メモリの中身が違う");
+    }
+
+    /// 比較に使う意味論の実体。呼び出し側が `|b| prog_x(b)` で
+    /// インタプリタと記録器の両方へ渡す。
+    fn prog_arith<B: Backend>(b: &mut B, r: StateRef<W64>) -> Result<(), B::Exit> {
+        let a = b.get(r);
+        let k = b.konst::<W64>(37);
+        let s = b.add(a, k);
+        let m = b.mul(s, k);
+        b.set(r, m);
+        Ok(())
+    }
+
+    fn prog_mem<B: Backend>(b: &mut B) -> Result<(), B::Exit> {
+        let acc = Access {
+            endian: Endian::Le,
+            align: Align::Natural,
+            kind: AccessKind::DataRead,
+        };
+        let accw = Access {
+            kind: AccessKind::DataWrite,
+            ..acc
+        };
+        let a = b.konst::<W64>(0x2004);
+        let v = b.load::<W32>(a, acc)?;
+        let k = b.konst::<W32>(1);
+        let v = b.add(v, k);
+        let a2 = b.konst::<W64>(0x2008);
+        b.store::<W32>(a2, v, accw)?;
+        Ok(())
+    }
+
+    fn prog_if<B: Backend>(b: &mut B, r: StateRef<W64>) -> Result<(), B::Exit> {
+        let cond = b.get(r);
+        let zero = b.konst::<W64>(0);
+        let c = b.cmp::<W64>(Cmp::Ne, cond, zero);
+        b.if_then_else(
+            c,
+            |b| {
+                let ten = b.konst::<W64>(10);
+                b.set(r, ten);
+                Ok(())
+            },
+            |b| {
+                let twenty = b.konst::<W64>(20);
+                b.set(r, twenty);
+                Ok(())
+            },
+        )
+    }
+
+    fn prog_branch<B: Backend>(b: &mut B) -> Result<(), B::Exit> {
+        let one = b.konst::<W64>(1);
+        let c = b.cmp::<W64>(Cmp::Eq, one, one);
+        b.branch(c, 0x8000);
+        Ok(())
+    }
+
+    fn prog_jump<B: Backend>(b: &mut B) -> Result<(), B::Exit> {
+        let t = b.konst::<W64>(0x4000);
+        b.jump(t);
+        Ok(())
+    }
+
+    fn prog_raise<B: Backend>(b: &mut B) -> Result<(), B::Exit> {
+        Err(b.raise(GuestException {
+            kind: ExceptionKind::Undefined,
+            code: 0x42,
+            addr: None,
+            in_delay_slot: false,
+        }))
+    }
+
+    fn prog_fault<B: Backend>(b: &mut B) -> Result<(), B::Exit> {
+        let acc = Access {
+            endian: Endian::Le,
+            align: Align::Natural,
+            kind: AccessKind::DataRead,
+        };
+        let a = b.konst::<W64>(0x2000);
+        let _ = b.load::<W32>(a, acc)?;
+        Ok(())
+    }
+
+    #[test]
+    fn ir_arith_and_state() {
+        let r = StateRef::<W64>::from_offset(8);
+        compare(|b| b.set(r, 5), |b| prog_arith(b, r), |b| prog_arith(b, r));
+    }
+
+    #[test]
+    fn ir_mem_load_store() {
+        compare(
+            |b| {
+                b.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+            },
+            prog_mem,
+            prog_mem,
+        );
+    }
+
+    #[test]
+    fn ir_if_then_else_both_sides() {
+        let r = StateRef::<W64>::from_offset(0);
+        // cond=1: then 側だけ通る。
+        compare(|b| b.set(r, 1), |b| prog_if(b, r), |b| prog_if(b, r));
+        // cond=0: else 側だけ通る。
+        compare(|b| b.set(r, 0), |b| prog_if(b, r), |b| prog_if(b, r));
+    }
+
+    #[test]
+    fn ir_branch_and_jump() {
+        compare(|_| (), prog_branch, prog_branch);
+        compare(|_| (), prog_jump, prog_jump);
+    }
+
+    #[test]
+    fn ir_raise_exit() {
+        compare(|_| (), prog_raise, prog_raise);
+    }
+
+    #[test]
+    fn ir_mem_fault_exit() {
+        // 未写像への load は両者で PageFault で抜ける。
+        compare(|_| (), prog_fault, prog_fault);
     }
 }

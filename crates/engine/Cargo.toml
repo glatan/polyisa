@@ -12,6 +12,7 @@ polyisa-sem = { path = "../sem" }
 polyisa-guest = { path = "../guest" }
 polyisa-timing = { path = "../timing" }
 polyisa-softfloat = { path = "../softfloat" }
+polyisa-ir = { path = "../ir" }
 
 [lints]
 workspace = true
