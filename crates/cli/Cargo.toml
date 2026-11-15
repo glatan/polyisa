@@ -13,6 +13,7 @@ polyisa-guest-arm = { path = "../../guests/arm", optional = true }
 polyisa-guest-mips = { path = "../../guests/mips", optional = true }
 polyisa-guest-power = { path = "../../guests/power", optional = true }
 polyisa-guest-riscv = { path = "../../guests/riscv", optional = true }
+polyisa-guest-s390 = { path = "../../guests/s390", optional = true }
 polyisa-guest-x86 = { path = "../../guests/x86", optional = true }
 polyisa-host = { path = "../host" }
 polyisa-ir = { path = "../ir" }
@@ -31,6 +32,7 @@ default = [
     "guest-mips",
     "guest-power",
     "guest-riscv",
+    "guest-s390",
     "guest-x86",
 ]
 guest-aarch64 = ["dep:polyisa-guest-aarch64", "polyisa-os-linux/guest-aarch64"]
@@ -38,6 +40,7 @@ guest-arm = ["dep:polyisa-guest-arm", "polyisa-os-linux/guest-arm"]
 guest-mips = ["dep:polyisa-guest-mips", "polyisa-os-linux/guest-mips"]
 guest-power = ["dep:polyisa-guest-power", "polyisa-os-linux/guest-power"]
 guest-riscv = ["dep:polyisa-guest-riscv", "polyisa-os-linux/guest-riscv"]
+guest-s390 = ["dep:polyisa-guest-s390", "polyisa-os-linux/guest-s390"]
 guest-x86 = ["dep:polyisa-guest-x86", "polyisa-os-linux/guest-x86"]
 
 # 各 heavy_* テストは対象ゲストの feature が有効なときだけビルドする。
@@ -64,6 +67,10 @@ required-features = ["guest-aarch64"]
 [[test]]
 name = "heavy_program_power"
 required-features = ["guest-power"]
+
+[[test]]
+name = "heavy_program_s390"
+required-features = ["guest-s390"]
 
 [[test]]
 name = "heavy_jit_diff"

@@ -104,6 +104,40 @@
     lane/put_lane 系ヘルパ、vperm/vsel/vsldoi、
     x31_arith 大体、lq、put_stat、uname、CR0.SO。
 
+7. 段階 11（s390）で追加した台帳項目の確認待ち:
+   BIN-DISTRO-S390X（BusyBox 1.31.0 の s390x BE、
+   `.testdata/bin-distro-s390x`）、SRC-LINUX-S390-UAPI
+   （v6.6 の `arch/s390/kernel/syscalls/syscall.tbl`、
+   `.testdata/uapi-s390`）。いずれも用途 T で、
+   所有者の確認欄は空欄のまま。
+8. 段階 11（s390）の実装スコープ判断:
+   - 主対象は z/Architecture 64 ビットのユーザーモード。
+     ESA/390 31 ビットは AMASK・`la` 系の裸テストで
+     カバー（z/Architecture ファシリティは CPU モデル
+     z900..z13/generic/esa390 で機能単位に切る）。
+   - BFP（二進浮動小数点）は f32/f64 を実装。拡張
+     （128 ビット）は f64 近似で片方のレジスタだけを
+     読み書きし、実利用面はカバー（GAP）。16 進浮動
+     小数点と十進演算（DFP・パック十進・`ed`/`mk` 系の
+     文字・十進ユーティリティ）は段階 10 基盤の提供前の
+     ため今回の範囲外。未対応命令は `unimp` で報告する。
+   - `MADBR` 系（RRF-a）はフィールド配置が `B3 ff|r1 0|
+     r2 r3` で、2 値 RRE の `r1|r2` 並びと異なる点に注意
+     （初版が全フィールドをずらして読み、busybox `seq` の
+     無限ループを引いた不具合を修正済み）。
+   - BIN-DISTRO-S390X の既知の不具合: このビルドは
+     long double が 8 バイトで、musl の 128 ビット前提の
+     `fmt_fp`/`frexpl` と不整合し、`%f`/`%e`/`%g` の
+     出力が実機でも壊れる（例: `printf %f 2.0`→
+     `7.500000`、`seq 3` の数値部分）。エミュレーションは
+     そのまま再現する方針で、テストの期待値はこの経路を
+     避けてある。armv5l の同版 BusyBox は正しく出力する
+     ことを確認済み（フィクスチャ固有の問題）。
+   - 残件: `wait4`/`clone` 系のプロセス生成は未実装
+     （`sh` はフォークした子側で実行するため出力は出るが
+     wait が ENOSYS）。ソケット系・`execve`・シグナル
+     フレームも未着手。
+
 ## 段階ごとの作業記録
 
 ### 段階 7（ARM、A32・EABI）
@@ -265,6 +299,56 @@
   - 生成コードの最適度は低い（値スロット経由・重い演算は
     ランタイム呼び出し）。オラクルとの一致を優先。
 - 完了条件: `heavy_jit_diff` の 3 件が green。
+
+### 段階 11（s390x・z/Architecture、ESA/390 31 ビット）
+
+- 追加: `guests/s390`（`spec/zarch.rs` = 先頭バイトと
+  サブオペコードの粗分類 ISADL、CPU モデルは
+  esa390/z900/z990/z9ec/z10ec/z196/zec12/z13/generic、
+  機能フラグは zarch/long-disp/ext-imm/hfp/dfp。
+  `src/sem.rs` = 形式別の意味論。命令長は先頭 2 ビットの
+  2/4/6 バイト、BE 可変長フェッチ、AMODE は AMASK で
+  31 ビットをマスク）。
+- 追加: `crates/os-linux/src/s390.rs`（番号表 =
+  `syscall.tbl` の common/64 行）と `s390/sys.rs`
+  （`svc 0`、番号 r1・引数 r2..r7・戻り値 r2。
+  write/writev/read/open/stat 系/mmap/brk/umask 等）。
+- 追加: `crates/cli/src/run_s390.rs`（ELF ロード、
+  BE 初期スタック、`POLYISA_S390_*` の調査フック）。
+  フィーチャ `guest-s390` で有効。
+- テスト:
+  - `guests/s390/tests/bare_s390.rs` 4 件（z/Arch 64
+    ビットループ、全アドレスフォールト、ESA 31 ビット
+    AMASK、`la` 系 AMASK）。
+  - `guests/s390/tests/heavy_oracle_s390.rs` 2 件
+    （llvm-mc SystemZ とのデコード突き合わせ、命令長）。
+  - `guests/s390/tests/sem_unit.rs` 16 件。
+  - `crates/os-linux/tests/heavy_abi_s390.rs` 1 件
+    （UAPI tbl との番号突き合わせ。`sys` 実装だけ
+    `guest-s390` 機能の内側にし、番号表は機能なしで
+    使える形にした）。
+  - `crates/cli/tests/heavy_program_s390.rs` 3 件
+    （nostdlib hello、再帰 fib=55、BusyBox アプレット
+    9 コマンド）。`reqs.rs` に 3 バイナリ分を登録。
+- 実機バイナリから潰した意味論の不具合:
+  - `LNR`/`LNGR` が `x|符号` で負の絶対値を近似し、
+    0→INT_MIN に化けていた（busybox `basename` の
+    full_write が 0 扱いになる原因）。符号なし減算と
+    条件選択で置き換え。
+  - `MADBR` 系（RRF-a）のフィールド配置ずれ（確認待ち
+    #8 の通り。`seq` の無限ループの原因）。
+  - `MVHHI`/`MVGHI`/`MVHI`（SIL、0xE5）のサブ
+    オペコードが byte0 を読んでおり常に `unimp`
+    （fib テストの失敗原因）。
+  - RXF（`ed`）の `MAEB`/`MSEB`/`MADB`/`MSDB` が
+    先に並んだ 2 値演算のアームに吸われて到達不能に
+    なっていたのを、除外して通した。
+- S11-1..4 を実テスト名で判定に反映。段階 11 の
+  完了条件 4 件は green。
+- 残件（確認待ち #8 と同一案件）: 128 ビット拡張 BFP の
+  実値、HFP/DFP/パック十進、プロセス生成系 syscall、
+  ソケット、シグナルフレーム、`EX`/`EXRL` の一部、
+  SIE/特権命令（esa390 モデルの裸検証範囲のみ）。
 
 ## 参考
 

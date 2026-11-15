@@ -14,6 +14,8 @@ pub mod run_mips;
 pub mod run_power;
 #[cfg(feature = "guest-riscv")]
 pub mod run_riscv;
+#[cfg(feature = "guest-s390")]
+pub mod run_s390;
 #[cfg(feature = "guest-x86")]
 pub mod run_x86;
 
@@ -73,6 +75,7 @@ pub fn parse_cpu_spec(s: &str) -> Result<CpuSpec, String> {
     feature = "guest-mips",
     feature = "guest-power",
     feature = "guest-riscv",
+    feature = "guest-s390",
     feature = "guest-x86"
 ))]
 fn resolve_sel(
@@ -238,6 +241,37 @@ fn run_power_elf(
     Err("この polyisa は power ゲストなしでビルドされた".to_string())
 }
 
+#[cfg(feature = "guest-s390")]
+fn run_s390_elf(
+    path: &str,
+    argv: &[String],
+    spec: Option<&CpuSpec>,
+    root: Option<&str>,
+) -> Result<u64, String> {
+    let sel = spec
+        .map(|s| {
+            resolve_sel(
+                "s390",
+                polyisa_guest_s390::MODEL_DEFS,
+                polyisa_guest_s390::FEATURE_DEFS,
+                polyisa_guest_s390::FEAT_BITS,
+                s,
+            )
+        })
+        .transpose()?;
+    run_s390::run_elf_s390_root(path, argv, sel.as_ref(), root)
+}
+
+#[cfg(not(feature = "guest-s390"))]
+fn run_s390_elf(
+    _path: &str,
+    _argv: &[String],
+    _spec: Option<&CpuSpec>,
+    _root: Option<&str>,
+) -> Result<u64, String> {
+    Err("この polyisa は s390 ゲストなしでビルドされた".to_string())
+}
+
 #[cfg(feature = "guest-riscv")]
 fn run_riscv_elf(path: &str, argv: &[String], spec: Option<&CpuSpec>) -> Result<u64, String> {
     let sel = spec
@@ -319,8 +353,8 @@ pub fn run_path_opts(
         CLASS_64 => {
             let ehdr =
                 polyisa_loader::elf::parse_ehdr(&bytes).map_err(|e| format!("ehdr: {e:?}"))?;
-            if root.is_some() && !matches!(ehdr.machine, 183 | 21) {
-                return Err("--root は現状 aarch64 と ppc64 のみ対応".to_string());
+            if root.is_some() && !matches!(ehdr.machine, 183 | 21 | 22) {
+                return Err("--root は現状 aarch64・ppc64・s390x のみ対応".to_string());
             }
             // EM_RISCV=243。Ref: SPEC-RISCV-PSABI (v1.0).
             if ehdr.machine == 243 {
@@ -342,6 +376,10 @@ pub fn run_path_opts(
                 // EM_PPC64。Ref: SPEC-POWER-ABI (ELFv2 r1.5)。
                 check("power")?;
                 run_power_elf(path, argv, spec.as_ref(), root)
+            } else if ehdr.machine == 22 {
+                // EM_S390（s390x）。Ref: SPEC-S390-ABI。
+                check("s390")?;
+                run_s390_elf(path, argv, spec.as_ref(), root)
             } else {
                 Err(format!("未対応の e_machine: {}", ehdr.machine))
             }

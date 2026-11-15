@@ -28,6 +28,9 @@ mod power {
 mod riscv {
     include!("../../../guests/riscv/spec/rv64i.rs");
 }
+mod s390 {
+    include!("../../../guests/s390/spec/zarch.rs");
+}
 mod sparc {
     include!("../../../guests/sparc/spec/sparcv8.rs");
 }
@@ -79,6 +82,11 @@ const SPECS: &[IsaSpec] = &[
         isa: "riscv",
         rel_path: "guests/riscv/spec/rv64i.rs",
         build: riscv::build_model,
+    },
+    IsaSpec {
+        isa: "s390",
+        rel_path: "guests/s390/spec/zarch.rs",
+        build: s390::build_model,
     },
     IsaSpec {
         isa: "sparc",

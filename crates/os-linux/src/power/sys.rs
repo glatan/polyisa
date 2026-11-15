@@ -378,7 +378,7 @@ impl Linux {
         b[20..24].copy_from_slice(&w32(md.uid));
         b[24..28].copy_from_slice(&w32(md.gid));
         // Ref: SRC-LINUX — struct statx（include/uapi/linux/stat.h）。
-        b[28..30].copy_from_slice(&w32(md.mode as u16 as u32)[0..2].as_ref());
+        b[28..30].copy_from_slice(&w32(u32::from(md.mode as u16))[0..2]);
         b[32..40].copy_from_slice(&w64(md.ino));
         b[40..48].copy_from_slice(&w64(md.size));
         b[48..56].copy_from_slice(&w64(md.blocks));
@@ -621,7 +621,7 @@ impl Linux {
         // Ref: SRC-LINUX — struct sysinfo の 64bit レイアウト。
         b[64..72].copy_from_slice(&w64(1 << 30)); // totalswap
         b[72..80].copy_from_slice(&w64(1 << 29)); // freeswap
-        b[80..82].copy_from_slice(&w32(1)[0..2].as_ref()); // procs
+        b[80..82].copy_from_slice(&w32(1)[0..2]); // procs
         b[104..108].copy_from_slice(&w32(1)); // mem_unit
         match self.write_bytes(env, addr, &b) {
             Ok(()) => 0,

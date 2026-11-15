@@ -62,6 +62,13 @@ pub type F32 = Binary<8, 23>;
 /// 64 ビット形式。
 pub type F64 = Binary<11, 52>;
 
+/// DEC の F/D/G/H 形式（VAX・PDP-11・Alpha）。
+pub mod decfp;
+/// IBM の十六進浮動小数点（S/360 系 HFP）。
+pub mod ibmhex;
+/// Motorola 68881/68882 の拡張精度形式。
+pub mod m68kext;
+
 // 演算名は `Backend` の語彙に合わせる。`std::ops` は実装しない。
 #[allow(clippy::should_implement_trait)]
 impl<const E: u32, const M: u32> Binary<E, M> {

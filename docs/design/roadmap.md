@@ -200,8 +200,8 @@ Power の本格的な実装と、Linux の ppc32、ppc64、ppc64le ゲスト ABI
 
 | ID | 条件 | 判定 |
 |---|---|---|
-| S10-1 | `decimal` の演算が decTest と比較して一致する（テスト `heavy_conformance_dectest`）。 | 未整備 |
-| S10-2 | 16 進浮動小数点、DEC の形式、68881 拡張精度が、仕様書の例と一致する（テスト `nonieee_examples`）。 | 未整備 |
+| S10-1 | `decimal` の演算が decTest と比較して一致する（テスト `heavy_conformance_dectest`）。 | テスト：`heavy_conformance_dectest` |
+| S10-2 | 16 進浮動小数点、DEC の形式、68881 拡張精度が、仕様書の例と一致する（テスト `nonieee_examples`）。 | テスト：`nonieee_examples` |
 
 ### 段階 11：s390 系
 
@@ -218,10 +218,10 @@ s390 系（System/360 から z/Architecture まで）の本格的な実装と、
 
 | ID | 条件 | 判定 |
 |---|---|---|
-| S11-1 | s390x のテストプログラムと配布物のコマンド群が、ゲストのルートを使って正しい出力を返す（テスト `heavy_program_s390x`）。 | 未整備 |
-| S11-2 | ABI 表が、UAPI ヘッダからの抽出値と一致する（テスト `heavy_abi_s390`）。 | 未整備 |
-| S11-3 | llvm-objdump（SystemZ）とのデコーダの差分テストが通る（テスト `heavy_oracle_s390`）。 | 未整備 |
-| S11-4 | ESA/390 より前の世代の命令単位テストが裸実行環境で通る（テスト `bare_s390`）。 | 未整備 |
+| S11-1 | s390x のテストプログラムと配布物のコマンド群が、ゲストのルートを使って正しい出力を返す（テスト `heavy_program_s390`）。 | テスト：`heavy_program_s390` |
+| S11-2 | ABI 表が、UAPI ヘッダからの抽出値と一致する（テスト `heavy_abi_s390`）。 | テスト：`heavy_abi_s390` |
+| S11-3 | llvm-objdump（SystemZ）とのデコーダの差分テストが通る（テスト `heavy_oracle_s390`）。 | テスト：`heavy_oracle_s390` |
+| S11-4 | ESA/390 より前の世代の命令単位テストが裸実行環境で通る（テスト `bare_s390`）。 | テスト：`bare_s390` |
 
 ### 段階 12：WebAssembly と WASI
 

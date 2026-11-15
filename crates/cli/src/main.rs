@@ -81,6 +81,10 @@ fn main() {
             for m in polyisa_guest_power::MODELS {
                 println!("power:{m}");
             }
+            #[cfg(feature = "guest-s390")]
+            for m in polyisa_guest_s390::MODELS {
+                println!("s390:{m}");
+            }
         }
         polyisa_cli::Command::Disasm => {
             #[cfg(feature = "guest-riscv")]

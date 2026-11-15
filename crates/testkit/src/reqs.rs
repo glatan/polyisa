@@ -40,8 +40,16 @@ pub const TEST_REQUIREMENTS: &[TestBinary] = &[
         needs: &[Req::Data(".testdata/uapi-powerpc")],
     },
     TestBinary {
+        binary: "heavy_abi_s390",
+        needs: &[Req::Data(".testdata/uapi-s390")],
+    },
+    TestBinary {
         binary: "heavy_abi_uapi",
         needs: &[Req::Tool("clang")],
+    },
+    TestBinary {
+        binary: "heavy_conformance_dectest",
+        needs: &[Req::Data(".testdata/dectest")],
     },
     TestBinary {
         binary: "heavy_conformance_riscv_tests",
@@ -68,6 +76,10 @@ pub const TEST_REQUIREMENTS: &[TestBinary] = &[
     },
     TestBinary {
         binary: "heavy_oracle_power",
+        needs: &[Req::Tool("llvm-mc")],
+    },
+    TestBinary {
+        binary: "heavy_oracle_s390",
         needs: &[Req::Tool("llvm-mc")],
     },
     TestBinary {
@@ -108,6 +120,10 @@ pub const TEST_REQUIREMENTS: &[TestBinary] = &[
             Req::Data(".testdata/bin-distro-powerpc64/busybox"),
             Req::Data(".testdata/bin-distro-powerpc64le"),
         ],
+    },
+    TestBinary {
+        binary: "heavy_program_s390",
+        needs: &[Req::Tool("clang"), Req::Data(".testdata/bin-distro-s390x")],
     },
 ];
 

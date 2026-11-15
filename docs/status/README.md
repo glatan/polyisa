@@ -33,12 +33,12 @@
 | S8-2 | テスト：`heavy_abi_power` |
 | S8-3 | テスト：`heavy_oracle_power` |
 | S9-1 | テスト：`heavy_jit_diff` |
-| S10-1 | 未整備 |
-| S10-2 | 未整備 |
-| S11-1 | 未整備 |
-| S11-2 | 未整備 |
-| S11-3 | 未整備 |
-| S11-4 | 未整備 |
+| S10-1 | テスト：`heavy_conformance_dectest` |
+| S10-2 | テスト：`nonieee_examples` |
+| S11-1 | テスト：`heavy_program_s390` |
+| S11-2 | テスト：`heavy_abi_s390` |
+| S11-3 | テスト：`heavy_oracle_s390` |
+| S11-4 | テスト：`bare_s390` |
 | S12-1 | 未整備 |
 | S12-2 | 未整備 |
 | S12-3 | 未整備 |
@@ -97,6 +97,7 @@
 | mips | 283 | 270 | r3000、mips32r2、r6、mips64r2、mips64r6 | [isa-mips.md](isa-mips.md) |
 | power | 57 | 57 | generic | [isa-power.md](isa-power.md) |
 | riscv | 196 | 196 | rv64gc、rv64imac | [isa-riscv.md](isa-riscv.md) |
+| s390 | 251 | 251 | z900、z990、z9ec、z10ec、z196、zec12、z13、generic、esa390 | [isa-s390.md](isa-s390.md) |
 | sparc | 10 | 10 | generic | [isa-sparc.md](isa-sparc.md) |
 | wasm | 8 | 8 | generic | [isa-wasm.md](isa-wasm.md) |
 | x86 | 853 | 165 | generic32 | [isa-x86.md](isa-x86.md) |

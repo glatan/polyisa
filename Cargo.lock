@@ -17,6 +17,7 @@ dependencies = [
  "polyisa-guest-mips",
  "polyisa-guest-power",
  "polyisa-guest-riscv",
+ "polyisa-guest-s390",
  "polyisa-guest-x86",
  "polyisa-host",
  "polyisa-ir",
@@ -165,6 +166,7 @@ version = "0.0.0"
 dependencies = [
  "polyisa-bits",
  "polyisa-cli",
+ "polyisa-decimal",
  "polyisa-engine",
  "polyisa-guest",
  "polyisa-isadl",
@@ -192,6 +194,20 @@ dependencies = [
  "polyisa-os-linux",
  "polyisa-sem",
  "polyisa-softfloat",
+ "polyisa-timing",
+]
+
+[[package]]
+name = "polyisa-guest-s390"
+version = "0.0.0"
+dependencies = [
+ "polyisa-bits",
+ "polyisa-engine",
+ "polyisa-isadl",
+ "polyisa-isagen",
+ "polyisa-loader",
+ "polyisa-mem",
+ "polyisa-sem",
  "polyisa-timing",
 ]
 
@@ -316,6 +332,7 @@ dependencies = [
  "polyisa-guest-mips",
  "polyisa-guest-power",
  "polyisa-guest-riscv",
+ "polyisa-guest-s390",
  "polyisa-guest-x86",
  "polyisa-host",
  "polyisa-kernel",

@@ -33,6 +33,7 @@ members = [
     "guests/hexagon",
     "guests/ia64",
     "guests/power",
+    "guests/s390",
 ]
 resolver = "2"
 

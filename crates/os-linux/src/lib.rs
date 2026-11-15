@@ -49,6 +49,11 @@ pub mod power;
 /// RISC-V（asm-generic）のシステムコール番号と syscall 処理。
 pub mod rv64;
 
+/// s390x（Linux・64ビット・ビッグエンディアン）のシステムコール番号と
+/// syscall 処理（`sys` の実装だけ `guest-s390` 機能の内側）。
+// Ref: SRC-LINUX (7.3), SPEC-S390-ABI.
+pub mod s390;
+
 /// x86 の 32ビット（Linux の i386 ABI、EM_386）のシステムコール番号。
 // Ref: SRC-LINUX (7.3).
 pub mod x86_32;
