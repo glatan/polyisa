@@ -32,6 +32,10 @@ pub const TEST_REQUIREMENTS: &[TestBinary] = &[
         needs: &[Req::Tool("clang")],
     },
     TestBinary {
+        binary: "heavy_abi_arm",
+        needs: &[Req::Data(".testdata/uapi-arm")],
+    },
+    TestBinary {
         binary: "heavy_abi_uapi",
         needs: &[Req::Tool("clang")],
     },
@@ -71,6 +75,14 @@ pub const TEST_REQUIREMENTS: &[TestBinary] = &[
         needs: &[
             Req::Tool("clang"),
             Req::Data(".testdata/bin-distro-aarch64"),
+        ],
+    },
+    TestBinary {
+        binary: "heavy_program_arm",
+        needs: &[
+            Req::Tool("clang"),
+            Req::Data(".testdata/bin-distro-armv5l/busybox"),
+            Req::Data(".testdata/bin-distro-armv7l/busybox"),
         ],
     },
     TestBinary {

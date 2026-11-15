@@ -6,6 +6,8 @@
 
 #[cfg(feature = "guest-aarch64")]
 pub mod run_aarch64;
+#[cfg(feature = "guest-arm")]
+pub mod run_arm;
 #[cfg(feature = "guest-mips")]
 pub mod run_mips;
 #[cfg(feature = "guest-riscv")]
@@ -150,6 +152,27 @@ fn run_mips_elf(_path: &str, _argv: &[String], _spec: Option<&CpuSpec>) -> Resul
     Err("この polyisa は mips ゲストなしでビルドされた".to_string())
 }
 
+#[cfg(feature = "guest-arm")]
+fn run_arm_elf(path: &str, argv: &[String], spec: Option<&CpuSpec>) -> Result<u64, String> {
+    let sel = spec
+        .map(|s| {
+            resolve_sel(
+                "arm",
+                polyisa_guest_arm::MODEL_DEFS,
+                polyisa_guest_arm::FEATURE_DEFS,
+                polyisa_guest_arm::FEAT_BITS,
+                s,
+            )
+        })
+        .transpose()?;
+    run_arm::run_elf_arm_sel(path, argv, sel.as_ref())
+}
+
+#[cfg(not(feature = "guest-arm"))]
+fn run_arm_elf(_path: &str, _argv: &[String], _spec: Option<&CpuSpec>) -> Result<u64, String> {
+    Err("この polyisa は arm ゲストなしでビルドされた".to_string())
+}
+
 #[cfg(feature = "guest-aarch64")]
 fn run_aarch64_elf(
     path: &str,
@@ -247,6 +270,10 @@ pub fn run_path_opts(
             if ehdr.machine == 3 {
                 check("x86")?;
                 run_x86_32_elf(path, argv, spec.as_ref())
+            } else if ehdr.machine == 40 {
+                // EM_ARM（AArch32・ARM 状態）。Ref: AAELF32 §4.1。
+                check("arm")?;
+                run_arm_elf(path, argv, spec.as_ref())
             } else if ehdr.machine == 8 {
                 // EM_MIPS。Ref: SRC-LINUX (7.3)。アーキテクチャとエンディアンは ELF ヘッダから取る。
                 check("mips")?;

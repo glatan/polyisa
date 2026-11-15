@@ -1,0 +1,22 @@
+[package]
+name = "polyisa-guest-arm"
+version = "0.0.0"
+license.workspace = true
+edition = "2024"
+rust-version = "1.99"
+
+[dependencies]
+polyisa-bits = { path = "../../crates/bits" }
+polyisa-mem = { path = "../../crates/mem" }
+polyisa-sem = { path = "../../crates/sem" }
+
+[build-dependencies]
+polyisa-isadl = { path = "../../crates/isadl" }
+polyisa-isagen = { path = "../../crates/isagen" }
+
+[dev-dependencies]
+polyisa-engine = { path = "../../crates/engine" }
+polyisa-os-linux = { path = "../../crates/os-linux" }
+
+[lints]
+workspace = true

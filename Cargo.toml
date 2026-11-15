@@ -24,6 +24,7 @@ members = [
     "crates/cli",
     "crates/jit",
     "guests/aarch64",
+    "guests/arm",
     "guests/riscv",
     "guests/sparc",
     "guests/mips",

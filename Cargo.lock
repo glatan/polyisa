@@ -13,6 +13,7 @@ dependencies = [
  "polyisa-engine",
  "polyisa-guest",
  "polyisa-guest-aarch64",
+ "polyisa-guest-arm",
  "polyisa-guest-mips",
  "polyisa-guest-riscv",
  "polyisa-guest-x86",
@@ -92,6 +93,19 @@ dependencies = [
  "polyisa-sem",
  "polyisa-softfloat",
  "polyisa-timing",
+]
+
+[[package]]
+name = "polyisa-guest-arm"
+version = "0.0.0"
+dependencies = [
+ "polyisa-bits",
+ "polyisa-engine",
+ "polyisa-isadl",
+ "polyisa-isagen",
+ "polyisa-mem",
+ "polyisa-os-linux",
+ "polyisa-sem",
 ]
 
 [[package]]
@@ -276,6 +290,7 @@ dependencies = [
  "polyisa-engine",
  "polyisa-guest",
  "polyisa-guest-aarch64",
+ "polyisa-guest-arm",
  "polyisa-guest-mips",
  "polyisa-guest-riscv",
  "polyisa-guest-x86",

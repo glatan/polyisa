@@ -9,6 +9,7 @@ rust-version = "1.99"
 polyisa-engine = { path = "../engine" }
 polyisa-guest = { path = "../guest" }
 polyisa-guest-aarch64 = { path = "../../guests/aarch64", optional = true }
+polyisa-guest-arm = { path = "../../guests/arm", optional = true }
 polyisa-guest-mips = { path = "../../guests/mips", optional = true }
 polyisa-guest-riscv = { path = "../../guests/riscv", optional = true }
 polyisa-guest-x86 = { path = "../../guests/x86", optional = true }
@@ -22,8 +23,9 @@ polyisa-sem = { path = "../sem" }
 polyisa-trace = { path = "../trace" }
 
 [features]
-default = ["guest-aarch64", "guest-mips", "guest-riscv", "guest-x86"]
+default = ["guest-aarch64", "guest-arm", "guest-mips", "guest-riscv", "guest-x86"]
 guest-aarch64 = ["dep:polyisa-guest-aarch64", "polyisa-os-linux/guest-aarch64"]
+guest-arm = ["dep:polyisa-guest-arm", "polyisa-os-linux/guest-arm"]
 guest-mips = ["dep:polyisa-guest-mips", "polyisa-os-linux/guest-mips"]
 guest-riscv = ["dep:polyisa-guest-riscv", "polyisa-os-linux/guest-riscv"]
 guest-x86 = ["dep:polyisa-guest-x86", "polyisa-os-linux/guest-x86"]

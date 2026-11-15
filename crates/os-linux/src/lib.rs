@@ -38,6 +38,10 @@ pub mod mips_n64;
 // Ref: SRC-LINUX (7.3).
 pub mod aarch64;
 
+/// ARM（AArch32・EABI）のシステムコール番号と syscall 処理。
+// Ref: SRC-LINUX (7.3).
+pub mod arm;
+
 /// RISC-V（asm-generic）のシステムコール番号と syscall 処理。
 pub mod rv64;
 
@@ -65,6 +69,7 @@ pub enum GuestAbi {
     X86_32Linux,
     MipsO32,
     Aarch64Linux,
+    ArmLinux,
 }
 
 /// 実行ループとの境界。定義は実行エンジンにある。
@@ -390,6 +395,7 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
         },
         GuestAbi::MipsO32 => mips_o32::name(nr),
         GuestAbi::Aarch64Linux => aarch64::name(nr),
+        GuestAbi::ArmLinux => arm::name(nr),
         GuestAbi::Unknown => None,
     }
 }
