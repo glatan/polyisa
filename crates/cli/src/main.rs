@@ -69,9 +69,17 @@ fn main() {
             for m in polyisa_guest_mips::MODELS {
                 println!("mips:{m}");
             }
+            #[cfg(feature = "guest-arm")]
+            for m in polyisa_guest_arm::MODELS {
+                println!("arm:{m}");
+            }
             #[cfg(feature = "guest-aarch64")]
             for m in polyisa_guest_aarch64::MODELS {
                 println!("aarch64:{m}");
+            }
+            #[cfg(feature = "guest-power")]
+            for m in polyisa_guest_power::MODELS {
+                println!("power:{m}");
             }
         }
         polyisa_cli::Command::Disasm => {

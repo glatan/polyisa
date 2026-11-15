@@ -36,6 +36,10 @@ pub const TEST_REQUIREMENTS: &[TestBinary] = &[
         needs: &[Req::Data(".testdata/uapi-arm")],
     },
     TestBinary {
+        binary: "heavy_abi_power",
+        needs: &[Req::Data(".testdata/uapi-powerpc")],
+    },
+    TestBinary {
         binary: "heavy_abi_uapi",
         needs: &[Req::Tool("clang")],
     },
@@ -56,6 +60,10 @@ pub const TEST_REQUIREMENTS: &[TestBinary] = &[
     },
     TestBinary {
         binary: "heavy_oracle_llvm",
+        needs: &[Req::Tool("llvm-mc")],
+    },
+    TestBinary {
+        binary: "heavy_oracle_power",
         needs: &[Req::Tool("llvm-mc")],
     },
     TestBinary {
@@ -88,6 +96,14 @@ pub const TEST_REQUIREMENTS: &[TestBinary] = &[
     TestBinary {
         binary: "heavy_program_mips",
         needs: &[Req::Tool("clang")],
+    },
+    TestBinary {
+        binary: "heavy_program_power",
+        needs: &[
+            Req::Tool("clang"),
+            Req::Data(".testdata/bin-distro-powerpc64/busybox"),
+            Req::Data(".testdata/bin-distro-powerpc64le"),
+        ],
     },
 ];
 

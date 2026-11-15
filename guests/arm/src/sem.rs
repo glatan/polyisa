@@ -250,12 +250,13 @@ fn set_q<B: Backend>(b: &mut B, sat: B::B) {
 }
 
 /// GE[3:0] を 4 ビット値で書く（並列演算用）。
-fn set_ge<B: Backend>(b: &mut B, ge: u32) {
+fn set_ge<B: Backend>(b: &mut B, ge: B::V<W32>) {
     let cs = cpsr(b);
     let __h12 = k32(b, 0xfff0_ffff);
 
     let keep = b.and(cs, __h12);
-    let __h13 = k32(b, ge << 16);
+    let sh = k32(b, 16);
+    let __h13 = b.shl(ge, sh);
 
     let new = b.or(keep, __h13);
     b.set(cpsr_ref(), new);
@@ -930,14 +931,10 @@ pub fn mul<B: Backend>(b: &mut B, word: u32, pc: u64) -> Flow<B> {
                 let c64 = b.zext::<W32, W64>(c);
                 b.mul::<W64>(a64, c64)
             };
-            let acc64 = {
-                let lo64 = b.zext::<W32, W64>(lo);
-                let hi64 = b.zext::<W32, W64>(hi);
-                let __h81 = k64(b, 32);
-                let __h82 = b.shl(hi64, __h81);
-
-                b.or(lo64, __h82)
-            };
+            // 累算は RdLo + RdHi の二項和（連結ではない）。
+            let lo64 = b.zext::<W32, W64>(lo);
+            let hi64 = b.zext::<W32, W64>(hi);
+            let acc64 = b.add(lo64, hi64);
             let r = b.add(p64, acc64);
             let rlo = b.trunc::<W64, W32>(r);
             let __h83 = k64(b, 32);
@@ -1202,24 +1199,25 @@ fn smulxy<B: Backend>(b: &mut B, word: u32, pc: u64) -> Flow<B> {
         b.trunc::<W32, polyisa_sem::W16>(v)
     }
     match top8 {
-        // smla<xy>：rd = Ra + half(Rn,x)*half(Rs,y)。
+        // smla<xy>：rd = Ra + half(Rn[3:0],y)*half(Rm[11:8],x)。
         0x10 => {
             let __h108 = rd(b, f_30, pc);
 
-            let na = half(b, __h108, x);
+            let na = half(b, __h108, y);
             let __h109 = rd(b, f_118, pc);
 
-            let sa = half(b, __h109, y);
+            let sa = half(b, __h109, x);
             let __h110 = b.sext::<polyisa_sem::W16, W32>(na);
             let __h111 = b.sext::<polyisa_sem::W16, W32>(sa);
 
             let p = b.mul::<W32>(__h110, __h111);
-            let acc = rd(b, f_hi, pc);
+            // smla<xy>：Rd=[19:16]、Ra=[15:12]。
+            let acc = rd(b, f_lo, pc);
             let r = b.add(p, acc);
-            wr(b, f_lo, r);
+            wr(b, f_hi, r);
         }
-        // smlal<xy>：RdHi:RdLo += half(Rn,x)*half(Rs,y)。
-        // Rn=[11:8]、Rs=[3:0]（smlabb 系と並びが違う点に注意）。
+        // smlal<xy>：RdHi:RdLo += half(Rn,y)*half(Rm,x)。
+        // RdHi=[19:16]、RdLo=[15:12]、Rm=[11:8]、Rn=[3:0]。
         0x14 => {
             let __h112 = rd(b, f_118, pc);
 
@@ -1232,8 +1230,8 @@ fn smulxy<B: Backend>(b: &mut B, word: u32, pc: u64) -> Flow<B> {
 
             let p = b.mul::<W32>(__h114, __h115);
             let p64 = b.sext::<W32, W64>(p);
-            let lo = rd(b, f_hi, pc);
-            let hi = rd(b, f_lo, pc);
+            let lo = rd(b, f_lo, pc);
+            let hi = rd(b, f_hi, pc);
             let acc = {
                 let lo64 = b.zext::<W32, W64>(lo);
                 let hi64 = b.zext::<W32, W64>(hi);
@@ -1245,12 +1243,12 @@ fn smulxy<B: Backend>(b: &mut B, word: u32, pc: u64) -> Flow<B> {
             let r = b.add(p64, acc);
             let __h118 = b.trunc::<W64, W32>(r);
 
-            b.set(Gpr(f_hi).state(), __h118);
+            b.set(Gpr(f_lo).state(), __h118);
             let __h119 = k64(b, 32);
             let __h120 = b.shr_l(r, __h119);
             let __h121 = b.trunc::<W64, W32>(__h120);
 
-            b.set(Gpr(f_lo).state(), __h121);
+            b.set(Gpr(f_hi).state(), __h121);
         }
         // smlaw<y>/smulw<y>：[7:4] bit5 が 0 なら累算つき。
         0x12 => {
@@ -1266,23 +1264,23 @@ fn smulxy<B: Backend>(b: &mut B, word: u32, pc: u64) -> Flow<B> {
             let p = b.shr_a(p, __h126);
             let p = b.trunc::<W64, W32>(p);
             if y == 0 {
-                // smlaw<y>：rd = Ra + p
-                let acc = rd(b, f_hi, pc);
+                // smlaw<y>：Rd=[19:16]、Ra=[15:12]。rd = Ra + p。
+                let acc = rd(b, f_lo, pc);
                 let r = b.add(acc, p);
-                wr(b, f_lo, r);
+                wr(b, f_hi, r);
             } else {
                 // smulw<y>：rd = p（Ra 面は 0 固定）
-                wr(b, f_lo, p);
+                wr(b, f_hi, p);
             }
         }
-        // smul<xy>：rd = half(Rn,x)*half(Rs,y)。
+        // smul<xy>：rd = half(Rn[3:0],y)*half(Rm[11:8],x)。
         0x16 => {
             let __h127 = rd(b, f_30, pc);
 
-            let na = half(b, __h127, x);
+            let na = half(b, __h127, y);
             let __h128 = rd(b, f_118, pc);
 
-            let sa = half(b, __h128, y);
+            let sa = half(b, __h128, x);
             let __h129 = b.sext::<polyisa_sem::W16, W32>(na);
             let __h130 = b.sext::<polyisa_sem::W16, W32>(sa);
 
@@ -1299,6 +1297,12 @@ fn dp_misc_sreg<B: Backend>(b: &mut B, word: u32, pc: u64) -> Flow<B> {
     let top8 = (word >> 20) & 0xff;
     let b74 = (word >> 4) & 0xf;
     let rm = (word & 0xf) as u8;
+    // レジスタシフト版の TST/TEQ/CMP/CMN（op5 奇数）は misc ではなく
+    // 通常のデータ処理として実行する。
+    if matches!(top8, 0x11 | 0x13 | 0x15 | 0x17) {
+        let (op2, carry) = dp_op2_reg_reg(b, word, pc);
+        return dp_exec(b, word, pc, op2, carry);
+    }
     match (top8, b74) {
         // bx：0001 0010、bits[11:8]=1111、bits[7:4]=0001
         (0x12, 1) if (word >> 8) & 0xf == 0xf => bx(b, pc, rm, false),
@@ -1359,14 +1363,25 @@ fn clz32<B: Backend>(b: &mut B, v: B::V<W32>) -> B::V<W32> {
 /// 飽和演算。qadd/qsub/qdadd/qdsub を top8 で分ける。
 /// フィールド：Rd=[15:12]、Rn=[19:16]、Rm=[3:0]。`a`=Rm、`c`=Rn。
 fn qop<B: Backend>(b: &mut B, top8: u32, a: B::V<W32>, c: B::V<W32>, rdn: u8) -> Flow<B> {
+    // a=Rm[3:0] が左項、c=Rn[19:16]。QD* は Rn*2 を先に飽和する。
     let a64 = b.sext::<W32, W64>(a);
     let c64 = b.sext::<W32, W64>(c);
-    let a2 = b.add(a64, a64);
+    let c2 = b.add(c64, c64);
+    let c2t = b.trunc::<W64, W32>(c2);
+    let c2b = b.sext::<W32, W64>(c2t);
+    let c2ok = b.cmp::<W64>(Cmp::Eq, c2, c2b);
+    let c2sat = inv(b, c2ok);
+    let __h0 = k64(b, 0);
+    let c2neg = b.cmp::<W64>(Cmp::LtS, c2, __h0);
+    let smin = k64(b, 0xffff_ffff_8000_0000);
+    let smax = k64(b, 0x7fff_ffff);
+    let c2cl = b.select::<W64>(c2neg, smin, smax);
+    let c2s = b.select::<W64>(c2sat, c2cl, c2);
     let res64 = match top8 {
-        0x10 => b.add(c64, a64), // qadd: c + a
-        0x12 => b.sub(c64, a64), // qsub: c - a
-        0x14 => b.add(c64, a2),  // qdadd: c + 2a
-        _ => b.sub(c64, a2),     // qdsub: c - 2a
+        0x10 => b.add(a64, c64), // qadd: Rm + Rn
+        0x12 => b.sub(a64, c64), // qsub: Rm - Rn
+        0x14 => b.add(a64, c2s), // qdadd: Rm + sat(2*Rn)
+        _ => b.sub(a64, c2s),    // qdsub: Rm - sat(2*Rn)
     };
     // 32 ビット符号に飽和する。res != sext(res[31:0]) なら飽和。
     let lo = b.trunc::<W64, W32>(res64);
@@ -1381,7 +1396,13 @@ fn qop<B: Backend>(b: &mut B, top8: u32, a: B::V<W32>, c: B::V<W32>, rdn: u8) ->
 
     let cl = b.select::<W64>(sign, __h1, __h2);
     let r64 = b.select::<W64>(sat, cl, res64);
-    set_q(b, sat);
+    // QD* では二倍の飽和でも Q が立つ。
+    let q = if top8 & 4 != 0 {
+        bor(b, sat, c2sat)
+    } else {
+        sat
+    };
+    set_q(b, q);
     let __h3 = b.trunc::<W64, W32>(r64);
 
     wr(b, rdn, __h3);
@@ -1470,11 +1491,11 @@ pub fn dp_sreg<B: Backend>(b: &mut B, word: u32, pc: u64) -> Flow<B> {
 
 // ---- メディア領域（011, bit4=1）----
 
-/// 並列加減算。`sgn`: 0=signed,1=unsigned,2=halving。
+/// 並列加減算。`kind`: 0=S, 1=U, 2=SH, 3=UH。
 /// opc2=[7:5]：0=add16, 1=asx, 2=sax, 3=sub16, 4=add8, 7=sub8。
 /// GE：signed → 結果が非負、unsigned → 繰り上がり（add）/借りなし（sub）。
 /// halving は GE を書かない。
-fn parl<B: Backend>(b: &mut B, word: u32, pc: u64, sgn: u32) -> Flow<B> {
+fn parl<B: Backend>(b: &mut B, word: u32, pc: u64, kind: u32) -> Flow<B> {
     let opc2 = (word >> 5) & 7;
     let rn = ((word >> 16) & 0xf) as u8;
     let rdn = ((word >> 12) & 0xf) as u8;
@@ -1494,34 +1515,41 @@ fn parl<B: Backend>(b: &mut B, word: u32, pc: u64, sgn: u32) -> Flow<B> {
         let __h14 = k32(b, 16);
 
         let chi = b.shr_l(c, __h14);
-        // opc2: 0=add16,1=sasx,2=ssax,3=sub16。
-        // sasx: lo=a.lo - c.hi, hi=a.hi + c.lo? — ARM の定義：
-        // SASX: GE1=Rn[15:0]-Rm[31:16]? いや SASX は lo が Rn.lo - Rm.hi、
-        // hi が Rn.hi + Rm.lo。SSAX は lo が +、hi が -。
+        // 0=add16, 1=asx（lo=Rn.lo-Rm.hi, hi=Rn.hi+Rm.lo）,
+        // 2=sax（lo=Rn.lo+Rm.hi, hi=Rn.hi-Rm.lo）, 3=sub16。
         let (x_lo, y_lo, sub_lo) = match opc2 {
             0 => (alo, clo, false),
-            1 => (alo, chi, true), // sasx: lo = a.lo - c.hi? SASX 定義は Rn.lo + Rm.hi? 要確認
-            2 => (alo, chi, false), // ssax: lo = a.lo + c.hi
-            _ => (alo, clo, true), // sub16
+            1 => (alo, chi, true),
+            2 => (alo, chi, false),
+            _ => (alo, clo, true),
         };
         let (x_hi, y_hi, sub_hi) = match opc2 {
             0 => (ahi, chi, false),
-            1 => (ahi, clo, false), // sasx: hi = a.hi + c.lo
-            2 => (ahi, clo, true),  // ssax: hi = a.hi - c.lo
+            1 => (ahi, clo, false),
+            2 => (ahi, clo, true),
             _ => (ahi, chi, true),
         };
-        let rlo = lane(b, x_lo, y_lo, sub_lo, sgn);
-        let rhi = lane(b, x_hi, y_hi, sub_hi, sgn);
+        let rlo = lane(b, x_lo, y_lo, sub_lo, kind, 16);
+        let rhi = lane(b, x_hi, y_hi, sub_hi, kind, 16);
         let __h15 = k32(b, 16);
         let __h16 = b.shl(rhi, __h15);
 
         let r = b.or(rlo, __h16);
         wr(b, rdn, r);
-        if sgn != 2 {
-            let gl = ge16(b, x_lo, y_lo, rlo, sub_lo, sgn);
-            let gh = ge16(b, x_hi, y_hi, rhi, sub_hi, sgn);
+        if kind < 2 {
+            let gl = ge_lane(b, x_lo, y_lo, rlo, sub_lo, kind, 16);
+            let gh = ge_lane(b, x_hi, y_hi, rhi, sub_hi, kind, 16);
             // 16 ビット演算は GE を 2 ビットずつ立てる。
-            set_ge(b, gl | gl << 1 | gh << 2 | gh << 3);
+            let one = k32(b, 1);
+            let two = k32(b, 2);
+            let three = k32(b, 3);
+            let g1 = b.shl(gl, one);
+            let g2 = b.shl(gh, two);
+            let g3 = b.shl(gh, three);
+            let lo2 = b.or(gl, g1);
+            let hi2 = b.or(g2, g3);
+            let g = b.or(lo2, hi2);
+            set_ge(b, g);
         }
         return Ok(());
     }
@@ -1531,7 +1559,7 @@ fn parl<B: Backend>(b: &mut B, word: u32, pc: u64, sgn: u32) -> Flow<B> {
     }
     let sub = opc2 == 7;
     let mut r = k32(b, 0);
-    let mut ge = 0u32;
+    let mut ge = k32(b, 0);
     for i in 0..4u32 {
         let sh = k32(b, i * 8);
         let m = k32(b, 0xff);
@@ -1541,59 +1569,95 @@ fn parl<B: Backend>(b: &mut B, word: u32, pc: u64, sgn: u32) -> Flow<B> {
         let __h18 = b.shr_l(c, sh);
 
         let cv = b.and(__h18, m);
-        let res = lane(b, av, cv, sub, sgn);
+        let res = lane(b, av, cv, sub, kind, 8);
         let __h19 = b.shl(res, sh);
 
         r = b.or(r, __h19);
-        if sgn != 2 {
-            ge |= ge8(b, av, cv, res, sub, sgn) << i;
+        if kind < 2 {
+            let g = ge_lane(b, av, cv, res, sub, kind, 8);
+            let gsh = k32(b, i);
+            let gs = b.shl(g, gsh);
+            ge = b.or(ge, gs);
         }
     }
     wr(b, rdn, r);
-    if sgn != 2 {
+    if kind < 2 {
         set_ge(b, ge);
     }
     Ok(())
 }
 
-/// レーン加減（マスクして 8/16 ビットに収める）。
-fn lane<B: Backend>(b: &mut B, x: B::V<W32>, y: B::V<W32>, sub: bool, sgn: u32) -> B::V<W32> {
-    let r = if sub { b.sub(x, y) } else { b.add(x, y) };
-    if sgn == 2 {
-        let __h20 = k32(b, 1);
-        let __h21 = b.shr_l(r, __h20);
-        let __h22 = k32(b, 0x7fff_ffff);
-
-        b.and(__h21, __h22)
+/// レーン加減。結果は `w`（8 または 16）ビットにマスクして返す。
+/// `kind`: 0=S,1=U,2=SH,3=UH。halving はレーンを種別どおりに
+/// 拡張してから加減し、算術 1 ビット右シフトする。
+fn lane<B: Backend>(
+    b: &mut B,
+    x: B::V<W32>,
+    y: B::V<W32>,
+    sub: bool,
+    kind: u32,
+    w: u32,
+) -> B::V<W32> {
+    let mask = if w == 8 { 0xff } else { 0xffff };
+    let m = k32(b, mask);
+    if kind < 2 {
+        let r = if sub { b.sub(x, y) } else { b.add(x, y) };
+        b.and(r, m)
     } else {
-        r
+        // halving。SH はレーンを符号拡張、UH はゼロ拡張のまま。
+        let ext = |v: B::V<W32>, b: &mut B| {
+            if kind == 2 {
+                if w == 8 {
+                    let t = b.trunc::<W32, polyisa_sem::W8>(v);
+                    b.sext::<polyisa_sem::W8, W32>(t)
+                } else {
+                    let t = b.trunc::<W32, polyisa_sem::W16>(v);
+                    b.sext::<polyisa_sem::W16, W32>(t)
+                }
+            } else {
+                v
+            }
+        };
+        let xw = ext(x, b);
+        let yw = ext(y, b);
+        let d = if sub { b.sub(xw, yw) } else { b.add(xw, yw) };
+        let one = k32(b, 1);
+        let h = b.shr_a(d, one);
+        b.and(h, m)
     }
 }
 
-/// 16 ビットレーンの GE（signed: res>=0 → 1、unsigned: add→carry、sub→a>=b）。
-fn ge16<B: Backend>(
+/// 1 レーンの GE（0 または 1）。`w`: 8 or 16。`kind`: 0=S,1=U。
+/// S は結果の符号ビットが 0、U は add が繰り上がり・sub が借りなし。
+fn ge_lane<B: Backend>(
     b: &mut B,
     x: B::V<W32>,
     y: B::V<W32>,
     res: B::V<W32>,
     sub: bool,
-    sgn: u32,
-) -> u32 {
-    let _ = (b, x, y, res, sub, sgn);
-    0
-}
-
-/// 8 ビットレーンの GE。
-fn ge8<B: Backend>(
-    b: &mut B,
-    x: B::V<W32>,
-    y: B::V<W32>,
-    res: B::V<W32>,
-    sub: bool,
-    sgn: u32,
-) -> u32 {
-    let _ = (b, x, y, res, sub, sgn);
-    0
+    kind: u32,
+    w: u32,
+) -> B::V<W32> {
+    let (mask, sign) = if w == 8 {
+        (0xffu32, 0x80u32)
+    } else {
+        (0xffff, 0x8000)
+    };
+    let z = k32(b, 0);
+    let cond = if kind == 0 {
+        // signed: 結果 >= 0 ⇔ 符号ビットなし。
+        let sign_k = k32(b, sign);
+        let s = b.and(res, sign_k);
+        b.cmp::<W32>(Cmp::Eq, s, z)
+    } else if sub {
+        b.cmp::<W32>(Cmp::GeU, x, y)
+    } else {
+        let sum = b.add(x, y);
+        let mask_k = k32(b, mask);
+        b.cmp::<W32>(Cmp::GtU, sum, mask_k)
+    };
+    let one = k32(b, 1);
+    b.select(cond, one, z)
 }
 
 /// 拡張命令。`ty`: 0=B16, 2=B, 3=H。`sgn`：signed か。
@@ -1741,19 +1805,19 @@ fn revop<B: Backend>(b: &mut B, word: u32, pc: u64, top: u32) -> Flow<B> {
 
             b.or(__h3, __h4)
         }
-        // rev16：各ハーフ内でバイト交換。
+        // rev16：各ハーフ内でバイト交換（b3b2b1b0 → b2b3b0b1）。
         1 => {
             let __h5 = k32(b, 24);
 
-            let t0 = b.shl(b0, __h5);
+            let t0 = b.shl(b2, __h5);
             let __h6 = k32(b, 16);
 
-            let t1 = b.shl(b1, __h6);
+            let t1 = b.shl(b3, __h6);
             let __h7 = k32(b, 8);
 
-            let t2 = b.shl(b3, __h7);
+            let t2 = b.shl(b0, __h7);
             let __h8 = b.or(t0, t1);
-            let __h9 = b.or(t2, b2);
+            let __h9 = b.or(t2, b1);
 
             b.or(__h8, __h9)
         }
@@ -1877,13 +1941,12 @@ fn sat<B: Backend>(b: &mut B, word: u32, pc: u64) -> Flow<B> {
     let shamt = (word >> 7) & 31;
     let asr = (word >> 6) & 1 != 0;
     let v = rd(b, rm, pc);
-    let c_in = flag_c(b);
-    let (sv, _c) = sh_imm(b, v, if asr { 2 } else { 0 }, shamt, c_in);
     if pair {
-        // 16 ビットペア。
-        let sat_bits = imm + 1;
+        // ssat16/usat16 にはシフト面がない（bits[11:4] は固定パターン）。
+        let sv = v;
+        // 16 ビットペア。usat16 は imm ビット、ssat16 は imm+1。
+        let sat_bits = if uns { imm } else { imm + 1 };
         let __h34 = k32(b, 0xffff);
-        // ssat16/usat16 とも imm+1 で統一（ARM: sat_imm+1）
         let lo = b.and(sv, __h34);
         let __h35 = k32(b, 16);
 
@@ -1915,6 +1978,8 @@ fn sat<B: Backend>(b: &mut B, word: u32, pc: u64) -> Flow<B> {
     } else {
         // 32 ビット。ssat は sat = imm+1（imm>=1 のはずだが素直に +1）。
         let sat_bits = if uns { imm } else { imm + 1 };
+        let c_in = flag_c(b);
+        let (sv, _c) = sh_imm(b, v, if asr { 2 } else { 0 }, shamt, c_in);
         let (clipped, s) = sat_val(b, sv, sat_bits, uns);
         set_q(b, s);
         wr(b, rdn, clipped);
@@ -2039,23 +2104,22 @@ fn bfx<B: Backend>(b: &mut B, word: u32, pc: u64, signed: bool) -> Flow<B> {
     Ok(())
 }
 
-/// BFI/BFC。rn=[19:16]（0xf なら BFC）、rd=[15:12]、lsb=[11:7]、msb=[20:16]。
+/// BFI/BFC。msb=[20:16]（最上位ビット位置）、rd=[15:12]、lsb=[11:7]、
+/// rn=[3:0]（0xf なら BFC）。width = msb - lsb + 1。
 fn bfi<B: Backend>(b: &mut B, word: u32, pc: u64) -> Flow<B> {
-    let msb = ((word >> 16) & 0x1f) + 1;
+    let msb = (word >> 16) & 0x1f;
     let lsb = (word >> 7) & 0x1f;
     let rdn = ((word >> 12) & 0xf) as u8;
-    let rn = ((word >> 16) & 0xf) as u8;
-    let _ = rn;
-    let rnf = (word >> 16) & 0xf;
+    let rnf = word & 0xf;
     let v = if rnf == 0xf {
         k32(b, 0)
     } else {
         rd(b, rnf as u8, pc)
     };
-    if lsb + msb > 32 || msb == 0 {
+    if msb < lsb {
         return Err(unimpl(b));
     }
-    let width = msb;
+    let width = msb - lsb + 1;
     // lsb から width ビットを v の下位から入れる。
     let mask = if width == 32 {
         k32(b, 0xffff_ffff)
@@ -2229,8 +2293,10 @@ pub fn media<B: Backend>(b: &mut B, word: u32, pc: u64) -> Flow<B> {
         0x61 if b74 & 1 != 0 => parl(b, word, pc, 0),
         // 並列加減算（unsigned）
         0x65 if b74 & 1 != 0 => parl(b, word, pc, 1),
-        // 半値化並列（halving）
+        // 半値化並列（signed halving）
         0x63 if b74 & 1 != 0 => parl(b, word, pc, 2),
+        // 半値化並列（unsigned halving）
+        0x67 if b74 & 1 != 0 => parl(b, word, pc, 3),
         // pkh / sel / sxtab16 / uxtab16
         0x68 => match b74 {
             1 | 5 => pkh(b, word, pc),
@@ -2276,12 +2342,12 @@ pub fn media<B: Backend>(b: &mut B, word: u32, pc: u64) -> Flow<B> {
         0x75 if b74 & 1 != 0 => pmul2(b, word, pc),
         // usad8/usada8
         0x78 if b74 == 1 => usad8(b, word, pc),
-        // sbfx
-        0x7a if b74 & 0b0101 == 0b0101 => bfx(b, word, pc, true),
-        // bfi/bfc（[7:4]=0001）
-        0x7c if b74 == 1 => bfi(b, word, pc),
-        // ubfx
-        0x7e if b74 & 0b0101 == 0b0101 => bfx(b, word, pc, false),
+        // sbfx（msb[4] が top8 の bit0 に入るので 0x7a/0x7b）
+        0x7a | 0x7b if b74 & 0b0101 == 0b0101 => bfx(b, word, pc, true),
+        // bfi/bfc（[7:4]=0001、同様に 0x7c/0x7d）
+        0x7c | 0x7d if b74 == 1 => bfi(b, word, pc),
+        // ubfx（0x7e/0x7f）
+        0x7e | 0x7f if b74 & 0b0101 == 0b0101 => bfx(b, word, pc, false),
         // udf
         0x7f if b74 == 0xf => Err(b.raise(GuestException {
             kind: ExceptionKind::Undefined,
@@ -2578,16 +2644,15 @@ fn vfp3<B: Backend>(b: &mut B, op: u32, sz: bool, dd: u8, dn: u8, dm: u8) -> Flo
                 b.fsub::<F64>(zf, p)
             }
             3 => {
-                // vnmla: -(n*m) - d
+                // vnmla: -d - n*m
                 let p = b.fmul::<F64>(n, m);
                 let s = b.fsub::<F64>(zf, p);
                 b.fsub::<F64>(s, a)
             }
             _ => {
-                // vnmls: -(n*m) + d
+                // vnmls: n*m - d
                 let p = b.fmul::<F64>(n, m);
-                let s = b.fsub::<F64>(zf, p);
-                b.fadd::<F64>(s, a)
+                b.fsub::<F64>(p, a)
             }
         };
         vwdf(b, dd, r);
@@ -2616,8 +2681,7 @@ fn vfp3<B: Backend>(b: &mut B, op: u32, sz: bool, dd: u8, dn: u8, dm: u8) -> Flo
             }
             _ => {
                 let p = b.fmul::<F32>(n, m);
-                let s = b.fsub::<F32>(zf, p);
-                b.fadd::<F32>(s, a)
+                b.fsub::<F32>(p, a)
             }
         };
         vwsf(b, dd, r);
@@ -2722,7 +2786,7 @@ fn vfp_imm(imm: u8, sz: bool) -> u64 {
     let nb = b6 ^ 1;
     let frac = i & 0x3f;
     if sz {
-        let e = (nb << 10) | (b6 * 0b111_111_111);
+        let e = (nb << 10) | (b6 * 0b11_1111_1111);
         (s << 63) | (e << 52) | (frac << 48)
     } else {
         let e = (nb << 7) | (b6 * 0b111_1111);

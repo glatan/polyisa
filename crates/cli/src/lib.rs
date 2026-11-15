@@ -10,6 +10,8 @@ pub mod run_aarch64;
 pub mod run_arm;
 #[cfg(feature = "guest-mips")]
 pub mod run_mips;
+#[cfg(feature = "guest-power")]
+pub mod run_power;
 #[cfg(feature = "guest-riscv")]
 pub mod run_riscv;
 #[cfg(feature = "guest-x86")]
@@ -69,6 +71,7 @@ pub fn parse_cpu_spec(s: &str) -> Result<CpuSpec, String> {
 #[cfg(any(
     feature = "guest-aarch64",
     feature = "guest-mips",
+    feature = "guest-power",
     feature = "guest-riscv",
     feature = "guest-x86"
 ))]
@@ -204,6 +207,37 @@ fn run_aarch64_elf(
     Err("この polyisa は aarch64 ゲストなしでビルドされた".to_string())
 }
 
+#[cfg(feature = "guest-power")]
+fn run_power_elf(
+    path: &str,
+    argv: &[String],
+    spec: Option<&CpuSpec>,
+    root: Option<&str>,
+) -> Result<u64, String> {
+    let sel = spec
+        .map(|s| {
+            resolve_sel(
+                "power",
+                polyisa_guest_power::MODEL_DEFS,
+                polyisa_guest_power::FEATURE_DEFS,
+                polyisa_guest_power::FEAT_BITS,
+                s,
+            )
+        })
+        .transpose()?;
+    run_power::run_elf_power_root(path, argv, sel.as_ref(), root)
+}
+
+#[cfg(not(feature = "guest-power"))]
+fn run_power_elf(
+    _path: &str,
+    _argv: &[String],
+    _spec: Option<&CpuSpec>,
+    _root: Option<&str>,
+) -> Result<u64, String> {
+    Err("この polyisa は power ゲストなしでビルドされた".to_string())
+}
+
 #[cfg(feature = "guest-riscv")]
 fn run_riscv_elf(path: &str, argv: &[String], spec: Option<&CpuSpec>) -> Result<u64, String> {
     let sel = spec
@@ -285,8 +319,8 @@ pub fn run_path_opts(
         CLASS_64 => {
             let ehdr =
                 polyisa_loader::elf::parse_ehdr(&bytes).map_err(|e| format!("ehdr: {e:?}"))?;
-            if root.is_some() && ehdr.machine != 183 {
-                return Err("--root は現状 aarch64 のみ対応".to_string());
+            if root.is_some() && !matches!(ehdr.machine, 183 | 21) {
+                return Err("--root は現状 aarch64 と ppc64 のみ対応".to_string());
             }
             // EM_RISCV=243。Ref: SPEC-RISCV-PSABI (v1.0).
             if ehdr.machine == 243 {
@@ -304,6 +338,10 @@ pub fn run_path_opts(
                 // EM_AARCH64。Ref: SPEC-AARCH64-ELF（AAELF64）§4.2。
                 check("aarch64")?;
                 run_aarch64_elf(path, argv, spec.as_ref(), root)
+            } else if ehdr.machine == 21 {
+                // EM_PPC64。Ref: SPEC-POWER-ABI (ELFv2 r1.5)。
+                check("power")?;
+                run_power_elf(path, argv, spec.as_ref(), root)
             } else {
                 Err(format!("未対応の e_machine: {}", ehdr.machine))
             }

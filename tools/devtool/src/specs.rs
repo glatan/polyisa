@@ -22,6 +22,9 @@ mod ia64 {
 mod mips {
     include!("../../../guests/mips/spec/mipsi.rs");
 }
+mod power {
+    include!("../../../guests/power/spec/poweri.rs");
+}
 mod riscv {
     include!("../../../guests/riscv/spec/rv64i.rs");
 }
@@ -66,6 +69,11 @@ const SPECS: &[IsaSpec] = &[
         isa: "mips",
         rel_path: "guests/mips/spec/mipsi.rs",
         build: mips::build_model,
+    },
+    IsaSpec {
+        isa: "power",
+        rel_path: "guests/power/spec/poweri.rs",
+        build: power::build_model,
     },
     IsaSpec {
         isa: "riscv",

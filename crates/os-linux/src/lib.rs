@@ -42,6 +42,10 @@ pub mod aarch64;
 // Ref: SRC-LINUX (7.3).
 pub mod arm;
 
+/// Power（ppc64・ELFv2）のシステムコール番号と syscall 処理。
+// Ref: SRC-LINUX (7.3), SPEC-POWER-ABI (ELFv2 r1.5).
+pub mod power;
+
 /// RISC-V（asm-generic）のシステムコール番号と syscall 処理。
 pub mod rv64;
 

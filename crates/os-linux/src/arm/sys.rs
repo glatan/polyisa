@@ -658,6 +658,23 @@ impl Linux {
         }
     }
 
+    /// `pwrite64`。ファイル位置を変えずに offset へ書く。
+    fn do_pwrite(&mut self, env: &mut BareEnv, fd: u32, buf: u64, len: u64, off: u64) -> u64 {
+        let len = len.min(1 << 20) as usize;
+        let data = match self.read_bytes(env, buf, len) {
+            Ok(d) => d,
+            Err(e) => return fail(e),
+        };
+        let f = match self.file_of(fd) {
+            Ok(f) => f,
+            Err(e) => return fail(e),
+        };
+        match polyisa_host::pwrite(f, &data, off) {
+            Ok(n) => ret(n as u64),
+            Err(e) => fail_host(e.raw_os_error().unwrap_or(arm::errno::EIO as i32)),
+        }
+    }
+
     /// `sendfile`/`sendfile64`。offset==NULL の形だけ。
     fn do_sendfile(
         &mut self,
@@ -1062,8 +1079,9 @@ impl Linux {
                 Disp::Ret(self.do_pread(env, args[0] as u32, args[1], args[2], off))
             }
             arm::PWRITE64 => {
-                let _off = self.pair(env, 4);
-                Disp::Ret(self.do_write(env, args[0] as u32, args[1], args[2]))
+                // pwrite64(fd, buf, len, pad, off_lo, off_hi)
+                let off = self.pair(env, 4);
+                Disp::Ret(self.do_pwrite(env, args[0] as u32, args[1], args[2], off))
             }
             arm::WRITE => Disp::Ret(self.do_write(env, args[0] as u32, args[1], args[2])),
             arm::READV => Disp::Ret(self.do_readv(env, args[0] as u32, args[1], args[2])),
@@ -1146,11 +1164,12 @@ impl Linux {
                 Disp::Ret(self.do_stat(env, None, Some(args[1]), args[2], lstat, false))
             }
             arm::STATX => {
+                // statx(dirfd, path, flags, mask, buf)
                 if args[0] as i32 != -100 {
                     return fail_ret(E::EBADF);
                 }
-                let lstat = args[1] & 0x100 != 0;
-                Disp::Ret(self.do_stat(env, None, Some(args[2]), args[4], lstat, true))
+                let lstat = args[2] & 0x100 != 0;
+                Disp::Ret(self.do_stat(env, None, Some(args[1]), args[4], lstat, true))
             }
             // ---- アクセス・属性 ----
             arm::ACCESS => {
@@ -1233,7 +1252,16 @@ impl Linux {
                     Err(e) => fail_ret_host(e.raw_os_error().unwrap_or(E::EIO as i32)),
                 }
             }
-            arm::RMDIR => self.unimpl_path(env, 0),
+            arm::RMDIR => {
+                let path = match self.read_cstr(env, args[0]) {
+                    Ok(p) => p,
+                    Err(e) => return fail_ret(e),
+                };
+                match std::fs::remove_dir(self.host_path(&path)) {
+                    Ok(()) => ok_ret(0),
+                    Err(e) => fail_ret_host(e.raw_os_error().unwrap_or(E::EIO as i32)),
+                }
+            }
             arm::UNLINK | arm::UNLINKAT => {
                 let idx = if n == arm::UNLINK { 0 } else { 1 };
                 let path = match self.read_cstr(env, args[idx]) {
@@ -1264,7 +1292,30 @@ impl Linux {
                     Err(e) => fail_ret_host(e.raw_os_error().unwrap_or(E::EIO as i32)),
                 }
             }
-            arm::LINK | arm::LINKAT => self.unimpl_path(env, 0),
+            arm::LINK | arm::LINKAT => {
+                // link(old,new) / linkat(olddirfd,old,newdirfd,new,flags)。
+                // AT_FDCWD 以外の dirfd は未対応。
+                let (a, b) = if n == arm::LINK {
+                    (args[0], args[1])
+                } else {
+                    if args[0] as i32 != -100 || args[2] as i32 != -100 {
+                        return fail_ret(E::EBADF);
+                    }
+                    (args[1], args[3])
+                };
+                let from = match self.read_cstr(env, a) {
+                    Ok(p) => p,
+                    Err(e) => return fail_ret(e),
+                };
+                let to = match self.read_cstr(env, b) {
+                    Ok(p) => p,
+                    Err(e) => return fail_ret(e),
+                };
+                match std::fs::hard_link(self.host_path(&from), self.host_path(&to)) {
+                    Ok(()) => ok_ret(0),
+                    Err(e) => fail_ret_host(e.raw_os_error().unwrap_or(E::EIO as i32)),
+                }
+            }
             arm::SYMLINK | arm::SYMLINKAT => {
                 let (a, b) = if n == arm::SYMLINK {
                     (args[0], args[1])
@@ -1297,10 +1348,11 @@ impl Linux {
                         Ok(p) => p,
                         Err(e) => return fail_ret(e),
                     };
+                    // truncate64 は EABI 整合で len が r2:r3。
                     let len = if n == arm::TRUNCATE {
                         args[1]
                     } else {
-                        self.pair(env, 1)
+                        self.pair(env, 2)
                     };
                     match std::fs::OpenOptions::new()
                         .write(true)
@@ -1313,10 +1365,11 @@ impl Linux {
                 }
                 _ => {
                     let fd = args[0] as u32;
+                    // ftruncate64 は fd=r0, len=r2:r3。
                     let len = if n == arm::FTRUNCATE {
                         args[1]
                     } else {
-                        self.pair(env, 1)
+                        self.pair(env, 2)
                     };
                     match self.file_of(fd).and_then(|f| {
                         f.set_len(len).map_err(|_| arm::errno::EIO)?;
@@ -1515,12 +1568,14 @@ impl Linux {
                 ok_ret(0)
             }
             arm::SETRLIMIT => ok_ret(0),
-            arm::GETRUSAGE | arm::GETPRIORITY => {
+            arm::GETRUSAGE => {
                 if args[1] != 0 {
                     let _ = self.put32(env, args[1], 0);
                 }
                 ok_ret(0)
             }
+            // getpriority(which, who) は nice 値を返す。最小権限の 20 を返す。
+            arm::GETPRIORITY => ok_ret(20),
             arm::SETPRIORITY | arm::NICE => ok_ret(0),
             arm::SCHED_SETPARAM | arm::SCHED_SETSCHEDULER | arm::SCHED_YIELD => ok_ret(0),
             arm::SCHED_GETPARAM | arm::SCHED_GETSCHEDULER => {
@@ -1780,25 +1835,6 @@ impl Linux {
             arm::SYNC | arm::FDATASYNC | arm::SYNCFS | arm::FLOCK => ok_ret(0),
             arm::GETRANDOM => Disp::Ret(self.do_getrandom(env, args[0], args[1])),
             _ => Disp::Unimpl,
-        }
-    }
-
-    /// 未実装のパス一つ取り出し（unlink/rmdir 等のフォールバック）。
-    fn unimpl_path(&mut self, env: &mut BareEnv, idx: usize) -> Disp {
-        let a = self.arg(env, idx);
-        let path = match self.read_cstr(env, a) {
-            Ok(p) => p,
-            Err(e) => return fail_ret(e),
-        };
-        let host = self.host_path(&path);
-        let r = if std::path::Path::new(&host).is_dir() {
-            std::fs::remove_dir(&host)
-        } else {
-            std::fs::remove_file(&host)
-        };
-        match r {
-            Ok(()) => ok_ret(0),
-            Err(e) => fail_ret_host(e.raw_os_error().unwrap_or(arm::errno::EIO as i32)),
         }
     }
 }

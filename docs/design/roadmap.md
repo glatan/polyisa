@@ -152,9 +152,9 @@ ARM（AArch32 とそれ以前）の本格的な実装と、Linux の arm EABI �
 
 | ID | 条件 | 判定 |
 |---|---|---|
-| S7-1 | arm のテストプログラムと配布物のコマンド群が、ゲストのルートを使って正しい出力を返す（テスト `heavy_program_arm`）。 | 未整備 |
-| S7-2 | ABI 表が、UAPI ヘッダからの抽出値と一致する（テスト `heavy_abi_arm`）。 | 未整備 |
-| S7-3 | llvm-objdump とのデコーダの差分テストが通る（テスト `heavy_oracle_arm`）。 | 未整備 |
+| S7-1 | arm のテストプログラムと配布物のコマンド群が、ゲストのルートを使って正しい出力を返す（テスト `heavy_program_arm`）。 | テスト：`heavy_program_arm` |
+| S7-2 | ABI 表が、UAPI ヘッダからの抽出値と一致する（テスト `heavy_abi_arm`）。 | テスト：`heavy_abi_arm` |
+| S7-3 | llvm-objdump とのデコーダの差分テストが通る（テスト `heavy_oracle_arm`）。 | テスト：`heavy_oracle_llvm` |
 
 ### 段階 8：Power
 
@@ -168,9 +168,9 @@ Power の本格的な実装と、Linux の ppc32、ppc64、ppc64le ゲスト ABI
 
 | ID | 条件 | 判定 |
 |---|---|---|
-| S8-1 | ppc64le のテストプログラムと配布物のコマンド群が、ゲストのルートを使って正しい出力を返す（テスト `heavy_program_power`）。 | 未整備 |
-| S8-2 | ABI 表が、UAPI ヘッダからの抽出値と一致する（テスト `heavy_abi_power`）。 | 未整備 |
-| S8-3 | llvm-objdump とのデコーダの差分テストが通る（テスト `heavy_oracle_power`）。 | 未整備 |
+| S8-1 | ppc64le のテストプログラムと配布物のコマンド群が、ゲストのルートを使って正しい出力を返す（テスト `heavy_program_power`）。 | テスト：`heavy_program_power` |
+| S8-2 | ABI 表が、UAPI ヘッダからの抽出値と一致する（テスト `heavy_abi_power`）。 | テスト：`heavy_abi_power` |
+| S8-3 | llvm-objdump とのデコーダの差分テストが通る（テスト `heavy_oracle_power`）。 | テスト：`heavy_oracle_power` |
 
 ### 段階 9：IR と JIT
 

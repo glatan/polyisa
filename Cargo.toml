@@ -32,6 +32,7 @@ members = [
     "guests/wasm",
     "guests/hexagon",
     "guests/ia64",
+    "guests/power",
 ]
 resolver = "2"
 

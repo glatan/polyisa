@@ -2,7 +2,7 @@
 
 このファイルは `task status` が生成する。手で編集しない。
 
-生成の元は、ISADL の記述（`guests/*/spec/`）、ロードマップの完了条件、設計との差の台帳、システムコールの表（`crates/os-linux/src/rv64/sys.rs` の `RV64_SYSCALLS`、`crates/os-linux/src/x86/sys.rs` の `X86_64_SYSCALLS` と `X86_32_SYSCALLS`、`crates/os-linux/src/mips_o32.rs`・`mips_n32.rs`・`mips_n64.rs`・`aarch64.rs` の各 `SYSCALLS`）である。テストの結果は含めない。
+生成の元は、ISADL の記述（`guests/*/spec/`）、ロードマップの完了条件、設計との差の台帳、システムコールの表（`crates/os-linux/src/rv64/sys.rs` の `RV64_SYSCALLS`、`crates/os-linux/src/x86/sys.rs` の `X86_64_SYSCALLS` と `X86_32_SYSCALLS`、`crates/os-linux/src/mips_o32.rs`・`mips_n32.rs`・`mips_n64.rs`・`aarch64.rs`・`power.rs` の各 `SYSCALLS`）である。テストの結果は含めない。
 
 ## 段階の完了条件
 
@@ -26,12 +26,12 @@
 | S6-1 | テスト：`heavy_program_aarch64` |
 | S6-2 | テスト：`heavy_abi_aarch64` |
 | S6-3 | テスト：`heavy_oracle_llvm` |
-| S7-1 | 未整備 |
-| S7-2 | 未整備 |
-| S7-3 | 未整備 |
-| S8-1 | 未整備 |
-| S8-2 | 未整備 |
-| S8-3 | 未整備 |
+| S7-1 | テスト：`heavy_program_arm` |
+| S7-2 | テスト：`heavy_abi_arm` |
+| S7-3 | テスト：`heavy_oracle_llvm` |
+| S8-1 | テスト：`heavy_program_power` |
+| S8-2 | テスト：`heavy_abi_power` |
+| S8-3 | テスト：`heavy_oracle_power` |
 | S9-1 | 未整備 |
 | S10-1 | 未整備 |
 | S10-2 | 未整備 |
@@ -95,6 +95,7 @@
 | hexagon | 6 | 6 | generic | [isa-hexagon.md](isa-hexagon.md) |
 | ia64 | 6 | 5 | generic | [isa-ia64.md](isa-ia64.md) |
 | mips | 283 | 270 | r3000、mips32r2、r6、mips64r2、mips64r6 | [isa-mips.md](isa-mips.md) |
+| power | 57 | 57 | generic | [isa-power.md](isa-power.md) |
 | riscv | 196 | 196 | rv64gc、rv64imac | [isa-riscv.md](isa-riscv.md) |
 | sparc | 10 | 10 | generic | [isa-sparc.md](isa-sparc.md) |
 | wasm | 8 | 8 | generic | [isa-wasm.md](isa-wasm.md) |
@@ -111,6 +112,7 @@
 | mips_n32 | 398 | [syscalls.md](syscalls.md) |
 | mips_n64 | 374 | [syscalls.md](syscalls.md) |
 | aarch64 | 122 | [syscalls.md](syscalls.md) |
+| power | 221 | [syscalls.md](syscalls.md) |
 
 ## 設計との差
 
