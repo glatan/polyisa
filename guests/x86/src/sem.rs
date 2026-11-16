@@ -263,11 +263,89 @@ pub(crate) fn update_sub_flags<B: Backend, W: Width>(
     b.set(eflags_ref(), f);
 }
 
-/// 論理演算の 5 旗を更新する（CF=0、OF=0、AF は不定のため保存）。
+/// ADD/ADC の 6 旗を更新する。`c` はキャリー入力（0/1）、`v` は最終結果。
+/// 繰り上がり・半キャリーは x+y → +c の 2 段で評価し、y+c の桁あふれを
+/// 落とさない。c=0 なら ADD と同じ式に縮退する。
+pub(crate) fn update_addc_flags<B: Backend, W: Width>(
+    b: &mut B,
+    x: B::V<W>,
+    y: B::V<W>,
+    c: B::V<W>,
+    v: B::V<W>,
+) {
+    let old: B::V<W32> = b.get(eflags_ref());
+    let zero = b.konst::<W>(W::from_u128(0));
+    let v1 = b.add::<W>(x, y);
+    let t = b.cmp::<W>(Cmp::LtU, v1, x);
+    let cf1 = pick(b, t, FLAG_CF);
+    let t = b.cmp::<W>(Cmp::LtU, v, v1);
+    let cf2 = pick(b, t, FLAG_CF);
+    let cf = b.or::<W32>(cf1, cf2);
+    // OF は被演算子 y（+c でラップする前）の符号で評価する。
+    let a = b.xor::<W>(x, v);
+    let c2 = b.xor::<W>(y, v);
+    let s = b.and::<W>(a, c2);
+    let n_top = b.konst::<W>(W::from_u128((W::BITS - 1) as u128));
+    let s_top = b.shr_l::<W>(s, n_top);
+    let of_take = b.cmp::<W>(Cmp::Ne, s_top, zero);
+    let of = pick(b, of_take, FLAG_OF);
+    let af1 = af_bit(b, x, y, v1);
+    let af2 = af_bit(b, v1, c, v);
+    let af = b.or::<W32>(af1, af2);
+    let szp = szp_bits(b, v);
+    let clear_mask = b.konst::<W32>(!FLAG_OSZPCA);
+    let mut f = b.and::<W32>(old, clear_mask);
+    f = b.or::<W32>(f, cf);
+    f = b.or::<W32>(f, of);
+    f = b.or::<W32>(f, af);
+    f = b.or::<W32>(f, szp);
+    b.set(eflags_ref(), f);
+}
+
+/// SUB/SBB/CMP の 6 旗を更新する。`c` はキャリー入力（0/1）、`v` は最終結果。
+/// 借りは x-y → -c の 2 段で評価する。c=0 なら SUB/CMP と同じ式に縮退する。
+pub(crate) fn update_subb_flags<B: Backend, W: Width>(
+    b: &mut B,
+    x: B::V<W>,
+    y: B::V<W>,
+    c: B::V<W>,
+    v: B::V<W>,
+) {
+    let old: B::V<W32> = b.get(eflags_ref());
+    let zero = b.konst::<W>(W::from_u128(0));
+    let v1 = b.sub::<W>(x, y);
+    let t = b.cmp::<W>(Cmp::LtU, x, y);
+    let cf1 = pick(b, t, FLAG_CF);
+    let t = b.cmp::<W>(Cmp::LtU, v1, c);
+    let cf2 = pick(b, t, FLAG_CF);
+    let cf = b.or::<W32>(cf1, cf2);
+    // OF は被演算子 y（+c でラップする前）の符号で評価する。
+    let a = b.xor::<W>(x, y);
+    let c2 = b.xor::<W>(x, v);
+    let s = b.and::<W>(a, c2);
+    let n_top = b.konst::<W>(W::from_u128((W::BITS - 1) as u128));
+    let s_top = b.shr_l::<W>(s, n_top);
+    let of_take = b.cmp::<W>(Cmp::Ne, s_top, zero);
+    let of = pick(b, of_take, FLAG_OF);
+    let af1 = af_bit(b, x, y, v1);
+    let af2 = af_bit(b, v1, c, v);
+    let af = b.or::<W32>(af1, af2);
+    let szp = szp_bits(b, v);
+    let clear_mask = b.konst::<W32>(!FLAG_OSZPCA);
+    let mut f = b.and::<W32>(old, clear_mask);
+    f = b.or::<W32>(f, cf);
+    f = b.or::<W32>(f, of);
+    f = b.or::<W32>(f, af);
+    f = b.or::<W32>(f, szp);
+    b.set(eflags_ref(), f);
+}
+
+/// 論理演算の 6 旗を更新する（CF=0、OF=0、AF=0）。AF は SDM 上は不定だが
+/// 実機（8088 以降の実装全般）は 0 を残すのでそれに合わせる。
 pub(crate) fn update_logic_flags<B: Backend, W: Width>(b: &mut B, v: B::V<W>) {
     let old: B::V<W32> = b.get(eflags_ref());
     let szp = szp_bits(b, v);
-    let clear_mask = b.konst::<W32>(!FLAG_OSZPC);
+    let clear_mask = b.konst::<W32>(!FLAG_OSZPCA);
     let cleared = b.and::<W32>(old, clear_mask);
     let f = b.or::<W32>(cleared, szp);
     b.set(eflags_ref(), f);
@@ -277,6 +355,15 @@ pub(crate) fn update_logic_flags<B: Backend, W: Width>(b: &mut B, v: B::V<W>) {
 pub(crate) fn read_cf<B: Backend>(b: &mut B) -> B::B {
     let flags: B::V<W32> = b.get(eflags_ref());
     let mask = b.konst::<W32>(0x1);
+    let masked = b.and::<W32>(flags, mask);
+    let zero = b.konst::<W32>(0);
+    b.cmp::<W32>(Cmp::Ne, masked, zero)
+}
+
+/// AF を読む。
+pub(crate) fn read_af<B: Backend>(b: &mut B) -> B::B {
+    let flags: B::V<W32> = b.get(eflags_ref());
+    let mask = b.konst::<W32>(FLAG_AF);
     let masked = b.and::<W32>(flags, mask);
     let zero = b.konst::<W32>(0);
     b.cmp::<W32>(Cmp::Ne, masked, zero)

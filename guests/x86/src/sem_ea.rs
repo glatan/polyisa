@@ -11,7 +11,7 @@ use crate::MapDec;
 use crate::decode::{self, Hw, Rm};
 use crate::sem::{
     self, Gpr, eflags_ref, eip_ref, read_cf, read_of, read_pf, read_sf, read_zf, update_add_flags,
-    update_logic_flags, update_sub_flags,
+    update_addc_flags, update_logic_flags, update_sub_flags, update_subb_flags,
 };
 use crate::sem::{pick, szp_bits};
 
@@ -38,24 +38,32 @@ fn alu_op<B: Backend, W: Hw>(b: &mut B, op: Alu, x: B::V<W>, y: B::V<W>) -> B::V
     }
 }
 
-fn alu_flags<B: Backend, W: Hw>(b: &mut B, op: Alu, x: B::V<W>, y: B::V<W>, v: B::V<W>) {
+fn alu_flags<B: Backend, W: Hw>(
+    b: &mut B,
+    op: Alu,
+    x: B::V<W>,
+    y: B::V<W>,
+    c: B::V<W>,
+    v: B::V<W>,
+) {
     match op {
-        Alu::Add | Alu::Adc => update_add_flags(b, x, y, v),
+        Alu::Add | Alu::Adc => update_addc_flags(b, x, y, c, v),
         Alu::Or | Alu::And | Alu::Xor => update_logic_flags(b, v),
-        Alu::Sub | Alu::Sbb | Alu::Cmp => update_sub_flags(b, x, y, v),
+        Alu::Sub | Alu::Sbb | Alu::Cmp => update_subb_flags(b, x, y, c, v),
     }
 }
 
-/// ADC/SBB のキャリー分を被演算子に足す。
-fn alu_carry<B: Backend, W: Hw>(b: &mut B, op: Alu, y: B::V<W>) -> B::V<W> {
+/// ADC/SBB のキャリー入力 `c`（0/1）と、それを足した被演算子 `y+c`。
+fn alu_carry<B: Backend, W: Hw>(b: &mut B, op: Alu, y: B::V<W>) -> (B::V<W>, B::V<W>) {
     if matches!(op, Alu::Adc | Alu::Sbb) {
         let cf = read_cf(b);
         let one = b.konst::<W>(W::from_u128(1));
         let zero = b.konst::<W>(W::from_u128(0));
         let c = b.select::<W>(cf, one, zero);
-        b.add::<W>(y, c)
+        (b.add::<W>(y, c), c)
     } else {
-        y
+        let zero = b.konst::<W>(W::from_u128(0));
+        (y, zero)
     }
 }
 
@@ -130,9 +138,9 @@ fn alu_w<'a, B: Backend, W: Hw>(
         Src::Imm(i) => b.konst::<W>(W::from_u128(u128::from(i))),
         Src::Ea(e) => rd_w::<B, W>(b, e, d)?,
     };
-    let y = alu_carry::<B, W>(b, op, y);
-    let v = alu_op::<B, W>(b, op, x, y);
-    alu_flags::<B, W>(b, op, x, y, v);
+    let (y2, c) = alu_carry::<B, W>(b, op, y);
+    let v = alu_op::<B, W>(b, op, x, y2);
+    alu_flags::<B, W>(b, op, x, y, c, v);
     if !matches!(op, Alu::Cmp) {
         wr_w::<B, W>(b, rm, d, v)?;
     }
@@ -419,30 +427,33 @@ pub fn movzx<B: Backend>(
 }
 
 /// LEA。実効アドレスをレジスタに入れる（メモリアクセスしない）。
-/// `addr` はセグメントを含まないリニアの数値。
+/// `rm` の番地はセグメント基底込みなので、`seg` を差し戻してオフセットにする。
 pub fn lea<B: Backend>(
     b: &mut B,
     w: u8,
     dst: Gpr,
     rm: &Rm<B::V<W64>>,
     asize: u8,
+    seg: u64,
     d: &MapDec,
 ) -> Flow<B> {
-    let Rm::Mem(a) = rm else {
+    let Rm::Mem { a, .. } = rm else {
         return Ok(()); // #UD（mod=11）は呼び出し側で排除済み想定
     };
+    let s = b.konst::<W64>(seg);
+    let a = b.sub::<W64>(*a, s);
     match (w, asize) {
         (16, _) => {
-            let v: B::V<W16> = b.trunc::<W64, W16>(*a);
+            let v: B::V<W16> = b.trunc::<W64, W16>(a);
             gwr_w::<B, W16>(b, dst, d, v);
         }
         (32, _) => {
-            let v: B::V<W32> = b.trunc::<W64, W32>(*a);
+            let v: B::V<W32> = b.trunc::<W64, W32>(a);
             gwr_w::<B, W32>(b, dst, d, v);
         }
-        (_, 64) => sem::write64(b, dst, *a),
+        (_, 64) => sem::write64(b, dst, a),
         _ => {
-            let v: B::V<W32> = b.trunc::<W64, W32>(*a);
+            let v: B::V<W32> = b.trunc::<W64, W32>(a);
             let v = b.zext::<W32, W64>(v);
             sem::write64(b, dst, v);
         }
@@ -556,7 +567,7 @@ pub enum ShiftCnt {
 }
 
 /// シフトの種別。
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Sh {
     Rol,
     Ror,
@@ -564,6 +575,8 @@ pub enum Sh {
     Rcr,
     Shl,
     Shr,
+    /// 8086/8088 のシフト群 /6。全ビット 1 を書く undocumented 命令。
+    Setmo,
     Sar,
 }
 
@@ -576,22 +589,26 @@ pub fn shift<B: Backend>(
     rm: &Rm<B::V<W64>>,
     d: &MapDec,
     cnt: ShiftCnt,
+    m16: bool,
 ) -> Flow<B> {
     match w {
-        8 => shift_w::<B, W8>(b, op, rm, d, cnt),
-        16 => shift_w::<B, W16>(b, op, rm, d, cnt),
-        32 => shift_w::<B, W32>(b, op, rm, d, cnt),
-        _ => shift_w::<B, W64>(b, op, rm, d, cnt),
+        8 => shift_w::<B, W8>(b, op, rm, d, cnt, m16),
+        16 => shift_w::<B, W16>(b, op, rm, d, cnt, m16),
+        32 => shift_w::<B, W32>(b, op, rm, d, cnt, m16),
+        _ => shift_w::<B, W64>(b, op, rm, d, cnt, m16),
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn shift_w<B: Backend, W: Hw>(
     b: &mut B,
     op: Sh,
     rm: &Rm<B::V<W64>>,
     d: &MapDec,
     cnt: ShiftCnt,
+    m16: bool,
 ) -> Flow<B> {
+    // 8088 は CL をマスクしない（回数をそのまま反復）。286 以降は 31/63。
     let mask: u64 = if W::BITS == 64 { 63 } else { 31 };
     let n = match cnt {
         ShiftCnt::Imm(i) => b.konst::<W>(W::from_u128(u128::from(i & mask as u32))),
@@ -599,50 +616,107 @@ fn shift_w<B: Backend, W: Hw>(
         ShiftCnt::Cl => {
             let cl = sem::read8(b, Gpr(1), false);
             let cl: B::V<W32> = b.zext::<W8, W32>(cl);
-            let m = b.konst::<W32>(mask as u32);
+            let m = b.konst::<W32>(if m16 { 0xFF } else { mask as u32 });
             let v = b.and::<W32>(cl, m);
             b.trunc::<W32, W>(v)
         }
     };
+    // SETMO: 8086/8088 のシフト群 /6。回数 0 以外では全ビット 1 を書き、
+    // 論理演算と同じ旗（SZP 更新、CF/OF/AF=0）。回数 0 は結果・旗とも不変。
+    if op == Sh::Setmo {
+        let x = rd_w::<B, W>(b, rm, d)?;
+        let all = b.konst::<W>(W::from_u128((1u128 << W::BITS) - 1));
+        let z = b.konst::<W>(W::from_u128(0));
+        let nz = b.cmp::<W>(Cmp::Ne, n, z);
+        let v = b.select::<W>(nz, all, x);
+        wr_w::<B, W>(b, rm, d, v)?;
+        let old: B::V<W32> = b.get(eflags_ref());
+        let keep = b.konst::<W32>(!sem::FLAG_OSZPCA);
+        let cleared = b.and::<W32>(old, keep);
+        let szp = szp_bits(b, all);
+        let nf = b.or::<W32>(cleared, szp);
+        let n32: B::V<W32> = b.trunc::<W, W32>(n);
+        let z32 = b.konst::<W32>(0);
+        let active = b.cmp::<W32>(Cmp::Ne, n32, z32);
+        let assembled = b.select::<W32>(active, nf, old);
+        b.set(eflags_ref(), assembled);
+        return Ok(());
+    }
     let x = rd_w::<B, W>(b, rm, d)?;
     let bits = W::BITS;
-    // bits-n は n=0 で bits になるため mod しておく。
-    let v = match op {
-        Sh::Shl => b.shl::<W>(x, n),
-        Sh::Shr => b.shr_l::<W>(x, n),
-        Sh::Sar => b.shr_a::<W>(x, n),
-        Sh::Rol | Sh::Ror | Sh::Rcl | Sh::Rcr => {
-            // 循環は (x<<n)|(x>>(bits-n)) 型。RCL/RCR は CF 込みの
-            // bits+1 循環だが、単一スレッド試作では算術近似に留める。
-            let bm = b.konst::<W>(W::from_u128(u128::from(bits - 1)));
-            let n_mod = b.and::<W>(n, bm);
-            let bmc = b.konst::<W>(W::from_u128(u128::from(bits)));
-            let m = b.sub::<W>(bmc, n_mod);
-            let l = b.shl::<W>(
-                x,
-                if matches!(op, Sh::Rol | Sh::Rcl) {
-                    n_mod
-                } else {
-                    m
-                },
-            );
-            let r = b.shr_l::<W>(
-                x,
-                if matches!(op, Sh::Rol | Sh::Rcl) {
-                    m
-                } else {
-                    n_mod
-                },
-            );
-            b.or::<W>(l, r)
-        }
-    };
-    wr_w::<B, W>(b, rm, d, v)?;
-    // 旗: 量が 0 なら据え置き。CF は最後に追い出されたビット、OF は
-    // n=1 のときだけ更新される（SDM Vol.2 各命令の Flags Affected）。
-    let old: B::V<W32> = b.get(eflags_ref());
     let zw = b.konst::<W>(W::from_u128(0));
     let ow = b.konst::<W>(W::from_u128(1));
+    let bw = b.konst::<W>(W::from_u128(u128::from(bits)));
+    // 大きい回数への安全なシフト量。bits シフトはバックエンドで 0 を返す。
+    let over = b.cmp::<W>(Cmp::LtU, bw, n);
+    let nc = b.select::<W>(over, bw, n);
+    // RCL/RCR の回数は bits+1 の環。mod は繰り返し減算で求める。
+    let b1w = b.konst::<W>(W::from_u128(u128::from(bits + 1)));
+    let mut ne = n;
+    for _ in 0..28 {
+        let lt = b.cmp::<W>(Cmp::LtU, ne, b1w);
+        let d1 = b.sub::<W>(ne, b1w);
+        ne = b.select::<W>(lt, ne, d1);
+    }
+    // CF 込みの bits+1 回転に必要な CF の値化。
+    let cf0 = read_cf(b);
+    let cfv = b.select::<W>(cf0, ow, zw);
+    let rot = matches!(op, Sh::Rol | Sh::Ror | Sh::Rcl | Sh::Rcr);
+    let v = match op {
+        Sh::Shl => b.shl::<W>(x, nc),
+        Sh::Shr => b.shr_l::<W>(x, nc),
+        Sh::Sar => {
+            // 回数が幅を超えるときは全ビット符号になる。
+            let bm1 = b.konst::<W>(W::from_u128(u128::from(bits - 1)));
+            let ge = b.cmp::<W>(Cmp::LtU, bm1, n);
+            let sc = b.select::<W>(ge, bm1, n);
+            b.shr_a::<W>(x, sc)
+        }
+        Sh::Rol | Sh::Ror => {
+            let bm = b.konst::<W>(W::from_u128(u128::from(bits - 1)));
+            let n_mod = b.and::<W>(n, bm);
+            let m = b.sub::<W>(bw, n_mod);
+            let l = b.shl::<W>(x, if matches!(op, Sh::Rol) { n_mod } else { m });
+            let r = b.shr_l::<W>(x, if matches!(op, Sh::Rol) { m } else { n_mod });
+            b.or::<W>(l, r)
+        }
+        Sh::Rcl => {
+            // (v<<ne) | (cf<<(ne-1)) | (v>>(bits+1-ne))。ne=0 なら v。
+            let t1 = b.shl::<W>(x, ne);
+            let nz = b.cmp::<W>(Cmp::Ne, ne, zw);
+            let ne1 = b.sub::<W>(ne, ow);
+            let t2s = b.shl::<W>(cfv, ne1);
+            let t2 = b.select::<W>(nz, t2s, zw);
+            let gt1 = b.cmp::<W>(Cmp::LtU, ow, ne);
+            let rr = b.sub::<W>(b1w, ne);
+            let t3s = b.shr_l::<W>(x, rr);
+            let t3 = b.select::<W>(gt1, t3s, zw);
+            let t = b.or::<W>(t1, t2);
+            b.or::<W>(t, t3)
+        }
+        Sh::Rcr => {
+            // (v>>ne) | (cf<<(bits-ne)) | (v<<(bits+1-ne))。ne=0 なら v。
+            let t1 = b.shr_l::<W>(x, ne);
+            let nz = b.cmp::<W>(Cmp::Ne, ne, zw);
+            let sm = b.sub::<W>(bw, ne);
+            let t2s = b.shl::<W>(cfv, sm);
+            let t2 = b.select::<W>(nz, t2s, zw);
+            let gt1 = b.cmp::<W>(Cmp::LtU, ow, ne);
+            let rr = b.sub::<W>(b1w, ne);
+            let t3s = b.shl::<W>(x, rr);
+            let t3 = b.select::<W>(gt1, t3s, zw);
+            let t = b.or::<W>(t1, t2);
+            b.or::<W>(t, t3)
+        }
+        Sh::Setmo => unreachable!(),
+    };
+    wr_w::<B, W>(b, rm, d, v)?;
+    // 旗: 回数が 0 なら据え置き。8088 の実測（SST）に基づく:
+    //   CF = 最後に追い出されたビット（RCL/RCR は CF 込みの環から計算）
+    //   OF = SHL/ROL/RCL: msb(v)^CF、ROR/RCR: msb(v)^msb-1(v)、
+    //        SHR: 回数 1 のとき msb(x)、2 以上で 0、SAR: 0
+    //   AF = SHL: v[4]、回転系: 不変、SHR/SAR: 0
+    let old: B::V<W32> = b.get(eflags_ref());
     let active = b.cmp::<W>(Cmp::Ne, n, zw);
     let c1 = b.sub::<W>(n, ow);
     let safe_c1 = b.select::<W>(active, c1, zw);
@@ -654,34 +728,74 @@ fn shift_w<B: Backend, W: Hw>(
             let m = b.and::<W>(t, ow);
             b.cmp::<W>(Cmp::Ne, m, zw)
         }
-        Sh::Shr | Sh::Sar => {
+        Sh::Shr => {
             let s = b.shr_l::<W>(x, safe_c1);
             let m = b.and::<W>(s, ow);
             b.cmp::<W>(Cmp::Ne, m, zw)
         }
-        Sh::Rol | Sh::Rcl => {
+        Sh::Sar => {
+            // 回数が幅を超えるとき最後に出るビットは符号。
+            let s = b.shr_l::<W>(x, safe_c1);
+            let m = b.and::<W>(s, ow);
+            let lt = b.cmp::<W>(Cmp::Ne, m, zw);
+            let sg = b.shr_l::<W>(x, topk);
+            let sgn = b.and::<W>(sg, ow);
+            let sgb = b.cmp::<W>(Cmp::Ne, sgn, zw);
+            // n <= bits: n-1 ビット目が最後に出る（n=bits でも msb=符号で一致）。
+            let g1 = b.cmp::<W>(Cmp::LtU, n, b1w);
+            let t1 = band(b, g1, lt);
+            let g2 = b.cmp::<W>(Cmp::LtU, bw, n);
+            let t2 = band(b, g2, sgb);
+            bor(b, t1, t2)
+        }
+        Sh::Rol => {
             let m = b.and::<W>(v, ow);
             b.cmp::<W>(Cmp::Ne, m, zw)
         }
-        Sh::Ror | Sh::Rcr => {
+        Sh::Ror => {
             let t = b.shr_l::<W>(v, topk);
             let m = b.and::<W>(t, ow);
             b.cmp::<W>(Cmp::Ne, m, zw)
         }
+        Sh::Rcl | Sh::Rcr => {
+            // bits+1 環の位置 bits に来たビット。
+            // rcl: idx = bits-ne（ne<=bits なので負にならない）。
+            // rcr: idx = ne==0 ? bits : ne-1。
+            let idx = if op == Sh::Rcl {
+                b.sub::<W>(bw, ne)
+            } else {
+                let nz = b.cmp::<W>(Cmp::Ne, ne, zw);
+                let d1 = b.sub::<W>(ne, ow);
+                b.select::<W>(nz, d1, bw)
+            };
+            // idx == bits なら CF_in、それ以外は x[idx]。
+            let is_t = b.cmp::<W>(Cmp::Eq, idx, bw);
+            let s = b.shr_l::<W>(x, idx);
+            let m = b.and::<W>(s, ow);
+            let xb = b.cmp::<W>(Cmp::Ne, m, zw);
+            let nt = bnot(b, is_t);
+            let t1 = band(b, nt, xb);
+            let t2 = band(b, is_t, cf0);
+            bor(b, t1, t2)
+        }
+        Sh::Setmo => unreachable!(),
     };
     let cf = pick(b, cf_take, sem::FLAG_CF);
     let v_top = b.shr_l::<W>(v, topk);
     let v_msb = b.and::<W>(v_top, ow);
     let of_take: B::B = match op {
         Sh::Shl | Sh::Rol | Sh::Rcl => {
-            let cfv = b.select::<W>(cf_take, ow, zw);
-            let x = b.xor::<W>(v_msb, cfv);
-            b.cmp::<W>(Cmp::Ne, x, zw)
+            let cfvv = b.select::<W>(cf_take, ow, zw);
+            let t = b.xor::<W>(v_msb, cfvv);
+            b.cmp::<W>(Cmp::Ne, t, zw)
         }
         Sh::Shr => {
+            // 実測: 回数 1 のときのみ msb(x)、2 以上は 0。
             let t = b.shr_l::<W>(x, topk);
             let m = b.and::<W>(t, ow);
-            b.cmp::<W>(Cmp::Ne, m, zw)
+            let msb_x = b.cmp::<W>(Cmp::Ne, m, zw);
+            let is1 = b.cmp::<W>(Cmp::Eq, n, ow);
+            band(b, is1, msb_x)
         }
         Sh::Sar => {
             let m = b.and::<W>(v_msb, zw);
@@ -690,31 +804,43 @@ fn shift_w<B: Backend, W: Hw>(
         Sh::Ror | Sh::Rcr => {
             let k2 = b.konst::<W>(W::from_u128(u128::from(bits - 2)));
             let t2 = b.shr_l::<W>(v, k2);
-            let x = b.xor::<W>(v_top, t2);
-            let m = b.and::<W>(x, ow);
+            let t = b.xor::<W>(v_top, t2);
+            let m = b.and::<W>(t, ow);
             b.cmp::<W>(Cmp::Ne, m, zw)
         }
+        Sh::Setmo => unreachable!(),
     };
-    let of_new = pick(b, of_take, sem::FLAG_OF);
-    let of_mask = b.konst::<W32>(sem::FLAG_OF);
-    let old_of = b.and::<W32>(old, of_mask);
-    let n32: B::V<W32> = b.trunc::<W, W32>(n);
-    let one32 = b.konst::<W32>(1);
-    let is_one = b.cmp::<W32>(Cmp::Eq, n32, one32);
-    let of = b.select::<W32>(is_one, of_new, old_of);
+    let of = pick(b, of_take, sem::FLAG_OF);
+    // AF: SHL は結果 bit4、SHR/SAR は 0、回転系は不変。
+    let af = match op {
+        Sh::Shl => {
+            let four = b.konst::<W>(W::from_u128(4));
+            let t = b.shr_l::<W>(v, four);
+            let m = b.and::<W>(t, ow);
+            let take = b.cmp::<W>(Cmp::Ne, m, zw);
+            pick(b, take, sem::FLAG_AF)
+        }
+        Sh::Rol | Sh::Ror | Sh::Rcl | Sh::Rcr => {
+            let m = b.konst::<W32>(sem::FLAG_AF);
+            b.and::<W32>(old, m)
+        }
+        _ => b.konst::<W32>(0),
+    };
     // シフト系は SZP を更新するが、回転系（ROL/ROR/RCL/RCR）は
     // SF/ZF/PF を変えない（SDM: CF と OF のみ）。
-    let szp = if matches!(op, Sh::Rol | Sh::Ror | Sh::Rcl | Sh::Rcr) {
+    let szp = if rot {
         let m = b.konst::<W32>(sem::FLAG_SF | sem::FLAG_ZF | sem::FLAG_PF);
         b.and::<W32>(old, m)
     } else {
         szp_bits(b, v)
     };
-    let clear = b.konst::<W32>(!sem::FLAG_OSZPC);
+    let clear = b.konst::<W32>(!sem::FLAG_OSZPCA);
     let mut nf = b.and::<W32>(old, clear);
     nf = b.or::<W32>(nf, cf);
     nf = b.or::<W32>(nf, of);
+    nf = b.or::<W32>(nf, af);
     nf = b.or::<W32>(nf, szp);
+    let n32: B::V<W32> = b.trunc::<W, W32>(n);
     let zero32 = b.konst::<W32>(0);
     let active32 = b.cmp::<W32>(Cmp::Ne, n32, zero32);
     let assembled = b.select::<W32>(active32, nf, old);
@@ -762,15 +888,18 @@ pub fn push_v<B: Backend>(b: &mut B, w: u8, v64: B::V<W64>, sa: u8, sseg: u64) -
             b.add::<W64>(off, sg)
         }
     };
+    // 実モードでは SP が 64K で折り返す（SP=0xffff への push は
+    // 上位バイトがオフセット 0 に書かれる）。
+    let wseg = (sa == 16).then_some(sseg);
     match w {
         16 => {
             let v: B::V<W16> = b.trunc::<W64, W16>(v64);
-            b.store::<W16>(a, v, sem::DATA_WRITE)
+            decode::mem_store(b, a, wseg, v)
         }
-        64 => b.store::<W64>(a, v64, sem::DATA_WRITE),
+        64 => decode::mem_store::<B, W64>(b, a, wseg, v64),
         _ => {
             let v: B::V<W32> = b.trunc::<W64, W32>(v64);
-            b.store::<W32>(a, v, sem::DATA_WRITE)
+            decode::mem_store(b, a, wseg, v)
         }
     }
 }
@@ -815,14 +944,15 @@ pub fn pop_v<B: Backend>(b: &mut B, w: u8, sa: u8, sseg: u64) -> Result<B::V<W64
     if sa != 64 {
         b.set(sp.state(), np_done);
     }
+    let wseg = (sa == 16).then_some(sseg);
     match w {
         16 => {
-            let v = b.load::<W16>(a, sem::DATA_READ)?;
+            let v: B::V<W16> = decode::mem_load(b, a, wseg)?;
             Ok(b.zext::<W16, W64>(v))
         }
-        64 => b.load::<W64>(a, sem::DATA_READ),
+        64 => decode::mem_load::<B, W64>(b, a, wseg),
         _ => {
-            let v = b.load::<W32>(a, sem::DATA_READ)?;
+            let v: B::V<W32> = decode::mem_load(b, a, wseg)?;
             Ok(b.zext::<W32, W64>(v))
         }
     }
@@ -1080,7 +1210,7 @@ pub fn cdq<B: Backend>(b: &mut B, w: u8) -> Flow<B> {
 
 /// SAHF：AH を旗の低8ビット（SF/ZF/AF/PF/CF）に入れる。
 pub fn sahf<B: Backend>(b: &mut B) -> Flow<B> {
-    let ah = sem::read8(b, Gpr(4), true);
+    let ah = sem::read8(b, Gpr(0), true);
     let mask = b.konst::<W8>(0xd5); // SF|ZF|AF|PF|CF
     let bits = b.and::<W8>(ah, mask);
     let f = b.get(eflags_ref());
@@ -1098,7 +1228,7 @@ pub fn sahf<B: Backend>(b: &mut B) -> Flow<B> {
 pub fn lahf<B: Backend>(b: &mut B) -> Flow<B> {
     let f = b.get(eflags_ref());
     let v = b.trunc::<W32, W8>(f);
-    sem::write8(b, Gpr(4), true, v);
+    sem::write8(b, Gpr(0), true, v);
     Ok(())
 }
 
@@ -1542,6 +1672,9 @@ fn str_w<B: Backend, W: Hw>(
     zf_cond: u8,
 ) -> Flow<B> {
     let asize = d.asize;
+    // 実モードの文字列アクセスはオフセット（SI/DI）を 64K で折り返す。
+    let wseg_s = (asize == 16).then_some(seg);
+    let wseg_d = (asize == 16).then_some(es);
     let mut si = sptr(b, Gpr(6), asize);
     let sg = b.konst::<W64>(seg);
     si = b.add::<W64>(si, sg);
@@ -1551,31 +1684,31 @@ fn str_w<B: Backend, W: Hw>(
     let sz = u64::from(W::BITS / 8);
     match kind {
         Str::Movs => {
-            let v: B::V<W> = b.load::<W>(si, sem::DATA_READ)?;
-            b.store::<W>(di, v, sem::DATA_WRITE)?;
+            let v: B::V<W> = decode::mem_load(b, si, wseg_s)?;
+            decode::mem_store(b, di, wseg_d, v)?;
             str_bump(b, Gpr(6), asize, sz);
             str_bump(b, Gpr(7), asize, sz);
         }
         Str::Stos => {
             let acc = W::get(b, Gpr(0), d);
-            b.store::<W>(di, acc, sem::DATA_WRITE)?;
+            decode::mem_store(b, di, wseg_d, acc)?;
             str_bump(b, Gpr(7), asize, sz);
         }
         Str::Lods => {
-            let v: B::V<W> = b.load::<W>(si, sem::DATA_READ)?;
+            let v: B::V<W> = decode::mem_load(b, si, wseg_s)?;
             W::put(b, Gpr(0), d, v);
             str_bump(b, Gpr(6), asize, sz);
         }
         Str::Scas => {
             let acc = W::get(b, Gpr(0), d);
-            let t: B::V<W> = b.load::<W>(di, sem::DATA_READ)?;
+            let t: B::V<W> = decode::mem_load(b, di, wseg_d)?;
             let v = b.sub::<W>(acc, t);
             update_sub_flags(b, acc, t, v);
             str_bump(b, Gpr(7), asize, sz);
         }
         Str::Cmps => {
-            let x: B::V<W> = b.load::<W>(si, sem::DATA_READ)?;
-            let t: B::V<W> = b.load::<W>(di, sem::DATA_READ)?;
+            let x: B::V<W> = decode::mem_load(b, si, wseg_s)?;
+            let t: B::V<W> = decode::mem_load(b, di, wseg_d)?;
             let v = b.sub::<W>(x, t);
             update_sub_flags(b, x, t, v);
             str_bump(b, Gpr(6), asize, sz);
@@ -1632,21 +1765,22 @@ pub fn mov_moffs_ld<B: Backend>(b: &mut B, w: u8, moffs: u64, seg: u64, d: &MapD
     let a = b.konst::<W64>(moffs);
     let sg = b.konst::<W64>(seg);
     let addr = b.add::<W64>(a, sg);
+    let wseg = (d.asize == 16).then_some(seg);
     match w {
         8 => {
             let v: B::V<W8> = b.load::<W8>(addr, sem::DATA_READ)?;
             W8::put(b, Gpr(0), d, v);
         }
         16 => {
-            let v: B::V<W16> = b.load::<W16>(addr, sem::DATA_READ)?;
+            let v: B::V<W16> = decode::mem_load(b, addr, wseg)?;
             W16::put(b, Gpr(0), d, v);
         }
         64 => {
-            let v: B::V<W64> = b.load::<W64>(addr, sem::DATA_READ)?;
+            let v: B::V<W64> = decode::mem_load(b, addr, wseg)?;
             W64::put(b, Gpr(0), d, v);
         }
         _ => {
-            let v: B::V<W32> = b.load::<W32>(addr, sem::DATA_READ)?;
+            let v: B::V<W32> = decode::mem_load(b, addr, wseg)?;
             W32::put(b, Gpr(0), d, v);
         }
     }
@@ -1658,6 +1792,7 @@ pub fn mov_moffs_st<B: Backend>(b: &mut B, w: u8, moffs: u64, seg: u64, d: &MapD
     let a = b.konst::<W64>(moffs);
     let sg = b.konst::<W64>(seg);
     let addr = b.add::<W64>(a, sg);
+    let wseg = (d.asize == 16).then_some(seg);
     match w {
         8 => {
             let v = W8::get(b, Gpr(0), d);
@@ -1665,15 +1800,15 @@ pub fn mov_moffs_st<B: Backend>(b: &mut B, w: u8, moffs: u64, seg: u64, d: &MapD
         }
         16 => {
             let v = W16::get(b, Gpr(0), d);
-            b.store::<W16>(addr, v, sem::DATA_WRITE)?;
+            decode::mem_store(b, addr, wseg, v)?;
         }
         64 => {
             let v = W64::get(b, Gpr(0), d);
-            b.store::<W64>(addr, v, sem::DATA_WRITE)?;
+            decode::mem_store(b, addr, wseg, v)?;
         }
         _ => {
             let v = W32::get(b, Gpr(0), d);
-            b.store::<W32>(addr, v, sem::DATA_WRITE)?;
+            decode::mem_store(b, addr, wseg, v)?;
         }
     }
     Ok(())
@@ -1708,10 +1843,10 @@ fn bt_w<B: Backend, W: Hw>(
     let idx = b.and::<W64>(n, bm);
     let bs = b.konst::<W64>(u64::from(lg_bytes));
     let e2;
-    let target = if let Rm::Mem(a) = ea {
+    let target = if let Rm::Mem { a, wseg } = ea {
         let ob = b.shl::<W64>(off, bs);
         let na = b.add::<W64>(*a, ob);
-        e2 = Rm::Mem(na);
+        e2 = Rm::Mem { a: na, wseg: *wseg };
         &e2
     } else {
         ea
@@ -1896,7 +2031,7 @@ pub fn xm_lo64<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>) -> Result<B::V<W64>, B
 fn rx<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>, bits: u32) -> Result<B::V<W128>, B::Exit> {
     match ea {
         Rm::Reg(g) => Ok(b.get(sem::xmm_ref(Xmm(g.0)))),
-        Rm::Mem(a) => {
+        Rm::Mem { a, .. } => {
             let a = *a;
             match bits {
                 32 => {
@@ -1921,7 +2056,7 @@ fn wx<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>, bits: u32, v: B::V<W128>) -> Re
             b.set(sem::xmm_ref(Xmm(g.0)), v);
             Ok(())
         }
-        Rm::Mem(a) => {
+        Rm::Mem { a, .. } => {
             let a = *a;
             match bits {
                 32 => {
@@ -3357,7 +3492,7 @@ pub fn pextrx<B: Backend>(
             sem::write64(b, *g, v);
             Ok(())
         }
-        Rm::Mem(a) => {
+        Rm::Mem { a, .. } => {
             let a = *a;
             match bits {
                 8 => {
@@ -3531,7 +3666,7 @@ fn st_slot<B: Backend>(b: &mut B, i: u8) -> B::V<W16> {
 pub fn fld_m<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>, bits: u32) -> Result<(), B::Exit> {
     match ea {
         Rm::Reg(_) => Ok(()),
-        Rm::Mem(a) => {
+        Rm::Mem { a, .. } => {
             let a = *a;
             match bits {
                 32 => {
@@ -3563,7 +3698,7 @@ pub fn fst_m<B: Backend>(
 ) -> Result<(), B::Exit> {
     let top = b.get(sem::top_ref());
     let (sig, exp) = sem::read_st(b, top);
-    if let Rm::Mem(a) = ea {
+    if let Rm::Mem { a, .. } = ea {
         let a = *a;
         match bits {
             32 => {
@@ -3605,7 +3740,7 @@ pub fn fst_sti<B: Backend>(b: &mut B, i: u8, pop: bool) -> Flow<B> {
 
 /// FILD m16/m32/m64。
 pub fn fild_m<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>, bits: u32) -> Result<(), B::Exit> {
-    if let Rm::Mem(a) = ea {
+    if let Rm::Mem { a, .. } = ea {
         let a = *a;
         match bits {
             16 => {
@@ -3637,7 +3772,7 @@ pub fn fist_m<B: Backend>(
     let top = b.get(sem::top_ref());
     let (sig, exp) = sem::read_st(b, top);
     let v = sem::f80_to_i64(b, sig, exp);
-    if let Rm::Mem(a) = ea {
+    if let Rm::Mem { a, .. } = ea {
         let a = *a;
         match bits {
             16 => {
@@ -3703,7 +3838,7 @@ pub fn farith_m<B: Backend>(
     ea: &Rm<B::V<W64>>,
     fbits: u32,
 ) -> Result<(), B::Exit> {
-    if let Rm::Mem(a) = ea {
+    if let Rm::Mem { a, .. } = ea {
         let a = *a;
         let (sm, em) = if fbits == 32 {
             let v: B::V<W32> = b.load::<W32>(a, sem::DATA_READ)?;
@@ -3727,7 +3862,7 @@ pub fn fiarith_m<B: Backend>(
     ea: &Rm<B::V<W64>>,
     bits: u32,
 ) -> Result<(), B::Exit> {
-    if let Rm::Mem(a) = ea {
+    if let Rm::Mem { a, .. } = ea {
         let a = *a;
         let v64 = if bits == 16 {
             let v: B::V<W16> = b.load::<W16>(a, sem::DATA_READ)?;
@@ -3924,7 +4059,7 @@ pub fn finit<B: Backend>(b: &mut B) -> Flow<B> {
 
 /// FLDCW m16。
 pub fn fldcw_m<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit> {
-    if let Rm::Mem(a) = ea {
+    if let Rm::Mem { a, .. } = ea {
         let v: B::V<W16> = b.load::<W16>(*a, sem::DATA_READ)?;
         b.set(sem::fcw_ref(), v);
     }
@@ -3933,7 +4068,7 @@ pub fn fldcw_m<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit>
 
 /// FNSTCW m16。
 pub fn fnstcw_m<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit> {
-    if let Rm::Mem(a) = ea {
+    if let Rm::Mem { a, .. } = ea {
         let v: B::V<W16> = b.get(sem::fcw_ref());
         b.store::<W16>(*a, v, sem::DATA_WRITE)?;
     }
@@ -4026,7 +4161,8 @@ pub fn sysexit<B: Backend>(b: &mut B, w: u8) -> Flow<B> {
 // ---- MUL/IMUL/DIV/IDIV（F6/F7 /4-/7）----
 
 /// MUL/IMUL r/m（1被演算子形）。積は DX:AX 系に倍幅で入る。
-/// CF/OF は上位半分が意味を持つとき 1（他旗は不定のため保存）。
+/// CF/OF は上位半分が意味を持つとき 1。フラグのソースは MUL が上位半分
+/// そのもの、IMUL が `hi - sext(lo)`（収まり検査の減算）になる（8088 実測）。
 pub fn mulx<B: Backend>(b: &mut B, w: u8, d: &MapDec, ea: &Rm<B::V<W64>>, signed: bool) -> Flow<B> {
     match w {
         8 => mulx8(b, d, ea, signed),
@@ -4036,15 +4172,40 @@ pub fn mulx<B: Backend>(b: &mut B, w: u8, d: &MapDec, ea: &Rm<B::V<W64>>, signed
     }
 }
 
-/// CF/OF を `c` で更新する。
-fn set_cof<B: Backend>(b: &mut B, c: B::B) {
+/// MUL/IMUL のフラグ更新。MUL は `src=hi`・AF=0。IMUL は `src = hi - sext(lo)`
+/// で、SZP を `src` から、CF=OF=`src != 0`、AF は `lo` が負かつ `hi` の
+/// 下位ニブルが 0xF のとき 1（sext の否定を 2 の補数で加えたときの
+/// ニブルキャリーに相当。8088 実測）。
+fn mul_flags<B: Backend, W: Hw>(b: &mut B, hi: B::V<W>, lo: B::V<W>, signed: bool) {
+    let zro = b.konst::<W>(W::from_u128(0));
     let old: B::V<W32> = b.get(eflags_ref());
-    let mask = b.konst::<W32>(!(sem::FLAG_CF | sem::FLAG_OF));
+    let mask = b.konst::<W32>(!sem::FLAG_OSZPCA);
     let cleared = b.and::<W32>(old, mask);
-    let cf = pick(b, c, sem::FLAG_CF);
-    let of = pick(b, c, sem::FLAG_OF);
-    let both = b.or::<W32>(cf, of);
-    let efl = b.or::<W32>(cleared, both);
+    let (src, af) = if signed {
+        let msb = b.konst::<W>(W::from_u128(1u128 << (W::BITS - 1)));
+        let loand = b.and::<W>(lo, msb);
+        let negl = b.cmp::<W>(Cmp::Ne, loand, zro);
+        let all = b.konst::<W>(W::from_u128((1u128 << W::BITS) - 1));
+        let se = b.select::<W>(negl, all, zro);
+        let chk = b.sub::<W>(hi, se);
+        let hf = b.konst::<W>(W::from_u128(0xF));
+        let hiand = b.and::<W>(hi, hf);
+        let hif = b.cmp::<W>(Cmp::Eq, hiand, hf);
+        let an = pick(b, negl, sem::FLAG_AF);
+        let ah = pick(b, hif, sem::FLAG_AF);
+        let af = b.and::<W32>(an, ah);
+        (chk, af)
+    } else {
+        (hi, b.konst::<W32>(0))
+    };
+    let cof = b.cmp::<W>(Cmp::Ne, src, zro);
+    let cf = pick(b, cof, sem::FLAG_CF);
+    let of = pick(b, cof, sem::FLAG_OF);
+    let szp = szp_bits(b, src);
+    let mut efl = b.or::<W32>(cleared, cf);
+    efl = b.or::<W32>(efl, of);
+    efl = b.or::<W32>(efl, szp);
+    efl = b.or::<W32>(efl, af);
     b.set(eflags_ref(), efl);
 }
 
@@ -4061,19 +4222,9 @@ fn mulx8<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>, signed: bool) ->
     decode::gwr16(b, Gpr(0), p);
     let eight = b.konst::<W16>(8);
     let hi = b.shr_l::<W16>(p, eight);
-    let zro = b.konst::<W16>(0);
-    let cof = if signed {
-        // hi が lo（AL）の符号拡張と一致するか。
-        let lo: B::V<W8> = b.trunc::<W16, W8>(p);
-        let z8 = b.konst::<W8>(0);
-        let neg = b.cmp::<W8>(Cmp::LtS, lo, z8);
-        let all = b.konst::<W16>(0xFF);
-        let exp = b.select::<W16>(neg, all, zro);
-        b.cmp::<W16>(Cmp::Ne, hi, exp)
-    } else {
-        b.cmp::<W16>(Cmp::Ne, hi, zro)
-    };
-    set_cof(b, cof);
+    let hi8: B::V<W8> = b.trunc::<W16, W8>(hi);
+    let lo8: B::V<W8> = b.trunc::<W16, W8>(p);
+    mul_flags::<B, W8>(b, hi8, lo8, signed);
     Ok(())
 }
 
@@ -4097,16 +4248,7 @@ fn mulx_w<B: Backend, W: Hw, W2: polyisa_sem::Width>(
     let hi: B::V<W> = b.trunc::<W2, W>(hiw);
     W::put(b, Gpr(0), d, lo);
     W::put(b, Gpr(2), d, hi);
-    let zro = b.konst::<W>(W::from_u128(0));
-    let cof = if signed {
-        let neg = b.cmp::<W>(Cmp::LtS, lo, zro);
-        let all = b.konst::<W>(W::from_u128((1u128 << W::BITS) - 1));
-        let exp = b.select::<W>(neg, all, zro);
-        b.cmp::<W>(Cmp::Ne, hi, exp)
-    } else {
-        b.cmp::<W>(Cmp::Ne, hi, zro)
-    };
-    set_cof(b, cof);
+    mul_flags::<B, W>(b, hi, lo, signed);
     Ok(())
 }
 
@@ -4216,6 +4358,236 @@ fn divx_w<B: Backend, W: Hw, W2: polyisa_sem::Width>(
     Ok(())
 }
 
+// ---- BCD 調整・SALC ----
+
+/// DAA（27）。AL をパック BCD 加算の結果に補正する。
+/// CF/AF は補正の有無、SZP は結果、OF は元値+補正合計の符号あふれ
+/// （8088 実測）。
+pub fn daa<B: Backend>(b: &mut B) -> Flow<B> {
+    let old_al = sem::read8(b, Gpr(0), false);
+    let old_cf = read_cf(b);
+    let af_in = sem::read_af(b);
+    let z8 = b.konst::<W8>(0);
+    let nine = b.konst::<W8>(9);
+    let f = b.konst::<W8>(0xF);
+    let low = b.and::<W8>(old_al, f);
+    let gt9 = b.cmp::<W8>(Cmp::LtU, nine, low);
+    let adj1 = bor(b, gt9, af_in);
+    let six = b.konst::<W8>(6);
+    let add1 = b.select::<W8>(adj1, six, z8);
+    let al1 = b.add::<W8>(old_al, add1);
+    // 第2補正の条件: CF | (AL + (AF ? 0 : 6)) > 0x9F（8088 実測）。
+    // AL=0x9A..0x9F で AF=0 のときだけ補正がかかる点が SDM と異なる。
+    // 比較は 8 ビットに折れない幅で行う（0xFA+6=0x100 も補正対象）。
+    let add6 = b.select::<W8>(af_in, z8, six);
+    let al16: B::V<W16> = b.zext::<W8, W16>(old_al);
+    let a16: B::V<W16> = b.zext::<W8, W16>(add6);
+    let chk = b.add::<W16>(al16, a16);
+    let n9f = b.konst::<W16>(0x9F);
+    let gt9f = b.cmp::<W16>(Cmp::LtU, n9f, chk);
+    let adj2 = bor(b, gt9f, old_cf);
+    let c60 = b.konst::<W8>(0x60);
+    let add2 = b.select::<W8>(adj2, c60, z8);
+    let v = b.add::<W8>(al1, add2);
+    sem::write8(b, Gpr(0), false, v);
+    // OF は元値 + 補正合計の符号あふれ（8088 実測）。
+    let adj_total = b.add::<W8>(add1, add2);
+    let t1 = b.xor::<W8>(old_al, v);
+    let t2 = b.xor::<W8>(adj_total, v);
+    let s = b.and::<W8>(t1, t2);
+    let k80 = b.konst::<W8>(0x80);
+    let sm = b.and::<W8>(s, k80);
+    let of_take = b.cmp::<W8>(Cmp::Ne, sm, z8);
+    let old: B::V<W32> = b.get(eflags_ref());
+    let cf = pick(b, adj2, sem::FLAG_CF);
+    let af = pick(b, adj1, sem::FLAG_AF);
+    let of = pick(b, of_take, sem::FLAG_OF);
+    let szp = szp_bits(b, v);
+    let keep = b.konst::<W32>(!sem::FLAG_OSZPCA);
+    let mut nf = b.and::<W32>(old, keep);
+    nf = b.or::<W32>(nf, cf);
+    nf = b.or::<W32>(nf, af);
+    nf = b.or::<W32>(nf, of);
+    nf = b.or::<W32>(nf, szp);
+    b.set(eflags_ref(), nf);
+    Ok(())
+}
+
+/// DAS（2F）。AL をパック BCD 減算の結果に補正する。
+/// CF/AF は補正の有無、SZP は結果、OF は元値-補正合計の借りあふれ。
+pub fn das<B: Backend>(b: &mut B) -> Flow<B> {
+    let old_al = sem::read8(b, Gpr(0), false);
+    let old_cf = read_cf(b);
+    let af_in = sem::read_af(b);
+    let z8 = b.konst::<W8>(0);
+    let nine = b.konst::<W8>(9);
+    let f = b.konst::<W8>(0xF);
+    let low = b.and::<W8>(old_al, f);
+    let gt9 = b.cmp::<W8>(Cmp::LtU, nine, low);
+    let adj1 = bor(b, gt9, af_in);
+    let six = b.konst::<W8>(6);
+    let sub1 = b.select::<W8>(adj1, six, z8);
+    let al1 = b.sub::<W8>(old_al, sub1);
+    // 第2補正の条件: CF | (AL + (AF ? 0 : 6)) > 0x9F（8088 実測）。
+    // 比較は 8 ビットに折れない幅で行う。
+    let add6 = b.select::<W8>(af_in, z8, six);
+    let al16: B::V<W16> = b.zext::<W8, W16>(old_al);
+    let a16: B::V<W16> = b.zext::<W8, W16>(add6);
+    let chk = b.add::<W16>(al16, a16);
+    let n9f = b.konst::<W16>(0x9F);
+    let gt9f = b.cmp::<W16>(Cmp::LtU, n9f, chk);
+    let adj2 = bor(b, gt9f, old_cf);
+    let c60 = b.konst::<W8>(0x60);
+    let sub2 = b.select::<W8>(adj2, c60, z8);
+    let v = b.sub::<W8>(al1, sub2);
+    sem::write8(b, Gpr(0), false, v);
+    // OF は元値 - 補正合計の借りあふれ（8088 実測）。
+    let adj_total = b.add::<W8>(sub1, sub2);
+    let t1 = b.xor::<W8>(old_al, adj_total);
+    let t2 = b.xor::<W8>(old_al, v);
+    let s = b.and::<W8>(t1, t2);
+    let k80 = b.konst::<W8>(0x80);
+    let sm = b.and::<W8>(s, k80);
+    let of_take = b.cmp::<W8>(Cmp::Ne, sm, z8);
+    let old: B::V<W32> = b.get(eflags_ref());
+    let cf = pick(b, adj2, sem::FLAG_CF);
+    let af = pick(b, adj1, sem::FLAG_AF);
+    let of = pick(b, of_take, sem::FLAG_OF);
+    let szp = szp_bits(b, v);
+    let keep = b.konst::<W32>(!sem::FLAG_OSZPCA);
+    let mut nf = b.and::<W32>(old, keep);
+    nf = b.or::<W32>(nf, cf);
+    nf = b.or::<W32>(nf, af);
+    nf = b.or::<W32>(nf, of);
+    nf = b.or::<W32>(nf, szp);
+    b.set(eflags_ref(), nf);
+    Ok(())
+}
+
+/// AAA/AAS（37/3F）。AL をアンパック BCD に補正し、必要なら AH を
+/// ±1 する。AH±1 と AL±6 は独立に計算する（AL の桁上げは AH に伝搬しない）。
+/// 旗ソースは補正時 `AL±6`、非補正時は `AL`。CF/AF は補正の有無、
+/// SZP は旗ソースから、OF は補正時だけ `AL±6` の符号あふれ（8088 実測）。
+pub fn aaa_aas<B: Backend>(b: &mut B, sub: bool) -> Flow<B> {
+    let al = sem::read8(b, Gpr(0), false);
+    let ah = sem::read8(b, Gpr(0), true);
+    let af_in = sem::read_af(b);
+    let z8 = b.konst::<W8>(0);
+    let nine = b.konst::<W8>(9);
+    let f = b.konst::<W8>(0xF);
+    let low = b.and::<W8>(al, f);
+    let gt9 = b.cmp::<W8>(Cmp::LtU, nine, low);
+    let adj = bor(b, gt9, af_in);
+    let six = b.konst::<W8>(6);
+    let t = if sub {
+        b.sub::<W8>(al, six)
+    } else {
+        b.add::<W8>(al, six)
+    };
+    // 旗ソース: 補正時は al±6、非補正時は al（8088 実測）。
+    let src = b.select::<W8>(adj, t, al);
+    // AL = src & 0xF（非補正でも下位ニブルへマスク）。AH は独立に ±1。
+    let al_v = b.and::<W8>(src, f);
+    let one = b.konst::<W8>(1);
+    let d1 = b.select::<W8>(adj, one, z8);
+    let ah_v = if sub {
+        b.sub::<W8>(ah, d1)
+    } else {
+        b.add::<W8>(ah, d1)
+    };
+    sem::write8(b, Gpr(0), false, al_v);
+    sem::write8(b, Gpr(0), true, ah_v);
+    // OF: 補正時は al±6 の符号あふれ、非補正時は 0。
+    let t1 = if sub {
+        b.xor::<W8>(al, six)
+    } else {
+        let nt = b.not::<W8>(al);
+        b.xor::<W8>(nt, six)
+    };
+    let t2 = b.xor::<W8>(al, t);
+    let s = b.and::<W8>(t1, t2);
+    let k80 = b.konst::<W8>(0x80);
+    let sm = b.and::<W8>(s, k80);
+    let ovf = b.cmp::<W8>(Cmp::Ne, sm, z8);
+    let of_take = band(b, ovf, adj);
+    let old: B::V<W32> = b.get(eflags_ref());
+    let cf = pick(b, adj, sem::FLAG_CF);
+    let af = pick(b, adj, sem::FLAG_AF);
+    let of = pick(b, of_take, sem::FLAG_OF);
+    let szp = szp_bits(b, src);
+    let keep = b.konst::<W32>(!sem::FLAG_OSZPCA);
+    let mut nf = b.and::<W32>(old, keep);
+    nf = b.or::<W32>(nf, cf);
+    nf = b.or::<W32>(nf, af);
+    nf = b.or::<W32>(nf, of);
+    nf = b.or::<W32>(nf, szp);
+    b.set(eflags_ref(), nf);
+    Ok(())
+}
+
+/// AAM（D4 ib）。AL を base で割り商を AH・剰余を AL に置く。
+/// SZP は剰余、CF/OF/AF=0（8088 実測）。base=0 は #DE。
+pub fn aam<B: Backend>(b: &mut B, base: u8, eip: u32) -> Flow<B> {
+    if base == 0 {
+        return Err(sem::div0(b, eip));
+    }
+    let al = sem::read8(b, Gpr(0), false);
+    let bb = b.konst::<W8>(base);
+    let q = b.udiv::<W8>(al, bb);
+    let r = b.urem::<W8>(al, bb);
+    let q16: B::V<W16> = b.zext::<W8, W16>(q);
+    let r16: B::V<W16> = b.zext::<W8, W16>(r);
+    let eight = b.konst::<W16>(8);
+    let hi = b.shl::<W16>(q16, eight);
+    let ax = b.or::<W16>(hi, r16);
+    decode::gwr16(b, Gpr(0), ax);
+    // SZP は剰余（新 AL）から。CF/OF/AF=0（8088 実測）= 論理演算型。
+    update_logic_flags(b, r);
+    Ok(())
+}
+
+/// AAD（D5 ib）。AL = AL + AH*base、AH = 0。
+/// 8088 ではこの 8 ビット加算として全旗が更新される。
+pub fn aad<B: Backend>(b: &mut B, base: u8) -> Flow<B> {
+    let al = sem::read8(b, Gpr(0), false);
+    let ah = sem::read8(b, Gpr(0), true);
+    let bb = b.konst::<W8>(base);
+    let p = b.mul::<W8>(ah, bb);
+    let v = b.add::<W8>(al, p);
+    sem::write8(b, Gpr(0), false, v);
+    let z8 = b.konst::<W8>(0);
+    sem::write8(b, Gpr(0), true, z8);
+    // 8088 では AL + (AH*base) の 8 ビット加算として全旗が更新される。
+    update_add_flags(b, al, p, v);
+    Ok(())
+}
+
+/// SALC（D6）。CF=1 なら AL=0xFF、0 なら 0x00。旗は不変。
+pub fn salc<B: Backend>(b: &mut B) -> Flow<B> {
+    let cf = read_cf(b);
+    let ff = b.konst::<W8>(0xFF);
+    let z8 = b.konst::<W8>(0);
+    let v = b.select::<W8>(cf, ff, z8);
+    sem::write8(b, Gpr(0), false, v);
+    Ok(())
+}
+
+/// LES/LDS（C4/C5）。m16:16 の far ポインタを読み、オフセットを
+/// 汎用レジスタ、セレクタをセグメントレジスタ `s`（ES=0,DS=3）へ書く。
+/// mod=11 は #UD 相当なので何もしない。
+pub fn load_far<B: Backend>(b: &mut B, d: &MapDec, rm: &Rm<B::V<W64>>, s: u8) -> Flow<B> {
+    let Rm::Mem { a, wseg } = rm else {
+        return Ok(());
+    };
+    let off: B::V<W16> = decode::mem_load(b, *a, *wseg)?;
+    let two = b.konst::<W64>(2);
+    let a2 = b.add::<W64>(*a, two);
+    let seg: B::V<W16> = decode::mem_load(b, a2, *wseg)?;
+    decode::gwr16(b, decode::reg(d), off);
+    b.set(sem::sreg_ref(s), seg);
+    Ok(())
+}
+
 // ---- x87 比較・環境 ----
 
 /// FCOM 系の C ビット位置（fsw の bit8,10,14）。
@@ -4269,7 +4641,7 @@ pub fn fcom_m<B: Backend>(
         return fcom_ext(b, s1, e1, pop);
     }
     let (sig, exp) = match ea {
-        Rm::Mem(a) => {
+        Rm::Mem { a, .. } => {
             let a = *a;
             if bits == 64 {
                 let v = b.load::<W64>(a, sem::DATA_READ)?;
@@ -4319,7 +4691,7 @@ pub fn fnstsw_m16<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>) -> Result<(), B::Ex
 /// 書き終わると FPU を初期化する（FCW=0x037F、スタックは空）。
 /// FIP/FCS/FOP/FDP/FDS はモデル外のため 0 を書く。
 pub fn fnsave_m<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>) -> Flow<B> {
-    let Rm::Mem(a) = ea else {
+    let Rm::Mem { a, .. } = ea else {
         return Ok(());
     };
     let a = *a;
@@ -4398,7 +4770,7 @@ pub fn fnsave_m<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>) -> Flow<B> {
 /// FRSTOR m108。FNSAVE が書いた形式から環境と ST を戻す。
 /// FSW から TOP を `top` へ、C ビットを `fsw` へ反映する。
 pub fn frstor_m<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>) -> Flow<B> {
-    let Rm::Mem(a) = ea else {
+    let Rm::Mem { a, .. } = ea else {
         return Ok(());
     };
     let a = *a;
@@ -4435,7 +4807,7 @@ pub fn frstor_m<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>) -> Flow<B> {
 /// 整数として拡張精度に変換して積む。符号付き 0 は -0.0 になる。
 /// 数字でないニブルは値としてそのまま扱う（SDM の規定する無効動作は未対応）。
 pub fn fbld_m<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>) -> Flow<B> {
-    let Rm::Mem(a) = ea else {
+    let Rm::Mem { a, .. } = ea else {
         return Ok(());
     };
     let a = *a;
@@ -4479,7 +4851,7 @@ pub fn fbld_m<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>) -> Flow<B> {
 /// FBSTP m80。ST(0) を FCW の丸めで整数にしてパック十進へ書き、pop する。
 /// 18 桁に入らない値・非数は不定（全バイト 0xFF）を書く。
 pub fn fbstp_m<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>) -> Flow<B> {
-    let Rm::Mem(a) = ea else {
+    let Rm::Mem { a, .. } = ea else {
         return Ok(());
     };
     let a = *a;

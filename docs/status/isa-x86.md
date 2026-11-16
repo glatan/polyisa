@@ -18,6 +18,10 @@
 
 | ニーモニック | 記述 | 条件 | タイミング |
 |---|---|---|---|
+| aaa | aaa | !m64 | alu |
+| aad | aad_ib | !m64 | alu |
+| aam | aam_ib | !m64 | alu |
+| aas | aas | !m64 | alu |
 | adc | adc_eb_ib | !m64 | alu |
 | adc | adc_al_ib、adc_al_imm、adc_eax_iz、adc_eb_gb、adc_eb_ib、adc_ev_gv、adc_ev_ib、adc_ev_iz、adc_gb_eb、adc_gv_ev、adc_m32_imm8_mem8、adc_m32_imm8_sibd、adc_m32_r32_mem32、adc_m32_r32_mem8、adc_m32_r32_sibd、adc_m32_r32_sibd32、adc_r_mem32、adc_r_mem8、adc_r_memnd、adc_r_rip、adc_r_sibabs、adc_r_sibd、adc_rm32、adc_rm32_imm、adc_rm_imm8 | 真 | alu |
 | add | add_eb_ib | !m64 | alu |
@@ -51,6 +55,7 @@
 | cdq | en_cdq | 真 | alu |
 | clc | clc | 真 | alu |
 | cld | cld、en_cld | 真 | alu |
+| cli | cli | 真 | system |
 | cmc | cmc | 真 | alu |
 | cmova | cmova | 真 | alu |
 | cmovae | cmovae | 真 | alu |
@@ -103,6 +108,8 @@
 | cvttss2si | cvttss2si_gv_wv | 真 | alu |
 | cwd/cdq/cqo | cdq | 真 | alu |
 | cwde | en_cwde | 真 | alu |
+| daa | daa | !m64 | alu |
+| das | das | !m64 | alu |
 | dec | dec_rv | !m64 | alu |
 | dec | dec_eax、dec_eb、dec_ebp、dec_ebx、dec_ecx、dec_edi、dec_edx、dec_esi、dec_esp、dec_ev、dec_m8_memnd、dec_r8、dec_rm、dec_rm_mem32、dec_rm_mem8、dec_rm_rip、dec_rm_sib、dec_rm_sibd、dec_rm_sibd32 | 真 | alu |
 | div | div_rm32、div_rm32_mem8、div_rm32_sib、div_rm32_sibd、div_rm8 | 真 | div |
@@ -169,8 +176,10 @@
 | jp | jp、jp_rel32 | 真 | jump |
 | js | js、js_rel32 | 真 | jump |
 | lahf | lahf | 真 | alu |
+| lds | lds_gv_mp | !m64 | load |
 | lea | lea_abs、lea_gv_m、lea_m32、lea_m8、lea_mnd、lea_sib、lea_sibabs、lea_sibd、lea_sibd32 | 真 | alu |
 | leave | en_leave、leave | 真 | alu |
+| les | les_gv_mp | !m64 | load |
 | lods | lods_v | 真 | load |
 | lodsb | lods_b | 真 | load |
 | loop | jcxz_jb、loop、loop_jb、loope_jb、loopne_jb | 真 | jump |
@@ -364,6 +373,7 @@
 | rol | rol_eb_1、rol_eb_cl、rol_eb_ib、rol_ev_1、rol_ev_cl、rol_ev_ib、rol_rm32_1、rol_rm32_cl、rol_rm32_imm8 | 真 | alu |
 | ror | ror_eb_1、ror_eb_cl、ror_eb_ib、ror_ev_1、ror_ev_cl、ror_ev_ib、ror_rm32_1、ror_rm32_imm8 | 真 | alu |
 | sahf | sahf | 真 | alu |
+| salc | salc | !m64 | alu |
 | sar | sar_eb_1、sar_eb_cl、sar_eb_ib、sar_ev_1、sar_ev_cl、sar_ev_ib、sar_rm32_1、sar_rm32_cl、sar_rm32_imm8 | 真 | alu |
 | sbb | sbb_eb_ib | !m64 | alu |
 | sbb | sbb_al_ib、sbb_eax_iz、sbb_eb_gb、sbb_eb_ib、sbb_ev_gv、sbb_ev_ib、sbb_ev_iz、sbb_gb_eb、sbb_gv_ev、sbb_m32_r32_mem8、sbb_m32_r32_sibd、sbb_r_mem32、sbb_r_mem8、sbb_r_memnd、sbb_r_rip、sbb_rm32、sbb_rm32_imm、sbb_rm_imm8、sbb_rm_imm8_sibd | 真 | alu |
@@ -398,6 +408,7 @@
 | sqrtss | sqrtss_xv_wv | 真 | alu |
 | stc | stc | 真 | alu |
 | std | en_std、std | 真 | alu |
+| sti | sti | 真 | system |
 | stos | stos_v | 真 | store |
 | stosb | stos_b、stosb | 真 | store |
 | stosd | stosd | 真 | store |

@@ -2591,6 +2591,17 @@ fn decode_x86(
 
 // ---- オペコード表（map）経路 ----
 
+/// シフト群の操作。8088 では /6 が undocumented な SETMO（全ビット 1 を
+/// 書き込む）になる。それ以外のモードでは SHL の別名。
+fn grp2_op(d: &polyisa_guest_x86::MapDec, mode: u8) -> polyisa_guest_x86::sem_ea::Sh {
+    use polyisa_guest_x86::sem_ea::Sh;
+    if mode == 16 && (d.modrm >> 3) & 7 == 6 {
+        Sh::Setmo
+    } else {
+        Sh::Shl
+    }
+}
+
 /// map デコード結果を実行する。`Ok(true)` は実行済み、`Ok(false)` は
 /// 未移行で、呼び出し側が旧デコード経路へフォールバックする。
 // Ref: SPEC-X86-INTEL-SDM (v093).
@@ -2817,7 +2828,7 @@ fn dispatch_map<B: Backend>(
         Insn::MovEvIz => sem_ea::mov_e(b, w, &ea, d, Src::Imm(iz)),
         Insn::MovRbIb => sem_ea::mov_e(b, 8, &Rm::Reg(decode::op_reg(d)), d, Src::Imm(d.imm)),
         Insn::MovRvIv => sem_ea::mov_e(b, w, &Rm::Reg(decode::op_reg(d)), d, Src::Imm(d.imm)),
-        Insn::LeaGvM => sem_ea::lea(b, w, reg, &ea, d.asize, d),
+        Insn::LeaGvM => sem_ea::lea(b, w, reg, &ea, d.asize, seg, d),
         Insn::MovzxGvEb => sem_ea::movzx(b, w, 8, reg, &ea, d, false),
         Insn::MovzxGvEw => sem_ea::movzx(b, w, 16, reg, &ea, d, false),
         Insn::MovsxGvEb => sem_ea::movzx(b, w, 8, reg, &ea, d, true),
@@ -2831,50 +2842,168 @@ fn dispatch_map<B: Backend>(
         Insn::NotEv => sem_ea::not(b, w, &ea, d),
         Insn::NegEb => sem_ea::neg(b, 8, &ea, d),
         Insn::NegEv => sem_ea::neg(b, w, &ea, d),
-        Insn::RolEbIb => sem_ea::shift(b, Sh::Rol, 8, &ea, d, ShiftCnt::Imm(d.imm as u32)),
-        Insn::RolEvIb => sem_ea::shift(b, Sh::Rol, w, &ea, d, ShiftCnt::Imm(d.imm as u32)),
-        Insn::RolEb1 => sem_ea::shift(b, Sh::Rol, 8, &ea, d, ShiftCnt::One),
-        Insn::RolEv1 => sem_ea::shift(b, Sh::Rol, w, &ea, d, ShiftCnt::One),
-        Insn::RolEbCl => sem_ea::shift(b, Sh::Rol, 8, &ea, d, ShiftCnt::Cl),
-        Insn::RolEvCl => sem_ea::shift(b, Sh::Rol, w, &ea, d, ShiftCnt::Cl),
-        Insn::RorEbIb => sem_ea::shift(b, Sh::Ror, 8, &ea, d, ShiftCnt::Imm(d.imm as u32)),
-        Insn::RorEvIb => sem_ea::shift(b, Sh::Ror, w, &ea, d, ShiftCnt::Imm(d.imm as u32)),
-        Insn::RorEb1 => sem_ea::shift(b, Sh::Ror, 8, &ea, d, ShiftCnt::One),
-        Insn::RorEv1 => sem_ea::shift(b, Sh::Ror, w, &ea, d, ShiftCnt::One),
-        Insn::RorEbCl => sem_ea::shift(b, Sh::Ror, 8, &ea, d, ShiftCnt::Cl),
-        Insn::RorEvCl => sem_ea::shift(b, Sh::Ror, w, &ea, d, ShiftCnt::Cl),
-        Insn::RclEbIb => sem_ea::shift(b, Sh::Rcl, 8, &ea, d, ShiftCnt::Imm(d.imm as u32)),
-        Insn::RclEvIb => sem_ea::shift(b, Sh::Rcl, w, &ea, d, ShiftCnt::Imm(d.imm as u32)),
-        Insn::RclEb1 => sem_ea::shift(b, Sh::Rcl, 8, &ea, d, ShiftCnt::One),
-        Insn::RclEv1 => sem_ea::shift(b, Sh::Rcl, w, &ea, d, ShiftCnt::One),
-        Insn::RclEbCl => sem_ea::shift(b, Sh::Rcl, 8, &ea, d, ShiftCnt::Cl),
-        Insn::RclEvCl => sem_ea::shift(b, Sh::Rcl, w, &ea, d, ShiftCnt::Cl),
-        Insn::RcrEbIb => sem_ea::shift(b, Sh::Rcr, 8, &ea, d, ShiftCnt::Imm(d.imm as u32)),
-        Insn::RcrEvIb => sem_ea::shift(b, Sh::Rcr, w, &ea, d, ShiftCnt::Imm(d.imm as u32)),
-        Insn::RcrEb1 => sem_ea::shift(b, Sh::Rcr, 8, &ea, d, ShiftCnt::One),
-        Insn::RcrEv1 => sem_ea::shift(b, Sh::Rcr, w, &ea, d, ShiftCnt::One),
-        Insn::RcrEbCl => sem_ea::shift(b, Sh::Rcr, 8, &ea, d, ShiftCnt::Cl),
-        Insn::RcrEvCl => sem_ea::shift(b, Sh::Rcr, w, &ea, d, ShiftCnt::Cl),
-        Insn::ShlEbIb => sem_ea::shift(b, Sh::Shl, 8, &ea, d, ShiftCnt::Imm(d.imm as u32)),
-        Insn::ShlEvIb => sem_ea::shift(b, Sh::Shl, w, &ea, d, ShiftCnt::Imm(d.imm as u32)),
-        Insn::ShlEb1 => sem_ea::shift(b, Sh::Shl, 8, &ea, d, ShiftCnt::One),
-        Insn::ShlEv1 => sem_ea::shift(b, Sh::Shl, w, &ea, d, ShiftCnt::One),
-        Insn::ShlEbCl => sem_ea::shift(b, Sh::Shl, 8, &ea, d, ShiftCnt::Cl),
-        Insn::ShlEvCl => sem_ea::shift(b, Sh::Shl, w, &ea, d, ShiftCnt::Cl),
-        Insn::ShrEbIb => sem_ea::shift(b, Sh::Shr, 8, &ea, d, ShiftCnt::Imm(d.imm as u32)),
-        Insn::ShrEvIb => sem_ea::shift(b, Sh::Shr, w, &ea, d, ShiftCnt::Imm(d.imm as u32)),
-        Insn::ShrEb1 => sem_ea::shift(b, Sh::Shr, 8, &ea, d, ShiftCnt::One),
-        Insn::ShrEv1 => sem_ea::shift(b, Sh::Shr, w, &ea, d, ShiftCnt::One),
-        Insn::ShrEbCl => sem_ea::shift(b, Sh::Shr, 8, &ea, d, ShiftCnt::Cl),
-        Insn::ShrEvCl => sem_ea::shift(b, Sh::Shr, w, &ea, d, ShiftCnt::Cl),
-        Insn::SarEbIb => sem_ea::shift(b, Sh::Sar, 8, &ea, d, ShiftCnt::Imm(d.imm as u32)),
-        Insn::SarEvIb => sem_ea::shift(b, Sh::Sar, w, &ea, d, ShiftCnt::Imm(d.imm as u32)),
-        Insn::SarEb1 => sem_ea::shift(b, Sh::Sar, 8, &ea, d, ShiftCnt::One),
-        Insn::SarEv1 => sem_ea::shift(b, Sh::Sar, w, &ea, d, ShiftCnt::One),
-        Insn::SarEbCl => sem_ea::shift(b, Sh::Sar, 8, &ea, d, ShiftCnt::Cl),
-        Insn::SarEvCl => sem_ea::shift(b, Sh::Sar, w, &ea, d, ShiftCnt::Cl),
+        Insn::RolEbIb => sem_ea::shift(
+            b,
+            Sh::Rol,
+            8,
+            &ea,
+            d,
+            ShiftCnt::Imm(d.imm as u32),
+            mode == 16,
+        ),
+        Insn::RolEvIb => sem_ea::shift(
+            b,
+            Sh::Rol,
+            w,
+            &ea,
+            d,
+            ShiftCnt::Imm(d.imm as u32),
+            mode == 16,
+        ),
+        Insn::RolEb1 => sem_ea::shift(b, Sh::Rol, 8, &ea, d, ShiftCnt::One, mode == 16),
+        Insn::RolEv1 => sem_ea::shift(b, Sh::Rol, w, &ea, d, ShiftCnt::One, mode == 16),
+        Insn::RolEbCl => sem_ea::shift(b, Sh::Rol, 8, &ea, d, ShiftCnt::Cl, mode == 16),
+        Insn::RolEvCl => sem_ea::shift(b, Sh::Rol, w, &ea, d, ShiftCnt::Cl, mode == 16),
+        Insn::RorEbIb => sem_ea::shift(
+            b,
+            Sh::Ror,
+            8,
+            &ea,
+            d,
+            ShiftCnt::Imm(d.imm as u32),
+            mode == 16,
+        ),
+        Insn::RorEvIb => sem_ea::shift(
+            b,
+            Sh::Ror,
+            w,
+            &ea,
+            d,
+            ShiftCnt::Imm(d.imm as u32),
+            mode == 16,
+        ),
+        Insn::RorEb1 => sem_ea::shift(b, Sh::Ror, 8, &ea, d, ShiftCnt::One, mode == 16),
+        Insn::RorEv1 => sem_ea::shift(b, Sh::Ror, w, &ea, d, ShiftCnt::One, mode == 16),
+        Insn::RorEbCl => sem_ea::shift(b, Sh::Ror, 8, &ea, d, ShiftCnt::Cl, mode == 16),
+        Insn::RorEvCl => sem_ea::shift(b, Sh::Ror, w, &ea, d, ShiftCnt::Cl, mode == 16),
+        Insn::RclEbIb => sem_ea::shift(
+            b,
+            Sh::Rcl,
+            8,
+            &ea,
+            d,
+            ShiftCnt::Imm(d.imm as u32),
+            mode == 16,
+        ),
+        Insn::RclEvIb => sem_ea::shift(
+            b,
+            Sh::Rcl,
+            w,
+            &ea,
+            d,
+            ShiftCnt::Imm(d.imm as u32),
+            mode == 16,
+        ),
+        Insn::RclEb1 => sem_ea::shift(b, Sh::Rcl, 8, &ea, d, ShiftCnt::One, mode == 16),
+        Insn::RclEv1 => sem_ea::shift(b, Sh::Rcl, w, &ea, d, ShiftCnt::One, mode == 16),
+        Insn::RclEbCl => sem_ea::shift(b, Sh::Rcl, 8, &ea, d, ShiftCnt::Cl, mode == 16),
+        Insn::RclEvCl => sem_ea::shift(b, Sh::Rcl, w, &ea, d, ShiftCnt::Cl, mode == 16),
+        Insn::RcrEbIb => sem_ea::shift(
+            b,
+            Sh::Rcr,
+            8,
+            &ea,
+            d,
+            ShiftCnt::Imm(d.imm as u32),
+            mode == 16,
+        ),
+        Insn::RcrEvIb => sem_ea::shift(
+            b,
+            Sh::Rcr,
+            w,
+            &ea,
+            d,
+            ShiftCnt::Imm(d.imm as u32),
+            mode == 16,
+        ),
+        Insn::RcrEb1 => sem_ea::shift(b, Sh::Rcr, 8, &ea, d, ShiftCnt::One, mode == 16),
+        Insn::RcrEv1 => sem_ea::shift(b, Sh::Rcr, w, &ea, d, ShiftCnt::One, mode == 16),
+        Insn::RcrEbCl => sem_ea::shift(b, Sh::Rcr, 8, &ea, d, ShiftCnt::Cl, mode == 16),
+        Insn::RcrEvCl => sem_ea::shift(b, Sh::Rcr, w, &ea, d, ShiftCnt::Cl, mode == 16),
+        Insn::ShlEbIb => sem_ea::shift(
+            b,
+            grp2_op(d, mode),
+            8,
+            &ea,
+            d,
+            ShiftCnt::Imm(d.imm as u32),
+            mode == 16,
+        ),
+        Insn::ShlEvIb => sem_ea::shift(
+            b,
+            grp2_op(d, mode),
+            w,
+            &ea,
+            d,
+            ShiftCnt::Imm(d.imm as u32),
+            mode == 16,
+        ),
+        Insn::ShlEb1 => sem_ea::shift(b, grp2_op(d, mode), 8, &ea, d, ShiftCnt::One, mode == 16),
+        Insn::ShlEv1 => sem_ea::shift(b, grp2_op(d, mode), w, &ea, d, ShiftCnt::One, mode == 16),
+        Insn::ShlEbCl => sem_ea::shift(b, grp2_op(d, mode), 8, &ea, d, ShiftCnt::Cl, mode == 16),
+        Insn::ShlEvCl => sem_ea::shift(b, grp2_op(d, mode), w, &ea, d, ShiftCnt::Cl, mode == 16),
+        Insn::ShrEbIb => sem_ea::shift(
+            b,
+            Sh::Shr,
+            8,
+            &ea,
+            d,
+            ShiftCnt::Imm(d.imm as u32),
+            mode == 16,
+        ),
+        Insn::ShrEvIb => sem_ea::shift(
+            b,
+            Sh::Shr,
+            w,
+            &ea,
+            d,
+            ShiftCnt::Imm(d.imm as u32),
+            mode == 16,
+        ),
+        Insn::ShrEb1 => sem_ea::shift(b, Sh::Shr, 8, &ea, d, ShiftCnt::One, mode == 16),
+        Insn::ShrEv1 => sem_ea::shift(b, Sh::Shr, w, &ea, d, ShiftCnt::One, mode == 16),
+        Insn::ShrEbCl => sem_ea::shift(b, Sh::Shr, 8, &ea, d, ShiftCnt::Cl, mode == 16),
+        Insn::ShrEvCl => sem_ea::shift(b, Sh::Shr, w, &ea, d, ShiftCnt::Cl, mode == 16),
+        Insn::SarEbIb => sem_ea::shift(
+            b,
+            Sh::Sar,
+            8,
+            &ea,
+            d,
+            ShiftCnt::Imm(d.imm as u32),
+            mode == 16,
+        ),
+        Insn::SarEvIb => sem_ea::shift(
+            b,
+            Sh::Sar,
+            w,
+            &ea,
+            d,
+            ShiftCnt::Imm(d.imm as u32),
+            mode == 16,
+        ),
+        Insn::SarEb1 => sem_ea::shift(b, Sh::Sar, 8, &ea, d, ShiftCnt::One, mode == 16),
+        Insn::SarEv1 => sem_ea::shift(b, Sh::Sar, w, &ea, d, ShiftCnt::One, mode == 16),
+        Insn::SarEbCl => sem_ea::shift(b, Sh::Sar, 8, &ea, d, ShiftCnt::Cl, mode == 16),
+        Insn::SarEvCl => sem_ea::shift(b, Sh::Sar, w, &ea, d, ShiftCnt::Cl, mode == 16),
         Insn::PushRv => {
-            let v = gr64(b, decode::op_reg(d), sw);
+            let r = decode::op_reg(d);
+            let mut v = gr64(b, r, sw);
+            // 8088 の push sp はデクリメント後の SP を積む。
+            if mode == 16 && r.0 == 4 {
+                let two = b.konst::<W64>(2);
+                v = b.sub::<W64>(v, two);
+            }
             sem_ea::push_v(b, sw, v, sa, sseg)
         }
         Insn::PopRv => {
@@ -2891,7 +3020,15 @@ fn dispatch_map<B: Backend>(
             sem_ea::push_v(b, sw, v, sa, sseg)
         }
         Insn::PushEv => {
-            let v = rd_any(b, sw, &ea, d)?;
+            let mut v = rd_any(b, sw, &ea, d)?;
+            // 8088 の push sp（mod=11, r/m=4）はデクリメント後の SP を積む。
+            if mode == 16
+                && let Rm::Reg(g) = &ea
+                && g.0 == 4
+            {
+                let two = b.konst::<W64>(2);
+                v = b.sub::<W64>(v, two);
+            }
             sem_ea::push_v(b, sw, v, sa, sseg)
         }
         Insn::PopEv => {
@@ -2907,10 +3044,22 @@ fn dispatch_map<B: Backend>(
             let v = sem_ea::pop_v(b, sw, sa, sseg)?;
             let v32: B::V<W32> = b.trunc::<W64, W32>(v);
             let cur = b.get(eflags_ref());
-            let km = b.konst::<W32>(!0xcd5u32);
-            let keep = b.and::<W32>(cur, km);
-            let merged = b.or::<W32>(keep, v32);
-            b.set(eflags_ref(), merged);
+            if mode == 16 {
+                // 8088: bit1=1、bit3/5=0、bit12-15 は常に 1。
+                let m = b.konst::<W32>(0x0FD5);
+                let low = b.and::<W32>(v32, m);
+                let forced = b.konst::<W32>(0xF002);
+                let low = b.or::<W32>(low, forced);
+                let him = b.konst::<W32>(0xFFFF_0000);
+                let hi = b.and::<W32>(cur, him);
+                let merged = b.or::<W32>(hi, low);
+                b.set(eflags_ref(), merged);
+            } else {
+                let km = b.konst::<W32>(!0xcd5u32);
+                let keep = b.and::<W32>(cur, km);
+                let merged = b.or::<W32>(keep, v32);
+                b.set(eflags_ref(), merged);
+            }
             Ok(())
         }
         Insn::JoJb => sem_ea::jcc(b, 0, eip, u32::from(d.len), d.rel),
@@ -2997,11 +3146,22 @@ fn dispatch_map<B: Backend>(
         Insn::Cdq => sem_ea::cdq(b, w),
         Insn::Sahf => sem_ea::sahf(b),
         Insn::Lahf => sem_ea::lahf(b),
+        Insn::Daa => sem_ea::daa(b),
+        Insn::Das => sem_ea::das(b),
+        Insn::Aaa => sem_ea::aaa_aas(b, false),
+        Insn::Aas => sem_ea::aaa_aas(b, true),
+        Insn::Salc => sem_ea::salc(b),
+        Insn::AamIb => sem_ea::aam(b, d.imm as u8, eip),
+        Insn::AadIb => sem_ea::aad(b, d.imm as u8),
+        Insn::LesGvMp => sem_ea::load_far(b, d, &ea, 0),
+        Insn::LdsGvMp => sem_ea::load_far(b, d, &ea, 3),
         Insn::Cmc => sem_ea::flagop(b, 0x1, 2),
         Insn::Clc => sem_ea::flagop(b, 0x1, 0),
         Insn::Stc => sem_ea::flagop(b, 0x1, 1),
         Insn::Cld => sem_ea::flagop(b, 0x400, 0),
         Insn::Std => sem_ea::flagop(b, 0x400, 1),
+        Insn::Cli => sem_ea::flagop(b, 0x200, 0),
+        Insn::Sti => sem_ea::flagop(b, 0x200, 1),
         Insn::BswapRv => sem_ea::bswap(b, w, decode::op_reg(d)),
         Insn::NopEv => sem_ea::nop(b),
         Insn::Endbr => sem_ea::nop(b),
@@ -3107,14 +3267,21 @@ fn dispatch_map<B: Backend>(
         // ===== セグメント・特権 =====
         // セレクタ 6/7 は #UD。未対応として旧経路（＝Unimplemented）へ落ちる。
         Insn::MovEwSr => {
-            let s = (d.modrm >> 3) & 7;
+            // 8088 には ES/CS/SS/DS しかなく、reg の上位ビットは無視される。
+            let mut s = (d.modrm >> 3) & 7;
+            if mode == 16 {
+                s &= 3;
+            }
             if s > 5 {
                 return Ok(false);
             }
             sem_ea::mov_sr_st(b, s, &ea)
         }
         Insn::MovSrEw => {
-            let s = (d.modrm >> 3) & 7;
+            let mut s = (d.modrm >> 3) & 7;
+            if mode == 16 {
+                s &= 3;
+            }
             if s > 5 {
                 return Ok(false);
             }
@@ -3909,20 +4076,34 @@ fn step_x86_map(
     // 実モードでは eip 状態は IP（下位 16 ビット）で、
     // フェッチ番地は CS<<4 + IP。CS 基底を含める。
     let ip = eip_of(env);
+    let csb = if mode == 16 {
+        u64::from(env.backend.get(sem::sreg_ref(1))) * 16
+    } else {
+        0
+    };
     let pc = if mode == 16 {
-        u64::from(env.backend.get(sem::sreg_ref(1))) * 16 + u64::from(ip & 0xFFFF)
+        csb + u64::from(ip & 0xFFFF)
     } else {
         u64::from(ip)
     };
     let mut buf = [0u8; 15];
     let mut n = 0usize;
-    while n < 15
-        && env
+    while n < 15 {
+        // 実モードでは IP が 16 ビットで折り返す（命令が IP=FFFF を跨ぐ）。
+        // cs*16+ip が 20 ビットを超えるときも addr_mask で折り返す。
+        let a = (if mode == 16 {
+            csb + u64::from((ip as u16).wrapping_add(n as u16))
+        } else {
+            pc + n as u64
+        }) & env.backend.addr_mask;
+        if env
             .backend
             .mem
-            .read(VirtAddr(pc + n as u64), &mut buf[n..n + 1], acc_fetch())
-            .is_ok()
-    {
+            .read(VirtAddr(a), &mut buf[n..n + 1], acc_fetch())
+            .is_err()
+        {
+            break;
+        }
         n += 1;
     }
     let opd = match mode {

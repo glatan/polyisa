@@ -371,8 +371,8 @@ fn flags_logic_clears_cf_of() {
     env.backend.set(Gpr(1).state(), 0x0F);
     env.step(|b| sem::and_rm32(b, Gpr(0), Gpr(1))).unwrap();
     assert_eq!(eax(&mut env), 0);
-    // ZF=PF=1、CF=OF=SF=0。AF は ADD 時の 1 が保存される。
-    assert_eq!(env.backend.get(sem::eflags_ref()), 0x54);
+    // ZF=PF=1、CF=OF=SF=AF=0（8088 実機は論理演算で AF をクリアする）。
+    assert_eq!(env.backend.get(sem::eflags_ref()), 0x44);
 }
 
 #[test]

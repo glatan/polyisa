@@ -289,6 +289,35 @@ pub fn build_maps(m: &mut Model) {
     primary.push(MapItem::Insn(0x9E, n("sahf", &[], "sahf", "alu")));
     primary.push(MapItem::Insn(0x9F, n("lahf", &[], "lahf", "alu")));
 
+    // BCD 補正と far ポインタロード・SALC。64 ビットモードでは無効。
+    for (op, name, syntax) in [
+        (0x27u8, "daa", "daa"),
+        (0x2F, "das", "das"),
+        (0x37, "aaa", "aaa"),
+        (0x3F, "aas", "aas"),
+        (0xD6, "salc", "salc"),
+    ] {
+        primary.push(MapItem::Insn(op, mi(name, &[], None, PfxSel::Any, w("!m64"), syntax, "alu")));
+    }
+    primary.push(MapItem::Insn(
+        0xC4,
+        mi("les_gv_mp", &[Reg(V), Ea(V)], None, PfxSel::Any, w("!m64"), "les {g}, {e}", "load"),
+    ));
+    primary.push(MapItem::Insn(
+        0xC5,
+        mi("lds_gv_mp", &[Reg(V), Ea(V)], None, PfxSel::Any, w("!m64"), "lds {g}, {e}", "load"),
+    ));
+    primary.push(MapItem::Insn(
+        0xD4,
+        mi("aam_ib", &[Imp(ImpOp::Eax), Imm(B8)], None, PfxSel::Any, w("!m64"), "aam {i}", "alu"),
+    ));
+    primary.push(MapItem::Insn(
+        0xD5,
+        mi("aad_ib", &[Imp(ImpOp::Eax), Imm(B8)], None, PfxSel::Any, w("!m64"), "aad {i}", "alu"),
+    ));
+    primary.push(MapItem::Insn(0xFA, n("cli", &[], "cli", "system")));
+    primary.push(MapItem::Insn(0xFB, n("sti", &[], "sti", "system")));
+
     // moffs と string 命令。
     primary.extend([
         MapItem::Insn(0xA0, n("mov_al_ob", &[Imp(ImpOp::Eax), Moffs(B8)], "mov al, [{m}]", "load")),
@@ -357,14 +386,11 @@ pub fn build_maps(m: &mut Model) {
     primary.extend([
         MapItem::Insn(0xC2, n("ret_iw", &[Imm(W16)], "ret {i}", "jump")),
         MapItem::Insn(0xC3, n("ret", &[], "ret", "jump")),
-        MapItem::Insn(
-            0xC6,
-            g("mov_eb_ib", 0, &[Ea(B8), Imm(B8)], "mov {e}, {i}", "store"),
-        ),
-        MapItem::Insn(
-            0xC7,
-            g("mov_ev_iz", 0, &[Ea(V), Imm(Z)], "mov {e}, {i}", "store"),
-        ),
+        // C6/C7 は 8088 では ModRM.reg が全値で mov の別名になる（非グループ
+        // 宣言で reg を照合しない）。286 以降は /1-7 が #UD だが、デコーダは
+        // 全モードで受理する（既知の近似）。
+        MapItem::Insn(0xC6, n("mov_eb_ib", &[Ea(B8), Imm(B8)], "mov {e}, {i}", "store")),
+        MapItem::Insn(0xC7, n("mov_ev_iz", &[Ea(V), Imm(Z)], "mov {e}, {i}", "store")),
         MapItem::Insn(
             0xC8,
             n("enter_iw_ib", &[Imm(W16), Imm2(B8)], "enter {i}, {j}", "store"),

@@ -63,6 +63,10 @@ pub const TEST_REQUIREMENTS: &[TestBinary] = &[
         needs: &[Req::Data(".testdata/riscv-tests"), Req::Tool("clang")],
     },
     TestBinary {
+        binary: "heavy_conformance_sst8088",
+        needs: &[Req::Data(".testdata/sst-8088")],
+    },
+    TestBinary {
         binary: "heavy_conformance_testfloat",
         needs: &[Req::Data(".testdata/testfloat")],
     },

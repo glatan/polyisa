@@ -15,8 +15,11 @@ use crate::sem::{Gpr, clear_hi, read64, write64};
 pub enum Rm<V> {
     /// レジスタ直接（mod=11）。
     Reg(Gpr),
-    /// メモリ。実効アドレス（セグメントベース加算済み）を持つ。
-    Mem(V),
+    /// メモリ。`a` は実効アドレス（セグメントベース加算済み）。
+    /// `wseg` が `Some` のとき 16 ビットアドレッシング由来で、
+    /// 8 ビットを超えるアクセスはオフセットを 64K で折り返す
+    /// （実モードの `mov word [bx+0ffffh]` 等）。
+    Mem { a: V, wseg: Option<u64> },
 }
 
 /// ModRM reg フィールドのレジスタ（REX.R 込み）。
@@ -80,7 +83,8 @@ pub fn rm_of<B: Backend>(b: &mut B, d: &MapDec, next_rip: u64, seg: u64) -> Rm<B
         let s = b.konst::<W64>(seg);
         a = b.add::<W64>(a, s);
     }
-    Rm::Mem(a)
+    let wseg = (d.asize == 16).then_some(seg);
+    Rm::Mem { a, wseg }
 }
 
 /// 16ビットアドレッシング（実モード・286）。BX+SI 等の固定表。
@@ -172,6 +176,70 @@ fn ea_base<B: Backend>(b: &mut B, wide: bool, g: Gpr) -> B::V<W64> {
 
 // ---- レジスタ・メモリの読み書き ----
 
+/// 実モードの 64K オフセット折り返しを考慮してメモリを読む。
+/// `wseg` が `Some` なら `off = a - seg` を 16 ビットオフセットとみなし、
+/// i バイト目は `seg + ((off + i) & 0xffff)` から読む。
+pub fn mem_load<B: Backend, W: Hw>(
+    b: &mut B,
+    a: B::V<W64>,
+    wseg: Option<u64>,
+) -> Result<B::V<W>, B::Exit> {
+    let Some(seg) = wseg.filter(|_| W::BITS > 8) else {
+        return b.load::<W>(a, crate::sem::DATA_READ);
+    };
+    let sv = b.konst::<W64>(seg);
+    let lim = b.konst::<W64>(0xFFFF);
+    let aoff = b.sub::<W64>(a, sv);
+    let off = b.and::<W64>(aoff, lim);
+    let addr0 = b.add::<W64>(off, sv);
+    let byte0 = b.load::<W8>(addr0, crate::sem::DATA_READ)?;
+    let mut acc: B::V<W> = b.zext::<W8, W>(byte0);
+    for i in 1..W::BITS / 8 {
+        let iv = b.konst::<W64>(u64::from(i));
+        let t = b.add::<W64>(off, iv);
+        let oi = b.and::<W64>(t, lim);
+        let addr = b.add::<W64>(oi, sv);
+        let byte = b.load::<W8>(addr, crate::sem::DATA_READ)?;
+        let bw: B::V<W> = b.zext::<W8, W>(byte);
+        let sh = b.konst::<W>(W::from_u128(u128::from(i * 8)));
+        let part = b.shl::<W>(bw, sh);
+        acc = b.or::<W>(acc, part);
+    }
+    Ok(acc)
+}
+
+/// `mem_load` と同じ折り返し規則でメモリに書く。
+pub fn mem_store<B: Backend, W: Hw>(
+    b: &mut B,
+    a: B::V<W64>,
+    wseg: Option<u64>,
+    v: B::V<W>,
+) -> Result<(), B::Exit> {
+    let Some(seg) = wseg.filter(|_| W::BITS > 8) else {
+        return b.store::<W>(a, v, crate::sem::DATA_WRITE);
+    };
+    let sv = b.konst::<W64>(seg);
+    let lim = b.konst::<W64>(0xFFFF);
+    let aoff = b.sub::<W64>(a, sv);
+    let off = b.and::<W64>(aoff, lim);
+    {
+        let addr = b.add::<W64>(off, sv);
+        let byte = b.trunc::<W, W8>(v);
+        b.store::<W8>(addr, byte, crate::sem::DATA_WRITE)?;
+    }
+    for i in 1..W::BITS / 8 {
+        let iv = b.konst::<W64>(u64::from(i));
+        let t = b.add::<W64>(off, iv);
+        let oi = b.and::<W64>(t, lim);
+        let addr = b.add::<W64>(oi, sv);
+        let sh = b.konst::<W>(W::from_u128(u128::from(i * 8)));
+        let t = b.shr_l::<W>(v, sh);
+        let byte = b.trunc::<W, W8>(t);
+        b.store::<W8>(addr, byte, crate::sem::DATA_WRITE)?;
+    }
+    Ok(())
+}
+
 /// 8ビットを読む。
 pub fn rd8<B: Backend>(b: &mut B, rm: &Rm<B::V<W64>>, d: &MapDec) -> Result<B::V<W8>, B::Exit> {
     match rm {
@@ -179,7 +247,7 @@ pub fn rd8<B: Backend>(b: &mut B, rm: &Rm<B::V<W64>>, d: &MapDec) -> Result<B::V
             let (r8, hi) = reg8(d, *g);
             Ok(crate::sem::read8(b, r8, hi))
         }
-        Rm::Mem(a) => b.load::<W8>(*a, crate::sem::DATA_READ),
+        Rm::Mem { a, .. } => b.load::<W8>(*a, crate::sem::DATA_READ),
     }
 }
 
@@ -190,7 +258,7 @@ pub fn rd16<B: Backend>(b: &mut B, rm: &Rm<B::V<W64>>) -> Result<B::V<W16>, B::E
             let v: B::V<W32> = b.get(g.state());
             Ok(b.trunc::<W32, W16>(v))
         }
-        Rm::Mem(a) => b.load::<W16>(*a, crate::sem::DATA_READ),
+        Rm::Mem { a, wseg } => mem_load::<B, W16>(b, *a, *wseg),
     }
 }
 
@@ -198,7 +266,7 @@ pub fn rd16<B: Backend>(b: &mut B, rm: &Rm<B::V<W64>>) -> Result<B::V<W16>, B::E
 pub fn rd32<B: Backend>(b: &mut B, rm: &Rm<B::V<W64>>) -> Result<B::V<W32>, B::Exit> {
     match rm {
         Rm::Reg(g) => Ok(b.get(g.state())),
-        Rm::Mem(a) => b.load::<W32>(*a, crate::sem::DATA_READ),
+        Rm::Mem { a, wseg } => mem_load::<B, W32>(b, *a, *wseg),
     }
 }
 
@@ -206,7 +274,7 @@ pub fn rd32<B: Backend>(b: &mut B, rm: &Rm<B::V<W64>>) -> Result<B::V<W32>, B::E
 pub fn rd64<B: Backend>(b: &mut B, rm: &Rm<B::V<W64>>) -> Result<B::V<W64>, B::Exit> {
     match rm {
         Rm::Reg(g) => Ok(read64(b, *g)),
-        Rm::Mem(a) => b.load::<W64>(*a, crate::sem::DATA_READ),
+        Rm::Mem { a, wseg } => mem_load::<B, W64>(b, *a, *wseg),
     }
 }
 
@@ -223,7 +291,7 @@ pub fn wr8<B: Backend>(
             crate::sem::write8(b, r8, hi, v);
             Ok(())
         }
-        Rm::Mem(a) => b.store::<W8>(*a, v, crate::sem::DATA_WRITE),
+        Rm::Mem { a, .. } => b.store::<W8>(*a, v, crate::sem::DATA_WRITE),
     }
 }
 
@@ -239,7 +307,7 @@ pub fn wr16<B: Backend>(b: &mut B, rm: &Rm<B::V<W64>>, v: B::V<W16>) -> Result<(
             b.set(g.state(), merged);
             Ok(())
         }
-        Rm::Mem(a) => b.store::<W16>(*a, v, crate::sem::DATA_WRITE),
+        Rm::Mem { a, wseg } => mem_store::<B, W16>(b, *a, *wseg, v),
     }
 }
 
@@ -251,7 +319,7 @@ pub fn wr32<B: Backend>(b: &mut B, rm: &Rm<B::V<W64>>, v: B::V<W32>) -> Result<(
             clear_hi(b, *g);
             Ok(())
         }
-        Rm::Mem(a) => b.store::<W32>(*a, v, crate::sem::DATA_WRITE),
+        Rm::Mem { a, wseg } => mem_store::<B, W32>(b, *a, *wseg, v),
     }
 }
 
@@ -262,7 +330,7 @@ pub fn wr64<B: Backend>(b: &mut B, rm: &Rm<B::V<W64>>, v: B::V<W64>) -> Result<(
             write64(b, *g, v);
             Ok(())
         }
-        Rm::Mem(a) => b.store::<W64>(*a, v, crate::sem::DATA_WRITE),
+        Rm::Mem { a, wseg } => mem_store::<B, W64>(b, *a, *wseg, v),
     }
 }
 
@@ -378,7 +446,7 @@ pub fn rd<B: Backend, W: Hw>(
 ) -> Result<B::V<W>, B::Exit> {
     match rm {
         Rm::Reg(g) => Ok(W::get(b, *g, d)),
-        Rm::Mem(a) => b.load::<W>(*a, crate::sem::DATA_READ),
+        Rm::Mem { a, wseg } => mem_load::<B, W>(b, *a, *wseg),
     }
 }
 
@@ -394,7 +462,7 @@ pub fn wr<B: Backend, W: Hw>(
             W::put(b, *g, d, v);
             Ok(())
         }
-        Rm::Mem(a) => b.store::<W>(*a, v, crate::sem::DATA_WRITE),
+        Rm::Mem { a, wseg } => mem_store::<B, W>(b, *a, *wseg, v),
     }
 }
 

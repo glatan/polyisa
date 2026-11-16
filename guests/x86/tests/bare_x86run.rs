@@ -6328,7 +6328,7 @@ fn run_shl_m32_imm8_mem8() {
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     for (mem, flags, outb) in [
         ([0x81, 0x00, 0x00, 0x00], 0x04u32, [0x00, 0x81, 0x00, 0x00]),
-        ([0x00, 0x00, 0x00, 0x01], 0x45, [0x00, 0x00, 0x00, 0x00]),
+        ([0x00, 0x00, 0x00, 0x01], 0x845, [0x00, 0x00, 0x00, 0x00]),
     ] {
         let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
         env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
@@ -8063,8 +8063,9 @@ fn run_rol_bp_imm8() {
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
     assert_eq!(out, Outcome::StepLimit { pc: 0x1004 });
     assert_eq!(env.backend.get(Gpr(5).state()), 0x1234_AB00);
-    // ROL は CF/OF のみに触り SF/ZF/PF は不変（0xab00 の LSB は 0）。
-    assert_eq!(env.backend.get(polyisa_guest_x86::sem::eflags_ref()), 0);
+    // ROL は CF/OF のみに触り SF/ZF/PF は不変。結果 0xab00 の LSB=0 より
+    // CF=0、OF=msb(v)^CF=1（8088 実測: 回数 1 の式を最終状態へ適用）。
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::eflags_ref()), 0x800);
 }
 
 #[test]
@@ -15764,4 +15765,167 @@ fn run16_p67_asize32() {
     let out = run_x86::run_m16(&mut env, 0x1000, &mut sys, 1);
     assert_eq!(out, Outcome::StepLimit { pc: 0x1003 });
     assert_eq!(env.backend.get(Gpr(0).state()) & 0xFFFF, 0xFACE);
+}
+
+#[test]
+fn run16_ea16_word_wrap() {
+    // 8B 07 = mov ax,[bx]。BX=0xFFFF, DS=0x100 → 下位は DS:0xFFFF（実番地
+    // 0x1FFF）、上位はセグメント内折り返しで DS:0x0000（実番地 0x1000）。
+    let mut env = env16(&[0x8B, 0x07], 0x4000);
+    env.backend.set(polyisa_guest_x86::sem::sreg_ref(3), 0x100);
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(3), 0xFFFF);
+        Ok(())
+    })
+    .unwrap();
+    env.backend.mem.write(VirtAddr(0x10FFF), &[0xAA]).unwrap();
+    env.backend.mem.write(VirtAddr(0x1000), &[0xBB]).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_m16(&mut env, 0x4000, &mut sys, 1);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x4002 });
+    assert_eq!(env.backend.get(Gpr(0).state()) & 0xFFFF, 0xBBAA);
+}
+
+#[test]
+fn run16_rep_movsw_wrap() {
+    // F3 A5 = rep movsw。SI=0xFFFF の読みは 0xFFFF+0x0000 に折り返す。
+    let mut env = env16(&[0xF3, 0xA5], 0x4000);
+    env.backend.set(polyisa_guest_x86::sem::sreg_ref(3), 0x100); // DS
+    env.backend.set(polyisa_guest_x86::sem::sreg_ref(0), 0x200); // ES
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(1), 1); // CX
+        polyisa_guest_x86::sem::write64(b, Gpr(6), 0xFFFF); // SI
+        polyisa_guest_x86::sem::write64(b, Gpr(7), 4); // DI
+        Ok(())
+    })
+    .unwrap();
+    env.backend.mem.write(VirtAddr(0x10FFF), &[0xAA]).unwrap();
+    env.backend.mem.write(VirtAddr(0x1000), &[0xBB]).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_m16(&mut env, 0x4000, &mut sys, 1);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x4002 });
+    let mut buf = [0u8; 2];
+    env.backend
+        .mem
+        .read(VirtAddr(0x2004), &mut buf, polyisa_mem::Access::DATA_LE)
+        .unwrap();
+    assert_eq!(u16::from_le_bytes(buf), 0xBBAA);
+    assert_eq!(env.backend.get(Gpr(6).state()) & 0xFFFF, 0x0001);
+    assert_eq!(env.backend.get(Gpr(7).state()) & 0xFFFF, 0x0006);
+}
+
+#[test]
+fn run16_setmo_cl() {
+    // D3 F6 = setmo si,cl（8088 /6 undocumented）。CL=0 なら結果・旗とも不変、
+    // CL!=0 なら SI=0xFFFF で論理旗型（SZP 更新、CF/OF/AF=0）。
+    let mut env = env16(&[0xD3, 0xF6], 0x1000);
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(1), 0);
+        polyisa_guest_x86::sem::write64(b, Gpr(6), 0x1234);
+        Ok(())
+    })
+    .unwrap();
+    env.backend
+        .set(polyisa_guest_x86::sem::eflags_ref(), 0x08D5);
+    let mut sys = X64Exit;
+    let out = run_x86::run_m16(&mut env, 0x1000, &mut sys, 1);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+    assert_eq!(env.backend.get(Gpr(6).state()) & 0xFFFF, 0x1234);
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::eflags_ref()),
+        0x08D5
+    );
+
+    let mut env = env16(&[0xD3, 0xF6], 0x1000);
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(1), 5);
+        polyisa_guest_x86::sem::write64(b, Gpr(6), 0x1234);
+        Ok(())
+    })
+    .unwrap();
+    env.backend
+        .set(polyisa_guest_x86::sem::eflags_ref(), 0x08D5);
+    let mut sys = X64Exit;
+    let out = run_x86::run_m16(&mut env, 0x1000, &mut sys, 1);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+    assert_eq!(env.backend.get(Gpr(6).state()) & 0xFFFF, 0xFFFF);
+    // SZP(0xFFFF)=SF|PF、CF/OF/AF=0。
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x8D5,
+        0x84
+    );
+}
+
+#[test]
+fn run16_daa_af_edges() {
+    // DAA: AL=0x9E, AF=1, CF=0 → +6 のみ（第2補正なし）。8088 実測。
+    let mut env = env16(&[0x27], 0x1000);
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(0), 0x9E);
+        Ok(())
+    })
+    .unwrap();
+    env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 0x10);
+    let mut sys = X64Exit;
+    let out = run_x86::run_m16(&mut env, 0x1000, &mut sys, 1);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1001 });
+    assert_eq!(env.backend.get(Gpr(0).state()) & 0xFF, 0xA4);
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 1, 0);
+
+    // AL=0xFD, AF=0, CF=0 → +0x66（第2補正あり）。
+    let mut env = env16(&[0x27], 0x1000);
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(0), 0xFD);
+        Ok(())
+    })
+    .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_m16(&mut env, 0x1000, &mut sys, 1);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1001 });
+    assert_eq!(env.backend.get(Gpr(0).state()) & 0xFF, 0x63);
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 1, 1);
+}
+
+#[test]
+fn run16_aaa_independent_ah() {
+    // AAA: AX=0x72FF → AH+1 と AL+6 は独立（桁上げは伝搬しない）→ 0x7305。
+    let mut env = env16(&[0x37], 0x1000);
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(0), 0x72FF);
+        Ok(())
+    })
+    .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_m16(&mut env, 0x1000, &mut sys, 1);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1001 });
+    assert_eq!(env.backend.get(Gpr(0).state()) & 0xFFFF, 0x7305);
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x11,
+        0x11
+    );
+}
+
+#[test]
+fn run16_imul8_flags() {
+    // F6 2F = imul byte [bx]。AL=0xEC（-20）* [bx]=0x06 → AX=0xFF88。
+    // IMUL 旗: chk = AH - sext(AL) = 0xFF - 0xFF = 0 → Z=1,S=0,P=1、
+    // CF=OF=0、AF = AL<0 && AH&0xF==0xF → 1（8088 実測）。
+    let mut env = env16(&[0xF6, 0x2F], 0x1000);
+    env.backend.set(polyisa_guest_x86::sem::sreg_ref(3), 0x200);
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(0), 0xEC);
+        polyisa_guest_x86::sem::write64(b, Gpr(3), 0x10);
+        Ok(())
+    })
+    .unwrap();
+    env.backend.mem.write(VirtAddr(0x2010), &[0x06]).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_m16(&mut env, 0x1000, &mut sys, 1);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+    assert_eq!(env.backend.get(Gpr(0).state()) & 0xFFFF, 0xFF88);
+    // OF|SF|ZF|AF|PF|CF = 0|0|1|1|1|0
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x8D5,
+        0x54
+    );
 }
