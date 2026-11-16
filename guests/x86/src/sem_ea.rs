@@ -4355,3 +4355,112 @@ pub fn frstor_m<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>) -> Flow<B> {
     }
     Ok(())
 }
+
+/// FBLD m80。9 バイトのパック十進 18 桁 + 符号バイトを読み、
+/// 整数として拡張精度に変換して積む。符号付き 0 は -0.0 になる。
+/// 数字でないニブルは値としてそのまま扱う（SDM の規定する無効動作は未対応）。
+pub fn fbld_m<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>) -> Flow<B> {
+    let Rm::Mem(a) = ea else {
+        return Ok(());
+    };
+    let a = *a;
+    let mut acc = b.konst::<W64>(0);
+    let mut mul = b.konst::<W64>(1);
+    let ten = b.konst::<W64>(10);
+    let m0f = b.konst::<W8>(0x0F);
+    let s4 = b.konst::<W8>(4);
+    for i in 0..18u64 {
+        let off = b.konst::<W64>(i / 2);
+        let addr = b.add::<W64>(a, off);
+        let byte = b.load::<W8>(addr, sem::DATA_READ)?;
+        let nib = if i % 2 == 0 {
+            b.and::<W8>(byte, m0f)
+        } else {
+            b.shr_l::<W8>(byte, s4)
+        };
+        let nib64 = b.zext::<W8, W64>(nib);
+        let term = b.mul::<W64>(nib64, mul);
+        acc = b.add::<W64>(acc, term);
+        mul = b.mul::<W64>(mul, ten);
+    }
+    let off9 = b.konst::<W64>(9);
+    let addr9 = b.add::<W64>(a, off9);
+    let sbyte = b.load::<W8>(addr9, sem::DATA_READ)?;
+    let s80 = b.konst::<W8>(0x80);
+    let sbits = b.and::<W8>(sbyte, s80);
+    let is_neg = b.cmp::<W8>(Cmp::Eq, sbits, s80);
+    let zero = b.konst::<W64>(0);
+    let negv = b.sub::<W64>(zero, acc);
+    let v = b.select::<W64>(is_neg, negv, acc);
+    let (sig, exp0) = sem::i64_to_ext(b, v);
+    // i64_to_ext は -0 を作れないので、負の 0 には符号ビットを足す。
+    let kb = b.konst::<W16>(0x8000);
+    let k0 = b.konst::<W16>(0);
+    let sbit = b.select::<W16>(is_neg, kb, k0);
+    let exp = b.or::<W16>(exp0, sbit);
+    sem::push_ext(b, sig, exp)
+}
+
+/// FBSTP m80。ST(0) を FCW の丸めで整数にしてパック十進へ書き、pop する。
+/// 18 桁に入らない値・非数は不定（全バイト 0xFF）を書く。
+pub fn fbstp_m<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>) -> Flow<B> {
+    let Rm::Mem(a) = ea else {
+        return Ok(());
+    };
+    let a = *a;
+    let top = b.get(sem::top_ref());
+    let (sig, exp) = sem::read_st(b, top);
+    let v = sem::f80_to_i64(b, sig, exp);
+    let indef = b.konst::<W64>(1u64 << 63);
+    let raw_indef = b.cmp::<W64>(Cmp::Eq, v, indef);
+    let exp64 = b.zext::<W16, W64>(exp);
+    let s15 = b.konst::<W64>(15);
+    let sgn = b.shr_l::<W64>(exp64, s15);
+    let one = b.konst::<W64>(1);
+    let neg = b.cmp::<W64>(Cmp::Eq, sgn, one);
+    let zero = b.konst::<W64>(0);
+    let negv = b.sub::<W64>(zero, v);
+    let mag = b.select::<W64>(neg, negv, v);
+    // 18 桁（< 10^18）に収まる範囲だけを書く。
+    let lim = b.konst::<W64>(1_000_000_000_000_000_000);
+    let big = b.cmp::<W64>(Cmp::GeU, mag, lim);
+    let is_indef = sem::bit_or(b, raw_indef, big);
+    let ten = b.konst::<W64>(10);
+    let s4 = b.konst::<W64>(4);
+    let ff8 = b.konst::<W8>(0xFF);
+    let mut m = mag;
+    for i in 0..9u64 {
+        let off = b.konst::<W64>(i);
+        let addr = b.add::<W64>(a, off);
+        let d0 = b.urem::<W64>(m, ten);
+        let m1 = b.udiv::<W64>(m, ten);
+        let d1 = b.urem::<W64>(m1, ten);
+        let m2 = b.udiv::<W64>(m1, ten);
+        let d1s = b.shl::<W64>(d1, s4);
+        let pair = b.or::<W64>(d0, d1s);
+        let pair8: B::V<W8> = b.trunc::<W64, W8>(pair);
+        let byte = b.select::<W8>(is_indef, ff8, pair8);
+        b.store::<W8>(addr, byte, sem::DATA_WRITE)?;
+        m = m2;
+    }
+    let off9 = b.konst::<W64>(9);
+    let addr9 = b.add::<W64>(a, off9);
+    let s8 = b.konst::<W8>(0x80);
+    let z8 = b.konst::<W8>(0);
+    let sval = b.select::<W8>(neg, s8, z8);
+    let sbyte = b.select::<W8>(is_indef, ff8, sval);
+    b.store::<W8>(addr9, sbyte, sem::DATA_WRITE)?;
+    sem::pop_st(b, top)
+}
+
+/// FNSTSW AX（DF E0）。fsw に TOP を合成して AX へ書く。
+pub fn fnstsw_ax<B: Backend>(b: &mut B) {
+    let fsw: B::V<W16> = b.get(sem::fsw_ref());
+    let top = b.get(sem::top_ref());
+    let seven = b.konst::<W16>(7);
+    let t3 = b.and::<W16>(top, seven);
+    let sh = b.konst::<W16>(11);
+    let tbits = b.shl::<W16>(t3, sh);
+    let v = b.or::<W16>(fsw, tbits);
+    decode::gwr16(b, Gpr(0), v);
+}

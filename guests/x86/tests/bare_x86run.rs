@@ -15436,3 +15436,123 @@ fn run_fnsave_frstor_roundtrip() {
         1u64 << 63
     );
 }
+
+#[test]
+fn run_fbld_m80() {
+    // DF 25 = fbld [0x2000]。パック十進 12345 を積む（top=7、12345=0x3039<<50、exp=0x400C）。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    let bcd: [u8; 10] = [0x45, 0x23, 0x01, 0, 0, 0, 0, 0, 0, 0x00];
+    env.backend.mem.write(VirtAddr(0x2000), &bcd).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0xDF, 0x25, 0xFA, 0x0F, 0x00, 0x00])
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1006 });
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::top_ref()), 7);
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::st_exp_ref(7)),
+        0x400C
+    );
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::st_sig_ref(7)),
+        0xC0E4_0000_0000_0000
+    );
+}
+
+#[test]
+fn run_fbld_m80_negative() {
+    // 符号バイト 0x80 で -12345。exp の bit15 が立つ。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    let bcd: [u8; 10] = [0x45, 0x23, 0x01, 0, 0, 0, 0, 0, 0, 0x80];
+    env.backend.mem.write(VirtAddr(0x2000), &bcd).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0xDF, 0x25, 0xFA, 0x0F, 0x00, 0x00])
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1006 });
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::st_exp_ref(7)),
+        0xC00C
+    );
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::st_sig_ref(7)),
+        0xC0E4_0000_0000_0000
+    );
+}
+
+#[test]
+fn run_fbstp_m80() {
+    // fld dword [0x2000]=42.0f のあと DF 35 = fbstp [0x2100]。
+    // 書き込みは 0x42 0x00*8 0x00。pop で top=0 に戻る。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2000), &0x4228_0000u32.to_le_bytes())
+        .unwrap();
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x1000),
+            &[
+                0xD9, 0x05, 0xFA, 0x0F, 0x00, 0x00, // fld dword [0x2000]
+                0xDF, 0x35, 0xF4, 0x10, 0x00, 0x00, // fbstp tbyte [0x2100]
+            ],
+        )
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 2, true);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x100C });
+    let mut buf = [0xAAu8; 10];
+    env.backend
+        .mem
+        .read(VirtAddr(0x2100), &mut buf, polyisa_mem::Access::DATA_LE)
+        .unwrap();
+    assert_eq!(buf[0], 0x42);
+    assert!(buf[1..10].iter().all(|b| *b == 0));
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::top_ref()), 0);
+}
+
+#[test]
+fn run_fnstsw_ax() {
+    // fld 1.0; fcom 2.0 (C0=1); DF E0 = fnstsw ax -> AX=0x3900。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2000), &0x3f800000u32.to_le_bytes())
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2004), &0x40000000u32.to_le_bytes())
+        .unwrap();
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x1000),
+            &[
+                0xD9, 0x05, 0xFA, 0x0F, 0x00, 0x00, // fld dword [0x2000]
+                0xD8, 0x15, 0xF8, 0x0F, 0x00, 0x00, // fcom dword [0x2004]
+                0xDF, 0xE0, // fnstsw ax
+            ],
+        )
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 3, true);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x100E });
+    assert_eq!(env.backend.get(Gpr(0).state()) & 0xFFFF, 0x3900);
+}

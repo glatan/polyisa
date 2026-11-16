@@ -3837,10 +3837,17 @@ fn dispatch_map<B: Backend>(
             sem_ea::fist_m(b, &ea, 16, true)
         }
         Insn::FbldM80 => {
-            // BCD 変換は未実装。mod=11 の DF E0 FNSTSW AX も
-            // ステータスワード未モデルで旧経路へ。
-            let _ = &ea;
-            return Ok(false);
+            if d.modrm >= 0xC0 {
+                // DF E0 = FNSTSW AX。E1-E7 は未定義。
+                if d.modrm & 7 == 0 {
+                    sem_ea::fnstsw_ax(b);
+                    Ok(())
+                } else {
+                    return Ok(false);
+                }
+            } else {
+                sem_ea::fbld_m(b, &ea)
+            }
         }
         Insn::FildM64 => {
             if d.modrm >= 0xC0 {
@@ -3854,7 +3861,7 @@ fn dispatch_map<B: Backend>(
                 // FCOMIP も旗の規則は FUCOMIP と同じ。
                 polyisa_guest_x86::sem::fucomip_st(b, d.modrm & 7)
             } else {
-                return Ok(false);
+                sem_ea::fbstp_m(b, &ea)
             }
         }
         Insn::FistpM64 => {
