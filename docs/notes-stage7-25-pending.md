@@ -355,3 +355,59 @@
 - 段階の完了条件は `design/roadmap.md` の各段階の表。
 - 台帳の規則は `references.md` の冒頭。
 - 前段階の記録は `notes-stage5-6-pending.md`。
+
+## 進行ログ（17:30 UTC 時点）
+
+- e7affcc: 段階10+11 を同一コミットで push（エージェント途中停止のため）。
+- 段階11 レビュー完了: C2（old_mmap ABI・EX/EXRL）、M28件
+  （形式誤り・CC 表・幅/レジスタ保存・FP・stat レイアウト）。
+  修正エージェント 7b96f65f が対応中。
+- 段階10 レビュー（5d4378fa）・Power %f/アロケータ調査
+  （29f66a52）・段階12 WASM 実装（18ae746d）が並行稼働。
+- Power 動的 musl: `%f` 小数部消失（1.5→1.0、0.5 は正）と
+  `%d`/echo で allocator assert の2件が未解決として残る。
+
+## 進行ログ（続・Power 動的 musl 2件の解決）
+
+段階8 レビュー記録の「未対応」2件（上記 93-97 行・68-73 行）は
+いずれも Power 意味論の不具合が原因で、修正済み。
+
+- `%f`/`%e`/`%g` の小数部消失:
+  - 原因: `cmpi`/`cmpli`/`tdi`/`twi` が被演算子に `ra()`（(RA|0)
+    規約、r0 を定数 0 と読む）を使っていた。ISA では即値形式の
+    比較・トラップは `(RA)` であり、エンコードが r0 のときも
+    格納値を読む。M2 の「r0=0 読み」修正がアドレッシング基底と
+    同じ規約を即値比較に誤適用した退行（15a1637 では正、
+    02b151e で混入）。
+  - 症状: musl の `fesetenv`/fmt_fp 経路の `cmpwi r0,0`
+    （PC 0x2…213c0 付近）が実 r0 を捨てて桁生成の繰り越し
+    ストアを飛ばし、1 以上の値の小数部が全て 0 になった
+    （`%f 1.5`→`1.000000`、`0.5` は正しい）。
+  - 修正: `sem.rs` の `cmp_imm`/`cmpl_imm`/`trap_imm` を
+    `ra()`→`g()` に変更。
+- mallocng `activate_group` の `assert(!avail_mask)` a_crash:
+  - 原因: Altivec（VMX）の VR 番号フィールドを VSR[32+n] に
+    マップすべきところ、生の 5 ビットを VSR 番号として使って
+    いた。`lvx`/`stvx`（X31 XO 103/231）と op4 系ベクタ命令
+    （vperm/vsel/vsldoi/加減算等の全 VA/VX 系）が FPR 空間
+    （VSR0-31）を読み書きしていた。
+  - 症状: gcc は callee-saved の VR31（VSR63）を musl
+    mallocng の `queue()` 用 `struct meta*` スプラット値の
+    キャッシュに使う。alloc_group→alloc_slot→alloc_group の
+    入れ子呼出で、内側の `stvx 31` が VSR31（f31）の値を退避し
+    `lvx 31` が VSR31 へ復帰するため、外側呼出に戻った時点で
+    VSR63 が内側の meta 値のままになる。その結果 `queue` の
+    `stxvd2x 63,0,30` が `m->prev`/`m->next` に別の meta
+    ポインタを書き、破壊された単一ノードの `avail_mask` 非零で
+    `.long 0`（a_crash）に落ちた。
+  - 修正: `x31_vsx_ls` の lvx/stvx を `xt`→`t+32` に、`x4` の
+    VR フィールド（t/a/bb/各 c）を `+32` に変更。op4 で
+    A フィールドをサブopcode として使う群（vext*/vctzd/vnegw/
+    vprtybw=1538）と bcd 系（FPR 番号）は生フィールドを使う
+    よう `t_raw`/`a_raw`/`bb_raw` を併置。
+- 確認: `echo`・`printf %d`・`id`・`printf %f/%e/%g`・`ls`・
+  `seq`・`sort`・`wc`・`uname` が正常終了し、
+  `cargo test -p polyisa-cli --test heavy_program_power`（
+  distro_commands_le_dynamic 含む 4 件）が全通過。
+- 補足: `%a`/`%La` が invalid format になるのは BusyBox printf
+  アプレット自体の制約で、エミュレーション不具合ではない。

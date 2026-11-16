@@ -218,3 +218,45 @@ fn m68k_bits_roundtrip() {
     assert_eq!(b >> 64 & 0xFFFF, 0);
     assert!(v.negative());
 }
+
+#[test]
+fn vax_borrow_residual_not_signed_zero() {
+    // 1.0 - (1 - 2^-24) = 2^-24：下位を切り捨てた粗いスケールでは
+    // 差が 0 に見えるが、落ちた桁を含めると残余は非零になる。
+    // （残余 q==0 で符号つき零を返していた問題の回帰）。
+    let one = VaxFF::from_bits(0x4080_0000); // 1.0
+    let below = VaxFF::from_bits(0x407F_FFFF); // 1 - 2^-24（全 1 係数、指数 1 つ下）
+    let (r, f) = one.sub(below, Rm::Rne);
+    assert_eq!((r.bits() as u64, f), (0x3480_0000, 0));
+    // -1.0 + (1 - 2^-24) = -2^-24：符号は sy 側になる。
+    let neg_one = VaxFF::from_bits(0xC080_0000);
+    let (r2, _) = neg_one.add(below, Rm::Rne);
+    assert_eq!(r2.bits() as u64, 0xB480_0000);
+}
+
+#[test]
+fn m68k_borrow_residual_not_signed_zero() {
+    // 同じ残余ケース：1.0 - (1 - 2^-64) = 2^-64。
+    let one = M68kExt::from_parts(false, 0x3FFF, 0x8000_0000_0000_0000);
+    let below = M68kExt::from_parts(false, 0x3FFE, 0xFFFF_FFFF_FFFF_FFFF);
+    let (r, f) = one.sub(below, Rm::Rne);
+    assert_eq!(
+        (r, f),
+        (M68kExt::from_parts(false, 0x3FBF, 0x8000_0000_0000_0000), 0)
+    );
+    let neg_one = M68kExt::from_parts(true, 0x3FFF, 0x8000_0000_0000_0000);
+    let (r2, _) = neg_one.add(below, Rm::Rne);
+    assert_eq!(r2, M68kExt::from_parts(true, 0x3FBF, 0x8000_0000_0000_0000));
+}
+
+#[test]
+fn m68k_inf_ordering() {
+    // -inf < +inf（符号の違う無限大を等しいと返していた問題の回帰）。
+    let ninf = M68kExt::inf(true);
+    let pinf = M68kExt::inf(false);
+    assert_eq!(ninf.cmp(pinf), Some(-1));
+    assert_eq!(pinf.cmp(ninf), Some(1));
+    assert_eq!(ninf.cmp(ninf), Some(0));
+    assert!(ninf.lt(pinf));
+    assert!(!pinf.lt(ninf));
+}

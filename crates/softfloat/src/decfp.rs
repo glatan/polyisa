@@ -401,8 +401,21 @@ fn add_sub<const E: u32, const M: u32>(
     if dropped_nz && sx != sy && neg != sy {
         q = q.saturating_sub(1);
     }
-    if q == 0 && !dropped_nz {
-        return (VaxF::zero(), 0);
+    if q == 0 {
+        if !dropped_nz {
+            return (VaxF::zero(), 0);
+        }
+        // 粗いスケールでは 0 だが、シフトで落ちた桁を含めると残余は
+        // 零ではない。異符号（減算相当）のとき：
+        //   neg == sx（x > シフト後 y、借りパス）: 値 = (2^r - dropped)
+        //   neg == sy（x == シフト後 y）: 値 = -dropped（符号は sy）
+        // 残余は 2^-r 細かいスケールなので指数を ex - r にずらす。
+        let q2 = if neg == sx {
+            (1u128 << r) - dropped
+        } else {
+            dropped
+        };
+        return round_pack::<E, M>(neg, q2, ex - i64::from(r), false, rm);
     }
     round_pack::<E, M>(neg, q, ex, dropped_nz, rm)
 }

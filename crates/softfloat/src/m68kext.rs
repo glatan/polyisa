@@ -370,9 +370,17 @@ impl M68kExt {
         }
         let s1 = self.decode().0;
         let s2 = other.decode().0;
-        // 無限大はランクで比較。
+        // 無限大は符号で順序づく（-inf < +inf）。
         match (self.is_inf(), other.is_inf()) {
-            (true, true) => return Some(0),
+            (true, true) => {
+                return Some(if s1 == s2 {
+                    0
+                } else if s1 {
+                    -1
+                } else {
+                    1
+                });
+            }
             (true, false) => return Some(if s1 { -1 } else { 1 }),
             (false, true) => return Some(if s2 { 1 } else { -1 }),
             _ => {}
@@ -506,9 +514,9 @@ fn add_sub(a: M68kExt, b: M68kExt, flip: bool, rm: Rm) -> (M68kExt, u8) {
         (m2, m1, s2, s1, e2)
     };
     let diff = (e1 - e2).unsigned_abs();
+    let r = diff.min(127) as u32;
     let mut dropped: u128 = 0;
-    if diff > 0 {
-        let r = diff.min(127) as u32;
+    if r > 0 {
         dropped = y & ((1u128 << r) - 1);
         y >>= r;
     }
@@ -523,8 +531,21 @@ fn add_sub(a: M68kExt, b: M68kExt, flip: bool, rm: Rm) -> (M68kExt, u8) {
     if dropped_nz && sx != sy && neg != sy {
         q = q.saturating_sub(1);
     }
-    if q == 0 && !dropped_nz {
-        return (M68kExt::zero_signed(false), 0);
+    if q == 0 {
+        if !dropped_nz {
+            return (M68kExt::zero_signed(false), 0);
+        }
+        // 粗いスケールでは 0 だが、シフトで落ちた桁を含めると残余は
+        // 零ではない。異符号（減算相当）のとき：
+        //   neg == sx（x > シフト後 y、借りパス）: 値 = (2^r - dropped)
+        //   neg == sy（x == シフト後 y）: 値 = -dropped（符号は sy）
+        // 残余は 2^-r 細かいスケールなので指数を ex - r にずらす。
+        let q2 = if neg == sx {
+            (1u128 << r) - dropped
+        } else {
+            dropped
+        };
+        return round_window(neg, q2, ex - i64::from(r), 0, rm);
     }
     round_window(neg, q, ex, i8::from(dropped_nz), rm)
 }

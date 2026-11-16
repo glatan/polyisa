@@ -409,17 +409,18 @@ fn andi_rc_i<B: Backend>(b: &mut B, ra_d: u8, rs: u8, imm: u64) -> Flow<B> {
     Ok(())
 }
 
-/// cmpwi/cmpdi。
+/// cmpwi/cmpdi。cmpi の被演算子は (RA) で、r0 は格納値を読む
+/// （(RA|0) 規約は cmpi には適用されない。Ref: SPEC-POWER-ISA Book I）。
 fn cmp_imm<B: Backend>(b: &mut B, bf: u8, l: bool, r: u8, imm: i64) -> Flow<B> {
-    let a = ra(b, r);
+    let a = g(b, r);
     let x = k(b, imm as u64);
     do_cmp(b, bf, l, false, a, x);
     Ok(())
 }
 
-/// cmplwi/cmpldi。
+/// cmplwi/cmpldi。cmpli も (RA)。r0 は格納値を読む。
 fn cmpl_imm<B: Backend>(b: &mut B, bf: u8, l: bool, r: u8, imm: u64) -> Flow<B> {
-    let a = ra(b, r);
+    let a = g(b, r);
     let x = k(b, imm);
     do_cmp(b, bf, l, true, a, x);
     Ok(())
@@ -479,9 +480,9 @@ fn trap_if<B: Backend>(b: &mut B, to: u8, l: bool, a: B::V<W64>, x: B::V<W64>) -
     })
 }
 
-/// tdi/twi。
+/// tdi/twi。trap 即値形式の被演算子も (RA)。r0 は格納値を読む。
 fn trap_imm<B: Backend>(b: &mut B, to: u8, l: bool, r: u8, imm: i64) -> Flow<B> {
-    let a = ra(b, r);
+    let a = g(b, r);
     let x = k(b, imm as u64);
     trap_if(b, to, l, a, x)
 }
@@ -1710,6 +1711,8 @@ fn x31_stcx<B: Backend>(b: &mut B, xo: u32, t: u8, a: u8, bb: u8, le: bool) -> F
 /// lvsl/lvsr。要素の IBM 番号は EA mod 要素サイズで、要素内部の
 /// バイト順は常に BE 規約（Ref: SPEC-POWER-ISA）。
 fn x31_velem_ls<B: Backend>(b: &mut B, xo: u32, t: u8, a: u8, bb: u8, _le: bool) -> Flow<B> {
+    // Altivec の VR 番号は VSR[t+32]（lvx/stvx と同じく VSX 拡張なし）。
+    let t = t + 32;
     let base = ra(b, a);
     let idx = g(b, bb);
     let ea = b.add(base, idx);
@@ -1965,13 +1968,15 @@ fn x31_vsx_ls<B: Backend>(
             set_vsr(b, xt, v);
         }
         103 => {
-            // lvx: 16B。LE モードは要素順が IBM 逆。全バイト反転で近似。
+            // lvx: 16B。Altivec の VR 番号は VSR[t+32]（VSX 拡張なし）。
+            // LE モードは要素順が IBM 逆。全バイト反転で近似。
             let v = b.load::<W128>(ea, acc)?;
             let w = bswap128(b, v);
-            set_vsr(b, xt, w);
+            set_vsr(b, t + 32, w);
         }
         231 => {
-            let v = vsr(b, xt);
+            // stvx: ソースも VSR[t+32]。
+            let v = vsr(b, t + 32);
             let w = bswap128(b, v);
             b.store::<W128>(ea, w, accw)?;
         }
@@ -4888,22 +4893,27 @@ fn bnot_m<B: Backend>(b: &mut B, c: B::B) -> B::V<W64> {
 }
 
 // ---------------- BCD（パック十進整数） ----------------
-// bcdadd./bcdsub. は Z22 形式。FPR は 15 桁の BCD（bit4–63）と符号
-// ニブル（bit0–3）。入力の符号は 0xB と 0xD が負、0xA 以上の残りが
-// 正で、0x9 以下の符号ニブルと 9 を超える数字ニブルは無効である。
-// 出力の符号は PS=0 なら 0xC/0xD、PS=1 なら 0xF/0xB を優先する。
-// 無効オペランドの結果は未定義だが、決定性のため桁をそのまま演算
-// した値を返し、CR0.SO だけを立てる。
+// bcdadd./bcdsub. は VX 形式で、VSR 全体（128 ビット）がオペランド：
+// 31 桁の BCD（bit4–127、ニブル 1–31）と符号ニブル（bit0–3）。
+// 入力の符号は 0xB と 0xD が負、0xA 以上の残りが正で、0x9 以下の
+// 符号ニブルと 9 を超える数字ニブルは無効である（SPEC-POWER-ISA の
+// bcd_ADD/bcd_SUBTRACT）。出力の符号は結果が負なら常に 0xD、負で
+// なければ PS=0 なら 0xC、PS=1 なら 0xF（優先符号コード）。結果の
+// 条件コードは CR6 に書く。無効オペランドの結果は未定義だが、決定性
+// のため桁をそのまま演算した値を返す。
 
-/// 15 桁の BCD 加算。戻り値は (15 桁の和, 16 桁目のキャリ)。
-fn bcd_add15<B: Backend>(b: &mut B, x: B::V<W64>, y: B::V<W64>) -> (B::V<W64>, B::B) {
-    let mut out = k(b, 0);
-    let mut carry = k(b, 0);
-    let f = k(b, 0xf);
-    let nine = k(b, 9);
-    for i in 0..15u64 {
-        // 桁はニブル 1..15（bits 4..63）。ニブル 0 は符号。
-        let sh = k(b, 4 + i * 4);
+/// 31 桁の BCD 加算。桁はニブル 1..31（bits 4..127）。ニブル 0 は
+/// 符号で読みも書きもしない。戻り値は (31 桁の和, 32 桁目のキャリ)。
+fn bcd_add31<B: Backend>(b: &mut B, x: B::V<W128>, y: B::V<W128>) -> (B::V<W128>, B::B) {
+    let mut out = k128(b, 0);
+    let mut carry = k128(b, 0);
+    let f = k128(b, 0xf);
+    let nine = k128(b, 9);
+    let one = k128(b, 1);
+    let z = k128(b, 0);
+    let k10 = k128(b, 10);
+    for i in 0..31u128 {
+        let sh = k128(b, 4 + i * 4);
         let sx = b.shr_l(x, sh);
         let dx = b.and(sx, f);
         let sy = b.shr_l(y, sh);
@@ -4912,56 +4922,58 @@ fn bcd_add15<B: Backend>(b: &mut B, x: B::V<W64>, y: B::V<W64>) -> (B::V<W64>, B
         let s = b.add(s0, carry);
         // 桁が 9 を超えたら 10 を引いて次位に送る。
         let c = b.cmp(Cmp::GtU, s, nine);
-        let ten = bsel64(b, c, 10, 0);
+        let ten = b.select(c, k10, z);
         let d0 = b.sub(s, ten);
         let d = b.and(d0, f);
         let ds = b.shl(d, sh);
         out = b.or(out, ds);
-        carry = bsel64(b, c, 1, 0);
+        carry = b.select(c, one, z);
     }
-    let z = k(b, 0);
     (out, b.cmp(Cmp::Ne, carry, z))
 }
 
-/// 15 桁の BCD 減算（x >= y を前提）。桁ごとに借りる。
-fn bcd_sub15<B: Backend>(b: &mut B, x: B::V<W64>, y: B::V<W64>) -> B::V<W64> {
-    let mut out = k(b, 0);
-    let mut borrow = k(b, 0);
-    let f = k(b, 0xf);
-    let z = k(b, 0);
-    let six = k(b, 16);
-    for i in 0..15u64 {
-        let sh = k(b, 4 + i * 4);
+/// 31 桁の BCD 減算（x の係数 >= y の係数を前提）。桁ごとに借りる。
+/// 借りるときの補正は +10（基数 10）であって +16 ではない。
+fn bcd_sub31<B: Backend>(b: &mut B, x: B::V<W128>, y: B::V<W128>) -> B::V<W128> {
+    let mut out = k128(b, 0);
+    let mut borrow = k128(b, 0);
+    let f = k128(b, 0xf);
+    let z = k128(b, 0);
+    let one = k128(b, 1);
+    let ten = k128(b, 10);
+    for i in 0..31u128 {
+        let sh = k128(b, 4 + i * 4);
         let sx = b.shr_l(x, sh);
         let dx = b.and(sx, f);
         let sy = b.shr_l(y, sh);
         let dy = b.and(sy, f);
         let t0 = b.sub(dx, dy);
         let t = b.sub(t0, borrow);
-        // t < 0 なら 16 を足して借りる。
+        // t < 0 なら 10 を足して借りる。
         let neg = b.cmp(Cmp::LtS, t, z);
-        let adj = b.add(t, six);
+        let adj = b.add(t, ten);
         let d = b.select(neg, adj, t);
         let ds = b.shl(d, sh);
         out = b.or(out, ds);
-        borrow = bsel64(b, neg, 1, 0);
+        borrow = b.select(neg, one, z);
     }
     out
 }
 
-/// bcdadd./bcdsub. の中核。結果と CR0 の 4 ビットを返す。
+/// bcdadd./bcdsub. の中核。オペランドは VSR 全体（31 桁＋符号）。
+/// 戻り値は (結果の VSR 値, CR6 の 4 ビット)。
 fn bcd_addsub<B: Backend>(
     b: &mut B,
-    x: B::V<W64>,
-    y: B::V<W64>,
+    x: B::V<W128>,
+    y: B::V<W128>,
     ps: bool,
     sub: bool,
-) -> (B::V<W64>, B::V<W64>) {
-    let f = k(b, 0xf);
+) -> (B::V<W128>, B::V<W64>) {
+    let f = k128(b, 0xf);
     let sx = b.and(x, f);
     let sy = b.and(y, f);
-    let nb = k(b, 0xb);
-    let nd = k(b, 0xd);
+    let nb = k128(b, 0xb);
+    let nd = k128(b, 0xd);
     let ex = b.cmp(Cmp::Eq, sx, nb);
     let ex2 = b.cmp(Cmp::Eq, sx, nd);
     let nx = bor(b, ex, ex2);
@@ -4970,13 +4982,13 @@ fn bcd_addsub<B: Backend>(
     let ny0 = bor(b, ey, ey2);
     let ny = if sub { bnot(b, ny0) } else { ny0 };
     // 符号ニブルが 0xA 未満か、数字ニブルが 9 を超えるかで無効。
-    let ka = k(b, 0xa);
-    let nine = k(b, 9);
+    let ka = k128(b, 0xa);
+    let nine = k128(b, 9);
     let bx = b.cmp(Cmp::LtU, sx, ka);
     let by = b.cmp(Cmp::LtU, sy, ka);
     let mut bad = bor(b, bx, by);
-    for i in 0..15u64 {
-        let sh = k(b, 4 + i * 4);
+    for i in 0..31u128 {
+        let sh = k128(b, 4 + i * 4);
         let vx = b.shr_l(x, sh);
         let dx = b.and(vx, f);
         let vy = b.shr_l(y, sh);
@@ -4986,47 +4998,45 @@ fn bcd_addsub<B: Backend>(
         let g = bor(b, g1, g2);
         bad = bor(b, bad, g);
     }
-    let mask = k(b, 0xffff_ffff_ffff_fff0);
-    let mx = b.and(x, mask);
-    let my = b.and(y, mask);
     // 同符号なら絶対値の加算。異符号なら大きい方から小さい方を引く。
     let p1 = band(b, nx, ny);
     let nxn = bnot(b, nx);
     let nyn = bnot(b, ny);
     let p2 = band(b, nxn, nyn);
     let same = bor(b, p1, p2);
-    let (add_mag, add_c) = bcd_add15(b, mx, my);
+    let (add_mag, add_c) = bcd_add31(b, x, y);
+    let sh4 = k128(b, 4);
+    let mx = b.shr_l(x, sh4);
+    let my = b.shr_l(y, sh4);
     let lt = b.cmp(Cmp::LtU, mx, my);
-    let s_hi = bcd_sub15(b, my, mx);
-    let s_lo = bcd_sub15(b, mx, my);
+    let s_hi = bcd_sub31(b, y, x);
+    let s_lo = bcd_sub31(b, x, y);
     let sub_mag = b.select(lt, s_hi, s_lo);
-    let ny_i = bsel64(b, ny, 1, 0);
-    let nx_i = bsel64(b, nx, 1, 0);
-    let sub_neg = b.select(lt, ny_i, nx_i);
+    let sub_neg = bsel_b(b, lt, ny, nx);
     let mag = b.select(same, add_mag, sub_mag);
-    let neg_v = b.select(same, nx_i, sub_neg);
+    let neg_v = bsel_b(b, same, nx, sub_neg);
     let ovf = band(b, same, add_c);
-    // 結果が零なら正の優先符号にする。
-    let z = k(b, 0);
+    // 結果が零なら負にはならない（非負の優先符号を使う）。
+    let z = k128(b, 0);
     let nz = b.cmp(Cmp::Ne, mag, z);
-    let neg_r = b.cmp(Cmp::Ne, neg_v, z);
-    let neg_eff = band(b, neg_r, nz);
-    let sc = bsel64(
-        b,
-        neg_eff,
-        if ps { 0xb } else { 0xd },
-        if ps { 0xf } else { 0xc },
-    );
-    // 符号は最下位ニブル。
+    // 符号と CR6 は切り詰め後の桁ではなく無制限の結果に基づく：
+    // 桁あふれした和は、格納された桁がすべて 0 でも非零として扱う。
+    let nz_ub = bor(b, nz, ovf);
+    let neg_eff = band(b, neg_v, nz_ub);
+    let negv = k128(b, 0xd);
+    let posv = k128(b, if ps { 0xf } else { 0xc });
+    let sc = b.select::<W128>(neg_eff, negv, posv);
+    // 符号は最下位ニブル（mag のニブル 0 は常に 0）。
     let res = b.or(mag, sc);
-    // CR0：負→LT、正の非零→GT、零→EQ、無効・桁あふれ→SO。
-    let lt_f = band(b, neg_eff, nz);
+    // CR6：負→LT、正の非零→GT、零→EQ、無効→SO のみ、桁あふれ→SO 追加。
+    // （GT/LT/EQ は無制限の結果で判定する：SPEC-POWER-ISA）。
+    let lt_f = band(b, neg_eff, nz_ub);
     let neg_n = bnot(b, neg_eff);
-    let gt_f = band(b, neg_n, nz);
+    let gt_f = band(b, neg_n, nz_ub);
     let c1 = bsel64(b, lt_f, CR_LT, 0);
     let c2 = bsel64(b, gt_f, CR_GT, 0);
     let mut cr = b.or(c1, c2);
-    let nzn = bnot(b, nz);
+    let nzn = bnot(b, nz_ub);
     let c3 = bsel64(b, nzn, CR_EQ, 0);
     cr = b.or(cr, c3);
     let so = bor(b, bad, ovf);
@@ -5625,13 +5635,18 @@ fn pow10_64<B: Backend>(b: &mut B, i: B::V<W64>) -> B::V<W64> {
 
 /// 二進係数 `cb`（< 10^16）の十進桁数（0..16）。cb=0 → 0。
 fn ndig64<B: Backend>(b: &mut B, cb: B::V<W64>) -> B::V<W64> {
-    let mut nd = k(b, 0);
+    // cb != 0 なら最低 1 桁。cb >= 10^i → 桁数は i+1 以上。
+    let z = k(b, 0);
+    let nz = b.cmp(Cmp::Ne, cb, z);
+    let mut nd = {
+        let one = k(b, 1);
+        b.select(nz, one, z)
+    };
     let mut pw = 1u64;
     for i in 1..=16u64 {
         pw = pw.saturating_mul(10);
         let pv = k(b, pw);
         let ge = b.cmp(Cmp::GeU, cb, pv);
-        // cb >= 10^i → 桁数は i+1 以上。
         let iv = k(b, i + 1);
         nd = b.select(ge, iv, nd);
     }
@@ -5758,23 +5773,49 @@ fn d64_addsub_fin<B: Backend>(
         b.cmp(Cmp::Ne, lco, z)
     };
     let hnd = ndig64(b, hco);
-    // 同符号で遠い → 係数 = hi を 16 桁左詰め、guard=0、sticky=lo!=0。
-    //   h = d + nd(hi) - 1、be = lbe + h - 15。
-    let ljz = {
-        let room = b.sub(c16, hnd);
-        let pw2 = pow10_64(b, room);
-        b.mul(hco, pw2)
-    };
     let h_pos = {
         let t = b.add(d, hnd);
         b.sub(t, one)
     };
+    // be = lbe + h_pos - 15（窓の最下位位置に合わせる）。
     let be_far_same = {
         let t = b.add(lbe, h_pos);
         let k15 = k(b, 15);
         b.sub(t, k15)
     };
+    let k15v = k(b, 15);
+    // 同符号で遠い → C = hi*10^d + lo（桁は混ざらない）。係数は
+    // 位置 wbot_s..h_pos の 16 桁を組み立て、ガードは wbot_s-1、
+    // それ未満に残る lo の桁が sticky（hi の桁は全て位置 d 以上）。
+    let wbot_s = b.sub(h_pos, k15v);
+    let gpos_s = b.sub(wbot_s, one);
+    let dig_same = |b: &mut B, p: B::V<W64>| -> B::V<W64> {
+        let pge = b.cmp(Cmp::GeU, p, d);
+        let pd_d = b.sub(p, d);
+        let d_hi = digit_at(b, hco, pd_d);
+        let d_lo = digit_at(b, lco, p);
+        b.select(pge, d_hi, d_lo)
+    };
+    let mut cbw_s = k(b, 0);
+    let mut p10s = 1u64;
+    for i in 0..16u64 {
+        let iv = k(b, i);
+        let p = b.add(wbot_s, iv);
+        let dg = dig_same(b, p);
+        let pv = k(b, p10s);
+        let t = b.mul(dg, pv);
+        cbw_s = b.add(cbw_s, t);
+        p10s *= 10;
+    }
+    let g_far_same = dig_same(b, gpos_s);
+    // sticky：ガード位置より下の lo の桁（pow10_64 は 10^19 で飽和し、
+    // lo は 16 桁以下なので gpos_s >= 19 なら lo 全体が残る）。
+    let pw_s = pow10_64(b, gpos_s);
+    let lo_rem_s = b.urem(lco, pw_s);
+    let zv_r = k(b, 0);
+    let s_far_same = b.cmp(Cmp::Ne, lo_rem_s, zv_r);
     // 異符号で遠い → C = (hi-1)*10^d + (10^d - lo) の区分的な桁。
+    // lo == 0 のとき C = hi*10^d そのもの（補数分解はしない）。
     // 最上位位置 h、係数の 16 桁を組み立てる。
     let c1m = {
         let t = k(b, 1);
@@ -5785,23 +5826,28 @@ fn d64_addsub_fin<B: Backend>(
         b.cmp(Cmp::Ne, c1m, z)
     };
     let nd1m = ndig64(b, c1m);
-    // hi=1（c1m=0）のとき C = 10^d - lo で h = d-1。
+    // hi=1（c1m=0）のとき C = 10^d - lo で h = d-1。lo=0 なら hi の高さ。
     let h_diff = {
         let t = b.add(d, nd1m);
         let t = b.sub(t, one);
         let dm1 = b.sub(d, one);
-        b.select(c1m_nz, t, dm1)
+        let sel_nz = b.select(c1m_nz, t, dm1);
+        let t2 = b.add(d, hnd);
+        let sel_z = b.sub(t2, one);
+        b.select(lo_nz, sel_nz, sel_z)
     };
-    let k15v = k(b, 15);
     let wbot = b.sub(h_diff, k15v); // ウィンドウの最下位
     let lz2 = low_nz_pos(b, lco);
     let lco_nz = lo_nz;
-    // 位置 p の C の桁：p >= d → (hi-1) の桁、p < d → 10^d - lo の補数桁。
+    // 位置 p の C の桁：p >= d → (hi-1) の桁（lo=0 なら hi の桁）、
+    // p < d → 10^d - lo の補数桁（lo=0 なら 0）。
     let dig = |b: &mut B, p: B::V<W64>| -> B::V<W64> {
-        // p >= d → digit(hi-1, p-d)
+        // p >= d → digit(hi-1 or hi, p-d)
         let pge = b.cmp(Cmp::GeU, p, d);
         let pd_d = b.sub(p, d);
-        let d_hi = digit_at(b, c1m, pd_d);
+        let d_hi1 = digit_at(b, c1m, pd_d);
+        let d_hi0 = digit_at(b, hco, pd_d);
+        let d_hi = b.select(lco_nz, d_hi1, d_hi0);
         // p < d → 10^d - lo の桁：
         //   p < lz2 → 0、p == lz2 → 10 - lo[p]、p > lz2 → 9 - lo[p]
         let d2p = digit_at(b, lco, p);
@@ -5814,7 +5860,8 @@ fn d64_addsub_fin<B: Backend>(
         let zv = k(b, 0);
         let comp0 = b.select(eq_lz, at_lz, zv);
         let comp = b.select(gt_lz, above, comp0);
-        b.select(pge, d_hi, comp)
+        let lo_d = b.select(lco_nz, comp, zv);
+        b.select(pge, d_hi, lo_d)
     };
     // 17 桁分（guard 含む）を集める。
     let mut cbw = k(b, 0);
@@ -5830,32 +5877,50 @@ fn d64_addsub_fin<B: Backend>(
     }
     let gpos = b.sub(wbot, one);
     let g_far = dig(b, gpos);
-    // sticky：位置 wbot-1 より下に非零があるか。
-    // lo != 0 なら補数領域に 9 が残る（gpos < d-1）か、
-    // 補数の非零桁が落ちる（lz2 < gpos）→ 実質 (lo != 0) でよい。
-    // lo = 0 のとき C = hi*10^d で下はすべて 0 → sticky=0。
-    let s_far_diff = lco_nz;
-    let cb_far = b.select(same, ljz, cbw);
+    // sticky：ガード位置より下に残る桁。補数領域の低 gpos 桁の和は
+    // (10^gpos - (lo mod 10^gpos)) mod 10^gpos で、非零 ⇔ lo mod 10^gpos != 0。
+    // （lo != 0 であっても残りが全部 9 なら sticky は立たない）。
+    let pw_d = pow10_64(b, gpos);
+    let lo_rem_d = b.urem(lco, pw_d);
+    let s_far_diff = b.cmp(Cmp::Ne, lo_rem_d, zv_r);
+    let cb_far = b.select(same, cbw_s, cbw);
     let be_far = {
         let t = b.add(lbe, h_diff);
         let k15 = k(b, 15);
         let be_d = b.sub(t, k15);
         b.select(same, be_far_same, be_d)
     };
-    let zv0 = k(b, 0);
-    let g_far2 = b.select(same, zv0, g_far);
-    let nsame = bnot(b, same);
-    let s_far = band(b, nsame, s_far_diff);
+    let g_far2 = b.select(same, g_far_same, g_far);
+    let s_far = bsel_b(b, same, s_far_same, s_far_diff);
     // 異符号の符号は hi の符号（|hi*10^d| > |lo|）。
     let sgn_far = hsg;
-    let cb = b.select(far, cb_far, q_small);
-    let be = b.select(far, be_far, be_small);
-    let g = b.select(far, g_far2, g_small);
+    // 退化ケース：片方の係数が 0 → 結果は他方のオペランドそのもの
+    // （0E+大指数 + 小さい値 = 小さい値。同符号では lsg==hsg、
+    // 異符号で hi=0 なら結果は -lo → lsg）。
+    let hco_z = {
+        let z = k(b, 0);
+        b.cmp(Cmp::Eq, hco, z)
+    };
+    let nlo = bnot(b, lo_nz);
+    let degen = bor(b, hco_z, nlo);
+    let cb_deg = b.select(hco_z, lco, hco);
+    let be_deg = b.select(hco_z, lbe, hbe);
+    let sgn_deg = bsel_b(b, hco_z, lsg, hsg);
+    let cb0 = b.select(far, cb_far, q_small);
+    let be0 = b.select(far, be_far, be_small);
+    let g0 = b.select(far, g_far2, g_small);
+    let sgn0 = bsel_b(b, far, sgn_far, sgn_small);
+    let cb = b.select(degen, cb_deg, cb0);
+    let be = b.select(degen, be_deg, be0);
+    let zg = k(b, 0);
+    let g = b.select(degen, zg, g0);
     let st1 = band(b, far, s_far);
     let nfar = bnot(b, far);
     let st2 = band(b, nfar, sticky_lo);
-    let st = bor(b, st1, st2);
-    let sgn = bsel_b(b, far, sgn_far, sgn_small);
+    let st0 = bor(b, st1, st2);
+    let ndegen = bnot(b, degen);
+    let st = band(b, st0, ndegen);
+    let sgn = bsel_b(b, degen, sgn_deg, sgn0);
     (cb, be, sgn, g, st)
 }
 
@@ -6057,7 +6122,12 @@ fn d64_addsub<B: Backend>(
     let anynan = bor(b, x.nan, y.nan);
     let xq = quiet64(b, xw);
     let yq = quiet64(b, yw);
-    let nanw = b.select(x.nan, xq, yq);
+    // sNaN を優先（quiet 化）：x.snan→xq、y.snan→yq、次に x の qNaN、
+    // 最後に y の qNaN（SPEC-POWER-ISA のアクション表）。
+    let nys = bnot(b, y.snan);
+    let pxq = band(b, x.nan, nys);
+    let px = bor(b, x.snan, pxq);
+    let nanw = b.select(px, xq, yq);
     let sd = bxor(b, x.sgn, ys);
     let isi = band3(b, x.inf, y.inf, sd);
     let iw1 = d64_inf(b, x.sgn);
@@ -6069,13 +6139,14 @@ fn d64_addsub<B: Backend>(
     let qnw = d64_qnan(b, qb);
     let w2 = b.select(isi, qnw, w1);
     let w = b.select(anynan, nanw, w2);
-    // フラグ：sNaN → VXSNAN、isi → VXISI、それ以外は有限経路のフラグ。
+    // フラグ：NaN 系では sNaN のみ VX|VXSNAN（qNaN は無通知で伝播）、
+    // isi → VXISI、それ以外は有限経路のフラグ。NaN 優先なので isi より先。
     let f_snan = k(b, FPSCR_VX | FPSCR_VXSNAN);
     let f_isi = k(b, FPSCR_VX | FPSCR_VXISI);
     let snan = bor(b, x.snan, y.snan);
-    let f_sn = b.select(snan, f_snan, ff);
-    let f2 = b.select(isi, f_isi, f_sn);
-    let flags = b.select(anynan, f_snan, f2);
+    let f_nan = b.select(snan, f_snan, z);
+    let f2 = b.select(isi, f_isi, ff);
+    let flags = b.select(anynan, f_nan, f2);
     fpscr_raise_v(b, flags);
     let frf = d64_fprf(b, w);
     fpscr_set_fprf(b, frf);
@@ -6125,7 +6196,11 @@ fn d64_mul<B: Backend>(b: &mut B, xw: B::V<W64>, yw: B::V<W64>, rm: B::V<W64>) -
     let anynan = bor(b, x.nan, y.nan);
     let xq = quiet64(b, xw);
     let yq = quiet64(b, yw);
-    let nanw = b.select(x.nan, xq, yq);
+    // sNaN 優先（d64_addsub と同じ規則）。
+    let nys = bnot(b, y.snan);
+    let pxq = band(b, x.nan, nys);
+    let px = bor(b, x.snan, pxq);
+    let nanw = b.select(px, xq, yq);
     let i1 = band(b, x.inf, y.zero);
     let i2 = band(b, y.inf, x.zero);
     let i12 = bor(b, i1, i2);
@@ -6140,8 +6215,12 @@ fn d64_mul<B: Backend>(b: &mut B, xw: B::V<W64>, yw: B::V<W64>, rm: B::V<W64>) -
     let w = b.select(anynan, nanw, w2);
     let f_snan = k(b, FPSCR_VX | FPSCR_VXSNAN);
     let f_imz = k(b, FPSCR_VX | FPSCR_VXIMZ);
+    let snan = bor(b, x.snan, y.snan);
+    // qNaN の伝播は無通知（フラグなし）。sNaN のみ VX|VXSNAN。
+    let zfl = k(b, 0);
+    let f_nan = b.select(snan, f_snan, zfl);
     let fi = b.select(imz, f_imz, ff);
-    let f1 = b.select(anynan, f_snan, fi);
+    let f1 = b.select(anynan, f_nan, fi);
     fpscr_raise_v(b, f1);
     let frf = d64_fprf(b, w);
     fpscr_set_fprf(b, frf);
@@ -6237,7 +6316,11 @@ fn d64_div<B: Backend>(b: &mut B, xw: B::V<W64>, yw: B::V<W64>, rm: B::V<W64>) -
     let anynan = bor(b, x.nan, y.nan);
     let xq = quiet64(b, xw);
     let yq = quiet64(b, yw);
-    let nanw = b.select(x.nan, xq, yq);
+    // sNaN 優先（d64_addsub と同じ規則）。
+    let nys = bnot(b, y.snan);
+    let pxq = band(b, x.nan, nys);
+    let px = bor(b, x.snan, pxq);
+    let nanw = b.select(px, xq, yq);
     let snan = bor(b, x.snan, y.snan);
     // 0/0 → VXZDZ、inf/inf → VXIDI、x/0 → ZX + inf。
     let zdz = band(b, x.zero, y.zero);
@@ -6251,10 +6334,10 @@ fn d64_div<B: Backend>(b: &mut B, xw: B::V<W64>, yw: B::V<W64>, rm: B::V<W64>) -
     let dz = band(b, dz0, nxi);
     let anyinf = bor(b, x.inf, y.inf);
     let infw = d64_inf(b, sgn);
-    // x/inf → ±0、inf/fin → ±inf。
-    let k398 = k(b, 398);
+    // 有限/inf → 真の零（係数 0・指数 Etiny=0、SPEC-POWER-ISA の
+    // 除算アクション表の zt）。inf/有限 → ±inf。
     let z0 = k(b, 0);
-    let zword = d64_enc(b, sgn, k398, z0);
+    let zword = d64_enc(b, sgn, z0, z0);
     let w_inf = b.select(x.inf, infw, zword);
     let qn = d64_qnan(b, sgn);
     let w1 = b.select(anyinf, w_inf, fw);
@@ -6269,8 +6352,9 @@ fn d64_div<B: Backend>(b: &mut B, xw: B::V<W64>, yw: B::V<W64>, rm: B::V<W64>) -
     let fd = b.select(dz, f_dz, ff);
     let fi = b.select(idi, f_idi, fd);
     let fz = b.select(zdz, f_oth, fi);
-    let f = b.select(anynan, f_snan, fz);
-    let _ = snan;
+    // qNaN の伝播は無通知（フラグなし）。sNaN のみ VX|VXSNAN。
+    let f_nan = b.select(snan, f_snan, z0);
+    let f = b.select(anynan, f_nan, fz);
     fpscr_raise_v(b, f);
     let frf = d64_fprf(b, w);
     fpscr_set_fprf(b, frf);
@@ -6349,26 +6433,27 @@ fn d64_mag_cmp<B: Backend>(b: &mut B, x: &D64<B>, y: &D64<B>) -> B::V<W64> {
     let k20 = k(b, 20);
     let d20 = b.cmp(Cmp::GtU, dd, k20);
     // 厳密比較：小さい指数側に合わせて u128 でスケール。
+    // 係数 < 10^16 なので cb·10^dd（dd<=20）< 10^36 < 2^128 に必ず収まる。
+    // W64 への切り詰めは溢れで壊れるため、比較は W128 のまま行う。
     let dcl = b.select(d20, k20, dd);
     let pw = pow10_128(b, dcl);
     // 大きい指数側をスケール。
     let xz128 = b.zext::<W64, W128>(x.cb);
     let xm = b.mul(xz128, pw);
-    let xmt = b.trunc::<W128, W64>(xm);
-    let xs = b.select(lt_e, x.cb, xmt);
+    let xs = b.select(lt_e, xz128, xm);
     let yz128 = b.zext::<W64, W128>(y.cb);
     let ym = b.mul(yz128, pw);
-    let ymt = b.trunc::<W128, W64>(ym);
-    let ys = b.select(lt_e, ymt, y.cb);
+    let ys = b.select(lt_e, ym, yz128);
     let mlt = b.cmp(Cmp::LtU, xs, ys);
     let mgt = b.cmp(Cmp::GtU, xs, ys);
     // 指数差が大きい → 大きい指数側（係数非零）が大きい。
-    // 係数がゼロの側は無視。
+    // ただし相手の係数がゼロ（±0）なら絶対値の大小は係数だけで決まり、
+    // 非零側が必ず大きいので、両方が非零のときだけ指数差を使う。
     let nxz = bnot(b, xz);
     let nyz = bnot(b, yz);
-    let far_lt = band(b, lt_e, nxz); // x の指数が小さい→x が小さい（x 非零）
+    let far_lt = band3(b, lt_e, nxz, nyz); // x の指数が小さい→x が小さい
     let nlte = bnot(b, lt_e);
-    let far_gt = band(b, nlte, nyz);
+    let far_gt = band3(b, nlte, nyz, nxz);
     let l2 = bsel_b(b, d20, far_lt, mlt);
     let g2 = bsel_b(b, d20, far_gt, mgt);
     // 係数数ゼロの扱い：片方ゼロ → ゼロ側が小さい。
@@ -6667,21 +6752,16 @@ fn d64_tstsf<B: Backend>(b: &mut B, k6: B::V<W64>, yw: B::V<W64>) -> B::V<W64> {
     b.select(spec, v1, cr)
 }
 
-/// dscli/dscri：係数の十進シフト（値は不変、指数が補償）。
-/// sh > 16 ではゼロ係数＋同指数（QEMU 準拠の近似）。
+/// dscli/dscri：係数の十進シフト。SPEC-POWER-ISA：結果の指数は
+/// ソースオペランドと同じで、シフトアウトした桁は失われる。
+/// 左シフトでは 16 桁フィールドを超えた上位桁が捨てられる。
 fn d64_shift<B: Backend>(b: &mut B, xw: B::V<W64>, sh: u32, left: bool) -> B::V<W64> {
     let x = d64_dec(b, xw);
-    let shv = k(b, u64::from(sh));
-    if sh > 16 {
-        // 係数ゼロ、指数はそのまま（近似）。
-        let z = k(b, 0);
-        let w = d64_enc(b, x.sgn, x.be, z);
-        let inf_nan = bor(b, x.inf, x.nan);
-        let fin = bnot(b, inf_nan);
-        return b.select(fin, w, xw);
-    }
+    // sh は 6 ビットフィールド（0..63）。16 を超えると全桁が落ちて
+    // 係数は 0 になる。pow10_64 は 10^19 で飽和するので 19 に丸める。
+    let shv = k(b, u64::from(sh.min(19)));
     let pw = pow10_64(b, shv);
-    let (cb2, be2) = if left {
+    let cb2 = if left {
         // 係数×10^sh の上位 16 桁のあふれは捨てる。
         let p128 = {
             let c = b.zext::<W64, W128>(x.cb);
@@ -6690,22 +6770,12 @@ fn d64_shift<B: Backend>(b: &mut B, xw: B::V<W64>, sh: u32, left: bool) -> B::V<
         };
         let m16 = k128(b, 10_000_000_000_000_000);
         let c2 = b.urem(p128, m16);
-        let c2 = b.trunc::<W128, W64>(c2);
-        let be = b.sub(x.be, shv);
-        (c2, be)
+        b.trunc::<W128, W64>(c2)
     } else {
-        let c2 = b.udiv(x.cb, pw);
-        let be = b.add(x.be, shv);
-        (c2, be)
+        b.udiv(x.cb, pw)
     };
-    // 指数のクランプ（有限値のみ意味を持つ）。
-    let z = k(b, 0);
-    let m767 = k(b, 767);
-    let blo = b.cmp(Cmp::LtS, be2, z);
-    let bhi = b.cmp(Cmp::GtU, be2, m767);
-    let be3h = b.select(bhi, m767, be2);
-    let be3 = b.select(blo, z, be3h);
-    let w = d64_enc(b, x.sgn, be3, cb2);
+    // 指数は変わらない。Inf/NaN はそのまま返す。
+    let w = d64_enc(b, x.sgn, x.be, cb2);
     let inf_nan = bor(b, x.inf, x.nan);
     let fin = bnot(b, inf_nan);
     b.select(fin, w, xw)
@@ -7074,20 +7144,93 @@ fn d64_rsp<B: Backend>(b: &mut B, xw: B::V<W64>, rm: B::V<W64>) -> B::V<W64> {
     let sv_nz = b.cmp(Cmp::Ne, sv, z);
     let st = band(b, sv_nz, sh0);
     let g = b.select(sh0, gv, z);
-    let (cb2, c2) = round_coeff(b, q, g, st, x.sgn, rm);
+    let (cb2, _c2x) = round_coeff(b, q, g, st, x.sgn, rm);
+    // 7 桁への丸めあふれ：9999999+1 = 10^7 → 係数 10^6 で指数 +1。
+    // （round_coeff の carry は 16 桁用なのでここでは直接比較する）。
+    let m7v = k(b, 10_000_000);
+    let c2 = b.cmp(Cmp::Eq, cb2, m7v);
     let m7 = k(b, 1_000_000);
     let cb = b.select(c2, m7, cb2);
     let be_t = b.add(x.be, sh);
     let be1 = b.add(be_t, one);
-    let be0 = be_t;
-    let be = b.select(c2, be1, be0);
-    // decimal32 バイアスへ（be - 297）。範囲外は clamp/inf。
+    let be = b.select(c2, be1, be_t);
+    // decimal32 バイアスへ（be - 297）。e32 ∈ [-101, 90] ⇔ be32 ∈ [0, 191]。
     let k297 = k(b, 297);
     let be32 = b.sub(be, k297);
     let gnz = b.cmp(Cmp::Ne, g, z);
-    let inex = bor(b, gnz, st);
+    let inex0 = bor(b, gnz, st);
+    // ---- アンダーフロー：be32 < 0 → 係数を右にずらして be32=0 に
+    // 非正規化し、落ちる桁で再度丸める（SPEC-POWER-ISA の drsp）。----
+    let under = b.cmp(Cmp::LtS, be32, z);
+    let sh2 = {
+        let s0 = b.sub(z, be32); // -be32 = 297 - be（be<297 のとき）
+        let m9 = k(b, 9); // 7 桁 + ガード + sticky → 9 で全部落ちる
+        let gt = b.cmp(Cmp::GtU, s0, m9);
+        b.select(gt, m9, s0)
+    };
+    let pw2 = pow10_64(b, sh2);
+    let q2 = b.udiv(cb, pw2);
+    let r2 = b.urem(cb, pw2);
+    let sh2ge = b.cmp(Cmp::GeU, sh2, one);
+    let sh2m1v = b.sub(sh2, one);
+    let sh2m1 = b.select(sh2ge, sh2m1v, z);
+    let pw2m1 = pow10_64(b, sh2m1);
+    let g2v = b.udiv(r2, pw2m1);
+    let s2v = b.urem(r2, pw2m1);
+    let s2b = b.cmp(Cmp::Ne, s2v, z);
+    let s2m = bor(b, s2b, inex0);
+    let g2 = b.select(sh2ge, g2v, g);
+    let (cb3, _c3x) = round_coeff(b, q2, g2, s2m, x.sgn, rm);
+    let c3 = b.cmp(Cmp::Eq, cb3, m7v);
+    let cb_u = b.select(c3, m7, cb3);
+    let be32u = b.select(c3, one, z);
+    let g2nz = b.cmp(Cmp::Ne, g2, z);
+    let inex_u = bor(b, g2nz, s2m);
+    // 非正規化＋非正確 → UX（d64_fin と同じ近似）。
+    let ux = band(b, under, inex_u);
+    let cb = b.select(under, cb_u, cb);
+    let be32 = b.select(under, be32u, be32);
+    let inex = bsel_b(b, under, inex_u, inex0);
+    // ---- オーバーフロー：be32 > 191 → 係数に余地があれば左へずらし、
+    // 収まらなければ ±Inf または最大有限（rm による）。----
+    let k191 = k(b, 191);
+    let nd2 = ndig64(b, cb);
+    let room = b.sub(c7, nd2);
+    let over = b.cmp(Cmp::GtU, be32, k191);
+    let excess = b.sub(be32, k191);
+    let ov_gt = b.cmp(Cmp::GtU, excess, room);
+    let shv = b.select(ov_gt, room, excess);
+    let pw_o = pow10_64(b, shv);
+    let cb_o = b.mul(cb, pw_o);
+    let be32o = b.sub(be32, shv);
+    let cb = b.select(over, cb_o, cb);
+    let be32 = b.select(over, be32o, be32);
+    let cbnz = b.cmp(Cmp::Ne, cb, z);
+    let still0 = b.cmp(Cmp::GtU, be32, k191);
+    let still_over = band3(b, over, still0, cbnz);
+    // rm：Rtz→常に最大有限、Rdn→負のみ最大有限、Rup→正のみ最大有限。
+    let k1v = k(b, 1);
+    let k2v = k(b, 2);
+    let k3v = k(b, 3);
+    let rm1 = b.cmp(Cmp::Eq, rm, k1v);
+    let rm2 = b.cmp(Cmp::Eq, rm, k2v);
+    let rm3 = b.cmp(Cmp::Eq, rm, k3v);
+    let d2 = band(b, rm2, x.sgn);
+    let nxsgn = bnot(b, x.sgn);
+    let d3 = band(b, rm3, nxsgn);
+    let d23 = bor(b, d2, d3);
+    let down = bor(b, rm1, d23);
+    let to_max = band(b, still_over, down);
+    let ndown = bnot(b, down);
+    let to_inf = band(b, still_over, ndown);
+    let k9999999 = k(b, 9_999_999);
+    let cb_f = b.select(to_max, k9999999, cb);
+    let be32_f = b.select(to_max, k191, be32);
+    // 係数 0（±0）なら指数欄は Etiny=0 にしておく。
+    let cbz = bnot(b, cbnz);
+    let be32_f = b.select(cbz, z, be32_f);
     // エンコード：符号|comb|exp6|2デクレット。
-    let co = u64_to_bcd(b, cb);
+    let co = u64_to_bcd(b, cb_f);
     let sh24 = k(b, 24);
     let lv = b.shr_l(co, sh24);
     let mf = k(b, 0xf);
@@ -7095,11 +7238,11 @@ fn d64_rsp<B: Backend>(b: &mut B, xw: B::V<W64>, rm: B::V<W64>) -> B::V<W64> {
     let k7 = k(b, 7);
     let big = b.cmp(Cmp::GtU, lead, k7);
     let sh6 = k(b, 6);
-    let et_v = b.shr_l(be32, sh6);
+    let et_v = b.shr_l(be32_f, sh6);
     let m3 = k(b, 3);
     let etop = b.and(et_v, m3);
     let m3f = k(b, 0x3f);
-    let elo = b.and(be32, m3f);
+    let elo = b.and(be32_f, m3f);
     let et1 = b.shl(etop, one);
     let l1 = b.and(lead, one);
     let o1 = b.or(et1, l1);
@@ -7134,22 +7277,34 @@ fn d64_rsp<B: Backend>(b: &mut B, xw: B::V<W64>, rm: B::V<W64>) -> B::V<W64> {
     let sb2 = bsel64(b, x.sgn, 1 << 31, 0);
     let winf2 = b.or(winf, sb2);
     let wnan2 = b.or(wnan, sb2);
+    let wfin = b.select(to_inf, winf2, w32);
     let sp = bor(b, x.inf, x.nan);
     let wsp = b.select(x.nan, wnan2, winf2);
-    let w = b.select(sp, wsp, w32);
-    // フラグ：inexact のみ（近似）。
-    let fv = bsel64(b, inex, FPSCR_XX | FPSCR_FI, 0);
+    let w = b.select(sp, wsp, wfin);
+    // フラグ：inexact → XX|FI、非正規化+inexact → UX、
+    // オーバーフロー → OX|XX|FI。sNaN は例外を起こさず sNaN32 へ
+    // 変換される（drsp は移動系の変換なので VXSNAN は立たない）。
+    let fx = bsel64(b, inex, FPSCR_XX | FPSCR_FI, 0);
+    let fu = bsel64(b, ux, FPSCR_UX, 0);
+    let fo = bsel64(b, still_over, FPSCR_OX | FPSCR_XX | FPSCR_FI, 0);
+    let fxu = b.or(fx, fu);
+    let fv = b.or(fxu, fo);
     fpscr_raise_v(b, fv);
-    let _ = inex;
     w
 }
 
 /// op4。VX 形式（XO11 = bits10:0）と VA 形式（XO6 = bits5:0）。
 #[allow(clippy::too_many_lines)]
 pub fn x4<B: Backend>(b: &mut B, word: u32, _pc: u64, _le: bool) -> Flow<B> {
-    let t = ((word >> 21) & 31) as u8;
-    let a = ((word >> 16) & 31) as u8;
-    let bb = ((word >> 11) & 31) as u8;
+    // opcode4 のベクタ命令は Altivec の VR 番号を持ち、VSR[32+n] を指す。
+    // VSX 命令の XT|TX 6bit 拡張とは別系統なので +32 して使う。
+    // （bcd 系は例外的に FPR 番号を使うため生のフィールドも残す）
+    let t_raw = ((word >> 21) & 31) as u8;
+    let a_raw = ((word >> 16) & 31) as u8;
+    let bb_raw = ((word >> 11) & 31) as u8;
+    let t = t_raw + 32;
+    let a = a_raw + 32;
+    let bb = bb_raw + 32;
     let xo11 = word & 0x7ff;
     // ---- BCD（パック十進、Z22 形式）----
     // xo10 = 512+256*ps が bcdadd.、544+256*ps が bcdsub.。
@@ -7159,11 +7314,12 @@ pub fn x4<B: Backend>(b: &mut B, word: u32, _pc: u64, _le: bool) -> Flow<B> {
             512 | 768 | 544 | 800 => {
                 let ps = (word >> 9) & 1 == 1;
                 let sub = (word >> 6) & 1 == 1;
-                let xa = fpr(b, a);
-                let xb = fpr(b, bb);
+                // オペランドと結果は VSR 全体（31 桁＋符号）、CC は CR6。
+                let xa = vsr(b, a);
+                let xb = vsr(b, bb);
                 let (res, crf) = bcd_addsub(b, xa, xb, ps, sub);
-                set_fpr(b, t, res);
-                set_crf(b, 0, crf);
+                set_vsr(b, t, res);
+                set_crf(b, 6, crf);
                 return Ok(());
             }
             _ => {}
@@ -7173,7 +7329,7 @@ pub fn x4<B: Backend>(b: &mut B, word: u32, _pc: u64, _le: bool) -> Flow<B> {
     match word & 0x3f {
         // vperm: T.byte[i] = C[i]&31<16 ? A[C[i]&31] : B[C[i]&31-16]。
         0x2b => {
-            let c = ((word >> 6) & 31) as u8;
+            let c = (((word >> 6) & 31) as u8) + 32;
             let av = vsr(b, a);
             let bv = vsr(b, bb);
             let cv = vsr(b, c);
@@ -7204,7 +7360,7 @@ pub fn x4<B: Backend>(b: &mut B, word: u32, _pc: u64, _le: bool) -> Flow<B> {
         }
         // vsel: T = (A & ~C) | (B & C)。
         0x2a => {
-            let c = ((word >> 6) & 31) as u8;
+            let c = (((word >> 6) & 31) as u8) + 32;
             let x = vsr(b, a);
             let y = vsr(b, bb);
             let cc = vsr(b, c);
@@ -7737,10 +7893,11 @@ pub fn x4<B: Backend>(b: &mut B, word: u32, _pc: u64, _le: bool) -> Flow<B> {
         1538 => {
             let src = vsr(b, bb);
             let mut v = k128(b, 0);
-            match a {
+            // この単項群は A フィールドを要素種別のサブopcode として使う。
+            match a_raw {
                 16 | 17 => {
                     // vextsb2w/vextsh2w: 各要素を w へ符号拡張。
-                    let (ssz, n) = if a == 16 { (8u128, 4u128) } else { (16, 4) };
+                    let (ssz, n) = if a_raw == 16 { (8u128, 4u128) } else { (16, 4) };
                     let base = 128 / ssz - n;
                     for i in 0..n {
                         let e = lane(b, src, ssz, base + i);

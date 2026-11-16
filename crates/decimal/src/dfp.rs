@@ -1861,13 +1861,17 @@ pub const FMT_D128: DfpFmt = DfpFmt {
 };
 
 /// 値を交換形式のビット列に符号化する。
+///
+/// 係数の桁数が形式の精度を超える値や、指数継続フィールドに収まらない
+/// 指数は表現不能なので `None` を返す（黙って上位桁や指数を落とさない）。
+/// 呼び出し側は `Dec::finish` で文脈を適用してから使うこと。
 #[must_use]
-pub fn encode(f: DfpFmt, d: &Dec) -> u128 {
+pub fn encode(f: DfpFmt, d: &Dec) -> Option<u128> {
     let neg_bit = u128::from(d.neg) << (f.bits - 1);
     match d.kind {
         Kind::Inf => {
             // 組合せフィールド 11110。
-            neg_bit | (0b11110u128 << (f.bits - 6))
+            Some(neg_bit | (0b11110u128 << (f.bits - 6)))
         }
         Kind::Qnan | Kind::Snan => {
             // 組合せフィールド 11111、指数継続の先頭ビットが sNaN 印。
@@ -1877,13 +1881,14 @@ pub fn encode(f: DfpFmt, d: &Dec) -> u128 {
             }
             // ペイロードは係数フィールドにデクレットで収める。
             let ncoef = f.prec - 1;
-            let mut coef = d.coef.clone();
+            let coef = &d.coef;
             let nl = coef.len();
             if nl > ncoef as usize {
-                coef.drain(0..nl - ncoef as usize);
+                // 収まらないペイロードは表現不能。
+                return None;
             }
             let mut pad = vec![0u8; ncoef as usize - coef.len()];
-            pad.extend_from_slice(&coef);
+            pad.extend_from_slice(coef);
             let mut bits: u128 = 0;
             for i in 0..f.declets() {
                 let c0 = u16::from(pad[(i * 3) as usize]);
@@ -1892,28 +1897,23 @@ pub fn encode(f: DfpFmt, d: &Dec) -> u128 {
                 let dl = dpd::bcd_to_dpd((c0 << 8) | (c1 << 4) | c2);
                 bits |= u128::from(dl) << (10 * (f.declets() - 1 - i));
             }
-            v | bits
+            Some(v | bits)
         }
         Kind::Finite => {
             // 係数を prec 桁に揃える（先頭は組合せフィールド）。
-            let etop = i64::from(f.emax) - i64::from(f.prec) + 1;
-            let mut coef = d.coef.clone();
+            let coef = &d.coef;
             let n = coef.len();
             if n > f.prec as usize {
-                // 先頭が 0 でない限り収まらない。呼び出し側の規約では
-                // encode 前に文脈適用済み。ここでは下位桁を残す。
-                coef.drain(0..n - f.prec as usize);
+                // 精度を超える係数は表現不能（黙って上位桁を捨てない）。
+                return None;
             }
             let mut full = vec![0u8; f.prec as usize - coef.len()];
-            full.extend_from_slice(&coef);
+            full.extend_from_slice(coef);
             let lead = i64::from(full[0]);
-            let mut exp = i64::from(d.exp) + i64::from(f.bias);
-            if exp > i64::from(f.emax) + i64::from(f.bias) {
-                exp = i64::from(f.emax) + i64::from(f.bias); // clamp 済み前提
-            }
-            let _ = etop;
-            if exp < 0 {
-                exp = 0;
+            let exp = i64::from(d.exp) + i64::from(f.bias);
+            // バイアス付き指数は [0, emax+bias] に入るものだけが表現できる。
+            if exp < 0 || exp > i64::from(f.emax) + i64::from(f.bias) {
+                return None;
             }
             let exp = exp as u128;
             let eb = f.exp_cont_bits;
@@ -1934,7 +1934,7 @@ pub fn encode(f: DfpFmt, d: &Dec) -> u128 {
                 let dl = dpd::bcd_to_dpd((c0 << 8) | (c1 << 4) | c2);
                 v |= u128::from(dl) << (10 * (f.declets() - 1 - i));
             }
-            v
+            Some(v)
         }
     }
 }
@@ -2044,9 +2044,30 @@ mod tests {
     fn encode_roundtrip() {
         for s in ["0", "1", "-1", "1234567890123456", "1.5", "-Inf", "NaN"] {
             let d = Dec::parse(s).unwrap();
-            let bits = encode(FMT_D64, &d);
+            let bits = encode(FMT_D64, &d).unwrap();
             let back = decode(FMT_D64, bits);
             assert_eq!(back.to_sci(), d.to_sci(), "{s}");
         }
+    }
+
+    #[test]
+    fn encode_rejects_unrepresentable() {
+        // 係数が 16 桁を超える → 上位桁を落とすのではなく None。
+        let d = Dec::parse("12345678901234567").unwrap();
+        assert_eq!(encode(FMT_D64, &d), None);
+        // 係数が収まっても指数が範囲外なら None。
+        let d = Dec::parse("1E-400").unwrap();
+        assert_eq!(encode(FMT_D64, &d), None);
+        let d = Dec::parse("1E+400").unwrap();
+        assert_eq!(encode(FMT_D64, &d), None);
+        // 境界：Etiny（係数 1、exp -398）は表現できる。
+        let d = Dec::parse("1E-398").unwrap();
+        assert!(encode(FMT_D64, &d).is_some());
+        // NaN ペイロードが prec-1 = 15 桁を超えると None。
+        let mut d = Dec::nan(false);
+        d.coef = vec![1; 16];
+        assert_eq!(encode(FMT_D64, &d), None);
+        d.coef = vec![1; 15];
+        assert!(encode(FMT_D64, &d).is_some());
     }
 }

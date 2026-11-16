@@ -143,13 +143,15 @@ fn subfc_and_addc_set_ca() {
     assert_ne!(xer & (1 << 29), 0, "add must not modify CA: xer={xer:#x}");
 }
 
-// ---- bcdadd./bcdsub.（十進整数）----
-// FPR（= VSR 上位 64 ビット）は下位ニブルが符号、上位 15 ニブルが BCD 桁。
-// PS=0 の優先符号は +0xC/-0xD、PS=1 は +0xF/-0xB。
+// ---- bcdadd./bcdsub.（十進整数、VX 形式）----
+// VSR 全体（ベクタレジスタ = VSR[32+i]）がオペランド：ニブル 0 が符号、
+// ニブル 1..31 が 31 桁の BCD。PS=0 の優先正符号は 0xC、PS=1 は 0xF。
+// 負の符号は常に 0xD。結果の条件コードは CR6 に書かれる。
 
-/// n の BCD 桁に符号 s を付けた FPR 値を作る（n は十進文字列表記→BCD）。
-fn bcd(n: u64, sign: u64) -> u128 {
-    let mut v = 0u64;
+/// n の BCD 桁に符号 s を付けた VSR 値を作る（n は十進文字列表記→BCD）。
+/// 桁はニブル 1..31（bit4..127）、ニブル 0 が符号。
+fn bcd(n: u128, sign: u128) -> u128 {
+    let mut v = 0u128;
     let mut m = n;
     let mut pos = 0;
     while m > 0 {
@@ -157,7 +159,7 @@ fn bcd(n: u64, sign: u64) -> u128 {
         m /= 10;
         pos += 1;
     }
-    (v | sign) as u128
+    v | sign
 }
 
 fn set_fpr(env: &mut BareEnv, i: u8, fpr: u128) {
@@ -167,6 +169,22 @@ fn set_fpr(env: &mut BareEnv, i: u8, fpr: u128) {
 fn fpr_of(env: &mut BareEnv, i: u8) -> u64 {
     let v: u128 = env.backend.get(sem::Vsr(i).state());
     (v >> 64) as u64
+}
+
+/// ベクタレジスタ番号 i（0..31）= VSR[i+32] に 128 ビット値を書く。
+fn set_vr(env: &mut BareEnv, i: u8, v: u128) {
+    env.backend.set(sem::Vsr(i + 32).state(), v);
+}
+
+/// ベクタレジスタ番号 i（0..31）= VSR[i+32] を読む。
+fn vr_of(env: &mut BareEnv, i: u8) -> u128 {
+    env.backend.get(sem::Vsr(i + 32).state())
+}
+
+/// CR フィールド i の 4 ビット（i=0 が最上位）。
+fn cr_of(env: &mut BareEnv, i: u8) -> u64 {
+    let cr: u64 = env.backend.get(sem::cr_ref());
+    (cr >> (28 - 4 * i)) & 0xf
 }
 
 fn bcdword(t: u8, a: u8, b: u8, ps: u8, sub: u8) -> u32 {
@@ -184,101 +202,124 @@ fn bcdword(t: u8, a: u8, b: u8, ps: u8, sub: u8) -> u32 {
 #[test]
 fn bcdadd_basic_and_cr() {
     let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_power::CpuState>());
-    // +123 + +456 = +579 → 0x579C、CR0=GT。
-    set_fpr(&mut env, 2, bcd(123, 0xc));
-    set_fpr(&mut env, 3, bcd(456, 0xc));
+    // +123 + +456 = +579 → 0x579C、CR6=GT。
+    set_vr(&mut env, 2, bcd(123, 0xc));
+    set_vr(&mut env, 3, bcd(456, 0xc));
     env.step(|b| sem::x4(b, bcdword(1, 2, 3, 0, 0), 0x100, false))
         .unwrap();
-    assert_eq!(fpr_of(&mut env, 1), 0x579c, "bcdadd 123+456");
-    let cr: u64 = env.backend.get(sem::cr_ref());
-    assert_eq!((cr >> 28) & 0xf, 0x4, "CR0 should be GT: cr={cr:#x}");
+    assert_eq!(vr_of(&mut env, 1), 0x579c, "bcdadd 123+456");
+    assert_eq!(cr_of(&mut env, 6), 0x4, "CR6 should be GT");
 }
 
 #[test]
 fn bcdadd_mixed_signs() {
     let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_power::CpuState>());
     // +500 + (-200) = +300。
-    set_fpr(&mut env, 2, bcd(500, 0xc));
-    set_fpr(&mut env, 3, bcd(200, 0xd));
+    set_vr(&mut env, 2, bcd(500, 0xc));
+    set_vr(&mut env, 3, bcd(200, 0xd));
     env.step(|b| sem::x4(b, bcdword(1, 2, 3, 0, 0), 0x100, false))
         .unwrap();
-    assert_eq!(fpr_of(&mut env, 1), 0x300c);
-    let cr: u64 = env.backend.get(sem::cr_ref());
-    assert_eq!((cr >> 28) & 0xf, 0x4);
+    assert_eq!(vr_of(&mut env, 1), 0x300c);
+    assert_eq!(cr_of(&mut env, 6), 0x4);
 }
 
 #[test]
 fn bcdsub_negative_result() {
     let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_power::CpuState>());
-    // -300 - +100 = -400 → 0x400D、CR0=LT。
-    set_fpr(&mut env, 2, bcd(300, 0xd));
-    set_fpr(&mut env, 3, bcd(100, 0xc));
+    // -300 - +100 = -400 → 0x400D、CR6=LT。
+    set_vr(&mut env, 2, bcd(300, 0xd));
+    set_vr(&mut env, 3, bcd(100, 0xc));
     env.step(|b| sem::x4(b, bcdword(1, 2, 3, 0, 1), 0x100, false))
         .unwrap();
-    assert_eq!(fpr_of(&mut env, 1), 0x400d);
-    let cr: u64 = env.backend.get(sem::cr_ref());
-    assert_eq!((cr >> 28) & 0xf, 0x8, "CR0 should be LT: cr={cr:#x}");
+    assert_eq!(vr_of(&mut env, 1), 0x400d);
+    assert_eq!(cr_of(&mut env, 6), 0x8, "CR6 should be LT");
+}
+
+#[test]
+fn bcdsub_borrow_uses_radix10() {
+    let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_power::CpuState>());
+    // 0x0100C - 0x0001C = 0x0099C（借りの補正は +10。+16 だと 0x0FFC になる）。
+    set_vr(&mut env, 2, bcd(100, 0xc));
+    set_vr(&mut env, 3, bcd(1, 0xc));
+    env.step(|b| sem::x4(b, bcdword(1, 2, 3, 0, 1), 0x100, false))
+        .unwrap();
+    assert_eq!(vr_of(&mut env, 1), 0x099c, "bcdsub 100-1 = 99");
+    assert_eq!(cr_of(&mut env, 6), 0x4, "CR6 should be GT");
+}
+
+#[test]
+fn bcdadd_uses_full_vsr_width() {
+    let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_power::CpuState>());
+    // オペランドは 31 桁：ニブル 21（10^20 の位）を持つ値も扱える。
+    // 10^20 + 1 → 桁はニブル 1 と 21。
+    set_vr(&mut env, 2, bcd(10u128.pow(20), 0xc));
+    set_vr(&mut env, 3, bcd(1, 0xc));
+    env.step(|b| sem::x4(b, bcdword(1, 2, 3, 0, 0), 0x100, false))
+        .unwrap();
+    assert_eq!(vr_of(&mut env, 1), (1u128 << 84) | (1u128 << 4) | 0xc);
+    assert_eq!(cr_of(&mut env, 6), 0x4);
 }
 
 #[test]
 fn bcdadd_zero_result() {
     let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_power::CpuState>());
-    // +100 + (-100) = +0 → 0x000C、CR0=EQ。
-    set_fpr(&mut env, 2, bcd(100, 0xc));
-    set_fpr(&mut env, 3, bcd(100, 0xd));
+    // +100 + (-100) = +0 → 0x000C、CR6=EQ。
+    set_vr(&mut env, 2, bcd(100, 0xc));
+    set_vr(&mut env, 3, bcd(100, 0xd));
     env.step(|b| sem::x4(b, bcdword(1, 2, 3, 0, 0), 0x100, false))
         .unwrap();
-    assert_eq!(fpr_of(&mut env, 1), 0x000c);
-    let cr: u64 = env.backend.get(sem::cr_ref());
-    assert_eq!((cr >> 28) & 0xf, 0x2, "CR0 should be EQ: cr={cr:#x}");
+    assert_eq!(vr_of(&mut env, 1), 0x000c);
+    assert_eq!(cr_of(&mut env, 6), 0x2, "CR6 should be EQ");
 }
 
 #[test]
 fn bcdadd_ps1_uses_f_sign() {
     let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_power::CpuState>());
-    // PS=1 → 正の結果符号は 0xF、負は 0xB。
-    set_fpr(&mut env, 2, bcd(7, 0xf));
-    set_fpr(&mut env, 3, bcd(8, 0xf));
+    // PS=1 → 正の結果符号は優先符号 0xF。負は常に 0xD。
+    set_vr(&mut env, 2, bcd(7, 0xf));
+    set_vr(&mut env, 3, bcd(8, 0xf));
     env.step(|b| sem::x4(b, bcdword(1, 2, 3, 1, 0), 0x100, false))
         .unwrap();
-    assert_eq!(fpr_of(&mut env, 1), 0x15f);
-    set_fpr(&mut env, 2, bcd(8, 0xd));
-    set_fpr(&mut env, 3, bcd(5, 0xc));
+    assert_eq!(vr_of(&mut env, 1), 0x15f);
+    set_vr(&mut env, 2, bcd(8, 0xd));
+    set_vr(&mut env, 3, bcd(5, 0xc));
     env.step(|b| sem::x4(b, bcdword(1, 2, 3, 1, 0), 0x100, false))
         .unwrap();
-    assert_eq!(fpr_of(&mut env, 1), 0x3b);
+    assert_eq!(vr_of(&mut env, 1), 0x3d);
 }
 
 #[test]
 fn bcdadd_invalid_operand_sets_so() {
     let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_power::CpuState>());
-    // 0xA の数字ニブルは無効 → CR0=SO。
-    set_fpr(&mut env, 2, 0xa1c); // 桁が 0xA
-    set_fpr(&mut env, 3, bcd(1, 0xc));
+    // 0xA の数字ニブルは無効 → CR6=SO。
+    set_vr(&mut env, 2, 0xa1c); // 桁が 0xA
+    set_vr(&mut env, 3, bcd(1, 0xc));
     env.step(|b| sem::x4(b, bcdword(1, 2, 3, 0, 0), 0x100, false))
         .unwrap();
-    let cr: u64 = env.backend.get(sem::cr_ref());
-    assert_eq!((cr >> 28) & 0xf, 0x1, "CR0 should be SO: cr={cr:#x}");
-    // 符号ニブルが 0xA 未満も無効。
-    set_fpr(&mut env, 2, bcd(1, 0x9));
+    assert_eq!(cr_of(&mut env, 6), 0x1, "CR6 should be SO");
+    // 符号ニブルが 0xA 未満も無効（PS=1 でも符号は必須）。
+    set_vr(&mut env, 2, bcd(1, 0x9));
+    env.step(|b| sem::x4(b, bcdword(1, 2, 3, 1, 0), 0x100, false))
+        .unwrap();
+    assert_eq!(cr_of(&mut env, 6), 0x1);
+    // 上位桁（ニブル 16 以降）が 0xA 以上でも無効（符号は有効な 0xC）。
+    set_vr(&mut env, 2, (0xa10u128 << 64) | 0xc);
     env.step(|b| sem::x4(b, bcdword(1, 2, 3, 0, 0), 0x100, false))
         .unwrap();
-    let cr: u64 = env.backend.get(sem::cr_ref());
-    assert_eq!((cr >> 28) & 0xf, 0x1);
+    assert_eq!(cr_of(&mut env, 6), 0x1);
 }
 
 #[test]
 fn bcdadd_overflow_sets_so() {
     let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_power::CpuState>());
-    // 999999999999999 + 1 → 桁あふれ → CR0 に SO。
-    set_fpr(&mut env, 2, bcd(999_999_999_999_999, 0xc));
-    set_fpr(&mut env, 3, bcd(1, 0xc));
+    // 31 桁の 9 全部 + 1 → 桁あふれ → CR6 に SO、結果は 0x000C。
+    let nines = (0..31).fold(0u128, |v, _| v * 10 + 9);
+    set_vr(&mut env, 2, bcd(nines, 0xc));
+    set_vr(&mut env, 3, bcd(1, 0xc));
     env.step(|b| sem::x4(b, bcdword(1, 2, 3, 0, 0), 0x100, false))
         .unwrap();
-    let cr: u64 = env.backend.get(sem::cr_ref());
-    assert_ne!((cr >> 28) & 0xf & 0x1, 0, "CR0.SO expected: cr={cr:#x}");
-    // 結果は 10^15 mod 桁数 → 0x000C（eq も立つ）。
-    assert_eq!(fpr_of(&mut env, 1), 0x000c);
+    assert_ne!(cr_of(&mut env, 6) & 0x1, 0, "CR6.SO expected");
+    assert_eq!(vr_of(&mut env, 1), 0x000c);
 }
 
 // ---- DFP64（decimal floating-point、opcode 59）----
@@ -289,7 +330,7 @@ use polyisa_decimal::dfp::{FMT_D64, encode};
 /// 十進文字列を decimal64 のビット列にする。
 fn d64(s: &str) -> u128 {
     let d = polyisa_decimal::dfp::Dec::parse(s).unwrap();
-    (encode(FMT_D64, &d) as u64) as u128
+    u128::from(encode(FMT_D64, &d).unwrap() as u64)
 }
 
 fn fpscr(env: &mut BareEnv) -> u64 {
@@ -375,7 +416,7 @@ fn ddiv_basic() {
             &polyisa_decimal::dfp::Dec::parse("2.5").unwrap(),
             &FMT_D64.ctx(),
         );
-        encode(FMT_D64, &d) as u64
+        encode(FMT_D64, &d).unwrap() as u64
     };
     assert_eq!(fpr_of(&mut env, 4), want, "ddiv 7.5/2.5");
 }
@@ -666,17 +707,18 @@ fn dqua_uses_a_exponent() {
 #[test]
 fn dscli_dscri_roundtrip() {
     let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_power::CpuState>());
-    // dscli FRT,FRA,SH → SH は bits10-15。係数を左に 1 桁、指数 -1。
+    // dscli FRT,FRA,SH → SH は bits10-15。係数だけを左にずらし、
+    // 指数は変わらない（値は 10^SH 倍になる：SPEC-POWER-ISA / decNumberShift）。
     set_fpr(&mut env, 2, d64("1.5"));
     let word = 59u32 << 26 | 4 << 21 | 2 << 16 | 1u32 << 10 | 578 << 1;
     env.step(|b| sem::x59(b, word, 0x100, false)).unwrap();
     assert_eq!(
         fpr_of(&mut env, 4),
-        d64("1.50") as u64,
-        "dscli 1.5 -> 15E-2"
+        d64("1.50E+1") as u64,
+        "dscli 1.5 -> 150E-1"
     );
-    // 戻す：右 1 桁 → 1.5。
-    set_fpr(&mut env, 2, d64("1.50"));
+    // 戻す：右 1 桁 → 係数 15、指数 -1 のまま → 1.5。
+    set_fpr(&mut env, 2, d64("1.50E+1"));
     let word = 59u32 << 26 | 4 << 21 | 2 << 16 | 1u32 << 10 | 610 << 1;
     env.step(|b| sem::x59(b, word, 0x100, false)).unwrap();
     assert_eq!(fpr_of(&mut env, 4), d64("1.5") as u64, "dscri -> 1.5");
@@ -759,7 +801,8 @@ fn dctdp_decodes_d32() {
     let d32 = polyisa_decimal::dfp::encode(
         polyisa_decimal::dfp::FMT_D32,
         &polyisa_decimal::dfp::Dec::parse("1.5").unwrap(),
-    ) as u32 as u64;
+    )
+    .unwrap() as u32 as u64;
     set_fpr(&mut env, 2, d32 as u128);
     env.step(|b| sem::x59(b, dfp3(4, 0, 2, 258), 0x100, false))
         .unwrap();
@@ -776,7 +819,8 @@ fn drsp_roundtrip() {
     let d32 = polyisa_decimal::dfp::encode(
         polyisa_decimal::dfp::FMT_D32,
         &polyisa_decimal::dfp::Dec::parse("123").unwrap(),
-    ) as u32 as u64;
+    )
+    .unwrap() as u32 as u64;
     assert_eq!(w & 0xffff_ffff, d32, "drsp low32 = decimal32 bits");
 }
 
@@ -790,4 +834,222 @@ fn drrnd_reduces_digits() {
         .unwrap();
     // 1.55 → 有効 2 桁 → 1.6（RNE: 155→15.5、5 → 偶数 16）。
     assert_eq!(fpr_of(&mut env, 5), d64("1.6") as u64, "drrnd 1.55 -> 1.6");
+}
+
+#[test]
+fn dcmpu_far_zero_vs_nonzero() {
+    // 指数差 > 20 の far 経路で ±0 と非零を比較。
+    // x 非零・y=0E+大指数 → x の方が大きい（旧コードは指数だけ見て LT）。
+    let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_power::CpuState>());
+    set_fpr(&mut env, 1, d64("5"));
+    set_fpr(&mut env, 2, d64("0E+25"));
+    env.step(|b| sem::x59(b, dfpbf(0, 1, 2, 642), 0x100, false))
+        .unwrap();
+    assert_eq!(cr_hi(&mut env) >> 28 & 0xf, 0x4, "dcmpu 5 vs 0E+25 -> GT");
+    env.step(|b| sem::x59(b, dfpbf(0, 2, 1, 642), 0x100, false))
+        .unwrap();
+    assert_eq!(cr_hi(&mut env) >> 28 & 0xf, 0x8, "dcmpu 0E+25 vs 5 -> LT");
+}
+
+#[test]
+fn dcmpu_scaled_compare_uses_w128() {
+    // dd = 16（≦20）の厳密スケール比較。x.cb·10^16 = 1.845e19 は
+    // u64 に収まらない（u64 切り詰めだと ~3.26e15 < 1e16 になって LT を返す）。
+    let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_power::CpuState>());
+    set_fpr(&mut env, 1, d64("1.845E+19")); // cb=1845, be=414
+    set_fpr(&mut env, 2, d64("9999999999999999")); // cb≈1e16, be=398
+    env.step(|b| sem::x59(b, dfpbf(0, 1, 2, 642), 0x100, false))
+        .unwrap();
+    assert_eq!(
+        cr_hi(&mut env) >> 28 & 0xf,
+        0x4,
+        "dcmpu 1.845E+19 > 9999999999999999 -> GT"
+    );
+}
+
+#[test]
+fn dadd_qnan_propagates_without_flags() {
+    let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_power::CpuState>());
+    set_fpr(&mut env, 1, 0x7c00_0000_0000_0000u128); // qNaN
+    set_fpr(&mut env, 2, d64("1"));
+    env.step(|b| sem::x59(b, dfp3(4, 1, 2, 2), 0x100, false))
+        .unwrap();
+    let r = fpr_of(&mut env, 4);
+    assert_eq!(r >> 58, 0x1f, "qNaN propagates: {r:#x}");
+    let f = fpscr(&mut env);
+    // qNaN は無通知：VX(1<<29) も VXSNAN(1<<24) も立たない。
+    assert_eq!(f & (1 << 29), 0, "no VX for qNaN: {f:#x}");
+    assert_eq!(f & (1 << 24), 0, "no VXSNAN for qNaN: {f:#x}");
+}
+
+#[test]
+fn dadd_snan_takes_precedence_over_qnan() {
+    let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_power::CpuState>());
+    // x = qNaN(ペイロード 2)、y = sNaN(ペイロード 1) → 結果は y の sNaN を
+    // quiet 化したもの（sNaN が優先）。旧コードは常に x を選んでいた。
+    set_fpr(&mut env, 1, 0x7c00_0000_0000_0002u128);
+    set_fpr(&mut env, 2, 0x7e00_0000_0000_0001u128);
+    env.step(|b| sem::x59(b, dfp3(4, 1, 2, 2), 0x100, false))
+        .unwrap();
+    let r = fpr_of(&mut env, 4);
+    assert_eq!(r, 0x7c00_0000_0000_0001, "sNaN(y) quieted: {r:#x}");
+    let f = fpscr(&mut env);
+    assert_ne!(f & (1 << 24), 0, "VXSNAN: {f:#x}");
+    // x が sNaN、y が qNaN → x の sNaN（quiet 化）が選ばれる。
+    set_fpr(&mut env, 1, 0x7e00_0000_0000_0003u128);
+    set_fpr(&mut env, 2, 0x7c00_0000_0000_0004u128);
+    env.step(|b| sem::x59(b, dfp3(5, 1, 2, 2), 0x100, false))
+        .unwrap();
+    assert_eq!(fpr_of(&mut env, 5), 0x7c00_0000_0000_0003);
+}
+
+#[test]
+fn ddiv_snan_raises_vxsnan() {
+    let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_power::CpuState>());
+    set_fpr(&mut env, 1, d64("1"));
+    set_fpr(&mut env, 2, 0x7e00_0000_0000_0000u128); // sNaN
+    env.step(|b| sem::x59(b, dfp3(4, 1, 2, 546), 0x100, false))
+        .unwrap();
+    let f = fpscr(&mut env);
+    assert_ne!(f & (1 << 24), 0, "VXSNAN expected: {f:#x}");
+}
+
+#[test]
+fn dadd_far_path_keeps_guard_and_sticky() {
+    let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_power::CpuState>());
+    // 7E+30 + 9999999999999999：lo の桁が係数窓（位置 15-30）に入る。
+    // C = 70000000000000009999999999999999 → 上位 16 桁は
+    // 7000000000000009、ガード=9、sticky → 7000000000000010。
+    set_fpr(&mut env, 1, d64("7E+30"));
+    set_fpr(&mut env, 2, d64("9999999999999999"));
+    env.step(|b| sem::x59(b, dfp3(4, 1, 2, 2), 0x100, false))
+        .unwrap();
+    assert_eq!(
+        fpr_of(&mut env, 4),
+        d64("7.000000000000010E+30") as u64,
+        "far add keeps lo digits in window"
+    );
+    let f = fpscr(&mut env);
+    assert_ne!(f & (1 << 25), 0, "XX expected: {f:#x}");
+    assert_ne!(f & (1 << 17), 0, "FI expected: {f:#x}");
+}
+
+#[test]
+fn dadd_far_path_sticky_tie_even() {
+    let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_power::CpuState>());
+    // 7E+30 + 5E+14：ガード桁は lo の 5（位置 14）、それより下の
+    // 桁はすべて 0 → sticky=0。RNE のタイは偶数側（繰り上がらない）。
+    // 旧コードは sticky=1 扱いで 7000000000000001 に丸めていた。
+    set_fpr(&mut env, 1, d64("7E+30"));
+    set_fpr(&mut env, 2, d64("5E+14"));
+    env.step(|b| sem::x59(b, dfp3(4, 1, 2, 2), 0x100, false))
+        .unwrap();
+    assert_eq!(
+        fpr_of(&mut env, 4),
+        d64("7.000000000000000E+30") as u64,
+        "tie-to-even keeps coefficient"
+    );
+    let f = fpscr(&mut env);
+    assert_ne!(f & (1 << 25), 0, "XX expected: {f:#x}");
+}
+
+#[test]
+fn dsub_far_path_sticky_tie_even() {
+    let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_power::CpuState>());
+    // 8E+30 - 5.5E+15：補数領域のガード桁は 5（位置 14 = lz）、
+    // それより下は 0 → sticky=0 → タイは偶数側 7999999999999994。
+    set_fpr(&mut env, 1, d64("8E+30"));
+    set_fpr(&mut env, 2, d64("5.5E+15"));
+    env.step(|b| sem::x59(b, dfp3(4, 1, 2, 514), 0x100, false))
+        .unwrap();
+    assert_eq!(
+        fpr_of(&mut env, 4),
+        d64("7.999999999999994E+30") as u64,
+        "far sub tie-to-even"
+    );
+    let f = fpscr(&mut env);
+    assert_ne!(f & (1 << 25), 0, "XX expected: {f:#x}");
+}
+
+#[test]
+fn dadd_far_with_zero_coefficient() {
+    let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_power::CpuState>());
+    // 0E+30 + 1 = 1（高指数の ±0 オペランドが結果を消さない）。
+    set_fpr(&mut env, 1, d64("0E+30"));
+    set_fpr(&mut env, 2, d64("1"));
+    env.step(|b| sem::x59(b, dfp3(4, 1, 2, 2), 0x100, false))
+        .unwrap();
+    assert_eq!(fpr_of(&mut env, 4), d64("1") as u64, "0E+30 + 1 = 1");
+}
+
+#[test]
+fn ddiv_finite_by_inf_is_etiny_zero() {
+    let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_power::CpuState>());
+    // 有限 / +inf → 真の零（係数 0、指数 Etiny=be0）。符号は除算の符号。
+    set_fpr(&mut env, 1, d64("1"));
+    set_fpr(&mut env, 2, 0x7800_0000_0000_0000u128); // +inf
+    env.step(|b| sem::x59(b, dfp3(4, 1, 2, 546), 0x100, false))
+        .unwrap();
+    assert_eq!(fpr_of(&mut env, 4), 0, "1/inf -> 0E-398");
+    set_fpr(&mut env, 1, d64("-1"));
+    env.step(|b| sem::x59(b, dfp3(5, 1, 2, 546), 0x100, false))
+        .unwrap();
+    assert_eq!(
+        fpr_of(&mut env, 5),
+        0x8000_0000_0000_0000u64,
+        "-1/inf -> -0E-398"
+    );
+}
+
+#[test]
+fn drsp_overflow_to_inf() {
+    let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_power::CpuState>());
+    // 1E+100 は decimal32 の最大（9.999999E+96）を超える → RNE で +Inf。
+    set_fpr(&mut env, 2, d64("1E+100"));
+    env.step(|b| sem::x59(b, dfp3(4, 0, 2, 770), 0x100, false))
+        .unwrap();
+    let w = fpr_of(&mut env, 4);
+    assert_eq!(w & 0xffff_ffff, 0x7800_0000, "drsp overflow -> +Inf");
+    let f = fpscr(&mut env);
+    assert_ne!(f & (1 << 28), 0, "OX expected: {f:#x}");
+    assert_ne!(f & (1 << 25), 0, "XX expected: {f:#x}");
+}
+
+#[test]
+fn drsp_overflow_rtz_to_max_finite() {
+    let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_power::CpuState>());
+    // DRN=Rtz（fpscr 下位 2 ビット = 1）→ オーバーフローは最大有限。
+    env.backend.set(sem::fpscr_ref(), 1u64);
+    set_fpr(&mut env, 2, d64("1E+100"));
+    env.step(|b| sem::x59(b, dfp3(4, 0, 2, 770), 0x100, false))
+        .unwrap();
+    let w = fpr_of(&mut env, 4);
+    let want = polyisa_decimal::dfp::encode(
+        polyisa_decimal::dfp::FMT_D32,
+        &polyisa_decimal::dfp::Dec::parse("9.999999E+96").unwrap(),
+    )
+    .unwrap() as u32 as u64;
+    assert_eq!(w & 0xffff_ffff, want, "drsp Rtz overflow -> max finite");
+    let f = fpscr(&mut env);
+    assert_ne!(f & (1 << 28), 0, "OX expected: {f:#x}");
+}
+
+#[test]
+fn drsp_underflow_denormalizes() {
+    let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_power::CpuState>());
+    // 1.234567E-97 は decimal32 の Etiny(-101) にずらして非正規化：
+    // 1234567 → 12345(.67) → RNE で 12346 → 1.2346E-97（be32=0）。
+    set_fpr(&mut env, 2, d64("1.234567E-97"));
+    env.step(|b| sem::x59(b, dfp3(4, 0, 2, 770), 0x100, false))
+        .unwrap();
+    let w = fpr_of(&mut env, 4);
+    let want = polyisa_decimal::dfp::encode(
+        polyisa_decimal::dfp::FMT_D32,
+        &polyisa_decimal::dfp::Dec::parse("1.2346E-97").unwrap(),
+    )
+    .unwrap() as u32 as u64;
+    assert_eq!(w & 0xffff_ffff, want, "drsp denormalized: {w:#x}");
+    let f = fpscr(&mut env);
+    assert_ne!(f & (1 << 27), 0, "UX expected: {f:#x}");
+    assert_ne!(f & (1 << 25), 0, "XX expected: {f:#x}");
 }

@@ -1318,7 +1318,7 @@ fn result_eq(got: &Dec, want: &str, c: &Case) -> bool {
 }
 
 fn enc_eq(got: &Dec, bits: u128, f: DfpFmt) -> bool {
-    dfp::encode(f, got) == bits
+    dfp::encode(f, got) == Some(bits)
 }
 
 struct Stats {

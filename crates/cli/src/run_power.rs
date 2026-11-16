@@ -171,10 +171,22 @@ fn step_power(
             }
         }
     }
+    // 一時デバッグ: POLYISA_POWER_HASH があれば step ごとの CPU 状態を
+    // FNV-1a で畳み、別実装/別版との最先差分を pc で特定できるようにする。
+    // `pvr`/`tb` は実行非依存のため畳み込み対象から外す。
+    let want_hash = std::env::var_os("POLYISA_POWER_HASH").is_some();
     // 一時デバッグ: POLYISA_WATCH_ADDR の 8 バイトを step ごとに比較する。
     let watch = std::env::var("POLYISA_WATCH_ADDR")
         .ok()
         .and_then(|v| u64::from_str_radix(v.trim_start_matches("0x"), 16).ok());
+    // 一時デバッグ: POLYISA_WATCH_VSR=<n> で VSR[n] の変化を追跡する。
+    let watch_vsr = std::env::var("POLYISA_WATCH_VSR")
+        .ok()
+        .and_then(|v| v.parse::<u8>().ok());
+    let vprev = watch_vsr.map(|n| {
+        let off = core::mem::offset_of!(polyisa_guest_power::CpuState, vsr) + usize::from(n) * 16;
+        u128::from_le_bytes(env.backend.state[off..off + 16].try_into().unwrap())
+    });
     let wprev = watch.and_then(|wa| {
         let mut wb = [0u8; 8];
         let wacc = Access {
@@ -257,10 +269,28 @@ fn step_power(
             eprintln!("watch {wa:#x}: {prev:02x?} -> {wb:02x?} @pc={pc:#x} w={word:#x}");
         }
     }
+    if let (Some(n), Some(prev)) = (watch_vsr, vprev) {
+        let off = core::mem::offset_of!(polyisa_guest_power::CpuState, vsr) + usize::from(n) * 16;
+        let cur = u128::from_le_bytes(env.backend.state[off..off + 16].try_into().unwrap());
+        if cur != prev {
+            eprintln!("vwatch vsr{n}: {prev:032x} -> {cur:032x} @pc={pc:#x} w={word:#x}");
+        }
+    }
     match ok {
         Ok(()) => {
             if env.backend.ctrl == Ctrl::Fallthrough {
                 env.pc += 4;
+            }
+            if want_hash {
+                let st = &env.backend.state;
+                // 末尾の pvr/tb（実行非依存のカウンタ）は畳まない。
+                let n = st.len().saturating_sub(16);
+                let mut h = 0xcbf2_9ce4_8422_2325u64;
+                for &x in &st[..n] {
+                    h ^= u64::from(x);
+                    h = h.wrapping_mul(0x0000_0100_0000_01b3);
+                }
+                eprintln!("hash@{pc:#x}={h:#x}");
             }
             Ok(())
         }
