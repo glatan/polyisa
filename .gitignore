@@ -6,6 +6,9 @@
 # テストデータ（取得物はコミットしない）
 .testdata/
 
+# 参照台帳（docs/references.md）の資料のローカル取得物（コミットしない）
+.refs/
+
 # nextest の JUnit 出力
 junit.xml
 target/nextest/

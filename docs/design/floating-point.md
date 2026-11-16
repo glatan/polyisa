@@ -18,13 +18,14 @@
 |---|---|
 | IEEE 754 binary16、binary32、binary64、binary128 | 大半の ISA |
 | bfloat16 | x86（AVX-512 BF16）、AArch64、Power |
+| 低精度形式（E4M3、E5M2、E2M1 など） | x86（AVX10.3、ACE） |
 | x87 拡張精度（80 ビット） | x86 の x87 |
 | 68881 拡張精度（96 ビットの格納形式、値は 80 ビット） | 68k の FPU |
 | IBM 16 進浮動小数点（32、64、128 ビット） | s390 系 |
 | DEC の F、D、G、H 形式 | VAX、PDP-11（F、D）、Alpha（F、G） |
 | IEEE 754 decimal32、decimal64、decimal128（DPD 符号化） | Power、s390 系（`decimal` クレート） |
 
-8 ビット浮動小数点（E4M3、E5M2）は、対応する命令を実装する段階で追加する。
+8 ビット（E4M3、E5M2）と 4 ビット（E2M1）の浮動小数点形式は、AVX10.3 と ACE を実装する段階 13 で追加する。
 
 ## ISA ごとの規則の渡し方
 

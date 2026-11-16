@@ -244,19 +244,27 @@ WebAssembly の本格的な実装と、WASI preview1 の OS パーソナリテ�
 
 前提：段階 10（x87 の BCD 命令）。
 
-段階 4 の範囲の外にあった x86 の部分を実装する。
+段階 4 の範囲の外にあった x86 の部分を実装し、ユーザーモードで実行できる命令の全範囲をカバーする。対象は、Intel SDM と AMD APM の台帳で確認した版が定める、ユーザーモードで実行できる命令のすべてである。特権命令とシステムモードの機能（ページテーブル走査、記述子テーブルによる保護機構、割り込みコントローラ、VMX、SGX など）は、[設計概要](overview.md) の非目標どおり対象にしない。
 
-- 8086、8088、80286。Linux が動かないので裸実行環境で検証する。命令プリフェッチキューによる自己書き換えコードの振る舞いは、機能の側で再現する
-- SSE2 以降の拡張（SSE3 以降、AVX 系、AVX-512 のサブセット、AMX、APX）と、x86-64 のマイクロアーキテクチャレベルのプロファイル（v1 から v4）
+- 記述の基盤。x86min の変形ごとの列挙はこの命令数に対応できないので、オペコード表（`map`）と接頭辞・ModRM/SIB・VEX/EVEX/REX2 のフックを ISADL に実装し、x86 の記述をそれらで書き直す（[ADR-0018](../adr/0018-x86min-enumerated-encoding.md) の「列挙の複製が主な費用になったとき」にあたる）。実行モード（16、32、64 ビットのオペランドサイズとアドレスサイズ、ModRM の 16 ビットアドレッシング）を ISADL でモデル化し（GAP-0029 の解消）、挙動パラメータと機能から識別情報への導出を繋げる（GAP-0027 の解消）
+- 8086、8088、80286。実モードに限り、裸実行環境で検証する（プロテクトモードはシステムモードの範囲）。命令プリフェッチキューによる自己書き換えコードの振る舞いは、機能の側で再現する。世代ごとの差（FLAGS の固定ビット、`PUSH SP` の値、シフト回数のマスク、`0F` が `POP CS`、0x82 のエイリアス、80186 以降の命令の有無、FS・GS と 0x66・0x67 の接頭辞の有無、除算エラーの戻りアドレス、1 MiB でのアドレスの巻き戻し、CPUID の有無）は、機能と挙動パラメータで表す。8088 のバスインターフェースユニットと命令プリフェッチキューは、専用のタイミングモデルとする（[タイミングモデル](timing.md)）
+- x87 の残り。`FBLD`/`FBSTP` は段階 10 の `decimal` を使う。8087、80287 と 80387 以降での擬似非正規化数などの扱いの差は、挙動パラメータとする（[浮動小数点と十進演算](floating-point.md)）。FPU を持たない CPU モデルでは、ESC 命令は世代の規定どおりの振る舞い（8086 ではダミーのフェッチ、80286 では MSW の EM ビットによる INT 7）とする
+- SSE2 以降の拡張のすべて。MMX と 3DNow!（MMX のレジスタは x87 のスタックにエイリアスされる）を含み、SSE3 以降の各版、AES-NI・PCLMUL・SHA・GFNI・RDRAND・RDSEED・ADX・BMI・F16C・FMA、AVX 系、AVX-512 の全サブセット、AVX10（10.3 まで）、ACE（外積による行列演算。v2 まで）、AMX の全拡張、APX（REX2、NDD、拡張 GPR）を実装する。AVX10.3 と ACE v2 が使う 8 ビットと 4 ビットの浮動小数点形式（E4M3、E5M2、E2M1 など）は `softfloat` の形式として追加する（[浮動小数点と十進演算](floating-point.md)）。AMD の拡張（FMA4、XOP、TBM、SSE4a、MONITORX・MWAITX、CLZERO、RDPRU）も、AMD APM が定める範囲で対象とする。AVX 系をユーザーモードで使うために、XCR0 と `XGETBV`、`XSAVE` 系と xsave 領域の配置を持ち、シグナルフレームの浮動小数点状態もこの配置に従う。AMX の利用許可は `arch_prctl` の `ARCH_REQ_XCOMP_PERM` で再現する。CET のユーザー命令（ENDBR とシャドウスタックの操作）、PKU、WAITPKG、MOVDIR、CLDEMOTE、SERIALIZE、HRESET、FSGSBASE 系、TSX も対象とする。TSX のトランザクションの開始は [アーキテクチャ固有の要求](arch-requirements.md) どおり常に失敗させ、挙動パラメータで切り替えられる形にする。WAITPKG の `TPAUSE` の期限は仮想時間に従う。ユーザーモードから読めるシステム状態の命令（`SGDT`、`SIDT`、`SLDT`、`STR`、`SMSW`、`LAR`、`LSL`、`VERR`、`VERW`、`ARPL`）は、CPU モデルと OS パーソナリティが持つモデル化した値を返す。`RDRAND` と `RDSEED` は、決定性の原則に従い、設定した種から生成する擬似乱数を返す。UINTR の命令群（`SENDUIPI`、`UIRET`、`TESTUI`、`CLUI`、`STUI`）と `ENQCMD` のように、実行に OS による許可や設定が要る命令は、許可のない状態の規定の振る舞いとする
+- x86-64 のマイクロアーキテクチャレベルのプロファイル（v1 から v4）と、ベンダーと世代ごとの CPU モデル
 - 80486 と Pentium の `exact` のタイミング表。U/V パイプラインはインオーダーの汎用モデル（段階 3 で R3000 に使ったもの）で表す
+- x32 のゲスト ABI（[ユーザーモード](user-mode.md) の ABI 表の残りの変種）。ELF の `GNU_PROPERTY_X86_FEATURE_*` の注記が要求する機能（IBT、SHSTK など）はローダが読み、CPU モデルにない機能の要求は [CPU モデル](cpu-models.md) の規約どおり警告にとどめる。`SYSENTER` と `SYSEXIT` は x86-32 の Linux のシステムコールの入口として OS パーソナリティに渡し、x86-64 の vsyscall ページ（gettimeofday、time、getcpu の固定アドレス）は [アーキテクチャ固有の要求](arch-requirements.md) の「特別なアドレスを経由する OS の呼び出し」で再現する
 
 完了条件：
 
 | ID | 条件 | 判定 |
 |---|---|---|
-| S13-1 | 8088 の SingleStepTests のデータ集と命令の振る舞いが一致する（テスト `heavy_conformance_sst8088`）。 | 未整備 |
-| S13-2 | 追加した拡張の命令単位テストが裸実行環境で通る（テスト `bare_x86ext`）。 | 未整備 |
+| S13-1 | 8088 と 80286 の SingleStepTests のデータ集と命令の振る舞いが一致する（テスト `heavy_conformance_sst8088`、`heavy_conformance_sst80286`）。 | 未整備 |
+| S13-2 | 追加した拡張と 80286、x87 の世代差の命令単位テストが裸実行環境で通る（テスト `bare_x86ext`）。 | 未整備 |
 | S13-3 | 80486 と Pentium のタイミングの検証用の命令列がすべて一致する（テスト `heavy_timing_i486`、`heavy_timing_pentium`）。 | 未整備 |
+| S13-4 | 8088 の専用のタイミングモデルが、SingleStepTests のサイクル数と一致する（テスト `heavy_timing_8088`）。 | 未整備 |
+| S13-5 | 追加した拡張と 16 ビットモードについて、llvm-objdump と XED とのデコーダの差分テストが通る（テスト `heavy_oracle_llvm`、`heavy_oracle_xed`。両方のオラクルが対応しない拡張は S13-2 で検証する）。 | 未整備 |
+| S13-6 | ホストの CPU と、ホストが持つ拡張について実行の差分テストが通る（テスト `heavy_diff_host`。GAP-0030 の解消を兼ねる）。ホストが持たない拡張は、Intel SDE（TOOL-INTEL-SDE）が対応する版の範囲で実行の差分テスト（`heavy_diff_sde`）を行う。 | 未整備 |
+| S13-7 | x32 ABI のテストプログラムと、xsave 領域・`XGETBV`・AMX の許可・vsyscall 経由の呼び出しを使うテストプログラムが正しい出力を返す（テスト `heavy_program_x32`、`heavy_program_x86ext`）。 | 未整備 |
 
 ### 段階 14：m68k
 
@@ -506,7 +514,7 @@ LLVM の対応しない ISA（m68k、Alpha、PA-RISC、SuperH、OpenRISC、IA-64
 | 段階 10（十進演算と非 IEEE 浮動小数点） | SPEC-DECIMAL-ARITH（確認済み）、各形式の根拠（SPEC-S390-ZARCH-POP、SPEC-VAX-ARM、SPEC-M68K-FPU） | TEST-DECTEST（確認済み） |
 | 段階 11（s390 系） | SPEC-S390-ZARCH-POP（確認済み）、SPEC-S390-ESA390-POP（版確定）、SPEC-S390-S360-POP（版確定） | SPEC-S390-ABI（確認済み）、SPEC-S390-ABI-31（版確定）、BIN（未登録分は追加）、TOOL-LLVM |
 | 段階 12（WebAssembly と WASI） | SPEC-WASM-CORE、SPEC-WASI-P1（確認済み） | TEST-WASM-SPEC、TOOL-WASMTIME |
-| 段階 13（x86 の残り） | SPEC-X86-8086（確認済み）、SPEC-X86-I286（版確定）、SPEC-X86-PENTIUM（確認済み）、SPEC-X86-I486（版確定） | TEST-SINGLESTEP-8088、MEAS-UOPS-INFO、MEAS-AGNER |
+| 段階 13（x86 の残り） | SPEC-X86-8086（確認済み）、SPEC-X86-8087（版確定。SPEC-X86-8086 への収録を先に点検）、SPEC-X86-I186（版確定）、SPEC-X86-I286（版確定）、SPEC-X86-I386（版確定）、SPEC-X86-I387（版確定。80387 以降の x87 挙動差）、SPEC-X86-I486（版確定）、SPEC-X86-PENTIUM（確認済み）、SPEC-X86-INTEL-SDM（拡張の全範囲をカバーする版の確定。APX・AMX・AVX10 の収録を確認し、不足分は別資料を追加登録）、SPEC-X86-AMD-APM（版確定。Vol.3 Rev 3.39 で 3DNow!・FMA4・XOP・TBM の収録を確認済み）、SPEC-X86-APX（版確定）、SPEC-X86-ISE（版確定。SDM にない拡張の根拠）、SPEC-X86-AVX10-2（版確定）、SPEC-X86-ACE-V1（版確定）、SPEC-X86-ACE-AVX10-3（版確定）、SPEC-X86-PSABI（確認済み。x32 は同じ文書の ILP32 の節）、SPEC-X86-I386-PSABI（版確定） | TEST-SINGLESTEP-8088、TEST-SINGLESTEP-80286（版確定）、TEST-SINGLESTEP-80386（版確定。386EX の実モード）、MEAS-UOPS-INFO、MEAS-AGNER、MEAS-INSTLATX64（版確定。CPU モデルの識別情報）、SPEC-X86-INTEL-OPT-V2（版確定。旧世代の公式レイテンシ）、SRC-LINUX（確認済み。x32 のシステムコール表と `arch_prctl` の定数）、TOOL-XED（版確定。第2のデコードオラクル）、TOOL-INTEL-SDE（版確定。未出荷拡張の実行差分オラクル）、TOOL-GCC-X32（版確定。x32 のテストバイナリは公式配布がなく自前ビルド）、BIN（新しい拡張を使う配布物、未登録分は追加） |
 | 段階 14（m68k） | SPEC-M68K-PRM、SPEC-M68K-UM、SPEC-M68K-FPU（確認済み）、SPEC-M68K-CPU32（版確定）、SPEC-M68K-COLDFIRE（版確定） | SPEC-M68K-ABI（版確定）、TEST-SINGLESTEP-68000、SRC-LINUX、BIN（未登録分は追加） |
 | 段階 15（SPARC） | SPEC-SPARC-V8（確認済み）、SPEC-SPARC-V9（版確定） | SPEC-SPARC-PSABI（版確定）、SRC-LINUX、BIN（未登録分は追加）、TOOL-LLVM |
 | 段階 16（Alpha） | SPEC-ALPHA-ARM（版確定） | SPEC-ALPHA-CALLSTD（版確定）、SRC-LINUX、BIN（未登録分は追加） |
