@@ -13679,7 +13679,7 @@ pub fn fnstcw_mem32<B: Backend>(b: &mut B, base: Gpr, disp: i32) -> Flow<B> {
 }
 
 /// binary32 のビットを 80 ビットへ伸ばし、TOP を 1 減らしてから ST(0) へ書く。
-fn f32_to_ext<B: Backend>(b: &mut B, bits: B::V<W32>) -> (B::V<W64>, B::V<W16>) {
+pub(crate) fn f32_to_ext<B: Backend>(b: &mut B, bits: B::V<W32>) -> (B::V<W64>, B::V<W16>) {
     let s31 = b.konst::<W32>(31);
     let sign = b.shr_l::<W32>(bits, s31);
     let s23 = b.konst::<W32>(23);
@@ -13743,13 +13743,13 @@ fn f32_to_ext<B: Backend>(b: &mut B, bits: B::V<W32>) -> (B::V<W64>, B::V<W16>) 
     (sig_final, exp_word)
 }
 
-fn push_f32<B: Backend>(b: &mut B, bits: B::V<W32>) -> Flow<B> {
+pub(crate) fn push_f32<B: Backend>(b: &mut B, bits: B::V<W32>) -> Flow<B> {
     let (sig, exp) = f32_to_ext(b, bits);
     push_ext(b, sig, exp)
 }
 
 /// 80 ビット値を x87 スタックへ載せる。TOP を 1 減らしてから書く。
-fn push_ext<B: Backend>(b: &mut B, sig: B::V<W64>, exp_word: B::V<W16>) -> Flow<B> {
+pub(crate) fn push_ext<B: Backend>(b: &mut B, sig: B::V<W64>, exp_word: B::V<W16>) -> Flow<B> {
     let top = b.get(top_ref());
     let one16 = b.konst::<W16>(1);
     let dec = b.sub::<W16>(top, one16);
@@ -13770,7 +13770,7 @@ fn push_ext<B: Backend>(b: &mut B, sig: B::V<W64>, exp_word: B::V<W16>) -> Flow<
 }
 
 /// 符号付き 32 ビット整数を 80 ビットへ伸ばしてスタックへ載せる。
-fn push_i32<B: Backend>(b: &mut B, bits: B::V<W32>) -> Flow<B> {
+pub(crate) fn push_i32<B: Backend>(b: &mut B, bits: B::V<W32>) -> Flow<B> {
     let s31 = b.konst::<W32>(31);
     let sign = b.shr_l::<W32>(bits, s31);
     let one32 = b.konst::<W32>(1);
@@ -13826,7 +13826,8 @@ fn push_i32<B: Backend>(b: &mut B, bits: B::V<W32>) -> Flow<B> {
 }
 
 /// 符号付き 64 ビット整数を 80 ビットへ伸ばしてスタックへ載せる。
-fn push_i64<B: Backend>(b: &mut B, bits: B::V<W64>) -> Flow<B> {
+/// 符号付き 64 ビット整数を 80 ビットへ変換する。
+pub(crate) fn i64_to_ext<B: Backend>(b: &mut B, bits: B::V<W64>) -> (B::V<W64>, B::V<W16>) {
     let s63 = b.konst::<W64>(63);
     let sign = b.shr_l::<W64>(bits, s63);
     let one64 = b.konst::<W64>(1);
@@ -13877,11 +13878,17 @@ fn push_i64<B: Backend>(b: &mut B, bits: B::V<W64>) -> Flow<B> {
     let sign_bit = b.shl::<W64>(sign, s15);
     let exp_word64 = b.or::<W64>(exp_final, sign_bit);
     let exp_word: B::V<W16> = b.trunc::<W64, W16>(exp_word64);
-    push_ext(b, sig_final, exp_word)
+    (sig_final, exp_word)
 }
 
-/// 倍精度を 80 ビットへ伸ばしてスタックへ載せる。非正規化数は正規化する。
-fn push_f64<B: Backend>(b: &mut B, bits: B::V<W64>) -> Flow<B> {
+/// 符号付き 64 ビット整数をスタックへ載せる。
+pub(crate) fn push_i64<B: Backend>(b: &mut B, bits: B::V<W64>) -> Flow<B> {
+    let (sig, exp) = i64_to_ext(b, bits);
+    push_ext(b, sig, exp)
+}
+
+/// 倍精度を 80 ビットへ伸ばす。非正規化数は正規化する。
+pub(crate) fn f64_to_ext<B: Backend>(b: &mut B, bits: B::V<W64>) -> (B::V<W64>, B::V<W16>) {
     let s63 = b.konst::<W64>(63);
     let sign = b.shr_l::<W64>(bits, s63);
     let s52 = b.konst::<W64>(52);
@@ -13941,7 +13948,13 @@ fn push_f64<B: Backend>(b: &mut B, bits: B::V<W64>) -> Flow<B> {
     let sign_bit = b.shl::<W64>(sign, s15);
     let exp_word64 = b.or::<W64>(exp_final, sign_bit);
     let exp_word: B::V<W16> = b.trunc::<W64, W16>(exp_word64);
-    push_ext(b, sig_final, exp_word)
+    (sig_final, exp_word)
+}
+
+/// 倍精度を 80 ビットへ伸ばしてスタックへ載せる。
+pub(crate) fn push_f64<B: Backend>(b: &mut B, bits: B::V<W64>) -> Flow<B> {
+    let (sig, exp) = f64_to_ext(b, bits);
+    push_ext(b, sig, exp)
 }
 
 /// FLDS [RIP+disp32] (D9 /0 mod=00 rm=101)。seq 0x402335 対応.
@@ -13969,7 +13982,7 @@ pub fn fmul_m32_abs<B: Backend>(b: &mut B, addr32: u32) -> Flow<B> {
     fmul_m32_bits(b, bits)
 }
 
-fn fmul_m32_bits<B: Backend>(b: &mut B, bits: B::V<W32>) -> Flow<B> {
+pub(crate) fn fmul_m32_bits<B: Backend>(b: &mut B, bits: B::V<W32>) -> Flow<B> {
     let (sig_m, exp_m) = f32_to_ext(b, bits);
     let top = b.get(top_ref());
     let (sig0, exp0) = read_st(b, top);
@@ -14409,7 +14422,7 @@ pub fn fstp_st<B: Backend>(b: &mut B, i: u8) -> Flow<B> {
     Ok(())
 }
 
-fn read_st<B: Backend>(b: &mut B, slot_sel: B::V<W16>) -> (B::V<W64>, B::V<W16>) {
+pub(crate) fn read_st<B: Backend>(b: &mut B, slot_sel: B::V<W16>) -> (B::V<W64>, B::V<W16>) {
     let mut sig = b.konst::<W64>(0);
     let mut exp = b.konst::<W16>(0);
     for slot in 0..8 {
@@ -14424,7 +14437,7 @@ fn read_st<B: Backend>(b: &mut B, slot_sel: B::V<W16>) -> (B::V<W64>, B::V<W16>)
 }
 
 /// 正規化済み 80 ビット同士の乗算。最近接偶数へ丸め、ゼロと無限大だけ特別扱いする。
-fn mul_ext<B: Backend>(
+pub(crate) fn mul_ext<B: Backend>(
     b: &mut B,
     sig_a: B::V<W64>,
     exp_a: B::V<W16>,
@@ -14515,7 +14528,7 @@ fn mul_ext<B: Backend>(
     (sig_out, exp_word)
 }
 
-fn bit_or<B: Backend>(b: &mut B, x: B::B, y: B::B) -> B::B {
+pub(crate) fn bit_or<B: Backend>(b: &mut B, x: B::B, y: B::B) -> B::B {
     let zero = b.konst::<W64>(0);
     let one = b.konst::<W64>(1);
     let xn = b.select::<W64>(x, one, zero);
@@ -14524,7 +14537,7 @@ fn bit_or<B: Backend>(b: &mut B, x: B::B, y: B::B) -> B::B {
     b.cmp::<W64>(Cmp::Ne, combined, zero)
 }
 
-fn bit_and<B: Backend>(b: &mut B, x: B::B, y: B::B) -> B::B {
+pub(crate) fn bit_and<B: Backend>(b: &mut B, x: B::B, y: B::B) -> B::B {
     let zero = b.konst::<W64>(0);
     let one = b.konst::<W64>(1);
     let xn = b.select::<W64>(x, one, zero);
@@ -14533,7 +14546,7 @@ fn bit_and<B: Backend>(b: &mut B, x: B::B, y: B::B) -> B::B {
     b.cmp::<W64>(Cmp::Ne, combined, zero)
 }
 
-fn bit_not<B: Backend>(b: &mut B, x: B::B) -> B::B {
+pub(crate) fn bit_not<B: Backend>(b: &mut B, x: B::B) -> B::B {
     let zero = b.konst::<W64>(0);
     let one = b.konst::<W64>(1);
     let xn = b.select::<W64>(x, zero, one);
@@ -14601,7 +14614,7 @@ fn clz64<B: Backend>(b: &mut B, x: B::V<W64>) -> B::V<W64> {
 
 /// 正規化済み 80 ビット同士の加算。最近接偶数へ丸め、ゼロと無限大だけ特別扱いする。
 /// 非正規化数はゼロとみなす。仮数の 128 ビットより下は sticky に潰す。
-fn add_ext<B: Backend>(
+pub(crate) fn add_ext<B: Backend>(
     b: &mut B,
     sig_a: B::V<W64>,
     exp_a: B::V<W16>,
@@ -14799,6 +14812,118 @@ fn add_ext<B: Backend>(
     (sig_final, exp_word)
 }
 
+/// ST(slot_sel) に 80 ビット値を書く。スロット番号は値ドメイン。
+pub(crate) fn write_st<B: Backend>(b: &mut B, slot_sel: B::V<W16>, sig: B::V<W64>, exp: B::V<W16>) {
+    for slot in 0..8 {
+        let idx = b.konst::<W16>(slot as u16);
+        let hit = b.cmp::<W16>(Cmp::Eq, slot_sel, idx);
+        let old_sig = b.get(st_sig_ref(slot));
+        let old_exp = b.get(st_exp_ref(slot));
+        let new_sig = b.select::<W64>(hit, sig, old_sig);
+        let new_exp = b.select::<W16>(hit, exp, old_exp);
+        b.set(st_sig_ref(slot), new_sig);
+        b.set(st_exp_ref(slot), new_exp);
+    }
+}
+
+/// 正規化済み 80 ビット同士の除算（a / b）。指数の差と 128 ビットの
+/// 仮数商で組み立て、商は切り捨て（仮数 64 ビットの丸めは後の段階）。
+/// ゼロ除算は無限大、0/0 と inf/inf は非数。非正規化数はゼロとみなす。
+pub(crate) fn div_ext<B: Backend>(
+    b: &mut B,
+    sig_a: B::V<W64>,
+    exp_a: B::V<W16>,
+    sig_b: B::V<W64>,
+    exp_b: B::V<W16>,
+) -> (B::V<W64>, B::V<W16>) {
+    let zero = b.konst::<W64>(0);
+    let one = b.konst::<W64>(1);
+    let mask15 = b.konst::<W64>(0x7fff);
+    let special = b.konst::<W64>(0x7fff);
+    let s15 = b.konst::<W64>(15);
+    let bias = b.konst::<W64>(16383);
+    let int_bit = b.konst::<W64>(1u64 << 63);
+    let nan_sig = b.konst::<W64>(0xC000_0000_0000_0000);
+    let nan_exp = b.konst::<W64>(0x7fff);
+
+    let exp_a64 = b.zext::<W16, W64>(exp_a);
+    let exp_b64 = b.zext::<W16, W64>(exp_b);
+    let ea = b.and::<W64>(exp_a64, mask15);
+    let eb = b.and::<W64>(exp_b64, mask15);
+    let sign_a = b.shr_l::<W64>(exp_a64, s15);
+    let sign_b = b.shr_l::<W64>(exp_b64, s15);
+    let sign_r = b.xor::<W64>(sign_a, sign_b);
+    let sp_a = b.cmp::<W64>(Cmp::Eq, ea, special);
+    let sp_b = b.cmp::<W64>(Cmp::Eq, eb, special);
+    let z_a = b.cmp::<W64>(Cmp::Eq, ea, zero);
+    let z_b = b.cmp::<W64>(Cmp::Eq, eb, zero);
+    // 非数判定: 指数が全 1 で仮数の小数部が非零。
+    let frac_mask = b.konst::<W64>((1u64 << 63) - 1);
+    let fa = b.and::<W64>(sig_a, frac_mask);
+    let fb = b.and::<W64>(sig_b, frac_mask);
+    let fa_nz = b.cmp::<W64>(Cmp::Ne, fa, zero);
+    let fb_nz = b.cmp::<W64>(Cmp::Ne, fb, zero);
+    let nan_a = bit_and(b, sp_a, fa_nz);
+    let nan_b = bit_and(b, sp_b, fb_nz);
+    let fa_z = bit_not(b, fa_nz);
+    let fb_z = bit_not(b, fb_nz);
+    let inf_a = bit_and(b, sp_a, fa_z);
+    let inf_b = bit_and(b, sp_b, fb_z);
+
+    // 通常経路: q = (sig_a << 64) / sig_b ∈ [2^63, 2^65)。
+    let num = {
+        let a128 = b.zext::<W64, W128>(sig_a);
+        let k64 = b.konst::<W128>(64);
+        b.shl::<W128>(a128, k64)
+    };
+    let den = b.zext::<W64, W128>(sig_b);
+    let q128 = b.udiv::<W128>(num, den);
+    let q = b.trunc::<W128, W64>(q128);
+    let k64c = b.konst::<W128>(64);
+    let q_hi128 = b.shr_l::<W128>(q128, k64c);
+    let q_hi = b.trunc::<W128, W64>(q_hi128);
+    let q_ge = b.cmp::<W64>(Cmp::Ne, q_hi, zero);
+    // ratio >= 1 なら仮数を 1 ビット下げて指数をそのまま、未満なら指数を -1。
+    let sig_sh = b.shr_l::<W64>(q, one);
+    let sig_norm = b.select::<W64>(q_ge, sig_sh, q);
+    let ediff = b.sub::<W64>(ea, eb);
+    let em1 = b.sub::<W64>(ediff, one);
+    let eraw = b.select::<W64>(q_ge, ediff, em1);
+    let e_norm = b.add::<W64>(eraw, bias);
+    // オーバー/アンダーフローは特別値へ潰す（飽和近似）。
+    let e_ovf = b.cmp::<W64>(Cmp::GeU, e_norm, special);
+    let e_under = b.cmp::<W64>(Cmp::GeU, eraw, special); // eraw が負（上位ビット立つ）
+    let sig_ovf = int_bit;
+    let e_inf = b.select::<W64>(e_ovf, special, e_norm);
+    let sig_fin = b.select::<W64>(e_ovf, sig_ovf, sig_norm);
+    let e_under_z = b.select::<W64>(e_under, zero, e_inf);
+    let sig_under = b.select::<W64>(e_under, zero, sig_fin);
+
+    // 特殊値の規則:
+    //   nan が絡む → nan
+    //   inf / inf または 0 / 0 → nan
+    //   inf / 有限 → inf、有限 / inf → 0、x / 0 → inf
+    let any_nan = bit_or(b, nan_a, nan_b);
+    let inf_inf = bit_and(b, inf_a, inf_b);
+    let z_z = bit_and(b, z_a, z_b);
+    let bad = bit_or(b, any_nan, inf_inf);
+    let bad = bit_or(b, bad, z_z);
+    let res_inf = bit_or(b, inf_a, z_b);
+    let res_zero = bit_or(b, inf_b, z_a);
+
+    let e_out = b.select::<W64>(bad, nan_exp, e_under_z);
+    let s_out = b.select::<W64>(bad, nan_sig, sig_under);
+    let e_out = b.select::<W64>(res_inf, special, e_out);
+    let s_out = b.select::<W64>(res_inf, int_bit, s_out);
+    let e_out = b.select::<W64>(res_zero, zero, e_out);
+    let s_out = b.select::<W64>(res_zero, zero, s_out);
+    // nan は符号なし。
+    let sign_bit = b.shl::<W64>(sign_r, s15);
+    let sign_sel = b.select::<W64>(bad, zero, sign_bit);
+    let e_word = b.or::<W64>(e_out, sign_sel);
+    (s_out, b.trunc::<W64, W16>(e_word))
+}
+
 /// FADD ST(0), ST(i) (D8 C0+i)。ST(0) に和を書き、スタックは戻さない。seq 0x4d097d 対応.
 pub fn fadd_st<B: Backend>(b: &mut B, i: u8) -> Flow<B> {
     let top = b.get(top_ref());
@@ -14903,7 +15028,7 @@ pub fn fsubp_st<B: Backend>(b: &mut B, i: u8) -> Flow<B> {
 }
 
 /// 80 ビットを倍精度へ丸める。非正規化数はゼロにする。
-fn f80_to_f64<B: Backend>(b: &mut B, sig: B::V<W64>, exp: B::V<W16>) -> B::V<W64> {
+pub(crate) fn f80_to_f64<B: Backend>(b: &mut B, sig: B::V<W64>, exp: B::V<W16>) -> B::V<W64> {
     let exp64 = b.zext::<W16, W64>(exp);
     let mask15 = b.konst::<W64>(0x7fff);
     let ea = b.and::<W64>(exp64, mask15);
@@ -14968,7 +15093,7 @@ fn f80_to_f64<B: Backend>(b: &mut B, sig: B::V<W64>, exp: B::V<W16>) -> B::V<W64
 
 /// 80 ビットを符号付き 64 ビット整数へ丸める。丸め方向は FCW の RC。
 /// 入らない値と非数は不定整数 0x8000_0000_0000_0000。
-fn f80_to_i64<B: Backend>(b: &mut B, sig: B::V<W64>, exp: B::V<W16>) -> B::V<W64> {
+pub(crate) fn f80_to_i64<B: Backend>(b: &mut B, sig: B::V<W64>, exp: B::V<W16>) -> B::V<W64> {
     let zero = b.konst::<W64>(0);
     let one = b.konst::<W64>(1);
     let mask15 = b.konst::<W64>(0x7fff);
@@ -15076,7 +15201,7 @@ fn f80_to_i64<B: Backend>(b: &mut B, sig: B::V<W64>, exp: B::V<W16>) -> B::V<W64
 }
 
 /// FISTP m64。整数を書いてから ST(0) を捨てる。
-fn fistp_m64_at<B: Backend>(b: &mut B, addr: B::V<W64>) -> Flow<B> {
+pub(crate) fn fistp_m64_at<B: Backend>(b: &mut B, addr: B::V<W64>) -> Flow<B> {
     let top = b.get(top_ref());
     let (sig, exp) = read_st(b, top);
     let bits = f80_to_i64(b, sig, exp);
@@ -15096,7 +15221,7 @@ pub fn fistp_m64_sibd<B: Backend>(b: &mut B, base: Gpr, idx: Gpr, shift: u32, di
     fistp_m64_at(b, addr)
 }
 
-fn pop_st<B: Backend>(b: &mut B, top: B::V<W16>) -> Flow<B> {
+pub(crate) fn pop_st<B: Backend>(b: &mut B, top: B::V<W16>) -> Flow<B> {
     let zero64 = b.konst::<W64>(0);
     let zero16 = b.konst::<W16>(0);
     for slot in 0..8 {

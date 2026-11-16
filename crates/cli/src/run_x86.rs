@@ -3082,6 +3082,638 @@ fn dispatch_map<B: Backend>(
         Insn::ShldEvGvCl => sem_ea::shxd(b, true, w, &ea, d, reg, u8::MAX),
         Insn::ShrdEvGvIb => sem_ea::shxd(b, false, w, &ea, d, reg, d.imm as u8),
         Insn::ShrdEvGvCl => sem_ea::shxd(b, false, w, &ea, d, reg, u8::MAX),
+        // ===== SSE/SSE2（0F 系）=====
+        Insn::MovupsXvWv
+        | Insn::MovupdXvWv
+        | Insn::MovapsXvWv
+        | Insn::MovapdXvWv
+        | Insn::MovdqaXvWv
+        | Insn::MovdquXvWv => sem_ea::mov_x_w(b, d, &ea),
+        Insn::MovupsWvXv
+        | Insn::MovupdWvXv
+        | Insn::MovapsWvXv
+        | Insn::MovapdWvXv
+        | Insn::MovdqaWvXv
+        | Insn::MovdquWvXv => sem_ea::mov_w_x(b, d, &ea),
+        Insn::MovssXvWv => sem_ea::movs_ld(b, d, &ea, 32),
+        Insn::MovsdXvWv => sem_ea::movs_ld(b, d, &ea, 64),
+        Insn::MovssWvXv => sem_ea::movs_st(b, d, &ea, 32),
+        Insn::MovsdWvXv => sem_ea::movs_st(b, d, &ea, 64),
+        Insn::MovlpsXvWv | Insn::MovlpdXvWv | Insn::MovddupXvWv | Insn::MovsldupXvWv => {
+            sem_ea::movl_d(b, d, &ea)
+        }
+        Insn::MovlpsWvXv | Insn::MovlpdWvXv => sem_ea::movl_st(b, d, &ea),
+        Insn::MovhpsXvWv | Insn::MovhpdXvWv | Insn::MovshdupXvWv => sem_ea::movh_d(b, d, &ea),
+        Insn::MovhpsWvXv | Insn::MovhpdWvXv => sem_ea::movh_st(b, d, &ea),
+        Insn::MovqXvWv => sem_ea::movq_x_w(b, d, &ea),
+        Insn::MovqWvXv => sem_ea::movq_w_x(b, d, &ea),
+        Insn::MovdXvEv => sem_ea::movd_x_e(b, d, &ea),
+        Insn::MovdEvXv => sem_ea::movd_e_x(b, d, &ea),
+        Insn::MovmskpsGvWv => sem_ea::movmsk(b, 32, d, &ea),
+        Insn::MovmskpdGvWv => sem_ea::movmsk(b, 64, d, &ea),
+        Insn::PmovmskbGvWv => sem_ea::movmsk(b, 8, d, &ea),
+        Insn::UcomissXvWv | Insn::ComissXvWv => sem_ea::ucomis(b, 32, d, &ea),
+        Insn::UcomisdXvWv | Insn::ComisdXvWv => sem_ea::ucomis(b, 64, d, &ea),
+        Insn::Cvtsi2ssXvEv => sem_ea::cvtsi(b, 32, d, &ea),
+        Insn::Cvtsi2sdXvEv => sem_ea::cvtsi(b, 64, d, &ea),
+        Insn::Cvttss2siGvWv => sem_ea::cvtf2i(b, 32, true, d, &ea, reg),
+        Insn::Cvttsd2siGvWv => sem_ea::cvtf2i(b, 64, true, d, &ea, reg),
+        Insn::Cvtss2siGvWv => sem_ea::cvtf2i(b, 32, false, d, &ea, reg),
+        Insn::Cvtsd2siGvWv => sem_ea::cvtf2i(b, 64, false, d, &ea, reg),
+        Insn::Cvtps2pdXvWv => sem_ea::cvtff(b, true, false, d, &ea),
+        Insn::Cvtss2sdXvWv => sem_ea::cvtff(b, true, true, d, &ea),
+        Insn::Cvtpd2psXvWv => sem_ea::cvtff(b, false, false, d, &ea),
+        Insn::Cvtsd2ssXvWv => sem_ea::cvtff(b, false, true, d, &ea),
+        Insn::CmppsXvWvIb => sem_ea::pfloat(b, sem_ea::Fop::Cmp(d.imm as u8), 32, d, &ea),
+        Insn::CmppdXvWvIb => sem_ea::pfloat(b, sem_ea::Fop::Cmp(d.imm as u8), 64, d, &ea),
+        Insn::CmpssXvWvIb => sem_ea::scmp(b, 32, d.imm as u8, d, &ea),
+        Insn::CmpsdXvWvIb => sem_ea::scmp(b, 64, d.imm as u8, d, &ea),
+        Insn::AndpsXvWv | Insn::AndpdXvWv | Insn::PandXvWv => {
+            sem_ea::logic128(b, sem_ea::Lop::And, d, &ea)
+        }
+        Insn::AndnpsXvWv | Insn::AndnpdXvWv | Insn::PandnXvWv => {
+            sem_ea::logic128(b, sem_ea::Lop::Andn, d, &ea)
+        }
+        Insn::OrpsXvWv | Insn::OrpdXvWv | Insn::PorXvWv => {
+            sem_ea::logic128(b, sem_ea::Lop::Or, d, &ea)
+        }
+        Insn::XorpsXvWv | Insn::XorpdXvWv | Insn::PxorXvWv => {
+            sem_ea::logic128(b, sem_ea::Lop::Xor, d, &ea)
+        }
+        Insn::PshufdXvWvIb => sem_ea::pshuf(b, 0, d.imm as u8, d, &ea),
+        Insn::PshufhwXvWvIb => sem_ea::pshuf(b, 1, d.imm as u8, d, &ea),
+        Insn::PshuflwXvWvIb => sem_ea::pshuf(b, 2, d.imm as u8, d, &ea),
+        Insn::ShufpsXvWvIb => sem_ea::shufp(b, false, d.imm as u8, d, &ea),
+        Insn::ShufpdXvWvIb => sem_ea::shufp(b, true, d.imm as u8, d, &ea),
+        Insn::PunpcklbwXvWv => sem_ea::punpck(b, 8, false, d, &ea),
+        Insn::PunpcklwdXvWv => sem_ea::punpck(b, 16, false, d, &ea),
+        Insn::PunpckldqXvWv => sem_ea::punpck(b, 32, false, d, &ea),
+        Insn::PunpcklqdqXvWv => sem_ea::punpck(b, 64, false, d, &ea),
+        Insn::UnpcklpsXvWv => sem_ea::punpck(b, 32, false, d, &ea),
+        Insn::UnpcklpdXvWv => sem_ea::punpck(b, 64, false, d, &ea),
+        Insn::UnpckhpsXvWv => sem_ea::punpck(b, 32, true, d, &ea),
+        Insn::UnpckhpdXvWv => sem_ea::punpck(b, 64, true, d, &ea),
+        Insn::PunpckhbwXvWv => sem_ea::punpck(b, 8, true, d, &ea),
+        Insn::PunpckhwdXvWv => sem_ea::punpck(b, 16, true, d, &ea),
+        Insn::PunpckhdqXvWv => sem_ea::punpck(b, 32, true, d, &ea),
+        Insn::PunpckhqdqXvWv => sem_ea::punpck(b, 64, true, d, &ea),
+        Insn::PinsrwXvEwIb => sem_ea::pinsrw(b, d.imm as u8, d, &ea),
+        Insn::PextrwGvWvIb => sem_ea::pextrw(b, d.imm as u8, d, &ea, reg),
+        // パック浮動小数点。
+        Insn::SqrtpsXvWv => sem_ea::pfloat(b, sem_ea::Fop::Sqrt, 32, d, &ea),
+        Insn::SqrtpdXvWv => sem_ea::pfloat(b, sem_ea::Fop::Sqrt, 64, d, &ea),
+        Insn::SqrtssXvWv => sem_ea::sfloat(b, sem_ea::Fop::Sqrt, 32, d, &ea),
+        Insn::SqrtsdXvWv => sem_ea::sfloat(b, sem_ea::Fop::Sqrt, 64, d, &ea),
+        Insn::AddpsXvWv => sem_ea::pfloat(b, sem_ea::Fop::Add, 32, d, &ea),
+        Insn::AddpdXvWv => sem_ea::pfloat(b, sem_ea::Fop::Add, 64, d, &ea),
+        Insn::AddssXvWv => sem_ea::sfloat(b, sem_ea::Fop::Add, 32, d, &ea),
+        Insn::AddsdXvWv => sem_ea::sfloat(b, sem_ea::Fop::Add, 64, d, &ea),
+        Insn::MulpsXvWv => sem_ea::pfloat(b, sem_ea::Fop::Mul, 32, d, &ea),
+        Insn::MulpdXvWv => sem_ea::pfloat(b, sem_ea::Fop::Mul, 64, d, &ea),
+        Insn::MulssXvWv => sem_ea::sfloat(b, sem_ea::Fop::Mul, 32, d, &ea),
+        Insn::MulsdXvWv => sem_ea::sfloat(b, sem_ea::Fop::Mul, 64, d, &ea),
+        Insn::SubpsXvWv => sem_ea::pfloat(b, sem_ea::Fop::Sub, 32, d, &ea),
+        Insn::SubpdXvWv => sem_ea::pfloat(b, sem_ea::Fop::Sub, 64, d, &ea),
+        Insn::SubssXvWv => sem_ea::sfloat(b, sem_ea::Fop::Sub, 32, d, &ea),
+        Insn::SubsdXvWv => sem_ea::sfloat(b, sem_ea::Fop::Sub, 64, d, &ea),
+        Insn::MinpsXvWv => sem_ea::pfloat(b, sem_ea::Fop::Min, 32, d, &ea),
+        Insn::MinpdXvWv => sem_ea::pfloat(b, sem_ea::Fop::Min, 64, d, &ea),
+        Insn::MinssXvWv => sem_ea::sfloat(b, sem_ea::Fop::Min, 32, d, &ea),
+        Insn::MinsdXvWv => sem_ea::sfloat(b, sem_ea::Fop::Min, 64, d, &ea),
+        Insn::DivpsXvWv => sem_ea::pfloat(b, sem_ea::Fop::Div, 32, d, &ea),
+        Insn::DivpdXvWv => sem_ea::pfloat(b, sem_ea::Fop::Div, 64, d, &ea),
+        Insn::DivssXvWv => sem_ea::sfloat(b, sem_ea::Fop::Div, 32, d, &ea),
+        Insn::DivsdXvWv => sem_ea::sfloat(b, sem_ea::Fop::Div, 64, d, &ea),
+        Insn::MaxpsXvWv => sem_ea::pfloat(b, sem_ea::Fop::Max, 32, d, &ea),
+        Insn::MaxpdXvWv => sem_ea::pfloat(b, sem_ea::Fop::Max, 64, d, &ea),
+        Insn::MaxssXvWv => sem_ea::sfloat(b, sem_ea::Fop::Max, 32, d, &ea),
+        Insn::MaxsdXvWv => sem_ea::sfloat(b, sem_ea::Fop::Max, 64, d, &ea),
+        // パック整数。
+        Insn::PcmpeqbXvWv => sem_ea::pint::<B, W8>(b, sem_ea::Iop::CmpEq, d, &ea),
+        Insn::PcmpeqwXvWv => sem_ea::pint::<B, W16>(b, sem_ea::Iop::CmpEq, d, &ea),
+        Insn::PcmpeqdXvWv => sem_ea::pint::<B, W32>(b, sem_ea::Iop::CmpEq, d, &ea),
+        Insn::PcmpgtbXvWv => sem_ea::pint::<B, W8>(b, sem_ea::Iop::CmpGtS, d, &ea),
+        Insn::PcmpgtwXvWv => sem_ea::pint::<B, W16>(b, sem_ea::Iop::CmpGtS, d, &ea),
+        Insn::PcmpgtdXvWv => sem_ea::pint::<B, W32>(b, sem_ea::Iop::CmpGtS, d, &ea),
+        Insn::PaddqXvWv => sem_ea::pint::<B, W64>(b, sem_ea::Iop::Add, d, &ea),
+        Insn::PmullwXvWv => sem_ea::pint::<B, W16>(b, sem_ea::Iop::MulLo, d, &ea),
+        Insn::PsubusbXvWv => sem_ea::pint::<B, W8>(b, sem_ea::Iop::SubSatU, d, &ea),
+        Insn::PsubuswXvWv => sem_ea::pint::<B, W16>(b, sem_ea::Iop::SubSatU, d, &ea),
+        Insn::PaddusbXvWv => sem_ea::pint::<B, W8>(b, sem_ea::Iop::AddSatU, d, &ea),
+        Insn::PadduswXvWv => sem_ea::pint::<B, W16>(b, sem_ea::Iop::AddSatU, d, &ea),
+        Insn::PsubsbXvWv => sem_ea::pint::<B, W8>(b, sem_ea::Iop::SubSatS, d, &ea),
+        Insn::PsubswXvWv => sem_ea::pint::<B, W16>(b, sem_ea::Iop::SubSatS, d, &ea),
+        Insn::PaddsbXvWv => sem_ea::pint::<B, W8>(b, sem_ea::Iop::AddSatS, d, &ea),
+        Insn::PaddswXvWv => sem_ea::pint::<B, W16>(b, sem_ea::Iop::AddSatS, d, &ea),
+        Insn::PminubXvWv => sem_ea::pint::<B, W8>(b, sem_ea::Iop::MinU, d, &ea),
+        Insn::PmaxubXvWv => sem_ea::pint::<B, W8>(b, sem_ea::Iop::MaxU, d, &ea),
+        Insn::PminswXvWv => sem_ea::pint::<B, W16>(b, sem_ea::Iop::MinS, d, &ea),
+        Insn::PmaxswXvWv => sem_ea::pint::<B, W16>(b, sem_ea::Iop::MaxS, d, &ea),
+        Insn::PavgbXvWv => sem_ea::pint::<B, W8>(b, sem_ea::Iop::Avg, d, &ea),
+        Insn::PavgwXvWv => sem_ea::pint::<B, W16>(b, sem_ea::Iop::Avg, d, &ea),
+        Insn::PsubbXvWv => sem_ea::pint::<B, W8>(b, sem_ea::Iop::Sub, d, &ea),
+        Insn::PsubwXvWv => sem_ea::pint::<B, W16>(b, sem_ea::Iop::Sub, d, &ea),
+        Insn::PsubdXvWv => sem_ea::pint::<B, W32>(b, sem_ea::Iop::Sub, d, &ea),
+        Insn::PsubqXvWv => sem_ea::pint::<B, W64>(b, sem_ea::Iop::Sub, d, &ea),
+        Insn::PaddbXvWv => sem_ea::pint::<B, W8>(b, sem_ea::Iop::Add, d, &ea),
+        Insn::PaddwXvWv => sem_ea::pint::<B, W16>(b, sem_ea::Iop::Add, d, &ea),
+        Insn::PadddXvWv => sem_ea::pint::<B, W32>(b, sem_ea::Iop::Add, d, &ea),
+        // パックシフト（カウントは xmm/m64 下位 64 または即値）。
+        Insn::PsrlwXvWv => {
+            let c = sem_ea::xm_lo64(b, &ea)?;
+            sem_ea::pshift::<B, W16>(b, sem_ea::Psh::R, c, d)
+        }
+        Insn::PsrldXvWv => {
+            let c = sem_ea::xm_lo64(b, &ea)?;
+            sem_ea::pshift::<B, W32>(b, sem_ea::Psh::R, c, d)
+        }
+        Insn::PsrlqXvWv => {
+            let c = sem_ea::xm_lo64(b, &ea)?;
+            sem_ea::pshift::<B, W64>(b, sem_ea::Psh::R, c, d)
+        }
+        Insn::PsrawXvWv => {
+            let c = sem_ea::xm_lo64(b, &ea)?;
+            sem_ea::pshift::<B, W16>(b, sem_ea::Psh::A, c, d)
+        }
+        Insn::PsradXvWv => {
+            let c = sem_ea::xm_lo64(b, &ea)?;
+            sem_ea::pshift::<B, W32>(b, sem_ea::Psh::A, c, d)
+        }
+        Insn::PsllwXvWv => {
+            let c = sem_ea::xm_lo64(b, &ea)?;
+            sem_ea::pshift::<B, W16>(b, sem_ea::Psh::L, c, d)
+        }
+        Insn::PslldXvWv => {
+            let c = sem_ea::xm_lo64(b, &ea)?;
+            sem_ea::pshift::<B, W32>(b, sem_ea::Psh::L, c, d)
+        }
+        Insn::PsllqXvWv => {
+            let c = sem_ea::xm_lo64(b, &ea)?;
+            sem_ea::pshift::<B, W64>(b, sem_ea::Psh::L, c, d)
+        }
+        Insn::PsrlwWvIb => {
+            if d.modrm < 0xC0 {
+                return Ok(false);
+            }
+            sem_ea::pshift_i::<B, W16>(b, sem_ea::Psh::R, d.imm as u8, d)
+        }
+        Insn::PsrldWvIb => {
+            if d.modrm < 0xC0 {
+                return Ok(false);
+            }
+            sem_ea::pshift_i::<B, W32>(b, sem_ea::Psh::R, d.imm as u8, d)
+        }
+        Insn::PsrlqWvIb => {
+            if d.modrm < 0xC0 {
+                return Ok(false);
+            }
+            sem_ea::pshift_i::<B, W64>(b, sem_ea::Psh::R, d.imm as u8, d)
+        }
+        Insn::PsrawWvIb => {
+            if d.modrm < 0xC0 {
+                return Ok(false);
+            }
+            sem_ea::pshift_i::<B, W16>(b, sem_ea::Psh::A, d.imm as u8, d)
+        }
+        Insn::PsradWvIb => {
+            if d.modrm < 0xC0 {
+                return Ok(false);
+            }
+            sem_ea::pshift_i::<B, W32>(b, sem_ea::Psh::A, d.imm as u8, d)
+        }
+        Insn::PsllwWvIb => {
+            if d.modrm < 0xC0 {
+                return Ok(false);
+            }
+            sem_ea::pshift_i::<B, W16>(b, sem_ea::Psh::L, d.imm as u8, d)
+        }
+        Insn::PslldWvIb => {
+            if d.modrm < 0xC0 {
+                return Ok(false);
+            }
+            sem_ea::pshift_i::<B, W32>(b, sem_ea::Psh::L, d.imm as u8, d)
+        }
+        Insn::PsllqWvIb => {
+            if d.modrm < 0xC0 {
+                return Ok(false);
+            }
+            sem_ea::pshift_i::<B, W64>(b, sem_ea::Psh::L, d.imm as u8, d)
+        }
+        Insn::PsrldqWvIb => {
+            if d.modrm < 0xC0 {
+                return Ok(false);
+            }
+            sem_ea::byteshift(b, false, d.imm as u8, d)
+        }
+        Insn::PslldqWvIb => {
+            if d.modrm < 0xC0 {
+                return Ok(false);
+            }
+            sem_ea::byteshift(b, true, d.imm as u8, d)
+        }
+        // ===== x87（D8-DF）。mod=11 は r/m フィールドを ST(i) として
+        // 扱い、それ以外はメモリ形。ステータスワード依存の比較系は
+        // 未モデルのため旧経路へフォールバックする。
+        Insn::FaddM32 => {
+            if d.modrm >= 0xC0 {
+                sem_ea::farith_st(b, sem_ea::FAr::Add, d.modrm & 7, false, false)
+            } else {
+                sem_ea::farith_m(b, sem_ea::FAr::Add, &ea, 32)
+            }
+        }
+        Insn::FmulM32 => {
+            if d.modrm >= 0xC0 {
+                sem_ea::farith_st(b, sem_ea::FAr::Mul, d.modrm & 7, false, false)
+            } else {
+                sem_ea::farith_m(b, sem_ea::FAr::Mul, &ea, 32)
+            }
+        }
+        Insn::FsubM32 => {
+            if d.modrm >= 0xC0 {
+                sem_ea::farith_st(b, sem_ea::FAr::Sub, d.modrm & 7, false, false)
+            } else {
+                sem_ea::farith_m(b, sem_ea::FAr::Sub, &ea, 32)
+            }
+        }
+        Insn::FsubrM32 => {
+            if d.modrm >= 0xC0 {
+                sem_ea::farith_st(b, sem_ea::FAr::SubR, d.modrm & 7, false, false)
+            } else {
+                sem_ea::farith_m(b, sem_ea::FAr::SubR, &ea, 32)
+            }
+        }
+        Insn::FdivM32 => {
+            if d.modrm >= 0xC0 {
+                sem_ea::farith_st(b, sem_ea::FAr::Div, d.modrm & 7, false, false)
+            } else {
+                sem_ea::farith_m(b, sem_ea::FAr::Div, &ea, 32)
+            }
+        }
+        Insn::FdivrM32 => {
+            if d.modrm >= 0xC0 {
+                sem_ea::farith_st(b, sem_ea::FAr::DivR, d.modrm & 7, false, false)
+            } else {
+                sem_ea::farith_m(b, sem_ea::FAr::DivR, &ea, 32)
+            }
+        }
+        Insn::FldM32 => {
+            if d.modrm >= 0xC0 {
+                polyisa_guest_x86::sem::fld_st(b, d.modrm & 7)
+            } else {
+                sem_ea::fld_m(b, &ea, 32)
+            }
+        }
+        Insn::FxchSti => {
+            if d.modrm >= 0xC0 {
+                polyisa_guest_x86::sem::fxch_st(b, d.modrm & 7)
+            } else {
+                return Ok(false);
+            }
+        }
+        Insn::FstM32 => {
+            if d.modrm >= 0xC0 {
+                // mod=11 rm=0 は FNOP。残りは未定義。
+                if d.modrm & 7 == 0 {
+                    Ok(())
+                } else {
+                    return Ok(false);
+                }
+            } else {
+                sem_ea::fst_m(b, &ea, 32, false)
+            }
+        }
+        Insn::FstpM32 => {
+            if d.modrm >= 0xC0 {
+                return Ok(false);
+            }
+            sem_ea::fst_m(b, &ea, 32, true)
+        }
+        Insn::X87d94 => {
+            if d.modrm >= 0xC0 {
+                match d.modrm & 7 {
+                    0 => sem_ea::fchs_abs(b, false),
+                    1 => sem_ea::fchs_abs(b, true),
+                    _ => return Ok(false),
+                }
+            } else {
+                return Ok(false);
+            }
+        }
+        Insn::FldcwM16 => {
+            if d.modrm >= 0xC0 {
+                // D9 E8+i: FLD1/L2T/L2E/PI/LG2/LN2/Z。
+                sem_ea::fld_const(b, d.modrm & 7)
+            } else {
+                sem_ea::fldcw_m(b, &ea)
+            }
+        }
+        Insn::X87d96 => {
+            if d.modrm >= 0xC0 {
+                match d.modrm & 7 {
+                    6 => sem_ea::fdecstp(b, false),
+                    7 => sem_ea::fdecstp(b, true),
+                    _ => return Ok(false),
+                }
+            } else {
+                return Ok(false);
+            }
+        }
+        Insn::FnstcwM16 => {
+            if d.modrm >= 0xC0 {
+                match d.modrm & 7 {
+                    2 => sem_ea::fsqrt_st(b),
+                    4 => sem_ea::frndint_st(b),
+                    _ => return Ok(false),
+                }
+            } else {
+                sem_ea::fnstcw_m(b, &ea)
+            }
+        }
+        Insn::FiaddM32 => {
+            if d.modrm >= 0xC0 {
+                sem_ea::fcmov_cc(b, 0, d.modrm & 7)
+            } else {
+                sem_ea::fiarith_m(b, sem_ea::FAr::Add, &ea, 32)
+            }
+        }
+        Insn::FimulM32 => {
+            if d.modrm >= 0xC0 {
+                sem_ea::fcmov_cc(b, 1, d.modrm & 7)
+            } else {
+                sem_ea::fiarith_m(b, sem_ea::FAr::Mul, &ea, 32)
+            }
+        }
+        Insn::FicomM32 => {
+            if d.modrm >= 0xC0 {
+                sem_ea::fcmov_cc(b, 2, d.modrm & 7)
+            } else {
+                return Ok(false);
+            }
+        }
+        Insn::FicompM32 => {
+            if d.modrm >= 0xC0 {
+                sem_ea::fcmov_cc(b, 3, d.modrm & 7)
+            } else {
+                return Ok(false);
+            }
+        }
+        Insn::FisubM32 => {
+            if d.modrm >= 0xC0 {
+                return Ok(false);
+            }
+            sem_ea::fiarith_m(b, sem_ea::FAr::Sub, &ea, 32)
+        }
+        Insn::FisubrM32 => {
+            if d.modrm >= 0xC0 {
+                return Ok(false);
+            }
+            sem_ea::fiarith_m(b, sem_ea::FAr::SubR, &ea, 32)
+        }
+        Insn::FidivM32 => {
+            if d.modrm >= 0xC0 {
+                return Ok(false);
+            }
+            sem_ea::fiarith_m(b, sem_ea::FAr::Div, &ea, 32)
+        }
+        Insn::FidivrM32 => {
+            if d.modrm >= 0xC0 {
+                return Ok(false);
+            }
+            sem_ea::fiarith_m(b, sem_ea::FAr::DivR, &ea, 32)
+        }
+        Insn::FildM32 => {
+            if d.modrm >= 0xC0 {
+                sem_ea::fcmov_cc(b, 4, d.modrm & 7)
+            } else {
+                sem_ea::fild_m(b, &ea, 32)
+            }
+        }
+        Insn::FisttpM32 => {
+            if d.modrm >= 0xC0 {
+                sem_ea::fcmov_cc(b, 5, d.modrm & 7)
+            } else {
+                sem_ea::fist_m(b, &ea, 32, true)
+            }
+        }
+        Insn::FistM32 => {
+            if d.modrm >= 0xC0 {
+                sem_ea::fcmov_cc(b, 6, d.modrm & 7)
+            } else {
+                sem_ea::fist_m(b, &ea, 32, false)
+            }
+        }
+        Insn::FistpM32 => {
+            if d.modrm >= 0xC0 {
+                sem_ea::fcmov_cc(b, 7, d.modrm & 7)
+            } else {
+                sem_ea::fist_m(b, &ea, 32, true)
+            }
+        }
+        Insn::X87db4 => {
+            if d.modrm >= 0xC0 {
+                match d.modrm & 7 {
+                    // FCLEX は例外状態未モデルで実質 NOP。
+                    2 => Ok(()),
+                    3 => sem_ea::finit(b),
+                    _ => return Ok(false),
+                }
+            } else {
+                return Ok(false);
+            }
+        }
+        Insn::FldM80 => {
+            if d.modrm >= 0xC0 {
+                polyisa_guest_x86::sem::fucomi_st(b, d.modrm & 7)
+            } else {
+                sem_ea::fld_m(b, &ea, 80)
+            }
+        }
+        Insn::FcomiSti => {
+            if d.modrm >= 0xC0 {
+                // FCOMI も旗の規則は FUCOMI と同じ。
+                polyisa_guest_x86::sem::fucomi_st(b, d.modrm & 7)
+            } else {
+                return Ok(false);
+            }
+        }
+        Insn::FstpM80 => {
+            if d.modrm >= 0xC0 {
+                return Ok(false);
+            }
+            sem_ea::fst_m(b, &ea, 80, true)
+        }
+        Insn::FaddM64 => {
+            if d.modrm >= 0xC0 {
+                sem_ea::farith_st(b, sem_ea::FAr::Add, d.modrm & 7, true, false)
+            } else {
+                sem_ea::farith_m(b, sem_ea::FAr::Add, &ea, 64)
+            }
+        }
+        Insn::FmulM64 => {
+            if d.modrm >= 0xC0 {
+                sem_ea::farith_st(b, sem_ea::FAr::Mul, d.modrm & 7, true, false)
+            } else {
+                sem_ea::farith_m(b, sem_ea::FAr::Mul, &ea, 64)
+            }
+        }
+        Insn::FsubM64 => {
+            if d.modrm >= 0xC0 {
+                // DC E0+i FSUBR: st(i) = st(0) - st(i)
+                sem_ea::farith_st(b, sem_ea::FAr::SubR, d.modrm & 7, true, false)
+            } else {
+                sem_ea::farith_m(b, sem_ea::FAr::Sub, &ea, 64)
+            }
+        }
+        Insn::FsubrM64 => {
+            if d.modrm >= 0xC0 {
+                // DC E8+i FSUB: st(i) = st(i) - st(0)
+                sem_ea::farith_st(b, sem_ea::FAr::Sub, d.modrm & 7, true, false)
+            } else {
+                sem_ea::farith_m(b, sem_ea::FAr::SubR, &ea, 64)
+            }
+        }
+        Insn::FdivM64 => {
+            if d.modrm >= 0xC0 {
+                // DC F0+i FDIVR: st(i) = st(0) / st(i)
+                sem_ea::farith_st(b, sem_ea::FAr::DivR, d.modrm & 7, true, false)
+            } else {
+                sem_ea::farith_m(b, sem_ea::FAr::Div, &ea, 64)
+            }
+        }
+        Insn::FdivrM64 => {
+            if d.modrm >= 0xC0 {
+                // DC F8+i FDIV: st(i) = st(i) / st(0)
+                sem_ea::farith_st(b, sem_ea::FAr::Div, d.modrm & 7, true, false)
+            } else {
+                sem_ea::farith_m(b, sem_ea::FAr::DivR, &ea, 64)
+            }
+        }
+        Insn::FldM64 => {
+            if d.modrm >= 0xC0 {
+                sem_ea::ffree(b, d.modrm & 7)
+            } else {
+                sem_ea::fld_m(b, &ea, 64)
+            }
+        }
+        Insn::FisttpM64 => {
+            if d.modrm >= 0xC0 {
+                return Ok(false);
+            }
+            // FISTTP は常に切り捨てだが、現状は FCW 準拠の近似。
+            sem_ea::fist_m(b, &ea, 64, true)
+        }
+        Insn::FstM64 => {
+            if d.modrm >= 0xC0 {
+                sem_ea::fst_sti(b, d.modrm & 7, false)
+            } else {
+                sem_ea::fst_m(b, &ea, 64, false)
+            }
+        }
+        Insn::FstpM64 => {
+            if d.modrm >= 0xC0 {
+                sem_ea::fst_sti(b, d.modrm & 7, true)
+            } else {
+                sem_ea::fst_m(b, &ea, 64, true)
+            }
+        }
+        Insn::FiaddM16 => {
+            if d.modrm >= 0xC0 {
+                sem_ea::farith_st(b, sem_ea::FAr::Add, d.modrm & 7, true, true)
+            } else {
+                sem_ea::fiarith_m(b, sem_ea::FAr::Add, &ea, 16)
+            }
+        }
+        Insn::FimulM16 => {
+            if d.modrm >= 0xC0 {
+                sem_ea::farith_st(b, sem_ea::FAr::Mul, d.modrm & 7, true, true)
+            } else {
+                sem_ea::fiarith_m(b, sem_ea::FAr::Mul, &ea, 16)
+            }
+        }
+        Insn::FisubM16 => {
+            if d.modrm >= 0xC0 {
+                // DE E0+i FSUBRP: st(i) = st(0) - st(i), pop
+                sem_ea::farith_st(b, sem_ea::FAr::SubR, d.modrm & 7, true, true)
+            } else {
+                sem_ea::fiarith_m(b, sem_ea::FAr::Sub, &ea, 16)
+            }
+        }
+        Insn::FisubrM16 => {
+            if d.modrm >= 0xC0 {
+                // DE E8+i FSUBP: st(i) = st(i) - st(0), pop
+                sem_ea::farith_st(b, sem_ea::FAr::Sub, d.modrm & 7, true, true)
+            } else {
+                sem_ea::fiarith_m(b, sem_ea::FAr::SubR, &ea, 16)
+            }
+        }
+        Insn::FidivM16 => {
+            if d.modrm >= 0xC0 {
+                // DE F0+i FDIVRP: st(i) = st(0) / st(i), pop
+                sem_ea::farith_st(b, sem_ea::FAr::DivR, d.modrm & 7, true, true)
+            } else {
+                sem_ea::fiarith_m(b, sem_ea::FAr::Div, &ea, 16)
+            }
+        }
+        Insn::FidivrM16 => {
+            if d.modrm >= 0xC0 {
+                // DE F8+i FDIVP: st(i) = st(i) / st(0), pop
+                sem_ea::farith_st(b, sem_ea::FAr::Div, d.modrm & 7, true, true)
+            } else {
+                sem_ea::fiarith_m(b, sem_ea::FAr::DivR, &ea, 16)
+            }
+        }
+        Insn::FildM16 => {
+            if d.modrm >= 0xC0 {
+                sem_ea::ffreep(b, d.modrm & 7)
+            } else {
+                sem_ea::fild_m(b, &ea, 16)
+            }
+        }
+        Insn::FisttpM16 => {
+            if d.modrm >= 0xC0 {
+                return Ok(false);
+            }
+            sem_ea::fist_m(b, &ea, 16, true)
+        }
+        Insn::FistM16 => {
+            if d.modrm >= 0xC0 {
+                return Ok(false);
+            }
+            sem_ea::fist_m(b, &ea, 16, false)
+        }
+        Insn::FistpM16 => {
+            if d.modrm >= 0xC0 {
+                return Ok(false);
+            }
+            sem_ea::fist_m(b, &ea, 16, true)
+        }
+        Insn::FbldM80 => {
+            // BCD 変換は未実装。mod=11 の DF E0 FNSTSW AX も
+            // ステータスワード未モデルで旧経路へ。
+            let _ = &ea;
+            return Ok(false);
+        }
+        Insn::FildM64 => {
+            if d.modrm >= 0xC0 {
+                polyisa_guest_x86::sem::fucomip_st(b, d.modrm & 7)
+            } else {
+                sem_ea::fild_m(b, &ea, 64)
+            }
+        }
+        Insn::FbstpM80 => {
+            if d.modrm >= 0xC0 {
+                // FCOMIP も旗の規則は FUCOMIP と同じ。
+                polyisa_guest_x86::sem::fucomip_st(b, d.modrm & 7)
+            } else {
+                return Ok(false);
+            }
+        }
+        Insn::FistpM64 => {
+            if d.modrm >= 0xC0 {
+                return Ok(false);
+            }
+            sem_ea::fist_m(b, &ea, 64, true)
+        }
         _ => return Ok(false),
     };
     r.map(|()| true)
@@ -12631,6 +13263,8 @@ mod tests {
             &[0x48, 0xff, 0x00, 0x10, 0x00, 0x00, 0x00, 0x5a][..],
             &[0x48, 0x11, 0x40, 0x10, 0x00, 0x00, 0x00, 0x5a][..],
             &[0x4f, 0xd1, 0xc9, 0x10, 0x00, 0x00, 0x00, 0x5a][..],
+            &[0x0f, 0xb1, 0xd8, 0x10, 0x00, 0x00, 0x00, 0x5a][..],
+            &[0x0f, 0xb1, 0x18, 0x10, 0x00, 0x00, 0x00, 0x5a][..],
             &[0x5a][..],
         ] {
             let mut c = code.to_vec();

@@ -423,6 +423,106 @@ pub fn build_maps(m: &mut Model) {
         MapItem::Insn(0xFF, g("push_ev", 6, &[Ea(V)], "push {e}", "store")),
     ]);
 
+    // x87（D8-DF）。/n はメモリ形の選択で、mod=11 のときは同じ
+    // r/m フィールドが ST(i) 系の選択に変わる。どちらの意味を取るかは
+    // 意味論側で d.modrm の mod を見て決める（被演算子に Imp(Sti) を
+    // 置いてその旨を示す）。メモリの幅も意味論側で決める。
+    use OpWidth::{D32 as D, Q64 as Q};
+    let mut f = |byte: u8, grp: u8, name: &str, ops: &[OpKind], syn: &str| {
+        primary.push(MapItem::Insn(
+            byte,
+            mi(name, ops, Some(grp), PfxSel::Any, Pred::True, syn, "alu"),
+        ));
+    };
+    // D8: m32 実数演算 + ST(0),ST(i)。
+    for (grp, mn) in [
+        (0u8, "fadd_m32"),
+        (1, "fmul_m32"),
+        (2, "fcom_m32"),
+        (3, "fcomp_m32"),
+        (4, "fsub_m32"),
+        (5, "fsubr_m32"),
+        (6, "fdiv_m32"),
+        (7, "fdivr_m32"),
+    ] {
+        f(0xD8, grp, mn, &[Ea(D), Imp(ImpOp::Sti)], "x87 {e}|st(i)");
+    }
+    // D9: 移動と単項。mod=11 側は rm ごとの複合（意味論が rm を見る）。
+    f(0xD9, 0, "fld_m32", &[Ea(D), Imp(ImpOp::Sti)], "fld {e}|st(i)");
+    f(0xD9, 1, "fxch_sti", &[Imp(ImpOp::Sti)], "fxch st(i)");
+    f(0xD9, 2, "fst_m32", &[Ea(D)], "fst {e}");
+    f(0xD9, 3, "fstp_m32", &[Ea(D)], "fstp {e}");
+    f(0xD9, 4, "x87d9_4", &[Ea(D), Imp(ImpOp::Sti)], "x87 {e}");
+    f(0xD9, 5, "fldcw_m16", &[Ea(W16), Imp(ImpOp::Sti)], "fldcw {e}|const");
+    f(0xD9, 6, "x87d9_6", &[Ea(D), Imp(ImpOp::Sti)], "x87 {e}");
+    f(0xD9, 7, "fnstcw_m16", &[Ea(W16), Imp(ImpOp::Sti)], "fnstcw {e}|x87");
+    // DA: m32 整数演算 + FCMOV/FUCOMPP。
+    for (grp, mn) in [
+        (0u8, "fiadd_m32"),
+        (1, "fimul_m32"),
+        (2, "ficom_m32"),
+        (3, "ficomp_m32"),
+        (4, "fisub_m32"),
+        (5, "fisubr_m32"),
+        (6, "fidiv_m32"),
+        (7, "fidivr_m32"),
+    ] {
+        f(0xDA, grp, mn, &[Ea(D), Imp(ImpOp::Sti)], "x87 {e}|st(i)");
+    }
+    // DB: 変換 + FCMOVN/FUCOMI/FCOMI/FCLEX/FINIT。
+    f(0xDB, 0, "fild_m32", &[Ea(D), Imp(ImpOp::Sti)], "fild {e}|st(i)");
+    f(0xDB, 1, "fisttp_m32", &[Ea(D), Imp(ImpOp::Sti)], "fisttp {e}|st(i)");
+    f(0xDB, 2, "fist_m32", &[Ea(D), Imp(ImpOp::Sti)], "fist {e}|st(i)");
+    f(0xDB, 3, "fistp_m32", &[Ea(D), Imp(ImpOp::Sti)], "fistp {e}|st(i)");
+    f(0xDB, 4, "x87db_4", &[Imp(ImpOp::Sti)], "x87");
+    f(0xDB, 5, "fld_m80", &[Ea(Q), Imp(ImpOp::Sti)], "fld {e}|fucomi");
+    f(0xDB, 6, "fcomi_sti", &[Imp(ImpOp::Sti)], "fcomi st(i)");
+    f(0xDB, 7, "fstp_m80", &[Ea(Q)], "fstp {e}");
+    // DC: m64 実数演算 + ST(i),ST(0)。
+    for (grp, mn) in [
+        (0u8, "fadd_m64"),
+        (1, "fmul_m64"),
+        (2, "fcom_m64"),
+        (3, "fcomp_m64"),
+        (4, "fsub_m64"),
+        (5, "fsubr_m64"),
+        (6, "fdiv_m64"),
+        (7, "fdivr_m64"),
+    ] {
+        f(0xDC, grp, mn, &[Ea(Q), Imp(ImpOp::Sti)], "x87 {e}|st(i)");
+    }
+    // DD: m64 移動 + ST(i) 移動・解放。
+    f(0xDD, 0, "fld_m64", &[Ea(Q), Imp(ImpOp::Sti)], "fld {e}|ffree");
+    f(0xDD, 1, "fisttp_m64", &[Ea(Q), Imp(ImpOp::Sti)], "fisttp {e}");
+    f(0xDD, 2, "fst_m64", &[Ea(Q), Imp(ImpOp::Sti)], "fst {e}|st(i)");
+    f(0xDD, 3, "fstp_m64", &[Ea(Q), Imp(ImpOp::Sti)], "fstp {e}|st(i)");
+    f(0xDD, 4, "x87dd_4", &[Ea(Q), Imp(ImpOp::Sti)], "x87 {e}");
+    f(0xDD, 5, "x87dd_5", &[Imp(ImpOp::Sti)], "x87");
+    f(0xDD, 6, "x87dd_6", &[Ea(Q)], "x87 {e}");
+    f(0xDD, 7, "fnstsw_m16", &[Ea(W16)], "fnstsw {e}");
+    // DE: m16 整数演算 + 演算+pop（FADDP 等）。
+    for (grp, mn) in [
+        (0u8, "fiadd_m16"),
+        (1, "fimul_m16"),
+        (2, "ficom_m16"),
+        (3, "ficomp_m16"),
+        (4, "fisub_m16"),
+        (5, "fisubr_m16"),
+        (6, "fidiv_m16"),
+        (7, "fidivr_m16"),
+    ] {
+        f(0xDE, grp, mn, &[Ea(W16), Imp(ImpOp::Sti)], "x87 {e}|st(i)p");
+    }
+    // DF: 16/64 ビット整数変換 + FNSTSW AX/FUCOMIP/FCOMIP。
+    f(0xDF, 0, "fild_m16", &[Ea(W16), Imp(ImpOp::Sti)], "fild {e}");
+    f(0xDF, 1, "fisttp_m16", &[Ea(W16)], "fisttp {e}");
+    f(0xDF, 2, "fist_m16", &[Ea(W16)], "fist {e}");
+    f(0xDF, 3, "fistp_m16", &[Ea(W16)], "fistp {e}");
+    f(0xDF, 4, "fbld_m80", &[Ea(Q), Imp(ImpOp::Sti)], "fbld {e}|fnstsw");
+    f(0xDF, 5, "fild_m64", &[Ea(Q), Imp(ImpOp::Sti)], "fild {e}|fucomip");
+    f(0xDF, 6, "fbstp_m80", &[Ea(Q), Imp(ImpOp::Sti)], "fbstp {e}|fcomip");
+    f(0xDF, 7, "fistp_m64", &[Ea(Q)], "fistp {e}");
+
     // 0F への分岐。
     primary.push(MapItem::Map(0x0F, "map_0f".to_string()));
 
@@ -525,6 +625,206 @@ pub fn build_maps(m: &mut Model) {
             0xC8 + k,
             n("bswap_rv", &[InOp(V)], "bswap {r}", "alu"),
         ));
+    }
+    // SSE/SSE2（0F 10-2F、50-5F、60-77、C2、C4-C6、D0-EF、F1-FF）。
+    // 必須接頭辞は PfxSel で選ぶ。V は ModRM.reg の XMM、W は
+    // ModRM.r/m の XMM/メモリ（メモリ幅は意味論側が決める）。
+    // MMX 形（接頭辞なしの 6F/70/7E/D6 等）は対象外。
+    for (byte, base) in [(0x10u8, "movup"), (0x28, "movap")] {
+        for (sel, suf) in [(PfxSel::Plain, "s"), (PfxSel::P66, "d")] {
+            let mn = format!("{base}{suf}");
+            m0f.push(MapItem::Insn(
+                byte,
+                mi(&format!("{mn}_xv_wv"), &[RegX, RmX], None, sel, Pred::True, "mov {x}, {w}", "load"),
+            ));
+            m0f.push(MapItem::Insn(
+                byte + 1,
+                mi(&format!("{mn}_wv_xv"), &[RmX, RegX], None, sel, Pred::True, "mov {w}, {x}", "store"),
+            ));
+        }
+    }
+    // 0F 10/11 の F2/F3 はスカラ形。
+    for (byte, ld) in [(0x10u8, true), (0x11, false)] {
+        for (sel, mn) in [(PfxSel::PF2, "movsd"), (PfxSel::PF3, "movss")] {
+            let name = if ld {
+                format!("{mn}_xv_wv")
+            } else {
+                format!("{mn}_wv_xv")
+            };
+            let ops: &[OpKind] = if ld { &[RegX, RmX] } else { &[RmX, RegX] };
+            let syn = if ld { "mov {x}, {w}" } else { "mov {w}, {x}" };
+            let tim = if ld { "load" } else { "store" };
+            m0f.push(MapItem::Insn(byte, mi(&name, ops, None, sel, Pred::True, syn, tim)));
+        }
+    }
+    m0f.extend([
+        // MOVLP/MOVHP/MOVH/MOVL の高下半分移動。
+        MapItem::Insn(0x12, mi("movlps_xv_wv", &[RegX, RmX], None, PfxSel::Plain, Pred::True, "movlps {x}, {w}", "load")),
+        MapItem::Insn(0x12, mi("movlpd_xv_wv", &[RegX, RmX], None, PfxSel::P66, Pred::True, "movlpd {x}, {w}", "load")),
+        MapItem::Insn(0x12, mi("movddup_xv_wv", &[RegX, RmX], None, PfxSel::PF2, Pred::True, "movddup {x}, {w}", "load")),
+        MapItem::Insn(0x12, mi("movsldup_xv_wv", &[RegX, RmX], None, PfxSel::PF3, Pred::True, "movsldup {x}, {w}", "load")),
+        MapItem::Insn(0x13, mi("movlps_wv_xv", &[RmX, RegX], None, PfxSel::Plain, Pred::True, "movlps {w}, {x}", "store")),
+        MapItem::Insn(0x13, mi("movlpd_wv_xv", &[RmX, RegX], None, PfxSel::P66, Pred::True, "movlpd {w}, {x}", "store")),
+        MapItem::Insn(0x16, mi("movhps_xv_wv", &[RegX, RmX], None, PfxSel::Plain, Pred::True, "movhps {x}, {w}", "load")),
+        MapItem::Insn(0x16, mi("movhpd_xv_wv", &[RegX, RmX], None, PfxSel::P66, Pred::True, "movhpd {x}, {w}", "load")),
+        MapItem::Insn(0x16, mi("movshdup_xv_wv", &[RegX, RmX], None, PfxSel::PF3, Pred::True, "movshdup {x}, {w}", "load")),
+        MapItem::Insn(0x17, mi("movhps_wv_xv", &[RmX, RegX], None, PfxSel::Plain, Pred::True, "movhps {w}, {x}", "store")),
+        MapItem::Insn(0x17, mi("movhpd_wv_xv", &[RmX, RegX], None, PfxSel::P66, Pred::True, "movhpd {w}, {x}", "store")),
+        // UNPCKLPS/PD・UNPCKHPS/PD（0F 14/15）。
+        MapItem::Insn(0x14, mi("unpcklps_xv_wv", &[RegX, RmX], None, PfxSel::Plain, Pred::True, "unpcklps {x}, {w}", "alu")),
+        MapItem::Insn(0x14, mi("unpcklpd_xv_wv", &[RegX, RmX], None, PfxSel::P66, Pred::True, "unpcklpd {x}, {w}", "alu")),
+        MapItem::Insn(0x15, mi("unpckhps_xv_wv", &[RegX, RmX], None, PfxSel::Plain, Pred::True, "unpckhps {x}, {w}", "alu")),
+        MapItem::Insn(0x15, mi("unpckhpd_xv_wv", &[RegX, RmX], None, PfxSel::P66, Pred::True, "unpckhpd {x}, {w}", "alu")),
+        // スカラ比較。
+        MapItem::Insn(0x2E, mi("ucomiss_xv_wv", &[RegX, RmX], None, PfxSel::Plain, Pred::True, "ucomiss {x}, {w}", "alu")),
+        MapItem::Insn(0x2E, mi("ucomisd_xv_wv", &[RegX, RmX], None, PfxSel::P66, Pred::True, "ucomisd {x}, {w}", "alu")),
+        MapItem::Insn(0x2F, mi("comiss_xv_wv", &[RegX, RmX], None, PfxSel::Plain, Pred::True, "comiss {x}, {w}", "alu")),
+        MapItem::Insn(0x2F, mi("comisd_xv_wv", &[RegX, RmX], None, PfxSel::P66, Pred::True, "comisd {x}, {w}", "alu")),
+        // 変換。
+        MapItem::Insn(0x2A, mi("cvtsi2ss_xv_ev", &[RegX, Ea(V)], None, PfxSel::PF3, Pred::True, "cvtsi2ss {x}, {e}", "alu")),
+        MapItem::Insn(0x2A, mi("cvtsi2sd_xv_ev", &[RegX, Ea(V)], None, PfxSel::PF2, Pred::True, "cvtsi2sd {x}, {e}", "alu")),
+        MapItem::Insn(0x2C, mi("cvttss2si_gv_wv", &[Reg(V), RmX], None, PfxSel::PF3, Pred::True, "cvttss2si {g}, {w}", "alu")),
+        MapItem::Insn(0x2C, mi("cvttsd2si_gv_wv", &[Reg(V), RmX], None, PfxSel::PF2, Pred::True, "cvttsd2si {g}, {w}", "alu")),
+        MapItem::Insn(0x2D, mi("cvtss2si_gv_wv", &[Reg(V), RmX], None, PfxSel::PF3, Pred::True, "cvtss2si {g}, {w}", "alu")),
+        MapItem::Insn(0x2D, mi("cvtsd2si_gv_wv", &[Reg(V), RmX], None, PfxSel::PF2, Pred::True, "cvtsd2si {g}, {w}", "alu")),
+        MapItem::Insn(0x50, mi("movmskps_gv_wv", &[Reg(V), RmX], None, PfxSel::Plain, Pred::True, "movmskps {g}, {w}", "alu")),
+        MapItem::Insn(0x50, mi("movmskpd_gv_wv", &[Reg(V), RmX], None, PfxSel::P66, Pred::True, "movmskpd {g}, {w}", "alu")),
+        MapItem::Insn(0x5A, mi("cvtps2pd_xv_wv", &[RegX, RmX], None, PfxSel::Plain, Pred::True, "cvtps2pd {x}, {w}", "alu")),
+        MapItem::Insn(0x5A, mi("cvtpd2ps_xv_wv", &[RegX, RmX], None, PfxSel::P66, Pred::True, "cvtpd2ps {x}, {w}", "alu")),
+        MapItem::Insn(0x5A, mi("cvtss2sd_xv_wv", &[RegX, RmX], None, PfxSel::PF3, Pred::True, "cvtss2sd {x}, {w}", "alu")),
+        MapItem::Insn(0x5A, mi("cvtsd2ss_xv_wv", &[RegX, RmX], None, PfxSel::PF2, Pred::True, "cvtsd2ss {x}, {w}", "alu")),
+        // MOVDQA/MOVDQU（アライメント検査は現状なし）。
+        MapItem::Insn(0x6F, mi("movdqa_xv_wv", &[RegX, RmX], None, PfxSel::P66, Pred::True, "movdqa {x}, {w}", "load")),
+        MapItem::Insn(0x6F, mi("movdqu_xv_wv", &[RegX, RmX], None, PfxSel::PF3, Pred::True, "movdqu {x}, {w}", "load")),
+        MapItem::Insn(0x7F, mi("movdqa_wv_xv", &[RmX, RegX], None, PfxSel::P66, Pred::True, "movdqa {w}, {x}", "store")),
+        MapItem::Insn(0x7F, mi("movdqu_wv_xv", &[RmX, RegX], None, PfxSel::PF3, Pred::True, "movdqu {w}, {x}", "store")),
+        // MOVD/MOVQ。
+        MapItem::Insn(0x6E, mi("movd_xv_ev", &[RegX, Ea(V)], None, PfxSel::P66, Pred::True, "movd {x}, {e}", "load")),
+        MapItem::Insn(0x7E, mi("movd_ev_xv", &[Ea(V), RegX], None, PfxSel::P66, Pred::True, "movd {e}, {x}", "store")),
+        MapItem::Insn(0x7E, mi("movq_xv_wv", &[RegX, RmX], None, PfxSel::PF3, Pred::True, "movq {x}, {w}", "load")),
+        MapItem::Insn(0xD6, mi("movq_wv_xv", &[RmX, RegX], None, PfxSel::P66, Pred::True, "movq {w}, {x}", "store")),
+        // PSHUF/PINSR/PEXTR。
+        MapItem::Insn(0x70, mi("pshufd_xv_wv_ib", &[RegX, RmX, Imm(B8)], None, PfxSel::P66, Pred::True, "pshufd {x}, {w}, {i}", "alu")),
+        MapItem::Insn(0x70, mi("pshuflw_xv_wv_ib", &[RegX, RmX, Imm(B8)], None, PfxSel::PF2, Pred::True, "pshuflw {x}, {w}, {i}", "alu")),
+        MapItem::Insn(0x70, mi("pshufhw_xv_wv_ib", &[RegX, RmX, Imm(B8)], None, PfxSel::PF3, Pred::True, "pshufhw {x}, {w}, {i}", "alu")),
+        MapItem::Insn(0xC2, mi("cmpps_xv_wv_ib", &[RegX, RmX, Imm(B8)], None, PfxSel::Plain, Pred::True, "cmpps {x}, {w}, {i}", "alu")),
+        MapItem::Insn(0xC2, mi("cmppd_xv_wv_ib", &[RegX, RmX, Imm(B8)], None, PfxSel::P66, Pred::True, "cmppd {x}, {w}, {i}", "alu")),
+        MapItem::Insn(0xC2, mi("cmpss_xv_wv_ib", &[RegX, RmX, Imm(B8)], None, PfxSel::PF3, Pred::True, "cmpss {x}, {w}, {i}", "alu")),
+        MapItem::Insn(0xC2, mi("cmpsd_xv_wv_ib", &[RegX, RmX, Imm(B8)], None, PfxSel::PF2, Pred::True, "cmpsd {x}, {w}, {i}", "alu")),
+        MapItem::Insn(0xC4, mi("pinsrw_xv_ew_ib", &[RegX, Ea(W16), Imm(B8)], None, PfxSel::P66, Pred::True, "pinsrw {x}, {e}, {i}", "alu")),
+        MapItem::Insn(0xC5, mi("pextrw_gv_wv_ib", &[Reg(V), RmX, Imm(B8)], None, PfxSel::P66, Pred::True, "pextrw {g}, {w}, {i}", "alu")),
+        MapItem::Insn(0xC6, mi("shufps_xv_wv_ib", &[RegX, RmX, Imm(B8)], None, PfxSel::Plain, Pred::True, "shufps {x}, {w}, {i}", "alu")),
+        MapItem::Insn(0xC6, mi("shufpd_xv_wv_ib", &[RegX, RmX, Imm(B8)], None, PfxSel::P66, Pred::True, "shufpd {x}, {w}, {i}", "alu")),
+        // PMOVMSKB。
+        MapItem::Insn(0xD7, mi("pmovmskb_gv_wv", &[Reg(V), RmX], None, PfxSel::P66, Pred::True, "pmovmskb {g}, {w}", "alu")),
+    ]);
+    // パック浮動小数点（51, 58, 59, 5C, 5D, 5E, 5F）。名前は map insn。
+    for (byte, mn) in [
+        (0x51u8, "sqrt"),
+        (0x58, "add"),
+        (0x59, "mul"),
+        (0x5C, "sub"),
+        (0x5D, "min"),
+        (0x5E, "div"),
+        (0x5F, "max"),
+    ] {
+        for (sel, suf) in [
+            (PfxSel::Plain, "ps"),
+            (PfxSel::P66, "pd"),
+            (PfxSel::PF3, "ss"),
+            (PfxSel::PF2, "sd"),
+        ] {
+            m0f.push(MapItem::Insn(
+                byte,
+                mi(&format!("{mn}{suf}_xv_wv"), &[RegX, RmX], None, sel, Pred::True, "{op} {x}, {w}", "alu"),
+            ));
+        }
+    }
+    // パック論理（54-57）とパック整数の論理（DB, DF, EB, EF）。
+    for (byte, mn, sel) in [
+        (0x54u8, "andps", PfxSel::Plain),
+        (0x54, "andpd", PfxSel::P66),
+        (0x55, "andnps", PfxSel::Plain),
+        (0x55, "andnpd", PfxSel::P66),
+        (0x56, "orps", PfxSel::Plain),
+        (0x56, "orpd", PfxSel::P66),
+        (0x57, "xorps", PfxSel::Plain),
+        (0x57, "xorpd", PfxSel::P66),
+        (0xDB, "pand", PfxSel::P66),
+        (0xDF, "pandn", PfxSel::P66),
+        (0xEB, "por", PfxSel::P66),
+        (0xEF, "pxor", PfxSel::P66),
+    ] {
+        m0f.push(MapItem::Insn(
+            byte,
+            mi(&format!("{mn}_xv_wv"), &[RegX, RmX], None, sel, Pred::True, "{op} {x}, {w}", "alu"),
+        ));
+    }
+    // パック整数（P66 のみ。MMX 形は対象外）。
+    for (byte, mn) in [
+        (0x60u8, "punpcklbw"),
+        (0x61, "punpcklwd"),
+        (0x62, "punpckldq"),
+        (0x64, "pcmpgtb"),
+        (0x65, "pcmpgtw"),
+        (0x66, "pcmpgtd"),
+        (0x68, "punpckhbw"),
+        (0x69, "punpckhwd"),
+        (0x6A, "punpckhdq"),
+        (0x6C, "punpcklqdq"),
+        (0x6D, "punpckhqdq"),
+        (0x74, "pcmpeqb"),
+        (0x75, "pcmpeqw"),
+        (0x76, "pcmpeqd"),
+        (0xD1, "psrlw"),
+        (0xD2, "psrld"),
+        (0xD3, "psrlq"),
+        (0xD4, "paddq"),
+        (0xD5, "pmullw"),
+        (0xD8, "psubusb"),
+        (0xD9, "psubusw"),
+        (0xDA, "pminub"),
+        (0xDC, "paddusb"),
+        (0xDD, "paddusw"),
+        (0xDE, "pmaxub"),
+        (0xE0, "pavgb"),
+        (0xE1, "psraw"),
+        (0xE2, "psrad"),
+        (0xE3, "pavgw"),
+        (0xE8, "psubsb"),
+        (0xE9, "psubsw"),
+        (0xEA, "pminsw"),
+        (0xEC, "paddsb"),
+        (0xED, "paddsw"),
+        (0xEE, "pmaxsw"),
+        (0xF1, "psllw"),
+        (0xF2, "pslld"),
+        (0xF3, "psllq"),
+        (0xF8, "psubb"),
+        (0xF9, "psubw"),
+        (0xFA, "psubd"),
+        (0xFB, "psubq"),
+        (0xFC, "paddb"),
+        (0xFD, "paddw"),
+        (0xFE, "paddd"),
+    ] {
+        m0f.push(MapItem::Insn(
+            byte,
+            mi(&format!("{mn}_xv_wv"), &[RegX, RmX], None, PfxSel::P66, Pred::True, "{op} {x}, {w}", "alu"),
+        ));
+    }
+    // パックシフト群（0F 71-73、/n はグループ、被演算子は xmm + imm8）。
+    for (byte, entries) in [
+        (0x71u8, &[(2u8, "psrlw"), (4, "psraw"), (6, "psllw")][..]),
+        (0x72, &[(2u8, "psrld"), (4, "psrad"), (6, "pslld")][..]),
+        (0x73, &[(2u8, "psrlq"), (3, "psrldq"), (6, "psllq"), (7, "pslldq")][..]),
+    ] {
+        for (grp, mn) in entries.iter().copied() {
+            m0f.push(MapItem::Insn(
+                byte,
+                mi(&format!("{mn}_wv_ib"), &[RmX, Imm(B8)], Some(grp), PfxSel::P66, Pred::True, "{op} {w}, {i}", "alu"),
+            ));
+        }
     }
     // PUSH/POP FS・GS。
     m0f.extend([

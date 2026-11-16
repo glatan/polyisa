@@ -5,7 +5,7 @@
 //!
 //! Ref: SPEC-X86-INTEL-SDM (v093) Vol.2.
 
-use polyisa_sem::{Backend, Cmp, Flow, W8, W16, W32, W64};
+use polyisa_sem::{Backend, Cmp, Flow, W8, W16, W32, W64, W128};
 
 use crate::MapDec;
 use crate::decode::{self, Hw, Rm};
@@ -1792,4 +1792,1564 @@ fn cnt_v<B: Backend, W: Hw>(b: &mut B, cnt: u8, d: &MapDec) -> B::V<W> {
     } else {
         b.konst::<W>(W::from_u128(u128::from(cnt)))
     }
+}
+
+// ===== XMM（オペコード表経路の SSE/SSE2）=====
+//
+// 被演算子は `Rm` のまま受け、`Rm::Reg` を XMM 番号として読み替える。
+// メモリは命令ごとの幅（128/64/32）で読み、上位はゼロ拡張する。
+
+use crate::sem::Xmm;
+
+/// ModRM.reg の XMM。
+fn reg_x(d: &MapDec) -> Xmm {
+    Xmm(decode::reg(d).0)
+}
+
+/// ModRM.r/m の XMM（mod=11 のみで使う）。
+fn rm_x(d: &MapDec) -> Xmm {
+    Xmm(decode::rm_reg(d).0)
+}
+
+/// xmm/m64 の下位 64 ビット（パックシフトのカウント被演算子）。
+pub fn xm_lo64<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>) -> Result<B::V<W64>, B::Exit> {
+    let v = rx(b, ea, 64)?;
+    Ok(b.trunc::<W128, W64>(v))
+}
+
+/// xmm/m を読む。メモリは `bits` 幅で読み、上位はゼロ拡張。
+fn rx<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>, bits: u32) -> Result<B::V<W128>, B::Exit> {
+    match ea {
+        Rm::Reg(g) => Ok(b.get(sem::xmm_ref(Xmm(g.0)))),
+        Rm::Mem(a) => {
+            let a = *a;
+            match bits {
+                32 => {
+                    let v: B::V<W32> = b.load::<W32>(a, sem::DATA_READ)?;
+                    Ok(b.zext::<W32, W128>(v))
+                }
+                64 => {
+                    let v: B::V<W64> = b.load::<W64>(a, sem::DATA_READ)?;
+                    Ok(b.zext::<W64, W128>(v))
+                }
+                _ => b.load::<W128>(a, sem::DATA_READ),
+            }
+        }
+    }
+}
+
+/// xmm/m に `v` の下位 `bits` を書く。レジスタ直接は 128 ビット全体を
+/// `v`（呼び出し側が上位を合成済み）で上書きする。
+fn wx<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>, bits: u32, v: B::V<W128>) -> Result<(), B::Exit> {
+    match ea {
+        Rm::Reg(g) => {
+            b.set(sem::xmm_ref(Xmm(g.0)), v);
+            Ok(())
+        }
+        Rm::Mem(a) => {
+            let a = *a;
+            match bits {
+                32 => {
+                    let v32: B::V<W32> = b.trunc::<W128, W32>(v);
+                    b.store::<W32>(a, v32, sem::DATA_WRITE)
+                }
+                64 => {
+                    let v64: B::V<W64> = b.trunc::<W128, W64>(v);
+                    b.store::<W64>(a, v64, sem::DATA_WRITE)
+                }
+                _ => b.store::<W128>(a, v, sem::DATA_WRITE),
+            }
+        }
+    }
+}
+
+/// 128 ビット値の `at` ビットから `bits` 幅を取り出してゼロ拡張する。
+fn lane128<B: Backend>(b: &mut B, v: B::V<W128>, at: u32, bits: u32) -> B::V<W128> {
+    let sh = b.konst::<W128>(u128::from(at));
+    let shifted = b.shr_l::<W128>(v, sh);
+    let mask = b.konst::<W128>((1u128 << bits) - 1);
+    b.and::<W128>(shifted, mask)
+}
+
+/// `dst` の `at` ビットから `bits` 幅を `v` の下位で置き換える。
+fn put_lane128<B: Backend>(
+    b: &mut B,
+    dst: B::V<W128>,
+    v: B::V<W128>,
+    at: u32,
+    bits: u32,
+) -> B::V<W128> {
+    let mask = b.konst::<W128>((1u128 << bits) - 1);
+    let lo = b.and::<W128>(v, mask);
+    let sh = b.konst::<W128>(u128::from(at));
+    let part = b.shl::<W128>(lo, sh);
+    let hole = b.shl::<W128>(mask, sh);
+    let nhole = b.not::<W128>(hole);
+    let keep = b.and::<W128>(dst, nhole);
+    b.or::<W128>(keep, part)
+}
+
+/// 128 ビット移動の読み込み（movups/movupd/movaps/movapd/movdqa/movdqu）。
+pub fn mov_x_w<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit> {
+    let v = rx(b, ea, 128)?;
+    b.set(sem::xmm_ref(reg_x(d)), v);
+    Ok(())
+}
+
+/// 128 ビット移動の書き込み。
+pub fn mov_w_x<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit> {
+    let v: B::V<W128> = b.get(sem::xmm_ref(reg_x(d)));
+    wx(b, ea, 128, v)
+}
+
+/// MOVSS/MOVSD の読み込み。mod=11 は下位のみ書き換えて上位を保持、
+/// メモリは 32/64 ビットを読んで上位をゼロクリア。
+pub fn movs_ld<B: Backend>(
+    b: &mut B,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+    bits: u32,
+) -> Result<(), B::Exit> {
+    let dst = reg_x(d);
+    if d.modrm >= 0xC0 {
+        let s = rx(b, ea, 128)?;
+        let old: B::V<W128> = b.get(sem::xmm_ref(dst));
+        let v = put_lane128(b, old, s, 0, bits);
+        b.set(sem::xmm_ref(dst), v);
+    } else {
+        let v = rx(b, ea, bits)?;
+        b.set(sem::xmm_ref(dst), v);
+    }
+    Ok(())
+}
+
+/// MOVSS/MOVSD の書き込み。mod=11 は下位のみコピー（上位は dst のまま）。
+pub fn movs_st<B: Backend>(
+    b: &mut B,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+    bits: u32,
+) -> Result<(), B::Exit> {
+    let s: B::V<W128> = b.get(sem::xmm_ref(reg_x(d)));
+    if d.modrm >= 0xC0 {
+        let old = rx(b, ea, 128)?;
+        let v = put_lane128(b, old, s, 0, bits);
+        wx(b, ea, 128, v)
+    } else {
+        wx(b, ea, bits, s)
+    }
+}
+
+/// MOVQ xmm, xmm/m64（F3 0F 7E）。下位 64 をコピーし上位はゼロ。
+pub fn movq_x_w<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit> {
+    let v = rx(b, ea, 64)?;
+    b.set(sem::xmm_ref(reg_x(d)), v);
+    Ok(())
+}
+
+/// MOVQ xmm/m64, xmm（66 0F D6）。mod=11 は下位 64 のみ書き換え上位はゼロ。
+pub fn movq_w_x<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit> {
+    let s: B::V<W128> = b.get(sem::xmm_ref(reg_x(d)));
+    let lo = lane128(b, s, 0, 64);
+    wx(b, ea, if d.modrm >= 0xC0 { 128 } else { 64 }, lo)
+}
+
+/// MOVD/MOVQ xmm, r/m（66 0F 6E）。REX.W で 64 ビット。
+pub fn movd_x_e<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit> {
+    let v = if d.rex & 8 != 0 {
+        let v: B::V<W64> = decode::rd64(b, ea)?;
+        b.zext::<W64, W128>(v)
+    } else {
+        let v: B::V<W32> = decode::rd32(b, ea)?;
+        b.zext::<W32, W128>(v)
+    };
+    b.set(sem::xmm_ref(reg_x(d)), v);
+    Ok(())
+}
+
+/// MOVD/MOVQ r/m, xmm（66 0F 7E）。REX.W で 64 ビット。
+pub fn movd_e_x<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit> {
+    let s: B::V<W128> = b.get(sem::xmm_ref(reg_x(d)));
+    if d.rex & 8 != 0 {
+        let v: B::V<W64> = b.trunc::<W128, W64>(s);
+        decode::wr64(b, ea, v)
+    } else {
+        let v: B::V<W32> = b.trunc::<W128, W32>(s);
+        decode::wr32(b, ea, v)
+    }
+}
+
+/// MOVLPS/MOVLPD の読み込み（0F 12）。mem は下位 64 を読み込み、
+/// mod=11 は MOVLHPS（0x66 なし）または MOVHLPS（0x66 あり）。
+/// F3 は MOVSLDUP、F2 は MOVDDUP。
+pub fn movl_d<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit> {
+    let dst = reg_x(d);
+    if d.rep == 0xF3 {
+        // MOVSLDUP: 偶数の 32 ビット要素を複製。
+        let s = rx(b, ea, 128)?;
+        let l0 = lane128(b, s, 0, 32);
+        let l2 = lane128(b, s, 64, 32);
+        let mut v = put_lane128(b, s, l0, 32, 32);
+        v = put_lane128(b, v, l2, 96, 32);
+        b.set(sem::xmm_ref(dst), v);
+        return Ok(());
+    }
+    if d.rep == 0xF2 {
+        // MOVDDUP: 下位 64 を両方に複製。
+        let s = rx(b, ea, 64)?;
+        let lo = lane128(b, s, 0, 64);
+        let v = put_lane128(b, s, lo, 64, 64);
+        b.set(sem::xmm_ref(dst), v);
+        return Ok(());
+    }
+    if d.modrm >= 0xC0 {
+        let s = rx(b, ea, 128)?;
+        let old: B::V<W128> = b.get(sem::xmm_ref(dst));
+        let v = if d.p66 {
+            // MOVHLPS: dst.lo = src.hi
+            let hi = lane128(b, s, 64, 64);
+            put_lane128(b, old, hi, 0, 64)
+        } else {
+            // MOVLHPS: dst.hi = src.lo
+            put_lane128(b, old, s, 64, 64)
+        };
+        b.set(sem::xmm_ref(dst), v);
+    } else {
+        let s = rx(b, ea, 64)?;
+        let old: B::V<W128> = b.get(sem::xmm_ref(dst));
+        let v = put_lane128(b, old, s, 0, 64);
+        b.set(sem::xmm_ref(dst), v);
+    }
+    Ok(())
+}
+
+/// MOVLPS/MOVLPD の書き込み（0F 13）。下位 64 を書く。
+pub fn movl_st<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit> {
+    let s: B::V<W128> = b.get(sem::xmm_ref(reg_x(d)));
+    let lo = lane128(b, s, 0, 64);
+    wx(b, ea, 64, lo)
+}
+
+/// MOVHPS/MOVHPD の読み込み（0F 16）。mem は上位 64 を読み込み、
+/// mod=11 は MOVHLPS（dst.lo = src.hi）。F3 は MOVSHDUP。
+pub fn movh_d<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit> {
+    let dst = reg_x(d);
+    if d.rep == 0xF3 {
+        // MOVSHDUP: 奇数の 32 ビット要素を複製。
+        let s = rx(b, ea, 128)?;
+        let l1 = lane128(b, s, 32, 32);
+        let l3 = lane128(b, s, 96, 32);
+        let mut v = put_lane128(b, s, l1, 0, 32);
+        v = put_lane128(b, v, l3, 64, 32);
+        b.set(sem::xmm_ref(dst), v);
+        return Ok(());
+    }
+    if d.modrm >= 0xC0 {
+        // MOVHLPS: dst.lo = src.hi
+        let s = rx(b, ea, 128)?;
+        let hi = lane128(b, s, 64, 64);
+        let old: B::V<W128> = b.get(sem::xmm_ref(dst));
+        let v = put_lane128(b, old, hi, 0, 64);
+        b.set(sem::xmm_ref(dst), v);
+    } else {
+        let s = rx(b, ea, 64)?;
+        let old: B::V<W128> = b.get(sem::xmm_ref(dst));
+        let v = put_lane128(b, old, s, 64, 64);
+        b.set(sem::xmm_ref(dst), v);
+    }
+    Ok(())
+}
+
+/// MOVHPS/MOVHPD の書き込み（0F 17）。上位 64 を書く。
+pub fn movh_st<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit> {
+    let s: B::V<W128> = b.get(sem::xmm_ref(reg_x(d)));
+    let hi = lane128(b, s, 64, 64);
+    wx(b, ea, 64, hi)
+}
+
+/// 128 ビットの論理演算（ANDPS/ANDPD/ANDNPS/ANDNPD/ORPS/ORPD/XORPS/XORPD
+/// と PAND/PANDN/POR/PXOR はすべて同じビット演算）。
+#[derive(Clone, Copy)]
+pub enum Lop {
+    And,
+    Andn,
+    Or,
+    Xor,
+}
+
+pub fn logic128<B: Backend>(
+    b: &mut B,
+    op: Lop,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    let dst = reg_x(d);
+    let a: B::V<W128> = b.get(sem::xmm_ref(dst));
+    let c = rx(b, ea, 128)?;
+    let v = match op {
+        Lop::And => b.and::<W128>(a, c),
+        Lop::Andn => {
+            let na = b.not::<W128>(a);
+            b.and::<W128>(na, c)
+        }
+        Lop::Or => b.or::<W128>(a, c),
+        Lop::Xor => b.xor::<W128>(a, c),
+    };
+    b.set(sem::xmm_ref(dst), v);
+    Ok(())
+}
+
+/// 浮動小数点演算の種別。
+#[derive(Clone, Copy)]
+pub enum Fop {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Min,
+    Max,
+    Sqrt,
+    Cmp(u8),
+}
+
+fn fop64<B: Backend>(
+    b: &mut B,
+    op: Fop,
+    a: B::V<polyisa_sem::F64>,
+    c: B::V<polyisa_sem::F64>,
+) -> B::V<polyisa_sem::F64> {
+    use polyisa_sem::F64;
+    match op {
+        Fop::Add => b.fadd::<F64>(a, c),
+        Fop::Sub => b.fsub::<F64>(a, c),
+        Fop::Mul => b.fmul::<F64>(a, c),
+        Fop::Div => b.fdiv::<F64>(a, c),
+        Fop::Min => b.fmin::<F64>(a, c),
+        Fop::Max => b.fmax::<F64>(a, c),
+        Fop::Sqrt => b.fsqrt::<F64>(a),
+        Fop::Cmp(_) => a,
+    }
+}
+
+fn fop32<B: Backend>(
+    b: &mut B,
+    op: Fop,
+    a: B::V<polyisa_sem::F32>,
+    c: B::V<polyisa_sem::F32>,
+) -> B::V<polyisa_sem::F32> {
+    use polyisa_sem::F32;
+    match op {
+        Fop::Add => b.fadd::<F32>(a, c),
+        Fop::Sub => b.fsub::<F32>(a, c),
+        Fop::Mul => b.fmul::<F32>(a, c),
+        Fop::Div => b.fdiv::<F32>(a, c),
+        Fop::Min => b.fmin::<F32>(a, c),
+        Fop::Max => b.fmax::<F32>(a, c),
+        Fop::Sqrt => b.fsqrt::<F32>(a),
+        Fop::Cmp(_) => a,
+    }
+}
+
+/// スカラ浮動小数点（addsd/subsd/mulsd/divsd/minsd/maxsd/sqrtsd と
+/// 単精度形）。`fbits` は 32 または 64。上位は dst のまま。
+pub fn sfloat<B: Backend>(
+    b: &mut B,
+    op: Fop,
+    fbits: u32,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    let dst = reg_x(d);
+    let a128: B::V<W128> = b.get(sem::xmm_ref(dst));
+    let c128 = rx(b, ea, fbits)?;
+    let res = if fbits == 64 {
+        let a64: B::V<W64> = b.trunc::<W128, W64>(a128);
+        let c64: B::V<W64> = b.trunc::<W128, W64>(c128);
+        let af = b.trunc::<W64, polyisa_sem::F64>(a64);
+        let cf = b.trunc::<W64, polyisa_sem::F64>(c64);
+        let v = fop64(b, op, af, cf);
+        let v64 = b.trunc::<polyisa_sem::F64, W64>(v);
+        b.zext::<W64, W128>(v64)
+    } else {
+        let a32: B::V<W32> = b.trunc::<W128, W32>(a128);
+        let c32: B::V<W32> = b.trunc::<W128, W32>(c128);
+        let af = b.trunc::<W32, polyisa_sem::F32>(a32);
+        let cf = b.trunc::<W32, polyisa_sem::F32>(c32);
+        let v = fop32(b, op, af, cf);
+        let v32 = b.trunc::<polyisa_sem::F32, W32>(v);
+        b.zext::<W32, W128>(v32)
+    };
+    let out = put_lane128(b, a128, res, 0, fbits);
+    b.set(sem::xmm_ref(dst), out);
+    Ok(())
+}
+
+/// パック浮動小数点（addps/addpd 等の 4×f32 / 2×f64 の全要素）。
+pub fn pfloat<B: Backend>(
+    b: &mut B,
+    op: Fop,
+    fbits: u32,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    let dst = reg_x(d);
+    let a128: B::V<W128> = b.get(sem::xmm_ref(dst));
+    let c128 = rx(b, ea, 128)?;
+    let mut acc = b.konst::<W128>(0);
+    let n = 128 / fbits;
+    for i in 0..n {
+        let al = lane128(b, a128, i * fbits, fbits);
+        let cl = lane128(b, c128, i * fbits, fbits);
+        let res = if fbits == 64 {
+            let a64: B::V<W64> = b.trunc::<W128, W64>(al);
+            let c64: B::V<W64> = b.trunc::<W128, W64>(cl);
+            let af = b.trunc::<W64, polyisa_sem::F64>(a64);
+            let cf = b.trunc::<W64, polyisa_sem::F64>(c64);
+            let v = match op {
+                Fop::Cmp(p) => {
+                    let m = fcmp_pred::<B, polyisa_sem::F64>(b, p, af, cf);
+                    let ones = b.konst::<W64>(u64::MAX);
+                    let zero = b.konst::<W64>(0);
+                    b.select::<W64>(m, ones, zero)
+                }
+                _ => {
+                    let v = fop64(b, op, af, cf);
+                    b.trunc::<polyisa_sem::F64, W64>(v)
+                }
+            };
+            b.zext::<W64, W128>(v)
+        } else {
+            let a32: B::V<W32> = b.trunc::<W128, W32>(al);
+            let c32: B::V<W32> = b.trunc::<W128, W32>(cl);
+            let af = b.trunc::<W32, polyisa_sem::F32>(a32);
+            let cf = b.trunc::<W32, polyisa_sem::F32>(c32);
+            let v = match op {
+                Fop::Cmp(p) => {
+                    let m = fcmp_pred::<B, polyisa_sem::F32>(b, p, af, cf);
+                    let ones = b.konst::<W32>(u32::MAX);
+                    let zero = b.konst::<W32>(0);
+                    b.select::<W32>(m, ones, zero)
+                }
+                _ => {
+                    let v = fop32(b, op, af, cf);
+                    b.trunc::<polyisa_sem::F32, W32>(v)
+                }
+            };
+            b.zext::<W32, W128>(v)
+        };
+        acc = put_lane128(b, acc, res, i * fbits, fbits);
+    }
+    b.set(sem::xmm_ref(dst), acc);
+    Ok(())
+}
+
+/// CMPPS/CMPPD の判定。cond に該当するかを返す。
+fn fcmp_pred<B: Backend, F: polyisa_sem::Width>(
+    b: &mut B,
+    pred: u8,
+    a: B::V<F>,
+    c: B::V<F>,
+) -> B::B {
+    let nan_a = {
+        let eq = b.feq::<F>(a, a);
+        sem::bit_not(b, eq)
+    };
+    let nan_c = {
+        let eq = b.feq::<F>(c, c);
+        sem::bit_not(b, eq)
+    };
+    let unord = sem::bit_or(b, nan_a, nan_c);
+    let ord = sem::bit_not(b, unord);
+    let eq = b.feq::<F>(a, c);
+    let lt = b.flt::<F>(a, c);
+    let le = b.fle::<F>(a, c);
+    let neq = sem::bit_not(b, eq);
+    let lt_o = sem::bit_not(b, lt);
+    let nlt = sem::bit_or(b, unord, lt_o);
+    let le_o = sem::bit_not(b, le);
+    let nle = sem::bit_or(b, unord, le_o);
+    let neq_u = sem::bit_or(b, unord, neq);
+    match pred & 7 {
+        0 => eq,
+        1 => lt,
+        2 => le,
+        3 => unord,
+        4 => neq_u,
+        5 => nlt,
+        6 => nle,
+        _ => ord,
+    }
+}
+
+/// CMPSS/CMPSD。下位のみ判定マスク、上位は dst のまま。
+pub fn scmp<B: Backend>(
+    b: &mut B,
+    fbits: u32,
+    pred: u8,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    let dst = reg_x(d);
+    let a128: B::V<W128> = b.get(sem::xmm_ref(dst));
+    let c128 = rx(b, ea, fbits)?;
+    let res = if fbits == 64 {
+        let a64: B::V<W64> = b.trunc::<W128, W64>(a128);
+        let c64: B::V<W64> = b.trunc::<W128, W64>(c128);
+        let af = b.trunc::<W64, polyisa_sem::F64>(a64);
+        let cf = b.trunc::<W64, polyisa_sem::F64>(c64);
+        let m = fcmp_pred::<B, polyisa_sem::F64>(b, pred, af, cf);
+        let ones = b.konst::<W64>(u64::MAX);
+        let zero = b.konst::<W64>(0);
+        let m64 = b.select::<W64>(m, ones, zero);
+        b.zext::<W64, W128>(m64)
+    } else {
+        let a32: B::V<W32> = b.trunc::<W128, W32>(a128);
+        let c32: B::V<W32> = b.trunc::<W128, W32>(c128);
+        let af = b.trunc::<W32, polyisa_sem::F32>(a32);
+        let cf = b.trunc::<W32, polyisa_sem::F32>(c32);
+        let m = fcmp_pred::<B, polyisa_sem::F32>(b, pred, af, cf);
+        let ones = b.konst::<W32>(u32::MAX);
+        let zero = b.konst::<W32>(0);
+        let m32 = b.select::<W32>(m, ones, zero);
+        b.zext::<W32, W128>(m32)
+    };
+    let out = put_lane128(b, a128, res, 0, fbits);
+    b.set(sem::xmm_ref(dst), out);
+    Ok(())
+}
+
+/// UCOMISS/UCOMISD（COMISS/COMISD も同じ旗の規則）。
+/// 結果は ZF/PF/CF に書き、OF/SF/AF は 0。
+pub fn ucomis<B: Backend>(
+    b: &mut B,
+    fbits: u32,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    let a128: B::V<W128> = b.get(sem::xmm_ref(reg_x(d)));
+    let c128 = rx(b, ea, fbits)?;
+    let (unord, eq, lt) = if fbits == 64 {
+        let a64: B::V<W64> = b.trunc::<W128, W64>(a128);
+        let c64: B::V<W64> = b.trunc::<W128, W64>(c128);
+        let af = b.trunc::<W64, polyisa_sem::F64>(a64);
+        let cf = b.trunc::<W64, polyisa_sem::F64>(c64);
+        let na = {
+            let e = b.feq::<polyisa_sem::F64>(af, af);
+            sem::bit_not(b, e)
+        };
+        let nc = {
+            let e = b.feq::<polyisa_sem::F64>(cf, cf);
+            sem::bit_not(b, e)
+        };
+        (
+            sem::bit_or(b, na, nc),
+            b.feq::<polyisa_sem::F64>(af, cf),
+            b.flt::<polyisa_sem::F64>(af, cf),
+        )
+    } else {
+        let a32: B::V<W32> = b.trunc::<W128, W32>(a128);
+        let c32: B::V<W32> = b.trunc::<W128, W32>(c128);
+        let af = b.trunc::<W32, polyisa_sem::F32>(a32);
+        let cf = b.trunc::<W32, polyisa_sem::F32>(c32);
+        let na = {
+            let e = b.feq::<polyisa_sem::F32>(af, af);
+            sem::bit_not(b, e)
+        };
+        let nc = {
+            let e = b.feq::<polyisa_sem::F32>(cf, cf);
+            sem::bit_not(b, e)
+        };
+        (
+            sem::bit_or(b, na, nc),
+            b.feq::<polyisa_sem::F32>(af, cf),
+            b.flt::<polyisa_sem::F32>(af, cf),
+        )
+    };
+    let zf = sem::bit_or(b, unord, eq);
+    let cf_out = sem::bit_or(b, unord, lt);
+    let f: B::V<W32> = b.get(eflags_ref());
+    let mask = b.konst::<W32>(
+        sem::FLAG_ZF | sem::FLAG_PF | sem::FLAG_CF | sem::FLAG_OF | sem::FLAG_SF | sem::FLAG_AF,
+    );
+    let nmask = b.not::<W32>(mask);
+    let kept = b.and::<W32>(f, nmask);
+    let zf_v = pick(b, zf, sem::FLAG_ZF);
+    let pf_v = pick(b, unord, sem::FLAG_PF);
+    let cf_v = pick(b, cf_out, sem::FLAG_CF);
+    let mut v = b.or::<W32>(kept, zf_v);
+    v = b.or::<W32>(v, pf_v);
+    v = b.or::<W32>(v, cf_v);
+    b.set(eflags_ref(), v);
+    Ok(())
+}
+
+/// CVTSI2SD/CVTSI2SS。整数を浮動小数点にして下位に書く。上位は dst のまま。
+pub fn cvtsi<B: Backend>(
+    b: &mut B,
+    fbits: u32,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    let dst = reg_x(d);
+    let a128: B::V<W128> = b.get(sem::xmm_ref(dst));
+    let res = if d.rex & 8 != 0 {
+        let i64v = decode::rd64(b, ea)?;
+        let f = if fbits == 64 {
+            let f = b.fcvt_from_s64::<polyisa_sem::F64>(i64v, 0);
+            b.trunc::<polyisa_sem::F64, W64>(f)
+        } else {
+            let f = b.fcvt_from_s64::<polyisa_sem::F32>(i64v, 0);
+            let f32 = b.trunc::<polyisa_sem::F32, W32>(f);
+            b.zext::<W32, W64>(f32)
+        };
+        b.zext::<W64, W128>(f)
+    } else {
+        let i32v = decode::rd32(b, ea)?;
+        if fbits == 64 {
+            let f = b.fcvt_from_s32::<polyisa_sem::F64>(i32v, 0);
+            let f64 = b.trunc::<polyisa_sem::F64, W64>(f);
+            b.zext::<W64, W128>(f64)
+        } else {
+            let f = b.fcvt_from_s32::<polyisa_sem::F32>(i32v, 0);
+            let f32 = b.trunc::<polyisa_sem::F32, W32>(f);
+            b.zext::<W32, W128>(f32)
+        }
+    };
+    let out = put_lane128(b, a128, res, 0, fbits);
+    b.set(sem::xmm_ref(dst), out);
+    Ok(())
+}
+
+/// CVTTSD2SI/CVTTSS2SI（rm=1 切り捨て）と CVTSD2SI/CVTSS2SI（rm=0 最近接）。
+/// dst は GPR（V 幅）。`trunc_rm` が真で切り捨て。
+pub fn cvtf2i<B: Backend>(
+    b: &mut B,
+    fbits: u32,
+    trunc_rm: bool,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+    dst: Gpr,
+) -> Result<(), B::Exit> {
+    let s = rx(b, ea, fbits)?;
+    let rm = if trunc_rm { 1 } else { 0 };
+    let v = if fbits == 64 {
+        let s64: B::V<W64> = b.trunc::<W128, W64>(s);
+        let f = b.trunc::<W64, polyisa_sem::F64>(s64);
+        if d.rex & 8 != 0 {
+            b.fcvt_s64::<polyisa_sem::F64>(f, rm)
+        } else {
+            let v32 = b.fcvt_s32::<polyisa_sem::F64>(f, rm);
+            b.sext::<W32, W64>(v32)
+        }
+    } else {
+        let s32: B::V<W32> = b.trunc::<W128, W32>(s);
+        let f = b.trunc::<W32, polyisa_sem::F32>(s32);
+        if d.rex & 8 != 0 {
+            b.fcvt_s64::<polyisa_sem::F32>(f, rm)
+        } else {
+            let v32 = b.fcvt_s32::<polyisa_sem::F32>(f, rm);
+            b.sext::<W32, W64>(v32)
+        }
+    };
+    if d.rex & 8 != 0 {
+        sem::write64(b, dst, v);
+    } else {
+        let v32: B::V<W32> = b.trunc::<W64, W32>(v);
+        let cleared = b.zext::<W32, W64>(v32);
+        sem::write64(b, dst, cleared);
+    }
+    Ok(())
+}
+
+/// CVTPS2PD / CVTPD2PS / CVTSS2SD / CVTSD2SS。
+/// `to64` で F32→F64、`keep_hi` でスカラ形（上位を dst のまま）。
+pub fn cvtff<B: Backend>(
+    b: &mut B,
+    to64: bool,
+    keep_hi: bool,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    use polyisa_sem::{F32, F64};
+    let dst = reg_x(d);
+    let a128: B::V<W128> = b.get(sem::xmm_ref(dst));
+    let src_bits = if to64 { 64 } else { 128 };
+    let s = rx(b, ea, src_bits)?;
+    let out = if to64 {
+        if keep_hi {
+            // CVTSS2SD: lo32 → lo64
+            let s32: B::V<W32> = b.trunc::<W128, W32>(s);
+            let f = b.trunc::<W32, F32>(s32);
+            let v = b.fcvt_ff::<F32, F64>(f, 0);
+            let v64 = b.trunc::<F64, W64>(v);
+            let v128 = b.zext::<W64, W128>(v64);
+            put_lane128(b, a128, v128, 0, 64)
+        } else {
+            // CVTPS2PD: lo/hi の f32 → 2 つの f64
+            let lo32: B::V<W32> = b.trunc::<W128, W32>(s);
+            let s64k = b.konst::<W128>(64);
+            let s_hi = b.shr_l::<W128>(s, s64k);
+            let hi64: B::V<W64> = b.trunc::<W128, W64>(s_hi);
+            let hi32: B::V<W32> = b.trunc::<W64, W32>(hi64);
+            let fl = b.trunc::<W32, F32>(lo32);
+            let fh = b.trunc::<W32, F32>(hi32);
+            let vl = b.fcvt_ff::<F32, F64>(fl, 0);
+            let vh = b.fcvt_ff::<F32, F64>(fh, 0);
+            let vl64 = b.trunc::<F64, W64>(vl);
+            let vh64 = b.trunc::<F64, W64>(vh);
+            let lo = b.zext::<W64, W128>(vl64);
+            let vh128 = b.zext::<W64, W128>(vh64);
+            put_lane128(b, lo, vh128, 64, 64)
+        }
+    } else if keep_hi {
+        // CVTSD2SS: lo64 → lo32
+        let s64: B::V<W64> = b.trunc::<W128, W64>(s);
+        let f = b.trunc::<W64, F64>(s64);
+        let v = b.fcvt_ff::<F64, F32>(f, 0);
+        let v32 = b.trunc::<F32, W32>(v);
+        let v128 = b.zext::<W32, W128>(v32);
+        put_lane128(b, a128, v128, 0, 32)
+    } else {
+        // CVTPD2PS: 2 つの f64 → lo64 の 2 つの f32、hi64 は 0
+        let lo64: B::V<W64> = b.trunc::<W128, W64>(s);
+        let k64c = b.konst::<W128>(64);
+        let hi64v = b.shr_l::<W128>(s, k64c);
+        let hi64: B::V<W64> = b.trunc::<W128, W64>(hi64v);
+        let fl = b.trunc::<W64, F64>(lo64);
+        let fh = b.trunc::<W64, F64>(hi64);
+        let vl = b.fcvt_ff::<F64, F32>(fl, 0);
+        let vh = b.fcvt_ff::<F64, F32>(fh, 0);
+        let vl32 = b.trunc::<F32, W32>(vl);
+        let vh32 = b.trunc::<F32, W32>(vh);
+        let lo = b.zext::<W32, W128>(vl32);
+        let vh128 = b.zext::<W32, W128>(vh32);
+        put_lane128(b, lo, vh128, 32, 32)
+    };
+    b.set(sem::xmm_ref(dst), out);
+    Ok(())
+}
+
+/// PSHUFD（66）/PSHUFHW（F3）/PSHUFLW（F2）。
+pub fn pshuf<B: Backend>(
+    b: &mut B,
+    kind: u8,
+    imm: u8,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    let dst = reg_x(d);
+    let s = rx(b, ea, 128)?;
+    let v = match kind {
+        // 全 4 dword を imm で並べ替え。
+        0 => {
+            let mut acc = b.konst::<W128>(0);
+            for i in 0..4u32 {
+                let sel = u32::from((imm >> (2 * i)) & 3);
+                let l = lane128(b, s, sel * 32, 32);
+                acc = put_lane128(b, acc, l, i * 32, 32);
+            }
+            acc
+        }
+        // 上位 4 word を並べ替え。下位 64 は src のまま。
+        1 => {
+            let mut acc = s;
+            for i in 0..4u32 {
+                let sel = u32::from((imm >> (2 * i)) & 3);
+                let l = lane128(b, s, 64 + sel * 16, 16);
+                acc = put_lane128(b, acc, l, 64 + i * 16, 16);
+            }
+            acc
+        }
+        // 下位 4 word を並べ替え。上位 64 は src のまま。
+        _ => {
+            let mut acc = s;
+            for i in 0..4u32 {
+                let sel = u32::from((imm >> (2 * i)) & 3);
+                let l = lane128(b, s, sel * 16, 16);
+                acc = put_lane128(b, acc, l, i * 16, 16);
+            }
+            acc
+        }
+    };
+    b.set(sem::xmm_ref(dst), v);
+    Ok(())
+}
+
+/// SHUFPS/SHUFPD。
+pub fn shufp<B: Backend>(
+    b: &mut B,
+    pd: bool,
+    imm: u8,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    let dst = reg_x(d);
+    let a: B::V<W128> = b.get(sem::xmm_ref(dst));
+    let c = rx(b, ea, 128)?;
+    let v = if pd {
+        let al = lane128(b, a, u32::from(imm & 1) * 64, 64);
+        let cl = lane128(b, c, u32::from((imm >> 1) & 1) * 64, 64);
+        put_lane128(b, al, cl, 64, 64)
+    } else {
+        let a0 = lane128(b, a, u32::from(imm & 3) * 32, 32);
+        let a1 = lane128(b, a, u32::from((imm >> 2) & 3) * 32, 32);
+        let c0 = lane128(b, c, u32::from((imm >> 4) & 3) * 32, 32);
+        let c1 = lane128(b, c, u32::from((imm >> 6) & 3) * 32, 32);
+        let mut acc = put_lane128(b, a0, a1, 32, 32);
+        acc = put_lane128(b, acc, c0, 64, 32);
+        put_lane128(b, acc, c1, 96, 32)
+    };
+    b.set(sem::xmm_ref(dst), v);
+    Ok(())
+}
+
+/// PUNPCKL*/PUNPCKH* と UNPCKLPS/PD・UNPCKHPS/PD。
+/// `bits` は要素幅（8/16/32/64）、`high` で上半分を取る。
+pub fn punpck<B: Backend>(
+    b: &mut B,
+    bits: u32,
+    high: bool,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    let dst = reg_x(d);
+    let a: B::V<W128> = b.get(sem::xmm_ref(dst));
+    let c = rx(b, ea, 128)?;
+    let half = 64 / bits;
+    let base = if high { half } else { 0 };
+    let mut acc = b.konst::<W128>(0);
+    for i in 0..half {
+        let al = lane128(b, a, (base + i) * bits, bits);
+        let cl = lane128(b, c, (base + i) * bits, bits);
+        acc = put_lane128(b, acc, al, (2 * i) * bits, bits);
+        acc = put_lane128(b, acc, cl, (2 * i + 1) * bits, bits);
+    }
+    b.set(sem::xmm_ref(dst), acc);
+    Ok(())
+}
+
+/// PINSRW。imm の下位 3 ビットの word を 16 ビットで置き換える。
+pub fn pinsrw<B: Backend>(
+    b: &mut B,
+    imm: u8,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    let dst = reg_x(d);
+    let a: B::V<W128> = b.get(sem::xmm_ref(dst));
+    let w16: B::V<W16> = decode::rd16(b, ea)?;
+    let w128 = b.zext::<W16, W128>(w16);
+    let v = put_lane128(b, a, w128, u32::from(imm & 7) * 16, 16);
+    b.set(sem::xmm_ref(dst), v);
+    Ok(())
+}
+
+/// PEXTRW。imm の下位 3 ビットの word を GPR に書く。
+pub fn pextrw<B: Backend>(
+    b: &mut B,
+    imm: u8,
+    _d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+    dst: Gpr,
+) -> Result<(), B::Exit> {
+    let s = rx(b, ea, 128)?;
+    let l = lane128(b, s, u32::from(imm & 7) * 16, 16);
+    let l16: B::V<W16> = b.trunc::<W128, W16>(l);
+    let v = b.zext::<W16, W64>(l16);
+    sem::write64(b, dst, v);
+    Ok(())
+}
+
+/// PMOVMSKB（16 バイトの符号ビット）と MOVMSKPS/MOVMSKPD
+/// （要素の符号ビットを 4/2 個取る）。
+pub fn movmsk<B: Backend>(
+    b: &mut B,
+    bits: u32,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    let s = rx(b, ea, 128)?;
+    let mut acc = b.konst::<W64>(0);
+    let n = 128 / bits;
+    for i in 0..n {
+        let l = lane128(b, s, i * bits + bits - 1, 1);
+        let l64: B::V<W64> = b.trunc::<W128, W64>(l);
+        let sh = b.konst::<W64>(u64::from(i));
+        let placed = b.shl::<W64>(l64, sh);
+        acc = b.or::<W64>(acc, placed);
+    }
+    // dst は 32/64 ビット GPR。下位 32 ビットを書き上位はクリア。
+    let v32: B::V<W32> = b.trunc::<W64, W32>(acc);
+    let v = b.zext::<W32, W64>(v32);
+    sem::write64(b, decode::reg(d), v);
+    Ok(())
+}
+
+/// パック整数の要素ごとの演算。`f` は要素同士の演算。
+fn lane_bin<B: Backend, W: polyisa_sem::Width>(
+    b: &mut B,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+    mut f: impl FnMut(&mut B, B::V<W>, B::V<W>) -> B::V<W>,
+) -> Result<(), B::Exit> {
+    let dst = reg_x(d);
+    let a: B::V<W128> = b.get(sem::xmm_ref(dst));
+    let c = rx(b, ea, 128)?;
+    let mut acc = b.konst::<W128>(0);
+    let n = 128 / W::BITS;
+    for i in 0..n {
+        let al = lane128(b, a, i * W::BITS, W::BITS);
+        let cl = lane128(b, c, i * W::BITS, W::BITS);
+        let a_w: B::V<W> = b.trunc::<W128, W>(al);
+        let c_w: B::V<W> = b.trunc::<W128, W>(cl);
+        let r = f(b, a_w, c_w);
+        let r128 = b.zext::<W, W128>(r);
+        acc = put_lane128(b, acc, r128, i * W::BITS, W::BITS);
+    }
+    b.set(sem::xmm_ref(dst), acc);
+    Ok(())
+}
+
+/// 符号なし飽和加算（a+b が溢れたら全 1）。
+fn sat_add_u<B: Backend, W: polyisa_sem::Width>(b: &mut B, a: B::V<W>, c: B::V<W>) -> B::V<W> {
+    let s = b.add::<W>(a, c);
+    let ovf = b.cmp::<W>(Cmp::LtU, s, a);
+    let max = b.konst::<W>(W::from_u128((1u128 << W::BITS) - 1));
+    b.select::<W>(ovf, max, s)
+}
+
+/// 符号付き飽和加算。
+fn sat_add_s<B: Backend, W: polyisa_sem::Width>(b: &mut B, a: B::V<W>, c: B::V<W>) -> B::V<W> {
+    let s = b.add::<W>(a, c);
+    let sign = b.konst::<W>(W::from_u128(1u128 << (W::BITS - 1)));
+    let sa = b.and::<W>(a, sign);
+    let sc = b.and::<W>(c, sign);
+    let ss = b.and::<W>(s, sign);
+    let same = b.cmp::<W>(Cmp::Eq, sa, sc);
+    let diff = b.cmp::<W>(Cmp::Ne, ss, sa);
+    let ovf = sem::bit_and(b, same, diff);
+    let wzero = b.konst::<W>(W::from_u128(0));
+    let neg = b.cmp::<W>(Cmp::Ne, sa, wzero);
+    let min = sign;
+    let max = b.konst::<W>(W::from_u128((1u128 << (W::BITS - 1)) - 1));
+    let sat = b.select::<W>(neg, min, max);
+    b.select::<W>(ovf, sat, s)
+}
+
+/// 符号なし飽和減算（a<b なら 0）。
+fn sat_sub_u<B: Backend, W: polyisa_sem::Width>(b: &mut B, a: B::V<W>, c: B::V<W>) -> B::V<W> {
+    let lt = b.cmp::<W>(Cmp::LtU, a, c);
+    let s = b.sub::<W>(a, c);
+    let z = b.konst::<W>(W::from_u128(0));
+    b.select::<W>(lt, z, s)
+}
+
+/// 符号付き飽和減算。
+fn sat_sub_s<B: Backend, W: polyisa_sem::Width>(b: &mut B, a: B::V<W>, c: B::V<W>) -> B::V<W> {
+    let s = b.sub::<W>(a, c);
+    let sign = b.konst::<W>(W::from_u128(1u128 << (W::BITS - 1)));
+    let sa = b.and::<W>(a, sign);
+    let sc = b.and::<W>(c, sign);
+    let ss = b.and::<W>(s, sign);
+    let diff = b.cmp::<W>(Cmp::Ne, sa, sc);
+    let wrong = b.cmp::<W>(Cmp::Ne, ss, sa);
+    let ovf = sem::bit_and(b, diff, wrong);
+    let wzero = b.konst::<W>(W::from_u128(0));
+    let neg = b.cmp::<W>(Cmp::Ne, sa, wzero);
+    let min = sign;
+    let max = b.konst::<W>(W::from_u128((1u128 << (W::BITS - 1)) - 1));
+    let sat = b.select::<W>(neg, min, max);
+    b.select::<W>(ovf, sat, s)
+}
+
+/// 全 1 マスクの生成（要素比較用）。
+fn lane_mask<B: Backend, W: polyisa_sem::Width>(b: &mut B, cond: B::B) -> B::V<W> {
+    let ones = b.konst::<W>(W::from_u128((1u128 << W::BITS) - 1));
+    let z = b.konst::<W>(W::from_u128(0));
+    b.select::<W>(cond, ones, z)
+}
+
+/// パック整数の算術・比較。`kind` で演算を選ぶ。
+#[derive(Clone, Copy)]
+pub enum Iop {
+    Add,
+    Sub,
+    MulLo,
+    AddSatU,
+    AddSatS,
+    SubSatU,
+    SubSatS,
+    Avg,
+    MinU,
+    MaxU,
+    MinS,
+    MaxS,
+    CmpEq,
+    CmpGtS,
+}
+
+pub fn pint<B: Backend, W: polyisa_sem::Width>(
+    b: &mut B,
+    kind: Iop,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    lane_bin::<B, W>(b, d, ea, |b, a, c| match kind {
+        Iop::Add => b.add::<W>(a, c),
+        Iop::Sub => b.sub::<W>(a, c),
+        Iop::MulLo => b.mul::<W>(a, c),
+        Iop::AddSatU => sat_add_u::<B, W>(b, a, c),
+        Iop::AddSatS => sat_add_s::<B, W>(b, a, c),
+        Iop::SubSatU => sat_sub_u::<B, W>(b, a, c),
+        Iop::SubSatS => sat_sub_s::<B, W>(b, a, c),
+        Iop::Avg => {
+            // (a + b + 1) >> 1 をオーバーフローなしで: (a>>1)+(b>>1)+((a|b)&1)
+            let one = b.konst::<W>(W::from_u128(1));
+            let ah = b.shr_l::<W>(a, one);
+            let ch = b.shr_l::<W>(c, one);
+            let sum = b.add::<W>(ah, ch);
+            let ab = b.or::<W>(a, c);
+            let lsb = b.and::<W>(ab, one);
+            b.add::<W>(sum, lsb)
+        }
+        Iop::MinU => {
+            let lt = b.cmp::<W>(Cmp::LtU, a, c);
+            b.select::<W>(lt, a, c)
+        }
+        Iop::MaxU => {
+            let gt = b.cmp::<W>(Cmp::GtU, a, c);
+            b.select::<W>(gt, a, c)
+        }
+        Iop::MinS => {
+            let lt = b.cmp::<W>(Cmp::LtS, a, c);
+            b.select::<W>(lt, a, c)
+        }
+        Iop::MaxS => {
+            let gt = b.cmp::<W>(Cmp::GtS, a, c);
+            b.select::<W>(gt, a, c)
+        }
+        Iop::CmpEq => {
+            let eq = b.cmp::<W>(Cmp::Eq, a, c);
+            lane_mask::<B, W>(b, eq)
+        }
+        Iop::CmpGtS => {
+            let gt = b.cmp::<W>(Cmp::GtS, a, c);
+            lane_mask::<B, W>(b, gt)
+        }
+    })
+}
+
+/// PSRL/PSRA/PSLL のパックシフト。カウントは xmm/m128 の下位 64 または即値。
+#[derive(Clone, Copy)]
+pub enum Psh {
+    L,
+    A,
+    R,
+}
+
+fn pshift_impl<B: Backend, W: polyisa_sem::Width>(
+    b: &mut B,
+    dir: Psh,
+    cnt: B::V<W64>,
+    dst: Xmm,
+) -> Flow<B> {
+    let a: B::V<W128> = b.get(sem::xmm_ref(dst));
+    // カウントが幅以上なら結果は 0（PSRA は符号拡張）。
+    let bits_k = b.konst::<W64>(u64::from(W::BITS));
+    let over = b.cmp::<W64>(Cmp::GeU, cnt, bits_k);
+    let cnt_w: B::V<W> = b.trunc::<W64, W>(cnt);
+    let mut acc = b.konst::<W128>(0);
+    let n = 128 / W::BITS;
+    for i in 0..n {
+        let al = lane128(b, a, i * W::BITS, W::BITS);
+        let a_w: B::V<W> = b.trunc::<W128, W>(al);
+        let r = match dir {
+            Psh::L => b.shl::<W>(a_w, cnt_w),
+            Psh::A => b.shr_a::<W>(a_w, cnt_w),
+            Psh::R => b.shr_l::<W>(a_w, cnt_w),
+        };
+        // オーバーシフト: L/R は 0、A は符号ビットの繰り返し。
+        let r = if matches!(dir, Psh::A) {
+            let sign_sh = b.konst::<W>(W::from_u128((W::BITS - 1) as u128));
+            let sg = b.shr_l::<W>(a_w, sign_sh);
+            let wz2 = b.konst::<W>(W::from_u128(0));
+            let neg = b.cmp::<W>(Cmp::Ne, sg, wz2);
+            let ones = b.konst::<W>(W::from_u128((1u128 << W::BITS) - 1));
+            let z = b.konst::<W>(W::from_u128(0));
+            let ext = b.select::<W>(neg, ones, z);
+            b.select::<W>(over, ext, r)
+        } else {
+            let z = b.konst::<W>(W::from_u128(0));
+            b.select::<W>(over, z, r)
+        };
+        let r128 = b.zext::<W, W128>(r);
+        acc = put_lane128(b, acc, r128, i * W::BITS, W::BITS);
+    }
+    b.set(sem::xmm_ref(dst), acc);
+    Ok(())
+}
+
+/// 2 被演算子形（xmm, xmm/m64）：dst は ModRM.reg。
+pub fn pshift<B: Backend, W: polyisa_sem::Width>(
+    b: &mut B,
+    dir: Psh,
+    cnt: B::V<W64>,
+    d: &MapDec,
+) -> Flow<B> {
+    pshift_impl::<B, W>(b, dir, cnt, reg_x(d))
+}
+
+/// グループ即値形（xmm, imm8）：dst は ModRM.r/m。
+pub fn pshift_i<B: Backend, W: polyisa_sem::Width>(
+    b: &mut B,
+    dir: Psh,
+    imm: u8,
+    d: &MapDec,
+) -> Flow<B> {
+    let c = b.konst::<W64>(u64::from(imm));
+    pshift_impl::<B, W>(b, dir, c, rm_x(d))
+}
+
+/// PSRLDQ/PSLLDQ。128 ビット全体を imm バイトずらす。
+pub fn byteshift<B: Backend>(b: &mut B, left: bool, imm: u8, d: &MapDec) -> Flow<B> {
+    let dst = rm_x(d);
+    let a: B::V<W128> = b.get(sem::xmm_ref(dst));
+    let bits = u32::from(imm).min(16) * 8;
+    let sh = b.konst::<W128>(u128::from(bits));
+    let v = if imm >= 16 {
+        b.konst::<W128>(0)
+    } else if left {
+        b.shl::<W128>(a, sh)
+    } else {
+        b.shr_l::<W128>(a, sh)
+    };
+    b.set(sem::xmm_ref(dst), v);
+    Ok(())
+}
+
+// ===== x87（オペコード表経路）=====
+//
+// ST(i) は物理スロット (top + i) & 7。mod=11 の r/m フィールドが i。
+// 状態は sig/exp/top で持つ（タグ・ステータスワードは未モデル）。
+
+/// ST(i) のスロット番号を値ドメインで返す。i はホスト既知。
+fn st_slot<B: Backend>(b: &mut B, i: u8) -> B::V<W16> {
+    let top = b.get(sem::top_ref());
+    let ii = b.konst::<W16>(u16::from(i));
+    let summed = b.add::<W16>(top, ii);
+    let seven = b.konst::<W16>(7);
+    b.and::<W16>(summed, seven)
+}
+
+/// FLD m32/m64/m80。m80 は仮数 8 バイト + 指数 2 バイト。
+pub fn fld_m<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>, bits: u32) -> Result<(), B::Exit> {
+    match ea {
+        Rm::Reg(_) => Ok(()),
+        Rm::Mem(a) => {
+            let a = *a;
+            match bits {
+                32 => {
+                    let v: B::V<W32> = b.load::<W32>(a, sem::DATA_READ)?;
+                    sem::push_f32(b, v)
+                }
+                80 => {
+                    let sig: B::V<W64> = b.load::<W64>(a, sem::DATA_READ)?;
+                    let a8 = b.konst::<W64>(8);
+                    let a2 = b.add::<W64>(a, a8);
+                    let exp: B::V<W16> = b.load::<W16>(a2, sem::DATA_READ)?;
+                    sem::push_ext(b, sig, exp)
+                }
+                _ => {
+                    let v: B::V<W64> = b.load::<W64>(a, sem::DATA_READ)?;
+                    sem::push_f64(b, v)
+                }
+            }
+        }
+    }
+}
+
+/// FST/FSTP m32/m64/m80。pop でスタックを一つ捨てる。
+pub fn fst_m<B: Backend>(
+    b: &mut B,
+    ea: &Rm<B::V<W64>>,
+    bits: u32,
+    pop: bool,
+) -> Result<(), B::Exit> {
+    let top = b.get(sem::top_ref());
+    let (sig, exp) = sem::read_st(b, top);
+    if let Rm::Mem(a) = ea {
+        let a = *a;
+        match bits {
+            32 => {
+                let v64 = sem::f80_to_f64(b, sig, exp);
+                let f = b.trunc::<W64, polyisa_sem::F64>(v64);
+                let v32 = b.fcvt_ff::<polyisa_sem::F64, polyisa_sem::F32>(f, 0);
+                let bits32 = b.trunc::<polyisa_sem::F32, W32>(v32);
+                b.store::<W32>(a, bits32, sem::DATA_WRITE)?;
+            }
+            80 => {
+                b.store::<W64>(a, sig, sem::DATA_WRITE)?;
+                let a8 = b.konst::<W64>(8);
+                let a2 = b.add::<W64>(a, a8);
+                b.store::<W16>(a2, exp, sem::DATA_WRITE)?;
+            }
+            _ => {
+                let v = sem::f80_to_f64(b, sig, exp);
+                b.store::<W64>(a, v, sem::DATA_WRITE)?;
+            }
+        }
+    }
+    if pop {
+        sem::pop_st(b, top)?;
+    }
+    Ok(())
+}
+
+/// FST/FSTP ST(i)（DD D0/D8+i）。
+pub fn fst_sti<B: Backend>(b: &mut B, i: u8, pop: bool) -> Flow<B> {
+    let top = b.get(sem::top_ref());
+    let (sig, exp) = sem::read_st(b, top);
+    let dst = st_slot(b, i);
+    sem::write_st(b, dst, sig, exp);
+    if pop {
+        sem::pop_st(b, top)?;
+    }
+    Ok(())
+}
+
+/// FILD m16/m32/m64。
+pub fn fild_m<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>, bits: u32) -> Result<(), B::Exit> {
+    if let Rm::Mem(a) = ea {
+        let a = *a;
+        match bits {
+            16 => {
+                let v: B::V<W16> = b.load::<W16>(a, sem::DATA_READ)?;
+                let v32 = b.sext::<W16, W32>(v);
+                sem::push_i32(b, v32)
+            }
+            32 => {
+                let v: B::V<W32> = b.load::<W32>(a, sem::DATA_READ)?;
+                sem::push_i32(b, v)
+            }
+            _ => {
+                let v: B::V<W64> = b.load::<W64>(a, sem::DATA_READ)?;
+                sem::push_i64(b, v)
+            }
+        }
+    } else {
+        Ok(())
+    }
+}
+
+/// FIST/FISTP m16/m32/m64。
+pub fn fist_m<B: Backend>(
+    b: &mut B,
+    ea: &Rm<B::V<W64>>,
+    bits: u32,
+    pop: bool,
+) -> Result<(), B::Exit> {
+    let top = b.get(sem::top_ref());
+    let (sig, exp) = sem::read_st(b, top);
+    let v = sem::f80_to_i64(b, sig, exp);
+    if let Rm::Mem(a) = ea {
+        let a = *a;
+        match bits {
+            16 => {
+                let v16: B::V<W16> = b.trunc::<W64, W16>(v);
+                b.store::<W16>(a, v16, sem::DATA_WRITE)?;
+            }
+            32 => {
+                let v32: B::V<W32> = b.trunc::<W64, W32>(v);
+                b.store::<W32>(a, v32, sem::DATA_WRITE)?;
+            }
+            _ => {
+                b.store::<W64>(a, v, sem::DATA_WRITE)?;
+            }
+        }
+    }
+    if pop {
+        sem::pop_st(b, top)?;
+    }
+    Ok(())
+}
+
+/// x87 のメモリ二項演算（fadd/fmul/fsub/fsubr/fdiv/fdivr）。
+/// `rev` で被演算子の順序を反転（fsubr/fdivr）。
+#[derive(Clone, Copy)]
+pub enum FAr {
+    Add,
+    Sub,
+    SubR,
+    Mul,
+    Div,
+    DivR,
+}
+
+fn ext_arith<B: Backend>(
+    b: &mut B,
+    op: FAr,
+    s0: B::V<W64>,
+    e0: B::V<W16>,
+    s1: B::V<W64>,
+    e1: B::V<W16>,
+) -> (B::V<W64>, B::V<W16>) {
+    let sign_mask = b.konst::<W16>(0x8000);
+    match op {
+        FAr::Add => sem::add_ext(b, s0, e0, s1, e1),
+        FAr::Sub => {
+            let ne = b.xor::<W16>(e1, sign_mask);
+            sem::add_ext(b, s0, e0, s1, ne)
+        }
+        FAr::SubR => {
+            let ne = b.xor::<W16>(e0, sign_mask);
+            sem::add_ext(b, s1, e1, s0, ne)
+        }
+        FAr::Mul => sem::mul_ext(b, s0, e0, s1, e1),
+        FAr::Div => sem::div_ext(b, s0, e0, s1, e1),
+        FAr::DivR => sem::div_ext(b, s1, e1, s0, e0),
+    }
+}
+
+/// x87 の m32/m64 二項演算。ST(0) = ST(0) op m。
+pub fn farith_m<B: Backend>(
+    b: &mut B,
+    op: FAr,
+    ea: &Rm<B::V<W64>>,
+    fbits: u32,
+) -> Result<(), B::Exit> {
+    if let Rm::Mem(a) = ea {
+        let a = *a;
+        let (sm, em) = if fbits == 32 {
+            let v: B::V<W32> = b.load::<W32>(a, sem::DATA_READ)?;
+            sem::f32_to_ext(b, v)
+        } else {
+            let v: B::V<W64> = b.load::<W64>(a, sem::DATA_READ)?;
+            sem::f64_to_ext(b, v)
+        };
+        let top = b.get(sem::top_ref());
+        let (s0, e0) = sem::read_st(b, top);
+        let (sr, er) = ext_arith(b, op, s0, e0, sm, em);
+        sem::write_st(b, top, sr, er);
+    }
+    Ok(())
+}
+
+/// x87 の整数二項演算（fiadd/fimul/fisub/fisubr/fidiv/fidivr）m16/m32。
+pub fn fiarith_m<B: Backend>(
+    b: &mut B,
+    op: FAr,
+    ea: &Rm<B::V<W64>>,
+    bits: u32,
+) -> Result<(), B::Exit> {
+    if let Rm::Mem(a) = ea {
+        let a = *a;
+        let v64 = if bits == 16 {
+            let v: B::V<W16> = b.load::<W16>(a, sem::DATA_READ)?;
+            b.sext::<W16, W64>(v)
+        } else {
+            let v: B::V<W32> = b.load::<W32>(a, sem::DATA_READ)?;
+            b.sext::<W32, W64>(v)
+        };
+        let (sm, em) = sem::i64_to_ext(b, v64);
+        let top = b.get(sem::top_ref());
+        let (s0, e0) = sem::read_st(b, top);
+        let (sr, er) = ext_arith(b, op, s0, e0, sm, em);
+        sem::write_st(b, top, sr, er);
+    }
+    Ok(())
+}
+
+/// x87 の ST(i) 二項演算。`rev` は ST(i) 側を結果の書き先にする
+/// DC 形（st(i) = st(i) op st(0) の順、sub/div は反転済みの FAr を渡す）。
+/// `pop` で ST(0) を捨てる（DE 形）。
+pub fn farith_st<B: Backend>(b: &mut B, op: FAr, i: u8, rev: bool, pop: bool) -> Flow<B> {
+    let top = b.get(sem::top_ref());
+    let (s0, e0) = sem::read_st(b, top);
+    let slot = st_slot(b, i);
+    let (s1, e1) = sem::read_st(b, slot);
+    let (sr, er) = if rev {
+        ext_arith(b, op, s1, e1, s0, e0)
+    } else {
+        ext_arith(b, op, s0, e0, s1, e1)
+    };
+    let dst = if rev { slot } else { top };
+    sem::write_st(b, dst, sr, er);
+    if pop {
+        sem::pop_st(b, top)?;
+    }
+    Ok(())
+}
+
+/// FCMOVcc。cond が真なら ST(0) = ST(i)。
+/// code: 0=B 1=E 2=BE 3=U 4=NB 5=NE 6=NBE 7=NU（DA/DB のグループ順）。
+pub fn fcmov_cc<B: Backend>(b: &mut B, code: u8, i: u8) -> Flow<B> {
+    let f: B::V<W32> = b.get(eflags_ref());
+    let bit = |b: &mut B, m: u32| {
+        let mk = b.konst::<W32>(m);
+        let masked = b.and::<W32>(f, mk);
+        let z = b.konst::<W32>(0);
+        b.cmp::<W32>(Cmp::Ne, masked, z)
+    };
+    let cond = match code & 7 {
+        0 => bit(b, 0x1),
+        1 => bit(b, 0x40),
+        2 => {
+            let cf = bit(b, 0x1);
+            let zf = bit(b, 0x40);
+            sem::bit_or(b, cf, zf)
+        }
+        3 => bit(b, 0x4),
+        4 => {
+            let cf = bit(b, 0x1);
+            sem::bit_not(b, cf)
+        }
+        5 => {
+            let zf = bit(b, 0x40);
+            sem::bit_not(b, zf)
+        }
+        6 => {
+            let cf = bit(b, 0x1);
+            let zf = bit(b, 0x40);
+            let be = sem::bit_or(b, cf, zf);
+            sem::bit_not(b, be)
+        }
+        _ => {
+            let pf = bit(b, 0x4);
+            sem::bit_not(b, pf)
+        }
+    };
+    fcmov(b, cond, i)
+}
+
+/// FCMOVcc。cond が真なら ST(0) = ST(i)。
+pub fn fcmov<B: Backend>(b: &mut B, cond: B::B, i: u8) -> Flow<B> {
+    let top = b.get(sem::top_ref());
+    let (s0, e0) = sem::read_st(b, top);
+    let slot = st_slot(b, i);
+    let (s1, e1) = sem::read_st(b, slot);
+    let sig = b.select::<W64>(cond, s1, s0);
+    let exp = b.select::<W16>(cond, e1, e0);
+    sem::write_st(b, top, sig, exp);
+    Ok(())
+}
+
+/// FCHS（符号反転）/FABS（符号クリア）。
+pub fn fchs_abs<B: Backend>(b: &mut B, abs: bool) -> Flow<B> {
+    let top = b.get(sem::top_ref());
+    let (sig, exp) = sem::read_st(b, top);
+    let new_exp = if abs {
+        let m = b.konst::<W16>(0x7fff);
+        b.and::<W16>(exp, m)
+    } else {
+        let m = b.konst::<W16>(0x8000);
+        b.xor::<W16>(exp, m)
+    };
+    sem::write_st(b, top, sig, new_exp);
+    Ok(())
+}
+
+/// FLD1/FLDZ/FLDPI/FLDL2T/FLDL2E/FLDLG2/FLDLN2。
+pub fn fld_const<B: Backend>(b: &mut B, which: u8) -> Flow<B> {
+    let (sig, exp): (u64, u16) = match which {
+        0 => (0x8000_0000_0000_0000, 0x3fff), // 1.0
+        1 => (0xD49A_784B_CD1B_8AFE, 0x4000), // log2(10)
+        2 => (0xB8AA_3B29_5C17_F0BC, 0x3fff), // log2(e)
+        3 => (0xC90F_DAA2_2168_C235, 0x4000), // pi
+        4 => (0x9A20_9A84_FBCF_F799, 0x3ffd), // log10(2)
+        5 => (0xB172_17F7_D1CF_79AC, 0x3ffe), // ln(2)
+        _ => (0, 0),                          // 0.0
+    };
+    let s = b.konst::<W64>(sig);
+    let e = b.konst::<W16>(exp);
+    sem::push_ext(b, s, e)
+}
+
+/// FSQRT。80 ビットを倍精度に落として平方根し戻す（精度は倍精度近似）。
+pub fn fsqrt_st<B: Backend>(b: &mut B) -> Flow<B> {
+    let top = b.get(sem::top_ref());
+    let (sig, exp) = sem::read_st(b, top);
+    let v = sem::f80_to_f64(b, sig, exp);
+    let f = b.trunc::<W64, polyisa_sem::F64>(v);
+    let r = b.fsqrt::<polyisa_sem::F64>(f);
+    let r64 = b.trunc::<polyisa_sem::F64, W64>(r);
+    let (sr, er) = sem::f64_to_ext(b, r64);
+    sem::write_st(b, top, sr, er);
+    Ok(())
+}
+
+/// FRNDINT。倍精度経由で整数値へ丸める（RC は RNE 近似、|x|>2^63 は不正確）。
+pub fn frndint_st<B: Backend>(b: &mut B) -> Flow<B> {
+    let top = b.get(sem::top_ref());
+    let (sig, exp) = sem::read_st(b, top);
+    let v = sem::f80_to_f64(b, sig, exp);
+    let f = b.trunc::<W64, polyisa_sem::F64>(v);
+    let i = b.fcvt_s64::<polyisa_sem::F64>(f, 0);
+    let r = b.fcvt_from_s64::<polyisa_sem::F64>(i, 0);
+    let r64 = b.trunc::<polyisa_sem::F64, W64>(r);
+    let (sr, er) = sem::f64_to_ext(b, r64);
+    sem::write_st(b, top, sr, er);
+    Ok(())
+}
+
+/// FFREE。タグ未モデルのためスロットをゼロにする。
+pub fn ffree<B: Backend>(b: &mut B, i: u8) -> Flow<B> {
+    let slot = st_slot(b, i);
+    let z64 = b.konst::<W64>(0);
+    let z16 = b.konst::<W16>(0);
+    sem::write_st(b, slot, z64, z16);
+    Ok(())
+}
+
+/// FFREEP（DF C0+i）。FFREE に続けてスタックを一つ捨てる。
+pub fn ffreep<B: Backend>(b: &mut B, i: u8) -> Flow<B> {
+    ffree(b, i)?;
+    let top = b.get(sem::top_ref());
+    sem::pop_st(b, top)
+}
+
+/// FDECSTP/FINCSTP。TOP を -1/+1 する。
+pub fn fdecstp<B: Backend>(b: &mut B, inc: bool) -> Flow<B> {
+    let top = b.get(sem::top_ref());
+    let one = b.konst::<W16>(1);
+    let seven = b.konst::<W16>(7);
+    let moved = if inc {
+        b.add::<W16>(top, one)
+    } else {
+        b.sub::<W16>(top, one)
+    };
+    let new_top = b.and::<W16>(moved, seven);
+    b.set(sem::top_ref(), new_top);
+    Ok(())
+}
+
+/// FINIT。FCW=0x037f、TOP=0、スタックを空にする。
+pub fn finit<B: Backend>(b: &mut B) -> Flow<B> {
+    let fcw = b.konst::<W16>(0x037f);
+    b.set(sem::fcw_ref(), fcw);
+    let z16 = b.konst::<W16>(0);
+    let z64 = b.konst::<W64>(0);
+    b.set(sem::top_ref(), z16);
+    for slot in 0..8 {
+        b.set(sem::st_sig_ref(slot), z64);
+        b.set(sem::st_exp_ref(slot), z16);
+    }
+    Ok(())
+}
+
+/// FLDCW m16。
+pub fn fldcw_m<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit> {
+    if let Rm::Mem(a) = ea {
+        let v: B::V<W16> = b.load::<W16>(*a, sem::DATA_READ)?;
+        b.set(sem::fcw_ref(), v);
+    }
+    Ok(())
+}
+
+/// FNSTCW m16。
+pub fn fnstcw_m<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit> {
+    if let Rm::Mem(a) = ea {
+        let v: B::V<W16> = b.get(sem::fcw_ref());
+        b.store::<W16>(*a, v, sem::DATA_WRITE)?;
+    }
+    Ok(())
 }

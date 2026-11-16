@@ -9093,7 +9093,8 @@ fn run_addsd_m64_sib() {
 
 #[test]
 fn run_movsd_xmm3_rcx_scaled() {
-    // F2 0F 10 1C CD 10 00 00 00 = movsd xmm3, [rcx*8+0x10]。下位64を読み、上位64は残る。
+    // F2 0F 10 1C CD 10 00 00 00 = movsd xmm3, [rcx*8+0x10]。下位64を読み、上位64は0
+    // （mod!=3 のメモリ形は上位クリア、SDM 準拠）。
     // awk exp 0x4c12f4。Ref: SPEC-X86-INTEL-SDM (v093).
     let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
@@ -9127,7 +9128,7 @@ fn run_movsd_xmm3_rcx_scaled() {
     let v: u128 = env.backend.get(polyisa_guest_x86::sem::xmm_ref(
         polyisa_guest_x86::sem::Xmm(3),
     ));
-    assert_eq!(v, 0xAAAA_AAAA_AAAA_AAAA_4000_0000_0000_0000);
+    assert_eq!(v, 0x4000_0000_0000_0000);
     let rcx: u64 = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(1));
     assert_eq!(rcx, 0x400);
     assert_eq!(env.backend.get(polyisa_guest_x86::sem::eflags_ref()), 1);
@@ -14316,4 +14317,257 @@ fn run_shld_cl() {
     ];
     let (out, _) = run32(prog, 100);
     assert_eq!(out, Outcome::Exit(0x2345_6789));
+}
+
+#[test]
+fn run_sse_movd_paddd() {
+    // movd xmm0,eax / movd xmm1,ebx / paddd xmm0,xmm1 / movd ebx,xmm0。
+    let prog: &[u8] = &[
+        0xB8, 0x44, 0x33, 0x22, 0x11, // mov eax,0x11223344
+        0xBB, 0x01, 0x00, 0x00, 0x00, // mov ebx,1
+        0x66, 0x0F, 0x6E, 0xC0, // movd xmm0,eax
+        0x66, 0x0F, 0x6E, 0xCB, // movd xmm1,ebx
+        0x66, 0x0F, 0xFE, 0xC1, // paddd xmm0,xmm1
+        0x66, 0x0F, 0x7E, 0xC3, // movd ebx,xmm0
+        0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax,1
+        0xCD, 0x80,
+    ];
+    let (out, _) = run32(prog, 100);
+    assert_eq!(out, Outcome::Exit(0x1122_3345));
+}
+
+#[test]
+fn run_sse_pxor_pcmpeqb_pmovmskb() {
+    // xmm0=xmm1=0 → pcmpeqb は全バイト 0xFF → pmovmskb = 0xFFFF。
+    let prog: &[u8] = &[
+        0x66, 0x0F, 0xEF, 0xC0, // pxor xmm0,xmm0
+        0x66, 0x0F, 0xEF, 0xC9, // pxor xmm1,xmm1
+        0x66, 0x0F, 0x74, 0xC1, // pcmpeqb xmm0,xmm1
+        0x66, 0x0F, 0xD7, 0xD8, // pmovmskb ebx,xmm0
+        0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax,1
+        0xCD, 0x80,
+    ];
+    let (out, _) = run32(prog, 100);
+    assert_eq!(out, Outcome::Exit(0xFFFF));
+}
+
+#[test]
+fn run_sse_addsd_mem() {
+    // movsd xmm0,[1.5]; addsd xmm0,[0.5]; movsd [dst],xmm0 → 2.0。
+    let prog: &[u8] = &[
+        0xF2, 0x0F, 0x10, 0x05, 0x00, 0x14, 0x00, 0x00, // movsd xmm0,[0x1400]
+        0xF2, 0x0F, 0x58, 0x05, 0x08, 0x14, 0x00, 0x00, // addsd xmm0,[0x1408]
+        0xF2, 0x0F, 0x11, 0x05, 0x10, 0x14, 0x00, 0x00, // movsd [0x1410],xmm0
+        0x8B, 0x1D, 0x14, 0x14, 0x00, 0x00, // mov ebx,[0x1414]（上位32ビット）
+        0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax,1
+        0xCD, 0x80,
+    ];
+    let (_o, mut env) = run32(prog, 0);
+    env.backend
+        .mem
+        .write(VirtAddr(0x1400), &1.5f64.to_le_bytes())
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1408), &0.5f64.to_le_bytes())
+        .unwrap();
+    env.backend.set(polyisa_guest_x86::sem::eip_ref(), 0x1000);
+    let mut sys = ExitOne;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, false);
+    assert_eq!(out, Outcome::Exit(0x4000_0000));
+}
+
+#[test]
+fn run_sse_pshufd_movups() {
+    // movups xmm0,[data]; pshufd xmm0,xmm0,0x1B → dword 逆順。
+    // lane0 = 旧 lane3 = 0x00FFEEDD。
+    let prog: &[u8] = &[
+        0x0F, 0x10, 0x05, 0x00, 0x14, 0x00, 0x00, // movups xmm0,[0x1400]
+        0x66, 0x0F, 0x70, 0xC0, 0x1B, // pshufd xmm0,xmm0,0x1B
+        0x66, 0x0F, 0x7E, 0xC3, // movd ebx,xmm0
+        0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax,1
+        0xCD, 0x80,
+    ];
+    let (_o, mut env) = run32(prog, 0);
+    let data: [u8; 16] = [
+        0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF,
+        0x00,
+    ];
+    env.backend.mem.write(VirtAddr(0x1400), &data).unwrap();
+    env.backend.set(polyisa_guest_x86::sem::eip_ref(), 0x1000);
+    let mut sys = ExitOne;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, false);
+    assert_eq!(out, Outcome::Exit(0x00FF_EEDD));
+}
+
+#[test]
+fn run_sse_movq_movss() {
+    // movq xmm0,xmm1: 下位 64 コピー＋上位ゼロ。movss xmm0,xmm1（mod=3）は
+    // 下位 32 のみ書き換え。
+    let prog: &[u8] = &[
+        0x0F, 0x10, 0x0D, 0x00, 0x14, 0x00, 0x00, // movups xmm1,[0x1400]
+        0xF3, 0x0F, 0x7E, 0xC1, // movq xmm0,xmm1 → lo64=0x7766554433221100, hi=0
+        0xF3, 0x0F, 0x10, 0xC1, // movss xmm0,xmm1 → lo32=0x33221100
+        0x66, 0x0F, 0x7E, 0xC3, // movd ebx,xmm0
+        0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax,1
+        0xCD, 0x80,
+    ];
+    let (_o, mut env) = run32(prog, 0);
+    let data: [u8; 16] = [
+        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE,
+        0xFF,
+    ];
+    env.backend.mem.write(VirtAddr(0x1400), &data).unwrap();
+    env.backend.set(polyisa_guest_x86::sem::eip_ref(), 0x1000);
+    let mut sys = ExitOne;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, false);
+    assert_eq!(out, Outcome::Exit(0x3322_1100));
+}
+
+#[test]
+fn run_x87_fild_fistp() {
+    // fild m32 [42]; fistp m64 [dst] → dst = 42。
+    let prog: &[u8] = &[
+        0xDB, 0x05, 0x00, 0x14, 0x00, 0x00, // fild m32 [0x1400]
+        0xDF, 0x3D, 0x08, 0x14, 0x00, 0x00, // fistp m64 [0x1408]
+        0x8B, 0x1D, 0x08, 0x14, 0x00, 0x00, // mov ebx,[0x1408]
+        0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax,1
+        0xCD, 0x80,
+    ];
+    let (_o, mut env) = run32(prog, 0);
+    env.backend
+        .mem
+        .write(VirtAddr(0x1400), &42i32.to_le_bytes())
+        .unwrap();
+    env.backend.set(polyisa_guest_x86::sem::eip_ref(), 0x1000);
+    let mut sys = ExitOne;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, false);
+    assert_eq!(out, Outcome::Exit(42));
+}
+
+#[test]
+fn run_x87_fld_fadd_fstp() {
+    // fld m64 [1.5]; fadd m32 [0.5]; fstp m64 [dst] → 2.0。
+    let prog: &[u8] = &[
+        0xDD, 0x05, 0x00, 0x14, 0x00, 0x00, // fld m64 [0x1400]
+        0xD8, 0x05, 0x08, 0x14, 0x00, 0x00, // fadd m32 [0x1408]
+        0xDD, 0x1D, 0x10, 0x14, 0x00, 0x00, // fstp m64 [0x1410]
+        0x8B, 0x1D, 0x14, 0x14, 0x00, 0x00, // mov ebx,[0x1414]
+        0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax,1
+        0xCD, 0x80,
+    ];
+    let (_o, mut env) = run32(prog, 0);
+    env.backend
+        .mem
+        .write(VirtAddr(0x1400), &1.5f64.to_le_bytes())
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1408), &0.5f32.to_le_bytes())
+        .unwrap();
+    env.backend.set(polyisa_guest_x86::sem::eip_ref(), 0x1000);
+    let mut sys = ExitOne;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, false);
+    assert_eq!(out, Outcome::Exit(0x4000_0000));
+}
+
+#[test]
+fn run_x87_fsqrt() {
+    // fld m64 [4.0]; fsqrt; fstp m64 [dst] → 2.0。
+    let prog: &[u8] = &[
+        0xDD, 0x05, 0x00, 0x14, 0x00, 0x00, // fld m64 [0x1400]
+        0xD9, 0xFA, // fsqrt
+        0xDD, 0x1D, 0x08, 0x14, 0x00, 0x00, // fstp m64 [0x1408]
+        0x8B, 0x1D, 0x0C, 0x14, 0x00, 0x00, // mov ebx,[0x140C]
+        0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax,1
+        0xCD, 0x80,
+    ];
+    let (_o, mut env) = run32(prog, 0);
+    env.backend
+        .mem
+        .write(VirtAddr(0x1400), &4.0f64.to_le_bytes())
+        .unwrap();
+    env.backend.set(polyisa_guest_x86::sem::eip_ref(), 0x1000);
+    let mut sys = ExitOne;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, false);
+    assert_eq!(out, Outcome::Exit(0x4000_0000));
+}
+
+#[test]
+fn run_x87_fucomi_flags() {
+    // fld1; fldz; fucomi st(1) → st0(0) < st1(1) → CF=1。setc bl。
+    let prog: &[u8] = &[
+        0xD9, 0xE8, // fld1
+        0xD9, 0xEE, // fldz
+        0xDB, 0xE9, // fucomi st(1) → CF=1,ZF=0
+        0x0F, 0x92, 0xC3, // setc bl
+        0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax,1
+        0xCD, 0x80,
+    ];
+    let (out, _) = run32(prog, 100);
+    assert_eq!(out, Outcome::Exit(1));
+}
+
+#[test]
+fn run_x87_fadd_st_pop() {
+    // fld m64 [1.5]; fld m64 [2.5]; faddp st(1) → st0=4.0、stack は 1 段。
+    // fstp m64 [dst] → 4.0。
+    let prog: &[u8] = &[
+        0xDD, 0x05, 0x00, 0x14, 0x00, 0x00, // fld m64 [0x1400] = 1.5
+        0xDD, 0x05, 0x08, 0x14, 0x00, 0x00, // fld m64 [0x1408] = 2.5
+        0xDE, 0xC1, // faddp st(1) → st(1)+=st(0), pop → st0=4.0
+        0xDD, 0x1D, 0x10, 0x14, 0x00, 0x00, // fstp m64 [0x1410]
+        0x8B, 0x1D, 0x14, 0x14, 0x00, 0x00, // mov ebx,[0x1414]
+        0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax,1
+        0xCD, 0x80,
+    ];
+    let (_o, mut env) = run32(prog, 0);
+    env.backend
+        .mem
+        .write(VirtAddr(0x1400), &1.5f64.to_le_bytes())
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1408), &2.5f64.to_le_bytes())
+        .unwrap();
+    env.backend.set(polyisa_guest_x86::sem::eip_ref(), 0x1000);
+    let mut sys = ExitOne;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, false);
+    assert_eq!(out, Outcome::Exit(0x4010_0000));
+}
+
+#[test]
+fn run_sse_movdqa_movdqu() {
+    // movdqa [src]→xmm0; movdqu xmm0→[dst]; movdqa xmm1←[dst] で転送往復。
+    let prog: &[u8] = &[
+        0x66, 0x0F, 0x6F, 0x05, 0x00, 0x14, 0x00, 0x00, // movdqa xmm0,[0x1400]
+        0xF3, 0x0F, 0x7F, 0x05, 0x10, 0x14, 0x00, 0x00, // movdqu [0x1410],xmm0
+        0x66, 0x0F, 0x6F, 0x0D, 0x10, 0x14, 0x00, 0x00, // movdqa xmm1,[0x1410]
+        0x66, 0x0F, 0x7E, 0xCB, // movd ebx,xmm1
+        0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax,1
+        0xCD, 0x80,
+    ];
+    let (_o, mut env) = run32(prog, 0);
+    let data: [u8; 16] = [
+        0x78, 0x56, 0x34, 0x12, 0xF0, 0xDE, 0xBC, 0x9A, 1, 2, 3, 4, 5, 6, 7, 8,
+    ];
+    env.backend.mem.write(VirtAddr(0x1400), &data).unwrap();
+    env.backend.set(polyisa_guest_x86::sem::eip_ref(), 0x1000);
+    let mut sys = ExitOne;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, false);
+    assert_eq!(out, Outcome::Exit(0x1234_5678));
+    let mut got = [0u8; 16];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x1410),
+            &mut got,
+            polyisa_mem::Access {
+                endian: polyisa_mem::Endian::Le,
+                align: polyisa_mem::Align::Unaligned,
+                kind: polyisa_mem::AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(got, data);
 }
