@@ -93,6 +93,11 @@ pub fn sreg_ref(i: u8) -> StateRef<W16> {
     StateRef::<W16>::from_offset(core::mem::offset_of!(CpuState, sregs) + usize::from(i & 7) * 2)
 }
 
+/// x87 ステータスワードを指す（C0-C3 と例外旗。TOP は `top` が正）。
+pub fn fsw_ref() -> StateRef<W16> {
+    StateRef::<W16>::from_offset(core::mem::offset_of!(CpuState, fsw))
+}
+
 /// 64ビットレジスタを読む（0-7 は上位 h と下位 g を結合し、8-15 は x を読む）。
 pub fn read64<B: Backend>(b: &mut B, r: Gpr) -> B::V<W64> {
     if r.0 < 8 {
@@ -14218,7 +14223,7 @@ pub fn fxch_st<B: Backend>(b: &mut B, i: u8) -> Flow<B> {
 }
 
 /// ST(0) と ST(i) の比較。戻り値は ZF、PF、CF。NaN は unordered。
-fn cmp_f80<B: Backend>(
+pub(crate) fn cmp_f80<B: Backend>(
     b: &mut B,
     sig_a: B::V<W64>,
     exp_a: B::V<W16>,

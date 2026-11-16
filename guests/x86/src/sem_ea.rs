@@ -3947,3 +3947,411 @@ pub fn sysexit<B: Backend>(b: &mut B, w: u8) -> Flow<B> {
     b.jump(tgt);
     Ok(())
 }
+
+// ---- MUL/IMUL/DIV/IDIV（F6/F7 /4-/7）----
+
+/// MUL/IMUL r/m（1被演算子形）。積は DX:AX 系に倍幅で入る。
+/// CF/OF は上位半分が意味を持つとき 1（他旗は不定のため保存）。
+pub fn mulx<B: Backend>(b: &mut B, w: u8, d: &MapDec, ea: &Rm<B::V<W64>>, signed: bool) -> Flow<B> {
+    match w {
+        8 => mulx8(b, d, ea, signed),
+        16 => mulx_w::<B, W16, W32>(b, d, ea, signed),
+        64 => mulx_w::<B, W64, W128>(b, d, ea, signed),
+        _ => mulx_w::<B, W32, W64>(b, d, ea, signed),
+    }
+}
+
+/// CF/OF を `c` で更新する。
+fn set_cof<B: Backend>(b: &mut B, c: B::B) {
+    let old: B::V<W32> = b.get(eflags_ref());
+    let mask = b.konst::<W32>(!(sem::FLAG_CF | sem::FLAG_OF));
+    let cleared = b.and::<W32>(old, mask);
+    let cf = pick(b, c, sem::FLAG_CF);
+    let of = pick(b, c, sem::FLAG_OF);
+    let both = b.or::<W32>(cf, of);
+    let efl = b.or::<W32>(cleared, both);
+    b.set(eflags_ref(), efl);
+}
+
+/// MUL r/m8 → AX。IMUL では符号拡張してから掛ける。
+fn mulx8<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>, signed: bool) -> Flow<B> {
+    let al = sem::read8(b, Gpr(0), false);
+    let y = rd_w::<B, W8>(b, ea, d)?;
+    let (xw, yw) = if signed {
+        (b.sext::<W8, W16>(al), b.sext::<W8, W16>(y))
+    } else {
+        (b.zext::<W8, W16>(al), b.zext::<W8, W16>(y))
+    };
+    let p = b.mul::<W16>(xw, yw);
+    decode::gwr16(b, Gpr(0), p);
+    let eight = b.konst::<W16>(8);
+    let hi = b.shr_l::<W16>(p, eight);
+    let zro = b.konst::<W16>(0);
+    let cof = if signed {
+        // hi が lo（AL）の符号拡張と一致するか。
+        let lo: B::V<W8> = b.trunc::<W16, W8>(p);
+        let z8 = b.konst::<W8>(0);
+        let neg = b.cmp::<W8>(Cmp::LtS, lo, z8);
+        let all = b.konst::<W16>(0xFF);
+        let exp = b.select::<W16>(neg, all, zro);
+        b.cmp::<W16>(Cmp::Ne, hi, exp)
+    } else {
+        b.cmp::<W16>(Cmp::Ne, hi, zro)
+    };
+    set_cof(b, cof);
+    Ok(())
+}
+
+fn mulx_w<B: Backend, W: Hw, W2: polyisa_sem::Width>(
+    b: &mut B,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+    signed: bool,
+) -> Flow<B> {
+    let x = W::get(b, Gpr(0), d);
+    let y = rd_w::<B, W>(b, ea, d)?;
+    let (xw, yw) = if signed {
+        (b.sext::<W, W2>(x), b.sext::<W, W2>(y))
+    } else {
+        (b.zext::<W, W2>(x), b.zext::<W, W2>(y))
+    };
+    let p = b.mul::<W2>(xw, yw);
+    let lo: B::V<W> = b.trunc::<W2, W>(p);
+    let sh = b.konst::<W2>(W2::from_u128(u128::from(W::BITS)));
+    let hiw = b.shr_l::<W2>(p, sh);
+    let hi: B::V<W> = b.trunc::<W2, W>(hiw);
+    W::put(b, Gpr(0), d, lo);
+    W::put(b, Gpr(2), d, hi);
+    let zro = b.konst::<W>(W::from_u128(0));
+    let cof = if signed {
+        let neg = b.cmp::<W>(Cmp::LtS, lo, zro);
+        let all = b.konst::<W>(W::from_u128((1u128 << W::BITS) - 1));
+        let exp = b.select::<W>(neg, all, zro);
+        b.cmp::<W>(Cmp::Ne, hi, exp)
+    } else {
+        b.cmp::<W>(Cmp::Ne, hi, zro)
+    };
+    set_cof(b, cof);
+    Ok(())
+}
+
+/// DIV/IDIV r/m。0 除算・商あふれは #DE 相当の DivZero で退出する。
+/// フラグは不定なので変えない。
+pub fn divx<B: Backend>(
+    b: &mut B,
+    w: u8,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+    eip: u32,
+    signed: bool,
+) -> Flow<B> {
+    match w {
+        8 => divx8(b, d, ea, eip, signed),
+        16 => divx_w::<B, W16, W32>(b, d, ea, eip, signed),
+        64 => divx_w::<B, W64, W128>(b, d, ea, eip, signed),
+        _ => divx_w::<B, W32, W64>(b, d, ea, eip, signed),
+    }
+}
+
+/// DIV/IDIV r/m8。被除数は AX、商を AL・剰余を AH に置く。
+fn divx8<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>, eip: u32, signed: bool) -> Flow<B> {
+    let ax32: B::V<W32> = b.get(Gpr(0).state());
+    let ax: B::V<W16> = b.trunc::<W32, W16>(ax32);
+    let y = rd_w::<B, W8>(b, ea, d)?;
+    let (dvd, dvs) = if signed {
+        (b.sext::<W16, W32>(ax), b.sext::<W8, W32>(y))
+    } else {
+        (b.zext::<W16, W32>(ax), b.zext::<W8, W32>(y))
+    };
+    let zero = b.konst::<W32>(0);
+    let is_zero = b.cmp::<W32>(Cmp::Eq, dvs, zero);
+    b.if_then(is_zero, |b| Err(sem::div0(b, eip)))?;
+    let q = if signed {
+        b.sdiv::<W32>(dvd, dvs)
+    } else {
+        b.udiv::<W32>(dvd, dvs)
+    };
+    let q8: B::V<W8> = b.trunc::<W32, W8>(q);
+    let q_back = if signed {
+        b.sext::<W8, W32>(q8)
+    } else {
+        b.zext::<W8, W32>(q8)
+    };
+    let over = b.cmp::<W32>(Cmp::Ne, q_back, q);
+    b.if_then(over, |b| Err(sem::div0(b, eip)))?;
+    let r = if signed {
+        b.srem::<W32>(dvd, dvs)
+    } else {
+        b.urem::<W32>(dvd, dvs)
+    };
+    let r8: B::V<W8> = b.trunc::<W32, W8>(r);
+    sem::write8(b, Gpr(0), false, q8);
+    sem::write8(b, Gpr(0), true, r8);
+    Ok(())
+}
+
+fn divx_w<B: Backend, W: Hw, W2: polyisa_sem::Width>(
+    b: &mut B,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+    eip: u32,
+    signed: bool,
+) -> Flow<B> {
+    let lo = W::get(b, Gpr(0), d);
+    let hi = W::get(b, Gpr(2), d);
+    let y = rd_w::<B, W>(b, ea, d)?;
+    let hiw = if signed {
+        b.sext::<W, W2>(hi)
+    } else {
+        b.zext::<W, W2>(hi)
+    };
+    let sh = b.konst::<W2>(W2::from_u128(u128::from(W::BITS)));
+    let hi_sh = b.shl::<W2>(hiw, sh);
+    let low = b.zext::<W, W2>(lo);
+    let dvd = b.or::<W2>(hi_sh, low);
+    let yw = if signed {
+        b.sext::<W, W2>(y)
+    } else {
+        b.zext::<W, W2>(y)
+    };
+    let zero = b.konst::<W2>(W2::from_u128(0));
+    let is_zero = b.cmp::<W2>(Cmp::Eq, yw, zero);
+    b.if_then(is_zero, |b| Err(sem::div0(b, eip)))?;
+    let q = if signed {
+        b.sdiv::<W2>(dvd, yw)
+    } else {
+        b.udiv::<W2>(dvd, yw)
+    };
+    let q_t: B::V<W> = b.trunc::<W2, W>(q);
+    let q_back = if signed {
+        b.sext::<W, W2>(q_t)
+    } else {
+        b.zext::<W, W2>(q_t)
+    };
+    let over = b.cmp::<W2>(Cmp::Ne, q_back, q);
+    b.if_then(over, |b| Err(sem::div0(b, eip)))?;
+    let r = if signed {
+        b.srem::<W2>(dvd, yw)
+    } else {
+        b.urem::<W2>(dvd, yw)
+    };
+    let r_t: B::V<W> = b.trunc::<W2, W>(r);
+    W::put(b, Gpr(0), d, q_t);
+    W::put(b, Gpr(2), d, r_t);
+    Ok(())
+}
+
+// ---- x87 比較・環境 ----
+
+/// FCOM 系の C ビット位置（fsw の bit8,10,14）。
+const X87_C0: u16 = 0x0100;
+const X87_C2: u16 = 0x0400;
+const X87_C3: u16 = 0x4000;
+const X87_C_MASK: u16 = X87_C0 | X87_C2 | X87_C3;
+
+/// ST(0) と (sig,exp) を比較して fsw の C0/C2/C3 を更新する。
+/// `pop` で 1 段捨てる（FCOMP/FICOMP）。
+fn fcom_ext<B: Backend>(b: &mut B, sig: B::V<W64>, exp: B::V<W16>, pop: bool) -> Flow<B> {
+    let top = b.get(sem::top_ref());
+    let (s0, e0) = sem::read_st(b, top);
+    let (zf, unord, cf) = sem::cmp_f80(b, s0, e0, sig, exp);
+    let old: B::V<W16> = b.get(sem::fsw_ref());
+    let keep = b.konst::<W16>(!X87_C_MASK);
+    let cleared = b.and::<W16>(old, keep);
+    let k0 = b.konst::<W16>(0);
+    let kc0 = b.konst::<W16>(X87_C0);
+    let kc2 = b.konst::<W16>(X87_C2);
+    let kc3 = b.konst::<W16>(X87_C3);
+    let c0 = b.select::<W16>(cf, kc0, k0);
+    let c2 = b.select::<W16>(unord, kc2, k0);
+    let c3 = b.select::<W16>(zf, kc3, k0);
+    let c02 = b.or::<W16>(c0, c2);
+    let cbits = b.or::<W16>(c02, c3);
+    let nv = b.or::<W16>(cleared, cbits);
+    b.set(sem::fsw_ref(), nv);
+    if pop {
+        sem::pop_st(b, top)?;
+    }
+    Ok(())
+}
+
+/// FCOM/FCOMP m32/m64（bits で読み幅）。mod=11 では ST(i) との比較。
+pub fn fcom_m<B: Backend>(
+    b: &mut B,
+    bits: u32,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+    pop: bool,
+) -> Flow<B> {
+    if d.modrm >= 0xC0 {
+        let i = (d.modrm & 7) as u32;
+        let top = b.get(sem::top_ref());
+        let ii = b.konst::<W16>(i as u16);
+        let summed = b.add::<W16>(top, ii);
+        let seven = b.konst::<W16>(7);
+        let slot = b.and::<W16>(summed, seven);
+        let (s1, e1) = sem::read_st(b, slot);
+        return fcom_ext(b, s1, e1, pop);
+    }
+    let (sig, exp) = match ea {
+        Rm::Mem(a) => {
+            let a = *a;
+            if bits == 64 {
+                let v = b.load::<W64>(a, sem::DATA_READ)?;
+                sem::f64_to_ext(b, v)
+            } else {
+                let v = b.load::<W32>(a, sem::DATA_READ)?;
+                sem::f32_to_ext(b, v)
+            }
+        }
+        Rm::Reg(_) => return Ok(()),
+    };
+    fcom_ext(b, sig, exp, pop)
+}
+
+/// FICOM/FICOMP m16int。
+pub fn ficom_m16<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>, pop: bool) -> Flow<B> {
+    let v = decode::rd16(b, ea)?;
+    let v64 = b.sext::<W16, W64>(v);
+    let (sig, exp) = sem::i64_to_ext(b, v64);
+    fcom_ext(b, sig, exp, pop)
+}
+
+/// FCOM/FUCOM 系の st(i) 形。ST(0) と ST(i) を比較して C ビットを更新する。
+pub fn fcom_sti<B: Backend>(b: &mut B, i: u8, pop: bool) -> Flow<B> {
+    let top = b.get(sem::top_ref());
+    let ii = b.konst::<W16>(u16::from(i & 7));
+    let summed = b.add::<W16>(top, ii);
+    let seven = b.konst::<W16>(7);
+    let slot = b.and::<W16>(summed, seven);
+    let (s1, e1) = sem::read_st(b, slot);
+    fcom_ext(b, s1, e1, pop)
+}
+
+/// FNSTSW m16。fsw の C ビットに TOP を合成して書き込む。
+pub fn fnstsw_m16<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit> {
+    let fsw: B::V<W16> = b.get(sem::fsw_ref());
+    let top = b.get(sem::top_ref());
+    let seven = b.konst::<W16>(7);
+    let t3 = b.and::<W16>(top, seven);
+    let sh = b.konst::<W16>(11);
+    let tbits = b.shl::<W16>(t3, sh);
+    let v = b.or::<W16>(fsw, tbits);
+    decode::wr16(b, ea, v)
+}
+
+/// FNSAVE m108。28 バイトの環境 + 8×10 バイトの ST を書き、
+/// 書き終わると FPU を初期化する（FCW=0x037F、スタックは空）。
+/// FIP/FCS/FOP/FDP/FDS はモデル外のため 0 を書く。
+pub fn fnsave_m<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>) -> Flow<B> {
+    let Rm::Mem(a) = ea else {
+        return Ok(());
+    };
+    let a = *a;
+    let fcw: B::V<W16> = b.get(sem::fcw_ref());
+    b.store::<W16>(a, fcw, sem::DATA_WRITE)?;
+    let fsw: B::V<W16> = b.get(sem::fsw_ref());
+    let top = b.get(sem::top_ref());
+    let seven = b.konst::<W16>(7);
+    let t3 = b.and::<W16>(top, seven);
+    let sh = b.konst::<W16>(11);
+    let tbits = b.shl::<W16>(t3, sh);
+    let fswv = b.or::<W16>(fsw, tbits);
+    let a2 = b.konst::<W64>(2);
+    let afs = b.add::<W64>(a, a2);
+    b.store::<W16>(afs, fswv, sem::DATA_WRITE)?;
+    // FTW（簡約形）: ST(i) が空でなければ bit i = 1。
+    let mut ftag = b.konst::<W16>(0);
+    for i in 0..8u32 {
+        let ii = b.konst::<W16>(i as u16);
+        let summed = b.add::<W16>(top, ii);
+        let slot = b.and::<W16>(summed, seven);
+        let (sig, exp) = sem::read_st(b, slot);
+        let e64 = b.zext::<W16, W64>(exp);
+        let mask = b.konst::<W64>(0x7fff);
+        let em = b.and::<W64>(e64, mask);
+        let zro = b.konst::<W64>(0);
+        let e_nz = b.cmp::<W64>(Cmp::Ne, em, zro);
+        let s_nz = b.cmp::<W64>(Cmp::Ne, sig, zro);
+        let nonempty = sem::bit_or(b, e_nz, s_nz);
+        let bit = b.konst::<W16>(1u16 << i);
+        let z16 = b.konst::<W16>(0);
+        let sel = b.select::<W16>(nonempty, bit, z16);
+        ftag = b.or::<W16>(ftag, sel);
+    }
+    let a4 = b.konst::<W64>(4);
+    let aft = b.add::<W64>(a, a4);
+    b.store::<W16>(aft, ftag, sem::DATA_WRITE)?;
+    // 予約 + FIP/FCS/FOP/FDP/FDS（オフセット 6-27）は 0。
+    let a6 = b.konst::<W64>(6);
+    let az = b.add::<W64>(a, a6);
+    let z64 = b.konst::<W64>(0);
+    for i in 0..3u64 {
+        let ki = b.konst::<W64>(i * 8);
+        let addr = b.add::<W64>(az, ki);
+        b.store::<W64>(addr, z64, sem::DATA_WRITE)?;
+    }
+    // ST レジスタ: 論理順（ST(0) から）で sig(8B)+exp(2B)。
+    let a28 = b.konst::<W64>(28);
+    for i in 0..8u32 {
+        let ii = b.konst::<W16>(i as u16);
+        let summed = b.add::<W16>(top, ii);
+        let slot = b.and::<W16>(summed, seven);
+        let (sig, exp) = sem::read_st(b, slot);
+        let off = b.konst::<W64>(u64::from(i) * 10);
+        let base = b.add::<W64>(a, a28);
+        let addr = b.add::<W64>(base, off);
+        b.store::<W64>(addr, sig, sem::DATA_WRITE)?;
+        let off8 = b.konst::<W64>(u64::from(i) * 10 + 8);
+        let addr8 = b.add::<W64>(base, off8);
+        b.store::<W16>(addr8, exp, sem::DATA_WRITE)?;
+    }
+    // 初期化: FCW=0x037F、FSW/TOP=0、レジスタは空。
+    let kcw = b.konst::<W16>(0x037F);
+    b.set(sem::fcw_ref(), kcw);
+    let z16 = b.konst::<W16>(0);
+    b.set(sem::fsw_ref(), z16);
+    b.set(sem::top_ref(), z16);
+    for i in 0..8u32 {
+        let ii = b.konst::<W16>(i as u16);
+        let z = b.konst::<W64>(0);
+        sem::write_st(b, ii, z, z16);
+    }
+    Ok(())
+}
+
+/// FRSTOR m108。FNSAVE が書いた形式から環境と ST を戻す。
+/// FSW から TOP を `top` へ、C ビットを `fsw` へ反映する。
+pub fn frstor_m<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>) -> Flow<B> {
+    let Rm::Mem(a) = ea else {
+        return Ok(());
+    };
+    let a = *a;
+    let fcw = b.load::<W16>(a, sem::DATA_READ)?;
+    b.set(sem::fcw_ref(), fcw);
+    let a2 = b.konst::<W64>(2);
+    let afs = b.add::<W64>(a, a2);
+    let fsw = b.load::<W16>(afs, sem::DATA_READ)?;
+    b.set(sem::fsw_ref(), fsw);
+    let sh = b.konst::<W16>(11);
+    let t = b.shr_l::<W16>(fsw, sh);
+    let seven = b.konst::<W16>(7);
+    let top = b.and::<W16>(t, seven);
+    b.set(sem::top_ref(), top);
+    let a28 = b.konst::<W64>(28);
+    for i in 0..8u32 {
+        let off = b.konst::<W64>(u64::from(i) * 10);
+        let base = b.add::<W64>(a, a28);
+        let addr = b.add::<W64>(base, off);
+        let sig = b.load::<W64>(addr, sem::DATA_READ)?;
+        let off8 = b.konst::<W64>(u64::from(i) * 10 + 8);
+        let addr8 = b.add::<W64>(base, off8);
+        let exp = b.load::<W16>(addr8, sem::DATA_READ)?;
+        // 論理 ST(i) は物理スロット (top+i)&7。
+        let ii = b.konst::<W16>(i as u16);
+        let summed = b.add::<W16>(top, ii);
+        let slot = b.and::<W16>(summed, seven);
+        sem::write_st(b, slot, sig, exp);
+    }
+    Ok(())
+}

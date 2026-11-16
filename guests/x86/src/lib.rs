@@ -62,6 +62,9 @@ pub struct CpuState {
     /// セグメントセレクタ（ES,CS,SS,DS,FS,GS の順）。ユーザモードの
     /// エミュレーションではベースに影響しない観測用の値として扱う。
     pub sregs: [u16; 6],
+    /// x87 ステータスワード。C0-C3（bit8,9,10,14）を FCOM 系が更新する。
+    /// TOP（bit11-13）は `top` フィールドが正であり、FNSTSW で合成する。
+    pub fsw: u16,
 }
 
 #[cfg(test)]

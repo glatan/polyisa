@@ -14935,3 +14935,504 @@ fn run_sysexit_jumps() {
     let (out, _) = run32(&prog, 100);
     assert_eq!(out, Outcome::Exit(0x5A));
 }
+
+#[test]
+fn run_mul_cl_r8() {
+    // F6 E1 = mul cl。AL=20*CL=30 -> AX=600。上位非零で CF=OF=1。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(0), 0xABCD_0014);
+        polyisa_guest_x86::sem::write64(b, Gpr(1), 30);
+        Ok(())
+    })
+    .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0xF6, 0xE1])
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+    assert_eq!(env.backend.get(Gpr(0).state()) & 0xFFFF, 600);
+    assert_eq!(env.backend.get(Gpr(0).state()) >> 16, 0xABCD);
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x801,
+        0x801
+    );
+}
+
+#[test]
+fn run_imul_cl_r8() {
+    // F6 E9 = imul cl。AL=-2 * CL=3 -> AX=-6=0xFFFA。上位は符号拡張で CF=OF=0。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(0), 0xFE);
+        polyisa_guest_x86::sem::write64(b, Gpr(1), 3);
+        Ok(())
+    })
+    .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0xF6, 0xE9])
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+    assert_eq!(env.backend.get(Gpr(0).state()) & 0xFFFF, 0xFFFA);
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x801,
+        0
+    );
+}
+
+#[test]
+fn run_mul_ecx_map() {
+    // F7 E1 = mul ecx。0x10000*0x10000 -> EDX=1,EAX=0、CF=OF=1。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(0), 0x1_0000);
+        polyisa_guest_x86::sem::write64(b, Gpr(1), 0x1_0000);
+        Ok(())
+    })
+    .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0xF7, 0xE1])
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+    assert_eq!(env.backend.get(Gpr(0).state()), 0);
+    assert_eq!(env.backend.get(Gpr(2).state()), 1);
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x801,
+        0x801
+    );
+}
+
+#[test]
+fn run_mul_rcx_map() {
+    // 48 F7 E1 = mul rcx。2^32*2^32 -> RDX=1,RAX=0、CF=OF=1。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(0), 0x1_0000_0000);
+        polyisa_guest_x86::sem::write64(b, Gpr(1), 0x1_0000_0000);
+        Ok(())
+    })
+    .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0x48, 0xF7, 0xE1])
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1003 });
+    assert_eq!(env.backend.get(Gpr(0).state()), 0);
+    assert_eq!(env.backend.get(Gpr(2).state()), 1);
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x801,
+        0x801
+    );
+}
+
+#[test]
+fn run_imul_rcx_neg() {
+    // 48 F7 E9 = imul rcx。RAX=-2*3=-6。上位=全1 は符号拡張一致で CF=OF=0。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(0), 0xFFFF_FFFF_FFFF_FFFE);
+        polyisa_guest_x86::sem::write64(b, Gpr(1), 3);
+        Ok(())
+    })
+    .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0x48, 0xF7, 0xE9])
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1003 });
+    env.step(|b| {
+        assert_eq!(
+            polyisa_guest_x86::sem::read64(b, Gpr(0)),
+            0xFFFF_FFFF_FFFF_FFFA
+        );
+        assert_eq!(
+            polyisa_guest_x86::sem::read64(b, Gpr(2)),
+            0xFFFF_FFFF_FFFF_FFFF
+        );
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x801,
+        0
+    );
+}
+
+#[test]
+fn run_div_cl_map() {
+    // F6 F1 = div cl。AX=17/5 -> AL=3, AH=2。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(0), 17);
+        polyisa_guest_x86::sem::write64(b, Gpr(1), 5);
+        Ok(())
+    })
+    .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0xF6, 0xF1])
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+    assert_eq!(env.backend.get(Gpr(0).state()) & 0xFFFF, 0x0203);
+}
+
+#[test]
+fn run_div_cl_zero() {
+    // F6 F1 で CL=0 は #DE。現段階では例外退出＝Unimplemented。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(0), 17);
+        polyisa_guest_x86::sem::write64(b, Gpr(1), 0);
+        Ok(())
+    })
+    .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0xF6, 0xF1])
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(
+        out,
+        Outcome::Unimplemented {
+            pc: 0x1000,
+            word: 0xF1F6
+        }
+    );
+}
+
+#[test]
+fn run_idiv_ecx_neg() {
+    // F7 F9 = idiv ecx。EDX:EAX=-17 / 5 -> EAX=-3, EDX=-2。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(0), 0xFFFF_FFEF);
+        polyisa_guest_x86::sem::write64(b, Gpr(1), 5);
+        polyisa_guest_x86::sem::write64(b, Gpr(2), 0xFFFF_FFFF);
+        Ok(())
+    })
+    .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0xF7, 0xF9])
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+    assert_eq!(env.backend.get(Gpr(0).state()), 0xFFFF_FFFD);
+    assert_eq!(env.backend.get(Gpr(2).state()), 0xFFFF_FFFE);
+}
+
+#[test]
+fn run_idiv_ecx_overflow() {
+    // F7 F9 で INT_MIN / -1 は商あふれ #DE。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(0), 0x8000_0000);
+        polyisa_guest_x86::sem::write64(b, Gpr(1), 0xFFFF_FFFF);
+        polyisa_guest_x86::sem::write64(b, Gpr(2), 0xFFFF_FFFF);
+        Ok(())
+    })
+    .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0xF7, 0xF9])
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
+    assert_eq!(
+        out,
+        Outcome::Unimplemented {
+            pc: 0x1000,
+            word: 0xF9F7
+        }
+    );
+}
+
+#[test]
+fn run_fcom_m32_less() {
+    // fld [0x2000]=1.0f のあと D8 15 = fcom [0x2004]=2.0f。ST0<2.0 で C0=1。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2000), &0x3f800000u32.to_le_bytes())
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2004), &0x40000000u32.to_le_bytes())
+        .unwrap();
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x1000),
+            &[
+                0xD9, 0x05, 0xFA, 0x0F, 0x00, 0x00, // fld dword [0x2000]
+                0xD8, 0x15, 0xF8, 0x0F, 0x00, 0x00, // fcom dword [0x2004]
+            ],
+        )
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 2, true);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x100C });
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::fsw_ref()) & 0x4500,
+        0x0100
+    );
+    // FCOM はポップしない。
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::top_ref()), 7);
+}
+
+#[test]
+fn run_fcomp_m64_greater_pops() {
+    // fld [0x2000]=3.0 のあと DC 1D = fcomp [0x2008]=1.0。ST0>1.0 で C=0、pop。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2000), &0x4008_0000_0000_0000u64.to_le_bytes())
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2008), &0x3FF0_0000_0000_0000u64.to_le_bytes())
+        .unwrap();
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x1000),
+            &[
+                0xDD, 0x05, 0xFA, 0x0F, 0x00, 0x00, // fld qword [0x2000]
+                0xDC, 0x1D, 0xFC, 0x0F, 0x00, 0x00, // fcomp qword [0x2008]
+            ],
+        )
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 2, true);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x100C });
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::fsw_ref()) & 0x4500,
+        0
+    );
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::top_ref()), 0);
+}
+
+#[test]
+fn run_ficom_m16_equal() {
+    // fld [0x2000]=1.0f のあと DE 15 = ficom word [0x2004]=1。等しく C3=1。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2000), &0x3f800000u32.to_le_bytes())
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2004), &1i16.to_le_bytes())
+        .unwrap();
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x1000),
+            &[
+                0xD9, 0x05, 0xFA, 0x0F, 0x00, 0x00, // fld dword [0x2000]
+                0xDE, 0x15, 0xF8, 0x0F, 0x00, 0x00, // ficom word [0x2004]
+            ],
+        )
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 2, true);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x100C });
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::fsw_ref()) & 0x4500,
+        0x4000
+    );
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::top_ref()), 7);
+}
+
+#[test]
+fn run_ficomp_m16_pops() {
+    // fld 1.0 のあと DE 1D = ficomp word [0x2004]=2。ST0<2 で C0=1、pop。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2000), &0x3f800000u32.to_le_bytes())
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2004), &2i16.to_le_bytes())
+        .unwrap();
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x1000),
+            &[
+                0xD9, 0x05, 0xFA, 0x0F, 0x00, 0x00, // fld dword [0x2000]
+                0xDE, 0x1D, 0xF8, 0x0F, 0x00, 0x00, // ficomp word [0x2004]
+            ],
+        )
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 2, true);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x100C });
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::fsw_ref()) & 0x4500,
+        0x0100
+    );
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::top_ref()), 0);
+}
+
+#[test]
+fn run_fnstsw_m16_stores_top_and_c() {
+    // fld 1.0; fcom 2.0 (C0=1); DD 3D = fnstsw [0x2100]。
+    // TOP=7 が bit11-13 に載り 0x3800|0x0100=0x3900。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2000), &0x3f800000u32.to_le_bytes())
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2004), &0x40000000u32.to_le_bytes())
+        .unwrap();
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x1000),
+            &[
+                0xD9, 0x05, 0xFA, 0x0F, 0x00, 0x00, // fld dword [0x2000]
+                0xD8, 0x15, 0xF8, 0x0F, 0x00, 0x00, // fcom dword [0x2004]
+                0xDD, 0x3D, 0xEE, 0x10, 0x00, 0x00, // fnstsw word [0x2100]
+            ],
+        )
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 3, true);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1012 });
+    let mut buf = [0u8; 2];
+    env.backend
+        .mem
+        .read(VirtAddr(0x2100), &mut buf, polyisa_mem::Access::DATA_LE)
+        .unwrap();
+    assert_eq!(u16::from_le_bytes(buf), 0x3900);
+}
+
+#[test]
+fn run_fucomp_st1() {
+    // fld 2.0; fld 1.0; DD E9 = fucomp st(1)。ST0=1.0<ST1=2.0 で C0=1、pop。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2000), &0x4000_0000_0000_0000u64.to_le_bytes())
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2008), &0x3FF0_0000_0000_0000u64.to_le_bytes())
+        .unwrap();
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x1000),
+            &[
+                0xDD, 0x05, 0xFA, 0x0F, 0x00, 0x00, // fld qword [0x2000]
+                0xDD, 0x05, 0xFC, 0x0F, 0x00, 0x00, // fld qword [0x2008]
+                0xDD, 0xE9, // fucomp st(1)
+            ],
+        )
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 3, true);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x100E });
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::fsw_ref()) & 0x4500,
+        0x0100
+    );
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::top_ref()), 7);
+}
+
+#[test]
+fn run_fnsave_frstor_roundtrip() {
+    // fld 1.0; DD 35 = fsave [0x2100]（top=0 に初期化）; DD 25 = frstor [0x2100]。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2000), &0x3f800000u32.to_le_bytes())
+        .unwrap();
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x1000),
+            &[
+                0xD9, 0x05, 0xFA, 0x0F, 0x00, 0x00, // fld dword [0x2000]
+                0xDD, 0x35, 0xF4, 0x10, 0x00, 0x00, // fsave [0x2100]
+                0xDD, 0x25, 0xEE, 0x10, 0x00, 0x00, // frstor [0x2100]
+            ],
+        )
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 2, true);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x100C });
+    // FSAVE 後は初期化: top=0。
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::top_ref()), 0);
+    let out = run_x86::run_mode(&mut env, 0x100C, &mut sys, 1, true);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1012 });
+    // FRSTOR で top=7、ST(0)=1.0（exp 0x3fff、sig は整数ビットのみ）に戻る。
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::top_ref()), 7);
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::st_exp_ref(7)),
+        0x3fff
+    );
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::st_sig_ref(7)),
+        1u64 << 63
+    );
+}

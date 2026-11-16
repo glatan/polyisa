@@ -3709,6 +3709,62 @@ fn dispatch_map<B: Backend>(
                 sem_ea::fst_m(b, &ea, 64, true)
             }
         }
+        Insn::MulEb => sem_ea::mulx(b, 8, d, &ea, false),
+        Insn::MulEv => sem_ea::mulx(b, w, d, &ea, false),
+        Insn::ImulEb => sem_ea::mulx(b, 8, d, &ea, true),
+        Insn::ImulEv => sem_ea::mulx(b, w, d, &ea, true),
+        Insn::DivEb => sem_ea::divx(b, 8, d, &ea, eip, false),
+        Insn::DivEv => sem_ea::divx(b, w, d, &ea, eip, false),
+        Insn::IdivEb => sem_ea::divx(b, 8, d, &ea, eip, true),
+        Insn::IdivEv => sem_ea::divx(b, w, d, &ea, eip, true),
+        Insn::FcomM32 => sem_ea::fcom_m(b, 32, d, &ea, false),
+        Insn::FcompM32 => sem_ea::fcom_m(b, 32, d, &ea, true),
+        Insn::FcomM64 => sem_ea::fcom_m(b, 64, d, &ea, false),
+        Insn::FcompM64 => sem_ea::fcom_m(b, 64, d, &ea, true),
+        Insn::FicomM16 => {
+            // DE /2,/3: mod=11 は割り当てなし。
+            if d.modrm >= 0xC0 {
+                return Ok(false);
+            }
+            sem_ea::ficom_m16(b, &ea, false)
+        }
+        Insn::FicompM16 => {
+            if d.modrm >= 0xC0 {
+                return Ok(false);
+            }
+            sem_ea::ficom_m16(b, &ea, true)
+        }
+        Insn::X87dd4 => {
+            // DD /4: mem=FRSTOR m108、mod=11 は DD E0+i FUCOM st(i)。
+            if d.modrm >= 0xC0 {
+                sem_ea::fcom_sti(b, d.modrm & 7, false)
+            } else {
+                sem_ea::frstor_m(b, &ea)
+            }
+        }
+        Insn::X87dd5 => {
+            // DD /5: mem は未定義、mod=11 は DD E8+i FUCOMP st(i)。
+            if d.modrm >= 0xC0 {
+                sem_ea::fcom_sti(b, d.modrm & 7, true)
+            } else {
+                return Ok(false);
+            }
+        }
+        Insn::X87dd6 => {
+            // DD /6: mem=FNSAVE m108。mod=11 は未定義。
+            if d.modrm >= 0xC0 {
+                return Ok(false);
+            }
+            sem_ea::fnsave_m(b, &ea)
+        }
+        Insn::FnstswM16 => {
+            // DD /7: mem=FNSTSW m16、mod=11 は DD F8+i FSTP st(i)。
+            if d.modrm >= 0xC0 {
+                sem_ea::fst_sti(b, d.modrm & 7, true)
+            } else {
+                sem_ea::fnstsw_m16(b, &ea)
+            }
+        }
         Insn::FiaddM16 => {
             if d.modrm >= 0xC0 {
                 sem_ea::farith_st(b, sem_ea::FAr::Add, d.modrm & 7, true, true)
