@@ -2671,6 +2671,19 @@ fn dispatch_map<B: Backend>(
             }
         }
     }
+    fn gr_sext64<B: Backend>(b: &mut B, g: Gpr, w: u8) -> B::V<W64> {
+        match w {
+            16 => {
+                let v = decode::grd16(b, g);
+                b.sext::<W16, W64>(v)
+            }
+            64 => decode::grd64(b, g),
+            _ => {
+                let v = decode::grd32(b, g);
+                b.sext::<W32, W64>(v)
+            }
+        }
+    }
     fn put64<B: Backend>(b: &mut B, g: Gpr, w: u8, v: B::V<W64>, d: &polyisa_guest_x86::MapDec) {
         match w {
             16 => {
@@ -3019,6 +3032,56 @@ fn dispatch_map<B: Backend>(
         Insn::Xlat => sem_ea::xlat(b, d, seg),
         Insn::Rdtsc => sem_ea::rdtsc(b),
         Insn::Fwait => sem_ea::nop(b),
+        Insn::MovsB => sem_ea::str_op(b, sem_ea::Str::Movs, 8, d, eip, seg),
+        Insn::MovsV => sem_ea::str_op(b, sem_ea::Str::Movs, w, d, eip, seg),
+        Insn::StosB => sem_ea::str_op(b, sem_ea::Str::Stos, 8, d, eip, seg),
+        Insn::StosV => sem_ea::str_op(b, sem_ea::Str::Stos, w, d, eip, seg),
+        Insn::LodsB => sem_ea::str_op(b, sem_ea::Str::Lods, 8, d, eip, seg),
+        Insn::LodsV => sem_ea::str_op(b, sem_ea::Str::Lods, w, d, eip, seg),
+        Insn::ScasB => sem_ea::str_op(b, sem_ea::Str::Scas, 8, d, eip, seg),
+        Insn::ScasV => sem_ea::str_op(b, sem_ea::Str::Scas, w, d, eip, seg),
+        Insn::CmpsB => sem_ea::str_op(b, sem_ea::Str::Cmps, 8, d, eip, seg),
+        Insn::CmpsV => sem_ea::str_op(b, sem_ea::Str::Cmps, w, d, eip, seg),
+        Insn::MovAlOb => sem_ea::mov_moffs_ld(b, 8, d.imm, seg, d),
+        Insn::MovEaxOv => sem_ea::mov_moffs_ld(b, w, d.imm, seg, d),
+        Insn::MovObAl => sem_ea::mov_moffs_st(b, 8, d.imm, seg, d),
+        Insn::MovOvEax => sem_ea::mov_moffs_st(b, w, d.imm, seg, d),
+        Insn::BtEvGv => {
+            let n = gr_sext64(b, reg, w);
+            sem_ea::bt_op(b, 0, w, &ea, d, n)
+        }
+        Insn::BtEvIb => {
+            let n = b.konst::<W64>(ib8);
+            sem_ea::bt_op(b, 0, w, &ea, d, n)
+        }
+        Insn::BtsEvGv => {
+            let n = gr_sext64(b, reg, w);
+            sem_ea::bt_op(b, 1, w, &ea, d, n)
+        }
+        Insn::BtsEvIb => {
+            let n = b.konst::<W64>(ib8);
+            sem_ea::bt_op(b, 1, w, &ea, d, n)
+        }
+        Insn::BtrEvGv => {
+            let n = gr_sext64(b, reg, w);
+            sem_ea::bt_op(b, 2, w, &ea, d, n)
+        }
+        Insn::BtrEvIb => {
+            let n = b.konst::<W64>(ib8);
+            sem_ea::bt_op(b, 2, w, &ea, d, n)
+        }
+        Insn::BtcEvGv => {
+            let n = gr_sext64(b, reg, w);
+            sem_ea::bt_op(b, 3, w, &ea, d, n)
+        }
+        Insn::BtcEvIb => {
+            let n = b.konst::<W64>(ib8);
+            sem_ea::bt_op(b, 3, w, &ea, d, n)
+        }
+        Insn::ShldEvGvIb => sem_ea::shxd(b, true, w, &ea, d, reg, d.imm as u8),
+        Insn::ShldEvGvCl => sem_ea::shxd(b, true, w, &ea, d, reg, u8::MAX),
+        Insn::ShrdEvGvIb => sem_ea::shxd(b, false, w, &ea, d, reg, d.imm as u8),
+        Insn::ShrdEvGvCl => sem_ea::shxd(b, false, w, &ea, d, reg, u8::MAX),
         _ => return Ok(false),
     };
     r.map(|()| true)

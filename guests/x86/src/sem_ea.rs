@@ -1372,3 +1372,424 @@ pub fn rdtsc<B: Backend>(b: &mut B) -> Flow<B> {
     decode::gwr32(b, Gpr(2), z);
     Ok(())
 }
+
+// ---- 文字列命令 ----
+
+/// 文字列命令の種別。
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Str {
+    Movs,
+    Stos,
+    Lods,
+    Scas,
+    Cmps,
+}
+
+fn asize_mask(asize: u8) -> u64 {
+    match asize {
+        16 => 0xffff,
+        32 => 0xffff_ffff,
+        _ => u64::MAX,
+    }
+}
+
+/// 文字列ポインタ（ESI/EDI 系）を asize 幅で読む。
+fn sptr<B: Backend>(b: &mut B, g: Gpr, asize: u8) -> B::V<W64> {
+    let v = sem::read64(b, g);
+    let m = b.konst::<W64>(asize_mask(asize));
+    b.and::<W64>(v, m)
+}
+
+fn sptr_put<B: Backend>(b: &mut B, g: Gpr, asize: u8, v: B::V<W64>) {
+    let m = asize_mask(asize);
+    let cur = sem::read64(b, g);
+    let nm = b.konst::<W64>(!m);
+    let hi = b.and::<W64>(cur, nm);
+    let mm = b.konst::<W64>(m);
+    let lo = b.and::<W64>(v, mm);
+    let nv = b.or::<W64>(hi, lo);
+    sem::write64(b, g, nv);
+}
+
+/// DF を見て文字列ポインタを ±sz 進める。
+fn str_bump<B: Backend>(b: &mut B, g: Gpr, asize: u8, sz: u64) {
+    let flags: B::V<W32> = b.get(eflags_ref());
+    let dfm = b.konst::<W32>(0x400);
+    let bit = b.and::<W32>(flags, dfm);
+    let z = b.konst::<W32>(0);
+    let down = b.cmp::<W32>(Cmp::Ne, bit, z);
+    let pos = b.konst::<W64>(sz);
+    let neg = b.konst::<W64>((sz as i64).wrapping_neg() as u64);
+    let d = b.select::<W64>(down, neg, pos);
+    let v = sptr(b, g, asize);
+    let nv = b.add::<W64>(v, d);
+    sptr_put(b, g, asize, nv);
+}
+
+/// 繰り返し判定とカウンタ減算。cond_zf: 0=なし, 1=ZF==1(REPE), 2=ZF==0(REPNE)。
+fn rep_tail<B: Backend>(b: &mut B, d: &MapDec, eip: u32, cond_zf: u8) -> Flow<B> {
+    let m = asize_mask(d.asize);
+    let mm = b.konst::<W64>(m);
+    let c0 = sem::read64(b, Gpr(1));
+    let c0m = b.and::<W64>(c0, mm);
+    let one = b.konst::<W64>(1);
+    let zero = b.konst::<W64>(0);
+    let dec = b.sub::<W64>(c0m, one);
+    let c1 = b.and::<W64>(dec, mm);
+    let nm = b.konst::<W64>(!m);
+    let hi = b.and::<W64>(c0, nm);
+    let nv = b.or::<W64>(hi, c1);
+    sem::write64(b, Gpr(1), nv);
+    let nz = b.cmp::<W64>(Cmp::Ne, c1, zero);
+    let nzv = b.select::<W64>(nz, one, zero);
+    let again_v = match cond_zf {
+        1 => {
+            let zf = read_zf(b);
+            let zv = b.select::<W64>(zf, one, zero);
+            b.and::<W64>(nzv, zv)
+        }
+        2 => {
+            let zf = read_zf(b);
+            let zv = b.select::<W64>(zf, one, zero);
+            let zinv = b.xor::<W64>(zv, one);
+            b.and::<W64>(nzv, zinv)
+        }
+        _ => nzv,
+    };
+    let again = b.cmp::<W64>(Cmp::Ne, again_v, zero);
+    let t = b.konst::<W32>(eip);
+    let tj = b.konst::<W64>(u64::from(eip));
+    b.if_then(again, |b| {
+        b.set(eip_ref(), t);
+        b.jump(tj);
+        Ok(())
+    })?;
+    Ok(())
+}
+
+fn str_w<B: Backend, W: Hw>(
+    b: &mut B,
+    kind: Str,
+    d: &MapDec,
+    eip: u32,
+    seg: u64,
+    rep: bool,
+    zf_cond: u8,
+) -> Flow<B> {
+    let asize = d.asize;
+    let mut si = sptr(b, Gpr(6), asize);
+    let sg = b.konst::<W64>(seg);
+    si = b.add::<W64>(si, sg);
+    let di = sptr(b, Gpr(7), asize);
+    let sz = u64::from(W::BITS / 8);
+    match kind {
+        Str::Movs => {
+            let v: B::V<W> = b.load::<W>(si, sem::DATA_READ)?;
+            b.store::<W>(di, v, sem::DATA_WRITE)?;
+            str_bump(b, Gpr(6), asize, sz);
+            str_bump(b, Gpr(7), asize, sz);
+        }
+        Str::Stos => {
+            let acc = W::get(b, Gpr(0), d);
+            b.store::<W>(di, acc, sem::DATA_WRITE)?;
+            str_bump(b, Gpr(7), asize, sz);
+        }
+        Str::Lods => {
+            let v: B::V<W> = b.load::<W>(si, sem::DATA_READ)?;
+            W::put(b, Gpr(0), d, v);
+            str_bump(b, Gpr(6), asize, sz);
+        }
+        Str::Scas => {
+            let acc = W::get(b, Gpr(0), d);
+            let t: B::V<W> = b.load::<W>(di, sem::DATA_READ)?;
+            let v = b.sub::<W>(acc, t);
+            update_sub_flags(b, acc, t, v);
+            str_bump(b, Gpr(7), asize, sz);
+        }
+        Str::Cmps => {
+            let x: B::V<W> = b.load::<W>(si, sem::DATA_READ)?;
+            let t: B::V<W> = b.load::<W>(di, sem::DATA_READ)?;
+            let v = b.sub::<W>(x, t);
+            update_sub_flags(b, x, t, v);
+            str_bump(b, Gpr(6), asize, sz);
+            str_bump(b, Gpr(7), asize, sz);
+        }
+    }
+    if rep {
+        rep_tail(b, d, eip, zf_cond)
+    } else {
+        Ok(())
+    }
+}
+
+/// 文字列命令（MOVS/STOS/LODS/SCAS/CMPS）。rep≠0 で要素ごとの繰り返し。
+pub fn str_op<B: Backend>(b: &mut B, kind: Str, w: u8, d: &MapDec, eip: u32, seg: u64) -> Flow<B> {
+    let rep = d.rep != 0;
+    // REPE/REPNE の ZF 条件は SCAS/CMPS にだけ効く。
+    let zf_cond = match kind {
+        Str::Scas | Str::Cmps if d.rep == 0xF3 => 1,
+        Str::Scas | Str::Cmps if d.rep == 0xF2 => 2,
+        _ => 0,
+    };
+    let iter = |b: &mut B| -> Flow<B> {
+        match w {
+            16 => str_w::<B, W16>(b, kind, d, eip, seg, rep, zf_cond),
+            64 => str_w::<B, W64>(b, kind, d, eip, seg, rep, zf_cond),
+            8 => str_w::<B, W8>(b, kind, d, eip, seg, rep, zf_cond),
+            _ => str_w::<B, W32>(b, kind, d, eip, seg, rep, zf_cond),
+        }
+    };
+    if rep {
+        // カウンタが 0 なら何もせず次へ進む。
+        let c = sptr(b, Gpr(1), d.asize);
+        let z = b.konst::<W64>(0);
+        let active = b.cmp::<W64>(Cmp::Ne, c, z);
+        b.if_then(active, |b| iter(b))
+    } else {
+        iter(b)
+    }
+}
+
+// ---- moffs MOV ----
+
+/// MOV AL/eAX, [moffs]（A0/A1）。
+pub fn mov_moffs_ld<B: Backend>(b: &mut B, w: u8, moffs: u64, seg: u64, d: &MapDec) -> Flow<B> {
+    let a = b.konst::<W64>(moffs);
+    let sg = b.konst::<W64>(seg);
+    let addr = b.add::<W64>(a, sg);
+    match w {
+        8 => {
+            let v: B::V<W8> = b.load::<W8>(addr, sem::DATA_READ)?;
+            W8::put(b, Gpr(0), d, v);
+        }
+        16 => {
+            let v: B::V<W16> = b.load::<W16>(addr, sem::DATA_READ)?;
+            W16::put(b, Gpr(0), d, v);
+        }
+        64 => {
+            let v: B::V<W64> = b.load::<W64>(addr, sem::DATA_READ)?;
+            W64::put(b, Gpr(0), d, v);
+        }
+        _ => {
+            let v: B::V<W32> = b.load::<W32>(addr, sem::DATA_READ)?;
+            W32::put(b, Gpr(0), d, v);
+        }
+    }
+    Ok(())
+}
+
+/// MOV [moffs], AL/eAX（A2/A3）。
+pub fn mov_moffs_st<B: Backend>(b: &mut B, w: u8, moffs: u64, seg: u64, d: &MapDec) -> Flow<B> {
+    let a = b.konst::<W64>(moffs);
+    let sg = b.konst::<W64>(seg);
+    let addr = b.add::<W64>(a, sg);
+    match w {
+        8 => {
+            let v = W8::get(b, Gpr(0), d);
+            b.store::<W8>(addr, v, sem::DATA_WRITE)?;
+        }
+        16 => {
+            let v = W16::get(b, Gpr(0), d);
+            b.store::<W16>(addr, v, sem::DATA_WRITE)?;
+        }
+        64 => {
+            let v = W64::get(b, Gpr(0), d);
+            b.store::<W64>(addr, v, sem::DATA_WRITE)?;
+        }
+        _ => {
+            let v = W32::get(b, Gpr(0), d);
+            b.store::<W32>(addr, v, sem::DATA_WRITE)?;
+        }
+    }
+    Ok(())
+}
+
+// ---- BT/BTS/BTR/BTC ----
+
+fn bt_flags<B: Backend>(b: &mut B, bit: B::B) {
+    let old: B::V<W32> = b.get(eflags_ref());
+    let ncf = b.konst::<W32>(!sem::FLAG_CF);
+    let cleared = b.and::<W32>(old, ncf);
+    let cf = b.konst::<W32>(sem::FLAG_CF);
+    let z = b.konst::<W32>(0);
+    let on = b.select::<W32>(bit, cf, z);
+    let nv = b.or::<W32>(cleared, on);
+    b.set(eflags_ref(), nv);
+}
+
+fn bt_w<B: Backend, W: Hw>(
+    b: &mut B,
+    op: u8,
+    ea: &Rm<B::V<W64>>,
+    d: &MapDec,
+    n: B::V<W64>,
+) -> Flow<B> {
+    // r/m のビット列：メモリなら n/W::BITS 要素分アドレスを進める（負も可）。
+    let lg_bits = W::BITS.trailing_zeros();
+    let lg_bytes = (W::BITS / 8).trailing_zeros();
+    let sh = b.konst::<W64>(u64::from(lg_bits));
+    let off = b.shr_a::<W64>(n, sh);
+    let bm = b.konst::<W64>(u64::from(W::BITS - 1));
+    let idx = b.and::<W64>(n, bm);
+    let bs = b.konst::<W64>(u64::from(lg_bytes));
+    let e2;
+    let target = if let Rm::Mem(a) = ea {
+        let ob = b.shl::<W64>(off, bs);
+        let na = b.add::<W64>(*a, ob);
+        e2 = Rm::Mem(na);
+        &e2
+    } else {
+        ea
+    };
+    let t = rd_w::<B, W>(b, target, d)?;
+    let k: B::V<W> = b.trunc::<W64, W>(idx);
+    let one = b.konst::<W>(W::from_u128(1));
+    let bit = b.shl::<W>(one, k);
+    let got = b.and::<W>(t, bit);
+    let zero = b.konst::<W>(W::from_u128(0));
+    let is_set = b.cmp::<W>(Cmp::Ne, got, zero);
+    bt_flags(b, is_set);
+    let nv = match op {
+        1 => b.or::<W>(t, bit),
+        2 => {
+            let all = b.konst::<W>(W::from_u128(u128::MAX));
+            let nb = b.xor::<W>(bit, all);
+            b.and::<W>(t, nb)
+        }
+        3 => b.xor::<W>(t, bit),
+        _ => t,
+    };
+    if op != 0 {
+        wr_w::<B, W>(b, target, d, nv)?;
+    }
+    Ok(())
+}
+
+/// BT/BTS/BTR/BTC。op: 0=BT 1=BTS 2=BTR 3=BTC。n は符号付きビット番号（64bit 値）。
+pub fn bt_op<B: Backend>(
+    b: &mut B,
+    op: u8,
+    w: u8,
+    ea: &Rm<B::V<W64>>,
+    d: &MapDec,
+    n: B::V<W64>,
+) -> Flow<B> {
+    match w {
+        16 => bt_w::<B, W16>(b, op, ea, d, n),
+        64 => bt_w::<B, W64>(b, op, ea, d, n),
+        _ => bt_w::<B, W32>(b, op, ea, d, n),
+    }
+}
+
+// ---- SHLD/SHRD ----
+
+fn shxd_w<B: Backend, W: Hw>(
+    b: &mut B,
+    left: bool,
+    ea: &Rm<B::V<W64>>,
+    d: &MapDec,
+    src: Gpr,
+    cnt: B::V<W>,
+) -> Flow<B> {
+    let msk = if W::BITS == 64 { 63u64 } else { 31 };
+    let mk = b.konst::<W>(W::from_u128(u128::from(msk)));
+    let n = b.and::<W>(cnt, mk);
+    let zero = b.konst::<W>(W::from_u128(0));
+    let nz = b.cmp::<W>(Cmp::Ne, n, zero);
+    b.if_then(nz, |b| {
+        let t = rd_w::<B, W>(b, ea, d)?;
+        let s = W::get(b, src, d);
+        let bits_k = b.konst::<W>(W::from_u128(u128::from(W::BITS)));
+        let wm = b.sub::<W>(bits_k, n);
+        let v = if left {
+            let a = b.shl::<W>(t, n);
+            let x = b.shr_l::<W>(s, wm);
+            b.or::<W>(a, x)
+        } else {
+            let a = b.shr_l::<W>(t, n);
+            let x = b.shl::<W>(s, wm);
+            b.or::<W>(a, x)
+        };
+        wr_w::<B, W>(b, ea, d, v)?;
+        // CF: SHLD は元の w-n ビット、SHRD は n-1 ビット。
+        let cf_idx = if left { wm } else { n };
+        let one = b.konst::<W>(W::from_u128(1));
+        let cf_idx = if left {
+            cf_idx
+        } else {
+            b.sub::<W>(cf_idx, one)
+        };
+        let cfv = b.shr_l::<W>(t, cf_idx);
+        let cf_and = b.and::<W>(cfv, one);
+        let cf = b.cmp::<W>(Cmp::Ne, cf_and, zero);
+        let old: B::V<W32> = b.get(eflags_ref());
+        let ncf = b.konst::<W32>(!sem::FLAG_CF);
+        let cleared = b.and::<W32>(old, ncf);
+        let cfm = b.konst::<W32>(sem::FLAG_CF);
+        let z32 = b.konst::<W32>(0);
+        let on = b.select::<W32>(cf, cfm, z32);
+        let efl = b.or::<W32>(cleared, on);
+        b.set(eflags_ref(), efl);
+        // SZP と OF（n==1 のとき符号変化）。
+        let szp = szp_bits::<B, W>(b, v);
+        let one_w = b.konst::<W>(W::from_u128(1));
+        let n1 = b.cmp::<W>(Cmp::Eq, n, one_w);
+        let msb = b.konst::<W>(W::from_u128(u128::from(W::BITS - 1)));
+        let so = b.shr_l::<W>(t, msb);
+        let sv = b.shr_l::<W>(v, msb);
+        let so1 = b.and::<W>(so, one);
+        let sv1 = b.and::<W>(sv, one);
+        let chg = b.cmp::<W>(Cmp::Ne, so1, sv1);
+        let ofm = b.konst::<W32>(sem::FLAG_OF);
+        let ones32 = b.konst::<W32>(0xffff_ffff);
+        let o1 = b.select::<W32>(n1, ofm, z32);
+        let o2 = b.select::<W32>(chg, ones32, z32);
+        let of = b.and::<W32>(o1, o2);
+        let old2: B::V<W32> = b.get(eflags_ref());
+        let mask = sem::FLAG_OF | sem::FLAG_SF | sem::FLAG_ZF | sem::FLAG_PF;
+        let nm = b.konst::<W32>(!mask);
+        let keep = b.and::<W32>(old2, nm);
+        let efl2 = b.or::<W32>(keep, szp);
+        let efl3 = b.or::<W32>(efl2, of);
+        b.set(eflags_ref(), efl3);
+        Ok(())
+    })?;
+    Ok(())
+}
+
+/// SHLD/SHRD。left=true で SHLD。cnt は幅 W の値（CL または即値）。
+pub fn shxd<B: Backend>(
+    b: &mut B,
+    left: bool,
+    w: u8,
+    ea: &Rm<B::V<W64>>,
+    d: &MapDec,
+    src: Gpr,
+    cnt: u8,
+) -> Flow<B> {
+    // 即値/CL を幅 W の値として供給。CL は上位を切る。
+    match w {
+        16 => {
+            let c = cnt_v::<B, W16>(b, cnt, d);
+            shxd_w::<B, W16>(b, left, ea, d, src, c)
+        }
+        64 => {
+            let c = cnt_v::<B, W64>(b, cnt, d);
+            shxd_w::<B, W64>(b, left, ea, d, src, c)
+        }
+        _ => {
+            let c = cnt_v::<B, W32>(b, cnt, d);
+            shxd_w::<B, W32>(b, left, ea, d, src, c)
+        }
+    }
+}
+
+fn cnt_v<B: Backend, W: Hw>(b: &mut B, cnt: u8, d: &MapDec) -> B::V<W> {
+    if cnt == u8::MAX {
+        // CL。
+        let cl = W8::get(b, Gpr(1), d);
+        b.zext::<W8, W>(cl)
+    } else {
+        b.konst::<W>(W::from_u128(u128::from(cnt)))
+    }
+}

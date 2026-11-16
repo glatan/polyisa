@@ -14053,3 +14053,267 @@ fn run_jrcxz64() {
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
     assert_eq!(out, Outcome::Exit(42));
 }
+
+// ---- map 経路拡張 第3弾（文字列命令・moffs・bt 系・shld/shrd）----
+
+#[test]
+fn run_rep_movsb64() {
+    // F3 A4 = rep movsb。rcx 回だけ [rsi]→[rdi]。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 4, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x3000), 1, Perms::RW).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0xF3u8, 0xA4])
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x3000), &[1u8, 2, 3, 4])
+        .unwrap();
+    polyisa_guest_x86::sem::write64(&mut env.backend, Gpr(6), 0x3000);
+    polyisa_guest_x86::sem::write64(&mut env.backend, Gpr(7), 0x3100);
+    polyisa_guest_x86::sem::write64(&mut env.backend, Gpr(1), 3);
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 3, true);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+    let mut got = [0u8; 4];
+    env.backend
+        .mem
+        .read(VirtAddr(0x3100), &mut got, polyisa_mem::Access::DATA_LE)
+        .unwrap();
+    assert_eq!(got, [1, 2, 3, 0]);
+    assert_eq!(polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(1)), 0);
+    assert_eq!(
+        polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(6)),
+        0x3003
+    );
+    assert_eq!(
+        polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(7)),
+        0x3103
+    );
+}
+
+#[test]
+fn run_rep_stosb64() {
+    // F3 AA = rep stosb。al を [rdi] に rcx 回。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 4, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x3000), 1, Perms::RW).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0xB0u8, 0x5A, 0xF3, 0xAA])
+        .unwrap();
+    polyisa_guest_x86::sem::write64(&mut env.backend, Gpr(7), 0x3100);
+    polyisa_guest_x86::sem::write64(&mut env.backend, Gpr(1), 4);
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 5, true);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1004 });
+    let mut got = [0u8; 4];
+    env.backend
+        .mem
+        .read(VirtAddr(0x3100), &mut got, polyisa_mem::Access::DATA_LE)
+        .unwrap();
+    assert_eq!(got, [0x5A; 4]);
+}
+
+#[test]
+fn run_repe_cmpsb() {
+    // F3 A6 = repe cmpsb。等しい間続ける。src="abcx", dst="abcz"。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 4, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x3000), 1, Perms::RW).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0xF3u8, 0xA6])
+        .unwrap();
+    env.backend.mem.write(VirtAddr(0x3000), b"abcx").unwrap();
+    env.backend.mem.write(VirtAddr(0x3100), b"abcz").unwrap();
+    polyisa_guest_x86::sem::write64(&mut env.backend, Gpr(6), 0x3000);
+    polyisa_guest_x86::sem::write64(&mut env.backend, Gpr(7), 0x3100);
+    polyisa_guest_x86::sem::write64(&mut env.backend, Gpr(1), 5);
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 4, true);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+    // 4 要素目で ZF=0 → ecx=1 で停止、rsi/rdi は 4 進む。
+    assert_eq!(polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(1)), 1);
+    assert_eq!(
+        polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(6)),
+        0x3004
+    );
+    assert_eq!(
+        polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(7)),
+        0x3104
+    );
+}
+
+#[test]
+fn run_repne_scasb() {
+    // F2 AE = repne scasb。al と違う間続ける。al='x'、buf="aaxb"。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 4, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x3000), 1, Perms::RW).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0xB0u8, 0x78, 0xF2, 0xAE])
+        .unwrap();
+    env.backend.mem.write(VirtAddr(0x3100), b"aaxb").unwrap();
+    polyisa_guest_x86::sem::write64(&mut env.backend, Gpr(7), 0x3100);
+    polyisa_guest_x86::sem::write64(&mut env.backend, Gpr(1), 8);
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 4, true);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1004 });
+    // 3 要素目で ZF=1 → rcx=8-3=5、rdi=+3。
+    assert_eq!(polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(1)), 5);
+    assert_eq!(
+        polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(7)),
+        0x3103
+    );
+}
+
+#[test]
+fn run_movs_lods_scas_single() {
+    // 単発 movsb + lodsb。rsi=0x3000('Q'), rdi=0x3100。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 4, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x3000), 1, Perms::RW).unwrap();
+    // movsb; lodsb; mov edi,eax→exit 値は rdi の下位…exit は rdi 全体。
+    // 代わりに [0x3100]='Q' と al='T' を検証。
+    env.backend
+        .mem
+        .write(VirtAddr(0x1000), &[0xA4u8, 0xAC])
+        .unwrap();
+    env.backend.mem.write(VirtAddr(0x3000), b"QT").unwrap();
+    polyisa_guest_x86::sem::write64(&mut env.backend, Gpr(6), 0x3000);
+    polyisa_guest_x86::sem::write64(&mut env.backend, Gpr(7), 0x3100);
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 2, true);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+    let mut got = [0u8; 1];
+    env.backend
+        .mem
+        .read(VirtAddr(0x3100), &mut got, polyisa_mem::Access::DATA_LE)
+        .unwrap();
+    assert_eq!(got, [b'Q']);
+    // lodsb で al=[0x3001]='T'、rsi=0x3002。
+    let rax = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(0));
+    assert_eq!(rax & 0xff, b'T' as u64);
+    assert_eq!(
+        polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(6)),
+        0x3002
+    );
+}
+
+#[test]
+fn run_moffs64() {
+    // A1 moffs64 = mov rax,[0x3000]。A3 = mov [0x3010],rax。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 4, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x3000), 1, Perms::RW).unwrap();
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x1000),
+            &[
+                0x48, 0xA1, 0x00, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, // mov rax,[0x3000]
+                0x48, 0xA3, 0x10, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, // mov [0x3010],rax
+            ],
+        )
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x3000), &0x1122_3344_5566_7788u64.to_le_bytes())
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 2, true);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1014 });
+    let mut got = [0u8; 8];
+    env.backend
+        .mem
+        .read(VirtAddr(0x3010), &mut got, polyisa_mem::Access::DATA_LE)
+        .unwrap();
+    assert_eq!(u64::from_le_bytes(got), 0x1122_3344_5566_7788);
+}
+
+#[test]
+fn run_bt_ops() {
+    // bts ebx,4 → ebx=0x10,CF=0。btc ebx,4 → ebx=0,CF=1。bt ebx,0 → CF=0。btr via reg。
+    let prog: &[u8] = &[
+        0x0F, 0xBA, 0xEB, 0x04, // bts ebx,4
+        0x0F, 0xBA, 0xFB, 0x04, // btc ebx,4
+        0x0F, 0xBA, 0xEB, 0x07, // bts ebx,7 → ebx=0x80
+        0x0F, 0xBA, 0xEB, 0x06, // bts ebx,6 → ebx=0xC0
+        0x0F, 0xBA, 0xE3, 0x06, // bt ebx,6 → CF=1
+        0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax,1
+        0xCD, 0x80, // int 0x80 → exit(0xC0)
+    ];
+    let (out, mut env) = run32(prog, 100);
+    assert_eq!(out, Outcome::Exit(0xC0));
+    assert_ne!(env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 1, 0);
+}
+
+#[test]
+fn run_bt_regform() {
+    // bt eax,ebx（0F A3 /r）と btr eax,ebx（0F B3 /r）。
+    let prog: &[u8] = &[
+        0xB8, 0x20, 0x00, 0x00, 0x00, // mov eax,0x20
+        0xBB, 0x05, 0x00, 0x00, 0x00, // mov ebx,5
+        0x0F, 0xA3, 0xD8, // bt eax,ebx → bit5=1 → CF=1
+        0x0F, 0xB3, 0xD8, // btr eax,ebx → bit5 を消す → eax=0
+        0x89, 0xC3, // mov ebx,eax
+        0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax,1
+        0xCD, 0x80, // int 0x80 → exit(0)
+    ];
+    let (out, mut env) = run32(prog, 100);
+    assert_eq!(out, Outcome::Exit(0));
+    assert_ne!(env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 1, 0);
+}
+
+#[test]
+fn run_shld_shrd() {
+    // shld eax,ebx,8 と shrd eax,ebx,8。
+    let prog: &[u8] = &[
+        0xB8, 0x78, 0x56, 0x34, 0x12, // mov eax,0x12345678
+        0xBB, 0xF0, 0xDE, 0xBC, 0x9A, // mov ebx,0x9ABCDEF0
+        0x0F, 0xA4, 0xD8, 0x08, // shld eax,ebx,8 → 0x3456789A
+        0x89, 0xC3, // mov ebx,eax
+        0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax,1
+        0xCD, 0x80, // int 0x80 → exit(0x3456789A)
+    ];
+    let (out, _) = run32(prog, 100);
+    assert_eq!(out, Outcome::Exit(0x3456_789A));
+
+    let prog2: &[u8] = &[
+        0xB8, 0x78, 0x56, 0x34, 0x12, // mov eax,0x12345678
+        0xBB, 0xF0, 0xDE, 0xBC, 0x9A, // mov ebx,0x9ABCDEF0
+        0x0F, 0xAC, 0xD8, 0x08, // shrd eax,ebx,8 → 0xF0123456
+        0x89, 0xC3, // mov ebx,eax
+        0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax,1
+        0xCD, 0x80, // int 0x80
+    ];
+    let (out2, _) = run32(prog2, 100);
+    assert_eq!(out2, Outcome::Exit(0xF012_3456));
+}
+
+#[test]
+fn run_shld_cl() {
+    // CL カウントの SHLD。cl=4 → eax=(0x12345678<<4)|(ebx>>28)。
+    let prog: &[u8] = &[
+        0xB8, 0x78, 0x56, 0x34, 0x12, // mov eax,0x12345678
+        0xBB, 0xF0, 0xDE, 0xBC, 0x9A, // mov ebx,0x9ABCDEF0
+        0xB1, 0x04, // mov cl,4
+        0x0F, 0xA5, 0xD8, // shld eax,ebx,cl → 0x2345678F? ebx>>28=0x9 → 0x23456789
+        0x89, 0xC3, // mov ebx,eax
+        0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax,1
+        0xCD, 0x80,
+    ];
+    let (out, _) = run32(prog, 100);
+    assert_eq!(out, Outcome::Exit(0x2345_6789));
+}
