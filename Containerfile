@@ -1,15 +1,9 @@
 # polyisa の開発・検証環境。task check / task test / task test:full など
 # すべての検証がホストに依存せずコンテナ内で完結する。
 #
-# ビルド:
-#   podman build -t localhost/polyisa-dev -f tools/containers/dev/Containerfile .
-#
-# 実行（リポジトリを /work にマウント、cargo のキャッシュは名前付きボリューム）:
-#   podman run --rm -it \
-#     -v "$PWD:/work" -w /work \
-#     -v polyisa-cargo-registry:/usr/local/cargo/registry \
-#     -v polyisa-cargo-git:/usr/local/cargo/git \
-#     localhost/polyisa-dev task check
+# ビルドと実行は Taskfile 経由（podman を直接叩かない）:
+#   task container:build
+#   task container -- task check
 #
 # ツールの版は docs/references.md の TOOL-* エントリと対応する。
 

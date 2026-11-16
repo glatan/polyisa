@@ -85,7 +85,7 @@ tasks:
   container:build:
     desc: "検証コンテナイメージ localhost/polyisa-dev をビルドする"
     cmds:
-      - podman build -t localhost/polyisa-dev -f tools/containers/dev/Containerfile .
+      - podman build -t localhost/polyisa-dev .
 
   container:
     desc: "検証コンテナ内でコマンドを実行する（例: task container -- task check）"
