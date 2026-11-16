@@ -3217,13 +3217,14 @@ pub enum Iop {
     CmpGtS,
 }
 
-pub fn pint<B: Backend, W: polyisa_sem::Width>(
+/// `Iop` のレーン演算本体。xmm の `pint` と mm の `mint` で共有する。
+fn iop_op<B: Backend, W: polyisa_sem::Width>(
     b: &mut B,
     kind: Iop,
-    d: &MapDec,
-    ea: &Rm<B::V<W64>>,
-) -> Result<(), B::Exit> {
-    lane_bin::<B, W>(b, d, ea, |b, a, c| match kind {
+    a: B::V<W>,
+    c: B::V<W>,
+) -> B::V<W> {
+    match kind {
         Iop::Add => b.add::<W>(a, c),
         Iop::Sub => b.sub::<W>(a, c),
         Iop::MulLo => b.mul::<W>(a, c),
@@ -3265,7 +3266,16 @@ pub fn pint<B: Backend, W: polyisa_sem::Width>(
             let gt = b.cmp::<W>(Cmp::GtS, a, c);
             lane_mask::<B, W>(b, gt)
         }
-    })
+    }
+}
+
+pub fn pint<B: Backend, W: polyisa_sem::Width>(
+    b: &mut B,
+    kind: Iop,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    lane_bin::<B, W>(b, d, ea, |b, a, c| iop_op::<B, W>(b, kind, a, c))
 }
 
 /// PSRL/PSRA/PSLL のパックシフト。カウントは xmm/m128 の下位 64 または即値。
@@ -3353,6 +3363,499 @@ pub fn byteshift<B: Backend>(b: &mut B, left: bool, imm: u8, d: &MapDec) -> Flow
         b.shr_l::<W128>(a, sh)
     };
     b.set(sem::xmm_ref(dst), v);
+    Ok(())
+}
+
+// ===== MMX（0F 接頭辞なし。P/Q オペランド）=====
+//
+// mm レジスタは st_sig（x87 仮数部の物理スロット）が実機の
+// エイリアス先。タグワードはモデル化していないので EMMS は
+// 建築状態を変えない。
+
+/// ModRM.reg の MMX 番号。
+fn reg_m(d: &MapDec) -> usize {
+    (decode::reg(d).0 & 7) as usize
+}
+
+/// ModRM.r/m がレジスタ形のときの MMX 番号（mod=11 でのみ使う）。
+fn rm_m(d: &MapDec) -> usize {
+    (decode::rm_reg(d).0 & 7) as usize
+}
+
+/// mm/m64 を読む。
+fn rq<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>) -> Result<B::V<W64>, B::Exit> {
+    match ea {
+        Rm::Reg(g) => Ok(b.get(sem::st_sig_ref((g.0 & 7) as usize))),
+        Rm::Mem { a, .. } => b.load::<W64>(*a, sem::DATA_READ),
+    }
+}
+
+/// 64 ビット値の `at` ビットから `bits` 幅を取り出してゼロ拡張する。
+fn lane64<B: Backend>(b: &mut B, v: B::V<W64>, at: u32, bits: u32) -> B::V<W64> {
+    let sh = b.konst::<W64>(u64::from(at));
+    let shifted = b.shr_l::<W64>(v, sh);
+    let mask = b.konst::<W64>((1u64 << bits) - 1);
+    b.and::<W64>(shifted, mask)
+}
+
+/// `dst` の `at` ビットから `bits` 幅を `v` の下位で置き換える。
+fn put_lane64<B: Backend>(
+    b: &mut B,
+    dst: B::V<W64>,
+    v: B::V<W64>,
+    at: u32,
+    bits: u32,
+) -> B::V<W64> {
+    let mask = b.konst::<W64>((1u64 << bits) - 1);
+    let lo = b.and::<W64>(v, mask);
+    let sh = b.konst::<W64>(u64::from(at));
+    let part = b.shl::<W64>(lo, sh);
+    let hole = b.shl::<W64>(mask, sh);
+    let nhole = b.not::<W64>(hole);
+    let keep = b.and::<W64>(dst, nhole);
+    b.or::<W64>(keep, part)
+}
+
+/// パック整数の要素ごとの演算の MMX 形（`lane_bin` の 64 ビット版）。
+fn lane_bin64<B: Backend, W: polyisa_sem::Width>(
+    b: &mut B,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+    mut f: impl FnMut(&mut B, B::V<W>, B::V<W>) -> B::V<W>,
+) -> Result<(), B::Exit> {
+    let dst = reg_m(d);
+    let a: B::V<W64> = b.get(sem::st_sig_ref(dst));
+    let c = rq(b, ea)?;
+    let mut acc = b.konst::<W64>(0);
+    let n = 64 / W::BITS;
+    for i in 0..n {
+        let al = lane64(b, a, i * W::BITS, W::BITS);
+        let cl = lane64(b, c, i * W::BITS, W::BITS);
+        let a_w: B::V<W> = b.trunc::<W64, W>(al);
+        let c_w: B::V<W> = b.trunc::<W64, W>(cl);
+        let r = f(b, a_w, c_w);
+        let r64 = b.zext::<W, W64>(r);
+        acc = put_lane64(b, acc, r64, i * W::BITS, W::BITS);
+    }
+    b.set(sem::st_sig_ref(dst), acc);
+    Ok(())
+}
+
+/// `pint` の MMX 形。PADD/PSUB/PMULLW/飽和/平均/min/max/PCMPEQ/PCMPGT。
+pub fn mint<B: Backend, W: polyisa_sem::Width>(
+    b: &mut B,
+    kind: Iop,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    lane_bin64::<B, W>(b, d, ea, |b, a, c| iop_op::<B, W>(b, kind, a, c))
+}
+
+/// PAND/PANDN/POR/PXOR の MMX 形（64 ビット全体の論理）。
+pub fn mlogic<B: Backend>(
+    b: &mut B,
+    kind: u8,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    let dst = reg_m(d);
+    let a: B::V<W64> = b.get(sem::st_sig_ref(dst));
+    let c = rq(b, ea)?;
+    let v = match kind {
+        0 => b.and::<W64>(a, c),
+        1 => {
+            let na = b.not::<W64>(a);
+            b.and::<W64>(na, c)
+        }
+        2 => b.or::<W64>(a, c),
+        _ => b.xor::<W64>(a, c),
+    };
+    b.set(sem::st_sig_ref(dst), v);
+    Ok(())
+}
+
+/// PUNPCKL*/PUNPCKH* の MMX 形。`bits` は要素幅（8/16/32）。
+/// 64 ビットの下半分（high なら上半分）を交互に詰める。
+pub fn mpunpck<B: Backend>(
+    b: &mut B,
+    bits: u32,
+    high: bool,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    let dst = reg_m(d);
+    let a: B::V<W64> = b.get(sem::st_sig_ref(dst));
+    let c = rq(b, ea)?;
+    let half = 32 / bits;
+    let base = if high { half } else { 0 };
+    let mut acc = b.konst::<W64>(0);
+    for i in 0..half {
+        let al = lane64(b, a, (base + i) * bits, bits);
+        let cl = lane64(b, c, (base + i) * bits, bits);
+        acc = put_lane64(b, acc, al, (2 * i) * bits, bits);
+        acc = put_lane64(b, acc, cl, (2 * i + 1) * bits, bits);
+    }
+    b.set(sem::st_sig_ref(dst), acc);
+    Ok(())
+}
+
+/// PACKSSWB/W の MMX 形。`W` 要素を半分の幅に飽和変換して詰める
+/// （dst が下位、src が上位）。`unsig` は packuswb（出力が符号なし飽和、
+/// 入力は符号付き読み）。
+pub fn mpack<B: Backend, W: polyisa_sem::Width>(
+    b: &mut B,
+    unsig: bool,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    let dst = reg_m(d);
+    let a: B::V<W64> = b.get(sem::st_sig_ref(dst));
+    let c = rq(b, ea)?;
+    let mut acc = b.konst::<W64>(0);
+    let n = 64 / W::BITS;
+    let (lo, hi) = if unsig {
+        (0u128, (1u128 << (W::BITS / 2)) - 1)
+    } else {
+        let h = W::BITS / 2;
+        let mag = 1u128 << (h - 1);
+        ((1u128 << W::BITS) - mag, mag - 1)
+    };
+    for (src_i, s) in [a, c].into_iter().enumerate() {
+        for i in 0..n {
+            let l = lane64(b, s, i * W::BITS, W::BITS);
+            let v: B::V<W> = b.trunc::<W64, W>(l);
+            let klo = b.konst::<W>(W::from_u128(lo));
+            let khi = b.konst::<W>(W::from_u128(hi));
+            let under = b.cmp::<W>(Cmp::LtS, v, klo);
+            let over = b.cmp::<W>(Cmp::GtS, v, khi);
+            let r = b.select::<W>(under, klo, v);
+            let r = b.select::<W>(over, khi, r);
+            let r64 = b.zext::<W, W64>(r);
+            acc = put_lane64(
+                b,
+                acc,
+                r64,
+                (src_i as u32 * n + i) * (W::BITS / 2),
+                W::BITS / 2,
+            );
+        }
+    }
+    b.set(sem::st_sig_ref(dst), acc);
+    Ok(())
+}
+
+/// PSRL/PSRA/PSLL の MMX 形。
+fn mshift_impl<B: Backend, W: polyisa_sem::Width>(
+    b: &mut B,
+    dir: Psh,
+    cnt: B::V<W64>,
+    dst: usize,
+) -> Flow<B> {
+    let a: B::V<W64> = b.get(sem::st_sig_ref(dst));
+    // カウントが幅以上なら結果は 0（PSRA は符号拡張）。
+    let bits_k = b.konst::<W64>(u64::from(W::BITS));
+    let over = b.cmp::<W64>(Cmp::GeU, cnt, bits_k);
+    let cnt_w: B::V<W> = b.trunc::<W64, W>(cnt);
+    let mut acc = b.konst::<W64>(0);
+    let n = 64 / W::BITS;
+    for i in 0..n {
+        let al = lane64(b, a, i * W::BITS, W::BITS);
+        let a_w: B::V<W> = b.trunc::<W64, W>(al);
+        let r = match dir {
+            Psh::L => b.shl::<W>(a_w, cnt_w),
+            Psh::A => b.shr_a::<W>(a_w, cnt_w),
+            Psh::R => b.shr_l::<W>(a_w, cnt_w),
+        };
+        let r = if matches!(dir, Psh::A) {
+            let sign_sh = b.konst::<W>(W::from_u128((W::BITS - 1) as u128));
+            let sg = b.shr_l::<W>(a_w, sign_sh);
+            let wz2 = b.konst::<W>(W::from_u128(0));
+            let neg = b.cmp::<W>(Cmp::Ne, sg, wz2);
+            let ones = b.konst::<W>(W::from_u128((1u128 << W::BITS) - 1));
+            let z = b.konst::<W>(W::from_u128(0));
+            let ext = b.select::<W>(neg, ones, z);
+            b.select::<W>(over, ext, r)
+        } else {
+            let z = b.konst::<W>(W::from_u128(0));
+            b.select::<W>(over, z, r)
+        };
+        let r64 = b.zext::<W, W64>(r);
+        acc = put_lane64(b, acc, r64, i * W::BITS, W::BITS);
+    }
+    b.set(sem::st_sig_ref(dst), acc);
+    Ok(())
+}
+
+/// 2 被演算子形（mm, mm/m64）：dst は ModRM.reg、カウントは被演算子全体。
+pub fn mshift<B: Backend, W: polyisa_sem::Width>(
+    b: &mut B,
+    dir: Psh,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Flow<B> {
+    let cnt = rq(b, ea)?;
+    mshift_impl::<B, W>(b, dir, cnt, reg_m(d))
+}
+
+/// グループ即値形（mm, imm8）：dst は ModRM.r/m。
+pub fn mshift_i<B: Backend, W: polyisa_sem::Width>(
+    b: &mut B,
+    dir: Psh,
+    imm: u8,
+    d: &MapDec,
+) -> Flow<B> {
+    let c = b.konst::<W64>(u64::from(imm));
+    mshift_impl::<B, W>(b, dir, c, rm_m(d))
+}
+
+/// PSHUFW。4 つの word を imm の 2 ビットずつで並べ替える。
+pub fn mshufw<B: Backend>(
+    b: &mut B,
+    imm: u8,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    let s = rq(b, ea)?;
+    let mut acc = b.konst::<W64>(0);
+    for i in 0..4u32 {
+        let sel = u32::from((imm >> (2 * i)) & 3);
+        let l = lane64(b, s, sel * 16, 16);
+        acc = put_lane64(b, acc, l, i * 16, 16);
+    }
+    b.set(sem::st_sig_ref(reg_m(d)), acc);
+    Ok(())
+}
+
+/// PMULHW/PMULHUW。16×16→32 の上位 16（`unsigned` は符号なし掛け）。
+pub fn mmulh<B: Backend>(
+    b: &mut B,
+    unsigned: bool,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    let dst = reg_m(d);
+    let a: B::V<W64> = b.get(sem::st_sig_ref(dst));
+    let c = rq(b, ea)?;
+    let mut acc = b.konst::<W64>(0);
+    for i in 0..4u32 {
+        let al = lane64(b, a, i * 16, 16);
+        let cl = lane64(b, c, i * 16, 16);
+        let a16: B::V<W16> = b.trunc::<W64, W16>(al);
+        let c16: B::V<W16> = b.trunc::<W64, W16>(cl);
+        let av = if unsigned {
+            b.zext::<W16, W32>(a16)
+        } else {
+            b.sext::<W16, W32>(a16)
+        };
+        let cv = if unsigned {
+            b.zext::<W16, W32>(c16)
+        } else {
+            b.sext::<W16, W32>(c16)
+        };
+        let p = b.mul::<W32>(av, cv);
+        let sh = b.konst::<W32>(16);
+        let hi = b.shr_l::<W32>(p, sh);
+        let hi64 = b.zext::<W32, W64>(hi);
+        acc = put_lane64(b, acc, hi64, i * 16, 16);
+    }
+    b.set(sem::st_sig_ref(dst), acc);
+    Ok(())
+}
+
+/// PMADDWD。隣接 s16 ペア同士の積の和を s32 にする。
+pub fn mmaddwd<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit> {
+    let dst = reg_m(d);
+    let a: B::V<W64> = b.get(sem::st_sig_ref(dst));
+    let c = rq(b, ea)?;
+    let mut acc = b.konst::<W64>(0);
+    for i in 0..2u32 {
+        let mut sum = b.konst::<W32>(0);
+        for j in 0..2u32 {
+            let al = lane64(b, a, (2 * i + j) * 16, 16);
+            let cl = lane64(b, c, (2 * i + j) * 16, 16);
+            let a16: B::V<W16> = b.trunc::<W64, W16>(al);
+            let c16: B::V<W16> = b.trunc::<W64, W16>(cl);
+            let av = b.sext::<W16, W32>(a16);
+            let cv = b.sext::<W16, W32>(c16);
+            let p = b.mul::<W32>(av, cv);
+            sum = b.add::<W32>(sum, p);
+        }
+        let s64 = b.zext::<W32, W64>(sum);
+        acc = put_lane64(b, acc, s64, i * 32, 32);
+    }
+    b.set(sem::st_sig_ref(dst), acc);
+    Ok(())
+}
+
+/// PMULUDQ（MMX 形）。下位 u32 同士の積がそのまま 64 ビットの結果。
+pub fn mmuludq<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit> {
+    let a: B::V<W64> = b.get(sem::st_sig_ref(reg_m(d)));
+    let c = rq(b, ea)?;
+    let a32: B::V<W32> = b.trunc::<W64, W32>(a);
+    let c32: B::V<W32> = b.trunc::<W64, W32>(c);
+    let av = b.zext::<W32, W64>(a32);
+    let cv = b.zext::<W32, W64>(c32);
+    let p = b.mul::<W64>(av, cv);
+    b.set(sem::st_sig_ref(reg_m(d)), p);
+    Ok(())
+}
+
+/// PSADBW。8 バイトの絶対差の和を下位 16 ビットへ（上位は 0）。
+pub fn msadbw<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit> {
+    let a: B::V<W64> = b.get(sem::st_sig_ref(reg_m(d)));
+    let c = rq(b, ea)?;
+    let mut acc = b.konst::<W64>(0);
+    for i in 0..8u32 {
+        let al = lane64(b, a, i * 8, 8);
+        let cl = lane64(b, c, i * 8, 8);
+        let lt = b.cmp::<W64>(Cmp::LtU, al, cl);
+        let d1 = b.sub::<W64>(al, cl);
+        let d2 = b.sub::<W64>(cl, al);
+        let diff = b.select::<W64>(lt, d2, d1);
+        acc = b.add::<W64>(acc, diff);
+    }
+    b.set(sem::st_sig_ref(reg_m(d)), acc);
+    Ok(())
+}
+
+/// MOVD/MOVQ mm, r/m。`w` が 64 なら movq、さもなくば movd（ゼロ拡張）。
+pub fn movd_pv_ev<B: Backend>(
+    b: &mut B,
+    w: u8,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    let v = if w == 64 {
+        decode::rd::<B, W64>(b, ea, d)?
+    } else {
+        let v32: B::V<W32> = decode::rd::<B, W32>(b, ea, d)?;
+        b.zext::<W32, W64>(v32)
+    };
+    b.set(sem::st_sig_ref(reg_m(d)), v);
+    Ok(())
+}
+
+/// MOVD/MOVQ r/m, mm。`w` が 64 なら 64 ビット、さもなくば下位 32。
+pub fn movd_ev_pv<B: Backend>(
+    b: &mut B,
+    w: u8,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    let v: B::V<W64> = b.get(sem::st_sig_ref(reg_m(d)));
+    if w == 64 {
+        decode::wr::<B, W64>(b, ea, d, v)
+    } else {
+        let v32: B::V<W32> = b.trunc::<W64, W32>(v);
+        decode::wr::<B, W32>(b, ea, d, v32)
+    }
+}
+
+/// MOVQ mm, mm/m64。
+pub fn movq_pv_qv<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit> {
+    let v = rq(b, ea)?;
+    b.set(sem::st_sig_ref(reg_m(d)), v);
+    Ok(())
+}
+
+/// MOVQ mm/m64, mm（MOVNTQ も同じ経路。nt ヒントは効果なし）。
+pub fn movq_qv_pv<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit> {
+    let v: B::V<W64> = b.get(sem::st_sig_ref(reg_m(d)));
+    match ea {
+        Rm::Reg(g) => {
+            b.set(sem::st_sig_ref((g.0 & 7) as usize), v);
+            Ok(())
+        }
+        Rm::Mem { a, .. } => b.store::<W64>(*a, v, sem::DATA_WRITE),
+    }
+}
+
+/// PINSRW mm, r32/m16, imm8。imm の下位 2 ビットの word を置き換える。
+pub fn mpinsrw<B: Backend>(
+    b: &mut B,
+    imm: u8,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    let dst = reg_m(d);
+    let a: B::V<W64> = b.get(sem::st_sig_ref(dst));
+    let w16: B::V<W16> = decode::rd16(b, ea)?;
+    let w64 = b.zext::<W16, W64>(w16);
+    let v = put_lane64(b, a, w64, u32::from(imm & 3) * 16, 16);
+    b.set(sem::st_sig_ref(dst), v);
+    Ok(())
+}
+
+/// PEXTRW r, mm, imm8。imm の下位 2 ビットの word を GPR に書く。
+pub fn mpextrw<B: Backend>(
+    b: &mut B,
+    imm: u8,
+    ea: &Rm<B::V<W64>>,
+    dst: Gpr,
+) -> Result<(), B::Exit> {
+    let s = rq(b, ea)?;
+    let l = lane64(b, s, u32::from(imm & 3) * 16, 16);
+    let l16: B::V<W16> = b.trunc::<W64, W16>(l);
+    let v = b.zext::<W16, W64>(l16);
+    sem::write64(b, dst, v);
+    Ok(())
+}
+
+/// PMOVMSKB（MMX 形）。8 バイトの符号ビットを 8 ビットに集める。
+pub fn mmovmskb<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>, dst: Gpr) -> Result<(), B::Exit> {
+    let s = rq(b, ea)?;
+    let mut acc = b.konst::<W64>(0);
+    for i in 0..8u32 {
+        let l = lane64(b, s, i * 8 + 7, 1);
+        let sh = b.konst::<W64>(u64::from(i));
+        let placed = b.shl::<W64>(l, sh);
+        acc = b.or::<W64>(acc, placed);
+    }
+    sem::write64(b, dst, acc);
+    Ok(())
+}
+
+/// MASKMOVQ。マスク mm の各バイトの MSB が立つ要素だけ
+/// データ mm を DS:(E)DI へ書く。
+pub fn maskmovq<B: Backend>(
+    b: &mut B,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+    seg: u64,
+) -> Result<(), B::Exit> {
+    let src: B::V<W64> = b.get(sem::st_sig_ref(reg_m(d)));
+    let mask = rq(b, ea)?;
+    let di = sem::read64(b, Gpr(7));
+    // (E)DI はアドレスサイズで折り返してから DS 基底を足す。
+    let off = match d.asize {
+        16 => {
+            let m16 = b.konst::<W64>(0xffff);
+            b.and::<W64>(di, m16)
+        }
+        32 => {
+            let m32 = b.konst::<W64>(0xffff_ffff);
+            b.and::<W64>(di, m32)
+        }
+        _ => di,
+    };
+    let sb = b.konst::<W64>(seg);
+    let base = b.add::<W64>(off, sb);
+    for i in 0..8u32 {
+        let m = lane64(b, mask, i * 8 + 7, 1);
+        let m8: B::V<W8> = b.trunc::<W64, W8>(m);
+        let z8 = b.konst::<W8>(0);
+        let en = b.cmp::<W8>(Cmp::Ne, m8, z8);
+        let byte = lane64(b, src, i * 8, 8);
+        let b8: B::V<W8> = b.trunc::<W64, W8>(byte);
+        let koff = b.konst::<W64>(u64::from(i));
+        let a = b.add::<W64>(base, koff);
+        b.if_then(en, |b| b.store::<W8>(a, b8, sem::DATA_WRITE))?;
+    }
+    Ok(())
+}
+
+/// EMMS。タグワードはモデル化していないので状態変化なし。
+pub fn emms<B: Backend>(_b: &mut B) -> Flow<B> {
     Ok(())
 }
 

@@ -102,7 +102,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 段階4の x86 最小 853 件にオペコード表の記述を足した件数。
-        assert_eq!(INSNS.len(), 1472);
+        assert_eq!(INSNS.len(), 1546);
     }
 
     #[test]

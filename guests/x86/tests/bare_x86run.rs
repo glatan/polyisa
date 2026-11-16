@@ -1171,7 +1171,7 @@ fn run_movdqa_load_xmm_rex() {
     env.backend.set(Gpr(5).state(), 0xAABB_CCDD);
     let prog: &[u8] = &[
         0x66, 0x0F, 0x6E, 0xED, // movd xmm5,ebp (xmm5=0xAABBCCDD)
-        0x44, 0x0F, 0x6F, 0xCD, // movdqa xmm9,xmm5 (REX.R)
+        0x66, 0x44, 0x0F, 0x6F, 0xCD, // movdqa xmm9,xmm5 (REX.R)
         0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
         0x48, 0xC7, 0xC7, 0x00, 0x00, 0x00, 0x00, // mov rdi,0
         0x0F, 0x05, // syscall -> exit(0)
@@ -16186,4 +16186,145 @@ fn run16_xlat_offset_wrap() {
     let out = run_x86::run_m16(&mut env, 0x1000, &mut sys, 1);
     assert_eq!(out, Outcome::StepLimit { pc: 0x1001 });
     assert_eq!(env.backend.get(Gpr(0).state()) & 0xFFFF, 0x005A);
+}
+
+#[test]
+fn run_mmx_movd_padd_movq() {
+    // 0F 6E (movd mm,r32); 0F FC (paddb); 0F 7F (movq m64,mm);
+    // 0F 74 (pcmpeqb); 0F 70 (pshufw); 0F 71 (psllw ib);
+    // 0F D7 (pmovmskb); 0F C5 (pextrw); 0F 77 (emms)。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    let prog: &[u8] = &[
+        0xB8, 0x44, 0x43, 0x42, 0x41, // mov eax,0x41424344
+        0xBB, 0x0B, 0x0A, 0x09, 0x08, // mov ebx,0x08090A0B
+        0xBF, 0x00, 0x20, 0x00, 0x00, // mov edi,0x2000
+        0x0F, 0x6E, 0xC0, // movd mm0,eax
+        0x0F, 0x6E, 0xCB, // movd mm1,ebx
+        0x0F, 0xFC, 0xC1, // paddb mm0,mm1 -> 0x494B4D4F
+        0x0F, 0x7F, 0x07, // movq [rdi],mm0
+        0x0F, 0x74, 0xD2, // pcmpeqb mm2,mm2 -> 全 FF
+        0x0F, 0x70, 0xD8, 0x1B, // pshufw mm3,mm0,0x1B -> 語反転
+        0xBA, 0x01, 0x00, 0x01, 0x00, // mov edx,0x00010001
+        0x0F, 0x6E, 0xE2, // movd mm4,edx
+        0x0F, 0x71, 0xF4, 0x04, // psllw mm4,4 -> 0x0010x4
+        0x0F, 0xD7, 0xC2, // pmovmskb eax,mm2 -> 0xFF
+        0x89, 0x47, 0x08, // mov [rdi+8],eax
+        0x0F, 0xC5, 0xC8, 0x01, // pextrw ecx,mm0,1 -> 0x494B
+        0x89, 0x4F, 0x0C, // mov [rdi+12],ecx
+        0x0F, 0x77, // emms
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0x31, 0xFF, // xor rdi,rdi
+        0x0F, 0x05, // syscall -> exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0));
+    // paddb の結果と movq ストア。
+    let st0: u64 = env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0));
+    assert_eq!(st0, 0x0000_0000_494B_4D4F);
+    let mut mem = [0u8; 16];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x2000),
+            &mut mem,
+            polyisa_mem::Access {
+                endian: polyisa_mem::Endian::Le,
+                align: polyisa_mem::Align::Unaligned,
+                kind: polyisa_mem::AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(&mem[0..8], &[0x4F, 0x4D, 0x4B, 0x49, 0, 0, 0, 0]);
+    assert_eq!(&mem[8..12], &0xFFu32.to_le_bytes());
+    assert_eq!(&mem[12..16], &0x494Bu32.to_le_bytes());
+    // pcmpeqb / pshufw / psllw の mm 状態。
+    let st2: u64 = env.backend.get(polyisa_guest_x86::sem::st_sig_ref(2));
+    let st3: u64 = env.backend.get(polyisa_guest_x86::sem::st_sig_ref(3));
+    let st4: u64 = env.backend.get(polyisa_guest_x86::sem::st_sig_ref(4));
+    assert_eq!(st2, 0xFFFF_FFFF_FFFF_FFFF);
+    assert_eq!(st3, 0x4D4F_494B_0000_0000);
+    assert_eq!(st4, 0x0000_0000_0010_0010);
+}
+
+#[test]
+fn run_mmx_pack_sadbw_maskmovq() {
+    // movq ロード、packuswb、psadbw、maskmovq、emms を通す。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    // [0x2150] packuswb 源語: 0x0001,0x00FF,0xFFFF(-1),0x0080
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x2150),
+            &[0x01, 0x00, 0xFF, 0x00, 0xFF, 0xFF, 0x80, 0x00],
+        )
+        .unwrap();
+    // [0x2158]: 0x0100,0x0000,0x7FFF,0x8000
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x2158),
+            &[0x00, 0x01, 0x00, 0x00, 0xFF, 0x7F, 0x00, 0x80],
+        )
+        .unwrap();
+    // [0x2160] psadbw 被演算子: 1..8
+    env.backend
+        .mem
+        .write(VirtAddr(0x2160), &[1, 2, 3, 4, 5, 6, 7, 8])
+        .unwrap();
+    // [0x2170] maskmovq マスク: 偶数バイトのみ MSB=1
+    env.backend
+        .mem
+        .write(VirtAddr(0x2170), &[0xFF, 0, 0xFF, 0, 0xFF, 0, 0xFF, 0])
+        .unwrap();
+    let prog: &[u8] = &[
+        0xBF, 0x50, 0x21, 0x00, 0x00, // mov edi,0x2150
+        0x0F, 0x6F, 0x07, // movq mm0,[rdi]
+        0x0F, 0x6F, 0x4F, 0x08, // movq mm1,[rdi+8]
+        0x0F, 0x67, 0xC1, // packuswb mm0,mm1
+        0x0F, 0x6F, 0x5F, 0x10, // movq mm3,[rdi+0x10]
+        0x0F, 0x6F, 0x67, 0x18, // movq mm4,[rdi+0x18] (0 埋め)
+        0x0F, 0xF6, 0xDC, // psadbw mm3,mm4 -> 36
+        0x0F, 0x6F, 0x57, 0x20, // movq mm2,[rdi+0x20] マスク
+        0xBF, 0x40, 0x21, 0x00, 0x00, // mov edi,0x2140
+        0x0F, 0xF7, 0xC2, // maskmovq mm0,mm2
+        0x0F, 0x77, // emms
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0x31, 0xFF, // xor rdi,rdi
+        0x0F, 0x05, // syscall -> exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0));
+    // packuswb: [1,255,0,128 | 255,0,255,0]
+    let st0: u64 = env.backend.get(polyisa_guest_x86::sem::st_sig_ref(0));
+    assert_eq!(st0, 0x00FF_00FF_8000_FF01);
+    // psadbw: |1|+...+|8| = 36
+    let st3: u64 = env.backend.get(polyisa_guest_x86::sem::st_sig_ref(3));
+    assert_eq!(st3, 36);
+    // maskmovq: 偶数位置だけ書く。mm0 バイト = [1,255,0,128,255,0,255,0]
+    let mut mem = [0xAAu8; 8];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x2140),
+            &mut mem,
+            polyisa_mem::Access {
+                endian: polyisa_mem::Endian::Le,
+                align: polyisa_mem::Align::Unaligned,
+                kind: polyisa_mem::AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(mem, [1, 0, 0, 0, 255, 0, 255, 0]);
 }

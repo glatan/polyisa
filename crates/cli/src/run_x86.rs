@@ -3638,6 +3638,131 @@ fn dispatch_map<B: Backend>(
             }
             sem_ea::byteshift(b, true, d.imm as u8, d)
         }
+        // ===== MMX（接頭辞なし。P/Q = mm レジスタ形）=====
+        Insn::PunpcklbwPvQv => sem_ea::mpunpck(b, 8, false, d, &ea),
+        Insn::PunpcklwdPvQv => sem_ea::mpunpck(b, 16, false, d, &ea),
+        Insn::PunpckldqPvQv => sem_ea::mpunpck(b, 32, false, d, &ea),
+        Insn::PunpckhbwPvQv => sem_ea::mpunpck(b, 8, true, d, &ea),
+        Insn::PunpckhwdPvQv => sem_ea::mpunpck(b, 16, true, d, &ea),
+        Insn::PunpckhdqPvQv => sem_ea::mpunpck(b, 32, true, d, &ea),
+        Insn::PacksswbPvQv => sem_ea::mpack::<B, W16>(b, false, d, &ea),
+        Insn::PackssdwPvQv => sem_ea::mpack::<B, W32>(b, false, d, &ea),
+        Insn::PackuswbPvQv => sem_ea::mpack::<B, W16>(b, true, d, &ea),
+        Insn::PcmpgtbPvQv => sem_ea::mint::<B, W8>(b, sem_ea::Iop::CmpGtS, d, &ea),
+        Insn::PcmpgtwPvQv => sem_ea::mint::<B, W16>(b, sem_ea::Iop::CmpGtS, d, &ea),
+        Insn::PcmpgtdPvQv => sem_ea::mint::<B, W32>(b, sem_ea::Iop::CmpGtS, d, &ea),
+        Insn::PcmpeqbPvQv => sem_ea::mint::<B, W8>(b, sem_ea::Iop::CmpEq, d, &ea),
+        Insn::PcmpeqwPvQv => sem_ea::mint::<B, W16>(b, sem_ea::Iop::CmpEq, d, &ea),
+        Insn::PcmpeqdPvQv => sem_ea::mint::<B, W32>(b, sem_ea::Iop::CmpEq, d, &ea),
+        Insn::PsrlwPvQv => sem_ea::mshift::<B, W16>(b, sem_ea::Psh::R, d, &ea),
+        Insn::PsrldPvQv => sem_ea::mshift::<B, W32>(b, sem_ea::Psh::R, d, &ea),
+        Insn::PsrlqPvQv => sem_ea::mshift::<B, W64>(b, sem_ea::Psh::R, d, &ea),
+        Insn::PsrawPvQv => sem_ea::mshift::<B, W16>(b, sem_ea::Psh::A, d, &ea),
+        Insn::PsradPvQv => sem_ea::mshift::<B, W32>(b, sem_ea::Psh::A, d, &ea),
+        Insn::PsllwPvQv => sem_ea::mshift::<B, W16>(b, sem_ea::Psh::L, d, &ea),
+        Insn::PslldPvQv => sem_ea::mshift::<B, W32>(b, sem_ea::Psh::L, d, &ea),
+        Insn::PsllqPvQv => sem_ea::mshift::<B, W64>(b, sem_ea::Psh::L, d, &ea),
+        Insn::PsrlwQvIb => {
+            if d.modrm < 0xC0 {
+                return Ok(false);
+            }
+            sem_ea::mshift_i::<B, W16>(b, sem_ea::Psh::R, d.imm as u8, d)
+        }
+        Insn::PsrawQvIb => {
+            if d.modrm < 0xC0 {
+                return Ok(false);
+            }
+            sem_ea::mshift_i::<B, W16>(b, sem_ea::Psh::A, d.imm as u8, d)
+        }
+        Insn::PsllwQvIb => {
+            if d.modrm < 0xC0 {
+                return Ok(false);
+            }
+            sem_ea::mshift_i::<B, W16>(b, sem_ea::Psh::L, d.imm as u8, d)
+        }
+        Insn::PsrldQvIb => {
+            if d.modrm < 0xC0 {
+                return Ok(false);
+            }
+            sem_ea::mshift_i::<B, W32>(b, sem_ea::Psh::R, d.imm as u8, d)
+        }
+        Insn::PsradQvIb => {
+            if d.modrm < 0xC0 {
+                return Ok(false);
+            }
+            sem_ea::mshift_i::<B, W32>(b, sem_ea::Psh::A, d.imm as u8, d)
+        }
+        Insn::PslldQvIb => {
+            if d.modrm < 0xC0 {
+                return Ok(false);
+            }
+            sem_ea::mshift_i::<B, W32>(b, sem_ea::Psh::L, d.imm as u8, d)
+        }
+        Insn::PsrlqQvIb => {
+            if d.modrm < 0xC0 {
+                return Ok(false);
+            }
+            sem_ea::mshift_i::<B, W64>(b, sem_ea::Psh::R, d.imm as u8, d)
+        }
+        Insn::PsllqQvIb => {
+            if d.modrm < 0xC0 {
+                return Ok(false);
+            }
+            sem_ea::mshift_i::<B, W64>(b, sem_ea::Psh::L, d.imm as u8, d)
+        }
+        Insn::PaddbPvQv => sem_ea::mint::<B, W8>(b, sem_ea::Iop::Add, d, &ea),
+        Insn::PaddwPvQv => sem_ea::mint::<B, W16>(b, sem_ea::Iop::Add, d, &ea),
+        Insn::PadddPvQv => sem_ea::mint::<B, W32>(b, sem_ea::Iop::Add, d, &ea),
+        Insn::PaddqPvQv => sem_ea::mint::<B, W64>(b, sem_ea::Iop::Add, d, &ea),
+        Insn::PsubbPvQv => sem_ea::mint::<B, W8>(b, sem_ea::Iop::Sub, d, &ea),
+        Insn::PsubwPvQv => sem_ea::mint::<B, W16>(b, sem_ea::Iop::Sub, d, &ea),
+        Insn::PsubdPvQv => sem_ea::mint::<B, W32>(b, sem_ea::Iop::Sub, d, &ea),
+        Insn::PsubqPvQv => sem_ea::mint::<B, W64>(b, sem_ea::Iop::Sub, d, &ea),
+        Insn::PaddsbPvQv => sem_ea::mint::<B, W8>(b, sem_ea::Iop::AddSatS, d, &ea),
+        Insn::PaddswPvQv => sem_ea::mint::<B, W16>(b, sem_ea::Iop::AddSatS, d, &ea),
+        Insn::PaddusbPvQv => sem_ea::mint::<B, W8>(b, sem_ea::Iop::AddSatU, d, &ea),
+        Insn::PadduswPvQv => sem_ea::mint::<B, W16>(b, sem_ea::Iop::AddSatU, d, &ea),
+        Insn::PsubsbPvQv => sem_ea::mint::<B, W8>(b, sem_ea::Iop::SubSatS, d, &ea),
+        Insn::PsubswPvQv => sem_ea::mint::<B, W16>(b, sem_ea::Iop::SubSatS, d, &ea),
+        Insn::PsubusbPvQv => sem_ea::mint::<B, W8>(b, sem_ea::Iop::SubSatU, d, &ea),
+        Insn::PsubuswPvQv => sem_ea::mint::<B, W16>(b, sem_ea::Iop::SubSatU, d, &ea),
+        Insn::PmullwPvQv => sem_ea::mint::<B, W16>(b, sem_ea::Iop::MulLo, d, &ea),
+        Insn::PavgbPvQv => sem_ea::mint::<B, W8>(b, sem_ea::Iop::Avg, d, &ea),
+        Insn::PavgwPvQv => sem_ea::mint::<B, W16>(b, sem_ea::Iop::Avg, d, &ea),
+        Insn::PminubPvQv => sem_ea::mint::<B, W8>(b, sem_ea::Iop::MinU, d, &ea),
+        Insn::PmaxubPvQv => sem_ea::mint::<B, W8>(b, sem_ea::Iop::MaxU, d, &ea),
+        Insn::PminswPvQv => sem_ea::mint::<B, W16>(b, sem_ea::Iop::MinS, d, &ea),
+        Insn::PmaxswPvQv => sem_ea::mint::<B, W16>(b, sem_ea::Iop::MaxS, d, &ea),
+        Insn::PandPvQv => sem_ea::mlogic(b, 0, d, &ea),
+        Insn::PandnPvQv => sem_ea::mlogic(b, 1, d, &ea),
+        Insn::PorPvQv => sem_ea::mlogic(b, 2, d, &ea),
+        Insn::PxorPvQv => sem_ea::mlogic(b, 3, d, &ea),
+        Insn::PmulhuwPvQv => sem_ea::mmulh(b, true, d, &ea),
+        Insn::PmulhwPvQv => sem_ea::mmulh(b, false, d, &ea),
+        Insn::PmuludqPvQv => sem_ea::mmuludq(b, d, &ea),
+        Insn::PmaddwdPvQv => sem_ea::mmaddwd(b, d, &ea),
+        Insn::PsadbwPvQv => sem_ea::msadbw(b, d, &ea),
+        Insn::MovdPvEv => sem_ea::movd_pv_ev(b, 32, d, &ea),
+        Insn::MovdEvPv => sem_ea::movd_ev_pv(b, 32, d, &ea),
+        Insn::MovqPvQv => sem_ea::movq_pv_qv(b, d, &ea),
+        Insn::MovqQvPv => sem_ea::movq_qv_pv(b, d, &ea),
+        Insn::PshufwPvQvIb => sem_ea::mshufw(b, d.imm as u8, d, &ea),
+        Insn::PinsrwPvEwIb => sem_ea::mpinsrw(b, d.imm as u8, d, &ea),
+        Insn::PextrwGvPvIb => sem_ea::mpextrw(b, d.imm as u8, &ea, reg),
+        Insn::PmovmskbGvQv => sem_ea::mmovmskb(b, &ea, reg),
+        Insn::MovntqQvPv => {
+            if d.modrm >= 0xC0 {
+                return Ok(false);
+            }
+            sem_ea::movq_qv_pv(b, d, &ea)
+        }
+        Insn::MaskmovqPvQv => {
+            if d.modrm < 0xC0 {
+                return Ok(false);
+            }
+            sem_ea::maskmovq(b, d, &ea, seg)
+        }
+        Insn::Emms => sem_ea::emms(b),
         // ===== 0F 38（SSSE3/SSE4.1/MOVBE）=====
         Insn::PshufbXvWv => sem_ea::pshufb(b, d, &ea),
         Insn::PhaddwXvWv => sem_ea::phaddsub::<B, W16>(b, false, false, d, &ea),
