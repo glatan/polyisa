@@ -332,6 +332,18 @@ pub trait Backend {
         acc: Access,
     ) -> Result<Self::B, Self::Exit>;
 
+    // ポート空間（x86 の IN/OUT のような ISA 固有 I/O）。
+    // ポートモデルを持つバックエンドだけが実装する。
+    // 既定は読み値 0、書き込みは捨てる。
+    fn port_in<W: Width>(&mut self, port: Self::V<W64>) -> Result<Self::V<W>, Self::Exit> {
+        let _ = port;
+        Ok(self.konst::<W>(W::from_u128(0)))
+    }
+    fn port_out<W: Width>(&mut self, port: Self::V<W64>, v: Self::V<W>) -> Result<(), Self::Exit> {
+        let _ = (port, v);
+        Ok(())
+    }
+
     // 制御
     /// 実行時の値 `c` で分岐する。インタプリタでは片側だけを実行し、
     /// IR では両側を分岐ノードとして記録する。

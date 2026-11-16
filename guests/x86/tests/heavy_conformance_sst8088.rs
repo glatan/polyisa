@@ -31,13 +31,7 @@ const REG_NAMES: [&str; 14] = [
 
 /// まだ対応しないオペコード（ファイル名の拡張子なし）。
 /// 差分は既知なので個数を数えずに済ませる。
-const SKIP: &[&str] = &[
-    // ポート I/O がない（IN/OUT）
-    "E4", "E5", "E6", "E7", "EC", "ED", "EE", "EF",
-    // DIV/IDIV の #DE。IVT シーケンスは実装済みだが、フォールト時に
-    // 除算マイクロコードが残すフラグ値の規則が未確定
-    "F6.6", "F6.7", "F7.6", "F7.7",
-];
+const SKIP: &[&str] = &[];
 
 #[derive(Default)]
 struct Sst {
@@ -47,6 +41,12 @@ struct Sst {
     fina_mask: u16,
     fina_regs: [u16; 14],
     fina_ram: Vec<(u32, u8)>,
+    /// BYTS チャンクの命令バイト列。
+    byts: Vec<u8>,
+    /// CYCL の IOR 記録から取ったポート読み値（ポート番号, バイト）。
+    port_reads: Vec<(u16, u8)>,
+    /// CYCL の IOW 記録から取った期待されるポート書き込み。
+    port_writes: Vec<(u16, u8)>,
 }
 
 struct Rd<'a> {
@@ -97,6 +97,10 @@ fn parse(data: &[u8], max: usize, tests: &mut Vec<Sst>) {
                     let n = rd.u32() as usize;
                     t.name = String::from_utf8_lossy(&rd.d[rd.p..rd.p + n]).into_owned();
                 }
+                b"BYTS" => {
+                    let n = rd.u32() as usize;
+                    t.byts = rd.d[rd.p..rd.p + n].to_vec();
+                }
                 b"INIT" | b"FINA" => {
                     let fina = &tag == b"FINA";
                     while rd.p < cend {
@@ -132,6 +136,37 @@ fn parse(data: &[u8], max: usize, tests: &mut Vec<Sst>) {
                             _ => {}
                         }
                         rd.p = send;
+                    }
+                }
+                b"CYCL" => {
+                    // エントリは 15 バイト。bus_status は [11]、
+                    // io_status は [7]、data_bus は [9:11]、addr は [1:5]。
+                    // IOR/IOW の T1 でポート番号を掴み、T3（io の R/W
+                    // ビットが立つ PASV）で data_bus の下位バイトを読む。
+                    let n = rd.u32() as usize;
+                    let mut pin: Option<u16> = None;
+                    let mut pout: Option<u16> = None;
+                    for _ in 0..n {
+                        let e = &rd.d[rd.p..rd.p + 15];
+                        let addr = u32::from_le_bytes(e[1..5].try_into().unwrap());
+                        let data = e[9];
+                        let bus = e[11];
+                        let ts = e[12];
+                        if ts == 1 && bus == 1 {
+                            pin = Some(addr as u16);
+                        }
+                        if ts == 1 && bus == 2 {
+                            pout = Some(addr as u16);
+                        }
+                        if bus != 1 && bus != 2 {
+                            if let Some(p) = pin.take() {
+                                t.port_reads.push((p, data));
+                            }
+                            if let Some(p) = pout.take() {
+                                t.port_writes.push((p, data));
+                            }
+                        }
+                        rd.p += 15;
                     }
                 }
                 _ => {}
@@ -200,6 +235,9 @@ fn run_one(env: &mut BareEnv, t: &Sst) -> Vec<String> {
     for &(a, v) in &t.ram {
         env.backend.mem.write(VirtAddr(u64::from(a)), &[v]).unwrap();
     }
+    for &(p, v) in &t.port_reads {
+        env.backend.ports[usize::from(p)] = v;
+    }
     for (i, &v) in t.regs.iter().enumerate() {
         set(env, i, v);
     }
@@ -207,8 +245,16 @@ fn run_one(env: &mut BareEnv, t: &Sst) -> Vec<String> {
     let mut out = run_x86::run_m16(env, u32::from(t.regs[12]), &mut sys, 1);
     // REP 接頭辞付き文字列命令は 1 反復ごとに IP が命令先頭へ戻る。
     // 建築的な完了（CX=0 や ZF 条件）まで 1 ステップずつ継続する。
+    // REP のない命令で IP が命令先頭に戻る場合（#DE の IVT 着地点が
+    // 命令アドレスと一致する等）は継続しない。
+    let has_rep = t
+        .byts
+        .iter()
+        .take_while(|&&b| matches!(b, 0x26 | 0x2E | 0x36 | 0x3E | 0xF0 | 0xF2 | 0xF3))
+        .any(|&b| b == 0xF2 || b == 0xF3);
     let mut steps = 1u32;
-    while matches!(out, Outcome::StepLimit { .. })
+    while has_rep
+        && matches!(out, Outcome::StepLimit { .. })
         && get(env, 12) == u32::from(t.regs[12])
         && steps < 0x1_0002
     {
@@ -238,6 +284,12 @@ fn run_one(env: &mut BareEnv, t: &Sst) -> Vec<String> {
             .unwrap();
         if b[0] != v {
             diffs.push(format!("mem {a:05x}: exp {v:02x} got {:02x}", b[0]));
+        }
+    }
+    for &(p, v) in &t.port_writes {
+        let got = env.backend.ports[usize::from(p)];
+        if got != v {
+            diffs.push(format!("port {p:04x}: exp {v:02x} got {got:02x}"));
         }
     }
     diffs

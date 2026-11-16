@@ -499,6 +499,15 @@ impl Backend for IrBackend {
         IrExit::Raise(e)
     }
 
+    /// ポート空間は IR のノードがない。実モード専用の I/O なので
+    /// JIT 経路は `Unimpl` で抜ける点として記録する。
+    fn port_in<W: Width>(&mut self, _port: IrVal) -> Result<IrVal, IrExit> {
+        Err(IrExit::Unimpl)
+    }
+    fn port_out<W: Width>(&mut self, _port: IrVal, _v: IrVal) -> Result<(), IrExit> {
+        Err(IrExit::Unimpl)
+    }
+
     /// ヘルパーは型付き引数を IR に写す決まった形がない。
     /// 呼び出しを `Unimpl` で抜ける点として記録する。
     /// ゲスト側は helper を段階 9 の時点では使っていない。

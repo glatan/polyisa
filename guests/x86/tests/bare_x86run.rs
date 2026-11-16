@@ -16056,3 +16056,134 @@ fn run16_esc_nop() {
     assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
     assert_eq!(env.backend.get(Gpr(0).state()), 0x1234);
 }
+
+#[test]
+fn run16_div_entry_fault() {
+    // F7 F8 = div ax。DX:AX / AX で DX=5,AX=1 → 入口比較 hi>=d で #DE。
+    // 残るフラグは入口減算 hi-d = 5-1 の結果（SZP/A/C/O 全て 0）、
+    // 商・剰余は書かれず、積まれる IP は次の命令（0x1002）。
+    let mut env = env16(&[0xF7, 0xF8], 0x1000);
+    env.backend
+        .mem
+        .write(VirtAddr(0), &[0x00, 0x04, 0x00, 0x03])
+        .unwrap(); // IVT[0] = 0300:0400
+    env.backend.set(polyisa_guest_x86::sem::sreg_ref(2), 0x200);
+    env.backend.set(Gpr(4).state(), 0x1000); // SP
+    env.backend.set(Gpr(0).state(), 0x0001); // AX（除数）
+    env.backend.set(Gpr(2).state(), 0x0005); // DX（被除数上位）
+    env.backend
+        .set(polyisa_guest_x86::sem::eflags_ref(), 0xFFFF);
+    let mut sys = X64Exit;
+    let out = run_x86::run_m16(&mut env, 0x1000, &mut sys, 1);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x0400 });
+    assert_eq!(env.backend.get(Gpr(4).state()) & 0xFFFF, 0x0FFA);
+    let mut stk = [0u8; 6];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x2FFA),
+            &mut stk,
+            polyisa_mem::Access {
+                endian: polyisa_mem::Endian::Le,
+                align: polyisa_mem::Align::Unaligned,
+                kind: polyisa_mem::AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    // ip_next=0x1002、cs=0、flags = (0xFFFF & ~0x8D5) | sub(5,1) = 0xF72A
+    // （5-1=4 はパリティ奇で PF=0、SZP/A/C/O は全て 0）
+    assert_eq!(stk, [0x02, 0x10, 0x00, 0x00, 0x2A, 0xF7]);
+    // AX/DX はフォールトなので変更されない。
+    assert_eq!(env.backend.get(Gpr(0).state()) & 0xFFFF, 0x0001);
+    assert_eq!(env.backend.get(Gpr(2).state()) & 0xFFFF, 0x0005);
+}
+
+#[test]
+fn run16_idiv_rep_flips_quotient() {
+    // F3 F6 FB = rep idiv bl。8088 の PREIDIV は内部 F1 を REP 接頭辞
+    // で立てるため、通常と逆符号の商になる（実機 quirk）。
+    // AX=0x000A, BL=0xFE(-2): |q|=5。rep なしなら -5 (0xFB)、
+    // rep ありなら +5 (0x05)。剰余は被除数符号で 0。
+    let mut env = env16(&[0xF3, 0xF6, 0xFB], 0x1000);
+    env.backend.set(Gpr(0).state(), 0x000A); // AX
+    env.backend.set(Gpr(3).state(), 0x00FE); // BL = -2
+    let mut sys = X64Exit;
+    let out = run_x86::run_m16(&mut env, 0x1000, &mut sys, 1);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1003 });
+    assert_eq!(env.backend.get(Gpr(0).state()) & 0xFFFF, 0x0005);
+}
+
+#[test]
+fn run16_idiv_repne_flips_quotient() {
+    // F2 (REPNE) も同じく F1 を立てる。
+    let mut env = env16(&[0xF2, 0xF6, 0xFB], 0x1000);
+    env.backend.set(Gpr(0).state(), 0x000A);
+    env.backend.set(Gpr(3).state(), 0x00FE);
+    let mut sys = X64Exit;
+    let out = run_x86::run_m16(&mut env, 0x1000, &mut sys, 1);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1003 });
+    assert_eq!(env.backend.get(Gpr(0).state()) & 0xFFFF, 0x0005);
+}
+
+#[test]
+fn run16_idiv_plain_quotient() {
+    // 比較用に REP なし: 10 / -2 = -5、剰余 +0。
+    let mut env = env16(&[0xF6, 0xFB], 0x1000);
+    env.backend.set(Gpr(0).state(), 0x000A);
+    env.backend.set(Gpr(3).state(), 0x00FE);
+    let mut sys = X64Exit;
+    let out = run_x86::run_m16(&mut env, 0x1000, &mut sys, 1);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+    assert_eq!(env.backend.get(Gpr(0).state()) & 0xFFFF, 0x00FB);
+}
+
+#[test]
+fn run16_aam0_fault() {
+    // D4 00 = aam 0。除数 0 は #DE。AAM の CORD 被除数上位は 0 なので
+    // 入口比較 0 - 0 のフラグ（ZF+PF）が残る。
+    let mut env = env16(&[0xD4, 0x00], 0x1000);
+    env.backend
+        .mem
+        .write(VirtAddr(0), &[0x00, 0x04, 0x00, 0x03])
+        .unwrap(); // IVT[0] = 0300:0400
+    env.backend.set(polyisa_guest_x86::sem::sreg_ref(2), 0x200);
+    env.backend.set(Gpr(4).state(), 0x1000);
+    env.backend.set(Gpr(0).state(), 0x0037); // AX（残らない）
+    env.backend
+        .set(polyisa_guest_x86::sem::eflags_ref(), 0xFFFF);
+    let mut sys = X64Exit;
+    let out = run_x86::run_m16(&mut env, 0x1000, &mut sys, 1);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x0400 });
+    let mut stk = [0u8; 6];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x2FFA),
+            &mut stk,
+            polyisa_mem::Access {
+                endian: polyisa_mem::Endian::Le,
+                align: polyisa_mem::Align::Unaligned,
+                kind: polyisa_mem::AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    // ip_next=0x1002、flags = (0xFFFF & ~0x8D5) | sub(0,0) = 0xF76E
+    assert_eq!(stk, [0x02, 0x10, 0x00, 0x00, 0x6E, 0xF7]);
+    // AX は書かれない。
+    assert_eq!(env.backend.get(Gpr(0).state()) & 0xFFFF, 0x0037);
+}
+
+#[test]
+fn run16_xlat_offset_wrap() {
+    // D7 = xlat。BX+AL が 0xFFFF を越えるとオフセットは 16 ビットに
+    // 折り返す。BX=0xFFE7, AL=0xE0 → off=0x00C7、DS=0x100 → 0x10C7。
+    let mut env = env16(&[0xD7], 0x1000);
+    env.backend.set(polyisa_guest_x86::sem::sreg_ref(3), 0x100);
+    env.backend.set(Gpr(3).state(), 0xFFE7); // BX
+    env.backend.set(Gpr(0).state(), 0x00E0); // AX (AL=0xE0)
+    env.backend.mem.write(VirtAddr(0x10C7), &[0x5A]).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_m16(&mut env, 0x1000, &mut sys, 1);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1001 });
+    assert_eq!(env.backend.get(Gpr(0).state()) & 0xFFFF, 0x005A);
+}

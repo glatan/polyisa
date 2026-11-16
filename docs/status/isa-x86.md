@@ -153,6 +153,7 @@
 | imul | imul_r_imm、imul_r_imm8、imul_r_imm8_mem32、imul_r_imm8_mem8、imul_r_imm8_rip、imul_r_imm8_sib、imul_r_imm8_sibd、imul_r_imm_mem8、imul_r_imm_rip、imul_r_imm_sib、imul_r_imm_sibd、imul_r_rm、imul_rm_mem8、imul_rm_sibd | 真 | alu |
 | imul | imul_r_mem32、imul_r_mem8、imul_r_memnd、imul_r_rip、imul_r_sibabs、imul_r_sibd | 真 | load |
 | imul | imul_eb、imul_ev、imul_gv_ev、imul_gv_ev_ib、imul_gv_ev_iz、imul_rm32 | 真 | mult |
+| in | in_al_dx、in_al_ib、in_ev_dx、in_ev_ib | 真 | system |
 | inc | inc_rv | !m64 | alu |
 | inc | inc_eax、inc_eb、inc_ebp、inc_ebx、inc_ecx、inc_edi、inc_edx、inc_esi、inc_esp、inc_ev、inc_m8_rip、inc_r8、inc_rm、inc_rm_mem32、inc_rm_mem8、inc_rm_memnd、inc_rm_rip、inc_rm_sib、inc_rm_sibd、inc_rm_sibd32 | 真 | alu |
 | insertps | insertps_xv_wv_ib | 真 | alu |
@@ -254,6 +255,7 @@
 | or | or_r8_m8_mem32、or_r8_m8_rip、or_r8_m8_sibd、or_r8_m8_sibd32 | 真 | load |
 | orpd | orpd_xv_wv | 真 | alu |
 | orps | orps_xv_wv | 真 | alu |
+| out | out_dx_al、out_dx_ev、out_ib_al、out_ib_ev | 真 | system |
 | pabsb_xv_wv | pabsb_xv_wv | 真 | alu |
 | pabsd_xv_wv | pabsd_xv_wv | 真 | alu |
 | pabsw_xv_wv | pabsw_xv_wv | 真 | alu |

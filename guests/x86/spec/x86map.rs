@@ -460,6 +460,83 @@ pub fn build_maps(m: &mut Model) {
         MapItem::Insn(0xEB, n("jmp_jb", &[Rel(B8)], "jmp {r}", "jump")),
     ]);
 
+    // IN/OUT。ポート番号は imm8 または DX、データはアキュムレータ
+    // （AL 固定か osize 幅）。フラグは変わらない。
+    primary.extend([
+        MapItem::Insn(
+            0xE4,
+            n(
+                "in_al_ib",
+                &[Imp(ImpOp::Eax), Imm(B8)],
+                "in al, {i}",
+                "system",
+            ),
+        ),
+        MapItem::Insn(
+            0xE5,
+            n(
+                "in_ev_ib",
+                &[Imp(ImpOp::Eax), Imm(B8)],
+                "in {a}, {i}",
+                "system",
+            ),
+        ),
+        MapItem::Insn(
+            0xE6,
+            n(
+                "out_ib_al",
+                &[Imm(B8), Imp(ImpOp::Eax)],
+                "out {i}, al",
+                "system",
+            ),
+        ),
+        MapItem::Insn(
+            0xE7,
+            n(
+                "out_ib_ev",
+                &[Imm(B8), Imp(ImpOp::Eax)],
+                "out {i}, {a}",
+                "system",
+            ),
+        ),
+        MapItem::Insn(
+            0xEC,
+            n(
+                "in_al_dx",
+                &[Imp(ImpOp::Eax), Imp(ImpOp::Edx)],
+                "in al, dx",
+                "system",
+            ),
+        ),
+        MapItem::Insn(
+            0xED,
+            n(
+                "in_ev_dx",
+                &[Imp(ImpOp::Eax), Imp(ImpOp::Edx)],
+                "in {a}, dx",
+                "system",
+            ),
+        ),
+        MapItem::Insn(
+            0xEE,
+            n(
+                "out_dx_al",
+                &[Imp(ImpOp::Edx), Imp(ImpOp::Eax)],
+                "out dx, al",
+                "system",
+            ),
+        ),
+        MapItem::Insn(
+            0xEF,
+            n(
+                "out_dx_ev",
+                &[Imp(ImpOp::Edx), Imp(ImpOp::Eax)],
+                "out dx, {a}",
+                "system",
+            ),
+        ),
+    ]);
+
     // フラグ操作と HLT。
     primary.extend([
         MapItem::Insn(0xF4, n("hlt", &[], "hlt", "system")),

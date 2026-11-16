@@ -5,13 +5,13 @@
 //!
 //! Ref: SPEC-X86-INTEL-SDM (v093) Vol.2.
 
-use polyisa_sem::{Backend, Cmp, Flow, W8, W16, W32, W64, W128};
+use polyisa_sem::{Backend, Cmp, Flow, W8, W16, W32, W64, W128, Width};
 
 use crate::MapDec;
 use crate::decode::{self, Hw, Rm};
 use crate::sem::{
-    self, Gpr, eflags_ref, eip_ref, read_cf, read_of, read_pf, read_sf, read_zf, update_add_flags,
-    update_addc_flags, update_logic_flags, update_sub_flags, update_subb_flags,
+    self, FLAG_CF, FLAG_OF, Gpr, eflags_ref, eip_ref, read_cf, read_of, read_pf, read_sf, read_zf,
+    update_add_flags, update_addc_flags, update_logic_flags, update_sub_flags, update_subb_flags,
 };
 use crate::sem::{pick, szp_bits};
 
@@ -1259,6 +1259,45 @@ pub fn iret_real<B: Backend>(b: &mut B, sa: u8, sseg: u64) -> Flow<B> {
     jmp_far(b, ip, sel)
 }
 
+/// IN AL/AX/EAX, port。ポート番号は 16 ビットで、読み出した
+/// 値はアキュムレータへ入る。フラグは変わらない。
+pub fn io_in<B: Backend>(b: &mut B, w: u8, port: B::V<W64>, d: &MapDec) -> Flow<B> {
+    match w {
+        8 => {
+            let v = b.port_in::<W8>(port)?;
+            W8::put(b, Gpr(0), d, v);
+        }
+        16 => {
+            let v = b.port_in::<W16>(port)?;
+            W16::put(b, Gpr(0), d, v);
+        }
+        _ => {
+            let v = b.port_in::<W32>(port)?;
+            W32::put(b, Gpr(0), d, v);
+        }
+    }
+    Ok(())
+}
+
+/// OUT port, AL/AX/EAX。アキュムレータの値をポートへ書く。
+/// フラグは変わらない。
+pub fn io_out<B: Backend>(b: &mut B, w: u8, port: B::V<W64>, d: &MapDec) -> Flow<B> {
+    match w {
+        8 => {
+            let v = W8::get(b, Gpr(0), d);
+            b.port_out::<W8>(port, v)
+        }
+        16 => {
+            let v = W16::get(b, Gpr(0), d);
+            b.port_out::<W16>(port, v)
+        }
+        _ => {
+            let v = W32::get(b, Gpr(0), d);
+            b.port_out::<W32>(port, v)
+        }
+    }
+}
+
 // ---- SETcc/CMOVcc ----
 
 /// SETcc r/m8。
@@ -1718,6 +1757,19 @@ pub fn xlat<B: Backend>(b: &mut B, d: &MapDec, seg: u64) -> Flow<B> {
     let al = sem::read8(b, Gpr(0), false);
     let al64 = b.zext::<W8, W64>(al);
     let addr = b.add::<W64>(base, al64);
+    // オフセットはアドレスサイズに折り返す（8088 の XLAT は
+    // BX+AL が 0xFFFF を越えるとセグメント内で巻き戻る）。
+    let addr = match d.asize {
+        16 => {
+            let m16 = b.konst::<W64>(0xffff);
+            b.and::<W64>(addr, m16)
+        }
+        32 => {
+            let m32 = b.konst::<W64>(0xffff_ffff);
+            b.and::<W64>(addr, m32)
+        }
+        _ => addr,
+    };
     let sb = b.konst::<W64>(seg);
     let addr = b.add::<W64>(addr, sb);
     let v = b.load::<W8>(addr, sem::DATA_READ)?;
@@ -4421,7 +4473,8 @@ fn mulx_w<B: Backend, W: Hw, W2: polyisa_sem::Width>(
 
 /// DIV/IDIV r/m。実モードでは 0 除算・商あふれを IVT 0 番へ送る
 /// （積まれる IP は命令の次を指す）。それ以外のモードでは DivZero
-/// 例外で退出する。8088 のフォールトが残すフラグの実動作は未再現。
+/// 例外で退出する。8088 がフォールト時に残すフラグは
+/// CORD 先頭の `tmpA - tmpB` 比較減算のもの。
 #[allow(clippy::too_many_arguments)]
 pub fn divx<B: Backend>(
     b: &mut B,
@@ -4445,12 +4498,141 @@ pub fn divx<B: Backend>(
 
 /// #DE。実モードでは実機の割り込み 0（FLAGS/CS/次の IP を積んで
 /// IVT[0] へ far 分岐）。他モードは divide error 例外。
-fn div_fault<B: Backend>(b: &mut B, eip: u32, len: u32, sa: u8, sseg: u64, mode: u8) -> Flow<B> {
+/// `hi`/`dv` はオペランド幅の（符号付きなら絶対値化後の）被除数
+/// 上位半分と除数。8088 では CORD 先頭の `hi - dv` 比較減算の
+/// フラグがフォールト時に残る（SST 8088 実測）。
+#[allow(clippy::too_many_arguments)]
+fn div_fault<B: Backend, W: Width>(
+    b: &mut B,
+    hi: B::V<W>,
+    dv: B::V<W>,
+    eip: u32,
+    len: u32,
+    sa: u8,
+    sseg: u64,
+    mode: u8,
+) -> Flow<B> {
     if mode == 16 {
+        let r = b.sub::<W>(hi, dv);
+        update_sub_flags::<B, W>(b, hi, dv, r);
         int_real(b, eip, len, 0, sa, sseg)
     } else {
         Err(sem::div0(b, eip))
     }
+}
+
+/// mode==16（8088）の DIV/IDIV。CORD 除算マイクロコードを再現する。
+///
+/// フラグはループ内で最後に実行された F 比較（シフト後 tmpA - 除数）
+/// が残す。ただし CF は除算完了時に捨てられる RCL tmpC が ¬商 の
+/// 最上位を残すため ¬q_msb に置き換わる。IDIV 成功時は POSTIDIV の
+/// CCOF で CF/OF=0。フォールトは 2 種: 入口比較の |hi| ≥ |d|
+/// （ゼロ除算を含む）と IDIV 専用の POSTIDIV 商オーバーフロー
+/// （商マグニチュードの msb=1。表現可能な -2^(W-1) もフォールト
+/// するのが実機動作）。いずれもフラグ更新のあと INT 0 を起こし、
+/// 商・剰余は書かない。
+#[allow(clippy::too_many_arguments)]
+fn div_cord<B: Backend, W: Hw, W2: Width, F: Fn(&mut B, B::V<W>, B::V<W>)>(
+    b: &mut B,
+    hi: B::V<W>,
+    lo: B::V<W>,
+    d: B::V<W>,
+    dvd: B::V<W2>,
+    neg_q: B::B,
+    neg_r: B::B,
+    signed: bool,
+    eip: u32,
+    len: u32,
+    sa: u8,
+    sseg: u64,
+    wr: F,
+) -> Flow<B> {
+    let zero = b.konst::<W>(W::from_u128(0));
+    let one = b.konst::<W>(W::from_u128(1));
+    let top = b.konst::<W>(W::from_u128(1u128 << (W::BITS - 1)));
+    // 入口フォールト: |hi| ≥ |d|。d=0 もここで捕捉される。
+    let ef = b.cmp::<W>(Cmp::GeU, hi, d);
+    // 商・剰余はマグニチュード除算。ゼロ除算は結果を使わないので 1 に退避。
+    let dz = b.cmp::<W>(Cmp::Eq, d, zero);
+    let d_safe = b.select::<W>(dz, one, d);
+    let d_ext = b.zext::<W, W2>(d_safe);
+    let q2 = b.udiv::<W2>(dvd, d_ext);
+    let r2 = b.urem::<W2>(dvd, d_ext);
+    let q = b.trunc::<W2, W>(q2);
+    let r = b.trunc::<W2, W>(r2);
+    let qb = b.and::<W>(q, top);
+    let q_msb = b.cmp::<W>(Cmp::Ne, qb, zero);
+    // POSTIDIV 商オーバーフロー（IDIV のみ）。
+    let mut fault = ef;
+    if signed {
+        fault = bor(b, ef, q_msb);
+    }
+    // CORD ループ。比較の桁供給ビットは元の下位被除数の bit (W-1-i)。
+    // fl_a は最後にフラグを書いた比較の被演算値。全反復が top-bit
+    // パスなら入口比較の hi が残るので hi で初期化する。
+    let mut fl_a = hi;
+    let mut tmp_a = hi;
+    for i in 0..W::BITS {
+        let shn = b.konst::<W>(W::from_u128((W::BITS - 1 - i) as u128));
+        let c1s = b.shr_l::<W>(lo, shn);
+        let c1 = b.and::<W>(c1s, one);
+        let tb = b.and::<W>(tmp_a, top);
+        let c2 = b.cmp::<W>(Cmp::Ne, tb, zero);
+        let a_sl = b.shl::<W>(tmp_a, one);
+        let a_sh = b.or::<W>(a_sl, c1);
+        fl_a = b.select::<W>(c2, fl_a, a_sh);
+        let subr = b.sub::<W>(a_sh, d);
+        let ge = b.cmp::<W>(Cmp::GeU, a_sh, d);
+        let take = bor(b, c2, ge);
+        tmp_a = b.select::<W>(take, subr, a_sh);
+    }
+    // フラグ = 入口フォールト時は hi - d、それ以外は最後の比較。
+    let fx = b.select::<W>(ef, hi, fl_a);
+    let fr = b.sub::<W>(fx, d);
+    update_sub_flags::<B, W>(b, fx, d, fr);
+    // CF/OF を比較結果から実機の値に直す。
+    //   入口フォールト: 比較のまま（hi≥d なので CF=0・OF は減算値）。
+    //   DIV 成功: CF = ¬q_msb。
+    //   IDIV 成功: CF=0, OF=0（CCOF）。
+    //   POSTIDIV フォールト: CF=0（=¬q_msb は q_msb=1 で自動的に 0）。
+    let nq = bnot(b, q_msb);
+    let cf_t = if signed {
+        b.konst::<W32>(0)
+    } else {
+        pick(b, nq, FLAG_CF)
+    };
+    let z32 = b.konst::<W32>(0);
+    let cf_v = b.select::<W32>(ef, z32, cf_t);
+    let a1 = b.xor::<W>(fx, d);
+    let a2 = b.xor::<W>(fx, fr);
+    let sof = b.and::<W>(a1, a2);
+    let sof_n = b.konst::<W>(W::from_u128((W::BITS - 1) as u128));
+    let sof_s = b.shr_l::<W>(sof, sof_n);
+    let sof_t = b.and::<W>(sof_s, one);
+    let of_c = b.cmp::<W>(Cmp::Ne, sof_t, zero);
+    let mut of_v = pick(b, of_c, FLAG_OF);
+    if signed {
+        let succ = bnot(b, fault);
+        of_v = b.select::<W32>(succ, z32, of_v);
+    }
+    let clr = b.konst::<W32>(!(FLAG_CF | FLAG_OF));
+    let mut f: B::V<W32> = b.get(eflags_ref());
+    f = b.and::<W32>(f, clr);
+    f = b.or::<W32>(f, cf_v);
+    f = b.or::<W32>(f, of_v);
+    b.set(eflags_ref(), f);
+    // フォールトは商・剰余を書かずに割り込み 0 を起こす。
+    let nf = bnot(b, fault);
+    b.if_then(nf, |b| {
+        let q_neg = b.sub::<W>(zero, q);
+        let r_neg = b.sub::<W>(zero, r);
+        let qs = b.select::<W>(neg_q, q_neg, q);
+        let rs = b.select::<W>(neg_r, r_neg, r);
+        wr(b, qs, rs);
+        Ok(())
+    })?;
+    b.if_then(fault, |b| int_real(b, eip, len, 0, sa, sseg))?;
+    Ok(())
 }
 
 /// DIV/IDIV r/m8。被除数は AX、商を AL・剰余を AH に置く。
@@ -4469,14 +4651,82 @@ fn divx8<B: Backend>(
     let ax32: B::V<W32> = b.get(Gpr(0).state());
     let ax: B::V<W16> = b.trunc::<W32, W16>(ax32);
     let y = rd_w::<B, W8>(b, ea, d)?;
+    if mode == 16 {
+        // PREIDIV 相当の絶対値化（IDIV のみ）。
+        let z16 = b.konst::<W16>(0);
+        let z8 = b.konst::<W8>(0);
+        let zero32 = b.konst::<W32>(0);
+        let one32 = b.konst::<W32>(1);
+        let (m_a, m_d, neg_q, neg_r) = if signed {
+            let neg_a = b.sub::<W16>(z16, ax);
+            let sa16 = b.cmp::<W16>(Cmp::LtS, ax, z16);
+            let m_a = b.select::<W16>(sa16, neg_a, ax);
+            let neg_d = b.sub::<W8>(z8, y);
+            let sd8 = b.cmp::<W8>(Cmp::LtS, y, z8);
+            let m_d = b.select::<W8>(sd8, neg_d, y);
+            let s1 = b.select::<W32>(sa16, one32, zero32);
+            let s2 = b.select::<W32>(sd8, one32, zero32);
+            let mut neg_q = b.cmp::<W32>(Cmp::Ne, s1, s2);
+            // F1 は REP 接頭辞でも立つ（8088 実機の quirk。`rep idiv`
+            // は商の符号が反転する）。
+            if d.rep != 0 {
+                neg_q = bnot(b, neg_q);
+            }
+            (m_a, m_d, neg_q, sa16)
+        } else {
+            let f0 = b.cmp::<W32>(Cmp::Ne, zero32, zero32);
+            (ax, y, f0, f0)
+        };
+        let sh8 = b.konst::<W16>(8);
+        let hi16 = b.shr_l::<W16>(m_a, sh8);
+        let hi = b.trunc::<W16, W8>(hi16);
+        let lo = b.trunc::<W16, W8>(m_a);
+        return div_cord::<B, W8, W16, _>(
+            b,
+            hi,
+            lo,
+            m_d,
+            m_a,
+            neg_q,
+            neg_r,
+            signed,
+            eip,
+            len,
+            sa,
+            sseg,
+            |b, q, r| {
+                sem::write8(b, Gpr(0), false, q);
+                sem::write8(b, Gpr(0), true, r);
+            },
+        );
+    }
+    // PREIDIV 相当の絶対値化（IDIV のみ）。CORD のフォールト検査
+    // は |上位半分| - |除数| の減算を行い、そのフラグが残る。
+    let (m_dvd, m_d) = if signed {
+        let z16 = b.konst::<W16>(0);
+        let neg_a = b.sub::<W16>(z16, ax);
+        let sa16 = b.cmp::<W16>(Cmp::LtS, ax, z16);
+        let m_a = b.select::<W16>(sa16, neg_a, ax);
+        let z8 = b.konst::<W8>(0);
+        let neg_d = b.sub::<W8>(z8, y);
+        let sd8 = b.cmp::<W8>(Cmp::LtS, y, z8);
+        (m_a, b.select::<W8>(sd8, neg_d, y))
+    } else {
+        (ax, y)
+    };
     let (dvd, dvs) = if signed {
         (b.sext::<W16, W32>(ax), b.sext::<W8, W32>(y))
     } else {
         (b.zext::<W16, W32>(ax), b.zext::<W8, W32>(y))
     };
+    let sh8 = b.konst::<W16>(8);
+    let hi16 = b.shr_l::<W16>(m_dvd, sh8);
+    let hi8 = b.trunc::<W16, W8>(hi16);
     let zero = b.konst::<W32>(0);
     let is_zero = b.cmp::<W32>(Cmp::Eq, dvs, zero);
-    b.if_then(is_zero, |b| div_fault(b, eip, len, sa, sseg, mode))?;
+    b.if_then(is_zero, |b| {
+        div_fault::<B, W8>(b, hi8, m_d, eip, len, sa, sseg, mode)
+    })?;
     let q = if signed {
         b.sdiv::<W32>(dvd, dvs)
     } else {
@@ -4489,7 +4739,9 @@ fn divx8<B: Backend>(
         b.zext::<W8, W32>(q8)
     };
     let over = b.cmp::<W32>(Cmp::Ne, q_back, q);
-    b.if_then(over, |b| div_fault(b, eip, len, sa, sseg, mode))?;
+    b.if_then(over, |b| {
+        div_fault::<B, W8>(b, hi8, m_d, eip, len, sa, sseg, mode)
+    })?;
     let r = if signed {
         b.srem::<W32>(dvd, dvs)
     } else {
@@ -4516,6 +4768,57 @@ fn divx_w<B: Backend, W: Hw, W2: polyisa_sem::Width>(
     let lo = W::get(b, Gpr(0), d);
     let hi = W::get(b, Gpr(2), d);
     let y = rd_w::<B, W>(b, ea, d)?;
+    if mode == 16 {
+        // PREIDIV 相当の絶対値化（IDIV のみ）。
+        let zw = b.konst::<W>(W::from_u128(0));
+        let zero32 = b.konst::<W32>(0);
+        let one32 = b.konst::<W32>(1);
+        let sh16 = b.konst::<W2>(W2::from_u128(u128::from(W::BITS)));
+        let hi_z = b.zext::<W, W2>(hi);
+        let lo_z = b.zext::<W, W2>(lo);
+        let hi_sh = b.shl::<W2>(hi_z, sh16);
+        let dvd = b.or::<W2>(hi_sh, lo_z);
+        let z2 = b.konst::<W2>(W2::from_u128(0));
+        let (m_dvd, m_d, neg_q, neg_r) = if signed {
+            let neg = b.sub::<W2>(z2, dvd);
+            let sdvd = b.cmp::<W>(Cmp::LtS, hi, zw);
+            let m_dvd = b.select::<W2>(sdvd, neg, dvd);
+            let neg_d = b.sub::<W>(zw, y);
+            let sd = b.cmp::<W>(Cmp::LtS, y, zw);
+            let m_d = b.select::<W>(sd, neg_d, y);
+            let s1 = b.select::<W32>(sdvd, one32, zero32);
+            let s2 = b.select::<W32>(sd, one32, zero32);
+            let mut neg_q = b.cmp::<W32>(Cmp::Ne, s1, s2);
+            if d.rep != 0 {
+                neg_q = bnot(b, neg_q);
+            }
+            (m_dvd, m_d, neg_q, sdvd)
+        } else {
+            let f0 = b.cmp::<W32>(Cmp::Ne, zero32, zero32);
+            (dvd, y, f0, f0)
+        };
+        let m_hi2 = b.shr_l::<W2>(m_dvd, sh16);
+        let m_hi = b.trunc::<W2, W>(m_hi2);
+        let m_lo = b.trunc::<W2, W>(m_dvd);
+        return div_cord::<B, W, W2, _>(
+            b,
+            m_hi,
+            m_lo,
+            m_d,
+            m_dvd,
+            neg_q,
+            neg_r,
+            signed,
+            eip,
+            len,
+            sa,
+            sseg,
+            |b, q, r| {
+                W::put(b, Gpr(0), d, q);
+                W::put(b, Gpr(2), d, r);
+            },
+        );
+    }
     let hiw = if signed {
         b.sext::<W, W2>(hi)
     } else {
@@ -4530,9 +4833,27 @@ fn divx_w<B: Backend, W: Hw, W2: polyisa_sem::Width>(
     } else {
         b.zext::<W, W2>(y)
     };
+    // PREIDIV 相当の絶対値化（IDIV のみ）。CORD のフォールト検査
+    // は |上位半分| - |除数| の減算を行い、そのフラグが残る。
+    let (m_hi, m_d) = if signed {
+        let z2 = b.konst::<W2>(W2::from_u128(0));
+        let neg = b.sub::<W2>(z2, dvd);
+        let sd2 = b.cmp::<W2>(Cmp::LtS, dvd, z2);
+        let m2 = b.select::<W2>(sd2, neg, dvd);
+        let m_h2 = b.shr_l::<W2>(m2, sh);
+        let m_hi = b.trunc::<W2, W>(m_h2);
+        let zw = b.konst::<W>(W::from_u128(0));
+        let neg_d = b.sub::<W>(zw, y);
+        let sdw = b.cmp::<W>(Cmp::LtS, y, zw);
+        (m_hi, b.select::<W>(sdw, neg_d, y))
+    } else {
+        (hi, y)
+    };
     let zero = b.konst::<W2>(W2::from_u128(0));
     let is_zero = b.cmp::<W2>(Cmp::Eq, yw, zero);
-    b.if_then(is_zero, |b| div_fault(b, eip, len, sa, sseg, mode))?;
+    b.if_then(is_zero, |b| {
+        div_fault::<B, W>(b, m_hi, m_d, eip, len, sa, sseg, mode)
+    })?;
     let q = if signed {
         b.sdiv::<W2>(dvd, yw)
     } else {
@@ -4545,7 +4866,9 @@ fn divx_w<B: Backend, W: Hw, W2: polyisa_sem::Width>(
         b.zext::<W, W2>(q_t)
     };
     let over = b.cmp::<W2>(Cmp::Ne, q_back, q);
-    b.if_then(over, |b| div_fault(b, eip, len, sa, sseg, mode))?;
+    b.if_then(over, |b| {
+        div_fault::<B, W>(b, m_hi, m_d, eip, len, sa, sseg, mode)
+    })?;
     let r = if signed {
         b.srem::<W2>(dvd, yw)
     } else {
@@ -4726,9 +5049,20 @@ pub fn aaa_aas<B: Backend>(b: &mut B, sub: bool) -> Flow<B> {
 
 /// AAM（D4 ib）。AL を base で割り商を AH・剰余を AL に置く。
 /// SZP は剰余、CF/OF/AF=0（8088 実測）。base=0 は #DE。
-pub fn aam<B: Backend>(b: &mut B, base: u8, eip: u32) -> Flow<B> {
+pub fn aam<B: Backend>(
+    b: &mut B,
+    base: u8,
+    eip: u32,
+    len: u32,
+    sa: u8,
+    sseg: u64,
+    mode: u8,
+) -> Flow<B> {
     if base == 0 {
-        return Err(sem::div0(b, eip));
+        // 8088 の AAM は被除数上位 = 0 の CORD 経路。除数 0 は
+        // 入口比較 0 - 0 のフラグを残して #DE（IVT 0 番）になる。
+        let z = b.konst::<W8>(0);
+        return div_fault::<B, W8>(b, z, z, eip, len, sa, sseg, mode);
     }
     let al = sem::read8(b, Gpr(0), false);
     let bb = b.konst::<W8>(base);

@@ -2602,6 +2602,15 @@ fn grp2_op(d: &polyisa_guest_x86::MapDec, mode: u8) -> polyisa_guest_x86::sem_ea
     }
 }
 
+/// IN/OUT の DX ポート番号（下位 16 ビット）。
+fn dx_port<B: Backend>(b: &mut B) -> B::V<polyisa_sem::W64> {
+    use polyisa_sem::{W32, W64};
+    let dx: B::V<W32> = b.get(polyisa_guest_x86::sem::Gpr(2).state());
+    let m = b.konst::<W32>(0xFFFF);
+    let d16 = b.and::<W32>(dx, m);
+    b.zext::<W32, W64>(d16)
+}
+
 /// map デコード結果を実行する。`Ok(true)` は実行済み、`Ok(false)` は
 /// 未移行で、呼び出し側が旧デコード経路へフォールバックする。
 // Ref: SPEC-X86-INTEL-SDM (v093).
@@ -3204,7 +3213,7 @@ fn dispatch_map<B: Backend>(
         Insn::Aaa => sem_ea::aaa_aas(b, false),
         Insn::Aas => sem_ea::aaa_aas(b, true),
         Insn::Salc => sem_ea::salc(b),
-        Insn::AamIb => sem_ea::aam(b, d.imm as u8, eip),
+        Insn::AamIb => sem_ea::aam(b, d.imm as u8, eip, u32::from(d.len), sa, sseg, mode),
         Insn::AadIb => sem_ea::aad(b, d.imm as u8),
         Insn::LesGvMp => sem_ea::load_far(b, d, &ea, 0),
         Insn::LdsGvMp => sem_ea::load_far(b, d, &ea, 3),
@@ -3232,6 +3241,38 @@ fn dispatch_map<B: Backend>(
             } else {
                 sem_ea::int_n(b, eip, d.imm as u8)
             }
+        }
+        Insn::InAlIb => {
+            let port = b.konst::<W64>(d.imm);
+            sem_ea::io_in(b, 8, port, d)
+        }
+        Insn::InEvIb => {
+            let port = b.konst::<W64>(d.imm);
+            sem_ea::io_in(b, w, port, d)
+        }
+        Insn::OutIbAl => {
+            let port = b.konst::<W64>(d.imm);
+            sem_ea::io_out(b, 8, port, d)
+        }
+        Insn::OutIbEv => {
+            let port = b.konst::<W64>(d.imm);
+            sem_ea::io_out(b, w, port, d)
+        }
+        Insn::InAlDx => {
+            let port = dx_port(b);
+            sem_ea::io_in(b, 8, port, d)
+        }
+        Insn::InEvDx => {
+            let port = dx_port(b);
+            sem_ea::io_in(b, w, port, d)
+        }
+        Insn::OutDxAl => {
+            let port = dx_port(b);
+            sem_ea::io_out(b, 8, port, d)
+        }
+        Insn::OutDxEv => {
+            let port = dx_port(b);
+            sem_ea::io_out(b, w, port, d)
         }
         Insn::Syscall => sem::syscall(b, eip),
         Insn::Cpuid => sem::cpuid(b),

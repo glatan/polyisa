@@ -55,6 +55,8 @@ pub struct InterpBackend {
     /// 32 ビットで折り返すので、意味論が 64 ビットで組み立てたアドレスを
     /// アクセス直前に切る。JIT 経路はこの層を通らないため別途対応が要る。
     pub addr_mask: u64,
+    /// I/O ポート空間（x86 IN/OUT 用の 64KiB）。未初期化は 0 を返す。
+    pub ports: Box<[u8; 0x1_0000]>,
 }
 
 impl InterpBackend {
@@ -67,6 +69,7 @@ impl InterpBackend {
             reservation: polyisa_mem::Reservation::empty(),
             fp_flags: 0,
             addr_mask: u64::MAX,
+            ports: vec![0u8; 0x1_0000].into_boxed_slice().try_into().unwrap(),
         }
     }
 
@@ -660,6 +663,30 @@ impl Backend for InterpBackend {
             self.store::<W>(addr, v, acc)?;
         }
         Ok(ok)
+    }
+
+    // ポート番号は 16 ビット。W の読み書きはポート番号を 1 ずつ
+    // 進めながらの LE バイト列で、0xFFFF で折り返す。
+    fn port_in<W: Width>(&mut self, port: Self::V<W64>) -> Result<Self::V<W>, Self::Exit> {
+        let mut v = 0u64;
+        for i in 0..(W::BITS / 8) as usize {
+            let a = (port as usize).wrapping_add(i) & 0xFFFF;
+            v |= u64::from(self.ports[a]) << (8 * i);
+        }
+        Ok(from_u64::<W>(v))
+    }
+
+    fn port_out<W: Width>(
+        &mut self,
+        port: Self::V<W64>,
+        val: Self::V<W>,
+    ) -> Result<(), Self::Exit> {
+        let val = to_u64::<W>(val);
+        for i in 0..(W::BITS / 8) as usize {
+            let a = (port as usize).wrapping_add(i) & 0xFFFF;
+            self.ports[a] = (val >> (8 * i)) as u8;
+        }
+        Ok(())
     }
 
     fn if_then_else<F, G>(&mut self, c: Self::B, then: F, els: G) -> Result<(), Self::Exit>
