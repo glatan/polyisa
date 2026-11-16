@@ -6,6 +6,9 @@
 mod x86map {
     include!("spec/x86map.rs");
 }
+mod x86cpu {
+    include!("spec/x86cpu.rs");
+}
 include!("spec/x86min.rs");
 
 fn main() {

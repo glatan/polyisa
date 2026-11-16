@@ -66,6 +66,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         parent: String::new(),
         add_features: vec!["mips1".to_string()],
         remove_features: vec![],
+        ident: vec![],
     });
     // Release 2 は MIPS I の符号化を残し、ロード遅延は持たない。遅延の有無は実行ループが持つ。
     m.models.push(ModelDef {
@@ -73,6 +74,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         parent: String::new(),
         add_features: vec!["mips1".to_string(), "mips32r2".to_string(), "fpu".to_string()],
         remove_features: vec![],
+        ident: vec![],
     });
     m.models.push(ModelDef {
         name: "r6".to_string(),
@@ -84,6 +86,7 @@ pub fn build_model() -> polyisa_isadl::Model {
             "fpu".to_string(),
         ],
         remove_features: vec![],
+        ident: vec![],
     });
     m.models.push(ModelDef {
         name: "mips64r2".to_string(),
@@ -95,6 +98,7 @@ pub fn build_model() -> polyisa_isadl::Model {
             "fpu".to_string(),
         ],
         remove_features: vec![],
+        ident: vec![],
     });
     m.models.push(ModelDef {
         name: "mips64r6".to_string(),
@@ -107,6 +111,7 @@ pub fn build_model() -> polyisa_isadl::Model {
             "fpu".to_string(),
         ],
         remove_features: vec![],
+        ident: vec![],
     });
 
     m.regclasses.push(RegClass {

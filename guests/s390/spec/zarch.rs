@@ -53,6 +53,7 @@ pub fn build_model() -> polyisa_isadl::Model {
             parent: parent.to_string(),
             add_features: add.iter().map(|s| s.to_string()).collect(),
             remove_features: rem.iter().map(|s| s.to_string()).collect(),
+        ident: vec![],
         });
     }
 

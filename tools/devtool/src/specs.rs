@@ -41,6 +41,9 @@ mod x86 {
     mod x86map {
         include!("../../../guests/x86/spec/x86map.rs");
     }
+    mod x86cpu {
+        include!("../../../guests/x86/spec/x86cpu.rs");
+    }
     include!("../../../guests/x86/spec/x86min.rs");
 }
 
@@ -103,7 +106,11 @@ const SPECS: &[IsaSpec] = &[
     },
     IsaSpec {
         isa: "x86",
-        rel_paths: &["guests/x86/spec/x86min.rs", "guests/x86/spec/x86map.rs"],
+        rel_paths: &[
+            "guests/x86/spec/x86min.rs",
+            "guests/x86/spec/x86map.rs",
+            "guests/x86/spec/x86cpu.rs",
+        ],
         build: x86::build_model,
     },
 ];

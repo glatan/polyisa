@@ -8,14 +8,15 @@
 //! に従う。親をたどって機能を足し引きし、`implies` で閉包してから
 //! `conflicts` を検査する。
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
-/// `MODEL_DEFS` の要素型。
+/// `MODEL_DEFS` の要素型。名前、親、追加機能、削除機能、識別情報の対。
 pub type ModelRow = (
     &'static str,
     &'static str,
     &'static [&'static str],
     &'static [&'static str],
+    &'static [(&'static str, &'static str)],
 );
 /// `FEATURE_DEFS` の要素型。
 pub type FeatureRow = (
@@ -37,6 +38,9 @@ pub struct CpuSel {
     /// 機能集合に `rv64` があれば `Some(true)`、`rv32` なら `Some(false)`。
     /// どちらもなければ `None`（RISC-V 以外では使わない）。
     pub is_rv64: Option<bool>,
+    /// モデルの識別情報。親連鎖を根から順にたどり、近い世代の
+    /// 値で同じキーを上書きする（`cpuid.vendor` 等）。
+    pub ident: BTreeMap<String, String>,
 }
 
 /// モデル名と機能の足し引きから `CpuSel` を解決する。
@@ -81,12 +85,16 @@ pub fn resolve(
         cur = row.1;
     }
     let mut set: BTreeSet<String> = BTreeSet::new();
+    let mut ident: BTreeMap<String, String> = BTreeMap::new();
     for row in chain.iter().rev() {
         for f in row.2 {
             set.insert((*f).to_string());
         }
         for f in row.3 {
             set.remove(*f);
+        }
+        for (k, v) in row.4 {
+            ident.insert((*k).to_string(), (*v).to_string());
         }
     }
     for f in add {
@@ -137,6 +145,7 @@ pub fn resolve(
         features: set,
         feats,
         is_rv64,
+        ident,
     })
 }
 
@@ -154,8 +163,20 @@ mod tests {
 
     fn tables() -> (Vec<ModelRow>, Vec<FeatureRow>, Vec<(&'static str, u64)>) {
         let models: Vec<ModelRow> = vec![
-            ("rv64gc", "", &["rv64", "m", "a", "f", "d", "c"], &[]),
-            ("rv64imac", "rv64gc", &[], &["f", "d"]),
+            (
+                "rv64gc",
+                "",
+                &["rv64", "m", "a", "f", "d", "c"],
+                &[],
+                &[("cpuid.vendor", "generic")],
+            ),
+            (
+                "rv64imac",
+                "rv64gc",
+                &[],
+                &["f", "d"],
+                &[("cpuid.family", "u7")],
+            ),
         ];
         let features: Vec<FeatureRow> = vec![
             ("rv64", &[], &[]),
@@ -200,6 +221,15 @@ mod tests {
         let (m, f, b) = tables();
         assert!(resolve(&m, &f, &b, "nonexistent", &[], &[]).is_err());
         assert!(resolve(&m, &f, &b, "rv64gc", &["nosuch"], &[]).is_err());
+    }
+
+    #[test]
+    fn ident_inherits_and_overrides() {
+        let (m, f, b) = tables();
+        // 親のキーは継承し、子が持つキーは上書き・追加される。
+        let sel = resolve(&m, &f, &b, "rv64imac", &[], &[]).unwrap();
+        assert_eq!(sel.ident.get("cpuid.vendor").unwrap(), "generic");
+        assert_eq!(sel.ident.get("cpuid.family").unwrap(), "u7");
     }
 
     #[test]

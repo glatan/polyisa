@@ -286,8 +286,10 @@ pub fn build_maps(m: &mut Model) {
     primary.push(MapItem::Insn(0x99, n("cdq", &[], "cwd/cdq/cqo", "alu")));
     primary.push(MapItem::Insn(0x9C, n("pushf", &[], "pushf", "store")));
     primary.push(MapItem::Insn(0x9D, n("popf", &[], "popf", "load")));
-    primary.push(MapItem::Insn(0x9E, n("sahf", &[], "sahf", "alu")));
-    primary.push(MapItem::Insn(0x9F, n("lahf", &[], "lahf", "alu")));
+    // LAHF/SAHF は 64 ビットモードでは LAHF-LM（CPUID.8000_0001:ECX.0）
+    // を要する。
+    primary.push(MapItem::Insn(0x9E, mi("sahf", &[], None, PfxSel::Any, w("!m64 || lahf_lm"), "sahf", "alu")));
+    primary.push(MapItem::Insn(0x9F, mi("lahf", &[], None, PfxSel::Any, w("!m64 || lahf_lm"), "lahf", "alu")));
 
     // BCD 補正と far ポインタロード・SALC。64 ビットモードでは無効。
     for (op, name, syntax) in [
@@ -705,7 +707,7 @@ pub fn build_maps(m: &mut Model) {
     // 0F マップ。
     let mut m0f: Vec<MapItem> = Vec::new();
     m0f.extend([
-        MapItem::Insn(0x05, n("syscall", &[], "syscall", "system")),
+        MapItem::Insn(0x05, mi("syscall", &[], None, PfxSel::Any, w("m64"), "syscall", "system")),
         MapItem::Insn(0x0B, n("ud2", &[], "ud2", "system")),
         MapItem::Insn(
             0x1E,

@@ -104,9 +104,10 @@ fn gen_decoder(model: &Model) -> Result<String, GenError> {
     // モデル対応デコード（ADR-0006）。`when` の述語を評価し、符号化の
     // 重なりを機能で解決する。XLEN（rv32/rv64）は `is_rv64` で受け、
     // それ以外の機能旗は `feats` のビット集合で受ける。
-    // `decode` と `decode_model` は既定（RV64、機能なし）を選ぶ互換用の殻である。
+    // `decode` と `decode_model` は既定 CPU モデルの機能集合（`DEFAULT_FEATS`）
+    // を選ぶ互換用の殻である。
     s.push_str("pub fn decode_model(word: u128, len: u32, is_rv64: bool) -> Option<Insn> {\n");
-    s.push_str("    decode_model_ex(word, len, is_rv64, 0)\n");
+    s.push_str("    decode_model_ex(word, len, is_rv64, DEFAULT_FEATS)\n");
     s.push_str("}\n");
     let extra = extra_flags(model)?;
     for (i, name) in extra.iter().enumerate() {
@@ -293,9 +294,24 @@ fn when_guard(pred: &polyisa_isadl::pred::Pred, extra: &[String]) -> Result<Stri
 }
 
 /// `when` に現れる XLEN 以外の機能旗を集める。辞書順に並べ、位置が
-/// ビット番号になる。64 個を超えたら生成しない。
+/// ビット番号になる。64 個を超えたら生成しない。実行モードの旗
+/// （`m64`、`opd_o16` 等）は `modes` 側で解決するので除く。
 fn extra_flags(model: &Model) -> Result<Vec<String>, GenError> {
+    use polyisa_isadl::model::ModeType;
     use polyisa_isadl::pred::Pred;
+    let mut mode_names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for m in &model.modes {
+        match &m.ty {
+            ModeType::Bool => {
+                mode_names.insert(m.name.clone());
+            }
+            ModeType::Enum(vars) => {
+                for v in vars {
+                    mode_names.insert(format!("{}_{}", m.name, v));
+                }
+            }
+        }
+    }
     fn collect(pred: &Pred, out: &mut Vec<String>) {
         match pred {
             Pred::True | Pred::False => {}
@@ -323,6 +339,7 @@ fn extra_flags(model: &Model) -> Result<Vec<String>, GenError> {
             }
         }
     }
+    out.retain(|f| !mode_names.contains(f));
     out.sort();
     {
         use std::collections::BTreeSet;
@@ -1038,8 +1055,13 @@ fn gen_metadata(model: &Model) -> String {
         s.push_str(&format!("    {:?},\n", m.name));
     }
     s.push_str("];\n");
-    // CPU モデルの定義全体（親と機能の足し引き）。`--cpu` の解決が使う。
-    s.push_str("pub const MODEL_DEFS: &[(&str, &str, &[&str], &[&str])] = &[\n");
+    // CPU モデルの定義全体（親と機能の足し引きと識別情報）。
+    // `--cpu` の解決が使う。
+    s.push_str(
+        "/// `MODEL_DEFS` の行型（名前、親、追加機能、削除機能、識別情報の対）。\n\
+         pub type ModelRow = (\n    &'static str,\n    &'static str,\n    &'static [&'static str],\n    &'static [&'static str],\n    &'static [(&'static str, &'static str)],\n);\n",
+    );
+    s.push_str("pub const MODEL_DEFS: &[ModelRow] = &[\n");
     for m in &model.models {
         let list = |v: &[String]| {
             let inner = v
@@ -1049,8 +1071,14 @@ fn gen_metadata(model: &Model) -> String {
                 .join(", ");
             format!("&[{inner}]")
         };
+        let ident = m
+            .ident
+            .iter()
+            .map(|(k, v)| format!("({k:?}, {v:?})"))
+            .collect::<Vec<_>>()
+            .join(", ");
         s.push_str(&format!(
-            "    ({:?}, {:?}, {}, {}),\n",
+            "    ({:?}, {:?}, {}, {}, &[{ident}]),\n",
             m.name,
             m.parent,
             list(&m.add_features),
@@ -1058,7 +1086,70 @@ fn gen_metadata(model: &Model) -> String {
         ));
     }
     s.push_str("];\n");
+    // 機能→識別情報ビットの対応表（cpu-models.md の `cpuid_bit`）。
+    // `--cpu` の機能集合からリーフごとの値を導出する実行側が読む。
+    s.push_str("pub const IDENT_BITS: &[(&str, u32, u32, &str, u8)] = &[\n");
+    for b in &model.ident_bits {
+        s.push_str(&format!(
+            "    ({:?}, {:#x}, {}, {:?}, {}),\n",
+            b.feature, b.leaf, b.subleaf, b.reg, b.bit
+        ));
+    }
+    s.push_str("];\n");
+    s.push_str(&format!(
+        "pub const DEFAULT_FEATS: u64 = {:#x};\n",
+        default_feats(model)
+    ));
     s
+}
+
+/// 既定 CPU モデル（MODEL_DEFS の先頭）の機能を `implies` で閉包し、
+/// `FEAT_*` のビット和にしたもの。`--cpu` を省略したときの値。
+fn default_feats(model: &Model) -> u64 {
+    let Some(first) = model.models.first() else {
+        return 0;
+    };
+    let mut set: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    let mut cur = first;
+    let mut chain = Vec::new();
+    loop {
+        chain.push(cur);
+        if cur.parent.is_empty() || chain.len() > model.models.len() {
+            break;
+        }
+        cur = model
+            .models
+            .iter()
+            .find(|m| m.name == cur.parent)
+            .expect("model parent");
+    }
+    for row in chain.iter().rev() {
+        set.extend(row.add_features.iter().map(String::as_str));
+        for f in &row.remove_features {
+            set.remove(f.as_str());
+        }
+    }
+    // implies の閉包。
+    loop {
+        let mut grew = false;
+        for f in &model.features {
+            if set.contains(f.name.as_str()) {
+                for i in &f.implies {
+                    grew |= set.insert(i.as_str());
+                }
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    let extra = match extra_flags(model) {
+        Ok(e) => e,
+        Err(_) => return 0,
+    };
+    set.iter()
+        .filter_map(|f| extra.iter().position(|e| e == f))
+        .fold(0u64, |acc, i| acc | (1 << i))
 }
 
 /// 命令名を型の識別子にする。`_` で区切り、各語の先頭を大文字にする。
@@ -1200,6 +1291,11 @@ mod tests {
     fn decoder_accepts_feature_flag_with_feats() {
         // XLEN 以外の旗は `feats` のビット集合で受ける。
         let mut m = model();
+        m.features.push(Feature {
+            name: "m".to_string(),
+            implies: vec![],
+            conflicts: vec![],
+        });
         m.insns[0].when = Pred::Flag("m".to_string());
         let g = generate(&m).unwrap();
         assert!(g.decoder.contains("pub const FEAT_M: u64 = 1 << 0;"));
@@ -1211,14 +1307,22 @@ mod tests {
             g.decoder
                 .contains("fn decode_model_ex(word: u128, len: u32, is_rv64: bool, feats: u64)")
         );
-        // 互換用の入口は既定（機能なし）で拡張版に委譲する。
-        assert!(g.decoder.contains("decode_model_ex(word, len, is_rv64, 0)"));
+        // 互換用の入口は既定モデルの機能集合で拡張版に委譲する。
+        assert!(
+            g.decoder
+                .contains("decode_model_ex(word, len, is_rv64, DEFAULT_FEATS)")
+        );
     }
 
     #[test]
     fn decoder_guards_overlapping_encodings_with_feature() {
         // 同じ符号化を `when` の肯定と否定で振り分ける（R6 の割り当て直しの形）。
         let mut m = model();
+        m.features.push(Feature {
+            name: "mips_r6".to_string(),
+            implies: vec![],
+            conflicts: vec![],
+        });
         m.insns[0].when = Pred::Not(Box::new(Pred::Flag("mips_r6".to_string())));
         m.insns.push(Insn {
             name: "bovc_like".to_string(),
@@ -1239,6 +1343,11 @@ mod tests {
     fn decoder_rejects_too_many_feature_flags() {
         let mut m = model();
         for i in 0..65u32 {
+            m.features.push(Feature {
+                name: format!("feat{i}"),
+                implies: vec![],
+                conflicts: vec![],
+            });
             m.insns.push(Insn {
                 name: format!("f{i}"),
                 format: "R".to_string(),

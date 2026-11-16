@@ -98,6 +98,12 @@ pub fn fsw_ref() -> StateRef<W16> {
     StateRef::<W16>::from_offset(core::mem::offset_of!(CpuState, fsw))
 }
 
+/// CPUID リーフ表の `i` 番目のリーフの `r` 番目の出力レジスタを指す。
+/// `r` は 0=EAX,1=EBX,2=ECX,3=EDX（`cpuid::LEAF_IDS` と同じ添え字）。
+pub fn cpuid_ref(i: usize, r: usize) -> StateRef<W32> {
+    StateRef::<W32>::from_offset(core::mem::offset_of!(CpuState, cpuid) + (i * 4 + r) * 4)
+}
+
 /// 64ビットレジスタを読む（0-7 は上位 h と下位 g を結合し、8-15 は x を読む）。
 pub fn read64<B: Backend>(b: &mut B, r: Gpr) -> B::V<W64> {
     if r.0 < 8 {
@@ -6823,26 +6829,35 @@ pub fn syscall<B: Backend>(b: &mut B, eip: u32) -> Flow<B> {
     }))
 }
 
-/// CPUID。leaf 0 のベンダIDのみ返す（機能導出は本格実装で足す）。
-/// TODO(本格実装): leaf 1+ はゼロでなく版数・機能ビットを返す。
-/// EAX=最大leaf、EBX="Genu"、EDX="ineI"、ECX="ntel"。
+/// CPUID。`CpuState.cpuid` のリーフ表（`cpuid::LEAF_IDS` の順）から
+/// 入力 EAX のリーフに対応する (EAX,EBX,ECX,EDX) を選んで書き戻す。
+/// 表は実行開始時に `cpuid::derive` が機能集合から導出したもので、
+/// 対応しないリーフ・サブリーフは 0 を返す（近似。実機は最大ベーシック
+/// リーフ超過でその値を返す挙動を持つ機種がある）。
+/// Ref: SPEC-X86-INTEL-SDM (v093).
 pub fn cpuid<B: Backend>(b: &mut B) -> Flow<B> {
     // レジスタ番号は EAX=0, ECX=1, EDX=2, EBX=3 である。
     let leaf = read(b, Gpr(0));
+    let subleaf = read(b, Gpr(1));
     let zero = b.konst::<W32>(0);
-    let is_zero = b.cmp::<W32>(Cmp::Eq, leaf, zero);
-    let max = b.konst::<W32>(1);
-    let new_eax = b.select::<W32>(is_zero, max, zero);
-    write(b, Gpr(0), new_eax);
-    let ebx_v = b.konst::<W32>(0x756e_6547);
-    let new_ebx = b.select::<W32>(is_zero, ebx_v, zero);
-    write(b, Gpr(3), new_ebx);
-    let ecx_v = b.konst::<W32>(0x6c65_746e);
-    let new_ecx = b.select::<W32>(is_zero, ecx_v, zero);
-    write(b, Gpr(1), new_ecx);
-    let edx_v = b.konst::<W32>(0x4965_6e69);
-    let new_edx = b.select::<W32>(is_zero, edx_v, zero);
-    write(b, Gpr(2), new_edx);
+    let mut out = [zero, zero, zero, zero];
+    for (i, id) in crate::cpuid::LEAF_IDS.iter().enumerate() {
+        let k = b.konst::<W32>(*id);
+        let is = b.cmp::<W32>(Cmp::Eq, leaf, k);
+        for (r, slot) in out.iter_mut().enumerate() {
+            let mut v: B::V<W32> = b.get(cpuid_ref(i, r));
+            if *id == 7 {
+                // leaf 7 はサブリーフ 0 のみを報告する。
+                let sub0 = b.cmp::<W32>(Cmp::Eq, subleaf, zero);
+                v = b.select::<W32>(sub0, v, zero);
+            }
+            *slot = b.select::<W32>(is, v, *slot);
+        }
+    }
+    write(b, Gpr(0), out[0]);
+    write(b, Gpr(3), out[1]);
+    write(b, Gpr(1), out[2]);
+    write(b, Gpr(2), out[3]);
     Ok(())
 }
 

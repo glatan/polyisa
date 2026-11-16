@@ -39,6 +39,7 @@ pub fn build_model() -> polyisa_isadl::Model {
             .map(|s| s.to_string())
             .collect(),
         remove_features: Vec::new(),
+        ident: vec![],
     });
 
     m.regclasses.push(RegClass {

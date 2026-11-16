@@ -35,19 +35,6 @@ pub fn build_model() -> polyisa_isadl::Model {
         m.timing_classes.push(class.to_string());
     }
 
-    // Ref: SPEC-X86-INTEL-SDM (v093).
-    m.features.push(Feature {
-        name: "i386".to_string(),
-        implies: vec![],
-        conflicts: vec![],
-    });
-    m.models.push(ModelDef {
-        name: "generic32".to_string(),
-        parent: String::new(),
-        add_features: vec!["i386".to_string()],
-        remove_features: vec![],
-    });
-
     m.regclasses.push(RegClass {
         name: "gpr".to_string(),
         dynamic: false,
@@ -3703,5 +3690,7 @@ pub fn build_model() -> polyisa_isadl::Model {
     }
     // 段階13: オペコード表記述を足す（x86map.rs）。
     x86map::build_maps(&mut m);
+    // 段階13 C2a: 機能・モデル・識別情報の宣言と `when` ゲート（x86cpu.rs）。
+    x86cpu::build_cpu(&mut m);
     m
 }

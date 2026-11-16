@@ -95,6 +95,102 @@ pub fn validate(model: &Model) -> Report {
         }
     }
 
+    // `when` の旗名は宣言済みの機能か実行モードの旗でなければならない。
+    // 綴りの誤りがあると命令が全モデルで解読されなくなる。
+    let mut flag_names: BTreeSet<&str> = features.clone();
+    let mut mode_enum_flags: Vec<String> = Vec::new();
+    for mode in &model.modes {
+        match &mode.ty {
+            crate::model::ModeType::Bool => {
+                flag_names.insert(mode.name.as_str());
+            }
+            // `Enum` の旗名は `モード_値`（`opd_o16` 等）。
+            crate::model::ModeType::Enum(vars) => {
+                for v in vars {
+                    mode_enum_flags.push(format!("{}_{}", mode.name, v));
+                }
+            }
+        }
+    }
+    let check_when = |when: &crate::pred::Pred, name: &str, errors: &mut Vec<ValidationError>| {
+        let mut flags = Vec::new();
+        collect_flag_names(when, &mut flags);
+        for f in flags {
+            // `rv32`/`rv64` は RISC-V の XLEN を表す予約名。
+            if f == "rv32" || f == "rv64" {
+                continue;
+            }
+            if !flag_names.contains(f.as_str()) && !mode_enum_flags.contains(&f) {
+                errors.push(ValidationError::Unresolved {
+                    kind: "when-flag".to_string(),
+                    name: format!("{name}: {f}"),
+                });
+            }
+        }
+    };
+    for insn in &model.insns {
+        check_when(&insn.when, &insn.name, &mut errors);
+        // 列挙経路のデコーダには modes 引数がないためモード旗を
+        // 評価できない（`rv32`/`rv64` は is_rv64 で扱う予約名）。
+        // 使うと生成時に UnsupportedWhen になるのでここで止める。
+        let mut flags = Vec::new();
+        collect_flag_names(&insn.when, &mut flags);
+        for f in flags {
+            let is_mode = model.modes.iter().any(|md| match &md.ty {
+                crate::model::ModeType::Bool => md.name == f,
+                crate::model::ModeType::Enum(vars) => {
+                    vars.iter().any(|v| format!("{}_{v}", md.name) == f)
+                }
+            });
+            if is_mode {
+                errors.push(ValidationError::BadField {
+                    format: "when".to_string(),
+                    field: format!("{}: 列挙命令にモード旗 {f} は使えない", insn.name),
+                });
+            }
+        }
+    }
+    for map in &model.maps {
+        for item in &map.items {
+            if let crate::model::MapItem::Insn(_, mi) = item {
+                check_when(&mi.when, &mi.name, &mut errors);
+            }
+        }
+    }
+
+    // 識別情報とモデルの参照。
+    for b in &model.ident_bits {
+        if !features.contains(b.feature.as_str()) {
+            errors.push(ValidationError::Unresolved {
+                kind: "ident-bit-feature".to_string(),
+                name: b.feature.clone(),
+            });
+        }
+        if b.bit >= 32 {
+            errors.push(ValidationError::BadField {
+                format: "ident-bit".to_string(),
+                field: format!("{}: bit {}", b.feature, b.bit),
+            });
+        }
+    }
+    let model_names: BTreeSet<&str> = model.models.iter().map(|d| d.name.as_str()).collect();
+    for d in &model.models {
+        if !d.parent.is_empty() && !model_names.contains(d.parent.as_str()) {
+            errors.push(ValidationError::Unresolved {
+                kind: "model-parent".to_string(),
+                name: format!("{}: {}", d.name, d.parent),
+            });
+        }
+        for f in d.add_features.iter().chain(d.remove_features.iter()) {
+            if !features.contains(f.as_str()) {
+                errors.push(ValidationError::Unresolved {
+                    kind: "model-feature".to_string(),
+                    name: format!("{}: {}", d.name, f),
+                });
+            }
+        }
+    }
+
     for format in &model.formats {
         let mut seen: Vec<(&str, u32, u32)> = Vec::new();
         for fname in &format.fields {
@@ -283,6 +379,21 @@ fn validate_maps(model: &Model, timing: &BTreeSet<&str>, errors: &mut Vec<Valida
                 });
             }
         }
+    }
+}
+
+/// `when` 述語に現れる旗名をすべて集める。
+fn collect_flag_names(pred: &crate::pred::Pred, out: &mut Vec<String>) {
+    use crate::pred::Pred;
+    match pred {
+        Pred::Flag(name) => out.push(name.clone()),
+        Pred::Not(inner) => collect_flag_names(inner, out),
+        Pred::All(ps) | Pred::Any(ps) => {
+            for p in ps {
+                collect_flag_names(p, out);
+            }
+        }
+        Pred::True | Pred::False => {}
     }
 }
 
@@ -541,6 +652,111 @@ mod tests {
             r.errors
                 .iter()
                 .any(|e| matches!(e, ValidationError::MissingEncoder { .. }))
+        );
+    }
+
+    #[test]
+    fn unknown_when_flag_is_rejected() {
+        let mut m = test_model();
+        m.insns[0].when = Pred::Flag("nosuchflag".to_string());
+        let r = validate(&m);
+        assert!(
+            r.errors.iter().any(
+                |e| matches!(e, ValidationError::Unresolved { kind, .. } if kind == "when-flag")
+            ),
+            "{:?}",
+            r.errors
+        );
+    }
+
+    #[test]
+    fn unknown_model_parent_is_rejected() {
+        let mut m = test_model();
+        m.models.push(crate::model::ModelDef {
+            name: "child".to_string(),
+            parent: "nosuchparent".to_string(),
+            add_features: vec![],
+            remove_features: vec![],
+            ident: vec![],
+        });
+        let r = validate(&m);
+        assert!(
+            r.errors.iter().any(
+                |e| matches!(e, ValidationError::Unresolved { kind, .. } if kind == "model-parent")
+            ),
+            "{:?}",
+            r.errors
+        );
+    }
+
+    #[test]
+    fn unknown_model_feature_is_rejected() {
+        let mut m = test_model();
+        m.features.push(Feature {
+            name: "base".to_string(),
+            implies: vec![],
+            conflicts: vec![],
+        });
+        m.models.push(crate::model::ModelDef {
+            name: "parent".to_string(),
+            parent: String::new(),
+            add_features: vec![],
+            remove_features: vec![],
+            ident: vec![],
+        });
+        m.models.push(crate::model::ModelDef {
+            name: "child".to_string(),
+            parent: "parent".to_string(),
+            add_features: vec!["nosuchfeat".to_string()],
+            remove_features: vec![],
+            ident: vec![],
+        });
+        let r = validate(&m);
+        assert!(
+            r.errors.iter().any(
+                |e| matches!(e, ValidationError::Unresolved { kind, .. } if kind == "model-feature")
+            ),
+            "{:?}",
+            r.errors
+        );
+    }
+
+    #[test]
+    fn bad_ident_bit_is_rejected() {
+        let mut m = test_model();
+        m.features.push(Feature {
+            name: "f0".to_string(),
+            implies: vec![],
+            conflicts: vec![],
+        });
+        m.ident_bits.push(crate::model::IdentBit {
+            feature: "f0".to_string(),
+            leaf: 1,
+            subleaf: 0,
+            reg: "eax".to_string(),
+            bit: 32,
+        });
+        m.ident_bits.push(crate::model::IdentBit {
+            feature: "nosuchfeat".to_string(),
+            leaf: 1,
+            subleaf: 0,
+            reg: "eax".to_string(),
+            bit: 0,
+        });
+        let r = validate(&m);
+        assert!(
+            r.errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::BadField { .. })),
+            "{:?}",
+            r.errors
+        );
+        assert!(
+            r.errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::Unresolved { kind, .. } if kind == "ident-bit-feature")),
+            "{:?}",
+            r.errors
         );
     }
 }

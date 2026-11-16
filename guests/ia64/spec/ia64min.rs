@@ -32,6 +32,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         parent: String::new(),
         add_features: vec!["itanium".to_string()],
         remove_features: vec![],
+        ident: vec![],
     });
 
     m.regclasses.push(RegClass {

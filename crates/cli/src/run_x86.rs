@@ -1722,7 +1722,14 @@ pub fn run_mode(
     limit: u64,
     is64: bool,
 ) -> Outcome {
-    run_mode_ex(env, entry, sys, limit, is64, 0)
+    run_mode_ex(
+        env,
+        entry,
+        sys,
+        limit,
+        is64,
+        polyisa_guest_x86::DEFAULT_FEATS,
+    )
 }
 
 /// `run_mode` に機能集合を渡す。`feats` は生成した `FEAT_*` のビット和で
@@ -1756,6 +1763,17 @@ pub fn run_mode_ex(
 /// 16 ビット実モードの実行ループ。`eip` 状態は IP（16 ビット）、
 /// セグメント基底はセレクタ<<4 で実モードの規則に従う。
 pub fn run_m16(env: &mut BareEnv, entry: u32, sys: &mut impl TrapHandler, limit: u64) -> Outcome {
+    run_m16_ex(env, entry, sys, limit, 0)
+}
+
+/// `run_m16` に機能集合を渡す（`--cpu` の配線）。
+pub fn run_m16_ex(
+    env: &mut BareEnv,
+    entry: u32,
+    sys: &mut impl TrapHandler,
+    limit: u64,
+    feats: u64,
+) -> Outcome {
     env.backend.set(polyisa_guest_x86::sem::eip_ref(), entry);
     env.backend.addr_mask = 0xF_FFFF;
     let _ = sys.on_block(env);
@@ -1765,8 +1783,22 @@ pub fn run_m16(env: &mut BareEnv, entry: u32, sys: &mut impl TrapHandler, limit:
         sys,
         limit,
         |env| u64::from(eip_of(env)),
-        |env, sys| step_x86(env, sys, 16, 0, &mut hist),
+        |env, sys| step_x86(env, sys, 16, feats, &mut hist),
     )
+}
+
+/// CPUID のリーフ表を機能名集合と識別情報から導出し、CPU 状態へ書き込む。
+fn install_cpuid(
+    env: &mut BareEnv,
+    features: &std::collections::BTreeSet<String>,
+    ident: &std::collections::BTreeMap<String, String>,
+) {
+    let tbl = polyisa_guest_x86::cpuid::derive(features, ident);
+    for (i, regs) in tbl.iter().enumerate() {
+        for (r, v) in regs.iter().enumerate() {
+            env.backend.set(polyisa_guest_x86::sem::cpuid_ref(i, r), *v);
+        }
+    }
 }
 
 /// 1 命令ぶんのフェッチ・解読・意味論とトラップ境界の解決。
@@ -12450,16 +12482,66 @@ pub fn run_image_x86_32(
     argv: &[String],
     sys: &mut impl TrapHandler,
 ) -> Result<u64, String> {
-    run_image_x86_32_ex(bytes, prog, argv, sys, 0)
+    run_image_x86_32_ex(bytes, prog, argv, sys, polyisa_guest_x86::DEFAULT_FEATS)
+}
+
+/// 既定モデルの `CpuSel`（`--cpu` 省略時と同じ解決）。
+/// CPUID の導出に使う機能名集合と識別情報の既定値。
+fn default_sel() -> polyisa_isadl::select::CpuSel {
+    polyisa_isadl::select::resolve(
+        polyisa_guest_x86::MODEL_DEFS,
+        polyisa_guest_x86::FEATURE_DEFS,
+        polyisa_guest_x86::FEAT_BITS,
+        "",
+        &[],
+        &[],
+    )
+    .expect("x86 の既定モデルの解決")
 }
 
 /// `run_image_x86_32` に機能集合を渡す（`--cpu` の配線）。
+/// CPUID の識別情報は既定モデルのものを使う（`feats` だけを
+/// 渡す経路では機能名集合を再現できないため）。
 pub fn run_image_x86_32_ex(
     bytes: &[u8],
     prog: &str,
     argv: &[String],
     sys: &mut impl TrapHandler,
     feats: u64,
+) -> Result<u64, String> {
+    let sel = default_sel();
+    run_image_x86_32_impl(bytes, prog, argv, sys, feats, &sel.features, &sel.ident)
+}
+
+/// `run_image_x86_32` に CPU モデルの選択を渡す（`--cpu` の配線）。
+/// `None` でも既定モデルを解決し、CPUID の識別情報が空にならない
+/// ようにする。
+pub fn run_image_x86_32_sel(
+    bytes: &[u8],
+    prog: &str,
+    argv: &[String],
+    sys: &mut impl TrapHandler,
+    sel: Option<&polyisa_isadl::select::CpuSel>,
+) -> Result<u64, String> {
+    let owned;
+    let sel = match sel {
+        Some(s) => s,
+        None => {
+            owned = default_sel();
+            &owned
+        }
+    };
+    run_image_x86_32_impl(bytes, prog, argv, sys, sel.feats, &sel.features, &sel.ident)
+}
+
+fn run_image_x86_32_impl(
+    bytes: &[u8],
+    prog: &str,
+    argv: &[String],
+    sys: &mut impl TrapHandler,
+    feats: u64,
+    features: &std::collections::BTreeSet<String>,
+    ident: &std::collections::BTreeMap<String, String>,
 ) -> Result<u64, String> {
     use polyisa_guest_x86::sem::Gpr;
     use polyisa_mem::{PAGE_SIZE, Perms};
@@ -12535,6 +12617,7 @@ pub fn run_image_x86_32_ex(
     env.backend.set(Gpr(4).state(), sp as u32);
     // x87 制御ワードの初期値（丸め最近接の 0x037F）。FNSTCW/FLDCW で使う.
     env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037F);
+    install_cpuid(&mut env, features, ident);
     match run_mode_ex(&mut env, ehdr.entry as u32, sys, 1_000_000, false, feats) {
         Outcome::Exit(code) => Ok(code),
         Outcome::Unimplemented { pc, word } => Err(format!("unimplemented at {pc:#x}: {word:#x}")),
@@ -12556,7 +12639,7 @@ pub fn run_elf_x86_32_sel(
 ) -> Result<u64, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
     let mut sys = Linux::x86_32();
-    run_image_x86_32_ex(&bytes, path, argv, &mut sys, sel.map_or(0, |s| s.feats))
+    run_image_x86_32_sel(&bytes, path, argv, &mut sys, sel)
 }
 
 /// ELF32 を実行し、終了コードと fd 1 の出力を返す。ホストの stdout には書かない。
@@ -12578,10 +12661,11 @@ pub fn run_image_x86_64(
     argv: &[String],
     sys: &mut Linux,
 ) -> Result<u64, String> {
-    run_image_x86_64_ex(bytes, prog, argv, sys, 0)
+    run_image_x86_64_ex(bytes, prog, argv, sys, polyisa_guest_x86::DEFAULT_FEATS)
 }
 
 /// `run_image_x86_64` に機能集合を渡す（`--cpu` の配線）。
+/// CPUID の識別情報は既定モデルのものを使う。
 pub fn run_image_x86_64_ex(
     bytes: &[u8],
     prog: &str,
@@ -12589,16 +12673,59 @@ pub fn run_image_x86_64_ex(
     sys: &mut Linux,
     feats: u64,
 ) -> Result<u64, String> {
-    run_image_x86_64_impl(bytes, prog, argv, sys, feats, None)
+    let sel = default_sel();
+    run_image_x86_64_impl(
+        bytes,
+        prog,
+        argv,
+        sys,
+        feats,
+        &sel.features,
+        &sel.ident,
+        None,
+    )
+}
+
+/// `run_image_x86_64` に CPU モデルの選択を渡す（`--cpu` の配線）。
+/// `None` でも既定モデルを解決する。
+pub fn run_image_x86_64_sel(
+    bytes: &[u8],
+    prog: &str,
+    argv: &[String],
+    sys: &mut Linux,
+    sel: Option<&polyisa_isadl::select::CpuSel>,
+    jit: Option<&mut polyisa_jit::Jit>,
+) -> Result<u64, String> {
+    let owned;
+    let sel = match sel {
+        Some(s) => s,
+        None => {
+            owned = default_sel();
+            &owned
+        }
+    };
+    run_image_x86_64_impl(
+        bytes,
+        prog,
+        argv,
+        sys,
+        sel.feats,
+        &sel.features,
+        &sel.ident,
+        jit,
+    )
 }
 
 /// `run_image_x86_64_ex` の実体。`jit` があればブロック実行経路を使う。
+#[allow(clippy::too_many_arguments)]
 fn run_image_x86_64_impl(
     bytes: &[u8],
     prog: &str,
     argv: &[String],
     sys: &mut Linux,
     feats: u64,
+    features: &std::collections::BTreeSet<String>,
+    ident: &std::collections::BTreeMap<String, String>,
     jit: Option<&mut polyisa_jit::Jit>,
 ) -> Result<u64, String> {
     use polyisa_guest_x86::sem::Gpr;
@@ -12657,6 +12784,7 @@ fn run_image_x86_64_impl(
     polyisa_guest_x86::sem::write64(&mut env.backend, Gpr(4), sp);
     // x87 制御ワードの初期値（丸め最近接の 0x037F）。FNSTCW/FLDCW で使う.
     env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037F);
+    install_cpuid(&mut env, features, ident);
     let out = match jit {
         Some(jit) => run_mode_ex_jit(
             &mut env,
@@ -12693,14 +12821,7 @@ pub fn run_elf_x86_64_sel(
     // JIT は `POLYISA_JIT` 指定時のみ opt-in。既定はインタプリタ。
     let mut jit_owned = polyisa_jit::Jit::new();
     let jit = std::env::var_os("POLYISA_JIT").map(|_| &mut jit_owned);
-    run_image_x86_64_impl(
-        &bytes,
-        path,
-        argv,
-        &mut sys,
-        sel.map_or(0, |s| s.feats),
-        jit,
-    )
+    run_image_x86_64_sel(&bytes, path, argv, &mut sys, sel, jit)
 }
 
 /// ELF64 を実行し、終了コードと fd 1 の出力を返す。ホストの stdout には書かない。
@@ -12930,7 +13051,17 @@ pub fn run_image_x86_64_ex_jit(
     feats: u64,
     jit: &mut polyisa_jit::Jit,
 ) -> Result<u64, String> {
-    run_image_x86_64_impl(bytes, prog, argv, sys, feats, Some(jit))
+    let sel = default_sel();
+    run_image_x86_64_impl(
+        bytes,
+        prog,
+        argv,
+        sys,
+        feats,
+        &sel.features,
+        &sel.ident,
+        Some(jit),
+    )
 }
 
 /// `run_elf_x86_64_captured` の JIT 版。
@@ -12943,7 +13074,14 @@ pub fn run_elf_x86_64_captured_jit(
     let mut sys = Linux::x86_64();
     let captured = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     sys.capture_out = Some(std::rc::Rc::clone(&captured));
-    let code = run_image_x86_64_ex_jit(&bytes, path, argv, &mut sys, 0, jit)?;
+    let code = run_image_x86_64_ex_jit(
+        &bytes,
+        path,
+        argv,
+        &mut sys,
+        polyisa_guest_x86::DEFAULT_FEATS,
+        jit,
+    )?;
     Ok((code, captured.borrow().clone()))
 }
 
@@ -13802,7 +13940,7 @@ mod tests {
             &[0xc3][..],
             &[0x0f, 0x05][..],
         ] {
-            let d = polyisa_guest_x86::decode_map(code, modes, 0);
+            let d = polyisa_guest_x86::decode_map(code, modes, polyisa_guest_x86::DEFAULT_FEATS);
             eprintln!("{code:02x?} -> {d:?}");
         }
     }
@@ -13971,7 +14109,11 @@ mod tests {
         let modes = polyisa_guest_x86::MODE_M64
             | (polyisa_guest_x86::MODE_OPD_O32 << polyisa_guest_x86::MODE_OPD_SHIFT)
             | (polyisa_guest_x86::MODE_ADR_A64 << polyisa_guest_x86::MODE_ADR_SHIFT);
-        let d = polyisa_guest_x86::decode_map(&[0x80, 0xcc, 0x0c], modes, 0);
+        let d = polyisa_guest_x86::decode_map(
+            &[0x80, 0xcc, 0x0c],
+            modes,
+            polyisa_guest_x86::DEFAULT_FEATS,
+        );
         eprintln!("{d:?}");
     }
 }

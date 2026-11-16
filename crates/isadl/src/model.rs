@@ -132,6 +132,28 @@ pub struct ModelDef {
     pub parent: String,
     pub add_features: Vec<String>,
     pub remove_features: Vec<String>,
+    /// 機能に対応しない識別情報の値（`cpuid.vendor`・`cpuid.family`
+    /// 等のキーと文字列値の対）。機能の有無に対応するビットは
+    /// `IdentBit` が導出するのでここには書かない。
+    pub ident: Vec<(String, String)>,
+}
+
+/// 機能から識別情報のビットへの対応。機能が有効なら識別情報の
+/// リーフ `leaf`・サブリーフ `subleaf` のレジスタ `reg` の
+/// ビット `bit` を立てる。x86 の CPUID の対応表が典型例である
+/// （`cpuid_bit sse2 = leaf 0x1, edx, 26;`、cpu-models.md 参照）。
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct IdentBit {
+    /// 対応する機能の名前。
+    pub feature: String,
+    /// 識別情報のリーフ番号（CPUID の EAX 入力値）。
+    pub leaf: u32,
+    /// サブリーフ番号（CPUID の ECX 入力値。なければ 0）。
+    pub subleaf: u32,
+    /// 出力レジスタの名前（`eax`・`ebx`・`ecx`・`edx` 等）。
+    pub reg: String,
+    /// レジスタ内のビット位置。
+    pub bit: u8,
 }
 
 /// オペランドの幅。`V` は有効オペランドサイズ（16/32/64）、`Z` は 16/32、
@@ -265,6 +287,8 @@ pub struct Model {
     pub insns: Vec<Insn>,
     pub features: Vec<Feature>,
     pub models: Vec<ModelDef>,
+    /// 機能から識別情報のビットへの対応表。
+    pub ident_bits: Vec<IdentBit>,
     pub timing_classes: Vec<String>,
     /// オペコード表（可変長 ISA 用。`primary` がデコードの入口）。
     pub maps: Vec<MapDecl>,
@@ -274,5 +298,24 @@ impl Model {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// 機能→識別情報ビットの対応を一件追加する。
+    pub fn ident_bit(
+        &mut self,
+        feature: &str,
+        leaf: u32,
+        subleaf: u32,
+        reg: &str,
+        bit: u8,
+    ) -> &mut Self {
+        self.ident_bits.push(IdentBit {
+            feature: feature.to_string(),
+            leaf,
+            subleaf,
+            reg: reg.to_string(),
+            bit,
+        });
+        self
     }
 }

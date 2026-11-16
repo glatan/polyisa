@@ -86,14 +86,32 @@ fn int80_traps_with_vector() {
 #[test]
 fn cpuid_leaf0_returns_vendor() {
     let mut env = env();
+    // リーフ表を既定モデル相当の機能名集合で導出して置く（run_image と同じ）。
+    let features: std::collections::BTreeSet<String> = ["cpuid", "fpu", "sse", "sse2"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let tbl = polyisa_guest_x86::cpuid::derive(&features, &std::collections::BTreeMap::new());
+    for (i, regs) in tbl.iter().enumerate() {
+        for (r, v) in regs.iter().enumerate() {
+            env.backend.set(polyisa_guest_x86::sem::cpuid_ref(i, r), *v);
+        }
+    }
     env.backend.set(sem::Gpr(0).state(), 0);
     env.step(sem::cpuid).unwrap();
-    assert_eq!(env.backend.get(sem::Gpr(0).state()), 1);
+    assert_eq!(env.backend.get(sem::Gpr(0).state()), 7);
     assert_eq!(env.backend.get(sem::Gpr(3).state()), 0x756e_6547);
     assert_eq!(env.backend.get(sem::Gpr(1).state()), 0x6c65_746e);
     assert_eq!(env.backend.get(sem::Gpr(2).state()), 0x4965_6e69);
-    // leaf 1 は試作ではゼロを返す。
+    // leaf 1 は機能名集合から導出したビットを返す（FPU・SSE・SSE2）。
     env.backend.set(sem::Gpr(0).state(), 1);
+    env.step(sem::cpuid).unwrap();
+    let edx = env.backend.get(sem::Gpr(2).state());
+    assert_ne!(edx & 1, 0, "leaf1 EDX.FPU = {edx:#x}");
+    assert_ne!(edx & (1 << 25), 0, "leaf1 EDX.SSE = {edx:#x}");
+    assert_ne!(edx & (1 << 26), 0, "leaf1 EDX.SSE2 = {edx:#x}");
+    // 対応しないリーフは 0 を返す。
+    env.backend.set(sem::Gpr(0).state(), 0x1234_5678);
     env.step(sem::cpuid).unwrap();
     assert_eq!(env.backend.get(sem::Gpr(0).state()), 0);
 }

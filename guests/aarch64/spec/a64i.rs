@@ -46,12 +46,14 @@ pub fn build_model() -> polyisa_isadl::Model {
         parent: String::new(),
         add_features: ["fp", "asimd"].iter().map(|s| s.to_string()).collect(),
         remove_features: Vec::new(),
+        ident: vec![],
     });
     m.models.push(polyisa_isadl::model::ModelDef {
         name: "generic_v81".to_string(),
         parent: "generic".to_string(),
         add_features: ["lse"].iter().map(|s| s.to_string()).collect(),
         remove_features: Vec::new(),
+        ident: vec![],
     });
 
     m.regclasses.push(RegClass {

@@ -11,6 +11,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod cpuid;
 pub mod decode;
 pub mod sem;
 pub mod sem_ea;
@@ -65,6 +66,10 @@ pub struct CpuState {
     /// x87 ステータスワード。C0-C3（bit8,9,10,14）を FCOM 系が更新する。
     /// TOP（bit11-13）は `top` フィールドが正であり、FNSTSW で合成する。
     pub fsw: u16,
+    /// CPUID 命令が返すリーフの値。`cpuid::LEAF_IDS` の添え字順に
+    /// (EAX,EBX,ECX,EDX) を持つ。実行開始時に `cpuid::derive` の結果を
+    /// 書き込む。初期値の 0 は「CPUID 未導出」を表す。
+    pub cpuid: [[u32; 4]; 6],
 }
 
 #[cfg(test)]
@@ -231,7 +236,12 @@ mod tests {
         // ENDBR64 (F3 0F 1E FA)：F3 接頭辞は実行側で剥がす。
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x0F1EFA, 24), Some(Insn::Endbr64));
-        assert_eq!(decode(0x0F1EC8, 24), Some(Insn::Rdsspq));
+        // RDSSPQ は CET-SS の命令。既定モデル（CET 無し）では解読しない。
+        assert_eq!(decode(0x0F1EC8, 24), None);
+        assert_eq!(
+            decode_model_ex(0x0F1EC8, 24, true, FEAT_CET_SS),
+            Some(Insn::Rdsspq)
+        );
         // NOP r/m (0F 1F /0)：F3/0x66 接頭辞は実行側で剥がす。
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x0F1F00, 24), Some(Insn::Nopl));
@@ -1659,5 +1669,69 @@ mod tests {
     fn cpu_models() {
         assert!(FEATURES.contains(&"i386"));
         assert!(MODELS.contains(&"generic32"));
+    }
+
+    #[test]
+    fn feature_gated_decode() {
+        // 既定の decode/decode_model は DEFAULT_FEATS（先頭モデル x86_64）
+        // を使うので CPUID は解読できる。
+        assert_eq!(decode(0xFA2, 16), Some(Insn::EnCpuid));
+        assert_eq!(decode(0xF05, 16), Some(Insn::EnSyscall));
+        // 列挙デコーダ：機能が無ければ解読しない（legacy 経路のゲート）。
+        assert_eq!(decode_model_ex(0xFA2, 16, true, 0), None);
+        assert_eq!(
+            decode_model_ex(0xFA2, 16, true, FEAT_CPUID),
+            Some(Insn::EnCpuid)
+        );
+        assert_eq!(decode_model_ex(0xF05, 16, true, 0), None);
+        assert_eq!(
+            decode_model_ex(0xF05, 16, true, FEAT_SYSCALL),
+            Some(Insn::EnSyscall)
+        );
+        // CMOV は P6 以降。列挙デコーダでもゲートする。
+        assert_eq!(decode_model_ex(0xF44C0, 24, true, 0), None);
+        assert_eq!(
+            decode_model_ex(0xF44C0, 24, true, FEAT_CMOV),
+            Some(Insn::Cmove)
+        );
+        // マップデコーダ（map 経路）でも同じ機能でゲートする。
+        let modes = MODE_M64 | (MODE_OPD_O32 << MODE_OPD_SHIFT) | (MODE_ADR_A64 << MODE_ADR_SHIFT);
+        assert!(decode_map(&[0x0F, 0xA2], modes, 0).is_none());
+        assert_eq!(
+            decode_map(&[0x0F, 0xA2], modes, FEAT_CPUID).map(|d| d.insn),
+            Some(Insn::Cpuid)
+        );
+        assert!(decode_map(&[0x0F, 0x05], modes, 0).is_none());
+        // MOVUPS xmm,xmm（0F 10 /r mod=11）は SSE が無いと解読しない。
+        assert!(decode_map(&[0x0F, 0x10, 0xC0], modes, 0).is_none());
+        assert!(decode_map(&[0x0F, 0x10, 0xC0], modes, FEAT_SSE).is_some());
+        // EMMS は MMX でゲートする。
+        assert!(decode_map(&[0x0F, 0x77], modes, 0).is_none());
+        assert!(decode_map(&[0x0F, 0x77], modes, FEAT_MMX).is_some());
+    }
+
+    #[test]
+    fn model_defs_and_default_feats() {
+        // 既定（先頭）モデルは x86_64 で、SSE4.2 までを含む。
+        assert_eq!(MODEL_DEFS[0].0, "x86_64");
+        assert_ne!(DEFAULT_FEATS & FEAT_SSE2, 0);
+        assert_ne!(DEFAULT_FEATS & FEAT_SSE, 0);
+        assert_ne!(DEFAULT_FEATS & FEAT_CPUID, 0);
+        assert_ne!(DEFAULT_FEATS & FEAT_SSE4_2, 0);
+        // モデル行は (名前, 親, 追加, 削除, ident) の5項。8088 は機能なし。
+        let i8088 = MODEL_DEFS.iter().find(|r| r.0 == "i8088").unwrap();
+        assert!(i8088.2.is_empty());
+        // v2 は v1 を親に popcnt/cx16 を足す（ident は親から継承する）。
+        let v4 = MODEL_DEFS.iter().find(|r| r.0 == "x86_64_v4").unwrap();
+        assert_eq!(v4.1, "x86_64_v3");
+        let v2 = MODEL_DEFS.iter().find(|r| r.0 == "x86_64_v2").unwrap();
+        assert!(v2.2.contains(&"popcnt"));
+        assert_eq!(
+            v4.4.iter().find(|(k, _)| *k == "cpuid.family").unwrap().1,
+            "6"
+        );
+        // ident の feature→CPUID ビット表が機能と対応する。
+        assert!(IDENT_BITS.iter().any(|(f, ..)| *f == "sse2"));
+        assert!(FEAT_BITS.iter().any(|(f, _)| *f == "sse4_2"));
     }
 }
