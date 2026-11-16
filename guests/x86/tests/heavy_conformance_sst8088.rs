@@ -265,7 +265,7 @@ fn run_one(env: &mut BareEnv, t: &Sst) -> Vec<String> {
     if !matches!(out, Outcome::StepLimit { .. }) {
         diffs.push(format!("outcome {out:?}"));
     }
-    for i in 0..14 {
+    for (i, name) in REG_NAMES.iter().enumerate() {
         let exp = if t.fina_mask >> i & 1 != 0 {
             t.fina_regs[i]
         } else {
@@ -273,7 +273,7 @@ fn run_one(env: &mut BareEnv, t: &Sst) -> Vec<String> {
         };
         let got = get(env, i) as u16;
         if got != exp {
-            diffs.push(format!("{}: exp {exp:04x} got {got:04x}", REG_NAMES[i]));
+            diffs.push(format!("{name}: exp {exp:04x} got {got:04x}"));
         }
     }
     for &(a, v) in &t.fina_ram {

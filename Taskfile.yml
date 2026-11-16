@@ -81,3 +81,18 @@ tasks:
     desc: "Git の pre-commit フックを入れる"
     cmds:
       - cargo run -q -p polyisa-devtool -- hooks:install
+
+  container:build:
+    desc: "検証コンテナイメージ localhost/polyisa-dev をビルドする"
+    cmds:
+      - podman build -t localhost/polyisa-dev -f tools/containers/dev/Containerfile .
+
+  container:
+    desc: "検証コンテナ内でコマンドを実行する（例: task container -- task check）"
+    cmds:
+      - >-
+        podman run --rm
+        -v "{{.TASKFILE_DIR}}:/work" -w /work
+        -v polyisa-cargo-registry:/usr/local/cargo/registry
+        -v polyisa-cargo-git:/usr/local/cargo/git
+        localhost/polyisa-dev {{.CLI_ARGS}}
