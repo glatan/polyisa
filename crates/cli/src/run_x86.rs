@@ -1743,12 +1743,29 @@ pub fn run_mode_ex(
     let _ = sys.on_block(env);
     // 直近の eip を記録する（POLYISA_HIST でフェッチ失敗時に吐出す診断）。
     let mut hist = std::collections::VecDeque::<(u32, String)>::with_capacity(33);
+    let mode = if is64 { 64 } else { 32 };
     polyisa_engine::run::run(
         env,
         sys,
         limit,
         |env| u64::from(eip_of(env)),
-        |env, sys| step_x86(env, sys, is64, feats, &mut hist),
+        |env, sys| step_x86(env, sys, mode, feats, &mut hist),
+    )
+}
+
+/// 16 ビット実モードの実行ループ。`eip` 状態は IP（16 ビット）、
+/// セグメント基底はセレクタ<<4 で実モードの規則に従う。
+pub fn run_m16(env: &mut BareEnv, entry: u32, sys: &mut impl TrapHandler, limit: u64) -> Outcome {
+    env.backend.set(polyisa_guest_x86::sem::eip_ref(), entry);
+    env.backend.addr_mask = 0xF_FFFF;
+    let _ = sys.on_block(env);
+    let mut hist = std::collections::VecDeque::<(u32, String)>::with_capacity(33);
+    polyisa_engine::run::run(
+        env,
+        sys,
+        limit,
+        |env| u64::from(eip_of(env)),
+        |env, sys| step_x86(env, sys, 16, 0, &mut hist),
     )
 }
 
@@ -2578,14 +2595,19 @@ fn decode_x86(
 /// 未移行で、呼び出し側が旧デコード経路へフォールバックする。
 // Ref: SPEC-X86-INTEL-SDM (v093).
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)]
 fn dispatch_map<B: Backend>(
     b: &mut B,
     d: &polyisa_guest_x86::MapDec,
     eip: u32,
     next_rip: u64,
     seg: u64,
-    m64: bool,
+    sseg: u64,
+    es: u64,
+    mode: u8,
 ) -> Result<bool, B::Exit> {
+    let m64 = mode == 64;
+    let sa = mode;
     use polyisa_guest_x86::decode::{self, Hw, Rm};
     use polyisa_guest_x86::sem::{Gpr, eflags_ref};
     use polyisa_guest_x86::sem_ea::{self, Alu, Sh, ShiftCnt, Src};
@@ -2853,36 +2875,36 @@ fn dispatch_map<B: Backend>(
         Insn::SarEvCl => sem_ea::shift(b, Sh::Sar, w, &ea, d, ShiftCnt::Cl),
         Insn::PushRv => {
             let v = gr64(b, decode::op_reg(d), sw);
-            sem_ea::push_v(b, sw, v)
+            sem_ea::push_v(b, sw, v, sa, sseg)
         }
         Insn::PopRv => {
-            let v = sem_ea::pop_v(b, sw)?;
+            let v = sem_ea::pop_v(b, sw, sa, sseg)?;
             put64(b, decode::op_reg(d), sw, v, d);
             Ok(())
         }
         Insn::PushIz => {
             let v = b.konst::<W64>(iz);
-            sem_ea::push_v(b, sw, v)
+            sem_ea::push_v(b, sw, v, sa, sseg)
         }
         Insn::PushIb => {
             let v = b.konst::<W64>(ib8);
-            sem_ea::push_v(b, sw, v)
+            sem_ea::push_v(b, sw, v, sa, sseg)
         }
         Insn::PushEv => {
             let v = rd_any(b, sw, &ea, d)?;
-            sem_ea::push_v(b, sw, v)
+            sem_ea::push_v(b, sw, v, sa, sseg)
         }
         Insn::PopEv => {
-            let v = sem_ea::pop_v(b, sw)?;
+            let v = sem_ea::pop_v(b, sw, sa, sseg)?;
             wr_any(b, sw, &ea, d, v)
         }
         Insn::Pushf => {
             let f = b.get(eflags_ref());
             let v = b.zext::<W32, W64>(f);
-            sem_ea::push_v(b, sw, v)
+            sem_ea::push_v(b, sw, v, sa, sseg)
         }
         Insn::Popf => {
-            let v = sem_ea::pop_v(b, sw)?;
+            let v = sem_ea::pop_v(b, sw, sa, sseg)?;
             let v32: B::V<W32> = b.trunc::<W64, W32>(v);
             let cur = b.get(eflags_ref());
             let km = b.konst::<W32>(!0xcd5u32);
@@ -2955,19 +2977,19 @@ fn dispatch_map<B: Backend>(
         Insn::JgJz => sem_ea::jcc(b, 15, eip, u32::from(d.len), d.rel),
         Insn::SetjgEb => sem_ea::setcc(b, 15, &ea, d),
         Insn::CmovjgGvEv => sem_ea::cmov(b, 15, w, reg, &ea, d),
-        Insn::CallJz => sem_ea::call_rel(b, eip, u32::from(d.len), d.rel, sw),
+        Insn::CallJz => sem_ea::call_rel(b, eip, u32::from(d.len), d.rel, sw, sa, sseg),
         Insn::JmpJz => sem_ea::jmp_rel(b, eip, u32::from(d.len), d.rel),
         Insn::JmpJb => sem_ea::jmp_rel(b, eip, u32::from(d.len), d.rel),
-        Insn::Ret => sem_ea::ret(b, sw, 0),
-        Insn::RetIw => sem_ea::ret(b, sw, d.imm as u16),
-        Insn::CallEv => sem_ea::call_rm(b, sw, &ea, d, eip, u32::from(d.len)),
+        Insn::Ret => sem_ea::ret(b, sw, 0, sa, sseg),
+        Insn::RetIw => sem_ea::ret(b, sw, d.imm as u16, sa, sseg),
+        Insn::CallEv => sem_ea::call_rm(b, sw, &ea, d, eip, u32::from(d.len), sa, sseg),
         Insn::JmpEv => sem_ea::jmp_rm(b, sw, &ea, d),
         Insn::Leave => {
             // SDM: SP←BP は StackAddressSize、pop は OperandSize。
             let bp = Gpr(5);
-            let v = gr64(b, bp, d.asize);
-            put64(b, Gpr(4), d.asize, v, d);
-            let p = sem_ea::pop_v(b, sw)?;
+            let v = gr64(b, bp, sa);
+            put64(b, Gpr(4), sa, v, d);
+            let p = sem_ea::pop_v(b, sw, sa, sseg)?;
             put64(b, bp, sw, p, d);
             Ok(())
         }
@@ -2997,20 +3019,20 @@ fn dispatch_map<B: Backend>(
             // EAX, ECX, EDX, EBX, 元の ESP, EBP, ESI, EDI の順。
             for g in 0..4u8 {
                 let v = gr64(b, Gpr(g), w);
-                sem_ea::push_v(b, w, v)?;
+                sem_ea::push_v(b, w, v, sa, sseg)?;
             }
             let v = gr64(b, Gpr(4), w);
-            sem_ea::push_v(b, w, v)?;
+            sem_ea::push_v(b, w, v, sa, sseg)?;
             for g in 5..8u8 {
                 let v = gr64(b, Gpr(g), w);
-                sem_ea::push_v(b, w, v)?;
+                sem_ea::push_v(b, w, v, sa, sseg)?;
             }
             Ok(())
         }
         Insn::Popa => {
             // EDI, ESI, EBP, (ESP は捨てる), EBX, EDX, ECX, EAX。
             for (i, g) in [7u8, 6, 5, 4, 3, 2, 1, 0].iter().enumerate() {
-                let v = sem_ea::pop_v(b, w)?;
+                let v = sem_ea::pop_v(b, w, sa, sseg)?;
                 if i != 3 {
                     put64(b, Gpr(*g), w, v, d);
                 }
@@ -3028,20 +3050,20 @@ fn dispatch_map<B: Backend>(
         Insn::LoopeJb => sem_ea::loopcc(b, 1, eip, u32::from(d.len), d.rel, d),
         Insn::LoopJb => sem_ea::loopcc(b, 2, eip, u32::from(d.len), d.rel, d),
         Insn::JcxzJb => sem_ea::loopcc(b, 3, eip, u32::from(d.len), d.rel, d),
-        Insn::EnterIwIb => sem_ea::enter(b, w, d.imm, d.imm2),
+        Insn::EnterIwIb => sem_ea::enter(b, w, d.imm, d.imm2, sa, sseg),
         Insn::Xlat => sem_ea::xlat(b, d, seg),
         Insn::Rdtsc => sem_ea::rdtsc(b),
         Insn::Fwait => sem_ea::nop(b),
-        Insn::MovsB => sem_ea::str_op(b, sem_ea::Str::Movs, 8, d, eip, seg),
-        Insn::MovsV => sem_ea::str_op(b, sem_ea::Str::Movs, w, d, eip, seg),
-        Insn::StosB => sem_ea::str_op(b, sem_ea::Str::Stos, 8, d, eip, seg),
-        Insn::StosV => sem_ea::str_op(b, sem_ea::Str::Stos, w, d, eip, seg),
-        Insn::LodsB => sem_ea::str_op(b, sem_ea::Str::Lods, 8, d, eip, seg),
-        Insn::LodsV => sem_ea::str_op(b, sem_ea::Str::Lods, w, d, eip, seg),
-        Insn::ScasB => sem_ea::str_op(b, sem_ea::Str::Scas, 8, d, eip, seg),
-        Insn::ScasV => sem_ea::str_op(b, sem_ea::Str::Scas, w, d, eip, seg),
-        Insn::CmpsB => sem_ea::str_op(b, sem_ea::Str::Cmps, 8, d, eip, seg),
-        Insn::CmpsV => sem_ea::str_op(b, sem_ea::Str::Cmps, w, d, eip, seg),
+        Insn::MovsB => sem_ea::str_op(b, sem_ea::Str::Movs, 8, d, eip, seg, es),
+        Insn::MovsV => sem_ea::str_op(b, sem_ea::Str::Movs, w, d, eip, seg, es),
+        Insn::StosB => sem_ea::str_op(b, sem_ea::Str::Stos, 8, d, eip, seg, es),
+        Insn::StosV => sem_ea::str_op(b, sem_ea::Str::Stos, w, d, eip, seg, es),
+        Insn::LodsB => sem_ea::str_op(b, sem_ea::Str::Lods, 8, d, eip, seg, es),
+        Insn::LodsV => sem_ea::str_op(b, sem_ea::Str::Lods, w, d, eip, seg, es),
+        Insn::ScasB => sem_ea::str_op(b, sem_ea::Str::Scas, 8, d, eip, seg, es),
+        Insn::ScasV => sem_ea::str_op(b, sem_ea::Str::Scas, w, d, eip, seg, es),
+        Insn::CmpsB => sem_ea::str_op(b, sem_ea::Str::Cmps, 8, d, eip, seg, es),
+        Insn::CmpsV => sem_ea::str_op(b, sem_ea::Str::Cmps, w, d, eip, seg, es),
         Insn::MovAlOb => sem_ea::mov_moffs_ld(b, 8, d.imm, seg, d),
         Insn::MovEaxOv => sem_ea::mov_moffs_ld(b, w, d.imm, seg, d),
         Insn::MovObAl => sem_ea::mov_moffs_st(b, 8, d.imm, seg, d),
@@ -3098,17 +3120,17 @@ fn dispatch_map<B: Backend>(
             }
             sem_ea::mov_sr_ld(b, s, &ea)
         }
-        Insn::PushEs => sem_ea::push_sr(b, 0, sw),
-        Insn::PushCs => sem_ea::push_sr(b, 1, sw),
-        Insn::PushSs => sem_ea::push_sr(b, 2, sw),
-        Insn::PushDs => sem_ea::push_sr(b, 3, sw),
-        Insn::PushFs => sem_ea::push_sr(b, 4, sw),
-        Insn::PushGs => sem_ea::push_sr(b, 5, sw),
-        Insn::PopEs => sem_ea::pop_sr(b, 0, sw),
-        Insn::PopSs => sem_ea::pop_sr(b, 2, sw),
-        Insn::PopDs => sem_ea::pop_sr(b, 3, sw),
-        Insn::PopFs => sem_ea::pop_sr(b, 4, sw),
-        Insn::PopGs => sem_ea::pop_sr(b, 5, sw),
+        Insn::PushEs => sem_ea::push_sr(b, 0, sw, sa, sseg),
+        Insn::PushCs => sem_ea::push_sr(b, 1, sw, sa, sseg),
+        Insn::PushSs => sem_ea::push_sr(b, 2, sw, sa, sseg),
+        Insn::PushDs => sem_ea::push_sr(b, 3, sw, sa, sseg),
+        Insn::PushFs => sem_ea::push_sr(b, 4, sw, sa, sseg),
+        Insn::PushGs => sem_ea::push_sr(b, 5, sw, sa, sseg),
+        Insn::PopEs => sem_ea::pop_sr(b, 0, sw, sa, sseg),
+        Insn::PopSs => sem_ea::pop_sr(b, 2, sw, sa, sseg),
+        Insn::PopDs => sem_ea::pop_sr(b, 3, sw, sa, sseg),
+        Insn::PopFs => sem_ea::pop_sr(b, 4, sw, sa, sseg),
+        Insn::PopGs => sem_ea::pop_sr(b, 5, sw, sa, sseg),
         Insn::ArplEwGw => sem_ea::arpl(b, d, &ea),
         Insn::Sysenter => sem_ea::sysenter(b, eip),
         Insn::Sysexit => sem_ea::sysexit(b, if d.rex & 8 != 0 { 64 } else { 32 }),
@@ -3880,11 +3902,18 @@ fn dispatch_map<B: Backend>(
 fn step_x86_map(
     env: &mut BareEnv,
     sys: &mut dyn TrapHandler,
-    is64: bool,
+    mode: u8,
     feats: u64,
     hist: &mut std::collections::VecDeque<(u32, String)>,
 ) -> Option<Result<(), Outcome>> {
-    let pc = eip_of(env) as u64;
+    // 実モードでは eip 状態は IP（下位 16 ビット）で、
+    // フェッチ番地は CS<<4 + IP。CS 基底を含める。
+    let ip = eip_of(env);
+    let pc = if mode == 16 {
+        u64::from(env.backend.get(sem::sreg_ref(1))) * 16 + u64::from(ip & 0xFFFF)
+    } else {
+        u64::from(ip)
+    };
     let mut buf = [0u8; 15];
     let mut n = 0usize;
     while n < 15
@@ -3896,23 +3925,61 @@ fn step_x86_map(
     {
         n += 1;
     }
-    let modes = if is64 {
-        polyisa_guest_x86::MODE_M64
-            | (polyisa_guest_x86::MODE_OPD_O32 << polyisa_guest_x86::MODE_OPD_SHIFT)
-            | (polyisa_guest_x86::MODE_ADR_A64 << polyisa_guest_x86::MODE_ADR_SHIFT)
-    } else {
-        (polyisa_guest_x86::MODE_OPD_O32 << polyisa_guest_x86::MODE_OPD_SHIFT)
-            | (polyisa_guest_x86::MODE_ADR_A32 << polyisa_guest_x86::MODE_ADR_SHIFT)
+    let opd = match mode {
+        16 => polyisa_guest_x86::MODE_OPD_O16,
+        _ => polyisa_guest_x86::MODE_OPD_O32,
     };
+    let adr = match mode {
+        64 => polyisa_guest_x86::MODE_ADR_A64,
+        16 => polyisa_guest_x86::MODE_ADR_A16,
+        _ => polyisa_guest_x86::MODE_ADR_A32,
+    };
+    let mut modes =
+        (opd << polyisa_guest_x86::MODE_OPD_SHIFT) | (adr << polyisa_guest_x86::MODE_ADR_SHIFT);
+    if mode == 64 {
+        modes |= polyisa_guest_x86::MODE_M64;
+    }
     let md = polyisa_guest_x86::decode_map(&buf[..n], modes, feats)?;
-    let eip = pc as u32;
+    let eip = if mode == 16 { ip & 0xFFFF } else { ip };
     let next_rip = pc + u64::from(md.len);
-    let seg = match md.seg {
-        0x64 => env.backend.get(sem::fs_base_ref()),
-        0x65 => env.backend.get(sem::gs_base_ref()),
-        _ => 0,
+    // メモリアクセスの既定セグメント。実モードはセレクタ<<4 の基底で、
+    // 上書き接頭辞は該当セグメントを、なければ BP/SP 系は SS、ほかは DS。
+    let (seg, sseg, es) = if mode == 16 {
+        let s = [
+            env.backend.get(sem::sreg_ref(0)),
+            env.backend.get(sem::sreg_ref(1)),
+            env.backend.get(sem::sreg_ref(2)),
+            env.backend.get(sem::sreg_ref(3)),
+            env.backend.get(sem::sreg_ref(4)),
+            env.backend.get(sem::sreg_ref(5)),
+        ];
+        let sel = |i: u8| u64::from(s[usize::from(i)]) << 4;
+        let ss = sel(2);
+        let es = sel(0);
+        let def = if polyisa_guest_x86::decode::ea_uses_ss(&md) {
+            ss
+        } else {
+            sel(3)
+        };
+        let ov = match md.seg {
+            0x26 => es,
+            0x2E => sel(1),
+            0x36 => ss,
+            0x3E => sel(3),
+            0x64 => sel(4),
+            0x65 => sel(5),
+            _ => 0,
+        };
+        (if md.seg != 0 { ov } else { def }, ss, es)
+    } else {
+        let seg = match md.seg {
+            0x64 => env.backend.get(sem::fs_base_ref()),
+            0x65 => env.backend.get(sem::gs_base_ref()),
+            _ => 0,
+        };
+        (seg, 0, 0)
     };
-    let r = env.step(|b| dispatch_map(b, &md, eip, next_rip, seg, is64));
+    let r = env.step(|b| dispatch_map(b, &md, eip, next_rip, seg, sseg, es, mode));
     if let Ok(false) = r {
         // 未移行。従来経路へ。
         return None;
@@ -3935,10 +4002,11 @@ fn step_x86_map(
 fn step_x86(
     env: &mut BareEnv,
     sys: &mut dyn TrapHandler,
-    is64: bool,
+    mode: u8,
     feats: u64,
     hist: &mut std::collections::VecDeque<(u32, String)>,
 ) -> Result<(), Outcome> {
+    let is64 = mode == 64;
     let pc = eip_of(env) as u64;
     if std::env::var_os("POLYISA_HIST").is_some() {
         if hist.len() == 32 {
@@ -3948,9 +4016,16 @@ fn step_x86(
     }
     // オペコード表経路を先に試す。未移行の命令は従来のパターンデコードへ。
     if std::env::var_os("POLYISA_NO_MAP").is_none()
-        && let Some(r) = step_x86_map(env, sys, is64, feats, hist)
+        && let Some(r) = step_x86_map(env, sys, mode, feats, hist)
     {
         return r;
+    }
+    if mode == 16 {
+        // 実モードは map 経路のみ。列挙経路は 32 ビット既定のため誤動作する。
+        return Err(Outcome::Unimplemented {
+            pc: u64::from(eip_of(env)),
+            word: 0,
+        });
     }
     step_x86_legacy(env, sys, is64, feats, hist)
 }
@@ -12333,7 +12408,7 @@ fn step_x86_jit(
     let pc = u64::from(eip_of(env));
     let tx = X86Tx { is64, feats };
     let Some(exit) = jit.exec_block(&mut env.backend, &tx, pc) else {
-        return step_x86(env, sys, is64, feats, hist);
+        return step_x86(env, sys, if is64 { 64 } else { 32 }, feats, hist);
     };
     let r = match exit {
         polyisa_jit::BlockExit::Next(next) => {
@@ -13158,7 +13233,7 @@ mod tests {
         let mut h = std::collections::VecDeque::new();
         let ra = step_x86_legacy(&mut a, &mut sa, is64, 0, &mut h);
         let mut h = std::collections::VecDeque::new();
-        let rb = step_x86_map(&mut b, &mut sb, is64, 0, &mut h)?;
+        let rb = step_x86_map(&mut b, &mut sb, if is64 { 64 } else { 32 }, 0, &mut h)?;
         Some(match (&ra, &rb) {
             (Ok(()), Ok(())) => match diff_state(&mut a, &mut b) {
                 Some(d) => DiffKind::StateDiff(d),
@@ -13349,7 +13424,7 @@ mod tests {
         for _ in 0..limit {
             let mut h = std::collections::VecDeque::new();
             let r = if use_map {
-                match step_x86_map(&mut env, &mut sys, true, 0, &mut h) {
+                match step_x86_map(&mut env, &mut sys, 64, 0, &mut h) {
                     Some(r) => r,
                     None => {
                         let mut h = std::collections::VecDeque::new();
@@ -13441,7 +13516,7 @@ mod tests {
         let mut h = std::collections::VecDeque::new();
         let ra = step_x86_legacy(&mut a, &mut sa, true, 0, &mut h);
         let mut h = std::collections::VecDeque::new();
-        let rb = step_x86_map(&mut b, &mut sb, true, 0, &mut h);
+        let rb = step_x86_map(&mut b, &mut sb, 64, 0, &mut h);
         eprintln!(
             "legacy: {:?} rax={:#x} eflags={:#x}",
             ra.is_ok(),

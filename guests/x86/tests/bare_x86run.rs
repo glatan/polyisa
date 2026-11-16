@@ -15556,3 +15556,212 @@ fn run_fnstsw_ax() {
     assert_eq!(out, Outcome::StepLimit { pc: 0x100E });
     assert_eq!(env.backend.get(Gpr(0).state()) & 0xFFFF, 0x3900);
 }
+
+// ---- 16 ビット実モード ----
+
+/// 実モード用の env。`entry` は IP。セグメントは個別に sregs へ設定する。
+fn env16(prog: &[u8], entry: u32) -> BareEnv {
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0), 16, rwx).unwrap();
+    env.backend
+        .mem
+        .map(VirtAddr(0x1_0000), 8, Perms::RW)
+        .unwrap();
+    env.backend.mem.write(VirtAddr(entry as u64), prog).unwrap();
+    env
+}
+
+#[test]
+fn run16_mov_ax_bx() {
+    // 89 D8 = mov ax,bx（既定 osize は 16）。
+    let mut env = env16(&[0x89, 0xD8], 0x1000);
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(0), 0xAAAA_0000);
+        polyisa_guest_x86::sem::write64(b, Gpr(3), 0x1234_5678);
+        Ok(())
+    })
+    .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_m16(&mut env, 0x1000, &mut sys, 1);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+    assert_eq!(env.backend.get(Gpr(0).state()), 0xAAAA_5678);
+}
+
+#[test]
+fn run16_mov_eax_p66() {
+    // 66 B8 = mov eax,imm32。0x66 は 16 ビットモードで osize を 32 に切り替える。
+    let mut env = env16(&[0x66, 0xB8, 0x78, 0x56, 0x34, 0x12], 0x1000);
+    let mut sys = X64Exit;
+    let out = run_x86::run_m16(&mut env, 0x1000, &mut sys, 1);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1006 });
+    assert_eq!(env.backend.get(Gpr(0).state()), 0x1234_5678);
+}
+
+#[test]
+fn run16_ea16_ds_base() {
+    // 8B 07 = mov ax,[bx]。DS=0x100 の基底 0x1000 に BX=0x10 で 0x1010 を読む。
+    let mut env = env16(&[0x8B, 0x07], 0x1000);
+    env.backend.set(polyisa_guest_x86::sem::sreg_ref(3), 0x100);
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(3), 0x10);
+        Ok(())
+    })
+    .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1010), &0xBEEFu16.to_le_bytes())
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_m16(&mut env, 0x1000, &mut sys, 1);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+    assert_eq!(env.backend.get(Gpr(0).state()) & 0xFFFF, 0xBEEF);
+}
+
+#[test]
+fn run16_ea16_bp_uses_ss() {
+    // 8B 46 04 = mov ax,[bp+4]。BP 系の既定セグメントは SS。
+    let mut env = env16(&[0x8B, 0x46, 0x04], 0x1000);
+    env.backend.set(polyisa_guest_x86::sem::sreg_ref(2), 0x200);
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(5), 0x20);
+        Ok(())
+    })
+    .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2024), &0xCAFEu16.to_le_bytes())
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_m16(&mut env, 0x1000, &mut sys, 1);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1003 });
+    assert_eq!(env.backend.get(Gpr(0).state()) & 0xFFFF, 0xCAFE);
+}
+
+#[test]
+fn run16_seg_override_cs() {
+    // 2E 8B 07 = mov ax, cs:[bx]。CS=0x100 の基底 0x1000 に BX=0x10 で
+    // 0x1010 を読む。実モードでは CS セレクタがフェッチ基底でもあるため
+    // IP=0 から CS*16=0x1000 のコードを実行する。
+    let mut env = env16(&[0x2E, 0x8B, 0x07], 0x1000);
+    env.backend.set(polyisa_guest_x86::sem::sreg_ref(1), 0x100);
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(3), 0x10);
+        Ok(())
+    })
+    .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1010), &0xD00Du16.to_le_bytes())
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_m16(&mut env, 0, &mut sys, 1);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x3 });
+    assert_eq!(env.backend.get(Gpr(0).state()) & 0xFFFF, 0xD00D);
+}
+
+#[test]
+fn run16_push_pop_ss() {
+    // SS=0x200（基底 0x2000）、SP=0x20。mov ax,0x42; push ax; pop bx。
+    // push は SP-2=0x1E に書く（実番地 0x201E）。
+    let mut env = env16(&[0xB8, 0x42, 0x00, 0x50, 0x5B], 0x1000);
+    env.backend.set(polyisa_guest_x86::sem::sreg_ref(2), 0x200);
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(4), 0x20);
+        Ok(())
+    })
+    .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_m16(&mut env, 0x1000, &mut sys, 3);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1005 });
+    assert_eq!(env.backend.get(Gpr(3).state()) & 0xFFFF, 0x42);
+    assert_eq!(env.backend.get(Gpr(4).state()) & 0xFFFF, 0x20);
+    let mut buf = [0u8; 2];
+    env.backend
+        .mem
+        .read(VirtAddr(0x201E), &mut buf, polyisa_mem::Access::DATA_LE)
+        .unwrap();
+    assert_eq!(u16::from_le_bytes(buf), 0x42);
+}
+
+#[test]
+fn run16_push_sp_wrap() {
+    // SP=0 から push は SP=0xFFFE に書き、ESP 上位は保持する。
+    let mut env = env16(&[0xB8, 0x42, 0x00, 0x50], 0x1000);
+    env.backend.set(polyisa_guest_x86::sem::sreg_ref(2), 0x000);
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(4), 0xABCD_0000);
+        Ok(())
+    })
+    .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_m16(&mut env, 0x1000, &mut sys, 2);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1004 });
+    assert_eq!(env.backend.get(Gpr(4).state()), 0xABCD_FFFE);
+    let mut buf = [0u8; 2];
+    env.backend
+        .mem
+        .read(VirtAddr(0xFFFE), &mut buf, polyisa_mem::Access::DATA_LE)
+        .unwrap();
+    assert_eq!(u16::from_le_bytes(buf), 0x42);
+}
+
+#[test]
+fn run16_cs_base_fetch() {
+    // CS=0x100 のときフェッチ番地は CS*16+IP。IP=0 → 0x1000。
+    let mut env = env16(&[0xBB, 0x5A, 0x00], 0x1000);
+    env.backend.set(polyisa_guest_x86::sem::sreg_ref(1), 0x100);
+    let mut sys = X64Exit;
+    let out = run_x86::run_m16(&mut env, 0, &mut sys, 1);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x3 });
+    assert_eq!(env.backend.get(Gpr(3).state()) & 0xFFFF, 0x5A);
+}
+
+#[test]
+fn run16_movsb_ds_es() {
+    // A4 = movsb。DS:SI から読み ES:DI に書く。
+    // DS=0x100,ES=0x200、SI=5,DI=7 → 0x1005→0x2007。
+    let mut env = env16(&[0xA4], 0x1000);
+    env.backend.set(polyisa_guest_x86::sem::sreg_ref(3), 0x100);
+    env.backend.set(polyisa_guest_x86::sem::sreg_ref(0), 0x200);
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(6), 5);
+        polyisa_guest_x86::sem::write64(b, Gpr(7), 7);
+        Ok(())
+    })
+    .unwrap();
+    env.backend.mem.write(VirtAddr(0x1005), &[0x77]).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_m16(&mut env, 0x1000, &mut sys, 1);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1001 });
+    let mut buf = [0u8; 1];
+    env.backend
+        .mem
+        .read(VirtAddr(0x2007), &mut buf, polyisa_mem::Access::DATA_LE)
+        .unwrap();
+    assert_eq!(buf[0], 0x77);
+    // SI,DI はともに +1。
+    assert_eq!(env.backend.get(Gpr(6).state()) & 0xFFFF, 6);
+    assert_eq!(env.backend.get(Gpr(7).state()) & 0xFFFF, 8);
+}
+
+#[test]
+fn run16_p67_asize32() {
+    // 67 8B 00 = mov ax,[eax]。0x67 で asize が 32 になる。
+    // EAX=0x10、DS=0x100 → 0x1010 を読む。
+    let mut env = env16(&[0x67, 0x8B, 0x00], 0x1000);
+    env.backend.set(polyisa_guest_x86::sem::sreg_ref(3), 0x100);
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(0), 0x10);
+        Ok(())
+    })
+    .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1010), &0xFACEu16.to_le_bytes())
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_m16(&mut env, 0x1000, &mut sys, 1);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1003 });
+    assert_eq!(env.backend.get(Gpr(0).state()) & 0xFFFF, 0xFACE);
+}

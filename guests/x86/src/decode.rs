@@ -397,3 +397,24 @@ pub fn wr<B: Backend, W: Hw>(
         Rm::Mem(a) => b.store::<W>(*a, v, crate::sem::DATA_WRITE),
     }
 }
+
+/// ModRM/SIB の EA が既定で SS を使うか（BP/SP ベースか）。
+/// 実モードの既定セグメント解決に使う。
+pub fn ea_uses_ss(d: &MapDec) -> bool {
+    if d.modrm >= 0xC0 {
+        return false;
+    }
+    let md = d.modrm >> 6;
+    let rm = d.modrm & 7;
+    if d.asize == 16 {
+        // BP+SI / BP+DI / [BP+disp]
+        matches!(rm, 2 | 3) || (rm == 6 && md != 0)
+    } else if rm == 4 {
+        // SIB: base=EBP/RBP/R13(mod!=00) または base=ESP/RSP/R12
+        let base = d.sib & 7;
+        (base == 5 && md != 0) || base == 4
+    } else {
+        // mod!=00 の r/m=101 は BP ベース（mod=00 は disp32/RIP）
+        rm == 5 && md != 0
+    }
+}

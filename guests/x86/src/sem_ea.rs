@@ -725,65 +725,104 @@ fn shift_w<B: Backend, W: Hw>(
 // ---- PUSH/POP ----
 
 /// PUSH r/m（v は値幅。スタックは osize 幅）。
-pub fn push_v<B: Backend>(b: &mut B, w: u8, v64: B::V<W64>) -> Flow<B> {
+/// PUSH。被演算子は w 幅、スタックポインタの演算は `sa` 幅（16=SP/32=ESP/64=RSP）。
+/// `sseg` は SS の基底（実モードではセレクタ<<4、フラットでは 0）。
+pub fn push_v<B: Backend>(b: &mut B, w: u8, v64: B::V<W64>, sa: u8, sseg: u64) -> Flow<B> {
     let sp = Gpr(4);
+    let sz = u64::from(w / 8);
+    let sg = b.konst::<W64>(sseg);
+    let a = match sa {
+        16 => {
+            let k = b.konst::<W32>(sz as u32);
+            let cur: B::V<W32> = b.get(sp.state());
+            let np32 = b.sub::<W32>(cur, k);
+            // SP は下位 16 ビットだけ。上位は保持する。
+            let m16 = b.konst::<W32>(0xFFFF);
+            let lo = b.and::<W32>(np32, m16);
+            let nm = b.konst::<W32>(0xFFFF_0000);
+            let hi = b.and::<W32>(cur, nm);
+            let np = b.or::<W32>(hi, lo);
+            b.set(sp.state(), np);
+            let off = b.zext::<W32, W64>(lo);
+            b.add::<W64>(off, sg)
+        }
+        64 => {
+            let k = b.konst::<W64>(sz);
+            let cur = sem::read64(b, sp);
+            let np = b.sub::<W64>(cur, k);
+            sem::write64(b, sp, np);
+            b.add::<W64>(np, sg)
+        }
+        _ => {
+            let k = b.konst::<W32>(sz as u32);
+            let cur: B::V<W32> = b.get(sp.state());
+            let np = b.sub::<W32>(cur, k);
+            b.set(sp.state(), np);
+            let off = b.zext::<W32, W64>(np);
+            b.add::<W64>(off, sg)
+        }
+    };
     match w {
         16 => {
-            let sz = b.konst::<W32>(2);
-            let cur: B::V<W32> = b.get(sp.state());
-            let np = b.sub::<W32>(cur, sz);
-            b.set(sp.state(), np);
-            let a = b.zext::<W32, W64>(np);
             let v: B::V<W16> = b.trunc::<W64, W16>(v64);
             b.store::<W16>(a, v, sem::DATA_WRITE)
         }
-        64 => {
-            let sz = b.konst::<W64>(8);
-            let cur = sem::read64(b, sp);
-            let np = b.sub::<W64>(cur, sz);
-            sem::write64(b, sp, np);
-            b.store::<W64>(np, v64, sem::DATA_WRITE)
-        }
+        64 => b.store::<W64>(a, v64, sem::DATA_WRITE),
         _ => {
-            let sz = b.konst::<W32>(4);
-            let cur: B::V<W32> = b.get(sp.state());
-            let np = b.sub::<W32>(cur, sz);
-            b.set(sp.state(), np);
-            let a = b.zext::<W32, W64>(np);
             let v: B::V<W32> = b.trunc::<W64, W32>(v64);
             b.store::<W32>(a, v, sem::DATA_WRITE)
         }
     }
 }
 
-/// POP → 値幅 w で返す。
-pub fn pop_v<B: Backend>(b: &mut B, w: u8) -> Result<B::V<W64>, B::Exit> {
+/// POP → 値幅 w で返す。ポインタ演算は `sa` 幅、読み込み番地は `sseg`+SP。
+pub fn pop_v<B: Backend>(b: &mut B, w: u8, sa: u8, sseg: u64) -> Result<B::V<W64>, B::Exit> {
     let sp = Gpr(4);
-    match w {
+    let sz = u64::from(w / 8);
+    let sg = b.konst::<W64>(sseg);
+    let (a, np_done) = match sa {
         16 => {
             let cur: B::V<W32> = b.get(sp.state());
-            let a = b.zext::<W32, W64>(cur);
-            let v = b.load::<W16>(a, sem::DATA_READ)?;
-            let sz = b.konst::<W32>(2);
-            let np = b.add::<W32>(cur, sz);
-            b.set(sp.state(), np);
-            Ok(b.zext::<W16, W64>(v))
+            let m16 = b.konst::<W32>(0xFFFF);
+            let lo = b.and::<W32>(cur, m16);
+            let off = b.zext::<W32, W64>(lo);
+            let a = b.add::<W64>(off, sg);
+            let k = b.konst::<W32>(sz as u32);
+            let nlo = b.add::<W32>(lo, k);
+            let nm = b.konst::<W32>(0xFFFF_0000);
+            let hi = b.and::<W32>(cur, nm);
+            let np = b.or::<W32>(hi, nlo);
+            (a, np)
         }
         64 => {
             let cur = sem::read64(b, sp);
-            let v = b.load::<W64>(cur, sem::DATA_READ)?;
-            let sz = b.konst::<W64>(8);
-            let np = b.add::<W64>(cur, sz);
-            sem::write64(b, sp, np);
-            Ok(v)
+            let a = b.add::<W64>(cur, sg);
+            let k = b.konst::<W64>(sz);
+            let np = b.add::<W64>(cur, k);
+            let np64 = np;
+            sem::write64(b, sp, np64);
+            (a, b.trunc::<W64, W32>(np))
         }
         _ => {
             let cur: B::V<W32> = b.get(sp.state());
-            let a = b.zext::<W32, W64>(cur);
+            let off = b.zext::<W32, W64>(cur);
+            let a = b.add::<W64>(off, sg);
+            let k = b.konst::<W32>(sz as u32);
+            let np = b.add::<W32>(cur, k);
+            (a, np)
+        }
+    };
+    if sa != 64 {
+        b.set(sp.state(), np_done);
+    }
+    match w {
+        16 => {
+            let v = b.load::<W16>(a, sem::DATA_READ)?;
+            Ok(b.zext::<W16, W64>(v))
+        }
+        64 => b.load::<W64>(a, sem::DATA_READ),
+        _ => {
             let v = b.load::<W32>(a, sem::DATA_READ)?;
-            let sz = b.konst::<W32>(4);
-            let np = b.add::<W32>(cur, sz);
-            b.set(sp.state(), np);
             Ok(b.zext::<W32, W64>(v))
         }
     }
@@ -849,14 +888,23 @@ pub fn jmp_rm<B: Backend>(b: &mut B, w: u8, rm: &Rm<B::V<W64>>, d: &MapDec) -> F
 }
 
 /// CALL rel。戻り番地（次の命令）を積んで分岐。
-pub fn call_rel<B: Backend>(b: &mut B, eip: u32, len: u32, rel: i64, stack_w: u8) -> Flow<B> {
+pub fn call_rel<B: Backend>(
+    b: &mut B,
+    eip: u32,
+    len: u32,
+    rel: i64,
+    stack_w: u8,
+    sa: u8,
+    sseg: u64,
+) -> Flow<B> {
     let next = eip.wrapping_add(len);
     let nv = b.konst::<W64>(u64::from(next));
-    push_v(b, stack_w, nv)?;
+    push_v(b, stack_w, nv, sa, sseg)?;
     jmp_rel(b, eip, len, rel)
 }
 
 /// CALL r/m。
+#[allow(clippy::too_many_arguments)]
 pub fn call_rm<B: Backend>(
     b: &mut B,
     w: u8,
@@ -864,11 +912,13 @@ pub fn call_rm<B: Backend>(
     d: &MapDec,
     eip: u32,
     len: u32,
+    sa: u8,
+    sseg: u64,
 ) -> Flow<B> {
     let next = eip.wrapping_add(len);
     let t = rd_any::<B>(b, w, rm, d)?;
     let nv = b.konst::<W64>(u64::from(next));
-    push_v(b, w, nv)?;
+    push_v(b, w, nv, sa, sseg)?;
     let t32: B::V<W32> = b.trunc::<W64, W32>(t);
     b.set(eip_ref(), t32);
     b.jump(t);
@@ -876,16 +926,27 @@ pub fn call_rm<B: Backend>(
 }
 
 /// RET。pop で戻る。iw は積み増し。
-pub fn ret<B: Backend>(b: &mut B, w: u8, iw: u16) -> Flow<B> {
-    let v = pop_v(b, w)?;
+pub fn ret<B: Backend>(b: &mut B, w: u8, iw: u16, sa: u8, sseg: u64) -> Flow<B> {
+    let v = pop_v(b, w, sa, sseg)?;
     if iw != 0 {
         let sp = Gpr(4);
-        match w {
+        match sa {
             64 => {
                 let cur = sem::read64(b, sp);
                 let k = b.konst::<W64>(u64::from(iw));
                 let np = b.add::<W64>(cur, k);
                 sem::write64(b, sp, np);
+            }
+            16 => {
+                let cur: B::V<W32> = b.get(sp.state());
+                let k = b.konst::<W32>(u32::from(iw));
+                let np32 = b.add::<W32>(cur, k);
+                let m16 = b.konst::<W32>(0xFFFF);
+                let lo = b.and::<W32>(np32, m16);
+                let nm = b.konst::<W32>(0xFFFF_0000);
+                let hi = b.and::<W32>(cur, nm);
+                let np = b.or::<W32>(hi, lo);
+                b.set(sp.state(), np);
             }
             _ => {
                 let cur: B::V<W32> = b.get(sp.state());
@@ -1305,26 +1366,28 @@ pub fn loopcc<B: Backend>(
 }
 
 /// ENTER imm16, imm8（レベルは下位 5 ビット）。非 64 ビットモードのみ。
-pub fn enter<B: Backend>(b: &mut B, w: u8, frame: u64, level: u64) -> Flow<B> {
+pub fn enter<B: Backend>(b: &mut B, w: u8, frame: u64, level: u64, sa: u8, sseg: u64) -> Flow<B> {
     let lvl = level & 31;
     let m: u64 = if w == 16 { 0xffff } else { 0xffff_ffff };
     let mm = b.konst::<W64>(m);
     let bp = sem::read64(b, Gpr(5));
     let bp = b.and::<W64>(bp, mm);
-    push_v(b, w, bp)?;
+    push_v(b, w, bp, sa, sseg)?;
     let sp0 = sem::read64(b, Gpr(4));
     let sp0 = b.and::<W64>(sp0, mm);
     let bytes = b.konst::<W64>(u64::from(w / 8));
+    let sg = b.konst::<W64>(sseg);
     if lvl > 0 {
         let mut p = sp0;
         for _ in 1..lvl {
             let pv = b.sub::<W64>(p, bytes);
             p = b.and::<W64>(pv, mm);
-            let v = b.load::<W64>(p, sem::DATA_READ)?;
+            let pa = b.add::<W64>(p, sg);
+            let v = b.load::<W64>(pa, sem::DATA_READ)?;
             let vm = b.and::<W64>(v, mm);
-            push_v(b, w, vm)?;
+            push_v(b, w, vm, sa, sseg)?;
         }
-        push_v(b, w, sp0)?;
+        push_v(b, w, sp0, sa, sseg)?;
     }
     let nmm = b.konst::<W64>(!m);
     let rbp = sem::read64(b, Gpr(5));
@@ -1467,12 +1530,14 @@ fn rep_tail<B: Backend>(b: &mut B, d: &MapDec, eip: u32, cond_zf: u8) -> Flow<B>
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn str_w<B: Backend, W: Hw>(
     b: &mut B,
     kind: Str,
     d: &MapDec,
     eip: u32,
     seg: u64,
+    es: u64,
     rep: bool,
     zf_cond: u8,
 ) -> Flow<B> {
@@ -1480,7 +1545,9 @@ fn str_w<B: Backend, W: Hw>(
     let mut si = sptr(b, Gpr(6), asize);
     let sg = b.konst::<W64>(seg);
     si = b.add::<W64>(si, sg);
-    let di = sptr(b, Gpr(7), asize);
+    let mut di = sptr(b, Gpr(7), asize);
+    let eg = b.konst::<W64>(es);
+    di = b.add::<W64>(di, eg);
     let sz = u64::from(W::BITS / 8);
     match kind {
         Str::Movs => {
@@ -1523,7 +1590,15 @@ fn str_w<B: Backend, W: Hw>(
 }
 
 /// 文字列命令（MOVS/STOS/LODS/SCAS/CMPS）。rep≠0 で要素ごとの繰り返し。
-pub fn str_op<B: Backend>(b: &mut B, kind: Str, w: u8, d: &MapDec, eip: u32, seg: u64) -> Flow<B> {
+pub fn str_op<B: Backend>(
+    b: &mut B,
+    kind: Str,
+    w: u8,
+    d: &MapDec,
+    eip: u32,
+    seg: u64,
+    es: u64,
+) -> Flow<B> {
     let rep = d.rep != 0;
     // REPE/REPNE の ZF 条件は SCAS/CMPS にだけ効く。
     let zf_cond = match kind {
@@ -1533,10 +1608,10 @@ pub fn str_op<B: Backend>(b: &mut B, kind: Str, w: u8, d: &MapDec, eip: u32, seg
     };
     let iter = |b: &mut B| -> Flow<B> {
         match w {
-            16 => str_w::<B, W16>(b, kind, d, eip, seg, rep, zf_cond),
-            64 => str_w::<B, W64>(b, kind, d, eip, seg, rep, zf_cond),
-            8 => str_w::<B, W8>(b, kind, d, eip, seg, rep, zf_cond),
-            _ => str_w::<B, W32>(b, kind, d, eip, seg, rep, zf_cond),
+            16 => str_w::<B, W16>(b, kind, d, eip, seg, es, rep, zf_cond),
+            64 => str_w::<B, W64>(b, kind, d, eip, seg, es, rep, zf_cond),
+            8 => str_w::<B, W8>(b, kind, d, eip, seg, es, rep, zf_cond),
+            _ => str_w::<B, W32>(b, kind, d, eip, seg, es, rep, zf_cond),
         }
     };
     if rep {
@@ -3885,16 +3960,16 @@ pub fn mov_sr_st<B: Backend>(b: &mut B, s: u8, ea: &Rm<B::V<W64>>) -> Result<(),
 
 /// PUSH sreg。ゼロ拡張したセレクタをスタック幅で積む
 /// （64bit モードは 8 バイトスロット、32bit は 4 バイト）。
-pub fn push_sr<B: Backend>(b: &mut B, s: u8, sw: u8) -> Flow<B> {
+pub fn push_sr<B: Backend>(b: &mut B, s: u8, sw: u8, sa: u8, sseg: u64) -> Flow<B> {
     let v: B::V<W16> = b.get(sem::sreg_ref(s));
     let v64 = b.zext::<W16, W64>(v);
-    push_v(b, sw, v64)
+    push_v(b, sw, v64, sa, sseg)
 }
 
 /// POP sreg。スタック幅で取り出し下位 16 ビットをセレクタへ書く
 /// （ベースは変えない。`mov_sr_ld` の注記を参照）。
-pub fn pop_sr<B: Backend>(b: &mut B, s: u8, sw: u8) -> Flow<B> {
-    let v = pop_v(b, sw)?;
+pub fn pop_sr<B: Backend>(b: &mut B, s: u8, sw: u8, sa: u8, sseg: u64) -> Flow<B> {
+    let v = pop_v(b, sw, sa, sseg)?;
     let v16: B::V<W16> = b.trunc::<W64, W16>(v);
     b.set(sem::sreg_ref(s), v16);
     Ok(())
