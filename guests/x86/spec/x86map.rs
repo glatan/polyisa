@@ -96,6 +96,31 @@ pub fn build_maps(m: &mut Model) {
 
     let mut primary: Vec<MapItem> = Vec::new();
 
+    // セグメントの push/pop（06/07/0E/16/17/1E/1F）。64 ビットモードでは
+    // 無効（0x06 等は別の命令になる）なので非64 のみ。
+    for (op, sreg, what) in [
+        (0x06u8, "es", "push"),
+        (0x07, "es", "pop"),
+        (0x0E, "cs", "push"),
+        (0x16, "ss", "push"),
+        (0x17, "ss", "pop"),
+        (0x1E, "ds", "push"),
+        (0x1F, "ds", "pop"),
+    ] {
+        primary.push(MapItem::Insn(
+            op,
+            mi(
+                &format!("{what}_{sreg}"),
+                &[],
+                None,
+                PfxSel::Any,
+                w("!m64"),
+                &format!("{what} {sreg}"),
+                if what == "push" { "store" } else { "load" },
+            ),
+        ));
+    }
+
     // ALU 系（00-05, 08-0D, 10-15, 18-1D, 20-25, 28-2D, 30-35, 38-3D）。
     for (k, name) in [
         "add", "or", "adc", "sbb", "and", "sub", "xor", "cmp",

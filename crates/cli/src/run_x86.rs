@@ -3082,6 +3082,38 @@ fn dispatch_map<B: Backend>(
         Insn::ShldEvGvCl => sem_ea::shxd(b, true, w, &ea, d, reg, u8::MAX),
         Insn::ShrdEvGvIb => sem_ea::shxd(b, false, w, &ea, d, reg, d.imm as u8),
         Insn::ShrdEvGvCl => sem_ea::shxd(b, false, w, &ea, d, reg, u8::MAX),
+        // ===== セグメント・特権 =====
+        // セレクタ 6/7 は #UD。未対応として旧経路（＝Unimplemented）へ落ちる。
+        Insn::MovEwSr => {
+            let s = (d.modrm >> 3) & 7;
+            if s > 5 {
+                return Ok(false);
+            }
+            sem_ea::mov_sr_st(b, s, &ea)
+        }
+        Insn::MovSrEw => {
+            let s = (d.modrm >> 3) & 7;
+            if s > 5 {
+                return Ok(false);
+            }
+            sem_ea::mov_sr_ld(b, s, &ea)
+        }
+        Insn::PushEs => sem_ea::push_sr(b, 0, sw),
+        Insn::PushCs => sem_ea::push_sr(b, 1, sw),
+        Insn::PushSs => sem_ea::push_sr(b, 2, sw),
+        Insn::PushDs => sem_ea::push_sr(b, 3, sw),
+        Insn::PushFs => sem_ea::push_sr(b, 4, sw),
+        Insn::PushGs => sem_ea::push_sr(b, 5, sw),
+        Insn::PopEs => sem_ea::pop_sr(b, 0, sw),
+        Insn::PopSs => sem_ea::pop_sr(b, 2, sw),
+        Insn::PopDs => sem_ea::pop_sr(b, 3, sw),
+        Insn::PopFs => sem_ea::pop_sr(b, 4, sw),
+        Insn::PopGs => sem_ea::pop_sr(b, 5, sw),
+        Insn::ArplEwGw => sem_ea::arpl(b, d, &ea),
+        Insn::Sysenter => sem_ea::sysenter(b, eip),
+        Insn::Sysexit => sem_ea::sysexit(b, if d.rex & 8 != 0 { 64 } else { 32 }),
+        // HLT は CPL0 専用だが旧経路と同じく nop として扱う。
+        Insn::Hlt => Ok(()),
         // ===== SSE/SSE2（0F 系）=====
         Insn::MovupsXvWv
         | Insn::MovupdXvWv

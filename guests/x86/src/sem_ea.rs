@@ -3864,3 +3864,86 @@ pub fn fnstcw_m<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit
     }
     Ok(())
 }
+
+// ---- セグメント・特権 ----
+
+/// MOV Sreg, r/m16。セレクタをロードする。実機ではディスクリプタ
+/// キャッシュの再解決が起きるが、ユーザモードのエミュレーションでは
+/// FS/GS ベースは OS の仕掛け（arch_prctl / set_thread_area）で別途
+/// 決まるため、ここではセレクタ値の観測だけをモデルにする。
+pub fn mov_sr_ld<B: Backend>(b: &mut B, s: u8, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit> {
+    let v = decode::rd16(b, ea)?;
+    b.set(sem::sreg_ref(s), v);
+    Ok(())
+}
+
+/// MOV r/m16, Sreg。
+pub fn mov_sr_st<B: Backend>(b: &mut B, s: u8, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit> {
+    let v: B::V<W16> = b.get(sem::sreg_ref(s));
+    decode::wr16(b, ea, v)
+}
+
+/// PUSH sreg。ゼロ拡張したセレクタをスタック幅で積む
+/// （64bit モードは 8 バイトスロット、32bit は 4 バイト）。
+pub fn push_sr<B: Backend>(b: &mut B, s: u8, sw: u8) -> Flow<B> {
+    let v: B::V<W16> = b.get(sem::sreg_ref(s));
+    let v64 = b.zext::<W16, W64>(v);
+    push_v(b, sw, v64)
+}
+
+/// POP sreg。スタック幅で取り出し下位 16 ビットをセレクタへ書く
+/// （ベースは変えない。`mov_sr_ld` の注記を参照）。
+pub fn pop_sr<B: Backend>(b: &mut B, s: u8, sw: u8) -> Flow<B> {
+    let v = pop_v(b, sw)?;
+    let v16: B::V<W16> = b.trunc::<W64, W16>(v);
+    b.set(sem::sreg_ref(s), v16);
+    Ok(())
+}
+
+/// ARPL r/m16, r16。dst の RPL（下位 2 ビット）が src より小さければ
+/// src の RPL に揃えて ZF=1、そうでなければ ZF=0。
+pub fn arpl<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit> {
+    let dst = decode::rd16(b, ea)?;
+    let src = decode::grd16(b, decode::reg(d));
+    let m = b.konst::<W16>(3);
+    let dr = b.and::<W16>(dst, m);
+    let sr = b.and::<W16>(src, m);
+    let lt = b.cmp::<W16>(Cmp::LtU, dr, sr);
+    let dr_new = b.select::<W16>(lt, sr, dr);
+    let keep = b.konst::<W16>(0xFFFC);
+    let upper = b.and::<W16>(dst, keep);
+    let nv = b.or::<W16>(upper, dr_new);
+    decode::wr16(b, ea, nv)?;
+    let old: B::V<W32> = b.get(eflags_ref());
+    let nzf = b.konst::<W32>(!sem::FLAG_ZF);
+    let cleared = b.and::<W32>(old, nzf);
+    let zf = pick(b, lt, sem::FLAG_ZF);
+    let efl = b.or::<W32>(cleared, zf);
+    b.set(eflags_ref(), efl);
+    Ok(())
+}
+
+/// SYSENTER。i386 のシステムコール ABI（eax=番号、ebx,ecx,edx,esi,
+/// edi,ebp=引数）は INT 0x80 と同じなので同じトラップで表す。
+/// vdso の __kernel_vsyscall は sysenter の次の命令が sysexit の
+/// 戻り先になるよう構成されるため、継続位置の扱いも一致する。
+pub fn sysenter<B: Backend>(b: &mut B, eip: u32) -> Flow<B> {
+    sem::int80(b, eip)
+}
+
+/// SYSEXIT。REX.W なしは edx→eip・ecx→esp、REX.W ありは
+/// rdx→rip・rcx→rsp に機械的に従う（特権遷移はモデル外）。
+pub fn sysexit<B: Backend>(b: &mut B, w: u8) -> Flow<B> {
+    let (tgt, nsp) = if w == 64 {
+        (decode::grd64(b, Gpr(2)), decode::grd64(b, Gpr(1)))
+    } else {
+        let t = decode::grd32(b, Gpr(2));
+        let s = decode::grd32(b, Gpr(1));
+        (b.zext::<W32, W64>(t), b.zext::<W32, W64>(s))
+    };
+    let e: B::V<W32> = b.trunc::<W64, W32>(tgt);
+    b.set(eip_ref(), e);
+    sem::write64(b, Gpr(4), nsp);
+    b.jump(tgt);
+    Ok(())
+}

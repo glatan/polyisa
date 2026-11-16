@@ -311,6 +311,7 @@
 | pmulhrsw_xv_wv | pmulhrsw_xv_wv | 真 | alu |
 | pmulld_xv_wv | pmulld_xv_wv | 真 | alu |
 | pmullw | pmullw_xv_wv | 真 | alu |
+| pop | pop_ds、pop_es、pop_ss | !m64 | load |
 | pop | pop_eax、pop_ebp、pop_ebx、pop_ecx、pop_edi、pop_edx、pop_esi、pop_esp、pop_ev、pop_fs、pop_gs、pop_m64_mem8、pop_rv | 真 | load |
 | popa | popa | !m64 | load |
 | popf | popf | 真 | load |
@@ -350,6 +351,7 @@
 | punpckldq | punpckldq、punpckldq_xv_wv | 真 | alu |
 | punpcklqdq | punpcklqdq、punpcklqdq_xv_wv | 真 | alu |
 | punpcklwd | punpcklwd、punpcklwd_xv_wv | 真 | alu |
+| push | push_cs、push_ds、push_es、push_ss | !m64 | store |
 | push | push_eax、push_ebp、push_ebx、push_ecx、push_edi、push_edx、push_esi、push_esp、push_ev、push_fs、push_gs、push_ib、push_imm32、push_imm8、push_iz、push_rm_abs、push_rm_mem32、push_rm_mem8、push_rm_memnd、push_rm_sib、push_rm_sibabs、push_rm_sibd、push_rm_sibd32、push_rv | 真 | store |
 | pusha | pusha | !m64 | store |
 | pushf | pushf | 真 | store |

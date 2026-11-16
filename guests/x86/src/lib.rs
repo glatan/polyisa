@@ -59,6 +59,9 @@ pub struct CpuState {
     pub fs_base: u64,
     /// GS セグメントのベース（i386 TLS）。set_thread_area で設定する。
     pub gs_base: u64,
+    /// セグメントセレクタ（ES,CS,SS,DS,FS,GS の順）。ユーザモードの
+    /// エミュレーションではベースに影響しない観測用の値として扱う。
+    pub sregs: [u16; 6],
 }
 
 #[cfg(test)]
@@ -96,7 +99,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 段階4の x86 最小 853 件にオペコード表の記述を足した件数。
-        assert_eq!(INSNS.len(), 1438);
+        assert_eq!(INSNS.len(), 1445);
     }
 
     #[test]

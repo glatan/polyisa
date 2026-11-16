@@ -88,6 +88,11 @@ pub fn gs_base_ref() -> StateRef<W64> {
     StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, gs_base))
 }
 
+/// セグメントセレクタを指す。`i` は 0=ES,1=CS,2=SS,3=DS,4=FS,5=GS。
+pub fn sreg_ref(i: u8) -> StateRef<W16> {
+    StateRef::<W16>::from_offset(core::mem::offset_of!(CpuState, sregs) + usize::from(i & 7) * 2)
+}
+
 /// 64ビットレジスタを読む（0-7 は上位 h と下位 g を結合し、8-15 は x を読む）。
 pub fn read64<B: Backend>(b: &mut B, r: Gpr) -> B::V<W64> {
     if r.0 < 8 {
