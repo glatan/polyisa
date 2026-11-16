@@ -105,6 +105,99 @@ fn svc<H: ?Sized + TrapHandler>(
     }
 }
 
+/// EX/EXRL: 対象命令を（r1 の下位バイトで修飾して）1 回だけ実行する。
+/// PoP: r1!=0 のとき対象命令の第 2 バイトに r1 の下位バイトを OR する
+/// が、メモリ上の命令語は書き換えない。EX 系の入れ子は execute 例外。
+/// 相対アドレスは対象命令自身の位置で評価する（QEMU と同じ扱い）。
+// Ref: SPEC-S390-ZARCH-POP — EXECUTE。
+#[allow(clippy::too_many_arguments)]
+fn step_ex(
+    env: &mut BareEnv,
+    sys: &mut impl TrapHandler,
+    model: S390Model,
+    pc: u64,
+    len: u64,
+    word: u64,
+    insn: Insn,
+) -> Result<(), Outcome> {
+    let unimpl = |env: &BareEnv, word: u64| Outcome::Unimplemented {
+        pc: env.pc,
+        word: u128::from(word),
+    };
+    let acc = Access {
+        endian: Endian::Be,
+        align: Align::Natural,
+        kind: AccessKind::Fetch,
+    };
+    let amask = env.backend.get(sem::amask_ref());
+    // 対象アドレスと修飾レジスタ（sem::execute_target で共用）。
+    let mut regs = [0u64; 16];
+    for (i, v) in regs.iter_mut().enumerate() {
+        *v = env.backend.get(Gpr(i as u8).state());
+    }
+    let (taddr, r1) = sem::execute_target(insn, word, pc, |i| regs[i as usize], amask);
+    if taddr & 1 != 0 {
+        return Err(unimpl(env, word));
+    }
+    // 修飾バイト（r1=0 なら修飾なし）。
+    let modifier = if r1 == 0 {
+        0
+    } else {
+        (regs[r1 as usize] & 0xff) as u8
+    };
+    // 対象命令をフェッチ。
+    let mut b0 = [0u8; 1];
+    if env.backend.mem.read(VirtAddr(taddr), &mut b0, acc).is_err() {
+        return Err(unimpl(env, word));
+    }
+    let tlen: u64 = match b0[0] >> 6 {
+        0 => 2,
+        1 | 2 => 4,
+        _ => 6,
+    };
+    let mut tbytes = [0u8; 6];
+    tbytes[0] = b0[0];
+    if env
+        .backend
+        .mem
+        .read(VirtAddr(taddr + 1), &mut tbytes[1..tlen as usize], acc)
+        .is_err()
+    {
+        return Err(unimpl(env, u64::from(b0[0])));
+    }
+    let mut tword = 0u64;
+    for &x in &tbytes[..tlen as usize] {
+        tword = (tword << 8) | u64::from(x);
+    }
+    // 第 2 バイトへ修飾（メモリ上の命令は書き換えない）。
+    tword = sem::resolve_execute(tword, tlen as u8, modifier);
+    let tbits = (tlen * 8) as u32;
+    let Some(tinsn) = decode_model_ex(u128::from(tword), tbits, true, model.feats) else {
+        return Err(unimpl(env, tword));
+    };
+    // EX の入れ子は execute 例外。
+    if tinsn == Insn::Ex || tinsn == Insn::Exrl {
+        return Err(unimpl(env, tword));
+    }
+    if tinsn == Insn::Svc {
+        return svc(env, sys, pc, len, tword);
+    }
+    LAST_EXC.with(|c| c.set(None));
+    match env.step(|b| sem::exec(b, tinsn, tword, taddr)) {
+        Ok(()) => {
+            if env.backend.ctrl == Ctrl::Fallthrough {
+                env.pc += len;
+            }
+            Ok(())
+        }
+        Err(InterpExit::Exception(e)) => {
+            LAST_EXC.with(|c| c.set(Some(e)));
+            Err(unimpl(env, tword))
+        }
+        Err(InterpExit::Unimplemented(_)) => Err(unimpl(env, tword)),
+    }
+}
+
 /// 1 命令ぶんのフェッチ・解読・意味論と `svc` 境界の解決。
 // Ref: SPEC-S390-ZARCH-POP (SA22-7832-13).
 fn step_s390(
@@ -157,6 +250,9 @@ fn step_s390(
     };
     if insn == Insn::Svc {
         return svc(env, sys, pc, len, word);
+    }
+    if insn == Insn::Ex || insn == Insn::Exrl {
+        return step_ex(env, sys, model, pc, len, word, insn);
     }
     if std::env::var_os("POLYISA_S390_TRACE_INSN").is_some() {
         eprintln!("insn@{pc:#x}={insn:?} {word:#x}");

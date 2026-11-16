@@ -74,6 +74,7 @@ pub const PWRITE64: u64 = 181;
 pub const GETCWD: u64 = 183;
 pub const VFORK: u64 = 190;
 pub const GETRLIMIT: u64 = 191;
+pub const MMAP2: u64 = 192;
 pub const GETUID: u64 = 199;
 pub const GETGID: u64 = 200;
 pub const GETEUID: u64 = 201;
@@ -148,6 +149,7 @@ pub fn name(nr: u64) -> Option<&'static str> {
         PWRITE64 => "pwrite64",
         GETCWD => "getcwd",
         GETRLIMIT => "getrlimit",
+        MMAP2 => "mmap2",
         GETUID => "getuid",
         GETGID => "getgid",
         GETEUID => "geteuid",

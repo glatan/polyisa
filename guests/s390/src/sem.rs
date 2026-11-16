@@ -148,6 +148,15 @@ fn band<B: Backend>(b: &mut B, x: B::B, y: B::B) -> B::B {
     b.cmp(Cmp::Ne, v, z)
 }
 
+/// ブール OR。
+fn bor<B: Backend>(b: &mut B, x: B::B, y: B::B) -> B::B {
+    let t = k(b, 1);
+    let z = k(b, 0);
+    let sy = b.select(y, t, z);
+    let v = b.select(x, t, sy);
+    b.cmp(Cmp::Ne, v, z)
+}
+
 fn set_cc<B: Backend>(b: &mut B, v: u64) {
     let __h2 = b.konst::<W64>(v);
 
@@ -217,6 +226,64 @@ fn cc_test<B: Backend>(b: &mut B, res: B::V<W64>) {
 
     let v = b.select(eq, __h18, __h19);
     b.set(cc_ref(), v);
+}
+
+/// N/O/X 系論理演算の CC: 0=結果ゼロ、1=非ゼロ（PoP の 0/1 のみ）。
+fn cc_zero1<B: Backend>(b: &mut B, res: B::V<W64>) {
+    let zero = k(b, 0);
+    let eq = b.cmp(Cmp::Eq, res, zero);
+    let __ha = k(b, 0);
+    let __hb = k(b, 1);
+    let v = b.select(eq, __ha, __hb);
+    b.set(cc_ref(), v);
+}
+
+/// 比較結果を CC 値として返す（状態は書かない）。trap 系が使う。
+fn cmp_cc<B: Backend>(b: &mut B, a: B::V<W64>, x: B::V<W64>, signed: bool) -> B::V<W64> {
+    let eq = b.cmp(Cmp::Eq, a, x);
+    let lt = b.cmp(if signed { Cmp::LtS } else { Cmp::LtU }, a, x);
+    let __ha = k(b, 0);
+    let __hb = k(b, 1);
+    let __hc = k(b, 2);
+    let lt2 = b.select(lt, __hb, __hc);
+    b.select(eq, __ha, lt2)
+}
+
+/// CC 値 `cc` に対応するマスクビット (3-cc) が立つか。
+fn mask_hit<B: Backend>(b: &mut B, m: u8, cc: B::V<W64>) -> B::B {
+    let __ha = k(b, 3);
+    let sh = b.sub(__ha, cc);
+    let mk = k(b, u64::from(m & 0xf));
+    let s = b.shr_l::<W64>(mk, sh);
+    let one = k(b, 1);
+    let bit = b.and(s, one);
+    let z = k(b, 0);
+    b.cmp(Cmp::Ne, bit, z)
+}
+
+/// 比較結果がマスクに合えば trap（CIT/CGIT/CRT/CGRT 系の共通処理）。
+fn trap_if<B: Backend>(
+    b: &mut B,
+    m: u8,
+    a: B::V<W64>,
+    x: B::V<W64>,
+    signed: bool,
+    code: u64,
+) -> Flow<B> {
+    let ccv = cmp_cc(b, a, x, signed);
+    let c = mask_hit(b, m, ccv);
+    b.if_then_else(
+        c,
+        |bb| {
+            Err(bb.raise(GuestException {
+                kind: ExceptionKind::Trap,
+                code,
+                addr: None,
+                in_delay_slot: false,
+            }))
+        },
+        |_| Ok(()),
+    )
 }
 
 /// 有効アドレス。x2/b2 のフィールド値 0 は「レジスタを足さない」。
@@ -318,6 +385,55 @@ fn b2_48(w: u64) -> u8 {
 fn d2_48(w: u64) -> u64 {
     w & 0xfff
 }
+
+/// EX/EXRL: 対象命令語（右詰め）へ修飾バイトを OR で畳み込む。
+/// `modifier` は r1 レジスタの下位バイト（r1=0 指定時は 0 で呼ぶ）。
+/// PoP: 対象命令の第 2 バイト（ビット 8-15）に OR する。メモリ上の
+/// 命令語は書き換えない。
+// Ref: SPEC-S390-ZARCH-POP — EXECUTE。
+#[must_use]
+pub fn resolve_execute(word: u64, len: u8, modifier: u8) -> u64 {
+    if modifier == 0 || len < 2 {
+        return word;
+    }
+    let shift = u64::from(len) * 8 - 16;
+    word | (u64::from(modifier) << shift)
+}
+
+/// EX/EXRL の対象アドレスと修飾レジスタ番号を返す。
+/// `reg` は GPR 読み出し、`amask` は有効アドレスマスク。
+/// EX は RX 形式（対象 = x2+b2+d12）、EXRL は RIL 形式
+/// （対象 = pc + 2×i2）。r1 は修飾値の供給元（0 なら修飾なし）。
+// Ref: SPEC-S390-ZARCH-POP — EXECUTE。
+#[must_use]
+pub fn execute_target(
+    insn: crate::Insn,
+    word: u64,
+    pc: u64,
+    reg: impl Fn(u8) -> u64,
+    amask: u64,
+) -> (u64, u8) {
+    if insn == crate::Insn::Ex {
+        // RX: byte1 = r1<<4|x2、byte2-3 = b2<<4|d12。
+        let r1 = ((word >> 20) & 0xf) as u8;
+        let x2 = ((word >> 16) & 0xf) as u8;
+        let b2 = ((word >> 12) & 0xf) as u8;
+        let d = word & 0xfff;
+        let mut a = d;
+        if x2 != 0 {
+            a = a.wrapping_add(reg(x2));
+        }
+        if b2 != 0 {
+            a = a.wrapping_add(reg(b2));
+        }
+        (a & amask, r1)
+    } else {
+        // RIL: byte1 = r1<<4|0、i2 = 符号付き 32 ビット ×2 オフセット。
+        let r1 = ((word >> 36) & 0xf) as u8;
+        let i2 = i64::from((word as u32) as i32);
+        (pc.wrapping_add((i2 << 1) as u64) & amask, r1)
+    }
+}
 fn ril_u2(w: u64) -> u64 {
     w & 0xffff_ffff
 }
@@ -411,8 +527,8 @@ fn log32<B: Backend>(b: &mut B, r: u8, x: B::V<W32>, op: u8) -> Flow<B> {
         _ => b.xor(a, x),
     };
     set_g32(b, r, v);
-    let s = b.sext::<W32, W64>(v);
-    cc_test(b, s);
+    let s = b.zext::<W32, W64>(v);
+    cc_zero1(b, s);
     Ok(())
 }
 
@@ -424,7 +540,7 @@ fn log64<B: Backend>(b: &mut B, r: u8, x: B::V<W64>, op: u8) -> Flow<B> {
         _ => b.xor(a, x),
     };
     set_g(b, r, v);
-    cc_test(b, v);
+    cc_zero1(b, v);
     Ok(())
 }
 
@@ -546,7 +662,10 @@ pub fn exec<B: Backend>(b: &mut B, insn: crate::Insn, w: u64, pc: u64) -> Flow<B
         Bsm | Bassm => {
             let (r, x) = (rr1(w), rr2(w));
             let ret = k(b, pc.wrapping_add(2));
-            let t = g(b, x);
+            let __hbs = g(b, x);
+            // 分岐先は r2 のビット 0（AMODE 選択ビット）を除いた値。
+            let __hbm = k(b, !1u64);
+            let t = b.and(__hbs, __hbm);
             set_g(b, r, ret);
             if x != 0 {
                 b.jump(t);
@@ -610,13 +729,15 @@ pub fn exec<B: Backend>(b: &mut B, insn: crate::Insn, w: u64, pc: u64) -> Flow<B
             };
             set_g32(b, r, v);
             let s = b.sext::<W32, W64>(v);
-            if insn == Lcr {
+            if insn == Ltr {
+                cc_test(b, s);
+            } else {
+                // LPR/LNR/LCR: 0/1/2 で、INT_MIN 入力（結果がそのまま
+                // 0x80000000 に見える）は CC3。
                 let __h69 = k(b, 0xffff_ffff_8000_0000);
 
                 let min = b.cmp(Cmp::Eq, s, __h69);
                 cc_signed(b, s, min);
-            } else {
-                cc_test(b, s);
             }
             Ok(())
         }
@@ -735,11 +856,13 @@ fn mr<B: Backend>(b: &mut B, w: u64) -> Flow<B> {
 
     let y = b.sext::<W32, W64>(__h90);
     let p = b.mul::<W64>(a, y);
-    set_g(b, r + 1, p);
+    // 積はペアの下位 32 ビットずつに置く（上位 32 ビットは保持）。
     let __h93 = k(b, 32);
-    let __h92 = b.shr_a::<W64>(p, __h93);
-
-    set_g(b, r, __h92);
+    let __h92 = b.shr_l::<W64>(p, __h93);
+    let hi = b.trunc::<W64, W32>(__h92);
+    let lo = b.trunc::<W64, W32>(p);
+    set_g32(b, r, hi);
+    set_g32(b, r + 1, lo);
     Ok(())
 }
 
@@ -1211,12 +1334,15 @@ pub fn rx<B: Backend>(b: &mut B, insn: crate::Insn, w: u64, pc: u64) -> Flow<B> 
             Ok(())
         }
         Ic => {
+            // IC はビット 56–63（最下位バイト）だけを更新する。
             let __h204 = b.load::<W8>(a, RD)?;
 
-            let v = b.zext::<W8, W64>(__h204);
-            let __h205 = b.trunc::<W64, W32>(v);
-
-            set_g32(b, r, __h205);
+            let byte = b.zext::<W8, W64>(__h204);
+            let old = g(b, r);
+            let __hk = k(b, 0xffff_ffff_ffff_ff00);
+            let hi = b.and(old, __hk);
+            let v = b.or(hi, byte);
+            set_g(b, r, v);
             Ok(())
         }
         Stc => {
@@ -1341,11 +1467,13 @@ pub fn rx<B: Backend>(b: &mut B, insn: crate::Insn, w: u64, pc: u64) -> Flow<B> 
 
             let v = b.sext::<W32, W64>(__h225);
             let p = b.mul::<W64>(v, m);
-            set_g(b, r + 1, p);
+            // 積はペアの下位 32 ビットずつに置く（上位 32 ビットは保持）。
             let __h228 = k(b, 32);
-            let __h227 = b.shr_a::<W64>(p, __h228);
-
-            set_g(b, r, __h227);
+            let __h227 = b.shr_l::<W64>(p, __h228);
+            let hi = b.trunc::<W64, W32>(__h227);
+            let lo = b.trunc::<W64, W32>(p);
+            set_g32(b, r, hi);
+            set_g32(b, r + 1, lo);
             Ok(())
         }
         Ms => {
@@ -1455,14 +1583,16 @@ pub fn rs<B: Backend>(b: &mut B, insn: crate::Insn, w: u64, pc: u64) -> Flow<B> 
         Srl | Sll | Sra | Sla | Srdl | Sldl | Srda | Slda => shift_r(b, insn, w),
         Tm | Ni | Cli | Oi | Xi | Mvi => si_op(b, insn, w),
         Ts => {
-            // TS: 読んで CC、0xff を書く。
+            // TS: 読んで CC（最左ビットが 1 なら CC1、0 なら CC0）、0xff を書く。
             let a = ea(b, 0, b2, d as i64);
             let __h247 = b.load::<W8>(a, RD)?;
 
             let v = b.zext::<W8, W64>(__h247);
+            let __h2x = k(b, 0x80);
+            let tb = b.and(v, __h2x);
             let __h248 = k(b, 0);
 
-            let nz = b.cmp(Cmp::Ne, v, __h248);
+            let nz = b.cmp(Cmp::Ne, tb, __h248);
             let __h250 = k(b, 1);
             let __h251 = k(b, 0);
 
@@ -1474,7 +1604,7 @@ pub fn rs<B: Backend>(b: &mut B, insn: crate::Insn, w: u64, pc: u64) -> Flow<B> 
             b.store::<W8>(a, __h252, WR)?;
             Ok(())
         }
-        Brxh | Brxle | Bxh | Bxle => bx(b, insn, w),
+        Brxh | Brxle | Bxh | Bxle => bx(b, insn, w, pc),
         Diag => unimp(b, 0x83),
         Stnsm | Stosm => {
             // STNSM/STOSM: アクセスレジスタ操作（ユーザーモードでは実質 no-op）。
@@ -1526,41 +1656,46 @@ pub fn rs<B: Backend>(b: &mut B, insn: crate::Insn, w: u64, pc: u64) -> Flow<B> 
             )
         }
         Cds => {
-            // CDS: 64 ビット CAS（r1 ペア=期待値、r3 ペア=新値）。
+            // CDS: 64 ビット CAS = ペアの下位 32 ビット 2 個
+            //（r1/r1+1 の下位半分 = 期待値、r3/r3+1 の下位半分 = 新値）。
             if r & 1 != 0 || f3v & 1 != 0 {
                 return unimp(b, 0x5ec1);
             }
             let a = ea(b, 0, b2, d as i64);
-            let old0 = g(b, r);
-            let old1 = g(b, r + 1);
-            let m0 = b.load::<W64>(a, RD)?;
+            let __hc0 = g(b, r);
+            let old0 = b.trunc::<W64, W32>(__hc0);
+            let __hc1 = g(b, r + 1);
+            let old1 = b.trunc::<W64, W32>(__hc1);
+            let m0 = b.load::<W32>(a, RD)?;
             let same = {
                 let e0 = b.cmp(Cmp::Eq, m0, old0);
-                let __h404 = k(b, 8);
+                let __h404 = k(b, 4);
                 let a1 = b.add(a, __h404);
-                let m1 = b.load::<W64>(a1, RD)?;
+                let m1 = b.load::<W32>(a1, RD)?;
                 let e1 = b.cmp(Cmp::Eq, m1, old1);
                 band(b, e0, e1)
             };
             b.if_then_else(
                 same,
                 |bb| {
-                    let n0 = g(bb, f3v);
-                    bb.store::<W64>(a, n0, WR)?;
-                    let __h405 = bb.konst::<W64>(8);
+                    let __hn0 = g(bb, f3v);
+                    let n0 = bb.trunc::<W64, W32>(__hn0);
+                    bb.store::<W32>(a, n0, WR)?;
+                    let __h405 = bb.konst::<W64>(4);
                     let a1 = bb.add(a, __h405);
-                    let n1 = g(bb, f3v + 1);
-                    bb.store::<W64>(a1, n1, WR)?;
+                    let __hn1 = g(bb, f3v + 1);
+                    let n1 = bb.trunc::<W64, W32>(__hn1);
+                    bb.store::<W32>(a1, n1, WR)?;
                     let __h406 = bb.konst::<W64>(0);
                     bb.set(cc_ref(), __h406);
                     Ok(())
                 },
                 |bb| {
-                    let __h407 = bb.konst::<W64>(8);
+                    let __h407 = bb.konst::<W64>(4);
                     let a1 = bb.add(a, __h407);
-                    let m1 = bb.load::<W64>(a1, RD)?;
-                    bb.set(Gpr(r).state(), m0);
-                    bb.set(Gpr(r + 1).state(), m1);
+                    let m1 = bb.load::<W32>(a1, RD)?;
+                    set_g32(bb, r, m0);
+                    set_g32(bb, r + 1, m1);
                     let __h408 = bb.konst::<W64>(1);
                     bb.set(cc_ref(), __h408);
                     Ok(())
@@ -1618,9 +1753,8 @@ fn shift_r<B: Backend>(b: &mut B, insn: crate::Insn, w: u64) -> Flow<B> {
             set_g32(b, r, o32);
             let s = b.sext::<W32, W64>(o32);
             if insn == Sla {
+                // SRL/SLL/SRA は CC を設定しない（SLA のみ 0/1/2/3）。
                 cc_signed(b, s, ovf);
-            } else if insn == Sra || insn == Sll {
-                cc_test(b, s);
             }
             Ok(())
         }
@@ -1661,9 +1795,8 @@ fn shift_r<B: Backend>(b: &mut B, insn: crate::Insn, w: u64) -> Flow<B> {
 
             set_g32(b, r + 1, __h272);
             if insn == Slda {
+                // SRDL/SLDL/SRDA は CC を設定しない（SLDA のみ）。
                 cc_signed(b, out, ovf);
-            } else if insn == Srda {
-                cc_test(b, out);
             }
             Ok(())
         }
@@ -1732,29 +1865,29 @@ fn si_op<B: Backend>(b: &mut B, insn: crate::Insn, w: u64) -> Flow<B> {
     }
 }
 
-/// BXH/BXLE/BRXH/BRXLE。r3（偶数なら r3+1 が増分、r3 が比較値;奇数なら
-/// r3 が両方）の規約に従う。
-fn bx<B: Backend>(b: &mut B, insn: crate::Insn, w: u64) -> Flow<B> {
-    use crate::Insn::*;
-    let (r, r3, b2, d) = (r1(w), f3(w), b2f(w), d2(w));
-    let target = ea(b, 0, b2, d as i64);
-    let (inc, lim) = if r3 & 1 != 0 { (r3, r3) } else { (r3 + 1, r3) };
-    let is64 = matches!(insn, Brxh | Brxle);
-    let one = k(b, 1);
+/// BXH/BXLE 系の共通処理。PoP の奇偶規約: 増分は常に r3、比較値は
+/// r3|1（r3 が奇数なら r3|1 == r3 で両方 r3）。`high` なら加算結果が
+/// 比較値より大きいとき、なら low-or-equal のとき分岐する。
+fn bx_body<B: Backend>(
+    b: &mut B,
+    r: u8,
+    r3: u8,
+    target: B::V<W64>,
+    is64: bool,
+    high: bool,
+) -> Flow<B> {
+    let inc = r3;
+    let lim = r3 | 1;
     if is64 {
-        let __h285 = g(b, r);
-        let __h286 = g(b, inc);
-
-        let v = b.add(__h285, __h286);
+        let cur = g(b, r);
+        let i = g(b, inc);
+        let v = b.add(cur, i);
         set_g(b, r, v);
-        let c = if insn == Brxh {
-            let __h287 = g(b, lim);
-
-            b.cmp(Cmp::GtS, v, __h287)
+        let l = g(b, lim);
+        let c = if high {
+            b.cmp(Cmp::GtS, v, l)
         } else {
-            let __h288 = g(b, lim);
-
-            b.cmp(Cmp::LeS, v, __h288)
+            b.cmp(Cmp::LeS, v, l)
         };
         b.if_then_else(
             c,
@@ -1765,26 +1898,20 @@ fn bx<B: Backend>(b: &mut B, insn: crate::Insn, w: u64) -> Flow<B> {
             |_| Ok(()),
         )
     } else {
-        let __h289 = g(b, r);
-        let __h290 = g(b, inc);
-
-        let v = b.add(__h289, __h290);
-        let __h291 = b.trunc::<W64, W32>(v);
-
-        set_g32(b, r, __h291);
-        let __h292 = b.trunc::<W64, W32>(v);
-
-        let vs = b.sext::<W32, W64>(__h292);
-        let __h294 = g(b, lim);
-        let __h293 = b.trunc::<W64, W32>(__h294);
-
-        let l = b.sext::<W32, W64>(__h293);
-        let c = if insn == Bxh {
+        let cur = g(b, r);
+        let i = g(b, inc);
+        let v = b.add(cur, i);
+        let v32 = b.trunc::<W64, W32>(v);
+        set_g32(b, r, v32);
+        let vs = b.sext::<W32, W64>(v32);
+        let lw = g(b, lim);
+        let lt = b.trunc::<W64, W32>(lw);
+        let l = b.sext::<W32, W64>(lt);
+        let c = if high {
             b.cmp(Cmp::GtS, vs, l)
         } else {
             b.cmp(Cmp::LeS, vs, l)
         };
-        let _ = one;
         b.if_then_else(
             c,
             |bb| {
@@ -1794,6 +1921,23 @@ fn bx<B: Backend>(b: &mut B, insn: crate::Insn, w: u64) -> Flow<B> {
             |_| Ok(()),
         )
     }
+}
+
+/// BXH/BXLE（RS、絶対 D2(B2)）と BRXH/BRXLE（RSI、PC+I2*2）。
+/// どちらも 32 ビット版。
+fn bx<B: Backend>(b: &mut B, insn: crate::Insn, w: u64, pc: u64) -> Flow<B> {
+    use crate::Insn::*;
+    let (r, r3) = (r1(w), f3(w));
+    let target = if matches!(insn, Brxh | Brxle) {
+        // RSI: bytes 2-3 は符号つき 16 ビット相対（×2）。
+        let i2 = (w as u16) as i16 as i64;
+        k(b, pc.wrapping_add((i2 << 1) as u64))
+    } else {
+        // RS: 絶対 D2(B2)。
+        ea(b, 0, b2f(w), d2(w) as i64)
+    };
+    let high = matches!(insn, Brxh | Bxh);
+    bx_body(b, r, r3, target, false, high)
 }
 
 // ======================== RI/RIL ========================
@@ -1876,10 +2020,8 @@ pub fn ri<B: Backend>(b: &mut B, insn: crate::Insn, w: u64, pc: u64) -> Flow<B> 
             let __h307 = k(b, 0);
 
             let is0 = b.cmp(Cmp::Eq, t, __h307);
-            let __h309 = k(b, 0xffff);
-            let __h308 = b.and(v, __h309);
-
-            let all = b.cmp(Cmp::Eq, t, __h308);
+            // 全部 1 = マスク選択ビットがすべて立つ（v&mask == mask）。
+            let all = b.cmp(Cmp::Eq, t, __h306);
             let __h311 = k(b, 0);
             let __h313 = k(b, 3);
             let __h314 = k(b, 1);
@@ -1994,6 +2136,11 @@ fn ri_imm<B: Backend>(b: &mut B, insn: crate::Insn, r: u8, imm: u64) -> Flow<B> 
         }
     };
     set_g(b, r, v);
+    if op != 0 {
+        // AND/OR IMMEDIATE: CC は操作した 16 ビット領域の結果で 0/1。
+        let fv2 = b.and(v, fmask);
+        cc_zero1(b, fv2);
+    }
     Ok(())
 }
 
@@ -2008,16 +2155,13 @@ pub fn ril<B: Backend>(b: &mut B, insn: crate::Insn, w: u64, pc: u64) -> Flow<B>
             set_g(b, r, t);
             Ok(())
         }
-        Brcl | Brul | Brh => {
-            let m = if insn == Brul {
-                0xf
-            } else if insn == Brh {
-                0x2
-            } else {
-                r & 0xf
-            };
+        Brcl => {
             let t = k(b, pc.wrapping_add((imm32 << 1) as u64));
-            cjump(b, m, t)
+            cjump(b, r & 0xf, t)
+        }
+        Bprp => {
+            // BPRP（C5）: 分枝予測ヒント。ユーザーモードでは no-op。
+            Ok(())
         }
         Brasl => {
             let t = k(b, pc.wrapping_add((imm32 << 1) as u64));
@@ -2049,7 +2193,15 @@ pub fn ril<B: Backend>(b: &mut B, insn: crate::Insn, w: u64, pc: u64) -> Flow<B>
             }
         }
         Clgfi | Clfi => {
-            let v = k(b, imm32 as u64);
+            // CLGFI の i2 はゼロ拡張（他の 32 ビット即値は符号拡張）。
+            let v = k(
+                b,
+                if insn == Clgfi {
+                    ril_u2(w)
+                } else {
+                    imm32 as u64
+                },
+            );
             if insn == Clgfi {
                 cmp64(b, r, v, false)
             } else {
@@ -2302,6 +2454,11 @@ fn ril_imm<B: Backend>(b: &mut B, insn: crate::Insn, r: u8, imm: u64) -> Flow<B>
         }
     };
     set_g(b, r, v);
+    if matches!(op, 1 | 2 | 4) {
+        // AND/OR/XOR IMMEDIATE: CC は操作した 32 ビット領域の結果で 0/1。
+        let fv2 = b.and(v, fmask);
+        cc_zero1(b, fv2);
+    }
     Ok(())
 }
 
@@ -2463,23 +2620,28 @@ pub fn ss<B: Backend>(b: &mut B, insn: crate::Insn, w: u64, _pc: u64) -> Flow<B>
 
 // ======================== MVST/CLST ========================
 
-/// MVST（B255）: NUL までバイトコピー。r1=宛先、r2=元。CC1 で終了。
+/// MVST（B255）: GR0 下位バイトの終端文字までバイトコピー。
+/// r1=宛先、r2=元。
+/// PoP: 終端文字を移し終えたら CC1、R1 には第 1 オペランド側の
+/// 終端文字のアドレス（格納した NUL の位置）を、R2 は不変のまま
+/// 残す。CPU 規定バイト数を移しただけなら CC3、R1/R2 は次に処理
+/// するバイトを指す。
+// Ref: SPEC-S390-ZARCH-POP — MOVE STRING。
 fn mvst<B: Backend>(b: &mut B, r: u8, x: u8, pc: u64) -> Flow<B> {
     let mut dst = g(b, r);
     let mut src = g(b, x);
+    let r0 = g(b, 0);
+    let end = b.trunc::<W64, W8>(r0);
     let mut hit = false;
     for _ in 0..CHUNK {
         if hit {
             break;
         }
         let byte = b.load::<W8>(src, RD)?;
-        let zb = b.zext::<W8, W64>(byte);
-        let __h407 = k(b, 0);
-
-        let is0 = b.cmp(Cmp::Eq, zb, __h407);
+        let is_end = b.cmp(Cmp::Eq, byte, end);
         b.store::<W8>(dst, byte, WR)?;
         b.if_then_else(
-            is0,
+            is_end,
             |bb| {
                 hit = true;
                 let __h408 = bb.konst::<W64>(1);
@@ -2490,8 +2652,8 @@ fn mvst<B: Backend>(b: &mut B, r: u8, x: u8, pc: u64) -> Flow<B> {
             |_| Ok(()),
         )?;
         if hit {
-            // 終端バイトを指したまま終了（呼び出し側が ' ' や '\n' で
-            // 上書きする規約。PoP の MVST は最終格納位置を返す）。
+            // PoP: R1 は格納した終端文字の位置を指す（dst は進めない）。
+            // R2 は不変なので書き戻さない。
             break;
         }
         let __h409 = k(b, 1);
@@ -2502,11 +2664,13 @@ fn mvst<B: Backend>(b: &mut B, r: u8, x: u8, pc: u64) -> Flow<B> {
         src = b.add(src, __h410);
     }
     set_g(b, r, dst);
-    set_g(b, x, src);
     if !hit {
-        let __h411 = k(b, pc);
-
-        b.jump(__h411);
+        set_g(b, x, src);
+        // チャンク分だけ処理した: CC3 にして命令先頭から継続。
+        let __h411 = k(b, 3);
+        b.set(cc_ref(), __h411);
+        let __h412 = k(b, pc);
+        b.jump(__h412);
     }
     Ok(())
 }
@@ -2784,11 +2948,14 @@ pub fn b9<B: Backend>(b: &mut B, w: u64, _pc: u64) -> Flow<B> {
             };
             set_g(b, r, v);
             if matches!(f, 0x02 | 0x12) {
+                // LTGR/LTGFR: 0/1/2 のみ。
                 cc_test(b, v);
-            } else if matches!(f, 0x03 | 0x13) {
+            } else {
+                // LPGR/LNGR/LCGR（および F 版）: 0/1/2 で、
+                // INT_MIN の入力（結果が INT_MIN のまま）は CC3。
                 let __h444 = k(
                     b,
-                    if f == 0x13 {
+                    if f >= 0x10 {
                         0xffff_ffff_8000_0000
                     } else {
                         0x8000_0000_0000_0000
@@ -2857,6 +3024,11 @@ pub fn b9<B: Backend>(b: &mut B, w: u64, _pc: u64) -> Flow<B> {
 
                 // LLGTR は上位 31 ビットクリア。
                 set_g(b, r, __h452);
+            } else if matches!(f, 0x26 | 0x27 | 0x94 | 0x95) {
+                // LBR/LHR/LLCR/LLHR: 結果は下位 32 ビットのみ
+                // （上位 32 ビットは保持）。
+                let v32 = b.trunc::<W64, W32>(v);
+                set_g32(b, r, v32);
             } else {
                 set_g(b, r, v);
             }
@@ -2873,7 +3045,13 @@ pub fn b9<B: Backend>(b: &mut B, w: u64, _pc: u64) -> Flow<B> {
             };
             let __h455 = bswap(b, v, if f == 0x1f { 4 } else { 8 });
 
-            set_g(b, r, __h455);
+            if f == 0x1f {
+                // LRVR: 下位 32 ビットのみ書き戻す。
+                let v32 = b.trunc::<W64, W32>(__h455);
+                set_g32(b, r, v32);
+            } else {
+                set_g(b, r, __h455);
+            }
             Ok(())
         }
         0x08 => arith64(b, r, v2, false),
@@ -2956,33 +3134,36 @@ pub fn b9<B: Backend>(b: &mut B, w: u64, _pc: u64) -> Flow<B> {
             }
         }
         0x60 | 0x61 | 0x72 | 0x73 => {
-            // CGRT/CLGRT/CRT/CLRT: 条件コードが m3 に合えば trap（ユーザーモード
-            // では条件が合わない限り no-op）。
-            let c = btaken(b, m3);
-            b.if_then_else(
-                c,
-                |bb| {
-                    Err(bb.raise(GuestException {
-                        kind: ExceptionKind::Trap,
-                        code: 0xb900 + u64::from(f),
-                        addr: None,
-                        in_delay_slot: false,
-                    }))
-                },
-                |_| Ok(()),
-            )
+            // CGRT/CLGRT/CRT/CLRT: r1 と r2 を比較し、結果が m3 の
+            // ビットに合えば trap。CC は参照しない（自分で比較する）。
+            let wide = f < 0x70;
+            let signed = matches!(f, 0x60 | 0x72);
+            let (a, x2) = if wide {
+                (g(b, r), v2)
+            } else {
+                let av = g(b, r);
+                let a32 = b.trunc::<W64, W32>(av);
+                let x32 = b.trunc::<W64, W32>(v2);
+                if signed {
+                    (b.sext::<W32, W64>(a32), b.sext::<W32, W64>(x32))
+                } else {
+                    (b.zext::<W32, W64>(a32), b.zext::<W32, W64>(x32))
+                }
+            };
+            trap_if(b, m3, a, x2, signed, 0xb900 + u64::from(f))
         }
         0x80 => log64(b, r, v2, 0),
         0x81 => log64(b, r, v2, 1),
         0x82 => log64(b, r, v2, 2),
         0x83 => {
-            // FLOGR: r（偶数ペア）= 元のままのレジスタ、r+1 = 先頭 1 ビット位置。
+            // FLOGR: r（偶数ペア）= 先頭 1 ビットの位置（ゼロなら 64）、
+            // r+1 = そのビットを落とした元の値。CC は元の値から
+            // （0 → CC0、それ以外 → CC2）。
             if r & 1 != 0 {
                 return unimp(b, 0x5ec1);
             }
             let __h467 = k(b, 0);
 
-            // ゼロなら位置 64、CC0。
             let is0 = b.cmp(Cmp::Eq, v2, __h467);
             let mut bit = k(b, 0);
             for i in 0..64 {
@@ -3005,11 +3186,13 @@ pub fn b9<B: Backend>(b: &mut B, w: u64, _pc: u64) -> Flow<B> {
             let __h474 = k(b, 64);
 
             let idx = b.select(is0, __h474, bit);
-            set_g(b, r, v2);
-            set_g(b, r + 1, idx);
-            let __h475 = k(b, 0);
-
-            let _ = b.cmp(Cmp::Eq, v2, __h475);
+            // 最初に見つかった 1 ビット（左から idx 番目）を落とす。
+            let __hm = k(b, 0x8000_0000_0000_0000);
+            let bmask = b.shr_l::<W64>(__hm, idx);
+            let nb = b.not(bmask);
+            let cleared = b.and(v2, nb);
+            set_g(b, r, idx);
+            set_g(b, r + 1, cleared);
             let __h477 = k(b, 0);
             let __h478 = k(b, 2);
 
@@ -3046,12 +3229,13 @@ pub fn b9<B: Backend>(b: &mut B, w: u64, _pc: u64) -> Flow<B> {
 
                     let y = b.zext::<W32, W64>(__h483);
                     let p = b.mul::<W64>(a, y);
-                    set_g(b, r + 1, p);
+                    // 積はペアの下位 32 ビットずつに置く（上位は保持）。
                     let __h486 = k(b, 32);
                     let __h485 = b.shr_l::<W64>(p, __h486);
                     let __h484 = b.trunc::<W64, W32>(__h485);
-
+                    let lo = b.trunc::<W64, W32>(p);
                     set_g32(b, r, __h484);
+                    set_g32(b, r + 1, lo);
                     Ok(())
                 }
                 0x87 => {
@@ -3418,31 +3602,23 @@ pub fn b3<B: Backend>(b: &mut B, w: u64, _pc: u64) -> Flow<B> {
             };
             let long = matches!(f, 0xa8..=0xaa);
             if long {
-                let v = b.fcvt_s64::<W64>(d, m3_to_rm(m3));
+                let v = fcvt_s64_m3(b, d, m3);
                 set_g(b, r1, v);
             } else {
-                let v = b.fcvt_s32::<W64>(d, m3_to_rm(m3));
+                let v = fcvt_s32_m3(b, d, m3);
                 set_g32(b, r1, v);
             }
-            set_cc(b, 0);
+            // PoP: 変換系命令は CC を変更しない。
             Ok(())
         }
         0x47 | 0x57 | 0x5f => {
-            // FIXBR/FIEBR/FIDBR: 整数部に丸める（m3 が丸めモード）。
-            let v = fg(b, r2);
-            let i = b.fcvt_s64::<W64>(v, m3_to_rm(m3));
+            // FIXBR/FIEBR/FIDBR: 整数部に丸める（m3 が丸めモード、0 なら
+            // FPC の DRM）。FIEBR のオペランドと結果は FPR のビット 0-31
+            //（上位 32 ビットの f32）で、下位 32 ビットは保存される。
+            let v = fg64(b, r2, f == 0x57);
+            let i = fcvt_s64_m3(b, v, m3);
             let d = b.fcvt_from_s64::<W64>(i, 0);
-            if f == 0x57 {
-                let s = b.fcvt_ff::<W64, W32>(d, 0);
-                let __h565 = b.zext::<W32, W64>(s);
-                let __h566 = k(b, 32);
-
-                let __h564 = b.shl::<W64>(__h565, __h566);
-
-                b.set(fr(r1), __h564);
-            } else {
-                b.set(fr(r1), d);
-            }
+            put_f(b, r1, d, f == 0x57);
             Ok(())
         }
         0x50 | 0x51 => {
@@ -3450,20 +3626,23 @@ pub fn b3<B: Backend>(b: &mut B, w: u64, _pc: u64) -> Flow<B> {
             unimp(b, 0xb300 + u64::from(f))
         }
         0x53 | 0x5b => {
-            // DIEBR/DIDBR: 商と余りの同時計算。byte2 = r2|m4、byte3 = r1|r3。
-            let r3 = (w & 0xf) as u8;
-            let r2i = ((w >> 12) & 0xf) as u8;
-            let n = fg(b, r2i);
-            let dv = fg(b, r3);
+            // DIEBR/DIDBR: 商と余りの同時計算。
+            // byte2 上位=r3（除数）、byte2 下位=m4（商の丸め指定子）、
+            // byte3 上位=r1（商）、byte3 下位=r2（被除数）。
+            let r3i = ((w >> 12) & 0xf) as u8;
+            let m4 = ((w >> 8) & 0xf) as u8;
+            let short = f == 0x53;
+            let n = fg64(b, r2, short);
+            let dv = fg64(b, r3i, short);
             let q = b.fdiv::<W64>(n, dv);
-            // PoP: 商は 0 方向への丸め。
-            let qi = b.fcvt_s64::<W64>(q, 1);
+            // 商は m4 の丸めモードで整数化（0 なら FPC の DRM）。
+            let qi = fcvt_s64_m3(b, q, m4);
             let qf = b.fcvt_from_s64::<W64>(qi, 0);
             let __h567 = b.fmul::<W64>(qf, dv);
 
             let rem = b.fsub::<W64>(n, __h567);
-            b.set(fr(r1), qf);
-            b.set(fr(r3), rem);
+            put_f(b, r1, qf, short);
+            put_f(b, r3i, rem, short);
             Ok(())
         }
         0x62 | 0x69 => {
@@ -3494,6 +3673,7 @@ pub fn b3<B: Backend>(b: &mut B, w: u64, _pc: u64) -> Flow<B> {
 
 /// s390 の M3 丸めモードを softfloat Rm へ写す。
 /// s390: 0=FPC 指定, 1=RNA, 4=RNE, 5=RTZ, 6=RUP(+∞), 7=RDN(-∞)。
+/// （2/3 = prepare-for-shorter は正確な f64 では区別しない → RNE）。
 /// softfloat: 0=Rne, 1=Rtz, 2=Rdn, 3=Rup, 4=Rmm。
 // Ref: SPEC-S390-ZARCH-POP — 変換系命令の丸めモード指定子。
 fn m3_to_rm(m3: u8) -> u8 {
@@ -3508,8 +3688,82 @@ fn m3_to_rm(m3: u8) -> u8 {
     }
 }
 
-/// LPTE/LTC 系のテスト CC（0/負/正）。近似はビット符号。
-fn fp_test_cc<B: Backend>(b: &mut B, v: B::V<W64>, _short: bool) {
+/// FPC レジスタの BFP 丸めモード（ビット 29-31）を softfloat Rm へ写す。
+/// s390 DRM: 0=RNE, 1=RTZ, 2=+∞, 3=-∞, 7=RNA。その他は RNE。
+fn fpc_drm_codes() -> [(u64, u8); 4] {
+    [(1, 1), (2, 3), (3, 2), (7, 4)]
+}
+
+/// f64→s64 変換。m3=0（FPC 現行）のとき FPC の DRM に従って結果を選択する。
+fn fcvt_s64_m3<B: Backend>(b: &mut B, d: B::V<W64>, m3: u8) -> B::V<W64> {
+    if m3 & 7 != 0 {
+        return b.fcvt_s64::<W64>(d, m3_to_rm(m3));
+    }
+    let fpc = b.get(fpc_ref());
+    let m = k(b, 7);
+    let drm = b.and(fpc, m);
+    let mut res = b.fcvt_s64::<W64>(d, 0);
+    for (code, rm) in fpc_drm_codes() {
+        let v = b.fcvt_s64::<W64>(d, rm);
+        let c = k(b, code);
+        let hit = b.cmp(Cmp::Eq, drm, c);
+        res = b.select(hit, v, res);
+    }
+    res
+}
+
+/// f64→s32 変換。m3=0 のとき FPC の DRM に従う。
+fn fcvt_s32_m3<B: Backend>(b: &mut B, d: B::V<W64>, m3: u8) -> B::V<W32> {
+    if m3 & 7 != 0 {
+        return b.fcvt_s32::<W64>(d, m3_to_rm(m3));
+    }
+    let fpc = b.get(fpc_ref());
+    let m = k(b, 7);
+    let drm = b.and(fpc, m);
+    let mut res = b.fcvt_s32::<W64>(d, 0);
+    for (code, rm) in fpc_drm_codes() {
+        let v = b.fcvt_s32::<W64>(d, rm);
+        let c = k(b, code);
+        let hit = b.cmp(Cmp::Eq, drm, c);
+        res = b.select(hit, v, res);
+    }
+    res
+}
+
+/// BFP 比較の CC: 0=等しい、1=op1<op2、2=op1>op2、3=非順序（NaN）。
+fn fp_cmp_cc<B: Backend>(b: &mut B, a: B::V<W64>, x: B::V<W64>) {
+    let eq = b.feq::<W64>(a, x);
+    let lt = b.flt::<W64>(a, x);
+    let gt = b.flt::<W64>(x, a);
+    let lt_or_gt = bor(b, lt, gt);
+    let ord = bor(b, eq, lt_or_gt);
+    let __h0 = k(b, 0);
+    let __h1 = k(b, 1);
+    let __h2 = k(b, 2);
+    let lt2 = b.select(lt, __h1, __h2);
+    let base = b.select(eq, __h0, lt2);
+    let __h3 = k(b, 3);
+    let cc = b.select(ord, base, __h3);
+    b.set(cc_ref(), cc);
+}
+
+/// LPTE/LTC 系のテスト CC（0/負/正）。近似はビット符号、NaN で 3。
+fn fp_test_cc<B: Backend>(b: &mut B, v: B::V<W64>, short: bool) {
+    // NaN の検出（fclass の bit8=sNaN、bit9=qNaN）。
+    let cls = if short {
+        let __h = k(b, 32);
+        let s = b.shr_l::<W64>(v, __h);
+        let s32 = b.trunc::<W64, W32>(s);
+        let c = b.fclass::<W32>(s32);
+        b.zext::<W32, W64>(c)
+    } else {
+        let c = b.fclass::<W64>(v);
+        b.zext::<W32, W64>(c)
+    };
+    let nm = k(b, 0x300);
+    let nan_bits = b.and(cls, nm);
+    let __hz = k(b, 0);
+    let nan = b.cmp(Cmp::Ne, nan_bits, __hz);
     let sign = k(b, 0x8000_0000_0000_0000);
     let __h571 = b.and(v, sign);
     let __h572 = k(b, 0);
@@ -3527,8 +3781,10 @@ fn fp_test_cc<B: Backend>(b: &mut B, v: B::V<W64>, _short: bool) {
     let __h578 = b.select(neg, __h579, __h580);
 
     let __h576 = b.select(is0, __h577, __h578);
+    let __h3 = k(b, 3);
+    let cc = b.select(nan, __h3, __h576);
 
-    b.set(cc_ref(), __h576);
+    b.set(cc_ref(), cc);
 }
 
 /// 2 値 BFP 演算。f32/f64 を選び、結果はレジスタの対応する半分に置く。
@@ -3539,31 +3795,9 @@ fn fp_bin<B: Backend>(b: &mut B, f: u8, r1: u8, r2: u8) -> Flow<B> {
     let a64 = fg64(b, r1, short);
     let y64 = fg64(b, r2, short);
     let (d, cc_v) = match f & 0x0f {
-        0x8 => {
-            // 比較（KEB/KDB/KXB）。
-            let eq = b.feq::<W64>(a64, y64);
-            let lt = b.flt::<W64>(a64, y64);
-            let __h581 = k(b, 0);
-            let __h583 = k(b, 1);
-            let __h584 = k(b, 2);
-
-            let __h582 = b.select(lt, __h583, __h584);
-
-            let cc = b.select(eq, __h581, __h582);
-            b.set(cc_ref(), cc);
-            return Ok(());
-        }
-        0x9 => {
-            let eq = b.feq::<W64>(a64, y64);
-            let lt = b.flt::<W64>(a64, y64);
-            let __h585 = k(b, 0);
-            let __h587 = k(b, 1);
-            let __h588 = k(b, 2);
-
-            let __h586 = b.select(lt, __h587, __h588);
-
-            let cc = b.select(eq, __h585, __h586);
-            b.set(cc_ref(), cc);
+        0x8 | 0x9 => {
+            // 比較（KEB/CEB/KDB/CDB/KXB/CXB）。NaN なら CC3。
+            fp_cmp_cc(b, a64, y64);
             return Ok(());
         }
         0xa => (b.fadd::<W64>(a64, y64), 0),
@@ -3652,7 +3886,9 @@ pub fn e3<B: Backend>(b: &mut B, w: u64, _pc: u64) -> Flow<B> {
                     let v = b.zext::<W32, W64>(__h596);
                     let __h597 = bswap(b, v, 4);
 
-                    set_g(b, r, __h597);
+                    // LRV は下位 32 ビットのみ書き戻す。
+                    let v32 = b.trunc::<W64, W32>(__h597);
+                    set_g32(b, r, v32);
                     return Ok(());
                 }
                 0x1f => {
@@ -3661,7 +3897,9 @@ pub fn e3<B: Backend>(b: &mut B, w: u64, _pc: u64) -> Flow<B> {
                     let v = b.zext::<W16, W64>(__h598);
                     let __h599 = bswap(b, v, 2);
 
-                    set_g(b, r, __h599);
+                    // LRVH も下位 32 ビットのみ書き戻す。
+                    let v32 = b.trunc::<W64, W32>(__h599);
+                    set_g32(b, r, v32);
                     return Ok(());
                 }
                 0x0f => {
@@ -3692,8 +3930,14 @@ pub fn e3<B: Backend>(b: &mut B, w: u64, _pc: u64) -> Flow<B> {
 
                 set_g32(b, r, __h602);
             }
-            if f == 0x02 || f == 0x12 {
+            if f == 0x02 {
                 cc_test(b, v);
+            } else if f == 0x12 {
+                // LT: CC は 32 ビット結果の符号から判定する（格納値は
+                // ゼロ拡張だが、CC 判定では符号拡張した値を見る）。
+                let v32 = b.trunc::<W64, W32>(v);
+                let s = b.sext::<W32, W64>(v32);
+                cc_test(b, s);
             }
             Ok(())
         }
@@ -3737,11 +3981,13 @@ pub fn e3<B: Backend>(b: &mut B, w: u64, _pc: u64) -> Flow<B> {
         0x73 => {
             let __h608 = b.load::<W8>(a, RD)?;
 
-            // ICY。
-            let v = b.zext::<W8, W64>(__h608);
-            let __h609 = b.trunc::<W64, W32>(v);
-
-            set_g32(b, r, __h609);
+            // ICY: ビット 56–63（最下位バイト）だけを更新する。
+            let byte = b.zext::<W8, W64>(__h608);
+            let old = g(b, r);
+            let __hk = k(b, 0xffff_ffff_ffff_ff00);
+            let hi = b.and(old, __hk);
+            let v = b.or(hi, byte);
+            set_g(b, r, v);
             Ok(())
         }
         0x71 => {
@@ -3751,23 +3997,22 @@ pub fn e3<B: Backend>(b: &mut B, w: u64, _pc: u64) -> Flow<B> {
         }
         // 算術。
         0x08 | 0x09 | 0x0a | 0x0b | 0x18 | 0x19 | 0x1a | 0x1b => {
+            // 0x18-0x1b（AGF/SGF/ALGF/SLGF）は 64 ビット宛先からみた
+            // 32 ビット被演算数。符号ありは符号拡張、論理はゼロ拡張。
             let m = match f {
                 0x08..=0x0b => b.load::<W64>(a, RD)?,
+                0x1a | 0x1b => {
+                    let __h610 = b.load::<W32>(a, RD)?;
+                    b.zext::<W32, W64>(__h610)
+                }
                 _ => {
                     let __h610 = b.load::<W32>(a, RD)?;
                     b.sext::<W32, W64>(__h610)
                 }
             };
-            let sub = matches!(f, 0x09 | 0x19);
+            let sub = matches!(f, 0x09 | 0x0b | 0x19 | 0x1b);
             let logical = matches!(f, 0x0a | 0x0b | 0x1a | 0x1b);
-            if matches!(f, 0x18..=0x1b) {
-                let x32 = b.trunc::<W64, W32>(m);
-                if logical {
-                    arith32l(b, r, x32, sub)
-                } else {
-                    arith32(b, r, x32, sub)
-                }
-            } else if logical {
+            if logical {
                 arith64l(b, r, m, sub)
             } else {
                 arith64(b, r, m, sub)
@@ -3833,12 +4078,13 @@ pub fn e3<B: Backend>(b: &mut B, w: u64, _pc: u64) -> Flow<B> {
 
             let v = b.zext::<W32, W64>(__h617);
             let p = b.mul::<W64>(v, m);
-            set_g(b, r + 1, p);
+            // 積はペアの下位 32 ビットずつに置く（上位 32 ビットは保持）。
             let __h621 = k(b, 32);
             let __h620 = b.shr_l::<W64>(p, __h621);
             let __h619 = b.trunc::<W64, W32>(__h620);
-
+            let lo = b.trunc::<W64, W32>(p);
             set_g32(b, r, __h619);
+            set_g32(b, r + 1, lo);
             Ok(())
         }
         0x87 => {
@@ -4183,20 +4429,18 @@ pub fn eb<B: Backend>(b: &mut B, w: u64, _pc: u64) -> Flow<B> {
             let m3 = r3;
             stcm_body(b, r, m3, a, 4, f == 0x2c)
         }
+        0x44 | 0x45 => {
+            // BXHG/BXLEG（RSY、64 ビット版）: 分岐先は絶対 D2(B2)。
+            bx_body(b, r, r3, a, true, f == 0x44)
+        }
         0x30 | 0x31 | 0x3e | 0x14 => {
             // CSG/CDSY/CDSG/CSY。
             cs_op(b, w, a)
         }
         0x4c => {
-            // ECAG: 抽出＋計算（アドレス生成専用）。r1 = r2 + (r3 << i3)。
-            let i3 = (w >> 16) & 0x3f;
-            let __h666 = g(b, f3_48(w));
-            let __h668 = g(b, b1_48(w));
-            let __h669 = k(b, i3);
-
-            let __h667 = b.shl::<W64>(__h668, __h669);
-
-            let v = b.add(__h666, __h667);
+            // ECAG: キャッシュ属性の抽出。キャッシュ情報を提供しない
+            // （QEMU と同じ）ので全 1 を返す。
+            let v = k(b, u64::MAX);
             set_g(b, r, v);
             let _ = a;
             Ok(())
@@ -4284,15 +4528,15 @@ fn cs_op<B: Backend>(b: &mut B, w: u64, a: B::V<W64>) -> Flow<B> {
                 },
             )
         }
-        // CDS/CDSY/CDSG（ペア CAS）は近似で未対応でもよいが、よく使われるので
-        // 順次版で実装する。z/Architecture では CDS/CDSY も 16 バイト CAS
-        // （レジスタペア = 128 ビット）。
+        // CDS/CDSY/CDSG（ペア CAS）は順次版で実装する。
+        // CDS/CDSY はペアの下位 32 ビットずつ（64 ビット CAS）、CDSG は
+        // 全 64 ビットずつ（128 ビット相当）。
         0x31 | 0x3e => {
             if r & 1 != 0 || r3 & 1 != 0 {
                 return unimp(b, 0x5ec1);
             }
             // 旧値の一致を確認してから新値 2 語を書く（cmpxchg は 1 語単位）。
-            if false {
+            if f == 0x31 {
                 let __h678 = g(b, r);
 
                 let old0 = b.trunc::<W64, W32>(__h678);
@@ -4382,10 +4626,12 @@ fn cs_op<B: Backend>(b: &mut B, w: u64, a: B::V<W64>) -> Flow<B> {
 
 /// CLM/CLMH/CLMY: マスクで選んだバイト列をメモリと比較。
 /// `hi` なら上位 32 ビット（バイト 0–3）、なら下位 32 ビット（4–7）。
+/// 比較は最初に異なったバイトで打ち切る（それより右は見ない）。
 fn clm_body<B: Backend>(b: &mut B, r: u8, m3: u8, a: B::V<W64>, n: u8, hi: bool) -> Flow<B> {
     // マスクビット m0 は対象の左端バイト。メモリ側は選択バイトを
     // 詰めた連続領域（選択順の番号 j）。
     let mut res = k(b, 0);
+    let mut diff: Option<B::B> = None;
     let mut j = 0u64;
     for i in 0..n {
         if (m3 >> (3 - i)) & 1 != 0 {
@@ -4403,13 +4649,21 @@ fn clm_body<B: Backend>(b: &mut B, r: u8, m3: u8, a: B::V<W64>, n: u8, hi: bool)
             let __h702 = b.load::<W8>(__h703, RD)?;
 
             let mb = b.zext::<W8, W64>(__h702);
+            let ne = b.cmp(Cmp::Ne, rb, mb);
             let lt = b.cmp(Cmp::LtU, rb, mb);
-            let gt = b.cmp(Cmp::GtU, rb, mb);
             let __h705 = k(b, 1);
             let __h707 = k(b, 2);
-            let __h706 = b.select(gt, __h707, res);
-
-            res = b.select(lt, __h705, __h706);
+            let ccv = b.select(lt, __h705, __h707);
+            let cand = b.select(ne, ccv, res);
+            // 一度差が出たら以降の結果は捨てる（最初の不一致で確定）。
+            res = match diff {
+                Some(d) => b.select(d, res, cand),
+                None => cand,
+            };
+            diff = Some(match diff {
+                Some(d) => bor(b, d, ne),
+                None => ne,
+            });
         }
     }
     b.set(cc_ref(), res);
@@ -4418,9 +4672,13 @@ fn clm_body<B: Backend>(b: &mut B, r: u8, m3: u8, a: B::V<W64>, n: u8, hi: bool)
 
 /// ICM/ICMH/ICMY: マスクビットごとにレジスタの該当バイトへロード。
 /// `hi` なら上位 32 ビット（バイト 0–3）、なら下位 32 ビット（4–7）。
+/// CC: 0=挿入値すべて 0（マスク 0 も）、1=左端挿入バイトの最上位ビットが
+/// 1、2=その他。マスク 0 でも第 1 バイトへのアクセスチェックは行う。
 fn icm_body<B: Backend>(b: &mut B, r: u8, m3: u8, a: B::V<W64>, n: u8, hi: bool) -> Flow<B> {
     let mut v = g(b, r);
     let mut acc = k(b, 0);
+    let mut first = k(b, 0);
+    let mut seen = false;
     // メモリ側は選択バイトを詰めた連続領域。選択順の番号 j で読む。
     let mut j = 0u64;
     for i in 0..n {
@@ -4433,6 +4691,10 @@ fn icm_body<B: Backend>(b: &mut B, r: u8, m3: u8, a: B::V<W64>, n: u8, hi: bool)
             let __h708 = b.load::<W8>(__h709, RD)?;
 
             let mv = b.zext::<W8, W64>(__h708);
+            if !seen {
+                first = mv;
+                seen = true;
+            }
             let sh = k(b, (7 - pos) * 8);
             let __h714 = k(b, 0xff);
             let __h713 = b.shl::<W64>(__h714, sh);
@@ -4444,8 +4706,23 @@ fn icm_body<B: Backend>(b: &mut B, r: u8, m3: u8, a: B::V<W64>, n: u8, hi: bool)
             acc = b.or(acc, mv);
         }
     }
+    if m3 == 0 {
+        // アクセスチェックのため先頭バイトを読む（値は使わない）。
+        let _ = b.load::<W8>(a, RD)?;
+    }
     set_g(b, r, v);
-    cc_test(b, acc);
+    let __hz = k(b, 0);
+    let is0 = b.cmp(Cmp::Eq, acc, __hz);
+    let __hb = k(b, 0x80);
+    let top = b.and(first, __hb);
+    let __hz2 = k(b, 0);
+    let neg = b.cmp(Cmp::Ne, top, __hz2);
+    let __h1 = k(b, 1);
+    let __h2 = k(b, 2);
+    let c12 = b.select(neg, __h1, __h2);
+    let __h0 = k(b, 0);
+    let ccv = b.select(is0, __h0, c12);
+    b.set(cc_ref(), ccv);
     Ok(())
 }
 
@@ -4482,8 +4759,16 @@ pub fn ec<B: Backend>(b: &mut B, w: u64, pc: u64) -> Flow<B> {
     let m3 = ((w >> 12) & 0xf) as u8;
     match f {
         0x64 | 0x65 | 0x76 | 0x77 | 0xe4 | 0xe5 | 0xf6 | 0xf7 => {
-            // CGRJ/CLGRJ/CRJ/CLRJ と BRB 系（cgrb 等）。
-            let target = k(b, pc.wrapping_add((i2 << 1) as u64));
+            // CGRJ/CLGRJ/CRJ/CLRJ（RIE、PC+I2*2）と
+            // CGRB/CLGRB/CRB/CLRB（RRS、絶対 D4(B4)）。
+            let target = if matches!(f, 0xe4 | 0xe5 | 0xf6 | 0xf7) {
+                // RRS では bytes 2-3 が b4|d4（絶対アドレス）。
+                let b4 = ((w >> 28) & 0xf) as u8;
+                let d4 = ((w >> 16) & 0xfff) as i64;
+                ea(b, 0, b4, d4)
+            } else {
+                k(b, pc.wrapping_add((i2 << 1) as u64))
+            };
             let signed = matches!(f, 0x64 | 0x76 | 0xe4 | 0xf6);
             let wide = matches!(f, 0x64 | 0x65 | 0xe4 | 0xe5);
             let (a, x) = if wide {
@@ -4527,43 +4812,30 @@ pub fn ec<B: Backend>(b: &mut B, w: u64, pc: u64) -> Flow<B> {
             cjump(b, m3i, target)
         }
         0x44 | 0x45 => {
-            // BRXHG/BRXLG: r1 += r(r1+1)。BRXHG は r1 > r(r2) で分岐、
-            // BRXLG は r1 <= r(r2) で分岐。busybox のループで使われる。
-            let incr = g(b, r + 1);
-            let lim = g(b, r2);
-            let cur = g(b, r);
-            let nv = b.add(cur, incr);
-            set_g(b, r, nv);
+            // BRXHG/BRXLG（RIE、64 ビット版）: byte1 下位 nibble が r3 で、
+            // 増分=r3、比較値=r3|1。分岐先は PC+I2*2。
             let target = k(b, pc.wrapping_add((i2 << 1) as u64));
-            let c = if f == 0x44 {
-                b.cmp(Cmp::GtS, nv, lim)
-            } else {
-                b.cmp(Cmp::LeS, nv, lim)
-            };
-            b.if_then_else(
-                c,
-                |bb| {
-                    bb.jump(target);
-                    Ok(())
-                },
-                |_| Ok(()),
-            )
+            bx_body(b, r, r2, target, true, f == 0x44)
         }
         0x70..=0x73 => {
-            // CGIT/CLGIT/CIT/CLIT: 条件が合えば trap、合わなければ no-op。
-            let c = btaken(b, m3);
-            b.if_then_else(
-                c,
-                |bb| {
-                    Err(bb.raise(GuestException {
-                        kind: ExceptionKind::Trap,
-                        code: 0xec00 + u64::from(f),
-                        addr: None,
-                        in_delay_slot: false,
-                    }))
-                },
-                |_| Ok(()),
-            )
+            // CGIT/CLGIT/CIT/CLIT: r1 と符号拡張した i2 を比較し、
+            // 結果が m3 のビットに合えば trap。CC は参照しない。
+            let wide = f < 0x72;
+            let signed = matches!(f, 0x70 | 0x72);
+            let immv = k(b, i2 as u64);
+            let (a, x2) = if wide {
+                (g(b, r), immv)
+            } else {
+                let av = g(b, r);
+                let a32 = b.trunc::<W64, W32>(av);
+                let x32 = b.trunc::<W64, W32>(immv);
+                if signed {
+                    (b.sext::<W32, W64>(a32), b.sext::<W32, W64>(x32))
+                } else {
+                    (b.zext::<W32, W64>(a32), b.zext::<W32, W64>(x32))
+                }
+            };
+            trap_if(b, m3, a, x2, signed, 0xec00 + u64::from(f))
         }
         0x54..=0x57 => {
             // RNSBG/ROSBG/RXSBG/RISBG 系（回転＋選択挿入）。
@@ -4622,8 +4894,18 @@ fn risb<B: Backend>(b: &mut B, f: u8, r: u8, w: u64) -> Flow<B> {
         let __h733 = b.and(old, __h732);
         b.or(__h733, ins)
     };
-    set_g(b, r, out);
-    cc_test(b, out);
+    // i3 のビット 0（最上位ビット）は「テストのみ」指定で結果を捨てる
+    // （RNSBGT/ROSBGT/RXSBGT）。
+    let test_only = i3 & 0x80 != 0;
+    if !test_only {
+        set_g(b, r, out);
+    }
+    // RNSBG/ROSBG/RXSBG は 0/1 の論理 CC（選択ビット内での非ゼロ判定）。
+    // RISBG（0x55）は CC を変えない。
+    if f != 0x55 {
+        let res = b.and(out, __h731);
+        cc_zero1(b, res);
+    }
     Ok(())
 }
 
@@ -4698,17 +4980,8 @@ pub fn ed<B: Backend>(b: &mut B, w: u64, _pc: u64) -> Flow<B> {
             let a64 = fg64(b, r, short);
             let d = match f & 0x0f {
                 0x8 | 0x9 => {
-                    // KEB/KEB? f==8=KEB,9=CEB。
-                    let eq = b.feq::<W64>(a64, m);
-                    let lt = b.flt::<W64>(a64, m);
-                    let __h756 = k(b, 0);
-                    let __h758 = k(b, 1);
-                    let __h759 = k(b, 2);
-
-                    let __h757 = b.select(lt, __h758, __h759);
-
-                    let cc = b.select(eq, __h756, __h757);
-                    b.set(cc_ref(), cc);
+                    // KEB/CEB/KDB/CDB。NaN なら CC3。
+                    fp_cmp_cc(b, a64, m);
                     return Ok(());
                 }
                 0xa => b.fadd::<W64>(a64, m),
@@ -4740,10 +5013,11 @@ pub fn ed<B: Backend>(b: &mut B, w: u64, _pc: u64) -> Flow<B> {
             let a64 = fg64(b, r3, short);
             let acc = fg64(b, r1f, short);
             let prod = b.fmul::<W64>(a64, m);
+            // MAD/MAE は acc+prod、MSD/MSE は prod−acc（PoP の順序）。
             let d = if f == 0x0e || f == 0x1e {
-                b.fadd::<W64>(acc, prod)
+                b.fadd::<W64>(prod, acc)
             } else {
-                b.fsub::<W64>(acc, prod)
+                b.fsub::<W64>(prod, acc)
             };
             put_f(b, r1f, d, short);
             Ok(())
@@ -4809,8 +5083,8 @@ pub fn exec2<B: Backend>(b: &mut B, insn: crate::Insn, w: u64, pc: u64) -> Flow<
         Larl | Lgfi | Brcl | Brasl | Xihf | Xilf | Iihf | Iilf | Nihf | Nilf | Oihf | Oilf
         | Llihf | Llilf | Msgfi | Msfi | Slgfi | Slfi | Agfi | Afi | Algfi | Alfi | Cgfi | Cfi
         | Clgfi | Clfi | Llhrl | Lghrl | Lhrl | Llghrl | Sthrl | Lgrl | Stgrl | Lgfrl | Lrl
-        | Llgfrl | Strl | Brul | Brh | Exrl | Cghrl | Chrl | Clghrl | Clhrl | Cgrl | Clgrl
-        | Cgfrl | Crl | Clgfrl | Clrl => ril(b, insn, w, pc),
+        | Llgfrl | Strl | Bprp | Exrl | Cghrl | Chrl | Clghrl | Clhrl | Cgrl | Clgrl | Cgfrl
+        | Crl | Clgfrl | Clrl => ril(b, insn, w, pc),
         // SS。
         Mvn | Mvc | Mvz | Nc | Clc | Oc | Xc | Tr | Trt | Ed | Edmk | Srp | Mvo | Pack | Unpk
         | Zap | Cp | Ap | Sp | Mp | Dp => ss(b, insn, w, pc),

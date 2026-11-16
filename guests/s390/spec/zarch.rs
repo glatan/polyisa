@@ -333,12 +333,8 @@ pub fn build_model() -> polyisa_isadl::Model {
     ] {
         push(name, p48f(0xc4, f), t);
     }
-    for (name, f, t) in [
-        ("brul", 0x4u8, "branch"),
-        ("brh", 0x5, "branch"),
-    ] {
-        push(name, p48f(0xc5, f), t);
-    }
+    // C5 は BPRP（分枝予測ヒント）。ユーザーモードでは no-op 扱い。
+    push("bprp", p48(0xc5), "branch");
     for (name, f, t) in [
         ("exrl", 0x0u8, "system"),
         ("cghrl", 0x4, "alu"),

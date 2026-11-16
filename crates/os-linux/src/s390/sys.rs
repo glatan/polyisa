@@ -150,6 +150,48 @@ impl Linux {
             .is_ok()
     }
 
+    /// 64 ビット値を読む。
+    fn get_u64(&self, env: &mut BareEnv, addr: u64) -> Option<u64> {
+        let mut b = [0u8; 8];
+        env.backend.mem.read(VirtAddr(addr), &mut b, ACC).ok()?;
+        Some(u64::from_be_bytes(b))
+    }
+
+    /// mmap 共用体。`prot` は PROT_*、addr!=0 はヒントとして使う。
+    fn do_mmap(&mut self, env: &mut BareEnv, addr: u64, len: u64, prot: u64) -> Disp {
+        if len == 0 {
+            return Self::fail_ret(errno::EINVAL);
+        }
+        let pages = len.div_ceil(0x1000);
+        let base = if addr != 0 {
+            addr & !0xfff
+        } else {
+            self.mmap_next
+        };
+        let mut p = 0u8;
+        if prot & 1 != 0 {
+            p |= Perms::R.0;
+        }
+        if prot & 2 != 0 {
+            p |= Perms::W.0;
+        }
+        if prot & 4 != 0 {
+            p |= Perms::X.0;
+        }
+        if env
+            .backend
+            .mem
+            .map(VirtAddr(base), pages, Perms(p))
+            .is_err()
+        {
+            return Self::fail_ret(errno::ENOMEM);
+        }
+        if base >= self.mmap_next {
+            self.mmap_next = base + pages * 0x1000;
+        }
+        ret(base)
+    }
+
     /// NUL 終端文字列を読む。失敗は None。
     fn cstr(&self, env: &mut BareEnv, addr: u64) -> Option<String> {
         let mut out = Vec::new();
@@ -195,23 +237,26 @@ impl Linux {
     /// 簡易 `struct stat`（新形式、144B）をビッグエンディアンで埋める。
     fn put_stat(&self, env: &mut BareEnv, addr: u64, m: &polyisa_host::Stat) -> bool {
         let mut ok = true;
-        // s390x `struct stat`（UAPI。__u64 中心の並び）。
+        // s390x `struct stat`（UAPI）。asm-generic とは違い時刻フィールドが
+        // st_blksize/st_blocks より先に来る。
+        // Ref: SRC-LINUX arch/s390/include/uapi/asm/stat.h。
         ok &= self.put_u64(env, addr, m.dev);
         ok &= self.put_u64(env, addr + 8, m.ino);
         ok &= self.put_u64(env, addr + 16, m.nlink);
         ok &= self.put_u32(env, addr + 24, m.mode);
         ok &= self.put_u32(env, addr + 28, m.uid);
         ok &= self.put_u32(env, addr + 32, m.gid);
+        // addr+36 は __pad1。
         ok &= self.put_u64(env, addr + 40, m.rdev);
         ok &= self.put_u64(env, addr + 48, m.size);
-        ok &= self.put_u64(env, addr + 56, m.blksize);
-        ok &= self.put_u64(env, addr + 64, m.blocks);
-        ok &= self.put_u64(env, addr + 72, m.atime as u64);
-        ok &= self.put_u64(env, addr + 80, m.atime_nsec as u64);
-        ok &= self.put_u64(env, addr + 88, m.mtime as u64);
-        ok &= self.put_u64(env, addr + 96, m.mtime_nsec as u64);
-        ok &= self.put_u64(env, addr + 104, m.ctime as u64);
-        ok &= self.put_u64(env, addr + 112, m.ctime_nsec as u64);
+        ok &= self.put_u64(env, addr + 56, m.atime as u64);
+        ok &= self.put_u64(env, addr + 64, m.atime_nsec as u64);
+        ok &= self.put_u64(env, addr + 72, m.mtime as u64);
+        ok &= self.put_u64(env, addr + 80, m.mtime_nsec as u64);
+        ok &= self.put_u64(env, addr + 88, m.ctime as u64);
+        ok &= self.put_u64(env, addr + 96, m.ctime_nsec as u64);
+        ok &= self.put_u64(env, addr + 104, m.blksize);
+        ok &= self.put_u64(env, addr + 112, m.blocks);
         ok
     }
 
@@ -334,16 +379,21 @@ impl Linux {
             }
             s390::BRK => {
                 let req = arg(env, 0);
-                if req != 0 && req >= self.heap_end {
-                    // 新領域を RW でマップしてから伸ばす。count はページ数。
+                if req != 0 {
                     let old_page = self.heap_end.div_ceil(0x1000);
                     let new_page = req.div_ceil(0x1000);
                     if new_page > old_page {
+                        // 伸長: 新領域を RW でマップしてから伸ばす。
                         let _ = env.backend.mem.map(
                             VirtAddr(old_page * 0x1000),
                             new_page - old_page,
                             Perms::RW,
                         );
+                    } else if new_page < old_page {
+                        // 縮小: 新しい break より上のページを外す。
+                        env.backend
+                            .mem
+                            .unmap(VirtAddr(new_page * 0x1000), old_page - new_page);
                     }
                     self.heap_end = req;
                 }
@@ -455,11 +505,21 @@ impl Linux {
                 }
                 ret(v.len() as u64)
             }
-            s390::PRLIMIT64 | s390::GETRLIMIT => {
-                let (res, rlim) = (arg(env, 1), arg(env, 3));
-                let _ = res;
+            s390::GETRLIMIT => {
+                // getrlimit(res, rlim): ポインタは第 2 引数（r3）。
+                let rlim = arg(env, 1);
                 if rlim != 0 {
-                    // rlim_cur/rlim_max = infinity。
+                    let inf = u64::MAX;
+                    if !self.put_u64(env, rlim, inf) || !self.put_u64(env, rlim + 8, inf) {
+                        return Self::fail_ret(errno::EFAULT);
+                    }
+                }
+                ret(0)
+            }
+            s390::PRLIMIT64 => {
+                // prlimit64(pid, res, new, old): 書き戻し先は第 4 引数（r5）。
+                let rlim = arg(env, 3);
+                if rlim != 0 {
                     let inf = u64::MAX;
                     if !self.put_u64(env, rlim, inf) || !self.put_u64(env, rlim + 8, inf) {
                         return Self::fail_ret(errno::EFAULT);
@@ -552,13 +612,29 @@ impl Linux {
                 ret(n as u64)
             }
             s390::MMAP => {
-                let (len, prot) = (arg(env, 1), arg(env, 2));
-                let base = self.mmap_next;
-                let pages = len.div_ceil(0x1000);
-                let _ = env.backend.mem.map(VirtAddr(base), pages, Perms::RW);
-                self.mmap_next += pages * 0x1000;
-                let _ = prot;
-                ret(base)
+                // s390 の 90 番は old_mmap: r2 が 6 語の引数ブロック
+                // （addr,len,prot,flags,fd,offset）を指す。
+                let p = arg(env, 0);
+                let mut margs = [0u64; 6];
+                let mut ok = true;
+                for (i, a) in margs.iter_mut().enumerate() {
+                    match self.get_u64(env, p + i as u64 * 8) {
+                        Some(v) => *a = v,
+                        None => {
+                            ok = false;
+                            break;
+                        }
+                    }
+                }
+                if !ok {
+                    return Self::fail_ret(errno::EFAULT);
+                }
+                self.do_mmap(env, margs[0], margs[1], margs[2])
+            }
+            s390::MMAP2 => {
+                // mmap2: 引数はレジスタ（offset は 4KiB ページ単位、無視）。
+                let (addr, len, prot) = (arg(env, 0), arg(env, 1), arg(env, 2));
+                self.do_mmap(env, addr, len, prot)
             }
             s390::FUTEX => Self::fail_ret(errno::EAGAIN),
             s390::UMASK => {
@@ -579,8 +655,14 @@ impl TrapHandler for Linux {
         self.mmap_next = image_end.div_ceil(0x1000) * 0x1000 + 0x1000;
     }
 
-    fn handle_trap(&mut self, env: &mut BareEnv, _code: u32) -> TrapOutcome {
-        let nr = reg(env, 1);
+    fn handle_trap(&mut self, env: &mut BareEnv, code: u32) -> TrapOutcome {
+        // `svc imm`: imm が 0 以外ならそれ自体が syscall 番号
+        // （ESA 系の旧形式）。0 なら番号は r1。
+        let nr = if code != 0 {
+            u64::from(code)
+        } else {
+            reg(env, 1)
+        };
         if std::env::var_os("POLYISA_S390_SYS_TRACE").is_some() {
             let name = s390::name(nr).unwrap_or("?");
             eprintln!(
