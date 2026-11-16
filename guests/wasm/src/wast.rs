@@ -72,6 +72,9 @@ enum Exp {
     NanCanon { f32: bool },
     /// 任意の funcref（`ref.func`）。
     AnyFunc,
+    /// 指標つき funcref（`(ref.func i)`）。比較時に対象モジュールの
+    /// 関数指標空間でアドレスに解決する。
+    Func(u32),
     /// 型を問わない null 参照（裸の `ref.null`）。
     AnyNull,
 }
@@ -212,7 +215,9 @@ impl Runner {
             "assert_exhaustion" => self.assert_exhaustion(l, st),
             "assert_malformed" => self.assert_malformed(l, st),
             "assert_invalid" => self.assert_invalid(l, st),
-            "assert_unlinkable" | "assert_uninstantiable" => self.assert_unlinkable(l, st),
+            "assert_unlinkable" | "assert_uninstantiable" => {
+                self.assert_unlinkable(l, st, head);
+            }
             "assert_return_canonical_nan" | "assert_return_arithmetic_nan" => {
                 self.assert_nan(l, st, head == "assert_return_arithmetic_nan");
             }
@@ -227,11 +232,23 @@ impl Runner {
     // -----------------------------------------------------------------------
 
     /// `(module ...)` を decode+validate+instantiate する。
+    /// 失敗は (種別, 文言)。種別はアサーションの等級判定に使うため
+    /// `exec::Error` の variant をそのまま写す（link と trap を
+    /// ひとまとめにしない）。
     fn try_module(&mut self, sx: &Sx) -> Result<Rc<Instance>, (String, String)> {
         let bytes = crate::wat::module_bytes(sx).map_err(|e| ("wat".to_string(), e.0))?;
-        let v = crate::compile(&bytes).map_err(|e| ("compile".to_string(), e.msg()))?;
+        let v = crate::compile(&bytes).map_err(|e| (err_kind(&e).to_string(), e.msg()))?;
         exec::instantiate(&mut self.store, Rc::new(v), &self.registry, &NoHost)
-            .map_err(|e| ("link".to_string(), e.msg()))
+            .map_err(|e| (err_kind(&e).to_string(), e.msg()))
+    }
+
+    /// アクション `(invoke|get $m? ...)` の対象モジュール。
+    /// 名なしなら直近の名なしモジュール。
+    fn action_inst(&self, action: &Sx) -> Option<Rc<Instance>> {
+        match action.list().and_then(|a| a.get(1)) {
+            Some(Sx::Atom(n)) if n.starts_with('$') => self.named.get(n.as_str()).cloned(),
+            _ => self.last.clone(),
+        }
     }
 
     /// アクション `(invoke|get $m? ...)` がスキップ済みモジュールを指すか。
@@ -355,8 +372,18 @@ impl Runner {
             return;
         };
         let mut expected = Vec::new();
+        // `(ref.func i)` の指標は呼び出したモジュールの指標空間で
+        // ストアアドレスに解決する。
+        let inst = self.action_inst(action);
         for it in &l[2..] {
             match exp_of(it) {
+                Ok(Exp::Func(i)) => match inst.as_ref().and_then(|x| x.funcs.get(i as usize)) {
+                    Some(a) => expected.push(Exp::Val(Val::Ref(RefVal::Func(*a)))),
+                    None => {
+                        st.fail("assert_return: bad expected: unknown function".into());
+                        return;
+                    }
+                },
                 Ok(e) => expected.push(e),
                 Err(m) => {
                     st.fail(format!("assert_return: bad expected: {m}"));
@@ -391,12 +418,25 @@ impl Runner {
             .and_then(Sx::string)
             .map(|s| String::from_utf8_lossy(s).into_owned());
         let kind = action.list().and_then(|a| a.first()).and_then(Sx::atom);
+        // (module …) 形はインスタンス化時の Trap だけを受理する。
+        // link/検証/テキスト側のエラーを trap 等級に混ぜない。
         let result: Result<String, String> = match kind {
             Some("invoke") => self.invoke_sx(action).map(|_| String::new()),
-            Some("module") => self
-                .try_module(action)
-                .map(|_| String::new())
-                .map_err(|(_, m)| m),
+            Some("module") => match self.try_module(action) {
+                Ok(_) => Ok(String::new()),
+                Err((k, m)) if k == "trap" => Err(m),
+                Err((k, m)) => {
+                    if has_out_of_scope(action) || self.imports_skipped_reg(action) {
+                        st.skipped += 1;
+                    } else {
+                        st.fail(format!(
+                            "assert_trap: not a trap ({k}: {})",
+                            &m[..m.len().min(80)]
+                        ));
+                    }
+                    return;
+                }
+            },
             _ => {
                 st.skipped += 1;
                 return;
@@ -425,14 +465,25 @@ impl Runner {
             st.fail("assert_exhaustion: empty".into());
             return;
         };
+        // 仕様の期待文言は "call stack exhausted"。それ以外の失敗で
+        // 偶然成立させない（assert_trap と同じ文言照合を行う）。
+        let want = l
+            .get(2)
+            .and_then(Sx::string)
+            .map(|s| String::from_utf8_lossy(s).into_owned())
+            .unwrap_or_else(|| "call stack exhausted".to_string());
         match action.list().and_then(|a| a.first()).and_then(Sx::atom) {
             Some("invoke") => match self.invoke_sx(action) {
                 Ok(_) => st.fail("assert_exhaustion: no trap".into()),
-                Err(_) => {
-                    if self.action_skipped(action) {
+                Err(actual) => {
+                    if msg_match(&actual, Some(want.as_str())) {
+                        st.passed += 1;
+                    } else if self.action_skipped(action) {
                         st.skipped += 1;
                     } else {
-                        st.passed += 1;
+                        st.fail(format!(
+                            "assert_exhaustion: msg mismatch (got {actual:?} want {want:?})"
+                        ));
                     }
                 }
             },
@@ -511,9 +562,12 @@ impl Runner {
         }
     }
 
-    fn assert_unlinkable(&mut self, l: &[Sx], st: &mut Stats) {
+    /// `assert_unlinkable`・`assert_uninstantiable` の共通処理。
+    /// どちらもインスタンス化時のリンク失敗（Error::Link）のみを
+    /// 期待し、trap や検証エラーとは区別する。
+    fn assert_unlinkable(&mut self, l: &[Sx], st: &mut Stats, head: &str) {
         let Some(m) = l.get(1) else {
-            st.fail("assert_unlinkable: empty".into());
+            st.fail(format!("{head}: empty"));
             return;
         };
         let want = l
@@ -524,18 +578,16 @@ impl Runner {
         match result {
             // 範囲外の構文が無視されて通っただけなら skip。
             Ok(_) if has_out_of_scope(m) => st.skipped += 1,
-            Ok(_) => st.fail("assert_unlinkable: module instantiated".into()),
+            Ok(_) => st.fail(format!("{head}: module instantiated")),
             Err((kind, a)) => {
                 if kind == "link" && msg_match(&a, want.as_deref()) {
                     st.passed += 1;
                 } else if has_out_of_scope(m) || self.imports_skipped_reg(m) {
                     st.skipped += 1;
                 } else if kind == "link" {
-                    st.fail(format!(
-                        "assert_unlinkable: msg mismatch (got {a:?} want {want:?})"
-                    ));
+                    st.fail(format!("{head}: msg mismatch (got {a:?} want {want:?})"));
                 } else {
-                    st.fail(format!("assert_unlinkable: wrong error ({kind}: {a})"));
+                    st.fail(format!("{head}: wrong error ({kind}: {a})"));
                 }
             }
         }
@@ -578,8 +630,21 @@ impl Runner {
 // 補助
 // ---------------------------------------------------------------------------
 
+/// `exec::Error` の種別を assert 照合用の語にする。
+fn err_kind(e: &exec::Error) -> &'static str {
+    match e {
+        exec::Error::Decode(_) => "decode",
+        exec::Error::Invalid(_) => "invalid",
+        exec::Error::Link(_) => "link",
+        exec::Error::Trap(_) => "trap",
+    }
+}
+
 /// 段階 12 の範囲（1.0/2.0 コア）に入らない提案の印。
 /// アトムの完全一致と、SIMD 系命令の接頭辞を見る。
+/// 裸の "ref"/"extern" は `(ref func)`・`ref.null extern` など
+/// 範囲内の 2.0 構文にも現れるのでここには入れず、
+/// `(ref <heaptype>)` の形は has_out_of_scope で別に判定する。
 fn is_oos_atom(a: &str) -> bool {
     const OOS: &[&str] = &[
         // 例外処理（3.0）
@@ -593,14 +658,29 @@ fn is_oos_atom(a: &str) -> bool {
         "try_table2",
         "delegate",
         "throw_ref",
-        // GC・関数参照（3.0）。裸の "ref" は (ref $t) 型コンストラクタ。
+        "exnref",
+        // GC・型付き関数参照（3.0）。"ref"/"extern" は上記の通り外す。
         "rec",
-        "ref",
-        "extern",
         "sub",
         "struct",
         "array",
         "i31",
+        "field",
+        "final",
+        "anyref",
+        "eqref",
+        "i31ref",
+        "structref",
+        "arrayref",
+        "nullref",
+        "nullfuncref",
+        "nullexternref",
+        "nofunc",
+        "nofuncref",
+        "noextern",
+        "noexternref",
+        "noneref",
+        "none",
         "call_ref",
         "return_call_ref",
         "br_on_null",
@@ -608,6 +688,8 @@ fn is_oos_atom(a: &str) -> bool {
         "br_on_cast",
         "br_on_cast_fail",
         "ref.as_non_null",
+        "ref.test",
+        "ref.cast",
         // tail-call（3.0）
         "return_call",
         "return_call_indirect",
@@ -619,6 +701,7 @@ fn is_oos_atom(a: &str) -> bool {
         "suspend",
         "resume",
         "contbind",
+        "memory64",
         "memory.copy64",
         "extern.internalize",
         "extern.externalize",
@@ -632,13 +715,34 @@ fn is_oos_atom(a: &str) -> bool {
     SIMD.iter().any(|p| a.starts_with(p))
 }
 
-/// quote/binary 文字列の中身への緩い印判定。
+/// quote/binary 文字列の中身への緩い印判定（再解析に失敗したときの予備）。
+/// `"..."` リテラルの内側は潰してから走査し、文字列中の語を
+/// 構文の印と誤認しない。
 fn str_has_oos(s: &[u8]) -> bool {
-    let Ok(t) = std::str::from_utf8(s) else {
-        return false;
-    };
-    // 文字列全体を単語に分けてアトム判定に回す。
-    t.split(|c: char| !(c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '$'))
+    let mut t = s.to_vec();
+    let mut i = 0;
+    while i < t.len() {
+        if t[i] == b'"' {
+            t[i] = b' ';
+            i += 1;
+            while i < t.len() {
+                let b = t[i];
+                t[i] = b' ';
+                i += 1;
+                if b == b'\\' && i < t.len() {
+                    // エスケープの次の字も潰す。
+                    t[i] = b' ';
+                    i += 1;
+                } else if b == b'"' {
+                    break;
+                }
+            }
+        } else {
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&t)
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '$'))
         .any(is_oos_atom)
 }
 
@@ -646,13 +750,70 @@ fn str_has_oos(s: &[u8]) -> bool {
 fn has_out_of_scope(sx: &Sx) -> bool {
     match sx {
         Sx::Atom(a) => is_oos_atom(a),
-        Sx::Str(s) => str_has_oos(s),
+        // 文字列リテラル（名前・data バイト列）の中身は構文ではないので
+        // 走査しない。quote モジュールの中身は List 側で再解析する。
+        Sx::Str(_) => false,
         Sx::List(l) => {
-            // (module definition|instance ...) は module-linking 提案。
-            if l.first().and_then(Sx::atom) == Some("module")
-                && matches!(l.get(1).and_then(Sx::atom), Some("definition" | "instance"))
-            {
-                return true;
+            match l.first().and_then(Sx::atom) {
+                Some("module") => {
+                    // (module definition|instance ...) は module-linking 提案。
+                    if matches!(l.get(1).and_then(Sx::atom), Some("definition" | "instance")) {
+                        return true;
+                    }
+                    // `(module $n? quote "...")` の中身はモジュールテキスト。
+                    // S 式として読み直してから再走査し、読めないときだけ
+                    // 緩い語走査に落ちる。
+                    let qi = 1 + usize::from(
+                        l.get(1)
+                            .and_then(Sx::atom)
+                            .is_some_and(|a| a.starts_with('$')),
+                    );
+                    if l.get(qi).and_then(Sx::atom) == Some("quote") {
+                        let mut text = Vec::new();
+                        for it in &l[qi + 1..] {
+                            if let Sx::Str(s) = it {
+                                text.extend_from_slice(s);
+                            }
+                        }
+                        if let Ok(src) = std::str::from_utf8(&text)
+                            && let Ok(inner) = sexpr::parse_all(src)
+                        {
+                            return inner.iter().any(has_out_of_scope);
+                        }
+                        return str_has_oos(&text);
+                    }
+                }
+                // `(ref [null] ht)` のヒープ型が func/extern 以外
+                // （型指標・GC 型）は範囲外。形が壊れているときも
+                // 範囲外扱いにする。
+                Some("ref") => {
+                    let mut j = 1;
+                    if l.get(1).and_then(Sx::atom) == Some("null") {
+                        j = 2;
+                    }
+                    return !(l.len() == j + 1
+                        && matches!(l.get(j).and_then(Sx::atom), Some("func" | "extern")));
+                }
+                // `(ref.null ht)` の func/extern 以外のヒープ型も範囲外。
+                Some("ref.null") => {
+                    return !matches!(
+                        l.get(1).and_then(Sx::atom),
+                        Some("func" | "extern" | "funcref" | "externref")
+                    );
+                }
+                // non-null 参照型のローカル宣言（undefaulted local）は
+                // 初期化追跡が要り内部表現に持たないため範囲外。
+                Some("local")
+                    if l[1..].iter().any(|it| {
+                        it.list().is_some_and(|inner| {
+                            inner.first().and_then(Sx::atom) == Some("ref")
+                                && inner.get(1).and_then(Sx::atom) != Some("null")
+                        })
+                    }) =>
+                {
+                    return true;
+                }
+                _ => {}
             }
             l.iter().any(has_out_of_scope)
         }
@@ -740,6 +901,11 @@ fn arg_of(sx: &Sx) -> Result<Val, String> {
         "ref.extern" => {
             let n = crate::wat::parse_int_signed(l.get(1).and_then(Sx::atom).ok_or("arg")?)
                 .map_err(|e| e.0)?;
+            // 内部表現は u32 なので、切り詰めで別の値にならないよう
+            // 範囲外はエラーにする。
+            if !(0..=i128::from(u32::MAX)).contains(&n) {
+                return Err("ref.extern out of range".into());
+            }
             Ok(Val::Ref(RefVal::Extern(n as u32)))
         }
         _ => Err(format!("unsupported arg {head}")),
@@ -826,9 +992,25 @@ fn exp_of(sx: &Sx) -> Result<Exp, String> {
             };
             Ok(Exp::Val(Val::Ref(RefVal::Null(t))))
         }
-        "ref.func" => Ok(Exp::AnyFunc),
+        "ref.func" => {
+            // `(ref.func)` は任意の funcref、`(ref.func i)` は指標 i の
+            // 関数参照（呼び出したモジュールの指標空間で解決する）。
+            let Some(sx) = l.get(1) else {
+                return Ok(Exp::AnyFunc);
+            };
+            let n =
+                crate::wat::parse_int_signed(sx.atom().ok_or("bad ref.func")?).map_err(|e| e.0)?;
+            if !(0..=i128::from(u32::MAX)).contains(&n) {
+                return Err("bad ref.func".into());
+            }
+            Ok(Exp::Func(n as u32))
+        }
         "ref.extern" => {
             let n = crate::wat::parse_int_signed(atom(1)?).map_err(|e| e.0)?;
+            // 内部表現は u32 なので範囲外は切り詰めずエラーにする。
+            if !(0..=i128::from(u32::MAX)).contains(&n) {
+                return Err("ref.extern out of range".into());
+            }
             Ok(Exp::Val(Val::Ref(RefVal::Extern(n as u32))))
         }
         _ => Err(format!("unsupported expected: {head}")),

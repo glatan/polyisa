@@ -391,6 +391,57 @@
   f32/f64 の文字列→ビット変換で hex-float タイの
   1ulp 差が残る可能性がある。wasi-sdk/clang が無い
   環境では S12-3 は手組モジュール経路のみ。
+- レビュー（サブエージェント 3 系）実施。指摘を受けて修正:
+  - `table_inits` がインポート込みのテーブル空間で
+    添字付けされていたのを定義テーブル起点に修正
+    （インポートテーブルの上書き防止。回帰テスト
+    `imported_table_init`）。
+  - 宣言ローカルの個数上限 `u32::MAX` が decode 時に
+    巨大確保を強いるのを連長表現化で回避（decode/
+    validate/exec の 3 層）。テーブル確保は
+    `try_reserve` 化し、確保失敗は grow→-1、
+    インスタンス化→link エラー。
+  - validate の関数ごとの Ctx deep clone を解消、
+    非 null テーブルの init 必須化、`collect_refs` が
+    `table_inits` を拾うよう修正、`ref.is_null` の
+    オペランドを reftype 限定に。
+  - インポート記述の table に `0x40` init 形式を
+    malformed として拒否。`(ref ht)` 要素への
+    `ref.null` 項目を invalid に。
+  - WAT 受理の穴: フラット `br_table` の非ラベル
+    原子で停止、孤立 `end`/`else` の黙殺をエラー化、
+    `(offset …)` 等のフラット定数式受理、
+    `call_indirect (type N)` の OOB パニック解消、
+    param/local の `$id` 規則、if 折り畳み・import
+    記述の末尾ゴミ拒否、sexpr の `\u{}` 桁溢れ・
+    深さ上限・制御文字拒否。
+  - wast 採点の穴: `assert_exhaustion` の文言照合、
+    Trap/Link の種別保持（assert_trap↔unlinkable
+    の混同解消）、`has_out_of_scope` の誤検出
+    （`(ref func)` 等の 2.0 内構文・文字列中の走査）
+    を修正。`(ref.func N)` の添字比較対応。
+  - os-wasi: `resolve_under` を要素ごとの
+    `symlink_metadata` 走査＋canonicalize で
+    プリオープン外 symlink を NOTCAPABLE に
+    （dirflags も反映）。`fd_readdir` の
+    `bufused==buf_len` 切詰め、`random_get` の
+    全量充填（32 KiB チャンク）、iovec 走査の
+    u64 化、fd ごとの rights 保持と必須権検査
+    （NOTCAPABLE）、`canonical_sig` によるインポート
+    シグネチャ照合、ディレクトリへの write intent
+    拒否（ISDIR/EXIST/NOTDIR/NOENT）、errno 表追加
+    （NOSYS/OVERFLOW/NOTSOCK/STALE/DQUOT）。
+  - 判明した誤指摘: memarg offset は仕様 3.0 の
+    u64 読みが正（レビュー #24 は 2.0 前提の誤り。
+    binary-leb128/address/align の suite で検証済み）。
+    table init の `global.get` 束縛は imported 限定が
+    正（table.wast:104 で検証済み）。
+  - 追加テスト: `imported_table_init`・
+    `malformed_wat_forms`（guest-wasm）、ctx.rs の
+    readdir/symlink/rights 単体テスト（os-wasi）。
+    os-wasi → host の dev 依存を追加（テストの
+    symlink 作成用。依存規則・workspace.md 更新済み）。
+  - スイート採点 28050/0/697 → 28053/0/694。
 
 ## 参考
 

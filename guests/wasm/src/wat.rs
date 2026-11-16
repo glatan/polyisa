@@ -1065,7 +1065,10 @@ fn resolve_type(
         if params.is_empty() && results.is_empty() {
             return Ok(t);
         }
-        let ft = &mb.types[t as usize];
+        let ft = mb
+            .types
+            .get(t as usize)
+            .ok_or_else(|| err("unknown type"))?;
         if ft.params == params && ft.results == results {
             return Ok(t);
         }
@@ -1125,7 +1128,9 @@ fn plain_imm(cx: &mut FnCx, cur: &mut Cur, head: &str, imm: &mut Vec<u8>) -> R<(
         "br_table" => {
             let mut ls = Vec::new();
             while let Some(sx) = cur.items.get(cur.i) {
-                if sx.atom().is_none() {
+                // labelidx は `$名` か非負整数だけ。それ以外のアトム
+                // （次の命令キーワード・`end`/`else`）でラベル列は終わる。
+                if !idx_atom(sx) {
                     break;
                 }
                 ls.push(label_idx(cx, sx)?);
@@ -1433,22 +1438,32 @@ fn emit_folded(cx: &mut FnCx, items: &[Sx], out: &mut Vec<u8>) -> R<()> {
                 i += 1;
             }
             let bt = blocktype_imm(cx, items, &mut i)?;
-            // 条件部・then・else を仕分ける。
+            // 条件部・then・else を仕分ける。文法は
+            // `foldedinstr* (then instr*) (else instr*)?` の順固定なので、
+            // (then) の後は (else) 1 つだけを認め、他の項・重複はエラー。
             let mut cond_end = items.len();
             let mut then_part: Option<&[Sx]> = None;
             let mut else_part: Option<&[Sx]> = None;
             for (k, it) in items.iter().enumerate().skip(i) {
-                if let Some(l) = it.list()
-                    && let Some(h) = l.first().and_then(Sx::atom)
-                {
-                    if h == "then" {
-                        then_part = Some(&l[1..]);
+                let h = it.list().and_then(|l| l.first()).and_then(Sx::atom);
+                match h {
+                    Some("then") => {
+                        if then_part.is_some() || else_part.is_some() {
+                            return Err(err("unexpected token"));
+                        }
+                        then_part = Some(&it.list().unwrap()[1..]);
                         cond_end = k;
-                        continue;
                     }
-                    if h == "else" {
-                        else_part = Some(&l[1..]);
-                        continue;
+                    Some("else") => {
+                        if then_part.is_none() || else_part.is_some() {
+                            return Err(err("unexpected token"));
+                        }
+                        else_part = Some(&it.list().unwrap()[1..]);
+                    }
+                    _ => {
+                        if then_part.is_some() {
+                            return Err(err("unexpected token"));
+                        }
                     }
                 }
             }
@@ -1467,7 +1482,9 @@ fn emit_folded(cx: &mut FnCx, items: &[Sx], out: &mut Vec<u8>) -> R<()> {
                     items: &items[i..cond_end],
                     i: 0,
                 };
-                emit_seq(cx, &mut cur, out)?;
+                if emit_seq(cx, &mut cur, out)?.is_some() {
+                    return Err(err("unexpected end/else"));
+                }
             }
             out.push(0x04);
             out.extend_from_slice(&bt);
@@ -1477,7 +1494,9 @@ fn emit_folded(cx: &mut FnCx, items: &[Sx], out: &mut Vec<u8>) -> R<()> {
                     items: then_part,
                     i: 0,
                 };
-                emit_seq(cx, &mut cur, out)?;
+                if emit_seq(cx, &mut cur, out)?.is_some() {
+                    return Err(err("unexpected end/else"));
+                }
             }
             if let Some(else_part) = else_part {
                 out.push(0x05);
@@ -1485,7 +1504,9 @@ fn emit_folded(cx: &mut FnCx, items: &[Sx], out: &mut Vec<u8>) -> R<()> {
                     items: else_part,
                     i: 0,
                 };
-                emit_seq(cx, &mut cur, out)?;
+                if emit_seq(cx, &mut cur, out)?.is_some() {
+                    return Err(err("unexpected end/else"));
+                }
             }
             cx.labels.pop();
             out.push(0x0b);
@@ -1498,11 +1519,33 @@ fn emit_folded(cx: &mut FnCx, items: &[Sx], out: &mut Vec<u8>) -> R<()> {
             let mut imm = Vec::new();
             plain_imm(cx, &mut cur, head, &mut imm)?;
             let mut sub = Cur { items, i: cur.i };
-            emit_seq(cx, &mut sub, out)?;
+            if emit_seq(cx, &mut sub, out)?.is_some() {
+                return Err(err("unexpected end/else"));
+            }
             out.extend_from_slice(&imm);
         }
     }
     Ok(())
+}
+
+/// 定数式を構成しうる命令の先頭語（2.0 の extended const を含む）。
+fn const_head(a: &str) -> bool {
+    matches!(
+        a,
+        "i32.const"
+            | "i64.const"
+            | "f32.const"
+            | "f64.const"
+            | "ref.null"
+            | "ref.func"
+            | "global.get"
+            | "i32.add"
+            | "i32.sub"
+            | "i32.mul"
+            | "i64.add"
+            | "i64.sub"
+            | "i64.mul"
+    )
 }
 
 /// 定数式（畳み込み式）をバイト列にする。
@@ -1511,45 +1554,63 @@ fn const_expr_bytes(cx: &mut FnCx, sx: &Sx) -> R<Vec<u8>> {
     match sx {
         Sx::List(items) => {
             let head = items.first().and_then(Sx::atom).unwrap_or("");
-            match head {
-                "i32.const" | "i64.const" | "f32.const" | "f64.const" | "ref.null"
-                | "ref.func" | "global.get"
-                // extended const (2.0)
-                | "i32.add" | "i32.sub" | "i32.mul"
-                | "i64.add" | "i64.sub" | "i64.mul" => {
-                    emit_folded(cx, items, &mut out)?;
-                    out.push(0x0b);
+            if const_head(head) {
+                emit_folded(cx, items, &mut out)?;
+            } else if head == "item" {
+                // `(item instr*)` の中身はフラット/畳み混在の命令列。
+                let mut cur = Cur {
+                    items: &items[1..],
+                    i: 0,
+                };
+                if emit_seq(cx, &mut cur, &mut out)?.is_some() {
+                    return Err(err("unexpected end/else"));
                 }
-                "item" => {
-                    // `(item instr*)` の中身はフラット/畳み混在の命令列。
-                    let mut cur = Cur {
-                        items: &items[1..],
-                        i: 0,
-                    };
-                    emit_seq(cx, &mut cur, &mut out)?;
-                    out.push(0x0b);
-                }
-                _ => return Err(err("constant expression required")),
+            } else {
+                return Err(err("constant expression required"));
             }
+            out.push(0x0b);
         }
         _ => return Err(err("constant expression required")),
     }
     Ok(out)
 }
 
-/// `(offset e* ...)` または裸式リストから定数式バイトを作る。
+/// 定数式の項列を出力する。`expr ::= instr*` なので `(i32.const 0)`
+/// の畳み形と `i32.const 0` のフラット形を混在して受け付ける。
 /// 複数式は区切りの `end` を除いて連結する（検証側が type mismatch
-/// を出す）。`(offset)` 空形は `end` のみの式になる。
+/// を出す）。終端の `end` は呼び出し側が足す。
+fn const_seq(cx: &mut FnCx, items: &[Sx], out: &mut Vec<u8>) -> R<()> {
+    let mut cur = Cur { items, i: 0 };
+    while cur.i < items.len() {
+        match &items[cur.i] {
+            Sx::Atom(a) => {
+                if !const_head(a) {
+                    return Err(err("constant expression required"));
+                }
+                let a = a.clone();
+                cur.i += 1;
+                emit_plain_after(cx, &mut cur, &a, out)?;
+            }
+            Sx::List(_) => {
+                let b = const_expr_bytes(cx, &items[cur.i])?;
+                out.extend_from_slice(&b[..b.len() - 1]);
+                cur.i += 1;
+            }
+            _ => return Err(err("constant expression required")),
+        }
+    }
+    Ok(())
+}
+
+/// `(offset e* ...)` または裸式リストから定数式バイトを作る。
+/// `(offset)` 空形は `end` のみの式になる。
 fn offset_expr_bytes(cx: &mut FnCx, l: &Sx) -> R<Vec<u8>> {
     let inner = l.list().unwrap();
     if inner.first().and_then(Sx::atom) != Some("offset") {
         return const_expr_bytes(cx, l);
     }
     let mut out = Vec::new();
-    for e in &inner[1..] {
-        let b = const_expr_bytes(cx, e)?;
-        out.extend_from_slice(&b[..b.len() - 1]);
-    }
+    const_seq(cx, &inner[1..], &mut out)?;
     out.push(0x0b);
     Ok(out)
 }
@@ -1570,6 +1631,10 @@ fn str_utf8(sx: Option<&Sx>) -> R<String> {
 fn inline_import(l: &[Sx]) -> R<Option<(String, String)>> {
     if l.first().and_then(Sx::atom) != Some("import") {
         return Ok(None);
+    }
+    // `(import "m" "n" extra ...)` の余分な項は文法エラー。
+    if l.len() != 3 {
+        return Err(err("malformed import"));
     }
     let m = str_utf8(l.get(1))?;
     let n = str_utf8(l.get(2))?;
@@ -1838,16 +1903,29 @@ fn emit_func_def(mb: &mut Mb, items: &[Sx], i0: usize) -> R<()> {
             if l.first().and_then(Sx::atom) != Some("param") {
                 continue;
             }
+            // 1 つの `(param …)` につき `$名` は先頭の1個までで、
+            // そのとき型はちょうど1つ（`(param $x $y t)`・`(param $x)`
+            // のような形は文法エラー）。
+            let mut name_seen = false;
+            let mut types_in = 0usize;
             for p in &l[1..] {
-                if let Some(a) = p.atom() {
-                    if a.starts_with('$') {
-                        if locals_map.insert(a.to_string(), pidx).is_some() {
-                            return Err(err("duplicate local"));
-                        }
-                    } else {
-                        pidx += 1;
+                if let Some(a) = p.atom()
+                    && a.starts_with('$')
+                {
+                    if name_seen || types_in > 0 {
+                        return Err(err("unexpected token"));
                     }
+                    name_seen = true;
+                    if locals_map.insert(a.to_string(), pidx).is_some() {
+                        return Err(err("duplicate local"));
+                    }
+                } else {
+                    types_in += 1;
+                    pidx += 1;
                 }
+            }
+            if name_seen && types_in != 1 {
+                return Err(err("unexpected token"));
             }
         }
         let _ = fty;
@@ -1860,20 +1938,27 @@ fn emit_func_def(mb: &mut Mb, items: &[Sx], i0: usize) -> R<()> {
         if l.first().and_then(Sx::atom) != Some("local") {
             break;
         }
-        let mut named: Option<(String, u32)> = None;
-        let mut types_in = 0u32;
+        // `$名` は先頭の1個までで、そのとき型はちょうど1つ
+        // （`(local i32 $l i64)` のような形は文法エラー）。
+        let mut name: Option<String> = None;
+        let base = local_types.len() as u32;
         for p in &l[1..] {
             if let Some(a) = p.atom()
                 && a.starts_with('$')
             {
-                named = Some((a.to_string(), local_types.len() as u32 + types_in));
-            } else {
-                local_types.push(valtype_sx(p).ok_or_else(|| err("malformed value type"))?);
-                types_in += 1;
+                if name.is_some() || local_types.len() as u32 != base {
+                    return Err(err("unexpected token"));
+                }
+                name = Some(a.to_string());
+                continue;
             }
+            local_types.push(valtype_sx(p).ok_or_else(|| err("malformed value type"))?);
         }
-        if let Some((n, pos)) = named {
-            let idx = fty.params.len() as u32 + pos;
+        if let Some(n) = name {
+            if local_types.len() as u32 - base != 1 {
+                return Err(err("unexpected token"));
+            }
+            let idx = fty.params.len() as u32 + base;
             if locals_map.insert(n, idx).is_some() {
                 return Err(err("duplicate local"));
             }
@@ -1889,7 +1974,10 @@ fn emit_func_def(mb: &mut Mb, items: &[Sx], i0: usize) -> R<()> {
             labels: Vec::new(),
         };
         let mut cur = Cur { items, i: j };
-        let _ = emit_seq(&mut cx, &mut cur, &mut body)?;
+        // 本体末尾の裸の `end`/`else` は文法エラー（残りは捨てない）。
+        if emit_seq(&mut cx, &mut cur, &mut body)?.is_some() {
+            return Err(err("unexpected end/else"));
+        }
         body.push(0x0b);
         // locals 宣言の圧縮表現。
         let mut hdr = Vec::new();
@@ -2294,6 +2382,10 @@ fn build_module(fields: &[Sx]) -> R<Vec<u8>> {
                 let Some(Sx::List(d)) = l.get(3) else {
                     return Err(err("malformed import"));
                 };
+                // 記述子の後の余分な項は文法エラー。
+                if l.len() > 4 {
+                    return Err(err("unexpected token"));
+                }
                 let Some((kind, bytes, _name)) = import_desc(&mut mb, d, 0)? else {
                     // 範囲外の種別（tag 等）はインポート自体を落とす。
                     continue;
@@ -2546,18 +2638,16 @@ fn build_module(fields: &[Sx]) -> R<Vec<u8>> {
                     let en = inline_export(l[pos].list().unwrap())?.unwrap();
                     mb.exports.push((en, 3, gidx));
                 }
-                // 初期化式：残りの List 群を順に出す。各区切りの `end` は
-                // 除き、全体を1本の定数式にする（複数式は検証で
-                // type mismatch になる）。
+                // 初期化式：`expr ::= instr*` なので畳み形とフラット形を
+                // 混在して受け付ける（複数式は検証で type mismatch になる）。
                 let mut init = Vec::new();
-                for it in &l[j..] {
+                {
                     let mut cx = FnCx {
                         mb: &mut mb,
                         locals: HashMap::new(),
                         labels: Vec::new(),
                     };
-                    let b = const_expr_bytes(&mut cx, it)?;
-                    init.extend_from_slice(&b[..b.len() - 1]);
+                    const_seq(&mut cx, &l[j..], &mut init)?;
                 }
                 init.push(0x0b);
                 mb.globals.push((gt, init));

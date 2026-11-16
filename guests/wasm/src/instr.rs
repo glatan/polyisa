@@ -506,6 +506,10 @@ fn mem_arg(r: &mut Reader) -> D<(u64, u32, u32)> {
     }
     let al = a & 0x3f;
     let mi = if a & 0x40 != 0 { r.u32()? } else { 0 };
+    // オフセットのフィールドは 3.0 の文法では u64（memory64 取り込みで
+    // 統一）。u32 を超える値は malformed ではなく、検証側で 32 ビット
+    // メモリの「offset out of range」（invalid）として弾く
+    // （binary-leb128.wast・address.wast・align.wast 参照）。
     let off = r.uleb(64)?;
     Ok((off, al, mi))
 }
@@ -557,8 +561,8 @@ fn simple(b: u8) -> Option<Instr> {
         0x0f => Return,
         0x1a => Drop,
         0x1b => Select,
-        0x3f => MemorySize,
-        0x40 => MemoryGrow,
+        // 0x3f/0x40（memory.size/grow）は memidx バイトを持つため
+        // `one` が先に処理する。ここには来ない。
         0x45 => I32Eqz,
         0x46 => I32Eq,
         0x47 => I32Ne,
@@ -814,7 +818,7 @@ pub fn one(r: &mut Reader) -> D<Instr> {
             if n != 1 {
                 return Err(DecodeError::malformed("invalid result arity"));
             }
-            let t = r.byte()?;
+            let t = r.byte7()?;
             SelectT(val_type(t).ok_or_else(|| DecodeError::malformed("malformed value type"))?)
         }
         0x20 => LocalGet(r.u32()?),

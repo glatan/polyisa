@@ -57,6 +57,10 @@ pub struct SxError {
 
 type R<T> = Result<T, SxError>;
 
+/// S 式の入れ子深さの上限。入力が支配する再帰なので、
+/// 異常に深い括弧でスタックを使い切らないようにする。
+const MAX_SEXPR_DEPTH: u32 = 1000;
+
 /// トークンの区切り文字（空白・括弧・コメント開始）。
 fn is_delim(b: u8) -> bool {
     matches!(b, b' ' | b'\t' | b'\n' | b'\r' | b'(' | b')' | b';')
@@ -203,8 +207,10 @@ impl<'a> Lexer<'a> {
 
     /// 注釈内の文字列（`"..."` または `@"..."` の ID 部）。
     /// エスケープを展開し、結果が UTF-8 でなければ malformed。
+    /// annotchar の規則で制御文字の直書きも通す（`@"\n"` のような
+    /// 空白だけの ID は `empty annotation id` で弾く）。
     fn annot_string(&mut self) -> R<Vec<u8>> {
-        match self.string_lit() {
+        match self.string_lit(true) {
             Ok(s) => {
                 if String::from_utf8(s.clone()).is_err() {
                     return Err(self.err("malformed UTF-8"));
@@ -299,7 +305,9 @@ impl<'a> Lexer<'a> {
     }
 
     /// 文字列リテラルをエスケープ展開して読む。
-    fn string_lit(&mut self) -> R<Vec<u8>> {
+    /// `allow_ctl` は注釈文字列用で、制御文字の直書きを許す
+    /// （通常の stringchar 規則ではエスケープが必須）。
+    fn string_lit(&mut self, allow_ctl: bool) -> R<Vec<u8>> {
         // 開き引用符。
         self.bump();
         let mut out = Vec::new();
@@ -335,7 +343,13 @@ impl<'a> Lexer<'a> {
                                 let Some(d) = d else {
                                     return Err(self.err("bad unicode escape"));
                                 };
-                                v = v * 16 + d;
+                                // 8 桁を超える / u32 を超える値は必ず
+                                // コードポイント範囲外（桁溢れで握り潰さない）。
+                                let Some(v2) = v.checked_mul(16).and_then(|x| x.checked_add(d))
+                                else {
+                                    return Err(self.err("malformed UTF-8 codepoint"));
+                                };
+                                v = v2;
                                 n += 1;
                                 self.bump();
                             }
@@ -361,6 +375,11 @@ impl<'a> Lexer<'a> {
                         }
                         _ => return Err(self.err("bad escape")),
                     }
+                }
+                // stringchar に制御文字の直書きは含まれない
+                // （\t 等はエスケープが必要）。
+                0x00..=0x1f | 0x7f if !allow_ctl => {
+                    return Err(self.err("illegal character"));
                 }
                 _ => out.push(b),
             }
@@ -404,7 +423,11 @@ impl<'a> Lexer<'a> {
                                 let Some(d) = (c as char).to_digit(16) else {
                                     return Err(self.err("empty identifier"));
                                 };
-                                v = v * 16 + d;
+                                let Some(v2) = v.checked_mul(16).and_then(|x| x.checked_add(d))
+                                else {
+                                    return Err(self.err("malformed UTF-8"));
+                                };
+                                v = v2;
                                 n += 1;
                                 self.bump();
                             }
@@ -459,11 +482,15 @@ impl<'a> Lexer<'a> {
         String::from_utf8_lossy(&self.src[start..self.pos]).into_owned()
     }
 
-    fn sexpr(&mut self) -> R<Sx> {
+    fn sexpr(&mut self, depth: u32) -> R<Sx> {
         self.skip_ws()?;
         match self.peek() {
             None => Err(self.err("unexpected end")),
             Some(b'(') => {
+                // 入れ子の深さに上限を設け、スタック溢れを防ぐ。
+                if depth >= MAX_SEXPR_DEPTH {
+                    return Err(self.err("nesting too deep"));
+                }
                 self.bump();
                 let mut items = Vec::new();
                 loop {
@@ -474,7 +501,7 @@ impl<'a> Lexer<'a> {
                             self.bump();
                             return Ok(Sx::List(items));
                         }
-                        _ => items.push(self.sexpr()?),
+                        _ => items.push(self.sexpr(depth + 1)?),
                     }
                 }
             }
@@ -485,7 +512,7 @@ impl<'a> Lexer<'a> {
                 if self.pos > 0 && !is_delim(self.src[self.pos - 1]) {
                     return Err(self.err("unknown operator"));
                 }
-                let s = self.string_lit()?;
+                let s = self.string_lit(false)?;
                 self.check_delim()?;
                 Ok(Sx::Str(s))
             }
@@ -520,14 +547,14 @@ pub fn parse_all(src: &str) -> R<Vec<Sx>> {
         if lx.peek().is_none() {
             return Ok(out);
         }
-        out.push(lx.sexpr()?);
+        out.push(lx.sexpr(0)?);
     }
 }
 
 /// 単一の S 式を読む（`module quote` の中身など）。
 pub fn parse_one(src: &str) -> R<Sx> {
     let mut lx = Lexer::new(src.as_bytes());
-    let sx = lx.sexpr()?;
+    let sx = lx.sexpr(0)?;
     lx.skip_ws()?;
     if lx.peek().is_some() {
         return Err(lx.err("unexpected token"));

@@ -348,6 +348,7 @@ dependencies = [
  "polyisa-engine",
  "polyisa-guest",
  "polyisa-guest-wasm",
+ "polyisa-host",
  "polyisa-kernel",
 ]
 

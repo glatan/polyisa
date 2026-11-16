@@ -16,6 +16,7 @@ pub mod errno {
     pub const AGAIN: u16 = 6;
     pub const BADF: u16 = 8;
     pub const BUSY: u16 = 10;
+    pub const DQUOT: u16 = 19;
     pub const EXIST: u16 = 20;
     pub const FAULT: u16 = 21;
     pub const FBIG: u16 = 22;
@@ -35,6 +36,7 @@ pub mod errno {
     pub const NOSYS: u16 = 52;
     pub const NOTDIR: u16 = 54;
     pub const NOTEMPTY: u16 = 55;
+    pub const NOTSOCK: u16 = 57;
     pub const NOTSUP: u16 = 58;
     pub const OVERFLOW: u16 = 61;
     pub const PERM: u16 = 63;
@@ -42,6 +44,7 @@ pub mod errno {
     pub const RANGE: u16 = 68;
     pub const ROFS: u16 = 69;
     pub const SPIPE: u16 = 70;
+    pub const STALE: u16 = 72;
     pub const TXTBSY: u16 = 74;
     pub const XDEV: u16 = 75;
     pub const NOTCAPABLE: u16 = 76;
@@ -112,6 +115,17 @@ pub mod rights {
     pub const PATH_RENAME_TARGET: u64 = 1 << 18;
     pub const PATH_SYMLINK: u64 = 1 << 19;
     pub const PATH_UNLINK_FILE: u64 = 1 << 20;
+    pub const PATH_FILESTAT_GET: u64 = 1 << 21;
+    pub const PATH_FILESTAT_SET_SIZE: u64 = 1 << 22;
+    pub const PATH_FILESTAT_SET_TIMES: u64 = 1 << 23;
+    pub const FD_FILESTAT_GET: u64 = 1 << 24;
+    pub const FD_FILESTAT_SET_SIZE: u64 = 1 << 25;
+    pub const FD_FILESTAT_SET_TIMES: u64 = 1 << 26;
+    pub const POLL_FD_READWRITE: u64 = 1 << 27;
+    pub const SOCK_ACCEPT: u64 = 1 << 28;
+    pub const SOCK_RECV: u64 = 1 << 29;
+    pub const SOCK_SEND: u64 = 1 << 30;
+    pub const SOCK_SHUTDOWN: u64 = 1 << 31;
     /// 通常ファイルに要求し得るフルセット（inheriting と同じ）。
     pub const FILE_ALL: u64 = (1 << 21) - 1;
 }
@@ -179,6 +193,10 @@ impl<'a> In<'a> {
     }
 
     pub fn bytes(&mut self, addr: u32, len: u32) -> Result<Vec<u8>, u16> {
+        // 先に境界だけ検査してから確保する（大きな len で無駄確保しない）。
+        if u64::from(addr) + u64::from(len) > self.mem.byte_len() {
+            return Err(errno::FAULT);
+        }
         let mut buf = vec![0u8; len as usize];
         self.mem
             .read(u64::from(addr), &mut buf)
@@ -233,8 +251,13 @@ pub fn errno_of(e: &std::io::Error) -> u16 {
             31 => errno::MLINK,
             32 => errno::PIPE,
             36 => errno::NAMETOOLONG,
+            38 => errno::NOSYS,
             39 => errno::NOTEMPTY,
             40 => errno::LOOP,
+            75 => errno::OVERFLOW,
+            88 => errno::NOTSOCK,
+            116 => errno::STALE,
+            122 => errno::DQUOT,
             _ => errno::IO,
         };
     }

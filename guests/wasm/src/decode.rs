@@ -197,6 +197,16 @@ fn read_val_type(r: &mut Reader) -> D<ValType> {
     }
 }
 
+/// 初期化式を持たない素の `tabletype`（`reftype limits`）。
+/// 戻り値の `bool` は要素型が non-null（`0x64`）か。
+/// インポート記述子のテーブルはこの形だけを許すため、先頭が
+/// `0x40` なら `read_ref_type` が「malformed reference type」で弾く。
+fn table_type_plain(r: &mut Reader) -> D<(TableType, bool)> {
+    let (et, nn) = read_ref_type(r)?;
+    let lim = limits(r)?;
+    Ok((TableType { et, lim }, nn))
+}
+
 /// テーブル型。戻り値の `Some` は 2.0 の初期化式
 /// (`0x40 0x00 reftype limits expr` 形）を含み、`bool` は
 /// 要素型が non-null か。
@@ -212,9 +222,8 @@ fn table_type(r: &mut Reader) -> D<(TableType, Option<ConstExpr>, bool)> {
         let init = const_expr(r)?;
         return Ok((TableType { et, lim }, Some(init), nn));
     }
-    let (et, nn) = read_ref_type(r)?;
-    let lim = limits(r)?;
-    Ok((TableType { et, lim }, None, nn))
+    let (t, nn) = table_type_plain(r)?;
+    Ok((t, None, nn))
 }
 
 fn global_type(r: &mut Reader) -> D<GlobalType> {
@@ -260,7 +269,9 @@ fn sec_imports(r: &mut Reader, m: &mut Module) -> D<()> {
         let kind = r.byte()?;
         let desc = match kind {
             0x00 => ImportDesc::Func(r.u32()?),
-            0x01 => ImportDesc::Table(table_type(r)?.0),
+            // インポートの tabletype は初期化式を持たない（`0x40` 形は
+            // 定義テーブル専用。ここでは reference type として弾かれる）。
+            0x01 => ImportDesc::Table(table_type_plain(r)?.0),
             0x02 => ImportDesc::Mem(MemType { lim: limits(r)? }),
             0x03 => ImportDesc::Global(global_type(r)?),
             _ => return Err(malformed("malformed import kind")),
@@ -461,15 +472,18 @@ fn sec_code(r: &mut Reader, m: &mut Module) -> D<()> {
         let body_end = r.pos + size;
         let lcount = vec_count(r)?;
         let mut locals = Vec::new();
+        let mut total: u64 = 0;
         for _ in 0..lcount {
             let rep = r.u32()?;
             let t = read_val_type(r)?;
-            // 仕様の上限は u32::MAX 個。超えたら展開前に拒否する。
-            let total = locals.len() as u64 + u64::from(rep);
+            // 仕様の上限は u32::MAX 個。超えたら拒否する。繰り返し
+            // 回数は連長表現のまま保持し、ここでは展開しない
+            // （悪意ある宣言で巨大な確保を強いられないため）。
+            total += u64::from(rep);
             if total > u64::from(u32::MAX) {
                 return Err(malformed("too many locals"));
             }
-            locals.resize(total as usize, t);
+            locals.push((rep, t));
         }
         let istart = r.pos;
         // 命令列の malformed は decode 段で拾う（assert_malformed が

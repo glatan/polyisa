@@ -338,7 +338,10 @@ pub fn run_path_opts(
     if let Ok(mut f) = std::fs::File::open(path) {
         use std::io::Read;
         let mut head = [0u8; 8];
-        if f.read_exact(&mut head).is_ok() && head[0..4] == *b"\0asm" {
+        if f.read_exact(&mut head).is_ok()
+            && head[0..4] == *b"\0asm"
+            && head[4..8] == 1u32.to_le_bytes()
+        {
             if let Some(s) = &spec
                 && s.family != "wasm"
             {

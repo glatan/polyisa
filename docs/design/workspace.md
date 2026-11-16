@@ -83,7 +83,7 @@ OS 層        loader → bits
              kernel → mem, engine, guest, timing, host
              os-linux → kernel, loader, engine, guest, host, mem, sem,
                         guests/*（機能フラグで選択）
-             os-wasi → kernel, engine, guest, guests/wasm
+             os-wasi → kernel, engine, guest, host, guests/wasm
 ツール層     trace → engine, guest
              gdbstub → engine, guest
              cli → すべて

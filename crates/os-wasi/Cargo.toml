@@ -11,5 +11,8 @@ polyisa-engine = { path = "../engine" }
 polyisa-guest = { path = "../guest" }
 polyisa-guest-wasm = { path = "../../guests/wasm" }
 
+[dev-dependencies]
+polyisa-host = { path = "../host" }
+
 [lints]
 workspace = true

@@ -514,11 +514,15 @@ pub fn instantiate(
         funcs.push(base_func + i as u32);
     }
     for t in &m.tables {
+        let mut elems = Vec::new();
+        // 宣言 min は u32::MAX まで有り得る。確保の失敗は abort ではなく
+        // インスタンス化の失敗にする（MemInst の遅延確保と同じ方針）。
+        elems
+            .try_reserve(t.lim.min as usize)
+            .map_err(|_| Error::Link("table size exceeds available memory".into()))?;
+        elems.resize(t.lim.min as usize, RefVal::Null(t.et));
         tables.push(store.tables.len() as u32);
-        store.tables.push(TableInst {
-            ty: *t,
-            elems: vec![RefVal::Null(t.et); t.lim.min as usize],
-        });
+        store.tables.push(TableInst { ty: *t, elems });
     }
     for t in &m.mems {
         mems.push(store.mems.len() as u32);
@@ -570,11 +574,17 @@ pub fn instantiate(
         store.globals.push(GlobalInst { ty: g.ty, val });
     }
     // --- 5b. テーブル初期化式（2.0 の `0x40 0x00` 形） ---
+    // `m.table_inits` は定義テーブル（`m.tables`）と同じ並びだが、
+    // `inst.tables` はインポート分が先頭に入る指標空間なので、
+    // インポート個数分だけずらして参照する。
+    let imported_tables = inst.tables.len() - m.tables.len();
     for (i, init) in m.table_inits.iter().enumerate() {
         if let Some(e) = init {
             let val = eval_const(store, &inst, e).map_err(Error::Trap)?;
             if let Val::Ref(rv) = val {
-                store.tables[inst.tables[i] as usize].elems.fill(rv);
+                store.tables[inst.tables[i + imported_tables] as usize]
+                    .elems
+                    .fill(rv);
             }
         }
     }
@@ -701,37 +711,56 @@ fn block_arity(inst: &Instance, bt: BlockType) -> (usize, usize) {
 }
 
 // 値スタックの取り出し（検証済みなので型は決まっている。防御的に既定値を返す）。
+// アンダーフロー・型不一致は検証で防がれるはずなので、デバッグ時は
+// 帳簿ズレとして検出する。
 fn ppop(vals: &mut Vec<Val>) -> Val {
-    vals.pop().unwrap_or(Val::I32(0))
+    let v = vals.pop();
+    debug_assert!(v.is_some(), "operand stack underflow");
+    v.unwrap_or(Val::I32(0))
 }
 fn pi32(vals: &mut Vec<Val>) -> u32 {
     match ppop(vals) {
         Val::I32(v) => v,
-        _ => 0,
+        v => {
+            debug_assert!(matches!(v, Val::I32(_)), "expected i32, got {v:?}");
+            0
+        }
     }
 }
 fn pi64(vals: &mut Vec<Val>) -> u64 {
     match ppop(vals) {
         Val::I64(v) => v,
-        _ => 0,
+        v => {
+            debug_assert!(matches!(v, Val::I64(_)), "expected i64, got {v:?}");
+            0
+        }
     }
 }
 fn pf32(vals: &mut Vec<Val>) -> f32 {
     match ppop(vals) {
         Val::F32(v) => f32::from_bits(v),
-        _ => 0.0,
+        v => {
+            debug_assert!(matches!(v, Val::F32(_)), "expected f32, got {v:?}");
+            0.0
+        }
     }
 }
 fn pf64(vals: &mut Vec<Val>) -> f64 {
     match ppop(vals) {
         Val::F64(v) => f64::from_bits(v),
-        _ => 0.0,
+        v => {
+            debug_assert!(matches!(v, Val::F64(_)), "expected f64, got {v:?}");
+            0.0
+        }
     }
 }
 fn pref(vals: &mut Vec<Val>) -> RefVal {
     match ppop(vals) {
         Val::Ref(r) => r,
-        _ => RefVal::Null(RefType::Func),
+        v => {
+            debug_assert!(matches!(v, Val::Ref(_)), "expected ref, got {v:?}");
+            RefVal::Null(RefType::Func)
+        }
     }
 }
 
@@ -777,10 +806,17 @@ fn push_call(
                 return Err(Trap::new(TrapKind::Exhaustion));
             }
             let mut locals = args;
-            locals.resize(nparams + body.locals.len(), Val::I32(0));
+            // 宣言ローカルは連長表現で保持されている。合計は u32::MAX
+            // 個まで有り得るので、確保の失敗は abort ではなく
+            // トラップにする（呼ばれなければ展開もされない）。
+            let decl: u64 = body.locals.iter().map(|&(n, _)| u64::from(n)).sum();
+            locals
+                .try_reserve(decl as usize)
+                .map_err(|_| Trap::host("local count exceeds available memory"))?;
             // 宣言ローカルは型の既定値。
-            for (i, t) in body.locals.iter().enumerate() {
-                locals[nparams + i] = Val::zero(*t);
+            for &(n, t) in &body.locals {
+                let z = Val::zero(t);
+                locals.resize(locals.len() + n as usize, z);
             }
             frames.push(Frame {
                 inst: module,
@@ -1032,8 +1068,14 @@ fn run(store: &mut Store, vals: &mut Vec<Val>, frames: &mut Vec<Frame>) -> Resul
                 let old = tab.elems.len() as u32;
                 match old.checked_add(n) {
                     Some(new) if new <= hard => {
-                        tab.elems.resize(new as usize, r);
-                        vals.push(Val::I32(old));
+                        // 巨大な伸長で確保に失敗したら abort ではなく
+                        // 仕様の失敗値 -1 を返す。
+                        if tab.elems.try_reserve((new - old) as usize).is_err() {
+                            vals.push(Val::I32(u32::MAX));
+                        } else {
+                            tab.elems.resize(new as usize, r);
+                            vals.push(Val::I32(old));
+                        }
                     }
                     _ => vals.push(Val::I32(u32::MAX)),
                 }

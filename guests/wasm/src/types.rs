@@ -179,6 +179,3 @@ pub const PAGE: u64 = 65_536;
 
 /// メモリのページ数の上限（4 GiB / 64 KiB）。
 pub const MAX_PAGES: u32 = 65_536;
-
-/// メモリのページ数の上限（4 GiB / 64 KiB）。`memory.grow` の max 省略時の既定。
-pub const MAX_TABLE: u64 = u32::MAX as u64;

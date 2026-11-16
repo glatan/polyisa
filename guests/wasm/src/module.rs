@@ -135,8 +135,10 @@ pub enum DataMode {
 /// コードセクションの一関数ぶん。`body` は `end` を含む生の式バイト列。
 #[derive(Clone, Debug)]
 pub struct Code {
-    /// 宣言ローカル（繰り返し回数を展開済み）。
-    pub locals: Vec<crate::types::ValType>,
+    /// 宣言ローカルの連長表現（個数, 型）。仕様上の合計は
+    /// `u32::MAX` 個まで認められるため、展開はしない（実行時に
+    /// 呼ばれた関数だけ `exec` が展開する）。
+    pub locals: Vec<(u32, crate::types::ValType)>,
     /// 式の生バイト列（`end` で終わる）。
     pub body: Vec<u8>,
 }

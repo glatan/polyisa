@@ -35,8 +35,9 @@ pub struct Validated {
 /// 検証・解読済みの関数本体。
 #[derive(Clone, Debug)]
 pub struct Body {
-    /// 宣言ローカル（パラメータは含まない）。
-    pub locals: Vec<ValType>,
+    /// 宣言ローカルの連長表現（個数, 型。パラメータは含まない）。
+    /// 合計は `u32::MAX` に達し得るので展開済みの列は持たない。
+    pub locals: Vec<(u32, ValType)>,
     pub instrs: Vec<Instr>,
 }
 
@@ -72,18 +73,20 @@ enum CtrlKind {
 }
 
 /// 検証の文脈。モジュールの宣言を数えたもの。
+/// 不変の宣言部は借用で持ち、関数ごとに使い回す（本体検証のたびに
+/// 複製すると関数数×型ノード数の二乗コストになるため）。
 struct Ctx<'m> {
     m: &'m Module,
     /// 全関数の型（インポート＋定義、funcidx 順）。
-    funcs: Vec<FuncType>,
+    funcs: &'m [FuncType],
     /// 全テーブルの型。
-    tables: Vec<TableType>,
+    tables: &'m [TableType],
     /// 全メモリの型。
-    mems: Vec<MemType>,
+    mems: &'m [MemType],
     /// 全グローバルの型。
-    globals: Vec<GlobalType>,
+    globals: &'m [GlobalType],
     /// `ref.func` が参照できる宣言済み関数指標。
-    refs: HashSet<u32>,
+    refs: &'m HashSet<u32>,
     vals: Vec<Vt>,
     ctrls: Vec<Ctrl>,
 }
@@ -317,7 +320,6 @@ fn static_sig(i: &Instr) -> Option<(&'static [Vt], &'static [Vt])> {
         I32TruncSatF64S | I32TruncSatF64U => s!(&[F64], &[I32]),
         I64TruncSatF32S | I64TruncSatF32U => s!(&[F32], &[I64]),
         I64TruncSatF64S | I64TruncSatF64U => s!(&[F64], &[I64]),
-        RefIsNull => s!(&[BOT], &[I32]),
         _ => return None,
     })
 }
@@ -467,10 +469,24 @@ fn count_funcs(m: &Module) -> usize {
         + m.funcs.len()
 }
 
+/// 定数式が null 参照を生むか。`end` 手前の命令が `ref.null` なら
+/// 結果は nullable であり、non-null を要求する位置には置けない。
+fn yields_null(e: &ConstExpr) -> bool {
+    e.instrs
+        .iter()
+        .rev()
+        .find(|x| !matches!(x, Instr::End))
+        .is_some_and(|x| matches!(x, Instr::RefNull(_)))
+}
+
 /// `ref.func` が参照できる集合：関数本体の外に現れる関数指標。
 /// Ref: SPEC-WASM-CORE 3.3.3（C.refs）。
 fn collect_refs(m: &Module) -> HashSet<u32> {
     let mut refs = HashSet::new();
+    // テーブル初期化式（`0x40 0x00` 形）の中の `ref.func` も宣言扱い。
+    for e in m.table_inits.iter().flatten() {
+        refs.extend(expr_func_refs(e));
+    }
     for e in &m.elems {
         match &e.init {
             ElemItem::Funcs(fs) => refs.extend(fs.iter().copied()),
@@ -525,8 +541,38 @@ fn check_limits(lim: &Limits, hard: u64, what: &str) -> V<()> {
     Ok(())
 }
 
+/// パラメータと連長表現の宣言ローカルを並べた列への索引。
+/// 宣言個数の合計は `u32::MAX` に達し得るため、展開せずに
+/// 連長区間をたどって型を返す。
+struct LocalTypes<'a> {
+    params: &'a [ValType],
+    runs: &'a [(u32, ValType)],
+}
+
+impl LocalTypes<'_> {
+    fn get(&self, i: u32) -> Option<ValType> {
+        let nparams = self.params.len() as u64;
+        if u64::from(i) < nparams {
+            return Some(self.params[i as usize]);
+        }
+        let mut rest = u64::from(i) - nparams;
+        for &(n, t) in self.runs {
+            if rest < u64::from(n) {
+                return Some(t);
+            }
+            rest -= u64::from(n);
+        }
+        None
+    }
+}
+
 /// 関数本体の検証。`locals` はパラメータと宣言ローカルの連結。
-fn validate_body(ctx: &mut Ctx, locals: &[ValType], results: &[ValType], body: &Body) -> V<()> {
+fn validate_body(
+    ctx: &mut Ctx,
+    locals: &LocalTypes<'_>,
+    results: &[ValType],
+    body: &Body,
+) -> V<()> {
     ctx.vals.clear();
     ctx.ctrls.clear();
     ctx.ctrls.push(Ctrl {
@@ -697,23 +743,17 @@ fn validate_body(ctx: &mut Ctx, locals: &[ValType], results: &[ValType], body: &
                 ctx.push(Some(*t));
             }
             Instr::LocalGet(x) => {
-                let t = locals
-                    .get(*x as usize)
-                    .ok_or_else(|| invalid("unknown local"))?;
-                ctx.push(Some(*t));
+                let t = locals.get(*x).ok_or_else(|| invalid("unknown local"))?;
+                ctx.push(Some(t));
             }
             Instr::LocalSet(x) => {
-                let t = locals
-                    .get(*x as usize)
-                    .ok_or_else(|| invalid("unknown local"))?;
-                ctx.pop_expect(Some(*t))?;
+                let t = locals.get(*x).ok_or_else(|| invalid("unknown local"))?;
+                ctx.pop_expect(Some(t))?;
             }
             Instr::LocalTee(x) => {
-                let t = locals
-                    .get(*x as usize)
-                    .ok_or_else(|| invalid("unknown local"))?;
-                ctx.pop_expect(Some(*t))?;
-                ctx.push(Some(*t));
+                let t = locals.get(*x).ok_or_else(|| invalid("unknown local"))?;
+                ctx.pop_expect(Some(t))?;
+                ctx.push(Some(t));
             }
             Instr::GlobalGet(g) => {
                 let t = ctx.global(*g)?.vt;
@@ -788,6 +828,8 @@ fn validate_body(ctx: &mut Ctx, locals: &[ValType], results: &[ValType], body: &
                 if al32(*al) > load_natural(*op) {
                     return Err(invalid("alignment must not be larger than natural"));
                 }
+                // オフセットのフィールドは u64（3.0 文法）だが、
+                // 32 ビットメモリでは u32 の範囲に限る。
                 if *off > u64::from(u32::MAX) {
                     return Err(invalid("offset out of range"));
                 }
@@ -849,6 +891,19 @@ fn validate_body(ctx: &mut Ctx, locals: &[ValType], results: &[ValType], body: &
                 ctx.pop_expect(I32)?;
                 ctx.pop_expect(I32)?;
                 ctx.pop_expect(I32)?;
+            }
+            Instr::RefIsNull => {
+                // オペランドは参照型に限る。多相スタック由来の
+                // ボトム（`None`）は任意の型になり得るので許す。
+                // 静的シグネチャの BOT ワイルドカードでは数値型まで
+                // 通してしまうため、ここで個別に検査する。
+                let t = ctx.pop()?;
+                if let Some(v) = t
+                    && !matches!(v, ValType::Ref(_))
+                {
+                    return Err(invalid("type mismatch"));
+                }
+                ctx.push(I32);
             }
             Instr::RefNull(t) => {
                 // 具体型指標のヒープ型は範囲を検査してから Func に潰す。
@@ -921,7 +976,7 @@ pub fn validate_module(mut m: Module) -> Result<Validated, Invalid> {
         norm_vt(&mut g.ty.vt, ntypes)?;
     }
     for c in &mut m.code {
-        for v in &mut c.locals {
+        for (_, v) in &mut c.locals {
             norm_vt(v, ntypes)?;
         }
     }
@@ -981,23 +1036,27 @@ pub fn validate_module(mut m: Module) -> Result<Validated, Invalid> {
     let refs = collect_refs(&m);
 
     // --- テーブル初期化式（2.0 の `0x40 0x00` 形） ---
-    // テーブル節は global 節より先なので、参照できるのは import 済み
-    // グローバルのみ。
+    // テーブル節は global 節より先に現れるため、仕様上ここで参照
+    // できるのはインポート済みグローバルのみ。exec は定義済み
+    // グローバルの確保後に初期化式を評価するが、定義グローバルを指す
+    // 式はここで既に弾かれるので差異は生じない（elem/data の
+    // オフセットは global 節より後なので定義済みも読める）。
     for (i, t) in m.tables.iter().enumerate() {
-        if let Some(e) = &m.table_inits[i] {
+        let init = m.table_inits.get(i).and_then(Option::as_ref);
+        let nn = m.table_nonnull.get(i).copied().unwrap_or(false);
+        // non-null（`(ref ht)` = `0x64` 形）な要素型は既定値の null を
+        // 持てないため初期化式が必須（table.wast の
+        // `(table 0 (ref func))` → "type mismatch"）。
+        if nn && init.is_none() {
+            return Err(invalid("type mismatch"));
+        }
+        if let Some(e) = init {
             let vt = const_expr_type(e, &m, &globals, imported_globals, &refs)?;
             if vt != ValType::Ref(t.et) {
                 return Err(invalid("type mismatch in table init"));
             }
             // non-null な要素型の初期化式が null を生むのは invalid。
-            let nn = m.table_nonnull.get(i).copied().unwrap_or(false);
-            if nn
-                && e.instrs
-                    .iter()
-                    .rev()
-                    .find(|x| !matches!(x, Instr::End))
-                    .is_some_and(|x| matches!(x, Instr::RefNull(_)))
-            {
+            if nn && yields_null(e) {
                 return Err(invalid("type mismatch in table init"));
             }
         }
@@ -1053,6 +1112,11 @@ pub fn validate_module(mut m: Module) -> Result<Validated, Invalid> {
                 for ex in es {
                     let t = const_expr_type(ex, &m, &globals, globals.len(), &refs)?;
                     if t != ValType::Ref(e.ty) {
+                        return Err(invalid("type mismatch in elem item"));
+                    }
+                    // non-null な `(ref ht)` セグメントに `ref.null` の
+                    // 項目は置けない。
+                    if e.nonnull && yields_null(ex) {
                         return Err(invalid("type mismatch in elem item"));
                     }
                 }
@@ -1117,31 +1181,38 @@ pub fn validate_module(mut m: Module) -> Result<Validated, Invalid> {
     }
 
     // --- 関数本体 ---
+    // 宣言部を数えた文脈は不変なので一度だけ作り、本体ごとの
+    // スタック状態（vals/ctrls）だけを `validate_body` の入口で
+    // 初期化する。
+    let mut ctx = Ctx {
+        m: &m,
+        funcs: &funcs,
+        tables: &tables,
+        mems: &mems,
+        globals: &globals,
+        refs: &refs,
+        vals: Vec::new(),
+        ctrls: Vec::new(),
+    };
+    let imported_funcs = m
+        .imports
+        .iter()
+        .filter(|im| matches!(im.desc, ImportDesc::Func(_)))
+        .count();
     let mut bodies = Vec::with_capacity(m.code.len());
     for (i, code) in m.code.iter().enumerate() {
-        let fidx = m
-            .imports
-            .iter()
-            .filter(|im| matches!(im.desc, ImportDesc::Func(_)))
-            .count()
-            + i;
-        let ft = funcs[fidx].clone();
-        let mut locals = ft.params.clone();
-        locals.extend(code.locals.iter().copied());
+        let fidx = imported_funcs + i;
+        let ft = funcs
+            .get(fidx)
+            .ok_or_else(|| invalid(&format!("unknown function {fidx}")))?;
+        let locals = LocalTypes {
+            params: &ft.params,
+            runs: &code.locals,
+        };
         let instrs = instr::decode_body(&code.body).map_err(|e| invalid(&e.0))?;
         let body = Body {
             locals: code.locals.clone(),
             instrs,
-        };
-        let mut ctx = Ctx {
-            m: &m,
-            funcs: funcs.clone(),
-            tables: tables.clone(),
-            mems: mems.clone(),
-            globals: globals.clone(),
-            refs: refs.clone(),
-            vals: Vec::new(),
-            ctrls: Vec::new(),
         };
         validate_body(&mut ctx, &locals, &ft.results, &body)
             .map_err(|e| invalid(&format!("func {fidx}: {}", e.0)))?;

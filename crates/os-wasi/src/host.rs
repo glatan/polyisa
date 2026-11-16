@@ -3,8 +3,9 @@
 //! `wasi_snapshot_preview1` のインポート解決。`exec::Host` を実装し、
 //! 各関数名を `WasiCtx` の処理へ繋ぐ。
 //!
-//! 型はモジュールが要求した `ExternType::Func` をそのまま使う
-//! （`extern_matches` の一致が保証される）。未対応の preview1 名は
+//! 宣言された関数型が `canonical_sig` の正準シグネチャと一致しない
+//! インポートは提供しない（`want` をそのまま複製すると
+//! `extern_matches` が自明に通ってしまうため）。未対応の preview1 名は
 //! errno 相当を返すスタブとして提供し、`unknown import` で落ちない
 //! ようにする。`proc_exit` は `TrapKind::Exited` で運ぶ。
 //! Ref: SPEC-WASI-P1 (wasi_snapshot_preview1).
@@ -91,6 +92,11 @@ impl exec::Host for Wasi {
         let ExternType::Func(ft) = want else {
             return None;
         };
+        // 宣言型が preview1 の正準シグネチャと違うインポートは、
+        // 存在しないインポートと同じく未解決にする。
+        if canonical_sig(name).is_some_and(|c| c != *ft) {
+            return None;
+        }
         let ty = Rc::new(ft.clone());
         let ctx = Rc::clone(&self.ctx);
         let fname = name.to_string();
@@ -144,8 +150,7 @@ fn zero_results(ft: &FuncType) -> Vec<Val> {
     ft.results.iter().map(|t| Val::zero(*t)).collect()
 }
 
-/// preview1 の正準な関数型表。`want` とは無関係に検査・文書化のために持つ。
-#[allow(dead_code)]
+/// preview1 の正準な関数型表。`provide` が宣言型の一致検査に使う。
 pub fn canonical_sig(name: &str) -> Option<FuncType> {
     let i = ValType::I32;
     let l = ValType::I64;
