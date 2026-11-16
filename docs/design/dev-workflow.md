@@ -9,6 +9,7 @@ polyisa は CI を使わず、検証はすべて開発者の手元で行う（[�
 | Task | `Taskfile.yml` | 開発作業の入口。検査、テスト、テストデータの取得、生成コードの書き出し、性能の計測をタスクとして定義する |
 | cargo-nextest | `.config/nextest.toml` | テストの実行。プロファイルによって、実行するテストの範囲と時間の上限を切り替える |
 | devtool | `tools/devtool/` | タスクから呼ぶ Rust のコマンド。検査とデータの処理を行う |
+| Podman | `Containerfile` | 検証環境の再現。Rust・LLVM・オラクル群を版固定したイメージを作り、検査とテストをホストの環境に依らず実行する |
 
 Task と cargo-nextest は外部のツールであり、[参照資料の台帳](../references.md) に登録して使う。Arch Linux のパッケージでは Task の実行ファイルの名前が `go-task` なので、その環境ではこの文書の `task` を `go-task` と読み替える。
 
@@ -32,6 +33,14 @@ Task と cargo-nextest は外部のツールであり、[参照資料の台帳](
 | `task bench` | 性能の計測（[実行エンジン](execution-engine.md)） |
 | `task doctor` | 外部のツールと Rust のターゲットの有無と版を表示する |
 | `task hooks:install` | Git のコミット前のフックを入れる |
+| `task container:build` | 検証コンテナのイメージを `Containerfile` からビルドする |
+| `task container -- <コマンド>` | 検証コンテナの中でコマンドを実行する |
+
+## コンテナ
+
+`Containerfile` は検証に必要なツールチェーン全体（Rust、LLVM、オラクルの各ツール、x32 のクロスコンパイラ）を版固定で収めたイメージを定義する。`task container` は作業ツリーをコンテナ内の同じ絶対パスに写して実行する。テストのバイナリが埋め込む `CARGO_MANIFEST_DIR` などの絶対パスをホストと一致させるためであり、これにより `target/` の成果物をホストと共有しても壊れない。
+
+コンテナ内のプロセスはホストと同じ非特権の uid で動き、すべてのケーパビリティを落とす（`--userns=keep-id`、`--cap-drop=ALL`）。`chroot` や `setuid` 系の操作が権限不足で失敗するという、一般ユーザーでの実行と同じ前提を保つためである。ワークスペースは外部のクレートに依存しない（[ADR-0001](../adr/0001-no-external-crates.md)）ので、Cargo のキャッシュは実行のたびに捨てられるコンテナ内の `/cache/cargo` で足りる。`task container` は rootless の Podman を前提とし、実行ユーザーの uid が 0 ではないことを期待する。
 
 ## 実装状況の生成
 

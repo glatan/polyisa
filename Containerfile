@@ -6,6 +6,9 @@
 #   task container -- task check
 #
 # ツールの版は docs/references.md の TOOL-* エントリと対応する。
+# ARG で版を固定するのは Rust / nextest / Task / wasmtime / XED / SDE。
+# apt 由来（LLVM、qemu、gdb、x32 ツールチェーンなど）はディストリビューションの
+# 版に従い、台帳にはイメージ内で確認した版を記録する。
 
 FROM docker.io/library/debian:trixie@sha256:bfc36aecdece0387418759dba474aa856c026ca8087da3606b41b90ab0509c99
 
@@ -47,6 +50,8 @@ RUN for tool in clang clang++ llvm-mc llvm-objdump llvm-mca ld.lld; do \
     done
 
 # Rust ツールチェーン（台帳 TOOL-RUST に対応）。
+# rustup の shim は /usr/local/cargo/bin に置き、実行時の CARGO_HOME は
+# 非 root（--userns=keep-id）でも書き込める /cache/cargo にする。
 ARG RUST_VERSION=1.100.0
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
@@ -87,6 +92,11 @@ RUN curl -fsSL -o /tmp/sde.tar.xz \
     && tar -xJ -C /opt -f /tmp/sde.tar.xz \
     && mv "/opt/sde-external-${SDE_VERSION}-lin" /opt/sde \
     && rm /tmp/sde.tar.xz
+
+# 実行時の cargo 書き込み先。外部クレートがないため registry はほぼ空だが、
+# 非 root 実行でもエラーにならないよう誰でも書き込める場所を用意する。
+ENV CARGO_HOME=/cache/cargo
+RUN mkdir -p /cache/cargo && chmod 0777 /cache/cargo
 
 # 導入確認（ビルド時スモークテスト）。
 RUN rustc --version && cargo --version && rustup target list --installed \

@@ -585,7 +585,8 @@ fn true_echo_uname_id_match() {
         ("chvt", ["chvt", "1"].as_slice()),
         ("deallocvt", ["deallocvt", "1"].as_slice()),
         ("openvt", ["openvt", "true"].as_slice()),
-        ("renice", ["renice", "0", "1"].as_slice()),
+        // pid 1 はコンテナだと同じ uid のため renice が通る。実在しない pid で確実に失敗させる。
+        ("renice", ["renice", "0", "999999"].as_slice()),
         ("cttyhack", ["cttyhack"].as_slice()),
         ("login", ["login", "-h", "x"].as_slice()),
         ("lpd", ["lpd"].as_slice()),
@@ -754,8 +755,8 @@ fn true_echo_uname_id_match() {
             .env_clear()
             .output()
             .unwrap_or_else(|e| panic!("host {name}: {e}"));
-        assert_eq!(code, host.status.code().unwrap_or(1) as u64);
-        assert_eq!(out.as_slice(), host.stdout.as_slice());
+        assert_eq!(code, host.status.code().unwrap_or(1) as u64, "{name}");
+        assert_eq!(out.as_slice(), host.stdout.as_slice(), "{name}");
     }
     // nslookup は socket が常に EPERM のため失敗。ホストのDNS成否と比べない。
     // Gap: GAP-0002 と段階5のネットワーク待ち。合成か実網かは将来決める。
@@ -794,7 +795,7 @@ fn chgrp_unknown_group_matches_host() {
     std::fs::create_dir(&dir).unwrap();
     let f = dir.join("f");
     std::fs::write(&f, b"x").unwrap();
-    let args = ["chgrp", "nogroup", f.to_str().expect("utf-8")];
+    let args = ["chgrp", "polyisa-nosuch-grp", f.to_str().expect("utf-8")];
     let argv: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
     let (code, out) = polyisa_cli::run_x86::run_elf_x86_64_captured(path, &argv)
         .unwrap_or_else(|e| panic!("chgrp: {e}"));

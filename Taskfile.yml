@@ -85,14 +85,21 @@ tasks:
   container:build:
     desc: "検証コンテナイメージ localhost/polyisa-dev をビルドする"
     cmds:
-      - podman build -t localhost/polyisa-dev .
+      - podman build --cgroup-manager=cgroupfs -t localhost/polyisa-dev .
 
   container:
     desc: "検証コンテナ内でコマンドを実行する（例: task container -- task check）"
+    deps: [container:build]
     cmds:
+      # リポジトリはコンテナ内でも同じ絶対パスに置く。
+      # CARGO_MANIFEST_DIR 由来の埋め込みパス（.testdata 参照）が
+      # ホスト・コンテナで一致し、target/ も安全に共有できる。
+      # keep-id + cap-drop でホストの非特権ユーザーと同じ権限に揃える
+      # （busybox テストは権限不足の失敗を検証し、root だと壊れる）。
+      # POLYISA_ 系のデバッグ・絞り込み変数はまとめてコンテナに引き継ぐ。
       - >-
-        podman run --rm
-        -v "{{.TASKFILE_DIR}}:/work" -w /work
-        -v polyisa-cargo-registry:/usr/local/cargo/registry
-        -v polyisa-cargo-git:/usr/local/cargo/git
-        localhost/polyisa-dev {{.CLI_ARGS}}
+        podman run --rm -i --cap-drop=ALL --userns=keep-id
+        -v "{{.TASKFILE_DIR}}:{{.TASKFILE_DIR}}" -w "{{.TASKFILE_DIR}}"
+        -e RUST_BACKTRACE
+        $(env | sed -n 's/^\(POLYISA_[A-Za-z0-9_]*\)=.*/-e \1/p')
+        localhost/polyisa-dev {{.CLI_ARGS | default "task --list"}}
