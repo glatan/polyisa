@@ -11,7 +11,9 @@
 
 #![forbid(unsafe_code)]
 
+pub mod decode;
 pub mod sem;
+pub mod sem_ea;
 
 // 空のモデルから生成した殻。ISADL 記述の追加後に中身が増える。
 include!(concat!(env!("OUT_DIR"), "/generated.rs"));
@@ -93,21 +95,21 @@ mod tests {
 
     #[test]
     fn insn_count() {
-        // 段階4の x86 最小。ModRM/SIB 展開で 853 件。
-        assert_eq!(INSNS.len(), 853);
+        // 段階4の x86 最小 853 件にオペコード表の記述を足した件数。
+        assert_eq!(INSNS.len(), 1149);
     }
 
     #[test]
     fn decode_spot_checks() {
         // 命令語はビット配置から手で組み立てる。Ref: SPEC-X86-INTEL-SDM。
         assert_eq!(decode(0x90, 8), Some(Insn::Nop));
-        assert_eq!(decode(0xF4, 8), Some(Insn::Hlt));
-        assert_eq!(decode(0xFC, 8), Some(Insn::Cld));
-        assert_eq!(decode(0xFD, 8), Some(Insn::Std));
-        assert_eq!(decode(0x98, 8), Some(Insn::Cwde));
+        assert_eq!(decode(0xF4, 8), Some(Insn::EnHlt));
+        assert_eq!(decode(0xFC, 8), Some(Insn::EnCld));
+        assert_eq!(decode(0xFD, 8), Some(Insn::EnStd));
+        assert_eq!(decode(0x98, 8), Some(Insn::EnCwde));
         // CDQ/CQO (0x99)。od 0x5acde6 対応.
         // Ref: SPEC-X86-INTEL-SDM (v093).
-        assert_eq!(decode(0x99, 8), Some(Insn::Cdq));
+        assert_eq!(decode(0x99, 8), Some(Insn::EnCdq));
         assert_eq!(decode(0x99, 16), None);
         assert_eq!(decode(0x40, 8), Some(Insn::IncEax));
         assert_eq!(decode(0x41, 8), Some(Insn::IncEcx));
@@ -136,8 +138,8 @@ mod tests {
         assert_eq!(decode(0xEBFE, 16), Some(Insn::Jmp8));
         assert_eq!(decode(0xEB00, 16), Some(Insn::Jmp8));
         // 16ビット2バイトオペコード：SYSCALL (0F 05)、CPUID (0F A2)。
-        assert_eq!(decode(0x0F05, 16), Some(Insn::Syscall));
-        assert_eq!(decode(0x0FA2, 16), Some(Insn::Cpuid));
+        assert_eq!(decode(0x0F05, 16), Some(Insn::EnSyscall));
+        assert_eq!(decode(0x0FA2, 16), Some(Insn::EnCpuid));
         // BSWAP r32/r64 (0F C8+rd)。ls -l 0x429c02 対応。REX 剥がし済み.
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x0FC9, 16), Some(Insn::Bswap));
@@ -158,7 +160,7 @@ mod tests {
         // POP EBP (5D)、CALL rel32 (E8+imm32)、RET (C3)。
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0xE8_0000_0010, 40), Some(Insn::CallRel32));
-        assert_eq!(decode(0xC3, 8), Some(Insn::Ret));
+        assert_eq!(decode(0xC3, 8), Some(Insn::EnRet));
         // 比較・条件分岐：CMP EAX,imm32 (3D)、TEST EAX,EAX (85 C0)、JE (74)、JNE (75)。
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x3D_0000_0001, 40), Some(Insn::CmpEax));
@@ -901,7 +903,7 @@ mod tests {
         assert_eq!(decode(0x29D8, 16), Some(Insn::SubRm32));
         assert_eq!(decode(0x89E5, 16), Some(Insn::MovMr32));
         assert_eq!(decode(0x89D8, 16), Some(Insn::MovMr32));
-        assert_eq!(decode(0xC9, 8), Some(Insn::Leave));
+        assert_eq!(decode(0xC9, 8), Some(Insn::EnLeave));
         // PUSH/POP r32 全レジスタ：PUSH 50+r、POP 58+r。
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x50, 8), Some(Insn::PushEax));

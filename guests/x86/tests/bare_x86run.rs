@@ -8063,7 +8063,8 @@ fn run_rol_bp_imm8() {
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
     assert_eq!(out, Outcome::StepLimit { pc: 0x1004 });
     assert_eq!(env.backend.get(Gpr(5).state()), 0x1234_AB00);
-    assert_eq!(env.backend.get(polyisa_guest_x86::sem::eflags_ref()), 0x84);
+    // ROL は CF/OF のみに触り SF/ZF/PF は不変（0xab00 の LSB は 0）。
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::eflags_ref()), 0);
 }
 
 #[test]

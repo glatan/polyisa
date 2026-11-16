@@ -134,6 +134,126 @@ pub struct ModelDef {
     pub remove_features: Vec<String>,
 }
 
+/// オペランドの幅。`V` は有効オペランドサイズ（16/32/64）、`Z` は 16/32、
+/// `A` は有効アドレスサイズに従う。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum OpWidth {
+    B8,
+    W16,
+    V,
+    Z,
+    D32,
+    Q64,
+    O128,
+    A,
+}
+
+/// `map` 記述のオペランドの種類。ModRM 系はデコーダがバイトを消費する
+/// 規則を持ち、即値と相対変位は命令の末尾から読む。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum OpKind {
+    /// ModRM.r/m の EA またはレジスタ（Eb/Ev/Ew/Ed/Eq/Eo）。
+    Ea(OpWidth),
+    /// ModRM.reg の GPR（Gb/Gv/Gw/Gd）。
+    Reg(OpWidth),
+    /// ModRM.reg のセグメントレジスタ（Sreg）。
+    RegS,
+    /// ModRM.reg の XMM（V/U 系）。
+    RegX,
+    /// ModRM.r/m の XMM（W 系）。EA のときは 128 ビットのメモリ。
+    RmX,
+    /// ModRM.reg の MMX レジスタ（P 系）。
+    RegM,
+    /// ModRM.r/m の MMX または 64 ビットメモリ（Q 系）。
+    RmM,
+    /// オペコード下位 3 ビットの GPR（+rb/+rw/+ro/+rv）。
+    InOp(OpWidth),
+    /// 即値（Ib/Iw/Iz/Iv）。`V` は 64 ビット時に符号拡張された 32 ビット。
+    Imm(OpWidth),
+    /// 2 つ目の即値（ENTER の imm8）。
+    Imm2(OpWidth),
+    /// 相対変位（Jb/Jz）。
+    Rel(OpWidth),
+    /// moffs（Ob/Ov）。幅は有効アドレスサイズ。
+    Moffs(OpWidth),
+    /// 暗黙オペランド。
+    Imp(ImpOp),
+}
+
+/// 暗黙オペランド。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ImpOp {
+    /// アキュムレータ（AL/AX/EAX/RAX、幅は V）。
+    Eax,
+    Ecx,
+    Edx,
+    Ebx,
+    Esp,
+    Ebp,
+    Esi,
+    Edi,
+    /// 8 ビットの CL。
+    Cl,
+    /// 定数 1（シフト）。
+    One,
+    /// x87 の ST(0)。
+    St0,
+    /// x87 の ST(i)。i は ModRM.r/m またはオペコードのフィールド。
+    Sti,
+    /// DS:(E)SI のソース（string 命令）。
+    Xsrc,
+    /// ES:(E)DI のデスティネーション（string 命令）。
+    Ydst,
+    /// セグメントレジスタの暗黙指定（PUSH FS 等）。
+    Seg(u8),
+}
+
+/// `map` の命令項目が要求する必須接頭辞の状態。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PfxSel {
+    /// 必須接頭辞で区別しない（primary 系の既定）。
+    Any,
+    /// 0x66・0xF2・0xF3 がいずれもないもの（MOVUPS など）。
+    Plain,
+    /// 0x66 を要求する（MOVUPD など）。
+    P66,
+    /// 0xF2 を要求する（MOVSD など）。
+    PF2,
+    /// 0xF3 を要求する（MOVSS など）。
+    PF3,
+}
+
+/// `map` の中で宣言する命令。
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct MapInsn {
+    pub name: String,
+    /// オペランドの並び。消費するバイトの規則をここから導く。
+    pub ops: Vec<OpKind>,
+    /// ModRM.reg によるグループ選択（/0 から /7）。None は /r または ModRM なし。
+    pub group: Option<u8>,
+    /// 必須接頭辞の状態。
+    pub pfx: PfxSel,
+    pub when: Pred,
+    pub syntax: String,
+    pub timing: String,
+}
+
+/// `map` の一要素。命令を宣言するか、別の表へ分岐する。
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum MapItem {
+    /// バイト値 `u8` に対する命令（グループ・必須接頭辞は `MapInsn` が持つ）。
+    Insn(u8, MapInsn),
+    /// バイト値 `u8` で別の表に分岐する（0F、VEX 後の map 選択）。
+    Map(u8, String),
+}
+
+/// オペコード表。バイト値をキーとする。
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct MapDecl {
+    pub name: String,
+    pub items: Vec<MapItem>,
+}
+
 /// 検査済みモデルの全体。
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct Model {
@@ -146,6 +266,8 @@ pub struct Model {
     pub features: Vec<Feature>,
     pub models: Vec<ModelDef>,
     pub timing_classes: Vec<String>,
+    /// オペコード表（可変長 ISA 用。`primary` がデコードの入口）。
+    pub maps: Vec<MapDecl>,
 }
 
 impl Model {

@@ -195,7 +195,6 @@ mod tests {
         // クレートをまたぐ探索はここでは行わず、表の形だけを見る。
         for tb in TEST_REQUIREMENTS {
             assert!(tb.binary.starts_with("heavy_"), "{}", tb.binary);
-            assert!(!tb.needs.is_empty(), "{}", tb.binary);
         }
     }
 

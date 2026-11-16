@@ -3,6 +3,9 @@
 //! x86 最小の ISADL 記述。出典は SPEC-X86-INTEL-SDM Combined v093 である。
 
 // Ref: SPEC-X86-INTEL-SDM (v093).
+mod x86map {
+    include!("spec/x86map.rs");
+}
 include!("spec/x86min.rs");
 
 fn main() {
@@ -33,6 +36,7 @@ fn main() {
         &generated.encoder,
         &generated.operands,
         &generated.metadata,
+        &generated.map_decoder,
     ] {
         all.push_str(part);
         all.push('\n');

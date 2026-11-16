@@ -38,69 +38,72 @@ mod wasm {
     include!("../../../guests/wasm/spec/wasmmin.rs");
 }
 mod x86 {
+    mod x86map {
+        include!("../../../guests/x86/spec/x86map.rs");
+    }
     include!("../../../guests/x86/spec/x86min.rs");
 }
 
 pub(crate) struct IsaSpec {
     pub isa: &'static str,
-    pub rel_path: &'static str,
+    pub rel_paths: &'static [&'static str],
     pub build: fn() -> Model,
 }
 
 const SPECS: &[IsaSpec] = &[
     IsaSpec {
         isa: "aarch64",
-        rel_path: "guests/aarch64/spec/a64i.rs",
+        rel_paths: &["guests/aarch64/spec/a64i.rs"],
         build: aarch64::build_model,
     },
     IsaSpec {
         isa: "arm",
-        rel_path: "guests/arm/spec/armi.rs",
+        rel_paths: &["guests/arm/spec/armi.rs"],
         build: arm::build_model,
     },
     IsaSpec {
         isa: "hexagon",
-        rel_path: "guests/hexagon/spec/hexmin.rs",
+        rel_paths: &["guests/hexagon/spec/hexmin.rs"],
         build: hexagon::build_model,
     },
     IsaSpec {
         isa: "ia64",
-        rel_path: "guests/ia64/spec/ia64min.rs",
+        rel_paths: &["guests/ia64/spec/ia64min.rs"],
         build: ia64::build_model,
     },
     IsaSpec {
         isa: "mips",
-        rel_path: "guests/mips/spec/mipsi.rs",
+        rel_paths: &["guests/mips/spec/mipsi.rs"],
         build: mips::build_model,
     },
     IsaSpec {
         isa: "power",
-        rel_path: "guests/power/spec/poweri.rs",
+        rel_paths: &["guests/power/spec/poweri.rs"],
         build: power::build_model,
     },
     IsaSpec {
         isa: "riscv",
-        rel_path: "guests/riscv/spec/rv64i.rs",
+        rel_paths: &["guests/riscv/spec/rv64i.rs"],
         build: riscv::build_model,
     },
     IsaSpec {
         isa: "s390",
-        rel_path: "guests/s390/spec/zarch.rs",
+        rel_paths: &["guests/s390/spec/zarch.rs"],
         build: s390::build_model,
     },
     IsaSpec {
         isa: "sparc",
-        rel_path: "guests/sparc/spec/sparcv8.rs",
+        rel_paths: &["guests/sparc/spec/sparcv8.rs"],
         build: sparc::build_model,
     },
     IsaSpec {
         isa: "wasm",
-        rel_path: "guests/wasm/spec/wasmmin.rs",
+        rel_paths: &["guests/wasm/spec/wasmmin.rs"],
         build: wasm::build_model,
     },
     IsaSpec {
         isa: "x86",
-        rel_path: "guests/x86/spec/x86min.rs",
+        rel_paths: &["guests/x86/spec/x86min.rs", "guests/x86/spec/x86map.rs"],
         build: x86::build_model,
     },
 ];
@@ -140,7 +143,7 @@ pub(crate) fn check_spec_table(root: &Path) -> Result<(), String> {
     let found = discover_includes(root)?;
     let table: Vec<(&str, &str)> = SPECS
         .iter()
-        .map(|s| (s.isa, file_name(s.rel_path)))
+        .flat_map(|s| s.rel_paths.iter().map(|p| (s.isa, file_name(p))))
         .collect();
     let violations = spec_table_violations(&table, &found);
     if violations.is_empty() {

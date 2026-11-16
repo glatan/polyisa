@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use polyisa_isadl::model::Insn;
+use polyisa_isadl::model::MapItem;
 use polyisa_isadl::{Model, Pred};
 
 use crate::specs;
@@ -123,7 +123,7 @@ pub(crate) fn freshness_violations(
 
 struct IndexedModel<'a> {
     isa: &'a str,
-    rel_path: &'a str,
+    rel_paths: &'a [&'a str],
     model: &'a Model,
 }
 
@@ -139,7 +139,7 @@ pub(crate) fn render_status(
         if let Some(model) = models.get(spec.isa) {
             indexed.push(IndexedModel {
                 isa: spec.isa,
-                rel_path: spec.rel_path,
+                rel_paths: spec.rel_paths,
                 model,
             });
         }
@@ -181,7 +181,8 @@ fn render_index(
     let isa_rows: Vec<Vec<String>> = models
         .iter()
         .map(|item| {
-            let mnemonics = mnemonic_rows(&item.model.insns);
+            let attrs = insn_attrs(item.model);
+            let mnemonics = mnemonic_rows(&attrs);
             let models = item
                 .model
                 .models
@@ -191,7 +192,7 @@ fn render_index(
                 .join("、");
             vec![
                 item.isa.to_string(),
-                item.model.insns.len().to_string(),
+                attrs.len().to_string(),
                 distinct_mnemonics(&mnemonics).to_string(),
                 models,
                 format!("[isa-{}.md](isa-{}.md)", item.isa, item.isa),
@@ -234,7 +235,10 @@ fn render_index(
 fn render_isa(item: &IndexedModel<'_>) -> String {
     let mut s = String::new();
     push_generated_heading(&mut s, &format!("# 実装状況：{}", item.isa));
-    s.push_str(&format!("生成の元は `{}` である。\n\n", item.rel_path));
+    s.push_str(&format!(
+        "生成の元は `{}` である。\n\n",
+        item.rel_paths.join("`・`")
+    ));
     s.push_str("## CPU モデル\n\n");
     let mut cpu = item.model.models.clone();
     cpu.sort_by(|a, b| a.name.cmp(&b.name));
@@ -269,7 +273,7 @@ fn render_isa(item: &IndexedModel<'_>) -> String {
         }
     }
     s.push_str("\n## 命令\n\n");
-    let rows = mnemonic_rows(&item.model.insns);
+    let rows = mnemonic_rows(&insn_attrs(item.model));
     let table_rows: Vec<Vec<String>> = rows
         .iter()
         .map(|row| {
@@ -327,6 +331,9 @@ pub(crate) fn mnemonic_of(syntax: &str, name: &str) -> String {
         words[0].to_string()
     };
     match token.chars().next() {
+        // `{0}` はオペコード表の記述でニーモニックを置く占位子。
+        // 記述名は `{ニーモニック}_{形}` なので先頭の区切りを取る。
+        Some('{') => name.split('_').next().unwrap_or(name).to_string(),
         Some(c) if c.is_ascii_alphabetic() => token,
         _ => name.to_string(),
     }
@@ -363,15 +370,45 @@ fn fmt_pred(pred: &Pred, prec: u8) -> String {
     }
 }
 
-fn mnemonic_rows(insns: &[Insn]) -> Vec<MnemonicRow> {
+/// 命令の表に載せる属性。`Insn`（バイト列照合の記述）と
+/// `MapInsn`（オペコード表の記述）の両方から取る。
+type InsnAttr<'a> = (&'a str, &'a str, &'a Pred, &'a str);
+
+fn insn_attrs(model: &Model) -> Vec<InsnAttr<'_>> {
+    model
+        .insns
+        .iter()
+        .map(|i| {
+            (
+                i.name.as_str(),
+                i.syntax.as_str(),
+                &i.when,
+                i.timing.as_str(),
+            )
+        })
+        .chain(model.maps.iter().flat_map(|m| {
+            m.items.iter().filter_map(|it| match it {
+                MapItem::Insn(_, mi) => Some((
+                    mi.name.as_str(),
+                    mi.syntax.as_str(),
+                    &mi.when,
+                    mi.timing.as_str(),
+                )),
+                MapItem::Map(_, _) => None,
+            })
+        }))
+        .collect()
+}
+
+fn mnemonic_rows(insns: &[InsnAttr<'_>]) -> Vec<MnemonicRow> {
     let mut groups: BTreeMap<(String, String, String), BTreeSet<String>> = BTreeMap::new();
-    for insn in insns {
+    for (name, syntax, when, timing) in insns {
         let key = (
-            mnemonic_of(&insn.syntax, &insn.name),
-            pred_string(&insn.when),
-            insn.timing.clone(),
+            mnemonic_of(syntax, name),
+            pred_string(when),
+            (*timing).to_string(),
         );
-        groups.entry(key).or_default().insert(insn.name.clone());
+        groups.entry(key).or_default().insert((*name).to_string());
     }
     groups
         .into_iter()
@@ -665,6 +702,7 @@ fn md_table(header: &[&str], rows: &[Vec<String>]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use polyisa_isadl::model::Insn;
 
     fn sample_insn(name: &str, syntax: &str, when: Pred, timing: &str) -> Insn {
         Insn {
@@ -724,7 +762,7 @@ mod tests {
 
     #[test]
     fn mnemonic_groups_by_first_word_and_splits_conditions() {
-        let insns = vec![
+        let insns = [
             sample_insn("add_rm", "add r/m, {imm}", Pred::True, "alu"),
             sample_insn("add_r", "add r, {imm}", Pred::True, "alu"),
             sample_insn(
@@ -736,7 +774,18 @@ mod tests {
             sample_insn("jump", "", Pred::True, "jump"),
             sample_insn("sub", "r{rd} = sub(r{rs1}, r{rs2})", Pred::True, "alu"),
         ];
-        let rows = mnemonic_rows(&insns);
+        let attrs: Vec<InsnAttr> = insns
+            .iter()
+            .map(|i| {
+                (
+                    i.name.as_str(),
+                    i.syntax.as_str(),
+                    &i.when,
+                    i.timing.as_str(),
+                )
+            })
+            .collect();
+        let rows = mnemonic_rows(&attrs);
         let add_true = rows
             .iter()
             .find(|r| r.mnemonic == "add" && r.condition == "真")

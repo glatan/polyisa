@@ -2,9 +2,11 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // x86 最小の ISADL モデル（段階4の最小）。
 //
-// オペコード表と ModRM/SIB フックは使わず、オペランドの置き方ごとに
-// 命令を列挙する方針を採る（ADR-0018）。命令長の判定とオペランドの
-// 取り出しは実行側（`cli` の `step_x86`）が担う。
+// オペランドの置き方ごとに命令を列挙する方針を採る（ADR-0018）。
+// 命令長の判定とオペランドの取り出しは実行側（`cli` の `step_x86`）が担う。
+// 段階13 でオペコード表の記述（`x86map.rs`）が先に試される経路になり、
+// この列挙は map が扱わない命令へのフォールバックである。map 側と
+// 名前が重なる記述は `en_`（enumerated）の接頭辞を持つ。
 //
 // 初期の最小構成（i386 の105件に ModRM/SIB 汎用 23件等を加えた計106件）から
 // 段階4の拡張で増えた。記述数は `task status` の生成値（docs/status/isa-x86.md）を参照。
@@ -143,9 +145,9 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("nop", "F1", "10010000", "nop", "alu"),
         // HLT (F4)。ユーザーモードでは特権例外になるが、glibc の abort は
         // 続けて exit を置く。ここでは 1 バイト進めてその後続を実行する。
-        ("hlt", "F1", "11110100", "hlt", "system"),
-        ("cld", "F1", "11111100", "cld", "alu"),
-        ("std", "F1", "11111101", "std", "alu"),
+        ("en_hlt", "F1", "11110100", "hlt", "system"),
+        ("en_cld", "F1", "11111100", "cld", "alu"),
+        ("en_std", "F1", "11111101", "std", "alu"),
         // BSWAP r32/r64 (0F C8+rd)。REX.B で拡張、REX.W で64bit。F3/66 剥がし済み.
         ("bswap", "F1", "00001111 11001...", "bswap", "alu"),
         ("inc_eax", "F1", "01000000", "inc eax", "alu"),
@@ -254,7 +256,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         // POP m64 [base+disp8] (8F /0 mod=01)。vi 0x4ce187 の popq 0x40(%rdi)。
         ("pop_m64_mem8", "M8", "10001111 01000... ........", "pop m64", "load"),
         ("call_rel32", "F1", "11101000 ................................", "call {imm}", "jump"),
-        ("ret", "F1", "11000011", "ret", "jump"),
+        ("en_ret", "F1", "11000011", "ret", "jump"),
         // RET imm16 (C2 iw)。i386 musl の stdcall 風呼出しで多用される.
         ("ret_imm", "F1", "11000010 ................", "ret {imm}", "jump"),
         ("cmp_eax", "F1", "00111101 ................................", "cmp eax, {imm}", "alu"),
@@ -295,11 +297,11 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("sbb_rm32", "F1", "00011001 11......", "sbb r/m32, r32", "alu"),
         ("sub_eax", "F1", "00101101 ................................", "sub eax, {imm}", "alu"),
         ("mov_mr32", "F1", "10001001 11......", "mov r/m32, r32", "alu"),
-        ("leave", "F1", "11001001", "leave", "alu"),
+        ("en_leave", "F1", "11001001", "leave", "alu"),
         ("mov_r32_imm", "F1", "10111... ................................", "mov r32, {imm}", "alu"),
         ("mov_r64_imm64", "F1", "10111... ................................................................", "mov r64, {imm}", "alu"),
-        ("syscall", "F1", "00001111 00000101", "syscall", "system"),
-        ("cpuid", "F1", "00001111 10100010", "cpuid", "system"),
+        ("en_syscall", "F1", "00001111 00000101", "syscall", "system"),
+        ("en_cpuid", "F1", "00001111 10100010", "cpuid", "system"),
         ("mov_rm_imm", "F1", "11000111 11000... ................................", "mov r/m, {imm}", "alu"),
         ("add_rm_imm8", "F1", "10000011 11000... ........", "add r/m, {imm}", "alu"),
         ("or_rm_imm8", "F1", "10000011 11001... ........", "or r/m, {imm}", "alu"),
@@ -937,9 +939,9 @@ pub fn build_model() -> polyisa_isadl::Model {
         // POR xmm,xmm (66 0F EB /r)。reg-direct のみ.
         ("por", "F1", "00001111 11101011 11......", "por xmm, xmm", "alu"),
         // CWDE/CDQE (0x98)。AX→EAX / EAX→RAX 符号拡張。REX.W で切替.
-        ("cwde", "F1", "10011000", "cwde", "alu"),
+        ("en_cwde", "F1", "10011000", "cwde", "alu"),
         // CDQ/CQO (0x99)。EAX→EDX:EAX / RAX→RDX:RAX 符号拡張。od 0x5acde6 対応。REX.W で切替.
-        ("cdq", "F1", "10011001", "cdq", "alu"),
+        ("en_cdq", "F1", "10011001", "cdq", "alu"),
         ("movq_m64_xmm_rip", "F1", "00001111 11010110 00...101 ................................", "movq m64, xmm", "store"),
         // MOVQ xmm,m64 RIP (F3 0F 7E 05 + disp32)。F3 接頭辞は実行側で剥がす。
         ("movq_xmm_m64_rip", "F1", "00001111 01111110 00...101 ................................", "movq xmm, m64", "load"),
@@ -3699,5 +3701,7 @@ pub fn build_model() -> polyisa_isadl::Model {
             timing: timing.to_string(),
         });
     }
+    // 段階13: オペコード表記述を足す（x86map.rs）。
+    x86map::build_maps(&mut m);
     m
 }

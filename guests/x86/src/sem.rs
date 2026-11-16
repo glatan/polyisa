@@ -131,26 +131,26 @@ pub fn clear_hi<B: Backend>(b: &mut B, rd: Gpr) {
 }
 
 /// EFLAGS のビット位置（x86 共通）。
-const FLAG_CF: u32 = 0x1;
-const FLAG_PF: u32 = 0x4;
-const FLAG_AF: u32 = 0x10;
-const FLAG_ZF: u32 = 0x40;
-const FLAG_SF: u32 = 0x80;
-const FLAG_OF: u32 = 0x800;
+pub(crate) const FLAG_CF: u32 = 0x1;
+pub(crate) const FLAG_PF: u32 = 0x4;
+pub(crate) const FLAG_AF: u32 = 0x10;
+pub(crate) const FLAG_ZF: u32 = 0x40;
+pub(crate) const FLAG_SF: u32 = 0x80;
+pub(crate) const FLAG_OF: u32 = 0x800;
 /// ADD/SUB/CMP と論理演算で更新する 6 旗のマスク（遅延評価は本格実装で足す）。
-const FLAG_OSZPCA: u32 = FLAG_OF | FLAG_SF | FLAG_ZF | FLAG_AF | FLAG_PF | FLAG_CF;
+pub(crate) const FLAG_OSZPCA: u32 = FLAG_OF | FLAG_SF | FLAG_ZF | FLAG_AF | FLAG_PF | FLAG_CF;
 /// シフトで更新する 5 旗のマスク（AF は不定のため触らない）。
-const FLAG_OSZPC: u32 = FLAG_OF | FLAG_SF | FLAG_ZF | FLAG_PF | FLAG_CF;
+pub(crate) const FLAG_OSZPC: u32 = FLAG_OF | FLAG_SF | FLAG_ZF | FLAG_PF | FLAG_CF;
 
 /// 条件の真偽でビット値（bit / 0）を選ぶ。
-fn pick<B: Backend>(b: &mut B, c: B::B, bit: u32) -> B::V<W32> {
+pub(crate) fn pick<B: Backend>(b: &mut B, c: B::B, bit: u32) -> B::V<W32> {
     let t = b.konst::<W32>(bit);
     let f = b.konst::<W32>(0);
     b.select::<W32>(c, t, f)
 }
 
 /// 低8ビットの偶パリティで PF bit を作る。
-fn pf_bit<B: Backend, W: Width>(b: &mut B, v: B::V<W>) -> B::V<W32> {
+pub(crate) fn pf_bit<B: Backend, W: Width>(b: &mut B, v: B::V<W>) -> B::V<W32> {
     let ff = b.konst::<W>(W::from_u128(0xff));
     let mut x = b.and::<W>(v, ff);
     for s in [4u32, 2, 1] {
@@ -166,7 +166,7 @@ fn pf_bit<B: Backend, W: Width>(b: &mut B, v: B::V<W>) -> B::V<W32> {
 }
 
 /// 結果値から SF/ZF/PF の 3 ビット分を作る。
-fn szp_bits<B: Backend, W: Width>(b: &mut B, v: B::V<W>) -> B::V<W32> {
+pub(crate) fn szp_bits<B: Backend, W: Width>(b: &mut B, v: B::V<W>) -> B::V<W32> {
     let top_mask = b.konst::<W>(W::from_u128(1u128 << (W::BITS - 1)));
     let top = b.and::<W>(v, top_mask);
     let zero = b.konst::<W>(W::from_u128(0));
@@ -180,7 +180,12 @@ fn szp_bits<B: Backend, W: Width>(b: &mut B, v: B::V<W>) -> B::V<W32> {
 }
 
 /// (x OP y) の補助キャリ（bit4）から AF bit を作る。ADD/SUB/CMP 共通式。
-fn af_bit<B: Backend, W: Width>(b: &mut B, x: B::V<W>, y: B::V<W>, v: B::V<W>) -> B::V<W32> {
+pub(crate) fn af_bit<B: Backend, W: Width>(
+    b: &mut B,
+    x: B::V<W>,
+    y: B::V<W>,
+    v: B::V<W>,
+) -> B::V<W32> {
     let t = b.xor::<W>(x, y);
     let u = b.xor::<W>(t, v);
     let af_mask = b.konst::<W>(W::from_u128(FLAG_AF as u128));
@@ -191,7 +196,12 @@ fn af_bit<B: Backend, W: Width>(b: &mut B, x: B::V<W>, y: B::V<W>, v: B::V<W>) -
 }
 
 /// ADD 系の 6 旗を更新する。CF=繰り上がり、OF=符号あふれ。
-fn update_add_flags<B: Backend, W: Width>(b: &mut B, x: B::V<W>, y: B::V<W>, v: B::V<W>) {
+pub(crate) fn update_add_flags<B: Backend, W: Width>(
+    b: &mut B,
+    x: B::V<W>,
+    y: B::V<W>,
+    v: B::V<W>,
+) {
     let old: B::V<W32> = b.get(eflags_ref());
     let zero = b.konst::<W>(W::from_u128(0));
     let cf_take = b.cmp::<W>(Cmp::LtU, v, x);
@@ -215,7 +225,12 @@ fn update_add_flags<B: Backend, W: Width>(b: &mut B, x: B::V<W>, y: B::V<W>, v: 
 }
 
 /// SUB/CMP 系の 6 旗を更新する。CF=借り、OF=符号あふれ。
-fn update_sub_flags<B: Backend, W: Width>(b: &mut B, x: B::V<W>, y: B::V<W>, v: B::V<W>) {
+pub(crate) fn update_sub_flags<B: Backend, W: Width>(
+    b: &mut B,
+    x: B::V<W>,
+    y: B::V<W>,
+    v: B::V<W>,
+) {
     let old: B::V<W32> = b.get(eflags_ref());
     let zero = b.konst::<W>(W::from_u128(0));
     let cf_take = b.cmp::<W>(Cmp::LtU, x, y);
@@ -239,7 +254,7 @@ fn update_sub_flags<B: Backend, W: Width>(b: &mut B, x: B::V<W>, y: B::V<W>, v: 
 }
 
 /// 論理演算の 5 旗を更新する（CF=0、OF=0、AF は不定のため保存）。
-fn update_logic_flags<B: Backend, W: Width>(b: &mut B, v: B::V<W>) {
+pub(crate) fn update_logic_flags<B: Backend, W: Width>(b: &mut B, v: B::V<W>) {
     let old: B::V<W32> = b.get(eflags_ref());
     let szp = szp_bits(b, v);
     let clear_mask = b.konst::<W32>(!FLAG_OSZPC);
@@ -249,7 +264,7 @@ fn update_logic_flags<B: Backend, W: Width>(b: &mut B, v: B::V<W>) {
 }
 
 /// CF を読む。
-fn read_cf<B: Backend>(b: &mut B) -> B::B {
+pub(crate) fn read_cf<B: Backend>(b: &mut B) -> B::B {
     let flags: B::V<W32> = b.get(eflags_ref());
     let mask = b.konst::<W32>(0x1);
     let masked = b.and::<W32>(flags, mask);
@@ -257,7 +272,7 @@ fn read_cf<B: Backend>(b: &mut B) -> B::B {
     b.cmp::<W32>(Cmp::Ne, masked, zero)
 }
 
-fn read_zf<B: Backend>(b: &mut B) -> B::B {
+pub(crate) fn read_zf<B: Backend>(b: &mut B) -> B::B {
     let flags: B::V<W32> = b.get(eflags_ref());
     let mask = b.konst::<W32>(FLAG_ZF);
     let masked = b.and::<W32>(flags, mask);
@@ -815,7 +830,7 @@ pub fn test_rm64_imm_sibd<B: Backend>(
 }
 
 /// 8ビット GPR を読む。REX ありは低8ビット、REX なしの 4-7 は上位8ビット (AH/CH/DH/BH).
-fn read8<B: Backend>(b: &mut B, r: Gpr, high: bool) -> B::V<W8> {
+pub(crate) fn read8<B: Backend>(b: &mut B, r: Gpr, high: bool) -> B::V<W8> {
     if high {
         let v32 = read(b, r);
         let n = b.konst::<W32>(8);
@@ -1052,7 +1067,7 @@ pub fn test_rm8_imm<B: Backend>(b: &mut B, dst: Gpr, imm: u8, high: bool) -> Flo
 }
 
 /// 8ビット GPR に書く。REX ありは低8ビット、REX なしの 4-7 は上位8ビット.
-fn write8<B: Backend>(b: &mut B, r: Gpr, high: bool, v: B::V<W8>) {
+pub(crate) fn write8<B: Backend>(b: &mut B, r: Gpr, high: bool, v: B::V<W8>) {
     if high {
         let cur32 = read(b, r);
         let low_mask = b.konst::<W32>(0xffff_00ff);
@@ -2145,7 +2160,7 @@ pub fn jcxz64<B: Backend>(b: &mut B, eip: u32, disp: i8) -> Flow<B> {
 }
 
 /// CF を 0/1 の値として読む。
-fn cf_num<B: Backend>(b: &mut B) -> B::V<W32> {
+pub(crate) fn cf_num<B: Backend>(b: &mut B) -> B::V<W32> {
     let flags: B::V<W32> = b.get(eflags_ref());
     let mask = b.konst::<W32>(0x1);
     let masked = b.and::<W32>(flags, mask);
@@ -2156,7 +2171,7 @@ fn cf_num<B: Backend>(b: &mut B) -> B::V<W32> {
 }
 
 /// ZF を 0/1 の値として読む。
-fn zf_num<B: Backend>(b: &mut B) -> B::V<W32> {
+pub(crate) fn zf_num<B: Backend>(b: &mut B) -> B::V<W32> {
     let flags: B::V<W32> = b.get(eflags_ref());
     let mask = b.konst::<W32>(FLAG_ZF);
     let masked = b.and::<W32>(flags, mask);
@@ -2167,7 +2182,7 @@ fn zf_num<B: Backend>(b: &mut B) -> B::V<W32> {
 }
 
 /// SF を 0/1 の値として読む。
-fn sf_num<B: Backend>(b: &mut B) -> B::V<W32> {
+pub(crate) fn sf_num<B: Backend>(b: &mut B) -> B::V<W32> {
     let flags: B::V<W32> = b.get(eflags_ref());
     let mask = b.konst::<W32>(FLAG_SF);
     let masked = b.and::<W32>(flags, mask);
@@ -2178,7 +2193,7 @@ fn sf_num<B: Backend>(b: &mut B) -> B::V<W32> {
 }
 
 /// OF を 0/1 の値として読む。
-fn of_num<B: Backend>(b: &mut B) -> B::V<W32> {
+pub(crate) fn of_num<B: Backend>(b: &mut B) -> B::V<W32> {
     let flags: B::V<W32> = b.get(eflags_ref());
     let mask = b.konst::<W32>(FLAG_OF);
     let masked = b.and::<W32>(flags, mask);
@@ -2353,11 +2368,11 @@ pub fn jne<B: Backend>(b: &mut B, eip: u32, disp: i8) -> Flow<B> {
     Ok(())
 }
 
-fn read<B: Backend>(b: &mut B, r: Gpr) -> B::V<W32> {
+pub(crate) fn read<B: Backend>(b: &mut B, r: Gpr) -> B::V<W32> {
     b.get(r.state())
 }
 
-fn write<B: Backend>(b: &mut B, rd: Gpr, v: B::V<W32>) {
+pub(crate) fn write<B: Backend>(b: &mut B, rd: Gpr, v: B::V<W32>) {
     b.set(rd.state(), v);
 }
 
@@ -2953,14 +2968,14 @@ pub fn mov_rm32<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
     Ok(())
 }
 
-const DATA_READ: Access = Access {
+pub(crate) const DATA_READ: Access = Access {
     endian: Endian::Le,
     // x86 は非整列アクセスを許す。
     align: Align::Unaligned,
     kind: AccessKind::DataRead,
 };
 
-const DATA_WRITE: Access = Access {
+pub(crate) const DATA_WRITE: Access = Access {
     endian: Endian::Le,
     align: Align::Unaligned,
     kind: AccessKind::DataWrite,
@@ -2968,7 +2983,7 @@ const DATA_WRITE: Access = Access {
 
 /// ベース + disp8 の実効アドレスを 64ビットで求める（disp8 は符号付き）。
 /// 32ビット時は上位がゼロのため従来と等価である。
-fn eff_addr<B: Backend>(b: &mut B, base: Gpr, disp: i8) -> B::V<W64> {
+pub(crate) fn eff_addr<B: Backend>(b: &mut B, base: Gpr, disp: i8) -> B::V<W64> {
     let r = read64(b, base);
     let d = b.konst::<W64>(disp as i64 as u64);
     b.add::<W64>(r, d)
@@ -3121,7 +3136,7 @@ pub fn mov_memnd_eax<B: Backend>(b: &mut B, src: Gpr, base: Gpr) -> Flow<B> {
 }
 
 /// ベース + disp32 の実効アドレスを求める（disp32 は符号付き）。
-fn eff_addr32<B: Backend>(b: &mut B, base: Gpr, disp: i32) -> B::V<W64> {
+pub(crate) fn eff_addr32<B: Backend>(b: &mut B, base: Gpr, disp: i32) -> B::V<W64> {
     let r = read64(b, base);
     let d = b.konst::<W64>(disp as i64 as u64);
     b.add::<W64>(r, d)
@@ -6663,7 +6678,7 @@ pub fn idiv_rm32<B: Backend>(b: &mut B, eip: u32, rm: Gpr) -> Flow<B> {
 }
 
 /// 実機の #DE（0 除算・商あふれ）に相当する退出。
-fn div0<B: Backend>(b: &mut B, eip: u32) -> B::Exit {
+pub(crate) fn div0<B: Backend>(b: &mut B, eip: u32) -> B::Exit {
     b.raise(GuestException {
         kind: ExceptionKind::DivZero,
         code: 0,
@@ -11991,7 +12006,7 @@ pub fn movups_xmm_xmm<B: Backend>(b: &mut B, dst: Xmm, src: Xmm) -> Flow<B> {
 
 /* ===== near Jcc (0F 80-8F + disp32)。eip+6+disp に飛ぶ。 ===== */
 
-fn read_pf<B: Backend>(b: &mut B) -> B::B {
+pub(crate) fn read_pf<B: Backend>(b: &mut B) -> B::B {
     let flags: B::V<W32> = b.get(eflags_ref());
     let mask = b.konst::<W32>(FLAG_PF);
     let masked = b.and::<W32>(flags, mask);
@@ -11999,7 +12014,7 @@ fn read_pf<B: Backend>(b: &mut B) -> B::B {
     b.cmp::<W32>(Cmp::Ne, masked, zero)
 }
 
-fn read_sf<B: Backend>(b: &mut B) -> B::B {
+pub(crate) fn read_sf<B: Backend>(b: &mut B) -> B::B {
     let flags: B::V<W32> = b.get(eflags_ref());
     let mask = b.konst::<W32>(FLAG_SF);
     let masked = b.and::<W32>(flags, mask);
@@ -12007,7 +12022,7 @@ fn read_sf<B: Backend>(b: &mut B) -> B::B {
     b.cmp::<W32>(Cmp::Ne, masked, zero)
 }
 
-fn read_of<B: Backend>(b: &mut B) -> B::B {
+pub(crate) fn read_of<B: Backend>(b: &mut B) -> B::B {
     let flags: B::V<W32> = b.get(eflags_ref());
     let mask = b.konst::<W32>(FLAG_OF);
     let masked = b.and::<W32>(flags, mask);

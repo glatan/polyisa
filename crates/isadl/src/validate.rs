@@ -136,6 +136,9 @@ pub fn validate(model: &Model) -> Report {
         }
     }
 
+    // オペコード表の検査。参照解決、キーの重複、名前の一意性を見る。
+    validate_maps(model, &timing, &mut errors);
+
     // デコードの一意性。長さが同じで重なり、述語が両立しうる組を誤りとする。
     // `where` が互いに排他なら重なりを許す。機能の排他も考慮する。
     let mut conflicts: Vec<(String, String)> = Vec::new();
@@ -166,6 +169,119 @@ pub fn validate(model: &Model) -> Report {
     }
 
     Report { errors, warnings }
+}
+
+/// `map` の検査。表参照の解決、同一キーでの両立しうる命令、
+/// 命令名とタイミング分類の一意性・存在を見る。
+fn validate_maps(model: &Model, timing: &BTreeSet<&str>, errors: &mut Vec<ValidationError>) {
+    use crate::model::{MapItem, PfxSel};
+    if model.maps.is_empty() {
+        return;
+    }
+    let map_names: BTreeSet<&str> = model.maps.iter().map(|m| m.name.as_str()).collect();
+    if !map_names.contains("primary") {
+        errors.push(ValidationError::Unresolved {
+            kind: "map-entry".to_string(),
+            name: "primary".to_string(),
+        });
+    }
+    let mut insn_names: BTreeSet<&str> = model.insns.iter().map(|i| i.name.as_str()).collect();
+    // `map` の命令は、同一の命令が複数のオペコード値（+r 系）に
+    // 並びうる。同名の別定義は誤りとし、同一内容の重複は許す。
+    let mut map_insn_defs: std::collections::BTreeMap<&str, &crate::model::MapInsn> =
+        std::collections::BTreeMap::new();
+    let mut conflicts: Vec<(String, String)> = Vec::new();
+    for f in &model.features {
+        for c in &f.conflicts {
+            conflicts.push((f.name.clone(), c.clone()));
+        }
+    }
+    for map in &model.maps {
+        for item in &map.items {
+            match item {
+                MapItem::Map(byte, name) => {
+                    if !map_names.contains(name.as_str()) {
+                        errors.push(ValidationError::Unresolved {
+                            kind: "map".to_string(),
+                            name: format!("{name} (at {byte:#04x})"),
+                        });
+                    }
+                }
+                MapItem::Insn(_, mi) => {
+                    if let Some(g) = mi.group
+                        && g > 7
+                    {
+                        errors.push(ValidationError::Unresolved {
+                            kind: "map-group".to_string(),
+                            name: format!("{}: /{}", mi.name, g),
+                        });
+                    }
+                    if let Some(first) = map_insn_defs.get(mi.name.as_str()) {
+                        // group はスロットの番号であり命令の同一性ではない
+                        // （例: /4 と /6 が同じ shl を指すエイリアス）。
+                        let same = first.ops == mi.ops
+                            && first.pfx == mi.pfx
+                            && first.when == mi.when
+                            && first.syntax == mi.syntax
+                            && first.timing == mi.timing;
+                        if !same {
+                            errors.push(ValidationError::Unresolved {
+                                kind: "map-insn-name".to_string(),
+                                name: mi.name.clone(),
+                            });
+                        }
+                    } else {
+                        map_insn_defs.insert(mi.name.as_str(), mi);
+                        if !insn_names.insert(mi.name.as_str()) {
+                            errors.push(ValidationError::Unresolved {
+                                kind: "map-insn-name".to_string(),
+                                name: mi.name.clone(),
+                            });
+                        }
+                    }
+                    if !timing.contains(mi.timing.as_str()) {
+                        errors.push(ValidationError::Unresolved {
+                            kind: "timing".to_string(),
+                            name: mi.timing.clone(),
+                        });
+                    }
+                    if matches!(mi.when, crate::pred::Pred::False) {
+                        // map 命令の到達不能も警告相当だが、errors には含めない。
+                    }
+                }
+            }
+        }
+    }
+    // 同一キー（byte, group, pfx）での重なり。pfx が異なれば接頭辞の状態で
+    // 区別されるので許す。`Any` はすべての接頭辞状態と重なりうる。
+    let pfx_disjoint = |a: PfxSel, b: PfxSel| a != PfxSel::Any && b != PfxSel::Any && a != b;
+    for map in &model.maps {
+        let insns: Vec<(u8, &crate::model::MapInsn)> = map
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                MapItem::Insn(b, mi) => Some((*b, mi)),
+                _ => None,
+            })
+            .collect();
+        for (i, (ba, a)) in insns.iter().enumerate() {
+            for (bb, b) in insns.iter().skip(i + 1) {
+                if ba != bb || a.group != b.group || pfx_disjoint(a.pfx, b.pfx) {
+                    continue;
+                }
+                if !a.when.maybe_both_true(&b.when) {
+                    continue;
+                }
+                if when_disjoint_by_conflict(&a.when, &b.when, &conflicts) {
+                    continue;
+                }
+                errors.push(ValidationError::Ambiguous {
+                    first: a.name.clone(),
+                    second: b.name.clone(),
+                });
+            }
+        }
+    }
 }
 
 /// `where` 句の組が互いに排他かどうか。同一フィールドへの矛盾があれば真。
