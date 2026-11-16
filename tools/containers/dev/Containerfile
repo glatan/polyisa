@@ -53,7 +53,7 @@ RUN for tool in clang clang++ llvm-mc llvm-objdump llvm-mca ld.lld; do \
     done
 
 # Rust ツールチェーン（台帳 TOOL-RUST に対応）。
-ARG RUST_VERSION=1.99.1
+ARG RUST_VERSION=1.100.0
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
     PATH=/usr/local/cargo/bin:/opt/sde:/opt/xed/bin:$PATH
