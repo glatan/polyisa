@@ -285,6 +285,7 @@ pub fn sys_msgget(env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
 
 pub fn sys_munmap(env: &mut BareEnv, _cx: &SysCtx) -> Option<TrapOutcome> {
     // munmap(addr, len)。試作では写像解除せず 0 を返す.
+    // Gap: GAP-0034
     set64(env, Gpr(0), 0);
     Some(TrapOutcome::Handled)
 }
@@ -2705,6 +2706,8 @@ pub fn find_free_run(env: &BareEnv, start: u64, count: u64) -> Option<u64> {
     None
 }
 pub fn sys_brk(heap_end: &mut u64, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // ブレークは要求値ではなくページ整列した末尾で記録・返却する。
+    // Gap: GAP-0034
     use polyisa_mem::{PAGE_SIZE, Perms, VirtAddr};
     let addr = get64(env, cx.r_a);
     // 未初期化の非常口：像末尾を知らないため要求値を切り上げて使う。
@@ -2748,7 +2751,7 @@ pub fn sys_brk(heap_end: &mut u64, env: &mut BareEnv, cx: &SysCtx) -> Option<Tra
     set64(env, Gpr(0), *heap_end);
     Some(TrapOutcome::Handled)
 }
-pub fn sys_mmap(heap_end: &mut u64, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+pub fn sys_mmap(mmap_base: &mut u64, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     // mmap(addr, len, prot, flags, fd, offset)。匿名のみ受け付ける.
     // ファイル-backed は未対応のため EINVAL.
     // prot は寛容に RW で写像する (PROT_NONE 予約後の mprotect 前でも動くため).
@@ -2797,38 +2800,21 @@ pub fn sys_mmap(heap_end: &mut u64, env: &mut BareEnv, cx: &SysCtx) -> Option<Tr
             set64(env, Gpr(0), cx.neg(ENOMEM));
             return Some(TrapOutcome::Handled);
         }
-        // heap_end より後ろに伸ばしたら追随する (brk との衝突回避).
-        let grown = (addr + aligned_len).next_multiple_of(PAGE_SIZE);
-        if *heap_end == 0 || grown > *heap_end {
-            *heap_end = grown;
-        }
+        // MAP_FIXED は明示番地なので割り当て基底は動かさない。
+        // brk のブレークとも独立している。
         set64(env, Gpr(0), addr);
         return Some(TrapOutcome::Handled);
     }
     if addr == 0 {
-        if *heap_end == 0 {
-            (*heap_end) = 0x6000_0000;
-        }
-        // 縮小で残った写像を上書きしないよう空きを探す.
-        let Some(base) = find_free_run(env, *heap_end, count) else {
+        let Some(base) = mmap_alloc(mmap_base, env, count, aligned_len) else {
             set64(env, Gpr(0), cx.neg(ENOMEM));
             return Some(TrapOutcome::Handled);
         };
-        if env
-            .backend
-            .mem
-            .map(VirtAddr(base), count, Perms::RW)
-            .is_err()
-        {
-            set64(env, Gpr(0), cx.neg(ENOMEM));
-            return Some(TrapOutcome::Handled);
-        }
-        (*heap_end) = base + aligned_len;
         set64(env, Gpr(0), base);
         return Some(TrapOutcome::Handled);
     }
     // ヒント付き: 範囲全体が空きのときだけ要求番地に写像し、
-    // 占有があれば heap_end から first-fit で取る (上書きしない).
+    // 占有があれば mmap_base から first-fit で取る (上書きしない).
     let hint = addr & !(PAGE_SIZE - 1);
     let hint_free = {
         use polyisa_mem::PageNo;
@@ -2849,32 +2835,40 @@ pub fn sys_mmap(heap_end: &mut u64, env: &mut BareEnv, cx: &SysCtx) -> Option<Tr
             .map(VirtAddr(hint), count, Perms::RW)
             .is_ok()
     {
-        let grown = (hint + aligned_len).next_multiple_of(PAGE_SIZE);
-        if *heap_end == 0 || grown > *heap_end {
-            *heap_end = grown;
-        }
         set64(env, Gpr(0), hint);
         return Some(TrapOutcome::Handled);
     }
-    if *heap_end == 0 {
-        (*heap_end) = 0x6000_0000;
-    }
-    let Some(base) = find_free_run(env, *heap_end, count) else {
+    let Some(base) = mmap_alloc(mmap_base, env, count, aligned_len) else {
         set64(env, Gpr(0), cx.neg(ENOMEM));
         return Some(TrapOutcome::Handled);
     };
-    if env
-        .backend
-        .mem
-        .map(VirtAddr(base), count, Perms::RW)
-        .is_err()
-    {
-        set64(env, Gpr(0), cx.neg(ENOMEM));
-        return Some(TrapOutcome::Handled);
-    }
-    (*heap_end) = base + aligned_len;
     set64(env, Gpr(0), base);
     Some(TrapOutcome::Handled)
+}
+
+/// 匿名 mmap の割り当て。`mmap_base` から空きを探して写像し、
+/// 基底を進めて割り当てた番地を返す。失敗は None.
+fn mmap_alloc(mmap_base: &mut u64, env: &mut BareEnv, count: u64, aligned_len: u64) -> Option<u64> {
+    use polyisa_mem::{Perms, VirtAddr};
+    if *mmap_base == 0 {
+        // 実 Linux の TASK_UNMAPPED_BASE 相当。brk ヒープとは別空間から
+        // 昇順に取る。空間の幅に応じて番地を選ぶ。
+        *mmap_base = if env.backend.addr_mask == u64::MAX {
+            0x4000_0000_0000
+        } else {
+            0x4000_0000
+        };
+    }
+    let base = find_free_run(env, *mmap_base, count)?;
+    // ゲストのアドレス空間に収まる割り当てだけを返す。
+    // addr_mask の外側は mem 上は空きでもゲストから到達できない。
+    let limit = env.backend.addr_mask.wrapping_add(1);
+    if limit != 0 && (base >= limit || aligned_len > limit - base) {
+        return None;
+    }
+    env.backend.mem.map(VirtAddr(base), count, Perms::RW).ok()?;
+    *mmap_base = base + aligned_len;
+    Some(base)
 }
 
 /// eip レジスタの読み出し。FS/GS ベースは `CpuState` のレジスタなので、

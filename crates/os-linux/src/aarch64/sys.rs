@@ -551,6 +551,9 @@ impl Linux {
     }
 
     /// brk。0 なら現在値を返す。像の末尾は `init_brk` で受ける。
+    /// 既存写像の確認なしに `map` で上書きするため、ヒープ成長域に
+    /// 先行する mmap 写像があると黙って潰す。
+    // Gap: GAP-0034
     fn do_brk(&mut self, env: &mut BareEnv, addr: u64) -> u64 {
         if addr == 0 {
             return self.heap_end;

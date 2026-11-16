@@ -44,6 +44,11 @@ pub struct Linux {
     /// プログラムブレーク（ヒープ末尾）。0 は未初期化。
     /// `run_image_x86_64` がロード後に像末尾へ進める。
     heap_end: u64,
+    /// 匿名 mmap の割り当て基底。0 は未初期化。
+    /// brk のヒープとは別の高アドレス領域から昇順に取る（実 Linux で
+    /// ヒープと mmap 領域が別空間なのと同じ分離）。heap_end と共有すると
+    /// brk の縮小で割り当て起点がヒープ内に戻り、領域が交差する。
+    mmap_base: u64,
     /// robust futex リスト先頭。set_robust_list で記録する。
     /// 終了時の書き戻しは未対応のため、値の保持のみ行う。
     robust_head: u64,
@@ -518,6 +523,7 @@ impl Linux {
             ioprio_known: self.ioprio_known,
             is64: self.is64,
             heap_end: self.heap_end,
+            mmap_base: self.mmap_base,
             robust_head: self.robust_head,
             rseq_addr: self.rseq_addr,
             exe_path: self.exe_path.clone(),
@@ -1868,7 +1874,7 @@ fn sys_exit_group(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<Tra
 
 fn sys_mmap(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
-    crate::x86::sys_mmap(&mut sys.heap_end, env, cx)
+    crate::x86::sys_mmap(&mut sys.mmap_base, env, cx)
 }
 
 fn sys_set_tid_address(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
@@ -3348,6 +3354,8 @@ fn install_exec(
     env.backend
         .set(polyisa_guest_x86::sem::eip_ref(), ehdr.entry as u32);
     sys.init_brk(image_end);
+    // アドレス空間を置き換えたので mmap の割り当て基底も初期に戻す。
+    sys.mmap_base = 0;
     sys.exe_path = path.to_string();
     env.backend.set(polyisa_guest_x86::sem::fs_base_ref(), 0);
     Ok(())
@@ -3417,10 +3425,21 @@ impl TrapHandler for Linux {
         } else {
             X86_32_SYSCALLS
         };
+        let trace = std::env::var_os("POLYISA_X86_SYSCALLS").is_some();
+        if trace {
+            let args: Vec<u64> = [cx.r_a, cx.r_b, cx.r_c, cx.r_d, cx.r_e, cx.r_f]
+                .iter()
+                .map(|r| get64(env, *r))
+                .collect();
+            eprintln!("sys {}({}) args={args:x?}", nr, name.unwrap_or("?"));
+        }
         if let Some(name) = name
             && let Some((_, handler)) = table.iter().find(|(n, _)| *n == name)
             && let Some(out) = handler(self, env, &cx)
         {
+            if trace {
+                eprintln!("  -> {:#x}", get64(env, Gpr(0)));
+            }
             return out;
         }
         // 未実装は既定で ENOSYS を返して続ける（設計: user-mode.md）。
@@ -3599,7 +3618,7 @@ mod tests {
     fn mmap_anonymous_returns_addr() {
         use crate::x86_64 as abi;
         let mut sys = Linux::x86_64();
-        sys.heap_end = 0x6000_0000;
+        sys.mmap_base = 0x6000_0000;
         let mut env = bare();
         // mmap(NULL, 0x1000, PROT_READ|WRITE, MAP_PRIVATE|ANONYMOUS, -1, 0).
         set64(&mut env, Gpr(0), abi::MMAP);
@@ -3624,7 +3643,7 @@ mod tests {
     fn mmap_null_skips_mapped() {
         use crate::x86_64 as abi;
         let mut sys = Linux::x86_64();
-        sys.heap_end = 0x6000_0000;
+        sys.mmap_base = 0x6000_0000;
         let mut env = bare();
         // 先に 0x60000000 を写像して内容を書く（縮小で残った写像を模す）。
         env.backend
@@ -3649,6 +3668,90 @@ mod tests {
             .read(VirtAddr(0x6000_0000), &mut back, data_access())
             .unwrap();
         assert_eq!(&back, b"hi");
+    }
+
+    #[test]
+    fn mmap_anonymous_stays_clear_of_brk() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        sys.init_brk(0x1234);
+        let mut env = bare();
+        // brk でヒープを伸ばしても mmap 基底には触れない。
+        set64(&mut env, Gpr(0), abi::BRK);
+        set64(&mut env, Gpr(7), 0x4000);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(sys.heap_end, 0x4000);
+        // mmap(NULL, ...) はヒープ末尾ではなく mmap 領域から取る。
+        set64(&mut env, Gpr(0), abi::MMAP);
+        set64(&mut env, Gpr(7), 0);
+        set64(&mut env, Gpr(6), 0x2000);
+        set64(&mut env, Gpr(2), 3);
+        set64(&mut env, Gpr(10), 0x22);
+        set64(&mut env, Gpr(8), 0xffff_ffff_ffff_ffff);
+        set64(&mut env, Gpr(9), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0x4000_0000_0000);
+        // 2 回目はその続き。ヒープ領域には割り当てない。
+        set64(&mut env, Gpr(0), abi::MMAP);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0x4000_0000_2000);
+        // mmap はブレークを動かさない。brk 側も mmap 基底を動かさない。
+        assert_eq!(sys.heap_end, 0x4000);
+        assert_eq!(sys.mmap_base, 0x4000_0000_4000);
+    }
+
+    #[test]
+    fn mmap_fixed_and_hint_leave_cursor() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        sys.init_brk(0x1234);
+        let mut env = bare();
+        // MAP_FIXED は要求番地に写像し、割り当て基底は動かさない。
+        set64(&mut env, Gpr(0), abi::MMAP);
+        set64(&mut env, Gpr(7), 0x7000_0000);
+        set64(&mut env, Gpr(6), 0x1000);
+        set64(&mut env, Gpr(2), 3);
+        set64(&mut env, Gpr(10), 0x32);
+        set64(&mut env, Gpr(8), 0xffff_ffff_ffff_ffff);
+        set64(&mut env, Gpr(9), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0x7000_0000);
+        assert_eq!(sys.mmap_base, 0);
+        // ヒント付き（FIXED なし）も同様。次の mmap(NULL) は基底から取る。
+        set64(&mut env, Gpr(0), abi::MMAP);
+        set64(&mut env, Gpr(7), 0x8000_0000);
+        set64(&mut env, Gpr(10), 0x22);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0x8000_0000);
+        assert_eq!(sys.mmap_base, 0);
+        set64(&mut env, Gpr(0), abi::MMAP);
+        set64(&mut env, Gpr(7), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0x4000_0000_0000);
+    }
+
+    #[test]
+    fn mmap_anonymous_stays_in_guest_space() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        // 32 ビット空間（i386）では割り当て基底も空間内に取る。
+        env.backend.addr_mask = 0xffff_ffff;
+        set64(&mut env, Gpr(0), abi::MMAP);
+        set64(&mut env, Gpr(7), 0);
+        set64(&mut env, Gpr(6), 0x1000);
+        set64(&mut env, Gpr(2), 3);
+        set64(&mut env, Gpr(10), 0x22);
+        set64(&mut env, Gpr(8), 0xffff_ffff_ffff_ffff);
+        set64(&mut env, Gpr(9), 0);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0x4000_0000);
+        // 空間の末尾を跨ぐ割り当ては ENOMEM。
+        sys.mmap_base = 0xffff_f000;
+        set64(&mut env, Gpr(0), abi::MMAP);
+        set64(&mut env, Gpr(6), 0x2000);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(ENOMEM));
     }
 
     #[test]
