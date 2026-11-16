@@ -1081,3 +1081,294 @@ pub fn int_n<B: Backend>(b: &mut B, eip: u32, n: u8) -> Flow<B> {
         in_delay_slot: false,
     }))
 }
+
+// ---- 追加の幅汎用命令 ----
+
+/// CF/OF を同じ値に更新し、他のフラグは保存する（IMUL: SZPA は未定義）。
+fn set_cf_of<B: Backend>(b: &mut B, ovf: B::B) {
+    let old: B::V<W32> = b.get(eflags_ref());
+    let m = sem::FLAG_CF | sem::FLAG_OF;
+    let nm = b.konst::<W32>(!m);
+    let cleared = b.and::<W32>(old, nm);
+    let mv = b.konst::<W32>(m);
+    let z0 = b.konst::<W32>(0);
+    let on = b.select::<W32>(ovf, mv, z0);
+    let efl = b.or::<W32>(cleared, on);
+    b.set(eflags_ref(), efl);
+}
+
+fn imul3_w<B: Backend, W: Hw>(
+    b: &mut B,
+    g: Gpr,
+    ea: &Rm<B::V<W64>>,
+    d: &MapDec,
+    imm: i64,
+) -> Flow<B> {
+    let x = rd_w::<B, W>(b, ea, d)?;
+    let y = b.konst::<W>(W::from_u128(imm as u64 as u128));
+    let lo = b.mul::<W>(x, y);
+    let hi = b.mulh::<W>(x, y);
+    let sh = b.konst::<W>(W::from_u128(u128::from(W::BITS - 1)));
+    let expect = b.shr_a::<W>(lo, sh);
+    let ovf = b.cmp::<W>(Cmp::Ne, hi, expect);
+    W::put(b, g, d, lo);
+    set_cf_of(b, ovf);
+    Ok(())
+}
+
+fn imul2_w<B: Backend, W: Hw>(b: &mut B, g: Gpr, ea: &Rm<B::V<W64>>, d: &MapDec) -> Flow<B> {
+    let x = W::get(b, g, d);
+    let y = rd_w::<B, W>(b, ea, d)?;
+    let lo = b.mul::<W>(x, y);
+    let hi = b.mulh::<W>(x, y);
+    let sh = b.konst::<W>(W::from_u128(u128::from(W::BITS - 1)));
+    let expect = b.shr_a::<W>(lo, sh);
+    let ovf = b.cmp::<W>(Cmp::Ne, hi, expect);
+    W::put(b, g, d, lo);
+    set_cf_of(b, ovf);
+    Ok(())
+}
+
+/// IMUL Gv, Ev（2 被演算子形）。
+pub fn imul2<B: Backend>(b: &mut B, w: u8, g: Gpr, ea: &Rm<B::V<W64>>, d: &MapDec) -> Flow<B> {
+    match w {
+        16 => imul2_w::<B, W16>(b, g, ea, d),
+        64 => imul2_w::<B, W64>(b, g, ea, d),
+        _ => imul2_w::<B, W32>(b, g, ea, d),
+    }
+}
+
+/// IMUL Gv, Ev, Iz/Ib（3 被演算子形）。CF/OF=積が幅に収まらないとき 1。
+pub fn imul3<B: Backend>(
+    b: &mut B,
+    w: u8,
+    g: Gpr,
+    ea: &Rm<B::V<W64>>,
+    d: &MapDec,
+    imm: i64,
+) -> Flow<B> {
+    match w {
+        16 => imul3_w::<B, W16>(b, g, ea, d, imm),
+        64 => imul3_w::<B, W64>(b, g, ea, d, imm),
+        _ => imul3_w::<B, W32>(b, g, ea, d, imm),
+    }
+}
+
+fn cmpxchg_w<B: Backend, W: Hw>(b: &mut B, ea: &Rm<B::V<W64>>, d: &MapDec, src: Gpr) -> Flow<B> {
+    let t = rd_w::<B, W>(b, ea, d)?;
+    let acc = W::get(b, Gpr(0), d);
+    let v = b.sub::<W>(acc, t);
+    update_sub_flags(b, acc, t, v);
+    let zero = b.konst::<W>(W::from_u128(0));
+    let eq = b.cmp::<W>(Cmp::Eq, v, zero);
+    let new_acc = b.select::<W>(eq, acc, t);
+    W::put(b, Gpr(0), d, new_acc);
+    let sv = W::get(b, src, d);
+    b.if_then(eq, |b| wr_w::<B, W>(b, ea, d, sv))?;
+    Ok(())
+}
+
+/// CMPXCHG r/m, r（AL/AX/EAX/RAX と比較）。
+pub fn cmpxchg<B: Backend>(b: &mut B, w: u8, ea: &Rm<B::V<W64>>, d: &MapDec, src: Gpr) -> Flow<B> {
+    match w {
+        8 => cmpxchg_w::<B, W8>(b, ea, d, src),
+        16 => cmpxchg_w::<B, W16>(b, ea, d, src),
+        64 => cmpxchg_w::<B, W64>(b, ea, d, src),
+        _ => cmpxchg_w::<B, W32>(b, ea, d, src),
+    }
+}
+
+fn xadd_w<B: Backend, W: Hw>(b: &mut B, ea: &Rm<B::V<W64>>, d: &MapDec, src: Gpr) -> Flow<B> {
+    let t = rd_w::<B, W>(b, ea, d)?;
+    let s = W::get(b, src, d);
+    let v = b.add::<W>(t, s);
+    update_add_flags(b, t, s, v);
+    wr_w::<B, W>(b, ea, d, v)?;
+    W::put(b, src, d, t);
+    Ok(())
+}
+
+/// XADD r/m, r（交換しつつ加算）。
+pub fn xadd<B: Backend>(b: &mut B, w: u8, ea: &Rm<B::V<W64>>, d: &MapDec, src: Gpr) -> Flow<B> {
+    match w {
+        8 => xadd_w::<B, W8>(b, ea, d, src),
+        16 => xadd_w::<B, W16>(b, ea, d, src),
+        64 => xadd_w::<B, W64>(b, ea, d, src),
+        _ => xadd_w::<B, W32>(b, ea, d, src),
+    }
+}
+
+fn bsfx_w<B: Backend, W: Hw>(
+    b: &mut B,
+    msb: bool,
+    g: Gpr,
+    ea: &Rm<B::V<W64>>,
+    d: &MapDec,
+) -> Flow<B> {
+    let v = rd_w::<B, W>(b, ea, d)?;
+    let zero = b.konst::<W>(W::from_u128(0));
+    let one = b.konst::<W>(W::from_u128(1));
+    let is_zero = b.cmp::<W>(Cmp::Eq, v, zero);
+    let sentinel = b.konst::<W>(W::from_u128(u128::from(W::BITS)));
+    let mut acc = sentinel;
+    for i in 0..W::BITS {
+        let bit = b.konst::<W>(W::from_u128(1u128 << i));
+        let t = b.and::<W>(v, bit);
+        let set = b.cmp::<W>(Cmp::Ne, t, zero);
+        let idx = b.konst::<W>(W::from_u128(u128::from(i)));
+        acc = if msb {
+            b.select::<W>(set, idx, acc)
+        } else {
+            let undecided = b.cmp::<W>(Cmp::Eq, acc, sentinel);
+            let s_n = b.select::<W>(set, one, zero);
+            let u_n = b.select::<W>(undecided, one, zero);
+            let both = b.and::<W>(s_n, u_n);
+            let take = b.cmp::<W>(Cmp::Ne, both, zero);
+            b.select::<W>(take, idx, acc)
+        };
+    }
+    let dst = b.select::<W>(is_zero, zero, acc);
+    W::put(b, g, d, dst);
+    let old: B::V<W32> = b.get(eflags_ref());
+    let nzf = b.konst::<W32>(!sem::FLAG_ZF);
+    let cleared = b.and::<W32>(old, nzf);
+    let zon = b.konst::<W32>(sem::FLAG_ZF);
+    let zoff = b.konst::<W32>(0);
+    let zf = b.select::<W32>(is_zero, zon, zoff);
+    let efl = b.or::<W32>(cleared, zf);
+    b.set(eflags_ref(), efl);
+    Ok(())
+}
+
+/// BSF/BSR r, r/m（msb=true で BSR）。
+pub fn bsfx<B: Backend>(
+    b: &mut B,
+    w: u8,
+    msb: bool,
+    g: Gpr,
+    ea: &Rm<B::V<W64>>,
+    d: &MapDec,
+) -> Flow<B> {
+    match w {
+        16 => bsfx_w::<B, W16>(b, msb, g, ea, d),
+        64 => bsfx_w::<B, W64>(b, msb, g, ea, d),
+        _ => bsfx_w::<B, W32>(b, msb, g, ea, d),
+    }
+}
+
+/// LOOPNE/LOOPE/LOOP/JcXZ。カウンタ幅はアドレスサイズ（CX/ECX/RCX）に従う。
+/// kind: 0=LOOPNE 1=LOOPE 2=LOOP 3=JcXZ。
+pub fn loopcc<B: Backend>(
+    b: &mut B,
+    kind: u8,
+    eip: u32,
+    len: u32,
+    rel: i64,
+    d: &MapDec,
+) -> Flow<B> {
+    let m: u64 = match d.asize {
+        16 => 0xffff,
+        32 => 0xffff_ffff,
+        _ => u64::MAX,
+    };
+    let c0 = sem::read64(b, Gpr(1));
+    let mm = b.konst::<W64>(m);
+    let c0m = b.and::<W64>(c0, mm);
+    let one = b.konst::<W64>(1);
+    let zero64 = b.konst::<W64>(0);
+    let dec = b.sub::<W64>(c0m, one);
+    let c1 = b.and::<W64>(dec, mm);
+    if kind != 3 {
+        let nmm = b.konst::<W64>(!m);
+        let rest = b.and::<W64>(c0, nmm);
+        let nv2 = b.or::<W64>(rest, c1);
+        sem::write64(b, Gpr(1), nv2);
+    }
+    let nz = b.cmp::<W64>(Cmp::Ne, c1, zero64);
+    let zf = read_zf(b);
+    let zv = b.select::<W64>(zf, one, zero64);
+    let nv = b.select::<W64>(nz, one, zero64);
+    let take_v = match kind {
+        0 => {
+            let zinv = b.xor::<W64>(zv, one);
+            b.and::<W64>(nv, zinv)
+        }
+        1 => b.and::<W64>(nv, zv),
+        2 => nv,
+        _ => {
+            let is_z = b.cmp::<W64>(Cmp::Eq, c0m, zero64);
+            b.select::<W64>(is_z, one, zero64)
+        }
+    };
+    let take = b.cmp::<W64>(Cmp::Ne, take_v, zero64);
+    jcc_take(b, eip, len, rel, take)
+}
+
+/// ENTER imm16, imm8（レベルは下位 5 ビット）。非 64 ビットモードのみ。
+pub fn enter<B: Backend>(b: &mut B, w: u8, frame: u64, level: u64) -> Flow<B> {
+    let lvl = level & 31;
+    let m: u64 = if w == 16 { 0xffff } else { 0xffff_ffff };
+    let mm = b.konst::<W64>(m);
+    let bp = sem::read64(b, Gpr(5));
+    let bp = b.and::<W64>(bp, mm);
+    push_v(b, w, bp)?;
+    let sp0 = sem::read64(b, Gpr(4));
+    let sp0 = b.and::<W64>(sp0, mm);
+    let bytes = b.konst::<W64>(u64::from(w / 8));
+    if lvl > 0 {
+        let mut p = sp0;
+        for _ in 1..lvl {
+            let pv = b.sub::<W64>(p, bytes);
+            p = b.and::<W64>(pv, mm);
+            let v = b.load::<W64>(p, sem::DATA_READ)?;
+            let vm = b.and::<W64>(v, mm);
+            push_v(b, w, vm)?;
+        }
+        push_v(b, w, sp0)?;
+    }
+    let nmm = b.konst::<W64>(!m);
+    let rbp = sem::read64(b, Gpr(5));
+    let bhi = b.and::<W64>(rbp, nmm);
+    let nbp = b.or::<W64>(bhi, sp0);
+    sem::write64(b, Gpr(5), nbp);
+    let cur = sem::read64(b, Gpr(4));
+    let fv = b.konst::<W64>(frame & m);
+    let sub = b.sub::<W64>(cur, fv);
+    let lo = b.and::<W64>(sub, mm);
+    let shi = b.and::<W64>(cur, nmm);
+    let nsp = b.or::<W64>(shi, lo);
+    sem::write64(b, Gpr(4), nsp);
+    Ok(())
+}
+
+/// XLAT: AL = [seg:BX/EBX/RBX + AL]（asize 幅のベース）。
+pub fn xlat<B: Backend>(b: &mut B, d: &MapDec, seg: u64) -> Flow<B> {
+    let bx = sem::read64(b, Gpr(3));
+    let base = match d.asize {
+        16 => {
+            let m16 = b.konst::<W64>(0xffff);
+            b.and::<W64>(bx, m16)
+        }
+        32 => {
+            let m32 = b.konst::<W64>(0xffff_ffff);
+            b.and::<W64>(bx, m32)
+        }
+        _ => bx,
+    };
+    let al = sem::read8(b, Gpr(0), false);
+    let al64 = b.zext::<W8, W64>(al);
+    let addr = b.add::<W64>(base, al64);
+    let sb = b.konst::<W64>(seg);
+    let addr = b.add::<W64>(addr, sb);
+    let v = b.load::<W8>(addr, sem::DATA_READ)?;
+    sem::write8(b, Gpr(0), false, v);
+    Ok(())
+}
+
+/// RDTSC: EDX:EAX = 仮想タイムスタンプ。現段階は決定論的な 0（時間モデル未実装）。
+pub fn rdtsc<B: Backend>(b: &mut B) -> Flow<B> {
+    let z = b.konst::<W32>(0);
+    decode::gwr32(b, Gpr(0), z);
+    decode::gwr32(b, Gpr(2), z);
+    Ok(())
+}

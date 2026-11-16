@@ -179,6 +179,22 @@ pub fn build_maps(m: &mut Model) {
         }
     }
 
+    // 0x82 は 0x80 のエイリアス（非64ビットモードのみ）。同名で登録する。
+    for (gi, name) in grp1.iter().enumerate() {
+        primary.push(MapItem::Insn(
+            0x82,
+            mi(
+                &format!("{name}_eb_ib"),
+                &[Ea(B8), Imm(B8)],
+                Some(gi as u8),
+                PfxSel::Any,
+                w("!m64"),
+                "{0} {e}, {i}",
+                "alu",
+            ),
+        ));
+    }
+
     // MOV 系。
     primary.extend([
         MapItem::Insn(0x84, n("test_eb_gb", &[Ea(B8), Reg(B8)], "test {e}, {g}", "alu")),
@@ -196,6 +212,31 @@ pub fn build_maps(m: &mut Model) {
             0x8F,
             g("pop_ev", 0, &[Ea(V)], "pop {e}", "load"),
         ),
+    ]);
+
+    // 40-4F: INC/DEC r32。64ビットモードでは REX 接頭辞なので非64のみ。
+    for k in 0..8u8 {
+        primary.push(MapItem::Insn(
+            0x40 + k,
+            mi("inc_rv", &[InOp(V)], None, PfxSel::Any, w("!m64"), "inc {r}", "alu"),
+        ));
+        primary.push(MapItem::Insn(
+            0x48 + k,
+            mi("dec_rv", &[InOp(V)], None, PfxSel::Any, w("!m64"), "dec {r}", "alu"),
+        ));
+    }
+
+    // 60/61: PUSHA/POPA（非64ビットモードのみ）。
+    primary.extend([
+        MapItem::Insn(
+            0x60,
+            mi("pusha", &[], None, PfxSel::Any, w("!m64"), "pusha", "store"),
+        ),
+        MapItem::Insn(
+            0x61,
+            mi("popa", &[], None, PfxSel::Any, w("!m64"), "popa", "load"),
+        ),
+        MapItem::Insn(0x9B, n("fwait", &[], "fwait", "system")),
     ]);
 
     // 50-5F: PUSH/POP r。64ビットモードでの既定幅は 64（接頭辞 66 で 16）。
@@ -412,6 +453,31 @@ pub fn build_maps(m: &mut Model) {
             g("nop_ev", 0, &[Ea(V)], "nop {e}", "alu"),
         ),
         MapItem::Insn(0x31, n("rdtsc", &[], "rdtsc", "system")),
+        MapItem::Insn(
+            0xB0,
+            n("cmpxchg_eb_gb", &[Ea(B8), Reg(B8)], "cmpxchg {e}, {g}", "alu"),
+        ),
+        MapItem::Insn(
+            0xB1,
+            n("cmpxchg_ev_gv", &[Ea(V), Reg(V)], "cmpxchg {e}, {g}", "alu"),
+        ),
+        MapItem::Insn(0xB9, n("ud1", &[Ea(V)], "ud1 {e}", "system")),
+        MapItem::Insn(
+            0xBC,
+            n("bsf_gv_ev", &[Reg(V), Ea(V)], "bsf {g}, {e}", "alu"),
+        ),
+        MapItem::Insn(
+            0xBD,
+            n("bsr_gv_ev", &[Reg(V), Ea(V)], "bsr {g}, {e}", "alu"),
+        ),
+        MapItem::Insn(
+            0xC0,
+            n("xadd_eb_gb", &[Ea(B8), Reg(B8)], "xadd {e}, {g}", "alu"),
+        ),
+        MapItem::Insn(
+            0xC1,
+            n("xadd_ev_gv", &[Ea(V), Reg(V)], "xadd {e}, {g}", "alu"),
+        ),
         MapItem::Insn(0x34, n("sysenter", &[], "sysenter", "system")),
         MapItem::Insn(0x35, n("sysexit", &[], "sysexit", "system")),
         MapItem::Insn(0xA2, n("cpuid", &[], "cpuid", "system")),
@@ -437,6 +503,23 @@ pub fn build_maps(m: &mut Model) {
         ));
     }
     // BSWAP は 0F C8-CF の 8 個のみ。
+    // ヒント NOP: 0F 0D（prefetch 系）と 0F 18-1D + 0F 1F /1-7（全グループ）。
+    // 1E は F3 が ENDBR のため今回は対象外、1F /0 は既に登録済み。
+    for grp in 0..8u8 {
+        m0f.push(MapItem::Insn(0x0D, g("nop_ev", grp, &[Ea(V)], "nop {e}", "alu")));
+        for byte in [0x18u8, 0x19, 0x1A, 0x1B, 0x1C, 0x1D] {
+            m0f.push(MapItem::Insn(
+                byte,
+                g("nop_ev", grp, &[Ea(V)], "nop {e}", "alu"),
+            ));
+        }
+        if grp > 0 {
+            m0f.push(MapItem::Insn(
+                0x1F,
+                g("nop_ev", grp, &[Ea(V)], "nop {e}", "alu"),
+            ));
+        }
+    }
     for k in 0..8u8 {
         m0f.push(MapItem::Insn(
             0xC8 + k,

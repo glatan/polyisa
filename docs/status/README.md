@@ -104,7 +104,7 @@
 | s390 | 250 | 250 | z900、z990、z9ec、z10ec、z196、zec12、z13、generic、esa390 | [isa-s390.md](isa-s390.md) |
 | sparc | 10 | 10 | generic | [isa-sparc.md](isa-sparc.md) |
 | wasm | 8 | 8 | generic | [isa-wasm.md](isa-wasm.md) |
-| x86 | 1199 | 198 | generic32 | [isa-x86.md](isa-x86.md) |
+| x86 | 1296 | 202 | generic32 | [isa-x86.md](isa-x86.md) |
 
 ## システムコール
 

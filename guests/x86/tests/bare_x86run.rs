@@ -6391,7 +6391,7 @@ fn run_imul_r64_imm_sib() {
     let lo = env.backend.get(Gpr(1).state()) as u64;
     let hi = env.backend.get(polyisa_guest_x86::sem::hi_ref(Gpr(1))) as u64;
     assert_eq!((hi << 32) | lo, 0x1E_8480);
-    assert_eq!(env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 1, 1);
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 1, 0);
 }
 
 #[test]
@@ -7008,7 +7008,7 @@ fn run_imul_eax_rip_imm32() {
     assert_eq!(out, Outcome::StepLimit { pc: 0x100A });
     let eax: u64 = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(0));
     assert_eq!(eax, 15);
-    assert_eq!(env.backend.get(polyisa_guest_x86::sem::eflags_ref()), 1);
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::eflags_ref()), 0);
     let mut nb = [0u8; 1];
     env.backend
         .mem
@@ -7232,7 +7232,7 @@ fn run_imul_eax_rdx_scale_disp32() {
     assert_eq!(eax, 15);
     let rdx: u64 = polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(2));
     assert_eq!(rdx, 1);
-    assert_eq!(env.backend.get(polyisa_guest_x86::sem::eflags_ref()), 1);
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::eflags_ref()), 0);
     let mut nb = [0u8; 1];
     env.backend
         .mem
@@ -7975,7 +7975,7 @@ fn run_imul_r64_imm8_rsp_nodisp() {
         polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(5)),
         144
     );
-    assert_eq!(env.backend.get(polyisa_guest_x86::sem::eflags_ref()), 1);
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::eflags_ref()), 0);
 }
 
 #[test]
@@ -8163,7 +8163,7 @@ fn run_imul_r64_imm8_rsp() {
         polyisa_guest_x86::sem::read64(&mut env.backend, Gpr(0)),
         176
     );
-    assert_eq!(env.backend.get(polyisa_guest_x86::sem::eflags_ref()), 1);
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::eflags_ref()), 0);
 }
 
 #[test]
@@ -8283,7 +8283,7 @@ fn run_imul_r32_imm_mem8() {
     let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 1, true);
     assert_eq!(out, Outcome::StepLimit { pc: 0x1007 });
     assert_eq!(env.backend.get(Gpr(0).state()), 2000);
-    assert_eq!(env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 1, 1);
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 1, 0);
 }
 
 #[test]
@@ -13818,4 +13818,238 @@ fn run_cmp_si_dx_sets_flags() {
     assert_eq!(run(0x1234, 0x0034) & 0x41, 0);
     assert_eq!(run(0x0034, 0x0034) & 0x41, 0x40);
     assert_eq!(run(0x0010, 0x0020) & 1, 1);
+}
+
+// ---- map 経路拡張（段階13 追加分）のスポットテスト ----
+
+/// 32ビットプログラムを exit(ebx) で終わらせる補助。
+fn run32(prog: &[u8], steps: u64) -> (Outcome, BareEnv) {
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 4, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    let mut sys = ExitOne;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, steps, false);
+    (out, env)
+}
+
+#[test]
+fn run_loop_and_jcxz() {
+    // mov ecx,2; loop $ (E2 FE); jcxz +1; int3; mov ebx,7; exit(ebx)。
+    // loop は 2→1 で taken、1→0 で fall。jcxz は ecx=0 で taken。
+    let prog: &[u8] = &[
+        0xB9, 0x02, 0x00, 0x00, 0x00, // mov ecx,2
+        0xE2, 0xFE, // loop -2
+        0xE3, 0x01, // jcxz +1
+        0xCC, // int3（到達しないはず）
+        0xBB, 0x07, 0x00, 0x00, 0x00, // mov ebx,7
+        0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax,1
+        0xCD, 0x80, // int 0x80
+    ];
+    let (out, _) = run32(prog, 100);
+    assert_eq!(out, Outcome::Exit(7));
+}
+
+#[test]
+fn run_loope_loopne() {
+    // loope: ZF=1 かつ ECX!=0 で分岐。loopne: ZF=0 かつ ECX!=0 で分岐。
+    // mov ecx,2; loope $→ ZF=0 なので即 fall。ecx は 1 に減る。
+    // loopne $ → ZF=0 で ecx!=0 → 1 回 taken（ecx=0）、その後 fall。
+    let prog: &[u8] = &[
+        0x31, 0xC0, // xor eax,eax（ZF=1）
+        0x40, // inc eax（ZF=0）
+        0xB9, 0x03, 0x00, 0x00, 0x00, // mov ecx,3
+        0xE1, 0xFE, // loope -2: ZF=0 → 即 fall（ecx→2）
+        0xE0, 0xFE, // loopne -2: ZF=0 かつ ecx!=0 → 1 回 taken → ecx=0 で fall
+        0xBB, 0x09, 0x00, 0x00, 0x00, // mov ebx,9
+        0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax,1
+        0xCD, 0x80, // int 0x80
+    ];
+    let (out, mut env) = run32(prog, 100);
+    assert_eq!(out, Outcome::Exit(9));
+    assert_eq!(env.backend.get(Gpr(1).state()), 0);
+}
+
+#[test]
+fn run_pusha_popa() {
+    // pusha で全レジスタを退避、ebx を潰して popa で復元。
+    let prog: &[u8] = &[
+        0xBB, 0x22, 0x00, 0x00, 0x00, // mov ebx,0x22
+        0x60, // pusha
+        0x31, 0xDB, // xor ebx,ebx
+        0x61, // popa（esp の pop は捨てられる）
+        0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax,1
+        0xCD, 0x80, // int 0x80
+    ];
+    let (out, mut env) = run32(prog, 100);
+    assert_eq!(out, Outcome::Exit(0x22));
+    assert_eq!(env.backend.get(Gpr(4).state()), 0x2000);
+}
+
+#[test]
+fn run_inc_dec_r32() {
+    // 0x40-0x4F の INC/DEC r32（非64ビットモード）。
+    let prog: &[u8] = &[
+        0xB8, 0x05, 0x00, 0x00, 0x00, // mov eax,5
+        0x40, // inc eax
+        0x40, // inc eax
+        0x48, // dec eax → 6
+        0x89, 0xC3, // mov ebx,eax
+        0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax,1
+        0xCD, 0x80, // int 0x80
+    ];
+    let (out, _) = run32(prog, 100);
+    assert_eq!(out, Outcome::Exit(6));
+}
+
+#[test]
+fn run_grp1_82_alias() {
+    // 0x82 は非64ビットモードで 0x80 のエイリアス。add al,5。
+    let prog: &[u8] = &[
+        0x82, 0xC0, 0x05, // add al,5
+        0x88, 0xC3, // mov bl,al
+        0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax,1
+        0xCD, 0x80, // int 0x80
+    ];
+    let (out, _) = run32(prog, 100);
+    assert_eq!(out, Outcome::Exit(5));
+}
+
+#[test]
+fn run_xadd_cmpxchg() {
+    // xadd eax,ebx: eax=12, ebx=5。cmpxchg ebx,ecx: eax(12)!=ebx(5) → eax=5。
+    let prog: &[u8] = &[
+        0xB8, 0x05, 0x00, 0x00, 0x00, // mov eax,5
+        0xBB, 0x07, 0x00, 0x00, 0x00, // mov ebx,7
+        0x0F, 0xC1, 0xD8, // xadd eax,ebx → eax=12, ebx=5
+        0xB9, 0x09, 0x00, 0x00, 0x00, // mov ecx,9
+        0x0F, 0xB1, 0xD9, // cmpxchg ecx,ebx: eax(12)!=ecx(9) → eax←9、ecx 不変
+        0x89, 0xC2, // mov edx,eax → edx=9
+        0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax,1
+        0xCD, 0x80, // int 0x80（ebx=5 のまま）
+    ];
+    let (out, mut env) = run32(prog, 100);
+    assert_eq!(out, Outcome::Exit(5));
+    assert_eq!(env.backend.get(Gpr(1).state()), 9);
+    assert_eq!(env.backend.get(Gpr(2).state()), 9);
+}
+
+#[test]
+fn run_cmpxchg_equal() {
+    // eax==dest なら dest=src、ZF=1。
+    let prog: &[u8] = &[
+        0xB8, 0x05, 0x00, 0x00, 0x00, // mov eax,5
+        0xBB, 0x05, 0x00, 0x00, 0x00, // mov ebx,5
+        0xB9, 0x09, 0x00, 0x00, 0x00, // mov ecx,9
+        0x0F, 0xB1, 0xCB, // cmpxchg ebx,ecx: eax==ebx → ebx=ecx=9, ZF=1
+        0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax,1
+        0xCD, 0x80, // int 0x80 → exit(9)
+    ];
+    let (out, mut env) = run32(prog, 100);
+    assert_eq!(out, Outcome::Exit(9));
+    assert_ne!(
+        env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x40,
+        0
+    );
+}
+
+#[test]
+fn run_bsf_bsr() {
+    // bsf=最下位 1 ビット、bsr=最上位 1 ビット。0x80000001 → 0 と 31。
+    let prog: &[u8] = &[
+        0xB9, 0x01, 0x00, 0x00, 0x80, // mov ecx,0x80000001
+        0x0F, 0xBC, 0xC1, // bsf eax,ecx → 0
+        0x89, 0xC6, // mov esi,eax（結果を退避）
+        0x0F, 0xBD, 0xD1, // bsr edx,ecx → 31
+        0x89, 0xD3, // mov ebx,edx
+        0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax,1
+        0xCD, 0x80, // int 0x80 → exit(31)
+    ];
+    let (out, mut env) = run32(prog, 100);
+    assert_eq!(out, Outcome::Exit(31));
+    assert_eq!(env.backend.get(Gpr(6).state()), 0);
+}
+
+#[test]
+fn run_imul_three_and_two() {
+    // 69: imul eax,ebx,7 → 35。6B: imul eax,ebx,3 → 15。0F AF: eax*=ebx → 75。
+    let prog: &[u8] = &[
+        0xBB, 0x05, 0x00, 0x00, 0x00, // mov ebx,5
+        0x69, 0xC3, 0x07, 0x00, 0x00, 0x00, // imul eax,ebx,7
+        0x6B, 0xC3, 0x03, // imul eax,ebx,3
+        0x0F, 0xAF, 0xC3, // imul eax,ebx
+        0x89, 0xC3, // mov ebx,eax
+        0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax,1
+        0xCD, 0x80, // int 0x80 → exit(75)
+    ];
+    let (out, _) = run32(prog, 100);
+    assert_eq!(out, Outcome::Exit(75));
+}
+
+#[test]
+fn run_enter_leave() {
+    // enter 0x10,0: ebp を push、ebp=esp、esp-=0x10。leave で復元。
+    let prog: &[u8] = &[
+        0xBD, 0x34, 0x12, 0x00, 0x00, // mov ebp,0x1234
+        0xC8, 0x10, 0x00, 0x00, // enter 0x10,0
+        0xC9, // leave
+        0x89, 0xEB, // mov ebx,ebp → 0x1234
+        0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax,1
+        0xCD, 0x80, // int 0x80 → exit(0x1234)
+    ];
+    let (out, mut env) = run32(prog, 100);
+    assert_eq!(out, Outcome::Exit(0x1234));
+    assert_eq!(env.backend.get(Gpr(4).state()), 0x2000);
+}
+
+#[test]
+fn run_xlat() {
+    // al=[ebx+al]。テーブルを 0x3000 に置く。
+    let prog: &[u8] = &[
+        0xBB, 0x00, 0x30, 0x00, 0x00, // mov ebx,0x3000
+        0xB0, 0x02, // mov al,2
+        0xD7, // xlat → al=[0x3002]=7
+        0x0F, 0xB6, 0xD8, // movzx ebx,al
+        0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax,1
+        0xCD, 0x80, // int 0x80 → exit(7)
+    ];
+    let (_out, mut env) = run32(prog, 0);
+    env.backend
+        .mem
+        .write(VirtAddr(0x3000), &[9u8, 8, 7, 6])
+        .unwrap();
+    env.backend.set(polyisa_guest_x86::sem::eip_ref(), 0x1000);
+    let mut sys = ExitOne;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, false);
+    assert_eq!(out, Outcome::Exit(7));
+}
+
+#[test]
+fn run_ud1_traps() {
+    // UD1（0F B9）は UD2 と同じく #UD → 未実装として止まる。
+    let prog: &[u8] = &[0x0F, 0xB9, 0xC0];
+    let (out, _) = run32(prog, 10);
+    assert!(matches!(out, Outcome::Unimplemented { .. }));
+}
+
+#[test]
+fn run_jrcxz64() {
+    // 64ビットモードでは JRCXZ が RCX を見る。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    let prog: &[u8] = &[
+        0x48, 0xC7, 0xC1, 0x00, 0x00, 0x00, 0x00, // mov rcx,0
+        0xE3, 0x02, // jrcxz +2 → taken
+        0x0F, 0x0B, // ud2（到達しないはず）
+        0x48, 0xC7, 0xC7, 0x2A, 0x00, 0x00, 0x00, // mov rdi,42
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x0F, 0x05, // syscall → exit(42)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(42));
 }

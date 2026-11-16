@@ -2975,6 +2975,50 @@ fn dispatch_map<B: Backend>(
         Insn::IntIb => sem_ea::int_n(b, eip, d.imm as u8),
         Insn::Syscall => sem::syscall(b, eip),
         Insn::Cpuid => sem::cpuid(b),
+        Insn::ImulGvEv => sem_ea::imul2(b, w, reg, &ea, d),
+        Insn::ImulGvEvIz => sem_ea::imul3(b, w, reg, &ea, d, iz as i64),
+        Insn::ImulGvEvIb => sem_ea::imul3(b, w, reg, &ea, d, ib8 as i64),
+        Insn::IncRv => sem_ea::incdec(b, true, w, &Rm::Reg(decode::op_reg(d)), d),
+        Insn::DecRv => sem_ea::incdec(b, false, w, &Rm::Reg(decode::op_reg(d)), d),
+        Insn::Pusha => {
+            // EAX, ECX, EDX, EBX, 元の ESP, EBP, ESI, EDI の順。
+            for g in 0..4u8 {
+                let v = gr64(b, Gpr(g), w);
+                sem_ea::push_v(b, w, v)?;
+            }
+            let v = gr64(b, Gpr(4), w);
+            sem_ea::push_v(b, w, v)?;
+            for g in 5..8u8 {
+                let v = gr64(b, Gpr(g), w);
+                sem_ea::push_v(b, w, v)?;
+            }
+            Ok(())
+        }
+        Insn::Popa => {
+            // EDI, ESI, EBP, (ESP は捨てる), EBX, EDX, ECX, EAX。
+            for (i, g) in [7u8, 6, 5, 4, 3, 2, 1, 0].iter().enumerate() {
+                let v = sem_ea::pop_v(b, w)?;
+                if i != 3 {
+                    put64(b, Gpr(*g), w, v, d);
+                }
+            }
+            Ok(())
+        }
+        Insn::CmpxchgEbGb => sem_ea::cmpxchg(b, 8, &ea, d, reg),
+        Insn::CmpxchgEvGv => sem_ea::cmpxchg(b, w, &ea, d, reg),
+        Insn::XaddEbGb => sem_ea::xadd(b, 8, &ea, d, reg),
+        Insn::XaddEvGv => sem_ea::xadd(b, w, &ea, d, reg),
+        Insn::BsfGvEv => sem_ea::bsfx(b, w, false, reg, &ea, d),
+        Insn::BsrGvEv => sem_ea::bsfx(b, w, true, reg, &ea, d),
+        Insn::Ud1 => sem_ea::trap(b, eip, 0x06),
+        Insn::LoopneJb => sem_ea::loopcc(b, 0, eip, u32::from(d.len), d.rel, d),
+        Insn::LoopeJb => sem_ea::loopcc(b, 1, eip, u32::from(d.len), d.rel, d),
+        Insn::LoopJb => sem_ea::loopcc(b, 2, eip, u32::from(d.len), d.rel, d),
+        Insn::JcxzJb => sem_ea::loopcc(b, 3, eip, u32::from(d.len), d.rel, d),
+        Insn::EnterIwIb => sem_ea::enter(b, w, d.imm, d.imm2),
+        Insn::Xlat => sem_ea::xlat(b, d, seg),
+        Insn::Rdtsc => sem_ea::rdtsc(b),
+        Insn::Fwait => sem_ea::nop(b),
         _ => return Ok(false),
     };
     r.map(|()| true)
