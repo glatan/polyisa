@@ -125,6 +125,20 @@ pub const TEST_REQUIREMENTS: &[TestBinary] = &[
         binary: "heavy_program_s390",
         needs: &[Req::Tool("clang"), Req::Data(".testdata/bin-distro-s390x")],
     },
+    TestBinary {
+        binary: "heavy_conformance_wasm_spec",
+        needs: &[Req::Data(".testdata/wasm-spec")],
+    },
+    TestBinary {
+        binary: "heavy_diff_wasmtime",
+        needs: &[Req::Tool("wasmtime")],
+    },
+    // wasi-sdk/clang が無い環境ではテスト内の手組モジュールで検証
+    // するため、外部要件は持たない。
+    TestBinary {
+        binary: "heavy_program_wasi",
+        needs: &[],
+    },
 ];
 
 /// コマンドが使えるかを `--version` で調べる。

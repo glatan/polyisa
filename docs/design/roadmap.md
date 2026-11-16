@@ -236,9 +236,9 @@ WebAssembly の本格的な実装と、WASI preview1 の OS パーソナリテ�
 
 | ID | 条件 | 判定 |
 |---|---|---|
-| S12-1 | WebAssembly 仕様のテストスイートが通る（テスト `heavy_conformance_wasm_spec`）。 | 未整備 |
-| S12-2 | wasmtime との実行の差分テストが通る（テスト `heavy_diff_wasmtime`）。 | 未整備 |
-| S12-3 | WASI preview1 を使うプログラムが正しい出力を返す（テスト `heavy_program_wasi`）。 | 未整備 |
+| S12-1 | WebAssembly 仕様のテストスイートが通る（テスト `heavy_conformance_wasm_spec`）。 | テスト：`heavy_conformance_wasm_spec` |
+| S12-2 | wasmtime との実行の差分テストが通る（テスト `heavy_diff_wasmtime`）。 | テスト：`heavy_diff_wasmtime` |
+| S12-3 | WASI preview1 を使うプログラムが正しい出力を返す（テスト `heavy_program_wasi`）。 | テスト：`heavy_program_wasi` |
 
 ### 段階 13：x86 の残り
 

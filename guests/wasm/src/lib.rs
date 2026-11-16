@@ -1,16 +1,36 @@
 // Copyright (c) polyisa contributors
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! WebAssembly 最小のゲスト ISA。段階2の試作であり、スタックマシンとトラップを確かめる。
+//! WebAssembly ゲスト ISA。段階12の本実装。
 //!
-//! 単一関数の整数演算と、制御フレームのない void 関数の検証を持つ。
-//! 線形メモリ・テーブル・グローバル・関数呼び出し・GC は試作に含まない。
-//! プログラムカウンタは func（関数番号）と off（関数内オフセット）の組であり、
-//! 線形メモリの外にあるコードを指す（自己書き換えなし）。
+//! 構成:
+//! - `types`: 値型・参照型・外部型・実行時値の定義。
+//! - `module`: デコード済みモジュールの形。
+//! - `instr`: 命令集合と関数本体バイト列の解読。
+//! - `decode`: バイナリ形式（ヘッダ・セクション・LEB128）の検査つき読み出し。
+//! - `validate`: モジュールと関数本体の検証（付録のスタック型付け）。
+//! - `exec`: ストア・インスタンス化・構造化インタプリタ（専用ループ）。
+//! - `sexpr`: `.wast`/`.wat` 向けの S 式読み出し。
+//! - `wat`: テキスト形式のモジュールをバイナリへ組み立てる。
+//! - `wast`: `.wast` スクリプト（assert_*/invoke/register）の実行。
+//!
+//! `sem`/`CpuState` は段階2の試作の残置で、生成メタデータと裸
+//! バックエンド上の最小の意味論を持つ。本実装は `exec` を使う。
+//!
+//! 出典は SPEC-WASM-CORE 3.0 (Release 3.0) である。
+//! Ref: SPEC-WASM-CORE (3.0).
 
 #![forbid(unsafe_code)]
 
+pub mod decode;
+pub mod exec;
+pub mod instr;
+pub mod module;
 pub mod sem;
+pub mod sexpr;
+pub mod types;
 pub mod validate;
+pub mod wast;
+pub mod wat;
 
 // 空のモデルから生成した殻。ISADL 記述の追加後に中身が増える。
 include!(concat!(env!("OUT_DIR"), "/generated.rs"));
@@ -24,7 +44,7 @@ impl polyisa_guest::GuestIsa for Wasm {
     }
 }
 
-/// CPU 状態というより実行フレーム。`#[repr(C)]` で配置を固定する。
+/// 段階2試作の状態（`sem` が参照する）。本実装は `exec::Store` を使う。
 #[repr(C)]
 #[derive(Clone, Debug)]
 pub struct CpuState {
@@ -50,6 +70,12 @@ impl Default for CpuState {
             func: 0,
         }
     }
+}
+
+/// バイナリから `Validated` を作る（decode+validate）。
+pub fn compile(bytes: &[u8]) -> Result<validate::Validated, exec::Error> {
+    let m = decode::decode_module(bytes).map_err(exec::Error::Decode)?;
+    validate::validate_module(m).map_err(exec::Error::Invalid)
 }
 
 #[cfg(test)]

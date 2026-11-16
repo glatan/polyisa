@@ -7,8 +7,6 @@ rust-version = "1.99"
 
 [dependencies]
 polyisa-bits = { path = "../../crates/bits" }
-polyisa-softfloat = { path = "../../crates/softfloat" }
-polyisa-decimal = { path = "../../crates/decimal" }
 polyisa-mem = { path = "../../crates/mem" }
 polyisa-sem = { path = "../../crates/sem" }
 polyisa-guest = { path = "../../crates/guest" }

@@ -16,6 +16,8 @@ pub mod run_power;
 pub mod run_riscv;
 #[cfg(feature = "guest-s390")]
 pub mod run_s390;
+#[cfg(feature = "guest-wasm")]
+pub mod run_wasm;
 #[cfg(feature = "guest-x86")]
 pub mod run_x86;
 
@@ -293,6 +295,26 @@ fn run_riscv_elf(_path: &str, _argv: &[String], _spec: Option<&CpuSpec>) -> Resu
     Err("この polyisa は riscv ゲストなしでビルドされた".to_string())
 }
 
+#[cfg(feature = "guest-wasm")]
+fn run_wasm_mod(
+    bytes: &[u8],
+    path: &str,
+    argv: &[String],
+    root: Option<&str>,
+) -> Result<u64, String> {
+    run_wasm::run_wasm_prog(bytes, path, argv, root)
+}
+
+#[cfg(not(feature = "guest-wasm"))]
+fn run_wasm_mod(
+    _bytes: &[u8],
+    _path: &str,
+    _argv: &[String],
+    _root: Option<&str>,
+) -> Result<u64, String> {
+    Err("この polyisa は wasm ゲストなしでビルドされた".to_string())
+}
+
 /// `run_path` に `--cpu` の指定を加える。`cpu` は `parse_cpu_spec` の
 /// 入力と同じ文字列。ファミリが ELF の `e_machine` と合わなければ拒否する。
 pub fn run_path_with(path: &str, argv: &[String], cpu: Option<&str>) -> Result<u64, String> {
@@ -310,6 +332,22 @@ pub fn run_path_opts(
 ) -> Result<u64, String> {
     use polyisa_loader::elf::{CLASS_32, CLASS_64, MAGIC};
     let spec = cpu.map(parse_cpu_spec).transpose()?;
+    // wasm バイナリ（`\0asm` + version 1）は WASI preview1 で実行する。
+    // `--root` はプリオープン `/` として渡るだけで、モジュールファイル
+    // 自体はホストのパスから読む（wasmtime の `--dir` と同じ規則）。
+    if let Ok(mut f) = std::fs::File::open(path) {
+        use std::io::Read;
+        let mut head = [0u8; 8];
+        if f.read_exact(&mut head).is_ok() && head[0..4] == *b"\0asm" {
+            if let Some(s) = &spec
+                && s.family != "wasm"
+            {
+                return Err(format!("--cpu のファミリ {} は wasm と合わない", s.family));
+            }
+            let bytes = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
+            return run_wasm_mod(&bytes, path, argv, root);
+        }
+    }
     // e_machine の嗅探も root 内のパス解決を通る（run_aarch64 側と同じ規則）。
     let host_path = match root {
         Some(root) => polyisa_os_linux::guest_path::resolve_guest_path_links(root, "/", path)

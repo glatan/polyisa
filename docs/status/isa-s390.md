@@ -61,14 +61,13 @@
 | bcr | bcr | 真 | branch |
 | bct | bct | 真 | branch |
 | bctr | bctr | 真 | branch |
+| bprp | bprp | 真 | branch |
 | bras | bras | 真 | branch |
 | brasl | brasl | 真 | branch |
 | brc | brc | 真 | branch |
 | brcl | brcl | 真 | branch |
 | brct | brct | 真 | branch |
 | brctg | brctg | 真 | branch |
-| brh | brh | 真 | branch |
-| brul | brul | 真 | branch |
 | brxh | brxh | 真 | branch |
 | brxle | brxle | 真 | branch |
 | bsm | bsm | 真 | branch |

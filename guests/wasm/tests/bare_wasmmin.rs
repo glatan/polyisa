@@ -7,7 +7,6 @@
 use polyisa_engine::bare::BareEnv;
 use polyisa_guest_wasm::CpuState;
 use polyisa_guest_wasm::sem;
-use polyisa_guest_wasm::validate::{self, Op, Reject};
 use polyisa_sem::Backend as _;
 
 fn env() -> BareEnv {
@@ -96,31 +95,39 @@ fn br_moves_offset_only() {
     assert_eq!(env.backend.get(sem::off_ref()), 40);
 }
 
+/// `(func ...)` だけのモジュールをテキストから組み立てて検証する。
+fn validate_body(body: &str) -> Result<(), String> {
+    let src = format!("(module (func {body}))");
+    let bytes = polyisa_guest_wasm::wat::module_from_str(&src).map_err(|e| e.0)?;
+    polyisa_guest_wasm::compile(&bytes)
+        .map(|_| ())
+        .map_err(|e| e.msg())
+}
+
 #[test]
 fn validate_accepts_balanced_void_body() {
-    let ops = [Op::I32Const, Op::I32Const, Op::I32Add, Op::LocalSet(0)];
-    assert_eq!(validate::validate(4, &ops), Ok(()));
+    let r = validate_body("(local i32) i32.const 1 i32.const 2 i32.add local.set 0");
+    assert_eq!(r, Ok(()));
 }
 
 #[test]
 fn validate_rejects_underflow_and_local_and_leftover() {
-    assert_eq!(
-        validate::validate(4, &[Op::I32Add]),
-        Err(Reject::StackUnderflow)
-    );
-    assert_eq!(
-        validate::validate(4, &[Op::LocalGet(4)]),
-        Err(Reject::LocalRange)
-    );
-    assert_eq!(
-        validate::validate(4, &[Op::I32Const]),
-        Err(Reject::StackLeft)
-    );
+    // 空スタックの i32.add は型不一致（underflow）。
+    let e = validate_body("i32.add").unwrap_err();
+    assert!(e.contains("type mismatch"), "{e}");
+    // ローカル 4 は存在しない。
+    let e = validate_body("local.get 4").unwrap_err();
+    assert!(e.contains("unknown local"), "{e}");
+    // i32 を残したまま終わるのは型不一致。
+    let e = validate_body("i32.const 1").unwrap_err();
+    assert!(e.contains("type mismatch"), "{e}");
 }
 
 #[test]
 fn validate_unreachable_makes_stack_polymorphic() {
-    // unreachable の後の add は、スタックが空でも拒否しない。終わりも合う。
-    let ops = [Op::Unreachable, Op::I32Add];
-    assert_eq!(validate::validate(1, &ops), Ok(()));
+    // unreachable の後の pop はボトム型として許す。ただし push した
+    // 値は実在するので、結果を残しすぎると型不一致になる。
+    assert_eq!(validate_body("unreachable i32.add drop"), Ok(()));
+    let e = validate_body("unreachable i32.add").unwrap_err();
+    assert!(e.contains("type mismatch"), "{e}");
 }

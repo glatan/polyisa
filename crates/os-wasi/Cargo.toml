@@ -9,6 +9,7 @@ rust-version = "1.99"
 polyisa-kernel = { path = "../kernel" }
 polyisa-engine = { path = "../engine" }
 polyisa-guest = { path = "../guest" }
+polyisa-guest-wasm = { path = "../../guests/wasm" }
 
 [lints]
 workspace = true

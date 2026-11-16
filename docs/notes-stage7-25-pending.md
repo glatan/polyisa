@@ -350,6 +350,48 @@
   ソケット、シグナルフレーム、`EX`/`EXRL` の一部、
   SIE/特権命令（esa390 モデルの裸検証範囲のみ）。
 
+### 段階 12（WebAssembly 1.0/2.0 + WASI preview1）
+
+- `guests/wasm` は機械語ゲストと同じ層のクレートとして
+  `decode`/`validate`/`exec`/`wat`/`wast` を
+  持つ。`decode` は `\0asm` バイナリ、`wat`/`sexpr` は
+  WAT/WAST のテキストを読む。仕様スイート
+  （`.testdata/wasm-spec/test/core`）は
+  `heavy_conformance_wasm_spec` が `wast::Runner` で
+  全ディレクティブを採点する。
+- WASI preview1 は `crates/os-wasi` に OS 人格として
+  実装し、`wasi_snapshot_preview1` / `wasi_unstable` の
+  インポートを host 関数で供給する（`fd_write`/
+  `fd_read`/`fd_close`/`fd_seek`/`fd_tell`/`fd_prestat_*`/
+  `fd_fdstat_get`/`fd_filestat_get`/`fd_readdir`/`path_open`/
+  `args_*`/`environ_*`/`clock_time_get`/`random_get`/
+  `proc_exit`）。fd 表と VFS は kernel の概念を共有するが
+  依存は `os-wasi → kernel` 方向のみ。
+- `cli` はバイナリ先頭の `\0asm` で WASM を検出し
+  `run_wasm` に振り分ける。`--root` は preopen fd 3、
+  CLI argv は `args_get`/`args_sizes_get` で見える。
+  `_start`（コマンド）/ `_initialize`（リアクター）を
+  探して実行し、`proc_exit` はトラップで運ぶ。
+- 完了条件の対応テスト: S12-1 =
+  `heavy_conformance_wasm_spec`（guest-wasm）、
+  S12-2 = `heavy_diff_wasmtime`（cli、wasmtime 外部
+  ツールがあれば出力比較）、S12-3 =
+  `heavy_program_wasi`（cli。wasi-sdk/clang が無い
+  環境では `fd_write`+`proc_exit` を import する手組
+  モジュールで検証）。
+- スイート採点では範囲外の提案機能（module linking、
+  GC・function-references の完全な型体系、tail-call、
+  SIMD、threads、exception handling 等）は
+  `skipped_named`/`skipped_regs` で skip に落とし、
+  依存する後続ディレクティブのカスケード失敗を防ぐ。
+  具象ヒープ型 `RefType::Idx` はデコードで受理し
+  検証で型空間の範囲を見て内部表現の `Func` に正規化
+  する（完全なヒープ型同一性は未実装）。
+- 残件: 提案機能の完全実装は範囲外のまま。実値は
+  f32/f64 の文字列→ビット変換で hex-float タイの
+  1ulp 差が残る可能性がある。wasi-sdk/clang が無い
+  環境では S12-3 は手組モジュール経路のみ。
+
 ## 参考
 
 - 段階の完了条件は `design/roadmap.md` の各段階の表。
