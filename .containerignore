@@ -1,6 +1,6 @@
-.git/
-.local/
-.refs/
-.testdata/
-target/
-junit.xml
+# すべて除外してから、COPY で参照が要るものだけを許可する形式にする。
+# 現在の Containerfile は COPY/ADD を持たず、インストールはすべて
+# イメージ内の RUN で完結するため、ビルドコンテキストは空でよい。
+*
+# 必要になったときだけ例外を足す:
+# !path/to/needed
