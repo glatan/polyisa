@@ -219,11 +219,11 @@ fn validate_maps(model: &Model, timing: &BTreeSet<&str>, errors: &mut Vec<Valida
                     if let Some(first) = map_insn_defs.get(mi.name.as_str()) {
                         // group はスロットの番号であり命令の同一性ではない
                         // （例: /4 と /6 が同じ shl を指すエイリアス）。
-                        // `when` は命令の同一性ではなく表項目の成立条件
-                        // （例: 0x82 が非64ビットモードでだけ 0x80 の
-                        // エイリアスになる）なので比較から外す。
+                        // `when`・`pfx` は命令の同一性ではなく表項目の成立条件
+                        // （例: 0x82 が非64ビットモードでだけ 0x80 のエイリアス、
+                        // MOVBE が接頭辞なしと 0x66 の両方で有効）なので
+                        // 比較から外す。
                         let same = first.ops == mi.ops
-                            && first.pfx == mi.pfx
                             && first.syntax == mi.syntax
                             && first.timing == mi.timing;
                         if !same {

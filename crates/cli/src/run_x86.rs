@@ -3311,6 +3311,67 @@ fn dispatch_map<B: Backend>(
             }
             sem_ea::byteshift(b, true, d.imm as u8, d)
         }
+        // ===== 0F 38（SSSE3/SSE4.1/MOVBE）=====
+        Insn::PshufbXvWv => sem_ea::pshufb(b, d, &ea),
+        Insn::PhaddwXvWv => sem_ea::phaddsub::<B, W16>(b, false, false, d, &ea),
+        Insn::PhadddXvWv => sem_ea::phaddsub::<B, W32>(b, false, false, d, &ea),
+        Insn::PhaddswXvWv => sem_ea::phaddsub::<B, W16>(b, false, true, d, &ea),
+        Insn::PhsubwXvWv => sem_ea::phaddsub::<B, W16>(b, true, false, d, &ea),
+        Insn::PhsubdXvWv => sem_ea::phaddsub::<B, W32>(b, true, false, d, &ea),
+        Insn::PhsubswXvWv => sem_ea::phaddsub::<B, W16>(b, true, true, d, &ea),
+        Insn::PmaddubswXvWv => sem_ea::pmaddubsw(b, d, &ea),
+        Insn::PmulhrswXvWv => sem_ea::pmulhrsw(b, d, &ea),
+        Insn::PsignbXvWv => sem_ea::psign::<B, W8>(b, d, &ea),
+        Insn::PsignwXvWv => sem_ea::psign::<B, W16>(b, d, &ea),
+        Insn::PsigndXvWv => sem_ea::psign::<B, W32>(b, d, &ea),
+        Insn::PabsbXvWv => sem_ea::pabs::<B, W8>(b, d, &ea),
+        Insn::PabswXvWv => sem_ea::pabs::<B, W16>(b, d, &ea),
+        Insn::PabsdXvWv => sem_ea::pabs::<B, W32>(b, d, &ea),
+        Insn::PtestXvWv => sem_ea::ptest(b, d, &ea),
+        Insn::PmovsxbwXvWv => sem_ea::pmovx(b, 8, 16, true, d, &ea),
+        Insn::PmovsxbdXvWv => sem_ea::pmovx(b, 8, 32, true, d, &ea),
+        Insn::PmovsxbqXvWv => sem_ea::pmovx(b, 8, 64, true, d, &ea),
+        Insn::PmovsxwdXvWv => sem_ea::pmovx(b, 16, 32, true, d, &ea),
+        Insn::PmovsxwqXvWv => sem_ea::pmovx(b, 16, 64, true, d, &ea),
+        Insn::PmovsxdqXvWv => sem_ea::pmovx(b, 32, 64, true, d, &ea),
+        Insn::PmovzxbwXvWv => sem_ea::pmovx(b, 8, 16, false, d, &ea),
+        Insn::PmovzxbdXvWv => sem_ea::pmovx(b, 8, 32, false, d, &ea),
+        Insn::PmovzxbqXvWv => sem_ea::pmovx(b, 8, 64, false, d, &ea),
+        Insn::PmovzxwdXvWv => sem_ea::pmovx(b, 16, 32, false, d, &ea),
+        Insn::PmovzxwqXvWv => sem_ea::pmovx(b, 16, 64, false, d, &ea),
+        Insn::PmovzxdqXvWv => sem_ea::pmovx(b, 32, 64, false, d, &ea),
+        Insn::PmuldqXvWv => sem_ea::pmuldq(b, d, &ea),
+        Insn::PmulldXvWv => sem_ea::pint::<B, W32>(b, sem_ea::Iop::MulLo, d, &ea),
+        Insn::PcmpeqqXvWv => sem_ea::pint::<B, W64>(b, sem_ea::Iop::CmpEq, d, &ea),
+        Insn::PcmpgtqXvWv => sem_ea::pint::<B, W64>(b, sem_ea::Iop::CmpGtS, d, &ea),
+        Insn::PminsbXvWv => sem_ea::pint::<B, W8>(b, sem_ea::Iop::MinS, d, &ea),
+        Insn::PminsdXvWv => sem_ea::pint::<B, W32>(b, sem_ea::Iop::MinS, d, &ea),
+        Insn::PminuwXvWv => sem_ea::pint::<B, W16>(b, sem_ea::Iop::MinU, d, &ea),
+        Insn::PminudXvWv => sem_ea::pint::<B, W32>(b, sem_ea::Iop::MinU, d, &ea),
+        Insn::PmaxsbXvWv => sem_ea::pint::<B, W8>(b, sem_ea::Iop::MaxS, d, &ea),
+        Insn::PmaxsdXvWv => sem_ea::pint::<B, W32>(b, sem_ea::Iop::MaxS, d, &ea),
+        Insn::PmaxuwXvWv => sem_ea::pint::<B, W16>(b, sem_ea::Iop::MaxU, d, &ea),
+        Insn::PmaxudXvWv => sem_ea::pint::<B, W32>(b, sem_ea::Iop::MaxU, d, &ea),
+        Insn::PackusdwXvWv => sem_ea::packusdw(b, d, &ea),
+        Insn::MovntdqaXvWv => sem_ea::mov_x_w(b, d, &ea),
+        Insn::MovbeGvMv => sem_ea::movbe_ld(b, w, reg, d, &ea),
+        Insn::MovbeMvGv => sem_ea::movbe_st(b, w, reg, d, &ea),
+        // ===== 0F 3A =====
+        Insn::BlendpsXvWvIb => sem_ea::blendp(b, 32, d.imm as u8, d, &ea),
+        Insn::BlendpdXvWvIb => sem_ea::blendp(b, 64, d.imm as u8, d, &ea),
+        Insn::PblendwXvWvIb => sem_ea::blendp(b, 16, d.imm as u8, d, &ea),
+        Insn::PalignrXvWvIb => sem_ea::palignr(b, d.imm as u8, d, &ea),
+        Insn::PextrbEbXv => sem_ea::pextrx(b, 8, d.imm as u8, d, &ea),
+        Insn::PextrwEwXv => sem_ea::pextrx(b, 16, d.imm as u8, d, &ea),
+        Insn::PextrdEdXv => {
+            sem_ea::pextrx(b, if d.rex & 8 != 0 { 64 } else { 32 }, d.imm as u8, d, &ea)
+        }
+        Insn::ExtractpsEdXv => sem_ea::pextrx(b, 32, d.imm as u8, d, &ea),
+        Insn::PinsrbXvEbIb => sem_ea::pinsrx(b, 8, d.imm as u8, d, &ea),
+        Insn::PinsrdXvEdIb => {
+            sem_ea::pinsrx(b, if d.rex & 8 != 0 { 64 } else { 32 }, d.imm as u8, d, &ea)
+        }
+        Insn::InsertpsXvWvIb => sem_ea::insertps(b, d.imm as u8, d, &ea),
         // ===== x87（D8-DF）。mod=11 は r/m フィールドを ST(i) として
         // 扱い、それ以外はメモリ形。ステータスワード依存の比較系は
         // 未モデルのため旧経路へフォールバックする。

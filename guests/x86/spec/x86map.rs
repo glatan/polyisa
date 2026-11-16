@@ -848,9 +848,113 @@ pub fn build_maps(m: &mut Model) {
         MapItem::Insn(0xA5, n("shld_ev_gv_cl", &[Ea(V), Reg(V), Imp(ImpOp::Cl)], "shld {e}, {g}, cl", "alu")),
         MapItem::Insn(0xAC, n("shrd_ev_gv_ib", &[Ea(V), Reg(V), Imm(B8)], "shrd {e}, {g}, {i}", "alu")),
         MapItem::Insn(0xAD, n("shrd_ev_gv_cl", &[Ea(V), Reg(V), Imp(ImpOp::Cl)], "shrd {e}, {g}, cl", "alu")),
+        // 3 バイトオペコードのサブマップ。
+        MapItem::Map(0x38, "map_0f38".to_string()),
+        MapItem::Map(0x3A, "map_0f3a".to_string()),
     ]);
     m.maps.push(MapDecl {
         name: "map_0f".to_string(),
         items: m0f,
+    });
+    build_map_0f38(m);
+    build_map_0f3a(m);
+}
+
+/// 0F 38 サブマップ（SSSE3/SSE4.1/MOVBE）。XMM 形は必須接頭辞 0x66。
+/// MMX 形（接頭辞なし）は XMM 状態しか持たない現段階では宣言しない。
+fn build_map_0f38(m: &mut Model) {
+    use OpKind::*;
+    use OpWidth::*;
+    let xv_wv: &[OpKind] = &[RegX, RmX];
+    let mut v: Vec<MapItem> = Vec::new();
+    let mut x = |op: u8, name: &str| {
+        v.push(MapItem::Insn(
+            op,
+            mi(name, xv_wv, None, PfxSel::P66, Pred::True, "", "alu"),
+        ));
+    };
+    // SSSE3。
+    x(0x00, "pshufb_xv_wv");
+    x(0x01, "phaddw_xv_wv");
+    x(0x02, "phaddd_xv_wv");
+    x(0x03, "phaddsw_xv_wv");
+    x(0x04, "pmaddubsw_xv_wv");
+    x(0x05, "phsubw_xv_wv");
+    x(0x06, "phsubd_xv_wv");
+    x(0x07, "phsubsw_xv_wv");
+    x(0x08, "psignb_xv_wv");
+    x(0x09, "psignw_xv_wv");
+    x(0x0A, "psignd_xv_wv");
+    x(0x0B, "pmulhrsw_xv_wv");
+    // SSE4.1。
+    x(0x17, "ptest_xv_wv");
+    x(0x1C, "pabsb_xv_wv");
+    x(0x1D, "pabsw_xv_wv");
+    x(0x1E, "pabsd_xv_wv");
+    x(0x20, "pmovsxbw_xv_wv");
+    x(0x21, "pmovsxbd_xv_wv");
+    x(0x22, "pmovsxbq_xv_wv");
+    x(0x23, "pmovsxwd_xv_wv");
+    x(0x24, "pmovsxwq_xv_wv");
+    x(0x25, "pmovsxdq_xv_wv");
+    x(0x28, "pmuldq_xv_wv");
+    x(0x29, "pcmpeqq_xv_wv");
+    x(0x2A, "movntdqa_xv_wv");
+    x(0x2B, "packusdw_xv_wv");
+    x(0x30, "pmovzxbw_xv_wv");
+    x(0x31, "pmovzxbd_xv_wv");
+    x(0x32, "pmovzxbq_xv_wv");
+    x(0x33, "pmovzxwd_xv_wv");
+    x(0x34, "pmovzxwq_xv_wv");
+    x(0x35, "pmovzxdq_xv_wv");
+    x(0x37, "pcmpgtq_xv_wv");
+    x(0x38, "pminsb_xv_wv");
+    x(0x39, "pminsd_xv_wv");
+    x(0x3A, "pminuw_xv_wv");
+    x(0x3B, "pminud_xv_wv");
+    x(0x3C, "pmaxsb_xv_wv");
+    x(0x3D, "pmaxsd_xv_wv");
+    x(0x3E, "pmaxuw_xv_wv");
+    x(0x3F, "pmaxud_xv_wv");
+    x(0x40, "pmulld_xv_wv");
+    // MOVBE。必須接頭辞はなく、0x66 は 16 ビット幅を選ぶ。
+    // F2 は CRC32 なので Plain/P66 のみ宣言し、F2 形は未対応に留める。
+    for p in [PfxSel::Plain, PfxSel::P66] {
+        v.push(MapItem::Insn(
+            0xF0,
+            mi("movbe_gv_mv", &[Reg(V), Ea(V)], None, p, Pred::True, "movbe {g}, {e}", "load"),
+        ));
+        v.push(MapItem::Insn(
+            0xF1,
+            mi("movbe_mv_gv", &[Ea(V), Reg(V)], None, p, Pred::True, "movbe {e}, {g}", "store"),
+        ));
+    }
+    m.maps.push(MapDecl {
+        name: "map_0f38".to_string(),
+        items: v,
+    });
+}
+
+/// 0F 3A サブマップ。すべて必須接頭辞 0x66 + imm8。
+fn build_map_0f3a(m: &mut Model) {
+    use OpKind::*;
+    use OpWidth::*;
+    let ib = Imm(B8);
+    let items = vec![
+        MapItem::Insn(0x0C, mi("blendps_xv_wv_ib", &[RegX, RmX, ib], None, PfxSel::P66, Pred::True, "blendps {x}, {w}, {i}", "alu")),
+        MapItem::Insn(0x0D, mi("blendpd_xv_wv_ib", &[RegX, RmX, ib], None, PfxSel::P66, Pred::True, "blendpd {x}, {w}, {i}", "alu")),
+        MapItem::Insn(0x0E, mi("pblendw_xv_wv_ib", &[RegX, RmX, ib], None, PfxSel::P66, Pred::True, "pblendw {x}, {w}, {i}", "alu")),
+        MapItem::Insn(0x0F, mi("palignr_xv_wv_ib", &[RegX, RmX, ib], None, PfxSel::P66, Pred::True, "palignr {x}, {w}, {i}", "alu")),
+        MapItem::Insn(0x14, mi("pextrb_eb_xv", &[Ea(B8), RegX, ib], None, PfxSel::P66, Pred::True, "pextrb {e}, {x}, {i}", "store")),
+        MapItem::Insn(0x15, mi("pextrw_ew_xv", &[Ea(W16), RegX, ib], None, PfxSel::P66, Pred::True, "pextrw {e}, {x}, {i}", "store")),
+        MapItem::Insn(0x16, mi("pextrd_ed_xv", &[Ea(V), RegX, ib], None, PfxSel::P66, Pred::True, "pextrd {e}, {x}, {i}", "store")),
+        MapItem::Insn(0x17, mi("extractps_ed_xv", &[Ea(D32), RegX, ib], None, PfxSel::P66, Pred::True, "extractps {e}, {x}, {i}", "store")),
+        MapItem::Insn(0x20, mi("pinsrb_xv_eb_ib", &[RegX, Ea(B8), ib], None, PfxSel::P66, Pred::True, "pinsrb {x}, {e}, {i}", "alu")),
+        MapItem::Insn(0x21, mi("insertps_xv_wv_ib", &[RegX, RmX, ib], None, PfxSel::P66, Pred::True, "insertps {x}, {w}, {i}", "alu")),
+        MapItem::Insn(0x22, mi("pinsrd_xv_ed_ib", &[RegX, Ea(V), ib], None, PfxSel::P66, Pred::True, "pinsrd {x}, {e}, {i}", "alu")),
+    ];
+    m.maps.push(MapDecl {
+        name: "map_0f3a".to_string(),
+        items,
     });
 }

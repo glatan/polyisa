@@ -2927,6 +2927,517 @@ pub fn byteshift<B: Backend>(b: &mut B, left: bool, imm: u8, d: &MapDec) -> Flow
     Ok(())
 }
 
+// ===== 0F 38 / 0F 3A サブマップ（SSSE3/SSE4.1/MOVBE）=====
+
+/// PSHUFB。制御バイトの MSB が立つ要素は 0、下位 4 ビットが選ぶバイト。
+pub fn pshufb<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit> {
+    let dst = reg_x(d);
+    let a: B::V<W128> = b.get(sem::xmm_ref(dst));
+    let c = rx(b, ea, 128)?;
+    let mut acc = b.konst::<W128>(0);
+    for i in 0..16u32 {
+        let ctrl = lane128(b, c, i * 8, 8);
+        let c8: B::V<W8> = b.trunc::<W128, W8>(ctrl);
+        let k0f = b.konst::<W8>(0x0F);
+        let idx = b.and::<W8>(c8, k0f);
+        let idx128 = b.zext::<W8, W128>(idx);
+        let k3 = b.konst::<W128>(3);
+        let sh = b.shl::<W128>(idx128, k3);
+        let kff = b.konst::<W128>(0xFF);
+        let shifted = b.shr_l::<W128>(a, sh);
+        let byte = b.and::<W128>(shifted, kff);
+        let k80 = b.konst::<W8>(0x80);
+        let m = b.and::<W8>(c8, k80);
+        let z8 = b.konst::<W8>(0);
+        let msb = b.cmp::<W8>(Cmp::Ne, m, z8);
+        let z128 = b.konst::<W128>(0);
+        let v = b.select::<W128>(msb, z128, byte);
+        acc = put_lane128(b, acc, v, i * 8, 8);
+    }
+    b.set(sem::xmm_ref(dst), acc);
+    Ok(())
+}
+
+/// PHADDW/PHADDD/PHADDSW/PHSUBW/PHSUBD/PHSUBSW。
+/// 隣接ペアを加減算し、dst 側ペアを下位 64・src 側ペアを上位 64 に詰める。
+pub fn phaddsub<B: Backend, W: polyisa_sem::Width>(
+    b: &mut B,
+    sub: bool,
+    sat: bool,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    let dst = reg_x(d);
+    let a: B::V<W128> = b.get(sem::xmm_ref(dst));
+    let c = rx(b, ea, 128)?;
+    let bits = W::BITS;
+    let half = 64 / bits;
+    let mut acc = b.konst::<W128>(0);
+    for (src_i, s) in [a, c].into_iter().enumerate() {
+        for i in 0..half {
+            let l0 = lane128(b, s, 2 * i * bits, bits);
+            let l1 = lane128(b, s, (2 * i + 1) * bits, bits);
+            let w0: B::V<W> = b.trunc::<W128, W>(l0);
+            let w1: B::V<W> = b.trunc::<W128, W>(l1);
+            let r = match (sub, sat) {
+                (true, true) => sat_sub_s::<B, W>(b, w0, w1),
+                (true, false) => b.sub::<W>(w0, w1),
+                (false, true) => sat_add_s::<B, W>(b, w0, w1),
+                (false, false) => b.add::<W>(w0, w1),
+            };
+            let r128 = b.zext::<W, W128>(r);
+            acc = put_lane128(b, acc, r128, (src_i as u32 * half + i) * bits, bits);
+        }
+    }
+    b.set(sem::xmm_ref(dst), acc);
+    Ok(())
+}
+
+/// PSIGNB/W/D。`c < 0` なら `-a`、`c == 0` なら 0、それ以外は `a`。
+pub fn psign<B: Backend, W: polyisa_sem::Width>(
+    b: &mut B,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    lane_bin::<B, W>(b, d, ea, |b, a, c| {
+        let z = b.konst::<W>(W::from_u128(0));
+        let neg = b.cmp::<W>(Cmp::LtS, c, z);
+        let zero = b.cmp::<W>(Cmp::Eq, c, z);
+        let nega = b.sub::<W>(z, a);
+        let inner = b.select::<W>(zero, z, a);
+        b.select::<W>(neg, nega, inner)
+    })
+}
+
+/// PMADDUBSW。符号なし a バイトと符号付き c バイトの積を、隣接ペアで
+/// s16 飽和の和にする。
+pub fn pmaddubsw<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit> {
+    let dst = reg_x(d);
+    let a: B::V<W128> = b.get(sem::xmm_ref(dst));
+    let c = rx(b, ea, 128)?;
+    let mut acc = b.konst::<W128>(0);
+    for i in 0..8u32 {
+        let mut sum = b.konst::<W32>(0);
+        for j in 0..2u32 {
+            let at = i * 16 + j * 8;
+            let al = lane128(b, a, at, 8);
+            let cl = lane128(b, c, at, 8);
+            let a8: B::V<W8> = b.trunc::<W128, W8>(al);
+            let c8: B::V<W8> = b.trunc::<W128, W8>(cl);
+            let ab = b.zext::<W8, W32>(a8);
+            let cb = b.sext::<W8, W32>(c8);
+            let p = b.mul::<W32>(ab, cb);
+            sum = b.add::<W32>(sum, p);
+        }
+        // s16 飽和。
+        let kmin = b.konst::<W32>(0xFFFF_8000);
+        let kmax = b.konst::<W32>(0x7FFF);
+        let lo = b.cmp::<W32>(Cmp::LtS, sum, kmin);
+        let hi = b.cmp::<W32>(Cmp::GtS, sum, kmax);
+        let r = b.select::<W32>(lo, kmin, sum);
+        let r = b.select::<W32>(hi, kmax, r);
+        let r128 = b.zext::<W32, W128>(r);
+        acc = put_lane128(b, acc, r128, i * 16, 16);
+    }
+    b.set(sem::xmm_ref(dst), acc);
+    Ok(())
+}
+
+/// PMULHRSW。`((a*c*2) + 0x8000) >> 16` を s16 飽和にする。
+pub fn pmulhrsw<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit> {
+    let dst = reg_x(d);
+    let a: B::V<W128> = b.get(sem::xmm_ref(dst));
+    let c = rx(b, ea, 128)?;
+    let mut acc = b.konst::<W128>(0);
+    for i in 0..8u32 {
+        let al = lane128(b, a, i * 16, 16);
+        let cl = lane128(b, c, i * 16, 16);
+        let a16: B::V<W16> = b.trunc::<W128, W16>(al);
+        let c16: B::V<W16> = b.trunc::<W128, W16>(cl);
+        let av = b.sext::<W16, W32>(a16);
+        let cv = b.sext::<W16, W32>(c16);
+        let p = b.mul::<W32>(av, cv);
+        let k1 = b.konst::<W32>(1);
+        let k8000 = b.konst::<W32>(0x8000);
+        let p2 = b.shl::<W32>(p, k1);
+        let t = b.add::<W32>(p2, k8000);
+        let k16 = b.konst::<W32>(16);
+        let r = b.shr_a::<W32>(t, k16);
+        let r128 = b.zext::<W32, W128>(r);
+        acc = put_lane128(b, acc, r128, i * 16, 16);
+    }
+    b.set(sem::xmm_ref(dst), acc);
+    Ok(())
+}
+
+/// PABSB/W/D。`|src[i]|`。
+pub fn pabs<B: Backend, W: polyisa_sem::Width>(
+    b: &mut B,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    let dst = reg_x(d);
+    let s = rx(b, ea, 128)?;
+    let bits = W::BITS;
+    let mut acc = b.konst::<W128>(0);
+    for i in 0..(128 / bits) {
+        let l = lane128(b, s, i * bits, bits);
+        let v: B::V<W> = b.trunc::<W128, W>(l);
+        let z = b.konst::<W>(W::from_u128(0));
+        let neg = b.cmp::<W>(Cmp::LtS, v, z);
+        let nega = b.sub::<W>(z, v);
+        let r = b.select::<W>(neg, nega, v);
+        let r128 = b.zext::<W, W128>(r);
+        acc = put_lane128(b, acc, r128, i * bits, bits);
+    }
+    b.set(sem::xmm_ref(dst), acc);
+    Ok(())
+}
+
+/// PTEST。ZF = (a & c) == 0、CF = (c & !a) == 0。他の状況旗はクリア。
+pub fn ptest<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Flow<B> {
+    let a: B::V<W128> = b.get(sem::xmm_ref(reg_x(d)));
+    let c = rx(b, ea, 128)?;
+    let z = b.konst::<W128>(0);
+    let t1 = b.and::<W128>(a, c);
+    let na = b.not::<W128>(a);
+    let t2 = b.and::<W128>(na, c);
+    let zf = b.cmp::<W128>(Cmp::Eq, t1, z);
+    let cf = b.cmp::<W128>(Cmp::Eq, t2, z);
+    let f: B::V<W32> = b.get(eflags_ref());
+    let mask = b.konst::<W32>(
+        sem::FLAG_ZF | sem::FLAG_PF | sem::FLAG_CF | sem::FLAG_OF | sem::FLAG_SF | sem::FLAG_AF,
+    );
+    let nmask = b.not::<W32>(mask);
+    let kept = b.and::<W32>(f, nmask);
+    let zf_v = pick(b, zf, sem::FLAG_ZF);
+    let cf_v = pick(b, cf, sem::FLAG_CF);
+    let v = b.or::<W32>(kept, zf_v);
+    let v = b.or::<W32>(v, cf_v);
+    b.set(eflags_ref(), v);
+    Ok(())
+}
+
+/// `from` ビット整数を `to` ビットへ拡張する（`signed` で符号拡張）。
+fn ext_int<B: Backend>(b: &mut B, v: B::V<W128>, from: u32, to: u32, signed: bool) -> B::V<W128> {
+    macro_rules! e {
+        ($f:ty, $t:ty) => {{
+            let x: B::V<$f> = b.trunc::<W128, $f>(v);
+            let r = if signed {
+                b.sext::<$f, $t>(x)
+            } else {
+                b.zext::<$f, $t>(x)
+            };
+            b.zext::<$t, W128>(r)
+        }};
+    }
+    match (from, to) {
+        (8, 16) => e!(W8, W16),
+        (8, 32) => e!(W8, W32),
+        (8, 64) => e!(W8, W64),
+        (16, 32) => e!(W16, W32),
+        (16, 64) => e!(W16, W64),
+        (32, 64) => e!(W32, W64),
+        _ => v,
+    }
+}
+
+/// PMOVSX*/PMOVZX*。下位要素を `to` ビット幅へ拡張して詰める。
+pub fn pmovx<B: Backend>(
+    b: &mut B,
+    from: u32,
+    to: u32,
+    signed: bool,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    let n = 128 / to;
+    let s = rx(b, ea, n * from)?;
+    let mut acc = b.konst::<W128>(0);
+    for i in 0..n {
+        let l = lane128(b, s, i * from, from);
+        let e = ext_int(b, l, from, to, signed);
+        acc = put_lane128(b, acc, e, i * to, to);
+    }
+    b.set(sem::xmm_ref(reg_x(d)), acc);
+    Ok(())
+}
+
+/// PMULDQ。偶数 i32 レーンの符号付き積を i64 で 2 本得る。
+pub fn pmuldq<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit> {
+    let a: B::V<W128> = b.get(sem::xmm_ref(reg_x(d)));
+    let c = rx(b, ea, 128)?;
+    let mut acc = b.konst::<W128>(0);
+    for i in 0..2u32 {
+        let al = lane128(b, a, i * 64, 32);
+        let cl = lane128(b, c, i * 64, 32);
+        let a32: B::V<W32> = b.trunc::<W128, W32>(al);
+        let c32: B::V<W32> = b.trunc::<W128, W32>(cl);
+        let av = b.sext::<W32, W64>(a32);
+        let cv = b.sext::<W32, W64>(c32);
+        let p = b.mul::<W64>(av, cv);
+        let p128 = b.zext::<W64, W128>(p);
+        acc = put_lane128(b, acc, p128, i * 64, 64);
+    }
+    b.set(sem::xmm_ref(reg_x(d)), acc);
+    Ok(())
+}
+
+/// PACKUSDW。i32 を u16 飽和に変換して詰める（dst が下位、src が上位）。
+pub fn packusdw<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit> {
+    let a: B::V<W128> = b.get(sem::xmm_ref(reg_x(d)));
+    let c = rx(b, ea, 128)?;
+    let mut acc = b.konst::<W128>(0);
+    for (src_i, s) in [a, c].into_iter().enumerate() {
+        for i in 0..4u32 {
+            let l = lane128(b, s, i * 32, 32);
+            let v: B::V<W32> = b.trunc::<W128, W32>(l);
+            let kz = b.konst::<W32>(0);
+            let kmax = b.konst::<W32>(0xFFFF);
+            let neg = b.cmp::<W32>(Cmp::LtS, v, kz);
+            let over = b.cmp::<W32>(Cmp::GtS, v, kmax);
+            let kz = b.konst::<W32>(0);
+            let r = b.select::<W32>(neg, kz, v);
+            let kmax = b.konst::<W32>(0xFFFF);
+            let r = b.select::<W32>(over, kmax, r);
+            let r128 = b.zext::<W32, W128>(r);
+            acc = put_lane128(b, acc, r128, (src_i as u32 * 4 + i) * 16, 16);
+        }
+    }
+    b.set(sem::xmm_ref(reg_x(d)), acc);
+    Ok(())
+}
+
+/// PALIGNR。`(dst:src)` の 256 ビット連結を imm バイト右にずらし下位
+/// 128 ビットを取る。
+pub fn palignr<B: Backend>(
+    b: &mut B,
+    imm: u8,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    let dst = reg_x(d);
+    let a: B::V<W128> = b.get(sem::xmm_ref(dst));
+    let c = rx(b, ea, 128)?;
+    let sh = u32::from(imm) * 8;
+    let v = if sh == 0 {
+        c
+    } else if sh < 128 {
+        let ksh = b.konst::<W128>(u128::from(sh));
+        let lo = b.shr_l::<W128>(c, ksh);
+        let ksh2 = b.konst::<W128>(u128::from(128 - sh));
+        let hi = b.shl::<W128>(a, ksh2);
+        b.or::<W128>(lo, hi)
+    } else if sh < 256 {
+        let ksh = b.konst::<W128>(u128::from(sh - 128));
+        b.shr_l::<W128>(a, ksh)
+    } else {
+        b.konst::<W128>(0)
+    };
+    b.set(sem::xmm_ref(dst), v);
+    Ok(())
+}
+
+/// BLENDPS/BLENDPD/PBLENDW。imm の各ビットで `c` のレーンを選ぶ
+/// （0 は `a` を維持）。`bits` は 16/32/64。
+pub fn blendp<B: Backend>(
+    b: &mut B,
+    bits: u32,
+    imm: u8,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    let dst = reg_x(d);
+    let a: B::V<W128> = b.get(sem::xmm_ref(dst));
+    let c = rx(b, ea, 128)?;
+    let mut acc = b.konst::<W128>(0);
+    for i in 0..(128 / bits) {
+        let l = if imm >> i & 1 == 1 {
+            lane128(b, c, i * bits, bits)
+        } else {
+            lane128(b, a, i * bits, bits)
+        };
+        acc = put_lane128(b, acc, l, i * bits, bits);
+    }
+    b.set(sem::xmm_ref(dst), acc);
+    Ok(())
+}
+
+/// PEXTRB/PEXTRW/PEXTRD/PEXTRQ/EXTRACTPS。`bits` 幅のレーンを取り出して
+/// Ea 先へ書く。mod=11（GPR）はゼロ拡張して 32/64 ビットに書く。
+pub fn pextrx<B: Backend>(
+    b: &mut B,
+    bits: u32,
+    imm: u8,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    let s: B::V<W128> = b.get(sem::xmm_ref(reg_x(d)));
+    let n = 128 / bits;
+    let sel = u32::from(imm) & (n - 1);
+    let l = lane128(b, s, sel * bits, bits);
+    match ea {
+        Rm::Reg(g) => {
+            let v: B::V<W64> = b.trunc::<W128, W64>(l);
+            sem::write64(b, *g, v);
+            Ok(())
+        }
+        Rm::Mem(a) => {
+            let a = *a;
+            match bits {
+                8 => {
+                    let v: B::V<W8> = b.trunc::<W128, W8>(l);
+                    b.store::<W8>(a, v, sem::DATA_WRITE)
+                }
+                16 => {
+                    let v: B::V<W16> = b.trunc::<W128, W16>(l);
+                    b.store::<W16>(a, v, sem::DATA_WRITE)
+                }
+                32 => {
+                    let v: B::V<W32> = b.trunc::<W128, W32>(l);
+                    b.store::<W32>(a, v, sem::DATA_WRITE)
+                }
+                _ => {
+                    let v: B::V<W64> = b.trunc::<W128, W64>(l);
+                    b.store::<W64>(a, v, sem::DATA_WRITE)
+                }
+            }
+        }
+    }
+}
+
+/// PINSRB/PINSRD/PINSRQ。Ea の `bits` 幅を `sel` のレーンへ挿入する。
+pub fn pinsrx<B: Backend>(
+    b: &mut B,
+    bits: u32,
+    imm: u8,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    let a: B::V<W128> = b.get(sem::xmm_ref(reg_x(d)));
+    let v: B::V<W64> = match bits {
+        8 => {
+            let x: B::V<W8> = decode::rd8(b, ea, d)?;
+            b.zext::<W8, W64>(x)
+        }
+        16 => {
+            let x: B::V<W16> = decode::rd16(b, ea)?;
+            b.zext::<W16, W64>(x)
+        }
+        32 => {
+            let x: B::V<W32> = decode::rd32(b, ea)?;
+            b.zext::<W32, W64>(x)
+        }
+        _ => decode::rd64(b, ea)?,
+    };
+    let v128: B::V<W128> = b.zext::<W64, W128>(v);
+    let n = 128 / bits;
+    let sel = u32::from(imm) & (n - 1);
+    let r = put_lane128(b, a, v128, sel * bits, bits);
+    b.set(sem::xmm_ref(reg_x(d)), r);
+    Ok(())
+}
+
+/// INSERTPS。mod=11 は src xmm の `count_s` レーン、メモリは m32 を、
+/// `count_d` レーンへ挿入する。`zmask` のビットが立つレーンは 0 にする。
+pub fn insertps<B: Backend>(
+    b: &mut B,
+    imm: u8,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    let a: B::V<W128> = b.get(sem::xmm_ref(reg_x(d)));
+    let s = if d.modrm >= 0xC0 {
+        let src: B::V<W128> = b.get(sem::xmm_ref(rm_x(d)));
+        lane128(b, src, u32::from(imm >> 6 & 3) * 32, 32)
+    } else {
+        rx(b, ea, 32)?
+    };
+    let mut v = put_lane128(b, a, s, u32::from(imm >> 4 & 3) * 32, 32);
+    for i in 0..4u32 {
+        if imm >> i & 1 == 1 {
+            let z = b.konst::<W128>(0);
+            v = put_lane128(b, v, z, i * 32, 32);
+        }
+    }
+    b.set(sem::xmm_ref(reg_x(d)), v);
+    Ok(())
+}
+
+/// `bits` 幅（16/32/64）のバイト順反転。
+fn bswap_bits<B: Backend>(b: &mut B, v: B::V<W64>, bits: u32) -> B::V<W64> {
+    let n = bits / 8;
+    let mut acc = b.konst::<W64>(0);
+    for i in 0..n {
+        let sh = b.konst::<W64>(u64::from(i * 8));
+        let kff = b.konst::<W64>(0xFF);
+        let shv = b.shr_l::<W64>(v, sh);
+        let byte = b.and::<W64>(shv, kff);
+        let to = b.konst::<W64>(u64::from((n - 1 - i) * 8));
+        let placed = b.shl::<W64>(byte, to);
+        acc = b.or::<W64>(acc, placed);
+    }
+    acc
+}
+
+/// MOVBE load。`w` ビットのメモリを読み、バイト順を反転して GPR に書く。
+pub fn movbe_ld<B: Backend>(b: &mut B, w: u8, reg: Gpr, d: &MapDec, ea: &Rm<B::V<W64>>) -> Flow<B> {
+    let v: B::V<W64> = match w {
+        16 => {
+            let x: B::V<W16> = decode::rd16(b, ea)?;
+            b.zext::<W16, W64>(x)
+        }
+        64 => decode::rd64(b, ea)?,
+        _ => {
+            let x: B::V<W32> = decode::rd32(b, ea)?;
+            b.zext::<W32, W64>(x)
+        }
+    };
+    let r = bswap_bits(b, v, u32::from(w));
+    match w {
+        64 => sem::write64(b, reg, r),
+        16 => {
+            let r16: B::V<W16> = b.trunc::<W64, W16>(r);
+            gwr_w::<B, W16>(b, reg, d, r16);
+        }
+        _ => {
+            let r32: B::V<W32> = b.trunc::<W64, W32>(r);
+            gwr_w::<B, W32>(b, reg, d, r32);
+        }
+    }
+    Ok(())
+}
+
+/// MOVBE store。GPR の `w` ビットをバイト順反転してメモリに書く。
+pub fn movbe_st<B: Backend>(b: &mut B, w: u8, reg: Gpr, d: &MapDec, ea: &Rm<B::V<W64>>) -> Flow<B> {
+    let v: B::V<W64> = match w {
+        16 => {
+            let x: B::V<W16> = grd_w::<B, W16>(b, reg, d);
+            b.zext::<W16, W64>(x)
+        }
+        64 => grd_w::<B, W64>(b, reg, d),
+        _ => {
+            let x: B::V<W32> = grd_w::<B, W32>(b, reg, d);
+            b.zext::<W32, W64>(x)
+        }
+    };
+    let r = bswap_bits(b, v, u32::from(w));
+    match w {
+        16 => {
+            let r16: B::V<W16> = b.trunc::<W64, W16>(r);
+            decode::wr16(b, ea, r16)
+        }
+        64 => {
+            let r64: B::V<W64> = r;
+            decode::wr64(b, ea, r64)
+        }
+        _ => {
+            let r32: B::V<W32> = b.trunc::<W64, W32>(r);
+            decode::wr32(b, ea, r32)
+        }
+    }
+}
+
 // ===== x87（オペコード表経路）=====
 //
 // ST(i) は物理スロット (top + i) & 7。mod=11 の r/m フィールドが i。
