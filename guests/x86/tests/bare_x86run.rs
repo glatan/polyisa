@@ -15591,12 +15591,13 @@ fn run16_mov_ax_bx() {
 
 #[test]
 fn run16_mov_eax_p66() {
-    // 66 B8 = mov eax,imm32。0x66 は 16 ビットモードで osize を 32 に切り替える。
-    let mut env = env16(&[0x66, 0xB8, 0x78, 0x56, 0x34, 0x12], 0x1000);
+    // 8088 には 0x66 接頭辞はなく、0x76 (jbe) の別名として実行される。
+    // ZF=1 なら +2 分岐が取られ IP は 0x1004 へ進む。
+    let mut env = env16(&[0x66, 0x02, 0x90, 0x90], 0x1000);
+    env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 0x40);
     let mut sys = X64Exit;
     let out = run_x86::run_m16(&mut env, 0x1000, &mut sys, 1);
-    assert_eq!(out, Outcome::StepLimit { pc: 0x1006 });
-    assert_eq!(env.backend.get(Gpr(0).state()), 0x1234_5678);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1004 });
 }
 
 #[test]
@@ -15748,23 +15749,13 @@ fn run16_movsb_ds_es() {
 
 #[test]
 fn run16_p67_asize32() {
-    // 67 8B 00 = mov ax,[eax]。0x67 で asize が 32 になる。
-    // EAX=0x10、DS=0x100 → 0x1010 を読む。
-    let mut env = env16(&[0x67, 0x8B, 0x00], 0x1000);
-    env.backend.set(polyisa_guest_x86::sem::sreg_ref(3), 0x100);
-    env.step(|b| {
-        polyisa_guest_x86::sem::write64(b, Gpr(0), 0x10);
-        Ok(())
-    })
-    .unwrap();
-    env.backend
-        .mem
-        .write(VirtAddr(0x1010), &0xFACEu16.to_le_bytes())
-        .unwrap();
+    // 0x67 は 8088 ではアドレスサイズ接頭辞ではなく 0x77 (ja) の別名。
+    // CF=0 かつ ZF=0 なら +2 分岐が取られる。
+    let mut env = env16(&[0x67, 0x02, 0x90, 0x90], 0x1000);
+    env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 0);
     let mut sys = X64Exit;
     let out = run_x86::run_m16(&mut env, 0x1000, &mut sys, 1);
-    assert_eq!(out, Outcome::StepLimit { pc: 0x1003 });
-    assert_eq!(env.backend.get(Gpr(0).state()) & 0xFFFF, 0xFACE);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1004 });
 }
 
 #[test]
@@ -15928,4 +15919,140 @@ fn run16_imul8_flags() {
         env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x8D5,
         0x54
     );
+}
+
+#[test]
+fn run16_int3_ivt() {
+    // CC = int3。FLAGS/CS/次の IP を SS:SP-6 へ積み IVT[3] (0x0C) へ飛ぶ。
+    // 積まれる FLAGS は IF/TF クリア前の元値、IF/TF はクリアされる。
+    let mut env = env16(&[0xCC], 0x1000);
+    env.backend
+        .mem
+        .write(VirtAddr(0x0C), &[0x00, 0x04, 0x00, 0x03])
+        .unwrap(); // IVT[3] = 0300:0400
+    env.backend.set(polyisa_guest_x86::sem::sreg_ref(2), 0x200); // SS=0x200 → base 0x2000
+    env.backend.set(Gpr(4).state(), 0x1000); // SP
+    env.backend
+        .set(polyisa_guest_x86::sem::eflags_ref(), 0xF302);
+    let mut sys = X64Exit;
+    let out = run_x86::run_m16(&mut env, 0x1000, &mut sys, 1);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x0400 });
+    assert_eq!(env.backend.get(Gpr(4).state()) & 0xFFFF, 0x0FFA);
+    let mut stk = [0u8; 6];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x2FFA),
+            &mut stk,
+            polyisa_mem::Access {
+                endian: polyisa_mem::Endian::Le,
+                align: polyisa_mem::Align::Unaligned,
+                kind: polyisa_mem::AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(stk, [0x01, 0x10, 0x00, 0x00, 0x02, 0xF3]); // ip_next, cs, flags
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0x300,
+        0
+    );
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::sreg_ref(1)), 0x0300);
+}
+
+#[test]
+fn run16_iret() {
+    // CF = iret。スタックから IP、CS、FLAGS を戻す（POPF と同じ強制ビット）。
+    let mut env = env16(&[0xCF], 0x1000);
+    env.backend.set(polyisa_guest_x86::sem::sreg_ref(2), 0x200);
+    env.backend.set(Gpr(4).state(), 0x1000);
+    env.backend
+        .mem
+        .write(VirtAddr(0x3000), &[0x00, 0x05, 0x00, 0x03, 0xFF, 0xFF])
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_m16(&mut env, 0x1000, &mut sys, 1);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x0500 }); // ip=0x0500 (cs=0x300)
+    assert_eq!(env.backend.get(Gpr(4).state()) & 0xFFFF, 0x1006);
+    assert_eq!(
+        env.backend.get(polyisa_guest_x86::sem::eflags_ref()) & 0xFFFF,
+        0xFFD7
+    ); // 0xFFFF & 0x0FD5 | 0xF002
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::sreg_ref(1)), 0x0300);
+}
+
+#[test]
+fn run16_callf_ptr() {
+    // 9A = callf ptr16:16。CS、次の IP の順に積んで far 分岐。
+    // CS=0x0100 とすると CS:IP = 0100:1000 → 物理 0x2000 にコードを置く。
+    let mut env = env16(&[0x9A, 0x00, 0x10, 0x00, 0x02], 0x2000);
+    env.backend.set(polyisa_guest_x86::sem::sreg_ref(1), 0x0100);
+    env.backend.set(polyisa_guest_x86::sem::sreg_ref(2), 0x200);
+    env.backend.set(Gpr(4).state(), 0x1000);
+    let mut sys = X64Exit;
+    let out = run_x86::run_m16(&mut env, 0x1000, &mut sys, 1);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1000 }); // ip=0x1000 (cs=0x200)
+    assert_eq!(env.backend.get(Gpr(4).state()) & 0xFFFF, 0x0FFC);
+    let mut stk = [0u8; 4];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x2FFC),
+            &mut stk,
+            polyisa_mem::Access {
+                endian: polyisa_mem::Endian::Le,
+                align: polyisa_mem::Align::Unaligned,
+                kind: polyisa_mem::AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(stk, [0x05, 0x10, 0x00, 0x01]); // ip_next=0x1005, cs=0x0100
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::sreg_ref(1)), 0x0200);
+}
+
+#[test]
+fn run16_alias_60_jo() {
+    // 0x60 は 8088 では pusha ではなく 0x70 (jo) の別名。OF=1 で分岐。
+    let mut env = env16(&[0x60, 0x02, 0x90, 0x90], 0x1000);
+    env.backend.set(polyisa_guest_x86::sem::eflags_ref(), 0x800);
+    let mut sys = X64Exit;
+    let out = run_x86::run_m16(&mut env, 0x1000, &mut sys, 1);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1004 });
+}
+
+#[test]
+fn run16_ff7_push_alias() {
+    // FF /7 は 8088 では /6 push の別名。FF F8 = push ax。
+    let mut env = env16(&[0xFF, 0xF8], 0x1000);
+    env.backend.set(polyisa_guest_x86::sem::sreg_ref(2), 0x200);
+    env.backend.set(Gpr(4).state(), 0x1000);
+    env.backend.set(Gpr(0).state(), 0xBEEF);
+    let mut sys = X64Exit;
+    let out = run_x86::run_m16(&mut env, 0x1000, &mut sys, 1);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+    assert_eq!(env.backend.get(Gpr(4).state()) & 0xFFFF, 0x0FFE);
+    let mut w = [0u8; 2];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x2FFE),
+            &mut w,
+            polyisa_mem::Access {
+                endian: polyisa_mem::Endian::Le,
+                align: polyisa_mem::Align::Unaligned,
+                kind: polyisa_mem::AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(w, [0xEF, 0xBE]);
+}
+
+#[test]
+fn run16_esc_nop() {
+    // 8088 には 8087 がないので ESC (D8-DF) は状態を変えずに進む。
+    let mut env = env16(&[0xD8, 0xC0], 0x1000);
+    env.backend.set(Gpr(0).state(), 0x1234);
+    let mut sys = X64Exit;
+    let out = run_x86::run_m16(&mut env, 0x1000, &mut sys, 1);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+    assert_eq!(env.backend.get(Gpr(0).state()), 0x1234);
 }

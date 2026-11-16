@@ -2619,6 +2619,11 @@ fn dispatch_map<B: Backend>(
 ) -> Result<bool, B::Exit> {
     let m64 = mode == 64;
     let sa = mode;
+    if mode == 16 && (0xD8..=0xDF).contains(&d.opcode) {
+        // 8088 には 8087 が付いていない。ESC は ModRM の評価と
+        // ダミー読みだけを行い、建築状態は変わらない。
+        return Ok(true);
+    }
     use polyisa_guest_x86::decode::{self, Hw, Rm};
     use polyisa_guest_x86::sem::{Gpr, eflags_ref};
     use polyisa_guest_x86::sem_ea::{self, Alu, Sh, ShiftCnt, Src};
@@ -3131,6 +3136,54 @@ fn dispatch_map<B: Backend>(
         Insn::JmpJb => sem_ea::jmp_rel(b, eip, u32::from(d.len), d.rel),
         Insn::Ret => sem_ea::ret(b, sw, 0, sa, sseg),
         Insn::RetIw => sem_ea::ret(b, sw, d.imm as u16, sa, sseg),
+        Insn::Retf => {
+            if mode != 16 {
+                return Ok(false);
+            }
+            sem_ea::retf(b, 0, sa, sseg)
+        }
+        Insn::RetfIw => {
+            if mode != 16 {
+                return Ok(false);
+            }
+            sem_ea::retf(b, d.imm as u16, sa, sseg)
+        }
+        Insn::CallfAp => {
+            if mode != 16 {
+                return Ok(false);
+            }
+            sem_ea::callf_ptr(b, d.imm, d.imm2, eip, u32::from(d.len), sa, sseg)
+        }
+        Insn::JmpfAp => {
+            if mode != 16 {
+                return Ok(false);
+            }
+            sem_ea::jmpf_ptr(b, d.imm, d.imm2)
+        }
+        Insn::CallfRm => {
+            if mode != 16 {
+                return Ok(false);
+            }
+            sem_ea::far_rm(b, w, &ea, true, eip, u32::from(d.len), sa, sseg)
+        }
+        Insn::JmpfRm => {
+            if mode != 16 {
+                return Ok(false);
+            }
+            sem_ea::far_rm(b, w, &ea, false, eip, u32::from(d.len), sa, sseg)
+        }
+        Insn::Iret => {
+            if mode != 16 {
+                return Ok(false);
+            }
+            sem_ea::iret_real(b, sa, sseg)
+        }
+        Insn::Into => {
+            if mode != 16 {
+                return Ok(false);
+            }
+            sem_ea::into_real(b, eip, u32::from(d.len), sa, sseg)
+        }
         Insn::CallEv => sem_ea::call_rm(b, sw, &ea, d, eip, u32::from(d.len), sa, sseg),
         Insn::JmpEv => sem_ea::jmp_rm(b, sw, &ea, d),
         Insn::Leave => {
@@ -3166,8 +3219,20 @@ fn dispatch_map<B: Backend>(
         Insn::NopEv => sem_ea::nop(b),
         Insn::Endbr => sem_ea::nop(b),
         Insn::Ud2 => sem_ea::trap(b, eip, 0x06),
-        Insn::Int3 => sem_ea::int_n(b, eip, 3),
-        Insn::IntIb => sem_ea::int_n(b, eip, d.imm as u8),
+        Insn::Int3 => {
+            if mode == 16 {
+                sem_ea::int_real(b, eip, u32::from(d.len), 3, sa, sseg)
+            } else {
+                sem_ea::int_n(b, eip, 3)
+            }
+        }
+        Insn::IntIb => {
+            if mode == 16 {
+                sem_ea::int_real(b, eip, u32::from(d.len), d.imm as u8, sa, sseg)
+            } else {
+                sem_ea::int_n(b, eip, d.imm as u8)
+            }
+        }
         Insn::Syscall => sem::syscall(b, eip),
         Insn::Cpuid => sem::cpuid(b),
         Insn::ImulGvEv => sem_ea::imul2(b, w, reg, &ea, d),
@@ -3902,10 +3967,10 @@ fn dispatch_map<B: Backend>(
         Insn::MulEv => sem_ea::mulx(b, w, d, &ea, false),
         Insn::ImulEb => sem_ea::mulx(b, 8, d, &ea, true),
         Insn::ImulEv => sem_ea::mulx(b, w, d, &ea, true),
-        Insn::DivEb => sem_ea::divx(b, 8, d, &ea, eip, false),
-        Insn::DivEv => sem_ea::divx(b, w, d, &ea, eip, false),
-        Insn::IdivEb => sem_ea::divx(b, 8, d, &ea, eip, true),
-        Insn::IdivEv => sem_ea::divx(b, w, d, &ea, eip, true),
+        Insn::DivEb => sem_ea::divx(b, 8, d, &ea, eip, u32::from(d.len), sa, sseg, mode, false),
+        Insn::DivEv => sem_ea::divx(b, w, d, &ea, eip, u32::from(d.len), sa, sseg, mode, false),
+        Insn::IdivEb => sem_ea::divx(b, 8, d, &ea, eip, u32::from(d.len), sa, sseg, mode, true),
+        Insn::IdivEv => sem_ea::divx(b, w, d, &ea, eip, u32::from(d.len), sa, sseg, mode, true),
         Insn::FcomM32 => sem_ea::fcom_m(b, 32, d, &ea, false),
         Insn::FcompM32 => sem_ea::fcom_m(b, 32, d, &ea, true),
         Insn::FcomM64 => sem_ea::fcom_m(b, 64, d, &ea, false),
@@ -4119,6 +4184,29 @@ fn step_x86_map(
         (opd << polyisa_guest_x86::MODE_OPD_SHIFT) | (adr << polyisa_guest_x86::MODE_ADR_SHIFT);
     if mode == 64 {
         modes |= polyisa_guest_x86::MODE_M64;
+    }
+    if mode == 16 {
+        // 8088 の別名。0x66/0x67 は接頭辞ではなく Jcc 命令なので
+        // 接頭辞としては 26/2E/36/3E/F0/F2/F3 だけを読み飛ばす。
+        // 60-6F は 70-7F の Jcc 別名、C0/C1/C8/C9 は C2/C3/CA/CB、
+        // FF /7 は /6 push の別名になる。
+        let mut i = 0usize;
+        while i < n && matches!(buf[i], 0x26 | 0x2E | 0x36 | 0x3E | 0xF0 | 0xF2 | 0xF3) {
+            i += 1;
+        }
+        if i < n {
+            match buf[i] {
+                0x60..=0x6F => buf[i] |= 0x10,
+                0xC0 => buf[i] = 0xC2,
+                0xC1 => buf[i] = 0xC3,
+                0xC8 => buf[i] = 0xCA,
+                0xC9 => buf[i] = 0xCB,
+                0xFF if i + 1 < n && (buf[i + 1] >> 3) & 7 == 7 => {
+                    buf[i + 1] = (buf[i + 1] & !0x38) | 0x30;
+                }
+                _ => {}
+            }
+        }
     }
     let md = polyisa_guest_x86::decode_map(&buf[..n], modes, feats)?;
     let eip = if mode == 16 { ip & 0xFFFF } else { ip };

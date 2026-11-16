@@ -51,6 +51,8 @@
 | btr | btr_ev_gv、btr_ev_ib | 真 | alu |
 | bts | bts_ev_gv、bts_ev_ib、bts_r32_imm、bts_r32_rm | 真 | alu |
 | call | call_ev、call_jz、call_r_mem32、call_r_mem8、call_r_memnd、call_r_rip、call_r_rm、call_r_sib、call_r_sibabs、call_r_sibd、call_r_sibd32、call_rel32 | 真 | jump |
+| callf | callf_ap | !m64 | jump |
+| callf | callf_rm | 真 | jump |
 | cbw/cwde/cdqe | cwde | 真 | alu |
 | cdq | en_cdq | 真 | alu |
 | clc | clc | 真 | alu |
@@ -156,6 +158,8 @@
 | insertps | insertps_xv_wv_ib | 真 | alu |
 | int | int80、int_ib | 真 | system |
 | int3 | int3 | 真 | system |
+| into | into | !m64 | system |
+| iret | iret | !m64 | jump |
 | ja | ja、ja_rel32 | 真 | jump |
 | jae | jae、jae_rel32 | 真 | jump |
 | jb | jb、jb_rel32 | 真 | jump |
@@ -168,6 +172,8 @@
 | jl | jl、jl_rel32 | 真 | jump |
 | jle | jle、jle_rel32 | 真 | jump |
 | jmp | jmp8、jmp_ev、jmp_jb、jmp_jz、jmp_r_mem32、jmp_r_mem8、jmp_r_memnd、jmp_r_rip、jmp_r_rm、jmp_r_sib、jmp_r_sibabs、jmp_rel32 | 真 | jump |
+| jmpf | jmpf_ap | !m64 | jump |
+| jmpf | jmpf_rm | 真 | jump |
 | jne | jne、jne_rel32 | 真 | jump |
 | jno | jno、jno_rel32 | 真 | jump |
 | jnp | jnp、jnp_rel32 | 真 | jump |
@@ -370,6 +376,7 @@
 | rdsspq | rdsspq | 真 | system |
 | rdtsc | rdtsc | 真 | system |
 | ret | en_ret、ret、ret_imm、ret_iw | 真 | jump |
+| retf | retf、retf_iw | !m64 | jump |
 | rol | rol_eb_1、rol_eb_cl、rol_eb_ib、rol_ev_1、rol_ev_cl、rol_ev_ib、rol_rm32_1、rol_rm32_cl、rol_rm32_imm8 | 真 | alu |
 | ror | ror_eb_1、ror_eb_cl、ror_eb_ib、ror_ev_1、ror_ev_cl、ror_ev_ib、ror_rm32_1、ror_rm32_imm8 | 真 | alu |
 | sahf | sahf | 真 | alu |

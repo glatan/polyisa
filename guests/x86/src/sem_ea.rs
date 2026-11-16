@@ -1055,41 +1055,208 @@ pub fn call_rm<B: Backend>(
     Ok(())
 }
 
+/// SP に iw を積み増しする。ポインタ更新はスタックアドレス幅 sa に従う。
+fn sp_add_iw<B: Backend>(b: &mut B, iw: u16, sa: u8) {
+    let sp = Gpr(4);
+    match sa {
+        64 => {
+            let cur = sem::read64(b, sp);
+            let k = b.konst::<W64>(u64::from(iw));
+            let np = b.add::<W64>(cur, k);
+            sem::write64(b, sp, np);
+        }
+        16 => {
+            let cur: B::V<W32> = b.get(sp.state());
+            let k = b.konst::<W32>(u32::from(iw));
+            let np32 = b.add::<W32>(cur, k);
+            let m16 = b.konst::<W32>(0xFFFF);
+            let lo = b.and::<W32>(np32, m16);
+            let nm = b.konst::<W32>(0xFFFF_0000);
+            let hi = b.and::<W32>(cur, nm);
+            let np = b.or::<W32>(hi, lo);
+            b.set(sp.state(), np);
+        }
+        _ => {
+            let cur: B::V<W32> = b.get(sp.state());
+            let k = b.konst::<W32>(u32::from(iw));
+            let np = b.add::<W32>(cur, k);
+            b.set(sp.state(), np);
+        }
+    }
+}
+
 /// RET。pop で戻る。iw は積み増し。
 pub fn ret<B: Backend>(b: &mut B, w: u8, iw: u16, sa: u8, sseg: u64) -> Flow<B> {
     let v = pop_v(b, w, sa, sseg)?;
     if iw != 0 {
-        let sp = Gpr(4);
-        match sa {
-            64 => {
-                let cur = sem::read64(b, sp);
-                let k = b.konst::<W64>(u64::from(iw));
-                let np = b.add::<W64>(cur, k);
-                sem::write64(b, sp, np);
-            }
-            16 => {
-                let cur: B::V<W32> = b.get(sp.state());
-                let k = b.konst::<W32>(u32::from(iw));
-                let np32 = b.add::<W32>(cur, k);
-                let m16 = b.konst::<W32>(0xFFFF);
-                let lo = b.and::<W32>(np32, m16);
-                let nm = b.konst::<W32>(0xFFFF_0000);
-                let hi = b.and::<W32>(cur, nm);
-                let np = b.or::<W32>(hi, lo);
-                b.set(sp.state(), np);
-            }
-            _ => {
-                let cur: B::V<W32> = b.get(sp.state());
-                let k = b.konst::<W32>(u32::from(iw));
-                let np = b.add::<W32>(cur, k);
-                b.set(sp.state(), np);
-            }
-        }
+        sp_add_iw(b, iw, sa);
     }
     let t32: B::V<W32> = b.trunc::<W64, W32>(v);
     b.set(eip_ref(), t32);
     b.jump(v);
     Ok(())
+}
+
+// ---- 実モードの far 転移・割り込み ----
+
+/// far 分岐先 (off, sel) へ CS:IP を設定し、実モードの物理番地
+/// `sel<<4 + off` へ分岐する。
+fn jmp_far<B: Backend>(b: &mut B, off: B::V<W64>, sel: B::V<W16>) -> Flow<B> {
+    b.set(sem::sreg_ref(1), sel);
+    let ip: B::V<W32> = b.trunc::<W64, W32>(off);
+    b.set(eip_ref(), ip);
+    let sel64 = b.zext::<W16, W64>(sel);
+    let sh = b.konst::<W64>(4);
+    let base = b.shl::<W64>(sel64, sh);
+    let target = b.add::<W64>(base, off);
+    b.jump(target);
+    Ok(())
+}
+
+/// JMPF ptr16:v（直値 far ポインタ）。
+pub fn jmpf_ptr<B: Backend>(b: &mut B, off: u64, sel: u64) -> Flow<B> {
+    let o = b.konst::<W64>(off);
+    let s = b.konst::<W16>(sel as u16);
+    jmp_far(b, o, s)
+}
+
+/// CALLF ptr16:v。CS、次の IP の順に積んで far 分岐する。
+pub fn callf_ptr<B: Backend>(
+    b: &mut B,
+    off: u64,
+    sel: u64,
+    eip: u32,
+    len: u32,
+    sa: u8,
+    sseg: u64,
+) -> Flow<B> {
+    let cs: B::V<W16> = b.get(sem::sreg_ref(1));
+    let cs64 = b.zext::<W16, W64>(cs);
+    push_v(b, 16, cs64, sa, sseg)?;
+    let next = eip.wrapping_add(len) & 0xFFFF;
+    let nv = b.konst::<W64>(u64::from(next));
+    push_v(b, 16, nv, sa, sseg)?;
+    jmpf_ptr(b, off, sel)
+}
+
+/// RETF。IP、CS の順に戻す。iw は積み増し。
+pub fn retf<B: Backend>(b: &mut B, iw: u16, sa: u8, sseg: u64) -> Flow<B> {
+    let ip = pop_v(b, 16, sa, sseg)?;
+    let cs64 = pop_v(b, 16, sa, sseg)?;
+    if iw != 0 {
+        sp_add_iw(b, iw, sa);
+    }
+    let sel: B::V<W16> = b.trunc::<W64, W16>(cs64);
+    jmp_far(b, ip, sel)
+}
+
+/// far ポインタ（オフセット、セレクタ）。
+type FarPtr<B> = (<B as Backend>::V<W64>, <B as Backend>::V<W16>);
+
+/// m16:v の far ポインタ（off は v 幅、seg は 16 ビット）を読む。
+/// レジスタ形は far ポインタを構成できないので None。
+fn load_far_ptr<B: Backend>(
+    b: &mut B,
+    w: u8,
+    rm: &Rm<B::V<W64>>,
+) -> Result<Option<FarPtr<B>>, B::Exit> {
+    let Rm::Mem { a, wseg } = rm else {
+        return Ok(None);
+    };
+    let off: B::V<W64> = match w {
+        16 => {
+            let v: B::V<W16> = decode::mem_load(b, *a, *wseg)?;
+            b.zext::<W16, W64>(v)
+        }
+        _ => {
+            let v: B::V<W32> = decode::mem_load(b, *a, *wseg)?;
+            b.zext::<W32, W64>(v)
+        }
+    };
+    let adv = b.konst::<W64>(u64::from(w / 8));
+    let a2 = b.add::<W64>(*a, adv);
+    let seg: B::V<W16> = decode::mem_load(b, a2, *wseg)?;
+    Ok(Some((off, seg)))
+}
+
+/// CALLF/JMPF m16:v。far ポインタを読み、`is_call` なら CS と
+/// 次の IP を積んでから分岐する。
+#[allow(clippy::too_many_arguments)]
+pub fn far_rm<B: Backend>(
+    b: &mut B,
+    w: u8,
+    rm: &Rm<B::V<W64>>,
+    is_call: bool,
+    eip: u32,
+    len: u32,
+    sa: u8,
+    sseg: u64,
+) -> Flow<B> {
+    let Some((off, sel)) = load_far_ptr(b, w, rm)? else {
+        return Ok(());
+    };
+    if is_call {
+        let cs: B::V<W16> = b.get(sem::sreg_ref(1));
+        let cs64 = b.zext::<W16, W64>(cs);
+        push_v(b, 16, cs64, sa, sseg)?;
+        let next = eip.wrapping_add(len) & 0xFFFF;
+        let nv = b.konst::<W64>(u64::from(next));
+        push_v(b, 16, nv, sa, sseg)?;
+    }
+    jmp_far(b, off, sel)
+}
+
+/// 実モード割り込み。FLAGS、CS、次の IP の順に積み、IF=TF=0 に
+/// して IVT[vec] へ far 分岐する。divide error もこの経路で、
+/// 積まれる IP は除算命令の次を指す（8088 の実動作）。
+pub fn int_real<B: Backend>(b: &mut B, eip: u32, len: u32, vec: u8, sa: u8, sseg: u64) -> Flow<B> {
+    let fl: B::V<W32> = b.get(eflags_ref());
+    let fl64 = b.zext::<W32, W64>(fl);
+    push_v(b, 16, fl64, sa, sseg)?;
+    // IF(bit9) と TF(bit8) を落とす。
+    let m = b.konst::<W32>(!0x300u32);
+    let n = b.and::<W32>(fl, m);
+    b.set(eflags_ref(), n);
+    let cs: B::V<W16> = b.get(sem::sreg_ref(1));
+    let cs64 = b.zext::<W16, W64>(cs);
+    push_v(b, 16, cs64, sa, sseg)?;
+    let next = eip.wrapping_add(len) & 0xFFFF;
+    let nv = b.konst::<W64>(u64::from(next));
+    push_v(b, 16, nv, sa, sseg)?;
+    // IVT の物理番地は vec*4（+2 がセレクタ）。
+    let va = b.konst::<W64>(u64::from(vec) * 4);
+    let ip: B::V<W16> = decode::mem_load(b, va, None)?;
+    let adv = b.konst::<W64>(2);
+    let ca = b.add::<W64>(va, adv);
+    let cs2: B::V<W16> = decode::mem_load(b, ca, None)?;
+    let off = b.zext::<W16, W64>(ip);
+    jmp_far(b, off, cs2)
+}
+
+/// INTO。OF が立っていれば割り込み 4。
+pub fn into_real<B: Backend>(b: &mut B, eip: u32, len: u32, sa: u8, sseg: u64) -> Flow<B> {
+    let of = read_of(b);
+    b.if_then(of, |b| int_real(b, eip, len, 4, sa, sseg))
+}
+
+/// IRET（実モード）。IP、CS、FLAGS を pop する。
+pub fn iret_real<B: Backend>(b: &mut B, sa: u8, sseg: u64) -> Flow<B> {
+    let ip = pop_v(b, 16, sa, sseg)?;
+    let cs64 = pop_v(b, 16, sa, sseg)?;
+    let fl64 = pop_v(b, 16, sa, sseg)?;
+    let fl32: B::V<W32> = b.trunc::<W64, W32>(fl64);
+    // POPF と同じ強制ビット（bit1=1、bit3/5=0、bit12-15 は常に 1）。
+    let m = b.konst::<W32>(0x0FD5);
+    let low = b.and::<W32>(fl32, m);
+    let forced = b.konst::<W32>(0xF002);
+    let low = b.or::<W32>(low, forced);
+    let cur = b.get(eflags_ref());
+    let him = b.konst::<W32>(0xFFFF_0000);
+    let hi = b.and::<W32>(cur, him);
+    let merged = b.or::<W32>(hi, low);
+    b.set(eflags_ref(), merged);
+    let sel: B::V<W16> = b.trunc::<W64, W16>(cs64);
+    jmp_far(b, ip, sel)
 }
 
 // ---- SETcc/CMOVcc ----
@@ -4252,26 +4419,53 @@ fn mulx_w<B: Backend, W: Hw, W2: polyisa_sem::Width>(
     Ok(())
 }
 
-/// DIV/IDIV r/m。0 除算・商あふれは #DE 相当の DivZero で退出する。
-/// フラグは不定なので変えない。
+/// DIV/IDIV r/m。実モードでは 0 除算・商あふれを IVT 0 番へ送る
+/// （積まれる IP は命令の次を指す）。それ以外のモードでは DivZero
+/// 例外で退出する。8088 のフォールトが残すフラグの実動作は未再現。
+#[allow(clippy::too_many_arguments)]
 pub fn divx<B: Backend>(
     b: &mut B,
     w: u8,
     d: &MapDec,
     ea: &Rm<B::V<W64>>,
     eip: u32,
+    len: u32,
+    sa: u8,
+    sseg: u64,
+    mode: u8,
     signed: bool,
 ) -> Flow<B> {
     match w {
-        8 => divx8(b, d, ea, eip, signed),
-        16 => divx_w::<B, W16, W32>(b, d, ea, eip, signed),
-        64 => divx_w::<B, W64, W128>(b, d, ea, eip, signed),
-        _ => divx_w::<B, W32, W64>(b, d, ea, eip, signed),
+        8 => divx8(b, d, ea, eip, len, sa, sseg, mode, signed),
+        16 => divx_w::<B, W16, W32>(b, d, ea, eip, len, sa, sseg, mode, signed),
+        64 => divx_w::<B, W64, W128>(b, d, ea, eip, len, sa, sseg, mode, signed),
+        _ => divx_w::<B, W32, W64>(b, d, ea, eip, len, sa, sseg, mode, signed),
+    }
+}
+
+/// #DE。実モードでは実機の割り込み 0（FLAGS/CS/次の IP を積んで
+/// IVT[0] へ far 分岐）。他モードは divide error 例外。
+fn div_fault<B: Backend>(b: &mut B, eip: u32, len: u32, sa: u8, sseg: u64, mode: u8) -> Flow<B> {
+    if mode == 16 {
+        int_real(b, eip, len, 0, sa, sseg)
+    } else {
+        Err(sem::div0(b, eip))
     }
 }
 
 /// DIV/IDIV r/m8。被除数は AX、商を AL・剰余を AH に置く。
-fn divx8<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>, eip: u32, signed: bool) -> Flow<B> {
+#[allow(clippy::too_many_arguments)]
+fn divx8<B: Backend>(
+    b: &mut B,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+    eip: u32,
+    len: u32,
+    sa: u8,
+    sseg: u64,
+    mode: u8,
+    signed: bool,
+) -> Flow<B> {
     let ax32: B::V<W32> = b.get(Gpr(0).state());
     let ax: B::V<W16> = b.trunc::<W32, W16>(ax32);
     let y = rd_w::<B, W8>(b, ea, d)?;
@@ -4282,7 +4476,7 @@ fn divx8<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>, eip: u32, signed
     };
     let zero = b.konst::<W32>(0);
     let is_zero = b.cmp::<W32>(Cmp::Eq, dvs, zero);
-    b.if_then(is_zero, |b| Err(sem::div0(b, eip)))?;
+    b.if_then(is_zero, |b| div_fault(b, eip, len, sa, sseg, mode))?;
     let q = if signed {
         b.sdiv::<W32>(dvd, dvs)
     } else {
@@ -4295,7 +4489,7 @@ fn divx8<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>, eip: u32, signed
         b.zext::<W8, W32>(q8)
     };
     let over = b.cmp::<W32>(Cmp::Ne, q_back, q);
-    b.if_then(over, |b| Err(sem::div0(b, eip)))?;
+    b.if_then(over, |b| div_fault(b, eip, len, sa, sseg, mode))?;
     let r = if signed {
         b.srem::<W32>(dvd, dvs)
     } else {
@@ -4307,11 +4501,16 @@ fn divx8<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>, eip: u32, signed
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn divx_w<B: Backend, W: Hw, W2: polyisa_sem::Width>(
     b: &mut B,
     d: &MapDec,
     ea: &Rm<B::V<W64>>,
     eip: u32,
+    len: u32,
+    sa: u8,
+    sseg: u64,
+    mode: u8,
     signed: bool,
 ) -> Flow<B> {
     let lo = W::get(b, Gpr(0), d);
@@ -4333,7 +4532,7 @@ fn divx_w<B: Backend, W: Hw, W2: polyisa_sem::Width>(
     };
     let zero = b.konst::<W2>(W2::from_u128(0));
     let is_zero = b.cmp::<W2>(Cmp::Eq, yw, zero);
-    b.if_then(is_zero, |b| Err(sem::div0(b, eip)))?;
+    b.if_then(is_zero, |b| div_fault(b, eip, len, sa, sseg, mode))?;
     let q = if signed {
         b.sdiv::<W2>(dvd, yw)
     } else {
@@ -4346,7 +4545,7 @@ fn divx_w<B: Backend, W: Hw, W2: polyisa_sem::Width>(
         b.zext::<W, W2>(q_t)
     };
     let over = b.cmp::<W2>(Cmp::Ne, q_back, q);
-    b.if_then(over, |b| Err(sem::div0(b, eip)))?;
+    b.if_then(over, |b| div_fault(b, eip, len, sa, sseg, mode))?;
     let r = if signed {
         b.srem::<W2>(dvd, yw)
     } else {

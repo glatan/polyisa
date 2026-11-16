@@ -386,6 +386,47 @@ pub fn build_maps(m: &mut Model) {
     primary.extend([
         MapItem::Insn(0xC2, n("ret_iw", &[Imm(W16)], "ret {i}", "jump")),
         MapItem::Insn(0xC3, n("ret", &[], "ret", "jump")),
+        // far 転移と割り込み系。実モード経路が意味論を持つ。
+        MapItem::Insn(
+            0x9A,
+            mi(
+                "callf_ap",
+                &[Imm(Z), Imm2(W16)],
+                None,
+                PfxSel::Any,
+                w("!m64"),
+                "callf {i}",
+                "jump",
+            ),
+        ),
+        MapItem::Insn(
+            0xCA,
+            mi("retf_iw", &[Imm(W16)], None, PfxSel::Any, w("!m64"), "retf {i}", "jump"),
+        ),
+        MapItem::Insn(
+            0xCB,
+            mi("retf", &[], None, PfxSel::Any, w("!m64"), "retf", "jump"),
+        ),
+        MapItem::Insn(
+            0xCE,
+            mi("into", &[], None, PfxSel::Any, w("!m64"), "into", "system"),
+        ),
+        MapItem::Insn(
+            0xCF,
+            mi("iret", &[], None, PfxSel::Any, w("!m64"), "iret", "jump"),
+        ),
+        MapItem::Insn(
+            0xEA,
+            mi(
+                "jmpf_ap",
+                &[Imm(Z), Imm2(W16)],
+                None,
+                PfxSel::Any,
+                w("!m64"),
+                "jmpf {i}",
+                "jump",
+            ),
+        ),
         // C6/C7 は 8088 では ModRM.reg が全値で mov の別名になる（非グループ
         // 宣言で reg を照合しない）。286 以降は /1-7 が #UD だが、デコーダは
         // 全モードで受理する（既知の近似）。
@@ -470,7 +511,9 @@ pub fn build_maps(m: &mut Model) {
         MapItem::Insn(0xFF, g("inc_ev", 0, &[Ea(V)], "inc {e}", "alu")),
         MapItem::Insn(0xFF, g("dec_ev", 1, &[Ea(V)], "dec {e}", "alu")),
         MapItem::Insn(0xFF, g("call_ev", 2, &[Ea(V)], "call {e}", "jump")),
+        MapItem::Insn(0xFF, g("callf_rm", 3, &[Ea(V)], "callf {e}", "jump")),
         MapItem::Insn(0xFF, g("jmp_ev", 4, &[Ea(V)], "jmp {e}", "jump")),
+        MapItem::Insn(0xFF, g("jmpf_rm", 5, &[Ea(V)], "jmpf {e}", "jump")),
         MapItem::Insn(0xFF, g("push_ev", 6, &[Ea(V)], "push {e}", "store")),
     ]);
 
