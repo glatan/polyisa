@@ -38,6 +38,9 @@ pub struct IrBackend {
     pub cur_next: u64,
     /// `if_then_else` の記録中の子列。末尾が現在の追記先。
     stack: Vec<Vec<Inst>>,
+    /// 挙動パラメータの値。`Param` の型を鍵にする u64 の表。
+    /// 記録時に定数として読まれ、選んだ枝だけが IR に残る。
+    pub params: std::collections::BTreeMap<std::any::TypeId, u64>,
 }
 
 impl IrBackend {
@@ -48,6 +51,7 @@ impl IrBackend {
             cur_pc: 0,
             cur_next: 0,
             stack: Vec::new(),
+            params: std::collections::BTreeMap::new(),
         }
     }
 
@@ -517,9 +521,18 @@ impl Backend for IrBackend {
     {
         Err(IrExit::Unimpl)
     }
-    /// `param` はインタプリタも panic するので同じに揃える（GAP-0027）。
+    /// 記録時に値を読み、選んだ枝だけが IR に残る（定数畳み込み）。
     fn param<P: Param>(&mut self) -> P::Value {
-        panic!("param: 挙動パラメータは CPU モデルの結び付け後に読む")
+        let bits = self
+            .params
+            .get(&std::any::TypeId::of::<P>())
+            .copied()
+            .unwrap_or_else(P::default_bits);
+        P::from_bits(bits)
+    }
+
+    fn set_param<P: Param>(&mut self, bits: u64) {
+        self.params.insert(std::any::TypeId::of::<P>(), bits);
     }
     /// タイミングの手がかりは記録だけしておく（実行時の効果なし）。
     fn timing_hint(&mut self, key: HintKey, v: IrVal) {

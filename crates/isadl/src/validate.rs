@@ -210,6 +210,71 @@ pub fn validate(model: &Model) -> Report {
                 });
             }
         }
+        // 親連鎖の循環は解決不能なので、ここで止める（生成側・実行側は
+        // 打ち切りやエラーで挙動が分かれるため）。
+        let mut seen: BTreeSet<&str> = BTreeSet::new();
+        let mut cur = d;
+        while !cur.parent.is_empty() {
+            if !seen.insert(cur.name.as_str()) {
+                errors.push(ValidationError::BadField {
+                    format: "model".to_string(),
+                    field: format!("{}: parent cycle", d.name),
+                });
+                break;
+            }
+            let Some(next) = model.models.iter().find(|m| m.name == cur.parent) else {
+                break;
+            };
+            cur = next;
+        }
+    }
+
+    // 挙動パラメータ。宣言の既定値とモデル側の上書き値を検査する。
+    let mut param_names: BTreeSet<&str> = BTreeSet::new();
+    for p in &model.params {
+        if !param_names.insert(p.name.as_str()) {
+            errors.push(ValidationError::BadField {
+                format: "param".to_string(),
+                field: format!("{}: duplicate", p.name),
+            });
+        }
+        let value_ok = |v: &str| match &p.kind {
+            crate::model::ParamKind::Bool => v == "true" || v == "false",
+            crate::model::ParamKind::Enum(vs) => vs.iter().any(|x| x == v),
+            crate::model::ParamKind::Int(max) => {
+                v.parse::<u64>().is_ok_and(|n| n <= u64::from(*max))
+            }
+        };
+        if !value_ok(&p.default) {
+            errors.push(ValidationError::BadField {
+                format: "param".to_string(),
+                field: format!("{}: default {:?}", p.name, p.default),
+            });
+        }
+    }
+    for d in &model.models {
+        for (k, v) in &d.params {
+            let Some(p) = model.params.iter().find(|p| p.name == *k) else {
+                errors.push(ValidationError::Unresolved {
+                    kind: "model-param".to_string(),
+                    name: format!("{}: {}", d.name, k),
+                });
+                continue;
+            };
+            let value_ok = match &p.kind {
+                crate::model::ParamKind::Bool => v == "true" || v == "false",
+                crate::model::ParamKind::Enum(vs) => vs.iter().any(|x| x == v),
+                crate::model::ParamKind::Int(max) => {
+                    v.parse::<u64>().is_ok_and(|n| n <= u64::from(*max))
+                }
+            };
+            if !value_ok {
+                errors.push(ValidationError::BadField {
+                    format: "param".to_string(),
+                    field: format!("{}: {} = {:?}", d.name, k, v),
+                });
+            }
+        }
     }
 
     for format in &model.formats {
@@ -713,6 +778,7 @@ mod tests {
     fn unknown_model_parent_is_rejected() {
         let mut m = test_model();
         m.models.push(crate::model::ModelDef {
+            params: vec![],
             name: "child".to_string(),
             parent: "nosuchparent".to_string(),
             add_features: vec![],
@@ -730,6 +796,106 @@ mod tests {
     }
 
     #[test]
+    fn model_parent_cycle_is_rejected() {
+        let mut m = test_model();
+        for (name, parent) in [("a", "b"), ("b", "a")] {
+            m.models.push(crate::model::ModelDef {
+                params: vec![],
+                name: name.to_string(),
+                parent: parent.to_string(),
+                add_features: vec![],
+                remove_features: vec![],
+                ident: vec![],
+            });
+        }
+        let r = validate(&m);
+        assert!(
+            r.errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::BadField { field, .. }
+                    if field.contains("parent cycle"))),
+            "{:?}",
+            r.errors
+        );
+    }
+
+    #[test]
+    fn param_defaults_and_overrides_are_checked() {
+        use crate::model::{Param, ParamKind};
+        let mut m = test_model();
+        // 既定値が列挙に無い宣言は拒否する。
+        m.params.push(Param {
+            name: "p0".to_string(),
+            kind: ParamKind::Enum(vec!["a".to_string(), "b".to_string()]),
+            default: "zzz".to_string(),
+            doc: String::new(),
+        });
+        // 同名の二重宣言は拒否する。
+        m.params.push(Param {
+            name: "p0".to_string(),
+            kind: ParamKind::Bool,
+            default: "true".to_string(),
+            doc: String::new(),
+        });
+        // 宣言の無いパラメータをモデルが上書きするのは拒否する。
+        m.models.push(crate::model::ModelDef {
+            params: vec![("nosuch".to_string(), "a".to_string())],
+            name: "mdl".to_string(),
+            parent: String::new(),
+            add_features: vec![],
+            remove_features: vec![],
+            ident: vec![],
+        });
+        // 型に合わない上書き値は拒否する。
+        m.params.push(Param {
+            name: "p1".to_string(),
+            kind: ParamKind::Int(10),
+            default: "3".to_string(),
+            doc: String::new(),
+        });
+        m.models.push(crate::model::ModelDef {
+            params: vec![("p1".to_string(), "99".to_string())],
+            name: "mdl2".to_string(),
+            parent: String::new(),
+            add_features: vec![],
+            remove_features: vec![],
+            ident: vec![],
+        });
+        let r = validate(&m);
+        assert!(
+            r.errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::BadField { format, field }
+                    if format == "param" && field.contains("p0: duplicate"))),
+            "{:?}",
+            r.errors
+        );
+        assert!(
+            r.errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::BadField { format, field }
+                    if format == "param" && field.contains("p0: default"))),
+            "{:?}",
+            r.errors
+        );
+        assert!(
+            r.errors.iter().any(
+                |e| matches!(e, ValidationError::Unresolved { kind, .. } if kind == "model-param")
+            ),
+            "{:?}",
+            r.errors
+        );
+        assert!(
+            r.errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::BadField { format, field }
+                    if format == "param" && field.contains("p1"))),
+            "{:?}",
+            r.errors
+        );
+    }
+
+    #[test]
     fn unknown_model_feature_is_rejected() {
         let mut m = test_model();
         m.features.push(Feature {
@@ -738,6 +904,7 @@ mod tests {
             conflicts: vec![],
         });
         m.models.push(crate::model::ModelDef {
+            params: vec![],
             name: "parent".to_string(),
             parent: String::new(),
             add_features: vec![],
@@ -745,6 +912,7 @@ mod tests {
             ident: vec![],
         });
         m.models.push(crate::model::ModelDef {
+            params: vec![],
             name: "child".to_string(),
             parent: "parent".to_string(),
             add_features: vec!["nosuchfeat".to_string()],

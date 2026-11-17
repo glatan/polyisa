@@ -57,6 +57,9 @@ pub struct InterpBackend {
     pub addr_mask: u64,
     /// I/O ポート空間（x86 IN/OUT 用の 64KiB）。未初期化は 0 を返す。
     pub ports: Box<[u8; 0x1_0000]>,
+    /// 挙動パラメータの値。`Param` の型を鍵にする u64 の表で、
+    /// 実行の開始時に CPU モデルから解決した値を流し込む。
+    pub params: std::collections::BTreeMap<std::any::TypeId, u64>,
 }
 
 impl InterpBackend {
@@ -70,6 +73,7 @@ impl InterpBackend {
             fp_flags: 0,
             addr_mask: u64::MAX,
             ports: vec![0u8; 0x1_0000].into_boxed_slice().try_into().unwrap(),
+            params: std::collections::BTreeMap::new(),
         }
     }
 
@@ -716,6 +720,7 @@ impl Backend for InterpBackend {
         InterpExit::Exception(e)
     }
 
+    // Gap: GAP-0027（call/timing_hint は未配線）
     fn call<H: Helper>(&mut self, _args: H::Args<Self>) -> Result<H::Ret<Self>, Self::Exit>
     where
         Self: Sized,
@@ -723,9 +728,17 @@ impl Backend for InterpBackend {
         Err(InterpExit::Unimplemented("helper".to_string()))
     }
 
-    // Gap: GAP-0027
     fn param<P: Param>(&mut self) -> P::Value {
-        panic!("param: 挙動パラメータは CPU モデルの結び付け後に読む")
+        let bits = self
+            .params
+            .get(&std::any::TypeId::of::<P>())
+            .copied()
+            .unwrap_or_else(P::default_bits);
+        P::from_bits(bits)
+    }
+
+    fn set_param<P: Param>(&mut self, bits: u64) {
+        self.params.insert(std::any::TypeId::of::<P>(), bits);
     }
 
     fn timing_hint(&mut self, _key: HintKey, _v: Self::V<W64>) {}

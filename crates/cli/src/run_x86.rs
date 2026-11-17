@@ -1729,6 +1729,7 @@ pub fn run_mode(
         limit,
         is64,
         polyisa_guest_x86::DEFAULT_FEATS,
+        &polyisa_guest_x86::DEFAULT_PARAMS,
     )
 }
 
@@ -1741,11 +1742,14 @@ pub fn run_mode_ex(
     limit: u64,
     is64: bool,
     feats: u64,
+    params: &polyisa_guest_x86::Params,
 ) -> Outcome {
     env.backend.set(polyisa_guest_x86::sem::eip_ref(), entry);
     // 32 ビットゲストの実効アドレスは 32 ビットで折り返す。負のオフセットを含む
     // 加算が 4GiB を越えても未映射判定にならないよう、アクセス幅をここで絞る。
     env.backend.addr_mask = if is64 { u64::MAX } else { 0xffff_ffff };
+    // 挙動パラメータをバックエンドの表に流し込む（意味論が `param` で読む）。
+    polyisa_guest_x86::install_params(&mut env.backend, params);
     // 呼び出し前に wait4 で止まっていれば、子から再開する。
     let _ = sys.on_block(env);
     // 直近の eip を記録する（POLYISA_HIST でフェッチ失敗時に吐出す診断）。
@@ -1763,7 +1767,14 @@ pub fn run_mode_ex(
 /// 16 ビット実モードの実行ループ。`eip` 状態は IP（16 ビット）、
 /// セグメント基底はセレクタ<<4 で実モードの規則に従う。
 pub fn run_m16(env: &mut BareEnv, entry: u32, sys: &mut impl TrapHandler, limit: u64) -> Outcome {
-    run_m16_ex(env, entry, sys, limit, 0)
+    run_m16_ex(
+        env,
+        entry,
+        sys,
+        limit,
+        0,
+        &polyisa_guest_x86::DEFAULT_PARAMS,
+    )
 }
 
 /// `run_m16` に機能集合を渡す（`--cpu` の配線）。
@@ -1773,7 +1784,9 @@ pub fn run_m16_ex(
     sys: &mut impl TrapHandler,
     limit: u64,
     feats: u64,
+    params: &polyisa_guest_x86::Params,
 ) -> Outcome {
+    polyisa_guest_x86::install_params(&mut env.backend, params);
     env.backend.set(polyisa_guest_x86::sem::eip_ref(), entry);
     env.backend.addr_mask = 0xF_FFFF;
     let _ = sys.on_block(env);
@@ -12593,7 +12606,16 @@ pub fn run_image_x86_32_ex(
     feats: u64,
 ) -> Result<u64, String> {
     let sel = default_sel();
-    run_image_x86_32_impl(bytes, prog, argv, sys, feats, &sel.features, &sel.ident)
+    run_image_x86_32_impl(
+        bytes,
+        prog,
+        argv,
+        sys,
+        feats,
+        &sel.features,
+        &sel.ident,
+        &polyisa_guest_x86::DEFAULT_PARAMS,
+    )
 }
 
 /// `run_image_x86_32` に CPU モデルの選択を渡す（`--cpu` の配線）。
@@ -12614,9 +12636,19 @@ pub fn run_image_x86_32_sel(
             &owned
         }
     };
-    run_image_x86_32_impl(bytes, prog, argv, sys, sel.feats, &sel.features, &sel.ident)
+    run_image_x86_32_impl(
+        bytes,
+        prog,
+        argv,
+        sys,
+        sel.feats,
+        &sel.features,
+        &sel.ident,
+        &polyisa_guest_x86::model_params(&sel.name),
+    )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_image_x86_32_impl(
     bytes: &[u8],
     prog: &str,
@@ -12625,6 +12657,7 @@ fn run_image_x86_32_impl(
     feats: u64,
     features: &std::collections::BTreeSet<String>,
     ident: &std::collections::BTreeMap<String, String>,
+    params: &polyisa_guest_x86::Params,
 ) -> Result<u64, String> {
     use polyisa_guest_x86::sem::Gpr;
     use polyisa_mem::{PAGE_SIZE, Perms};
@@ -12702,7 +12735,15 @@ fn run_image_x86_32_impl(
     env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037F);
     env.backend.set(polyisa_guest_x86::sem::mxcsr_ref(), 0x1F80);
     install_cpuid(&mut env, features, ident);
-    match run_mode_ex(&mut env, ehdr.entry as u32, sys, 1_000_000, false, feats) {
+    match run_mode_ex(
+        &mut env,
+        ehdr.entry as u32,
+        sys,
+        1_000_000,
+        false,
+        feats,
+        params,
+    ) {
         Outcome::Exit(code) => Ok(code),
         Outcome::Unimplemented { pc, word } => Err(format!("unimplemented at {pc:#x}: {word:#x}")),
         Outcome::StepLimit { pc } => Err(format!("step limit at {pc:#x}")),
@@ -12767,6 +12808,7 @@ pub fn run_image_x86_64_ex(
         &sel.features,
         &sel.ident,
         None,
+        &polyisa_guest_x86::DEFAULT_PARAMS,
     )
 }
 
@@ -12797,6 +12839,7 @@ pub fn run_image_x86_64_sel(
         &sel.features,
         &sel.ident,
         jit,
+        &polyisa_guest_x86::model_params(&sel.name),
     )
 }
 
@@ -12811,6 +12854,7 @@ fn run_image_x86_64_impl(
     features: &std::collections::BTreeSet<String>,
     ident: &std::collections::BTreeMap<String, String>,
     jit: Option<&mut polyisa_jit::Jit>,
+    params: &polyisa_guest_x86::Params,
 ) -> Result<u64, String> {
     use polyisa_guest_x86::sem::Gpr;
     use polyisa_mem::{PAGE_SIZE, Perms};
@@ -12878,9 +12922,18 @@ fn run_image_x86_64_impl(
             30_000_000,
             true,
             feats,
+            params,
             jit,
         ),
-        None => run_mode_ex(&mut env, ehdr.entry as u32, sys, 30_000_000, true, feats),
+        None => run_mode_ex(
+            &mut env,
+            ehdr.entry as u32,
+            sys,
+            30_000_000,
+            true,
+            feats,
+            params,
+        ),
     };
     match out {
         Outcome::Exit(code) => Ok(code),
@@ -12966,10 +13019,12 @@ fn run_elf_x86_64_at(
 /// 重いので a64/arm より小さく取る。
 const MAX_BLOCK_INSNS: usize = 16;
 
-/// x86/x86-64 の翻訳器。`is64`/`feats` は実行と同じ設定で固定する。
+/// x86/x86-64 の翻訳器。`is64`/`feats`/`params` は実行と同じ
+/// 設定で固定する。
 pub struct X86Tx {
     pub is64: bool,
     pub feats: u64,
+    pub params: polyisa_guest_x86::Params,
 }
 
 impl polyisa_jit::Translate for X86Tx {
@@ -12981,7 +13036,13 @@ impl polyisa_jit::Translate for X86Tx {
         let fs = u64::from_le_bytes(b.state[at..at + 8].try_into().unwrap_or([0; 8]));
         let at = sem::gs_base_ref().offset();
         let gs = u64::from_le_bytes(b.state[at..at + 8].try_into().unwrap_or([0; 8]));
-        pc ^ fs.rotate_left(19) ^ gs.rotate_left(41)
+        // 同じ Jit インスタンスを別設定で使い回してもブロックが混ざらない
+        // ように、翻訳に影響する設定を全部畳む。
+        pc ^ fs.rotate_left(19)
+            ^ gs.rotate_left(41)
+            ^ polyisa_guest_x86::params_key(&self.params)
+            ^ self.feats.rotate_left(7)
+            ^ u64::from(self.is64)
     }
 
     fn record(
@@ -12990,6 +13051,8 @@ impl polyisa_jit::Translate for X86Tx {
         entry: u64,
     ) -> Option<polyisa_ir::Recorded> {
         let mut irb = polyisa_ir::IrBackend::new();
+        // 挙動パラメータは記録時に定数として読まれ、枝が畳まれる。
+        polyisa_guest_x86::install_params(&mut irb, &self.params);
         let mut hist = std::collections::VecDeque::new();
         let mut pc = entry;
         for _ in 0..MAX_BLOCK_INSNS {
@@ -13044,10 +13107,15 @@ fn step_x86_jit(
     jit: &mut polyisa_jit::Jit,
     is64: bool,
     feats: u64,
+    params: &polyisa_guest_x86::Params,
     hist: &mut std::collections::VecDeque<(u32, String)>,
 ) -> Result<(), Outcome> {
     let pc = u64::from(eip_of(env));
-    let tx = X86Tx { is64, feats };
+    let tx = X86Tx {
+        is64,
+        feats,
+        params: *params,
+    };
     let Some(exit) = jit.exec_block(&mut env.backend, &tx, pc) else {
         return step_x86(env, sys, if is64 { 64 } else { 32 }, feats, hist);
     };
@@ -13105,6 +13173,7 @@ fn step_x86_jit(
 }
 
 /// `run_mode_ex` の JIT 版。初期設定はインタプリタと同じ。
+#[allow(clippy::too_many_arguments)]
 pub fn run_mode_ex_jit(
     env: &mut BareEnv,
     entry: u32,
@@ -13112,8 +13181,10 @@ pub fn run_mode_ex_jit(
     limit: u64,
     is64: bool,
     feats: u64,
+    params: &polyisa_guest_x86::Params,
     jit: &mut polyisa_jit::Jit,
 ) -> Outcome {
+    polyisa_guest_x86::install_params(&mut env.backend, params);
     env.backend.set(polyisa_guest_x86::sem::eip_ref(), entry);
     env.backend.addr_mask = if is64 { u64::MAX } else { 0xffff_ffff };
     let _ = sys.on_block(env);
@@ -13123,7 +13194,7 @@ pub fn run_mode_ex_jit(
         sys,
         limit,
         |env| u64::from(eip_of(env)),
-        |env, sys| step_x86_jit(env, sys, jit, is64, feats, &mut hist),
+        |env, sys| step_x86_jit(env, sys, jit, is64, feats, params, &mut hist),
     )
 }
 
@@ -13146,6 +13217,7 @@ pub fn run_image_x86_64_ex_jit(
         &sel.features,
         &sel.ident,
         Some(jit),
+        &polyisa_guest_x86::DEFAULT_PARAMS,
     )
 }
 

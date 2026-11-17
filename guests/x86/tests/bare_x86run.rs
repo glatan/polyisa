@@ -13837,6 +13837,27 @@ fn run32(prog: &[u8], steps: u64) -> (Outcome, BareEnv) {
     (out, env)
 }
 
+/// `run32` に挙動パラメータを渡す版。
+fn run32_p(prog: &[u8], steps: u64, params: &polyisa_guest_x86::Params) -> (Outcome, BareEnv) {
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 4, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    let mut sys = ExitOne;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        steps,
+        false,
+        polyisa_guest_x86::DEFAULT_FEATS,
+        params,
+    );
+    (out, env)
+}
+
 /// `run32` に機能集合を足す版。既定モデルに無い機能が要る命令用。
 fn run32_ex(prog: &[u8], steps: u64, feats: u64) -> (Outcome, BareEnv) {
     let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
@@ -13846,7 +13867,15 @@ fn run32_ex(prog: &[u8], steps: u64, feats: u64) -> (Outcome, BareEnv) {
     env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
     env.backend.set(Gpr(4).state(), 0x2000);
     let mut sys = ExitOne;
-    let out = run_x86::run_mode_ex(&mut env, 0x1000, &mut sys, steps, false, feats);
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        steps,
+        false,
+        feats,
+        &polyisa_guest_x86::DEFAULT_PARAMS,
+    );
     (out, env)
 }
 
@@ -16375,6 +16404,7 @@ fn run_a1_popcnt() {
         100,
         false,
         polyisa_guest_x86::DEFAULT_FEATS | polyisa_guest_x86::FEAT_POPCNT,
+        &polyisa_guest_x86::DEFAULT_PARAMS,
     );
     assert_eq!(out, Outcome::Exit(16));
     // 既定モデル（Nehalem）でも POPCNT が通る。
@@ -16925,4 +16955,31 @@ fn run_a2_fst_sti() {
         .read(VirtAddr(0x2000), &mut b8, polyisa_mem::Access::DATA_LE)
         .unwrap();
     assert_eq!(f64::from_bits(u64::from_le_bytes(b8)), 2.0);
+}
+
+#[test]
+fn bsf_zero_input_param() {
+    // bsf eax, ecx（ecx=0）。入力 0 のときの宛先は挙動パラメータ
+    // bsf_zero_input で決まる: unchanged=宛先を保つ、zero=0 にする。
+    let prog: &[u8] = &[
+        0xB9, 0x00, 0x00, 0x00, 0x00, // mov ecx,0
+        0xB8, 0x34, 0x12, 0x00, 0x00, // mov eax,0x1234
+        0x0F, 0xBC, 0xC1, // bsf eax,ecx
+        0x50, // push eax
+        0x5B, // pop ebx
+        0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax,1
+        0xCD, 0x80, // int 0x80
+    ];
+    // 既定（unchanged）: 宛先は 0x1234 のまま。
+    let (out, mut env) = run32_p(prog, 10, &polyisa_guest_x86::DEFAULT_PARAMS);
+    assert_eq!(out, Outcome::Exit(0x1234));
+    // 入力 0 では ZF が立つ（宛先の扱いとは独立）。
+    let flags: u32 = env.backend.get(polyisa_guest_x86::sem::eflags_ref());
+    assert_ne!(flags & 0x40, 0);
+    // zero: 宛先は 0 になる。
+    let params = polyisa_guest_x86::Params {
+        bsf_zero_input: polyisa_guest_x86::BSF_ZERO_INPUT_DEST_ZERO,
+    };
+    let (out, _) = run32_p(prog, 10, &params);
+    assert_eq!(out, Outcome::Exit(0));
 }

@@ -1624,7 +1624,15 @@ fn bsfx_w<B: Backend, W: Hw>(
             b.select::<W>(take, idx, acc)
         };
     }
-    let dst = b.select::<W>(is_zero, zero, acc);
+    // 入力 0 のときの宛先は挙動パラメータ。dest_zero=0 に、
+    // dest_unchanged=保つ。IR 経路では `param` が定数になり枝が畳まれる。
+    let zero_dst = b.param::<crate::BsfZeroInputParam>() == crate::BSF_ZERO_INPUT_DEST_ZERO;
+    let dst = if zero_dst {
+        b.select::<W>(is_zero, zero, acc)
+    } else {
+        let old = W::get(b, g, d);
+        b.select::<W>(is_zero, old, acc)
+    };
     W::put(b, g, d, dst);
     let old: B::V<W32> = b.get(eflags_ref());
     let nzf = b.konst::<W32>(!sem::FLAG_ZF);

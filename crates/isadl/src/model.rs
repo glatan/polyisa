@@ -125,6 +125,30 @@ pub struct Feature {
     pub conflicts: Vec<String>,
 }
 
+/// 挙動パラメータの型（真偽値・列挙・整数）。
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum ParamKind {
+    /// 真偽値。値は "true"/"false"。
+    Bool,
+    /// 列挙。値は列挙子の名前（序数で保持する）。
+    Enum(Vec<String>),
+    /// 整数。値は 0..=max。
+    Int(u32),
+}
+
+/// 挙動パラメータの宣言（既定値と説明を持つ型付きの値）。
+/// `cpu-models.md` の `param` 句に対応する。
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Param {
+    pub name: String,
+    pub kind: ParamKind,
+    /// 既定値（kind が Enum なら列挙子名、Bool なら "true"/"false"、
+    /// Int なら 10 進整数）。
+    pub default: String,
+    /// 説明。出典は `ref` 慣習どおり括弧に書く。
+    pub doc: String,
+}
+
 /// CPU モデルの定義（機能の足し引きと親の指定）。
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct ModelDef {
@@ -132,6 +156,8 @@ pub struct ModelDef {
     pub parent: String,
     pub add_features: Vec<String>,
     pub remove_features: Vec<String>,
+    /// 挙動パラメータの値の上書き（`param` 句の値）。
+    pub params: Vec<(String, String)>,
     /// 機能に対応しない識別情報の値（`cpuid.vendor`・`cpuid.family`
     /// 等のキーと文字列値の対）。機能の有無に対応するビットは
     /// `IdentBit` が導出するのでここには書かない。
@@ -302,6 +328,8 @@ pub struct Model {
     pub formats: Vec<Format>,
     pub insns: Vec<Insn>,
     pub features: Vec<Feature>,
+    /// 挙動パラメータの宣言。
+    pub params: Vec<Param>,
     pub models: Vec<ModelDef>,
     /// 機能から識別情報のビットへの対応表。
     pub ident_bits: Vec<IdentBit>,
@@ -314,6 +342,18 @@ impl Model {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// 挙動パラメータを一件宣言する。`default` は kind が Enum なら
+    /// 列挙子名、Bool なら "true"/"false"、Int なら 10 進整数。
+    pub fn param(&mut self, name: &str, kind: ParamKind, default: &str, doc: &str) -> &mut Self {
+        self.params.push(Param {
+            name: name.to_string(),
+            kind,
+            default: default.to_string(),
+            doc: doc.to_string(),
+        });
+        self
     }
 
     /// 機能→識別情報ビットの対応を一件追加する。

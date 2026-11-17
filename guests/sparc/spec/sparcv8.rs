@@ -29,6 +29,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         conflicts: vec![],
     });
     m.models.push(ModelDef {
+            params: vec![],
         name: "generic".to_string(),
         parent: String::new(),
         add_features: vec!["v8".to_string()],

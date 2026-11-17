@@ -1112,6 +1112,253 @@ fn gen_metadata(model: &Model) -> String {
         "pub const DEFAULT_FEATS: u64 = {:#x};\n",
         default_feats(model)
     ));
+    s.push_str(&params_code(model));
+    s
+}
+
+/// パラメータ値（文字列）を `u64` の格納ビットにする。
+fn param_bits(kind: &polyisa_isadl::model::ParamKind, v: &str) -> u64 {
+    use polyisa_isadl::model::ParamKind::*;
+    match kind {
+        Bool => u64::from(v == "true"),
+        Enum(vs) => vs
+            .iter()
+            .position(|x| x == v)
+            .expect("validated enum variant") as u64,
+        Int(_) => v.parse().expect("validated int"),
+    }
+}
+
+/// `ParamKind` の生成コードでのフィールド型。
+fn param_ty(kind: &polyisa_isadl::model::ParamKind) -> &'static str {
+    use polyisa_isadl::model::ParamKind::*;
+    match kind {
+        Bool => "bool",
+        Enum(_) => "u8",
+        Int(_) => "u32",
+    }
+}
+
+/// パラメータ値（文字列）を生成コードのリテラルにする。
+fn param_lit(kind: &polyisa_isadl::model::ParamKind, v: &str) -> String {
+    use polyisa_isadl::model::ParamKind::*;
+    match kind {
+        Bool => v.to_string(),
+        Enum(vs) => vs
+            .iter()
+            .position(|x| x == v)
+            .expect("validated enum variant")
+            .to_string(),
+        Int(_) => v.to_string(),
+    }
+}
+
+/// CPU モデル名から挙動パラメータを解決した `Params` の生成。
+/// 親チェーンを根から順にたどり、子の値で上書きする。
+fn params_code(model: &Model) -> String {
+    if model.params.is_empty() {
+        return String::new();
+    }
+    let mut s = String::from(
+        "/// CPU モデルごとの挙動パラメータ（`cpu-models.md` の `param`）。
+         /// フィールドの型は宣言の型に従い、列挙は列挙子の序数である。
+         #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+         pub struct Params {
+",
+    );
+    for p in &model.params {
+        let doc = if p.doc.is_empty() {
+            p.name.clone()
+        } else {
+            format!("{}: {}", p.name, p.doc)
+        };
+        s.push_str(&format!(
+            "    /// {doc}
+    pub {}: {},
+",
+            p.name,
+            param_ty(&p.kind)
+        ));
+    }
+    s.push_str(
+        "}
+",
+    );
+    // `Default` は宣言の既定値（先頭モデルの値ではない）にする。
+    let defs = model
+        .params
+        .iter()
+        .map(|p| format!("{}: {}", p.name, param_lit(&p.kind, &p.default)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    s.push_str(&format!(
+        "#[allow(clippy::derivable_impls)]
+         impl Default for Params {{
+    fn default() -> Self {{ Params {{ {defs} }} }}
+}}
+"
+    ));
+    // `Backend::param` で読むためのマーカー型をパラメータごとに出す。
+    for p in &model.params {
+        let ty = p
+            .name
+            .split('_')
+            .map(|w| {
+                let mut c = w.chars();
+                c.next()
+                    .map(|f| f.to_uppercase().collect::<String>())
+                    .unwrap_or_default()
+                    + c.as_str()
+            })
+            .collect::<String>();
+        let vty = param_ty(&p.kind);
+        let from = match &p.kind {
+            polyisa_isadl::model::ParamKind::Bool => "v != 0".to_string(),
+            _ => format!("v as {vty}"),
+        };
+        let def = param_bits(&p.kind, &p.default);
+        s.push_str(&format!(
+            "/// `{name}` を `Backend::param` で読むためのマーカー型。
+             pub struct {ty}Param;
+             impl polyisa_sem::Param for {ty}Param {{
+                 type Value = {vty};
+                 fn from_bits(v: u64) -> {vty} {{ {from} }}
+                 fn default_bits() -> u64 {{ {def} }}
+             }}
+",
+            name = p.name,
+        ));
+    }
+    // `Params` をバックエンドのパラメータ表に流し込む関数。
+    s.push_str(
+        "/// `Params` の値をバックエンドのパラメータ表に流し込む。
+         /// 実行・翻訳の開始時に一度呼ぶ。
+         pub fn install_params<B: polyisa_sem::Backend>(b: &mut B, p: &Params) {
+",
+    );
+    for p in &model.params {
+        let ty = p
+            .name
+            .split('_')
+            .map(|w| {
+                let mut c = w.chars();
+                c.next()
+                    .map(|f| f.to_uppercase().collect::<String>())
+                    .unwrap_or_default()
+                    + c.as_str()
+            })
+            .collect::<String>();
+        s.push_str(&format!(
+            "    b.set_param::<{ty}Param>(u64::from(p.{name}));
+",
+            name = p.name
+        ));
+    }
+    s.push_str(
+        "}
+",
+    );
+    // 翻訳キーに畳む値。フィールドが増えてもここだけ直せばよい。
+    s.push_str(
+        "/// `Translate::key` に畳むための、全フィールドを混ぜた値。
+         pub fn params_key(p: &Params) -> u64 {
+    let mut h = 0x9e37_79b9_7f4a_7c15u64;
+",
+    );
+    for p in &model.params {
+        s.push_str(&format!(
+            "    h = h.rotate_left(5) ^ u64::from(p.{});
+",
+            p.name
+        ));
+    }
+    s.push_str(
+        "    h
+}
+",
+    );
+    // 列挙パラメータの列挙子を定数として出す（呼び出し側が序数を
+    // 直書きしないようにする）。
+    for p in &model.params {
+        if let polyisa_isadl::model::ParamKind::Enum(vs) = &p.kind {
+            for (i, v) in vs.iter().enumerate() {
+                s.push_str(&format!(
+                    "pub const {}_{}: u8 = {i};
+",
+                    p.name.to_uppercase(),
+                    v.to_uppercase()
+                ));
+            }
+        }
+    }
+    // モデル名 → 解決済み値。
+    fn resolve<'a>(
+        model: &'a Model,
+        d: &'a polyisa_isadl::model::ModelDef,
+    ) -> std::collections::BTreeMap<&'a str, &'a str> {
+        let mut chain = vec![d];
+        let mut cur = d;
+        let mut guard = model.models.len() + 1;
+        while !cur.parent.is_empty() && guard > 0 {
+            guard -= 1;
+            cur = model
+                .models
+                .iter()
+                .find(|m| m.name == cur.parent)
+                .expect("model parent");
+            chain.push(cur);
+        }
+        let mut vals: std::collections::BTreeMap<&'a str, &'a str> =
+            std::collections::BTreeMap::new();
+        for p in &model.params {
+            vals.insert(p.name.as_str(), p.default.as_str());
+        }
+        for row in chain.iter().rev() {
+            for (k, v) in &row.params {
+                vals.insert(k.as_str(), v.as_str());
+            }
+        }
+        vals
+    }
+    let lit = |m: &polyisa_isadl::model::ModelDef| {
+        let vals = resolve(model, m);
+        let fields = model
+            .params
+            .iter()
+            .map(|p| format!("{}: {}", p.name, param_lit(&p.kind, vals[p.name.as_str()])))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("Params {{ {fields} }}")
+    };
+    let first = model
+        .models
+        .first()
+        .map(lit)
+        .unwrap_or_else(|| "Params::default()".to_string());
+    s.push_str(&format!(
+        "pub const DEFAULT_PARAMS: Params = {first};
+"
+    ));
+    s.push_str(
+        "/// CPU モデル名から挙動パラメータを解決する。未知の名前は既定値。
+         pub fn model_params(name: &str) -> Params {
+    match name {
+",
+    );
+    for m in &model.models {
+        s.push_str(&format!(
+            "        {:?} => {},
+",
+            m.name,
+            lit(m)
+        ));
+    }
+    s.push_str(
+        "        _ => DEFAULT_PARAMS,
+    }
+}
+",
+    );
     s
 }
 
@@ -1216,6 +1463,60 @@ mod tests {
             timing: "alu".to_string(),
         });
         m
+    }
+
+    #[test]
+    fn params_resolve_along_model_chain() {
+        use polyisa_isadl::model::{ModelDef, ParamKind};
+        let mut m = model();
+        m.param(
+            "bsf_zero_input",
+            ParamKind::Enum(vec!["dest_unchanged".to_string(), "dest_zero".to_string()]),
+            "dest_unchanged",
+            "d",
+        );
+        let row = |name: &str, parent: &str, params: &[(&str, &str)]| ModelDef {
+            name: name.to_string(),
+            parent: parent.to_string(),
+            add_features: vec![],
+            remove_features: vec![],
+            params: params
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            ident: vec![],
+        };
+        // 宣言既定 → 根が dest_zero、中間は継承、葉が dest_unchanged に戻す。
+        m.models
+            .push(row("root", "", &[("bsf_zero_input", "dest_zero")]));
+        m.models.push(row("mid", "root", &[]));
+        m.models
+            .push(row("leaf", "mid", &[("bsf_zero_input", "dest_unchanged")]));
+        let g = generate(&m).unwrap();
+        assert!(
+            g.metadata
+                .contains("\"root\" => Params { bsf_zero_input: 1 }"),
+            "{}",
+            g.metadata
+        );
+        assert!(
+            g.metadata
+                .contains("\"mid\" => Params { bsf_zero_input: 1 }")
+        );
+        assert!(
+            g.metadata
+                .contains("\"leaf\" => Params { bsf_zero_input: 0 }")
+        );
+        // 既定モデルは先頭（root）の解決値。
+        assert!(
+            g.metadata
+                .contains("DEFAULT_PARAMS: Params = Params { bsf_zero_input: 1 }")
+        );
+        // `Params::default` は宣言の既定値。
+        assert!(
+            g.metadata
+                .contains("fn default() -> Self { Params { bsf_zero_input: 0 } }")
+        );
     }
 
     #[test]

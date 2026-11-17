@@ -216,8 +216,12 @@ pub trait Helper {
 }
 
 /// 挙動パラメータ。CPU モデルごとの値を表す型付きの値。
-pub trait Param {
+pub trait Param: 'static {
     type Value: Copy;
+    /// パラメータ表のビットから値を復元する。
+    fn from_bits(bits: u64) -> Self::Value;
+    /// CPU モデルが上書きしないときの既定値（表に入れるビット）。
+    fn default_bits() -> u64;
 }
 
 /// タイミングの手がかりの鍵。
@@ -366,7 +370,12 @@ pub trait Backend {
     fn call<H: Helper>(&mut self, args: H::Args<Self>) -> Result<H::Ret<Self>, Self::Exit>
     where
         Self: Sized;
+    /// 挙動パラメータを読む。`set_param` で値が流し込まれていなければ
+    /// 宣言の既定値（`P::default_bits`）を返す。
     fn param<P: Param>(&mut self) -> P::Value;
+    /// 挙動パラメータの値を表に書く。CPU モデルから解決した値を
+    /// 実行・翻訳の開始時に一度流し込む。
+    fn set_param<P: Param>(&mut self, bits: u64);
     fn timing_hint(&mut self, key: HintKey, v: Self::V<W64>);
 }
 

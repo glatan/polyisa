@@ -37,7 +37,7 @@ pub struct CpuSpec {
     pub model: String,
     pub add: Vec<String>,
     pub remove: Vec<String>,
-    /// `パラメータ=値`。挙動パラメータの宣言はまだない（GAP-0027）。
+    /// `パラメータ=値`。`param=` の上書きは未接続（GAP-0027）。
     pub params: Vec<(String, String)>,
 }
 
@@ -89,7 +89,9 @@ fn resolve_sel(
 ) -> Result<polyisa_isadl::select::CpuSel, String> {
     if !spec.params.is_empty() {
         let (k, _) = &spec.params[0];
-        return Err(format!("挙動パラメータ {k} は宣言されていない（GAP-0027）"));
+        return Err(format!(
+            "挙動パラメータの `param=` 上書きは未接続（GAP-0027）: {k}"
+        ));
     }
     let add: Vec<&str> = spec.add.iter().map(String::as_str).collect();
     let remove: Vec<&str> = spec.remove.iter().map(String::as_str).collect();

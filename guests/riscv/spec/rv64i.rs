@@ -38,6 +38,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         });
     }
     m.models.push(polyisa_isadl::model::ModelDef {
+            params: vec![],
         name: "rv64gc".to_string(),
         parent: String::new(),
         add_features: ["rv64", "m", "a", "f", "d", "c", "zicsr", "zifencei"]
@@ -48,6 +49,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         ident: vec![],
     });
     m.models.push(polyisa_isadl::model::ModelDef {
+            params: vec![],
         name: "rv64imac".to_string(),
         parent: "rv64gc".to_string(),
         add_features: Vec::new(),

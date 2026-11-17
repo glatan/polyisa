@@ -1740,4 +1740,18 @@ mod tests {
         assert!(IDENT_BITS.iter().any(|(f, ..)| *f == "sse2"));
         assert!(FEAT_BITS.iter().any(|(f, _)| *f == "sse4_2"));
     }
+
+    #[test]
+    fn model_params_resolve() {
+        // bsf_zero_input は全モデルで宣言値 unchanged(0)。オーバーライドは
+        // 親連鎖で解決され、未知のモデル名は既定値になる。
+        assert_eq!(DEFAULT_PARAMS.bsf_zero_input, 0);
+        assert_eq!(model_params("x86_64").bsf_zero_input, 0);
+        assert_eq!(model_params("i8088").bsf_zero_input, 0);
+        assert_eq!(model_params("nope"), DEFAULT_PARAMS);
+        // 既定モデルと全モデルで値が解決される（親は空でないことを前提にしない）。
+        for row in MODEL_DEFS {
+            let _ = model_params(row.0);
+        }
+    }
 }

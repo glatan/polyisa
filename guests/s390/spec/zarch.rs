@@ -49,6 +49,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("esa390", "", vec![], vec!["zarch"]),
     ] {
         m.models.push(ModelDef {
+            params: vec![],
             name: name.to_string(),
             parent: parent.to_string(),
             add_features: add.iter().map(|s| s.to_string()).collect(),

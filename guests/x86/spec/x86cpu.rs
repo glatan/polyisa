@@ -18,6 +18,7 @@ use polyisa_isadl::pred::Pred;
 /// の後に呼ぶ（マップ項目を走査するため）。
 pub fn build_cpu(m: &mut Model) {
     declare_features(m);
+    declare_params(m);
     declare_models(m);
     declare_ident_bits(m);
     apply_gates(m);
@@ -188,9 +189,14 @@ fn model(
     parent: &str,
     add: &[&str],
     remove: &[&str],
+    params: &[(&str, &str)],
     ident: Vec<(&str, &str)>,
 ) {
     m.models.push(ModelDef {
+        params: params
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect(),
         name: name.to_string(),
         parent: parent.to_string(),
         add_features: add.iter().map(|s| s.to_string()).collect(),
@@ -202,8 +208,21 @@ fn model(
     });
 }
 
+/// 挙動パラメータの宣言（cpu-models.md の `param` 句）。値は
+/// `Params`（生成）で意味論が読む。出典は SDM の未定義記述と
+/// AMD 側の観測値の差（GAP-0027 の枠組み）。
+fn declare_params(m: &mut Model) {
+    m.param(
+        "bsf_zero_input",
+        ParamKind::Enum(vec!["dest_unchanged".to_string(), "dest_zero".to_string()]),
+        "dest_unchanged",
+        "BSF/BSR で入力が 0 のときの宛先。Intel は宛先を保ち、AMD は 0 にする",
+    );
+}
+
 fn declare_models(m: &mut Model) {
-    // （名前, 親, 追加機能, 削除機能, 識別情報）。先頭が `--cpu` 省略時の既定。
+    // （名前, 親, 追加機能, 削除機能, パラメータ上書き, 識別情報）。
+    // 先頭が `--cpu` 省略時の既定。
     // ident のキーは `cpuid.` で始まり、機能から導出できない値だけを書く。
 
     // 既定モデル。現在の実装がカバーする機能の和（汎用 x86-64）。
@@ -218,6 +237,7 @@ fn declare_models(m: &mut Model) {
             "lm", "lahf_lm", "i486",
         ],
         &[],
+        &[],
         // SSE4.2 のある最古の世代に合わせた Nehalem の署名。
         intel("6", "26", "5"),
     );
@@ -227,6 +247,7 @@ fn declare_models(m: &mut Model) {
         "x86_64_v2",
         "x86_64",
         &["cx16", "popcnt"],
+        &[],
         &[],
         // v2 の水準（SSE4.2+POPCNT+CX16、AVX なし）は Westmere。
         intel("6", "44", "2"),
@@ -239,6 +260,7 @@ fn declare_models(m: &mut Model) {
             "avx", "avx2", "bmi1", "bmi2", "f16c", "fma", "lzcnt", "movbe", "osxsave",
         ],
         &[],
+        &[],
         intel("6", "60", "3"),
     );
     model(
@@ -247,16 +269,17 @@ fn declare_models(m: &mut Model) {
         "x86_64_v3",
         &["avx512f", "avx512bw", "avx512cd", "avx512dq", "avx512vl"],
         &[],
+        &[],
         intel("6", "85", "4"),
     );
     // 実モード世代。CPUID を持つ 486 以降だけ識別情報を持つ。
     // `cpuid.max_basic`/`cpuid.max_ext` は報告する最大リーフ番号で、
     // 省略時は 7 と 0x8000_0008（導出側の既定値）。
-    model(m, "i8088", "", &[], &[], vec![]);
-    model(m, "i386", "", &["fpu"], &[], vec![]);
+    model(m, "i8088", "", &[], &[], &[], vec![]);
+    model(m, "i386", "", &["fpu"], &[], &[], vec![]);
     let mut id486 = intel("4", "8", "0");
     id486.extend([("cpuid.max_basic", "1"), ("cpuid.max_ext", "0")]);
-    model(m, "i486", "i386", &["cpuid", "i486"], &[], id486);
+    model(m, "i486", "i386", &["cpuid", "i486"], &[], &[], id486);
     let mut idp5 = intel("5", "4", "4");
     idp5.extend([("cpuid.max_basic", "1"), ("cpuid.max_ext", "0")]);
     model(
@@ -264,6 +287,7 @@ fn declare_models(m: &mut Model) {
         "pentium",
         "i486",
         &["vme", "de", "pse", "tsc", "msr", "cx8", "mce", "apic", "mmx"],
+        &[],
         &[],
         idp5,
     );
@@ -274,6 +298,7 @@ fn declare_models(m: &mut Model) {
         "pentium_pro",
         "pentium",
         &["cmov", "pge", "mca", "pae", "mtrr", "pse36"],
+        &[],
         &[],
         idp6,
     );
@@ -286,10 +311,11 @@ fn declare_models(m: &mut Model) {
         "pentium_pro",
         &["fxsr", "sse", "sep", "pat"],
         &[],
+        &[],
         idp3,
     );
     // 既存の既定名との互換（段階4の `generic32`）。i386 の旗だけを持つ。
-    model(m, "generic32", "", &["i386"], &[], vec![]);
+    model(m, "generic32", "", &["i386"], &[], &[], vec![]);
 }
 
 /// 機能→CPUID ビットの対応表（`cpuid_bit` 宣言）。
