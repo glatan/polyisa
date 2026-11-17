@@ -179,11 +179,11 @@ mod tests {
     /// r2/MIPS64r2 拡張の一次根拠は台帳の SPEC-MIPS32R2・SPEC-MIPS64（未確認）。
     #[test]
     fn decode_release_ext() {
-        let f = |w: u32, feats: u64| decode_model_ex(u128::from(w), 32, true, feats);
-        const R2: u64 = FEAT_MIPS32R2;
-        const M64: u64 = FEAT_MIPS32R2 | FEAT_MIPS64;
-        const R6: u64 = FEAT_MIPS32R2 | FEAT_MIPS_R6;
-        const M64R6: u64 = FEAT_MIPS32R2 | FEAT_MIPS64 | FEAT_MIPS_R6;
+        let f = |w: u32, feats: u128| decode_model_ex(u128::from(w), 32, true, feats);
+        const R2: u128 = FEAT_MIPS32R2;
+        const M64: u128 = FEAT_MIPS32R2 | FEAT_MIPS64;
+        const R6: u128 = FEAT_MIPS32R2 | FEAT_MIPS_R6;
+        const M64R6: u128 = FEAT_MIPS32R2 | FEAT_MIPS64 | FEAT_MIPS_R6;
 
         // R2 で残る命令（r6 のモデルでも有効）。
         assert_eq!(f(0x0022_180a, R2), Some(Insn::Movz));

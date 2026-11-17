@@ -26,7 +26,7 @@ const STEP_LIMIT: u64 = 256_000_000;
 #[derive(Clone, Copy, Debug)]
 pub struct ArmModel {
     /// `decode_model_ex` に渡す機能ビット。
-    pub feats: u64,
+    pub feats: u128,
 }
 
 impl ArmModel {
@@ -476,7 +476,7 @@ pub struct StackGrowth {
 fn run_with_growth(
     env: &mut BareEnv,
     entry: u64,
-    feats: u64,
+    feats: u128,
     stack: Option<StackGrowth>,
     sys: &mut impl TrapHandler,
 ) -> Outcome {
@@ -642,7 +642,7 @@ fn cond_expr<B: Backend>(b: &mut B, cond: u32) -> B::B {
 
 /// A32 の翻訳器。`feats` は `decode_model_ex` にそのまま渡す。
 pub struct ArmTx {
-    pub feats: u64,
+    pub feats: u128,
 }
 
 impl polyisa_jit::Translate for ArmTx {
@@ -757,7 +757,7 @@ fn step_a32_jit(
 fn run_with_growth_jit(
     env: &mut BareEnv,
     entry: u64,
-    feats: u64,
+    feats: u128,
     stack: Option<StackGrowth>,
     sys: &mut impl TrapHandler,
     jit: &mut polyisa_jit::Jit,

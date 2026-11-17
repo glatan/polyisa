@@ -67,7 +67,7 @@ fn insn_mnemonic(i: polyisa_guest_x86::Insn) -> String {
 }
 
 /// polyisa 側の結果。(命令名, 消費したバイト列)。
-fn polyisa_decode(bytes: &[u8], modes: u32, feats: u64) -> Option<(String, Vec<u8>)> {
+fn polyisa_decode(bytes: &[u8], modes: u32, feats: u128) -> Option<(String, Vec<u8>)> {
     if let Some(d) = decode_map(bytes, modes, feats) {
         let len = usize::from(d.len);
         return Some((
@@ -386,7 +386,7 @@ fn hexs(b: &[u8]) -> String {
         .join(" ")
 }
 
-fn run_pass(llvm_mc: &str, triple: &str, modes: u32, feats: u64, mode: &str) -> Diff {
+fn run_pass(llvm_mc: &str, triple: &str, modes: u32, feats: u128, mode: &str) -> Diff {
     let mut diff = Diff::default();
     let candidates = corpus();
     let threads = std::thread::available_parallelism()
@@ -871,7 +871,7 @@ fn oracle_llvm_decode_diff() {
     };
     // 全機能を有効にして符号化の網羅率を上げる。モード（m64）は
     // FEAT ではなく modes で制御されるので含まれない。
-    let all = FEAT_BITS.iter().fold(0u64, |a, (_, b)| a | b);
+    let all = FEAT_BITS.iter().fold(0u128, |a, (_, b)| a | b);
     // pop_cs は 0F の副表を潰すので両モードで外す。op82 は llvm が
     // i386 でも受理するので i386 では残し、x86-64（m64 非対応の
     // 別名）では外す。

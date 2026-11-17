@@ -27,7 +27,7 @@ const STEP_LIMIT: u64 = 256_000_000;
 #[derive(Clone, Copy, Debug)]
 pub struct S390Model {
     /// `decode_model_ex` に渡す機能ビット。
-    pub feats: u64,
+    pub feats: u128,
 }
 
 impl S390Model {

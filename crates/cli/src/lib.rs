@@ -84,7 +84,7 @@ fn resolve_sel(
     family: &str,
     models: &[polyisa_isadl::select::ModelRow],
     features: &[polyisa_isadl::select::FeatureRow],
-    feat_bits: &[(&str, u64)],
+    feat_bits: &[(&str, u128)],
     spec: &CpuSpec,
 ) -> Result<polyisa_isadl::select::CpuSel, String> {
     if !spec.params.is_empty() {

@@ -1741,7 +1741,7 @@ pub fn run_mode_ex(
     sys: &mut impl TrapHandler,
     limit: u64,
     is64: bool,
-    feats: u64,
+    feats: u128,
     params: &polyisa_guest_x86::Params,
 ) -> Outcome {
     env.backend.set(polyisa_guest_x86::sem::eip_ref(), entry);
@@ -1785,7 +1785,7 @@ pub fn run_m16_ex(
     entry: u32,
     sys: &mut impl TrapHandler,
     limit: u64,
-    feats: u64,
+    feats: u128,
     params: &polyisa_guest_x86::Params,
 ) -> Outcome {
     polyisa_guest_x86::install_params(&mut env.backend, params);
@@ -1848,7 +1848,7 @@ fn decode_x86(
     mem: &polyisa_mem::AddressSpace,
     pc: u64,
     is64: bool,
-    feats: u64,
+    feats: u128,
     hist: &mut std::collections::VecDeque<(u32, String)>,
 ) -> Result<DecodedX86, Outcome> {
     let mut head = [0u8; 1];
@@ -2644,7 +2644,7 @@ fn decode_x86(
 
 /// シフト群の操作。8086/8088 では /6 が undocumented な SETMO（全ビット
 /// 1 を書き込む）になる。80186 以降は SHL の別名。
-fn grp2_op(d: &polyisa_guest_x86::MapDec, mode: u8, feats: u64) -> polyisa_guest_x86::sem_ea::Sh {
+fn grp2_op(d: &polyisa_guest_x86::MapDec, mode: u8, feats: u128) -> polyisa_guest_x86::sem_ea::Sh {
     use polyisa_guest_x86::sem_ea::Sh;
     if mode == 16 && feats & polyisa_guest_x86::FEAT_I186 == 0 && (d.modrm >> 3) & 7 == 6 {
         Sh::Setmo
@@ -2677,7 +2677,7 @@ fn dispatch_map<B: Backend>(
     sseg: u64,
     es: u64,
     mode: u8,
-    feats: u64,
+    feats: u128,
 ) -> Result<bool, B::Exit> {
     let m64 = mode == 64;
     let sa = mode;
@@ -3555,6 +3555,10 @@ fn dispatch_map<B: Backend>(
         Insn::SidtMs => sem_ea::sidt(b, &ea, mode),
         Insn::LgdtMs => sem_ea::lgdt(b, &ea, mode),
         Insn::LidtMs => sem_ea::lidt(b, &ea, mode),
+        // SERIALIZE は逐次化 no-op。
+        Insn::Serialize => sem_ea::nop(b),
+        Insn::RdrandRv => sem_ea::rdrand(b, w, &ea, d),
+        Insn::RdseedRv => sem_ea::rdrand(b, w, &ea, d),
         Insn::MovsB => sem_ea::str_op(b, sem_ea::Str::Movs, 8, d, eip, seg, seg_ss, es, mode == 16),
         Insn::MovsV => sem_ea::str_op(b, sem_ea::Str::Movs, w, d, eip, seg, seg_ss, es, mode == 16),
         Insn::StosB => sem_ea::str_op(b, sem_ea::Str::Stos, 8, d, eip, seg, seg_ss, es, mode == 16),
@@ -4648,7 +4652,7 @@ fn step_x86_map(
     env: &mut BareEnv,
     sys: &mut dyn TrapHandler,
     mode: u8,
-    feats: u64,
+    feats: u128,
     hist: &mut std::collections::VecDeque<(u32, String)>,
 ) -> Option<Result<(), Outcome>> {
     // 実モードでは eip 状態は IP（下位 16 ビット）で、
@@ -4917,7 +4921,7 @@ fn step_x86(
     env: &mut BareEnv,
     sys: &mut dyn TrapHandler,
     mode: u8,
-    feats: u64,
+    feats: u128,
     hist: &mut std::collections::VecDeque<(u32, String)>,
 ) -> Result<(), Outcome> {
     let is64 = mode == 64;
@@ -4949,7 +4953,7 @@ fn step_x86_legacy(
     env: &mut BareEnv,
     sys: &mut dyn TrapHandler,
     is64: bool,
-    feats: u64,
+    feats: u128,
     hist: &mut std::collections::VecDeque<(u32, String)>,
 ) -> Result<(), Outcome> {
     let pc = eip_of(env) as u64;
@@ -12957,7 +12961,7 @@ pub fn run_image_x86_32_ex(
     prog: &str,
     argv: &[String],
     sys: &mut impl TrapHandler,
-    feats: u64,
+    feats: u128,
 ) -> Result<u64, String> {
     let sel = default_sel();
     run_image_x86_32_impl(
@@ -13008,7 +13012,7 @@ fn run_image_x86_32_impl(
     prog: &str,
     argv: &[String],
     sys: &mut impl TrapHandler,
-    feats: u64,
+    feats: u128,
     features: &std::collections::BTreeSet<String>,
     ident: &std::collections::BTreeMap<String, String>,
     params: &polyisa_guest_x86::Params,
@@ -13150,7 +13154,7 @@ pub fn run_image_x86_64_ex(
     prog: &str,
     argv: &[String],
     sys: &mut Linux,
-    feats: u64,
+    feats: u128,
 ) -> Result<u64, String> {
     let sel = default_sel();
     run_image_x86_64_impl(
@@ -13204,7 +13208,7 @@ fn run_image_x86_64_impl(
     prog: &str,
     argv: &[String],
     sys: &mut Linux,
-    feats: u64,
+    feats: u128,
     features: &std::collections::BTreeSet<String>,
     ident: &std::collections::BTreeMap<String, String>,
     jit: Option<&mut polyisa_jit::Jit>,
@@ -13377,7 +13381,7 @@ const MAX_BLOCK_INSNS: usize = 16;
 /// 設定で固定する。
 pub struct X86Tx {
     pub is64: bool,
-    pub feats: u64,
+    pub feats: u128,
     pub params: polyisa_guest_x86::Params,
 }
 
@@ -13395,7 +13399,7 @@ impl polyisa_jit::Translate for X86Tx {
         pc ^ fs.rotate_left(19)
             ^ gs.rotate_left(41)
             ^ polyisa_guest_x86::params_key(&self.params)
-            ^ self.feats.rotate_left(7)
+            ^ (self.feats as u64 ^ (self.feats >> 64) as u64).rotate_left(7)
             ^ u64::from(self.is64)
     }
 
@@ -13460,7 +13464,7 @@ fn step_x86_jit(
     sys: &mut dyn TrapHandler,
     jit: &mut polyisa_jit::Jit,
     is64: bool,
-    feats: u64,
+    feats: u128,
     params: &polyisa_guest_x86::Params,
     hist: &mut std::collections::VecDeque<(u32, String)>,
 ) -> Result<(), Outcome> {
@@ -13534,7 +13538,7 @@ pub fn run_mode_ex_jit(
     sys: &mut impl TrapHandler,
     limit: u64,
     is64: bool,
-    feats: u64,
+    feats: u128,
     params: &polyisa_guest_x86::Params,
     jit: &mut polyisa_jit::Jit,
 ) -> Outcome {
@@ -13558,7 +13562,7 @@ pub fn run_image_x86_64_ex_jit(
     prog: &str,
     argv: &[String],
     sys: &mut Linux,
-    feats: u64,
+    feats: u128,
     jit: &mut polyisa_jit::Jit,
 ) -> Result<u64, String> {
     let sel = default_sel();

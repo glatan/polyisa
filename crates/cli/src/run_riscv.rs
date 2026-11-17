@@ -122,7 +122,7 @@ pub fn run_ex(
     env: &mut BareEnv,
     entry: u64,
     rv32: bool,
-    feats: u64,
+    feats: u128,
     sys: &mut impl EcallHandler,
 ) -> Outcome {
     env.pc = entry;
@@ -142,7 +142,7 @@ fn step_rv(
     env: &mut BareEnv,
     sys: &mut impl EcallHandler,
     rv32: bool,
-    feats: u64,
+    feats: u128,
 ) -> Result<(), Outcome> {
     // 16 ビット単位でフェッチする（C 拡張のため）。32 ビット命令は
     // 下位 2 ビットが 0b11 である。
@@ -1118,7 +1118,7 @@ fn step_rv(
 /// RV32/RV64 で符号化が重なる命令は、モデル対応デコード（`decode_model`、
 /// ADR-0006）が `when` の述語で振り分ける。
 /// Ref: SPEC-RISCV-UNPRIV (20250508) §C.
-fn step_c(env: &mut BareEnv, w16: u16, rv32: bool, feats: u64) -> Option<Outcome> {
+fn step_c(env: &mut BareEnv, w16: u16, rv32: bool, feats: u128) -> Option<Outcome> {
     let word = u32::from(w16);
     let Some(insn) = decode_model_ex(u128::from(word), 16, !rv32, feats) else {
         return Some(Outcome::Unimplemented {

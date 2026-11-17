@@ -13859,7 +13859,7 @@ fn run32_p(prog: &[u8], steps: u64, params: &polyisa_guest_x86::Params) -> (Outc
 }
 
 /// `run32` に機能集合を足す版。既定モデルに無い機能が要る命令用。
-fn run32_ex(prog: &[u8], steps: u64, feats: u64) -> (Outcome, BareEnv) {
+fn run32_ex(prog: &[u8], steps: u64, feats: u128) -> (Outcome, BareEnv) {
     let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
     let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
     env.backend.mem.map(VirtAddr(0x1000), 4, rwx).unwrap();
@@ -17717,4 +17717,90 @@ fn run32_sdt_lar() {
     let mut w = [0u8; 2];
     env.backend.mem.read(VirtAddr(0x2210), &mut w, acc).unwrap();
     assert_eq!(u16::from_le_bytes(w), 0xFFF0, "smsw");
+}
+
+#[test]
+fn run32_rdrand_rdseed() {
+    // RDRAND/RDSEED/SERIALIZE。真のエントロピー源を持たないので
+    // `rand_seed` を混ぜた splitmix64 の決定的列を返すモデル規約を、
+    // 実装と独立の参照計算で照合する。
+    const GOLDEN: u64 = 0x9E37_79B9_7F4A_7C15;
+    fn splitmix(seed: u64, state: u64) -> u64 {
+        let mut z = state.wrapping_add(seed);
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+    let seed = u64::from(polyisa_guest_x86::DEFAULT_PARAMS.rand_seed);
+    let want1 = splitmix(seed, GOLDEN) as u32;
+    let want2 = splitmix(seed, GOLDEN.wrapping_mul(2)) as u32;
+    let want3 = splitmix(seed, GOLDEN.wrapping_mul(3)) as u32;
+    let prog: &[u8] = &[
+        0x0F, 0xC7, 0xF0, // rdrand eax
+        0xA3, 0x04, 0x22, 0x00, 0x00, // mov [0x2204],eax → want1
+        0x0F, 0xC7, 0xF9, // rdseed ecx
+        0x89, 0x0D, 0x08, 0x22, 0x00, 0x00, // mov [0x2208],ecx → want2
+        0x0F, 0x01, 0xE8, // serialize（実質 nop）
+        0x0F, 0xC7, 0xF2, // rdrand edx
+        0x89, 0x15, 0x0C, 0x22, 0x00, 0x00, // mov [0x220C],edx → want3
+        0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax,1
+        0xCD, 0x80, // int 0x80
+    ];
+    let (out, mut env) = run32_p(prog, 20, &polyisa_guest_x86::DEFAULT_PARAMS);
+    assert_eq!(out, Outcome::Exit(0));
+    // CF=1、他の演算フラグは 0（rdrand 契約）。最後のフラグ書きは rdrand edx。
+    let fl: u32 = env.backend.get(polyisa_guest_x86::sem::eflags_ref());
+    assert_eq!(fl & 0x8D5, 1, "CF=1・残りの演算フラグは 0");
+    let acc = polyisa_mem::Access {
+        endian: polyisa_mem::Endian::Le,
+        align: polyisa_mem::Align::Unaligned,
+        kind: polyisa_mem::AccessKind::DataRead,
+    };
+    let mut v = [0u8; 16];
+    env.backend.mem.read(VirtAddr(0x2200), &mut v, acc).unwrap();
+    assert_eq!(
+        u32::from_le_bytes(v[4..8].try_into().unwrap()),
+        want1,
+        "rdrand eax"
+    );
+    assert_eq!(
+        u32::from_le_bytes(v[8..12].try_into().unwrap()),
+        want2,
+        "rdseed ecx"
+    );
+    assert_eq!(
+        u32::from_le_bytes(v[12..16].try_into().unwrap()),
+        want3,
+        "rdrand edx"
+    );
+    // 負のデコード検査: F2/F3 形は別命令スロット（RDPID/SENDUIPI/
+    // XSUSLDTRK/SETSSBSY/予約）なので decode_map は拒否する。
+    use polyisa_guest_x86::{MODE_ADR_A32, MODE_ADR_SHIFT, MODE_OPD_O32, MODE_OPD_SHIFT};
+    let modes = (MODE_OPD_O32 << MODE_OPD_SHIFT) | (MODE_ADR_A32 << MODE_ADR_SHIFT);
+    let feats = polyisa_guest_x86::DEFAULT_FEATS;
+    for bytes in [
+        &[0xF2, 0x0F, 0xC7, 0xF0][..], // F2 rdrand → 予約
+        &[0xF3, 0x0F, 0xC7, 0xF0][..], // F3 rdrand → SENDUIPI/予約
+        &[0xF2, 0x0F, 0xC7, 0xF8][..], // F2 rdseed → 予約
+        &[0xF3, 0x0F, 0xC7, 0xF8][..], // F3 rdseed → RDPID
+        &[0xF2, 0x0F, 0x01, 0xE8][..], // F2 serialize → XSUSLDTRK
+        &[0xF3, 0x0F, 0x01, 0xE8][..], // F3 serialize → SETSSBSY
+    ] {
+        assert!(
+            polyisa_guest_x86::decode_map(bytes, modes, feats).is_none(),
+            "{bytes:?}"
+        );
+    }
+    // NP・66 形は受理する。
+    for bytes in [
+        &[0x0F, 0xC7, 0xF0][..],
+        &[0x66, 0x0F, 0xC7, 0xF0][..], // rdrand ax
+        &[0x0F, 0xC7, 0xF8][..],
+        &[0x66, 0x0F, 0x01, 0xE8][..], // 66 serialize
+    ] {
+        assert!(
+            polyisa_guest_x86::decode_map(bytes, modes, feats).is_some(),
+            "{bytes:?}"
+        );
+    }
 }

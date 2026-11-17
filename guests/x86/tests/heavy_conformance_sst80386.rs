@@ -375,7 +375,7 @@ fn inject_hlt(
     env: &mut BareEnv,
     ip: u32,
     sys: &mut impl TrapHandler,
-    feats: u64,
+    feats: u128,
     params: &polyisa_guest_x86::Params,
 ) -> Outcome {
     let cs = u64::from(env.backend.get(sem::sreg_ref(1)));
@@ -395,7 +395,7 @@ fn inject_hlt(
 fn run_one(
     env: &mut BareEnv,
     t: &Sst,
-    feats: u64,
+    feats: u128,
     params: &polyisa_guest_x86::Params,
     f_umask: u16,
 ) -> Vec<String> {

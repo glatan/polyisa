@@ -277,6 +277,10 @@ pub enum PfxSel {
     /// 割り当てられているもの（0F BD の BSR と LZCNT の
     /// 関係）に使う。
     NoF3,
+    /// 0xF2 も 0xF3 もないもの（NP + 66）。F2/F3 が別命令に
+    /// 割り当てられているもの（0F 01 E8 の SERIALIZE と
+    /// XSUSLDTRK/SETSSBSY の関係）に使う。
+    NoF2F3,
     /// 0x66 を要求する（MOVUPD など）。
     P66,
     /// 0xF2 を要求する（MOVSD など）。

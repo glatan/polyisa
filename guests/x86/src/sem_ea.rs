@@ -6873,6 +6873,61 @@ pub fn lar_lsl<B: Backend>(b: &mut B, mode: u8, eip: u32, sa: u8, sseg: u64) -> 
     verrw(b, mode, eip, sa, sseg)
 }
 
+/// RDRAND/RDSEED。真のエントロピー源は持たないので
+/// `rand_seed` パラメータを混ぜた splitmix64 の決定的列を
+/// 返す。常に成功（CF=1、他のフラグは 0）。
+fn rand_next<B: Backend>(b: &mut B) -> B::V<W64> {
+    let s: B::V<W64> = b.get(sem::rand_state_ref());
+    let g = b.konst::<W64>(0x9E37_79B9_7F4A_7C15);
+    let ns = b.add::<W64>(s, g);
+    b.set(sem::rand_state_ref(), ns);
+    let p = u64::from(b.param::<crate::RandSeedParam>());
+    let seed = b.konst::<W64>(p);
+    let mut z = b.add::<W64>(ns, seed);
+    let k30 = b.konst::<W64>(30);
+    let sh = b.shr_l::<W64>(z, k30);
+    z = b.xor::<W64>(z, sh);
+    let m1 = b.konst::<W64>(0xBF58_476D_1CE4_E5B9);
+    z = b.mul::<W64>(z, m1);
+    let k27 = b.konst::<W64>(27);
+    let sh = b.shr_l::<W64>(z, k27);
+    z = b.xor::<W64>(z, sh);
+    let m2 = b.konst::<W64>(0x94D0_49BB_1331_11EB);
+    z = b.mul::<W64>(z, m2);
+    let k31 = b.konst::<W64>(31);
+    let sh = b.shr_l::<W64>(z, k31);
+    b.xor::<W64>(z, sh)
+}
+
+/// RDRAND/RDSEED r。決定的列を書き込み、CF=1・他のフラグは 0。
+pub fn rdrand<B: Backend>(b: &mut B, w: u8, rm: &Rm<B::V<W64>>, _d: &MapDec) -> Flow<B> {
+    let z = rand_next(b);
+    let Rm::Reg(g) = rm else {
+        return Ok(());
+    };
+    match w {
+        16 => {
+            let v = b.trunc::<W64, W16>(z);
+            decode::gwr16(b, *g, v);
+        }
+        64 => decode::gwr64(b, *g, z),
+        _ => {
+            let v = b.trunc::<W64, W32>(z);
+            decode::gwr32(b, *g, v);
+        }
+    }
+    // CF=1、OF/SF/ZF/AF/PF=0。
+    let f: B::V<W32> = b.get(eflags_ref());
+    let keep = b.konst::<W32>(
+        !(sem::FLAG_CF | sem::FLAG_PF | sem::FLAG_AF | sem::FLAG_ZF | sem::FLAG_SF | sem::FLAG_OF),
+    );
+    let clr = b.and::<W32>(f, keep);
+    let cf = b.konst::<W32>(sem::FLAG_CF);
+    let v = b.or::<W32>(clr, cf);
+    b.set(eflags_ref(), v);
+    Ok(())
+}
+
 /// SGDT。
 pub fn sgdt<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>, mode: u8) -> Flow<B> {
     sdtr(b, ea, mode, false)

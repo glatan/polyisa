@@ -951,6 +951,14 @@ pub fn build_maps(m: &mut Model) {
     let mut it = m01(6, "lmsw_ew", "lmsw {e}");
     it.ops = vec![Ea(W16)];
     m0f.push(MapItem::Insn(0x01, it));
+    // SERIALIZE（0F 01 /5 mod=11）。逐次化の意味論は持たない
+    // ので no-op。世代ゲートは serialize 機能。F2 は XSUSLDTRK、
+    // F3 は SETSSBSY で別命令なので NP+66 のみ受理する。
+    let mut it = m01(5, "serialize", "serialize");
+    it.ops = vec![];
+    it.group_mod = Some(true);
+    it.pfx = PfxSel::NoF2F3;
+    m0f.push(MapItem::Insn(0x01, it));
     // CLTS（0F 06）。80386 で追加。実モードでは CR0 の TS を下ろすだけで、
     // 現行モデルは CR0 を持たないので no-op として扱う（SST 80386 実測）。
     m0f.push(MapItem::Insn(
@@ -991,6 +999,18 @@ pub fn build_maps(m: &mut Model) {
         MapItem::Insn(0xB8, mi("popcnt_gv_ev", &[Reg(V), Ea(V)], None, PfxSel::PF3, Pred::True, "popcnt {g}, {e}", "alu")),
         // CMPXCHG8B/16B（0F C7 /1、メモリ形のみ。REX.W で 16 バイト）。
         MapItem::Insn(0xC7, gm("cmpxchg8b_mq", 1, false, &[Ea(Q64)], "cmpxchg8b {e}", "alu")),
+        // RDRAND/RDSEED（0F C7 /6 /7、レジスタ形のみ）。
+        MapItem::Insn(
+            0xC7,
+            // F3 0F C7 /6 は 64 ビットで SENDUIPI（m32 では予約）、
+            // F2 は予約。NP+66 のみ受理する。
+            gmp("rdrand_rv", 6, true, &[Ea(V)], PfxSel::NoF2F3, "rdrand {e}", "alu"),
+        ),
+        MapItem::Insn(
+            0xC7,
+            // F3 0F C7 /7 は RDPID、F2 は予約。NP+66 のみ受理する。
+            gmp("rdseed_rv", 7, true, &[Ea(V)], PfxSel::NoF2F3, "rdseed {e}", "alu"),
+        ),
         MapItem::Insn(
             0xB0,
             n("cmpxchg_eb_gb", &[Ea(B8), Reg(B8)], "cmpxchg {e}, {g}", "alu"),

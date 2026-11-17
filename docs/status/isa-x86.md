@@ -17,8 +17,8 @@
 | pentium | i486 | vme、de、pse、tsc、msr、cx8、mce、apic、mmx |  |
 | pentium_iii | pentium_pro | fxsr、sse、sep、pat |  |
 | pentium_pro | pentium | cmov、pge、mca、pae、mtrr、pse36 |  |
-| x86_64 |  | cpuid、fpu、vme、de、pse、tsc、msr、pae、mce、cx8、apic、sep、mtrr、pge、mca、cmov、pat、pse36、clfsh、mmx、fxsr、sse、sse2、sse3、ssse3、sse4_1、sse4_2、cx16、popcnt、rdtscp、syscall、nx、lm、lahf_lm、i486、lzcnt、adx、pclmulqdq、aesni、sha、gfni |  |
-| x86_64_v2 | x86_64 | cx16、popcnt | lzcnt、adx、pclmulqdq、aesni、sha、gfni |
+| x86_64 |  | cpuid、fpu、vme、de、pse、tsc、msr、pae、mce、cx8、apic、sep、mtrr、pge、mca、cmov、pat、pse36、clfsh、mmx、fxsr、sse、sse2、sse3、ssse3、sse4_1、sse4_2、cx16、popcnt、rdtscp、syscall、nx、lm、lahf_lm、i486、lzcnt、adx、pclmulqdq、aesni、sha、gfni、rdrnd、rdseed、serialize |  |
+| x86_64_v2 | x86_64 | cx16、popcnt | lzcnt、adx、pclmulqdq、aesni、sha、gfni、rdrnd、rdseed、serialize |
 | x86_64_v3 | x86_64_v2 | avx、avx2、bmi1、bmi2、f16c、fma、lzcnt、movbe、osxsave、adx、pclmulqdq、aesni |  |
 | x86_64_v4 | x86_64_v3 | avx512f、avx512bw、avx512cd、avx512dq、avx512vl |  |
 
@@ -670,6 +670,8 @@
 | rcl | rcl_eb_1、rcl_eb_cl、rcl_ev_1、rcl_ev_cl | 真 | alu |
 | rcr | rcr_eb_ib、rcr_ev_ib | i186 | alu |
 | rcr | rcr_eb_1、rcr_eb_cl、rcr_ev_1、rcr_ev_cl | 真 | alu |
+| rdrand | rdrand_rv | rdrnd | alu |
+| rdseed | rdseed_rv | rdseed | alu |
 | rdsspq | rdsspq | cet_ss | system |
 | rdtsc | rdtsc | tsc | system |
 | rdtscp | rdtscp | rdtscp | system |
@@ -691,6 +693,7 @@
 | sbb | sbb_al_ib、sbb_eax_iz、sbb_eb_gb、sbb_eb_ib、sbb_ev_gv、sbb_ev_ib、sbb_ev_iz、sbb_gb_eb、sbb_gv_ev、sbb_m32_r32_mem8、sbb_m32_r32_sibd、sbb_r_mem32、sbb_r_mem8、sbb_r_memnd、sbb_r_rip、sbb_rm32、sbb_rm32_imm、sbb_rm_imm8、sbb_rm_imm8_sibd | 真 | alu |
 | scas | scas_v | 真 | alu |
 | scasb | scas_b | 真 | alu |
+| serialize | serialize | i286 && serialize | system |
 | seta | seta | 真 | alu |
 | setae | setae | 真 | alu |
 | setb | setb | 真 | alu |

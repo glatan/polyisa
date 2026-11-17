@@ -34,7 +34,7 @@ pub struct CpuSel {
     /// 閉包済みの機能名の集合。
     pub features: BTreeSet<String>,
     /// `decode_model_ex` の `feats` に渡すビット集合。
-    pub feats: u64,
+    pub feats: u128,
     /// 機能集合に `rv64` があれば `Some(true)`、`rv32` なら `Some(false)`。
     /// どちらもなければ `None`（RISC-V 以外では使わない）。
     pub is_rv64: Option<bool>,
@@ -53,7 +53,7 @@ pub struct CpuSel {
 pub fn resolve(
     models: &[ModelRow],
     features: &[FeatureRow],
-    feat_bits: &[(&str, u64)],
+    feat_bits: &[(&str, u128)],
     model: &str,
     add: &[&str],
     remove: &[&str],
@@ -161,7 +161,7 @@ fn check_known(features: &[FeatureRow], name: &str) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    fn tables() -> (Vec<ModelRow>, Vec<FeatureRow>, Vec<(&'static str, u64)>) {
+    fn tables() -> (Vec<ModelRow>, Vec<FeatureRow>, Vec<(&'static str, u128)>) {
         let models: Vec<ModelRow> = vec![
             (
                 "rv64gc",
@@ -189,7 +189,7 @@ mod tests {
             ("b", &[], &[]),
             ("rv32", &[], &["rv64"]),
         ];
-        let bits: Vec<(&str, u64)> = vec![("m", 1 << 0), ("c", 1 << 2), ("zba", 1 << 3)];
+        let bits: Vec<(&str, u128)> = vec![("m", 1 << 0), ("c", 1 << 2), ("zba", 1 << 3)];
         (models, features, bits)
     }
 

@@ -14,7 +14,7 @@ pub use polyisa_isadl::Model;
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum GenError {
     Invalid(Vec<polyisa_isadl::ValidationError>),
-    /// デコーダが評価できない `when` の機能旗。64 個を超える旗で
+    /// デコーダが評価できない `when` の機能旗。128 個を超える旗で
     /// 符号化を区別しようとしたときに使う。
     UnsupportedWhen(String),
 }
@@ -112,19 +112,19 @@ fn gen_decoder(model: &Model) -> Result<String, GenError> {
     let extra = extra_flags(model)?;
     for (i, name) in extra.iter().enumerate() {
         s.push_str(&format!(
-            "pub const {}: u64 = 1 << {};\n",
+            "pub const {}: u128 = 1u128 << {};\n",
             feat_const(name),
             i
         ));
     }
     // 機能名から feats のビットへの対応。CPU モデルの解決が使う。
-    s.push_str("pub const FEAT_BITS: &[(&str, u64)] = &[\n");
+    s.push_str("pub const FEAT_BITS: &[(&str, u128)] = &[\n");
     for name in &extra {
         s.push_str(&format!("    ({name:?}, {}),\n", feat_const(name)));
     }
     s.push_str("];\n");
     s.push_str(
-        "pub fn decode_model_ex(word: u128, len: u32, is_rv64: bool, feats: u64) -> Option<Insn> {\n",
+        "pub fn decode_model_ex(word: u128, len: u32, is_rv64: bool, feats: u128) -> Option<Insn> {\n",
     );
     // `when` を使わないモデルでは `is_rv64` と `feats` が未使用になる。
     // 呼び出し側の互換性のため引数は残し、警告が出ないよう明示的に破棄する。
@@ -378,7 +378,7 @@ fn extra_flags(model: &Model) -> Result<Vec<String>, GenError> {
             }
         }
     }
-    if out.len() > 64 {
+    if out.len() > 128 {
         return Err(GenError::UnsupportedWhen(format!(
             "too many feature flags: {}",
             out.len()
@@ -713,7 +713,7 @@ fn gen_map_decoder(model: &Model) -> Result<String, GenError> {
     for map in &model.maps {
         s.push_str(&format!(
             "#[allow(clippy::all)]\n\
-             fn sel_{}(bytes: &[u8], i: &mut usize, d: &mut MapDec, modes: u32, feats: u64) -> Option<Insn> {{\n",
+             fn sel_{}(bytes: &[u8], i: &mut usize, d: &mut MapDec, modes: u32, feats: u128) -> Option<Insn> {{\n",
             to_snake(&map.name)
         ));
         s.push_str("    let _ = feats;\n");
@@ -802,7 +802,7 @@ fn gen_map_decoder(model: &Model) -> Result<String, GenError> {
         "/// オペコード表によるデコード。`bytes` は命令の先頭からの\n\
          /// バイト列（15 バイトあれば全命令をカバーする）。\n\
          #[allow(clippy::all)]\n\
-         pub fn decode_map(bytes: &[u8], modes: u32, feats: u64) -> Option<MapDec> {\n",
+         pub fn decode_map(bytes: &[u8], modes: u32, feats: u128) -> Option<MapDec> {\n",
     );
     s.push_str("    let _ = feats;\n");
     s.push_str(
@@ -884,6 +884,7 @@ fn emit_map_candidate(
         PfxSel::No66F3 => "!d.p66 && d.rep != 0xF3".to_string(),
         PfxSel::NoF2 => "d.rep != 0xF2".to_string(),
         PfxSel::NoF3 => "d.rep != 0xF3".to_string(),
+        PfxSel::NoF2F3 => "d.rep == 0".to_string(),
         PfxSel::P66 => "d.p66 && d.rep == 0".to_string(),
         PfxSel::PF2 => "d.rep == 0xF2".to_string(),
         PfxSel::PF3 => "d.rep == 0xF3".to_string(),
@@ -1148,7 +1149,7 @@ fn gen_metadata(model: &Model) -> String {
     }
     s.push_str("];\n");
     s.push_str(&format!(
-        "pub const DEFAULT_FEATS: u64 = {:#x};\n",
+        "pub const DEFAULT_FEATS: u128 = {:#x};\n",
         default_feats(model)
     ));
     s.push_str(&params_code(model));
@@ -1400,7 +1401,7 @@ fn params_code(model: &Model) -> String {
 /// CPU モデル名から機能ビットマスクを解決する。親連鎖をたどって
 /// add/remove を適用し、機能の `implies` で閉包を取る。
 /// 未知の名前は DEFAULT_FEATS。
-pub fn model_feats(name: &str) -> u64 {
+pub fn model_feats(name: &str) -> u128 {
     let mut chain: Vec<&ModelRow> = Vec::new();
     let mut cur = name;
     loop {
@@ -1443,7 +1444,7 @@ pub fn model_feats(name: &str) -> u64 {
     FEAT_BITS
         .iter()
         .filter(|(n, _)| set.contains(n))
-        .fold(0u64, |a, (_, b)| a | b)
+        .fold(0u128, |a, (_, b)| a | b)
 }
 ",
     );
@@ -1452,7 +1453,7 @@ pub fn model_feats(name: &str) -> u64 {
 
 /// 既定 CPU モデル（MODEL_DEFS の先頭）の機能を `implies` で閉包し、
 /// `FEAT_*` のビット和にしたもの。`--cpu` を省略したときの値。
-fn default_feats(model: &Model) -> u64 {
+fn default_feats(model: &Model) -> u128 {
     let Some(first) = model.models.first() else {
         return 0;
     };
@@ -1496,7 +1497,7 @@ fn default_feats(model: &Model) -> u64 {
     };
     set.iter()
         .filter_map(|f| extra.iter().position(|e| e == f))
-        .fold(0u64, |acc, i| acc | (1 << i))
+        .fold(0u128, |acc, i| acc | (1u128 << i))
 }
 
 /// 命令名を型の識別子にする。`_` で区切り、各語の先頭を大文字にする。
@@ -1699,14 +1700,14 @@ mod tests {
         });
         m.insns[0].when = Pred::Flag("m".to_string());
         let g = generate(&m).unwrap();
-        assert!(g.decoder.contains("pub const FEAT_M: u64 = 1 << 0;"));
+        assert!(g.decoder.contains("pub const FEAT_M: u128 = 1u128 << 0;"));
         assert!(g.decoder.contains("(feats & FEAT_M != 0)"));
         // 旗だけのモデルでは `is_rv64` が未使用になる。
         assert!(g.decoder.contains("let _ = is_rv64;"));
         assert!(!g.decoder.contains("let _ = feats;"));
         assert!(
             g.decoder
-                .contains("fn decode_model_ex(word: u128, len: u32, is_rv64: bool, feats: u64)")
+                .contains("fn decode_model_ex(word: u128, len: u32, is_rv64: bool, feats: u128)")
         );
         // 互換用の入口は既定モデルの機能集合で拡張版に委譲する。
         assert!(
@@ -1735,7 +1736,10 @@ mod tests {
             timing: "alu".to_string(),
         });
         let g = generate(&m).unwrap();
-        assert!(g.decoder.contains("pub const FEAT_MIPS_R6: u64 = 1 << 0;"));
+        assert!(
+            g.decoder
+                .contains("pub const FEAT_MIPS_R6: u128 = 1u128 << 0;")
+        );
         assert!(g.decoder.contains("(!(feats & FEAT_MIPS_R6 != 0))"));
         assert!(g.decoder.contains("(feats & FEAT_MIPS_R6 != 0)"));
     }
@@ -1743,7 +1747,7 @@ mod tests {
     #[test]
     fn decoder_rejects_too_many_feature_flags() {
         let mut m = model();
-        for i in 0..65u32 {
+        for i in 0..129u32 {
             m.features.push(Feature {
                 name: format!("feat{i}"),
                 implies: vec![],

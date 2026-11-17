@@ -27,7 +27,7 @@ const STEP_LIMIT: u64 = 256_000_000;
 #[derive(Clone, Copy, Debug)]
 pub struct PowerModel {
     /// `decode_model_ex` に渡す機能ビット。
-    pub feats: u64,
+    pub feats: u128,
     /// データ・命令のエンディアン。ppc64le が主対象。
     pub le: bool,
 }

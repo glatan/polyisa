@@ -265,6 +265,12 @@ fn declare_params(m: &mut Model) {
         "MSW（マシン状態ワード）。80286 のリセット値は 0xFFF0",
     );
     m.param(
+        "rand_seed",
+        ParamKind::Int(0xFFFF_FFFF),
+        "2654435769",
+        "RDRAND/RDSEED の決定的乱数列（splitmix64）のシード。真のエントロピー源は持たない",
+    );
+    m.param(
         "seg_limit",
         ParamKind::Enum(vec!["wrap".to_string(), "fault".to_string()]),
         "wrap",
@@ -335,6 +341,7 @@ fn declare_models(m: &mut Model) {
             "mtrr", "pge", "mca", "cmov", "pat", "pse36", "clfsh", "mmx", "fxsr", "sse", "sse2",
             "sse3", "ssse3", "sse4_1", "sse4_2", "cx16", "popcnt", "rdtscp", "syscall", "nx",
             "lm", "lahf_lm", "i486", "lzcnt", "adx", "pclmulqdq", "aesni", "sha", "gfni",
+            "rdrnd", "rdseed", "serialize",
         ],
         &[],
         &[],
@@ -347,9 +354,10 @@ fn declare_models(m: &mut Model) {
         "x86_64_v2",
         "x86_64",
         &["cx16", "popcnt"],
-        // psABI v2 に LZCNT・ADX・PCLMUL・AES-NI・SHA・GFNI は
-        // 含まれないので既定モデルから継承した分を削る。
-        &["lzcnt", "adx", "pclmulqdq", "aesni", "sha", "gfni"],
+        // psABI v2 に LZCNT・ADX・PCLMUL・AES-NI・SHA・GFNI・
+        // RDRAND・RDSEED・SERIALIZE は含まれないので既定モデルから
+        // 継承した分を削る。
+        &["lzcnt", "adx", "pclmulqdq", "aesni", "sha", "gfni", "rdrnd", "rdseed", "serialize"],
         &[],
         // v2 の水準（SSE4.2+POPCNT+CX16、AVX なし）は Westmere。
         intel("6", "44", "2"),
@@ -718,6 +726,9 @@ fn named_gate(mn: &str) -> Option<&'static [&'static str]> {
         | "aeskeygenassist" => &["aesni"],
         "pclmulqdq" => &["pclmulqdq"],
         // SHA-NI と GFNI。
+        "rdrand" => &["rdrnd"],
+        "rdseed" => &["rdseed"],
+        "serialize" => &["serialize"],
         _ if mn.starts_with("sha1") || mn.starts_with("sha256") => &["sha"],
         _ if mn.starts_with("gf2p8") => &["gfni"],
         "clflush" => &["clfsh"],

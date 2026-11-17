@@ -47,7 +47,7 @@ fn acc_fetch() -> Access {
 pub fn run_ex(
     env: &mut BareEnv,
     entry: u64,
-    feats: u64,
+    feats: u128,
     endian: Endian,
     stack: Option<StackGrowth>,
     sys: &mut impl TrapHandler,
@@ -115,7 +115,7 @@ fn svc<H: ?Sized + TrapHandler>(
 fn step_a64(
     env: &mut BareEnv,
     sys: &mut impl TrapHandler,
-    feats: u64,
+    feats: u128,
     endian: Endian,
     stack: Option<StackGrowth>,
 ) -> Result<(), Outcome> {
@@ -886,7 +886,7 @@ const MAX_BLOCK_INSNS: usize = 32;
 
 /// A64 の翻訳器。`feats`/`endian` は実行と同じ設定で固定する。
 pub struct A64Tx {
-    pub feats: u64,
+    pub feats: u128,
     pub endian: Endian,
 }
 
@@ -963,7 +963,7 @@ pub fn step_a64_jit(
     env: &mut BareEnv,
     sys: &mut impl TrapHandler,
     jit: &mut polyisa_jit::Jit,
-    feats: u64,
+    feats: u128,
     endian: Endian,
     stack: Option<StackGrowth>,
 ) -> Result<(), Outcome> {
@@ -998,7 +998,7 @@ pub fn step_a64_jit(
 pub fn run_ex_jit(
     env: &mut BareEnv,
     entry: u64,
-    feats: u64,
+    feats: u128,
     endian: Endian,
     stack: Option<StackGrowth>,
     sys: &mut impl TrapHandler,

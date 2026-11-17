@@ -27,7 +27,7 @@ const STEP_LIMIT: u64 = 256_000_000;
 #[derive(Clone, Copy, Debug)]
 pub struct MipsModel {
     /// `decode_model_ex` に渡す機能ビット。
-    pub feats: u64,
+    pub feats: u128,
     pub endian: Endian,
     /// R3000 だけが真。Release 2 と Release 6 は偽。
     pub load_delay: bool,
