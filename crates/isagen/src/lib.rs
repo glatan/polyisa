@@ -883,6 +883,7 @@ fn emit_map_candidate(
         PfxSel::No66 => "!d.p66".to_string(),
         PfxSel::No66F3 => "!d.p66 && d.rep != 0xF3".to_string(),
         PfxSel::NoF2 => "d.rep != 0xF2".to_string(),
+        PfxSel::NoF3 => "d.rep != 0xF3".to_string(),
         PfxSel::P66 => "d.p66 && d.rep == 0".to_string(),
         PfxSel::PF2 => "d.rep == 0xF2".to_string(),
         PfxSel::PF3 => "d.rep == 0xF3".to_string(),

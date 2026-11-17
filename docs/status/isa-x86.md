@@ -17,9 +17,9 @@
 | pentium | i486 | vme、de、pse、tsc、msr、cx8、mce、apic、mmx |  |
 | pentium_iii | pentium_pro | fxsr、sse、sep、pat |  |
 | pentium_pro | pentium | cmov、pge、mca、pae、mtrr、pse36 |  |
-| x86_64 |  | cpuid、fpu、vme、de、pse、tsc、msr、pae、mce、cx8、apic、sep、mtrr、pge、mca、cmov、pat、pse36、clfsh、mmx、fxsr、sse、sse2、sse3、ssse3、sse4_1、sse4_2、cx16、popcnt、rdtscp、syscall、nx、lm、lahf_lm、i486 |  |
-| x86_64_v2 | x86_64 | cx16、popcnt |  |
-| x86_64_v3 | x86_64_v2 | avx、avx2、bmi1、bmi2、f16c、fma、lzcnt、movbe、osxsave |  |
+| x86_64 |  | cpuid、fpu、vme、de、pse、tsc、msr、pae、mce、cx8、apic、sep、mtrr、pge、mca、cmov、pat、pse36、clfsh、mmx、fxsr、sse、sse2、sse3、ssse3、sse4_1、sse4_2、cx16、popcnt、rdtscp、syscall、nx、lm、lahf_lm、i486、lzcnt、adx |  |
+| x86_64_v2 | x86_64 | cx16、popcnt | lzcnt、adx |
+| x86_64_v3 | x86_64_v2 | avx、avx2、bmi1、bmi2、f16c、fma、lzcnt、movbe、osxsave、adx |  |
 | x86_64_v4 | x86_64_v3 | avx512f、avx512bw、avx512cd、avx512dq、avx512vl |  |
 
 ## 機能
@@ -165,6 +165,7 @@
 | aas | aas | !m64 | alu |
 | adc | adc_eb_ib | op82 | alu |
 | adc | adc_al_ib、adc_al_imm、adc_eax_iz、adc_eb_gb、adc_eb_ib、adc_ev_gv、adc_ev_ib、adc_ev_iz、adc_gb_eb、adc_gv_ev、adc_m32_imm8_mem8、adc_m32_imm8_sibd、adc_m32_r32_mem32、adc_m32_r32_mem8、adc_m32_r32_sibd、adc_m32_r32_sibd32、adc_r_mem32、adc_r_mem8、adc_r_memnd、adc_r_rip、adc_r_sibabs、adc_r_sibd、adc_rm32、adc_rm32_imm、adc_rm_imm8 | 真 | alu |
+| adcx | adcx_gv_ev | adx | alu |
 | add | add_eb_ib | op82 | alu |
 | add | add_al_ib、add_eax、add_eax_iz、add_eb_gb、add_eb_ib、add_ev_gv、add_ev_ib、add_ev_iz、add_gb_eb、add_gv_ev、add_m16_imm_sib、add_m32_r32_mem32、add_m32_r32_mem8、add_m32_r32_memnd、add_m32_r32_rip、add_m32_r32_sib、add_m32_r32_sibabs、add_m32_r32_sibd、add_m32_r32_sibd32、add_r_mem32、add_r_mem8、add_r_memnd、add_r_rip、add_r_sib、add_r_sibabs、add_r_sibd、add_r_sibd32、add_rm16_imm、add_rm32、add_rm32_imm、add_rm32_imm8_rip、add_rm32_imm_mem32、add_rm32_imm_mem8、add_rm32_imm_sib、add_rm32_imm_sibd、add_rm32_rip、add_rm64_imm、add_rm8_imm_sib、add_rm8_imm_sibd、add_rm_imm8、add_rm_imm8_mem32、add_rm_imm8_mem8、add_rm_imm8_memnd、add_rm_imm8_sibd | 真 | alu |
 | addpd | addpd_xv_wv | sse2 | alu |
@@ -174,6 +175,7 @@
 | addss | addss_xv_wv | sse | alu |
 | addsubpd | addsubpd_xv_wv | sse3 | alu |
 | addsubps | addsubps_xv_wv | sse3 | alu |
+| adox | adox_gv_ev | adx | alu |
 | and | and_eb_ib | op82 | alu |
 | and | and_al_ib、and_ax_imm16、and_eax、and_eax_iz、and_eb_gb、and_eb_ib、and_ev_gv、and_ev_ib、and_ev_iz、and_gb_eb、and_gv_ev、and_m32_r32_mem8、and_m32_r32_memnd、and_m32_r32_sib、and_m32_r32_sibd、and_m8_r8、and_m8_r8_mem8、and_r8_m8_mem32、and_r_mem32、and_r_mem8、and_r_memnd、and_r_rip、and_r_sib、and_r_sibd、and_r_sibd32、and_rm16_imm、and_rm16_imm_memnd、and_rm32、and_rm32_imm、and_rm32_imm_mem32、and_rm32_imm_mem8、and_rm32_imm_memnd、and_rm32_imm_sibd、and_rm32_rip、and_rm8_imm、and_rm8_imm_mem32、and_rm8_imm_mem8、and_rm8_imm_sibd、and_rm8_imm_sibd32、and_rm_imm8、and_rm_imm8_mem32、and_rm_imm8_mem8、and_rm_imm8_memnd、and_rm_imm8_rip、and_rm_imm8_sib、and_rm_imm8_sibd | 真 | alu |
 | andnpd | andnpd_xv_wv | sse2 | alu |
@@ -358,6 +360,7 @@
 | lodsb | lods_b | 真 | load |
 | loop | jcxz_jb、loop、loop_jb、loope_jb、loopne_jb | 真 | jump |
 | lss | lss_gv_mp | i386 | load |
+| lzcnt | lzcnt_gv_ev | lzcnt | alu |
 | maskmovdqu | maskmovdqu_xv_xv | sse2 | store |
 | maskmovq | maskmovq_pv_qv | sse | store |
 | maxpd | maxpd_xv_wv | sse2 | alu |

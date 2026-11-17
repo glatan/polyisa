@@ -3486,6 +3486,11 @@ fn dispatch_map<B: Backend>(
         Insn::XaddEvGv => sem_ea::xadd(b, w, &ea, d, reg),
         Insn::BsfGvEv => sem_ea::bsfx(b, w, false, reg, &ea, d),
         Insn::BsrGvEv => sem_ea::bsfx(b, w, true, reg, &ea, d),
+        Insn::LzcntGvEv => sem_ea::lzcnt(b, w, reg, &ea, d),
+        // ADCX/ADOX の必須接頭辞（66/F3）はオペコード選択子で、
+        // オペランド幅を縮めない。幅は REX.W ? 64 : 32 に固定。
+        Insn::AdcxGvEv => sem_ea::adcx(b, if d.rex & 8 != 0 { 64 } else { 32 }, false, reg, &ea, d),
+        Insn::AdoxGvEv => sem_ea::adcx(b, if d.rex & 8 != 0 { 64 } else { 32 }, true, reg, &ea, d),
         Insn::Ud1 => {
             if mode == 16 {
                 sem_ea::int_real(b, eip, 0, 6, sa, sseg)

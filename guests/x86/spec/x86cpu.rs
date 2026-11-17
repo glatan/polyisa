@@ -334,7 +334,7 @@ fn declare_models(m: &mut Model) {
             "cpuid", "fpu", "vme", "de", "pse", "tsc", "msr", "pae", "mce", "cx8", "apic", "sep",
             "mtrr", "pge", "mca", "cmov", "pat", "pse36", "clfsh", "mmx", "fxsr", "sse", "sse2",
             "sse3", "ssse3", "sse4_1", "sse4_2", "cx16", "popcnt", "rdtscp", "syscall", "nx",
-            "lm", "lahf_lm", "i486",
+            "lm", "lahf_lm", "i486", "lzcnt", "adx",
         ],
         &[],
         &[],
@@ -347,7 +347,9 @@ fn declare_models(m: &mut Model) {
         "x86_64_v2",
         "x86_64",
         &["cx16", "popcnt"],
-        &[],
+        // psABI v2 に LZCNT・ADX は含まれず、v2 の Westmere 署名の
+        // 実機も持たない。既定モデルから継承した分を削る。
+        &["lzcnt", "adx"],
         &[],
         // v2 の水準（SSE4.2+POPCNT+CX16、AVX なし）は Westmere。
         intel("6", "44", "2"),
@@ -357,7 +359,7 @@ fn declare_models(m: &mut Model) {
         "x86_64_v3",
         "x86_64_v2",
         &[
-            "avx", "avx2", "bmi1", "bmi2", "f16c", "fma", "lzcnt", "movbe", "osxsave",
+            "avx", "avx2", "bmi1", "bmi2", "f16c", "fma", "lzcnt", "movbe", "osxsave", "adx",
         ],
         &[],
         &[],
@@ -706,6 +708,9 @@ fn named_gate(mn: &str) -> Option<&'static [&'static str]> {
         // その他の拡張。
         "popcnt" => &["popcnt"],
         "movbe" => &["movbe"],
+        // ADX 系と POPCNT 系の拡張。
+        "lzcnt" => &["lzcnt"],
+        "adcx" | "adox" => &["adx"],
         "clflush" => &["clfsh"],
         // MXCSR の読み書きは SSE 付随。
         "ldmxcsr" | "stmxcsr" => &["sse"],

@@ -17164,3 +17164,40 @@ fn run16_flags_top_bits() {
         assert_eq!(env.backend.get(Gpr(0).state()) & 0xFFFF, want, "{model}");
     }
 }
+
+#[test]
+fn run32_lzcnt_adcx_adox() {
+    // LZCNT/ADCX/ADOX をマップ経路で回す。フラグ連鎖込み。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    let prog: &[u8] = &[
+        0xB9, 0xFF, 0x00, 0x00, 0x00, // mov ecx,0xFF
+        0xF3, 0x0F, 0xBD, 0xC1, // lzcnt eax,ecx  → 24, CF=0
+        0xBB, 0x00, 0x00, 0x00, 0x00, // mov ebx,0
+        0xF3, 0x0F, 0xBD, 0xD3, // lzcnt edx,ebx  → 32, CF=1
+        0x66, 0x0F, 0x38, 0xF6, 0xCA, // adcx ecx,edx   → 0xFF+32+1=0x120, CF=0
+        0xF3, 0x0F, 0x38, 0xF6, 0xC1, // adox eax,ecx   → 24+0x120+0=0x138
+        0x89, 0xC3, // mov ebx,eax
+        0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax,1
+        0xCD, 0x80, // int 0x80 → exit(0x138)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut ExitOne, 1000, false);
+    assert_eq!(out, Outcome::Exit(0x138));
+    // ADOX は OF だけを動かす: OF=0 を保ち、CF は ADCX で消費済み。
+    let fl: u32 = env.backend.get(polyisa_guest_x86::sem::eflags_ref());
+    assert_eq!(fl & 0x801, 0, "CF/OF both clear");
+    // LZCNT 機能が無い CPU では F3 0F BD は BSR として動く
+    // （デコードはしない、モデル機能の規則）。
+    use polyisa_guest_x86::{MODE_ADR_A32, MODE_ADR_SHIFT, MODE_OPD_O32, MODE_OPD_SHIFT};
+    let modes = (MODE_OPD_O32 << MODE_OPD_SHIFT) | (MODE_ADR_A32 << MODE_ADR_SHIFT);
+    let d = polyisa_guest_x86::decode_map(
+        &[0xF3, 0x0F, 0xBD, 0xC1],
+        modes,
+        polyisa_guest_x86::model_feats("generic32"),
+    );
+    assert!(d.is_none(), "generic32 has no lzcnt; F3 0F BD unmapped");
+}

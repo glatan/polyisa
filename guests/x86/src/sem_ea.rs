@@ -2055,6 +2055,101 @@ pub fn bsfx<B: Backend>(
     }
 }
 
+/// LZCNT r, r/m。上位から連続する 0 の個数。入力 0 は幅を返して
+/// CF=1、結果 0（MSB が立つ）で ZF=1。その他のフラグは保つ。
+fn lzcnt_w<B: Backend, W: Hw>(b: &mut B, g: Gpr, ea: &Rm<B::V<W64>>, d: &MapDec) -> Flow<B> {
+    let v = rd_w::<B, W>(b, ea, d)?;
+    let zero = b.konst::<W>(W::from_u128(0));
+    // 最上位に立つビットの添字（入力 0 のときは使わない）。
+    let mut idx = zero;
+    for i in 0..W::BITS {
+        let bit = b.konst::<W>(W::from_u128(1u128 << i));
+        let t = b.and::<W>(v, bit);
+        let set = b.cmp::<W>(Cmp::Ne, t, zero);
+        let iv = b.konst::<W>(W::from_u128(u128::from(i)));
+        idx = b.select::<W>(set, iv, idx);
+    }
+    let is_zero = b.cmp::<W>(Cmp::Eq, v, zero);
+    let bits = b.konst::<W>(W::from_u128(u128::from(W::BITS)));
+    let one = b.konst::<W>(W::from_u128(1));
+    let t = b.add::<W>(idx, one);
+    let cnt = b.sub::<W>(bits, t);
+    let dst = b.select::<W>(is_zero, bits, cnt);
+    W::put(b, g, d, dst);
+    let is_dst_zero = b.cmp::<W>(Cmp::Eq, dst, zero);
+    let old: B::V<W32> = b.get(eflags_ref());
+    let mask = b.konst::<W32>(!(sem::FLAG_CF | sem::FLAG_ZF));
+    let f = b.and::<W32>(old, mask);
+    let cf = pick(b, is_zero, sem::FLAG_CF);
+    let zf = pick(b, is_dst_zero, sem::FLAG_ZF);
+    let f = b.or::<W32>(f, cf);
+    let f = b.or::<W32>(f, zf);
+    b.set(eflags_ref(), f);
+    Ok(())
+}
+
+/// LZCNT r, r/m。
+pub fn lzcnt<B: Backend>(b: &mut B, w: u8, g: Gpr, ea: &Rm<B::V<W64>>, d: &MapDec) -> Flow<B> {
+    match w {
+        16 => lzcnt_w::<B, W16>(b, g, ea, d),
+        64 => lzcnt_w::<B, W64>(b, g, ea, d),
+        _ => lzcnt_w::<B, W32>(b, g, ea, d),
+    }
+}
+
+/// ADCX/ADOX r, r/m。`of` が真なら ADOX（OF を桁上げ入力・出力に
+/// 使う）、偽なら ADCX（CF）。結果は dst = dst + src + carry。
+/// 更新するのは対応する旗だけで、他のフラグは保つ。
+fn adcx_w<B: Backend, W: Hw, W2: Width>(
+    b: &mut B,
+    of: bool,
+    g: Gpr,
+    ea: &Rm<B::V<W64>>,
+    d: &MapDec,
+) -> Flow<B> {
+    let src = rd_w::<B, W>(b, ea, d)?;
+    let dst = W::get(b, g, d);
+    let c = if of { read_of(b) } else { read_cf(b) };
+    let zero = b.konst::<W>(W::from_u128(0));
+    let one = b.konst::<W>(W::from_u128(1));
+    let cin = b.select::<W>(c, one, zero);
+    let d2 = b.zext::<W, W2>(dst);
+    let s2 = b.zext::<W, W2>(src);
+    let c2 = b.zext::<W, W2>(cin);
+    let t = b.add::<W2>(d2, s2);
+    let t = b.add::<W2>(t, c2);
+    let v: B::V<W> = b.trunc::<W2, W>(t);
+    let top = b.konst::<W2>(W2::from_u128(1u128 << W::BITS));
+    let co = b.and::<W2>(t, top);
+    let zero2 = b.konst::<W2>(W2::from_u128(0));
+    let cout = b.cmp::<W2>(Cmp::Ne, co, zero2);
+    W::put(b, g, d, v);
+    let bit = if of { sem::FLAG_OF } else { sem::FLAG_CF };
+    let old: B::V<W32> = b.get(eflags_ref());
+    let mask = b.konst::<W32>(!bit);
+    let f = b.and::<W32>(old, mask);
+    let nv = pick(b, cout, bit);
+    let f = b.or::<W32>(f, nv);
+    b.set(eflags_ref(), f);
+    Ok(())
+}
+
+/// ADCX/ADOX r, r/m。
+pub fn adcx<B: Backend>(
+    b: &mut B,
+    w: u8,
+    of: bool,
+    g: Gpr,
+    ea: &Rm<B::V<W64>>,
+    d: &MapDec,
+) -> Flow<B> {
+    match w {
+        16 => adcx_w::<B, W16, W32>(b, of, g, ea, d),
+        64 => adcx_w::<B, W64, W128>(b, of, g, ea, d),
+        _ => adcx_w::<B, W32, W64>(b, of, g, ea, d),
+    }
+}
+
 /// LOOPNE/LOOPE/LOOP/JcXZ。カウンタ幅はアドレスサイズ（CX/ECX/RCX）に従う。
 /// kind: 0=LOOPNE 1=LOOPE 2=LOOP 3=JcXZ。
 pub fn loopcc<B: Backend>(

@@ -939,9 +939,32 @@ pub fn build_maps(m: &mut Model) {
             0xBC,
             n("bsf_gv_ev", &[Reg(V), Ea(V)], "bsf {g}, {e}", "alu"),
         ),
+        // LZCNT（F3 0F BD）。LZCNT 機能が無い CPU での F3 0F BD は
+        // 実機では BSR として動くが、BSR は NoF3 で排他しているので
+        // このモデルではデコード不能になる（既知の近似）。
         MapItem::Insn(
             0xBD,
-            n("bsr_gv_ev", &[Reg(V), Ea(V)], "bsr {g}, {e}", "alu"),
+            mi(
+                "lzcnt_gv_ev",
+                &[Reg(V), Ea(V)],
+                None,
+                PfxSel::PF3,
+                Pred::True,
+                "lzcnt {g}, {e}",
+                "alu",
+            ),
+        ),
+        MapItem::Insn(
+            0xBD,
+            mi(
+                "bsr_gv_ev",
+                &[Reg(V), Ea(V)],
+                None,
+                PfxSel::NoF3,
+                Pred::True,
+                "bsr {g}, {e}",
+                "alu",
+            ),
         ),
         MapItem::Insn(
             0xC0,
@@ -1435,6 +1458,15 @@ fn build_map_0f38(m: &mut Model) {
     x(0x14, "blendvps_xv_wv");
     x(0x15, "blendvpd_xv_wv");
     x(0x41, "phminposuw_xv_wv");
+    // ADX。ADCX は必須 66、ADOX は必須 F3。
+    v.push(MapItem::Insn(
+        0xF6,
+        mi("adcx_gv_ev", &[Reg(V), Ea(V)], None, PfxSel::P66, Pred::True, "adcx {g}, {e}", "alu"),
+    ));
+    v.push(MapItem::Insn(
+        0xF6,
+        mi("adox_gv_ev", &[Reg(V), Ea(V)], None, PfxSel::PF3, Pred::True, "adox {g}, {e}", "alu"),
+    ));
     // CRC32（F2 0F38 F0/F1）。MOVBE と同バイトで接頭辞で分ける。
     v.push(MapItem::Insn(
         0xF0,

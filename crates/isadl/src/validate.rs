@@ -452,6 +452,7 @@ fn validate_maps(model: &Model, timing: &BTreeSet<&str>, errors: &mut Vec<Valida
             PfxSel::No66 => 0b1101,
             PfxSel::No66F3 => 0b0101,
             PfxSel::NoF2 => 0b1011,
+            PfxSel::NoF3 => 0b0111,
         }
     };
     let pfx_overlap = |a: PfxSel, b: PfxSel| (pfx_states(a) & pfx_states(b)) != 0;
