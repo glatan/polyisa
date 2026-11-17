@@ -113,7 +113,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 段階4の x86 最小 853 件にオペコード表の記述を足した件数。
-        assert_eq!(INSNS.len(), 1600);
+        assert_eq!(INSNS.len(), 1608);
     }
 
     #[test]
@@ -1717,6 +1717,64 @@ mod tests {
     }
 
     #[test]
+    fn generation_gates() {
+        // 世代ゲート（A0）。実モードの modes = o16/a16 = 0。
+        let sel = model_feats;
+        let m16 = 0u32;
+        // 0F: 8088/186 では POP CS、286 以降は副表。
+        assert_eq!(
+            decode_map(&[0x0F], m16, sel("i8088")).map(|d| d.insn),
+            Some(Insn::PopCs)
+        );
+        assert_eq!(
+            decode_map(&[0x0F], m16, sel("i186")).map(|d| d.insn),
+            Some(Insn::PopCs)
+        );
+        assert_eq!(
+            decode_map(&[0x0F, 0x01, 0xE0], m16, sel("i286")).map(|d| d.insn),
+            Some(Insn::SmswEw)
+        );
+        // 0x82: 8088/186 の 0x80 別名。286 以降は無効。
+        assert!(decode_map(&[0x82, 0xC0, 0x05], m16, sel("i8088")).is_some());
+        assert!(decode_map(&[0x82, 0xC0, 0x05], m16, sel("i186")).is_some());
+        assert!(decode_map(&[0x82, 0xC0, 0x05], m16, sel("i286")).is_none());
+        // 80186 系: PUSH imm / INS / OUTS / PUSHA / ENTER / BOUND。
+        for prog in [
+            &[0x6A, 0x05][..],
+            &[0x68, 0x34, 0x12][..],
+            &[0x6C][..],
+            &[0x6D][..],
+            &[0x6E][..],
+            &[0x6F][..],
+            &[0x60][..],
+            &[0x61][..],
+            &[0x62, 0x00][..],
+            &[0xC8, 0x00, 0x00, 0x00][..],
+            &[0xC9][..],
+            &[0xC0, 0xC0, 0x02][..],
+        ] {
+            assert!(
+                decode_map(prog, m16, sel("i186")).is_some(),
+                "i186 で解読できない: {prog:02x?}"
+            );
+            assert!(
+                decode_map(prog, m16, sel("i8088")).is_none(),
+                "i8088 で解読してしまう: {prog:02x?}"
+            );
+        }
+        // SMSW/LMSW は 286 実モードのみ。
+        assert_eq!(
+            decode_map(&[0x0F, 0x01, 0xF0], m16, sel("i286")).map(|d| d.insn),
+            Some(Insn::LmswEw)
+        );
+        // 186 では 0F が POP CS なので副表へは落ちない。
+        assert_eq!(
+            decode_map(&[0x0F, 0x01, 0xE0], m16, sel("i186")).map(|d| d.insn),
+            Some(Insn::PopCs)
+        );
+    }
+
+    #[test]
     fn model_defs_and_default_feats() {
         // 既定（先頭）モデルは x86_64 で、SSE4.2 までを含む。
         assert_eq!(MODEL_DEFS[0].0, "x86_64");
@@ -1724,9 +1782,10 @@ mod tests {
         assert_ne!(DEFAULT_FEATS & FEAT_SSE, 0);
         assert_ne!(DEFAULT_FEATS & FEAT_CPUID, 0);
         assert_ne!(DEFAULT_FEATS & FEAT_SSE4_2, 0);
-        // モデル行は (名前, 親, 追加, 削除, ident) の5項。8088 は機能なし。
+        // モデル行は (名前, 親, 追加, 削除, ident) の5項。8088 は
+        // POP CS と 0x82 別名の世代旗を持つ。
         let i8088 = MODEL_DEFS.iter().find(|r| r.0 == "i8088").unwrap();
-        assert!(i8088.2.is_empty());
+        assert!(i8088.2.contains(&"pop_cs") && i8088.2.contains(&"op82"));
         // v2 は v1 を親に popcnt/cx16 を足す（ident は親から継承する）。
         let v4 = MODEL_DEFS.iter().find(|r| r.0 == "x86_64_v4").unwrap();
         assert_eq!(v4.1, "x86_64_v3");

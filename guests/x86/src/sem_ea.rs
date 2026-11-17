@@ -606,17 +606,19 @@ fn shift_w<B: Backend, W: Hw>(
     rm: &Rm<B::V<W64>>,
     d: &MapDec,
     cnt: ShiftCnt,
-    m16: bool,
+    _m16: bool,
 ) -> Flow<B> {
-    // 8088 は CL をマスクしない（回数をそのまま反復）。286 以降は 31/63。
+    // CL のマスクは挙動パラメータ `shift_count`。full は 8086/8088
+    // （回数をそのまま反復）、masked は 286 以降の 31/63。
     let mask: u64 = if W::BITS == 64 { 63 } else { 31 };
+    let full = b.param::<crate::ShiftCountParam>() == crate::SHIFT_COUNT_FULL;
     let n = match cnt {
         ShiftCnt::Imm(i) => b.konst::<W>(W::from_u128(u128::from(i & mask as u32))),
         ShiftCnt::One => b.konst::<W>(W::from_u128(1)),
         ShiftCnt::Cl => {
             let cl = sem::read8(b, Gpr(1), false);
             let cl: B::V<W32> = b.zext::<W8, W32>(cl);
-            let m = b.konst::<W32>(if m16 { 0xFF } else { mask as u32 });
+            let m = b.konst::<W32>(if full { 0xFF } else { mask as u32 });
             let v = b.and::<W32>(cl, m);
             b.trunc::<W32, W>(v)
         }
@@ -1211,7 +1213,12 @@ pub fn far_rm<B: Backend>(
 /// 積まれる IP は除算命令の次を指す（8088 の実動作）。
 pub fn int_real<B: Backend>(b: &mut B, eip: u32, len: u32, vec: u8, sa: u8, sseg: u64) -> Flow<B> {
     let fl: B::V<W32> = b.get(eflags_ref());
-    let fl64 = b.zext::<W32, W64>(fl);
+    // `flags_top` = ones（8086/80186）では積まれる FLAGS の bit12-15 が 1。
+    let mut fl64 = b.zext::<W32, W64>(fl);
+    if b.param::<crate::FlagsTopParam>() == crate::FLAGS_TOP_ONES {
+        let hi = b.konst::<W64>(0xF000);
+        fl64 = b.or::<W64>(fl64, hi);
+    }
     push_v(b, 16, fl64, sa, sseg)?;
     // IF(bit9) と TF(bit8) を落とす。
     let m = b.konst::<W32>(!0x300u32);
@@ -1722,7 +1729,7 @@ pub fn enter<B: Backend>(b: &mut B, w: u8, frame: u64, level: u64, sa: u8, sseg:
     let bytes = b.konst::<W64>(u64::from(w / 8));
     let sg = b.konst::<W64>(sseg);
     if lvl > 0 {
-        let mut p = sp0;
+        let mut p = bp;
         for _ in 1..lvl {
             let pv = b.sub::<W64>(p, bytes);
             p = b.and::<W64>(pv, mm);
@@ -1811,6 +1818,8 @@ pub enum Str {
     Lods,
     Scas,
     Cmps,
+    Ins,
+    Outs,
 }
 
 fn asize_mask(asize: u8) -> u64 {
@@ -1948,6 +1957,22 @@ fn str_w<B: Backend, W: Hw>(
             update_sub_flags(b, x, t, v);
             str_bump(b, Gpr(6), asize, sz);
             str_bump(b, Gpr(7), asize, sz);
+        }
+        Str::Ins => {
+            // INS: DX のポートから読み ES:(E)DI へ書く（80186）。
+            let dx = decode::grd16(b, Gpr(2));
+            let port: B::V<W64> = b.zext::<W16, W64>(dx);
+            let v = b.port_in::<W>(port)?;
+            decode::mem_store(b, di, wseg_d, v)?;
+            str_bump(b, Gpr(7), asize, sz);
+        }
+        Str::Outs => {
+            // OUTS: DS:(E)SI から読み DX のポートへ書く（80186）。
+            let dx = decode::grd16(b, Gpr(2));
+            let port: B::V<W64> = b.zext::<W16, W64>(dx);
+            let v: B::V<W> = decode::mem_load(b, si, wseg_s)?;
+            b.port_out::<W>(port, v)?;
+            str_bump(b, Gpr(6), asize, sz);
         }
     }
     if rep {
@@ -4877,7 +4902,19 @@ pub fn pop_sr<B: Backend>(b: &mut B, s: u8, sw: u8, sa: u8, sseg: u64) -> Flow<B
 
 /// ARPL r/m16, r16。dst の RPL（下位 2 ビット）が src より小さければ
 /// src の RPL に揃えて ZF=1、そうでなければ ZF=0。
-pub fn arpl<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit> {
+pub fn arpl<B: Backend>(
+    b: &mut B,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+    eip: u32,
+    mode: u8,
+    sa: u8,
+    sseg: u64,
+) -> Result<(), B::Exit> {
+    // ARPL は保護モード専用。実モードで実行すると #UD（割り込み 6）。
+    if mode == 16 {
+        return int_real(b, eip, 0, 6, sa, sseg);
+    }
     let dst = decode::rd16(b, ea)?;
     let src = decode::grd16(b, decode::reg(d));
     let m = b.konst::<W16>(3);
@@ -5061,7 +5098,13 @@ fn div_fault<B: Backend, W: Width>(
     if mode == 16 {
         let r = b.sub::<W>(hi, dv);
         update_sub_flags::<B, W>(b, hi, dv, r);
-        int_real(b, eip, len, 0, sa, sseg)
+        // 8086/8088 は次命令、286 以降はフォールトした命令の先頭を積む。
+        let flen = if b.param::<crate::DivFaultIpParam>() == crate::DIV_FAULT_IP_AT_INSN {
+            0
+        } else {
+            len
+        };
+        int_real(b, eip, flen, 0, sa, sseg)
     } else {
         Err(sem::div0(b, eip))
     }
@@ -5177,7 +5220,12 @@ fn div_cord<B: Backend, W: Hw, W2: Width, F: Fn(&mut B, B::V<W>, B::V<W>)>(
         wr(b, qs, rs);
         Ok(())
     })?;
-    b.if_then(fault, |b| int_real(b, eip, len, 0, sa, sseg))?;
+    let flen = if b.param::<crate::DivFaultIpParam>() == crate::DIV_FAULT_IP_AT_INSN {
+        0
+    } else {
+        len
+    };
+    b.if_then(fault, |b| int_real(b, eip, flen, 0, sa, sseg))?;
     Ok(())
 }
 
@@ -5665,6 +5713,94 @@ pub fn load_far<B: Backend>(b: &mut B, d: &MapDec, rm: &Rm<B::V<W64>>, s: u8) ->
     decode::gwr16(b, decode::reg(d), off);
     b.set(sem::sreg_ref(s), seg);
     Ok(())
+}
+
+/// BOUND Gv, Mp（80186）。添字レジスタが [lo, hi]（符号付き）の外なら
+/// 実モードでは割り込み 5。フォールト時に積む IP は命令先頭（len=0）。
+#[allow(clippy::too_many_arguments)]
+pub fn bound<B: Backend>(
+    b: &mut B,
+    w: u8,
+    d: &MapDec,
+    rm: &Rm<B::V<W64>>,
+    eip: u32,
+    mode: u8,
+    sa: u8,
+    sseg: u64,
+) -> Flow<B> {
+    let Rm::Mem { a, wseg } = rm else {
+        return Ok(());
+    };
+    let sz = b.konst::<W64>(u64::from(w / 8));
+    let a2 = b.add::<W64>(*a, sz);
+    if w == 16 {
+        let lo: B::V<W16> = decode::mem_load(b, *a, *wseg)?;
+        let hi: B::V<W16> = decode::mem_load(b, a2, *wseg)?;
+        let idx = decode::grd16(b, decode::reg(d));
+        bound_chk::<B, W16>(b, idx, lo, hi, eip, mode, sa, sseg)
+    } else {
+        let lo: B::V<W32> = decode::mem_load(b, *a, *wseg)?;
+        let hi: B::V<W32> = decode::mem_load(b, a2, *wseg)?;
+        let idx = decode::grd32(b, decode::reg(d));
+        bound_chk::<B, W32>(b, idx, lo, hi, eip, mode, sa, sseg)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn bound_chk<B: Backend, W: Width>(
+    b: &mut B,
+    idx: B::V<W>,
+    lo: B::V<W>,
+    hi: B::V<W>,
+    eip: u32,
+    mode: u8,
+    sa: u8,
+    sseg: u64,
+) -> Flow<B> {
+    let under = b.cmp::<W>(Cmp::LtS, idx, lo);
+    let over = b.cmp::<W>(Cmp::GtS, idx, hi);
+    let bad = bor(b, under, over);
+    if mode == 16 {
+        b.if_then(bad, |b| int_real(b, eip, 0, 5, sa, sseg))
+    } else {
+        // 保護モードの #BR ハンドラは本格実装で足す。
+        use polyisa_sem::{ExceptionKind, GuestException};
+        b.if_then(bad, |b| {
+            Err(b.raise(GuestException {
+                kind: ExceptionKind::Break,
+                code: 5,
+                addr: Some(eip as u64),
+                in_delay_slot: false,
+            }))
+        })
+    }
+}
+
+/// SMSW r/m16（80286 実モード）。`msw` 挙動パラメータの値を書く。
+/// `reg` 形では機種依存の上位ビットは書かない（`msw` は 16 ビット値）。
+pub fn smsw<B: Backend>(b: &mut B, rm: &Rm<B::V<W64>>) -> Flow<B> {
+    let m = u64::from(b.param::<crate::MswParam>()) as u16;
+    let v = b.konst::<W16>(m);
+    decode::wr16(b, rm, v)
+}
+
+/// LMSW r/m16（80286）。PE ビットを立てる書き込みは保護モード非対応の
+/// ため例外とする。PE=0 の書き込みは MSW を変えない。
+pub fn lmsw<B: Backend>(b: &mut B, rm: &Rm<B::V<W64>>, eip: u32) -> Flow<B> {
+    let v: B::V<W16> = decode::rd16(b, rm)?;
+    let one = b.konst::<W16>(1);
+    let pe = b.and::<W16>(v, one);
+    let zero = b.konst::<W16>(0);
+    let on = b.cmp::<W16>(Cmp::Ne, pe, zero);
+    use polyisa_sem::{ExceptionKind, GuestException};
+    b.if_then(on, |b| {
+        Err(b.raise(GuestException {
+            kind: ExceptionKind::Undefined,
+            code: 0x000F_0106,
+            addr: Some(eip as u64),
+            in_delay_slot: false,
+        }))
+    })
 }
 
 // ---- x87 比較・環境 ----

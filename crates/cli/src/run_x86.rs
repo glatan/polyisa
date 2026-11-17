@@ -1767,13 +1767,15 @@ pub fn run_mode_ex(
 /// 16 ビット実モードの実行ループ。`eip` 状態は IP（16 ビット）、
 /// セグメント基底はセレクタ<<4 で実モードの規則に従う。
 pub fn run_m16(env: &mut BareEnv, entry: u32, sys: &mut impl TrapHandler, limit: u64) -> Outcome {
+    // 既定は 8088 世代（SST 8088 の基準）。他世代は `run_m16_ex` に
+    // モデルの機能・パラメータを渡す。
     run_m16_ex(
         env,
         entry,
         sys,
         limit,
-        0,
-        &polyisa_guest_x86::DEFAULT_PARAMS,
+        polyisa_guest_x86::model_feats("i8088"),
+        &polyisa_guest_x86::model_params("i8088"),
     )
 }
 
@@ -1788,7 +1790,11 @@ pub fn run_m16_ex(
 ) -> Outcome {
     polyisa_guest_x86::install_params(&mut env.backend, params);
     env.backend.set(polyisa_guest_x86::sem::eip_ref(), entry);
-    env.backend.addr_mask = 0xF_FFFF;
+    env.backend.addr_mask = if params.addr_wrap == polyisa_guest_x86::ADDR_WRAP_M20 {
+        0xF_FFFF
+    } else {
+        u64::MAX
+    };
     let _ = sys.on_block(env);
     let mut hist = std::collections::VecDeque::<(u32, String)>::with_capacity(33);
     polyisa_engine::run::run(
@@ -3059,10 +3065,12 @@ fn dispatch_map<B: Backend>(
         Insn::PushRv => {
             let r = decode::op_reg(d);
             let mut v = gr64(b, r, sw);
-            // 8088 の push sp はデクリメント後の SP を積む。
-            if mode == 16 && r.0 == 4 {
-                let two = b.konst::<W64>(2);
-                v = b.sub::<W64>(v, two);
+            // `push_sp` = post（8086/8088）ならデクリメント後の SP を積む。
+            if b.param::<polyisa_guest_x86::PushSpParam>() == polyisa_guest_x86::PUSH_SP_POST
+                && r.0 == 4
+            {
+                let sz = b.konst::<W64>(u64::from(sw / 8));
+                v = b.sub::<W64>(v, sz);
             }
             sem_ea::push_v(b, sw, v, sa, sseg)
         }
@@ -3081,13 +3089,13 @@ fn dispatch_map<B: Backend>(
         }
         Insn::PushEv => {
             let mut v = rd_any(b, sw, &ea, d)?;
-            // 8088 の push sp（mod=11, r/m=4）はデクリメント後の SP を積む。
-            if mode == 16
+            // `push_sp` = post なら mod=11, r/m=4 でもデクリメント後を積む。
+            if b.param::<polyisa_guest_x86::PushSpParam>() == polyisa_guest_x86::PUSH_SP_POST
                 && let Rm::Reg(g) = &ea
                 && g.0 == 4
             {
-                let two = b.konst::<W64>(2);
-                v = b.sub::<W64>(v, two);
+                let sz = b.konst::<W64>(u64::from(sw / 8));
+                v = b.sub::<W64>(v, sz);
             }
             sem_ea::push_v(b, sw, v, sa, sseg)
         }
@@ -3097,7 +3105,15 @@ fn dispatch_map<B: Backend>(
         }
         Insn::Pushf => {
             let f = b.get(eflags_ref());
-            let v = b.zext::<W32, W64>(f);
+            let mut v = b.zext::<W32, W64>(f);
+            // `flags_top` = ones（8086/8088）は bit12-15 を立てて積む。
+            if mode == 16
+                && b.param::<polyisa_guest_x86::FlagsTopParam>()
+                    == polyisa_guest_x86::FLAGS_TOP_ONES
+            {
+                let hi = b.konst::<W64>(0xF000);
+                v = b.or::<W64>(v, hi);
+            }
             sem_ea::push_v(b, sw, v, sa, sseg)
         }
         Insn::Popf => {
@@ -3105,10 +3121,18 @@ fn dispatch_map<B: Backend>(
             let v32: B::V<W32> = b.trunc::<W64, W32>(v);
             let cur = b.get(eflags_ref());
             if mode == 16 {
-                // 8088: bit1=1、bit3/5=0、bit12-15 は常に 1。
+                // bit1=1、bit3/5=0。`flags_top` = ones（8086/8088）は
+                // bit12-15 も常に 1。zero（286 以降）はスタックの値。
                 let m = b.konst::<W32>(0x0FD5);
                 let low = b.and::<W32>(v32, m);
-                let forced = b.konst::<W32>(0xF002);
+                let forced = if b.param::<polyisa_guest_x86::FlagsTopParam>()
+                    == polyisa_guest_x86::FLAGS_TOP_ONES
+                {
+                    0xF002
+                } else {
+                    0x0002
+                };
+                let forced = b.konst::<W32>(forced);
                 let low = b.or::<W32>(low, forced);
                 let him = b.konst::<W32>(0xFFFF_0000);
                 let hi = b.and::<W32>(cur, him);
@@ -3329,12 +3353,13 @@ fn dispatch_map<B: Backend>(
         Insn::DecRv => sem_ea::incdec(b, false, w, &Rm::Reg(decode::op_reg(d)), d),
         Insn::Pusha => {
             // EAX, ECX, EDX, EBX, 元の ESP, EBP, ESI, EDI の順。
+            // ESP 枠は命令実行前の値なので push 前に採取する。
+            let sp0 = gr64(b, Gpr(4), w);
             for g in 0..4u8 {
                 let v = gr64(b, Gpr(g), w);
                 sem_ea::push_v(b, w, v, sa, sseg)?;
             }
-            let v = gr64(b, Gpr(4), w);
-            sem_ea::push_v(b, w, v, sa, sseg)?;
+            sem_ea::push_v(b, w, sp0, sa, sseg)?;
             for g in 5..8u8 {
                 let v = gr64(b, Gpr(g), w);
                 sem_ea::push_v(b, w, v, sa, sseg)?;
@@ -3387,6 +3412,14 @@ fn dispatch_map<B: Backend>(
         Insn::AddsubpdXvWv => sem_ea::addsub(b, 64, d, &ea),
         Insn::LddquXvMv => sem_ea::mov_x_w(b, d, &ea),
         Insn::Fwait => sem_ea::nop(b),
+        Insn::InsEbDx => sem_ea::str_op(b, sem_ea::Str::Ins, 8, d, eip, seg, es),
+        Insn::InsEvDx => sem_ea::str_op(b, sem_ea::Str::Ins, w, d, eip, seg, es),
+        Insn::OutsDxEb => sem_ea::str_op(b, sem_ea::Str::Outs, 8, d, eip, seg, es),
+        Insn::OutsDxEv => sem_ea::str_op(b, sem_ea::Str::Outs, w, d, eip, seg, es),
+        Insn::BoundGvMp => sem_ea::bound(b, w, d, &ea, eip, mode, sa, sseg),
+        Insn::PopCs => sem_ea::pop_sr(b, 1, sw, sa, sseg),
+        Insn::SmswEw => sem_ea::smsw(b, &ea),
+        Insn::LmswEw => sem_ea::lmsw(b, &ea, eip),
         Insn::MovsB => sem_ea::str_op(b, sem_ea::Str::Movs, 8, d, eip, seg, es),
         Insn::MovsV => sem_ea::str_op(b, sem_ea::Str::Movs, w, d, eip, seg, es),
         Insn::StosB => sem_ea::str_op(b, sem_ea::Str::Stos, 8, d, eip, seg, es),
@@ -3471,7 +3504,7 @@ fn dispatch_map<B: Backend>(
         Insn::PopDs => sem_ea::pop_sr(b, 3, sw, sa, sseg),
         Insn::PopFs => sem_ea::pop_sr(b, 4, sw, sa, sseg),
         Insn::PopGs => sem_ea::pop_sr(b, 5, sw, sa, sseg),
-        Insn::ArplEwGw => sem_ea::arpl(b, d, &ea),
+        Insn::ArplEwGw => sem_ea::arpl(b, d, &ea, eip, mode, sa, sseg),
         Insn::Sysenter => sem_ea::sysenter(b, eip),
         Insn::Sysexit => sem_ea::sysexit(b, if d.rex & 8 != 0 { 64 } else { 32 }),
         // HLT は CPL0 専用だが旧経路と同じく nop として扱う。
@@ -4476,26 +4509,38 @@ fn step_x86_map(
     if mode == 64 {
         modes |= polyisa_guest_x86::MODE_M64;
     }
-    if mode == 16 {
-        // 8088 の別名。0x66/0x67 は接頭辞ではなく Jcc 命令なので
-        // 接頭辞としては 26/2E/36/3E/F0/F2/F3 だけを読み飛ばす。
-        // 60-6F は 70-7F の Jcc 別名、C0/C1/C8/C9 は C2/C3/CA/CB、
-        // FF /7 は /6 push の別名になる。
+    if mode == 16 && feats & polyisa_guest_x86::FEAT_I386 == 0 {
+        // 386 より前の実モードでは FS/GS・0x66/0x67 接頭辞はなく、
+        // 世代に応じて一部のオペコードは別名として実行される。
+        let i186 = feats & polyisa_guest_x86::FEAT_I186 != 0;
+        let i286 = feats & polyisa_guest_x86::FEAT_I286 != 0;
         let mut i = 0usize;
         while i < n && matches!(buf[i], 0x26 | 0x2E | 0x36 | 0x3E | 0xF0 | 0xF2 | 0xF3) {
             i += 1;
         }
         if i < n {
-            match buf[i] {
-                0x60..=0x6F => buf[i] |= 0x10,
-                0xC0 => buf[i] = 0xC2,
-                0xC1 => buf[i] = 0xC3,
-                0xC8 => buf[i] = 0xCA,
-                0xC9 => buf[i] = 0xCB,
-                0xFF if i + 1 < n && (buf[i + 1] >> 3) & 7 == 7 => {
-                    buf[i + 1] = (buf[i + 1] & !0x38) | 0x30;
+            if !i186 {
+                // 8086/8088 の別名。60-6F は 70-7F の Jcc 別名、
+                // C0/C1/C8/C9 は C2/C3/CA/CB、FF /7 は /6 push の別名。
+                match buf[i] {
+                    0x60..=0x6F => buf[i] |= 0x10,
+                    0xC0 => buf[i] = 0xC2,
+                    0xC1 => buf[i] = 0xC3,
+                    0xC8 => buf[i] = 0xCA,
+                    0xC9 => buf[i] = 0xCB,
+                    0xFF if i + 1 < n && (buf[i + 1] >> 3) & 7 == 7 => {
+                        buf[i + 1] = (buf[i + 1] & !0x38) | 0x30;
+                    }
+                    _ => {}
                 }
-                _ => {}
+            } else {
+                // 80186/80286。0x63 は 286 から ARPL、残る 63-67 は
+                // 73-77 の Jcc 別名として実行される。
+                match buf[i] {
+                    0x63 if !i286 => buf[i] |= 0x10,
+                    0x64..=0x67 => buf[i] |= 0x10,
+                    _ => {}
+                }
             }
         }
     }

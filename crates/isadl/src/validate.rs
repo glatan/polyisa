@@ -152,6 +152,10 @@ pub fn validate(model: &Model) -> Report {
     }
     for map in &model.maps {
         for item in &map.items {
+            // Map 分岐の述語も when 旗と同じ解決規則で検査する。
+            if let crate::model::MapItem::Map(_, name, when) = item {
+                check_when(when, name, &mut errors);
+            }
             if let crate::model::MapItem::Insn(_, mi) = item {
                 check_when(&mi.when, &mi.name, &mut errors);
                 // `group_mod` は ModRM を消費する項目にだけ意味を持つ。
@@ -381,7 +385,7 @@ fn validate_maps(model: &Model, timing: &BTreeSet<&str>, errors: &mut Vec<Valida
     for map in &model.maps {
         for item in &map.items {
             match item {
-                MapItem::Map(byte, name) => {
+                MapItem::Map(byte, name, _) => {
                     if !map_names.contains(name.as_str()) {
                         errors.push(ValidationError::Unresolved {
                             kind: "map".to_string(),

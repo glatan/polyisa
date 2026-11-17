@@ -37,8 +37,17 @@ fn feat(m: &mut Model, name: &str, implies: &[&str]) {
 fn declare_features(m: &mut Model) {
     // 命令ゲート専用で、CPUID のビットを持たないもの。
     feat(m, "cpuid", &[]);
+    // 80186 で追加された命令群（PUSHA/POPA/PUSH imm/IMUL3/INS/OUTS/
+    // BOUND/シフト即値/ENTER/LEAVE）の世代旗。CPUID のビットは持たない。
+    feat(m, "i186", &[]);
+    // 80286 の実モードで有効な命令（SMSW/LMSW）の世代旗。
+    feat(m, "i286", &[]);
+    // 8086/8088 の 0F は POP CS（以降は副表への分岐）。
+    feat(m, "pop_cs", &[]);
+    // 8086/8088/80186 の 0x82 は 0x80 のエイリアス。
+    feat(m, "op82", &[]);
     // 既存の列挙記述が持っていた互換用の旗。命令ゲートには使わない。
-    feat(m, "i386", &[]);
+    feat(m, "i386", &["i186", "i286"]);
     // i486 で追加された命令群（BSWAP/XADD/CMPXCHG/INVD/INVLPG）の
     // 世代旗。CPUID のビットは持たない。
     feat(m, "i486", &["i386"]);
@@ -218,6 +227,42 @@ fn declare_params(m: &mut Model) {
         "dest_unchanged",
         "BSF/BSR で入力が 0 のときの宛先。Intel は宛先を保ち、AMD は 0 にする",
     );
+    m.param(
+        "push_sp",
+        ParamKind::Enum(vec!["pre".to_string(), "post".to_string()]),
+        "pre",
+        "PUSH SP が積む値。80186 以降は元の SP、8086/8088 は減算後の SP",
+    );
+    m.param(
+        "shift_count",
+        ParamKind::Enum(vec!["masked".to_string(), "full".to_string()]),
+        "masked",
+        "シフト・回転の回数。80186 以降は下位 5 ビット、8086/8088 は CL 全体",
+    );
+    m.param(
+        "flags_top",
+        ParamKind::Enum(vec!["zero".to_string(), "ones".to_string()]),
+        "zero",
+        "実モードの FLAGS ビット 12-15。80286 以降は 0（書き込み可）、8086/80186 は常に 1",
+    );
+    m.param(
+        "div_fault_ip",
+        ParamKind::Enum(vec!["at_insn".to_string(), "next".to_string()]),
+        "at_insn",
+        "除算例外が積む戻り IP。80286 以降は DIV/IDIV の番地、8086/80186 は次命令の番地",
+    );
+    m.param(
+        "addr_wrap",
+        ParamKind::Enum(vec!["m24".to_string(), "m20".to_string()]),
+        "m24",
+        "実モードの実アドレスの折り返し。80286 以降は 24 ビット、8086/80186 は 20 ビット（1 MiB）",
+    );
+    m.param(
+        "msw",
+        ParamKind::Int(0xFFFF),
+        "65520",
+        "MSW（マシン状態ワード）。80286 のリセット値は 0xFFF0",
+    );
 }
 
 fn declare_models(m: &mut Model) {
@@ -275,8 +320,50 @@ fn declare_models(m: &mut Model) {
     // 実モード世代。CPUID を持つ 486 以降だけ識別情報を持つ。
     // `cpuid.max_basic`/`cpuid.max_ext` は報告する最大リーフ番号で、
     // 省略時は 7 と 0x8000_0008（導出側の既定値）。
-    model(m, "i8088", "", &[], &[], &[], vec![]);
-    model(m, "i386", "", &["fpu"], &[], &[], vec![]);
+    model(
+        m,
+        "i8088",
+        "",
+        &["pop_cs", "op82"],
+        &[],
+        &[
+            ("push_sp", "post"),
+            ("shift_count", "full"),
+            ("flags_top", "ones"),
+            ("div_fault_ip", "next"),
+            ("addr_wrap", "m20"),
+        ],
+        vec![],
+    );
+    model(
+        m,
+        "i186",
+        "i8088",
+        &["i186", "op82"],
+        &[],
+        &[
+            ("push_sp", "pre"),
+            ("shift_count", "masked"),
+            ("flags_top", "ones"),
+            ("div_fault_ip", "next"),
+            ("addr_wrap", "m20"),
+        ],
+        vec![],
+    );
+    model(
+        m,
+        "i286",
+        "i186",
+        &["i286"],
+        &["op82", "pop_cs"],
+        &[
+            ("flags_top", "zero"),
+            ("div_fault_ip", "at_insn"),
+            ("addr_wrap", "m24"),
+        ],
+        vec![],
+    );
+    model(m, "i386", "", &["fpu", "i386"], &[], &[], vec![]);
     let mut id486 = intel("4", "8", "0");
     id486.extend([("cpuid.max_basic", "1"), ("cpuid.max_ext", "0")]);
     model(m, "i486", "i386", &["cpuid", "i486"], &[], &[], id486);

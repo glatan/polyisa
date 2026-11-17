@@ -13950,15 +13950,13 @@ fn run_inc_dec_r32() {
 
 #[test]
 fn run_grp1_82_alias() {
-    // 0x82 は非64ビットモードで 0x80 のエイリアス。add al,5。
-    let prog: &[u8] = &[
-        0x82, 0xC0, 0x05, // add al,5
-        0x88, 0xC3, // mov bl,al
-        0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax,1
-        0xCD, 0x80, // int 0x80
-    ];
-    let (out, _) = run32(prog, 100);
-    assert_eq!(out, Outcome::Exit(5));
+    // 0x82 は 8086/80186 世代だけの 0x80 の別名（286 以降は削除）。
+    // add al,5; mov bl,al。
+    let mut env = env16(&[0x82, 0xC0, 0x05, 0x88, 0xC3], 0x1000);
+    let mut sys = X64Exit;
+    let out = run_x86::run_m16(&mut env, 0x1000, &mut sys, 2);
+    assert!(matches!(out, Outcome::StepLimit { .. }));
+    assert_eq!(env.backend.get(Gpr(3).state()) & 0xFF, 5);
 }
 
 #[test]
@@ -16979,7 +16977,190 @@ fn bsf_zero_input_param() {
     // zero: 宛先は 0 になる。
     let params = polyisa_guest_x86::Params {
         bsf_zero_input: polyisa_guest_x86::BSF_ZERO_INPUT_DEST_ZERO,
+        ..Default::default()
     };
     let (out, _) = run32_p(prog, 10, &params);
     assert_eq!(out, Outcome::Exit(0));
+}
+
+// ---- A0: 80186/80286 世代差 ----
+
+/// `model` 名で m16 を回すヘルパー。
+fn run16m(env: &mut BareEnv, prog_entry: u32, model: &str, limit: u64) -> Outcome {
+    let mut sys = X64Exit;
+    run_x86::run_m16_ex(
+        env,
+        prog_entry,
+        &mut sys,
+        limit,
+        polyisa_guest_x86::model_feats(model),
+        &polyisa_guest_x86::model_params(model),
+    )
+}
+
+#[test]
+fn run16_generation_push_sp() {
+    // PUSH SP: 8086/8088 はデクリメント後の SP、80186/80286 は元の値を積む。
+    for (model, want) in [("i8088", 0x7FFEu32), ("i186", 0x8000), ("i286", 0x8000)] {
+        let mut env = env16(&[0x54, 0x58], 0x1000); // push sp; pop ax
+        env.backend.set(polyisa_guest_x86::sem::sreg_ref(2), 0);
+        env.step(|b| {
+            polyisa_guest_x86::sem::write64(b, Gpr(4), 0x8000);
+            Ok(())
+        })
+        .unwrap();
+        let out = run16m(&mut env, 0x1000, model, 2);
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1002 }, "{model}");
+        assert_eq!(env.backend.get(Gpr(0).state()) & 0xFFFF, want, "{model}");
+    }
+}
+
+#[test]
+fn run16_generation_div_fault_ip() {
+    // 除算例外の積まれる IP: 8088/186 は次命令 (0x1002)、286 以降は命令先頭 (0x1000)。
+    for (model, want_ip) in [("i8088", 0x1002u16), ("i286", 0x1000)] {
+        let mut env = env16(&[0xF7, 0xF8], 0x1000); // div ax
+        env.backend
+            .mem
+            .write(VirtAddr(0), &[0x00, 0x04, 0x00, 0x03])
+            .unwrap(); // IVT[0] = 0300:0400
+        env.backend.set(polyisa_guest_x86::sem::sreg_ref(2), 0x200);
+        env.step(|b| {
+            polyisa_guest_x86::sem::write64(b, Gpr(4), 0x1000);
+            polyisa_guest_x86::sem::write64(b, Gpr(0), 0x0001);
+            polyisa_guest_x86::sem::write64(b, Gpr(2), 0x0005);
+            Ok(())
+        })
+        .unwrap();
+        let out = run16m(&mut env, 0x1000, model, 1);
+        assert_eq!(out, Outcome::StepLimit { pc: 0x0400 }, "{model}");
+        let mut stk = [0u8; 6];
+        env.backend
+            .mem
+            .read(VirtAddr(0x2FFA), &mut stk, polyisa_mem::Access::DATA_LE)
+            .unwrap();
+        assert_eq!(u16::from_le_bytes([stk[0], stk[1]]), want_ip, "{model}");
+    }
+}
+
+#[test]
+fn run16_generation_shift_mask() {
+    // シフト回数: 8088 は CL=33 をそのまま反復（16 ビットから全ビット押し出し）、
+    // 286 以降は 33 & 31 = 1 回。
+    let prog = &[0xB1, 0x21, 0xB8, 0x01, 0x00, 0xD3, 0xE0]; // mov cl,33; mov ax,1; shl ax,cl
+    for (model, want) in [("i8088", 0u32), ("i186", 2u32), ("i286", 2u32)] {
+        let mut env = env16(prog, 0x1000);
+        let out = run16m(&mut env, 0x1000, model, 3);
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1007 }, "{model}");
+        assert_eq!(env.backend.get(Gpr(0).state()) & 0xFFFF, want, "{model}");
+    }
+}
+
+#[test]
+fn run16_pop_cs() {
+    // 0F = POP CS（8086/80186 のみ）。SS:SP から CS を得る。
+    let mut env = env16(&[0x0F], 0x1000);
+    env.backend.set(polyisa_guest_x86::sem::sreg_ref(2), 0);
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(4), 0x8000);
+        Ok(())
+    })
+    .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x8000), &[0x34, 0x12])
+        .unwrap();
+    let _ = run16m(&mut env, 0x1000, "i8088", 1);
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::sreg_ref(1)), 0x1234);
+    assert_eq!(env.backend.get(Gpr(4).state()) & 0xFFFF, 0x8002);
+}
+
+#[test]
+fn run16_286_smsw_lmsw() {
+    // 0F 01 E0 = SMSW AX、0F 01 F0 = LMSW AX。MSW 既定値は 0xFFF0 で、
+    // PE=0 の LMSW は状態を変えない。
+    let prog = &[0x0F, 0x01, 0xE0, 0x0F, 0x01, 0xF0];
+    let mut env = env16(prog, 0x1000);
+    let out = run16m(&mut env, 0x1000, "i286", 2);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1006 });
+    assert_eq!(env.backend.get(Gpr(0).state()) & 0xFFFF, 0xFFF0);
+}
+
+#[test]
+fn run16_ins_outs() {
+    // 6C = INSB（DX ポート → ES:DI）、6E = OUTSB（DS:SI → DX ポート）。
+    let mut env = env16(&[0x6C, 0x6E], 0x1000);
+    env.backend.set(polyisa_guest_x86::sem::sreg_ref(3), 0x100); // DS
+    env.backend.set(polyisa_guest_x86::sem::sreg_ref(0), 0x200); // ES
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(6), 0x40); // SI
+        polyisa_guest_x86::sem::write64(b, Gpr(7), 0x50); // DI
+        polyisa_guest_x86::sem::write64(b, Gpr(2), 0x3F8); // DX
+        Ok(())
+    })
+    .unwrap();
+    env.backend.ports[0x3F8] = 0xAB;
+    env.backend.mem.write(VirtAddr(0x1040), &[0xCD]).unwrap();
+    let out = run16m(&mut env, 0x1000, "i186", 2);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x1002 });
+    // INSB: ES:2050 <- 0xAB、DI=0x51。
+    let mut buf = [0u8; 1];
+    env.backend
+        .mem
+        .read(VirtAddr(0x2050), &mut buf, polyisa_mem::Access::DATA_LE)
+        .unwrap();
+    assert_eq!(buf[0], 0xAB);
+    // OUTSB: DS:1040=0xCD → port 0x3F8。
+    assert_eq!(env.backend.ports[0x3F8], 0xCD);
+    assert_eq!(env.backend.get(Gpr(6).state()) & 0xFFFF, 0x41);
+}
+
+#[test]
+fn run16_bound_int5() {
+    // BOUND AX, [0040]。AX=5 < lo=0x10 → 割り込み 5（積む IP は命令先頭）。
+    let mut env = env16(&[0x62, 0x06, 0x40, 0x00], 0x1000);
+    env.backend.set(polyisa_guest_x86::sem::sreg_ref(3), 0); // DS
+    env.backend.set(polyisa_guest_x86::sem::sreg_ref(2), 0); // SS
+    env.backend
+        .mem
+        .write(VirtAddr(0x14), &[0x00, 0x04, 0x00, 0x03])
+        .unwrap(); // IVT[5] = 0300:0400
+    env.backend
+        .mem
+        .write(VirtAddr(0x40), &[0x10, 0x00, 0x20, 0x00])
+        .unwrap(); // lo=0x10 hi=0x20
+    env.step(|b| {
+        polyisa_guest_x86::sem::write64(b, Gpr(0), 5); // AX
+        polyisa_guest_x86::sem::write64(b, Gpr(4), 0x8000); // SP
+        Ok(())
+    })
+    .unwrap();
+    let out = run16m(&mut env, 0x1000, "i186", 1);
+    assert_eq!(out, Outcome::StepLimit { pc: 0x0400 });
+    // 積まれる IP は BOUND 命令の先頭 0x1000。
+    let mut buf = [0u8; 6];
+    env.backend
+        .mem
+        .read(VirtAddr(0x7FFA), &mut buf, polyisa_mem::Access::DATA_LE)
+        .unwrap();
+    assert_eq!(&buf[0..2], &[0x00, 0x10]);
+}
+
+#[test]
+fn run16_flags_top_bits() {
+    // PUSHF: 8088 は bit12-15 が常に 1、286 以降は 0。
+    for (model, want) in [("i8088", 0xF002u32), ("i286", 0x0002)] {
+        let mut env = env16(&[0x9C, 0x58], 0x1000); // pushf; pop ax
+        env.backend.set(polyisa_guest_x86::sem::sreg_ref(2), 0);
+        env.backend
+            .set(polyisa_guest_x86::sem::eflags_ref(), 0x0002);
+        env.step(|b| {
+            polyisa_guest_x86::sem::write64(b, Gpr(4), 0x8000);
+            Ok(())
+        })
+        .unwrap();
+        let out = run16m(&mut env, 0x1000, model, 2);
+        assert_eq!(out, Outcome::StepLimit { pc: 0x1002 }, "{model}");
+        assert_eq!(env.backend.get(Gpr(0).state()) & 0xFFFF, want, "{model}");
+    }
 }

@@ -394,7 +394,7 @@ fn insn_attrs(model: &Model) -> Vec<InsnAttr<'_>> {
                     &mi.when,
                     mi.timing.as_str(),
                 )),
-                MapItem::Map(_, _) => None,
+                MapItem::Map(..) => None,
             })
         }))
         .collect()

@@ -897,8 +897,16 @@ fn oracle_llvm_decode_diff() {
     };
     // 全機能を有効にして符号化の網羅率を上げる。モード（m64）は
     // FEAT ではなく modes で制御されるので含まれない。
-    let feats = FEAT_BITS.iter().fold(0u64, |a, (_, b)| a | b);
-    for (name, triple, modes) in [("i386", "i386", MODES32), ("x86-64", "x86_64", MODES64)] {
+    let all = FEAT_BITS.iter().fold(0u64, |a, (_, b)| a | b);
+    // pop_cs は 0F の副表を潰すので両モードで外す。op82 は llvm が
+    // i386 でも受理するので i386 では残し、x86-64（m64 非対応の
+    // 別名）では外す。
+    let f32 = all & !polyisa_guest_x86::FEAT_POP_CS;
+    let f64 = f32 & !polyisa_guest_x86::FEAT_OP82;
+    for (name, triple, modes, feats) in [
+        ("i386", "i386", MODES32, f32),
+        ("x86-64", "x86_64", MODES64, f64),
+    ] {
         let d = run_pass(&llvm_mc, triple, modes, feats, name);
         let mut msg = String::new();
         for (label, v) in [

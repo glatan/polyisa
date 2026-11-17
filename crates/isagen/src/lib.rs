@@ -339,6 +339,32 @@ fn extra_flags(model: &Model) -> Result<Vec<String>, GenError> {
             }
         }
     }
+    // `when` で参照されなくても、CPU モデル宣言が使う機能は旗を持つ。
+    // `model_feats` の解決と実行時の世代判定に FEAT_* 定数が必要。
+    for m in &model.models {
+        for f in m.add_features.iter().chain(m.remove_features.iter()) {
+            if !mode_names.contains(f) && !out.iter().any(|x| x == f) {
+                out.push(f.clone());
+            }
+        }
+    }
+    // モデル宣言が辿る implies 先の機能も旗が要る。
+    loop {
+        let mut grew = false;
+        for f in &model.features {
+            if out.iter().any(|x| x == &f.name) {
+                for i in &f.implies {
+                    if !mode_names.contains(i) && !out.iter().any(|x| x == i) {
+                        out.push(i.clone());
+                        grew = true;
+                    }
+                }
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
     out.retain(|f| !mode_names.contains(f));
     out.sort();
     {
@@ -700,7 +726,7 @@ fn gen_map_decoder(model: &Model) -> Result<String, GenError> {
             std::collections::BTreeMap::new();
         for item in &map.items {
             let key = match item {
-                MapItem::Insn(b, _) | MapItem::Map(b, _) => *b,
+                MapItem::Insn(b, _) | MapItem::Map(b, ..) => *b,
             };
             by_byte.entry(key).or_default().push(item);
         }
@@ -709,15 +735,27 @@ fn gen_map_decoder(model: &Model) -> Result<String, GenError> {
             // サブマップへの分岐はそのまま返す。分岐があるバイトは以降の
             // フォールスルーが到達不能になるので None を出さない。
             let mut has_branch = false;
+            let mut gated = false;
             for item in items {
-                if let MapItem::Map(_, name) = item {
-                    s.push_str(&format!(
-                        "            return sel_{}(bytes, i, d, modes, feats);\n",
-                        to_snake(name)
-                    ));
+                if let MapItem::Map(_, name, when) = item {
+                    let guard = when_guard_flags(when, &flag_exprs)?;
+                    if guard.is_empty() {
+                        s.push_str(&format!(
+                            "            return sel_{}(bytes, i, d, modes, feats);\n",
+                            to_snake(name)
+                        ));
+                    } else {
+                        s.push_str(&format!(
+                            "            if {guard} {{\n                return sel_{}(bytes, i, d, modes, feats);\n            }}\n",
+                            to_snake(name)
+                        ));
+                        gated = true;
+                    }
                     has_branch = true;
                 }
             }
+            // 分岐がガード付きだとガード不成立時に命令項目へ落ちる。
+            let has_branch = has_branch && !gated;
             // 命令項目。グループの有無で選び方が変わる。
             let insns: Vec<&polyisa_isadl::model::MapInsn> = items
                 .iter()
@@ -1356,6 +1394,55 @@ fn params_code(model: &Model) -> String {
     s.push_str(
         "        _ => DEFAULT_PARAMS,
     }
+}
+
+/// CPU モデル名から機能ビットマスクを解決する。親連鎖をたどって
+/// add/remove を適用し、機能の `implies` で閉包を取る。
+/// 未知の名前は DEFAULT_FEATS。
+pub fn model_feats(name: &str) -> u64 {
+    let mut chain: Vec<&ModelRow> = Vec::new();
+    let mut cur = name;
+    loop {
+        let Some(row) = MODEL_DEFS.iter().find(|r| r.0 == cur) else {
+            return DEFAULT_FEATS;
+        };
+        chain.push(row);
+        if row.1.is_empty() || chain.len() > MODEL_DEFS.len() {
+            break;
+        }
+        cur = row.1;
+    }
+    let mut set: Vec<&str> = Vec::new();
+    for row in chain.iter().rev() {
+        for f in row.2 {
+            if !set.contains(f) {
+                set.push(f);
+            }
+        }
+        for f in row.3 {
+            set.retain(|x| *x != *f);
+        }
+    }
+    loop {
+        let mut grew = false;
+        for (fname, implies, _) in FEATURE_DEFS {
+            if set.contains(fname) {
+                for i in *implies {
+                    if !set.contains(i) {
+                        set.push(i);
+                        grew = true;
+                    }
+                }
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    FEAT_BITS
+        .iter()
+        .filter(|(n, _)| set.contains(n))
+        .fold(0u64, |a, (_, b)| a | b)
 }
 ",
     );

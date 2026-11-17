@@ -177,7 +177,7 @@ pub fn build_maps(m: &mut Model) {
             &[Ea(W16), Reg(W16)],
             None,
             PfxSel::Any,
-            w("!m64"),
+            w("i286 && !m64"),
             "arpl {e}, {g}",
             "alu",
         ),
@@ -195,18 +195,71 @@ pub fn build_maps(m: &mut Model) {
         ),
     ));
 
-    // PUSH/POP と即値 PUSH。
-    primary.push(MapItem::Insn(0x68, n("push_iz", &[Imm(Z)], "push {i}", "store")));
-    primary.push(MapItem::Insn(0x6A, n("push_ib", &[Imm(B8)], "push {i}", "store")));
+    // PUSH/POP と即値 PUSH（80186 以降）。
+    primary.push(MapItem::Insn(
+        0x68,
+        mi("push_iz", &[Imm(Z)], None, PfxSel::Any, w("i186"), "push {i}", "store"),
+    ));
+    primary.push(MapItem::Insn(
+        0x6A,
+        mi("push_ib", &[Imm(B8)], None, PfxSel::Any, w("i186"), "push {i}", "store"),
+    ));
     // IMUL 3 オペランド形。
     primary.push(MapItem::Insn(
         0x69,
-        n("imul_gv_ev_iz", &[Reg(V), Ea(V), Imm(Z)], "imul {g}, {e}, {i}", "mult"),
+        mi(
+            "imul_gv_ev_iz",
+            &[Reg(V), Ea(V), Imm(Z)],
+            None,
+            PfxSel::Any,
+            w("i186"),
+            "imul {g}, {e}, {i}",
+            "mult",
+        ),
     ));
     primary.push(MapItem::Insn(
         0x6B,
-        n("imul_gv_ev_ib", &[Reg(V), Ea(V), Imm(B8)], "imul {g}, {e}, {i}", "mult"),
+        mi(
+            "imul_gv_ev_ib",
+            &[Reg(V), Ea(V), Imm(B8)],
+            None,
+            PfxSel::Any,
+            w("i186"),
+            "imul {g}, {e}, {i}",
+            "mult",
+        ),
     ));
+    // BOUND（62、mod=11 は #UD）と INS/OUTS（6C-6F）。
+    primary.push(MapItem::Insn(
+        0x62,
+        mmem(mi(
+            "bound_gv_mp",
+            &[Reg(V), Ea(V)],
+            None,
+            PfxSel::Any,
+            w("i186 && !m64"),
+            "bound {g}, {e}",
+            "system",
+        )),
+    ));
+    primary.extend([
+        MapItem::Insn(
+            0x6C,
+            mi("ins_eb_dx", &[], None, PfxSel::Any, w("i186"), "insb", "system"),
+        ),
+        MapItem::Insn(
+            0x6D,
+            mi("ins_ev_dx", &[], None, PfxSel::Any, w("i186"), "ins {a}", "system"),
+        ),
+        MapItem::Insn(
+            0x6E,
+            mi("outs_dx_eb", &[], None, PfxSel::Any, w("i186"), "outsb", "system"),
+        ),
+        MapItem::Insn(
+            0x6F,
+            mi("outs_dx_ev", &[], None, PfxSel::Any, w("i186"), "outs {a}", "system"),
+        ),
+    ]);
 
     // Jcc rel8（70-7F）。
     let cc8 = [
@@ -242,7 +295,7 @@ pub fn build_maps(m: &mut Model) {
         }
     }
 
-    // 0x82 は 0x80 のエイリアス（非64ビットモードのみ）。同名で登録する。
+    // 0x82 は 0x80 のエイリアス（8086/80186 まで）。
     for (gi, name) in grp1.iter().enumerate() {
         primary.push(MapItem::Insn(
             0x82,
@@ -251,7 +304,7 @@ pub fn build_maps(m: &mut Model) {
                 &[Ea(B8), Imm(B8)],
                 Some(gi as u8),
                 PfxSel::Any,
-                w("!m64"),
+                w("op82"),
                 "{0} {e}, {i}",
                 "alu",
             ),
@@ -317,11 +370,11 @@ pub fn build_maps(m: &mut Model) {
     primary.extend([
         MapItem::Insn(
             0x60,
-            mi("pusha", &[], None, PfxSel::Any, w("!m64"), "pusha", "store"),
+            mi("pusha", &[], None, PfxSel::Any, w("i186 && !m64"), "pusha", "store"),
         ),
         MapItem::Insn(
             0x61,
-            mi("popa", &[], None, PfxSel::Any, w("!m64"), "popa", "load"),
+            mi("popa", &[], None, PfxSel::Any, w("i186 && !m64"), "popa", "load"),
         ),
         MapItem::Insn(0x9B, n("fwait", &[], "fwait", "system")),
     ]);
@@ -414,7 +467,7 @@ pub fn build_maps(m: &mut Model) {
         ));
     }
 
-    // グループ 2（シフト・ローテート）。
+    // グループ 2（シフト・ローテート）。即値形（C0/C1）は 80186 以降。
     let grp2 = ["rol", "ror", "rcl", "rcr", "shl", "shr", "shl", "sar"];
     for (byte, cnt) in [
         (0xC0u8, Imm(B8)),
@@ -424,6 +477,7 @@ pub fn build_maps(m: &mut Model) {
         (0xD2, Imp(ImpOp::Cl)),
         (0xD3, Imp(ImpOp::Cl)),
     ] {
+        let gate = if byte < 0xD0 { w("i186") } else { Pred::True };
         let wdt = if byte & 1 == 0 { B8 } else { V };
         for (gi, name) in grp2.iter().enumerate() {
             let suf = match (wdt, cnt) {
@@ -434,15 +488,17 @@ pub fn build_maps(m: &mut Model) {
                 (OpWidth::B8, _) => "eb_cl",
                 _ => "ev_cl",
             };
+            let mut it = g(
+                &format!("{name}_{suf}"),
+                gi as u8,
+                &[Ea(wdt), cnt],
+                "{0} {e}, {c}",
+                "alu",
+            );
+            it.when = gate.clone();
             primary.push(MapItem::Insn(
                 byte,
-                g(
-                    &format!("{name}_{suf}"),
-                    gi as u8,
-                    &[Ea(wdt), cnt],
-                    "{0} {e}, {c}",
-                    "alu",
-                ),
+                it,
             ));
         }
     }
@@ -498,22 +554,33 @@ pub fn build_maps(m: &mut Model) {
         MapItem::Insn(0xC7, g("mov_ev_iz", 0, &[Ea(V), Imm(Z)], "mov {e}, {i}", "store")),
         MapItem::Insn(
             0xC8,
-            n("enter_iw_ib", &[Imm(W16), Imm2(B8)], "enter {i}, {j}", "store"),
+            mi(
+                "enter_iw_ib",
+                &[Imm(W16), Imm2(B8)],
+                None,
+                PfxSel::Any,
+                w("i186"),
+                "enter {i}, {j}",
+                "store",
+            ),
         ),
-        MapItem::Insn(0xC9, n("leave", &[], "leave", "alu")),
+        MapItem::Insn(
+            0xC9,
+            mi("leave", &[], None, PfxSel::Any, w("i186"), "leave", "alu"),
+        ),
         MapItem::Insn(0xCC, n("int3", &[], "int3", "system")),
         MapItem::Insn(0xCD, n("int_ib", &[Imm(B8)], "int {i}", "system")),
         MapItem::Insn(0xD7, n("xlat", &[], "xlat", "load")),
     ]);
-    // 8088/186 では C6/C7 の /1-/7 は /0 の別名として動く。
+    // 8088/186 では C6/C7 の /1-/7 は /0 の別名として動く（286 以降は #UD）。
     for grp in 1..8u8 {
         primary.push(MapItem::Insn(
             0xC6,
-            mi("mov_eb_ib", &[Ea(B8), Imm(B8)], Some(grp), PfxSel::Any, w("opd_o16 && adr_a16"), "mov {e}, {i}", "store"),
+            mi("mov_eb_ib", &[Ea(B8), Imm(B8)], Some(grp), PfxSel::Any, w("opd_o16 && adr_a16 && !i286"), "mov {e}, {i}", "store"),
         ));
         primary.push(MapItem::Insn(
             0xC7,
-            mi("mov_ev_iz", &[Ea(V), Imm(Z)], Some(grp), PfxSel::Any, w("opd_o16 && adr_a16"), "mov {e}, {i}", "store"),
+            mi("mov_ev_iz", &[Ea(V), Imm(Z)], Some(grp), PfxSel::Any, w("opd_o16 && adr_a16 && !i286"), "mov {e}, {i}", "store"),
         ));
     }
 
@@ -770,7 +837,12 @@ pub fn build_maps(m: &mut Model) {
     f(0xDF, 7, "fistp_m64", &[Ea(Q)], "fistp {e}");
 
     // 0F への分岐。
-    primary.push(MapItem::Map(0x0F, "map_0f".to_string()));
+    // 0F は 8086/8088 では POP CS、以降は副表への分岐。
+    primary.push(MapItem::Map(0x0F, "map_0f".to_string(), w("!pop_cs")));
+    primary.push(MapItem::Insn(
+        0x0F,
+        mi("pop_cs", &[], None, PfxSel::Any, w("pop_cs"), "pop cs", "load"),
+    ));
 
     m.maps.push(MapDecl {
         name: "primary".to_string(),
@@ -779,6 +851,21 @@ pub fn build_maps(m: &mut Model) {
 
     // 0F マップ。
     let mut m0f: Vec<MapItem> = Vec::new();
+    // 0F 01 グループ。実モードでは 80286 の SMSW(/4)/LMSW(/6) だけを
+    // 解読する（SGDT/SIDT/SLDT/STR の実モード形と保護モード系は A4）。
+    let m286 = |grp: u8, name: &str, syntax: &str| {
+        mi(
+            name,
+            &[Ea(W16)],
+            Some(grp),
+            PfxSel::Any,
+            w("i286 && opd_o16 && adr_a16"),
+            syntax,
+            "system",
+        )
+    };
+    m0f.push(MapItem::Insn(0x01, m286(4, "smsw_ew", "smsw {e}")));
+    m0f.push(MapItem::Insn(0x01, m286(6, "lmsw_ew", "lmsw {e}")));
     m0f.extend([
         MapItem::Insn(0x05, mi("syscall", &[], None, PfxSel::Any, w("m64"), "syscall", "system")),
         MapItem::Insn(0x0B, n("ud2", &[], "ud2", "system")),
@@ -1246,8 +1333,8 @@ pub fn build_maps(m: &mut Model) {
         MapItem::Insn(0xAC, n("shrd_ev_gv_ib", &[Ea(V), Reg(V), Imm(B8)], "shrd {e}, {g}, {i}", "alu")),
         MapItem::Insn(0xAD, n("shrd_ev_gv_cl", &[Ea(V), Reg(V), Imp(ImpOp::Cl)], "shrd {e}, {g}, cl", "alu")),
         // 3 バイトオペコードのサブマップ。
-        MapItem::Map(0x38, "map_0f38".to_string()),
-        MapItem::Map(0x3A, "map_0f3a".to_string()),
+        MapItem::Map(0x38, "map_0f38".to_string(), Pred::True),
+        MapItem::Map(0x3A, "map_0f3a".to_string(), Pred::True),
     ]);
     m.maps.push(MapDecl {
         name: "map_0f".to_string(),
