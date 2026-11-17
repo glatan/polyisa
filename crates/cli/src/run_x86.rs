@@ -2727,6 +2727,9 @@ fn dispatch_map<B: Backend>(
         d.imm
     };
     let ib8 = d.imm as u8 as i8 as i64 as u64;
+    // Jcc（0F 8x 系）の分岐基準。386 では `66 0F 8x rel32` でも
+    // 接頭辞込みの全命令長が基準になる（SST 80386 実測）。
+    let jz_len = u32::from(d.len);
     // 被演算子を常に 64 ビット値として読む補助。
     fn rd_any<B: Backend>(
         b: &mut B,
@@ -3150,12 +3153,58 @@ fn dispatch_map<B: Backend>(
             sem_ea::push_v(b, sw, v, sa, sseg)
         }
         Insn::PopEv => {
+            let sz = u64::from(sw / 8);
+            // `pop [mem]` で EA が esp を参照するとき（a32 の SIB
+            // base=esp）386 は SP 更新後の値で EA を計算する
+            // （SST 80386 実測）。
+            let ea2 = if mode == 16 && d.asize == 32 && (d.modrm & 7) == 4 && (d.sib & 7) == 4 {
+                match &ea {
+                    Rm::Mem { a, wseg } => {
+                        let inc = b.konst::<W64>(sz);
+                        Some(Rm::Mem {
+                            a: b.add::<W64>(*a, inc),
+                            wseg: wseg.map(|(seg, off)| (seg, b.add::<W64>(off, inc))),
+                        })
+                    }
+                    Rm::Reg(_) => None,
+                }
+            } else {
+                None
+            };
+            let ea2 = ea2.as_ref().unwrap_or(&ea);
+            // 80386 系は全アクセスの限界を事前検査する。スタック読み
+            // 出しの検査がデストより先（#SS が勝つ。SST 80386 実測）。
+            // デスト違反では SP の更新も残らない。
+            if mode == 16
+                && b.param::<polyisa_guest_x86::FaultAtomicParam>()
+                    == polyisa_guest_x86::FAULT_ATOMIC_ATOMIC
+            {
+                if sa == 16 {
+                    let cur: B::V<W32> = b.get(Gpr(4).state());
+                    let m16 = b.konst::<W32>(0xFFFF);
+                    let lo = b.and::<W32>(cur, m16);
+                    let off = b.zext::<W32, W64>(lo);
+                    decode::seg_limit_chk_n(b, off, sseg | decode::WSEG_SS, sz)?;
+                }
+                if let Rm::Mem {
+                    wseg: Some((seg, off)),
+                    ..
+                } = ea2
+                {
+                    decode::seg_limit_chk_n(b, *off, *seg, sz)?;
+                }
+            }
             let v = sem_ea::pop_v(b, sw, sa, sseg)?;
-            wr_any(b, sw, &ea, d, v)
+            wr_any(b, sw, ea2, d, v)
         }
         Insn::Pushf => {
             let f = b.get(eflags_ref());
-            let mut v = b.zext::<W32, W64>(f);
+            let mut v = if mode == 16 {
+                let f16: B::V<W16> = b.trunc::<W32, W16>(f);
+                b.zext::<W16, W64>(f16)
+            } else {
+                b.zext::<W32, W64>(f)
+            };
             // `flags_top` = ones（8086/8088）は bit12-15 を立てて積む。
             if mode == 16
                 && b.param::<polyisa_guest_x86::FlagsTopParam>()
@@ -3197,67 +3246,67 @@ fn dispatch_map<B: Backend>(
             Ok(())
         }
         Insn::JoJb => sem_ea::jcc(b, 0, eip, u32::from(d.len), d.rel),
-        Insn::JoJz => sem_ea::jcc(b, 0, eip, u32::from(d.len), d.rel),
+        Insn::JoJz => sem_ea::jcc(b, 0, eip, jz_len, d.rel),
         Insn::SetjoEb => sem_ea::setcc(b, 0, &ea, d),
         Insn::CmovjoGvEv => sem_ea::cmov(b, 0, w, reg, &ea, d),
         Insn::JnoJb => sem_ea::jcc(b, 1, eip, u32::from(d.len), d.rel),
-        Insn::JnoJz => sem_ea::jcc(b, 1, eip, u32::from(d.len), d.rel),
+        Insn::JnoJz => sem_ea::jcc(b, 1, eip, jz_len, d.rel),
         Insn::SetjnoEb => sem_ea::setcc(b, 1, &ea, d),
         Insn::CmovjnoGvEv => sem_ea::cmov(b, 1, w, reg, &ea, d),
         Insn::JbJb => sem_ea::jcc(b, 2, eip, u32::from(d.len), d.rel),
-        Insn::JbJz => sem_ea::jcc(b, 2, eip, u32::from(d.len), d.rel),
+        Insn::JbJz => sem_ea::jcc(b, 2, eip, jz_len, d.rel),
         Insn::SetjbEb => sem_ea::setcc(b, 2, &ea, d),
         Insn::CmovjbGvEv => sem_ea::cmov(b, 2, w, reg, &ea, d),
         Insn::JaeJb => sem_ea::jcc(b, 3, eip, u32::from(d.len), d.rel),
-        Insn::JaeJz => sem_ea::jcc(b, 3, eip, u32::from(d.len), d.rel),
+        Insn::JaeJz => sem_ea::jcc(b, 3, eip, jz_len, d.rel),
         Insn::SetjaeEb => sem_ea::setcc(b, 3, &ea, d),
         Insn::CmovjaeGvEv => sem_ea::cmov(b, 3, w, reg, &ea, d),
         Insn::JeJb => sem_ea::jcc(b, 4, eip, u32::from(d.len), d.rel),
-        Insn::JeJz => sem_ea::jcc(b, 4, eip, u32::from(d.len), d.rel),
+        Insn::JeJz => sem_ea::jcc(b, 4, eip, jz_len, d.rel),
         Insn::SetjeEb => sem_ea::setcc(b, 4, &ea, d),
         Insn::CmovjeGvEv => sem_ea::cmov(b, 4, w, reg, &ea, d),
         Insn::JneJb => sem_ea::jcc(b, 5, eip, u32::from(d.len), d.rel),
-        Insn::JneJz => sem_ea::jcc(b, 5, eip, u32::from(d.len), d.rel),
+        Insn::JneJz => sem_ea::jcc(b, 5, eip, jz_len, d.rel),
         Insn::SetjneEb => sem_ea::setcc(b, 5, &ea, d),
         Insn::CmovjneGvEv => sem_ea::cmov(b, 5, w, reg, &ea, d),
         Insn::JbeJb => sem_ea::jcc(b, 6, eip, u32::from(d.len), d.rel),
-        Insn::JbeJz => sem_ea::jcc(b, 6, eip, u32::from(d.len), d.rel),
+        Insn::JbeJz => sem_ea::jcc(b, 6, eip, jz_len, d.rel),
         Insn::SetjbeEb => sem_ea::setcc(b, 6, &ea, d),
         Insn::CmovjbeGvEv => sem_ea::cmov(b, 6, w, reg, &ea, d),
         Insn::JaJb => sem_ea::jcc(b, 7, eip, u32::from(d.len), d.rel),
-        Insn::JaJz => sem_ea::jcc(b, 7, eip, u32::from(d.len), d.rel),
+        Insn::JaJz => sem_ea::jcc(b, 7, eip, jz_len, d.rel),
         Insn::SetjaEb => sem_ea::setcc(b, 7, &ea, d),
         Insn::CmovjaGvEv => sem_ea::cmov(b, 7, w, reg, &ea, d),
         Insn::JsJb => sem_ea::jcc(b, 8, eip, u32::from(d.len), d.rel),
-        Insn::JsJz => sem_ea::jcc(b, 8, eip, u32::from(d.len), d.rel),
+        Insn::JsJz => sem_ea::jcc(b, 8, eip, jz_len, d.rel),
         Insn::SetjsEb => sem_ea::setcc(b, 8, &ea, d),
         Insn::CmovjsGvEv => sem_ea::cmov(b, 8, w, reg, &ea, d),
         Insn::JnsJb => sem_ea::jcc(b, 9, eip, u32::from(d.len), d.rel),
-        Insn::JnsJz => sem_ea::jcc(b, 9, eip, u32::from(d.len), d.rel),
+        Insn::JnsJz => sem_ea::jcc(b, 9, eip, jz_len, d.rel),
         Insn::SetjnsEb => sem_ea::setcc(b, 9, &ea, d),
         Insn::CmovjnsGvEv => sem_ea::cmov(b, 9, w, reg, &ea, d),
         Insn::JpJb => sem_ea::jcc(b, 10, eip, u32::from(d.len), d.rel),
-        Insn::JpJz => sem_ea::jcc(b, 10, eip, u32::from(d.len), d.rel),
+        Insn::JpJz => sem_ea::jcc(b, 10, eip, jz_len, d.rel),
         Insn::SetjpEb => sem_ea::setcc(b, 10, &ea, d),
         Insn::CmovjpGvEv => sem_ea::cmov(b, 10, w, reg, &ea, d),
         Insn::JnpJb => sem_ea::jcc(b, 11, eip, u32::from(d.len), d.rel),
-        Insn::JnpJz => sem_ea::jcc(b, 11, eip, u32::from(d.len), d.rel),
+        Insn::JnpJz => sem_ea::jcc(b, 11, eip, jz_len, d.rel),
         Insn::SetjnpEb => sem_ea::setcc(b, 11, &ea, d),
         Insn::CmovjnpGvEv => sem_ea::cmov(b, 11, w, reg, &ea, d),
         Insn::JlJb => sem_ea::jcc(b, 12, eip, u32::from(d.len), d.rel),
-        Insn::JlJz => sem_ea::jcc(b, 12, eip, u32::from(d.len), d.rel),
+        Insn::JlJz => sem_ea::jcc(b, 12, eip, jz_len, d.rel),
         Insn::SetjlEb => sem_ea::setcc(b, 12, &ea, d),
         Insn::CmovjlGvEv => sem_ea::cmov(b, 12, w, reg, &ea, d),
         Insn::JgeJb => sem_ea::jcc(b, 13, eip, u32::from(d.len), d.rel),
-        Insn::JgeJz => sem_ea::jcc(b, 13, eip, u32::from(d.len), d.rel),
+        Insn::JgeJz => sem_ea::jcc(b, 13, eip, jz_len, d.rel),
         Insn::SetjgeEb => sem_ea::setcc(b, 13, &ea, d),
         Insn::CmovjgeGvEv => sem_ea::cmov(b, 13, w, reg, &ea, d),
         Insn::JleJb => sem_ea::jcc(b, 14, eip, u32::from(d.len), d.rel),
-        Insn::JleJz => sem_ea::jcc(b, 14, eip, u32::from(d.len), d.rel),
+        Insn::JleJz => sem_ea::jcc(b, 14, eip, jz_len, d.rel),
         Insn::SetjleEb => sem_ea::setcc(b, 14, &ea, d),
         Insn::CmovjleGvEv => sem_ea::cmov(b, 14, w, reg, &ea, d),
         Insn::JgJb => sem_ea::jcc(b, 15, eip, u32::from(d.len), d.rel),
-        Insn::JgJz => sem_ea::jcc(b, 15, eip, u32::from(d.len), d.rel),
+        Insn::JgJz => sem_ea::jcc(b, 15, eip, jz_len, d.rel),
         Insn::SetjgEb => sem_ea::setcc(b, 15, &ea, d),
         Insn::CmovjgGvEv => sem_ea::cmov(b, 15, w, reg, &ea, d),
         Insn::CallJz => sem_ea::call_rel(b, eip, u32::from(d.len), d.rel, sw, sa, sseg),
@@ -3269,19 +3318,19 @@ fn dispatch_map<B: Backend>(
             if mode != 16 {
                 return Ok(false);
             }
-            sem_ea::retf(b, 0, sa, sseg)
+            sem_ea::retf(b, sw, 0, sa, sseg)
         }
         Insn::RetfIw => {
             if mode != 16 {
                 return Ok(false);
             }
-            sem_ea::retf(b, d.imm as u16, sa, sseg)
+            sem_ea::retf(b, sw, d.imm as u16, sa, sseg)
         }
         Insn::CallfAp => {
             if mode != 16 {
                 return Ok(false);
             }
-            sem_ea::callf_ptr(b, d.imm, d.imm2, eip, u32::from(d.len), sa, sseg)
+            sem_ea::callf_ptr(b, sw, d.imm, d.imm2, eip, u32::from(d.len), sa, sseg)
         }
         Insn::JmpfAp => {
             if mode != 16 {
@@ -3305,7 +3354,7 @@ fn dispatch_map<B: Backend>(
             if mode != 16 {
                 return Ok(false);
             }
-            sem_ea::iret_real(b, sa, sseg)
+            sem_ea::iret_real(b, sw, sa, sseg)
         }
         Insn::Into => {
             if mode != 16 {
@@ -3314,7 +3363,7 @@ fn dispatch_map<B: Backend>(
             sem_ea::into_real(b, eip, u32::from(d.len), sa, sseg)
         }
         Insn::CallEv => sem_ea::call_rm(b, sw, &ea, d, eip, u32::from(d.len), sa, sseg),
-        Insn::JmpEv => sem_ea::jmp_rm(b, sw, &ea, d),
+        Insn::JmpEv => sem_ea::jmp_rm(b, sw, &ea, d, sa),
         Insn::Leave => {
             // SDM: SP←BP は StackAddressSize、pop は OperandSize。
             if sa == 16 {
@@ -3342,8 +3391,23 @@ fn dispatch_map<B: Backend>(
         Insn::Salc => sem_ea::salc(b),
         Insn::AamIb => sem_ea::aam(b, d.imm as u8, eip, u32::from(d.len), sa, sseg, mode),
         Insn::AadIb => sem_ea::aad(b, d.imm as u8),
-        Insn::LesGvMp => sem_ea::load_far(b, d, &ea, 0),
-        Insn::LdsGvMp => sem_ea::load_far(b, d, &ea, 3),
+        Insn::LesGvMp => sem_ea::load_far(b, w, d, &ea, 0),
+        Insn::LdsGvMp => sem_ea::load_far(b, w, d, &ea, 3),
+        // LSS/LFS/LGS の mod=3 形は #UD（SST 80386 実測）。
+        Insn::LssGvMp | Insn::LfsGvMp | Insn::LgsGvMp => {
+            if matches!(ea, decode::Rm::Reg(_)) {
+                if mode == 16 {
+                    return sem_ea::int_real(b, eip, 0, 6, sa, sseg).map(|_| true);
+                }
+                return sem_ea::trap(b, eip, 0x06).map(|_| true);
+            }
+            let s = match d.insn {
+                Insn::LssGvMp => 2,
+                Insn::LfsGvMp => 4,
+                _ => 5,
+            };
+            sem_ea::load_far(b, w, d, &ea, s)
+        }
         Insn::Cmc => sem_ea::flagop(b, 0x1, 2),
         Insn::Clc => sem_ea::flagop(b, 0x1, 0),
         Insn::Stc => sem_ea::flagop(b, 0x1, 1),
@@ -3354,7 +3418,13 @@ fn dispatch_map<B: Backend>(
         Insn::BswapRv => sem_ea::bswap(b, w, decode::op_reg(d)),
         Insn::NopEv => sem_ea::nop(b),
         Insn::Endbr => sem_ea::nop(b),
-        Insn::Ud2 => sem_ea::trap(b, eip, 0x06),
+        Insn::Ud2 => {
+            if mode == 16 {
+                sem_ea::int_real(b, eip, 0, 6, sa, sseg)
+            } else {
+                sem_ea::trap(b, eip, 0x06)
+            }
+        }
         Insn::Int3 => {
             if mode == 16 {
                 sem_ea::int_real(b, eip, u32::from(d.len), 3, sa, sseg)
@@ -3408,44 +3478,21 @@ fn dispatch_map<B: Backend>(
         Insn::ImulGvEvIb => sem_ea::imul3(b, w, reg, &ea, d, ib8 as i64),
         Insn::IncRv => sem_ea::incdec(b, true, w, &Rm::Reg(decode::op_reg(d)), d),
         Insn::DecRv => sem_ea::incdec(b, false, w, &Rm::Reg(decode::op_reg(d)), d),
-        Insn::Pusha => {
-            // EAX, ECX, EDX, EBX, 元の ESP, EBP, ESI, EDI の順。
-            // ESP 枠は命令実行前の値なので push 前に採取する。
-            // 80286 では系列中のどれかが限界に触れると書き込みを
-            // 一切残さず例外になるため、全アクセスを事前検査する。
-            sem_ea::stack_span_chk(b, w, 8, false, sa, sseg)?;
-            let sp0 = gr64(b, Gpr(4), w);
-            for g in 0..4u8 {
-                let v = gr64(b, Gpr(g), w);
-                sem_ea::push_v(b, w, v, sa, sseg)?;
-            }
-            sem_ea::push_v(b, w, sp0, sa, sseg)?;
-            for g in 5..8u8 {
-                let v = gr64(b, Gpr(g), w);
-                sem_ea::push_v(b, w, v, sa, sseg)?;
-            }
-            Ok(())
-        }
-        Insn::Popa => {
-            // EDI, ESI, EBP, (ESP は捨てる), EBX, EDX, ECX, EAX。
-            // 限界に触れる語があればレジスタ・SP を一切更新しない
-            // （PUSHA と同じ事前検査）。
-            sem_ea::stack_span_chk(b, w, 8, true, sa, sseg)?;
-            for (i, g) in [7u8, 6, 5, 4, 3, 2, 1, 0].iter().enumerate() {
-                let v = sem_ea::pop_v(b, w, sa, sseg)?;
-                if i != 3 {
-                    put64(b, Gpr(*g), w, v, d);
-                }
-            }
-            Ok(())
-        }
+        Insn::Pusha => sem_ea::pusha(b, w, sa, sseg),
+        Insn::Popa => sem_ea::popa(b, w, sa, sseg),
         Insn::CmpxchgEbGb => sem_ea::cmpxchg(b, 8, &ea, d, reg),
         Insn::CmpxchgEvGv => sem_ea::cmpxchg(b, w, &ea, d, reg),
         Insn::XaddEbGb => sem_ea::xadd(b, 8, &ea, d, reg),
         Insn::XaddEvGv => sem_ea::xadd(b, w, &ea, d, reg),
         Insn::BsfGvEv => sem_ea::bsfx(b, w, false, reg, &ea, d),
         Insn::BsrGvEv => sem_ea::bsfx(b, w, true, reg, &ea, d),
-        Insn::Ud1 => sem_ea::trap(b, eip, 0x06),
+        Insn::Ud1 => {
+            if mode == 16 {
+                sem_ea::int_real(b, eip, 0, 6, sa, sseg)
+            } else {
+                sem_ea::trap(b, eip, 0x06)
+            }
+        }
         Insn::LoopneJb => sem_ea::loopcc(b, 0, eip, u32::from(d.len), d.rel, d),
         Insn::LoopeJb => sem_ea::loopcc(b, 1, eip, u32::from(d.len), d.rel, d),
         Insn::LoopJb => sem_ea::loopcc(b, 2, eip, u32::from(d.len), d.rel, d),
@@ -3507,40 +3554,40 @@ fn dispatch_map<B: Backend>(
         Insn::MovOvEax => sem_ea::mov_moffs_st(b, w, d.imm, seg, seg_ss, d, mode == 16),
         Insn::BtEvGv => {
             let n = gr_sext64(b, reg, w);
-            sem_ea::bt_op(b, 0, w, &ea, d, n)
+            sem_ea::bt_op(b, 0, w, &ea, d, n, false)
         }
         Insn::BtEvIb => {
-            let n = b.konst::<W64>(ib8);
-            sem_ea::bt_op(b, 0, w, &ea, d, n)
+            let n = b.konst::<W64>(ib8 as i8 as i64 as u64);
+            sem_ea::bt_op(b, 0, w, &ea, d, n, true)
         }
         Insn::BtsEvGv => {
             let n = gr_sext64(b, reg, w);
-            sem_ea::bt_op(b, 1, w, &ea, d, n)
+            sem_ea::bt_op(b, 1, w, &ea, d, n, false)
         }
         Insn::BtsEvIb => {
-            let n = b.konst::<W64>(ib8);
-            sem_ea::bt_op(b, 1, w, &ea, d, n)
+            let n = b.konst::<W64>(ib8 as i8 as i64 as u64);
+            sem_ea::bt_op(b, 1, w, &ea, d, n, true)
         }
         Insn::BtrEvGv => {
             let n = gr_sext64(b, reg, w);
-            sem_ea::bt_op(b, 2, w, &ea, d, n)
+            sem_ea::bt_op(b, 2, w, &ea, d, n, false)
         }
         Insn::BtrEvIb => {
-            let n = b.konst::<W64>(ib8);
-            sem_ea::bt_op(b, 2, w, &ea, d, n)
+            let n = b.konst::<W64>(ib8 as i8 as i64 as u64);
+            sem_ea::bt_op(b, 2, w, &ea, d, n, true)
         }
         Insn::BtcEvGv => {
             let n = gr_sext64(b, reg, w);
-            sem_ea::bt_op(b, 3, w, &ea, d, n)
+            sem_ea::bt_op(b, 3, w, &ea, d, n, false)
         }
         Insn::BtcEvIb => {
-            let n = b.konst::<W64>(ib8);
-            sem_ea::bt_op(b, 3, w, &ea, d, n)
+            let n = b.konst::<W64>(ib8 as i8 as i64 as u64);
+            sem_ea::bt_op(b, 3, w, &ea, d, n, true)
         }
-        Insn::ShldEvGvIb => sem_ea::shxd(b, true, w, &ea, d, reg, d.imm as u8),
-        Insn::ShldEvGvCl => sem_ea::shxd(b, true, w, &ea, d, reg, u8::MAX),
-        Insn::ShrdEvGvIb => sem_ea::shxd(b, false, w, &ea, d, reg, d.imm as u8),
-        Insn::ShrdEvGvCl => sem_ea::shxd(b, false, w, &ea, d, reg, u8::MAX),
+        Insn::ShldEvGvIb => sem_ea::shxd(b, true, w, &ea, d, reg, ShiftCnt::Imm(d.imm as u32)),
+        Insn::ShldEvGvCl => sem_ea::shxd(b, true, w, &ea, d, reg, ShiftCnt::Cl),
+        Insn::ShrdEvGvIb => sem_ea::shxd(b, false, w, &ea, d, reg, ShiftCnt::Imm(d.imm as u32)),
+        Insn::ShrdEvGvCl => sem_ea::shxd(b, false, w, &ea, d, reg, ShiftCnt::Cl),
         // ===== セグメント・特権 =====
         // セレクタ 6/7 は #UD。未対応として旧経路（＝Unimplemented）へ落ちる。
         Insn::MovEwSr => {
@@ -3552,6 +3599,16 @@ fn dispatch_map<B: Backend>(
             }
             if s > 5 {
                 return Ok(false);
+            }
+            // 80386 の o32 形で r32 宛てのときはセレクタをゼロ拡張して
+            // 32 ビット書き込む（メモリ形は word のまま。SST 80386 実測）。
+            if w == 32
+                && let polyisa_guest_x86::decode::Rm::Reg(g) = &ea
+            {
+                let v: B::V<W16> = b.get(polyisa_guest_x86::sem::sreg_ref(s));
+                let v32 = b.zext::<W16, W32>(v);
+                b.set(g.state(), v32);
+                return Ok(true);
             }
             sem_ea::mov_sr_st(b, s, &ea)
         }
@@ -3581,6 +3638,8 @@ fn dispatch_map<B: Backend>(
         Insn::Sysexit => sem_ea::sysexit(b, if d.rex & 8 != 0 { 64 } else { 32 }),
         // HLT は CPL0 専用だが旧経路と同じく nop として扱う。
         Insn::Hlt => Ok(()),
+        // CLTS は CR0.TS を下ろすが、CR0 をモデル化していないので nop。
+        Insn::Clts => Ok(()),
         // ===== SSE/SSE2（0F 系）=====
         Insn::MovupsXvWv
         | Insn::MovupdXvWv
@@ -4656,6 +4715,14 @@ fn step_x86_map(
     } else {
         u8::MAX
     };
+    // 80386 以降ではフェッチ位置自体が CS 限界（64KiB）を越えれば #GP。
+    // 直前の命令が境界ぴったりに終わったとき IP は折り返さず
+    // 0x1_0000 のまま届くので、デコードより先に検査する
+    // （積まれる IP は 16 ビットに折られる。SST 80386 実測）。
+    if mode == 16 && feats & polyisa_guest_x86::FEAT_I386 != 0 && u64::from(ip) >= 0x1_0000 {
+        let r = env.step(|b| polyisa_guest_x86::sem_ea::int_real(b, ip, 0, 13, 16, sseg));
+        return Some(x86_post_step(env, sys, ip, 0, 0, r, hist));
+    }
     let md = match polyisa_guest_x86::decode_map(&buf[..n], modes, feats) {
         Some(md) => md,
         None => {
@@ -4683,6 +4750,59 @@ fn step_x86_map(
     if md.len > insn_len_lim {
         let r = env.step(|b| polyisa_guest_x86::sem_ea::int_real(b, eip, 0, 13, 16, sseg));
         return Some(x86_post_step(env, sys, eip, 0, 0, r, hist));
+    }
+    // 80386 以降の実モードでは命令フェッチが CS 限界（64KiB）を
+    // またぐと #GP。80286 以前は IP が 16 ビットで折り返す
+    // （SST 80386 実測）。
+    if mode == 16
+        && feats & polyisa_guest_x86::FEAT_I386 != 0
+        && u64::from(ip) + u64::from(md.len) > 0x1_0000
+    {
+        let r = env.step(|b| polyisa_guest_x86::sem_ea::int_real(b, eip, 0, 13, 16, sseg));
+        return Some(x86_post_step(env, sys, eip, 0, 0, r, hist));
+    }
+    // 80386 以降では LOCK 接頭辞はメモリ宛ての RMW 命令にだけ有効で、
+    // それ以外では #UD（SST 80386 実測。80286 以前は無視される）。
+    if mode == 16 && md.lock && feats & polyisa_guest_x86::FEAT_I386 != 0 {
+        let mut i = 0usize;
+        while i < n
+            && matches!(
+                buf[i],
+                0x26 | 0x2E | 0x36 | 0x3E | 0x64 | 0x65 | 0x66 | 0x67 | 0xF0 | 0xF2 | 0xF3
+            )
+        {
+            i += 1;
+        }
+        let op = if buf.get(i) == Some(&0x0F) {
+            buf.get(i + 1).copied().unwrap_or(0)
+        } else {
+            buf[i]
+        };
+        let grp = (md.modrm >> 3) & 7;
+        let mem = md.has_modrm && md.modrm >> 6 != 3;
+        let ok = match op {
+            // XCHG は暗黙 LOCK を主張するが、レジスタ同士では
+            // LOCK 接頭辞そのものが #UD（SST 80386 実測）。
+            0x86 | 0x87 => mem,
+            // 上記以外はメモリ宛ての RMW だけが LOCK を取れる。
+            _ if !mem => false,
+            0x00 | 0x01 | 0x08 | 0x09 | 0x10 | 0x11 | 0x18 | 0x19 | 0x20 | 0x21 | 0x28 | 0x29
+            | 0x30 | 0x31 => true,
+            // /r の reg が演算選択のグループでは CMP(/7)は書き込まない。
+            0x80..=0x83 => grp != 7,
+            0xF6 | 0xF7 => grp == 2 || grp == 3,      // NOT/NEG
+            0xFE | 0xFF => grp == 0 || grp == 1,      // INC/DEC
+            0xAB | 0xB3 | 0xBB => true,               // BTS/BTR/BTC
+            0xBA => grp == 5 || grp == 6 || grp == 7, // BTS/BTR/BTC 即値
+            // i486 で追加される RMW 系（SST 80386 の範囲では現れない）。
+            0xB0 | 0xB1 | 0xC0 | 0xC1 => feats & polyisa_guest_x86::FEAT_I486 != 0,
+            0xC7 => grp == 1 && feats & polyisa_guest_x86::FEAT_CX8 != 0,
+            _ => false,
+        };
+        if !ok {
+            let r = env.step(|b| polyisa_guest_x86::sem_ea::int_real(b, eip, 0, 6, 16, sseg));
+            return Some(x86_post_step(env, sys, eip, 0, 0, r, hist));
+        }
     }
     let next_rip = pc + u64::from(md.len);
     // メモリアクセスの既定セグメント。実モードはセレクタ<<4 の基底で、
@@ -4743,15 +4863,18 @@ fn step_x86_map(
         .iter()
         .rev()
         .fold(0u128, |w, c| (w << 8) | u128::from(*c));
-    Some(x86_post_step(
-        env,
-        sys,
-        eip,
-        u64::from(md.len),
-        word,
-        r.map(|_| ()),
-        hist,
-    ))
+    let res = x86_post_step(env, sys, eip, u64::from(md.len), word, r.map(|_| ()), hist);
+    if mode == 16
+        && res.is_ok()
+        && matches!(env.backend.ctrl, polyisa_engine::interp::Ctrl::Jump(_))
+    {
+        // 実モードの近接制御移転は IP を 16 ビットで折り返す
+        // （SST 80386 実測。ストレート進行の 0x1_0000 到達だけは
+        // 折り返さず残して次フェッチの #GP を発火させる）。
+        let v = eip_of(env) & 0xFFFF;
+        env.backend.set(polyisa_guest_x86::sem::eip_ref(), v);
+    }
+    Some(res)
 }
 
 fn step_x86(

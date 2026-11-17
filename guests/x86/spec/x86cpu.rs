@@ -283,6 +283,18 @@ fn declare_params(m: &mut Model) {
         "1 命令の最大長。80286 は 10 バイト超で #GP、80386 以降は 15 バイト、8086/80186 は制限なし（SST 80286 実測）",
     );
     m.param(
+        "stack_wrap",
+        ParamKind::Enum(vec!["check".to_string(), "wrap".to_string()]),
+        "check",
+        "実モードのスタック系挙動まとめ（80386 系は wrap）。RET/RETF/IRET は全ポップを事前検査してからコミットし、PUSH/POP sreg の o32 形は word アクセス＋dword 分の SP 更新、制御移転でロードした EIP が 0xFFFF を越えれば移転自体が #GP（SST 80386 実測）",
+    );
+    m.param(
+        "fault_atomic",
+        ParamKind::Enum(vec!["partial".to_string(), "atomic".to_string()]),
+        "atomic",
+        "実モードのセグメント限界例外で未完了の途中状態を残すか。80286 は SI/DI 更新や追加の CX デクリメントが残り、80386 以降は全アクセスの限界を先に検査して一切残さない（SST 80286/80386 実測）",
+    );
+    m.param(
         "bcd",
         ParamKind::Enum(vec!["i8088".to_string(), "i286".to_string()]),
         "i286",
@@ -299,6 +311,12 @@ fn declare_params(m: &mut Model) {
         ParamKind::Enum(vec!["co".to_string(), "szp".to_string()]),
         "co",
         "IMUL のステータスフラグ。80286 は積の上位語から SF/ZF/PF を報告する（SST 80286 実測）。それ以降の世代は CF/OF のみ確定的で残りは未定義",
+    );
+    m.param(
+        "shift8_over",
+        ParamKind::Enum(vec!["zero".to_string(), "edge".to_string()]),
+        "zero",
+        "バイト SHL/SHR で回数が 8 を超えたときの CF/OF。zero は常に 0、edge は回数が 8 の倍数（16/24）のとき被演算子バイトの端ビットを残す（80386 実測、SST 80386）",
     );
 }
 
@@ -405,6 +423,7 @@ fn declare_models(m: &mut Model) {
             ("insn_len", "l10"),
             ("idiv8", "i286"),
             ("imul_flags", "szp"),
+            ("fault_atomic", "partial"),
         ],
         vec![],
     );
@@ -412,17 +431,23 @@ fn declare_models(m: &mut Model) {
         m,
         "i386",
         "",
-        &["fpu", "i386"],
+        // 0x82 の 0x80 別名は 386EX でも実行される（SST 80386 実測）。
+        &["fpu", "i386", "op82"],
         &[],
         &[
             ("seg_limit", "fault"),
             ("insn_len", "l15"),
             ("idiv8", "i286"),
+            ("stack_wrap", "wrap"),
+            ("shift8_over", "edge"),
         ],
         vec![],
     );
     let mut id486 = intel("4", "8", "0");
     id486.extend([("cpuid.max_basic", "1"), ("cpuid.max_ext", "0")]);
+    // i486 以降は i386 の挙動パラメータ（stack_wrap=wrap 等）を
+    // 継承するが、それらの値は 386EX の SST 実測に基づく近似で、
+    // 他世代で同じとは検証されていない。
     model(m, "i486", "i386", &["cpuid", "i486"], &[], &[], id486);
     let mut idp5 = intel("5", "4", "4");
     idp5.extend([("cpuid.max_basic", "1"), ("cpuid.max_ext", "0")]);

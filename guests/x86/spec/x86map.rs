@@ -295,7 +295,8 @@ pub fn build_maps(m: &mut Model) {
         }
     }
 
-    // 0x82 は 0x80 のエイリアス（8086/80186 まで）。
+    // 0x82 は 0x80 のエイリアス（386EX までの実モード世代で実行。
+    // SST 80386 実測）。
     for (gi, name) in grp1.iter().enumerate() {
         primary.push(MapItem::Insn(
             0x82,
@@ -885,6 +886,12 @@ pub fn build_maps(m: &mut Model) {
     };
     m0f.push(MapItem::Insn(0x01, m286(4, "smsw_ew", "smsw {e}")));
     m0f.push(MapItem::Insn(0x01, m286(6, "lmsw_ew", "lmsw {e}")));
+    // CLTS（0F 06）。80386 で追加。実モードでは CR0 の TS を下ろすだけで、
+    // 現行モデルは CR0 を持たないので no-op として扱う（SST 80386 実測）。
+    m0f.push(MapItem::Insn(
+        0x06,
+        mi("clts", &[], None, PfxSel::Any, w("i386"), "clts", "system"),
+    ));
     m0f.extend([
         MapItem::Insn(0x05, mi("syscall", &[], None, PfxSel::Any, w("m64"), "syscall", "system")),
         MapItem::Insn(0x0B, n("ud2", &[], "ud2", "system")),
@@ -1346,6 +1353,10 @@ pub fn build_maps(m: &mut Model) {
         MapItem::Insn(0xBA, g("bts_ev_ib", 5, &[Ea(V), Imm(B8)], "bts {e}, {i}", "alu")),
         MapItem::Insn(0xBA, g("btr_ev_ib", 6, &[Ea(V), Imm(B8)], "btr {e}, {i}", "alu")),
         MapItem::Insn(0xBA, g("btc_ev_ib", 7, &[Ea(V), Imm(B8)], "btc {e}, {i}", "alu")),
+        // LSS/LFS/LGS（i386 で追加される far ポインタロード）。
+        MapItem::Insn(0xB2, mi("lss_gv_mp", &[Reg(V), Ea(V)], None, PfxSel::Any, w("i386"), "lss {g}, {e}", "load")),
+        MapItem::Insn(0xB4, mi("lfs_gv_mp", &[Reg(V), Ea(V)], None, PfxSel::Any, w("i386"), "lfs {g}, {e}", "load")),
+        MapItem::Insn(0xB5, mi("lgs_gv_mp", &[Reg(V), Ea(V)], None, PfxSel::Any, w("i386"), "lgs {g}, {e}", "load")),
         // SHLD/SHRD。
         MapItem::Insn(0xA4, n("shld_ev_gv_ib", &[Ea(V), Reg(V), Imm(B8)], "shld {e}, {g}, {i}", "alu")),
         MapItem::Insn(0xA5, n("shld_ev_gv_cl", &[Ea(V), Reg(V), Imp(ImpOp::Cl)], "shld {e}, {g}, cl", "alu")),

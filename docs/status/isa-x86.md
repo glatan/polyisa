@@ -11,7 +11,7 @@
 | generic32 |  | i386 |  |
 | i186 | i8088 | i186、op82 |  |
 | i286 | i186 | i286 | pop_cs |
-| i386 |  | fpu、i386 |  |
+| i386 |  | fpu、i386、op82 |  |
 | i486 | i386 | cpuid、i486 |  |
 | i8088 |  | pop_cs、op82 |  |
 | pentium | i486 | vme、de、pse、tsc、msr、cx8、mce、apic、mmx |  |
@@ -205,6 +205,7 @@
 | cld | cld、en_cld | 真 | alu |
 | clflush | clflush_mb | clfsh | alu |
 | cli | cli | 真 | system |
+| clts | clts | i386 | system |
 | cmc | cmc | 真 | alu |
 | cmova | cmova | cmov | alu |
 | cmovae | cmovae | cmov | alu |
@@ -350,10 +351,13 @@
 | leave | en_leave | 真 | alu |
 | les | les_gv_mp | !m64 | load |
 | lfence | lfence | sse2 | alu |
+| lfs | lfs_gv_mp | i386 | load |
+| lgs | lgs_gv_mp | i386 | load |
 | lmsw | lmsw_ew | i286 && opd_o16 && adr_a16 | system |
 | lods | lods_v | 真 | load |
 | lodsb | lods_b | 真 | load |
 | loop | jcxz_jb、loop、loop_jb、loope_jb、loopne_jb | 真 | jump |
+| lss | lss_gv_mp | i386 | load |
 | maskmovdqu | maskmovdqu_xv_xv | sse2 | store |
 | maskmovq | maskmovq_pv_qv | sse | store |
 | maxpd | maxpd_xv_wv | sse2 | alu |

@@ -16,18 +16,28 @@ use crate::sem::{Gpr, clear_hi, read64, write64};
 /// （限界超過の例外は SS なら #SS=12、他は #GP=13）。
 pub const WSEG_SS: u64 = 1 << 32;
 
+/// `wseg` に詰める 32 ビットアドレッシング（0x67）フラグ。
+/// bit33 が立つとき生オフセットは下位 32 ビットの EA で、折り返し
+/// 桁上げは存在しない。限界検査は「最終バイト > 0xFFFF」の単純な
+/// 範囲比較になる（80386 実モードの実測規則）。
+pub const WSEG_32: u64 = 1 << 33;
+
 /// ModRM の r/m が指す被演算子。
 pub enum Rm<V> {
     /// レジスタ直接（mod=11）。
     Reg(Gpr),
     /// メモリ。`a` は実効アドレス（セグメントベース加算済み、
-    /// オフセットは 64K で折り返し済み）。
-    /// `wseg` が `Some` のとき 16 ビットアドレッシング由来で、
-    /// 8 ビットを超えるアクセスはオフセットを 64K で折り返す
-    /// （8086/80186）か限界例外（80286 以降、`seg_limit` パラメータ）。
-    /// 値は (セグメントベース | [`WSEG_SS`], 折り返し前の EA 和)。
-    /// EA 和が 64K で桁上げしたとき 80286 の限界検査は発火しない
-    /// （SST 80286 実測）ので、検査には折り返し前の和を使う。
+    /// オフセットはアドレス幅で折り返し済み）。
+    /// `wseg` が `Some` のとき実モードの限界検査対象で、値は
+    /// (セグメントベース | [`WSEG_SS`] | [`WSEG_32`], 生オフセット)。
+    /// 16 ビットアドレッシングでは生オフセットは折り返し前の
+    /// EA 和で、8 ビットを超えるアクセスはオフセットを 64K で
+    /// 折り返す（8086/80186）か限界例外（80286 以降、`seg_limit`
+    /// パラメータ）。EA 和が 64K で桁上げしたとき 80286 の限界検査
+    /// は発火しない（SST 80286 実測）ので検査には折り返し前の和を
+    /// 使う。32 ビットアドレッシング（[`WSEG_32`]）では生オフセット
+    /// は下位 32 ビットの EA で、検査は最終バイト > 0xFFFF の
+    /// 単純比較（80386 実モード実測）。
     Mem { a: V, wseg: Option<(u64, V)> },
 }
 
@@ -89,6 +99,7 @@ pub fn rm_of<B: Backend>(
     }
     let rm = m & 7;
     let mut raw16 = None;
+    let mut raw32 = None;
     let mut a: B::V<W64> = if d.asize == 16 {
         let (off, raw) = ea16(b, m, d.disp);
         raw16 = Some(raw);
@@ -102,14 +113,28 @@ pub fn rm_of<B: Backend>(
     } else {
         ea_base_disp(b, d.asize, rm, d.rex, d.disp)
     };
+    if real16 && d.asize == 32 {
+        // 0x67 の 32 ビット EA は 2^32 で折り返す（折り返し前の
+        // 生オフセットとしてもこの値を使う）。
+        let m32 = b.konst::<W64>(0xFFFF_FFFF);
+        let t = b.and::<W64>(a, m32);
+        raw32 = Some(t);
+        a = t;
+    }
     if seg != 0 {
         let s = b.konst::<W64>(seg);
         a = b.add::<W64>(a, s);
     }
-    let wseg = (real16 && d.asize == 16).then(|| {
+    let wseg = if real16 {
         let seg = seg | if seg_ss { WSEG_SS } else { 0 };
-        (seg, raw16.unwrap())
-    });
+        match d.asize {
+            16 => Some((seg, raw16.unwrap())),
+            32 => Some((seg | WSEG_32, raw32.unwrap())),
+            _ => None,
+        }
+    } else {
+        None
+    };
     Rm::Mem { a, wseg }
 }
 
@@ -164,6 +189,16 @@ fn ea_sib<B: Backend>(b: &mut B, m: u8, d: &MapDec, _next_rip: u64) -> B::V<W64>
     let wide = d.asize == 64;
     let mut a = if m >> 6 == 0 && base_raw == 5 {
         b.konst::<W64>(d.disp as u64)
+    } else if no_index && scale != 0 && !wide {
+        // 386 の未定義 SIB 形式（index=100b かつ scale>0）では
+        // スケールがベースレジスタに適用され、
+        // EA = base << scale + disp になる（SST 80386 実測）。
+        let bv = ea_base(b, wide, base_reg);
+        let sh = b.konst::<W64>(u64::from(scale));
+        let v: B::V<W32> = b.trunc::<W64, W32>(bv);
+        let sh32: B::V<W32> = b.trunc::<W64, W32>(sh);
+        let t = b.shl::<W32>(v, sh32);
+        b.zext::<W32, W64>(t)
     } else {
         ea_base(b, wide, base_reg)
     };
@@ -233,14 +268,33 @@ pub fn seg_limit_chk_n<B: Backend>(
     if b.param::<crate::SegLimitParam>() != crate::SEG_LIMIT_FAULT {
         return Ok(());
     }
-    // 最終バイトのオフセットが 0xFFFF を越えるか。閾値は 0x1_0001 - size。
-    // ただしオフセット自身が 0xFFFF を越える（EA 和の桁上げ）場合は
-    // 例外にならない（SST 80286 実測）。thr <= off <= 0xFFFF は
-    // off - thr <= size-2 と同値で 1 回の比較で済む。
-    let thr = b.konst::<W64>(0x1_0001 - nbytes);
-    let dt = b.sub::<W64>(off, thr);
-    let sp = b.konst::<W64>(nbytes.saturating_sub(2));
-    let over = b.cmp::<W64>(Cmp::LeU, dt, sp);
+    let over = if wseg & WSEG_32 != 0 {
+        // 32 ビットアドレッシング: オフセットは折り返さないので
+        // 単純に最終バイトが 0xFFFF を越えるかを見る
+        // （off + nbytes - 1 > 0xFFFF ⟺ off > 0x1_0000 - nbytes）。
+        let lim = b.konst::<W64>(0x1_0000 - nbytes);
+        b.cmp::<W64>(Cmp::GtU, off, lim)
+    } else if b.param::<crate::FaultAtomicParam>() == crate::FAULT_ATOMIC_ATOMIC {
+        // 80386 以降: アクセスはまずオフセットを 64K で折り、その
+        // 折り返し済みオフセットの最終バイトが 0xFFFF を越えるとき
+        // 例外になる。EA 和の桁上げ（bp+si=0x1_FFFE 等）で 0xFFFF
+        // 直上に着いたアクセスも跨ぎ判定になる（SST 80386 実測。
+        // 80286 は桁上げ側を例外にしないので `fault_atomic` で分ける）。
+        let m = b.konst::<W64>(0xFFFF);
+        let offm = b.and::<W64>(off, m);
+        let lim = b.konst::<W64>(0x1_0000 - nbytes);
+        b.cmp::<W64>(Cmp::GtU, offm, lim)
+    } else {
+        // 最終バイトのオフセットが 0xFFFF を越えるか。閾値は
+        // 0x1_0001 - size。ただしオフセット自身が 0xFFFF を越える
+        // （EA 和の桁上げ）場合は例外にならない（SST 80286 実測）。
+        // thr <= off <= 0xFFFF は off - thr <= size-2 と同値で
+        // 1 回の比較で済む。
+        let thr = b.konst::<W64>(0x1_0001 - nbytes);
+        let dt = b.sub::<W64>(off, thr);
+        let sp = b.konst::<W64>(nbytes.saturating_sub(2));
+        b.cmp::<W64>(Cmp::LeU, dt, sp)
+    };
     let ss_vec = if b.param::<crate::StackFaultParam>() == crate::STACK_FAULT_GP {
         13u8
     } else {
@@ -286,9 +340,15 @@ pub fn wseg_off<B: Backend>(
 ) -> Option<(B::V<W64>, B::V<W64>)> {
     let (seg, raw) = wseg?;
     let sv = b.konst::<W64>(seg & 0xFFFF_FFFF);
+    let base = b.sub::<W64>(a, sv);
+    if seg & WSEG_32 != 0 {
+        // 32 ビット EA: 折り返しがないので `a - sv` がそのまま
+        // オフセット（部分アクセスでも正しい生値になる）。
+        let m = b.konst::<W64>(0xFFFF_FFFF);
+        return Some((b.and::<W64>(base, m), sv));
+    }
     let hm = b.konst::<W64>(!0xFFFFu64);
     let hi = b.and::<W64>(raw, hm);
-    let base = b.sub::<W64>(a, sv);
     let off = b.add::<W64>(base, hi);
     Some((off, sv))
 }
@@ -302,12 +362,16 @@ pub fn mem_load<B: Backend, W: Hw>(
     a: B::V<W64>,
     wseg: Option<(u64, B::V<W64>)>,
 ) -> Result<B::V<W>, B::Exit> {
-    let Some((seg, _)) = wseg.filter(|_| W::BITS > 8) else {
+    // 16 ビット EA の単バイトアクセスは限界を越えられないので
+    // 検査しないが、32 ビット EA（WSEG_32）はオフセット自体が
+    // 限界を越え得るので 1 バイトでも検査する。
+    let Some((seg, _)) = wseg.filter(|(s, _)| W::BITS > 8 || s & WSEG_32 != 0) else {
         return b.load::<W>(a, crate::sem::DATA_READ);
     };
     // 検査は折り返し前の EA 和に対して行う。`a` はオフセット折り
     // 返し済みなので raw の上位を足して部分アクセスの生オフセット
-    // を復元する。番地計算は 16 ビットに折る。
+    // を復元する。番地計算は 16 ビットに折る（検査を通った範囲では
+    // 折り返しは起きない）。
     let (off_raw, sv) = wseg_off(b, a, wseg).unwrap();
     let lim = b.konst::<W64>(0xFFFF);
     seg_limit_chk::<B, W>(b, off_raw, seg)?;
@@ -336,7 +400,7 @@ pub fn mem_store<B: Backend, W: Hw>(
     wseg: Option<(u64, B::V<W64>)>,
     v: B::V<W>,
 ) -> Result<(), B::Exit> {
-    let Some((seg, _)) = wseg.filter(|_| W::BITS > 8) else {
+    let Some((seg, _)) = wseg.filter(|(s, _)| W::BITS > 8 || s & WSEG_32 != 0) else {
         return b.store::<W>(a, v, crate::sem::DATA_WRITE);
     };
     // mem_load と同じ折り返し・限界規則。
@@ -369,7 +433,7 @@ pub fn rd8<B: Backend>(b: &mut B, rm: &Rm<B::V<W64>>, d: &MapDec) -> Result<B::V
             let (r8, hi) = reg8(d, *g);
             Ok(crate::sem::read8(b, r8, hi))
         }
-        Rm::Mem { a, .. } => b.load::<W8>(*a, crate::sem::DATA_READ),
+        Rm::Mem { a, wseg } => mem_load::<B, W8>(b, *a, *wseg),
     }
 }
 
@@ -413,7 +477,7 @@ pub fn wr8<B: Backend>(
             crate::sem::write8(b, r8, hi, v);
             Ok(())
         }
-        Rm::Mem { a, .. } => b.store::<W8>(*a, v, crate::sem::DATA_WRITE),
+        Rm::Mem { a, wseg } => mem_store::<B, W8>(b, *a, *wseg, v),
     }
 }
 

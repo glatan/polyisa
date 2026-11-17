@@ -782,6 +782,35 @@ fn shift_w<B: Backend, W: Hw>(
         }
         Sh::Setmo => unreachable!(),
     };
+    // 80386: バイトシフトで回数が 8 を超えるとき、回数が 8 の倍数
+    //（16/24）なら CF に被演算子バイトの端ビットが残る。メモリ
+    // 被演算子はアライメント済みワードで読まれるが、端ビットは
+    // 被演算子バイト自身から取られる（SST 80386 実測）。
+    let cf_take = if W::BITS == 8
+        && matches!(op, Sh::Shl | Sh::Shr)
+        && b.param::<crate::Shift8OverParam>() == crate::SHIFT8_OVER_EDGE
+    {
+        let ebit = if matches!(op, Sh::Shl) {
+            b.and::<W>(x, ow)
+        } else {
+            let s = b.shr_l::<W>(x, topk);
+            b.and::<W>(s, ow)
+        };
+        let edgeb = b.cmp::<W>(Cmp::Ne, ebit, zw);
+        let eight = b.konst::<W>(W::from_u128(8));
+        let gt8 = b.cmp::<W>(Cmp::LtU, eight, n);
+        let seven = b.konst::<W>(W::from_u128(7));
+        let m8 = b.and::<W>(n, seven);
+        let m8z = b.cmp::<W>(Cmp::Ne, m8, zw);
+        let m8z = bnot(b, m8z);
+        let apply = band(b, gt8, m8z);
+        let napp = bnot(b, apply);
+        let keep = band(b, napp, cf_take);
+        let take = band(b, apply, edgeb);
+        bor(b, keep, take)
+    } else {
+        cf_take
+    };
     let cf = pick(b, cf_take, sem::FLAG_CF);
     let v_top = b.shr_l::<W>(v, topk);
     let v_msb = b.and::<W>(v_top, ow);
@@ -891,11 +920,11 @@ pub fn push_v<B: Backend>(b: &mut B, w: u8, v64: B::V<W64>, sa: u8, sseg: u64) -
             (b.add::<W64>(off, sg), None, off)
         }
     };
-    // 実モードでは SP が 64K で折り返す（SP=0xffff への push は
-    // 上位バイトがオフセット 0 に書かれる）。80286 以降は折り返さず
-    // #SS を起こす（`seg_limit` パラメータ）。SS アクセスを表す
-    // WSEG_SS を立てる。第 2 要素はオフセットの生値（SP は 16 ビット
-    // 幅なので桁上げは起きない）。
+    // 80386 のスタック書き込みも折り返したオフセットの跨ぎで
+    // #SS になる（PUSHAD の逐次 push が 0xFFFE の双語で例外になる
+    // SST 80386 実測）。折り返しそのものはアクセス側が行う。
+    // 第 2 要素はオフセットの生値（SP は 16 ビット幅なので
+    // 桁上げは起きない）。
     let wseg = (sa == 16).then_some((sseg | decode::WSEG_SS, off));
     match w {
         16 => {
@@ -928,7 +957,10 @@ pub fn stack_span_chk<B: Backend>(
     sa: u8,
     sseg: u64,
 ) -> Flow<B> {
-    if sa != 16 {
+    // 80386 系（`fault_atomic` = ATOMIC）の PUSHA は各書き込みを
+    // 個別に検査しながら逐次コミットするのでここでは検査しない
+    // （POPA 側はこの関数を呼ばず、読み込みを個別に検査する）。
+    if sa != 16 || (!pop && b.param::<crate::FaultAtomicParam>() == crate::FAULT_ATOMIC_ATOMIC) {
         return Ok(());
     }
     let sp = Gpr(4);
@@ -952,6 +984,161 @@ pub fn stack_span_chk<B: Backend>(
             16 => decode::seg_limit_chk::<B, W16>(b, off, wseg)?,
             64 => decode::seg_limit_chk::<B, W64>(b, off, wseg)?,
             _ => decode::seg_limit_chk::<B, W32>(b, off, wseg)?,
+        }
+    }
+    Ok(())
+}
+
+/// PUSHA/PUSHAD。`w` はオペランドサイズ。80286 系では系列中の
+/// いずれかの限界違反で全書き込みが無効になる不可分検査
+/// （`stack_span_chk`）。80386 系では書き込みは低位番地
+/// （EDI 側）から昇順に行われ、各書き込みは個別に限界検査
+/// される。違反時はそこまでの書き込みが残り、SP は命令前の
+/// 値のままになる（SST 80386 実測）。
+pub fn pusha<B: Backend>(b: &mut B, w: u8, sa: u8, sseg: u64) -> Flow<B> {
+    if sa == 16 && b.param::<crate::FaultAtomicParam>() == crate::FAULT_ATOMIC_ATOMIC {
+        let sz = u64::from(w / 8);
+        let m = b.konst::<W64>(0xFFFF);
+        let nm = b.konst::<W64>(!0xFFFFu64);
+        let sg = b.konst::<W64>(sseg);
+        let wseg = sseg | decode::WSEG_SS;
+        let cur = sem::read64(b, Gpr(4));
+        let total = b.konst::<W64>(sz * 8);
+        let base0 = b.sub::<W64>(cur, total);
+        let base = b.and::<W64>(base0, m);
+        // 格納順は EDI, ESI, EBP, 元の ESP, EBX, EDX, ECX, EAX。
+        for (k, g) in [7u8, 6, 5, 4, 3, 2, 1, 0].iter().enumerate() {
+            let kk = b.konst::<W64>(k as u64 * sz);
+            let o = b.add::<W64>(base, kk);
+            let off = b.and::<W64>(o, m);
+            let a = b.add::<W64>(off, sg);
+            let ws = Some((wseg, off));
+            let v64 = if *g == 4 {
+                cur
+            } else {
+                sem::read64(b, Gpr(*g))
+            };
+            match w {
+                16 => {
+                    let v: B::V<W16> = b.trunc::<W64, W16>(v64);
+                    decode::mem_store(b, a, ws, v)?;
+                }
+                _ => {
+                    let v: B::V<W32> = b.trunc::<W64, W32>(v64);
+                    decode::mem_store(b, a, ws, v)?;
+                }
+            }
+        }
+        // 全書き込みの成功後に SP の下位 16 ビットだけを更新する。
+        let nsp = b.sub::<W64>(cur, total);
+        let lo = b.and::<W64>(nsp, m);
+        let hi = b.and::<W64>(cur, nm);
+        let np = b.or::<W64>(hi, lo);
+        sem::write64(b, Gpr(4), np);
+        return Ok(());
+    }
+    // EAX, ECX, EDX, EBX, 元の ESP, EBP, ESI, EDI の順。
+    // ESP 枠は命令実行前の値なので push 前に採取する。
+    stack_span_chk(b, w, 8, false, sa, sseg)?;
+    let sp0 = sem::read64(b, Gpr(4));
+    for g in 0..4u8 {
+        let v = sem::read64(b, Gpr(g));
+        push_v(b, w, v, sa, sseg)?;
+    }
+    push_v(b, w, sp0, sa, sseg)?;
+    for g in 5..8u8 {
+        let v = sem::read64(b, Gpr(g));
+        push_v(b, w, v, sa, sseg)?;
+    }
+    Ok(())
+}
+
+/// POPA/POPAD。`w` はオペランドサイズ。80286 系では読み込み系列を
+/// 不可分に事前検査する（違反時はレジスタ・SP を一切更新しない）。
+/// 80386 系では各 pop の読み込みが個別に限界検査され、成功した
+/// 分のレジスタはコミットされるが SP は最後の pop が成功するまで
+/// 更新されない（SST 80386 実測）。
+pub fn popa<B: Backend>(b: &mut B, w: u8, sa: u8, sseg: u64) -> Flow<B> {
+    if sa == 16 && b.param::<crate::FaultAtomicParam>() == crate::FAULT_ATOMIC_ATOMIC {
+        let sz = u64::from(w / 8);
+        let m = b.konst::<W64>(0xFFFF);
+        let nm = b.konst::<W64>(!0xFFFFu64);
+        let sg = b.konst::<W64>(sseg);
+        let wseg = sseg | decode::WSEG_SS;
+        let cur = sem::read64(b, Gpr(4));
+        // 読み出し順は EDI, ESI, EBP, ESP(捨てる), EBX, EDX, ECX, EAX。
+        let mut esp_hi: Option<B::V<W64>> = None;
+        for (k, g) in [7u8, 6, 5, 4, 3, 2, 1, 0].iter().enumerate() {
+            let kk = b.konst::<W64>(k as u64 * sz);
+            let lo = b.and::<W64>(cur, m);
+            let o = b.add::<W64>(lo, kk);
+            let off = b.and::<W64>(o, m);
+            let a = b.add::<W64>(off, sg);
+            let ws = Some((wseg, off));
+            let v = match w {
+                16 => {
+                    let v: B::V<W16> = decode::mem_load(b, a, ws)?;
+                    b.zext::<W16, W64>(v)
+                }
+                _ => {
+                    let v: B::V<W32> = decode::mem_load(b, a, ws)?;
+                    b.zext::<W32, W64>(v)
+                }
+            };
+            if *g == 4 {
+                esp_hi = Some(v);
+                continue;
+            }
+            match w {
+                16 => {
+                    let old = sem::read64(b, Gpr(*g));
+                    let hi = b.and::<W64>(old, nm);
+                    let nv = b.or::<W64>(hi, v);
+                    sem::write64(b, Gpr(*g), nv);
+                }
+                _ => {
+                    let v32: B::V<W32> = b.trunc::<W64, W32>(v);
+                    b.set(Gpr(*g).state(), v32);
+                }
+            }
+        }
+        // 全読み出しの成功後に SP の下位 16 ビットだけを進める。
+        // POPAD では ESP スロットの双語の上位 16 ビットが ESP の
+        // 上位に載る（下位は SP+32 のまま。SST 80386 実測）。
+        let total = b.konst::<W64>(sz * 8);
+        let nsp = b.add::<W64>(cur, total);
+        let lo = b.and::<W64>(nsp, m);
+        let hi = match (w, esp_hi) {
+            (32, Some(v)) => b.and::<W64>(v, nm),
+            _ => b.and::<W64>(cur, nm),
+        };
+        let np = b.or::<W64>(hi, lo);
+        sem::write64(b, Gpr(4), np);
+        return Ok(());
+    }
+    // EDI, ESI, EBP, (ESP は捨てる), EBX, EDX, ECX, EAX。
+    stack_span_chk(b, w, 8, true, sa, sseg)?;
+    for g in [7u8, 6, 5, 4, 3, 2, 1, 0] {
+        let v = pop_v(b, w, sa, sseg)?;
+        if g == 4 {
+            continue;
+        }
+        match w {
+            16 => {
+                let m = b.konst::<W64>(0xFFFF_0000);
+                let old = sem::read64(b, Gpr(g));
+                let hi = b.and::<W64>(old, m);
+                let nv = b.or::<W64>(hi, v);
+                sem::write64(b, Gpr(g), nv);
+            }
+            64 => {
+                let v64: B::V<W64> = v;
+                sem::write64(b, Gpr(g), v64);
+            }
+            _ => {
+                let v32: B::V<W32> = b.trunc::<W64, W32>(v);
+                b.set(Gpr(g).state(), v32);
+            }
         }
     }
     Ok(())
@@ -1070,8 +1257,9 @@ fn rd_any<B: Backend>(
 }
 
 /// 間接分岐（r/m の値へ）。
-pub fn jmp_rm<B: Backend>(b: &mut B, w: u8, rm: &Rm<B::V<W64>>, d: &MapDec) -> Flow<B> {
+pub fn jmp_rm<B: Backend>(b: &mut B, w: u8, rm: &Rm<B::V<W64>>, d: &MapDec, sa: u8) -> Flow<B> {
     let t = rd_any::<B>(b, w, rm, d)?;
+    xfer_eip_chk(b, t, sa, w)?;
     let t32: B::V<W32> = b.trunc::<W64, W32>(t);
     b.set(eip_ref(), t32);
     b.jump(t);
@@ -1108,6 +1296,7 @@ pub fn call_rm<B: Backend>(
 ) -> Flow<B> {
     let next = eip.wrapping_add(len);
     let t = rd_any::<B>(b, w, rm, d)?;
+    xfer_eip_chk(b, t, sa, w)?;
     let nv = b.konst::<W64>(u64::from(next));
     push_v(b, w, nv, sa, sseg)?;
     let t32: B::V<W32> = b.trunc::<W64, W32>(t);
@@ -1146,8 +1335,68 @@ fn sp_add_iw<B: Backend>(b: &mut B, iw: u16, sa: u8) {
     }
 }
 
+/// sa==16 のスタック読み込み（SP は更新しない）。`plus` は SP
+/// からのオフセット（ワード境界で 64K 折り返し）。ret 系の
+/// 移転先検査で値だけ先に読むために使う。
+fn stack_peek<B: Backend>(b: &mut B, w: u8, plus: u64, sseg: u64) -> Result<B::V<W64>, B::Exit> {
+    let sp = Gpr(4);
+    let cur: B::V<W32> = b.get(sp.state());
+    let m16 = b.konst::<W32>(0xFFFF);
+    let lo = b.and::<W32>(cur, m16);
+    let k = b.konst::<W32>(plus as u32);
+    let o = b.add::<W32>(lo, k);
+    let o16 = b.and::<W32>(o, m16);
+    let off = b.zext::<W32, W64>(o16);
+    let sg = b.konst::<W64>(sseg);
+    let a = b.add::<W64>(off, sg);
+    let wseg = Some((sseg | decode::WSEG_SS, off));
+    match w {
+        16 => {
+            let v: B::V<W16> = decode::mem_load(b, a, wseg)?;
+            Ok(b.zext::<W16, W64>(v))
+        }
+        64 => decode::mem_load::<B, W64>(b, a, wseg),
+        _ => {
+            let v: B::V<W32> = decode::mem_load(b, a, wseg)?;
+            Ok(b.zext::<W32, W64>(v))
+        }
+    }
+}
+
+/// 80386 実モードでは、制御移転でロードした EIP が CS 限界を
+/// 越えると移転自体が #GP になる（積まれる IP は移転命令の
+/// 番地。SST 80386 実測）。16 ビットの移転先は常に範囲内。
+fn xfer_eip_chk<B: Backend>(b: &mut B, eip: B::V<W64>, sa: u8, w: u8) -> Flow<B> {
+    use polyisa_sem::{ExceptionKind, GuestException};
+    if sa != 16 || w != 32 || b.param::<crate::StackWrapParam>() != crate::STACK_WRAP_WRAP {
+        return Ok(());
+    }
+    let lim = b.konst::<W64>(0xFFFF);
+    let over = b.cmp::<W64>(Cmp::GtU, eip, lim);
+    b.if_then(over, |b| {
+        Err(b.raise(GuestException {
+            kind: ExceptionKind::Trap,
+            code: 13,
+            addr: None,
+            in_delay_slot: false,
+        }))
+    })
+}
+
 /// RET。pop で戻る。iw は積み増し。
 pub fn ret<B: Backend>(b: &mut B, w: u8, iw: u16, sa: u8, sseg: u64) -> Flow<B> {
+    // 80386 実モード: 移転先が限界を越えれば RET 自体が #GP
+    // になり、SP の更新はコミットされない（SST 80386 実測）。
+    if sa == 16 && b.param::<crate::StackWrapParam>() == crate::STACK_WRAP_WRAP {
+        let v = stack_peek(b, w, 0, sseg)?;
+        xfer_eip_chk(b, v, sa, w)?;
+        let bump = (u64::from(w / 8) + u64::from(iw)) as u16;
+        sp_add_iw(b, bump, sa);
+        let t32: B::V<W32> = b.trunc::<W64, W32>(v);
+        b.set(eip_ref(), t32);
+        b.jump(v);
+        return Ok(());
+    }
     let v = pop_v(b, w, sa, sseg)?;
     if iw != 0 {
         sp_add_iw(b, iw, sa);
@@ -1174,16 +1423,21 @@ fn jmp_far<B: Backend>(b: &mut B, off: B::V<W64>, sel: B::V<W16>) -> Flow<B> {
     Ok(())
 }
 
-/// JMPF ptr16:v（直値 far ポインタ）。
+/// JMPF ptr16:v（直値 far ポインタ）。実モードでは移転先が
+/// CS 限界を越えると JMPF 自体が #GP（SST 80386 実測）。
 pub fn jmpf_ptr<B: Backend>(b: &mut B, off: u64, sel: u64) -> Flow<B> {
     let o = b.konst::<W64>(off);
+    xfer_eip_chk(b, o, 16, 32)?;
     let s = b.konst::<W16>(sel as u16);
     jmp_far(b, o, s)
 }
 
-/// CALLF ptr16:v。CS、次の IP の順に積んで far 分岐する。
+/// CALLF ptr16:v。CS、次の IP の順に積んで far 分岐する。`w` は
+/// オペランドサイズ（積む CS/EIP の幅とターゲットオフセット幅）。
+#[allow(clippy::too_many_arguments)]
 pub fn callf_ptr<B: Backend>(
     b: &mut B,
+    w: u8,
     off: u64,
     sel: u64,
     eip: u32,
@@ -1191,19 +1445,38 @@ pub fn callf_ptr<B: Backend>(
     sa: u8,
     sseg: u64,
 ) -> Flow<B> {
+    let o = b.konst::<W64>(off);
+    xfer_eip_chk(b, o, sa, w)?;
     let cs: B::V<W16> = b.get(sem::sreg_ref(1));
     let cs64 = b.zext::<W16, W64>(cs);
-    push_v(b, 16, cs64, sa, sseg)?;
-    let next = eip.wrapping_add(len) & 0xFFFF;
+    push_v(b, w, cs64, sa, sseg)?;
+    let next = if w == 16 {
+        eip.wrapping_add(len) & 0xFFFF
+    } else {
+        eip.wrapping_add(len)
+    };
     let nv = b.konst::<W64>(u64::from(next));
-    push_v(b, 16, nv, sa, sseg)?;
-    jmpf_ptr(b, off, sel)
+    push_v(b, w, nv, sa, sseg)?;
+    let s = b.konst::<W16>(sel as u16);
+    jmp_far(b, o, s)
 }
 
-/// RETF。IP、CS の順に戻す。iw は積み増し。
-pub fn retf<B: Backend>(b: &mut B, iw: u16, sa: u8, sseg: u64) -> Flow<B> {
-    let ip = pop_v(b, 16, sa, sseg)?;
-    let cs64 = pop_v(b, 16, sa, sseg)?;
+/// RETF。IP、CS の順に戻す。`w` はオペランドサイズ、iw は積み増し。
+pub fn retf<B: Backend>(b: &mut B, w: u8, iw: u16, sa: u8, sseg: u64) -> Flow<B> {
+    // 80386 実モード: 移転先 EIP が限界を越えれば RETF 自体が
+    // #GP で、どちらのポップもコミットされない（SST 80386 実測）。
+    if sa == 16 && b.param::<crate::StackWrapParam>() == crate::STACK_WRAP_WRAP {
+        let sz = u64::from(w / 8);
+        let ip = stack_peek(b, w, 0, sseg)?;
+        let cs64 = stack_peek(b, w, sz, sseg)?;
+        xfer_eip_chk(b, ip, sa, w)?;
+        let bump = (sz * 2 + u64::from(iw)) as u16;
+        sp_add_iw(b, bump, sa);
+        let sel: B::V<W16> = b.trunc::<W64, W16>(cs64);
+        return jmp_far(b, ip, sel);
+    }
+    let ip = pop_v(b, w, sa, sseg)?;
+    let cs64 = pop_v(b, w, sa, sseg)?;
     if iw != 0 {
         sp_add_iw(b, iw, sa);
     }
@@ -1256,13 +1529,18 @@ pub fn far_rm<B: Backend>(
     let Some((off, sel)) = load_far_ptr(b, w, rm)? else {
         return Ok(());
     };
+    xfer_eip_chk(b, off, sa, w)?;
     if is_call {
         let cs: B::V<W16> = b.get(sem::sreg_ref(1));
         let cs64 = b.zext::<W16, W64>(cs);
-        push_v(b, 16, cs64, sa, sseg)?;
-        let next = eip.wrapping_add(len) & 0xFFFF;
+        push_v(b, w, cs64, sa, sseg)?;
+        let next = if w == 16 {
+            eip.wrapping_add(len) & 0xFFFF
+        } else {
+            eip.wrapping_add(len)
+        };
         let nv = b.konst::<W64>(u64::from(next));
-        push_v(b, 16, nv, sa, sseg)?;
+        push_v(b, w, nv, sa, sseg)?;
     }
     jmp_far(b, off, sel)
 }
@@ -1271,6 +1549,14 @@ pub fn far_rm<B: Backend>(
 /// して IVT[vec] へ far 分岐する。divide error もこの経路で、
 /// 積まれる IP は除算命令の次を指す（8088 の実動作）。
 pub fn int_real<B: Backend>(b: &mut B, eip: u32, len: u32, vec: u8, sa: u8, sseg: u64) -> Flow<B> {
+    // IVT エントリはフレームを積む前に読む。SS と IVT が重なる
+    // とき、フレームの書き込みがベクタを上書きしても配送先は
+    // 元のエントリになる（SST 80386 実測）。
+    let va = b.konst::<W64>(u64::from(vec) * 4);
+    let ip: B::V<W16> = decode::mem_load(b, va, None)?;
+    let adv = b.konst::<W64>(2);
+    let ca = b.add::<W64>(va, adv);
+    let cs2: B::V<W16> = decode::mem_load(b, ca, None)?;
     let fl: B::V<W32> = b.get(eflags_ref());
     // `flags_top` = ones（8086/80186）では積まれる FLAGS の bit12-15 が 1。
     let mut fl64 = b.zext::<W32, W64>(fl);
@@ -1289,12 +1575,6 @@ pub fn int_real<B: Backend>(b: &mut B, eip: u32, len: u32, vec: u8, sa: u8, sseg
     let next = eip.wrapping_add(len) & 0xFFFF;
     let nv = b.konst::<W64>(u64::from(next));
     push_v(b, 16, nv, sa, sseg)?;
-    // IVT の物理番地は vec*4（+2 がセレクタ）。
-    let va = b.konst::<W64>(u64::from(vec) * 4);
-    let ip: B::V<W16> = decode::mem_load(b, va, None)?;
-    let adv = b.konst::<W64>(2);
-    let ca = b.add::<W64>(va, adv);
-    let cs2: B::V<W16> = decode::mem_load(b, ca, None)?;
     let off = b.zext::<W16, W64>(ip);
     jmp_far(b, off, cs2)
 }
@@ -1305,11 +1585,26 @@ pub fn into_real<B: Backend>(b: &mut B, eip: u32, len: u32, sa: u8, sseg: u64) -
     b.if_then(of, |b| int_real(b, eip, len, 4, sa, sseg))
 }
 
-/// IRET（実モード）。IP、CS、FLAGS を pop する。
-pub fn iret_real<B: Backend>(b: &mut B, sa: u8, sseg: u64) -> Flow<B> {
-    let ip = pop_v(b, 16, sa, sseg)?;
-    let cs64 = pop_v(b, 16, sa, sseg)?;
-    let fl64 = pop_v(b, 16, sa, sseg)?;
+/// IRET（実モード）。IP、CS、FLAGS を pop する。`w` は
+/// オペランドサイズ（iretd では 32 ビット双語を pop する）。
+pub fn iret_real<B: Backend>(b: &mut B, w: u8, sa: u8, sseg: u64) -> Flow<B> {
+    // 80386 実モード: 移転先 EIP が限界を越えれば IRET 自体が
+    // #GP で、どのポップもコミットされない（SST 80386 実測）。
+    let (ip, cs64, fl64) =
+        if sa == 16 && b.param::<crate::StackWrapParam>() == crate::STACK_WRAP_WRAP {
+            let sz = u64::from(w / 8);
+            let ip = stack_peek(b, w, 0, sseg)?;
+            let cs = stack_peek(b, w, sz, sseg)?;
+            let fl = stack_peek(b, w, sz * 2, sseg)?;
+            xfer_eip_chk(b, ip, sa, w)?;
+            sp_add_iw(b, (sz * 3) as u16, sa);
+            (ip, cs, fl)
+        } else {
+            let ip = pop_v(b, w, sa, sseg)?;
+            let cs = pop_v(b, w, sa, sseg)?;
+            let fl = pop_v(b, w, sa, sseg)?;
+            (ip, cs, fl)
+        };
     let fl32: B::V<W32> = b.trunc::<W64, W32>(fl64);
     // POPF と同じ強制ビット（bit1=1、bit3/5=0）。bit12-15 は
     // `flags_top` = ones（8086/80186）で常に 1、zero（80286 以降）では
@@ -1852,16 +2147,19 @@ pub fn enter<B: Backend>(b: &mut B, w: u8, frame: u64, level: u64, sa: u8, sseg:
     let sz = u64::from(w / 8);
     let bytes = b.konst::<W64>(sz);
     let sg = b.konst::<W64>(sseg);
-    let bp = sem::read64(b, Gpr(5));
-    let bp = b.and::<W64>(bp, mm);
+    // push する BP は被演算子幅の全値（o32 では EBP の上位語も
+    // 積まれる。SST 80386 実測）。鎖の番地は `sa` 幅に潰す。
+    let rbp = sem::read64(b, Gpr(5));
+    let bp = b.and::<W64>(rbp, mm);
     let sp0 = sem::read64(b, Gpr(4));
     let sp0 = b.and::<W64>(sp0, mm);
-    // sa==16 では SS の限界例外が効く（80286 の実測。SST の
-    // enter は #GP を起こしつつコミット済みの push を残す）。
+    // sa==16 では読み書きとも SS の限界例外が効く（80286/80386
+    // 実測。コミット済みの push は例外後も残る）。
     let wseg = (sa == 16).then_some(sseg | decode::WSEG_SS);
+    let wseg_r = wseg;
     let mut vsp = b.sub::<W64>(sp0, bytes);
     vsp = b.and::<W64>(vsp, mm);
-    enter_store(b, w, sg, vsp, wseg, bp)?;
+    enter_store(b, w, sg, vsp, wseg, rbp)?;
     let framep = vsp;
     if lvl > 0 {
         let mut p = bp;
@@ -1869,7 +2167,7 @@ pub fn enter<B: Backend>(b: &mut B, w: u8, frame: u64, level: u64, sa: u8, sseg:
             let pv = b.sub::<W64>(p, bytes);
             p = b.and::<W64>(pv, mm);
             let pa = b.add::<W64>(p, sg);
-            let ws = wseg.map(|s| (s, p));
+            let ws = wseg_r.map(|s| (s, p));
             let v = match w {
                 16 => {
                     let v: B::V<W16> = decode::mem_load(b, pa, ws)?;
@@ -1881,18 +2179,26 @@ pub fn enter<B: Backend>(b: &mut B, w: u8, frame: u64, level: u64, sa: u8, sseg:
                     b.zext::<W32, W64>(v)
                 }
             };
-            let vm = b.and::<W64>(v, mm);
+            // 鎖要素は値幅 `w` のまま積む。`mm`（スタック番地幅）
+            // を被演算子に掛けると o32 の双語要素の上位が消える
+            // （SST 80386 実測）。
             let sub = b.sub::<W64>(vsp, bytes);
             vsp = b.and::<W64>(sub, mm);
-            enter_store(b, w, sg, vsp, wseg, vm)?;
+            enter_store(b, w, sg, vsp, wseg, v)?;
         }
         let sub = b.sub::<W64>(vsp, bytes);
         vsp = b.and::<W64>(sub, mm);
         enter_store(b, w, sg, vsp, wseg, framep)?;
     }
-    let rbp = sem::read64(b, Gpr(5));
-    let bhi = b.and::<W64>(rbp, nmm);
-    let nbp = b.or::<W64>(bhi, framep);
+    // フレームポインタは被演算子幅で書く。sa==16 の 386 実測では
+    // o32 enter の EBP に折り返した SP が零拡張で入る。
+    let nbp = if w == 16 {
+        let rbp = sem::read64(b, Gpr(5));
+        let bhi = b.and::<W64>(rbp, nmm);
+        b.or::<W64>(bhi, framep)
+    } else {
+        framep
+    };
     sem::write64(b, Gpr(5), nbp);
     let cur = sem::read64(b, Gpr(4));
     let fv = b.konst::<W64>(frame & m);
@@ -2106,6 +2412,7 @@ fn str_w<B: Backend, W: Hw>(
     rep: bool,
     zf_cond: u8,
     real16: bool,
+    atomic: bool,
 ) -> Flow<B> {
     let asize = d.asize;
     // 実モードの文字列アクセスはオフセット（SI/DI）を 64K で折り返す
@@ -2114,9 +2421,19 @@ fn str_w<B: Backend, W: Hw>(
     // 併せて要求する。
     let mut si = sptr(b, Gpr(6), asize);
     let mut di = sptr(b, Gpr(7), asize);
-    let wseg_s =
-        (real16 && asize == 16).then_some((seg | if seg_ss { decode::WSEG_SS } else { 0 }, si));
-    let wseg_d = (real16 && asize == 16).then_some((es, di));
+    let wseg_at = |seg: u64, off: B::V<W64>| {
+        if !real16 {
+            return None;
+        }
+        match asize {
+            16 => Some((seg, off)),
+            32 => Some((seg | decode::WSEG_32, off)),
+            _ => None,
+        }
+    };
+    let sf = seg | if seg_ss { decode::WSEG_SS } else { 0 };
+    let wseg_s = wseg_at(sf, si);
+    let wseg_d = wseg_at(es, di);
     let sg = b.konst::<W64>(seg);
     si = b.add::<W64>(si, sg);
     let eg = b.konst::<W64>(es);
@@ -2124,13 +2441,14 @@ fn str_w<B: Backend, W: Hw>(
     let sz = u64::from(W::BITS / 8);
     // 80286 系は要素ごとのポインタ更新をアクセスより先にコミット
     // する（アクセスが限界例外を起こしても更新が残る。SST 実測）。
-    // wrap する世代とは可観測な差はないので常に先に更新する。
+    // 80386 系は全アクセスの限界を事前検査するので違反時は更新も
+    // デクリメントも起きない（str_op 側で検査済み）。
     // REP 実行中のストアが限界例外を起こすと、80286 はイテレーション
     // の後始末として CX をもう一度デクリメントしてから例外を取る
     // （合計 -2。ロード系の失敗ではイテレーション先頭の -1 のみ。
     // SST 実測）。最終アクセスになるストアにだけ適用する。
     let done = |b: &mut B, r: Flow<B>| -> Flow<B> {
-        if rep && r.is_err() {
+        if rep && !atomic && r.is_err() {
             rep_dec(b, d);
         }
         r
@@ -2169,7 +2487,7 @@ fn str_w<B: Backend, W: Hw>(
             // 例外ではデクリメントされない）。
             str_bump(b, Gpr(7), asize, sz);
             let t: B::V<W> = decode::mem_load(b, di, wseg_d)?;
-            if rep {
+            if rep && !atomic {
                 rep_dec(b, d);
             }
             str_bump(b, Gpr(6), asize, sz);
@@ -2222,12 +2540,53 @@ pub fn str_op<B: Backend>(
         Str::Scas | Str::Cmps if d.rep == 0xF2 => 2,
         _ => 0,
     };
+    // 80386 系は全アクセスのセグメント限界を事前検査し、違反では
+    // CX デクリメントも SI/DI 更新も起きない（SST 80386 実測）。
+    let atomic = real16
+        && matches!(d.asize, 16 | 32)
+        && b.param::<crate::FaultAtomicParam>() == crate::FAULT_ATOMIC_ATOMIC;
+    let precheck = |b: &mut B| -> Flow<B> {
+        if !atomic {
+            return Ok(());
+        }
+        let sz = u64::from(w / 8);
+        let w32 = if d.asize == 32 { decode::WSEG_32 } else { 0 };
+        let sf = seg | if seg_ss { decode::WSEG_SS } else { 0 } | w32;
+        let esw = es | w32;
+        let si_hit = matches!(kind, Str::Movs | Str::Lods | Str::Cmps | Str::Outs);
+        let di_hit = matches!(
+            kind,
+            Str::Movs | Str::Stos | Str::Scas | Str::Cmps | Str::Ins
+        );
+        // 検査順はアクセス順（CMPS は DI 側が先）。
+        if matches!(kind, Str::Cmps) && di_hit {
+            let di = sptr(b, Gpr(7), d.asize);
+            decode::seg_limit_chk_n(b, di, esw, sz)?;
+        }
+        if si_hit {
+            let si = sptr(b, Gpr(6), d.asize);
+            decode::seg_limit_chk_n(b, si, sf, sz)?;
+        }
+        if di_hit && !matches!(kind, Str::Cmps) {
+            let di = sptr(b, Gpr(7), d.asize);
+            decode::seg_limit_chk_n(b, di, esw, sz)?;
+        }
+        Ok(())
+    };
     let iter = |b: &mut B| -> Flow<B> {
         match w {
-            16 => str_w::<B, W16>(b, kind, d, eip, seg, seg_ss, es, rep, zf_cond, real16),
-            64 => str_w::<B, W64>(b, kind, d, eip, seg, seg_ss, es, rep, zf_cond, real16),
-            8 => str_w::<B, W8>(b, kind, d, eip, seg, seg_ss, es, rep, zf_cond, real16),
-            _ => str_w::<B, W32>(b, kind, d, eip, seg, seg_ss, es, rep, zf_cond, real16),
+            16 => str_w::<B, W16>(
+                b, kind, d, eip, seg, seg_ss, es, rep, zf_cond, real16, atomic,
+            ),
+            64 => str_w::<B, W64>(
+                b, kind, d, eip, seg, seg_ss, es, rep, zf_cond, real16, atomic,
+            ),
+            8 => str_w::<B, W8>(
+                b, kind, d, eip, seg, seg_ss, es, rep, zf_cond, real16, atomic,
+            ),
+            _ => str_w::<B, W32>(
+                b, kind, d, eip, seg, seg_ss, es, rep, zf_cond, real16, atomic,
+            ),
         }
     };
     if rep {
@@ -2236,14 +2595,19 @@ pub fn str_op<B: Backend>(
         let z = b.konst::<W64>(0);
         let active = b.cmp::<W64>(Cmp::Ne, c, z);
         b.if_then(active, |b| {
-            // CMPS だけは CX デクリメントが DI ロードの後に置かれる
-            // （80286 実測。DI ロードの限界例外では減らない）。
-            if !matches!(kind, Str::Cmps) {
+            if atomic {
+                // 限界違反では CX も SI/DI も変わらない（80386 実測）。
+                precheck(b)?;
+                rep_dec(b, d);
+            } else if !matches!(kind, Str::Cmps) {
+                // CMPS だけは CX デクリメントが DI ロードの後に置かれる
+                // （80286 実測。DI ロードの限界例外では減らない）。
                 rep_dec(b, d);
             }
             iter(b)
         })
     } else {
+        precheck(b)?;
         iter(b)
     }
 }
@@ -2260,15 +2624,22 @@ pub fn mov_moffs_ld<B: Backend>(
     d: &MapDec,
     real16: bool,
 ) -> Flow<B> {
-    let a = b.konst::<W64>(moffs);
+    let mraw = b.konst::<W64>(moffs & asize_mask(d.asize));
     let sg = b.konst::<W64>(seg);
-    let addr = b.add::<W64>(a, sg);
-    let mraw = b.konst::<W64>(moffs);
-    let wseg =
-        (real16 && d.asize == 16).then_some((seg | if seg_ss { decode::WSEG_SS } else { 0 }, mraw));
+    let addr = b.add::<W64>(mraw, sg);
+    let sf = seg | if seg_ss { decode::WSEG_SS } else { 0 };
+    let wseg = if real16 {
+        match d.asize {
+            16 => Some((sf, mraw)),
+            32 => Some((sf | decode::WSEG_32, mraw)),
+            _ => None,
+        }
+    } else {
+        None
+    };
     match w {
         8 => {
-            let v: B::V<W8> = b.load::<W8>(addr, sem::DATA_READ)?;
+            let v: B::V<W8> = decode::mem_load(b, addr, wseg)?;
             W8::put(b, Gpr(0), d, v);
         }
         16 => {
@@ -2297,16 +2668,23 @@ pub fn mov_moffs_st<B: Backend>(
     d: &MapDec,
     real16: bool,
 ) -> Flow<B> {
-    let a = b.konst::<W64>(moffs);
+    let mraw = b.konst::<W64>(moffs & asize_mask(d.asize));
     let sg = b.konst::<W64>(seg);
-    let addr = b.add::<W64>(a, sg);
-    let mraw = b.konst::<W64>(moffs);
-    let wseg =
-        (real16 && d.asize == 16).then_some((seg | if seg_ss { decode::WSEG_SS } else { 0 }, mraw));
+    let addr = b.add::<W64>(mraw, sg);
+    let sf = seg | if seg_ss { decode::WSEG_SS } else { 0 };
+    let wseg = if real16 {
+        match d.asize {
+            16 => Some((sf, mraw)),
+            32 => Some((sf | decode::WSEG_32, mraw)),
+            _ => None,
+        }
+    } else {
+        None
+    };
     match w {
         8 => {
             let v = W8::get(b, Gpr(0), d);
-            b.store::<W8>(addr, v, sem::DATA_WRITE)?;
+            decode::mem_store(b, addr, wseg, v)?;
         }
         16 => {
             let v = W16::get(b, Gpr(0), d);
@@ -2328,8 +2706,9 @@ pub fn mov_moffs_st<B: Backend>(
 
 fn bt_flags<B: Backend>(b: &mut B, bit: B::B) {
     let old: B::V<W32> = b.get(eflags_ref());
-    let ncf = b.konst::<W32>(!sem::FLAG_CF);
-    let cleared = b.and::<W32>(old, ncf);
+    // CF はビット値、OF は未定義（386EX 実測では 0 に落ちる）。
+    let clr = b.konst::<W32>(!(sem::FLAG_CF | sem::FLAG_OF));
+    let cleared = b.and::<W32>(old, clr);
     let cf = b.konst::<W32>(sem::FLAG_CF);
     let z = b.konst::<W32>(0);
     let on = b.select::<W32>(bit, cf, z);
@@ -2343,6 +2722,7 @@ fn bt_w<B: Backend, W: Hw>(
     ea: &Rm<B::V<W64>>,
     d: &MapDec,
     n: B::V<W64>,
+    mod_at_ea: bool,
 ) -> Flow<B> {
     // r/m のビット列：メモリなら n/W::BITS 要素分アドレスを進める（負も可）。
     let lg_bits = W::BITS.trailing_zeros();
@@ -2351,13 +2731,40 @@ fn bt_w<B: Backend, W: Hw>(
     let off = b.shr_a::<W64>(n, sh);
     let bm = b.konst::<W64>(u64::from(W::BITS - 1));
     let idx = b.and::<W64>(n, bm);
-    let bs = b.konst::<W64>(u64::from(lg_bytes));
     let e2;
     let target = if let Rm::Mem { a, wseg } = ea {
-        let ob = b.shl::<W64>(off, bs);
-        let na = b.add::<W64>(*a, ob);
-        e2 = Rm::Mem { a: na, wseg: *wseg };
-        &e2
+        if mod_at_ea {
+            // 386 実モード実測: Ib 形のメモリオペランドはビット列
+            // オフセットでアドレスをずらさず、EA 上のオペランドに
+            // mod 幅で作用する。
+            ea
+        } else {
+            let bs = b.konst::<W64>(u64::from(lg_bytes));
+            let ob = b.shl::<W64>(off, bs);
+            match decode::wseg_off(b, *a, *wseg) {
+                // 実モード: ずらしたオフセットを折り返して限界検査する。
+                Some((off_raw, sv)) => {
+                    let (seg, _) = wseg.unwrap();
+                    let no = b.add::<W64>(off_raw, ob);
+                    let m = if seg & decode::WSEG_32 != 0 {
+                        b.konst::<W64>(0xFFFF_FFFF)
+                    } else {
+                        b.konst::<W64>(0xFFFF)
+                    };
+                    let a2 = b.and::<W64>(no, m);
+                    let na = b.add::<W64>(a2, sv);
+                    e2 = Rm::Mem {
+                        a: na,
+                        wseg: Some((seg, no)),
+                    };
+                }
+                None => {
+                    let na = b.add::<W64>(*a, ob);
+                    e2 = Rm::Mem { a: na, wseg: *wseg };
+                }
+            }
+            &e2
+        }
     } else {
         ea
     };
@@ -2393,11 +2800,12 @@ pub fn bt_op<B: Backend>(
     ea: &Rm<B::V<W64>>,
     d: &MapDec,
     n: B::V<W64>,
+    mod_at_ea: bool,
 ) -> Flow<B> {
     match w {
-        16 => bt_w::<B, W16>(b, op, ea, d, n),
-        64 => bt_w::<B, W64>(b, op, ea, d, n),
-        _ => bt_w::<B, W32>(b, op, ea, d, n),
+        16 => bt_w::<B, W16>(b, op, ea, d, n, mod_at_ea),
+        64 => bt_w::<B, W64>(b, op, ea, d, n, mod_at_ea),
+        _ => bt_w::<B, W32>(b, op, ea, d, n, mod_at_ea),
     }
 }
 
@@ -2416,31 +2824,60 @@ fn shxd_w<B: Backend, W: Hw>(
     let n = b.and::<W>(cnt, mk);
     let zero = b.konst::<W>(W::from_u128(0));
     let nz = b.cmp::<W>(Cmp::Ne, n, zero);
+    // 読み出しは count=0 でも行う: 386 は n==0 でもデストの EA を
+    // 検証し、限界違反なら例外になる（SST 80386 実測）。
+    let t = rd_w::<B, W>(b, ea, d)?;
     b.if_then(nz, |b| {
-        let t = rd_w::<B, W>(b, ea, d)?;
         let s = W::get(b, src, d);
         let bits_k = b.konst::<W>(W::from_u128(u128::from(W::BITS)));
         let wm = b.sub::<W>(bits_k, n);
-        let v = if left {
+        let one = b.konst::<W>(W::from_u128(1));
+        // n > オペランド幅（W16 で 17-31）: 386 実測ではデストが
+        // 押し出されて残るのは src の n-16 回転だけになる。
+        let (v_norm, cf_norm, v_wide, cf_wide) = if left {
             let a = b.shl::<W>(t, n);
             let x = b.shr_l::<W>(s, wm);
-            b.or::<W>(a, x)
+            let vn = b.or::<W>(a, x);
+            let cfv = b.shr_l::<W>(t, wm);
+            let cf_n = b.and::<W>(cfv, one);
+            // rol(src, n-16)
+            let k = b.sub::<W>(n, bits_k);
+            let bk = b.add::<W>(bits_k, bits_k);
+            let k2 = b.sub::<W>(bk, n);
+            let sa = b.shl::<W>(s, k);
+            let sb = b.shr_l::<W>(s, k2);
+            let vw = b.or::<W>(sa, sb);
+            // CF は連結値 (t:s) の 2W-n ビット = src の 2W-n ビット。
+            let bk2 = b.add::<W>(bits_k, bits_k);
+            let cf_i2 = b.sub::<W>(bk2, n);
+            let cfv2 = b.shr_l::<W>(s, cf_i2);
+            let cf_w = b.and::<W>(cfv2, one);
+            (vn, cf_n, vw, cf_w)
         } else {
             let a = b.shr_l::<W>(t, n);
             let x = b.shl::<W>(s, wm);
-            b.or::<W>(a, x)
+            let vn = b.or::<W>(a, x);
+            let cf_idx = b.sub::<W>(n, one);
+            let cfv = b.shr_l::<W>(t, cf_idx);
+            let cf_n = b.and::<W>(cfv, one);
+            // ror(src, n-16)
+            let k = b.sub::<W>(n, bits_k);
+            let bk = b.add::<W>(bits_k, bits_k);
+            let k2 = b.sub::<W>(bk, n);
+            let sa = b.shr_l::<W>(s, k);
+            let sb = b.shl::<W>(s, k2);
+            let vw = b.or::<W>(sa, sb);
+            let cf_idx2 = b.sub::<W>(n, bits_k);
+            let cf_idx2 = b.sub::<W>(cf_idx2, one);
+            let cfv2 = b.shr_l::<W>(s, cf_idx2);
+            let cf_w = b.and::<W>(cfv2, one);
+            (vn, cf_n, vw, cf_w)
         };
+        let over = b.cmp::<W>(Cmp::GtU, n, bits_k);
+        let v = b.select::<W>(over, v_wide, v_norm);
+        let cf_and = b.select::<W>(over, cf_wide, cf_norm);
         wr_w::<B, W>(b, ea, d, v)?;
         // CF: SHLD は元の w-n ビット、SHRD は n-1 ビット。
-        let cf_idx = if left { wm } else { n };
-        let one = b.konst::<W>(W::from_u128(1));
-        let cf_idx = if left {
-            cf_idx
-        } else {
-            b.sub::<W>(cf_idx, one)
-        };
-        let cfv = b.shr_l::<W>(t, cf_idx);
-        let cf_and = b.and::<W>(cfv, one);
         let cf = b.cmp::<W>(Cmp::Ne, cf_and, zero);
         let old: B::V<W32> = b.get(eflags_ref());
         let ncf = b.konst::<W32>(!sem::FLAG_CF);
@@ -2485,7 +2922,7 @@ pub fn shxd<B: Backend>(
     ea: &Rm<B::V<W64>>,
     d: &MapDec,
     src: Gpr,
-    cnt: u8,
+    cnt: ShiftCnt,
 ) -> Flow<B> {
     // 即値/CL を幅 W の値として供給。CL は上位を切る。
     match w {
@@ -2504,13 +2941,15 @@ pub fn shxd<B: Backend>(
     }
 }
 
-fn cnt_v<B: Backend, W: Hw>(b: &mut B, cnt: u8, d: &MapDec) -> B::V<W> {
-    if cnt == u8::MAX {
-        // CL。
-        let cl = W8::get(b, Gpr(1), d);
-        b.zext::<W8, W>(cl)
-    } else {
-        b.konst::<W>(W::from_u128(u128::from(cnt)))
+fn cnt_v<B: Backend, W: Hw>(b: &mut B, cnt: ShiftCnt, d: &MapDec) -> B::V<W> {
+    match cnt {
+        ShiftCnt::Cl => {
+            // CL。
+            let cl = W8::get(b, Gpr(1), d);
+            b.zext::<W8, W>(cl)
+        }
+        ShiftCnt::One => b.konst::<W>(W::from_u128(1)),
+        ShiftCnt::Imm(i) => b.konst::<W>(W::from_u128(u128::from(i))),
     }
 }
 
@@ -5135,16 +5574,47 @@ pub fn mov_sr_st<B: Backend>(b: &mut B, s: u8, ea: &Rm<B::V<W64>>) -> Result<(),
 
 /// PUSH sreg。ゼロ拡張したセレクタをスタック幅で積む
 /// （64bit モードは 8 バイトスロット、32bit は 4 バイト）。
+/// 80386 実モードの o32 形では SP をオペランド幅（4）で引き、
+/// word だけを新しい SP に書く（SST 80386 実測）。
 pub fn push_sr<B: Backend>(b: &mut B, s: u8, sw: u8, sa: u8, sseg: u64) -> Flow<B> {
     let v: B::V<W16> = b.get(sem::sreg_ref(s));
+    if sa == 16 && b.param::<crate::StackWrapParam>() == crate::STACK_WRAP_WRAP {
+        let sp = Gpr(4);
+        let delta = u64::from(sw / 8);
+        let cur: B::V<W32> = b.get(sp.state());
+        let m16 = b.konst::<W32>(0xFFFF);
+        let k = b.konst::<W32>(delta as u32);
+        let np32 = b.sub::<W32>(cur, k);
+        let lo = b.and::<W32>(np32, m16);
+        let nm = b.konst::<W32>(0xFFFF_0000);
+        let hi = b.and::<W32>(cur, nm);
+        let np = b.or::<W32>(hi, lo);
+        let off = b.zext::<W32, W64>(lo);
+        let sg = b.konst::<W64>(sseg);
+        let a = b.add::<W64>(off, sg);
+        let ws = Some((sseg | decode::WSEG_SS, off));
+        decode::mem_store::<B, W16>(b, a, ws, v)?;
+        b.set(sp.state(), np);
+        return Ok(());
+    }
     let v64 = b.zext::<W16, W64>(v);
     push_v(b, sw, v64, sa, sseg)
 }
 
 /// POP sreg。スタック幅で取り出し下位 16 ビットをセレクタへ書く
 /// （ベースは変えない。`mov_sr_ld` の注記を参照）。
+/// 80386 実モードの o32 形では word だけを読み、SP は
+/// オペランド幅（4）で進む（SST 80386 実測）。
 pub fn pop_sr<B: Backend>(b: &mut B, s: u8, sw: u8, sa: u8, sseg: u64) -> Flow<B> {
-    let v = pop_v(b, sw, sa, sseg)?;
+    let v = if sa == 16 && b.param::<crate::StackWrapParam>() == crate::STACK_WRAP_WRAP {
+        let v = pop_v(b, 16, sa, sseg)?;
+        if sw > 16 {
+            sp_add_iw(b, u16::from(sw / 8) - 2, sa);
+        }
+        v
+    } else {
+        pop_v(b, sw, sa, sseg)?
+    };
     let v16: B::V<W16> = b.trunc::<W64, W16>(v);
     b.set(sem::sreg_ref(s), v16);
     Ok(())
@@ -5348,7 +5818,8 @@ fn div_fault<B: Backend, W: Width>(
     if mode == 16 {
         let r = b.sub::<W>(hi, dv);
         update_sub_flags::<B, W>(b, hi, dv, r);
-        // 8086/8088 は次命令、286 以降はフォールトした命令の先頭を積む。
+        // 8086/8088 は次命令、286 以降はフォールトした命令の先頭を積む
+        // （`div_fault_ip` パラメータで選択）。
         let flen = if b.param::<crate::DivFaultIpParam>() == crate::DIV_FAULT_IP_AT_INSN {
             0
         } else {
@@ -5402,12 +5873,11 @@ fn div_cord<B: Backend, W: Hw, W2: Width, F: Fn(&mut B, B::V<W>, B::V<W>)>(
     let qb = b.and::<W>(q, top);
     let q_msb = b.cmp::<W>(Cmp::Ne, qb, zero);
     // POSTIDIV 商オーバーフロー（IDIV のみ）。80286 以降は符号付きの
-    // -128 を許容するので、q==0x80 かつ商が負になるケースでは
-    // q_msb をフォールトに数えない（SST 80286 実測）。
-    let q_ovf = if signed && W::BITS == 8 && b.param::<crate::Idiv8Param>() == crate::IDIV8_I286 {
-        let c128 = b.konst::<W>(W::from_u128(0x80));
-        let is128 = b.cmp::<W>(Cmp::Eq, q, c128);
-        let allow = band(b, is128, neg_q);
+    // -2^(W-1) を許容するので、q==top かつ商が負になるケースでは
+    // q_msb をフォールトに数えない（SST 80286/80386 実測）。
+    let q_ovf = if signed && b.param::<crate::Idiv8Param>() == crate::IDIV8_I286 {
+        let is_top = b.cmp::<W>(Cmp::Eq, q, top);
+        let allow = band(b, is_top, neg_q);
         let nallow = bnot(b, allow);
         band(b, q_msb, nallow)
     } else {
@@ -5416,6 +5886,39 @@ fn div_cord<B: Backend, W: Hw, W2: Width, F: Fn(&mut B, B::V<W>, B::V<W>)>(
     let mut fault = ef;
     if signed {
         fault = bor(b, ef, q_ovf);
+    }
+    // 80386: 商が -2^(W-1) を下回る IDIV でも、|被除数| - 2^(2W-2) が
+    // [2^(W-1)·|除数|, (2^(W-1)+1)·|除数|) に収まるときは例外にならず、
+    // 商を -2^(W-1) に飽和させ剰余は |被除数| - 2^(W-1)|除数| を残す
+    // （SST 80386 実測）。80286 では同条件でも #DE になり、8086/80186
+    // では商マグニチュード自体が #DE なので、idiv8=i286 かつ
+    // fault_atomic=atomic のモデル（= i386 系）に限る。
+    let mut q_w = q;
+    let mut r_w = r;
+    if signed
+        && b.param::<crate::Idiv8Param>() == crate::IDIV8_I286
+        && b.param::<crate::FaultAtomicParam>() == crate::FAULT_ATOMIC_ATOMIC
+    {
+        let s = W2::from_u128(1u128 << (W::BITS - 1));
+        let s2 = b.konst::<W2>(W2::from_u128(1u128 << (2 * W::BITS - 2)));
+        let s_w2 = b.konst::<W2>(s);
+        let d2 = b.zext::<W, W2>(d_safe);
+        let ge_s2 = b.cmp::<W2>(Cmp::GeU, dvd, s2);
+        let c = b.sub::<W2>(dvd, s2);
+        let qw = b.udiv::<W2>(c, d2);
+        let is_s = b.cmp::<W2>(Cmp::Eq, qw, s_w2);
+        let ndz = bnot(b, dz);
+        let win0 = band(b, ge_s2, is_s);
+        let win1 = band(b, win0, neg_q);
+        let win = band(b, win1, ndz);
+        let nwin = bnot(b, win);
+        fault = band(b, fault, nwin);
+        let shs = b.konst::<W2>(W2::from_u128(u128::from(W::BITS - 1)));
+        let smd = b.shl::<W2>(d2, shs);
+        let r_sat = b.sub::<W2>(dvd, smd);
+        let r_sat_w = b.trunc::<W2, W>(r_sat);
+        q_w = b.select::<W>(win, top, q);
+        r_w = b.select::<W>(win, r_sat_w, r);
     }
     // CORD ループ。比較の桁供給ビットは元の下位被除数の bit (W-1-i)。
     // fl_a は最後にフラグを書いた比較の被演算値。全反復が top-bit
@@ -5474,10 +5977,10 @@ fn div_cord<B: Backend, W: Hw, W2: Width, F: Fn(&mut B, B::V<W>, B::V<W>)>(
     // フォールトは商・剰余を書かずに割り込み 0 を起こす。
     let nf = bnot(b, fault);
     b.if_then(nf, |b| {
-        let q_neg = b.sub::<W>(zero, q);
-        let r_neg = b.sub::<W>(zero, r);
-        let qs = b.select::<W>(neg_q, q_neg, q);
-        let rs = b.select::<W>(neg_r, r_neg, r);
+        let q_neg = b.sub::<W>(zero, q_w);
+        let r_neg = b.sub::<W>(zero, r_w);
+        let qs = b.select::<W>(neg_q, q_neg, q_w);
+        let rs = b.select::<W>(neg_r, r_neg, r_w);
         wr(b, qs, rs);
         Ok(())
     })?;
@@ -5954,6 +6457,24 @@ pub fn aam<B: Backend>(
     mode: u8,
 ) -> Flow<B> {
     if base == 0 {
+        if mode == 16
+            && b.param::<crate::Idiv8Param>() == crate::IDIV8_I286
+            && b.param::<crate::FaultAtomicParam>() == crate::FAULT_ATOMIC_ATOMIC
+        {
+            // i386 系のみ（上の複合条件は世代プロキシ。div_cord 参照）。
+            // 80386 の AAM 0 は #DE。全ステータスフラグをクリアして
+            // PF=被除数 AL>>1 の偶パリティになる（SST 80386 実測）。
+            let al = sem::read8(b, Gpr(0), false);
+            let one = b.konst::<W8>(1);
+            let sh = b.shr_l::<W8>(al, one);
+            let old: B::V<W32> = b.get(eflags_ref());
+            let clr = b.konst::<W32>(!sem::FLAG_OSZPCA);
+            let f = b.and::<W32>(old, clr);
+            let pf = pf_bit::<B, W8>(b, sh);
+            let f = b.or::<W32>(f, pf);
+            b.set(eflags_ref(), f);
+            return int_real(b, eip, 0, 0, sa, sseg);
+        }
         if b.param::<crate::BcdParam>() == crate::BCD_I286 && mode == 16 {
             // 80286 の AAM 0 は #DE だが、積まれるフラグは全ステータス
             // クリア + PF=被除数 AL の偶パリティになる（SST 80286 実測）。
@@ -6015,15 +6536,21 @@ pub fn salc<B: Backend>(b: &mut B) -> Flow<B> {
 /// LES/LDS（C4/C5）。m16:16 の far ポインタを読み、オフセットを
 /// 汎用レジスタ、セレクタをセグメントレジスタ `s`（ES=0,DS=3）へ書く。
 /// mod=11 は #UD 相当なので何もしない。
-pub fn load_far<B: Backend>(b: &mut B, d: &MapDec, rm: &Rm<B::V<W64>>, s: u8) -> Flow<B> {
-    let Rm::Mem { a, wseg } = rm else {
+pub fn load_far<B: Backend>(b: &mut B, w: u8, d: &MapDec, rm: &Rm<B::V<W64>>, s: u8) -> Flow<B> {
+    let Some((off, seg)) = load_far_ptr(b, w, rm)? else {
         return Ok(());
     };
-    let off: B::V<W16> = decode::mem_load(b, *a, *wseg)?;
-    let two = b.konst::<W64>(2);
-    let a2 = b.add::<W64>(*a, two);
-    let seg: B::V<W16> = decode::mem_load(b, a2, *wseg)?;
-    decode::gwr16(b, decode::reg(d), off);
+    match w {
+        16 => {
+            let off16: B::V<W16> = b.trunc::<W64, W16>(off);
+            decode::gwr16(b, decode::reg(d), off16);
+        }
+        64 => decode::gwr64(b, decode::reg(d), off),
+        _ => {
+            let off32: B::V<W32> = b.trunc::<W64, W32>(off);
+            decode::gwr32(b, decode::reg(d), off32);
+        }
+    }
     b.set(sem::sreg_ref(s), seg);
     Ok(())
 }

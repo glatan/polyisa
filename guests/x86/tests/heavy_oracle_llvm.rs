@@ -527,9 +527,11 @@ const KNOWN: &[(&str, &str, &str)] = &[
     ("0f a7", "missing", "*"), // VIA 拡張（B3）
     ("0f aa", "missing", "*"), // rsm（A4）
     ("0f ae", "missing", "*"), // fxsave 等（C1）
-    ("0f b2", "missing", "*"),
-    ("0f b4", "missing", "*"),
-    ("0f b5", "missing", "*"), // lss/lfs/lgs（A4）
+    // lss/lfs/lgs（D2 で実装）。mod=11 形を受理するのは GAP-0037(a)
+    // と同じく mod 制約の未宣言が原因（strict）。
+    ("0f b2", "spurious", "*"),
+    ("0f b4", "spurious", "*"),
+    ("0f b5", "spurious", "*"),
     // rdrand/rdseed 等（A4）。/1 のメモリ形（cmpxchg8b/16b）は
     // 宣言済みなので、この行が覆うのは /0,/2-/7 と mod=11。
     ("0f c7", "missing", "*"),
@@ -649,11 +651,11 @@ const KNOWN: &[(&str, &str, &str)] = &[
     ("66 0f a7", "missing", "*"),
     ("66 0f aa", "missing", "*"),
     ("66 0f ae", "missing", "*"), // fxsave/clwb/clflushopt/tpause（C1/A4）
-    ("66 0f b2", "missing", "*"),
-    ("66 0f b4", "missing", "*"),
-    ("66 0f b5", "missing", "*"), // lss/lfs/lgs（A4）
-    ("66 0f c3", "missing", "*"), // movnti
-    ("66 0f c7", "missing", "*"), // rdrand/rdseed（A4）
+    ("66 0f b2", "spurious", "*"),
+    ("66 0f b4", "spurious", "*"),
+    ("66 0f b5", "spurious", "*"), // lss/lfs/lgs（D2、strict）
+    ("66 0f c3", "missing", "*"),  // movnti
+    ("66 0f c7", "missing", "*"),  // rdrand/rdseed（A4）
     // SSE2 xmm 形の未宣言（PACK*/PMULH*/PMULUDQ/PMADDWD/PSADBW/
     // CVTTPD2DQ/CVTPI2PD/MOVNTPD/MOVNTDQ 等）。
     ("66 0f 2a", "missing", "*"),
@@ -702,9 +704,9 @@ const KNOWN: &[(&str, &str, &str)] = &[
     ("f2 0f a7", "missing", "*"),
     ("f2 0f aa", "missing", "*"),
     ("f2 0f ae", "missing", "*"), // fxsave/umwait（C1/A4）
-    ("f2 0f b2", "missing", "*"),
-    ("f2 0f b4", "missing", "*"),
-    ("f2 0f b5", "missing", "*"),
+    ("f2 0f b2", "spurious", "*"),
+    ("f2 0f b4", "spurious", "*"),
+    ("f2 0f b5", "spurious", "*"), // lss/lfs/lgs（D2、strict）
     ("f2 0f c3", "missing", "*"),
     ("f2 0f c7", "missing", "*"), // rdrand/rdseed（A4）
     ("f2 0f d6", "missing", "*"), // movdq2q
@@ -738,9 +740,9 @@ const KNOWN: &[(&str, &str, &str)] = &[
     ("f3 0f a7", "missing", "*"),
     ("f3 0f aa", "missing", "*"),
     ("f3 0f ae", "missing", "*"), // rdfsbase/incsspd/umonitor/ptwrite（A4）
-    ("f3 0f b2", "missing", "*"),
-    ("f3 0f b4", "missing", "*"),
-    ("f3 0f b5", "missing", "*"),
+    ("f3 0f b2", "spurious", "*"),
+    ("f3 0f b4", "spurious", "*"),
+    ("f3 0f b5", "spurious", "*"), // lss/lfs/lgs（D2、strict）
     ("f3 0f c3", "missing", "*"),
     ("f3 0f c7", "missing", "*"), // rdrand/rdpid（A4）
     ("f3 0f d6", "missing", "*"), // movq2dq
