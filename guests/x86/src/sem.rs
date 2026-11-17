@@ -7541,6 +7541,11 @@ pub fn xmm_ref(r: Xmm) -> StateRef<W128> {
     StateRef::<W128>::from_offset(core::mem::offset_of!(CpuState, xmm) + (r.0 as usize) * 16)
 }
 
+/// YMM 上位 128 ビットの状態参照（XSAVE の YMMH 成分）。
+pub fn ymm_hi_ref(r: Xmm) -> StateRef<W128> {
+    StateRef::<W128>::from_offset(core::mem::offset_of!(CpuState, ymm_hi) + (r.0 as usize) * 16)
+}
+
 /// MOVD xmm, r/m32。GPR 下位32ビットを XMM 下位に移し、上位96を消す。
 pub fn movd_xmm_gpr32<B: Backend>(b: &mut B, dst: Xmm, src: Gpr) -> Flow<B> {
     let v32 = read(b, src);

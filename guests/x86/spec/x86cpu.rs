@@ -896,6 +896,9 @@ fn apply_gates(m: &mut Model) {
                 let mn = mi.name.split('_').next().unwrap_or("");
                 let mut feats = match exact_gate(&mi.name).or(named_gate(mn)) {
                     Some(f) => f.to_vec(),
+                    // VEX エンコードの既定は AVX。AVX2 以降の
+                    // 項目は exact_gate/named_gate で個別に上書きする。
+                    None if mi.vex.is_some() => vec!["avx"],
                     None => {
                         let mut f = op_features(&mi.ops, mi.pfx);
                         if f == ["sse"] && f3_sse2(mn) {

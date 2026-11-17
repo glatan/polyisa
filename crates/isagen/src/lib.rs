@@ -514,7 +514,7 @@ fn gen_map_decoder(model: &Model) -> Result<String, GenError> {
          #[derive(Clone, Copy)]\n\
          pub enum OpK {\n\
          \x20   Ea(OpW), Reg(OpW), RegS, RegX, RmX, RegM, RmM,\n\
-         \x20   InOp(OpW), Imm(OpW), Imm2(OpW), Rel(OpW), Moffs(OpW), Imp(u8),\n\
+         \x20   InOp(OpW), Imm(OpW), Imm2(OpW), Rel(OpW), Moffs(OpW), Vv, Imp(u8),\n\
          }\n",
     );
 
@@ -567,6 +567,16 @@ fn gen_map_decoder(model: &Model) -> Result<String, GenError> {
          \x20   pub asize: u8,\n\
          \x20   /// デコードに使った実行モード。\n\
          \x20   pub modes: u32,\n\
+         \x20   /// VEX 接頭辞があったか。\n\
+         \x20   pub vex: bool,\n\
+         \x20   /// VEX.mmmmm（表の選択コード）。\n\
+         \x20   pub vex_map: u8,\n\
+         \x20   /// VEX.L（ベクタ長 256 ビット）。\n\
+         \x20   pub vex_l: bool,\n\
+         \x20   /// VEX.vvvv（反転済みのレジスタ番号 0-15）。\n\
+         \x20   pub vex_v: u8,\n\
+         \x20   /// VEX.W（GPR 系の 64 ビット選択子）。\n\
+         \x20   pub vex_w: bool,\n\
          }\n",
     );
 
@@ -840,6 +850,72 @@ fn gen_map_decoder(model: &Model) -> Result<String, GenError> {
          \x20       }\n\
          \x20   }\n",
     );
+    // VEX 接頭辞（2/3 バイト）。VEX.R/X/B は REX と同じ拡張意味を
+    // 持つので `d.rex` に畳み、VEX.pp は `d.p66`/`d.rep` に畳む。
+    // 有効サイズの計算より先に解析して VEX.W を rex bit3 へ反映する。
+    s.push_str(
+        "    {\n\
+         \x20       let b0 = *bytes.get(i)?;\n\
+         \x20       if b0 == 0xC4 || b0 == 0xC5 {\n\
+         \x20           let b2 = *bytes.get(i + 1)?;\n\
+         \x20           // 非64ビットモードでは直後の ModRM.mod==11 のときだけ\n\
+         \x20           // VEX（さもなければ LES/LDS のオペコード）。\n\
+         \x20           if mode_m64(modes) || b2 >> 6 == 3 {\n\
+         \x20               // LOCK+VEX は #UD。\n\
+         \x20               if d.lock {\n\
+         \x20                   return None;\n\
+         \x20               }\n\
+         \x20               // VEX の前のレガシー接頭辞（66/F2/F3）は無視\n\
+         \x20               // される。pp フィールドだけが接頭辞を選ぶ。\n\
+         \x20               d.p66 = false;\n\
+         \x20               d.rep = 0;\n\
+         \x20               if b0 == 0xC5 {\n\
+         \x20                   d.vex = true;\n\
+         \x20                   d.vex_map = 1;\n\
+         \x20                   // レジスタ拡張は 64 ビットモードでのみ有効。\n\
+         \x20                   d.rex = if mode_m64(modes) {\n\
+         \x20                       0x40 | (((b2 >> 7) & 1) ^ 1) << 2\n\
+         \x20                   } else {\n\
+         \x20                       0x40\n\
+         \x20                   };\n\
+         \x20                   d.vex_v = (!b2 >> 3) & 0xF;\n\
+         \x20                   d.vex_l = b2 & 4 != 0;\n\
+         \x20                   match b2 & 3 {\n\
+         \x20                       1 => d.p66 = true,\n\
+         \x20                       2 => d.rep = 0xF3,\n\
+         \x20                       3 => d.rep = 0xF2,\n\
+         \x20                       _ => {}\n\
+         \x20                   }\n\
+         \x20                   i += 2;\n\
+         \x20               } else {\n\
+         \x20                   let b3 = *bytes.get(i + 2)?;\n\
+         \x20                   d.vex = true;\n\
+         \x20                   d.vex_map = b2 & 0x1F;\n\
+         \x20                   d.rex = if mode_m64(modes) {\n\
+         \x20                       0x40\n\
+         \x20                           | (((b2 >> 5) & 7) ^ 7)\n\
+         \x20                           | ((b3 & 0x80) >> 4)\n\
+         \x20                   } else {\n\
+         \x20                       0x40\n\
+         \x20                   };\n\
+         \x20                   d.vex_w = b3 & 0x80 != 0;\n\
+         \x20                   d.vex_v = (!b3 >> 3) & 0xF;\n\
+         \x20                   d.vex_l = b3 & 4 != 0;\n\
+         \x20                   match b3 & 3 {\n\
+         \x20                       1 => d.p66 = true,\n\
+         \x20                       2 => d.rep = 0xF3,\n\
+         \x20                       3 => d.rep = 0xF2,\n\
+         \x20                       _ => {}\n\
+         \x20                   }\n\
+         \x20                   i += 3;\n\
+         \x20               }\n\
+         \x20               if i > 15 {\n\
+         \x20                   return None;\n\
+         \x20               }\n\
+         \x20           }\n\
+         \x20       }\n\
+         \x20   }\n",
+    );
     // 有効サイズ。
     s.push_str(
         "    d.osize = if mode_m64(modes) {\n\
@@ -864,12 +940,28 @@ fn gen_map_decoder(model: &Model) -> Result<String, GenError> {
          \x20       _ => 32,\n\
          \x20   };\n",
     );
-    s.push_str(
-        "    let insn = sel_primary(bytes, &mut i, &mut d, modes, feats)?;\n\
+    // VEX 経路では VEX.mmmmm が指す表へ進む。vex_code を持つ表から
+    // ディスパッチを生成する。
+    let mut vex_arms = String::new();
+    for map in &model.maps {
+        if let Some(code) = map.vex_code {
+            vex_arms.push_str(&format!(
+                "            {code} => sel_{}(bytes, &mut i, &mut d, modes, feats)?,\n",
+                to_snake(&map.name)
+            ));
+        }
+    }
+    s.push_str(&format!(
+        "    let insn = if d.vex {{\n\
+         \x20       match d.vex_map {{\n{vex_arms}            _ => return None,\n\
+         \x20       }}\n\
+         \x20   }} else {{\n\
+         \x20       sel_primary(bytes, &mut i, &mut d, modes, feats)?\n\
+         \x20   }};\n\
          \x20   d.insn = insn;\n\
          \x20   Some(d)\n\
-         }\n",
-    );
+         }}\n",
+    ));
     Ok(s)
 }
 
@@ -894,10 +986,25 @@ fn emit_map_candidate(
         PfxSel::PF3 => "d.rep == 0xF3".to_string(),
     };
     let guard = when_guard_flags(&mi.when, flag_exprs)?;
-    let mut cond = if guard.is_empty() {
-        pfx
+    // VEX 項目は VEX 経路でのみ、レガシー項目は非 VEX 経路でのみ選ぶ。
+    // VEX 項目は更に VEX.L と予約 vvvv を検査する。
+    use polyisa_isadl::model::VexL;
+    let vex = match mi.vex {
+        None => "!d.vex".to_string(),
+        Some(VexL::Any) => "d.vex".to_string(),
+        Some(VexL::L0) => "d.vex && !d.vex_l".to_string(),
+        Some(VexL::L1) => "d.vex && d.vex_l".to_string(),
+    };
+    // `vex_rv` はフィールド 1111b（= 補数を解くとレジスタ 0）を要求。
+    let vex = if mi.vex_rv {
+        format!("{vex} && d.vex_v == 0")
     } else {
-        format!("({pfx}) && ({guard})")
+        vex
+    };
+    let mut cond = if guard.is_empty() {
+        format!("({vex}) && ({pfx})")
+    } else {
+        format!("({vex}) && ({pfx}) && ({guard})")
     };
     // グループ項目の mod 選択（`m` はグループ生成部が定義済み）。
     cond = match mi.group_mod {
@@ -965,6 +1072,7 @@ fn opk_code(op: &polyisa_isadl::model::OpKind) -> String {
         OpKind::Imm2(w) => format!("OpK::Imm2({})", wc(w)),
         OpKind::Rel(w) => format!("OpK::Rel({})", wc(w)),
         OpKind::Moffs(w) => format!("OpK::Moffs({})", wc(w)),
+        OpKind::Vv => "OpK::Vv".to_string(),
         OpKind::Imp(i) => format!("OpK::Imp({})", imp(i)),
     }
 }

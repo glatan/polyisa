@@ -29,11 +29,31 @@ fn mi(
         group,
         group_mod: None,
         group_rm: None,
+        vex: None,
+        vex_rv: false,
         pfx,
         when,
         syntax: syntax.to_string(),
         timing: timing.to_string(),
     }
+}
+
+/// VEX 接頭辞の命令項目。`sel` は VEX.pp に対応する接頭辞選択、
+/// `l` は VEX.L の許容範囲、`rv` が真なら vvvv フィールドが
+/// 未使用（1111b）のときだけ解読する。
+fn vmx(
+    name: &str,
+    ops: &[OpKind],
+    sel: PfxSel,
+    l: VexL,
+    rv: bool,
+    syntax: &str,
+    timing: &str,
+) -> MapInsn {
+    let mut it = mi(name, ops, None, sel, Pred::True, syntax, timing);
+    it.vex = Some(l);
+    it.vex_rv = rv;
+    it
 }
 
 /// グループでも必須接頭辞でもない、無条件の命令項目。
@@ -885,6 +905,7 @@ pub fn build_maps(m: &mut Model) {
 
     m.maps.push(MapDecl {
         name: "primary".to_string(),
+        vex_code: None,
         items: primary,
     });
 
@@ -1638,8 +1659,126 @@ pub fn build_maps(m: &mut Model) {
         MapItem::Map(0x38, "map_0f38".to_string(), Pred::True),
         MapItem::Map(0x3A, "map_0f3a".to_string(), Pred::True),
     ]);
+    // ===== VEX エンコーディング（VEX.0F、AVX の基本形）=====
+    // VEX 経路では同じ表を VEX.mmmmm=1 として再入するので、
+    // このブロックは同じ m0f に並べる。vvvv がオペランドとして
+    // 生きる形は `Vv` を ops に含め、`rv` は vvvv=1111b 必須の
+    // 項目（2 オペランド形）に立てる。
+    use VexL::*;
+    // VZEROUPPER（L0）/VZEROALL（L1）。
+    m0f.push(MapItem::Insn(
+        0x77,
+        vmx("vzeroupper", &[], PfxSel::Plain, L0, true, "vzeroupper", "alu"),
+    ));
+    m0f.push(MapItem::Insn(
+        0x77,
+        vmx("vzeroall", &[], PfxSel::Plain, L1, true, "vzeroall", "alu"),
+    ));
+    // データ移動のロード（10）/ストア（11）。整列なし形のみ
+    // （VMOVAPS/VMOVAPD は B1b）。vvvv は未使用。
+    for (sel, mn) in [(PfxSel::Plain, "vmovups"), (PfxSel::P66, "vmovupd")] {
+        m0f.push(MapItem::Insn(
+            0x10,
+            vmx(&format!("{mn}_xv_wv"), &[RegX, RmX], sel, Any, true, "{op} {x}, {w}", "load"),
+        ));
+        m0f.push(MapItem::Insn(
+            0x11,
+            vmx(&format!("{mn}_wv_xv"), &[RmX, RegX], sel, Any, true, "{op} {w}, {x}", "store"),
+        ));
+    }
+    // VMOVDQA/VMOVDQU（66/F3 の 6F/7F）。vvvv は未使用。
+    for (sel, mn) in [(PfxSel::P66, "vmovdqa"), (PfxSel::PF3, "vmovdqu")] {
+        m0f.push(MapItem::Insn(
+            0x6F,
+            vmx(&format!("{mn}_xv_wv"), &[RegX, RmX], sel, Any, true, "{op} {x}, {w}", "load"),
+        ));
+        m0f.push(MapItem::Insn(
+            0x7F,
+            vmx(&format!("{mn}_wv_xv"), &[RmX, RegX], sel, Any, true, "{op} {w}, {x}", "store"),
+        ));
+    }
+    // VMOVSS/VMOVSD（F3/F2 の 10/11、L0 のみ）。レジスタ形は
+    // vvvv が第 2 ソースになる 3 オペランド形。メモリ形で
+    // vvvv が 1111b 以外のときの #UD はモデル化しない。
+    for (sel, mn) in [(PfxSel::PF3, "vmovss"), (PfxSel::PF2, "vmovsd")] {
+        m0f.push(MapItem::Insn(
+            0x10,
+            vmx(&format!("{mn}_xv_hv_wv"), &[RegX, Vv, RmX], sel, L0, false, "{op} {x}, {h}, {w}", "load"),
+        ));
+        m0f.push(MapItem::Insn(
+            0x11,
+            vmx(&format!("{mn}_wv_hv_xv"), &[RmX, Vv, RegX], sel, L0, false, "{op} {w}, {h}, {x}", "store"),
+        ));
+    }
+    // パック・スカラ浮動小数点演算（58-5F と 51 の SQRT）。
+    // パック形は 128/256、スカラ形は L0。VSQRT のパック形は
+    // 2 オペランドなので vvvv=1111b を要求する。
+    for (b, mn) in [
+        (0x51u8, "vsqrt"),
+        (0x58, "vadd"),
+        (0x59, "vmul"),
+        (0x5C, "vsub"),
+        (0x5D, "vmin"),
+        (0x5E, "vdiv"),
+        (0x5F, "vmax"),
+    ] {
+        let pk = b == 0x51;
+        // SQRT のパック形だけ 2 オペランド（vvvv=1111b 必須）。
+        let (suf, ops): (&str, &[OpKind]) = if pk {
+            ("ps_xv_wv", &[RegX, RmX])
+        } else {
+            ("ps_xv_hv_wv", &[RegX, Vv, RmX])
+        };
+        let ps = format!("{mn}{suf}");
+        let syn = if pk { "{op} {x}, {w}" } else { "{op} {x}, {h}, {w}" };
+        m0f.push(MapItem::Insn(
+            b,
+            vmx(&ps, ops, PfxSel::Plain, Any, pk, syn, "alu"),
+        ));
+        let (suf, ops): (&str, &[OpKind]) = if pk {
+            ("pd_xv_wv", &[RegX, RmX])
+        } else {
+            ("pd_xv_hv_wv", &[RegX, Vv, RmX])
+        };
+        let pd = format!("{mn}{suf}");
+        m0f.push(MapItem::Insn(
+            b,
+            vmx(&pd, ops, PfxSel::P66, Any, pk, syn, "alu"),
+        ));
+        m0f.push(MapItem::Insn(
+            b,
+            vmx(&format!("{mn}ss_xv_hv_wv"), &[RegX, Vv, RmX], PfxSel::PF3, L0, false, "{op} {x}, {h}, {w}", "alu"),
+        ));
+        m0f.push(MapItem::Insn(
+            b,
+            vmx(&format!("{mn}sd_xv_hv_wv"), &[RegX, Vv, RmX], PfxSel::PF2, L0, false, "{op} {x}, {h}, {w}", "alu"),
+        ));
+    }
+    // パック論理（54-57 の浮動小数点形と DB/DF/EB/EF の整数形）。
+    // 整数形は 256 ビットが AVX2 なので L0 に留める（B1b）。
+    for (b, sel, mn) in [
+        (0x54u8, PfxSel::Plain, "vandps"),
+        (0x54, PfxSel::P66, "vandpd"),
+        (0x55, PfxSel::Plain, "vandnps"),
+        (0x55, PfxSel::P66, "vandnpd"),
+        (0x56, PfxSel::Plain, "vorps"),
+        (0x56, PfxSel::P66, "vorpd"),
+        (0x57, PfxSel::Plain, "vxorps"),
+        (0x57, PfxSel::P66, "vxorpd"),
+        (0xDB, PfxSel::P66, "vpand"),
+        (0xDF, PfxSel::P66, "vpandn"),
+        (0xEB, PfxSel::P66, "vpor"),
+        (0xEF, PfxSel::P66, "vpxor"),
+    ] {
+        let l = if b >= 0xDB { L0 } else { Any };
+        m0f.push(MapItem::Insn(
+            b,
+            vmx(&format!("{mn}_xv_hv_wv"), &[RegX, Vv, RmX], sel, l, false, "{op} {x}, {h}, {w}", "alu"),
+        ));
+    }
     m.maps.push(MapDecl {
         name: "map_0f".to_string(),
+        vex_code: Some(1),
         items: m0f,
     });
     build_map_0f38(m);
@@ -1868,6 +2007,7 @@ fn build_map_0f38(m: &mut Model) {
     }
     m.maps.push(MapDecl {
         name: "map_0f38".to_string(),
+        vex_code: Some(2),
         items: v,
     });
 }
@@ -1922,6 +2062,7 @@ fn build_map_0f3a(m: &mut Model) {
     ];
     m.maps.push(MapDecl {
         name: "map_0f3a".to_string(),
+        vex_code: Some(3),
         items,
     });
 }

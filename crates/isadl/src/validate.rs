@@ -167,6 +167,14 @@ pub fn validate(model: &Model) -> Report {
                         field: format!("{}: group_rm は 0-7", mi.name),
                     });
                 }
+                // `OpKind::Vv`（VEX.vvvv）と `vex_rv` は VEX 項目にだけ
+                // 意味を持つ。
+                if mi.vex.is_none() && (mi.vex_rv || mi.ops.contains(&crate::model::OpKind::Vv)) {
+                    errors.push(ValidationError::BadField {
+                        format: "map-insn".to_string(),
+                        field: format!("{}: Vv/vex_rv には vex が要る", mi.name),
+                    });
+                }
                 if mi.group_rm.is_some() && mi.group_mod != Some(true) {
                     errors.push(ValidationError::BadField {
                         format: "map-insn".to_string(),
@@ -401,7 +409,16 @@ fn validate_maps(model: &Model, timing: &BTreeSet<&str>, errors: &mut Vec<Valida
             conflicts.push((f.name.clone(), c.clone()));
         }
     }
+    let mut vex_codes: std::collections::BTreeMap<u8, &str> = std::collections::BTreeMap::new();
     for map in &model.maps {
+        if let Some(v) = map.vex_code
+            && let Some(first) = vex_codes.insert(v, map.name.as_str())
+        {
+            errors.push(ValidationError::Unresolved {
+                kind: "map".to_string(),
+                name: format!("{}: vex_code {} は {} と重複", map.name, v, first),
+            });
+        }
         for item in &map.items {
             match item {
                 MapItem::Map(byte, name, _) => {
@@ -413,6 +430,14 @@ fn validate_maps(model: &Model, timing: &BTreeSet<&str>, errors: &mut Vec<Valida
                     }
                 }
                 MapItem::Insn(_, mi) => {
+                    // VEX 項目は `vex_code` のある表にだけ置ける
+                    // （無い表からは VEX 経路で到達しない）。
+                    if mi.vex.is_some() && map.vex_code.is_none() {
+                        errors.push(ValidationError::BadField {
+                            format: "map-insn".to_string(),
+                            field: format!("{}: vex には表の vex_code が要る", mi.name),
+                        });
+                    }
                     if let Some(g) = mi.group
                         && g > 7
                     {
@@ -489,6 +514,23 @@ fn validate_maps(model: &Model, timing: &BTreeSet<&str>, errors: &mut Vec<Valida
         for (i, (ba, a)) in insns.iter().enumerate() {
             for (bb, b) in insns.iter().skip(i + 1) {
                 if ba != bb || a.group != b.group || pfx_disjoint(a.pfx, b.pfx) {
+                    continue;
+                }
+                // VEX 項目とレガシー項目は別エンコーディング経路なので
+                // 同じ表の同じスロットを置いても衝突しない。
+                if a.vex.is_some() != b.vex.is_some() {
+                    continue;
+                }
+                // VEX 項目同士は VEX.L の許容範囲が排他なら衝突しない。
+                if let (Some(x), Some(y)) = (a.vex, b.vex)
+                    && !matches!(
+                        (x, y),
+                        (crate::model::VexL::Any, _)
+                            | (_, crate::model::VexL::Any)
+                            | (crate::model::VexL::L0, crate::model::VexL::L0)
+                            | (crate::model::VexL::L1, crate::model::VexL::L1)
+                    )
+                {
                     continue;
                 }
                 // `group_mod` が mod で排他なら同じ modrm を選ばない。

@@ -224,6 +224,9 @@ pub enum OpKind {
     Rel(OpWidth),
     /// moffs（Ob/Ov）。幅は有効アドレスサイズ。
     Moffs(OpWidth),
+    /// VEX.vvvv の 3 番目オペランド（H 系）。接頭辞フィールドなので
+    /// バイトは消費しない。
+    Vv,
     /// 暗黙オペランド。
     Imp(ImpOp),
 }
@@ -289,6 +292,17 @@ pub enum PfxSel {
     PF3,
 }
 
+/// VEX.L の許容範囲。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum VexL {
+    /// L=0/1 の両方（128/256 ビットの両形）。
+    Any,
+    /// L=0（128 ビット形）のみ。
+    L0,
+    /// L=1（256 ビット形）のみ。
+    L1,
+}
+
 /// `map` の中で宣言する命令。
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct MapInsn {
@@ -309,7 +323,13 @@ pub struct MapInsn {
     /// C7 /7 の XBEGIN（rm=0 固定）のように、同じグループ番号で
     /// r/m に応じて命令が分かれるときに使う。
     pub group_rm: Option<u8>,
-    /// 必須接頭辞の状態。
+    /// VEX 接頭辞の要求。None はレガシーエンコーディングのみ
+    /// （VEX 経路では選ばれない）。`Some` は VEX が必須で、
+    /// 値は VEX.L の許容範囲を表す。
+    pub vex: Option<VexL>,
+    /// VEX.vvvv が未使用（1111b 固定）か。`vex` が Some のときのみ意味を持つ。
+    pub vex_rv: bool,
+    /// 必須接頭辞の状態。VEX 項目では VEX.pp に対応する。
     pub pfx: PfxSel,
     pub when: Pred,
     pub syntax: String,
@@ -331,6 +351,9 @@ pub enum MapItem {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct MapDecl {
     pub name: String,
+    /// VEX.mmmmm がこの表を選ぶときの値（1=0F, 2=0F38, 3=0F3A）。
+    /// None の表は VEX 経路から到達しない。
+    pub vex_code: Option<u8>,
     pub items: Vec<MapItem>,
 }
 

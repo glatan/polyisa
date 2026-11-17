@@ -3832,6 +3832,59 @@ fn dispatch_map<B: Backend>(
         Insn::MaxpdXvWv => sem_ea::pfloat(b, sem_ea::Fop::Max, 64, d, &ea),
         Insn::MaxssXvWv => sem_ea::sfloat(b, sem_ea::Fop::Max, 32, d, &ea),
         Insn::MaxsdXvWv => sem_ea::sfloat(b, sem_ea::Fop::Max, 64, d, &ea),
+        // ===== VEX エンコード（AVX 基本形）=====
+        Insn::Vzeroupper => sem_ea::vzero(b, false),
+        Insn::Vzeroall => sem_ea::vzero(b, true),
+        Insn::VmovupsXvWv | Insn::VmovupdXvWv | Insn::VmovdqaXvWv | Insn::VmovdquXvWv => {
+            sem_ea::vmov_x_w(b, d, &ea)
+        }
+        Insn::VmovupsWvXv | Insn::VmovupdWvXv | Insn::VmovdqaWvXv | Insn::VmovdquWvXv => {
+            sem_ea::vmov_w_x(b, d, &ea)
+        }
+        Insn::VmovssXvHvWv => sem_ea::vmovs_ld(b, d, &ea, 32),
+        Insn::VmovsdXvHvWv => sem_ea::vmovs_ld(b, d, &ea, 64),
+        Insn::VmovssWvHvXv => sem_ea::vmovs_st(b, d, &ea, 32),
+        Insn::VmovsdWvHvXv => sem_ea::vmovs_st(b, d, &ea, 64),
+        Insn::VsqrtpsXvWv => sem_ea::vpfloat(b, sem_ea::Fop::Sqrt, 32, d, &ea),
+        Insn::VsqrtpdXvWv => sem_ea::vpfloat(b, sem_ea::Fop::Sqrt, 64, d, &ea),
+        Insn::VsqrtssXvHvWv => sem_ea::vsfloat(b, sem_ea::Fop::Sqrt, 32, d, &ea),
+        Insn::VsqrtsdXvHvWv => sem_ea::vsfloat(b, sem_ea::Fop::Sqrt, 64, d, &ea),
+        Insn::VaddpsXvHvWv => sem_ea::vpfloat(b, sem_ea::Fop::Add, 32, d, &ea),
+        Insn::VaddpdXvHvWv => sem_ea::vpfloat(b, sem_ea::Fop::Add, 64, d, &ea),
+        Insn::VaddssXvHvWv => sem_ea::vsfloat(b, sem_ea::Fop::Add, 32, d, &ea),
+        Insn::VaddsdXvHvWv => sem_ea::vsfloat(b, sem_ea::Fop::Add, 64, d, &ea),
+        Insn::VmulpsXvHvWv => sem_ea::vpfloat(b, sem_ea::Fop::Mul, 32, d, &ea),
+        Insn::VmulpdXvHvWv => sem_ea::vpfloat(b, sem_ea::Fop::Mul, 64, d, &ea),
+        Insn::VmulssXvHvWv => sem_ea::vsfloat(b, sem_ea::Fop::Mul, 32, d, &ea),
+        Insn::VmulsdXvHvWv => sem_ea::vsfloat(b, sem_ea::Fop::Mul, 64, d, &ea),
+        Insn::VsubpsXvHvWv => sem_ea::vpfloat(b, sem_ea::Fop::Sub, 32, d, &ea),
+        Insn::VsubpdXvHvWv => sem_ea::vpfloat(b, sem_ea::Fop::Sub, 64, d, &ea),
+        Insn::VsubssXvHvWv => sem_ea::vsfloat(b, sem_ea::Fop::Sub, 32, d, &ea),
+        Insn::VsubsdXvHvWv => sem_ea::vsfloat(b, sem_ea::Fop::Sub, 64, d, &ea),
+        Insn::VminpsXvHvWv => sem_ea::vpfloat(b, sem_ea::Fop::Min, 32, d, &ea),
+        Insn::VminpdXvHvWv => sem_ea::vpfloat(b, sem_ea::Fop::Min, 64, d, &ea),
+        Insn::VminssXvHvWv => sem_ea::vsfloat(b, sem_ea::Fop::Min, 32, d, &ea),
+        Insn::VminsdXvHvWv => sem_ea::vsfloat(b, sem_ea::Fop::Min, 64, d, &ea),
+        Insn::VdivpsXvHvWv => sem_ea::vpfloat(b, sem_ea::Fop::Div, 32, d, &ea),
+        Insn::VdivpdXvHvWv => sem_ea::vpfloat(b, sem_ea::Fop::Div, 64, d, &ea),
+        Insn::VdivssXvHvWv => sem_ea::vsfloat(b, sem_ea::Fop::Div, 32, d, &ea),
+        Insn::VdivsdXvHvWv => sem_ea::vsfloat(b, sem_ea::Fop::Div, 64, d, &ea),
+        Insn::VmaxpsXvHvWv => sem_ea::vpfloat(b, sem_ea::Fop::Max, 32, d, &ea),
+        Insn::VmaxpdXvHvWv => sem_ea::vpfloat(b, sem_ea::Fop::Max, 64, d, &ea),
+        Insn::VmaxssXvHvWv => sem_ea::vsfloat(b, sem_ea::Fop::Max, 32, d, &ea),
+        Insn::VmaxsdXvHvWv => sem_ea::vsfloat(b, sem_ea::Fop::Max, 64, d, &ea),
+        Insn::VandpsXvHvWv | Insn::VandpdXvHvWv | Insn::VpandXvHvWv => {
+            sem_ea::vlogic(b, sem_ea::Lop::And, d, &ea)
+        }
+        Insn::VandnpsXvHvWv | Insn::VandnpdXvHvWv | Insn::VpandnXvHvWv => {
+            sem_ea::vlogic(b, sem_ea::Lop::Andn, d, &ea)
+        }
+        Insn::VorpsXvHvWv | Insn::VorpdXvHvWv | Insn::VporXvHvWv => {
+            sem_ea::vlogic(b, sem_ea::Lop::Or, d, &ea)
+        }
+        Insn::VxorpsXvHvWv | Insn::VxorpdXvHvWv | Insn::VpxorXvHvWv => {
+            sem_ea::vlogic(b, sem_ea::Lop::Xor, d, &ea)
+        }
         // パック整数。
         Insn::PcmpeqbXvWv => sem_ea::pint::<B, W8>(b, sem_ea::Iop::CmpEq, d, &ea),
         Insn::PcmpeqwXvWv => sem_ea::pint::<B, W16>(b, sem_ea::Iop::CmpEq, d, &ea),
@@ -13160,11 +13213,11 @@ fn run_image_x86_32_impl(
     // x87 制御ワードの初期値（丸め最近接の 0x037F）。FNSTCW/FLDCW で使う.
     env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037F);
     env.backend.set(polyisa_guest_x86::sem::mxcsr_ref(), 0x1F80);
-    // OSXSAVE=1 を報告するので XCR0 は OS が x87+SSE を有効化した
-    // 後の 3 で始める（実機のリセット値は 1）。
-    env.backend.set(polyisa_guest_x86::sem::xcr0_ref(), 3);
-    // XCOMP の対応・許可マスク。静的成分は起動時点で全て許可済み。
+    // OSXSAVE=1 を報告するので XCR0 は OS が対応成分を有効化した
+    // 後の値で始める（実機のリセット値は 1。AVX モデルでは 7）。
     let supp = polyisa_guest_x86::cpuid::xcomp_supp(features);
+    env.backend
+        .set(polyisa_guest_x86::sem::xcr0_ref(), supp & 0xFFFF);
     env.backend
         .set(polyisa_guest_x86::sem::xcomp_supp_ref(), supp);
     env.backend
@@ -13348,11 +13401,11 @@ fn run_image_x86_64_impl(
     // x87 制御ワードの初期値（丸め最近接の 0x037F）。FNSTCW/FLDCW で使う.
     env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037F);
     env.backend.set(polyisa_guest_x86::sem::mxcsr_ref(), 0x1F80);
-    // OSXSAVE=1 を報告するので XCR0 は OS が x87+SSE を有効化した
-    // 後の 3 で始める（実機のリセット値は 1）。
-    env.backend.set(polyisa_guest_x86::sem::xcr0_ref(), 3);
-    // XCOMP の対応・許可マスク。静的成分は起動時点で全て許可済み。
+    // OSXSAVE=1 を報告するので XCR0 は OS が対応成分を有効化した
+    // 後の値で始める（実機のリセット値は 1。AVX モデルでは 7）。
     let supp = polyisa_guest_x86::cpuid::xcomp_supp(features);
+    env.backend
+        .set(polyisa_guest_x86::sem::xcr0_ref(), supp & 0xFFFF);
     env.backend
         .set(polyisa_guest_x86::sem::xcomp_supp_ref(), supp);
     env.backend

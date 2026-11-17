@@ -15,13 +15,14 @@ use crate::IDENT_BITS;
 
 /// CPUID が報告する (リーフ, サブリーフ) の一覧。
 /// `CpuState.cpuid` の添え字順。ベーシックは 0・1・7.0・0xD.0・
-/// 0xD.1、拡張は 0x8000_0000・0x8000_0001・0x8000_0008。
-pub const LEAF_IDS: [(u32, u32); 8] = [
+/// 0xD.1・0xD.2、拡張は 0x8000_0000・0x8000_0001・0x8000_0008。
+pub const LEAF_IDS: [(u32, u32); 9] = [
     (0, 0),
     (1, 0),
     (7, 0),
     (0xD, 0),
     (0xD, 1),
+    (0xD, 2),
     (0x8000_0000, 0),
     (0x8000_0001, 0),
     (0x8000_0008, 0),
@@ -63,7 +64,7 @@ fn num(ident: &BTreeMap<String, String>, key: &str, default: u32) -> u32 {
 /// ベンダと版を使う。最大リーフ番号は ident の `cpuid.max_basic`/
 /// `cpuid.max_ext` で上書きでき、既定は 7 と 0x8000_0008。
 #[must_use]
-pub fn derive(features: &BTreeSet<String>, ident: &BTreeMap<String, String>) -> [[u32; 4]; 8] {
+pub fn derive(features: &BTreeSet<String>, ident: &BTreeMap<String, String>) -> [[u32; 4]; 9] {
     // IDENT_BITS をリーフ・レジスタごとに畳む。
     let mut leaf_regs: BTreeMap<(u32, u32, &str), u32> = BTreeMap::new();
     for (f, leaf, subleaf, reg, bit) in IDENT_BITS {
@@ -117,10 +118,15 @@ pub fn derive(features: &BTreeSet<String>, ident: &BTreeMap<String, String>) -> 
         ],
         // leaf D サブリーフ 0: XCR0 対応成分（`xcomp_supp` と同じ
         // マスク）、現在有効サイズ・最大サイズ。成分の保存実装は
-        // x87/SSE だけなのでサイズは 512+64=576 のまま（近似。
+        // x87/SSE/AVX の上位 512+64+256=832 バイトまで（近似。
         // 実機は AMX 成分ぶん大きい値と leaf D.17/D.18 を報告する）。
         if features.contains("xsave") {
-            [xcomp_supp(features) as u32, 0x240, 0x240, 0]
+            let sz = if features.contains("avx") {
+                0x340
+            } else {
+                0x240
+            };
+            [xcomp_supp(features) as u32, sz, sz, 0]
         } else {
             [0; 4]
         },
@@ -129,6 +135,14 @@ pub fn derive(features: &BTreeSet<String>, ident: &BTreeMap<String, String>) -> 
         // XSAVES 領域サイズで 0。
         if features.contains("xsaveopt") {
             [1, 0, 0, 0]
+        } else {
+            [0; 4]
+        },
+        // leaf D サブリーフ 2: YMMH 成分のサイズとオフセット
+        // （XSAVE レイアウトの +576、16 エントリ×16 バイト）。
+        // D.0 の EAX に bit2 を立てるモデルだけ報告する。
+        if features.contains("avx") {
+            [0x100, 0x240, 0, 0]
         } else {
             [0; 4]
         },
@@ -168,6 +182,9 @@ pub fn derive(features: &BTreeSet<String>, ident: &BTreeMap<String, String>) -> 
 #[must_use]
 pub fn xcomp_supp(features: &BTreeSet<String>) -> u64 {
     let mut m = 0x3u64;
+    if features.contains("avx") {
+        m |= 0x4;
+    }
     if features.contains("amx_tile") {
         m |= 0x6_0000;
     }

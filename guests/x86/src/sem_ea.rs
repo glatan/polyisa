@@ -3338,7 +3338,15 @@ pub fn logic128<B: Backend>(
     let dst = reg_x(d);
     let a: B::V<W128> = b.get(sem::xmm_ref(dst));
     let c = rx(b, ea, 128)?;
-    let v = match op {
+    let v = lop_lane(b, op, a, c);
+    b.set(sem::xmm_ref(dst), v);
+    Ok(())
+}
+
+/// 128 ビットレーンの論理演算（レガシー形の `logic128` と
+/// VEX 形の `vlogic` が共有する要素演算）。
+fn lop_lane<B: Backend>(b: &mut B, op: Lop, a: B::V<W128>, c: B::V<W128>) -> B::V<W128> {
+    match op {
         Lop::And => b.and::<W128>(a, c),
         Lop::Andn => {
             let na = b.not::<W128>(a);
@@ -3346,8 +3354,215 @@ pub fn logic128<B: Backend>(
         }
         Lop::Or => b.or::<W128>(a, c),
         Lop::Xor => b.xor::<W128>(a, c),
-    };
+    }
+}
+
+/// VEX.vvvv が指す XMM。
+fn vvv_x(d: &MapDec) -> Xmm {
+    Xmm(d.vex_v)
+}
+
+/// `ea` が指す YMM の上位 128 ビットを読む。レジスタ直接は
+/// `ymm_hi`、メモリは `a + 16` からの 128 ビットロード。
+fn rx_hi<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>) -> Result<B::V<W128>, B::Exit> {
+    match ea {
+        Rm::Reg(g) => Ok(b.get(sem::ymm_hi_ref(Xmm(g.0)))),
+        Rm::Mem { a, .. } => {
+            let a16 = madd(b, *a, 16);
+            b.load::<W128>(a16, sem::DATA_READ)
+        }
+    }
+}
+
+/// `ea` が指す YMM の上位 128 ビットへ書く。
+fn wx_hi<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>, v: B::V<W128>) -> Result<(), B::Exit> {
+    match ea {
+        Rm::Reg(g) => {
+            b.set(sem::ymm_hi_ref(Xmm(g.0)), v);
+            Ok(())
+        }
+        Rm::Mem { a, .. } => {
+            let a16 = madd(b, *a, 16);
+            b.store::<W128>(a16, v, sem::DATA_WRITE)
+        }
+    }
+}
+
+/// VEX の 128/256 ビット移動ロード（VMOVUPS/VMOVUPD/VMOVDQA/
+/// VMOVDQU）。VEX.128 形は YMM 上位をゼロクリアする
+/// （VEX 命令共通の不動点規則）。
+pub fn vmov_x_w<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit> {
+    let dst = reg_x(d);
+    let v = rx(b, ea, 128)?;
     b.set(sem::xmm_ref(dst), v);
+    let hi = if d.vex_l {
+        rx_hi(b, ea)?
+    } else {
+        b.konst::<W128>(0)
+    };
+    b.set(sem::ymm_hi_ref(dst), hi);
+    Ok(())
+}
+
+/// VEX の 128/256 ビット移動ストア。
+pub fn vmov_w_x<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit> {
+    let v: B::V<W128> = b.get(sem::xmm_ref(reg_x(d)));
+    wx(b, ea, 128, v)?;
+    if d.vex_l {
+        let hi: B::V<W128> = b.get(sem::ymm_hi_ref(reg_x(d)));
+        wx_hi(b, ea, hi)?;
+    }
+    Ok(())
+}
+
+/// VMOVSS/VMOVSD の読み込み。メモリ形は下位 `fbits` のみ読んで
+/// 残りはゼロ。レジスタ形は下位 `fbits` を第 2 ソース（r/m）から、
+/// 128 ビット内の残りを第 1 ソース（vvvv）から合成する。
+/// YMM 上位は常にゼロクリア。
+pub fn vmovs_ld<B: Backend>(
+    b: &mut B,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+    fbits: u32,
+) -> Result<(), B::Exit> {
+    let dst = reg_x(d);
+    // レジスタ形もメモリ形も、下位 `fbits` に r/m ソースを置き、
+    // 128 ビット内の残りは src1（vvvv）とマージする。
+    // メモリ形の上位マージはレガシーの MOVSS/MOVSD（0 クリア）と違う
+    // VEX 固有の動作。
+    let s1: B::V<W128> = b.get(sem::xmm_ref(vvv_x(d)));
+    let s2 = if d.modrm >= 0xC0 {
+        rx(b, ea, 128)?
+    } else {
+        rx(b, ea, fbits)?
+    };
+    let v = put_lane128(b, s1, s2, 0, fbits);
+    b.set(sem::xmm_ref(dst), v);
+    let z = b.konst::<W128>(0);
+    b.set(sem::ymm_hi_ref(dst), z);
+    Ok(())
+}
+
+/// VMOVSS/VMOVSD の書き込み。メモリ形は下位 `fbits` のみ書く。
+/// レジスタ形は r/m のレジスタが第 3 オペランドで、下位を
+/// 第 2 ソース（reg）、残りを第 1 ソース（vvvv）から合成する。
+pub fn vmovs_st<B: Backend>(
+    b: &mut B,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+    fbits: u32,
+) -> Result<(), B::Exit> {
+    let s2: B::V<W128> = b.get(sem::xmm_ref(reg_x(d)));
+    if d.modrm >= 0xC0 {
+        let dst = rm_x(d);
+        let s1: B::V<W128> = b.get(sem::xmm_ref(vvv_x(d)));
+        let v = put_lane128(b, s1, s2, 0, fbits);
+        b.set(sem::xmm_ref(dst), v);
+        let z = b.konst::<W128>(0);
+        b.set(sem::ymm_hi_ref(dst), z);
+        Ok(())
+    } else {
+        wx(b, ea, fbits, s2)
+    }
+}
+
+/// VEX のスカラ浮動小数点（VADDSS 等）。下位 `fbits` を
+/// src1(vvvv) と src2(r/m) で演算し、128 ビット内の残りは
+/// src1 からコピー。YMM 上位はゼロクリア。
+pub fn vsfloat<B: Backend>(
+    b: &mut B,
+    op: Fop,
+    fbits: u32,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    let dst = reg_x(d);
+    let s1: B::V<W128> = b.get(sem::xmm_ref(vvv_x(d)));
+    let s2 = rx(b, ea, fbits)?;
+    let res = if fbits == 64 {
+        let a64: B::V<W64> = b.trunc::<W128, W64>(s1);
+        let c64: B::V<W64> = b.trunc::<W128, W64>(s2);
+        let af = b.trunc::<W64, polyisa_sem::F64>(a64);
+        let cf = b.trunc::<W64, polyisa_sem::F64>(c64);
+        let v = fop64(b, op, af, cf);
+        let v64 = b.trunc::<polyisa_sem::F64, W64>(v);
+        b.zext::<W64, W128>(v64)
+    } else {
+        let a32: B::V<W32> = b.trunc::<W128, W32>(s1);
+        let c32: B::V<W32> = b.trunc::<W128, W32>(s2);
+        let af = b.trunc::<W32, polyisa_sem::F32>(a32);
+        let cf = b.trunc::<W32, polyisa_sem::F32>(c32);
+        let v = fop32(b, op, af, cf);
+        let v32 = b.trunc::<polyisa_sem::F32, W32>(v);
+        b.zext::<W32, W128>(v32)
+    };
+    let out = put_lane128(b, s1, res, 0, fbits);
+    b.set(sem::xmm_ref(dst), out);
+    let z = b.konst::<W128>(0);
+    b.set(sem::ymm_hi_ref(dst), z);
+    Ok(())
+}
+
+/// VEX のパック浮動小数点。レーンごとに src1(vvvv) と src2(r/m)
+/// を演算する。VEX.256 形は上位 128 ビットにも同じ演算を適用し、
+/// VEX.128 形は上位をゼロクリアする。
+pub fn vpfloat<B: Backend>(
+    b: &mut B,
+    op: Fop,
+    fbits: u32,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    let dst = reg_x(d);
+    let s1: B::V<W128> = b.get(sem::xmm_ref(vvv_x(d)));
+    let s2 = rx(b, ea, 128)?;
+    let lo = pfloat_lane(b, op, fbits, s1, s2);
+    b.set(sem::xmm_ref(dst), lo);
+    let hi = if d.vex_l {
+        let h1: B::V<W128> = b.get(sem::ymm_hi_ref(vvv_x(d)));
+        let h2 = rx_hi(b, ea)?;
+        pfloat_lane(b, op, fbits, h1, h2)
+    } else {
+        b.konst::<W128>(0)
+    };
+    b.set(sem::ymm_hi_ref(dst), hi);
+    Ok(())
+}
+
+/// VEX のパック論理（VANDPS/VPXOR 等）。`vpfloat` と同じ
+/// 128/256 のレーン構造。
+pub fn vlogic<B: Backend>(
+    b: &mut B,
+    op: Lop,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    let dst = reg_x(d);
+    let s1: B::V<W128> = b.get(sem::xmm_ref(vvv_x(d)));
+    let s2 = rx(b, ea, 128)?;
+    let lo = lop_lane(b, op, s1, s2);
+    b.set(sem::xmm_ref(dst), lo);
+    let hi = if d.vex_l {
+        let h1: B::V<W128> = b.get(sem::ymm_hi_ref(vvv_x(d)));
+        let h2 = rx_hi(b, ea)?;
+        lop_lane(b, op, h1, h2)
+    } else {
+        b.konst::<W128>(0)
+    };
+    b.set(sem::ymm_hi_ref(dst), hi);
+    Ok(())
+}
+
+/// VZEROUPPER（`all=false`、YMM 上位だけを消す）と
+/// VZEROALL（`all=true`、XMM 全体も消す）。
+pub fn vzero<B: Backend>(b: &mut B, all: bool) -> Result<(), B::Exit> {
+    let z = b.konst::<W128>(0);
+    for i in 0..16u8 {
+        b.set(sem::ymm_hi_ref(Xmm(i)), z);
+        if all {
+            b.set(sem::xmm_ref(Xmm(i)), z);
+        }
+    }
     Ok(())
 }
 
@@ -3378,7 +3593,9 @@ fn fop64<B: Backend>(
         Fop::Div => b.fdiv::<F64>(a, c),
         Fop::Min => b.fmin::<F64>(a, c),
         Fop::Max => b.fmax::<F64>(a, c),
-        Fop::Sqrt => b.fsqrt::<F64>(a),
+        // SQRT 系は 2 オペランド（dst = sqrt(src)）なので
+        // src1（`a`）ではなく r/m 側の `c` を取る。
+        Fop::Sqrt => b.fsqrt::<F64>(c),
         Fop::Cmp(_) => a,
     }
 }
@@ -3397,7 +3614,7 @@ fn fop32<B: Backend>(
         Fop::Div => b.fdiv::<F32>(a, c),
         Fop::Min => b.fmin::<F32>(a, c),
         Fop::Max => b.fmax::<F32>(a, c),
-        Fop::Sqrt => b.fsqrt::<F32>(a),
+        Fop::Sqrt => b.fsqrt::<F32>(c),
         Fop::Cmp(_) => a,
     }
 }
@@ -3447,6 +3664,20 @@ pub fn pfloat<B: Backend>(
     let dst = reg_x(d);
     let a128: B::V<W128> = b.get(sem::xmm_ref(dst));
     let c128 = rx(b, ea, 128)?;
+    let acc = pfloat_lane(b, op, fbits, a128, c128);
+    b.set(sem::xmm_ref(dst), acc);
+    Ok(())
+}
+
+/// 128 ビットレーンのパック浮動小数点（レガシー形の `pfloat` と
+/// VEX 形の `vpfloat` が共有する要素演算）。
+fn pfloat_lane<B: Backend>(
+    b: &mut B,
+    op: Fop,
+    fbits: u32,
+    a128: B::V<W128>,
+    c128: B::V<W128>,
+) -> B::V<W128> {
     let mut acc = b.konst::<W128>(0);
     let n = 128 / fbits;
     for i in 0..n {
@@ -3491,8 +3722,7 @@ pub fn pfloat<B: Backend>(
         };
         acc = put_lane128(b, acc, res, i * fbits, fbits);
     }
-    b.set(sem::xmm_ref(dst), acc);
-    Ok(())
+    acc
 }
 
 /// CMPPS/CMPPD の判定。cond に該当するかを返す。
@@ -8761,6 +8991,7 @@ pub fn xsave<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>, mode: u8) -> Flow<B> {
     let m = xsave_mask(b);
     let w87 = mask_bit(b, m, 0);
     let wsse = mask_bit(b, m, 1);
+    let wymm = mask_bit(b, m, 2);
     fxsave_area(b, a, wseg, mode, w87, wsse)?;
     let a512 = madd(b, a, 512);
     decode::mem_store::<B, W64>(b, a512, wseg, m)?;
@@ -8770,7 +9001,24 @@ pub fn xsave<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>, mode: u8) -> Flow<B> {
         let ah = madd(b, a, off);
         decode::mem_store::<B, W64>(b, ah, wseg, z)?;
     }
-    Ok(())
+    // YMMH 成分（+576、YMM0-15 の上位 128 ビット）。W128 の
+    // メモリアクセスは wseg 経路がないので 2 本の W64 に分解する。
+    // 成分が RFBM∩XCR0 から外れるモデルでは領域外を触らないよう
+    // 条件領域にする（AVX 非対応モデルの回帰防止）。
+    b.if_then(wymm, |b| {
+        for i in 0..16u8 {
+            let v: B::V<W128> = b.get(sem::ymm_hi_ref(Xmm(i)));
+            let ah = madd(b, a, 576 + u64::from(i) * 16);
+            let lo: B::V<W64> = b.trunc::<W128, W64>(v);
+            let sh = b.konst::<W128>(64);
+            let vs = b.shr_l::<W128>(v, sh);
+            let hi: B::V<W64> = b.trunc::<W128, W64>(vs);
+            decode::mem_store::<B, W64>(b, ah, wseg, lo)?;
+            let ah8 = madd(b, ah, 8);
+            decode::mem_store::<B, W64>(b, ah8, wseg, hi)?;
+        }
+        Ok(())
+    })
 }
 
 /// XRSTOR。成分 i∈RFBM∩XCR0 は領域の XSTATE_BV ビットが立てば
@@ -8788,7 +9036,34 @@ pub fn xrstor<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>, mode: u8) -> Flow<B> {
     let rst = b.and::<W64>(m, xbv);
     let nxbv = b.not::<W64>(xbv);
     let ini = b.and::<W64>(m, nxbv);
-    fxrstor_area(b, a, wseg, mode, rst, ini)
+    fxrstor_area(b, a, wseg, mode, rst, ini)?;
+    // YMMH 成分（+576）。`rst` が立つときだけ領域を読み、`ini`
+    // なら読まずに 0 を書く。両方偽なら領域も状態も触らない
+    // （xsave 側と同じ回帰防止）。`rst`/`ini` は排他。
+    let rymm = mask_bit(b, rst, 2);
+    let iymm = mask_bit(b, ini, 2);
+    b.if_then(rymm, |b| {
+        for i in 0..16u8 {
+            let ah = madd(b, a, 576 + u64::from(i) * 16);
+            let ah8 = madd(b, ah, 8);
+            let lo: B::V<W64> = decode::mem_load(b, ah, wseg)?;
+            let hi: B::V<W64> = decode::mem_load(b, ah8, wseg)?;
+            let sh = b.konst::<W128>(64);
+            let hiz = b.zext::<W64, W128>(hi);
+            let hi128 = b.shl::<W128>(hiz, sh);
+            let loz = b.zext::<W64, W128>(lo);
+            let vm = b.or::<W128>(loz, hi128);
+            b.set(sem::ymm_hi_ref(Xmm(i)), vm);
+        }
+        Ok(())
+    })?;
+    b.if_then(iymm, |b| {
+        let z: B::V<W128> = b.konst::<W128>(0);
+        for i in 0..16u8 {
+            b.set(sem::ymm_hi_ref(Xmm(i)), z);
+        }
+        Ok(())
+    })
 }
 
 /// CMPXCHG8B/CMPXCHG16B。EDX:EAX（または RDX:RAX）とメモリを比較し、

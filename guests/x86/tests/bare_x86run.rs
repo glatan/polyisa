@@ -18043,6 +18043,150 @@ fn w32(a: &[u8], i: usize) -> u32 {
 }
 
 #[test]
+fn run64_vex_avx() {
+    // VEX 命令の実行。x86_64_v3 モデル（avx あり）で
+    // VMOVUPS/VADDPS/VADDSS/VZEROUPPER/VZEROALL と
+    // XSAVE/XRSTOR の YMMH 成分を回す。
+    let feats = polyisa_guest_x86::model_feats("x86_64_v3");
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.mem.map(VirtAddr(0x3000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2800);
+    // AVX 状態を使うので電源投入状態に xcr0 の SSE+YMM ビットを足す。
+    env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037F);
+    env.backend.set(polyisa_guest_x86::sem::mxcsr_ref(), 0x1F80);
+    env.backend.set(polyisa_guest_x86::sem::xcr0_ref(), 7);
+    // 入力: [0x2000..0x2020] = f32 1.0 × 8、[0x20A0..0x20C0] = f32 4.0 × 8。
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x2000),
+            &[0x3F80_0000u32.to_le_bytes(); 8].concat(),
+        )
+        .unwrap();
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x20A0),
+            &[0x4080_0000u32.to_le_bytes(); 8].concat(),
+        )
+        .unwrap();
+    let prog: &[u8] = &[
+        0x48, 0xB8, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rax,0x2000
+        0xC5, 0xFC, 0x10, 0x00, // vmovups ymm0,[rax] → 8×1.0
+        0xC5, 0xFC, 0x58, 0xC8, // vaddps ymm1,ymm0,ymm0 → 8×2.0
+        0xC5, 0xFC, 0x11, 0x48, 0x40, // vmovups [rax+0x40],ymm1 → 0x2040
+        0xC5, 0xF8, 0x77, // vzeroupper → ymm_hi=0
+        0xC5, 0xF8, 0x10, 0x10, // vmovups xmm2,[rax] → 4×1.0
+        0xC5, 0xEA, 0x58, 0x18, // vaddss xmm3,xmm2,[rax] → [2.0,1.0,1.0,1.0]
+        0xC5, 0xF8, 0x11, 0x58, 0x60, // vmovups [rax+0x60],xmm3 → 0x2060
+        0x48, 0xBB, 0x00, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rbx,0x3000
+        0xC5, 0xFC, 0x10, 0x00, // vmovups ymm0,[rax] → 8×1.0
+        0xB8, 0x07, 0x00, 0x00, 0x00, // mov eax,7（RFBM）
+        0x31, 0xD2, // xor edx,edx
+        0x0F, 0xAE, 0x23, // xsave [rbx] → xstate_bv=7、YMMH @+576
+        0xC5, 0xFC, 0x77, // vzeroall → xmm+ymm_hi 全 0
+        0xB8, 0x07, 0x00, 0x00, 0x00, // mov eax,7（RFBM）
+        0x31, 0xD2, // xor edx,edx
+        0x0F, 0xAE, 0x2B, // xrstor [rbx] → ymm0 復元
+        0x48, 0xB8, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rax,0x2000
+        0xC5, 0xFC, 0x11, 0x80, 0x80, 0x00, 0x00, 0x00, // vmovups [rax+0x80],ymm0 → 0x2080
+        // SQRT は src（r/m）の平方根を取る（src1 ではない）回帰検査。
+        0xC5, 0xFC, 0x51, 0xB0, 0xA0, 0x00, 0x00, 0x00, // vsqrtps ymm6,[rax+0xA0] → 8×2.0
+        0xC5, 0xFC, 0x11, 0xB0, 0xC0, 0x00, 0x00, 0x00, // vmovups [rax+0xC0],ymm6 → 0x20C0
+        0xC5, 0xEA, 0x51, 0xB8, 0xA0, 0x00, 0x00,
+        0x00, // vsqrtss xmm7,xmm2,[rax+0xA0] → [2.0,1.0,1.0,1.0]
+        0xC5, 0xF8, 0x11, 0xB8, 0xE0, 0x00, 0x00, 0x00, // vmovups [rax+0xE0],xmm7 → 0x20E0
+        // VMOVSS のメモリ形も上位を src1 とマージする（0 クリアではない）。
+        0xC5, 0xEA, 0x10, 0xB8, 0xA0, 0x00, 0x00,
+        0x00, // vmovss xmm7,xmm2,[rax+0xA0] → [4.0,1.0,1.0,1.0]
+        0xC5, 0xF8, 0x11, 0xB8, 0xF0, 0x00, 0x00, 0x00, // vmovups [rax+0xF0],xmm7 → 0x20F0
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0x31, 0xFF, // xor rdi,rdi
+        0x0F, 0x05, // syscall → exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        100,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64_v3"),
+    );
+    assert_eq!(out, Outcome::Exit(0));
+    let acc = polyisa_mem::Access {
+        endian: polyisa_mem::Endian::Le,
+        align: polyisa_mem::Align::Unaligned,
+        kind: polyisa_mem::AccessKind::DataRead,
+    };
+    let mut v = [0u8; 0xA0];
+    env.backend.mem.read(VirtAddr(0x2040), &mut v, acc).unwrap();
+    {
+        let w = |i: usize| u32::from_le_bytes(v[i..i + 4].try_into().unwrap());
+        for i in 0..8 {
+            assert_eq!(w(i * 4), 0x4000_0000, "vaddps ymm lane{i}");
+        }
+        // vaddss は下位のみ加算で残りは src1 を引き継ぐ。
+        assert_eq!(w(0x20), 0x4000_0000, "vaddss 下位");
+        for i in 1..4 {
+            assert_eq!(w(0x20 + i * 4), 0x3F80_0000, "vaddss 上位 lane{i} は src1");
+        }
+    }
+    // XSAVE 領域: XSTATE_BV=7、YMMH 成分（+576）は 4×1.0。
+    env.backend
+        .mem
+        .read(VirtAddr(0x3200), &mut v[..8], acc)
+        .unwrap();
+    assert_eq!(
+        u64::from_le_bytes(v[..8].try_into().unwrap()),
+        7,
+        "xstate_bv"
+    );
+    env.backend
+        .mem
+        .read(VirtAddr(0x3240), &mut v[..16], acc)
+        .unwrap();
+    {
+        let w = |i: usize| u32::from_le_bytes(v[i..i + 4].try_into().unwrap());
+        for i in 0..4 {
+            assert_eq!(w(i * 4), 0x3F80_0000, "ymmh lane{i}");
+        }
+    }
+    // XRSTOR で ymm0（ymm_hi 込み）が復元される。
+    env.backend.mem.read(VirtAddr(0x2080), &mut v, acc).unwrap();
+    {
+        let w = |i: usize| u32::from_le_bytes(v[i..i + 4].try_into().unwrap());
+        for i in 0..8 {
+            assert_eq!(w(i * 4), 0x3F80_0000, "xrstor ymm0 lane{i}");
+        }
+    }
+    // vsqrtps は r/m ソースの平方根（sqrt(4.0)=2.0）。
+    env.backend.mem.read(VirtAddr(0x20C0), &mut v, acc).unwrap();
+    {
+        let w = |i: usize| u32::from_le_bytes(v[i..i + 4].try_into().unwrap());
+        for i in 0..8 {
+            assert_eq!(w(i * 4), 0x4000_0000, "vsqrtps ymm lane{i}");
+        }
+        assert_eq!(w(0x20), 0x4000_0000, "vsqrtss 下位");
+        for i in 1..4 {
+            assert_eq!(w(0x20 + i * 4), 0x3F80_0000, "vsqrtss 上位 lane{i} は src1");
+        }
+    }
+    // vmovss のメモリ形は上位を src1 とマージする。
+    env.backend.mem.read(VirtAddr(0x20F0), &mut v, acc).unwrap();
+    let w = |i: usize| u32::from_le_bytes(v[i..i + 4].try_into().unwrap());
+    assert_eq!(w(0), 0x4080_0000, "vmovss 下位はメモリ値");
+    for i in 1..4 {
+        assert_eq!(w(i * 4), 0x3F80_0000, "vmovss 上位 lane{i} は src1");
+    }
+}
+
+#[test]
 fn run64_tsx_uintr_pku() {
     // TSX/UINTR/PKU。トランザクションとユーザー割り込みは
     // モデル化しないので、XBEGIN は常にアボートして

@@ -69,7 +69,7 @@ pub struct CpuState {
     /// CPUID 命令が返すリーフの値。`cpuid::LEAF_IDS` の添え字順に
     /// (EAX,EBX,ECX,EDX) を持つ。実行開始時に `cpuid::derive` の結果を
     /// 書き込む。初期値の 0 は「CPUID 未導出」を表す。
-    pub cpuid: [[u32; 4]; 8],
+    pub cpuid: [[u32; 4]; 9],
     /// SSE の制御・状態レジスタ（LDMXCSR/STMXCSR が読み書きする）。
     /// 実行開始時に 0x1F80（例外全マスク・RNE）へ初期化する。
     pub mxcsr: u32,
@@ -100,6 +100,9 @@ pub struct CpuState {
     /// `ARCH_GET_XCOMP_PERM`/`ARCH_REQ_XCOMP_PERM` が読み書き
     /// する。動的成分（bit16 以降）は許可時に `xcr0` にも足す。
     pub xcomp_perm: u64,
+    /// YMM レジスタの上位 128 ビット。下位は `xmm` と共有する
+    /// （XSAVE の YMMH 成分に対応する）。AVX 形の演算だけが使う。
+    pub ymm_hi: [[u64; 2]; 16],
 }
 
 #[cfg(test)]
@@ -132,19 +135,21 @@ mod tests {
         assert_eq!(core::mem::offset_of!(CpuState, st_sig), 416);
         assert_eq!(core::mem::offset_of!(CpuState, fs_base), 480);
         assert_eq!(core::mem::offset_of!(CpuState, gs_base), 488);
-        // mxcsr（sregs 12 + fsw 2 + cpuid 128 を
-        // gs_base 以降に足した 638 を 8 境界へ揃えた位置）。
-        assert_eq!(core::mem::offset_of!(CpuState, mxcsr), 640);
+        // mxcsr（sregs 12 + fsw 2 + cpuid 144 を
+        // gs_base 以降に足した 654 を 8 境界へ揃えた位置）。
+        assert_eq!(core::mem::offset_of!(CpuState, mxcsr), 656);
         // xcr0 は末尾（rand_state・pkru の後）。
-        assert_eq!(core::mem::offset_of!(CpuState, xcr0), 696);
-        assert_eq!(core::mem::offset_of!(CpuState, xcomp_supp), 704);
-        assert_eq!(core::mem::offset_of!(CpuState, xcomp_perm), 712);
+        assert_eq!(core::mem::offset_of!(CpuState, xcr0), 712);
+        assert_eq!(core::mem::offset_of!(CpuState, xcomp_supp), 720);
+        assert_eq!(core::mem::offset_of!(CpuState, xcomp_perm), 728);
+        assert_eq!(core::mem::offset_of!(CpuState, ymm_hi), 736);
+        assert_eq!(core::mem::size_of::<CpuState>(), 992);
     }
 
     #[test]
     fn insn_count() {
         // 段階4の x86 最小 853 件にオペコード表の記述を足した件数。
-        assert_eq!(INSNS.len(), 1688);
+        assert_eq!(INSNS.len(), 1742);
     }
 
     #[test]
@@ -1746,6 +1751,82 @@ mod tests {
         // EMMS は MMX でゲートする。
         assert!(decode_map(&[0x0F, 0x77], modes, 0).is_none());
         assert!(decode_map(&[0x0F, 0x77], modes, FEAT_MMX).is_some());
+    }
+
+    #[test]
+    fn vex_decode() {
+        let modes = MODE_M64 | (MODE_OPD_O32 << MODE_OPD_SHIFT) | (MODE_ADR_A64 << MODE_ADR_SHIFT);
+        let avx = FEAT_AVX | FEAT_SSE | FEAT_SSE2;
+        // C5 F8 77 = VZEROUPPER（VEX.128.0F 77、vvvv フィールド=1111b）。
+        let d = decode_map(&[0xC5, 0xF8, 0x77], modes, avx).unwrap();
+        assert_eq!(d.insn, Insn::Vzeroupper);
+        assert_eq!(d.len, 3);
+        assert!(d.vex);
+        // C5 FC 77 = VZEROALL（VEX.256.0F 77、L=1）。
+        let d = decode_map(&[0xC5, 0xFC, 0x77], modes, avx).unwrap();
+        assert_eq!(d.insn, Insn::Vzeroall);
+        assert!(d.vex && d.vex_l);
+        // VADDPS xmm0, xmm1, xmm2: C5 F0 58 C2（フィールド ~vvvv=1110
+        // → src1=xmm1、pp=00=NP）。
+        let d = decode_map(&[0xC5, 0xF0, 0x58, 0xC2], modes, avx).unwrap();
+        assert_eq!(d.insn, Insn::VaddpsXvHvWv);
+        assert_eq!(d.vex_v, 1);
+        assert!(!d.vex_l);
+        // VADDPS ymm0, ymm1, ymm2: C5 F4 58 C2（L=1）。
+        let d = decode_map(&[0xC5, 0xF4, 0x58, 0xC2], modes, avx).unwrap();
+        assert_eq!(d.insn, Insn::VaddpsXvHvWv);
+        assert!(d.vex_l);
+        // VMOVSS xmm0, xmm1, xmm2: C5 F2 10 C2（pp=10=F3、L0）。
+        let d = decode_map(&[0xC5, 0xF2, 0x10, 0xC2], modes, avx).unwrap();
+        assert_eq!(d.insn, Insn::VmovssXvHvWv);
+        // VMOVUPS は vvvv フィールド=1111b が必須: C5 F8 10 C0。
+        assert_eq!(
+            decode_map(&[0xC5, 0xF8, 0x10, 0xC0], modes, avx).map(|d| d.insn),
+            Some(Insn::VmovupsXvWv)
+        );
+        // NP 0x10 でフィールド 1110（src1=xmm1）は解読しない。
+        assert!(decode_map(&[0xC5, 0xF4, 0x10, 0xC0], modes, avx).is_none());
+        // AVX 無しのモデルでは VEX 経路は解読しない。
+        assert!(decode_map(&[0xC5, 0xF8, 0x77], modes, FEAT_SSE | FEAT_SSE2).is_none());
+        // 32 ビットモードでは mod!=11 なら LES/LDS として解読する。
+        let m32 = (MODE_OPD_O32 << MODE_OPD_SHIFT) | (MODE_ADR_A32 << MODE_ADR_SHIFT);
+        let d = decode_map(&[0xC5, 0x00, 0x11, 0x22], m32, avx);
+        assert!(d.is_some(), "C5 00 は 32 ビットで LDS");
+        // 3 バイト VEX（C4）。C4 E1 3C 58 C2 = VADDPS ymm0,ymm8,ymm2
+        // （~RXB=111、map=1、W=0、~vvvv=0111→src1=ymm8、L=1）。
+        let d = decode_map(&[0xC4, 0xE1, 0x3C, 0x58, 0xC2], modes, avx).unwrap();
+        assert_eq!(d.insn, Insn::VaddpsXvHvWv);
+        assert_eq!(d.vex_v, 8);
+        assert!(d.vex_l);
+        // C4 41 7C 10 C0 = VMOVUPS ymm8,ymm8（~RXB=010→R=1・B=1 で
+        // 64 ビットモードではレジスタ 8-15 まで届く）。rex に畳まれる。
+        let d = decode_map(&[0xC4, 0x41, 0x7C, 0x10, 0xC0], modes, avx).unwrap();
+        assert_eq!(d.insn, Insn::VmovupsXvWv);
+        assert_eq!(d.rex & 0x7, 0b101);
+        // 32 ビットモードでは b2 の上位 2 ビットが 11 でないと VEX では
+        // なく LES/LDS（C4 41 … は LES のメモリ形として解読される）。
+        let d = decode_map(&[0xC4, 0x41, 0x7C, 0x10, 0xC0], m32, avx).unwrap();
+        assert_eq!(d.insn, Insn::LesGvMp);
+        // C4 C1 7C 10 C0: ~B=0（B 拡張あり）でも 32 ビットモードでは
+        // レジスタ拡張は無視される（rex の RXB は立てない）。
+        let d = decode_map(&[0xC4, 0xC1, 0x7C, 0x10, 0xC0], m32, avx).unwrap();
+        assert_eq!(d.insn, Insn::VmovupsXvWv);
+        assert_eq!(d.rex & 0x7, 0);
+        // 64 ビットモードでは B=1 で r/m が拡張される。
+        let d = decode_map(&[0xC4, 0xC1, 0x7C, 0x10, 0xC0], modes, avx).unwrap();
+        assert_eq!(d.rex & 0x7, 1);
+        // 0F 38 マップ（mmmmm=2）にはまだ VEX 項目がないので拒否。
+        assert!(decode_map(&[0xC4, 0xE2, 0x7C, 0x18, 0xC0], modes, avx).is_none());
+        // LOCK+VEX は #UD。VEX の前のレガシー接頭辞は無視される。
+        assert!(decode_map(&[0xF0, 0xC5, 0xF8, 0x77], modes, avx).is_none());
+        assert_eq!(
+            decode_map(&[0x66, 0xC5, 0xF8, 0x77], modes, avx).map(|d| d.insn),
+            Some(Insn::Vzeroupper)
+        );
+        assert_eq!(
+            decode_map(&[0xF3, 0xC5, 0xF8, 0x77], modes, avx).map(|d| d.insn),
+            Some(Insn::Vzeroupper)
+        );
     }
 
     #[test]
