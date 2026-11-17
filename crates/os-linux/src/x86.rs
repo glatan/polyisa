@@ -35,6 +35,7 @@ pub const EINVAL: u32 = 22;
 pub const EPIPE: u32 = 32;
 pub const ERANGE: u32 = 34;
 pub const ENOTTY: u32 = 25;
+pub const EOPNOTSUPP: u32 = 95;
 
 pub fn get64(env: &mut BareEnv, r: Gpr) -> u64 {
     polyisa_guest_x86::sem::read64(&mut env.backend, r)
@@ -304,25 +305,6 @@ pub fn sys_poll(env: &mut BareEnv, _cx: &SysCtx) -> Option<TrapOutcome> {
 pub fn sys_reboot(env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     // reboot。権限がなく常に EPERM。halt / poweroff / reboot アプレットが呼ぶ。
     set64(env, Gpr(0), cx.neg(EPERM));
-    Some(TrapOutcome::Handled)
-}
-
-pub fn sys_rt_sigaction(env: &mut BareEnv, _cx: &SysCtx) -> Option<TrapOutcome> {
-    // Gap: GAP-0026
-    // シグナルハンドラ設定は無視して 0 を返す (試作はシグナルなし).
-    set64(env, Gpr(0), 0);
-    Some(TrapOutcome::Handled)
-}
-
-pub fn sys_rt_sigprocmask(env: &mut BareEnv, _cx: &SysCtx) -> Option<TrapOutcome> {
-    // シグナルマスク変更は無視して 0 を返す.
-    set64(env, Gpr(0), 0);
-    Some(TrapOutcome::Handled)
-}
-
-pub fn sys_rt_sigsuspend(env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // シグナル待ちはせず EINTR を返す。本格は GAP-0026 のシグナル機構の実装時。
-    set64(env, Gpr(0), cx.neg(EINTR));
     Some(TrapOutcome::Handled)
 }
 
@@ -1613,6 +1595,70 @@ pub fn sys_arch_prctl(env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
         set64(env, Gpr(0), 0);
         return Some(TrapOutcome::Handled);
     }
+    // XCOMP 系（AMX 等の動的拡張状態の許可）。対応マスクと
+    // 許可マスクは CpuState の `xcomp_supp`/`xcomp_perm` にある。
+    // Ref: SRC-LINUX (7.3) arch/x86/kernel/fpu/xstate.c.
+    const ARCH_GET_XCOMP_PERM: u64 = 0x1021;
+    const ARCH_REQ_XCOMP_PERM: u64 = 0x1022;
+    const ARCH_GET_XCOMP_SUPP: u64 = 0x1031;
+    /// 動的に許可が要る成分の先頭（XTILECFG 以降）。これより
+    /// 小さい成分は静的で、要求なしに使える。
+    const XFEATURE_FIRST_DYNAMIC: u64 = 16;
+    /// 成分番号の上限（XFEATURE_MAX）。
+    const XFEATURE_MAX: u64 = 18;
+    const XFEATURE_XTILECFG: u64 = 17;
+    const XFEATURE_XTILEDATA: u64 = 18;
+    if op == ARCH_GET_XCOMP_SUPP || op == ARCH_GET_XCOMP_PERM {
+        let which = if op == ARCH_GET_XCOMP_SUPP {
+            polyisa_guest_x86::sem::xcomp_supp_ref()
+        } else {
+            polyisa_guest_x86::sem::xcomp_perm_ref()
+        };
+        let v = env.backend.get(which);
+        let dst = get64(env, cx.r_b);
+        if env
+            .backend
+            .mem
+            .write(polyisa_mem::VirtAddr(dst), &v.to_le_bytes())
+            .is_err()
+        {
+            set64(env, Gpr(0), cx.neg(EFAULT));
+            return Some(TrapOutcome::Handled);
+        }
+        set64(env, Gpr(0), 0);
+        return Some(TrapOutcome::Handled);
+    }
+    if op == ARCH_REQ_XCOMP_PERM {
+        let feature = get64(env, cx.r_b);
+        let supp = env.backend.get(polyisa_guest_x86::sem::xcomp_supp_ref());
+        let perm = env.backend.get(polyisa_guest_x86::sem::xcomp_perm_ref());
+        // Linux の規約: 番号が上限超なら EINVAL、対応外の成分は
+        // EOPNOTSUPP。XTILEDATA の要求は先に XTILECFG の許可が要る。
+        if feature > XFEATURE_MAX {
+            set64(env, Gpr(0), cx.neg(EINVAL));
+            return Some(TrapOutcome::Handled);
+        }
+        let bit = 1u64 << feature;
+        if bit & supp == 0 {
+            set64(env, Gpr(0), cx.neg(EOPNOTSUPP));
+            return Some(TrapOutcome::Handled);
+        }
+        if feature == XFEATURE_XTILEDATA && perm & (1 << XFEATURE_XTILECFG) == 0 {
+            set64(env, Gpr(0), cx.neg(EINVAL));
+            return Some(TrapOutcome::Handled);
+        }
+        env.backend
+            .set(polyisa_guest_x86::sem::xcomp_perm_ref(), perm | bit);
+        // 動的成分の許可は XCR0 にも反映される（実機では XSAVE
+        // 領域が広がる）。成分の保存実装がない bit は名前だけの追跡。
+        if feature >= XFEATURE_FIRST_DYNAMIC {
+            let xcr0 = env.backend.get(polyisa_guest_x86::sem::xcr0_ref());
+            env.backend
+                .set(polyisa_guest_x86::sem::xcr0_ref(), xcr0 | bit);
+        }
+        set64(env, Gpr(0), 0);
+        return Some(TrapOutcome::Handled);
+    }
     set64(env, Gpr(0), cx.neg(EINVAL));
     Some(TrapOutcome::Handled)
 }
@@ -2875,6 +2921,223 @@ fn mmap_alloc(mmap_base: &mut u64, env: &mut BareEnv, count: u64, aligned_len: u
 /// トラップ側からも実行ループ側からも同じ `env.backend` 経由で届く。
 pub fn eip_of(env: &mut BareEnv) -> u32 {
     env.backend.get(polyisa_guest_x86::sem::eip_ref())
+}
+
+/// `rt_sigaction` で覚えるハンドラの内容。Linux の
+/// kernel_sigaction（x86-64 では handler/flags/restorer/mask の
+/// 32 バイト、i386 は 20 バイト）に対応する。
+// Ref: SRC-LINUX (7.3) arch/x86/kernel/signal.c.
+#[derive(Clone, Copy, Default, Debug)]
+pub struct SigAct {
+    /// ハンドラのアドレス。0=SIG_DFL、1=SIG_IGN。
+    pub handler: u64,
+    /// SA_* フラグ（SA_NODEFER/SA_RESETHAND/SA_RESTORER を使う）。
+    pub flags: u64,
+    /// SA_RESTORER が指す復帰コード。rt_sigreturn を呼ぶ。
+    pub restorer: u64,
+    /// ハンドラ実行中に足すシグナルマスク。
+    pub mask: u64,
+}
+
+/// ハンドラ実行中に当該シグナル自身を止めない。
+pub const SA_NODEFER: u64 = 0x4000_0000;
+/// 配送のたびにハンドラを SIG_DFL に戻す。
+pub const SA_RESETHAND: u64 = 0x8000_0000;
+/// `restorer` が有効（x86-64 の rt_sigaction では必須）。
+pub const SA_RESTORER: u64 = 0x0400_0000;
+/// 代替スタックなしを表す ss_flags の値。
+pub const SS_DISABLE: u64 = 2;
+/// rt_sigprocmask の how。現行マスクに加える。
+pub const SIG_BLOCK: u64 = 0;
+/// rt_sigprocmask の how。現行マスクから外す。
+pub const SIG_UNBLOCK: u64 = 1;
+/// rt_sigprocmask の how。マスクを置き換える。
+pub const SIG_SETMASK: u64 = 2;
+
+/// ゲストメモリから kernel_sigaction を読む。`is64` で配置が変わる。
+#[must_use]
+pub fn sigact_read(env: &mut BareEnv, addr: u64, is64: bool) -> Option<SigAct> {
+    // i386 の構造体は 20 バイト。32 バイト読むとマップ末尾の
+    // 構造体で偽の EFAULT になる。
+    let mut b = [0u8; 32];
+    let n = if is64 { 32 } else { 20 };
+    env.backend
+        .mem
+        .read(polyisa_mem::VirtAddr(addr), &mut b[..n], data_access())
+        .ok()?;
+    Some(if is64 {
+        SigAct {
+            handler: u64::from_le_bytes(b[0..8].try_into().unwrap()),
+            flags: u64::from_le_bytes(b[8..16].try_into().unwrap()),
+            restorer: u64::from_le_bytes(b[16..24].try_into().unwrap()),
+            mask: u64::from_le_bytes(b[24..32].try_into().unwrap()),
+        }
+    } else {
+        SigAct {
+            handler: u64::from(u32::from_le_bytes(b[0..4].try_into().unwrap())),
+            flags: u64::from(u32::from_le_bytes(b[4..8].try_into().unwrap())),
+            restorer: u64::from(u32::from_le_bytes(b[8..12].try_into().unwrap())),
+            mask: u64::from_le_bytes(b[12..20].try_into().unwrap()),
+        }
+    })
+}
+
+/// ゲストメモリへ kernel_sigaction を書く（oldact の返却用）。
+pub fn sigact_write(env: &mut BareEnv, addr: u64, act: &SigAct, is64: bool) -> bool {
+    // i386 は 20 バイトだけ書く。32 バイト書くと呼び出し側の
+    // バッファの後ろを壊す。
+    let mut b = [0u8; 32];
+    if is64 {
+        b[0..8].copy_from_slice(&act.handler.to_le_bytes());
+        b[8..16].copy_from_slice(&act.flags.to_le_bytes());
+        b[16..24].copy_from_slice(&act.restorer.to_le_bytes());
+        b[24..32].copy_from_slice(&act.mask.to_le_bytes());
+    } else {
+        b[0..4].copy_from_slice(&(act.handler as u32).to_le_bytes());
+        b[4..8].copy_from_slice(&(act.flags as u32).to_le_bytes());
+        b[8..12].copy_from_slice(&(act.restorer as u32).to_le_bytes());
+        b[12..20].copy_from_slice(&act.mask.to_le_bytes());
+    }
+    let n = if is64 { 32 } else { 20 };
+    env.backend
+        .mem
+        .write(polyisa_mem::VirtAddr(addr), &b[..n])
+        .is_ok()
+}
+
+/// ゲストメモリの読み書き。失敗時は None/false。
+fn frd64(env: &mut BareEnv, a: u64) -> Option<u64> {
+    let mut b = [0u8; 8];
+    env.backend
+        .mem
+        .read(polyisa_mem::VirtAddr(a), &mut b, data_access())
+        .ok()?;
+    Some(u64::from_le_bytes(b))
+}
+
+fn fwr(env: &mut BareEnv, a: u64, v: u64, n: usize) -> bool {
+    env.backend
+        .mem
+        .write(polyisa_mem::VirtAddr(a), &v.to_le_bytes()[..n])
+        .is_ok()
+}
+
+/// x86-64 の rt シグナルフレームをスタックに作り、RIP を
+/// ハンドラ入口に向ける。失敗（未写像など）なら偽を返す。
+/// 配置（`struct rt_sigframe` 相当）:
+///   +0    pretcode（SA_RESTORER のアドレス）
+///   +8    ucontext: flags,link,stack,mcontext{gregs[23],fpregs*,rsvd}
+///         ,sigmask（旧マスク）… +311
+///   +312  siginfo（128 バイト、si_signo/si_code=SI_USER/si_pid）
+///   fpstate（512 バイト、FXSAVE 配置）はフレームの直上に
+///   別置きし、uc_mcontext.fpregs が指す（64 整列が要るため）。
+/// フレーム基底は ≡8 (mod 16)。call 直後の関数入口と同じ
+/// ABI 整列でハンドラへ入る。RDI=sig, RSI=&info, RDX=&uc。
+// Ref: SRC-LINUX (7.3) arch/x86/kernel/signal.c setup_rt_frame.
+pub fn rt_sigframe_write(
+    env: &mut BareEnv,
+    sig: u32,
+    act: &SigAct,
+    old_mask: u64,
+    pid: u64,
+) -> bool {
+    const FRAME: u64 = 1024;
+    const GREGB: u64 = 48; // ucontext.mcontext.gregs のフレーム内オフセット
+    let rsp = get64(env, Gpr(4));
+    // レッドゾーン(128)を避けて、fpstate をフレームより上に
+    // 64 整列で取る。フレーム基底は fp の下に ≡8 (mod 16) で
+    // 置く（実カーネルの round_down(...,16)-8 と同じ整列）。
+    let fp = ((rsp - 128).wrapping_sub(512)) & !63;
+    let f = (fp & !15).wrapping_sub(FRAME + 8);
+    // ucontext の固定部と siginfo。
+    let fields: [(u64, u64); 10] = [
+        (f, act.restorer),
+        (f + 8, 0),                // uc_flags
+        (f + 16, 0),               // uc_link
+        (f + 24, 0),               // uc_stack.ss_sp
+        (f + 32, SS_DISABLE),      // uc_stack.ss_flags
+        (f + 40, 0),               // uc_stack.ss_size
+        (f + GREGB + 184, fp),     // uc_mcontext.fpregs
+        (f + 304, old_mask),       // uc_sigmask
+        (f + 312, u64::from(sig)), // si_signo+si_errno(=0)
+        (f + 312 + 8, 0),          // si_code=SI_USER
+    ];
+    for (a, v) in fields {
+        if !fwr(env, a, v, 8) {
+            return false;
+        }
+    }
+    if !fwr(env, f + 312 + 16, pid, 8) {
+        // _sifields._kill = {si_pid u32, si_uid u32}
+        return false;
+    }
+    // gregs: REG_R8..R15,RDI,RSI,RBP,RBX,RDX,RAX,RCX,RSP,RIP,EFL,
+    // CSGSFS,ERR,TRAPNO,OLDMASK,CR2 の順。
+    let mut g = [0u64; 23];
+    for (i, v) in g.iter_mut().enumerate().take(8) {
+        *v = get64(env, Gpr(8 + i as u8));
+    }
+    for (i, r) in [7u8, 6, 5, 3, 2, 0, 1, 4].iter().enumerate() {
+        g[8 + i] = get64(env, Gpr(*r));
+    }
+    g[16] = u64::from(env.backend.get(polyisa_guest_x86::sem::eip_ref()));
+    g[17] = u64::from(env.backend.get(polyisa_guest_x86::sem::eflags_ref()));
+    let cs = u64::from(env.backend.get(polyisa_guest_x86::sem::sreg_ref(1)));
+    let gs = u64::from(env.backend.get(polyisa_guest_x86::sem::sreg_ref(5)));
+    let fs = u64::from(env.backend.get(polyisa_guest_x86::sem::sreg_ref(4)));
+    g[18] = cs | (gs << 16) | (fs << 32);
+    g[21] = old_mask;
+    for (i, v) in g.iter().enumerate() {
+        if !fwr(env, f + GREGB + 8 * i as u64, *v, 8) {
+            return false;
+        }
+    }
+    // fpstate（FXSAVE 配置）。両成分を無条件で書く。
+    let b = &mut env.backend;
+    if polyisa_guest_x86::sem_ea::fxsave_area(b, fp, None, 64, true, true).is_err() {
+        return false;
+    }
+    // ハンドラへ入る引数とスタック。
+    set64(env, Gpr(4), f);
+    set64(env, Gpr(7), u64::from(sig));
+    set64(env, Gpr(6), f + 312);
+    set64(env, Gpr(2), f + 8);
+    set64(env, Gpr(0), 0);
+    env.backend
+        .set(polyisa_guest_x86::sem::eip_ref(), act.handler as u32);
+    true
+}
+
+/// rt_sigreturn。RSP が指すフレームからコンテキスト（レジスタ・
+/// FP 状態・マスク）を復元し、復元したシグナルマスクを返す。
+/// フレームが読めなければ None。
+/// ハンドラの ret が pretcode をポップしてから restorer が走る
+/// ので、システムコール時点の RSP はフレーム基底+8 になって
+/// いる（カーネルも `sp - sizeof(long)` で基底を求める）。
+pub fn rt_sigframe_read(env: &mut BareEnv) -> Option<u64> {
+    const GREGB: u64 = 48;
+    let f = get64(env, Gpr(4)).wrapping_sub(8);
+    let mask = frd64(env, f + 304)?;
+    let fp = frd64(env, f + GREGB + 184)?;
+    let mut g = [0u64; 23];
+    for (i, v) in g.iter_mut().enumerate() {
+        *v = frd64(env, f + GREGB + 8 * i as u64)?;
+    }
+    for (i, v) in g.iter().enumerate().take(8) {
+        set64(env, Gpr(8 + i as u8), *v);
+    }
+    for (i, r) in [7u8, 6, 5, 3, 2, 0, 1].iter().enumerate() {
+        set64(env, Gpr(*r), g[8 + i]);
+    }
+    let xcr0 = env.backend.get(polyisa_guest_x86::sem::xcr0_ref());
+    let b = &mut env.backend;
+    polyisa_guest_x86::sem_ea::fxrstor_area(b, fp, None, 64, xcr0 & 3, 0).ok()?;
+    set64(env, Gpr(4), g[15]);
+    env.backend
+        .set(polyisa_guest_x86::sem::eflags_ref(), g[17] as u32);
+    env.backend
+        .set(polyisa_guest_x86::sem::eip_ref(), g[16] as u32);
+    Some(mask)
 }
 
 /// Linux の syscall 処理（`cli` から移管した `Linux` 状態機械）。

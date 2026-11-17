@@ -89,6 +89,7 @@
 - newfstatat
 - open
 - openat
+- pause
 - personality
 - pipe
 - pipe2
@@ -106,7 +107,9 @@
 - rmdir
 - rseq
 - rt_sigaction
+- rt_sigpending
 - rt_sigprocmask
+- rt_sigreturn
 - rt_sigsuspend
 - rt_sigtimedwait
 - sched_get_priority_max
@@ -213,6 +216,7 @@
 - munmap
 - open
 - openat
+- pause
 - personality
 - pipe
 - pipe2
@@ -223,7 +227,9 @@
 - rename
 - rmdir
 - rt_sigaction
+- rt_sigpending
 - rt_sigprocmask
+- rt_sigreturn
 - rt_sigsuspend
 - rt_sigtimedwait
 - sendfile

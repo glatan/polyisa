@@ -146,6 +146,16 @@ pub fn xcr0_ref() -> StateRef<W64> {
     StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, xcr0))
 }
 
+/// 拡張状態の OS 対応マスク（`arch_prctl` XCOMP 系のもと）。
+pub fn xcomp_supp_ref() -> StateRef<W64> {
+    StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, xcomp_supp))
+}
+
+/// 拡張状態のスレッド許可マスク（`arch_prctl` XCOMP 系）。
+pub fn xcomp_perm_ref() -> StateRef<W64> {
+    StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, xcomp_perm))
+}
+
 /// 64ビットレジスタを読む（0-7 は上位 h と下位 g を結合し、8-15 は x を読む）。
 pub fn read64<B: Backend>(b: &mut B, r: Gpr) -> B::V<W64> {
     if r.0 < 8 {

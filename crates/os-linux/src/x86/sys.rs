@@ -73,6 +73,13 @@ pub struct Linux {
     pub stdin_buf: Vec<u8>,
     /// `stdin_buf` の次に読む位置。
     stdin_pos: usize,
+    /// シグナルハンドラの表（添字はシグナル番号-1）。空は全て
+    /// SIG_DFL。i386 では配送はしないが設定の保持は共通。
+    sigacts: Vec<crate::x86::SigAct>,
+    /// ブロック中のシグナルのビット集合。
+    sig_mask: u64,
+    /// 保留中のシグナルのビット集合。配送は `after_step` で行う。
+    sig_pending: u64,
     /// ゲストプロセス表。fork した子と共有する。
     procs: std::rc::Rc<std::cell::RefCell<polyisa_kernel::ProcessTable>>,
     /// 0 は未登録。最初のシステムコールか命令で 1 から採番する。
@@ -535,6 +542,10 @@ impl Linux {
             stderr_is_stdout: self.stderr_is_stdout,
             stdin_buf: self.stdin_buf.clone(),
             stdin_pos: self.stdin_pos,
+            // fork: ハンドラ表とマスクは継承、保留は引き継がない。
+            sigacts: self.sigacts.clone(),
+            sig_mask: self.sig_mask,
+            sig_pending: 0,
             procs: std::rc::Rc::clone(&self.procs),
             pid: self.pid,
             steps: 0,
@@ -566,6 +577,54 @@ impl Linux {
             .iter()
             .map(|task| task.linux.pid)
             .collect()
+    }
+
+    /// 保留シグナルのうちブロックされていない最も小さい番号を
+    /// 配送する。フレームは x86-64 の rt 形式（i386 は未配送）。
+    /// ハンドラが SIG_DFL/SIG_IGN のものは `kill` 側で保留に
+    /// しないのでここには来ない。
+    // Gap: GAP-0026 — CPU 例外→シグナルの変換、i386 フレーム、
+    // 既定動作（SIGKILL 以外）による終了、他プロセス/他スレッド
+    // への配送、タイマ由来のシグナル、sigaltstack はない。
+    fn deliver_pending(&mut self, env: &mut BareEnv) {
+        if !self.is64 {
+            return;
+        }
+        let deliver = self.sig_pending & !self.sig_mask;
+        if deliver == 0 {
+            return;
+        }
+        let sig = deliver.trailing_zeros() + 1;
+        let bit = 1u64 << (sig - 1);
+        self.sig_pending &= !bit;
+        let act = self
+            .sigacts
+            .get(sig as usize - 1)
+            .copied()
+            .unwrap_or_default();
+        if act.handler <= 1 {
+            return;
+        }
+        let old = self.sig_mask;
+        self.sig_mask = old
+            | act.mask
+            | if act.flags & crate::x86::SA_NODEFER == 0 {
+                bit
+            } else {
+                0
+            };
+        if act.flags & crate::x86::SA_RESETHAND != 0 {
+            self.sigacts[sig as usize - 1] = crate::x86::SigAct::default();
+        }
+        let pid = self.pid;
+        if !crate::x86::rt_sigframe_write(env, sig, &act, old, pid) {
+            // フレームが書けない（未写像スタック等）。実機なら
+            // SIGSEGV で死ぬが、ここでは配送を諦めて保留と
+            // ハンドラを戻し、再試行できる状態にする。
+            self.sig_mask = old;
+            self.sig_pending |= bit;
+            self.sigacts[sig as usize - 1] = act;
+        }
     }
 
     /// 1 命令を数え、区切りでより短いスレッドへ切り替える。
@@ -859,8 +918,11 @@ const X86_64_SYSCALLS: &[(&str, SysFn)] = &[
     ("munmap", sys_munmap),
     ("rt_sigaction", sys_rt_sigaction),
     ("rt_sigprocmask", sys_rt_sigprocmask),
+    ("rt_sigpending", sys_rt_sigpending),
+    ("rt_sigreturn", sys_rt_sigreturn),
     ("rt_sigtimedwait", sys_rt_sigtimedwait),
     ("rt_sigsuspend", sys_rt_sigsuspend),
+    ("pause", sys_pause),
     ("tgkill", sys_tgkill),
     ("set_robust_list", sys_set_robust_list),
     ("rseq", sys_rseq),
@@ -935,8 +997,11 @@ const X86_32_SYSCALLS: &[(&str, SysFn)] = &[
     ("munmap", sys_munmap),
     ("rt_sigaction", sys_rt_sigaction),
     ("rt_sigprocmask", sys_rt_sigprocmask),
+    ("rt_sigpending", sys_rt_sigpending),
+    ("rt_sigreturn", sys_rt_sigreturn),
     ("rt_sigtimedwait", sys_rt_sigtimedwait),
     ("rt_sigsuspend", sys_rt_sigsuspend),
+    ("pause", sys_pause),
     ("tgkill", sys_tgkill),
     ("readlinkat", sys_readlinkat),
     ("readlink", sys_readlink),
@@ -2113,9 +2178,28 @@ fn sys_sysfs(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOut
     crate::x86::sys_sysfs(env, cx)
 }
 
-fn sys_tkill(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
-    crate::x86::sys_tkill(env, cx)
+fn sys_tkill(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // tkill(tid, sig)。tgkill と同様に、自分宛てでハンドラが
+    // あれば保留に積む。
+    let sig = get64(env, cx.r_b);
+    if sig > 64 {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    if sig > 0 {
+        let me = sys.ensure_self();
+        let tid = get64(env, cx.r_a);
+        if tid == me.0
+            && sys
+                .sigacts
+                .get(sig as usize - 1)
+                .is_some_and(|a| a.handler > 1)
+        {
+            sys.sig_pending |= 1 << (sig - 1);
+        }
+    }
+    set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
 }
 
 fn sys_inotify_init1(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
@@ -2308,8 +2392,38 @@ fn sys_kill(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutco
     const SIGKILL: i64 = 9;
     let pid = get64(env, cx.r_a) as i64;
     let sig = get64(env, cx.r_b) as i64;
-    // SIGTERM 等は配送しない。halt が一斉送信しても単一ゲストでは相手がいない。
+    // SIGKILL 以外: 自分宛てでハンドラがあれば保留に積む。
+    // SIG_IGN/SIG_DFL 宛ては従来どおり成功だけを返す（SIGKILL
+    // 以外の既定動作での終了はモデル化しない）。
     if sig != SIGKILL {
+        // sig=0 は存在確認のみ。範囲外は EINVAL（tgkill と同じ）。
+        if !(0..=64).contains(&sig) {
+            set64(env, Gpr(0), cx.neg(EINVAL));
+            return Some(TrapOutcome::Handled);
+        }
+        if sig > 0 {
+            let me = sys.ensure_self();
+            if pid == me.0 as i64 {
+                if sys
+                    .sigacts
+                    .get(sig as usize - 1)
+                    .is_some_and(|a| a.handler > 1)
+                {
+                    sys.sig_pending |= 1 << (sig - 1);
+                }
+            } else if pid > 0
+                && sys
+                    .procs
+                    .borrow()
+                    .pgid(polyisa_kernel::ProcessId(pid as u64))
+                    .is_none()
+            {
+                // 他プロセス宛ての配送はないが、存在しない
+                // pid への送信は ESRCH。
+                set64(env, Gpr(0), cx.neg(ESRCH));
+                return Some(TrapOutcome::Handled);
+            }
+        }
         set64(env, Gpr(0), 0);
         return Some(TrapOutcome::Handled);
     }
@@ -2640,14 +2754,151 @@ fn sys_munmap(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOu
     crate::x86::sys_munmap(env, cx)
 }
 
-fn sys_rt_sigaction(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
-    crate::x86::sys_rt_sigaction(env, cx)
+/// シグナル番号の妥当性（1..=64）。SIGKILL(9)/SIGSTOP(19) は
+/// ハンドラを設定できない（Linux の sig_kernel_only 相当）。
+fn sig_settable(sig: u64) -> bool {
+    (1..=64).contains(&sig) && sig != 9 && sig != 19
 }
 
-fn sys_rt_sigprocmask(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
-    crate::x86::sys_rt_sigprocmask(env, cx)
+fn sys_rt_sigaction(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // rt_sigaction(sig, act, oldact, sigsetsize)。kernel_sigaction
+    // は x86-64 で 32 バイト、i386 で 20 バイト。x86-64 では
+    // SA_RESTORER 必須（glibc が常に設定する）。
+    let sig = get64(env, cx.r_a);
+    let act_p = get64(env, cx.r_b);
+    let old_p = get64(env, cx.r_c);
+    let size = get64(env, cx.r_d);
+    if !(1..=64).contains(&sig) || size != 8 {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    let act = if act_p == 0 {
+        None
+    } else {
+        // 設定の拒否は act 指定時のみ。act=NULL の照会は
+        // SIGKILL/SIGSTOP に対しても成功する。
+        if !sig_settable(sig) {
+            set64(env, Gpr(0), cx.neg(EINVAL));
+            return Some(TrapOutcome::Handled);
+        }
+        let Some(a) = crate::x86::sigact_read(env, act_p, sys.is64) else {
+            set64(env, Gpr(0), cx.neg(EFAULT));
+            return Some(TrapOutcome::Handled);
+        };
+        if sys.is64 && a.flags & crate::x86::SA_RESTORER == 0 {
+            set64(env, Gpr(0), cx.neg(EINVAL));
+            return Some(TrapOutcome::Handled);
+        }
+        Some(a)
+    };
+    if sys.sigacts.len() < 64 {
+        sys.sigacts.resize(64, crate::x86::SigAct::default());
+    }
+    let i = sig as usize - 1;
+    let old = sys.sigacts[i];
+    if let Some(a) = act {
+        sys.sigacts[i] = a;
+    }
+    if old_p != 0 && !crate::x86::sigact_write(env, old_p, &old, sys.is64) {
+        set64(env, Gpr(0), cx.neg(EFAULT));
+        return Some(TrapOutcome::Handled);
+    }
+    set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
+}
+
+/// シグナルマスクの u64 をゲストメモリから読む。
+fn mask_read(env: &mut BareEnv, addr: u64) -> Option<u64> {
+    let mut b = [0u8; 8];
+    env.backend
+        .mem
+        .read(
+            polyisa_mem::VirtAddr(addr),
+            &mut b,
+            crate::x86::data_access(),
+        )
+        .ok()?;
+    Some(u64::from_le_bytes(b))
+}
+
+fn mask_write(env: &mut BareEnv, addr: u64, v: u64) -> bool {
+    env.backend
+        .mem
+        .write(polyisa_mem::VirtAddr(addr), &v.to_le_bytes())
+        .is_ok()
+}
+
+fn sys_rt_sigprocmask(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // rt_sigprocmask(how, set, oldset, sigsetsize)。
+    let how = get64(env, cx.r_a);
+    let set_p = get64(env, cx.r_b);
+    let old_p = get64(env, cx.r_c);
+    let size = get64(env, cx.r_d);
+    if size != 8 {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    if old_p != 0 && !mask_write(env, old_p, sys.sig_mask) {
+        set64(env, Gpr(0), cx.neg(EFAULT));
+        return Some(TrapOutcome::Handled);
+    }
+    if set_p != 0 {
+        let Some(v) = mask_read(env, set_p) else {
+            set64(env, Gpr(0), cx.neg(EFAULT));
+            return Some(TrapOutcome::Handled);
+        };
+        sys.sig_mask = match how {
+            crate::x86::SIG_BLOCK => sys.sig_mask | v,
+            crate::x86::SIG_UNBLOCK => sys.sig_mask & !v,
+            crate::x86::SIG_SETMASK => v,
+            _ => {
+                set64(env, Gpr(0), cx.neg(EINVAL));
+                return Some(TrapOutcome::Handled);
+            }
+        } & !(1 << 8 | 1 << 18); // SIGKILL/SIGSTOP は止められない
+    }
+    set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_rt_sigpending(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // rt_sigpending(set, sigsetsize)。
+    let set_p = get64(env, cx.r_a);
+    let size = get64(env, cx.r_b);
+    if size != 8 {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    if !mask_write(env, set_p, sys.sig_pending) {
+        set64(env, Gpr(0), cx.neg(EFAULT));
+        return Some(TrapOutcome::Handled);
+    }
+    set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
+}
+
+fn sys_rt_sigreturn(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // x86-64 の rt フレームから復元する。i386 のフレーム形式は
+    // 未対応（i386 では配送自体をしていない）。
+    if !sys.is64 {
+        set64(env, Gpr(0), cx.neg(crate::ENOSYS));
+        return Some(TrapOutcome::Handled);
+    }
+    match crate::x86::rt_sigframe_read(env) {
+        Some(mask) => {
+            sys.sig_mask = mask;
+            Some(TrapOutcome::Handled)
+        }
+        // 壊れたフレーム。実機は SIGSEGV で殺す。
+        None => Some(TrapOutcome::Exit(11)),
+    }
+}
+
+fn sys_pause(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // pause。保留シグナルがあれば `after_step` で配送されるので
+    // EINTR を返す。ない場合も待たずに EINTR（近似）。
+    set64(env, Gpr(0), cx.neg(EINTR));
+    Some(TrapOutcome::Handled)
 }
 
 fn sys_rt_sigtimedwait(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
@@ -2655,14 +2906,49 @@ fn sys_rt_sigtimedwait(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Opti
     crate::x86::sys_rt_sigtimedwait(env, cx)
 }
 
-fn sys_rt_sigsuspend(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
-    crate::x86::sys_rt_sigsuspend(env, cx)
+fn sys_rt_sigsuspend(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // rt_sigsuspend(set, sigsetsize)。マスクを一時的に置き換えて
+    // シグナルを待つ。配送は `after_step` で起きるので待たずに
+    // EINTR を返す（近似）。マスクは次の sigreturn で元に戻る
+    // ためここでは退避しない（近似: フレームの uc_sigmask が正）。
+    let set_p = get64(env, cx.r_a);
+    let size = get64(env, cx.r_b);
+    if size != 8 {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    if set_p != 0 {
+        let Some(v) = mask_read(env, set_p) else {
+            set64(env, Gpr(0), cx.neg(EFAULT));
+            return Some(TrapOutcome::Handled);
+        };
+        sys.sig_mask = v;
+    }
+    set64(env, Gpr(0), cx.neg(EINTR));
+    Some(TrapOutcome::Handled)
 }
 
-fn sys_tgkill(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
-    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
-    crate::x86::sys_tgkill(env, cx)
+fn sys_tgkill(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // tgkill(tgid, tid, sig)。自分宛てでハンドラがあれば保留に積む。
+    let sig = get64(env, cx.r_c);
+    if sig > 64 {
+        set64(env, Gpr(0), cx.neg(EINVAL));
+        return Some(TrapOutcome::Handled);
+    }
+    if sig > 0 {
+        let me = sys.ensure_self();
+        let tid = get64(env, cx.r_b);
+        if tid == me.0
+            && sys
+                .sigacts
+                .get(sig as usize - 1)
+                .is_some_and(|a| a.handler > 1)
+        {
+            sys.sig_pending |= 1 << (sig - 1);
+        }
+    }
+    set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
 }
 
 fn sys_set_robust_list(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
@@ -3358,6 +3644,13 @@ fn install_exec(
     sys.mmap_base = 0;
     sys.exe_path = path.to_string();
     env.backend.set(polyisa_guest_x86::sem::fs_base_ref(), 0);
+    // execve は捕捉済みハンドラを SIG_DFL に戻す。SIG_IGN と
+    // マスク・保留は維持される。
+    for a in &mut sys.sigacts {
+        if a.handler > 1 {
+            *a = crate::x86::SigAct::default();
+        }
+    }
     Ok(())
 }
 
@@ -3367,6 +3660,7 @@ impl TrapHandler for Linux {
     }
 
     fn after_step(&mut self, env: &mut BareEnv) {
+        self.deliver_pending(env);
         self.step_and_maybe_preempt(env);
     }
 
@@ -4282,6 +4576,169 @@ mod tests {
         set64(&mut env, Gpr(7), 0x9999);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EINVAL));
+    }
+
+    fn rd8(env: &mut BareEnv, a: u64) -> u64 {
+        let mut b = [0u8; 8];
+        env.backend
+            .mem
+            .read(VirtAddr(a), &mut b, data_access())
+            .unwrap();
+        u64::from_le_bytes(b)
+    }
+
+    #[test]
+    fn arch_prctl_xcomp() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        let mut prctl = |env: &mut BareEnv, op: u64, arg: u64| {
+            set64(env, Gpr(0), abi::ARCH_PRCTL);
+            set64(env, Gpr(7), op);
+            set64(env, Gpr(6), arg);
+            sys.handle_trap(env, 0);
+            get64(env, Gpr(0))
+        };
+        // 対応=3（x87+SSE。amx_tile なしの既定モデル）、許可=3。
+        env.backend.set(polyisa_guest_x86::sem::xcomp_supp_ref(), 3);
+        env.backend.set(polyisa_guest_x86::sem::xcomp_perm_ref(), 3);
+        assert_eq!(prctl(&mut env, 0x1031, 0x100), 0); // GET_XCOMP_SUPP
+        assert_eq!(rd8(&mut env, 0x100), 3);
+        assert_eq!(prctl(&mut env, 0x1021, 0x108), 0); // GET_XCOMP_PERM
+        assert_eq!(rd8(&mut env, 0x108), 3);
+        // 未対応の XTILEDATA(18) は EOPNOTSUPP、上限超は EINVAL。
+        assert_eq!(prctl(&mut env, 0x1022, 18), neg_errno64(EOPNOTSUPP));
+        assert_eq!(prctl(&mut env, 0x1022, 19), neg_errno64(EINVAL));
+        // amx_tile 相当の対応マスクにすると要求が通る。
+        env.backend
+            .set(polyisa_guest_x86::sem::xcomp_supp_ref(), 0x6_0003);
+        // XTILECFG(17) なしの XTILEDATA は EINVAL。
+        assert_eq!(prctl(&mut env, 0x1022, 18), neg_errno64(EINVAL));
+        assert_eq!(prctl(&mut env, 0x1022, 17), 0);
+        assert_eq!(prctl(&mut env, 0x1022, 18), 0);
+        assert_eq!(
+            env.backend.get(polyisa_guest_x86::sem::xcomp_perm_ref()),
+            0x6_0003
+        );
+        // 動的成分の許可は XCR0 にも反映される。
+        assert_eq!(
+            env.backend.get(polyisa_guest_x86::sem::xcr0_ref()),
+            0x6_0000
+        );
+        // 書き込み先が未写像なら EFAULT。
+        assert_eq!(prctl(&mut env, 0x1031, 0x1_0000_0000), neg_errno64(EFAULT));
+    }
+
+    #[test]
+    fn signal_deliver_sigreturn() {
+        use crate::x86_64 as abi;
+        let mut sys = Linux::x86_64();
+        let mut env = bare();
+        // フレーム用のスタック領域を写像する（0x6000-0x9FFF）。
+        env.backend.mem.map(VirtAddr(0x6000), 4, Perms::RW).unwrap();
+        // 64 ビットでフルサイズの CPU 状態が要る。
+        env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037F);
+        env.backend.set(polyisa_guest_x86::sem::mxcsr_ref(), 0x1F80);
+        env.backend.set(polyisa_guest_x86::sem::xcr0_ref(), 3);
+        env.backend.set(
+            polyisa_guest_x86::sem::xmm_ref(polyisa_guest_x86::sem::Xmm(0)),
+            0x1122_3344,
+        );
+        set64(&mut env, Gpr(4), 0x8000); // RSP
+        set64(&mut env, Gpr(3), 0xAAAA); // RBX
+        env.backend.set(polyisa_guest_x86::sem::eip_ref(), 0x4000);
+        // kernel_sigaction {handler, flags=SA_RESTORER, restorer, mask}。
+        env.backend
+            .mem
+            .write(VirtAddr(0x200), &0x9000u64.to_le_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x208), &crate::x86::SA_RESTORER.to_le_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x210), &0x9100u64.to_le_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x218), &(1u64 << 11).to_le_bytes())
+            .unwrap();
+        // rt_sigaction(SIGUSR1=10, act=0x200, old=0, 8)。
+        set64(&mut env, Gpr(0), abi::RT_SIGACTION);
+        set64(&mut env, Gpr(7), 10);
+        set64(&mut env, Gpr(6), 0x200);
+        set64(&mut env, Gpr(2), 0);
+        set64(&mut env, Gpr(10), 8);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        // SIGKILL(9) にはハンドラを設定できない。
+        set64(&mut env, Gpr(0), abi::RT_SIGACTION);
+        set64(&mut env, Gpr(7), 9);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EINVAL));
+        // ただし act=NULL の照会は SIGKILL に対しても成功する。
+        set64(&mut env, Gpr(0), abi::RT_SIGACTION);
+        set64(&mut env, Gpr(7), 9);
+        set64(&mut env, Gpr(6), 0);
+        set64(&mut env, Gpr(2), 0x220);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        // kill(getpid(), SIGUSR1) で保留に積む。
+        set64(&mut env, Gpr(0), abi::GETPID);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        let pid = get64(&mut env, Gpr(0));
+        set64(&mut env, Gpr(0), abi::KILL);
+        set64(&mut env, Gpr(7), pid);
+        set64(&mut env, Gpr(6), 10);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        // 次の命令境界で配送される。
+        sys.after_step(&mut env);
+        let f = get64(&mut env, Gpr(4));
+        assert!(f < 0x8000 - 1024);
+        // フレーム基底は ≡8 (mod 16)（call 直後の関数入口と同じ）。
+        assert_eq!(f % 16, 8);
+        assert_eq!(env.backend.get(polyisa_guest_x86::sem::eip_ref()), 0x9000);
+        assert_eq!(get64(&mut env, Gpr(7)), 10); // 第1引数=シグナル
+        assert_eq!(get64(&mut env, Gpr(6)), f + 312); // &siginfo
+        assert_eq!(get64(&mut env, Gpr(2)), f + 8); // &ucontext
+        assert_eq!(rd8(&mut env, f), 0x9100); // pretcode=restorer
+        assert_eq!(rd8(&mut env, f + 304), 0); // uc_sigmask=旧マスク
+        assert_eq!(rd8(&mut env, f + 312) & 0xFFFF_FFFF, 10); // si_signo
+        assert_eq!(rd8(&mut env, f + 312 + 16) & 0xFFFF_FFFF, pid); // si_pid
+        // gregs: RIP=旧 eip, RBX=0xAAAA。
+        assert_eq!(rd8(&mut env, f + 48 + 8 * 16), 0x4000);
+        assert_eq!(rd8(&mut env, f + 48 + 8 * 11), 0xAAAA);
+        // fpstate はフレームの直上に別置き。fpregs が指す。
+        let fp = rd8(&mut env, f + 48 + 184);
+        assert_eq!(fp % 64, 0); // 64 整列
+        assert_eq!(rd8(&mut env, fp) & 0xFFFF, 0x037F);
+        assert_eq!(rd8(&mut env, fp + 24) & 0xFFFF_FFFF, 0x1F80);
+        assert_eq!(rd8(&mut env, fp + 160), 0x1122_3344);
+        // ハンドラ中はマスクが act.mask|シグナル になる。
+        assert_eq!(sys.sig_mask, (1 << 11) | (1 << 9));
+        // ハンドラが状態を変えてから ret で pretcode（restorer）
+        // をポップ → RSP はフレーム基底+8 で rt_sigreturn へ来る。
+        set64(&mut env, Gpr(3), 0xBBBB);
+        env.backend.set(
+            polyisa_guest_x86::sem::xmm_ref(polyisa_guest_x86::sem::Xmm(0)),
+            0,
+        );
+        set64(&mut env, Gpr(4), f + 8);
+        set64(&mut env, Gpr(0), abi::RT_SIGRETURN);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        // コンテキストと FP 状態・マスクが復元される。
+        assert_eq!(env.backend.get(polyisa_guest_x86::sem::eip_ref()), 0x4000);
+        assert_eq!(get64(&mut env, Gpr(4)), 0x8000);
+        assert_eq!(get64(&mut env, Gpr(3)), 0xAAAA);
+        assert_eq!(
+            env.backend.get(polyisa_guest_x86::sem::xmm_ref(
+                polyisa_guest_x86::sem::Xmm(0)
+            )),
+            0x1122_3344
+        );
+        assert_eq!(sys.sig_mask, 0);
     }
 
     #[test]
@@ -5443,16 +5900,27 @@ mod tests {
         use crate::x86_64 as abi;
         let mut sys = Linux::x86_64();
         let mut env = bare();
+        // sig=10, act=0, old=0, size=8 は受理される。
         set64(&mut env, Gpr(0), abi::RT_SIGACTION);
+        set64(&mut env, Gpr(7), 10);
+        set64(&mut env, Gpr(10), 8);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), 0);
+        // how=SIG_BLOCK, set=0, old=0, size=8 は受理される。
         set64(&mut env, Gpr(0), abi::RT_SIGPROCMASK);
+        set64(&mut env, Gpr(7), 0);
+        set64(&mut env, Gpr(6), 0);
+        set64(&mut env, Gpr(2), 0);
+        set64(&mut env, Gpr(10), 8);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), 0);
         set64(&mut env, Gpr(0), abi::RT_SIGTIMEDWAIT);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EAGAIN));
+        // set=0, size=8 は受理されて EINTR。
         set64(&mut env, Gpr(0), abi::RT_SIGSUSPEND);
+        set64(&mut env, Gpr(7), 0);
+        set64(&mut env, Gpr(6), 8);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), neg_errno64(EINTR));
     }

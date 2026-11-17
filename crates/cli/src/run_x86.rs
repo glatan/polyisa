@@ -13163,6 +13163,12 @@ fn run_image_x86_32_impl(
     // OSXSAVE=1 を報告するので XCR0 は OS が x87+SSE を有効化した
     // 後の 3 で始める（実機のリセット値は 1）。
     env.backend.set(polyisa_guest_x86::sem::xcr0_ref(), 3);
+    // XCOMP の対応・許可マスク。静的成分は起動時点で全て許可済み。
+    let supp = polyisa_guest_x86::cpuid::xcomp_supp(features);
+    env.backend
+        .set(polyisa_guest_x86::sem::xcomp_supp_ref(), supp);
+    env.backend
+        .set(polyisa_guest_x86::sem::xcomp_perm_ref(), supp & 0xFFFF);
     install_cpuid(&mut env, features, ident);
     match run_mode_ex(
         &mut env,
@@ -13345,6 +13351,12 @@ fn run_image_x86_64_impl(
     // OSXSAVE=1 を報告するので XCR0 は OS が x87+SSE を有効化した
     // 後の 3 で始める（実機のリセット値は 1）。
     env.backend.set(polyisa_guest_x86::sem::xcr0_ref(), 3);
+    // XCOMP の対応・許可マスク。静的成分は起動時点で全て許可済み。
+    let supp = polyisa_guest_x86::cpuid::xcomp_supp(features);
+    env.backend
+        .set(polyisa_guest_x86::sem::xcomp_supp_ref(), supp);
+    env.backend
+        .set(polyisa_guest_x86::sem::xcomp_perm_ref(), supp & 0xFFFF);
     install_cpuid(&mut env, features, ident);
     let out = match jit {
         Some(jit) => run_mode_ex_jit(
@@ -14582,6 +14594,9 @@ mod tests {
         // OSXSAVE=1 を報告するので XCR0 は OS が x87+SSE を有効化した
         // 後の 3 で始める（実機のリセット値は 1）。
         env.backend.set(sem::xcr0_ref(), 3);
+        // XCOMP の対応・許可マスク（既定モデル = amx_tile なしの 3）。
+        env.backend.set(sem::xcomp_supp_ref(), 3);
+        env.backend.set(sem::xcomp_perm_ref(), 3);
         env.backend.set(sem::eip_ref(), ehdr.entry as u32);
         env.backend.addr_mask = u64::MAX;
         let _ = sys.on_block(&mut env);

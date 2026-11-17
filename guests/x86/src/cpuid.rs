@@ -115,12 +115,12 @@ pub fn derive(features: &BTreeSet<String>, ident: &BTreeMap<String, String>) -> 
             reg_of(7, 0, "ecx"),
             reg_of(7, 0, "edx"),
         ],
-        // leaf D サブリーフ 0: XCR0 対応成分（bit0=x87,bit1=SSE で
-        // 固定 3）、現在有効サイズ・最大サイズ。モデル化する成分は
-        // 2 つだけなので両方とも 512+64=576 固定。EBX は本来現在の
-        // XCR0 に連動するが固定表なので最大値を報告する（近似）。
+        // leaf D サブリーフ 0: XCR0 対応成分（`xcomp_supp` と同じ
+        // マスク）、現在有効サイズ・最大サイズ。成分の保存実装は
+        // x87/SSE だけなのでサイズは 512+64=576 のまま（近似。
+        // 実機は AMX 成分ぶん大きい値と leaf D.17/D.18 を報告する）。
         if features.contains("xsave") {
-            [3, 0x240, 0x240, 0]
+            [xcomp_supp(features) as u32, 0x240, 0x240, 0]
         } else {
             [0; 4]
         },
@@ -157,4 +157,19 @@ pub fn derive(features: &BTreeSet<String>, ident: &BTreeMap<String, String>) -> 
         }
     }
     tbl
+}
+
+/// Linux `arch_prctl(ARCH_GET_XCOMP_SUPP)` が返す「OS が
+/// 対応する拡張状態」の成分マスク。bit0=x87, bit1=SSE は常に、
+/// bit17=XTILECFG, bit18=XTILEDATA は `amx_tile` 宣言時に含む。
+/// bit2 (YMM) 以降はその成分の XSAVE 実装が入ってから足す。
+/// leaf D.0 の EAX が報告する成分と同じマスクを返す（実機の
+/// XCOMP_SUPP は leaf D の uabi 成分と一致する）。
+#[must_use]
+pub fn xcomp_supp(features: &BTreeSet<String>) -> u64 {
+    let mut m = 0x3u64;
+    if features.contains("amx_tile") {
+        m |= 0x6_0000;
+    }
+    m
 }

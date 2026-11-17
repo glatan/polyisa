@@ -92,6 +92,14 @@ pub struct CpuState {
     /// XCR0（拡張機能許可ビットマスク）。XGETBV/XSETBV が
     /// 読み書きする。リセット値は 1（x87 状態のみ必須）。
     pub xcr0: u64,
+    /// 拡張状態のうち OS が対応する成分のマスク。Linux の
+    /// `arch_prctl(ARCH_GET_XCOMP_SUPP)` が返す値のもとで、
+    /// `cpuid::derive` が報告するモデルから導く。実行中は不変。
+    pub xcomp_supp: u64,
+    /// 拡張状態のうちスレッドに許可済みの成分のマスク。Linux の
+    /// `ARCH_GET_XCOMP_PERM`/`ARCH_REQ_XCOMP_PERM` が読み書き
+    /// する。動的成分（bit16 以降）は許可時に `xcr0` にも足す。
+    pub xcomp_perm: u64,
 }
 
 #[cfg(test)]
@@ -129,6 +137,8 @@ mod tests {
         assert_eq!(core::mem::offset_of!(CpuState, mxcsr), 640);
         // xcr0 は末尾（rand_state・pkru の後）。
         assert_eq!(core::mem::offset_of!(CpuState, xcr0), 696);
+        assert_eq!(core::mem::offset_of!(CpuState, xcomp_supp), 704);
+        assert_eq!(core::mem::offset_of!(CpuState, xcomp_perm), 712);
     }
 
     #[test]

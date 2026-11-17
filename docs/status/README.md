@@ -111,8 +111,8 @@
 | ゲスト ABI | 処理するシステムコール | 詳細 |
 |---|---|---|
 | rv64 | 3 | [syscalls.md](syscalls.md) |
-| x86_64 | 150 | [syscalls.md](syscalls.md) |
-| x86_32 | 83 | [syscalls.md](syscalls.md) |
+| x86_64 | 153 | [syscalls.md](syscalls.md) |
+| x86_32 | 86 | [syscalls.md](syscalls.md) |
 | mips_o32 | 444 | [syscalls.md](syscalls.md) |
 | mips_n32 | 398 | [syscalls.md](syscalls.md) |
 | mips_n64 | 374 | [syscalls.md](syscalls.md) |

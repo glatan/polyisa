@@ -8534,7 +8534,9 @@ fn cstore<B: Backend, W: decode::Hw>(
 /// +XMM(160-,16B毎。m64 は XMM8-15 が +288 以降)。
 /// FOP/FIP/FDP は命令ポインタを追跡しないので 0。64 バイト
 /// 境界整列の #GP はモデル化しない。
-fn fxsave_area<B: Backend>(
+/// 公開の理由: Linux のシグナルフレームの fpstate もこの
+/// 配置なので、os-linux が `wseg=None` で呼び直す。
+pub fn fxsave_area<B: Backend>(
     b: &mut B,
     a: B::V<W64>,
     wseg: Option<(u64, B::V<W64>)>,
@@ -8619,7 +8621,9 @@ fn fxsave_area<B: Backend>(
 /// `cstore` と同様の近似で、RFBM 外の成分も値は読み込む
 /// （読み出し側の副作用は残るが状態には反映しない）。
 /// FTW/FOP/FIP/FDP は追跡していないので読み捨てる。
-fn fxrstor_area<B: Backend>(
+/// 公開の理由: rt_sigreturn が fpstate（同じ配置）から
+/// 復元するとき os-linux 側から呼ぶ。
+pub fn fxrstor_area<B: Backend>(
     b: &mut B,
     a: B::V<W64>,
     wseg: Option<(u64, B::V<W64>)>,
