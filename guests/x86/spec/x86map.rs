@@ -2157,6 +2157,31 @@ pub fn build_maps(m: &mut Model) {
             vax(&n, &[RegX, Vv, RmX], PfxSel::P66, L1, false, "{op} {x}, {h}, {w}", "alu"),
         ));
     }
+    // VPINSRW（0F C4、3 オペランド）と VPEXTRW（0F C5、レジスタ形のみ）。
+    m0f.push(MapItem::Insn(
+        0xC4,
+        vmx(
+            "vpinsrw_xv_hv_ew_ib",
+            &[RegX, Vv, Ea(W16), Imm(B8)],
+            PfxSel::P66,
+            L0,
+            false,
+            "{op} {x}, {h}, {e}, {i}",
+            "alu",
+        ),
+    ));
+    m0f.push(MapItem::Insn(
+        0xC5,
+        mreg(vmx(
+            "vpextrw_gv_wv_ib",
+            &[Reg(V), RmX, Imm(B8)],
+            PfxSel::P66,
+            L0,
+            true,
+            "{op} {g}, {w}, {i}",
+            "alu",
+        )),
+    ));
     m.maps.push(MapDecl {
         name: "map_0f".to_string(),
         vex_code: Some(1),
@@ -2474,6 +2499,149 @@ fn build_map_0f38(m: &mut Model) {
         0x41,
         vmx("vphminposuw_xv_wv", &[RegX, RmX], PfxSel::P66, L0, true, "{op} {x}, {w}", "alu"),
     ));
+    // VPERMILPS/VPERMILPD の可変形（3 オペランド。256 ビットも AVX）。
+    for (op, mn) in [(0x0Cu8, "vpermilps"), (0x0D, "vpermilpd")] {
+        v.push(MapItem::Insn(
+            op,
+            vmx(
+                &format!("{mn}_xv_hv_wv"),
+                &[RegX, Vv, RmX],
+                PfxSel::P66,
+                Any,
+                false,
+                "{op} {x}, {h}, {w}",
+                "alu",
+            ),
+        ));
+    }
+    // VPERMPS・VPERMD（AVX2・256 ビットのみ）。
+    for (op, mn) in [(0x16u8, "vpermps"), (0x36, "vpermd")] {
+        v.push(MapItem::Insn(
+            op,
+            vax(
+                &format!("{mn}_xv_hv_wv"),
+                &[RegX, Vv, RmX],
+                PfxSel::P66,
+                L1,
+                false,
+                "{op} {x}, {h}, {w}",
+                "alu",
+            ),
+        ));
+    }
+    // VBROADCASTSS（Any）・VBROADCASTSD（256 のみ）。メモリ形は AVX、
+    // レジスタ形は AVX2。
+    for (op, mn, l) in [
+        (0x18u8, "vbroadcastss", Any),
+        (0x19, "vbroadcastsd", L1),
+    ] {
+        let nm = format!("{mn}_xv_wv");
+        let nr = format!("{mn}_xv_xv");
+        v.push(MapItem::Insn(
+            op,
+            mmem(vmx(&nm, &[RegX, RmX], PfxSel::P66, l, true, "{op} {x}, {w}", "load")),
+        ));
+        v.push(MapItem::Insn(
+            op,
+            mreg(vax(&nr, &[RegX, RmX], PfxSel::P66, l, true, "{op} {x}, {w}", "alu")),
+        ));
+    }
+    // VBROADCASTF128（メモリ形のみ・256 ビットのみ）。
+    v.push(MapItem::Insn(
+        0x1A,
+        mmem(vmx(
+            "vbroadcastf128_xv_wv",
+            &[RegX, RmX],
+            PfxSel::P66,
+            L1,
+            true,
+            "{op} {x}, {w}",
+            "load",
+        )),
+    ));
+    // VPMOVSX*/VPMOVZX*（128 ビットは AVX、256 ビットは AVX2）。
+    for (op, mn) in [
+        (0x20u8, "vpmovsxbw"),
+        (0x21, "vpmovsxbd"),
+        (0x22, "vpmovsxbq"),
+        (0x23, "vpmovsxwd"),
+        (0x24, "vpmovsxwq"),
+        (0x25, "vpmovsxdq"),
+        (0x30, "vpmovzxbw"),
+        (0x31, "vpmovzxbd"),
+        (0x32, "vpmovzxbq"),
+        (0x33, "vpmovzxwd"),
+        (0x34, "vpmovzxwq"),
+        (0x35, "vpmovzxdq"),
+    ] {
+        let n = format!("{mn}_xv_wv");
+        v.push(MapItem::Insn(
+            op,
+            vmx(&n, &[RegX, RmX], PfxSel::P66, L0, true, "{op} {x}, {w}", "alu"),
+        ));
+        v.push(MapItem::Insn(
+            op,
+            vax(&n, &[RegX, RmX], PfxSel::P66, L1, true, "{op} {x}, {w}", "alu"),
+        ));
+    }
+    // VMOVNTDQA（メモリ形のみ。256 ビット形は AVX2）。
+    v.push(MapItem::Insn(
+        0x2A,
+        mmem(vmx(
+            "vmovntdqa_xv_wv",
+            &[RegX, RmX],
+            PfxSel::P66,
+            L0,
+            true,
+            "{op} {x}, {w}",
+            "load",
+        )),
+    ));
+    v.push(MapItem::Insn(
+        0x2A,
+        mmem(vax(
+            "vmovntdqa_xv_wv",
+            &[RegX, RmX],
+            PfxSel::P66,
+            L1,
+            true,
+            "{op} {x}, {w}",
+            "load",
+        )),
+    ));
+    // VPBROADCASTB/W/D/Q（AVX2。レジスタ・メモリ両形）。
+    for (op, mn) in [
+        (0x78u8, "vpbroadcastb"),
+        (0x79, "vpbroadcastw"),
+        (0x58, "vpbroadcastd"),
+        (0x59, "vpbroadcastq"),
+    ] {
+        v.push(MapItem::Insn(
+            op,
+            vax(
+                &format!("{mn}_xv_wv"),
+                &[RegX, RmX],
+                PfxSel::P66,
+                Any,
+                true,
+                "{op} {x}, {w}",
+                "load",
+            ),
+        ));
+    }
+    // VBROADCASTI128（AVX2・メモリ形のみ・256 ビットのみ）。
+    v.push(MapItem::Insn(
+        0x5A,
+        mmem(vax(
+            "vbroadcasti128_xv_wv",
+            &[RegX, RmX],
+            PfxSel::P66,
+            L1,
+            true,
+            "{op} {x}, {w}",
+            "load",
+        )),
+    ));
     m.maps.push(MapDecl {
         name: "map_0f38".to_string(),
         vex_code: Some(2),
@@ -2486,7 +2654,7 @@ fn build_map_0f3a(m: &mut Model) {
     use OpKind::*;
     use OpWidth::*;
     let ib = Imm(B8);
-    let items = vec![
+    let mut items = vec![
         MapItem::Insn(0x08, mi("roundps_xv_wv_ib", &[RegX, RmX, ib], None, PfxSel::P66, Pred::True, "roundps {x}, {w}, {i}", "alu")),
         MapItem::Insn(0x09, mi("roundpd_xv_wv_ib", &[RegX, RmX, ib], None, PfxSel::P66, Pred::True, "roundpd {x}, {w}, {i}", "alu")),
         MapItem::Insn(0x0A, mi("roundss_xv_wv_ib", &[RegX, RmX, ib], None, PfxSel::P66, Pred::True, "roundss {x}, {w}, {i}", "alu")),
@@ -2529,6 +2697,267 @@ fn build_map_0f3a(m: &mut Model) {
             MapItem::Insn(0xF0, it)
         },
     ];
+    {
+        use VexL::{Any, L0, L1};
+        // VPERMQ（AVX2・256 のみ・W=1 必須だが W ゲートはないので
+        // W によらず解読する近似）。
+        items.push(MapItem::Insn(
+            0x00,
+            vax(
+                "vpermq_xv_wv_ib",
+                &[RegX, RmX, ib],
+                PfxSel::P66,
+                L1,
+                true,
+                "{op} {x}, {w}, {i}",
+                "alu",
+            ),
+        ));
+        // VPERMILPS/VPERMILPD の即値形（vvvv 未使用）。
+        items.push(MapItem::Insn(
+            0x04,
+            vmx("vpermilps_xv_wv_ib", &[RegX, RmX, ib], PfxSel::P66, Any, true, "{op} {x}, {w}, {i}", "alu"),
+        ));
+        items.push(MapItem::Insn(
+            0x05,
+            vmx("vpermilpd_xv_wv_ib", &[RegX, RmX, ib], PfxSel::P66, Any, true, "{op} {x}, {w}, {i}", "alu"),
+        ));
+        // VPERM2F128（AVX・256 のみ）。
+        items.push(MapItem::Insn(
+            0x06,
+            vmx(
+                "vperm2f128_xv_hv_wv_ib",
+                &[RegX, Vv, RmX, ib],
+                PfxSel::P66,
+                L1,
+                false,
+                "{op} {x}, {h}, {w}, {i}",
+                "alu",
+            ),
+        ));
+        // VROUNDPS/PD（vvvv 未使用）と VROUNDSS/SD（3 オペランド）。
+        for (op, mn) in [
+            (0x08u8, "vroundps"),
+            (0x09, "vroundpd"),
+        ] {
+            items.push(MapItem::Insn(
+                op,
+                vmx(
+                    &format!("{mn}_xv_wv_ib"),
+                    &[RegX, RmX, ib],
+                    PfxSel::P66,
+                    Any,
+                    true,
+                    "{op} {x}, {w}, {i}",
+                    "alu",
+                ),
+            ));
+        }
+        for (op, mn) in [(0x0Au8, "vroundss"), (0x0B, "vroundsd")] {
+            items.push(MapItem::Insn(
+                op,
+                vmx(
+                    &format!("{mn}_xv_hv_wv_ib"),
+                    &[RegX, Vv, RmX, ib],
+                    PfxSel::P66,
+                    L0,
+                    false,
+                    "{op} {x}, {h}, {w}, {i}",
+                    "alu",
+                ),
+            ));
+        }
+        // VBLENDPS/VBLENDPD（256 ビットも AVX）。
+        for (op, mn) in [(0x0Cu8, "vblendps"), (0x0D, "vblendpd")] {
+            items.push(MapItem::Insn(
+                op,
+                vmx(
+                    &format!("{mn}_xv_hv_wv_ib"),
+                    &[RegX, Vv, RmX, ib],
+                    PfxSel::P66,
+                    Any,
+                    false,
+                    "{op} {x}, {h}, {w}, {i}",
+                    "alu",
+                ),
+            ));
+        }
+        // VPBLENDW（256 ビット形は AVX2）。
+        items.push(MapItem::Insn(
+            0x0E,
+            vmx("vpblendw_xv_hv_wv_ib", &[RegX, Vv, RmX, ib], PfxSel::P66, L0, false, "{op} {x}, {h}, {w}, {i}", "alu"),
+        ));
+        items.push(MapItem::Insn(
+            0x0E,
+            vax("vpblendw_xv_hv_wv_ib", &[RegX, Vv, RmX, ib], PfxSel::P66, L1, false, "{op} {x}, {h}, {w}, {i}", "alu"),
+        ));
+        // VPEXTRB/W/D/Q・VEXTRACTPS（vvvv 未使用・128 のみ）。
+        for (op, mn, w) in [
+            (0x14u8, "vpextrb_eb_xv_ib", B8),
+            (0x15, "vpextrw_ew_xv_ib", W16),
+            (0x16, "vpextrd_ev_xv_ib", V),
+            (0x17, "vextractps_ed_xv_ib", D32),
+        ] {
+            items.push(MapItem::Insn(
+                op,
+                vmx(
+                    mn,
+                    &[Ea(w), RegX, ib],
+                    PfxSel::P66,
+                    L0,
+                    true,
+                    "{op} {e}, {x}, {i}",
+                    "store",
+                ),
+            ));
+        }
+        // VINSERTF128（AVX）/VEXTRACTF128（AVX）・VINSERTI128/
+        // VEXTRACTI128（AVX2）。すべて 256 のみ。
+        for (op, mn, f) in [
+            (0x18u8, "vinsertf128", false),
+            (0x19, "vextractf128", true),
+            (0x38, "vinserti128", false),
+            (0x39, "vextracti128", true),
+        ] {
+            let it = if f {
+                if op < 0x20 {
+                    vmx(
+                        &format!("{mn}_wv_xv_ib"),
+                        &[RmX, RegX, ib],
+                        PfxSel::P66,
+                        L1,
+                        true,
+                        "{op} {w}, {x}, {i}",
+                        "store",
+                    )
+                } else {
+                    vax(
+                        &format!("{mn}_wv_xv_ib"),
+                        &[RmX, RegX, ib],
+                        PfxSel::P66,
+                        L1,
+                        true,
+                        "{op} {w}, {x}, {i}",
+                        "store",
+                    )
+                }
+            } else if op < 0x20 {
+                vmx(
+                    &format!("{mn}_xv_hv_wv_ib"),
+                    &[RegX, Vv, RmX, ib],
+                    PfxSel::P66,
+                    L1,
+                    false,
+                    "{op} {x}, {h}, {w}, {i}",
+                    "alu",
+                )
+            } else {
+                vax(
+                    &format!("{mn}_xv_hv_wv_ib"),
+                    &[RegX, Vv, RmX, ib],
+                    PfxSel::P66,
+                    L1,
+                    false,
+                    "{op} {x}, {h}, {w}, {i}",
+                    "alu",
+                )
+            };
+            items.push(MapItem::Insn(op, it));
+        }
+        // VPINSRB・VINSERTPS・VPINSRD/Q（128 のみ）。VPINSRQ は
+        // Ea(V)+VEX.W の `d.rex` 経由で幅を選ぶ。
+        items.push(MapItem::Insn(
+            0x20,
+            vmx(
+                "vpinsrb_xv_hv_eb_ib",
+                &[RegX, Vv, Ea(B8), ib],
+                PfxSel::P66,
+                L0,
+                false,
+                "{op} {x}, {h}, {e}, {i}",
+                "alu",
+            ),
+        ));
+        items.push(MapItem::Insn(
+            0x21,
+            vmx(
+                "vinsertps_xv_hv_wv_ib",
+                &[RegX, Vv, RmX, ib],
+                PfxSel::P66,
+                L0,
+                false,
+                "{op} {x}, {h}, {w}, {i}",
+                "alu",
+            ),
+        ));
+        items.push(MapItem::Insn(
+            0x22,
+            vmx(
+                "vpinsrd_xv_hv_ev_ib",
+                &[RegX, Vv, Ea(V), ib],
+                PfxSel::P66,
+                L0,
+                false,
+                "{op} {x}, {h}, {e}, {i}",
+                "alu",
+            ),
+        ));
+        // VDPPS（256 ビットも AVX）・VDPPD（128 のみ）と
+        // VMPSADBW（256 は AVX2）。
+        items.push(MapItem::Insn(
+            0x40,
+            vmx("vdpps_xv_hv_wv_ib", &[RegX, Vv, RmX, ib], PfxSel::P66, Any, false, "{op} {x}, {h}, {w}, {i}", "alu"),
+        ));
+        items.push(MapItem::Insn(
+            0x41,
+            vmx("vdppd_xv_hv_wv_ib", &[RegX, Vv, RmX, ib], PfxSel::P66, L0, false, "{op} {x}, {h}, {w}, {i}", "alu"),
+        ));
+        items.push(MapItem::Insn(
+            0x42,
+            vmx("vmpsadbw_xv_hv_wv_ib", &[RegX, Vv, RmX, ib], PfxSel::P66, L0, false, "{op} {x}, {h}, {w}, {i}", "alu"),
+        ));
+        items.push(MapItem::Insn(
+            0x42,
+            vax("vmpsadbw_xv_hv_wv_ib", &[RegX, Vv, RmX, ib], PfxSel::P66, L1, false, "{op} {x}, {h}, {w}, {i}", "alu"),
+        ));
+        // VBLENDVPS/VBLENDVPD（256 も AVX）と VPBLENDVB（256 は AVX2）。
+        // imm8[7:4] がマスクレジスタ。
+        for (op, mn) in [(0x4Au8, "vblendvps"), (0x4B, "vblendvpd")] {
+            items.push(MapItem::Insn(
+                op,
+                vmx(
+                    &format!("{mn}_xv_hv_wv_ib"),
+                    &[RegX, Vv, RmX, ib],
+                    PfxSel::P66,
+                    Any,
+                    false,
+                    "{op} {x}, {h}, {w}, {i}",
+                    "alu",
+                ),
+            ));
+        }
+        items.push(MapItem::Insn(
+            0x4C,
+            vmx("vpblendvb_xv_hv_wv_ib", &[RegX, Vv, RmX, ib], PfxSel::P66, L0, false, "{op} {x}, {h}, {w}, {i}", "alu"),
+        ));
+        items.push(MapItem::Insn(
+            0x4C,
+            vax("vpblendvb_xv_hv_wv_ib", &[RegX, Vv, RmX, ib], PfxSel::P66, L1, false, "{op} {x}, {h}, {w}, {i}", "alu"),
+        ));
+        // VPERM2I128（AVX2・256 のみ）。
+        items.push(MapItem::Insn(
+            0x46,
+            vax(
+                "vperm2i128_xv_hv_wv_ib",
+                &[RegX, Vv, RmX, ib],
+                PfxSel::P66,
+                L1,
+                false,
+                "{op} {x}, {h}, {w}, {i}",
+                "alu",
+            ),
+        ));
+    }
     m.maps.push(MapDecl {
         name: "map_0f3a".to_string(),
         vex_code: Some(3),

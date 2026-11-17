@@ -19131,6 +19131,502 @@ fn run64_vex_cvt_shuf() {
 }
 
 #[test]
+fn run64_vex_blend_perm() {
+    // VEX の blend・dpp・round・extend・insert/extract・permute・
+    // broadcast 系（B1b-4a）。x86_64_v3（avx+avx2 あり）。
+    let feats = polyisa_guest_x86::model_feats("x86_64_v3");
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2800);
+    env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037F);
+    env.backend.set(polyisa_guest_x86::sem::mxcsr_ref(), 0x1F80);
+    env.backend.set(polyisa_guest_x86::sem::xcr0_ref(), 7);
+    let u32v = |a: &[u32]| -> Vec<u8> { a.iter().flat_map(|f| f.to_le_bytes()).collect() };
+    // [0x2000] = f32 [1..8]、[0x2020] = f64 [1.5,-2.5,3.5,-4.5]。
+    let mut d = Vec::new();
+    for f in [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0] {
+        d.extend_from_slice(&f.to_le_bytes());
+    }
+    env.backend.mem.write(VirtAddr(0x2000), &d).unwrap();
+    let mut d = Vec::new();
+    for f in [1.5f64, -2.5, 3.5, -4.5] {
+        d.extend_from_slice(&f.to_le_bytes());
+    }
+    env.backend.mem.write(VirtAddr(0x2020), &d).unwrap();
+    // [0x2040] = 0x40..0x5F、[0x2060] = s16、[0x2080] = permute 制御。
+    env.backend
+        .mem
+        .write(VirtAddr(0x2040), &(0x40u8..0x60).collect::<Vec<_>>())
+        .unwrap();
+    let mut d = Vec::new();
+    for i in [
+        1i16, -2, 3, -4, 5, -6, 7, -8, 9, -10, 11, -12, 13, -14, 15, -16,
+    ] {
+        d.extend_from_slice(&i.to_le_bytes());
+    }
+    env.backend.mem.write(VirtAddr(0x2060), &d).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2080), &u32v(&[3, 0, 1, 2, 7, 4, 5, 6]))
+        .unwrap();
+    // [0x20A0] = 0x80..0x9F（符号拡張ソース）。
+    env.backend
+        .mem
+        .write(VirtAddr(0x20A0), &(0x80u8..0xA0).collect::<Vec<_>>())
+        .unwrap();
+    // [0x20C0] = blendvps マスク、[0x20D0] = pblendvb マスク、
+    // [0x20E0] = blendvpd マスク、[0x20F0] = f32 2.7。
+    env.backend
+        .mem
+        .write(VirtAddr(0x20C0), &u32v(&[0x8000_0000, 0, 0x8000_0000, 0]))
+        .unwrap();
+    let mut m = Vec::new();
+    for _ in 0..4 {
+        m.extend_from_slice(&[0xFF, 0xFF, 0, 0]);
+    }
+    env.backend.mem.write(VirtAddr(0x20D0), &m).unwrap();
+    let mut d = Vec::new();
+    for q in [0x8000_0000_0000_0000u64, 0, 0x8000_0000_0000_0000, 0] {
+        d.extend_from_slice(&q.to_le_bytes());
+    }
+    env.backend.mem.write(VirtAddr(0x20E0), &d).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x20F0), &2.7f32.to_le_bytes())
+        .unwrap();
+    let prog: &[u8] = &[
+        0x48, 0xb8, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rax,0x2000
+        0xc5, 0xfc, 0x10, 0x20, // vmovups ymm4,[rax]
+        0xc5, 0xfa, 0x6f, 0x50, 0x40, // vmovdqu xmm2,[rax+0x40]
+        0xc5, 0xfa, 0x6f, 0x70, 0x60, // vmovdqu xmm6,[rax+0x60]
+        0xc5, 0xfa, 0x6f, 0xb8, 0xc0, 0x00, 0x00, 0x00, // vmovdqu xmm7,[rax+0xC0]
+        0xc5, 0x7a, 0x6f, 0x80, 0xd0, 0x00, 0x00, 0x00, // vmovdqu xmm8,[rax+0xD0]
+        0xc5, 0x7e, 0x6f, 0x88, 0xe0, 0x00, 0x00, 0x00, // vmovdqu ymm9,[rax+0xE0]
+        0xc4, 0xe3, 0x69, 0x0c, 0x08, 0x55, // vblendps xmm1,xmm2,[rax],0x55
+        0xc5, 0xfa, 0x7f, 0x88, 0x00, 0x01, 0x00, 0x00, // vmovdqu [rax+0x100],xmm1
+        0xc4, 0xe3, 0x5d, 0x0d, 0x58, 0x20, 0x33, // vblendpd ymm3,ymm4,[rax+0x20],0x33
+        0xc5, 0xfe, 0x7f, 0x98, 0x20, 0x01, 0x00, 0x00, // vmovdqu [rax+0x120],ymm3
+        0xc4, 0xe3, 0x49, 0x0e, 0x68, 0x40, 0xa5, // vpblendw xmm5,xmm6,[rax+0x40],0xA5
+        0xc5, 0xfa, 0x7f, 0xa8, 0x40, 0x01, 0x00, 0x00, // vmovdqu [rax+0x140],xmm5
+        0xc4, 0xe3, 0x69, 0x4a, 0x08, 0x70, // vblendvps xmm1,xmm2,[rax],xmm7
+        0xc5, 0xfa, 0x7f, 0x88, 0x50, 0x01, 0x00, 0x00, // vmovdqu [rax+0x150],xmm1
+        0xc4, 0xe3, 0x5d, 0x4b, 0x58, 0x20, 0x90, // vblendvpd ymm3,ymm4,[rax+0x20],ymm9
+        0xc5, 0xfe, 0x7f, 0x98, 0x60, 0x01, 0x00, 0x00, // vmovdqu [rax+0x160],ymm3
+        0xc4, 0xe3, 0x49, 0x4c, 0x68, 0x40, 0x80, // vpblendvb xmm5,xmm6,[rax+0x40],xmm8
+        0xc5, 0xfa, 0x7f, 0xa8, 0x80, 0x01, 0x00, 0x00, // vmovdqu [rax+0x180],xmm5
+        0xc4, 0xe3, 0x5d, 0x40, 0x08, 0xf1, // vdpps ymm1,ymm4,[rax],0xF1
+        0xc5, 0xfe, 0x7f, 0x88, 0xa0, 0x01, 0x00, 0x00, // vmovdqu [rax+0x1A0],ymm1
+        0xc5, 0x79, 0x10, 0x50, 0x20, // vmovupd xmm10,[rax+0x20]
+        0xc4, 0xe3, 0x29, 0x41, 0x58, 0x20, 0x31, // vdppd xmm3,xmm10,[rax+0x20],0x31
+        0xc5, 0xfa, 0x7f, 0x98, 0xc0, 0x01, 0x00, 0x00, // vmovdqu [rax+0x1C0],xmm3
+        0xc4, 0xe3, 0x49, 0x42, 0x68, 0x40, 0x19, // vmpsadbw xmm5,xmm6,[rax+0x40],0x19
+        0xc5, 0xfa, 0x7f, 0xa8, 0xe0, 0x01, 0x00, 0x00, // vmovdqu [rax+0x1E0],xmm5
+        0xc4, 0xe3, 0x7d, 0x08, 0x08, 0x09, // vroundps ymm1,[rax],0x09
+        0xc5, 0xfe, 0x7f, 0x88, 0x00, 0x02, 0x00, 0x00, // vmovdqu [rax+0x200],ymm1
+        0xc4, 0xe3, 0x79, 0x09, 0x50, 0x20, 0x0a, // vroundpd xmm2,[rax+0x20],0x0A
+        0xc5, 0xf9, 0x11, 0x90, 0x20, 0x02, 0x00, 0x00, // vmovupd [rax+0x220],xmm2
+        0xc4, 0xe3, 0x59, 0x0a, 0x98, 0xf0, 0x00, 0x00, 0x00,
+        0x02, // vroundss xmm3,xmm4,[rax+0xF0],0x02
+        0xc5, 0xfa, 0x7f, 0x98, 0x40, 0x02, 0x00, 0x00, // vmovdqu [rax+0x240],xmm3
+        0xc4, 0xe3, 0x29, 0x0b, 0x68, 0x20, 0x01, // vroundsd xmm5,xmm10,[rax+0x20],0x01
+        0xc5, 0xf9, 0x11, 0xa8, 0x60, 0x02, 0x00, 0x00, // vmovupd [rax+0x260],xmm5
+        0xc4, 0x62, 0x79, 0x20, 0x98, 0xa0, 0x00, 0x00, 0x00, // vpmovsxbw xmm11,[rax+0xA0]
+        0xc5, 0x7a, 0x7f, 0x98, 0x80, 0x02, 0x00, 0x00, // vmovdqu [rax+0x280],xmm11
+        0xc4, 0x62, 0x7d, 0x20, 0xa0, 0xa0, 0x00, 0x00, 0x00, // vpmovsxbw ymm12,[rax+0xA0]
+        0xc5, 0x7e, 0x7f, 0xa0, 0xa0, 0x02, 0x00, 0x00, // vmovdqu [rax+0x2A0],ymm12
+        0xc4, 0x62, 0x79, 0x33, 0x68, 0x60, // vpmovzxwd xmm13,[rax+0x60]
+        0xc5, 0x7a, 0x7f, 0xa8, 0xe0, 0x02, 0x00, 0x00, // vmovdqu [rax+0x2E0],xmm13
+        0xc4, 0x62, 0x79, 0x25, 0x30, // vpmovsxdq xmm14,[rax]
+        0xc5, 0x7a, 0x7f, 0xb0, 0x00, 0x03, 0x00, 0x00, // vmovdqu [rax+0x300],xmm14
+        0xc4, 0xe3, 0x69, 0x21, 0x48, 0x44, 0x30, // vinsertps xmm1,xmm2,[rax+0x44],0x30
+        0xc5, 0xfa, 0x7f, 0x88, 0x20, 0x03, 0x00, 0x00, // vmovdqu [rax+0x320],xmm1
+        0xc5, 0x7a, 0x6f, 0x78, 0x60, // vmovdqu xmm15,[rax+0x60]
+        0xc4, 0xc3, 0x69, 0x21, 0xdf, 0xd0, // vinsertps xmm3,xmm2,xmm15,0xD0
+        0xc5, 0xfa, 0x7f, 0x98, 0x40, 0x03, 0x00, 0x00, // vmovdqu [rax+0x340],xmm3
+        0xc4, 0xe3, 0x41, 0x20, 0x70, 0x45, 0x05, // vpinsrb xmm6,xmm7,[rax+0x45],5
+        0xc5, 0xfa, 0x7f, 0xb0, 0x60, 0x03, 0x00, 0x00, // vmovdqu [rax+0x360],xmm6
+        0xc4, 0x63, 0x21, 0x22, 0x50, 0x40, 0x01, // vpinsrd xmm10,xmm11,[rax+0x40],1
+        0xc5, 0x7a, 0x7f, 0x90, 0x80, 0x03, 0x00, 0x00, // vmovdqu [rax+0x380],xmm10
+        0xc4, 0x63, 0x79, 0x16, 0xb8, 0xa0, 0x03, 0x00, 0x00,
+        0x02, // vpextrd [rax+0x3A0],xmm15,2
+        0xc4, 0xc1, 0x79, 0xc5, 0xcf, 0x04, // vpextrw ecx,xmm15,4
+        0xc4, 0xe2, 0x69, 0x0c, 0x98, 0x80, 0x00, 0x00,
+        0x00, // vpermilps xmm3,xmm2,[rax+0x80]
+        0xc5, 0xfa, 0x7f, 0x98, 0xc0, 0x03, 0x00, 0x00, // vmovdqu [rax+0x3C0],xmm3
+        0xc5, 0xfd, 0x10, 0x70, 0x20, // vmovupd ymm6,[rax+0x20]
+        0xc4, 0xe2, 0x4d, 0x0d, 0xa8, 0x80, 0x00, 0x00,
+        0x00, // vpermilpd ymm5,ymm6,[rax+0x80]
+        0xc5, 0xfe, 0x7f, 0xa8, 0xe0, 0x03, 0x00, 0x00, // vmovdqu [rax+0x3E0],ymm5
+        0xc4, 0xe3, 0x7d, 0x04, 0x38, 0x1b, // vpermilps ymm7,[rax],0x1B
+        0xc5, 0xfe, 0x7f, 0xb8, 0x00, 0x04, 0x00, 0x00, // vmovdqu [rax+0x400],ymm7
+        0xc4, 0x63, 0x79, 0x05, 0x40, 0x20, 0x03, // vpermilpd xmm8,[rax+0x20],0x03
+        0xc5, 0x79, 0x11, 0x80, 0x20, 0x04, 0x00, 0x00, // vmovupd [rax+0x420],xmm8
+        0xc4, 0x63, 0x5d, 0x06, 0x48, 0x40, 0x21, // vperm2f128 ymm9,ymm4,[rax+0x40],0x21
+        0xc5, 0x7e, 0x7f, 0x88, 0x40, 0x04, 0x00, 0x00, // vmovdqu [rax+0x440],ymm9
+        0xc4, 0x63, 0x1d, 0x46, 0x58, 0x40, 0x30, // vperm2i128 ymm11,ymm12,[rax+0x40],0x30
+        0xc5, 0x7e, 0x7f, 0x98, 0x80, 0x04, 0x00, 0x00, // vmovdqu [rax+0x480],ymm11
+        0xc4, 0x63, 0xfd, 0x00, 0x68, 0x20, 0x1b, // vpermq ymm13,[rax+0x20],0x1B
+        0xc5, 0x7e, 0x7f, 0xa8, 0xa0, 0x04, 0x00, 0x00, // vmovdqu [rax+0x4A0],ymm13
+        0xc5, 0x7e, 0x6f, 0xb8, 0x80, 0x00, 0x00, 0x00, // vmovdqu ymm15,[rax+0x80]
+        0xc4, 0x62, 0x05, 0x36, 0x30, // vpermd ymm14,ymm15,[rax]
+        0xc5, 0x7e, 0x7f, 0xb0, 0xc0, 0x04, 0x00, 0x00, // vmovdqu [rax+0x4C0],ymm14
+        0xc5, 0xfe, 0x6f, 0x88, 0x80, 0x00, 0x00, 0x00, // vmovdqu ymm1,[rax+0x80]
+        0xc4, 0xe2, 0x75, 0x16, 0x00, // vpermps ymm0,ymm1,[rax]
+        0xc5, 0xfe, 0x7f, 0x80, 0xe0, 0x04, 0x00, 0x00, // vmovdqu [rax+0x4E0],ymm0
+        0xc5, 0xfe, 0x6f, 0x18, // vmovdqu ymm3,[rax]
+        0xc4, 0xe3, 0x65, 0x18, 0x50, 0x40, 0x01, // vinsertf128 ymm2,ymm3,[rax+0x40],1
+        0xc5, 0xfe, 0x7f, 0x90, 0x00, 0x05, 0x00, 0x00, // vmovdqu [rax+0x500],ymm2
+        0xc4, 0xe3, 0x55, 0x38, 0x60, 0x60, 0x00, // vinserti128 ymm4,ymm5,[rax+0x60],0
+        0xc5, 0xfe, 0x7f, 0xa0, 0x20, 0x05, 0x00, 0x00, // vmovdqu [rax+0x520],ymm4
+        0xc4, 0xe3, 0x7d, 0x19, 0xb0, 0x40, 0x05, 0x00, 0x00,
+        0x01, // vextractf128 [rax+0x540],ymm6,1
+        0xc4, 0xe3, 0x7d, 0x39, 0xb8, 0x60, 0x05, 0x00, 0x00,
+        0x00, // vextracti128 [rax+0x560],ymm7,0
+        0xc4, 0x62, 0x7d, 0x18, 0x00, // vbroadcastss ymm8,[rax]
+        0xc5, 0x7e, 0x7f, 0x80, 0x80, 0x05, 0x00, 0x00, // vmovdqu [rax+0x580],ymm8
+        0xc4, 0x42, 0x79, 0x18, 0xca, // vbroadcastss xmm9,xmm10
+        0xc5, 0x7a, 0x7f, 0x88, 0xc0, 0x05, 0x00, 0x00, // vmovdqu [rax+0x5C0],xmm9
+        0xc4, 0x62, 0x7d, 0x19, 0x58, 0x20, // vbroadcastsd ymm11,[rax+0x20]
+        0xc5, 0x7e, 0x7f, 0x98, 0xe0, 0x05, 0x00, 0x00, // vmovdqu [rax+0x5E0],ymm11
+        0xc4, 0x62, 0x7d, 0x1a, 0x60, 0x40, // vbroadcastf128 ymm12,[rax+0x40]
+        0xc5, 0x7e, 0x7f, 0xa0, 0x00, 0x06, 0x00, 0x00, // vmovdqu [rax+0x600],ymm12
+        0xc4, 0x62, 0x7d, 0x58, 0x28, // vpbroadcastd ymm13,[rax]
+        0xc5, 0x7e, 0x7f, 0xa8, 0x20, 0x06, 0x00, 0x00, // vmovdqu [rax+0x620],ymm13
+        0xc4, 0x62, 0x79, 0x78, 0xb0, 0xa0, 0x00, 0x00, 0x00, // vpbroadcastb xmm14,[rax+0xA0]
+        0xc5, 0x7a, 0x7f, 0xb0, 0x40, 0x06, 0x00, 0x00, // vmovdqu [rax+0x640],xmm14
+        0xc4, 0x62, 0x7d, 0x59, 0x78, 0x20, // vpbroadcastq ymm15,[rax+0x20]
+        0xc5, 0x7e, 0x7f, 0xb8, 0x60, 0x06, 0x00, 0x00, // vmovdqu [rax+0x660],ymm15
+        0xc4, 0xe2, 0x7d, 0x5a, 0x40, 0x60, // vbroadcasti128 ymm0,[rax+0x60]
+        0xc5, 0xfe, 0x7f, 0x80, 0x80, 0x06, 0x00, 0x00, // vmovdqu [rax+0x680],ymm0
+        0xc4, 0xe2, 0x79, 0x2a, 0x08, // vmovntdqa xmm1,[rax]
+        0xc5, 0xfa, 0x7f, 0x88, 0xa0, 0x06, 0x00, 0x00, // vmovdqu [rax+0x6A0],xmm1
+        0xc4, 0xe2, 0x7d, 0x2a, 0x10, // vmovntdqa ymm2,[rax]
+        0xc5, 0xfe, 0x7f, 0x90, 0xc0, 0x06, 0x00, 0x00, // vmovdqu [rax+0x6C0],ymm2
+        0xc4, 0xe3, 0x79, 0x14, 0x80, 0xe0, 0x06, 0x00, 0x00,
+        0x03, // vpextrb [rax+0x6E0],xmm0,3
+        0xc4, 0xe3, 0x79, 0x17, 0x88, 0x00, 0x07, 0x00, 0x00,
+        0x02, // vextractps [rax+0x700],xmm1,2
+        0xc4, 0xe3, 0xf9, 0x16, 0x88, 0x20, 0x07, 0x00, 0x00,
+        0x01, // vpextrq [rax+0x720],xmm1,1
+        0xc5, 0x7e, 0x6f, 0x88, 0xa0, 0x00, 0x00, 0x00, // vmovdqu ymm9,[rax+0xA0]
+        0xc4, 0x63, 0x35, 0x42, 0x40, 0x40, 0x2b, // vmpsadbw ymm8,ymm9,[rax+0x40],0x2B
+        0xc5, 0x7e, 0x7f, 0x80, 0x40, 0x07, 0x00, 0x00, // vmovdqu [rax+0x740],ymm8
+        0xc4, 0x63, 0x0d, 0x18, 0x70, 0x20, 0x01, // vinsertf128 ymm14,ymm14,[rax+0x20],1
+        0xc4, 0xc3, 0x7d, 0x19, 0xf6, 0x00, // vextractf128 xmm14,ymm6,0
+        0xc5, 0x7e, 0x7f, 0xb0, 0x60, 0x07, 0x00, 0x00, // vmovdqu [rax+0x760],ymm14
+        0x48, 0xc7, 0xc0, 0x3c, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0x31, 0xff, // xor rdi,rdi
+        0x0f, 0x05, // syscall
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        200,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64_v3"),
+    );
+    assert_eq!(out, Outcome::Exit(0));
+    let acc = polyisa_mem::Access {
+        endian: polyisa_mem::Endian::Le,
+        align: polyisa_mem::Align::Unaligned,
+        kind: polyisa_mem::AccessKind::DataRead,
+    };
+    let mut v = [0u8; 0x40];
+    let f64v = |a: &[f64]| -> Vec<u8> { a.iter().flat_map(|f| f.to_le_bytes()).collect() };
+    let f32v = |a: &[f32]| -> Vec<u8> { a.iter().flat_map(|f| f.to_le_bytes()).collect() };
+    let u16v = |a: &[u16]| -> Vec<u8> { a.iter().flat_map(|f| f.to_le_bytes()).collect() };
+    let u64v = |a: &[u64]| -> Vec<u8> { a.iter().flat_map(|f| f.to_le_bytes()).collect() };
+    // vblendps 0x55: [c0,a1,c2,a3]。
+    env.backend.mem.read(VirtAddr(0x2100), &mut v, acc).unwrap();
+    assert_eq!(
+        &v[..16],
+        &u32v(&[0x3F80_0000, 0x4746_4544, 0x4040_0000, 0x4F4E_4D4C])[..],
+        "vblendps"
+    );
+    // vblendpd 0x33: [c0,c1,a2,a3]。
+    env.backend.mem.read(VirtAddr(0x2120), &mut v, acc).unwrap();
+    let mut e = f64v(&[1.5, -2.5]);
+    e.extend(u64v(&[0x40C0_0000_40A0_0000, 0x4100_0000_40E0_0000]));
+    assert_eq!(&v[..32], &e[..], "vblendpd");
+    // vpblendw 0xA5。
+    env.backend.mem.read(VirtAddr(0x2140), &mut v, acc).unwrap();
+    assert_eq!(
+        &v[..16],
+        &u16v(&[
+            0x4140, 0xFFFE, 0x4544, 0xFFFC, 0x0005, 0x4B4A, 0x0007, 0x4F4E
+        ])[..],
+        "vpblendw"
+    );
+    // vblendvps: マスクレジスタ imm8[7:4]=xmm7。
+    env.backend.mem.read(VirtAddr(0x2150), &mut v, acc).unwrap();
+    assert_eq!(
+        &v[..16],
+        &u32v(&[0x3F80_0000, 0x4746_4544, 0x4040_0000, 0x4F4E_4D4C])[..],
+        "vblendvps"
+    );
+    // vblendvpd: マスク ymm9。
+    env.backend.mem.read(VirtAddr(0x2160), &mut v, acc).unwrap();
+    let mut e = f64v(&[1.5]);
+    e.extend(u64v(&[0x4080_0000_4040_0000]));
+    e.extend(f64v(&[3.5]));
+    e.extend(u64v(&[0x4100_0000_40E0_0000]));
+    assert_eq!(&v[..32], &e[..], "vblendvpd");
+    // vpblendvb: バイト単位マスク xmm8。
+    env.backend.mem.read(VirtAddr(0x2180), &mut v, acc).unwrap();
+    assert_eq!(
+        &v[..16],
+        &u16v(&[
+            0x4140, 0xFFFE, 0x4544, 0xFFFC, 0x4948, 0xFFFA, 0x4D4C, 0xFFF8
+        ])[..],
+        "vpblendvb"
+    );
+    // vdpps 0xF1: 全要素積和を lane0 へ。lo=30、hi=174。
+    env.backend.mem.read(VirtAddr(0x21A0), &mut v, acc).unwrap();
+    assert_eq!(
+        &v[..32],
+        &f32v(&[30.0, 0.0, 0.0, 0.0, 174.0, 0.0, 0.0, 0.0])[..],
+        "vdpps"
+    );
+    // vdppd 0x31: 1.5^2 + 2.5^2 = 8.5。
+    env.backend.mem.read(VirtAddr(0x21C0), &mut v, acc).unwrap();
+    assert_eq!(&v[..16], &f64v(&[8.5, 0.0])[..], "vdppd");
+    // vmpsadbw 0x19: a ブロック 0、c ブロック 4 からの絶対差和。
+    env.backend.mem.read(VirtAddr(0x21E0), &mut v, acc).unwrap();
+    assert_eq!(
+        &v[..16],
+        &u16v(&[
+            0x01F8, 0x01FA, 0x01FE, 0x01F8, 0x01F4, 0x01F6, 0x01FA, 0x01F4
+        ])[..],
+        "vmpsadbw"
+    );
+    // vroundps RDN: 整数値はそのまま。
+    env.backend.mem.read(VirtAddr(0x2200), &mut v, acc).unwrap();
+    assert_eq!(
+        &v[..32],
+        &f32v(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0])[..],
+        "vroundps"
+    );
+    // vroundpd RUP: ceil(1.5)=2、ceil(-2.5)=-2。
+    env.backend.mem.read(VirtAddr(0x2220), &mut v, acc).unwrap();
+    assert_eq!(&v[..16], &f64v(&[2.0, -2.0])[..], "vroundpd");
+    // vroundss RUP: ceil(2.7)=3、上位は xmm4=[1,2,3,4] をマージ。
+    env.backend.mem.read(VirtAddr(0x2240), &mut v, acc).unwrap();
+    assert_eq!(&v[..16], &f32v(&[3.0, 2.0, 3.0, 4.0])[..], "vroundss");
+    // vroundsd RDN: floor(1.5)=1、hi64 は xmm10=-2.5。
+    env.backend.mem.read(VirtAddr(0x2260), &mut v, acc).unwrap();
+    assert_eq!(&v[..16], &f64v(&[1.0, -2.5])[..], "vroundsd");
+    // vpmovsxbw xmm（8 バイト→8 ワード）/ymm（16 バイト→16 ワード）。
+    env.backend.mem.read(VirtAddr(0x2280), &mut v, acc).unwrap();
+    let mut e = Vec::new();
+    for b in 0x80u16..0x88 {
+        e.extend_from_slice(&(b | 0xFF00).to_le_bytes());
+    }
+    assert_eq!(&v[..16], &e[..], "vpmovsxbw l0");
+    env.backend.mem.read(VirtAddr(0x22A0), &mut v, acc).unwrap();
+    let mut e = Vec::new();
+    for b in 0x80u16..0x90 {
+        e.extend_from_slice(&(b | 0xFF00).to_le_bytes());
+    }
+    assert_eq!(&v[..32], &e[..], "vpmovsxbw l1");
+    // vpmovzxwd: s16 [1,-2,3,-4] → u32。
+    env.backend.mem.read(VirtAddr(0x22E0), &mut v, acc).unwrap();
+    assert_eq!(
+        &v[..16],
+        &u32v(&[0x0000_0001, 0x0000_FFFE, 0x0000_0003, 0x0000_FFFC])[..],
+        "vpmovzxwd"
+    );
+    // vpmovsxdq: f32 1.0/2.0 のビット（正）→ i64。
+    env.backend.mem.read(VirtAddr(0x2300), &mut v, acc).unwrap();
+    assert_eq!(
+        &v[..16],
+        &u64v(&[0x3F80_0000, 0x4000_0000])[..],
+        "vpmovsxdq"
+    );
+    // vinsertps メモリ形: lane3 に m32 を挿入（xmm2=roundpd 結果）。
+    env.backend.mem.read(VirtAddr(0x2320), &mut v, acc).unwrap();
+    assert_eq!(
+        &v[..16],
+        &u32v(&[0x0000_0000, 0x4000_0000, 0x0000_0000, 0x4746_4544])[..],
+        "vinsertps mem"
+    );
+    // vinsertps レジスタ形: count_s=3 → lane1 に xmm15 の lane3。
+    env.backend.mem.read(VirtAddr(0x2340), &mut v, acc).unwrap();
+    assert_eq!(
+        &v[..16],
+        &u32v(&[0x0000_0000, 0xFFF8_0007, 0x0000_0000, 0xC000_0000])[..],
+        "vinsertps reg"
+    );
+    // vpinsrb: byte5 に m8 0x45 を挿入。
+    env.backend.mem.read(VirtAddr(0x2360), &mut v, acc).unwrap();
+    assert_eq!(
+        &v[..16],
+        &[
+            0x00, 0x00, 0x00, 0x80, 0x00, 0x45, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00,
+            0x00, 0x00
+        ][..],
+        "vpinsrb"
+    );
+    // vpinsrd: dword1 に m32 を挿入（xmm11=pmovsxbw 結果）。
+    env.backend.mem.read(VirtAddr(0x2380), &mut v, acc).unwrap();
+    assert_eq!(
+        &v[..16],
+        &u32v(&[0xFF81_FF80, 0x4342_4140, 0xFF85_FF84, 0xFF87_FF86])[..],
+        "vpinsrd"
+    );
+    // vpextrd: xmm15 の dword2 = s16 [5,-6]。
+    env.backend.mem.read(VirtAddr(0x23A0), &mut v, acc).unwrap();
+    assert_eq!(&v[..4], &0xFFFA_0005u32.to_le_bytes(), "vpextrd");
+    // vpextrw → ecx = xmm15 の word4 = 5。
+    assert_eq!(env.backend.get(Gpr(1).state()), 5u32, "vpextrw");
+    // vpermilps 可変形: 制御 [3,0,1,2]（xmm2=roundpd 結果）。
+    env.backend.mem.read(VirtAddr(0x23C0), &mut v, acc).unwrap();
+    assert_eq!(
+        &v[..16],
+        &u32v(&[0xC000_0000, 0x0000_0000, 0x4000_0000, 0x0000_0000])[..],
+        "vpermilps var"
+    );
+    // vpermilpd 可変形: 制御 bit1 で交差。
+    env.backend.mem.read(VirtAddr(0x23E0), &mut v, acc).unwrap();
+    assert_eq!(
+        &v[..32],
+        &f64v(&[-2.5, 1.5, -4.5, 3.5])[..],
+        "vpermilpd var"
+    );
+    // vpermilps 即値形 0x1B: レーン内逆順。
+    env.backend.mem.read(VirtAddr(0x2400), &mut v, acc).unwrap();
+    assert_eq!(
+        &v[..32],
+        &f32v(&[4.0, 3.0, 2.0, 1.0, 8.0, 7.0, 6.0, 5.0])[..],
+        "vpermilps imm"
+    );
+    // vpermilpd 即値形 0x03: 両レーンとも src.q1。
+    env.backend.mem.read(VirtAddr(0x2420), &mut v, acc).unwrap();
+    assert_eq!(&v[..16], &f64v(&[-2.5, -2.5])[..], "vpermilpd imm");
+    // vperm2f128 0x21: lo=a.hi、hi=c.lo。
+    env.backend.mem.read(VirtAddr(0x2440), &mut v, acc).unwrap();
+    let mut e = f32v(&[5.0, 6.0, 7.0, 8.0]);
+    e.extend(u32v(&[0x4342_4140, 0x4746_4544, 0x4B4A_4948, 0x4F4E_4D4C]));
+    assert_eq!(&v[..32], &e[..], "vperm2f128");
+    // vperm2i128 0x30: lo=a.lo、hi=c.hi。
+    env.backend.mem.read(VirtAddr(0x2480), &mut v, acc).unwrap();
+    let mut e = Vec::new();
+    for b in 0x80u16..0x88 {
+        e.extend_from_slice(&(b | 0xFF00).to_le_bytes());
+    }
+    e.extend(0x50u8..0x60);
+    assert_eq!(&v[..32], &e[..], "vperm2i128");
+    // vpermq 0x1B: qword 逆順。
+    env.backend.mem.read(VirtAddr(0x24A0), &mut v, acc).unwrap();
+    assert_eq!(&v[..32], &f64v(&[-4.5, 3.5, -2.5, 1.5])[..], "vpermq");
+    // vpermd: idx [3,0,1,2,7,4,5,6] で全 256 ビット選択。
+    env.backend.mem.read(VirtAddr(0x24C0), &mut v, acc).unwrap();
+    assert_eq!(
+        &v[..32],
+        &f32v(&[4.0, 1.0, 2.0, 3.0, 8.0, 5.0, 6.0, 7.0])[..],
+        "vpermd"
+    );
+    // vpermps: 同じ選択子で同じ結果。
+    env.backend.mem.read(VirtAddr(0x24E0), &mut v, acc).unwrap();
+    assert_eq!(
+        &v[..32],
+        &f32v(&[4.0, 1.0, 2.0, 3.0, 8.0, 5.0, 6.0, 7.0])[..],
+        "vpermps"
+    );
+    // vinsertf128: 上位 128 を m128 で置き換え。
+    env.backend.mem.read(VirtAddr(0x2500), &mut v, acc).unwrap();
+    let mut e = f32v(&[1.0, 2.0, 3.0, 4.0]);
+    e.extend(u32v(&[0x4342_4140, 0x4746_4544, 0x4B4A_4948, 0x4F4E_4D4C]));
+    assert_eq!(&v[..32], &e[..], "vinsertf128");
+    // vinserti128: 下位 128 を m128（s16）で置き換え、上位は ymm5.hi。
+    env.backend.mem.read(VirtAddr(0x2520), &mut v, acc).unwrap();
+    let mut e = Vec::new();
+    for i in [1i16, -2, 3, -4, 5, -6, 7, -8] {
+        e.extend_from_slice(&i.to_le_bytes());
+    }
+    e.extend(f64v(&[-4.5, 3.5]));
+    assert_eq!(&v[..32], &e[..], "vinserti128");
+    // vextractf128: ymm6.hi。
+    env.backend.mem.read(VirtAddr(0x2540), &mut v, acc).unwrap();
+    assert_eq!(&v[..16], &f64v(&[3.5, -4.5])[..], "vextractf128");
+    // vextracti128: ymm7.lo。
+    env.backend.mem.read(VirtAddr(0x2560), &mut v, acc).unwrap();
+    assert_eq!(&v[..16], &f32v(&[4.0, 3.0, 2.0, 1.0])[..], "vextracti128");
+    // vbroadcastss ymm: 1.0 × 8。
+    env.backend.mem.read(VirtAddr(0x2580), &mut v, acc).unwrap();
+    assert_eq!(&v[..32], &f32v(&[1.0; 8])[..], "vbroadcastss mem");
+    // vbroadcastss xmm レジスタ形（AVX2）。
+    env.backend.mem.read(VirtAddr(0x25C0), &mut v, acc).unwrap();
+    assert_eq!(&v[..16], &u32v(&[0xFF81_FF80; 4])[..], "vbroadcastss reg");
+    // vbroadcastsd: 1.5 × 4。
+    env.backend.mem.read(VirtAddr(0x25E0), &mut v, acc).unwrap();
+    assert_eq!(&v[..32], &f64v(&[1.5; 4])[..], "vbroadcastsd");
+    // vbroadcastf128。
+    env.backend.mem.read(VirtAddr(0x2600), &mut v, acc).unwrap();
+    let mut e = u32v(&[0x4342_4140, 0x4746_4544, 0x4B4A_4948, 0x4F4E_4D4C]);
+    e.extend(u32v(&[0x4342_4140, 0x4746_4544, 0x4B4A_4948, 0x4F4E_4D4C]));
+    assert_eq!(&v[..32], &e[..], "vbroadcastf128");
+    // vpbroadcastd: 0x3F800000 × 8。
+    env.backend.mem.read(VirtAddr(0x2620), &mut v, acc).unwrap();
+    assert_eq!(&v[..32], &u32v(&[0x3F80_0000; 8])[..], "vpbroadcastd");
+    // vpbroadcastb: 0x80 × 16。
+    env.backend.mem.read(VirtAddr(0x2640), &mut v, acc).unwrap();
+    assert_eq!(&v[..16], &[0x80u8; 16][..], "vpbroadcastb");
+    // vpbroadcastq: f64 1.5 × 4。
+    env.backend.mem.read(VirtAddr(0x2660), &mut v, acc).unwrap();
+    assert_eq!(&v[..32], &f64v(&[1.5; 4])[..], "vpbroadcastq");
+    // vbroadcasti128: s16 [1..8] を両半分に。
+    env.backend.mem.read(VirtAddr(0x2680), &mut v, acc).unwrap();
+    let mut e = Vec::new();
+    for _ in 0..2 {
+        for i in [1i16, -2, 3, -4, 5, -6, 7, -8] {
+            e.extend_from_slice(&i.to_le_bytes());
+        }
+    }
+    assert_eq!(&v[..32], &e[..], "vbroadcasti128");
+    // vmovntdqa xmm/ymm。
+    env.backend.mem.read(VirtAddr(0x26A0), &mut v, acc).unwrap();
+    assert_eq!(&v[..16], &f32v(&[1.0, 2.0, 3.0, 4.0])[..], "vmovntdqa l0");
+    env.backend.mem.read(VirtAddr(0x26C0), &mut v, acc).unwrap();
+    assert_eq!(
+        &v[..32],
+        &f32v(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0])[..],
+        "vmovntdqa l1"
+    );
+    // vpextrb: xmm0(broadcasti128 結果)の byte3 = 0xFF。
+    env.backend.mem.read(VirtAddr(0x26E0), &mut v, acc).unwrap();
+    assert_eq!(v[0], 0xFF, "vpextrb");
+    // vextractps: xmm1 の dword2 = f32 3.0。
+    env.backend.mem.read(VirtAddr(0x2700), &mut v, acc).unwrap();
+    assert_eq!(&v[..4], &3.0f32.to_le_bytes(), "vextractps");
+    // vpextrq: xmm1 の qword1 = f64 として [3.0,4.0] のビット。
+    env.backend.mem.read(VirtAddr(0x2720), &mut v, acc).unwrap();
+    assert_eq!(&v[..8], &0x4080_0000_4040_0000u64.to_le_bytes(), "vpextrq");
+    // vmpsadbw ymm 0x2B: 下位は imm[2:0]=3（a ブロック0・c ブロック3）。
+    // a=0x80..、c=0x40.. → Σ|0x80+i+j-(0x4C+j)| = 4*(0x34+i)。
+    // 上位は imm[5:3]=5（a ブロック1・c ブロック1）→ 4*(0x40+i)。
+    env.backend.mem.read(VirtAddr(0x2740), &mut v, acc).unwrap();
+    let mut e = Vec::new();
+    for i in 0..8u16 {
+        e.extend_from_slice(&(208 + 4 * i).to_le_bytes());
+    }
+    for i in 0..8u16 {
+        e.extend_from_slice(&(256 + 4 * i).to_le_bytes());
+    }
+    assert_eq!(&v[..32], &e[..], "vmpsadbw ymm");
+    // vextractf128 xmm 宛先: xmm14=ymm6.lo、ymm14.hi はゼロ。
+    env.backend.mem.read(VirtAddr(0x2760), &mut v, acc).unwrap();
+    let mut e = f64v(&[1.5, -2.5]);
+    e.extend([0; 16]);
+    assert_eq!(&v[..32], &e[..], "vextractf128 reg");
+}
+
+#[test]
 fn run64_tsx_uintr_pku() {
     // TSX/UINTR/PKU。トランザクションとユーザー割り込みは
     // モデル化しないので、XBEGIN は常にアボートして
