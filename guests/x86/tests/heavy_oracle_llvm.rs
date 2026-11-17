@@ -590,25 +590,15 @@ const KNOWN: &[(&str, &str, &str)] = &[
     ("f3 0f 38 cb", "missing", "*"),
     ("f3 0f 38 cc", "missing", "*"),
     ("f3 0f 38 cd", "missing", "*"), // sha（A3a）
-    ("0f 38 c8", "missing", "*"),
     ("0f 38 8a", "missing", "*"),
     ("0f 38 8b", "missing", "*"), // movrsb/movrsl（新命令群、A4 以降）
-    ("0f 38 c9", "missing", "*"),
-    ("0f 38 ca", "missing", "*"),
-    ("0f 38 cb", "missing", "*"),
-    ("0f 38 cc", "missing", "*"),
-    ("0f 38 cd", "missing", "*"), // sha の NP 形（A3a）    // sha1nexte NP 形（A3a）
     ("0f 38 f6", "missing", "*"),
     ("0f 38 f8", "missing", "*"),
     ("0f 38 f9", "missing", "*"),
     ("0f 38 fc", "missing", "*"), // wrssd/movrs/movdiri/aadd（新命令群、A4 以降）
-    ("0f 3a cc", "missing", "*"), // sha1rnds4（A3a）    // movrs NP 形（新命令、A4 以降）
-    ("66 0f 38 cf", "missing", "*"), // gf2p8mulb（A3a）
     ("66 0f 3a cc", "missing", "*"),
     ("f2 0f 3a cc", "missing", "*"),
-    ("f3 0f 3a cc", "missing", "*"), // sha1rnds4（A3a）
-    ("66 0f 3a ce", "missing", "*"),
-    ("66 0f 3a cf", "missing", "*"), // gf2p8affine（A3a）
+    ("f3 0f 3a cc", "missing", "*"), // sha1rnds4 の接頭辞付き形（llvm は受理）
     ("f3 0f 3a f0", "missing", "*"), // hreset（A4）
     // ---- 必須接頭辞 0F ヘッド。mod 制約・MMX 寛容（No66/No66F3）
     // 修正で大半は一致する。残りは未宣言の命令群。

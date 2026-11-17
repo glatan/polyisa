@@ -334,7 +334,7 @@ fn declare_models(m: &mut Model) {
             "cpuid", "fpu", "vme", "de", "pse", "tsc", "msr", "pae", "mce", "cx8", "apic", "sep",
             "mtrr", "pge", "mca", "cmov", "pat", "pse36", "clfsh", "mmx", "fxsr", "sse", "sse2",
             "sse3", "ssse3", "sse4_1", "sse4_2", "cx16", "popcnt", "rdtscp", "syscall", "nx",
-            "lm", "lahf_lm", "i486", "lzcnt", "adx", "pclmulqdq", "aesni",
+            "lm", "lahf_lm", "i486", "lzcnt", "adx", "pclmulqdq", "aesni", "sha", "gfni",
         ],
         &[],
         &[],
@@ -347,9 +347,9 @@ fn declare_models(m: &mut Model) {
         "x86_64_v2",
         "x86_64",
         &["cx16", "popcnt"],
-        // psABI v2 に LZCNT・ADX・PCLMUL・AES-NI は含まれないので
-        // 既定モデルから継承した分を削る。
-        &["lzcnt", "adx", "pclmulqdq", "aesni"],
+        // psABI v2 に LZCNT・ADX・PCLMUL・AES-NI・SHA・GFNI は
+        // 含まれないので既定モデルから継承した分を削る。
+        &["lzcnt", "adx", "pclmulqdq", "aesni", "sha", "gfni"],
         &[],
         // v2 の水準（SSE4.2+POPCNT+CX16、AVX なし）は Westmere。
         intel("6", "44", "2"),
@@ -717,6 +717,9 @@ fn named_gate(mn: &str) -> Option<&'static [&'static str]> {
         "aesimc" | "aesenc" | "aesenclast" | "aesdec" | "aesdeclast"
         | "aeskeygenassist" => &["aesni"],
         "pclmulqdq" => &["pclmulqdq"],
+        // SHA-NI と GFNI。
+        _ if mn.starts_with("sha1") || mn.starts_with("sha256") => &["sha"],
+        _ if mn.starts_with("gf2p8") => &["gfni"],
         "clflush" => &["clfsh"],
         // MXCSR の読み書きは SSE 付随。
         "ldmxcsr" | "stmxcsr" => &["sse"],

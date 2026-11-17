@@ -4105,6 +4105,17 @@ fn dispatch_map<B: Backend>(
         Insn::AesdeclastXvWv => sem_ea::aesround(b, 3, d, &ea),
         Insn::AeskeygenassistXvWvIb => sem_ea::aeskeygenassist(b, d.imm as u8, d, &ea),
         Insn::PclmulqdqXvWvIb => sem_ea::pclmulqdq(b, d.imm as u8, d, &ea),
+        // SHA-NI と GFNI。
+        Insn::Sha1rnds4XvWvIb => sem_ea::sha1rnds4(b, d.imm as u8, d, &ea),
+        Insn::Sha1nexteXvWv => sem_ea::sha1nexte(b, d, &ea),
+        Insn::Sha1msg1XvWv => sem_ea::sha1msg1(b, d, &ea),
+        Insn::Sha1msg2XvWv => sem_ea::sha1msg2(b, d, &ea),
+        Insn::Sha256rnds2XvWv => sem_ea::sha256rnds2(b, d, &ea),
+        Insn::Sha256msg1XvWv => sem_ea::sha256msg1(b, d, &ea),
+        Insn::Sha256msg2XvWv => sem_ea::sha256msg2(b, d, &ea),
+        Insn::Gf2p8mulbXvWv => sem_ea::gf2p8mulb(b, d, &ea),
+        Insn::Gf2p8affineqbXvWvIb => sem_ea::gf2p8affine(b, false, d.imm as u8, d, &ea),
+        Insn::Gf2p8affineinvqbXvWvIb => sem_ea::gf2p8affine(b, true, d.imm as u8, d, &ea),
         // ===== x87（D8-DF）。mod=11 は r/m フィールドを ST(i) として
         // 扱い、それ以外はメモリ形。ステータスワード依存の比較系は
         // 未モデルのため旧経路へフォールバックする。

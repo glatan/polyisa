@@ -1480,6 +1480,26 @@ fn build_map_0f38(m: &mut Model) {
             mi(name, &[RegX, RmX], None, PfxSel::P66, Pred::True, syn, "alu"),
         ));
     }
+    // SHA-NI（0xC8-0xCD、接頭辞なし NP）。SHA256RNDS2 は
+    // 暗黙の XMM0 も読む（意味論側で参照）。
+    for (op, name, syn) in [
+        (0xC8u8, "sha1nexte_xv_wv", "sha1nexte {x}, {w}"),
+        (0xC9, "sha1msg1_xv_wv", "sha1msg1 {x}, {w}"),
+        (0xCA, "sha1msg2_xv_wv", "sha1msg2 {x}, {w}"),
+        (0xCB, "sha256rnds2_xv_wv", "sha256rnds2 {x}, {w}"),
+        (0xCC, "sha256msg1_xv_wv", "sha256msg1 {x}, {w}"),
+        (0xCD, "sha256msg2_xv_wv", "sha256msg2 {x}, {w}"),
+    ] {
+        v.push(MapItem::Insn(
+            op,
+            mi(name, &[RegX, RmX], None, PfxSel::Plain, Pred::True, syn, "alu"),
+        ));
+    }
+    // GFNI の GF(2^8) 乗算（必須接頭辞 0x66）。
+    v.push(MapItem::Insn(
+        0xCF,
+        mi("gf2p8mulb_xv_wv", &[RegX, RmX], None, PfxSel::P66, Pred::True, "gf2p8mulb {x}, {w}", "alu"),
+    ));
     // CRC32（F2 0F38 F0/F1）。MOVBE と同バイトで接頭辞で分ける。
     v.push(MapItem::Insn(
         0xF0,
@@ -1570,6 +1590,10 @@ fn build_map_0f3a(m: &mut Model) {
         // PCLMULQDQ と AESKEYGENASSIST（必須接頭辞 0x66 + imm8）。
         MapItem::Insn(0x44, mi("pclmulqdq_xv_wv_ib", &[RegX, RmX, ib], None, PfxSel::P66, Pred::True, "pclmulqdq {x}, {w}, {i}", "alu")),
         MapItem::Insn(0xDF, mi("aeskeygenassist_xv_wv_ib", &[RegX, RmX, ib], None, PfxSel::P66, Pred::True, "aeskeygenassist {x}, {w}, {i}", "alu")),
+        // SHA1RNDS4（NP + imm8）と GFNI の affine 変換（必須接頭辞 0x66 + imm8）。
+        MapItem::Insn(0xCC, mi("sha1rnds4_xv_wv_ib", &[RegX, RmX, ib], None, PfxSel::Plain, Pred::True, "sha1rnds4 {x}, {w}, {i}", "alu")),
+        MapItem::Insn(0xCE, mi("gf2p8affineqb_xv_wv_ib", &[RegX, RmX, ib], None, PfxSel::P66, Pred::True, "gf2p8affineqb {x}, {w}, {i}", "alu")),
+        MapItem::Insn(0xCF, mi("gf2p8affineinvqb_xv_wv_ib", &[RegX, RmX, ib], None, PfxSel::P66, Pred::True, "gf2p8affineinvqb {x}, {w}, {i}", "alu")),
     ];
     m.maps.push(MapDecl {
         name: "map_0f3a".to_string(),

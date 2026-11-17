@@ -17,8 +17,8 @@
 | pentium | i486 | vme、de、pse、tsc、msr、cx8、mce、apic、mmx |  |
 | pentium_iii | pentium_pro | fxsr、sse、sep、pat |  |
 | pentium_pro | pentium | cmov、pge、mca、pae、mtrr、pse36 |  |
-| x86_64 |  | cpuid、fpu、vme、de、pse、tsc、msr、pae、mce、cx8、apic、sep、mtrr、pge、mca、cmov、pat、pse36、clfsh、mmx、fxsr、sse、sse2、sse3、ssse3、sse4_1、sse4_2、cx16、popcnt、rdtscp、syscall、nx、lm、lahf_lm、i486、lzcnt、adx、pclmulqdq、aesni |  |
-| x86_64_v2 | x86_64 | cx16、popcnt | lzcnt、adx、pclmulqdq、aesni |
+| x86_64 |  | cpuid、fpu、vme、de、pse、tsc、msr、pae、mce、cx8、apic、sep、mtrr、pge、mca、cmov、pat、pse36、clfsh、mmx、fxsr、sse、sse2、sse3、ssse3、sse4_1、sse4_2、cx16、popcnt、rdtscp、syscall、nx、lm、lahf_lm、i486、lzcnt、adx、pclmulqdq、aesni、sha、gfni |  |
+| x86_64_v2 | x86_64 | cx16、popcnt | lzcnt、adx、pclmulqdq、aesni、sha、gfni |
 | x86_64_v3 | x86_64_v2 | avx、avx2、bmi1、bmi2、f16c、fma、lzcnt、movbe、osxsave、adx、pclmulqdq、aesni |  |
 | x86_64_v4 | x86_64_v3 | avx512f、avx512bw、avx512cd、avx512dq、avx512vl |  |
 
@@ -308,6 +308,9 @@
 | fucomip | fucomip_st | 真 | alu |
 | fwait | fwait | 真 | system |
 | fxch | fxch_st、fxch_sti | 真 | alu |
+| gf2p8affineinvqb | gf2p8affineinvqb_xv_wv_ib | gfni | alu |
+| gf2p8affineqb | gf2p8affineqb_xv_wv_ib | gfni | alu |
+| gf2p8mulb | gf2p8mulb_xv_wv | gfni | alu |
 | haddpd | haddpd_xv_wv | sse3 | alu |
 | haddps | haddps_xv_wv | sse3 | alu |
 | hlt | en_hlt、hlt | 真 | system |
@@ -700,6 +703,13 @@
 | setp | setp | 真 | alu |
 | sets | sets | 真 | alu |
 | sfence | sfence | sse | alu |
+| sha1msg1 | sha1msg1_xv_wv | sha | alu |
+| sha1msg2 | sha1msg2_xv_wv | sha | alu |
+| sha1nexte | sha1nexte_xv_wv | sha | alu |
+| sha1rnds4 | sha1rnds4_xv_wv_ib | sha | alu |
+| sha256msg1 | sha256msg1_xv_wv | sha | alu |
+| sha256msg2 | sha256msg2_xv_wv | sha | alu |
+| sha256rnds2 | sha256rnds2_xv_wv | sha | alu |
 | shl | shl_eb_ib、shl_ev_ib | i186 | alu |
 | shl | shl_eb_1、shl_eb_cl、shl_ev_1、shl_ev_cl、shl_m32_imm8_mem8、shl_m8_1_mem32、shl_rm32_1、shl_rm32_cl、shl_rm32_imm8 | 真 | alu |
 | shld | shld_ev_gv_cl、shld_ev_gv_ib、shld_r32_cl、shld_r32_imm8 | 真 | alu |

@@ -17373,3 +17373,274 @@ fn run32_aes_pclmul() {
     assert_eq!(buf[..8], [0xffu8; 8], "pclmulqdq imm=0x01 lo");
     assert_eq!(buf[8..], [0u8; 8], "pclmulqdq imm=0x01 hi");
 }
+
+// SHA1RNDS4 の参照実装（SDM の擬似コードそのまま）。
+fn ref_sha1rnds4(abcd: [u32; 4], w: [u32; 4], imm: u8) -> [u32; 4] {
+    const K: [u32; 4] = [0x5A82_7999, 0x6ED9_EBA1, 0x8F1B_BCDC, 0xCA62_C1D6];
+    let k = K[usize::from(imm & 3)];
+    let f = |b: u32, c: u32, d: u32| match imm & 3 {
+        0 => (b & c) | (!b & d),
+        2 => (b & c) | (b & d) | (c & d),
+        _ => b ^ c ^ d,
+    };
+    let (mut a, mut b, mut c, mut d) = (abcd[3], abcd[2], abcd[1], abcd[0]);
+    let mut e = w[3];
+    for i in 0..4 {
+        let add = if i == 0 { e } else { e.wrapping_add(w[3 - i]) };
+        let na = f(b, c, d)
+            .wrapping_add(a.rotate_left(5))
+            .wrapping_add(add)
+            .wrapping_add(k);
+        e = d;
+        d = c;
+        c = b.rotate_left(30);
+        b = a;
+        a = na;
+    }
+    [d, c, b, a]
+}
+
+// SHA256RNDS2 の参照実装。cdgh = SRC1、abef = SRC2、wk = XMM0 下位。
+fn ref_sha256rnds2(cdgh: [u32; 4], abef: [u32; 4], wk: [u32; 2]) -> [u32; 4] {
+    let (mut a, mut b) = (abef[3], abef[2]);
+    let (mut c, mut d) = (cdgh[3], cdgh[2]);
+    let (mut e, mut f) = (abef[1], abef[0]);
+    let (mut g, mut h) = (cdgh[1], cdgh[0]);
+    let ch = |x: u32, y: u32, z: u32| (x & y) ^ (!x & z);
+    let maj = |x: u32, y: u32, z: u32| (x & y) ^ (x & z) ^ (y & z);
+    let s0 = |x: u32| x.rotate_right(2) ^ x.rotate_right(13) ^ x.rotate_right(22);
+    let s1 = |x: u32| x.rotate_right(6) ^ x.rotate_right(11) ^ x.rotate_right(25);
+    for w in wk {
+        let t1 = ch(e, f, g)
+            .wrapping_add(s1(e))
+            .wrapping_add(w)
+            .wrapping_add(h);
+        let na = t1.wrapping_add(maj(a, b, c)).wrapping_add(s0(a));
+        let ne = t1.wrapping_add(d);
+        h = g;
+        g = f;
+        f = e;
+        e = ne;
+        d = c;
+        c = b;
+        b = a;
+        a = na;
+    }
+    [f, e, b, a]
+}
+
+fn ref_gf8mul(x: u8, y: u8) -> u8 {
+    let mut t = 0u16;
+    for i in 0..8 {
+        if y >> i & 1 != 0 {
+            t ^= u16::from(x) << i;
+        }
+    }
+    for i in (8..15).rev() {
+        if t >> i & 1 != 0 {
+            t ^= 0x11bu16 << (i - 8);
+        }
+    }
+    t as u8
+}
+
+fn ref_gf8inv(x: u8) -> u8 {
+    let mut r = 1u8;
+    let mut t = x;
+    for _ in 0..7 {
+        t = ref_gf8mul(t, t);
+        r = ref_gf8mul(r, t);
+    }
+    r
+}
+
+#[test]
+fn run32_sha_gfni() {
+    // SHA-NI・GFNI をマップ経路で回し、スカラ参照実装と比較する。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    // 0x2000: SHA1 の IV (A,B,C,D)（dword3..0 = A..D）。
+    let sha1_state: [u32; 4] = [0x1032_5476, 0x98BA_DCFE, 0xEFCD_AB89, 0x6745_2301];
+    let mut buf = Vec::new();
+    for w in sha1_state {
+        buf.extend_from_slice(&w.to_le_bytes());
+    }
+    env.backend.mem.write(VirtAddr(0x2000), &buf).unwrap();
+    // 0x2010: SHA1 の W0E..W3（任意値）。
+    let sha1_w: [u32; 4] = [0x0c0d_0e0f, 0x0809_0a0b, 0x0405_0607, 0x0001_0203];
+    buf.clear();
+    for w in sha1_w {
+        buf.extend_from_slice(&w.to_le_bytes());
+    }
+    env.backend.mem.write(VirtAddr(0x2010), &buf).unwrap();
+    // 0x2020: SHA256 の (C,D,G,H)。0x2030: (A,B,E,F)。0x2040: WK。
+    let sha256_cdgh: [u32; 4] = [0x5be0_cd19, 0x1f83_d9ab, 0xa54f_f53a, 0x3c6e_f372];
+    let sha256_abef: [u32; 4] = [0x9b05_688c, 0x510e_527f, 0xbb67_ae85, 0x6a09_e667];
+    let sha256_wk: [u32; 4] = [0x0001_0203, 0x0405_0607, 0x0809_0a0b, 0x0c0d_0e0f];
+    buf.clear();
+    for w in sha256_cdgh {
+        buf.extend_from_slice(&w.to_le_bytes());
+    }
+    env.backend.mem.write(VirtAddr(0x2020), &buf).unwrap();
+    buf.clear();
+    for w in sha256_abef {
+        buf.extend_from_slice(&w.to_le_bytes());
+    }
+    env.backend.mem.write(VirtAddr(0x2030), &buf).unwrap();
+    buf.clear();
+    for w in sha256_wk {
+        buf.extend_from_slice(&w.to_le_bytes());
+    }
+    env.backend.mem.write(VirtAddr(0x2040), &buf).unwrap();
+    // 0x2060: GFNI 用バイト列 0x00-0x0E + 0x95（inv 既知値用）。
+    // 0x2070: 恒等行列 qword×2。
+    buf = (0u8..15).chain([0x95]).collect();
+    env.backend.mem.write(VirtAddr(0x2060), &buf).unwrap();
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x2070),
+            &[
+                0x80, 0x40, 0x20, 0x10, 0x08, 0x04, 0x02, 0x01, 0x80, 0x40, 0x20, 0x10, 0x08, 0x04,
+                0x02, 0x01,
+            ],
+        )
+        .unwrap();
+    let prog: &[u8] = &[
+        // SHA1RNDS4 imm=0（f0/K0）。
+        0x66, 0x0F, 0x28, 0x05, 0x00, 0x20, 0x00, 0x00, // movapd xmm0,[0x2000]
+        0x66, 0x0F, 0x28, 0x0D, 0x10, 0x20, 0x00, 0x00, // movapd xmm1,[0x2010]
+        0x0F, 0x3A, 0xCC, 0xC1, 0x00, // sha1rnds4 xmm0,xmm1,0
+        0x66, 0x0F, 0x29, 0x05, 0x80, 0x20, 0x00, 0x00, // movapd [0x2080],xmm0
+        // SHA1NEXTE/MSG1/MSG2（状態と W を元のまま使う）。
+        0x66, 0x0F, 0x28, 0x05, 0x00, 0x20, 0x00, 0x00, // movapd xmm0,[0x2000]
+        0x0F, 0x38, 0xC8, 0xC1, // sha1nexte xmm0,xmm1
+        0x66, 0x0F, 0x29, 0x05, 0x90, 0x20, 0x00, 0x00, // movapd [0x2090],xmm0
+        0x66, 0x0F, 0x28, 0x05, 0x00, 0x20, 0x00, 0x00, // movapd xmm0,[0x2000]
+        0x0F, 0x38, 0xC9, 0xC1, // sha1msg1 xmm0,xmm1
+        0x66, 0x0F, 0x29, 0x05, 0xA0, 0x20, 0x00, 0x00, // movapd [0x20a0],xmm0
+        0x66, 0x0F, 0x28, 0x05, 0x00, 0x20, 0x00, 0x00, // movapd xmm0,[0x2000]
+        0x0F, 0x38, 0xCA, 0xC1, // sha1msg2 xmm0,xmm1
+        0x66, 0x0F, 0x29, 0x05, 0xB0, 0x20, 0x00, 0x00, // movapd [0x20b0],xmm0
+        // SHA256RNDS2。xmm1=dst(CDGH)、xmm2=src(ABEF)、xmm0=WK。
+        0x66, 0x0F, 0x28, 0x05, 0x40, 0x20, 0x00, 0x00, // movapd xmm0,[0x2040]
+        0x66, 0x0F, 0x28, 0x0D, 0x20, 0x20, 0x00, 0x00, // movapd xmm1,[0x2020]
+        0x66, 0x0F, 0x28, 0x15, 0x30, 0x20, 0x00, 0x00, // movapd xmm2,[0x2030]
+        0x0F, 0x38, 0xCB, 0xCA, // sha256rnds2 xmm1,xmm2
+        0x66, 0x0F, 0x29, 0x0D, 0xC0, 0x20, 0x00, 0x00, // movapd [0x20c0],xmm1
+        // SHA256MSG1/MSG2。xmm0=[0x2040]、xmm1=[0x2020] を再利用。
+        0x66, 0x0F, 0x28, 0x05, 0x40, 0x20, 0x00, 0x00, // movapd xmm0,[0x2040]
+        0x66, 0x0F, 0x28, 0x0D, 0x20, 0x20, 0x00, 0x00, // movapd xmm1,[0x2020]
+        0x0F, 0x38, 0xCC, 0xC1, // sha256msg1 xmm0,xmm1
+        0x66, 0x0F, 0x29, 0x05, 0xD0, 0x20, 0x00, 0x00, // movapd [0x20d0],xmm0
+        0x0F, 0x38, 0xCD, 0xC1, // sha256msg2 xmm0,xmm1
+        0x66, 0x0F, 0x29, 0x05, 0xE0, 0x20, 0x00, 0x00, // movapd [0x20e0],xmm0
+        // GFNI: gf2p8mulb（各バイトの GF 乗算）、affine は恒等行列。
+        0x66, 0x0F, 0x28, 0x25, 0x60, 0x20, 0x00, 0x00, // movapd xmm4,[0x2060]
+        0x66, 0x0F, 0x28, 0x2D, 0x60, 0x20, 0x00, 0x00, // movapd xmm5,[0x2060]
+        0x66, 0x0F, 0x28, 0x35, 0x70, 0x20, 0x00, 0x00, // movapd xmm6,[0x2070]
+        0x66, 0x0F, 0x28, 0x3D, 0x60, 0x20, 0x00, 0x00, // movapd xmm7,[0x2060]
+        0x66, 0x0F, 0x38, 0xCF, 0xE5, // gf2p8mulb xmm4,xmm5
+        0x66, 0x0F, 0x29, 0x25, 0xF0, 0x20, 0x00, 0x00, // movapd [0x20f0],xmm4
+        0x66, 0x0F, 0x3A, 0xCE, 0xFE, 0x00, // gf2p8affineqb xmm7,xmm6,0
+        0x66, 0x0F, 0x29, 0x3D, 0x00, 0x21, 0x00, 0x00, // movapd [0x2100],xmm7
+        0x66, 0x0F, 0x3A, 0xCF, 0xFE, 0x00, // gf2p8affineinvqb xmm7,xmm6,0
+        0x66, 0x0F, 0x29, 0x3D, 0x10, 0x21, 0x00, 0x00, // movapd [0x2110],xmm7
+        // SHA1RNDS4 imm=1（f1/K1）。
+        0x66, 0x0F, 0x28, 0x05, 0x00, 0x20, 0x00, 0x00, // movapd xmm0,[0x2000]
+        0x66, 0x0F, 0x28, 0x0D, 0x10, 0x20, 0x00, 0x00, // movapd xmm1,[0x2010]
+        0x0F, 0x3A, 0xCC, 0xC1, 0x01, // sha1rnds4 xmm0,xmm1,1
+        0x66, 0x0F, 0x29, 0x05, 0x20, 0x21, 0x00, 0x00, // movapd [0x2120],xmm0
+        0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax,1
+        0xCD, 0x80, // int 0x80 → exit(ebx=0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut ExitOne, 1000, false);
+    assert_eq!(out, Outcome::Exit(0));
+    let acc = polyisa_mem::Access {
+        endian: polyisa_mem::Endian::Le,
+        align: polyisa_mem::Align::Unaligned,
+        kind: polyisa_mem::AccessKind::DataRead,
+    };
+    let read = |env: &BareEnv, a: u64| {
+        let mut v = [0u8; 16];
+        env.backend.mem.read(VirtAddr(a), &mut v, acc).unwrap();
+        v
+    };
+    let dws = |v: &[u8; 16]| {
+        [
+            u32::from_le_bytes(v[0..4].try_into().unwrap()),
+            u32::from_le_bytes(v[4..8].try_into().unwrap()),
+            u32::from_le_bytes(v[8..12].try_into().unwrap()),
+            u32::from_le_bytes(v[12..16].try_into().unwrap()),
+        ]
+    };
+    // SHA1RNDS4: imm=0 の 4 ラウンド。
+    let exp = ref_sha1rnds4(sha1_state, sha1_w, 0);
+    assert_eq!(dws(&read(&env, 0x2080)), exp, "sha1rnds4");
+    // SHA1NEXTE: 上位 dword に rol30(A) を加算。
+    let mut exp = sha1_w;
+    exp[3] = exp[3].wrapping_add(sha1_state[3].rotate_left(30));
+    assert_eq!(dws(&read(&env, 0x2090)), exp, "sha1nexte");
+    // SHA1MSG1。DEST[127:96]=W2^W0、DEST[95:64]=W3^W1、
+    // DEST[63:32]=W4^W2、DEST[31:0]=W5^W3（SDM の W 番号）。
+    let exp = [
+        sha1_w[2] ^ sha1_state[0],
+        sha1_w[3] ^ sha1_state[1],
+        sha1_state[0] ^ sha1_state[2],
+        sha1_state[1] ^ sha1_state[3],
+    ];
+    assert_eq!(dws(&read(&env, 0x20a0)), exp, "sha1msg1");
+    // SHA1MSG2。
+    let w13 = sha1_w[2];
+    let w14 = sha1_w[1];
+    let w15 = sha1_w[0];
+    let w16 = (sha1_state[3] ^ w13).rotate_left(1);
+    let w17 = (sha1_state[2] ^ w14).rotate_left(1);
+    let w18 = (sha1_state[1] ^ w15).rotate_left(1);
+    let w19 = (sha1_state[0] ^ w16).rotate_left(1);
+    assert_eq!(dws(&read(&env, 0x20b0)), [w19, w18, w17, w16], "sha1msg2");
+    // SHA256RNDS2。
+    let exp = ref_sha256rnds2(sha256_cdgh, sha256_abef, [sha256_wk[0], sha256_wk[1]]);
+    assert_eq!(dws(&read(&env, 0x20c0)), exp, "sha256rnds2");
+    // SHA256MSG1: DEST[i] = W_(i-1) + σ0(W_?)（参照式）。
+    let s0 = |x: u32| x.rotate_right(7) ^ x.rotate_right(18) ^ (x >> 3);
+    let w = sha256_wk;
+    let exp = [
+        w[0].wrapping_add(s0(w[1])),
+        w[1].wrapping_add(s0(w[2])),
+        w[2].wrapping_add(s0(w[3])),
+        w[3].wrapping_add(s0(sha256_cdgh[0])),
+    ];
+    assert_eq!(dws(&read(&env, 0x20d0)), exp, "sha256msg1");
+    // SHA256MSG2。SRC1 は直前の msg1 で書き換えられた xmm0。
+    let s1f = |x: u32| x.rotate_right(17) ^ x.rotate_right(19) ^ (x >> 10);
+    let w14 = sha256_cdgh[2];
+    let w15 = sha256_cdgh[3];
+    let w16 = exp[0].wrapping_add(s1f(w14));
+    let w17 = exp[1].wrapping_add(s1f(w15));
+    let w18 = exp[2].wrapping_add(s1f(w16));
+    let w19 = exp[3].wrapping_add(s1f(w17));
+    assert_eq!(dws(&read(&env, 0x20e0)), [w16, w17, w18, w19], "sha256msg2");
+    // GF2P8MULB: 各バイトの自乗。
+    let gfin: Vec<u8> = (0u8..15).chain([0x95]).collect();
+    let mul = read(&env, 0x20f0);
+    for (i, v) in mul.iter().enumerate() {
+        assert_eq!(*v, ref_gf8mul(gfin[i], gfin[i]), "gf2p8mulb byte {i}");
+    }
+    // GF2P8AFFINEQB: 恒等行列＋imm=0 なので入力そのまま。
+    assert_eq!(read(&env, 0x2100), gfin.as_slice(), "gf2p8affineqb");
+    // GF2P8AFFINEINVQB: 恒等行列＋imm=0 なので GF 逆元。
+    let inv = read(&env, 0x2110);
+    for (i, v) in inv.iter().enumerate() {
+        assert_eq!(*v, ref_gf8inv(gfin[i]), "gf2p8affineinvqb byte {i}");
+    }
+    // SDM の既知値: inv(0x95) = 0x8A。
+    assert_eq!(inv[15], 0x8A, "gf2p8affineinvqb inv(0x95)");
+    // SHA1RNDS4: imm=1（f1=parity、K=0x6ED9EBA1）。
+    let exp = ref_sha1rnds4(sha1_state, sha1_w, 1);
+    assert_eq!(dws(&read(&env, 0x2120)), exp, "sha1rnds4 imm=1");
+}

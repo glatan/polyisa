@@ -8674,3 +8674,418 @@ pub fn pclmulqdq<B: Backend>(
     b.set(sem::xmm_ref(reg_x(d)), r);
     Ok(())
 }
+
+// ---- SHA-NI / GFNI ----
+
+/// dword レーンの 32 ビットローテート。`x` は下位 32 ビットを持つ。
+fn rol32<B: Backend>(b: &mut B, x: B::V<W128>, n: u32) -> B::V<W128> {
+    let kl = b.konst::<W128>(u128::from(n));
+    let kr = b.konst::<W128>(u128::from(32 - n));
+    let l = b.shl::<W128>(x, kl);
+    let r = b.shr_l::<W128>(x, kr);
+    let t = b.or::<W128>(l, r);
+    let m = b.konst::<W128>(0xffff_ffff);
+    b.and::<W128>(t, m)
+}
+
+/// dword レーンの右ローテート。
+fn ror32<B: Backend>(b: &mut B, x: B::V<W128>, n: u32) -> B::V<W128> {
+    let kr = b.konst::<W128>(u128::from(n));
+    let kl = b.konst::<W128>(u128::from(32 - n));
+    let r = b.shr_l::<W128>(x, kr);
+    let l = b.shl::<W128>(x, kl);
+    let t = b.or::<W128>(l, r);
+    let m = b.konst::<W128>(0xffff_ffff);
+    b.and::<W128>(t, m)
+}
+
+/// 下位 32 ビットに丸める。
+fn m32<B: Backend>(b: &mut B, x: B::V<W128>) -> B::V<W128> {
+    let m = b.konst::<W128>(0xffff_ffff);
+    b.and::<W128>(x, m)
+}
+
+/// dword レーン i（0 が最下位）を取り出す。
+fn dw<B: Backend>(b: &mut B, v: B::V<W128>, i: u32) -> B::V<W128> {
+    lane128(b, v, i * 32, 32)
+}
+
+/// dst の dword レーン i を v の下位で置き換える。
+fn put_dw<B: Backend>(b: &mut B, dst: B::V<W128>, v: B::V<W128>, i: u32) -> B::V<W128> {
+    put_lane128(b, dst, v, i * 32, 32)
+}
+
+/// SHA1RNDS4。imm[1:0] が論理関数と定数を選ぶ。SRC1 = (A,B,C,D)、
+/// SRC2 = (W0+E, W1, W2, W3)。4 ラウンド分をまとめて計算する。
+pub fn sha1rnds4<B: Backend>(
+    b: &mut B,
+    imm: u8,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    const K: [u64; 4] = [0x5A82_7999, 0x6ED9_EBA1, 0x8F1B_BCDC, 0xCA62_C1D6];
+    let s1: B::V<W128> = b.get(sem::xmm_ref(reg_x(d)));
+    let s2 = rx(b, ea, 128)?;
+    let kk = b.konst::<W128>(u128::from(K[usize::from(imm & 3)]));
+    let fsel = imm & 3;
+    let (mut a, mut bb, mut c, mut dd) = (dw(b, s1, 3), dw(b, s1, 2), dw(b, s1, 1), dw(b, s1, 0));
+    // 0 ラウンド目は SRC2[127:96]（W0+E の和）をそのまま使う。
+    let mut e = dw(b, s2, 3);
+    for i in 0..4u32 {
+        let f = match fsel {
+            0 => {
+                let t0 = b.and::<W128>(bb, c);
+                let nb = b.not::<W128>(bb);
+                let t1 = b.and::<W128>(nb, dd);
+                b.xor::<W128>(t0, t1)
+            }
+            2 => {
+                let t0 = b.and::<W128>(bb, c);
+                let t1 = b.and::<W128>(bb, dd);
+                let t2 = b.and::<W128>(c, dd);
+                let t3 = b.xor::<W128>(t0, t1);
+                b.xor::<W128>(t3, t2)
+            }
+            _ => {
+                let t = b.xor::<W128>(bb, c);
+                b.xor::<W128>(t, dd)
+            }
+        };
+        let addend = if i == 0 {
+            e
+        } else {
+            let w = dw(b, s2, 3 - i);
+            b.add::<W128>(e, w)
+        };
+        let r5 = rol32(b, a, 5);
+        let t0 = b.add::<W128>(f, r5);
+        let t1 = b.add::<W128>(t0, addend);
+        let t2 = b.add::<W128>(t1, kk);
+        let na = m32(b, t2);
+        e = dd;
+        dd = c;
+        c = rol32(b, bb, 30);
+        bb = a;
+        a = na;
+    }
+    let mut r = b.konst::<W128>(0);
+    r = put_dw(b, r, a, 3);
+    r = put_dw(b, r, bb, 2);
+    r = put_dw(b, r, c, 1);
+    r = put_dw(b, r, dd, 0);
+    b.set(sem::xmm_ref(reg_x(d)), r);
+    Ok(())
+}
+
+/// SHA1NEXTE。DEST[127:96] = SRC2[127:96] + rol30(SRC1[127:96])、
+/// 残りは SRC2 そのまま。
+pub fn sha1nexte<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit> {
+    let s1: B::V<W128> = b.get(sem::xmm_ref(reg_x(d)));
+    let s2 = rx(b, ea, 128)?;
+    let a = dw(b, s1, 3);
+    let t = rol32(b, a, 30);
+    let s2top = dw(b, s2, 3);
+    let top = b.add::<W128>(s2top, t);
+    let top = m32(b, top);
+    let r = put_dw(b, s2, top, 3);
+    b.set(sem::xmm_ref(reg_x(d)), r);
+    Ok(())
+}
+
+/// SHA1MSG1。DEST = [W2^W0, W3^W1, W4^W2, W5^W3]（dword 順に
+/// 上から）。W4/W5 は SRC2 の上位 2 dword。
+pub fn sha1msg1<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit> {
+    let s1: B::V<W128> = b.get(sem::xmm_ref(reg_x(d)));
+    let s2 = rx(b, ea, 128)?;
+    let mut r = b.konst::<W128>(0);
+    for (a1, a2, oi) in [
+        (dw(b, s1, 1), dw(b, s1, 3), 3u32),
+        (dw(b, s1, 0), dw(b, s1, 2), 2),
+        (dw(b, s2, 3), dw(b, s1, 1), 1),
+        (dw(b, s2, 2), dw(b, s1, 0), 0),
+    ] {
+        let t = b.xor::<W128>(a1, a2);
+        r = put_dw(b, r, t, oi);
+    }
+    b.set(sem::xmm_ref(reg_x(d)), r);
+    Ok(())
+}
+
+/// SHA1MSG2。W16-W19 を順に (SRC1^W13..)^rol1 で作る
+/// （W19 は W16 に依存する逐次形）。
+pub fn sha1msg2<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit> {
+    let s1: B::V<W128> = b.get(sem::xmm_ref(reg_x(d)));
+    let s2 = rx(b, ea, 128)?;
+    let w13 = dw(b, s2, 2);
+    let w14 = dw(b, s2, 1);
+    let w15 = dw(b, s2, 0);
+    let __dw0 = dw(b, s1, 3);
+    let t13 = b.xor::<W128>(__dw0, w13);
+    let w16 = rol32(b, t13, 1);
+    let __dw1 = dw(b, s1, 2);
+    let t14 = b.xor::<W128>(__dw1, w14);
+    let w17 = rol32(b, t14, 1);
+    let __dw2 = dw(b, s1, 1);
+    let t15 = b.xor::<W128>(__dw2, w15);
+    let w18 = rol32(b, t15, 1);
+    let __dw3 = dw(b, s1, 0);
+    let t16 = b.xor::<W128>(__dw3, w16);
+    let w19 = rol32(b, t16, 1);
+    let mut r = b.konst::<W128>(0);
+    r = put_dw(b, r, w16, 3);
+    r = put_dw(b, r, w17, 2);
+    r = put_dw(b, r, w18, 1);
+    r = put_dw(b, r, w19, 0);
+    b.set(sem::xmm_ref(reg_x(d)), r);
+    Ok(())
+}
+
+/// SHA-256 の補助関数。
+fn sha256_ch<B: Backend>(b: &mut B, e: B::V<W128>, f: B::V<W128>, g: B::V<W128>) -> B::V<W128> {
+    let t0 = b.and::<W128>(e, f);
+    let ne = b.not::<W128>(e);
+    let t1 = b.and::<W128>(ne, g);
+    b.xor::<W128>(t0, t1)
+}
+fn sha256_maj<B: Backend>(b: &mut B, a: B::V<W128>, bb: B::V<W128>, c: B::V<W128>) -> B::V<W128> {
+    let t0 = b.and::<W128>(a, bb);
+    let t1 = b.and::<W128>(a, c);
+    let t2 = b.and::<W128>(bb, c);
+    let t3 = b.xor::<W128>(t0, t1);
+    b.xor::<W128>(t3, t2)
+}
+fn sha256_sig0<B: Backend>(b: &mut B, x: B::V<W128>) -> B::V<W128> {
+    let t0 = ror32(b, x, 2);
+    let t1 = ror32(b, x, 13);
+    let t2 = ror32(b, x, 22);
+    let t3 = b.xor::<W128>(t0, t1);
+    b.xor::<W128>(t3, t2)
+}
+fn sha256_sig1<B: Backend>(b: &mut B, x: B::V<W128>) -> B::V<W128> {
+    let t0 = ror32(b, x, 6);
+    let t1 = ror32(b, x, 11);
+    let t2 = ror32(b, x, 25);
+    let t3 = b.xor::<W128>(t0, t1);
+    b.xor::<W128>(t3, t2)
+}
+fn sha256_s0<B: Backend>(b: &mut B, x: B::V<W128>) -> B::V<W128> {
+    let t0 = ror32(b, x, 7);
+    let t1 = ror32(b, x, 18);
+    let k3 = b.konst::<W128>(3);
+    let t2 = b.shr_l::<W128>(x, k3);
+    let t3 = b.xor::<W128>(t0, t1);
+    let t4 = b.xor::<W128>(t3, t2);
+    m32(b, t4)
+}
+fn sha256_s1<B: Backend>(b: &mut B, x: B::V<W128>) -> B::V<W128> {
+    let t0 = ror32(b, x, 17);
+    let t1 = ror32(b, x, 19);
+    let k10 = b.konst::<W128>(10);
+    let t2 = b.shr_l::<W128>(x, k10);
+    let t3 = b.xor::<W128>(t0, t1);
+    let t4 = b.xor::<W128>(t3, t2);
+    m32(b, t4)
+}
+
+/// SHA256RNDS2。SRC1 = (C,D,G,H)、SRC2 = (A,B,E,F)、暗黙の XMM0 の
+/// 下位 2 dword が W+K の和。2 ラウンドで (A,B,E,F) を更新する。
+pub fn sha256rnds2<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit> {
+    let s1: B::V<W128> = b.get(sem::xmm_ref(reg_x(d)));
+    let s2 = rx(b, ea, 128)?;
+    let x0: B::V<W128> = b.get(sem::xmm_ref(Xmm(0)));
+    let wk = [dw(b, x0, 0), dw(b, x0, 1)];
+    let (mut a, mut bb) = (dw(b, s2, 3), dw(b, s2, 2));
+    let (mut c, mut dd) = (dw(b, s1, 3), dw(b, s1, 2));
+    let (mut e, mut f) = (dw(b, s2, 1), dw(b, s2, 0));
+    let (mut g, mut h) = (dw(b, s1, 1), dw(b, s1, 0));
+    for w in wk {
+        let ch = sha256_ch(b, e, f, g);
+        let s1_ = sha256_sig1(b, e);
+        let t0 = b.add::<W128>(ch, s1_);
+        let t1 = b.add::<W128>(t0, w);
+        let t1 = b.add::<W128>(t1, h);
+        let t1 = m32(b, t1);
+        let maj = sha256_maj(b, a, bb, c);
+        let s0_ = sha256_sig0(b, a);
+        let t2 = b.add::<W128>(maj, s0_);
+        let t3 = b.add::<W128>(t1, t2);
+        let na = m32(b, t3);
+        let ne0 = b.add::<W128>(t1, dd);
+        let ne = m32(b, ne0);
+        h = g;
+        g = f;
+        f = e;
+        e = ne;
+        dd = c;
+        c = bb;
+        bb = a;
+        a = na;
+    }
+    let mut r = b.konst::<W128>(0);
+    r = put_dw(b, r, a, 3);
+    r = put_dw(b, r, bb, 2);
+    r = put_dw(b, r, e, 1);
+    r = put_dw(b, r, f, 0);
+    b.set(sem::xmm_ref(reg_x(d)), r);
+    Ok(())
+}
+
+/// SHA256MSG1。DEST.d_i = SRC1.d_i + σ0(d_{i+1})（最上位だけ
+/// SRC2[31:0] を σ0 入力に使う）。
+pub fn sha256msg1<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit> {
+    let s1: B::V<W128> = b.get(sem::xmm_ref(reg_x(d)));
+    let s2 = rx(b, ea, 128)?;
+    let w4 = dw(b, s2, 0);
+    let mut r = b.konst::<W128>(0);
+    for i in 0..4u32 {
+        let w = dw(b, s1, i);
+        let x = if i == 3 { w4 } else { dw(b, s1, i + 1) };
+        let s = sha256_s0(b, x);
+        let t0 = b.add::<W128>(w, s);
+        let t = m32(b, t0);
+        r = put_dw(b, r, t, i);
+    }
+    b.set(sem::xmm_ref(reg_x(d)), r);
+    Ok(())
+}
+
+/// SHA256MSG2。W16-W19 を逐次に作る（W18/W19 は直前の結果に依存）。
+pub fn sha256msg2<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit> {
+    let s1: B::V<W128> = b.get(sem::xmm_ref(reg_x(d)));
+    let s2 = rx(b, ea, 128)?;
+    let w14 = dw(b, s2, 2);
+    let w15 = dw(b, s2, 3);
+    let s14 = sha256_s1(b, w14);
+    let __dw4 = dw(b, s1, 0);
+    let t0 = b.add::<W128>(__dw4, s14);
+    let w16 = m32(b, t0);
+    let s15 = sha256_s1(b, w15);
+    let __dw5 = dw(b, s1, 1);
+    let t1 = b.add::<W128>(__dw5, s15);
+    let w17 = m32(b, t1);
+    let s16 = sha256_s1(b, w16);
+    let __dw6 = dw(b, s1, 2);
+    let t2 = b.add::<W128>(__dw6, s16);
+    let w18 = m32(b, t2);
+    let s17 = sha256_s1(b, w17);
+    let __dw7 = dw(b, s1, 3);
+    let t3 = b.add::<W128>(__dw7, s17);
+    let w19 = m32(b, t3);
+    let mut r = b.konst::<W128>(0);
+    r = put_dw(b, r, w19, 3);
+    r = put_dw(b, r, w18, 2);
+    r = put_dw(b, r, w17, 1);
+    r = put_dw(b, r, w16, 0);
+    b.set(sem::xmm_ref(reg_x(d)), r);
+    Ok(())
+}
+
+// ---- GFNI ----
+
+/// GF(2^8) の乗算（還元多項式 x^8+x^4+x^3+x+1 = 0x11B）。
+/// 両オペランドは下位 8 ビットを持つ。
+fn gf8mul<B: Backend>(b: &mut B, x: B::V<W128>, y: B::V<W128>) -> B::V<W128> {
+    let mut t = b.konst::<W128>(0);
+    for i in 0..8u32 {
+        let ki = b.konst::<W128>(u128::from(i));
+        let sh = b.shr_l::<W128>(y, ki);
+        let k1 = b.konst::<W128>(1);
+        let bit = b.and::<W128>(sh, k1);
+        let c = nez::<B, W128>(b, bit);
+        let xs = b.shl::<W128>(x, ki);
+        let xt = b.xor::<W128>(t, xs);
+        t = b.select::<W128>(c, xt, t);
+    }
+    for i in (8..15u32).rev() {
+        let ki = b.konst::<W128>(u128::from(i));
+        let sh = b.shr_l::<W128>(t, ki);
+        let k1 = b.konst::<W128>(1);
+        let bit = b.and::<W128>(sh, k1);
+        let c = nez::<B, W128>(b, bit);
+        let p = b.konst::<W128>(0x11bu128 << (i - 8));
+        let tp = b.xor::<W128>(t, p);
+        t = b.select::<W128>(c, tp, t);
+    }
+    t
+}
+
+/// GF(2^8) の逆元 x^254（x=0 では 0）。
+fn gf8inv<B: Backend>(b: &mut B, x: B::V<W128>) -> B::V<W128> {
+    // 254 = 2+4+8+16+32+64+128 なので x^{2^i}（i=1..7）を掛け合わせる。
+    let mut r = b.konst::<W128>(1);
+    let mut t = x;
+    for _ in 0..7 {
+        t = gf8mul(b, t, t);
+        r = gf8mul(b, r, t);
+    }
+    m32(b, r)
+}
+
+/// GF2P8MULB。各バイトを GF(2^8) で乗算する。
+pub fn gf2p8mulb<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit> {
+    let s1: B::V<W128> = b.get(sem::xmm_ref(reg_x(d)));
+    let s2 = rx(b, ea, 128)?;
+    let mut r = b.konst::<W128>(0);
+    for i in 0..16u32 {
+        let x = lane128(b, s1, i * 8, 8);
+        let y = lane128(b, s2, i * 8, 8);
+        let p = gf8mul(b, x, y);
+        r = put_lane128(b, r, p, i * 8, 8);
+    }
+    b.set(sem::xmm_ref(reg_x(d)), r);
+    Ok(())
+}
+
+/// バイト値（下位 8 ビット）のパリティを 0/1 の値で返す。
+fn parity8<B: Backend>(b: &mut B, x: B::V<W128>) -> B::V<W128> {
+    let k4 = b.konst::<W128>(4);
+    let t0 = b.shr_l::<W128>(x, k4);
+    let t = b.xor::<W128>(x, t0);
+    let k2 = b.konst::<W128>(2);
+    let t1 = b.shr_l::<W128>(t, k2);
+    let t = b.xor::<W128>(t, t1);
+    let k1 = b.konst::<W128>(1);
+    let t2 = b.shr_l::<W128>(t, k1);
+    let t = b.xor::<W128>(t, t2);
+    b.and::<W128>(t, k1)
+}
+
+/// GF2P8AFFINEQB/AFFINEINVQB。qword ごとに 8x8 ビット行列を
+/// 各バイトに掛け、imm8 を XOR する。inv=true は入力バイトを
+/// GF(2^8) で逆元にしてから掛ける。
+pub fn gf2p8affine<B: Backend>(
+    b: &mut B,
+    inv: bool,
+    imm: u8,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    let s1: B::V<W128> = b.get(sem::xmm_ref(reg_x(d)));
+    let s2 = rx(b, ea, 128)?;
+    let mut r = b.konst::<W128>(0);
+    for q in 0..2u32 {
+        let mat = lane128(b, s2, q * 64, 64);
+        for i in 0..8u32 {
+            let mut x = lane128(b, s1, (q * 8 + i) * 8, 8);
+            if inv {
+                x = gf8inv(b, x);
+            }
+            let mut ob = b.konst::<W128>(0);
+            for k in 0..8u32 {
+                let row = lane128(b, mat, (7 - k) * 8, 8);
+                let prod = b.and::<W128>(row, x);
+                let mut bit = parity8(b, prod);
+                if imm >> k & 1 != 0 {
+                    let k1 = b.konst::<W128>(1);
+                    bit = b.xor::<W128>(bit, k1);
+                }
+                let kk = b.konst::<W128>(u128::from(k));
+                let sh = b.shl::<W128>(bit, kk);
+                ob = b.or::<W128>(ob, sh);
+            }
+            r = put_lane128(b, r, ob, (q * 8 + i) * 8, 8);
+        }
+    }
+    b.set(sem::xmm_ref(reg_x(d)), r);
+    Ok(())
+}
