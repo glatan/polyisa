@@ -3567,7 +3567,11 @@ fn dispatch_map<B: Backend>(
         // RSTORSSP は no-op、RDSSP は 0 固定、WRSS/WRUSS は通常
         // ストア。
         Insn::RdsspdRv => sem_ea::rdssp(b, w, &ea, d),
-        Insn::IncsspdRv | Insn::Setssbsy | Insn::ClrssbsyMq | Insn::RstorsspMq => sem_ea::nop(b),
+        Insn::IncsspdRv
+        | Insn::Setssbsy
+        | Insn::ClrssbsyMq
+        | Insn::RstorsspMq
+        | Insn::Saveprevssp => sem_ea::nop(b),
         // WRSS/WRUSS のメモリ幅は d/q 固定。WRUSS の必須 66 は
         // オペコード選択子でオペランド幅を縮めないので、osize
         // ではなく rex.W から決める（ADCX/ADOX と同じ）。
@@ -3578,6 +3582,39 @@ fn dispatch_map<B: Backend>(
             d,
             Src::Reg(reg),
         ),
+        // PKU は実状態。EAX=PKRU / PKRU=EAX。
+        Insn::Rdpkru => sem_ea::rdpkru(b),
+        Insn::Wrpkru => sem_ea::wrpkru(b),
+        // TSX。XBEGIN は常にアボートしてフォールバックへ分岐、
+        // XTEST はトランザクション外なので ZF=1。XEND/XABORT は
+        // トランザクション外では #GP/無効だが近似の no-op。
+        Insn::XbeginJz => sem_ea::xbegin(b, eip, jz_len, d.rel),
+        Insn::Xtest => sem_ea::xtest(b),
+        // UIF=0・ウェイク即時の近似で CF=0。
+        Insn::Testui | Insn::UmwaitRv => sem_ea::cf_clear(b),
+        // UIRET/CLUI/STUI/SENDUIPI（ユーザー割り込みは配送
+        // しない）、UMONITOR/TPAUSE（監視・タイマーなし）、
+        // CLWB/CLFLUSHOPT/CLDEMOTE（キャッシュ階層なし）、
+        // HRESET（履歴なし）— すべて近似の no-op。
+        Insn::Xend
+        | Insn::XabortIb
+        | Insn::Uiret
+        | Insn::Clui
+        | Insn::Stui
+        | Insn::SenduipiRv
+        | Insn::UmonitorRv
+        | Insn::TpauseRv
+        | Insn::ClwbMb
+        | Insn::ClflushoptMb
+        | Insn::CldemoteMb
+        | Insn::HresetIb => sem_ea::nop(b),
+        // MOVDIRI は通常ストアとして近似。
+        Insn::MovdiriMvGv => sem_ea::mov_e(b, w, &ea, d, Src::Reg(reg)),
+        // MOVDIR64B/ENQCMD/ENQCMDS は reg の指す宛先へ
+        // 64 バイトコピーする近似。
+        Insn::Movdir64bGvMv | Insn::EnqcmdGvMv | Insn::EnqcmdsGvMv => {
+            sem_ea::movdir64b(b, reg, &ea, m64)
+        }
         Insn::MovsB => sem_ea::str_op(b, sem_ea::Str::Movs, 8, d, eip, seg, seg_ss, es, mode == 16),
         Insn::MovsV => sem_ea::str_op(b, sem_ea::Str::Movs, w, d, eip, seg, seg_ss, es, mode == 16),
         Insn::StosB => sem_ea::str_op(b, sem_ea::Str::Stos, 8, d, eip, seg, seg_ss, es, mode == 16),

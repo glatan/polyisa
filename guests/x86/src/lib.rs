@@ -86,6 +86,9 @@ pub struct CpuState {
     /// パラメータをシードにした splitmix64）。真のエントロピー
     /// 源は持たない。
     pub rand_state: u64,
+    /// PKRU（保護キーレジスタ、32 ビット）。RDPKRU/WRPKRU が
+    /// 読み書きする。
+    pub pkru: u64,
 }
 
 #[cfg(test)]
@@ -126,7 +129,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 段階4の x86 最小 853 件にオペコード表の記述を足した件数。
-        assert_eq!(INSNS.len(), 1658);
+        assert_eq!(INSNS.len(), 1681);
     }
 
     #[test]

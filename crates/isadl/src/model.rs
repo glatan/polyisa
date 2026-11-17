@@ -303,6 +303,12 @@ pub struct MapInsn {
     /// mod で分岐するエンコーディングや、メモリ形専用の非グループ項目
     /// （LEA・MOVBE・MOVLPS ストアなど）に使う。
     pub group_mod: Option<bool>,
+    /// ModRM.r/m の選択。`Some(v)` は r/m フィールドが `v` のときだけに
+    /// 解読する。0F 01 /5 mod=11 の r/m 副エンコーディング
+    /// （rm=0 SETSSBSY、rm=2 SAVEPREVSSP、rm=4 UIRET など）や
+    /// C7 /7 の XBEGIN（rm=0 固定）のように、同じグループ番号で
+    /// r/m に応じて命令が分かれるときに使う。
+    pub group_rm: Option<u8>,
     /// 必須接頭辞の状態。
     pub pfx: PfxSel,
     pub when: Pred,

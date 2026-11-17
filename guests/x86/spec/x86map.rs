@@ -28,6 +28,7 @@ fn mi(
         ops: ops.to_vec(),
         group,
         group_mod: None,
+        group_rm: None,
         pfx,
         when,
         syntax: syntax.to_string(),
@@ -604,6 +605,24 @@ pub fn build_maps(m: &mut Model) {
         ));
     }
 
+    // TSX。XBEGIN（C7 /7 mod=11 rm=0）と XABORT（C6 /7 mod=11
+    // rm=0）は 32/64 ビットモード専用。トランザクションは
+    // モデル化しないので XBEGIN は常にアボートしフォールバックへ
+    // 分岐する（`tsx_abort` パラメータが EAX に入る）。8088 系の
+    // C6/C7 別名（i286 否定）とは i286 で素集合。
+    primary.push(MapItem::Insn(0xC7, {
+        let mut it = mi("xbegin_jz", &[Rel(Z)], Some(7), PfxSel::Any, w("i286 && opd_o32"), "xbegin {r}", "jump");
+        it.group_mod = Some(true);
+        it.group_rm = Some(0);
+        it
+    }));
+    primary.push(MapItem::Insn(0xC6, {
+        let mut it = mi("xabort_ib", &[Imm(B8)], Some(7), PfxSel::Any, w("i286 && opd_o32"), "xabort {i}", "system");
+        it.group_mod = Some(true);
+        it.group_rm = Some(0);
+        it
+    }));
+
     // LOOP 系。
     for (byte, name) in [
         (0xE0u8, "loopne_jb"),
@@ -951,28 +970,64 @@ pub fn build_maps(m: &mut Model) {
     let mut it = m01(6, "lmsw_ew", "lmsw {e}");
     it.ops = vec![Ea(W16)];
     m0f.push(MapItem::Insn(0x01, it));
-    // SERIALIZE（0F 01 /5 mod=11）。逐次化の意味論は持たない
-    // ので no-op。世代ゲートは serialize 機能。F2 は XSUSLDTRK、
-    // F3 は SETSSBSY で別命令なので NP+66 のみ受理する。
+    // 0F 01 /5 mod=11 は rm 副エンコーディング（rm×接頭辞で
+    // 命令が分かれる）: NP/66 rm=0 SERIALIZE、F3 rm=0 SETSSBSY、
+    // F3 rm=2 SAVEPREVSSP、F3 rm=4-7 UIRET/TESTUI/CLUI/STUI
+    // （UINTR は 64 ビット専用）、NP/66/F2 rm=6 RDPKRU、
+    // rm=7 WRPKRU。rm=1,3 は予約。
+    // SERIALIZE。逐次化の意味論は持たないので no-op。
     let mut it = m01(5, "serialize", "serialize");
     it.ops = vec![];
     it.group_mod = Some(true);
+    it.group_rm = Some(0);
     it.pfx = PfxSel::NoF2F3;
     m0f.push(MapItem::Insn(0x01, it));
-    // CET-SS。SETSSBSY/SAVEPREVSSP は F3 0F 01 /5 mod=11
-    // （rm=0 が SETSSBSY、rm=2 が SAVEPREVSSP で、rm 値の
-    // 制約は宣言できないので setssbsy 名で受理する（rm≠0 の
-    // 形も拾う。oracle のコーパスは rm=0/4 しか生成しない
-    // ため差分には現れない）。RSTORSSP は /5 の
-    // メモリ形。影響スタックはモデル化しないので no-op。
-    m0f.push(MapItem::Insn(
-        0x01,
-        gmp("setssbsy", 5, true, &[], PfxSel::PF3, "setssbsy", "system"),
-    ));
+    // CET-SS。影響スタックはモデル化しないので no-op 系。
+    m0f.push(MapItem::Insn(0x01, {
+        let mut it = gmp("setssbsy", 5, true, &[], PfxSel::PF3, "setssbsy", "system");
+        it.group_rm = Some(0);
+        it
+    }));
+    m0f.push(MapItem::Insn(0x01, {
+        let mut it = gmp("saveprevssp", 5, true, &[], PfxSel::PF3, "saveprevssp", "system");
+        it.group_rm = Some(2);
+        it
+    }));
     m0f.push(MapItem::Insn(
         0x01,
         gmp("rstorssp_mq", 5, false, &[Ea(Q64)], PfxSel::PF3, "rstorssp {e}", "system"),
     ));
+    // UINTR（64 ビット専用）。UIRET はユーザー割り込みからの
+    // リターン、TESTUI は CF=UIF（UIF=0 固定）、CLUI/STUI は
+    // UIF の更新。すべて近似のスタブ意味論。
+    for (rm, name) in [(4u8, "uiret"), (5, "testui"), (6, "clui"), (7, "stui")] {
+        let mut it = mi(name, &[], Some(5), PfxSel::PF3, w("m64"), name, "system");
+        it.group_mod = Some(true);
+        it.group_rm = Some(rm);
+        m0f.push(MapItem::Insn(0x01, it));
+    }
+    // PKU。F2/66 は無視される接頭辞なので NoF3 で受理し、
+    // F3 は m64 では CLUI/STUI に譲る（i386 では CLUI 系が
+    // 無効なので F3 も RDPKRU/WRPKRU に落ちる — llvm 実測）。
+    for (rm, name) in [(6u8, "rdpkru"), (7, "wrpkru")] {
+        let mut it = mi(name, &[], Some(5), PfxSel::NoF3, Pred::True, name, "system");
+        it.group_mod = Some(true);
+        it.group_rm = Some(rm);
+        m0f.push(MapItem::Insn(0x01, it));
+        let mut it = mi(name, &[], Some(5), PfxSel::PF3, w("!m64"), name, "system");
+        it.group_mod = Some(true);
+        it.group_rm = Some(rm);
+        m0f.push(MapItem::Insn(0x01, it));
+    }
+    // TSX。XEND（/2 rm=5）と XTEST（/2 rm=6）は 0F 01 /2 の
+    // mod=11 副エンコーディング。XTEST はトランザクション外で
+    // ZF=1、XEND はトランザクション外で #UD。
+    for (rm, name) in [(5u8, "xend"), (6, "xtest")] {
+        let mut it = mi(name, &[], Some(2), PfxSel::Any, Pred::True, name, "system");
+        it.group_mod = Some(true);
+        it.group_rm = Some(rm);
+        m0f.push(MapItem::Insn(0x01, it));
+    }
     // CLTS（0F 06）。80386 で追加。実モードでは CR0 の TS を下ろすだけで、
     // 現行モデルは CR0 を持たないので no-op として扱う（SST 80386 実測）。
     m0f.push(MapItem::Insn(
@@ -1002,6 +1057,13 @@ pub fn build_maps(m: &mut Model) {
         MapItem::Insn(
             0x1F,
             g("nop_ev", 0, &[Ea(V)], "nop {e}", "alu"),
+        ),
+        // CLDEMOTE（0F 1C /0、メモリ形のみ）。全接頭辞を無視
+        // する（llvm 実測で NP/66/F2/F3 いずれも受理）。
+        // キャッシュ階層はモデル化しないので no-op。
+        MapItem::Insn(
+            0x1C,
+            gm("cldemote_mb", 0, false, &[Ea(B8)], "cldemote {e}", "alu"),
         ),
         MapItem::Insn(0x31, n("rdtsc", &[], "rdtsc", "system")),
         // 0F AE グループ。mod!=11 は MXCSR/CLFLUSH、mod=11 は fence。
@@ -1034,14 +1096,27 @@ pub fn build_maps(m: &mut Model) {
         // CET-SS のユーザー命令。影響スタックはモデル化しない
         // ので意味論側は no-op/0 固定。INCSSP は /5 mod=11。
         MapItem::Insn(0xAE, gmp("incsspd_rv", 5, true, &[Ea(V)], PfxSel::PF3, "incssp {e}", "system")),
-        // CLRSSBSY は /6 のメモリ形。mod=11 の /6 は UMONITOR
-        // （WAITPKG、A4d の範囲）なので宣言しない。
+        // CLRSSBSY は /6 のメモリ形のみ。mod=11 の /6 は
+        // UMONITOR 系として別途宣言する。
         MapItem::Insn(0xAE, gmp("clrssbsy_mq", 6, false, &[Ea(Q64)], PfxSel::PF3, "clrssbsy {e}", "system")),
+        // WAITPKG（/6 mod=11、rm がオペランドレジスタ）。
+        // UMONITOR はアドレス監視、UMWAIT は待機で CF=0 固定、
+        // TPAUSE は仮想時間まで待つ — 単スレッド近似のスタブ。
+        MapItem::Insn(0xAE, gmp("umonitor_rv", 6, true, &[Ea(V)], PfxSel::PF3, "umonitor {e}", "system")),
+        MapItem::Insn(0xAE, gmp("tpause_rv", 6, true, &[Ea(V)], PfxSel::P66, "tpause {e}", "system")),
+        MapItem::Insn(0xAE, gmp("umwait_rv", 6, true, &[Ea(V)], PfxSel::PF2, "umwait {e}", "system")),
+        // キャッシュ制御。CLWB（66 /6 メモリ形）と
+        // CLFLUSHOPT（66 /7 メモリ形）。キャッシュ階層は
+        // モデル化しないので no-op。
+        MapItem::Insn(0xAE, gmp("clwb_mb", 6, false, &[Ea(B8)], PfxSel::P66, "clwb {e}", "alu")),
+        MapItem::Insn(0xAE, gmp("clflushopt_mb", 7, false, &[Ea(B8)], PfxSel::P66, "clflushopt {e}", "alu")),
         // fence は接頭辞なし。F3 0F AE は RDFSBASE/INCSSP/UMONITOR/
         // PTWRITE 系、66/F2 も別命令なので Plain で切る。
         MapItem::Insn(0xAE, gmp("lfence", 5, true, &[], PfxSel::Plain, "lfence", "alu")),
         MapItem::Insn(0xAE, gmp("mfence", 6, true, &[], PfxSel::Plain, "mfence", "alu")),
-        MapItem::Insn(0xAE, gm("clflush_mb", 7, false, &[Ea(B8)], "clflush {e}", "alu")),
+        // CLFLUSH は F2/F3 を無視して受理（llvm 実測）するが、
+        // 66 は CLFLUSHOPT なので No66 で切る。
+        MapItem::Insn(0xAE, gmp("clflush_mb", 7, false, &[Ea(B8)], PfxSel::No66, "clflush {e}", "alu")),
         MapItem::Insn(0xAE, gmp("sfence", 7, true, &[], PfxSel::Plain, "sfence", "alu")),
         // POPCNT（F3 0F B8）。接頭辞なしは TZCNT/JMPE で別物。
         MapItem::Insn(0xB8, mi("popcnt_gv_ev", &[Reg(V), Ea(V)], None, PfxSel::PF3, Pred::True, "popcnt {g}, {e}", "alu")),
@@ -1053,6 +1128,16 @@ pub fn build_maps(m: &mut Model) {
             // F3 0F C7 /6 は 64 ビットで SENDUIPI（m32 では予約）、
             // F2 は予約。NP+66 のみ受理する。
             gmp("rdrand_rv", 6, true, &[Ea(V)], PfxSel::NoF2F3, "rdrand {e}", "alu"),
+        ),
+        MapItem::Insn(
+            0xC7,
+            // SENDUIPI（F3 0F C7 /6 mod=11、64 ビット専用）。
+            // ユーザー割り込みの配送はモデル化しないので no-op。
+            {
+                let mut it = mi("senduipi_rv", &[Ea(V)], Some(6), PfxSel::PF3, w("m64"), "senduipi {e}", "system");
+                it.group_mod = Some(true);
+                it
+            },
         ),
         MapItem::Insn(
             0xC7,
@@ -1136,7 +1221,8 @@ pub fn build_maps(m: &mut Model) {
     // 1E は F3 が ENDBR のため今回は対象外、1F /0 は既に登録済み。
     for grp in 0..8u8 {
         m0f.push(MapItem::Insn(0x0D, g("nop_ev", grp, &[Ea(V)], "nop {e}", "alu")));
-        for byte in [0x18u8, 0x19, 0x1A, 0x1B, 0x1C, 0x1D] {
+        // 0x1C は /0 mod!=11 が CLDEMOTE なので別途登録する。
+        for byte in [0x18u8, 0x19, 0x1A, 0x1B, 0x1D] {
             m0f.push(MapItem::Insn(
                 byte,
                 g("nop_ev", grp, &[Ea(V)], "nop {e}", "alu"),
@@ -1148,6 +1234,16 @@ pub fn build_maps(m: &mut Model) {
                 g("nop_ev", grp, &[Ea(V)], "nop {e}", "alu"),
             ));
         }
+        // 0x1C の /0 mod=11 と /1-/7 はヒント NOP として残す
+        // （/0 mod!=11 のみ CLDEMOTE）。
+        m0f.push(MapItem::Insn(
+            0x1C,
+            if grp == 0 {
+                gmp("nop_ev", 0, true, &[Ea(V)], PfxSel::Any, "nop {e}", "alu")
+            } else {
+                g("nop_ev", grp, &[Ea(V)], "nop {e}", "alu")
+            },
+        ));
     }
     for k in 0..8u8 {
         m0f.push(MapItem::Insn(
@@ -1629,6 +1725,45 @@ fn build_map_0f38(m: &mut Model) {
         it.group_mod = Some(false);
         v.push(MapItem::Insn(0xF5, it));
     }
+    // MOVDIR/ENQCMD（いずれもメモリ形のみ、mod=11 は別用途）。
+    // MOVDIRI はダイレクトストア、MOVDIR64B は 64 バイトコピー、
+    // ENQCMD/ENQCMDS はデバイス投入。
+    {
+        let mut it = mi(
+            "movdiri_mv_gv",
+            &[Ea(V), Reg(V)],
+            None,
+            PfxSel::Plain,
+            Pred::True,
+            "movdiri {e}, {g}",
+            "store",
+        );
+        it.group_mod = Some(false);
+        v.push(MapItem::Insn(0xF9, it));
+    }
+    for (name, pfx, syn) in [
+        ("enqcmd_gv_mv", PfxSel::PF2, "enqcmd {g}, {e}"),
+        ("enqcmds_gv_mv", PfxSel::PF3, "enqcmds {g}, {e}"),
+    ] {
+        // 第1オペランドは配送先アドレスを持つレジスタ、第2は
+        // 64 バイトのコマンドを読むメモリ。
+        let mut it = mi(name, &[Reg(V), Ea(Q64)], None, pfx, Pred::True, syn, "load");
+        it.group_mod = Some(false);
+        v.push(MapItem::Insn(0xF8, it));
+    }
+    {
+        let mut it = mi(
+            "movdir64b_gv_mv",
+            &[Reg(V), Ea(Q64)],
+            None,
+            PfxSel::P66,
+            Pred::True,
+            "movdir64b {g}, {e}",
+            "load",
+        );
+        it.group_mod = Some(false);
+        v.push(MapItem::Insn(0xF8, it));
+    }
     // AES-NI のラウンド変換（0xDB-0xDF、必須接頭辞 0x66）。
     for (op, name, syn) in [
         (0xDBu8, "aesimc_xv_wv", "aesimc {x}, {w}"),
@@ -1756,6 +1891,14 @@ fn build_map_0f3a(m: &mut Model) {
         MapItem::Insn(0xCC, mi("sha1rnds4_xv_wv_ib", &[RegX, RmX, ib], None, PfxSel::Plain, Pred::True, "sha1rnds4 {x}, {w}, {i}", "alu")),
         MapItem::Insn(0xCE, mi("gf2p8affineqb_xv_wv_ib", &[RegX, RmX, ib], None, PfxSel::P66, Pred::True, "gf2p8affineqb {x}, {w}, {i}", "alu")),
         MapItem::Insn(0xCF, mi("gf2p8affineinvqb_xv_wv_ib", &[RegX, RmX, ib], None, PfxSel::P66, Pred::True, "gf2p8affineinvqb {x}, {w}, {i}", "alu")),
+        // HRESET（F3 0F 3A F0 /0 mod=11 rm=0、imm8）。
+        // ハードウェア履歴リセット — スタブとして no-op。
+        {
+            let mut it = mi("hreset_ib", &[Imm(B8)], Some(0), PfxSel::PF3, Pred::True, "hreset {i}", "system");
+            it.group_mod = Some(true);
+            it.group_rm = Some(0);
+            MapItem::Insn(0xF0, it)
+        },
     ];
     m.maps.push(MapDecl {
         name: "map_0f3a".to_string(),

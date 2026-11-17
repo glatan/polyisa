@@ -772,7 +772,11 @@ fn gen_map_decoder(model: &Model) -> Result<String, GenError> {
             };
             // ModRM.mod で選ぶ項目（group_mod）があれば、グループの
             // 有無にかかわらず ModRM バイトを覗く。
-            if !grouped.is_empty() || insns.iter().any(|mi| mi.group_mod.is_some()) {
+            if !grouped.is_empty()
+                || insns
+                    .iter()
+                    .any(|mi| mi.group_mod.is_some() || mi.group_rm.is_some())
+            {
                 s.push_str("            let m = *bytes.get(*i)?;\n");
             }
             if !grouped.is_empty() {
@@ -901,6 +905,10 @@ fn emit_map_candidate(
         Some(false) => format!("(m >> 6) != 3 && ({cond})"),
         None => cond,
     };
+    // グループ項目の r/m 副選択（mod=11 内の更なる分岐）。
+    if let Some(rm) = mi.group_rm {
+        cond = format!("(m & 7) == {rm} && ({cond})");
+    }
     let ops = mi.ops.iter().map(opk_code).collect::<Vec<_>>().join(", ");
     let group = mi.group.is_some();
     s.push_str(&format!(

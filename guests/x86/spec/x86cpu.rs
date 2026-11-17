@@ -156,6 +156,7 @@ fn declare_features(m: &mut Model) {
     feat(m, "pks", &[]);
     // Leaf 7.0 EDX。
     feat(m, "uintr", &[]);
+    feat(m, "hreset", &[]);
     feat(m, "serialize", &[]);
     feat(m, "cet_ibt", &[]);
     feat(m, "amx_bf16", &[]);
@@ -271,6 +272,12 @@ fn declare_params(m: &mut Model) {
         "RDRAND/RDSEED の決定的乱数列（splitmix64）のシード。真のエントロピー源は持たない",
     );
     m.param(
+        "tsx_abort",
+        ParamKind::Int(0xFFFF_FFFF),
+        "0",
+        "XBEGIN が常に失敗するとき EAX に書くアボートコード。トランザクション実行はモデル化しない",
+    );
+    m.param(
         "seg_limit",
         ParamKind::Enum(vec!["wrap".to_string(), "fault".to_string()]),
         "wrap",
@@ -342,6 +349,8 @@ fn declare_models(m: &mut Model) {
             "sse3", "ssse3", "sse4_1", "sse4_2", "cx16", "popcnt", "rdtscp", "syscall", "nx",
             "lm", "lahf_lm", "i486", "lzcnt", "adx", "pclmulqdq", "aesni", "sha", "gfni",
             "rdrnd", "rdseed", "serialize", "fsgsbase", "cet_ss",
+            "rtm", "pku", "uintr", "movdiri", "movdir64b", "enqcmd", "cldemote",
+            "waitpkg", "hreset", "clwb", "clflushopt",
         ],
         &[],
         &[],
@@ -357,7 +366,7 @@ fn declare_models(m: &mut Model) {
         // psABI v2 に LZCNT・ADX・PCLMUL・AES-NI・SHA・GFNI・
         // RDRAND・RDSEED・SERIALIZE は含まれないので既定モデルから
         // 継承した分を削る。
-        &["lzcnt", "adx", "pclmulqdq", "aesni", "sha", "gfni", "rdrnd", "rdseed", "serialize", "fsgsbase", "cet_ss"],
+        &["lzcnt", "adx", "pclmulqdq", "aesni", "sha", "gfni", "rdrnd", "rdseed", "serialize", "fsgsbase", "cet_ss", "rtm", "pku", "uintr", "movdiri", "movdir64b", "enqcmd", "cldemote", "waitpkg", "hreset", "clwb", "clflushopt"],
         &[],
         // v2 の水準（SSE4.2+POPCNT+CX16、AVX なし）は Westmere。
         intel("6", "44", "2"),
@@ -661,6 +670,8 @@ fn declare_ident_bits(m: &mut Model) {
     ] {
         b(f, 0x8000_0001, "edx", bit);
     }
+    // Leaf 7.1 EAX（HRESET 等）は現行の CPUID 表がサブリーフ行を
+    // 持たないので報告しない。HRESET 命令自体は機能旗で解読される。
 }
 
 // ---------------------------------------------------------------------------
@@ -743,11 +754,25 @@ fn named_gate(mn: &str) -> Option<&'static [&'static str]> {
         "cmpxchg8b" => &["cx8"],
         // FSGSBASE。
         "rdfsbase" | "rdgsbase" | "wrfsbase" | "wrgsbase" => &["fsgsbase"],
-        // CET 影響スタックのユーザ形。`saveprevssp` は F3 0F 01 /5
-        // mod=11 の rm=2 形で、rm 値制約は宣言できないため現在は
-        // `setssbsy` 名で受理される（将来別宣言する場合のために残す）。
+        // CET 影響スタックのユーザ形。
         "rdsspq" | "rdsspd" | "incsspq" | "incsspd" | "wrssq" | "wrssd" | "wrussq"
         | "wrussd" | "rstorssp" | "saveprevssp" | "setssbsy" | "clrssbsy" => &["cet_ss"],
+        // TSX（XBEGIN は常にアボートする近似）。
+        "xbegin" | "xend" | "xabort" | "xtest" => &["rtm"],
+        // ユーザー割り込み。
+        "uiret" | "testui" | "clui" | "stui" | "senduipi" => &["uintr"],
+        // PKU。
+        "rdpkru" | "wrpkru" => &["pku"],
+        // キャッシュ制御と MOVDIR。
+        "clwb" => &["clwb"],
+        "clflushopt" => &["clflushopt"],
+        "cldemote" => &["cldemote"],
+        "movdiri" => &["movdiri"],
+        "movdir64b" => &["movdir64b"],
+        "enqcmd" | "enqcmds" => &["enqcmd"],
+        "hreset" => &["hreset"],
+        // WAITPKG。
+        "umonitor" | "umwait" | "tpause" => &["waitpkg"],
         // システム・判定命令。
         // `fwait` は FPU なしでも定義される待機命令なのでゲートしない。
         "fwait" => &[],

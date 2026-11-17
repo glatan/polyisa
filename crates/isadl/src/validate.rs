@@ -158,8 +158,24 @@ pub fn validate(model: &Model) -> Report {
             }
             if let crate::model::MapItem::Insn(_, mi) = item {
                 check_when(&mi.when, &mi.name, &mut errors);
-                // `group_mod` は ModRM を消費する項目にだけ意味を持つ。
-                if mi.group_mod.is_some()
+                // `group_rm` は mod=11 の副エンコーディング専用。
+                // mod!=11 でも r/m バイトには意味があるので、
+                // `group_mod = Some(true)` と併置することを要求する。
+                if mi.group_rm.is_some_and(|rm| rm > 7) {
+                    errors.push(ValidationError::BadField {
+                        format: "map-insn".to_string(),
+                        field: format!("{}: group_rm は 0-7", mi.name),
+                    });
+                }
+                if mi.group_rm.is_some() && mi.group_mod != Some(true) {
+                    errors.push(ValidationError::BadField {
+                        format: "map-insn".to_string(),
+                        field: format!("{}: group_rm には group_mod=Some(true) が要る", mi.name),
+                    });
+                }
+                // `group_mod`/`group_rm` は ModRM を消費する項目にだけ
+                // 意味を持つ。
+                if (mi.group_mod.is_some() || mi.group_rm.is_some())
                     && mi.group.is_none()
                     && !mi.ops.iter().any(|o| {
                         matches!(
@@ -176,7 +192,10 @@ pub fn validate(model: &Model) -> Report {
                 {
                     errors.push(ValidationError::BadField {
                         format: "map-insn".to_string(),
-                        field: format!("{}: group_mod には ModRM を使うオペランドが要る", mi.name),
+                        field: format!(
+                            "{}: group_mod/group_rm には ModRM を使うオペランドが要る",
+                            mi.name
+                        ),
                     });
                 }
             }
@@ -474,6 +493,12 @@ fn validate_maps(model: &Model, timing: &BTreeSet<&str>, errors: &mut Vec<Valida
                 }
                 // `group_mod` が mod で排他なら同じ modrm を選ばない。
                 if let (Some(x), Some(y)) = (a.group_mod, b.group_mod)
+                    && x != y
+                {
+                    continue;
+                }
+                // `group_rm` が r/m で排他なら同じ modrm を選ばない。
+                if let (Some(x), Some(y)) = (a.group_rm, b.group_rm)
                     && x != y
                 {
                     continue;

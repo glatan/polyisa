@@ -6983,6 +6983,83 @@ pub fn rdrand<B: Backend>(b: &mut B, w: u8, rm: &Rm<B::V<W64>>, _d: &MapDec) -> 
     Ok(())
 }
 
+/// RDPKRU。EAX=PKRU、EDX=0。ECX は入力（0 以外で #GP）で
+/// 出力ではないが、#GP はモデル化しないので ECX は触れない。
+pub fn rdpkru<B: Backend>(b: &mut B) -> Flow<B> {
+    let p: B::V<W64> = b.get(sem::pkru_ref());
+    let v = b.trunc::<W64, W32>(p);
+    decode::gwr32(b, Gpr(0), v);
+    let z = b.konst::<W32>(0);
+    decode::gwr32(b, Gpr(2), z);
+    Ok(())
+}
+
+/// WRPKRU。PKRU=EAX。ECX/EDX が 0 でない場合の #GP は
+/// モデル化しない。
+pub fn wrpkru<B: Backend>(b: &mut B) -> Flow<B> {
+    let v = decode::grd32(b, Gpr(0));
+    let w64 = b.zext::<W32, W64>(v);
+    b.set(sem::pkru_ref(), w64);
+    Ok(())
+}
+
+/// XBEGIN。トランザクション実行はモデル化しないので常に
+/// アボートし、EAX=`tsx_abort` パラメータを書いて
+/// フォールバックアドレスへ分岐する。アボート時の状態復元は
+/// XBEGIN 直前の値なので、実質「EAX を書いて分岐」と等価。
+pub fn xbegin<B: Backend>(b: &mut B, eip: u32, len: u32, rel: i64) -> Flow<B> {
+    let code = u64::from(b.param::<crate::TsxAbortParam>()) as u32;
+    let v = b.konst::<W32>(code);
+    decode::gwr32(b, Gpr(0), v);
+    jmp_rel(b, eip, len, rel)
+}
+
+/// XTEST。トランザクションはモデル化しないので実行中は
+/// 常に外 = ZF=1。他のフラグは不変。
+pub fn xtest<B: Backend>(b: &mut B) -> Flow<B> {
+    let f: B::V<W32> = b.get(eflags_ref());
+    let zf = b.konst::<W32>(sem::FLAG_ZF);
+    let v = b.or::<W32>(f, zf);
+    b.set(eflags_ref(), v);
+    Ok(())
+}
+
+/// TESTUI/UMWAIT。UIF は 0 固定、ウェイクは即時と近似する
+/// ので CF=0。他のフラグは不変。
+pub fn cf_clear<B: Backend>(b: &mut B) -> Flow<B> {
+    let f: B::V<W32> = b.get(eflags_ref());
+    let keep = b.konst::<W32>(!FLAG_CF);
+    let v = b.and::<W32>(f, keep);
+    b.set(eflags_ref(), v);
+    Ok(())
+}
+
+/// MOVDIR64B/ENQCMD/ENQCMDS。reg が指す宛先へ src の
+/// 64 バイトをコピーする。ダイレクトストアやキュー投入の
+/// デバイス側振る舞いは持たないので通常のメモリ書き込み
+/// として近似する。
+pub fn movdir64b<B: Backend>(b: &mut B, dst: Gpr, src: &Rm<B::V<W64>>, m64: bool) -> Flow<B> {
+    let Rm::Mem { a, .. } = src else {
+        return Ok(());
+    };
+    // 宛先アドレスを持つレジスタはアドレス幅ではなく
+    // レジスタ幅（m64 なら r64）で読む。
+    let da: B::V<W64> = if m64 {
+        decode::grd64(b, dst)
+    } else {
+        let v = decode::grd32(b, dst);
+        b.zext::<W32, W64>(v)
+    };
+    for k in 0..8u64 {
+        let ka = b.konst::<W64>(k * 8);
+        let sa = b.add::<W64>(*a, ka);
+        let v: B::V<W64> = b.load::<W64>(sa, sem::DATA_READ)?;
+        let dd = b.add::<W64>(da, ka);
+        b.store::<W64>(dd, v, sem::DATA_WRITE)?;
+    }
+    Ok(())
+}
+
 /// SGDT。
 pub fn sgdt<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>, mode: u8) -> Flow<B> {
     sdtr(b, ea, mode, false)

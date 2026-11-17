@@ -17841,6 +17841,7 @@ fn run64_fsgsbase_cet() {
         // WRUSS の必須 66 はオペコード選択子なので、REX.W なしでも
         // 幅は縮まず 4 バイト書き込みになる。
         0x66, 0x0F, 0x38, 0xF5, 0x04, 0x25, 0x18, 0x23, 0x00, 0x00, // wruss [0x2318],eax
+        0xF3, 0x0F, 0x01, 0xEA, // saveprevssp（no-op）
         0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
         0x48, 0x31, 0xFF, // xor rdi,rdi
         0x0F, 0x05, // syscall → exit(0)
@@ -17867,8 +17868,7 @@ fn run64_fsgsbase_cet() {
     // 必須 66 は幅を縮めないので d 形でも 4 バイト書き込み。
     let w = |i: usize| u32::from_le_bytes(v[i..i + 4].try_into().unwrap());
     assert_eq!(w(0x118), 0xBBAA, "wruss dword store");
-    // 負のデコード検査: FSGSBASE のメモリ形・mod=11 の WRSS/WRUSS・
-    // 未宣言の UMONITOR は拒否。
+    // 負のデコード検査: FSGSBASE のメモリ形・mod=11 の WRSS/WRUSS は拒否。
     use polyisa_guest_x86::{MODE_ADR_A64, MODE_ADR_SHIFT, MODE_M64, MODE_OPD_O32, MODE_OPD_SHIFT};
     let modes = MODE_M64 | (MODE_OPD_O32 << MODE_OPD_SHIFT) | (MODE_ADR_A64 << MODE_ADR_SHIFT);
     let feats = polyisa_guest_x86::DEFAULT_FEATS;
@@ -17876,13 +17876,15 @@ fn run64_fsgsbase_cet() {
         &[0xF3, 0x0F, 0xAE, 0x00][..],       // FSGSBASE mod≠11 → 予約
         &[0x0F, 0x38, 0xF6, 0xC1][..],       // NP WRSS mod=11 → 予約
         &[0x66, 0x0F, 0x38, 0xF5, 0xC1][..], // WRUSS mod=11 → 予約
-        &[0xF3, 0x0F, 0xAE, 0xF0][..],       // UMONITOR → 未宣言
     ] {
         assert!(
             polyisa_guest_x86::decode_map(bytes, modes, feats).is_none(),
             "{bytes:?}"
         );
     }
+    // A4d で UMONITOR が宣言されたので F3 0F AE /6 mod=11 は受理。
+    let d = polyisa_guest_x86::decode_map(&[0xF3, 0x0F, 0xAE, 0xF0], modes, feats).unwrap();
+    assert_eq!(d.insn, polyisa_guest_x86::Insn::UmonitorRv);
     // F3 0F 1E /1 mod=11 は ENDBR ではなく RDSSP として解読され、
     // 他の mod=11 形は従来通りヒント NOP（endbr）に落ちる。
     let d = polyisa_guest_x86::decode_map(&[0xF3, 0x0F, 0x1E, 0xC8], modes, feats).unwrap();
@@ -17902,5 +17904,231 @@ fn run64_fsgsbase_cet() {
             polyisa_guest_x86::decode_map(bytes, modes32, feats).is_none(),
             "{bytes:?}"
         );
+    }
+}
+
+#[test]
+fn run64_tsx_uintr_pku() {
+    // TSX/UINTR/PKU。トランザクションとユーザー割り込みは
+    // モデル化しないので、XBEGIN は常にアボートして
+    // フォールバックへ分岐（EAX=`tsx_abort` 既定 0）、XTEST は
+    // ZF=1、TESTUI は CF=0。XEND/XABORT/UIRET/CLUI/STUI/
+    // SENDUIPI は no-op。PKRU は実状態で WRPKRU/RDPKRU が
+    // 読み書きする。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    let prog: &[u8] = &[
+        0x48, 0xB8, 0xAA, 0xBB, 0xCC, 0xDD, 0x00, 0x00, 0x00, 0x00, // movabs rax,0xDDCCBBAA
+        0x0F, 0x01, 0xEF, // wrpkru → pkru=eax
+        0x31, 0xC0, // xor eax,eax
+        0xB9, 0x11, 0x11, 0x11, 0x11, // mov ecx,0x11111111
+        0xBA, 0x22, 0x22, 0x22, 0x22, // mov edx,0x22222222
+        0x0F, 0x01, 0xEE, // rdpkru → eax=pkru, edx=0、ecx は不変
+        0x48, 0xA3, 0x00, 0x22, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // mov [0x2200],rax
+        0x48, 0x89, 0x0C, 0x25, 0x08, 0x22, 0x00, 0x00, // mov [0x2208],rcx
+        0x48, 0x89, 0x14, 0x25, 0x10, 0x22, 0x00, 0x00, // mov [0x2210],rdx
+        0x0F, 0x01, 0xD6, // xtest → ZF=1
+        0x0F, 0x94, 0x04, 0x25, 0x18, 0x22, 0x00, 0x00, // sete [0x2218] → 1
+        0xF9, // stc
+        0xF3, 0x0F, 0x01, 0xED, // testui → CF=0
+        0x0F, 0x92, 0x04, 0x25, 0x19, 0x22, 0x00, 0x00, // setc [0x2219] → 0
+        0xF3, 0x0F, 0x01, 0xEC, // uiret（no-op）
+        0xF3, 0x0F, 0x01, 0xEE, // clui（no-op）
+        0xF3, 0x0F, 0x01, 0xEF, // stui（no-op）
+        0xF3, 0x0F, 0xC7, 0xF0, // senduipi rax（no-op）
+        0x0F, 0x01, 0xD5, // xend（no-op）
+        0xC6, 0xF8, 0xAA, // xabort 0xaa（no-op）
+        // XBEGIN は常にアボートするので EAX=tsx_abort(=0) で
+        // フォールバックへ分岐し、直後の mov eax は実行されない。
+        0xC7, 0xF8, 0x05, 0x00, 0x00, 0x00, // xbegin +5
+        0xB8, 0xAD, 0xBA, 0x00, 0x00, // mov eax,0xBAAD（スキップ）
+        0x48, 0xA3, 0x20, 0x22, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // mov [0x2220],rax
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0x31, 0xFF, // xor rdi,rdi
+        0x0F, 0x05, // syscall → exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0));
+    let acc = polyisa_mem::Access {
+        endian: polyisa_mem::Endian::Le,
+        align: polyisa_mem::Align::Unaligned,
+        kind: polyisa_mem::AccessKind::DataRead,
+    };
+    let mut v = [0u8; 0x30];
+    env.backend.mem.read(VirtAddr(0x2200), &mut v, acc).unwrap();
+    let q = |i: usize| u64::from_le_bytes(v[i..i + 8].try_into().unwrap());
+    assert_eq!(q(0), 0xDDCC_BBAA, "wrpkru→rdpkru");
+    // ECX は入力（#GP はモデル化しない）で出力ではないので不変。
+    assert_eq!(q(8), 0x1111_1111, "rdpkru preserves ecx");
+    assert_eq!(q(0x10), 0, "rdpkru clears edx");
+    assert_eq!(v[0x18], 1, "xtest sets ZF");
+    assert_eq!(v[0x19], 0, "testui clears CF");
+    assert_eq!(q(0x20), 0, "xbegin abort: eax=tsx_abort(0)");
+    // PKRU 状態を直接確認。
+    let pkru: u64 = env.backend.get(polyisa_guest_x86::sem::pkru_ref());
+    assert_eq!(pkru, 0xDDCC_BBAA);
+    // デコード検査。rm 副エンコーディングの分岐を確認する。
+    use polyisa_guest_x86::{
+        DEFAULT_FEATS as feats, Insn, MODE_ADR_A32, MODE_ADR_A64, MODE_ADR_SHIFT, MODE_M64,
+        MODE_OPD_O32, MODE_OPD_SHIFT, decode_map,
+    };
+    let m64 = MODE_M64 | (MODE_OPD_O32 << MODE_OPD_SHIFT) | (MODE_ADR_A64 << MODE_ADR_SHIFT);
+    let m32 = (MODE_OPD_O32 << MODE_OPD_SHIFT) | (MODE_ADR_A32 << MODE_ADR_SHIFT);
+    for (bytes, insn) in [
+        (&[0x0F, 0x01, 0xE8][..], Insn::Serialize), // NP rm=0
+        (&[0x66, 0x0F, 0x01, 0xE8][..], Insn::Serialize), // 66 rm=0
+        (&[0xF3, 0x0F, 0x01, 0xE8][..], Insn::Setssbsy), // F3 rm=0
+        (&[0xF3, 0x0F, 0x01, 0xEA][..], Insn::Saveprevssp), // F3 rm=2
+        (&[0xF3, 0x0F, 0x01, 0xEC][..], Insn::Uiret), // F3 rm=4
+        (&[0xF3, 0x0F, 0x01, 0xED][..], Insn::Testui), // F3 rm=5
+        (&[0xF3, 0x0F, 0x01, 0xEE][..], Insn::Clui), // F3 rm=6
+        (&[0xF3, 0x0F, 0x01, 0xEF][..], Insn::Stui), // F3 rm=7
+        (&[0x0F, 0x01, 0xEE][..], Insn::Rdpkru),    // NP rm=6
+        (&[0x0F, 0x01, 0xEF][..], Insn::Wrpkru),    // NP rm=7
+        (&[0x0F, 0x01, 0xD5][..], Insn::Xend),      // /2 rm=5
+        (&[0x0F, 0x01, 0xD6][..], Insn::Xtest),     // /2 rm=6
+        (&[0xF3, 0x0F, 0xC7, 0xF0][..], Insn::SenduipiRv),
+        (&[0xC6, 0xF8, 0x00][..], Insn::XabortIb),
+    ] {
+        let d = decode_map(bytes, m64, feats).unwrap_or_else(|| panic!("{bytes:?}"));
+        assert_eq!(d.insn, insn, "{bytes:?}");
+    }
+    // 負の検査: 予約 rm、mod 違反、モード違反、接頭辞違反。
+    for bytes in [
+        &[0x0F, 0x01, 0xE9][..],                         // /5 rm=1 予約
+        &[0x0F, 0x01, 0xEB][..],                         // /5 rm=3 予約
+        &[0xF3, 0x0F, 0x01, 0xE9][..],                   // F3 rm=1 予約
+        &[0xF2, 0x0F, 0x01, 0xE8][..],                   // F2 serialize → XSUSLDTRK
+        &[0x0F, 0x01, 0xD4][..],                         // /2 rm=4 予約
+        &[0xC7, 0xF9, 0x00, 0x00, 0x00, 0x00][..],       // xbegin rm=1
+        &[0xC6, 0xF9, 0x00][..],                         // xabort rm=1
+        &[0x0F, 0x01, 0x2D, 0x00, 0x00, 0x00, 0x00][..], // /5 mod≠11 NP → 予約
+    ] {
+        assert!(decode_map(bytes, m64, feats).is_none(), "{bytes:?}");
+    }
+    // UINTR/SENDUIPI は 64 ビット専用。m32 では F3 rm=6/7 は
+    // PKU に落ち（llvm 実測）、rm=4/5 は拒否。
+    for bytes in [
+        &[0xF3, 0x0F, 0x01, 0xEC][..], // uiret
+        &[0xF3, 0x0F, 0x01, 0xED][..], // testui
+        &[0xF3, 0x0F, 0xC7, 0xF0][..], // senduipi
+    ] {
+        assert!(decode_map(bytes, m32, feats).is_none(), "{bytes:?}");
+    }
+    let d = decode_map(&[0xF3, 0x0F, 0x01, 0xEE], m32, feats).unwrap();
+    assert_eq!(d.insn, Insn::Rdpkru);
+    let d = decode_map(&[0xF3, 0x0F, 0x01, 0xEF], m32, feats).unwrap();
+    assert_eq!(d.insn, Insn::Wrpkru);
+}
+
+#[test]
+fn run64_movdir_waitpkg() {
+    // MOVDIR/WAITPKG/CLDEMOTE/HRESET。MOVDIRI は通常ストア、
+    // MOVDIR64B/ENQCMD/ENQCMDS は reg の指す宛先への 64 バイト
+    // コピーとして近似。UMONITOR/TPAUSE/CLWB/CLFLUSHOPT/
+    // CLDEMOTE/HRESET は no-op、UMWAIT は CF=0。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    let prog: &[u8] = &[
+        0x48, 0xB8, 0x55, 0xAA, 0x55, 0xAA, 0x00, 0x00, 0x00, 0x00, // movabs rax,0xAA55AA55
+        0x48, 0x0F, 0x38, 0xF9, 0x04, 0x25, 0x00, 0x24, 0x00, 0x00, // movdiri [0x2400],rax
+        0x48, 0xBB, 0x00, 0x25, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rbx,0x2500
+        0x48, 0xB9, 0x00, 0x26, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rcx,0x2600
+        0x66, 0x0F, 0x38, 0xF8, 0x0B, // movdir64b rcx,[rbx]
+        0x48, 0xBA, 0x40, 0x26, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rdx,0x2640
+        0xF2, 0x0F, 0x38, 0xF8, 0x13, // enqcmd rdx,[rbx]
+        0x48, 0xBA, 0x80, 0x26, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rdx,0x2680
+        0xF3, 0x0F, 0x38, 0xF8, 0x13, // enqcmds rdx,[rbx]
+        0xF3, 0x0F, 0xAE, 0xF0, // umonitor rax（no-op）
+        0xF9, // stc
+        0xF2, 0x0F, 0xAE, 0xF0, // umwait rax → CF=0
+        0x0F, 0x92, 0x04, 0x25, 0xC0, 0x27, 0x00, 0x00, // setc [0x27C0] → 0
+        0x66, 0x0F, 0xAE, 0xF0, // tpause rax（no-op）
+        0x0F, 0x1C, 0x04, 0x25, 0x00, 0x28, 0x00, 0x00, // cldemote [0x2800]
+        0x66, 0x0F, 0xAE, 0x34, 0x25, 0x00, 0x28, 0x00, 0x00, // clwb [0x2800]
+        0x66, 0x0F, 0xAE, 0x3C, 0x25, 0x00, 0x28, 0x00, 0x00, // clflushopt [0x2800]
+        0xF3, 0x0F, 0x3A, 0xF0, 0xC0, 0x01, // hreset 1（no-op）
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0x31, 0xFF, // xor rdi,rdi
+        0x0F, 0x05, // syscall → exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    // ソース 64 バイトを 0..0x3F で埋め、宛先を汚しておく。
+    let src: Vec<u8> = (0u8..0x40).collect();
+    env.backend.mem.write(VirtAddr(0x2500), &src).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2600), &[0xEE; 0xC0])
+        .unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0));
+    let acc = polyisa_mem::Access {
+        endian: polyisa_mem::Endian::Le,
+        align: polyisa_mem::Align::Unaligned,
+        kind: polyisa_mem::AccessKind::DataRead,
+    };
+    let mut v = [0u8; 0x400];
+    env.backend.mem.read(VirtAddr(0x2400), &mut v, acc).unwrap();
+    assert_eq!(
+        u64::from_le_bytes(v[0..8].try_into().unwrap()),
+        0xAA55_AA55,
+        "movdiri qword store"
+    );
+    for (i, dst) in [
+        (0x200usize, "movdir64b"),
+        (0x240, "enqcmd"),
+        (0x280, "enqcmds"),
+    ] {
+        assert_eq!(&v[i..i + 0x40], &src[..], "{dst} copies 64B");
+    }
+    let mut w = [0u8; 8];
+    env.backend.mem.read(VirtAddr(0x27C0), &mut w, acc).unwrap();
+    assert_eq!(w[0], 0, "umwait clears CF");
+    // デコード検査。
+    use polyisa_guest_x86::{
+        DEFAULT_FEATS as feats, MODE_ADR_A64, MODE_ADR_SHIFT, MODE_M64, MODE_OPD_O32,
+        MODE_OPD_SHIFT, decode_map,
+    };
+    let m64 = MODE_M64 | (MODE_OPD_O32 << MODE_OPD_SHIFT) | (MODE_ADR_A64 << MODE_ADR_SHIFT);
+    for bytes in [
+        &[0x0F, 0x38, 0xF9, 0xC0][..],             // movdiri mod=11 → 予約
+        &[0x66, 0x0F, 0x38, 0xF8, 0xC0][..],       // movdir64b mod=11 → 予約
+        &[0xF2, 0x0F, 0x38, 0xF8, 0xC0][..],       // enqcmd mod=11 → 予約
+        &[0xF3, 0x0F, 0x38, 0xF8, 0xC0][..],       // enqcmds mod=11 → 予約
+        &[0xF3, 0x0F, 0x3A, 0xF0, 0xC8, 0x00][..], // hreset /1 → 予約
+        &[0xF3, 0x0F, 0x3A, 0xF0, 0xC1, 0x00][..], // hreset rm=1 → 予約
+        &[0xF3, 0x0F, 0x3A, 0xF0, 0x00, 0x00][..], // hreset mod≠11 → 予約
+        &[0x0F, 0x3A, 0xF0, 0xC0, 0x00][..],       // hreset NP → 予約
+        // /5-/7 の mod=11 NP は LFENCE/MFENCE/SFENCE なので
+        // 拒否対象にしない。NP /6 のメモリ形は XSAVEOPT（C1a
+        // で実装予定）なので現状は拒否される。
+        &[0x0F, 0xAE, 0x30][..], // xsaveopt → 未実装
+    ] {
+        assert!(decode_map(bytes, m64, feats).is_none(), "{bytes:?}");
+    }
+    // 受理系: 各命令の正しい形。
+    for bytes in [
+        &[0x0F, 0x38, 0xF9, 0x00][..],             // movdiri [eax]
+        &[0x66, 0x0F, 0x38, 0xF8, 0x00][..],       // movdir64b rax,[rax]
+        &[0xF2, 0x0F, 0x38, 0xF8, 0x00][..],       // enqcmd
+        &[0xF3, 0x0F, 0x38, 0xF8, 0x00][..],       // enqcmds
+        &[0xF3, 0x0F, 0xAE, 0xF0][..],             // umonitor
+        &[0xF2, 0x0F, 0xAE, 0xF0][..],             // umwait
+        &[0x66, 0x0F, 0xAE, 0xF0][..],             // tpause
+        &[0x66, 0x0F, 0xAE, 0x30][..],             // clwb [rax]
+        &[0x66, 0x0F, 0xAE, 0x38][..],             // clflushopt [rax]
+        &[0x0F, 0x1C, 0x00][..],                   // cldemote [rax]
+        &[0x66, 0x0F, 0x1C, 0x00][..],             // cldemote +66
+        &[0xF3, 0x0F, 0x1C, 0x00][..],             // cldemote +F3
+        &[0xF3, 0x0F, 0x3A, 0xF0, 0xC0, 0x00][..], // hreset 0
+    ] {
+        assert!(decode_map(bytes, m64, feats).is_some(), "{bytes:?}");
     }
 }

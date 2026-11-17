@@ -136,6 +136,11 @@ pub fn rand_state_ref() -> StateRef<W64> {
     StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, rand_state))
 }
 
+/// PKRU の `StateRef`。
+pub fn pkru_ref() -> StateRef<W64> {
+    StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, pkru))
+}
+
 /// 64ビットレジスタを読む（0-7 は上位 h と下位 g を結合し、8-15 は x を読む）。
 pub fn read64<B: Backend>(b: &mut B, r: Gpr) -> B::V<W64> {
     if r.0 < 8 {

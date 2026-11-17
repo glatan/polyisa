@@ -17,8 +17,8 @@
 | pentium | i486 | vme、de、pse、tsc、msr、cx8、mce、apic、mmx |  |
 | pentium_iii | pentium_pro | fxsr、sse、sep、pat |  |
 | pentium_pro | pentium | cmov、pge、mca、pae、mtrr、pse36 |  |
-| x86_64 |  | cpuid、fpu、vme、de、pse、tsc、msr、pae、mce、cx8、apic、sep、mtrr、pge、mca、cmov、pat、pse36、clfsh、mmx、fxsr、sse、sse2、sse3、ssse3、sse4_1、sse4_2、cx16、popcnt、rdtscp、syscall、nx、lm、lahf_lm、i486、lzcnt、adx、pclmulqdq、aesni、sha、gfni、rdrnd、rdseed、serialize、fsgsbase、cet_ss |  |
-| x86_64_v2 | x86_64 | cx16、popcnt | lzcnt、adx、pclmulqdq、aesni、sha、gfni、rdrnd、rdseed、serialize、fsgsbase、cet_ss |
+| x86_64 |  | cpuid、fpu、vme、de、pse、tsc、msr、pae、mce、cx8、apic、sep、mtrr、pge、mca、cmov、pat、pse36、clfsh、mmx、fxsr、sse、sse2、sse3、ssse3、sse4_1、sse4_2、cx16、popcnt、rdtscp、syscall、nx、lm、lahf_lm、i486、lzcnt、adx、pclmulqdq、aesni、sha、gfni、rdrnd、rdseed、serialize、fsgsbase、cet_ss、rtm、pku、uintr、movdiri、movdir64b、enqcmd、cldemote、waitpkg、hreset、clwb、clflushopt |  |
+| x86_64_v2 | x86_64 | cx16、popcnt | lzcnt、adx、pclmulqdq、aesni、sha、gfni、rdrnd、rdseed、serialize、fsgsbase、cet_ss、rtm、pku、uintr、movdiri、movdir64b、enqcmd、cldemote、waitpkg、hreset、clwb、clflushopt |
 | x86_64_v3 | x86_64_v2 | avx、avx2、bmi1、bmi2、f16c、fma、lzcnt、movbe、osxsave、adx、pclmulqdq、aesni |  |
 | x86_64_v4 | x86_64_v3 | avx512f、avx512bw、avx512cd、avx512dq、avx512vl |  |
 
@@ -76,6 +76,7 @@
 - fxsr
 - gfni
 - hle
+- hreset
 - htt
 - hypervisor
 - i186
@@ -211,10 +212,14 @@
 | cdq | en_cdq | 真 | alu |
 | clc | clc | 真 | alu |
 | cld | cld、en_cld | 真 | alu |
+| cldemote | cldemote_mb | cldemote | alu |
 | clflush | clflush_mb | clfsh | alu |
+| clflushopt | clflushopt_mb | clflushopt | alu |
 | cli | cli | 真 | system |
 | clrssbsy | clrssbsy_mq | cet_ss | system |
 | clts | clts | i386 | system |
+| clui | clui | m64 && uintr | system |
+| clwb | clwb_mb | clwb | alu |
 | cmc | cmc | 真 | alu |
 | cmova | cmova | cmov | alu |
 | cmovae | cmovae | cmov | alu |
@@ -285,6 +290,8 @@
 | emms | emms | mmx | alu |
 | endbr | endbr | 真 | alu |
 | endbr64 | endbr64 | 真 | alu |
+| enqcmd | enqcmd_gv_mv | enqcmd | load |
+| enqcmds | enqcmds_gv_mv | enqcmd | load |
 | enter | enter_iw_ib | i186 | store |
 | extractps | extractps_ed_xv | sse4_1 | store |
 | fadd | fadd_st | 真 | alu |
@@ -315,6 +322,7 @@
 | haddpd | haddpd_xv_wv | sse3 | alu |
 | haddps | haddps_xv_wv | sse3 | alu |
 | hlt | en_hlt、hlt | 真 | system |
+| hreset | hreset_ib | hreset | system |
 | hsubpd | hsubpd_xv_wv | sse3 | alu |
 | hsubps | hsubps_xv_wv | sse3 | alu |
 | idiv | idiv_rm32 | 真 | div |
@@ -410,6 +418,8 @@
 | movd | movd_xmm、movd_xmm_m32、movd_xmm_rip、movd_xv_ev | sse2 | load |
 | movd | movd_ev_xv | sse2 | store |
 | movddup | movddup_xv_wv | sse3 | load |
+| movdir64b | movdir64b_gv_mv | movdir64b | load |
+| movdiri | movdiri_mv_gv | movdiri | store |
 | movdqa | movdqa_load_rip、movdqa_xv_wv | sse2 | load |
 | movdqa | movdqa_wv_xv | sse2 | store |
 | movdqu | movdqu_load_mem32、movdqu_load_mem8、movdqu_load_memnd、movdqu_load_sib、movdqu_load_xmm、movdqu_xv_wv | sse2 | load |
@@ -674,6 +684,8 @@
 | rcr | rcr_eb_1、rcr_eb_cl、rcr_ev_1、rcr_ev_cl | 真 | alu |
 | rdfsbase | rdfsbase_rv | m64 && fsgsbase | system |
 | rdgsbase | rdgsbase_rv | m64 && fsgsbase | system |
+| rdpkru | rdpkru | !m64 && pku | system |
+| rdpkru | rdpkru | pku | system |
 | rdrand | rdrand_rv | rdrnd | alu |
 | rdseed | rdseed_rv | rdseed | alu |
 | rdssp | rdsspd_rv | cet_ss | system |
@@ -695,10 +707,12 @@
 | salc | salc | !m64 | alu |
 | sar | sar_eb_ib、sar_ev_ib | i186 | alu |
 | sar | sar_eb_1、sar_eb_cl、sar_ev_1、sar_ev_cl、sar_rm32_1、sar_rm32_cl、sar_rm32_imm8 | 真 | alu |
+| saveprevssp | saveprevssp | cet_ss | system |
 | sbb | sbb_eb_ib | op82 | alu |
 | sbb | sbb_al_ib、sbb_eax_iz、sbb_eb_gb、sbb_eb_ib、sbb_ev_gv、sbb_ev_ib、sbb_ev_iz、sbb_gb_eb、sbb_gv_ev、sbb_m32_r32_mem8、sbb_m32_r32_sibd、sbb_r_mem32、sbb_r_mem8、sbb_r_memnd、sbb_r_rip、sbb_rm32、sbb_rm32_imm、sbb_rm_imm8、sbb_rm_imm8_sibd | 真 | alu |
 | scas | scas_v | 真 | alu |
 | scasb | scas_b | 真 | alu |
+| senduipi | senduipi_rv | m64 && uintr | system |
 | serialize | serialize | i286 && serialize | system |
 | seta | seta | 真 | alu |
 | setae | setae | 真 | alu |
@@ -750,6 +764,7 @@
 | stosb | stos_b、stosb | 真 | store |
 | stosd | stosd | 真 | store |
 | str | str_ew | i286 | system |
+| stui | stui | m64 && uintr | system |
 | sub | sub_eb_ib | op82 | alu |
 | sub | sub_al_ib、sub_eax、sub_eax_iz、sub_eb_gb、sub_eb_ib、sub_ev_gv、sub_ev_ib、sub_ev_iz、sub_gb_eb、sub_gv_ev、sub_m32_imm8_sibd32、sub_m32_r32_mem32、sub_m32_r32_mem8、sub_m32_r32_sibd32、sub_m8_r8、sub_m8_r8_sib、sub_m_r_sibd、sub_r_mem32、sub_r_mem8、sub_r_memnd、sub_r_rip、sub_r_sib、sub_r_sibabs、sub_r_sibd、sub_r_sibd32、sub_rm32、sub_rm32_imm、sub_rm64_imm、sub_rm_imm8、sub_rm_imm8_mem32、sub_rm_imm8_mem8、sub_rm_imm8_memnd、sub_rm_imm8_rip、sub_rm_imm8_sibd | 真 | alu |
 | subpd | subpd_xv_wv | sse2 | alu |
@@ -763,11 +778,16 @@
 | sysexit | sysexit | sep | system |
 | test | test_al_ib、test_al_imm、test_ax_imm16、test_eax_imm、test_eax_iz、test_eb_gb、test_ev_gv、test_m16_imm_mem8、test_m16_imm_memnd、test_m16_imm_rip、test_m8_imm_mem32、test_m8_imm_mem8、test_m8_imm_memnd、test_m8_imm_rip、test_m8_imm_sib、test_m8_imm_sibd、test_m8_imm_sibd32、test_m8_r8_mem32、test_m8_r8_mem8、test_m8_r8_memnd、test_m8_r8_sibd、test_r8_r8、test_r_mem32、test_r_mem8、test_r_sib、test_r_sibabs、test_r_sibd、test_r_sibd32、test_rm16_imm、test_rm32、test_rm32_imm、test_rm32_imm_mem8、test_rm32_imm_memnd、test_rm32_imm_rip、test_rm32_imm_sib、test_rm32_imm_sibd、test_rm32_memnd、test_rm8_imm | 真 | alu |
 | test | test_eb_i、test_ev_i | 真 | mult |
+| testui | testui | m64 && uintr | system |
+| tpause | tpause_rv | waitpkg | system |
 | ucomisd | ucomisd、ucomisd_xv_wv | sse2 | alu |
 | ucomisd | ucomisd_mem32、ucomisd_mem8、ucomisd_memnd、ucomisd_rip | sse2 | load |
 | ucomiss | ucomiss_xv_wv | sse | alu |
 | ud1 | ud1 | 真 | system |
 | ud2 | ud2 | 真 | system |
+| uiret | uiret | m64 && uintr | system |
+| umonitor | umonitor_rv | waitpkg | system |
+| umwait | umwait_rv | waitpkg | system |
 | unpckhpd | unpckhpd_xv_wv | sse2 | alu |
 | unpckhps | unpckhps_xv_wv | sse | alu |
 | unpcklpd | unpcklpd_xv_wv | sse2 | alu |
@@ -776,13 +796,19 @@
 | verw | verw_ew | i286 | system |
 | wrfsbase | wrfsbase_rv | m64 && fsgsbase | system |
 | wrgsbase | wrgsbase_rv | m64 && fsgsbase | system |
+| wrpkru | wrpkru | !m64 && pku | system |
+| wrpkru | wrpkru | pku | system |
 | wrss | wrssd_mv_gv | cet_ss | store |
 | wruss | wrussd_mv_gv | cet_ss | store |
 | x87 | fadd_m32、fadd_m64、fcom_m32、fcom_m64、fcomp_m32、fcomp_m64、fdiv_m32、fdiv_m64、fdivr_m32、fdivr_m64、fiadd_m16、fiadd_m32、ficom_m16、ficom_m32、ficomp_m16、ficomp_m32、fidiv_m16、fidiv_m32、fidivr_m16、fidivr_m32、fimul_m16、fimul_m32、fisub_m16、fisub_m32、fisubr_m16、fisubr_m32、fmul_m32、fmul_m64、fsub_m32、fsub_m64、fsubr_m32、fsubr_m64、x87d9_4、x87d9_6、x87db_4、x87dd_4、x87dd_5、x87dd_6 | 真 | alu |
+| xabort | xabort_ib | i286 && opd_o32 && rtm | system |
 | xadd | xadd_eb_gb、xadd_ev_gv、xadd_r32_memnd、xadd_r32_rip | i486 | alu |
+| xbegin | xbegin_jz | i286 && opd_o32 && rtm | jump |
 | xchg | xchg_eb_gb、xchg_ev_gv、xchg_r8、xchg_r_mem32、xchg_r_mem8、xchg_r_memnd、xchg_r_rip、xchg_r_rm、xchg_rbp_ax、xchg_rbx_ax、xchg_rcx_ax、xchg_rdi_ax、xchg_rdx_ax、xchg_rsi_ax、xchg_rsp_ax、xchg_rv_eax | 真 | alu |
+| xend | xend | rtm | system |
 | xlat | xlat | 真 | load |
 | xor | xor_eb_ib | op82 | alu |
 | xor | xor_al_ib、xor_eax_iz、xor_eb_gb、xor_eb_ib、xor_ev_gv、xor_ev_ib、xor_ev_iz、xor_gb_eb、xor_gv_ev、xor_imm、xor_m32_r32_mem32、xor_m32_r32_mem8、xor_m32_r32_memnd、xor_m32_r32_sibd、xor_m8_r8、xor_m8_r8_sib、xor_r8_m8_memnd、xor_r_mem32、xor_r_mem8、xor_r_memnd、xor_r_rip、xor_r_sib、xor_r_sibd、xor_r_sibd32、xor_rm32、xor_rm32_imm、xor_rm32_imm_sibd、xor_rm8_imm、xor_rm8_imm_mem32、xor_rm8_imm_memnd、xor_rm8_imm_sib、xor_rm8_imm_sibd、xor_rm_imm8、xor_rm_imm8_mem32、xor_rm_imm8_mem8、xor_rm_imm8_memnd、xor_rm_imm8_sibd | 真 | alu |
 | xorpd | xorpd_xv_wv | sse2 | alu |
 | xorps | xorps、xorps_xv_wv | sse | alu |
+| xtest | xtest | rtm | system |
