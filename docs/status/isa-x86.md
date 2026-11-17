@@ -10,7 +10,7 @@
 |---|---|---|---|
 | generic32 |  | i386 |  |
 | i186 | i8088 | i186、op82 |  |
-| i286 | i186 | i286 | op82、pop_cs |
+| i286 | i186 | i286 | pop_cs |
 | i386 |  | fpu、i386 |  |
 | i486 | i386 | cpuid、i486 |  |
 | i8088 |  | pop_cs、op82 |  |
@@ -366,7 +366,9 @@
 | minsd | minsd、minsd_xv_wv | sse2 | alu |
 | minss | minss_xv_wv | sse | alu |
 | monitor | monitor | monitor | system |
-| mov | mov_ew_sr、mov_sr_ew | opd_o16 && adr_a16 | load |
+| mov | mov_sr_ew | !i286 | load |
+| mov | mov_ew_sr、mov_sr_ew | i386 || opd_o16 && adr_a16 && !i286 | load |
+| mov | mov_ew_sr、mov_sr_ew | opd_o16 && adr_a16 && !i286 | load |
 | mov | mov_eb_ib、mov_ev_iz | opd_o16 && adr_a16 && !i286 | store |
 | mov | movaps_xv_wv、movss_xv_wv、movups_xv_wv | sse | load |
 | mov | movaps_wv_xv、movss_wv_xv、movups_wv_xv | sse | store |

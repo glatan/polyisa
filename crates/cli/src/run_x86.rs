@@ -1790,10 +1790,10 @@ pub fn run_m16_ex(
 ) -> Outcome {
     polyisa_guest_x86::install_params(&mut env.backend, params);
     env.backend.set(polyisa_guest_x86::sem::eip_ref(), entry);
-    env.backend.addr_mask = if params.addr_wrap == polyisa_guest_x86::ADDR_WRAP_M20 {
-        0xF_FFFF
-    } else {
-        u64::MAX
+    env.backend.addr_mask = match params.addr_wrap {
+        polyisa_guest_x86::ADDR_WRAP_M20 => 0xF_FFFF,
+        polyisa_guest_x86::ADDR_WRAP_M24 => 0xFF_FFFF,
+        _ => u64::MAX,
     };
     let _ = sys.on_block(env);
     let mut hist = std::collections::VecDeque::<(u32, String)>::with_capacity(33);
@@ -2642,11 +2642,11 @@ fn decode_x86(
 
 // ---- オペコード表（map）経路 ----
 
-/// シフト群の操作。8088 では /6 が undocumented な SETMO（全ビット 1 を
-/// 書き込む）になる。それ以外のモードでは SHL の別名。
-fn grp2_op(d: &polyisa_guest_x86::MapDec, mode: u8) -> polyisa_guest_x86::sem_ea::Sh {
+/// シフト群の操作。8086/8088 では /6 が undocumented な SETMO（全ビット
+/// 1 を書き込む）になる。80186 以降は SHL の別名。
+fn grp2_op(d: &polyisa_guest_x86::MapDec, mode: u8, feats: u64) -> polyisa_guest_x86::sem_ea::Sh {
     use polyisa_guest_x86::sem_ea::Sh;
-    if mode == 16 && (d.modrm >> 3) & 7 == 6 {
+    if mode == 16 && feats & polyisa_guest_x86::FEAT_I186 == 0 && (d.modrm >> 3) & 7 == 6 {
         Sh::Setmo
     } else {
         Sh::Shl
@@ -2673,6 +2673,7 @@ fn dispatch_map<B: Backend>(
     eip: u32,
     next_rip: u64,
     seg: u64,
+    seg_ss: bool,
     sseg: u64,
     es: u64,
     mode: u8,
@@ -2681,10 +2682,27 @@ fn dispatch_map<B: Backend>(
     let m64 = mode == 64;
     let sa = mode;
     if mode == 16 && (0xD8..=0xDF).contains(&d.opcode) {
-        // 8088 には 8087 が付いていない。ESC は ModRM の評価と
-        // ダミー読みだけを行い、建築状態は変わらない。
-        return Ok(true);
+        // 80286 以降で FPU がなければ ESC は #NM（実モードは IVT 7 へ）。
+        if feats & polyisa_guest_x86::FEAT_I286 != 0 && feats & polyisa_guest_x86::FEAT_FPU == 0 {
+            return sem_ea::int_real(b, eip, 0, 7, sa, sseg).map(|_| true);
+        }
+        if feats & polyisa_guest_x86::FEAT_I286 == 0 {
+            // 8088 に 8087 は付いていない。ESC は建築状態を変えずに
+            // 次の命令へ進む（バス上の ModRM 評価・ダミー読みは
+            // 建築状態に現れない）。
+            return Ok(true);
+        }
+        // i286+FPU は落下して FPU 意味論を実行する。成功時に
+        // 80287 へのバス転送プロトコルを emit する（末尾の npx 参照）。
     }
+    // 80286+80287 の ESC は実行成功時にポート F8/FC へ命令語と文脈
+    // を転送する。オペランドの限界例外は転送に先行する（SST 80286
+    // 実測でフォルト時はポートが無条件に書かれない）ので emit は
+    // 実行後に行う。
+    let npx = mode == 16
+        && (0xD8..=0xDF).contains(&d.opcode)
+        && feats & polyisa_guest_x86::FEAT_I286 != 0
+        && feats & polyisa_guest_x86::FEAT_FPU != 0;
     use polyisa_guest_x86::decode::{self, Hw, Rm};
     use polyisa_guest_x86::sem::{Gpr, eflags_ref};
     use polyisa_guest_x86::sem_ea::{self, Alu, Sh, ShiftCnt, Src};
@@ -2698,7 +2716,7 @@ fn dispatch_map<B: Backend>(
     // Ea 被演算子（ModRM が無い命令は modrm=0 で mem 誤認するので
     // has_modrm で守る）。
     let ea = if d.has_modrm {
-        decode::rm_of(b, d, next_rip, seg)
+        decode::rm_of(b, d, next_rip, seg, seg_ss, mode == 16)
     } else {
         Rm::Reg(Gpr(0))
     };
@@ -2998,7 +3016,7 @@ fn dispatch_map<B: Backend>(
         Insn::RcrEvCl => sem_ea::shift(b, Sh::Rcr, w, &ea, d, ShiftCnt::Cl, mode == 16),
         Insn::ShlEbIb => sem_ea::shift(
             b,
-            grp2_op(d, mode),
+            grp2_op(d, mode, feats),
             8,
             &ea,
             d,
@@ -3007,17 +3025,49 @@ fn dispatch_map<B: Backend>(
         ),
         Insn::ShlEvIb => sem_ea::shift(
             b,
-            grp2_op(d, mode),
+            grp2_op(d, mode, feats),
             w,
             &ea,
             d,
             ShiftCnt::Imm(d.imm as u32),
             mode == 16,
         ),
-        Insn::ShlEb1 => sem_ea::shift(b, grp2_op(d, mode), 8, &ea, d, ShiftCnt::One, mode == 16),
-        Insn::ShlEv1 => sem_ea::shift(b, grp2_op(d, mode), w, &ea, d, ShiftCnt::One, mode == 16),
-        Insn::ShlEbCl => sem_ea::shift(b, grp2_op(d, mode), 8, &ea, d, ShiftCnt::Cl, mode == 16),
-        Insn::ShlEvCl => sem_ea::shift(b, grp2_op(d, mode), w, &ea, d, ShiftCnt::Cl, mode == 16),
+        Insn::ShlEb1 => sem_ea::shift(
+            b,
+            grp2_op(d, mode, feats),
+            8,
+            &ea,
+            d,
+            ShiftCnt::One,
+            mode == 16,
+        ),
+        Insn::ShlEv1 => sem_ea::shift(
+            b,
+            grp2_op(d, mode, feats),
+            w,
+            &ea,
+            d,
+            ShiftCnt::One,
+            mode == 16,
+        ),
+        Insn::ShlEbCl => sem_ea::shift(
+            b,
+            grp2_op(d, mode, feats),
+            8,
+            &ea,
+            d,
+            ShiftCnt::Cl,
+            mode == 16,
+        ),
+        Insn::ShlEvCl => sem_ea::shift(
+            b,
+            grp2_op(d, mode, feats),
+            w,
+            &ea,
+            d,
+            ShiftCnt::Cl,
+            mode == 16,
+        ),
         Insn::ShrEbIb => sem_ea::shift(
             b,
             Sh::Shr,
@@ -3267,11 +3317,18 @@ fn dispatch_map<B: Backend>(
         Insn::JmpEv => sem_ea::jmp_rm(b, sw, &ea, d),
         Insn::Leave => {
             // SDM: SP←BP は StackAddressSize、pop は OperandSize。
-            let bp = Gpr(5);
-            let v = gr64(b, bp, sa);
-            put64(b, Gpr(4), sa, v, d);
-            let p = sem_ea::pop_v(b, sw, sa, sseg)?;
-            put64(b, bp, sw, p, d);
+            if sa == 16 {
+                // 80286 実測: pop が限界例外を起こすと SP:=BP は
+                // コミットされず、例外フレームは元の SP に積まれる。
+                let p = sem_ea::leave16(b, sw, sseg)?;
+                put64(b, Gpr(5), sw, p, d);
+            } else {
+                let bp = Gpr(5);
+                let v = gr64(b, bp, sa);
+                put64(b, Gpr(4), sa, v, d);
+                let p = sem_ea::pop_v(b, sw, sa, sseg)?;
+                put64(b, bp, sw, p, d);
+            }
             Ok(())
         }
         Insn::Cwde => sem_ea::cwde(b, w, d),
@@ -3354,6 +3411,9 @@ fn dispatch_map<B: Backend>(
         Insn::Pusha => {
             // EAX, ECX, EDX, EBX, 元の ESP, EBP, ESI, EDI の順。
             // ESP 枠は命令実行前の値なので push 前に採取する。
+            // 80286 では系列中のどれかが限界に触れると書き込みを
+            // 一切残さず例外になるため、全アクセスを事前検査する。
+            sem_ea::stack_span_chk(b, w, 8, false, sa, sseg)?;
             let sp0 = gr64(b, Gpr(4), w);
             for g in 0..4u8 {
                 let v = gr64(b, Gpr(g), w);
@@ -3368,6 +3428,9 @@ fn dispatch_map<B: Backend>(
         }
         Insn::Popa => {
             // EDI, ESI, EBP, (ESP は捨てる), EBX, EDX, ECX, EAX。
+            // 限界に触れる語があればレジスタ・SP を一切更新しない
+            // （PUSHA と同じ事前検査）。
+            sem_ea::stack_span_chk(b, w, 8, true, sa, sseg)?;
             for (i, g) in [7u8, 6, 5, 4, 3, 2, 1, 0].iter().enumerate() {
                 let v = sem_ea::pop_v(b, w, sa, sseg)?;
                 if i != 3 {
@@ -3387,7 +3450,7 @@ fn dispatch_map<B: Backend>(
         Insn::LoopeJb => sem_ea::loopcc(b, 1, eip, u32::from(d.len), d.rel, d),
         Insn::LoopJb => sem_ea::loopcc(b, 2, eip, u32::from(d.len), d.rel, d),
         Insn::JcxzJb => sem_ea::loopcc(b, 3, eip, u32::from(d.len), d.rel, d),
-        Insn::EnterIwIb => sem_ea::enter(b, w, d.imm, d.imm2, sa, sseg),
+        Insn::EnterIwIb => sem_ea::enter(b, sw, d.imm, d.imm2, sa, sseg),
         Insn::Xlat => sem_ea::xlat(b, d, seg),
         Insn::Rdtsc => sem_ea::rdtsc(b),
         Insn::PopcntGvEv => sem_ea::popcnt(b, w, reg, d, &ea),
@@ -3412,28 +3475,36 @@ fn dispatch_map<B: Backend>(
         Insn::AddsubpdXvWv => sem_ea::addsub(b, 64, d, &ea),
         Insn::LddquXvMv => sem_ea::mov_x_w(b, d, &ea),
         Insn::Fwait => sem_ea::nop(b),
-        Insn::InsEbDx => sem_ea::str_op(b, sem_ea::Str::Ins, 8, d, eip, seg, es),
-        Insn::InsEvDx => sem_ea::str_op(b, sem_ea::Str::Ins, w, d, eip, seg, es),
-        Insn::OutsDxEb => sem_ea::str_op(b, sem_ea::Str::Outs, 8, d, eip, seg, es),
-        Insn::OutsDxEv => sem_ea::str_op(b, sem_ea::Str::Outs, w, d, eip, seg, es),
+        Insn::InsEbDx => {
+            sem_ea::str_op(b, sem_ea::Str::Ins, 8, d, eip, seg, seg_ss, es, mode == 16)
+        }
+        Insn::InsEvDx => {
+            sem_ea::str_op(b, sem_ea::Str::Ins, w, d, eip, seg, seg_ss, es, mode == 16)
+        }
+        Insn::OutsDxEb => {
+            sem_ea::str_op(b, sem_ea::Str::Outs, 8, d, eip, seg, seg_ss, es, mode == 16)
+        }
+        Insn::OutsDxEv => {
+            sem_ea::str_op(b, sem_ea::Str::Outs, w, d, eip, seg, seg_ss, es, mode == 16)
+        }
         Insn::BoundGvMp => sem_ea::bound(b, w, d, &ea, eip, mode, sa, sseg),
         Insn::PopCs => sem_ea::pop_sr(b, 1, sw, sa, sseg),
         Insn::SmswEw => sem_ea::smsw(b, &ea),
         Insn::LmswEw => sem_ea::lmsw(b, &ea, eip),
-        Insn::MovsB => sem_ea::str_op(b, sem_ea::Str::Movs, 8, d, eip, seg, es),
-        Insn::MovsV => sem_ea::str_op(b, sem_ea::Str::Movs, w, d, eip, seg, es),
-        Insn::StosB => sem_ea::str_op(b, sem_ea::Str::Stos, 8, d, eip, seg, es),
-        Insn::StosV => sem_ea::str_op(b, sem_ea::Str::Stos, w, d, eip, seg, es),
-        Insn::LodsB => sem_ea::str_op(b, sem_ea::Str::Lods, 8, d, eip, seg, es),
-        Insn::LodsV => sem_ea::str_op(b, sem_ea::Str::Lods, w, d, eip, seg, es),
-        Insn::ScasB => sem_ea::str_op(b, sem_ea::Str::Scas, 8, d, eip, seg, es),
-        Insn::ScasV => sem_ea::str_op(b, sem_ea::Str::Scas, w, d, eip, seg, es),
-        Insn::CmpsB => sem_ea::str_op(b, sem_ea::Str::Cmps, 8, d, eip, seg, es),
-        Insn::CmpsV => sem_ea::str_op(b, sem_ea::Str::Cmps, w, d, eip, seg, es),
-        Insn::MovAlOb => sem_ea::mov_moffs_ld(b, 8, d.imm, seg, d),
-        Insn::MovEaxOv => sem_ea::mov_moffs_ld(b, w, d.imm, seg, d),
-        Insn::MovObAl => sem_ea::mov_moffs_st(b, 8, d.imm, seg, d),
-        Insn::MovOvEax => sem_ea::mov_moffs_st(b, w, d.imm, seg, d),
+        Insn::MovsB => sem_ea::str_op(b, sem_ea::Str::Movs, 8, d, eip, seg, seg_ss, es, mode == 16),
+        Insn::MovsV => sem_ea::str_op(b, sem_ea::Str::Movs, w, d, eip, seg, seg_ss, es, mode == 16),
+        Insn::StosB => sem_ea::str_op(b, sem_ea::Str::Stos, 8, d, eip, seg, seg_ss, es, mode == 16),
+        Insn::StosV => sem_ea::str_op(b, sem_ea::Str::Stos, w, d, eip, seg, seg_ss, es, mode == 16),
+        Insn::LodsB => sem_ea::str_op(b, sem_ea::Str::Lods, 8, d, eip, seg, seg_ss, es, mode == 16),
+        Insn::LodsV => sem_ea::str_op(b, sem_ea::Str::Lods, w, d, eip, seg, seg_ss, es, mode == 16),
+        Insn::ScasB => sem_ea::str_op(b, sem_ea::Str::Scas, 8, d, eip, seg, seg_ss, es, mode == 16),
+        Insn::ScasV => sem_ea::str_op(b, sem_ea::Str::Scas, w, d, eip, seg, seg_ss, es, mode == 16),
+        Insn::CmpsB => sem_ea::str_op(b, sem_ea::Str::Cmps, 8, d, eip, seg, seg_ss, es, mode == 16),
+        Insn::CmpsV => sem_ea::str_op(b, sem_ea::Str::Cmps, w, d, eip, seg, seg_ss, es, mode == 16),
+        Insn::MovAlOb => sem_ea::mov_moffs_ld(b, 8, d.imm, seg, seg_ss, d, mode == 16),
+        Insn::MovEaxOv => sem_ea::mov_moffs_ld(b, w, d.imm, seg, seg_ss, d, mode == 16),
+        Insn::MovObAl => sem_ea::mov_moffs_st(b, 8, d.imm, seg, seg_ss, d, mode == 16),
+        Insn::MovOvEax => sem_ea::mov_moffs_st(b, w, d.imm, seg, seg_ss, d, mode == 16),
         Insn::BtEvGv => {
             let n = gr_sext64(b, reg, w);
             sem_ea::bt_op(b, 0, w, &ea, d, n)
@@ -3473,9 +3544,10 @@ fn dispatch_map<B: Backend>(
         // ===== セグメント・特権 =====
         // セレクタ 6/7 は #UD。未対応として旧経路（＝Unimplemented）へ落ちる。
         Insn::MovEwSr => {
-            // 8088 には ES/CS/SS/DS しかなく、reg の上位ビットは無視される。
+            // 8086/80186 には ES/CS/SS/DS しかなく、reg の上位ビットは
+            // 無視される。80286 以降は /6,/7 が #UD、/4,/5 が FS/GS。
             let mut s = (d.modrm >> 3) & 7;
-            if mode == 16 {
+            if mode == 16 && feats & polyisa_guest_x86::FEAT_I286 == 0 {
                 s &= 3;
             }
             if s > 5 {
@@ -3485,7 +3557,7 @@ fn dispatch_map<B: Backend>(
         }
         Insn::MovSrEw => {
             let mut s = (d.modrm >> 3) & 7;
-            if mode == 16 {
+            if mode == 16 && feats & polyisa_guest_x86::FEAT_I286 == 0 {
                 s &= 3;
             }
             if s > 5 {
@@ -4450,7 +4522,29 @@ fn dispatch_map<B: Backend>(
         }
         _ => return Ok(false),
     };
-    r.map(|()| true)
+    let r = r.map(|()| true);
+    if matches!(r, Ok(true)) && npx {
+        // 80287 転送プロトコル: ポート F8 へ命令語 [opcode, modrm]、
+        // FC へ [IP, CS, EAオフセット, オペランドのセグメント]（記憶形）
+        // または FC へ [IP, CS]（mod=11 の st(i) 形）。
+        let f8 = b.konst::<W64>(0xF8);
+        let fc = b.konst::<W64>(0xFC);
+        let iw = b.konst::<W16>(u16::from(d.opcode) | (u16::from(d.modrm) << 8));
+        let ipw = b.konst::<W16>(eip as u16);
+        let csw = b.get(sem::sreg_ref(1));
+        let sgw = b.konst::<W16>((seg >> 4) as u16);
+        b.port_out::<W16>(f8, iw)?;
+        b.port_out::<W16>(fc, ipw)?;
+        b.port_out::<W16>(fc, csw)?;
+        if let Rm::Mem { a, .. } = &ea {
+            let sb = b.konst::<W64>(seg);
+            let off = b.sub::<W64>(*a, sb);
+            let eaw = b.trunc::<W64, W16>(off);
+            b.port_out::<W16>(fc, eaw)?;
+            b.port_out::<W16>(fc, sgw)?;
+        }
+    }
+    r
 }
 
 /// オペコード表経路の 1 命令。表に無いか `dispatch_map` が未対応なら `None`
@@ -4544,12 +4638,56 @@ fn step_x86_map(
             }
         }
     }
-    let md = polyisa_guest_x86::decode_map(&buf[..n], modes, feats)?;
+    // 実モードの SS 基底。デコード失敗時の #UD 配送でも使うので先に取る。
+    let sseg = if mode == 16 {
+        u64::from(env.backend.get(sem::sreg_ref(2))) << 4
+    } else {
+        0
+    };
     let eip = if mode == 16 { ip & 0xFFFF } else { ip };
+    // 命令長の上限。80286 の実モードは 10 バイト超で #GP、
+    // 80386 以降は 15 バイト。
+    let insn_len_lim = if mode == 16 {
+        match env.backend.param::<polyisa_guest_x86::InsnLenParam>() {
+            polyisa_guest_x86::INSN_LEN_L10 => 10u8,
+            polyisa_guest_x86::INSN_LEN_L15 => 15,
+            _ => u8::MAX,
+        }
+    } else {
+        u8::MAX
+    };
+    let md = match polyisa_guest_x86::decode_map(&buf[..n], modes, feats) {
+        Some(md) => md,
+        None => {
+            // 80286 以降の実モードでは未定義命令は #UD（IVT 6 へ）。
+            if mode == 16 && feats & polyisa_guest_x86::FEAT_I286 != 0 {
+                // 命令長の #GP は #UD より先に評価される。無効なグループ
+                // 値でもオペランド長は確定するので、8088/186 の別名形を
+                // 仮にデコードして長さを見る（SST 80286 実測: C7 /7 で
+                // 11 バイトなら #GP）。
+                let alt = polyisa_guest_x86::decode_map(
+                    &buf[..n],
+                    modes,
+                    feats & !polyisa_guest_x86::FEAT_I286,
+                );
+                let vec = match alt {
+                    Some(alt) if alt.len > insn_len_lim => 13,
+                    _ => 6,
+                };
+                let r = env.step(|b| polyisa_guest_x86::sem_ea::int_real(b, eip, 0, vec, 16, sseg));
+                return Some(x86_post_step(env, sys, eip, 0, 0, r, hist));
+            }
+            return None;
+        }
+    };
+    if md.len > insn_len_lim {
+        let r = env.step(|b| polyisa_guest_x86::sem_ea::int_real(b, eip, 0, 13, 16, sseg));
+        return Some(x86_post_step(env, sys, eip, 0, 0, r, hist));
+    }
     let next_rip = pc + u64::from(md.len);
     // メモリアクセスの既定セグメント。実モードはセレクタ<<4 の基底で、
     // 上書き接頭辞は該当セグメントを、なければ BP/SP 系は SS、ほかは DS。
-    let (seg, sseg, es) = if mode == 16 {
+    let (seg, seg_ss, es) = if mode == 16 {
         let s = [
             env.backend.get(sem::sreg_ref(0)),
             env.backend.get(sem::sreg_ref(1)),
@@ -4559,32 +4697,44 @@ fn step_x86_map(
             env.backend.get(sem::sreg_ref(5)),
         ];
         let sel = |i: u8| u64::from(s[usize::from(i)]) << 4;
-        let ss = sel(2);
         let es = sel(0);
+        // アクセスの既定セグメントが SS か（限界例外の #SS/#GP 選択）。
+        let seg_ss = md.seg == 0x36 || (md.seg == 0 && polyisa_guest_x86::decode::ea_uses_ss(&md));
         let def = if polyisa_guest_x86::decode::ea_uses_ss(&md) {
-            ss
+            sseg
         } else {
             sel(3)
         };
         let ov = match md.seg {
             0x26 => es,
             0x2E => sel(1),
-            0x36 => ss,
+            0x36 => sseg,
             0x3E => sel(3),
             0x64 => sel(4),
             0x65 => sel(5),
             _ => 0,
         };
-        (if md.seg != 0 { ov } else { def }, ss, es)
+        (if md.seg != 0 { ov } else { def }, seg_ss, es)
     } else {
         let seg = match md.seg {
             0x64 => env.backend.get(sem::fs_base_ref()),
             0x65 => env.backend.get(sem::gs_base_ref()),
             _ => 0,
         };
-        (seg, 0, 0)
+        (seg, false, 0)
     };
-    let r = env.step(|b| dispatch_map(b, &md, eip, next_rip, seg, sseg, es, mode, feats));
+    let r = env.step(|b| dispatch_map(b, &md, eip, next_rip, seg, seg_ss, sseg, es, mode, feats));
+    let r = match r {
+        Err(InterpExit::Exception(ref e))
+            if mode == 16 && e.kind == polyisa_sem::ExceptionKind::Trap && e.code <= 0xFF =>
+        {
+            // 実モードではベクタ例外は IVT 経由で配送する（#SS/#GP/#NM 等。
+            // 命令の実行を中断し、フォールトした命令の IP を積む）。
+            env.step(|b| polyisa_guest_x86::sem_ea::int_real(b, eip, 0, e.code as u8, 16, sseg))
+                .map(|_| true)
+        }
+        r => r,
+    };
     if let Ok(false) = r {
         // 未移行。従来経路へ。
         return None;

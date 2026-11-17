@@ -1734,10 +1734,11 @@ mod tests {
             decode_map(&[0x0F, 0x01, 0xE0], m16, sel("i286")).map(|d| d.insn),
             Some(Insn::SmswEw)
         );
-        // 0x82: 8088/186 の 0x80 別名。286 以降は無効。
+        // 0x82: 8086-80286 の 0x80 別名（SST 80286 実測）。386 以降は無効。
         assert!(decode_map(&[0x82, 0xC0, 0x05], m16, sel("i8088")).is_some());
         assert!(decode_map(&[0x82, 0xC0, 0x05], m16, sel("i186")).is_some());
-        assert!(decode_map(&[0x82, 0xC0, 0x05], m16, sel("i286")).is_none());
+        assert!(decode_map(&[0x82, 0xC0, 0x05], m16, sel("i286")).is_some());
+        assert!(decode_map(&[0x82, 0xC0, 0x05], m16, sel("i386")).is_none());
         // 80186 系: PUSH imm / INS / OUTS / PUSHA / ENTER / BOUND。
         for prog in [
             &[0x6A, 0x05][..],

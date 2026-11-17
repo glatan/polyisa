@@ -6,20 +6,29 @@
 //!
 //! Ref: SPEC-X86-INTEL-SDM (v093) Vol.2A 2.1.3-2.1.5.
 
-use polyisa_sem::{Backend, W8, W16, W32, W64};
+use polyisa_sem::{Backend, Cmp, W8, W16, W32, W64};
 
 use crate::MapDec;
 use crate::sem::{Gpr, clear_hi, read64, write64};
+
+/// `wseg` に詰める SS フラグ。実モードの 64K 折り返し・限界検査の
+/// 対象アクセスで、アクセスのセグメントが SS なら bit32 を立てる
+/// （限界超過の例外は SS なら #SS=12、他は #GP=13）。
+pub const WSEG_SS: u64 = 1 << 32;
 
 /// ModRM の r/m が指す被演算子。
 pub enum Rm<V> {
     /// レジスタ直接（mod=11）。
     Reg(Gpr),
-    /// メモリ。`a` は実効アドレス（セグメントベース加算済み）。
+    /// メモリ。`a` は実効アドレス（セグメントベース加算済み、
+    /// オフセットは 64K で折り返し済み）。
     /// `wseg` が `Some` のとき 16 ビットアドレッシング由来で、
     /// 8 ビットを超えるアクセスはオフセットを 64K で折り返す
-    /// （実モードの `mov word [bx+0ffffh]` 等）。
-    Mem { a: V, wseg: Option<u64> },
+    /// （8086/80186）か限界例外（80286 以降、`seg_limit` パラメータ）。
+    /// 値は (セグメントベース | [`WSEG_SS`], 折り返し前の EA 和)。
+    /// EA 和が 64K で桁上げしたとき 80286 の限界検査は発火しない
+    /// （SST 80286 実測）ので、検査には折り返し前の和を使う。
+    Mem { a: V, wseg: Option<(u64, V)> },
 }
 
 /// ModRM reg フィールドのレジスタ（REX.R 込み）。
@@ -62,14 +71,28 @@ pub fn reg8(d: &MapDec, g: Gpr) -> (Gpr, bool) {
 
 /// ModRM/SIB/変位から実効アドレスを求める。mod=11 は `Rm::Reg`。
 /// `seg` はセグメントベース（上書き接頭辞由来、なければ 0）。
-pub fn rm_of<B: Backend>(b: &mut B, d: &MapDec, next_rip: u64, seg: u64) -> Rm<B::V<W64>> {
+/// `seg_ss` はそのアクセスの既定セグメントが SS か（実モードの
+/// 限界例外の種別に使う）。`real16` は実モード実行かどうか。偽なら
+/// 16 ビットアドレッシングでも 64K 折り返し・実モード限界検査は
+/// 適用しない（保護モードの 0x67 でも `d.asize` は 16 になり得る）。
+pub fn rm_of<B: Backend>(
+    b: &mut B,
+    d: &MapDec,
+    next_rip: u64,
+    seg: u64,
+    seg_ss: bool,
+    real16: bool,
+) -> Rm<B::V<W64>> {
     let m = d.modrm;
     if m >> 6 == 3 {
         return Rm::Reg(rm_reg(d));
     }
     let rm = m & 7;
+    let mut raw16 = None;
     let mut a: B::V<W64> = if d.asize == 16 {
-        ea16(b, m, d.disp)
+        let (off, raw) = ea16(b, m, d.disp);
+        raw16 = Some(raw);
+        off
     } else if rm == 4 {
         ea_sib(b, m, d, next_rip)
     } else if m >> 6 == 0 && rm == 5 {
@@ -83,12 +106,19 @@ pub fn rm_of<B: Backend>(b: &mut B, d: &MapDec, next_rip: u64, seg: u64) -> Rm<B
         let s = b.konst::<W64>(seg);
         a = b.add::<W64>(a, s);
     }
-    let wseg = (d.asize == 16).then_some(seg);
+    let wseg = (real16 && d.asize == 16).then(|| {
+        let seg = seg | if seg_ss { WSEG_SS } else { 0 };
+        (seg, raw16.unwrap())
+    });
     Rm::Mem { a, wseg }
 }
 
 /// 16ビットアドレッシング（実モード・286）。BX+SI 等の固定表。
-fn ea16<B: Backend>(b: &mut B, m: u8, disp: i64) -> B::V<W64> {
+/// 戻り値は (64K 折り返し済みのオフセット, 折り返し前の和)。和は
+/// 16 ビット加算器のモデルで、変位は 16 ビットに切って足す
+/// （disp8=-1 は 0xFFFF として加算）。桁上げの有無は後段の
+/// セグメント限界検査が使う。
+fn ea16<B: Backend>(b: &mut B, m: u8, disp: i64) -> (B::V<W64>, B::V<W64>) {
     let rm = m & 7;
     // (base, index) のレジスタ番号。None はなし。
     let (base, idx): (Option<u8>, Option<u8>) = match rm {
@@ -102,22 +132,24 @@ fn ea16<B: Backend>(b: &mut B, m: u8, disp: i64) -> B::V<W64> {
         6 => (Some(5), None),             // BP
         _ => (Some(3), None),             // BX
     };
-    let r16 = |b: &mut B, i: u8| -> B::V<W16> {
+    let r16 = |b: &mut B, i: u8| -> B::V<W32> {
         let v: B::V<W32> = b.get(Gpr(i).state());
-        b.trunc::<W32, W16>(v)
+        let m = b.konst::<W32>(0xFFFF);
+        b.and::<W32>(v, m)
     };
-    let mut v = b.konst::<W16>(0);
+    let mut s = b.konst::<W32>(0);
     if let Some(i) = base {
         let t = r16(b, i);
-        v = b.add::<W16>(v, t);
+        s = b.add::<W32>(s, t);
     }
     if let Some(i) = idx {
         let t = r16(b, i);
-        v = b.add::<W16>(v, t);
+        s = b.add::<W32>(s, t);
     }
-    let dv = b.konst::<W16>(disp as u16);
-    v = b.add::<W16>(v, dv);
-    b.zext::<W16, W64>(v)
+    let dv = b.konst::<W32>(disp as u16 as u32);
+    s = b.add::<W32>(s, dv);
+    let off = b.trunc::<W32, W16>(s);
+    (b.zext::<W16, W64>(off), b.zext::<W32, W64>(s))
 }
 
 /// SIB 付き実効アドレス（32/64）。mod=00 base=101 は disp32 のみ。
@@ -176,21 +208,110 @@ fn ea_base<B: Backend>(b: &mut B, wide: bool, g: Gpr) -> B::V<W64> {
 
 // ---- レジスタ・メモリの読み書き ----
 
+/// `wseg` のうちアクセスを起こした側のセグメント種別に応じた
+/// 限界超過例外を起こす（`seg_limit` = fault の世代。80286 以降の
+/// 実モード）。SS 由来は `stack_fault` で #SS(12)/#GP(13) を選ぶ
+/// （80286 はすべて #GP）。判定するオフセットは wrap 前の値で、
+/// 最終バイトが 0xFFFF を越えるとき。
+pub(crate) fn seg_limit_chk<B: Backend, W: Hw>(
+    b: &mut B,
+    off: B::V<W64>,
+    wseg: u64,
+) -> Result<(), B::Exit> {
+    seg_limit_chk_n(b, off, wseg, u64::from(W::BITS / 8))
+}
+
+/// `nbytes` バイトのアクセスについて `wseg` の限界超過例外を起こす。
+/// [`seg_limit_chk`] の幅非依存版（m80 などの奇数長アクセス用）。
+pub fn seg_limit_chk_n<B: Backend>(
+    b: &mut B,
+    off: B::V<W64>,
+    wseg: u64,
+    nbytes: u64,
+) -> Result<(), B::Exit> {
+    use polyisa_sem::{ExceptionKind, GuestException};
+    if b.param::<crate::SegLimitParam>() != crate::SEG_LIMIT_FAULT {
+        return Ok(());
+    }
+    // 最終バイトのオフセットが 0xFFFF を越えるか。閾値は 0x1_0001 - size。
+    // ただしオフセット自身が 0xFFFF を越える（EA 和の桁上げ）場合は
+    // 例外にならない（SST 80286 実測）。thr <= off <= 0xFFFF は
+    // off - thr <= size-2 と同値で 1 回の比較で済む。
+    let thr = b.konst::<W64>(0x1_0001 - nbytes);
+    let dt = b.sub::<W64>(off, thr);
+    let sp = b.konst::<W64>(nbytes.saturating_sub(2));
+    let over = b.cmp::<W64>(Cmp::LeU, dt, sp);
+    let ss_vec = if b.param::<crate::StackFaultParam>() == crate::STACK_FAULT_GP {
+        13u8
+    } else {
+        12u8
+    };
+    let vec = u64::from(if wseg & WSEG_SS != 0 { ss_vec } else { 13u8 });
+    b.if_then(over, |b| {
+        Err(b.raise(GuestException {
+            kind: ExceptionKind::Trap,
+            code: vec,
+            addr: None,
+            in_delay_slot: false,
+        }))
+    })
+}
+
+/// `wseg` の 64K 折り返しで `off`（折り返し前の EA 和）から i バイト目の
+/// 番地を返す。`wseg` が無いときは `a + i`。
+/// 複数バイトアクセスは先に [`seg_limit_chk_n`] で限界を確認すること。
+pub fn wseg_byte_addr<B: Backend>(
+    b: &mut B,
+    a: B::V<W64>,
+    wseg: Option<(B::V<W64>, B::V<W64>)>,
+    i: u64,
+) -> B::V<W64> {
+    let iv = b.konst::<W64>(i);
+    let Some((off, sv)) = wseg else {
+        return b.add::<W64>(a, iv);
+    };
+    let t = b.add::<W64>(off, iv);
+    let lim = b.konst::<W64>(0xFFFF);
+    let o = b.and::<W64>(t, lim);
+    b.add::<W64>(o, sv)
+}
+
+/// `wseg` と折り返し済み番地 `a` から折り返し前の EA 和とセグメント
+/// 基底を取り出す（`wseg_byte_addr`・`seg_limit_chk_n` の入力）。
+/// `wseg` が無いときは `None`。
+pub fn wseg_off<B: Backend>(
+    b: &mut B,
+    a: B::V<W64>,
+    wseg: Option<(u64, B::V<W64>)>,
+) -> Option<(B::V<W64>, B::V<W64>)> {
+    let (seg, raw) = wseg?;
+    let sv = b.konst::<W64>(seg & 0xFFFF_FFFF);
+    let hm = b.konst::<W64>(!0xFFFFu64);
+    let hi = b.and::<W64>(raw, hm);
+    let base = b.sub::<W64>(a, sv);
+    let off = b.add::<W64>(base, hi);
+    Some((off, sv))
+}
+
 /// 実モードの 64K オフセット折り返しを考慮してメモリを読む。
-/// `wseg` が `Some` なら `off = a - seg` を 16 ビットオフセットとみなし、
+/// `wseg` が `Some((seg, raw))` なら `off = a - seg + (raw の上位)` を
 /// i バイト目は `seg + ((off + i) & 0xffff)` から読む。
+/// `seg_limit` = fault の世代では先に限界検査を行う。
 pub fn mem_load<B: Backend, W: Hw>(
     b: &mut B,
     a: B::V<W64>,
-    wseg: Option<u64>,
+    wseg: Option<(u64, B::V<W64>)>,
 ) -> Result<B::V<W>, B::Exit> {
-    let Some(seg) = wseg.filter(|_| W::BITS > 8) else {
+    let Some((seg, _)) = wseg.filter(|_| W::BITS > 8) else {
         return b.load::<W>(a, crate::sem::DATA_READ);
     };
-    let sv = b.konst::<W64>(seg);
+    // 検査は折り返し前の EA 和に対して行う。`a` はオフセット折り
+    // 返し済みなので raw の上位を足して部分アクセスの生オフセット
+    // を復元する。番地計算は 16 ビットに折る。
+    let (off_raw, sv) = wseg_off(b, a, wseg).unwrap();
     let lim = b.konst::<W64>(0xFFFF);
-    let aoff = b.sub::<W64>(a, sv);
-    let off = b.and::<W64>(aoff, lim);
+    seg_limit_chk::<B, W>(b, off_raw, seg)?;
+    let off = b.and::<W64>(off_raw, lim);
     let addr0 = b.add::<W64>(off, sv);
     let byte0 = b.load::<W8>(addr0, crate::sem::DATA_READ)?;
     let mut acc: B::V<W> = b.zext::<W8, W>(byte0);
@@ -208,20 +329,21 @@ pub fn mem_load<B: Backend, W: Hw>(
     Ok(acc)
 }
 
-/// `mem_load` と同じ折り返し規則でメモリに書く。
+/// `mem_load` と同じ折り返し・限界規則でメモリに書く。
 pub fn mem_store<B: Backend, W: Hw>(
     b: &mut B,
     a: B::V<W64>,
-    wseg: Option<u64>,
+    wseg: Option<(u64, B::V<W64>)>,
     v: B::V<W>,
 ) -> Result<(), B::Exit> {
-    let Some(seg) = wseg.filter(|_| W::BITS > 8) else {
+    let Some((seg, _)) = wseg.filter(|_| W::BITS > 8) else {
         return b.store::<W>(a, v, crate::sem::DATA_WRITE);
     };
-    let sv = b.konst::<W64>(seg);
+    // mem_load と同じ折り返し・限界規則。
+    let (off_raw, sv) = wseg_off(b, a, wseg).unwrap();
     let lim = b.konst::<W64>(0xFFFF);
-    let aoff = b.sub::<W64>(a, sv);
-    let off = b.and::<W64>(aoff, lim);
+    seg_limit_chk::<B, W>(b, off_raw, seg)?;
+    let off = b.and::<W64>(off_raw, lim);
     {
         let addr = b.add::<W64>(off, sv);
         let byte = b.trunc::<W, W8>(v);

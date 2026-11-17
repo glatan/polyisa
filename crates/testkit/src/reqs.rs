@@ -67,6 +67,10 @@ pub const TEST_REQUIREMENTS: &[TestBinary] = &[
         needs: &[Req::Data(".testdata/sst-8088")],
     },
     TestBinary {
+        binary: "heavy_conformance_sst80286",
+        needs: &[Req::Data(".testdata/sst-80286")],
+    },
+    TestBinary {
         binary: "heavy_conformance_testfloat",
         needs: &[Req::Data(".testdata/testfloat")],
     },

@@ -44,7 +44,8 @@ fn declare_features(m: &mut Model) {
     feat(m, "i286", &[]);
     // 8086/8088 の 0F は POP CS（以降は副表への分岐）。
     feat(m, "pop_cs", &[]);
-    // 8086/8088/80186 の 0x82 は 0x80 のエイリアス。
+    // 8086-80286 の実モードでは 0x82 は 0x80 のエイリアスとして実行される。
+    // 80286 では仕様外だが実機は実行する（sst-80286 実測）。
     feat(m, "op82", &[]);
     // 既存の列挙記述が持っていた互換用の旗。命令ゲートには使わない。
     feat(m, "i386", &["i186", "i286"]);
@@ -263,6 +264,42 @@ fn declare_params(m: &mut Model) {
         "65520",
         "MSW（マシン状態ワード）。80286 のリセット値は 0xFFF0",
     );
+    m.param(
+        "seg_limit",
+        ParamKind::Enum(vec!["wrap".to_string(), "fault".to_string()]),
+        "wrap",
+        "実モードで 16 ビットオフセットを越える複数バイトアクセス。80286 以降は #SS/#GP、8086/80186 はオフセットを 64K で折り返す",
+    );
+    m.param(
+        "stack_fault",
+        ParamKind::Enum(vec!["ss".to_string(), "gp".to_string()]),
+        "ss",
+        "実モードのセグメント限界超過で SS 由来アクセスが起こす例外。80286 は SS も含めて #GP(13) に統一、80386 以降は #SS(12)",
+    );
+    m.param(
+        "insn_len",
+        ParamKind::Enum(vec!["none".to_string(), "l10".to_string(), "l15".to_string()]),
+        "none",
+        "1 命令の最大長。80286 は 10 バイト超で #GP、80386 以降は 15 バイト、8086/80186 は制限なし（SST 80286 実測）",
+    );
+    m.param(
+        "bcd",
+        ParamKind::Enum(vec!["i8088".to_string(), "i286".to_string()]),
+        "i286",
+        "DAA/DAS/AAA/AAS の補正手続き。80286 以降は AX±0x106 と AL>0x99 判定、8086/8088 は AH±1 と AL+(AF?0:6)>0x9F 判定（SST 実測）",
+    );
+    m.param(
+        "idiv8",
+        ParamKind::Enum(vec!["cord".to_string(), "i286".to_string()]),
+        "cord",
+        "実モードのバイト IDIV の商境界。8086/80186 の CORD は商マグニチュード 128 で常に #DE、80286 以降は符号付き -128 を許容する（SST 80286 実測）",
+    );
+    m.param(
+        "imul_flags",
+        ParamKind::Enum(vec!["co".to_string(), "szp".to_string()]),
+        "co",
+        "IMUL のステータスフラグ。80286 は積の上位語から SF/ZF/PF を報告する（SST 80286 実測）。それ以降の世代は CF/OF のみ確定的で残りは未定義",
+    );
 }
 
 fn declare_models(m: &mut Model) {
@@ -332,6 +369,8 @@ fn declare_models(m: &mut Model) {
             ("flags_top", "ones"),
             ("div_fault_ip", "next"),
             ("addr_wrap", "m20"),
+            ("seg_limit", "wrap"),
+            ("bcd", "i8088"),
         ],
         vec![],
     );
@@ -347,6 +386,7 @@ fn declare_models(m: &mut Model) {
             ("flags_top", "ones"),
             ("div_fault_ip", "next"),
             ("addr_wrap", "m20"),
+            ("bcd", "i286"),
         ],
         vec![],
     );
@@ -355,15 +395,32 @@ fn declare_models(m: &mut Model) {
         "i286",
         "i186",
         &["i286"],
-        &["op82", "pop_cs"],
+        &["pop_cs"],
         &[
             ("flags_top", "zero"),
             ("div_fault_ip", "at_insn"),
             ("addr_wrap", "m24"),
+            ("seg_limit", "fault"),
+            ("stack_fault", "gp"),
+            ("insn_len", "l10"),
+            ("idiv8", "i286"),
+            ("imul_flags", "szp"),
         ],
         vec![],
     );
-    model(m, "i386", "", &["fpu", "i386"], &[], &[], vec![]);
+    model(
+        m,
+        "i386",
+        "",
+        &["fpu", "i386"],
+        &[],
+        &[
+            ("seg_limit", "fault"),
+            ("insn_len", "l15"),
+            ("idiv8", "i286"),
+        ],
+        vec![],
+    );
     let mut id486 = intel("4", "8", "0");
     id486.extend([("cpuid.max_basic", "1"), ("cpuid.max_ext", "0")]);
     model(m, "i486", "i386", &["cpuid", "i486"], &[], &[], id486);

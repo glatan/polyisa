@@ -324,33 +324,52 @@ pub fn build_maps(m: &mut Model) {
         // MOV sreg は /0-/5 のみ有効（/6,/7 は #UD）。LEA は
         // メモリ形のみ。
         MapItem::Insn(0x8D, mmem(n("lea_gv_m", &[Reg(V), Ea(V)], "lea {g}, {e}", "alu"))),
+        // POP r/m。メモリ形・レジスタ形とも全世代で実行される
+        // （80286 の mod=11 も #UD ではない。SST 80286 実測）。
+        MapItem::Insn(0x8F, gm("pop_ev", 0, false, &[Ea(V)], "pop {e}", "load")),
         MapItem::Insn(
             0x8F,
-            g("pop_ev", 0, &[Ea(V)], "pop {e}", "load"),
+            mreg(mi("pop_ev", &[Ea(V)], Some(0), PfxSel::Any, Pred::True, "pop {e}", "load")),
         ),
     ]);
-    // MOV sreg は近世 x86 で /0-/5 のみ有効。16 ビットモード
-    // （8088/186）では /6,/7 の上位ビットは無視され sreg & 3 の
-    // 別名として動くので、その形も受理する（意味論側が &3 で
-    // 捌く）。`opd_o16 && adr_a16` は 16 ビット実行モードの目印。
-    for grp in 0..6u8 {
+    // MOV sreg。近世 x86 で /0-/5 のみ有効だが、MOV sreg,rm への
+    // CS 書き込み（8E /1）は 80286 以降 #UD、FS/GS（/4,/5）は
+    // 80386 以降の機能。16 ビットモードの 8086/80186 では reg>=4
+    // （/4-/7）の上位ビットは無視され sreg & 3 の別名として動くので、
+    // その形も受理する（意味論側が &3 で捌く）。
+    // `opd_o16 && adr_a16` は 16 ビット実行モードの目印。
+    for grp in 0..4u8 {
         primary.push(MapItem::Insn(
             0x8C,
             g("mov_ew_sr", grp, &[Ea(W16), RegS], "mov {e}, sreg", "load"),
         ));
+        let gate = if grp == 1 { w("!i286") } else { Pred::True };
         primary.push(MapItem::Insn(
             0x8E,
-            g("mov_sr_ew", grp, &[RegS, Ea(W16)], "mov sreg, {e}", "load"),
+            mi("mov_sr_ew", &[RegS, Ea(W16)], Some(grp), PfxSel::Any, gate, "mov sreg, {e}", "load"),
+        ));
+    }
+    // /4,/5。386 以降は FS/GS として本物。それ以前の実モードでは
+    // sreg & 3 の別名として実行される（意味論側が !i286 のとき &3）。
+    // /6,/7 は 286 以降 #UD。8086/80186 では同じく別名。
+    for grp in 4..6u8 {
+        primary.push(MapItem::Insn(
+            0x8C,
+            mi("mov_ew_sr", &[Ea(W16), RegS], Some(grp), PfxSel::Any, w("i386 || (opd_o16 && adr_a16 && !i286)"), "mov {e}, sreg", "load"),
+        ));
+        primary.push(MapItem::Insn(
+            0x8E,
+            mi("mov_sr_ew", &[RegS, Ea(W16)], Some(grp), PfxSel::Any, w("i386 || (opd_o16 && adr_a16 && !i286)"), "mov sreg, {e}", "load"),
         ));
     }
     for grp in 6..8u8 {
         primary.push(MapItem::Insn(
             0x8C,
-            mi("mov_ew_sr", &[Ea(W16), RegS], Some(grp), PfxSel::Any, w("opd_o16 && adr_a16"), "mov {e}, sreg", "load"),
+            mi("mov_ew_sr", &[Ea(W16), RegS], Some(grp), PfxSel::Any, w("opd_o16 && adr_a16 && !i286"), "mov {e}, sreg", "load"),
         ));
         primary.push(MapItem::Insn(
             0x8E,
-            mi("mov_sr_ew", &[RegS, Ea(W16)], Some(grp), PfxSel::Any, w("opd_o16 && adr_a16"), "mov sreg, {e}", "load"),
+            mi("mov_sr_ew", &[RegS, Ea(W16)], Some(grp), PfxSel::Any, w("opd_o16 && adr_a16 && !i286"), "mov sreg, {e}", "load"),
         ));
     }
 
