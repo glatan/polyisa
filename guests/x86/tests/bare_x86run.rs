@@ -13837,6 +13837,19 @@ fn run32(prog: &[u8], steps: u64) -> (Outcome, BareEnv) {
     (out, env)
 }
 
+/// `run32` に機能集合を足す版。既定モデルに無い機能が要る命令用。
+fn run32_ex(prog: &[u8], steps: u64, feats: u64) -> (Outcome, BareEnv) {
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 4, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    let mut sys = ExitOne;
+    let out = run_x86::run_mode_ex(&mut env, 0x1000, &mut sys, steps, false, feats);
+    (out, env)
+}
+
 #[test]
 fn run_loop_and_jcxz() {
     // mov ecx,2; loop $ (E2 FE); jcxz +1; int3; mov ebx,7; exit(ebx)。
@@ -14765,7 +14778,12 @@ fn run_0f38_movbe() {
     prog.resize(0x40, 0x90);
     prog.extend_from_slice(&[0x78, 0x56, 0x34, 0x12]);
     prog.extend_from_slice(&[0u8; 12]);
-    let (out, _) = run32(&prog, 100);
+    // 既定モデル（Nehalem）に MOVBE は無いので機能を足して実行する。
+    let (out, _) = run32_ex(
+        &prog,
+        100,
+        polyisa_guest_x86::DEFAULT_FEATS | polyisa_guest_x86::FEAT_MOVBE,
+    );
     // movbe ld: LE 0x12345678 をバイト反転 → 0x78563412。
     // movbe st: BE として格納 → メモリ LE 読みで元の 0x12345678。
     assert_eq!(out, Outcome::Exit(0x1234_5678));
@@ -16327,4 +16345,374 @@ fn run_mmx_pack_sadbw_maskmovq() {
         )
         .unwrap();
     assert_eq!(mem, [1, 0, 0, 0, 255, 0, 255, 0]);
+}
+
+// ---- A1: SSE3-4.2・POPCNT/CRC32・MXCSR・0F AE 群 ----
+
+#[test]
+fn run_a1_popcnt() {
+    // F3 0F B8 CB = popcnt ecx,ebx。ebx=0xF0F00F0F → 16。
+    // 機能集合への明示追加と、既定モデル（Nehalem は POPCNT 持ち）
+    // の両方で実行する。
+    let prog: &[u8] = &[
+        0xBB, 0x0F, 0x0F, 0xF0, 0xF0, // mov ebx,0xF0F00F0F
+        0xF3, 0x0F, 0xB8, 0xCB, // popcnt ecx,ebx
+        0x89, 0xCB, // mov ebx,ecx
+        0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax,1
+        0xCD, 0x80,
+    ];
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 4, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    let mut sys = ExitOne;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        100,
+        false,
+        polyisa_guest_x86::DEFAULT_FEATS | polyisa_guest_x86::FEAT_POPCNT,
+    );
+    assert_eq!(out, Outcome::Exit(16));
+    // 既定モデル（Nehalem）でも POPCNT が通る。
+    let (out2, _) = run32(prog, 100);
+    assert_eq!(out2, Outcome::Exit(16));
+}
+
+#[test]
+fn run_a1_crc32() {
+    // F2 0F 38 F1 C2 = crc32 eax,edx。eax=0xFFFFFFFF, edx=0x44332211
+    // → CRC32C(b"\x11\x22\x33\x44", 0xFFFFFFFF) = 0xDFDA361D。
+    let prog: &[u8] = &[
+        0xBA, 0x11, 0x22, 0x33, 0x44, // mov edx,0x44332211
+        0xB8, 0xFF, 0xFF, 0xFF, 0xFF, // mov eax,0xFFFFFFFF
+        0xF2, 0x0F, 0x38, 0xF1, 0xC2, // crc32 eax,edx
+        0x89, 0xC3, // mov ebx,eax
+        0xB8, 0x01, 0x00, 0x00, 0x00, 0xCD, 0x80,
+    ];
+    let (out, _) = run32(prog, 100);
+    assert_eq!(out, Outcome::Exit(0xDFDA_361D));
+}
+
+#[test]
+fn run_a1_crc32_byte() {
+    // F2 0F 38 F0 C2 = crc32 eax,dl。eax=0, dl=0x42 → 0xA0406D4B。
+    let prog: &[u8] = &[
+        0xB2, 0x42, // mov dl,0x42
+        0x31, 0xC0, // xor eax,eax
+        0xF2, 0x0F, 0x38, 0xF0, 0xC2, // crc32 eax,dl
+        0x89, 0xC3, // mov ebx,eax
+        0xB8, 0x01, 0x00, 0x00, 0x00, 0xCD, 0x80,
+    ];
+    let (out, _) = run32(prog, 100);
+    assert_eq!(out, Outcome::Exit(0xA040_6D4B));
+}
+
+#[test]
+fn run_a1_ldmxcsr_stmxcsr() {
+    // stmxcsr [0x2040]; ldmxcsr [0x2044]。MXCSR=0x1F80 を往復する。
+    let prog: &[u8] = &[
+        0x0F, 0xAE, 0x1D, 0x40, 0x20, 0x00, 0x00, // stmxcsr [0x2040]
+        0x8B, 0x1D, 0x40, 0x20, 0x00, 0x00, // mov ebx,[0x2040]
+        0xC7, 0x05, 0x44, 0x20, 0x00, 0x00, 0x55, 0xAA, 0x00,
+        0x00, // mov dword [0x2044],0xAA55
+        0x0F, 0xAE, 0x15, 0x44, 0x20, 0x00, 0x00, // ldmxcsr [0x2044]
+        0x0F, 0xAE, 0x1D, 0x48, 0x20, 0x00, 0x00, // stmxcsr [0x2048]
+        0x8B, 0x0D, 0x48, 0x20, 0x00, 0x00, // mov ecx,[0x2048]
+        0x09, 0xCB, // or ebx,ecx
+        0xB8, 0x01, 0x00, 0x00, 0x00, 0xCD, 0x80,
+    ];
+    let (out, env) = run32(prog, 100);
+    // stmxcsr は MXCSR=0（テスト env は既定 0）→ ebx=0。
+    // ldmxcsr で 0xAA55 を読み、再度 stmxcsr → ecx=0xAA55。
+    assert_eq!(out, Outcome::Exit(0xAA55));
+    let _ = env;
+}
+
+#[test]
+fn run_a1_cmpxchg8b() {
+    // cmpxchg8b [0x2040]: EDX:EAX=0:0、メモリ=1:2 → 不一致 →
+    // EDX:EAX にメモリ値、ZF=0。ebx=edx|eax=3。
+    let mut prog = vec![
+        0x31, 0xC0, // xor eax,eax
+        0x31, 0xD2, // xor edx,edx
+        0x31, 0xC9, // xor ecx,ecx
+        0x31, 0xDB, // xor ebx,ebx
+        0x0F, 0xC7, 0x0D, 0x40, 0x20, 0x00, 0x00, // cmpxchg8b [0x2040]
+        0x09, 0xD0, // or eax,edx
+        0x89, 0xC3, // mov ebx,eax
+        0xB8, 0x01, 0x00, 0x00, 0x00, 0xCD, 0x80,
+    ];
+    prog.resize(0x40, 0x90);
+    prog.extend_from_slice(&2u32.to_le_bytes());
+    prog.extend_from_slice(&1u32.to_le_bytes());
+    // データは 0x1040 に置くが、参照先は 0x2040 — マップ済みの
+    // 0x2000 ページを使うようアドレスを直す。
+    let _ = prog;
+    // プログラム側のデータ領域は使わないので別途書き込む。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 4, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.mem.write(VirtAddr(0x1000), &prog).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2040), &2u32.to_le_bytes())
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2044), &1u32.to_le_bytes())
+        .unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    let mut sys = ExitOne;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, false);
+    // EDX:EAX <- 1:2 → eax|edx = 3。
+    assert_eq!(out, Outcome::Exit(3));
+    // メモリは変わらない（不一致なので書き戻しは同値）。
+    let mut got = [0u8; 8];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x2040),
+            &mut got,
+            polyisa_mem::Access {
+                endian: polyisa_mem::Endian::Le,
+                align: polyisa_mem::Align::Unaligned,
+                kind: polyisa_mem::AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(u64::from_le_bytes(got), (1u64 << 32) | 2);
+}
+
+#[test]
+fn run_a1_haddps() {
+    // haddps xmm0,xmm1: [1+2, 3+4, 5+6, 7+8] → lane0=3.0f。
+    let mut prog = vec![
+        0xF3, 0x0F, 0x6F, 0x05, 0x40, 0x10, 0x00, 0x00, // movdqu xmm0,[0x1040]
+        0xF3, 0x0F, 0x6F, 0x0D, 0x50, 0x10, 0x00, 0x00, // movdqu xmm1,[0x1050]
+        0xF2, 0x0F, 0x7C, 0xC1, // haddps xmm0,xmm1
+        0x66, 0x0F, 0x3A, 0x16, 0xC3, 0x00, // pextrd ebx,xmm0,0
+        0xB8, 0x01, 0x00, 0x00, 0x00, 0xCD, 0x80,
+    ];
+    prog.resize(0x40, 0x90);
+    for f in [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0] {
+        prog.extend_from_slice(&f.to_le_bytes());
+    }
+    let (out, _) = run32(&prog, 100);
+    assert_eq!(out, Outcome::Exit(0x4040_0000)); // 3.0f
+}
+
+#[test]
+fn run_a1_roundps() {
+    // roundps xmm0,xmm0,1 (round down): [-1.5, 1.5]→[-2.0, 1.0]。
+    // lane0 = -2.0f = 0xC0000000、lane1 = 1.0f = 0x3F800000 → xor 検査。
+    let mut prog = vec![
+        0xF3, 0x0F, 0x6F, 0x05, 0x40, 0x10, 0x00, 0x00, // movdqu xmm0,[0x1040]
+        0x66, 0x0F, 0x3A, 0x08, 0xC0, 0x01, // roundps xmm0,xmm0,1
+        0x66, 0x0F, 0x3A, 0x16, 0xC3, 0x00, // pextrd ebx,xmm0,0
+        0x66, 0x0F, 0x3A, 0x16, 0xC1, 0x01, // pextrd ecx,xmm0,1
+        0x8B, 0xD9, // mov ebx,ecx
+        0xB8, 0x01, 0x00, 0x00, 0x00, 0xCD, 0x80,
+    ];
+    prog.resize(0x40, 0x90);
+    for f in [-1.5f32, 1.5, 0.0, 0.0] {
+        prog.extend_from_slice(&f.to_le_bytes());
+    }
+    let (out, _) = run32(&prog, 100);
+    assert_eq!(out, Outcome::Exit(0x3F80_0000)); // lane1 = 1.0f
+}
+
+#[test]
+fn run_a1_dpps() {
+    // dpps xmm0,xmm1,0xFF: 全レーンの積和 → 1+2+3+4 = 10.0f。
+    let mut prog = vec![
+        0xF3, 0x0F, 0x6F, 0x05, 0x40, 0x10, 0x00, 0x00, // movdqu xmm0,[0x1040]
+        0xF3, 0x0F, 0x6F, 0x0D, 0x50, 0x10, 0x00, 0x00, // movdqu xmm1,[0x1050]
+        0x66, 0x0F, 0x3A, 0x40, 0xC1, 0xFF, // dpps xmm0,xmm1,0xFF
+        0x66, 0x0F, 0x3A, 0x16, 0xC3, 0x00, // pextrd ebx,xmm0,0
+        0xB8, 0x01, 0x00, 0x00, 0x00, 0xCD, 0x80,
+    ];
+    prog.resize(0x40, 0x90);
+    for f in [1.0f32, 2.0, 3.0, 4.0, 1.0, 1.0, 1.0, 1.0] {
+        prog.extend_from_slice(&f.to_le_bytes());
+    }
+    let (out, _) = run32(&prog, 100);
+    assert_eq!(out, Outcome::Exit(0x4120_0000)); // 10.0f
+}
+
+#[test]
+fn run_a1_pshufb_mm() {
+    // pshufb mm0,mm1: 逆順シャッフル → movq [0x2040],mm0 → mov ebx,[0x2040]。
+    let mut prog = vec![
+        0x0F, 0x6F, 0x05, 0x40, 0x10, 0x00, 0x00, // movq mm0,[0x1040]
+        0x0F, 0x6F, 0x0D, 0x48, 0x10, 0x00, 0x00, // movq mm1,[0x1048]
+        0x0F, 0x38, 0x00, 0xC1, // pshufb mm0,mm1
+        0x0F, 0x7F, 0x05, 0x40, 0x20, 0x00, 0x00, // movq [0x2040],mm0
+        0x8B, 0x1D, 0x40, 0x20, 0x00, 0x00, // mov ebx,[0x2040]
+        0xB8, 0x01, 0x00, 0x00, 0x00, 0xCD, 0x80,
+    ];
+    prog.resize(0x40, 0x90);
+    // mm0 = [0,1,2,3,4,5,6,7]、制御 = [7,6,5,4,3,2,1,0] → 逆順。
+    prog.extend_from_slice(&[0, 1, 2, 3, 4, 5, 6, 7]);
+    prog.extend_from_slice(&[7, 6, 5, 4, 3, 2, 1, 0]);
+    let (out, _) = run32(&prog, 100);
+    // [7,6,5,4,...] → 下位 32 ビット = 0x04050607。
+    assert_eq!(out, Outcome::Exit(0x0405_0607));
+}
+
+#[test]
+fn run_a1_fences_nop() {
+    // SFENCE/MFENCE/LFENCE/CLFLUSH は意味論的に nop。
+    let prog: &[u8] = &[
+        0x0F, 0xAE, 0xF8, // sfence
+        0x0F, 0xAE, 0xF0, // mfence
+        0x0F, 0xAE, 0xE8, // lfence
+        0x0F, 0xAE, 0x3D, 0x40, 0x20, 0x00, 0x00, // clflush [0x2040]
+        0xBB, 0x07, 0x00, 0x00, 0x00, // mov ebx,7
+        0xB8, 0x01, 0x00, 0x00, 0x00, 0xCD, 0x80,
+    ];
+    let (out, _) = run32(prog, 100);
+    assert_eq!(out, Outcome::Exit(7));
+}
+
+#[test]
+fn run_a1_pcmpistri() {
+    // pcmpistri xmm0,xmm1,0x00 (equal any, implicit len)。
+    // xmm0="AB" (len2)、xmm1="ZB" (len2) → c[0]='Z'∉{A,B}=0、c[1]='B'∈=1
+    // → IntRes=0b10 → ECX=1。
+    let mut prog = vec![
+        0xF3, 0x0F, 0x6F, 0x05, 0x40, 0x10, 0x00, 0x00, // movdqu xmm0,[0x1040]
+        0xF3, 0x0F, 0x6F, 0x0D, 0x50, 0x10, 0x00, 0x00, // movdqu xmm1,[0x1050]
+        0x66, 0x0F, 0x3A, 0x63, 0xC1, 0x00, // pcmpistri xmm0,xmm1,0
+        0x89, 0xCB, // mov ebx,ecx
+        0xB8, 0x01, 0x00, 0x00, 0x00, 0xCD, 0x80,
+    ];
+    prog.resize(0x40, 0x90);
+    let mut a = vec![b'A', b'B'];
+    a.resize(16, 0);
+    let mut c = vec![b'Z', b'B'];
+    c.resize(16, 0);
+    prog.extend_from_slice(&a);
+    prog.extend_from_slice(&c);
+    let (out, _) = run32(&prog, 100);
+    assert_eq!(out, Outcome::Exit(1));
+}
+
+#[test]
+fn run_a1_phminposuw() {
+    // phminposuw xmm0,xmm1: [5,3,9,1,7,2,8,4] → min=1 at index 3
+    // → lane0 = 1 | 3<<16。
+    let mut prog = vec![
+        0xF3, 0x0F, 0x6F, 0x05, 0x40, 0x10, 0x00, 0x00, // movdqu xmm0,[0x1040]
+        0x66, 0x0F, 0x38, 0x41, 0x05, 0x50, 0x10, 0x00, 0x00, // phminposuw xmm0,[0x1050]
+        0x66, 0x0F, 0x3A, 0x16, 0xC3, 0x00, // pextrd ebx,xmm0,0
+        0xB8, 0x01, 0x00, 0x00, 0x00, 0xCD, 0x80,
+    ];
+    prog.resize(0x40, 0x90);
+    prog.extend_from_slice(&[0u8; 16]); // xmm0 の初期値（未使用）
+    for w in [5u16, 3, 9, 1, 7, 2, 8, 4] {
+        prog.extend_from_slice(&w.to_le_bytes());
+    }
+    prog.resize(0x50 + 16, 0x90);
+    let (out, _) = run32(&prog, 100);
+    assert_eq!(out, Outcome::Exit(0x0003_0001));
+}
+
+#[test]
+fn run_a1_pcmpistri_equal_ordered() {
+    // pcmpistri xmm0,xmm1,0x0C = equal ordered。SDM では第1被演算子
+    // が needle、第2が haystack。needle=xmm0"BC"、haystack=xmm1"ABC"
+    // → index 1 に一致 → ECX=1。
+    let mut prog = vec![
+        0xF3, 0x0F, 0x6F, 0x05, 0x40, 0x10, 0x00, 0x00, // movdqu xmm0,[0x1040]
+        0xF3, 0x0F, 0x6F, 0x0D, 0x50, 0x10, 0x00, 0x00, // movdqu xmm1,[0x1050]
+        0x66, 0x0F, 0x3A, 0x63, 0xC1, 0x0C, // pcmpistri xmm0,xmm1,0x0C
+        0x89, 0xCB, // mov ebx,ecx
+        0xB8, 0x01, 0x00, 0x00, 0x00, 0xCD, 0x80,
+    ];
+    prog.resize(0x40, 0x90);
+    let mut needle = vec![b'B', b'C'];
+    needle.resize(16, 0);
+    let mut haystack = vec![b'A', b'B', b'C'];
+    haystack.resize(16, 0);
+    prog.extend_from_slice(&needle);
+    prog.extend_from_slice(&haystack);
+    let (out, _) = run32(&prog, 100);
+    assert_eq!(out, Outcome::Exit(1));
+}
+
+#[test]
+fn run_a1_pcmpestri_explicit_len() {
+    // pcmpestri xmm0,xmm1,0x0C: explicit length（EAX=needle、EDX=haystack、
+    // 符号付き絶対値）。EAX=-2→2、EDX=3。needle"BC"がhaystack"ABC"の
+    // index 1 に一致 → ECX=1。
+    let mut prog = vec![
+        0xF3, 0x0F, 0x6F, 0x05, 0x50, 0x10, 0x00, 0x00, // movdqu xmm0,[0x1050]
+        0xF3, 0x0F, 0x6F, 0x0D, 0x60, 0x10, 0x00, 0x00, // movdqu xmm1,[0x1060]
+        0xB8, 0xFE, 0xFF, 0xFF, 0xFF, // mov eax,-2
+        0xBA, 0x03, 0x00, 0x00, 0x00, // mov edx,3
+        0x66, 0x0F, 0x3A, 0x61, 0xC1, 0x0C, // pcmpestri xmm0,xmm1,0x0C
+        0x89, 0xCB, // mov ebx,ecx
+        0xB8, 0x01, 0x00, 0x00, 0x00, 0xCD, 0x80,
+    ];
+    prog.resize(0x50, 0x90);
+    // レジスタ内容は明示長に関係なく任意でよい（比較は長で制限される）。
+    let mut needle = vec![b'B', b'C', b'X'];
+    needle.resize(16, 0xAA);
+    let mut haystack = vec![b'A', b'B', b'C'];
+    haystack.resize(16, 0xBB);
+    prog.extend_from_slice(&needle);
+    prog.extend_from_slice(&haystack);
+    let (out, _) = run32(&prog, 100);
+    assert_eq!(out, Outcome::Exit(1));
+}
+
+#[test]
+fn run_a1_mpsadbw_imm() {
+    // mpsadbw xmm0,xmm1,0x07: c のブロック3、dst の窓開始 1。
+    // c[12..16]=[10,20,30,40]、a[4..12]=[1,2,3,4,5,6,7,8]。
+    // lane0 = |1-10|+...+|4-40| = 90、lane1 = |2-10|+...+|5-40| = 86。
+    // pextrd は u16 2 レーンを返す → 90 | 86<<16。
+    let mut prog = vec![
+        0xF3, 0x0F, 0x6F, 0x05, 0x40, 0x10, 0x00, 0x00, // movdqu xmm0,[0x1040]
+        0xF3, 0x0F, 0x6F, 0x0D, 0x50, 0x10, 0x00, 0x00, // movdqu xmm1,[0x1050]
+        0x66, 0x0F, 0x3A, 0x42, 0xC1, 0x07, // mpsadbw xmm0,xmm1,7
+        0x66, 0x0F, 0x3A, 0x16, 0xC3, 0x00, // pextrd ebx,xmm0,0
+        0xB8, 0x01, 0x00, 0x00, 0x00, 0xCD, 0x80,
+    ];
+    prog.resize(0x40, 0x90);
+    let mut a = vec![0u8; 16];
+    for (i, b) in a.iter_mut().enumerate().skip(4).take(8) {
+        *b = (i - 3) as u8; // 1..8 at index 4..12
+    }
+    let mut c = vec![0u8; 16];
+    for (i, b) in c.iter_mut().enumerate().skip(12) {
+        *b = ((i - 11) * 10) as u8; // 10,20,30,40 at index 12..16
+    }
+    prog.extend_from_slice(&a);
+    prog.extend_from_slice(&c);
+    let (out, _) = run32(&prog, 100);
+    assert_eq!(out, Outcome::Exit(90 | (86 << 16)));
+}
+
+#[test]
+fn run_a1_pabs_mm() {
+    // pabsd mm0,mm1: src の絶対値。dst≠src を確認。
+    // mm1=[-3,5] → mm0=[3,5]。
+    let mut prog = vec![
+        0x0F, 0x6F, 0x0D, 0x40, 0x10, 0x00, 0x00, // movq mm1,[0x1040]
+        0x0F, 0x38, 0x1E, 0xC1, // pabsd mm0,mm1
+        0x0F, 0x7F, 0x05, 0x40, 0x20, 0x00, 0x00, // movq [0x2040],mm0
+        0x8B, 0x1D, 0x40, 0x20, 0x00, 0x00, // mov ebx,[0x2040]
+        0xB8, 0x01, 0x00, 0x00, 0x00, 0xCD, 0x80,
+    ];
+    prog.resize(0x40, 0x90);
+    prog.extend_from_slice(&(-3i32).to_le_bytes());
+    prog.extend_from_slice(&5i32.to_le_bytes());
+    let (out, _) = run32(&prog, 100);
+    assert_eq!(out, Outcome::Exit(3));
 }

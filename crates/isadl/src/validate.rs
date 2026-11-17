@@ -154,6 +154,13 @@ pub fn validate(model: &Model) -> Report {
         for item in &map.items {
             if let crate::model::MapItem::Insn(_, mi) = item {
                 check_when(&mi.when, &mi.name, &mut errors);
+                // `group_mod` はグループ項目でのみ意味を持つ。
+                if mi.group.is_none() && mi.group_mod.is_some() {
+                    errors.push(ValidationError::BadField {
+                        format: "map-insn".to_string(),
+                        field: format!("{}: group_mod には group が要る", mi.name),
+                    });
+                }
             }
         }
     }
@@ -365,6 +372,12 @@ fn validate_maps(model: &Model, timing: &BTreeSet<&str>, errors: &mut Vec<Valida
         for (i, (ba, a)) in insns.iter().enumerate() {
             for (bb, b) in insns.iter().skip(i + 1) {
                 if ba != bb || a.group != b.group || pfx_disjoint(a.pfx, b.pfx) {
+                    continue;
+                }
+                // `group_mod` が mod で排他なら同じ modrm を選ばない。
+                if let (Some(x), Some(y)) = (a.group_mod, b.group_mod)
+                    && x != y
+                {
                     continue;
                 }
                 if !a.when.maybe_both_true(&b.when) {

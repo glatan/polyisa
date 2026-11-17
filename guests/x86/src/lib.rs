@@ -70,6 +70,9 @@ pub struct CpuState {
     /// (EAX,EBX,ECX,EDX) を持つ。実行開始時に `cpuid::derive` の結果を
     /// 書き込む。初期値の 0 は「CPUID 未導出」を表す。
     pub cpuid: [[u32; 4]; 6],
+    /// SSE の制御・状態レジスタ（LDMXCSR/STMXCSR が読み書きする）。
+    /// 実行開始時に 0x1F80（例外全マスク・RNE）へ初期化する。
+    pub mxcsr: u32,
 }
 
 #[cfg(test)]
@@ -102,12 +105,15 @@ mod tests {
         assert_eq!(core::mem::offset_of!(CpuState, st_sig), 416);
         assert_eq!(core::mem::offset_of!(CpuState, fs_base), 480);
         assert_eq!(core::mem::offset_of!(CpuState, gs_base), 488);
+        // mxcsr は構造体の末尾（sregs 12 + fsw 2 + cpuid 96 を
+        // gs_base 以降に足した 606 を 8 境界へ揃えた位置）。
+        assert_eq!(core::mem::offset_of!(CpuState, mxcsr), 608);
     }
 
     #[test]
     fn insn_count() {
         // 段階4の x86 最小 853 件にオペコード表の記述を足した件数。
-        assert_eq!(INSNS.len(), 1546);
+        assert_eq!(INSNS.len(), 1595);
     }
 
     #[test]

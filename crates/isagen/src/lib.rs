@@ -734,7 +734,7 @@ fn gen_map_decoder(model: &Model) -> Result<String, GenError> {
             };
             if !grouped.is_empty() {
                 s.push_str(
-                    "            let g = (*bytes.get(*i)? >> 3) & 7;\n            match g {\n",
+                    "            let m = *bytes.get(*i)?;\n            let g = (m >> 3) & 7;\n            match g {\n",
                 );
                 for g in &grouped {
                     s.push_str(&format!("                {g} => {{\n"));
@@ -844,10 +844,16 @@ fn emit_map_candidate(
         PfxSel::PF3 => "d.rep == 0xF3".to_string(),
     };
     let guard = when_guard_flags(&mi.when, flag_exprs)?;
-    let cond = if guard.is_empty() {
+    let mut cond = if guard.is_empty() {
         pfx
     } else {
         format!("({pfx}) && ({guard})")
+    };
+    // グループ項目の mod 選択（`m` はグループ生成部が定義済み）。
+    cond = match mi.group_mod {
+        Some(true) => format!("(m >> 6) == 3 && ({cond})"),
+        Some(false) => format!("(m >> 6) != 3 && ({cond})"),
+        None => cond,
     };
     let ops = mi.ops.iter().map(opk_code).collect::<Vec<_>>().join(", ");
     let group = mi.group.is_some();

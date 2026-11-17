@@ -317,6 +317,11 @@ pub fn build_model() -> polyisa_isadl::Model {
         // RDSSPQ r64 (F3 REX.W 0F 1E /1)。CETシャドースタック未実装のためNOP扱い.
         // F3/REX.W は剥がし済みのため 0F 1E C8 の3Bで受ける。
         ("rdsspq", "F1", "00001111 00011110 11001000", "rdsspq", "system"),
+        // RDTSCP (0F 01 F9)。RDTSC + ECX <- TSC_AUX（0 固定）。
+        ("rdtscp", "F1", "00001111 00000001 11111001", "rdtscp", "system"),
+        // MONITOR/MWAIT (0F 01 C8/C9)。単スレッド実行なので NOP 扱い。
+        ("monitor", "F1", "00001111 00000001 11001000", "monitor", "system"),
+        ("mwait", "F1", "00001111 00000001 11001001", "mwait", "system"),
         ("nopl", "F1", "00001111 00011111 00000000", "nopl", "alu"),
         // NOPL [base+disp8] (0F 1F mod=01)。何もしない.
         ("nopl_mem8", "F1", "00001111 00011111 01...... ........", "nopl [r/m+disp8]", "alu"),

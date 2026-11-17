@@ -2657,6 +2657,7 @@ fn dispatch_map<B: Backend>(
     sseg: u64,
     es: u64,
     mode: u8,
+    feats: u64,
 ) -> Result<bool, B::Exit> {
     let m64 = mode == 64;
     let sa = mode;
@@ -3351,6 +3352,27 @@ fn dispatch_map<B: Backend>(
         Insn::EnterIwIb => sem_ea::enter(b, w, d.imm, d.imm2, sa, sseg),
         Insn::Xlat => sem_ea::xlat(b, d, seg),
         Insn::Rdtsc => sem_ea::rdtsc(b),
+        Insn::PopcntGvEv => sem_ea::popcnt(b, w, reg, d, &ea),
+        Insn::Cmpxchg8bMq => {
+            // REX.W 形は CMPXCHG16B で `cx16` が要る。デコードは
+            // `cx8` で通ったが、ワイド形の機能旗はここで検査する。
+            if d.rex & 8 != 0 && feats & polyisa_guest_x86::FEAT_CX16 == 0 {
+                return sem_ea::trap(b, eip, 0x06).map(|_| true);
+            }
+            sem_ea::cmpxchg_m(b, d.rex & 8 != 0, d, &ea)
+        }
+        // 0F AE 群。fence/clflush は機能シミュレーション上は無意味論。
+        Insn::LdmxcsrMd => sem_ea::ldmxcsr(b, &ea),
+        Insn::StmxcsrMd => sem_ea::stmxcsr(b, &ea),
+        Insn::Lfence | Insn::Mfence | Insn::ClflushMb | Insn::Sfence => sem_ea::mem_hint(b),
+        // SSE3。
+        Insn::HaddpsXvWv => sem_ea::phaddsub_f(b, false, 32, d, &ea),
+        Insn::HaddpdXvWv => sem_ea::phaddsub_f(b, false, 64, d, &ea),
+        Insn::HsubpsXvWv => sem_ea::phaddsub_f(b, true, 32, d, &ea),
+        Insn::HsubpdXvWv => sem_ea::phaddsub_f(b, true, 64, d, &ea),
+        Insn::AddsubpsXvWv => sem_ea::addsub(b, 32, d, &ea),
+        Insn::AddsubpdXvWv => sem_ea::addsub(b, 64, d, &ea),
+        Insn::LddquXvMv => sem_ea::mov_x_w(b, d, &ea),
         Insn::Fwait => sem_ea::nop(b),
         Insn::MovsB => sem_ea::str_op(b, sem_ea::Str::Movs, 8, d, eip, seg, es),
         Insn::MovsV => sem_ea::str_op(b, sem_ea::Str::Movs, w, d, eip, seg, es),
@@ -3840,6 +3862,26 @@ fn dispatch_map<B: Backend>(
         Insn::MovntdqaXvWv => sem_ea::mov_x_w(b, d, &ea),
         Insn::MovbeGvMv => sem_ea::movbe_ld(b, w, reg, d, &ea),
         Insn::MovbeMvGv => sem_ea::movbe_st(b, w, reg, d, &ea),
+        Insn::PblendvbXvWv => sem_ea::pblendvb(b, d, &ea),
+        Insn::PhminposuwXvWv => sem_ea::phminposuw(b, d, &ea),
+        Insn::Crc32GvEb => sem_ea::crc32(b, 8, d, &ea),
+        Insn::Crc32GvEv => sem_ea::crc32(b, u32::from(w), d, &ea),
+        // SSSE3 の MMX 形。
+        Insn::PshufbPvQv => sem_ea::pshufb64(b, d, &ea),
+        Insn::PhaddwPvQv => sem_ea::phaddsub64::<B, W16>(b, false, false, d, &ea),
+        Insn::PhadddPvQv => sem_ea::phaddsub64::<B, W32>(b, false, false, d, &ea),
+        Insn::PhaddswPvQv => sem_ea::phaddsub64::<B, W16>(b, false, true, d, &ea),
+        Insn::PhsubwPvQv => sem_ea::phaddsub64::<B, W16>(b, true, false, d, &ea),
+        Insn::PhsubdPvQv => sem_ea::phaddsub64::<B, W32>(b, true, false, d, &ea),
+        Insn::PhsubswPvQv => sem_ea::phaddsub64::<B, W16>(b, true, true, d, &ea),
+        Insn::PmaddubswPvQv => sem_ea::pmaddubsw64(b, d, &ea),
+        Insn::PmulhrswPvQv => sem_ea::pmulhrsw64(b, d, &ea),
+        Insn::PsignbPvQv => sem_ea::psign64::<B, W8>(b, d, &ea),
+        Insn::PsignwPvQv => sem_ea::psign64::<B, W16>(b, d, &ea),
+        Insn::PsigndPvQv => sem_ea::psign64::<B, W32>(b, d, &ea),
+        Insn::PabsbPvQv => sem_ea::pabs64::<B, W8>(b, d, &ea),
+        Insn::PabswPvQv => sem_ea::pabs64::<B, W16>(b, d, &ea),
+        Insn::PabsdPvQv => sem_ea::pabs64::<B, W32>(b, d, &ea),
         // ===== 0F 3A =====
         Insn::BlendpsXvWvIb => sem_ea::blendp(b, 32, d.imm as u8, d, &ea),
         Insn::BlendpdXvWvIb => sem_ea::blendp(b, 64, d.imm as u8, d, &ea),
@@ -3856,6 +3898,18 @@ fn dispatch_map<B: Backend>(
             sem_ea::pinsrx(b, if d.rex & 8 != 0 { 64 } else { 32 }, d.imm as u8, d, &ea)
         }
         Insn::InsertpsXvWvIb => sem_ea::insertps(b, d.imm as u8, d, &ea),
+        Insn::RoundpsXvWvIb => sem_ea::round_p(b, 32, d.imm as u8, d, &ea),
+        Insn::RoundpdXvWvIb => sem_ea::round_p(b, 64, d.imm as u8, d, &ea),
+        Insn::RoundssXvWvIb => sem_ea::round_s(b, 32, d.imm as u8, d, &ea),
+        Insn::RoundsdXvWvIb => sem_ea::round_s(b, 64, d.imm as u8, d, &ea),
+        Insn::DppsXvWvIb => sem_ea::dpp(b, 32, d.imm as u8, d, &ea),
+        Insn::DppdXvWvIb => sem_ea::dpp(b, 64, d.imm as u8, d, &ea),
+        Insn::MpsadbwXvWvIb => sem_ea::mpsadbw(b, d.imm as u8, d, &ea),
+        Insn::PalignrPvQvIb => sem_ea::palignr64(b, d.imm as u8, d, &ea),
+        Insn::PcmpestriXvWvIb => sem_ea::pxstr(b, true, true, d.imm as u8, d, &ea),
+        Insn::PcmpestrmXvWvIb => sem_ea::pxstr(b, true, false, d.imm as u8, d, &ea),
+        Insn::PcmpistriXvWvIb => sem_ea::pxstr(b, false, true, d.imm as u8, d, &ea),
+        Insn::PcmpistrmXvWvIb => sem_ea::pxstr(b, false, false, d.imm as u8, d, &ea),
         // ===== x87（D8-DF）。mod=11 は r/m フィールドを ST(i) として
         // 扱い、それ以外はメモリ形。ステータスワード依存の比較系は
         // 未モデルのため旧経路へフォールバックする。
@@ -4446,7 +4500,7 @@ fn step_x86_map(
         };
         (seg, 0, 0)
     };
-    let r = env.step(|b| dispatch_map(b, &md, eip, next_rip, seg, sseg, es, mode));
+    let r = env.step(|b| dispatch_map(b, &md, eip, next_rip, seg, sseg, es, mode, feats));
     if let Ok(false) = r {
         // 未移行。従来経路へ。
         return None;
@@ -4853,6 +4907,9 @@ fn dispatch<B: Backend>(
         Insn::Endbr64 => sem::nop(b),
         Insn::EnHlt => sem::nop(b),
         Insn::Rdsspq => sem::nop(b),
+        Insn::Rdtscp => polyisa_guest_x86::sem_ea::rdtscp(b),
+        // 単スレッドのエミュレーションでは監視と待機は意味を持たない。
+        Insn::Monitor | Insn::Mwait => sem::nop(b),
         Insn::Nopl => sem::nop(b),
         Insn::NoplMem8 => sem::nop(b),
         Insn::NoplMem32 => sem::nop(b),
@@ -12617,6 +12674,7 @@ fn run_image_x86_32_impl(
     env.backend.set(Gpr(4).state(), sp as u32);
     // x87 制御ワードの初期値（丸め最近接の 0x037F）。FNSTCW/FLDCW で使う.
     env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037F);
+    env.backend.set(polyisa_guest_x86::sem::mxcsr_ref(), 0x1F80);
     install_cpuid(&mut env, features, ident);
     match run_mode_ex(&mut env, ehdr.entry as u32, sys, 1_000_000, false, feats) {
         Outcome::Exit(code) => Ok(code),
@@ -12784,6 +12842,7 @@ fn run_image_x86_64_impl(
     polyisa_guest_x86::sem::write64(&mut env.backend, Gpr(4), sp);
     // x87 制御ワードの初期値（丸め最近接の 0x037F）。FNSTCW/FLDCW で使う.
     env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037F);
+    env.backend.set(polyisa_guest_x86::sem::mxcsr_ref(), 0x1F80);
     install_cpuid(&mut env, features, ident);
     let out = match jit {
         Some(jit) => run_mode_ex_jit(
@@ -13989,6 +14048,7 @@ mod tests {
         env.backend.mem.write(VirtAddr(sp), &img).unwrap();
         sem::write64(&mut env.backend, Gpr(4), sp);
         env.backend.set(sem::fcw_ref(), 0x037F);
+        env.backend.set(sem::mxcsr_ref(), 0x1F80);
         env.backend.set(sem::eip_ref(), ehdr.entry as u32);
         env.backend.addr_mask = u64::MAX;
         let _ = sys.on_block(&mut env);

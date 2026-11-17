@@ -15,7 +15,7 @@
 | pentium | i486 | vme、de、pse、tsc、msr、cx8、mce、apic、mmx |  |
 | pentium_iii | pentium_pro | fxsr、sse、sep、pat |  |
 | pentium_pro | pentium | cmov、pge、mca、pae、mtrr、pse36 |  |
-| x86_64 |  | cpuid、fpu、vme、de、pse、tsc、msr、pae、mce、cx8、apic、sep、mtrr、pge、mca、cmov、pat、pse36、clfsh、mmx、fxsr、sse、sse2、sse3、ssse3、sse4_1、sse4_2、movbe、syscall、nx、lm、lahf_lm、i486 |  |
+| x86_64 |  | cpuid、fpu、vme、de、pse、tsc、msr、pae、mce、cx8、apic、sep、mtrr、pge、mca、cmov、pat、pse36、clfsh、mmx、fxsr、sse、sse2、sse3、ssse3、sse4_1、sse4_2、cx16、popcnt、rdtscp、syscall、nx、lm、lahf_lm、i486 |  |
 | x86_64_v2 | x86_64 | cx16、popcnt |  |
 | x86_64_v3 | x86_64_v2 | avx、avx2、bmi1、bmi2、f16c、fma、lzcnt、movbe、osxsave |  |
 | x86_64_v4 | x86_64_v3 | avx512f、avx512bw、avx512cd、avx512dq、avx512vl |  |
@@ -166,6 +166,8 @@
 | addsd | addsd、addsd_xv_wv | sse2 | alu |
 | addsd | addsd_m64_sib、addsd_xmm_m64_mem32、addsd_xmm_m64_mem8、addsd_xmm_m64_memnd、addsd_xmm_m64_rip、addsd_xmm_m64_sibd | sse2 | load |
 | addss | addss_xv_wv | sse | alu |
+| addsubpd | addsubpd_xv_wv | sse3 | alu |
+| addsubps | addsubps_xv_wv | sse3 | alu |
 | and | and_eb_ib | !m64 | alu |
 | and | and_al_ib、and_ax_imm16、and_eax、and_eax_iz、and_eb_gb、and_eb_ib、and_ev_gv、and_ev_ib、and_ev_iz、and_gb_eb、and_gv_ev、and_m32_r32_mem8、and_m32_r32_memnd、and_m32_r32_sib、and_m32_r32_sibd、and_m8_r8、and_m8_r8_mem8、and_r8_m8_mem32、and_r_mem32、and_r_mem8、and_r_memnd、and_r_rip、and_r_sib、and_r_sibd、and_r_sibd32、and_rm16_imm、and_rm16_imm_memnd、and_rm32、and_rm32_imm、and_rm32_imm_mem32、and_rm32_imm_mem8、and_rm32_imm_memnd、and_rm32_imm_sibd、and_rm32_rip、and_rm8_imm、and_rm8_imm_mem32、and_rm8_imm_mem8、and_rm8_imm_sibd、and_rm8_imm_sibd32、and_rm_imm8、and_rm_imm8_mem32、and_rm_imm8_mem8、and_rm_imm8_memnd、and_rm_imm8_rip、and_rm_imm8_sib、and_rm_imm8_sibd | 真 | alu |
 | andnpd | andnpd_xv_wv | sse2 | alu |
@@ -192,6 +194,7 @@
 | cdq | en_cdq | 真 | alu |
 | clc | clc | 真 | alu |
 | cld | cld、en_cld | 真 | alu |
+| clflush | clflush_mb | clfsh | alu |
 | cli | cli | 真 | system |
 | cmc | cmc | 真 | alu |
 | cmova | cmova | cmov | alu |
@@ -227,9 +230,11 @@
 | cmpsd | cmpsd_xv_wv_ib | sse2 | alu |
 | cmpss | cmpss_xv_wv_ib | sse | alu |
 | cmpxchg | cmpxchg_eb_gb、cmpxchg_ev_gv、cmpxchg_r_mem32、cmpxchg_r_mem8、cmpxchg_r_memnd、cmpxchg_r_rip、cmpxchg_r_rm | i486 | alu |
+| cmpxchg8b | cmpxchg8b_mq | cx8 && (cx16 || !cx16) | alu |
 | comisd | comisd、comisd_xv_wv | sse2 | alu |
 | comiss | comiss_xv_wv | sse | alu |
 | cpuid | cpuid、en_cpuid | cpuid | system |
+| crc32 | crc32_gv_eb、crc32_gv_ev | sse4_2 | alu |
 | cvtpd2ps | cvtpd2ps_xv_wv | sse2 | alu |
 | cvtps2pd | cvtps2pd_xv_wv | sse2 | alu |
 | cvtsd2si | cvtsd2si_gv_wv | sse2 | alu |
@@ -256,6 +261,8 @@
 | divsd | divsd、divsd_xv_wv | sse2 | alu |
 | divsd | divsd_xmm_m64_rip | sse2 | load |
 | divss | divss_xv_wv | sse | alu |
+| dppd | dppd_xv_wv_ib | sse4_1 | alu |
+| dpps | dpps_xv_wv_ib | sse4_1 | alu |
 | emms | emms | mmx | alu |
 | endbr | endbr | 真 | alu |
 | endbr64 | endbr64 | 真 | alu |
@@ -283,7 +290,11 @@
 | fucomip | fucomip_st | 真 | alu |
 | fwait | fwait | 真 | system |
 | fxch | fxch_st、fxch_sti | 真 | alu |
+| haddpd | haddpd_xv_wv | sse3 | alu |
+| haddps | haddps_xv_wv | sse3 | alu |
 | hlt | en_hlt、hlt | 真 | system |
+| hsubpd | hsubpd_xv_wv | sse3 | alu |
+| hsubps | hsubps_xv_wv | sse3 | alu |
 | idiv | idiv_rm32 | 真 | div |
 | idiv | idiv_eb、idiv_ev | 真 | mult |
 | imul | imul_r_imm、imul_r_imm8、imul_r_imm8_mem32、imul_r_imm8_mem8、imul_r_imm8_rip、imul_r_imm8_sib、imul_r_imm8_sibd、imul_r_imm_mem8、imul_r_imm_rip、imul_r_imm_sib、imul_r_imm_sibd、imul_r_rm、imul_rm_mem8、imul_rm_sibd | 真 | alu |
@@ -319,10 +330,13 @@
 | jp | jp、jp_rel32 | 真 | jump |
 | js | js、js_rel32 | 真 | jump |
 | lahf | lahf | !m64 || lahf_lm | alu |
+| lddqu | lddqu_xv_mv | sse3 | load |
+| ldmxcsr | ldmxcsr_md | sse | load |
 | lds | lds_gv_mp | !m64 | load |
 | lea | lea_abs、lea_gv_m、lea_m32、lea_m8、lea_mnd、lea_sib、lea_sibabs、lea_sibd、lea_sibd32 | 真 | alu |
 | leave | en_leave、leave | 真 | alu |
 | les | les_gv_mp | !m64 | load |
+| lfence | lfence | sse2 | alu |
 | lods | lods_v | 真 | load |
 | lodsb | lods_b | 真 | load |
 | loop | jcxz_jb、loop、loop_jb、loope_jb、loopne_jb | 真 | jump |
@@ -331,10 +345,12 @@
 | maxps | maxps_xv_wv | sse | alu |
 | maxsd | maxsd_xv_wv | sse2 | alu |
 | maxss | maxss_xv_wv | sse | alu |
+| mfence | mfence | sse2 | alu |
 | minpd | minpd_xv_wv | sse2 | alu |
 | minps | minps_xv_wv | sse | alu |
 | minsd | minsd、minsd_xv_wv | sse2 | alu |
 | minss | minss_xv_wv | sse | alu |
+| monitor | monitor | monitor | system |
 | mov | movaps_xv_wv、movss_xv_wv、movups_xv_wv | sse | load |
 | mov | movaps_wv_xv、movss_wv_xv、movups_wv_xv | sse | store |
 | mov | movapd_xv_wv、movsd_xv_wv、movupd_xv_wv | sse2 | load |
@@ -384,12 +400,14 @@
 | movups | movups_load_mem32、movups_load_mem8、movups_load_memnd、movups_load_rip、movups_load_sib、movups_load_sibabs、movups_load_sibd、movups_load_sibd32、movups_load_xmm | sse | load |
 | movups | movups_store_mem32、movups_store_mem8、movups_store_memnd、movups_store_rip、movups_store_sib、movups_store_sibd、movups_store_sibd32、movups_store_xmm | sse | store |
 | movzx | movzx_gv_eb、movzx_gv_ew、movzx_r32_m16_mem32、movzx_r32_m16_mem8、movzx_r32_m16_memnd、movzx_r32_m16_rip、movzx_r32_m16_sib、movzx_r32_m16_sibabs、movzx_r32_m16_sibd、movzx_r32_m16_sibd32、movzx_r32_m8_mem32、movzx_r32_m8_mem8、movzx_r32_m8_memnd、movzx_r32_m8_rip、movzx_r32_m8_sib、movzx_r32_m8_sibd、movzx_r32_m8_sibd32、movzx_r32_r16、movzx_r32_r8 | 真 | load |
+| mpsadbw | mpsadbw_xv_wv_ib | sse4_1 | alu |
 | mul | mul_eb、mul_ev、mul_rm32、mul_rm32_rip、mul_rm32_sib | 真 | mult |
 | mulpd | mulpd_xv_wv | sse2 | alu |
 | mulps | mulps_xv_wv | sse | alu |
 | mulsd | mulsd、mulsd_xv_wv | sse2 | alu |
 | mulsd | mulsd_m64_sib、mulsd_xmm_m64_mem32、mulsd_xmm_m64_rip、mulsd_xmm_m64_sibd | sse2 | load |
 | mulss | mulss_xv_wv | sse | alu |
+| mwait | mwait | monitor | system |
 | neg | neg_rm32 | 真 | alu |
 | neg | neg_eb、neg_ev | 真 | mult |
 | nop | nop、nop_ev | 真 | alu |
@@ -402,8 +420,11 @@
 | orpd | orpd_xv_wv | sse2 | alu |
 | orps | orps_xv_wv | sse | alu |
 | out | out_dx_al、out_dx_ev、out_ib_al、out_ib_ev | 真 | system |
+| pabsb_pv_qv | pabsb_pv_qv | ssse3 | alu |
 | pabsb_xv_wv | pabsb_xv_wv | ssse3 | alu |
+| pabsd_pv_qv | pabsd_pv_qv | ssse3 | alu |
 | pabsd_xv_wv | pabsd_xv_wv | ssse3 | alu |
+| pabsw_pv_qv | pabsw_pv_qv | ssse3 | alu |
 | pabsw_xv_wv | pabsw_xv_wv | ssse3 | alu |
 | packssdw | packssdw_pv_qv | mmx | alu |
 | packsswb | packsswb_pv_qv | mmx | alu |
@@ -424,7 +445,7 @@
 | paddusw | paddusw_xv_wv | sse2 | alu |
 | paddw | paddw_pv_qv | mmx | alu |
 | paddw | paddw_xv_wv | sse2 | alu |
-| palignr | palignr_xv_wv_ib | ssse3 | alu |
+| palignr | palignr_pv_qv_ib、palignr_xv_wv_ib | ssse3 | alu |
 | pand | pand_pv_qv | mmx | alu |
 | pand | pand、pand_xv_wv | sse2 | alu |
 | pandn | pandn_pv_qv | mmx | alu |
@@ -433,6 +454,7 @@
 | pavgb | pavgb_xv_wv | sse2 | alu |
 | pavgw | pavgw_pv_qv | sse | alu |
 | pavgw | pavgw_xv_wv | sse2 | alu |
+| pblendvb_xv_wv | pblendvb_xv_wv | sse4_1 | alu |
 | pblendw | pblendw_xv_wv_ib | sse4_1 | alu |
 | pcmpeqb | pcmpeqb_pv_qv | mmx | alu |
 | pcmpeqb | pcmpeqb、pcmpeqb_xv_wv | sse2 | alu |
@@ -442,6 +464,8 @@
 | pcmpeqq_xv_wv | pcmpeqq_xv_wv | sse4_1 | alu |
 | pcmpeqw | pcmpeqw_pv_qv | mmx | alu |
 | pcmpeqw | pcmpeqw_xv_wv | sse2 | alu |
+| pcmpestri | pcmpestri_xv_wv_ib | sse4_2 | alu |
+| pcmpestrm | pcmpestrm_xv_wv_ib | sse4_2 | alu |
 | pcmpgtb | pcmpgtb_pv_qv | mmx | alu |
 | pcmpgtb | pcmpgtb、pcmpgtb_xv_wv | sse2 | alu |
 | pcmpgtd | pcmpgtd_pv_qv | mmx | alu |
@@ -449,21 +473,31 @@
 | pcmpgtq_xv_wv | pcmpgtq_xv_wv | sse4_2 | alu |
 | pcmpgtw | pcmpgtw_pv_qv | mmx | alu |
 | pcmpgtw | pcmpgtw_xv_wv | sse2 | alu |
+| pcmpistri | pcmpistri_xv_wv_ib | sse4_2 | alu |
+| pcmpistrm | pcmpistrm_xv_wv_ib | sse4_2 | alu |
 | pextrb | pextrb_eb_xv | sse4_1 | store |
 | pextrd | pextrd_ed_xv | sse4_1 | store |
 | pextrw | pextrw_gv_pv_ib | sse | alu |
 | pextrw | pextrw_gv_wv_ib | sse2 | alu |
 | pextrw | pextrw_ew_xv | sse4_1 | store |
+| phaddd_pv_qv | phaddd_pv_qv | ssse3 | alu |
 | phaddd_xv_wv | phaddd_xv_wv | ssse3 | alu |
+| phaddsw_pv_qv | phaddsw_pv_qv | ssse3 | alu |
 | phaddsw_xv_wv | phaddsw_xv_wv | ssse3 | alu |
+| phaddw_pv_qv | phaddw_pv_qv | ssse3 | alu |
 | phaddw_xv_wv | phaddw_xv_wv | ssse3 | alu |
+| phminposuw_xv_wv | phminposuw_xv_wv | sse4_1 | alu |
+| phsubd_pv_qv | phsubd_pv_qv | ssse3 | alu |
 | phsubd_xv_wv | phsubd_xv_wv | ssse3 | alu |
+| phsubsw_pv_qv | phsubsw_pv_qv | ssse3 | alu |
 | phsubsw_xv_wv | phsubsw_xv_wv | ssse3 | alu |
+| phsubw_pv_qv | phsubw_pv_qv | ssse3 | alu |
 | phsubw_xv_wv | phsubw_xv_wv | ssse3 | alu |
 | pinsrb | pinsrb_xv_eb_ib | sse4_1 | alu |
 | pinsrd | pinsrd_xv_ed_ib | sse4_1 | alu |
 | pinsrw | pinsrw_pv_ew_ib | sse | alu |
 | pinsrw | pinsrw_xv_ew_ib | sse2 | alu |
+| pmaddubsw_pv_qv | pmaddubsw_pv_qv | ssse3 | alu |
 | pmaddubsw_xv_wv | pmaddubsw_xv_wv | ssse3 | alu |
 | pmaddwd | pmaddwd_pv_qv | mmx | alu |
 | pmaxsb_xv_wv | pmaxsb_xv_wv | sse4_1 | alu |
@@ -499,6 +533,7 @@
 | pmovzxwd_xv_wv | pmovzxwd_xv_wv | sse4_1 | alu |
 | pmovzxwq_xv_wv | pmovzxwq_xv_wv | sse4_1 | alu |
 | pmuldq_xv_wv | pmuldq_xv_wv | sse4_1 | alu |
+| pmulhrsw_pv_qv | pmulhrsw_pv_qv | ssse3 | alu |
 | pmulhrsw_xv_wv | pmulhrsw_xv_wv | ssse3 | alu |
 | pmulhuw | pmulhuw_pv_qv | sse | alu |
 | pmulhw | pmulhw_pv_qv | mmx | alu |
@@ -509,18 +544,23 @@
 | pop | pop_ds、pop_es、pop_ss | !m64 | load |
 | pop | pop_eax、pop_ebp、pop_ebx、pop_ecx、pop_edi、pop_edx、pop_esi、pop_esp、pop_ev、pop_fs、pop_gs、pop_m64_mem8、pop_rv | 真 | load |
 | popa | popa | !m64 | load |
+| popcnt | popcnt_gv_ev | popcnt | alu |
 | popf | popf | 真 | load |
 | por | por_pv_qv | mmx | alu |
 | por | por、por_xv_wv | sse2 | alu |
 | por | por_mem32、por_mem8、por_memnd、por_sibd32 | sse2 | load |
 | psadbw | psadbw_pv_qv | sse | alu |
+| pshufb_pv_qv | pshufb_pv_qv | ssse3 | alu |
 | pshufb_xv_wv | pshufb_xv_wv | ssse3 | alu |
 | pshufd | pshufd、pshufd_xv_wv_ib | sse2 | alu |
 | pshufhw | pshufhw_xv_wv_ib | sse2 | alu |
 | pshuflw | pshuflw_xv_wv_ib | sse2 | alu |
 | pshufw | pshufw_pv_qv_ib | sse | alu |
+| psignb_pv_qv | psignb_pv_qv | ssse3 | alu |
 | psignb_xv_wv | psignb_xv_wv | ssse3 | alu |
+| psignd_pv_qv | psignd_pv_qv | ssse3 | alu |
 | psignd_xv_wv | psignd_xv_wv | ssse3 | alu |
+| psignw_pv_qv | psignw_pv_qv | ssse3 | alu |
 | psignw_xv_wv | psignw_xv_wv | ssse3 | alu |
 | pslld | pslld_pv_qv、pslld_qv_ib | mmx | alu |
 | pslld | pslld_wv_ib、pslld_xv_wv | sse2 | alu |
@@ -580,10 +620,15 @@
 | rcr | rcr_eb_1、rcr_eb_cl、rcr_eb_ib、rcr_ev_1、rcr_ev_cl、rcr_ev_ib | 真 | alu |
 | rdsspq | rdsspq | cet_ss | system |
 | rdtsc | rdtsc | tsc | system |
+| rdtscp | rdtscp | rdtscp | system |
 | ret | en_ret、ret、ret_imm、ret_iw | 真 | jump |
 | retf | retf、retf_iw | !m64 | jump |
 | rol | rol_eb_1、rol_eb_cl、rol_eb_ib、rol_ev_1、rol_ev_cl、rol_ev_ib、rol_rm32_1、rol_rm32_cl、rol_rm32_imm8 | 真 | alu |
 | ror | ror_eb_1、ror_eb_cl、ror_eb_ib、ror_ev_1、ror_ev_cl、ror_ev_ib、ror_rm32_1、ror_rm32_imm8 | 真 | alu |
+| roundpd | roundpd_xv_wv_ib | sse4_1 | alu |
+| roundps | roundps_xv_wv_ib | sse4_1 | alu |
+| roundsd | roundsd_xv_wv_ib | sse4_1 | alu |
+| roundss | roundss_xv_wv_ib | sse4_1 | alu |
 | sahf | sahf | !m64 || lahf_lm | alu |
 | salc | salc | !m64 | alu |
 | sar | sar_eb_1、sar_eb_cl、sar_eb_ib、sar_ev_1、sar_ev_cl、sar_ev_ib、sar_rm32_1、sar_rm32_cl、sar_rm32_imm8 | 真 | alu |
@@ -608,6 +653,7 @@
 | seto | seto | 真 | alu |
 | setp | setp | 真 | alu |
 | sets | sets | 真 | alu |
+| sfence | sfence | sse | alu |
 | shl | shl_eb_1、shl_eb_cl、shl_eb_ib、shl_ev_1、shl_ev_cl、shl_ev_ib、shl_m32_imm8_mem8、shl_m8_1_mem32、shl_rm32_1、shl_rm32_cl、shl_rm32_imm8 | 真 | alu |
 | shld | shld_ev_gv_cl、shld_ev_gv_ib、shld_r32_cl、shld_r32_imm8 | 真 | alu |
 | shr | shr_eb_1、shr_eb_cl、shr_eb_ib、shr_ev_1、shr_ev_cl、shr_ev_ib、shr_rm32_1、shr_rm32_cl、shr_rm32_imm8、shr_rm8_1、shr_rm8_imm8 | 真 | alu |
@@ -621,6 +667,7 @@
 | stc | stc | 真 | alu |
 | std | en_std、std | 真 | alu |
 | sti | sti | 真 | system |
+| stmxcsr | stmxcsr_md | sse | store |
 | stos | stos_v | 真 | store |
 | stosb | stos_b、stosb | 真 | store |
 | stosd | stosd | 真 | store |

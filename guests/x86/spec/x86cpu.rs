@@ -214,7 +214,8 @@ fn declare_models(m: &mut Model) {
         &[
             "cpuid", "fpu", "vme", "de", "pse", "tsc", "msr", "pae", "mce", "cx8", "apic", "sep",
             "mtrr", "pge", "mca", "cmov", "pat", "pse36", "clfsh", "mmx", "fxsr", "sse", "sse2",
-            "sse3", "ssse3", "sse4_1", "sse4_2", "movbe", "syscall", "nx", "lm", "lahf_lm", "i486",
+            "sse3", "ssse3", "sse4_1", "sse4_2", "cx16", "popcnt", "rdtscp", "syscall", "nx",
+            "lm", "lahf_lm", "i486",
         ],
         &[],
         // SSE4.2 のある最古の世代に合わせた Nehalem の署名。
@@ -474,7 +475,7 @@ fn named_gate(mn: &str) -> Option<&'static [&'static str]> {
         }
         // SSE4.1。
         "ptest" | "pmuldq" | "pmulld" | "pcmpeqq" | "movntdqa" | "packusdw" | "blendps"
-        | "blendpd" | "pblendw" | "pblendvb" | "pblendd" | "pextrb" | "pextrd" | "pextrq"
+        | "blendpd" | "pblendw" | "pblendvb" | "pextrb" | "pextrd" | "pextrq"
         | "extractps" | "pinsrb" | "pinsrd" | "pinsrq" | "insertps" | "dpps" | "dppd"
         | "roundps" | "roundpd" | "roundss" | "roundsd" | "mpsadbw" | "phminposuw" => {
             &["sse4_1"]
@@ -511,11 +512,15 @@ fn named_gate(mn: &str) -> Option<&'static [&'static str]> {
         "popcnt" => &["popcnt"],
         "movbe" => &["movbe"],
         "clflush" => &["clfsh"],
+        // MXCSR の読み書きは SSE 付随。
+        "ldmxcsr" | "stmxcsr" => &["sse"],
         // i486 で追加された命令（i386 との区別は i486 旗で表す）。
         "bswap" | "xadd" | "cmpxchg" => &["i486"],
-        // Pentium の CMPXCHG8B と x86-64 の CMPXCHG16B。
+        // Pentium の CMPXCHG8B。REX.W 形（CMPXCHG16B）は
+        // `cx16` が要るが、REX はデコード時の `when` で表せないので
+        // dispatch 側で検査する。`cx16` の参照は FEAT_CX16 定数を
+        // 生成させるための恒真述語として `apply_gates` で足す。
         "cmpxchg8b" => &["cx8"],
-        "cmpxchg16b" => &["cx16"],
         // CET 影響スタックのユーザ形。
         "rdsspq" | "rdsspd" | "incsspq" | "incsspd" | "wrssq" | "wrssd" | "wrussq"
         | "wrussd" | "rstorssp" | "saveprevssp" | "setssbsy" | "clrssbsy" => &["cet_ss"],
@@ -526,6 +531,7 @@ fn named_gate(mn: &str) -> Option<&'static [&'static str]> {
         "syscall" => &["syscall"],
         "sysenter" | "sysexit" => &["sep"],
         "rdtscp" => &["rdtscp"],
+        "monitor" | "mwait" => &["monitor"],
         "rdtsc" => &["tsc"],
         "rdmsr" | "wrmsr" => &["msr"],
         "emms" => &["mmx"],
@@ -659,6 +665,15 @@ fn apply_gates(m: &mut Model) {
                     Pred::True => gate,
                     existing => Pred::All(vec![existing.clone(), gate]),
                 };
+                if mi.name == "cmpxchg8b_mq" {
+                    // FEAT_CX16 定数を生成させる恒真参照（上記参照）。
+                    let cx16 = Pred::Flag("cx16".to_string());
+                    let taut = Pred::Any(vec![
+                        cx16.clone(),
+                        Pred::Not(Box::new(cx16)),
+                    ]);
+                    mi.when = Pred::All(vec![mi.when.clone(), taut]);
+                }
             }
         }
     }

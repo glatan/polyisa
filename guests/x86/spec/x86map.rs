@@ -27,6 +27,7 @@ fn mi(
         name: name.to_string(),
         ops: ops.to_vec(),
         group,
+        group_mod: None,
         pfx,
         when,
         syntax: syntax.to_string(),
@@ -42,6 +43,14 @@ fn n(name: &str, ops: &[OpKind], syntax: &str, timing: &str) -> MapInsn {
 /// グループ選択の命令項目。
 fn g(name: &str, group: u8, ops: &[OpKind], syntax: &str, timing: &str) -> MapInsn {
     mi(name, ops, Some(group), PfxSel::Any, Pred::True, syntax, timing)
+}
+
+/// グループ選択に mod 制約を付けた命令項目。`reg_form` が真なら
+/// mod=11（レジスタ形）のみ、偽なら mod!=11（メモリ形）のみに解読する。
+fn gm(name: &str, group: u8, reg_form: bool, ops: &[OpKind], syntax: &str, timing: &str) -> MapInsn {
+    let mut it = g(name, group, ops, syntax, timing);
+    it.group_mod = Some(reg_form);
+    it
 }
 
 /// 実行モードの述語を作る。
@@ -726,6 +735,18 @@ pub fn build_maps(m: &mut Model) {
             g("nop_ev", 0, &[Ea(V)], "nop {e}", "alu"),
         ),
         MapItem::Insn(0x31, n("rdtsc", &[], "rdtsc", "system")),
+        // 0F AE グループ。mod!=11 は MXCSR/CLFLUSH、mod=11 は fence。
+        // /0 /1 /4 は FXSAVE/FXRSTOR/XSAVE（C1 の範囲）なので未宣言。
+        MapItem::Insn(0xAE, gm("ldmxcsr_md", 2, false, &[Ea(D32)], "ldmxcsr {e}", "load")),
+        MapItem::Insn(0xAE, gm("stmxcsr_md", 3, false, &[Ea(D32)], "stmxcsr {e}", "store")),
+        MapItem::Insn(0xAE, gm("lfence", 5, true, &[], "lfence", "alu")),
+        MapItem::Insn(0xAE, gm("mfence", 6, true, &[], "mfence", "alu")),
+        MapItem::Insn(0xAE, gm("clflush_mb", 7, false, &[Ea(B8)], "clflush {e}", "alu")),
+        MapItem::Insn(0xAE, gm("sfence", 7, true, &[], "sfence", "alu")),
+        // POPCNT（F3 0F B8）。接頭辞なしは TZCNT/JMPE で別物。
+        MapItem::Insn(0xB8, mi("popcnt_gv_ev", &[Reg(V), Ea(V)], None, PfxSel::PF3, Pred::True, "popcnt {g}, {e}", "alu")),
+        // CMPXCHG8B/16B（0F C7 /1、メモリ形のみ。REX.W で 16 バイト）。
+        MapItem::Insn(0xC7, gm("cmpxchg8b_mq", 1, false, &[Ea(Q64)], "cmpxchg8b {e}", "alu")),
         MapItem::Insn(
             0xB0,
             n("cmpxchg_eb_gb", &[Ea(B8), Reg(B8)], "cmpxchg {e}, {g}", "alu"),
@@ -914,6 +935,24 @@ pub fn build_maps(m: &mut Model) {
             ));
         }
     }
+    // SSE3 の水平加減算と ADDSUB、LDDQU。
+    for (byte, mn, sel) in [
+        (0x7Cu8, "haddps", PfxSel::PF2),
+        (0x7C, "haddpd", PfxSel::P66),
+        (0x7D, "hsubps", PfxSel::PF2),
+        (0x7D, "hsubpd", PfxSel::P66),
+        (0xD0, "addsubps", PfxSel::PF2),
+        (0xD0, "addsubpd", PfxSel::P66),
+    ] {
+        m0f.push(MapItem::Insn(
+            byte,
+            mi(&format!("{mn}_xv_wv"), &[RegX, RmX], None, sel, Pred::True, "{op} {x}, {w}", "alu"),
+        ));
+    }
+    m0f.push(MapItem::Insn(
+        0xF0,
+        mi("lddqu_xv_mv", &[RegX, RmX], None, PfxSel::PF2, Pred::True, "lddqu {x}, {w}", "load"),
+    ));
     // パック論理（54-57）とパック整数の論理（DB, DF, EB, EF）。
     for (byte, mn, sel) in [
         (0x54u8, "andps", PfxSel::Plain),
@@ -1132,7 +1171,7 @@ pub fn build_maps(m: &mut Model) {
 }
 
 /// 0F 38 サブマップ（SSSE3/SSE4.1/MOVBE）。XMM 形は必須接頭辞 0x66。
-/// MMX 形（接頭辞なし）は XMM 状態しか持たない現段階では宣言しない。
+/// MMX 形（接頭辞なし）は st_sig 経由で x87 にエイリアスする。
 fn build_map_0f38(m: &mut Model) {
     use OpKind::*;
     use OpWidth::*;
@@ -1188,8 +1227,41 @@ fn build_map_0f38(m: &mut Model) {
     x(0x3E, "pmaxuw_xv_wv");
     x(0x3F, "pmaxud_xv_wv");
     x(0x40, "pmulld_xv_wv");
+    x(0x10, "pblendvb_xv_wv");
+    x(0x41, "phminposuw_xv_wv");
+    // CRC32（F2 0F38 F0/F1）。MOVBE と同バイトで接頭辞で分ける。
+    v.push(MapItem::Insn(
+        0xF0,
+        mi("crc32_gv_eb", &[Reg(V), Ea(B8)], None, PfxSel::PF2, Pred::True, "crc32 {g}, {e}", "alu"),
+    ));
+    v.push(MapItem::Insn(
+        0xF1,
+        mi("crc32_gv_ev", &[Reg(V), Ea(V)], None, PfxSel::PF2, Pred::True, "crc32 {g}, {e}", "alu"),
+    ));
+    // SSSE3 の MMX 形（接頭辞なし。mm は x87 仮数部のエイリアス）。
+    for (op, mn) in [
+        (0x00u8, "pshufb"),
+        (0x01, "phaddw"),
+        (0x02, "phaddd"),
+        (0x03, "phaddsw"),
+        (0x04, "pmaddubsw"),
+        (0x05, "phsubw"),
+        (0x06, "phsubd"),
+        (0x07, "phsubsw"),
+        (0x08, "psignb"),
+        (0x09, "psignw"),
+        (0x0A, "psignd"),
+        (0x0B, "pmulhrsw"),
+        (0x1C, "pabsb"),
+        (0x1D, "pabsw"),
+        (0x1E, "pabsd"),
+    ] {
+        v.push(MapItem::Insn(
+            op,
+            mi(&format!("{mn}_pv_qv"), &[RegM, RmM], None, PfxSel::Plain, Pred::True, "", "alu"),
+        ));
+    }
     // MOVBE。必須接頭辞はなく、0x66 は 16 ビット幅を選ぶ。
-    // F2 は CRC32 なので Plain/P66 のみ宣言し、F2 形は未対応に留める。
     for p in [PfxSel::Plain, PfxSel::P66] {
         v.push(MapItem::Insn(
             0xF0,
@@ -1212,10 +1284,16 @@ fn build_map_0f3a(m: &mut Model) {
     use OpWidth::*;
     let ib = Imm(B8);
     let items = vec![
+        MapItem::Insn(0x08, mi("roundps_xv_wv_ib", &[RegX, RmX, ib], None, PfxSel::P66, Pred::True, "roundps {x}, {w}, {i}", "alu")),
+        MapItem::Insn(0x09, mi("roundpd_xv_wv_ib", &[RegX, RmX, ib], None, PfxSel::P66, Pred::True, "roundpd {x}, {w}, {i}", "alu")),
+        MapItem::Insn(0x0A, mi("roundss_xv_wv_ib", &[RegX, RmX, ib], None, PfxSel::P66, Pred::True, "roundss {x}, {w}, {i}", "alu")),
+        MapItem::Insn(0x0B, mi("roundsd_xv_wv_ib", &[RegX, RmX, ib], None, PfxSel::P66, Pred::True, "roundsd {x}, {w}, {i}", "alu")),
         MapItem::Insn(0x0C, mi("blendps_xv_wv_ib", &[RegX, RmX, ib], None, PfxSel::P66, Pred::True, "blendps {x}, {w}, {i}", "alu")),
         MapItem::Insn(0x0D, mi("blendpd_xv_wv_ib", &[RegX, RmX, ib], None, PfxSel::P66, Pred::True, "blendpd {x}, {w}, {i}", "alu")),
         MapItem::Insn(0x0E, mi("pblendw_xv_wv_ib", &[RegX, RmX, ib], None, PfxSel::P66, Pred::True, "pblendw {x}, {w}, {i}", "alu")),
         MapItem::Insn(0x0F, mi("palignr_xv_wv_ib", &[RegX, RmX, ib], None, PfxSel::P66, Pred::True, "palignr {x}, {w}, {i}", "alu")),
+        // PALIGNR の MMX 形（接頭辞なし）。
+        MapItem::Insn(0x0F, mi("palignr_pv_qv_ib", &[RegM, RmM, ib], None, PfxSel::Plain, Pred::True, "palignr {p}, {q}, {i}", "alu")),
         MapItem::Insn(0x14, mi("pextrb_eb_xv", &[Ea(B8), RegX, ib], None, PfxSel::P66, Pred::True, "pextrb {e}, {x}, {i}", "store")),
         MapItem::Insn(0x15, mi("pextrw_ew_xv", &[Ea(W16), RegX, ib], None, PfxSel::P66, Pred::True, "pextrw {e}, {x}, {i}", "store")),
         MapItem::Insn(0x16, mi("pextrd_ed_xv", &[Ea(V), RegX, ib], None, PfxSel::P66, Pred::True, "pextrd {e}, {x}, {i}", "store")),
@@ -1223,6 +1301,15 @@ fn build_map_0f3a(m: &mut Model) {
         MapItem::Insn(0x20, mi("pinsrb_xv_eb_ib", &[RegX, Ea(B8), ib], None, PfxSel::P66, Pred::True, "pinsrb {x}, {e}, {i}", "alu")),
         MapItem::Insn(0x21, mi("insertps_xv_wv_ib", &[RegX, RmX, ib], None, PfxSel::P66, Pred::True, "insertps {x}, {w}, {i}", "alu")),
         MapItem::Insn(0x22, mi("pinsrd_xv_ed_ib", &[RegX, Ea(V), ib], None, PfxSel::P66, Pred::True, "pinsrd {x}, {e}, {i}", "alu")),
+        // SSE4.1 のドット積と隣接差分絶対和。
+        MapItem::Insn(0x40, mi("dpps_xv_wv_ib", &[RegX, RmX, ib], None, PfxSel::P66, Pred::True, "dpps {x}, {w}, {i}", "alu")),
+        MapItem::Insn(0x41, mi("dppd_xv_wv_ib", &[RegX, RmX, ib], None, PfxSel::P66, Pred::True, "dppd {x}, {w}, {i}", "alu")),
+        MapItem::Insn(0x42, mi("mpsadbw_xv_wv_ib", &[RegX, RmX, ib], None, PfxSel::P66, Pred::True, "mpsadbw {x}, {w}, {i}", "alu")),
+        // SSE4.2 の明示・暗黙長文字列比較。
+        MapItem::Insn(0x60, mi("pcmpestrm_xv_wv_ib", &[RegX, RmX, ib], None, PfxSel::P66, Pred::True, "pcmpestrm {x}, {w}, {i}", "alu")),
+        MapItem::Insn(0x61, mi("pcmpestri_xv_wv_ib", &[RegX, RmX, ib], None, PfxSel::P66, Pred::True, "pcmpestri {x}, {w}, {i}", "alu")),
+        MapItem::Insn(0x62, mi("pcmpistrm_xv_wv_ib", &[RegX, RmX, ib], None, PfxSel::P66, Pred::True, "pcmpistrm {x}, {w}, {i}", "alu")),
+        MapItem::Insn(0x63, mi("pcmpistri_xv_wv_ib", &[RegX, RmX, ib], None, PfxSel::P66, Pred::True, "pcmpistri {x}, {w}, {i}", "alu")),
     ];
     m.maps.push(MapDecl {
         name: "map_0f3a".to_string(),

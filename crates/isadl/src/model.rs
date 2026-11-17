@@ -253,6 +253,11 @@ pub struct MapInsn {
     pub ops: Vec<OpKind>,
     /// ModRM.reg によるグループ選択（/0 から /7）。None は /r または ModRM なし。
     pub group: Option<u8>,
+    /// グループ項目での ModRM.mod の選択。`Some(true)` は mod=11
+    /// （レジスタ形）のみ、`Some(false)` は mod!=11（メモリ形）のみ。
+    /// None は制約なし。0F AE の fence（mod=11）と clflush（mod!=11）
+    /// のように同じ /n で mod で分岐するエンコーディングに使う。
+    pub group_mod: Option<bool>,
     /// 必須接頭辞の状態。
     pub pfx: PfxSel,
     pub when: Pred,
