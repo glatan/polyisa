@@ -3543,6 +3543,18 @@ fn dispatch_map<B: Backend>(
         Insn::PopCs => sem_ea::pop_sr(b, 1, sw, sa, sseg),
         Insn::SmswEw => sem_ea::smsw(b, &ea),
         Insn::LmswEw => sem_ea::lmsw(b, &ea, eip),
+        // 0F 00/01 のシステム状態群。ディスクリプタ機構を持たない
+        // モデルでは保護系の検査は全て失敗（ZF=0）で近似する。
+        Insn::SldtEw => sem_ea::sldt(b, false, &ea, mode, eip, sa, sseg),
+        Insn::StrEw => sem_ea::sldt(b, true, &ea, mode, eip, sa, sseg),
+        Insn::LldtEw => sem_ea::lldt(b, false, &ea, mode, eip, sa, sseg),
+        Insn::LtrEw => sem_ea::lldt(b, true, &ea, mode, eip, sa, sseg),
+        Insn::VerrEw | Insn::VerwEw => sem_ea::verrw(b, mode, eip, sa, sseg),
+        Insn::LarGvEw | Insn::LslGvEw => sem_ea::lar_lsl(b, mode, eip, sa, sseg),
+        Insn::SgdtMs => sem_ea::sgdt(b, &ea, mode),
+        Insn::SidtMs => sem_ea::sidt(b, &ea, mode),
+        Insn::LgdtMs => sem_ea::lgdt(b, &ea, mode),
+        Insn::LidtMs => sem_ea::lidt(b, &ea, mode),
         Insn::MovsB => sem_ea::str_op(b, sem_ea::Str::Movs, 8, d, eip, seg, seg_ss, es, mode == 16),
         Insn::MovsV => sem_ea::str_op(b, sem_ea::Str::Movs, w, d, eip, seg, seg_ss, es, mode == 16),
         Insn::StosB => sem_ea::str_op(b, sem_ea::Str::Stos, 8, d, eip, seg, seg_ss, es, mode == 16),

@@ -504,10 +504,7 @@ const KNOWN: &[(&str, &str, &str)] = &[
     ("6d", "missing", "*"),
     ("6e", "missing", "*"),
     ("6f", "missing", "*"),    // ins/outs（A0）
-    ("0f 00", "missing", "*"), // sldt/str/lldt/ltr（A4）
-    ("0f 01", "missing", "*"), // sgdt/sidt/lgdt/lidt/lmsw/enclv/serialize 等（A4）
-    ("0f 02", "missing", "*"),
-    ("0f 03", "missing", "*"), // lar/lsl（A4）
+    ("0f 01", "missing", "*"), // 0F 01 の mod=11 形・/5 /7（VMX/INVLPG/serialize 等、A4 以降）
     ("0f 06", "missing", "*"),
     ("0f 07", "missing", "*"), // clts/sysret（A4）
     ("0f 08", "missing", "*"),
@@ -611,10 +608,7 @@ const KNOWN: &[(&str, &str, &str)] = &[
     // 66 0F: A4 のシステム系（66 は無視される）と SSE2 の
     // 未宣言 xmm 形（map 未宣言。列挙経路は剥がし形として
     // 一部実装済み）。
-    ("66 0f 00", "missing", "*"),
     ("66 0f 01", "missing", "*"),
-    ("66 0f 02", "missing", "*"),
-    ("66 0f 03", "missing", "*"),
     ("66 0f 05", "missing", "i386"), // syscall（m64 ゲート）
     ("66 0f 06", "missing", "*"),
     ("66 0f 07", "missing", "*"),
@@ -659,10 +653,8 @@ const KNOWN: &[(&str, &str, &str)] = &[
     ("66 0f f5", "missing", "*"),
     ("66 0f f6", "missing", "*"),
     // F2 0F: A4 のシステム系と未宣言の F2 命令。
-    ("f2 0f 00", "missing", "*"),
+    ("f2 0f 00", "missing", "*"), // lkgs（新命令、未対応）
     ("f2 0f 01", "missing", "*"),
-    ("f2 0f 02", "missing", "*"),
-    ("f2 0f 03", "missing", "*"),
     ("f2 0f 05", "missing", "i386"), // syscall（m64 ゲート）
     ("f2 0f 06", "missing", "*"),
     ("f2 0f 07", "missing", "*"),
@@ -695,10 +687,7 @@ const KNOWN: &[(&str, &str, &str)] = &[
     ("f2 0f d6", "missing", "*"), // movdq2q
     ("f2 0f e6", "missing", "*"), // cvtdq2pd
     // F3 0F: A4 のシステム系と未宣言の F3 命令。
-    ("f3 0f 00", "missing", "*"),
     ("f3 0f 01", "missing", "*"),
-    ("f3 0f 02", "missing", "*"),
-    ("f3 0f 03", "missing", "*"),
     ("f3 0f 05", "missing", "i386"), // syscall（m64 ゲート）
     ("f3 0f 06", "missing", "*"),
     ("f3 0f 07", "missing", "*"),

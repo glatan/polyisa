@@ -73,6 +73,15 @@ pub struct CpuState {
     /// SSE の制御・状態レジスタ（LDMXCSR/STMXCSR が読み書きする）。
     /// 実行開始時に 0x1F80（例外全マスク・RNE）へ初期化する。
     pub mxcsr: u32,
+    /// GDTR/IDTR のベースとリミット（LGDT/SGDT 系が読み書きする）。
+    /// 保護モードのディスクリプタ機構は持たない観測用の状態。
+    pub gdtr_base: u64,
+    pub gdtr_limit: u16,
+    pub idtr_base: u64,
+    pub idtr_limit: u16,
+    /// LDTR/TR のセレクタ（SLDT/STR/LLDT/LTR が読み書きする）。
+    pub ldtr: u16,
+    pub tr: u16,
 }
 
 #[cfg(test)]
@@ -105,7 +114,7 @@ mod tests {
         assert_eq!(core::mem::offset_of!(CpuState, st_sig), 416);
         assert_eq!(core::mem::offset_of!(CpuState, fs_base), 480);
         assert_eq!(core::mem::offset_of!(CpuState, gs_base), 488);
-        // mxcsr は構造体の末尾（sregs 12 + fsw 2 + cpuid 96 を
+        // mxcsr（sregs 12 + fsw 2 + cpuid 96 を
         // gs_base 以降に足した 606 を 8 境界へ揃えた位置）。
         assert_eq!(core::mem::offset_of!(CpuState, mxcsr), 608);
     }
@@ -113,7 +122,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 段階4の x86 最小 853 件にオペコード表の記述を足した件数。
-        assert_eq!(INSNS.len(), 1632);
+        assert_eq!(INSNS.len(), 1644);
     }
 
     #[test]

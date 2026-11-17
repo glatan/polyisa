@@ -17644,3 +17644,77 @@ fn run32_sha_gfni() {
     let exp = ref_sha1rnds4(sha1_state, sha1_w, 1);
     assert_eq!(dws(&read(&env, 0x2120)), exp, "sha1rnds4 imm=1");
 }
+
+#[test]
+fn run32_sdt_lar() {
+    // SGDT/LGDT/SIDT/LIDT・SLDT/STR/LLDT/LTR・VERR/VERW/LAR/LSL。
+    // ディスクリプタ機構を持たないので保護系検査は全て失敗
+    // （ZF=0）になるモデル規約を検証する。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    // 0x2100: 擬似テーブル {limit=0x1234, base=0x56789ABC}。
+    env.backend
+        .mem
+        .write(
+            VirtAddr(0x2100),
+            &[0x34, 0x12, 0xBC, 0x9A, 0x78, 0x56, 0, 0, 0, 0, 0, 0],
+        )
+        .unwrap();
+    let prog: &[u8] = &[
+        0x0F, 0x01, 0x15, 0x00, 0x21, 0x00, 0x00, // lgdt [0x2100]
+        0x0F, 0x01, 0x05, 0x00, 0x22, 0x00, 0x00, // sgdt [0x2200]
+        0x0F, 0x01, 0x1D, 0x00, 0x21, 0x00, 0x00, // lidt [0x2100]
+        0x0F, 0x01, 0x0D, 0x08, 0x22, 0x00, 0x00, // sidt [0x2208]
+        0x0F, 0x00, 0xC0, // sldt ax
+        0x0F, 0x00, 0xCB, // str bx
+        0xB8, 0x1B, 0x00, 0x00, 0x00, // mov eax,0x1B
+        0x0F, 0x00, 0xD0, // lldt ax
+        0x0F, 0x00, 0xD8, // ltr ax
+        0x0F, 0x00, 0xC1, // sldt cx
+        0x0F, 0x00, 0xCA, // str dx
+        0x0F, 0x00, 0xE0, // verr ax
+        0x0F, 0x00, 0xE8, // verw ax
+        0xB8, 0x77, 0x77, 0x00, 0x00, // mov eax,0x7777
+        0x0F, 0x02, 0xC0, // lar eax, ax
+        0x0F, 0x03, 0xC0, // lsl eax, ax
+        0xA3, 0x14, 0x22, 0x00, 0x00, // mov [0x2214],eax
+        0x0F, 0x01, 0x25, 0x10, 0x22, 0x00, 0x00, // smsw [0x2210]
+        0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax,1
+        0xCD, 0x80, // int 0x80 → exit(ebx=0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut ExitOne, 1000, false);
+    assert_eq!(out, Outcome::Exit(0));
+    // SGDT/SIDT は limit+base をそのまま往復する。
+    let acc = polyisa_mem::Access {
+        endian: polyisa_mem::Endian::Le,
+        align: polyisa_mem::Align::Unaligned,
+        kind: polyisa_mem::AccessKind::DataRead,
+    };
+    let mut v = [0u8; 16];
+    env.backend.mem.read(VirtAddr(0x2200), &mut v, acc).unwrap();
+    assert_eq!(&v[..6], &[0x34, 0x12, 0xBC, 0x9A, 0x78, 0x56], "sgdt");
+    assert_eq!(&v[8..14], &[0x34, 0x12, 0xBC, 0x9A, 0x78, 0x56], "sidt");
+    // LLDT/LTR → SLDT/STR で往復（cx=ldtr、dx=tr）。
+    let cx: u32 = env.backend.get(Gpr(1).state());
+    let dx: u32 = env.backend.get(Gpr(2).state());
+    assert_eq!(cx & 0xFFFF, 0x1B, "lldt→sldt");
+    assert_eq!(dx & 0xFFFF, 0x1B, "ltr→str");
+    // VERR/VERW/LAR/LSL は ZF=0 かつ dest 不変（eax=0x7777）。
+    let efl: u32 = env.backend.get(polyisa_guest_x86::sem::eflags_ref());
+    assert_eq!(efl & 0x40, 0, "verr/verw/lar/lsl ZF");
+    // lar/lsl は ZF=0 経路なので dest 不変（0x7777 のまま）。
+    let mut lw = [0u8; 4];
+    env.backend
+        .mem
+        .read(VirtAddr(0x2214), &mut lw, acc)
+        .unwrap();
+    assert_eq!(u32::from_le_bytes(lw), 0x7777, "lar/lsl dest 不変");
+    // SMSW は msw パラメータ（既定 0xFFF0）を書く。
+    let mut w = [0u8; 2];
+    env.backend.mem.read(VirtAddr(0x2210), &mut w, acc).unwrap();
+    assert_eq!(u16::from_le_bytes(w), 0xFFF0, "smsw");
+}

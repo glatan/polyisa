@@ -6719,8 +6719,9 @@ pub fn smsw<B: Backend>(b: &mut B, rm: &Rm<B::V<W64>>) -> Flow<B> {
     decode::wr16(b, rm, v)
 }
 
-/// LMSW r/m16（80286）。PE ビットを立てる書き込みは保護モード非対応の
-/// ため例外とする。PE=0 の書き込みは MSW を変えない。
+/// LMSW r/m16。PE ビットを立てる書き込みはどのモードでも例外と
+/// する（CR0 を持たないモデルの近似）。PE=0 の書き込みは MSW を
+/// 変えない。
 pub fn lmsw<B: Backend>(b: &mut B, rm: &Rm<B::V<W64>>, eip: u32) -> Flow<B> {
     let v: B::V<W16> = decode::rd16(b, rm)?;
     let one = b.konst::<W16>(1);
@@ -6736,6 +6737,157 @@ pub fn lmsw<B: Backend>(b: &mut B, rm: &Rm<B::V<W64>>, eip: u32) -> Flow<B> {
             in_delay_slot: false,
         }))
     })
+}
+
+// ---- システム状態（0F 00/01 グループ） ----
+
+/// SGDT/SIDT。limit(16) + base(32 または 64) をメモリに書く。
+/// `idt` で対象レジスタを選ぶ。80286 ではベースが 24 ビットだが
+/// 32 ビット幅で書く近似（上位バイトは実機では不定）。
+fn sdtr<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>, mode: u8, idt: bool) -> Result<(), B::Exit> {
+    let Rm::Mem { a, wseg } = ea else {
+        return Ok(());
+    };
+    let (base_r, lim_r) = if idt {
+        (sem::idtr_base_ref(), sem::idtr_limit_ref())
+    } else {
+        (sem::gdtr_base_ref(), sem::gdtr_limit_ref())
+    };
+    // 6/10 バイトのアクセスをまとめて限界検査してから書く
+    // （分割書き込みだと前半だけコミットされ得る）。
+    if let Some((seg, _)) = wseg {
+        let (off, _) = decode::wseg_off(b, *a, *wseg).unwrap();
+        let n = if mode == 64 { 10 } else { 6 };
+        decode::seg_limit_chk_n(b, off, *seg, n)?;
+    }
+    let lim: B::V<W16> = b.get(lim_r);
+    decode::mem_store::<B, W16>(b, *a, *wseg, lim)?;
+    let k2 = b.konst::<W64>(2);
+    let a2 = b.add::<W64>(*a, k2);
+    let base: B::V<W64> = b.get(base_r);
+    if mode == 64 {
+        decode::mem_store::<B, W64>(b, a2, *wseg, base)
+    } else {
+        let base32 = b.trunc::<W64, W32>(base);
+        decode::mem_store::<B, W32>(b, a2, *wseg, base32)
+    }
+}
+
+/// LGDT/LIDT。limit(16) + base(32 または 64) をメモリから読む。
+/// 80286 のベースは 24 ビットだが 32 ビット読む近似。
+fn ldtr_load<B: Backend>(
+    b: &mut B,
+    ea: &Rm<B::V<W64>>,
+    mode: u8,
+    idt: bool,
+) -> Result<(), B::Exit> {
+    let Rm::Mem { a, wseg } = ea else {
+        return Ok(());
+    };
+    let lim: B::V<W16> = decode::mem_load(b, *a, *wseg)?;
+    let k2 = b.konst::<W64>(2);
+    let a2 = b.add::<W64>(*a, k2);
+    let base: B::V<W64> = if mode == 64 {
+        decode::mem_load::<B, W64>(b, a2, *wseg)?
+    } else {
+        let v: B::V<W32> = decode::mem_load(b, a2, *wseg)?;
+        b.zext::<W32, W64>(v)
+    };
+    let (base_r, lim_r) = if idt {
+        (sem::idtr_base_ref(), sem::idtr_limit_ref())
+    } else {
+        (sem::gdtr_base_ref(), sem::gdtr_limit_ref())
+    };
+    b.set(base_r, base);
+    b.set(lim_r, lim);
+    Ok(())
+}
+
+/// SLDT/STR。セレクタを格納する。実モードでは全世代で #UD
+/// （Intel 80386 PRM: "not recognized in Real Address Mode"）。
+/// r/m32 以上の格納先では上位ビットは不定のはずだが、W16 の
+/// まま書く近似。
+pub fn sldt<B: Backend>(
+    b: &mut B,
+    is_str: bool,
+    rm: &Rm<B::V<W64>>,
+    mode: u8,
+    eip: u32,
+    sa: u8,
+    sseg: u64,
+) -> Flow<B> {
+    if mode == 16 {
+        return int_real(b, eip, 0, 6, sa, sseg);
+    }
+    let sel: B::V<W16> = b.get(if is_str {
+        sem::tr_ref()
+    } else {
+        sem::ldtr_ref()
+    });
+    decode::wr16(b, rm, sel)
+}
+
+/// LLDT/LTR。実モードでは #UD。ディスクリプタ検査を持たないので
+/// セレクタをそのまま格納する。
+pub fn lldt<B: Backend>(
+    b: &mut B,
+    is_ltr: bool,
+    rm: &Rm<B::V<W64>>,
+    mode: u8,
+    eip: u32,
+    sa: u8,
+    sseg: u64,
+) -> Flow<B> {
+    if mode == 16 {
+        return int_real(b, eip, 0, 6, sa, sseg);
+    }
+    let sel: B::V<W16> = decode::rd16(b, rm)?;
+    b.set(
+        if is_ltr {
+            sem::tr_ref()
+        } else {
+            sem::ldtr_ref()
+        },
+        sel,
+    );
+    Ok(())
+}
+
+/// VERR/VERW。実モードでは #UD。ディスクリプタを持たないモデル
+/// では全セレクタの検査が失敗するので ZF=0 とする。セレクタ
+/// 自体は読まない（読んでも検査結果は変わらない近似）。
+pub fn verrw<B: Backend>(b: &mut B, mode: u8, eip: u32, sa: u8, sseg: u64) -> Flow<B> {
+    if mode == 16 {
+        return int_real(b, eip, 0, 6, sa, sseg);
+    }
+    let f: B::V<W32> = b.get(eflags_ref());
+    let nzf = b.konst::<W32>(!sem::FLAG_ZF);
+    let v = b.and::<W32>(f, nzf);
+    b.set(eflags_ref(), v);
+    Ok(())
+}
+
+/// LAR/LSL。実モードでは #UD。ディスクリプタを持たないモデルでは
+/// 全セレクタが無効なので ZF=0・dest 不変とする。
+pub fn lar_lsl<B: Backend>(b: &mut B, mode: u8, eip: u32, sa: u8, sseg: u64) -> Flow<B> {
+    verrw(b, mode, eip, sa, sseg)
+}
+
+/// SGDT。
+pub fn sgdt<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>, mode: u8) -> Flow<B> {
+    sdtr(b, ea, mode, false)
+}
+/// SIDT。
+pub fn sidt<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>, mode: u8) -> Flow<B> {
+    sdtr(b, ea, mode, true)
+}
+/// LGDT。
+pub fn lgdt<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>, mode: u8) -> Flow<B> {
+    ldtr_load(b, ea, mode, false)
+}
+/// LIDT。
+pub fn lidt<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>, mode: u8) -> Flow<B> {
+    ldtr_load(b, ea, mode, true)
 }
 
 // ---- x87 比較・環境 ----

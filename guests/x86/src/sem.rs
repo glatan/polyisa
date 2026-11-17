@@ -109,6 +109,28 @@ pub fn mxcsr_ref() -> StateRef<W32> {
     StateRef::<W32>::from_offset(core::mem::offset_of!(CpuState, mxcsr))
 }
 
+/// GDTR/IDTR のベースとリミットを指す。
+pub fn gdtr_base_ref() -> StateRef<W64> {
+    StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, gdtr_base))
+}
+pub fn gdtr_limit_ref() -> StateRef<W16> {
+    StateRef::<W16>::from_offset(core::mem::offset_of!(CpuState, gdtr_limit))
+}
+pub fn idtr_base_ref() -> StateRef<W64> {
+    StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, idtr_base))
+}
+pub fn idtr_limit_ref() -> StateRef<W16> {
+    StateRef::<W16>::from_offset(core::mem::offset_of!(CpuState, idtr_limit))
+}
+
+/// LDTR/TR のセレクタを指す。
+pub fn ldtr_ref() -> StateRef<W16> {
+    StateRef::<W16>::from_offset(core::mem::offset_of!(CpuState, ldtr))
+}
+pub fn tr_ref() -> StateRef<W16> {
+    StateRef::<W16>::from_offset(core::mem::offset_of!(CpuState, tr))
+}
+
 /// 64ビットレジスタを読む（0-7 は上位 h と下位 g を結合し、8-15 は x を読む）。
 pub fn read64<B: Backend>(b: &mut B, r: Gpr) -> B::V<W64> {
     if r.0 < 8 {

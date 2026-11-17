@@ -871,21 +871,86 @@ pub fn build_maps(m: &mut Model) {
 
     // 0F マップ。
     let mut m0f: Vec<MapItem> = Vec::new();
-    // 0F 01 グループ。実モードでは 80286 の SMSW(/4)/LMSW(/6) だけを
-    // 解読する（SGDT/SIDT/SLDT/STR の実モード形と保護モード系は A4）。
-    let m286 = |grp: u8, name: &str, syntax: &str| {
+    // 0F 00 グループ（80286 以降のシステム命令）。SLDT/STR は
+    // 80386 以降では実モードでも動くが 80286 の実モードでは
+    // #UD — 世代差は意味論側で分岐する。LLDT/LTR/VERR/VERW は
+    // 実モードで #UD（意味論側）。ディスクリプタテーブルを
+    // 持たないので保護系の検査は全て失敗として扱う。
+    let msys = |grp: u8, name: &str, syntax: &str| {
         mi(
             name,
             &[Ea(W16)],
             Some(grp),
             PfxSel::Any,
-            w("i286 && opd_o16 && adr_a16"),
+            w("i286"),
             syntax,
             "system",
         )
     };
-    m0f.push(MapItem::Insn(0x01, m286(4, "smsw_ew", "smsw {e}")));
-    m0f.push(MapItem::Insn(0x01, m286(6, "lmsw_ew", "lmsw {e}")));
+    for (grp, name, syn) in [
+        (0u8, "sldt_ew", "sldt {e}"),
+        (1, "str_ew", "str {e}"),
+        (2, "lldt_ew", "lldt {e}"),
+        (3, "ltr_ew", "ltr {e}"),
+        (4, "verr_ew", "verr {e}"),
+        (5, "verw_ew", "verw {e}"),
+    ] {
+        m0f.push(MapItem::Insn(0x00, msys(grp, name, syn)));
+    }
+    // LAR/LSL（0F 02/03）。保護系の検査は全て失敗（ZF=0）。
+    m0f.push(MapItem::Insn(
+        0x02,
+        mi(
+            "lar_gv_ew",
+            &[Reg(V), Ea(W16)],
+            None,
+            PfxSel::Any,
+            w("i286"),
+            "lar {g}, {e}",
+            "system",
+        ),
+    ));
+    m0f.push(MapItem::Insn(
+        0x03,
+        mi(
+            "lsl_gv_ew",
+            &[Reg(V), Ea(W16)],
+            None,
+            PfxSel::Any,
+            w("i286"),
+            "lsl {g}, {e}",
+            "system",
+        ),
+    ));
+    // 0F 01 グループ。/0-/3 は GDTR/IDTR の退避・復帰（メモリ形
+    // のみ）、/4 SMSW と /6 LMSW は 80286 以降の全モードで動く。
+    let m01 = |grp: u8, name: &str, syntax: &str| {
+        mi(
+            name,
+            &[Ea(V)],
+            Some(grp),
+            PfxSel::Any,
+            w("i286"),
+            syntax,
+            "system",
+        )
+    };
+    for (grp, name, syn) in [
+        (0u8, "sgdt_ms", "sgdt {e}"),
+        (1, "sidt_ms", "sidt {e}"),
+        (2, "lgdt_ms", "lgdt {e}"),
+        (3, "lidt_ms", "lidt {e}"),
+    ] {
+        let mut it = m01(grp, name, syn);
+        it.group_mod = Some(false);
+        m0f.push(MapItem::Insn(0x01, it));
+    }
+    let mut it = m01(4, "smsw_ew", "smsw {e}");
+    it.ops = vec![Ea(W16)];
+    m0f.push(MapItem::Insn(0x01, it));
+    let mut it = m01(6, "lmsw_ew", "lmsw {e}");
+    it.ops = vec![Ea(W16)];
+    m0f.push(MapItem::Insn(0x01, it));
     // CLTS（0F 06）。80386 で追加。実モードでは CR0 の TS を下ろすだけで、
     // 現行モデルは CR0 を持たないので no-op として扱う（SST 80386 実測）。
     m0f.push(MapItem::Insn(

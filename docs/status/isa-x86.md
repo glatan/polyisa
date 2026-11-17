@@ -354,6 +354,7 @@
 | jp | jp、jp_rel32 | 真 | jump |
 | js | js、js_rel32 | 真 | jump |
 | lahf | lahf | !m64 || lahf_lm | alu |
+| lar | lar_gv_ew | i286 | system |
 | lddqu | lddqu_xv_mv | sse3 | load |
 | ldmxcsr | ldmxcsr_md | sse | load |
 | lds | lds_gv_mp | !m64 | load |
@@ -363,12 +364,17 @@
 | les | les_gv_mp | !m64 | load |
 | lfence | lfence | sse2 | alu |
 | lfs | lfs_gv_mp | i386 | load |
+| lgdt | lgdt_ms | i286 | system |
 | lgs | lgs_gv_mp | i386 | load |
-| lmsw | lmsw_ew | i286 && opd_o16 && adr_a16 | system |
+| lidt | lidt_ms | i286 | system |
+| lldt | lldt_ew | i286 | system |
+| lmsw | lmsw_ew | i286 | system |
 | lods | lods_v | 真 | load |
 | lodsb | lods_b | 真 | load |
 | loop | jcxz_jb、loop、loop_jb、loope_jb、loopne_jb | 真 | jump |
+| lsl | lsl_gv_ew | i286 | system |
 | lss | lss_gv_mp | i386 | load |
+| ltr | ltr_ew | i286 | system |
 | lzcnt | lzcnt_gv_ev | lzcnt | alu |
 | maskmovdqu | maskmovdqu_xv_xv | sse2 | store |
 | maskmovq | maskmovq_pv_qv | sse | store |
@@ -703,6 +709,7 @@
 | setp | setp | 真 | alu |
 | sets | sets | 真 | alu |
 | sfence | sfence | sse | alu |
+| sgdt | sgdt_ms | i286 | system |
 | sha1msg1 | sha1msg1_xv_wv | sha | alu |
 | sha1msg2 | sha1msg2_xv_wv | sha | alu |
 | sha1nexte | sha1nexte_xv_wv | sha | alu |
@@ -718,7 +725,9 @@
 | shrd | shrd_ev_gv_cl、shrd_ev_gv_ib、shrd_r32_cl、shrd_r32_imm8 | 真 | alu |
 | shufpd | shufpd_xv_wv_ib | sse2 | alu |
 | shufps | shufps_xv_wv_ib | sse | alu |
-| smsw | smsw_ew | i286 && opd_o16 && adr_a16 | system |
+| sidt | sidt_ms | i286 | system |
+| sldt | sldt_ew | i286 | system |
+| smsw | smsw_ew | i286 | system |
 | sqrtpd | sqrtpd_xv_wv | sse2 | alu |
 | sqrtps | sqrtps_xv_wv | sse | alu |
 | sqrtsd | sqrtsd、sqrtsd_xv_wv | sse2 | alu |
@@ -730,6 +739,7 @@
 | stos | stos_v | 真 | store |
 | stosb | stos_b、stosb | 真 | store |
 | stosd | stosd | 真 | store |
+| str | str_ew | i286 | system |
 | sub | sub_eb_ib | op82 | alu |
 | sub | sub_al_ib、sub_eax、sub_eax_iz、sub_eb_gb、sub_eb_ib、sub_ev_gv、sub_ev_ib、sub_ev_iz、sub_gb_eb、sub_gv_ev、sub_m32_imm8_sibd32、sub_m32_r32_mem32、sub_m32_r32_mem8、sub_m32_r32_sibd32、sub_m8_r8、sub_m8_r8_sib、sub_m_r_sibd、sub_r_mem32、sub_r_mem8、sub_r_memnd、sub_r_rip、sub_r_sib、sub_r_sibabs、sub_r_sibd、sub_r_sibd32、sub_rm32、sub_rm32_imm、sub_rm64_imm、sub_rm_imm8、sub_rm_imm8_mem32、sub_rm_imm8_mem8、sub_rm_imm8_memnd、sub_rm_imm8_rip、sub_rm_imm8_sibd | 真 | alu |
 | subpd | subpd_xv_wv | sse2 | alu |
@@ -752,6 +762,8 @@
 | unpckhps | unpckhps_xv_wv | sse | alu |
 | unpcklpd | unpcklpd_xv_wv | sse2 | alu |
 | unpcklps | unpcklps_xv_wv | sse | alu |
+| verr | verr_ew | i286 | system |
+| verw | verw_ew | i286 | system |
 | x87 | fadd_m32、fadd_m64、fcom_m32、fcom_m64、fcomp_m32、fcomp_m64、fdiv_m32、fdiv_m64、fdivr_m32、fdivr_m64、fiadd_m16、fiadd_m32、ficom_m16、ficom_m32、ficomp_m16、ficomp_m32、fidiv_m16、fidiv_m32、fidivr_m16、fidivr_m32、fimul_m16、fimul_m32、fisub_m16、fisub_m32、fisubr_m16、fisubr_m32、fmul_m32、fmul_m64、fsub_m32、fsub_m64、fsubr_m32、fsubr_m64、x87d9_4、x87d9_6、x87db_4、x87dd_4、x87dd_5、x87dd_6 | 真 | alu |
 | xadd | xadd_eb_gb、xadd_ev_gv、xadd_r32_memnd、xadd_r32_rip | i486 | alu |
 | xchg | xchg_eb_gb、xchg_ev_gv、xchg_r8、xchg_r_mem32、xchg_r_mem8、xchg_r_memnd、xchg_r_rip、xchg_r_rm、xchg_rbp_ax、xchg_rbx_ax、xchg_rcx_ax、xchg_rdi_ax、xchg_rdx_ax、xchg_rsi_ax、xchg_rsp_ax、xchg_rv_eax | 真 | alu |
