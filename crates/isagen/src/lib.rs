@@ -732,10 +732,13 @@ fn gen_map_decoder(model: &Model) -> Result<String, GenError> {
                 g.dedup();
                 g
             };
+            // ModRM.mod で選ぶ項目（group_mod）があれば、グループの
+            // 有無にかかわらず ModRM バイトを覗く。
+            if !grouped.is_empty() || insns.iter().any(|mi| mi.group_mod.is_some()) {
+                s.push_str("            let m = *bytes.get(*i)?;\n");
+            }
             if !grouped.is_empty() {
-                s.push_str(
-                    "            let m = *bytes.get(*i)?;\n            let g = (m >> 3) & 7;\n            match g {\n",
-                );
+                s.push_str("            let g = (m >> 3) & 7;\n            match g {\n");
                 for g in &grouped {
                     s.push_str(&format!("                {g} => {{\n"));
                     for mi in insns.iter().filter(|mi| mi.group == Some(*g)) {
@@ -839,6 +842,9 @@ fn emit_map_candidate(
     let pfx = match mi.pfx {
         PfxSel::Any => "true".to_string(),
         PfxSel::Plain => "!d.p66 && d.rep == 0".to_string(),
+        PfxSel::No66 => "!d.p66".to_string(),
+        PfxSel::No66F3 => "!d.p66 && d.rep != 0xF3".to_string(),
+        PfxSel::NoF2 => "d.rep != 0xF2".to_string(),
         PfxSel::P66 => "d.p66 && d.rep == 0".to_string(),
         PfxSel::PF2 => "d.rep == 0xF2".to_string(),
         PfxSel::PF3 => "d.rep == 0xF3".to_string(),

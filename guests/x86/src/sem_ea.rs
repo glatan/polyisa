@@ -2416,9 +2416,9 @@ pub fn movd_e_x<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result
     }
 }
 
-/// MOVLPS/MOVLPD の読み込み（0F 12）。mem は下位 64 を読み込み、
-/// mod=11 は MOVLHPS（0x66 なし）または MOVHLPS（0x66 あり）。
-/// F3 は MOVSLDUP、F2 は MOVDDUP。
+/// MOVLPS/MOVLPD の読み込み（0F 12、メモリ形のみ）。下位 64 を
+/// 読み込む。F3 は MOVSLDUP、F2 は MOVDDUP。mod=11 は
+/// MOVHLPS/MOVLHPS（別宣言）。
 pub fn movl_d<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit> {
     let dst = reg_x(d);
     if d.rep == 0xF3 {
@@ -2439,24 +2439,31 @@ pub fn movl_d<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<(
         b.set(sem::xmm_ref(dst), v);
         return Ok(());
     }
-    if d.modrm >= 0xC0 {
-        let s = rx(b, ea, 128)?;
-        let old: B::V<W128> = b.get(sem::xmm_ref(dst));
-        let v = if d.p66 {
-            // MOVHLPS: dst.lo = src.hi
-            let hi = lane128(b, s, 64, 64);
-            put_lane128(b, old, hi, 0, 64)
-        } else {
-            // MOVLHPS: dst.hi = src.lo
-            put_lane128(b, old, s, 64, 64)
-        };
-        b.set(sem::xmm_ref(dst), v);
-    } else {
-        let s = rx(b, ea, 64)?;
-        let old: B::V<W128> = b.get(sem::xmm_ref(dst));
-        let v = put_lane128(b, old, s, 0, 64);
-        b.set(sem::xmm_ref(dst), v);
-    }
+    let s = rx(b, ea, 64)?;
+    let old: B::V<W128> = b.get(sem::xmm_ref(dst));
+    let v = put_lane128(b, old, s, 0, 64);
+    b.set(sem::xmm_ref(dst), v);
+    Ok(())
+}
+
+/// MOVHLPS（0F 12 mod=11、0x66 は無視される）。dst.lo = src.hi。
+pub fn movhlps_d<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit> {
+    let dst = reg_x(d);
+    let s = rx(b, ea, 128)?;
+    let hi = lane128(b, s, 64, 64);
+    let old: B::V<W128> = b.get(sem::xmm_ref(dst));
+    let v = put_lane128(b, old, hi, 0, 64);
+    b.set(sem::xmm_ref(dst), v);
+    Ok(())
+}
+
+/// MOVLHPS（0F 16 mod=11、0x66 は無視される）。dst.hi = src.lo。
+pub fn movlhps_d<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit> {
+    let dst = reg_x(d);
+    let s = rx(b, ea, 128)?;
+    let old: B::V<W128> = b.get(sem::xmm_ref(dst));
+    let v = put_lane128(b, old, s, 64, 64);
+    b.set(sem::xmm_ref(dst), v);
     Ok(())
 }
 
@@ -2467,8 +2474,8 @@ pub fn movl_st<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<
     wx(b, ea, 64, lo)
 }
 
-/// MOVHPS/MOVHPD の読み込み（0F 16）。mem は上位 64 を読み込み、
-/// mod=11 は MOVHLPS（dst.lo = src.hi）。F3 は MOVSHDUP。
+/// MOVHPS/MOVHPD の読み込み（0F 16、メモリ形のみ）。上位 64 を
+/// 読み込む。F3 は MOVSHDUP。mod=11 は MOVLHPS（別宣言）。
 pub fn movh_d<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit> {
     let dst = reg_x(d);
     if d.rep == 0xF3 {
@@ -2481,19 +2488,10 @@ pub fn movh_d<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<(
         b.set(sem::xmm_ref(dst), v);
         return Ok(());
     }
-    if d.modrm >= 0xC0 {
-        // MOVHLPS: dst.lo = src.hi
-        let s = rx(b, ea, 128)?;
-        let hi = lane128(b, s, 64, 64);
-        let old: B::V<W128> = b.get(sem::xmm_ref(dst));
-        let v = put_lane128(b, old, hi, 0, 64);
-        b.set(sem::xmm_ref(dst), v);
-    } else {
-        let s = rx(b, ea, 64)?;
-        let old: B::V<W128> = b.get(sem::xmm_ref(dst));
-        let v = put_lane128(b, old, s, 64, 64);
-        b.set(sem::xmm_ref(dst), v);
-    }
+    let s = rx(b, ea, 64)?;
+    let old: B::V<W128> = b.get(sem::xmm_ref(dst));
+    let v = put_lane128(b, old, s, 64, 64);
+    b.set(sem::xmm_ref(dst), v);
     Ok(())
 }
 
@@ -3833,6 +3831,33 @@ pub fn maskmovq<B: Backend>(
 ) -> Result<(), B::Exit> {
     let src: B::V<W64> = b.get(sem::st_sig_ref(reg_m(d)));
     let mask = rq(b, ea)?;
+    let src128: B::V<W128> = b.zext::<W64, W128>(src);
+    let mask128: B::V<W128> = b.zext::<W64, W128>(mask);
+    maskmov_store(b, d, seg, src128, mask128, 8)
+}
+
+/// MASKMOVDQU（66 0F F7）。xmm のマスク上位ビットで選択した
+/// バイトを DS:(E)DI に書き込む（16 バイト）。
+pub fn maskmovdqu<B: Backend>(
+    b: &mut B,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+    seg: u64,
+) -> Result<(), B::Exit> {
+    let src: B::V<W128> = b.get(sem::xmm_ref(reg_x(d)));
+    let mask = rx(b, ea, 128)?;
+    maskmov_store(b, d, seg, src, mask, 16)
+}
+
+/// マスク付きバイト列を DS:(E)DI に書き込む共有部。
+fn maskmov_store<B: Backend>(
+    b: &mut B,
+    d: &MapDec,
+    seg: u64,
+    src: B::V<W128>,
+    mask: B::V<W128>,
+    n: u32,
+) -> Result<(), B::Exit> {
     let di = sem::read64(b, Gpr(7));
     // (E)DI はアドレスサイズで折り返してから DS 基底を足す。
     let off = match d.asize {
@@ -3848,13 +3873,13 @@ pub fn maskmovq<B: Backend>(
     };
     let sb = b.konst::<W64>(seg);
     let base = b.add::<W64>(off, sb);
-    for i in 0..8u32 {
-        let m = lane64(b, mask, i * 8 + 7, 1);
-        let m8: B::V<W8> = b.trunc::<W64, W8>(m);
+    for i in 0..n {
+        let m = lane128(b, mask, i * 8 + 7, 1);
+        let m8: B::V<W8> = b.trunc::<W128, W8>(m);
         let z8 = b.konst::<W8>(0);
         let en = b.cmp::<W8>(Cmp::Ne, m8, z8);
-        let byte = lane64(b, src, i * 8, 8);
-        let b8: B::V<W8> = b.trunc::<W64, W8>(byte);
+        let byte = lane128(b, src, i * 8, 8);
+        let b8: B::V<W8> = b.trunc::<W128, W8>(byte);
         let koff = b.konst::<W64>(u64::from(i));
         let a = b.add::<W64>(base, koff);
         b.if_then(en, |b| b.store::<W8>(a, b8, sem::DATA_WRITE))?;
@@ -6158,6 +6183,32 @@ pub fn pblendvb<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result
         let sel = nez::<B, W8>(b, m8);
         let l = b.select::<W128>(sel, cl, al);
         acc = put_lane128(b, acc, l, i * 8, 8);
+    }
+    b.set(sem::xmm_ref(dst), acc);
+    Ok(())
+}
+
+/// BLENDVPS/BLENDVPD。XMM0 の各要素の MSB で `c` の要素を選ぶ。
+/// `elt` は要素のビット幅（32/64）。
+pub fn blendv<B: Backend>(
+    b: &mut B,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+    elt: u32,
+) -> Result<(), B::Exit> {
+    let dst = reg_x(d);
+    let a: B::V<W128> = b.get(sem::xmm_ref(dst));
+    let c = rx(b, ea, 128)?;
+    let mask: B::V<W128> = b.get(sem::xmm_ref(sem::Xmm(0)));
+    let mut acc = b.konst::<W128>(0);
+    for i in 0..128u32 / elt {
+        let m = lane128(b, mask, i * elt + elt - 1, 1);
+        let al = lane128(b, a, i * elt, elt);
+        let cl = lane128(b, c, i * elt, elt);
+        let m8: B::V<W8> = b.trunc::<W128, W8>(m);
+        let sel = nez::<B, W8>(b, m8);
+        let l = b.select::<W128>(sel, cl, al);
+        acc = put_lane128(b, acc, l, i * elt, elt);
     }
     b.set(sem::xmm_ref(dst), acc);
     Ok(())

@@ -154,11 +154,25 @@ pub fn validate(model: &Model) -> Report {
         for item in &map.items {
             if let crate::model::MapItem::Insn(_, mi) = item {
                 check_when(&mi.when, &mi.name, &mut errors);
-                // `group_mod` はグループ項目でのみ意味を持つ。
-                if mi.group.is_none() && mi.group_mod.is_some() {
+                // `group_mod` は ModRM を消費する項目にだけ意味を持つ。
+                if mi.group_mod.is_some()
+                    && mi.group.is_none()
+                    && !mi.ops.iter().any(|o| {
+                        matches!(
+                            o,
+                            crate::model::OpKind::Ea(_)
+                                | crate::model::OpKind::Reg(_)
+                                | crate::model::OpKind::RegS
+                                | crate::model::OpKind::RegX
+                                | crate::model::OpKind::RmX
+                                | crate::model::OpKind::RegM
+                                | crate::model::OpKind::RmM
+                        )
+                    })
+                {
                     errors.push(ValidationError::BadField {
                         format: "map-insn".to_string(),
-                        field: format!("{}: group_mod には group が要る", mi.name),
+                        field: format!("{}: group_mod には ModRM を使うオペランドが要る", mi.name),
                     });
                 }
             }
@@ -357,9 +371,22 @@ fn validate_maps(model: &Model, timing: &BTreeSet<&str>, errors: &mut Vec<Valida
             }
         }
     }
-    // 同一キー（byte, group, pfx）での重なり。pfx が異なれば接頭辞の状態で
-    // 区別されるので許す。`Any` はすべての接頭辞状態と重なりうる。
-    let pfx_disjoint = |a: PfxSel, b: PfxSel| a != PfxSel::Any && b != PfxSel::Any && a != b;
+    // 同一キー（byte, group, pfx）での重なり。各選択を接頭辞状態
+    // （NP, 66, F2, F3）の集合として積を取る。
+    let pfx_states = |s: PfxSel| -> u8 {
+        match s {
+            PfxSel::Any => 0b1111,
+            PfxSel::Plain => 0b0001,
+            PfxSel::P66 => 0b0010,
+            PfxSel::PF2 => 0b0100,
+            PfxSel::PF3 => 0b1000,
+            PfxSel::No66 => 0b1101,
+            PfxSel::No66F3 => 0b0101,
+            PfxSel::NoF2 => 0b1011,
+        }
+    };
+    let pfx_overlap = |a: PfxSel, b: PfxSel| (pfx_states(a) & pfx_states(b)) != 0;
+    let pfx_disjoint = |a: PfxSel, b: PfxSel| !pfx_overlap(a, b);
     for map in &model.maps {
         let insns: Vec<(u8, &crate::model::MapInsn)> = map
             .items

@@ -104,7 +104,7 @@
 | s390 | 250 | 250 | z900、z990、z9ec、z10ec、z196、zec12、z13、generic、esa390 | [isa-s390.md](isa-s390.md) |
 | sparc | 10 | 10 | generic | [isa-sparc.md](isa-sparc.md) |
 | wasm | 8 | 8 | generic | [isa-wasm.md](isa-wasm.md) |
-| x86 | 1732 | 431 | x86_64、x86_64_v2、x86_64_v3、x86_64_v4、i8088、i386、i486、pentium、pentium_pro、pentium_iii、generic32 | [isa-x86.md](isa-x86.md) |
+| x86 | 1765 | 436 | x86_64、x86_64_v2、x86_64_v3、x86_64_v4、i8088、i386、i486、pentium、pentium_pro、pentium_iii、generic32 | [isa-x86.md](isa-x86.md) |
 
 ## システムコール
 
@@ -121,7 +121,7 @@
 
 ## 設計との差
 
-台帳は [設計との差の台帳](../gaps.md) にある。未着手は 8 件、代替は 15 件、対象外は 3 件である。
+台帳は [設計との差の台帳](../gaps.md) にある。未着手は 8 件、代替は 16 件、対象外は 3 件である。
 
 | ID | 区分 | 設計 |
 |---|---|---|
@@ -151,3 +151,4 @@
 | GAP-0034 | 代替 | [ユーザーモード「Linux のシステムコールの実装の段階」](../design/user-mode.md#linux-のシステムコールの実装の段階) |
 | GAP-0035 | 代替 | [CPU モデルとバージョンの表現「機能」](../design/cpu-models.md#機能) |
 | GAP-0036 | 代替 | x86 ゲスト「SSE4.2 文字列・拡張の近似」 |
+| GAP-0037 | 代替 | x86 ゲスト「llvm-mc とのデコード差分」 |

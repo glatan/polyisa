@@ -237,6 +237,16 @@ pub enum PfxSel {
     Any,
     /// 0x66・0xF2・0xF3 がいずれもないもの（MOVUPS など）。
     Plain,
+    /// 0x66 がないもの。F2/F3 は必須接頭辞でないエンコーディング
+    /// では無視される（0F 38 / 0F 3A の MMX 形など）。
+    No66,
+    /// 0x66 も 0xF3 もないもの（NP + F2）。F3 が別命令に
+    /// 割り当てられている MMX 形（MOVQ など）に使う。
+    No66F3,
+    /// 0xF2 がないもの（NP + 66 + F3）。F2 が別命令に
+    /// 割り当てられているもの（0F 38 F0/F1 の MOVBE と
+    /// CRC32 の関係）に使う。
+    NoF2,
     /// 0x66 を要求する（MOVUPD など）。
     P66,
     /// 0xF2 を要求する（MOVSD など）。
@@ -253,10 +263,11 @@ pub struct MapInsn {
     pub ops: Vec<OpKind>,
     /// ModRM.reg によるグループ選択（/0 から /7）。None は /r または ModRM なし。
     pub group: Option<u8>,
-    /// グループ項目での ModRM.mod の選択。`Some(true)` は mod=11
-    /// （レジスタ形）のみ、`Some(false)` は mod!=11（メモリ形）のみ。
-    /// None は制約なし。0F AE の fence（mod=11）と clflush（mod!=11）
-    /// のように同じ /n で mod で分岐するエンコーディングに使う。
+    /// ModRM.mod の選択。`Some(true)` は mod=11（レジスタ形）のみ、
+    /// `Some(false)` は mod!=11（メモリ形）のみ。None は制約なし。
+    /// 0F AE の fence（mod=11）と clflush（mod!=11）のように同じ /n で
+    /// mod で分岐するエンコーディングや、メモリ形専用の非グループ項目
+    /// （LEA・MOVBE・MOVLPS ストアなど）に使う。
     pub group_mod: Option<bool>,
     /// 必須接頭辞の状態。
     pub pfx: PfxSel,

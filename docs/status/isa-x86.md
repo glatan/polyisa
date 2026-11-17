@@ -178,6 +178,8 @@
 | arpl | arpl_ew_gw | !m64 | alu |
 | blendpd | blendpd_xv_wv_ib | sse4_1 | alu |
 | blendps | blendps_xv_wv_ib | sse4_1 | alu |
+| blendvpd_xv_wv | blendvpd_xv_wv | sse4_1 | alu |
+| blendvps_xv_wv | blendvps_xv_wv | sse4_1 | alu |
 | bsf | bsf_gv_ev、bsf_r_rm | 真 | alu |
 | bsf | bsf_r_mem32、bsf_r_mem8、bsf_r_memnd、bsf_r_rip | 真 | load |
 | bsr | bsr_gv_ev、bsr_r_rm | 真 | alu |
@@ -340,6 +342,7 @@
 | lods | lods_v | 真 | load |
 | lodsb | lods_b | 真 | load |
 | loop | jcxz_jb、loop、loop_jb、loope_jb、loopne_jb | 真 | jump |
+| maskmovdqu | maskmovdqu_xv_xv | sse2 | store |
 | maskmovq | maskmovq_pv_qv | sse | store |
 | maxpd | maxpd_xv_wv | sse2 | alu |
 | maxps | maxps_xv_wv | sse | alu |
@@ -351,6 +354,8 @@
 | minsd | minsd、minsd_xv_wv | sse2 | alu |
 | minss | minss_xv_wv | sse | alu |
 | monitor | monitor | monitor | system |
+| mov | mov_ew_sr、mov_sr_ew | opd_o16 && adr_a16 | load |
+| mov | mov_eb_ib、mov_ev_iz | opd_o16 && adr_a16 | store |
 | mov | movaps_xv_wv、movss_xv_wv、movups_xv_wv | sse | load |
 | mov | movaps_wv_xv、movss_wv_xv、movups_wv_xv | sse | store |
 | mov | movapd_xv_wv、movsd_xv_wv、movupd_xv_wv | sse2 | load |
@@ -371,10 +376,14 @@
 | movdqa | movdqa_wv_xv | sse2 | store |
 | movdqu | movdqu_load_mem32、movdqu_load_mem8、movdqu_load_memnd、movdqu_load_sib、movdqu_load_xmm、movdqu_xv_wv | sse2 | load |
 | movdqu | movdqu_store_mem32、movdqu_store_mem8、movdqu_store_memnd、movdqu_store_sib、movdqu_store_xmm、movdqu_wv_xv | sse2 | store |
+| movhlps | movhlps_xv_xv | sse | alu |
+| movhlps | movhlps_xv_xv | sse2 | alu |
 | movhpd | movhpd_xv_wv | sse2 | load |
 | movhpd | movhpd_wv_xv | sse2 | store |
 | movhps | movhps_xmm_m64_mem8、movhps_xv_wv | sse | load |
 | movhps | movhps_wv_xv | sse | store |
+| movlhps | movlhps_xv_xv | sse | alu |
+| movlhps | movlhps_xv_xv | sse2 | alu |
 | movlpd | movlpd_xmm_m64_memnd、movlpd_xv_wv | sse2 | load |
 | movlpd | movlpd_wv_xv | sse2 | store |
 | movlps | movlps_xv_wv | sse | load |

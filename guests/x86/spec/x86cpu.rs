@@ -475,7 +475,7 @@ fn named_gate(mn: &str) -> Option<&'static [&'static str]> {
         }
         // SSE4.1。
         "ptest" | "pmuldq" | "pmulld" | "pcmpeqq" | "movntdqa" | "packusdw" | "blendps"
-        | "blendpd" | "pblendw" | "pblendvb" | "pextrb" | "pextrd" | "pextrq"
+        | "blendpd" | "blendvps" | "blendvpd" | "pblendw" | "pblendvb" | "pextrb" | "pextrd" | "pextrq"
         | "extractps" | "pinsrb" | "pinsrd" | "pinsrq" | "insertps" | "dpps" | "dppd"
         | "roundps" | "roundpd" | "roundss" | "roundsd" | "mpsadbw" | "phminposuw" => {
             &["sse4_1"]

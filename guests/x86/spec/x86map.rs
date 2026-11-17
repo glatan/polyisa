@@ -53,6 +53,35 @@ fn gm(name: &str, group: u8, reg_form: bool, ops: &[OpKind], syntax: &str, timin
     it
 }
 
+/// グループ選択・必須接頭辞・mod 制約を持つ命令項目。
+fn gmp(
+    name: &str,
+    group: u8,
+    reg_form: bool,
+    ops: &[OpKind],
+    pfx: PfxSel,
+    syntax: &str,
+    timing: &str,
+) -> MapInsn {
+    let mut it = mi(name, ops, Some(group), pfx, Pred::True, syntax, timing);
+    it.group_mod = Some(reg_form);
+    it
+}
+
+/// mod=11（レジスタ形）のみに解読する。
+fn mreg(it: MapInsn) -> MapInsn {
+    let mut it = it;
+    it.group_mod = Some(true);
+    it
+}
+
+/// mod!=11（メモリ形）のみに解読する。
+fn mmem(it: MapInsn) -> MapInsn {
+    let mut it = it;
+    it.group_mod = Some(false);
+    it
+}
+
 /// 実行モードの述語を作る。
 fn w(s: &str) -> Pred {
     polyisa_isadl::pred::parse(s).expect("valid when")
@@ -239,14 +268,38 @@ pub fn build_maps(m: &mut Model) {
         MapItem::Insn(0x89, n("mov_ev_gv", &[Ea(V), Reg(V)], "mov {e}, {g}", "load")),
         MapItem::Insn(0x8A, n("mov_gb_eb", &[Reg(B8), Ea(B8)], "mov {g}, {e}", "load")),
         MapItem::Insn(0x8B, n("mov_gv_ev", &[Reg(V), Ea(V)], "mov {g}, {e}", "load")),
-        MapItem::Insn(0x8C, n("mov_ew_sr", &[Ea(W16), RegS], "mov {e}, sreg", "load")),
-        MapItem::Insn(0x8D, n("lea_gv_m", &[Reg(V), Ea(V)], "lea {g}, {e}", "alu")),
-        MapItem::Insn(0x8E, n("mov_sr_ew", &[RegS, Ea(W16)], "mov sreg, {e}", "load")),
+        // MOV sreg は /0-/5 のみ有効（/6,/7 は #UD）。LEA は
+        // メモリ形のみ。
+        MapItem::Insn(0x8D, mmem(n("lea_gv_m", &[Reg(V), Ea(V)], "lea {g}, {e}", "alu"))),
         MapItem::Insn(
             0x8F,
             g("pop_ev", 0, &[Ea(V)], "pop {e}", "load"),
         ),
     ]);
+    // MOV sreg は近世 x86 で /0-/5 のみ有効。16 ビットモード
+    // （8088/186）では /6,/7 の上位ビットは無視され sreg & 3 の
+    // 別名として動くので、その形も受理する（意味論側が &3 で
+    // 捌く）。`opd_o16 && adr_a16` は 16 ビット実行モードの目印。
+    for grp in 0..6u8 {
+        primary.push(MapItem::Insn(
+            0x8C,
+            g("mov_ew_sr", grp, &[Ea(W16), RegS], "mov {e}, sreg", "load"),
+        ));
+        primary.push(MapItem::Insn(
+            0x8E,
+            g("mov_sr_ew", grp, &[RegS, Ea(W16)], "mov sreg, {e}", "load"),
+        ));
+    }
+    for grp in 6..8u8 {
+        primary.push(MapItem::Insn(
+            0x8C,
+            mi("mov_ew_sr", &[Ea(W16), RegS], Some(grp), PfxSel::Any, w("opd_o16 && adr_a16"), "mov {e}, sreg", "load"),
+        ));
+        primary.push(MapItem::Insn(
+            0x8E,
+            mi("mov_sr_ew", &[RegS, Ea(W16)], Some(grp), PfxSel::Any, w("opd_o16 && adr_a16"), "mov sreg, {e}", "load"),
+        ));
+    }
 
     // 40-4F: INC/DEC r32。64ビットモードでは REX 接頭辞なので非64のみ。
     for k in 0..8u8 {
@@ -312,11 +365,11 @@ pub fn build_maps(m: &mut Model) {
     }
     primary.push(MapItem::Insn(
         0xC4,
-        mi("les_gv_mp", &[Reg(V), Ea(V)], None, PfxSel::Any, w("!m64"), "les {g}, {e}", "load"),
+        mmem(mi("les_gv_mp", &[Reg(V), Ea(V)], None, PfxSel::Any, w("!m64"), "les {g}, {e}", "load")),
     ));
     primary.push(MapItem::Insn(
         0xC5,
-        mi("lds_gv_mp", &[Reg(V), Ea(V)], None, PfxSel::Any, w("!m64"), "lds {g}, {e}", "load"),
+        mmem(mi("lds_gv_mp", &[Reg(V), Ea(V)], None, PfxSel::Any, w("!m64"), "lds {g}, {e}", "load")),
     ));
     primary.push(MapItem::Insn(
         0xD4,
@@ -438,11 +491,11 @@ pub fn build_maps(m: &mut Model) {
                 "jump",
             ),
         ),
-        // C6/C7 は 8088 では ModRM.reg が全値で mov の別名になる（非グループ
-        // 宣言で reg を照合しない）。286 以降は /1-7 が #UD だが、デコーダは
-        // 全モードで受理する（既知の近似）。
-        MapItem::Insn(0xC6, n("mov_eb_ib", &[Ea(B8), Imm(B8)], "mov {e}, {i}", "store")),
-        MapItem::Insn(0xC7, n("mov_ev_iz", &[Ea(V), Imm(Z)], "mov {e}, {i}", "store")),
+        // C6/C7 は近世 x86 で /0 のみ有効（/1-/7 は #UD）。8088/186
+        // では全値が /0 の別名になるので、16 ビットモード限定の
+        // グループ項目を後ろで追加する。
+        MapItem::Insn(0xC6, g("mov_eb_ib", 0, &[Ea(B8), Imm(B8)], "mov {e}, {i}", "store")),
+        MapItem::Insn(0xC7, g("mov_ev_iz", 0, &[Ea(V), Imm(Z)], "mov {e}, {i}", "store")),
         MapItem::Insn(
             0xC8,
             n("enter_iw_ib", &[Imm(W16), Imm2(B8)], "enter {i}, {j}", "store"),
@@ -452,6 +505,17 @@ pub fn build_maps(m: &mut Model) {
         MapItem::Insn(0xCD, n("int_ib", &[Imm(B8)], "int {i}", "system")),
         MapItem::Insn(0xD7, n("xlat", &[], "xlat", "load")),
     ]);
+    // 8088/186 では C6/C7 の /1-/7 は /0 の別名として動く。
+    for grp in 1..8u8 {
+        primary.push(MapItem::Insn(
+            0xC6,
+            mi("mov_eb_ib", &[Ea(B8), Imm(B8)], Some(grp), PfxSel::Any, w("opd_o16 && adr_a16"), "mov {e}, {i}", "store"),
+        ));
+        primary.push(MapItem::Insn(
+            0xC7,
+            mi("mov_ev_iz", &[Ea(V), Imm(Z)], Some(grp), PfxSel::Any, w("opd_o16 && adr_a16"), "mov {e}, {i}", "store"),
+        ));
+    }
 
     // LOOP 系。
     for (byte, name) in [
@@ -599,9 +663,9 @@ pub fn build_maps(m: &mut Model) {
         MapItem::Insn(0xFF, g("inc_ev", 0, &[Ea(V)], "inc {e}", "alu")),
         MapItem::Insn(0xFF, g("dec_ev", 1, &[Ea(V)], "dec {e}", "alu")),
         MapItem::Insn(0xFF, g("call_ev", 2, &[Ea(V)], "call {e}", "jump")),
-        MapItem::Insn(0xFF, g("callf_rm", 3, &[Ea(V)], "callf {e}", "jump")),
+        MapItem::Insn(0xFF, gm("callf_rm", 3, false, &[Ea(V)], "callf {e}", "jump")),
         MapItem::Insn(0xFF, g("jmp_ev", 4, &[Ea(V)], "jmp {e}", "jump")),
-        MapItem::Insn(0xFF, g("jmpf_rm", 5, &[Ea(V)], "jmpf {e}", "jump")),
+        MapItem::Insn(0xFF, gm("jmpf_rm", 5, false, &[Ea(V)], "jmpf {e}", "jump")),
         MapItem::Insn(0xFF, g("push_ev", 6, &[Ea(V)], "push {e}", "store")),
     ]);
 
@@ -739,10 +803,12 @@ pub fn build_maps(m: &mut Model) {
         // /0 /1 /4 は FXSAVE/FXRSTOR/XSAVE（C1 の範囲）なので未宣言。
         MapItem::Insn(0xAE, gm("ldmxcsr_md", 2, false, &[Ea(D32)], "ldmxcsr {e}", "load")),
         MapItem::Insn(0xAE, gm("stmxcsr_md", 3, false, &[Ea(D32)], "stmxcsr {e}", "store")),
-        MapItem::Insn(0xAE, gm("lfence", 5, true, &[], "lfence", "alu")),
-        MapItem::Insn(0xAE, gm("mfence", 6, true, &[], "mfence", "alu")),
+        // fence は接頭辞なし。F3 0F AE は RDFSBASE/INCSSP/UMONITOR/
+        // PTWRITE 系、66/F2 も別命令なので Plain で切る。
+        MapItem::Insn(0xAE, gmp("lfence", 5, true, &[], PfxSel::Plain, "lfence", "alu")),
+        MapItem::Insn(0xAE, gmp("mfence", 6, true, &[], PfxSel::Plain, "mfence", "alu")),
         MapItem::Insn(0xAE, gm("clflush_mb", 7, false, &[Ea(B8)], "clflush {e}", "alu")),
-        MapItem::Insn(0xAE, gm("sfence", 7, true, &[], "sfence", "alu")),
+        MapItem::Insn(0xAE, gmp("sfence", 7, true, &[], PfxSel::Plain, "sfence", "alu")),
         // POPCNT（F3 0F B8）。接頭辞なしは TZCNT/JMPE で別物。
         MapItem::Insn(0xB8, mi("popcnt_gv_ev", &[Reg(V), Ea(V)], None, PfxSel::PF3, Pred::True, "popcnt {g}, {e}", "alu")),
         // CMPXCHG8B/16B（0F C7 /1、メモリ形のみ。REX.W で 16 バイト）。
@@ -825,8 +891,13 @@ pub fn build_maps(m: &mut Model) {
     // ModRM.r/m の XMM/メモリ（メモリ幅は意味論側が決める）。
     // 接頭辞なしの同オペコードは MMX 形（P = ModRM.reg の mm、
     // Q = ModRM.r/m の mm/m64）。
-    for (byte, base) in [(0x10u8, "movup"), (0x28, "movap")] {
-        for (sel, suf) in [(PfxSel::Plain, "s"), (PfxSel::P66, "d")] {
+    // MOVUP は F2/F3 がスカラ形に取られるため Plain、
+    // MOVAP は F2/F3 が無視されるので No66。
+    for (byte, base, np) in [
+        (0x10u8, "movup", PfxSel::Plain),
+        (0x28, "movap", PfxSel::No66),
+    ] {
+        for (sel, suf) in [(np, "s"), (PfxSel::P66, "d")] {
             let mn = format!("{base}{suf}");
             m0f.push(MapItem::Insn(
                 byte,
@@ -854,26 +925,35 @@ pub fn build_maps(m: &mut Model) {
     }
     m0f.extend([
         // MOVLP/MOVHP/MOVH/MOVL の高下半分移動。
-        MapItem::Insn(0x12, mi("movlps_xv_wv", &[RegX, RmX], None, PfxSel::Plain, Pred::True, "movlps {x}, {w}", "load")),
-        MapItem::Insn(0x12, mi("movlpd_xv_wv", &[RegX, RmX], None, PfxSel::P66, Pred::True, "movlpd {x}, {w}", "load")),
+        // 0F 12: NP+mem=MOVLPS、NP+reg=MOVHLPS、66+mem=MOVLPD、
+        // 66+reg は MOVHLPS（66 は無視される）。F2=MOVDDUP、F3=MOVSLDUP。
+        MapItem::Insn(0x12, mmem(mi("movlps_xv_wv", &[RegX, RmX], None, PfxSel::Plain, Pred::True, "movlps {x}, {w}", "load"))),
+        MapItem::Insn(0x12, mreg(mi("movhlps_xv_xv", &[RegX, RmX], None, PfxSel::Plain, Pred::True, "movhlps {x}, {w}", "alu"))),
+        MapItem::Insn(0x12, mreg(mi("movhlps_xv_xv", &[RegX, RmX], None, PfxSel::P66, Pred::True, "movhlps {x}, {w}", "alu"))),
+        MapItem::Insn(0x12, mmem(mi("movlpd_xv_wv", &[RegX, RmX], None, PfxSel::P66, Pred::True, "movlpd {x}, {w}", "load"))),
         MapItem::Insn(0x12, mi("movddup_xv_wv", &[RegX, RmX], None, PfxSel::PF2, Pred::True, "movddup {x}, {w}", "load")),
         MapItem::Insn(0x12, mi("movsldup_xv_wv", &[RegX, RmX], None, PfxSel::PF3, Pred::True, "movsldup {x}, {w}", "load")),
-        MapItem::Insn(0x13, mi("movlps_wv_xv", &[RmX, RegX], None, PfxSel::Plain, Pred::True, "movlps {w}, {x}", "store")),
-        MapItem::Insn(0x13, mi("movlpd_wv_xv", &[RmX, RegX], None, PfxSel::P66, Pred::True, "movlpd {w}, {x}", "store")),
-        MapItem::Insn(0x16, mi("movhps_xv_wv", &[RegX, RmX], None, PfxSel::Plain, Pred::True, "movhps {x}, {w}", "load")),
-        MapItem::Insn(0x16, mi("movhpd_xv_wv", &[RegX, RmX], None, PfxSel::P66, Pred::True, "movhpd {x}, {w}", "load")),
+        // ストアはメモリ形のみ。F2/F3 は無視される（No66）。
+        MapItem::Insn(0x13, mmem(mi("movlps_wv_xv", &[RmX, RegX], None, PfxSel::No66, Pred::True, "movlps {w}, {x}", "store"))),
+        MapItem::Insn(0x13, mmem(mi("movlpd_wv_xv", &[RmX, RegX], None, PfxSel::P66, Pred::True, "movlpd {w}, {x}", "store"))),
+        // 0F 16: NP+mem=MOVHPS、NP/66+reg=MOVLHPS（66 無視）、
+        // 66+mem=MOVHPD。F2=MOVLDUP（未宣言）、F3=MOVSHDUP。
+        MapItem::Insn(0x16, mmem(mi("movhps_xv_wv", &[RegX, RmX], None, PfxSel::Plain, Pred::True, "movhps {x}, {w}", "load"))),
+        MapItem::Insn(0x16, mreg(mi("movlhps_xv_xv", &[RegX, RmX], None, PfxSel::Plain, Pred::True, "movlhps {x}, {w}", "alu"))),
+        MapItem::Insn(0x16, mreg(mi("movlhps_xv_xv", &[RegX, RmX], None, PfxSel::P66, Pred::True, "movlhps {x}, {w}", "alu"))),
+        MapItem::Insn(0x16, mmem(mi("movhpd_xv_wv", &[RegX, RmX], None, PfxSel::P66, Pred::True, "movhpd {x}, {w}", "load"))),
         MapItem::Insn(0x16, mi("movshdup_xv_wv", &[RegX, RmX], None, PfxSel::PF3, Pred::True, "movshdup {x}, {w}", "load")),
-        MapItem::Insn(0x17, mi("movhps_wv_xv", &[RmX, RegX], None, PfxSel::Plain, Pred::True, "movhps {w}, {x}", "store")),
-        MapItem::Insn(0x17, mi("movhpd_wv_xv", &[RmX, RegX], None, PfxSel::P66, Pred::True, "movhpd {w}, {x}", "store")),
+        MapItem::Insn(0x17, mmem(mi("movhps_wv_xv", &[RmX, RegX], None, PfxSel::No66, Pred::True, "movhps {w}, {x}", "store"))),
+        MapItem::Insn(0x17, mmem(mi("movhpd_wv_xv", &[RmX, RegX], None, PfxSel::P66, Pred::True, "movhpd {w}, {x}", "store"))),
         // UNPCKLPS/PD・UNPCKHPS/PD（0F 14/15）。
-        MapItem::Insn(0x14, mi("unpcklps_xv_wv", &[RegX, RmX], None, PfxSel::Plain, Pred::True, "unpcklps {x}, {w}", "alu")),
+        MapItem::Insn(0x14, mi("unpcklps_xv_wv", &[RegX, RmX], None, PfxSel::No66, Pred::True, "unpcklps {x}, {w}", "alu")),
         MapItem::Insn(0x14, mi("unpcklpd_xv_wv", &[RegX, RmX], None, PfxSel::P66, Pred::True, "unpcklpd {x}, {w}", "alu")),
-        MapItem::Insn(0x15, mi("unpckhps_xv_wv", &[RegX, RmX], None, PfxSel::Plain, Pred::True, "unpckhps {x}, {w}", "alu")),
+        MapItem::Insn(0x15, mi("unpckhps_xv_wv", &[RegX, RmX], None, PfxSel::No66, Pred::True, "unpckhps {x}, {w}", "alu")),
         MapItem::Insn(0x15, mi("unpckhpd_xv_wv", &[RegX, RmX], None, PfxSel::P66, Pred::True, "unpckhpd {x}, {w}", "alu")),
         // スカラ比較。
-        MapItem::Insn(0x2E, mi("ucomiss_xv_wv", &[RegX, RmX], None, PfxSel::Plain, Pred::True, "ucomiss {x}, {w}", "alu")),
+        MapItem::Insn(0x2E, mi("ucomiss_xv_wv", &[RegX, RmX], None, PfxSel::No66, Pred::True, "ucomiss {x}, {w}", "alu")),
         MapItem::Insn(0x2E, mi("ucomisd_xv_wv", &[RegX, RmX], None, PfxSel::P66, Pred::True, "ucomisd {x}, {w}", "alu")),
-        MapItem::Insn(0x2F, mi("comiss_xv_wv", &[RegX, RmX], None, PfxSel::Plain, Pred::True, "comiss {x}, {w}", "alu")),
+        MapItem::Insn(0x2F, mi("comiss_xv_wv", &[RegX, RmX], None, PfxSel::No66, Pred::True, "comiss {x}, {w}", "alu")),
         MapItem::Insn(0x2F, mi("comisd_xv_wv", &[RegX, RmX], None, PfxSel::P66, Pred::True, "comisd {x}, {w}", "alu")),
         // 変換。
         MapItem::Insn(0x2A, mi("cvtsi2ss_xv_ev", &[RegX, Ea(V)], None, PfxSel::PF3, Pred::True, "cvtsi2ss {x}, {e}", "alu")),
@@ -882,8 +962,8 @@ pub fn build_maps(m: &mut Model) {
         MapItem::Insn(0x2C, mi("cvttsd2si_gv_wv", &[Reg(V), RmX], None, PfxSel::PF2, Pred::True, "cvttsd2si {g}, {w}", "alu")),
         MapItem::Insn(0x2D, mi("cvtss2si_gv_wv", &[Reg(V), RmX], None, PfxSel::PF3, Pred::True, "cvtss2si {g}, {w}", "alu")),
         MapItem::Insn(0x2D, mi("cvtsd2si_gv_wv", &[Reg(V), RmX], None, PfxSel::PF2, Pred::True, "cvtsd2si {g}, {w}", "alu")),
-        MapItem::Insn(0x50, mi("movmskps_gv_wv", &[Reg(V), RmX], None, PfxSel::Plain, Pred::True, "movmskps {g}, {w}", "alu")),
-        MapItem::Insn(0x50, mi("movmskpd_gv_wv", &[Reg(V), RmX], None, PfxSel::P66, Pred::True, "movmskpd {g}, {w}", "alu")),
+        MapItem::Insn(0x50, mreg(mi("movmskps_gv_wv", &[Reg(V), RmX], None, PfxSel::No66, Pred::True, "movmskps {g}, {w}", "alu"))),
+        MapItem::Insn(0x50, mreg(mi("movmskpd_gv_wv", &[Reg(V), RmX], None, PfxSel::P66, Pred::True, "movmskpd {g}, {w}", "alu"))),
         MapItem::Insn(0x5A, mi("cvtps2pd_xv_wv", &[RegX, RmX], None, PfxSel::Plain, Pred::True, "cvtps2pd {x}, {w}", "alu")),
         MapItem::Insn(0x5A, mi("cvtpd2ps_xv_wv", &[RegX, RmX], None, PfxSel::P66, Pred::True, "cvtpd2ps {x}, {w}", "alu")),
         MapItem::Insn(0x5A, mi("cvtss2sd_xv_wv", &[RegX, RmX], None, PfxSel::PF3, Pred::True, "cvtss2sd {x}, {w}", "alu")),
@@ -907,11 +987,11 @@ pub fn build_maps(m: &mut Model) {
         MapItem::Insn(0xC2, mi("cmpss_xv_wv_ib", &[RegX, RmX, Imm(B8)], None, PfxSel::PF3, Pred::True, "cmpss {x}, {w}, {i}", "alu")),
         MapItem::Insn(0xC2, mi("cmpsd_xv_wv_ib", &[RegX, RmX, Imm(B8)], None, PfxSel::PF2, Pred::True, "cmpsd {x}, {w}, {i}", "alu")),
         MapItem::Insn(0xC4, mi("pinsrw_xv_ew_ib", &[RegX, Ea(W16), Imm(B8)], None, PfxSel::P66, Pred::True, "pinsrw {x}, {e}, {i}", "alu")),
-        MapItem::Insn(0xC5, mi("pextrw_gv_wv_ib", &[Reg(V), RmX, Imm(B8)], None, PfxSel::P66, Pred::True, "pextrw {g}, {w}, {i}", "alu")),
-        MapItem::Insn(0xC6, mi("shufps_xv_wv_ib", &[RegX, RmX, Imm(B8)], None, PfxSel::Plain, Pred::True, "shufps {x}, {w}, {i}", "alu")),
+        MapItem::Insn(0xC5, mreg(mi("pextrw_gv_wv_ib", &[Reg(V), RmX, Imm(B8)], None, PfxSel::P66, Pred::True, "pextrw {g}, {w}, {i}", "alu"))),
+        MapItem::Insn(0xC6, mi("shufps_xv_wv_ib", &[RegX, RmX, Imm(B8)], None, PfxSel::No66, Pred::True, "shufps {x}, {w}, {i}", "alu")),
         MapItem::Insn(0xC6, mi("shufpd_xv_wv_ib", &[RegX, RmX, Imm(B8)], None, PfxSel::P66, Pred::True, "shufpd {x}, {w}, {i}", "alu")),
         // PMOVMSKB。
-        MapItem::Insn(0xD7, mi("pmovmskb_gv_wv", &[Reg(V), RmX], None, PfxSel::P66, Pred::True, "pmovmskb {g}, {w}", "alu")),
+        MapItem::Insn(0xD7, mreg(mi("pmovmskb_gv_wv", &[Reg(V), RmX], None, PfxSel::P66, Pred::True, "pmovmskb {g}, {w}", "alu"))),
     ]);
     // パック浮動小数点（51, 58, 59, 5C, 5D, 5E, 5F）。名前は map insn。
     for (byte, mn) in [
@@ -951,17 +1031,17 @@ pub fn build_maps(m: &mut Model) {
     }
     m0f.push(MapItem::Insn(
         0xF0,
-        mi("lddqu_xv_mv", &[RegX, RmX], None, PfxSel::PF2, Pred::True, "lddqu {x}, {w}", "load"),
+        mmem(mi("lddqu_xv_mv", &[RegX, RmX], None, PfxSel::PF2, Pred::True, "lddqu {x}, {w}", "load")),
     ));
     // パック論理（54-57）とパック整数の論理（DB, DF, EB, EF）。
     for (byte, mn, sel) in [
-        (0x54u8, "andps", PfxSel::Plain),
+        (0x54u8, "andps", PfxSel::No66),
         (0x54, "andpd", PfxSel::P66),
-        (0x55, "andnps", PfxSel::Plain),
+        (0x55, "andnps", PfxSel::No66),
         (0x55, "andnpd", PfxSel::P66),
-        (0x56, "orps", PfxSel::Plain),
+        (0x56, "orps", PfxSel::No66),
         (0x56, "orpd", PfxSel::P66),
-        (0x57, "xorps", PfxSel::Plain),
+        (0x57, "xorps", PfxSel::No66),
         (0x57, "xorpd", PfxSel::P66),
         (0xDB, "pand", PfxSel::P66),
         (0xDF, "pandn", PfxSel::P66),
@@ -1048,7 +1128,7 @@ pub fn build_maps(m: &mut Model) {
         for (grp, mn) in entries.iter().copied() {
             m0f.push(MapItem::Insn(
                 byte,
-                mi(&format!("{mn}_qv_ib"), &[RmM, Imm(B8)], Some(grp), PfxSel::Plain, Pred::True, "{op} {q}, {i}", "alu"),
+                mi(&format!("{mn}_qv_ib"), &[RmM, Imm(B8)], Some(grp), PfxSel::No66, Pred::True, "{op} {q}, {i}", "alu"),
             ));
         }
     }
@@ -1113,28 +1193,35 @@ pub fn build_maps(m: &mut Model) {
     ] {
         m0f.push(MapItem::Insn(
             byte,
-            mi(&format!("{mn}_pv_qv"), &[RegM, RmM], None, PfxSel::Plain, Pred::True, "{op} {p}, {q}", "alu"),
+            mi(&format!("{mn}_pv_qv"), &[RegM, RmM], None, PfxSel::No66, Pred::True, "{op} {p}, {q}", "alu"),
         ));
     }
     // MMX の移動・シャッフル・特殊形。
     m0f.extend([
         // MOVD/MOVQ mm, r/m（osize が 64 なら movq、さもなくば movd）。
-        MapItem::Insn(0x6E, mi("movd_pv_ev", &[RegM, Ea(V)], None, PfxSel::Plain, Pred::True, "movd {p}, {e}", "load")),
-        MapItem::Insn(0x7E, mi("movd_ev_pv", &[Ea(V), RegM], None, PfxSel::Plain, Pred::True, "movd {e}, {p}", "store")),
+        // MMX 形は F2/F3 を無視して解読するが、0F 6F/7E/7F は
+        // F3 が MOVDQU/MOVQ xmm に取られるので No66F3。
+        MapItem::Insn(0x6E, mi("movd_pv_ev", &[RegM, Ea(V)], None, PfxSel::No66, Pred::True, "movd {p}, {e}", "load")),
+        MapItem::Insn(0x7E, mi("movd_ev_pv", &[Ea(V), RegM], None, PfxSel::No66F3, Pred::True, "movd {e}, {p}", "store")),
         // MOVQ mm, mm/m64。
-        MapItem::Insn(0x6F, mi("movq_pv_qv", &[RegM, RmM], None, PfxSel::Plain, Pred::True, "movq {p}, {q}", "load")),
-        MapItem::Insn(0x7F, mi("movq_qv_pv", &[RmM, RegM], None, PfxSel::Plain, Pred::True, "movq {q}, {p}", "store")),
-        // PSHUFW（SSE1 で追加された mm シャッフル）。
+        MapItem::Insn(0x6F, mi("movq_pv_qv", &[RegM, RmM], None, PfxSel::No66F3, Pred::True, "movq {p}, {q}", "load")),
+        MapItem::Insn(0x7F, mi("movq_qv_pv", &[RmM, RegM], None, PfxSel::No66F3, Pred::True, "movq {q}, {p}", "store")),
+        // PSHUFW（SSE1 で追加された mm シャッフル）。66/F2/F3 は
+        // 全て xmm 形に取られるので Plain のまま。
         MapItem::Insn(0x70, mi("pshufw_pv_qv_ib", &[RegM, RmM, Imm(B8)], None, PfxSel::Plain, Pred::True, "pshufw {p}, {q}, {i}", "alu")),
         // EMMS。x87 タグのクリア（当モデルでは建築状態の変化なし）。
-        MapItem::Insn(0x77, mi("emms", &[], None, PfxSel::Plain, Pred::True, "emms", "alu")),
+        // 接頭辞はすべて無視される。
+        MapItem::Insn(0x77, mi("emms", &[], None, PfxSel::Any, Pred::True, "emms", "alu")),
         // PINSRW/PEXTRW/PMOVMSKB（SSE1 で mm にも拡張）。
-        MapItem::Insn(0xC4, mi("pinsrw_pv_ew_ib", &[RegM, Ea(W16), Imm(B8)], None, PfxSel::Plain, Pred::True, "pinsrw {p}, {e}, {i}", "alu")),
-        MapItem::Insn(0xC5, mi("pextrw_gv_pv_ib", &[Reg(V), RmM, Imm(B8)], None, PfxSel::Plain, Pred::True, "pextrw {g}, {q}, {i}", "alu")),
-        MapItem::Insn(0xD7, mi("pmovmskb_gv_qv", &[Reg(V), RmM], None, PfxSel::Plain, Pred::True, "pmovmskb {g}, {q}", "alu")),
-        // MASKMOVQ（DS:(E)DI へマスク書き込み）と MOVNTQ。
-        MapItem::Insn(0xE7, mi("movntq_qv_pv", &[RmM, RegM], None, PfxSel::Plain, Pred::True, "movntq {q}, {p}", "store")),
-        MapItem::Insn(0xF7, mi("maskmovq_pv_qv", &[RegM, RmM], None, PfxSel::Plain, Pred::True, "maskmovq {p}, {q}", "store")),
+        // PEXTRW/PMOVMSKB はレジスタ形のみ。
+        MapItem::Insn(0xC4, mi("pinsrw_pv_ew_ib", &[RegM, Ea(W16), Imm(B8)], None, PfxSel::No66, Pred::True, "pinsrw {p}, {e}, {i}", "alu")),
+        MapItem::Insn(0xC5, mreg(mi("pextrw_gv_pv_ib", &[Reg(V), RmM, Imm(B8)], None, PfxSel::No66, Pred::True, "pextrw {g}, {q}, {i}", "alu"))),
+        MapItem::Insn(0xD7, mreg(mi("pmovmskb_gv_qv", &[Reg(V), RmM], None, PfxSel::No66, Pred::True, "pmovmskb {g}, {q}", "alu"))),
+        // MASKMOVQ（DS:(E)DI へマスク書き込み、レジスタ形のみ）と
+        // MOVNTQ（メモリ形のみ）。
+        MapItem::Insn(0xE7, mmem(mi("movntq_qv_pv", &[RmM, RegM], None, PfxSel::No66, Pred::True, "movntq {q}, {p}", "store"))),
+        MapItem::Insn(0xF7, mreg(mi("maskmovq_pv_qv", &[RegM, RmM], None, PfxSel::No66, Pred::True, "maskmovq {p}, {q}", "store"))),
+        MapItem::Insn(0xF7, mreg(mi("maskmovdqu_xv_xv", &[RegX, RmX], None, PfxSel::P66, Pred::True, "maskmovdqu {x}, {w}", "store"))),
     ]);
     // PUSH/POP FS・GS。
     m0f.extend([
@@ -1228,6 +1315,8 @@ fn build_map_0f38(m: &mut Model) {
     x(0x3F, "pmaxud_xv_wv");
     x(0x40, "pmulld_xv_wv");
     x(0x10, "pblendvb_xv_wv");
+    x(0x14, "blendvps_xv_wv");
+    x(0x15, "blendvpd_xv_wv");
     x(0x41, "phminposuw_xv_wv");
     // CRC32（F2 0F38 F0/F1）。MOVBE と同バイトで接頭辞で分ける。
     v.push(MapItem::Insn(
@@ -1258,19 +1347,25 @@ fn build_map_0f38(m: &mut Model) {
     ] {
         v.push(MapItem::Insn(
             op,
-            mi(&format!("{mn}_pv_qv"), &[RegM, RmM], None, PfxSel::Plain, Pred::True, "", "alu"),
+            mi(&format!("{mn}_pv_qv"), &[RegM, RmM], None, PfxSel::No66, Pred::True, "", "alu"),
         ));
     }
-    // MOVBE。必須接頭辞はなく、0x66 は 16 ビット幅を選ぶ。
-    for p in [PfxSel::Plain, PfxSel::P66] {
+    // MOVBE。必須接頭辞はなく 0x66 は 16 ビット幅を選ぶ。
+    // F3 は無視されるが F2 は CRC32 に取られる。メモリ形のみ。
+    for (op, name, ops, syn, tim) in [
+        (0xF0u8, "movbe_gv_mv", &[Reg(V), Ea(V)] as &[OpKind], "movbe {g}, {e}", "load"),
+        (0xF1, "movbe_mv_gv", &[Ea(V), Reg(V)], "movbe {e}, {g}", "store"),
+    ] {
         v.push(MapItem::Insn(
-            0xF0,
-            mi("movbe_gv_mv", &[Reg(V), Ea(V)], None, p, Pred::True, "movbe {g}, {e}", "load"),
+            op,
+            mmem(mi(name, ops, None, PfxSel::NoF2, Pred::True, syn, tim)),
         ));
-        v.push(MapItem::Insn(
-            0xF1,
-            mi("movbe_mv_gv", &[Ea(V), Reg(V)], None, p, Pred::True, "movbe {e}, {g}", "store"),
-        ));
+    }
+    // MOVNTDQA はメモリ形のみ。
+    for it in v.iter_mut() {
+        if let MapItem::Insn(0x2A, mi) = it {
+            mi.group_mod = Some(false);
+        }
     }
     m.maps.push(MapDecl {
         name: "map_0f38".to_string(),
@@ -1293,7 +1388,7 @@ fn build_map_0f3a(m: &mut Model) {
         MapItem::Insn(0x0E, mi("pblendw_xv_wv_ib", &[RegX, RmX, ib], None, PfxSel::P66, Pred::True, "pblendw {x}, {w}, {i}", "alu")),
         MapItem::Insn(0x0F, mi("palignr_xv_wv_ib", &[RegX, RmX, ib], None, PfxSel::P66, Pred::True, "palignr {x}, {w}, {i}", "alu")),
         // PALIGNR の MMX 形（接頭辞なし）。
-        MapItem::Insn(0x0F, mi("palignr_pv_qv_ib", &[RegM, RmM, ib], None, PfxSel::Plain, Pred::True, "palignr {p}, {q}, {i}", "alu")),
+        MapItem::Insn(0x0F, mi("palignr_pv_qv_ib", &[RegM, RmM, ib], None, PfxSel::No66, Pred::True, "palignr {p}, {q}, {i}", "alu")),
         MapItem::Insn(0x14, mi("pextrb_eb_xv", &[Ea(B8), RegX, ib], None, PfxSel::P66, Pred::True, "pextrb {e}, {x}, {i}", "store")),
         MapItem::Insn(0x15, mi("pextrw_ew_xv", &[Ea(W16), RegX, ib], None, PfxSel::P66, Pred::True, "pextrw {e}, {x}, {i}", "store")),
         MapItem::Insn(0x16, mi("pextrd_ed_xv", &[Ea(V), RegX, ib], None, PfxSel::P66, Pred::True, "pextrd {e}, {x}, {i}", "store")),

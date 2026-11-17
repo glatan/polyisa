@@ -3485,6 +3485,8 @@ fn dispatch_map<B: Backend>(
         }
         Insn::MovlpsWvXv | Insn::MovlpdWvXv => sem_ea::movl_st(b, d, &ea),
         Insn::MovhpsXvWv | Insn::MovhpdXvWv | Insn::MovshdupXvWv => sem_ea::movh_d(b, d, &ea),
+        Insn::MovhlpsXvXv => sem_ea::movhlps_d(b, d, &ea),
+        Insn::MovlhpsXvXv => sem_ea::movlhps_d(b, d, &ea),
         Insn::MovhpsWvXv | Insn::MovhpdWvXv => sem_ea::movh_st(b, d, &ea),
         Insn::MovqXvWv => sem_ea::movq_x_w(b, d, &ea),
         Insn::MovqWvXv => sem_ea::movq_w_x(b, d, &ea),
@@ -3796,8 +3798,8 @@ fn dispatch_map<B: Backend>(
         Insn::PmuludqPvQv => sem_ea::mmuludq(b, d, &ea),
         Insn::PmaddwdPvQv => sem_ea::mmaddwd(b, d, &ea),
         Insn::PsadbwPvQv => sem_ea::msadbw(b, d, &ea),
-        Insn::MovdPvEv => sem_ea::movd_pv_ev(b, 32, d, &ea),
-        Insn::MovdEvPv => sem_ea::movd_ev_pv(b, 32, d, &ea),
+        Insn::MovdPvEv => sem_ea::movd_pv_ev(b, w, d, &ea),
+        Insn::MovdEvPv => sem_ea::movd_ev_pv(b, w, d, &ea),
         Insn::MovqPvQv => sem_ea::movq_pv_qv(b, d, &ea),
         Insn::MovqQvPv => sem_ea::movq_qv_pv(b, d, &ea),
         Insn::PshufwPvQvIb => sem_ea::mshufw(b, d.imm as u8, d, &ea),
@@ -3816,6 +3818,7 @@ fn dispatch_map<B: Backend>(
             }
             sem_ea::maskmovq(b, d, &ea, seg)
         }
+        Insn::MaskmovdquXvXv => sem_ea::maskmovdqu(b, d, &ea, seg),
         Insn::Emms => sem_ea::emms(b),
         // ===== 0F 38（SSSE3/SSE4.1/MOVBE）=====
         Insn::PshufbXvWv => sem_ea::pshufb(b, d, &ea),
@@ -3863,6 +3866,8 @@ fn dispatch_map<B: Backend>(
         Insn::MovbeGvMv => sem_ea::movbe_ld(b, w, reg, d, &ea),
         Insn::MovbeMvGv => sem_ea::movbe_st(b, w, reg, d, &ea),
         Insn::PblendvbXvWv => sem_ea::pblendvb(b, d, &ea),
+        Insn::BlendvpsXvWv => sem_ea::blendv(b, d, &ea, 32),
+        Insn::BlendvpdXvWv => sem_ea::blendv(b, d, &ea, 64),
         Insn::PhminposuwXvWv => sem_ea::phminposuw(b, d, &ea),
         Insn::Crc32GvEb => sem_ea::crc32(b, 8, d, &ea),
         Insn::Crc32GvEv => sem_ea::crc32(b, u32::from(w), d, &ea),
