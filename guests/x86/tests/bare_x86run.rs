@@ -16739,3 +16739,190 @@ fn run_a1_pabs_mm() {
     let (out, _) = run32(&prog, 100);
     assert_eq!(out, Outcome::Exit(3));
 }
+
+// ---- A2: 残り x87 ----
+
+#[test]
+fn run_a2_ftst_fxam() {
+    // ftst: 1.0 → C ビット全クリア、0.0 → C3。fxam: 0.0 → Zero(100)=C3、
+    // 1.0 → Normal(010)=C2。fsw は fnstsw m16 で退避する。
+    let mut prog = vec![
+        0xD9, 0x05, 0x40, 0x10, 0x00, 0x00, // fld dword [0x1040]
+        0xD9, 0xE4, // ftst
+        0xDD, 0x3D, 0x00, 0x20, 0x00, 0x00, // fnstsw word [0x2000]
+        0xD9, 0xEE, // fldz
+        0xD9, 0xE4, // ftst
+        0xDD, 0x3D, 0x02, 0x20, 0x00, 0x00, // fnstsw word [0x2002]
+        0xD9, 0xE5, // fxam
+        0xDD, 0x3D, 0x04, 0x20, 0x00, 0x00, // fnstsw word [0x2004]
+        0xD9, 0xE8, // fld1
+        0xD9, 0xE5, // fxam
+        0xDD, 0x3D, 0x06, 0x20, 0x00, 0x00, // fnstsw word [0x2006]
+        0xD9, 0xE8, // fld1
+        0xD9, 0xE0, // fchs → -1.0
+        0xD9, 0xE5, // fxam → Normal + C0
+        0xDD, 0x3D, 0x08, 0x20, 0x00, 0x00, // fnstsw word [0x2008]
+        0xB8, 0x01, 0x00, 0x00, 0x00, 0xCD, 0x80,
+    ];
+    prog.resize(0x40, 0x90);
+    prog.extend_from_slice(&0x3f800000u32.to_le_bytes());
+    let (out, env) = run32(&prog, 50);
+    assert_eq!(out, Outcome::Exit(0));
+    let mut b2 = [0u8; 2];
+    env.backend
+        .mem
+        .read(VirtAddr(0x2000), &mut b2, polyisa_mem::Access::DATA_LE)
+        .unwrap();
+    assert_eq!(u16::from_le_bytes(b2) & 0x4700, 0);
+    env.backend
+        .mem
+        .read(VirtAddr(0x2002), &mut b2, polyisa_mem::Access::DATA_LE)
+        .unwrap();
+    assert_eq!(u16::from_le_bytes(b2) & 0x4700, 0x4000);
+    env.backend
+        .mem
+        .read(VirtAddr(0x2004), &mut b2, polyisa_mem::Access::DATA_LE)
+        .unwrap();
+    assert_eq!(u16::from_le_bytes(b2) & 0x4700, 0x4000);
+    env.backend
+        .mem
+        .read(VirtAddr(0x2006), &mut b2, polyisa_mem::Access::DATA_LE)
+        .unwrap();
+    assert_eq!(u16::from_le_bytes(b2) & 0x4700, 0x0400);
+    env.backend
+        .mem
+        .read(VirtAddr(0x2008), &mut b2, polyisa_mem::Access::DATA_LE)
+        .unwrap();
+    assert_eq!(u16::from_le_bytes(b2) & 0x4700, 0x0500);
+}
+
+#[test]
+fn run_a2_fcompp_fucompp() {
+    // 等値の 2 ポップ比較で C3=1。両命令とも top は元に戻る。
+    let prog: &[u8] = &[
+        0xD9, 0xE8, 0xD9, 0xE8, // fld1; fld1
+        0xDE, 0xD9, // fcompp
+        0xDD, 0x3D, 0x00, 0x20, 0x00, 0x00, // fnstsw word [0x2000]
+        0xD9, 0xE8, 0xD9, 0xE8, 0xDA, 0xE9, // fucompp
+        0xDD, 0x3D, 0x02, 0x20, 0x00, 0x00, 0xB8, 0x01, 0x00, 0x00, 0x00, 0xCD, 0x80,
+    ];
+    let (out, mut env) = run32(prog, 50);
+    assert_eq!(out, Outcome::Exit(0));
+    let mut b2 = [0u8; 2];
+    env.backend
+        .mem
+        .read(VirtAddr(0x2000), &mut b2, polyisa_mem::Access::DATA_LE)
+        .unwrap();
+    assert_eq!(u16::from_le_bytes(b2) & 0x4700, 0x4000);
+    env.backend
+        .mem
+        .read(VirtAddr(0x2002), &mut b2, polyisa_mem::Access::DATA_LE)
+        .unwrap();
+    assert_eq!(u16::from_le_bytes(b2) & 0x4700, 0x4000);
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::top_ref()), 0);
+}
+
+#[test]
+fn run_a2_fscale_fxtract_fprem() {
+    // fscale: 3.0 * 2^2 = 12.0。fxtract: 8.0 → 指数 3.0 / 仮数 1.0。
+    // fprem: 7 mod 2 = 1.0（trunc）。fprem1: 3.5→RNE 4 → 7-8 = -1.0。
+    let mut prog = vec![
+        0xDD, 0x05, 0x80, 0x10, 0x00, 0x00, // fld qword [0x1080] = 2.0
+        0xDD, 0x05, 0x88, 0x10, 0x00, 0x00, // fld qword [0x1088] = 3.0
+        0xD9, 0xFD, // fscale
+        0xDD, 0x1D, 0x00, 0x20, 0x00, 0x00, // fstp qword [0x2000]
+        0xDD, 0x05, 0x90, 0x10, 0x00, 0x00, // fld qword [0x1090] = 8.0
+        0xD9, 0xF4, // fxtract
+        0xDD, 0x1D, 0x08, 0x20, 0x00, 0x00, // fstp qword [0x2008]
+        0xDD, 0x1D, 0x10, 0x20, 0x00, 0x00, // fstp qword [0x2010]
+        0xDD, 0x05, 0x80, 0x10, 0x00, 0x00, // fld 2.0
+        0xDD, 0x05, 0x98, 0x10, 0x00, 0x00, // fld qword [0x1098] = 7.0
+        0xD9, 0xF8, // fprem
+        0xDD, 0x1D, 0x18, 0x20, 0x00, 0x00, // fstp qword [0x2018]
+        0xDD, 0x05, 0x80, 0x10, 0x00, 0x00, // fld 2.0
+        0xDD, 0x05, 0x98, 0x10, 0x00, 0x00, // fld 7.0
+        0xD9, 0xF5, // fprem1
+        0xDD, 0x1D, 0x20, 0x20, 0x00, 0x00, // fstp qword [0x2020]
+        0xB8, 0x01, 0x00, 0x00, 0x00, 0xCD, 0x80,
+    ];
+    prog.resize(0x80, 0x90);
+    for v in [2.0f64, 3.0, 8.0, 7.0] {
+        prog.extend_from_slice(&v.to_bits().to_le_bytes());
+    }
+    let (out, env) = run32(&prog, 50);
+    assert_eq!(out, Outcome::Exit(0));
+    let mut b8 = [0u8; 8];
+    for (off, want) in [
+        (0x2000, 12.0f64),
+        // fxtract: ST(0)=仮数 1.0 が先、ST(1)=指数 3.0 が次。
+        (0x2008, 1.0),
+        (0x2010, 3.0),
+        (0x2018, 1.0),
+        (0x2020, -1.0),
+    ] {
+        env.backend
+            .mem
+            .read(VirtAddr(off), &mut b8, polyisa_mem::Access::DATA_LE)
+            .unwrap();
+        assert_eq!(
+            f64::from_bits(u64::from_le_bytes(b8)),
+            want,
+            "offset {off:#x}"
+        );
+    }
+}
+
+#[test]
+fn run_a2_fnstenv_fldenv() {
+    // fldcw で区別可能な FCW を設定 → fld1 → fnstenv → finit → fldenv で
+    // FCW/FSW/TOP が往復する。fnstenv が書く FSW の TOP ビットは 7<<11。
+    let mut prog = vec![
+        0xD9, 0x2D, 0x60, 0x10, 0x00, 0x00, // fldcw word [0x1060]
+        0xD9, 0xE8, // fld1
+        0xD9, 0x35, 0x00, 0x20, 0x00, 0x00, // fnstenv [0x2000]
+        0xDB, 0xE3, // finit
+        0xD9, 0x25, 0x00, 0x20, 0x00, 0x00, // fldenv [0x2000]
+        0xB8, 0x01, 0x00, 0x00, 0x00, 0xCD, 0x80,
+    ];
+    prog.resize(0x60, 0x90);
+    prog.extend_from_slice(&0x0fffu16.to_le_bytes());
+    let (out, mut env) = run32(&prog, 50);
+    assert_eq!(out, Outcome::Exit(0));
+    let mut b2 = [0u8; 2];
+    env.backend
+        .mem
+        .read(VirtAddr(0x2000), &mut b2, polyisa_mem::Access::DATA_LE)
+        .unwrap();
+    assert_eq!(u16::from_le_bytes(b2), 0x0fff);
+    env.backend
+        .mem
+        .read(VirtAddr(0x2002), &mut b2, polyisa_mem::Access::DATA_LE)
+        .unwrap();
+    assert_eq!(u16::from_le_bytes(b2) & 0x3800, 7 << 11);
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::top_ref()), 7);
+    assert_eq!(env.backend.get(polyisa_guest_x86::sem::fcw_ref()), 0x0fff);
+}
+
+#[test]
+fn run_a2_fst_sti() {
+    // DD D1 = fst st(1): st(1) に st(0) を複製。両方 2.0 になる。
+    let mut prog = vec![
+        0xDD, 0x05, 0x40, 0x10, 0x00, 0x00, // fld qword [0x1040] = 1.0
+        0xDD, 0x05, 0x48, 0x10, 0x00, 0x00, // fld qword [0x1048] = 2.0
+        0xDD, 0xD1, // fst st(1)
+        0xDD, 0xD8, // fstp st(0)
+        0xDD, 0x1D, 0x00, 0x20, 0x00, 0x00, // fstp qword [0x2000]
+        0xB8, 0x01, 0x00, 0x00, 0x00, 0xCD, 0x80,
+    ];
+    prog.resize(0x40, 0x90);
+    prog.extend_from_slice(&1.0f64.to_bits().to_le_bytes());
+    prog.extend_from_slice(&2.0f64.to_bits().to_le_bytes());
+    let (out, env) = run32(&prog, 50);
+    assert_eq!(out, Outcome::Exit(0));
+    let mut b8 = [0u8; 8];
+    env.backend
+        .mem
+        .read(VirtAddr(0x2000), &mut b8, polyisa_mem::Access::DATA_LE)
+        .unwrap();
+    assert_eq!(f64::from_bits(u64::from_le_bytes(b8)), 2.0);
+}

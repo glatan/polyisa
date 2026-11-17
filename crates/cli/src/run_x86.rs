@@ -3997,15 +3997,20 @@ fn dispatch_map<B: Backend>(
                 match d.modrm & 7 {
                     0 => sem_ea::fchs_abs(b, false),
                     1 => sem_ea::fchs_abs(b, true),
+                    4 => sem_ea::ftst_st(b),
+                    5 => sem_ea::fxam_st(b),
                     _ => return Ok(false),
                 }
             } else {
-                return Ok(false);
+                sem_ea::fldenv_m(b, &ea)
             }
         }
         Insn::FldcwM16 => {
             if d.modrm >= 0xC0 {
-                // D9 E8+i: FLD1/L2T/L2E/PI/LG2/LN2/Z。
+                // D9 E8+i: FLD1/L2T/L2E/PI/LG2/LN2/Z。rm=7 は未定義。
+                if d.modrm & 7 == 7 {
+                    return Ok(false);
+                }
                 sem_ea::fld_const(b, d.modrm & 7)
             } else {
                 sem_ea::fldcw_m(b, &ea)
@@ -4014,19 +4019,27 @@ fn dispatch_map<B: Backend>(
         Insn::X87d96 => {
             if d.modrm >= 0xC0 {
                 match d.modrm & 7 {
+                    // 0-3: F2XM1/FYL2X/FPTAN/FPATAN は softfloat 超越関数なし。
+                    // Gap: GAP-0038
+                    4 => sem_ea::fxtract_st(b),
+                    5 => sem_ea::fprem_st(b, true),
                     6 => sem_ea::fdecstp(b, false),
                     7 => sem_ea::fdecstp(b, true),
                     _ => return Ok(false),
                 }
             } else {
-                return Ok(false);
+                sem_ea::fnstenv_m(b, &ea)
             }
         }
         Insn::FnstcwM16 => {
             if d.modrm >= 0xC0 {
                 match d.modrm & 7 {
+                    0 => sem_ea::fprem_st(b, false),
+                    // 1: FYL2XP1、3: FSINCOS、6/7: FSIN/FCOS は超越関数なし。
+                    // Gap: GAP-0038
                     2 => sem_ea::fsqrt_st(b),
                     4 => sem_ea::frndint_st(b),
+                    5 => sem_ea::fscale_st(b),
                     _ => return Ok(false),
                 }
             } else {
@@ -4069,6 +4082,10 @@ fn dispatch_map<B: Backend>(
         }
         Insn::FisubrM32 => {
             if d.modrm >= 0xC0 {
+                // DA E9: FUCOMPP。rm!=1 は未定義。
+                if d.modrm & 7 == 1 {
+                    return sem_ea::fcompp_st(b).map(|()| true);
+                }
                 return Ok(false);
             }
             sem_ea::fiarith_m(b, sem_ea::FAr::SubR, &ea, 32)
@@ -4241,6 +4258,10 @@ fn dispatch_map<B: Backend>(
         }
         Insn::FicompM16 => {
             if d.modrm >= 0xC0 {
+                // DE D9: FCOMPP。rm!=1 は未定義。
+                if d.modrm & 7 == 1 {
+                    return sem_ea::fcompp_st(b).map(|()| true);
+                }
                 return Ok(false);
             }
             sem_ea::ficom_m16(b, &ea, true)

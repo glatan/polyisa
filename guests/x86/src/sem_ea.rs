@@ -5661,11 +5661,13 @@ pub fn load_far<B: Backend>(b: &mut B, d: &MapDec, rm: &Rm<B::V<W64>>, s: u8) ->
 
 // ---- x87 比較・環境 ----
 
-/// FCOM 系の C ビット位置（fsw の bit8,10,14）。
+/// FCOM 系の C ビット位置（fsw の bit8,9,10,14）。
 const X87_C0: u16 = 0x0100;
+const X87_C1: u16 = 0x0200;
 const X87_C2: u16 = 0x0400;
 const X87_C3: u16 = 0x4000;
 const X87_C_MASK: u16 = X87_C0 | X87_C2 | X87_C3;
+const X87_CC_MASK: u16 = X87_C_MASK | X87_C1;
 
 /// ST(0) と (sig,exp) を比較して fsw の C0/C2/C3 を更新する。
 /// `pop` で 1 段捨てる（FCOMP/FICOMP）。
@@ -5674,7 +5676,8 @@ fn fcom_ext<B: Backend>(b: &mut B, sig: B::V<W64>, exp: B::V<W16>, pop: bool) ->
     let (s0, e0) = sem::read_st(b, top);
     let (zf, unord, cf) = sem::cmp_f80(b, s0, e0, sig, exp);
     let old: B::V<W16> = b.get(sem::fsw_ref());
-    let keep = b.konst::<W16>(!X87_C_MASK);
+    // FCOM 系は C1 も 0 にする（C1=1 はスタックフォルト時のみ）。
+    let keep = b.konst::<W16>(!X87_CC_MASK);
     let cleared = b.and::<W16>(old, keep);
     let k0 = b.konst::<W16>(0);
     let kc0 = b.konst::<W16>(X87_C0);
@@ -5746,6 +5749,313 @@ pub fn fcom_sti<B: Backend>(b: &mut B, i: u8, pop: bool) -> Flow<B> {
     fcom_ext(b, s1, e1, pop)
 }
 
+/// FCOMPP/FUCOMPP。ST(0) と ST(1) を比較して C ビットを更新し、
+/// 2 段ポップする（FUCOMPP との #IA 違いは例外状態未モデルのため同一動作）。
+pub fn fcompp_st<B: Backend>(b: &mut B) -> Flow<B> {
+    fcom_sti(b, 1, true)?;
+    let top = b.get(sem::top_ref());
+    sem::pop_st(b, top)
+}
+
+/// FTST。ST(0) と +0.0 を比較して C ビットを更新する（ポップなし）。
+pub fn ftst_st<B: Backend>(b: &mut B) -> Flow<B> {
+    let zs = b.konst::<W64>(0);
+    let ze = b.konst::<W16>(0);
+    fcom_ext(b, zs, ze, false)
+}
+
+/// FXAM。ST(0) を分類して C0=符号、C1-C3=クラスを書く。Gap: GAP-0038
+/// クラス: 0=未対応(unnormal) 1=NaN 2=正規 3=無限 4=ゼロ 5=空 6=非正規。
+/// モデルはタグを持たず sig==0 && exp==0 をゼロと空で区別できないため、
+/// 両方 0 のスロットは Zero(4) に分類する。
+pub fn fxam_st<B: Backend>(b: &mut B) -> Flow<B> {
+    let top = b.get(sem::top_ref());
+    let (sig, exp) = sem::read_st(b, top);
+    let e64 = b.zext::<W16, W64>(exp);
+    let m7fff = b.konst::<W64>(0x7fff);
+    let eb = b.and::<W64>(e64, m7fff);
+    let z64 = b.konst::<W64>(0);
+    let ibit = b.konst::<W64>(1u64 << 63);
+    let ez = b.cmp::<W64>(Cmp::Eq, eb, z64);
+    let ef = b.cmp::<W64>(Cmp::Eq, eb, m7fff);
+    let sz = b.cmp::<W64>(Cmp::Eq, sig, z64);
+    let snz = b.cmp::<W64>(Cmp::Ne, sig, z64);
+    let sib = b.cmp::<W64>(Cmp::Eq, sig, ibit);
+    let s63 = b.konst::<W64>(63);
+    let topbit = b.shr_l::<W64>(sig, s63);
+    let one64 = b.konst::<W64>(1);
+    let int_set = b.cmp::<W64>(Cmp::Eq, topbit, one64);
+    let not_int = sem::bit_not(b, int_set);
+    let not_ez = sem::bit_not(b, ez);
+    let not_ef = sem::bit_not(b, ef);
+    let range = sem::bit_and(b, not_ez, not_ef);
+    let not_sib = sem::bit_not(b, sib);
+    let is_nan = sem::bit_and(b, ef, not_sib);
+    let is_inf = sem::bit_and(b, ef, sib);
+    let is_zero = sem::bit_and(b, ez, sz);
+    let is_den = sem::bit_and(b, ez, snz);
+    let is_unn = sem::bit_and(b, range, not_int);
+    let mut class = b.konst::<W16>(2);
+    let z16 = b.konst::<W16>(0);
+    let k0 = b.konst::<W16>(0);
+    let k1 = b.konst::<W16>(1);
+    let k3 = b.konst::<W16>(3);
+    let k4 = b.konst::<W16>(4);
+    let k6 = b.konst::<W16>(6);
+    class = b.select::<W16>(is_unn, k0, class);
+    class = b.select::<W16>(is_nan, k1, class);
+    class = b.select::<W16>(is_inf, k3, class);
+    class = b.select::<W16>(is_zero, k4, class);
+    class = b.select::<W16>(is_den, k6, class);
+    let four = b.konst::<W16>(4);
+    let two = b.konst::<W16>(2);
+    let c3f = b.cmp::<W16>(Cmp::GeU, class, four);
+    let c2v = b.and::<W16>(class, two);
+    let c2f = b.cmp::<W16>(Cmp::Ne, c2v, z16);
+    let c1v = b.and::<W16>(class, k1);
+    let c1f = b.cmp::<W16>(Cmp::Ne, c1v, z16);
+    let s15 = b.konst::<W64>(15);
+    let sgn = b.shr_l::<W64>(e64, s15);
+    let c0f = b.cmp::<W64>(Cmp::Eq, sgn, one64);
+    let old: B::V<W16> = b.get(sem::fsw_ref());
+    let keep = b.konst::<W16>(!X87_CC_MASK);
+    let cleared = b.and::<W16>(old, keep);
+    let kc0 = b.konst::<W16>(X87_C0);
+    let kc1 = b.konst::<W16>(X87_C1);
+    let kc2 = b.konst::<W16>(X87_C2);
+    let kc3 = b.konst::<W16>(X87_C3);
+    let c0 = b.select::<W16>(c0f, kc0, z16);
+    let c1 = b.select::<W16>(c1f, kc1, z16);
+    let c2 = b.select::<W16>(c2f, kc2, z16);
+    let c3 = b.select::<W16>(c3f, kc3, z16);
+    let c01 = b.or::<W16>(c0, c1);
+    let c23 = b.or::<W16>(c2, c3);
+    let cbits = b.or::<W16>(c01, c23);
+    let nv = b.or::<W16>(cleared, cbits);
+    b.set(sem::fsw_ref(), nv);
+    Ok(())
+}
+
+/// FPREM/FPREM1。q = ST(0)/ST(1) を trunc(FPREM) または最近値(FPREM1) で
+/// 整数化し、ST(0) = ST(0) - q*ST(1)。倍精度経由の近似。
+/// Gap: GAP-0038
+/// C2=0（完全減算）で商の下位 3 ビットを C3=Q1・C1=Q0・C0=Q2 に写す。
+pub fn fprem_st<B: Backend>(b: &mut B, prem1: bool) -> Flow<B> {
+    let top = b.get(sem::top_ref());
+    let (s0, e0) = sem::read_st(b, top);
+    let slot = st_slot(b, 1);
+    let (s1, e1) = sem::read_st(b, slot);
+    let b0 = sem::f80_to_f64(b, s0, e0);
+    let b1 = sem::f80_to_f64(b, s1, e1);
+    let f0 = b.trunc::<W64, polyisa_sem::F64>(b0);
+    let f1 = b.trunc::<W64, polyisa_sem::F64>(b1);
+    let q = b.fdiv::<polyisa_sem::F64>(f0, f1);
+    let rm: u8 = if prem1 { 0 } else { 1 };
+    let qi = b.fcvt_s64::<polyisa_sem::F64>(q, rm);
+    let qf = b.fcvt_from_s64::<polyisa_sem::F64>(qi, 0);
+    let prod = b.fmul::<polyisa_sem::F64>(qf, f1);
+    let r = b.fsub::<polyisa_sem::F64>(f0, prod);
+    let r64 = b.trunc::<polyisa_sem::F64, W64>(r);
+    let (sr, er) = sem::f64_to_ext(b, r64);
+    sem::write_st(b, top, sr, er);
+    // Q ビット: C0=Q2, C1=Q0, C3=Q1。C2=0（完全減算近似）。
+    let qi16 = b.trunc::<W64, W16>(qi);
+    let z16 = b.konst::<W16>(0);
+    let one16 = b.konst::<W16>(1);
+    let two16 = b.konst::<W16>(2);
+    let four16 = b.konst::<W16>(4);
+    let q0v = b.and::<W16>(qi16, one16);
+    let q1v = b.and::<W16>(qi16, two16);
+    let q2v = b.and::<W16>(qi16, four16);
+    let q0f = b.cmp::<W16>(Cmp::Ne, q0v, z16);
+    let q1f = b.cmp::<W16>(Cmp::Ne, q1v, z16);
+    let q2f = b.cmp::<W16>(Cmp::Ne, q2v, z16);
+    let old: B::V<W16> = b.get(sem::fsw_ref());
+    let keep = b.konst::<W16>(!X87_CC_MASK);
+    let cleared = b.and::<W16>(old, keep);
+    let kc0 = b.konst::<W16>(X87_C0);
+    let kc1 = b.konst::<W16>(X87_C1);
+    let kc3 = b.konst::<W16>(X87_C3);
+    let c0 = b.select::<W16>(q2f, kc0, z16);
+    let c1 = b.select::<W16>(q0f, kc1, z16);
+    let c3 = b.select::<W16>(q1f, kc3, z16);
+    let c01 = b.or::<W16>(c0, c1);
+    let cbits = b.or::<W16>(c01, c3);
+    let nv = b.or::<W16>(cleared, cbits);
+    b.set(sem::fsw_ref(), nv);
+    Ok(())
+}
+
+/// FSCALE。ST(0) = ST(0) * 2^trunc(ST(1))。仮数は変えず指数に整数を加える。
+/// Gap: GAP-0038
+/// 結果が上限を超えると無限、下限を割ると仮数右シフトの非正規数（近似）。
+pub fn fscale_st<B: Backend>(b: &mut B) -> Flow<B> {
+    let top = b.get(sem::top_ref());
+    let (s0, e0) = sem::read_st(b, top);
+    let slot = st_slot(b, 1);
+    let (s1, e1) = sem::read_st(b, slot);
+    let b1 = sem::f80_to_f64(b, s1, e1);
+    let f1 = b.trunc::<W64, polyisa_sem::F64>(b1);
+    let n = b.fcvt_s64::<polyisa_sem::F64>(f1, 1);
+    let hi = b.konst::<W64>(0x8000);
+    let lo = b.konst::<W64>(0xffff_ffff_ffff_8000);
+    let nhi = b.cmp::<W64>(Cmp::GtS, n, hi);
+    let nlo = b.cmp::<W64>(Cmp::LtS, n, lo);
+    let n1 = b.select::<W64>(nhi, hi, n);
+    let n2 = b.select::<W64>(nlo, lo, n1);
+    let e64 = b.zext::<W16, W64>(e0);
+    let m7fff = b.konst::<W64>(0x7fff);
+    let eb = b.and::<W64>(e64, m7fff);
+    let sum = b.add::<W64>(eb, n2);
+    let z64 = b.konst::<W64>(0);
+    let max_e = b.konst::<W64>(0x7ffe);
+    let over = b.cmp::<W64>(Cmp::GtS, sum, max_e);
+    let under = b.cmp::<W64>(Cmp::LeS, sum, z64);
+    let one64 = b.konst::<W64>(1);
+    let shift = b.sub::<W64>(one64, sum);
+    let s63 = b.konst::<W64>(63);
+    let sh_big = b.cmp::<W64>(Cmp::GtU, shift, s63);
+    let shift_c = b.select::<W64>(sh_big, s63, shift);
+    let sig_den = b.shr_l::<W64>(s0, shift_c);
+    let sig_u = b.select::<W64>(under, sig_den, s0);
+    let exp_u = b.select::<W64>(under, z64, sum);
+    let ibit = b.konst::<W64>(1u64 << 63);
+    let sig_f = b.select::<W64>(over, ibit, sig_u);
+    let exp_f = b.select::<W64>(over, m7fff, exp_u);
+    // NaN/inf（指数 0x7fff）と ±0（仮数 0）は入力をそのまま返す。
+    let ef = b.cmp::<W64>(Cmp::Eq, eb, m7fff);
+    let sz = b.cmp::<W64>(Cmp::Eq, s0, z64);
+    let ez0 = b.cmp::<W64>(Cmp::Eq, eb, z64);
+    let is_zero = sem::bit_and(b, ez0, sz);
+    let pass = sem::bit_or(b, ef, is_zero);
+    let sig_p = b.select::<W64>(pass, s0, sig_f);
+    let exp_p = b.select::<W64>(pass, e64, exp_f);
+    let m8000 = b.konst::<W64>(0x8000);
+    let sgn = b.and::<W64>(e64, m8000);
+    let exp_s = b.or::<W64>(exp_p, sgn);
+    let exp16 = b.trunc::<W64, W16>(exp_s);
+    sem::write_st(b, top, sig_p, exp16);
+    Ok(())
+}
+
+/// FXTRACT。ST(0) を指数・仮数に分け、結果は ST(0)=仮数（指数 0x3fff、
+/// 符号保持）、ST(1)=指数（実数化）。±0/±inf/NaN の各クラス結果は近似。
+/// Gap: GAP-0038
+pub fn fxtract_st<B: Backend>(b: &mut B) -> Flow<B> {
+    let top = b.get(sem::top_ref());
+    let (sig, exp) = sem::read_st(b, top);
+    let e64 = b.zext::<W16, W64>(exp);
+    let m7fff = b.konst::<W64>(0x7fff);
+    let eb = b.and::<W64>(e64, m7fff);
+    let bias = b.konst::<W64>(0x3fff);
+    let t = b.sub::<W64>(eb, bias);
+    let (es, ee) = sem::i64_to_ext(b, t);
+    let m8000 = b.konst::<W16>(0x8000);
+    let sgn = b.and::<W16>(exp, m8000);
+    let k3fff = b.konst::<W16>(0x3fff);
+    let new_e = b.or::<W16>(sgn, k3fff);
+    // 旧トップに指数を置き、仮数を積む → ST(0)=仮数、ST(1)=指数。
+    sem::write_st(b, top, es, ee);
+    sem::push_ext(b, sig, new_e)
+}
+
+/// FNSAVE/FNSTENV 共通の環境 28 バイト書き込み。
+/// FCW(2)+FSW|TOP<<11(2)+簡約 FTW(2)+予約/FIP/FCS/FOP/FDP/FDS=0(22)。
+fn x87_env_store<B: Backend>(b: &mut B, a: B::V<W64>) -> Flow<B> {
+    let fcw: B::V<W16> = b.get(sem::fcw_ref());
+    b.store::<W16>(a, fcw, sem::DATA_WRITE)?;
+    let fsw: B::V<W16> = b.get(sem::fsw_ref());
+    let top = b.get(sem::top_ref());
+    let seven = b.konst::<W16>(7);
+    let t3 = b.and::<W16>(top, seven);
+    let sh = b.konst::<W16>(11);
+    let tbits = b.shl::<W16>(t3, sh);
+    let fswv = b.or::<W16>(fsw, tbits);
+    let a2 = b.konst::<W64>(2);
+    let afs = b.add::<W64>(a, a2);
+    b.store::<W16>(afs, fswv, sem::DATA_WRITE)?;
+    // FTW（簡約形）: 物理スロット i が空でなければ bit i = 1。
+    let mut ftag = b.konst::<W16>(0);
+    for i in 0..8u16 {
+        let slot = b.konst::<W16>(i);
+        let (sig, exp) = sem::read_st(b, slot);
+        let e64 = b.zext::<W16, W64>(exp);
+        let mask = b.konst::<W64>(0x7fff);
+        let em = b.and::<W64>(e64, mask);
+        let zro = b.konst::<W64>(0);
+        let e_nz = b.cmp::<W64>(Cmp::Ne, em, zro);
+        let s_nz = b.cmp::<W64>(Cmp::Ne, sig, zro);
+        let nonempty = sem::bit_or(b, e_nz, s_nz);
+        let bit = b.konst::<W16>(1u16 << i);
+        let z16 = b.konst::<W16>(0);
+        let sel = b.select::<W16>(nonempty, bit, z16);
+        ftag = b.or::<W16>(ftag, sel);
+    }
+    let a4 = b.konst::<W64>(4);
+    let aft = b.add::<W64>(a, a4);
+    b.store::<W16>(aft, ftag, sem::DATA_WRITE)?;
+    // 予約 + FIP/FCS/FOP/FDP/FDS（オフセット 6-27、計 22 バイト）は 0。
+    let z64 = b.konst::<W64>(0);
+    let a6 = b.konst::<W64>(6);
+    let a6w = b.add::<W64>(a, a6);
+    b.store::<W64>(a6w, z64, sem::DATA_WRITE)?;
+    let a14 = b.konst::<W64>(14);
+    let a14w = b.add::<W64>(a, a14);
+    b.store::<W64>(a14w, z64, sem::DATA_WRITE)?;
+    let a22 = b.konst::<W64>(22);
+    let a22w = b.add::<W64>(a, a22);
+    let z32 = b.konst::<W32>(0);
+    b.store::<W32>(a22w, z32, sem::DATA_WRITE)?;
+    let a26 = b.konst::<W64>(26);
+    let a26w = b.add::<W64>(a, a26);
+    let z16 = b.konst::<W16>(0);
+    b.store::<W16>(a26w, z16, sem::DATA_WRITE)?;
+    Ok(())
+}
+
+/// FRSTOR/FLDENV 共通の環境読み出し。FCW・FSW（C ビット+TOP）を戻す。
+/// FTW はタグ未モデルのため読み飛ばす。Gap: GAP-0038
+fn x87_env_load<B: Backend>(b: &mut B, a: B::V<W64>) -> Flow<B> {
+    let fcw = b.load::<W16>(a, sem::DATA_READ)?;
+    b.set(sem::fcw_ref(), fcw);
+    let a2 = b.konst::<W64>(2);
+    let afs = b.add::<W64>(a, a2);
+    let fsw = b.load::<W16>(afs, sem::DATA_READ)?;
+    let sh = b.konst::<W16>(11);
+    let t = b.shr_l::<W16>(fsw, sh);
+    let seven = b.konst::<W16>(7);
+    let top = b.and::<W16>(t, seven);
+    // TOP は専用の top 状態が持つ。fsw からは TOP ビットを除いて格納する。
+    let keep = b.konst::<W16>(!0x3800u16);
+    let fsw_n = b.and::<W16>(fsw, keep);
+    b.set(sem::fsw_ref(), fsw_n);
+    b.set(sem::top_ref(), top);
+    Ok(())
+}
+
+/// FLDENV m28。環境を読み戻す（FIP/FCS/FOP/FDP/FDS はモデル外）。
+pub fn fldenv_m<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>) -> Flow<B> {
+    let Rm::Mem { a, .. } = ea else {
+        return Ok(());
+    };
+    x87_env_load(b, *a)
+}
+
+/// FNSTENV m28。環境を書き出し、全浮動小数点例外をマスクする（FCW|=0x3f）。
+/// Gap: GAP-0038
+pub fn fnstenv_m<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>) -> Flow<B> {
+    let Rm::Mem { a, .. } = ea else {
+        return Ok(());
+    };
+    let a = *a;
+    x87_env_store(b, a)?;
+    let fcw: B::V<W16> = b.get(sem::fcw_ref());
+    let mask = b.konst::<W16>(0x3f);
+    let m = b.or::<W16>(fcw, mask);
+    b.set(sem::fcw_ref(), m);
+    Ok(())
+}
+
 /// FNSTSW m16。fsw の C ビットに TOP を合成して書き込む。
 pub fn fnstsw_m16<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit> {
     let fsw: B::V<W16> = b.get(sem::fsw_ref());
@@ -5766,50 +6076,10 @@ pub fn fnsave_m<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>) -> Flow<B> {
         return Ok(());
     };
     let a = *a;
-    let fcw: B::V<W16> = b.get(sem::fcw_ref());
-    b.store::<W16>(a, fcw, sem::DATA_WRITE)?;
-    let fsw: B::V<W16> = b.get(sem::fsw_ref());
+    x87_env_store(b, a)?;
+    // ST レジスタ: 論理順（ST(0) から）で sig(8B)+exp(2B)。
     let top = b.get(sem::top_ref());
     let seven = b.konst::<W16>(7);
-    let t3 = b.and::<W16>(top, seven);
-    let sh = b.konst::<W16>(11);
-    let tbits = b.shl::<W16>(t3, sh);
-    let fswv = b.or::<W16>(fsw, tbits);
-    let a2 = b.konst::<W64>(2);
-    let afs = b.add::<W64>(a, a2);
-    b.store::<W16>(afs, fswv, sem::DATA_WRITE)?;
-    // FTW（簡約形）: ST(i) が空でなければ bit i = 1。
-    let mut ftag = b.konst::<W16>(0);
-    for i in 0..8u32 {
-        let ii = b.konst::<W16>(i as u16);
-        let summed = b.add::<W16>(top, ii);
-        let slot = b.and::<W16>(summed, seven);
-        let (sig, exp) = sem::read_st(b, slot);
-        let e64 = b.zext::<W16, W64>(exp);
-        let mask = b.konst::<W64>(0x7fff);
-        let em = b.and::<W64>(e64, mask);
-        let zro = b.konst::<W64>(0);
-        let e_nz = b.cmp::<W64>(Cmp::Ne, em, zro);
-        let s_nz = b.cmp::<W64>(Cmp::Ne, sig, zro);
-        let nonempty = sem::bit_or(b, e_nz, s_nz);
-        let bit = b.konst::<W16>(1u16 << i);
-        let z16 = b.konst::<W16>(0);
-        let sel = b.select::<W16>(nonempty, bit, z16);
-        ftag = b.or::<W16>(ftag, sel);
-    }
-    let a4 = b.konst::<W64>(4);
-    let aft = b.add::<W64>(a, a4);
-    b.store::<W16>(aft, ftag, sem::DATA_WRITE)?;
-    // 予約 + FIP/FCS/FOP/FDP/FDS（オフセット 6-27）は 0。
-    let a6 = b.konst::<W64>(6);
-    let az = b.add::<W64>(a, a6);
-    let z64 = b.konst::<W64>(0);
-    for i in 0..3u64 {
-        let ki = b.konst::<W64>(i * 8);
-        let addr = b.add::<W64>(az, ki);
-        b.store::<W64>(addr, z64, sem::DATA_WRITE)?;
-    }
-    // ST レジスタ: 論理順（ST(0) から）で sig(8B)+exp(2B)。
     let a28 = b.konst::<W64>(28);
     for i in 0..8u32 {
         let ii = b.konst::<W16>(i as u16);
@@ -5845,17 +6115,9 @@ pub fn frstor_m<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>) -> Flow<B> {
         return Ok(());
     };
     let a = *a;
-    let fcw = b.load::<W16>(a, sem::DATA_READ)?;
-    b.set(sem::fcw_ref(), fcw);
-    let a2 = b.konst::<W64>(2);
-    let afs = b.add::<W64>(a, a2);
-    let fsw = b.load::<W16>(afs, sem::DATA_READ)?;
-    b.set(sem::fsw_ref(), fsw);
-    let sh = b.konst::<W16>(11);
-    let t = b.shr_l::<W16>(fsw, sh);
+    x87_env_load(b, a)?;
+    let top = b.get(sem::top_ref());
     let seven = b.konst::<W16>(7);
-    let top = b.and::<W16>(t, seven);
-    b.set(sem::top_ref(), top);
     let a28 = b.konst::<W64>(28);
     for i in 0..8u32 {
         let off = b.konst::<W64>(u64::from(i) * 10);

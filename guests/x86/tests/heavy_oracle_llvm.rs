@@ -16,7 +16,7 @@
 //!   （setj*/cmovj*/lcall 等）で正規化して比べる。
 //! - 既知の差分は `KNOWN` 表に（オペコード head, 種別, モード）で
 //!   列挙する。未対応ファミリ（A3a/A4/B3）、接頭辞剥がし設計由来の
-//!   寛容さ、reg/mod 検証不足、x87 副表の誤りを分類する。
+//!   寛容さ、reg/mod 検証不足、x87 副表の未定義スロット受理を分類する。
 //!
 //! ツールが無ければスキップする（testkit::reqs がフィルタを掛ける）。
 //! オペランドの比較はしない（E1b 以降）。
@@ -494,7 +494,7 @@ fn known(head: &str, kind: &str, mode: &str) -> bool {
 /// - strict: polyisa 側の reg/mod 検証の不足（HW は受理しない
 ///   のに解読する）。将来マップ宣言を厳しくする。
 /// - loose: オラクルが知らないが HW は受理する（prefetch 等）。
-/// - x87: x87 mod=11 副表の誤り（A2 で直す）。
+/// - x87: x87 mod=11 副表の未定義スロット受理と別名差。
 const KNOWN: &[(&str, &str, &str)] = &[
     // ---- 後続ステップの対象 ----
     // bound（A0）。x86-64 では EVEX 接頭辞なので AVX-512 系も
@@ -803,7 +803,7 @@ const KNOWN: &[(&str, &str, &str)] = &[
     ("d1", "spurious", "*"),
     ("d2", "spurious", "*"),
     ("d3", "spurious", "*"), // shift /6（sal 別名、llvm は拒否）
-    // ---- x87 mod=11 副表の誤り（A2 で直す）----
+    // ---- x87 mod=11 副表（GAP-0037b: 未定義スロットを受理、別名も差）----
     ("d9", "spurious", "*"),
     ("da", "spurious", "*"),
     ("db", "spurious", "*"),
