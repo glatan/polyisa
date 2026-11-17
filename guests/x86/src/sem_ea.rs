@@ -6899,6 +6899,61 @@ fn rand_next<B: Backend>(b: &mut B) -> B::V<W64> {
     b.xor::<W64>(z, sh)
 }
 
+/// RDFSBASE/RDGSBASE/WRFSBASE/WRGSBASE（F3 0F AE /0-/3）。
+/// FS/GS base を GPR とやり取りする。16 ビット形は無いので
+/// o64 以外は 32 ビットで扱う。
+pub fn fsgsbase<B: Backend>(
+    b: &mut B,
+    w: u8,
+    rm: &Rm<B::V<W64>>,
+    gs: bool,
+    wr: bool,
+    _d: &MapDec,
+) -> Flow<B> {
+    let Rm::Reg(g) = rm else {
+        return Ok(());
+    };
+    let base = if gs {
+        sem::gs_base_ref()
+    } else {
+        sem::fs_base_ref()
+    };
+    if wr {
+        let v: B::V<W64> = if w == 64 {
+            decode::grd64(b, *g)
+        } else {
+            let v = decode::grd32(b, *g);
+            b.zext::<W32, W64>(v)
+        };
+        b.set(base, v);
+    } else {
+        let cur: B::V<W64> = b.get(base);
+        if w == 64 {
+            decode::gwr64(b, *g, cur);
+        } else {
+            let v = b.trunc::<W64, W32>(cur);
+            decode::gwr32(b, *g, v);
+        }
+    }
+    Ok(())
+}
+
+/// RDSSPD/RDSSPQ（F3 0F 1E /1）。影響スタックはモデル化
+/// しないので dest は 0 固定。
+pub fn rdssp<B: Backend>(b: &mut B, w: u8, rm: &Rm<B::V<W64>>, _d: &MapDec) -> Flow<B> {
+    let Rm::Reg(g) = rm else {
+        return Ok(());
+    };
+    if w == 64 {
+        let z = b.konst::<W64>(0);
+        decode::gwr64(b, *g, z);
+    } else {
+        let z = b.konst::<W32>(0);
+        decode::gwr32(b, *g, z);
+    }
+    Ok(())
+}
+
 /// RDRAND/RDSEED r。決定的列を書き込み、CF=1・他のフラグは 0。
 pub fn rdrand<B: Backend>(b: &mut B, w: u8, rm: &Rm<B::V<W64>>, _d: &MapDec) -> Flow<B> {
     let z = rand_next(b);

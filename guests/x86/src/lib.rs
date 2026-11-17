@@ -126,7 +126,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 段階4の x86 最小 853 件にオペコード表の記述を足した件数。
-        assert_eq!(INSNS.len(), 1647);
+        assert_eq!(INSNS.len(), 1658);
     }
 
     #[test]
@@ -255,12 +255,13 @@ mod tests {
         // ENDBR64 (F3 0F 1E FA)：F3 接頭辞は実行側で剥がす。
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x0F1EFA, 24), Some(Insn::Endbr64));
-        // RDSSPQ は CET-SS の命令。既定モデル（CET 無し）では解読しない。
-        assert_eq!(decode(0x0F1EC8, 24), None);
+        // RDSSPQ は CET-SS の命令。cet_ss 無しでは解読しない
+        // （既定モデルは cet_ss を含む）。
         assert_eq!(
-            decode_model_ex(0x0F1EC8, 24, true, FEAT_CET_SS),
-            Some(Insn::Rdsspq)
+            decode_model_ex(0x0F1EC8, 24, true, DEFAULT_FEATS & !FEAT_CET_SS),
+            None
         );
+        assert_eq!(decode(0x0F1EC8, 24), Some(Insn::Rdsspq));
         // NOP r/m (0F 1F /0)：F3/0x66 接頭辞は実行側で剥がす。
         // Ref: SPEC-X86-INTEL-SDM (v093).
         assert_eq!(decode(0x0F1F00, 24), Some(Insn::Nopl));

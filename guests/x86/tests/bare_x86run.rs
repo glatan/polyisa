@@ -17774,7 +17774,7 @@ fn run32_rdrand_rdseed() {
         "rdrand edx"
     );
     // 負のデコード検査: F2/F3 形は別命令スロット（RDPID/SENDUIPI/
-    // XSUSLDTRK/SETSSBSY/予約）なので decode_map は拒否する。
+    // XSUSLDTRK/予約）なので decode_map は拒否する。
     use polyisa_guest_x86::{MODE_ADR_A32, MODE_ADR_SHIFT, MODE_OPD_O32, MODE_OPD_SHIFT};
     let modes = (MODE_OPD_O32 << MODE_OPD_SHIFT) | (MODE_ADR_A32 << MODE_ADR_SHIFT);
     let feats = polyisa_guest_x86::DEFAULT_FEATS;
@@ -17784,13 +17784,15 @@ fn run32_rdrand_rdseed() {
         &[0xF2, 0x0F, 0xC7, 0xF8][..], // F2 rdseed → 予約
         &[0xF3, 0x0F, 0xC7, 0xF8][..], // F3 rdseed → RDPID
         &[0xF2, 0x0F, 0x01, 0xE8][..], // F2 serialize → XSUSLDTRK
-        &[0xF3, 0x0F, 0x01, 0xE8][..], // F3 serialize → SETSSBSY
     ] {
         assert!(
             polyisa_guest_x86::decode_map(bytes, modes, feats).is_none(),
             "{bytes:?}"
         );
     }
+    // F3 0F 01 E8 は SERIALIZE ではなく SETSSBSY（CET-SS）。
+    let d = polyisa_guest_x86::decode_map(&[0xF3, 0x0F, 0x01, 0xE8], modes, feats).unwrap();
+    assert_eq!(d.insn, polyisa_guest_x86::Insn::Setssbsy);
     // NP・66 形は受理する。
     for bytes in [
         &[0x0F, 0xC7, 0xF0][..],
@@ -17800,6 +17802,104 @@ fn run32_rdrand_rdseed() {
     ] {
         assert!(
             polyisa_guest_x86::decode_map(bytes, modes, feats).is_some(),
+            "{bytes:?}"
+        );
+    }
+}
+
+#[test]
+fn run64_fsgsbase_cet() {
+    // FSGSBASE（F3 0F AE /0-/3、64 ビットモード専用）と CET-SS の
+    // ユーザー命令。影響スタックはモデル化しないので
+    // INCSSP/SETSSBSY/CLRSSBSY/RSTORSSP は no-op、RDSSP は 0 固定、
+    // WRSS/WRUSS は通常ストア。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2000);
+    let prog: &[u8] = &[
+        0x48, 0xB8, 0x78, 0x56, 0x34, 0x12, 0x00, 0x00, 0x00, 0x00, // movabs rax,0x12345678
+        0xF3, 0x48, 0x0F, 0xAE, 0xD0, // wrfsbase rax
+        0x48, 0x31, 0xC0, // xor rax,rax
+        0xF3, 0x48, 0x0F, 0xAE, 0xC0, // rdfsbase rax
+        0x48, 0xA3, 0x00, 0x22, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // mov [0x2200],rax
+        0x48, 0xB9, 0xEF, 0xBE, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rcx,0xBEEF
+        0xF3, 0x48, 0x0F, 0xAE, 0xD9, // wrgsbase rcx
+        0xF3, 0x48, 0x0F, 0xAE, 0xCA, // rdgsbase rdx
+        0x48, 0x89, 0x14, 0x25, 0x08, 0x22, 0x00, 0x00, // mov [0x2208],rdx
+        0xF3, 0x48, 0x0F, 0x1E, 0xC8, // rdsspq rax → 0
+        0x48, 0xA3, 0x10, 0x22, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // mov [0x2210],rax
+        0xF3, 0x0F, 0xAE, 0xE8, // incsspd eax（no-op）
+        0xF3, 0x0F, 0x01, 0xE8, // setssbsy（no-op）
+        0xF3, 0x0F, 0xAE, 0x35, 0x00, 0x21, 0x00, 0x00, // clrssbsy [rip+0x2100]（no-op）
+        0xF3, 0x0F, 0x01, 0x2D, 0x00, 0x21, 0x00, 0x00, // rstorssp [rip+0x2100]（no-op）
+        0x48, 0xB8, 0xAA, 0xBB, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rax,0xBBAA
+        0x48, 0x0F, 0x38, 0xF6, 0x04, 0x25, 0x00, 0x23, 0x00, 0x00, // wrss [0x2300],rax
+        0x66, 0x48, 0x0F, 0x38, 0xF5, 0x04, 0x25, 0x10, 0x23, 0x00,
+        0x00, // wruss [0x2310],rax
+        // WRUSS の必須 66 はオペコード選択子なので、REX.W なしでも
+        // 幅は縮まず 4 バイト書き込みになる。
+        0x66, 0x0F, 0x38, 0xF5, 0x04, 0x25, 0x18, 0x23, 0x00, 0x00, // wruss [0x2318],eax
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0x31, 0xFF, // xor rdi,rdi
+        0x0F, 0x05, // syscall → exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    // wruss d 形の書き込み幅を区別できるよう上位を汚しておく。
+    env.backend.mem.write(VirtAddr(0x2318), &[0xFF; 4]).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0));
+    let acc = polyisa_mem::Access {
+        endian: polyisa_mem::Endian::Le,
+        align: polyisa_mem::Align::Unaligned,
+        kind: polyisa_mem::AccessKind::DataRead,
+    };
+    let mut v = [0u8; 0x120];
+    env.backend.mem.read(VirtAddr(0x2200), &mut v, acc).unwrap();
+    let q = |i: usize| u64::from_le_bytes(v[i..i + 8].try_into().unwrap());
+    assert_eq!(q(0), 0x1234_5678, "wrfsbase→rdfsbase");
+    assert_eq!(q(8), 0xBEEF, "wrgsbase→rdgsbase");
+    assert_eq!(q(0x10), 0, "rdsspq = 0");
+    assert_eq!(q(0x100), 0xBBAA, "wrss store");
+    assert_eq!(q(0x110), 0xBBAA, "wruss store");
+    // 必須 66 は幅を縮めないので d 形でも 4 バイト書き込み。
+    let w = |i: usize| u32::from_le_bytes(v[i..i + 4].try_into().unwrap());
+    assert_eq!(w(0x118), 0xBBAA, "wruss dword store");
+    // 負のデコード検査: FSGSBASE のメモリ形・mod=11 の WRSS/WRUSS・
+    // 未宣言の UMONITOR は拒否。
+    use polyisa_guest_x86::{MODE_ADR_A64, MODE_ADR_SHIFT, MODE_M64, MODE_OPD_O32, MODE_OPD_SHIFT};
+    let modes = MODE_M64 | (MODE_OPD_O32 << MODE_OPD_SHIFT) | (MODE_ADR_A64 << MODE_ADR_SHIFT);
+    let feats = polyisa_guest_x86::DEFAULT_FEATS;
+    for bytes in [
+        &[0xF3, 0x0F, 0xAE, 0x00][..],       // FSGSBASE mod≠11 → 予約
+        &[0x0F, 0x38, 0xF6, 0xC1][..],       // NP WRSS mod=11 → 予約
+        &[0x66, 0x0F, 0x38, 0xF5, 0xC1][..], // WRUSS mod=11 → 予約
+        &[0xF3, 0x0F, 0xAE, 0xF0][..],       // UMONITOR → 未宣言
+    ] {
+        assert!(
+            polyisa_guest_x86::decode_map(bytes, modes, feats).is_none(),
+            "{bytes:?}"
+        );
+    }
+    // F3 0F 1E /1 mod=11 は ENDBR ではなく RDSSP として解読され、
+    // 他の mod=11 形は従来通りヒント NOP（endbr）に落ちる。
+    let d = polyisa_guest_x86::decode_map(&[0xF3, 0x0F, 0x1E, 0xC8], modes, feats).unwrap();
+    assert_eq!(d.insn, polyisa_guest_x86::Insn::RdsspdRv);
+    let d = polyisa_guest_x86::decode_map(&[0xF3, 0x0F, 0x1E, 0xC0], modes, feats).unwrap();
+    assert_eq!(d.insn, polyisa_guest_x86::Insn::Endbr);
+    // FSGSBASE は 64 ビットモード専用なので 32 ビットでは拒否。
+    use polyisa_guest_x86::{MODE_ADR_A32, MODE_OPD_O32 as O32};
+    let modes32 = (O32 << MODE_OPD_SHIFT) | (MODE_ADR_A32 << MODE_ADR_SHIFT);
+    for bytes in [
+        &[0xF3, 0x0F, 0xAE, 0xC0][..], // rdfsbase
+        &[0xF3, 0x0F, 0xAE, 0xC8][..], // rdgsbase
+        &[0xF3, 0x0F, 0xAE, 0xD0][..], // wrfsbase
+        &[0xF3, 0x0F, 0xAE, 0xD8][..], // wrgsbase
+    ] {
+        assert!(
+            polyisa_guest_x86::decode_map(bytes, modes32, feats).is_none(),
             "{bytes:?}"
         );
     }

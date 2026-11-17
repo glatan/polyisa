@@ -341,7 +341,7 @@ fn declare_models(m: &mut Model) {
             "mtrr", "pge", "mca", "cmov", "pat", "pse36", "clfsh", "mmx", "fxsr", "sse", "sse2",
             "sse3", "ssse3", "sse4_1", "sse4_2", "cx16", "popcnt", "rdtscp", "syscall", "nx",
             "lm", "lahf_lm", "i486", "lzcnt", "adx", "pclmulqdq", "aesni", "sha", "gfni",
-            "rdrnd", "rdseed", "serialize",
+            "rdrnd", "rdseed", "serialize", "fsgsbase", "cet_ss",
         ],
         &[],
         &[],
@@ -357,7 +357,7 @@ fn declare_models(m: &mut Model) {
         // psABI v2 に LZCNT・ADX・PCLMUL・AES-NI・SHA・GFNI・
         // RDRAND・RDSEED・SERIALIZE は含まれないので既定モデルから
         // 継承した分を削る。
-        &["lzcnt", "adx", "pclmulqdq", "aesni", "sha", "gfni", "rdrnd", "rdseed", "serialize"],
+        &["lzcnt", "adx", "pclmulqdq", "aesni", "sha", "gfni", "rdrnd", "rdseed", "serialize", "fsgsbase", "cet_ss"],
         &[],
         // v2 の水準（SSE4.2+POPCNT+CX16、AVX なし）は Westmere。
         intel("6", "44", "2"),
@@ -741,7 +741,11 @@ fn named_gate(mn: &str) -> Option<&'static [&'static str]> {
         // dispatch 側で検査する。`cx16` の参照は FEAT_CX16 定数を
         // 生成させるための恒真述語として `apply_gates` で足す。
         "cmpxchg8b" => &["cx8"],
-        // CET 影響スタックのユーザ形。
+        // FSGSBASE。
+        "rdfsbase" | "rdgsbase" | "wrfsbase" | "wrgsbase" => &["fsgsbase"],
+        // CET 影響スタックのユーザ形。`saveprevssp` は F3 0F 01 /5
+        // mod=11 の rm=2 形で、rm 値制約は宣言できないため現在は
+        // `setssbsy` 名で受理される（将来別宣言する場合のために残す）。
         "rdsspq" | "rdsspd" | "incsspq" | "incsspd" | "wrssq" | "wrssd" | "wrussq"
         | "wrussd" | "rstorssp" | "saveprevssp" | "setssbsy" | "clrssbsy" => &["cet_ss"],
         // システム・判定命令。

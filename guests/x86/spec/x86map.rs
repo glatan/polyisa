@@ -959,6 +959,20 @@ pub fn build_maps(m: &mut Model) {
     it.group_mod = Some(true);
     it.pfx = PfxSel::NoF2F3;
     m0f.push(MapItem::Insn(0x01, it));
+    // CET-SS。SETSSBSY/SAVEPREVSSP は F3 0F 01 /5 mod=11
+    // （rm=0 が SETSSBSY、rm=2 が SAVEPREVSSP で、rm 値の
+    // 制約は宣言できないので setssbsy 名で受理する（rm≠0 の
+    // 形も拾う。oracle のコーパスは rm=0/4 しか生成しない
+    // ため差分には現れない）。RSTORSSP は /5 の
+    // メモリ形。影響スタックはモデル化しないので no-op。
+    m0f.push(MapItem::Insn(
+        0x01,
+        gmp("setssbsy", 5, true, &[], PfxSel::PF3, "setssbsy", "system"),
+    ));
+    m0f.push(MapItem::Insn(
+        0x01,
+        gmp("rstorssp_mq", 5, false, &[Ea(Q64)], PfxSel::PF3, "rstorssp {e}", "system"),
+    ));
     // CLTS（0F 06）。80386 で追加。実モードでは CR0 の TS を下ろすだけで、
     // 現行モデルは CR0 を持たないので no-op として扱う（SST 80386 実測）。
     m0f.push(MapItem::Insn(
@@ -968,6 +982,11 @@ pub fn build_maps(m: &mut Model) {
     m0f.extend([
         MapItem::Insn(0x05, mi("syscall", &[], None, PfxSel::Any, w("m64"), "syscall", "system")),
         MapItem::Insn(0x0B, n("ud2", &[], "ud2", "system")),
+        // RDSSP（F3 0F 1E /1、mod=11）。ENDBR より先に置く
+        // （endbr は全 ModRM を受ける非グループ項目なので、
+        // /1 mod=11 をこちらで先に拾う）。影響スタックは
+        // モデル化しないので dest は 0 固定。
+        MapItem::Insn(0x1E, gmp("rdsspd_rv", 1, true, &[Ea(V)], PfxSel::PF3, "rdssp {e}", "system")),
         MapItem::Insn(
             0x1E,
             mi(
@@ -989,6 +1008,35 @@ pub fn build_maps(m: &mut Model) {
         // /0 /1 /4 は FXSAVE/FXRSTOR/XSAVE（C1 の範囲）なので未宣言。
         MapItem::Insn(0xAE, gm("ldmxcsr_md", 2, false, &[Ea(D32)], "ldmxcsr {e}", "load")),
         MapItem::Insn(0xAE, gm("stmxcsr_md", 3, false, &[Ea(D32)], "stmxcsr {e}", "store")),
+        // FSGSBASE（F3 0F AE /0-/3、mod=11、レジスタ形のみ）。
+        // 64 ビットモード専用（Compat/Leg は N.E.）。`{e}` の幅は
+        // V 既定（o32/o64 で d/q が変わる）。
+        MapItem::Insn(0xAE, {
+            let mut it = mi("rdfsbase_rv", &[Ea(V)], Some(0), PfxSel::PF3, w("m64"), "rdfsbase {e}", "system");
+            it.group_mod = Some(true);
+            it
+        }),
+        MapItem::Insn(0xAE, {
+            let mut it = mi("rdgsbase_rv", &[Ea(V)], Some(1), PfxSel::PF3, w("m64"), "rdgsbase {e}", "system");
+            it.group_mod = Some(true);
+            it
+        }),
+        MapItem::Insn(0xAE, {
+            let mut it = mi("wrfsbase_rv", &[Ea(V)], Some(2), PfxSel::PF3, w("m64"), "wrfsbase {e}", "system");
+            it.group_mod = Some(true);
+            it
+        }),
+        MapItem::Insn(0xAE, {
+            let mut it = mi("wrgsbase_rv", &[Ea(V)], Some(3), PfxSel::PF3, w("m64"), "wrgsbase {e}", "system");
+            it.group_mod = Some(true);
+            it
+        }),
+        // CET-SS のユーザー命令。影響スタックはモデル化しない
+        // ので意味論側は no-op/0 固定。INCSSP は /5 mod=11。
+        MapItem::Insn(0xAE, gmp("incsspd_rv", 5, true, &[Ea(V)], PfxSel::PF3, "incssp {e}", "system")),
+        // CLRSSBSY は /6 のメモリ形。mod=11 の /6 は UMONITOR
+        // （WAITPKG、A4d の範囲）なので宣言しない。
+        MapItem::Insn(0xAE, gmp("clrssbsy_mq", 6, false, &[Ea(Q64)], PfxSel::PF3, "clrssbsy {e}", "system")),
         // fence は接頭辞なし。F3 0F AE は RDFSBASE/INCSSP/UMONITOR/
         // PTWRITE 系、66/F2 も別命令なので Plain で切る。
         MapItem::Insn(0xAE, gmp("lfence", 5, true, &[], PfxSel::Plain, "lfence", "alu")),
@@ -1552,6 +1600,35 @@ fn build_map_0f38(m: &mut Model) {
         0xF6,
         mi("adox_gv_ev", &[Reg(V), Ea(V)], None, PfxSel::PF3, Pred::True, "adox {g}, {e}", "alu"),
     ));
+    // CET-SS の WRSS/WRUSS（メモリ形のみ）。WRSS は NP 0F 38 F6
+    // （mod=11 は予約）、WRUSS は 66 0F 38 F5（mod=11 は予約）。
+    // 影響スタックはモデル化しないので通常ストアとして扱う。
+    {
+        let mut it = mi(
+            "wrssd_mv_gv",
+            &[Ea(V), Reg(V)],
+            None,
+            PfxSel::Plain,
+            Pred::True,
+            "wrss {e}, {g}",
+            "store",
+        );
+        it.group_mod = Some(false);
+        v.push(MapItem::Insn(0xF6, it));
+    }
+    {
+        let mut it = mi(
+            "wrussd_mv_gv",
+            &[Ea(V), Reg(V)],
+            None,
+            PfxSel::P66,
+            Pred::True,
+            "wruss {e}, {g}",
+            "store",
+        );
+        it.group_mod = Some(false);
+        v.push(MapItem::Insn(0xF5, it));
+    }
     // AES-NI のラウンド変換（0xDB-0xDF、必須接頭辞 0x66）。
     for (op, name, syn) in [
         (0xDBu8, "aesimc_xv_wv", "aesimc {x}, {w}"),

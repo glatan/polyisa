@@ -549,8 +549,8 @@ const KNOWN: &[(&str, &str, &str)] = &[
     ("66 0f 38 80", "missing", "*"),
     ("66 0f 38 81", "missing", "*"),
     ("66 0f 38 82", "missing", "*"), // invept/invvpid/invpcid（A4）
-    ("66 0f 38 f5", "missing", "*"),
-    ("f2 0f 38 f6", "missing", "*"), // wruss/wrssd（A4）
+    ("66 0f 38 f5", "missing", "*"), // wruss（mod=11 等の未宣言形）
+    ("f2 0f 38 f6", "missing", "*"),
     ("66 0f 38 f6", "missing", "*"),
     ("f3 0f 38 f6", "missing", "*"), // adcx/adox（A3a）
     ("66 0f 38 f8", "missing", "*"),
@@ -589,7 +589,7 @@ const KNOWN: &[(&str, &str, &str)] = &[
     ("f3 0f 38 cd", "missing", "*"), // sha（A3a）
     ("0f 38 8a", "missing", "*"),
     ("0f 38 8b", "missing", "*"), // movrsb/movrsl（新命令群、A4 以降）
-    ("0f 38 f6", "missing", "*"),
+    ("0f 38 f6", "missing", "*"), // wrss（mod=11 等の未宣言形）
     ("0f 38 f8", "missing", "*"),
     ("0f 38 f9", "missing", "*"),
     ("0f 38 fc", "missing", "*"), // wrssd/movrs/movdiri/aadd（新命令群、A4 以降）
@@ -711,7 +711,7 @@ const KNOWN: &[(&str, &str, &str)] = &[
     ("f3 0f a6", "missing", "*"),
     ("f3 0f a7", "missing", "*"),
     ("f3 0f aa", "missing", "*"),
-    ("f3 0f ae", "missing", "*"), // rdfsbase/incsspd/umonitor/ptwrite（A4）
+    ("f3 0f ae", "missing", "*"), // umonitor/ptwrite 等（A4d 以降）
     ("f3 0f b2", "spurious", "*"),
     ("f3 0f b4", "spurious", "*"),
     ("f3 0f b5", "spurious", "*"), // lss/lfs/lgs（D2、strict）

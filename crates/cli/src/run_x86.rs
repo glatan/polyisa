@@ -3559,6 +3559,25 @@ fn dispatch_map<B: Backend>(
         Insn::Serialize => sem_ea::nop(b),
         Insn::RdrandRv => sem_ea::rdrand(b, w, &ea, d),
         Insn::RdseedRv => sem_ea::rdrand(b, w, &ea, d),
+        Insn::RdfsbaseRv => sem_ea::fsgsbase(b, w, &ea, false, false, d),
+        Insn::RdgsbaseRv => sem_ea::fsgsbase(b, w, &ea, true, false, d),
+        Insn::WrfsbaseRv => sem_ea::fsgsbase(b, w, &ea, false, true, d),
+        Insn::WrgsbaseRv => sem_ea::fsgsbase(b, w, &ea, true, true, d),
+        // 影響スタックはモデル化しない: INCSSP/SETSSBSY/CLRSSBSY/
+        // RSTORSSP は no-op、RDSSP は 0 固定、WRSS/WRUSS は通常
+        // ストア。
+        Insn::RdsspdRv => sem_ea::rdssp(b, w, &ea, d),
+        Insn::IncsspdRv | Insn::Setssbsy | Insn::ClrssbsyMq | Insn::RstorsspMq => sem_ea::nop(b),
+        // WRSS/WRUSS のメモリ幅は d/q 固定。WRUSS の必須 66 は
+        // オペコード選択子でオペランド幅を縮めないので、osize
+        // ではなく rex.W から決める（ADCX/ADOX と同じ）。
+        Insn::WrssdMvGv | Insn::WrussdMvGv => sem_ea::mov_e(
+            b,
+            if d.rex & 8 != 0 { 64 } else { 32 },
+            &ea,
+            d,
+            Src::Reg(reg),
+        ),
         Insn::MovsB => sem_ea::str_op(b, sem_ea::Str::Movs, 8, d, eip, seg, seg_ss, es, mode == 16),
         Insn::MovsV => sem_ea::str_op(b, sem_ea::Str::Movs, w, d, eip, seg, seg_ss, es, mode == 16),
         Insn::StosB => sem_ea::str_op(b, sem_ea::Str::Stos, 8, d, eip, seg, seg_ss, es, mode == 16),
@@ -5303,7 +5322,12 @@ fn dispatch<B: Backend>(
         Insn::EnCpuid => sem::cpuid(b),
         Insn::Endbr64 => sem::nop(b),
         Insn::EnHlt => sem::nop(b),
-        Insn::Rdsspq => sem::nop(b),
+        // map 経路の rdssp と揃えて dest（固定形なので rax）に 0。
+        Insn::Rdsspq => {
+            let z = b.konst::<polyisa_sem::W64>(0);
+            sem::write64(b, Gpr(0), z);
+            sem::nop(b)
+        }
         Insn::Rdtscp => polyisa_guest_x86::sem_ea::rdtscp(b),
         // 単スレッドのエミュレーションでは監視と待機は意味を持たない。
         Insn::Monitor | Insn::Mwait => sem::nop(b),
