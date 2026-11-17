@@ -13,12 +13,25 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::IDENT_BITS;
 
-/// CPUID が報告するリーフの一覧。`CpuState.cpuid` の添え字順。
-/// ベーシックは 0・1・7、拡張は 0x8000_0000・0x8000_0001・0x8000_0008。
-pub const LEAF_IDS: [u32; 6] = [0, 1, 7, 0x8000_0000, 0x8000_0001, 0x8000_0008];
+/// CPUID が報告する (リーフ, サブリーフ) の一覧。
+/// `CpuState.cpuid` の添え字順。ベーシックは 0・1・7.0・0xD.0・
+/// 0xD.1、拡張は 0x8000_0000・0x8000_0001・0x8000_0008。
+pub const LEAF_IDS: [(u32, u32); 8] = [
+    (0, 0),
+    (1, 0),
+    (7, 0),
+    (0xD, 0),
+    (0xD, 1),
+    (0x8000_0000, 0),
+    (0x8000_0001, 0),
+    (0x8000_0008, 0),
+];
 
-/// 最大ベーシックリーフ（leaf 0 の EAX）。
+/// 最大ベーシックリーフの既定（leaf 0 の EAX）。`xsave` 機能が
+/// あれば leaf D を含む 0xD、なければ 7。`cpuid.max_basic`
+/// で上書きできる。
 const MAX_BASIC: u32 = 7;
+const MAX_BASIC_XSAVE: u32 = 0xD;
 /// 最大拡張リーフ（leaf 0x8000_0000 の EAX）。
 const MAX_EXT: u32 = 0x8000_0008;
 
@@ -50,7 +63,7 @@ fn num(ident: &BTreeMap<String, String>, key: &str, default: u32) -> u32 {
 /// ベンダと版を使う。最大リーフ番号は ident の `cpuid.max_basic`/
 /// `cpuid.max_ext` で上書きでき、既定は 7 と 0x8000_0008。
 #[must_use]
-pub fn derive(features: &BTreeSet<String>, ident: &BTreeMap<String, String>) -> [[u32; 4]; 6] {
+pub fn derive(features: &BTreeSet<String>, ident: &BTreeMap<String, String>) -> [[u32; 4]; 8] {
     // IDENT_BITS をリーフ・レジスタごとに畳む。
     let mut leaf_regs: BTreeMap<(u32, u32, &str), u32> = BTreeMap::new();
     for (f, leaf, subleaf, reg, bit) in IDENT_BITS {
@@ -83,7 +96,12 @@ pub fn derive(features: &BTreeSet<String>, ident: &BTreeMap<String, String>) -> 
         | (((model >> 4) & 0xf) << 16)
         | (((family >> 4) & 0xff) << 20);
 
-    let max_basic = num(ident, "cpuid.max_basic", MAX_BASIC);
+    let def_max = if features.contains("xsave") {
+        MAX_BASIC_XSAVE
+    } else {
+        MAX_BASIC
+    };
+    let max_basic = num(ident, "cpuid.max_basic", def_max);
     let max_ext = num(ident, "cpuid.max_ext", MAX_EXT);
     let mut tbl = [
         // leaf 0: 最大リーフ + ベンダ。
@@ -97,6 +115,23 @@ pub fn derive(features: &BTreeSet<String>, ident: &BTreeMap<String, String>) -> 
             reg_of(7, 0, "ecx"),
             reg_of(7, 0, "edx"),
         ],
+        // leaf D サブリーフ 0: XCR0 対応成分（bit0=x87,bit1=SSE で
+        // 固定 3）、現在有効サイズ・最大サイズ。モデル化する成分は
+        // 2 つだけなので両方とも 512+64=576 固定。EBX は本来現在の
+        // XCR0 に連動するが固定表なので最大値を報告する（近似）。
+        if features.contains("xsave") {
+            [3, 0x240, 0x240, 0]
+        } else {
+            [0; 4]
+        },
+        // leaf D サブリーフ 1: 拡張保存機能ビット。bit0=XSAVEOPT、
+        // bit1/3 の XSAVEC/XSAVES は未実装。EBX 以降は
+        // XSAVES 領域サイズで 0。
+        if features.contains("xsaveopt") {
+            [1, 0, 0, 0]
+        } else {
+            [0; 4]
+        },
         // leaf 0x8000_0000: 最大拡張リーフ。
         [max_ext, 0, 0, 0],
         // leaf 0x8000_0001: 拡張機能ビット。
@@ -111,7 +146,7 @@ pub fn derive(features: &BTreeSet<String>, ident: &BTreeMap<String, String>) -> 
     ];
     // モデルが報告する最大リーフを超える行は 0 に潰す。leaf 0 と
     // 0x8000_0000 の EAX は最大値そのものを運ぶので残す。
-    for (i, leaf) in LEAF_IDS.iter().enumerate() {
+    for (i, (leaf, _)) in LEAF_IDS.iter().enumerate() {
         let beyond = if *leaf >= 0x8000_0000 {
             *leaf > max_ext
         } else {

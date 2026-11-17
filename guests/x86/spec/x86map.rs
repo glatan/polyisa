@@ -1019,6 +1019,14 @@ pub fn build_maps(m: &mut Model) {
         it.group_rm = Some(rm);
         m0f.push(MapItem::Insn(0x01, it));
     }
+    // XCR0（/2 rm=0/1）。全接頭辞を無視する（llvm 実測）。
+    // XSETBV は特権命令だが CPL はモデル化しない。
+    for (rm, name) in [(0u8, "xgetbv"), (1, "xsetbv")] {
+        let mut it = mi(name, &[], Some(2), PfxSel::Any, Pred::True, name, "system");
+        it.group_mod = Some(true);
+        it.group_rm = Some(rm);
+        m0f.push(MapItem::Insn(0x01, it));
+    }
     // TSX。XEND（/2 rm=5）と XTEST（/2 rm=6）は 0F 01 /2 の
     // mod=11 副エンコーディング。XTEST はトランザクション外で
     // ZF=1、XEND はトランザクション外で #UD。
@@ -1067,7 +1075,19 @@ pub fn build_maps(m: &mut Model) {
         ),
         MapItem::Insn(0x31, n("rdtsc", &[], "rdtsc", "system")),
         // 0F AE グループ。mod!=11 は MXCSR/CLFLUSH、mod=11 は fence。
-        // /0 /1 /4 は FXSAVE/FXRSTOR/XSAVE（C1 の範囲）なので未宣言。
+        // FXSAVE/FXRSTOR（/0 /1 メモリ形）は全接頭辞を無視する
+        // （llvm 実測）。
+        MapItem::Insn(0xAE, gmp("fxsave", 0, false, &[Ea(Q64)], PfxSel::Any, "fxsave {e}", "system")),
+        MapItem::Insn(0xAE, gmp("fxrstor", 1, false, &[Ea(Q64)], PfxSel::Any, "fxrstor {e}", "system")),
+        // XSAVE（/4）は F3 が PTWRITE なので NoF3。XRSTOR（/5）は
+        // 全接頭辞を無視する（llvm 実測）。XSAVEOPT（/6）は
+        // NP+F2 で 66 は CLWB、F3 は CLRSSBSY に譲る。
+        // SDM 上は XSAVE 系の 66/F2 は #UD だが、llvm と同じく
+        // 「実装されていない命令でなければ接頭辞を無視する」
+        // 近似で受理する。
+        MapItem::Insn(0xAE, gmp("xsave", 4, false, &[Ea(Q64)], PfxSel::NoF3, "xsave {e}", "system")),
+        MapItem::Insn(0xAE, gmp("xrstor", 5, false, &[Ea(Q64)], PfxSel::Any, "xrstor {e}", "system")),
+        MapItem::Insn(0xAE, gmp("xsaveopt", 6, false, &[Ea(Q64)], PfxSel::No66F3, "xsaveopt {e}", "system")),
         MapItem::Insn(0xAE, gm("ldmxcsr_md", 2, false, &[Ea(D32)], "ldmxcsr {e}", "load")),
         MapItem::Insn(0xAE, gm("stmxcsr_md", 3, false, &[Ea(D32)], "stmxcsr {e}", "store")),
         // FSGSBASE（F3 0F AE /0-/3、mod=11、レジスタ形のみ）。

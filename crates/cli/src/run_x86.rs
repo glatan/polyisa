@@ -3585,6 +3585,13 @@ fn dispatch_map<B: Backend>(
         // PKU は実状態。EAX=PKRU / PKRU=EAX。
         Insn::Rdpkru => sem_ea::rdpkru(b),
         Insn::Wrpkru => sem_ea::wrpkru(b),
+        // XCR0 と保存領域。XGETBV/XSETBV は EDX:EAX 経由。
+        Insn::Xgetbv => sem_ea::xgetbv(b),
+        Insn::Xsetbv => sem_ea::xsetbv(b),
+        Insn::Fxsave => sem_ea::fxsave(b, &ea, mode),
+        Insn::Fxrstor => sem_ea::fxrstor(b, &ea, mode),
+        Insn::Xsave | Insn::Xsaveopt => sem_ea::xsave(b, &ea, mode),
+        Insn::Xrstor => sem_ea::xrstor(b, &ea, mode),
         // TSX。XBEGIN は常にアボートしてフォールバックへ分岐、
         // XTEST はトランザクション外なので ZF=1。XEND/XABORT は
         // トランザクション外では #GP/無効だが近似の no-op。
@@ -13153,6 +13160,9 @@ fn run_image_x86_32_impl(
     // x87 制御ワードの初期値（丸め最近接の 0x037F）。FNSTCW/FLDCW で使う.
     env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037F);
     env.backend.set(polyisa_guest_x86::sem::mxcsr_ref(), 0x1F80);
+    // OSXSAVE=1 を報告するので XCR0 は OS が x87+SSE を有効化した
+    // 後の 3 で始める（実機のリセット値は 1）。
+    env.backend.set(polyisa_guest_x86::sem::xcr0_ref(), 3);
     install_cpuid(&mut env, features, ident);
     match run_mode_ex(
         &mut env,
@@ -13332,6 +13342,9 @@ fn run_image_x86_64_impl(
     // x87 制御ワードの初期値（丸め最近接の 0x037F）。FNSTCW/FLDCW で使う.
     env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037F);
     env.backend.set(polyisa_guest_x86::sem::mxcsr_ref(), 0x1F80);
+    // OSXSAVE=1 を報告するので XCR0 は OS が x87+SSE を有効化した
+    // 後の 3 で始める（実機のリセット値は 1）。
+    env.backend.set(polyisa_guest_x86::sem::xcr0_ref(), 3);
     install_cpuid(&mut env, features, ident);
     let out = match jit {
         Some(jit) => run_mode_ex_jit(
@@ -14566,6 +14579,9 @@ mod tests {
         sem::write64(&mut env.backend, Gpr(4), sp);
         env.backend.set(sem::fcw_ref(), 0x037F);
         env.backend.set(sem::mxcsr_ref(), 0x1F80);
+        // OSXSAVE=1 を報告するので XCR0 は OS が x87+SSE を有効化した
+        // 後の 3 で始める（実機のリセット値は 1）。
+        env.backend.set(sem::xcr0_ref(), 3);
         env.backend.set(sem::eip_ref(), ehdr.entry as u32);
         env.backend.addr_mask = u64::MAX;
         let _ = sys.on_block(&mut env);

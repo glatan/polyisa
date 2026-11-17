@@ -8472,6 +8472,321 @@ pub fn mem_hint<B: Backend>(b: &mut B) -> Result<(), B::Exit> {
     Ok(())
 }
 
+// ---- XCR0 / XSAVE 系 ----
+
+/// XGETBV。EAX=XCR0[31:0]、EDX=XCR0[63:32]。ECX≠0 の #GP は
+/// モデル化しない。
+pub fn xgetbv<B: Backend>(b: &mut B) -> Flow<B> {
+    let x: B::V<W64> = b.get(sem::xcr0_ref());
+    let lo = b.trunc::<W64, W32>(x);
+    decode::gwr32(b, Gpr(0), lo);
+    let k32 = b.konst::<W64>(32);
+    let hi64 = b.shr_l::<W64>(x, k32);
+    let hi = b.trunc::<W64, W32>(hi64);
+    decode::gwr32(b, Gpr(2), hi);
+    Ok(())
+}
+
+/// XSETBV。XCR0=EDX:EAX。bit0（x87）はハードウェアで常時 1 な
+/// ので OR して保持する。他の #GP 条件（未対応ビット、
+/// XCOMP_BV 不整合等）はモデル化しない。
+pub fn xsetbv<B: Backend>(b: &mut B) -> Flow<B> {
+    let lo = decode::grd32(b, Gpr(0));
+    let hi = decode::grd32(b, Gpr(2));
+    let lo64 = b.zext::<W32, W64>(lo);
+    let hi64 = b.zext::<W32, W64>(hi);
+    let k32 = b.konst::<W64>(32);
+    let his = b.shl::<W64>(hi64, k32);
+    let v = b.or::<W64>(lo64, his);
+    let k1 = b.konst::<W64>(1);
+    let v = b.or::<W64>(v, k1);
+    b.set(sem::xcr0_ref(), v);
+    Ok(())
+}
+
+/// `a` に定数オフセットを足したアドレス。
+fn madd<B: Backend>(b: &mut B, a: B::V<W64>, off: u64) -> B::V<W64> {
+    let k = b.konst::<W64>(off);
+    b.add::<W64>(a, k)
+}
+
+/// `c` が真なら `v` を書き、偽なら既存値を読み戻して書き戻す
+/// 条件付きストア。XSAVE が RFBM 外の成分を書かない振る舞いの
+/// 近似で、偽でもアクセス自体は行われる（限界検査・ライト
+/// ペーパーの副作用は残る）。
+fn cstore<B: Backend, W: decode::Hw>(
+    b: &mut B,
+    a: B::V<W64>,
+    wseg: Option<(u64, B::V<W64>)>,
+    v: B::V<W>,
+    c: B::B,
+) -> Result<(), B::Exit> {
+    let old: B::V<W> = decode::mem_load(b, a, wseg)?;
+    let nv = b.select::<W>(c, v, old);
+    decode::mem_store::<B, W>(b, a, wseg, nv)
+}
+
+/// FXSAVE/XSAVE 共通の先行 512 バイトを書く。`w87`/`wsse` が
+/// 偽の成分は `cstore` 経由で既存値を書き戻す（XSAVE の
+/// RFBM ∩ XCR0 反映）。
+/// レイアウト: FCW(0)+FSW|TOP(2)+FTW(4)+FOP(6)+FIP(8)+FDP(16)
+/// +MXCSR(24)+MASK(28)+ST0-7(32-,16B毎: sig@0,exp@8)
+/// +XMM(160-,16B毎。m64 は XMM8-15 が +288 以降)。
+/// FOP/FIP/FDP は命令ポインタを追跡しないので 0。64 バイト
+/// 境界整列の #GP はモデル化しない。
+fn fxsave_area<B: Backend>(
+    b: &mut B,
+    a: B::V<W64>,
+    wseg: Option<(u64, B::V<W64>)>,
+    mode: u8,
+    w87: B::B,
+    wsse: B::B,
+) -> Flow<B> {
+    let fcw: B::V<W16> = b.get(sem::fcw_ref());
+    cstore::<B, W16>(b, a, wseg, fcw, w87)?;
+    let a2 = madd(b, a, 2);
+    let fsw: B::V<W16> = b.get(sem::fsw_ref());
+    let top: B::V<W16> = b.get(sem::top_ref());
+    let k7 = b.konst::<W16>(7);
+    let t3 = b.and::<W16>(top, k7);
+    let k11 = b.konst::<W16>(11);
+    let tbits = b.shl::<W16>(t3, k11);
+    let fswv = b.or::<W16>(fsw, tbits);
+    cstore::<B, W16>(b, a2, wseg, fswv, w87)?;
+    // FTW（簡約形、1 ビット/物理スロット）: 空でなければ 1。
+    // 空判定は `x87_env_store` と同じ sig/exp 由来の近似で、
+    // +0.0 のような値のある空判定の誤りは GAP-0038 の枠組み。
+    // 予約の上位バイト（+5）は 0 で書く。
+    let mut ftw = b.konst::<W8>(0);
+    for i in 0..8u16 {
+        let slot = b.konst::<W16>(i);
+        let (sig, exp) = sem::read_st(b, slot);
+        let e64 = b.zext::<W16, W64>(exp);
+        let m7fff = b.konst::<W64>(0x7fff);
+        let em = b.and::<W64>(e64, m7fff);
+        let z0 = b.konst::<W64>(0);
+        let e_nz = b.cmp::<W64>(Cmp::Ne, em, z0);
+        let s_nz = b.cmp::<W64>(Cmp::Ne, sig, z0);
+        let non = sem::bit_or(b, e_nz, s_nz);
+        let bit = b.konst::<W8>(1u8 << i);
+        let z8 = b.konst::<W8>(0);
+        let sel = b.select::<W8>(non, bit, z8);
+        ftw = b.or::<W8>(ftw, sel);
+    }
+    let a4 = madd(b, a, 4);
+    let ftw16 = b.zext::<W8, W16>(ftw);
+    cstore::<B, W16>(b, a4, wseg, ftw16, w87)?;
+    let a6 = madd(b, a, 6);
+    let z16 = b.konst::<W16>(0);
+    cstore::<B, W16>(b, a6, wseg, z16, w87)?;
+    let z64 = b.konst::<W64>(0);
+    let a8 = madd(b, a, 8);
+    cstore::<B, W64>(b, a8, wseg, z64, w87)?;
+    let a16 = madd(b, a, 16);
+    cstore::<B, W64>(b, a16, wseg, z64, w87)?;
+    let mx: B::V<W32> = b.get(sem::mxcsr_ref());
+    let a24 = madd(b, a, 24);
+    cstore::<B, W32>(b, a24, wseg, mx, wsse)?;
+    let a28 = madd(b, a, 28);
+    let mm = b.konst::<W32>(0xFFBF);
+    cstore::<B, W32>(b, a28, wseg, mm, wsse)?;
+    // ST0-7（物理レジスタ順。FTW/TOP と組で往復できる）。
+    for i in 0..8u64 {
+        let slot = b.konst::<W16>(i as u16);
+        let (sig, exp) = sem::read_st(b, slot);
+        let asig = madd(b, a, 32 + 16 * i);
+        cstore::<B, W64>(b, asig, wseg, sig, w87)?;
+        let aexp = madd(b, a, 40 + 16 * i);
+        cstore::<B, W16>(b, aexp, wseg, exp, w87)?;
+    }
+    // XMM のストアは 128 ビット幅なので `cstore`（Hw 制約）では
+    // なく読み戻し+生ストアで実装する。XMM の map 経路メモリ
+    // アクセスは既存と同じく wseg の限界検査を行わない。
+    let nx = if mode == 64 { 16u64 } else { 8 };
+    for i in 0..nx {
+        let xv: B::V<W128> = b.get(sem::xmm_ref(Xmm(i as u8)));
+        let ax = madd(b, a, 160 + 16 * i);
+        let old: B::V<W128> = b.load::<W128>(ax, sem::DATA_READ)?;
+        let nv = b.select::<W128>(wsse, xv, old);
+        b.store::<W128>(ax, nv, sem::DATA_WRITE)?;
+    }
+    Ok(())
+}
+
+/// FXRSTOR/XRSTOR 共通の先行 512 バイトからの復元。成分ごとに
+/// 「領域の値で復元 (`r*`)」「初期値に戻す (`i*`)」を選び、
+/// 両方偽なら現状を保つ（XRSTOR の RFBM 外成分）。
+/// `cstore` と同様の近似で、RFBM 外の成分も値は読み込む
+/// （読み出し側の副作用は残るが状態には反映しない）。
+/// FTW/FOP/FIP/FDP は追跡していないので読み捨てる。
+fn fxrstor_area<B: Backend>(
+    b: &mut B,
+    a: B::V<W64>,
+    wseg: Option<(u64, B::V<W64>)>,
+    mode: u8,
+    rst: B::V<W64>,
+    ini: B::V<W64>,
+) -> Flow<B> {
+    let r87 = mask_bit(b, rst, 0);
+    let rsse = mask_bit(b, rst, 1);
+    let i87 = mask_bit(b, ini, 0);
+    let isse = mask_bit(b, ini, 1);
+    let fcw_m: B::V<W16> = decode::mem_load(b, a, wseg)?;
+    let fcw_i = b.konst::<W16>(0x037F);
+    let fcw_c = b.get(sem::fcw_ref());
+    let t1 = b.select::<W16>(i87, fcw_i, fcw_c);
+    let fcw_n = b.select::<W16>(r87, fcw_m, t1);
+    b.set(sem::fcw_ref(), fcw_n);
+    // FSW の bit11-13 は TOP。復元値から取り出して別フィールドへ。
+    let a2 = madd(b, a, 2);
+    let fsw_m: B::V<W16> = decode::mem_load(b, a2, wseg)?;
+    let k7 = b.konst::<W16>(7);
+    let k11 = b.konst::<W16>(11);
+    let fsw_sh = b.shr_l::<W16>(fsw_m, k11);
+    let top_m = b.and::<W16>(fsw_sh, k7);
+    let top_c = b.get(sem::top_ref());
+    let top_i = b.konst::<W16>(0);
+    let t2 = b.select::<W16>(i87, top_i, top_c);
+    let top_n = b.select::<W16>(r87, top_m, t2);
+    b.set(sem::top_ref(), top_n);
+    let fsw_c = b.get(sem::fsw_ref());
+    let ktop = b.konst::<W16>(0xC7FF);
+    let fsw_keep = b.and::<W16>(fsw_m, ktop);
+    let fsw_i = b.konst::<W16>(0);
+    let t3 = b.select::<W16>(i87, fsw_i, fsw_c);
+    let fsw_n = b.select::<W16>(r87, fsw_keep, t3);
+    b.set(sem::fsw_ref(), fsw_n);
+    for i in 0..8 {
+        let asig = madd(b, a, 32 + 16 * i as u64);
+        let sig_m: B::V<W64> = decode::mem_load(b, asig, wseg)?;
+        let aexp = madd(b, a, 40 + 16 * i as u64);
+        let exp_m: B::V<W16> = decode::mem_load(b, aexp, wseg)?;
+        let s_c = b.get(sem::st_sig_ref(i));
+        let e_c = b.get(sem::st_exp_ref(i));
+        let z64 = b.konst::<W64>(0);
+        let z16 = b.konst::<W16>(0);
+        let s_t = b.select::<W64>(i87, z64, s_c);
+        let e_t = b.select::<W16>(i87, z16, e_c);
+        let s_n = b.select::<W64>(r87, sig_m, s_t);
+        let e_n = b.select::<W16>(r87, exp_m, e_t);
+        b.set(sem::st_sig_ref(i), s_n);
+        b.set(sem::st_exp_ref(i), e_n);
+    }
+    let a24 = madd(b, a, 24);
+    let mx_m: B::V<W32> = decode::mem_load(b, a24, wseg)?;
+    let mx_i = b.konst::<W32>(0x1F80);
+    let mx_c = b.get(sem::mxcsr_ref());
+    let t4 = b.select::<W32>(isse, mx_i, mx_c);
+    let mx_n = b.select::<W32>(rsse, mx_m, t4);
+    b.set(sem::mxcsr_ref(), mx_n);
+    let nx = if mode == 64 { 16 } else { 8 };
+    for i in 0..nx {
+        let ax = madd(b, a, 160 + 16 * i as u64);
+        let x_m: B::V<W128> = b.load::<W128>(ax, sem::DATA_READ)?;
+        let x_c = b.get(sem::xmm_ref(Xmm(i as u8)));
+        let z128 = b.konst::<W128>(0);
+        let t5 = b.select::<W128>(isse, z128, x_c);
+        let x_n = b.select::<W128>(rsse, x_m, t5);
+        b.set(sem::xmm_ref(Xmm(i as u8)), x_n);
+    }
+    Ok(())
+}
+
+/// XSAVE 系の成分マスク。RFBM（EDX:EAX）∩ XCR0。
+fn xsave_mask<B: Backend>(b: &mut B) -> B::V<W64> {
+    let lo = decode::grd32(b, Gpr(0));
+    let hi = decode::grd32(b, Gpr(2));
+    let lo64 = b.zext::<W32, W64>(lo);
+    let hi64 = b.zext::<W32, W64>(hi);
+    let k32 = b.konst::<W64>(32);
+    let his = b.shl::<W64>(hi64, k32);
+    let rfbm = b.or::<W64>(lo64, his);
+    let x0 = b.get(sem::xcr0_ref());
+    b.and::<W64>(rfbm, x0)
+}
+
+/// マスク `m` の `bit` が立っていれば真。
+fn mask_bit<B: Backend>(b: &mut B, m: B::V<W64>, bit: u64) -> B::B {
+    let k = b.konst::<W64>(1u64 << bit);
+    let v = b.and::<W64>(m, k);
+    let z = b.konst::<W64>(0);
+    b.cmp::<W64>(Cmp::Ne, v, z)
+}
+
+/// 定数真偽値。
+fn bool_k<B: Backend>(b: &mut B, v: bool) -> B::B {
+    let z = b.konst::<W8>(0);
+    let op = if v { Cmp::Eq } else { Cmp::Ne };
+    b.cmp::<W8>(op, z, z)
+}
+
+/// FXSAVE。512 バイトの x87+SSE イメージを書く。
+pub fn fxsave<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>, mode: u8) -> Flow<B> {
+    let Rm::Mem { a, wseg } = ea else {
+        return Ok(());
+    };
+    let a = *a;
+    let wseg = *wseg;
+    let t = bool_k::<B>(b, true);
+    fxsave_area(b, a, wseg, mode, t, t)
+}
+
+/// FXRSTOR。512 バイトの x87+SSE イメージで全成分を復元する。
+/// 初期化は起きない。
+pub fn fxrstor<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>, mode: u8) -> Flow<B> {
+    let Rm::Mem { a, wseg } = ea else {
+        return Ok(());
+    };
+    let a = *a;
+    let wseg = *wseg;
+    let rst = b.konst::<W64>(3);
+    let ini = b.konst::<W64>(0);
+    fxrstor_area(b, a, wseg, mode, rst, ini)
+}
+
+/// XSAVE/XSAVEOPT。先行 512 バイトは RFBM ∩ XCR0 の成分だけ
+/// 書き、+512 に XSTATE_BV、+520 に XCOMP_BV=0 を書く。
+/// XINUSE は全成分使用中と近似するので XSTATE_BV=RFBM∩XCR0。
+/// XSAVEOPT の省略最適化・圧縮形式・監査値はモデル化しない。
+pub fn xsave<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>, mode: u8) -> Flow<B> {
+    let Rm::Mem { a, wseg } = ea else {
+        return Ok(());
+    };
+    let a = *a;
+    let wseg = *wseg;
+    let m = xsave_mask(b);
+    let w87 = mask_bit(b, m, 0);
+    let wsse = mask_bit(b, m, 1);
+    fxsave_area(b, a, wseg, mode, w87, wsse)?;
+    let a512 = madd(b, a, 512);
+    decode::mem_store::<B, W64>(b, a512, wseg, m)?;
+    let z = b.konst::<W64>(0);
+    // XCOMP_BV=0。ヘッダの予約域（528-575）も実機同様 0 で埋める。
+    for off in (520..576).step_by(8) {
+        let ah = madd(b, a, off);
+        decode::mem_store::<B, W64>(b, ah, wseg, z)?;
+    }
+    Ok(())
+}
+
+/// XRSTOR。成分 i∈RFBM∩XCR0 は領域の XSTATE_BV ビットが立てば
+/// 復元、立たなければ初期値に戻す。RFBM 外の成分は手付かず。
+/// MXCSR 予約ビット・XSTATE_BV 不整合の #GP はモデル化しない。
+pub fn xrstor<B: Backend>(b: &mut B, ea: &Rm<B::V<W64>>, mode: u8) -> Flow<B> {
+    let Rm::Mem { a, wseg } = ea else {
+        return Ok(());
+    };
+    let a = *a;
+    let wseg = *wseg;
+    let a512 = madd(b, a, 512);
+    let xbv: B::V<W64> = decode::mem_load(b, a512, wseg)?;
+    let m = xsave_mask(b);
+    let rst = b.and::<W64>(m, xbv);
+    let nxbv = b.not::<W64>(xbv);
+    let ini = b.and::<W64>(m, nxbv);
+    fxrstor_area(b, a, wseg, mode, rst, ini)
+}
+
 /// CMPXCHG8B/CMPXCHG16B。EDX:EAX（または RDX:RAX）とメモリを比較し、
 /// 等しければ ECX:EBX（RCX:RBX）を書き込み、違えばメモリ値を
 /// EDX:EAX（RDX:RAX）へ読む。ZF に結果を書く。

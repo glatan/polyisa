@@ -17,9 +17,9 @@
 | pentium | i486 | vme、de、pse、tsc、msr、cx8、mce、apic、mmx |  |
 | pentium_iii | pentium_pro | fxsr、sse、sep、pat |  |
 | pentium_pro | pentium | cmov、pge、mca、pae、mtrr、pse36 |  |
-| x86_64 |  | cpuid、fpu、vme、de、pse、tsc、msr、pae、mce、cx8、apic、sep、mtrr、pge、mca、cmov、pat、pse36、clfsh、mmx、fxsr、sse、sse2、sse3、ssse3、sse4_1、sse4_2、cx16、popcnt、rdtscp、syscall、nx、lm、lahf_lm、i486、lzcnt、adx、pclmulqdq、aesni、sha、gfni、rdrnd、rdseed、serialize、fsgsbase、cet_ss、rtm、pku、uintr、movdiri、movdir64b、enqcmd、cldemote、waitpkg、hreset、clwb、clflushopt |  |
-| x86_64_v2 | x86_64 | cx16、popcnt | lzcnt、adx、pclmulqdq、aesni、sha、gfni、rdrnd、rdseed、serialize、fsgsbase、cet_ss、rtm、pku、uintr、movdiri、movdir64b、enqcmd、cldemote、waitpkg、hreset、clwb、clflushopt |
-| x86_64_v3 | x86_64_v2 | avx、avx2、bmi1、bmi2、f16c、fma、lzcnt、movbe、osxsave、adx、pclmulqdq、aesni |  |
+| x86_64 |  | cpuid、fpu、vme、de、pse、tsc、msr、pae、mce、cx8、apic、sep、mtrr、pge、mca、cmov、pat、pse36、clfsh、mmx、fxsr、sse、sse2、sse3、ssse3、sse4_1、sse4_2、cx16、popcnt、rdtscp、syscall、nx、lm、lahf_lm、i486、lzcnt、adx、pclmulqdq、aesni、sha、gfni、rdrnd、rdseed、serialize、fsgsbase、cet_ss、rtm、pku、uintr、movdiri、movdir64b、enqcmd、cldemote、waitpkg、hreset、clwb、clflushopt、xsave、xsaveopt、osxsave |  |
+| x86_64_v2 | x86_64 | cx16、popcnt | lzcnt、adx、pclmulqdq、aesni、sha、gfni、rdrnd、rdseed、serialize、fsgsbase、cet_ss、rtm、pku、uintr、movdiri、movdir64b、enqcmd、cldemote、waitpkg、hreset、clwb、clflushopt、xsaveopt |
+| x86_64_v3 | x86_64_v2 | avx、avx2、bmi1、bmi2、f16c、fma、lzcnt、movbe、osxsave、adx、pclmulqdq、aesni、xsaveopt |  |
 | x86_64_v4 | x86_64_v3 | avx512f、avx512bw、avx512cd、avx512dq、avx512vl |  |
 
 ## 機能
@@ -154,6 +154,7 @@
 - x2apic
 - xop
 - xsave
+- xsaveopt
 - xtpr
 
 ## 命令
@@ -316,6 +317,8 @@
 | fucomip | fucomip_st | 真 | alu |
 | fwait | fwait | 真 | system |
 | fxch | fxch_st、fxch_sti | 真 | alu |
+| fxrstor | fxrstor | fxsr | system |
+| fxsave | fxsave | fxsr | system |
 | gf2p8affineinvqb | gf2p8affineinvqb_xv_wv_ib | gfni | alu |
 | gf2p8affineqb | gf2p8affineqb_xv_wv_ib | gfni | alu |
 | gf2p8mulb | gf2p8mulb_xv_wv | gfni | alu |
@@ -806,9 +809,14 @@
 | xbegin | xbegin_jz | i286 && opd_o32 && rtm | jump |
 | xchg | xchg_eb_gb、xchg_ev_gv、xchg_r8、xchg_r_mem32、xchg_r_mem8、xchg_r_memnd、xchg_r_rip、xchg_r_rm、xchg_rbp_ax、xchg_rbx_ax、xchg_rcx_ax、xchg_rdi_ax、xchg_rdx_ax、xchg_rsi_ax、xchg_rsp_ax、xchg_rv_eax | 真 | alu |
 | xend | xend | rtm | system |
+| xgetbv | xgetbv | osxsave | system |
 | xlat | xlat | 真 | load |
 | xor | xor_eb_ib | op82 | alu |
 | xor | xor_al_ib、xor_eax_iz、xor_eb_gb、xor_eb_ib、xor_ev_gv、xor_ev_ib、xor_ev_iz、xor_gb_eb、xor_gv_ev、xor_imm、xor_m32_r32_mem32、xor_m32_r32_mem8、xor_m32_r32_memnd、xor_m32_r32_sibd、xor_m8_r8、xor_m8_r8_sib、xor_r8_m8_memnd、xor_r_mem32、xor_r_mem8、xor_r_memnd、xor_r_rip、xor_r_sib、xor_r_sibd、xor_r_sibd32、xor_rm32、xor_rm32_imm、xor_rm32_imm_sibd、xor_rm8_imm、xor_rm8_imm_mem32、xor_rm8_imm_memnd、xor_rm8_imm_sib、xor_rm8_imm_sibd、xor_rm_imm8、xor_rm_imm8_mem32、xor_rm_imm8_mem8、xor_rm_imm8_memnd、xor_rm_imm8_sibd | 真 | alu |
 | xorpd | xorpd_xv_wv | sse2 | alu |
 | xorps | xorps、xorps_xv_wv | sse | alu |
+| xrstor | xrstor | xsave | system |
+| xsave | xsave | xsave | system |
+| xsaveopt | xsaveopt | xsaveopt | system |
+| xsetbv | xsetbv | xsave | system |
 | xtest | xtest | rtm | system |

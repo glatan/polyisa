@@ -69,7 +69,7 @@ pub struct CpuState {
     /// CPUID 命令が返すリーフの値。`cpuid::LEAF_IDS` の添え字順に
     /// (EAX,EBX,ECX,EDX) を持つ。実行開始時に `cpuid::derive` の結果を
     /// 書き込む。初期値の 0 は「CPUID 未導出」を表す。
-    pub cpuid: [[u32; 4]; 6],
+    pub cpuid: [[u32; 4]; 8],
     /// SSE の制御・状態レジスタ（LDMXCSR/STMXCSR が読み書きする）。
     /// 実行開始時に 0x1F80（例外全マスク・RNE）へ初期化する。
     pub mxcsr: u32,
@@ -89,6 +89,9 @@ pub struct CpuState {
     /// PKRU（保護キーレジスタ、32 ビット）。RDPKRU/WRPKRU が
     /// 読み書きする。
     pub pkru: u64,
+    /// XCR0（拡張機能許可ビットマスク）。XGETBV/XSETBV が
+    /// 読み書きする。リセット値は 1（x87 状態のみ必須）。
+    pub xcr0: u64,
 }
 
 #[cfg(test)]
@@ -121,15 +124,17 @@ mod tests {
         assert_eq!(core::mem::offset_of!(CpuState, st_sig), 416);
         assert_eq!(core::mem::offset_of!(CpuState, fs_base), 480);
         assert_eq!(core::mem::offset_of!(CpuState, gs_base), 488);
-        // mxcsr（sregs 12 + fsw 2 + cpuid 96 を
-        // gs_base 以降に足した 606 を 8 境界へ揃えた位置）。
-        assert_eq!(core::mem::offset_of!(CpuState, mxcsr), 608);
+        // mxcsr（sregs 12 + fsw 2 + cpuid 128 を
+        // gs_base 以降に足した 638 を 8 境界へ揃えた位置）。
+        assert_eq!(core::mem::offset_of!(CpuState, mxcsr), 640);
+        // xcr0 は末尾（rand_state・pkru の後）。
+        assert_eq!(core::mem::offset_of!(CpuState, xcr0), 696);
     }
 
     #[test]
     fn insn_count() {
         // 段階4の x86 最小 853 件にオペコード表の記述を足した件数。
-        assert_eq!(INSNS.len(), 1681);
+        assert_eq!(INSNS.len(), 1688);
     }
 
     #[test]

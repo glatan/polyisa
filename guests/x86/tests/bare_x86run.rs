@@ -17873,7 +17873,6 @@ fn run64_fsgsbase_cet() {
     let modes = MODE_M64 | (MODE_OPD_O32 << MODE_OPD_SHIFT) | (MODE_ADR_A64 << MODE_ADR_SHIFT);
     let feats = polyisa_guest_x86::DEFAULT_FEATS;
     for bytes in [
-        &[0xF3, 0x0F, 0xAE, 0x00][..],       // FSGSBASE mod≠11 → 予約
         &[0x0F, 0x38, 0xF6, 0xC1][..],       // NP WRSS mod=11 → 予約
         &[0x66, 0x0F, 0x38, 0xF5, 0xC1][..], // WRUSS mod=11 → 予約
     ] {
@@ -17882,6 +17881,10 @@ fn run64_fsgsbase_cet() {
             "{bytes:?}"
         );
     }
+    // FSGSBASE は mod=11 専用。mod≠11 の F3 /0 は接頭辞を無視
+    // する FXSAVE として受理される（C1a）。
+    let d = polyisa_guest_x86::decode_map(&[0xF3, 0x0F, 0xAE, 0x00], modes, feats).unwrap();
+    assert_eq!(d.insn, polyisa_guest_x86::Insn::Fxsave);
     // A4d で UMONITOR が宣言されたので F3 0F AE /6 mod=11 は受理。
     let d = polyisa_guest_x86::decode_map(&[0xF3, 0x0F, 0xAE, 0xF0], modes, feats).unwrap();
     assert_eq!(d.insn, polyisa_guest_x86::Insn::UmonitorRv);
@@ -17905,6 +17908,138 @@ fn run64_fsgsbase_cet() {
             "{bytes:?}"
         );
     }
+}
+#[test]
+fn run64_xsave_xcr0() {
+    // XGETBV/XSETBV と FXSAVE/FXRSTOR/XSAVE/XRSTOR/XSAVEOPT。
+    // xsave 領域は 0x4000（FXSAVE）、0x4400（XSAVE/XSAVEOPT）。
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x4000), 2, Perms::RW).unwrap();
+    env.backend.mem.map(VirtAddr(0x5000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x5800);
+    // run_image と同じ電源投入状態（XCR0=1 で x87 成分のみ有効）。
+    env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037F);
+    env.backend.set(polyisa_guest_x86::sem::mxcsr_ref(), 0x1F80);
+    env.backend.set(polyisa_guest_x86::sem::xcr0_ref(), 3);
+    let prog: &[u8] = &[
+        0x48, 0xBB, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rbx,0x4000
+        0xD9, 0xE8, // fld1 → st[top=7]=1.0
+        0x66, 0x0F, 0x76, 0xC0, // pcmpeqd xmm0,xmm0 → all-ones
+        0x0F, 0xAE, 0x03, // fxsave [rbx]
+        0x0F, 0x01, 0xD0, // xgetbv → eax=3（初期 xcr0=3）
+        0x89, 0x04, 0x25, 0x00, 0x50, 0x00, 0x00, // mov [0x5000],eax
+        0xB8, 0x00, 0x00, 0x00, 0x00, // mov eax,0
+        0x31, 0xD2, // xor edx,edx
+        0x0F, 0x01, 0xD1, // xsetbv → 0|1=1（bit0 強制）
+        0x0F, 0x01, 0xD0, // xgetbv → eax=1
+        0x89, 0x04, 0x25, 0x08, 0x50, 0x00, 0x00, // mov [0x5008],eax
+        0xB8, 0x03, 0x00, 0x00, 0x00, // mov eax,3
+        0x31, 0xD2, // xor edx,edx
+        0x0F, 0x01, 0xD1, // xsetbv → xcr0=3
+        0x0F, 0x01, 0xD0, // xgetbv → eax=3
+        0x89, 0x04, 0x25, 0x04, 0x50, 0x00, 0x00, // mov [0x5004],eax
+        0x0F, 0xAE, 0xA3, 0x00, 0x04, 0x00, 0x00, // xsave [rbx+0x400]
+        0x0F, 0xAE, 0xB3, 0x00, 0x04, 0x00, 0x00, // xsaveopt [rbx+0x400]
+        // RFBM=1（x87 のみ）の XSAVE: SSE 成分は領域の値を保つ。
+        0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax,1
+        0x31, 0xD2, // xor edx,edx
+        0x0F, 0xAE, 0x23, // xsave [rbx] → xstate_bv@0x4200=1
+        0x66, 0x0F, 0xEF, 0xC0, // pxor xmm0,xmm0 → 0
+        0x0F, 0xAE, 0x0B, // fxrstor [rbx] → xmm0=FF…、st0=1.0
+        0xD9, 0x1C, 0x25, 0x30, 0x50, 0x00, 0x00, // fstp dword [0x5030] → x87 復元検証
+        0x0F, 0x11, 0x04, 0x25, 0x10, 0x50, 0x00, 0x00, // movups [0x5010],xmm0
+        // 領域の XSTATE_BV を 1（x87 のみ）に書き換えてから
+        // XRSTOR → SSE 成分は初期値（0）に戻る。
+        0x48, 0xC7, 0xC0, 0x01, 0x00, 0x00, 0x00, // mov rax,1
+        0x48, 0xA3, 0x00, 0x46, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // mov [0x4600],rax
+        0xB8, 0x03, 0x00, 0x00, 0x00, // mov eax,3（RFBM）
+        0x31, 0xD2, // xor edx,edx
+        0x0F, 0xAE, 0xAB, 0x00, 0x04, 0x00, 0x00, // xrstor [rbx+0x400]
+        0x0F, 0x11, 0x04, 0x25, 0x20, 0x50, 0x00, 0x00, // movups [0x5020],xmm0
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0x31, 0xFF, // xor rdi,rdi
+        0x0F, 0x05, // syscall → exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode(&mut env, 0x1000, &mut sys, 100, true);
+    assert_eq!(out, Outcome::Exit(0));
+    let acc = polyisa_mem::Access {
+        endian: polyisa_mem::Endian::Le,
+        align: polyisa_mem::Align::Unaligned,
+        kind: polyisa_mem::AccessKind::DataRead,
+    };
+    let mut v = [0u8; 0x40];
+    env.backend.mem.read(VirtAddr(0x5000), &mut v, acc).unwrap();
+    let w = |i: usize| u32::from_le_bytes(v[i..i + 4].try_into().unwrap());
+    assert_eq!(w(0), 3, "xgetbv → xcr0=3");
+    assert_eq!(w(4), 3, "xsetbv(3) → xgetbv=3");
+    assert_eq!(w(8), 1, "xsetbv(0) は bit0 強制で 1");
+    assert_eq!(&v[0x10..0x20], &[0xFF; 16], "fxrstor で xmm0 復元");
+    assert_eq!(&v[0x20..0x30], &[0; 16], "xrstor で SSE 初期化");
+    // FSTP で ST(0)=1.0 が戻ったこと → x87 成分の復元を検証。
+    assert_eq!(w(0x30), 0x3F80_0000, "fxrstor で st0=1.0");
+    // FXSAVE 領域（0x4000）のフィールド確認。
+    let mut a = [0u8; 0xB0];
+    env.backend.mem.read(VirtAddr(0x4000), &mut a, acc).unwrap();
+    let h = |i: usize| u16::from_le_bytes(a[i..i + 2].try_into().unwrap());
+    let q = |i: usize| u64::from_le_bytes(a[i..i + 8].try_into().unwrap());
+    assert_eq!(h(0), 0x037F, "fcw");
+    assert_eq!(h(2), 0x3800, "fsw(top=7)");
+    assert_eq!(a[4], 0x80, "ftw: 物理スロット 7 のみ使用中");
+    assert_eq!(w32(&a, 24), 0x1F80, "mxcsr");
+    assert_eq!(w32(&a, 28), 0xFFBF, "mxcsr_mask");
+    assert_eq!(q(32 + 16 * 7), 0x8000_0000_0000_0000, "st7 有意");
+    assert_eq!(h(40 + 16 * 7), 0x3FFF, "st7 指数(1.0)");
+    // XSAVE 領域（0x4400）: ヘッダ XSTATE_BV=3、XCOMP_BV=0。
+    let mut x = [0u8; 8];
+    env.backend
+        .mem
+        .read(VirtAddr(0x4400), &mut x[..2], acc)
+        .unwrap();
+    assert_eq!(
+        u16::from_le_bytes(x[..2].try_into().unwrap()),
+        0x037F,
+        "xsave fcw"
+    );
+    env.backend.mem.read(VirtAddr(0x4608), &mut x, acc).unwrap();
+    assert_eq!(u64::from_le_bytes(x), 0, "xcomp_bv=0");
+    // デコード検査。
+    use polyisa_guest_x86::{
+        Insn, MODE_ADR_A64, MODE_ADR_SHIFT, MODE_M64, MODE_OPD_O32, MODE_OPD_SHIFT, decode_map,
+    };
+    let modes = MODE_M64 | (MODE_OPD_O32 << MODE_OPD_SHIFT) | (MODE_ADR_A64 << MODE_ADR_SHIFT);
+    let feats = polyisa_guest_x86::DEFAULT_FEATS;
+    for (bytes, want) in [
+        (&[0x0F, 0x01, 0xD0][..], Insn::Xgetbv),
+        (&[0x0F, 0x01, 0xD1][..], Insn::Xsetbv),
+        (&[0x0F, 0xAE, 0x03][..], Insn::Fxsave),
+        (&[0x0F, 0xAE, 0x0B][..], Insn::Fxrstor),
+        (&[0x0F, 0xAE, 0x23][..], Insn::Xsave),
+        (&[0x0F, 0xAE, 0x2B][..], Insn::Xrstor),
+        (&[0x0F, 0xAE, 0x33][..], Insn::Xsaveopt),
+        // 66 も XSAVE（F3 が PTWRITE、66 は別機能なし）。
+        (&[0x66, 0x0F, 0xAE, 0x23][..], Insn::Xsave),
+        // 66 /6 は CLWB。NP /6 mod=11 は MFENCE。
+        (&[0x66, 0x0F, 0xAE, 0x33][..], Insn::ClwbMb),
+        (&[0x0F, 0xAE, 0xF0][..], Insn::Mfence),
+    ] {
+        let d = decode_map(bytes, modes, feats).unwrap_or_else(|| panic!("{bytes:?}"));
+        assert_eq!(d.insn, want, "{bytes:?}");
+    }
+    for bytes in [
+        &[0x0F, 0xAE, 0xE0][..],       // /4 mod=11 → 予約
+        &[0xF3, 0x0F, 0xAE, 0x23][..], // F3 /4 → PTWRITE（未実装）
+        &[0x0F, 0x01, 0xD2][..],       // /2 rm=2 → 予約
+    ] {
+        assert!(decode_map(bytes, modes, feats).is_none(), "{bytes:?}");
+    }
+}
+
+fn w32(a: &[u8], i: usize) -> u32 {
+    u32::from_le_bytes(a[i..i + 4].try_into().unwrap())
 }
 
 #[test]
@@ -18093,7 +18228,7 @@ fn run64_movdir_waitpkg() {
     assert_eq!(w[0], 0, "umwait clears CF");
     // デコード検査。
     use polyisa_guest_x86::{
-        DEFAULT_FEATS as feats, MODE_ADR_A64, MODE_ADR_SHIFT, MODE_M64, MODE_OPD_O32,
+        DEFAULT_FEATS as feats, Insn, MODE_ADR_A64, MODE_ADR_SHIFT, MODE_M64, MODE_OPD_O32,
         MODE_OPD_SHIFT, decode_map,
     };
     let m64 = MODE_M64 | (MODE_OPD_O32 << MODE_OPD_SHIFT) | (MODE_ADR_A64 << MODE_ADR_SHIFT);
@@ -18106,13 +18241,14 @@ fn run64_movdir_waitpkg() {
         &[0xF3, 0x0F, 0x3A, 0xF0, 0xC1, 0x00][..], // hreset rm=1 → 予約
         &[0xF3, 0x0F, 0x3A, 0xF0, 0x00, 0x00][..], // hreset mod≠11 → 予約
         &[0x0F, 0x3A, 0xF0, 0xC0, 0x00][..],       // hreset NP → 予約
-        // /5-/7 の mod=11 NP は LFENCE/MFENCE/SFENCE なので
-        // 拒否対象にしない。NP /6 のメモリ形は XSAVEOPT（C1a
-        // で実装予定）なので現状は拒否される。
-        &[0x0F, 0xAE, 0x30][..], // xsaveopt → 未実装
+                                                   // /5-/7 の mod=11 NP は LFENCE/MFENCE/SFENCE なので
+                                                   // 拒否対象にしない。
     ] {
         assert!(decode_map(bytes, m64, feats).is_none(), "{bytes:?}");
     }
+    // NP /6 のメモリ形は C1a で XSAVEOPT として実装済み。
+    let d = decode_map(&[0x0F, 0xAE, 0x30], m64, feats).unwrap();
+    assert_eq!(d.insn, Insn::Xsaveopt);
     // 受理系: 各命令の正しい形。
     for bytes in [
         &[0x0F, 0x38, 0xF9, 0x00][..],             // movdiri [eax]

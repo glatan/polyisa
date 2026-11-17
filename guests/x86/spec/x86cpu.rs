@@ -103,6 +103,7 @@ fn declare_features(m: &mut Model) {
     feat(m, "tsc_deadline", &[]);
     feat(m, "aesni", &["sse2"]);
     feat(m, "xsave", &[]);
+    feat(m, "xsaveopt", &["xsave"]);
     feat(m, "osxsave", &["xsave"]);
     feat(m, "avx", &["xsave", "sse4_2"]);
     feat(m, "f16c", &["avx"]);
@@ -351,6 +352,7 @@ fn declare_models(m: &mut Model) {
             "rdrnd", "rdseed", "serialize", "fsgsbase", "cet_ss",
             "rtm", "pku", "uintr", "movdiri", "movdir64b", "enqcmd", "cldemote",
             "waitpkg", "hreset", "clwb", "clflushopt",
+            "xsave", "xsaveopt", "osxsave",
         ],
         &[],
         &[],
@@ -365,8 +367,10 @@ fn declare_models(m: &mut Model) {
         &["cx16", "popcnt"],
         // psABI v2 に LZCNT・ADX・PCLMUL・AES-NI・SHA・GFNI・
         // RDRAND・RDSEED・SERIALIZE は含まれないので既定モデルから
-        // 継承した分を削る。
-        &["lzcnt", "adx", "pclmulqdq", "aesni", "sha", "gfni", "rdrnd", "rdseed", "serialize", "fsgsbase", "cet_ss", "rtm", "pku", "uintr", "movdiri", "movdir64b", "enqcmd", "cldemote", "waitpkg", "hreset", "clwb", "clflushopt"],
+        // 継承した分を削る。XSAVEOPT は Sandy Bridge 以降なので
+        // Westmere の版数を名乗る v2 からも削る（XSAVE 本体は
+        // Penryn 世代の機能なので残す）。
+        &["lzcnt", "adx", "pclmulqdq", "aesni", "sha", "gfni", "rdrnd", "rdseed", "serialize", "fsgsbase", "cet_ss", "rtm", "pku", "uintr", "movdiri", "movdir64b", "enqcmd", "cldemote", "waitpkg", "hreset", "clwb", "clflushopt", "xsaveopt"],
         &[],
         // v2 の水準（SSE4.2+POPCNT+CX16、AVX なし）は Westmere。
         intel("6", "44", "2"),
@@ -377,7 +381,7 @@ fn declare_models(m: &mut Model) {
         "x86_64_v2",
         &[
             "avx", "avx2", "bmi1", "bmi2", "f16c", "fma", "lzcnt", "movbe", "osxsave", "adx",
-            "pclmulqdq", "aesni",
+            "pclmulqdq", "aesni", "xsaveopt",
         ],
         &[],
         &[],
@@ -788,8 +792,11 @@ fn named_gate(mn: &str) -> Option<&'static [&'static str]> {
         "mfence" | "lfence" => &["sse2"],
         "fxsave" | "fxrstor" => &["fxsr"],
         "xsave" | "xrstor" => &["xsave"],
-        // XGETBV は XCR0 を読むので OS の xsave 許可（OSXSAVE）が要る。
+        "xsaveopt" => &["xsaveopt"],
+        // XGETBV は OS の xsave 許可（OSXSAVE）が要る。XSETBV は
+        // XSAVE 機能（+特権。CPL はモデル化しない）。
         "xgetbv" => &["osxsave"],
+        "xsetbv" => &["xsave"],
         _ => return None,
     })
 }

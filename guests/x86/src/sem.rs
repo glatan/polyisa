@@ -141,6 +141,11 @@ pub fn pkru_ref() -> StateRef<W64> {
     StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, pkru))
 }
 
+/// XCR0（拡張機能許可ビットマスク）。
+pub fn xcr0_ref() -> StateRef<W64> {
+    StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, xcr0))
+}
+
 /// 64ビットレジスタを読む（0-7 は上位 h と下位 g を結合し、8-15 は x を読む）。
 pub fn read64<B: Backend>(b: &mut B, r: Gpr) -> B::V<W64> {
     if r.0 < 8 {
@@ -6878,17 +6883,22 @@ pub fn cpuid<B: Backend>(b: &mut B) -> Flow<B> {
     let subleaf = read(b, Gpr(1));
     let zero = b.konst::<W32>(0);
     let mut out = [zero, zero, zero, zero];
-    for (i, id) in crate::cpuid::LEAF_IDS.iter().enumerate() {
+    for (i, (id, sid)) in crate::cpuid::LEAF_IDS.iter().enumerate() {
         let k = b.konst::<W32>(*id);
         let is = b.cmp::<W32>(Cmp::Eq, leaf, k);
+        // ECX をサブリーフとして読むのは 7・0xD 系だけ。他の
+        // リーフは入力 ECX を無視する（1 回目の CPUID が ECX を
+        // 上書きするため、無条件照合だと続けて読めない）。
+        let hit = if *sid == 0 && *id != 7 && *id != 0xD {
+            is
+        } else {
+            let sk = b.konst::<W32>(*sid);
+            let sub_is = b.cmp::<W32>(Cmp::Eq, subleaf, sk);
+            bit_and(b, is, sub_is)
+        };
         for (r, slot) in out.iter_mut().enumerate() {
-            let mut v: B::V<W32> = b.get(cpuid_ref(i, r));
-            if *id == 7 {
-                // leaf 7 はサブリーフ 0 のみを報告する。
-                let sub0 = b.cmp::<W32>(Cmp::Eq, subleaf, zero);
-                v = b.select::<W32>(sub0, v, zero);
-            }
-            *slot = b.select::<W32>(is, v, *slot);
+            let v: B::V<W32> = b.get(cpuid_ref(i, r));
+            *slot = b.select::<W32>(hit, v, *slot);
         }
     }
     write(b, Gpr(0), out[0]);
