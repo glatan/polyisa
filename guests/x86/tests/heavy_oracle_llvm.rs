@@ -542,8 +542,6 @@ const KNOWN: &[(&str, &str, &str)] = &[
     ("0f 2d", "mnemonic", "*"), // 同上
     ("0f 52", "missing", "*"),  // rsqrtps
     ("0f 53", "missing", "*"),  // rcpps
-    ("0f 5b", "missing", "*"),  // cvtdq2ps/cvtps2dq/cvttps2dq
-    ("0f 5b", "mnemonic", "*"), // 列挙経路は接頭辞剥がし形として解読
     ("0f c3", "missing", "*"),  // movnti
     // 0F 38/3A の未宣言（A3a/A4/将来）。
     ("66 0f 38 80", "missing", "*"),
@@ -641,13 +639,8 @@ const KNOWN: &[(&str, &str, &str)] = &[
     ("66 0f 2d", "missing", "*"),
     ("66 0f 52", "missing", "*"),
     ("66 0f 53", "missing", "*"),
-    ("66 0f 5b", "missing", "*"),
-    ("66 0f 63", "missing", "*"),
-    ("66 0f 67", "missing", "*"),
-    ("66 0f 6b", "missing", "*"),
     ("66 0f e4", "missing", "*"),
     ("66 0f e5", "missing", "*"),
-    ("66 0f e6", "missing", "*"),
     ("66 0f e7", "missing", "*"),
     ("66 0f f4", "missing", "*"),
     ("66 0f f5", "missing", "*"),
@@ -685,7 +678,6 @@ const KNOWN: &[(&str, &str, &str)] = &[
     ("f2 0f c3", "missing", "*"),
     ("f2 0f c7", "missing", "*"), // rdrand/rdseed（A4）
     ("f2 0f d6", "missing", "*"), // movdq2q
-    ("f2 0f e6", "missing", "*"), // cvtdq2pd
     // F3 0F: A4 のシステム系と未宣言の F3 命令。
     ("f3 0f 01", "missing", "*"),
     ("f3 0f 05", "missing", "i386"), // syscall（m64 ゲート）
@@ -705,7 +697,6 @@ const KNOWN: &[(&str, &str, &str)] = &[
     ("f3 0f 37", "missing", "*"),
     ("f3 0f 52", "missing", "*"),
     ("f3 0f 53", "missing", "*"),
-    ("f3 0f 5b", "missing", "*"),
     ("f3 0f 78", "missing", "*"),
     ("f3 0f 79", "missing", "*"),
     ("f3 0f a6", "missing", "*"),
@@ -718,7 +709,6 @@ const KNOWN: &[(&str, &str, &str)] = &[
     ("f3 0f c3", "missing", "*"),
     ("f3 0f c7", "missing", "*"), // rdrand/rdpid（A4）
     ("f3 0f d6", "missing", "*"), // movq2dq
-    ("f3 0f e6", "missing", "*"),
     // 接頭辞付きのヒント NOP 系。0F 0D/18/1C はオラクルが
     // prefetch/prefetchnta/cldemote 名を返す（mod!=11 のみ）、
     // 19-1D は拒否する（我々は寛容に nop として受理＝HW 準拠）。

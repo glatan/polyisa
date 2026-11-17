@@ -3922,15 +3922,13 @@ pub fn ucomis<B: Backend>(
     Ok(())
 }
 
-/// CVTSI2SD/CVTSI2SS。整数を浮動小数点にして下位に書く。上位は dst のまま。
-pub fn cvtsi<B: Backend>(
+/// CVTSI2SD/CVTSI2SS の変換値（ゼロ拡張された 128 ビット）。
+fn cvtsi_val<B: Backend>(
     b: &mut B,
     fbits: u32,
     d: &MapDec,
     ea: &Rm<B::V<W64>>,
-) -> Result<(), B::Exit> {
-    let dst = reg_x(d);
-    let a128: B::V<W128> = b.get(sem::xmm_ref(dst));
+) -> Result<B::V<W128>, B::Exit> {
     let res = if d.rex & 8 != 0 {
         let i64v = decode::rd64(b, ea)?;
         let f = if fbits == 64 {
@@ -3954,7 +3952,25 @@ pub fn cvtsi<B: Backend>(
             b.zext::<W32, W128>(f32)
         }
     };
-    let out = put_lane128(b, a128, res, 0, fbits);
+    Ok(res)
+}
+
+/// `base` の下位 `fbits` を `res` で置き換える。
+fn cvt_merge<B: Backend>(b: &mut B, base: B::V<W128>, res: B::V<W128>, fbits: u32) -> B::V<W128> {
+    put_lane128(b, base, res, 0, fbits)
+}
+
+/// CVTSI2SD/CVTSI2SS。整数を浮動小数点にして下位に書く。上位は dst のまま。
+pub fn cvtsi<B: Backend>(
+    b: &mut B,
+    fbits: u32,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    let dst = reg_x(d);
+    let a128: B::V<W128> = b.get(sem::xmm_ref(dst));
+    let res = cvtsi_val(b, fbits, d, ea)?;
+    let out = cvt_merge(b, a128, res, fbits);
     b.set(sem::xmm_ref(dst), out);
     Ok(())
 }
@@ -4068,17 +4084,9 @@ pub fn cvtff<B: Backend>(
     Ok(())
 }
 
-/// PSHUFD（66）/PSHUFHW（F3）/PSHUFLW（F2）。
-pub fn pshuf<B: Backend>(
-    b: &mut B,
-    kind: u8,
-    imm: u8,
-    d: &MapDec,
-    ea: &Rm<B::V<W64>>,
-) -> Result<(), B::Exit> {
-    let dst = reg_x(d);
-    let s = rx(b, ea, 128)?;
-    let v = match kind {
+/// PSHUFD/PSHUFHW/PSHUFLW の 128 ビット処理（値関数）。
+fn pshuf_val<B: Backend>(b: &mut B, kind: u8, imm: u8, s: B::V<W128>) -> B::V<W128> {
+    match kind {
         // 全 4 dword を imm で並べ替え。
         0 => {
             let mut acc = b.konst::<W128>(0);
@@ -4109,9 +4117,40 @@ pub fn pshuf<B: Backend>(
             }
             acc
         }
-    };
+    }
+}
+
+/// PSHUFD（66）/PSHUFHW（F3）/PSHUFLW（F2）。
+pub fn pshuf<B: Backend>(
+    b: &mut B,
+    kind: u8,
+    imm: u8,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    let dst = reg_x(d);
+    let s = rx(b, ea, 128)?;
+    let v = pshuf_val(b, kind, imm, s);
     b.set(sem::xmm_ref(dst), v);
     Ok(())
+}
+
+/// SHUFPS/SHUFPD の 128 ビット処理（値関数）。a が下位、
+/// c が上位の要素ソース。
+fn shufp_val<B: Backend>(b: &mut B, pd: bool, imm: u8, a: B::V<W128>, c: B::V<W128>) -> B::V<W128> {
+    if pd {
+        let al = lane128(b, a, u32::from(imm & 1) * 64, 64);
+        let cl = lane128(b, c, u32::from((imm >> 1) & 1) * 64, 64);
+        put_lane128(b, al, cl, 64, 64)
+    } else {
+        let a0 = lane128(b, a, u32::from(imm & 3) * 32, 32);
+        let a1 = lane128(b, a, u32::from((imm >> 2) & 3) * 32, 32);
+        let c0 = lane128(b, c, u32::from((imm >> 4) & 3) * 32, 32);
+        let c1 = lane128(b, c, u32::from((imm >> 6) & 3) * 32, 32);
+        let mut acc = put_lane128(b, a0, a1, 32, 32);
+        acc = put_lane128(b, acc, c0, 64, 32);
+        put_lane128(b, acc, c1, 96, 32)
+    }
 }
 
 /// SHUFPS/SHUFPD。
@@ -4125,21 +4164,30 @@ pub fn shufp<B: Backend>(
     let dst = reg_x(d);
     let a: B::V<W128> = b.get(sem::xmm_ref(dst));
     let c = rx(b, ea, 128)?;
-    let v = if pd {
-        let al = lane128(b, a, u32::from(imm & 1) * 64, 64);
-        let cl = lane128(b, c, u32::from((imm >> 1) & 1) * 64, 64);
-        put_lane128(b, al, cl, 64, 64)
-    } else {
-        let a0 = lane128(b, a, u32::from(imm & 3) * 32, 32);
-        let a1 = lane128(b, a, u32::from((imm >> 2) & 3) * 32, 32);
-        let c0 = lane128(b, c, u32::from((imm >> 4) & 3) * 32, 32);
-        let c1 = lane128(b, c, u32::from((imm >> 6) & 3) * 32, 32);
-        let mut acc = put_lane128(b, a0, a1, 32, 32);
-        acc = put_lane128(b, acc, c0, 64, 32);
-        put_lane128(b, acc, c1, 96, 32)
-    };
+    let v = shufp_val(b, pd, imm, a, c);
     b.set(sem::xmm_ref(dst), v);
     Ok(())
+}
+
+/// PUNPCKL*/PUNPCKH* と UNPCKLPS/PD・UNPCKHPS/PD の 128 ビット
+/// 処理（値関数）。`bits` は要素幅（8/16/32/64）、`high` で上半分。
+fn punpck_val<B: Backend>(
+    b: &mut B,
+    bits: u32,
+    high: bool,
+    a: B::V<W128>,
+    c: B::V<W128>,
+) -> B::V<W128> {
+    let half = 64 / bits;
+    let base = if high { half } else { 0 };
+    let mut acc = b.konst::<W128>(0);
+    for i in 0..half {
+        let al = lane128(b, a, (base + i) * bits, bits);
+        let cl = lane128(b, c, (base + i) * bits, bits);
+        acc = put_lane128(b, acc, al, (2 * i) * bits, bits);
+        acc = put_lane128(b, acc, cl, (2 * i + 1) * bits, bits);
+    }
+    acc
 }
 
 /// PUNPCKL*/PUNPCKH* と UNPCKLPS/PD・UNPCKHPS/PD。
@@ -4154,15 +4202,7 @@ pub fn punpck<B: Backend>(
     let dst = reg_x(d);
     let a: B::V<W128> = b.get(sem::xmm_ref(dst));
     let c = rx(b, ea, 128)?;
-    let half = 64 / bits;
-    let base = if high { half } else { 0 };
-    let mut acc = b.konst::<W128>(0);
-    for i in 0..half {
-        let al = lane128(b, a, (base + i) * bits, bits);
-        let cl = lane128(b, c, (base + i) * bits, bits);
-        acc = put_lane128(b, acc, al, (2 * i) * bits, bits);
-        acc = put_lane128(b, acc, cl, (2 * i + 1) * bits, bits);
-    }
+    let acc = punpck_val(b, bits, high, a, c);
     b.set(sem::xmm_ref(dst), acc);
     Ok(())
 }
@@ -5040,6 +5080,293 @@ pub fn vphminposuw<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Res
     Ok(())
 }
 
+/// VSHUFPS/VSHUFPD。L=1 は各 128 レーンで独立に変形する
+/// （VSHUFPS は同じ imm8 フィールド、VSHUFPD は上位レーンが
+/// imm8[3:2]）。
+pub fn vshufp<B: Backend>(
+    b: &mut B,
+    pd: bool,
+    imm: u8,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    if !pd {
+        return vbin2(b, d, ea, |b, a, c| shufp_val(b, false, imm, a, c));
+    }
+    // VSHUFPD ymm はレーンごとに別の imm8 ビットを使う
+    // （L0 は 1:0、L1 は 3:2）。
+    let dst = reg_x(d);
+    let s1: B::V<W128> = b.get(sem::xmm_ref(vvv_x(d)));
+    let s2 = rx(b, ea, 128)?;
+    let lo = shufp_val(b, true, imm, s1, s2);
+    b.set(sem::xmm_ref(dst), lo);
+    let hi = if d.vex_l {
+        let h1: B::V<W128> = b.get(sem::ymm_hi_ref(vvv_x(d)));
+        let h2 = rx_hi(b, ea)?;
+        shufp_val(b, true, imm >> 2, h1, h2)
+    } else {
+        b.konst::<W128>(0)
+    };
+    b.set(sem::ymm_hi_ref(dst), hi);
+    Ok(())
+}
+
+/// VPUNPCKL*/VPUNPCKH* と VUNPCKLPS/PD・VUNPCKHPS/PD。
+pub fn vpunpck<B: Backend>(
+    b: &mut B,
+    bits: u32,
+    high: bool,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    vbin2(b, d, ea, |b, a, c| punpck_val(b, bits, high, a, c))
+}
+
+/// VPSHUFD/VPSHUFHW/VPSHUFLW。
+pub fn vpshuf<B: Backend>(
+    b: &mut B,
+    kind: u8,
+    imm: u8,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    vun2(b, d, ea, |b, s| pshuf_val(b, kind, imm, s))
+}
+
+/// VPACKSSWB/W・VPACKUSWB/DW。
+pub fn vpack<B: Backend, W: polyisa_sem::Width>(
+    b: &mut B,
+    unsig: bool,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    vbin2(b, d, ea, |b, a, c| pack_val::<B, W>(b, unsig, a, c))
+}
+
+/// VPSHUFB。各 128 レーンの制御バイトで同レーンをシャッフル。
+pub fn vpshufb<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit> {
+    vbin2(b, d, ea, pshufb_val)
+}
+
+/// VEX パック CVT の変換方向。
+#[derive(Clone, Copy)]
+pub enum CvtK {
+    /// VCVTPS2PD。f32 → f64（拡大）。
+    Ps2Pd,
+    /// VCVTPD2PS。f64 → f32（縮小、dst は常に xmm）。
+    Pd2Ps,
+    /// VCVTPD2DQ。f64 → s32（最近接丸め、dst は常に xmm）。
+    Pd2Dq,
+    /// VCVTTPD2DQ。f64 → s32（切り捨て、dst は常に xmm）。
+    TPd2Dq,
+    /// VCVTPS2DQ。f32 → s32（最近接丸め、同幅）。
+    Ps2Dq,
+    /// VCVTTPS2DQ。f32 → s32（切り捨て、同幅）。
+    TPs2Dq,
+    /// VCVTDQ2PD。s32 → f64（拡大）。
+    Dq2Pd,
+    /// VCVTDQ2PS。s32 → f32（同幅）。
+    Dq2Ps,
+}
+
+/// s の `base` から 2 つの 32 ビット要素を f64 に変換して
+/// 0/64 ビットに置く（ps2pd/dq2pd の各 128 ビット出力）。
+fn cvt_widen_lane<B: Backend>(b: &mut B, int: bool, s: B::V<W128>, base: u32) -> B::V<W128> {
+    let mut acc = b.konst::<W128>(0);
+    for i in 0..2u32 {
+        let l = lane128(b, s, (base + i) * 32, 32);
+        let v32: B::V<W32> = b.trunc::<W128, W32>(l);
+        let v64: B::V<W64> = if int {
+            let f = b.fcvt_from_s32::<polyisa_sem::F64>(v32, 0);
+            b.trunc::<polyisa_sem::F64, W64>(f)
+        } else {
+            let f = b.trunc::<W32, polyisa_sem::F32>(v32);
+            let g = b.fcvt_ff::<polyisa_sem::F32, polyisa_sem::F64>(f, 0);
+            b.trunc::<polyisa_sem::F64, W64>(g)
+        };
+        let v128 = b.zext::<W64, W128>(v64);
+        acc = put_lane128(b, acc, v128, i * 64, 64);
+    }
+    acc
+}
+
+/// s の 2 つの f64 を 32 ビット要素に変換して下位 64 ビットに置く
+/// （pd2ps/pd2dq の各 128 ビットソース）。
+fn cvt_narrow_lane<B: Backend>(b: &mut B, kind: CvtK, s: B::V<W128>) -> B::V<W128> {
+    let mut acc = b.konst::<W128>(0);
+    for i in 0..2u32 {
+        let l = lane128(b, s, i * 64, 64);
+        let v64: B::V<W64> = b.trunc::<W128, W64>(l);
+        let f = b.trunc::<W64, polyisa_sem::F64>(v64);
+        let r32: B::V<W32> = match kind {
+            CvtK::Pd2Ps => {
+                let g = b.fcvt_ff::<polyisa_sem::F64, polyisa_sem::F32>(f, 0);
+                b.trunc::<polyisa_sem::F32, W32>(g)
+            }
+            CvtK::Pd2Dq => b.fcvt_s32::<polyisa_sem::F64>(f, 0),
+            _ => b.fcvt_s32::<polyisa_sem::F64>(f, 1),
+        };
+        let r128 = b.zext::<W32, W128>(r32);
+        acc = put_lane128(b, acc, r128, i * 32, 32);
+    }
+    acc
+}
+
+/// s の 4 つの 32 ビット要素を同幅で相互変換する
+/// （dq2ps/ps2dq/tps2dq の各 128 ビットレーン）。
+fn cvt_same_lane<B: Backend>(b: &mut B, kind: CvtK, s: B::V<W128>) -> B::V<W128> {
+    let mut acc = b.konst::<W128>(0);
+    for i in 0..4u32 {
+        let l = lane128(b, s, i * 32, 32);
+        let v32: B::V<W32> = b.trunc::<W128, W32>(l);
+        let r32: B::V<W32> = match kind {
+            CvtK::Dq2Ps => {
+                let f = b.fcvt_from_s32::<polyisa_sem::F32>(v32, 0);
+                b.trunc::<polyisa_sem::F32, W32>(f)
+            }
+            CvtK::Ps2Dq => {
+                let f = b.trunc::<W32, polyisa_sem::F32>(v32);
+                b.fcvt_s32::<polyisa_sem::F32>(f, 0)
+            }
+            _ => {
+                let f = b.trunc::<W32, polyisa_sem::F32>(v32);
+                b.fcvt_s32::<polyisa_sem::F32>(f, 1)
+            }
+        };
+        let r128 = b.zext::<W32, W128>(r32);
+        acc = put_lane128(b, acc, r128, i * 32, 32);
+    }
+    acc
+}
+
+/// VEX のパック変換。L=1 での読み・書き幅は `kind` ごとに決まる。
+pub fn vcvtp<B: Backend>(
+    b: &mut B,
+    kind: CvtK,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    let dst = reg_x(d);
+    match kind {
+        CvtK::Dq2Ps | CvtK::Ps2Dq | CvtK::TPs2Dq => {
+            let s = rx(b, ea, 128)?;
+            let lo = cvt_same_lane(b, kind, s);
+            b.set(sem::xmm_ref(dst), lo);
+            let hi = if d.vex_l {
+                let h = rx_hi(b, ea)?;
+                cvt_same_lane(b, kind, h)
+            } else {
+                b.konst::<W128>(0)
+            };
+            b.set(sem::ymm_hi_ref(dst), hi);
+        }
+        CvtK::Ps2Pd | CvtK::Dq2Pd => {
+            // 読み幅 = dst/2（L=0 は 64、L=1 は 128）。
+            let s = rx(b, ea, if d.vex_l { 128 } else { 64 })?;
+            let int = matches!(kind, CvtK::Dq2Pd);
+            let lo = cvt_widen_lane(b, int, s, 0);
+            b.set(sem::xmm_ref(dst), lo);
+            let hi = if d.vex_l {
+                cvt_widen_lane(b, int, s, 2)
+            } else {
+                b.konst::<W128>(0)
+            };
+            b.set(sem::ymm_hi_ref(dst), hi);
+        }
+        CvtK::Pd2Ps | CvtK::Pd2Dq | CvtK::TPd2Dq => {
+            // 出力は常に xmm。L=1 は上位 128 ソースの変換結果を
+            // 下位の結果の後ろに並べる。
+            let s = rx(b, ea, 128)?;
+            let mut out = cvt_narrow_lane(b, kind, s);
+            if d.vex_l {
+                let h = rx_hi(b, ea)?;
+                let h2 = cvt_narrow_lane(b, kind, h);
+                out = put_lane128(b, out, h2, 64, 64);
+            }
+            b.set(sem::xmm_ref(dst), out);
+            let z = b.konst::<W128>(0);
+            b.set(sem::ymm_hi_ref(dst), z);
+        }
+    }
+    Ok(())
+}
+
+/// レガシー xmm 形のパック CVT（0F 5B/E6）。dst を丸ごと上書きする。
+pub fn pcvtp<B: Backend>(
+    b: &mut B,
+    kind: CvtK,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    let dst = reg_x(d);
+    let v = match kind {
+        CvtK::Dq2Ps | CvtK::Ps2Dq | CvtK::TPs2Dq => {
+            let s = rx(b, ea, 128)?;
+            cvt_same_lane(b, kind, s)
+        }
+        CvtK::Ps2Pd | CvtK::Dq2Pd => {
+            let s = rx(b, ea, 64)?;
+            cvt_widen_lane(b, matches!(kind, CvtK::Dq2Pd), s, 0)
+        }
+        CvtK::Pd2Ps | CvtK::Pd2Dq | CvtK::TPd2Dq => {
+            let s = rx(b, ea, 128)?;
+            cvt_narrow_lane(b, kind, s)
+        }
+    };
+    b.set(sem::xmm_ref(dst), v);
+    Ok(())
+}
+
+/// VCVTSS2SD/VCVTSD2SS。下位のみ変換し、残りは vvvv ソースとマージ。
+pub fn vcvtsf<B: Backend>(
+    b: &mut B,
+    to64: bool,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    let dst = reg_x(d);
+    let s1: B::V<W128> = b.get(sem::xmm_ref(vvv_x(d)));
+    // ソースは m32（ss2sd）または m64（sd2ss）のみを読む。
+    let s = rx(b, ea, if to64 { 32 } else { 64 })?;
+    let res = if to64 {
+        let l = lane128(b, s, 0, 32);
+        let v32: B::V<W32> = b.trunc::<W128, W32>(l);
+        let f = b.trunc::<W32, polyisa_sem::F32>(v32);
+        let g = b.fcvt_ff::<polyisa_sem::F32, polyisa_sem::F64>(f, 0);
+        let v64 = b.trunc::<polyisa_sem::F64, W64>(g);
+        b.zext::<W64, W128>(v64)
+    } else {
+        let l = lane128(b, s, 0, 64);
+        let v64: B::V<W64> = b.trunc::<W128, W64>(l);
+        let f = b.trunc::<W64, polyisa_sem::F64>(v64);
+        let g = b.fcvt_ff::<polyisa_sem::F64, polyisa_sem::F32>(f, 0);
+        let v32 = b.trunc::<polyisa_sem::F32, W32>(g);
+        b.zext::<W32, W128>(v32)
+    };
+    let out = cvt_merge(b, s1, res, if to64 { 64 } else { 32 });
+    b.set(sem::xmm_ref(dst), out);
+    let z = b.konst::<W128>(0);
+    b.set(sem::ymm_hi_ref(dst), z);
+    Ok(())
+}
+
+/// VCVTSI2SS/SD。レガシーと同じ変換を vvvv ソースへマージする。
+pub fn vcvtsi<B: Backend>(
+    b: &mut B,
+    fbits: u32,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    let dst = reg_x(d);
+    let s1: B::V<W128> = b.get(sem::xmm_ref(vvv_x(d)));
+    let res = cvtsi_val(b, fbits, d, ea)?;
+    let out = cvt_merge(b, s1, res, fbits);
+    b.set(sem::xmm_ref(dst), out);
+    let z = b.konst::<W128>(0);
+    b.set(sem::ymm_hi_ref(dst), z);
+    Ok(())
+}
+
 // ===== MMX（0F 接頭辞なし。P/Q オペランド）=====
 //
 // mm レジスタは st_sig（x87 仮数部の物理スロット）が実機の
@@ -5562,11 +5889,9 @@ pub fn emms<B: Backend>(_b: &mut B) -> Flow<B> {
 
 // ===== 0F 38 / 0F 3A サブマップ（SSSE3/SSE4.1/MOVBE）=====
 
-/// PSHUFB。制御バイトの MSB が立つ要素は 0、下位 4 ビットが選ぶバイト。
-pub fn pshufb<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit> {
-    let dst = reg_x(d);
-    let a: B::V<W128> = b.get(sem::xmm_ref(dst));
-    let c = rx(b, ea, 128)?;
+/// PSHUFB の 128 ビット処理（値関数）。制御バイトの MSB が立つ要素は
+/// 0、下位 4 ビットが選ぶバイト。a がデータ、c が制御。
+fn pshufb_val<B: Backend>(b: &mut B, a: B::V<W128>, c: B::V<W128>) -> B::V<W128> {
     let mut acc = b.konst::<W128>(0);
     for i in 0..16u32 {
         let ctrl = lane128(b, c, i * 8, 8);
@@ -5587,6 +5912,15 @@ pub fn pshufb<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<(
         let v = b.select::<W128>(msb, z128, byte);
         acc = put_lane128(b, acc, v, i * 8, 8);
     }
+    acc
+}
+
+/// PSHUFB。
+pub fn pshufb<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit> {
+    let dst = reg_x(d);
+    let a: B::V<W128> = b.get(sem::xmm_ref(dst));
+    let c = rx(b, ea, 128)?;
+    let acc = pshufb_val(b, a, c);
     b.set(sem::xmm_ref(dst), acc);
     Ok(())
 }
@@ -5854,29 +6188,60 @@ pub fn pmuldq<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<(
     Ok(())
 }
 
-/// PACKUSDW。i32 を u16 飽和に変換して詰める（dst が下位、src が上位）。
-pub fn packusdw<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit> {
-    let a: B::V<W128> = b.get(sem::xmm_ref(reg_x(d)));
-    let c = rx(b, ea, 128)?;
+/// PACKSS*/PACKUS* の 128 ビット処理（値関数）。`W` 要素を半分の
+/// 幅に飽和変換して詰める（a が下位、c が上位）。`unsig` なら出力は
+/// 符号なし飽和（入力は符号付き読み）。
+fn pack_val<B: Backend, W: polyisa_sem::Width>(
+    b: &mut B,
+    unsig: bool,
+    a: B::V<W128>,
+    c: B::V<W128>,
+) -> B::V<W128> {
     let mut acc = b.konst::<W128>(0);
+    let n = 128 / W::BITS;
+    let (lo, hi) = if unsig {
+        (0u128, (1u128 << (W::BITS / 2)) - 1)
+    } else {
+        let h = W::BITS / 2;
+        let mag = 1u128 << (h - 1);
+        ((1u128 << W::BITS) - mag, mag - 1)
+    };
     for (src_i, s) in [a, c].into_iter().enumerate() {
-        for i in 0..4u32 {
-            let l = lane128(b, s, i * 32, 32);
-            let v: B::V<W32> = b.trunc::<W128, W32>(l);
-            let kz = b.konst::<W32>(0);
-            let kmax = b.konst::<W32>(0xFFFF);
-            let neg = b.cmp::<W32>(Cmp::LtS, v, kz);
-            let over = b.cmp::<W32>(Cmp::GtS, v, kmax);
-            let kz = b.konst::<W32>(0);
-            let r = b.select::<W32>(neg, kz, v);
-            let kmax = b.konst::<W32>(0xFFFF);
-            let r = b.select::<W32>(over, kmax, r);
-            let r128 = b.zext::<W32, W128>(r);
-            acc = put_lane128(b, acc, r128, (src_i as u32 * 4 + i) * 16, 16);
+        for i in 0..n {
+            let l = lane128(b, s, i * W::BITS, W::BITS);
+            let v: B::V<W> = b.trunc::<W128, W>(l);
+            let klo = b.konst::<W>(W::from_u128(lo));
+            let khi = b.konst::<W>(W::from_u128(hi));
+            let under = b.cmp::<W>(Cmp::LtS, v, klo);
+            let over = b.cmp::<W>(Cmp::GtS, v, khi);
+            let r = b.select::<W>(under, klo, v);
+            let r = b.select::<W>(over, khi, r);
+            let r128 = b.zext::<W, W128>(r);
+            acc = put_lane128(
+                b,
+                acc,
+                r128,
+                (src_i as u32 * n + i) * (W::BITS / 2),
+                W::BITS / 2,
+            );
         }
     }
-    b.set(sem::xmm_ref(reg_x(d)), acc);
-    Ok(())
+    acc
+}
+
+/// PACKSSWB/W・PACKUSWB/DW のレガシー xmm 形。
+pub fn ppack<B: Backend, W: polyisa_sem::Width>(
+    b: &mut B,
+    unsig: bool,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    pdst_val(b, d, ea, |b, a, c| pack_val::<B, W>(b, unsig, a, c))
+}
+
+/// PACKUSDW（SSE4.1、0F38 2B）。
+pub fn packusdw<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit> {
+    ppack::<B, W32>(b, true, d, ea)
 }
 
 /// PALIGNR。`(dst:src)` の 256 ビット連結を imm バイト右にずらし下位

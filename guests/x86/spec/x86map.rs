@@ -1480,12 +1480,15 @@ pub fn build_maps(m: &mut Model) {
         (0x60u8, "punpcklbw"),
         (0x61, "punpcklwd"),
         (0x62, "punpckldq"),
+        (0x63, "packsswb"),
         (0x64, "pcmpgtb"),
         (0x65, "pcmpgtw"),
         (0x66, "pcmpgtd"),
+        (0x67, "packuswb"),
         (0x68, "punpckhbw"),
         (0x69, "punpckhwd"),
         (0x6A, "punpckhdq"),
+        (0x6B, "packssdw"),
         (0x6C, "punpcklqdq"),
         (0x6D, "punpckhqdq"),
         (0x74, "pcmpeqb"),
@@ -2031,6 +2034,129 @@ pub fn build_maps(m: &mut Model) {
             vax(&n, &[RegX, Vv, RmX], PfxSel::P66, L1, false, "{op} {x}, {h}, {w}", "alu"),
         ));
     }
+    // VCVT 系。5A: ps2pd(NP)/pd2ps(66)/ss2sd(F3)/sd2ss(F2)。スカラ形は
+    // 3 オペランドで vvvv ソースへマージする。
+    for (sel, mn, ops, l, rv) in [
+        (PfxSel::Plain, "vcvtps2pd", &[RegX, RmX][..], Any, true),
+        (PfxSel::P66, "vcvtpd2ps", &[RegX, RmX][..], Any, true),
+        (PfxSel::PF3, "vcvtss2sd", &[RegX, Vv, RmX][..], L0, false),
+        (PfxSel::PF2, "vcvtsd2ss", &[RegX, Vv, RmX][..], L0, false),
+    ] {
+        let n = if rv {
+            format!("{mn}_xv_wv")
+        } else {
+            format!("{mn}_xv_hv_wv")
+        };
+        let syn = if rv {
+            "{op} {x}, {w}"
+        } else {
+            "{op} {x}, {h}, {w}"
+        };
+        m0f.push(MapItem::Insn(0x5A, vmx(&n, ops, sel, l, rv, syn, "alu")));
+    }
+    // 5B: dq2ps(NP)/ps2dq(66)/tps2dq(F3)。E6: pd2dq(F2)/tpd2dq(66)/dq2pd(F3)。
+    for (byte, sel, mn) in [
+        (0x5Bu8, PfxSel::Plain, "vcvtdq2ps"),
+        (0x5B, PfxSel::P66, "vcvtps2dq"),
+        (0x5B, PfxSel::PF3, "vcvttps2dq"),
+        (0xE6, PfxSel::PF2, "vcvtpd2dq"),
+        (0xE6, PfxSel::P66, "vcvttpd2dq"),
+        (0xE6, PfxSel::PF3, "vcvtdq2pd"),
+    ] {
+        m0f.push(MapItem::Insn(
+            byte,
+            vmx(&format!("{mn}_xv_wv"), &[RegX, RmX], sel, Any, true, "{op} {x}, {w}", "alu"),
+        ));
+    }
+    // 同項目のレガシー xmm 形（F4-F6 と同じくマップ駆動に寄せる）。
+    for (byte, sel, mn) in [
+        (0x5Bu8, PfxSel::Plain, "cvtdq2ps"),
+        (0x5B, PfxSel::P66, "cvtps2dq"),
+        (0x5B, PfxSel::PF3, "cvttps2dq"),
+        (0xE6, PfxSel::PF2, "cvtpd2dq"),
+        (0xE6, PfxSel::P66, "cvttpd2dq"),
+        (0xE6, PfxSel::PF3, "cvtdq2pd"),
+    ] {
+        m0f.push(MapItem::Insn(
+            byte,
+            mi(&format!("{mn}_xv_wv"), &[RegX, RmX], None, sel, Pred::True, "{op} {x}, {w}", "alu"),
+        ));
+    }
+    // 2A: VCVTSI2SS（F3）/VCVTSI2SD（F2）。L0・3 オペランド。
+    for (sel, mn) in [(PfxSel::PF3, "vcvtsi2ss"), (PfxSel::PF2, "vcvtsi2sd")] {
+        m0f.push(MapItem::Insn(
+            0x2A,
+            vmx(&format!("{mn}_xv_hv_ev"), &[RegX, Vv, Ea(V)], sel, L0, false, "{op} {x}, {h}, {e}", "alu"),
+        ));
+    }
+    // 2C/2D: f→GPR。vvvv は未使用。
+    for (byte, sel, mn) in [
+        (0x2Cu8, PfxSel::PF3, "vcvttss2si"),
+        (0x2C, PfxSel::PF2, "vcvttsd2si"),
+        (0x2D, PfxSel::PF3, "vcvtss2si"),
+        (0x2D, PfxSel::PF2, "vcvtsd2si"),
+    ] {
+        m0f.push(MapItem::Insn(
+            byte,
+            vmx(&format!("{mn}_gv_wv"), &[Reg(V), RmX], sel, L0, true, "{op} {g}, {w}", "alu"),
+        ));
+    }
+    // C6: VSHUFPS/VSHUFPD（3 オペランド＋imm8、Any）。
+    for (sel, mn) in [(PfxSel::Plain, "vshufps"), (PfxSel::P66, "vshufpd")] {
+        m0f.push(MapItem::Insn(
+            0xC6,
+            vmx(&format!("{mn}_xv_hv_wv_ib"), &[RegX, Vv, RmX, Imm(B8)], sel, Any, false, "{op} {x}, {h}, {w}, {i}", "alu"),
+        ));
+    }
+    // 14/15: VUNPCKL*/VUNPCKH*（3 オペランド、Any）。
+    for (byte, sel, mn) in [
+        (0x14u8, PfxSel::Plain, "vunpcklps"),
+        (0x14, PfxSel::P66, "vunpcklpd"),
+        (0x15, PfxSel::Plain, "vunpckhps"),
+        (0x15, PfxSel::P66, "vunpckhpd"),
+    ] {
+        m0f.push(MapItem::Insn(
+            byte,
+            vmx(&format!("{mn}_xv_hv_wv"), &[RegX, Vv, RmX], sel, Any, false, "{op} {x}, {h}, {w}", "alu"),
+        ));
+    }
+    // 70: VPSHUFD（66）/VPSHUFLW（F2）/VPSHUFHW（F3）。128 は AVX、
+    // 256 は AVX2。
+    for (sel, mn) in [(PfxSel::P66, "vpshufd"), (PfxSel::PF2, "vpshuflw"), (PfxSel::PF3, "vpshufhw")] {
+        let n = format!("{mn}_xv_wv_ib");
+        m0f.push(MapItem::Insn(
+            0x70,
+            vmx(&n, &[RegX, RmX, Imm(B8)], sel, L0, true, "{op} {x}, {w}, {i}", "alu"),
+        ));
+        m0f.push(MapItem::Insn(
+            0x70,
+            vax(&n, &[RegX, RmX, Imm(B8)], sel, L1, true, "{op} {x}, {w}, {i}", "alu"),
+        ));
+    }
+    // 60-6D: VPUNPCK*/VPACK*（3 オペランド。128 は AVX、256 は AVX2）。
+    for (byte, mn) in [
+        (0x60u8, "vpunpcklbw"),
+        (0x61, "vpunpcklwd"),
+        (0x62, "vpunpckldq"),
+        (0x63, "vpacksswb"),
+        (0x67, "vpackuswb"),
+        (0x68, "vpunpckhbw"),
+        (0x69, "vpunpckhwd"),
+        (0x6A, "vpunpckhdq"),
+        (0x6B, "vpackssdw"),
+        (0x6C, "vpunpcklqdq"),
+        (0x6D, "vpunpckhqdq"),
+    ] {
+        let n = format!("{mn}_xv_hv_wv");
+        m0f.push(MapItem::Insn(
+            byte,
+            vmx(&n, &[RegX, Vv, RmX], PfxSel::P66, L0, false, "{op} {x}, {h}, {w}", "alu"),
+        ));
+        m0f.push(MapItem::Insn(
+            byte,
+            vax(&n, &[RegX, Vv, RmX], PfxSel::P66, L1, false, "{op} {x}, {h}, {w}", "alu"),
+        ));
+    }
     m.maps.push(MapDecl {
         name: "map_0f".to_string(),
         vex_code: Some(1),
@@ -2292,7 +2418,8 @@ fn build_map_0f38(m: &mut Model) {
     // SSSE3 系の 3 オペランド VEX 形（PHADD/PHSUB/PMADDUBSW/
     // PMULHRSW）。128 ビットは AVX、256 ビットは AVX2。
     for (op, mn) in [
-        (0x01u8, "vphaddw"),
+        (0x00u8, "vpshufb"),
+        (0x01, "vphaddw"),
         (0x02, "vphaddd"),
         (0x03, "vphaddsw"),
         (0x04, "vpmaddubsw"),
@@ -2300,6 +2427,7 @@ fn build_map_0f38(m: &mut Model) {
         (0x06, "vphsubd"),
         (0x07, "vphsubsw"),
         (0x0B, "vpmulhrsw"),
+        (0x2B, "vpackusdw"),
     ] {
         let n = format!("{mn}_xv_hv_wv");
         v.push(MapItem::Insn(
