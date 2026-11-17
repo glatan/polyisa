@@ -4167,16 +4167,13 @@ pub fn movmsk<B: Backend>(
     Ok(())
 }
 
-/// パック整数の要素ごとの演算。`f` は要素同士の演算。
-fn lane_bin<B: Backend, W: polyisa_sem::Width>(
+/// 2 つの 128 ビット値のレーンごとに `f` を適用する。
+fn plane_bin<B: Backend, W: polyisa_sem::Width>(
     b: &mut B,
-    d: &MapDec,
-    ea: &Rm<B::V<W64>>,
+    a: B::V<W128>,
+    c: B::V<W128>,
     mut f: impl FnMut(&mut B, B::V<W>, B::V<W>) -> B::V<W>,
-) -> Result<(), B::Exit> {
-    let dst = reg_x(d);
-    let a: B::V<W128> = b.get(sem::xmm_ref(dst));
-    let c = rx(b, ea, 128)?;
+) -> B::V<W128> {
     let mut acc = b.konst::<W128>(0);
     let n = 128 / W::BITS;
     for i in 0..n {
@@ -4188,6 +4185,19 @@ fn lane_bin<B: Backend, W: polyisa_sem::Width>(
         let r128 = b.zext::<W, W128>(r);
         acc = put_lane128(b, acc, r128, i * W::BITS, W::BITS);
     }
+    acc
+}
+
+fn lane_bin<B: Backend, W: polyisa_sem::Width>(
+    b: &mut B,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+    f: impl FnMut(&mut B, B::V<W>, B::V<W>) -> B::V<W>,
+) -> Result<(), B::Exit> {
+    let dst = reg_x(d);
+    let a: B::V<W128> = b.get(sem::xmm_ref(dst));
+    let c = rx(b, ea, 128)?;
+    let acc = plane_bin::<B, W>(b, a, c, f);
     b.set(sem::xmm_ref(dst), acc);
     Ok(())
 }
@@ -4268,6 +4278,9 @@ pub enum Iop {
     MaxS,
     CmpEq,
     CmpGtS,
+    MulHiU,
+    MulHiS,
+    Sign,
 }
 
 /// `Iop` のレーン演算本体。xmm の `pint` と mm の `mint` で共有する。
@@ -4319,7 +4332,41 @@ fn iop_op<B: Backend, W: polyisa_sem::Width>(
             let gt = b.cmp::<W>(Cmp::GtS, a, c);
             lane_mask::<B, W>(b, gt)
         }
+        Iop::MulHiU => mul_hi::<B, W>(b, true, a, c),
+        Iop::MulHiS => mul_hi::<B, W>(b, false, a, c),
+        // PSIGN: c<0 なら -a、c=0 なら 0、それ以外は a。
+        Iop::Sign => {
+            let z = b.konst::<W>(W::from_u128(0));
+            let eq0 = b.cmp::<W>(Cmp::Eq, c, z);
+            let neg = b.cmp::<W>(Cmp::LtS, c, z);
+            let na = b.sub::<W>(z, a);
+            let r = b.select::<W>(neg, na, a);
+            b.select::<W>(eq0, z, r)
+        }
     }
+}
+
+/// 拡幅乗算の上位 `W` ビット（PMULHUW/PMULHW のレーン本体）。
+fn mul_hi<B: Backend, W: polyisa_sem::Width>(
+    b: &mut B,
+    unsigned: bool,
+    a: B::V<W>,
+    c: B::V<W>,
+) -> B::V<W> {
+    let a128 = if unsigned {
+        b.zext::<W, W128>(a)
+    } else {
+        b.sext::<W, W128>(a)
+    };
+    let c128 = if unsigned {
+        b.zext::<W, W128>(c)
+    } else {
+        b.sext::<W, W128>(c)
+    };
+    let p = b.mul::<W128>(a128, c128);
+    let sh = b.konst::<W128>(u128::from(W::BITS));
+    let hi = b.shr_l::<W128>(p, sh);
+    b.trunc::<W128, W>(hi)
 }
 
 pub fn pint<B: Backend, W: polyisa_sem::Width>(
@@ -4331,6 +4378,31 @@ pub fn pint<B: Backend, W: polyisa_sem::Width>(
     lane_bin::<B, W>(b, d, ea, |b, a, c| iop_op::<B, W>(b, kind, a, c))
 }
 
+/// VEX の 3 オペランド・パック整数演算。第 1 ソースは vvvv、
+/// 第 2 ソースは xmm/m128（L=0）または ymm/m256（L=1）。
+/// L=0 では YMM 上位をゼロクリアする。
+pub fn vpint<B: Backend, W: polyisa_sem::Width>(
+    b: &mut B,
+    kind: Iop,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    let dst = reg_x(d);
+    let s1: B::V<W128> = b.get(sem::xmm_ref(vvv_x(d)));
+    let s2 = rx(b, ea, 128)?;
+    let lo = plane_bin::<B, W>(b, s1, s2, |b, a, c| iop_op::<B, W>(b, kind, a, c));
+    b.set(sem::xmm_ref(dst), lo);
+    let hi = if d.vex_l {
+        let h1: B::V<W128> = b.get(sem::ymm_hi_ref(vvv_x(d)));
+        let h2 = rx_hi(b, ea)?;
+        plane_bin::<B, W>(b, h1, h2, |b, a, c| iop_op::<B, W>(b, kind, a, c))
+    } else {
+        b.konst::<W128>(0)
+    };
+    b.set(sem::ymm_hi_ref(dst), hi);
+    Ok(())
+}
+
 /// PSRL/PSRA/PSLL のパックシフト。カウントは xmm/m128 の下位 64 または即値。
 #[derive(Clone, Copy)]
 pub enum Psh {
@@ -4339,13 +4411,13 @@ pub enum Psh {
     R,
 }
 
-fn pshift_impl<B: Backend, W: polyisa_sem::Width>(
+/// 128 ビット値 `a` の各 `W` レーンを `cnt` でシフトする。
+fn pshift_val<B: Backend, W: polyisa_sem::Width>(
     b: &mut B,
     dir: Psh,
     cnt: B::V<W64>,
-    dst: Xmm,
-) -> Flow<B> {
-    let a: B::V<W128> = b.get(sem::xmm_ref(dst));
+    a: B::V<W128>,
+) -> B::V<W128> {
     // カウントが幅以上なら結果は 0（PSRA は符号拡張）。
     let bits_k = b.konst::<W64>(u64::from(W::BITS));
     let over = b.cmp::<W64>(Cmp::GeU, cnt, bits_k);
@@ -4377,7 +4449,18 @@ fn pshift_impl<B: Backend, W: polyisa_sem::Width>(
         let r128 = b.zext::<W, W128>(r);
         acc = put_lane128(b, acc, r128, i * W::BITS, W::BITS);
     }
-    b.set(sem::xmm_ref(dst), acc);
+    acc
+}
+
+fn pshift_impl<B: Backend, W: polyisa_sem::Width>(
+    b: &mut B,
+    dir: Psh,
+    cnt: B::V<W64>,
+    dst: Xmm,
+) -> Flow<B> {
+    let a: B::V<W128> = b.get(sem::xmm_ref(dst));
+    let r = pshift_val::<B, W>(b, dir, cnt, a);
+    b.set(sem::xmm_ref(dst), r);
     Ok(())
 }
 
@@ -4402,20 +4485,89 @@ pub fn pshift_i<B: Backend, W: polyisa_sem::Width>(
     pshift_impl::<B, W>(b, dir, c, rm_x(d))
 }
 
-/// PSRLDQ/PSLLDQ。128 ビット全体を imm バイトずらす。
-pub fn byteshift<B: Backend>(b: &mut B, left: bool, imm: u8, d: &MapDec) -> Flow<B> {
-    let dst = rm_x(d);
-    let a: B::V<W128> = b.get(sem::xmm_ref(dst));
+/// VEX の 3 オペランド・パックシフト（カウントは xmm/m128 の
+/// 下位 64 ビット）。第 1 ソースは vvvv、L=1 では上位 128 も
+/// 同じカウントでシフトする。
+pub fn vpshift<B: Backend, W: polyisa_sem::Width>(
+    b: &mut B,
+    dir: Psh,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    let s2 = rx(b, ea, 128)?;
+    let lo64 = lane128(b, s2, 0, 64);
+    let cnt = b.trunc::<W128, W64>(lo64);
+    let dst = reg_x(d);
+    let s1: B::V<W128> = b.get(sem::xmm_ref(vvv_x(d)));
+    let lo = pshift_val::<B, W>(b, dir, cnt, s1);
+    b.set(sem::xmm_ref(dst), lo);
+    let hi = if d.vex_l {
+        let h1: B::V<W128> = b.get(sem::ymm_hi_ref(vvv_x(d)));
+        pshift_val::<B, W>(b, dir, cnt, h1)
+    } else {
+        b.konst::<W128>(0)
+    };
+    b.set(sem::ymm_hi_ref(dst), hi);
+    Ok(())
+}
+
+/// VEX のグループ即値シフト（Op/En B：vvvv が宛先）。
+/// ソースは r/m。L=1 では r/m の YMM 上位も処理する。
+pub fn vpshift_i<B: Backend, W: polyisa_sem::Width>(b: &mut B, dir: Psh, d: &MapDec) -> Flow<B> {
+    let cnt = b.konst::<W64>(u64::from(d.imm as u8));
+    let src = rm_x(d);
+    let dst = vvv_x(d);
+    let a: B::V<W128> = b.get(sem::xmm_ref(src));
+    let lo = pshift_val::<B, W>(b, dir, cnt, a);
+    b.set(sem::xmm_ref(dst), lo);
+    let hi = if d.vex_l {
+        let h: B::V<W128> = b.get(sem::ymm_hi_ref(src));
+        pshift_val::<B, W>(b, dir, cnt, h)
+    } else {
+        b.konst::<W128>(0)
+    };
+    b.set(sem::ymm_hi_ref(dst), hi);
+    Ok(())
+}
+
+/// 128 ビット値 `a` を `imm` バイトずらす。
+fn byteshift_val<B: Backend>(b: &mut B, left: bool, imm: u8, a: B::V<W128>) -> B::V<W128> {
     let bits = u32::from(imm).min(16) * 8;
     let sh = b.konst::<W128>(u128::from(bits));
-    let v = if imm >= 16 {
+    if imm >= 16 {
         b.konst::<W128>(0)
     } else if left {
         b.shl::<W128>(a, sh)
     } else {
         b.shr_l::<W128>(a, sh)
-    };
+    }
+}
+
+/// PSRLDQ/PSLLDQ。128 ビット全体を imm バイトずらす。
+pub fn byteshift<B: Backend>(b: &mut B, left: bool, imm: u8, d: &MapDec) -> Flow<B> {
+    let dst = rm_x(d);
+    let a: B::V<W128> = b.get(sem::xmm_ref(dst));
+    let v = byteshift_val(b, left, imm, a);
     b.set(sem::xmm_ref(dst), v);
+    Ok(())
+}
+
+/// VEX の VPSRLDQ/VPSLLDQ（Op/En B：vvvv が宛先）。
+/// L=1 では 128 ビットレーンごとに独立にずらす。
+pub fn vbyteshift<B: Backend>(b: &mut B, left: bool, d: &MapDec) -> Flow<B> {
+    let imm = d.imm as u8;
+    let src = rm_x(d);
+    let dst = vvv_x(d);
+    let a: B::V<W128> = b.get(sem::xmm_ref(src));
+    let lo = byteshift_val(b, left, imm, a);
+    b.set(sem::xmm_ref(dst), lo);
+    let hi = if d.vex_l {
+        let h: B::V<W128> = b.get(sem::ymm_hi_ref(src));
+        byteshift_val(b, left, imm, h)
+    } else {
+        b.konst::<W128>(0)
+    };
+    b.set(sem::ymm_hi_ref(dst), hi);
     Ok(())
 }
 

@@ -56,6 +56,22 @@ fn vmx(
     it
 }
 
+/// VEX 接頭辞で AVX2 ゲートの命令項目（256 ビット整数演算用）。
+/// `apply_gates` の VEX 既定 `avx` と `when` の `avx2` が結合される。
+fn vax(
+    name: &str,
+    ops: &[OpKind],
+    sel: PfxSel,
+    l: VexL,
+    rv: bool,
+    syntax: &str,
+    timing: &str,
+) -> MapInsn {
+    let mut it = vmx(name, ops, sel, l, rv, syntax, timing);
+    it.when = Pred::Flag("avx2".to_string());
+    it
+}
+
 /// グループでも必須接頭辞でもない、無条件の命令項目。
 fn n(name: &str, ops: &[OpKind], syntax: &str, timing: &str) -> MapInsn {
     mi(name, ops, None, PfxSel::Any, Pred::True, syntax, timing)
@@ -1755,7 +1771,8 @@ pub fn build_maps(m: &mut Model) {
         ));
     }
     // パック論理（54-57 の浮動小数点形と DB/DF/EB/EF の整数形）。
-    // 整数形は 256 ビットが AVX2 なので L0 に留める（B1b）。
+    // 整数形の 128 ビットは AVX、256 ビットは AVX2 なので
+    // L0/L1 を別項目にして機能を分ける。
     for (b, sel, mn) in [
         (0x54u8, PfxSel::Plain, "vandps"),
         (0x54, PfxSel::P66, "vandpd"),
@@ -1770,11 +1787,109 @@ pub fn build_maps(m: &mut Model) {
         (0xEB, PfxSel::P66, "vpor"),
         (0xEF, PfxSel::P66, "vpxor"),
     ] {
-        let l = if b >= 0xDB { L0 } else { Any };
+        let int = b >= 0xDB;
         m0f.push(MapItem::Insn(
             b,
-            vmx(&format!("{mn}_xv_hv_wv"), &[RegX, Vv, RmX], sel, l, false, "{op} {x}, {h}, {w}", "alu"),
+            vmx(&format!("{mn}_xv_hv_wv"), &[RegX, Vv, RmX], sel, if int { L0 } else { Any }, false, "{op} {x}, {h}, {w}", "alu"),
         ));
+        if int {
+            m0f.push(MapItem::Insn(
+                b,
+                vax(&format!("{mn}_xv_hv_wv"), &[RegX, Vv, RmX], sel, L1, false, "{op} {x}, {h}, {w}", "alu"),
+            ));
+        }
+    }
+    // パック整数の 3 オペランド演算（66 0F の xmm 形に対応する
+    // VEX 形）。128 ビットは AVX、256 ビットは AVX2。
+    for (b, mn) in [
+        (0x64u8, "vpcmpgtb"),
+        (0x65, "vpcmpgtw"),
+        (0x66, "vpcmpgtd"),
+        (0x74, "vpcmpeqb"),
+        (0x75, "vpcmpeqw"),
+        (0x76, "vpcmpeqd"),
+        (0xD4, "vpaddq"),
+        (0xD5, "vpmullw"),
+        (0xD8, "vpsubusb"),
+        (0xD9, "vpsubusw"),
+        (0xDA, "vpminub"),
+        (0xDC, "vpaddusb"),
+        (0xDD, "vpaddusw"),
+        (0xDE, "vpmaxub"),
+        (0xE0, "vpavgb"),
+        (0xE3, "vpavgw"),
+        (0xE4, "vpmulhuw"),
+        (0xE5, "vpmulhw"),
+        (0xE8, "vpsubsb"),
+        (0xE9, "vpsubsw"),
+        (0xEA, "vpminsw"),
+        (0xEC, "vpaddsb"),
+        (0xED, "vpaddsw"),
+        (0xEE, "vpmaxsw"),
+        (0xF8, "vpsubb"),
+        (0xF9, "vpsubw"),
+        (0xFA, "vpsubd"),
+        (0xFB, "vpsubq"),
+        (0xFC, "vpaddb"),
+        (0xFD, "vpaddw"),
+        (0xFE, "vpaddd"),
+    ] {
+        let n = format!("{mn}_xv_hv_wv");
+        m0f.push(MapItem::Insn(
+            b,
+            vmx(&n, &[RegX, Vv, RmX], PfxSel::P66, L0, false, "{op} {x}, {h}, {w}", "alu"),
+        ));
+        m0f.push(MapItem::Insn(
+            b,
+            vax(&n, &[RegX, Vv, RmX], PfxSel::P66, L1, false, "{op} {x}, {h}, {w}", "alu"),
+        ));
+    }
+    // パックシフト（xmm/m128 カウント形）。カウントは第 2
+    // ソースの下位 64 ビットだけを使う。
+    for (b, mn) in [
+        (0xD1u8, "vpsrlw"),
+        (0xD2, "vpsrld"),
+        (0xD3, "vpsrlq"),
+        (0xE1, "vpsraw"),
+        (0xE2, "vpsrad"),
+        (0xF1, "vpsllw"),
+        (0xF2, "vpslld"),
+        (0xF3, "vpsllq"),
+    ] {
+        let n = format!("{mn}_xv_hv_wv");
+        m0f.push(MapItem::Insn(
+            b,
+            vmx(&n, &[RegX, Vv, RmX], PfxSel::P66, L0, false, "{op} {x}, {h}, {w}", "alu"),
+        ));
+        m0f.push(MapItem::Insn(
+            b,
+            vax(&n, &[RegX, Vv, RmX], PfxSel::P66, L1, false, "{op} {x}, {h}, {w}", "alu"),
+        ));
+    }
+    // グループ即値シフト（0F 71-73 の 66 形）。r/m がソースで
+    // vvvv が宛先（Op/En B）。
+    for (b, grp, mn) in [
+        (0x71u8, 2u8, "vpsrlw"),
+        (0x71, 4, "vpsraw"),
+        (0x71, 6, "vpsllw"),
+        (0x72, 2, "vpsrld"),
+        (0x72, 4, "vpsrad"),
+        (0x72, 6, "vpslld"),
+        (0x73, 2, "vpsrlq"),
+        (0x73, 3, "vpsrldq"),
+        (0x73, 6, "vpsllq"),
+        (0x73, 7, "vpslldq"),
+    ] {
+        let n = format!("{mn}_hv_wv_ib");
+        for it in [
+            vmx(&n, &[Vv, RmX, Imm(B8)], PfxSel::P66, L0, false, "{op} {h}, {w}, {i}", "alu"),
+            vax(&n, &[Vv, RmX, Imm(B8)], PfxSel::P66, L1, false, "{op} {h}, {w}, {i}", "alu"),
+        ] {
+            let mut it = it;
+            it.group = Some(grp);
+            it.group_mod = Some(true);
+            m0f.push(MapItem::Insn(b, it));
+        }
     }
     m.maps.push(MapDecl {
         name: "map_0f".to_string(),
@@ -2004,6 +2119,35 @@ fn build_map_0f38(m: &mut Model) {
         if let MapItem::Insn(0x2A, mi) = it {
             mi.group_mod = Some(false);
         }
+    }
+    // AVX/AVX2 の整数演算（VEX.mmmmm=2）。128 ビットは AVX、
+    // 256 ビットは AVX2。
+    use VexL::{L0, L1};
+    for (op, mn) in [
+        (0x08u8, "vpsignb"),
+        (0x09, "vpsignw"),
+        (0x0A, "vpsignd"),
+        (0x29, "vpcmpeqq"),
+        (0x37, "vpcmpgtq"),
+        (0x38, "vpminsb"),
+        (0x39, "vpminsd"),
+        (0x3A, "vpminuw"),
+        (0x3B, "vpminud"),
+        (0x3C, "vpmaxsb"),
+        (0x3D, "vpmaxsd"),
+        (0x3E, "vpmaxuw"),
+        (0x3F, "vpmaxud"),
+        (0x40, "vpmulld"),
+    ] {
+        let n = format!("{mn}_xv_hv_wv");
+        v.push(MapItem::Insn(
+            op,
+            vmx(&n, &[RegX, Vv, RmX], PfxSel::P66, L0, false, "{op} {x}, {h}, {w}", "alu"),
+        ));
+        v.push(MapItem::Insn(
+            op,
+            vax(&n, &[RegX, Vv, RmX], PfxSel::P66, L1, false, "{op} {x}, {h}, {w}", "alu"),
+        ));
     }
     m.maps.push(MapDecl {
         name: "map_0f38".to_string(),

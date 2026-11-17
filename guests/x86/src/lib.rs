@@ -149,7 +149,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 段階4の x86 最小 853 件にオペコード表の記述を足した件数。
-        assert_eq!(INSNS.len(), 1742);
+        assert_eq!(INSNS.len(), 1805);
     }
 
     #[test]
@@ -1815,7 +1815,8 @@ mod tests {
         // 64 ビットモードでは B=1 で r/m が拡張される。
         let d = decode_map(&[0xC4, 0xC1, 0x7C, 0x10, 0xC0], modes, avx).unwrap();
         assert_eq!(d.rex & 0x7, 1);
-        // 0F 38 マップ（mmmmm=2）にはまだ VEX 項目がないので拒否。
+        // 0F 38 マップ（mmmmm=2）でこのオペコードには VEX 項目が
+        // ないので拒否。
         assert!(decode_map(&[0xC4, 0xE2, 0x7C, 0x18, 0xC0], modes, avx).is_none());
         // LOCK+VEX は #UD。VEX の前のレガシー接頭辞は無視される。
         assert!(decode_map(&[0xF0, 0xC5, 0xF8, 0x77], modes, avx).is_none());
