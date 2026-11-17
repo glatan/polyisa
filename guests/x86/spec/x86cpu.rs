@@ -334,7 +334,7 @@ fn declare_models(m: &mut Model) {
             "cpuid", "fpu", "vme", "de", "pse", "tsc", "msr", "pae", "mce", "cx8", "apic", "sep",
             "mtrr", "pge", "mca", "cmov", "pat", "pse36", "clfsh", "mmx", "fxsr", "sse", "sse2",
             "sse3", "ssse3", "sse4_1", "sse4_2", "cx16", "popcnt", "rdtscp", "syscall", "nx",
-            "lm", "lahf_lm", "i486", "lzcnt", "adx",
+            "lm", "lahf_lm", "i486", "lzcnt", "adx", "pclmulqdq", "aesni",
         ],
         &[],
         &[],
@@ -347,9 +347,9 @@ fn declare_models(m: &mut Model) {
         "x86_64_v2",
         "x86_64",
         &["cx16", "popcnt"],
-        // psABI v2 に LZCNT・ADX は含まれず、v2 の Westmere 署名の
-        // 実機も持たない。既定モデルから継承した分を削る。
-        &["lzcnt", "adx"],
+        // psABI v2 に LZCNT・ADX・PCLMUL・AES-NI は含まれないので
+        // 既定モデルから継承した分を削る。
+        &["lzcnt", "adx", "pclmulqdq", "aesni"],
         &[],
         // v2 の水準（SSE4.2+POPCNT+CX16、AVX なし）は Westmere。
         intel("6", "44", "2"),
@@ -360,6 +360,7 @@ fn declare_models(m: &mut Model) {
         "x86_64_v2",
         &[
             "avx", "avx2", "bmi1", "bmi2", "f16c", "fma", "lzcnt", "movbe", "osxsave", "adx",
+            "pclmulqdq", "aesni",
         ],
         &[],
         &[],
@@ -711,6 +712,11 @@ fn named_gate(mn: &str) -> Option<&'static [&'static str]> {
         // ADX 系と POPCNT 系の拡張。
         "lzcnt" => &["lzcnt"],
         "adcx" | "adox" => &["adx"],
+        // AES-NI と PCLMULQDQ。AES-KL 系は別機能（AESKLE）なので
+        // 語頭ではなく列挙で引く。
+        "aesimc" | "aesenc" | "aesenclast" | "aesdec" | "aesdeclast"
+        | "aeskeygenassist" => &["aesni"],
+        "pclmulqdq" => &["pclmulqdq"],
         "clflush" => &["clfsh"],
         // MXCSR の読み書きは SSE 付随。
         "ldmxcsr" | "stmxcsr" => &["sse"],

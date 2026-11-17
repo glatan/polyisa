@@ -1467,6 +1467,19 @@ fn build_map_0f38(m: &mut Model) {
         0xF6,
         mi("adox_gv_ev", &[Reg(V), Ea(V)], None, PfxSel::PF3, Pred::True, "adox {g}, {e}", "alu"),
     ));
+    // AES-NI のラウンド変換（0xDB-0xDF、必須接頭辞 0x66）。
+    for (op, name, syn) in [
+        (0xDBu8, "aesimc_xv_wv", "aesimc {x}, {w}"),
+        (0xDC, "aesenc_xv_wv", "aesenc {x}, {w}"),
+        (0xDD, "aesenclast_xv_wv", "aesenclast {x}, {w}"),
+        (0xDE, "aesdec_xv_wv", "aesdec {x}, {w}"),
+        (0xDF, "aesdeclast_xv_wv", "aesdeclast {x}, {w}"),
+    ] {
+        v.push(MapItem::Insn(
+            op,
+            mi(name, &[RegX, RmX], None, PfxSel::P66, Pred::True, syn, "alu"),
+        ));
+    }
     // CRC32（F2 0F38 F0/F1）。MOVBE と同バイトで接頭辞で分ける。
     v.push(MapItem::Insn(
         0xF0,
@@ -1554,6 +1567,9 @@ fn build_map_0f3a(m: &mut Model) {
         MapItem::Insn(0x61, mi("pcmpestri_xv_wv_ib", &[RegX, RmX, ib], None, PfxSel::P66, Pred::True, "pcmpestri {x}, {w}, {i}", "alu")),
         MapItem::Insn(0x62, mi("pcmpistrm_xv_wv_ib", &[RegX, RmX, ib], None, PfxSel::P66, Pred::True, "pcmpistrm {x}, {w}, {i}", "alu")),
         MapItem::Insn(0x63, mi("pcmpistri_xv_wv_ib", &[RegX, RmX, ib], None, PfxSel::P66, Pred::True, "pcmpistri {x}, {w}, {i}", "alu")),
+        // PCLMULQDQ と AESKEYGENASSIST（必須接頭辞 0x66 + imm8）。
+        MapItem::Insn(0x44, mi("pclmulqdq_xv_wv_ib", &[RegX, RmX, ib], None, PfxSel::P66, Pred::True, "pclmulqdq {x}, {w}, {i}", "alu")),
+        MapItem::Insn(0xDF, mi("aeskeygenassist_xv_wv_ib", &[RegX, RmX, ib], None, PfxSel::P66, Pred::True, "aeskeygenassist {x}, {w}, {i}", "alu")),
     ];
     m.maps.push(MapDecl {
         name: "map_0f3a".to_string(),

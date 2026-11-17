@@ -17,9 +17,9 @@
 | pentium | i486 | vme、de、pse、tsc、msr、cx8、mce、apic、mmx |  |
 | pentium_iii | pentium_pro | fxsr、sse、sep、pat |  |
 | pentium_pro | pentium | cmov、pge、mca、pae、mtrr、pse36 |  |
-| x86_64 |  | cpuid、fpu、vme、de、pse、tsc、msr、pae、mce、cx8、apic、sep、mtrr、pge、mca、cmov、pat、pse36、clfsh、mmx、fxsr、sse、sse2、sse3、ssse3、sse4_1、sse4_2、cx16、popcnt、rdtscp、syscall、nx、lm、lahf_lm、i486、lzcnt、adx |  |
-| x86_64_v2 | x86_64 | cx16、popcnt | lzcnt、adx |
-| x86_64_v3 | x86_64_v2 | avx、avx2、bmi1、bmi2、f16c、fma、lzcnt、movbe、osxsave、adx |  |
+| x86_64 |  | cpuid、fpu、vme、de、pse、tsc、msr、pae、mce、cx8、apic、sep、mtrr、pge、mca、cmov、pat、pse36、clfsh、mmx、fxsr、sse、sse2、sse3、ssse3、sse4_1、sse4_2、cx16、popcnt、rdtscp、syscall、nx、lm、lahf_lm、i486、lzcnt、adx、pclmulqdq、aesni |  |
+| x86_64_v2 | x86_64 | cx16、popcnt | lzcnt、adx、pclmulqdq、aesni |
+| x86_64_v3 | x86_64_v2 | avx、avx2、bmi1、bmi2、f16c、fma、lzcnt、movbe、osxsave、adx、pclmulqdq、aesni |  |
 | x86_64_v4 | x86_64_v3 | avx512f、avx512bw、avx512cd、avx512dq、avx512vl |  |
 
 ## 機能
@@ -176,6 +176,12 @@
 | addsubpd | addsubpd_xv_wv | sse3 | alu |
 | addsubps | addsubps_xv_wv | sse3 | alu |
 | adox | adox_gv_ev | adx | alu |
+| aesdec | aesdec_xv_wv | aesni | alu |
+| aesdeclast | aesdeclast_xv_wv | aesni | alu |
+| aesenc | aesenc_xv_wv | aesni | alu |
+| aesenclast | aesenclast_xv_wv | aesni | alu |
+| aesimc | aesimc_xv_wv | aesni | alu |
+| aeskeygenassist | aeskeygenassist_xv_wv_ib | aesni | alu |
 | and | and_eb_ib | op82 | alu |
 | and | and_al_ib、and_ax_imm16、and_eax、and_eax_iz、and_eb_gb、and_eb_ib、and_ev_gv、and_ev_ib、and_ev_iz、and_gb_eb、and_gv_ev、and_m32_r32_mem8、and_m32_r32_memnd、and_m32_r32_sib、and_m32_r32_sibd、and_m8_r8、and_m8_r8_mem8、and_r8_m8_mem32、and_r_mem32、and_r_mem8、and_r_memnd、and_r_rip、and_r_sib、and_r_sibd、and_r_sibd32、and_rm16_imm、and_rm16_imm_memnd、and_rm32、and_rm32_imm、and_rm32_imm_mem32、and_rm32_imm_mem8、and_rm32_imm_memnd、and_rm32_imm_sibd、and_rm32_rip、and_rm8_imm、and_rm8_imm_mem32、and_rm8_imm_mem8、and_rm8_imm_sibd、and_rm8_imm_sibd32、and_rm_imm8、and_rm_imm8_mem32、and_rm_imm8_mem8、and_rm_imm8_memnd、and_rm_imm8_rip、and_rm_imm8_sib、and_rm_imm8_sibd | 真 | alu |
 | andnpd | andnpd_xv_wv | sse2 | alu |
@@ -488,6 +494,7 @@
 | pavgw | pavgw_xv_wv | sse2 | alu |
 | pblendvb_xv_wv | pblendvb_xv_wv | sse4_1 | alu |
 | pblendw | pblendw_xv_wv_ib | sse4_1 | alu |
+| pclmulqdq | pclmulqdq_xv_wv_ib | pclmulqdq | alu |
 | pcmpeqb | pcmpeqb_pv_qv | mmx | alu |
 | pcmpeqb | pcmpeqb、pcmpeqb_xv_wv | sse2 | alu |
 | pcmpeqb | pcmpeqb_mem32、pcmpeqb_mem8、pcmpeqb_memnd | sse2 | load |

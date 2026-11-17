@@ -4097,6 +4097,14 @@ fn dispatch_map<B: Backend>(
         Insn::PcmpestrmXvWvIb => sem_ea::pxstr(b, true, false, d.imm as u8, d, &ea),
         Insn::PcmpistriXvWvIb => sem_ea::pxstr(b, false, true, d.imm as u8, d, &ea),
         Insn::PcmpistrmXvWvIb => sem_ea::pxstr(b, false, false, d.imm as u8, d, &ea),
+        // AES-NI と PCLMULQDQ。
+        Insn::AesimcXvWv => sem_ea::aesround(b, 4, d, &ea),
+        Insn::AesencXvWv => sem_ea::aesround(b, 0, d, &ea),
+        Insn::AesenclastXvWv => sem_ea::aesround(b, 1, d, &ea),
+        Insn::AesdecXvWv => sem_ea::aesround(b, 2, d, &ea),
+        Insn::AesdeclastXvWv => sem_ea::aesround(b, 3, d, &ea),
+        Insn::AeskeygenassistXvWvIb => sem_ea::aeskeygenassist(b, d.imm as u8, d, &ea),
+        Insn::PclmulqdqXvWvIb => sem_ea::pclmulqdq(b, d.imm as u8, d, &ea),
         // ===== x87（D8-DF）。mod=11 は r/m フィールドを ST(i) として
         // 扱い、それ以外はメモリ形。ステータスワード依存の比較系は
         // 未モデルのため旧経路へフォールバックする。

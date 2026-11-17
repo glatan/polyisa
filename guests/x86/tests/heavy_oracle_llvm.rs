@@ -604,18 +604,11 @@ const KNOWN: &[(&str, &str, &str)] = &[
     ("0f 38 fc", "missing", "*"), // wrssd/movrs/movdiri/aadd（新命令群、A4 以降）
     ("0f 3a cc", "missing", "*"), // sha1rnds4（A3a）    // movrs NP 形（新命令、A4 以降）
     ("66 0f 38 cf", "missing", "*"), // gf2p8mulb（A3a）
-    ("66 0f 38 db", "missing", "*"),
-    ("66 0f 38 dc", "missing", "*"),
-    ("66 0f 38 dd", "missing", "*"),
-    ("66 0f 38 de", "missing", "*"),
-    ("66 0f 38 df", "missing", "*"), // aes（A3a）
-    ("66 0f 3a 44", "missing", "*"), // pclmulqdq（A3a）
     ("66 0f 3a cc", "missing", "*"),
     ("f2 0f 3a cc", "missing", "*"),
     ("f3 0f 3a cc", "missing", "*"), // sha1rnds4（A3a）
     ("66 0f 3a ce", "missing", "*"),
     ("66 0f 3a cf", "missing", "*"), // gf2p8affine（A3a）
-    ("66 0f 3a df", "missing", "*"), // aeskeygenassist（A3a）
     ("f3 0f 3a f0", "missing", "*"), // hreset（A4）
     // ---- 必須接頭辞 0F ヘッド。mod 制約・MMX 寛容（No66/No66F3）
     // 修正で大半は一致する。残りは未宣言の命令群。
