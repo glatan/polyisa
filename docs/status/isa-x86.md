@@ -311,6 +311,7 @@
 | fbld | fbld_m80 | 真 | alu |
 | fbstp | fbstp_m80 | 真 | alu |
 | fcomi | fcomi_sti | 真 | alu |
+| femms | femms | dnow | alu |
 | fild | fild_m16、fild_m32、fild_m32_sibd、fild_m64、fild_m64_sib、fild_m64_sibd | 真 | alu |
 | fist | fist_m16、fist_m32 | 真 | alu |
 | fistp | fistp_m16、fistp_m32、fistp_m64、fistp_m64_sibd | 真 | alu |
@@ -530,6 +531,7 @@
 | pandn | pandn、pandn_xv_wv | sse2 | alu |
 | pavgb | pavgb_pv_qv | sse | alu |
 | pavgb | pavgb_xv_wv | sse2 | alu |
+| pavgusb | pavgusb_pq_qq | dnow | alu |
 | pavgw | pavgw_pv_qv | sse | alu |
 | pavgw | pavgw_xv_wv | sse2 | alu |
 | pblendvb_xv_wv | pblendvb_xv_wv | sse4_1 | alu |
@@ -561,6 +563,25 @@
 | pextrw | pextrw_gv_pv_ib | sse | alu |
 | pextrw | pextrw_gv_wv_ib | sse2 | alu |
 | pextrw | pextrw_ew_xv | sse4_1 | store |
+| pf2id | pf2id_pq_qq | dnow | alu |
+| pf2iw | pf2iw_pq_qq | dnowext | alu |
+| pfacc | pfacc_pq_qq | dnow | alu |
+| pfadd | pfadd_pq_qq | dnow | alu |
+| pfcmpeq | pfcmpeq_pq_qq | dnow | alu |
+| pfcmpge | pfcmpge_pq_qq | dnow | alu |
+| pfcmpgt | pfcmpgt_pq_qq | dnow | alu |
+| pfmax | pfmax_pq_qq | dnow | alu |
+| pfmin | pfmin_pq_qq | dnow | alu |
+| pfmul | pfmul_pq_qq | dnow | alu |
+| pfnacc | pfnacc_pq_qq | dnowext | alu |
+| pfpnacc | pfpnacc_pq_qq | dnowext | alu |
+| pfrcp | pfrcp_pq_qq | dnow | alu |
+| pfrcpit1 | pfrcpit1_pq_qq | dnow | alu |
+| pfrcpit2 | pfrcpit2_pq_qq | dnow | alu |
+| pfrsqit1 | pfrsqit1_pq_qq | dnow | alu |
+| pfrsqrt | pfrsqrt_pq_qq | dnow | alu |
+| pfsub | pfsub_pq_qq | dnow | alu |
+| pfsubr | pfsubr_pq_qq | dnow | alu |
 | phaddd_pv_qv | phaddd_pv_qv | ssse3 | alu |
 | phaddd_xv_wv | phaddd_xv_wv | ssse3 | alu |
 | phaddsw_pv_qv | phaddsw_pv_qv | ssse3 | alu |
@@ -574,6 +595,8 @@
 | phsubsw_xv_wv | phsubsw_xv_wv | ssse3 | alu |
 | phsubw_pv_qv | phsubw_pv_qv | ssse3 | alu |
 | phsubw_xv_wv | phsubw_xv_wv | ssse3 | alu |
+| pi2fd | pi2fd_pq_qq | dnow | alu |
+| pi2fw | pi2fw_pq_qq | dnowext | alu |
 | pinsrb | pinsrb_xv_eb_ib | sse4_1 | alu |
 | pinsrd | pinsrd_xv_ed_ib | sse4_1 | alu |
 | pinsrw | pinsrw_pv_ew_ib | sse | alu |
@@ -617,6 +640,7 @@
 | pmuldq_xv_wv | pmuldq_xv_wv | sse4_1 | alu |
 | pmulhrsw_pv_qv | pmulhrsw_pv_qv | ssse3 | alu |
 | pmulhrsw_xv_wv | pmulhrsw_xv_wv | ssse3 | alu |
+| pmulhrw | pmulhrw_pq_qq | dnow | alu |
 | pmulhuw | pmulhuw_pv_qv | sse | alu |
 | pmulhw | pmulhw_pv_qv | mmx | alu |
 | pmulld_xv_wv | pmulld_xv_wv | sse4_1 | alu |
@@ -679,6 +703,7 @@
 | psubusw | psubusw_xv_wv | sse2 | alu |
 | psubw | psubw_pv_qv | mmx | alu |
 | psubw | psubw_xv_wv | sse2 | alu |
+| pswapd | pswapd_pq_qq | dnowext | alu |
 | ptest_xv_wv | ptest_xv_wv | sse4_1 | alu |
 | punpckhbw | punpckhbw_pv_qv | mmx | alu |
 | punpckhbw | punpckhbw_xv_wv | sse2 | alu |

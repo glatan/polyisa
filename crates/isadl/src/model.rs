@@ -376,6 +376,10 @@ pub struct MapDecl {
     /// VEX.mmmmm がこの表を選ぶときの値（1=0F, 2=0F38, 3=0F3A）。
     /// None の表は VEX 経路から到達しない。
     pub vex_code: Option<u8>,
+    /// オペコードが ModRM（と SIB・変位）の後に来る表
+    /// （3DNow! の `0F 0F /r imm8` 形式）。true の表は先に
+    /// ModRM を読んでから照合バイトを消費する。
+    pub postop: bool,
     pub items: Vec<MapItem>,
 }
 

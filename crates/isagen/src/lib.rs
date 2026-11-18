@@ -617,30 +617,14 @@ fn gen_map_decoder(model: &Model) -> Result<String, GenError> {
     // ModRM/SIB/変位/即値の消費。
     s.push_str(
         "#[allow(clippy::all)]\n\
-         fn finish(\n\
+         fn modrm_dec(\n\
          \x20   bytes: &[u8],\n\
          \x20   i: &mut usize,\n\
          \x20   d: &mut MapDec,\n\
-         \x20   insn: Insn,\n\
-         \x20   ops: &[OpK],\n\
-         \x20   group_modrm: bool,\n\
          \x20   edisp: u8,\n\
          \x20   ebok: u8,\n\
-         ) -> Option<Insn> {\n\
-         \x20   let needs_modrm = group_modrm\n\
-         \x20       || ops.iter().any(|o| {\n\
-         \x20           matches!(\n\
-         \x20               o,\n\
-         \x20               OpK::Ea(_)\n\
-         \x20                   | OpK::Reg(_)\n\
-         \x20                   | OpK::RegS\n\
-         \x20                   | OpK::RegX\n\
-         \x20                   | OpK::RmX\n\
-         \x20                   | OpK::RegM\n\
-         \x20                   | OpK::RmM\n\
-         \x20           )\n\
-         \x20       });\n\
-         \x20   if needs_modrm {\n\
+         ) -> Option<()> {\n\
+         \x20   {\n\
          \x20       let m = *bytes.get(*i)?;\n\
          \x20       *i += 1;\n\
          \x20       d.has_modrm = true;\n\
@@ -703,6 +687,36 @@ fn gen_map_decoder(model: &Model) -> Result<String, GenError> {
          \x20               d.disp_bits = db as u8;\n\
          \x20           }\n\
          \x20       }\n\
+         \x20   }\n\
+         \x20   Some(())\n\
+         }\n\
+         #[allow(clippy::all)]\n\
+         fn finish(\n\
+         \x20   bytes: &[u8],\n\
+         \x20   i: &mut usize,\n\
+         \x20   d: &mut MapDec,\n\
+         \x20   insn: Insn,\n\
+         \x20   ops: &[OpK],\n\
+         \x20   group_modrm: bool,\n\
+         \x20   edisp: u8,\n\
+         \x20   ebok: u8,\n\
+         \x20   pre: bool,\n\
+         ) -> Option<Insn> {\n\
+         \x20   let needs_modrm = group_modrm\n\
+         \x20       || ops.iter().any(|o| {\n\
+         \x20           matches!(\n\
+         \x20               o,\n\
+         \x20               OpK::Ea(_)\n\
+         \x20                   | OpK::Reg(_)\n\
+         \x20                   | OpK::RegS\n\
+         \x20                   | OpK::RegX\n\
+         \x20                   | OpK::RmX\n\
+         \x20                   | OpK::RegM\n\
+         \x20                   | OpK::RmM\n\
+         \x20           )\n\
+         \x20       });\n\
+         \x20   if needs_modrm && !pre {\n\
+         \x20       modrm_dec(bytes, i, d, edisp, ebok)?;\n\
          \x20   }\n\
          \x20   for op in ops {\n\
          \x20       match op {\n\
@@ -769,6 +783,13 @@ fn gen_map_decoder(model: &Model) -> Result<String, GenError> {
         ));
         s.push_str("    let _ = feats;\n");
         s.push_str("    let _ = modes;\n");
+        if map.postop {
+            // postop 表（3DNow! の 0F 0F /r imm8 形式）は
+            // ModRM（と SIB・変位）を先に読み、その後の
+            // バイトを照合対象にする。ModRM の消費は
+            // 候補のオペランドに依らず必ず行う。
+            s.push_str("    modrm_dec(bytes, i, d, 0, 0)?;\n");
+        }
         s.push_str("    let op = *bytes.get(*i)?; *i += 1;\n");
         s.push_str("    d.opcode = op;\n");
         s.push_str("    match op {\n");
@@ -822,27 +843,32 @@ fn gen_map_decoder(model: &Model) -> Result<String, GenError> {
                 g
             };
             // ModRM.mod で選ぶ項目（group_mod）があれば、グループの
-            // 有無にかかわらず ModRM バイトを覗く。
+            // 有無にかかわらず ModRM バイトを覗く。postop 表では
+            // 先読み済みの `d.modrm` を使う。
             if !grouped.is_empty()
                 || insns
                     .iter()
                     .any(|mi| mi.group_mod.is_some() || mi.group_rm.is_some())
             {
-                s.push_str("            let m = *bytes.get(*i)?;\n");
+                if map.postop {
+                    s.push_str("            let m = d.modrm;\n");
+                } else {
+                    s.push_str("            let m = *bytes.get(*i)?;\n");
+                }
             }
             if !grouped.is_empty() {
                 s.push_str("            let g = (m >> 3) & 7;\n            match g {\n");
                 for g in &grouped {
                     s.push_str(&format!("                {g} => {{\n"));
                     for mi in insns.iter().filter(|mi| mi.group == Some(*g)) {
-                        emit_map_candidate(&mut s, mi, &flag_exprs)?;
+                        emit_map_candidate(&mut s, mi, &flag_exprs, map.postop)?;
                     }
                     s.push_str("                }\n");
                 }
                 s.push_str("                _ => {}\n            }\n");
             }
             for mi in insns.iter().filter(|mi| mi.group.is_none()) {
-                emit_map_candidate(&mut s, mi, &flag_exprs)?;
+                emit_map_candidate(&mut s, mi, &flag_exprs, map.postop)?;
             }
             if !has_branch {
                 s.push_str("            None\n");
@@ -1059,6 +1085,7 @@ fn emit_map_candidate(
     s: &mut String,
     mi: &polyisa_isadl::model::MapInsn,
     flag_exprs: &std::collections::BTreeMap<String, String>,
+    postop: bool,
 ) -> Result<(), GenError> {
     use polyisa_isadl::model::PfxSel;
     let pfx = match mi.pfx {
@@ -1088,10 +1115,14 @@ fn emit_map_candidate(
                 // {er} 形（b=1 + レジスタ形）では L'L は丸め指定
                 // なので全値を受理する。レジスタ形の判定は、非グループ
                 // 項目では `bytes[i]`（=ModRM バイト）の mod、グループ
-                // 項目では定義済みの `m` を見る。
+                // 項目では定義済みの `m` を見る。postop 表では ModRM が
+                // 先読み済みなので `d.modrm` を使う（現状 er は
+                // vex_code のある表にだけ置けるので到達不能だが）。
                 let modreg =
                     if mi.group.is_some() || mi.group_mod.is_some() || mi.group_rm.is_some() {
                         "m >> 6 == 3".to_string()
+                    } else if postop {
+                        "d.modrm >> 6 == 3".to_string()
                     } else {
                         "*bytes.get(*i)? >> 6 == 3".to_string()
                     };
@@ -1136,7 +1167,7 @@ fn emit_map_candidate(
     let edisp = mi.edisp;
     let ebok = u8::from(mi.bcast) | (u8::from(mi.er) << 1);
     s.push_str(&format!(
-        "            if {cond} {{\n                return finish(bytes, i, d, Insn::{}, &[{ops}], {group}, {edisp}, {ebok});\n            }}\n",
+        "            if {cond} {{\n                return finish(bytes, i, d, Insn::{}, &[{ops}], {group}, {edisp}, {ebok}, {postop});\n            }}\n",
         to_ident(&mi.name)
     ));
     Ok(())

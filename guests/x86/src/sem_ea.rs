@@ -7215,6 +7215,243 @@ pub fn emms<B: Backend>(_b: &mut B) -> Flow<B> {
     Ok(())
 }
 
+// ===== 3DNow!（0F 0F /r imm8、MMX 上のパック単精度）=====
+// 2 レーンの f32 を mm レジスタ（x87 仮数スロット）に詰める。
+// PFRCP/PFRSQRT の近似テーブルや PFRCPIT2 の捨てビット復元は
+// モデル化せず、近似命令は正確な除算/平方根で代用する。
+
+/// W64 中の `i` 番目の 32 ビットを f32 として取り出す。
+fn flane32_64<B: Backend>(b: &mut B, v: B::V<W64>, i: u32) -> B::V<F32> {
+    let l = lane64(b, v, i * 32, 32);
+    let w: B::V<W32> = b.trunc::<W64, W32>(l);
+    b.trunc::<W32, F32>(w)
+}
+
+/// f32 を `dst`（W64）のレーン `i` へ書く。
+fn put_flane32_64<B: Backend>(b: &mut B, dst: B::V<W64>, v: B::V<F32>, i: u32) -> B::V<W64> {
+    let w: B::V<W32> = b.trunc::<F32, W32>(v);
+    let w64 = b.zext::<W32, W64>(w);
+    put_lane64(b, dst, w64, i * 32, 32)
+}
+
+/// W32 の符号比較で `lo`/`hi` に飽和させる。
+fn clamp_w32<B: Backend>(b: &mut B, v: B::V<W32>, lo: u32, hi: u32) -> B::V<W32> {
+    let hv = b.konst::<W32>(hi);
+    let ge_hi = b.cmp::<W32>(Cmp::GtS, v, hv);
+    let lv = b.konst::<W32>(lo);
+    let lt_lo = b.cmp::<W32>(Cmp::LtS, v, lv);
+    let t = b.select::<W32>(ge_hi, hv, v);
+    b.select::<W32>(lt_lo, lv, t)
+}
+
+/// 3DNow! の操作種別。
+#[derive(Clone, Copy)]
+pub enum Dop {
+    /// レーンごとの二項演算。Subr は c-a。
+    Add,
+    Sub,
+    Subr,
+    Mul,
+    Min,
+    Max,
+    /// 比較（成立で全 1、さもなければ 0）。
+    CmpEq,
+    CmpGe,
+    CmpGt,
+    /// 横方向の累積。dst 側を畳んで下位、src 側を畳んで
+    /// 上位に置く。Acc は両側が加算、Nacc は両側が
+    /// lo-hi、Pnacc は dst 側が lo-hi・src 側が加算。
+    Acc,
+    Nacc,
+    Pnacc,
+    /// レーン交換（src のみ）。
+    Swap,
+    /// 逆数系。近似命令は正確値で代用。
+    Rcp,
+    Rsqrt,
+    /// Newton-Raphson の第 1 補正。RcpIt1 は 2-a*c、
+    /// RsqrtIt1 は (3-a*c)/2、RcpIt2 は最終乗算 a*c。
+    RcpIt1,
+    RsqrtIt1,
+    RcpIt2,
+    /// 変換。F2* は f32→符号付き整数（切り捨て・飽和）、
+    /// I2* は符号付き整数→f32。
+    F2Id,
+    F2Iw,
+    I2Fd,
+    I2Fw,
+    /// PAVGUSB（バイトの丸め付き平均）と PMULHRW
+    /// （符号付きワード乗算の上位+丸め）。
+    AvgUsb,
+    MulHrw,
+}
+
+/// 3DNow! の共通実装。dst = mm（ModRM.reg）、src = mm/m64。
+pub fn dnow<B: Backend>(b: &mut B, op: Dop, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit> {
+    use polyisa_sem::F32;
+    let dst = reg_m(d);
+    let a: B::V<W64> = b.get(sem::st_sig_ref(dst));
+    let c = rq(b, ea)?;
+    let mut acc = b.konst::<W64>(0);
+    match op {
+        Dop::Acc | Dop::Nacc | Dop::Pnacc => {
+            let a0 = flane32_64(b, a, 0);
+            let a1 = flane32_64(b, a, 1);
+            let c0 = flane32_64(b, c, 0);
+            let c1 = flane32_64(b, c, 1);
+            // dst（第 1 オペランド）側を畳んで下位に置く:
+            // Acc は加算、Nacc/Pnacc は lo-hi。
+            let lo = if matches!(op, Dop::Acc) {
+                b.fadd::<F32>(a0, a1)
+            } else {
+                b.fsub::<F32>(a0, a1)
+            };
+            // src（第 2 オペランド）側を畳んで上位に置く:
+            // Nacc は lo-hi、Acc/Pnacc は加算。
+            let hi = if matches!(op, Dop::Nacc) {
+                b.fsub::<F32>(c0, c1)
+            } else {
+                b.fadd::<F32>(c0, c1)
+            };
+            acc = put_flane32_64(b, acc, lo, 0);
+            acc = put_flane32_64(b, acc, hi, 1);
+        }
+        Dop::Swap => {
+            let c0 = flane32_64(b, c, 0);
+            let c1 = flane32_64(b, c, 1);
+            acc = put_flane32_64(b, acc, c1, 0);
+            acc = put_flane32_64(b, acc, c0, 1);
+        }
+        Dop::CmpEq | Dop::CmpGe | Dop::CmpGt => {
+            let ones = b.konst::<W32>(0xffff_ffff);
+            let zero = b.konst::<W32>(0);
+            for i in 0..2 {
+                let af = flane32_64(b, a, i);
+                let cf = flane32_64(b, c, i);
+                let hit = match op {
+                    Dop::CmpEq => b.feq::<F32>(af, cf),
+                    Dop::CmpGe => b.fle::<F32>(cf, af),
+                    _ => b.flt::<F32>(cf, af),
+                };
+                let w = b.select::<W32>(hit, ones, zero);
+                let w64 = b.zext::<W32, W64>(w);
+                acc = put_lane64(b, acc, w64, i * 32, 32);
+            }
+        }
+        Dop::F2Id => {
+            for i in 0..2 {
+                let af = flane32_64(b, c, i);
+                let w: B::V<W32> = b.fcvt_s32::<F32>(af, RM_RTZ);
+                let w64 = b.zext::<W32, W64>(w);
+                acc = put_lane64(b, acc, w64, i * 32, 32);
+            }
+        }
+        Dop::F2Iw => {
+            for i in 0..2 {
+                let af = flane32_64(b, c, i);
+                let w: B::V<W32> = b.fcvt_s32::<F32>(af, RM_RTZ);
+                let w = clamp_w32(b, w, 0xffff_8000, 0x0000_7fff);
+                let w64 = b.zext::<W32, W64>(w);
+                acc = put_lane64(b, acc, w64, i * 32, 32);
+            }
+        }
+        Dop::I2Fd => {
+            for i in 0..2 {
+                let l = lane64(b, c, i * 32, 32);
+                let w: B::V<W32> = b.trunc::<W64, W32>(l);
+                let f = b.fcvt_from_s32::<F32>(w, RM_RNE);
+                acc = put_flane32_64(b, acc, f, i);
+            }
+        }
+        Dop::I2Fw => {
+            for i in 0..2 {
+                let l = lane64(b, c, i * 32, 16);
+                let w16: B::V<W16> = b.trunc::<W64, W16>(l);
+                let w: B::V<W32> = b.sext::<W16, W32>(w16);
+                let f = b.fcvt_from_s32::<F32>(w, RM_RNE);
+                acc = put_flane32_64(b, acc, f, i);
+            }
+        }
+        Dop::AvgUsb => {
+            for i in 0..8 {
+                let al64 = lane64(b, a, i * 8, 8);
+                let cl64 = lane64(b, c, i * 8, 8);
+                let al = b.trunc::<W64, W32>(al64);
+                let cl = b.trunc::<W64, W32>(cl64);
+                let one = b.konst::<W32>(1);
+                let s = b.add::<W32>(al, cl);
+                let s = b.add::<W32>(s, one);
+                let r = b.shr_l::<W32>(s, one);
+                let r64 = b.zext::<W32, W64>(r);
+                acc = put_lane64(b, acc, r64, i * 8, 8);
+            }
+        }
+        Dop::MulHrw => {
+            for i in 0..4 {
+                let al64 = lane64(b, a, i * 16, 16);
+                let cl64 = lane64(b, c, i * 16, 16);
+                let al: B::V<W16> = b.trunc::<W64, W16>(al64);
+                let cl: B::V<W16> = b.trunc::<W64, W16>(cl64);
+                let a32 = b.sext::<W16, W32>(al);
+                let c32 = b.sext::<W16, W32>(cl);
+                let p = b.mul::<W32>(a32, c32);
+                let rnd = b.konst::<W32>(0x8000);
+                let p = b.add::<W32>(p, rnd);
+                let sh = b.konst::<W32>(16);
+                let r = b.shr_a::<W32>(p, sh);
+                let r64 = b.zext::<W32, W64>(r);
+                acc = put_lane64(b, acc, r64, i * 16, 16);
+            }
+        }
+        // 残りは全てレーンごとの f32 演算。
+        _ => {
+            for i in 0..2 {
+                let af = flane32_64(b, a, i);
+                let cf = flane32_64(b, c, i);
+                let rf = match op {
+                    Dop::Add => b.fadd::<F32>(af, cf),
+                    Dop::Sub => b.fsub::<F32>(af, cf),
+                    Dop::Subr => b.fsub::<F32>(cf, af),
+                    Dop::Mul => b.fmul::<F32>(af, cf),
+                    Dop::Min => b.fmin::<F32>(af, cf),
+                    Dop::Max => b.fmax::<F32>(af, cf),
+                    Dop::Rcp => {
+                        let one = b.konst::<F32>(0x3f80_0000);
+                        b.fdiv::<F32>(one, cf)
+                    }
+                    Dop::Rsqrt => {
+                        let one = b.konst::<F32>(0x3f80_0000);
+                        let sq = b.fsqrt::<F32>(cf);
+                        b.fdiv::<F32>(one, sq)
+                    }
+                    Dop::RcpIt1 => {
+                        let two = b.konst::<F32>(0x4000_0000);
+                        let p = b.fmul::<F32>(af, cf);
+                        b.fsub::<F32>(two, p)
+                    }
+                    Dop::RsqrtIt1 => {
+                        let three = b.konst::<F32>(0x4040_0000);
+                        let two = b.konst::<F32>(0x4000_0000);
+                        let p = b.fmul::<F32>(af, cf);
+                        let s = b.fsub::<F32>(three, p);
+                        b.fdiv::<F32>(s, two)
+                    }
+                    // RcpIt2 は近似値と補正係数の最終乗算。
+                    _ => b.fmul::<F32>(af, cf),
+                };
+                acc = put_flane32_64(b, acc, rf, i);
+            }
+        }
+    }
+    b.set(sem::st_sig_ref(dst), acc);
+    Ok(())
+}
+
+/// FEMMS。MMX 状態の解放（EMMS と同じ。タグワードは未モデル化）。
+pub fn femms<B: Backend>(_b: &mut B) -> Flow<B> {
+    Ok(())
+}
+
 // ===== 0F 38 / 0F 3A サブマップ（SSSE3/SSE4.1/MOVBE）=====
 
 /// PSHUFB の 128 ビット処理（値関数）。制御バイトの MSB が立つ要素は

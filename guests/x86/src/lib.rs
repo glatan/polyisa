@@ -160,7 +160,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 段階4の x86 最小 853 件にオペコード表の記述を足した件数。
-        assert_eq!(INSNS.len(), 2038);
+        assert_eq!(INSNS.len(), 2063);
     }
 
     #[test]
@@ -2000,6 +2000,84 @@ mod tests {
         // EVEX.z=1 は aaa!=0（マスク付き）でのみ有効。
         // z=1 + aaa=0 は予約で #UD。
         assert!(decode_map(&[0x62, 0xF1, 0x7E, 0xC8, 0x6F, 0xC1], modes, f512).is_none());
+    }
+
+    #[test]
+    fn dnow_decode() {
+        let modes = MODE_M64 | (MODE_OPD_O32 << MODE_OPD_SHIFT) | (MODE_ADR_A64 << MODE_ADR_SHIFT);
+        // 0F 0F /r imm8。選択バイトは ModRM（と SIB・変位）の後ろ。
+        // 0F 0F C1 9E = PFADD mm0,mm1。
+        let d = decode_map(&[0x0F, 0x0F, 0xC1, 0x9E], modes, FEAT_DNOW).unwrap();
+        assert_eq!(d.insn, Insn::PfaddPqQq);
+        assert_eq!(d.len, 4);
+        assert_eq!(d.modrm, 0xC1);
+        // 0F 0F 05 <disp32> 9E = PFADD mm0,[disp32]（mod=00,r/m=101）。
+        // 変位は選択バイトより前に来る。
+        let d = decode_map(
+            &[0x0F, 0x0F, 0x05, 0x78, 0x56, 0x34, 0x12, 0x9E],
+            modes,
+            FEAT_DNOW,
+        )
+        .unwrap();
+        assert_eq!(d.insn, Insn::PfaddPqQq);
+        assert_eq!(d.len, 8);
+        assert_eq!(d.disp, 0x1234_5678);
+        // 0F 0F 40 20 9E = PFADD mm0,[rax+0x20]（mod=01、disp8 が選択
+        // バイトの前）。
+        let d = decode_map(&[0x0F, 0x0F, 0x40, 0x20, 0x9E], modes, FEAT_DNOW).unwrap();
+        assert_eq!(d.insn, Insn::PfaddPqQq);
+        assert_eq!(d.len, 5);
+        assert_eq!(d.disp, 0x20);
+        // SIB 形: 0F 0F 04 24 BB = PSWAPD mm0,[rsp]（dnowext）。
+        let d = decode_map(&[0x0F, 0x0F, 0x04, 0x24, 0xBB], modes, FEAT_DNOWEXT).unwrap();
+        assert_eq!(d.insn, Insn::PswapdPqQq);
+        assert_eq!(d.len, 5);
+        // 全選択バイトが一意の命令に対応する。
+        for (op, want) in [
+            (0x0Cu8, Insn::Pi2fwPqQq),
+            (0x0D, Insn::Pi2fdPqQq),
+            (0x1C, Insn::Pf2iwPqQq),
+            (0x1D, Insn::Pf2idPqQq),
+            (0x8A, Insn::PfnaccPqQq),
+            (0x8E, Insn::PfpnaccPqQq),
+            (0x90, Insn::PfcmpgePqQq),
+            (0x94, Insn::PfminPqQq),
+            (0x96, Insn::PfrcpPqQq),
+            (0x97, Insn::PfrsqrtPqQq),
+            (0x9A, Insn::PfsubPqQq),
+            (0x9E, Insn::PfaddPqQq),
+            (0xA0, Insn::PfcmpgtPqQq),
+            (0xA4, Insn::PfmaxPqQq),
+            (0xA6, Insn::Pfrcpit1PqQq),
+            (0xA7, Insn::Pfrsqit1PqQq),
+            (0xAA, Insn::PfsubrPqQq),
+            (0xAE, Insn::PfaccPqQq),
+            (0xB0, Insn::PfcmpeqPqQq),
+            (0xB4, Insn::PfmulPqQq),
+            (0xB6, Insn::Pfrcpit2PqQq),
+            (0xB7, Insn::PmulhrwPqQq),
+            (0xBB, Insn::PswapdPqQq),
+            (0xBF, Insn::PavgusbPqQq),
+        ] {
+            let d = decode_map(&[0x0F, 0x0F, 0xC8, op], modes, FEAT_DNOW | FEAT_DNOWEXT);
+            assert_eq!(d.map(|d| d.insn), Some(want), "op={op:#04x}");
+        }
+        // ゲート: 基本 3DNow! は dnow、拡張（PF2IW/PFNACC/PFPNACC/
+        // PI2FW/PSWAPD）は dnowext が要る。
+        assert!(decode_map(&[0x0F, 0x0F, 0xC8, 0x9E], modes, FEAT_MMX).is_none());
+        for op in [0x0Cu8, 0x1C, 0x8A, 0x8E, 0xBB] {
+            assert!(
+                decode_map(&[0x0F, 0x0F, 0xC8, op], modes, FEAT_DNOW).is_none(),
+                "ext op={op:#04x}"
+            );
+        }
+        // 未割り当ての選択バイトは #UD。
+        assert!(decode_map(&[0x0F, 0x0F, 0xC8, 0x42], modes, FEAT_DNOW | FEAT_DNOWEXT).is_none());
+        // FEMMS（0F 0E）は post-opcode ではなく独立命令。
+        let d = decode_map(&[0x0F, 0x0E], modes, FEAT_DNOW).unwrap();
+        assert_eq!(d.insn, Insn::Femms);
+        assert_eq!(d.len, 2);
+        assert!(decode_map(&[0x0F, 0x0E], modes, FEAT_MMX).is_none());
     }
 
     #[test]

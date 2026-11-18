@@ -946,6 +946,7 @@ pub fn build_maps(m: &mut Model) {
     m.maps.push(MapDecl {
         name: "primary".to_string(),
         vex_code: None,
+        postop: false,
         items: primary,
     });
 
@@ -1725,6 +1726,11 @@ pub fn build_maps(m: &mut Model) {
         MapItem::Insn(0xA5, n("shld_ev_gv_cl", &[Ea(V), Reg(V), Imp(ImpOp::Cl)], "shld {e}, {g}, cl", "alu")),
         MapItem::Insn(0xAC, n("shrd_ev_gv_ib", &[Ea(V), Reg(V), Imm(B8)], "shrd {e}, {g}, {i}", "alu")),
         MapItem::Insn(0xAD, n("shrd_ev_gv_cl", &[Ea(V), Reg(V), Imp(ImpOp::Cl)], "shrd {e}, {g}, cl", "alu")),
+        // 3DNow! 系。FEMMS（0F 0E）は post-opcode ではなく
+        // 独立した命令。0F 0F /r imm8 は操作選択バイトが
+        // ModRM・SIB・変位の後に来るので postop 表に投げる。
+        MapItem::Insn(0x0E, mi("femms", &[], None, PfxSel::Any, Pred::True, "femms", "alu")),
+        MapItem::Map(0x0F, "map_3dnow".to_string(), w("dnow || dnowext")),
         // 3 バイトオペコードのサブマップ。
         MapItem::Map(0x38, "map_0f38".to_string(), Pred::True),
         MapItem::Map(0x3A, "map_0f3a".to_string(), Pred::True),
@@ -2342,10 +2348,69 @@ pub fn build_maps(m: &mut Model) {
     m.maps.push(MapDecl {
         name: "map_0f".to_string(),
         vex_code: Some(1),
+        postop: false,
         items: m0f,
     });
     build_map_0f38(m);
     build_map_0f3a(m);
+    build_map_3dnow(m);
+}
+
+/// 3DNow!（0F 0F /r imm8）。ModRM（と SIB・変位）の後に来る
+/// 選択バイトが操作を決める postop 表。オペランドは全て
+/// `mm, mm/m64`（P = ModRM.reg、Q = r/m）の 2 形。
+/// PF2IW/PFNACC/PFPNACC/PI2FW/PSWAPD は拡張 3DNow!（`dnowext`）で、
+/// それ以外は基本 3DNow!（`dnow`）。ゲートは `named_gate`。
+fn build_map_3dnow(m: &mut Model) {
+    use OpKind::*;
+    let pq_qq: &[OpKind] = &[RegM, RmM];
+    let mut v: Vec<MapItem> = Vec::new();
+    let mut d = |op: u8, name: &str, timing: &str| {
+        v.push(MapItem::Insn(
+            op,
+            mi(
+                &format!("{name}_pq_qq"),
+                pq_qq,
+                None,
+                PfxSel::Any,
+                Pred::True,
+                &format!("{name} {{p}}, {{q}}"),
+                timing,
+            ),
+        ));
+    };
+    // 基本 3DNow!（K6-2）。
+    d(0x0D, "pi2fd", "alu");
+    d(0x1D, "pf2id", "alu");
+    d(0x8A, "pfnacc", "alu");
+    d(0x8E, "pfpnacc", "alu");
+    d(0x90, "pfcmpge", "alu");
+    d(0x94, "pfmin", "alu");
+    d(0x96, "pfrcp", "alu");
+    d(0x97, "pfrsqrt", "alu");
+    d(0x9A, "pfsub", "alu");
+    d(0x9E, "pfadd", "alu");
+    d(0xA0, "pfcmpgt", "alu");
+    d(0xA4, "pfmax", "alu");
+    d(0xA6, "pfrcpit1", "alu");
+    d(0xA7, "pfrsqit1", "alu");
+    d(0xAA, "pfsubr", "alu");
+    d(0xAE, "pfacc", "alu");
+    d(0xB0, "pfcmpeq", "alu");
+    d(0xB4, "pfmul", "alu");
+    d(0xB6, "pfrcpit2", "alu");
+    d(0xB7, "pmulhrw", "alu");
+    d(0xBF, "pavgusb", "alu");
+    // 拡張 3DNow!（Athlon 以降）。
+    d(0x0C, "pi2fw", "alu");
+    d(0x1C, "pf2iw", "alu");
+    d(0xBB, "pswapd", "alu");
+    m.maps.push(MapDecl {
+        name: "map_3dnow".to_string(),
+        vex_code: None,
+        postop: true,
+        items: v,
+    });
 }
 
 /// 0F 38 サブマップ（SSSE3/SSE4.1/MOVBE）。XMM 形は必須接頭辞 0x66。
@@ -3039,6 +3104,7 @@ fn build_map_0f38(m: &mut Model) {
     m.maps.push(MapDecl {
         name: "map_0f38".to_string(),
         vex_code: Some(2),
+        postop: false,
         items: v,
     });
 }
@@ -3375,6 +3441,7 @@ fn build_map_0f3a(m: &mut Model) {
     m.maps.push(MapDecl {
         name: "map_0f3a".to_string(),
         vex_code: Some(3),
+        postop: false,
         items,
     });
 }

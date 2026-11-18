@@ -182,7 +182,7 @@ fn declare_features(m: &mut Model) {
     feat(m, "pdpe1gb", &["pae"]);
     feat(m, "rdtscp", &["tsc"]);
     feat(m, "lm", &["cx8", "cmov", "fxsr", "sse2"]);
-    feat(m, "dnowext", &["mmxext"]);
+    feat(m, "dnowext", &["mmxext", "dnow"]);
     feat(m, "dnow", &["mmx"]);
 }
 
@@ -794,6 +794,17 @@ fn named_gate(mn: &str) -> Option<&'static [&'static str]> {
         "rdtsc" => &["tsc"],
         "rdmsr" | "wrmsr" => &["msr"],
         "emms" => &["mmx"],
+        // 3DNow!。拡張 3DNow!（PF2IW/PFNACC/PFPNACC/PI2FW/PSWAPD、
+        // CPUID.8000_0001:EDX[30]）は `dnowext`。
+        "femms" => &["dnow"],
+        "pf2iw" | "pi2fw" | "pswapd" | "pfnacc" | "pfpnacc" => &["dnowext"],
+        _ if mn.starts_with("pf")
+            || mn == "pi2fd"
+            || mn == "pavgusb"
+            || mn == "pmulhrw" =>
+        {
+            &["dnow"]
+        }
         "sfence" => &["sse"],
         "mfence" | "lfence" => &["sse2"],
         "fxsave" | "fxrstor" => &["fxsr"],

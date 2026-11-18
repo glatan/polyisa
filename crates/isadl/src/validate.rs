@@ -422,9 +422,23 @@ fn validate_maps(model: &Model, timing: &BTreeSet<&str>, errors: &mut Vec<Valida
                 name: format!("{}: vex_code {} は {} と重複", map.name, v, first),
             });
         }
+        // postop 表はレガシーパスの先読みでだけ到達する
+        // （VEX/EVEX の mmmmm 選択では postop を処理しない）。
+        if map.postop && map.vex_code.is_some() {
+            errors.push(ValidationError::BadField {
+                format: "map".to_string(),
+                field: format!("{}: postop と vex_code は両立しない", map.name),
+            });
+        }
         for item in &map.items {
             match item {
                 MapItem::Map(byte, name, _) => {
+                    if map.postop {
+                        errors.push(ValidationError::BadField {
+                            format: "map".to_string(),
+                            field: format!("{}: postop 表に副表 {name} は置けない", map.name),
+                        });
+                    }
                     if !map_names.contains(name.as_str()) {
                         errors.push(ValidationError::Unresolved {
                             kind: "map".to_string(),
@@ -487,6 +501,30 @@ fn validate_maps(model: &Model, timing: &BTreeSet<&str>, errors: &mut Vec<Valida
                         errors.push(ValidationError::BadField {
                             format: "map-insn".to_string(),
                             field: format!("{}: er/bcast には r/m オペランドが要る", mi.name),
+                        });
+                    }
+                    // postop 表の項目は ModRM を必ず消費する
+                    // （照合バイトは ModRM の後ろに来る）。
+                    let has_modrm_op = mi.group.is_some()
+                        || mi.ops.iter().any(|o| {
+                            matches!(
+                                o,
+                                crate::model::OpKind::Ea(_)
+                                    | crate::model::OpKind::Reg(_)
+                                    | crate::model::OpKind::RegS
+                                    | crate::model::OpKind::RegX
+                                    | crate::model::OpKind::RmX
+                                    | crate::model::OpKind::RegM
+                                    | crate::model::OpKind::RmM
+                            )
+                        });
+                    if map.postop && !has_modrm_op {
+                        errors.push(ValidationError::BadField {
+                            format: "map-insn".to_string(),
+                            field: format!(
+                                "{}: postop 表の項目には ModRM オペランドが要る",
+                                mi.name
+                            ),
                         });
                     }
                     // W による項目選択は VEX/EVEX 項目にだけ意味がある。

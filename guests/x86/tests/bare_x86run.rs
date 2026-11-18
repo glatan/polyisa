@@ -21468,3 +21468,168 @@ fn run64_evex_alu2() {
         assert_eq!(&v[..], &u32v(&e)[..], "vpandd {{k3}} merge");
     }
 }
+
+#[test]
+fn run64_dnow() {
+    // 3DNow!（0F 0F /r imm8）の実行。選択バイトは ModRM・SIB・変位の
+    // 後ろに来る post-opcode 形式。結果は [0x2100] と [0x2200] に
+    // 退避して 64 ビット値で確かめる。
+    let feats = polyisa_guest_x86::model_feats("x86_64")
+        | polyisa_guest_x86::FEAT_DNOW
+        | polyisa_guest_x86::FEAT_DNOWEXT;
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 3, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2800);
+    // 入力データ（[0x2000] から）。
+    let mut data = Vec::new();
+    let mut qw = |v: u64| data.extend(v.to_le_bytes());
+    qw(0x4080_0000_4040_0000); // +0x00: f32 [3.0, 4.0]
+    qw(0x4000_0000_3F80_0000); // +0x08: f32 [1.0, 2.0]
+    qw(0xFFFF_FFFD_0000_0005); // +0x10: s32 [5, -3]
+    qw(0x0000_0007_0000_FFFE); // +0x18: s16 [-2, 7]（各 dword 下位）
+    qw(0x4000_0000_4080_0000); // +0x20: f32 [4.0, 2.0]
+    qw(0x4180_0000_4080_0000); // +0x28: f32 [4.0, 16.0]
+    qw(0xC079_999A_409C_CCCD); // +0x30: f32 [4.9, -3.9]
+    qw(0xC71C_4000_471C_4000); // +0x38: f32 [40000, -40000]
+    qw(0x0807_0605_0403_0201); // +0x40: u8 [1..=8]
+    qw(0x0101_0101_0101_0101); // +0x48: u8 全 1
+    qw(0x8000_2000_C000_4000); // +0x50: s16 [0x4000,-16384,0x2000,-32768]
+    qw(0x4000_4000_4000_4000); // +0x58: s16 全 0x4000
+    env.backend.mem.write(VirtAddr(0x2000), &data).unwrap();
+    let prog: &[u8] = &[
+        0x48, 0xB8, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rax,0x2000
+        0x48, 0xBB, 0x00, 0x21, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rbx,0x2100
+        0x0F, 0x6F, 0x48, 0x08, // movq mm1,[rax+8] → [1.0,2.0]
+        // パック f32 二項演算（mm2-5 = [3.0,4.0] を使い回す）。
+        0x0F, 0x6F, 0x10, // movq mm2,[rax]
+        0x0F, 0x0F, 0xD1, 0x9E, // pfadd mm2,mm1 → [4.0,6.0]
+        0x0F, 0x7F, 0x13, // movq [rbx],mm2
+        0x0F, 0x6F, 0x18, // movq mm3,[rax]
+        0x0F, 0x0F, 0xD9, 0x9A, // pfsub mm3,mm1 → [2.0,2.0]
+        0x0F, 0x7F, 0x5B, 0x08, // movq [rbx+8],mm3
+        0x0F, 0x6F, 0x18, // movq mm3,[rax]
+        0x0F, 0x0F, 0xD9, 0xAA, // pfsubr mm3,mm1 → [-2.0,-2.0]
+        0x0F, 0x7F, 0x5B, 0x10, // movq [rbx+0x10],mm3
+        0x0F, 0x6F, 0x20, // movq mm4,[rax]
+        0x0F, 0x0F, 0xE1, 0xB4, // pfmul mm4,mm1 → [3.0,8.0]
+        0x0F, 0x7F, 0x63, 0x18, // movq [rbx+0x18],mm4
+        0x0F, 0x6F, 0x28, // movq mm5,[rax]
+        0x0F, 0x0F, 0xE9, 0x94, // pfmin mm5,mm1 → [1.0,2.0]
+        0x0F, 0x7F, 0x6B, 0x20, // movq [rbx+0x20],mm5
+        0x0F, 0x6F, 0x28, // movq mm5,[rax]
+        0x0F, 0x0F, 0xE9, 0xA4, // pfmax mm5,mm1 → [3.0,4.0]
+        0x0F, 0x7F, 0x6B, 0x28, // movq [rbx+0x28],mm5
+        // 比較（成立で全 1）。
+        0x0F, 0x6F, 0x00, // movq mm0,[rax] → [3.0,4.0]
+        0x0F, 0x0F, 0xC1, 0xA0, // pfcmpgt mm0,mm1 → 全 1
+        0x0F, 0x7F, 0x43, 0x30, // movq [rbx+0x30],mm0
+        0x0F, 0x6F, 0x30, // movq mm6,[rax]
+        0x0F, 0x0F, 0xF6, 0xB0, // pfcmpeq mm6,mm6 → 全 1
+        0x0F, 0x7F, 0x73, 0x38, // movq [rbx+0x38],mm6
+        0x0F, 0x6F, 0x00, // movq mm0,[rax]
+        0x0F, 0x0F, 0xC1, 0x90, // pfcmpge mm0,mm1 → 全 1
+        0x0F, 0x7F, 0x43, 0x40, // movq [rbx+0x40],mm0
+        // 横方向の累積。
+        0x0F, 0x6F, 0x38, // movq mm7,[rax] → [3.0,4.0]
+        0x0F, 0x0F, 0xF9, 0xAE, // pfacc mm7,mm1 → [3+4, 1+2] = [7.0,3.0]
+        0x0F, 0x7F, 0x7B, 0x48, // movq [rbx+0x48],mm7
+        0x0F, 0x6F, 0x38, // movq mm7,[rax]
+        0x0F, 0x0F, 0xF9, 0x8A, // pfnacc mm7,mm1 → [3-4, 1-2] = [-1.0,-1.0]
+        0x0F, 0x7F, 0x7B, 0x50, // movq [rbx+0x50],mm7
+        0x0F, 0x6F, 0x38, // movq mm7,[rax]
+        0x0F, 0x0F, 0xF9, 0x8E, // pfpnacc mm7,mm1 → [3-4, 1+2] = [-1.0,3.0]
+        0x0F, 0x7F, 0x7B, 0x58, // movq [rbx+0x58],mm7
+        // 逆数チェーン: x=[4.0,2.0]、近似は正確値で代用されるので
+        // it1 の補正係数はちょうど 1.0、it2 は近似値そのものに戻る。
+        0x0F, 0x6F, 0x50, 0x20, // movq mm2,[rax+0x20] → x=[4.0,2.0]
+        0x0F, 0x0F, 0xDA, 0x96, // pfrcp mm3,mm2 → [0.25,0.5]
+        0x0F, 0x7F, 0x5B, 0x60, // movq [rbx+0x60],mm3
+        0x0F, 0x6F, 0xE3, // movq mm4,mm3
+        0x0F, 0x0F, 0xE2, 0xA6, // pfrcpit1 mm4,mm2 → [1.0,1.0]
+        0x0F, 0x7F, 0x63, 0x68, // movq [rbx+0x68],mm4
+        0x0F, 0x0F, 0xDC, 0xB6, // pfrcpit2 mm3,mm4 → [0.25,0.5]
+        0x0F, 0x7F, 0x5B, 0x70, // movq [rbx+0x70],mm3
+        // 逆平方根チェーン: x=[4.0,16.0] → r0=[0.5,0.25]、
+        // r0^2*x=[1.0,1.0] なので補正係数は 1.0。
+        0x0F, 0x6F, 0x50, 0x28, // movq mm2,[rax+0x28] → x=[4.0,16.0]
+        0x0F, 0x0F, 0xEA, 0x97, // pfrsqrt mm5,mm2 → [0.5,0.25]
+        0x0F, 0x0F, 0xED, 0xB4, // pfmul mm5,mm5 → [0.25,0.0625]
+        0x0F, 0x0F, 0xEA, 0xA7, // pfrsqit1 mm5,mm2 → [1.0,1.0]
+        0x0F, 0x7F, 0x6B, 0x78, // movq [rbx+0x78],mm5
+        // 後半は 0x2200 を退避先にする（disp8 は符号付きで +0x7F まで）。
+        0x48, 0xBB, 0x00, 0x22, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rbx,0x2200
+        // 変換。
+        0x0F, 0x0F, 0x70, 0x30, 0x1D, // pf2id mm6,[rax+0x30] → [4,-3]
+        0x0F, 0x7F, 0x33, // movq [rbx],mm6
+        0x0F, 0x0F, 0x78, 0x38, 0x1C, // pf2iw mm7,[rax+0x38] → [32767,-32768]
+        0x0F, 0x7F, 0x7B, 0x08, // movq [rbx+8],mm7
+        0x0F, 0x0F, 0x40, 0x10, 0x0D, // pi2fd mm0,[rax+0x10] → [5.0,-3.0]
+        0x0F, 0x7F, 0x43, 0x10, // movq [rbx+0x10],mm0
+        0x0F, 0x0F, 0x48, 0x18, 0x0C, // pi2fw mm1,[rax+0x18] → [-2.0,7.0]
+        0x0F, 0x7F, 0x4B, 0x18, // movq [rbx+0x18],mm1
+        // バイト平均・ワード乗算・レーン交換。
+        0x0F, 0x6F, 0x70, 0x40, // movq mm6,[rax+0x40] → u8 [1..=8]
+        0x0F, 0x6F, 0x78, 0x48, // movq mm7,[rax+0x48] → u8 全 1
+        0x0F, 0x0F, 0xF7, 0xBF, // pavgusb mm6,mm7
+        0x0F, 0x7F, 0x73, 0x20, // movq [rbx+0x20],mm6
+        0x0F, 0x6F, 0x40, 0x50, // movq mm0,[rax+0x50]
+        0x0F, 0x6F, 0x48, 0x58, // movq mm1,[rax+0x58]
+        0x0F, 0x0F, 0xC1, 0xB7, // pmulhrw mm0,mm1
+        0x0F, 0x7F, 0x43, 0x28, // movq [rbx+0x28],mm0
+        0x0F, 0x0F, 0x50, 0x20, 0xBB, // pswapd mm2,[rax+0x20] → [2.0,4.0]
+        0x0F, 0x7F, 0x53, 0x30, // movq [rbx+0x30],mm2
+        0x0F, 0x0E, // femms（post-opcode ではない独立命令）
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0x31, 0xFF, // xor rdi,rdi
+        0x0F, 0x05, // syscall → exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        200,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64"),
+    );
+    assert_eq!(out, Outcome::Exit(0));
+    let acc = polyisa_mem::Access {
+        endian: polyisa_mem::Endian::Le,
+        align: polyisa_mem::Align::Unaligned,
+        kind: polyisa_mem::AccessKind::DataRead,
+    };
+    let mut v = [0u8; 0x80];
+    env.backend.mem.read(VirtAddr(0x2100), &mut v, acc).unwrap();
+    let q = |i: usize| u64::from_le_bytes(v[i..i + 8].try_into().unwrap());
+    let f = |lo: u32, hi: u32| (u64::from(hi) << 32) | u64::from(lo);
+    assert_eq!(q(0x00), f(0x4080_0000, 0x40C0_0000), "pfadd");
+    assert_eq!(q(0x08), f(0x4000_0000, 0x4000_0000), "pfsub");
+    assert_eq!(q(0x10), f(0xC000_0000, 0xC000_0000), "pfsubr");
+    assert_eq!(q(0x18), f(0x4040_0000, 0x4100_0000), "pfmul");
+    assert_eq!(q(0x20), f(0x3F80_0000, 0x4000_0000), "pfmin");
+    assert_eq!(q(0x28), f(0x4040_0000, 0x4080_0000), "pfmax");
+    assert_eq!(q(0x30), u64::MAX, "pfcmpgt");
+    assert_eq!(q(0x38), u64::MAX, "pfcmpeq");
+    assert_eq!(q(0x40), u64::MAX, "pfcmpge");
+    assert_eq!(q(0x48), f(0x40E0_0000, 0x4040_0000), "pfacc");
+    assert_eq!(q(0x50), f(0xBF80_0000, 0xBF80_0000), "pfnacc");
+    assert_eq!(q(0x58), f(0xBF80_0000, 0x4040_0000), "pfpnacc");
+    assert_eq!(q(0x60), f(0x3E80_0000, 0x3F00_0000), "pfrcp");
+    assert_eq!(q(0x68), f(0x3F80_0000, 0x3F80_0000), "pfrcpit1");
+    assert_eq!(q(0x70), f(0x3E80_0000, 0x3F00_0000), "pfrcpit2");
+    assert_eq!(q(0x78), f(0x3F80_0000, 0x3F80_0000), "pfrsqit1");
+    let mut v = [0u8; 0x38];
+    env.backend.mem.read(VirtAddr(0x2200), &mut v, acc).unwrap();
+    let q = |i: usize| u64::from_le_bytes(v[i..i + 8].try_into().unwrap());
+    assert_eq!(q(0x00), 0xFFFF_FFFD_0000_0004, "pf2id");
+    assert_eq!(q(0x08), 0xFFFF_8000_0000_7FFF, "pf2iw");
+    assert_eq!(q(0x10), f(0x40A0_0000, 0xC040_0000), "pi2fd");
+    assert_eq!(q(0x18), f(0xC000_0000, 0x40E0_0000), "pi2fw");
+    assert_eq!(q(0x20), 0x0504_0403_0302_0201, "pavgusb");
+    assert_eq!(q(0x28), 0xE000_0800_F000_1000, "pmulhrw");
+    assert_eq!(q(0x30), f(0x4000_0000, 0x4080_0000), "pswapd");
+}
