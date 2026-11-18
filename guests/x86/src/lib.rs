@@ -217,7 +217,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 段階4の x86 最小 853 件にオペコード表の記述を足した件数。
-        assert_eq!(INSNS.len(), 2147);
+        assert_eq!(INSNS.len(), 2163);
     }
 
     #[test]
@@ -2619,4 +2619,52 @@ fn amx_decode() {
         )
         .is_none()
     );
+}
+#[test]
+fn avx10_decode() {
+    let modes = MODE_M64 | (MODE_OPD_O32 << MODE_OPD_SHIFT) | (MODE_ADR_A64 << MODE_ADR_SHIFT);
+    // avx10_2 の依存連鎖（avx10 → avx512f/bw/cd/dq/vl）も立てる。
+    let f = FEAT_AVX10_2
+        | FEAT_AVX10
+        | FEAT_AVX512F
+        | FEAT_AVX512BW
+        | FEAT_AVX512CD
+        | FEAT_AVX512DQ
+        | FEAT_AVX512VL;
+    // VADDBF16: EVEX.66.0F.W0 58。xmm（L'L=00）と ymm（L'L=01）。
+    let d = decode_map(&[0x62, 0xF5, 0x5D, 0x08, 0x58, 0xDD], modes, f).unwrap();
+    assert_eq!(d.insn, Insn::Vaddbf16XvHvWv);
+    assert_eq!(d.evex_ll, 0);
+    let d = decode_map(&[0x62, 0xF5, 0x5D, 0x28, 0x58, 0xDD], modes, f).unwrap();
+    assert_eq!(d.insn, Insn::Vaddbf16XvHvWv);
+    assert_eq!(d.evex_ll, 1);
+    // W=1 は VADDPD 側の項目（avx512f ゲート）が取る。
+    assert!(decode_map(&[0x62, 0xF5, 0x5D, 0x88, 0x58, 0xDD], modes, f).is_none());
+    // VSQRTBF16: 単項（vvvv=1111b 必須）・m16bcst。
+    let d = decode_map(&[0x62, 0xF5, 0x7D, 0x38, 0x51, 0x13], modes, f).unwrap();
+    assert_eq!(d.insn, Insn::Vsqrtbf16XvWv);
+    assert!(d.evex_b);
+    // VDPBF16PS: EVEX.F3.0F38.W0 52。
+    let d = decode_map(&[0x62, 0xF2, 0x6E, 0x48, 0x52, 0xCB], modes, f).unwrap();
+    assert_eq!(d.insn, Insn::Vdpbf16psXvHvWv);
+    // FP8 変換（半幅出力）。
+    let d = decode_map(&[0x62, 0xF2, 0x7E, 0x28, 0x74, 0xC1], modes, f).unwrap();
+    assert_eq!(d.insn, Insn::Vcvtph2bf8XvWv);
+    let d = decode_map(&[0x62, 0xF5, 0x7E, 0x28, 0x18, 0xC1], modes, f).unwrap();
+    assert_eq!(d.insn, Insn::Vcvtph2hf8XvWv);
+    // マスク+ゼロイング。
+    let d = decode_map(&[0x62, 0xF2, 0x7E, 0xC9, 0x74, 0xC1], modes, f).unwrap();
+    assert_eq!((d.evex_aaa, d.evex_z), (1, true));
+    // 2 ソース形。
+    let d = decode_map(&[0x62, 0xF2, 0x6F, 0x48, 0x74, 0xCB], modes, f).unwrap();
+    assert_eq!(d.insn, Insn::Vcvt2ph2bf8XvHvWv);
+    // VCVTPH2BF8S: EVEX.F3.MAP5.W0 74（1 ソース飽和形）。
+    let d = decode_map(&[0x62, 0xF5, 0x7E, 0x28, 0x74, 0xC1], modes, f).unwrap();
+    assert_eq!(d.insn, Insn::Vcvtph2bf8sXvWv);
+    // VDPBF16PS の m32bcst 形。
+    let d = decode_map(&[0x62, 0xF2, 0x6E, 0x58, 0x52, 0x08], modes, f).unwrap();
+    assert_eq!(d.insn, Insn::Vdpbf16psXvHvWv);
+    assert!(d.evex_b);
+    // フィーチャーなしは #UD。
+    assert!(decode_map(&[0x62, 0xF5, 0x5D, 0x08, 0x58, 0xDD], modes, 0).is_none());
 }

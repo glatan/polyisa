@@ -26,6 +26,7 @@ polyisa-mem = { path = "../mem" }
 polyisa-os-linux = { path = "../os-linux" }
 polyisa-os-wasi = { path = "../os-wasi", optional = true }
 polyisa-sem = { path = "../sem" }
+polyisa-softfloat = { path = "../softfloat" }
 
 [features]
 default = [

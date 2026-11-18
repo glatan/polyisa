@@ -22071,3 +22071,126 @@ fn run64_amx() {
         .unwrap();
     assert_eq!(back, cfg, "sttilecfg round-trip");
 }
+
+#[test]
+fn run64_avx10() {
+    // AVX10.2（B4c-2）: BF16 パック演算・VDPBF16PS・FP8 変換。
+    let feats = polyisa_guest_x86::model_feats("x86_64")
+        | polyisa_guest_x86::FEAT_AVX10_2
+        | polyisa_guest_x86::FEAT_AVX10
+        | polyisa_guest_x86::FEAT_AVX512F
+        | polyisa_guest_x86::FEAT_AVX512BW
+        | polyisa_guest_x86::FEAT_AVX512CD
+        | polyisa_guest_x86::FEAT_AVX512DQ
+        | polyisa_guest_x86::FEAT_AVX512VL;
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 3, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2800);
+    // 0x2100: bf16 1.0 ×16（0x3F80）。0x2120: bf16 3.0（0x4040）。
+    // 0x2140: f16 2.0（0x4000）。0x2160: f16 3.0（0x4200）。
+    // 0x2180: f16 65504.0（0x7BFF、最大正数）。0x21A0: f16 -65504.0。
+    let mut w = |addr: u64, v: u16| {
+        let mut d = Vec::new();
+        for _ in 0..16 {
+            d.extend(v.to_le_bytes());
+        }
+        env.backend.mem.write(VirtAddr(addr), &d).unwrap();
+    };
+    w(0x2100, 0x3F80);
+    w(0x2120, 0x4040);
+    w(0x2140, 0x4000);
+    w(0x2160, 0x4200);
+    w(0x2180, 0x7BFF);
+    w(0x21A0, 0xFBFF);
+    let prog: &[u8] = &[
+        0x48, 0xB8, 0x00, 0x21, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rax,0x2100
+        0x48, 0xBB, 0x00, 0x22, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rbx,0x2200
+        0x62, 0xF1, 0xFE, 0x28, 0x6F, 0x08, // vmovdqu64 ymm1,[rax]
+        0x62, 0xF1, 0xFE, 0x28, 0x6F, 0x50, 0x01, // vmovdqu64 ymm2,[rax+0x20]
+        0x62, 0xF1, 0xFE, 0x28, 0x6F, 0x58, 0x02, // vmovdqu64 ymm3,[rax+0x40]
+        0x62, 0xF1, 0xFE, 0x28, 0x6F, 0x60, 0x03, // vmovdqu64 ymm4,[rax+0x60]
+        0x62, 0x71, 0xFE, 0x28, 0x6F, 0x98, 0x80, 0x00, 0x00,
+        0x00, // vmovdqu64 ymm11,[rax+0x80]
+        0x62, 0x71, 0xFE, 0x28, 0x6F, 0xA0, 0xA0, 0x00, 0x00,
+        0x00, // vmovdqu64 ymm12,[rax+0xA0]
+        0x62, 0xF5, 0x75, 0x28, 0x58, 0xC2, // vaddbf16 ymm0,ymm1,ymm2
+        0x62, 0xF5, 0x7D, 0x28, 0x51, 0xE8, // vsqrtbf16 ymm5,ymm0
+        0x62, 0xF5, 0x7D, 0x28, 0x5C, 0xF2, // vsubbf16 ymm6,ymm0,ymm2
+        0x62, 0xF2, 0x76, 0x28, 0x52, 0xFA, // vdpbf16ps ymm7,ymm1,ymm2
+        0x62, 0x72, 0x7E, 0x28, 0x74, 0xC3, // vcvtph2bf8 xmm8,ymm3
+        0x62, 0x75, 0x7E, 0x28, 0x18, 0xCC, // vcvtph2hf8 xmm9,ymm4
+        0x62, 0x72, 0x67, 0x28, 0x74, 0xD4, // vcvt2ph2bf8 ymm10,ymm3,ymm4
+        0x62, 0x55, 0x7E, 0x28, 0x1B, 0xEB, // vcvtph2hf8s xmm13,ymm11
+        0x62, 0x55, 0x7E, 0x28, 0x74, 0xF4, // vcvtph2bf8s xmm14,ymm12
+        0x62, 0xF1, 0xFE, 0x28, 0x7F, 0x03, // vmovdqu64 [rbx],ymm0
+        0x62, 0xF1, 0xFE, 0x28, 0x7F, 0x6B, 0x01, // vmovdqu64 [rbx+0x20],ymm5
+        0x62, 0xF1, 0xFE, 0x28, 0x7F, 0x73, 0x02, // vmovdqu64 [rbx+0x40],ymm6
+        0x62, 0xF1, 0xFE, 0x28, 0x7F, 0x7B, 0x03, // vmovdqu64 [rbx+0x60],ymm7
+        0x62, 0x71, 0xFE, 0x28, 0x7F, 0x43, 0x04, // vmovdqu64 [rbx+0x80],ymm8
+        0x62, 0x71, 0xFE, 0x28, 0x7F, 0x4B, 0x05, // vmovdqu64 [rbx+0xa0],ymm9
+        0x62, 0x71, 0xFE, 0x28, 0x7F, 0x53, 0x06, // vmovdqu64 [rbx+0xc0],ymm10
+        0x62, 0x71, 0xFE, 0x28, 0x7F, 0x6B, 0x07, // vmovdqu64 [rbx+0xe0],ymm13
+        0x62, 0x71, 0xFE, 0x28, 0x7F, 0x73, 0x08, // vmovdqu64 [rbx+0x100],ymm14
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0x31, 0xFF, // xor rdi,rdi
+        0x0F, 0x05, // syscall → exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        200,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64"),
+    );
+    assert_eq!(out, Outcome::Exit(0));
+    let acc = polyisa_mem::Access {
+        endian: polyisa_mem::Endian::Le,
+        align: polyisa_mem::Align::Unaligned,
+        kind: polyisa_mem::AccessKind::DataRead,
+    };
+    let q = |off: u64| -> u64 {
+        let mut b = [0u8; 8];
+        env.backend
+            .mem
+            .read(VirtAddr(0x2200 + off), &mut b, acc)
+            .unwrap();
+        u64::from_le_bytes(b)
+    };
+    // vaddbf16: 1.0 + 3.0 = 4.0（0x4080）。
+    assert_eq!(q(0x00), 0x4080_4080_4080_4080, "vaddbf16 lo");
+    assert_eq!(q(0x08), 0x4080_4080_4080_4080, "vaddbf16 hi");
+    // vsqrt(4.0) = 2.0（0x4000）。
+    assert_eq!(q(0x20), 0x4000_4000_4000_4000, "vsqrtbf16 lo");
+    assert_eq!(q(0x28), 0x4000_4000_4000_4000, "vsqrtbf16 hi");
+    // vsubbf16: 4.0 - 3.0 = 1.0（0x3F80）。
+    assert_eq!(q(0x40), 0x3F80_3F80_3F80_3F80, "vsubbf16 lo");
+    // vdpbf16ps: 0 + 1.0*3.0 + 1.0*3.0 = 6.0（0x40C00000）。
+    assert_eq!(q(0x60), 0x40C0_0000_40C0_0000, "vdpbf16ps lo");
+    assert_eq!(q(0x68), 0x40C0_0000_40C0_0000, "vdpbf16ps hi");
+    // vcvtph2bf8: f16 2.0 → E5M2 0x40、上位は 0。
+    assert_eq!(q(0x80), 0x4040_4040_4040_4040, "vcvtph2bf8 lo");
+    assert_eq!(q(0x88), 0x4040_4040_4040_4040, "vcvtph2bf8 mid");
+    assert_eq!(q(0x90), 0, "vcvtph2bf8 upper");
+    // vcvtph2hf8: f16 3.0 → E4M3 0x44、上位は 0。
+    assert_eq!(q(0xA0), 0x4444_4444_4444_4444, "vcvtph2hf8 lo");
+    assert_eq!(q(0xB0), 0, "vcvtph2hf8 upper");
+    // vcvt2ph2bf8: 下位 16 バイト = cvt(src2 f16 3.0) = 0x42、
+    // 上位 16 バイト = cvt(src1 f16 2.0) = 0x40。
+    assert_eq!(q(0xC0), 0x4242_4242_4242_4242, "vcvt2ph2bf8 lo");
+    assert_eq!(q(0xC8), 0x4242_4242_4242_4242, "vcvt2ph2bf8 mid");
+    assert_eq!(q(0xD0), 0x4040_4040_4040_4040, "vcvt2ph2bf8 hi");
+    // vcvtph2hf8s: f16 65504 → E4M3 飽和 0x7E、上位は 0。
+    assert_eq!(q(0xE0), 0x7E7E_7E7E_7E7E_7E7E, "vcvtph2hf8s lo");
+    assert_eq!(q(0xE8), 0x7E7E_7E7E_7E7E_7E7E, "vcvtph2hf8s mid");
+    assert_eq!(q(0xF0), 0, "vcvtph2hf8s upper");
+    // vcvtph2bf8s: f16 -65504 → E5M2 飽和 -57344（0xFB）、上位は 0。
+    assert_eq!(q(0x100), 0xFBFB_FBFB_FBFB_FBFB, "vcvtph2bf8s lo");
+    assert_eq!(q(0x108), 0xFBFB_FBFB_FBFB_FBFB, "vcvtph2bf8s mid");
+    assert_eq!(q(0x110), 0, "vcvtph2bf8s upper");
+}

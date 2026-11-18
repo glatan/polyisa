@@ -30,6 +30,7 @@ dependencies = [
  "polyisa-os-linux",
  "polyisa-os-wasi",
  "polyisa-sem",
+ "polyisa-softfloat",
 ]
 
 [[package]]

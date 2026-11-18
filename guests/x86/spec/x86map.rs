@@ -2428,6 +2428,7 @@ pub fn build_maps(m: &mut Model) {
     build_map_3dnow(m);
     build_map_xop(m);
     build_map_apx(m);
+    build_map_avx10(m);
 }
 
 /// 3DNow!（0F 0F /r imm8）。ModRM（と SIB・変位）の後に来る
@@ -2483,6 +2484,84 @@ fn build_map_3dnow(m: &mut Model) {
         name: "map_3dnow".to_string(),
         vex_code: None,
         postop: true,
+        rex2_map1: false,
+        items: v,
+    });
+}
+
+/// AVX10.2 の EVEX map5 サブマップ。新規オペコード（BF16 パック
+/// 演算と HF8 変換・飽和形）は map5 に割り当てられる
+/// （Ref: SPEC-X86-AVX10-2）。
+fn build_map_avx10(m: &mut Model) {
+    use OpKind::*;
+    let mut v = Vec::new();
+    // AVX10.2 の BF16 パック演算（EVEX.66.MAP5）。要素は bf16 で
+    // broadcast（m16bcst）は b=1 で選ぶ。既定ゲートは
+    // apply_gates で avx10_2 に倒す。
+    for (op, mn) in [
+        (0x58u8, "vaddbf16"),
+        (0x59, "vmulbf16"),
+        (0x5C, "vsubbf16"),
+        (0x5D, "vminbf16"),
+        (0x5E, "vdivbf16"),
+        (0x5F, "vmaxbf16"),
+    ] {
+        let mut it = ex(
+            &format!("{mn}_xv_hv_wv"),
+            &[RegX, Vv, RmX],
+            PfxSel::P66,
+            0b111,
+            false,
+            "{op} {x}, {h}, {w}",
+            "alu",
+        );
+        it.bcast = true;
+        it.edisp = 2;
+        it.wsel = Some(false);
+        it.when = Pred::Flag("avx10_2".to_string());
+        v.push(MapItem::Insn(op, it));
+    }
+    {
+        // VSQRTBF16（単項、vvvv=1111b 必須）。
+        let mut it = ex(
+            "vsqrtbf16_xv_wv",
+            &[RegX, RmX],
+            PfxSel::P66,
+            0b111,
+            true,
+            "{op} {x}, {w}",
+            "alu",
+        );
+        it.bcast = true;
+        it.edisp = 2;
+        it.wsel = Some(false);
+        it.when = Pred::Flag("avx10_2".to_string());
+        v.push(MapItem::Insn(0x51, it));
+    }
+    // AVX10.2 の FP8 変換（MAP5 系）。1 ソース形は出力が半幅の
+    // ベクトル、2 ソース形は出力の下位半分に src2、上位半分に
+    // src1 の変換結果を連続配置する。メモリ形は m16bcst を取る。
+    for (op, sel, mn, rv) in [
+        (0x18u8, PfxSel::PF3, "vcvtph2hf8_xv_wv", true),
+        (0x18, PfxSel::PF2, "vcvt2ph2hf8_xv_hv_wv", false),
+        (0x1B, PfxSel::PF3, "vcvtph2hf8s_xv_wv", true),
+        (0x1B, PfxSel::PF2, "vcvt2ph2hf8s_xv_hv_wv", false),
+        (0x74, PfxSel::PF3, "vcvtph2bf8s_xv_wv", true),
+        (0x74, PfxSel::PF2, "vcvt2ph2bf8s_xv_hv_wv", false),
+    ] {
+        let ops: &[OpKind] = if rv { &[RegX, RmX] } else { &[RegX, Vv, RmX] };
+        let syn = if rv { "{op} {x}, {w}" } else { "{op} {x}, {h}, {w}" };
+        let mut it = ex(mn, ops, sel, 0b111, rv, syn, "alu");
+        it.bcast = true;
+        it.edisp = 2;
+        it.wsel = Some(false);
+        it.when = Pred::Flag("avx10_2".to_string());
+        v.push(MapItem::Insn(op, it));
+    }
+    m.maps.push(MapDecl {
+        name: "map_avx10".to_string(),
+        vex_code: Some(5),
+        postop: false,
         rex2_map1: false,
         items: v,
     });
@@ -3240,6 +3319,24 @@ fn build_map_0f38(m: &mut Model) {
         );
         it.group_mod = Some(true);
         tile(op, it);
+    }
+    // AVX10.2（map2 系）: VDPBF16PS（BF16 ペアのドット積 → f32
+    // 蓄積）と BF8 変換。VDPBF16PS は AVX512_BF16 の命令でもある
+    // （avx512_bf16 フィーチャーは未モデル。ゲートは avx10_2）。
+    // メモリ形は VDPBF16PS が m32bcst、FP8 変換が m16bcst を取る。
+    for (op, sel, mn, rv, ed) in [
+        (0x52u8, PfxSel::PF3, "vdpbf16ps_xv_hv_wv", false, 4),
+        (0x74, PfxSel::PF3, "vcvtph2bf8_xv_wv", true, 2),
+        (0x74, PfxSel::PF2, "vcvt2ph2bf8_xv_hv_wv", false, 2),
+    ] {
+        let ops: &[OpKind] = if rv { &[RegX, RmX] } else { &[RegX, Vv, RmX] };
+        let syn = if rv { "{op} {x}, {w}" } else { "{op} {x}, {h}, {w}" };
+        let mut it = ex(mn, ops, sel, 0b111, rv, syn, "alu");
+        it.bcast = true;
+        it.edisp = ed;
+        it.wsel = Some(false);
+        it.when = Pred::Flag("avx10_2".to_string());
+        v.push(MapItem::Insn(op, it));
     }
     m.maps.push(MapDecl {
         name: "map_0f38".to_string(),

@@ -5380,6 +5380,280 @@ fn tile_cell(st: &[u8], t: u8, r: usize) -> usize {
 }
 
 /// #UD（64 ビットモードの未定義命令・無効オペランド）。
+/// AVX10.2 の BF16/FP8 命令。要素幅が可変で値依存のため、
+/// AMX と同じく InterpBackend の具体値レベルで実行する。
+fn avx10_step(
+    env: &mut BareEnv,
+    md: &polyisa_guest_x86::MapDec,
+    next_rip: u64,
+    seg: u64,
+    eip: u32,
+) -> Option<Result<(), InterpExit>> {
+    use polyisa_guest_x86::Insn;
+    if !matches!(
+        md.insn,
+        Insn::Vaddbf16XvHvWv
+            | Insn::Vsubbf16XvHvWv
+            | Insn::Vmulbf16XvHvWv
+            | Insn::Vdivbf16XvHvWv
+            | Insn::Vminbf16XvHvWv
+            | Insn::Vmaxbf16XvHvWv
+            | Insn::Vsqrtbf16XvWv
+            | Insn::Vdpbf16psXvHvWv
+            | Insn::Vcvtph2bf8XvWv
+            | Insn::Vcvtph2bf8sXvWv
+            | Insn::Vcvtph2hf8XvWv
+            | Insn::Vcvtph2hf8sXvWv
+            | Insn::Vcvt2ph2bf8XvHvWv
+            | Insn::Vcvt2ph2bf8sXvHvWv
+            | Insn::Vcvt2ph2hf8XvHvWv
+            | Insn::Vcvt2ph2hf8sXvHvWv
+    ) {
+        return None;
+    }
+    Some(avx10_exec(env, md, next_rip, seg, eip))
+}
+
+fn avx10_exec(
+    env: &mut BareEnv,
+    md: &polyisa_guest_x86::MapDec,
+    next_rip: u64,
+    seg: u64,
+    _eip: u32,
+) -> Result<(), InterpExit> {
+    use polyisa_guest_x86::{Insn, decode, sem};
+    use polyisa_softfloat::{BF16, F16, F32, Rm};
+    let ll = usize::from(md.evex_ll);
+    let vbytes = 16usize << ll;
+    let acc_r = Access {
+        endian: Endian::Le,
+        align: Align::Natural,
+        kind: AccessKind::DataRead,
+    };
+    // ベクタレジスタの読み書き（16 バイト part 単位の StateRef 経由）。
+    let zget = |env: &mut BareEnv, r: u8| -> [u8; 64] {
+        let mut v = [0u8; 64];
+        for p in 0..4 {
+            v[p * 16..p * 16 + 16]
+                .copy_from_slice(&env.backend.get(sem::zreg_ref(r, p)).to_le_bytes());
+        }
+        v
+    };
+    let zput = |env: &mut BareEnv, r: u8, v: &[u8; 64]| {
+        for p in 0..4 {
+            env.backend.set(
+                sem::zreg_ref(r, p),
+                u128::from_le_bytes(v[p * 16..p * 16 + 16].try_into().unwrap()),
+            );
+        }
+    };
+    // 第 2 ソース（rm）。ベクタ幅ぶん読む。b=1 は要素ブロードキャスト
+    // （bf16 形のみ宣言上許可）。
+    let src2 = |env: &mut BareEnv| -> Result<[u8; 64], InterpExit> {
+        match decode::rm_of(&mut env.backend, md, next_rip, seg, false, false) {
+            decode::Rm::Reg(_) => Ok(zget(env, decode::rm_reg_x5(md))),
+            decode::Rm::Mem { a, .. } => {
+                let mut v = [0u8; 64];
+                if md.evex_b {
+                    let ebw = if matches!(md.insn, Insn::Vdpbf16psXvHvWv) {
+                        4
+                    } else {
+                        2
+                    };
+                    let mut e = [0u8; 4];
+                    env.backend
+                        .mem
+                        .read(VirtAddr(a), &mut e[..ebw], acc_r)
+                        .map_err(|er| amx_mem_exit(a, er))?;
+                    for i in 0..vbytes / ebw {
+                        v[i * ebw..i * ebw + ebw].copy_from_slice(&e[..ebw]);
+                    }
+                } else {
+                    env.backend
+                        .mem
+                        .read(VirtAddr(a), &mut v[..vbytes], acc_r)
+                        .map_err(|er| amx_mem_exit(a, er))?;
+                }
+                Ok(v)
+            }
+        }
+    };
+    let dst_r = decode::reg_x5(md);
+    let old = zget(env, dst_r);
+    let x = zget(env, md.vex_v);
+    let y = src2(env)?;
+    // マスク（aaa=0 は全 1）。z でマスクオフの要素を 0 にする。
+    let k: u64 = if md.evex_aaa == 0 {
+        u64::MAX
+    } else {
+        env.backend.get(sem::kref(md.evex_aaa))
+    };
+    let rd16 = |v: &[u8; 64], i: usize| u16::from_le_bytes(v[i * 2..i * 2 + 2].try_into().unwrap());
+    let mut flags = 0u8;
+    // AVX10.2 の bf16 演算・VDPBF16PS は DAZ/FTZ が無条件に効く
+    // （bf16/f32 の非正規の入出力を ±0 にフラッシュ）。
+    let bf_r = |v: &[u8; 64], i: usize| -> BF16 {
+        let w = rd16(v, i);
+        let m = w & 0x7fff;
+        BF16::from_bits(u64::from(if m != 0 && m < 0x0080 { w & 0x8000 } else { w }))
+    };
+    let ftz16 = |v: BF16| -> u16 {
+        let b = v.bits() as u16;
+        let m = b & 0x7fff;
+        if m != 0 && m < 0x0080 { b & 0x8000 } else { b }
+    };
+    let ftz32 = |v: F32| -> u32 {
+        let b = v.bits() as u32;
+        let m = b & 0x7fff_ffff;
+        if m != 0 && m < 0x0080_0000 {
+            b & 0x8000_0000
+        } else {
+            b
+        }
+    };
+    let bf2f = |v: BF16| F32::from_bits(u64::from(v.to_f32(Rm::Rne).0.bits() as u32));
+    let f2e5 = |v: F32, sat: bool, sgn: u64, fl: &mut u8| -> u8 {
+        let (r, f) = v.to_e5m2(Rm::Rne);
+        *fl |= f;
+        // 飽和形: オーバーフローは最大有限値 0x7B（57344）に飽和。
+        if sat && !v.is_nan() && r.bits() & 0x7f == 0x7c {
+            return (0x7b | sgn) as u8;
+        }
+        r.bits() as u8
+    };
+    let f2e4 = |v: F32, sat: bool, sgn: u64, fl: &mut u8| -> u8 {
+        let (r, f) = v.to_e4m3(Rm::Rne);
+        *fl |= f;
+        if sat && !v.is_nan() && r.bits() & 0x7f == 0x7f {
+            return (0x7e | sgn) as u8;
+        }
+        r.bits() as u8
+    };
+    let mut out = [0u8; 64];
+    let lanes16 = vbytes / 2;
+    let insn = md.insn;
+    let merge16 = |out: &mut [u8; 64], old: &[u8; 64], d: &polyisa_guest_x86::MapDec| {
+        for i in 0..lanes16 {
+            if k >> i & 1 == 0 {
+                let keep = if d.evex_z { 0 } else { rd16(old, i) };
+                out[i * 2..i * 2 + 2].copy_from_slice(&keep.to_le_bytes());
+            }
+        }
+    };
+    match insn {
+        Insn::Vaddbf16XvHvWv
+        | Insn::Vsubbf16XvHvWv
+        | Insn::Vmulbf16XvHvWv
+        | Insn::Vdivbf16XvHvWv
+        | Insn::Vminbf16XvHvWv
+        | Insn::Vmaxbf16XvHvWv
+        | Insn::Vsqrtbf16XvWv => {
+            for i in 0..lanes16 {
+                let a = bf_r(&x, i);
+                let c = bf_r(&y, i);
+                let (g, f) = match insn {
+                    Insn::Vaddbf16XvHvWv => a.add_rm(c, Rm::Rne),
+                    Insn::Vsubbf16XvHvWv => a.sub_rm(c, Rm::Rne),
+                    Insn::Vmulbf16XvHvWv => a.mul_rm(c, Rm::Rne),
+                    Insn::Vdivbf16XvHvWv => a.div_rm(c, Rm::Rne),
+                    // x86 の MIN/MAX は src1 < src2 なら src1、それ以外
+                    // （非順序・同値を含む）は src2 を返す。
+                    Insn::Vminbf16XvHvWv => (if a.lt(c).0 { a } else { c }, 0),
+                    Insn::Vmaxbf16XvHvWv => (if c.lt(a).0 { a } else { c }, 0),
+                    _ => c.sqrt_rm(Rm::Rne),
+                };
+                flags |= f;
+                out[i * 2..i * 2 + 2].copy_from_slice(&ftz16(g).to_le_bytes());
+            }
+            merge16(&mut out, &old, md);
+        }
+        Insn::Vdpbf16psXvHvWv => {
+            // bf16 要素対の積を f32 へ蓄積するドット積。DAZ 入力・
+            // FTZ 出力で、高位要素対の積から順に各ステップを
+            // RNE で f32 に畳む近似（gaps: AVX10.2 の累積精度）。
+            let lanes32 = vbytes / 4;
+            for i in 0..lanes32 {
+                if k >> i & 1 == 0 {
+                    let keep: [u8; 4] = if md.evex_z {
+                        [0; 4]
+                    } else {
+                        old[i * 4..i * 4 + 4].try_into().unwrap()
+                    };
+                    out[i * 4..i * 4 + 4].copy_from_slice(&keep);
+                    continue;
+                }
+                let mut accb = u32::from_le_bytes(old[i * 4..i * 4 + 4].try_into().unwrap());
+                let m = accb & 0x7fff_ffff;
+                if m != 0 && m < 0x0080_0000 {
+                    accb &= 0x8000_0000;
+                }
+                let acc = F32::from_bits(u64::from(accb));
+                let (lo, f1) = bf2f(bf_r(&x, 2 * i)).mul_rm(bf2f(bf_r(&y, 2 * i)), Rm::Rne);
+                let (hi, f2) = bf2f(bf_r(&x, 2 * i + 1)).mul_rm(bf2f(bf_r(&y, 2 * i + 1)), Rm::Rne);
+                let (s1, f3) = acc.add_rm(hi, Rm::Rne);
+                let (s2, f4) = s1.add_rm(lo, Rm::Rne);
+                flags |= f1 | f2 | f3 | f4;
+                out[i * 4..i * 4 + 4].copy_from_slice(&ftz32(s2).to_le_bytes());
+            }
+        }
+        _ => {
+            // FP8 変換。入力は f16。`two` は 2 ソース形で要素対ごとの
+            // 交互配置、`sat` は飽和形。
+            let (two, sat, hf8) = match insn {
+                Insn::Vcvtph2bf8XvWv => (false, false, false),
+                Insn::Vcvtph2bf8sXvWv => (false, true, false),
+                Insn::Vcvtph2hf8XvWv => (false, false, true),
+                Insn::Vcvtph2hf8sXvWv => (false, true, true),
+                Insn::Vcvt2ph2bf8XvHvWv => (true, false, false),
+                Insn::Vcvt2ph2bf8sXvHvWv => (true, true, false),
+                Insn::Vcvt2ph2hf8XvHvWv => (true, false, true),
+                Insn::Vcvt2ph2hf8sXvHvWv => (true, true, true),
+                _ => unreachable!(),
+            };
+            let f16f = |w: u16| {
+                F32::from_bits(u64::from(
+                    (F16::from_bits(u64::from(w)).to_f32(Rm::Rne).0.bits()) as u32,
+                ))
+            };
+            let cvt = |v: F32, fl: &mut u8| -> u8 {
+                let sgn = ((v.bits() >> 31) & 1) << 7;
+                if hf8 {
+                    f2e4(v, sat, sgn, fl)
+                } else {
+                    f2e5(v, sat, sgn, fl)
+                }
+            };
+            if two {
+                // 出力の下位半分 ← src2（r/m）、上位半分 ← src1（vvvv）。
+                for i in 0..lanes16 {
+                    if k >> i & 1 != 0 {
+                        out[i] = cvt(f16f(rd16(&y, i)), &mut flags);
+                    } else {
+                        out[i] = if md.evex_z { 0 } else { old[i] };
+                    }
+                    if k >> (lanes16 + i) & 1 != 0 {
+                        out[lanes16 + i] = cvt(f16f(rd16(&x, i)), &mut flags);
+                    } else {
+                        out[lanes16 + i] = if md.evex_z { 0 } else { old[lanes16 + i] };
+                    }
+                }
+            } else {
+                // 1 ソース形は出力が半幅。上位は 0。
+                for i in 0..lanes16 {
+                    if k >> i & 1 != 0 {
+                        out[i] = cvt(f16f(rd16(&y, i)), &mut flags);
+                    } else {
+                        out[i] = if md.evex_z { 0 } else { old[i] };
+                    }
+                }
+            }
+        }
+    }
+    zput(env, dst_r, &out);
+    env.backend.fp_flags |= flags;
+    Ok(())
+}
+
 fn amx_ud(eip: u32) -> InterpExit {
     InterpExit::Exception(polyisa_sem::GuestException {
         kind: polyisa_sem::ExceptionKind::Undefined,
@@ -5948,7 +6222,9 @@ fn step_x86_map(
         };
         (seg, false, 0)
     };
-    if let Some(r) = amx_tile_step(env, &md, next_rip, seg, eip) {
+    if let Some(r) = avx10_step(env, &md, next_rip, seg, eip)
+        .or_else(|| amx_tile_step(env, &md, next_rip, seg, eip))
+    {
         let word = buf[..usize::from(md.len).min(16)]
             .iter()
             .rev()

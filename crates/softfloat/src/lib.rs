@@ -85,6 +85,10 @@ pub type E5M2 = Binary<5, 2>;
 
 /// 4 ビット形式（E2M1、FP4。AVX10.2/ACE が使う）。特殊値なし。
 pub type E2M1 = Binary<2, 1>;
+
+/// 16 ビット形式（bfloat16。AVX10.2/AVX512_BF16/AMX が使う）。
+/// IEEE の配置と一致するので汎用機械で正しい。
+pub type BF16 = Binary<8, 7>;
 /// 64 ビット形式。
 pub type F64 = Binary<11, 52>;
 
@@ -1051,6 +1055,12 @@ impl F32 {
         convert(self, rm)
     }
 
+    /// BF16（16 ビット）に変換する。
+    #[must_use]
+    pub fn to_bf16(self, rm: Rm) -> (BF16, u8) {
+        convert(self, rm)
+    }
+
     /// E4M3（8 ビット）に変換する。OCP 仕様: Inf なし・オーバーフローは NaN。
     #[must_use]
     pub fn to_e4m3(self, rm: Rm) -> (E4M3, u8) {
@@ -1144,6 +1154,14 @@ impl F32 {
 }
 
 impl F64 {
+    /// 32 ビット形式に変換する。
+    #[must_use]
+    pub fn to_f32(self, rm: Rm) -> (F32, u8) {
+        convert(self, rm)
+    }
+}
+
+impl BF16 {
     /// 32 ビット形式に変換する。
     #[must_use]
     pub fn to_f32(self, rm: Rm) -> (F32, u8) {
