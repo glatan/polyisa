@@ -83,6 +83,10 @@ pub const TEST_REQUIREMENTS: &[TestBinary] = &[
         needs: &[Req::Tool("llvm-mc")],
     },
     TestBinary {
+        binary: "heavy_diff_sde",
+        needs: &[Req::Tool("sde64")],
+    },
+    TestBinary {
         binary: "heavy_oracle_xed",
         needs: &[Req::Tool("xed")],
     },
@@ -159,14 +163,17 @@ pub const TEST_REQUIREMENTS: &[TestBinary] = &[
 
 /// コマンドが使えるかを `--version` で調べる。
 fn tool_available(name: &str) -> bool {
-    [
+    // sde64 は /opt/sde/sde64 に展開される（/opt/sde64 ではない）。
+    let mut cands = vec![
         name.to_string(),
         format!("/usr/sbin/{name}"),
         format!("/usr/bin/{name}"),
         format!("/opt/{name}/bin/{name}"),
-    ]
-    .iter()
-    .any(|c| {
+    ];
+    if name == "sde64" {
+        cands.push("/opt/sde/sde64".to_string());
+    }
+    cands.iter().any(|c| {
         std::process::Command::new(c)
             .arg("--version")
             .output()
