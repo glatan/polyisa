@@ -342,7 +342,7 @@ pub fn classify(d: &MapDec, taken: bool) -> Option<InsnTiming> {
             xt!([2, 2], [2, 2], Pipe::Np);
         }
         // ---- シフト（grp2）----
-        "rol" | "ror" | "rcl" | "rcr" | "shl" | "sal" | "shr" | "sar" => {
+        "rol" | "ror" | "rcl" | "rcr" | "shl" | "shr" | "sar" => {
             x.wflags = true;
             x.uses = rm_op;
             x.defs = if mem { 0 } else { rm_op };
@@ -671,4 +671,508 @@ impl Pentium {
     fn bank_conflict(&self, v_addr: Option<u64>) -> bool {
         matches!((self.u_addr, v_addr), (Some(a), Some(b)) if (a >> 2) & 7 == (b >> 2) & 7)
     }
+}
+
+// ------------------------------------------------------------------
+// 8088（EU + BIU + プリフェッチキュー）モデル。
+// Ref: SPEC-X86-8086 — EU サイクル表・EA 計算コスト・キュー動作。
+// 検証は SingleStepTests 8088（TEST-SINGLESTEP-8088）の CYCL 件数と
+// 行う。CYCL は「命令のファーストバイト読み取り」から「次命令の
+// ファーストバイト読み取り」までの T-state 列。
+
+/// EU が消費する 1 命令分の情報。
+/// `doc` は 8088 の文献値クロック（バイト読み取り・データバス
+/// アクセスを含む EU 時間。キューストールは含まない）。
+/// Ref: SPEC-X86-8086 — EU サイクル表・EA 計算コスト。
+///
+/// EU の動作列: 接頭辞(読み+1T)×n → op/modrm 読み → EA 前半
+/// → disp/imm 読み → EA 後半 → データ読み bus → RMW 内部 →
+/// データ書き bus（最終アクセスは T3 で退役、posted write）→
+/// 残り内部 → 次命令のファーストバイト読み取り（境界）。
+pub struct Insn8088 {
+    /// 命令バイト数（接頭辞込み）。
+
+    /// 接頭辞バイト数。
+    pub prefixes: u8,
+    /// opcode + modrm バイト数（先読みする部分）。
+    pub core: u8,
+    /// disp/imm バイト数（EA 計算中に読む）。
+    pub tail: u8,
+    /// EA 前半の内部 T-state 数（disp 読みの前）。
+    pub ea_pre: u16,
+    /// EA 後半の内部 T-state 数。
+    pub ea_post: u16,
+    /// データ読みのバスアクセス数。
+    pub mem_r: u8,
+    /// データ書きのバスアクセス数。
+    pub mem_w: u8,
+    /// 読み〜書きの間の内部 T-state 数（RMW）。
+    pub mid: u16,
+    /// doc に含まれる総 EU クロック。
+    pub doc: u16,
+    /// 分岐成立などキューをフラッシュする命令。
+    pub flush: bool,
+}
+
+/// 8088 EU/BIU シミュレータ。`time` は T-state 単位。
+pub struct I8088 {
+    /// キュー内のバイト数（0..=4）。
+    q: u8,
+    /// 実行中フェッチのバイト到着時刻（T2 でキューへ入る）。
+    deliver: Option<u64>,
+    /// バスが空く時刻。
+    bus_free: u64,
+    /// これより前にフェッチを開始できない（フルキュー読み出し・
+    /// フラッシュ後は 2T）。
+    suppress: u64,
+    /// EU がバスを要求中（プリフェッチの新規開始を抑止）。
+    bus_req: bool,
+    /// 累積 T-state。
+    pub time: u64,
+}
+
+impl I8088 {
+    /// 空キュー＋先頭バイトを取り込み中のフェッチ（T1 通過済み）で
+    /// 開始する。QUEU なしのテストは `init(0)`、フルキューは
+    /// `init(4)` を使う。1〜3 バイトの部分キューは「進行中の
+    /// フェッチが無い」仮定で開始する（SST の QUEU はテスト開始時
+    /// のスナップショットで、BIU の内部状態は含まない）。
+    pub fn init(qlen: u8) -> Self {
+        debug_assert!(qlen <= 4);
+        Self {
+            q: qlen,
+            bus_req: false,
+            deliver: if qlen == 0 { Some(0) } else { None },
+            bus_free: if qlen == 0 { 3 } else { 0 },
+            suppress: 0,
+            time: 0,
+        }
+    }
+
+    fn tick(&mut self) {
+        // この T-state の到着処理（T2 でキューへ入る）。
+        if let Some(d) = self.deliver
+            && d <= self.time
+        {
+            if self.q < 4 {
+                self.q += 1;
+            }
+            self.deliver = None;
+        }
+        // BIU はキューに空きがありバスが空けば直ちにフェッチする。
+        if self.deliver.is_none()
+            && !self.bus_req
+            && self.q < 4
+            && self.bus_free <= self.time
+            && self.suppress <= self.time
+        {
+            self.deliver = Some(self.time + 1);
+            self.bus_free = self.time + 4;
+        }
+        self.time += 1;
+    }
+
+    /// EU が命令バイトを 1 つ読む。なければ到着まで待つ。
+    /// フェッチしたバイトは T2 の時点で読み取れる。
+    /// キューが空でないとき、読み出しそのものが T-state を消費し、
+    /// BIU は同じ T-state にフェッチを開始できない（`tick` を
+    /// 呼ばず時刻だけ進めるのはそのため）。
+    fn read(&mut self) {
+        if self.q > 0 {
+            if self.q == 4 {
+                self.suppress = self.time + 2;
+            }
+            self.q -= 1;
+            self.time += 1;
+            return;
+        }
+        while self.q == 0 {
+            self.tick();
+        }
+        self.q -= 1;
+    }
+
+    /// EU の内部処理（この間 BIU は空きがあればフェッチする）。
+    fn exec(&mut self, n: u64) {
+        for _ in 0..n {
+            self.tick();
+        }
+    }
+
+    /// データのバスアクセス。`posted` なら EU は T3 で退役する
+    /// （残り 1T は退行後もバスを占有する）。EU の要求は新規
+    /// フェッチ開始に優先する。
+    fn bus(&mut self, posted: bool) {
+        self.bus_req = true;
+        while self.bus_free > self.time || self.deliver.is_some() {
+            self.tick();
+        }
+        self.bus_req = false;
+        self.bus_free = self.time + 4;
+        self.exec(if posted { 3 } else { 4 });
+    }
+
+    /// 1 命令を流し、次命令のファーストバイト読み取りまでの
+    /// T-state 数（＝ CYCL 件数）を返す。
+    pub fn run(&mut self, x: &Insn8088) -> u64 {
+        for _ in 0..x.prefixes {
+            self.read();
+            self.exec(1);
+        }
+        for _ in 0..x.core {
+            self.read();
+        }
+        self.exec(u64::from(x.ea_pre));
+        for _ in 0..x.tail {
+            self.read();
+        }
+        self.exec(u64::from(x.ea_post));
+        for _ in 0..x.mem_r {
+            self.bus(false);
+        }
+        self.exec(u64::from(x.mid));
+        for i in 0..x.mem_w {
+            self.bus(i + 1 == x.mem_w);
+        }
+        if x.flush {
+            self.q = 0;
+            self.deliver = None;
+            self.bus_free = self.time;
+            self.suppress = self.time + 2;
+        }
+        // 残りの内部時間 = doc - 確定分（ストールは doc に含まない）。
+        let w_t = if x.mem_w > 0 {
+            u64::from(x.mem_w - 1) * 4 + 3
+        } else {
+            0
+        };
+        let used = u64::from(x.prefixes) * 2
+            + u64::from(x.core)
+            + u64::from(x.ea_pre)
+            + u64::from(x.tail)
+            + u64::from(x.ea_post)
+            + u64::from(x.mem_r) * 4
+            + u64::from(x.mid)
+            + w_t;
+        // 接頭辞込みの doc が read/隙間の合計を下回る形もある
+        // （隙間は doc に含めない）ので、残余は 0 に飽和する。
+        self.exec(u64::from(x.doc).saturating_sub(used));
+        // 境界: 次命令のファーストバイト読み取り時刻。
+        // フェッチしたバイトは T2 で読める。
+        if self.q > 0 {
+            self.time
+        } else {
+            loop {
+                self.tick();
+                if self.q > 0 {
+                    // バイトが届いた T-state が読み取りになる。
+                    return self.time - 1;
+                }
+            }
+        }
+    }
+}
+
+/// EA 計算コスト（a16 形）。SPEC-X86-8086 の EA 表。
+fn ea_cost_88(d: &MapDec, mem: bool) -> u16 {
+    if !mem {
+        return 0;
+    }
+    let m = d.modrm >> 6;
+    let rm = d.modrm & 7;
+    if m == 0 && rm == 6 {
+        6 // disp16 のみ
+    } else if m == 0 {
+        [7, 8, 8, 7, 5, 5, 6, 5][rm as usize]
+    } else {
+        [11, 12, 12, 11, 9, 9, 9, 9][rm as usize]
+    }
+}
+
+/// `MapDec` を 8088 の EU 情報へ分類。未対応命令は `None`。
+/// `taken` は jcc/loop 系の分岐成立、`cl` は CL シフト回数を渡す
+/// （初期レジスタから計算した値）。
+/// Ref: SPEC-X86-8086 の命令クロック表（8088 列、メモリ形は
+/// EA コスト加算）。
+pub fn classify_8088(d: &MapDec, byts: &[u8], taken: bool, cl: u8) -> Option<Insn8088> {
+    let name = INSNS[d.insn as usize].name;
+    let (m, ops) = name.split_once('_').unwrap_or((name, ""));
+    let t: Vec<&str> = ops.split('_').filter(|s| !s.is_empty()).collect();
+    let t0 = t.first().copied().unwrap_or("");
+    let t1 = t.get(1).copied().unwrap_or("");
+    let is_ea = |s: &str| matches!(s, "e" | "eb" | "ew" | "ed" | "ev" | "ep" | "m");
+    let is_reg = |s: &str| s.starts_with('g');
+    let is_imm = |s: &str| s.starts_with('i') || s == "jb" || s == "jz";
+    let is_acc = |s: &str| matches!(s, "al" | "ax" | "eax");
+    let mod_ = d.modrm >> 6;
+    let rm = d.modrm & 7;
+    let mem = d.has_modrm && mod_ != 3;
+    // v1 はバスアクセスなし・フラッシュなしの形のみ厳密検証する。
+    // Gap: GAP-0039
+    if mem {
+        return None;
+    }
+    let word = !(t0 == "eb" || t0 == "gb" || t0 == "rb" || t0 == "al" || t0 == "ib");
+    // ワードのデータアクセスは 2 バスサイクル（8088 は 8 ビットバス）。
+    let w = if word { 2 } else { 1 };
+    let ea = ea_cost_88(d, mem);
+    if d.rep != 0 {
+        return None; // REP 接頭辞付きは v1 の対象外
+    }
+    // 接頭辞は連続するバイトを数える（同一種の繰り返しを含む）。
+    // `MapDec` の seg/p66 は「種類」の有無しか表さないため、バイト列を
+    // 先頭から走査する（d.len は接頭辞込みのデコード長）。
+    let prefixes = byts
+        .iter()
+        .take_while(|b| {
+            matches!(
+                b,
+                0x26 | 0x2E | 0x36 | 0x3E | 0xF0 | 0xF2 | 0xF3 | 0x66 | 0x67
+            )
+        })
+        .count() as u8;
+    let core = 1 + u8::from(d.has_modrm);
+    let tail = d.len - prefixes - core;
+    // EA 計算中に disp バイトを読む位置。2 レジスタ形式は
+    // 加算が直列な分だけ遅れる（SST の SB マーカ位置から裏付け）。
+    let (mut ea_pre, ea_post) = if !mem {
+        (0, 0)
+    } else {
+        let nd = match mod_ {
+            0 if rm == 6 => 2,
+            0 => 0,
+            1 => 1,
+            _ => 2,
+        };
+        let pre = if nd == 0 {
+            0
+        } else if rm <= 3 {
+            6
+        } else {
+            3
+        };
+        let post = if nd == 0 {
+            ea + 1
+        } else {
+            ea.saturating_sub(nd + pre)
+        };
+        (pre, post)
+    };
+    // disp/imm の読み取り前に EU は 1T のデコード隙間を置く。
+    if tail > 0 && ea_pre == 0 {
+        ea_pre = 1;
+    }
+    // セグメント修飾の後に imm/disp が続く形は EU が追加 1T を費やす。
+    if tail > 0 && d.seg != 0 {
+        ea_pre += 1;
+    }
+    let mut x = Insn8088 {
+        prefixes,
+        core,
+        tail,
+        ea_pre,
+        ea_post,
+        mem_r: 0,
+        mem_w: 0,
+        mid: 0,
+        doc: 0,
+        flush: false,
+    };
+    match m {
+        "add" | "or" | "adc" | "sbb" | "and" | "sub" | "xor" | "cmp" => {
+            if is_ea(t0) && is_reg(t1) {
+                x.doc = if mem {
+                    ea + if word { 24 } else { 16 }
+                } else {
+                    3
+                };
+                x.mem_r = if mem { w } else { 0 };
+                x.mem_w = if mem { w } else { 0 };
+                x.mid = if mem { 7 } else { 0 };
+            } else if is_reg(t0) && is_ea(t1) {
+                x.doc = if mem {
+                    ea + if word { 13 } else { 9 }
+                } else {
+                    3
+                };
+                x.mem_r = if mem { w } else { 0 };
+            } else if is_ea(t0) && is_imm(t1) {
+                // 16 ビット imm + modrm 形は EU 内部スケジュールが未解明。
+                if matches!(t1, "iz" | "iv" | "i") {
+                    return None;
+                }
+                x.doc = if mem {
+                    ea + if word { 25 } else { 17 }
+                } else {
+                    4
+                };
+                x.mem_r = if mem { w } else { 0 };
+                x.mem_w = if mem { w } else { 0 };
+                x.mid = if mem { 7 } else { 0 };
+            } else if is_acc(t0) && is_imm(t1) {
+                x.doc = 4;
+            } else {
+                return None;
+            }
+        }
+        "test" => {
+            if is_ea(t0) && is_reg(t1) || is_reg(t0) && is_ea(t1) {
+                x.doc = if mem {
+                    ea + if word { 13 } else { 9 }
+                } else {
+                    3
+                };
+                x.mem_r = if mem { w } else { 0 };
+            } else if is_ea(t0) && is_imm(t1) {
+                if matches!(t1, "iz" | "iv" | "i") {
+                    return None;
+                }
+                x.doc = if mem {
+                    ea + if word { 15 } else { 11 }
+                } else {
+                    5
+                };
+                x.mem_r = if mem { w } else { 0 };
+            } else if is_acc(t0) && is_imm(t1) {
+                x.doc = 4;
+            } else {
+                return None;
+            }
+        }
+        "mov" => {
+            if is_ea(t0) && is_reg(t1) {
+                x.doc = if mem {
+                    ea + if word { 13 } else { 9 }
+                } else {
+                    2
+                };
+                x.mem_w = if mem { w } else { 0 };
+            } else if is_reg(t0) && is_ea(t1) {
+                x.doc = if mem {
+                    ea + if word { 12 } else { 8 }
+                } else {
+                    2
+                };
+                x.mem_r = if mem { w } else { 0 };
+            } else if is_ea(t0) && is_imm(t1) {
+                if matches!(t1, "iz" | "iv" | "i") {
+                    return None;
+                }
+                x.doc = if mem {
+                    ea + if word { 14 } else { 10 }
+                } else {
+                    4
+                };
+                x.mem_w = if mem { w } else { 0 };
+            } else if t0.starts_with('r') && is_imm(t1) {
+                x.doc = 4;
+            } else {
+                return None;
+            }
+        }
+        "inc" | "dec" => {
+            x.doc = if mem {
+                ea + if word { 23 } else { 15 }
+            } else if t0 == "rv" {
+                2 // 40-4F 短形
+            } else {
+                3 // FE/FF mod=3 形
+            };
+            x.mem_r = if mem { w } else { 0 };
+            x.mem_w = if mem { w } else { 0 };
+            x.mid = if mem { 7 } else { 0 };
+        }
+        "neg" | "not" => {
+            x.doc = if mem {
+                ea + if word { 24 } else { 16 }
+            } else {
+                3
+            };
+            x.mem_r = if mem { w } else { 0 };
+            x.mem_w = if mem { w } else { 0 };
+            x.mid = if mem { 7 } else { 0 };
+        }
+        "xchg" => {
+            if t0 == "rv" {
+                x.doc = 3; // acc + reg
+            } else {
+                x.doc = if mem {
+                    ea + if word { 25 } else { 17 }
+                } else {
+                    4
+                };
+                x.mem_r = if mem { w } else { 0 };
+                x.mem_w = if mem { w } else { 0 };
+                x.mid = if mem { 7 } else { 0 };
+            }
+        }
+        // スタック・データのバスアクセスを伴う形は v1 対象外。
+        "push" | "pop" | "pushf" | "popf" | "xlat" => return None,
+        // 制御転送（call/ret/jmp）はキューフラッシュを伴い、
+        // EU マイクロスケジュールが残課題（v1 対象外）。
+        "call" | "ret" | "jmp" => return None,
+        "jcxz" => {
+            if taken {
+                return None;
+            }
+            x.doc = 6;
+        }
+        "loop" => {
+            if taken {
+                return None;
+            }
+            x.doc = 5;
+        }
+        "loope" | "loopne" => {
+            if taken {
+                return None;
+            }
+            x.doc = 6;
+        }
+
+        "cwde" => x.doc = 2,
+        "lahf" => x.doc = 2,
+        "sahf" => x.doc = 4,
+
+        "clc" | "stc" | "cld" | "std" | "cmc" | "cli" | "sti" => x.doc = 2,
+        "daa" | "das" => x.doc = 4,
+        // キュー状態依存の ±1 の残差が残る形は v1 対象外。
+        "cdq" | "aaa" | "aas" | "aam" | "aad" => return None,
+        "rol" | "ror" | "rcl" | "rcr" | "shl" | "shr" | "sar" => {
+            // 0xC0/0xC1 は 8088 では imm カウントではなく RET の
+            // エイリアスとして動作する（80186+ の機能）。
+            if t1 == "ib" {
+                return None;
+            }
+            let by_cl = t1 == "cl";
+            let n = u16::from(cl);
+            if mem {
+                x.doc = if by_cl {
+                    ea + if word { 28 } else { 20 } + 4 * n
+                } else {
+                    ea + if word { 23 } else { 15 }
+                };
+                x.mem_r = w;
+                x.mem_w = w;
+                x.mid = 7;
+            } else {
+                x.doc = if by_cl { 8 + 4 * n } else { 2 };
+            }
+        }
+        "int" | "int1" | "into" | "int3" | "iret" | "hlt" | "retf" | "callf" | "jmpf" => {
+            return None;
+        }
+        _ => {
+            if m.starts_with('j') && (t0 == "jb" || t0 == "jz") {
+                if taken {
+                    return None;
+                }
+                x.doc = 4;
+            } else {
+                return None;
+            }
+        }
+    }
+    x.doc += 2 * u16::from(prefixes);
+    Some(x)
 }
