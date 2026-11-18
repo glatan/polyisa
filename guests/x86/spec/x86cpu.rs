@@ -160,10 +160,12 @@ fn declare_features(m: &mut Model) {
     feat(m, "hreset", &[]);
     feat(m, "serialize", &[]);
     feat(m, "cet_ibt", &[]);
-    feat(m, "amx_bf16", &[]);
+    feat(m, "amx_bf16", &["amx_tile"]);
     feat(m, "avx512_fp16", &["avx512f"]);
     feat(m, "amx_tile", &[]);
-    feat(m, "amx_int8", &[]);
+    feat(m, "amx_int8", &["amx_tile"]);
+    feat(m, "amx_fp16", &["amx_tile"]);
+    feat(m, "amx_complex", &["amx_tile"]);
     // Leaf 0x8000_0001 ECX。
     feat(m, "lahf_lm", &[]);
     feat(m, "svm", &[]);
@@ -685,10 +687,13 @@ fn declare_ident_bits(m: &mut Model) {
     ] {
         b(f, 0x8000_0001, "edx", bit);
     }
-    // Leaf 7.1 EAX（APX_F）。現行の CPUID 表はサブリーフ行を持た
-    // ないため `derive` では報告されないが、`ident_bit` の対応は
-    // ここが正本。`apx` 機能旗自体は明示モデルで使える。
-    b_sub(m, "apx", 0x7, 1, "eax", 21);
+    // Leaf 7.1（APX_F=EDX.21、AMX_FP16=EAX.21、AMX_COMPLEX=EDX.8）。
+    // 現行の CPUID 表はサブリーフ行を持たないため `derive` では
+    // 報告されないが、`ident_bit` の対応はここが正本。機能旗自体は
+    // 明示モデルで使える。
+        b_sub(m, "apx", 0x7, 1, "edx", 21);
+    b_sub(m, "amx_fp16", 0x7, 1, "eax", 21);
+    b_sub(m, "amx_complex", 0x7, 1, "edx", 8);
 }
 
 // ---------------------------------------------------------------------------
@@ -906,6 +911,14 @@ fn exact_gate(name: &str) -> Option<&'static [&'static str]> {
         "pextrw_ew_xv" => &["sse4_1"],
         // TBM の BEXTR（XOP.A imm32 形。BMI1 の reg 形は bmi1）。
         "bextr_gv_ev_id" => &["tbm"],
+        // AMX。タイル状態の操作は amx_tile、INT8/BF16/FP16/複素数の
+        // ドット積は対応する下位機能にする。
+        "ldtilecfg" | "sttilecfg" | "tilerelease" | "tilezero" | "tileloadd"
+        | "tileloaddt1" | "tilestored" => &["amx_tile"],
+        "tdpbssd" | "tdpbsud" | "tdpbusd" | "tdpbuud" => &["amx_int8"],
+        "tdpbf16ps" => &["amx_bf16"],
+        "tdpfp16ps" => &["amx_fp16"],
+        "tcmmimfp16ps" | "tcmmrlfp16ps" => &["amx_complex"],
         _ => return None,
     })
 }

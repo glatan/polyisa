@@ -517,7 +517,8 @@ fn gen_map_decoder(model: &Model) -> Result<String, GenError> {
          #[derive(Clone, Copy)]\n\
          pub enum OpK {\n\
          \x20   Ea(OpW), Reg(OpW), RegS, RegX, RmX, RegM, RmM,\n\
-         \x20   InOp(OpW), Imm(OpW), Imm2(OpW), Rel(OpW), Moffs(OpW), Vv, Imp(u8),\n\
+         \x20   InOp(OpW), Imm(OpW), Imm2(OpW), Rel(OpW), Moffs(OpW), Vv, RegT, RmT, VvT,\n\
+         \x20   Imp(u8),\n\
          }\n",
     );
 
@@ -727,6 +728,8 @@ fn gen_map_decoder(model: &Model) -> Result<String, GenError> {
          \x20                   | OpK::RmX\n\
          \x20                   | OpK::RegM\n\
          \x20                   | OpK::RmM\n\
+         \x20                   | OpK::RegT\n\
+         \x20                   | OpK::RmT\n\
          \x20           )\n\
          \x20       });\n\
          \x20   if needs_modrm && !pre {\n\
@@ -865,7 +868,7 @@ fn gen_map_decoder(model: &Model) -> Result<String, GenError> {
             if !grouped.is_empty()
                 || insns
                     .iter()
-                    .any(|mi| mi.group_mod.is_some() || mi.group_rm.is_some())
+                    .any(|mi| mi.group_mod.is_some() || mi.group_rm.is_some() || mi.sib)
             {
                 if map.postop {
                     s.push_str("            let m = d.modrm;\n");
@@ -1331,6 +1334,10 @@ fn emit_map_candidate(
         Some(false) => format!("(m >> 6) != 3 && ({cond})"),
         None => cond,
     };
+    // sibmem（mod!=11 かつ r/m=100）を要求する項目（AMX タイル）。
+    if mi.sib {
+        cond = format!("(m >> 6) != 3 && (m & 7) == 4 && ({cond})");
+    }
     // グループ項目の r/m 副選択（mod=11 内の更なる分岐）。
     if let Some(rm) = mi.group_rm {
         cond = format!("(m & 7) == {rm} && ({cond})");
@@ -1394,6 +1401,9 @@ fn opk_code(op: &polyisa_isadl::model::OpKind) -> String {
         OpKind::Rel(w) => format!("OpK::Rel({})", wc(w)),
         OpKind::Moffs(w) => format!("OpK::Moffs({})", wc(w)),
         OpKind::Vv => "OpK::Vv".to_string(),
+        OpKind::RegT => "OpK::RegT".to_string(),
+        OpKind::RmT => "OpK::RmT".to_string(),
+        OpKind::VvT => "OpK::VvT".to_string(),
         OpKind::Imp(i) => format!("OpK::Imp({})", imp(i)),
     }
 }

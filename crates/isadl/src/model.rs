@@ -227,6 +227,12 @@ pub enum OpKind {
     /// VEX.vvvv の 3 番目オペランド（H 系）。接頭辞フィールドなので
     /// バイトは消費しない。
     Vv,
+    /// ModRM.reg のタイルレジスタ（AMX の tmm 宛先・TILEZERO）。
+    RegT,
+    /// ModRM.r/m のタイルレジスタ（AMX のソース。mod=11 のみ）。
+    RmT,
+    /// VEX.vvvv のタイルレジスタ（AMX の第 3 オペランド）。
+    VvT,
     /// 暗黙オペランド。
     Imp(ImpOp),
 }
@@ -367,6 +373,9 @@ pub struct MapInsn {
     /// VEX.vvvv / EVEX.vvvv+V' が未使用（全ビット 1 固定）か。
     /// `vex`/`evex` が Some のときのみ意味を持つ。
     pub vex_rv: bool,
+    /// ModRM.r/m=100（SIB 必須）かつ mod!=11 のメモリ形だけを
+    /// 解読する。AMX の TILELOADD/TILESTORED の sibmem に使う。
+    pub sib: bool,
     /// 必須接頭辞の状態。VEX 項目では VEX.pp に対応する。
     pub pfx: PfxSel,
     pub when: Pred,

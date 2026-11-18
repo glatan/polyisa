@@ -27,6 +27,8 @@
 - adx
 - aesni
 - amx_bf16
+- amx_complex
+- amx_fp16
 - amx_int8
 - amx_tile
 - apic
@@ -405,6 +407,7 @@
 | lddqu | lddqu_xv_mv | sse3 | load |
 | ldmxcsr | ldmxcsr_md | sse | load |
 | lds | lds_gv_mp | !m64 | load |
+| ldtilecfg | ldtilecfg | m64 && amx_tile | load |
 | lea | lea_abs、lea_gv_m、lea_m32、lea_m8、lea_mnd、lea_sib、lea_sibabs、lea_sibd、lea_sibd32 | 真 | alu |
 | leave | leave | i186 | alu |
 | leave | en_leave | 真 | alu |
@@ -857,6 +860,7 @@
 | stosb | stos_b、stosb | 真 | store |
 | stosd | stosd | 真 | store |
 | str | str_ew | i286 | system |
+| sttilecfg | sttilecfg | m64 && amx_tile | store |
 | stui | stui | m64 && uintr | system |
 | sub | sub_eb_gb、sub_eb_ib、sub_ev_gv、sub_ev_ib、sub_ev_iz、sub_gb_eb、sub_gv_ev | apx | alu |
 | sub | sub_eb_ib | op82 | alu |
@@ -871,9 +875,22 @@
 | sysenter | sysenter | sep | system |
 | sysexit | sysexit | sep | system |
 | t1mskc | t1mskc_by_ev | tbm | alu |
+| tcmmimfp16ps | tcmmimfp16ps | m64 && amx_complex | alu |
+| tcmmrlfp16ps | tcmmrlfp16ps | m64 && amx_complex | alu |
+| tdpbf16ps | tdpbf16ps | m64 && amx_bf16 | alu |
+| tdpbssd | tdpbssd | m64 && amx_int8 | alu |
+| tdpbsud | tdpbsud | m64 && amx_int8 | alu |
+| tdpbusd | tdpbusd | m64 && amx_int8 | alu |
+| tdpbuud | tdpbuud | m64 && amx_int8 | alu |
+| tdpfp16ps | tdpfp16ps | m64 && amx_fp16 | alu |
 | test | test_al_ib、test_al_imm、test_ax_imm16、test_eax_imm、test_eax_iz、test_eb_gb、test_ev_gv、test_m16_imm_mem8、test_m16_imm_memnd、test_m16_imm_rip、test_m8_imm_mem32、test_m8_imm_mem8、test_m8_imm_memnd、test_m8_imm_rip、test_m8_imm_sib、test_m8_imm_sibd、test_m8_imm_sibd32、test_m8_r8_mem32、test_m8_r8_mem8、test_m8_r8_memnd、test_m8_r8_sibd、test_r8_r8、test_r_mem32、test_r_mem8、test_r_sib、test_r_sibabs、test_r_sibd、test_r_sibd32、test_rm16_imm、test_rm32、test_rm32_imm、test_rm32_imm_mem8、test_rm32_imm_memnd、test_rm32_imm_rip、test_rm32_imm_sib、test_rm32_imm_sibd、test_rm32_memnd、test_rm8_imm | 真 | alu |
 | test | test_eb_i、test_ev_i | 真 | mult |
 | testui | testui | m64 && uintr | system |
+| tileloadd | tileloadd | m64 && amx_tile | load |
+| tileloaddt1 | tileloaddt1 | m64 && amx_tile | load |
+| tilerelease | tilerelease | m64 && amx_tile | alu |
+| tilestored | tilestored | m64 && amx_tile | store |
+| tilezero | tilezero | m64 && amx_tile | store |
 | tpause | tpause_rv | waitpkg | system |
 | tzcnt | tzcnt_gv_ev | bmi1 | alu |
 | tzmsk | tzmsk_by_ev | tbm | alu |

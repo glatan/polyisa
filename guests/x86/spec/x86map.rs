@@ -40,6 +40,7 @@ fn mi(
         zu: false,
         nf_ok: false,
         vex_rv: false,
+        sib: false,
         pfx,
         when,
         syntax: syntax.to_string(),
@@ -3174,6 +3175,71 @@ fn build_map_0f38(m: &mut Model) {
             it.when = Pred::Flag("avx512dq".to_string());
         }
         v.push(MapItem::Insn(op, it));
+    }
+    // AMX（VEX.128.0F38.W0）。TILECFG 系は pp がグループ選択子、
+    // TILELOADD/STORED は sibmem 限定、ドット積は dst=modrm.reg・
+    // src1=modrm.r/m・src2=vvvv の mod=11 形。いずれも 64 ビット
+    // モードだけで有効。
+    // 全 AMX 形は W0 限定（wsel=false）。
+    let mut tile = |op: u8, mut it: MapInsn| {
+        it.vex = Some(VexL::L0);
+        it.wsel = Some(false);
+        it.when = w("m64");
+        v.push(MapItem::Insn(op, it));
+    };
+    // TILECFG 系は必須接頭辞がグループ選択子（NP=LD/RELEASE、
+    // 66=ST、F2=TILEZERO）。vvvv は未使用（全 1）。
+    // /0（modrm.reg=000）固定。
+    let mut it = mi("ldtilecfg", &[Ea(V)], Some(0), PfxSel::Plain, Pred::True, "ldtilecfg {e}", "load");
+    it.vex_rv = true;
+    it.group_mod = Some(false);
+    tile(0x49, it);
+    let mut it = mi("sttilecfg", &[Ea(V)], Some(0), PfxSel::P66, Pred::True, "sttilecfg {e}", "store");
+    it.vex_rv = true;
+    it.group_mod = Some(false);
+    tile(0x49, it);
+    let mut it = mi("tilerelease", &[], Some(0), PfxSel::Plain, Pred::True, "tilerelease", "alu");
+    it.vex_rv = true;
+    it.group_mod = Some(true);
+    it.group_rm = Some(0);
+    tile(0x49, it);
+    let mut it = mi("tilezero", &[RegT], None, PfxSel::PF2, Pred::True, "tilezero {x}", "store");
+    it.vex_rv = true;
+    it.group_mod = Some(true);
+    tile(0x49, it);
+    let mut it = mi("tileloadd", &[RegT, Ea(V)], None, PfxSel::PF2, Pred::True, "tileloadd {x}, {e}", "load");
+    it.vex_rv = true;
+    it.sib = true;
+    tile(0x4B, it);
+    let mut it = mi("tileloaddt1", &[RegT, Ea(V)], None, PfxSel::P66, Pred::True, "tileloaddt1 {x}, {e}", "load");
+    it.vex_rv = true;
+    it.sib = true;
+    tile(0x4B, it);
+    let mut it = mi("tilestored", &[Ea(V), RegT], None, PfxSel::PF3, Pred::True, "tilestored {e}, {x}", "store");
+    it.vex_rv = true;
+    it.sib = true;
+    tile(0x4B, it);
+    for (op, pfx, name) in [
+        (0x5Eu8, PfxSel::PF2, "tdpbssd"),
+        (0x5E, PfxSel::PF3, "tdpbsud"),
+        (0x5E, PfxSel::P66, "tdpbusd"),
+        (0x5E, PfxSel::Plain, "tdpbuud"),
+        (0x5C, PfxSel::PF3, "tdpbf16ps"),
+        (0x5C, PfxSel::PF2, "tdpfp16ps"),
+        (0x6C, PfxSel::P66, "tcmmimfp16ps"),
+        (0x6C, PfxSel::Plain, "tcmmrlfp16ps"),
+    ] {
+        let mut it = mi(
+            name,
+            &[RegT, RmT, VvT],
+            None,
+            pfx,
+            Pred::True,
+            &format!("{name} {{x}}, {{w}}, {{v}}"),
+            "alu",
+        );
+        it.group_mod = Some(true);
+        tile(op, it);
     }
     m.maps.push(MapDecl {
         name: "map_0f38".to_string(),

@@ -171,7 +171,9 @@ pub fn validate(model: &Model) -> Report {
                 // 意味を持つ。
                 if mi.vex.is_none()
                     && mi.evex.is_none()
-                    && (mi.vex_rv || mi.ops.contains(&crate::model::OpKind::Vv))
+                    && (mi.vex_rv
+                        || mi.ops.contains(&crate::model::OpKind::Vv)
+                        || mi.ops.contains(&crate::model::OpKind::VvT))
                 {
                     errors.push(ValidationError::BadField {
                         format: "map-insn".to_string(),
@@ -198,6 +200,8 @@ pub fn validate(model: &Model) -> Report {
                                 | crate::model::OpKind::RmX
                                 | crate::model::OpKind::RegM
                                 | crate::model::OpKind::RmM
+                                | crate::model::OpKind::RegT
+                                | crate::model::OpKind::RmT
                         )
                     })
                 {

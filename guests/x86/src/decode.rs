@@ -79,6 +79,11 @@ pub fn group(d: &MapDec) -> u8 {
     (d.modrm >> 3) & 7
 }
 
+/// VEX.vvvv のタイルレジスタ番号（AMX の src2、0-7）。
+pub fn vvv_t(d: &MapDec) -> u8 {
+    d.vex_v & 7
+}
+
 /// 8ビット被演算子で上位バイト（AH..BH）を指すか。REX があると
 /// SPL/BPL/SIL/DIL/R8B-R15B になるので、REX なしの 4-7 のみ。
 pub fn high8(d: &MapDec, g: Gpr) -> bool {

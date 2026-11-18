@@ -5316,6 +5316,401 @@ fn dispatch_map<B: Backend>(
     r
 }
 
+/// AMX タイル命令の実行（B4b）。タイル状態（`CpuState::tmm`/
+/// `tilecfg`）の更新は行数・列バイト数が実行時値なので、IR/意味論
+/// DSL ではなくインタプリタ層の具体値で組む。対象命令なら実行して
+/// `Some(結果)` を返し、それ以外は `None` で通常経路へ。
+fn amx_tile_step(
+    env: &mut BareEnv,
+    md: &polyisa_guest_x86::MapDec,
+    next_rip: u64,
+    seg: u64,
+    eip: u32,
+) -> Option<Result<(), InterpExit>> {
+    use polyisa_guest_x86::Insn;
+    if !matches!(
+        md.insn,
+        Insn::Ldtilecfg
+            | Insn::Sttilecfg
+            | Insn::Tilerelease
+            | Insn::Tilezero
+            | Insn::Tileloadd
+            | Insn::Tileloaddt1
+            | Insn::Tilestored
+            | Insn::Tdpbssd
+            | Insn::Tdpbsud
+            | Insn::Tdpbusd
+            | Insn::Tdpbuud
+            | Insn::Tdpbf16ps
+            | Insn::Tdpfp16ps
+            | Insn::Tcmmimfp16ps
+            | Insn::Tcmmrlfp16ps
+    ) {
+        return None;
+    }
+    Some(amx_tile_exec(env, md, next_rip, seg, eip))
+}
+
+/// `CpuState` 内のタイル構成の先頭オフセット（byte0=palette、
+/// byte1=startRow、16..=47=colsb[16]、48..=63=rows[16]）。
+const TILECFG_OFF: usize = core::mem::offset_of!(polyisa_guest_x86::CpuState, tilecfg);
+const TMM_OFF: usize = core::mem::offset_of!(polyisa_guest_x86::CpuState, tmm);
+
+/// タイルの行数。`st` は `CpuState` のバイト列。
+fn tile_rows(st: &[u8], t: u8) -> usize {
+    usize::from(st[TILECFG_OFF + 48 + usize::from(t)])
+}
+
+/// タイルの 1 行のバイト数。
+fn tile_colsb(st: &[u8], t: u8) -> usize {
+    usize::from(u16::from_le_bytes([
+        st[TILECFG_OFF + 16 + 2 * usize::from(t)],
+        st[TILECFG_OFF + 17 + 2 * usize::from(t)],
+    ]))
+}
+
+/// タイルが有効（構成済みかつ行・列が非 0）か。
+fn tile_valid(st: &[u8], t: u8) -> bool {
+    tile_rows(st, t) > 0 && tile_colsb(st, t) > 0
+}
+
+/// タイル `t` の行 `r` の先頭オフセット（行は colsb バイトずつ連続）。
+fn tile_cell(st: &[u8], t: u8, r: usize) -> usize {
+    TMM_OFF + usize::from(t) * 1024 + r * tile_colsb(st, t)
+}
+
+/// #UD（64 ビットモードの未定義命令・無効オペランド）。
+fn amx_ud(eip: u32) -> InterpExit {
+    InterpExit::Exception(polyisa_sem::GuestException {
+        kind: polyisa_sem::ExceptionKind::Undefined,
+        code: 6,
+        addr: Some(u64::from(eip)),
+        in_delay_slot: false,
+    })
+}
+
+/// タイル命令のメモリアクセスの失敗を例外に写す
+/// （`InterpBackend::load` の `mem_exit` と同じ写像）。
+fn amx_mem_exit(addr: u64, e: polyisa_mem::MemError) -> InterpExit {
+    match e {
+        polyisa_mem::MemError::NotAligned => InterpExit::Exception(polyisa_sem::GuestException {
+            kind: polyisa_sem::ExceptionKind::Align,
+            code: 0,
+            addr: Some(addr),
+            in_delay_slot: false,
+        }),
+        polyisa_mem::MemError::PageFault | polyisa_mem::MemError::OutOfMemory => {
+            InterpExit::Exception(polyisa_sem::GuestException {
+                kind: polyisa_sem::ExceptionKind::PageFault,
+                code: 0,
+                addr: Some(addr),
+                in_delay_slot: false,
+            })
+        }
+    }
+}
+
+/// FP16 のビットパターンを f32 に変換する。
+fn f16_to_f32(h: u16) -> f32 {
+    let s = if h & 0x8000 != 0 { -1.0f32 } else { 1.0 };
+    let e = i32::from((h >> 10) & 0x1F);
+    let m = u32::from(h & 0x3FF);
+    if e == 0 {
+        s * (m as f32) * 2f32.powi(-24)
+    } else if e == 31 {
+        if m == 0 { s * f32::INFINITY } else { f32::NAN }
+    } else {
+        s * (1024 + m) as f32 * 2f32.powi(e - 25)
+    }
+}
+
+/// タイル命令の実体。sibmem の行アドレスは base+index*scale+disp
+/// のうち index*scale が行ストライドになる（start は base+disp）。
+fn amx_tile_exec(
+    env: &mut BareEnv,
+    md: &polyisa_guest_x86::MapDec,
+    next_rip: u64,
+    seg: u64,
+    eip: u32,
+) -> Result<(), InterpExit> {
+    use polyisa_guest_x86::{Insn, decode, sem};
+    // XCR0 の XTILECFG(17)|XTILEDATA(18) が両方立っていなければ #UD。
+    let x0: u64 = env.backend.get(sem::xcr0_ref());
+    if x0 & 0x6_0000 != 0x6_0000 {
+        return Err(amx_ud(eip));
+    }
+    let acc_r = Access {
+        endian: Endian::Le,
+        align: Align::Natural,
+        kind: AccessKind::DataRead,
+    };
+    // sibmem の行ベースとストライド。index=100b(+X=0) はストライド 0、
+    // mod=00 base=101 は disp32 のみ（64 ビットでは RIP 相対）。
+    let tile_ea = |env: &mut BareEnv| -> (u64, u64) {
+        let s = md.sib;
+        let idx_raw = (s >> 3) & 7;
+        let no_index = idx_raw == 4 && (md.rex >> 1) & 1 == 0;
+        let idx = idx_raw | (((md.rex >> 1) & 1) << 3);
+        let base_raw = s & 7;
+        let no_base = md.modrm >> 6 == 0 && base_raw == 5;
+        let base = if no_base {
+            md.disp as u64
+        } else {
+            let br = base_raw | ((md.rex & 1) << 3);
+            let mut v = sem::read64(&mut env.backend, sem::Gpr(br));
+            if md.asize == 32 {
+                v &= 0xFFFF_FFFF;
+            }
+            (v as i64 + md.disp) as u64
+        };
+        let stride = if no_index {
+            0
+        } else {
+            let mut v = sem::read64(&mut env.backend, sem::Gpr(idx));
+            if md.asize == 32 {
+                v &= 0xFFFF_FFFF;
+            }
+            v << (s >> 6)
+        };
+        (base.wrapping_add(seg), stride)
+    };
+    // メモリ形の EA（LDTILECFG/STTILECFG。タイル命令はリニア
+    // アドレスを直接使い、modrm.reg の値は見ない）。
+    let ea_mem = |env: &mut BareEnv| -> Result<u64, InterpExit> {
+        // mod!=11 は必ず sibmem でも通常の EA 規則でも同じ並びの
+        // バイトなので汎用 EA 評価で求める。
+        match decode::rm_of(&mut env.backend, md, next_rip, seg, false, false) {
+            decode::Rm::Mem { a, .. } => Ok(a),
+            decode::Rm::Reg(_) => Err(amx_ud(eip)),
+        }
+    };
+    let insn = md.insn;
+    let st = &mut env.backend.state;
+    match insn {
+        Insn::Ldtilecfg | Insn::Sttilecfg => {
+            let ea = ea_mem(env)?;
+            let st = &mut env.backend.state;
+            if insn == Insn::Ldtilecfg {
+                let mut cfg = [0u8; 64];
+                env.backend
+                    .mem
+                    .read(VirtAddr(ea), &mut cfg, acc_r)
+                    .map_err(|e| amx_mem_exit(ea, e))?;
+                // palette>1 は #GP。0 は解放（検査を経ずに全状態を
+                // クリア）。1 なら予約域・tile8-15・寸法を検査する。
+                if cfg[0] > 1 {
+                    return Err(amx_ud(eip));
+                }
+                if cfg[0] == 1 {
+                    // bytes2-15 の予約域と、palette1 で使わない
+                    // tile8-15 の colsb/rows は 0 必須。
+                    if cfg[2..16].iter().any(|&b| b != 0)
+                        || cfg[32..48].iter().any(|&b| b != 0)
+                        || cfg[56..64].iter().any(|&b| b != 0)
+                    {
+                        return Err(amx_ud(eip));
+                    }
+                    for i in 0..8 {
+                        let cb = u16::from_le_bytes([cfg[16 + 2 * i], cfg[17 + 2 * i]]);
+                        // colsb<=64・rows<=16・片方だけ 0 は #GP。
+                        if cb > 64 || cfg[48 + i] > 16 || (cb == 0) != (cfg[48 + i] == 0) {
+                            return Err(amx_ud(eip));
+                        }
+                    }
+                }
+                st[TILECFG_OFF..TILECFG_OFF + 64].copy_from_slice(&cfg);
+                st[TMM_OFF..TMM_OFF + 8 * 1024].fill(0);
+            } else {
+                env.backend
+                    .mem
+                    .write(VirtAddr(ea), &st[TILECFG_OFF..TILECFG_OFF + 64])
+                    .map_err(|e| amx_mem_exit(ea, e))?;
+            }
+            return Ok(());
+        }
+        Insn::Tilerelease => {
+            st[TILECFG_OFF..TILECFG_OFF + 64].fill(0);
+            st[TMM_OFF..TMM_OFF + 8 * 1024].fill(0);
+            return Ok(());
+        }
+        _ => {}
+    }
+    // 以下は構成済み（palette=1）が前提。
+    if st[TILECFG_OFF] != 1 {
+        return Err(amx_ud(eip));
+    }
+    let dst = (md.modrm >> 3) & 7;
+    match insn {
+        Insn::Tilezero => {
+            if !tile_valid(st, dst) || md.rex & 4 != 0 {
+                return Err(amx_ud(eip));
+            }
+            let n = tile_rows(st, dst) * tile_colsb(st, dst);
+            st[TMM_OFF + usize::from(dst) * 1024..TMM_OFF + usize::from(dst) * 1024 + n].fill(0);
+            Ok(())
+        }
+        Insn::Tileloadd | Insn::Tileloaddt1 | Insn::Tilestored => {
+            let (load, t) = if insn == Insn::Tilestored {
+                (false, dst)
+            } else {
+                (true, dst)
+            };
+            // colsb は 4 バイト単位、startRow < rows、reg 側の
+            // R 拡張ビット（tmm8-15 を指す）は #UD。
+            if !tile_valid(st, t)
+                || md.rex & 4 != 0
+                || !tile_colsb(st, t).is_multiple_of(4)
+                || usize::from(st[TILECFG_OFF + 1]) >= tile_rows(st, t)
+            {
+                return Err(amx_ud(eip));
+            }
+            let (base, stride) = tile_ea(env);
+            let st = &mut env.backend.state;
+            let colsb = tile_colsb(st, t);
+            let srow = usize::from(st[TILECFG_OFF + 1]);
+            for r in srow..tile_rows(st, t) {
+                let a = base.wrapping_add(stride.wrapping_mul(r as u64));
+                let cell = TMM_OFF + usize::from(t) * 1024 + r * colsb;
+                if load {
+                    let mut row = vec![0u8; colsb];
+                    env.backend
+                        .mem
+                        .read(VirtAddr(a), &mut row, acc_r)
+                        .map_err(|e| amx_mem_exit(a, e))?;
+                    st[cell..cell + colsb].copy_from_slice(&row);
+                } else {
+                    let row = st[cell..cell + colsb].to_vec();
+                    env.backend
+                        .mem
+                        .write(VirtAddr(a), &row)
+                        .map_err(|e| amx_mem_exit(a, e))?;
+                }
+            }
+            st[TILECFG_OFF + 1] = 0;
+            Ok(())
+        }
+        _ => {
+            // TDP/TCMM: dst=modrm.reg、src1=modrm.r/m、src2=vvvv。
+            let s1 = md.modrm & 7;
+            let s2 = decode::vvv_t(md);
+            // 全て別レジスタ・vvvv<8・拡張ビットなし・rows(s1)=rows(dst)
+            // が実機の受理条件。
+            if !tile_valid(st, dst)
+                || !tile_valid(st, s1)
+                || !tile_valid(st, s2)
+                || dst == s1
+                || dst == s2
+                || s1 == s2
+                || md.vex_v > 7
+                || md.rex & 7 != 0
+                || tile_rows(st, s1) != tile_rows(st, dst)
+            {
+                return Err(amx_ud(eip));
+            }
+            // 形状の整合: 積和は dst が M×N dword、src1 が M×(4K) バイト
+            // （FP16/BF16 では M×(2K) 要素）、src2 が K×N dword。
+            let md_rows = tile_rows(st, dst);
+            let md_cols = tile_colsb(st, dst) / 4;
+            if !tile_colsb(st, dst).is_multiple_of(4) || !tile_colsb(st, s2).is_multiple_of(4) {
+                return Err(amx_ud(eip));
+            }
+            if tile_colsb(st, s2) != tile_colsb(st, dst) {
+                return Err(amx_ud(eip));
+            }
+            let int8 = matches!(
+                insn,
+                Insn::Tdpbssd | Insn::Tdpbsud | Insn::Tdpbusd | Insn::Tdpbuud
+            );
+            let k = if int8 {
+                // INT8 は src1 の 4 バイト=内積の 1 ステップ。
+                if tile_colsb(st, s1) != 4 * tile_rows(st, s2) {
+                    return Err(amx_ud(eip));
+                }
+                tile_rows(st, s2)
+            } else {
+                // BF16/FP16/複素 FP16 は 4 バイト=1 要素対。
+                if tile_colsb(st, s1) != 4 * tile_rows(st, s2)
+                    || !tile_colsb(st, s1).is_multiple_of(4)
+                {
+                    return Err(amx_ud(eip));
+                }
+                tile_rows(st, s2)
+            };
+            let st = &mut env.backend.state;
+            for m in 0..md_rows {
+                for n in 0..md_cols {
+                    let dcell = TMM_OFF + usize::from(dst) * 1024 + m * tile_colsb(st, dst) + 4 * n;
+                    match insn {
+                        Insn::Tdpbssd | Insn::Tdpbsud | Insn::Tdpbusd | Insn::Tdpbuud => {
+                            let a_sgn = matches!(insn, Insn::Tdpbssd | Insn::Tdpbsud);
+                            let b_sgn = matches!(insn, Insn::Tdpbssd | Insn::Tdpbusd);
+                            let mut acc =
+                                i32::from_le_bytes(st[dcell..dcell + 4].try_into().unwrap());
+                            for kk in 0..k {
+                                for q in 0..4 {
+                                    let av = st[tile_cell(st, s1, m) + 4 * kk + q];
+                                    let bv = st[tile_cell(st, s2, kk) + 4 * n + q];
+                                    let a = if a_sgn {
+                                        i32::from(av as i8)
+                                    } else {
+                                        i32::from(av)
+                                    };
+                                    let b = if b_sgn {
+                                        i32::from(bv as i8)
+                                    } else {
+                                        i32::from(bv)
+                                    };
+                                    acc = acc.wrapping_add(a * b);
+                                }
+                            }
+                            st[dcell..dcell + 4].copy_from_slice(&acc.to_le_bytes());
+                        }
+                        _ => {
+                            // BF16/FP16/複素 FP16: dword 対の実・虚で
+                            // f32 に拡張して積和する。
+                            let mut acc =
+                                f32::from_le_bytes(st[dcell..dcell + 4].try_into().unwrap());
+                            for kk in 0..k {
+                                let aw = u32::from_le_bytes(
+                                    st[tile_cell(st, s1, m) + 4 * kk
+                                        ..tile_cell(st, s1, m) + 4 * kk + 4]
+                                        .try_into()
+                                        .unwrap(),
+                                );
+                                let bw = u32::from_le_bytes(
+                                    st[tile_cell(st, s2, kk) + 4 * n
+                                        ..tile_cell(st, s2, kk) + 4 * n + 4]
+                                        .try_into()
+                                        .unwrap(),
+                                );
+                                let cvt: fn(u16) -> f32 = if insn == Insn::Tdpbf16ps {
+                                    |h| f32::from_bits(u32::from(h) << 16)
+                                } else {
+                                    f16_to_f32
+                                };
+                                let (a_re, a_im) = (cvt(aw as u16), cvt((aw >> 16) as u16));
+                                let (b_re, b_im) = (cvt(bw as u16), cvt((bw >> 16) as u16));
+                                match insn {
+                                    Insn::Tcmmrlfp16ps => {
+                                        acc += a_re * b_re - a_im * b_im;
+                                    }
+                                    Insn::Tcmmimfp16ps => {
+                                        acc += a_re * b_im + a_im * b_re;
+                                    }
+                                    _ => {
+                                        acc += a_re * b_re + a_im * b_im;
+                                    }
+                                }
+                            }
+                            st[dcell..dcell + 4].copy_from_slice(&acc.to_le_bytes());
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
+    }
+}
 /// オペコード表経路の 1 命令。表に無いか `dispatch_map` が未対応なら `None`
 /// で呼び出し側が従来経路に下りる。
 fn step_x86_map(
@@ -5553,6 +5948,21 @@ fn step_x86_map(
         };
         (seg, false, 0)
     };
+    if let Some(r) = amx_tile_step(env, &md, next_rip, seg, eip) {
+        let word = buf[..usize::from(md.len).min(16)]
+            .iter()
+            .rev()
+            .fold(0u128, |w, c| (w << 8) | u128::from(*c));
+        return Some(x86_post_step(
+            env,
+            sys,
+            eip,
+            u64::from(md.len),
+            word,
+            r,
+            hist,
+        ));
+    }
     let r = env.step(|b| dispatch_map(b, &md, eip, next_rip, seg, seg_ss, sseg, es, mode, feats));
     let r = match r {
         Err(InterpExit::Exception(ref e))

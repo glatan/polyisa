@@ -21983,3 +21983,91 @@ fn run64_apx() {
     let fl: u32 = env.backend.get(Gpr(1).state());
     assert_ne!(fl & 0x40, 0, "nf は旗を保持");
 }
+
+#[test]
+fn run64_amx() {
+    // AMX（B4b）: LDTILECFG→TILELOADD→TDPBSSD→TILESTORED の一通り。
+    let feats = polyisa_guest_x86::model_feats("x86_64")
+        | polyisa_guest_x86::FEAT_AMX_TILE
+        | polyisa_guest_x86::FEAT_AMX_INT8
+        | polyisa_guest_x86::FEAT_AMX_BF16
+        | polyisa_guest_x86::FEAT_AMX_FP16
+        | polyisa_guest_x86::FEAT_AMX_COMPLEX;
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 3, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2800);
+    // XTILECFG(17)|XTILEDATA(18) の許可 + x87/SSE。
+    env.backend
+        .set(polyisa_guest_x86::sem::xcr0_ref(), 0x6_0003);
+    // TILECFG at 0x2000: palette=1, startRow=0、tmm0-2 は
+    // rows=2・colsb=8（dst=M=2×N=2 dword、src1=M×(4K=8B)、src2=K=2 行）。
+    let mut cfg = [0u8; 64];
+    cfg[0] = 1;
+    for i in 0..3 {
+        cfg[16 + 2 * i..18 + 2 * i].copy_from_slice(&8u16.to_le_bytes());
+        cfg[48 + i] = 2;
+    }
+    env.backend.mem.write(VirtAddr(0x2000), &cfg).unwrap();
+    // A(src1) at 0x2100: 2 行×8B = [[1..=8],[9..=16]]。ストライド 8。
+    // B(src2) at 0x2110: 2 行×8B = 4x2 単位的な配置。
+    let a: [u8; 16] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+    let bmat: [u8; 16] = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+    env.backend.mem.write(VirtAddr(0x2100), &a).unwrap();
+    env.backend.mem.write(VirtAddr(0x2110), &bmat).unwrap();
+    let prog: &[u8] = &[
+        0x48, 0xB8, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rax,0x2000
+        0xC4, 0xE2, 0x78, 0x49, 0x00, // ldtilecfg (%rax)
+        0x48, 0xBE, 0x00, 0x21, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rsi,0x2100
+        0x48, 0xBF, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, // movabs rdi,8（stride）
+        0xC4, 0xE2, 0x7B, 0x4B, 0x0C, 0x3E, // tileloadd (%rsi,%rdi),tmm1
+        0x48, 0xBE, 0x10, 0x21, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rsi,0x2110
+        0xC4, 0xE2, 0x7B, 0x4B, 0x14, 0x3E, // tileloadd (%rsi,%rdi),tmm2
+        0xC4, 0xE2, 0x6B, 0x5E, 0xC1, // tdpbssd %tmm2,%tmm1,%tmm0
+        0x48, 0xBB, 0x00, 0x22, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rbx,0x2200
+        0xC4, 0xE2, 0x7A, 0x4B, 0x04, 0x3B, // tilestored %tmm0,(%rbx,%rdi)
+        0x48, 0xBA, 0x00, 0x23, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rdx,0x2300
+        0xC4, 0xE2, 0x79, 0x49, 0x02, // sttilecfg (%rdx)
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0x31, 0xFF, // xor rdi,rdi
+        0x0F, 0x05, // syscall → exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        200,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64"),
+    );
+    assert_eq!(out, Outcome::Exit(0));
+    // TDPBSSD: dst[m][n] = Σ_k Σ_q A[m][4k+q]·B[k][4n+q]。
+    // A=[[1..8],[9..16]]、B=単位行列 → dst=[[8,10],[24,26]]（dword）。
+    let acc = polyisa_mem::Access {
+        endian: polyisa_mem::Endian::Le,
+        align: polyisa_mem::Align::Unaligned,
+        kind: polyisa_mem::AccessKind::DataRead,
+    };
+    let q = |o: u64| {
+        let mut b = [0u8; 8];
+        env.backend
+            .mem
+            .read(VirtAddr(0x2200 + o), &mut b, acc)
+            .unwrap();
+        u64::from_le_bytes(b)
+    };
+    assert_eq!(q(0), 0x0000_000A_0000_0008, "tdpbssd row0 got {:x}", q(0));
+    assert_eq!(q(8), 0x0000_001A_0000_0018, "tdpbssd row1");
+    // STTILECFG は設定をそのまま書き戻す。
+    let mut back = [0u8; 64];
+    env.backend
+        .mem
+        .read(VirtAddr(0x2300), &mut back, acc)
+        .unwrap();
+    assert_eq!(back, cfg, "sttilecfg round-trip");
+}

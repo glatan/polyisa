@@ -32,7 +32,7 @@ impl polyisa_guest::GuestIsa for X86 {
 /// レジスタ順は EAX,ECX,EDX,EBX,ESP,EBP,ESI,EDI である。
 /// 64ビット拡張の上位32ビットは `h` に置く（x86-64 の RAX..RDI に対応）。
 #[repr(C)]
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct CpuState {
     /// 汎用レジスタ 8本の下位32ビット。
     pub g: [u32; 8],
@@ -114,6 +114,57 @@ pub struct CpuState {
     /// APX の拡張 GPR R16-R31（REX2/EVEX.map4 でだけ到達できる。
     /// XSAVE の追加成分はなく、コンテキストとしてモデル内に持つ）。
     pub x2: [u64; 16],
+    /// AMX のタイルレジスタ tmm0-7（各最大 16 行×64 バイト、
+    /// 行は colsb バイトずつ連続配置）。XSAVE の XTILEDATA 成分に対応。
+    pub tmm: [[u8; 1024]; 8],
+    /// LDTILECFG が読み込んだ 64 バイトのタイル設定。
+    /// byte0=palette_id（0 は解放/未設定）、byte1=startRow、
+    /// bytes16-47=colsb[16]（u16 LE）、bytes48-63=rows[16]。
+    /// XSAVE の XTILECFG 成分に対応する。
+    pub tilecfg: [u8; 64],
+}
+
+impl Default for CpuState {
+    fn default() -> Self {
+        // ほとんどのフィールドは 0 初期化。タイル領域が大きいので
+        // derive ではなく手実装にする。
+        Self {
+            g: Default::default(),
+            eip: 0,
+            eflags: 0,
+            h: Default::default(),
+            x: Default::default(),
+            xmm: Default::default(),
+            fcw: 0,
+            top: 0,
+            st_exp: Default::default(),
+            st_sig: Default::default(),
+            fs_base: 0,
+            gs_base: 0,
+            sregs: Default::default(),
+            fsw: 0,
+            cpuid: Default::default(),
+            mxcsr: 0,
+            gdtr_base: 0,
+            gdtr_limit: 0,
+            idtr_base: 0,
+            idtr_limit: 0,
+            ldtr: 0,
+            tr: 0,
+            rand_state: 0,
+            pkru: 0,
+            xcr0: 0,
+            xcomp_supp: 0,
+            xcomp_perm: 0,
+            ymm_hi: Default::default(),
+            zmm_hi: Default::default(),
+            zmm16: Default::default(),
+            kmask: Default::default(),
+            x2: Default::default(),
+            tmm: [[0; 1024]; 8],
+            tilecfg: [0; 64],
+        }
+    }
 }
 
 #[cfg(test)]
@@ -158,13 +209,15 @@ mod tests {
         assert_eq!(core::mem::offset_of!(CpuState, zmm16), 1504);
         assert_eq!(core::mem::offset_of!(CpuState, kmask), 2528);
         assert_eq!(core::mem::offset_of!(CpuState, x2), 2592);
-        assert_eq!(core::mem::size_of::<CpuState>(), 2720);
+        assert_eq!(core::mem::offset_of!(CpuState, tmm), 2720);
+        assert_eq!(core::mem::offset_of!(CpuState, tilecfg), 2720 + 8 * 1024);
+        assert_eq!(core::mem::size_of::<CpuState>(), 10976);
     }
 
     #[test]
     fn insn_count() {
         // 段階4の x86 最小 853 件にオペコード表の記述を足した件数。
-        assert_eq!(INSNS.len(), 2132);
+        assert_eq!(INSNS.len(), 2147);
     }
 
     #[test]
@@ -2505,6 +2558,64 @@ fn apx_decode() {
             &[0xD5, 0x00, 0xC4, 0xE1, 0x3C, 0x58, 0xC2],
             modes,
             FEAT_APX | FEAT_AVX
+        )
+        .is_none()
+    );
+}
+
+#[test]
+fn amx_decode() {
+    let modes = MODE_M64 | (MODE_OPD_O32 << MODE_OPD_SHIFT) | (MODE_ADR_A64 << MODE_ADR_SHIFT);
+    let tile = FEAT_AMX_TILE;
+    // 設定系は vvvv がグループ選択子（ldtilecfg=0, sttilecfg=1）。
+    // modrm.reg の値は使わない。
+    let d = decode_map(&[0xC4, 0xE2, 0x78, 0x49, 0x00], modes, tile).unwrap();
+    assert_eq!(d.insn, Insn::Ldtilecfg);
+    let d = decode_map(&[0xC4, 0xE2, 0x79, 0x49, 0x00], modes, tile).unwrap();
+    assert_eq!(d.insn, Insn::Sttilecfg);
+    // TILERELEASE は C4 E2 78 49 C0 固定。
+    let d = decode_map(&[0xC4, 0xE2, 0x78, 0x49, 0xC0], modes, tile).unwrap();
+    assert_eq!(d.insn, Insn::Tilerelease);
+    // TILEZERO は modrm.reg が tmm。tilezero %tmm3 = 49 D8。
+    let d = decode_map(&[0xC4, 0xE2, 0x7B, 0x49, 0xD8], modes, tile).unwrap();
+    assert_eq!(d.insn, Insn::Tilezero);
+    // TILELOADD/STORED は sibmem（mod!=11 かつ r/m=100）限定。
+    let d = decode_map(&[0xC4, 0xE2, 0x7B, 0x4B, 0x0C, 0x98], modes, tile).unwrap();
+    assert_eq!(d.insn, Insn::Tileloadd);
+    let d = decode_map(&[0xC4, 0xE2, 0x79, 0x4B, 0x0C, 0x98], modes, tile).unwrap();
+    assert_eq!(d.insn, Insn::Tileloaddt1);
+    let d = decode_map(&[0xC4, 0xE2, 0x7A, 0x4B, 0x0C, 0x98], modes, tile).unwrap();
+    assert_eq!(d.insn, Insn::Tilestored);
+    // 非 SIB 形（r/m=000）は拒否。
+    assert!(decode_map(&[0xC4, 0xE2, 0x7B, 0x4B, 0x08, 0x98], modes, tile).is_none());
+    // mod=11 も拒否。
+    assert!(decode_map(&[0xC4, 0xE2, 0x7B, 0x4B, 0xC8], modes, tile).is_none());
+    // ドット積: dst=modrm.reg、src1=modrm.r/m、src2=vvvv。
+    for (b2, op, want) in [
+        (0x63u8, 0x5Eu8, Insn::Tdpbssd),
+        (0x62, 0x5E, Insn::Tdpbsud),
+        (0x61, 0x5E, Insn::Tdpbusd),
+        (0x60, 0x5E, Insn::Tdpbuud),
+        (0x62, 0x5C, Insn::Tdpbf16ps),
+        (0x63, 0x5C, Insn::Tdpfp16ps),
+        (0x61, 0x6C, Insn::Tcmmimfp16ps),
+        (0x60, 0x6C, Insn::Tcmmrlfp16ps),
+    ] {
+        let feats = tile | FEAT_AMX_INT8 | FEAT_AMX_BF16 | FEAT_AMX_FP16 | FEAT_AMX_COMPLEX;
+        let d = decode_map(&[0xC4, 0xE2, b2, op, 0xCA], modes, feats).unwrap();
+        assert_eq!(d.insn, want, "{b2:02x} {op:02x}");
+        assert_eq!(crate::decode::vvv_t(&d), 3);
+    }
+    // 機能なしでは #UD。
+    assert!(decode_map(&[0xC4, 0xE2, 0x63, 0x5E, 0xCA], modes, tile).is_none());
+    assert!(decode_map(&[0xC4, 0xE2, 0x63, 0x5C, 0xCA], modes, tile).is_none());
+    // 32 ビットモードでは #UD。
+    let m32 = (MODE_OPD_O32 << MODE_OPD_SHIFT) | (MODE_ADR_A32 << MODE_ADR_SHIFT);
+    assert!(
+        decode_map(
+            &[0xC4, 0xE2, 0x63, 0x5E, 0xCA],
+            m32,
+            FEAT_AMX_TILE | FEAT_AMX_INT8
         )
         .is_none()
     );

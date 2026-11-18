@@ -1653,8 +1653,15 @@ pub fn sys_arch_prctl(env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
         // 領域が広がる）。成分の保存実装がない bit は名前だけの追跡。
         if feature >= XFEATURE_FIRST_DYNAMIC {
             let xcr0 = env.backend.get(polyisa_guest_x86::sem::xcr0_ref());
+            // XTILEDATA の許可はカーネルと同じく XTILECFG にも波及
+            // させる（bit18 の要求で bit17|18 が両方立つ）。
+            let set = if bit == (1 << XFEATURE_XTILEDATA) {
+                bit | (1 << XFEATURE_XTILECFG)
+            } else {
+                bit
+            };
             env.backend
-                .set(polyisa_guest_x86::sem::xcr0_ref(), xcr0 | bit);
+                .set(polyisa_guest_x86::sem::xcr0_ref(), xcr0 | set);
         }
         set64(env, Gpr(0), 0);
         return Some(TrapOutcome::Handled);
