@@ -24,6 +24,8 @@
 
 ## 機能
 
+- ace
+- ace_v2
 - adx
 - aesni
 - amx_bf16
@@ -34,6 +36,9 @@
 - apic
 - apx
 - avx
+- avx10
+- avx10_2
+- avx10_3
 - avx2
 - avx512_fp16
 - avx512bitalg

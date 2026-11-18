@@ -61,6 +61,30 @@ pub struct Binary<const E: u32, const M: u32> {
 pub type F16 = Binary<5, 10>;
 /// 32 ビット形式。
 pub type F32 = Binary<8, 23>;
+
+/// 8 ビット形式（FP8）。E4M3 は OCP FP8 の E4M3、E5M2 は E5M2。
+/// AVX10.2/ACE が使う。
+///
+/// `Binary<E, M>` の機械は IEEE754 の配置（最上段指数 = Inf/NaN）で
+/// 組み立てるため、E4M3 と E2M1 の最上段指数行だけは規格とずれる。
+/// OCP の実情は:
+///
+/// - E4M3: exp=15 は有限値の続き（256 〜 448）。0x7F/0xFF だけが
+///   NaN で、Inf は存在しない。
+/// - E2M1: 特殊値を持たない。0x6 = 4.0、0x7 = 6.0 が最大の有限値。
+/// - E5M2 は IEEE の配置と一致するので汎用機械で正しい。
+///
+/// このため E4M3・E2M1 への変換は専用経路（`to_e4m3`/`to_e2m1` と
+/// 各 `to_f32`）を用意し、上位行を OCP の意味で扱う。`is_inf` や
+/// `canonical_nan` など IEEE を仮定する補助関数は上位行に対して
+/// 当てはまらない点に注意（Ref: SPEC-X86-AVX10-2）。
+pub type E4M3 = Binary<4, 3>;
+
+/// 8 ビット形式（E5M2）。IEEE の配置と一致する。
+pub type E5M2 = Binary<5, 2>;
+
+/// 4 ビット形式（E2M1、FP4。AVX10.2/ACE が使う）。特殊値なし。
+pub type E2M1 = Binary<2, 1>;
 /// 64 ビット形式。
 pub type F64 = Binary<11, 52>;
 
@@ -1026,12 +1050,148 @@ impl F32 {
     pub fn to_f16(self, rm: Rm) -> (F16, u8) {
         convert(self, rm)
     }
+
+    /// E4M3（8 ビット）に変換する。OCP 仕様: Inf なし・オーバーフローは NaN。
+    #[must_use]
+    pub fn to_e4m3(self, rm: Rm) -> (E4M3, u8) {
+        if self.is_nan() || self.is_inf() {
+            return (E4M3::from_bits(0x7f | ((self.decode().0 as u64) << 7)), 0);
+        }
+        let (r, f) = convert::<8, 23, 4, 3>(self, rm);
+        // IEEE モデルで Inf 行に丸め込まれた有限値は OCP では 256〜448。
+        if r.bits() & 0x7f != 0x78 {
+            return (r, f);
+        }
+        let (neg, exp, frac) = self.decode();
+        let sgn = (neg as u64) << 7;
+        let eu = exp as i64 - 127;
+        let m24 = (1u64 << 23) | frac;
+        // 指数欄 15 の刻みは 32（2^8 の 1/8）。値は 256 + frac3 * 32。
+        // eu = 7 の到達範囲は 248 以上なので丸めると frac3 = 0（256）。
+        // eu = 8 では frac3 = round((m24 - 2^23) / 2^20)。
+        let (q, rem, half) = if eu == 7 {
+            (0u64, 1u64, 1u64) // 248 以上 → 0x78 に寄せる。常に非正確。
+        } else if eu == 8 {
+            let shift = 20u32;
+            let num = m24 - (1 << 23);
+            (num >> shift, num & ((1 << shift) - 1), 1u64 << (shift - 1))
+        } else {
+            // 上限超過（eu >= 9）は NaN。
+            return (E4M3::from_bits(0x7f | sgn), 0);
+        };
+        let inc = match rm {
+            Rm::Rne => rem > half || (rem == half && q & 1 == 1),
+            Rm::Rtz => false,
+            Rm::Rdn => neg && rem != 0,
+            Rm::Rup => !neg && rem != 0,
+            Rm::Rmm => rem >= half,
+        };
+        let q = q + u64::from(inc);
+        // frac3 = 7 は OCP で NaN 行。6（448）までが有限値。
+        if q >= 7 {
+            return (E4M3::from_bits(0x7f | sgn), 0);
+        }
+        let nx = if rem != 0 || eu == 7 { FP_NX } else { 0 };
+        (E4M3::from_bits(0x78 | q | sgn), nx)
+    }
+
+    /// E5M2（8 ビット）に変換する。
+    #[must_use]
+    pub fn to_e5m2(self, rm: Rm) -> (E5M2, u8) {
+        convert(self, rm)
+    }
+
+    /// E2M1（4 ビット）に変換する。特殊値なし・上限超過は最大値 6.0。
+    #[must_use]
+    pub fn to_e2m1(self, rm: Rm) -> (E2M1, u8) {
+        if self.is_nan() || self.is_inf() {
+            return (E2M1::from_bits(0x7 | ((self.decode().0 as u64) << 3)), 0);
+        }
+        let (r, f) = convert::<8, 23, 2, 1>(self, rm);
+        // IEEE モデルで exp=3 行に丸め込まれた有限値は OCP では 4.0/6.0。
+        if r.bits() & 0x7 != 0x6 {
+            return (r, f);
+        }
+        let (neg, exp, frac) = self.decode();
+        let sgn = (neg as u64) << 3;
+        let eu = exp as i64 - 127;
+        let m24 = (1u64 << 23) | frac;
+        // 値は 2^2*(1+m)。frac1 = round(m*2)。eu = 2 では (m24-2^23)/2^22。
+        let (q, rem, half) = if eu == 2 {
+            let shift = 22u32;
+            let num = m24 - (1 << 23);
+            (num >> shift, num & ((1 << shift) - 1), 1u64 << (shift - 1))
+        } else if eu > 2 {
+            // 6.0 超は最大値に飽和。
+            return (E2M1::from_bits(0x7 | sgn), FP_NX);
+        } else {
+            // eu = 1 で IEEE モデルが exp=3 行に来るのは 3.5 以上のみ。
+            (0, 1, 1)
+        };
+        let inc = match rm {
+            Rm::Rne => rem > half || (rem == half && q & 1 == 1),
+            Rm::Rtz => false,
+            Rm::Rdn => neg && rem != 0,
+            Rm::Rup => !neg && rem != 0,
+            Rm::Rmm => rem >= half,
+        };
+        let q = (q + u64::from(inc)).min(1);
+        (
+            E2M1::from_bits(0x6 | q | sgn),
+            if rem != 0 { FP_NX } else { 0 },
+        )
+    }
 }
 
 impl F64 {
     /// 32 ビット形式に変換する。
     #[must_use]
     pub fn to_f32(self, rm: Rm) -> (F32, u8) {
+        convert(self, rm)
+    }
+}
+
+/// FP8/FP4 の小さい形式から 32 ビットへの変換。
+impl E4M3 {
+    /// 32 ビット形式に変換する。OCP 仕様: 0x7F/0xFF が NaN。
+    #[must_use]
+    pub fn to_f32(self, rm: Rm) -> (F32, u8) {
+        let v = self.bits() & 0xff;
+        if v & 0x7f == 0x7f {
+            return (F32::canonical_nan(), 0);
+        }
+        if v & 0x7f == 0x78 {
+            // exp 欄 15・仮数 0 は 256.0。
+            return (F32::from_bits((v >> 7) << 31 | 0x4380_0000), 0);
+        }
+        if v & 0x7f > 0x78 {
+            // 0x79〜0x7E: 256 + frac*32。
+            let mag = 256 + ((v & 7) * 32) as i64;
+            let (r, _) = F32::from_i64(mag, Rm::Rne);
+            return (F32::from_bits(r.bits() | (v >> 7) << 31), 0);
+        }
+        convert(self, rm)
+    }
+}
+
+impl E5M2 {
+    /// 32 ビット形式に変換する。
+    #[must_use]
+    pub fn to_f32(self, rm: Rm) -> (F32, u8) {
+        convert(self, rm)
+    }
+}
+
+impl E2M1 {
+    /// 32 ビット形式に変換する。0x6 = 4.0、0x7 = 6.0。
+    #[must_use]
+    pub fn to_f32(self, rm: Rm) -> (F32, u8) {
+        let v = self.bits() & 0xf;
+        if v & 0x7 >= 0x6 {
+            let mag = if v & 1 == 1 { 6 } else { 4 };
+            let (r, _) = F32::from_i64(mag, Rm::Rne);
+            return (F32::from_bits(r.bits() | (v >> 3) << 31), 0);
+        }
         convert(self, rm)
     }
 }
@@ -1151,6 +1311,56 @@ mod tests {
         let two = F32::from_bits(0x4000_0000);
         assert_eq!(one.add(two).0.bits(), 0x4040_0000);
         assert_eq!(one.mul(two).0.bits(), two.bits());
+    }
+
+    #[test]
+    fn fp8_fp4_basic() {
+        let one = F32::from_bits(0x3f80_0000);
+        // E4M3: bias 7、1.0 は 0x38。
+        let a = one.to_e4m3(Rm::Rne);
+        assert_eq!(a.0.bits(), 0x38);
+        assert_eq!(a.1, 0);
+        assert_eq!(a.0.to_f32(Rm::Rne).0.bits(), one.bits());
+        // E5M2: bias 15、1.0 は 0x3c。
+        let b = one.to_e5m2(Rm::Rne);
+        assert_eq!(b.0.bits(), 0x3c);
+        assert_eq!(b.0.to_f32(Rm::Rne).0.bits(), one.bits());
+        // E2M1: bias 1、1.0 は 0b0010。
+        let c = one.to_e2m1(Rm::Rne);
+        assert_eq!(c.0.bits(), 0x2);
+        assert_eq!(c.0.to_f32(Rm::Rne).0.bits(), one.bits());
+        // 丸め: E4M3 は仮数 3 ビット。1.0625 (0x3f880000) は 0x38 に偶数側で丸まる。
+        let m = F32::from_bits(0x3f88_0000).to_e4m3(Rm::Rne);
+        assert_eq!(m.0.bits(), 0x38);
+        assert_eq!(m.1, FP_NX);
+        // E5M2 の無限大は 0x7c。
+        assert!(E5M2::from_bits(0x7c).is_inf());
+        // NaN は正準 NaN に畳む。
+        assert!(F32::from_bits(0x7fc0_0000).to_e4m3(Rm::Rne).0.is_nan());
+    }
+
+    #[test]
+    fn fp8_fp4_ocp_top_row() {
+        // OCP: E4M3 の exp=15 は有限値（256〜448）、0x7F のみ NaN。
+        assert_eq!(E4M3::from_bits(0x7e).to_f32(Rm::Rne).0.bits(), 0x43e0_0000); // 448
+        assert!(E4M3::from_bits(0x7f).to_f32(Rm::Rne).0.is_nan());
+        // f32 256〜448 → 0x78〜0x7E。
+        assert_eq!(F32::from_bits(0x4380_0000).to_e4m3(Rm::Rne).0.bits(), 0x78); // 256
+        assert_eq!(F32::from_bits(0x43e0_0000).to_e4m3(Rm::Rne).0.bits(), 0x7e); // 448
+        // 448 と次の刻み 480 の中点 464 は偶数側 448 へ。超過は NaN。
+        assert_eq!(F32::from_bits(0x43e8_0000).to_e4m3(Rm::Rne).0.bits(), 0x7e); // 464
+        assert_eq!(F32::from_bits(0x43f0_0000).to_e4m3(Rm::Rne).0.bits(), 0x7f); // 480→NaN
+        assert_eq!(F32::inf(false).to_e4m3(Rm::Rne).0.bits(), 0x7f);
+        // 248 は 240/256 の中点。偶数側の 256 に寄せる。
+        assert_eq!(F32::from_bits(0x4378_0000).to_e4m3(Rm::Rne).0.bits(), 0x78); // 248
+        // OCP: E2M1 の 0x6=4.0・0x7=6.0。
+        assert_eq!(E2M1::from_bits(0x6).to_f32(Rm::Rne).0.bits(), 0x4080_0000);
+        assert_eq!(E2M1::from_bits(0x7).to_f32(Rm::Rne).0.bits(), 0x40c0_0000);
+        assert_eq!(F32::from_bits(0x4080_0000).to_e2m1(Rm::Rne).0.bits(), 0x6); // 4.0
+        assert_eq!(F32::from_bits(0x40c0_0000).to_e2m1(Rm::Rne).0.bits(), 0x7); // 6.0
+        assert_eq!(F32::from_bits(0x40e0_0000).to_e2m1(Rm::Rne).0.bits(), 0x7); // 7.0→飽和
+        // NaN は最大値 0x7 に寄せる（OCP の E2M1 に NaN はない）。
+        assert_eq!(F32::from_bits(0x7fc0_0000).to_e2m1(Rm::Rne).0.bits(), 0x7);
     }
 
     #[test]

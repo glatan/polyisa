@@ -183,6 +183,17 @@ fn declare_features(m: &mut Model) {
     feat(m, "rdpru", &[]);
     // Leaf 7.1 EAX。REX2・拡張 EVEX（map4 昇格形・NDD・NF）。
     feat(m, "apx", &[]);
+    // Leaf 7.1 EDX。AVX10 は EVEX 系命令の再編成で、基盤として
+    // AVX-512 の中核部分集合（F/VL/BW/DQ/CD）を前提にする。
+    feat(m, "avx10", &["avx512f", "avx512bw", "avx512cd", "avx512dq", "avx512vl"]);
+    // AVX10.2/10.3 は版で分かれる（CPUID.0x24 の版報告は未モデル）。
+    feat(m, "avx10_2", &["avx10"]);
+    feat(m, "avx10_3", &["avx10_2"]);
+    // Leaf 7.1 ECX。ACE（Advanced Compute Extensions）。v2 は版
+    // （CPUID.0x1D 系の版報告は未モデル）で分かれる。
+    // ACE の命令は AMX のタイル状態も使う（ACE 仕様 §3.1 の前提）。
+    feat(m, "ace", &["avx10", "amx_tile"]);
+    feat(m, "ace_v2", &["ace"]);
     // Leaf 0x8000_0001 EDX。
     feat(m, "syscall", &[]);
     feat(m, "nx", &[]);
@@ -691,9 +702,11 @@ fn declare_ident_bits(m: &mut Model) {
     // 現行の CPUID 表はサブリーフ行を持たないため `derive` では
     // 報告されないが、`ident_bit` の対応はここが正本。機能旗自体は
     // 明示モデルで使える。
-        b_sub(m, "apx", 0x7, 1, "edx", 21);
+    b_sub(m, "apx", 0x7, 1, "edx", 21);
     b_sub(m, "amx_fp16", 0x7, 1, "eax", 21);
     b_sub(m, "amx_complex", 0x7, 1, "edx", 8);
+    b_sub(m, "avx10", 0x7, 1, "edx", 19);
+    b_sub(m, "ace", 0x7, 1, "ecx", 11);
 }
 
 // ---------------------------------------------------------------------------
