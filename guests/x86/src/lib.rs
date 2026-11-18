@@ -1940,6 +1940,34 @@ mod tests {
         let d = decode_map(&[0x66, 0x62, 0xF1, 0x7E, 0x48, 0x6F, 0xC1], modes, fvl).unwrap();
         assert_eq!(d.insn, Insn::Vmovdqu32XvWv);
         assert!(decode_map(&[0xF3, 0x62, 0xF1, 0x7C, 0x48, 0x6F, 0xC1], modes, fvl).is_none());
+        // EVEX.b の合法性。VMOVDQU32 は broadcast も {er} も
+        // 持たないので、reg/mem どちらの b=1 も #UD。
+        assert!(decode_map(&[0x62, 0xF1, 0x7E, 0x58, 0x6F, 0xCA], modes, fvl).is_none());
+        assert!(decode_map(&[0x62, 0xF1, 0x7E, 0x58, 0x6F, 0x08], modes, fvl).is_none());
+        // VADDPS は broadcast（mem b=1）と {er}（reg b=1、L'L が
+        // 丸め指定）を両方受理する。
+        let d = decode_map(&[0x62, 0xF1, 0x6C, 0x58, 0x58, 0x08], modes, fvl).unwrap();
+        assert_eq!(d.insn, Insn::VaddpsXvHvWv);
+        assert!(d.evex_b);
+        let d = decode_map(&[0x62, 0xF1, 0x6C, 0x38, 0x58, 0xCB], modes, fvl).unwrap();
+        assert_eq!(d.insn, Insn::VaddpsXvHvWv);
+        assert!(d.evex_b && d.evex_ll == 1);
+        // VPADDD は整数演算なので {er} は無い。reg 形の b=1 は
+        // #UD だが mem 形の b=1（m32bcst）は受理される。
+        assert!(decode_map(&[0x62, 0xF1, 0x45, 0x58, 0xFE, 0xC8], modes, fvl).is_none());
+        let d = decode_map(&[0x62, 0xF1, 0x45, 0x58, 0xFE, 0x48, 0x12], modes, fvl).unwrap();
+        assert_eq!(d.insn, Insn::VpadddXvHvWv);
+        // wsel: EVEX.66.0F FE の W=1 は VPADDD ではなく VPADDQ
+        // の位置（D4）。W=1 で 0xFE は #UD。VADDPS は W=0、
+        // VADDPD は W=1 だけを受理する。
+        assert!(decode_map(&[0x62, 0xF1, 0xC5, 0x48, 0xFE, 0xC8], modes, fvl).is_none());
+        let d = decode_map(&[0x62, 0xF1, 0xC5, 0x48, 0xD4, 0xC8], modes, fvl).unwrap();
+        assert_eq!(d.insn, Insn::VpaddqXvHvWv);
+        assert!(decode_map(&[0x62, 0xF1, 0xEC, 0x48, 0x58, 0xCB], modes, fvl).is_none());
+        assert!(decode_map(&[0x62, 0xF1, 0x6D, 0x48, 0x58, 0xCB], modes, fvl).is_none());
+        // 埋め込み broadcast は宣言された L'L 形（512 のみ）で
+        // だけ有効。b=1 のメモリ形で L'L!=2 は #UD。
+        assert!(decode_map(&[0x62, 0xF1, 0x6C, 0x18, 0x58, 0x48, 0x11], modes, fvl).is_none());
     }
 
     #[test]

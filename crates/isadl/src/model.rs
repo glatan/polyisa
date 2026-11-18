@@ -331,10 +331,23 @@ pub struct MapInsn {
     /// 許容する L'L のビット集合（bit0=128、bit1=256、bit2=512）。
     /// `vex` との同時指定は不可。
     pub evex: Option<u8>,
-    /// EVEX disp8 の倍率。0 はベクタ全幅（16<<L'L）、n はその
-    /// バイト数（broadcast 要素やスカラ形のメモリオペランド）。
-    /// EVEX のメモリ形は disp8 を N 倍して読む（disp8*N 方式）。
+    /// EVEX disp8 の倍率。EVEX のメモリ形は disp8 を N 倍して
+    /// 読む（disp8*N 方式）。0 はベクタ全幅（16<<L'L）。n は
+    /// バイト数で、broadcast を許す項目では b=1 のメモリ形に、
+    /// それ以外では常に適用される（スカラ形のオペランド）。
     pub edisp: u8,
+    /// EVEX.b のメモリ形を許す（埋め込み broadcast）。r/m が
+    /// メモリのとき EVEX.b=1 で要素をベクタ全幅に複製して読む。
+    /// `evex` が必須で、要素サイズは `edisp` に置く。
+    pub bcast: bool,
+    /// EVEX.b のレジスタ形を許す（{er}/{sae}）。r/m がレジスタの
+    /// とき EVEX.b=1 で L'L はベクタ長ではなく丸め指定になる
+    /// （00=rn, 01=rd, 10=ru, 11=rz）。ベクトル長は 512 固定。
+    pub er: bool,
+    /// VEX.W / EVEX.W による項目選択。`Some(w)` の項目は
+    /// W==w のエンコードにだけ一致する（同じオペコードで W 別の
+    /// 要素幅を持つ命令を分ける）。None は W を区別しない。
+    pub wsel: Option<bool>,
     /// VEX.vvvv / EVEX.vvvv+V' が未使用（全ビット 1 固定）か。
     /// `vex`/`evex` が Some のときのみ意味を持つ。
     pub vex_rv: bool,

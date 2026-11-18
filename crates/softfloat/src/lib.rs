@@ -167,18 +167,36 @@ impl<const E: u32, const M: u32> Binary<E, M> {
     /// 加算。RNE。
     #[must_use]
     pub fn add(self, other: Self) -> (Self, u8) {
-        add_sub(self, other, false)
+        self.add_rm(other, Rm::Rne)
+    }
+
+    /// 丸め指定付き加算。
+    #[must_use]
+    pub fn add_rm(self, other: Self, rm: Rm) -> (Self, u8) {
+        add_sub(self, other, false, rm)
     }
 
     /// 減算。`a - b` は `a + (-b)` である。
     #[must_use]
     pub fn sub(self, other: Self) -> (Self, u8) {
-        add_sub(self, other, true)
+        self.sub_rm(other, Rm::Rne)
+    }
+
+    /// 丸め指定付き減算。
+    #[must_use]
+    pub fn sub_rm(self, other: Self, rm: Rm) -> (Self, u8) {
+        add_sub(self, other, true, rm)
     }
 
     /// 乗算。RNE。
     #[must_use]
     pub fn mul(self, other: Self) -> (Self, u8) {
+        self.mul_rm(other, Rm::Rne)
+    }
+
+    /// 丸め指定付き乗算。
+    #[must_use]
+    pub fn mul_rm(self, other: Self, rm: Rm) -> (Self, u8) {
         let (s1, e1, f1) = self.decode();
         let (s2, e2, f2) = other.decode();
         let neg = s1 ^ s2;
@@ -227,12 +245,18 @@ impl<const E: u32, const M: u32> Binary<E, M> {
         }
         // m == 0 にはならない（入力が非ゼロのため）。正規化と丸めは共通化する。
         sticky = normalize_window::<E, M>(&mut e, &mut m, sticky);
-        finish::<E, M>(neg, &mut e, &mut m, sticky, Rm::Rne)
+        finish::<E, M>(neg, &mut e, &mut m, sticky, rm)
     }
 
     /// 除算。RNE。
     #[must_use]
     pub fn div(self, other: Self) -> (Self, u8) {
+        self.div_rm(other, Rm::Rne)
+    }
+
+    /// 丸め指定付き除算。
+    #[must_use]
+    pub fn div_rm(self, other: Self, rm: Rm) -> (Self, u8) {
         let (s1, e1, f1) = self.decode();
         let (s2, e2, f2) = other.decode();
         let neg = s1 ^ s2;
@@ -275,7 +299,7 @@ impl<const E: u32, const M: u32> Binary<E, M> {
         let mut e = ue1 - ue2 - shift + M as i64 + 3;
         let mut m = m;
         let sticky = normalize_window::<E, M>(&mut e, &mut m, sticky);
-        finish::<E, M>(neg, &mut e, &mut m, sticky, Rm::Rne)
+        finish::<E, M>(neg, &mut e, &mut m, sticky, rm)
     }
 
     /// 符号つき 32 ビット整数に変換する。範囲外は飽和し NV を立てる。
@@ -510,6 +534,12 @@ impl<const E: u32, const M: u32> Binary<E, M> {
     /// NaN 入力は正準 NaN、inf * 0 と inf - inf は NaN になる。
     #[must_use]
     pub fn fmadd(self, other: Self, addend: Self) -> (Self, u8) {
+        self.fmadd_rm(other, addend, Rm::Rne)
+    }
+
+    /// 丸め指定付き積和融合。
+    #[must_use]
+    pub fn fmadd_rm(self, other: Self, addend: Self, rm: Rm) -> (Self, u8) {
         let (s1, e1, f1) = self.decode();
         let (s2, e2, f2) = other.decode();
         let (s3, e3, f3) = addend.decode();
@@ -605,12 +635,18 @@ impl<const E: u32, const M: u32> Binary<E, M> {
         let mut e = base + M as i64 + 3;
         let mut m_win = acc;
         let s = normalize_window::<E, M>(&mut e, &mut m_win, sticky);
-        finish::<E, M>(neg, &mut e, &mut m_win, s, Rm::Rne)
+        finish::<E, M>(neg, &mut e, &mut m_win, s, rm)
     }
 
     /// 平方根。RNE。負の値（負の無限大を含む）は NaN になる。
     #[must_use]
     pub fn sqrt(self) -> (Self, u8) {
+        self.sqrt_rm(Rm::Rne)
+    }
+
+    /// 丸め指定付き平方根。
+    #[must_use]
+    pub fn sqrt_rm(self, rm: Rm) -> (Self, u8) {
         let (neg, exp, frac) = self.decode();
         if self.is_nan() {
             let f = if self.is_signaling_nan() { FP_NV } else { 0 };
@@ -645,7 +681,7 @@ impl<const E: u32, const M: u32> Binary<E, M> {
         // value = q * 2^(E_in/2 - EXTRA/2)。窓の不変条件に合わせる。
         let mut e = ein / 2 - (EXTRA as i64) / 2 + M as i64 + 3;
         sticky = normalize_window::<E, M>(&mut e, &mut q, sticky);
-        finish::<E, M>(neg, &mut e, &mut q, sticky, Rm::Rne)
+        finish::<E, M>(neg, &mut e, &mut q, sticky, rm)
     }
 }
 
@@ -673,6 +709,7 @@ fn add_sub<const E: u32, const M: u32>(
     a: Binary<E, M>,
     b: Binary<E, M>,
     flip: bool,
+    rm: Rm,
 ) -> (Binary<E, M>, u8) {
     let (s1, e1, f1) = a.decode();
     let (mut s2, e2, f2) = b.decode();
@@ -755,7 +792,7 @@ fn add_sub<const E: u32, const M: u32>(
     let sticky: i8 = if dropped { r_sign * s_shifted } else { 0 };
     // 正規化。e は emin を下回りうる。下回り分は jam で寄せる。
     let sticky = normalize_window::<E, M>(&mut e, &mut m, sticky);
-    finish::<E, M>(neg, &mut e, &mut m, sticky, Rm::Rne)
+    finish::<E, M>(neg, &mut e, &mut m, sticky, rm)
 }
 
 /// 正規化。窓 [2^(M+3), 2^(M+4)) に寄せ、emin を下回る分は jam で寄せる。

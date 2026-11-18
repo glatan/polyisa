@@ -295,6 +295,57 @@ impl Backend for InterpBackend {
         F::from_u128(v)
     }
 
+    // 丸め指定付き演算（EVEX {er}）。softfloat の `_rm` 変種に渡す。
+    fn fadd_r<F: Width>(&mut self, a: Self::V<F>, b: Self::V<F>, rm: u8) -> Self::V<F> {
+        let rm = FpRm::from_bits(rm);
+        let (v, f) = fbin_r::<F>(F::to_u128(a), F::to_u128(b), rm, SF32::add_rm, SF64::add_rm);
+        self.fp_flags |= f;
+        F::from_u128(v)
+    }
+    fn fsub_r<F: Width>(&mut self, a: Self::V<F>, b: Self::V<F>, rm: u8) -> Self::V<F> {
+        let rm = FpRm::from_bits(rm);
+        let (v, f) = fbin_r::<F>(F::to_u128(a), F::to_u128(b), rm, SF32::sub_rm, SF64::sub_rm);
+        self.fp_flags |= f;
+        F::from_u128(v)
+    }
+    fn fmul_r<F: Width>(&mut self, a: Self::V<F>, b: Self::V<F>, rm: u8) -> Self::V<F> {
+        let rm = FpRm::from_bits(rm);
+        let (v, f) = fbin_r::<F>(F::to_u128(a), F::to_u128(b), rm, SF32::mul_rm, SF64::mul_rm);
+        self.fp_flags |= f;
+        F::from_u128(v)
+    }
+    fn fmadd_r<F: Width>(
+        &mut self,
+        a: Self::V<F>,
+        b: Self::V<F>,
+        c: Self::V<F>,
+        rm: u8,
+    ) -> Self::V<F> {
+        let rm = FpRm::from_bits(rm);
+        let (v, f) = ftri_r::<F>(
+            F::to_u128(a),
+            F::to_u128(b),
+            F::to_u128(c),
+            rm,
+            SF32::fmadd_rm,
+            SF64::fmadd_rm,
+        );
+        self.fp_flags |= f;
+        F::from_u128(v)
+    }
+    fn fdiv_r<F: Width>(&mut self, a: Self::V<F>, b: Self::V<F>, rm: u8) -> Self::V<F> {
+        let rm = FpRm::from_bits(rm);
+        let (v, f) = fbin_r::<F>(F::to_u128(a), F::to_u128(b), rm, SF32::div_rm, SF64::div_rm);
+        self.fp_flags |= f;
+        F::from_u128(v)
+    }
+    fn fsqrt_r<F: Width>(&mut self, a: Self::V<F>, rm: u8) -> Self::V<F> {
+        let rm = FpRm::from_bits(rm);
+        let (v, f) = funa_r::<F>(F::to_u128(a), rm, SF32::sqrt_rm, SF64::sqrt_rm);
+        self.fp_flags |= f;
+        F::from_u128(v)
+    }
+
     fn fmin<F: Width>(&mut self, a: Self::V<F>, b: Self::V<F>) -> Self::V<F> {
         let (v, f) = fbin::<F>(F::to_u128(a), F::to_u128(b), SF32::fmin, SF64::fmin);
         self.fp_flags |= f;
@@ -858,6 +909,76 @@ fn funa<F: Width>(
         }
         _ => {
             let (v, f) = f64op(SF64::from_bits(a as u64));
+            (u128::from(v.bits()), f)
+        }
+    }
+}
+
+/// 丸め指定付きの二項演算を `F32` と `F64` に振り分ける。
+fn fbin_r<F: Width>(
+    a: u128,
+    b: u128,
+    rm: FpRm,
+    f32op: fn(SF32, SF32, FpRm) -> (SF32, u8),
+    f64op: fn(SF64, SF64, FpRm) -> (SF64, u8),
+) -> (u128, u8) {
+    match F::BITS {
+        32 => {
+            let (v, f) = f32op(SF32::from_bits(a as u64), SF32::from_bits(b as u64), rm);
+            (u128::from(v.bits()), f)
+        }
+        _ => {
+            let (v, f) = f64op(SF64::from_bits(a as u64), SF64::from_bits(b as u64), rm);
+            (u128::from(v.bits()), f)
+        }
+    }
+}
+
+/// 丸め指定付きの単項演算を振り分ける。
+fn funa_r<F: Width>(
+    a: u128,
+    rm: FpRm,
+    f32op: fn(SF32, FpRm) -> (SF32, u8),
+    f64op: fn(SF64, FpRm) -> (SF64, u8),
+) -> (u128, u8) {
+    match F::BITS {
+        32 => {
+            let (v, f) = f32op(SF32::from_bits(a as u64), rm);
+            (u128::from(v.bits()), f)
+        }
+        _ => {
+            let (v, f) = f64op(SF64::from_bits(a as u64), rm);
+            (u128::from(v.bits()), f)
+        }
+    }
+}
+
+/// 丸め指定付きの三項演算を振り分ける。
+fn ftri_r<F: Width>(
+    a: u128,
+    b: u128,
+    c: u128,
+    rm: FpRm,
+    f32op: fn(SF32, SF32, SF32, FpRm) -> (SF32, u8),
+    f64op: fn(SF64, SF64, SF64, FpRm) -> (SF64, u8),
+) -> (u128, u8) {
+    match F::BITS {
+        32 => {
+            let (v, f) = f32op(
+                SF32::from_bits(a as u64),
+                SF32::from_bits(b as u64),
+                SF32::from_bits(c as u64),
+                rm,
+            );
+            (u128::from(v.bits()), f)
+        }
+        _ => {
+            let (v, f) = f64op(
+                SF64::from_bits(a as u64),
+                SF64::from_bits(b as u64),
+                SF64::from_bits(c as u64),
+                rm,
+            );
             (u128::from(v.bits()), f)
         }
     }

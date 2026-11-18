@@ -12482,6 +12482,29 @@ fn ev_kmask128<B: Backend>(b: &mut B, k: B::V<W64>, p: usize, w64: bool) -> B::V
     m
 }
 
+/// {k}/{z} マージ。`src` の part 値を、`dst` の現在値（{z} なら
+/// 0）と要素マスクで合成する。`w64` は要素幅。
+fn ev_merge<B: Backend>(
+    b: &mut B,
+    d: &MapDec,
+    k: B::V<W64>,
+    dst: u8,
+    src: B::V<W128>,
+    p: usize,
+    w64: bool,
+) -> B::V<W128> {
+    let m = ev_kmask128(b, k, p, w64);
+    let keep = if d.evex_z {
+        b.konst::<W128>(W128::from_u128(0))
+    } else {
+        b.get(sem::zreg_ref(dst, p))
+    };
+    let masked = b.and::<W128>(src, m);
+    let nm = b.not::<W128>(m);
+    let kept = b.and::<W128>(keep, nm);
+    b.or::<W128>(masked, kept)
+}
+
 /// VMOVDQU32/64（EVEX.0F 6F/7F）。`store` が真なら r/m 宛ての 7F、
 /// `w64` は要素幅（dqu64）。{k} マージと {z} ゼロイングに対応する。
 /// メモリ読みは部分幅で行うため、非アクティブ要素のフォールト抑制は
@@ -12498,18 +12521,7 @@ pub fn emovdqu<B: Backend>(
     let n = ev_n(d);
     let k = ev_k(b, d);
     let zero = b.konst::<W128>(W128::from_u128(0));
-    let merge = |b: &mut B, dst: u8, src: B::V<W128>, p: usize| {
-        let m = ev_kmask128(b, k, p, w64);
-        let keep = if d.evex_z {
-            zero
-        } else {
-            b.get(sem::zreg_ref(dst, p))
-        };
-        let masked = b.and::<W128>(src, m);
-        let nm = b.not::<W128>(m);
-        let kept = b.and::<W128>(keep, nm);
-        b.or::<W128>(masked, kept)
-    };
+    let merge = |b: &mut B, dst: u8, src: B::V<W128>, p: usize| ev_merge(b, d, k, dst, src, p, w64);
     if !store {
         let dst = decode::reg_x5(d);
         for p in 0..4 {
@@ -12570,6 +12582,166 @@ pub fn emovdqu<B: Backend>(
                 }
             }
         }
+    }
+    Ok(())
+}
+
+/// {er} エンコード（b=1 のレジスタ形）なら L'L は丸め指定。
+/// softfloat の `Rm` 番号で返し、それ以外は 0（RNE。
+/// MXCSR.RC の反映と {sae} の例外抑制は未モデル化の近似）。
+fn ev_rc(d: &MapDec, reg_form: bool) -> u8 {
+    if d.evex_b && reg_form {
+        x86_rm(u64::from(d.evex_ll))
+    } else {
+        0
+    }
+}
+
+/// {er} 形を含めたベクタの part 数。{er} は 512 ビット固定で、
+/// レジスタ形の b=1 では L'L が丸め指定になるため `ev_n` は
+/// 使えない。
+fn ev_parts(d: &MapDec, reg_form: bool) -> usize {
+    if d.evex_b && reg_form { 4 } else { ev_n(d) }
+}
+
+/// 要素を 128 ビット全幅に複製する（埋め込み broadcast 用）。
+/// `v` は下位 `ebits`（32 または 64）に要素値を持つ W128。
+fn ev_splat128<B: Backend>(b: &mut B, v: B::V<W128>, ebits: u32) -> B::V<W128> {
+    assert!(ebits == 32 || ebits == 64, "ev_splat128: ebits={ebits}");
+    let sh = b.konst::<W128>(W128::from_u128(u128::from(ebits)));
+    let hi = b.shl::<W128>(v, sh);
+    let v = b.or::<W128>(v, hi);
+    if ebits == 32 {
+        let sh = b.konst::<W128>(W128::from_u128(64));
+        let hi = b.shl::<W128>(v, sh);
+        b.or::<W128>(v, hi)
+    } else {
+        v
+    }
+}
+
+/// EVEX r/m ソースの part `p`（128 ビット単位）を読む。
+/// メモリ形で b=1 なら埋め込み broadcast：要素（`edisp` バイト）
+/// を読んで全レーンに複製する。`w64` は要素幅。
+fn ev_src<B: Backend>(
+    b: &mut B,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+    p: usize,
+    w64: bool,
+) -> Result<B::V<W128>, B::Exit> {
+    match ea {
+        Rm::Reg(_) => Ok(b.get(sem::zreg_ref(decode::rm_reg_x5(d), p))),
+        Rm::Mem { a, .. } => {
+            if d.evex_b {
+                // 埋め込み broadcast。要素を読んで全レーンへ複製
+                // する。ベクタ長に依らず要素アクセスは 1 回だけ。
+                let v = if w64 {
+                    let v = b.load::<W64>(*a, sem::DATA_READ)?;
+                    b.zext::<W64, W128>(v)
+                } else {
+                    let v = b.load::<W32>(*a, sem::DATA_READ)?;
+                    b.zext::<W32, W128>(v)
+                };
+                Ok(ev_splat128(b, v, if w64 { 64 } else { 32 }))
+            } else {
+                let off = b.konst::<W64>(W64::from_u128((p * 16) as u128));
+                let a = b.add::<W64>(*a, off);
+                b.load::<W128>(a, sem::DATA_READ)
+            }
+        }
+    }
+}
+
+/// VADDPS/VADDPD（EVEX.0F 58）。dst{zk} = src1 + src2 で、
+/// `w64`（EVEX.W）は要素幅。メモリ形の b=1 は m32bcst/m64bcst、
+/// レジスタ形の b=1 は {er}/{sae}（L'L=丸め指定、512 固定）。
+/// {k} マージと {z} ゼロイングは要素単位。
+pub fn eaddp<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit> {
+    use polyisa_sem::{F32, F64};
+    let reg_form = matches!(ea, Rm::Reg(_));
+    let n = ev_parts(d, reg_form);
+    let w64 = d.vex_w;
+    let rc = ev_rc(d, reg_form);
+    let k = ev_k(b, d);
+    let dst = decode::reg_x5(d);
+    let src1 = d.vex_v;
+    let zero = b.konst::<W128>(W128::from_u128(0));
+    for p in 0..4 {
+        let v = if p < n {
+            let x = b.get(sem::zreg_ref(src1, p));
+            let y = ev_src(b, d, ea, p, w64)?;
+            let mut r = zero;
+            if w64 {
+                for e in 0..2 {
+                    let xf = flane64(b, x, e);
+                    let yf = flane64(b, y, e);
+                    let g = b.fadd_r::<F64>(xf, yf, rc);
+                    r = put_flane64(b, r, g, e);
+                }
+            } else {
+                for e in 0..4 {
+                    let xf = flane32(b, x, e);
+                    let yf = flane32(b, y, e);
+                    let g = b.fadd_r::<F32>(xf, yf, rc);
+                    r = put_flane32(b, r, g, e);
+                }
+            }
+            ev_merge(b, d, k, dst, r, p, w64)
+        } else {
+            zero
+        };
+        b.set(sem::zreg_ref(dst, p), v);
+    }
+    Ok(())
+}
+
+/// VPADDD/VPADDQ（EVEX.66.0F FE / D4）。dst{zk} = src1 + src2。
+/// メモリ形の b=1 は m32bcst/m64bcst。整数形なので {er} はない。
+pub fn epadd<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit> {
+    let reg_form = matches!(ea, Rm::Reg(_));
+    let n = ev_parts(d, reg_form);
+    let w64 = d.vex_w;
+    let k = ev_k(b, d);
+    let dst = decode::reg_x5(d);
+    let src1 = d.vex_v;
+    let zero = b.konst::<W128>(W128::from_u128(0));
+    for p in 0..4 {
+        let v = if p < n {
+            let x = b.get(sem::zreg_ref(src1, p));
+            let y = ev_src(b, d, ea, p, w64)?;
+            let r = if w64 {
+                let x64 = b.trunc::<W128, W64>(x);
+                let y64 = b.trunc::<W128, W64>(y);
+                let xh = lane128(b, x, 64, 64);
+                let yh = lane128(b, y, 64, 64);
+                let xh64 = b.trunc::<W128, W64>(xh);
+                let yh64 = b.trunc::<W128, W64>(yh);
+                let lo = b.add::<W64>(x64, y64);
+                let hi = b.add::<W64>(xh64, yh64);
+                let hi128 = b.zext::<W64, W128>(hi);
+                let lo128 = b.zext::<W64, W128>(lo);
+                let sh = b.konst::<W128>(W128::from_u128(64));
+                let hi_s = b.shl::<W128>(hi128, sh);
+                b.or::<W128>(lo128, hi_s)
+            } else {
+                let mut r = zero;
+                for e in 0..4 {
+                    let xl = lane128(b, x, e * 32, 32);
+                    let yl = lane128(b, y, e * 32, 32);
+                    let x32 = b.trunc::<W128, W32>(xl);
+                    let y32 = b.trunc::<W128, W32>(yl);
+                    let g = b.add::<W32>(x32, y32);
+                    let g128 = b.zext::<W32, W128>(g);
+                    r = put_lane128(b, r, g128, e * 32, 32);
+                }
+                r
+            };
+            ev_merge(b, d, k, dst, r, p, w64)
+        } else {
+            zero
+        };
+        b.set(sem::zreg_ref(dst, p), v);
     }
     Ok(())
 }

@@ -625,6 +625,7 @@ fn gen_map_decoder(model: &Model) -> Result<String, GenError> {
          \x20   ops: &[OpK],\n\
          \x20   group_modrm: bool,\n\
          \x20   edisp: u8,\n\
+         \x20   ebok: u8,\n\
          ) -> Option<Insn> {\n\
          \x20   let needs_modrm = group_modrm\n\
          \x20       || ops.iter().any(|o| {\n\
@@ -644,6 +645,15 @@ fn gen_map_decoder(model: &Model) -> Result<String, GenError> {
          \x20       *i += 1;\n\
          \x20       d.has_modrm = true;\n\
          \x20       d.modrm = m;\n\
+         \x20       // EVEX.b の合法性。レジスタ形は er（ebok bit1）、\n\
+         \x20       // メモリ形は埋め込み broadcast（ebok bit0）を要求。\n\
+         \x20       // それ以外で b=1 は予約で UD。\n\
+         \x20       if d.evex_b {\n\
+         \x20           let ok = if m >> 6 == 3 { ebok & 2 } else { ebok & 1 };\n\
+         \x20           if ok == 0 {\n\
+         \x20               return None;\n\
+         \x20           }\n\
+         \x20       }\n\
          \x20       if m >> 6 != 3 {\n\
          \x20           let rm = m & 7;\n\
          \x20           let db: u32 = if d.asize == 16 {\n\
@@ -678,12 +688,15 @@ fn gen_map_decoder(model: &Model) -> Result<String, GenError> {
          \x20               d.disp = v << (64 - db) >> (64 - db);\n\
          \x20               // EVEX は disp8 をオペランドサイズ N で\n\
          \x20               // スケールする（disp8*N）。edisp=0 はベクタ\n\
-         \x20               // 全幅 16<<L'L、それ以外は要素バイト数。\n\
+         \x20               // 全幅 16<<L'L。edisp!=0 は、broadcast 可能\n\
+         \x20               // 項目（ebok bit0）では b=1 のときだけ要素\n\
+         \x20               // バイト数に、それ以外（スカラ形）では常に\n\
+         \x20               // 要素バイト数になる。\n\
          \x20               if d.evex && db == 8 {\n\
-         \x20                   let n = if edisp == 0 {\n\
-         \x20                       16i64 << d.evex_ll\n\
-         \x20                   } else {\n\
+         \x20                   let n = if edisp != 0 && (d.evex_b || ebok & 1 == 0) {\n\
          \x20                       i64::from(edisp)\n\
+         \x20                   } else {\n\
+         \x20                       16i64 << d.evex_ll\n\
          \x20                   };\n\
          \x20                   d.disp *= n;\n\
          \x20               }\n\
@@ -1067,7 +1080,23 @@ fn emit_map_candidate(
         (Some(VexL::Any), None) => "d.vex".to_string(),
         (Some(VexL::L0), None) => "d.vex && !d.vex_l".to_string(),
         (Some(VexL::L1), None) => "d.vex && d.vex_l".to_string(),
-        (None, Some(mask)) => format!("d.evex && (1u32 << d.evex_ll) & {mask} != 0"),
+        (None, Some(mask)) => {
+            if mi.er {
+                // {er} 形（b=1 + レジスタ形）では L'L は丸め指定
+                // なので全値を受理する。レジスタ形の判定は、非グループ
+                // 項目では `bytes[i]`（=ModRM バイト）の mod、グループ
+                // 項目では定義済みの `m` を見る。
+                let modreg =
+                    if mi.group.is_some() || mi.group_mod.is_some() || mi.group_rm.is_some() {
+                        "m >> 6 == 3".to_string()
+                    } else {
+                        "*bytes.get(*i)? >> 6 == 3".to_string()
+                    };
+                format!("d.evex && ((1u32 << d.evex_ll) & {mask} != 0 || (d.evex_b && {modreg}))")
+            } else {
+                format!("d.evex && (1u32 << d.evex_ll) & {mask} != 0")
+            }
+        }
         (Some(_), Some(_)) => {
             return Err(GenError::Custom(format!("{}: vex と evex は排他", mi.name)));
         }
@@ -1075,6 +1104,12 @@ fn emit_map_candidate(
     // `vex_rv` はフィールド 1111b（= 補数を解くとレジスタ 0）を要求。
     let vex = if mi.vex_rv {
         format!("{vex} && d.vex_v == 0")
+    } else {
+        vex
+    };
+    // `wsel` は VEX/EVEX.W の値で項目を分ける。
+    let vex = if let Some(w) = mi.wsel {
+        format!("{vex} && d.vex_w == {w}")
     } else {
         vex
     };
@@ -1096,8 +1131,9 @@ fn emit_map_candidate(
     let ops = mi.ops.iter().map(opk_code).collect::<Vec<_>>().join(", ");
     let group = mi.group.is_some();
     let edisp = mi.edisp;
+    let ebok = u8::from(mi.bcast) | (u8::from(mi.er) << 1);
     s.push_str(&format!(
-        "            if {cond} {{\n                return finish(bytes, i, d, Insn::{}, &[{ops}], {group}, {edisp});\n            }}\n",
+        "            if {cond} {{\n                return finish(bytes, i, d, Insn::{}, &[{ops}], {group}, {edisp}, {ebok});\n            }}\n",
         to_ident(&mi.name)
     ));
     Ok(())

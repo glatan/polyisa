@@ -32,6 +32,9 @@ fn mi(
         vex: None,
         evex: None,
         edisp: 0,
+        bcast: false,
+        er: false,
+        wsel: None,
         vex_rv: false,
         pfx,
         when,
@@ -1788,6 +1791,32 @@ pub fn build_maps(m: &mut Model) {
         );
         vl.when = Pred::Flag("avx512vl".to_string());
         m0f.push(MapItem::Insn(op, vl));
+    }
+    // EVEX パック演算（FVM：512 ビット形のみ）。浮動小数点の
+    // VADDPS/PD は {er}/{sae} と埋め込み broadcast（m32bcst/
+    // m64bcst）を、整数の VPADDD/Q は broadcast のみ許す。
+    // `edisp` は broadcast 形の disp8 倍率（要素バイト数）。
+    // W=0/1 の要素幅別項目は `wsel` で分ける。
+    for (op, sel, mn, w, edisp, er) in [
+        (0x58u8, PfxSel::Plain, "vaddps", false, 4u8, true),
+        (0x58, PfxSel::P66, "vaddpd", true, 8, true),
+        (0xFE, PfxSel::P66, "vpaddd", false, 4, false),
+        (0xD4, PfxSel::P66, "vpaddq", true, 8, false),
+    ] {
+        let mut it = ex(
+            &format!("{mn}_xv_hv_wv"),
+            &[RegX, Vv, RmX],
+            sel,
+            0b100,
+            false,
+            "{op} {x}, {h}, {w}",
+            "alu",
+        );
+        it.bcast = true;
+        it.er = er;
+        it.edisp = edisp;
+        it.wsel = Some(w);
+        m0f.push(MapItem::Insn(op, it));
     }
     // VMOVSS/VMOVSD（F3/F2 の 10/11、L0 のみ）。レジスタ形は
     // vvvv が第 2 ソースになる 3 オペランド形。メモリ形で

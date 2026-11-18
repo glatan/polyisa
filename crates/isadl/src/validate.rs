@@ -457,6 +457,45 @@ fn validate_maps(model: &Model, timing: &BTreeSet<&str>, errors: &mut Vec<Valida
                             field: format!("{}: edisp には evex が要る", mi.name),
                         });
                     }
+                    // 埋め込み broadcast は EVEX 項目で、disp8 スケールに
+                    // 要素バイト数が要る。
+                    if mi.bcast && (mi.evex.is_none() || mi.edisp == 0) {
+                        errors.push(ValidationError::BadField {
+                            format: "map-insn".to_string(),
+                            field: format!("{}: bcast には evex と edisp が要る", mi.name),
+                        });
+                    }
+                    // {er} は EVEX 項目で、512 ビット形（L'L=2）が
+                    // 宣言されていることが要る（b=1 で L'L は丸め指定）。
+                    // また b=1 の扱いは r/m オペランドの形で決まるので
+                    // ModRM 系の r/m オペランドが必須。
+                    let has_rm = mi.ops.iter().any(|o| {
+                        matches!(
+                            o,
+                            crate::model::OpKind::Ea(_)
+                                | crate::model::OpKind::RmX
+                                | crate::model::OpKind::RmM
+                        )
+                    });
+                    if mi.er && !matches!(mi.evex, Some(m) if m & 0b100 != 0) {
+                        errors.push(ValidationError::BadField {
+                            format: "map-insn".to_string(),
+                            field: format!("{}: er には evex の 512 ビット形が要る", mi.name),
+                        });
+                    }
+                    if (mi.er || mi.bcast) && !has_rm {
+                        errors.push(ValidationError::BadField {
+                            format: "map-insn".to_string(),
+                            field: format!("{}: er/bcast には r/m オペランドが要る", mi.name),
+                        });
+                    }
+                    // W による項目選択は VEX/EVEX 項目にだけ意味がある。
+                    if mi.wsel.is_some() && mi.vex.is_none() && mi.evex.is_none() {
+                        errors.push(ValidationError::BadField {
+                            format: "map-insn".to_string(),
+                            field: format!("{}: wsel には vex/evex が要る", mi.name),
+                        });
+                    }
                     // VEX/EVEX 項目は `vex_code` のある表にだけ置ける
                     // （無い表からは接頭辞経路で到達しない）。
                     if (mi.vex.is_some() || mi.evex.is_some()) && map.vex_code.is_none() {
@@ -548,11 +587,20 @@ fn validate_maps(model: &Model, timing: &BTreeSet<&str>, errors: &mut Vec<Valida
                 if a.vex.is_some() != b.vex.is_some() || a.evex.is_some() != b.evex.is_some() {
                     continue;
                 }
-                // EVEX 項目同士は L'L の許容集合が排他なら衝突しない。
-                if let (Some(x), Some(y)) = (a.evex, b.evex)
-                    && x & y == 0
-                {
+                // W 選択が両方指定されていて値が違えば、同じ
+                // エンコードには一致しない。
+                if a.wsel.is_some() && b.wsel.is_some() && a.wsel != b.wsel {
                     continue;
+                }
+                // EVEX 項目同士は L'L の許容集合が排他なら衝突しない。
+                // ただし {er} 項目は b=1+reg で L'L が丸め指定になり
+                // 全 L'L を受理するので、0b111 として扱う。
+                if let (Some(x), Some(y)) = (a.evex, b.evex) {
+                    let x = if a.er { 0b111 } else { x };
+                    let y = if b.er { 0b111 } else { y };
+                    if x & y == 0 {
+                        continue;
+                    }
                 }
                 // VEX 項目同士は VEX.L の許容範囲が排他なら衝突しない。
                 if let (Some(x), Some(y)) = (a.vex, b.vex)

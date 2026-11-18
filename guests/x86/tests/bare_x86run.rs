@@ -20979,3 +20979,223 @@ fn run64_evex_movdqu() {
         assert_eq!(&v[..16], &u32v(&e)[..], "xmm7{{k2}}{{z}}");
     }
 }
+
+#[test]
+fn run64_evex_alu() {
+    // B2a-2 の EVEX 演算基盤検査：VADDPS/VADDPD・VPADDD/VPADDQ の
+    // 512 ビット実行、W 選択、{k} マージ/{z} ゼロイング、埋め込み
+    // broadcast（要素スケールの disp8）、{er} 丸め指定を確かめる。
+    let feats = polyisa_guest_x86::model_feats("x86_64_v4");
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2800);
+    let u32v = |a: &[u32]| -> Vec<u8> { a.iter().flat_map(|f| f.to_le_bytes()).collect() };
+    let u64v = |a: &[u64]| -> Vec<u8> { a.iter().flat_map(|f| f.to_le_bytes()).collect() };
+    let f32v = |f: f32| -> Vec<u8> { u32v(&[f.to_bits(); 16]) };
+    let f64v = |f: f64| -> Vec<u8> { u64v(&[f.to_bits(); 8]) };
+    // +0x000: f32 1.0x16、+0x040: f32 0.5x16、+0x0C0: -2^-25 x16
+    // +0x100: f64 1.0x8、+0x140: f64 0.25x8
+    // +0x180: dword (i+1)*4、+0x1C0: dword i
+    // +0x200: qword i*0x1000、+0x240: qword i、+0x280: f32 2.0x16
+    env.backend.mem.write(VirtAddr(0x2000), &f32v(1.0)).unwrap();
+    env.backend.mem.write(VirtAddr(0x2040), &f32v(0.5)).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x20C0), &u32v(&[0xB3000000; 16]))
+        .unwrap();
+    env.backend.mem.write(VirtAddr(0x2100), &f64v(1.0)).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2140), &f64v(0.25))
+        .unwrap();
+    let d7: Vec<u32> = (0..16).map(|i| (i + 1) * 4).collect();
+    env.backend.mem.write(VirtAddr(0x2180), &u32v(&d7)).unwrap();
+    let d8: Vec<u32> = (0..16).collect();
+    env.backend.mem.write(VirtAddr(0x21C0), &u32v(&d8)).unwrap();
+    let q9: Vec<u64> = (0..8).map(|i| i * 0x1000).collect();
+    env.backend.mem.write(VirtAddr(0x2200), &u64v(&q9)).unwrap();
+    let q10: Vec<u64> = (0..8).collect();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2240), &u64v(&q10))
+        .unwrap();
+    env.backend.mem.write(VirtAddr(0x2280), &f32v(2.0)).unwrap();
+    // k3=0xAAAA（dword 奇数）、k5=0x0F0F。
+    env.backend.set(polyisa_guest_x86::sem::kref(3), 0xAAAA);
+    env.backend.set(polyisa_guest_x86::sem::kref(5), 0x0F0F);
+    let prog: &[u8] = &[
+        0x48, 0xb8, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rax,0x2000
+        0x62, 0xf1, 0x7e, 0x48, 0x6f, 0x10, // vmovdqu32 zmm2,[rax]
+        0x62, 0xf1, 0x7e, 0x48, 0x6f, 0x58, 0x01, // vmovdqu32 zmm3,[rax+0x40]
+        0x62, 0xf1, 0x7e, 0x48, 0x6f, 0x60, 0x03, // vmovdqu32 zmm4,[rax+0xC0]
+        0x62, 0xf1, 0xfe, 0x48, 0x6f, 0x68, 0x04, // vmovdqu64 zmm5,[rax+0x100]
+        0x62, 0xf1, 0xfe, 0x48, 0x6f, 0x70, 0x05, // vmovdqu64 zmm6,[rax+0x140]
+        0x62, 0xf1, 0x7e, 0x48, 0x6f, 0x78, 0x06, // vmovdqu32 zmm7,[rax+0x180]
+        0x62, 0x71, 0x7e, 0x48, 0x6f, 0x40, 0x07, // vmovdqu32 zmm8,[rax+0x1C0]
+        0x62, 0x71, 0xfe, 0x48, 0x6f, 0x48, 0x08, // vmovdqu64 zmm9,[rax+0x200]
+        0x62, 0x71, 0xfe, 0x48, 0x6f, 0x50, 0x09, // vmovdqu64 zmm10,[rax+0x240]
+        // 1) vaddps zmm1,zmm2,zmm3 -> 1.5
+        0x62, 0xf1, 0x6c, 0x48, 0x58, 0xcb, 0x62, 0xf1, 0x7e, 0x48, 0x7f, 0x48,
+        0x0b, // [rax+0x2C0]
+        // 2) vaddpd zmm1,zmm5,zmm6 -> 1.25
+        0x62, 0xf1, 0xd5, 0x48, 0x58, 0xce, 0x62, 0xf1, 0x7e, 0x48, 0x7f, 0x48,
+        0x0c, // [rax+0x300]
+        // 3) vaddps zmm1,zmm2,[rax+0x280] -> 3.0（非 broadcast、
+        //    disp8=0x0A はベクタ幅スケールで 0x280）
+        0x62, 0xf1, 0x6c, 0x48, 0x58, 0x48, 0x0a, 0x62, 0xf1, 0x7e, 0x48, 0x7f, 0x48,
+        0x0d, // [rax+0x340]
+        // 4) vaddps zmm1,zmm2,[rax+0x44]{1to16} -> 1.5
+        //    （broadcast、disp8=0x11 は要素スケールで 0x44）
+        0x62, 0xf1, 0x6c, 0x58, 0x58, 0x48, 0x11, 0x62, 0xf1, 0x7e, 0x48, 0x7f, 0x48,
+        0x0e, // [rax+0x380]
+        // 5) vaddps zmm1,zmm2,zmm4,{rd-sae} -> 1.0-2^-24
+        0x62, 0xf1, 0x6c, 0x38, 0x58, 0xcc, 0x62, 0xf1, 0x7e, 0x48, 0x7f, 0x48,
+        0x0f, // [rax+0x3C0]
+        // 6) vaddps zmm1,zmm2,zmm4,{rn-sae} -> 1.0
+        0x62, 0xf1, 0x6c, 0x18, 0x58, 0xcc, 0x62, 0xf1, 0x7e, 0x48, 0x7f, 0x48,
+        0x10, // [rax+0x400]
+        // 7) vaddps zmm1{k3},zmm2,zmm2 -> 奇数 dword=2.0、他は 1.0 温存
+        0x62, 0xf1, 0x6c, 0x4b, 0x58, 0xca, 0x62, 0xf1, 0x7e, 0x48, 0x7f, 0x48,
+        0x11, // [rax+0x440]
+        // 8) vaddps zmm1{k3}{z},zmm2,zmm3 -> 奇数 dword=1.5、他は 0
+        0x62, 0xf1, 0x6c, 0xcb, 0x58, 0xcb, 0x62, 0xf1, 0x7e, 0x48, 0x7f, 0x48,
+        0x12, // [rax+0x480]
+        // 9) vpaddd zmm1{k5},zmm7,zmm8 -> dword 0-3,8-11 = (i+1)*4+i、
+        //    他は #8 の値を温存
+        0x62, 0xd1, 0x45, 0x4d, 0xfe, 0xc8, 0x62, 0xf1, 0x7e, 0x48, 0x7f, 0x48,
+        0x13, // [rax+0x4C0]
+        // 10) vpaddq zmm1,zmm9,zmm10 -> i*0x1000+i
+        0x62, 0xd1, 0xb5, 0x48, 0xd4, 0xca, 0x62, 0xf1, 0xfe, 0x48, 0x7f, 0x48,
+        0x14, // [rax+0x500]
+        // 11) vpaddd zmm1,zmm7,[rax+0x48]{1to16}
+        //     -> (i+1)*4 + 0x3F000000（disp8=0x12 要素スケール）
+        0x62, 0xf1, 0x45, 0x58, 0xfe, 0x48, 0x12, 0x62, 0xf1, 0x7e, 0x48, 0x7f, 0x48,
+        0x15, // [rax+0x540]
+        // 12) vpaddq zmm1,zmm9,[rax+0x108]{1to8}
+        //     -> i*0x1000 + 0x3FF0000000000000（disp8=0x21 要素スケール）
+        0x62, 0xf1, 0xb5, 0x58, 0xd4, 0x48, 0x21, 0x62, 0xf1, 0xfe, 0x48, 0x7f, 0x48,
+        0x16, // [rax+0x580]
+        // 13) vpaddd zmm1,zmm7,[rax+0x1C0] -> (i+1)*4+i
+        //     （非 broadcast、disp8=7 ベクタ幅スケール）
+        0x62, 0xf1, 0x45, 0x48, 0xfe, 0x48, 0x07, 0x62, 0xf1, 0x7e, 0x48, 0x7f, 0x48,
+        0x17, // [rax+0x5C0]
+        // 14) vaddps zmm1{k3}{z},zmm2,[rax]{1to16}
+        //     -> 奇数 dword=2.0、他は 0（broadcast + マスク + ゼロ）
+        0x62, 0xf1, 0x6c, 0xdb, 0x58, 0x08, 0x62, 0xf1, 0x7e, 0x48, 0x7f, 0x48, 0x18,
+        // [rax+0x600]
+        // 15) vaddps zmm1{k3},zmm2,zmm4,{rd-sae}
+        //     -> 奇数 dword=0x3F7FFFFF、他は #14 の値を温存
+        //     （{er} + opmask マージ）
+        0x62, 0xf1, 0x6c, 0x3b, 0x58, 0xcc, 0x62, 0xf1, 0x7e, 0x48, 0x7f, 0x48, 0x19,
+        // [rax+0x640]
+        0x48, 0x31, 0xdb, // xor ebx,ebx
+        0xb8, 0x01, 0x00, 0x00, 0x00, // mov eax,1
+        0xcd, 0x80, // int 0x80
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = ExitOne;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        300,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64_v4"),
+    );
+    assert_eq!(out, Outcome::Exit(0));
+    let acc = polyisa_mem::Access {
+        endian: polyisa_mem::Endian::Le,
+        align: polyisa_mem::Align::Unaligned,
+        kind: polyisa_mem::AccessKind::DataRead,
+    };
+    let mut v = [0u8; 0x40];
+    let f32n: Vec<u32> = (0..16).map(|i| (i + 1) * 4 + i).collect();
+    // 1) vaddps: 16 x 1.5。
+    env.backend.mem.read(VirtAddr(0x22C0), &mut v, acc).unwrap();
+    assert_eq!(&v[..], &u32v(&[0x3FC00000; 16])[..], "vaddps zmm");
+    // 2) vaddpd: 8 x 1.25。
+    env.backend.mem.read(VirtAddr(0x2300), &mut v, acc).unwrap();
+    assert_eq!(&v[..], &u64v(&[1.25f64.to_bits(); 8])[..], "vaddpd zmm");
+    // 3) 非 broadcast メモリ形: 16 x 3.0。
+    env.backend.mem.read(VirtAddr(0x2340), &mut v, acc).unwrap();
+    assert_eq!(&v[..], &u32v(&[0x40400000; 16])[..], "vaddps mem");
+    // 4) broadcast + 要素スケール disp8: 16 x 1.5。
+    env.backend.mem.read(VirtAddr(0x2380), &mut v, acc).unwrap();
+    assert_eq!(&v[..], &u32v(&[0x3FC00000; 16])[..], "vaddps bcst");
+    // 5) {rd-sae}: 1.0 - 2^-24 = 0x3F7FFFFF。
+    env.backend.mem.read(VirtAddr(0x23C0), &mut v, acc).unwrap();
+    assert_eq!(&v[..], &u32v(&[0x3F7FFFFF; 16])[..], "vaddps rd-sae");
+    // 6) {rn-sae}: 1.0。
+    env.backend.mem.read(VirtAddr(0x2400), &mut v, acc).unwrap();
+    assert_eq!(&v[..], &u32v(&[0x3F800000; 16])[..], "vaddps rn-sae");
+    // 7) {k3} マージ: 奇数 dword=2.0、他は 1.0。
+    env.backend.mem.read(VirtAddr(0x2440), &mut v, acc).unwrap();
+    {
+        let e: Vec<u32> = (0..16)
+            .map(|i| if i % 2 == 1 { 0x40000000 } else { 0x3F800000 })
+            .collect();
+        assert_eq!(&v[..], &u32v(&e)[..], "vaddps {{k3}} merge");
+    }
+    // 8) {k3}{z}: 奇数 dword=1.5、他は 0。
+    env.backend.mem.read(VirtAddr(0x2480), &mut v, acc).unwrap();
+    {
+        let e: Vec<u32> = (0..16)
+            .map(|i| if i % 2 == 1 { 0x3FC00000 } else { 0 })
+            .collect();
+        assert_eq!(&v[..], &u32v(&e)[..], "vaddps {{k3}}{{z}}");
+    }
+    // 9) vpaddd {k5}: dword 0-3,8-11 が和、他は #8 を温存。
+    env.backend.mem.read(VirtAddr(0x24C0), &mut v, acc).unwrap();
+    {
+        let e: Vec<u32> = (0..16)
+            .map(|i| match i {
+                0..=3 | 8..=11 => (i + 1) * 4 + i,
+                5 | 7 | 13 | 15 => 0x3FC00000,
+                _ => 0,
+            })
+            .collect();
+        assert_eq!(&v[..], &u32v(&e)[..], "vpaddd {{k5}} merge");
+    }
+    // 10) vpaddq: i*0x1000+i。
+    env.backend.mem.read(VirtAddr(0x2500), &mut v, acc).unwrap();
+    {
+        let e: Vec<u64> = (0..8).map(|i| i * 0x1000 + i).collect();
+        assert_eq!(&v[..], &u64v(&e)[..], "vpaddq zmm");
+    }
+    // 11) vpaddd broadcast: (i+1)*4 + 0x3F000000。
+    env.backend.mem.read(VirtAddr(0x2540), &mut v, acc).unwrap();
+    {
+        let e: Vec<u32> = (0..16).map(|i| (i + 1) * 4 + 0x3F000000).collect();
+        assert_eq!(&v[..], &u32v(&e)[..], "vpaddd bcst");
+    }
+    // 12) vpaddq broadcast: i*0x1000 + 0x3FF0000000000000。
+    env.backend.mem.read(VirtAddr(0x2580), &mut v, acc).unwrap();
+    {
+        let e: Vec<u64> = (0..8).map(|i| i * 0x1000 + 0x3FF0000000000000).collect();
+        assert_eq!(&v[..], &u64v(&e)[..], "vpaddq bcst");
+    }
+    // 13) vpaddd 非 broadcast メモリ: (i+1)*4+i。
+    env.backend.mem.read(VirtAddr(0x25C0), &mut v, acc).unwrap();
+    assert_eq!(&v[..], &u32v(&f32n)[..], "vpaddd mem");
+    // 14) broadcast + {k3}{z}: 奇数 dword=2.0、他は 0。
+    env.backend.mem.read(VirtAddr(0x2600), &mut v, acc).unwrap();
+    {
+        let e: Vec<u32> = (0..16)
+            .map(|i| if i % 2 == 1 { 0x40000000 } else { 0 })
+            .collect();
+        assert_eq!(&v[..], &u32v(&e)[..], "vaddps bcst {{k3}}{{z}}");
+    }
+    // 15) {er} + {k3} マージ: 奇数 dword=0x3F7FFFFF、他は #14 を
+    // 温存（偶数=0、奇数=2.0 のうち奇数だけが上書きされるので
+    // 結果は奇数=0x3F7FFFFF、偶数=0）。
+    env.backend.mem.read(VirtAddr(0x2640), &mut v, acc).unwrap();
+    {
+        let e: Vec<u32> = (0..16)
+            .map(|i| if i % 2 == 1 { 0x3F7FFFFF } else { 0 })
+            .collect();
+        assert_eq!(&v[..], &u32v(&e)[..], "vaddps rd-sae {{k3}}");
+    }
+}

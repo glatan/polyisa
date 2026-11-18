@@ -3744,6 +3744,8 @@ fn dispatch_map<B: Backend>(
         // EVEX の VMOVDQU32/64。要素幅は EVEX.W（d.vex_w）。
         Insn::Vmovdqu32XvWv | Insn::Vmovdqu32XvWvVl => sem_ea::emovdqu(b, d, &ea, false, d.vex_w),
         Insn::Vmovdqu32WvXv | Insn::Vmovdqu32WvXvVl => sem_ea::emovdqu(b, d, &ea, true, d.vex_w),
+        // EVEX パック演算は eaddp/epadd 側の腕に統合（同名の
+        // VEX 変種と Insn を共有するため `d.evex` で分岐する）。
         Insn::MovssXvWv => sem_ea::movs_ld(b, d, &ea, 32),
         Insn::MovsdXvWv => sem_ea::movs_ld(b, d, &ea, 64),
         Insn::MovssWvXv => sem_ea::movs_st(b, d, &ea, 32),
@@ -3856,8 +3858,20 @@ fn dispatch_map<B: Backend>(
         Insn::VsqrtpdXvWv => sem_ea::vpfloat(b, sem_ea::Fop::Sqrt, 64, d, &ea),
         Insn::VsqrtssXvHvWv => sem_ea::vsfloat(b, sem_ea::Fop::Sqrt, 32, d, &ea),
         Insn::VsqrtsdXvHvWv => sem_ea::vsfloat(b, sem_ea::Fop::Sqrt, 64, d, &ea),
-        Insn::VaddpsXvHvWv => sem_ea::vpfloat(b, sem_ea::Fop::Add, 32, d, &ea),
-        Insn::VaddpdXvHvWv => sem_ea::vpfloat(b, sem_ea::Fop::Add, 64, d, &ea),
+        Insn::VaddpsXvHvWv => {
+            if d.evex {
+                sem_ea::eaddp(b, d, &ea)
+            } else {
+                sem_ea::vpfloat(b, sem_ea::Fop::Add, 32, d, &ea)
+            }
+        }
+        Insn::VaddpdXvHvWv => {
+            if d.evex {
+                sem_ea::eaddp(b, d, &ea)
+            } else {
+                sem_ea::vpfloat(b, sem_ea::Fop::Add, 64, d, &ea)
+            }
+        }
         Insn::VaddssXvHvWv => sem_ea::vsfloat(b, sem_ea::Fop::Add, 32, d, &ea),
         Insn::VaddsdXvHvWv => sem_ea::vsfloat(b, sem_ea::Fop::Add, 64, d, &ea),
         Insn::VmulpsXvHvWv => sem_ea::vpfloat(b, sem_ea::Fop::Mul, 32, d, &ea),
@@ -3934,7 +3948,13 @@ fn dispatch_map<B: Backend>(
         Insn::VpcmpgtwXvHvWv => sem_ea::vpint::<B, W16>(b, sem_ea::Iop::CmpGtS, d, &ea),
         Insn::VpcmpgtdXvHvWv => sem_ea::vpint::<B, W32>(b, sem_ea::Iop::CmpGtS, d, &ea),
         Insn::VpcmpgtqXvHvWv => sem_ea::vpint::<B, W64>(b, sem_ea::Iop::CmpGtS, d, &ea),
-        Insn::VpaddqXvHvWv => sem_ea::vpint::<B, W64>(b, sem_ea::Iop::Add, d, &ea),
+        Insn::VpaddqXvHvWv => {
+            if d.evex {
+                sem_ea::epadd(b, d, &ea)
+            } else {
+                sem_ea::vpint::<B, W64>(b, sem_ea::Iop::Add, d, &ea)
+            }
+        }
         Insn::VpmullwXvHvWv => sem_ea::vpint::<B, W16>(b, sem_ea::Iop::MulLo, d, &ea),
         Insn::VpmulldXvHvWv => sem_ea::vpint::<B, W32>(b, sem_ea::Iop::MulLo, d, &ea),
         Insn::VpmulhuwXvHvWv => sem_ea::vpint::<B, W16>(b, sem_ea::Iop::MulHiU, d, &ea),
@@ -3968,7 +3988,13 @@ fn dispatch_map<B: Backend>(
         Insn::VpsubqXvHvWv => sem_ea::vpint::<B, W64>(b, sem_ea::Iop::Sub, d, &ea),
         Insn::VpaddbXvHvWv => sem_ea::vpint::<B, W8>(b, sem_ea::Iop::Add, d, &ea),
         Insn::VpaddwXvHvWv => sem_ea::vpint::<B, W16>(b, sem_ea::Iop::Add, d, &ea),
-        Insn::VpadddXvHvWv => sem_ea::vpint::<B, W32>(b, sem_ea::Iop::Add, d, &ea),
+        Insn::VpadddXvHvWv => {
+            if d.evex {
+                sem_ea::epadd(b, d, &ea)
+            } else {
+                sem_ea::vpint::<B, W32>(b, sem_ea::Iop::Add, d, &ea)
+            }
+        }
         Insn::VpsrlwXvHvWv => sem_ea::vpshift::<B, W16>(b, sem_ea::Psh::R, d, &ea),
         Insn::VpsrldXvHvWv => sem_ea::vpshift::<B, W32>(b, sem_ea::Psh::R, d, &ea),
         Insn::VpsrlqXvHvWv => sem_ea::vpshift::<B, W64>(b, sem_ea::Psh::R, d, &ea),

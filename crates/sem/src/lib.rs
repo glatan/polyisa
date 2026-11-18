@@ -314,6 +314,39 @@ pub trait Backend {
     fn fcvt_from_s64<F: Width>(&mut self, a: Self::V<W64>, rm: u8) -> Self::V<F>;
     fn fcvt_from_u64<F: Width>(&mut self, a: Self::V<W64>, rm: u8) -> Self::V<F>;
     fn fcvt_ff<F: Width, T: Width>(&mut self, a: Self::V<F>, rm: u8) -> Self::V<T>;
+    /// 丸め指定付きの浮動小数点演算（EVEX {er} など）。`rm` は
+    /// softfloat の `Rm` 番号。既定は丸め指定を無視して素の演算に
+    /// 委譲する（丸めを表現できない JIT などの近似経路向け）。
+    fn fadd_r<F: Width>(&mut self, a: Self::V<F>, b: Self::V<F>, rm: u8) -> Self::V<F> {
+        let _ = rm;
+        self.fadd(a, b)
+    }
+    fn fsub_r<F: Width>(&mut self, a: Self::V<F>, b: Self::V<F>, rm: u8) -> Self::V<F> {
+        let _ = rm;
+        self.fsub(a, b)
+    }
+    fn fmul_r<F: Width>(&mut self, a: Self::V<F>, b: Self::V<F>, rm: u8) -> Self::V<F> {
+        let _ = rm;
+        self.fmul(a, b)
+    }
+    fn fmadd_r<F: Width>(
+        &mut self,
+        a: Self::V<F>,
+        b: Self::V<F>,
+        c: Self::V<F>,
+        rm: u8,
+    ) -> Self::V<F> {
+        let _ = rm;
+        self.fmadd(a, b, c)
+    }
+    fn fdiv_r<F: Width>(&mut self, a: Self::V<F>, b: Self::V<F>, rm: u8) -> Self::V<F> {
+        let _ = rm;
+        self.fdiv(a, b)
+    }
+    fn fsqrt_r<F: Width>(&mut self, a: Self::V<F>, rm: u8) -> Self::V<F> {
+        let _ = rm;
+        self.fsqrt(a)
+    }
     /// 蓄積した浮動小数点例外フラグを取り出す。読み出しでクリアする。
     fn fp_flags(&mut self) -> u8;
     fn zext<F: Width, T: Width>(&mut self, a: Self::V<F>) -> Self::V<T>;

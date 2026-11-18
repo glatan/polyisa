@@ -821,7 +821,9 @@
 | unpcklpd | unpcklpd_xv_wv | sse2 | alu |
 | unpcklps | unpcklps_xv_wv | sse | alu |
 | vaddpd | vaddpd_xv_hv_wv | avx | alu |
+| vaddpd | vaddpd_xv_hv_wv | avx512f | alu |
 | vaddps | vaddps_xv_hv_wv | avx | alu |
+| vaddps | vaddps_xv_hv_wv | avx512f | alu |
 | vaddsd | vaddsd_xv_hv_wv | avx | alu |
 | vaddss | vaddss_xv_hv_wv | avx | alu |
 | vandnpd | vandnpd_xv_hv_wv | avx | alu |
@@ -990,8 +992,10 @@
 | vpaddb | vpaddb_xv_hv_wv | avx2 && avx | alu |
 | vpaddd | vpaddd_xv_hv_wv | avx | alu |
 | vpaddd | vpaddd_xv_hv_wv | avx2 && avx | alu |
+| vpaddd | vpaddd_xv_hv_wv | avx512f | alu |
 | vpaddq | vpaddq_xv_hv_wv | avx | alu |
 | vpaddq | vpaddq_xv_hv_wv | avx2 && avx | alu |
+| vpaddq | vpaddq_xv_hv_wv | avx512f | alu |
 | vpaddsb | vpaddsb_xv_hv_wv | avx | alu |
 | vpaddsb | vpaddsb_xv_hv_wv | avx2 && avx | alu |
 | vpaddsw | vpaddsw_xv_hv_wv | avx | alu |
