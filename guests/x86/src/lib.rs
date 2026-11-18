@@ -15,6 +15,7 @@ pub mod cpuid;
 pub mod decode;
 pub mod sem;
 pub mod sem_ea;
+pub mod timing;
 
 // 空のモデルから生成した殻。ISADL 記述の追加後に中身が増える。
 include!(concat!(env!("OUT_DIR"), "/generated.rs"));
