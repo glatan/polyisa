@@ -217,7 +217,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 段階4の x86 最小 853 件にオペコード表の記述を足した件数。
-        assert_eq!(INSNS.len(), 2163);
+        assert_eq!(INSNS.len(), 2335);
     }
 
     #[test]
@@ -1886,16 +1886,11 @@ mod tests {
         // 0F 38 マップ（mmmmm=2）でこのオペコードには VEX 項目が
         // ないので拒否。
         assert!(decode_map(&[0xC4, 0xE2, 0x7C, 0x18, 0xC0], modes, avx).is_none());
-        // LOCK+VEX は #UD。VEX の前のレガシー接頭辞は無視される。
+        // レガシー接頭辞（66/F2/F3/LOCK）+VEX は #UD（XED 実測）。
         assert!(decode_map(&[0xF0, 0xC5, 0xF8, 0x77], modes, avx).is_none());
-        assert_eq!(
-            decode_map(&[0x66, 0xC5, 0xF8, 0x77], modes, avx).map(|d| d.insn),
-            Some(Insn::Vzeroupper)
-        );
-        assert_eq!(
-            decode_map(&[0xF3, 0xC5, 0xF8, 0x77], modes, avx).map(|d| d.insn),
-            Some(Insn::Vzeroupper)
-        );
+        assert!(decode_map(&[0x66, 0xC5, 0xF8, 0x77], modes, avx).is_none());
+        assert!(decode_map(&[0xF2, 0xC5, 0xF8, 0x77], modes, avx).is_none());
+        assert!(decode_map(&[0xF3, 0xC5, 0xF8, 0x77], modes, avx).is_none());
     }
 
     #[test]
@@ -1989,14 +1984,12 @@ mod tests {
                 "p0={p0:#04x}"
             );
         }
-        // EVEX 前のレガシー接頭辞は無視される。pp だけが接頭辞を
-        // 選ぶので F2+pp=10(F3) は VMOVDQU32 として受理され、
-        // F3+pp=00(NP) は該当項目なしで #UD になる。
-        let d = decode_map(&[0xF2, 0x62, 0xF1, 0x7E, 0x48, 0x6F, 0xC1], modes, fvl).unwrap();
-        assert_eq!(d.insn, Insn::Vmovdqu32XvWv);
-        let d = decode_map(&[0x66, 0x62, 0xF1, 0x7E, 0x48, 0x6F, 0xC1], modes, fvl).unwrap();
-        assert_eq!(d.insn, Insn::Vmovdqu32XvWv);
-        assert!(decode_map(&[0xF3, 0x62, 0xF1, 0x7C, 0x48, 0x6F, 0xC1], modes, fvl).is_none());
+        // レガシー接頭辞（66/F2/F3/LOCK）+EVEX は #UD（XED 実測）。
+        for p in [0xF2u8, 0x66, 0xF3, 0xF0] {
+            let mut b = vec![p, 0x62, 0xF1, 0x7E, 0x48, 0x6F, 0xC1];
+            assert!(decode_map(&b, modes, fvl).is_none());
+            b[4] = 0x6F;
+        }
         // EVEX.b の合法性。VMOVDQU32 は broadcast も {er} も
         // 持たないので、reg/mem どちらの b=1 も #UD。
         assert!(decode_map(&[0x62, 0xF1, 0x7E, 0x58, 0x6F, 0xCA], modes, fvl).is_none());
@@ -2522,11 +2515,10 @@ fn apx_decode() {
     // ND=0 形は vvvv 未使用（格納 1111 → 反転後 0）を要求。
     // ~vvvv=0111（反転後 8）で ND=0 は #UD。
     assert!(decode_map(&[0x62, 0x4C, 0x3C, 0x00, 0x29, 0xD1], modes, FEAT_APX).is_none());
-    // 通常形（ND=0、vvvv 未使用）は 2 被演算子形として受理。
-    // vvvv 未使用は ~vvvv=1111 かつ P2.3(~V4)=1。
-    let d = decode_map(&[0x62, 0x4C, 0x7C, 0x08, 0x29, 0xD1], modes, FEAT_APX).unwrap();
-    assert_eq!(d.insn, Insn::SubEvGv);
-    assert!(!d.ndd);
+    // NDD 可能な昇格形は ND=0 が #UD（vvvv 未使用でも受理
+    // しない。XED 実測）。ND=0 の昇格形が必要な EGPR アクセスは
+    // REX2 側の 2 被演算子形が担う。
+    assert!(decode_map(&[0x62, 0x4C, 0x7C, 0x08, 0x29, 0xD1], modes, FEAT_APX).is_none());
     // NF は対象命令でのみ受理。ADC（0x10 系）は NF 不可で
     // NF=1 は #UD。NOT（F7 /2）も NF 不可。
     assert!(decode_map(&[0x62, 0x4C, 0x3C, 0x14, 0x11, 0xD1], modes, FEAT_APX).is_none());

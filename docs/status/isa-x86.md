@@ -174,7 +174,9 @@
 |---|---|---|---|
 | aaa | aaa | !m64 | alu |
 | aad | aad_ib | !m64 | alu |
+| aadd | aadd_mv_gv | 真 | alu |
 | aam | aam_ib | !m64 | alu |
+| aand | aand_mv_gv | 真 | alu |
 | aas | aas | !m64 | alu |
 | adc | adc_eb_gb、adc_eb_ib、adc_ev_gv、adc_ev_ib、adc_ev_iz、adc_gb_eb、adc_gv_ev | apx | alu |
 | adc | adc_eb_ib | op82 | alu |
@@ -206,7 +208,9 @@
 | andpd | andpd、andpd_xv_wv | sse2 | alu |
 | andpd | andpd_rip | sse2 | load |
 | andps | andps_xv_wv | sse | alu |
+| aor | aor_mv_gv | 真 | alu |
 | arpl | arpl_ew_gw | i286 && !m64 | alu |
+| axor | axor_mv_gv | 真 | alu |
 | bextr | bextr_gv_ev_by | bmi1 | alu |
 | bextr | bextr_gv_ev_id | tbm | alu |
 | blcfill | blcfill_by_ev | tbm | alu |
@@ -277,14 +281,30 @@
 | cmovs | cmovs_r32_sib | cmov | load |
 | cmp | cmp_eb_ib | op82 | alu |
 | cmp | cmp_al_ib、cmp_al_imm、cmp_ax_imm16、cmp_eax、cmp_eax_iz、cmp_eb_gb、cmp_eb_ib、cmp_ev_gv、cmp_ev_ib、cmp_ev_iz、cmp_gb_eb、cmp_gv_ev、cmp_m32_r32_sib、cmp_m32_r32_sibabs、cmp_m32_r32_sibd、cmp_m32_r32_sibd32、cmp_m8_r8、cmp_m8_r8_mem32、cmp_m8_r8_mem8、cmp_m8_r8_memnd、cmp_m8_r8_rip、cmp_m8_r8_sib、cmp_m8_r8_sibd、cmp_m8_r8_sibd32、cmp_r8_m8、cmp_r8_m8_mem32、cmp_r8_m8_mem8、cmp_r8_m8_memnd、cmp_r8_m8_sib、cmp_r8_m8_sibd、cmp_r8_m8_sibd32、cmp_r_mem32、cmp_r_mem8、cmp_r_memnd、cmp_r_rip、cmp_r_sib、cmp_r_sibabs、cmp_r_sibd、cmp_r_sibd32、cmp_rm16_imm、cmp_rm16_imm_mem8、cmp_rm32、cmp_rm32_imm、cmp_rm32_imm_mem32、cmp_rm32_imm_mem8、cmp_rm32_imm_memnd、cmp_rm32_imm_rip、cmp_rm32_imm_sib、cmp_rm32_imm_sibd、cmp_rm32_imm_sibd32、cmp_rm64_imm、cmp_rm8_imm、cmp_rm8_imm_mem32、cmp_rm8_imm_mem8、cmp_rm8_imm_memnd、cmp_rm8_imm_rip、cmp_rm8_imm_sib、cmp_rm8_imm_sibd、cmp_rm8_imm_sibd32、cmp_rm_imm8、cmp_rm_imm8_mem32、cmp_rm_imm8_memnd、cmp_rm_imm8_rip、cmp_rm_imm8_sib、cmp_rm_imm8_sibabs、cmp_rm_imm8_sibd、cmp_rm_imm8_sibd32、cmp_rm_imm8m8、cmp_rm_mem32、cmp_rm_mem8、cmp_rm_memnd、cmp_rm_rip | 真 | alu |
+| cmpbexadd | cmpbexadd_ev_gv | m64 && avx | alu |
+| cmpbxadd | cmpbxadd_ev_gv | m64 && avx | alu |
+| cmplexadd | cmplexadd_ev_gv | m64 && avx | alu |
+| cmplxadd | cmplxadd_ev_gv | m64 && avx | alu |
+| cmpnbexadd | cmpnbexadd_ev_gv | m64 && avx | alu |
+| cmpnbxadd | cmpnbxadd_ev_gv | m64 && avx | alu |
+| cmpnlexadd | cmpnlexadd_ev_gv | m64 && avx | alu |
+| cmpnlxadd | cmpnlxadd_ev_gv | m64 && avx | alu |
+| cmpnoxadd | cmpnoxadd_ev_gv | m64 && avx | alu |
+| cmpnpxadd | cmpnpxadd_ev_gv | m64 && avx | alu |
+| cmpnsxadd | cmpnsxadd_ev_gv | m64 && avx | alu |
+| cmpnzxadd | cmpnzxadd_ev_gv | m64 && avx | alu |
+| cmpoxadd | cmpoxadd_ev_gv | m64 && avx | alu |
 | cmppd | cmppd_xv_wv_ib | sse2 | alu |
 | cmpps | cmpps_xv_wv_ib | sse | alu |
+| cmppxadd | cmppxadd_ev_gv | m64 && avx | alu |
 | cmps | cmps_v | 真 | alu |
 | cmpsb | cmps_b | 真 | alu |
 | cmpsd | cmpsd_xv_wv_ib | sse2 | alu |
 | cmpss | cmpss_xv_wv_ib | sse | alu |
+| cmpsxadd | cmpsxadd_ev_gv | m64 && avx | alu |
 | cmpxchg | cmpxchg_eb_gb、cmpxchg_ev_gv、cmpxchg_r_mem32、cmpxchg_r_mem8、cmpxchg_r_memnd、cmpxchg_r_rip、cmpxchg_r_rm | i486 | alu |
 | cmpxchg8b | cmpxchg8b_mq | cx8 && (cx16 || !cx16) | alu |
+| cmpzxadd | cmpzxadd_ev_gv | m64 && avx | alu |
 | comisd | comisd、comisd_xv_wv | sse2 | alu |
 | comiss | comiss_xv_wv | sse | alu |
 | cpuid | cpuid、en_cpuid | cpuid | system |
@@ -292,9 +312,13 @@
 | cvtdq2pd | cvtdq2pd_xv_wv | sse2 | alu |
 | cvtdq2ps | cvtdq2ps_xv_wv | sse2 | alu |
 | cvtpd2dq | cvtpd2dq_xv_wv | sse2 | alu |
+| cvtpd2pi | cvtpd2pi_pv_wv | sse2 | alu |
 | cvtpd2ps | cvtpd2ps_xv_wv | sse2 | alu |
+| cvtpi2pd | cvtpi2pd_xv_qv | sse2 | alu |
+| cvtpi2ps | cvtpi2ps_xv_qv | sse | alu |
 | cvtps2dq | cvtps2dq_xv_wv | sse2 | alu |
 | cvtps2pd | cvtps2pd_xv_wv | sse2 | alu |
+| cvtps2pi | cvtps2pi_pv_wv | sse | alu |
 | cvtsd2si | cvtsd2si_gv_wv | sse2 | alu |
 | cvtsd2ss | cvtsd2ss、cvtsd2ss_xv_wv | sse2 | alu |
 | cvtsi2sd | cvtsi2sd_xv_ev | sse2 | alu |
@@ -304,7 +328,9 @@
 | cvtss2sd | cvtss2sd_m32 | sse2 | load |
 | cvtss2si | cvtss2si_gv_wv | sse | alu |
 | cvttpd2dq | cvttpd2dq_xv_wv | sse2 | alu |
+| cvttpd2pi | cvttpd2pi_pv_wv | sse2 | alu |
 | cvttps2dq | cvttps2dq_xv_wv | sse2 | alu |
+| cvttps2pi | cvttps2pi_pv_wv | sse | alu |
 | cvttsd2si | cvttsd2si_gv_wv | sse2 | alu |
 | cvttsd2si | cvttsd2si_m64_sib、cvttsd2si_r64 | sse2 | load |
 | cvttss2si | cvttss2si_gv_wv | sse | alu |
@@ -357,6 +383,7 @@
 | fxch | fxch_st、fxch_sti | 真 | alu |
 | fxrstor | fxrstor | fxsr | system |
 | fxsave | fxsave | fxsr | system |
+| getsec | getsec | 真 | system |
 | gf2p8affineinvqb | gf2p8affineinvqb_xv_wv_ib | gfni | alu |
 | gf2p8affineqb | gf2p8affineqb_xv_wv_ib | gfni | alu |
 | gf2p8mulb | gf2p8mulb_xv_wv | gfni | alu |
@@ -383,9 +410,11 @@
 | insertps | insertps_xv_wv_ib | sse4_1 | alu |
 | insertq | insertq_xv_wv、insertq_xv_wv_ib_ib | sse4a | alu |
 | int | int80、int_ib | 真 | system |
+| int1 | int1 | 真 | system |
 | int3 | int3 | 真 | system |
 | into | into | !m64 | system |
-| iret | iret | !m64 | jump |
+| invd | invd | 真 | system |
+| iret | iret | 真 | jump |
 | ja | ja、ja_rel32 | 真 | jump |
 | jae | jae、jae_rel32 | 真 | jump |
 | jb | jb、jb_rel32 | 真 | jump |
@@ -466,26 +495,28 @@
 | movddup | movddup_xv_wv | sse3 | load |
 | movdir64b | movdir64b_gv_mv | movdir64b | load |
 | movdiri | movdiri_mv_gv | movdiri | store |
+| movdq2q | movdq2q_pv_xv | sse2 | alu |
 | movdqa | movdqa_load_rip、movdqa_xv_wv | sse2 | load |
 | movdqa | movdqa_wv_xv | sse2 | store |
 | movdqu | movdqu_load_mem32、movdqu_load_mem8、movdqu_load_memnd、movdqu_load_sib、movdqu_load_xmm、movdqu_xv_wv | sse2 | load |
 | movdqu | movdqu_store_mem32、movdqu_store_mem8、movdqu_store_memnd、movdqu_store_sib、movdqu_store_xmm、movdqu_wv_xv | sse2 | store |
 | movhlps | movhlps_xv_xv | sse | alu |
-| movhlps | movhlps_xv_xv | sse2 | alu |
 | movhpd | movhpd_xv_wv | sse2 | load |
 | movhpd | movhpd_wv_xv | sse2 | store |
 | movhps | movhps_xmm_m64_mem8、movhps_xv_wv | sse | load |
 | movhps | movhps_wv_xv | sse | store |
 | movlhps | movlhps_xv_xv | sse | alu |
-| movlhps | movlhps_xv_xv | sse2 | alu |
 | movlpd | movlpd_xmm_m64_memnd、movlpd_xv_wv | sse2 | load |
 | movlpd | movlpd_wv_xv | sse2 | store |
 | movlps | movlps_xv_wv | sse | load |
 | movlps | movlps_wv_xv | sse | store |
 | movmskpd | movmskpd_gv_wv | sse2 | alu |
 | movmskps | movmskps_gv_wv | sse | alu |
-| movntdq | movntdq_store_mem8、movntdq_store_memnd | sse2 | store |
+| movntdq | movntdq_store_mem8、movntdq_store_memnd、movntdq_wv_xv | sse2 | store |
 | movntdqa_xv_wv | movntdqa_xv_wv | sse4_1 | alu |
+| movnti | movnti_ev_gv | 真 | store |
+| movntpd | movntpd_wv_xv | sse2 | store |
+| movntps | movntps_wv_xv | sse | store |
 | movntq | movntq_qv_pv | sse | store |
 | movntsd | movntsd_mq_xv | sse4a | store |
 | movntss | movntss_md_xv | sse4a | store |
@@ -493,6 +524,8 @@
 | movq | movq_qv_pv | mmx | store |
 | movq | movq_r64_xmm、movq_xmm_m64_mem8、movq_xmm_m64_rip、movq_xv_wv | sse2 | load |
 | movq | movq_m64_xmm_mem32、movq_m64_xmm_mem8、movq_m64_xmm_memnd、movq_m64_xmm_rip、movq_wv_xv | sse2 | store |
+| movq2dq | movq2dq_xv_qv | sse2 | alu |
+| movrs | movrs_gv_ev | m64 | load |
 | movs | movs_v | 真 | load |
 | movsb | movs_b、movsb | 真 | load |
 | movsd | movsd | 真 | load |
@@ -565,6 +598,7 @@
 | pand | pand、pand_xv_wv | sse2 | alu |
 | pandn | pandn_pv_qv | mmx | alu |
 | pandn | pandn、pandn_xv_wv | sse2 | alu |
+| pause | pause | 真 | alu |
 | pavgb | pavgb_pv_qv | sse | alu |
 | pavgb | pavgb_xv_wv | sse2 | alu |
 | pavgusb | pavgusb_pq_qq | dnow | alu |
@@ -678,7 +712,9 @@
 | pmulhrsw_xv_wv | pmulhrsw_xv_wv | ssse3 | alu |
 | pmulhrw | pmulhrw_pq_qq | dnow | alu |
 | pmulhuw | pmulhuw_pv_qv | sse | alu |
+| pmulhuw | pmulhuw_xv_wv | sse2 | alu |
 | pmulhw | pmulhw_pv_qv | mmx | alu |
+| pmulhw | pmulhw_xv_wv | sse2 | alu |
 | pmulld_xv_wv | pmulld_xv_wv | sse4_1 | alu |
 | pmullw | pmullw_pv_qv | mmx | alu |
 | pmullw | pmullw_xv_wv | sse2 | alu |
@@ -743,6 +779,7 @@
 | psubw | psubw_xv_wv | sse2 | alu |
 | pswapd | pswapd_pq_qq | dnowext | alu |
 | ptest_xv_wv | ptest_xv_wv | sse4_1 | alu |
+| ptwrite | ptwrite_rv | 真 | system |
 | punpckhbw | punpckhbw_pv_qv | mmx | alu |
 | punpckhbw | punpckhbw_xv_wv | sse2 | alu |
 | punpckhdq | punpckhdq_pv_qv | mmx | alu |
@@ -769,13 +806,18 @@
 | rcl | rcl_eb_1、rcl_eb_cl、rcl_eb_ib、rcl_ev_1、rcl_ev_cl、rcl_ev_ib | apx | alu |
 | rcl | rcl_eb_ib、rcl_ev_ib | i186 | alu |
 | rcl | rcl_eb_1、rcl_eb_cl、rcl_ev_1、rcl_ev_cl | 真 | alu |
+| rcpps | rcpps_xv_wv | sse | alu |
+| rcpss | rcpss_xv_wv | sse | alu |
 | rcr | rcr_eb_1、rcr_eb_cl、rcr_eb_ib、rcr_ev_1、rcr_ev_cl、rcr_ev_ib | apx | alu |
 | rcr | rcr_eb_ib、rcr_ev_ib | i186 | alu |
 | rcr | rcr_eb_1、rcr_eb_cl、rcr_ev_1、rcr_ev_cl | 真 | alu |
 | rdfsbase | rdfsbase_rv | m64 && fsgsbase | system |
 | rdgsbase | rdgsbase_rv | m64 && fsgsbase | system |
+| rdmsr | rdmsr | msr | system |
+| rdpid | rdpid_rv | 真 | system |
 | rdpkru | rdpkru | !m64 && pku | system |
 | rdpkru | rdpkru | pku | system |
+| rdpmc | rdpmc | 真 | system |
 | rdpru | rdpru | rdpru | system |
 | rdrand | rdrand_rv | rdrnd | alu |
 | rdseed | rdseed_rv | rdseed | alu |
@@ -783,8 +825,9 @@
 | rdsspq | rdsspq | cet_ss | system |
 | rdtsc | rdtsc | tsc | system |
 | rdtscp | rdtscp | rdtscp | system |
+| rep | rep_xstore | 真 | system |
 | ret | en_ret、ret、ret_imm、ret_iw | 真 | jump |
-| retf | retf、retf_iw | !m64 | jump |
+| retf | retf、retf_iw | 真 | jump |
 | rol | rol_eb_1、rol_eb_cl、rol_eb_ib、rol_ev_1、rol_ev_cl、rol_ev_ib | apx | alu |
 | rol | rol_eb_ib、rol_ev_ib | i186 | alu |
 | rol | rol_eb_1、rol_eb_cl、rol_ev_1、rol_ev_cl、rol_rm32_1、rol_rm32_cl、rol_rm32_imm8 | 真 | alu |
@@ -796,6 +839,9 @@
 | roundps | roundps_xv_wv_ib | sse4_1 | alu |
 | roundsd | roundsd_xv_wv_ib | sse4_1 | alu |
 | roundss | roundss_xv_wv_ib | sse4_1 | alu |
+| rsm | rsm | 真 | system |
+| rsqrtps | rsqrtps_xv_wv | sse | alu |
+| rsqrtss | rsqrtss_xv_wv | sse | alu |
 | rstorssp | rstorssp_mq | cet_ss | system |
 | sahf | sahf | !m64 || lahf_lm | alu |
 | salc | salc | !m64 | alu |
@@ -875,10 +921,13 @@
 | subsd | subsd、subsd_xv_wv | sse2 | alu |
 | subsd | subsd_xmm_m64_mem32、subsd_xmm_m64_mem8、subsd_xmm_m64_rip、subsd_xmm_m64_sibd、subsd_xmm_m64_sibd32 | sse2 | load |
 | subss | subss_xv_wv | sse | alu |
+| syscall | syscall_amd | !m64 && syscall | system |
 | syscall | syscall | m64 && syscall | system |
 | syscall | en_syscall | syscall | system |
 | sysenter | sysenter | sep | system |
 | sysexit | sysexit | sep | system |
+| sysret | sysret_amd | !m64 | system |
+| sysret | sysret | m64 | system |
 | t1mskc | t1mskc_by_ev | tbm | alu |
 | tcmmimfp16ps | tcmmimfp16ps | m64 && amx_complex | alu |
 | tcmmrlfp16ps | tcmmrlfp16ps | m64 && amx_complex | alu |
@@ -892,6 +941,8 @@
 | test | test_eb_i、test_ev_i | 真 | mult |
 | testui | testui | m64 && uintr | system |
 | tileloadd | tileloadd | m64 && amx_tile | load |
+| tileloaddrs | tileloaddrs | m64 && avx | load |
+| tileloaddrst1 | tileloaddrst1 | m64 && avx | load |
 | tileloaddt1 | tileloaddt1 | m64 && amx_tile | load |
 | tilerelease | tilerelease | m64 && amx_tile | alu |
 | tilestored | tilestored | m64 && amx_tile | store |
@@ -902,8 +953,10 @@
 | ucomisd | ucomisd、ucomisd_xv_wv | sse2 | alu |
 | ucomisd | ucomisd_mem32、ucomisd_mem8、ucomisd_memnd、ucomisd_rip | sse2 | load |
 | ucomiss | ucomiss_xv_wv | sse | alu |
+| ud0 | ud0_gv_ev | 真 | system |
 | ud1 | ud1 | 真 | system |
 | ud2 | ud2 | 真 | system |
+| udb | udb | m64 | system |
 | uiret | uiret | m64 && uintr | system |
 | umonitor | umonitor_rv | waitpkg | system |
 | umwait | umwait_rv | waitpkg | system |
@@ -911,6 +964,8 @@
 | unpckhps | unpckhps_xv_wv | sse | alu |
 | unpcklpd | unpcklpd_xv_wv | sse2 | alu |
 | unpcklps | unpcklps_xv_wv | sse | alu |
+| urdmsr | urdmsr_rv_ev | m64 | system |
+| uwrmsr | uwrmsr_rv_ev | m64 | system |
 | vaddbf16 | vaddbf16_xv_hv_wv | avx10_2 && avx512f | alu |
 | vaddpd | vaddpd_xv_hv_wv | avx | alu |
 | vaddpd | vaddpd_xv_hv_wv | avx512f | alu |
@@ -918,10 +973,20 @@
 | vaddps | vaddps_xv_hv_wv | avx512f | alu |
 | vaddsd | vaddsd_xv_hv_wv | avx | alu |
 | vaddss | vaddss_xv_hv_wv | avx | alu |
+| vaddsubpd | vaddsubpd_xv_hv_wv | avx | alu |
+| vaddsubps | vaddsubps_xv_hv_wv | avx | alu |
+| vaesdec | vaesdec_xv_hv_wv | avx | alu |
+| vaesdeclast | vaesdeclast_xv_hv_wv | avx | alu |
+| vaesenc | vaesenc_xv_hv_wv | avx | alu |
+| vaesenclast | vaesenclast_xv_hv_wv | avx | alu |
+| vaesimc | vaesimc_xv_wv | avx | alu |
+| vaeskeygenassist | vaeskeygenassist_xv_wv_ib | avx | alu |
 | vandnpd | vandnpd_xv_hv_wv | avx | alu |
 | vandnps | vandnps_xv_hv_wv | avx | alu |
 | vandpd | vandpd_xv_hv_wv | avx | alu |
 | vandps | vandps_xv_hv_wv | avx | alu |
+| vbcstnebf162ps | vbcstnebf162ps_xv_wv | avx | load |
+| vbcstnesh2ps | vbcstnesh2ps_xv_wv | avx | load |
 | vblendpd | vblendpd_xv_hv_wv_ib | avx | alu |
 | vblendps | vblendps_xv_hv_wv_ib | avx | alu |
 | vblendvpd | vblendvpd_xv_hv_wv_ib | avx | alu |
@@ -936,12 +1001,19 @@
 | vcmpps | vcmpps_xv_hv_wv_ib | avx | alu |
 | vcmpsd | vcmpsd_xv_hv_wv_ib | avx | alu |
 | vcmpss | vcmpss_xv_hv_wv_ib | avx | alu |
+| vcomisd | vcomisd_xv_wv | avx | alu |
+| vcomiss | vcomiss_xv_wv | avx | alu |
 | vcvt2ph2bf8 | vcvt2ph2bf8_xv_hv_wv | avx10_2 && avx512f | alu |
 | vcvt2ph2bf8s | vcvt2ph2bf8s_xv_hv_wv | avx10_2 && avx512f | alu |
 | vcvt2ph2hf8 | vcvt2ph2hf8_xv_hv_wv | avx10_2 && avx512f | alu |
 | vcvt2ph2hf8s | vcvt2ph2hf8s_xv_hv_wv | avx10_2 && avx512f | alu |
 | vcvtdq2pd | vcvtdq2pd_xv_wv | avx | alu |
 | vcvtdq2ps | vcvtdq2ps_xv_wv | avx | alu |
+| vcvtneebf162ps | vcvtneebf162ps_xv_wv | avx | load |
+| vcvtneeph2ps | vcvtneeph2ps_xv_wv | avx | load |
+| vcvtneobf162ps | vcvtneobf162ps_xv_wv | avx | load |
+| vcvtneoph2ps | vcvtneoph2ps_xv_wv | avx | load |
+| vcvtneps2bf16 | vcvtneps2bf16_xv_wv | avx | alu |
 | vcvtpd2dq | vcvtpd2dq_xv_wv | avx | alu |
 | vcvtpd2ps | vcvtpd2ps_xv_wv | avx | alu |
 | vcvtph2bf8 | vcvtph2bf8_xv_wv | avx10_2 && avx512f | alu |
@@ -977,29 +1049,47 @@
 | vextractf128 | vextractf128_wv_xv_ib | avx | store |
 | vextracti128 | vextracti128_wv_xv_ib | avx2 && avx | store |
 | vextractps | vextractps_ed_xv_ib | avx | store |
+| vfmadd132pd | vfmadd132pd_xv_hv_wv | fma | alu |
 | vfmadd132ps | vfmadd132ps_xv_hv_wv | fma | alu |
+| vfmadd132sd | vfmadd132sd_xv_hv_wv | fma | alu |
 | vfmadd132ss | vfmadd132ss_xv_hv_wv | fma | alu |
+| vfmadd213pd | vfmadd213pd_xv_hv_wv | fma | alu |
 | vfmadd213ps | vfmadd213ps_xv_hv_wv | fma | alu |
+| vfmadd213sd | vfmadd213sd_xv_hv_wv | fma | alu |
 | vfmadd213ss | vfmadd213ss_xv_hv_wv | fma | alu |
+| vfmadd231pd | vfmadd231pd_xv_hv_wv | fma | alu |
 | vfmadd231ps | vfmadd231ps_xv_hv_wv | fma | alu |
+| vfmadd231sd | vfmadd231sd_xv_hv_wv | fma | alu |
 | vfmadd231ss | vfmadd231ss_xv_hv_wv | fma | alu |
 | vfmaddpd | vfmaddpd_xv_hv_wv_iv | fma4 | alu |
 | vfmaddps | vfmaddps_xv_hv_wv_iv | fma4 | alu |
 | vfmaddsd | vfmaddsd_xv_hv_wv_iv | fma4 | alu |
 | vfmaddss | vfmaddss_xv_hv_wv_iv | fma4 | alu |
+| vfmaddsub132pd | vfmaddsub132pd_xv_hv_wv | fma | alu |
 | vfmaddsub132ps | vfmaddsub132ps_xv_hv_wv | fma | alu |
+| vfmaddsub213pd | vfmaddsub213pd_xv_hv_wv | fma | alu |
 | vfmaddsub213ps | vfmaddsub213ps_xv_hv_wv | fma | alu |
+| vfmaddsub231pd | vfmaddsub231pd_xv_hv_wv | fma | alu |
 | vfmaddsub231ps | vfmaddsub231ps_xv_hv_wv | fma | alu |
 | vfmaddsubpd | vfmaddsubpd_xv_hv_wv_iv | fma4 | alu |
 | vfmaddsubps | vfmaddsubps_xv_hv_wv_iv | fma4 | alu |
+| vfmsub132pd | vfmsub132pd_xv_hv_wv | fma | alu |
 | vfmsub132ps | vfmsub132ps_xv_hv_wv | fma | alu |
+| vfmsub132sd | vfmsub132sd_xv_hv_wv | fma | alu |
 | vfmsub132ss | vfmsub132ss_xv_hv_wv | fma | alu |
+| vfmsub213pd | vfmsub213pd_xv_hv_wv | fma | alu |
 | vfmsub213ps | vfmsub213ps_xv_hv_wv | fma | alu |
+| vfmsub213sd | vfmsub213sd_xv_hv_wv | fma | alu |
 | vfmsub213ss | vfmsub213ss_xv_hv_wv | fma | alu |
+| vfmsub231pd | vfmsub231pd_xv_hv_wv | fma | alu |
 | vfmsub231ps | vfmsub231ps_xv_hv_wv | fma | alu |
+| vfmsub231sd | vfmsub231sd_xv_hv_wv | fma | alu |
 | vfmsub231ss | vfmsub231ss_xv_hv_wv | fma | alu |
+| vfmsubadd132pd | vfmsubadd132pd_xv_hv_wv | fma | alu |
 | vfmsubadd132ps | vfmsubadd132ps_xv_hv_wv | fma | alu |
+| vfmsubadd213pd | vfmsubadd213pd_xv_hv_wv | fma | alu |
 | vfmsubadd213ps | vfmsubadd213ps_xv_hv_wv | fma | alu |
+| vfmsubadd231pd | vfmsubadd231pd_xv_hv_wv | fma | alu |
 | vfmsubadd231ps | vfmsubadd231ps_xv_hv_wv | fma | alu |
 | vfmsubaddpd | vfmsubaddpd_xv_hv_wv_iv | fma4 | alu |
 | vfmsubaddps | vfmsubaddps_xv_hv_wv_iv | fma4 | alu |
@@ -1007,21 +1097,33 @@
 | vfmsubps | vfmsubps_xv_hv_wv_iv | fma4 | alu |
 | vfmsubsd | vfmsubsd_xv_hv_wv_iv | fma4 | alu |
 | vfmsubss | vfmsubss_xv_hv_wv_iv | fma4 | alu |
+| vfnmadd132pd | vfnmadd132pd_xv_hv_wv | fma | alu |
 | vfnmadd132ps | vfnmadd132ps_xv_hv_wv | fma | alu |
+| vfnmadd132sd | vfnmadd132sd_xv_hv_wv | fma | alu |
 | vfnmadd132ss | vfnmadd132ss_xv_hv_wv | fma | alu |
+| vfnmadd213pd | vfnmadd213pd_xv_hv_wv | fma | alu |
 | vfnmadd213ps | vfnmadd213ps_xv_hv_wv | fma | alu |
+| vfnmadd213sd | vfnmadd213sd_xv_hv_wv | fma | alu |
 | vfnmadd213ss | vfnmadd213ss_xv_hv_wv | fma | alu |
+| vfnmadd231pd | vfnmadd231pd_xv_hv_wv | fma | alu |
 | vfnmadd231ps | vfnmadd231ps_xv_hv_wv | fma | alu |
+| vfnmadd231sd | vfnmadd231sd_xv_hv_wv | fma | alu |
 | vfnmadd231ss | vfnmadd231ss_xv_hv_wv | fma | alu |
 | vfnmaddpd | vfnmaddpd_xv_hv_wv_iv | fma4 | alu |
 | vfnmaddps | vfnmaddps_xv_hv_wv_iv | fma4 | alu |
 | vfnmaddsd | vfnmaddsd_xv_hv_wv_iv | fma4 | alu |
 | vfnmaddss | vfnmaddss_xv_hv_wv_iv | fma4 | alu |
+| vfnmsub132pd | vfnmsub132pd_xv_hv_wv | fma | alu |
 | vfnmsub132ps | vfnmsub132ps_xv_hv_wv | fma | alu |
+| vfnmsub132sd | vfnmsub132sd_xv_hv_wv | fma | alu |
 | vfnmsub132ss | vfnmsub132ss_xv_hv_wv | fma | alu |
+| vfnmsub213pd | vfnmsub213pd_xv_hv_wv | fma | alu |
 | vfnmsub213ps | vfnmsub213ps_xv_hv_wv | fma | alu |
+| vfnmsub213sd | vfnmsub213sd_xv_hv_wv | fma | alu |
 | vfnmsub213ss | vfnmsub213ss_xv_hv_wv | fma | alu |
+| vfnmsub231pd | vfnmsub231pd_xv_hv_wv | fma | alu |
 | vfnmsub231ps | vfnmsub231ps_xv_hv_wv | fma | alu |
+| vfnmsub231sd | vfnmsub231sd_xv_hv_wv | fma | alu |
 | vfnmsub231ss | vfnmsub231ss_xv_hv_wv | fma | alu |
 | vfnmsubpd | vfnmsubpd_xv_hv_wv_iv | fma4 | alu |
 | vfnmsubps | vfnmsubps_xv_hv_wv_iv | fma4 | alu |
@@ -1033,10 +1135,19 @@
 | vfrczss | vfrczss_xv_wv | xop | alu |
 | vgatherdps | vgatherdps_xv_wv_hv | avx2 && avx | load |
 | vgatherqps | vgatherqps_xv_wv_hv | avx2 && avx | load |
+| vgf2p8affineinvqb | vgf2p8affineinvqb_xv_hv_wv_ib | avx | alu |
+| vgf2p8affineqb | vgf2p8affineqb_xv_hv_wv_ib | avx | alu |
+| vgf2p8mulb | vgf2p8mulb_xv_wv | avx | alu |
+| vhaddpd | vhaddpd_xv_hv_wv | avx | alu |
+| vhaddps | vhaddps_xv_hv_wv | avx | alu |
+| vhsubpd | vhsubpd_xv_hv_wv | avx | alu |
+| vhsubps | vhsubps_xv_hv_wv | avx | alu |
 | vinsertf128 | vinsertf128_xv_hv_wv_ib | avx | alu |
 | vinserti128 | vinserti128_xv_hv_wv_ib | avx2 && avx | alu |
 | vinsertps | vinsertps_xv_hv_wv_ib | avx | alu |
+| vlddqu | vlddqu_xv_mv | avx | load |
 | vldmxcsr | vldmxcsr_md | avx | load |
+| vmaskmovdqu | vmaskmovdqu_xv_wv | avx | store |
 | vmaskmovpd | vmaskmovpd_xv_hv_wv | avx | load |
 | vmaskmovpd | vmaskmovpd_wv_hv_xv | avx | store |
 | vmaskmovps | vmaskmovps_xv_hv_wv | avx | load |
@@ -1059,6 +1170,8 @@
 | vmovapd | vmovapd_wv_xv | avx | store |
 | vmovaps | vmovaps_xv_wv | avx | load |
 | vmovaps | vmovaps_wv_xv | avx | store |
+| vmovd | vmovd_w1_xv_ev | !m64 && avx | load |
+| vmovd | vmovd_w1_ev_xv | !m64 && avx | store |
 | vmovd | vmovd_xv_ev | avx | load |
 | vmovd | vmovd_ev_xv | avx | store |
 | vmovddup | vmovddup_xv_wv | avx | load |
@@ -1090,6 +1203,8 @@
 | vmovntps | vmovntps_wv_xv | avx | store |
 | vmovq | vmovq_xv_wv | avx | load |
 | vmovq | vmovq_wv_xv | avx | store |
+| vmovq | vmovq_xv_eq | m64 && avx | load |
+| vmovq | vmovq_eq_xv | m64 && avx | store |
 | vmovsd | vmovsd_xv_hv_wv | avx | load |
 | vmovsd | vmovsd_wv_hv_xv | avx | store |
 | vmovshdup | vmovshdup_xv_wv | avx | load |
@@ -1102,6 +1217,7 @@
 | vmovups | vmovups_wv_xv | avx | store |
 | vmpsadbw | vmpsadbw_xv_hv_wv_ib | avx | alu |
 | vmpsadbw | vmpsadbw_xv_hv_wv_ib | avx2 && avx | alu |
+| vmread | vmread_ev_gv | 真 | system |
 | vmulbf16 | vmulbf16_xv_hv_wv | avx10_2 && avx512f | alu |
 | vmulpd | vmulpd_xv_hv_wv | avx | alu |
 | vmulpd | vmulpd_xv_hv_wv | avx512f | alu |
@@ -1109,6 +1225,7 @@
 | vmulps | vmulps_xv_hv_wv | avx512f | alu |
 | vmulsd | vmulsd_xv_hv_wv | avx | alu |
 | vmulss | vmulss_xv_hv_wv | avx | alu |
+| vmwrite | vmwrite_gv_ev | 真 | system |
 | vorpd | vorpd_xv_hv_wv | avx | alu |
 | vorps | vorps_xv_hv_wv | avx | alu |
 | vpabsb | vpabsb_xv_wv | avx | alu |
@@ -1145,6 +1262,7 @@
 | vpaddusw | vpaddusw_xv_hv_wv | avx2 && avx | alu |
 | vpaddw | vpaddw_xv_hv_wv | avx | alu |
 | vpaddw | vpaddw_xv_hv_wv | avx2 && avx | alu |
+| vpalignr | vpalignr_xv_hv_wv_ib | avx | alu |
 | vpand | vpand_xv_hv_wv | avx | alu |
 | vpand | vpand_xv_hv_wv | avx2 && avx | alu |
 | vpandd | vpandd_xv_hv_wv | avx512f | alu |
@@ -1157,6 +1275,7 @@
 | vpavgb | vpavgb_xv_hv_wv | avx2 && avx | alu |
 | vpavgw | vpavgw_xv_hv_wv | avx | alu |
 | vpavgw | vpavgw_xv_hv_wv | avx2 && avx | alu |
+| vpblendd | vpblendd_xv_hv_wv_ib | avx2 && avx | alu |
 | vpblendvb | vpblendvb_xv_hv_wv_ib | avx | alu |
 | vpblendvb | vpblendvb_xv_hv_wv_ib | avx2 && avx | alu |
 | vpblendw | vpblendw_xv_hv_wv_ib | avx | alu |
@@ -1165,6 +1284,7 @@
 | vpbroadcastd | vpbroadcastd_xv_wv | avx2 && avx | load |
 | vpbroadcastq | vpbroadcastq_xv_wv | avx2 && avx | load |
 | vpbroadcastw | vpbroadcastw_xv_wv | avx2 && avx | load |
+| vpclmulqdq | vpclmulqdq_xv_hv_wv_ib | avx | alu |
 | vpcmov | vpcmov_xv_hv_wv_iv | xop | alu |
 | vpcmpeqb | vpcmpeqb_xv_hv_wv | avx | alu |
 | vpcmpeqb | vpcmpeqb_xv_hv_wv | avx2 && avx | alu |
@@ -1190,15 +1310,36 @@
 | vpcomuq | vpcomuq_xv_hv_wv_ib | xop | alu |
 | vpcomuw | vpcomuw_xv_hv_wv_ib | xop | alu |
 | vpcomw | vpcomw_xv_hv_wv_ib | xop | alu |
+| vpdpbssd | vpdpbssd_xv_hv_wv | avx2 && avx | alu |
+| vpdpbssds | vpdpbssds_xv_hv_wv | avx2 && avx | alu |
+| vpdpbsud | vpdpbsud_xv_hv_wv | avx2 && avx | alu |
+| vpdpbsuds | vpdpbsuds_xv_hv_wv | avx2 && avx | alu |
+| vpdpbusd | vpdpbusd_xv_hv_wv | avx2 && avx | alu |
+| vpdpbusds | vpdpbusds_xv_hv_wv | avx2 && avx | alu |
+| vpdpbuud | vpdpbuud_xv_hv_wv | avx2 && avx | alu |
+| vpdpbuuds | vpdpbuuds_xv_hv_wv | avx2 && avx | alu |
+| vpdpwssd | vpdpwssd_xv_hv_wv | avx2 && avx | alu |
+| vpdpwssds | vpdpwssds_xv_hv_wv | avx2 && avx | alu |
+| vpdpwsud | vpdpwsud_xv_hv_wv | avx2 && avx | alu |
+| vpdpwsuds | vpdpwsuds_xv_hv_wv | avx2 && avx | alu |
+| vpdpwusd | vpdpwusd_xv_hv_wv | avx2 && avx | alu |
+| vpdpwusds | vpdpwusds_xv_hv_wv | avx2 && avx | alu |
+| vpdpwuud | vpdpwuud_xv_hv_wv | avx2 && avx | alu |
+| vpdpwuuds | vpdpwuuds_xv_hv_wv | avx2 && avx | alu |
 | vperm2f128 | vperm2f128_xv_hv_wv_ib | avx | alu |
 | vperm2i128 | vperm2i128_xv_hv_wv_ib | avx2 && avx | alu |
 | vpermd | vpermd_xv_hv_wv | avx2 && avx | alu |
+| vpermil2pd | vpermil2pd_xv_hv_wv_iv | avx | alu |
+| vpermil2ps | vpermil2ps_xv_hv_wv_iv | avx | alu |
 | vpermilpd | vpermilpd_xv_hv_wv、vpermilpd_xv_wv_ib | avx | alu |
 | vpermilps | vpermilps_xv_hv_wv、vpermilps_xv_wv_ib | avx | alu |
+| vpermpd | vpermpd_xv_wv_ib | avx2 && avx | alu |
 | vpermps | vpermps_xv_hv_wv | avx2 && avx | alu |
 | vpermq | vpermq_xv_wv_ib | avx2 && avx | alu |
 | vpextrb | vpextrb_eb_xv_ib | avx | store |
+| vpextrd | vpextrd_w1_ev_xv_ib | !m64 && avx | store |
 | vpextrd | vpextrd_ev_xv_ib | avx | store |
+| vpextrq | vpextrq_eq_xv_ib | m64 && avx | store |
 | vpextrw | vpextrw_gv_wv_ib | avx | alu |
 | vpextrw | vpextrw_ew_xv_ib | avx | store |
 | vpgatherdd | vpgatherdd_xv_wv_hv | avx2 && avx | load |
@@ -1217,14 +1358,20 @@
 | vphsubw | vphsubw_xv_hv_wv | avx | alu |
 | vphsubw | vphsubw_xv_hv_wv | avx2 && avx | alu |
 | vpinsrb | vpinsrb_xv_hv_eb_ib | avx | alu |
+| vpinsrd | vpinsrd_w1_xv_hv_ev_ib | !m64 && avx | alu |
 | vpinsrd | vpinsrd_xv_hv_ev_ib | avx | alu |
+| vpinsrq | vpinsrq_xv_hv_eq_ib | m64 && avx | alu |
 | vpinsrw | vpinsrw_xv_hv_ew_ib | avx | alu |
+| vpmadd52huq | vpmadd52huq_xv_hv_wv | avx2 && avx | alu |
+| vpmadd52luq | vpmadd52luq_xv_hv_wv | avx2 && avx | alu |
 | vpmaddubsw | vpmaddubsw_xv_hv_wv | avx | alu |
 | vpmaddubsw | vpmaddubsw_xv_hv_wv | avx2 && avx | alu |
 | vpmaddwd | vpmaddwd_xv_hv_wv | avx | alu |
 | vpmaddwd | vpmaddwd_xv_hv_wv | avx2 && avx | alu |
 | vpmaskmovd | vpmaskmovd_xv_hv_wv | avx2 && avx | load |
 | vpmaskmovd | vpmaskmovd_wv_hv_xv | avx2 && avx | store |
+| vpmaskmovq | vpmaskmovq_xv_hv_wv | avx2 && avx | load |
+| vpmaskmovq | vpmaskmovq_wv_hv_xv | avx2 && avx | store |
 | vpmaxsb | vpmaxsb_xv_hv_wv | avx | alu |
 | vpmaxsb | vpmaxsb_xv_hv_wv | avx2 && avx | alu |
 | vpmaxsd | vpmaxsd_xv_hv_wv | avx | alu |
@@ -1283,6 +1430,7 @@
 | vpmovzxwd | vpmovzxwd_xv_wv | avx2 && avx | alu |
 | vpmovzxwq | vpmovzxwq_xv_wv | avx | alu |
 | vpmovzxwq | vpmovzxwq_xv_wv | avx2 && avx | alu |
+| vpmuldq | vpmuldq_xv_hv_wv | avx2 && avx | alu |
 | vpmulhrsw | vpmulhrsw_xv_hv_wv | avx | alu |
 | vpmulhrsw | vpmulhrsw_xv_hv_wv | avx2 && avx | alu |
 | vpmulhuw | vpmulhuw_xv_hv_wv | avx | alu |
@@ -1335,10 +1483,13 @@
 | vpslldq | vpslldq_hv_wv_ib | avx2 && avx | alu |
 | vpsllq | vpsllq_hv_wv_ib、vpsllq_xv_hv_wv | avx | alu |
 | vpsllq | vpsllq_hv_wv_ib、vpsllq_xv_hv_wv | avx2 && avx | alu |
+| vpsllvd | vpsllvd_xv_hv_wv | avx2 && avx | alu |
+| vpsllvq | vpsllvq_xv_hv_wv | avx2 && avx | alu |
 | vpsllw | vpsllw_hv_wv_ib、vpsllw_xv_hv_wv | avx | alu |
 | vpsllw | vpsllw_hv_wv_ib、vpsllw_xv_hv_wv | avx2 && avx | alu |
 | vpsrad | vpsrad_hv_wv_ib、vpsrad_xv_hv_wv | avx | alu |
 | vpsrad | vpsrad_hv_wv_ib、vpsrad_xv_hv_wv | avx2 && avx | alu |
+| vpsravd | vpsravd_xv_hv_wv | avx2 && avx | alu |
 | vpsraw | vpsraw_hv_wv_ib、vpsraw_xv_hv_wv | avx | alu |
 | vpsraw | vpsraw_hv_wv_ib、vpsraw_xv_hv_wv | avx2 && avx | alu |
 | vpsrld | vpsrld_hv_wv_ib、vpsrld_xv_hv_wv | avx | alu |
@@ -1347,6 +1498,8 @@
 | vpsrldq | vpsrldq_hv_wv_ib | avx2 && avx | alu |
 | vpsrlq | vpsrlq_hv_wv_ib、vpsrlq_xv_hv_wv | avx | alu |
 | vpsrlq | vpsrlq_hv_wv_ib、vpsrlq_xv_hv_wv | avx2 && avx | alu |
+| vpsrlvd | vpsrlvd_xv_hv_wv | avx2 && avx | alu |
+| vpsrlvq | vpsrlvq_xv_hv_wv | avx2 && avx | alu |
 | vpsrlw | vpsrlw_hv_wv_ib、vpsrlw_xv_hv_wv | avx | alu |
 | vpsrlw | vpsrlw_hv_wv_ib、vpsrlw_xv_hv_wv | avx2 && avx | alu |
 | vpsubb | vpsubb_xv_hv_wv | avx | alu |
@@ -1389,12 +1542,23 @@
 | vpxor | vpxor_xv_hv_wv | avx2 && avx | alu |
 | vpxord | vpxord_xv_hv_wv | avx512f | alu |
 | vpxorq | vpxorq_xv_hv_wv | avx512f | alu |
+| vrcpps | vrcpps_xv_wv | avx | alu |
+| vrcpss | vrcpss_xv_hv_wv | avx | alu |
 | vroundpd | vroundpd_xv_wv_ib | avx | alu |
 | vroundps | vroundps_xv_wv_ib | avx | alu |
 | vroundsd | vroundsd_xv_hv_wv_ib | avx | alu |
 | vroundss | vroundss_xv_hv_wv_ib | avx | alu |
+| vrsqrtps | vrsqrtps_xv_wv | avx | alu |
+| vrsqrtss | vrsqrtss_xv_hv_wv | avx | alu |
+| vsha512msg1 | vsha512msg1_xv_hv_wv | avx | alu |
+| vsha512msg2 | vsha512msg2_xv_hv_wv | avx | alu |
+| vsha512rnds2 | vsha512rnds2_xv_hv_wv | avx | alu |
 | vshufpd | vshufpd_xv_hv_wv_ib | avx | alu |
 | vshufps | vshufps_xv_hv_wv_ib | avx | alu |
+| vsm3msg1 | vsm3msg1_xv_hv_wv | avx | alu |
+| vsm3msg2 | vsm3msg2_xv_hv_wv | avx | alu |
+| vsm4key4 | vsm4key4_xv_hv_wv | avx | alu |
+| vsm4rnds4 | vsm4rnds4_xv_hv_wv | avx | alu |
 | vsqrtbf16 | vsqrtbf16_xv_wv | avx10_2 && avx512f | alu |
 | vsqrtpd | vsqrtpd_xv_wv | avx | alu |
 | vsqrtpd | vsqrtpd_xv_wv | avx512f | alu |
@@ -1412,6 +1576,8 @@
 | vsubss | vsubss_xv_hv_wv | avx | alu |
 | vtestpd | vtestpd_xv_wv | avx | alu |
 | vtestps | vtestps_xv_wv | avx | alu |
+| vucomisd | vucomisd_xv_wv | avx | alu |
+| vucomiss | vucomiss_xv_wv | avx | alu |
 | vunpckhpd | vunpckhpd_xv_hv_wv | avx | alu |
 | vunpckhps | vunpckhps_xv_hv_wv | avx | alu |
 | vunpcklpd | vunpcklpd_xv_hv_wv | avx | alu |
@@ -1420,8 +1586,10 @@
 | vxorps | vxorps_xv_hv_wv | avx | alu |
 | vzeroall | vzeroall | avx | alu |
 | vzeroupper | vzeroupper | avx | alu |
+| wbinvd | wbinvd | 真 | system |
 | wrfsbase | wrfsbase_rv | m64 && fsgsbase | system |
 | wrgsbase | wrgsbase_rv | m64 && fsgsbase | system |
+| wrmsr | wrmsr | msr | system |
 | wrpkru | wrpkru | !m64 && pku | system |
 | wrpkru | wrpkru | pku | system |
 | wrss | wrssd_mv_gv | cet_ss | store |
@@ -1443,4 +1611,5 @@
 | xsave | xsave | xsave | system |
 | xsaveopt | xsaveopt | xsaveopt | system |
 | xsetbv | xsetbv | xsave | system |
+| xstore | xstore | 真 | system |
 | xtest | xtest | rtm | system |

@@ -83,6 +83,10 @@ pub const TEST_REQUIREMENTS: &[TestBinary] = &[
         needs: &[Req::Tool("llvm-mc")],
     },
     TestBinary {
+        binary: "heavy_oracle_xed",
+        needs: &[Req::Tool("xed")],
+    },
+    TestBinary {
         binary: "heavy_oracle_power",
         needs: &[Req::Tool("llvm-mc")],
     },
@@ -159,6 +163,7 @@ fn tool_available(name: &str) -> bool {
         name.to_string(),
         format!("/usr/sbin/{name}"),
         format!("/usr/bin/{name}"),
+        format!("/opt/{name}/bin/{name}"),
     ]
     .iter()
     .any(|c| {

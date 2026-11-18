@@ -657,9 +657,14 @@ fn validate_maps(model: &Model, timing: &BTreeSet<&str>, errors: &mut Vec<Valida
             PfxSel::P66 => 0b0010,
             PfxSel::PF2 => 0b0100,
             PfxSel::PF3 => 0b1000,
-            PfxSel::No66 => 0b1101,
-            PfxSel::No66F3 => 0b0101,
-            PfxSel::NoF2 => 0b1011,
+            // 必須接頭辞でない F2/F3 は #UD（XED 実測）なので
+            // No* 系は NP か NP+66 に縮約される。名前は「兄弟
+            // 命令がどの接頭辞を取るか」の意図の印。
+            PfxSel::No66 => 0b0001,
+            PfxSel::No66F3 => 0b0001,
+            PfxSel::NoF2 => 0b0011,
+            // `NoF3` は F3 だけ別命令に譲り NP/66/F2 を受理する
+            // （BSF/BSR・ヒント NOP・PKU が F2 を無視する例）。
             PfxSel::NoF3 => 0b0111,
             PfxSel::NoF2F3 => 0b0011,
         }

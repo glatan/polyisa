@@ -513,7 +513,7 @@ fn gen_map_decoder(model: &Model) -> Result<String, GenError> {
     // 生成コード内で使うオペランド種別の型。
     s.push_str(
         "#[derive(Clone, Copy)]\n\
-         pub enum OpW { B8, W16, V, Z, D32, Q64, O128, A }\n\
+         pub enum OpW { B8, W16, V, Z, J, D32, Q64, O128, A }\n\
          #[derive(Clone, Copy)]\n\
          pub enum OpK {\n\
          \x20   Ea(OpW), Reg(OpW), RegS, RegX, RmX, RegM, RmM,\n\
@@ -594,6 +594,10 @@ fn gen_map_decoder(model: &Model) -> Result<String, GenError> {
          \x20   pub evex_aaa: u8,\n\
          \x20   /// EVEX.R'（ModRM.reg の 5 ビット目。反転済み）。\n\
          \x20   pub evex_r2: bool,\n\
+         \x20   /// EVEX.map4 の U ビット（P1.2。メモリ形では\n\
+         \x20   /// ~X4 として SIB 指標の 5 ビット目になる）。\n\
+         \x20   /// map4 以外では予約の 1 なので常に真。\n\
+         \x20   pub evex_u: bool,\n\
          \x20   /// APX の上位拡張ビット。REX2 のペイロード\n\
          \x20   /// [M0 R4 X4 B4 W R X B]、EVEX.map4 の\n\
          \x20   /// [0 ~R4 ~X4 B4 ...] が入る。bit7=M0（0F 表選択）、\n\
@@ -615,7 +619,7 @@ fn gen_map_decoder(model: &Model) -> Result<String, GenError> {
     s.push_str(
         "#[allow(clippy::all)]\n\
          #[inline]\n\
-         fn opw_bits(w: OpW, osize: u8, _for_imm: bool) -> u32 {\n\
+         fn opw_bits(w: OpW, osize: u8, m64: bool) -> u32 {\n\
          \x20   match w {\n\
          \x20       OpW::B8 => 8,\n\
          \x20       OpW::W16 => 16,\n\
@@ -623,6 +627,7 @@ fn gen_map_decoder(model: &Model) -> Result<String, GenError> {
          \x20       OpW::Q64 => 64,\n\
          \x20       OpW::O128 => 128,\n\
          \x20       OpW::Z => if osize == 16 { 16 } else { 32 },\n\
+         \x20       OpW::J => if m64 { 32 } else if osize == 16 { 16 } else { 32 },\n\
          \x20       OpW::V => u32::from(osize),\n\
          \x20       OpW::A => 0,\n\
          \x20   }\n\
@@ -716,6 +721,7 @@ fn gen_map_decoder(model: &Model) -> Result<String, GenError> {
          \x20   edisp: u8,\n\
          \x20   ebok: u8,\n\
          \x20   pre: bool,\n\
+         \x20   lock_ok: bool,\n\
          ) -> Option<Insn> {\n\
          \x20   let needs_modrm = group_modrm\n\
          \x20       || ops.iter().any(|o| {\n\
@@ -735,10 +741,13 @@ fn gen_map_decoder(model: &Model) -> Result<String, GenError> {
          \x20   if needs_modrm && !pre {\n\
          \x20       modrm_dec(bytes, i, d, edisp, ebok)?;\n\
          \x20   }\n\
+         \x20   if d.lock && !(lock_ok && d.has_modrm && d.modrm >> 6 != 3) {\n\
+         \x20       return None;\n\
+         \x20   }\n\
          \x20   for op in ops {\n\
          \x20       match op {\n\
          \x20           OpK::Imm(w) => {\n\
-         \x20               let bits = opw_bits(*w, d.osize, true);\n\
+         \x20               let bits = opw_bits(*w, d.osize, mode_m64(d.modes));\n\
          \x20               let nb = (bits / 8) as usize;\n\
          \x20               let mut v: u64 = 0;\n\
          \x20               for k in 0..nb {\n\
@@ -749,7 +758,7 @@ fn gen_map_decoder(model: &Model) -> Result<String, GenError> {
          \x20               d.imm_bits = bits as u8;\n\
          \x20           }\n\
          \x20           OpK::Imm2(w) => {\n\
-         \x20               let bits = opw_bits(*w, d.osize, true);\n\
+         \x20               let bits = opw_bits(*w, d.osize, mode_m64(d.modes));\n\
          \x20               let nb = (bits / 8) as usize;\n\
          \x20               let mut v: u64 = 0;\n\
          \x20               for k in 0..nb {\n\
@@ -759,7 +768,7 @@ fn gen_map_decoder(model: &Model) -> Result<String, GenError> {
          \x20               d.imm2 = v;\n\
          \x20           }\n\
          \x20           OpK::Rel(w) => {\n\
-         \x20               let bits = opw_bits(*w, d.osize, false);\n\
+         \x20               let bits = opw_bits(*w, d.osize, mode_m64(d.modes));\n\
          \x20               let nb = (bits / 8) as usize;\n\
          \x20               let mut v: i64 = 0;\n\
          \x20               for k in 0..nb {\n\
@@ -785,6 +794,9 @@ fn gen_map_decoder(model: &Model) -> Result<String, GenError> {
          \x20           }\n\
          \x20           _ => {}\n\
          \x20       }\n\
+         \x20   }\n\
+         \x20   if *i > 15 {\n\
+         \x20       return None;\n\
          \x20   }\n\
          \x20   d.len = *i as u8;\n\
          \x20   Some(insn)\n\
@@ -827,15 +839,16 @@ fn gen_map_decoder(model: &Model) -> Result<String, GenError> {
             let mut gated = false;
             for item in items {
                 if let MapItem::Map(_, name, when) = item {
-                    // REX2 の後は 0F/0F38/0F3A のエスケープバイトを
-                    // 置けない（マップは M0 でだけ選ぶ）ので、サブ
-                    // マップへの分岐は REX2 非経由に限る。
+                    // REX2・VEX・EVEX の後は 0F/0F38/0F3A の
+                    // エスケープバイトを置けない（マップは M0 や
+                    // mmmmm でだけ選ぶ）ので、サブマップへの分岐は
+                    // レガシー経路に限る。
                     let guard = {
                         let g = when_guard_flags(when, &flag_exprs)?;
                         if g.is_empty() {
-                            "!d.rex2_seen".to_string()
+                            "!d.rex2_seen && !d.vex && !d.evex".to_string()
                         } else {
-                            format!("({g}) && !d.rex2_seen")
+                            format!("({g}) && !d.rex2_seen && !d.vex && !d.evex")
                         }
                     };
                     s.push_str(&format!(
@@ -982,12 +995,11 @@ fn gen_map_decoder(model: &Model) -> Result<String, GenError> {
          \x20           // VEX（さもなければ LES/LDS のオペコード）。\n\
          \x20           if mode_m64(modes) || b2 >> 6 == 3 {\n\
          \x20               // LOCK+VEX は #UD。\n\
-         \x20               if d.lock {\n\
+         \x20               // VEX の前のレガシー接頭辞（66/F2/F3/LOCK）は\n\
+         \x20               // #UD（XED 実測）。pp フィールドだけが接頭辞を選ぶ。\n\
+         \x20               if d.lock || d.p66 || d.rep != 0 {\n\
          \x20                   return None;\n\
          \x20               }\n\
-         \x20               // VEX の前のレガシー接頭辞（66/F2/F3）は無視\n\
-         \x20               // される。pp フィールドだけが接頭辞を選ぶ。\n\
-         \x20               d.p66 = false;\n\
          \x20               d.rep = 0;\n\
          \x20               if b0 == 0xC5 {\n\
          \x20                   d.vex = true;\n\
@@ -1053,8 +1065,8 @@ fn gen_map_decoder(model: &Model) -> Result<String, GenError> {
          \x20   if b0 == 0x8F && !d.vex && !d.evex && !d.rex2_seen {\n\
          \x20       let b2 = *bytes.get(i + 1)?;\n\
          \x20       if b2 & 0x1F >= 8 {\n\
-         \x20           // LOCK+XOP は #UD。\n\
-         \x20           if d.lock {\n\
+         \x20           // レガシー接頭辞（66/F2/F3/LOCK）+XOP は #UD。\n\
+         \x20           if d.lock || d.p66 || d.rep != 0 {\n\
          \x20               return None;\n\
          \x20           }\n\
          \x20           let b3 = *bytes.get(i + 2)?;\n\
@@ -1072,10 +1084,6 @@ fn gen_map_decoder(model: &Model) -> Result<String, GenError> {
          \x20           if b3 & 3 != 0 {\n\
          \x20               return None;\n\
          \x20           }\n\
-         \x20           // VEX 同様、XOP 前のレガシー接頭辞（66/F2/F3）は\n\
-         \x20           // 無視される。\n\
-         \x20           d.p66 = false;\n\
-         \x20           d.rep = 0;\n\
          \x20           i += 3;\n\
          \x20           if i > 15 {\n\
          \x20               return None;\n\
@@ -1101,7 +1109,7 @@ fn gen_map_decoder(model: &Model) -> Result<String, GenError> {
          \x20           // map4 では P0.3=B4・P0.4=~R4・P1.2=~X4 が有効フィールド\n\
          \x20           // なので予約ビット検査を緩める。5-7 は予約で、存在しない\n\
          \x20           // マップ番号としてディスパッチ側で #UD に落ちる。\n\
-         \x20           if d.lock || mmm == 0 {\n\
+         \x20           if d.lock || mmm == 0 || d.p66 || d.rep != 0 {\n\
          \x20               return None;\n\
          \x20           }\n\
          \x20           if mmm != 4 && (p0 & 0x08 != 0 || p1 & 4 == 0) {\n\
@@ -1125,9 +1133,9 @@ fn gen_map_decoder(model: &Model) -> Result<String, GenError> {
          \x20               d.ndd = p2 & 0x10 != 0;\n\
          \x20               d.nf = p2 & 4 != 0;\n\
          \x20           }\n\
-         \x20           // VEX 同様、EVEX 前のレガシー接頭辞（66/F2/F3）は\n\
-         \x20           // 無視される。pp フィールドだけが接頭辞を選ぶ。\n\
-         \x20           d.p66 = false;\n\
+         \x20           // U ビット（P1.2）。map4 以外では予約検査で\n\
+         \x20           // 1 確定なので無条件に代入してよい。\n\
+         \x20           d.evex_u = p1 & 4 != 0;\n\
          \x20           d.rep = 0;\n\
          \x20           match p1 & 3 {\n\
          \x20               1 => d.p66 = true,\n\
@@ -1241,9 +1249,9 @@ fn emit_map_candidate(
     let pfx = match mi.pfx {
         PfxSel::Any => "true".to_string(),
         PfxSel::Plain => "!d.p66 && d.rep == 0".to_string(),
-        PfxSel::No66 => "!d.p66".to_string(),
-        PfxSel::No66F3 => "!d.p66 && d.rep != 0xF3".to_string(),
-        PfxSel::NoF2 => "d.rep != 0xF2".to_string(),
+        PfxSel::No66 => "!d.p66 && d.rep == 0".to_string(),
+        PfxSel::No66F3 => "!d.p66 && d.rep == 0".to_string(),
+        PfxSel::NoF2 => "d.rep == 0".to_string(),
         PfxSel::NoF3 => "d.rep != 0xF3".to_string(),
         PfxSel::NoF2F3 => "d.rep == 0".to_string(),
         PfxSel::P66 => "d.p66 && d.rep == 0".to_string(),
@@ -1265,6 +1273,16 @@ fn emit_map_candidate(
         // 受理。`zu` は ND=1 かつ vvvv 未使用を要求（vvvv は
         // レジスタを指さず、ND は ZU を選ぶ）。
         let mut c = String::from("d.evex && !d.evex_z && d.evex_ll == 0 && d.evex_aaa & 3 == 0");
+        // U ビット（~X4）はメモリ形でのみ有効フィールド。
+        // mod=11 では予約の 1 でなければ #UD（XED 実測）。
+        let modreg = if mi.group.is_some() || mi.group_mod.is_some() || mi.group_rm.is_some() {
+            "m >> 6 == 3"
+        } else if postop {
+            "d.modrm >> 6 == 3"
+        } else {
+            "*bytes.get(*i)? >> 6 == 3"
+        };
+        c.push_str(&format!(" && (d.evex_u || !({modreg}))"));
         if !mi.nf_ok {
             c.push_str(" && !d.nf");
         }
@@ -1347,8 +1365,9 @@ fn emit_map_candidate(
     let edisp = mi.edisp;
     let ebok = u8::from(mi.bcast) | (u8::from(mi.er) << 1);
     s.push_str(&format!(
-        "            if {cond} {{\n                return finish(bytes, i, d, Insn::{}, &[{ops}], {group}, {edisp}, {ebok}, {postop});\n            }}\n",
-        to_ident(&mi.name)
+        "            if {cond} {{\n                return finish(bytes, i, d, Insn::{}, &[{ops}], {group}, {edisp}, {ebok}, {postop}, {});\n            }}\n",
+        to_ident(&mi.name),
+        mi.lock_ok
     ));
     Ok(())
 }
@@ -1362,6 +1381,7 @@ fn opk_code(op: &polyisa_isadl::model::OpKind) -> String {
             OpWidth::W16 => "OpW::W16",
             OpWidth::V => "OpW::V",
             OpWidth::Z => "OpW::Z",
+            OpWidth::J => "OpW::J",
             OpWidth::D32 => "OpW::D32",
             OpWidth::Q64 => "OpW::Q64",
             OpWidth::O128 => "OpW::O128",
