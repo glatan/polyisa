@@ -134,6 +134,10 @@ pub const TEST_REQUIREMENTS: &[TestBinary] = &[
         needs: &[Req::Tool("clang"), Req::Data(".testdata/bin-distro-s390x")],
     },
     TestBinary {
+        binary: "heavy_program_x32",
+        needs: &[Req::Tool("x86_64-linux-gnux32-gcc-14")],
+    },
+    TestBinary {
         binary: "heavy_conformance_wasm_spec",
         needs: &[Req::Data(".testdata/wasm-spec")],
     },

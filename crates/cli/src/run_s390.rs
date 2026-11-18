@@ -565,7 +565,6 @@ fn run_elf_s390_impl(
         arg_bytes.push(a.as_bytes().to_vec());
     }
     let img_top = top - 0x1_0000;
-    let rand_addr = top - 16;
     let mut auxv: Vec<(u64, u64)> = vec![
         (3, phdr_addr),              // AT_PHDR
         (4, 56),                     // AT_PHENT
@@ -579,7 +578,6 @@ fn run_elf_s390_impl(
         (14, 0),                     // AT_EGID
         (17, 100),                   // AT_CLKTCK
         (23, 0),                     // AT_SECURE
-        (25, rand_addr),             // AT_RANDOM
     ];
     if interp_bias != 0 {
         auxv.push((7, interp_bias)); // AT_BASE
@@ -602,10 +600,6 @@ fn run_elf_s390_impl(
     env.backend
         .mem
         .write(VirtAddr(sp), &img)
-        .map_err(|e| format!("stack write: {e:?}"))?;
-    env.backend
-        .mem
-        .write(VirtAddr(rand_addr), b"polyisa-s390x!!!")
         .map_err(|e| format!("stack write: {e:?}"))?;
     // r15 = sp。z/Architecture のスタックポインタ。
     // Ref: SPEC-S390-ABI §register conventions。

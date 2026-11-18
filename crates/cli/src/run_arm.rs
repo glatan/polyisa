@@ -392,7 +392,7 @@ fn run_elf_arm_impl(
     const HWCAP_VFPD32: u64 = 0x8_0000;
     let hwcap =
         HWCAP_TLS | HWCAP_VFP | HWCAP_EDSP | HWCAP_VFPV3 | HWCAP_IDIVA | HWCAP_IDIVT | HWCAP_VFPD32;
-    let mut auxv: Vec<(u64, u64)> = vec![
+    let auxv: Vec<(u64, u64)> = vec![
         (3, phdr_addr),             // AT_PHDR
         (4, 32),                    // AT_PHENT
         (5, u64::from(ehdr.phnum)), // AT_PHNUM
@@ -406,14 +406,7 @@ fn run_elf_arm_impl(
         (16, hwcap),                // AT_HWCAP
         (17, 100),                  // AT_CLKTCK
         (23, 0),                    // AT_SECURE
-        (25, 0),                    // AT_RANDOM（後で実番地に差し替え）
     ];
-    let rand_addr = top - 16;
-    for (k, v) in auxv.iter_mut() {
-        if *k == 25 {
-            *v = rand_addr;
-        }
-    }
     let (img, sp) = polyisa_os_linux::build_initial_stack32(img_top, &arg_bytes, &[], &auxv);
     let stack_base = sp & !(PAGE_SIZE - 1);
     let stack_pages = (top - stack_base) / PAGE_SIZE;
@@ -428,15 +421,6 @@ fn run_elf_arm_impl(
     env.backend
         .mem
         .write(VirtAddr(sp), &img)
-        .map_err(|e| format!("stack write: {e:?}"))?;
-    env.backend
-        .mem
-        .write(
-            VirtAddr(rand_addr),
-            &[
-                0x70, 0x6f, 0x6c, 0x79, 0x69, 0x73, 0x61, 0x2d, 0x61, 0x72, 0x6d, 0x33, 0x32, 0x21,
-            ],
-        )
         .map_err(|e| format!("stack write: {e:?}"))?;
     // sp=r13。cpsr/r0–r12/lr は 0 のまま。
     env.backend.set(Gpr(13).state(), sp as u32);

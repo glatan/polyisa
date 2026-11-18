@@ -85,6 +85,10 @@ name = "heavy_jit_diff"
 required-features = ["guest-aarch64", "guest-arm", "guest-x86"]
 
 [[test]]
+name = "heavy_program_x32"
+required-features = ["guest-x86"]
+
+[[test]]
 name = "heavy_program_wasi"
 required-features = ["guest-wasm"]
 

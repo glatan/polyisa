@@ -818,22 +818,14 @@ fn run_elf_aarch64_impl(
         (16, 0),                     // AT_HWCAP
         (17, 100),                   // AT_CLKTCK
         (23, 0),                     // AT_SECURE
-        (25, 0),                     // AT_RANDOM（後で実番地に差し替え）
     ];
     if interp_bias != 0 {
         auxv.push((7, interp_bias)); // AT_BASE
     }
-    let rand_addr = top - 16;
-    for (k, v) in auxv.iter_mut() {
-        if *k == 25 {
-            *v = rand_addr;
-        }
-    }
     let (img, sp) =
         polyisa_os_linux::build_initial_stack_endian(img_top, &arg_bytes, &[], &auxv, data_endian);
-    // 像の置かれる [sp, img_top) と、像の直上の呼出し側スクラッチ
-    // （rand_addr を含む top まで）を先に写像する。sp より下は
-    // ページフォルト駆動の成長で埋まる。
+    // 像の置かれる [sp, img_top) と、像の直上の呼出し側スクラッチを
+    // 先に写像する。sp より下はページフォルト駆動の成長で埋まる。
     let stack_base = sp & !(PAGE_SIZE - 1);
     let stack_pages = (top - stack_base) / PAGE_SIZE;
     env.backend
@@ -847,16 +839,6 @@ fn run_elf_aarch64_impl(
     env.backend
         .mem
         .write(VirtAddr(sp), &img)
-        .map_err(|e| format!("stack write: {e:?}"))?;
-    env.backend
-        .mem
-        .write(
-            VirtAddr(rand_addr),
-            &[
-                0x70, 0x6f, 0x6c, 0x79, 0x69, 0x73, 0x61, 0x2d, 0x61, 0x61, 0x72, 0x63, 0x68, 0x36,
-                0x34, 0x21,
-            ],
-        )
         .map_err(|e| format!("stack write: {e:?}"))?;
     env.backend.set(sem::sp_ref(), sp);
     sys.exe_path = path.to_string();

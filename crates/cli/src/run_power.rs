@@ -516,16 +516,9 @@ fn run_elf_power_impl(
         (17, 100),                                           // AT_CLKTCK
         (20, PPC_FEATURE2_ARCH_2_07),                        // AT_HWCAP2
         (23, 0),                                             // AT_SECURE
-        (25, 0),                                             // AT_RANDOM（後で実番地に差し替え）
     ];
     if interp_bias != 0 {
         auxv.push((7, interp_bias)); // AT_BASE
-    }
-    let rand_addr = top - 16;
-    for (k, v) in auxv.iter_mut() {
-        if *k == 25 {
-            *v = rand_addr;
-        }
     }
     let (img, sp) =
         polyisa_os_linux::build_initial_stack_endian(img_top, &arg_bytes, &[], &auxv, data_endian);
@@ -542,16 +535,6 @@ fn run_elf_power_impl(
     env.backend
         .mem
         .write(VirtAddr(sp), &img)
-        .map_err(|e| format!("stack write: {e:?}"))?;
-    env.backend
-        .mem
-        .write(
-            VirtAddr(rand_addr),
-            &[
-                0x70, 0x6f, 0x6c, 0x79, 0x69, 0x73, 0x61, 0x2d, 0x70, 0x70, 0x63, 0x36, 0x34, 0x21,
-                0x21,
-            ],
-        )
         .map_err(|e| format!("stack write: {e:?}"))?;
     // r1 = sp。ELFv2 の大域入口規約で r12 = 入口番地（入口関数が r12 から
     // r2/TOC を組み立てる）。r2/r13 はゲストが自分で張る。

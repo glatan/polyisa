@@ -540,12 +540,21 @@ fn build_initial_stack_ws(
         };
         out[off..off + ws].copy_from_slice(&b);
     };
+    // AT_RANDOM (25) が指す 16 バイト。スタックガード等の種。
+    // 実機は execve のたびに乱数を置くが、再現性のため固定種にする
+    // （execve 後も同じ値になる）。
+    const AT_RANDOM_SEED: [u8; 16] = [
+        0x35, 0xA7, 0xC1, 0x5E, 0x9B, 0x02, 0xF8, 0x6D, 0x4E, 0x11, 0x88, 0xD9, 0x27, 0xBC, 0x73,
+        0xE0,
+    ];
     let strings_len: usize = args.iter().map(|a| a.len() + 1).sum::<usize>()
-        + env.iter().map(|e| e.len() + 1).sum::<usize>();
+        + env.iter().map(|e| e.len() + 1).sum::<usize>()
+        + AT_RANDOM_SEED.len();
     // AT_EXECFN を args[0] 向けに1件足す（args 空では付けない）。
+    // AT_RANDOM は常に1件足す。終端の AT_NULL は +1 側に含む。
     let execfn_extra: usize = if args.is_empty() { 0 } else { 2 * ws };
     let arrays_len: usize =
-        ws * (1 + (args.len() + 1) + (env.len() + 1)) + 2 * ws * (auxv.len() + 1) + execfn_extra;
+        ws * (1 + (args.len() + 1) + (env.len() + 1)) + 2 * ws * (auxv.len() + 2) + execfn_extra;
     let total = arrays_len + strings_len;
     let aligned = total.next_multiple_of(16);
     let sp = top - aligned as u64;
@@ -560,6 +569,10 @@ fn build_initial_stack_ws(
         pos += s.len() + 1; // NUL は vec 初期値の 0 のまま.
         addrs.push(addr);
     }
+    let rand_addr = str_base + pos as u64;
+    img[aligned - strings_len + pos..aligned - strings_len + pos + AT_RANDOM_SEED.len()]
+        .copy_from_slice(&AT_RANDOM_SEED);
+    pos += AT_RANDOM_SEED.len();
     // 配列部。
     let mut off = 0usize;
     w(&mut img, off, args.len() as u64);
@@ -579,6 +592,12 @@ fn build_initial_stack_ws(
         w(&mut img, off + ws, *v);
         off += 2 * ws;
     }
+    // AT_RANDOM (25) は上で詰めた 16 バイトの番地を指す。
+    // glibc の _dl_random がここからスタックガードを取る.
+    const AT_RANDOM: u64 = 25;
+    w(&mut img, off, AT_RANDOM);
+    w(&mut img, off + ws, rand_addr);
+    off += 2 * ws;
     // AT_EXECFN (31) は args[0] の番地を指す。静的 glibc の _dl_get_origin が参照する.
     // args が空の単体テストでは付けない.
     if !args.is_empty() {
@@ -605,7 +624,7 @@ mod tests {
         let (img, sp) =
             build_initial_stack32_endian(0x8000, &[b"p".to_vec()], &[], &[(6, 0x1000)], Endian::Be);
         // sp からの配列: argc=1, argv[0]=文字列番地, argv NULL, auxv(6,0x1000),
-        // AT_EXECFN(31), AT_NULL.
+        // AT_RANDOM(25), AT_EXECFN(31), AT_NULL.
         let u32be = |off: usize| u32::from_be_bytes(img[off..off + 4].try_into().unwrap());
         assert_eq!(u32be(0), 1, "argc");
         let argv0 = u32be(4);
@@ -617,7 +636,10 @@ mod tests {
         assert_eq!(u32be(12), 0, "envp NULL");
         assert_eq!(u32be(16), 6, "AT_PAGESZ key");
         assert_eq!(u32be(20), 0x1000, "AT_PAGESZ value");
-        assert_eq!(u32be(24), 31, "AT_EXECFN key");
+        assert_eq!(u32be(24), 25, "AT_RANDOM key");
+        let rnd = u32be(28);
+        assert!(rnd > sp as u32 && rnd < 0x8000, "AT_RANDOM ptr {rnd:#x}");
+        assert_eq!(u32be(32), 31, "AT_EXECFN key");
     }
 
     #[test]
@@ -744,17 +766,22 @@ mod tests {
         let a1 = r64(16);
         assert_eq!(r64(24), 0);
         assert_eq!(r64(32), 0);
-        // auxv: (6,0x1000) + AT_EXECFN(31,args[0]) + AT_NULL.
+        // auxv: (6,0x1000) + AT_RANDOM(25,seed) + AT_EXECFN(31,args[0]) + AT_NULL.
         assert_eq!(r64(40), 6);
         assert_eq!(r64(48), 0x1000);
-        assert_eq!(r64(56), 31);
-        assert_eq!(r64(64), a0);
-        assert_eq!(r64(72), 0);
-        assert_eq!(r64(80), 0);
+        assert_eq!(r64(56), 25);
+        let rnd = r64(64);
+        assert_eq!(r64(72), 31);
+        assert_eq!(r64(80), a0);
+        assert_eq!(r64(88), 0);
+        assert_eq!(r64(96), 0);
         // 文字列の解決。
         let at = |addr: u64| (addr - sp) as usize;
         assert_eq!(&img[at(a0)..at(a0) + 4], b"prog");
         assert_eq!(&img[at(a1)..at(a1) + 2], b"hi");
+        // AT_RANDOM は 16 バイトの種を指す（argv/envp 文字列の後ろ）。
+        assert!(rnd > a1, "AT_RANDOM は文字列の後ろ");
+        assert_eq!(img[at(rnd)..at(rnd) + 16].len(), 16);
         assert_eq!(syscall_name(GuestAbi::Unknown, 64), None);
     }
 

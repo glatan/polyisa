@@ -14654,6 +14654,16 @@ pub fn run_elf_x86_x32_sel(
     run_image_x86_x32_sel(&bytes, path, argv, &mut sys, sel)
 }
 
+/// x32 の ELF を実行し、終了コードと fd 1 の出力を返す。ホストの stdout には書かない。
+pub fn run_elf_x86_x32_captured(path: &str, argv: &[String]) -> Result<(u64, Vec<u8>), String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
+    let mut sys = Linux::x86_x32();
+    let captured = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    sys.capture_out = Some(std::rc::Rc::clone(&captured));
+    let code = run_image_x86_x32_sel(&bytes, path, argv, &mut sys, None)?;
+    Ok((code, captured.borrow().clone()))
+}
+
 /// `run_image_x86_64_ex` の実体。`jit` があればブロック実行経路を使う。
 /// `x32` のときは ELFCLASS32 の像を 64 ビットモードで実行し、
 /// ポインタ幅と実効アドレスは 32 ビットに絞る。
