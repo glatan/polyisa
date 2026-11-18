@@ -155,8 +155,9 @@ pub fn derive(features: &BTreeSet<String>, ident: &BTreeMap<String, String>) -> 
             reg_of(0x8000_0001, 0, "ecx"),
             reg_of(0x8000_0001, 0, "edx"),
         ],
-        // leaf 0x8000_0008: アドレスサイズ（32/48 ビット固定）。
-        [0x0000_3020, 0, 0, 0],
+        // leaf 0x8000_0008: アドレスサイズ（32/48 ビット固定）と
+        // EBX の拡張機能ビット（CLZERO/RDPRU 等）。
+        [0x0000_3020, reg_of(0x8000_0008, 0, "ebx"), 0, 0],
     ];
     // モデルが報告する最大リーフを超える行は 0 に潰す。leaf 0 と
     // 0x8000_0000 の EAX は最大値そのものを運ぶので残す。

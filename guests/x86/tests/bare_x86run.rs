@@ -21633,3 +21633,111 @@ fn run64_dnow() {
     assert_eq!(q(0x28), 0xE000_0800_F000_1000, "pmulhrw");
     assert_eq!(q(0x30), f(0x4000_0000, 0x4080_0000), "pswapd");
 }
+
+// ---- B3b: SSE4a・MONITORX/MWAITX・CLZERO・RDPRU ----
+
+#[test]
+fn run64_sse4a() {
+    // SSE4a（AMD 拡張）。EXTRQ は imm 形（66 0F 78 /0 ib ib）と
+    // reg 形（66 0F 79 /r）、INSERTQ は F2 0F 78/79、
+    // MOVNTSS/MOVNTSD は F3/F2 0F 2B。CLZERO/RDPRU/MONITORX/
+    // MWAITX は 0F 01 /7 の mod=11 副エンコーディング。
+    let feats = polyisa_guest_x86::model_feats("x86_64")
+        | polyisa_guest_x86::FEAT_SSE4A
+        | polyisa_guest_x86::FEAT_MWAITX
+        | polyisa_guest_x86::FEAT_CLZERO
+        | polyisa_guest_x86::FEAT_RDPRU;
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 3, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2800);
+    // 入力データ（[0x2000] から）。
+    let mut data = Vec::new();
+    let mut qw = |v: u64| data.extend(v.to_le_bytes());
+    qw(0x0123_4567_89AB_CDEF); // +0x00: A.lo
+    qw(0xAAAA_AAAA_AAAA_AAAA); // +0x08: A.hi
+    qw(0x0000_0000_0000_0408); // +0x10: C1（EXTRQ 制御: len=8,idx=4）
+    qw(0x0000_0000_0000_0000);
+    qw(0x0000_0000_0000_00FF); // +0x20: S.lo（挿入ビット）
+    qw(0x0000_0000_0000_0408); // +0x28: S.hi（INSERTQ 制御: b8=len8,b9=idx4）
+    env.backend.mem.write(VirtAddr(0x2000), &data).unwrap();
+    // CLZERO の対象領域を 0xFF で埋めておく。
+    env.backend
+        .mem
+        .write(VirtAddr(0x2300), &[0xFFu8; 0x40])
+        .unwrap();
+    let prog: &[u8] = &[
+        0x48, 0xB8, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rax,0x2000
+        0x48, 0xBB, 0x00, 0x21, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rbx,0x2100
+        // EXTRQ imm 形: 66 0F 78 /0 ib ib。ib は（length, index）。
+        0x66, 0x0F, 0x6F, 0x08, // movdqa xmm1,[rax] → A
+        0x66, 0x0F, 0x78, 0xC1, 0x08, 0x04, // extrq xmm1, len=8, idx=4 → 0xDE
+        0x66, 0x0F, 0x7F, 0x0B, // movdqa [rbx],xmm1
+        // EXTRQ reg 形: 66 0F 79 /r。制御は r/m ソースの b[0]/b[1]。
+        0x66, 0x0F, 0x6F, 0x18, // movdqa xmm3,[rax] → A
+        0x66, 0x0F, 0x6F, 0x50, 0x10, // movdqa xmm2,[rax+0x10] → C1
+        0x66, 0x0F, 0x79, 0xDA, // extrq xmm3,xmm2 → 0xDE
+        0x66, 0x0F, 0x7F, 0x5B, 0x10, // movdqa [rbx+0x10],xmm3
+        // INSERTQ imm 形: F2 0F 78 /r ib ib。
+        0x66, 0x0F, 0x6F, 0x18, // movdqa xmm3,[rax] → A
+        0x66, 0x0F, 0x6F, 0x50, 0x20, // movdqa xmm2,[rax+0x20] → S
+        0xF2, 0x0F, 0x78, 0xDA, 0x08, 0x04, // insertq xmm3,xmm2,len=8,idx=4 → 0x89ABCFFF
+        0x66, 0x0F, 0x7F, 0x5B, 0x20, // movdqa [rbx+0x20],xmm3
+        // INSERTQ reg 形: F2 0F 79 /r。制御はソースの b[8]/b[9]。
+        0x66, 0x0F, 0x6F, 0x28, // movdqa xmm5,[rax] → A
+        0xF2, 0x0F, 0x79, 0xEA, // insertq xmm5,xmm2 → 0x89ABCFFF
+        0x66, 0x0F, 0x7F, 0x6B, 0x30, // movdqa [rbx+0x30],xmm5
+        // MOVNTSS/MOVNTSD（F3/F2 0F 2B、メモリ形のみ）。xmm2=S。
+        0xF3, 0x0F, 0x2B, 0x53, 0x40, // movntss [rbx+0x40],xmm2 → 0xFF
+        0xF2, 0x0F, 0x2B, 0x53, 0x48, // movntsd [rbx+0x48],xmm2 → 0xFF
+        // CLZERO/RDPRU/MONITORX/MWAITX（0F 01 /7 mod=11）。
+        0x48, 0xB8, 0x00, 0x23, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rax,0x2300
+        0x0F, 0x01, 0xFC, // clzero → [0x2300..0x2340) = 0
+        0x0F, 0x01, 0xFD, // rdpru → edx:eax=0
+        0x89, 0x43, 0x50, // mov [rbx+0x50],eax
+        0x89, 0x53, 0x54, // mov [rbx+0x54],edx
+        0x0F, 0x01, 0xFA, // monitorx → nop
+        0x0F, 0x01, 0xFB, // mwaitx → nop
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0x31, 0xFF, // xor rdi,rdi
+        0x0F, 0x05, // syscall → exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        100,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64"),
+    );
+    assert_eq!(out, Outcome::Exit(0));
+    let acc = polyisa_mem::Access {
+        endian: polyisa_mem::Endian::Le,
+        align: polyisa_mem::Align::Unaligned,
+        kind: polyisa_mem::AccessKind::DataRead,
+    };
+    let mut v = [0u8; 0x50];
+    env.backend.mem.read(VirtAddr(0x2100), &mut v, acc).unwrap();
+    let q = |i: usize| u64::from_le_bytes(v[i..i + 8].try_into().unwrap());
+    assert_eq!(q(0x00), 0xDE, "extrq_i lo");
+    assert_eq!(q(0x08), 0, "extrq_i hi");
+    assert_eq!(q(0x10), 0xDE, "extrq_r lo");
+    assert_eq!(q(0x18), 0, "extrq_r hi");
+    assert_eq!(q(0x20), 0x0123_4567_89AB_CFFF, "insertq_i lo");
+    assert_eq!(q(0x28), 0, "insertq_i hi");
+    assert_eq!(q(0x30), 0x0123_4567_89AB_CFFF, "insertq_r lo");
+    assert_eq!(q(0x38), 0, "insertq_r hi");
+    assert_eq!(q(0x40) & 0xFFFF_FFFF, 0xFF, "movntss");
+    assert_eq!(q(0x48), 0xFF, "movntsd");
+    let mut v = [0xFFu8; 0x40];
+    env.backend.mem.read(VirtAddr(0x2300), &mut v, acc).unwrap();
+    assert_eq!(v, [0u8; 0x40], "clzero");
+    // RDPRU は EDX:EAX=0 を書き戻す。
+    let mut v = [0xFFu8; 8];
+    env.backend.mem.read(VirtAddr(0x2150), &mut v, acc).unwrap();
+    assert_eq!(v, [0u8; 8], "rdpru edx:eax");
+}

@@ -621,7 +621,7 @@ const KNOWN: &[(&str, &str, &str)] = &[
     ("66 0f 33", "missing", "*"),
     ("66 0f 37", "missing", "*"),
     ("66 0f 78", "missing", "*"),
-    ("66 0f 79", "missing", "*"), // extrq/insertq（AMD SSE4a、B3）
+    ("66 0f 79", "missing", "*"), // extrq（AMD SSE4a、B3b。sse4a ゲート）
     ("66 0f a6", "missing", "*"),
     ("66 0f a7", "missing", "*"),
     ("66 0f aa", "missing", "*"),
@@ -658,7 +658,7 @@ const KNOWN: &[(&str, &str, &str)] = &[
     ("f2 0f 21", "missing", "*"),
     ("f2 0f 22", "missing", "*"),
     ("f2 0f 23", "missing", "*"),
-    ("f2 0f 2b", "missing", "*"), // movntps 系
+    ("f2 0f 2b", "missing", "*"), // movntsd（sse4a ゲート）
     ("f2 0f 30", "missing", "*"),
     ("f2 0f 32", "missing", "*"),
     ("f2 0f 33", "missing", "*"),

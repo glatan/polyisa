@@ -7452,6 +7452,177 @@ pub fn femms<B: Backend>(_b: &mut B) -> Flow<B> {
     Ok(())
 }
 
+// ===== SSE4a（AMD 拡張）=====
+
+/// EXTRQ/INSERTQ のフィールドマスク（値）。length が 0 のとき
+/// 64（全ビット）を意味する。
+fn extrq_mask<B: Backend>(b: &mut B, len: B::V<W64>) -> B::V<W64> {
+    let zero = b.konst::<W64>(0);
+    let is0 = b.cmp::<W64>(Cmp::Eq, len, zero);
+    let one = b.konst::<W64>(1);
+    let sh = b.shl::<W64>(one, len);
+    let m = b.sub::<W64>(sh, one);
+    let all = b.konst::<W64>(u64::MAX);
+    b.select::<W64>(is0, all, m)
+}
+
+/// EXTRQ（imm 形）。r/m 宛先の下位 64 ビットから index 位置・
+/// length 幅のフィールドを抽出して下位に置く。index+length が
+/// 64 を超えるとき結果は不定（Zen では単純な右シフト結果に
+/// なった観測値）だが、ここでは `(src >> idx) & mask(len)` で
+/// 求める。上位 64 ビットは不定 → 0。
+pub fn extrqi<B: Backend>(b: &mut B, len: u8, idx: u8, d: &MapDec) -> Flow<B> {
+    let dst = rm_x(d);
+    let a: B::V<W128> = b.get(sem::xmm_ref(dst));
+    let lo: B::V<W64> = b.trunc::<W128, W64>(a);
+    let n = u64::from(len & 0x3F);
+    let p = u64::from(idx & 0x3F);
+    let mask = if n == 0 { u64::MAX } else { (1u64 << n) - 1 };
+    let kp = b.konst::<W64>(p);
+    let sh = b.shr_l::<W64>(lo, kp);
+    let km = b.konst::<W64>(mask);
+    let v = b.and::<W64>(sh, km);
+    let v128 = b.zext::<W64, W128>(v);
+    b.set(sem::xmm_ref(dst), v128);
+    Ok(())
+}
+
+/// EXTRQ（reg 形）。reg 宛先の下位 64 ビットから、r/m ソースの
+/// b[0]=length・b[1]=index で指定されるフィールドを抽出。
+pub fn extrqr<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Flow<B> {
+    let dst = reg_x(d);
+    let a: B::V<W128> = b.get(sem::xmm_ref(dst));
+    let lo: B::V<W64> = b.trunc::<W128, W64>(a);
+    let c = rx(b, ea, 128)?;
+    let c64: B::V<W64> = b.trunc::<W128, W64>(c);
+    let k63 = b.konst::<W64>(0x3F);
+    let len = b.and::<W64>(c64, k63);
+    let k8 = b.konst::<W64>(8);
+    let idxb = b.shr_l::<W64>(c64, k8);
+    let idx = b.and::<W64>(idxb, k63);
+    let mask = extrq_mask(b, len);
+    let sh = b.shr_l::<W64>(lo, idx);
+    let v = b.and::<W64>(sh, mask);
+    let v128 = b.zext::<W64, W128>(v);
+    b.set(sem::xmm_ref(dst), v128);
+    Ok(())
+}
+
+/// INSERTQ の挿入合成（値）。`dlo` の index 位置に `slo` の
+/// 下位 length ビットを挿入する。index+length が 64 を超えて
+/// はみ出る上位ビットは失われる（Zen 観測値と同じ単純シフト）。
+fn insertq_val<B: Backend>(
+    b: &mut B,
+    dlo: B::V<W64>,
+    slo: B::V<W64>,
+    len: B::V<W64>,
+    idx: B::V<W64>,
+) -> B::V<W64> {
+    let mask = extrq_mask(b, len);
+    let msh = b.shl::<W64>(mask, idx);
+    let nm = b.not::<W64>(msh);
+    let keep = b.and::<W64>(dlo, nm);
+    let bits = b.and::<W64>(slo, mask);
+    let ins = b.shl::<W64>(bits, idx);
+    b.or::<W64>(keep, ins)
+}
+
+/// INSERTQ（imm 形）。reg 宛先に r/m ソースの下位 length ビットを
+/// index 位置へ挿入。ib は（length, index）の順。上位 64 ビットは
+/// 不定 → 0。
+pub fn insertqi<B: Backend>(
+    b: &mut B,
+    len: u8,
+    idx: u8,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    let dst = reg_x(d);
+    let a: B::V<W128> = b.get(sem::xmm_ref(dst));
+    let dlo: B::V<W64> = b.trunc::<W128, W64>(a);
+    let c = rx(b, ea, 64)?;
+    let slo: B::V<W64> = b.trunc::<W128, W64>(c);
+    let lenc = b.konst::<W64>(u64::from(len & 0x3F));
+    let idxc = b.konst::<W64>(u64::from(idx & 0x3F));
+    let v = insertq_val(b, dlo, slo, lenc, idxc);
+    let v128 = b.zext::<W64, W128>(v);
+    b.set(sem::xmm_ref(dst), v128);
+    Ok(())
+}
+
+/// INSERTQ（reg 形）。r/m ソースの下位 64 ビットを reg 宛先へ
+/// 挿入。制御はソース xmm の b[8]=length・b[9]=index。
+pub fn insertqr<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Flow<B> {
+    let dst = reg_x(d);
+    let a: B::V<W128> = b.get(sem::xmm_ref(dst));
+    let dlo: B::V<W64> = b.trunc::<W128, W64>(a);
+    let c = rx(b, ea, 128)?;
+    let k64 = b.konst::<W128>(64);
+    let hi128 = b.shr_l::<W128>(c, k64);
+    let hi: B::V<W64> = b.trunc::<W128, W64>(hi128);
+    let k63 = b.konst::<W64>(0x3F);
+    let len = b.and::<W64>(hi, k63);
+    let k8 = b.konst::<W64>(8);
+    let idxb = b.shr_l::<W64>(hi, k8);
+    let idx = b.and::<W64>(idxb, k63);
+    let slo: B::V<W64> = b.trunc::<W128, W64>(c);
+    let v = insertq_val(b, dlo, slo, len, idx);
+    let v128 = b.zext::<W64, W128>(v);
+    b.set(sem::xmm_ref(dst), v128);
+    Ok(())
+}
+
+/// MOVNTSS/MOVNTSD。reg ソースの下位 32/64 ビットをメモリへ
+/// ノンテンポラルに書き出す（NT ヒントはメモリモデルに現れない
+/// ので通常ストアと同じ）。
+pub fn movnts<B: Backend>(
+    b: &mut B,
+    dword: bool,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    let src = reg_x(d);
+    let v: B::V<W128> = b.get(sem::xmm_ref(src));
+    match ea {
+        Rm::Mem { a, .. } => {
+            let a = *a;
+            if dword {
+                let v32: B::V<W32> = b.trunc::<W128, W32>(v);
+                b.store::<W32>(a, v32, sem::DATA_WRITE)
+            } else {
+                let v64: B::V<W64> = b.trunc::<W128, W64>(v);
+                b.store::<W64>(a, v64, sem::DATA_WRITE)
+            }
+        }
+        Rm::Reg(_) => Ok(()),
+    }
+}
+
+/// CLZERO。rAX が指す 64 バイト領域を 0 で埋める。アドレスは
+/// アドレスサイズに折り返す。
+pub fn clzero<B: Backend>(b: &mut B, d: &MapDec) -> Flow<B> {
+    let base = sem::read64(b, Gpr(0));
+    let m = b.konst::<W64>(asize_mask(d.asize));
+    let a = b.and::<W64>(base, m);
+    let z = b.konst::<W64>(0);
+    for i in 0..8u64 {
+        let off = b.konst::<W64>(i * 8);
+        let ad = b.add::<W64>(a, off);
+        b.store::<W64>(ad, z, sem::DATA_WRITE)?;
+    }
+    Ok(())
+}
+
+/// RDPRU。ECX が選ぶ AMD プロセッサレジスタ（0=MPERF, 1=APERF）
+/// を EDX:EAX に返す。時間モデル未実装のため RDTSC と同じく
+/// 決定論的な 0（選択子が無効でも #GP はモデル化せず 0）。
+pub fn rdpru<B: Backend>(b: &mut B) -> Flow<B> {
+    let z = b.konst::<W32>(0);
+    decode::gwr32(b, Gpr(0), z);
+    decode::gwr32(b, Gpr(2), z);
+    Ok(())
+}
+
 // ===== 0F 38 / 0F 3A サブマップ（SSSE3/SSE4.1/MOVBE）=====
 
 /// PSHUFB の 128 ビット処理（値関数）。制御バイトの MSB が立つ要素は

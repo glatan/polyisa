@@ -1098,6 +1098,14 @@ pub fn build_maps(m: &mut Model) {
         it.group_rm = Some(rm);
         m0f.push(MapItem::Insn(0x01, it));
     }
+    // AMD 拡張（/7 mod=11 副エンコーディング）。MONITORX/MWAITX
+    // （mwaitx）、CLZERO（clzero）、RDPRU（rdpru）。
+    for (rm, name) in [(2u8, "monitorx"), (3, "mwaitx"), (4, "clzero"), (5, "rdpru")] {
+        let mut it = mi(name, &[], Some(7), PfxSel::Any, Pred::True, name, "system");
+        it.group_mod = Some(true);
+        it.group_rm = Some(rm);
+        m0f.push(MapItem::Insn(0x01, it));
+    }
     // CLTS（0F 06）。80386 で追加。実モードでは CR0 の TS を下ろすだけで、
     // 現行モデルは CR0 を持たないので no-op として扱う（SST 80386 実測）。
     m0f.push(MapItem::Insn(
@@ -1699,6 +1707,18 @@ pub fn build_maps(m: &mut Model) {
         MapItem::Insn(0xE7, mmem(mi("movntq_qv_pv", &[RmM, RegM], None, PfxSel::No66, Pred::True, "movntq {q}, {p}", "store"))),
         MapItem::Insn(0xF7, mreg(mi("maskmovq_pv_qv", &[RegM, RmM], None, PfxSel::No66, Pred::True, "maskmovq {p}, {q}", "store"))),
         MapItem::Insn(0xF7, mreg(mi("maskmovdqu_xv_xv", &[RegX, RmX], None, PfxSel::P66, Pred::True, "maskmovdqu {x}, {w}", "store"))),
+        // SSE4a（AMD 拡張）。EXTRQ の imm 形（66 78 /0）は r/m が
+        // 宛先で length・index の順の ib×2、reg 形（66 79 /r）は
+        // reg が宛先で制御は r/m ソース xmm の b[0]=length・
+        // b[1]=index。INSERTQ は reg が宛先（F2 78/79 /r）、reg 形の
+        // 制御はソース xmm の b[8]=length・b[9]=index。
+        // MOVNTSS/MOVNTSD は F3/F2 2B のメモリ形のみ。
+        MapItem::Insn(0x78, gmp("extrq_wv_ib_ib", 0, true, &[RmX, Imm(B8), Imm2(B8)], PfxSel::P66, "extrq {w}, {i}, {j}", "alu")),
+        MapItem::Insn(0x79, mreg(mi("extrq_xv_wv", &[RegX, RmX], None, PfxSel::P66, Pred::True, "extrq {x}, {w}", "alu"))),
+        MapItem::Insn(0x78, mreg(mi("insertq_xv_wv_ib_ib", &[RegX, RmX, Imm(B8), Imm2(B8)], None, PfxSel::PF2, Pred::True, "insertq {x}, {w}, {i}, {j}", "alu"))),
+        MapItem::Insn(0x79, mreg(mi("insertq_xv_wv", &[RegX, RmX], None, PfxSel::PF2, Pred::True, "insertq {x}, {w}", "alu"))),
+        MapItem::Insn(0x2B, mmem(mi("movntss_md_xv", &[Ea(D32), RegX], None, PfxSel::PF3, Pred::True, "movntss {e}, {x}", "store"))),
+        MapItem::Insn(0x2B, mmem(mi("movntsd_mq_xv", &[Ea(Q64), RegX], None, PfxSel::PF2, Pred::True, "movntsd {e}, {x}", "store"))),
     ]);
     // PUSH/POP FS・GS。
     m0f.extend([

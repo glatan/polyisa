@@ -4612,6 +4612,18 @@ fn dispatch_map<B: Backend>(
         Insn::Pi2fwPqQq => sem_ea::dnow(b, sem_ea::Dop::I2Fw, d, &ea),
         Insn::PavgusbPqQq => sem_ea::dnow(b, sem_ea::Dop::AvgUsb, d, &ea),
         Insn::PmulhrwPqQq => sem_ea::dnow(b, sem_ea::Dop::MulHrw, d, &ea),
+        // ===== SSE4a・AMD システム拡張 =====
+        Insn::ExtrqWvIbIb => sem_ea::extrqi(b, d.imm as u8, d.imm2 as u8, d),
+        Insn::ExtrqXvWv => sem_ea::extrqr(b, d, &ea),
+        Insn::InsertqXvWvIbIb => sem_ea::insertqi(b, d.imm as u8, d.imm2 as u8, d, &ea),
+        Insn::InsertqXvWv => sem_ea::insertqr(b, d, &ea),
+        Insn::MovntssMdXv => sem_ea::movnts(b, true, d, &ea),
+        Insn::MovntsdMqXv => sem_ea::movnts(b, false, d, &ea),
+        // MONITORX/MWAITX は単スレッド実行なので NOP 扱い
+        // （MONITOR/MWAIT と同じ）。
+        Insn::Monitorx | Insn::Mwaitx => sem::nop(b),
+        Insn::Clzero => sem_ea::clzero(b, d),
+        Insn::Rdpru => sem_ea::rdpru(b),
         // ===== 0F 38（SSSE3/SSE4.1/MOVBE）=====
         Insn::PshufbXvWv => sem_ea::pshufb(b, d, &ea),
         Insn::PhaddwXvWv => sem_ea::phaddsub::<B, W16>(b, false, false, d, &ea),

@@ -160,7 +160,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 段階4の x86 最小 853 件にオペコード表の記述を足した件数。
-        assert_eq!(INSNS.len(), 2063);
+        assert_eq!(INSNS.len(), 2073);
     }
 
     #[test]
@@ -2078,6 +2078,103 @@ mod tests {
         assert_eq!(d.insn, Insn::Femms);
         assert_eq!(d.len, 2);
         assert!(decode_map(&[0x0F, 0x0E], modes, FEAT_MMX).is_none());
+    }
+
+    #[test]
+    fn sse4a_decode() {
+        let modes = MODE_M64 | (MODE_OPD_O32 << MODE_OPD_SHIFT) | (MODE_ADR_A64 << MODE_ADR_SHIFT);
+        // EXTRQ imm 形（66 0F 78 /0 ib ib）。r/m が宛先、
+        // ib は（length, index）の順。
+        let d = decode_map(&[0x66, 0x0F, 0x78, 0xC1, 0x20, 0x10], modes, FEAT_SSE4A).unwrap();
+        assert_eq!(d.insn, Insn::ExtrqWvIbIb);
+        assert_eq!(d.len, 6);
+        assert_eq!(d.imm, 0x20);
+        assert_eq!(d.imm2, 0x10);
+        // /0 以外（reg!=0）は #UD。
+        assert!(decode_map(&[0x66, 0x0F, 0x78, 0xC9, 0x20, 0x10], modes, FEAT_SSE4A).is_none());
+        // EXTRQ reg 形（66 0F 79 /r）。reg が宛先。
+        let d = decode_map(&[0x66, 0x0F, 0x79, 0xCA], modes, FEAT_SSE4A).unwrap();
+        assert_eq!(d.insn, Insn::ExtrqXvWv);
+        assert_eq!(d.len, 4);
+        // メモリ形（mod!=11）は #UD（両形ともレジスタのみ）。
+        assert!(decode_map(&[0x66, 0x0F, 0x79, 0x08], modes, FEAT_SSE4A).is_none());
+        assert!(decode_map(&[0xF2, 0x0F, 0x79, 0x08], modes, FEAT_SSE4A).is_none());
+        // INSERTQ imm 形（F2 0F 78 /r ib ib）。
+        let d = decode_map(&[0xF2, 0x0F, 0x78, 0xCA, 0x20, 0x10], modes, FEAT_SSE4A).unwrap();
+        assert_eq!(d.insn, Insn::InsertqXvWvIbIb);
+        assert_eq!(d.len, 6);
+        // INSERTQ reg 形（F2 0F 79 /r）。
+        let d = decode_map(&[0xF2, 0x0F, 0x79, 0xCA], modes, FEAT_SSE4A).unwrap();
+        assert_eq!(d.insn, Insn::InsertqXvWv);
+        // MOVNTSS/MOVNTSD（F3/F2 0F 2B）はメモリ形のみ。
+        let d = decode_map(&[0xF3, 0x0F, 0x2B, 0x08], modes, FEAT_SSE4A).unwrap();
+        assert_eq!(d.insn, Insn::MovntssMdXv);
+        let d = decode_map(&[0xF2, 0x0F, 0x2B, 0x08], modes, FEAT_SSE4A).unwrap();
+        assert_eq!(d.insn, Insn::MovntsdMqXv);
+        assert!(decode_map(&[0xF3, 0x0F, 0x2B, 0xC8], modes, FEAT_SSE4A).is_none());
+        // MONITORX/MWAITX/CLZERO/RDPRU（0F 01 /7 mod=11 副
+        // エンコーディング）。各フィーチャーでゲートされる。
+        assert_eq!(
+            decode_map(&[0x0F, 0x01, 0xFA], modes, FEAT_MWAITX).map(|d| d.insn),
+            Some(Insn::Monitorx)
+        );
+        assert_eq!(
+            decode_map(&[0x0F, 0x01, 0xFB], modes, FEAT_MWAITX).map(|d| d.insn),
+            Some(Insn::Mwaitx)
+        );
+        assert_eq!(
+            decode_map(&[0x0F, 0x01, 0xFC], modes, FEAT_CLZERO).map(|d| d.insn),
+            Some(Insn::Clzero)
+        );
+        assert_eq!(
+            decode_map(&[0x0F, 0x01, 0xFD], modes, FEAT_RDPRU).map(|d| d.insn),
+            Some(Insn::Rdpru)
+        );
+        // ゲート: 各命令は自身のフィーチャービットが要る
+        // （mwaitx→monitor の imply 閉包はモデル選択の段階で畳まれる）。
+        assert!(decode_map(&[0x0F, 0x01, 0xFA], modes, FEAT_SSE4A).is_none());
+        assert!(decode_map(&[0x0F, 0x01, 0xFC], modes, FEAT_MWAITX).is_none());
+        assert!(decode_map(&[0x0F, 0x01, 0xFD], modes, FEAT_CLZERO).is_none());
+        // 未割り当ての rm（/7 rm=0/1 mod=11）は #UD。
+        assert!(
+            decode_map(
+                &[0x0F, 0x01, 0xF8],
+                modes,
+                FEAT_MWAITX | FEAT_CLZERO | FEAT_RDPRU
+            )
+            .is_none()
+        );
+        // ゲート: sse4a がなければ全形とも #UD。
+        for prog in [
+            &[0x66, 0x0F, 0x78, 0xC1, 0x20, 0x10][..],
+            &[0x66, 0x0F, 0x79, 0xCA][..],
+            &[0xF2, 0x0F, 0x78, 0xCA, 0x20, 0x10][..],
+            &[0xF2, 0x0F, 0x79, 0xCA][..],
+            &[0xF3, 0x0F, 0x2B, 0x08][..],
+            &[0xF2, 0x0F, 0x2B, 0x08][..],
+        ] {
+            assert!(decode_map(prog, modes, FEAT_SSE2).is_none());
+        }
+    }
+
+    #[test]
+    fn cpuid_leaf_regs() {
+        // CPUID テーブル導出。MWAITX = 8000_0001:ECX[29]、
+        // CLZERO/RDPRU = 8000_0008:EBX[0]/EBX[4]。
+        let feats: std::collections::BTreeSet<String> = ["clzero", "rdpru", "mwaitx"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let tbl = cpuid::derive(&feats, &Default::default());
+        // LEAF_IDS 順: index 7 = 0x8000_0001、index 8 = 0x8000_0008。
+        assert_eq!(tbl[7][2] & (1 << 29), 1 << 29, "mwaitx");
+        assert_eq!(tbl[8][1] & 0b1_0001, 0b1_0001, "clzero+rdpru");
+        assert_eq!(tbl[8][0], 0x3020, "addr size");
+        // フィーチャーなしではビットは立たない。
+        let empty = std::collections::BTreeSet::new();
+        let tbl = cpuid::derive(&empty, &Default::default());
+        assert_eq!(tbl[7][2] & (1 << 29), 0);
+        assert_eq!(tbl[8][1], 0);
     }
 
     #[test]

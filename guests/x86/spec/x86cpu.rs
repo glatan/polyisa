@@ -175,6 +175,10 @@ fn declare_features(m: &mut Model) {
     feat(m, "lwp", &[]);
     feat(m, "fma4", &["avx"]);
     feat(m, "tbm", &[]);
+    feat(m, "mwaitx", &["monitor"]);
+    // Leaf 0x8000_0008 EBX。
+    feat(m, "clzero", &[]);
+    feat(m, "rdpru", &[]);
     // Leaf 0x8000_0001 EDX。
     feat(m, "syscall", &[]);
     feat(m, "nx", &[]);
@@ -658,8 +662,13 @@ fn declare_ident_bits(m: &mut Model) {
         ("lwp", 15),
         ("fma4", 16),
         ("tbm", 21),
+        ("mwaitx", 29),
     ] {
         b(f, 0x8000_0001, "ecx", bit);
+    }
+    // Leaf 0x8000_0008 EBX。
+    for (f, bit) in [("clzero", 0u8), ("rdpru", 4)] {
+        b(f, 0x8000_0008, "ebx", bit);
     }
     // Leaf 0x8000_0001 EDX。
     for (f, bit) in [
@@ -791,6 +800,12 @@ fn named_gate(mn: &str) -> Option<&'static [&'static str]> {
         "sysenter" | "sysexit" => &["sep"],
         "rdtscp" => &["rdtscp"],
         "monitor" | "mwait" => &["monitor"],
+        // AMD MWAITX 拡張（MONITORX/MWAITX）。
+        "monitorx" | "mwaitx" => &["mwaitx"],
+        "clzero" => &["clzero"],
+        "rdpru" => &["rdpru"],
+        // SSE4a（AMD）。
+        "extrq" | "insertq" | "movntss" | "movntsd" => &["sse4a"],
         "rdtsc" => &["tsc"],
         "rdmsr" | "wrmsr" => &["msr"],
         "emms" => &["mmx"],

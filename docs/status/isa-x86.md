@@ -54,6 +54,7 @@
 - clflushopt
 - clfsh
 - clwb
+- clzero
 - cmov
 - cnxt_id
 - cpuid
@@ -99,6 +100,7 @@
 - movdiri
 - msr
 - mtrr
+- mwaitx
 - nx
 - op82
 - ospke
@@ -119,6 +121,7 @@
 - pse
 - pse36
 - rdpid
+- rdpru
 - rdrnd
 - rdseed
 - rdtscp
@@ -227,6 +230,7 @@
 | clts | clts | i386 | system |
 | clui | clui | m64 && uintr | system |
 | clwb | clwb_mb | clwb | alu |
+| clzero | clzero | clzero | system |
 | cmc | cmc | 真 | alu |
 | cmova | cmova | cmov | alu |
 | cmovae | cmovae | cmov | alu |
@@ -307,6 +311,7 @@
 | enqcmds | enqcmds_gv_mv | enqcmd | load |
 | enter | enter_iw_ib | i186 | store |
 | extractps | extractps_ed_xv | sse4_1 | store |
+| extrq | extrq_wv_ib_ib、extrq_xv_wv | sse4a | alu |
 | fadd | fadd_st | 真 | alu |
 | fbld | fbld_m80 | 真 | alu |
 | fbstp | fbstp_m80 | 真 | alu |
@@ -354,6 +359,7 @@
 | ins | ins_ev_dx | i186 | system |
 | insb | ins_eb_dx | i186 | system |
 | insertps | insertps_xv_wv_ib | sse4_1 | alu |
+| insertq | insertq_xv_wv、insertq_xv_wv_ib_ib | sse4a | alu |
 | int | int80、int_ib | 真 | system |
 | int3 | int3 | 真 | system |
 | into | into | !m64 | system |
@@ -414,6 +420,7 @@
 | minsd | minsd、minsd_xv_wv | sse2 | alu |
 | minss | minss_xv_wv | sse | alu |
 | monitor | monitor | monitor | system |
+| monitorx | monitorx | mwaitx | system |
 | mov | mov_sr_ew | !i286 | load |
 | mov | mov_ew_sr、mov_sr_ew | i386 || opd_o16 && adr_a16 && !i286 | load |
 | mov | mov_ew_sr、mov_sr_ew | opd_o16 && adr_a16 && !i286 | load |
@@ -457,6 +464,8 @@
 | movntdq | movntdq_store_mem8、movntdq_store_memnd | sse2 | store |
 | movntdqa_xv_wv | movntdqa_xv_wv | sse4_1 | alu |
 | movntq | movntq_qv_pv | sse | store |
+| movntsd | movntsd_mq_xv | sse4a | store |
+| movntss | movntss_md_xv | sse4a | store |
 | movq | movq_pv_qv | mmx | load |
 | movq | movq_qv_pv | mmx | store |
 | movq | movq_r64_xmm、movq_xmm_m64_mem8、movq_xmm_m64_rip、movq_xv_wv | sse2 | load |
@@ -482,6 +491,7 @@
 | mulss | mulss_xv_wv | sse | alu |
 | mulx | mulx_gv_by_ev | bmi2 | alu |
 | mwait | mwait | monitor | system |
+| mwaitx | mwaitx | mwaitx | system |
 | neg | neg_rm32 | 真 | alu |
 | neg | neg_eb、neg_ev | 真 | mult |
 | nop | nop、nop_ev | 真 | alu |
@@ -734,6 +744,7 @@
 | rdgsbase | rdgsbase_rv | m64 && fsgsbase | system |
 | rdpkru | rdpkru | !m64 && pku | system |
 | rdpkru | rdpkru | pku | system |
+| rdpru | rdpru | rdpru | system |
 | rdrand | rdrand_rv | rdrnd | alu |
 | rdseed | rdseed_rv | rdseed | alu |
 | rdssp | rdsspd_rv | cet_ss | system |
