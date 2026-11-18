@@ -4138,6 +4138,17 @@ fn dispatch_map<B: Backend>(
         Insn::VpbroadcastwXvWv => sem_ea::vpbroadcast(b, 16, d, &ea),
         Insn::VpbroadcastdXvWv => sem_ea::vpbroadcast(b, 32, d, &ea),
         Insn::VpbroadcastqXvWv => sem_ea::vpbroadcast(b, 64, d, &ea),
+        // B1b-4b: VMASKMOV（ロード/ストア）と VGATHER（VSIB）。
+        Insn::VmaskmovpsXvHvWv => sem_ea::vmaskmov_ld(b, 32, d, &ea),
+        Insn::VmaskmovpdXvHvWv => sem_ea::vmaskmov_ld(b, 64, d, &ea),
+        Insn::VmaskmovpsWvHvXv => sem_ea::vmaskmov_st(b, 32, d, &ea),
+        Insn::VmaskmovpdWvHvXv => sem_ea::vmaskmov_st(b, 64, d, &ea),
+        Insn::VpmaskmovdXvHvWv => sem_ea::vmaskmov_ld(b, if d.vex_w { 64 } else { 32 }, d, &ea),
+        Insn::VpmaskmovdWvHvXv => sem_ea::vmaskmov_st(b, if d.vex_w { 64 } else { 32 }, d, &ea),
+        Insn::VpgatherddXvWvHv => sem_ea::vgather(b, false, d, seg),
+        Insn::VpgatherqdXvWvHv => sem_ea::vgather(b, true, d, seg),
+        Insn::VgatherdpsXvWvHv => sem_ea::vgather(b, false, d, seg),
+        Insn::VgatherqpsXvWvHv => sem_ea::vgather(b, true, d, seg),
         // レガシー PACK の xmm 形（新規マップ項目）。
         Insn::PacksswbXvWv => sem_ea::ppack::<B, W16>(b, false, d, &ea),
         Insn::PackssdwXvWv => sem_ea::ppack::<B, W32>(b, false, d, &ea),

@@ -2642,6 +2642,84 @@ fn build_map_0f38(m: &mut Model) {
             "load",
         )),
     ));
+    // VMASKMOVPS/PD（AVX）・VPMASKMOVD/Q（AVX2）。ロード形は
+    // 0x2C/0x2D・0x8C、ストア形は 0x2E/0x2F・0x8E。VPMASKMOV の
+    // Q 形は VEX.W で共用（`d.rex` で切替）。メモリ形のみ。
+    for (op, mn) in [(0x2Cu8, "vmaskmovps"), (0x2D, "vmaskmovpd")] {
+        v.push(MapItem::Insn(
+            op,
+            mmem(vmx(
+                &format!("{mn}_xv_hv_wv"),
+                &[RegX, Vv, RmX],
+                PfxSel::P66,
+                Any,
+                false,
+                "{op} {x}, {h}, {w}",
+                "load",
+            )),
+        ));
+        v.push(MapItem::Insn(
+            op + 2,
+            mmem(vmx(
+                &format!("{mn}_wv_hv_xv"),
+                &[RmX, Vv, RegX],
+                PfxSel::P66,
+                Any,
+                false,
+                "{op} {w}, {h}, {x}",
+                "store",
+            )),
+        ));
+    }
+    v.push(MapItem::Insn(
+        0x8C,
+        mmem(vax(
+            "vpmaskmovd_xv_hv_wv",
+            &[RegX, Vv, RmX],
+            PfxSel::P66,
+            Any,
+            false,
+            "{op} {x}, {h}, {w}",
+            "load",
+        )),
+    ));
+    v.push(MapItem::Insn(
+        0x8E,
+        mmem(vax(
+            "vpmaskmovd_wv_hv_xv",
+            &[RmX, Vv, RegX],
+            PfxSel::P66,
+            Any,
+            false,
+            "{op} {w}, {h}, {x}",
+            "store",
+        )),
+    ));
+    // VGATHERDPS/QPS・VPGATHERDD/QD（W=0）とその W=1 版
+    // （DPD/DQ・QPD/QQ）はオペコード共用。index 幅は
+    // オペコード bit0、収集幅は VEX.W。VSIB メモリ形のみで、
+    // `Rm::Mem.a` は使わず意味論が `decode::vsib` で再構成する。
+    // W=0 版は 128 ビットのみだが、W ゲートがないので L=1 の
+    // W=0 エンコードも受理する近似。
+    for (op, mn) in [
+        (0x90u8, "vpgatherdd"),
+        (0x91, "vpgatherqd"),
+        (0x92, "vgatherdps"),
+        (0x93, "vgatherqps"),
+    ] {
+        v.push(MapItem::Insn(
+            op,
+            mmem(vax(
+                &format!("{mn}_xv_wv_hv"),
+                &[RegX, RmX, Vv],
+                PfxSel::P66,
+                Any,
+                false,
+                "{op} {x}, {w}, {h}",
+                "load",
+            )),
+        ));
+    }
     m.maps.push(MapDecl {
         name: "map_0f38".to_string(),
         vex_code: Some(2),

@@ -241,6 +241,24 @@ fn ea_base<B: Backend>(b: &mut B, wide: bool, g: Gpr) -> B::V<W64> {
     }
 }
 
+/// VSIB メモリオペランド（gather 系）。戻り値は
+/// (ベース値・なければ 0, スケール指数 0-3, 変位, ベクトルindex番号)。
+/// mod=00 base=101 はベースなし+disp32。`Rm::Mem` の `a` は
+/// index を GPR として計算したものなので、VSIB では使わず
+/// この関数で要素ごとのアドレスを組み立てる。
+pub fn vsib<B: Backend>(b: &mut B, d: &MapDec) -> (B::V<W64>, u8, i64, u8) {
+    let s = d.sib;
+    let scale = s >> 6;
+    let idx = ((s >> 3) & 7) | (((d.rex >> 1) & 1) << 3);
+    let base_raw = s & 7;
+    let base = if d.modrm >> 6 == 0 && base_raw == 5 {
+        b.konst::<W64>(0)
+    } else {
+        ea_base(b, d.asize == 64, Gpr(base_raw | ((d.rex & 1) << 3)))
+    };
+    (base, scale, d.disp, idx)
+}
+
 // ---- レジスタ・メモリの読み書き ----
 
 /// `wseg` のうちアクセスを起こした側のセグメント種別に応じた

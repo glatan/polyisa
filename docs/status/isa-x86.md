@@ -855,10 +855,16 @@
 | vextractf128 | vextractf128_wv_xv_ib | avx | store |
 | vextracti128 | vextracti128_wv_xv_ib | avx2 && avx | store |
 | vextractps | vextractps_ed_xv_ib | avx | store |
+| vgatherdps | vgatherdps_xv_wv_hv | avx2 && avx | load |
+| vgatherqps | vgatherqps_xv_wv_hv | avx2 && avx | load |
 | vinsertf128 | vinsertf128_xv_hv_wv_ib | avx | alu |
 | vinserti128 | vinserti128_xv_hv_wv_ib | avx2 && avx | alu |
 | vinsertps | vinsertps_xv_hv_wv_ib | avx | alu |
 | vldmxcsr | vldmxcsr_md | avx | load |
+| vmaskmovpd | vmaskmovpd_xv_hv_wv | avx | load |
+| vmaskmovpd | vmaskmovpd_wv_hv_xv | avx | store |
+| vmaskmovps | vmaskmovps_xv_hv_wv | avx | load |
+| vmaskmovps | vmaskmovps_wv_hv_xv | avx | store |
 | vmaxpd | vmaxpd_xv_hv_wv | avx | alu |
 | vmaxps | vmaxps_xv_hv_wv | avx | alu |
 | vmaxsd | vmaxsd_xv_hv_wv | avx | alu |
@@ -989,6 +995,8 @@
 | vpextrd | vpextrd_ev_xv_ib | avx | store |
 | vpextrw | vpextrw_gv_wv_ib | avx | alu |
 | vpextrw | vpextrw_ew_xv_ib | avx | store |
+| vpgatherdd | vpgatherdd_xv_wv_hv | avx2 && avx | load |
+| vpgatherqd | vpgatherqd_xv_wv_hv | avx2 && avx | load |
 | vphaddd | vphaddd_xv_hv_wv | avx | alu |
 | vphaddd | vphaddd_xv_hv_wv | avx2 && avx | alu |
 | vphaddsw | vphaddsw_xv_hv_wv | avx | alu |
@@ -1009,6 +1017,8 @@
 | vpmaddubsw | vpmaddubsw_xv_hv_wv | avx2 && avx | alu |
 | vpmaddwd | vpmaddwd_xv_hv_wv | avx | alu |
 | vpmaddwd | vpmaddwd_xv_hv_wv | avx2 && avx | alu |
+| vpmaskmovd | vpmaskmovd_xv_hv_wv | avx2 && avx | load |
+| vpmaskmovd | vpmaskmovd_wv_hv_xv | avx2 && avx | store |
 | vpmaxsb | vpmaxsb_xv_hv_wv | avx | alu |
 | vpmaxsb | vpmaxsb_xv_hv_wv | avx2 && avx | alu |
 | vpmaxsd | vpmaxsd_xv_hv_wv | avx | alu |

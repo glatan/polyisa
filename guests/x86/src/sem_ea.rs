@@ -5913,6 +5913,246 @@ pub fn vextractx128<B: Backend>(
     Ok(())
 }
 
+/// マスクベクトルの要素 `i`（`elt` ビット幅）の MSB が立つか。
+fn vmask_bit<B: Backend>(b: &mut B, m: B::V<W128>, i: u32, elt: u32) -> B::B {
+    let e = lane128(b, m, i * elt, elt);
+    let sh = b.konst::<W128>(u128::from(elt - 1));
+    let t = b.shr_l::<W128>(e, sh);
+    let z = b.konst::<W128>(0);
+    b.cmp::<W128>(Cmp::Ne, t, z)
+}
+
+/// `elt` 幅の条件付きロード。`pos` は出力レーン位置。
+fn vmask_load<B: Backend>(
+    b: &mut B,
+    ad: B::V<W64>,
+    cur: B::V<W128>,
+    pos: u32,
+    elt: u32,
+) -> Result<B::V<W128>, B::Exit> {
+    if elt == 32 {
+        let v: B::V<W32> = b.load::<W32>(ad, sem::DATA_READ)?;
+        let e = b.zext::<W32, W128>(v);
+        Ok(put_lane128(b, cur, e, pos, 32))
+    } else {
+        let v: B::V<W64> = b.load::<W64>(ad, sem::DATA_READ)?;
+        let e = b.zext::<W64, W128>(v);
+        Ok(put_lane128(b, cur, e, pos, 64))
+    }
+}
+
+/// VMASKMOVPS/PD・VPMASKMOVD/Q のロード形。マスク MSB の立つ
+/// 要素だけ読み、残りはゼロ（フォールト抑制）。メモリ形のみ。
+pub fn vmaskmov_ld<B: Backend>(
+    b: &mut B,
+    elt: u32,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    let dst = reg_x(d);
+    let mx = vvv_x(d);
+    let a = match ea {
+        Rm::Mem { a, .. } => *a,
+        Rm::Reg(_) => return Ok(()),
+    };
+    let per = 128 / elt;
+    let n = if d.vex_l { per * 2 } else { per };
+    // dst とマスクが同じレジスタでも正しく動くよう、
+    // dst のゼロ化前にマスクを両半分読んでおく。
+    let mlo: B::V<W128> = b.get(sem::xmm_ref(mx));
+    let mhi: B::V<W128> = if d.vex_l {
+        b.get(sem::ymm_hi_ref(mx))
+    } else {
+        mlo
+    };
+    let z = b.konst::<W128>(0);
+    b.set(sem::xmm_ref(dst), z);
+    let z = b.konst::<W128>(0);
+    b.set(sem::ymm_hi_ref(dst), z);
+    for i in 0..n {
+        let (m, li) = if i < per { (mlo, i) } else { (mhi, i - per) };
+        let on = vmask_bit(b, m, li, elt);
+        b.if_then(on, |b| {
+            let off = b.konst::<W64>(u64::from(i * (elt / 8)));
+            let ad = b.add::<W64>(a, off);
+            let cur: B::V<W128> = if i < per {
+                b.get(sem::xmm_ref(dst))
+            } else {
+                b.get(sem::ymm_hi_ref(dst))
+            };
+            let r = vmask_load(b, ad, cur, li * elt, elt)?;
+            if i < per {
+                b.set(sem::xmm_ref(dst), r);
+            } else {
+                b.set(sem::ymm_hi_ref(dst), r);
+            }
+            Ok(())
+        })?;
+    }
+    Ok(())
+}
+
+/// VMASKMOVPS/PD・VPMASKMOVD/Q のストア形。マスク MSB の立つ
+/// 要素だけ書く（フォールト抑制）。メモリ形のみ。
+pub fn vmaskmov_st<B: Backend>(
+    b: &mut B,
+    elt: u32,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    let src = reg_x(d);
+    let mx = vvv_x(d);
+    let a = match ea {
+        Rm::Mem { a, .. } => *a,
+        Rm::Reg(_) => return Ok(()),
+    };
+    let per = 128 / elt;
+    let n = if d.vex_l { per * 2 } else { per };
+    let mlo: B::V<W128> = b.get(sem::xmm_ref(mx));
+    let mhi: B::V<W128> = if d.vex_l {
+        b.get(sem::ymm_hi_ref(mx))
+    } else {
+        mlo
+    };
+    let shi: B::V<W128> = if d.vex_l {
+        b.get(sem::ymm_hi_ref(src))
+    } else {
+        mlo
+    };
+    for i in 0..n {
+        let (m, li) = if i < per { (mlo, i) } else { (mhi, i - per) };
+        let on = vmask_bit(b, m, li, elt);
+        b.if_then(on, |b| {
+            let s = if i < per {
+                b.get(sem::xmm_ref(src))
+            } else {
+                shi
+            };
+            let off = b.konst::<W64>(u64::from(i * (elt / 8)));
+            let ad = b.add::<W64>(a, off);
+            let l = lane128(b, s, li * elt, elt);
+            if elt == 32 {
+                let v: B::V<W32> = b.trunc::<W128, W32>(l);
+                b.store::<W32>(ad, v, sem::DATA_WRITE)
+            } else {
+                let v: B::V<W64> = b.trunc::<W128, W64>(l);
+                b.store::<W64>(ad, v, sem::DATA_WRITE)
+            }
+        })?;
+    }
+    Ok(())
+}
+
+/// VGATHER*/VPGATHER*。VSIB（SIB.index のベクトル）の要素ごとに
+/// base + sext(index)*scale + disp を計算して条件ロードする。
+/// マスクされなかった要素は dst の旧値を残し、マスクレジスタは
+/// 最後に全要素クリアされる。`idx_q` は index 要素が 64 ビットか
+/// （オペコード bit0）。収集幅は VEX.W（`d.vex_w`）で 32/64。
+/// 実機では dst/index/mask が重なるエンコードは #UD だが、ここでは
+/// 検査せず事前に読んだ値で処理する（合法コードには影響しない）。
+pub fn vgather<B: Backend>(b: &mut B, idx_q: bool, d: &MapDec, seg: u64) -> Result<(), B::Exit> {
+    // VSIB は SIB 必須。rm!=4 のメモリ形は非合法エンコードなので
+    // 何もしない（フォールトはモデル化しない）。
+    if !d.has_sib {
+        return Ok(());
+    }
+    let dbits = if d.vex_w { 64 } else { 32 };
+    let dst = reg_x(d);
+    let mx = vvv_x(d);
+    let (base, scale, disp, iv) = decode::vsib(b, d);
+    let ibits = if idx_q { 64 } else { 32 };
+    let per = 128 / dbits;
+    let iper = 128 / ibits;
+    // 収集要素数。qword index・dword 収集（QPS/QD）は 128 ビット
+    // 形のみで 2 要素。dword index・dword 収集は全幅。qword 収集は半幅。
+    let n = if dbits == 32 && idx_q {
+        2
+    } else if dbits == 32 {
+        if d.vex_l { 8 } else { 4 }
+    } else if d.vex_l {
+        4
+    } else {
+        2
+    };
+    let mlo: B::V<W128> = b.get(sem::xmm_ref(mx));
+    let mhi: B::V<W128> = if d.vex_l {
+        b.get(sem::ymm_hi_ref(mx))
+    } else {
+        mlo
+    };
+    let ilo: B::V<W128> = b.get(sem::xmm_ref(Xmm(iv)));
+    let ihi: B::V<W128> = if d.vex_l {
+        b.get(sem::ymm_hi_ref(Xmm(iv)))
+    } else {
+        ilo
+    };
+    for i in 0..n {
+        let (m, li) = if i < per { (mlo, i) } else { (mhi, i - per) };
+        let on = vmask_bit(b, m, li, dbits);
+        let (ivv, ii) = if i < iper { (ilo, i) } else { (ihi, i - iper) };
+        b.if_then(on, |b| {
+            let iev = lane128(b, ivv, ii * ibits, ibits);
+            let i64v: B::V<W64> = if idx_q {
+                b.trunc::<W128, W64>(iev)
+            } else {
+                let t: B::V<W32> = b.trunc::<W128, W32>(iev);
+                b.sext::<W32, W64>(t)
+            };
+            let sc = b.konst::<W64>(u64::from(scale));
+            let sh = b.shl::<W64>(i64v, sc);
+            let mut ad = b.add::<W64>(base, sh);
+            let dv = b.konst::<W64>(disp as u64);
+            ad = b.add::<W64>(ad, dv);
+            if d.asize == 32 {
+                let m32 = b.konst::<W64>(0xFFFF_FFFF);
+                ad = b.and::<W64>(ad, m32);
+            }
+            if seg != 0 {
+                let s = b.konst::<W64>(seg);
+                ad = b.add::<W64>(ad, s);
+            }
+            let cur: B::V<W128> = if i < per {
+                b.get(sem::xmm_ref(dst))
+            } else {
+                b.get(sem::ymm_hi_ref(dst))
+            };
+            let pos = (i - if i < per { 0 } else { per }) * dbits;
+            let r = vmask_load(b, ad, cur, pos, dbits)?;
+            if i < per {
+                b.set(sem::xmm_ref(dst), r);
+            } else {
+                b.set(sem::ymm_hi_ref(dst), r);
+            }
+            Ok(())
+        })?;
+    }
+    // 収集対象外の残り要素はゼロ（QPS/QD は 2 要素のみ）。
+    // 128 ビット形では上位半分もゼロ。
+    let full = if d.vex_l { per * 2 } else { per };
+    for i in n..full {
+        let z = b.konst::<W128>(0);
+        if i < per {
+            let cur: B::V<W128> = b.get(sem::xmm_ref(dst));
+            let r = put_lane128(b, cur, z, i * dbits, dbits);
+            b.set(sem::xmm_ref(dst), r);
+        } else {
+            let cur: B::V<W128> = b.get(sem::ymm_hi_ref(dst));
+            let r = put_lane128(b, cur, z, (i - per) * dbits, dbits);
+            b.set(sem::ymm_hi_ref(dst), r);
+        }
+    }
+    if !d.vex_l {
+        let z = b.konst::<W128>(0);
+        b.set(sem::ymm_hi_ref(dst), z);
+    }
+    // 終了時にマスクは全要素クリアされる。
+    let z = b.konst::<W128>(0);
+    b.set(sem::xmm_ref(mx), z);
+    let z = b.konst::<W128>(0);
+    b.set(sem::ymm_hi_ref(mx), z);
+    Ok(())
+}
+
 // ===== MMX（0F 接頭辞なし。P/Q オペランド）=====
 //
 // mm レジスタは st_sig（x87 仮数部の物理スロット）が実機の
