@@ -21,6 +21,7 @@ polyisa-isagen = { path = "../../crates/isagen" }
 [dev-dependencies]
 polyisa-engine = { path = "../../crates/engine" }
 polyisa-cli = { path = "../../crates/cli", features = ["guest-x86"] }
+polyisa-host = { path = "../../crates/host" }
 polyisa-os-linux = { path = "../../crates/os-linux", features = ["guest-x86"] }
 
 [lints]

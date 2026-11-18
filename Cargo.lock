@@ -253,6 +253,7 @@ dependencies = [
  "polyisa-decimal",
  "polyisa-engine",
  "polyisa-guest",
+ "polyisa-host",
  "polyisa-isadl",
  "polyisa-isagen",
  "polyisa-mem",

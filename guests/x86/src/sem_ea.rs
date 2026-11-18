@@ -2052,10 +2052,17 @@ fn cmpxchg_w<B: Backend, W: Hw>(b: &mut B, ea: &Rm<B::V<W64>>, d: &MapDec, src: 
     update_sub_flags(b, acc, t, v);
     let zero = b.konst::<W>(W::from_u128(0));
     let eq = b.cmp::<W>(Cmp::Eq, v, zero);
-    let new_acc = b.select::<W>(eq, acc, t);
-    W::put(b, Gpr(0), d, new_acc);
+    // 等価時は宛先のみ、非等価時はアキュムレータのみ書く。等価時に
+    // acc を「同じ値」で書き戻すと 32 ビット形が上位を消してしまう。
     let sv = W::get(b, src, d);
-    b.if_then(eq, |b| wr_w::<B, W>(b, ea, d, sv))?;
+    b.if_then_else(
+        eq,
+        |b| wr_w::<B, W>(b, ea, d, sv),
+        |b| {
+            W::put(b, Gpr(0), d, t);
+            Ok(())
+        },
+    )?;
     Ok(())
 }
 
@@ -2074,8 +2081,13 @@ fn xadd_w<B: Backend, W: Hw>(b: &mut B, ea: &Rm<B::V<W64>>, d: &MapDec, src: Gpr
     let s = W::get(b, src, d);
     let v = b.add::<W>(t, s);
     update_add_flags(b, t, s, v);
+    // dst と src が同じレジスタでは被演算子への書き戻しを
+    // しない（xadd r,r は r=2*r で確定する）。
+    let same = matches!(ea, Rm::Reg(g) if *g == src);
     wr_w::<B, W>(b, ea, d, v)?;
-    W::put(b, src, d, t);
+    if !same {
+        W::put(b, src, d, t);
+    }
     Ok(())
 }
 
@@ -3974,7 +3986,7 @@ fn shxd_w<B: Backend, W: Hw>(
     // 読み出しは count=0 でも行う: 386 は n==0 でもデストの EA を
     // 検証し、限界違反なら例外になる（SST 80386 実測）。
     let t = rd_w::<B, W>(b, ea, d)?;
-    b.if_then(nz, |b| {
+    {
         let s = W::get(b, src, d);
         let bits_k = b.konst::<W>(W::from_u128(u128::from(W::BITS)));
         let wm = b.sub::<W>(bits_k, n);
@@ -4021,43 +4033,49 @@ fn shxd_w<B: Backend, W: Hw>(
             (vn, cf_n, vw, cf_w)
         };
         let over = b.cmp::<W>(Cmp::GtU, n, bits_k);
-        let v = b.select::<W>(over, v_wide, v_norm);
+        let v0 = b.select::<W>(over, v_wide, v_norm);
         let cf_and = b.select::<W>(over, cf_wide, cf_norm);
+        // count=0 でも宛先は書き戻される（値は不変）。32 ビット形では
+        // この書き戻しが上位 32 ビットを消す（ホスト CPU 実測）。
+        let v = b.select::<W>(nz, v0, t);
         wr_w::<B, W>(b, ea, d, v)?;
-        // CF: SHLD は元の w-n ビット、SHRD は n-1 ビット。
-        let cf = b.cmp::<W>(Cmp::Ne, cf_and, zero);
-        let old: B::V<W32> = b.get(eflags_ref());
-        let ncf = b.konst::<W32>(!sem::FLAG_CF);
-        let cleared = b.and::<W32>(old, ncf);
-        let cfm = b.konst::<W32>(sem::FLAG_CF);
-        let z32 = b.konst::<W32>(0);
-        let on = b.select::<W32>(cf, cfm, z32);
-        let efl = b.or::<W32>(cleared, on);
-        b.set(eflags_ref(), efl);
-        // SZP と OF（n==1 のとき符号変化）。
-        let szp = szp_bits::<B, W>(b, v);
-        let one_w = b.konst::<W>(W::from_u128(1));
-        let n1 = b.cmp::<W>(Cmp::Eq, n, one_w);
-        let msb = b.konst::<W>(W::from_u128(u128::from(W::BITS - 1)));
-        let so = b.shr_l::<W>(t, msb);
-        let sv = b.shr_l::<W>(v, msb);
-        let so1 = b.and::<W>(so, one);
-        let sv1 = b.and::<W>(sv, one);
-        let chg = b.cmp::<W>(Cmp::Ne, so1, sv1);
-        let ofm = b.konst::<W32>(sem::FLAG_OF);
-        let ones32 = b.konst::<W32>(0xffff_ffff);
-        let o1 = b.select::<W32>(n1, ofm, z32);
-        let o2 = b.select::<W32>(chg, ones32, z32);
-        let of = b.and::<W32>(o1, o2);
-        let old2: B::V<W32> = b.get(eflags_ref());
-        let mask = sem::FLAG_OF | sem::FLAG_SF | sem::FLAG_ZF | sem::FLAG_PF;
-        let nm = b.konst::<W32>(!mask);
-        let keep = b.and::<W32>(old2, nm);
-        let efl2 = b.or::<W32>(keep, szp);
-        let efl3 = b.or::<W32>(efl2, of);
-        b.set(eflags_ref(), efl3);
-        Ok(())
-    })?;
+        // フラグは count!=0 のときだけ変わる（CF は追い出しビット）。
+        b.if_then(nz, |b| {
+            // CF: SHLD は元の w-n ビット、SHRD は n-1 ビット。
+            let cf = b.cmp::<W>(Cmp::Ne, cf_and, zero);
+            let old: B::V<W32> = b.get(eflags_ref());
+            let ncf = b.konst::<W32>(!sem::FLAG_CF);
+            let cleared = b.and::<W32>(old, ncf);
+            let cfm = b.konst::<W32>(sem::FLAG_CF);
+            let z32 = b.konst::<W32>(0);
+            let on = b.select::<W32>(cf, cfm, z32);
+            let efl = b.or::<W32>(cleared, on);
+            b.set(eflags_ref(), efl);
+            // SZP と OF（n==1 のとき符号変化）。
+            let szp = szp_bits::<B, W>(b, v);
+            let one_w = b.konst::<W>(W::from_u128(1));
+            let n1 = b.cmp::<W>(Cmp::Eq, n, one_w);
+            let msb = b.konst::<W>(W::from_u128(u128::from(W::BITS - 1)));
+            let so = b.shr_l::<W>(t, msb);
+            let sv = b.shr_l::<W>(v, msb);
+            let so1 = b.and::<W>(so, one);
+            let sv1 = b.and::<W>(sv, one);
+            let chg = b.cmp::<W>(Cmp::Ne, so1, sv1);
+            let ofm = b.konst::<W32>(sem::FLAG_OF);
+            let ones32 = b.konst::<W32>(0xffff_ffff);
+            let o1 = b.select::<W32>(n1, ofm, z32);
+            let o2 = b.select::<W32>(chg, ones32, z32);
+            let of = b.and::<W32>(o1, o2);
+            let old2: B::V<W32> = b.get(eflags_ref());
+            let mask = sem::FLAG_OF | sem::FLAG_SF | sem::FLAG_ZF | sem::FLAG_PF;
+            let nm = b.konst::<W32>(!mask);
+            let keep = b.and::<W32>(old2, nm);
+            let efl2 = b.or::<W32>(keep, szp);
+            let efl3 = b.or::<W32>(efl2, of);
+            b.set(eflags_ref(), efl3);
+            Ok(())
+        })?;
+    }
     Ok(())
 }
 

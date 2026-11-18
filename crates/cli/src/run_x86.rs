@@ -14170,14 +14170,10 @@ fn dispatch<B: Backend>(
             | Insn::BsrRMem32
             | Insn::BsrRRip
             | Insn::Cvttsd2siM64Sib => Some(reg0f_as_gpr()),
-            Insn::XaddR32Memnd
-            | Insn::XaddR32Rip
-            | Insn::ShldR32Cl
-            | Insn::ShldR32Imm8
-            | Insn::ShrdR32Cl
-            | Insn::ShrdR32Imm8
-            | Insn::BtsR32Rm
-            | Insn::Pmovmskb => Some(reg0f_as_gpr()),
+            Insn::Pmovmskb => Some(reg0f_as_gpr()),
+            // BTS の宛先は rm 側（reg0f はビット番号）。上位は rm の
+            // 32 ビット書き戻しで消える。
+            Insn::BtsR32Rm => Some(rm0f()),
             Insn::AddRRip
             | Insn::AddRMemnd
             | Insn::AddRMem8
@@ -14230,8 +14226,6 @@ fn dispatch<B: Backend>(
             | Insn::XchgRMem32
             | Insn::XchgRRip => Some(reg()),
             Insn::MovR32Imm => Some(Gpr((((word >> 32) & 7) as u8) | ((rex & 1) << 3))),
-            // BSWAP r32 (0F C8+rd)。rd は opcode 下位3 + REX.B。32bit書込みはゼロ拡張.
-            Insn::Bswap => Some(Gpr(((word as u8) & 7) | ((rex & 1) << 3))),
             Insn::XchgRcxAx
             | Insn::XchgRdxAx
             | Insn::XchgRbxAx

@@ -2573,6 +2573,7 @@ pub fn bswap_r32<B: Backend>(b: &mut B, rd: Gpr) -> Flow<B> {
     let v23 = b.or::<W32>(r2, b3);
     let v = b.or::<W32>(v01, v23);
     write(b, rd, v);
+    clear_hi(b, rd);
     Ok(())
 }
 
@@ -15947,8 +15948,8 @@ pub fn cmpxchg_r32<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
     let acc = read(b, Gpr(0));
     let m = read(b, dst);
     let r = read(b, src);
-    let v = b.sub::<W32>(m, acc);
-    update_sub_flags(b, m, acc, v);
+    let v = b.sub::<W32>(acc, m);
+    update_sub_flags(b, acc, m, v);
     let is_eq = {
         let zf = read_zf(b);
         let one = b.konst::<W32>(1);
@@ -15958,12 +15959,21 @@ pub fn cmpxchg_r32<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
     };
     // is_eq が真なら dst=r、偽なら dst=acc? 実際は mem/reg 交換だが reg-direct では dst が mem 役.
     // dst(mem役)= is_eq ? r : m (m はそのまま)、RAX = is_eq ? acc : m.
-    let new_mem = b.select::<W32>(is_eq, r, m);
-    let new_acc = b.select::<W32>(is_eq, acc, m);
-    write(b, dst, new_mem);
-    write(b, Gpr(0), new_acc);
-    // clear_hi は呼び出し側で行う (REX.W なしの64bit時)。
-    Ok(())
+    // 等価時は宛先のみ、非等価時はアキュムレータのみ書く（書かれない
+    // 側の上位 32 ビットは消えない。ホスト CPU 実測）。
+    b.if_then_else(
+        is_eq,
+        |b| {
+            write(b, dst, r);
+            clear_hi(b, dst);
+            Ok(())
+        },
+        |b| {
+            write(b, Gpr(0), m);
+            clear_hi(b, Gpr(0));
+            Ok(())
+        },
+    )
 }
 
 /// CMPXCHG r64, r/m64 reg-direct (REX.W)。
@@ -15971,18 +15981,24 @@ pub fn cmpxchg_r64<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
     let acc = read64(b, Gpr(0));
     let m = read64(b, dst);
     let r = read64(b, src);
-    let v = b.sub::<W64>(m, acc);
-    update_sub_flags(b, m, acc, v);
+    let v = b.sub::<W64>(acc, m);
+    update_sub_flags(b, acc, m, v);
     let zf = read_zf(b);
     let one = b.konst::<W32>(1);
     let zero = b.konst::<W32>(0);
     let n = b.select::<W32>(zf, one, zero);
     let is_eq = b.cmp::<W32>(Cmp::Ne, n, zero);
-    let new_mem = b.select::<W64>(is_eq, r, m);
-    let new_acc = b.select::<W64>(is_eq, acc, m);
-    write64(b, dst, new_mem);
-    write64(b, Gpr(0), new_acc);
-    Ok(())
+    b.if_then_else(
+        is_eq,
+        |b| {
+            write64(b, dst, r);
+            Ok(())
+        },
+        |b| {
+            write64(b, Gpr(0), m);
+            Ok(())
+        },
+    )
 }
 
 /// CMPXCHG [base],r32 (0F B1 mod=00)。
@@ -15991,19 +16007,22 @@ pub fn cmpxchg_r32_memnd<B: Backend>(b: &mut B, base: Gpr, src: Gpr) -> Flow<B> 
     let m: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
     let acc = read(b, Gpr(0));
     let r = read(b, src);
-    let v = b.sub::<W32>(m, acc);
-    update_sub_flags(b, m, acc, v);
+    let v = b.sub::<W32>(acc, m);
+    update_sub_flags(b, acc, m, v);
     let zf = read_zf(b);
     let one = b.konst::<W32>(1);
     let zero = b.konst::<W32>(0);
     let n = b.select::<W32>(zf, one, zero);
     let is_eq = b.cmp::<W32>(Cmp::Ne, n, zero);
-    let new_mem = b.select::<W32>(is_eq, r, m);
-    let new_acc = b.select::<W32>(is_eq, acc, m);
-    b.store::<W32>(addr, new_mem, DATA_WRITE)?;
-    write(b, Gpr(0), new_acc);
-    clear_hi(b, Gpr(0));
-    Ok(())
+    b.if_then_else(
+        is_eq,
+        |b| b.store::<W32>(addr, r, DATA_WRITE),
+        |b| {
+            write(b, Gpr(0), m);
+            clear_hi(b, Gpr(0));
+            Ok(())
+        },
+    )
 }
 
 /// CMPXCHG [base],r64 (0F B1 mod=00, REX.W)。
@@ -16012,18 +16031,21 @@ pub fn cmpxchg_r64_memnd<B: Backend>(b: &mut B, base: Gpr, src: Gpr) -> Flow<B> 
     let m: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
     let acc = read64(b, Gpr(0));
     let r = read64(b, src);
-    let v = b.sub::<W64>(m, acc);
-    update_sub_flags(b, m, acc, v);
+    let v = b.sub::<W64>(acc, m);
+    update_sub_flags(b, acc, m, v);
     let zf = read_zf(b);
     let one = b.konst::<W32>(1);
     let zero = b.konst::<W32>(0);
     let n = b.select::<W32>(zf, one, zero);
     let is_eq = b.cmp::<W32>(Cmp::Ne, n, zero);
-    let new_mem = b.select::<W64>(is_eq, r, m);
-    let new_acc = b.select::<W64>(is_eq, acc, m);
-    b.store::<W64>(addr, new_mem, DATA_WRITE)?;
-    write64(b, Gpr(0), new_acc);
-    Ok(())
+    b.if_then_else(
+        is_eq,
+        |b| b.store::<W64>(addr, r, DATA_WRITE),
+        |b| {
+            write64(b, Gpr(0), m);
+            Ok(())
+        },
+    )
 }
 
 /// CMPXCHG [base+disp8],r32 (0F B1 mod=01)。
@@ -16032,19 +16054,22 @@ pub fn cmpxchg_r32_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8, src: Gpr) ->
     let m: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
     let acc = read(b, Gpr(0));
     let r = read(b, src);
-    let v = b.sub::<W32>(m, acc);
-    update_sub_flags(b, m, acc, v);
+    let v = b.sub::<W32>(acc, m);
+    update_sub_flags(b, acc, m, v);
     let zf = read_zf(b);
     let one = b.konst::<W32>(1);
     let zero = b.konst::<W32>(0);
     let zn = b.select::<W32>(zf, one, zero);
     let is_eq = b.cmp::<W32>(Cmp::Ne, zn, zero);
-    let new_mem = b.select::<W32>(is_eq, r, m);
-    let new_acc = b.select::<W32>(is_eq, acc, m);
-    b.store::<W32>(addr, new_mem, DATA_WRITE)?;
-    write(b, Gpr(0), new_acc);
-    clear_hi(b, Gpr(0));
-    Ok(())
+    b.if_then_else(
+        is_eq,
+        |b| b.store::<W32>(addr, r, DATA_WRITE),
+        |b| {
+            write(b, Gpr(0), m);
+            clear_hi(b, Gpr(0));
+            Ok(())
+        },
+    )
 }
 
 /// CMPXCHG [base+disp8],r64 (REX.W)。
@@ -16053,18 +16078,21 @@ pub fn cmpxchg_r64_mem8<B: Backend>(b: &mut B, base: Gpr, disp: i8, src: Gpr) ->
     let m: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
     let acc = read64(b, Gpr(0));
     let r = read64(b, src);
-    let v = b.sub::<W64>(m, acc);
-    update_sub_flags(b, m, acc, v);
+    let v = b.sub::<W64>(acc, m);
+    update_sub_flags(b, acc, m, v);
     let zf = read_zf(b);
     let one = b.konst::<W32>(1);
     let zero = b.konst::<W32>(0);
     let zn = b.select::<W32>(zf, one, zero);
     let is_eq = b.cmp::<W32>(Cmp::Ne, zn, zero);
-    let new_mem = b.select::<W64>(is_eq, r, m);
-    let new_acc = b.select::<W64>(is_eq, acc, m);
-    b.store::<W64>(addr, new_mem, DATA_WRITE)?;
-    write64(b, Gpr(0), new_acc);
-    Ok(())
+    b.if_then_else(
+        is_eq,
+        |b| b.store::<W64>(addr, r, DATA_WRITE),
+        |b| {
+            write64(b, Gpr(0), m);
+            Ok(())
+        },
+    )
 }
 
 /// CMPXCHG [base+disp32],r32 (0F B1 mod=10)。
@@ -16073,19 +16101,22 @@ pub fn cmpxchg_r32_mem32<B: Backend>(b: &mut B, base: Gpr, disp: i32, src: Gpr) 
     let m: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
     let acc = read(b, Gpr(0));
     let r = read(b, src);
-    let v = b.sub::<W32>(m, acc);
-    update_sub_flags(b, m, acc, v);
+    let v = b.sub::<W32>(acc, m);
+    update_sub_flags(b, acc, m, v);
     let zf = read_zf(b);
     let one = b.konst::<W32>(1);
     let zero = b.konst::<W32>(0);
     let zn = b.select::<W32>(zf, one, zero);
     let is_eq = b.cmp::<W32>(Cmp::Ne, zn, zero);
-    let new_mem = b.select::<W32>(is_eq, r, m);
-    let new_acc = b.select::<W32>(is_eq, acc, m);
-    b.store::<W32>(addr, new_mem, DATA_WRITE)?;
-    write(b, Gpr(0), new_acc);
-    clear_hi(b, Gpr(0));
-    Ok(())
+    b.if_then_else(
+        is_eq,
+        |b| b.store::<W32>(addr, r, DATA_WRITE),
+        |b| {
+            write(b, Gpr(0), m);
+            clear_hi(b, Gpr(0));
+            Ok(())
+        },
+    )
 }
 
 /// CMPXCHG [base+disp32],r64 (REX.W)。
@@ -16094,18 +16125,21 @@ pub fn cmpxchg_r64_mem32<B: Backend>(b: &mut B, base: Gpr, disp: i32, src: Gpr) 
     let m: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
     let acc = read64(b, Gpr(0));
     let r = read64(b, src);
-    let v = b.sub::<W64>(m, acc);
-    update_sub_flags(b, m, acc, v);
+    let v = b.sub::<W64>(acc, m);
+    update_sub_flags(b, acc, m, v);
     let zf = read_zf(b);
     let one = b.konst::<W32>(1);
     let zero = b.konst::<W32>(0);
     let zn = b.select::<W32>(zf, one, zero);
     let is_eq = b.cmp::<W32>(Cmp::Ne, zn, zero);
-    let new_mem = b.select::<W64>(is_eq, r, m);
-    let new_acc = b.select::<W64>(is_eq, acc, m);
-    b.store::<W64>(addr, new_mem, DATA_WRITE)?;
-    write64(b, Gpr(0), new_acc);
-    Ok(())
+    b.if_then_else(
+        is_eq,
+        |b| b.store::<W64>(addr, r, DATA_WRITE),
+        |b| {
+            write64(b, Gpr(0), m);
+            Ok(())
+        },
+    )
 }
 
 /// CMPXCHG [RIP+disp32],r32。
@@ -16116,19 +16150,22 @@ pub fn cmpxchg_r32_rip<B: Backend>(b: &mut B, next_rip: u64, disp: i32, src: Gpr
     let m: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
     let acc = read(b, Gpr(0));
     let r = read(b, src);
-    let v = b.sub::<W32>(m, acc);
-    update_sub_flags(b, m, acc, v);
+    let v = b.sub::<W32>(acc, m);
+    update_sub_flags(b, acc, m, v);
     let zf = read_zf(b);
     let one = b.konst::<W32>(1);
     let zero = b.konst::<W32>(0);
     let zn = b.select::<W32>(zf, one, zero);
     let is_eq = b.cmp::<W32>(Cmp::Ne, zn, zero);
-    let new_mem = b.select::<W32>(is_eq, r, m);
-    let new_acc = b.select::<W32>(is_eq, acc, m);
-    b.store::<W32>(addr, new_mem, DATA_WRITE)?;
-    write(b, Gpr(0), new_acc);
-    clear_hi(b, Gpr(0));
-    Ok(())
+    b.if_then_else(
+        is_eq,
+        |b| b.store::<W32>(addr, r, DATA_WRITE),
+        |b| {
+            write(b, Gpr(0), m);
+            clear_hi(b, Gpr(0));
+            Ok(())
+        },
+    )
 }
 
 /// CMPXCHG [disp32],r32。i386 の mod=00 rm=101 絶対番地形（LOCK cmpxchg も同じ）。
@@ -16137,19 +16174,22 @@ pub fn cmpxchg_r32_abs<B: Backend>(b: &mut B, disp: i32, src: Gpr) -> Flow<B> {
     let m: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
     let acc = read(b, Gpr(0));
     let r = read(b, src);
-    let v = b.sub::<W32>(m, acc);
-    update_sub_flags(b, m, acc, v);
+    let v = b.sub::<W32>(acc, m);
+    update_sub_flags(b, acc, m, v);
     let zf = read_zf(b);
     let one = b.konst::<W32>(1);
     let zero = b.konst::<W32>(0);
     let zn = b.select::<W32>(zf, one, zero);
     let is_eq = b.cmp::<W32>(Cmp::Ne, zn, zero);
-    let new_mem = b.select::<W32>(is_eq, r, m);
-    let new_acc = b.select::<W32>(is_eq, acc, m);
-    b.store::<W32>(addr, new_mem, DATA_WRITE)?;
-    write(b, Gpr(0), new_acc);
-    clear_hi(b, Gpr(0));
-    Ok(())
+    b.if_then_else(
+        is_eq,
+        |b| b.store::<W32>(addr, r, DATA_WRITE),
+        |b| {
+            write(b, Gpr(0), m);
+            clear_hi(b, Gpr(0));
+            Ok(())
+        },
+    )
 }
 
 /// CMPXCHG [RIP+disp32],r64 (REX.W)。
@@ -16160,18 +16200,21 @@ pub fn cmpxchg_r64_rip<B: Backend>(b: &mut B, next_rip: u64, disp: i32, src: Gpr
     let m: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
     let acc = read64(b, Gpr(0));
     let r = read64(b, src);
-    let v = b.sub::<W64>(m, acc);
-    update_sub_flags(b, m, acc, v);
+    let v = b.sub::<W64>(acc, m);
+    update_sub_flags(b, acc, m, v);
     let zf = read_zf(b);
     let one = b.konst::<W32>(1);
     let zero = b.konst::<W32>(0);
     let zn = b.select::<W32>(zf, one, zero);
     let is_eq = b.cmp::<W32>(Cmp::Ne, zn, zero);
-    let new_mem = b.select::<W64>(is_eq, r, m);
-    let new_acc = b.select::<W64>(is_eq, acc, m);
-    b.store::<W64>(addr, new_mem, DATA_WRITE)?;
-    write64(b, Gpr(0), new_acc);
-    Ok(())
+    b.if_then_else(
+        is_eq,
+        |b| b.store::<W64>(addr, r, DATA_WRITE),
+        |b| {
+            write64(b, Gpr(0), m);
+            Ok(())
+        },
+    )
 }
 
 /// JO rel8。OF=1 なら分岐.
@@ -18195,6 +18238,7 @@ pub fn xadd_r32_memnd<B: Backend>(b: &mut B, dst: Gpr, base: Gpr) -> Flow<B> {
     let y = read(b, dst);
     let v = b.add::<W32>(x, y);
     write(b, dst, x);
+    clear_hi(b, dst);
     b.store::<W32>(addr, v, DATA_WRITE)?;
     update_add_flags(b, x, y, v);
     Ok(())
@@ -18209,6 +18253,7 @@ pub fn xadd_r32_rip<B: Backend>(b: &mut B, dst: Gpr, next_rip: u64, disp: i32) -
     let y = read(b, dst);
     let v = b.add::<W32>(x, y);
     write(b, dst, x);
+    clear_hi(b, dst);
     b.store::<W32>(addr, v, DATA_WRITE)?;
     update_add_flags(b, x, y, v);
     Ok(())
@@ -18231,6 +18276,7 @@ pub fn shld_r32_cl<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
     let v0 = b.or::<W32>(xshl, yshr);
     let v = b.select::<W32>(active, v0, x);
     write(b, dst, v);
+    clear_hi(b, dst);
     // 旗は SHL に準じる。count==0 では保存.
     let old: B::V<W32> = b.get(eflags_ref());
     let one = b.konst::<W32>(1);
@@ -18334,6 +18380,7 @@ pub fn shrd_r32_cl<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
     let v0 = b.or::<W32>(xshr, yshl);
     let v = b.select::<W32>(active, v0, x);
     write(b, dst, v);
+    clear_hi(b, dst);
     // 旗は SHR に準じる。count==0 では保存.
     let old: B::V<W32> = b.get(eflags_ref());
     let one = b.konst::<W32>(1);
@@ -18422,6 +18469,9 @@ pub fn shrd_r64_cl<B: Backend>(b: &mut B, dst: Gpr, src: Gpr) -> Flow<B> {
 pub fn shrd_r32_imm8<B: Backend>(b: &mut B, dst: Gpr, src: Gpr, n: u8) -> Flow<B> {
     let n = n & 31;
     if n == 0 {
+        // count=0 でも宛先は書き戻され、32 ビット形では上位を消す
+        // （ホスト CPU 実測）。値は変わらないので clear_hi のみ。
+        clear_hi(b, dst);
         return Ok(());
     }
     let x = read(b, dst);
@@ -18432,6 +18482,7 @@ pub fn shrd_r32_imm8<B: Backend>(b: &mut B, dst: Gpr, src: Gpr, n: u8) -> Flow<B
     let yshl = b.shl::<W32>(y, r);
     let v = b.or::<W32>(xshr, yshl);
     write(b, dst, v);
+    clear_hi(b, dst);
     let old: B::V<W32> = b.get(eflags_ref());
     let one = b.konst::<W32>(1);
     let c1 = b.konst::<W32>(n as u32 - 1);
@@ -18509,6 +18560,9 @@ pub fn shrd_r64_imm8<B: Backend>(b: &mut B, dst: Gpr, src: Gpr, n: u8) -> Flow<B
 pub fn shld_r32_imm8<B: Backend>(b: &mut B, dst: Gpr, src: Gpr, n: u8) -> Flow<B> {
     let n = n & 31;
     if n == 0 {
+        // count=0 でも宛先は書き戻され、32 ビット形では上位を消す
+        // （ホスト CPU 実測）。値は変わらないので clear_hi のみ。
+        clear_hi(b, dst);
         return Ok(());
     }
     let x = read(b, dst);
@@ -18519,6 +18573,7 @@ pub fn shld_r32_imm8<B: Backend>(b: &mut B, dst: Gpr, src: Gpr, n: u8) -> Flow<B
     let yshr = b.shr_l::<W32>(y, r);
     let v = b.or::<W32>(xshl, yshr);
     write(b, dst, v);
+    clear_hi(b, dst);
     let old: B::V<W32> = b.get(eflags_ref());
     let one = b.konst::<W32>(1);
     // CF = 追い出された最後のビット = 元の bit(32-n)。
