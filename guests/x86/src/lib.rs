@@ -103,6 +103,14 @@ pub struct CpuState {
     /// YMM レジスタの上位 128 ビット。下位は `xmm` と共有する
     /// （XSAVE の YMMH 成分に対応する）。AVX 形の演算だけが使う。
     pub ymm_hi: [[u64; 2]; 16],
+    /// ZMM0-15 の上位 256 ビット（bit511:256）。下位は `xmm` +
+    /// `ymm_hi` と共有する（XSAVE の ZMM_Hi256 成分に対応）。
+    pub zmm_hi: [[u64; 4]; 16],
+    /// ZMM16-31 の全体（XSAVE の Hi16_ZMM 成分に対応）。
+    /// EVEX でしか到達できない。
+    pub zmm16: [[u64; 8]; 16],
+    /// マスクレジスタ k0-k7（XSAVE の Opmask 成分に対応）。
+    pub kmask: [u64; 8],
 }
 
 #[cfg(test)]
@@ -143,13 +151,16 @@ mod tests {
         assert_eq!(core::mem::offset_of!(CpuState, xcomp_supp), 720);
         assert_eq!(core::mem::offset_of!(CpuState, xcomp_perm), 728);
         assert_eq!(core::mem::offset_of!(CpuState, ymm_hi), 736);
-        assert_eq!(core::mem::size_of::<CpuState>(), 992);
+        assert_eq!(core::mem::offset_of!(CpuState, zmm_hi), 992);
+        assert_eq!(core::mem::offset_of!(CpuState, zmm16), 1504);
+        assert_eq!(core::mem::offset_of!(CpuState, kmask), 2528);
+        assert_eq!(core::mem::size_of::<CpuState>(), 2592);
     }
 
     #[test]
     fn insn_count() {
         // 段階4の x86 最小 853 件にオペコード表の記述を足した件数。
-        assert_eq!(INSNS.len(), 2020);
+        assert_eq!(INSNS.len(), 2024);
     }
 
     #[test]
@@ -1864,6 +1875,71 @@ mod tests {
             decode_map(&[0xC4, 0xE3, 0x79, 0x1D, 0xC8, 0x00], modes, f).map(|d| d.insn),
             Some(Insn::Vcvtps2phWvXvIb)
         );
+    }
+
+    #[test]
+    fn evex_decode() {
+        let modes = MODE_M64 | (MODE_OPD_O32 << MODE_OPD_SHIFT) | (MODE_ADR_A64 << MODE_ADR_SHIFT);
+        let f512 = FEAT_AVX512F;
+        let fvl = f512 | FEAT_AVX512VL;
+        // 62 F1 7E 48 6F C1 = VMOVDQU32 zmm0,zmm1。
+        let d = decode_map(&[0x62, 0xF1, 0x7E, 0x48, 0x6F, 0xC1], modes, f512).unwrap();
+        assert_eq!(d.insn, Insn::Vmovdqu32XvWv);
+        assert_eq!(d.len, 6);
+        assert!(d.evex && !d.vex);
+        assert_eq!(d.evex_ll, 2);
+        // {k1}{z}: 62 F1 7E C9 6F C1 = VMOVDQU32 zmm0{k1}{z},zmm1。
+        let d = decode_map(&[0x62, 0xF1, 0x7E, 0xC9, 0x6F, 0xC1], modes, f512).unwrap();
+        assert!(d.evex_z && d.evex_aaa == 1);
+        // W=1（VMOVDQU64 の形。同じ項目で vex_w が立つ）。
+        let d = decode_map(&[0x62, 0xF1, 0xFE, 0x48, 0x6F, 0xD3], modes, f512).unwrap();
+        assert!(d.vex_w);
+        // 256 ビット形（L'L=01 + k7）は avx512vl が要る。
+        assert!(decode_map(&[0x62, 0xF1, 0x7E, 0x2F, 0x6F, 0x1B], modes, f512).is_none());
+        let d = decode_map(&[0x62, 0xF1, 0x7E, 0x2F, 0x6F, 0x1B], modes, fvl).unwrap();
+        assert_eq!(d.insn, Insn::Vmovdqu32XvWvVl);
+        assert_eq!(d.evex_ll, 1);
+        assert_eq!(d.evex_aaa, 7);
+        // L'L=11 は予約（どの許容集合にも含まれない）。
+        assert!(decode_map(&[0x62, 0xF1, 0x7E, 0x68, 0x6F, 0xC1], modes, fvl).is_none());
+        // 予約ビット: P0.3=1、P1.2=0、mm=0 は #UD。
+        assert!(decode_map(&[0x62, 0xF9, 0x7E, 0x48, 0x6F, 0xC1], modes, f512).is_none());
+        assert!(decode_map(&[0x62, 0xF1, 0x7A, 0x48, 0x6F, 0xC1], modes, f512).is_none());
+        assert!(decode_map(&[0x62, 0xF0, 0x7E, 0x48, 0x6F, 0xC1], modes, f512).is_none());
+        // LOCK+EVEX は #UD。
+        assert!(decode_map(&[0xF0, 0x62, 0xF1, 0x7E, 0x48, 0x6F, 0xC1], modes, f512).is_none());
+        // avx512f 無しでは解読しない。
+        assert!(decode_map(&[0x62, 0xF1, 0x7E, 0x48, 0x6F, 0xC1], modes, FEAT_AVX).is_none());
+        // zmm16-31: 62 A1 7E 48 6F C1 = VMOVDQU32 zmm16,zmm17
+        // （~R'=0 で reg 拡張、~X=0 で r/m 拡張）。
+        let d = decode_map(&[0x62, 0xA1, 0x7E, 0x48, 0x6F, 0xC1], modes, f512).unwrap();
+        assert_eq!(d.insn, Insn::Vmovdqu32XvWv);
+        assert!(d.evex_r2);
+        assert_eq!(crate::decode::reg_x5(&d), 16);
+        assert_eq!(crate::decode::rm_reg_x5(&d), 17);
+        // rv 項目は vvvv が未使用（フィールド全 1、vex_v==0）を
+        // 要求する。~vvvv=1101（vex_v!=0）のエンコードは拒否。
+        let d = decode_map(&[0x62, 0xA1, 0x5E, 0x48, 0x6F, 0xC1], modes, f512);
+        assert!(d.is_none());
+        // xmm7{k2}{z} 形（disp8 付きストアの検査込み）。
+        let d = decode_map(&[0x62, 0xF1, 0x7E, 0x8A, 0x6F, 0x38], modes, fvl).unwrap();
+        assert_eq!((d.evex_ll, d.evex_aaa, d.evex_z), (0, 2, true));
+        // P0.mmm は 3 ビット。0b100-0b111 は予約で #UD（& 3 で
+        // 切ると 0F/0F38/0F3A に化ける）。
+        for p0 in [0xF4u8, 0xF5, 0xF6, 0xF7] {
+            assert!(
+                decode_map(&[0x62, p0, 0x7E, 0x48, 0x6F, 0xC1], modes, fvl).is_none(),
+                "p0={p0:#04x}"
+            );
+        }
+        // EVEX 前のレガシー接頭辞は無視される。pp だけが接頭辞を
+        // 選ぶので F2+pp=10(F3) は VMOVDQU32 として受理され、
+        // F3+pp=00(NP) は該当項目なしで #UD になる。
+        let d = decode_map(&[0xF2, 0x62, 0xF1, 0x7E, 0x48, 0x6F, 0xC1], modes, fvl).unwrap();
+        assert_eq!(d.insn, Insn::Vmovdqu32XvWv);
+        let d = decode_map(&[0x66, 0x62, 0xF1, 0x7E, 0x48, 0x6F, 0xC1], modes, fvl).unwrap();
+        assert_eq!(d.insn, Insn::Vmovdqu32XvWv);
+        assert!(decode_map(&[0xF3, 0x62, 0xF1, 0x7C, 0x48, 0x6F, 0xC1], modes, fvl).is_none());
     }
 
     #[test]

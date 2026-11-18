@@ -7546,6 +7546,27 @@ pub fn ymm_hi_ref(r: Xmm) -> StateRef<W128> {
     StateRef::<W128>::from_offset(core::mem::offset_of!(CpuState, ymm_hi) + (r.0 as usize) * 16)
 }
 
+/// ベクタレジスタ 0-31 の 128 ビット部分 `part`（0-3）を指す。
+/// 0-15 は xmm/ymm_hi/zmm_hi に分散した実配置を解決し、16-31 は
+/// `zmm16` を見る。EVEX の L'L に応じて呼び出し側が part 数を選ぶ。
+pub fn zreg_ref(r: u8, part: usize) -> StateRef<W128> {
+    let off = if r < 16 {
+        match part {
+            0 => core::mem::offset_of!(CpuState, xmm) + (r as usize) * 16,
+            1 => core::mem::offset_of!(CpuState, ymm_hi) + (r as usize) * 16,
+            _ => core::mem::offset_of!(CpuState, zmm_hi) + (r as usize) * 32 + (part - 2) * 16,
+        }
+    } else {
+        core::mem::offset_of!(CpuState, zmm16) + (r as usize - 16) * 64 + part * 16
+    };
+    StateRef::<W128>::from_offset(off)
+}
+
+/// マスクレジスタ k0-k7 を指す（XSAVE の Opmask 成分）。
+pub fn kref(i: u8) -> StateRef<W64> {
+    StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, kmask) + (i as usize) * 8)
+}
+
 /// MOVD xmm, r/m32。GPR 下位32ビットを XMM 下位に移し、上位96を消す。
 pub fn movd_xmm_gpr32<B: Backend>(b: &mut B, dst: Xmm, src: Gpr) -> Flow<B> {
     let v32 = read(b, src);

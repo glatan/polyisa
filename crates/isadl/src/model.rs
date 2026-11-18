@@ -327,7 +327,16 @@ pub struct MapInsn {
     /// （VEX 経路では選ばれない）。`Some` は VEX が必須で、
     /// 値は VEX.L の許容範囲を表す。
     pub vex: Option<VexL>,
-    /// VEX.vvvv が未使用（1111b 固定）か。`vex` が Some のときのみ意味を持つ。
+    /// EVEX 接頭辞の要求。`Some(mask)` は EVEX が必須で、mask は
+    /// 許容する L'L のビット集合（bit0=128、bit1=256、bit2=512）。
+    /// `vex` との同時指定は不可。
+    pub evex: Option<u8>,
+    /// EVEX disp8 の倍率。0 はベクタ全幅（16<<L'L）、n はその
+    /// バイト数（broadcast 要素やスカラ形のメモリオペランド）。
+    /// EVEX のメモリ形は disp8 を N 倍して読む（disp8*N 方式）。
+    pub edisp: u8,
+    /// VEX.vvvv / EVEX.vvvv+V' が未使用（全ビット 1 固定）か。
+    /// `vex`/`evex` が Some のときのみ意味を持つ。
     pub vex_rv: bool,
     /// 必須接頭辞の状態。VEX 項目では VEX.pp に対応する。
     pub pfx: PfxSel,

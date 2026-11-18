@@ -167,9 +167,12 @@ pub fn validate(model: &Model) -> Report {
                         field: format!("{}: group_rm は 0-7", mi.name),
                     });
                 }
-                // `OpKind::Vv`（VEX.vvvv）と `vex_rv` は VEX 項目にだけ
+                // `OpKind::Vv`（VEX/EVEX.vvvv）と `vex_rv` は接頭辞項目にだけ
                 // 意味を持つ。
-                if mi.vex.is_none() && (mi.vex_rv || mi.ops.contains(&crate::model::OpKind::Vv)) {
+                if mi.vex.is_none()
+                    && mi.evex.is_none()
+                    && (mi.vex_rv || mi.ops.contains(&crate::model::OpKind::Vv))
+                {
                     errors.push(ValidationError::BadField {
                         format: "map-insn".to_string(),
                         field: format!("{}: Vv/vex_rv には vex が要る", mi.name),
@@ -430,9 +433,33 @@ fn validate_maps(model: &Model, timing: &BTreeSet<&str>, errors: &mut Vec<Valida
                     }
                 }
                 MapItem::Insn(_, mi) => {
-                    // VEX 項目は `vex_code` のある表にだけ置ける
-                    // （無い表からは VEX 経路で到達しない）。
-                    if mi.vex.is_some() && map.vex_code.is_none() {
+                    // VEX と EVEX は同じ項目で同時に要求できない。
+                    if mi.vex.is_some() && mi.evex.is_some() {
+                        errors.push(ValidationError::BadField {
+                            format: "map-insn".to_string(),
+                            field: format!("{}: vex と evex は排他", mi.name),
+                        });
+                    }
+                    // EVEX の L'L 許可マスク。0 は到達不能な項目、
+                    // bit3 以上は予約済み L'L=3 を受理してしまう。
+                    if let Some(mask) = mi.evex
+                        && !(1..=0b111).contains(&mask)
+                    {
+                        errors.push(ValidationError::BadField {
+                            format: "map-insn".to_string(),
+                            field: format!("{}: evex の L'L マスクは 1-7", mi.name),
+                        });
+                    }
+                    // EVEX 圧縮 disp8 のスケール指定は EVEX 項目にだけ意味がある。
+                    if mi.edisp != 0 && mi.evex.is_none() {
+                        errors.push(ValidationError::BadField {
+                            format: "map-insn".to_string(),
+                            field: format!("{}: edisp には evex が要る", mi.name),
+                        });
+                    }
+                    // VEX/EVEX 項目は `vex_code` のある表にだけ置ける
+                    // （無い表からは接頭辞経路で到達しない）。
+                    if (mi.vex.is_some() || mi.evex.is_some()) && map.vex_code.is_none() {
                         errors.push(ValidationError::BadField {
                             format: "map-insn".to_string(),
                             field: format!("{}: vex には表の vex_code が要る", mi.name),
@@ -516,9 +543,15 @@ fn validate_maps(model: &Model, timing: &BTreeSet<&str>, errors: &mut Vec<Valida
                 if ba != bb || a.group != b.group || pfx_disjoint(a.pfx, b.pfx) {
                     continue;
                 }
-                // VEX 項目とレガシー項目は別エンコーディング経路なので
+                // VEX・EVEX・レガシー項目は別エンコーディング経路なので
                 // 同じ表の同じスロットを置いても衝突しない。
-                if a.vex.is_some() != b.vex.is_some() {
+                if a.vex.is_some() != b.vex.is_some() || a.evex.is_some() != b.evex.is_some() {
+                    continue;
+                }
+                // EVEX 項目同士は L'L の許容集合が排他なら衝突しない。
+                if let (Some(x), Some(y)) = (a.evex, b.evex)
+                    && x & y == 0
+                {
                     continue;
                 }
                 // VEX 項目同士は VEX.L の許容範囲が排他なら衝突しない。

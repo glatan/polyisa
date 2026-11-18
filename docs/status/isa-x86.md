@@ -930,6 +930,10 @@
 | vmovdqa | vmovdqa_wv_xv | avx | store |
 | vmovdqu | vmovdqu_xv_wv | avx | load |
 | vmovdqu | vmovdqu_wv_xv | avx | store |
+| vmovdqu32 | vmovdqu32_xv_wv | avx512f | load |
+| vmovdqu32 | vmovdqu32_wv_xv | avx512f | store |
+| vmovdqu32 | vmovdqu32_xv_wv_vl | avx512vl && avx512f | load |
+| vmovdqu32 | vmovdqu32_wv_xv_vl | avx512vl && avx512f | store |
 | vmovhlps | vmovhlps_xv_hv_wv | avx | alu |
 | vmovhpd | vmovhpd_xv_hv_wv | avx | load |
 | vmovhpd | vmovhpd_wv_xv | avx | store |

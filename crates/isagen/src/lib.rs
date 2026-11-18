@@ -17,6 +17,8 @@ pub enum GenError {
     /// デコーダが評価できない `when` の機能旗。128 個を超える旗で
     /// 符号化を区別しようとしたときに使う。
     UnsupportedWhen(String),
+    /// 検査を通っていないモデルに対する生成要求（vex+evex の同居など）。
+    Custom(String),
 }
 
 impl core::fmt::Display for GenError {
@@ -24,6 +26,7 @@ impl core::fmt::Display for GenError {
         match self {
             Self::Invalid(es) => write!(f, "invalid model ({} errors)", es.len()),
             Self::UnsupportedWhen(name) => write!(f, "unsupported when flag: {name}"),
+            Self::Custom(msg) => write!(f, "{msg}"),
         }
     }
 }
@@ -573,10 +576,23 @@ fn gen_map_decoder(model: &Model) -> Result<String, GenError> {
          \x20   pub vex_map: u8,\n\
          \x20   /// VEX.L（ベクタ長 256 ビット）。\n\
          \x20   pub vex_l: bool,\n\
-         \x20   /// VEX.vvvv（反転済みのレジスタ番号 0-15）。\n\
+         \x20   /// VEX/EVEX.vvvv（反転済みのレジスタ番号。\n\
+         \x20   /// EVEX では V' 込みで 0-31）。\n\
          \x20   pub vex_v: u8,\n\
          \x20   /// VEX.W（GPR 系の 64 ビット選択子）。\n\
          \x20   pub vex_w: bool,\n\
+         \x20   /// EVEX 接頭辞があったか。\n\
+         \x20   pub evex: bool,\n\
+         \x20   /// EVEX.L'L（ベクタ長。0=128, 1=256, 2=512, 3 は予約）。\n\
+         \x20   pub evex_ll: u8,\n\
+         \x20   /// EVEX.b（broadcast/SAE/rounding-enable）。\n\
+         \x20   pub evex_b: bool,\n\
+         \x20   /// EVEX.z（ゼロイングマージ）。\n\
+         \x20   pub evex_z: bool,\n\
+         \x20   /// EVEX.aaa（マスクレジスタ k0-k7 の選択。0 はマスクなし）。\n\
+         \x20   pub evex_aaa: u8,\n\
+         \x20   /// EVEX.R'（ModRM.reg の 5 ビット目。反転済み）。\n\
+         \x20   pub evex_r2: bool,\n\
          }\n",
     );
 
@@ -608,6 +624,7 @@ fn gen_map_decoder(model: &Model) -> Result<String, GenError> {
          \x20   insn: Insn,\n\
          \x20   ops: &[OpK],\n\
          \x20   group_modrm: bool,\n\
+         \x20   edisp: u8,\n\
          ) -> Option<Insn> {\n\
          \x20   let needs_modrm = group_modrm\n\
          \x20       || ops.iter().any(|o| {\n\
@@ -659,6 +676,17 @@ fn gen_map_decoder(model: &Model) -> Result<String, GenError> {
          \x20               }\n\
          \x20               *i += nb;\n\
          \x20               d.disp = v << (64 - db) >> (64 - db);\n\
+         \x20               // EVEX は disp8 をオペランドサイズ N で\n\
+         \x20               // スケールする（disp8*N）。edisp=0 はベクタ\n\
+         \x20               // 全幅 16<<L'L、それ以外は要素バイト数。\n\
+         \x20               if d.evex && db == 8 {\n\
+         \x20                   let n = if edisp == 0 {\n\
+         \x20                       16i64 << d.evex_ll\n\
+         \x20                   } else {\n\
+         \x20                       i64::from(edisp)\n\
+         \x20                   };\n\
+         \x20                   d.disp *= n;\n\
+         \x20               }\n\
          \x20               d.disp_bits = db as u8;\n\
          \x20           }\n\
          \x20       }\n\
@@ -916,6 +944,50 @@ fn gen_map_decoder(model: &Model) -> Result<String, GenError> {
          \x20       }\n\
          \x20   }\n",
     );
+    // EVEX 接頭辞（4 バイト、0x62）。64 ビットモードでのみ扱う
+    // （非64ビットでは BOUND との識別が別途必要）。
+    // P0 = [~R ~X ~B ~R' 0 mm]、P1 = [W ~vvvv 1 pp]、
+    // P2 = [z L' L b ~V' aaa]。R/X/B/V'/vvvv は反転格納。
+    s.push_str(
+        "    {\n\
+         \x20       let b0 = *bytes.get(i)?;\n\
+         \x20       if b0 == 0x62 && mode_m64(modes) && !d.vex {\n\
+         \x20           let p0 = *bytes.get(i + 1)?;\n\
+         \x20           let p1 = *bytes.get(i + 2)?;\n\
+         \x20           let p2 = *bytes.get(i + 3)?;\n\
+         \x20           // LOCK+EVEX と予約ビット（P0.3=0、P1.2=1、mm!=0）は #UD。\n\
+         \x20           // mmm は 3 ビット。4-7 は予約で、存在しないマップ番号\n\
+         \x20           // としてディスパッチ側で #UD に落ちる。\n\
+         \x20           if d.lock || p0 & 0x08 != 0 || p0 & 7 == 0 || p1 & 4 == 0 {\n\
+         \x20               return None;\n\
+         \x20           }\n\
+         \x20           d.evex = true;\n\
+         \x20           d.vex_map = p0 & 7;\n\
+         \x20           d.rex = 0x40 | (((p0 >> 5) & 7) ^ 7) | ((p1 & 0x80) >> 4);\n\
+         \x20           d.evex_r2 = p0 & 0x10 == 0;\n\
+         \x20           d.vex_w = p1 & 0x80 != 0;\n\
+         \x20           d.vex_v = ((!p1 >> 3) & 0xF) | (((!p2 >> 3) & 1) << 4);\n\
+         \x20           // VEX 同様、EVEX 前のレガシー接頭辞（66/F2/F3）は\n\
+         \x20           // 無視される。pp フィールドだけが接頭辞を選ぶ。\n\
+         \x20           d.p66 = false;\n\
+         \x20           d.rep = 0;\n\
+         \x20           match p1 & 3 {\n\
+         \x20               1 => d.p66 = true,\n\
+         \x20               2 => d.rep = 0xF3,\n\
+         \x20               3 => d.rep = 0xF2,\n\
+         \x20               _ => {}\n\
+         \x20           }\n\
+         \x20           d.evex_ll = (p2 >> 5) & 3;\n\
+         \x20           d.evex_b = p2 & 0x10 != 0;\n\
+         \x20           d.evex_z = p2 & 0x80 != 0;\n\
+         \x20           d.evex_aaa = p2 & 7;\n\
+         \x20           i += 4;\n\
+         \x20           if i > 15 {\n\
+         \x20               return None;\n\
+         \x20           }\n\
+         \x20       }\n\
+         \x20   }\n",
+    );
     // 有効サイズ。
     s.push_str(
         "    d.osize = if mode_m64(modes) {\n\
@@ -952,7 +1024,7 @@ fn gen_map_decoder(model: &Model) -> Result<String, GenError> {
         }
     }
     s.push_str(&format!(
-        "    let insn = if d.vex {{\n\
+        "    let insn = if d.vex || d.evex {{\n\
          \x20       match d.vex_map {{\n{vex_arms}            _ => return None,\n\
          \x20       }}\n\
          \x20   }} else {{\n\
@@ -986,14 +1058,19 @@ fn emit_map_candidate(
         PfxSel::PF3 => "d.rep == 0xF3".to_string(),
     };
     let guard = when_guard_flags(&mi.when, flag_exprs)?;
-    // VEX 項目は VEX 経路でのみ、レガシー項目は非 VEX 経路でのみ選ぶ。
-    // VEX 項目は更に VEX.L と予約 vvvv を検査する。
+    // VEX/EVEX/レガシー項目はそれぞれの経路でのみ選ぶ。
+    // EVEX 項目は更に L'L の許容集合を検査する（ll=3 はどの
+    // 集合にも含まれないので常に拒否される）。
     use polyisa_isadl::model::VexL;
-    let vex = match mi.vex {
-        None => "!d.vex".to_string(),
-        Some(VexL::Any) => "d.vex".to_string(),
-        Some(VexL::L0) => "d.vex && !d.vex_l".to_string(),
-        Some(VexL::L1) => "d.vex && d.vex_l".to_string(),
+    let vex = match (mi.vex, mi.evex) {
+        (None, None) => "!d.vex && !d.evex".to_string(),
+        (Some(VexL::Any), None) => "d.vex".to_string(),
+        (Some(VexL::L0), None) => "d.vex && !d.vex_l".to_string(),
+        (Some(VexL::L1), None) => "d.vex && d.vex_l".to_string(),
+        (None, Some(mask)) => format!("d.evex && (1u32 << d.evex_ll) & {mask} != 0"),
+        (Some(_), Some(_)) => {
+            return Err(GenError::Custom(format!("{}: vex と evex は排他", mi.name)));
+        }
     };
     // `vex_rv` はフィールド 1111b（= 補数を解くとレジスタ 0）を要求。
     let vex = if mi.vex_rv {
@@ -1018,8 +1095,9 @@ fn emit_map_candidate(
     }
     let ops = mi.ops.iter().map(opk_code).collect::<Vec<_>>().join(", ");
     let group = mi.group.is_some();
+    let edisp = mi.edisp;
     s.push_str(&format!(
-        "            if {cond} {{\n                return finish(bytes, i, d, Insn::{}, &[{ops}], {group});\n            }}\n",
+        "            if {cond} {{\n                return finish(bytes, i, d, Insn::{}, &[{ops}], {group}, {edisp});\n            }}\n",
         to_ident(&mi.name)
     ));
     Ok(())

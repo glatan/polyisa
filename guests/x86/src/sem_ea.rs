@@ -12432,3 +12432,144 @@ pub fn gf2p8affine<B: Backend>(
     b.set(sem::xmm_ref(reg_x(d)), r);
     Ok(())
 }
+
+// ===== EVEX（AVX-512）
+
+/// EVEX のベクタ長（128 ビット部分の個数。ll=0→1、1→2、2→4）。
+fn ev_n(d: &MapDec) -> usize {
+    1usize << d.evex_ll
+}
+
+/// aaa が選ぶ k マスクを読む（0 はマスクなし＝全 1）。
+fn ev_k<B: Backend>(b: &mut B, d: &MapDec) -> B::V<W64> {
+    if d.evex_aaa == 0 {
+        b.konst::<W64>(W64::from_u128(u64::MAX as u128))
+    } else {
+        b.get(sem::kref(d.evex_aaa))
+    }
+}
+
+/// k マスクの `idx` ビット目（0/1 の値）。
+fn ev_kbit<B: Backend>(b: &mut B, k: B::V<W64>, idx: usize) -> B::V<W64> {
+    let sh = b.konst::<W64>(W64::from_u128(idx as u128));
+    let s = b.shr_l::<W64>(k, sh);
+    let one = b.konst::<W64>(W64::from_u128(1));
+    b.and::<W64>(s, one)
+}
+
+/// part `p`（128 ビット）に対応する要素マスクを 0/全 1 で展開する。
+/// `w64` なら 64 ビット要素×2、偽なら 32 ビット要素×4。
+fn ev_kmask128<B: Backend>(b: &mut B, k: B::V<W64>, p: usize, w64: bool) -> B::V<W128> {
+    let (nelem, ebits) = if w64 { (2usize, 64u32) } else { (4, 32) };
+    let z64 = b.konst::<W64>(W64::from_u128(0));
+    let eones = b.konst::<W64>(W64::from_u128(if w64 {
+        u64::MAX as u128
+    } else {
+        0xFFFF_FFFF
+    }));
+    let mut m = b.konst::<W128>(W128::from_u128(0));
+    for e in 0..nelem {
+        let bit = ev_kbit(b, k, p * nelem + e);
+        // 0 → 0、1 → 要素幅の全 1（0-1 の桁借りを要素幅に絞る。
+        // 64 ビット幅のままだと隣接要素へはみ出す）。
+        let m64 = b.sub::<W64>(z64, bit);
+        let m64 = b.and::<W64>(m64, eones);
+        let m128 = b.zext::<W64, W128>(m64);
+        let sh = b.konst::<W128>(W128::from_u128((e as u32 * ebits) as u128));
+        let m128 = b.shl::<W128>(m128, sh);
+        m = b.or::<W128>(m, m128);
+    }
+    m
+}
+
+/// VMOVDQU32/64（EVEX.0F 6F/7F）。`store` が真なら r/m 宛ての 7F、
+/// `w64` は要素幅（dqu64）。{k} マージと {z} ゼロイングに対応する。
+/// メモリ読みは部分幅で行うため、非アクティブ要素のフォールト抑制は
+/// 128 ビット単位の近似（ストアは要素単位に書かないので厳密）。
+/// `ea` の実モード限界検査（wseg）は落とす。EVEX は 64 ビット
+/// モード専用で wseg は常に無いため到達しない。
+pub fn emovdqu<B: Backend>(
+    b: &mut B,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+    store: bool,
+    w64: bool,
+) -> Result<(), B::Exit> {
+    let n = ev_n(d);
+    let k = ev_k(b, d);
+    let zero = b.konst::<W128>(W128::from_u128(0));
+    let merge = |b: &mut B, dst: u8, src: B::V<W128>, p: usize| {
+        let m = ev_kmask128(b, k, p, w64);
+        let keep = if d.evex_z {
+            zero
+        } else {
+            b.get(sem::zreg_ref(dst, p))
+        };
+        let masked = b.and::<W128>(src, m);
+        let nm = b.not::<W128>(m);
+        let kept = b.and::<W128>(keep, nm);
+        b.or::<W128>(masked, kept)
+    };
+    if !store {
+        let dst = decode::reg_x5(d);
+        for p in 0..4 {
+            let v = if p < n {
+                let src = match ea {
+                    Rm::Reg(_) => b.get(sem::zreg_ref(decode::rm_reg_x5(d), p)),
+                    Rm::Mem { a, .. } => {
+                        let off = b.konst::<W64>(W64::from_u128((p * 16) as u128));
+                        let a = b.add::<W64>(*a, off);
+                        b.load::<W128>(a, sem::DATA_READ)?
+                    }
+                };
+                merge(b, dst, src, p)
+            } else {
+                // ベクタ長より上は常に 0。
+                zero
+            };
+            b.set(sem::zreg_ref(dst, p), v);
+        }
+        return Ok(());
+    }
+    let src_r = decode::reg_x5(d);
+    match ea {
+        Rm::Reg(_) => {
+            let dst = decode::rm_reg_x5(d);
+            for p in 0..4 {
+                let v = if p < n {
+                    let src = b.get(sem::zreg_ref(src_r, p));
+                    merge(b, dst, src, p)
+                } else {
+                    zero
+                };
+                b.set(sem::zreg_ref(dst, p), v);
+            }
+        }
+        Rm::Mem { a, .. } => {
+            let a = *a;
+            let (nelem, ebytes) = if w64 { (2usize, 8u32) } else { (4, 4) };
+            let z64 = b.konst::<W64>(W64::from_u128(0));
+            for p in 0..n {
+                let part = b.get(sem::zreg_ref(src_r, p));
+                for e in 0..nelem {
+                    let bit = ev_kbit(b, k, p * nelem + e);
+                    let on = b.cmp::<W64>(Cmp::Ne, bit, z64);
+                    let off = (p * 16 + e * ebytes as usize) as u128;
+                    let elem = lane128(b, part, (e as u32) * ebytes * 8, ebytes * 8);
+                    b.if_then(on, |b| {
+                        let off = b.konst::<W64>(W64::from_u128(off));
+                        let ad = b.add::<W64>(a, off);
+                        if w64 {
+                            let v64 = b.trunc::<W128, W64>(elem);
+                            b.store::<W64>(ad, v64, sem::DATA_WRITE)
+                        } else {
+                            let v32 = b.trunc::<W128, W32>(elem);
+                            b.store::<W32>(ad, v32, sem::DATA_WRITE)
+                        }
+                    })?;
+                }
+            }
+        }
+    }
+    Ok(())
+}

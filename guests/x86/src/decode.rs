@@ -51,6 +51,18 @@ pub fn rm_reg(d: &MapDec) -> Gpr {
     Gpr((d.modrm & 7) | ((d.rex & 1) << 3))
 }
 
+/// ModRM reg フィールドのベクタレジスタ番号（REX.R + EVEX.R' 込み、
+/// 0-31）。EVEX 項目の reg 被演算子に使う。
+pub fn reg_x5(d: &MapDec) -> u8 {
+    ((d.modrm >> 3) & 7) | (((d.rex >> 2) & 1) << 3) | ((d.evex_r2 as u8) << 4)
+}
+
+/// ModRM r/m のベクタレジスタ番号（REX.B + EVEX.X 込み、0-31）。
+/// mod=11 でベクタレジスタを指すときだけ使う（GPR 形は `rm_reg`）。
+pub fn rm_reg_x5(d: &MapDec) -> u8 {
+    (d.modrm & 7) | ((d.rex & 1) << 3) | (((d.rex >> 1) & 1) << 4)
+}
+
 /// +r 形式のレジスタ（オペコード下位3ビット + REX.B）。
 pub fn op_reg(d: &MapDec) -> Gpr {
     Gpr((d.opcode & 7) | ((d.rex & 1) << 3))

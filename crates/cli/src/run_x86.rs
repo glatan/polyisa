@@ -3741,6 +3741,9 @@ fn dispatch_map<B: Backend>(
         | Insn::MovapdWvXv
         | Insn::MovdqaWvXv
         | Insn::MovdquWvXv => sem_ea::mov_w_x(b, d, &ea),
+        // EVEX の VMOVDQU32/64。要素幅は EVEX.W（d.vex_w）。
+        Insn::Vmovdqu32XvWv | Insn::Vmovdqu32XvWvVl => sem_ea::emovdqu(b, d, &ea, false, d.vex_w),
+        Insn::Vmovdqu32WvXv | Insn::Vmovdqu32WvXvVl => sem_ea::emovdqu(b, d, &ea, true, d.vex_w),
         Insn::MovssXvWv => sem_ea::movs_ld(b, d, &ea, 32),
         Insn::MovsdXvWv => sem_ea::movs_ld(b, d, &ea, 64),
         Insn::MovssWvXv => sem_ea::movs_st(b, d, &ea, 32),

@@ -30,6 +30,8 @@ fn mi(
         group_mod: None,
         group_rm: None,
         vex: None,
+        evex: None,
+        edisp: 0,
         vex_rv: false,
         pfx,
         when,
@@ -52,6 +54,25 @@ fn vmx(
 ) -> MapInsn {
     let mut it = mi(name, ops, None, sel, Pred::True, syntax, timing);
     it.vex = Some(l);
+    it.vex_rv = rv;
+    it
+}
+
+/// EVEX 接頭辞の命令項目。`ll` は許容する L'L のビット集合
+/// （bit0=128、bit1=256、bit2=512）。`apply_gates` の EVEX 既定は
+/// `avx512f`。`rv` が真なら vvvv+V' が未使用（全ビット 1）のとき
+/// だけ解読する。
+fn ex(
+    name: &str,
+    ops: &[OpKind],
+    sel: PfxSel,
+    ll: u8,
+    rv: bool,
+    syntax: &str,
+    timing: &str,
+) -> MapInsn {
+    let mut it = mi(name, ops, None, sel, Pred::True, syntax, timing);
+    it.evex = Some(ll);
     it.vex_rv = rv;
     it
 }
@@ -1742,6 +1763,31 @@ pub fn build_maps(m: &mut Model) {
             0x7F,
             vmx(&format!("{mn}_wv_xv"), &[RmX, RegX], sel, Any, true, "{op} {w}, {x}", "store"),
         ));
+    }
+    // VMOVDQU32/64（EVEX.F3.0F の 6F/7F）。W で 32/64 ビット要素を
+    // 選ぶが、名前は W=0 形に寄せる（vpmaskmovd と同じ近似）。
+    // 128/256 ビット形は avx512vl、512 ビット形は avx512f で
+    // ゲートする（L'L 集合で項目を分ける）。
+    for (op, ops, syn, tm) in [
+        (0x6Fu8, [RegX, RmX], "{op} {x}, {w}", "load"),
+        (0x7F, [RmX, RegX], "{op} {w}, {x}", "store"),
+    ] {
+        let mn = if op == 0x6F { "vmovdqu32_xv_wv" } else { "vmovdqu32_wv_xv" };
+        m0f.push(MapItem::Insn(
+            op,
+            ex(mn, &ops, PfxSel::PF3, 0b100, true, syn, tm),
+        ));
+        let mut vl = ex(
+            &format!("{mn}_vl"),
+            &ops,
+            PfxSel::PF3,
+            0b011,
+            true,
+            syn,
+            tm,
+        );
+        vl.when = Pred::Flag("avx512vl".to_string());
+        m0f.push(MapItem::Insn(op, vl));
     }
     // VMOVSS/VMOVSD（F3/F2 の 10/11、L0 のみ）。レジスタ形は
     // vvvv が第 2 ソースになる 3 オペランド形。メモリ形で

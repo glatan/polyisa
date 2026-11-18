@@ -20845,3 +20845,137 @@ fn run64_movdir_waitpkg() {
         assert!(decode_map(bytes, m64, feats).is_some(), "{bytes:?}");
     }
 }
+
+#[test]
+fn run64_evex_movdqu() {
+    // B2a-1 の EVEX 基盤検査：VMOVDQU32/64 の {k} マージ、{z}
+    // ゼロイング、L'L のベクタ長、zmm16-31、disp8*N スケーリング、
+    // マスク付きストアのフォールト抑制を確かめる。
+    let feats = polyisa_guest_x86::model_feats("x86_64_v4");
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2800);
+    let u32v = |a: &[u32]| -> Vec<u8> { a.iter().flat_map(|f| f.to_le_bytes()).collect() };
+    let u64v = |a: &[u64]| -> Vec<u8> { a.iter().flat_map(|f| f.to_le_bytes()).collect() };
+    // データ: [0x2000..0x2040] = dwords 0x100..0x10F。
+    let d: Vec<u32> = (0..16).map(|i| 0x100 + i).collect();
+    env.backend.mem.write(VirtAddr(0x2000), &u32v(&d)).unwrap();
+    // マスクストア先の番兵（0x20C0..0x2100）と zmm6 プリセット
+    // （0x2100..0x2140 = dwords 0x600+i）。
+    env.backend
+        .mem
+        .write(VirtAddr(0x20C0), &[0xAAu8; 0x40])
+        .unwrap();
+    let p: Vec<u32> = (0..16).map(|i| 0x600 + i).collect();
+    env.backend.mem.write(VirtAddr(0x2100), &u32v(&p)).unwrap();
+    // k1=0x00FF（dword 0-7）、k2=0x3333、k3=0xAA（qword 奇数）、
+    // k5=0x0F0F。
+    env.backend.set(polyisa_guest_x86::sem::kref(1), 0x00FF);
+    env.backend.set(polyisa_guest_x86::sem::kref(2), 0x3333);
+    env.backend.set(polyisa_guest_x86::sem::kref(3), 0x00AA);
+    env.backend.set(polyisa_guest_x86::sem::kref(5), 0x0F0F);
+    let prog: &[u8] = &[
+        0x48, 0xb8, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rax,0x2000
+        0x62, 0xf1, 0x7e, 0x48, 0x6f, 0x00, // vmovdqu32 zmm0,[rax]
+        0x62, 0xf1, 0x7e, 0x48, 0x7f, 0x40, 0x01, // vmovdqu32 [rax+0x40],zmm0
+        0x62, 0xf1, 0x7e, 0xc9, 0x6f, 0x08, // vmovdqu32 zmm1{k1}{z},[rax]
+        0x62, 0xf1, 0x7e, 0x48, 0x7f, 0x48, 0x02, // vmovdqu32 [rax+0x80],zmm1
+        0x62, 0xf1, 0x7e, 0x4a, 0x7f, 0x40, 0x03, // vmovdqu32 [rax+0xC0]{k2},zmm0
+        0x62, 0xe1, 0x7e, 0x48, 0x6f, 0x00, // vmovdqu32 zmm16,[rax]
+        0x62, 0xa1, 0x7e, 0xc9, 0x6f, 0xc8, // vmovdqu32 zmm17{{k1}}{{z}},zmm16
+        0x62, 0xe1, 0x7e, 0x48, 0x7f, 0x48, 0x05, // vmovdqu32 [rax+0x140],zmm17
+        0x62, 0xf1, 0xfe, 0xcb, 0x6f, 0x28, // vmovdqu64 zmm5{{k3}}{{z}},[rax]
+        0x62, 0xf1, 0x7e, 0x48, 0x7f, 0x68, 0x07, // vmovdqu32 [rax+0x1C0],zmm5
+        0x62, 0xf1, 0x7e, 0x48, 0x6f, 0x70, 0x04, // vmovdqu32 zmm6,[rax+0x100]
+        0x62, 0xf1, 0x7e, 0x2d, 0x6f, 0x30, // vmovdqu32 ymm6{k5},[rax]
+        0x62, 0xf1, 0x7e, 0x48, 0x7f, 0x70, 0x0a, // vmovdqu32 [rax+0x280],zmm6
+        0x62, 0xf1, 0x7e, 0x8a, 0x6f, 0x38, // vmovdqu32 xmm7{{k2}}{{z}},[rax]
+        0x62, 0xf1, 0x7e, 0x08, 0x7f, 0x78, 0x2c, // vmovdqu32 [rax+0x2C0],xmm7
+        0x48, 0x31, 0xdb, // xor ebx,ebx
+        0xb8, 0x01, 0x00, 0x00, 0x00, // mov eax,1
+        0xcd, 0x80, // int 0x80
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = ExitOne;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        200,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64_v4"),
+    );
+    assert_eq!(out, Outcome::Exit(0));
+    let acc = polyisa_mem::Access {
+        endian: polyisa_mem::Endian::Le,
+        align: polyisa_mem::Align::Unaligned,
+        kind: polyisa_mem::AccessKind::DataRead,
+    };
+    let mut v = [0u8; 0x40];
+    // 素通しストア: 16 dword 全転送。
+    env.backend.mem.read(VirtAddr(0x2040), &mut v, acc).unwrap();
+    assert_eq!(&v[..], &u32v(&d)[..], "zmm0 store");
+    // マスク+ゼロイングロード: dword 0-7 が転送、8-15 は 0。
+    env.backend.mem.read(VirtAddr(0x2080), &mut v, acc).unwrap();
+    {
+        let e: Vec<u32> = (0..16).map(|i| if i < 8 { 0x100 + i } else { 0 }).collect();
+        assert_eq!(&v[..], &u32v(&e)[..], "zmm1{{k1}}{{z}} load");
+    }
+    // マスクストア k2=0x3333: dword 0,1,4,5,8,9,12,13 が転送、
+    // 他は番兵 0xAAAAAAAA が残る。
+    env.backend.mem.read(VirtAddr(0x20C0), &mut v, acc).unwrap();
+    {
+        let e: Vec<u32> = (0..16)
+            .map(|i| {
+                if (0x3333u32 >> i) & 1 != 0 {
+                    0x100 + i
+                } else {
+                    0xAAAA_AAAA
+                }
+            })
+            .collect();
+        assert_eq!(&v[..], &u32v(&e)[..], "masked store {{k2}}");
+    }
+    // zmm16-31: zmm17{{k1}}{{z}} = zmm16（低 8 dword のみ）。
+    env.backend.mem.read(VirtAddr(0x2140), &mut v, acc).unwrap();
+    {
+        let e: Vec<u32> = (0..16).map(|i| if i < 8 { 0x100 + i } else { 0 }).collect();
+        assert_eq!(&v[..], &u32v(&e)[..], "zmm17{{k1}}{{z}}");
+    }
+    // VMOVDQU64 {k3}{z}: 奇数 qword のみ転送（要素幅 64）。
+    env.backend.mem.read(VirtAddr(0x21C0), &mut v, acc).unwrap();
+    {
+        let q: Vec<u64> = (0..16)
+            .map(|i| u64::from(0x100u32 + i as u32))
+            .collect::<Vec<u64>>()
+            .chunks(2)
+            .map(|c| c[0] | (c[1] << 32))
+            .collect();
+        let e: Vec<u64> = (0..8).map(|i| if i % 2 == 1 { q[i] } else { 0 }).collect();
+        assert_eq!(&v[..], &u64v(&e)[..], "vmovdqu64 zmm5{{k3}}{{z}}");
+    }
+    // ymm 形のマージ（z=0、VL=256 で要素 0-7 のみ）: dword 0-3 が
+    // [rax]、4-7 は zmm6 の旧値（0x600+i）、上位 256 は 0。
+    env.backend.mem.read(VirtAddr(0x2280), &mut v, acc).unwrap();
+    {
+        let e: Vec<u32> = (0..16)
+            .map(|i| match i {
+                0..=3 => 0x100 + i,
+                4..=7 => 0x600 + i,
+                _ => 0,
+            })
+            .collect();
+        assert_eq!(&v[..], &u32v(&e)[..], "ymm6{{k5}} merge");
+    }
+    // xmm 形マスク+ゼロイング: dword 0,1 が転送、他は 0。
+    let k2: u64 = env.backend.get(polyisa_guest_x86::sem::kref(2));
+    assert_eq!(k2, 0x3333, "kmask[2] after run");
+    env.backend.mem.read(VirtAddr(0x22C0), &mut v, acc).unwrap();
+    {
+        let e: Vec<u32> = (0..4).map(|i| if i < 2 { 0x100 + i } else { 0 }).collect();
+        assert_eq!(&v[..16], &u32v(&e)[..], "xmm7{{k2}}{{z}}");
+    }
+}
