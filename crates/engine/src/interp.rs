@@ -9,7 +9,7 @@ use polyisa_mem::{Access, AddressSpace, MemError, VirtAddr};
 use polyisa_sem::{
     Backend, Cmp, GuestException, Helper, HintKey, Param, StateArray, StateRef, W32, W64, Width,
 };
-use polyisa_softfloat::{F32 as SF32, F64 as SF64, Rm as FpRm};
+use polyisa_softfloat::{F16 as SF16, F32 as SF32, F64 as SF64, Rm as FpRm};
 
 /// デバッグ用のストアアドレスウォッチ。`POLYISA_MEM_WATCH` に 16 進数を
 /// 置くと、そのアドレスを覆うストアごとに出力する。0 は無効。
@@ -448,6 +448,16 @@ impl Backend for InterpBackend {
         let v = F::to_u128(a);
         let rm = FpRm::from_bits(rm);
         let out: u128 = match (F::BITS, T::BITS) {
+            (16, 32) => {
+                let (r, f) = SF16::from_bits(v as u64).to_f32(rm);
+                self.fp_flags |= f;
+                u128::from(r.bits())
+            }
+            (32, 16) => {
+                let (r, f) = SF32::from_bits(v as u64).to_f16(rm);
+                self.fp_flags |= f;
+                u128::from(r.bits())
+            }
             (32, 64) => {
                 let (r, f) = SF32::from_bits(v as u64).to_f64(rm);
                 self.fp_flags |= f;
@@ -458,7 +468,7 @@ impl Backend for InterpBackend {
                 self.fp_flags |= f;
                 u128::from(r.bits())
             }
-            (32, 32) | (64, 64) => v,
+            (16, 16) | (32, 32) | (64, 64) => v,
             _ => unimplemented!("float conversion"),
         };
         T::from_u128(out)

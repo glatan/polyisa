@@ -2097,6 +2097,548 @@ pub fn lzcnt<B: Backend>(b: &mut B, w: u8, g: Gpr, ea: &Rm<B::V<W64>>, d: &MapDe
     }
 }
 
+// ---- BMI1/BMI2（VEX エンコードの GPR ビット操作）----
+
+/// VEX.vvvv が指す GPR（BMI の By オペランド）。
+fn vvv_g(d: &MapDec) -> Gpr {
+    Gpr(d.vex_v)
+}
+
+/// BMI の SF/ZF/CF/OF 更新。SF/ZF は結果から、CF は `cf`、
+/// OF は常に 0。AF/PF は不定（実値のまま残す）。
+fn bmi_flags<B: Backend, W: Hw>(b: &mut B, dst: B::V<W>, cf: B::B) {
+    let zero = b.konst::<W>(W::from_u128(0));
+    let is_z = b.cmp::<W>(Cmp::Eq, dst, zero);
+    let top = b.konst::<W>(W::from_u128(1u128 << (W::BITS - 1)));
+    let t = b.and::<W>(dst, top);
+    let is_s = b.cmp::<W>(Cmp::Ne, t, zero);
+    let old: B::V<W32> = b.get(eflags_ref());
+    let mask = b.konst::<W32>(!(sem::FLAG_SF | sem::FLAG_ZF | sem::FLAG_OF | sem::FLAG_CF));
+    let f = b.and::<W32>(old, mask);
+    let sf = pick(b, is_s, sem::FLAG_SF);
+    let f = b.or::<W32>(f, sf);
+    let zf = pick(b, is_z, sem::FLAG_ZF);
+    let f = b.or::<W32>(f, zf);
+    let cfb = pick(b, cf, sem::FLAG_CF);
+    let f = b.or::<W32>(f, cfb);
+    b.set(eflags_ref(), f);
+}
+
+/// 偽の条件値（フラグを必ず 0 にする用途）。
+fn fals<B: Backend, W: Hw>(b: &mut B) -> B::B {
+    let z = b.konst::<W>(W::from_u128(0));
+    b.cmp::<W>(Cmp::Ne, z, z)
+}
+
+/// ANDN Gv, By, Ev。`dst = ~src1 & src2`。CF/OF=0。
+fn andn_w<B: Backend, W: Hw>(b: &mut B, g: Gpr, ea: &Rm<B::V<W64>>, d: &MapDec) -> Flow<B> {
+    let s1 = W::get(b, vvv_g(d), d);
+    let s2 = rd_w::<B, W>(b, ea, d)?;
+    let n = b.not::<W>(s1);
+    let r = b.and::<W>(n, s2);
+    W::put(b, g, d, r);
+    let f = fals::<B, W>(b);
+    bmi_flags::<B, W>(b, r, f);
+    Ok(())
+}
+
+/// ANDN。VEX.W で 32/64。
+pub fn andn<B: Backend>(b: &mut B, w: u8, g: Gpr, ea: &Rm<B::V<W64>>, d: &MapDec) -> Flow<B> {
+    if w == 64 {
+        andn_w::<B, W64>(b, g, ea, d)
+    } else {
+        andn_w::<B, W32>(b, g, ea, d)
+    }
+}
+
+/// BEXTR Gv, Ev, By。src2 の [7:0]=開始・[15:8]=長さの
+/// ビットフィールドを src1 から取り出す。ZF のみ意味を持ち、
+/// CF/OF=0。開始が幅以上なら結果 0、長さがあふれる分は無視。
+fn bextr_w<B: Backend, W: Hw>(b: &mut B, g: Gpr, ea: &Rm<B::V<W64>>, d: &MapDec) -> Flow<B> {
+    let s = rd_w::<B, W>(b, ea, d)?;
+    let c = W::get(b, vvv_g(d), d);
+    let m8 = b.konst::<W>(W::from_u128(0xFF));
+    let start = b.and::<W>(c, m8);
+    let c8 = b.konst::<W>(W::from_u128(8));
+    let t = b.shr_l::<W>(c, c8);
+    let len = b.and::<W>(t, m8);
+    // shr_l/shl は幅以上を 0 とする全域関数なので、開始・長さの
+    // 範囲外は select せずにそのまま扱える。
+    let sh = b.shr_l::<W>(s, start);
+    let one = b.konst::<W>(W::from_u128(1));
+    let ml = b.shl::<W>(one, len);
+    let one2 = b.konst::<W>(W::from_u128(1));
+    let mk = b.sub::<W>(ml, one2);
+    let r = b.and::<W>(sh, mk);
+    W::put(b, g, d, r);
+    let f = fals::<B, W>(b);
+    bmi_flags::<B, W>(b, r, f);
+    Ok(())
+}
+
+/// BEXTR。
+pub fn bextr<B: Backend>(b: &mut B, w: u8, g: Gpr, ea: &Rm<B::V<W64>>, d: &MapDec) -> Flow<B> {
+    if w == 64 {
+        bextr_w::<B, W64>(b, g, ea, d)
+    } else {
+        bextr_w::<B, W32>(b, g, ea, d)
+    }
+}
+
+/// BLSR(/1)・BLSMSK(/2)・BLSI(/3)。宛先は vvvv。
+/// CF は BLSI だけ src!=0、他は src==0。
+fn bls_w<B: Backend, W: Hw>(b: &mut B, kind: u8, ea: &Rm<B::V<W64>>, d: &MapDec) -> Flow<B> {
+    let s = rd_w::<B, W>(b, ea, d)?;
+    let one = b.konst::<W>(W::from_u128(1));
+    let m1 = b.sub::<W>(s, one);
+    let r = match kind {
+        1 => b.and::<W>(s, m1),
+        2 => b.xor::<W>(s, m1),
+        _ => {
+            let zero = b.konst::<W>(W::from_u128(0));
+            let n = b.sub::<W>(zero, s);
+            b.and::<W>(s, n)
+        }
+    };
+    W::put(b, vvv_g(d), d, r);
+    let zero = b.konst::<W>(W::from_u128(0));
+    let cf = if kind == 3 {
+        b.cmp::<W>(Cmp::Ne, s, zero)
+    } else {
+        b.cmp::<W>(Cmp::Eq, s, zero)
+    };
+    bmi_flags::<B, W>(b, r, cf);
+    Ok(())
+}
+
+/// BLSR/BLSMSK/BLSI。`kind` は ModRM.reg のグループ番号。
+pub fn bls<B: Backend>(b: &mut B, w: u8, kind: u8, ea: &Rm<B::V<W64>>, d: &MapDec) -> Flow<B> {
+    if w == 64 {
+        bls_w::<B, W64>(b, kind, ea, d)
+    } else {
+        bls_w::<B, W32>(b, kind, ea, d)
+    }
+}
+
+/// BZHI Gv, Ev, By。index（src2 の下位 8 ビット）以上の
+/// ビットをクリアする。index>=幅 で CF=1、結果は src のまま。
+fn bzhi_w<B: Backend, W: Hw>(b: &mut B, g: Gpr, ea: &Rm<B::V<W64>>, d: &MapDec) -> Flow<B> {
+    let s = rd_w::<B, W>(b, ea, d)?;
+    let c = W::get(b, vvv_g(d), d);
+    let m8 = b.konst::<W>(W::from_u128(0xFF));
+    let n = b.and::<W>(c, m8);
+    let one = b.konst::<W>(W::from_u128(1));
+    let ml = b.shl::<W>(one, n);
+    let one2 = b.konst::<W>(W::from_u128(1));
+    let mk = b.sub::<W>(ml, one2);
+    let r = b.and::<W>(s, mk);
+    W::put(b, g, d, r);
+    let bits = b.konst::<W>(W::from_u128(u128::from(W::BITS)));
+    let cf = b.cmp::<W>(Cmp::GeU, n, bits);
+    bmi_flags::<B, W>(b, r, cf);
+    Ok(())
+}
+
+/// BZHI。
+pub fn bzhi<B: Backend>(b: &mut B, w: u8, g: Gpr, ea: &Rm<B::V<W64>>, d: &MapDec) -> Flow<B> {
+    if w == 64 {
+        bzhi_w::<B, W64>(b, g, ea, d)
+    } else {
+        bzhi_w::<B, W32>(b, g, ea, d)
+    }
+}
+
+/// MULX By, Gv, Ev。暗黙の EDX/RDX と src の符号なし乗算で、
+/// 下位を vvvv、上位を ModRM.reg へ書く。フラグ不変。
+fn vmulx_w<B: Backend, W: Hw>(b: &mut B, g: Gpr, ea: &Rm<B::V<W64>>, d: &MapDec) -> Flow<B> {
+    let s = rd_w::<B, W>(b, ea, d)?;
+    let m = W::get(b, Gpr(2), d);
+    let lo = b.mul::<W>(m, s);
+    let hi = b.mulhu::<W>(m, s);
+    W::put(b, vvv_g(d), d, lo);
+    W::put(b, g, d, hi);
+    Ok(())
+}
+
+/// MULX。
+pub fn vmulx<B: Backend>(b: &mut B, w: u8, g: Gpr, ea: &Rm<B::V<W64>>, d: &MapDec) -> Flow<B> {
+    if w == 64 {
+        vmulx_w::<B, W64>(b, g, ea, d)
+    } else {
+        vmulx_w::<B, W32>(b, g, ea, d)
+    }
+}
+
+/// PDEP Gv, By, Ev。src1 の下位ビットを src2 マスクの立ち
+/// 位置へ並列配置する。フラグ不変。
+fn pdep_w<B: Backend, W: Hw>(b: &mut B, g: Gpr, ea: &Rm<B::V<W64>>, d: &MapDec) -> Flow<B> {
+    let s = W::get(b, vvv_g(d), d);
+    let mk = rd_w::<B, W>(b, ea, d)?;
+    let zero = b.konst::<W>(W::from_u128(0));
+    let one = b.konst::<W>(W::from_u128(1));
+    let mut r = zero;
+    let mut si = zero;
+    for i in 0..W::BITS {
+        let bit = b.konst::<W>(W::from_u128(1u128 << i));
+        let m = b.and::<W>(mk, bit);
+        let has = b.cmp::<W>(Cmp::Ne, m, zero);
+        // マスクの i 番目が立つなら src の si 番目を i に置く。
+        let sbit = b.shl::<W>(one, si);
+        let sv = b.and::<W>(s, sbit);
+        let nz = b.cmp::<W>(Cmp::Ne, sv, zero);
+        let place = b.select::<W>(nz, bit, zero);
+        let nr = b.or::<W>(r, place);
+        r = b.select::<W>(has, nr, r);
+        let si1 = b.add::<W>(si, one);
+        si = b.select::<W>(has, si1, si);
+    }
+    W::put(b, g, d, r);
+    Ok(())
+}
+
+/// PDEP。
+pub fn pdep<B: Backend>(b: &mut B, w: u8, g: Gpr, ea: &Rm<B::V<W64>>, d: &MapDec) -> Flow<B> {
+    if w == 64 {
+        pdep_w::<B, W64>(b, g, ea, d)
+    } else {
+        pdep_w::<B, W32>(b, g, ea, d)
+    }
+}
+
+/// PEXT Gv, By, Ev。src1 のうち src2 マスクの立つ位置の
+/// ビットを下位へ並列圧縮する。フラグ不変。
+fn pext_w<B: Backend, W: Hw>(b: &mut B, g: Gpr, ea: &Rm<B::V<W64>>, d: &MapDec) -> Flow<B> {
+    let s = W::get(b, vvv_g(d), d);
+    let mk = rd_w::<B, W>(b, ea, d)?;
+    let zero = b.konst::<W>(W::from_u128(0));
+    let one = b.konst::<W>(W::from_u128(1));
+    let mut r = zero;
+    let mut di = zero;
+    for i in 0..W::BITS {
+        let bit = b.konst::<W>(W::from_u128(1u128 << i));
+        let m = b.and::<W>(mk, bit);
+        let has = b.cmp::<W>(Cmp::Ne, m, zero);
+        // マスクの i 番目が立つなら src の i 番目を di に置く。
+        let sv = b.and::<W>(s, bit);
+        let nz = b.cmp::<W>(Cmp::Ne, sv, zero);
+        let dbit = b.shl::<W>(one, di);
+        let place = b.select::<W>(nz, dbit, zero);
+        let nr = b.or::<W>(r, place);
+        r = b.select::<W>(has, nr, r);
+        let di1 = b.add::<W>(di, one);
+        di = b.select::<W>(has, di1, di);
+    }
+    W::put(b, g, d, r);
+    Ok(())
+}
+
+/// PEXT。
+pub fn pext<B: Backend>(b: &mut B, w: u8, g: Gpr, ea: &Rm<B::V<W64>>, d: &MapDec) -> Flow<B> {
+    if w == 64 {
+        pext_w::<B, W64>(b, g, ea, d)
+    } else {
+        pext_w::<B, W32>(b, g, ea, d)
+    }
+}
+
+/// RORX Gv, Ev, Ib。フラグ不変の右ローテート。
+fn rorx_w<B: Backend, W: Hw>(b: &mut B, g: Gpr, ea: &Rm<B::V<W64>>, d: &MapDec) -> Flow<B> {
+    let s = rd_w::<B, W>(b, ea, d)?;
+    let c = (d.imm as u32) % W::BITS;
+    let ck = b.konst::<W>(W::from_u128(u128::from(c)));
+    let lo = b.shr_l::<W>(s, ck);
+    let bits = b.konst::<W>(W::from_u128(u128::from(W::BITS - c)));
+    let hi = b.shl::<W>(s, bits);
+    let r = b.or::<W>(lo, hi);
+    W::put(b, g, d, r);
+    Ok(())
+}
+
+/// RORX。
+pub fn rorx<B: Backend>(b: &mut B, w: u8, g: Gpr, ea: &Rm<B::V<W64>>, d: &MapDec) -> Flow<B> {
+    if w == 64 {
+        rorx_w::<B, W64>(b, g, ea, d)
+    } else {
+        rorx_w::<B, W32>(b, g, ea, d)
+    }
+}
+
+/// SHLX/SHRX/SARX Gv, Ev, By。カウントは src2 を幅で
+/// マスクしたもの。フラグ不変。`kind`: 0=shl, 1=shr_l, 2=shr_a。
+fn vshiftx_w<B: Backend, W: Hw>(
+    b: &mut B,
+    kind: u8,
+    g: Gpr,
+    ea: &Rm<B::V<W64>>,
+    d: &MapDec,
+) -> Flow<B> {
+    let s = rd_w::<B, W>(b, ea, d)?;
+    let c = W::get(b, vvv_g(d), d);
+    let m = b.konst::<W>(W::from_u128(u128::from(W::BITS - 1)));
+    let cnt = b.and::<W>(c, m);
+    let r = match kind {
+        0 => b.shl::<W>(s, cnt),
+        1 => b.shr_l::<W>(s, cnt),
+        _ => b.shr_a::<W>(s, cnt),
+    };
+    W::put(b, g, d, r);
+    Ok(())
+}
+
+/// SHLX/SHRX/SARX。
+pub fn vshiftx<B: Backend>(
+    b: &mut B,
+    w: u8,
+    kind: u8,
+    g: Gpr,
+    ea: &Rm<B::V<W64>>,
+    d: &MapDec,
+) -> Flow<B> {
+    if w == 64 {
+        vshiftx_w::<B, W64>(b, kind, g, ea, d)
+    } else {
+        vshiftx_w::<B, W32>(b, kind, g, ea, d)
+    }
+}
+
+/// TZCNT r, r/m（F3 0F BC）。下位から連続する 0 の個数。
+/// 入力 0 は幅を返して CF=1、結果 0（LSB が立つ）で ZF=1。
+/// その他のフラグは保つ。
+fn tzcnt_w<B: Backend, W: Hw>(b: &mut B, g: Gpr, ea: &Rm<B::V<W64>>, d: &MapDec) -> Flow<B> {
+    let v = rd_w::<B, W>(b, ea, d)?;
+    let zero = b.konst::<W>(W::from_u128(0));
+    // 最下位に立つビットの添字（入力 0 のときは使わない）。
+    let mut idx = zero;
+    for i in (0..W::BITS).rev() {
+        let bit = b.konst::<W>(W::from_u128(1u128 << i));
+        let t = b.and::<W>(v, bit);
+        let set = b.cmp::<W>(Cmp::Ne, t, zero);
+        let iv = b.konst::<W>(W::from_u128(u128::from(i)));
+        idx = b.select::<W>(set, iv, idx);
+    }
+    let is_zero = b.cmp::<W>(Cmp::Eq, v, zero);
+    let bits = b.konst::<W>(W::from_u128(u128::from(W::BITS)));
+    let dst = b.select::<W>(is_zero, bits, idx);
+    W::put(b, g, d, dst);
+    let is_dst_zero = b.cmp::<W>(Cmp::Eq, dst, zero);
+    let old: B::V<W32> = b.get(eflags_ref());
+    let mask = b.konst::<W32>(!(sem::FLAG_CF | sem::FLAG_ZF));
+    let f = b.and::<W32>(old, mask);
+    let cf = pick(b, is_zero, sem::FLAG_CF);
+    let zf = pick(b, is_dst_zero, sem::FLAG_ZF);
+    let f = b.or::<W32>(f, cf);
+    let f = b.or::<W32>(f, zf);
+    b.set(eflags_ref(), f);
+    Ok(())
+}
+
+/// TZCNT r, r/m。
+pub fn tzcnt<B: Backend>(b: &mut B, w: u8, g: Gpr, ea: &Rm<B::V<W64>>, d: &MapDec) -> Flow<B> {
+    match w {
+        16 => tzcnt_w::<B, W16>(b, g, ea, d),
+        64 => tzcnt_w::<B, W64>(b, g, ea, d),
+        _ => tzcnt_w::<B, W32>(b, g, ea, d),
+    }
+}
+
+/// パック浮動小数点レーンの取り出し/書き戻しの関数型。
+type FLaneGet<B, F> = fn(&mut B, <B as Backend>::V<W128>, u32) -> <B as Backend>::V<F>;
+type FLanePut<B, F> =
+    fn(&mut B, <B as Backend>::V<W128>, <B as Backend>::V<F>, u32) -> <B as Backend>::V<W128>;
+
+/// 128 ビットチャンクのレーンごと FMA。`ord` は積和へのオペランド
+/// 割り当て（0=132: dst·src+vvvv、1=213: vvvv·dst+src、
+/// 2=231: vvvv·src+dst）。`op`: 0=fmadd 1=fmsub 2=fnmadd
+/// 3=fnmsub 4=fmaddsub（偶数レーン引き算）5=fmsubadd（偶数レーン足し算）。
+#[allow(clippy::too_many_arguments)]
+fn vfma128<B: Backend, F: Width>(
+    b: &mut B,
+    op: u8,
+    ord: u8,
+    lanes: u32,
+    dv: B::V<W128>,
+    hv: B::V<W128>,
+    sv: B::V<W128>,
+    get: FLaneGet<B, F>,
+    put: FLanePut<B, F>,
+) -> B::V<W128> {
+    let sign = b.konst::<F>(F::from_u128(1u128 << (F::BITS - 1)));
+    let neg = |b: &mut B, v: B::V<F>| b.xor::<F>(v, sign);
+    let mut acc = b.konst::<W128>(0);
+    for i in 0..lanes {
+        let dl = get(b, dv, i);
+        let hl = get(b, hv, i);
+        let sl = get(b, sv, i);
+        let (a, m, c) = match ord {
+            0 => (dl, sl, hl),
+            1 => (hl, dl, sl),
+            _ => (hl, sl, dl),
+        };
+        let (a, c) = match op {
+            1 => (a, neg(b, c)),
+            2 => (neg(b, a), c),
+            3 => {
+                let na = neg(b, a);
+                (na, neg(b, c))
+            }
+            4 if i % 2 == 0 => (a, neg(b, c)),
+            5 if i % 2 == 1 => (a, neg(b, c)),
+            _ => (a, c),
+        };
+        let r = b.fmadd::<F>(a, m, c);
+        acc = put(b, acc, r, i);
+    }
+    acc
+}
+
+/// VEX FMA（VFMADD/VFMSUB/VFNMADD/VFNMSUB/VFMADDSUB/VFMSUBADD の
+/// 132・213・231 形）。`pd` は倍精度、`scalar` は SS/SD。スカラ形
+/// の上位ビットは vvvv（SRC1）由来で、VEX.128 のみ。
+pub fn vfma<B: Backend>(
+    b: &mut B,
+    pd: bool,
+    scalar: bool,
+    op: u8,
+    ord: u8,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    use polyisa_sem::{F32, F64};
+    let dst = reg_x(d);
+    let fbits = if pd { 64 } else { 32 };
+    let dv: B::V<W128> = b.get(sem::xmm_ref(dst));
+    let hv: B::V<W128> = b.get(sem::xmm_ref(vvv_x(d)));
+    let sv = rx(b, ea, if scalar { fbits } else { 128 })?;
+    let lo = if pd {
+        let lanes = if scalar { 1 } else { 2 };
+        vfma128::<B, F64>(b, op, ord, lanes, dv, hv, sv, flane64, put_flane64)
+    } else {
+        let lanes = if scalar { 1 } else { 4 };
+        vfma128::<B, F32>(b, op, ord, lanes, dv, hv, sv, flane32, put_flane32)
+    };
+    if scalar {
+        let out = put_lane128(b, hv, lo, 0, fbits);
+        b.set(sem::xmm_ref(dst), out);
+        let z = b.konst::<W128>(0);
+        b.set(sem::ymm_hi_ref(dst), z);
+        return Ok(());
+    }
+    b.set(sem::xmm_ref(dst), lo);
+    let hi = if d.vex_l {
+        let dhi: B::V<W128> = b.get(sem::ymm_hi_ref(dst));
+        let hhi: B::V<W128> = b.get(sem::ymm_hi_ref(vvv_x(d)));
+        let shi = rx_hi(b, ea)?;
+        if pd {
+            vfma128::<B, F64>(b, op, ord, 2, dhi, hhi, shi, flane64, put_flane64)
+        } else {
+            vfma128::<B, F32>(b, op, ord, 4, dhi, hhi, shi, flane32, put_flane32)
+        }
+    } else {
+        b.konst::<W128>(0)
+    };
+    b.set(sem::ymm_hi_ref(dst), hi);
+    Ok(())
+}
+
+/// x86 の RC フィールド（0=RNE 1=RDN 2=RUP 3=RTZ）を softfloat
+/// の丸め値（0=RNE 1=RTZ 2=RDN 3=RUP 4=RMM）へ写す。
+fn x86_rm(rc: u64) -> u8 {
+    [0u8, 2, 3, 1, 0, 0, 0, 0][(rc & 7) as usize]
+}
+
+/// F32 値を F16 へ変換する。`mx` が Some なら MXCSR の全値で、
+/// RC（bits 14:13）に従って 4 候補を選ぶ。None なら `rm` 固定。
+fn cvtps2ph_one<B: Backend>(
+    b: &mut B,
+    f: B::V<polyisa_sem::F32>,
+    mx: Option<B::V<W32>>,
+    rm: u8,
+) -> B::V<polyisa_sem::F16> {
+    use polyisa_sem::{F16, F32};
+    let Some(mx) = mx else {
+        return b.fcvt_ff::<F32, F16>(f, rm);
+    };
+    let sh = b.konst::<W32>(13);
+    let m = b.konst::<W32>(3);
+    let shr = b.shr_l::<W32>(mx, sh);
+    let rc = b.and::<W32>(shr, m);
+    // x86 RC 順（RNE/RDN/RUP/RTZ）に候補を並べて select する。
+    let rms = [0u8, 2, 3, 1];
+    let mut g = b.fcvt_ff::<F32, F16>(f, rms[0]);
+    for (k, r) in rms.iter().enumerate().skip(1) {
+        let cand = b.fcvt_ff::<F32, F16>(f, *r);
+        let kk = b.konst::<W32>(k as u32);
+        let is = b.cmp::<W32>(Cmp::Eq, rc, kk);
+        g = b.select::<F16>(is, cand, g);
+    }
+    g
+}
+
+/// VCVTPH2PS xmm/ymm, xmm/m64|m128。半精度を単精度へ展開する。
+/// VEX.128 は下位 64 ビットの 4 要素、VEX.256 は全 128 ビットの
+/// 8 要素を変換する。
+pub fn vcvtph2ps<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit> {
+    use polyisa_sem::{F16, F32};
+    let dst = reg_x(d);
+    let s = rx(b, ea, if d.vex_l { 128 } else { 64 })?;
+    let n = if d.vex_l { 8 } else { 4 };
+    let mut lo = b.konst::<W128>(0);
+    let mut hi = b.konst::<W128>(0);
+    for i in 0..n {
+        let l = lane128(b, s, i * 16, 16);
+        let h: B::V<W16> = b.trunc::<W128, W16>(l);
+        let f = b.trunc::<W16, F16>(h);
+        let g = b.fcvt_ff::<F16, F32>(f, 0);
+        let w = b.trunc::<F32, W32>(g);
+        let w128 = b.zext::<W32, W128>(w);
+        if i < 4 {
+            lo = put_lane128(b, lo, w128, i * 32, 32);
+        } else {
+            hi = put_lane128(b, hi, w128, (i - 4) * 32, 32);
+        }
+    }
+    b.set(sem::xmm_ref(dst), lo);
+    b.set(sem::ymm_hi_ref(dst), hi);
+    Ok(())
+}
+
+/// VCVTPS2PH xmm/m64|m128, xmm/ymm, imm8。単精度を半精度へ縮める。
+/// 丸めは imm8[1:0]（x86 RC）、imm8[2]=1 なら MXCSR.RC を使う。
+/// 宛先は Ev（VEX.128 では xmm/m64、VEX.256 では xmm/m128）。
+pub fn vcvtps2ph<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit> {
+    use polyisa_sem::{F16, F32};
+    // SDM Table 5-12: imm8[1:0]=RC、imm8[2]=1 で MXCSR.RC を使う。
+    // imm8[7:3] は無視。
+    let (mx, rm) = if d.imm & 0x04 != 0 {
+        (Some(b.get::<W32>(sem::mxcsr_ref())), 0)
+    } else {
+        (None, x86_rm(d.imm & 3))
+    };
+    let src = reg_x(d);
+    let n = if d.vex_l { 8 } else { 4 };
+    let mut out = b.konst::<W128>(0);
+    for i in 0..n {
+        let chunk: B::V<W128> = if i < 4 {
+            b.get(sem::xmm_ref(src))
+        } else {
+            b.get(sem::ymm_hi_ref(src))
+        };
+        let l = lane128(b, chunk, (i % 4) * 32, 32);
+        let w: B::V<W32> = b.trunc::<W128, W32>(l);
+        let f = b.trunc::<W32, F32>(w);
+        let g = cvtps2ph_one(b, f, mx, rm);
+        let h = b.trunc::<F16, W16>(g);
+        let h128 = b.zext::<W16, W128>(h);
+        out = put_lane128(b, out, h128, i * 16, 16);
+    }
+    wx(b, ea, if d.vex_l { 128 } else { 64 }, out)?;
+    if let Rm::Reg(g) = ea {
+        let z = b.konst::<W128>(0);
+        b.set(sem::ymm_hi_ref(Xmm(g.0)), z);
+    }
+    Ok(())
+}
+
 /// ADCX/ADOX r, r/m。`of` が真なら ADOX（OF を桁上げ入力・出力に
 /// 使う）、偽なら ADCX（CF）。結果は dst = dst + src + carry。
 /// 更新するのは対応する旗だけで、他のフラグは保つ。

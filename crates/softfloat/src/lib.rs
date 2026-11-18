@@ -57,6 +57,8 @@ pub struct Binary<const E: u32, const M: u32> {
     bits: u64,
 }
 
+/// 16 ビット形式（binary16・half）。
+pub type F16 = Binary<5, 10>;
 /// 32 ビット形式。
 pub type F32 = Binary<8, 23>;
 /// 64 ビット形式。
@@ -967,10 +969,24 @@ fn to_int_unsigned(m: u128, e: i64, bits: u32, rm: Rm) -> (u64, u8) {
 }
 
 /// 32 ビット形式と 64 ビット形式の相互変換。
+impl F16 {
+    /// 32 ビット形式に変換する。
+    #[must_use]
+    pub fn to_f32(self, rm: Rm) -> (F32, u8) {
+        convert(self, rm)
+    }
+}
+
 impl F32 {
     /// 64 ビット形式に変換する。
     #[must_use]
     pub fn to_f64(self, rm: Rm) -> (F64, u8) {
+        convert(self, rm)
+    }
+
+    /// 16 ビット形式に変換する。
+    #[must_use]
+    pub fn to_f16(self, rm: Rm) -> (F16, u8) {
         convert(self, rm)
     }
 }

@@ -7,7 +7,9 @@
 //! 求める薄い性質で、`InterpBackend` が engine 側で実装する。
 
 use polyisa_sem::GuestException;
-use polyisa_sem::{Backend, Cmp, F32, F64, StateArray, StateRef, W8, W16, W32, W64, W128, Width};
+use polyisa_sem::{
+    Backend, Cmp, F16, F32, F64, StateArray, StateRef, W8, W16, W32, W64, W128, Width,
+};
 
 use crate::inst::{BinOp, Cvt, Ext, FpCmp, Inst, Ir, TriOp, UnOp, Wid};
 
@@ -533,6 +535,12 @@ pub fn cvt_w<B: Concrete>(b: &mut B, op: Cvt, from: Wid, to: Wid, x: u128, rm: u
             B::v_to_u128::<F>(b.fcvt_from_u64::<F>(B::v_from_u128::<W64>(x), rm))
         }),
         C::Ff => match (from, to) {
+            (Wid::W16, Wid::W32) => {
+                B::v_to_u128::<F32>(b.fcvt_ff::<F16, F32>(B::v_from_u128::<F16>(x), rm))
+            }
+            (Wid::W32, Wid::W16) => {
+                B::v_to_u128::<F16>(b.fcvt_ff::<F32, F16>(B::v_from_u128::<F32>(x), rm))
+            }
             (Wid::W32, Wid::W64) => {
                 B::v_to_u128::<F64>(b.fcvt_ff::<F32, F64>(B::v_from_u128::<F32>(x), rm))
             }

@@ -149,7 +149,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 段階4の x86 最小 853 件にオペコード表の記述を足した件数。
-        assert_eq!(INSNS.len(), 1974);
+        assert_eq!(INSNS.len(), 2020);
     }
 
     #[test]
@@ -1827,6 +1827,42 @@ mod tests {
         assert_eq!(
             decode_map(&[0xF3, 0xC5, 0xF8, 0x77], modes, avx).map(|d| d.insn),
             Some(Insn::Vzeroupper)
+        );
+    }
+
+    #[test]
+    fn vex_feat_gates() {
+        // B1c のフィーチャーゲート：BMI1/BMI2/FMA/F16C それぞれ
+        // 固有のフラグで開き、avx だけでは解読しない。
+        let modes = MODE_M64 | (MODE_OPD_O32 << MODE_OPD_SHIFT) | (MODE_ADR_A64 << MODE_ADR_SHIFT);
+        let avx = FEAT_AVX | FEAT_SSE | FEAT_SSE2;
+        // ANDN eax,ebx,ecx = C4 E2 60 F2 C1（BMI1）。
+        assert!(decode_map(&[0xC4, 0xE2, 0x60, 0xF2, 0xC1], modes, avx).is_none());
+        let f = avx | FEAT_BMI1;
+        assert!(decode_map(&[0xC4, 0xE2, 0x60, 0xF2, 0xC1], modes, f).is_some());
+        // BZHI eax,ebx,ecx = C4 E2 70 F5 C3（BMI2）。
+        assert!(decode_map(&[0xC4, 0xE2, 0x70, 0xF5, 0xC3], modes, avx | FEAT_BMI1).is_none());
+        let f = avx | FEAT_BMI2;
+        assert!(decode_map(&[0xC4, 0xE2, 0x70, 0xF5, 0xC3], modes, f).is_some());
+        // VFMADD132PS ymm0,ymm1,ymm2 = C4 E2 75 98 C2（FMA）。
+        assert!(decode_map(&[0xC4, 0xE2, 0x75, 0x98, 0xC2], modes, avx).is_none());
+        let f = avx | FEAT_FMA;
+        assert_eq!(
+            decode_map(&[0xC4, 0xE2, 0x75, 0x98, 0xC2], modes, f).map(|d| d.insn),
+            Some(Insn::Vfmadd132psXvHvWv)
+        );
+        // VCVTPH2PS xmm0,xmm1 = C4 E2 79 13 C1（F16C）。
+        assert!(decode_map(&[0xC4, 0xE2, 0x79, 0x13, 0xC1], modes, avx).is_none());
+        let f = avx | FEAT_F16C;
+        assert_eq!(
+            decode_map(&[0xC4, 0xE2, 0x79, 0x13, 0xC1], modes, f).map(|d| d.insn),
+            Some(Insn::Vcvtph2psXvWv)
+        );
+        // VCVTPS2PH xmm0,xmm1,0 = C4 E3 79 1D C8 00（F16C）。
+        assert!(decode_map(&[0xC4, 0xE3, 0x79, 0x1D, 0xC8, 0x00], modes, avx).is_none());
+        assert_eq!(
+            decode_map(&[0xC4, 0xE3, 0x79, 0x1D, 0xC8, 0x00], modes, f).map(|d| d.insn),
+            Some(Insn::Vcvtps2phWvXvIb)
         );
     }
 

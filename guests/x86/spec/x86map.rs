@@ -1210,9 +1210,33 @@ pub fn build_maps(m: &mut Model) {
             n("cmpxchg_ev_gv", &[Ea(V), Reg(V)], "cmpxchg {e}, {g}", "alu"),
         ),
         MapItem::Insn(0xB9, n("ud1", &[Ea(V)], "ud1 {e}", "system")),
+        // TZCNT（F3 0F BC、BMI1）。TZCNT 機能が無い CPU での
+        // F3 0F BC は実機では BSF として動くが、BSF は NoF3 で
+        // 排他しているのでこのモデルではデコード不能になる
+        // （LZCNT/BSR と同じ既知の近似）。
         MapItem::Insn(
             0xBC,
-            n("bsf_gv_ev", &[Reg(V), Ea(V)], "bsf {g}, {e}", "alu"),
+            mi(
+                "tzcnt_gv_ev",
+                &[Reg(V), Ea(V)],
+                None,
+                PfxSel::PF3,
+                w("bmi1"),
+                "tzcnt {g}, {e}",
+                "alu",
+            ),
+        ),
+        MapItem::Insn(
+            0xBC,
+            mi(
+                "bsf_gv_ev",
+                &[Reg(V), Ea(V)],
+                None,
+                PfxSel::NoF3,
+                Pred::True,
+                "bsf {g}, {e}",
+                "alu",
+            ),
         ),
         // LZCNT（F3 0F BD）。LZCNT 機能が無い CPU での F3 0F BD は
         // 実機では BSR として動くが、BSR は NoF3 で排他しているので
@@ -2720,6 +2744,109 @@ fn build_map_0f38(m: &mut Model) {
             )),
         ));
     }
+    // BMI1/BMI2（VEX の GPR 演算）。幅は VEX.W（64 ビット
+    // モードのみ、他は 32）。L=0。vvvv は GPR を指す。
+    // ANDN Gv, By, Ev（F2 NP）。
+    v.push(MapItem::Insn(
+        0xF2,
+        vmx("andn_gv_by_ev", &[Reg(V), Vv, Ea(V)], PfxSel::Plain, L0, false, "andn {g}, {h}, {e}", "alu"),
+    ));
+    // BLSR/BLSMSK/BLSI（F3 /1 /2 /3）。宛先は vvvv。
+    for (grp, mn) in [(1u8, "blsr"), (2, "blsmsk"), (3, "blsi")] {
+        let mut it = vmx(&format!("{mn}_by_ev"), &[Vv, Ea(V)], PfxSel::Plain, L0, false, "{op} {h}, {e}", "alu");
+        it.group = Some(grp);
+        v.push(MapItem::Insn(0xF3, it));
+    }
+    // BZHI（F5 NP）・PDEP（F5 F2）・PEXT（F5 F3）。
+    v.push(MapItem::Insn(
+        0xF5,
+        vmx("bzhi_gv_ev_by", &[Reg(V), Ea(V), Vv], PfxSel::Plain, L0, false, "bzhi {g}, {e}, {h}", "alu"),
+    ));
+    v.push(MapItem::Insn(
+        0xF5,
+        vmx("pdep_gv_by_ev", &[Reg(V), Vv, Ea(V)], PfxSel::PF2, L0, false, "pdep {g}, {h}, {e}", "alu"),
+    ));
+    v.push(MapItem::Insn(
+        0xF5,
+        vmx("pext_gv_by_ev", &[Reg(V), Vv, Ea(V)], PfxSel::PF3, L0, false, "pext {g}, {h}, {e}", "alu"),
+    ));
+    // MULX（F6 F2）。上位は ModRM.reg、下位は vvvv。暗黙 EDX/RDX。
+    v.push(MapItem::Insn(
+        0xF6,
+        vmx("mulx_gv_by_ev", &[Reg(V), Vv, Ea(V)], PfxSel::PF2, L0, false, "mulx {g}, {h}, {e}", "alu"),
+    ));
+    // BEXTR（F7 NP）・SHLX（66）・SHRX（F2）・SARX（F3）。
+    // すべて Gv, Ev, By。
+    for (sel, mn) in [
+        (PfxSel::Plain, "bextr"),
+        (PfxSel::P66, "shlx"),
+        (PfxSel::PF2, "shrx"),
+        (PfxSel::PF3, "sarx"),
+    ] {
+        v.push(MapItem::Insn(
+            0xF7,
+            vmx(&format!("{mn}_gv_ev_by"), &[Reg(V), Ea(V), Vv], sel, L0, false, "{op} {g}, {e}, {h}", "alu"),
+        ));
+    }
+    // VCVTPH2PS（66 0F 38 13）。半精度→単精度。vvvv は 1111b 必須。
+    v.push(MapItem::Insn(
+        0x13,
+        vmx(
+            "vcvtph2ps_xv_wv",
+            &[RegX, RmX],
+            PfxSel::P66,
+            Any,
+            true,
+            "vcvtph2ps {x}, {w}",
+            "alu",
+        ),
+    ));
+    // FMA（VEX.66）。W=0 が PS/SS、W=1 が PD/SD。各ブロックの
+    // 配置は 96=fmaddsub・97=fmsubadd・98/99=fmadd パック/スカラ・
+    // 9A/9B=fmsub・9C/9D=fnmadd・9E/9F=fnmsub（132/213/231 は
+    // 0x96/0xA6/0xB6 起点で同配置）。W ゲートがないので名前は
+    // W=0（ps/ss）形で立て、W=1 は意味論が vex_w を見て pd/sd
+    // として動く（逆アセンブル表示は ps/ss になる近似）。
+    for (base, ord) in [(0x96u8, 0u8), (0xA6, 1), (0xB6, 2)] {
+        let os = match ord {
+            0 => "132",
+            1 => "213",
+            _ => "231",
+        };
+        for (i, mn) in ["vfmaddsub", "vfmsubadd"].iter().enumerate() {
+            v.push(MapItem::Insn(
+                base + i as u8,
+                vmx(
+                    &format!("{mn}{os}ps_xv_hv_wv"),
+                    &[RegX, Vv, RmX],
+                    PfxSel::P66,
+                    Any,
+                    false,
+                    "{op} {x}, {h}, {w}",
+                    "alu",
+                ),
+            ));
+        }
+        for (i, mn) in ["vfmadd", "vfmsub", "vfnmadd", "vfnmsub"]
+            .iter()
+            .enumerate()
+        {
+            for (sfx, l) in [("ps", Any), ("ss", L0)] {
+                v.push(MapItem::Insn(
+                    base + 2 + 2 * i as u8 + u8::from(l == L0),
+                    vmx(
+                        &format!("{mn}{os}{sfx}_xv_hv_wv"),
+                        &[RegX, Vv, RmX],
+                        PfxSel::P66,
+                        l,
+                        false,
+                        "{op} {x}, {h}, {w}",
+                        "alu",
+                    ),
+                ));
+            }
+        }
+    }
     m.maps.push(MapDecl {
         name: "map_0f38".to_string(),
         vex_code: Some(2),
@@ -2789,6 +2916,26 @@ fn build_map_0f3a(m: &mut Model) {
                 true,
                 "{op} {x}, {w}, {i}",
                 "alu",
+            ),
+        ));
+        // RORX（F2 0F 3A F0 /r ib、BMI2）。幅は VEX.W。
+        // vvvv は未使用（1111b 必須）。
+        items.push(MapItem::Insn(
+            0xF0,
+            vmx("rorx_gv_ev_ib", &[Reg(V), Ea(V), ib], PfxSel::PF2, L0, true, "rorx {g}, {e}, {i}", "alu"),
+        ));
+        // VCVTPS2PH（66 0F 3A 1D /r ib）。単精度→半精度。
+        // 宛先は r/m 側（xmm/m64 または xmm/m128）。
+        items.push(MapItem::Insn(
+            0x1D,
+            vmx(
+                "vcvtps2ph_wv_xv_ib",
+                &[RmX, RegX, ib],
+                PfxSel::P66,
+                Any,
+                true,
+                "vcvtps2ph {w}, {x}, {i}",
+                "store",
             ),
         ));
         // VPERMILPS/VPERMILPD の即値形（vvvv 未使用）。

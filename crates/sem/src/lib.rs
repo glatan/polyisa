@@ -85,6 +85,10 @@ impl Width for W128 {
     }
 }
 
+/// 16 ビット浮動小数点のビット列。F16C の半精度変換で使う。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct F16;
+
 /// 32 ビット浮動小数点のビット列。`W32` と同じ幅だが、浮動小数点演算の対象であることを表す。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct F32;
@@ -92,6 +96,17 @@ pub struct F32;
 /// 64 ビット浮動小数点のビット列。`W64` と同じ幅だが、浮動小数点演算の対象であることを表す。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct F64;
+
+impl Width for F16 {
+    const BITS: u32 = 16;
+    type Repr = u16;
+    fn to_u128(v: Self::Repr) -> u128 {
+        u128::from(v)
+    }
+    fn from_u128(v: u128) -> Self::Repr {
+        v as u16
+    }
+}
 
 impl Width for F32 {
     const BITS: u32 = 32;

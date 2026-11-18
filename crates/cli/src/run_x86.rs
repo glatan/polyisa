@@ -2709,6 +2709,10 @@ fn dispatch_map<B: Backend>(
     use polyisa_sem::{W8, W16, W32, W64};
     const EAX: Gpr = Gpr(0);
     let w = d.osize;
+    // VEX の GPR 演算（BMI 系）の被演算子幅。64 ビットモードでは
+    // VEX.W（`d.rex` bit3 に畳み込み済み）で 32/64、他モードは常に 32。
+    // pp=66 で `d.p66` が立つと osize が 16 になるので osize は使えない。
+    let vw = if d.rex & 8 != 0 { 64 } else { 32 };
     // PUSH/POP/CALL/RET は 64ビットモードで既定 64（66 で 16）。m64 以外は
     // osize と同じ扱い。
     let sw = if m64 && !d.p66 { 64 } else { w };
@@ -4149,6 +4153,56 @@ fn dispatch_map<B: Backend>(
         Insn::VpgatherqdXvWvHv => sem_ea::vgather(b, true, d, seg),
         Insn::VgatherdpsXvWvHv => sem_ea::vgather(b, false, d, seg),
         Insn::VgatherqpsXvWvHv => sem_ea::vgather(b, true, d, seg),
+        // B1c-1: BMI1/BMI2（VEX の GPR 演算）と TZCNT。
+        Insn::AndnGvByEv => sem_ea::andn(b, vw, reg, &ea, d),
+        Insn::BlsrByEv => sem_ea::bls(b, vw, 1, &ea, d),
+        Insn::BlsmskByEv => sem_ea::bls(b, vw, 2, &ea, d),
+        Insn::BlsiByEv => sem_ea::bls(b, vw, 3, &ea, d),
+        Insn::BextrGvEvBy => sem_ea::bextr(b, vw, reg, &ea, d),
+        Insn::BzhiGvEvBy => sem_ea::bzhi(b, vw, reg, &ea, d),
+        Insn::PdepGvByEv => sem_ea::pdep(b, vw, reg, &ea, d),
+        Insn::PextGvByEv => sem_ea::pext(b, vw, reg, &ea, d),
+        Insn::MulxGvByEv => sem_ea::vmulx(b, vw, reg, &ea, d),
+        Insn::ShlxGvEvBy => sem_ea::vshiftx(b, vw, 0, reg, &ea, d),
+        Insn::ShrxGvEvBy => sem_ea::vshiftx(b, vw, 1, reg, &ea, d),
+        Insn::SarxGvEvBy => sem_ea::vshiftx(b, vw, 2, reg, &ea, d),
+        Insn::RorxGvEvIb => sem_ea::rorx(b, vw, reg, &ea, d),
+        Insn::TzcntGvEv => sem_ea::tzcnt(b, w, reg, &ea, d),
+        // B1c-2: FMA（132/213/231 × 6 演算 × パック/スカラ）。
+        // 要素幅は VEX.W（0=PS/SS、1=PD/SD）。
+        Insn::Vfmadd132psXvHvWv => sem_ea::vfma(b, d.vex_w, false, 0, 0, d, &ea),
+        Insn::Vfmsub132psXvHvWv => sem_ea::vfma(b, d.vex_w, false, 1, 0, d, &ea),
+        Insn::Vfnmadd132psXvHvWv => sem_ea::vfma(b, d.vex_w, false, 2, 0, d, &ea),
+        Insn::Vfnmsub132psXvHvWv => sem_ea::vfma(b, d.vex_w, false, 3, 0, d, &ea),
+        Insn::Vfmaddsub132psXvHvWv => sem_ea::vfma(b, d.vex_w, false, 4, 0, d, &ea),
+        Insn::Vfmsubadd132psXvHvWv => sem_ea::vfma(b, d.vex_w, false, 5, 0, d, &ea),
+        Insn::Vfmadd213psXvHvWv => sem_ea::vfma(b, d.vex_w, false, 0, 1, d, &ea),
+        Insn::Vfmsub213psXvHvWv => sem_ea::vfma(b, d.vex_w, false, 1, 1, d, &ea),
+        Insn::Vfnmadd213psXvHvWv => sem_ea::vfma(b, d.vex_w, false, 2, 1, d, &ea),
+        Insn::Vfnmsub213psXvHvWv => sem_ea::vfma(b, d.vex_w, false, 3, 1, d, &ea),
+        Insn::Vfmaddsub213psXvHvWv => sem_ea::vfma(b, d.vex_w, false, 4, 1, d, &ea),
+        Insn::Vfmsubadd213psXvHvWv => sem_ea::vfma(b, d.vex_w, false, 5, 1, d, &ea),
+        Insn::Vfmadd231psXvHvWv => sem_ea::vfma(b, d.vex_w, false, 0, 2, d, &ea),
+        Insn::Vfmsub231psXvHvWv => sem_ea::vfma(b, d.vex_w, false, 1, 2, d, &ea),
+        Insn::Vfnmadd231psXvHvWv => sem_ea::vfma(b, d.vex_w, false, 2, 2, d, &ea),
+        Insn::Vfnmsub231psXvHvWv => sem_ea::vfma(b, d.vex_w, false, 3, 2, d, &ea),
+        Insn::Vfmaddsub231psXvHvWv => sem_ea::vfma(b, d.vex_w, false, 4, 2, d, &ea),
+        Insn::Vfmsubadd231psXvHvWv => sem_ea::vfma(b, d.vex_w, false, 5, 2, d, &ea),
+        Insn::Vfmadd132ssXvHvWv => sem_ea::vfma(b, d.vex_w, true, 0, 0, d, &ea),
+        Insn::Vfmsub132ssXvHvWv => sem_ea::vfma(b, d.vex_w, true, 1, 0, d, &ea),
+        Insn::Vfnmadd132ssXvHvWv => sem_ea::vfma(b, d.vex_w, true, 2, 0, d, &ea),
+        Insn::Vfnmsub132ssXvHvWv => sem_ea::vfma(b, d.vex_w, true, 3, 0, d, &ea),
+        Insn::Vfmadd213ssXvHvWv => sem_ea::vfma(b, d.vex_w, true, 0, 1, d, &ea),
+        Insn::Vfmsub213ssXvHvWv => sem_ea::vfma(b, d.vex_w, true, 1, 1, d, &ea),
+        Insn::Vfnmadd213ssXvHvWv => sem_ea::vfma(b, d.vex_w, true, 2, 1, d, &ea),
+        Insn::Vfnmsub213ssXvHvWv => sem_ea::vfma(b, d.vex_w, true, 3, 1, d, &ea),
+        Insn::Vfmadd231ssXvHvWv => sem_ea::vfma(b, d.vex_w, true, 0, 2, d, &ea),
+        Insn::Vfmsub231ssXvHvWv => sem_ea::vfma(b, d.vex_w, true, 1, 2, d, &ea),
+        Insn::Vfnmadd231ssXvHvWv => sem_ea::vfma(b, d.vex_w, true, 2, 2, d, &ea),
+        Insn::Vfnmsub231ssXvHvWv => sem_ea::vfma(b, d.vex_w, true, 3, 2, d, &ea),
+        // B1c-3: F16C の半精度変換。
+        Insn::Vcvtph2psXvWv => sem_ea::vcvtph2ps(b, d, &ea),
+        Insn::Vcvtps2phWvXvIb => sem_ea::vcvtps2ph(b, d, &ea),
         // レガシー PACK の xmm 形（新規マップ項目）。
         Insn::PacksswbXvWv => sem_ea::ppack::<B, W16>(b, false, d, &ea),
         Insn::PackssdwXvWv => sem_ea::ppack::<B, W32>(b, false, d, &ea),

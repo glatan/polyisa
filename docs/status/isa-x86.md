@@ -186,16 +186,21 @@
 | aeskeygenassist | aeskeygenassist_xv_wv_ib | aesni | alu |
 | and | and_eb_ib | op82 | alu |
 | and | and_al_ib、and_ax_imm16、and_eax、and_eax_iz、and_eb_gb、and_eb_ib、and_ev_gv、and_ev_ib、and_ev_iz、and_gb_eb、and_gv_ev、and_m32_r32_mem8、and_m32_r32_memnd、and_m32_r32_sib、and_m32_r32_sibd、and_m8_r8、and_m8_r8_mem8、and_r8_m8_mem32、and_r_mem32、and_r_mem8、and_r_memnd、and_r_rip、and_r_sib、and_r_sibd、and_r_sibd32、and_rm16_imm、and_rm16_imm_memnd、and_rm32、and_rm32_imm、and_rm32_imm_mem32、and_rm32_imm_mem8、and_rm32_imm_memnd、and_rm32_imm_sibd、and_rm32_rip、and_rm8_imm、and_rm8_imm_mem32、and_rm8_imm_mem8、and_rm8_imm_sibd、and_rm8_imm_sibd32、and_rm_imm8、and_rm_imm8_mem32、and_rm_imm8_mem8、and_rm_imm8_memnd、and_rm_imm8_rip、and_rm_imm8_sib、and_rm_imm8_sibd | 真 | alu |
+| andn | andn_gv_by_ev | bmi1 | alu |
 | andnpd | andnpd_xv_wv | sse2 | alu |
 | andnps | andnps_xv_wv | sse | alu |
 | andpd | andpd、andpd_xv_wv | sse2 | alu |
 | andpd | andpd_rip | sse2 | load |
 | andps | andps_xv_wv | sse | alu |
 | arpl | arpl_ew_gw | i286 && !m64 | alu |
+| bextr | bextr_gv_ev_by | bmi1 | alu |
 | blendpd | blendpd_xv_wv_ib | sse4_1 | alu |
 | blendps | blendps_xv_wv_ib | sse4_1 | alu |
 | blendvpd_xv_wv | blendvpd_xv_wv | sse4_1 | alu |
 | blendvps_xv_wv | blendvps_xv_wv | sse4_1 | alu |
+| blsi | blsi_by_ev | bmi1 | alu |
+| blsmsk | blsmsk_by_ev | bmi1 | alu |
+| blsr | blsr_by_ev | bmi1 | alu |
 | bound | bound_gv_mp | i186 && !m64 | system |
 | bsf | bsf_gv_ev、bsf_r_rm | 真 | alu |
 | bsf | bsf_r_mem32、bsf_r_mem8、bsf_r_memnd、bsf_r_rip | 真 | load |
@@ -206,6 +211,7 @@
 | btc | btc_ev_gv、btc_ev_ib | 真 | alu |
 | btr | btr_ev_gv、btr_ev_ib | 真 | alu |
 | bts | bts_ev_gv、bts_ev_ib、bts_r32_imm、bts_r32_rm | 真 | alu |
+| bzhi | bzhi_gv_ev_by | bmi2 | alu |
 | call | call_ev、call_jz、call_r_mem32、call_r_mem8、call_r_memnd、call_r_rip、call_r_rm、call_r_sib、call_r_sibabs、call_r_sibd、call_r_sibd32、call_rel32 | 真 | jump |
 | callf | callf_ap | !m64 | jump |
 | callf | callf_rm | 真 | jump |
@@ -473,6 +479,7 @@
 | mulsd | mulsd、mulsd_xv_wv | sse2 | alu |
 | mulsd | mulsd_m64_sib、mulsd_xmm_m64_mem32、mulsd_xmm_m64_rip、mulsd_xmm_m64_sibd | sse2 | load |
 | mulss | mulss_xv_wv | sse | alu |
+| mulx | mulx_gv_by_ev | bmi2 | alu |
 | mwait | mwait | monitor | system |
 | neg | neg_rm32 | 真 | alu |
 | neg | neg_eb、neg_ev | 真 | mult |
@@ -547,6 +554,8 @@
 | pcmpgtw | pcmpgtw_xv_wv | sse2 | alu |
 | pcmpistri | pcmpistri_xv_wv_ib | sse4_2 | alu |
 | pcmpistrm | pcmpistrm_xv_wv_ib | sse4_2 | alu |
+| pdep | pdep_gv_by_ev | bmi2 | alu |
+| pext | pext_gv_by_ev | bmi2 | alu |
 | pextrb | pextrb_eb_xv | sse4_1 | store |
 | pextrd | pextrd_ed_xv | sse4_1 | store |
 | pextrw | pextrw_gv_pv_ib | sse | alu |
@@ -712,6 +721,7 @@
 | rol | rol_eb_1、rol_eb_cl、rol_ev_1、rol_ev_cl、rol_rm32_1、rol_rm32_cl、rol_rm32_imm8 | 真 | alu |
 | ror | ror_eb_ib、ror_ev_ib | i186 | alu |
 | ror | ror_eb_1、ror_eb_cl、ror_ev_1、ror_ev_cl、ror_rm32_1、ror_rm32_imm8 | 真 | alu |
+| rorx | rorx_gv_ev_ib | bmi2 | alu |
 | roundpd | roundpd_xv_wv_ib | sse4_1 | alu |
 | roundps | roundps_xv_wv_ib | sse4_1 | alu |
 | roundsd | roundsd_xv_wv_ib | sse4_1 | alu |
@@ -721,6 +731,7 @@
 | salc | salc | !m64 | alu |
 | sar | sar_eb_ib、sar_ev_ib | i186 | alu |
 | sar | sar_eb_1、sar_eb_cl、sar_ev_1、sar_ev_cl、sar_rm32_1、sar_rm32_cl、sar_rm32_imm8 | 真 | alu |
+| sarx | sarx_gv_ev_by | bmi2 | alu |
 | saveprevssp | saveprevssp | cet_ss | system |
 | sbb | sbb_eb_ib | op82 | alu |
 | sbb | sbb_al_ib、sbb_eax_iz、sbb_eb_gb、sbb_eb_ib、sbb_ev_gv、sbb_ev_ib、sbb_ev_iz、sbb_gb_eb、sbb_gv_ev、sbb_m32_r32_mem8、sbb_m32_r32_sibd、sbb_r_mem32、sbb_r_mem8、sbb_r_memnd、sbb_r_rip、sbb_rm32、sbb_rm32_imm、sbb_rm_imm8、sbb_rm_imm8_sibd | 真 | alu |
@@ -758,9 +769,11 @@
 | shl | shl_eb_ib、shl_ev_ib | i186 | alu |
 | shl | shl_eb_1、shl_eb_cl、shl_ev_1、shl_ev_cl、shl_m32_imm8_mem8、shl_m8_1_mem32、shl_rm32_1、shl_rm32_cl、shl_rm32_imm8 | 真 | alu |
 | shld | shld_ev_gv_cl、shld_ev_gv_ib、shld_r32_cl、shld_r32_imm8 | 真 | alu |
+| shlx | shlx_gv_ev_by | bmi2 | alu |
 | shr | shr_eb_ib、shr_ev_ib | i186 | alu |
 | shr | shr_eb_1、shr_eb_cl、shr_ev_1、shr_ev_cl、shr_rm32_1、shr_rm32_cl、shr_rm32_imm8、shr_rm8_1、shr_rm8_imm8 | 真 | alu |
 | shrd | shrd_ev_gv_cl、shrd_ev_gv_ib、shrd_r32_cl、shrd_r32_imm8 | 真 | alu |
+| shrx | shrx_gv_ev_by | bmi2 | alu |
 | shufpd | shufpd_xv_wv_ib | sse2 | alu |
 | shufps | shufps_xv_wv_ib | sse | alu |
 | sidt | sidt_ms | i286 | system |
@@ -794,6 +807,7 @@
 | test | test_eb_i、test_ev_i | 真 | mult |
 | testui | testui | m64 && uintr | system |
 | tpause | tpause_rv | waitpkg | system |
+| tzcnt | tzcnt_gv_ev | bmi1 | alu |
 | ucomisd | ucomisd、ucomisd_xv_wv | sse2 | alu |
 | ucomisd | ucomisd_mem32、ucomisd_mem8、ucomisd_memnd、ucomisd_rip | sse2 | load |
 | ucomiss | ucomiss_xv_wv | sse | alu |
@@ -832,8 +846,10 @@
 | vcvtdq2ps | vcvtdq2ps_xv_wv | avx | alu |
 | vcvtpd2dq | vcvtpd2dq_xv_wv | avx | alu |
 | vcvtpd2ps | vcvtpd2ps_xv_wv | avx | alu |
+| vcvtph2ps | vcvtph2ps_xv_wv | f16c | alu |
 | vcvtps2dq | vcvtps2dq_xv_wv | avx | alu |
 | vcvtps2pd | vcvtps2pd_xv_wv | avx | alu |
+| vcvtps2ph | vcvtps2ph_wv_xv_ib | f16c | store |
 | vcvtsd2si | vcvtsd2si_gv_wv | avx | alu |
 | vcvtsd2ss | vcvtsd2ss_xv_hv_wv | avx | alu |
 | vcvtsi2sd | vcvtsi2sd_xv_hv_ev | avx | alu |
@@ -855,6 +871,36 @@
 | vextractf128 | vextractf128_wv_xv_ib | avx | store |
 | vextracti128 | vextracti128_wv_xv_ib | avx2 && avx | store |
 | vextractps | vextractps_ed_xv_ib | avx | store |
+| vfmadd132ps | vfmadd132ps_xv_hv_wv | fma | alu |
+| vfmadd132ss | vfmadd132ss_xv_hv_wv | fma | alu |
+| vfmadd213ps | vfmadd213ps_xv_hv_wv | fma | alu |
+| vfmadd213ss | vfmadd213ss_xv_hv_wv | fma | alu |
+| vfmadd231ps | vfmadd231ps_xv_hv_wv | fma | alu |
+| vfmadd231ss | vfmadd231ss_xv_hv_wv | fma | alu |
+| vfmaddsub132ps | vfmaddsub132ps_xv_hv_wv | fma | alu |
+| vfmaddsub213ps | vfmaddsub213ps_xv_hv_wv | fma | alu |
+| vfmaddsub231ps | vfmaddsub231ps_xv_hv_wv | fma | alu |
+| vfmsub132ps | vfmsub132ps_xv_hv_wv | fma | alu |
+| vfmsub132ss | vfmsub132ss_xv_hv_wv | fma | alu |
+| vfmsub213ps | vfmsub213ps_xv_hv_wv | fma | alu |
+| vfmsub213ss | vfmsub213ss_xv_hv_wv | fma | alu |
+| vfmsub231ps | vfmsub231ps_xv_hv_wv | fma | alu |
+| vfmsub231ss | vfmsub231ss_xv_hv_wv | fma | alu |
+| vfmsubadd132ps | vfmsubadd132ps_xv_hv_wv | fma | alu |
+| vfmsubadd213ps | vfmsubadd213ps_xv_hv_wv | fma | alu |
+| vfmsubadd231ps | vfmsubadd231ps_xv_hv_wv | fma | alu |
+| vfnmadd132ps | vfnmadd132ps_xv_hv_wv | avx | alu |
+| vfnmadd132ss | vfnmadd132ss_xv_hv_wv | avx | alu |
+| vfnmadd213ps | vfnmadd213ps_xv_hv_wv | avx | alu |
+| vfnmadd213ss | vfnmadd213ss_xv_hv_wv | avx | alu |
+| vfnmadd231ps | vfnmadd231ps_xv_hv_wv | avx | alu |
+| vfnmadd231ss | vfnmadd231ss_xv_hv_wv | avx | alu |
+| vfnmsub132ps | vfnmsub132ps_xv_hv_wv | avx | alu |
+| vfnmsub132ss | vfnmsub132ss_xv_hv_wv | avx | alu |
+| vfnmsub213ps | vfnmsub213ps_xv_hv_wv | avx | alu |
+| vfnmsub213ss | vfnmsub213ss_xv_hv_wv | avx | alu |
+| vfnmsub231ps | vfnmsub231ps_xv_hv_wv | avx | alu |
+| vfnmsub231ss | vfnmsub231ss_xv_hv_wv | avx | alu |
 | vgatherdps | vgatherdps_xv_wv_hv | avx2 && avx | load |
 | vgatherqps | vgatherqps_xv_wv_hv | avx2 && avx | load |
 | vinsertf128 | vinsertf128_xv_hv_wv_ib | avx | alu |

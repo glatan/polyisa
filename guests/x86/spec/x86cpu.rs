@@ -735,6 +735,12 @@ fn named_gate(mn: &str) -> Option<&'static [&'static str]> {
         // ADX 系と POPCNT 系の拡張。
         "lzcnt" => &["lzcnt"],
         "adcx" | "adox" => &["adx"],
+        // BMI1/BMI2（VEX の GPR 演算。既定の avx を上書き）。
+        "andn" | "blsr" | "blsmsk" | "blsi" | "bextr" => &["bmi1"],
+        "bzhi" | "mulx" | "pdep" | "pext" | "rorx" | "sarx" | "shlx" | "shrx" => &["bmi2"],
+        // FMA（132/213/231 の ps/pd/ss/sd）と F16C。
+        _ if mn.starts_with("vfm") => &["fma"],
+        "vcvtph2ps" | "vcvtps2ph" => &["f16c"],
         // AES-NI と PCLMULQDQ。AES-KL 系は別機能（AESKLE）なので
         // 語頭ではなく列挙で引く。
         "aesimc" | "aesenc" | "aesenclast" | "aesdec" | "aesdeclast"
