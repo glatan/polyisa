@@ -41,31 +41,37 @@ pub enum Rm<V> {
     Mem { a: V, wseg: Option<(u64, V)> },
 }
 
-/// ModRM reg フィールドのレジスタ（REX.R 込み）。
+/// ModRM reg フィールドのレジスタ（REX.R + REX2/EVEX.map4 R4 込み）。
 pub fn reg(d: &MapDec) -> Gpr {
-    Gpr(((d.modrm >> 3) & 7) | (((d.rex >> 2) & 1) << 3))
+    Gpr(((d.modrm >> 3) & 7) | (((d.rex >> 2) & 1) << 3) | (((d.rex2 >> 6) & 1) << 4))
 }
 
-/// ModRM r/m がレジスタ直接のときのレジスタ（REX.B 込み）。
+/// ModRM r/m がレジスタ直接のときのレジスタ（REX.B + B4 込み）。
 pub fn rm_reg(d: &MapDec) -> Gpr {
-    Gpr((d.modrm & 7) | ((d.rex & 1) << 3))
+    Gpr((d.modrm & 7) | ((d.rex & 1) << 3) | (((d.rex2 >> 4) & 1) << 4))
 }
 
-/// ModRM reg フィールドのベクタレジスタ番号（REX.R + EVEX.R' 込み、
-/// 0-31）。EVEX 項目の reg 被演算子に使う。
+/// ModRM reg フィールドのベクタレジスタ番号（REX.R + EVEX.R' + R4
+/// 込み、0-31）。EVEX 項目の reg 被演算子に使う。map4 では P0.4
+/// が R4 になるので rex2 側からも 4 ビット目を入れる（両者は
+/// 排他なので OR でよい）。
 pub fn reg_x5(d: &MapDec) -> u8 {
-    ((d.modrm >> 3) & 7) | (((d.rex >> 2) & 1) << 3) | ((d.evex_r2 as u8) << 4)
+    ((d.modrm >> 3) & 7)
+        | (((d.rex >> 2) & 1) << 3)
+        | ((d.evex_r2 as u8) << 4)
+        | (((d.rex2 >> 6) & 1) << 4)
 }
 
-/// ModRM r/m のベクタレジスタ番号（REX.B + EVEX.X 込み、0-31）。
+/// ModRM r/m のベクタレジスタ番号（REX.B + EVEX.X + B4 込み、0-31）。
 /// mod=11 でベクタレジスタを指すときだけ使う（GPR 形は `rm_reg`）。
 pub fn rm_reg_x5(d: &MapDec) -> u8 {
-    (d.modrm & 7) | ((d.rex & 1) << 3) | (((d.rex >> 1) & 1) << 4)
+    (d.modrm & 7) | ((d.rex & 1) << 3) | (((d.rex >> 1) & 1) << 4) | (((d.rex2 >> 4) & 1) << 4)
 }
 
-/// +r 形式のレジスタ（オペコード下位3ビット + REX.B）。
+/// +r 形式のレジスタ（オペコード下位3ビット + REX.B + B4）。
+/// push/pop などでは B4 が 16-31 を指す。
 pub fn op_reg(d: &MapDec) -> Gpr {
-    Gpr((d.opcode & 7) | ((d.rex & 1) << 3))
+    Gpr((d.opcode & 7) | ((d.rex & 1) << 3) | (((d.rex2 >> 4) & 1) << 4))
 }
 
 /// グループ選択の reg フィールド値（REX.R なし）。
@@ -123,7 +129,7 @@ pub fn rm_of<B: Backend>(
         let base = if d.asize == 64 { next_rip } else { 0 };
         b.konst::<W64>((base as i64).wrapping_add(d.disp) as u64)
     } else {
-        ea_base_disp(b, d.asize, rm, d.rex, d.disp)
+        ea_base_disp(b, d.asize, rm, d.rex, d.rex2, d.disp)
     };
     if real16 && d.asize == 32 {
         // 0x67 の 32 ビット EA は 2^32 で折り返す（折り返し前の
@@ -190,16 +196,21 @@ fn ea16<B: Backend>(b: &mut B, m: u8, disp: i64) -> (B::V<W64>, B::V<W64>) {
 }
 
 /// SIB 付き実効アドレス（32/64）。mod=00 base=101 は disp32 のみ。
+/// APX では index=100b+X4 が r20/r28、base=101+B4 が r21 になる
+/// （B4=1 のとき disp32 なしのベース付き形になる）。
 fn ea_sib<B: Backend>(b: &mut B, m: u8, d: &MapDec, _next_rip: u64) -> B::V<W64> {
     let s = d.sib;
     let idx_raw = (s >> 3) & 7;
-    let no_index = idx_raw == 4 && (d.rex >> 1) & 1 == 0;
-    let idx = idx_raw | (((d.rex >> 1) & 1) << 3);
+    let no_index = idx_raw == 4 && (d.rex >> 1) & 1 == 0 && (d.rex2 >> 5) & 1 == 0;
+    let idx = idx_raw | (((d.rex >> 1) & 1) << 3) | (((d.rex2 >> 5) & 1) << 4);
     let base_raw = s & 7;
-    let base_reg = Gpr(base_raw | ((d.rex & 1) << 3));
+    let base_reg = Gpr(base_raw | ((d.rex & 1) << 3) | (((d.rex2 >> 4) & 1) << 4));
+    // mod=00 base=101 は B4=0 のときだけベースなし+disp32。
+    // B4=1 なら r21 をベースにした通常形（disp は mod どおり）。
+    let no_base = m >> 6 == 0 && base_raw == 5 && (d.rex2 >> 4) & 1 == 0;
     let scale = s >> 6;
     let wide = d.asize == 64;
-    let mut a = if m >> 6 == 0 && base_raw == 5 {
+    let mut a = if no_base {
         b.konst::<W64>(d.disp as u64)
     } else if no_index && scale != 0 && !wide {
         // 386 の未定義 SIB 形式（index=100b かつ scale>0）では
@@ -227,7 +238,7 @@ fn ea_sib<B: Backend>(b: &mut B, m: u8, d: &MapDec, _next_rip: u64) -> B::V<W64>
         };
         a = b.add::<W64>(a, iv);
     }
-    if !(m >> 6 == 0 && base_raw == 5) {
+    if !no_base {
         let dv = b.konst::<W64>(d.disp as u64);
         a = b.add::<W64>(a, dv);
     }
@@ -235,8 +246,15 @@ fn ea_sib<B: Backend>(b: &mut B, m: u8, d: &MapDec, _next_rip: u64) -> B::V<W64>
 }
 
 /// base+disp の実効アドレス（32/64、非 SIB・非 RIP 相対）。
-fn ea_base_disp<B: Backend>(b: &mut B, asize: u8, rm: u8, rex: u8, disp: i64) -> B::V<W64> {
-    let base = Gpr(rm | ((rex & 1) << 3));
+fn ea_base_disp<B: Backend>(
+    b: &mut B,
+    asize: u8,
+    rm: u8,
+    rex: u8,
+    rex2: u8,
+    disp: i64,
+) -> B::V<W64> {
+    let base = Gpr(rm | ((rex & 1) << 3) | (((rex2 >> 4) & 1) << 4));
     let mut a = ea_base(b, asize == 64, base);
     let dv = b.konst::<W64>(disp as u64);
     a = b.add::<W64>(a, dv);
@@ -261,12 +279,17 @@ fn ea_base<B: Backend>(b: &mut B, wide: bool, g: Gpr) -> B::V<W64> {
 pub fn vsib<B: Backend>(b: &mut B, d: &MapDec) -> (B::V<W64>, u8, i64, u8) {
     let s = d.sib;
     let scale = s >> 6;
-    let idx = ((s >> 3) & 7) | (((d.rex >> 1) & 1) << 3);
+    let idx = ((s >> 3) & 7) | (((d.rex >> 1) & 1) << 3) | (((d.rex2 >> 5) & 1) << 4);
     let base_raw = s & 7;
-    let base = if d.modrm >> 6 == 0 && base_raw == 5 {
+    let no_base = d.modrm >> 6 == 0 && base_raw == 5 && (d.rex2 >> 4) & 1 == 0;
+    let base = if no_base {
         b.konst::<W64>(0)
     } else {
-        ea_base(b, d.asize == 64, Gpr(base_raw | ((d.rex & 1) << 3)))
+        ea_base(
+            b,
+            d.asize == 64,
+            Gpr(base_raw | ((d.rex & 1) << 3) | (((d.rex2 >> 4) & 1) << 4)),
+        )
     };
     (base, scale, d.disp, idx)
 }
@@ -694,11 +717,13 @@ pub fn ea_uses_ss(d: &MapDec) -> bool {
         // BP+SI / BP+DI / [BP+disp]
         matches!(rm, 2 | 3) || (rm == 6 && md != 0)
     } else if rm == 4 {
-        // SIB: base=EBP/RBP/R13(mod!=00) または base=ESP/RSP/R12
+        // SIB: base=EBP/RBP/R13(mod!=00) または base=ESP/RSP/R12。
+        // B4 拡張の base=5 は r21 なので BP 既定にしない。
         let base = d.sib & 7;
-        (base == 5 && md != 0) || base == 4
+        (base == 5 && md != 0 && (d.rex2 >> 4) & 1 == 0) || base == 4
     } else {
-        // mod!=00 の r/m=101 は BP ベース（mod=00 は disp32/RIP）
-        rm == 5 && md != 0
+        // mod!=00 の r/m=101 は BP ベース（mod=00 は disp32/RIP）。
+        // B4 拡張では r21 なので除外する。
+        rm == 5 && md != 0 && (d.rex2 >> 4) & 1 == 0
     }
 }

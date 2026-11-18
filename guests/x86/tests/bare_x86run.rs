@@ -21912,3 +21912,74 @@ fn run64_xop() {
     assert_eq!(q(0xA0) >> 32 & 0xFFFF_FFFF, 0x01, "blcmsk");
     assert_eq!(q(0xA8) & 0xFFFF_FFFF, 0xDE, "bextr");
 }
+
+#[test]
+fn run64_apx() {
+    // APX（B4a）: REX2 拡張 GPR・EVEX map4 の NDD/NF・PUSH2/POP2。
+    let feats = polyisa_guest_x86::model_feats("x86_64") | polyisa_guest_x86::FEAT_APX;
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 3, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2800);
+    env.backend
+        .mem
+        .write(VirtAddr(0x2000), &42u64.to_le_bytes())
+        .unwrap();
+    let prog: &[u8] = &[
+        // REX2 で r21 をアドレスに使う。
+        0x48, 0xB8, 0x01, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rax,0x2001
+        0xD5, 0x18, 0xF7, 0xD5, // notq %r21 → r21 = -1
+        0xD5, 0x18, 0x01, 0xC5, // addq %rax,%r21 → r21 = 0x2000
+        0x48, 0x31, 0xC0, // xor rax,rax
+        0xD5, 0x18, 0x03, 0x45, 0x00, // addq (%r21),%rax → rax = 42
+        // NDD: r25=1、r26=2 → sub r24 = r25 - r26 = -1。
+        0xD5, 0x19, 0xF7, 0xD1, // notq %r25
+        0xD5, 0x19, 0xF7, 0xD9, // negq %r25 → 1
+        0xD5, 0x19, 0xF7, 0xD2, // notq %r26
+        0xD5, 0x19, 0xF7, 0xDA, // negq %r26 → 1
+        0xD5, 0x19, 0xFF, 0xC2, // incq %r26 → 2
+        0x62, 0x4C, 0x3C, 0x10, 0x29, 0xD1, // sub r24,r25,r26（NDD）
+        // NF: xor で ZF=1 → sub.nf でも旗は不変のはず。
+        0x31, 0xC0, // xor eax,eax → ZF=1
+        0x62, 0x4C, 0x3C, 0x14, 0x29, 0xD1, // sub.nf r24,r25,r26
+        0x9C, // pushf
+        0x59, // pop rcx → 旗の退避
+        // PUSH2/POP2 往復。
+        0x49, 0xBC, 0x11, 0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs r12,0x1111
+        0x49, 0xBD, 0x22, 0x22, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs r13,0x2222
+        0x62, 0xD4, 0x1C, 0x18, 0xFF, 0xF5, // push2 %r13,%r12
+        0x49, 0xBC, 0, 0, 0, 0, 0, 0, 0, 0, // movabs r12,0
+        0x49, 0xBD, 0, 0, 0, 0, 0, 0, 0, 0, // movabs r13,0
+        0x62, 0xD4, 0x1C, 0x18, 0x8F, 0xC5, // pop2 %r13,%r12
+        // PUSH2P/POP2P 往復（役割交換）。
+        0x62, 0xD4, 0x9C, 0x18, 0xFF, 0xF5, // push2p %r13,%r12
+        0x49, 0xBC, 0, 0, 0, 0, 0, 0, 0, 0, // movabs r12,0
+        0x49, 0xBD, 0, 0, 0, 0, 0, 0, 0, 0, // movabs r13,0
+        0x62, 0xD4, 0x9C, 0x18, 0x8F, 0xC5, // pop2p %r13,%r12
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0x31, 0xFF, // xor rdi,rdi
+        0x0F, 0x05, // syscall → exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        200,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64"),
+    );
+    assert_eq!(out, Outcome::Exit(0));
+    // r24 は -1（1-2）。r21 は 0x2000。r12/r13 は pop2/pop2p で復元。
+    assert_eq!(env.backend.get(Gpr(24).state()), 0xFFFF_FFFF, "ndd sub");
+    assert_eq!(env.backend.get(Gpr(21).state()), 0x2000, "rex2 base");
+    assert_eq!(env.backend.get(Gpr(12).state()), 0x1111, "pop2p vvvv");
+    assert_eq!(env.backend.get(Gpr(13).state()), 0x2222, "pop2p rm");
+    assert_eq!(env.backend.get(Gpr(4).state()), 0x2800, "rsp 復元");
+    // NF: pushf で取った旗の ZF（bit6）が立っている。
+    let fl: u32 = env.backend.get(Gpr(1).state());
+    assert_ne!(fl & 0x40, 0, "nf は旗を保持");
+}

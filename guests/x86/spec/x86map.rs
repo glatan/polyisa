@@ -35,6 +35,10 @@ fn mi(
         bcast: false,
         er: false,
         wsel: None,
+        promoted: false,
+        ndd_req: false,
+        zu: false,
+        nf_ok: false,
         vex_rv: false,
         pfx,
         when,
@@ -104,6 +108,25 @@ fn n(name: &str, ops: &[OpKind], syntax: &str, timing: &str) -> MapInsn {
 /// グループ選択の命令項目。
 fn g(name: &str, group: u8, ops: &[OpKind], syntax: &str, timing: &str) -> MapInsn {
     mi(name, ops, Some(group), PfxSel::Any, Pred::True, syntax, timing)
+}
+
+/// APX EVEX.map4 昇格形の命令項目。`apply_gates` の既定は `apx`。
+/// z=0・L'L=0・P2.1-0=0 を要求し、ND・NF・拡張ビット（R4/X4/B4）
+/// はフィールドとして使う。名前とオペランドは昇格元と同じにして
+/// Insn 変種を共有する（d.ndd/d.nf で意味論が分岐する）。
+fn px(name: &str, ops: &[OpKind], syntax: &str, timing: &str) -> MapInsn {
+    // 昇格形の pp は 00（NP）か 01（66、opsize 16 選択）だけ。
+    // F2/F3 は予約で #UD。
+    let mut it = mi(name, ops, None, PfxSel::NoF2F3, Pred::True, syntax, timing);
+    it.promoted = true;
+    it
+}
+
+/// グループ選択の APX 昇格形の命令項目。
+fn pxg(name: &str, group: u8, ops: &[OpKind], syntax: &str, timing: &str) -> MapInsn {
+    let mut it = mi(name, ops, Some(group), PfxSel::NoF2F3, Pred::True, syntax, timing);
+    it.promoted = true;
+    it
 }
 
 /// グループ選択に mod 制約を付けた命令項目。`reg_form` が真なら
@@ -973,6 +996,7 @@ pub fn build_maps(m: &mut Model) {
         name: "primary".to_string(),
         vex_code: None,
         postop: false,
+        rex2_map1: false,
         items: primary,
     });
 
@@ -2395,12 +2419,14 @@ pub fn build_maps(m: &mut Model) {
         name: "map_0f".to_string(),
         vex_code: Some(1),
         postop: false,
+        rex2_map1: true,
         items: m0f,
     });
     build_map_0f38(m);
     build_map_0f3a(m);
     build_map_3dnow(m);
     build_map_xop(m);
+    build_map_apx(m);
 }
 
 /// 3DNow!（0F 0F /r imm8）。ModRM（と SIB・変位）の後に来る
@@ -2456,6 +2482,7 @@ fn build_map_3dnow(m: &mut Model) {
         name: "map_3dnow".to_string(),
         vex_code: None,
         postop: true,
+        rex2_map1: false,
         items: v,
     });
 }
@@ -3152,6 +3179,7 @@ fn build_map_0f38(m: &mut Model) {
         name: "map_0f38".to_string(),
         vex_code: Some(2),
         postop: false,
+        rex2_map1: false,
         items: v,
     });
 }
@@ -3506,6 +3534,7 @@ fn build_map_0f3a(m: &mut Model) {
         name: "map_0f3a".to_string(),
         vex_code: Some(3),
         postop: false,
+        rex2_map1: false,
         items,
     });
 }
@@ -3575,6 +3604,7 @@ fn build_map_xop(m: &mut Model) {
         name: "map_xop8".to_string(),
         vex_code: Some(8),
         postop: false,
+        rex2_map1: false,
         items: v8,
     });
 
@@ -3657,6 +3687,7 @@ fn build_map_xop(m: &mut Model) {
         name: "map_xop9".to_string(),
         vex_code: Some(9),
         postop: false,
+        rex2_map1: false,
         items: v9,
     });
 
@@ -3678,6 +3709,188 @@ fn build_map_xop(m: &mut Model) {
         name: "map_xopa".to_string(),
         vex_code: Some(10),
         postop: false,
+        rex2_map1: false,
         items: va,
+    });
+}
+
+/// APX 拡張 EVEX（mm=4、昇格形）のオペコード表。昇格元の
+/// レガシー命令と同じ Insn 名・オペランドを宣言し、NDD/NF は
+/// `MapDec` の ndd/nf 経由で意味論が分岐する。vvvv を被演算子に
+/// 使う形（PUSH2/POP2）は `ndd_req` で ND=1 を必須にする。
+/// B4a では ALU・シフト・INC/DEC/NOT/NEG・IMUL・PUSH2/POP2 の
+/// 基盤集合だけを置く。
+fn build_map_apx(m: &mut Model) {
+    use OpKind::*;
+    use OpWidth::*;
+    let mut v: Vec<MapItem> = Vec::new();
+    // 2 被演算子 ALU。昇格元と同じオペコード・オペランド順・構文
+    // （Insn 変種の共有は ops/syntax/timing の一致で認める）。
+    // NDD では vvvv が宛先、NF ではフラグ不更新。
+    for (base, mn, nfo) in [
+        (0x00u8, "add", true),
+        (0x08, "or", true),
+        (0x10, "adc", false),
+        (0x18, "sbb", false),
+        (0x20, "and", true),
+        (0x28, "sub", true),
+        (0x30, "xor", true),
+    ] {
+        for (off, name, ops, syn) in [
+            (0u8, "eb_gb", vec![Ea(B8), Reg(B8)], "{0} {e}, {g}"),
+            (1, "ev_gv", vec![Ea(V), Reg(V)], "{0} {e}, {g}"),
+            (2, "gb_eb", vec![Reg(B8), Ea(B8)], "{0} {g}, {e}"),
+            (3, "gv_ev", vec![Reg(V), Ea(V)], "{0} {g}, {e}"),
+        ] {
+            let mut it = px(&format!("{mn}_{name}"), &ops, syn, "alu");
+            it.nf_ok = nfo;
+            v.push(MapItem::Insn(base + off, it));
+        }
+    }
+    // グループ 1（即値）。/7 の CMP も仕様上は昇格するが、
+    // 書き戻しも NF もないので基盤対象からは外す。
+    for (byte, wdt, ikind, suf) in [
+        (0x80u8, B8, Imm(B8), "eb_ib"),
+        (0x81, V, Imm(Z), "ev_iz"),
+        (0x83, V, Imm(B8), "ev_ib"),
+    ] {
+        for (gi, mn) in ["add", "or", "adc", "sbb", "and", "sub", "xor"]
+            .iter()
+            .enumerate()
+        {
+            let mut it = pxg(
+                &format!("{mn}_{suf}"),
+                gi as u8,
+                &[Ea(wdt), ikind],
+                "{0} {e}, {i}",
+                "alu",
+            );
+            it.nf_ok = !matches!(*mn, "adc" | "sbb");
+            v.push(MapItem::Insn(byte, it));
+        }
+    }
+    // グループ 2（シフト・ローテート）。C0/C1 は imm8、D0/D1 は
+    // 暗黙の 1、D2/D3 は CL。グループ内の /6（SHL 別名）は昇格しない。
+    for (byte, wdt, cnt, suf) in [
+        (0xC0u8, B8, Imm(B8), "eb_ib"),
+        (0xC1, V, Imm(B8), "ev_ib"),
+        (0xD0, B8, Imp(ImpOp::One), "eb_1"),
+        (0xD1, V, Imp(ImpOp::One), "ev_1"),
+        (0xD2, B8, Imp(ImpOp::Cl), "eb_cl"),
+        (0xD3, V, Imp(ImpOp::Cl), "ev_cl"),
+    ] {
+        for (gi, mn) in ["rol", "ror", "rcl", "rcr", "shl", "shr", "sar"]
+            .iter()
+            .enumerate()
+        {
+            let gi = if gi >= 6 { gi + 1 } else { gi } as u8;
+            let mut it = pxg(
+                &format!("{mn}_{suf}"),
+                gi,
+                &[Ea(wdt), cnt],
+                "{0} {e}, {c}",
+                "alu",
+            );
+            it.nf_ok = !matches!(*mn, "rcl" | "rcr");
+            v.push(MapItem::Insn(byte, it));
+        }
+    }
+    // グループ 4/5（INC/DEC）と PUSH2/PUSH2P。FF /6 は ND=1 で
+    // PUSH2、W=1 で PUSH2P。ND=0 は #UD（ndd_req）。
+    // PUSH2/POP2 系は mod=11（両オペランドが GPR）と pp=00
+    // を必須にする。
+    let pushpop = |name: &str, group: u8, syn: &str, tim: &str| {
+        let mut it = pxg(name, group, &[Ea(V)], syn, tim);
+        it.ndd_req = true;
+        it.group_mod = Some(true);
+        it.pfx = PfxSel::Plain;
+        it
+    };
+    let mut inc_eb = pxg("inc_eb", 0, &[Ea(B8)], "inc {e}", "alu");
+    inc_eb.nf_ok = true;
+    let mut dec_eb = pxg("dec_eb", 1, &[Ea(B8)], "dec {e}", "alu");
+    dec_eb.nf_ok = true;
+    let mut inc_ev = pxg("inc_ev", 0, &[Ea(V)], "inc {e}", "alu");
+    inc_ev.nf_ok = true;
+    let mut dec_ev = pxg("dec_ev", 1, &[Ea(V)], "dec {e}", "alu");
+    dec_ev.nf_ok = true;
+    v.extend([
+        MapItem::Insn(0xFE, inc_eb),
+        MapItem::Insn(0xFE, dec_eb),
+        MapItem::Insn(0xFF, inc_ev),
+        MapItem::Insn(0xFF, dec_ev),
+        {
+            let mut it = pushpop("push2_ev", 6, "push2 {e}, {h}", "store");
+            it.wsel = Some(false);
+            MapItem::Insn(0xFF, it)
+        },
+        {
+            let mut it = pushpop("push2p_ev", 6, "push2p {e}, {h}", "store");
+            it.wsel = Some(true);
+            MapItem::Insn(0xFF, it)
+        },
+    ]);
+    // POP2/POP2P（8F /0、ND=1 必須。W が 2P 形を選ぶ）。
+    v.extend([
+        {
+            let mut it = pushpop("pop2_ev", 0, "pop2 {e}, {h}", "load");
+            it.wsel = Some(false);
+            MapItem::Insn(0x8F, it)
+        },
+        {
+            let mut it = pushpop("pop2p_ev", 0, "pop2p {e}, {h}", "load");
+            it.wsel = Some(true);
+            MapItem::Insn(0x8F, it)
+        },
+    ]);
+    // グループ 3 の NOT/NEG（F6/F7 の /2,/3）。/0,/1 は TEST で
+    // NDD の宛先がなく、/4-/7 は RDX:RAX ペアを書くので B4a では
+    // 置かない。
+    for (byte, wdt, suf) in [(0xF6u8, B8, "eb"), (0xF7, V, "ev")] {
+        for (gi, mn) in [(2u8, "not"), (3, "neg")] {
+            let mut it = pxg(
+                &format!("{mn}_{suf}"),
+                gi,
+                &[Ea(wdt)],
+                &format!("{mn} {{e}}"),
+                "mult",
+            );
+            it.nf_ok = mn == "neg";
+            v.push(MapItem::Insn(byte, it));
+        }
+    }
+    // IMUL（0F AF / 69 / 6B の昇格形）。map4 では 0F を省略した
+    // 番号で置かれ、NDD が宛先になる。
+    // IMUL 2 被演算子形（AF）は NDD、即値形（69/6B）は ZU
+    // （ND=1 + vvvv 全 1 で宛先は reg のまま上位ゼロ拡張）。
+    let mut i2 = px("imul_gv_ev", &[Reg(V), Ea(V)], "imul {g}, {e}", "mult");
+    i2.nf_ok = true;
+    let mut i3z = px(
+        "imul_gv_ev_iz",
+        &[Reg(V), Ea(V), Imm(Z)],
+        "imul {g}, {e}, {i}",
+        "mult",
+    );
+    i3z.nf_ok = true;
+    i3z.zu = true;
+    let mut i3b = px(
+        "imul_gv_ev_ib",
+        &[Reg(V), Ea(V), Imm(B8)],
+        "imul {g}, {e}, {i}",
+        "mult",
+    );
+    i3b.nf_ok = true;
+    i3b.zu = true;
+    v.extend([
+        MapItem::Insn(0xAF, i2),
+        MapItem::Insn(0x69, i3z),
+        MapItem::Insn(0x6B, i3b),
+    ]);
+    m.maps.push(MapDecl {
+        name: "map_apx".to_string(),
+        vex_code: Some(4),
+        postop: false,
+        rex2_map1: false,
+        items: v,
     });
 }

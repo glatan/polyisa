@@ -140,9 +140,11 @@ fn alu_w<'a, B: Backend, W: Hw>(
     };
     let (y2, c) = alu_carry::<B, W>(b, op, y);
     let v = alu_op::<B, W>(b, op, x, y2);
-    alu_flags::<B, W>(b, op, x, y, c, v);
+    if !d.nf {
+        alu_flags::<B, W>(b, op, x, y, c, v);
+    }
     if !matches!(op, Alu::Cmp) {
-        wr_w::<B, W>(b, rm, d, v)?;
+        wr_dst::<B, W>(b, rm, d, v)?;
     }
     Ok(())
 }
@@ -166,6 +168,30 @@ fn grd_w<B: Backend, W: Hw>(b: &mut B, g: Gpr, d: &MapDec) -> B::V<W> {
 
 fn gwr_w<B: Backend, W: Hw>(b: &mut B, g: Gpr, d: &MapDec, v: B::V<W>) {
     W::put(b, g, d, v)
+}
+
+/// NDD/ZU 宛先への書き込み。幅にかかわらずレジスタ全体へ書く
+/// （8/16 ビット形でも上位はゼロ拡張。APX の NDD は常に
+/// zero-upper）。
+fn put_ndd<B: Backend, W: Hw>(b: &mut B, g: Gpr, v: B::V<W>) {
+    let v64 = b.zext::<W, W64>(v);
+    sem::write64(b, g, v64);
+}
+
+/// 宛先オペランドへの書き戻し。APX の NDD では vvvv レジスタへ
+/// 書き、通常形は被演算子自身へ書く。
+fn wr_dst<B: Backend, W: Hw>(
+    b: &mut B,
+    rm: &Rm<B::V<W64>>,
+    d: &MapDec,
+    v: B::V<W>,
+) -> Result<(), B::Exit> {
+    if d.ndd {
+        put_ndd::<B, W>(b, Gpr(d.vex_v), v);
+        Ok(())
+    } else {
+        wr_w::<B, W>(b, rm, d, v)
+    }
 }
 
 // ---- 条件コード ----
@@ -484,7 +510,10 @@ fn incdec_w<B: Backend, W: Hw>(b: &mut B, inc: bool, rm: &Rm<B::V<W64>>, d: &Map
     } else {
         b.sub::<W>(x, one)
     };
-    wr_w::<B, W>(b, rm, d, v)?;
+    wr_dst::<B, W>(b, rm, d, v)?;
+    if d.nf {
+        return Ok(());
+    }
     if inc {
         update_add_flags(b, x, one, v);
     } else {
@@ -505,28 +534,28 @@ pub fn not<B: Backend>(b: &mut B, w: u8, rm: &Rm<B::V<W64>>, d: &MapDec) -> Flow
             let x = rd_w::<B, W8>(b, rm, d)?;
             {
                 let v = b.not::<W8>(x);
-                wr_w::<B, W8>(b, rm, d, v)
+                wr_dst::<B, W8>(b, rm, d, v)
             }
         }
         16 => {
             let x = rd_w::<B, W16>(b, rm, d)?;
             {
                 let v = b.not::<W16>(x);
-                wr_w::<B, W16>(b, rm, d, v)
+                wr_dst::<B, W16>(b, rm, d, v)
             }
         }
         32 => {
             let x = rd_w::<B, W32>(b, rm, d)?;
             {
                 let v = b.not::<W32>(x);
-                wr_w::<B, W32>(b, rm, d, v)
+                wr_dst::<B, W32>(b, rm, d, v)
             }
         }
         _ => {
             let x = rd_w::<B, W64>(b, rm, d)?;
             {
                 let v = b.not::<W64>(x);
-                wr_w::<B, W64>(b, rm, d, v)
+                wr_dst::<B, W64>(b, rm, d, v)
             }
         }
     }
@@ -546,10 +575,12 @@ fn neg_w<B: Backend, W: Hw>(b: &mut B, rm: &Rm<B::V<W64>>, d: &MapDec) -> Flow<B
     let x = rd_w::<B, W>(b, rm, d)?;
     let z = b.konst::<W>(W::from_u128(0));
     let v = b.sub::<W>(z, x);
-    wr_w::<B, W>(b, rm, d, v)?;
+    wr_dst::<B, W>(b, rm, d, v)?;
     // NEG は 0-x の減算と同じ旗。CF は x!=0 のとき立つ（0 からの
     // 借りがちょうどその条件）。
-    update_sub_flags(b, z, x, v);
+    if !d.nf {
+        update_sub_flags(b, z, x, v);
+    }
     Ok(())
 }
 
@@ -712,7 +743,10 @@ fn shift_w<B: Backend, W: Hw>(
         }
         Sh::Setmo => unreachable!(),
     };
-    wr_w::<B, W>(b, rm, d, v)?;
+    wr_dst::<B, W>(b, rm, d, v)?;
+    if d.nf {
+        return Ok(());
+    }
     // 旗: 回数が 0 なら据え置き。8088 の実測（SST）に基づく:
     //   CF = 最後に追い出されたビット（RCL/RCR は CF 込みの環から計算）
     //   OF = SHL/ROL/RCL: msb(v)^CF、ROR/RCR: msb(v)^msb-1(v)、
@@ -1204,6 +1238,57 @@ pub fn pop_v<B: Backend>(b: &mut B, w: u8, sa: u8, sseg: u64) -> Result<B::V<W64
         b.set(sp.state(), np_done);
     }
     Ok(v)
+}
+
+/// PUSH2 Ev, vvvv（APX）。第1被演算子（rm）→第2被演算子（vvvv）の順に
+/// 64 ビット値を push する。push2p は第2被演算子が r/m、第1が vvvv。
+/// スタックオペランドは常に 64 ビット（W は 2P 形の選択に使われる）。
+/// 仕様上は push 前の RSP が 16 バイト整列でなければ #GP だが、ここでは
+/// 逐次 push として近似する。
+pub fn push2<B: Backend>(
+    b: &mut B,
+    rm: &Rm<B::V<W64>>,
+    d: &MapDec,
+    sa: u8,
+    sseg: u64,
+    pp: bool,
+) -> Flow<B> {
+    let v_rm = rd_w::<B, W64>(b, rm, d)?;
+    let v_nd = sem::read64(b, Gpr(d.vex_v));
+    if pp {
+        push_v(b, 64, v_nd, sa, sseg)?;
+        push_v(b, 64, v_rm, sa, sseg)
+    } else {
+        push_v(b, 64, v_rm, sa, sseg)?;
+        push_v(b, 64, v_nd, sa, sseg)
+    }
+}
+
+/// POP2 Ev, vvvv（APX）。スタックトップから第2被演算子→第1被演算子の
+/// 順に pop する。pop2p は第2被演算子が r/m、第1が vvvv。
+pub fn pop2<B: Backend>(
+    b: &mut B,
+    rm: &Rm<B::V<W64>>,
+    d: &MapDec,
+    sa: u8,
+    sseg: u64,
+    pp: bool,
+) -> Flow<B> {
+    // push2 は rm→vvvv、push2p は vvvv→rm の順に積む。pop はその
+    // 逆順で取り出して鏡像になるようにする。
+    if pp {
+        let v_rm = pop_v(b, 64, sa, sseg)?;
+        let v_nd = pop_v(b, 64, sa, sseg)?;
+        wr_w::<B, W64>(b, rm, d, v_rm)?;
+        W64::put(b, Gpr(d.vex_v), d, v_nd);
+        Ok(())
+    } else {
+        let v_nd = pop_v(b, 64, sa, sseg)?;
+        let v_rm = pop_v(b, 64, sa, sseg)?;
+        wr_w::<B, W64>(b, rm, d, v_rm)?;
+        W64::put(b, Gpr(d.vex_v), d, v_nd);
+        Ok(())
+    }
 }
 
 // ---- 分岐 ----
@@ -1876,7 +1961,16 @@ fn imul3_w<B: Backend, W: Hw>(
     let sh = b.konst::<W>(W::from_u128(u128::from(W::BITS - 1)));
     let expect = b.shr_a::<W>(lo, sh);
     let ovf = b.cmp::<W>(Cmp::Ne, hi, expect);
-    W::put(b, g, d, lo);
+    // map4 の即値形は NDD ではなく ZU。宛先は reg のまま、
+    // ND=1 で上位をゼロにする（16 ビット幅でだけ意味を持つ）。
+    if d.ndd {
+        put_ndd::<B, W>(b, g, lo);
+    } else {
+        W::put(b, g, d, lo);
+    }
+    if d.nf {
+        return Ok(());
+    }
     if b.param::<crate::ImulFlagsParam>() == crate::IMUL_FLAGS_SZP {
         // 80286 の実測フラグ（SST 80286）：SF は積の符号（上位語の
         // 符号ビット）、ZF は上位語 == 0、PF は `hi ^ sext(lo)` の
@@ -1915,8 +2009,14 @@ fn imul2_w<B: Backend, W: Hw>(b: &mut B, g: Gpr, ea: &Rm<B::V<W64>>, d: &MapDec)
     let sh = b.konst::<W>(W::from_u128(u128::from(W::BITS - 1)));
     let expect = b.shr_a::<W>(lo, sh);
     let ovf = b.cmp::<W>(Cmp::Ne, hi, expect);
-    W::put(b, g, d, lo);
-    set_cf_of(b, ovf);
+    if d.ndd {
+        put_ndd::<B, W>(b, Gpr(d.vex_v), lo);
+    } else {
+        W::put(b, g, d, lo);
+    }
+    if !d.nf {
+        set_cf_of(b, ovf);
+    }
     Ok(())
 }
 

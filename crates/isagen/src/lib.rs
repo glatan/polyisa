@@ -593,6 +593,20 @@ fn gen_map_decoder(model: &Model) -> Result<String, GenError> {
          \x20   pub evex_aaa: u8,\n\
          \x20   /// EVEX.R'（ModRM.reg の 5 ビット目。反転済み）。\n\
          \x20   pub evex_r2: bool,\n\
+         \x20   /// APX の上位拡張ビット。REX2 のペイロード\n\
+         \x20   /// [M0 R4 X4 B4 W R X B]、EVEX.map4 の\n\
+         \x20   /// [0 ~R4 ~X4 B4 ...] が入る。bit7=M0（0F 表選択）、\n\
+         \x20   /// bit6=R4・bit5=X4・bit4=B4（GPR 16-31 の拡張）。\n\
+         \x20   /// 0 は REX2/map4 なし。\n\
+         \x20   pub rex2: u8,\n\
+         \x20   /// REX2 接頭辞を読んだか。ペイロード 0x00（全ビット\n\
+         \x20   /// 0 の退化形）でも真になるので、REX2 の存在判定は\n\
+         \x20   /// `rex2 != 0` ではなくこの旗を使う。\n\
+         \x20   pub rex2_seen: bool,\n\
+         \x20   /// EVEX.map4 の ND（vvvv が新しい宛先になる）。\n\
+         \x20   pub ndd: bool,\n\
+         \x20   /// EVEX.map4 の NF（フラグを更新しない）。\n\
+         \x20   pub nf: bool,\n\
          }\n",
     );
 
@@ -676,7 +690,7 @@ fn gen_map_decoder(model: &Model) -> Result<String, GenError> {
          \x20               // 項目（ebok bit0）では b=1 のときだけ要素\n\
          \x20               // バイト数に、それ以外（スカラ形）では常に\n\
          \x20               // 要素バイト数になる。\n\
-         \x20               if d.evex && db == 8 {\n\
+         \x20               if d.evex && d.vex_map != 4 && db == 8 {\n\
          \x20                   let n = if edisp != 0 && (d.evex_b || ebok & 1 == 0) {\n\
          \x20                       i64::from(edisp)\n\
          \x20                   } else {\n\
@@ -810,19 +824,22 @@ fn gen_map_decoder(model: &Model) -> Result<String, GenError> {
             let mut gated = false;
             for item in items {
                 if let MapItem::Map(_, name, when) = item {
-                    let guard = when_guard_flags(when, &flag_exprs)?;
-                    if guard.is_empty() {
-                        s.push_str(&format!(
-                            "            return sel_{}(bytes, i, d, modes, feats);\n",
-                            to_snake(name)
-                        ));
-                    } else {
-                        s.push_str(&format!(
-                            "            if {guard} {{\n                return sel_{}(bytes, i, d, modes, feats);\n            }}\n",
-                            to_snake(name)
-                        ));
-                        gated = true;
-                    }
+                    // REX2 の後は 0F/0F38/0F3A のエスケープバイトを
+                    // 置けない（マップは M0 でだけ選ぶ）ので、サブ
+                    // マップへの分岐は REX2 非経由に限る。
+                    let guard = {
+                        let g = when_guard_flags(when, &flag_exprs)?;
+                        if g.is_empty() {
+                            "!d.rex2_seen".to_string()
+                        } else {
+                            format!("({g}) && !d.rex2_seen")
+                        }
+                    };
+                    s.push_str(&format!(
+                        "            if {guard} {{\n                return sel_{}(bytes, i, d, modes, feats);\n            }}\n",
+                        to_snake(name)
+                    ));
+                    gated = true;
                     has_branch = true;
                 }
             }
@@ -917,13 +934,46 @@ fn gen_map_decoder(model: &Model) -> Result<String, GenError> {
          \x20       }\n\
          \x20   }\n",
     );
+    // REX2 接頭辞（2 バイト、0xD5）。64 ビットモードでのみ。
+    // ペイロード = [M0 R4 X4 B4 | W R X B]。下位ニブルは従来の
+    // REX と同じなので `d.rex` に畳み、上位ニブルは `d.rex2` に残す。
+    // 0xD5 は非64ビットでは AAD のオペコードなので m64 でだけ接頭辞。
+    // REX2 自体は APX の機能。モデルが `apx` を宣言しているとき
+    // だけ機能ゲートを掛け、他 ISA では従来どおり常時受理する。
+    let apx_gate = if model.features.iter().any(|f| f.name == "apx") {
+        format!(" && (feats & {} != 0)", feat_const("apx"))
+    } else {
+        String::new()
+    };
+    s.push_str(
+        format!(
+            "    {{\n\
+             \x20       let b0 = *bytes.get(i)?;\n\
+             \x20       if b0 == 0xD5 && mode_m64(modes){apx_gate} {{\n\
+             \x20           let p = *bytes.get(i + 1)?;\n\
+             \x20           // LOCK+REX2 は #UD。\n\
+             \x20           if d.lock {{\n\
+             \x20               return None;\n\
+             \x20           }}\n\
+             \x20           d.rex2 = p;\n\
+             \x20           d.rex2_seen = true;\n\
+             \x20           d.rex = 0x40 | (p & 0x0F);\n\
+             \x20           i += 2;\n\
+             \x20           if i > 15 {{\n\
+             \x20               return None;\n\
+             \x20           }}\n\
+             \x20       }}\n\
+             \x20   }}\n"
+        )
+        .as_str(),
+    );
     // VEX 接頭辞（2/3 バイト）。VEX.R/X/B は REX と同じ拡張意味を
     // 持つので `d.rex` に畳み、VEX.pp は `d.p66`/`d.rep` に畳む。
     // 有効サイズの計算より先に解析して VEX.W を rex bit3 へ反映する。
     s.push_str(
         "    {\n\
          \x20       let b0 = *bytes.get(i)?;\n\
-         \x20       if b0 == 0xC4 || b0 == 0xC5 {\n\
+         \x20       if (b0 == 0xC4 || b0 == 0xC5) && !d.rex2_seen {\n\
          \x20           let b2 = *bytes.get(i + 1)?;\n\
          \x20           // 非64ビットモードでは直後の ModRM.mod==11 のときだけ\n\
          \x20           // VEX（さもなければ LES/LDS のオペコード）。\n\
@@ -997,7 +1047,7 @@ fn gen_map_decoder(model: &Model) -> Result<String, GenError> {
     s.push_str(
         "    {\n\
          \x20   let b0 = *bytes.get(i)?;\n\
-         \x20   if b0 == 0x8F && !d.vex && !d.evex {\n\
+         \x20   if b0 == 0x8F && !d.vex && !d.evex && !d.rex2_seen {\n\
          \x20       let b2 = *bytes.get(i + 1)?;\n\
          \x20       if b2 & 0x1F >= 8 {\n\
          \x20           // LOCK+XOP は #UD。\n\
@@ -1038,22 +1088,40 @@ fn gen_map_decoder(model: &Model) -> Result<String, GenError> {
     s.push_str(
         "    {\n\
          \x20       let b0 = *bytes.get(i)?;\n\
-         \x20       if b0 == 0x62 && mode_m64(modes) && !d.vex {\n\
+         \x20       if b0 == 0x62 && mode_m64(modes) && !d.vex && !d.rex2_seen {\n\
          \x20           let p0 = *bytes.get(i + 1)?;\n\
          \x20           let p1 = *bytes.get(i + 2)?;\n\
          \x20           let p2 = *bytes.get(i + 3)?;\n\
+         \x20           let mmm = p0 & 7;\n\
          \x20           // LOCK+EVEX と予約ビット（P0.3=0、P1.2=1、mm!=0）は #UD。\n\
-         \x20           // mmm は 3 ビット。4-7 は予約で、存在しないマップ番号\n\
-         \x20           // としてディスパッチ側で #UD に落ちる。\n\
-         \x20           if d.lock || p0 & 0x08 != 0 || p0 & 7 == 0 || p1 & 4 == 0 {\n\
+         \x20           // mmm は 3 ビット。4-7 のうち 4 は APX 昇格形（map4）。\n\
+         \x20           // map4 では P0.3=B4・P0.4=~R4・P1.2=~X4 が有効フィールド\n\
+         \x20           // なので予約ビット検査を緩める。5-7 は予約で、存在しない\n\
+         \x20           // マップ番号としてディスパッチ側で #UD に落ちる。\n\
+         \x20           if d.lock || mmm == 0 {\n\
+         \x20               return None;\n\
+         \x20           }\n\
+         \x20           if mmm != 4 && (p0 & 0x08 != 0 || p1 & 4 == 0) {\n\
          \x20               return None;\n\
          \x20           }\n\
          \x20           d.evex = true;\n\
-         \x20           d.vex_map = p0 & 7;\n\
+         \x20           d.vex_map = mmm;\n\
          \x20           d.rex = 0x40 | (((p0 >> 5) & 7) ^ 7) | ((p1 & 0x80) >> 4);\n\
          \x20           d.evex_r2 = p0 & 0x10 == 0;\n\
          \x20           d.vex_w = p1 & 0x80 != 0;\n\
          \x20           d.vex_v = ((!p1 >> 3) & 0xF) | (((!p2 >> 3) & 1) << 4);\n\
+         \x20           if mmm == 4 {\n\
+         \x20               // map4：P0.4 は R' ではなく ~R4、P0.3 は B4、\n\
+         \x20               // P1.2 は ~X4。GPR 16-31 への拡張ビットを d.rex2 に\n\
+         \x20               // REX2 と同じ並び（bit6=R4/bit5=X4/bit4=B4）で畳む。\n\
+         \x20               // P2.4 は ND、P2.2 は NF、P2.1-0 は予約。\n\
+         \x20               d.rex2 = (((!p0 >> 4) & 1) << 6)\n\
+         \x20                   | (((!p1 >> 2) & 1) << 5)\n\
+         \x20                   | ((p0 & 0x08) << 1);\n\
+         \x20               d.evex_r2 = false;\n\
+         \x20               d.ndd = p2 & 0x10 != 0;\n\
+         \x20               d.nf = p2 & 4 != 0;\n\
+         \x20           }\n\
          \x20           // VEX 同様、EVEX 前のレガシー接頭辞（66/F2/F3）は\n\
          \x20           // 無視される。pp フィールドだけが接頭辞を選ぶ。\n\
          \x20           d.p66 = false;\n\
@@ -1065,7 +1133,7 @@ fn gen_map_decoder(model: &Model) -> Result<String, GenError> {
          \x20               _ => {}\n\
          \x20           }\n\
          \x20           d.evex_ll = (p2 >> 5) & 3;\n\
-         \x20           d.evex_b = p2 & 0x10 != 0;\n\
+         \x20           d.evex_b = mmm != 4 && p2 & 0x10 != 0;\n\
          \x20           d.evex_z = p2 & 0x80 != 0;\n\
          \x20           d.evex_aaa = p2 & 7;\n\
          \x20           if d.evex_z && d.evex_aaa == 0 {\n\
@@ -1113,13 +1181,44 @@ fn gen_map_decoder(model: &Model) -> Result<String, GenError> {
             ));
         }
     }
+    // REX2 の M0=1 は 0F 表を指す（0xD5 で 0F バイトを省略する）。
+    // rex2_map1 の立った表が M0=1 のときの選択先。
+    let mut m0_arm = String::new();
+    for map in &model.maps {
+        if map.rex2_map1 {
+            m0_arm = format!(
+                "    let insn = if d.rex2 & 0x80 != 0 {{\n\
+                 \x20       sel_{}(bytes, &mut i, &mut d, modes, feats)?\n\
+                 \x20   }} else {{\n",
+                to_snake(&map.name)
+            );
+        }
+    }
+    if m0_arm.is_empty() {
+        m0_arm = "    let insn = {\n".to_string();
+    }
     s.push_str(&format!(
-        "    let insn = if d.vex || d.evex {{\n\
+        "{m0_arm}         if d.vex || d.evex {{\n\
          \x20       match d.vex_map {{\n{vex_arms}            _ => return None,\n\
          \x20       }}\n\
          \x20   }} else {{\n\
          \x20       sel_primary(bytes, &mut i, &mut d, modes, feats)?\n\
+         \x20   }}\n\
          \x20   }};\n\
+         \x20   // REX2 の予約行。M0=0（primary）では 0x4*/0x7*/0xE*\n\
+         \x20   // と 0xA*（0xA1=JMPABS 以外）、M0=1（0F 表）では\n\
+         \x20   // 0x3*/0x8* の行が #UD。\n\
+         \x20   if d.rex2_seen && !d.evex {{\n\
+         \x20       let row = d.opcode >> 4;\n\
+         \x20       let bad = if d.rex2 & 0x80 != 0 {{\n\
+         \x20           row == 3 || row == 8\n\
+         \x20       }} else {{\n\
+         \x20           row == 4 || row == 7 || row == 0xE || (row == 0xA && d.opcode != 0xA1)\n\
+         \x20       }};\n\
+         \x20       if bad {{\n\
+         \x20           return None;\n\
+         \x20       }}\n\
+         \x20   }}\n\
          \x20   d.insn = insn;\n\
          \x20   Some(d)\n\
          }}\n",
@@ -1153,34 +1252,60 @@ fn emit_map_candidate(
     // EVEX 項目は更に L'L の許容集合を検査する（ll=3 はどの
     // 集合にも含まれないので常に拒否される）。
     use polyisa_isadl::model::VexL;
-    let vex = match (mi.vex, mi.evex) {
-        (None, None) => "!d.vex && !d.evex".to_string(),
-        (Some(VexL::Any), None) => "d.vex".to_string(),
-        (Some(VexL::L0), None) => "d.vex && !d.vex_l".to_string(),
-        (Some(VexL::L1), None) => "d.vex && d.vex_l".to_string(),
-        (None, Some(mask)) => {
-            if mi.er {
-                // {er} 形（b=1 + レジスタ形）では L'L は丸め指定
-                // なので全値を受理する。レジスタ形の判定は、非グループ
-                // 項目では `bytes[i]`（=ModRM バイト）の mod、グループ
-                // 項目では定義済みの `m` を見る。postop 表では ModRM が
-                // 先読み済みなので `d.modrm` を使う（現状 er は
-                // vex_code のある表にだけ置けるので到達不能だが）。
-                let modreg =
-                    if mi.group.is_some() || mi.group_mod.is_some() || mi.group_rm.is_some() {
-                        "m >> 6 == 3".to_string()
-                    } else if postop {
-                        "d.modrm >> 6 == 3".to_string()
-                    } else {
-                        "*bytes.get(*i)? >> 6 == 3".to_string()
-                    };
-                format!("d.evex && ((1u32 << d.evex_ll) & {mask} != 0 || (d.evex_b && {modreg}))")
-            } else {
-                format!("d.evex && (1u32 << d.evex_ll) & {mask} != 0")
-            }
+    let vex = if mi.promoted {
+        // APX 昇格形（EVEX.map4）：z=0・L'L=0・P2.1-0=0 を要求
+        // （P2.4=ND・P2.2=NF はフィールド）。表番号 4 への到達は
+        // ディスパッチ側で確定済み。`ndd_req` は vvvv を被演算子に
+        // 使う形（PUSH2/POP2 など）で ND=1 を必須にする。
+        // ND=0 の通常形は vvvv が未使用（格納フィールド全 1、
+        // 反転済みでは 0）を要求する。NF は `nf_ok` の項目でのみ
+        // 受理。`zu` は ND=1 かつ vvvv 未使用を要求（vvvv は
+        // レジスタを指さず、ND は ZU を選ぶ）。
+        let mut c = String::from("d.evex && !d.evex_z && d.evex_ll == 0 && d.evex_aaa & 3 == 0");
+        if !mi.nf_ok {
+            c.push_str(" && !d.nf");
         }
-        (Some(_), Some(_)) => {
-            return Err(GenError::Custom(format!("{}: vex と evex は排他", mi.name)));
+        if mi.zu {
+            c.push_str(" && d.ndd && d.vex_v == 0");
+        } else {
+            c.push_str(" && (d.ndd || d.vex_v == 0)");
+        }
+        if mi.ndd_req {
+            c.push_str(" && d.ndd");
+        }
+        c
+    } else {
+        match (mi.vex, mi.evex) {
+            (None, None) => "!d.vex && !d.evex".to_string(),
+            (Some(VexL::Any), None) => "d.vex".to_string(),
+            (Some(VexL::L0), None) => "d.vex && !d.vex_l".to_string(),
+            (Some(VexL::L1), None) => "d.vex && d.vex_l".to_string(),
+            (None, Some(mask)) => {
+                if mi.er {
+                    // {er} 形（b=1 + レジスタ形）では L'L は丸め指定
+                    // なので全値を受理する。レジスタ形の判定は、非グループ
+                    // 項目では `bytes[i]`（=ModRM バイト）の mod、グループ
+                    // 項目では定義済みの `m` を見る。postop 表では ModRM が
+                    // 先読み済みなので `d.modrm` を使う（現状 er は
+                    // vex_code のある表にだけ置けるので到達不能だが）。
+                    let modreg =
+                        if mi.group.is_some() || mi.group_mod.is_some() || mi.group_rm.is_some() {
+                            "m >> 6 == 3".to_string()
+                        } else if postop {
+                            "d.modrm >> 6 == 3".to_string()
+                        } else {
+                            "*bytes.get(*i)? >> 6 == 3".to_string()
+                        };
+                    format!(
+                        "d.evex && ((1u32 << d.evex_ll) & {mask} != 0 || (d.evex_b && {modreg}))"
+                    )
+                } else {
+                    format!("d.evex && (1u32 << d.evex_ll) & {mask} != 0")
+                }
+            }
+            (Some(_), Some(_)) => {
+                return Err(GenError::Custom(format!("{}: vex と evex は排他", mi.name)));
+            }
         }
     };
     // `vex_rv` はフィールド 1111b（= 補数を解くとレジスタ 0）を要求。

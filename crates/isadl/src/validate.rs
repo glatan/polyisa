@@ -527,19 +527,75 @@ fn validate_maps(model: &Model, timing: &BTreeSet<&str>, errors: &mut Vec<Valida
                             ),
                         });
                     }
-                    // W による項目選択は VEX/EVEX 項目にだけ意味がある。
-                    if mi.wsel.is_some() && mi.vex.is_none() && mi.evex.is_none() {
+                    // APX 昇格形は EVEX.map4 専用で、VEX/EVEX 通常形とは
+                    // 併用不可。z/L'L/b 系の属性も使わない。
+                    if mi.promoted && (mi.vex.is_some() || mi.evex.is_some()) {
                         errors.push(ValidationError::BadField {
                             format: "map-insn".to_string(),
-                            field: format!("{}: wsel には vex/evex が要る", mi.name),
+                            field: format!("{}: promoted と vex/evex は排他", mi.name),
+                        });
+                    }
+                    if mi.ndd_req && !mi.promoted {
+                        errors.push(ValidationError::BadField {
+                            format: "map-insn".to_string(),
+                            field: format!("{}: ndd_req には promoted が要る", mi.name),
+                        });
+                    }
+                    if mi.zu && !mi.promoted {
+                        errors.push(ValidationError::BadField {
+                            format: "map-insn".to_string(),
+                            field: format!("{}: zu には promoted が要る", mi.name),
+                        });
+                    }
+                    if mi.nf_ok && !mi.promoted {
+                        errors.push(ValidationError::BadField {
+                            format: "map-insn".to_string(),
+                            field: format!("{}: nf_ok には promoted が要る", mi.name),
+                        });
+                    }
+                    if mi.zu && mi.ndd_req {
+                        errors.push(ValidationError::BadField {
+                            format: "map-insn".to_string(),
+                            field: format!("{}: zu と ndd_req は排他", mi.name),
+                        });
+                    }
+                    if mi.promoted && (mi.bcast || mi.er || mi.edisp != 0) {
+                        errors.push(ValidationError::BadField {
+                            format: "map-insn".to_string(),
+                            field: format!("{}: promoted に bcast/er/edisp は使えない", mi.name),
+                        });
+                    }
+                    // W による項目選択は VEX/EVEX/APX 昇格形にだけ意味がある。
+                    if mi.wsel.is_some() && mi.vex.is_none() && mi.evex.is_none() && !mi.promoted {
+                        errors.push(ValidationError::BadField {
+                            format: "map-insn".to_string(),
+                            field: format!("{}: wsel には vex/evex/promoted が要る", mi.name),
                         });
                     }
                     // VEX/EVEX 項目は `vex_code` のある表にだけ置ける
                     // （無い表からは接頭辞経路で到達しない）。
-                    if (mi.vex.is_some() || mi.evex.is_some()) && map.vex_code.is_none() {
+                    if (mi.vex.is_some() || mi.evex.is_some() || mi.promoted)
+                        && map.vex_code.is_none()
+                    {
                         errors.push(ValidationError::BadField {
                             format: "map-insn".to_string(),
-                            field: format!("{}: vex には表の vex_code が要る", mi.name),
+                            field: format!(
+                                "{}: vex/evex/promoted には表の vex_code が要る",
+                                mi.name
+                            ),
+                        });
+                    }
+                    // 昇格形は EVEX.map4（vex_code==4）の表にだけ置ける。
+                    if mi.promoted && map.vex_code != Some(4) {
+                        errors.push(ValidationError::BadField {
+                            format: "map-insn".to_string(),
+                            field: format!("{}: promoted には vex_code==4 の表が要る", mi.name),
+                        });
+                    }
+                    if mi.promoted && map.postop {
+                        errors.push(ValidationError::BadField {
+                            format: "map-insn".to_string(),
+                            field: format!("{}: postop 表に promoted は置けない", mi.name),
                         });
                     }
                     if let Some(g) = mi.group

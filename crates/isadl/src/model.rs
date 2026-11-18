@@ -348,6 +348,22 @@ pub struct MapInsn {
     /// W==w のエンコードにだけ一致する（同じオペコードで W 別の
     /// 要素幅を持つ命令を分ける）。None は W を区別しない。
     pub wsel: Option<bool>,
+    /// APX EVEX 昇格形（map4）の項目。P2 の b/ND・NF・~v4 と
+    /// P0 の B4/R4・P1 の U/X4 を使い、z=0・L'L=0 を要求する。
+    /// `vex`/`evex` とは併用不可（EVEX.map4 経路でのみ選ばれる）。
+    pub promoted: bool,
+    /// 昇格形のうち ND=1 を必須とする項目（PUSH2/POP2 など
+    /// vvvv が被演算子になるもの）。`promoted` とだけ併用する。
+    pub ndd_req: bool,
+    /// APX ZU 形。ND ビットが新宛先ではなくゼロ拡張を選ぶ項目
+    /// （IMUL Gv,Ev,Iz/Ib・SETcc）。ND=1 と vvvv 全 1（未使用）
+    /// の両方を要求し、宛先は引き続き ModRM.reg になる。
+    /// `promoted` とだけ併用する。
+    pub zu: bool,
+    /// NF（P2.2）を受理する昇格形。NF 可能命令の一覧外
+    /// （ADC/SBB/NOT/CMP/TEST/RCL/RCR・PUSH2/POP2 など）では
+    /// NF=1 のエンコードは #UD。`promoted` とだけ併用する。
+    pub nf_ok: bool,
     /// VEX.vvvv / EVEX.vvvv+V' が未使用（全ビット 1 固定）か。
     /// `vex`/`evex` が Some のときのみ意味を持つ。
     pub vex_rv: bool,
@@ -380,6 +396,9 @@ pub struct MapDecl {
     /// （3DNow! の `0F 0F /r imm8` 形式）。true の表は先に
     /// ModRM を読んでから照合バイトを消費する。
     pub postop: bool,
+    /// APX REX2 の M0=1 経路（0xD5 で 0F 表を指す）でこの表を
+    /// 選ぶ。0F 表にだけ立てる。
+    pub rex2_map1: bool,
     pub items: Vec<MapItem>,
 }
 

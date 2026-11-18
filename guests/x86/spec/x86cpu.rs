@@ -179,6 +179,8 @@ fn declare_features(m: &mut Model) {
     // Leaf 0x8000_0008 EBX。
     feat(m, "clzero", &[]);
     feat(m, "rdpru", &[]);
+    // Leaf 7.1 EAX。REX2・拡張 EVEX（map4 昇格形・NDD・NF）。
+    feat(m, "apx", &[]);
     // Leaf 0x8000_0001 EDX。
     feat(m, "syscall", &[]);
     feat(m, "nx", &[]);
@@ -683,8 +685,10 @@ fn declare_ident_bits(m: &mut Model) {
     ] {
         b(f, 0x8000_0001, "edx", bit);
     }
-    // Leaf 7.1 EAX（HRESET 等）は現行の CPUID 表がサブリーフ行を
-    // 持たないので報告しない。HRESET 命令自体は機能旗で解読される。
+    // Leaf 7.1 EAX（APX_F）。現行の CPUID 表はサブリーフ行を持た
+    // ないため `derive` では報告されないが、`ident_bit` の対応は
+    // ここが正本。`apx` 機能旗自体は明示モデルで使える。
+    b_sub(m, "apx", 0x7, 1, "eax", 21);
 }
 
 // ---------------------------------------------------------------------------
@@ -948,6 +952,8 @@ fn apply_gates(m: &mut Model) {
                 let mn = mi.name.split('_').next().unwrap_or("");
                 let mut feats = match exact_gate(&mi.name).or(named_gate(mn)) {
                     Some(f) => f.to_vec(),
+                    // APX 昇格形（EVEX.map4）の既定は apx。
+                    None if mi.promoted => vec!["apx"],
                     // EVEX エンコードの既定は AVX-512F。VL などの
                     // 派生機能は exact_gate/named_gate で上書きする。
                     None if mi.evex.is_some() => vec!["avx512f"],
@@ -1015,4 +1021,9 @@ fn apply_gates(m: &mut Model) {
             existing => Pred::All(vec![existing.clone(), gate]),
         };
     }
+}
+
+/// サブリーフありの `cpuid_bit` 宣言（leaf 7.1 など）。
+fn b_sub(m: &mut Model, feature: &str, leaf: u32, sub: u32, reg: &str, bit: u8) {
+    m.ident_bit(feature, leaf, sub, reg, bit);
 }

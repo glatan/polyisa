@@ -30,9 +30,13 @@ impl Gpr {
     pub fn state(self) -> StateRef<W32> {
         if self.0 < 8 {
             StateRef::<W32>::from_offset(core::mem::offset_of!(CpuState, g) + (self.0 as usize) * 4)
-        } else {
+        } else if self.0 < 16 {
             StateRef::<W32>::from_offset(
                 core::mem::offset_of!(CpuState, x) + ((self.0 - 8) as usize) * 8,
+            )
+        } else {
+            StateRef::<W32>::from_offset(
+                core::mem::offset_of!(CpuState, x2) + ((self.0 - 16) as usize) * 8,
             )
         }
     }
@@ -73,9 +77,15 @@ pub fn hi_ref(r: Gpr) -> StateRef<W32> {
     StateRef::<W32>::from_offset(core::mem::offset_of!(CpuState, h) + (r.0 as usize) * 4)
 }
 
-/// 拡張レジスタ R8-R15 を指す。
+/// 拡張レジスタ R8-R31 を指す。
 pub fn x_ref(r: Gpr) -> StateRef<W64> {
-    StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, x) + ((r.0 - 8) as usize) * 8)
+    if r.0 < 16 {
+        StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, x) + ((r.0 - 8) as usize) * 8)
+    } else {
+        StateRef::<W64>::from_offset(
+            core::mem::offset_of!(CpuState, x2) + ((r.0 - 16) as usize) * 8,
+        )
+    }
 }
 
 /// FS セグメントベースを指す（x86-64 TLS）。

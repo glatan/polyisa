@@ -3156,6 +3156,10 @@ fn dispatch_map<B: Backend>(
             }
             sem_ea::push_v(b, sw, v, sa, sseg)
         }
+        Insn::Push2Ev => sem_ea::push2(b, &ea, d, sa, sseg, false),
+        Insn::Push2pEv => sem_ea::push2(b, &ea, d, sa, sseg, true),
+        Insn::Pop2Ev => sem_ea::pop2(b, &ea, d, sa, sseg, false),
+        Insn::Pop2pEv => sem_ea::pop2(b, &ea, d, sa, sseg, true),
         Insn::PopEv => {
             let sz = u64::from(sw / 8);
             // `pop [mem]` で EA が esp を参照するとき（a32 の SIB

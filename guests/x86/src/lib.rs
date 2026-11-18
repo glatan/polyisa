@@ -111,6 +111,9 @@ pub struct CpuState {
     pub zmm16: [[u64; 8]; 16],
     /// マスクレジスタ k0-k7（XSAVE の Opmask 成分に対応）。
     pub kmask: [u64; 8],
+    /// APX の拡張 GPR R16-R31（REX2/EVEX.map4 でだけ到達できる。
+    /// XSAVE の追加成分はなく、コンテキストとしてモデル内に持つ）。
+    pub x2: [u64; 16],
 }
 
 #[cfg(test)]
@@ -154,13 +157,14 @@ mod tests {
         assert_eq!(core::mem::offset_of!(CpuState, zmm_hi), 992);
         assert_eq!(core::mem::offset_of!(CpuState, zmm16), 1504);
         assert_eq!(core::mem::offset_of!(CpuState, kmask), 2528);
-        assert_eq!(core::mem::size_of::<CpuState>(), 2592);
+        assert_eq!(core::mem::offset_of!(CpuState, x2), 2592);
+        assert_eq!(core::mem::size_of::<CpuState>(), 2720);
     }
 
     #[test]
     fn insn_count() {
         // 段階4の x86 最小 853 件にオペコード表の記述を足した件数。
-        assert_eq!(INSNS.len(), 2128);
+        assert_eq!(INSNS.len(), 2132);
     }
 
     #[test]
@@ -2369,4 +2373,139 @@ fn xop_decode() {
     );
     // LOCK+XOP は #UD。POP への後退はしない。
     assert!(decode_map(&[0xF0, 0x8F, 0xE8, 0x70, 0xA2, 0xC2, 0x30], modes, FEAT_XOP).is_none());
+}
+
+#[test]
+fn apx_decode() {
+    let modes = MODE_M64 | (MODE_OPD_O32 << MODE_OPD_SHIFT) | (MODE_ADR_A64 << MODE_ADR_SHIFT);
+    // REX2（D5 payload）。payload = [M0 R4 X4 B4 | W R X B]。
+    // REX2 自体が APX 機能なので apx なしでは #UD。
+    assert!(decode_map(&[0xD5, 0x50, 0x01, 0xC8], modes, 0).is_none());
+    // addl %r17d,%r16d = D5 50 01 C8（R4=1,B4=1 → reg=17, rm=16）。
+    let d = decode_map(&[0xD5, 0x50, 0x01, 0xC8], modes, FEAT_APX).unwrap();
+    assert_eq!(d.insn, Insn::AddEvGv);
+    assert_eq!(crate::decode::reg(&d).0, 17);
+    assert_eq!(crate::decode::rm_reg(&d).0, 16);
+    // REX2.B4 拡張のベースレジスタ: addq (%r21),%rax =
+    // D5 18 03 45 00（B4=1, r/m=5 mod=01 → [r21+disp8]）。
+    let d = decode_map(&[0xD5, 0x18, 0x03, 0x45, 0x00], modes, FEAT_APX).unwrap();
+    assert_eq!(d.insn, Insn::AddGvEv);
+    // REX2.M0=1 は 0F マップへの暗黙ディスパッチ。
+    // cmovaeq %r17,%r16 = D5 D8 43 C1、imulq %r18,%r17 = D5 D8 AF CA。
+    let legacy = FEAT_I186 | FEAT_CMOV | FEAT_APX;
+    let d = decode_map(&[0xD5, 0xD8, 0x43, 0xC1], modes, legacy).unwrap();
+    assert_eq!(d.insn, Insn::CmovjaeGvEv);
+    assert_eq!(crate::decode::reg(&d).0, 16);
+    assert_eq!(crate::decode::rm_reg(&d).0, 17);
+    let d = decode_map(&[0xD5, 0xD8, 0xAF, 0xCA], modes, FEAT_APX).unwrap();
+    assert_eq!(d.insn, Insn::ImulGvEv);
+    // REX2 + グループ: shlq $3,%r18（C1 /4）・incq %r19（FF /0）・
+    // notq %r22 / negq %r23（F7 /2 /3）。
+    let d = decode_map(&[0xD5, 0x18, 0xC1, 0xE2, 0x03], modes, legacy).unwrap();
+    assert_eq!(d.insn, Insn::ShlEvIb);
+    assert_eq!(crate::decode::rm_reg(&d).0, 18);
+    assert_eq!(d.imm, 3);
+    let d = decode_map(&[0xD5, 0x18, 0xFF, 0xC3], modes, legacy).unwrap();
+    assert_eq!(d.insn, Insn::IncEv);
+    assert_eq!(crate::decode::rm_reg(&d).0, 19);
+    let d = decode_map(&[0xD5, 0x18, 0xF7, 0xD6], modes, legacy).unwrap();
+    assert_eq!(d.insn, Insn::NotEv);
+    assert_eq!(crate::decode::rm_reg(&d).0, 22);
+    let d = decode_map(&[0xD5, 0x18, 0xF7, 0xDF], modes, legacy).unwrap();
+    assert_eq!(d.insn, Insn::NegEv);
+    assert_eq!(crate::decode::rm_reg(&d).0, 23);
+    // REX2 は 64 ビットモード専用・LOCK+REX2 は #UD。REX2 後の
+    // VEX/EVEX バイトは接頭辞にならない。
+    // 32 ビットモードの D5 は AAD（REX2 ではない）。
+    let modes32 = MODE_OPD_O32 << MODE_OPD_SHIFT | MODE_ADR_A32 << MODE_ADR_SHIFT;
+    let d = decode_map(&[0xD5, 0x50, 0x01, 0xC8], modes32, 0).unwrap();
+    assert!(matches!(d.insn, Insn::AadIb));
+    assert!(decode_map(&[0xF0, 0xD5, 0x50, 0x01, 0xC8], modes, FEAT_APX).is_none());
+    assert!(
+        decode_map(
+            &[0xD5, 0x40, 0x62, 0xF1, 0x7E, 0x48, 0x6F, 0xC1],
+            modes,
+            FEAT_AVX512F | FEAT_APX,
+        )
+        .is_none()
+    );
+    // EVEX map4 昇格形。subl %r26d,%r25d,%r24d = 62 4C 3C 10 29 D1。
+    // P2.4=ND → vvvv（=8, r24）が新宛先。
+    let d = decode_map(&[0x62, 0x4C, 0x3C, 0x10, 0x29, 0xD1], modes, FEAT_APX).unwrap();
+    assert_eq!(d.insn, Insn::SubEvGv);
+    assert!(d.ndd && !d.nf);
+    assert_eq!(d.vex_v, 24);
+    assert_eq!(crate::decode::reg(&d).0, 26);
+    assert_eq!(crate::decode::rm_reg(&d).0, 25);
+    // P2.2=NF（旗更新抑制）。
+    let d = decode_map(&[0x62, 0x4C, 0x3C, 0x14, 0x29, 0xD1], modes, FEAT_APX).unwrap();
+    assert_eq!(d.insn, Insn::SubEvGv);
+    assert!(d.ndd && d.nf);
+    // apx ゲートなし・z=1・L'L!=0・P2.1-0!=0 は #UD。
+    assert!(decode_map(&[0x62, 0x4C, 0x3C, 0x10, 0x29, 0xD1], modes, 0).is_none());
+    assert!(decode_map(&[0x62, 0x4C, 0x3C, 0x90, 0x29, 0xD1], modes, FEAT_APX).is_none());
+    assert!(decode_map(&[0x62, 0x4C, 0x3C, 0x30, 0x29, 0xD1], modes, FEAT_APX).is_none());
+    assert!(decode_map(&[0x62, 0x4C, 0x3C, 0x11, 0x29, 0xD1], modes, FEAT_APX).is_none());
+    // PUSH2（FF /6, ND 必須）・POP2（8F /0）。
+    // push2 %r13,%r12 = 62 D4 1C 18 FF F5、push2p は W=1（P1=9C）。
+    let d = decode_map(&[0x62, 0xD4, 0x1C, 0x18, 0xFF, 0xF5], modes, FEAT_APX).unwrap();
+    assert_eq!(d.insn, Insn::Push2Ev);
+    assert!(d.ndd);
+    assert_eq!(crate::decode::rm_reg(&d).0, 13);
+    assert_eq!(d.vex_v, 12);
+    let d = decode_map(&[0x62, 0xD4, 0x9C, 0x18, 0xFF, 0xF5], modes, FEAT_APX).unwrap();
+    assert_eq!(d.insn, Insn::Push2pEv);
+    // pop2/pop2p（8F /0）。
+    let d = decode_map(&[0x62, 0xD4, 0x1C, 0x18, 0x8F, 0xC5], modes, FEAT_APX).unwrap();
+    assert_eq!(d.insn, Insn::Pop2Ev);
+    let d = decode_map(&[0x62, 0xD4, 0x9C, 0x18, 0x8F, 0xC5], modes, FEAT_APX).unwrap();
+    assert_eq!(d.insn, Insn::Pop2pEv);
+    // ND=0 の PUSH2/POP2 は #UD。
+    assert!(decode_map(&[0x62, 0xD4, 0x1C, 0x08, 0xFF, 0xF5], modes, FEAT_APX).is_none());
+    assert!(decode_map(&[0x62, 0xD4, 0x1C, 0x08, 0x8F, 0xC5], modes, FEAT_APX).is_none());
+    // PUSH2/POP2 は mod=11 と pp=00 が必須。
+    assert!(decode_map(&[0x62, 0xD4, 0x1C, 0x18, 0xFF, 0x75, 0x00], modes, FEAT_APX).is_none());
+    assert!(decode_map(&[0x62, 0xD4, 0x1D, 0x18, 0xFF, 0xF5], modes, FEAT_APX).is_none());
+    // ND=0 形は vvvv 未使用（格納 1111 → 反転後 0）を要求。
+    // ~vvvv=0111（反転後 8）で ND=0 は #UD。
+    assert!(decode_map(&[0x62, 0x4C, 0x3C, 0x00, 0x29, 0xD1], modes, FEAT_APX).is_none());
+    // 通常形（ND=0、vvvv 未使用）は 2 被演算子形として受理。
+    // vvvv 未使用は ~vvvv=1111 かつ P2.3(~V4)=1。
+    let d = decode_map(&[0x62, 0x4C, 0x7C, 0x08, 0x29, 0xD1], modes, FEAT_APX).unwrap();
+    assert_eq!(d.insn, Insn::SubEvGv);
+    assert!(!d.ndd);
+    // NF は対象命令でのみ受理。ADC（0x10 系）は NF 不可で
+    // NF=1 は #UD。NOT（F7 /2）も NF 不可。
+    assert!(decode_map(&[0x62, 0x4C, 0x3C, 0x14, 0x11, 0xD1], modes, FEAT_APX).is_none());
+    assert!(decode_map(&[0x62, 0x4C, 0x3C, 0x14, 0xF7, 0xD6], modes, FEAT_APX).is_none());
+    // IMUL 即値形は ZU（ND=1 + vvvv 未使用）。reg=r17・rm=r18。
+    let d = decode_map(&[0x62, 0xEC, 0xFC, 0x18, 0x6B, 0xCA, 0x05], modes, FEAT_APX).unwrap();
+    assert_eq!(d.insn, Insn::ImulGvEvIb);
+    assert!(d.ndd && d.vex_v == 0);
+    assert_eq!(crate::decode::reg(&d).0, 17);
+    assert_eq!(crate::decode::rm_reg(&d).0, 18);
+    // ZU 形は vvvv がレジスタを指すと #UD（ND=1 + ~vvvv!=1111）。
+    assert!(decode_map(&[0x62, 0xEC, 0x3C, 0x18, 0x6B, 0xCA, 0x05], modes, FEAT_APX).is_none());
+    // REX2 の予約行：primary の 0x7*/0xE* 行、map1 の 0x8* 行。
+    assert!(decode_map(&[0xD5, 0x40, 0x70, 0x00], modes, FEAT_APX).is_none());
+    assert!(decode_map(&[0xD5, 0x40, 0xE8, 0, 0, 0, 0], modes, FEAT_APX | FEAT_I186).is_none());
+    assert!(
+        decode_map(
+            &[0xD5, 0x88, 0x84, 0xC0, 0, 0, 0, 0],
+            modes,
+            FEAT_APX | FEAT_I386
+        )
+        .is_none()
+    );
+    // REX2 の後は 0F エスケープを置けない（M0 でだけ表を選ぶ）。
+    assert!(decode_map(&[0xD5, 0x00, 0x0F, 0xAF, 0xCA], modes, FEAT_APX).is_none());
+    // REX2（ペイロード 0 でも）の後に VEX/EVEX は来ない。
+    assert!(
+        decode_map(
+            &[0xD5, 0x00, 0xC4, 0xE1, 0x3C, 0x58, 0xC2],
+            modes,
+            FEAT_APX | FEAT_AVX
+        )
+        .is_none()
+    );
 }
