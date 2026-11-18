@@ -1744,17 +1744,55 @@ pub fn run_mode_ex(
     feats: u128,
     params: &polyisa_guest_x86::Params,
 ) -> Outcome {
-    env.backend.set(polyisa_guest_x86::sem::eip_ref(), entry);
     // 32 ビットゲストの実効アドレスは 32 ビットで折り返す。負のオフセットを含む
     // 加算が 4GiB を越えても未映射判定にならないよう、アクセス幅をここで絞る。
-    env.backend.addr_mask = if is64 { u64::MAX } else { 0xffff_ffff };
+    let addr_mask = if is64 { u64::MAX } else { 0xffff_ffff };
+    run_mode_go(
+        env,
+        entry,
+        sys,
+        limit,
+        if is64 { 64 } else { 32 },
+        addr_mask,
+        feats,
+        params,
+    )
+}
+
+/// x32（ILP32）ABI の実行ループ。命令は x86-64 と同じ 64 ビットモードで
+/// 動くが、ポインタは 32 ビットなので実効アドレスを 4GiB で折り返す。
+pub fn run_mode_x32_ex(
+    env: &mut BareEnv,
+    entry: u32,
+    sys: &mut impl TrapHandler,
+    limit: u64,
+    feats: u128,
+    params: &polyisa_guest_x86::Params,
+) -> Outcome {
+    run_mode_go(env, entry, sys, limit, 64, 0xffff_ffff, feats, params)
+}
+
+/// `run_mode_ex`・`run_mode_x32_ex` の共有本体。`mode` は命令モード、
+/// `addr_mask` は実効アドレスの折り返し幅。
+#[allow(clippy::too_many_arguments)]
+fn run_mode_go(
+    env: &mut BareEnv,
+    entry: u32,
+    sys: &mut impl TrapHandler,
+    limit: u64,
+    mode: u8,
+    addr_mask: u64,
+    feats: u128,
+    params: &polyisa_guest_x86::Params,
+) -> Outcome {
+    env.backend.set(polyisa_guest_x86::sem::eip_ref(), entry);
+    env.backend.addr_mask = addr_mask;
     // 挙動パラメータをバックエンドの表に流し込む（意味論が `param` で読む）。
     polyisa_guest_x86::install_params(&mut env.backend, params);
     // 呼び出し前に wait4 で止まっていれば、子から再開する。
     let _ = sys.on_block(env);
     // 直近の eip を記録する（POLYISA_HIST でフェッチ失敗時に吐出す診断）。
     let mut hist = std::collections::VecDeque::<(u32, String)>::with_capacity(33);
-    let mode = if is64 { 64 } else { 32 };
     polyisa_engine::run::run(
         env,
         sys,
@@ -14537,6 +14575,7 @@ pub fn run_image_x86_64_ex(
         &sel.ident,
         None,
         &polyisa_guest_x86::DEFAULT_PARAMS,
+        false,
     )
 }
 
@@ -14568,10 +14607,56 @@ pub fn run_image_x86_64_sel(
         &sel.ident,
         jit,
         &polyisa_guest_x86::model_params(&sel.name),
+        false,
     )
 }
 
+/// ELF32 + EM_X86_64 の x32（ILP32）イメージを実行する。
+/// `sys` は `Linux::x86_x32()` で作ったものを渡す。
+/// 命令は 64 ビットモード、ポインタ幅と実効アドレスは 32 ビット。
+pub fn run_image_x86_x32_sel(
+    bytes: &[u8],
+    prog: &str,
+    argv: &[String],
+    sys: &mut Linux,
+    sel: Option<&polyisa_isadl::select::CpuSel>,
+) -> Result<u64, String> {
+    let owned;
+    let sel = match sel {
+        Some(s) => s,
+        None => {
+            owned = default_sel();
+            &owned
+        }
+    };
+    run_image_x86_64_impl(
+        bytes,
+        prog,
+        argv,
+        sys,
+        sel.feats,
+        &sel.features,
+        &sel.ident,
+        None,
+        &polyisa_guest_x86::model_params(&sel.name),
+        true,
+    )
+}
+
+/// x32 の ELF ファイルを実行する。`run_elf_x86_64_sel` の x32 版。
+pub fn run_elf_x86_x32_sel(
+    path: &str,
+    argv: &[String],
+    sel: Option<&polyisa_isadl::select::CpuSel>,
+) -> Result<u64, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
+    let mut sys = Linux::x86_x32();
+    run_image_x86_x32_sel(&bytes, path, argv, &mut sys, sel)
+}
+
 /// `run_image_x86_64_ex` の実体。`jit` があればブロック実行経路を使う。
+/// `x32` のときは ELFCLASS32 の像を 64 ビットモードで実行し、
+/// ポインタ幅と実効アドレスは 32 ビットに絞る。
 #[allow(clippy::too_many_arguments)]
 fn run_image_x86_64_impl(
     bytes: &[u8],
@@ -14583,11 +14668,20 @@ fn run_image_x86_64_impl(
     ident: &std::collections::BTreeMap<String, String>,
     jit: Option<&mut polyisa_jit::Jit>,
     params: &polyisa_guest_x86::Params,
+    x32: bool,
 ) -> Result<u64, String> {
     use polyisa_guest_x86::sem::Gpr;
     use polyisa_mem::{PAGE_SIZE, Perms};
 
-    let ehdr = polyisa_loader::elf::parse_ehdr(bytes).map_err(|e| format!("ehdr: {e:?}"))?;
+    if sys.is_x32() != x32 {
+        return Err("像の ABI とシステムコールハンドラが食い違う".to_string());
+    }
+    // x32 は ELFCLASS32 + EM_X86_64。Ref: SRC-LINUX (7.3)。
+    let ehdr = if x32 {
+        polyisa_loader::elf::parse_ehdr32(bytes).map_err(|e| format!("ehdr: {e:?}"))?
+    } else {
+        polyisa_loader::elf::parse_ehdr(bytes).map_err(|e| format!("ehdr: {e:?}"))?
+    };
     if !ehdr.little {
         return Err("big-endian ELF は未対応".to_string());
     }
@@ -14599,8 +14693,14 @@ fn run_image_x86_64_impl(
     if ehdr.entry > u64::from(u32::MAX) {
         return Err("64ビット entry は未対応".to_string());
     }
-    let phdrs =
-        polyisa_loader::elf::parse_phdrs(bytes, &ehdr).map_err(|e| format!("phdrs: {e:?}"))?;
+    let phdrs = if x32 {
+        polyisa_loader::elf::parse_phdrs32(bytes, &ehdr).map_err(|e| format!("phdrs: {e:?}"))?
+    } else {
+        polyisa_loader::elf::parse_phdrs(bytes, &ehdr).map_err(|e| format!("phdrs: {e:?}"))?
+    };
+    // GNU_PROPERTY_X86_* の要求を CPU モデルと突き合わせる。
+    // 不足は拒否ではなく警告にとどめる（cpu-models.md の規約）。
+    check_gnu_properties(bytes, &phdrs, ehdr.little, features);
     let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_x86::CpuState>());
     polyisa_loader::elf::load_segments(bytes, &phdrs, &mut env.backend.mem)
         .map_err(|e| format!("load: {e:?}"))?;
@@ -14619,7 +14719,12 @@ fn run_image_x86_64_impl(
     for a in argv {
         arg_bytes.push(a.as_bytes().to_vec());
     }
-    let (img, sp) = polyisa_os_linux::build_initial_stack(top, &arg_bytes, &[], &[(6, 0x1000)]);
+    // x32 のスタック項目は 32 ビット幅（ポインタが 4 バイトの ILP32）。
+    let (img, sp) = if x32 {
+        polyisa_os_linux::build_initial_stack32(top, &arg_bytes, &[], &[(6, 0x1000)])
+    } else {
+        polyisa_os_linux::build_initial_stack(top, &arg_bytes, &[], &[(6, 0x1000)])
+    };
     // スタックは 8MB 確保する (Linux既定と同等)。sub $0x1000,%rsp等の拡張でPageFaultにならないため.
     const STACK_SIZE: u64 = 8 * 1024 * 1024;
     let base = top - STACK_SIZE;
@@ -14637,6 +14742,11 @@ fn run_image_x86_64_impl(
         .mem
         .write(polyisa_mem::VirtAddr(sp), &img)
         .map_err(|e| format!("stack write: {e:?}"))?;
+    // x86-64 の vsyscall ページ。call で飛んでくる呼び出しを
+    // `mov eax,nr; syscall; ret` スタブ経由で OS パーソナリティへ回す。
+    // ELF より後に写像して上書きされないようにする（i386 と同じ規則）。
+    polyisa_os_linux::x86::map_vsyscall_page(&mut env.backend.mem)
+        .map_err(|e| format!("vsys map: {e:?}"))?;
     polyisa_guest_x86::sem::write64(&mut env.backend, Gpr(4), sp);
     // x87 制御ワードの初期値（丸め最近接の 0x037F）。FNSTCW/FLDCW で使う.
     env.backend.set(polyisa_guest_x86::sem::fcw_ref(), 0x037F);
@@ -14651,26 +14761,31 @@ fn run_image_x86_64_impl(
     env.backend
         .set(polyisa_guest_x86::sem::xcomp_perm_ref(), supp & 0xFFFF);
     install_cpuid(&mut env, features, ident);
-    let out = match jit {
-        Some(jit) => run_mode_ex_jit(
-            &mut env,
-            ehdr.entry as u32,
-            sys,
-            30_000_000,
-            true,
-            feats,
-            params,
-            jit,
-        ),
-        None => run_mode_ex(
-            &mut env,
-            ehdr.entry as u32,
-            sys,
-            30_000_000,
-            true,
-            feats,
-            params,
-        ),
+    let out = if x32 {
+        // JIT 経路は x32 未対応。64 ビットモード・32 ビットアドレス幅で逐次実行。
+        run_mode_x32_ex(&mut env, ehdr.entry as u32, sys, 30_000_000, feats, params)
+    } else {
+        match jit {
+            Some(jit) => run_mode_ex_jit(
+                &mut env,
+                ehdr.entry as u32,
+                sys,
+                30_000_000,
+                true,
+                feats,
+                params,
+                jit,
+            ),
+            None => run_mode_ex(
+                &mut env,
+                ehdr.entry as u32,
+                sys,
+                30_000_000,
+                true,
+                feats,
+                params,
+            ),
+        }
     };
     match out {
         Outcome::Exit(code) => Ok(code),
@@ -14680,6 +14795,110 @@ fn run_image_x86_64_impl(
     }
 }
 
+/// `PT_GNU_PROPERTY` の `GNU_PROPERTY_X86_*` が要求する機能を
+/// CPU モデルの機能集合と突き合わせ、足りない機能を警告として出す。
+fn check_gnu_properties(
+    bytes: &[u8],
+    phdrs: &[polyisa_loader::elf::Phdr],
+    little: bool,
+    features: &std::collections::BTreeSet<String>,
+) {
+    use polyisa_loader::elf::{
+        GNU_PROPERTY_X86_FEATURE_1_AND, GNU_PROPERTY_X86_FEATURE_2_NEEDED,
+        GNU_PROPERTY_X86_FEATURE_2_USED, GNU_PROPERTY_X86_ISA_1_NEEDED,
+        GNU_PROPERTY_X86_ISA_1_USED, gnu_properties,
+    };
+    // FEATURE_1_AND: 立っている全ビットの機能を必要とする。
+    // Ref: binutils include/elf/common.h。
+    const F1: &[(u64, &str)] = &[(0x1, "cet_ibt"), (0x2, "cet_ss")];
+    // FEATURE_2_USED/NEEDED: プログラムが使うレジスタ状態の成分。
+    // bit0 (X86) は基本機能で常に立つ。XSAVEC はモデルにない。
+    const F2: &[(u64, &str)] = &[
+        (0x2, "fpu"),        // X87
+        (0x4, "mmx"),        // MMX
+        (0x8, "sse"),        // XMM
+        (0x10, "avx"),       // YMM
+        (0x20, "avx512f"),   // ZMM
+        (0x40, "fxsr"),      // FXSR
+        (0x80, "xsave"),     // XSAVE
+        (0x100, "xsaveopt"), // XSAVEOPT
+        (0x400, "amx_tile"), // TMM
+        (0x800, "avx512f"),  // MASK（AVX512 マスクレジスタ）
+    ];
+    // ISA_1_USED/NEEDED: マイクロアーキテクチャ水準（x86-64-v*）。
+    const ISA_BASELINE: &[&str] = &["cmov", "cx8", "fpu", "mmx", "fxsr", "sse2"];
+    const ISA_V2: &[&str] = &[
+        "cx16", "lahf_lm", "popcnt", "sse3", "ssse3", "sse4_1", "sse4_2",
+    ];
+    const ISA_V3: &[&str] = &[
+        "avx", "avx2", "bmi1", "bmi2", "f16c", "fma", "lzcnt", "movbe", "xsave",
+    ];
+    const ISA_V4: &[&str] = &["avx512f", "avx512bw", "avx512cd", "avx512dq", "avx512vl"];
+    const ISA_LEVELS: &[(u64, &str, &[&str])] = &[
+        (0x1, "x86-64", ISA_BASELINE),
+        (0x2, "x86-64-v2", ISA_V2),
+        (0x4, "x86-64-v3", ISA_V3),
+        (0x8, "x86-64-v4", ISA_V4),
+    ];
+    for (ty, val) in gnu_properties(bytes, phdrs, little) {
+        match ty {
+            GNU_PROPERTY_X86_FEATURE_1_AND
+            | GNU_PROPERTY_X86_FEATURE_2_USED
+            | GNU_PROPERTY_X86_FEATURE_2_NEEDED => {
+                let (label, table) = match ty {
+                    GNU_PROPERTY_X86_FEATURE_1_AND => ("FEATURE_1_AND", F1),
+                    GNU_PROPERTY_X86_FEATURE_2_USED => ("FEATURE_2_USED", F2),
+                    _ => ("FEATURE_2_NEEDED", F2),
+                };
+                let mut rest = val;
+                for &(bit, name) in table {
+                    if rest & bit == 0 {
+                        continue;
+                    }
+                    rest &= !bit;
+                    if !features.contains(name) {
+                        eprintln!("run: ELF は {label} で {name} を要求するが CPU モデルにない");
+                    }
+                }
+                // bit0（X86）は常に立つ基本機能ビット。残りは未知ビットとして報告。
+                rest &= !1u64;
+                if rest != 0 {
+                    eprintln!("run: ELF は {label} で未対応の機能ビット {rest:#x} を要求する");
+                }
+            }
+            GNU_PROPERTY_X86_ISA_1_USED | GNU_PROPERTY_X86_ISA_1_NEEDED => {
+                let label = if ty == GNU_PROPERTY_X86_ISA_1_USED {
+                    "ISA_1_USED"
+                } else {
+                    "ISA_1_NEEDED"
+                };
+                // 水準は累積（v3 は baseline・v2 を含む）なので、
+                // 立った最上位の水準まで下位の全機能を検査する。
+                let mut rest = val;
+                let mut top = 0usize;
+                for (i, &(bit, _, _)) in ISA_LEVELS.iter().enumerate() {
+                    if rest & bit != 0 {
+                        rest &= !bit;
+                        top = i + 1;
+                    }
+                }
+                for &(.., level, feats) in &ISA_LEVELS[..top] {
+                    for name in feats {
+                        if !features.contains(*name) {
+                            eprintln!(
+                                "run: ELF は {label} で {level} を要求するが CPU モデルに {name} がない"
+                            );
+                        }
+                    }
+                }
+                if rest != 0 {
+                    eprintln!("run: ELF は {label} で未対応の水準ビット {rest:#x} を要求する");
+                }
+            }
+            _ => {}
+        }
+    }
+}
 /// ELF64 ファイルを実行する。`run_elf_x86_32` の x86-64 版である。
 pub fn run_elf_x86_64(path: &str, argv: &[String]) -> Result<u64, String> {
     run_elf_x86_64_sel(path, argv, None)
@@ -14955,6 +15174,7 @@ pub fn run_image_x86_64_ex_jit(
         &sel.ident,
         Some(jit),
         &polyisa_guest_x86::DEFAULT_PARAMS,
+        false,
     )
 }
 

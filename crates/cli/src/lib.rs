@@ -125,6 +125,31 @@ fn run_x86_32_elf(_path: &str, _argv: &[String], _spec: Option<&CpuSpec>) -> Res
     Err("この polyisa は x86 ゲストなしでビルドされた".to_string())
 }
 
+/// ELFCLASS32 + EM_X86_64 の x32（ILP32）ELF を実行する。
+#[cfg(feature = "guest-x86")]
+fn run_x86_x32_elf(path: &str, argv: &[String], spec: Option<&CpuSpec>) -> Result<u64, String> {
+    let default = CpuSpec {
+        family: "x86".to_string(),
+        model: String::new(),
+        add: Vec::new(),
+        remove: Vec::new(),
+        params: Vec::new(),
+    };
+    let sel = resolve_sel(
+        "x86",
+        polyisa_guest_x86::MODEL_DEFS,
+        polyisa_guest_x86::FEATURE_DEFS,
+        polyisa_guest_x86::FEAT_BITS,
+        spec.unwrap_or(&default),
+    )?;
+    run_x86::run_elf_x86_x32_sel(path, argv, Some(&sel))
+}
+
+#[cfg(not(feature = "guest-x86"))]
+fn run_x86_x32_elf(_path: &str, _argv: &[String], _spec: Option<&CpuSpec>) -> Result<u64, String> {
+    Err("この polyisa は x86 ゲストなしでビルドされた".to_string())
+}
+
 #[cfg(feature = "guest-x86")]
 fn run_x86_64_elf(path: &str, argv: &[String], spec: Option<&CpuSpec>) -> Result<u64, String> {
     let default = CpuSpec {
@@ -389,6 +414,10 @@ pub fn run_path_opts(
             if ehdr.machine == 3 {
                 check("x86")?;
                 run_x86_32_elf(path, argv, spec.as_ref())
+            } else if ehdr.machine == 62 {
+                // ELFCLASS32 + EM_X86_64 は x32（ILP32）。Ref: SRC-LINUX (7.3)。
+                check("x86")?;
+                run_x86_x32_elf(path, argv, spec.as_ref())
             } else if ehdr.machine == 40 {
                 // EM_ARM（AArch32・ARM 状態）。Ref: AAELF32 §4.1。
                 check("arm")?;

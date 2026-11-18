@@ -102,6 +102,7 @@ pub const VFORK: u64 = 190;
 pub const PIPE: u64 = 42;
 pub const GETPPID: u64 = 64;
 pub const GETTIMEOFDAY: u64 = 78;
+pub const GETCPU: u64 = 318;
 pub const LLSEEK: u64 = 140;
 pub const STAT64: u64 = 195;
 pub const LSTAT64: u64 = 196;

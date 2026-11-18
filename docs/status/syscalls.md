@@ -48,6 +48,7 @@
 - fstat
 - fsync
 - ftruncate
+- getcpu
 - getcwd
 - getdents64
 - getegid
@@ -62,6 +63,7 @@
 - getrandom
 - getsockname
 - gettid
+- gettimeofday
 - getuid
 - init_module
 - inotify_add_watch
@@ -190,6 +192,7 @@
 - fstat
 - fstatat64
 - ftruncate
+- getcpu
 - getcwd
 - getdents64
 - getegid

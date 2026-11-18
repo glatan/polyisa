@@ -140,6 +140,63 @@ fn hello_x86_64() -> Vec<u8> {
 }
 
 #[cfg(feature = "guest-x86")]
+fn hello_x86_x32() -> Vec<u8> {
+    // ELFCLASS32 + EM_X86_64 の x32（ILP32）バイナリ。命令は 64 ビット
+    // モードだが syscall 番号は __X32_SYSCALL_BIT (0x40000000) 付きで、
+    // ポインタは 32 ビット。write(1, msg, 13) して exit(42)。
+    let code: &[u8] = &[
+        0xBF, 0x01, 0x00, 0x00, 0x00, // mov edi,1
+        0xBE, 0x22, 0x00, 0x01, 0x00, // mov esi,0x10022 (msg)
+        0xBA, 0x0D, 0x00, 0x00, 0x00, // mov edx,13
+        0xB8, 0x01, 0x00, 0x00, 0x40, // mov eax,0x40000001 (x32 write)
+        0x0F, 0x05, // syscall
+        0xBF, 0x2A, 0x00, 0x00, 0x00, // mov edi,42
+        0xB8, 0x3C, 0x00, 0x00, 0x40, // mov eax,0x4000003C (x32 exit)
+        0x0F, 0x05, // syscall
+    ];
+    let msg = b"Hello, poly!\n";
+    assert_eq!(code.len(), 0x22);
+    let mut f = Vec::new();
+    // ELFCLASS32。e_machine は EM_X86_64=62 — x32 の見分け方。
+    f.extend_from_slice(&[0x7f, b'E', b'L', b'F', 1, 1, 1, 0]);
+    f.extend_from_slice(&[0u8; 8]);
+    f.extend_from_slice(&2u16.to_le_bytes());
+    f.extend_from_slice(&62u16.to_le_bytes()); // EM_X86_64
+    f.extend_from_slice(&1u32.to_le_bytes());
+    f.extend_from_slice(&0x10000u32.to_le_bytes());
+    f.extend_from_slice(&52u32.to_le_bytes());
+    f.extend_from_slice(&0u32.to_le_bytes());
+    f.extend_from_slice(&0u32.to_le_bytes());
+    f.extend_from_slice(&52u16.to_le_bytes());
+    f.extend_from_slice(&32u16.to_le_bytes());
+    f.extend_from_slice(&1u16.to_le_bytes());
+    f.extend_from_slice(&0u16.to_le_bytes());
+    f.extend_from_slice(&0u16.to_le_bytes());
+    f.extend_from_slice(&0u16.to_le_bytes());
+    let seg_len = (code.len() + msg.len()) as u32;
+    f.extend_from_slice(&1u32.to_le_bytes());
+    f.extend_from_slice(&84u32.to_le_bytes());
+    f.extend_from_slice(&0x10000u32.to_le_bytes());
+    f.extend_from_slice(&0x10000u32.to_le_bytes());
+    f.extend_from_slice(&seg_len.to_le_bytes());
+    f.extend_from_slice(&seg_len.to_le_bytes());
+    f.extend_from_slice(&5u32.to_le_bytes());
+    f.extend_from_slice(&0x1000u32.to_le_bytes());
+    f.extend_from_slice(code);
+    f.extend_from_slice(msg);
+    f
+}
+
+#[cfg(feature = "guest-x86")]
+#[test]
+fn run_path_executes_x86_x32_hello() {
+    let path = write_temp("hellox32", &hello_x86_x32());
+    let r = polyisa_cli::run_path(&path.to_string_lossy(), &[]);
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(r, Ok(42));
+}
+
+#[cfg(feature = "guest-x86")]
 #[test]
 fn run_path_executes_x86_64_hello() {
     let path = write_temp("hello64", &hello_x86_64());

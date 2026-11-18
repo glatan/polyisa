@@ -1154,6 +1154,51 @@ pub fn sys_gettimeofday(env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     set64(env, Gpr(0), 0);
     Some(TrapOutcome::Handled)
 }
+
+/// getcpu(cpu, node, tcache)。仮想 CPU 0・ノード 0 を書き込む。
+/// tcache（第3引数）は未使用。Ref: SRC-LINUX (7.3)。
+pub fn sys_getcpu(env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    for p in [get64(env, cx.r_a), get64(env, cx.r_b)] {
+        if p != 0
+            && env
+                .backend
+                .mem
+                .write(VirtAddr(p), &0u32.to_le_bytes())
+                .is_err()
+        {
+            return Some(TrapOutcome::Unimplemented);
+        }
+    }
+    set64(env, Gpr(0), 0);
+    Some(TrapOutcome::Handled)
+}
+
+/// vsyscall ページの配置先。実機は 0xffffffffff600000 台だが、
+/// eip を 32 ビットで持つモデルでは下位番地に写像する。
+pub const VSYSCALL_ADDR: u64 = 0xff60_0000;
+
+/// x86-64 の vsyscall ページを写像する。gettimeofday(96)・
+/// time(201)・getcpu(309) の各入口に `mov eax, nr; syscall; ret`
+/// のスタブを置き、call で飛んできた呼び出しを OS パーソナリティへ
+/// 回す（i386 の VSYS_ADDR スタブと同じ仕組み）。
+/// x32 でも同じページが見えるので同様に写像してよい。
+// Ref: SRC-LINUX arch/x86/entry/vsyscall/vsyscall_64.c。
+pub fn map_vsyscall_page(mem: &mut polyisa_mem::AddressSpace) -> Result<(), polyisa_mem::MemError> {
+    use polyisa_mem::Perms;
+    mem.map(
+        VirtAddr(VSYSCALL_ADDR),
+        1,
+        Perms(Perms::R.0 | Perms::W.0 | Perms::X.0),
+    )?;
+    for (off, nr) in [(0u64, 96u32), (0x400, 201), (0x800, 309)] {
+        let mut stub = Vec::with_capacity(8);
+        stub.push(0xB8); // mov eax, imm32
+        stub.extend_from_slice(&nr.to_le_bytes());
+        stub.extend_from_slice(&[0x0F, 0x05, 0xC3]); // syscall; ret
+        mem.write(VirtAddr(VSYSCALL_ADDR + off), &stub)?;
+    }
+    Ok(())
+}
 pub fn path_ino(path: &str) -> u64 {
     let folded = fold_path(path);
     let mut h = 0xcbf29ce484222325u64;

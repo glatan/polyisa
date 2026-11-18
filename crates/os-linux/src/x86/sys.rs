@@ -192,6 +192,12 @@ impl Linux {
         }
     }
 
+    /// x32（ILP32）のハンドラなら真。実行経路が像とハンドラの
+    /// ABI を食い違えて組み合わせていないか検査するために使う。
+    pub fn is_x32(&self) -> bool {
+        self.x32
+    }
+
     /// プログラムブレークの初期値を置く。像末尾をページ境界に切り上げる。
     /// `run_image_x86_64` がセグメント配置の直後に呼ぶ。
     pub fn init_brk(&mut self, image_end: u64) {
@@ -946,6 +952,8 @@ const X86_64_SYSCALLS: &[(&str, SysFn)] = &[
     ("getrandom", sys_getrandom),
     ("prlimit64", sys_prlimit64),
     ("time", sys_time),
+    ("gettimeofday", sys_gettimeofday),
+    ("getcpu", sys_getcpu),
     ("ioctl", sys_ioctl),
     ("clock_nanosleep", sys_clock_nanosleep),
     ("nanosleep", sys_nanosleep),
@@ -1048,6 +1056,7 @@ const X86_32_SYSCALLS: &[(&str, SysFn)] = &[
     ("sendfile", sys_sendfile),
     ("time", sys_time),
     ("gettimeofday", sys_gettimeofday),
+    ("getcpu", sys_getcpu),
     ("clock_gettime", sys_clock_gettime),
     ("stat", sys_stat),
     ("lstat", sys_lstat),
@@ -3025,6 +3034,11 @@ fn sys_gettimeofday(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<
     crate::x86::sys_gettimeofday(env, cx)
 }
 
+fn sys_getcpu(_sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
+    // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
+    crate::x86::sys_getcpu(env, cx)
+}
+
 fn sys_clock_gettime(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     // 実体は `os-linux` に置く。WP2 の移管が終わるまでの適合層.
     crate::x86::sys_clock_gettime(&mut sys.mono_start, env, cx)
@@ -3675,6 +3689,11 @@ fn install_exec(
     mem.map(VirtAddr(base), count, Perms(Perms::R.0 | Perms::W.0))
         .map_err(|_| ENOMEM)?;
     mem.write(VirtAddr(sp), &img).map_err(|_| EFAULT)?;
+    // x86-64 の vsyscall ページ。新しい像でも同じ番地が見えるよう
+    // ここでも写像する（x32 も 64 ビット実行なので対象に含める）。
+    if sys.is64 {
+        let _ = crate::x86::map_vsyscall_page(&mut mem);
+    }
     env.backend.mem = mem;
     env.backend.reservation = polyisa_mem::Reservation::empty();
     polyisa_guest_x86::sem::write64(&mut env.backend, Gpr(4), sp);

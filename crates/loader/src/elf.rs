@@ -297,6 +297,87 @@ pub fn load_segments_bias(
     Ok(())
 }
 
+/// `PT_GNU_PROPERTY`。GNU のプログラム属性を運ぶノートセグメント。
+pub const PT_GNU_PROPERTY: u32 = 0x6474_e553;
+/// `NT_GNU_PROPERTY_TYPE_0`。`"GNU"` 名のノートの種類。
+pub const NT_GNU_PROPERTY_TYPE_0: u32 = 5;
+/// `GNU_PROPERTY_X86_FEATURE_1_AND`。必須機能の AND 条件。
+pub const GNU_PROPERTY_X86_FEATURE_1_AND: u32 = 0xc000_0002;
+/// `GNU_PROPERTY_X86_FEATURE_2_USED`。プログラムが使う機能。
+pub const GNU_PROPERTY_X86_FEATURE_2_USED: u32 = 0xc001_0001;
+/// `GNU_PROPERTY_X86_FEATURE_2_NEEDED`。必要とする機能。
+pub const GNU_PROPERTY_X86_FEATURE_2_NEEDED: u32 = 0xc000_8001;
+/// `GNU_PROPERTY_X86_ISA_1_USED`。使う命令セットの水準。
+pub const GNU_PROPERTY_X86_ISA_1_USED: u32 = 0xc001_0002;
+/// `GNU_PROPERTY_X86_ISA_1_NEEDED`。必要とする命令セットの水準。
+pub const GNU_PROPERTY_X86_ISA_1_NEEDED: u32 = 0xc000_8002;
+
+/// `PT_GNU_PROPERTY` の `"GNU"` ノートからプロパティを列挙する。
+/// 返り値は `(type, value)` の列で、値は 4 バイトまたは 8 バイトの
+/// 整数だけを拾う。ノートがなければ空を返す。
+// Ref: SPEC-X86-PSABI（ELF extensions, "Program Properties"）と
+// binutils `include/elf/common.h` のプロパティ定義。
+#[must_use]
+pub fn gnu_properties(bytes: &[u8], phdrs: &[Phdr], little: bool) -> Vec<(u32, u64)> {
+    // プロパティ項目の整列は ELFCLASS で決まる（64 は 8、32 は 4）。
+    let prop_align = if bytes.get(4) == Some(&2) {
+        8usize
+    } else {
+        4usize
+    };
+    let mut out = Vec::new();
+    for ph in phdrs {
+        if ph.seg_type != PT_GNU_PROPERTY {
+            continue;
+        }
+        let Some(end) = ph.offset.checked_add(ph.filesz) else {
+            continue;
+        };
+        let Some(seg) = bytes.get(ph.offset as usize..end as usize) else {
+            continue;
+        };
+        // ELF ノート: namesz・descsz・type の 3 語のあとに名前と
+        // 記述が続き、名前と記述はそれぞれ 4 バイト整列する。
+        let mut off = 0usize;
+        while off + 12 <= seg.len() {
+            let namesz = u32_of(&seg[off..], little).unwrap_or(0) as usize;
+            let descsz = u32_of(&seg[off + 4..], little).unwrap_or(0) as usize;
+            let ntype = u32_of(&seg[off + 8..], little).unwrap_or(0);
+            off += 12;
+            let Some(name) = seg.get(off..off + namesz) else {
+                break;
+            };
+            off += namesz.next_multiple_of(4);
+            let Some(desc) = seg.get(off..off + descsz) else {
+                break;
+            };
+            off += descsz.next_multiple_of(4);
+            if ntype != NT_GNU_PROPERTY_TYPE_0 || name != b"GNU\0" {
+                continue;
+            }
+            // 記述は (type, datasz, data) の並び。data の整列は
+            // ELFCLASS のプロパティ整列に従う。
+            let mut d = 0usize;
+            while d + 8 <= desc.len() {
+                let ty = u32_of(&desc[d..], little).unwrap_or(0);
+                let sz = u32_of(&desc[d + 4..], little).unwrap_or(0) as usize;
+                d += 8;
+                let Some(data) = desc.get(d..d + sz) else {
+                    break;
+                };
+                d += sz.next_multiple_of(prop_align);
+                let v = match sz {
+                    4 => u64::from(u32_of(data, little).unwrap_or(0)),
+                    8 => u64_of(data, little).unwrap_or(0),
+                    _ => continue,
+                };
+                out.push((ty, v));
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -591,5 +672,57 @@ mod tests {
         let mut z = [0xFFu8; 4];
         mem.read(VirtAddr(0x1_0800), &mut z, acc).unwrap();
         assert_eq!(z, [0; 4]);
+    }
+
+    /// PT_GNU_PROPERTY ノートを 64 ビット ELF 形式で組み立てる。
+    fn property_note(props: &[(u32, u32)]) -> Vec<u8> {
+        let mut desc = Vec::new();
+        for &(ty, val) in props {
+            desc.extend_from_slice(&ty.to_le_bytes());
+            desc.extend_from_slice(&4u32.to_le_bytes());
+            desc.extend_from_slice(&val.to_le_bytes());
+            desc.extend_from_slice(&[0; 4]); // 8 バイト整列の埋め草
+        }
+        let mut note = Vec::new();
+        note.extend_from_slice(&4u32.to_le_bytes()); // namesz
+        note.extend_from_slice(&(desc.len() as u32).to_le_bytes());
+        note.extend_from_slice(&NT_GNU_PROPERTY_TYPE_0.to_le_bytes());
+        note.extend_from_slice(b"GNU\0");
+        note.extend_from_slice(&desc);
+        note
+    }
+
+    #[test]
+    fn gnu_properties_reads_x86_features() {
+        let mut bytes = minimal();
+        // ノートはファイル末尾に置き、phdr で指す。
+        let note = property_note(&[
+            (GNU_PROPERTY_X86_FEATURE_1_AND, 0x3),
+            (GNU_PROPERTY_X86_FEATURE_2_USED, 0x8 | 0x10),
+        ]);
+        bytes[4] = 2; // ELFCLASS64
+        let off = bytes.len() as u64;
+        bytes.extend_from_slice(&note);
+        let ph = Phdr {
+            seg_type: PT_GNU_PROPERTY,
+            offset: off,
+            vaddr: 0,
+            filesz: note.len() as u64,
+            memsz: note.len() as u64,
+            flags: 4,
+            align: 8,
+        };
+        let props = gnu_properties(&bytes, &[ph], true);
+        assert_eq!(
+            props,
+            vec![
+                (GNU_PROPERTY_X86_FEATURE_1_AND, 0x3),
+                (GNU_PROPERTY_X86_FEATURE_2_USED, 0x18)
+            ]
+        );
+        // PT_GNU_PROPERTY 以外は見ない。
+        let mut other = ph;
+        other.seg_type = 6; // PT_PHDR
+        assert!(gnu_properties(&bytes, &[other], true).is_empty());
     }
 }
