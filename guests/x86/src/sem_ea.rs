@@ -12623,6 +12623,10 @@ fn ev_splat128<B: Backend>(b: &mut B, v: B::V<W128>, ebits: u32) -> B::V<W128> {
 /// EVEX r/m ソースの part `p`（128 ビット単位）を読む。
 /// メモリ形で b=1 なら埋め込み broadcast：要素（`edisp` バイト）
 /// を読んで全レーンに複製する。`w64` は要素幅。
+///
+/// 近似：実機では opmask で全要素が無効のときメモリ読み出し
+/// 自体が抑制される（フォールトしない）が、本実装は
+/// アクティブな part を無条件で読む。
 fn ev_src<B: Backend>(
     b: &mut B,
     d: &MapDec,
@@ -12653,11 +12657,18 @@ fn ev_src<B: Backend>(
     }
 }
 
-/// VADDPS/VADDPD（EVEX.0F 58）。dst{zk} = src1 + src2 で、
-/// `w64`（EVEX.W）は要素幅。メモリ形の b=1 は m32bcst/m64bcst、
-/// レジスタ形の b=1 は {er}/{sae}（L'L=丸め指定、512 固定）。
-/// {k} マージと {z} ゼロイングは要素単位。
-pub fn eaddp<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit> {
+/// EVEX の FVM パック浮動小数点演算（VADD/VSUB/VMUL/VDIV/
+/// VMIN/VMAX/VSQRT の ps/pd）。dst{zk} = src1 op src2 で、
+/// `d.vex_w` が要素幅（W=0 は f32、W=1 は f64）。メモリ形の
+/// b=1 は m32bcst/m64bcst、レジスタ形の b=1 は {er}/{sae}
+/// （L'L=丸め指定、512 固定）。Sqrt は Vv 未使用の単項で
+/// r/m 側を取る。{k} マージと {z} ゼロイングは要素単位。
+pub fn efloat<B: Backend>(
+    b: &mut B,
+    op: Fop,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
     use polyisa_sem::{F32, F64};
     let reg_form = matches!(ea, Rm::Reg(_));
     let n = ev_parts(d, reg_form);
@@ -12667,23 +12678,28 @@ pub fn eaddp<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<()
     let dst = decode::reg_x5(d);
     let src1 = d.vex_v;
     let zero = b.konst::<W128>(W128::from_u128(0));
+    let una = matches!(op, Fop::Sqrt);
     for p in 0..4 {
         let v = if p < n {
-            let x = b.get(sem::zreg_ref(src1, p));
             let y = ev_src(b, d, ea, p, w64)?;
+            let x = if una {
+                zero
+            } else {
+                b.get(sem::zreg_ref(src1, p))
+            };
             let mut r = zero;
             if w64 {
                 for e in 0..2 {
                     let xf = flane64(b, x, e);
                     let yf = flane64(b, y, e);
-                    let g = b.fadd_r::<F64>(xf, yf, rc);
+                    let g = efl_bin::<B, F64>(b, op, xf, yf, rc);
                     r = put_flane64(b, r, g, e);
                 }
             } else {
                 for e in 0..4 {
                     let xf = flane32(b, x, e);
                     let yf = flane32(b, y, e);
-                    let g = b.fadd_r::<F32>(xf, yf, rc);
+                    let g = efl_bin::<B, F32>(b, op, xf, yf, rc);
                     r = put_flane32(b, r, g, e);
                 }
             }
@@ -12696,9 +12712,37 @@ pub fn eaddp<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<()
     Ok(())
 }
 
-/// VPADDD/VPADDQ（EVEX.66.0F FE / D4）。dst{zk} = src1 + src2。
-/// メモリ形の b=1 は m32bcst/m64bcst。整数形なので {er} はない。
-pub fn epadd<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit> {
+/// `efloat` のレーン演算本体。{er} の丸め指定 `rc` は丸めの
+/// 効く演算（四則・sqrt）にだけ渡し、min/max は丸め無し。
+/// Sqrt は単項なので r/m 側の `c` を取る（`fop64` と同じ）。
+fn efl_bin<B: Backend, F: polyisa_sem::Width>(
+    b: &mut B,
+    op: Fop,
+    a: B::V<F>,
+    c: B::V<F>,
+    rc: u8,
+) -> B::V<F> {
+    match op {
+        Fop::Add => b.fadd_r::<F>(a, c, rc),
+        Fop::Sub => b.fsub_r::<F>(a, c, rc),
+        Fop::Mul => b.fmul_r::<F>(a, c, rc),
+        Fop::Div => b.fdiv_r::<F>(a, c, rc),
+        Fop::Min => b.fmin::<F>(a, c),
+        Fop::Max => b.fmax::<F>(a, c),
+        Fop::Sqrt => b.fsqrt_r::<F>(c, rc),
+        Fop::Cmp(_) => a,
+    }
+}
+
+/// EVEX のパック整数演算（VPADD/VPSUB/VPMIN/VPMAX 等の
+/// dword/qword 形）。`d.vex_w` が要素幅、メモリ形の b=1 は
+/// m32bcst/m64bcst。整数形なので {er} はない。
+pub fn eint<B: Backend>(
+    b: &mut B,
+    kind: Iop,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
     let reg_form = matches!(ea, Rm::Reg(_));
     let n = ev_parts(d, reg_form);
     let w64 = d.vex_w;
@@ -12711,19 +12755,17 @@ pub fn epadd<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<()
             let x = b.get(sem::zreg_ref(src1, p));
             let y = ev_src(b, d, ea, p, w64)?;
             let r = if w64 {
-                let x64 = b.trunc::<W128, W64>(x);
-                let y64 = b.trunc::<W128, W64>(y);
-                let xh = lane128(b, x, 64, 64);
-                let yh = lane128(b, y, 64, 64);
-                let xh64 = b.trunc::<W128, W64>(xh);
-                let yh64 = b.trunc::<W128, W64>(yh);
-                let lo = b.add::<W64>(x64, y64);
-                let hi = b.add::<W64>(xh64, yh64);
-                let hi128 = b.zext::<W64, W128>(hi);
-                let lo128 = b.zext::<W64, W128>(lo);
-                let sh = b.konst::<W128>(W128::from_u128(64));
-                let hi_s = b.shl::<W128>(hi128, sh);
-                b.or::<W128>(lo128, hi_s)
+                let mut r = zero;
+                for e in 0..2 {
+                    let xl = lane128(b, x, e * 64, 64);
+                    let yl = lane128(b, y, e * 64, 64);
+                    let x64 = b.trunc::<W128, W64>(xl);
+                    let y64 = b.trunc::<W128, W64>(yl);
+                    let g = iop_op::<B, W64>(b, kind, x64, y64);
+                    let g128 = b.zext::<W64, W128>(g);
+                    r = put_lane128(b, r, g128, e * 64, 64);
+                }
+                r
             } else {
                 let mut r = zero;
                 for e in 0..4 {
@@ -12731,11 +12773,67 @@ pub fn epadd<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<()
                     let yl = lane128(b, y, e * 32, 32);
                     let x32 = b.trunc::<W128, W32>(xl);
                     let y32 = b.trunc::<W128, W32>(yl);
-                    let g = b.add::<W32>(x32, y32);
+                    let g = iop_op::<B, W32>(b, kind, x32, y32);
                     let g128 = b.zext::<W32, W128>(g);
                     r = put_lane128(b, r, g128, e * 32, 32);
                 }
                 r
+            };
+            ev_merge(b, d, k, dst, r, p, w64)
+        } else {
+            zero
+        };
+        b.set(sem::zreg_ref(dst, p), v);
+    }
+    Ok(())
+}
+
+/// EVEX のパック論理（VPAND/VPANDN/VPOR/VPXOR の d/q 形）。
+/// レーン演算は 128 ビット単位、マスク粒度は `d.vex_w` の
+/// 要素幅。メモリ形の b=1 は m32bcst/m64bcst。
+pub fn elogic<B: Backend>(
+    b: &mut B,
+    op: Lop,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    let reg_form = matches!(ea, Rm::Reg(_));
+    let n = ev_parts(d, reg_form);
+    let w64 = d.vex_w;
+    let k = ev_k(b, d);
+    let dst = decode::reg_x5(d);
+    let src1 = d.vex_v;
+    let zero = b.konst::<W128>(W128::from_u128(0));
+    for p in 0..4 {
+        let v = if p < n {
+            let x = b.get(sem::zreg_ref(src1, p));
+            let y = ev_src(b, d, ea, p, w64)?;
+            let r = lop_lane(b, op, x, y);
+            ev_merge(b, d, k, dst, r, p, w64)
+        } else {
+            zero
+        };
+        b.set(sem::zreg_ref(dst, p), v);
+    }
+    Ok(())
+}
+
+/// EVEX の PABS（VPABSD/VPABSQ）。Vv 未使用の単項で、
+/// 要素幅は `d.vex_w`（VPABSQ は avx512dq）。
+pub fn eabs<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit> {
+    let reg_form = matches!(ea, Rm::Reg(_));
+    let n = ev_parts(d, reg_form);
+    let w64 = d.vex_w;
+    let k = ev_k(b, d);
+    let dst = decode::reg_x5(d);
+    let zero = b.konst::<W128>(W128::from_u128(0));
+    for p in 0..4 {
+        let v = if p < n {
+            let y = ev_src(b, d, ea, p, w64)?;
+            let r = if w64 {
+                pabs_val::<B, W64>(b, y)
+            } else {
+                pabs_val::<B, W32>(b, y)
             };
             ev_merge(b, d, k, dst, r, p, w64)
         } else {

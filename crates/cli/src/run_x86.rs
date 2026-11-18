@@ -3744,8 +3744,8 @@ fn dispatch_map<B: Backend>(
         // EVEX の VMOVDQU32/64。要素幅は EVEX.W（d.vex_w）。
         Insn::Vmovdqu32XvWv | Insn::Vmovdqu32XvWvVl => sem_ea::emovdqu(b, d, &ea, false, d.vex_w),
         Insn::Vmovdqu32WvXv | Insn::Vmovdqu32WvXvVl => sem_ea::emovdqu(b, d, &ea, true, d.vex_w),
-        // EVEX パック演算は eaddp/epadd 側の腕に統合（同名の
-        // VEX 変種と Insn を共有するため `d.evex` で分岐する）。
+        // EVEX パック演算は efloat/eint/elogic/eabs の腕に統合
+        // （同名の VEX 変種と Insn を共有するため `d.evex` で分岐する）。
         Insn::MovssXvWv => sem_ea::movs_ld(b, d, &ea, 32),
         Insn::MovsdXvWv => sem_ea::movs_ld(b, d, &ea, 64),
         Insn::MovssWvXv => sem_ea::movs_st(b, d, &ea, 32),
@@ -3854,44 +3854,116 @@ fn dispatch_map<B: Backend>(
         Insn::VmovsdXvHvWv => sem_ea::vmovs_ld(b, d, &ea, 64),
         Insn::VmovssWvHvXv => sem_ea::vmovs_st(b, d, &ea, 32),
         Insn::VmovsdWvHvXv => sem_ea::vmovs_st(b, d, &ea, 64),
-        Insn::VsqrtpsXvWv => sem_ea::vpfloat(b, sem_ea::Fop::Sqrt, 32, d, &ea),
-        Insn::VsqrtpdXvWv => sem_ea::vpfloat(b, sem_ea::Fop::Sqrt, 64, d, &ea),
+        Insn::VsqrtpsXvWv => {
+            if d.evex {
+                sem_ea::efloat(b, sem_ea::Fop::Sqrt, d, &ea)
+            } else {
+                sem_ea::vpfloat(b, sem_ea::Fop::Sqrt, 32, d, &ea)
+            }
+        }
+        Insn::VsqrtpdXvWv => {
+            if d.evex {
+                sem_ea::efloat(b, sem_ea::Fop::Sqrt, d, &ea)
+            } else {
+                sem_ea::vpfloat(b, sem_ea::Fop::Sqrt, 64, d, &ea)
+            }
+        }
         Insn::VsqrtssXvHvWv => sem_ea::vsfloat(b, sem_ea::Fop::Sqrt, 32, d, &ea),
         Insn::VsqrtsdXvHvWv => sem_ea::vsfloat(b, sem_ea::Fop::Sqrt, 64, d, &ea),
         Insn::VaddpsXvHvWv => {
             if d.evex {
-                sem_ea::eaddp(b, d, &ea)
+                sem_ea::efloat(b, sem_ea::Fop::Add, d, &ea)
             } else {
                 sem_ea::vpfloat(b, sem_ea::Fop::Add, 32, d, &ea)
             }
         }
         Insn::VaddpdXvHvWv => {
             if d.evex {
-                sem_ea::eaddp(b, d, &ea)
+                sem_ea::efloat(b, sem_ea::Fop::Add, d, &ea)
             } else {
                 sem_ea::vpfloat(b, sem_ea::Fop::Add, 64, d, &ea)
             }
         }
         Insn::VaddssXvHvWv => sem_ea::vsfloat(b, sem_ea::Fop::Add, 32, d, &ea),
         Insn::VaddsdXvHvWv => sem_ea::vsfloat(b, sem_ea::Fop::Add, 64, d, &ea),
-        Insn::VmulpsXvHvWv => sem_ea::vpfloat(b, sem_ea::Fop::Mul, 32, d, &ea),
-        Insn::VmulpdXvHvWv => sem_ea::vpfloat(b, sem_ea::Fop::Mul, 64, d, &ea),
+        Insn::VmulpsXvHvWv => {
+            if d.evex {
+                sem_ea::efloat(b, sem_ea::Fop::Mul, d, &ea)
+            } else {
+                sem_ea::vpfloat(b, sem_ea::Fop::Mul, 32, d, &ea)
+            }
+        }
+        Insn::VmulpdXvHvWv => {
+            if d.evex {
+                sem_ea::efloat(b, sem_ea::Fop::Mul, d, &ea)
+            } else {
+                sem_ea::vpfloat(b, sem_ea::Fop::Mul, 64, d, &ea)
+            }
+        }
         Insn::VmulssXvHvWv => sem_ea::vsfloat(b, sem_ea::Fop::Mul, 32, d, &ea),
         Insn::VmulsdXvHvWv => sem_ea::vsfloat(b, sem_ea::Fop::Mul, 64, d, &ea),
-        Insn::VsubpsXvHvWv => sem_ea::vpfloat(b, sem_ea::Fop::Sub, 32, d, &ea),
-        Insn::VsubpdXvHvWv => sem_ea::vpfloat(b, sem_ea::Fop::Sub, 64, d, &ea),
+        Insn::VsubpsXvHvWv => {
+            if d.evex {
+                sem_ea::efloat(b, sem_ea::Fop::Sub, d, &ea)
+            } else {
+                sem_ea::vpfloat(b, sem_ea::Fop::Sub, 32, d, &ea)
+            }
+        }
+        Insn::VsubpdXvHvWv => {
+            if d.evex {
+                sem_ea::efloat(b, sem_ea::Fop::Sub, d, &ea)
+            } else {
+                sem_ea::vpfloat(b, sem_ea::Fop::Sub, 64, d, &ea)
+            }
+        }
         Insn::VsubssXvHvWv => sem_ea::vsfloat(b, sem_ea::Fop::Sub, 32, d, &ea),
         Insn::VsubsdXvHvWv => sem_ea::vsfloat(b, sem_ea::Fop::Sub, 64, d, &ea),
-        Insn::VminpsXvHvWv => sem_ea::vpfloat(b, sem_ea::Fop::Min, 32, d, &ea),
-        Insn::VminpdXvHvWv => sem_ea::vpfloat(b, sem_ea::Fop::Min, 64, d, &ea),
+        Insn::VminpsXvHvWv => {
+            if d.evex {
+                sem_ea::efloat(b, sem_ea::Fop::Min, d, &ea)
+            } else {
+                sem_ea::vpfloat(b, sem_ea::Fop::Min, 32, d, &ea)
+            }
+        }
+        Insn::VminpdXvHvWv => {
+            if d.evex {
+                sem_ea::efloat(b, sem_ea::Fop::Min, d, &ea)
+            } else {
+                sem_ea::vpfloat(b, sem_ea::Fop::Min, 64, d, &ea)
+            }
+        }
         Insn::VminssXvHvWv => sem_ea::vsfloat(b, sem_ea::Fop::Min, 32, d, &ea),
         Insn::VminsdXvHvWv => sem_ea::vsfloat(b, sem_ea::Fop::Min, 64, d, &ea),
-        Insn::VdivpsXvHvWv => sem_ea::vpfloat(b, sem_ea::Fop::Div, 32, d, &ea),
-        Insn::VdivpdXvHvWv => sem_ea::vpfloat(b, sem_ea::Fop::Div, 64, d, &ea),
+        Insn::VdivpsXvHvWv => {
+            if d.evex {
+                sem_ea::efloat(b, sem_ea::Fop::Div, d, &ea)
+            } else {
+                sem_ea::vpfloat(b, sem_ea::Fop::Div, 32, d, &ea)
+            }
+        }
+        Insn::VdivpdXvHvWv => {
+            if d.evex {
+                sem_ea::efloat(b, sem_ea::Fop::Div, d, &ea)
+            } else {
+                sem_ea::vpfloat(b, sem_ea::Fop::Div, 64, d, &ea)
+            }
+        }
         Insn::VdivssXvHvWv => sem_ea::vsfloat(b, sem_ea::Fop::Div, 32, d, &ea),
         Insn::VdivsdXvHvWv => sem_ea::vsfloat(b, sem_ea::Fop::Div, 64, d, &ea),
-        Insn::VmaxpsXvHvWv => sem_ea::vpfloat(b, sem_ea::Fop::Max, 32, d, &ea),
-        Insn::VmaxpdXvHvWv => sem_ea::vpfloat(b, sem_ea::Fop::Max, 64, d, &ea),
+        Insn::VmaxpsXvHvWv => {
+            if d.evex {
+                sem_ea::efloat(b, sem_ea::Fop::Max, d, &ea)
+            } else {
+                sem_ea::vpfloat(b, sem_ea::Fop::Max, 32, d, &ea)
+            }
+        }
+        Insn::VmaxpdXvHvWv => {
+            if d.evex {
+                sem_ea::efloat(b, sem_ea::Fop::Max, d, &ea)
+            } else {
+                sem_ea::vpfloat(b, sem_ea::Fop::Max, 64, d, &ea)
+            }
+        }
         Insn::VmaxssXvHvWv => sem_ea::vsfloat(b, sem_ea::Fop::Max, 32, d, &ea),
         Insn::VmaxsdXvHvWv => sem_ea::vsfloat(b, sem_ea::Fop::Max, 64, d, &ea),
         Insn::VandpsXvHvWv | Insn::VandpdXvHvWv | Insn::VpandXvHvWv => {
@@ -3950,13 +4022,19 @@ fn dispatch_map<B: Backend>(
         Insn::VpcmpgtqXvHvWv => sem_ea::vpint::<B, W64>(b, sem_ea::Iop::CmpGtS, d, &ea),
         Insn::VpaddqXvHvWv => {
             if d.evex {
-                sem_ea::epadd(b, d, &ea)
+                sem_ea::eint(b, sem_ea::Iop::Add, d, &ea)
             } else {
                 sem_ea::vpint::<B, W64>(b, sem_ea::Iop::Add, d, &ea)
             }
         }
         Insn::VpmullwXvHvWv => sem_ea::vpint::<B, W16>(b, sem_ea::Iop::MulLo, d, &ea),
-        Insn::VpmulldXvHvWv => sem_ea::vpint::<B, W32>(b, sem_ea::Iop::MulLo, d, &ea),
+        Insn::VpmulldXvHvWv => {
+            if d.evex {
+                sem_ea::eint(b, sem_ea::Iop::MulLo, d, &ea)
+            } else {
+                sem_ea::vpint::<B, W32>(b, sem_ea::Iop::MulLo, d, &ea)
+            }
+        }
         Insn::VpmulhuwXvHvWv => sem_ea::vpint::<B, W16>(b, sem_ea::Iop::MulHiU, d, &ea),
         Insn::VpmulhwXvHvWv => sem_ea::vpint::<B, W16>(b, sem_ea::Iop::MulHiS, d, &ea),
         Insn::VpsubusbXvHvWv => sem_ea::vpint::<B, W8>(b, sem_ea::Iop::SubSatU, d, &ea),
@@ -3972,29 +4050,76 @@ fn dispatch_map<B: Backend>(
         Insn::VpminswXvHvWv => sem_ea::vpint::<B, W16>(b, sem_ea::Iop::MinS, d, &ea),
         Insn::VpmaxswXvHvWv => sem_ea::vpint::<B, W16>(b, sem_ea::Iop::MaxS, d, &ea),
         Insn::VpminsbXvHvWv => sem_ea::vpint::<B, W8>(b, sem_ea::Iop::MinS, d, &ea),
-        Insn::VpminsdXvHvWv => sem_ea::vpint::<B, W32>(b, sem_ea::Iop::MinS, d, &ea),
+        Insn::VpminsdXvHvWv => {
+            if d.evex {
+                sem_ea::eint(b, sem_ea::Iop::MinS, d, &ea)
+            } else {
+                sem_ea::vpint::<B, W32>(b, sem_ea::Iop::MinS, d, &ea)
+            }
+        }
         Insn::VpminuwXvHvWv => sem_ea::vpint::<B, W16>(b, sem_ea::Iop::MinU, d, &ea),
-        Insn::VpminudXvHvWv => sem_ea::vpint::<B, W32>(b, sem_ea::Iop::MinU, d, &ea),
+        Insn::VpminudXvHvWv => {
+            if d.evex {
+                sem_ea::eint(b, sem_ea::Iop::MinU, d, &ea)
+            } else {
+                sem_ea::vpint::<B, W32>(b, sem_ea::Iop::MinU, d, &ea)
+            }
+        }
         Insn::VpmaxsbXvHvWv => sem_ea::vpint::<B, W8>(b, sem_ea::Iop::MaxS, d, &ea),
-        Insn::VpmaxsdXvHvWv => sem_ea::vpint::<B, W32>(b, sem_ea::Iop::MaxS, d, &ea),
+        Insn::VpmaxsdXvHvWv => {
+            if d.evex {
+                sem_ea::eint(b, sem_ea::Iop::MaxS, d, &ea)
+            } else {
+                sem_ea::vpint::<B, W32>(b, sem_ea::Iop::MaxS, d, &ea)
+            }
+        }
         Insn::VpmaxuwXvHvWv => sem_ea::vpint::<B, W16>(b, sem_ea::Iop::MaxU, d, &ea),
-        Insn::VpmaxudXvHvWv => sem_ea::vpint::<B, W32>(b, sem_ea::Iop::MaxU, d, &ea),
+        Insn::VpmaxudXvHvWv => {
+            if d.evex {
+                sem_ea::eint(b, sem_ea::Iop::MaxU, d, &ea)
+            } else {
+                sem_ea::vpint::<B, W32>(b, sem_ea::Iop::MaxU, d, &ea)
+            }
+        }
         Insn::VpsignbXvHvWv => sem_ea::vpint::<B, W8>(b, sem_ea::Iop::Sign, d, &ea),
         Insn::VpsignwXvHvWv => sem_ea::vpint::<B, W16>(b, sem_ea::Iop::Sign, d, &ea),
         Insn::VpsigndXvHvWv => sem_ea::vpint::<B, W32>(b, sem_ea::Iop::Sign, d, &ea),
         Insn::VpsubbXvHvWv => sem_ea::vpint::<B, W8>(b, sem_ea::Iop::Sub, d, &ea),
         Insn::VpsubwXvHvWv => sem_ea::vpint::<B, W16>(b, sem_ea::Iop::Sub, d, &ea),
-        Insn::VpsubdXvHvWv => sem_ea::vpint::<B, W32>(b, sem_ea::Iop::Sub, d, &ea),
-        Insn::VpsubqXvHvWv => sem_ea::vpint::<B, W64>(b, sem_ea::Iop::Sub, d, &ea),
+        Insn::VpsubdXvHvWv => {
+            if d.evex {
+                sem_ea::eint(b, sem_ea::Iop::Sub, d, &ea)
+            } else {
+                sem_ea::vpint::<B, W32>(b, sem_ea::Iop::Sub, d, &ea)
+            }
+        }
+        Insn::VpsubqXvHvWv => {
+            if d.evex {
+                sem_ea::eint(b, sem_ea::Iop::Sub, d, &ea)
+            } else {
+                sem_ea::vpint::<B, W64>(b, sem_ea::Iop::Sub, d, &ea)
+            }
+        }
         Insn::VpaddbXvHvWv => sem_ea::vpint::<B, W8>(b, sem_ea::Iop::Add, d, &ea),
         Insn::VpaddwXvHvWv => sem_ea::vpint::<B, W16>(b, sem_ea::Iop::Add, d, &ea),
         Insn::VpadddXvHvWv => {
             if d.evex {
-                sem_ea::epadd(b, d, &ea)
+                sem_ea::eint(b, sem_ea::Iop::Add, d, &ea)
             } else {
                 sem_ea::vpint::<B, W32>(b, sem_ea::Iop::Add, d, &ea)
             }
         }
+        // EVEX 専用の FVM 項目（同名 VEX 変種が無いもの）。
+        Insn::VpmullqXvHvWv => sem_ea::eint(b, sem_ea::Iop::MulLo, d, &ea),
+        Insn::VpminsqXvHvWv => sem_ea::eint(b, sem_ea::Iop::MinS, d, &ea),
+        Insn::VpminuqXvHvWv => sem_ea::eint(b, sem_ea::Iop::MinU, d, &ea),
+        Insn::VpmaxsqXvHvWv => sem_ea::eint(b, sem_ea::Iop::MaxS, d, &ea),
+        Insn::VpmaxuqXvHvWv => sem_ea::eint(b, sem_ea::Iop::MaxU, d, &ea),
+        Insn::VpanddXvHvWv | Insn::VpandqXvHvWv => sem_ea::elogic(b, sem_ea::Lop::And, d, &ea),
+        Insn::VpandndXvHvWv | Insn::VpandnqXvHvWv => sem_ea::elogic(b, sem_ea::Lop::Andn, d, &ea),
+        Insn::VpordXvHvWv | Insn::VporqXvHvWv => sem_ea::elogic(b, sem_ea::Lop::Or, d, &ea),
+        Insn::VpxordXvHvWv | Insn::VpxorqXvHvWv => sem_ea::elogic(b, sem_ea::Lop::Xor, d, &ea),
+        Insn::VpabsqXvWv => sem_ea::eabs(b, d, &ea),
         Insn::VpsrlwXvHvWv => sem_ea::vpshift::<B, W16>(b, sem_ea::Psh::R, d, &ea),
         Insn::VpsrldXvHvWv => sem_ea::vpshift::<B, W32>(b, sem_ea::Psh::R, d, &ea),
         Insn::VpsrlqXvHvWv => sem_ea::vpshift::<B, W64>(b, sem_ea::Psh::R, d, &ea),
@@ -4058,7 +4183,13 @@ fn dispatch_map<B: Backend>(
         Insn::VtestpdXvWv => sem_ea::vtestf(b, d, 64, &ea),
         Insn::VpabsbXvWv => sem_ea::vpabs::<B, W8>(b, d, &ea),
         Insn::VpabswXvWv => sem_ea::vpabs::<B, W16>(b, d, &ea),
-        Insn::VpabsdXvWv => sem_ea::vpabs::<B, W32>(b, d, &ea),
+        Insn::VpabsdXvWv => {
+            if d.evex {
+                sem_ea::eabs(b, d, &ea)
+            } else {
+                sem_ea::vpabs::<B, W32>(b, d, &ea)
+            }
+        }
         Insn::VphminposuwXvWv => sem_ea::vphminposuw(b, d, &ea),
         // VCVT 系（パック変換）。
         Insn::Vcvtps2pdXvWv => sem_ea::vcvtp(b, sem_ea::CvtK::Ps2Pd, d, &ea),

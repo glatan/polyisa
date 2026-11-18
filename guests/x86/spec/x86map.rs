@@ -1800,6 +1800,18 @@ pub fn build_maps(m: &mut Model) {
     for (op, sel, mn, w, edisp, er) in [
         (0x58u8, PfxSel::Plain, "vaddps", false, 4u8, true),
         (0x58, PfxSel::P66, "vaddpd", true, 8, true),
+        (0x59, PfxSel::Plain, "vmulps", false, 4, true),
+        (0x59, PfxSel::P66, "vmulpd", true, 8, true),
+        (0x5C, PfxSel::Plain, "vsubps", false, 4, true),
+        (0x5C, PfxSel::P66, "vsubpd", true, 8, true),
+        (0x5D, PfxSel::Plain, "vminps", false, 4, false),
+        (0x5D, PfxSel::P66, "vminpd", true, 8, false),
+        (0x5E, PfxSel::Plain, "vdivps", false, 4, true),
+        (0x5E, PfxSel::P66, "vdivpd", true, 8, true),
+        (0x5F, PfxSel::Plain, "vmaxps", false, 4, false),
+        (0x5F, PfxSel::P66, "vmaxpd", true, 8, false),
+        (0xFA, PfxSel::P66, "vpsubd", false, 4, false),
+        (0xFB, PfxSel::P66, "vpsubq", true, 8, false),
         (0xFE, PfxSel::P66, "vpaddd", false, 4, false),
         (0xD4, PfxSel::P66, "vpaddq", true, 8, false),
     ] {
@@ -1817,6 +1829,52 @@ pub fn build_maps(m: &mut Model) {
         it.edisp = edisp;
         it.wsel = Some(w);
         m0f.push(MapItem::Insn(op, it));
+    }
+    // EVEX 論理演算（0F マップの DB/DF/EB/EF。0F38 ではない）。
+    for (op, mn, w, edisp) in [
+        (0xDBu8, "vpandd", false, 4u8),
+        (0xDB, "vpandq", true, 8),
+        (0xDF, "vpandnd", false, 4),
+        (0xDF, "vpandnq", true, 8),
+        (0xEB, "vpord", false, 4),
+        (0xEB, "vporq", true, 8),
+        (0xEF, "vpxord", false, 4),
+        (0xEF, "vpxorq", true, 8),
+    ] {
+        let mut it = ex(
+            &format!("{mn}_xv_hv_wv"),
+            &[RegX, Vv, RmX],
+            PfxSel::P66,
+            0b100,
+            false,
+            "{op} {x}, {h}, {w}",
+            "alu",
+        );
+        it.bcast = true;
+        it.edisp = edisp;
+        it.wsel = Some(w);
+        m0f.push(MapItem::Insn(op, it));
+    }
+    // VSQRTPS/PD の EVEX 形（FVM、単項で vvvv=1111b 必須）。
+    // b=1 はメモリ形の m32bcst/m64bcst とレジスタ形の {er}。
+    for (sel, mn, w, edisp) in [
+        (PfxSel::Plain, "vsqrtps", false, 4u8),
+        (PfxSel::P66, "vsqrtpd", true, 8),
+    ] {
+        let mut it = ex(
+            &format!("{mn}_xv_wv"),
+            &[RegX, RmX],
+            sel,
+            0b100,
+            true,
+            "{op} {x}, {w}",
+            "alu",
+        );
+        it.bcast = true;
+        it.er = true;
+        it.edisp = edisp;
+        it.wsel = Some(w);
+        m0f.push(MapItem::Insn(0x51, it));
     }
     // VMOVSS/VMOVSD（F3/F2 の 10/11、L0 のみ）。レジスタ形は
     // vvvv が第 2 ソースになる 3 オペランド形。メモリ形で
@@ -2921,6 +2979,62 @@ fn build_map_0f38(m: &mut Model) {
                 ));
             }
         }
+    }
+    // EVEX 0F38 の FVM 整数演算（512 ビット形のみ）。W=0/1 の
+    // 要素幅別項目は `wsel` で分け、メモリ形の b=1 は
+    // m32bcst/m64bcst（`edisp` が要素バイト数）。VPMULLQ と
+    // VPABSQ は avx512dq ゲート。論理演算（DB/DF/EB/EF）は
+    // 0F マップ側にある。
+    for (op, mn, w, edisp, dq) in [
+        (0x40u8, "vpmulld", false, 4u8, false),
+        (0x40, "vpmullq", true, 8, true),
+        (0x39, "vpminsd", false, 4, false),
+        (0x39, "vpminsq", true, 8, false),
+        (0x3B, "vpminud", false, 4, false),
+        (0x3B, "vpminuq", true, 8, false),
+        (0x3D, "vpmaxsd", false, 4, false),
+        (0x3D, "vpmaxsq", true, 8, false),
+        (0x3F, "vpmaxud", false, 4, false),
+        (0x3F, "vpmaxuq", true, 8, false),
+    ] {
+        let mut it = ex(
+            &format!("{mn}_xv_hv_wv"),
+            &[RegX, Vv, RmX],
+            PfxSel::P66,
+            0b100,
+            false,
+            "{op} {x}, {h}, {w}",
+            "alu",
+        );
+        it.bcast = true;
+        it.edisp = edisp;
+        it.wsel = Some(w);
+        if dq {
+            it.when = Pred::Flag("avx512dq".to_string());
+        }
+        v.push(MapItem::Insn(op, it));
+    }
+    // VPABSD/Q（単項、vvvv=1111b 必須）。どちらも avx512f。
+    for (op, mn, w, edisp, dq) in [
+        (0x1Eu8, "vpabsd", false, 4u8, false),
+        (0x1F, "vpabsq", true, 8, false),
+    ] {
+        let mut it = ex(
+            &format!("{mn}_xv_wv"),
+            &[RegX, RmX],
+            PfxSel::P66,
+            0b100,
+            true,
+            "{op} {x}, {w}",
+            "alu",
+        );
+        it.bcast = true;
+        it.edisp = edisp;
+        it.wsel = Some(w);
+        if dq {
+            it.when = Pred::Flag("avx512dq".to_string());
+        }
+        v.push(MapItem::Insn(op, it));
     }
     m.maps.push(MapDecl {
         name: "map_0f38".to_string(),

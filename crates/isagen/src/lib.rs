@@ -994,6 +994,9 @@ fn gen_map_decoder(model: &Model) -> Result<String, GenError> {
          \x20           d.evex_b = p2 & 0x10 != 0;\n\
          \x20           d.evex_z = p2 & 0x80 != 0;\n\
          \x20           d.evex_aaa = p2 & 7;\n\
+         \x20           if d.evex_z && d.evex_aaa == 0 {\n\
+         \x20               return None;\n\
+         \x20           }\n\
          \x20           i += 4;\n\
          \x20           if i > 15 {\n\
          \x20               return None;\n\

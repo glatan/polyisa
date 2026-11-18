@@ -160,7 +160,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 段階4の x86 最小 853 件にオペコード表の記述を足した件数。
-        assert_eq!(INSNS.len(), 2024);
+        assert_eq!(INSNS.len(), 2038);
     }
 
     #[test]
@@ -1968,6 +1968,38 @@ mod tests {
         // 埋め込み broadcast は宣言された L'L 形（512 のみ）で
         // だけ有効。b=1 のメモリ形で L'L!=2 は #UD。
         assert!(decode_map(&[0x62, 0xF1, 0x6C, 0x18, 0x58, 0x48, 0x11], modes, fvl).is_none());
+        // B2b の FVM 群。論理演算は 0F マップ（VPANDD）、
+        // min/max/mul/abs は 0F38 に分かれる。
+        let d = decode_map(&[0x62, 0xD1, 0x45, 0x48, 0xDB, 0xC8], modes, f512).unwrap();
+        assert_eq!(d.insn, Insn::VpanddXvHvWv);
+        let d = decode_map(&[0x62, 0xD2, 0x45, 0x48, 0x39, 0xC8], modes, f512).unwrap();
+        assert_eq!(d.insn, Insn::VpminsdXvHvWv);
+        let d = decode_map(&[0x62, 0xD2, 0xB5, 0x48, 0x39, 0xCA], modes, f512).unwrap();
+        assert_eq!(d.insn, Insn::VpminsqXvHvWv);
+        let d = decode_map(&[0x62, 0xD2, 0xB5, 0x48, 0x3F, 0xCA], modes, f512).unwrap();
+        assert_eq!(d.insn, Insn::VpmaxuqXvHvWv);
+        // VSQRTPD は単項（vvvv=1111b 必須）。~vvvv=1101
+        // （vex_v!=0）の形は #UD。
+        let d = decode_map(&[0x62, 0xF1, 0xFD, 0x48, 0x51, 0xCE], modes, f512).unwrap();
+        assert_eq!(d.insn, Insn::VsqrtpdXvWv);
+        assert!(decode_map(&[0x62, 0xF1, 0xDD, 0x48, 0x51, 0xCE], modes, f512).is_none());
+        // VPMULLQ は avx512dq ゲート。VPABSQ は avx512f で
+        // 足りる（DQ ではない）。
+        assert!(decode_map(&[0x62, 0xD2, 0xB5, 0x48, 0x40, 0xCA], modes, fvl).is_none());
+        let d = decode_map(
+            &[0x62, 0xD2, 0xB5, 0x48, 0x40, 0xCA],
+            modes,
+            f512 | FEAT_AVX512DQ,
+        )
+        .unwrap();
+        assert_eq!(d.insn, Insn::VpmullqXvHvWv);
+        let d = decode_map(&[0x62, 0xD2, 0xFD, 0x48, 0x1F, 0xCC], modes, f512).unwrap();
+        assert_eq!(d.insn, Insn::VpabsqXvWv);
+        // VPABSD も単項（vvvv=1111b 必須）。~vvvv=1101 は #UD。
+        assert!(decode_map(&[0x62, 0xD2, 0x5D, 0x48, 0x1E, 0xCB], modes, f512).is_none());
+        // EVEX.z=1 は aaa!=0（マスク付き）でのみ有効。
+        // z=1 + aaa=0 は予約で #UD。
+        assert!(decode_map(&[0x62, 0xF1, 0x7E, 0xC8, 0x6F, 0xC1], modes, f512).is_none());
     }
 
     #[test]
