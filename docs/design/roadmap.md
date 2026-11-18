@@ -258,13 +258,13 @@ WebAssembly の本格的な実装と、WASI preview1 の OS パーソナリテ�
 
 | ID | 条件 | 判定 |
 |---|---|---|
-| S13-1 | 8088 と 80286 の SingleStepTests のデータ集と命令の振る舞いが一致する（テスト `heavy_conformance_sst8088`、`heavy_conformance_sst80286`）。 | 未整備 |
-| S13-2 | 追加した拡張と 80286、x87 の世代差の命令単位テストが裸実行環境で通る（テスト `bare_x86ext`）。 | 未整備 |
-| S13-3 | 80486 と Pentium のタイミングの検証用の命令列がすべて一致する（テスト `heavy_timing_i486`、`heavy_timing_pentium`）。 | 未整備 |
-| S13-4 | 8088 の専用のタイミングモデルが、SingleStepTests のサイクル数と一致する（テスト `heavy_timing_8088`）。 | 未整備 |
-| S13-5 | 追加した拡張と 16 ビットモードについて、llvm-objdump と XED とのデコーダの差分テストが通る（テスト `heavy_oracle_llvm`、`heavy_oracle_xed`。両方のオラクルが対応しない拡張は S13-2 で検証する）。 | 未整備 |
-| S13-6 | ホストの CPU と、ホストが持つ拡張について実行の差分テストが通る（テスト `heavy_diff_host`。GAP-0030 の解消を兼ねる）。ホストが持たない拡張は、Intel SDE（TOOL-INTEL-SDE）が対応する版の範囲で実行の差分テスト（`heavy_diff_sde`）を行う。 | 未整備 |
-| S13-7 | x32 ABI のテストプログラムと、xsave 領域・`XGETBV`・AMX の許可・vsyscall 経由の呼び出しを使うテストプログラムが正しい出力を返す（テスト `heavy_program_x32`、`heavy_program_x86ext`）。 | 未整備 |
+| S13-1 | 8088 と 80286 の SingleStepTests のデータ集と命令の振る舞いが一致する（テスト `heavy_conformance_sst8088`、`heavy_conformance_sst80286`）。 | テスト：`heavy_conformance_sst8088`、`heavy_conformance_sst80286` |
+| S13-2 | 追加した拡張と 80286、x87 の世代差の命令単位テストが裸実行環境で通る（テスト `bare_x86ext`）。 | テスト：`bare_x86ext` |
+| S13-3 | 80486 と Pentium のタイミングの検証用の命令列がすべて一致する（テスト `heavy_timing_i486`、`heavy_timing_pentium`）。 | テスト：`heavy_timing_i486`、`heavy_timing_pentium` |
+| S13-4 | 8088 の専用のタイミングモデルが、SingleStepTests のサイクル数と一致する（テスト `heavy_timing_8088`）。 | テスト：`heavy_timing_8088` |
+| S13-5 | 追加した拡張と 16 ビットモードについて、llvm-objdump と XED とのデコーダの差分テストが通る（テスト `heavy_oracle_llvm`、`heavy_oracle_xed`。両方のオラクルが対応しない拡張は S13-2 で検証する）。 | テスト：`heavy_oracle_llvm`、`heavy_oracle_xed` |
+| S13-6 | ホストの CPU と、ホストが持つ拡張について実行の差分テストが通る（テスト `heavy_diff_host`。GAP-0030 の解消を兼ねる）。ホストが持たない拡張は、Intel SDE（TOOL-INTEL-SDE）が対応する版の範囲で実行の差分テスト（`heavy_diff_sde`）を行う。 | テスト：`heavy_diff_host`、`heavy_diff_sde` |
+| S13-7 | x32 ABI のテストプログラムと、xsave 領域・`XGETBV`・AMX の許可・vsyscall 経由の呼び出しを使うテストプログラムが正しい出力を返す（テスト `heavy_program_x32`、`heavy_program_x86ext`）。 | テスト：`heavy_program_x32`、`heavy_program_x86ext` |
 
 ### 段階 14：m68k
 

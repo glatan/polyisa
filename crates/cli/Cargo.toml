@@ -89,6 +89,10 @@ name = "heavy_program_x32"
 required-features = ["guest-x86"]
 
 [[test]]
+name = "heavy_program_x86ext"
+required-features = ["guest-x86"]
+
+[[test]]
 name = "heavy_program_wasi"
 required-features = ["guest-wasm"]
 

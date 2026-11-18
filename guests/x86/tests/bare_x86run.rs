@@ -13950,7 +13950,8 @@ fn run_inc_dec_r32() {
 
 #[test]
 fn run_grp1_82_alias() {
-    // 0x82 は 8086/80186 世代だけの 0x80 の別名（286 以降は削除）。
+    // 0x82 は 0x80 の別名。80286 でも残り、386EX でも実行される
+    // （SST 実測）。世代差の pin は bare_x86ext にある。
     // add al,5; mov bl,al。
     let mut env = env16(&[0x82, 0xC0, 0x05, 0x88, 0xC3], 0x1000);
     let mut sys = X64Exit;

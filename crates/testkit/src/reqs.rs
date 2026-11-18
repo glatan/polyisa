@@ -150,6 +150,10 @@ pub const TEST_REQUIREMENTS: &[TestBinary] = &[
         needs: &[Req::Tool("x86_64-linux-gnux32-gcc-14")],
     },
     TestBinary {
+        binary: "heavy_program_x86ext",
+        needs: &[Req::Tool("clang")],
+    },
+    TestBinary {
         binary: "heavy_conformance_wasm_spec",
         needs: &[Req::Data(".testdata/wasm-spec")],
     },
