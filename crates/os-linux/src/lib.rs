@@ -62,6 +62,10 @@ pub mod x86_32;
 // Ref: SRC-LINUX (7.3).
 pub mod x86_64;
 
+/// x32（Linux・ILP32、EM_X86_64 + ELFCLASS32）のシステムコール番号。
+// Ref: SRC-LINUX (7.3).
+pub mod x86_x32;
+
 /// ゲストパスをホストパスへ写す補助（cwd 連結とルート閉じ込め）。
 pub mod guest_path;
 
@@ -76,6 +80,7 @@ pub enum GuestAbi {
     Rv64Linux,
     X86_64Linux,
     X86_32Linux,
+    X32Linux,
     MipsO32,
     Aarch64Linux,
     ArmLinux,
@@ -248,6 +253,57 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
             x86_32::CLOCK_GETTIME64 => Some("clock_gettime"),
             _ => None,
         },
+        GuestAbi::X32Linux => {
+            if nr & x86_x32::SYSCALL_BIT == 0 {
+                // ビットのない番号は x86-64 と同じ表を使う。
+                return syscall_name(GuestAbi::X86_64Linux, nr);
+            }
+            let base = nr & !x86_x32::SYSCALL_BIT;
+            // x32 の呼び出しはすべてビットを立てる。ベース 0-511 は
+            // x86-64 の表をそのまま使い、512-547 が x32 専用になる。
+            if !(512..=547).contains(&base) {
+                return syscall_name(GuestAbi::X86_64Linux, base);
+            }
+            match base {
+                512 => Some("rt_sigaction"),
+                513 => Some("rt_sigreturn"),
+                514 => Some("ioctl"),
+                515 => Some("readv"),
+                516 => Some("writev"),
+                517 => Some("recvfrom"),
+                518 => Some("sendmsg"),
+                519 => Some("recvmsg"),
+                520 => Some("execve"),
+                521 => Some("ptrace"),
+                522 => Some("rt_sigpending"),
+                523 => Some("rt_sigtimedwait"),
+                524 => Some("rt_sigqueueinfo"),
+                525 => Some("sigaltstack"),
+                526 => Some("timer_create"),
+                527 => Some("mq_notify"),
+                528 => Some("kexec_load"),
+                529 => Some("waitid"),
+                530 => Some("set_robust_list"),
+                531 => Some("get_robust_list"),
+                532 => Some("vmsplice"),
+                533 => Some("move_pages"),
+                534 => Some("preadv"),
+                535 => Some("pwritev"),
+                536 => Some("rt_tgsigqueueinfo"),
+                537 => Some("recvmmsg"),
+                538 => Some("sendmmsg"),
+                539 => Some("process_vm_readv"),
+                540 => Some("process_vm_writev"),
+                541 => Some("setsockopt"),
+                542 => Some("getsockopt"),
+                543 => Some("io_setup"),
+                544 => Some("io_submit"),
+                545 => Some("execveat"),
+                546 => Some("preadv2"),
+                547 => Some("pwritev2"),
+                _ => None,
+            }
+        }
         GuestAbi::X86_64Linux => match nr {
             x86_64::READ => Some("read"),
             x86_64::WRITE => Some("write"),

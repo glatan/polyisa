@@ -103,6 +103,8 @@ pub struct SysCtx {
     pub r_e: Gpr,
     pub r_f: Gpr,
     pub is64: bool,
+    /// x32 ABI。構造体内のポインタ・`long` フィールドは 32 ビット幅。
+    pub x32: bool,
     pub at_fdcwd: u64,
 }
 
@@ -889,9 +891,19 @@ pub fn sys_ioctl(env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutcome> {
     // FS_IOC_GETFLAGS はフラグなしを返す。lsattr がこれでダッシュを出す。
     // Ref: SRC-LINUX (7.3). linux/fs.h の _IOR('f', 1, long)。
     const FS_IOC_GETFLAGS: u32 = 0x8008_6601;
-    if cx.is64 && get64(env, cx.r_b) as u32 == FS_IOC_GETFLAGS {
+    // compat（x32）では _IOR の型が 4 バイトになり要求値が変わる。
+    const FS_IOC_GETFLAGS32: u32 = 0x8004_6601;
+    if cx.is64 && !cx.x32 && get64(env, cx.r_b) as u32 == FS_IOC_GETFLAGS {
         let ptr = get64(env, cx.r_c);
         if env.backend.mem.write(VirtAddr(ptr), &[0u8; 8]).is_err() {
+            return Some(TrapOutcome::Unimplemented);
+        }
+        set64(env, Gpr(0), 0);
+        return Some(TrapOutcome::Handled);
+    }
+    if cx.x32 && get64(env, cx.r_b) as u32 == FS_IOC_GETFLAGS32 {
+        let ptr = get64(env, cx.r_c);
+        if env.backend.mem.write(VirtAddr(ptr), &[0u8; 4]).is_err() {
             return Some(TrapOutcome::Unimplemented);
         }
         set64(env, Gpr(0), 0);
@@ -1688,9 +1700,10 @@ pub fn sys_set_robust_list(
     cx: &SysCtx,
 ) -> Option<TrapOutcome> {
     // robust futex リスト先頭を記録して 0 を返す。
-    // 長さは struct robust_list_head (24バイト) のはずであり、異なる場合は EINVAL.
-    const ROBUST_LIST_HEAD_LEN: u64 = 24;
-    if get64(env, cx.r_b) != ROBUST_LIST_HEAD_LEN {
+    // 長さは struct robust_list_head のはずで、x86-64 は 24 バイト、
+    // x86-32・x32（compat）は 12 バイト。異なる場合は EINVAL.
+    let want = if cx.is64 && !cx.x32 { 24 } else { 12 };
+    if get64(env, cx.r_b) != want {
         set64(env, Gpr(0), cx.neg(EINVAL));
         return Some(TrapOutcome::Handled);
     }

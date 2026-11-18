@@ -41,6 +41,9 @@ pub struct Linux {
     ioprio: u32,
     ioprio_known: bool,
     is64: bool,
+    /// x32 ABI（ILP32）。`is64` と併置: 引数レジスタは 64ビット、
+    /// `long`/ポインタを含む構造体は 32ビット幅になる。
+    x32: bool,
     /// プログラムブレーク（ヒープ末尾）。0 は未初期化。
     /// `run_image_x86_64` がロード後に像末尾へ進める。
     heap_end: u64,
@@ -173,6 +176,17 @@ impl Linux {
     pub fn x86_64() -> Self {
         Self {
             is64: true,
+            umask: 0o22,
+            ..Self::default()
+        }
+    }
+
+    /// x32（ILP32）用ハンドラ。引数は x86-64 のレジスタ規則だが、
+    /// 構造体内のポインタ・`long` は 32 ビットになる。
+    pub fn x86_x32() -> Self {
+        Self {
+            is64: true,
+            x32: true,
             umask: 0o22,
             ..Self::default()
         }
@@ -529,6 +543,7 @@ impl Linux {
             ioprio: self.ioprio,
             ioprio_known: self.ioprio_known,
             is64: self.is64,
+            x32: self.x32,
             heap_end: self.heap_end,
             mmap_base: self.mmap_base,
             robust_head: self.robust_head,
@@ -586,6 +601,8 @@ impl Linux {
     // Gap: GAP-0026 — CPU 例外→シグナルの変換、i386 フレーム、
     // 既定動作（SIGKILL 以外）による終了、他プロセス/他スレッド
     // への配送、タイマ由来のシグナル、sigaltstack はない。
+    // x32 は配送を x86-64 の rt フレーム形式で行う（カーネルの
+    // compat フレームとは異なるが、rt_sigreturn と対で一貫）。
     fn deliver_pending(&mut self, env: &mut BareEnv) {
         if !self.is64 {
             return;
@@ -1676,7 +1693,7 @@ fn writev_opened(
     let mut done = 0u64;
     let mut chunk = vec![0u8; IO_CHUNK];
     for idx in 0..iovcnt {
-        let (base, len) = if cx.is64 {
+        let (base, len) = if cx.is64 && !cx.x32 {
             let mut ent = [0u8; 16];
             if env
                 .backend
@@ -1779,7 +1796,7 @@ fn sys_writev(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOut
     let mut done = 0u64;
     let mut chunk = vec![0u8; IO_CHUNK];
     for idx in 0..iovcnt {
-        let (base, len) = if cx.is64 {
+        let (base, len) = if cx.is64 && !cx.x32 {
             let mut ent = [0u8; 16];
             if env
                 .backend
@@ -1853,7 +1870,7 @@ fn sys_readv(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutc
     let mut done = 0u64;
     let mut chunk = vec![0u8; IO_CHUNK];
     for idx in 0..iovcnt {
-        let (base, len) = if cx.is64 {
+        let (base, len) = if cx.is64 && !cx.x32 {
             let mut ent = [0u8; 16];
             if env
                 .backend
@@ -2781,7 +2798,7 @@ fn sys_rt_sigaction(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<T
             set64(env, Gpr(0), cx.neg(EINVAL));
             return Some(TrapOutcome::Handled);
         }
-        let Some(a) = crate::x86::sigact_read(env, act_p, sys.is64) else {
+        let Some(a) = crate::x86::sigact_read(env, act_p, sys.is64 && !sys.x32) else {
             set64(env, Gpr(0), cx.neg(EFAULT));
             return Some(TrapOutcome::Handled);
         };
@@ -2799,7 +2816,7 @@ fn sys_rt_sigaction(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<T
     if let Some(a) = act {
         sys.sigacts[i] = a;
     }
-    if old_p != 0 && !crate::x86::sigact_write(env, old_p, &old, sys.is64) {
+    if old_p != 0 && !crate::x86::sigact_write(env, old_p, &old, sys.is64 && !sys.x32) {
         set64(env, Gpr(0), cx.neg(EFAULT));
         return Some(TrapOutcome::Handled);
     }
@@ -3449,7 +3466,8 @@ fn sys_execve(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOut
     };
     // /proc/self/exe はゲスト実行ファイル自身を読む（ホスト exe ではない）。
     let path = guest_exe_redirect(&sys.exe_path, &path).unwrap_or(path);
-    let argv = match read_cstr_array(env, argv_addr) {
+    let wide = sys.is64 && !sys.x32;
+    let argv = match read_cstr_array(env, argv_addr, wide) {
         Ok(v) => v,
         Err(()) => {
             set64(env, Gpr(0), cx.neg(EFAULT));
@@ -3461,7 +3479,7 @@ fn sys_execve(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOut
         set64(env, Gpr(0), cx.neg(EPERM));
         return Some(TrapOutcome::Handled);
     };
-    let envp = match read_cstr_array(env, envp_addr) {
+    let envp = match read_cstr_array(env, envp_addr, wide) {
         Ok(v) => v,
         Err(()) => {
             set64(env, Gpr(0), cx.neg(EFAULT));
@@ -3487,14 +3505,25 @@ fn sys_execve(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOut
             // 同じ argv で実行ファイル（BusyBox 静的）へ読み替える。
             // スクリプト（非 ELF）は ash の解釈へ委ねるため対象外。
             if errno == ENOEXEC && path != sys.exe_path && !sys.exe_path.is_empty() {
-                let is_dynamic = polyisa_loader::elf::parse_ehdr(&bytes)
-                    .ok()
-                    .and_then(|ehdr| {
-                        polyisa_loader::elf::parse_phdrs(&bytes, &ehdr)
-                            .ok()
-                            .map(|phdrs| phdrs.iter().any(|ph| ph.seg_type == 3))
-                    })
-                    .unwrap_or(false);
+                let is_dynamic = if sys.x32 {
+                    polyisa_loader::elf::parse_ehdr32(&bytes)
+                        .ok()
+                        .and_then(|ehdr| {
+                            polyisa_loader::elf::parse_phdrs32(&bytes, &ehdr)
+                                .ok()
+                                .map(|phdrs| phdrs.iter().any(|ph| ph.seg_type == 3))
+                        })
+                        .unwrap_or(false)
+                } else {
+                    polyisa_loader::elf::parse_ehdr(&bytes)
+                        .ok()
+                        .and_then(|ehdr| {
+                            polyisa_loader::elf::parse_phdrs(&bytes, &ehdr)
+                                .ok()
+                                .map(|phdrs| phdrs.iter().any(|ph| ph.seg_type == 3))
+                        })
+                        .unwrap_or(false)
+                };
                 if is_dynamic
                     && let Ok(busy) = std::fs::read(sys.exe_path.clone())
                     && install_exec(sys, env, &busy, &sys.exe_path.clone(), &argv, &envp).is_ok()
@@ -3564,18 +3593,21 @@ fn sys_wait4(sys: &mut Linux, env: &mut BareEnv, cx: &SysCtx) -> Option<TrapOutc
 }
 
 /// ゲストのポインタ配列を NUL 終端まで読む。失敗は `Err(())`。
-fn read_cstr_array(env: &mut BareEnv, addr: u64) -> Result<Vec<Vec<u8>>, ()> {
+/// `wide` はポインタ幅が 8 バイトか（x86-64）、4 バイトか
+/// （x86-32・x32）を選ぶ。
+fn read_cstr_array(env: &mut BareEnv, addr: u64, wide: bool) -> Result<Vec<Vec<u8>>, ()> {
     if addr == 0 {
         return Err(());
     }
     let acc = data_access();
+    let step: usize = if wide { 8 } else { 4 };
     let mut out = Vec::new();
     for i in 0..64u64 {
         let mut word = [0u8; 8];
         if env
             .backend
             .mem
-            .read(VirtAddr(addr + i * 8), &mut word, acc)
+            .read(VirtAddr(addr + i * step as u64), &mut word[..step], acc)
             .is_err()
         {
             return Err(());
@@ -3602,12 +3634,21 @@ fn install_exec(
     envp: &[Vec<u8>],
 ) -> Result<(), u32> {
     use polyisa_mem::{PAGE_SIZE, Perms};
-    let ehdr = polyisa_loader::elf::parse_ehdr(bytes).map_err(|_| ENOEXEC)?;
+    // x32 の ELF は ELFCLASS32 + EM_X86_64 なので 32 ビット形式で読む。
+    let ehdr = if sys.x32 {
+        polyisa_loader::elf::parse_ehdr32(bytes).map_err(|_| ENOEXEC)?
+    } else {
+        polyisa_loader::elf::parse_ehdr(bytes).map_err(|_| ENOEXEC)?
+    };
     const EM_X86_64: u16 = 62;
     if !ehdr.little || ehdr.machine != EM_X86_64 || ehdr.entry > u64::from(u32::MAX) {
         return Err(ENOEXEC);
     }
-    let phdrs = polyisa_loader::elf::parse_phdrs(bytes, &ehdr).map_err(|_| ENOEXEC)?;
+    let phdrs = if sys.x32 {
+        polyisa_loader::elf::parse_phdrs32(bytes, &ehdr).map_err(|_| ENOEXEC)?
+    } else {
+        polyisa_loader::elf::parse_phdrs(bytes, &ehdr).map_err(|_| ENOEXEC)?
+    };
     // 動的リンク（PT_INTERP あり）は実行できない。ENOEXEC で探索を続けさせる。
     if phdrs.iter().any(|ph| ph.seg_type == 3) {
         return Err(ENOEXEC);
@@ -3621,7 +3662,8 @@ fn install_exec(
         }
     }
     let top = 0x7fff_0000u64;
-    let (img, sp) = if sys.is64 {
+    // x32 は 64 ビットモードで動くが初期スタックのポインタは 32 ビット。
+    let (img, sp) = if sys.is64 && !sys.x32 {
         crate::build_initial_stack(top, argv, envp, &[(6, 0x1000)])
     } else {
         crate::build_initial_stack32(top, argv, envp, &[(6, 0x1000)])
@@ -3690,7 +3732,9 @@ impl TrapHandler for Linux {
         } else {
             (Gpr(3), Gpr(1), Gpr(2), Gpr(6), Gpr(7), Gpr(5))
         };
-        let guest_abi = if self.is64 {
+        let guest_abi = if self.x32 {
+            crate::GuestAbi::X32Linux
+        } else if self.is64 {
             crate::GuestAbi::X86_64Linux
         } else {
             crate::GuestAbi::X86_32Linux
@@ -3710,6 +3754,7 @@ impl TrapHandler for Linux {
             r_e,
             r_f,
             is64: self.is64,
+            x32: self.x32,
             at_fdcwd,
         };
         let nr = get64(env, Gpr(0));
@@ -3780,6 +3825,14 @@ mod tests {
         for nr in 0..4096 {
             if let Some(name) = crate::syscall_name(abi, nr) {
                 names.insert(name);
+            }
+        }
+        if abi == crate::GuestAbi::X32Linux {
+            // x32 専用番号（SYSCALL_BIT|512〜547）も列挙する。
+            for nr in 0x4000_0200..0x4000_0240 {
+                if let Some(name) = crate::syscall_name(abi, nr) {
+                    names.insert(name);
+                }
             }
         }
         names
@@ -6905,6 +6958,8 @@ mod tests {
     fn syscall_tables_are_unique_and_named_in_os_linux() {
         assert_syscall_table(X86_64_SYSCALLS, crate::GuestAbi::X86_64Linux);
         assert_syscall_table(X86_32_SYSCALLS, crate::GuestAbi::X86_32Linux);
+        // x32 は x86-64 と同じハンドラ表を使う（番号表だけが別）。
+        assert_syscall_table(X86_64_SYSCALLS, crate::GuestAbi::X32Linux);
     }
     #[test]
     fn unimplemented_syscall_returns_enosys_and_continues() {
@@ -6923,5 +6978,121 @@ mod tests {
         set64(&mut env, Gpr(0), 9999);
         assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
         assert_eq!(get64(&mut env, Gpr(0)), u64::from(neg_errno(crate::ENOSYS)));
+    }
+
+    #[test]
+    fn x32_table_names() {
+        // x32 専用番号（SYSCALL_BIT|512〜）は x32 の表を引く。
+        assert_eq!(
+            crate::syscall_name(crate::GuestAbi::X32Linux, crate::x86_x32::RT_SIGACTION),
+            Some("rt_sigaction")
+        );
+        assert_eq!(
+            crate::syscall_name(crate::GuestAbi::X32Linux, crate::x86_x32::WRITEV),
+            Some("writev")
+        );
+        assert_eq!(
+            crate::syscall_name(crate::GuestAbi::X32Linux, crate::x86_x32::EXECVE),
+            Some("execve")
+        );
+        // ビットのない番号は x86-64 と同じ表を使う。
+        assert_eq!(
+            crate::syscall_name(crate::GuestAbi::X32Linux, crate::x86_64::EXIT_GROUP),
+            Some("exit_group")
+        );
+        assert_eq!(
+            crate::syscall_name(crate::GuestAbi::X32Linux, crate::x86_64::MMAP),
+            Some("mmap")
+        );
+        // x32 は全呼び出しでビットを立てる。ベース 0-511 は
+        // x86-64 と同じ表を引く（0x40000001 = write）。
+        assert_eq!(
+            crate::syscall_name(crate::GuestAbi::X32Linux, crate::x86_x32::SYSCALL_BIT | 1),
+            Some("write")
+        );
+        assert_eq!(
+            crate::syscall_name(
+                crate::GuestAbi::X32Linux,
+                crate::x86_x32::SYSCALL_BIT | crate::x86_64::EXIT_GROUP
+            ),
+            Some("exit_group")
+        );
+        // ビットありで 512-547 の範囲外は未定義。
+        assert!(
+            crate::syscall_name(crate::GuestAbi::X32Linux, crate::x86_x32::SYSCALL_BIT | 548)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn x32_common_nr_with_bit_dispatches() {
+        // 0x40000001 = x32 の write（ベース 1 → x86-64 表）。
+        let mut sys = Linux::x86_x32();
+        let mut env = bare();
+        env.backend.mem.write(VirtAddr(0x100), b"hi").unwrap();
+        set64(&mut env, Gpr(0), crate::x86_x32::SYSCALL_BIT | 1);
+        set64(&mut env, Gpr(7), 2);
+        set64(&mut env, Gpr(6), 0x100);
+        set64(&mut env, Gpr(2), 2);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 2);
+    }
+
+    #[test]
+    fn x32_writev_uses_8byte_iovec() {
+        let mut sys = Linux::x86_x32();
+        let mut env = bare();
+        env.backend.mem.write(VirtAddr(0x100), b"hi").unwrap();
+        env.backend.mem.write(VirtAddr(0x110), b"!").unwrap();
+        // x32 の iovec は {u32 base, u32 len} の 8 バイト。
+        let mut iov = [0u8; 16];
+        iov[..4].copy_from_slice(&0x100u32.to_le_bytes());
+        iov[4..8].copy_from_slice(&2u32.to_le_bytes());
+        iov[8..12].copy_from_slice(&0x110u32.to_le_bytes());
+        iov[12..16].copy_from_slice(&1u32.to_le_bytes());
+        env.backend.mem.write(VirtAddr(0x200), &iov).unwrap();
+        // writev(2, 0x200, 2) を x32 番号で呼ぶ。
+        set64(&mut env, Gpr(0), crate::x86_x32::WRITEV);
+        set64(&mut env, Gpr(7), 2);
+        set64(&mut env, Gpr(6), 0x200);
+        set64(&mut env, Gpr(2), 2);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 3);
+    }
+
+    #[test]
+    fn x32_rt_sigaction_uses_20byte_act() {
+        let mut sys = Linux::x86_x32();
+        let mut env = bare();
+        // x32 の kernel_sigaction は i386 と同じ 20 バイト
+        // {handler u32, flags u32, restorer u32, mask u64}。
+        let mut act = [0u8; 20];
+        act[0..4].copy_from_slice(&0x1000u32.to_le_bytes());
+        act[4..8].copy_from_slice(&(crate::x86::SA_RESTORER as u32).to_le_bytes());
+        act[8..12].copy_from_slice(&0x2000u32.to_le_bytes());
+        env.backend.mem.write(VirtAddr(0x300), &act).unwrap();
+        // rt_sigaction(SIGUSR1=10, 0x300, 0, 8) で設定する。
+        set64(&mut env, Gpr(0), crate::x86_x32::RT_SIGACTION);
+        set64(&mut env, Gpr(7), 10);
+        set64(&mut env, Gpr(6), 0x300);
+        set64(&mut env, Gpr(2), 0);
+        set64(&mut env, Gpr(10), 8);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        // oldact=0x400 に 20 バイトで書き戻される。
+        set64(&mut env, Gpr(0), crate::x86_x32::RT_SIGACTION);
+        set64(&mut env, Gpr(7), 10);
+        set64(&mut env, Gpr(6), 0);
+        set64(&mut env, Gpr(2), 0x400);
+        set64(&mut env, Gpr(10), 8);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(get64(&mut env, Gpr(0)), 0);
+        let mut out = [0u8; 20];
+        env.backend
+            .mem
+            .read(VirtAddr(0x400), &mut out, crate::x86::data_access())
+            .unwrap();
+        assert_eq!(u32::from_le_bytes(out[0..4].try_into().unwrap()), 0x1000);
+        assert_eq!(u32::from_le_bytes(out[8..12].try_into().unwrap()), 0x2000);
     }
 }
