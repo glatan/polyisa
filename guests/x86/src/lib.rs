@@ -160,7 +160,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 段階4の x86 最小 853 件にオペコード表の記述を足した件数。
-        assert_eq!(INSNS.len(), 2073);
+        assert_eq!(INSNS.len(), 2128);
     }
 
     #[test]
@@ -2275,4 +2275,98 @@ mod tests {
             let _ = model_params(row.0);
         }
     }
+}
+
+#[test]
+fn xop_decode() {
+    let modes = MODE_M64 | (MODE_OPD_O32 << MODE_OPD_SHIFT) | (MODE_ADR_A64 << MODE_ADR_SHIFT);
+    // VEX.0F3A 形 FMA4（66 0F 3A 69 /r ib）。W=1 で
+    // src2=is4・src3=r/m。imm8[7:4]=2 → xmm2。
+    let d = decode_map(&[0xC4, 0xE3, 0xF1, 0x69, 0xC3, 0x20], modes, FEAT_FMA4).unwrap();
+    assert_eq!(d.insn, Insn::VfmaddpdXvHvWvIv);
+    assert_eq!(d.len, 6);
+    assert_eq!(d.imm, 0x20);
+    assert!(d.vex_w);
+    // W=0 の同命令。
+    let d = decode_map(&[0xC4, 0xE3, 0x71, 0x69, 0xC3, 0x30], modes, FEAT_FMA4).unwrap();
+    assert_eq!(d.insn, Insn::VfmaddpdXvHvWvIv);
+    assert!(!d.vex_w);
+    // fma4 ゲートなしは #UD（0F 3A 69 は他の命令でもない）。
+    assert!(decode_map(&[0xC4, 0xE3, 0xF1, 0x69, 0xC3, 0x20], modes, FEAT_AVX).is_none());
+    // FMA4 は VEX C4h ページのみ。XOP.8 の同オペコードは #UD。
+    assert!(decode_map(&[0x8F, 0xE8, 0x70, 0x69, 0xC2, 0x30], modes, FEAT_FMA4).is_none());
+    // VEX C4 の mmmmm=8/9/10 は予約で #UD（XOP 表に落ちない）。
+    for b2 in [0xE8u8, 0xE9, 0xEA] {
+        assert!(decode_map(&[0xC4, b2, 0x71, 0x69, 0xC3, 0x20], modes, FEAT_FMA4).is_none());
+    }
+    // VPCMOV（XOP.8 A2）。
+    let d = decode_map(&[0x8F, 0xE8, 0x70, 0xA2, 0xC2, 0x30], modes, FEAT_XOP).unwrap();
+    assert_eq!(d.insn, Insn::VpcmovXvHvWvIv);
+    // VPCOMB imm 形（XOP.8 CC /r ib）。L=1 は #UD。
+    let d = decode_map(&[0x8F, 0xE8, 0x68, 0xCC, 0xCB, 0x02], modes, FEAT_XOP).unwrap();
+    assert_eq!(d.insn, Insn::VpcombXvHvWvIb);
+    assert_eq!(d.imm, 2);
+    assert!(decode_map(&[0x8F, 0xE8, 0x6C, 0xCC, 0xCB, 0x02], modes, FEAT_XOP).is_none());
+    // VPCOM は W=1 が予約で #UD。
+    assert!(decode_map(&[0x8F, 0xE8, 0xE8, 0xCC, 0xCB, 0x02], modes, FEAT_XOP).is_none());
+    // TBM（XOP.9 01 /n と 02 /n）。vvvv が宛先。
+    let d = decode_map(&[0x8F, 0xE9, 0x60, 0x01, 0xC9], modes, FEAT_TBM).unwrap();
+    assert_eq!(d.insn, Insn::BlcfillByEv);
+    assert_eq!(d.vex_v, 3);
+    // W=1 は 64 ビットオペランド幅。
+    let d = decode_map(&[0x8F, 0xE9, 0xE0, 0x01, 0xC9], modes, FEAT_TBM).unwrap();
+    assert_eq!(d.insn, Insn::BlcfillByEv);
+    assert!(d.vex_w);
+    let d = decode_map(&[0x8F, 0xE9, 0x60, 0x02, 0xF1], modes, FEAT_TBM).unwrap();
+    assert_eq!(d.insn, Insn::BlciByEv);
+    let d = decode_map(&[0x8F, 0xE9, 0x60, 0x02, 0xC9], modes, FEAT_TBM).unwrap();
+    assert_eq!(d.insn, Insn::BlcmskByEv);
+    // TBM BEXTR（XOP.A 10 /r id）。imm32。
+    let d = decode_map(
+        &[0x8F, 0xEA, 0x78, 0x10, 0xD9, 0x44, 0x33, 0x22, 0x11],
+        modes,
+        FEAT_TBM,
+    )
+    .unwrap();
+    assert_eq!(d.insn, Insn::BextrGvEvId);
+    assert_eq!(d.imm, 0x1122_3344);
+    // VFRCZ（XOP.9 80-83）。W=1 は予約で #UD。
+    let d = decode_map(&[0x8F, 0xE9, 0x78, 0x81, 0xC1], modes, FEAT_XOP).unwrap();
+    assert_eq!(d.insn, Insn::VfrczpdXvWv);
+    assert!(decode_map(&[0x8F, 0xE9, 0xF8, 0x81, 0xC1], modes, FEAT_XOP).is_none());
+    // スカラ形（ss/sd）は L=1 が #UD。
+    let d = decode_map(&[0x8F, 0xE9, 0x78, 0x82, 0xC1], modes, FEAT_XOP).unwrap();
+    assert_eq!(d.insn, Insn::VfrczssXvWv);
+    assert!(decode_map(&[0x8F, 0xE9, 0x7C, 0x82, 0xC1], modes, FEAT_XOP).is_none());
+    // パックシフト（XOP.9 90-9B）。W=1 は src/cnt 交換形。
+    let d = decode_map(&[0x8F, 0xE9, 0x68, 0x98, 0xC1], modes, FEAT_XOP).unwrap();
+    assert_eq!(d.insn, Insn::VpshabXvWvHv);
+    assert!(!d.vex_w);
+    let d = decode_map(&[0x8F, 0xE9, 0xE8, 0x98, 0xC1], modes, FEAT_XOP).unwrap();
+    assert_eq!(d.insn, Insn::VpshabXvWvHv);
+    assert!(d.vex_w);
+    let d = decode_map(&[0x8F, 0xE9, 0x68, 0x90, 0xC1], modes, FEAT_XOP).unwrap();
+    assert_eq!(d.insn, Insn::VprotbXvWvHv);
+    // XOP 接頭辞の判別: mmmmm < 8 は POP Ev のレガシー経路。
+    // 8F /0 = pop r/m（reg=0 なので XOP ではない）。
+    let d = decode_map(&[0x8F, 0x00], modes, FEAT_XOP).unwrap();
+    assert_eq!(d.insn, Insn::PopEv);
+    // mmmmm が 8/9/10 以外（例: 11）は XOP 文脈の #UD。
+    assert!(decode_map(&[0x8F, 0xEB, 0x70, 0x69, 0xC2, 0x30], modes, FEAT_XOP).is_none());
+    // XOP 項目の pp!=0 は予約 #UD（vpshab に pp=01）。
+    assert!(decode_map(&[0x8F, 0xE9, 0x69, 0x98, 0xC1], modes, FEAT_XOP).is_none());
+    // ゲート: xop/tbm/fma4 がないと #UD。
+    assert!(decode_map(&[0x8F, 0xE8, 0x70, 0xA2, 0xC2, 0x30], modes, FEAT_FMA4).is_none());
+    assert!(decode_map(&[0x8F, 0xE8, 0x70, 0xA2, 0xC2, 0x30], modes, FEAT_AVX).is_none());
+    assert!(decode_map(&[0x8F, 0xE9, 0x60, 0x01, 0xC9], modes, FEAT_AVX).is_none());
+    assert!(
+        decode_map(
+            &[0x8F, 0xEA, 0x78, 0x10, 0xD9, 0x44, 0x33, 0x22, 0x11],
+            modes,
+            FEAT_XOP
+        )
+        .is_none()
+    );
+    // LOCK+XOP は #UD。POP への後退はしない。
+    assert!(decode_map(&[0xF0, 0x8F, 0xE8, 0x70, 0xA2, 0xC2, 0x30], modes, FEAT_XOP).is_none());
 }

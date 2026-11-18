@@ -2441,6 +2441,88 @@ pub fn tzcnt<B: Backend>(b: &mut B, w: u8, g: Gpr, ea: &Rm<B::V<W64>>, d: &MapDe
     }
 }
 
+// ---- TBM（XOP.9 グループと XOP.A の AMD ビット操作）----
+
+/// TBM 群（XOP.9）。宛先は vvvv、ソースは r/m。`kind` は式:
+///   0=BLCFILL s&(s+1)  1=BLSFILL s|(s-1)  2=BLCS s|(s+1)
+///   3=TZMSK  ~s&(s-1)  4=BLCIC   ~s&(s+1)  5=BLSIC ~s|(s-1)
+///   6=T1MSKC ~s|(s+1)  7=BLCI    s|~(s+1)  8=BLCMSK s^(s+1)
+/// CF は内部の加減算の桁上がり/借り（+1 形は s+1==0、
+/// -1 形は s==0）。SF/ZF は結果、OF=0。
+fn tbm_w<B: Backend, W: Hw>(b: &mut B, kind: u8, ea: &Rm<B::V<W64>>, d: &MapDec) -> Flow<B> {
+    let s = rd_w::<B, W>(b, ea, d)?;
+    let one = b.konst::<W>(W::from_u128(1));
+    let minus = matches!(kind, 1 | 3 | 5);
+    let t = if minus {
+        b.sub::<W>(s, one)
+    } else {
+        b.add::<W>(s, one)
+    };
+    let ns = b.not::<W>(s);
+    let nt = b.not::<W>(t);
+    let r = match kind {
+        0 => b.and::<W>(s, t),
+        1 | 2 => b.or::<W>(s, t),
+        3 | 4 => b.and::<W>(ns, t),
+        5 | 6 => b.or::<W>(ns, t),
+        7 => b.or::<W>(s, nt),
+        _ => b.xor::<W>(s, t),
+    };
+    W::put(b, vvv_g(d), d, r);
+    let zero = b.konst::<W>(W::from_u128(0));
+    let cf = if minus {
+        b.cmp::<W>(Cmp::Eq, s, zero)
+    } else {
+        b.cmp::<W>(Cmp::Eq, t, zero)
+    };
+    bmi_flags::<B, W>(b, r, cf);
+    Ok(())
+}
+
+/// TBM グループ命令（BLCFILL/BLSFILL/BLCS/TZMSK/BLCIC/BLSIC/
+/// T1MSKC/BLCI/BLCMSK）。`kind` は上の式番号。
+pub fn tbm<B: Backend>(b: &mut B, w: u8, kind: u8, ea: &Rm<B::V<W64>>, d: &MapDec) -> Flow<B> {
+    if w == 64 {
+        tbm_w::<B, W64>(b, kind, ea, d)
+    } else {
+        tbm_w::<B, W32>(b, kind, ea, d)
+    }
+}
+
+/// TBM BEXTR Gv, Ev, id（XOP.A 0x10）。imm32 の [7:0]=開始
+/// ビット・[15:8]=長さのフィールドを src から取り出す。
+/// フラグは BMI BEXTR と同じく ZF 意味あり・CF/OF=0。
+fn tbextr_w<B: Backend, W: Hw>(b: &mut B, g: Gpr, ea: &Rm<B::V<W64>>, d: &MapDec) -> Flow<B> {
+    let s = rd_w::<B, W>(b, ea, d)?;
+    let c = b.konst::<W>(W::from_u128(d.imm as u128));
+    let m8 = b.konst::<W>(W::from_u128(0xFF));
+    let start = b.and::<W>(c, m8);
+    let c8 = b.konst::<W>(W::from_u128(8));
+    let t = b.shr_l::<W>(c, c8);
+    let len = b.and::<W>(t, m8);
+    // shr_l/shl は幅以上を 0 とする全域関数なので、開始・長さの
+    // 範囲外はそのまま扱える。
+    let sh = b.shr_l::<W>(s, start);
+    let one = b.konst::<W>(W::from_u128(1));
+    let ml = b.shl::<W>(one, len);
+    let one2 = b.konst::<W>(W::from_u128(1));
+    let mk = b.sub::<W>(ml, one2);
+    let r = b.and::<W>(sh, mk);
+    W::put(b, g, d, r);
+    let f = fals::<B, W>(b);
+    bmi_flags::<B, W>(b, r, f);
+    Ok(())
+}
+
+/// TBM BEXTR（imm32 制御形）。
+pub fn tbextr<B: Backend>(b: &mut B, w: u8, g: Gpr, ea: &Rm<B::V<W64>>, d: &MapDec) -> Flow<B> {
+    if w == 64 {
+        tbextr_w::<B, W64>(b, g, ea, d)
+    } else {
+        tbextr_w::<B, W32>(b, g, ea, d)
+    }
+}
+
 /// パック浮動小数点レーンの取り出し/書き戻しの関数型。
 type FLaneGet<B, F> = fn(&mut B, <B as Backend>::V<W128>, u32) -> <B as Backend>::V<F>;
 type FLanePut<B, F> =
@@ -2537,6 +2619,334 @@ pub fn vfma<B: Backend>(
         b.konst::<W128>(0)
     };
     b.set(sem::ymm_hi_ref(dst), hi);
+    Ok(())
+}
+
+// ---- AMD XOP（FMA4・VPCMOV・VFRCZ・パックシフト）----
+
+/// imm8[7:4] が選ぶ XMM（is4 オペランド）。
+fn is4_x(d: &MapDec) -> Xmm {
+    Xmm(((d.imm >> 4) & 0xF) as u8)
+}
+
+/// FMA4（XOP.8 / 66 0F 3A + is4）。`dest = src1·src2 + src3`
+/// で src1=vvvv。W=0 は src2=r/m・src3=is4、W=1 は逆。
+/// `op` は vfma128 と同じ（0=fmadd 1=fmsub 2=fnmadd 3=fnmsub
+/// 4=fmaddsub 5=fmsubadd）。スカラ形の上位は src1（vvvv）由来。
+pub fn vfma4<B: Backend>(
+    b: &mut B,
+    pd: bool,
+    scalar: bool,
+    op: u8,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    use polyisa_sem::{F32, F64};
+    let dst = reg_x(d);
+    let fbits = if pd { 64 } else { 32 };
+    let hv: B::V<W128> = b.get(sem::xmm_ref(vvv_x(d)));
+    let rmv = rx(b, ea, if scalar { fbits } else { 128 })?;
+    let iv: B::V<W128> = b.get(sem::xmm_ref(is4_x(d)));
+    // ord=1 は (hv·dv)+sv を計算するので、dv=s2・sv=s3 を渡す。
+    let (s2, s3) = if d.vex_w { (iv, rmv) } else { (rmv, iv) };
+    let lo = if pd {
+        let lanes = if scalar { 1 } else { 2 };
+        vfma128::<B, F64>(b, op, 1, lanes, s2, hv, s3, flane64, put_flane64)
+    } else {
+        let lanes = if scalar { 1 } else { 4 };
+        vfma128::<B, F32>(b, op, 1, lanes, s2, hv, s3, flane32, put_flane32)
+    };
+    if scalar {
+        // FMA4 スカラ形は dest のレーン 0 以外を 0 クリアする
+        // （src1 上位の継承はしない。APM vol.6 各命令ページ）。
+        b.set(sem::xmm_ref(dst), lo);
+        let z = b.konst::<W128>(0);
+        b.set(sem::ymm_hi_ref(dst), z);
+        return Ok(());
+    }
+    b.set(sem::xmm_ref(dst), lo);
+    let hi = if d.vex_l {
+        let hhi: B::V<W128> = b.get(sem::ymm_hi_ref(vvv_x(d)));
+        let rhi = rx_hi(b, ea)?;
+        let ihi: B::V<W128> = b.get(sem::ymm_hi_ref(is4_x(d)));
+        let (s2h, s3h) = if d.vex_w { (ihi, rhi) } else { (rhi, ihi) };
+        if pd {
+            vfma128::<B, F64>(b, op, 1, 2, s2h, hhi, s3h, flane64, put_flane64)
+        } else {
+            vfma128::<B, F32>(b, op, 1, 4, s2h, hhi, s3h, flane32, put_flane32)
+        }
+    } else {
+        b.konst::<W128>(0)
+    };
+    b.set(sem::ymm_hi_ref(dst), hi);
+    Ok(())
+}
+
+/// VPCMOV dest, src1(vvvv), src2, src3:
+/// dest = (src1 & src3) | (src2 & ~src3)。W=0 は src2=r/m・
+/// src3=is4、W=1 は逆。L=1 は ymm 上位も同じ処理。
+pub fn vpcmov<B: Backend>(b: &mut B, d: &MapDec, ea: &Rm<B::V<W64>>) -> Result<(), B::Exit> {
+    let dst = reg_x(d);
+    let s1: B::V<W128> = b.get(sem::xmm_ref(vvv_x(d)));
+    let rmv = rx(b, ea, 128)?;
+    let iv: B::V<W128> = b.get(sem::xmm_ref(is4_x(d)));
+    let (s2, s3) = if d.vex_w { (iv, rmv) } else { (rmv, iv) };
+    let t = b.and::<W128>(s1, s3);
+    let n = b.not::<W128>(s3);
+    let o = b.and::<W128>(s2, n);
+    let lo = b.or::<W128>(t, o);
+    b.set(sem::xmm_ref(dst), lo);
+    let hi = if d.vex_l {
+        let h1: B::V<W128> = b.get(sem::ymm_hi_ref(vvv_x(d)));
+        let rh = rx_hi(b, ea)?;
+        let ih: B::V<W128> = b.get(sem::ymm_hi_ref(is4_x(d)));
+        let (h2, h3) = if d.vex_w { (ih, rh) } else { (rh, ih) };
+        let t = b.and::<W128>(h1, h3);
+        let n = b.not::<W128>(h3);
+        let o = b.and::<W128>(h2, n);
+        b.or::<W128>(t, o)
+    } else {
+        b.konst::<W128>(0)
+    };
+    b.set(sem::ymm_hi_ref(dst), hi);
+    Ok(())
+}
+
+/// 丸めのなじまない大きい値はそのまま返す frint のジェネリック版
+/// （frint_f32/frint_f64 と同じ近似）。rm は softfloat 値
+/// （0=RNE 1=RTZ 2=RDN 3=RUP 4=RMM）。
+fn frint_g<B: Backend, F: Width>(b: &mut B, a: B::V<F>, rm: u8) -> B::V<F> {
+    let lim = b.konst::<F>(F::from_u128(if F::BITS == 32 {
+        0x5f00_0000
+    } else {
+        0x43e0_0000_0000_0000
+    }));
+    let kz = b.konst::<F>(F::from_u128(0));
+    let abs = b.fsgnjx::<F>(a, kz);
+    let small = b.flt::<F>(abs, lim);
+    let i = b.fcvt_s64::<F>(a, rm);
+    let r = b.fcvt_from_s64::<F>(i, RM_RNE);
+    let via_int = b.select::<F>(small, r, a);
+    let ordered = b.feq::<F>(a, a);
+    b.select::<F>(ordered, via_int, a)
+}
+
+/// VFRCZ の 128 ビットチャンク — 各レーン `v - trunc(v)`。
+fn vfrcz128<B: Backend, F: Width>(
+    b: &mut B,
+    lanes: u32,
+    sv: B::V<W128>,
+    get: FLaneGet<B, F>,
+    put: FLanePut<B, F>,
+) -> B::V<W128> {
+    let mut acc = b.konst::<W128>(0);
+    for i in 0..lanes {
+        let f = get(b, sv, i);
+        let t = frint_g::<B, F>(b, f, 1); // RTZ = ゼロ方向
+        let r = b.fsub::<F>(f, t);
+        acc = put(b, acc, r, i);
+    }
+    acc
+}
+
+/// VFRCZPD/PS/SD/SS。dst = v - trunc(v)（小数部抽出）。
+/// スカラ形はレーン 0 のみ計算して上位は 0 クリア。L=1 は
+/// ymm も処理する（パック形のみ）。
+pub fn vfrcz<B: Backend>(
+    b: &mut B,
+    pd: bool,
+    scalar: bool,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    use polyisa_sem::{F32, F64};
+    let dst = reg_x(d);
+    let fbits = if pd { 64 } else { 32 };
+    let sv = rx(b, ea, if scalar { fbits } else { 128 })?;
+    let lo = if pd {
+        vfrcz128::<B, F64>(b, if scalar { 1 } else { 2 }, sv, flane64, put_flane64)
+    } else {
+        vfrcz128::<B, F32>(b, if scalar { 1 } else { 4 }, sv, flane32, put_flane32)
+    };
+    if scalar {
+        b.set(sem::xmm_ref(dst), lo);
+        let z = b.konst::<W128>(0);
+        b.set(sem::ymm_hi_ref(dst), z);
+        return Ok(());
+    }
+    b.set(sem::xmm_ref(dst), lo);
+    let hi = if d.vex_l {
+        let sh = rx_hi(b, ea)?;
+        if pd {
+            vfrcz128::<B, F64>(b, 2, sh, flane64, put_flane64)
+        } else {
+            vfrcz128::<B, F32>(b, 4, sh, flane32, put_flane32)
+        }
+    } else {
+        b.konst::<W128>(0)
+    };
+    b.set(sem::ymm_hi_ref(dst), hi);
+    Ok(())
+}
+
+/// XOP パックシフト/ローテートの 128 ビットチャンク。カウントは
+/// vvvv の対応レーン下位 8 ビット（符号付き: 正=左/左ローテート、
+/// 負=右）。kind: 0=算術(vpsha)、1=論理(vpshl)、2=ローテート(vprot)。
+fn vpsh_chunk<B: Backend>(
+    b: &mut B,
+    kind: u8,
+    ebits: u32,
+    sv: B::V<W128>,
+    cv: B::V<W128>,
+) -> B::V<W128> {
+    let mut acc = b.konst::<W128>(0);
+    let lanes = 128 / ebits;
+    for i in 0..lanes {
+        let off = i * ebits;
+        let sh = b.konst::<W128>(off as u128);
+        let lm = b.konst::<W128>((1u128 << ebits) - 1);
+        let sl = b.shr_l::<W128>(sv, sh);
+        let lane = b.and::<W128>(sl, lm);
+        let csh = b.konst::<W128>(off as u128);
+        let cl = b.shr_l::<W128>(cv, csh);
+        let mff = b.konst::<W128>(0xFF);
+        let cb = b.and::<W128>(cl, mff);
+        let zero = b.konst::<W128>(0);
+        let r = if kind == 2 {
+            // ローテート量 = raw byte & (w-1)。負カウントの右回転は
+            // (byte & mask) の左回転と同値（w が 256 を割るため）。
+            let wk = b.konst::<W128>((ebits - 1) as u128);
+            let n = b.and::<W128>(cb, wk);
+            let wl = b.konst::<W128>(ebits as u128);
+            let nr = b.sub::<W128>(wl, n);
+            let lo = b.shl::<W128>(lane, n);
+            let hi = b.shr_l::<W128>(lane, nr);
+            let both = b.or::<W128>(lo, hi);
+            b.and::<W128>(both, lm)
+        } else {
+            // 符号付きシフト: >=128 は負（右シフト）。
+            let half = b.konst::<W128>(128);
+            let neg = b.cmp::<W128>(Cmp::GeU, cb, half);
+            let bk = b.konst::<W128>(256);
+            let mag = b.sub::<W128>(bk, cb);
+            let cmag = b.select::<W128>(neg, mag, cb);
+            let sl2 = b.shl::<W128>(lane, cmag);
+            let left = b.and::<W128>(sl2, lm);
+            let base = b.shr_l::<W128>(lane, cmag);
+            // 算術右シフトの符号繰り返し。cmag>=w では全 1。
+            let top = b.konst::<W128>(1u128 << (ebits - 1));
+            let tb = b.and::<W128>(lane, top);
+            let sbit = b.cmp::<W128>(Cmp::Ne, tb, zero);
+            let wv = b.konst::<W128>(ebits as u128);
+            let big = b.cmp::<W128>(Cmp::GeU, cmag, wv);
+            let sc = b.select::<W128>(big, wv, cmag);
+            let rem = b.sub::<W128>(wv, sc);
+            let fsh = b.shl::<W128>(lm, rem);
+            let fill = b.and::<W128>(fsh, lm);
+            let right = if kind == 0 {
+                let f = b.select::<W128>(sbit, fill, zero);
+                b.or::<W128>(base, f)
+            } else {
+                base
+            };
+            b.select::<W128>(neg, right, left)
+        };
+        let pos = b.konst::<W128>(off as u128);
+        let pr = b.shl::<W128>(r, pos);
+        acc = b.or::<W128>(acc, pr);
+    }
+    acc
+}
+
+/// VPSHA*/VPSHL*/VPROT*。dest=reg。W=0 は src=r/m・cnt=vvvv、
+/// W=1 は src=vvvv・cnt=r/m（APM vol.6 Table 1-4 の 3 オペランド
+/// 配置）。kind: 0=算術右(vpsha)、1=論理(vpshl)、2=ローテート(vprot)。
+pub fn vpsh<B: Backend>(
+    b: &mut B,
+    kind: u8,
+    ebits: u32,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    let dst = reg_x(d);
+    let rmv = rx(b, ea, 128)?;
+    let hv: B::V<W128> = b.get(sem::xmm_ref(vvv_x(d)));
+    let (sv, cv) = if d.vex_w { (hv, rmv) } else { (rmv, hv) };
+    let lo = vpsh_chunk::<B>(b, kind, ebits, sv, cv);
+    b.set(sem::xmm_ref(dst), lo);
+    let z = b.konst::<W128>(0);
+    b.set(sem::ymm_hi_ref(dst), z);
+    Ok(())
+}
+
+/// VPCOM* — 各レーン src1(vvvv) と src2(r/m) を imm8[2:0] の述語で
+/// 比較し、真なら全 1・偽なら全 0 を書く。`ebits` は要素幅、
+/// `sgn` は符号付き比較か。述語: 0=lt 1=le 2=gt 3=ge 4=eq 5=ne
+/// 6=false 7=true。
+pub fn vpcom<B: Backend>(
+    b: &mut B,
+    ebits: u32,
+    sgn: bool,
+    d: &MapDec,
+    ea: &Rm<B::V<W64>>,
+) -> Result<(), B::Exit> {
+    let dst = reg_x(d);
+    let hv: B::V<W128> = b.get(sem::xmm_ref(vvv_x(d)));
+    let sv = rx(b, ea, 128)?;
+    let pred = (d.imm & 7) as u8;
+    let mut acc = b.konst::<W128>(0);
+    let lanes = 128 / ebits;
+    for i in 0..lanes {
+        let off = i * ebits;
+        let sh = b.konst::<W128>(off as u128);
+        let lm = b.konst::<W128>((1u128 << ebits) - 1);
+        let a1 = b.shr_l::<W128>(hv, sh);
+        let a = b.and::<W128>(a1, lm);
+        let s1 = b.shr_l::<W128>(sv, sh);
+        let c = b.and::<W128>(s1, lm);
+        // 符号比較は符号ビットを反転した上で符号なし比較に帰着する。
+        let (a, c) = if sgn {
+            let sign = b.konst::<W128>(1u128 << (ebits - 1));
+            (b.xor::<W128>(a, sign), b.xor::<W128>(c, sign))
+        } else {
+            (a, c)
+        };
+        let lz = b.konst::<W128>(0);
+        let lane = match pred {
+            0 => {
+                let t = b.cmp::<W128>(Cmp::LtU, a, c);
+                b.select::<W128>(t, lm, lz)
+            }
+            1 => {
+                let t = b.cmp::<W128>(Cmp::GtU, a, c);
+                b.select::<W128>(t, lz, lm)
+            }
+            2 => {
+                let t = b.cmp::<W128>(Cmp::GtU, a, c);
+                b.select::<W128>(t, lm, lz)
+            }
+            3 => {
+                let t = b.cmp::<W128>(Cmp::LtU, a, c);
+                b.select::<W128>(t, lz, lm)
+            }
+            4 => {
+                let t = b.cmp::<W128>(Cmp::Eq, a, c);
+                b.select::<W128>(t, lm, lz)
+            }
+            5 => {
+                let t = b.cmp::<W128>(Cmp::Ne, a, c);
+                b.select::<W128>(t, lm, lz)
+            }
+            6 => lz,
+            _ => lm,
+        };
+        let pos = b.konst::<W128>(off as u128);
+        let pr = b.shl::<W128>(lane, pos);
+        acc = b.or::<W128>(acc, pr);
+    }
+    b.set(sem::xmm_ref(dst), acc);
+    let z = b.konst::<W128>(0);
+    b.set(sem::ymm_hi_ref(dst), z);
     Ok(())
 }
 

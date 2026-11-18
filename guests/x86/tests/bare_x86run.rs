@@ -18124,7 +18124,7 @@ fn run64_vex_avx() {
         align: polyisa_mem::Align::Unaligned,
         kind: polyisa_mem::AccessKind::DataRead,
     };
-    let mut v = [0u8; 0xA0];
+    let mut v = [0u8; 0xB0];
     env.backend.mem.read(VirtAddr(0x2040), &mut v, acc).unwrap();
     {
         let w = |i: usize| u32::from_le_bytes(v[i..i + 4].try_into().unwrap());
@@ -21740,4 +21740,175 @@ fn run64_sse4a() {
     let mut v = [0xFFu8; 8];
     env.backend.mem.read(VirtAddr(0x2150), &mut v, acc).unwrap();
     assert_eq!(v, [0u8; 8], "rdpru edx:eax");
+}
+
+#[test]
+fn run64_xop() {
+    // AMD XOP/FMA4/TBM（8F 接頭辞）と VEX.0F3A 形 FMA4。
+    let feats = polyisa_guest_x86::model_feats("x86_64")
+        | polyisa_guest_x86::FEAT_XOP
+        | polyisa_guest_x86::FEAT_FMA4
+        | polyisa_guest_x86::FEAT_TBM;
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    let rwx = Perms(Perms::R.0 | Perms::W.0 | Perms::X.0);
+    env.backend.mem.map(VirtAddr(0x1000), 1, rwx).unwrap();
+    env.backend.mem.map(VirtAddr(0x2000), 3, Perms::RW).unwrap();
+    env.backend.set(Gpr(4).state(), 0x2800);
+    let mut data = Vec::new();
+    let mut qw = |v: u64| data.extend(v.to_le_bytes());
+    // +0x00 D1 {2.0, 4.0}
+    qw(0x4000_0000_0000_0000);
+    qw(0x4010_0000_0000_0000);
+    // +0x10 D2 {3.0, 5.0}
+    qw(0x4008_0000_0000_0000);
+    qw(0x4014_0000_0000_0000);
+    // +0x20 D3 {1.0, -1.0}
+    qw(0x3FF0_0000_0000_0000);
+    qw(0xBFF0_0000_0000_0000);
+    // +0x30 F1 {1.5, -2.25, 3.0, -0.75}
+    qw(0xC010_0000_3FC0_0000);
+    qw(0xBF40_0000_4040_0000);
+    // +0x40 M1、+0x50 M2、+0x60 M3（vpcmov/vpcom のオペランド）。
+    qw(0xFFFF_FFFF_FFFF_FFFF);
+    qw(0x0F0F_0F0F_0F0F_0F0F);
+    qw(0xAAAA_AAAA_AAAA_AAAA);
+    qw(0xBBBB_BBBB_BBBB_BBBB);
+    qw(0xFF00_FF00_FF00_FF00);
+    qw(0xF0F0_F0F0_F0F0_F0F0);
+    // +0x70 CNT（vpsh の符号付きカウント）。
+    qw(0x00FF_FF00_00FF_FF02 | (4u64 << 8)); // bytes [02,FF,04,00,08,F0,00,FF]
+    // → bytes: 02 FF 04 00 08 F0 00 FF —— 後半 8 は次 qw
+    data.truncate(0x70);
+    data.extend([
+        0x02u8, 0xFF, 0x04, 0x00, 0x08, 0xF0, 0x01, 0x03, // CNT lo
+        0x05, 0x07, 0x80, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, // CNT hi
+        // +0x80 SHF
+        0x01, 0x81, 0x10, 0xFF, 0x01, 0x02, 0x03, 0x7F, 0x80, 0xF0, 0x01, 0x02, 0x03, 0x04, 0x05,
+        0x06,
+    ]);
+    env.backend.mem.write(VirtAddr(0x2000), &data).unwrap();
+    let prog: &[u8] = &[
+        0x48, 0xB8, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rax,0x2000
+        0x48, 0xBB, 0x00, 0x21, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rbx,0x2100
+        0x66, 0x0F, 0x6F, 0x08, // movdqa xmm1,[rax] → D1
+        0x66, 0x0F, 0x6F, 0x50, 0x10, // movdqa xmm2,[rax+0x10] → D2
+        0x66, 0x0F, 0x6F, 0x58, 0x20, // movdqa xmm3,[rax+0x20] → D3
+        // FMA4（VEX.0F3A 形、W=0: src2=rm=xmm2・src3=is4=xmm3）。
+        0xC4, 0xE3, 0x71, 0x69, 0xE2, 0x30, // vfmaddpd xmm4,xmm1,xmm2,xmm3 → {7,19}
+        0x66, 0x0F, 0x7F, 0x23, // movdqa [rbx],xmm4
+        // W=1: src2=is4=xmm3・src3=rm=xmm2 → {2*1+3, 4*(-1)+5}={5,1}。
+        0xC4, 0xE3, 0xF1, 0x69, 0xE2, 0x30, // vfmaddpd xmm4,...
+        0x66, 0x0F, 0x7F, 0x63, 0x10, // movdqa [rbx+0x10],xmm4
+        // FMA4 スカラ形（VEX.0F3A 6B）はレーン 0 だけ計算して
+        // 上位を 0 クリアする（src1 上位の継承はしない）。
+        0xC4, 0xE3, 0x71, 0x6B, 0xE2, 0x30, // vfmaddsd xmm4,xmm1,xmm2,xmm3 → {7.0, 0}
+        0x66, 0x0F, 0x7F, 0x63, 0x20, // movdqa [rbx+0x20],xmm4
+        // VPCMOV: dst=(s1&s3)|(s2&~s3)。
+        0x66, 0x0F, 0x6F, 0x48, 0x40, // movdqa xmm1,[rax+0x40] → M1
+        0x66, 0x0F, 0x6F, 0x50, 0x50, // movdqa xmm2,[rax+0x50] → M2
+        0x66, 0x0F, 0x6F, 0x58, 0x60, // movdqa xmm3,[rax+0x60] → M3
+        0x8F, 0xE8, 0x70, 0xA2, 0xE2, 0x30, // vpcmov xmm4,xmm1,xmm2,xmm3
+        0x66, 0x0F, 0x7F, 0x63, 0x30, // movdqa [rbx+0x30],xmm4
+        // VPCOMB eq（xmm2==xmm2）→ 全 1。
+        0x8F, 0xE8, 0x68, 0xCC, 0xEA, 0x04, // vpcomb xmm5,xmm2,xmm2,4
+        0x66, 0x0F, 0x7F, 0x6B, 0x40, // movdqa [rbx+0x40],xmm5
+        // VPcomub lt（M2<M3、符号なしバイト比較）。
+        0x8F, 0xE8, 0x68, 0xEC, 0xF3, 0x00, // vpcomub xmm6,xmm2,xmm3,0
+        0x66, 0x0F, 0x7F, 0x73, 0x50, // movdqa [rbx+0x48],xmm6
+        // VFRCZPS — 小数部抽出。
+        0x66, 0x0F, 0x6F, 0x48, 0x30, // movdqa xmm1,[rax+0x30] → F1
+        0x8F, 0xE9, 0x78, 0x80, 0xF9, // vfrczps xmm7,xmm1
+        0x66, 0x0F, 0x7F, 0x7B, 0x60, // movdqa [rbx+0x50],xmm7
+        // VFRCZSS — スカラ形はレーン 0 のみ、上位は 0 クリア。
+        0x8F, 0xE9, 0x78, 0x82, 0xF9, // vfrczss xmm7,xmm1 → {0.5, 0,0,0}
+        0x66, 0x0F, 0x7F, 0xBB, 0xC0, 0x00, 0x00, 0x00, // movdqa [rbx+0xC0],xmm7
+        // VPSHLB — レーンごとの符号付きシフト（左=論理）。
+        0x66, 0x0F, 0x6F, 0xA0, 0x80, 0x00, 0x00, 0x00, // movdqa xmm4,[rax+0x80] → SHF
+        0x66, 0x0F, 0x6F, 0x50, 0x70, // movdqa xmm2,[rax+0x70] → CNT
+        0x8F, 0xE9, 0x68, 0x94, 0xCC, // vpshlb xmm1,xmm4,xmm2
+        0x66, 0x0F, 0x7F, 0x4B, 0x70, // movdqa [rbx+0x60],xmm1
+        // W=1 は src=vvvv・cnt=r/m（同じ計算を逆配置で書く）。
+        0x8F, 0xE9, 0xD8, 0x94, 0xCA, // vpshlb xmm1,xmm4(SHF),xmm2(CNT)
+        0x66, 0x0F, 0x7F, 0x8B, 0xB0, 0x00, 0x00, 0x00, // movdqa [rbx+0xB0],xmm1
+        // VPROTB — ローテート（負カウントは右回転と同値）。
+        0x8F, 0xE9, 0x68, 0x90, 0xCC, // vprotb xmm1,xmm4,xmm2
+        0x66, 0x0F, 0x7F, 0x8B, 0x80, 0x00, 0x00, 0x00, // movdqa [rbx+0x70],xmm1
+        // VPSHAB — 算術シフト（負カウントで符号拡張の右）。
+        0x8F, 0xE9, 0x68, 0x98, 0xCC, // vpshab xmm1,xmm4,xmm2
+        0x66, 0x0F, 0x7F, 0x8B, 0x90, 0x00, 0x00, 0x00, // movdqa [rbx+0x80],xmm1
+        // TBM（XOP.9 グループ、宛先 vvvv=eax）。
+        0xB9, 0x0A, 0x00, 0x00, 0x00, // mov ecx,0x0A
+        0x8F, 0xE9, 0x78, 0x01, 0xC9, // blcfill eax,ecx → 0xA & 0xB = 0xA
+        0x89, 0x83, 0xA0, 0x00, 0x00, 0x00, // mov [rbx+0xA0],eax
+        0xB9, 0xF0, 0x00, 0x00, 0x00, // mov ecx,0xF0
+        0x8F, 0xE9, 0x78, 0x02, 0xC9, // blcmsk eax,ecx → 0xF0 ^ 0xF1 = 0x01
+        0x89, 0x83, 0xA4, 0x00, 0x00, 0x00, // mov [rbx+0xA4],eax
+        // TBM BEXTR（XOP.A、imm32 [7:0]=start・[15:8]=len）。
+        0xBA, 0xEF, 0xCD, 0xAB, 0x00, // mov edx,0x00ABCDEF
+        0x8F, 0xEA, 0x78, 0x10, 0xC2, 0x04, 0x08, 0x00, 0x00, // bextr eax,edx,start=4,len=8
+        0x89, 0x83, 0xA8, 0x00, 0x00, 0x00, // mov [rbx+0xA8],eax
+        0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00, // mov rax,60
+        0x48, 0x31, 0xFF, // xor rdi,rdi
+        0x0F, 0x05, // syscall → exit(0)
+    ];
+    env.backend.mem.write(VirtAddr(0x1000), prog).unwrap();
+    let mut sys = X64Exit;
+    let out = run_x86::run_mode_ex(
+        &mut env,
+        0x1000,
+        &mut sys,
+        200,
+        true,
+        feats,
+        &polyisa_guest_x86::model_params("x86_64"),
+    );
+    assert_eq!(out, Outcome::Exit(0));
+    let acc = polyisa_mem::Access {
+        endian: polyisa_mem::Endian::Le,
+        align: polyisa_mem::Align::Unaligned,
+        kind: polyisa_mem::AccessKind::DataRead,
+    };
+    let mut v = [0u8; 0xD0];
+    env.backend.mem.read(VirtAddr(0x2100), &mut v, acc).unwrap();
+    let q = |i: usize| u64::from_le_bytes(v[i..i + 8].try_into().unwrap());
+    // VEX.0F3A 形 FMA4: {2*3+1, 4*5+(-1)} = {7.0, 19.0}。
+    assert_eq!(q(0x00), 0x401C_0000_0000_0000, "fma4 w0 lo");
+    assert_eq!(q(0x08), 0x4033_0000_0000_0000, "fma4 w0 hi");
+    // W=1: {2*1+3, 4*(-1)+5} = {5.0, 1.0}。
+    assert_eq!(q(0x10), 0x4014_0000_0000_0000, "fma4 w1 lo");
+    assert_eq!(q(0x18), 0x3FF0_0000_0000_0000, "fma4 w1 hi");
+    // スカラ FMA4: レーン 0=7.0、上位 64 ビットは 0 クリア。
+    assert_eq!(q(0x20), 0x401C_0000_0000_0000, "fma4sd lo");
+    assert_eq!(q(0x28), 0, "fma4sd hi");
+    // VPCMOV: (M1&M3)|(M2&~M3)。
+    assert_eq!(q(0x30), 0xFFAA_FFAA_FFAA_FFAA, "vpcmov lo");
+    assert_eq!(q(0x38), 0x0B0B_0B0B_0B0B_0B0B, "vpcmov hi");
+    // VPCOMB eq → 全 1。
+    assert_eq!(q(0x40), 0xFFFF_FFFF_FFFF_FFFF, "vpcomb lo");
+    assert_eq!(q(0x48), 0xFFFF_FFFF_FFFF_FFFF, "vpcomb hi");
+    // VPCOMUB lt: byte i = M2[i]<M3[i] ? 0xFF : 0。
+    assert_eq!(q(0x50), 0xFF00_FF00_FF00_FF00, "vpcomub lo");
+    assert_eq!(q(0x58), 0xFFFF_FFFF_FFFF_FFFF, "vpcomub hi");
+    // VFRCZPS: {0.5,-0.25,0.0,-0.75}。
+    assert_eq!(q(0x60), 0xBE80_0000_3F00_0000, "vfrczps lo");
+    assert_eq!(q(0x68), 0xBF40_0000_0000_0000, "vfrczps hi");
+    // VFRCZSS: レーン 0=0.5、残りは 0 クリア。
+    assert_eq!(q(0xC0), 0x3F00_0000, "vfrczss lo");
+    assert_eq!(q(0xC8), 0, "vfrczss hi");
+    // VPSHLB: bytes [04,40,00,FF,00,00,06,F8 | 00×8]。
+    assert_eq!(q(0x70), 0xF806_0000_FF00_4004, "vpshlb lo");
+    assert_eq!(q(0x78), 0, "vpshlb hi");
+    // W=1 形は src/cnt を交換して同じ結果。
+    assert_eq!(q(0xB0), 0xF806_0000_FF00_4004, "vpshlb w1 lo");
+    assert_eq!(q(0xB8), 0, "vpshlb w1 hi");
+    // VPROTB: bytes [04,C0,01,FF,01,02,06,FB | 10,78,01,04,0C,20,50,C0]。
+    assert_eq!(q(0x80), 0xFB06_0201_FF01_C004, "vprotb lo");
+    assert_eq!(q(0x88), 0xC050_200C_0401_7810, "vprotb hi");
+    // VPSHAB: bytes [04,C0,00,FF,00,00,06,F8 | 00×8]。
+    assert_eq!(q(0x90), 0xF806_0000_FF00_C004, "vpshab lo");
+    assert_eq!(q(0x98), 0, "vpshab hi");
+    // TBM: blcfill=0x0A、blcmsk=0x01、bextr=0xDE。
+    assert_eq!(q(0xA0) & 0xFFFF_FFFF, 0x0A, "blcfill");
+    assert_eq!(q(0xA0) >> 32 & 0xFFFF_FFFF, 0x01, "blcmsk");
+    assert_eq!(q(0xA8) & 0xFFFF_FFFF, 0xDE, "bextr");
 }

@@ -956,6 +956,12 @@ fn gen_map_decoder(model: &Model) -> Result<String, GenError> {
          \x20                   i += 2;\n\
          \x20               } else {\n\
          \x20                   let b3 = *bytes.get(i + 2)?;\n\
+         \x20                   // VEX.mmmmm は 0F/0F38/0F3A（1-3）だけ有効。\n\
+         \x20                   // 0 と 4 以上は予約で #UD（XOP 表の 8/9/10 は\n\
+         \x20                   // 0x8F 接頭辞でのみ選ばれる）。\n\
+         \x20                   if b2 & 0x1F == 0 || b2 & 0x1F > 3 {\n\
+         \x20                       return None;\n\
+         \x20                   }\n\
          \x20                   d.vex = true;\n\
          \x20                   d.vex_map = b2 & 0x1F;\n\
          \x20                   d.rex = if mode_m64(modes) {\n\
@@ -981,6 +987,48 @@ fn gen_map_decoder(model: &Model) -> Result<String, GenError> {
          \x20               }\n\
          \x20           }\n\
          \x20       }\n\
+         \x20   }\n",
+    );
+    // XOP 接頭辞（3 バイト、0x8F）。VEX と同じバイト並び
+    // （RXB mmmmm / W vvvv L pp）で、mmmmm >= 8 のときだけ
+    // 接頭辞になる — 8 未満なら POP Ev の ModRM なので
+    // レガシー解読へ進む。マップ番号（8/9/10）は vex_code を
+    // 持つ XOP 表に振り分ける。
+    s.push_str(
+        "    {\n\
+         \x20   let b0 = *bytes.get(i)?;\n\
+         \x20   if b0 == 0x8F && !d.vex && !d.evex {\n\
+         \x20       let b2 = *bytes.get(i + 1)?;\n\
+         \x20       if b2 & 0x1F >= 8 {\n\
+         \x20           // LOCK+XOP は #UD。\n\
+         \x20           if d.lock {\n\
+         \x20               return None;\n\
+         \x20           }\n\
+         \x20           let b3 = *bytes.get(i + 2)?;\n\
+         \x20           d.vex = true;\n\
+         \x20           d.vex_map = b2 & 0x1F;\n\
+         \x20           d.rex = if mode_m64(modes) {\n\
+         \x20               0x40 | (((b2 >> 5) & 7) ^ 7) | ((b3 & 0x80) >> 4)\n\
+         \x20           } else {\n\
+         \x20               0x40\n\
+         \x20           };\n\
+         \x20           d.vex_w = b3 & 0x80 != 0;\n\
+         \x20           d.vex_v = (!b3 >> 3) & 0xF;\n\
+         \x20           d.vex_l = b3 & 4 != 0;\n\
+         \x20           // XOP の pp フィールドは予約で非 0 は #UD。\n\
+         \x20           if b3 & 3 != 0 {\n\
+         \x20               return None;\n\
+         \x20           }\n\
+         \x20           // VEX 同様、XOP 前のレガシー接頭辞（66/F2/F3）は\n\
+         \x20           // 無視される。\n\
+         \x20           d.p66 = false;\n\
+         \x20           d.rep = 0;\n\
+         \x20           i += 3;\n\
+         \x20           if i > 15 {\n\
+         \x20               return None;\n\
+         \x20           }\n\
+         \x20       }\n\
+         \x20   }\n\
          \x20   }\n",
     );
     // EVEX 接頭辞（4 バイト、0x62）。64 ビットモードでのみ扱う

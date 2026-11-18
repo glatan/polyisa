@@ -148,6 +148,32 @@ fn w(s: &str) -> Pred {
     polyisa_isadl::pred::parse(s).expect("valid when")
 }
 
+/// AMD FMA4 のオペコード→ニーモニック。XOP.8 と VEX.0F3A で
+/// 同じ番号を使う（0F3A 形は imm8[7:4] の is4 で 4 番目の
+/// オペランドを選ぶ）。
+const FMA4_OPS: [(u8, &str); 20] = [
+    (0x5C, "vfmaddsubps"),
+    (0x5D, "vfmaddsubpd"),
+    (0x5E, "vfmsubaddps"),
+    (0x5F, "vfmsubaddpd"),
+    (0x68, "vfmaddps"),
+    (0x69, "vfmaddpd"),
+    (0x6A, "vfmaddss"),
+    (0x6B, "vfmaddsd"),
+    (0x6C, "vfmsubps"),
+    (0x6D, "vfmsubpd"),
+    (0x6E, "vfmsubss"),
+    (0x6F, "vfmsubsd"),
+    (0x78, "vfnmaddps"),
+    (0x79, "vfnmaddpd"),
+    (0x7A, "vfnmaddss"),
+    (0x7B, "vfnmaddsd"),
+    (0x7C, "vfnmsubps"),
+    (0x7D, "vfnmsubpd"),
+    (0x7E, "vfnmsubss"),
+    (0x7F, "vfnmsubsd"),
+];
+
 /// `map` の記述をモデルに足す。
 pub fn build_maps(m: &mut Model) {
     // 実行モード。`m64` は 64 ビットモード、`opd` は既定のオペランド
@@ -2374,6 +2400,7 @@ pub fn build_maps(m: &mut Model) {
     build_map_0f38(m);
     build_map_0f3a(m);
     build_map_3dnow(m);
+    build_map_xop(m);
 }
 
 /// 3DNow!（0F 0F /r imm8）。ModRM（と SIB・変位）の後に来る
@@ -3227,7 +3254,7 @@ fn build_map_0f3a(m: &mut Model) {
             0x06,
             vmx(
                 "vperm2f128_xv_hv_wv_ib",
-                &[RegX, Vv, RmX, ib],
+                &[RegX, Vv, RmX, Imm(B8)],
                 PfxSel::P66,
                 L1,
                 false,
@@ -3258,7 +3285,7 @@ fn build_map_0f3a(m: &mut Model) {
                 op,
                 vmx(
                     &format!("{mn}_xv_hv_wv_ib"),
-                    &[RegX, Vv, RmX, ib],
+                    &[RegX, Vv, RmX, Imm(B8)],
                     PfxSel::P66,
                     L0,
                     false,
@@ -3273,7 +3300,7 @@ fn build_map_0f3a(m: &mut Model) {
                 op,
                 vmx(
                     &format!("{mn}_xv_hv_wv_ib"),
-                    &[RegX, Vv, RmX, ib],
+                    &[RegX, Vv, RmX, Imm(B8)],
                     PfxSel::P66,
                     Any,
                     false,
@@ -3285,11 +3312,11 @@ fn build_map_0f3a(m: &mut Model) {
         // VPBLENDW（256 ビット形は AVX2）。
         items.push(MapItem::Insn(
             0x0E,
-            vmx("vpblendw_xv_hv_wv_ib", &[RegX, Vv, RmX, ib], PfxSel::P66, L0, false, "{op} {x}, {h}, {w}, {i}", "alu"),
+            vmx("vpblendw_xv_hv_wv_ib", &[RegX, Vv, RmX, Imm(B8)], PfxSel::P66, L0, false, "{op} {x}, {h}, {w}, {i}", "alu"),
         ));
         items.push(MapItem::Insn(
             0x0E,
-            vax("vpblendw_xv_hv_wv_ib", &[RegX, Vv, RmX, ib], PfxSel::P66, L1, false, "{op} {x}, {h}, {w}, {i}", "alu"),
+            vax("vpblendw_xv_hv_wv_ib", &[RegX, Vv, RmX, Imm(B8)], PfxSel::P66, L1, false, "{op} {x}, {h}, {w}, {i}", "alu"),
         ));
         // VPEXTRB/W/D/Q・VEXTRACTPS（vvvv 未使用・128 のみ）。
         for (op, mn, w) in [
@@ -3344,7 +3371,7 @@ fn build_map_0f3a(m: &mut Model) {
             } else if op < 0x20 {
                 vmx(
                     &format!("{mn}_xv_hv_wv_ib"),
-                    &[RegX, Vv, RmX, ib],
+                    &[RegX, Vv, RmX, Imm(B8)],
                     PfxSel::P66,
                     L1,
                     false,
@@ -3354,7 +3381,7 @@ fn build_map_0f3a(m: &mut Model) {
             } else {
                 vax(
                     &format!("{mn}_xv_hv_wv_ib"),
-                    &[RegX, Vv, RmX, ib],
+                    &[RegX, Vv, RmX, Imm(B8)],
                     PfxSel::P66,
                     L1,
                     false,
@@ -3382,7 +3409,7 @@ fn build_map_0f3a(m: &mut Model) {
             0x21,
             vmx(
                 "vinsertps_xv_hv_wv_ib",
-                &[RegX, Vv, RmX, ib],
+                &[RegX, Vv, RmX, Imm(B8)],
                 PfxSel::P66,
                 L0,
                 false,
@@ -3406,19 +3433,19 @@ fn build_map_0f3a(m: &mut Model) {
         // VMPSADBW（256 は AVX2）。
         items.push(MapItem::Insn(
             0x40,
-            vmx("vdpps_xv_hv_wv_ib", &[RegX, Vv, RmX, ib], PfxSel::P66, Any, false, "{op} {x}, {h}, {w}, {i}", "alu"),
+            vmx("vdpps_xv_hv_wv_ib", &[RegX, Vv, RmX, Imm(B8)], PfxSel::P66, Any, false, "{op} {x}, {h}, {w}, {i}", "alu"),
         ));
         items.push(MapItem::Insn(
             0x41,
-            vmx("vdppd_xv_hv_wv_ib", &[RegX, Vv, RmX, ib], PfxSel::P66, L0, false, "{op} {x}, {h}, {w}, {i}", "alu"),
+            vmx("vdppd_xv_hv_wv_ib", &[RegX, Vv, RmX, Imm(B8)], PfxSel::P66, L0, false, "{op} {x}, {h}, {w}, {i}", "alu"),
         ));
         items.push(MapItem::Insn(
             0x42,
-            vmx("vmpsadbw_xv_hv_wv_ib", &[RegX, Vv, RmX, ib], PfxSel::P66, L0, false, "{op} {x}, {h}, {w}, {i}", "alu"),
+            vmx("vmpsadbw_xv_hv_wv_ib", &[RegX, Vv, RmX, Imm(B8)], PfxSel::P66, L0, false, "{op} {x}, {h}, {w}, {i}", "alu"),
         ));
         items.push(MapItem::Insn(
             0x42,
-            vax("vmpsadbw_xv_hv_wv_ib", &[RegX, Vv, RmX, ib], PfxSel::P66, L1, false, "{op} {x}, {h}, {w}, {i}", "alu"),
+            vax("vmpsadbw_xv_hv_wv_ib", &[RegX, Vv, RmX, Imm(B8)], PfxSel::P66, L1, false, "{op} {x}, {h}, {w}, {i}", "alu"),
         ));
         // VBLENDVPS/VBLENDVPD（256 も AVX）と VPBLENDVB（256 は AVX2）。
         // imm8[7:4] がマスクレジスタ。
@@ -3427,7 +3454,7 @@ fn build_map_0f3a(m: &mut Model) {
                 op,
                 vmx(
                     &format!("{mn}_xv_hv_wv_ib"),
-                    &[RegX, Vv, RmX, ib],
+                    &[RegX, Vv, RmX, Imm(B8)],
                     PfxSel::P66,
                     Any,
                     false,
@@ -3438,18 +3465,18 @@ fn build_map_0f3a(m: &mut Model) {
         }
         items.push(MapItem::Insn(
             0x4C,
-            vmx("vpblendvb_xv_hv_wv_ib", &[RegX, Vv, RmX, ib], PfxSel::P66, L0, false, "{op} {x}, {h}, {w}, {i}", "alu"),
+            vmx("vpblendvb_xv_hv_wv_ib", &[RegX, Vv, RmX, Imm(B8)], PfxSel::P66, L0, false, "{op} {x}, {h}, {w}, {i}", "alu"),
         ));
         items.push(MapItem::Insn(
             0x4C,
-            vax("vpblendvb_xv_hv_wv_ib", &[RegX, Vv, RmX, ib], PfxSel::P66, L1, false, "{op} {x}, {h}, {w}, {i}", "alu"),
+            vax("vpblendvb_xv_hv_wv_ib", &[RegX, Vv, RmX, Imm(B8)], PfxSel::P66, L1, false, "{op} {x}, {h}, {w}, {i}", "alu"),
         ));
         // VPERM2I128（AVX2・256 のみ）。
         items.push(MapItem::Insn(
             0x46,
             vax(
                 "vperm2i128_xv_hv_wv_ib",
-                &[RegX, Vv, RmX, ib],
+                &[RegX, Vv, RmX, Imm(B8)],
                 PfxSel::P66,
                 L1,
                 false,
@@ -3457,11 +3484,200 @@ fn build_map_0f3a(m: &mut Model) {
                 "alu",
             ),
         ));
+        // AMD FMA4（66 0F 3A 5C-7F /r ib、VEX C4h ページ）。
+        // imm8[7:4] が 4 番目のオペランドのレジスタを選ぶ（is4）。
+        // W=0 は src2=r/m・src3=is4、W=1 は逆。
+        for (op, mn) in FMA4_OPS {
+            items.push(MapItem::Insn(
+                op,
+                vmx(
+                    &format!("{mn}_xv_hv_wv_iv"),
+                    &[RegX, Vv, RmX, Imm(B8)],
+                    PfxSel::P66,
+                    Any,
+                    false,
+                    "{op} {x}, {h}, {w}, {i}",
+                    "alu",
+                ),
+            ));
+        }
     }
     m.maps.push(MapDecl {
         name: "map_0f3a".to_string(),
         vex_code: Some(3),
         postop: false,
         items,
+    });
+}
+
+/// AMD XOP マップ（8F RXB.mmmmm W.vvvv.L.pp）。mmmmm 8/9/10 が
+/// それぞれ XOP.8・XOP.9・XOP.A。pp は常に 0（非 0 は予約で #UD）
+/// なので全項目 PfxSel::Plain。
+///
+/// XOP.8: FMA4（VEX.0F3A の同オペコードと同じ Insn 名で宣言して
+/// ディスパッチを共有）と VPCMOV。4 オペランド形は VEX.0F3A と
+/// 同じく imm8[7:4] が is4、W で src2/src3 が入れ替わる。
+///
+/// XOP.9: TBM（0x01・0x02 の ModRM.reg グループ、宛先は vvvv）、
+/// VFRCZ、VPSHA*/VPSHL*/VPROT*（カウントは vvvv）。
+///
+/// XOP.A: TBM BEXTR（imm32 の [7:0]=開始・[15:8]=長さ）。
+fn build_map_xop(m: &mut Model) {
+    use OpKind::*;
+    use OpWidth::*;
+    use VexL::*;
+
+    // ---- XOP.8 ----
+    // FMA4（5C-7F）は VEX C4h ページ（0F3A）専用で XOP.8 には
+    // 存在しない（APM vol.6 §1.2.2）。XOP.8 は 4 オペランド
+    // 整数/選択命令のページ。
+    let mut v8: Vec<MapItem> = Vec::new();
+    // VPCMOV dest, src1(vvvv), src2, src3:
+    // dest = (src1 & src3) | (src2 & ~src3)。W で src2/src3 交換。
+    v8.push(MapItem::Insn(
+        0xA2,
+        vmx(
+            "vpcmov_xv_hv_wv_iv",
+            &[RegX, Vv, RmX, Imm(B8)],
+            PfxSel::Plain,
+            Any,
+            false,
+            "{op} {x}, {h}, {w}, {i}",
+            "alu",
+        ),
+    ));
+    // VPCOM* — レーン比較で全 1/全 0 を書く。imm8[2:0] が述語
+    // （0=lt 1=le 2=gt 3=ge 4=eq 5=ne 6=false 7=true）。
+    for (op, mn) in [
+        (0xCCu8, "vpcomb"),
+        (0xCD, "vpcomw"),
+        (0xCE, "vpcomd"),
+        (0xCF, "vpcomq"),
+        (0xEC, "vpcomub"),
+        (0xED, "vpcomuw"),
+        (0xEE, "vpcomud"),
+        (0xEF, "vpcomuq"),
+    ] {
+        // XOP.W は VPCOM では予約（W=1 は #UD）。
+        let mut it = vmx(
+            &format!("{mn}_xv_hv_wv_ib"),
+            &[RegX, Vv, RmX, Imm(B8)],
+            PfxSel::Plain,
+            L0,
+            false,
+            &format!("{mn} {{x}}, {{h}}, {{w}}, {{i}}"),
+            "alu",
+        );
+        it.wsel = Some(false);
+        v8.push(MapItem::Insn(op, it));
+    }
+    m.maps.push(MapDecl {
+        name: "map_xop8".to_string(),
+        vex_code: Some(8),
+        postop: false,
+        items: v8,
+    });
+
+    // ---- XOP.9 ----
+    let mut v9: Vec<MapItem> = Vec::new();
+    // TBM グループ（宛先 vvvv、ソース r/m）。オペコード 0x01 と
+    // 0x02 で ModRM.reg が副オペコード。W はオペランド幅。
+    for (op, reg, mn) in [
+        (0x01u8, 1u8, "blcfill"),
+        (0x01, 2, "blsfill"),
+        (0x01, 3, "blcs"),
+        (0x01, 4, "tzmsk"),
+        (0x01, 5, "blcic"),
+        (0x01, 6, "blsic"),
+        (0x01, 7, "t1mskc"),
+        (0x02, 1, "blcmsk"),
+        (0x02, 6, "blci"),
+    ] {
+        let mut it = vmx(
+            &format!("{mn}_by_ev"),
+            &[Vv, Ea(V)],
+            PfxSel::Plain,
+            L0,
+            false,
+            &format!("{mn} {{h}}, {{e}}"),
+            "alu",
+        );
+        it.group = Some(reg);
+        v9.push(MapItem::Insn(op, it));
+    }
+    // VFRCZ（小数部抽出 = 値 - trunc(値)）。vvvv=1111b・W=0
+    // 必須。スカラ形（ss/sd）に 256 ビット形は無いので L0。
+    for (op, mn, lv) in [
+        (0x80u8, "vfrczps", Any),
+        (0x81, "vfrczpd", Any),
+        (0x82, "vfrczss", L0),
+        (0x83, "vfrczsd", L0),
+    ] {
+        let mut it = vmx(
+            &format!("{mn}_xv_wv"),
+            &[RegX, RmX],
+            PfxSel::Plain,
+            lv,
+            true,
+            &format!("{mn} {{x}}, {{w}}"),
+            "alu",
+        );
+        it.wsel = Some(false);
+        v9.push(MapItem::Insn(op, it));
+    }
+    // VPROT*/VPSHL*/VPSHA* — dest=reg、src=r/m、カウント=vvvv。
+    for (op, mn) in [
+        (0x90u8, "vprotb"),
+        (0x91, "vprotw"),
+        (0x92, "vprotd"),
+        (0x93, "vprotq"),
+        (0x94, "vpshlb"),
+        (0x95, "vpshlw"),
+        (0x96, "vpshld"),
+        (0x97, "vpshlq"),
+        (0x98, "vpshab"),
+        (0x99, "vpshaw"),
+        (0x9A, "vpshad"),
+        (0x9B, "vpshaq"),
+    ] {
+        v9.push(MapItem::Insn(
+            op,
+            vmx(
+                &format!("{mn}_xv_wv_hv"),
+                &[RegX, RmX, Vv],
+                PfxSel::Plain,
+                L0,
+                false,
+                &format!("{mn} {{x}}, {{w}}, {{h}}"),
+                "alu",
+            ),
+        ));
+    }
+    m.maps.push(MapDecl {
+        name: "map_xop9".to_string(),
+        vex_code: Some(9),
+        postop: false,
+        items: v9,
+    });
+
+    // ---- XOP.A ----
+    // TBM BEXTR Gv, Ev, id — 宛先 ModRM.reg、imm32 が制御値。
+    let va: Vec<MapItem> = vec![MapItem::Insn(
+        0x10,
+        vmx(
+            "bextr_gv_ev_id",
+            &[Reg(V), Ea(V), Imm(D32)],
+            PfxSel::Plain,
+            L0,
+            true,
+            "bextr {g}, {e}, {i}",
+            "alu",
+        ),
+    )];
+    m.maps.push(MapDecl {
+        name: "map_xopa".to_string(),
+        vex_code: Some(10),
+        postop: false,
+        items: va,
     });
 }

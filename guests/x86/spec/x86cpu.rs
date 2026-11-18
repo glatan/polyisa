@@ -747,8 +747,26 @@ fn named_gate(mn: &str) -> Option<&'static [&'static str]> {
         // BMI1/BMI2（VEX の GPR 演算。既定の avx を上書き）。
         "andn" | "blsr" | "blsmsk" | "blsi" | "bextr" => &["bmi1"],
         "bzhi" | "mulx" | "pdep" | "pext" | "rorx" | "sarx" | "shlx" | "shrx" => &["bmi2"],
-        // FMA（132/213/231 の ps/pd/ss/sd）と F16C。
-        _ if mn.starts_with("vfm") => &["fma"],
+        // TBM（XOP.9 グループ。BEXTR は XOP.A 形を exact_gate で引く）。
+        "blcfill" | "blsfill" | "blcs" | "tzmsk" | "blcic" | "blsic" | "t1mskc"
+        | "blcmsk" | "blci" => &["tbm"],
+        // XOP（VFRCZ・VPCMOV・パックシフト/ローテート）。
+        "vpcmov" | "vfrczps" | "vfrczpd" | "vfrczss" | "vfrczsd" => &["xop"],
+        _ if mn.starts_with("vprot")
+            || mn.starts_with("vpsha")
+            || mn.starts_with("vpshl")
+            || mn.starts_with("vpcom") =>
+        {
+            &["xop"]
+        }
+        // FMA3 は 132/213/231 形、FMA4 は XOP.8 / VEX.0F3A+is4 形
+        // （ニーモニックに数字の形番号が無い）。
+        _ if (mn.starts_with("vfm") || mn.starts_with("vfn"))
+            && (mn.contains("132") || mn.contains("213") || mn.contains("231")) =>
+        {
+            &["fma"]
+        }
+        _ if mn.starts_with("vfm") || mn.starts_with("vfn") => &["fma4"],
         "vcvtph2ps" | "vcvtps2ph" => &["f16c"],
         // AES-NI と PCLMULQDQ。AES-KL 系は別機能（AESKLE）なので
         // 語頭ではなく列挙で引く。
@@ -882,6 +900,8 @@ fn exact_gate(name: &str) -> Option<&'static [&'static str]> {
         // 0F 3A 起源の PEXTRW は SSE4.1（0F C5 形の PEXTRW は
         // MMX で SSE1、XMM で SSE2 なので名前全体で引く）。
         "pextrw_ew_xv" => &["sse4_1"],
+        // TBM の BEXTR（XOP.A imm32 形。BMI1 の reg 形は bmi1）。
+        "bextr_gv_ev_id" => &["tbm"],
         _ => return None,
     })
 }
