@@ -1058,8 +1058,8 @@ fn bit_op_forms() {
 fn decode_c5_spot() {
     // btst Dn,<ea> = 0000 rrr 1 00 mmm rrr。
     assert_eq!(polyisa_guest_m68k::decode(0x0101, 16), Some(Insn::Btst));
-    // emode=1 は MOVEP の空間なので decode されない。
-    assert_eq!(polyisa_guest_m68k::decode(0x0148, 16), None);
+    // emode=1 は MOVEP の空間（C10 で実装済み）。
+    assert_eq!(polyisa_guest_m68k::decode(0x0148, 16), Some(Insn::MovepLm));
     // bchg/bclr/bset reg 形。
     assert_eq!(polyisa_guest_m68k::decode(0x0141, 16), Some(Insn::Bchg));
     assert_eq!(polyisa_guest_m68k::decode(0x0181, 16), Some(Insn::Bclr));
@@ -1515,4 +1515,117 @@ fn exg_swap_ext() {
     assert_eq!(polyisa_guest_m68k::decode(0x48C0, 16), Some(Insn::ExtL));
     // and.l d0,d0 (0xC180) は emode=0 で残る。
     assert_eq!(polyisa_guest_m68k::decode(0xC180, 16), Some(Insn::AndLDn));
+}
+
+/// C10: movem/movep。
+// Ref: SPEC-M68K-PRM (Rev 1) §MOVEM/MOVEP.
+#[test]
+fn movem_movep() {
+    // movem.l <list>,(a0) = 0100 1000 11 010 000 = 0x48D0、mask 0x0003。
+    let mut env = env_with_data(&[0x48D0, 0x0003], &[]);
+    env.backend.set(D(0).state(), 0x1111_2222);
+    env.backend.set(D(1).state(), 0x3333_4444);
+    env.backend.set(A(0).state(), 0x4000);
+    env.backend.set(sem::ccr_ref(), 0x1F);
+    env.step(|b| sem::exec(b, Insn::MovrmL, 0x48D0, 0x1000))
+        .unwrap();
+    let mut buf = [0u8; 8];
+    env.backend
+        .mem
+        .read(VirtAddr(0x4000), &mut buf, DRD)
+        .unwrap();
+    assert_eq!(&buf[..4], &0x1111_2222u32.to_be_bytes());
+    assert_eq!(&buf[4..8], &0x3333_4444u32.to_be_bytes());
+    assert_eq!(env.backend.get(sem::ccr_ref()), 0x1F);
+
+    // mrmem.w (a0),<list>: 0x4C90、mask 0x0001 → d0 = sext16(mem)。
+    let mut env = env_with_data(&[0x4C90, 0x0001], &[]);
+    env.backend.set(A(0).state(), 0x4000);
+    env.backend
+        .mem
+        .write(VirtAddr(0x4000), &0x8000u16.to_be_bytes())
+        .unwrap();
+    env.step(|b| sem::exec(b, Insn::MrmemW, 0x4C90, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(D(0).state()), 0xFFFF_8000);
+
+    // movrm.w -(a7): 0x48A7? -(a7) = 0x48 27 系… 0100 1000 10 100 111 = 0x48A7。
+    // mask 0x8001 → predec 反転: bit0=A7, bit15=D0 → A7(自身)とD0 を退避。
+    let mut env = env_with_data(&[0x48A7, 0x8001], &[]);
+    env.backend.set(D(0).state(), 0x0000_BEEF);
+    env.backend.set(sem::Ssp.state(), 0x4004);
+    env.backend.set(sem::sr_ref(), 1 << sem::sr_bit::S);
+    env.step(|b| sem::exec(b, Insn::MovrmW, 0x48A7, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::Ssp.state()), 0x4000);
+    // 格納値は初期値のまま（predec でも減算前の An が書かれる）。
+    let mut buf2 = [0u8; 4];
+    env.backend
+        .mem
+        .read(VirtAddr(0x4000), &mut buf2, DRD)
+        .unwrap();
+    assert_eq!(&buf2[..2], &0xBEEFu16.to_be_bytes()); // d0
+    assert_eq!(&buf2[2..4], &0x4004u16.to_be_bytes()); // a7 初期値
+
+    // mrmem.l (a0)+,<list>: 0x4CD8、mask 0x8000 → a7 = mem、
+    // a0 += 4。
+    let mut env = env_with_data(&[0x4CD8, 0x8000], &[]);
+    env.backend.set(A(0).state(), 0x4000);
+    env.backend.set(sem::sr_ref(), 1 << sem::sr_bit::S);
+    env.backend
+        .mem
+        .write(VirtAddr(0x4000), &0x7777_6666u32.to_be_bytes())
+        .unwrap();
+    env.step(|b| sem::exec(b, Insn::MrmemL, 0x4CD8, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::Ssp.state()), 0x7777_6666);
+    assert_eq!(env.backend.get(A(0).state()), 0x4004);
+
+    // movep.w (d16,a0),d0: 0x0108 + 変位 0x0000。
+    // mem[0x4000]=0xAB, mem[0x4002]=0xCD → d0.w = 0xABCD（上位 word 保持）。
+    let mut env = env_with_data(&[0x0108, 0x0000], &[0xAB, 0, 0xCD]);
+    env.backend.set(A(0).state(), 0x4000);
+    env.backend.set(D(0).state(), 0x1234_5678);
+    env.step(|b| sem::exec(b, Insn::MovepWm, 0x0108, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(D(0).state()), 0x1234_ABCD);
+
+    // movep.l d0→(d16,a0): 0x01C8 + 変位 0x0002 → mem[a0+2+{0,2,4,6}]。
+    let mut env = env_with_data(&[0x01C8, 0x0002], &[]);
+    env.backend.set(A(0).state(), 0x4000);
+    env.backend.set(D(0).state(), 0x11_22_33_44);
+    env.step(|b| sem::exec(b, Insn::MovepLr, 0x01C8, 0x1000))
+        .unwrap();
+    let mut buf3 = [0u8; 8];
+    env.backend
+        .mem
+        .read(VirtAddr(0x4002), &mut buf3, DRD)
+        .unwrap();
+    assert_eq!(buf3, [0x11, 0, 0x22, 0, 0x33, 0, 0x44, 0]);
+
+    // 語数: movrm は EA 拡張語 + マスク1語。
+    assert_eq!(ea::insn_ext_words(Insn::MovrmW, 0x48A0), Some(1)); // -(a0)
+    assert_eq!(ea::insn_ext_words(Insn::MrmemL, 0x4CF8), Some(2)); // abs.w
+    assert_eq!(ea::insn_ext_words(Insn::MovepWm, 0x0108), Some(1));
+    // movrm.l <list>,($4000).w: 0x48F8、mask 0x0003、abs.w 拡張語。
+    let mut env = env_with_data(&[0x48F8, 0x0003, 0x4000], &[]);
+    env.backend.set(D(0).state(), 0xAAAA);
+    env.backend.set(D(1).state(), 0xBBBB);
+    env.step(|b| sem::exec(b, Insn::MovrmL, 0x48F8, 0x1000))
+        .unwrap();
+    let mut buf4 = [0u8; 8];
+    env.backend
+        .mem
+        .read(VirtAddr(0x4000), &mut buf4, DRD)
+        .unwrap();
+    assert_eq!(&buf4[..4], &0x0000_AAAAu32.to_be_bytes());
+    assert_eq!(&buf4[4..8], &0x0000_BBBBu32.to_be_bytes());
+    assert_eq!(ea::insn_ext_words(Insn::MovrmL, 0x48F8), Some(2));
+
+    // movrm に (a0)+ は illegal。
+    let mut env = env_with_data(&[0x48D8, 0x0001], &[]);
+    assert!(
+        env.step(|b| sem::exec(b, Insn::MovrmW, 0x48D8, 0x1000))
+            .is_err()
+    );
 }

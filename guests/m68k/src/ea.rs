@@ -200,6 +200,17 @@ pub const fn insn_ext_words(insn: super::Insn, w: u64) -> Option<u32> {
         | super::Insn::ExtW
         | super::Insn::ExtL => Some(0),
         super::Insn::Lea | super::Insn::Pea => ext_words(ea_mode(w), ea_reg(w), 4),
+        // movem はマスク語（pc+2）+ EA 拡張語、movep は変位語1つ。
+        super::Insn::MovrmW | super::Insn::MovrmL | super::Insn::MrmemW | super::Insn::MrmemL => {
+            match ext_words(ea_mode(w), ea_reg(w), 4) {
+                Some(n) => Some(n + 1),
+                None => None,
+            }
+        }
+        super::Insn::MovepWm
+        | super::Insn::MovepLm
+        | super::Insn::MovepWr
+        | super::Insn::MovepLr => Some(1),
         // レジスタビット操作: EA のみ（Dn なら拡張語なし）。
         super::Insn::Btst | super::Insn::Bchg | super::Insn::Bclr | super::Insn::Bset => {
             ext_words(ea_mode(w), ea_reg(w), 1)

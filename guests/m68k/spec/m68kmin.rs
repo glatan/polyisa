@@ -5,7 +5,7 @@
 // 宣言する命令は、16ビット固定の実符号化（nop/reset/rts/rtr/rte/illegal）、
 // EA フィールドを持つ move/movea/moveq（C1）、算術・比較（C2）、
 // 論理・単項（C3）、シフト/ローテート（C4）、ビット操作（C5）、
-// 分岐・復帰（C6）、scc/dbcc（C7）、lea/pea/link/unlk（C8）、exg/swap/ext（C9）。
+// 分岐・復帰（C6）、scc/dbcc（C7）、lea/pea/link/unlk（C8）、exg/swap/ext（C9）、movem/movep（C10）。
 // EA モードの解釈と拡張語の消費は `src/ea.rs`、意味論は `src/sem.rs`。
 // 出典は SPEC-M68K-PRM (M68000PM/AD Rev 1) である。
 // Ref: SPEC-M68K-PRM (Rev 1).
@@ -223,6 +223,18 @@ pub fn build_model() -> polyisa_isadl::Model {
     // XG: exg の2レジスタ。
     m.formats.push(Format {
         name: "XG".to_string(),
+        fields: vec!["dreg".to_string(), "ereg".to_string()],
+        operands: vec![],
+    });
+    // MM: movem の EA。
+    m.formats.push(Format {
+        name: "MM".to_string(),
+        fields: vec!["emode".to_string(), "ereg".to_string()],
+        operands: vec![],
+    });
+    // MP: movep の Dx と (d16,Ay)。
+    m.formats.push(Format {
+        name: "MP".to_string(),
         fields: vec!["dreg".to_string(), "ereg".to_string()],
         operands: vec![],
     });
@@ -703,6 +715,57 @@ pub fn build_model() -> polyisa_isadl::Model {
             "0100 1000 1100 0...",
             "ext",
             &[("emode", WhereOp::Eq, 0)],
+        ),
+         // C10: ブロック転送。
+        // movrm（reg→mem）は ext.w/l が残した 0100 1000 1x の
+        // emode!=0。mrmem（mem→reg）は 0100 1100 1x（bit8=0 で
+        // chk/lea と排他）。
+        // Ref: SPEC-M68K-PRM (Rev 1) §MOVEM/MOVEP.
+        (
+            "movrm_w",
+            "MM",
+            "0100 1000 10 ......",
+            "movem",
+            &[("emode", WhereOp::Ne, 0)],
+        ),
+        (
+            "movrm_l",
+            "MM",
+            "0100 1000 11 ......",
+            "movem",
+            &[("emode", WhereOp::Ne, 0)],
+        ),
+        ("mrmem_w", "MM", "0100 1100 10 ......", "movem", &[]),
+        ("mrmem_l", "MM", "0100 1100 11 ......", "movem", &[]),
+        // movep はビット操作が emode!=1 で予約した空間。
+        // qsz で mem→reg(.w/.l) と reg→mem(.w/.l) を分ける。
+        (
+            "movep_wm",
+            "MP",
+            "0000 ... 1 00 001 ...",
+            "movep",
+            &[("emode", WhereOp::Eq, 1)],
+        ),
+        (
+            "movep_lm",
+            "MP",
+            "0000 ... 1 01 001 ...",
+            "movep",
+            &[("emode", WhereOp::Eq, 1)],
+        ),
+        (
+            "movep_wr",
+            "MP",
+            "0000 ... 1 10 001 ...",
+            "movep",
+            &[("emode", WhereOp::Eq, 1)],
+        ),
+        (
+            "movep_lr",
+            "MP",
+            "0000 ... 1 11 001 ...",
+            "movep",
+            &[("emode", WhereOp::Eq, 1)],
         ),
     ];
     for (name, format, pattern, syntax, wheres) in arith {

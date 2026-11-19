@@ -241,6 +241,14 @@ pub fn exec<B: Backend>(b: &mut B, insn: super::Insn, w: u64, pc: u64) -> Flow<B
         super::Insn::Swap => swap_(b, w),
         super::Insn::ExtW => ext_(b, w, false),
         super::Insn::ExtL => ext_(b, w, true),
+        super::Insn::MovrmW => movem_r2m(b, w, pc, 2),
+        super::Insn::MovrmL => movem_r2m(b, w, pc, 4),
+        super::Insn::MrmemW => movem_m2r(b, w, pc, 2),
+        super::Insn::MrmemL => movem_m2r(b, w, pc, 4),
+        super::Insn::MovepWm => movep(b, w, pc, 2, true),
+        super::Insn::MovepLm => movep(b, w, pc, 4, true),
+        super::Insn::MovepWr => movep(b, w, pc, 2, false),
+        super::Insn::MovepLr => movep(b, w, pc, 4, false),
         super::Insn::Illegal => Err(b.raise(GuestException {
             kind: ExceptionKind::Trap,
             // m68k の例外ベクタ番号 4（Illegal Instruction）。
@@ -1594,4 +1602,234 @@ fn ext_<B: Backend>(b: &mut B, w: u64, long: bool) -> Flow<B> {
     b.set(D(rn).state(), r);
     set_nzvc(b, r, if long { 4 } else { 2 });
     Ok(())
+}
+
+/// マスクビット i に対応するレジスタ値（i<8 なら D、8-15 なら A）。
+fn mask_reg<B: Backend>(b: &mut B, i: u8) -> B::V<W32> {
+    if i < 8 {
+        b.get(D(i).state())
+    } else {
+        areg(b, i - 8)
+    }
+}
+
+/// マスクビット i に対応するレジスタへ書く。
+fn set_mask_reg<B: Backend>(b: &mut B, i: u8, v: B::V<W32>) -> Flow<B> {
+    if i < 8 {
+        b.set(D(i).state(), v);
+        Ok(())
+    } else {
+        set_areg(b, i - 8, v)
+    }
+}
+
+/// 拡張語のレジスタマスクを読む（命令語の直後、EA 拡張語より先）。
+fn movem_mask<B: Backend>(b: &mut B, pc: u64) -> Result<B::V<W32>, B::Exit> {
+    let (e, _x) = ea::eval(b, 7, 4, 2, pc + 2)?;
+    match e {
+        Ea::Imm(v) => Ok(v),
+        _ => unreachable!("mode7 reg4 は Imm"),
+    }
+}
+
+/// C10: movem reg→mem。EA は (An),-(An),d16(An),d8(An,Xn),abs のみ。
+/// -(An) ではマスクを反転解釈（bit0=A7…bit15=D0）し、1語ごとに
+/// アドレスを減らしながら書く。終了時に An を更新する。旗不変。
+// Ref: SPEC-M68K-PRM (Rev 1) §MOVEM.
+fn movem_r2m<B: Backend>(b: &mut B, w: u64, pc: u64, size: u32) -> Flow<B> {
+    let emode = ea::ea_mode(w);
+    let ereg = ea::ea_reg(w);
+    let legal = matches!(emode, 2 | 4 | 5 | 6) || (emode == 7 && ereg <= 1);
+    if !legal {
+        return Err(illegal(b));
+    }
+    // -(An) の EA 評価には An の自動デクリメント副作用があるが、
+    // movem は転送全体を自前で進めるため副作用なしの mode2 で
+    // 基底を読む（格納される An 自身の値も減算前のものになる）。
+    let (e, _ni) = ea::eval(b, if emode == 4 { 2 } else { emode }, ereg, 4, pc + 4)?;
+    let base = match e {
+        Ea::Addr(a) => a,
+        _ => unreachable!("memory EA は Addr"),
+    };
+    let mask = movem_mask(b, pc)?;
+    // アドレス列を純演算で先に決め、ビットごとの probe で全範囲の
+    // アクセス可否を確かめてから書き込む（例外一貫性規約）。
+    let mut sets = Vec::with_capacity(16);
+    let mut addrs = Vec::with_capacity(16);
+    let mut addr = base;
+    for i in 0..16u8 {
+        let bit = b.konst::<W32>(1 << i);
+        let bi = b.and(mask, bit);
+        let z = b.konst::<W32>(0);
+        let set = b.cmp(Cmp::Ne, bi, z);
+        let sz = b.konst::<W64>(u64::from(size));
+        let z64 = b.konst::<W64>(0);
+        let dv = b.select(set, sz, z64);
+        if emode == 4 {
+            addr = b.sub(addr, dv);
+            addrs.push(addr);
+        } else {
+            addrs.push(addr);
+            addr = b.add(addr, dv);
+        }
+        sets.push(set);
+    }
+    for i in 0..16usize {
+        b.if_then_else(
+            sets[i],
+            |bb| {
+                bb.probe(addrs[i], size, DWR)?;
+                Ok(())
+            },
+            |_| Ok(()),
+        )?;
+    }
+    for i in 0..16usize {
+        let rn = if emode == 4 { 15 - i as u8 } else { i as u8 };
+        let rv = mask_reg(b, rn);
+        let a = addrs[i];
+        b.if_then_else(
+            sets[i],
+            |bb| {
+                if size == 2 {
+                    let v = bb.trunc::<W32, W16>(rv);
+                    bb.store::<W16>(a, v, DWR)
+                } else {
+                    let sh = bb.konst::<W32>(16);
+                    let hi32 = bb.shr_l(rv, sh);
+                    let hi = bb.trunc::<W32, W16>(hi32);
+                    bb.store::<W16>(a, hi, DWR)?;
+                    let lo = bb.trunc::<W32, W16>(rv);
+                    let two = bb.konst::<W64>(2);
+                    let a2 = bb.add(a, two);
+                    bb.store::<W16>(a2, lo, DWR)
+                }
+            },
+            |_| Ok(()),
+        )?;
+    }
+    if emode == 4 {
+        let a32 = b.trunc::<W64, W32>(addr);
+        set_areg(b, ereg, a32)?;
+    }
+    Ok(())
+}
+
+/// C10: movem mem→reg。EA は (An),(An)+,d16,d8,abs,PC相対。
+/// .w は word を符号拡張して格納する。(An)+ は終了時に An を更新。
+// Ref: SPEC-M68K-PRM (Rev 1) §MOVEM.
+fn movem_m2r<B: Backend>(b: &mut B, w: u64, pc: u64, size: u32) -> Flow<B> {
+    let emode = ea::ea_mode(w);
+    let ereg = ea::ea_reg(w);
+    let legal = matches!(emode, 2 | 3 | 5 | 6) || (emode == 7 && ereg <= 3);
+    if !legal {
+        return Err(illegal(b));
+    }
+    // (An)+ も同じく自動インクリメントの副作用を避けて mode2 で読む。
+    let (e, _ni) = ea::eval(b, if emode == 3 { 2 } else { emode }, ereg, 4, pc + 4)?;
+    let base = match e {
+        Ea::Addr(a) => a,
+        _ => unreachable!("memory EA は Addr"),
+    };
+    let mask = movem_mask(b, pc)?;
+    // ロードをすべて先に済ませてからレジスタを書く（例外一貫性規約）。
+    let mut sets = Vec::with_capacity(16);
+    let mut addrs = Vec::with_capacity(16);
+    let mut addr = base;
+    for i in 0..16u8 {
+        let bit = b.konst::<W32>(1 << i);
+        let bi = b.and(mask, bit);
+        let z = b.konst::<W32>(0);
+        let set = b.cmp(Cmp::Ne, bi, z);
+        let sz = b.konst::<W64>(u64::from(size));
+        let z64 = b.konst::<W64>(0);
+        let dv = b.select(set, sz, z64);
+        addrs.push(addr);
+        sets.push(set);
+        addr = b.add(addr, dv);
+    }
+    let zero = b.konst::<W32>(0);
+    let mut vals = [zero; 16];
+    for i in 0..16usize {
+        let a = addrs[i];
+        b.if_then_else(
+            sets[i],
+            |bb| {
+                vals[i] = if size == 2 {
+                    let w16 = bb.load::<W16>(a, DRD)?;
+                    bb.sext::<W16, W32>(w16)
+                } else {
+                    let hi = bb.load::<W16>(a, DRD)?;
+                    let two = bb.konst::<W64>(2);
+                    let a2 = bb.add(a, two);
+                    let lo = bb.load::<W16>(a2, DRD)?;
+                    let hi32 = bb.zext::<W16, W32>(hi);
+                    let sh = bb.konst::<W32>(16);
+                    let hs = bb.shl(hi32, sh);
+                    let lo32 = bb.zext::<W16, W32>(lo);
+                    bb.or(hs, lo32)
+                };
+                Ok(())
+            },
+            |_| Ok(()),
+        )?;
+    }
+    for i in 0..16usize {
+        let v = vals[i];
+        b.if_then_else(sets[i], |bb| set_mask_reg(bb, i as u8, v), |_| Ok(()))?;
+    }
+    if emode == 3 {
+        let a32 = b.trunc::<W64, W32>(addr);
+        set_areg(b, ereg, a32)?;
+    }
+    Ok(())
+}
+
+/// C10: movep。交互 byte 転送（a+0,+2,+4,+6 の byte アクセス）。
+/// .w は Dx の下位 word のみ、.l は全体。旗不変。
+// Ref: SPEC-M68K-PRM (Rev 1) §MOVEP.
+fn movep<B: Backend>(b: &mut B, w: u64, pc: u64, size: u32, mem_to_reg: bool) -> Flow<B> {
+    let dx = ea::dest_reg(w);
+    let ay = ea::ea_reg(w);
+    let (e, _i) = ea::eval(b, 7, 4, 2, pc + 2)?;
+    let dv = match e {
+        Ea::Imm(v) => v,
+        _ => unreachable!("mode7 reg4 は Imm"),
+    };
+    let k = b.konst::<W32>(16);
+    let sv = b.shl(dv, k);
+    let sd = b.shr_a(sv, k);
+    let base = areg(b, ay);
+    let ea32 = b.add(base, sd);
+    let addr = b.zext::<W32, W64>(ea32);
+    let d = b.get(D(dx).state());
+    if mem_to_reg {
+        let mut acc = if size == 2 {
+            let mk = b.konst::<W32>(0xFFFF_0000);
+            b.and(d, mk)
+        } else {
+            b.konst::<W32>(0)
+        };
+        for i in 0..size {
+            let off = b.konst::<W64>(u64::from(i) * 2);
+            let a = b.add(addr, off);
+            let byte = b.load::<W8>(a, DRD)?;
+            let b32 = b.zext::<W8, W32>(byte);
+            let sh = b.konst::<W32>((size - 1 - i) * 8);
+            let part = b.shl(b32, sh);
+            acc = b.or(acc, part);
+        }
+        b.set(D(dx).state(), acc);
+        Ok(())
+    } else {
+        for i in 0..size {
+            let sh = b.konst::<W32>((size - 1 - i) * 8);
+            let v = b.shr_l(d, sh);
+            let v8 = b.trunc::<W32, W8>(v);
+            let off = b.konst::<W64>(u64::from(i) * 2);
+            let a = b.add(addr, off);
+            b.store::<W8>(a, v8, DWR)?;
+        }
+        Ok(())
+    }
 }

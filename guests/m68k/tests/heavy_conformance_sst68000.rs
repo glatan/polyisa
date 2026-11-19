@@ -110,7 +110,11 @@ const FILES: &[&str] = &[
     "EXG",
     "SWAP",
     "EXT.w",
-    "EXT.l", //
+    "EXT.l",
+    "MOVEM.w",
+    "MOVEM.l",
+    "MOVEP.w",
+    "MOVEP.l", //
     "ANDItoCCR",
     "ANDItoSR",
     "ORItoCCR",
