@@ -2875,13 +2875,10 @@ fn neg_<B: Backend>(b: &mut B, w: u64, pc: u64, with_x: bool) -> Flow<B> {
     let nvc = b.or(nv, c8);
     let nvcz = b.or(nvc, zf);
     let out0 = b.or(keep, nvcz);
-    // X は C と同値（NEGX のみ。NEG は X を保持）。
-    let x8 = if with_x {
+    // X は C と同値（NEG・NEGX 共通。SST が裏付け）。
+    let x8 = {
         let xk = b.konst::<W8>(1 << sr_bit::X);
         b.select(is_c, xk, z8)
-    } else {
-        let xk2 = b.konst::<W8>(1 << sr_bit::X);
-        b.and(ccr, xk2)
     };
     let out = b.or(out0, x8);
     b.set(ccr_ref(), out);

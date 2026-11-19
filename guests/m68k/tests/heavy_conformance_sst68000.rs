@@ -24,8 +24,7 @@ use polyisa_mem::{Access, AccessKind, Align, Endian, Perms, VirtAddr};
 use polyisa_sem::{Backend as _, ExceptionKind};
 use std::path::PathBuf;
 
-/// 実装済みの命令群に対応するファイルだけを走らせる（部分検証）。
-/// H1 で全ファイルに広げる。
+/// データセットの全ファイル（H1 で全件に拡大）。
 // ADDQ/SUBQ/ADDI/SUBI/CMPI/CMPM 等のファイルはデータセットに
 // 存在しない（その分は bare テストが担保する）。
 const FILES: &[&str] = &[
@@ -39,12 +38,18 @@ const FILES: &[&str] = &[
     "ADD.w",
     "ADD.l",
     "ADDA.w",
-    "ADDA.l", //
+    "ADDA.l",
+    "ADDX.b",
+    "ADDX.w",
+    "ADDX.l", //
     "SUB.b",
     "SUB.w",
     "SUB.l",
     "SUBA.w",
-    "SUBA.l", //
+    "SUBA.l",
+    "SUBX.b",
+    "SUBX.w",
+    "SUBX.l", //
     "CMP.b",
     "CMP.w",
     "CMP.l",
@@ -62,6 +67,12 @@ const FILES: &[&str] = &[
     "NOT.b",
     "NOT.w",
     "NOT.l",
+    "NEG.b",
+    "NEG.w",
+    "NEG.l",
+    "NEGX.b",
+    "NEGX.w",
+    "NEGX.l",
     "CLR.b",
     "CLR.w",
     "CLR.l",
@@ -144,7 +155,10 @@ const FILES: &[&str] = &[
     "RTE",
     "STOP",
     "MOVEtoUSP",
-    "MOVEfromUSP",
+    "MOVEfromUSP", //
+    // H1: データセット全件。Insn::Tas は未宣言で decode できない
+    // （unimplemented として分類）。
+    "TAS",
 ];
 
 /// u32 のレジスタ列（d0-7, a0-6, usp, ssp, sr, pc）を生値で持つ。
@@ -396,6 +410,8 @@ fn sst68000_conformance() {
     let mut total = 0usize;
     let mut failed_files = Vec::new();
     let mut exceptional = 0usize;
+    let mut unimplemented = 0usize;
+    let mut unimplemented_files: Vec<String> = Vec::new();
     for name in FILES {
         if let Some(f) = &only
             && name != f
@@ -407,7 +423,7 @@ fn sst68000_conformance() {
         parse(&data, max, &mut tests);
         let mut diffs = 0usize;
         let mut exc = 0usize;
-        let mut touched: Vec<u32> = Vec::new();
+        let mut unimp = 0usize;
         for (i, t) in tests.iter().enumerate() {
             setup(&mut env, &t.init);
             for &(a, v) in &t.init.ram {
@@ -417,10 +433,16 @@ fn sst68000_conformance() {
             // 命令語は実行前に掴んでおく（自己書き換えで変わりうる）。
             let head = head_insn(&env).ok();
             let mut d = match step_one(&mut env) {
+                // 未宣言命令（TAS 等）は decode 不可 — 未一致ではなく
+                // 未実装として別枠で数える（H1 の分類）。
+                Err(InterpExit::Unimplemented(m)) if m.starts_with("decode ") => {
+                    unimp += 1;
+                    Vec::new()
+                }
                 Ok(()) => diff(&mut env, &t.fina),
                 // アドレスエラー（14 バイトフレーム）の配送は未接続。
-                // それを起こすテストは終了状態が異なるので比較できない。
-                // 終了状態が例外スタックフレームを含むので比較できない。
+                // それを起こすテストは終了状態が例外スタックフレームを
+                // 含むので比較できない。
                 // ただし例外が「期待された」ことは確認する: MOVE は
                 // 分岐しないので、期待終了 pc = 初期 pc + 命令長。
                 // そこに一致するなら SST が期待しない例外であり diff。
@@ -461,23 +483,57 @@ fn sst68000_conformance() {
                 }
             }
             // このテストが触れた番地を 0 に戻す（次のテストの初期化）。
-            for &(a, _) in t.init.ram.iter().chain(t.fina.ram.iter()) {
-                touched.push(a);
-            }
-            if touched.len() > 8192 || i + 1 == tests.len() {
-                for &a in &touched {
-                    let _ = env.backend.mem.write(VirtAddr(u64::from(a)), &[0]);
+            // SST の ram 列は疎なので、スタックプッシュ（JSR/BSR/LINK/
+            // PEA・例外フレーム・A7 宛先の EA）が記録範囲外の番地に
+            // 書かれて残留しうる。USP/SSP の周辺も毎テスト戻す。
+            let mut z: Vec<u32> = t
+                .init
+                .ram
+                .iter()
+                .chain(t.fina.ram.iter())
+                .map(|&(a, _)| a)
+                .collect();
+            // MOVEM -(A7) は最大 16 レジスタ（.l で 64B）を SP 下に書く。
+            for st in [&t.init, &t.fina] {
+                for sp in [st.regs[15], st.regs[16]] {
+                    // 24bit バスで下は折り返すので、sp<80 は下端を
+                    // 空間末尾まで遡って戻す。
+                    let below = if sp < 80 {
+                        z.extend((0x1_000_000 - (80 - sp)..0x1_000_000).map(|a| a & 0xFF_FFFF));
+                        0
+                    } else {
+                        sp - 80
+                    };
+                    z.extend((below..sp.wrapping_add(8) & 0xFF_FFFF).map(|a| a & 0xFF_FFFF));
                 }
-                touched.clear();
+            }
+            for a in z {
+                let _ = env.backend.mem.write(VirtAddr(u64::from(a)), &[0]);
             }
         }
         exceptional += exc;
+        unimplemented += unimp;
+        // decode 不可が TAS 以外に出るのは spec 退行なので失敗にする。
+        assert_eq!(
+            unimp,
+            usize::from(*name == "TAS") * tests.len(),
+            "{name} 未宣言の decode 失敗がある"
+        );
+        if unimp > 0 {
+            unimplemented_files.push(format!("{name}:{unimp}/{}", tests.len()));
+        }
         if diffs > 0 {
             failed_files.push((name.to_string(), diffs, tests.len()));
         }
-        eprintln!("{name}: {diffs} diffs, {exc} exceptional");
+        eprintln!("{name}: {diffs} diffs, {exc} exceptional, {unimp} unimplemented");
     }
-    eprintln!("total {total} tests, {exceptional} exceptional（アドレスエラー等未接続）");
+    eprintln!(
+        "total {total} tests, {exceptional} exceptional（アドレスエラー等未接続）, \
+         {unimplemented} unimplemented（未宣言命令）"
+    );
+    for f in &unimplemented_files {
+        eprintln!("  unimplemented {f}");
+    }
     for (n, d, c) in &failed_files {
         eprintln!("  {n}: {d}/{c} diffs");
     }
