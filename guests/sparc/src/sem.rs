@@ -215,62 +215,497 @@ fn src2<B: Backend>(b: &mut B, s: Src2) -> B::V<W64> {
     }
 }
 
-/// ADD。
-pub fn add<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2) -> Flow<B> {
+fn false_b<B: Backend>(b: &mut B) -> B::B {
+    let z = b.konst::<W64>(0);
+    b.cmp::<W64>(Cmp::Ne, z, z)
+}
+
+fn inv_b<B: Backend>(b: &mut B, c: B::B) -> B::B {
+    let t = b.konst::<W64>(1);
+    let f = b.konst::<W64>(0);
+    let s = b.select::<W64>(c, f, t);
+    let z = b.konst::<W64>(0);
+    b.cmp::<W64>(Cmp::Ne, s, z)
+}
+
+/// ICC の指定ビット（N=23, Z=22, V=21, C=20）が立っているか。
+fn icc_bit<B: Backend>(b: &mut B, n: u32) -> B::B {
+    let psr = b.get(psr_ref());
+    let m = b.konst::<W32>(1u32 << n);
+    let masked = b.and::<W32>(psr, m);
+    let zero = b.konst::<W32>(0);
+    b.cmp::<W32>(Cmp::Ne, masked, zero)
+}
+
+/// ICC を更新する。N,Z は `res`（W32 の演算結果）から、V,C は引数の
+/// 判定値から取る。V9 の xcc への対応は後続ステップ（SP9）で扱う。
+/// Ref: SPEC-SPARC-V8 (Version 8) §Processor Status Register.
+fn set_icc<B: Backend>(b: &mut B, res: B::V<W32>, v: B::B, c: B::B) {
+    let one = b.konst::<W32>(1);
+    let zero = b.konst::<W32>(0);
+    let sh31 = b.konst::<W32>(31);
+    let ns = b.shr_l::<W32>(res, sh31);
+    let n = b.and::<W32>(ns, one);
+    let isz = b.cmp::<W32>(Cmp::Eq, res, zero);
+    let z = b.select::<W32>(isz, one, zero);
+    let vv = b.select::<W32>(v, one, zero);
+    let cv = b.select::<W32>(c, one, zero);
+    let psr = b.get(psr_ref());
+    let keep = b.konst::<W32>(0xFF0F_FFFF);
+    let base = b.and::<W32>(psr, keep);
+    let s23 = b.konst::<W32>(23);
+    let s22 = b.konst::<W32>(22);
+    let s21 = b.konst::<W32>(21);
+    let s20 = b.konst::<W32>(20);
+    let n23 = b.shl::<W32>(n, s23);
+    let z22 = b.shl::<W32>(z, s22);
+    let v21 = b.shl::<W32>(vv, s21);
+    let c20 = b.shl::<W32>(cv, s20);
+    let a = b.or::<W32>(n23, z22);
+    let b2 = b.or::<W32>(v21, c20);
+    let lo = b.or::<W32>(a, b2);
+    let psr2 = b.or::<W32>(base, lo);
+    b.set(psr_ref(), psr2);
+}
+
+/// 加算の共通処理。`carry` が立っていれば ICC の C を足す（ADDX 系）。
+/// `cc` が立っていれば N,Z,V,C を ICC に書く。V8 では 32 ビット側で
+/// 旗を計算する。
+/// Ref: SPEC-SPARC-V8 (Version 8) §ADD, §ADDcc, §ADDX, §ADDXcc.
+fn add_common<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2, cc: bool, carry: bool) -> Flow<B> {
     let x = read(b, rs1);
     let y = src2(b, s);
-    let sum = b.add::<W64>(x, y);
+    let cin = if carry { icc_bit(b, 20) } else { false_b(b) };
+    let one = b.konst::<W64>(1);
+    let zero = b.konst::<W64>(0);
+    let cv = b.select::<W64>(cin, one, zero);
+    let t = b.add::<W64>(x, y);
+    let sum = b.add::<W64>(t, cv);
     let v = wmask(b, sum);
     write(b, rd, v);
+    if cc {
+        let x32 = b.trunc::<W64, W32>(x);
+        let y32 = b.trunc::<W64, W32>(y);
+        let (_r, cry, ovf) = b.add_with_carry::<W32>(x32, y32, cin);
+        let res32 = b.trunc::<W64, W32>(v);
+        set_icc(b, res32, ovf, cry);
+    }
     Ok(())
+}
+
+/// 減算の共通処理。`carry` が立っていれば ICC の C を借りる（SUBX 系）。
+/// 旗は `x + !y + !C` の繰り上がりで求める。
+/// Ref: SPEC-SPARC-V8 (Version 8) §SUB, §SUBcc, §SUBX, §SUBXcc.
+fn sub_common<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2, cc: bool, carry: bool) -> Flow<B> {
+    let x = read(b, rs1);
+    let y = src2(b, s);
+    let bin = if carry { icc_bit(b, 20) } else { false_b(b) };
+    let one = b.konst::<W64>(1);
+    let zero = b.konst::<W64>(0);
+    let bv = b.select::<W64>(bin, one, zero);
+    let d = b.sub::<W64>(x, y);
+    let diff = b.sub::<W64>(d, bv);
+    let v = wmask(b, diff);
+    write(b, rd, v);
+    if cc {
+        let x32 = b.trunc::<W64, W32>(x);
+        let y32 = b.trunc::<W64, W32>(y);
+        let iy = b.not::<W32>(y32);
+        let nb = inv_b(b, bin);
+        let (_r, cry, ovf) = b.add_with_carry::<W32>(x32, iy, nb);
+        let res32 = b.trunc::<W64, W32>(v);
+        let borrow = inv_b(b, cry);
+        set_icc(b, res32, ovf, borrow);
+    }
+    Ok(())
+}
+
+/// 論理演算の共通処理。`cc` 形は V,C を 0 にして N,Z を更新する。
+/// Ref: SPEC-SPARC-V8 (Version 8) §AND, §ANDcc, §ANDN, §ANDNcc,
+/// §OR, §ORcc, §ORN, §ORNcc, §XOR, §XORcc, §XNOR, §XNORcc.
+#[derive(Clone, Copy)]
+enum LOp {
+    And,
+    Andn,
+    Or,
+    Orn,
+    Xor,
+    Xnor,
+}
+
+fn logic_common<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2, op: LOp, cc: bool) -> Flow<B> {
+    let x = read(b, rs1);
+    let y = src2(b, s);
+    let ny = b.not::<W64>(y);
+    let t = match op {
+        LOp::And => b.and::<W64>(x, y),
+        LOp::Andn => b.and::<W64>(x, ny),
+        LOp::Or => b.or::<W64>(x, y),
+        LOp::Orn => b.or::<W64>(x, ny),
+        LOp::Xor => b.xor::<W64>(x, y),
+        LOp::Xnor => {
+            let t = b.xor::<W64>(x, y);
+            b.not::<W64>(t)
+        }
+    };
+    let v = wmask(b, t);
+    write(b, rd, v);
+    if cc {
+        let res32 = b.trunc::<W64, W32>(v);
+        let f = false_b(b);
+        set_icc(b, res32, f, f);
+    }
+    Ok(())
+}
+
+/// シフトの共通処理。V7/V8 では rs1 の 32 ビットを下位 5 ビットの量で
+/// 動かす。V9 の 64 ビットシフト（sllx/srlx/srax）は SP9 で扱う。
+/// Ref: SPEC-SPARC-V8 (Version 8) §SLL, §SRL, §SRA.
+#[derive(Clone, Copy)]
+enum Sh {
+    Ll,
+    Rl,
+    Ra,
+}
+
+fn shift_common<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2, sh: Sh) -> Flow<B> {
+    let x = read(b, rs1);
+    let y = src2(b, s);
+    let x32 = b.trunc::<W64, W32>(x);
+    let m = b.konst::<W64>(31);
+    let n = b.and::<W64>(y, m);
+    let n32 = b.trunc::<W64, W32>(n);
+    let r = match sh {
+        Sh::Ll => b.shl::<W32>(x32, n32),
+        Sh::Rl => b.shr_l::<W32>(x32, n32),
+        Sh::Ra => b.shr_a::<W32>(x32, n32),
+    };
+    let e = b.sext::<W32, W64>(r);
+    let v = wmask(b, e);
+    write(b, rd, v);
+    Ok(())
+}
+
+/// 乗算の共通処理。積の下位 32 ビットを rd、上位 32 ビットを Y に書く。
+/// `signed` で SMUL/UMUL を分ける。`cc` 形は N,Z を更新し V,C を 0 にする。
+/// Ref: SPEC-SPARC-V8 (Version 8) §UMUL, §SMUL, §UMULcc, §SMULcc.
+fn mul_common<B: Backend>(
+    b: &mut B,
+    rd: Gpr,
+    rs1: Gpr,
+    s: Src2,
+    signed: bool,
+    cc: bool,
+) -> Flow<B> {
+    let x = read(b, rs1);
+    let y = src2(b, s);
+    let x32 = b.trunc::<W64, W32>(x);
+    let y32 = b.trunc::<W64, W32>(y);
+    let lo = b.mul::<W32>(x32, y32);
+    let hi = if signed {
+        b.mulh::<W32>(x32, y32)
+    } else {
+        b.mulhu::<W32>(x32, y32)
+    };
+    let e = b.sext::<W32, W64>(lo);
+    let v = wmask(b, e);
+    write(b, rd, v);
+    let h64 = b.zext::<W32, W64>(hi);
+    let hv = wmask(b, h64);
+    b.set(y_ref(), hv);
+    if cc {
+        let f = false_b(b);
+        set_icc(b, lo, f, f);
+    }
+    Ok(())
+}
+
+/// 除算の共通処理。被除数は {Y, rs1} の 64 ビット。商を rd に書く。
+/// 仕様では除算後の Y は不定だが、本実装は剰余を格納する実装任意の
+/// 選択肢を取る。`signed` で SDIV/UDIV を分ける。0 除算は division by
+/// zero トラップ（tt = 0x2A）。`cc` 形は N,Z を商から、V を商の
+/// オーバーフローから更新し、C を 0 にする。
+/// Ref: SPEC-SPARC-V8 (Version 8) §UDIV, §SDIV, §UDIVcc, §SDIVcc.
+fn div_common<B: Backend>(
+    b: &mut B,
+    rd: Gpr,
+    rs1: Gpr,
+    s: Src2,
+    signed: bool,
+    cc: bool,
+) -> Flow<B> {
+    let yv = src2(b, s);
+    let dv = b.trunc::<W64, W32>(yv);
+    let zero = b.konst::<W32>(0);
+    let isz = b.cmp::<W32>(Cmp::Eq, dv, zero);
+    b.if_then(isz, |bb| {
+        Err(bb.raise(polyisa_sem::GuestException {
+            kind: polyisa_sem::ExceptionKind::Trap,
+            code: 0x2A,
+            addr: None,
+            in_delay_slot: false,
+        }))
+    })?;
+    let x = read(b, rs1);
+    let x32 = b.trunc::<W64, W32>(x);
+    let yw = b.get(y_ref());
+    let y32 = b.trunc::<W64, W32>(yw);
+    let d64 = if signed {
+        b.sext::<W32, W64>(dv)
+    } else {
+        b.zext::<W32, W64>(dv)
+    };
+    let x64 = b.zext::<W32, W64>(x32);
+    let hi = if signed {
+        b.sext::<W32, W64>(y32)
+    } else {
+        b.zext::<W32, W64>(y32)
+    };
+    let sh = b.konst::<W64>(32);
+    let hi64 = b.shl::<W64>(hi, sh);
+    let dvd = b.or::<W64>(hi64, x64);
+    let (q, r) = if signed {
+        (b.sdiv::<W64>(dvd, d64), b.srem::<W64>(dvd, d64))
+    } else {
+        (b.udiv::<W64>(dvd, d64), b.urem::<W64>(dvd, d64))
+    };
+    // 商が 32 ビットを超えるときは飽和させる。INT64_MIN / -1 は
+    // バックエンドでは最小値に折り返すので、飽和方向は商の符号
+    // （被除数と除数の符号が同じなら正）で決める。
+    // Ref: SPEC-SPARC-V8 (Version 8) §SDIV §UDIV (overflow).
+    let q32 = b.trunc::<W64, W32>(q);
+    let back = if signed {
+        b.sext::<W32, W64>(q32)
+    } else {
+        b.zext::<W32, W64>(q32)
+    };
+    let fits = b.cmp::<W64>(Cmp::Eq, q, back);
+    let sat = if signed {
+        let sh63 = b.konst::<W64>(63);
+        let sd = b.shr_l::<W64>(dvd, sh63);
+        let sr = b.shr_l::<W64>(d64, sh63);
+        let same = b.cmp::<W64>(Cmp::Eq, sd, sr);
+        let pos = b.konst::<W64>(0x7fff_ffff);
+        let neg = b.konst::<W64>(0xffff_ffff_8000_0000);
+        b.select::<W64>(same, pos, neg)
+    } else {
+        b.konst::<W64>(0xffff_ffff)
+    };
+    let qsat = b.select::<W64>(fits, q, sat);
+    let v = wmask(b, qsat);
+    write(b, rd, v);
+    let rm = wmask(b, r);
+    b.set(y_ref(), rm);
+    if cc {
+        // V は商が 32 ビットに収まらないとき立つ。N,Z は格納した
+        // （飽和後の）商から取る。
+        let res32 = b.trunc::<W64, W32>(qsat);
+        let ovf = inv_b(b, fits);
+        let f = false_b(b);
+        set_icc(b, res32, ovf, f);
+    }
+    Ok(())
+}
+
+/// MULScc。ソフトウェア乗算の 1 ステップ。op1 は rs1 を右に 1 シフトし
+/// 最上位に (N xor V) を挿入したもの、op2 は Y<0> が立っていれば
+/// operand2、そうでなければ 0。rd は op1 + op2。Y は rs1<0> を最上位に
+/// 入れて右に 1 シフトしたもの。ICC は N,Z を結果から、V を加算の
+/// オーバーフロー、C を繰り上がりから更新する。
+/// Ref: SPEC-SPARC-V8 (Version 8) §MULScc.
+pub fn mulscc<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2) -> Flow<B> {
+    let x = read(b, rs1);
+    let y = src2(b, s);
+    let x32 = b.trunc::<W64, W32>(x);
+    let y32 = b.trunc::<W64, W32>(y);
+    let one = b.konst::<W32>(1);
+    let zero = b.konst::<W32>(0);
+    let sh31 = b.konst::<W32>(31);
+    // op1 = r[rs1]<31:1> concat... ではなく (n XOR v) CONCAT r[rs1]<31:1>。
+    let n = icc_bit(b, 23);
+    let v = icc_bit(b, 21);
+    let nb = b.select::<W32>(n, one, zero);
+    let vb = b.select::<W32>(v, one, zero);
+    let nv = b.xor::<W32>(nb, vb);
+    let top = b.shl::<W32>(nv, sh31);
+    let half = b.shr_l::<W32>(x32, one);
+    let op1 = b.or::<W32>(half, top);
+    // op2 = Y<0> が立っていれば operand2。
+    let yw = b.get(y_ref());
+    let yw32 = b.trunc::<W64, W32>(yw);
+    let yl = b.and::<W32>(yw32, one);
+    let useop = b.cmp::<W32>(Cmp::Ne, yl, zero);
+    let op2 = b.select::<W32>(useop, y32, zero);
+    let f0 = false_b(b);
+    let (res, cry, ovf) = b.add_with_carry::<W32>(op1, op2, f0);
+    let e = b.sext::<W32, W64>(res);
+    let res64 = wmask(b, e);
+    write(b, rd, res64);
+    // Y = r[rs1]<0> CONCAT Y<31:1>
+    let lsb = b.and::<W32>(x32, one);
+    let top2 = b.shl::<W32>(lsb, sh31);
+    let rest = b.shr_l::<W32>(yw32, one);
+    let ny = b.or::<W32>(top2, rest);
+    let ny64 = b.zext::<W32, W64>(ny);
+    let nyv = wmask(b, ny64);
+    b.set(y_ref(), nyv);
+    set_icc(b, res, ovf, cry);
+    Ok(())
+}
+
+/// ADD。
+pub fn add<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2) -> Flow<B> {
+    add_common(b, rd, rs1, s, false, false)
+}
+
+/// ADDcc。
+pub fn addcc<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2) -> Flow<B> {
+    add_common(b, rd, rs1, s, true, false)
+}
+
+/// ADDX（キャリーイン付き加算）。
+pub fn addx<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2) -> Flow<B> {
+    add_common(b, rd, rs1, s, false, true)
+}
+
+/// ADDXcc。
+pub fn addxcc<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2) -> Flow<B> {
+    add_common(b, rd, rs1, s, true, true)
 }
 
 /// SUB。
 pub fn sub<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2) -> Flow<B> {
-    let x = read(b, rs1);
-    let y = src2(b, s);
-    let d = b.sub::<W64>(x, y);
-    let v = wmask(b, d);
-    write(b, rd, v);
-    Ok(())
+    sub_common(b, rd, rs1, s, false, false)
+}
+
+/// SUBcc。
+pub fn subcc<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2) -> Flow<B> {
+    sub_common(b, rd, rs1, s, true, false)
+}
+
+/// SUBX（キャリーイン付き減算）。
+pub fn subx<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2) -> Flow<B> {
+    sub_common(b, rd, rs1, s, false, true)
+}
+
+/// SUBXcc。
+pub fn subxcc<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2) -> Flow<B> {
+    sub_common(b, rd, rs1, s, true, true)
 }
 
 /// AND。
 pub fn and<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2) -> Flow<B> {
-    let x = read(b, rs1);
-    let y = src2(b, s);
-    let t = b.and::<W64>(x, y);
-    let v = wmask(b, t);
-    write(b, rd, v);
-    Ok(())
+    logic_common(b, rd, rs1, s, LOp::And, false)
+}
+
+/// ANDcc。
+pub fn andcc<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2) -> Flow<B> {
+    logic_common(b, rd, rs1, s, LOp::And, true)
+}
+
+/// ANDN。
+pub fn andn<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2) -> Flow<B> {
+    logic_common(b, rd, rs1, s, LOp::Andn, false)
+}
+
+/// ANDNcc。
+pub fn andncc<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2) -> Flow<B> {
+    logic_common(b, rd, rs1, s, LOp::Andn, true)
 }
 
 /// OR。
 pub fn or<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2) -> Flow<B> {
-    let x = read(b, rs1);
-    let y = src2(b, s);
-    let t = b.or::<W64>(x, y);
-    let v = wmask(b, t);
-    write(b, rd, v);
-    Ok(())
+    logic_common(b, rd, rs1, s, LOp::Or, false)
 }
 
-/// SLL。V7/V8 は下位 5 ビット、V9 は 6 ビットのシフト量。
-/// Ref: SPEC-SPARC-V9 §Shift Instructions.
+/// ORcc。
+pub fn orcc<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2) -> Flow<B> {
+    logic_common(b, rd, rs1, s, LOp::Or, true)
+}
+
+/// ORN。
+pub fn orn<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2) -> Flow<B> {
+    logic_common(b, rd, rs1, s, LOp::Orn, false)
+}
+
+/// ORNcc。
+pub fn orncc<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2) -> Flow<B> {
+    logic_common(b, rd, rs1, s, LOp::Orn, true)
+}
+
+/// XOR。
+pub fn xor<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2) -> Flow<B> {
+    logic_common(b, rd, rs1, s, LOp::Xor, false)
+}
+
+/// XORcc。
+pub fn xorcc<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2) -> Flow<B> {
+    logic_common(b, rd, rs1, s, LOp::Xor, true)
+}
+
+/// XNOR。
+pub fn xnor<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2) -> Flow<B> {
+    logic_common(b, rd, rs1, s, LOp::Xnor, false)
+}
+
+/// XNORcc。
+pub fn xnorcc<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2) -> Flow<B> {
+    logic_common(b, rd, rs1, s, LOp::Xnor, true)
+}
+
+/// UMUL（V8）。積の上位 32 ビットを Y に書く。
+pub fn umul<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2) -> Flow<B> {
+    mul_common(b, rd, rs1, s, false, false)
+}
+
+/// UMULcc（V8）。
+pub fn umulcc<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2) -> Flow<B> {
+    mul_common(b, rd, rs1, s, false, true)
+}
+
+/// SMUL（V8）。積の上位 32 ビットを Y に書く。
+pub fn smul<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2) -> Flow<B> {
+    mul_common(b, rd, rs1, s, true, false)
+}
+
+/// SMULcc（V8）。
+pub fn smulcc<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2) -> Flow<B> {
+    mul_common(b, rd, rs1, s, true, true)
+}
+
+/// UDIV（V8）。被除数は {Y, rs1}。剰余を Y に書く。
+pub fn udiv<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2) -> Flow<B> {
+    div_common(b, rd, rs1, s, false, false)
+}
+
+/// UDIVcc（V8）。
+pub fn udivcc<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2) -> Flow<B> {
+    div_common(b, rd, rs1, s, false, true)
+}
+
+/// SDIV（V8）。被除数は {Y, rs1}。剰余を Y に書く。
+pub fn sdiv<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2) -> Flow<B> {
+    div_common(b, rd, rs1, s, true, false)
+}
+
+/// SDIVcc（V8）。
+pub fn sdivcc<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2) -> Flow<B> {
+    div_common(b, rd, rs1, s, true, true)
+}
+
+/// SLL。
 pub fn sll<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2) -> Flow<B> {
-    let x = read(b, rs1);
-    let y = src2(b, s);
-    let bits = if b.param::<super::Word64Param>() {
-        63
-    } else {
-        31
-    };
-    let m = b.konst::<W64>(bits);
-    let n = b.and::<W64>(y, m);
-    let t = b.shl::<W64>(x, n);
-    let v = wmask(b, t);
-    write(b, rd, v);
-    Ok(())
+    shift_common(b, rd, rs1, s, Sh::Ll)
+}
+
+/// SRL。
+pub fn srl<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2) -> Flow<B> {
+    shift_common(b, rd, rs1, s, Sh::Rl)
+}
+
+/// SRA。
+pub fn sra<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2) -> Flow<B> {
+    shift_common(b, rd, rs1, s, Sh::Ra)
 }
 
 /// SETHI。imm22 を上位に置く（rd = imm22 << 10）。V9 は 32 ビット目の
@@ -487,10 +922,37 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Flow<B> {
     let o = super::extract_ops(insn, u128::from(word));
     match insn {
         Insn::Add
-        | Insn::Sub
+        | Insn::Addcc
+        | Insn::Addx
+        | Insn::Addxcc
         | Insn::And
+        | Insn::Andcc
+        | Insn::Andn
+        | Insn::Andncc
         | Insn::Or
+        | Insn::Orcc
+        | Insn::Orn
+        | Insn::Orncc
+        | Insn::Xor
+        | Insn::Xorcc
+        | Insn::Xnor
+        | Insn::Xnorcc
+        | Insn::Sub
+        | Insn::Subcc
+        | Insn::Subx
+        | Insn::Subxcc
+        | Insn::Umul
+        | Insn::Umulcc
+        | Insn::Smul
+        | Insn::Smulcc
+        | Insn::Udiv
+        | Insn::Udivcc
+        | Insn::Sdiv
+        | Insn::Sdivcc
+        | Insn::Mulscc
         | Insn::Sll
+        | Insn::Srl
+        | Insn::Sra
         | Insn::Jmpl
         | Insn::Save
         | Insn::Restore
@@ -503,9 +965,37 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Flow<B> {
             pc,
         ),
         Insn::AddI
-        | Insn::SubI
+        | Insn::AddccI
+        | Insn::AddxI
+        | Insn::AddxccI
         | Insn::AndI
+        | Insn::AndccI
+        | Insn::AndnI
+        | Insn::AndnccI
         | Insn::OrI
+        | Insn::OrccI
+        | Insn::OrnI
+        | Insn::OrnccI
+        | Insn::XorI
+        | Insn::XorccI
+        | Insn::XnorI
+        | Insn::XnorccI
+        | Insn::SubI
+        | Insn::SubccI
+        | Insn::SubxI
+        | Insn::SubxccI
+        | Insn::UmulI
+        | Insn::UmulccI
+        | Insn::SmulI
+        | Insn::SmulccI
+        | Insn::UdivI
+        | Insn::UdivccI
+        | Insn::SdivI
+        | Insn::SdivccI
+        | Insn::MulsccI
+        | Insn::SllI
+        | Insn::SrlI
+        | Insn::SraI
         | Insn::JmplI
         | Insn::SaveI
         | Insn::RestoreI
@@ -545,10 +1035,37 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Flow<B> {
 fn dispatch3<B: Backend>(b: &mut B, insn: Insn, rd: Gpr, rs1: Gpr, s: Src2, pc: u64) -> Flow<B> {
     match insn {
         Insn::Add | Insn::AddI => add(b, rd, rs1, s),
-        Insn::Sub | Insn::SubI => sub(b, rd, rs1, s),
+        Insn::Addcc | Insn::AddccI => addcc(b, rd, rs1, s),
+        Insn::Addx | Insn::AddxI => addx(b, rd, rs1, s),
+        Insn::Addxcc | Insn::AddxccI => addxcc(b, rd, rs1, s),
         Insn::And | Insn::AndI => and(b, rd, rs1, s),
+        Insn::Andcc | Insn::AndccI => andcc(b, rd, rs1, s),
+        Insn::Andn | Insn::AndnI => andn(b, rd, rs1, s),
+        Insn::Andncc | Insn::AndnccI => andncc(b, rd, rs1, s),
         Insn::Or | Insn::OrI => or(b, rd, rs1, s),
-        Insn::Sll => sll(b, rd, rs1, s),
+        Insn::Orcc | Insn::OrccI => orcc(b, rd, rs1, s),
+        Insn::Orn | Insn::OrnI => orn(b, rd, rs1, s),
+        Insn::Orncc | Insn::OrnccI => orncc(b, rd, rs1, s),
+        Insn::Xor | Insn::XorI => xor(b, rd, rs1, s),
+        Insn::Xorcc | Insn::XorccI => xorcc(b, rd, rs1, s),
+        Insn::Xnor | Insn::XnorI => xnor(b, rd, rs1, s),
+        Insn::Xnorcc | Insn::XnorccI => xnorcc(b, rd, rs1, s),
+        Insn::Sub | Insn::SubI => sub(b, rd, rs1, s),
+        Insn::Subcc | Insn::SubccI => subcc(b, rd, rs1, s),
+        Insn::Subx | Insn::SubxI => subx(b, rd, rs1, s),
+        Insn::Subxcc | Insn::SubxccI => subxcc(b, rd, rs1, s),
+        Insn::Umul | Insn::UmulI => umul(b, rd, rs1, s),
+        Insn::Umulcc | Insn::UmulccI => umulcc(b, rd, rs1, s),
+        Insn::Smul | Insn::SmulI => smul(b, rd, rs1, s),
+        Insn::Smulcc | Insn::SmulccI => smulcc(b, rd, rs1, s),
+        Insn::Udiv | Insn::UdivI => udiv(b, rd, rs1, s),
+        Insn::Udivcc | Insn::UdivccI => udivcc(b, rd, rs1, s),
+        Insn::Sdiv | Insn::SdivI => sdiv(b, rd, rs1, s),
+        Insn::Sdivcc | Insn::SdivccI => sdivcc(b, rd, rs1, s),
+        Insn::Mulscc | Insn::MulsccI => mulscc(b, rd, rs1, s),
+        Insn::Sll | Insn::SllI => sll(b, rd, rs1, s),
+        Insn::Srl | Insn::SrlI => srl(b, rd, rs1, s),
+        Insn::Sra | Insn::SraI => sra(b, rd, rs1, s),
         Insn::Jmpl | Insn::JmplI => jmpl(b, rd, rs1, s, pc),
         Insn::Save | Insn::SaveI => save(b, rd, rs1, s),
         Insn::Restore | Insn::RestoreI => restore(b, rd, rs1, s),

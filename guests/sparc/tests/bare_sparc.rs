@@ -256,3 +256,237 @@ fn cond_table_matches_icc() {
         );
     }
 }
+
+fn psr(env: &mut BareEnv) -> u32 {
+    env.backend.get(sem::psr_ref())
+}
+
+fn icc(env: &mut BareEnv) -> u32 {
+    (psr(env) >> 20) & 0xf
+}
+
+fn yv(env: &mut BareEnv) -> u64 {
+    env.backend.get(sem::y_ref())
+}
+
+#[test]
+fn addx_subx_carry_chain() {
+    let mut env = env();
+    // 64 ビット加算 {g3:g2} = {g5:g4} + {g7:g6} を addcc+addx で。
+    // 下位の繰り上がりが C を通じて上位へ伝わる。
+    env.backend.set(Gpr(4).state(), 0xffff_ffff);
+    env.backend.set(Gpr(5).state(), 0x0000_0001);
+    env.backend.set(Gpr(6).state(), 1);
+    env.backend.set(Gpr(7).state(), 0xffff_ffff);
+    env.step(|b| sem::addcc(b, Gpr(2), Gpr(4), Src2::Reg(Gpr(6))))
+        .unwrap();
+    // 0xffff_ffff + 1 = 0x1_0000_0000 → res=0, Z=1, C=1, V=0。
+    assert_eq!(g(&mut env, 2), 0);
+    assert_eq!(icc(&mut env), 0b0101, "nzcv");
+    env.step(|b| sem::addx(b, Gpr(3), Gpr(5), Src2::Reg(Gpr(7))))
+        .unwrap();
+    // 1 + 0xffff_ffff + 1 = 0x1_0000_0001 → 32 ビットでは 1。
+    assert_eq!(g(&mut env, 3), 1);
+    // subx は借りを引く。C=1（借り）なら結果が 1 減る。
+    env.backend.set(sem::psr_ref(), 1 << 20);
+    env.step(|b| sem::subx(b, Gpr(8), Gpr(5), Src2::Reg(Gpr(6))))
+        .unwrap();
+    assert_eq!(g(&mut env, 8), 0xffff_ffff);
+    // C=0（借りなし）なら素の減算と同じ。
+    env.backend.set(sem::psr_ref(), 0);
+    env.step(|b| sem::subx(b, Gpr(8), Gpr(5), Src2::Reg(Gpr(6))))
+        .unwrap();
+    assert_eq!(g(&mut env, 8), 0);
+}
+
+#[test]
+fn cc_flags_from_ops() {
+    let mut env = env();
+    env.backend.set(Gpr(1).state(), 0x7fff_ffff);
+    env.backend.set(Gpr(2).state(), 1);
+    // addcc: 0x7fffffff+1 = 0x80000000 → N=1, Z=0, V=1, C=0。
+    env.step(|b| sem::addcc(b, Gpr(3), Gpr(1), Src2::Reg(Gpr(2))))
+        .unwrap();
+    assert_eq!(g(&mut env, 3), 0x8000_0000);
+    assert_eq!(icc(&mut env), 0b1010);
+    // subcc: 3 - 5 → N=1, C=1（借り）。
+    env.backend.set(Gpr(1).state(), 3);
+    env.backend.set(Gpr(2).state(), 5);
+    env.step(|b| sem::subcc(b, Gpr(3), Gpr(1), Src2::Reg(Gpr(2))))
+        .unwrap();
+    assert_eq!(icc(&mut env), 0b1001);
+    // andcc: 論理演算は V=C=0。f0f0 & 0 → Z=1。
+    env.backend.set(Gpr(1).state(), 0xf0f0);
+    env.backend.set(Gpr(2).state(), 0x0f00);
+    env.step(|b| sem::andcc(b, Gpr(3), Gpr(1), Src2::Reg(Gpr(2))))
+        .unwrap();
+    assert_eq!(g(&mut env, 3), 0);
+    assert_eq!(icc(&mut env), 0b0100);
+    // orcc: 0xfff0 は正なので N=Z=0。
+    env.step(|b| sem::orcc(b, Gpr(3), Gpr(1), Src2::Reg(Gpr(2))))
+        .unwrap();
+    assert_eq!(g(&mut env, 3), 0xfff0);
+    assert_eq!(icc(&mut env), 0b0000);
+}
+
+#[test]
+fn logic_ops_andn_orn_xor_xnor() {
+    let mut env = env();
+    env.backend.set(Gpr(1).state(), 0xff00_ff00);
+    env.backend.set(Gpr(2).state(), 0x0f0f_0f0f);
+    env.step(|b| sem::andn(b, Gpr(3), Gpr(1), Src2::Reg(Gpr(2))))
+        .unwrap();
+    assert_eq!(g(&mut env, 3), 0xf000_f000);
+    env.step(|b| sem::orn(b, Gpr(3), Gpr(1), Src2::Reg(Gpr(2))))
+        .unwrap();
+    assert_eq!(g(&mut env, 3), 0xfff0_fff0);
+    env.step(|b| sem::xor(b, Gpr(3), Gpr(1), Src2::Reg(Gpr(2))))
+        .unwrap();
+    assert_eq!(g(&mut env, 3), 0xf00f_f00f);
+    env.step(|b| sem::xnor(b, Gpr(3), Gpr(1), Src2::Reg(Gpr(2))))
+        .unwrap();
+    assert_eq!(g(&mut env, 3), 0x0ff0_0ff0);
+}
+
+#[test]
+fn mul_div_and_y() {
+    let mut env = env();
+    // umul: 0x10000 * 0x10000 = 0x1_0000_0000 → rd=0, Y=1。
+    env.backend.set(Gpr(1).state(), 0x1_0000);
+    env.backend.set(Gpr(2).state(), 0x1_0000);
+    env.step(|b| sem::umul(b, Gpr(3), Gpr(1), Src2::Reg(Gpr(2))))
+        .unwrap();
+    assert_eq!(g(&mut env, 3), 0);
+    assert_eq!(yv(&mut env), 1);
+    // smul: -1 * -1 = 1 → rd=1, Y=0。
+    env.backend.set(Gpr(1).state(), 0xffff_ffff);
+    env.backend.set(Gpr(2).state(), 0xffff_ffff);
+    env.step(|b| sem::smul(b, Gpr(3), Gpr(1), Src2::Reg(Gpr(2))))
+        .unwrap();
+    assert_eq!(g(&mut env, 3), 1);
+    assert_eq!(yv(&mut env), 0);
+    // udiv: {Y=0, rs1=100} / 7 → q=14, rem=2。
+    env.backend.set(sem::y_ref(), 0);
+    env.backend.set(Gpr(1).state(), 100);
+    env.backend.set(Gpr(2).state(), 7);
+    env.step(|b| sem::udiv(b, Gpr(3), Gpr(1), Src2::Reg(Gpr(2))))
+        .unwrap();
+    assert_eq!(g(&mut env, 3), 14);
+    assert_eq!(yv(&mut env), 2);
+    // sdiv: {Y=-1, rs1=0xffff_ff9c}（-100）/ 7 → q=-14, rem=-2。
+    env.backend.set(sem::y_ref(), 0xffff_ffff);
+    env.backend.set(Gpr(1).state(), 0xffff_ff9c);
+    env.step(|b| sem::sdiv(b, Gpr(3), Gpr(1), Src2::Reg(Gpr(2))))
+        .unwrap();
+    assert_eq!(g(&mut env, 3), 0xffff_fff2);
+    assert_eq!(yv(&mut env), 0xffff_fffe);
+}
+
+#[test]
+fn udivcc_sets_v_on_quotient_overflow() {
+    let mut env = env();
+    // 被除数 {Y=1, rs1=0} = 0x1_0000_0000、除数 1 → 商が 32 ビット超
+    // で飽和 0xffffffff。N=1, V=1, Z=0, C=0。
+    env.backend.set(sem::y_ref(), 1);
+    env.backend.set(Gpr(1).state(), 0);
+    env.backend.set(Gpr(2).state(), 1);
+    env.step(|b| sem::udivcc(b, Gpr(3), Gpr(1), Src2::Reg(Gpr(2))))
+        .unwrap();
+    assert_eq!(g(&mut env, 3), 0xffff_ffff);
+    assert_eq!(icc(&mut env), 0b1010);
+}
+
+#[test]
+fn sdiv_saturates_min_by_minus_one() {
+    let mut env = env();
+    // 被除数 {Y=0x80000000, rs1=0} = INT64_MIN、除数 -1 →
+    // 商は 2^63 で 32 ビット超。符号が同じ → 正の飽和 0x7fffffff。
+    env.backend.set(sem::y_ref(), 0x8000_0000);
+    env.backend.set(Gpr(1).state(), 0);
+    env.backend.set(Gpr(2).state(), 0xffff_ffff);
+    env.step(|b| sem::sdiv(b, Gpr(3), Gpr(1), Src2::Reg(Gpr(2))))
+        .unwrap();
+    assert_eq!(g(&mut env, 3), 0x7fff_ffff);
+    // 負の飽和。被除数 {Y=0x80000000, rs1=0} = INT64_MIN、除数 1 →
+    // 商 INT64_MIN < INT32_MIN → 0x8000_0000。
+    env.backend.set(sem::y_ref(), 0x8000_0000);
+    env.backend.set(Gpr(2).state(), 1);
+    env.step(|b| sem::sdiv(b, Gpr(3), Gpr(1), Src2::Reg(Gpr(2))))
+        .unwrap();
+    assert_eq!(g(&mut env, 3), 0x8000_0000);
+}
+
+#[test]
+fn div_by_zero_raises_trap() {
+    let mut env = env();
+    env.backend.set(sem::y_ref(), 0);
+    env.backend.set(Gpr(1).state(), 10);
+    env.backend.set(Gpr(2).state(), 0);
+    let r = env.step(|b| sem::udiv(b, Gpr(3), Gpr(1), Src2::Reg(Gpr(2))));
+    assert!(r.is_err());
+}
+
+#[test]
+fn mulscc_steps() {
+    let mut env = env();
+    // N^V=0 → op1 = rs1>>1。Y<0>=0 → 加算なし。rs1=8 → res=4。
+    // rs1[0]=0 → Y = 0x80000000 >> 1。
+    env.backend.set(sem::psr_ref(), 0);
+    env.backend.set(Gpr(1).state(), 8);
+    env.backend.set(Gpr(2).state(), 3);
+    env.backend.set(sem::y_ref(), 0x8000_0000);
+    env.step(|b| sem::mulscc(b, Gpr(3), Gpr(1), Src2::Reg(Gpr(2))))
+        .unwrap();
+    assert_eq!(g(&mut env, 3), 4);
+    assert_eq!(yv(&mut env), 0x4000_0000);
+    assert_eq!(icc(&mut env), 0b0000);
+    // N^V=1 → op1 の最上位が 1。Y<0>=0 なら加算なし。
+    // rs1=9 → op1 = 0x80000004。rs1[0]=1 → Y[31]=1。
+    env.backend.set(sem::psr_ref(), 1 << 23); // N=1, V=0
+    env.backend.set(Gpr(1).state(), 9);
+    env.backend.set(sem::y_ref(), 2);
+    env.step(|b| sem::mulscc(b, Gpr(3), Gpr(1), Src2::Reg(Gpr(2))))
+        .unwrap();
+    assert_eq!(g(&mut env, 3), 0x8000_0004);
+    assert_eq!(yv(&mut env), 0x8000_0001);
+    assert_eq!(icc(&mut env), 0b1000);
+    // Y<0>=1 → operand2 を加算。rs1=0x10, Y=3, src2=5 →
+    // op1 = 8, res = 13。繰り上がりなし → C=0。
+    env.backend.set(sem::psr_ref(), 0);
+    env.backend.set(Gpr(1).state(), 0x10);
+    env.backend.set(Gpr(2).state(), 5);
+    env.backend.set(sem::y_ref(), 3);
+    env.step(|b| sem::mulscc(b, Gpr(3), Gpr(1), Src2::Reg(Gpr(2))))
+        .unwrap();
+    assert_eq!(g(&mut env, 3), 13);
+    assert_eq!(yv(&mut env), 1);
+    assert_eq!(icc(&mut env), 0b0000);
+    // 加算で繰り上がり → C=1。op1 = 0x7fffffff, op2 = 0xffffffff →
+    // res = 0x7ffffffe, C=1。rs1[0]=1 → Y[31]=1。
+    env.backend.set(sem::psr_ref(), 0);
+    env.backend.set(Gpr(1).state(), 0xffff_ffff);
+    env.backend.set(Gpr(2).state(), 0xffff_ffff);
+    env.backend.set(sem::y_ref(), 1);
+    env.step(|b| sem::mulscc(b, Gpr(3), Gpr(1), Src2::Reg(Gpr(2))))
+        .unwrap();
+    assert_eq!(g(&mut env, 3), 0x7fff_fffe);
+    assert_eq!(yv(&mut env), 0x8000_0000);
+    assert_eq!(icc(&mut env), 0b0001);
+}
+
+#[test]
+fn shifts() {
+    let mut env = env();
+    env.backend.set(Gpr(1).state(), 0x8000_00f0);
+    env.backend.set(Gpr(2).state(), 4);
+    env.step(|b| sem::srl(b, Gpr(3), Gpr(1), Src2::Reg(Gpr(2))))
+        .unwrap();
+    assert_eq!(g(&mut env, 3), 0x0800_000f);
+    env.step(|b| sem::sra(b, Gpr(3), Gpr(1), Src2::Reg(Gpr(2))))
+        .unwrap();
+    assert_eq!(g(&mut env, 3), 0xf800_000f);
+    // 即値形のシフト（shcnt は simm13 の下位 5 ビット）。
+    env.step(|b| sem::sll(b, Gpr(3), Gpr(1), Src2::Imm(33)))
+        .unwrap();
+    assert_eq!(g(&mut env, 3), 0x0000_01e0);
+}
