@@ -22,6 +22,14 @@ use polyisa_sem::{Backend as _, ExceptionKind, StateRef, W64};
 // 実バイナリの処理量を見込んだ上限。
 const STEP_LIMIT: u64 = 256_000_000;
 
+/// `top` はスタック上端、`limit` は下向き成長の下限（RLIMIT_STACK 相当）。
+/// 窓 `[limit, top)` 内の未写像ページへのフォルトで写像を伸ばす。
+#[derive(Clone, Copy)]
+pub struct StackGrowth {
+    pub top: u64,
+    pub limit: u64,
+}
+
 /// 実行する CPU モデルの、ループが読む分。
 #[derive(Clone, Copy, Debug)]
 pub struct SparcModel {
@@ -62,11 +70,13 @@ impl SparcModel {
 }
 
 /// `entry` から `model` で実行する。`sys` は OS パーソナリティ。
+/// `stack` はページフォルト駆動のスタック成長窓（不要なら `None`）。
 pub fn run(
     env: &mut BareEnv,
     entry: u64,
     model: SparcModel,
     sys: &mut impl TrapHandler,
+    stack: Option<StackGrowth>,
 ) -> Outcome {
     polyisa_guest_sparc::install_params(&mut env.backend, &model.params);
     env.backend.addr_mask = model.addr_mask;
@@ -82,7 +92,7 @@ pub fn run(
         sys,
         STEP_LIMIT,
         |env| get_u64(env, sem::pc_ref().offset()),
-        |env, sys| step(env, sys, model),
+        |env, sys| step(env, sys, model, stack),
     )
 }
 
@@ -93,13 +103,27 @@ pub fn run(
 fn has_delay_slot(insn: Insn) -> bool {
     matches!(
         insn,
-        Insn::Bicc | Insn::Call | Insn::Jmpl | Insn::JmplI | Insn::Return | Insn::ReturnI
+        Insn::Bicc
+            | Insn::Bpcc
+            | Insn::Bpr
+            | Insn::Fbfcc
+            | Insn::Fbpfcc
+            | Insn::Call
+            | Insn::Jmpl
+            | Insn::JmplI
+            | Insn::Return
+            | Insn::ReturnI
     )
 }
 
 /// 1 命令ぶんのフェッチ・解読・意味論。遅延スロットは分岐と同じ
 /// 呼び出しの内側で実行する。
-fn step(env: &mut BareEnv, sys: &mut impl TrapHandler, model: SparcModel) -> Result<(), Outcome> {
+fn step(
+    env: &mut BareEnv,
+    sys: &mut impl TrapHandler,
+    model: SparcModel,
+    stack: Option<StackGrowth>,
+) -> Result<(), Outcome> {
     let pc = get_u64(env, sem::pc_ref().offset()) & model.addr_mask;
     // 命令フェッチは 4 バイト整列。非整列の mem_address_not_aligned
     // トラップは後続ステップで配送する。
@@ -122,10 +146,10 @@ fn step(env: &mut BareEnv, sys: &mut impl TrapHandler, model: SparcModel) -> Res
         });
     };
     if let Err(e) = env.step(|b| sem::exec(b, insn, word, pc)) {
-        return finish(env, sys, e, pc, word);
+        return finish(env, sys, e, pc, word, stack);
     }
     if has_delay_slot(insn) {
-        return delay(env, sys, model, pc, word);
+        return delay(env, sys, model, pc, word, stack);
     }
     commit(env, pc, word)
 }
@@ -144,6 +168,7 @@ fn delay(
     model: SparcModel,
     pc: u64,
     word: u32,
+    stack: Option<StackGrowth>,
 ) -> Result<(), Outcome> {
     let mut slot_pc = pc.wrapping_add(4) & model.addr_mask;
     loop {
@@ -186,7 +211,7 @@ fn delay(
             })
         });
         if let Err(e) = r {
-            return finish(env, sys, e, pc, word);
+            return finish(env, sys, e, pc, word, stack);
         }
         // スロットが制御転送命令なら、その遅延スロットを次に実行する
         // 連鎖を続ける。そうでなければ 1 回だけ commit して終わる。
@@ -205,32 +230,71 @@ fn finish(
     e: InterpExit,
     pc: u64,
     word: u32,
+    stack: Option<StackGrowth>,
 ) -> Result<(), Outcome> {
-    if let InterpExit::Exception(g) = e
-        && g.kind == ExceptionKind::Trap
-    {
-        match sys.handle_trap(env, g.code as u32) {
-            // 処理済みの復帰 PC はハンドラが設定済みの契約。
-            TrapOutcome::Handled => return Ok(()),
-            TrapOutcome::Exit(code) => {
-                if sys.take_exit(env, code) {
-                    return Ok(());
+    if let InterpExit::Exception(g) = e {
+        if stack_grow(env, stack, &g).is_some() {
+            return Ok(());
+        }
+        if g.kind == ExceptionKind::Trap {
+            match sys.handle_trap(env, g.code as u32) {
+                // 処理済みの復帰 PC はハンドラが設定済みの契約。
+                TrapOutcome::Handled => return Ok(()),
+                TrapOutcome::Exit(code) => {
+                    if sys.take_exit(env, code) {
+                        return Ok(());
+                    }
+                    return Err(Outcome::Exit(u64::from(code)));
                 }
-                return Err(Outcome::Exit(u64::from(code)));
-            }
-            TrapOutcome::Blocked => {
-                if sys.on_block(env) {
-                    return Ok(());
+                TrapOutcome::Blocked => {
+                    if sys.on_block(env) {
+                        return Ok(());
+                    }
+                    return Err(Outcome::Deadlock);
                 }
-                return Err(Outcome::Deadlock);
+                TrapOutcome::Unimplemented => {}
             }
-            TrapOutcome::Unimplemented => {}
         }
     }
     Err(Outcome::Unimplemented {
         pc,
         word: u128::from(word),
     })
+}
+
+/// スタック成長窓の内側へのページフォルトなら写像を伸ばす。
+fn stack_grow(
+    env: &mut BareEnv,
+    stack: Option<StackGrowth>,
+    e: &polyisa_sem::GuestException,
+) -> Option<()> {
+    use polyisa_mem::{PAGE_SIZE, PageNo};
+    let s = stack?;
+    if e.kind != ExceptionKind::PageFault {
+        return None;
+    }
+    let a = e.addr?;
+    if a >= s.top || a < s.limit {
+        return None;
+    }
+    let lo = a & !(PAGE_SIZE - 1);
+    // フォルトしたページから上向きに、現状の写像の下端を探す。
+    let mut hi = lo;
+    while hi < s.top && !env.backend.mem.is_mapped(PageNo(hi / PAGE_SIZE)) {
+        hi += PAGE_SIZE;
+    }
+    let pages = (hi - lo) / PAGE_SIZE;
+    if pages == 0 {
+        return None;
+    }
+    env.backend
+        .mem
+        .map(
+            VirtAddr(lo),
+            pages,
+            polyisa_mem::Perms(polyisa_mem::Perms::R.0 | polyisa_mem::Perms::W.0),
+        )
+        .ok()
 }
 
 /// 遅延スロットのない命令の完了。pc を npc に進める。
@@ -262,6 +326,187 @@ fn get_u64(env: &mut BareEnv, offset: usize) -> u64 {
 
 fn set_u64(env: &mut BareEnv, offset: usize, value: u64) {
     env.backend.set(StateRef::<W64>::from_offset(offset), value);
+}
+
+/// SPARC の Linux ELF を実行する。sparc32 は EM_SPARC /
+/// EM_SPARC32PLUS の ELFCLASS32、sparc64 は EM_SPARCV9 の
+/// ELFCLASS64 で、どちらもビッグエンディアンの静的リンクのみ。
+// Ref: SRC-LINUX (7.3), SPEC-ELF-GABI, SPEC-SPARC-V9 §Software Considerations.
+pub fn run_elf_sparc(path: &str, argv: &[String]) -> Result<u64, String> {
+    run_elf_sparc_sys(path, argv, &mut polyisa_os_linux::sparc::sys::Linux::new())
+}
+
+/// `sys` の状態を引き継いで SPARC の Linux ELF を実行する。
+pub fn run_elf_sparc_sys(
+    path: &str,
+    argv: &[String],
+    sys: &mut polyisa_os_linux::sparc::sys::Linux,
+) -> Result<u64, String> {
+    use polyisa_mem::{PAGE_SIZE, Perms};
+    use polyisa_sem::Backend as _;
+
+    let bytes = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
+    // EM_SPARC=2, EM_SPARC32PLUS=18, EM_SPARCV9=43。
+    // Ref: binutils include/elf/common.h.
+    let (ehdr, phdrs, phent, model, top) = match bytes.get(4) {
+        Some(1) => {
+            let ehdr =
+                polyisa_loader::elf::parse_ehdr32(&bytes).map_err(|e| format!("ehdr: {e:?}"))?;
+            if !matches!(ehdr.machine, 2 | 18) {
+                return Err(format!("未対応の e_machine: {}", ehdr.machine));
+            }
+            let phdrs = polyisa_loader::elf::parse_phdrs32(&bytes, &ehdr)
+                .map_err(|e| format!("phdrs: {e:?}"))?;
+            // Linux の sparc32 ユーザランドは V8 命令集合を使う。
+            // スタック上端は実機の TASK_SIZE（0xf000_0000）に合わせる。
+            (ehdr, phdrs, 32u64, SparcModel::named("v8"), 0xf000_0000u64)
+        }
+        Some(2) => {
+            let ehdr =
+                polyisa_loader::elf::parse_ehdr(&bytes).map_err(|e| format!("ehdr: {e:?}"))?;
+            if ehdr.machine != 43 {
+                return Err(format!("未対応の e_machine: {}", ehdr.machine));
+            }
+            let phdrs = polyisa_loader::elf::parse_phdrs(&bytes, &ehdr)
+                .map_err(|e| format!("phdrs: {e:?}"))?;
+            (
+                ehdr,
+                phdrs,
+                56u64,
+                SparcModel::named("ultrasparc3"),
+                // 実機の STACK_TOP64（0x7ff0_0000_0000）に合わせる。
+                0x0000_7ff0_0000_0000u64,
+            )
+        }
+        _ => return Err("ELFCLASS32/64 ではない".to_string()),
+    };
+    if ehdr.little {
+        return Err("SPARC はビッグエンディアンのみ対応".to_string());
+    }
+    if polyisa_loader::elf::parse_interp(&bytes, &phdrs).is_some() {
+        return Err("PT_INTERP のある SPARC ELF は未対応（静的のみ）".to_string());
+    }
+    let is64 = model.is64;
+    let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_sparc::CpuState>());
+    const MAIN_DYN_BASE: u64 = 0x0001_0000;
+    const ET_DYN: u16 = 3;
+    let min_vaddr = phdrs
+        .iter()
+        .filter(|p| p.seg_type == 1)
+        .map(|p| p.vaddr & !(PAGE_SIZE - 1))
+        .min()
+        .unwrap_or(0);
+    let main_bias = if ehdr.file_type == ET_DYN {
+        MAIN_DYN_BASE - min_vaddr
+    } else {
+        0
+    };
+    let image_end = phdrs
+        .iter()
+        .filter(|p| p.seg_type == 1)
+        .map(|p| p.vaddr + p.memsz)
+        .max()
+        .unwrap_or(0)
+        + main_bias;
+    polyisa_loader::elf::load_segments_bias(&bytes, &phdrs, &mut env.backend.mem, main_bias)
+        .map_err(|e| format!("load: {e:?}"))?;
+    let phdr_addr = match phdrs
+        .iter()
+        .find(|p| p.seg_type == 1 && p.offset <= ehdr.phoff && ehdr.phoff < p.offset + p.filesz)
+    {
+        Some(p) => main_bias + p.vaddr + (ehdr.phoff - p.offset),
+        None => {
+            let at = (main_bias + min_vaddr)
+                .checked_sub(PAGE_SIZE)
+                .ok_or_else(|| "phdr 表の置き場がない".to_string())?;
+            let lo = ehdr.phoff as usize;
+            let hi = lo + ehdr.phnum as usize * phent as usize;
+            env.backend
+                .mem
+                .map(VirtAddr(at), 1, Perms::RW)
+                .map_err(|_| "phdr 表の写像に失敗".to_string())?;
+            env.backend
+                .mem
+                .write(VirtAddr(at), &bytes[lo..hi])
+                .map_err(|_| "phdr 表の書き込みに失敗".to_string())?;
+            at
+        }
+    };
+    let entry = main_bias + ehdr.entry;
+    let img_top = top - 0x1_0000;
+    let mut arg_bytes = vec![path.as_bytes().to_vec()];
+    for a in argv {
+        arg_bytes.push(a.as_bytes().to_vec());
+    }
+    let auxv: Vec<(u64, u64)> = vec![
+        (3, phdr_addr),             // AT_PHDR
+        (4, phent),                 // AT_PHENT
+        (5, u64::from(ehdr.phnum)), // AT_PHNUM
+        (6, 0x1000),                // AT_PAGESZ
+        (8, 0),                     // AT_FLAGS
+        (9, entry),                 // AT_ENTRY
+        (11, 0),                    // AT_UID
+        (12, 0),                    // AT_EUID
+        (13, 0),                    // AT_GID
+        (14, 0),                    // AT_EGID
+        (17, 100),                  // AT_CLKTCK
+        (23, 0),                    // AT_SECURE
+    ];
+    let (img, sp) = if is64 {
+        polyisa_os_linux::build_initial_stack_endian(img_top, &arg_bytes, &[], &auxv, Endian::Be)
+    } else {
+        polyisa_os_linux::build_initial_stack32_endian(img_top, &arg_bytes, &[], &auxv, Endian::Be)
+    };
+    let stack_base = sp & !(PAGE_SIZE - 1);
+    let stack_pages = (top - stack_base) / PAGE_SIZE;
+    env.backend
+        .mem
+        .map(
+            VirtAddr(stack_base),
+            stack_pages,
+            Perms(Perms::R.0 | Perms::W.0),
+        )
+        .map_err(|e| format!("stack map: {e:?}"))?;
+    env.backend
+        .mem
+        .write(VirtAddr(sp), &img)
+        .map_err(|e| format!("stack write: {e:?}"))?;
+    // 初期 %sp は見える番号の %o6 に入る。CWP=0 の物理位置は o6 と
+    // 一致する。V9 では ABI の STACK_BIAS（2047）だけ下にずらす。
+    // Ref: SPEC-SPARC-V9 §STACK_BIAS.
+    let o6 = if is64 { sp - 2047 } else { sp };
+    env.backend.set(sem::Gpr(14).state(), o6);
+    // 初期ウィンドウ状態。現窓だけ使用中で残りは空きにする。
+    let nw = u64::from(model.params.nwindows);
+    env.backend.set(sem::cansave_ref(), nw - 1);
+    if is64 {
+        // Linux は起動時から FPU を使える状態でユーザを走らせる
+        // （PSTATE.PEF + FPRS.FEF）。
+        env.backend.set(sem::tstate_ref(), 1 << 12);
+        env.backend.set(sem::fprs_ref(), 0b100);
+    }
+    // /proc/self/exe の readlink は絶対パスを返す規約。
+    sys.exe_path = std::fs::canonicalize(path)
+        .map_or_else(|_| path.to_string(), |p| p.to_string_lossy().into_owned());
+    sys.init_brk(image_end);
+    // 初期スタックは像の分だけ写像し、下方向はページフォルト駆動で
+    // RLIMIT_STACK 既定値（8 MiB）まで伸ばす。
+    const STACK_LIMIT: u64 = 8 << 20;
+    let growth = Some(StackGrowth {
+        top,
+        limit: top - STACK_LIMIT,
+    });
+    // パーソナリティ側の窓退避・復帰がフォルトしたときも同じ窓で
+    // 伸ばせるよう、境界を教えておく。
+    sys.stack_top = top;
+    sys.stack_limit = top - STACK_LIMIT;
+    let out = run(&mut env, entry, model, sys, growth);
+    match out {
+        Outcome::Exit(code) => Ok(code),
+        Outcome::Unimplemented { pc, word } => Err(format!("unimplemented at {pc:#x}: {word:#x}")),
+        Outcome::StepLimit { pc } => Err(format!("step limit at {pc:#x}")),
+        Outcome::Deadlock => Err("deadlock".to_string()),
+    }
 }
 
 #[cfg(test)]
@@ -302,7 +547,7 @@ mod tests {
         // sethi 1,%g1; add %g1,3,%g2; unimp → g2=0x403 で未実装停止。
         let mut env = env_at(0x1000, &[0x0300_0001, 0x8400_6003, 0x0000_0000]);
         let mut sys = NoSys;
-        match run(&mut env, 0x1000, SparcModel::v8(), &mut sys) {
+        match run(&mut env, 0x1000, SparcModel::v8(), &mut sys, None) {
             Outcome::Unimplemented { pc, .. } => assert_eq!(pc, 0x1008),
             o => panic!("unexpected outcome: {o:?}"),
         }
@@ -325,7 +570,7 @@ mod tests {
             ],
         );
         let mut sys = NoSys;
-        match run(&mut env, 0x1000, SparcModel::v8(), &mut sys) {
+        match run(&mut env, 0x1000, SparcModel::v8(), &mut sys, None) {
             Outcome::Unimplemented { pc, .. } => assert_eq!(pc, 0x1010),
             o => panic!("unexpected outcome: {o:?}"),
         }
@@ -339,7 +584,7 @@ mod tests {
         // ba,a +8: 遅延スロットの sethi は取り消される。
         let mut env = env_at(0x1000, &[0x3080_0002, 0x0300_0009, 0x0000_0000]);
         let mut sys = NoSys;
-        match run(&mut env, 0x1000, SparcModel::v8(), &mut sys) {
+        match run(&mut env, 0x1000, SparcModel::v8(), &mut sys, None) {
             Outcome::Unimplemented { pc, .. } => assert_eq!(pc, 0x1008),
             o => panic!("unexpected outcome: {o:?}"),
         }
@@ -370,7 +615,7 @@ mod tests {
             .write(VirtAddr(0x3000), &0x0000_0000u32.to_be_bytes())
             .unwrap();
         let mut sys = NoSys;
-        match run(&mut env, 0x1FFC, SparcModel::v8(), &mut sys) {
+        match run(&mut env, 0x1FFC, SparcModel::v8(), &mut sys, None) {
             Outcome::Unimplemented { pc, .. } => assert_eq!(pc, 0x3000),
             o => panic!("unexpected outcome: {o:?}"),
         }
@@ -384,7 +629,7 @@ mod tests {
             &[0x0280_0002, 0x0300_0001, 0x8400_6003, 0x0000_0000],
         );
         let mut sys = NoSys;
-        match run(&mut env, 0x1000, SparcModel::v8(), &mut sys) {
+        match run(&mut env, 0x1000, SparcModel::v8(), &mut sys, None) {
             Outcome::Unimplemented { pc, .. } => assert_eq!(pc, 0x100c),
             o => panic!("unexpected outcome: {o:?}"),
         }
@@ -405,7 +650,7 @@ mod tests {
             ],
         );
         let mut sys = NoSys;
-        match run(&mut env, 0x1000, SparcModel::v8(), &mut sys) {
+        match run(&mut env, 0x1000, SparcModel::v8(), &mut sys, None) {
             Outcome::Unimplemented { pc, .. } => assert_eq!(pc, 0x100c),
             o => panic!("unexpected outcome: {o:?}"),
         }
@@ -434,7 +679,7 @@ mod tests {
         );
         env.backend.set(sem::psr_ref(), 1 << 22);
         let mut sys = NoSys;
-        match run(&mut env, 0x1000, SparcModel::v8(), &mut sys) {
+        match run(&mut env, 0x1000, SparcModel::v8(), &mut sys, None) {
             Outcome::Unimplemented { pc, .. } => assert_eq!(pc, 0x1024),
             o => panic!("unexpected outcome: {o:?}"),
         }
@@ -461,7 +706,7 @@ mod tests {
             ],
         );
         let mut sys = NoSys;
-        match run(&mut env, 0x1000, SparcModel::v8(), &mut sys) {
+        match run(&mut env, 0x1000, SparcModel::v8(), &mut sys, None) {
             Outcome::Unimplemented { pc, .. } => assert_eq!(pc, 0x1020),
             o => panic!("unexpected outcome: {o:?}"),
         }
@@ -489,7 +734,7 @@ mod tests {
         );
         env.backend.set(Gpr(1).state(), 0x1020);
         let mut sys = NoSys;
-        match run(&mut env, 0x1000, SparcModel::v8(), &mut sys) {
+        match run(&mut env, 0x1000, SparcModel::v8(), &mut sys, None) {
             Outcome::Unimplemented { pc, .. } => assert_eq!(pc, 0x1020),
             o => panic!("unexpected outcome: {o:?}"),
         }
@@ -516,7 +761,7 @@ mod tests {
             .write(VirtAddr(0x2000), &0x0000_0000u32.to_be_bytes())
             .unwrap();
         let mut sys = NoSys;
-        match run(&mut env, 0x1000, SparcModel::v8(), &mut sys) {
+        match run(&mut env, 0x1000, SparcModel::v8(), &mut sys, None) {
             Outcome::Unimplemented { pc, .. } => assert_eq!(pc, 0x2000),
             o => panic!("unexpected outcome: {o:?}"),
         }
@@ -540,7 +785,7 @@ mod tests {
         // ta 0x10。tt に 0x80 + 0x10 が積まれてハンドラへ渡る。
         let mut env = env_at(0x1000, &[0x91d0_2010]);
         let mut sys = TtSys;
-        match run(&mut env, 0x1000, SparcModel::v8(), &mut sys) {
+        match run(&mut env, 0x1000, SparcModel::v8(), &mut sys, None) {
             Outcome::Exit(code) => assert_eq!(code, 0x90),
             o => panic!("unexpected outcome: {o:?}"),
         }
@@ -558,7 +803,7 @@ mod tests {
             ],
         );
         let mut sys = NoSys;
-        match run(&mut env, 0x1000, SparcModel::v8(), &mut sys) {
+        match run(&mut env, 0x1000, SparcModel::v8(), &mut sys, None) {
             Outcome::Unimplemented { pc, .. } => assert_eq!(pc, 0x1008),
             o => panic!("unexpected outcome: {o:?}"),
         }
@@ -578,7 +823,7 @@ mod tests {
             ],
         );
         let mut sys = NoSys;
-        match run(&mut env, 0x1000, SparcModel::v8(), &mut sys) {
+        match run(&mut env, 0x1000, SparcModel::v8(), &mut sys, None) {
             Outcome::Unimplemented { pc, .. } => assert_eq!(pc, 0x100c),
             o => panic!("unexpected outcome: {o:?}"),
         }
@@ -590,7 +835,7 @@ mod tests {
         // rd %psr, %g5 は特権命令。ユーザーモードでは tt=3 でハンドラへ。
         let mut env = env_at(0x1000, &[0x8b48_0000]);
         let mut sys = TtSys;
-        match run(&mut env, 0x1000, SparcModel::v8(), &mut sys) {
+        match run(&mut env, 0x1000, SparcModel::v8(), &mut sys, None) {
             Outcome::Exit(code) => assert_eq!(code, 3),
             o => panic!("unexpected outcome: {o:?}"),
         }
@@ -617,10 +862,100 @@ mod tests {
             .write(VirtAddr(0x2000), &0x0000_0000u32.to_be_bytes())
             .unwrap();
         let mut sys = NoSys;
-        match run(&mut env, 0x1000, SparcModel::v8(), &mut sys) {
+        match run(&mut env, 0x1000, SparcModel::v8(), &mut sys, None) {
             Outcome::Unimplemented { pc, .. } => assert_eq!(pc, 0x2000),
             o => panic!("unexpected outcome: {o:?}"),
         }
         assert_eq!(g(&mut env, 1), 0);
+    }
+
+    /// 物理スロット番号 `i` を読む。
+    fn slot_get(env: &mut BareEnv, i: usize) -> u64 {
+        env.backend.get(StateRef::<W64>::from_offset(
+            core::mem::offset_of!(CpuState, g) + i * 8,
+        ))
+    }
+
+    /// 物理スロット番号 `i` に書く。
+    fn slot_set(env: &mut BareEnv, i: usize, v: u64) {
+        env.backend.set(
+            StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, g) + i * 8),
+            v,
+        );
+    }
+
+    /// メモリ `addr` から BE u32 を読む。
+    fn mem_u32(env: &BareEnv, addr: u64) -> u32 {
+        let mut b = [0u8; 4];
+        let acc = Access {
+            endian: Endian::Be,
+            align: Align::Unaligned,
+            kind: AccessKind::DataRead,
+        };
+        env.backend.mem.read(VirtAddr(addr), &mut b, acc).unwrap();
+        u32::from_be_bytes(b)
+    }
+
+    /// `ta n` のトラップを Linux パーソナリティへ渡す。
+    #[test]
+    fn linux_window_spill_and_fill_round_trip() {
+        use polyisa_os_linux::sparc::sys::Linux;
+        let mut env = env_at(0x1000, &[]);
+        env.map_rw(0x8000, 4).unwrap();
+        // CWP=0 で全窓が埋まった状態（nw=8、物理窓 7 が最古）。
+        env.backend.set(sem::cansave_ref(), 0);
+        env.backend.set(sem::canrestore_ref(), 7);
+        // 窓 7 の退避先 sp（その窓の %o6 = 物理スロット 126）。
+        slot_set(&mut env, 126, 0x8000);
+        // 窓 7 の l0（スロット 128）と i0（スロット 8 = 窓 0 の o0 別名）。
+        slot_set(&mut env, 128, 0xdead_0001);
+        slot_set(&mut env, 8, 0xbeef_0002);
+        // あふれトラップ（tt=0x05）。
+        env.backend.set(sem::tt_ref(), 0x05);
+        let mut sys = Linux::new();
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        // 窓 7 の l0–l7 → i0–i7 が 16 語 BE で [0x8000..) に退避された。
+        assert_eq!(mem_u32(&env, 0x8000), 0xdead_0001);
+        assert_eq!(mem_u32(&env, 0x8020), 0xbeef_0002);
+        // 空きが 1 枚戻り、退避分は canrestore から外れる。
+        assert_eq!(env.backend.get(sem::cansave_ref()), 1);
+        assert_eq!(env.backend.get(sem::canrestore_ref()), 6);
+        // 不足側。現窓の %i6（スロット 30、窓 1 の %o6 別名）が
+        // 退避域を指し、窓 1 の中身を埋め戻す。
+        env.backend.set(sem::canrestore_ref(), 0);
+        env.backend.set(sem::cansave_ref(), 7);
+        slot_set(&mut env, 30, 0x8000);
+        env.backend.set(sem::tt_ref(), 0x06);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        // 窓 1 の l0（スロット 32）と i0（スロット 40）。
+        assert_eq!(slot_get(&mut env, 32), 0xdead_0001);
+        assert_eq!(slot_get(&mut env, 40), 0xbeef_0002);
+        assert_eq!(env.backend.get(sem::canrestore_ref()), 1);
+    }
+
+    /// getpid と未知番号で syscall の返却規約を見る。
+    #[test]
+    fn linux_syscall_return_and_errno_convention() {
+        use polyisa_os_linux::sparc::{errno, nr, sys::Linux};
+        let mut env = env_at(0x1000, &[]);
+        let mut sys = Linux::new();
+        // getpid（sparc nr=20）。見える %g1 はスロット 1。
+        env.backend.set(sem::pc_ref(), 0x1000);
+        env.backend.set(sem::npc_ref(), 0x1004);
+        env.backend.set(Gpr(1).state(), nr::GETPID);
+        env.backend.set(sem::tt_ref(), 0x90);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        // 戻り値は見える %o0（スロット 8）。pid=1、キャリーなし。
+        assert_eq!(slot_get(&mut env, 8), 1);
+        assert_eq!(env.backend.get(sem::psr_ref()) & (1 << 20), 0);
+        // pc は npc へ、npc は +4 進む。
+        assert_eq!(env.backend.get(sem::pc_ref()), 0x1004);
+        assert_eq!(env.backend.get(sem::npc_ref()), 0x1008);
+        // 未知番号は SPARC の ENOSYS（=90）とキャリー。
+        env.backend.set(Gpr(1).state(), 0xffff);
+        env.backend.set(sem::tt_ref(), 0x90);
+        assert!(matches!(sys.handle_trap(&mut env, 0), TrapOutcome::Handled));
+        assert_eq!(slot_get(&mut env, 8), u64::from(errno::ENOSYS));
+        assert_ne!(env.backend.get(sem::psr_ref()) & (1 << 20), 0);
     }
 }

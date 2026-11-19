@@ -13,6 +13,8 @@ fn env() -> BareEnv {
     let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
     env.map_rw(0x1_0000, 1).unwrap();
     env.map_rw(0x0, 1).unwrap();
+    // 既定 nwindows=8 のユーザ初期状態（全ウィンドウ空き）。
+    env.backend.set(sem::cansave_ref(), 7);
     env
 }
 
@@ -1817,4 +1819,126 @@ fn ldd_odd_rd_is_illegal() {
     assert!(r.is_err());
     let r = env.step(|b| sem::std(b, Gpr(3), Gpr(4), Gpr(1), Src2::Reg(Gpr(0))));
     assert!(r.is_err());
+}
+
+#[test]
+fn save_traps_when_cansave_empty() {
+    let mut env = env();
+    env.backend.set(sem::cansave_ref(), 0);
+    let r = env.step(|b| sem::save(b, Gpr(0), Gpr(0), Src2::Reg(Gpr(0))));
+    assert!(r.is_err());
+    // V8 の window_overflow = 0x05。CWP とカウンタは変えない。
+    assert_eq!(env.backend.get(sem::tt_ref()), 0x05);
+    assert_eq!(env.backend.get(sem::cwp_ref()), 0);
+    // SAVED で窓を空きに戻すと SAVE が通る。
+    env.step(sem::saved).unwrap();
+    assert_eq!(env.backend.get(sem::cansave_ref()), 1);
+    env.step(|b| sem::save(b, Gpr(0), Gpr(0), Src2::Reg(Gpr(0))))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::cwp_ref()), 7);
+    assert_eq!(env.backend.get(sem::cansave_ref()), 0);
+    assert_eq!(env.backend.get(sem::canrestore_ref()), 1);
+}
+
+#[test]
+fn restore_traps_when_canrestore_empty() {
+    let mut env = env();
+    let r = env.step(|b| sem::restore(b, Gpr(0), Gpr(0), Src2::Reg(Gpr(0))));
+    assert!(r.is_err());
+    // V8 の window_underflow = 0x06。
+    assert_eq!(env.backend.get(sem::tt_ref()), 0x06);
+    assert_eq!(env.backend.get(sem::cwp_ref()), 0);
+    // RESTORED で埋め戻せる窓を戻すと RESTORE が通る。
+    env.step(sem::restored).unwrap();
+    env.step(|b| sem::restore(b, Gpr(0), Gpr(0), Src2::Reg(Gpr(0))))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::cwp_ref()), 1);
+    assert_eq!(env.backend.get(sem::canrestore_ref()), 0);
+    assert_eq!(env.backend.get(sem::cansave_ref()), 8);
+}
+
+#[test]
+fn v9_window_traps_use_spill_fill_vectors() {
+    let mut env = env();
+    env.backend.set_param::<polyisa_guest_sparc::Word64Param>(1);
+    env.backend.set(sem::cansave_ref(), 0);
+    let r = env.step(|b| sem::save(b, Gpr(0), Gpr(0), Src2::Reg(Gpr(0))));
+    assert!(r.is_err());
+    // V9 の spill_0_normal = 0x80。
+    assert_eq!(env.backend.get(sem::tt_ref()), 0x80);
+    env.backend.set(sem::canrestore_ref(), 0);
+    let r = env.step(|b| sem::restore(b, Gpr(0), Gpr(0), Src2::Reg(Gpr(0))));
+    assert!(r.is_err());
+    // V9 の fill_0_normal = 0xc0。
+    assert_eq!(env.backend.get(sem::tt_ref()), 0xc0);
+}
+
+#[test]
+fn v9_bpcc_uses_selected_cc() {
+    let mut env = env();
+    env.backend.set_param::<polyisa_guest_sparc::Word64Param>(1);
+    // XCC の Z（ccr bit6）を倒して bne 成立にする。
+    env.backend.set(sem::ccr_ref(), 0);
+    // bne,pt %xcc → cc=0b10、cond=0b1001。
+    env.step(|b| sem::bpcc(b, 0, 0b1001, 0b10, 0x100, 0x300))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::npc_ref()), 0x300);
+    // ICC 側（cc=0b00）は Z が未設定なので成立する。
+    env.step(|b| sem::bpcc(b, 0, 0b1001, 0b00, 0x100, 0x300))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::npc_ref()), 0x300);
+    // XCC に Z を立てると xcc 側だけ不成立になる。
+    env.backend.set(sem::ccr_ref(), 1 << 6);
+    env.step(|b| sem::bpcc(b, 0, 0b1001, 0b10, 0x100, 0x300))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::npc_ref()), 0x108);
+}
+
+#[test]
+fn v9_bpr_evaluates_signed_register() {
+    let mut env = env();
+    env.backend.set_param::<polyisa_guest_sparc::Word64Param>(1);
+    env.backend.set(Gpr(9).state(), 0xffff_ffff_ffff_ffffu64); // -1
+    // brlz（rcond=011）は負で成立。
+    env.step(|b| sem::bpr(b, 0, 0b011, Gpr(9), 0x100, 0x300))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::npc_ref()), 0x300);
+    // brgez（rcond=111）は不成立 → pc+8。
+    env.step(|b| sem::bpr(b, 0, 0b111, Gpr(9), 0x100, 0x300))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::npc_ref()), 0x108);
+    // 予約の rcond=000 は illegal instruction トラップ。
+    let r = env.step(|b| sem::bpr(b, 0, 0b000, Gpr(9), 0x100, 0x300));
+    assert!(r.is_err());
+    assert_eq!(env.backend.get(sem::tt_ref()), 0x10);
+}
+
+#[test]
+fn fbfcc_uses_fcc0() {
+    let mut env = env();
+    // FSR.fcc0 = 0（eq）で fbe が成立。
+    env.step(|b| sem::fbfcc(b, 0, 0b1001, 0x100, 0x300))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::npc_ref()), 0x300);
+    // fcc0 = 1（lt）なら fbe は不成立。
+    env.backend.set(sem::fsr_ref(), 1 << 10);
+    env.step(|b| sem::fbfcc(b, 0, 0b1001, 0x100, 0x300))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::npc_ref()), 0x108);
+}
+
+#[test]
+fn v9_fbpfcc_selects_fcc_and_annuls() {
+    let mut env = env();
+    env.backend.set_param::<polyisa_guest_sparc::Word64Param>(1);
+    // fcc1 = 3（unordered）→ fsr bit 32-33。
+    env.backend.set(sem::fsr_ref(), 0b11 << 32);
+    // fbu（cond=0b0111）fcc1 は成立。
+    env.step(|b| sem::fbpfcc(b, 0, 0b0111, 1, 0x100, 0x300))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::npc_ref()), 0x300);
+    // fba,a は常に annul。
+    env.step(|b| sem::fbpfcc(b, 1, 0b1000, 0, 0x100, 0x300))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::annul_ref()), 1);
 }

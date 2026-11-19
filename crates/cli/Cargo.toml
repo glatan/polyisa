@@ -50,7 +50,7 @@ guest-mips = ["dep:polyisa-guest-mips", "polyisa-os-linux/guest-mips"]
 guest-power = ["dep:polyisa-guest-power", "polyisa-os-linux/guest-power"]
 guest-riscv = ["dep:polyisa-guest-riscv", "polyisa-os-linux/guest-riscv"]
 guest-s390 = ["dep:polyisa-guest-s390", "polyisa-os-linux/guest-s390"]
-guest-sparc = ["dep:polyisa-guest-sparc"]
+guest-sparc = ["dep:polyisa-guest-sparc", "polyisa-os-linux/guest-sparc"]
 guest-wasm = [
     "dep:polyisa-guest-wasm",
     "dep:polyisa-os-wasi",

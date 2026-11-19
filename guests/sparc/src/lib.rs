@@ -85,6 +85,15 @@ pub struct CpuState {
     pub asi: u64,
     /// V9 の FPRS（%fprs）。FEF（ビット 2）が f レジスタの有効化。
     pub fprs: u64,
+    /// 退避不要で進めるウィンドウ数。V9 の CANSAVE に相当し、
+    /// V7/V8 では WIM を近似したカウンタとして使う。SAVE が 0 で
+    /// あふれトラップを起こし、OS パーソナリティが最古の窓を
+    /// ユーザスタックへ退避してから再実行させる。
+    pub cansave: u64,
+    /// 復帰先として中身があるウィンドウ数。V9 の CANRESTORE に
+    /// 相当する。RESTORE が 0 で不足トラップを起こし、
+    /// パーソナリティがスタックから埋め戻してから再実行させる。
+    pub canrestore: u64,
 }
 
 impl Default for CpuState {
@@ -107,6 +116,11 @@ impl Default for CpuState {
             // V9 の ASI_PRIMARY。V8 ではこのフィールドは使わない。
             asi: 0x80,
             fprs: 0,
+            // `nwindows` 既定値 8 に合わせて全ウィンドウを空きと
+            // する。別の枚数で動かすときは側（パーソナリティや
+            // テスト）が枚数 - 1 に合わせて初期化する。
+            cansave: 7,
+            canrestore: 0,
         }
     }
 }
@@ -148,12 +162,20 @@ mod tests {
         assert_eq!(core::mem::offset_of!(CpuState, ccr), REG_FILE * 8 + 43 * 8);
         assert_eq!(core::mem::offset_of!(CpuState, asi), REG_FILE * 8 + 44 * 8);
         assert_eq!(core::mem::offset_of!(CpuState, fprs), REG_FILE * 8 + 45 * 8);
+        assert_eq!(
+            core::mem::offset_of!(CpuState, cansave),
+            REG_FILE * 8 + 46 * 8
+        );
+        assert_eq!(
+            core::mem::offset_of!(CpuState, canrestore),
+            REG_FILE * 8 + 47 * 8
+        );
     }
 
     #[test]
     fn insn_count() {
         // 骨格の命令集合（整数演算・load/store 全サイズ・ASI 形・分岐・FPU・VIS）。
-        assert_eq!(INSNS.len(), 330);
+        assert_eq!(INSNS.len(), 334);
     }
 
     #[test]

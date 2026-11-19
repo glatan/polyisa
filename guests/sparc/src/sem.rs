@@ -109,6 +109,16 @@ pub fn fprs_ref() -> StateRef<W64> {
     StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, fprs))
 }
 
+/// 退避不要で進めるウィンドウ数（V9 CANSAVE 相当）を指す。
+pub fn cansave_ref() -> StateRef<W64> {
+    StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, cansave))
+}
+
+/// 復帰先があるウィンドウ数（V9 CANRESTORE 相当）を指す。
+pub fn canrestore_ref() -> StateRef<W64> {
+    StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, canrestore))
+}
+
 /// V9 の %tick 基準を指す。
 pub fn tick_ref() -> StateRef<W64> {
     StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, tick))
@@ -1052,18 +1062,24 @@ pub fn call<B: Backend>(b: &mut B, pc: u64, target: u64) -> Flow<B> {
     Ok(())
 }
 
-/// Bicc。ICC を評価して npc を書き換える。成立すれば npc は
-/// `target`（pc + sign_extend(disp22 << 2)）、不成立なら pc + 8。
+/// 分岐の共通部。`val` は条件の評価値（0/1）。成立すれば npc は
+/// `target`（pc + sign_extend(disp << 2)）、不成立なら pc + 8。
 /// 不成立でも npc を進めるのは、遅延スロットが pc + 4 にあって
 /// commit が pc を npc に写すためで、書き換えないと遅延スロットの
 /// 命令を二度実行することになる。
 /// `a` が立っているときの取り消し（annul）規則は 2 通りある。
 /// 条件分岐は不成立のときだけ遅延スロットを取り消し、成立したら
-/// `a` にかかわらず実行する。BA（cond=8）は常に成立するので
-/// `a` が立てば常に遅延スロットを取り消す。
-/// Ref: SPEC-SPARC-V8 (Version 8) §Bicc.
-pub fn bicc<B: Backend>(b: &mut B, a: u8, cond: u8, pc: u64, target: u64) -> Flow<B> {
-    let val = cond_val(b, cond);
+/// `a` にかかわらず実行する。`always`（BA/BPA/FBA）は常に成立
+/// するので `a` が立てば常に遅延スロットを取り消す。
+/// Ref: SPEC-SPARC-V8 (Version 8) §Bicc; SPEC-SPARC-V9 §Branch.
+fn branch_to<B: Backend>(
+    b: &mut B,
+    a: u8,
+    val: B::V<W64>,
+    always: bool,
+    pc: u64,
+    target: u64,
+) -> Flow<B> {
     let zero = b.konst::<W64>(0);
     let taken = b.cmp::<W64>(Cmp::Ne, val, zero);
     let t = const_w64(b, target);
@@ -1073,9 +1089,9 @@ pub fn bicc<B: Backend>(b: &mut B, a: u8, cond: u8, pc: u64, target: u64) -> Flo
     let npc = amask(b, npc);
     b.set(npc_ref(), npc);
     if a != 0 {
-        // BA は成立が確定しているので、annul の条件として `taken`
-        // （常に真）をそのまま使う。それ以外は不成立のときだけ。
-        let annul = if cond == 0b1000 {
+        // always は成立が確定しているので、annul の条件として
+        // `taken`（常に真）をそのまま使う。それ以外は不成立のときだけ。
+        let annul = if always {
             taken
         } else {
             b.cmp::<W64>(Cmp::Eq, val, zero)
@@ -1087,6 +1103,55 @@ pub fn bicc<B: Backend>(b: &mut B, a: u8, cond: u8, pc: u64, target: u64) -> Flo
         })?;
     }
     Ok(())
+}
+
+/// Bicc。ICC を評価して npc を書き換える。
+/// Ref: SPEC-SPARC-V8 (Version 8) §Bicc.
+pub fn bicc<B: Backend>(b: &mut B, a: u8, cond: u8, pc: u64, target: u64) -> Flow<B> {
+    let val = cond_val(b, cond);
+    branch_to(b, a, val, cond == 0b1000, pc, target)
+}
+
+/// BPcc。`cc` のビット 1（ビット 21）で XCC/ICC を選ぶ。
+/// Ref: SPEC-SPARC-V9 §BPcc.
+pub fn bpcc<B: Backend>(b: &mut B, a: u8, cond: u8, cc: u8, pc: u64, target: u64) -> Flow<B> {
+    let val = cond_val_cc(b, cond, cc & 0b10 != 0);
+    branch_to(b, a, val, cond == 0b1000, pc, target)
+}
+
+/// BPr。rs1 を符号付き 64 ビットの値として評価する。rcond は
+/// 001=brz, 010=brlez, 011=brlz, 101=brnz, 110=brgz, 111=brgez。
+/// 000/100 は予約で illegal instruction。
+/// Ref: SPEC-SPARC-V9 §BPr.
+pub fn bpr<B: Backend>(b: &mut B, a: u8, rcond: u8, rs1: Gpr, pc: u64, target: u64) -> Flow<B> {
+    let r = read(b, rs1);
+    let zero = b.konst::<W64>(0);
+    let t = match rcond {
+        0b001 => b.cmp::<W64>(Cmp::Eq, r, zero),
+        0b010 => b.cmp::<W64>(Cmp::LeS, r, zero),
+        0b011 => b.cmp::<W64>(Cmp::LtS, r, zero),
+        0b101 => b.cmp::<W64>(Cmp::Ne, r, zero),
+        0b110 => b.cmp::<W64>(Cmp::GtS, r, zero),
+        0b111 => b.cmp::<W64>(Cmp::GeS, r, zero),
+        _ => return Err(unimp(b, u64::from(rcond))),
+    };
+    let one = b.konst::<W64>(1);
+    let val = b.select::<W64>(t, one, zero);
+    branch_to(b, a, val, false, pc, target)
+}
+
+/// FBfcc。fcc0 を評価する。Bicc と同じ annul 規則。
+/// Ref: SPEC-SPARC-V8 (Version 8) §FBfcc.
+pub fn fbfcc<B: Backend>(b: &mut B, a: u8, cond: u8, pc: u64, target: u64) -> Flow<B> {
+    let val = cond_val_f(b, cond, 0);
+    branch_to(b, a, val, cond == 0b1000, pc, target)
+}
+
+/// FBPfcc。`bfcc`（0-3）が選ぶ fcc を評価する。
+/// Ref: SPEC-SPARC-V9 §FBPfcc.
+pub fn fbpfcc<B: Backend>(b: &mut B, a: u8, cond: u8, fcc: u8, pc: u64, target: u64) -> Flow<B> {
+    let val = cond_val_f(b, cond, fcc);
+    branch_to(b, a, val, cond == 0b1000, pc, target)
 }
 
 /// (n, z, v, c) の並び。
@@ -1241,42 +1306,98 @@ fn amask<B: Backend>(b: &mut B, addr: B::V<W64>) -> B::V<W64> {
     let m = b.or::<W64>(lo, amm1);
     b.and::<W64>(addr, m)
 }
-/// ウィンドウあふれの検出は OS パーソナリティが再現するため、
-/// ここではファイル内を巡回するだけである。CWP の進行方向は
-/// モデルで逆で、V7/V8 では SAVE で減少、V9 では SAVE で増加する。
+/// ウィンドウあふれ・不足トラップを上げる。tt は
+/// V8 の window_overflow=0x05 / window_underflow=0x06、
+/// V9 の spill_0_normal=0x80 / fill_0_normal=0xc0 とする。
+/// WSTATE/OTHERWIN の区別は持たず、パーソナリティは tt の
+/// 範囲（V9 では 0x80-0x9f / 0xc0-0xdf）で判定する。
+/// Ref: SPEC-SPARC-V8 (Version 8) §Trap Type;
+/// SPEC-SPARC-V9 §Trap Type.
+fn window_trap<B: Backend>(b: &mut B, tt: u64) -> B::Exit {
+    let v = b.konst::<W64>(tt);
+    b.set(tt_ref(), v);
+    b.raise(polyisa_sem::GuestException {
+        kind: polyisa_sem::ExceptionKind::Trap,
+        code: tt,
+        addr: None,
+        in_delay_slot: false,
+    })
+}
+
+/// ウィンドウカウンタを読み、0 のとき `tt` のトラップを上げる。
+fn window_guard<B: Backend>(b: &mut B, counter: StateRef<W64>, tt: u64) -> Flow<B> {
+    let n = b.get(counter);
+    let zero = b.konst::<W64>(0);
+    let empty = b.cmp::<W64>(Cmp::Eq, n, zero);
+    b.if_then(empty, |bb| Err(window_trap(bb, tt)))?;
+    Ok(())
+}
+
+/// ウィンドウカウンタを `delta` だけ増減する。
+fn step_counter<B: Backend>(b: &mut B, counter: StateRef<W64>, delta: i64) {
+    let n = b.get(counter);
+    let d = b.konst::<W64>(delta as u64);
+    let v = b.add::<W64>(n, d);
+    b.set(counter, v);
+}
+
+/// SAVE。現ウィンドウで加算してから次のウィンドウへ移り、
+/// 結果は移った先の rd へ書く。CANSAVE が 0 なら CWP を動かす前に
+/// window_overflow（V9 では spill_*_normal）トラップを上げ、
+/// 退避したパーソナリティが PC を戻して再実行する。
+/// CWP の進行方向はモデルで逆で、V7/V8 では SAVE で減少、
+/// V9 では SAVE で増加する。
 /// Ref: SPEC-SPARC-V8 (Version 8) §SAVE; SPEC-SPARC-V9 §SAVE.
 pub fn save<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2) -> Flow<B> {
+    let v9 = b.param::<super::Word64Param>();
+    window_guard(b, cansave_ref(), if v9 { 0x80 } else { 0x05 })?;
     let x = read(b, rs1);
     let y = src2(b, s);
     let sum = b.add::<W64>(x, y);
     let v = wmask(b, sum);
     let nw = nwindows(b);
-    let delta = if b.param::<super::Word64Param>() {
-        1
-    } else {
-        nw - 1
-    };
+    let delta = if v9 { 1 } else { nw - 1 };
     step_cwp(b, delta);
+    step_counter(b, cansave_ref(), -1);
+    step_counter(b, canrestore_ref(), 1);
     write(b, rd, v);
     Ok(())
 }
 
 /// RESTORE。現ウィンドウで加算し、CWP を SAVE とは逆方向に 1 進めて
 /// から戻ったウィンドウへ書く（V7/V8 では増加、V9 では減少）。
+/// CANRESTORE が 0 なら window_underflow（V9 では fill_*_normal）
+/// トラップを上げる。
 /// Ref: SPEC-SPARC-V8 (Version 8) §RESTORE; SPEC-SPARC-V9 §RESTORE.
 pub fn restore<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2) -> Flow<B> {
+    let v9 = b.param::<super::Word64Param>();
+    window_guard(b, canrestore_ref(), if v9 { 0xc0 } else { 0x06 })?;
     let x = read(b, rs1);
     let y = src2(b, s);
     let sum = b.add::<W64>(x, y);
     let v = wmask(b, sum);
     let nw = nwindows(b);
-    let delta = if b.param::<super::Word64Param>() {
-        nw - 1
-    } else {
-        1
-    };
+    let delta = if v9 { nw - 1 } else { 1 };
     step_cwp(b, delta);
+    step_counter(b, canrestore_ref(), -1);
+    step_counter(b, cansave_ref(), 1);
     write(b, rd, v);
+    Ok(())
+}
+
+/// SAVED。窓の退避を終えたことをカーネルが知らせる命令で、
+/// ここでは CANSAVE を 1 戻す（退避した窓が空きに戻った分）。
+/// Ref: SPEC-SPARC-V9 §SAVED.
+pub fn saved<B: Backend>(b: &mut B) -> Flow<B> {
+    step_counter(b, cansave_ref(), 1);
+    Ok(())
+}
+
+/// RESTORED。窓の埋め戻しを終えたことをカーネルが知らせる命令で、
+/// ここでは CANRESTORE を 1 戻す。
+/// Ref: SPEC-SPARC-V9 §RESTORED.
+pub fn restored<B: Backend>(b: &mut B) -> Flow<B> {
+    step_counter(b, canrestore_ref(), 1);
     Ok(())
 }
 
@@ -2240,6 +2361,40 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Flow<B> {
             let target = pc.wrapping_add((disp22 << 2) as u64);
             bicc(b, a, cond, pc, target)
         }
+        Insn::Bpcc => {
+            // オペランドは (a, cond, cc, disp19)。
+            let a = o[0] as u8;
+            let cond = o[1] as u8;
+            let cc = o[2] as u8;
+            let disp19 = ((o[3] as i64) << 45) >> 45;
+            let target = pc.wrapping_add((disp19 << 2) as u64);
+            bpcc(b, a, cond, cc, pc, target)
+        }
+        Insn::Bpr => {
+            // オペランドは (a, rcond, d16hi, rs1, d16lo)。
+            let a = o[0] as u8;
+            let rcond = o[1] as u8;
+            let d16 = ((o[2] << 14) | o[4]) as i64;
+            let disp16 = (d16 << 48) >> 48;
+            let target = pc.wrapping_add((disp16 << 2) as u64);
+            bpr(b, a, rcond, Gpr(o[3] as u8), pc, target)
+        }
+        Insn::Fbfcc => {
+            let a = o[0] as u8;
+            let cond = o[1] as u8;
+            let disp22 = ((o[2] as i64) << 42) >> 42;
+            let target = pc.wrapping_add((disp22 << 2) as u64);
+            fbfcc(b, a, cond, pc, target)
+        }
+        Insn::Fbpfcc => {
+            // オペランドは (a, cond, bfcc, disp19)。
+            let a = o[0] as u8;
+            let cond = o[1] as u8;
+            let fcc = o[2] as u8;
+            let disp19 = ((o[3] as i64) << 45) >> 45;
+            let target = pc.wrapping_add((disp19 << 2) as u64);
+            fbpfcc(b, a, cond, fcc, pc, target)
+        }
         // ASI 指定形。オペランドは (rd, rs1, asi, rs2)。V8 では特権
         // 命令、V9 は ASI が 0x80 未満のときだけ特権が要る。
         // アドレス空間の選択は後続ステップで扱うため、ここでは
@@ -2391,13 +2546,11 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Flow<B> {
         Insn::Return => ret(b, Gpr(o[0] as u8), Src2::Reg(Gpr(o[1] as u8))),
         Insn::ReturnI => ret(b, Gpr(o[0] as u8), Src2::Imm(sext13(o[1]))),
         // 観測可能な効果のない命令群。
-        Insn::Stbar
-        | Insn::Membar
-        | Insn::Flush
-        | Insn::FlushI
-        | Insn::Saved
-        | Insn::Restored
-        | Insn::Flushw => nop(b),
+        Insn::Stbar | Insn::Membar | Insn::Flush | Insn::FlushI | Insn::Flushw => nop(b),
+        // SAVED/RESTORED は V9 では特権命令。ユーザーモードでは
+        // privileged_opcode（0x11）。パーソナリティは `saved`/
+        // `restored` を直接呼んで窓カウンタを戻す。
+        Insn::Saved | Insn::Restored => Err(privileged(b)),
         // FP ロード/ストア。オペランドは (fd, rs1, src2)。
         Insn::Ldf => ldf(b, o[0] as u8, Gpr(o[1] as u8), Src2::Reg(Gpr(o[2] as u8))),
         Insn::LdfI => ldf(b, o[0] as u8, Gpr(o[1] as u8), Src2::Imm(sext13(o[2]))),

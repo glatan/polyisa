@@ -20,6 +20,7 @@ polyisa-guest-mips = { path = "../../guests/mips", optional = true }
 polyisa-guest-power = { path = "../../guests/power", optional = true }
 polyisa-guest-riscv = { path = "../../guests/riscv", optional = true }
 polyisa-guest-s390 = { path = "../../guests/s390", optional = true }
+polyisa-guest-sparc = { path = "../../guests/sparc", optional = true }
 polyisa-guest-x86 = { path = "../../guests/x86", optional = true }
 
 [features]
@@ -30,6 +31,7 @@ guest-mips = ["dep:polyisa-guest-mips"]
 guest-power = ["dep:polyisa-guest-power"]
 guest-riscv = ["dep:polyisa-guest-riscv"]
 guest-s390 = ["dep:polyisa-guest-s390"]
+guest-sparc = ["dep:polyisa-guest-sparc"]
 guest-x86 = ["dep:polyisa-guest-x86"]
 
 [lints]

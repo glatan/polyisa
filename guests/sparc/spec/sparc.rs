@@ -138,6 +138,12 @@ pub fn build_model() -> polyisa_isadl::Model {
         // Ticc の 7 ビット即値と V9 Tcc の 8 ビット即値。
         ("simm7", 6, 0),
         ("simm8", 7, 0),
+        // BPr の分岐条件（27-25）と 16 ビット変位の 2 分割桁。
+        ("bprcond", 27, 25),
+        ("d16hi", 21, 20),
+        ("d16lo", 13, 0),
+        // FBPfcc の fcc 選択（21-20。MOVfcc の fcc(12-11) とは別桁）。
+        ("bfcc", 21, 20),
         // V9 FCMP の fcc 選択（rd 桁の下位 2 ビット）。
         ("fccn", 26, 25),
     ] {
@@ -189,6 +195,47 @@ pub fn build_model() -> polyisa_isadl::Model {
         name: "F2B".to_string(),
         fields: vec!["a".to_string(), "cond".to_string(), "disp22".to_string()],
         operands: vec![val("a"), val("cond"), val("disp22")],
+    });
+    // BPcc 形式（op=00 + a + cond + op2=001 + cc + p + disp19）。
+    // 予測ビット p は意味に影響しないのでオペランドに含めない。
+    m.formats.push(Format {
+        name: "F2BP".to_string(),
+        fields: vec![
+            "a".to_string(),
+            "cond".to_string(),
+            "cc".to_string(),
+            "disp19".to_string(),
+        ],
+        operands: vec![val("a"), val("cond"), val("cc"), val("disp19")],
+    });
+    // FBPfcc 形式（op=00 + a + cond + op2=101 + bfcc + p + disp19）。
+    m.formats.push(Format {
+        name: "F2FBP".to_string(),
+        fields: vec![
+            "a".to_string(),
+            "cond".to_string(),
+            "bfcc".to_string(),
+            "disp19".to_string(),
+        ],
+        operands: vec![val("a"), val("cond"), val("bfcc"), val("disp19")],
+    });
+    // BPr 形式（op=00 + a + 0 + rcond + op2=011 + d16hi + p + rs1 + d16lo）。
+    m.formats.push(Format {
+        name: "F2BPR".to_string(),
+        fields: vec![
+            "a".to_string(),
+            "bprcond".to_string(),
+            "d16hi".to_string(),
+            "rs1".to_string(),
+            "d16lo".to_string(),
+        ],
+        operands: vec![
+            val("a"),
+            val("bprcond"),
+            val("d16hi"),
+            gpr("rs1", Access::Read),
+            val("d16lo"),
+        ],
     });
     // F3 レジスタ形（rd 書き込み。整数演算・ロード・jmpl・save/restore）。
     m.formats.push(Format {
@@ -634,6 +681,10 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("sethi", "F1SETHI", "00 ..... 100 ......................", "sethi {imm22}, {rd}", "alu", ""),
         ("unimp", "F1UNIMP", "00 00000 000 ......................", "unimp {imm22}", "misc", ""),
         ("bicc", "F2B", "00 . .... 010 ......................", "b{cond} {disp22}", "branch", ""),
+        ("bpcc", "F2BP", "00 . .... 001 .. . ...................", "bp{cond} {disp19}", "branch", "v9"),
+        ("bpr", "F2BPR", "00 . 0 ... 011 .. . ..... ..............", "br{rcond} {rs1}, {disp16}", "branch", "v9"),
+        ("fbfcc", "F2B", "00 . .... 110 ......................", "fb{cond} {disp22}", "branch", ""),
+        ("fbpfcc", "F2FBP", "00 . .... 101 .. . ...................", "fbp{cond} {disp19}", "branch", "v9"),
         // 整数演算（op=10）。op3 の配置は V8 の命令表どおり。
         ("add", "F3R", "10 ..... 000000 ..... 0 00000000 .....", "add {rs1}, {rs2}, {rd}", "alu", ""),
         ("add_i", "F3I", "10 ..... 000000 ..... 1 .............", "add {rs1}, {simm13}, {rd}", "alu", ""),

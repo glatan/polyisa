@@ -82,6 +82,7 @@ pub fn parse_cpu_spec(s: &str) -> Result<CpuSpec, String> {
     feature = "guest-power",
     feature = "guest-riscv",
     feature = "guest-s390",
+    feature = "guest-sparc",
     feature = "guest-x86"
 ))]
 fn resolve_sel(
@@ -219,6 +220,28 @@ fn run_m68k_elf(path: &str, argv: &[String], spec: Option<&CpuSpec>) -> Result<u
 #[cfg(not(feature = "guest-m68k"))]
 fn run_m68k_elf(_path: &str, _argv: &[String], _spec: Option<&CpuSpec>) -> Result<u64, String> {
     Err("この polyisa は m68k ゲストなしでビルドされた".to_string())
+}
+
+#[cfg(feature = "guest-sparc")]
+fn run_sparc_elf(path: &str, argv: &[String], spec: Option<&CpuSpec>) -> Result<u64, String> {
+    let sel = spec
+        .map(|s| {
+            resolve_sel(
+                "sparc",
+                polyisa_guest_sparc::MODEL_DEFS,
+                polyisa_guest_sparc::FEATURE_DEFS,
+                polyisa_guest_sparc::FEAT_BITS,
+                s,
+            )
+        })
+        .transpose()?;
+    let _ = sel;
+    run_sparc::run_elf_sparc(path, argv)
+}
+
+#[cfg(not(feature = "guest-sparc"))]
+fn run_sparc_elf(_path: &str, _argv: &[String], _spec: Option<&CpuSpec>) -> Result<u64, String> {
+    Err("この polyisa は sparc ゲストなしでビルドされた".to_string())
 }
 
 #[cfg(feature = "guest-arm")]
@@ -456,6 +479,10 @@ pub fn run_path_opts(
                 // EM_MIPS。Ref: SRC-LINUX (7.3)。アーキテクチャとエンディアンは ELF ヘッダから取る。
                 check("mips")?;
                 run_mips_elf(path, argv, spec.as_ref())
+            } else if matches!(ehdr.machine, 2 | 18) {
+                // EM_SPARC / EM_SPARC32PLUS。Ref: binutils include/elf/common.h。
+                check("sparc")?;
+                run_sparc_elf(path, argv, spec.as_ref())
             } else {
                 Err(format!("未対応の e_machine: {}", ehdr.machine))
             }
@@ -490,6 +517,10 @@ pub fn run_path_opts(
                 // EM_S390（s390x）。Ref: SPEC-S390-ABI。
                 check("s390")?;
                 run_s390_elf(path, argv, spec.as_ref(), root)
+            } else if ehdr.machine == 43 {
+                // EM_SPARCV9（sparc64）。Ref: binutils include/elf/common.h。
+                check("sparc")?;
+                run_sparc_elf(path, argv, spec.as_ref())
             } else {
                 Err(format!("未対応の e_machine: {}", ehdr.machine))
             }

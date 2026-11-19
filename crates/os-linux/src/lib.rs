@@ -59,6 +59,10 @@ pub mod rv64;
 // Ref: SRC-LINUX (7.3), SPEC-S390-ABI.
 pub mod s390;
 
+/// SPARC（sparc32/sparc64 共通番号）のシステムコール番号と syscall 処理。
+// Ref: SRC-LINUX (7.3).
+pub mod sparc;
+
 /// x86 の 32ビット（Linux の i386 ABI、EM_386）のシステムコール番号。
 // Ref: SRC-LINUX (7.3).
 pub mod x86_32;
