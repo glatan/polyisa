@@ -138,6 +138,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         // Ticc の 7 ビット即値と V9 Tcc の 8 ビット即値。
         ("simm7", 6, 0),
         ("simm8", 7, 0),
+        // V9 FCMP の fcc 選択（rd 桁の下位 2 ビット）。
+        ("fccn", 26, 25),
     ] {
         m.fields.push(Field {
             name: name.to_string(),
@@ -149,6 +151,12 @@ pub fn build_model() -> polyisa_isadl::Model {
         name: name.to_string(),
         field: None,
         regclass: Some("gpr".to_string()),
+        access,
+    };
+    let fpr = |name: &str, access: Access| Operand {
+        name: name.to_string(),
+        field: None,
+        regclass: Some("fpr".to_string()),
         access,
     };
     let val = |name: &str| Operand {
@@ -457,6 +465,118 @@ pub fn build_model() -> polyisa_isadl::Model {
         fields: vec!["mmask".to_string()],
         operands: vec![val("mmask")],
     });
+    // FPop1 の単項形（rs1 桁は 0 固定。opf はパターンに固定する）。
+    m.formats.push(Format {
+        name: "F3FP2".to_string(),
+        fields: vec!["rd".to_string(), "rs2".to_string()],
+        operands: vec![fpr("rd", Access::Write), fpr("rs2", Access::Read)],
+    });
+    // FPop1 の二項形。
+    m.formats.push(Format {
+        name: "F3FP3".to_string(),
+        fields: vec!["rd".to_string(), "rs1".to_string(), "rs2".to_string()],
+        operands: vec![
+            fpr("rd", Access::Write),
+            fpr("rs1", Access::Read),
+            fpr("rs2", Access::Read),
+        ],
+    });
+    // FCMP（fccn は V9 の fcc0-3 選択。V8 では 0 のみ）。
+    m.formats.push(Format {
+        name: "F3FCN".to_string(),
+        fields: vec!["fccn".to_string(), "rs1".to_string(), "rs2".to_string()],
+        operands: vec![
+            val("fccn"),
+            fpr("rs1", Access::Read),
+            fpr("rs2", Access::Read),
+        ],
+    });
+    // V9 FMOVcc（整数条件コードで転送する浮動小数点 mov）。
+    m.formats.push(Format {
+        name: "F3FMCC".to_string(),
+        fields: vec![
+            "rd".to_string(),
+            "mcond".to_string(),
+            "xcc".to_string(),
+            "rs2".to_string(),
+        ],
+        operands: vec![
+            fpr("rd", Access::Write),
+            val("mcond"),
+            val("xcc"),
+            fpr("rs2", Access::Read),
+        ],
+    });
+    // V9 FMOVfcc（浮動小数点条件コードで転送）。
+    m.formats.push(Format {
+        name: "F3FMFCC".to_string(),
+        fields: vec![
+            "rd".to_string(),
+            "mcond".to_string(),
+            "fcc".to_string(),
+            "rs2".to_string(),
+        ],
+        operands: vec![
+            fpr("rd", Access::Write),
+            val("mcond"),
+            val("fcc"),
+            fpr("rs2", Access::Read),
+        ],
+    });
+    // V9 FMOVr（整数レジスタ rs1 と 0 の比較で転送）。
+    m.formats.push(Format {
+        name: "F3FMR".to_string(),
+        fields: vec![
+            "rd".to_string(),
+            "rs1".to_string(),
+            "rcond".to_string(),
+            "rs2".to_string(),
+        ],
+        operands: vec![
+            fpr("rd", Access::Write),
+            gpr("rs1", Access::Read),
+            val("rcond"),
+            fpr("rs2", Access::Read),
+        ],
+    });
+    // 浮動小数点ロード（rd 桁は f レジスタ番号）。
+    m.formats.push(Format {
+        name: "F3LDF".to_string(),
+        fields: vec!["rd".to_string(), "rs1".to_string(), "rs2".to_string()],
+        operands: vec![
+            fpr("rd", Access::Write),
+            gpr("rs1", Access::Read),
+            gpr("rs2", Access::Read),
+        ],
+    });
+    m.formats.push(Format {
+        name: "F3LDFI".to_string(),
+        fields: vec!["rd".to_string(), "rs1".to_string(), "simm13".to_string()],
+        operands: vec![
+            fpr("rd", Access::Write),
+            gpr("rs1", Access::Read),
+            val("simm13"),
+        ],
+    });
+    // 浮動小数点ストア（rd 桁は読む側の f レジスタ番号）。
+    m.formats.push(Format {
+        name: "F3STF".to_string(),
+        fields: vec!["rd".to_string(), "rs1".to_string(), "rs2".to_string()],
+        operands: vec![
+            fpr("rd", Access::Read),
+            gpr("rs1", Access::Read),
+            gpr("rs2", Access::Read),
+        ],
+    });
+    m.formats.push(Format {
+        name: "F3STFI".to_string(),
+        fields: vec!["rd".to_string(), "rs1".to_string(), "simm13".to_string()],
+        operands: vec![
+            fpr("rd", Access::Read),
+            gpr("rs1", Access::Read),
+            val("simm13"),
+        ],
+    });
 
     // 骨格の命令集合。命令群は SP5 以降で足す。ここでは各形式を
     // 一通りデコードできる組を宣言する。
@@ -680,6 +800,67 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("tccx_i", "F3TI8", "10 0.... 111010 ..... 1 10000 ........", "t{cond} %xcc, {rs1} + {simm8}", "trap", "v9"),
         ("done", "F3NONE", "10 00000 111110 00000 0 00000000 00000", "done", "trap", "v9"),
         ("retry", "F3NONE", "10 00001 111110 00000 0 00000000 00000", "retry", "trap", "v9"),
+        // ---- SP10: FPU ----
+        // 浮動小数点ロード/ストア。rd 桁は f レジスタ番号。
+        ("ldf", "F3LDF", "11 ..... 100000 ..... 0 00000000 .....", "ldf [{rs1} + {rs2}], {rd}", "load", ""),
+        ("ldf_i", "F3LDFI", "11 ..... 100000 ..... 1 .............", "ldf [{rs1} + {simm13}], {rd}", "load", ""),
+        ("lddf", "F3LDF", "11 ..... 100011 ..... 0 00000000 .....", "lddf [{rs1} + {rs2}], {rd}", "load", ""),
+        ("lddf_i", "F3LDFI", "11 ..... 100011 ..... 1 .............", "lddf [{rs1} + {simm13}], {rd}", "load", ""),
+        ("stf", "F3STF", "11 ..... 100100 ..... 0 00000000 .....", "stf {rd}, [{rs1} + {rs2}]", "store", ""),
+        ("stf_i", "F3STFI", "11 ..... 100100 ..... 1 .............", "stf {rd}, [{rs1} + {simm13}]", "store", ""),
+        ("stdf", "F3STF", "11 ..... 100111 ..... 0 00000000 .....", "stdf {rd}, [{rs1} + {rs2}]", "store", ""),
+        ("stdf_i", "F3STFI", "11 ..... 100111 ..... 1 .............", "stdf {rd}, [{rs1} + {simm13}]", "store", ""),
+        // FSR のロード/ストア（rd 桁は 0 固定、V9 の 64 ビット形は 1）。
+        ("ldfsr", "F3ASWR", "11 00000 100001 ..... 0 00000000 .....", "ldfsr [{rs1} + {rs2}]", "load", ""),
+        ("ldfsr_i", "F3ASWI", "11 00000 100001 ..... 1 .............", "ldfsr [{rs1} + {simm13}]", "load", ""),
+        ("ldxfsr", "F3ASWR", "11 00001 100001 ..... 0 00000000 .....", "ldxfsr [{rs1} + {rs2}]", "load", "v9"),
+        ("ldxfsr_i", "F3ASWI", "11 00001 100001 ..... 1 .............", "ldxfsr [{rs1} + {simm13}]", "load", "v9"),
+        ("stfsr", "F3ASWR", "11 00000 100101 ..... 0 00000000 .....", "stfsr [{rs1} + {rs2}]", "store", ""),
+        ("stfsr_i", "F3ASWI", "11 00000 100101 ..... 1 .............", "stfsr [{rs1} + {simm13}]", "store", ""),
+        ("stxfsr", "F3ASWR", "11 00001 100101 ..... 0 00000000 .....", "stxfsr [{rs1} + {rs2}]", "store", "v9"),
+        ("stxfsr_i", "F3ASWI", "11 00001 100101 ..... 1 .............", "stxfsr [{rs1} + {simm13}]", "store", "v9"),
+        // FPop1（op3=110100、opf は bit13-5。d 形の一部は V9 追加）。
+        ("fmovs", "F3FP2", "10 ..... 110100 00000 0 00000001 .....", "fmovs {rs2}, {rd}", "float", ""),
+        ("fmovd", "F3FP2", "10 ..... 110100 00000 0 00000010 .....", "fmovd {rs2}, {rd}", "float", "v9"),
+        ("fnegs", "F3FP2", "10 ..... 110100 00000 0 00000101 .....", "fnegs {rs2}, {rd}", "float", ""),
+        ("fnegd", "F3FP2", "10 ..... 110100 00000 0 00000110 .....", "fnegd {rs2}, {rd}", "float", "v9"),
+        ("fabss", "F3FP2", "10 ..... 110100 00000 0 00001001 .....", "fabss {rs2}, {rd}", "float", ""),
+        ("fabsd", "F3FP2", "10 ..... 110100 00000 0 00001010 .....", "fabsd {rs2}, {rd}", "float", "v9"),
+        ("fsqrts", "F3FP2", "10 ..... 110100 00000 0 00101001 .....", "fsqrts {rs2}, {rd}", "float", ""),
+        ("fsqrtd", "F3FP2", "10 ..... 110100 00000 0 00101010 .....", "fsqrtd {rs2}, {rd}", "float", ""),
+        ("fitos", "F3FP2", "10 ..... 110100 00000 0 11000100 .....", "fitos {rs2}, {rd}", "float", ""),
+        ("fitod", "F3FP2", "10 ..... 110100 00000 0 11001000 .....", "fitod {rs2}, {rd}", "float", ""),
+        ("fxtos", "F3FP2", "10 ..... 110100 00000 0 10000100 .....", "fxtos {rs2}, {rd}", "float", "v9"),
+        ("fxtod", "F3FP2", "10 ..... 110100 00000 0 10001000 .....", "fxtod {rs2}, {rd}", "float", "v9"),
+        ("fstoi", "F3FP2", "10 ..... 110100 00000 0 11010001 .....", "fstoi {rs2}, {rd}", "float", ""),
+        ("fdtoi", "F3FP2", "10 ..... 110100 00000 0 11010010 .....", "fdtoi {rs2}, {rd}", "float", ""),
+        ("fstox", "F3FP2", "10 ..... 110100 00000 0 10000001 .....", "fstox {rs2}, {rd}", "float", "v9"),
+        ("fdtox", "F3FP2", "10 ..... 110100 00000 0 10000010 .....", "fdtox {rs2}, {rd}", "float", "v9"),
+        ("fstod", "F3FP2", "10 ..... 110100 00000 0 11001001 .....", "fstod {rs2}, {rd}", "float", ""),
+        ("fdtos", "F3FP2", "10 ..... 110100 00000 0 11000110 .....", "fdtos {rs2}, {rd}", "float", ""),
+        ("fadds", "F3FP3", "10 ..... 110100 ..... 0 01000001 .....", "fadds {rs1}, {rs2}, {rd}", "float", ""),
+        ("faddd", "F3FP3", "10 ..... 110100 ..... 0 01000010 .....", "faddd {rs1}, {rs2}, {rd}", "float", ""),
+        ("fsubs", "F3FP3", "10 ..... 110100 ..... 0 01000101 .....", "fsubs {rs1}, {rs2}, {rd}", "float", ""),
+        ("fsubd", "F3FP3", "10 ..... 110100 ..... 0 01000110 .....", "fsubd {rs1}, {rs2}, {rd}", "float", ""),
+        ("fmuls", "F3FP3", "10 ..... 110100 ..... 0 01001001 .....", "fmuls {rs1}, {rs2}, {rd}", "float", ""),
+        ("fmuld", "F3FP3", "10 ..... 110100 ..... 0 01001010 .....", "fmuld {rs1}, {rs2}, {rd}", "float", ""),
+        ("fdivs", "F3FP3", "10 ..... 110100 ..... 0 01001101 .....", "fdivs {rs1}, {rs2}, {rd}", "float", ""),
+        ("fdivd", "F3FP3", "10 ..... 110100 ..... 0 01001110 .....", "fdivd {rs1}, {rs2}, {rd}", "float", ""),
+        ("fsmuld", "F3FP3", "10 ..... 110100 ..... 0 01101001 .....", "fsmuld {rs1}, {rs2}, {rd}", "float", ""),
+        // FPop2（op3=110101）。FCMP は V9 で fccn が fcc0-3 を選ぶ。
+        // fcmpE は unordered 時に例外を起こすが、本モデルでは
+        // fp_exception を起こさず fcc=3 を書くだけに畳む。
+        ("fcmps", "F3FCN", "10 000.. 110101 ..... 0 01010001 .....", "fcmps {rs1}, {rs2}", "float", ""),
+        ("fcmpd", "F3FCN", "10 000.. 110101 ..... 0 01010010 .....", "fcmpd {rs1}, {rs2}", "float", ""),
+        ("fcmpes", "F3FCN", "10 000.. 110101 ..... 0 01010101 .....", "fcmpes {rs1}, {rs2}", "float", ""),
+        ("fcmped", "F3FCN", "10 000.. 110101 ..... 0 01010110 .....", "fcmped {rs1}, {rs2}", "float", ""),
+        // V9 の FMOVcc/FMOVfcc/FMOVr（cond は mcond 桁 17-14）。
+        ("fmovscc", "F3FMCC", "10 ..... 110101 0 .... 1 .0 000001 .....", "fmovscc {xcc} {mcond} {rs2} {rd}", "float", "v9"),
+        ("fmovdcc", "F3FMCC", "10 ..... 110101 0 .... 1 .0 000010 .....", "fmovdcc {xcc} {mcond} {rs2} {rd}", "float", "v9"),
+        ("fmovsfcc", "F3FMFCC", "10 ..... 110101 0 .... 0 .. 000001 .....", "fmovsfcc {fcc} {mcond} {rs2} {rd}", "float", "v9"),
+        ("fmovdfcc", "F3FMFCC", "10 ..... 110101 0 .... 0 .. 000010 .....", "fmovdfcc {fcc} {mcond} {rs2} {rd}", "float", "v9"),
+        ("fmovrs", "F3FMR", "10 ..... 110101 ..... 0 ... 00101 .....", "fmovrs {rs1} {rcond} {rs2} {rd}", "float", "v9"),
+        ("fmovrd", "F3FMR", "10 ..... 110101 ..... 0 ... 00110 .....", "fmovrd {rs1} {rcond} {rs2} {rd}", "float", "v9"),
     ];
     for (name, format, pattern, syntax, timing, feat) in insns {
         m.insns.push(Insn {

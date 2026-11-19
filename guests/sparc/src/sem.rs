@@ -22,7 +22,7 @@
 //! Ref: SPEC-SPARC-V9.
 
 use polyisa_mem::{Access, AccessKind, Align, Endian};
-use polyisa_sem::{Backend, Cmp, Flow, StateArray, StateRef, W8, W16, W32, W64, Width};
+use polyisa_sem::{Backend, Cmp, F32, F64, Flow, StateArray, StateRef, W8, W16, W32, W64, Width};
 
 use super::{CpuState, Insn};
 
@@ -1438,21 +1438,27 @@ fn movfcc<B: Backend>(b: &mut B, rd: Gpr, fcond: u8, fcc: u8, s: Src2) -> Flow<B
     Ok(())
 }
 
-/// MOVr。rs1 と 0 の比較結果で転送する。
-/// rcond: 1=RZ, 2=RLEZ, 3=RLZ, 5=RNZ, 6=RGZ, 7=RGEZ。0 と 4 は
-/// 予約で、exec 側で illegal instruction トラップに振る。
+/// MOVr/FMOVr の rcond 評価。`x` と 0 の比較。rcond:
+/// 1=RZ, 2=RLEZ, 3=RLZ, 5=RNZ, 6=RGZ, 7=RGEZ。
 /// Ref: SPEC-SPARC-V9 §MOVr.
-fn movr<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rcond: u8, s: Src2) -> Flow<B> {
-    let x = read(b, rs1);
+fn rcond_cmp<B: Backend>(b: &mut B, x: B::V<W64>, rcond: u8) -> B::B {
     let zero = b.konst::<W64>(0);
-    let t = match rcond {
+    match rcond {
         1 => b.cmp::<W64>(Cmp::Eq, x, zero),
         2 => b.cmp::<W64>(Cmp::LeS, x, zero),
         3 => b.cmp::<W64>(Cmp::LtS, x, zero),
         5 => b.cmp::<W64>(Cmp::Ne, x, zero),
         6 => b.cmp::<W64>(Cmp::GtS, x, zero),
         _ => b.cmp::<W64>(Cmp::GeS, x, zero),
-    };
+    }
+}
+
+/// MOVr。rs1 と 0 の比較結果で転送する。
+/// rcond の 0 と 4 は予約で、exec 側で illegal instruction トラップに振る。
+/// Ref: SPEC-SPARC-V9 §MOVr.
+fn movr<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rcond: u8, s: Src2) -> Flow<B> {
+    let x = read(b, rs1);
+    let t = rcond_cmp(b, x, rcond);
     let y = src2(b, s);
     let cur = read(b, rd);
     let v = b.select::<W64>(t, y, cur);
@@ -1542,6 +1548,406 @@ pub fn ret<B: Backend>(b: &mut B, rs1: Gpr, s: Src2) -> Flow<B> {
 /// いずれも状態を動かさない。
 /// Ref: SPEC-SPARC-V9 §STBAR, §MEMBAR, §FLUSH, §SAVED, §FLUSHW.
 pub fn nop<B: Backend>(_b: &mut B) -> Flow<B> {
+    Ok(())
+}
+
+// ---- SP10: 浮動小数点 ----
+
+/// FP が有効か確かめる。V7/V8 は PSR.EF（ビット 12）、V9 は
+/// PSTATE.PEF（PSTATE 桁のビット 4、TSTATE ではビット 12）を見る。
+/// 無効なら fp_disabled トラップ（V8 の 0x04、V9 の 0x20）。
+/// V9 の FPRS.FEF（ASR6）は本モデルに無く、PEF だけを条件にする。
+/// FSR の cexc/aexc/tem による IEEE 例外機構も持たない。
+/// Ref: SPEC-SPARC-V8 (Version 8) §The Floating-point Unit;
+/// SPEC-SPARC-V9 §PSTATE, §Trap Type.
+fn fp_check<B: Backend>(b: &mut B) -> Flow<B> {
+    let v9 = b.param::<super::Word64Param>();
+    let en = if v9 {
+        let ts = b.get(tstate_ref());
+        let sh = b.konst::<W64>(12);
+        let s = b.shr_l::<W64>(ts, sh);
+        let one = b.konst::<W64>(1);
+        let m = b.and::<W64>(s, one);
+        let zero = b.konst::<W64>(0);
+        b.cmp::<W64>(Cmp::Ne, m, zero)
+    } else {
+        let psr = b.get(psr_ref());
+        let m = b.konst::<W32>(1 << 12);
+        let masked = b.and::<W32>(psr, m);
+        let zero = b.konst::<W32>(0);
+        b.cmp::<W32>(Cmp::Ne, masked, zero)
+    };
+    let dis = inv_b(b, en);
+    let code = if v9 { 0x20 } else { 0x04 };
+    b.if_then(dis, |bb| {
+        let tt = bb.konst::<W64>(code);
+        bb.set(tt_ref(), tt);
+        Err(bb.raise(polyisa_sem::GuestException {
+            kind: polyisa_sem::ExceptionKind::Trap,
+            code,
+            addr: None,
+            in_delay_slot: false,
+        }))
+    })?;
+    Ok(())
+}
+
+/// 倍精度ペアの基底スロット。V9 では奇数フィールドが上位倍精度
+/// バンク %d32-%d62 を指すが、本モデルはバンクを持たないので
+/// illegal instruction とする。V8 では奇数フィールドは予約で
+/// あり、QEMU と同様に偶数へ畳む。フィールド 31 は f[32] が
+/// 存在しないためどちらの場合でもここで遮断される。
+/// Ref: SPEC-SPARC-V9 §5.1.4.1.
+fn fpair_base<B: Backend>(b: &mut B, r: u8) -> Result<u8, B::Exit> {
+    if r & 1 == 0 {
+        Ok(r)
+    } else if b.param::<super::Word64Param>() {
+        Err(unimp(b, 0))
+    } else {
+        Ok(r & !1)
+    }
+}
+
+/// スロット r,r+1 を連結した生の 64 ビット。倍精度（d レジスタ）は
+/// 偶数 r のスロット r が上位ワード、r+1 が下位ワードを持つ。
+/// %f(2n) が %dn の上位 32 ビットになる配置である。
+/// Ref: SPEC-SPARC-V8 (Version 8) §Floating-Point Data Types.
+fn fgetw64<B: Backend>(b: &mut B, r: u8) -> Result<B::V<W64>, B::Exit> {
+    let r = fpair_base(b, r)?;
+    let hi: B::V<W64> = b.get(Fpr(r).state());
+    let lo: B::V<W64> = b.get(Fpr(r + 1).state());
+    let sh = b.konst::<W64>(32);
+    let h = b.shl::<W64>(hi, sh);
+    let m = b.konst::<W64>(0xffff_ffff);
+    let l = b.and::<W64>(lo, m);
+    Ok(b.or::<W64>(h, l))
+}
+
+fn fputw64<B: Backend>(b: &mut B, r: u8, v: B::V<W64>) -> Result<(), B::Exit> {
+    let r = fpair_base(b, r)?;
+    let sh = b.konst::<W64>(32);
+    let hi = b.shr_l::<W64>(v, sh);
+    let m = b.konst::<W64>(0xffff_ffff);
+    let lo = b.and::<W64>(v, m);
+    b.set(Fpr(r).state(), hi);
+    b.set(Fpr(r + 1).state(), lo);
+    Ok(())
+}
+
+/// f レジスタの読み出し。F32 はスロット r の下位 32 ビット。
+fn fget<B: Backend, F: Width>(b: &mut B, r: u8) -> Result<B::V<F>, B::Exit> {
+    if F::BITS == 32 {
+        let v: B::V<W64> = b.get(Fpr(r).state());
+        Ok(b.trunc::<W64, F>(v))
+    } else {
+        let v = fgetw64(b, r)?;
+        Ok(b.trunc::<W64, F>(v))
+    }
+}
+
+fn fput<B: Backend, F: Width>(b: &mut B, r: u8, v: B::V<F>) -> Result<(), B::Exit> {
+    let w = b.zext::<F, W64>(v);
+    if F::BITS == 32 {
+        b.set(Fpr(r).state(), w);
+        Ok(())
+    } else {
+        fputw64(b, r, w)
+    }
+}
+
+/// FCMP。fcc（eq=0, lt=1, gt=2, unordered=3）を FSR の fccN に
+/// 書く。`sel` は V9 の fcc 番号（0-3）。V8 で sel が 0 でなければ
+/// illegal instruction（fccn 桁は V8 では予約）。
+/// fcmpE は unordered のとき fp_exception を起こすが、本モデルは
+/// 例外フラグを持たないので fcc=3 を書くだけに畳む。
+/// Ref: SPEC-SPARC-V8 (Version 8) §FCMP, §FCMPE; SPEC-SPARC-V9 §FCMP.
+fn fcmp_common<B: Backend, F: Width>(b: &mut B, fs1: u8, fs2: u8, sel: u8) -> Flow<B> {
+    if !b.param::<super::Word64Param>() && sel != 0 {
+        return Err(unimp(b, 0));
+    }
+    fp_check(b)?;
+    let a = fget::<B, F>(b, fs1)?;
+    let c = fget::<B, F>(b, fs2)?;
+    let eq = b.feq::<F>(a, c);
+    let le = b.fle::<F>(a, c);
+    let ge = b.fle::<F>(c, a);
+    let zero = b.konst::<W64>(0);
+    let one = b.konst::<W64>(1);
+    let two = b.konst::<W64>(2);
+    let three = b.konst::<W64>(3);
+    // fcc = le ? (eq ? 0 : 1) : (ge ? 2 : 3)
+    let lo = b.select::<W64>(eq, zero, one);
+    let hi = b.select::<W64>(ge, two, three);
+    let fcc = b.select::<W64>(le, lo, hi);
+    // 書き込み位置。fcc0 は FSR ビット 10-11、V9 の fccN は
+    // 30+2N（fcc1=32-33, fcc2=34-35, fcc3=36-37）。
+    let pos = if b.param::<super::Word64Param>() && sel != 0 {
+        u64::from(sel) * 2 + 30
+    } else {
+        10
+    };
+    let fsr = b.get(fsr_ref());
+    let pm = b.konst::<W64>(0b11 << pos);
+    let npm = b.not::<W64>(pm);
+    let cleared = b.and::<W64>(fsr, npm);
+    let pk = b.konst::<W64>(pos);
+    let ins = b.shl::<W64>(fcc, pk);
+    let m = b.or::<W64>(cleared, ins);
+    b.set(fsr_ref(), m);
+    Ok(())
+}
+
+/// 二項 FP 演算の選択肢。
+#[derive(Clone, Copy)]
+enum Fp3 {
+    Add,
+    Sub,
+    Mul,
+    Div,
+}
+
+/// FADDS/FADDD/FSUBS/FSUBD/FMULS/FMULD/FDIVS/FDIVD の共通処理。
+/// 丸めはバックエンドの最近接偶数固定（FSR.RD の動的丸めは
+/// バックエンドが静的な rm しか取れないため畳む）。
+/// Ref: SPEC-SPARC-V8 (Version 8) §Floating-Point Add/Subtract/
+/// Multiply/Divide.
+fn fp3<B: Backend, F: Width>(b: &mut B, rd: u8, rs1: u8, rs2: u8, op: Fp3) -> Flow<B> {
+    fp_check(b)?;
+    let a = fget::<B, F>(b, rs1)?;
+    let c = fget::<B, F>(b, rs2)?;
+    let v = match op {
+        Fp3::Add => b.fadd::<F>(a, c),
+        Fp3::Sub => b.fsub::<F>(a, c),
+        Fp3::Mul => b.fmul::<F>(a, c),
+        Fp3::Div => b.fdiv::<F>(a, c),
+    };
+    fput::<B, F>(b, rd, v)?;
+    Ok(())
+}
+
+/// FMOVS。スロットの下位 32 ビットをそのままコピーする。
+/// Ref: SPEC-SPARC-V8 (Version 8) §FMOVS.
+fn fmovs<B: Backend>(b: &mut B, rd: u8, rs2: u8) -> Flow<B> {
+    fp_check(b)?;
+    let v: B::V<W64> = b.get(Fpr(rs2).state());
+    b.set(Fpr(rd).state(), v);
+    Ok(())
+}
+
+/// FMOVD（V9）。スロット 2 個をコピーする。
+/// Ref: SPEC-SPARC-V9 §FMOV.
+fn fmovd<B: Backend>(b: &mut B, rd: u8, rs2: u8) -> Flow<B> {
+    fp_check(b)?;
+    let v = fgetw64(b, rs2)?;
+    fputw64(b, rd, v)?;
+    Ok(())
+}
+
+/// FNEGS/FABSS と FNEGD/FABSD。符号ビットはスロットのビット 31
+/// （倍精度では上位ワード側スロットのビット 31）で、どちらの精度
+/// でも同じ位置にある。`neg` なら反転、さもなくば消去。
+/// Ref: SPEC-SPARC-V8 (Version 8) §FNEGS, §FABSS; SPEC-SPARC-V9 §FNEG, §FABS.
+fn fsgn<B: Backend>(b: &mut B, rd: u8, rs2: u8, neg: bool) -> Flow<B> {
+    fp_check(b)?;
+    let v: B::V<W64> = b.get(Fpr(rs2).state());
+    let s = b.konst::<W64>(0x8000_0000);
+    let w = if neg {
+        b.xor::<W64>(v, s)
+    } else {
+        let n = b.not::<W64>(s);
+        b.and::<W64>(v, n)
+    };
+    b.set(Fpr(rd).state(), w);
+    Ok(())
+}
+
+/// FSQRTS/FSQRTD。
+/// Ref: SPEC-SPARC-V8 (Version 8) §FSQRTS, §FSQRTD.
+fn fsqrt<B: Backend, F: Width>(b: &mut B, rd: u8, rs2: u8) -> Flow<B> {
+    fp_check(b)?;
+    let a = fget::<B, F>(b, rs2)?;
+    let v = b.fsqrt::<F>(a);
+    fput::<B, F>(b, rd, v)?;
+    Ok(())
+}
+
+/// 整数→浮動小数点（fitos/fitod/fxtos/fxtod）。ソースは f レジスタの
+/// 生の整数値。FSR.RD の動的丸めはバックエンドの制約で
+/// 最近接偶数に畳む。
+/// Ref: SPEC-SPARC-V8 (Version 8) §Convert Integer to Floating;
+/// SPEC-SPARC-V9 §Convert Integer to Floating.
+fn i2f_common<B: Backend, F: Width>(b: &mut B, rd: u8, rs2: u8, wide: bool) -> Flow<B> {
+    fp_check(b)?;
+    let v = if wide {
+        let w = fgetw64(b, rs2)?;
+        b.fcvt_from_s64::<F>(w, 0)
+    } else {
+        let x: B::V<W64> = b.get(Fpr(rs2).state());
+        let x32 = b.trunc::<W64, W32>(x);
+        b.fcvt_from_s32::<F>(x32, 0)
+    };
+    fput::<B, F>(b, rd, v)
+}
+
+/// 浮動小数点→整数（fstoi/fdtoi/fstox/fdtox）。常に 0 方向丸め。
+/// Ref: SPEC-SPARC-V8 (Version 8) §Convert Floating to Integer;
+/// SPEC-SPARC-V9 §Convert Floating to Integer.
+fn f2i_common<B: Backend, F: Width>(b: &mut B, rd: u8, rs2: u8, wide: bool) -> Flow<B> {
+    fp_check(b)?;
+    let a = fget::<B, F>(b, rs2)?;
+    if wide {
+        let v = b.fcvt_s64::<F>(a, 1);
+        fputw64(b, rd, v)?;
+    } else {
+        let v = b.fcvt_s32::<F>(a, 1);
+        let w = b.zext::<W32, W64>(v);
+        b.set(Fpr(rd).state(), w);
+    }
+    Ok(())
+}
+
+/// 浮動小数点間変換（fstod/fdtos）。FSR.RD は最近接偶数に畳む。
+/// Ref: SPEC-SPARC-V8 (Version 8) §Convert Between Floating-Point Formats.
+fn f2f_common<B: Backend, F: Width, T: Width>(b: &mut B, rd: u8, rs2: u8) -> Flow<B> {
+    fp_check(b)?;
+    let a = fget::<B, F>(b, rs2)?;
+    let v = b.fcvt_ff::<F, T>(a, 0);
+    fput::<B, T>(b, rd, v)?;
+    Ok(())
+}
+
+/// FSMULD。単精度同士の積を倍精度で返す（精度ロスなし）。
+/// Ref: SPEC-SPARC-V8 (Version 8) §FsMULd.
+fn fsmuld<B: Backend>(b: &mut B, rd: u8, rs1: u8, rs2: u8) -> Flow<B> {
+    fp_check(b)?;
+    let a = fget::<B, F32>(b, rs1)?;
+    let c = fget::<B, F32>(b, rs2)?;
+    let a64 = b.fcvt_ff::<F32, F64>(a, 0);
+    let c64 = b.fcvt_ff::<F32, F64>(c, 0);
+    let v = b.fmul::<F64>(a64, c64);
+    fput::<B, F64>(b, rd, v)?;
+    Ok(())
+}
+
+/// 条件付き f レジスタコピーの共通処理。`t` が真なら rs2 の値を
+/// rd に写し、偽なら rd を保つ。
+fn fsel<B: Backend, F: Width>(b: &mut B, rd: u8, rs2: u8, t: B::B) -> Result<(), B::Exit> {
+    let y = fget::<B, F>(b, rs2)?;
+    let cur = fget::<B, F>(b, rd)?;
+    let v = b.select::<F>(t, y, cur);
+    fput::<B, F>(b, rd, v)
+}
+
+/// FMOVscc/FMOVdcc。整数条件コード（xcc=0 で ICC、1 で XCC）で
+/// 条件評価して転送する。
+/// Ref: SPEC-SPARC-V9 §FMOVcc.
+fn fmovcc_common<B: Backend, F: Width>(b: &mut B, rd: u8, cond: u8, xcc: u8, rs2: u8) -> Flow<B> {
+    fp_check(b)?;
+    let val = cond_val_cc(b, cond, xcc != 0);
+    let zero = b.konst::<W64>(0);
+    let t = b.cmp::<W64>(Cmp::Ne, val, zero);
+    fsel::<B, F>(b, rd, rs2, t)
+}
+
+/// FMOVsfcc/FMOVdfcc。浮動小数点条件コードで評価して転送する。
+/// Ref: SPEC-SPARC-V9 §FMOVfcc.
+fn fmovfcc_common<B: Backend, F: Width>(b: &mut B, rd: u8, fcond: u8, fcc: u8, rs2: u8) -> Flow<B> {
+    fp_check(b)?;
+    let val = cond_val_f(b, fcond, fcc);
+    let zero = b.konst::<W64>(0);
+    let t = b.cmp::<W64>(Cmp::Ne, val, zero);
+    fsel::<B, F>(b, rd, rs2, t)
+}
+
+/// FMOVrs/FMOVrd。整数レジスタ rs1 を rcond で 0 と比較して転送する。
+/// Ref: SPEC-SPARC-V9 §FMOVr.
+fn fmovr_common<B: Backend, F: Width>(b: &mut B, rd: u8, rs1: u8, rcond: u8, rs2: u8) -> Flow<B> {
+    fp_check(b)?;
+    let x = read(b, Gpr(rs1));
+    let t = rcond_cmp(b, x, rcond);
+    fsel::<B, F>(b, rd, rs2, t)
+}
+
+/// LDF。32 ビットを f レジスタへ読む。
+/// Ref: SPEC-SPARC-V8 (Version 8) §LDF.
+fn ldf<B: Backend>(b: &mut B, fd: u8, rs1: Gpr, s: Src2) -> Flow<B> {
+    fp_check(b)?;
+    let addr = eff_addr(b, rs1, s);
+    let v: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+    let w = b.zext::<W32, W64>(v);
+    b.set(Fpr(fd).state(), w);
+    Ok(())
+}
+
+/// LDDF。64 ビットを読み、上位ワードを偶数側（fd）、下位を fd+1
+/// のスロットへ置く。
+/// Ref: SPEC-SPARC-V8 (Version 8) §LDDF.
+fn lddf<B: Backend>(b: &mut B, fd: u8, rs1: Gpr, s: Src2) -> Flow<B> {
+    fp_check(b)?;
+    let addr = eff_addr(b, rs1, s);
+    let v: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    fputw64(b, fd, v)
+}
+
+/// STF。f レジスタの下位 32 ビットを書き出す。
+/// Ref: SPEC-SPARC-V8 (Version 8) §STF.
+fn stf<B: Backend>(b: &mut B, fs: u8, rs1: Gpr, s: Src2) -> Flow<B> {
+    fp_check(b)?;
+    let addr = eff_addr(b, rs1, s);
+    let v: B::V<W64> = b.get(Fpr(fs).state());
+    let w = b.trunc::<W64, W32>(v);
+    b.store::<W32>(addr, w, DATA_WRITE)?;
+    Ok(())
+}
+
+/// STDF。スロット 2 個を連結した 64 ビットを書き出す。
+/// Ref: SPEC-SPARC-V8 (Version 8) §STDF.
+fn stdf<B: Backend>(b: &mut B, fs: u8, rs1: Gpr, s: Src2) -> Flow<B> {
+    fp_check(b)?;
+    let addr = eff_addr(b, rs1, s);
+    let v = fgetw64(b, fs)?;
+    b.store::<W64>(addr, v, DATA_WRITE)?;
+    Ok(())
+}
+
+/// LDFSR/LDXFSR。メモリから FSR を読む（ldfsr は 32 ビット、
+/// V9 の ldxfsr は 64 ビット）。
+/// Ref: SPEC-SPARC-V8 (Version 8) §LDFSR; SPEC-SPARC-V9 §LDXFSR.
+fn ldfsr<B: Backend>(b: &mut B, rs1: Gpr, s: Src2, wide: bool) -> Flow<B> {
+    fp_check(b)?;
+    let addr = eff_addr(b, rs1, s);
+    if wide {
+        let v: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+        b.set(fsr_ref(), v);
+    } else {
+        let v: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
+        let w = b.zext::<W32, W64>(v);
+        // V9 の LDFSR は FSR[63:32]（fcc1-fcc3）を更新しない。
+        let val = if b.param::<super::Word64Param>() {
+            let cur = b.get(fsr_ref());
+            let keep = b.konst::<W64>(0xffff_ffff_0000_0000);
+            let upper = b.and::<W64>(cur, keep);
+            b.or::<W64>(w, upper)
+        } else {
+            w
+        };
+        b.set(fsr_ref(), val);
+    }
+    Ok(())
+}
+
+/// STFSR/STXFSR。FSR をメモリへ書く。
+/// Ref: SPEC-SPARC-V8 (Version 8) §STFSR; SPEC-SPARC-V9 §STXFSR.
+fn stfsr<B: Backend>(b: &mut B, rs1: Gpr, s: Src2, wide: bool) -> Flow<B> {
+    fp_check(b)?;
+    let addr = eff_addr(b, rs1, s);
+    let v = b.get(fsr_ref());
+    if wide {
+        b.store::<W64>(addr, v, DATA_WRITE)?;
+    } else {
+        let w = b.trunc::<W64, W32>(v);
+        b.store::<W32>(addr, w, DATA_WRITE)?;
+    }
     Ok(())
 }
 
@@ -1916,6 +2322,75 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Flow<B> {
         | Insn::Saved
         | Insn::Restored
         | Insn::Flushw => nop(b),
+        // FP ロード/ストア。オペランドは (fd, rs1, src2)。
+        Insn::Ldf => ldf(b, o[0] as u8, Gpr(o[1] as u8), Src2::Reg(Gpr(o[2] as u8))),
+        Insn::LdfI => ldf(b, o[0] as u8, Gpr(o[1] as u8), Src2::Imm(sext13(o[2]))),
+        Insn::Lddf => lddf(b, o[0] as u8, Gpr(o[1] as u8), Src2::Reg(Gpr(o[2] as u8))),
+        Insn::LddfI => lddf(b, o[0] as u8, Gpr(o[1] as u8), Src2::Imm(sext13(o[2]))),
+        Insn::Stf => stf(b, o[0] as u8, Gpr(o[1] as u8), Src2::Reg(Gpr(o[2] as u8))),
+        Insn::StfI => stf(b, o[0] as u8, Gpr(o[1] as u8), Src2::Imm(sext13(o[2]))),
+        Insn::Stdf => stdf(b, o[0] as u8, Gpr(o[1] as u8), Src2::Reg(Gpr(o[2] as u8))),
+        Insn::StdfI => stdf(b, o[0] as u8, Gpr(o[1] as u8), Src2::Imm(sext13(o[2]))),
+        // FSR のロード/ストア。オペランドは (rs1, src2)。
+        Insn::Ldfsr => ldfsr(b, Gpr(o[0] as u8), Src2::Reg(Gpr(o[1] as u8)), false),
+        Insn::LdfsrI => ldfsr(b, Gpr(o[0] as u8), Src2::Imm(sext13(o[1])), false),
+        Insn::Ldxfsr => ldfsr(b, Gpr(o[0] as u8), Src2::Reg(Gpr(o[1] as u8)), true),
+        Insn::LdxfsrI => ldfsr(b, Gpr(o[0] as u8), Src2::Imm(sext13(o[1])), true),
+        Insn::Stfsr => stfsr(b, Gpr(o[0] as u8), Src2::Reg(Gpr(o[1] as u8)), false),
+        Insn::StfsrI => stfsr(b, Gpr(o[0] as u8), Src2::Imm(sext13(o[1])), false),
+        Insn::Stxfsr => stfsr(b, Gpr(o[0] as u8), Src2::Reg(Gpr(o[1] as u8)), true),
+        Insn::StxfsrI => stfsr(b, Gpr(o[0] as u8), Src2::Imm(sext13(o[1])), true),
+        // FPop1 単項形。オペランドは (fd, fs2)。
+        Insn::Fmovs => fmovs(b, o[0] as u8, o[1] as u8),
+        Insn::Fmovd => fmovd(b, o[0] as u8, o[1] as u8),
+        Insn::Fnegs | Insn::Fnegd => fsgn(b, o[0] as u8, o[1] as u8, true),
+        Insn::Fabss | Insn::Fabsd => fsgn(b, o[0] as u8, o[1] as u8, false),
+        Insn::Fsqrts => fsqrt::<B, F32>(b, o[0] as u8, o[1] as u8),
+        Insn::Fsqrtd => fsqrt::<B, F64>(b, o[0] as u8, o[1] as u8),
+        Insn::Fitos => i2f_common::<B, F32>(b, o[0] as u8, o[1] as u8, false),
+        Insn::Fitod => i2f_common::<B, F64>(b, o[0] as u8, o[1] as u8, false),
+        Insn::Fxtos => i2f_common::<B, F32>(b, o[0] as u8, o[1] as u8, true),
+        Insn::Fxtod => i2f_common::<B, F64>(b, o[0] as u8, o[1] as u8, true),
+        Insn::Fstoi => f2i_common::<B, F32>(b, o[0] as u8, o[1] as u8, false),
+        Insn::Fdtoi => f2i_common::<B, F64>(b, o[0] as u8, o[1] as u8, false),
+        Insn::Fstox => f2i_common::<B, F32>(b, o[0] as u8, o[1] as u8, true),
+        Insn::Fdtox => f2i_common::<B, F64>(b, o[0] as u8, o[1] as u8, true),
+        Insn::Fstod => f2f_common::<B, F32, F64>(b, o[0] as u8, o[1] as u8),
+        Insn::Fdtos => f2f_common::<B, F64, F32>(b, o[0] as u8, o[1] as u8),
+        // FPop1 二項形。オペランドは (fd, fs1, fs2)。
+        Insn::Fadds => fp3::<B, F32>(b, o[0] as u8, o[1] as u8, o[2] as u8, Fp3::Add),
+        Insn::Faddd => fp3::<B, F64>(b, o[0] as u8, o[1] as u8, o[2] as u8, Fp3::Add),
+        Insn::Fsubs => fp3::<B, F32>(b, o[0] as u8, o[1] as u8, o[2] as u8, Fp3::Sub),
+        Insn::Fsubd => fp3::<B, F64>(b, o[0] as u8, o[1] as u8, o[2] as u8, Fp3::Sub),
+        Insn::Fmuls => fp3::<B, F32>(b, o[0] as u8, o[1] as u8, o[2] as u8, Fp3::Mul),
+        Insn::Fmuld => fp3::<B, F64>(b, o[0] as u8, o[1] as u8, o[2] as u8, Fp3::Mul),
+        Insn::Fdivs => fp3::<B, F32>(b, o[0] as u8, o[1] as u8, o[2] as u8, Fp3::Div),
+        Insn::Fdivd => fp3::<B, F64>(b, o[0] as u8, o[1] as u8, o[2] as u8, Fp3::Div),
+        Insn::Fsmuld => fsmuld(b, o[0] as u8, o[1] as u8, o[2] as u8),
+        // FCMP。オペランドは (fccn, fs1, fs2)。fcmpE も fcc を書くだけ。
+        Insn::Fcmps | Insn::Fcmpes => fcmp_common::<B, F32>(b, o[1] as u8, o[2] as u8, o[0] as u8),
+        Insn::Fcmpd | Insn::Fcmped => fcmp_common::<B, F64>(b, o[1] as u8, o[2] as u8, o[0] as u8),
+        // V9 の FMOVcc/FMOVfcc。オペランドは (fd, cond, cc, fs2)。
+        Insn::Fmovscc => fmovcc_common::<B, F32>(b, o[0] as u8, o[1] as u8, o[2] as u8, o[3] as u8),
+        Insn::Fmovdcc => fmovcc_common::<B, F64>(b, o[0] as u8, o[1] as u8, o[2] as u8, o[3] as u8),
+        Insn::Fmovsfcc => {
+            fmovfcc_common::<B, F32>(b, o[0] as u8, o[1] as u8, o[2] as u8, o[3] as u8)
+        }
+        Insn::Fmovdfcc => {
+            fmovfcc_common::<B, F64>(b, o[0] as u8, o[1] as u8, o[2] as u8, o[3] as u8)
+        }
+        // FMOVr。オペランドは (fd, rs1, rcond, fs2)。rcond 0/4 は予約。
+        Insn::Fmovrs | Insn::Fmovrd => {
+            let rcond = o[2] as u8;
+            if !matches!(rcond, 1 | 2 | 3 | 5 | 6 | 7) {
+                return Err(unimp(b, 0));
+            }
+            if matches!(insn, Insn::Fmovrs) {
+                fmovr_common::<B, F32>(b, o[0] as u8, o[1] as u8, rcond, o[3] as u8)
+            } else {
+                fmovr_common::<B, F64>(b, o[0] as u8, o[1] as u8, rcond, o[3] as u8)
+            }
+        }
         // ASR。読み出し形のオペランドは rd、書き込み形は (rs1, src2)。
         Insn::Rdy => rdy(b, Gpr(o[0] as u8)),
         Insn::Wry => wry(b, Gpr(o[0] as u8), Src2::Reg(Gpr(o[1] as u8))),
