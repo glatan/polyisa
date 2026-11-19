@@ -10,7 +10,7 @@
 //! 決める（00→2B、01/10→4B、11→6B）。`svc`（主オペコード 0x0a）で
 //! `TrapHandler` へ委譲し、Handled なら pc を命令長分進める。
 //! データ・命令ともにビッグエンディアン固定。スタックポインタは r15。
-//! Ref: SPEC-S390-ZARCH-POP (SA22-7832-13), SPEC-S390-ABI.
+//! Ref: SPEC-S390-ZARCH-POP (SA22-7832-14), SPEC-S390-ABI.
 
 use polyisa_engine::bare::BareEnv;
 use polyisa_engine::interp::{Ctrl, InterpExit};
@@ -199,7 +199,7 @@ fn step_ex(
 }
 
 /// 1 命令ぶんのフェッチ・解読・意味論と `svc` 境界の解決。
-// Ref: SPEC-S390-ZARCH-POP (SA22-7832-13).
+// Ref: SPEC-S390-ZARCH-POP (SA22-7832-14).
 fn step_s390(
     env: &mut BareEnv,
     sys: &mut impl TrapHandler,

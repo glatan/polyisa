@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! s390/zArchitecture（ESA/390 を含むユーザーモード面）の ISADL 記述。
 
-// Ref: SPEC-S390-ZARCH-POP (SA22-7832-13), SPEC-S390-ESA390-POP (SA22-7201-08).
+// Ref: SPEC-S390-ZARCH-POP (SA22-7832-14), SPEC-S390-ESA390-POP (SA22-7201-08).
 include!("spec/zarch.rs");
 
 fn main() {

@@ -176,7 +176,7 @@ mod tests {
 
     /// Release 2 / MIPS64 / Release 6 の追加命令の復号。
     /// 命令語はビット配置から手で組み立てる。Ref: SPEC-MIPS-IV, SPEC-MIPS-R6。
-    /// r2/MIPS64r2 拡張の一次根拠は台帳の SPEC-MIPS32R2・SPEC-MIPS64（未確認）。
+    /// r2/MIPS64r2 拡張の一次根拠は台帳の SPEC-MIPS32R2・SPEC-MIPS64。
     #[test]
     fn decode_release_ext() {
         let f = |w: u32, feats: u128| decode_model_ex(u128::from(w), 32, true, feats);

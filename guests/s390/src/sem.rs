@@ -14,7 +14,7 @@
 //! 出典は SPEC-S390-ZARCH-POP（SA22-7832）と SPEC-S390-ESA390-POP。
 //! DFP・HFP・10 進演算は範囲外で Unimplemented に落とす（GAP。
 //! lib.rs の説明を参照）。
-// Ref: SPEC-S390-ZARCH-POP (SA22-7832-13), SPEC-S390-ESA390-POP (SA22-7201-08).
+// Ref: SPEC-S390-ZARCH-POP (SA22-7832-14), SPEC-S390-ESA390-POP (SA22-7201-08).
 
 use polyisa_mem::{Access, AccessKind, Align, Endian};
 use polyisa_sem::{Backend, Cmp, ExceptionKind, Flow, GuestException, StateRef, W8, W16, W32, W64};

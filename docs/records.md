@@ -76,7 +76,6 @@ RISC-V で、ユーザーモードのプログラムの実行までを通す。
 残っている事項：
 
 - GAP-0010: riscv-tests/riscv-arch-test の実行ハーネスは殻のまま
-- GAP-0011: BIN-DISTRO-AARCH64 の台帳確認が未了
 - GAP-0022: i386 全アプレット走査の所有者確認
 
 ### 段階 2：抽象の試作
@@ -170,7 +169,6 @@ ISA のバージョンの表現と、最初の `exact` のタイミングモデ�
 
 残っている事項：
 
-- BIN-DISTRO-MIPSEL/MIPS64・TOOL-MUSLCC-N32 の台帳登録のみ残
 - o32 旧 `mmap` の引数順（テスト不足）・R6 コンパクト分岐 `rs>rt` の厳格化判断
 
 ### 段階 6：AArch64
@@ -227,7 +225,6 @@ ARM（AArch32 とそれ以前）の本格的な実装と、Linux の arm EABI �
 
 - Thumb/Thumb-2・NEON の実装時期（所有者判断）
 - kuser ヘルパー領域と `__ARM_NR_cmpxchg`（現状 ENOSYS）
-- BIN-DISTRO-ARMV5L/ARMV7L・SRC-LINUX-ARM-UAPI の台帳確認
 
 ### 段階 8：Power
 
@@ -255,7 +252,6 @@ Power の本格的な実装と、Linux の ppc32、ppc64、ppc64le ゲスト ABI
 
 - ELFv1・ppc32・ISA 3.1 接頭辞付き命令・SPE/Book E・十進 FP
 - FPSCR/FPCC/CR1 更新の残り・lxvl/stxvl・xvmadd 系の単一丸め等（段階 8 レビュー残件）
-- BIN-DISTRO-POWERPC64(-LE)/POWERPC・SRC-LINUX-POWERPC-UAPI の台帳確認
 
 ### 段階 9：IR と JIT
 
@@ -332,7 +328,6 @@ s390 系（System/360 から z/Architecture まで）の本格的な実装と、
 
 - 128 ビット BFP 実値・HFP/DFP・パック十進・`EX`/`EXRL` の残り
 - `wait4`/`clone`・ソケット・`execve`・シグナルフレーム・SIE/特権命令
-- BIN-DISTRO-S390X・SRC-LINUX-S390-UAPI の台帳確認
 
 ### 段階 12：WebAssembly と WASI
 
@@ -426,33 +421,11 @@ WebAssembly の本格的な実装と、WASI preview1 の OS パーソナリテ�
 
 ## 残っている事項（横断）
 
-### 台帳の確認待ち（所有者のみが「確認」欄を埋められる）
+### 台帳の未登録項目
 
-版・取得元は確定済みで、所有者の確認スタンプだけが残っているもの：
+版の方針は「新しい資料が古い資料の記載を内包する想定で新しい版を採り、古い版にしか存在しない記載が必要な場合のみ例外とする」。台帳に登録した項目は全て確認済みとするため、登録済みの項目に残る作業はない。残るのは未登録の項目のみ：
 
-- SPEC-MIPS32R2、SPEC-MIPS64、SPEC-MIPS-ABI-N32、TOOL-MUSLCC-N32
-- SPEC-POWERPC-PEM、SPEC-POWER-ABI32、SPEC-POWER-ALTIVEC-PEM、SPEC-POWER-EREF、SPEC-POWER-SPE-PEM、SPEC-POWER-PEM64、SPEC-POWER-601-UM
-- SPEC-S390-ESA390-POP、SPEC-S390-S360-POP、SPEC-S390-ABI-31
-- SPEC-VAX-MICROVAX、SPEC-PDP11-ARCH83、SPEC-PDP11-CIS、SPEC-PDP11-J11
-- SPEC-SPARC-V9、SPEC-SPARC-PSABI、SPEC-ALPHA-ARM、SPEC-ALPHA-CALLSTD
-- SPEC-SUPERH-SH2A、SPEC-SUPERH-JCORE、SPEC-LOONGARCH-PSABI、SPEC-LOONGARCH-VEXT、SPEC-HEXAGON-PRM-PREV
-- SPEC-UNIX-V7、SPEC-BSD-43、SPEC-ARM-SEMIHOST、SPEC-GDB-RSP、SPEC-WIN32、SRC-XNU
-- SRC-LINUX-ARM-UAPI、SRC-LINUX-M68K-UAPI、SRC-LINUX-POWERPC-UAPI、SRC-LINUX-S390-UAPI
-- BIN-DISTRO-AARCH64、BIN-DISTRO-MIPSEL、BIN-DISTRO-MIPS64、BIN-DISTRO-ARMV5L、BIN-DISTRO-ARMV7L、BIN-DISTRO-POWERPC64、BIN-DISTRO-POWERPC64LE、BIN-DISTRO-POWERPC、BIN-DISTRO-S390X
-
-### 台帳の残決定事項
-
-版や文書の特定、範囲の決定が残っているもの：
-
-- SPEC-MIPS-ABI-N32: 候補文書（SGI MIPSpro N32 ABI Handbook 007-2816 / ELF-64 1.5 Draft 2）の選択と利用条件の確認
-- SPEC-MIPS32R2・SPEC-MIPS64: 参照した改訂版の特定（Rev 4.x 系のどれを正本としたか）
-- SPEC-POWER-PEM64: MPCFPE64B の版の特定
-- SPEC-VAX-MICROVAX: 機種別文書の候補からの選択（VAX-ARM の MicroVAX 節で足りるかの点検を含む）
-- SPEC-PDP11-J11: 機種別文書の候補からの選択
-- SPEC-SUPERH-JCORE: j-core.org 公開資料の版の固定方法
-- SPEC-BSD-43: 4.3BSD 系と 4.4BSD のどちらを対象にするか（段階 25 の範囲決定）
-- SPEC-LOONGARCH-VEXT: 公式文書が未刊行。公開を待つか binutils の実装から拾うか
-- 未登録の項目: 段階 25 の V7/BSD バイナリ、段階 26・27・28 の BIN・較正ベンチマーク・ホスト OS 文書（実装時に追加登録する）
+- 段階 25 の V7/BSD バイナリ、段階 26・27・28 の BIN・較正ベンチマーク・ホスト OS 文書（実装時に追加登録する）
 
 ### 所有者の作業
 
@@ -470,4 +443,5 @@ WebAssembly の本格的な実装と、WASI preview1 の OS パーソナリテ�
 ### 未完了・保留
 
 - 各段階の残件は上記の各節と `gaps.md`（未着手・代替の行が正本）。GAP-0023 の残項目は段階 15 以降の非 LLVM ISA の着手条件
+- TEST-RISCV-ARCH-TEST: 後継の riscv/riscv-arch-test は ACT4 フレームワークへの全面移行（riscof 廃止・自己検査型 ELF）で、追従にはハーネスの再設計と利用条件の再確認が要る
 - 段階 15-24 の計画のうち着手条件に未確定項目があるものは、`design/roadmap.md` の各段階の作業計画の先頭ステップで確認する

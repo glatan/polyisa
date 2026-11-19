@@ -13,7 +13,7 @@
 //
 // 出典は SPEC-S390-ZARCH-POP（SA22-7832）と SPEC-S390-ESA390-POP
 // （SA22-7201）。ESA/390 の命令面は bare 実行で併せてカバーする。
-// Ref: SPEC-S390-ZARCH-POP (SA22-7832-13), SPEC-S390-ESA390-POP (SA22-7201-08).
+// Ref: SPEC-S390-ZARCH-POP (SA22-7832-14), SPEC-S390-ESA390-POP (SA22-7201-08).
 
 use polyisa_isadl::model::*;
 use polyisa_isadl::pattern::Pattern;

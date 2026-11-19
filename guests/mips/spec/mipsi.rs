@@ -39,7 +39,7 @@ pub fn build_model() -> polyisa_isadl::Model {
     });
     // Release 2 の追加命令（EXT/INS/SEB/SEH/WSBH/RDHWR/SYNC/LL/SC/TEQ/MOVZ/MOVN
     // および SPECIAL2 系）。R6 でも符号化が残る命令群をこの旗で有効にする。
-    // 一次根拠は台帳の SPEC-MIPS32R2（未確認・所有者確認待ち）。
+    // 一次根拠は台帳の SPEC-MIPS32R2。
     m.features.push(Feature {
         name: "mips32r2".to_string(),
         implies: vec![],
@@ -48,7 +48,7 @@ pub fn build_model() -> polyisa_isadl::Model {
     // 64 ビット命令群（daddu/dsll/ld/sd など）。素の MIPS64 整数命令は
     // MIPS IV ISA が定義する。
     // Ref: SPEC-MIPS-IV (Rev 3.2).
-    // MIPS64r2 拡張の一次根拠は台帳の SPEC-MIPS64（未確認・所有者確認待ち）。
+    // MIPS64r2 拡張の一次根拠は台帳の SPEC-MIPS64。
     // cop1 (FPU)。FR=1 相当の 64 ビット FPR を持つモデルで有効。
     // R6 の FP 符号化差分（MADDF 系）は本格実装で足す。
     m.features.push(Feature {

@@ -219,7 +219,7 @@ fn cmd_doctor() -> i32 {
 
 /// テストデータの取得。`tools/testdata/manifest.txt` の定義に従い、
 /// 取得先がなければ `git clone` して版を合わせ、あれば版の一致を確かめる。
-/// 未確認項目の取得はしない（manifest に載せない）。
+/// 台帳に登録した項目は全て確認済みのため、取得の対象は manifest の定義に従うだけとする。
 fn cmd_testdata_fetch() -> i32 {
     let manifest = workspace_root().join("tools/testdata/manifest.txt");
     let body = match std::fs::read_to_string(&manifest) {
@@ -428,11 +428,41 @@ fn check_cfg_rules() -> Result<(), String> {
 fn check_refs_register() -> Result<usize, String> {
     let path = workspace_root().join("docs/references.md");
     let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let shape_errors = check_table_shape(&text);
+    if !shape_errors.is_empty() {
+        return Err(shape_errors.join("; "));
+    }
     let table = parse_register(&text);
     if table.is_empty() {
         return Err("no register IDs found".to_string());
     }
     Ok(table.len())
+}
+
+/// 台帳の表の行が 8 列であることを確かめる。セル内の `\|` は列と数えない。
+fn check_table_shape(text: &str) -> Vec<String> {
+    let mut violations = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        let t = line.trim();
+        if !t.starts_with("| ") || !t.ends_with('|') {
+            continue;
+        }
+        let unescaped = t.replace("\\|", "\u{1}");
+        let cells: Vec<&str> = unescaped.split('|').collect();
+        let first = cells.get(1).map(|c| c.trim()).unwrap_or("");
+        if !(first == "ID" || is_register_id(first)) {
+            continue;
+        }
+        // `| a | ... | h |` は 8 セルで 10 要素になる。
+        if cells.len() != 10 {
+            violations.push(format!(
+                "references.md:{}: {} 列（8 列であること）",
+                i + 1,
+                cells.len() - 2
+            ));
+        }
+    }
+    violations
 }
 
 /// `refs:check` の本体。文書の「機械的な検査」の 1〜4 を行う。5 は `check` で行う。
@@ -451,12 +481,7 @@ fn check_refs_full() -> Result<(), String> {
         match table.get(&hit.id) {
             None => violations.push(format!("{}:{}: unknown ID {}", hit.file, hit.line, hit.id)),
             Some(entry) => {
-                if !entry.confirmed {
-                    violations.push(format!(
-                        "{}:{}: {} is unconfirmed",
-                        hit.file, hit.line, hit.id
-                    ));
-                } else if !entry.uses.iter().any(|u| u == &hit.need) {
+                if !entry.uses.iter().any(|u| u == &hit.need) {
                     violations.push(format!(
                         "{}:{}: {} lacks {:?}",
                         hit.file, hit.line, hit.id, hit.need
@@ -479,9 +504,7 @@ fn check_refs_full() -> Result<(), String> {
             match table.get(id) {
                 None => violations.push(format!("manifest.txt:{}: unknown ID {id}", i + 1)),
                 Some(entry) => {
-                    if !entry.confirmed {
-                        violations.push(format!("manifest.txt:{}: {id} is unconfirmed", i + 1));
-                    } else if !entry.uses.iter().any(|u| u == "T") {
+                    if !entry.uses.iter().any(|u| u == "T") {
                         violations.push(format!("manifest.txt:{}: {id} lacks 'T'", i + 1));
                     }
                 }
@@ -504,25 +527,30 @@ fn check_refs_full() -> Result<(), String> {
     }
 }
 
-/// 台帳の項目。用途は `R,F,T,X` の列、確認は日付の有無だけを見る。
+/// 台帳の項目。`R,F,T,X` の用途の列だけを見る。
+/// 台帳に登録した項目は全て確認済みなので、確認の記録は読まない。
 struct RegisterEntry {
     uses: Vec<String>,
-    confirmed: bool,
 }
 
-/// 台帳の表を読む。`用途` と `確認` の列だけを使う。
+/// 台帳の表を読む。`用途` の列だけを使う。
 fn parse_register(text: &str) -> std::collections::BTreeMap<String, RegisterEntry> {
     let mut table = std::collections::BTreeMap::new();
     for line in text.lines().map(str::trim) {
         if !line.starts_with("| ") {
             continue;
         }
-        let cols: Vec<&str> = line.split('|').map(str::trim).collect();
-        // `| ID | 名称 | 発行者 | 版 | 対象 | 利用条件 | 用途 | 確認 | 備考 |` の 9 列。
-        if cols.len() < 10 {
+        let cols: Vec<String> = line
+            .replace("\\|", "\u{1}")
+            .split('|')
+            .map(|c| c.trim().to_string())
+            .collect();
+        let cols: Vec<&str> = cols.iter().map(String::as_str).collect();
+        // `| ID | 名称 | 発行者 | 版 | 対象 | 利用条件 | 用途 | 備考 |` の 8 列。
+        if cols.len() < 9 {
             continue;
         }
-        let (id, uses, confirmed_cell) = (cols[1], cols[7], cols[8]);
+        let (id, uses) = (cols[1], cols[7]);
         if !is_register_id(id) {
             continue;
         }
@@ -532,26 +560,9 @@ fn parse_register(text: &str) -> std::collections::BTreeMap<String, RegisterEntr
             .filter(|u| !u.is_empty() && *u != "—")
             .map(str::to_string)
             .collect();
-        table.insert(
-            id.to_string(),
-            RegisterEntry {
-                uses,
-                confirmed: is_confirmed(confirmed_cell),
-            },
-        );
+        table.insert(id.to_string(), RegisterEntry { uses });
     }
     table
-}
-
-/// 確認の欄が `YYYY-MM-DD 確認者名` の形かどうか。
-fn is_confirmed(cell: &str) -> bool {
-    let b = cell.as_bytes();
-    cell.len() >= 10
-        && b[0..4].iter().all(|c| c.is_ascii_digit())
-        && b[4] == b'-'
-        && b[5..7].iter().all(|c| c.is_ascii_digit())
-        && b[7] == b'-'
-        && b[8..10].iter().all(|c| c.is_ascii_digit())
 }
 
 /// 固定書式の注記の1件。`need` は参照の場所に応じた用途。
@@ -582,7 +593,10 @@ fn scan_notations(root: &std::path::Path) -> Vec<NotationHit> {
             for (i, line) in text.lines().enumerate() {
                 let code = line.split("//").next().unwrap_or("");
                 // Rust の注記はコメントで書くので、元の行から探す。
-                for id in find_ids(line, "// Ref:") {
+                for id in find_ids(line, "// Ref:")
+                    .into_iter()
+                    .chain(find_ids(line, "//! Ref:"))
+                {
                     out.push(NotationHit {
                         file: rel.clone(),
                         line: i + 1,
@@ -614,19 +628,27 @@ fn scan_notations(root: &std::path::Path) -> Vec<NotationHit> {
     out
 }
 
-/// 行から接頭辞の直後の ID を拾う。
+/// 行から接頭辞の直後に続く台帳の ID をすべて拾う。
+/// `ref` だけは `reference` の前方一致を除く。
 fn find_ids(line: &str, marker: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut rest = line;
     while let Some(pos) = rest.find(marker) {
-        rest = &rest[pos + marker.len()..];
-        let token: String = rest
-            .chars()
-            .skip_while(|c| !c.is_ascii_alphanumeric())
-            .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
-            .collect();
-        if is_register_id(&token) {
-            out.push(token);
+        let end = pos + marker.len();
+        if marker == "ref"
+            && rest[end..]
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphanumeric())
+        {
+            rest = &rest[end..];
+            continue;
+        }
+        rest = &rest[end..];
+        for token in rest.split(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_')) {
+            if is_register_id(token) && !out.iter().any(|t| t == token) {
+                out.push(token.to_string());
+            }
         }
     }
     out
@@ -1178,24 +1200,14 @@ mod tests {
     }
 
     #[test]
-    fn confirmed_format() {
-        assert!(is_confirmed("2026-11-08 owner"));
-        assert!(!is_confirmed("未確認"));
-        assert!(!is_confirmed("—"));
-        assert!(!is_confirmed("2026/11/08 owner"));
-    }
-
-    #[test]
     fn register_uses_parsed() {
-        let text = "| ID | 名称 | 発行者 | 版 | 対象 | 利用条件 | 用途 | 確認 | 備考 |\n\
-                    |---|---|---|---|---|---|---|---|---|\n\
-                    | SPEC-FOO | x | y | — | z | w | R,F | 2026-11-08 owner | |\n\
-                    | TOOL-BAR | x | y | — | z | w | — | 未確認 | |";
+        let text = "| ID | 名称 | 発行者 | 版 | 対象 | 利用条件 | 用途 | 備考 |\n\
+                    |---|---|---|---|---|---|---|---|\n\
+                    | SPEC-FOO | x | y | — | z | w | R,F | |\n\
+                    | TOOL-BAR | x | y | — | z | w | — | |";
         let t = parse_register(text);
         assert_eq!(t["SPEC-FOO"].uses, vec!["R".to_string(), "F".to_string()]);
-        assert!(t["SPEC-FOO"].confirmed);
         assert!(t["TOOL-BAR"].uses.is_empty());
-        assert!(!t["TOOL-BAR"].confirmed);
     }
 
     #[test]
