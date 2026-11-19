@@ -86,10 +86,15 @@ pub fn run(
     )
 }
 
-/// 遅延スロットを持つ命令か。Bicc・CALL・JMPL が該当する。
-/// Ref: SPEC-SPARC-V8 (Version 8) §Control-Transfer Instructions.
+/// 遅延スロットを持つ命令か。Bicc・CALL・JMPL・V9 の RETURN が
+/// 該当する。
+/// Ref: SPEC-SPARC-V8 (Version 8) §Control-Transfer Instructions;
+/// SPEC-SPARC-V9 §RETURN.
 fn has_delay_slot(insn: Insn) -> bool {
-    matches!(insn, Insn::Bicc | Insn::Call | Insn::Jmpl | Insn::JmplI)
+    matches!(
+        insn,
+        Insn::Bicc | Insn::Call | Insn::Jmpl | Insn::JmplI | Insn::Return | Insn::ReturnI
+    )
 }
 
 /// 1 命令ぶんのフェッチ・解読・意味論。遅延スロットは分岐と同じ

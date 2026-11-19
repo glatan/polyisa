@@ -723,7 +723,7 @@ fn ticc_taken_sets_tt_and_traps() {
     // Z=1 で te は成立。trap 番号は 0x80 + ((rs1 + operand2) & 0x7f)。
     env.backend.set(sem::psr_ref(), 1 << 22);
     env.backend.set(Gpr(1).state(), 0x100);
-    let r = env.step(|b| sem::ticc(b, 1, Gpr(1), Src2::Imm(0x10)));
+    let r = env.step(|b| sem::ticc(b, 1, false, Gpr(1), Src2::Imm(0x10)));
     assert!(r.is_err());
     assert_eq!(env.backend.get(sem::tt_ref()), 0x90);
 }
@@ -733,7 +733,7 @@ fn ticc_uses_v9_trap_type_on_word64() {
     let mut env = env();
     // word64（V9）では trap type は 0x100 + N。
     env.backend.set_param::<polyisa_guest_sparc::Word64Param>(1);
-    let r = env.step(|b| sem::ticc(b, 8, Gpr(0), Src2::Imm(0x10)));
+    let r = env.step(|b| sem::ticc(b, 8, false, Gpr(0), Src2::Imm(0x10)));
     assert!(r.is_err());
     assert_eq!(env.backend.get(sem::tt_ref()), 0x110);
 }
@@ -753,7 +753,7 @@ fn ticc_not_taken_is_nop() {
     let mut env = env();
     // Z=0 で te は不成立。tt は変わらず例外も起きない。
     env.backend.set(sem::psr_ref(), 0);
-    env.step(|b| sem::ticc(b, 1, Gpr(1), Src2::Imm(0x10)))
+    env.step(|b| sem::ticc(b, 1, false, Gpr(1), Src2::Imm(0x10)))
         .unwrap();
     assert_eq!(env.backend.get(sem::tt_ref()), 0);
 }
@@ -822,4 +822,358 @@ fn ta_imm_decodes_and_traps() {
     let r = env.step(|b| sem::exec(b, insn, word, 0));
     assert!(r.is_err());
     assert_eq!(env.backend.get(sem::tt_ref()), 0x90);
+}
+
+// ---- V9 追加分（SP9）。word64 パラメータと v9 feature の組を使う。 ----
+
+const V9_FEATS: u128 =
+    polyisa_guest_sparc::FEAT_V7 | polyisa_guest_sparc::FEAT_V8 | polyisa_guest_sparc::FEAT_V9;
+
+fn dec_v9(word: u32) -> polyisa_guest_sparc::Insn {
+    polyisa_guest_sparc::decode_model_ex(u128::from(word), 32, true, V9_FEATS).unwrap()
+}
+
+#[test]
+fn v9_shiftx_uses_six_bit_count() {
+    let mut env = env();
+    env.backend.set_param::<polyisa_guest_sparc::Word64Param>(1);
+    env.backend.set(Gpr(1).state(), 1);
+    // sllx %g1, 40, %g2（op3=100101, i=1, x=1, shcnt6=40）。
+    let word: u32 =
+        (0b10 << 30) | (2 << 25) | (0b100101 << 19) | (1 << 14) | (1 << 13) | (1 << 12) | 40;
+    let insn = dec_v9(word);
+    assert_eq!(insn, polyisa_guest_sparc::Insn::SllxI);
+    env.step(|b| sem::exec(b, insn, word, 0)).unwrap();
+    assert_eq!(g(&mut env, 2), 1u64 << 40);
+    // srlx %g2, %g3(=20), %g4。レジスタ形は i=0, x=1, bits11-5=0。
+    env.backend.set(Gpr(3).state(), 20);
+    let word2: u32 = (0b10 << 30) | (4 << 25) | (0b100110 << 19) | (2 << 14) | (1 << 12) | 3;
+    let insn2 = dec_v9(word2);
+    assert_eq!(insn2, polyisa_guest_sparc::Insn::Srlx);
+    env.step(|b| sem::exec(b, insn2, word2, 0)).unwrap();
+    assert_eq!(g(&mut env, 4), 1u64 << 20);
+}
+
+#[test]
+fn v9_mulx_and_divx_use_full_width() {
+    let mut env = env();
+    env.backend.set_param::<polyisa_guest_sparc::Word64Param>(1);
+    env.backend.set(Gpr(1).state(), 0x1_0000_0002);
+    // mulx %g1, %g1, %g2。積の下位 64 ビット。
+    env.step(|b| sem::mulx(b, Gpr(2), Gpr(1), Src2::Reg(Gpr(1))))
+        .unwrap();
+    assert_eq!(g(&mut env, 2), 0x1_0000_0002u64.wrapping_mul(0x1_0000_0002));
+    // sdivx %g3, 2, %g4。-6 / 2 = -3。
+    env.backend.set(Gpr(3).state(), (-6i64) as u64);
+    env.step(|b| sem::sdivx(b, Gpr(4), Gpr(3), Src2::Imm(2)))
+        .unwrap();
+    assert_eq!(g(&mut env, 4), (-3i64) as u64);
+    // udivx の 0 除算は division_by_zero=0x28。
+    let r = env.step(|b| sem::udivx(b, Gpr(4), Gpr(3), Src2::Reg(Gpr(0))));
+    assert!(r.is_err());
+    assert_eq!(env.backend.get(sem::tt_ref()), 0x28);
+}
+
+#[test]
+fn v9_alu32_sign_extends_result() {
+    let mut env = env();
+    env.backend.set_param::<polyisa_guest_sparc::Word64Param>(1);
+    // V9 の 32 ビット演算は結果を符号拡張して rd に書く。
+    env.backend.set(Gpr(1).state(), 0xffff_ffff_ffff_ffff);
+    env.step(|b| sem::add(b, Gpr(2), Gpr(1), Src2::Imm(1)))
+        .unwrap();
+    assert_eq!(g(&mut env, 2), 0);
+    env.backend.set(Gpr(1).state(), 0x7fff_ffff);
+    env.step(|b| sem::add(b, Gpr(2), Gpr(1), Src2::Imm(1)))
+        .unwrap();
+    assert_eq!(g(&mut env, 2), 0xffff_ffff_8000_0000);
+}
+
+#[test]
+fn v9_addcc_updates_icc_and_xcc() {
+    let mut env = env();
+    env.backend.set_param::<polyisa_guest_sparc::Word64Param>(1);
+    // addcc %g1(-1), 1, %g2。32 ビット結果も 64 ビット結果も 0 で、
+    // ICC も XCC も Z と C が立つ（0b0101_0101 = 0x55）。
+    env.backend.set(Gpr(1).state(), 0xffff_ffff_ffff_ffff);
+    env.step(|b| sem::addcc(b, Gpr(2), Gpr(1), Src2::Imm(1)))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::ccr_ref()), 0x55);
+}
+
+#[test]
+fn v9_movcc_moves_on_condition() {
+    let mut env = env();
+    env.backend.set_param::<polyisa_guest_sparc::Word64Param>(1);
+    // movz %icc, %g2, %g1（bit18=1, cond=0001(z), i=0, cc=0, rs2=g2）。
+    // Z は %ccr の icc.z（bit2）。
+    let word: u32 = (0b10 << 30) | (1 << 25) | (0b101100 << 19) | (1 << 18) | (1 << 14) | 2;
+    let insn = dec_v9(word);
+    assert_eq!(insn, polyisa_guest_sparc::Insn::Movcc);
+    env.backend.set(sem::ccr_ref(), 1 << 2);
+    env.backend.set(Gpr(1).state(), 0xaaaa);
+    env.backend.set(Gpr(2).state(), 0xbeef);
+    env.step(|b| sem::exec(b, insn, word, 0)).unwrap();
+    assert_eq!(g(&mut env, 1), 0xbeef);
+    // Z が消えれば転送しない。
+    env.backend.set(sem::ccr_ref(), 0);
+    env.backend.set(Gpr(1).state(), 0xaaaa);
+    env.step(|b| sem::exec(b, insn, word, 0)).unwrap();
+    assert_eq!(g(&mut env, 1), 0xaaaa);
+    // movz %xcc（cc 桁=1）は xcc.z（bit6）を見る。
+    let wordx: u32 = word | (1 << 12);
+    let insnx = dec_v9(wordx);
+    assert_eq!(insnx, polyisa_guest_sparc::Insn::Movcc);
+    env.backend.set(sem::ccr_ref(), 1 << 6);
+    env.step(|b| sem::exec(b, insnx, wordx, 0)).unwrap();
+    assert_eq!(g(&mut env, 1), 0xbeef);
+}
+
+#[test]
+fn v9_movr_moves_on_register_condition() {
+    let mut env = env();
+    env.backend.set_param::<polyisa_guest_sparc::Word64Param>(1);
+    // movrz %g1, %g2, %g3（rcond=1）。rs1=0 なら転送する。
+    let word: u32 = (0b10 << 30) | (3 << 25) | (0b101111 << 19) | (1 << 14) | (1 << 10) | 2;
+    let insn = dec_v9(word);
+    assert_eq!(insn, polyisa_guest_sparc::Insn::Movr);
+    env.backend.set(Gpr(1).state(), 0);
+    env.backend.set(Gpr(2).state(), 0x7777);
+    env.backend.set(Gpr(3).state(), 0x1234);
+    env.step(|b| sem::exec(b, insn, word, 0)).unwrap();
+    assert_eq!(g(&mut env, 3), 0x7777);
+    // rs1 != 0 なら変わらない。
+    env.backend.set(Gpr(1).state(), 5);
+    env.backend.set(Gpr(3).state(), 0x1234);
+    env.step(|b| sem::exec(b, insn, word, 0)).unwrap();
+    assert_eq!(g(&mut env, 3), 0x1234);
+}
+
+#[test]
+fn v9_popc_counts_ones() {
+    let mut env = env();
+    env.backend.set_param::<polyisa_guest_sparc::Word64Param>(1);
+    // popc %g1, %g2（op3=101110, rs1=0, i=0）。
+    let word: u32 = (0b10 << 30) | (2 << 25) | (0b101110 << 19) | 1;
+    let insn = dec_v9(word);
+    assert_eq!(insn, polyisa_guest_sparc::Insn::Popc);
+    env.backend.set(Gpr(1).state(), 0xf0f0_f0f0_00ff_00ff);
+    env.step(|b| sem::exec(b, insn, word, 0)).unwrap();
+    assert_eq!(g(&mut env, 2), 32);
+}
+
+#[test]
+fn v9_casa_exchanges_on_match() {
+    let mut env = env();
+    env.backend.set_param::<polyisa_guest_sparc::Word64Param>(1);
+    env.backend.set(Gpr(1).state(), 0x600);
+    env.backend.set(Gpr(2).state(), 0xaaaa_bbbb); // 比較値
+    env.backend.set(Gpr(3).state(), 0x1111_2222); // 新値
+    env.step(|b| sem::st(b, Gpr(2), Gpr(1), Src2::Reg(Gpr(0))))
+        .unwrap();
+    // casa [%g1] 0x80, %g3, %g2（op3=111100, i=0, asi=0x80）。
+    let word: u32 = (0b11 << 30) | (2 << 25) | (0b111100 << 19) | (1 << 14) | (0x80 << 5) | 3;
+    let insn = dec_v9(word);
+    assert_eq!(insn, polyisa_guest_sparc::Insn::Casa);
+    env.step(|b| sem::exec(b, insn, word, 0)).unwrap();
+    // 一致したのでメモリは新値、rd には旧値が戻る。
+    env.step(|b| sem::ld(b, Gpr(4), Gpr(1), Src2::Reg(Gpr(0))))
+        .unwrap();
+    assert_eq!(g(&mut env, 4), 0x1111_2222);
+    assert_eq!(g(&mut env, 2), 0xaaaa_bbbb);
+    // 不一致ならメモリは変わらず rd に現値が戻る。
+    env.backend.set(Gpr(2).state(), 0xdead_beef);
+    env.step(|b| sem::exec(b, insn, word, 0)).unwrap();
+    env.step(|b| sem::ld(b, Gpr(4), Gpr(1), Src2::Reg(Gpr(0))))
+        .unwrap();
+    assert_eq!(g(&mut env, 4), 0x1111_2222);
+    assert_eq!(g(&mut env, 2), 0x1111_2222);
+}
+
+#[test]
+fn v9_casxa_exchanges_doubleword() {
+    let mut env = env();
+    env.backend.set_param::<polyisa_guest_sparc::Word64Param>(1);
+    env.backend.set(Gpr(1).state(), 0x700);
+    env.backend.set(Gpr(2).state(), 0x0123_4567_89ab_cdef);
+    env.backend.set(Gpr(3).state(), 0xdead_beef_cafe_f00d);
+    // メモリを st 2 発で用意する（ldx/stx は未実装）。
+    env.backend.set(Gpr(4).state(), 0x0123_4567);
+    env.step(|b| sem::st(b, Gpr(4), Gpr(1), Src2::Reg(Gpr(0))))
+        .unwrap();
+    env.backend.set(Gpr(4).state(), 0x89ab_cdef);
+    env.step(|b| sem::st(b, Gpr(4), Gpr(1), Src2::Imm(4)))
+        .unwrap();
+    // casxa [%g1] 0x80, %g3, %g2（op3=111110）。
+    let word: u32 = (0b11 << 30) | (2 << 25) | (0b111110 << 19) | (1 << 14) | (0x80 << 5) | 3;
+    let insn = dec_v9(word);
+    assert_eq!(insn, polyisa_guest_sparc::Insn::Casxa);
+    env.step(|b| sem::exec(b, insn, word, 0)).unwrap();
+    env.step(|b| sem::ld(b, Gpr(4), Gpr(1), Src2::Reg(Gpr(0))))
+        .unwrap();
+    assert_eq!(g(&mut env, 4), 0xdead_beef);
+    assert_eq!(g(&mut env, 2), 0x0123_4567_89ab_cdef);
+}
+
+#[test]
+fn v9_return_sets_npc() {
+    let mut env = env();
+    env.backend.set_param::<polyisa_guest_sparc::Word64Param>(1);
+    env.backend.set(Gpr(1).state(), 0x1230);
+    // return %g1 + 4（op3=111001, i=1）。rett と同じ op3 で非特権。
+    let word: u32 = (0b10 << 30) | (0b111001 << 19) | (1 << 14) | (1 << 13) | 4;
+    let insn = dec_v9(word);
+    assert_eq!(insn, polyisa_guest_sparc::Insn::ReturnI);
+    env.step(|b| sem::exec(b, insn, word, 0)).unwrap();
+    assert_eq!(env.backend.get(sem::npc_ref()), 0x1234);
+}
+
+#[test]
+fn v9_save_increments_cwp() {
+    let mut env = env();
+    env.backend.set_param::<polyisa_guest_sparc::Word64Param>(1);
+    // V9 では SAVE で CWP が増え、RESTORE で減る（V7/V8 とは逆）。
+    env.backend.set(sem::cwp_ref(), 3);
+    env.step(|b| sem::save(b, Gpr(16), Gpr(0), Src2::Reg(Gpr(0))))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::cwp_ref()), 4);
+    env.step(|b| sem::restore(b, Gpr(16), Gpr(0), Src2::Reg(Gpr(0))))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::cwp_ref()), 3);
+}
+
+#[test]
+fn v9_rdpr_traps_in_user_mode() {
+    let mut env = env();
+    env.backend.set_param::<polyisa_guest_sparc::Word64Param>(1);
+    // rdpr %tpc, %g1（op3=101010）。特権命令は
+    // privileged_opcode=0x11。
+    let word: u32 = (0b10 << 30) | (1 << 25) | (0b101010 << 19);
+    let insn = dec_v9(word);
+    assert_eq!(insn, polyisa_guest_sparc::Insn::Rdpr);
+    let r = env.step(|b| sem::exec(b, insn, word, 0));
+    assert!(r.is_err());
+    assert_eq!(env.backend.get(sem::tt_ref()), 0x11);
+}
+
+#[test]
+fn v9_tcc_imm8_forms() {
+    let mut env = env();
+    env.backend.set_param::<polyisa_guest_sparc::Word64Param>(1);
+    // ta %icc, %g0 + 0x90。icc 即値形で bit7 が立つ語。
+    // 即値は符号拡張後も 7 ビットに折れるので番号は 0x10 相当。
+    let word: u32 = (0b10 << 30) | (8 << 25) | (0b111010 << 19) | (1 << 13) | (1 << 7) | 0x10;
+    let insn = dec_v9(word);
+    assert_eq!(insn, polyisa_guest_sparc::Insn::TccI);
+    let r = env.step(|b| sem::exec(b, insn, word, 0));
+    assert!(r.is_err());
+    assert_eq!(env.backend.get(sem::tt_ref()), 0x110);
+    // ta %xcc, %g0 + 0x40。xcc 形（bit12=1）の 8 ビット即値。
+    let wordx: u32 = (0b10 << 30) | (8 << 25) | (0b111010 << 19) | (1 << 13) | (1 << 12) | 0x40;
+    let insnx = dec_v9(wordx);
+    assert_eq!(insnx, polyisa_guest_sparc::Insn::TccxI);
+    let rx = env.step(|b| sem::exec(b, insnx, wordx, 0));
+    assert!(rx.is_err());
+    assert_eq!(env.backend.get(sem::tt_ref()), 0x140);
+}
+
+#[test]
+fn v9_nop_insns_do_nothing() {
+    let mut env = env();
+    env.backend.set_param::<polyisa_guest_sparc::Word64Param>(1);
+    // membar #StoreStore|#StoreLoad（rs1=01111, i=1, mask=0b0001010）。
+    let word: u32 = (0b10 << 30) | (0b101000 << 19) | (0b01111 << 14) | (1 << 13) | 0b0001010;
+    let insn = dec_v9(word);
+    assert_eq!(insn, polyisa_guest_sparc::Insn::Membar);
+    env.step(|b| sem::exec(b, insn, word, 0)).unwrap();
+    // flushw も本モデルでは no-op。
+    let fw: u32 = (0b10 << 30) | (0b101011 << 19);
+    let insn2 = dec_v9(fw);
+    assert_eq!(insn2, polyisa_guest_sparc::Insn::Flushw);
+    env.step(|b| sem::exec(b, insn2, fw, 0)).unwrap();
+}
+
+#[test]
+fn v9_amask_drops_high_address_bits() {
+    let mut env = env();
+    env.backend.set_param::<polyisa_guest_sparc::Word64Param>(1);
+    // PSTATE.AM（TSTATE bit11）を立てると jmpl の飛び先と rd に
+    // 書く戻りの上位 32 ビットが落ちる。
+    env.backend.set(sem::tstate_ref(), 1 << 11);
+    env.backend.set(Gpr(1).state(), 0x1_0000_0200);
+    env.step(|b| sem::jmpl(b, Gpr(7), Gpr(1), Src2::Imm(0), 0x1_0000_0080))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::npc_ref()), 0x200);
+    assert_eq!(g(&mut env, 7), 0x80);
+    // AM が 0 なら全幅が残る。
+    env.backend.set(sem::tstate_ref(), 0);
+    env.step(|b| sem::jmpl(b, Gpr(7), Gpr(1), Src2::Imm(0), 0))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::npc_ref()), 0x1_0000_0200);
+}
+
+#[test]
+fn v9_save_aliases_caller_out_to_callee_in() {
+    let mut env = env();
+    env.backend.set_param::<polyisa_guest_sparc::Word64Param>(1);
+    // caller の %o0 に値を入れて save すると callee から %i0 に見える。
+    env.backend.set(Gpr(1).state(), 0x1234_5678);
+    env.step(|b| sem::or(b, Gpr(8), Gpr(1), Src2::Reg(Gpr(0))))
+        .unwrap();
+    env.step(|b| sem::save(b, Gpr(3), Gpr(0), Src2::Reg(Gpr(0))))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::cwp_ref()), 1);
+    env.step(|b| sem::or(b, Gpr(7), Gpr(24), Src2::Reg(Gpr(0))))
+        .unwrap();
+    assert_eq!(g(&mut env, 7), 0x1234_5678);
+    // callee の %o0 は caller の %o0 とは別のスロット。
+    env.step(|b| sem::or(b, Gpr(7), Gpr(8), Src2::Reg(Gpr(0))))
+        .unwrap();
+    assert_eq!(g(&mut env, 7), 0);
+    // restore で戻ると %o0 が読める。
+    env.step(|b| sem::restore(b, Gpr(3), Gpr(0), Src2::Reg(Gpr(0))))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::cwp_ref()), 0);
+    env.step(|b| sem::or(b, Gpr(7), Gpr(8), Src2::Reg(Gpr(0))))
+        .unwrap();
+    assert_eq!(g(&mut env, 7), 0x1234_5678);
+}
+
+#[test]
+fn v9_addcc_xcc_uses_64bit_result() {
+    let mut env = env();
+    env.backend.set_param::<polyisa_guest_sparc::Word64Param>(1);
+    // 64 ビットでは正、下位 32 ビットでは負の結果。xcc.n は 0、
+    // icc.n は 1 になる。
+    env.backend.set(Gpr(1).state(), 0x1_8000_0000);
+    env.step(|b| sem::addcc(b, Gpr(2), Gpr(1), Src2::Imm(0)))
+        .unwrap();
+    // icc = n z v c = 0b1000、xcc = 0b0000 → ccr = 0x08。
+    assert_eq!(env.backend.get(sem::ccr_ref()), 0x08);
+}
+
+#[test]
+fn v9_movfcc_moves_when_fcond_holds() {
+    let mut env = env();
+    env.backend.set_param::<polyisa_guest_sparc::Word64Param>(1);
+    // %fsr.fcc0 = 2（greater）。movfcc fg（fcond=6）, %fcc0 は成立。
+    env.backend.set(sem::fsr_ref(), 2 << 10);
+    env.backend.set(Gpr(5).state(), 0xdead_beef);
+    let word: u32 = (0b10 << 30) | (3 << 25) | (0b101100 << 19) | (6 << 14) | 5;
+    let insn = dec_v9(word);
+    assert_eq!(insn, polyisa_guest_sparc::Insn::Movfcc);
+    env.step(|b| sem::exec(b, insn, word, 0)).unwrap();
+    assert_eq!(g(&mut env, 3), 0xdead_beef);
+    // fcond=fe（9）は fcc0=2 では不成立なので rd は変わらない。
+    let word2: u32 = (0b10 << 30) | (4 << 25) | (0b101100 << 19) | (9 << 14) | 5;
+    let insn2 = dec_v9(word2);
+    env.step(|b| sem::exec(b, insn2, word2, 0)).unwrap();
+    assert_eq!(g(&mut env, 4), 0);
+}
+
+#[test]
+fn shift_imm32_rejects_reserved_bit5() {
+    // 32 ビットシフト即値形の bit5 は予約。1 が立つ語は解読しない。
+    let word: u32 = (0b10 << 30) | (2 << 25) | (0b100101 << 19) | (1 << 14) | (1 << 13) | 33;
+    assert!(polyisa_guest_sparc::decode_model_ex(u128::from(word), 32, false, V9_FEATS).is_none());
 }

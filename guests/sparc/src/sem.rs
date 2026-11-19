@@ -9,9 +9,9 @@
 //! 実行しない。遅延スロット内の例外の `in_delay_slot` 修正は
 //! 実行ループ側の責務で、ここでは `false` を置くだけである。
 //! 見える out/local/in は CWP と `nwindows` パラメータで
-//! レジスタファイル上の位置が変わる。SAVE は CWP を 1 減らし、
-//! RESTORE は 1 増やす。ウィンドウのあふれと不足は OS パーソナリティ
-//! が再現する（段階 15 の SP12）。
+//! レジスタファイル上の位置が変わる。SAVE は V7/V8 では CWP を
+//! 1 減らし、V9 では 1 増やす（RESTORE はその逆）。ウィンドウの
+//! あふれと不足は OS パーソナリティが再現する（段階 15 の SP12）。
 //! V7/V8 は整数レジスタの演算を 32 ビットで、V9 は 64 ビットで行う
 //! （`word64` パラメータ）。
 //!
@@ -132,7 +132,10 @@ fn nwindows<B: Backend>(b: &mut B) -> u64 {
 /// 見えるレジスタ番号を、CWP でずらした物理番号にする。0〜7 は
 /// グローバル。in は次のウィンドウの out への別名なので、物理位置は
 /// `cwp*16 + (reg-8)` を `nwindows*16` で折り返した場所にある。
-/// Ref: SPEC-SPARC-V8 (Version 8) §The Windowed Integer Registers.
+/// V9 は SAVE で CWP が増えるため、ウィンドウ番号の向きを反転して
+/// (`(nw-cwp) mod nw` を基底に) 同じ別名関係を保つ。
+/// Ref: SPEC-SPARC-V8 (Version 8) §The Windowed Integer Registers;
+///      SPEC-SPARC-V9 §The Windowed Integer Registers.
 fn phys_index<B: Backend>(b: &mut B, reg: u8) -> B::V<W32> {
     if reg < 8 {
         return b.konst::<W32>(u32::from(reg));
@@ -141,7 +144,15 @@ fn phys_index<B: Backend>(b: &mut B, reg: u8) -> B::V<W32> {
     let cwp: B::V<W64> = b.get(cwp_ref());
     let off = b.konst::<W64>(u64::from(reg) - 8);
     let sixteen = b.konst::<W64>(16);
-    let base = b.mul::<W64>(cwp, sixteen);
+    let base = if b.param::<super::Word64Param>() {
+        let nwv = b.konst::<W64>(nw);
+        let rem = b.urem::<W64>(cwp, nwv);
+        let rev = b.sub::<W64>(nwv, rem);
+        let rev = b.urem::<W64>(rev, nwv);
+        b.mul::<W64>(rev, sixteen)
+    } else {
+        b.mul::<W64>(cwp, sixteen)
+    };
     let sum = b.add::<W64>(base, off);
     let span = b.konst::<W64>(nw * 16);
     let wrapped = b.urem::<W64>(sum, span);
@@ -179,6 +190,19 @@ fn wmask<B: Backend>(b: &mut B, v: B::V<W64>) -> B::V<W64> {
     }
 }
 
+/// 32 ビット演算の結果を rd の値に包む。V7/V8 では下位 32 ビット、
+/// V9 では 32 ビット演算の結果を符号拡張して 64 ビットの rd に書く。
+/// アドレス計算など全幅演算は `wmask` の方を使う。
+/// Ref: SPEC-SPARC-V9 §Integer Register Usage.
+fn emask<B: Backend>(b: &mut B, v: B::V<W64>) -> B::V<W64> {
+    if b.param::<super::Word64Param>() {
+        let lo = b.trunc::<W64, W32>(v);
+        b.sext::<W32, W64>(lo)
+    } else {
+        wmask(b, v)
+    }
+}
+
 /// CWP を `delta` 進め、ウィンドウ枚数で折り返す。
 fn step_cwp<B: Backend>(b: &mut B, delta: u64) {
     let nw = nwindows(b);
@@ -196,7 +220,12 @@ fn const_w64<B: Backend>(b: &mut B, v: u64) -> B::V<W64> {
 
 /// simm13 の符号拡張。
 fn sext13(v: u64) -> i64 {
-    ((v as i64) << 51) >> 51
+    sext(v, 13)
+}
+
+/// n ビット即値の符号拡張。
+fn sext(v: u64, bits: u32) -> i64 {
+    ((v as i64) << (64 - bits)) >> (64 - bits)
 }
 
 const DATA_READ: Access = Access {
@@ -246,8 +275,17 @@ fn inv_b<B: Backend>(b: &mut B, c: B::B) -> B::B {
     b.cmp::<W64>(Cmp::Ne, s, z)
 }
 
-/// ICC の指定ビット（N=23, Z=22, V=21, C=20）が立っているか。
+/// ICC の指定ビットが立っているか。`n` は PSR ICC のビット番号
+/// （N=23, Z=22, V=21, C=20）。V9 では %ccr.icc の対応ビット
+/// （N=3, Z=2, V=1, C=0）を読む。
 fn icc_bit<B: Backend>(b: &mut B, n: u32) -> B::B {
+    if b.param::<super::Word64Param>() {
+        let ccr = b.get(ccr_ref());
+        let m = b.konst::<W64>(1u64 << (n - 20));
+        let masked = b.and::<W64>(ccr, m);
+        let zero = b.konst::<W64>(0);
+        return b.cmp::<W64>(Cmp::Ne, masked, zero);
+    }
     let psr = b.get(psr_ref());
     let m = b.konst::<W32>(1u32 << n);
     let masked = b.and::<W32>(psr, m);
@@ -256,7 +294,7 @@ fn icc_bit<B: Backend>(b: &mut B, n: u32) -> B::B {
 }
 
 /// ICC を更新する。N,Z は `res`（W32 の演算結果）から、V,C は引数の
-/// 判定値から取る。V9 の xcc への対応は後続ステップ（SP9）で扱う。
+/// 判定値から取る。V9 の XCC 更新は `set_cc` が併せて行う。
 /// Ref: SPEC-SPARC-V8 (Version 8) §Processor Status Register.
 fn set_icc<B: Backend>(b: &mut B, res: B::V<W32>, v: B::B, c: B::B) {
     let one = b.konst::<W32>(1);
@@ -286,9 +324,62 @@ fn set_icc<B: Backend>(b: &mut B, res: B::V<W32>, v: B::B, c: B::B) {
     b.set(psr_ref(), psr2);
 }
 
+/// cc 更新の共通処理。`res` は演算の全 64 ビット結果（rd に書く
+/// 符号拡張後の値ではなく、拡張前の生の結果）。`v32`/`c32` は
+/// 32 ビット演算の V/C、`v64`/`c64` は 64 ビット演算の V/C。
+/// V7/V8 では PSR ICC に 32 ビット側を書く。V9 では %ccr の
+/// ICC（下位 4 ビット、32 ビット演算の旗）と XCC（上位 4 ビット、
+/// 64 ビット演算の旗）を両方更新する。
+/// Ref: SPEC-SPARC-V9 §Condition Codes.
+fn set_cc<B: Backend>(b: &mut B, res: B::V<W64>, v32: B::B, c32: B::B, v64: B::B, c64: B::B) {
+    if !b.param::<super::Word64Param>() {
+        let res32 = b.trunc::<W64, W32>(res);
+        set_icc(b, res32, v32, c32);
+        return;
+    }
+    let one = b.konst::<W64>(1);
+    let zero = b.konst::<W64>(0);
+    // ICC の N,Z は下位 32 ビット、XCC の N,Z は全 64 ビットから。
+    let r32 = b.trunc::<W64, W32>(res);
+    let s31 = b.konst::<W32>(31);
+    let ns = b.shr_l::<W32>(r32, s31);
+    let one32 = b.konst::<W32>(1);
+    let n32 = b.and::<W32>(ns, one32);
+    let zero32 = b.konst::<W32>(0);
+    let isz32 = b.cmp::<W32>(Cmp::Eq, r32, zero32);
+    let z32 = b.select::<W32>(isz32, one32, zero32);
+    let s63 = b.konst::<W64>(63);
+    let ns64 = b.shr_l::<W64>(res, s63);
+    let n64 = b.and::<W64>(ns64, one);
+    let isz64 = b.cmp::<W64>(Cmp::Eq, res, zero);
+    let z64 = b.select::<W64>(isz64, one, zero);
+    let vv32 = b.select::<W64>(v32, one, zero);
+    let cc32 = b.select::<W64>(c32, one, zero);
+    let vv64 = b.select::<W64>(v64, one, zero);
+    let cc64 = b.select::<W64>(c64, one, zero);
+    let n32e = b.zext::<W32, W64>(n32);
+    let z32e = b.zext::<W32, W64>(z32);
+    // n64<<7 | z64<<6 | v64<<5 | c64<<4 | n32<<3 | z32<<2 | v32<<1 | c32
+    let ccr = b.konst::<W64>(0);
+    let or1 = |bb: &mut B, a: B::V<W64>, x: B::V<W64>, s: u64| -> B::V<W64> {
+        let sh = bb.konst::<W64>(s);
+        let t = bb.shl::<W64>(x, sh);
+        bb.or::<W64>(a, t)
+    };
+    let a = or1(b, ccr, n64, 7);
+    let a = or1(b, a, z64, 6);
+    let a = or1(b, a, vv64, 5);
+    let a = or1(b, a, cc64, 4);
+    let a = or1(b, a, n32e, 3);
+    let a = or1(b, a, z32e, 2);
+    let a = or1(b, a, vv32, 1);
+    let a = b.or::<W64>(a, cc32);
+    b.set(ccr_ref(), a);
+}
+
 /// 加算の共通処理。`carry` が立っていれば ICC の C を足す（ADDX 系）。
-/// `cc` が立っていれば N,Z,V,C を ICC に書く。V8 では 32 ビット側で
-/// 旗を計算する。
+/// `cc` が立っていれば N,Z,V,C を ICC に書く。V9 では XCC も更新
+/// する（V/C は 64 ビット側で計算する）。
 /// Ref: SPEC-SPARC-V8 (Version 8) §ADD, §ADDcc, §ADDX, §ADDXcc.
 fn add_common<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2, cc: bool, carry: bool) -> Flow<B> {
     let x = read(b, rs1);
@@ -299,14 +390,15 @@ fn add_common<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2, cc: bool, carry
     let cv = b.select::<W64>(cin, one, zero);
     let t = b.add::<W64>(x, y);
     let sum = b.add::<W64>(t, cv);
-    let v = wmask(b, sum);
+    let v = emask(b, sum);
     write(b, rd, v);
     if cc {
         let x32 = b.trunc::<W64, W32>(x);
         let y32 = b.trunc::<W64, W32>(y);
         let (_r, cry, ovf) = b.add_with_carry::<W32>(x32, y32, cin);
-        let res32 = b.trunc::<W64, W32>(v);
-        set_icc(b, res32, ovf, cry);
+        // XCC の V/C はオペランド全 64 ビットで計算する。
+        let (_r, cry64, ovf64) = b.add_with_carry::<W64>(x, y, cin);
+        set_cc(b, sum, ovf, cry, ovf64, cry64);
     }
     Ok(())
 }
@@ -323,17 +415,20 @@ fn sub_common<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2, cc: bool, carry
     let bv = b.select::<W64>(bin, one, zero);
     let d = b.sub::<W64>(x, y);
     let diff = b.sub::<W64>(d, bv);
-    let v = wmask(b, diff);
+    let v = emask(b, diff);
     write(b, rd, v);
     if cc {
+        let nb = inv_b(b, bin);
         let x32 = b.trunc::<W64, W32>(x);
         let y32 = b.trunc::<W64, W32>(y);
         let iy = b.not::<W32>(y32);
-        let nb = inv_b(b, bin);
         let (_r, cry, ovf) = b.add_with_carry::<W32>(x32, iy, nb);
-        let res32 = b.trunc::<W64, W32>(v);
         let borrow = inv_b(b, cry);
-        set_icc(b, res32, ovf, borrow);
+        // XCC の V/C はオペランド全 64 ビットで計算する。
+        let iy64 = b.not::<W64>(y);
+        let (_r, cry64, ovf64) = b.add_with_carry::<W64>(x, iy64, nb);
+        let borrow64 = inv_b(b, cry64);
+        set_cc(b, diff, ovf, borrow, ovf64, borrow64);
     }
     Ok(())
 }
@@ -366,18 +461,18 @@ fn logic_common<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2, op: LOp, cc: 
             b.not::<W64>(t)
         }
     };
-    let v = wmask(b, t);
+    let v = emask(b, t);
     write(b, rd, v);
     if cc {
-        let res32 = b.trunc::<W64, W32>(v);
         let f = false_b(b);
-        set_icc(b, res32, f, f);
+        set_cc(b, t, f, f, f, f);
     }
     Ok(())
 }
 
-/// シフトの共通処理。V7/V8 では rs1 の 32 ビットを下位 5 ビットの量で
-/// 動かす。V9 の 64 ビットシフト（sllx/srlx/srax）は SP9 で扱う。
+/// シフトの共通処理。rs1 の 32 ビットを下位 5 ビットの量で動かす。
+/// レジスタ形・即値形のどちらでも量は 5 ビット。V9 でも 32 ビット
+/// シフトはこの動作で、bit12 の x 桁は 0 に固定している。
 /// Ref: SPEC-SPARC-V8 (Version 8) §SLL, §SRL, §SRA.
 #[derive(Clone, Copy)]
 enum Sh {
@@ -400,6 +495,24 @@ fn shift_common<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2, sh: Sh) -> Fl
     };
     let e = b.sext::<W32, W64>(r);
     let v = wmask(b, e);
+    write(b, rd, v);
+    Ok(())
+}
+
+/// 64 ビットシフトの共通処理（V9 の SLLX/SRLX/SRAX）。シフト量は
+/// 下位 6 ビットで、即値形は shcnt6 桁がそのまま量になる。
+/// Ref: SPEC-SPARC-V9 §Shift Instructions.
+fn shiftx_common<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2, sh: Sh) -> Flow<B> {
+    let x = read(b, rs1);
+    let y = src2(b, s);
+    let m = b.konst::<W64>(63);
+    let n = b.and::<W64>(y, m);
+    let r = match sh {
+        Sh::Ll => b.shl::<W64>(x, n),
+        Sh::Rl => b.shr_l::<W64>(x, n),
+        Sh::Ra => b.shr_a::<W64>(x, n),
+    };
+    let v = wmask(b, r);
     write(b, rd, v);
     Ok(())
 }
@@ -432,8 +545,13 @@ fn mul_common<B: Backend>(
     let hv = wmask(b, h64);
     b.set(y_ref(), hv);
     if cc {
+        // XCC の N,Z は積全体（64 ビット）から取る。
+        let l64 = b.zext::<W32, W64>(lo);
+        let sh32 = b.konst::<W64>(32);
+        let hs = b.shl::<W64>(h64, sh32);
+        let p64 = b.or::<W64>(hs, l64);
         let f = false_b(b);
-        set_icc(b, lo, f, f);
+        set_cc(b, p64, f, f, f, f);
     }
     Ok(())
 }
@@ -515,17 +633,16 @@ fn div_common<B: Backend>(
         b.konst::<W64>(0xffff_ffff)
     };
     let qsat = b.select::<W64>(fits, q, sat);
-    let v = wmask(b, qsat);
+    let v = emask(b, qsat);
     write(b, rd, v);
     let rm = wmask(b, r);
     b.set(y_ref(), rm);
     if cc {
         // V は商が 32 ビットに収まらないとき立つ。N,Z は格納した
         // （飽和後の）商から取る。
-        let res32 = b.trunc::<W64, W32>(qsat);
         let ovf = inv_b(b, fits);
         let f = false_b(b);
-        set_icc(b, res32, ovf, f);
+        set_cc(b, v, ovf, f, ovf, f);
     }
     Ok(())
 }
@@ -572,7 +689,7 @@ pub fn mulscc<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2) -> Flow<B> {
     let ny64 = b.zext::<W32, W64>(ny);
     let nyv = wmask(b, ny64);
     b.set(y_ref(), nyv);
-    set_icc(b, res, ovf, cry);
+    set_cc(b, res64, ovf, cry, ovf, cry);
     Ok(())
 }
 
@@ -744,13 +861,15 @@ pub fn sethi<B: Backend>(b: &mut B, rd: Gpr, imm22: u64) -> Flow<B> {
 }
 
 /// 実効アドレス。rs1 + src2 をモデルの語幅で包む。V7/V8 のデータ
-/// アクセスも 32 ビットアドレスなので `wmask` をかける。
+/// アクセスも 32 ビットアドレスなので `wmask` をかける。V9 では
+/// PSTATE.AM のアドレスマスクも効く。
 /// Ref: SPEC-SPARC-V8 (Version 8) §Load/Store Instructions.
 fn eff_addr<B: Backend>(b: &mut B, rs1: Gpr, s: Src2) -> B::V<W64> {
     let base = read(b, rs1);
     let off = src2(b, s);
     let sum = b.add::<W64>(base, off);
-    wmask(b, sum)
+    let a = wmask(b, sum);
+    amask(b, a)
 }
 
 /// ロードの共通処理。`se` が立っていれば符号拡張する。
@@ -892,8 +1011,12 @@ pub fn jmpl<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2, pc: u64) -> Flow<
     let base = read(b, rs1);
     let off = src2(b, s);
     let sum = b.add::<W64>(base, off);
-    let target = wmask(b, sum);
+    let m = wmask(b, sum);
+    let target = amask(b, m);
+    // PSTATE.AM 有効時は rd に書く戻り PC も上位 32 ビットが落ちる
+    // (UltraSPARC impdep#125)。
     let ret = const_w64(b, pc);
+    let ret = amask(b, ret);
     write(b, rd, ret);
     b.set(npc_ref(), target);
     Ok(())
@@ -904,9 +1027,11 @@ pub fn jmpl<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2, pc: u64) -> Flow<
 /// Ref: SPEC-SPARC-V8 (Version 8) §CALL.
 pub fn call<B: Backend>(b: &mut B, pc: u64, target: u64) -> Flow<B> {
     let ret = const_w64(b, pc);
+    let ret = amask(b, ret);
     write(b, Gpr(15), ret);
     let k = const_w64(b, target);
     let t = wmask(b, k);
+    let t = amask(b, t);
     b.set(npc_ref(), t);
     Ok(())
 }
@@ -929,6 +1054,7 @@ pub fn bicc<B: Backend>(b: &mut B, a: u8, cond: u8, pc: u64, target: u64) -> Flo
     let fall = const_w64(b, pc.wrapping_add(8));
     let s = b.select::<W64>(taken, t, fall);
     let npc = wmask(b, s);
+    let npc = amask(b, npc);
     b.set(npc_ref(), npc);
     if a != 0 {
         // BA は成立が確定しているので、annul の条件として `taken`
@@ -947,24 +1073,65 @@ pub fn bicc<B: Backend>(b: &mut B, a: u8, cond: u8, pc: u64, target: u64) -> Flo
     Ok(())
 }
 
-/// 条件の評価値。ICC は PSR の N(23) Z(22) V(21) C(20)。
-/// 返り値は 0/1 の値で、0 なら不成立。各条件は値演算で組み立てる。
-/// V9 の条件コード（%ccr）は TSTATE 側にあり、ここでは V7/V8 の
-/// ICC だけを読む。V9 の Bicc/FBfcc 差分は後続ステップで扱う。
+/// (n, z, v, c) の並び。
+type CcBits<B> = (
+    <B as Backend>::V<W64>,
+    <B as Backend>::V<W64>,
+    <B as Backend>::V<W64>,
+    <B as Backend>::V<W64>,
+);
+
+/// 整数条件コードの (n, z, v, c) ビット。`xcc` が真なら V9 の
+/// %ccr.xcc（ビット 7-4）、偽なら ICC。ICC は V9 では %ccr の
+/// ビット 3-0、V7/V8 では PSR の ICC（23-20）を読む。
+/// Ref: SPEC-SPARC-V9 §Condition Codes.
+fn cc_bits<B: Backend>(b: &mut B, xcc: bool) -> CcBits<B> {
+    let bit = |bb: &mut B, v: B::V<W64>, s: u64| -> B::V<W64> {
+        let sh = bb.konst::<W64>(s);
+        let one = bb.konst::<W64>(1);
+        let x = bb.shr_l::<W64>(v, sh);
+        bb.and::<W64>(x, one)
+    };
+    if xcc {
+        let ccr = b.get(ccr_ref());
+        (
+            bit(b, ccr, 7),
+            bit(b, ccr, 6),
+            bit(b, ccr, 5),
+            bit(b, ccr, 4),
+        )
+    } else if b.param::<super::Word64Param>() {
+        let ccr = b.get(ccr_ref());
+        (
+            bit(b, ccr, 3),
+            bit(b, ccr, 2),
+            bit(b, ccr, 1),
+            bit(b, ccr, 0),
+        )
+    } else {
+        let psr = b.get(psr_ref());
+        let p64 = b.zext::<W32, W64>(psr);
+        (
+            bit(b, p64, 23),
+            bit(b, p64, 22),
+            bit(b, p64, 21),
+            bit(b, p64, 20),
+        )
+    }
+}
+
+/// 条件の評価値（ICC 選択）。0/1 の値で、0 なら不成立。
 /// Ref: SPEC-SPARC-V8 (Version 8) §Instruction Descriptions (Bicc).
 fn cond_val<B: Backend>(b: &mut B, cond: u8) -> B::V<W64> {
-    let psr = b.get(psr_ref());
-    let p64 = b.zext::<W32, W64>(psr);
-    let bit = |bb: &mut B, n: u64| -> B::V<W64> {
-        let sh = bb.konst::<W64>(n);
-        let one = bb.konst::<W64>(1);
-        let s = bb.shr_l::<W64>(p64, sh);
-        bb.and::<W64>(s, one)
-    };
-    let n = bit(b, 23);
-    let z = bit(b, 22);
-    let v = bit(b, 21);
-    let c = bit(b, 20);
+    cond_val_cc(b, cond, false)
+}
+
+/// 条件の評価値。`xcc` で V9 の XCC/ICC を選ぶ。各条件は値演算で
+/// 組み立てる。
+/// Ref: SPEC-SPARC-V8 (Version 8) §Instruction Descriptions (Bicc);
+/// SPEC-SPARC-V9 §Condition Codes.
+fn cond_val_cc<B: Backend>(b: &mut B, cond: u8, xcc: bool) -> B::V<W64> {
+    let (n, z, v, c) = cc_bits(b, xcc);
     let one = b.konst::<W64>(1);
     let inv = |x: B::V<W64>, bb: &mut B| -> B::V<W64> {
         let o = bb.konst::<W64>(1);
@@ -1003,33 +1170,96 @@ fn cond_val<B: Backend>(b: &mut B, cond: u8) -> B::V<W64> {
     }
 }
 
-/// SAVE。旧ウィンドウで加算し、CWP を 1 減らしてから新ウィンドウへ書く。
+/// FCC の評価値。`fcc` は使用する条件コード（0-3 で fcc0-3）。
+/// FCC は FSR のビット 10-11（fcc0）と 32-37（fcc1-3）。FCC 値は
+/// 0=等しい、1=小さい、2=大きい、3=順序なし。`fcond` の下位 3 ビットで
+/// 関係を選び、ビット 3 で否定する。FPU 演算は未実装だが FCC 桁は
+/// 状態としてあるので評価だけは正確に行う。
+/// Ref: SPEC-SPARC-V9 §Floating-Point Condition Codes.
+fn cond_val_f<B: Backend>(b: &mut B, fcond: u8, fcc: u8) -> B::V<W64> {
+    let fsr = b.get(fsr_ref());
+    let sel = if fcc == 0 {
+        10
+    } else {
+        30 + u64::from(fcc) * 2
+    };
+    let sh = b.konst::<W64>(sel);
+    let x = b.shr_l::<W64>(fsr, sh);
+    let three = b.konst::<W64>(3);
+    let f = b.and::<W64>(x, three);
+    let zero = b.konst::<W64>(0);
+    let one = b.konst::<W64>(1);
+    let two = b.konst::<W64>(2);
+    let fm1 = b.sub::<W64>(f, one);
+    let fand1 = b.and::<W64>(f, one);
+    let t = match fcond & 7 {
+        0 => false_b(b),
+        1 => b.cmp::<W64>(Cmp::Ne, f, zero),     // fne: f != 0
+        2 => b.cmp::<W64>(Cmp::LeU, fm1, one),   // flg: f in {1,2}
+        3 => b.cmp::<W64>(Cmp::Ne, fand1, zero), // ful: f in {1,3}
+        4 => b.cmp::<W64>(Cmp::Eq, f, one),      // fl:  f == 1
+        5 => b.cmp::<W64>(Cmp::GeU, f, two),     // fug: f in {2,3}
+        6 => b.cmp::<W64>(Cmp::Eq, f, two),      // fg:  f == 2
+        _ => b.cmp::<W64>(Cmp::Eq, f, three),    // fu:  f == 3
+    };
+    let t = if fcond & 8 == 0 { t } else { inv_b(b, t) };
+    b.select::<W64>(t, one, zero)
+}
+
+/// V9 の PSTATE.AM（TSTATE ビット 11）が立っていればアドレスの
+/// 上位 32 ビットを落とす。命令・データのどちらの仮想アドレスにも
+/// 効く。V7/V8 では 32 ビットアドレスなので変化なし。
+/// Ref: SPEC-SPARC-V9 §PSTATE.
+fn amask<B: Backend>(b: &mut B, addr: B::V<W64>) -> B::V<W64> {
+    if !b.param::<super::Word64Param>() {
+        return addr;
+    }
+    let ts = b.get(tstate_ref());
+    let sh = b.konst::<W64>(11);
+    let s = b.shr_l::<W64>(ts, sh);
+    let one = b.konst::<W64>(1);
+    let am = b.and::<W64>(s, one);
+    // am==1 なら 0xffffffff、0 なら全ビットのマスクをかける。
+    let lo = b.konst::<W64>(0xffff_ffff);
+    let amm1 = b.sub::<W64>(am, one);
+    let m = b.or::<W64>(lo, amm1);
+    b.and::<W64>(addr, m)
+}
 /// ウィンドウあふれの検出は OS パーソナリティが再現するため、
-/// ここではファイル内を巡回するだけである。V9 では CWP の進行
-/// 方向が逆（SAVE で増加）だが、本実装は全モデルで V8 の方向を
-/// 採る。ユーザーモードでは CWP を読めないので観測差はない。
-/// Ref: SPEC-SPARC-V8 (Version 8) §SAVE; SPEC-SPARC-V9 App. E.
+/// ここではファイル内を巡回するだけである。CWP の進行方向は
+/// モデルで逆で、V7/V8 では SAVE で減少、V9 では SAVE で増加する。
+/// Ref: SPEC-SPARC-V8 (Version 8) §SAVE; SPEC-SPARC-V9 §SAVE.
 pub fn save<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2) -> Flow<B> {
     let x = read(b, rs1);
     let y = src2(b, s);
     let sum = b.add::<W64>(x, y);
     let v = wmask(b, sum);
     let nw = nwindows(b);
-    step_cwp(b, nw - 1);
+    let delta = if b.param::<super::Word64Param>() {
+        1
+    } else {
+        nw - 1
+    };
+    step_cwp(b, delta);
     write(b, rd, v);
     Ok(())
 }
 
-/// RESTORE。現ウィンドウで加算し、CWP を 1 増やしてから戻った
-/// ウィンドウへ書く。CWP の進行方向は SAVE と同じく全モデルで
-/// V8 の方向を採る（V9 では逆）。
-/// Ref: SPEC-SPARC-V8 (Version 8) §RESTORE; SPEC-SPARC-V9 App. E.
+/// RESTORE。現ウィンドウで加算し、CWP を SAVE とは逆方向に 1 進めて
+/// から戻ったウィンドウへ書く（V7/V8 では増加、V9 では減少）。
+/// Ref: SPEC-SPARC-V8 (Version 8) §RESTORE; SPEC-SPARC-V9 §RESTORE.
 pub fn restore<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2) -> Flow<B> {
     let x = read(b, rs1);
     let y = src2(b, s);
     let sum = b.add::<W64>(x, y);
     let v = wmask(b, sum);
-    step_cwp(b, 1);
+    let nw = nwindows(b);
+    let delta = if b.param::<super::Word64Param>() {
+        nw - 1
+    } else {
+        1
+    };
+    step_cwp(b, delta);
     write(b, rd, v);
     Ok(())
 }
@@ -1055,8 +1285,8 @@ pub fn unimp<B: Backend>(b: &mut B, imm22: u64) -> B::Exit {
 /// 定数しか持てないため、番号は `tt` 状態に置いてから Trap を
 /// 上げる。遅延スロットは持たない。
 /// Ref: SPEC-SPARC-V8 (Version 8) §Ticc; SPEC-SPARC-V9 §Tcc.
-pub fn ticc<B: Backend>(b: &mut B, cond: u8, rs1: Gpr, s: Src2) -> Flow<B> {
-    let val = cond_val(b, cond);
+pub fn ticc<B: Backend>(b: &mut B, cond: u8, xcc: bool, rs1: Gpr, s: Src2) -> Flow<B> {
+    let val = cond_val_cc(b, cond, xcc);
     let zero = b.konst::<W64>(0);
     let taken = b.cmp::<W64>(Cmp::Ne, val, zero);
     let x = read(b, rs1);
@@ -1125,7 +1355,193 @@ pub fn wrccr<B: Backend>(b: &mut B, rs1: Gpr, s: Src2) -> Flow<B> {
 /// Ref: SPEC-SPARC-V9 §RDASR.
 pub fn rdpc<B: Backend>(b: &mut B, rd: Gpr, pc: u64) -> Flow<B> {
     let v = const_w64(b, pc);
+    let v = amask(b, v);
     write(b, rd, v);
+    Ok(())
+}
+
+/// MULX。64 ビット積の下位 64 ビットを rd に書く。Y は使わない。
+/// Ref: SPEC-SPARC-V9 §MULX.
+pub fn mulx<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2) -> Flow<B> {
+    let x = read(b, rs1);
+    let y = src2(b, s);
+    let p = b.mul::<W64>(x, y);
+    let v = wmask(b, p);
+    write(b, rd, v);
+    Ok(())
+}
+
+/// V9 の 64 ビット除算。被除数は rs1（Y は使わない）。0 除算は
+/// division_by_zero=0x28。`signed` で SDIVX/UDIVX を分ける。
+/// Ref: SPEC-SPARC-V9 §UDIVX, §SDIVX.
+fn divx_common<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2, signed: bool) -> Flow<B> {
+    let dv = src2(b, s);
+    let zero = b.konst::<W64>(0);
+    let isz = b.cmp::<W64>(Cmp::Eq, dv, zero);
+    b.if_then(isz, |bb| {
+        let tt = bb.konst::<W64>(0x28);
+        bb.set(tt_ref(), tt);
+        Err(bb.raise(polyisa_sem::GuestException {
+            kind: polyisa_sem::ExceptionKind::Trap,
+            code: 0x28,
+            addr: None,
+            in_delay_slot: false,
+        }))
+    })?;
+    let x = read(b, rs1);
+    let q = if signed {
+        b.sdiv::<W64>(x, dv)
+    } else {
+        b.udiv::<W64>(x, dv)
+    };
+    let v = wmask(b, q);
+    write(b, rd, v);
+    Ok(())
+}
+
+/// UDIVX。
+pub fn udivx<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2) -> Flow<B> {
+    divx_common(b, rd, rs1, s, false)
+}
+
+/// SDIVX。オーバーフロー時（2^63 / -1）の商はバックエンドの
+/// 折り返し（2^63）がそのまま効く。
+pub fn sdivx<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2) -> Flow<B> {
+    divx_common(b, rd, rs1, s, true)
+}
+
+/// MOVcc。整数条件コード（cc=0 は ICC、cc=1 は XCC）で条件評価し、
+/// 成立すれば operand2 を rd に転送する。オペランドは全幅。
+/// Ref: SPEC-SPARC-V9 §MOVcc.
+fn movcc<B: Backend>(b: &mut B, rd: Gpr, cond: u8, cc: u8, s: Src2) -> Flow<B> {
+    let val = cond_val_cc(b, cond, cc != 0);
+    let y = src2(b, s);
+    let zero = b.konst::<W64>(0);
+    let t = b.cmp::<W64>(Cmp::Ne, val, zero);
+    let cur = read(b, rd);
+    let v = b.select::<W64>(t, y, cur);
+    write(b, rd, v);
+    Ok(())
+}
+
+/// MOVfcc。浮動小数点条件コード（fcc0-3、2 ビットの `fcc` で選択）
+/// で条件評価し、成立すれば operand2 を rd に転送する。
+/// Ref: SPEC-SPARC-V9 §MOVfcc.
+fn movfcc<B: Backend>(b: &mut B, rd: Gpr, fcond: u8, fcc: u8, s: Src2) -> Flow<B> {
+    let val = cond_val_f(b, fcond, fcc);
+    let y = src2(b, s);
+    let zero = b.konst::<W64>(0);
+    let t = b.cmp::<W64>(Cmp::Ne, val, zero);
+    let cur = read(b, rd);
+    let v = b.select::<W64>(t, y, cur);
+    write(b, rd, v);
+    Ok(())
+}
+
+/// MOVr。rs1 と 0 の比較結果で転送する。
+/// rcond: 1=RZ, 2=RLEZ, 3=RLZ, 5=RNZ, 6=RGZ, 7=RGEZ。0 と 4 は
+/// 予約で、exec 側で illegal instruction トラップに振る。
+/// Ref: SPEC-SPARC-V9 §MOVr.
+fn movr<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rcond: u8, s: Src2) -> Flow<B> {
+    let x = read(b, rs1);
+    let zero = b.konst::<W64>(0);
+    let t = match rcond {
+        1 => b.cmp::<W64>(Cmp::Eq, x, zero),
+        2 => b.cmp::<W64>(Cmp::LeS, x, zero),
+        3 => b.cmp::<W64>(Cmp::LtS, x, zero),
+        5 => b.cmp::<W64>(Cmp::Ne, x, zero),
+        6 => b.cmp::<W64>(Cmp::GtS, x, zero),
+        _ => b.cmp::<W64>(Cmp::GeS, x, zero),
+    };
+    let y = src2(b, s);
+    let cur = read(b, rd);
+    let v = b.select::<W64>(t, y, cur);
+    write(b, rd, v);
+    Ok(())
+}
+
+/// POPC。被演算子の立っているビット数を数える。
+/// Ref: SPEC-SPARC-V9 §POPC.
+fn popc<B: Backend>(b: &mut B, rd: Gpr, s: Src2) -> Flow<B> {
+    let mut x = src2(b, s);
+    // SWAR で 64 ビットを数える。
+    let m55 = b.konst::<W64>(0x5555_5555_5555_5555);
+    let one = b.konst::<W64>(1);
+    let sh1 = b.shr_l::<W64>(x, one);
+    let a = b.and::<W64>(sh1, m55);
+    x = b.sub::<W64>(x, a);
+    let m33 = b.konst::<W64>(0x3333_3333_3333_3333);
+    let two = b.konst::<W64>(2);
+    let sh2 = b.shr_l::<W64>(x, two);
+    let lo = b.and::<W64>(x, m33);
+    let hi = b.and::<W64>(sh2, m33);
+    x = b.add::<W64>(lo, hi);
+    let four = b.konst::<W64>(4);
+    let sh4 = b.shr_l::<W64>(x, four);
+    let s = b.add::<W64>(x, sh4);
+    let m0f = b.konst::<W64>(0x0f0f_0f0f_0f0f_0f0f);
+    x = b.and::<W64>(s, m0f);
+    let mul = b.konst::<W64>(0x0101_0101_0101_0101);
+    let p = b.mul::<W64>(x, mul);
+    let s56 = b.konst::<W64>(56);
+    let cnt = b.shr_l::<W64>(p, s56);
+    write(b, rd, cnt);
+    Ok(())
+}
+
+/// CASA/CASXA の共通処理。rd が比較値、rs2 が新値。メモリの値が
+/// rd と等しければ rs2 を書き込み、rd には常に旧値が戻る。
+/// ASI 指定形と %asi 形とも、本モデルのアドレス空間は一つしか
+/// ないので通常空間へのアクセスに畳み込む（%asi レジスタは
+/// ユーザーモードから書けず既定値に留まるため）。
+/// Ref: SPEC-SPARC-V9 §CASA, §CASXA.
+fn cas_common<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr, wide: bool) -> Flow<B> {
+    let base = read(b, rs1);
+    let a = wmask(b, base);
+    let addr = amask(b, a);
+    let cmp = read(b, rd);
+    let newv = read(b, rs2);
+    if wide {
+        b.probe(addr, 8, ATOMIC_RW)?;
+        let old: B::V<W64> = b.load::<W64>(addr, ATOMIC_RW)?;
+        let eq = b.cmp::<W64>(Cmp::Eq, old, cmp);
+        b.if_then(eq, |bb| bb.store::<W64>(addr, newv, ATOMIC_RW))?;
+        write(b, rd, old);
+    } else {
+        b.probe(addr, 4, ATOMIC_RW)?;
+        let old: B::V<W32> = b.load::<W32>(addr, ATOMIC_RW)?;
+        let c32 = b.trunc::<W64, W32>(cmp);
+        let eq = b.cmp::<W32>(Cmp::Eq, old, c32);
+        let n32 = b.trunc::<W64, W32>(newv);
+        b.if_then(eq, |bb| bb.store::<W32>(addr, n32, ATOMIC_RW))?;
+        let e = b.zext::<W32, W64>(old);
+        let m = wmask(b, e);
+        write(b, rd, m);
+    }
+    Ok(())
+}
+
+/// V9 の RETURN。JMPL と同じく rs1 + operand2 へ飛ぶ遅延スロット
+/// 付き CTI だが、rd への戻り書き込みはしない。非特権命令。
+/// Ref: SPEC-SPARC-V9 §RETURN.
+pub fn ret<B: Backend>(b: &mut B, rs1: Gpr, s: Src2) -> Flow<B> {
+    let base = read(b, rs1);
+    let off = src2(b, s);
+    let sum = b.add::<W64>(base, off);
+    let m = wmask(b, sum);
+    let target = amask(b, m);
+    b.set(npc_ref(), target);
+    Ok(())
+}
+
+/// 観測可能な効果のない命令群。no-op で済ませる。
+/// STBAR/MEMBAR は本モデルのストアが常に順序どおり見えるため、
+/// FLUSH は命令キャッシュを持たないため、SAVED/RESTORED は
+/// ウィンドウの帳尻管理が OS 側の約束で観測不能なため、
+/// FLUSHW はウィンドウのメモリ退避をモデル化していないため、
+/// いずれも状態を動かさない。
+/// Ref: SPEC-SPARC-V9 §STBAR, §MEMBAR, §FLUSH, §SAVED, §FLUSHW.
+pub fn nop<B: Backend>(_b: &mut B) -> Flow<B> {
     Ok(())
 }
 
@@ -1215,7 +1631,8 @@ pub fn commit<B: Backend>(b: &mut B) -> Flow<B> {
     b.set(pc_ref(), npc);
     let four = b.konst::<W64>(4);
     let sum = b.add::<W64>(npc, four);
-    let next = wmask(b, sum);
+    let m = wmask(b, sum);
+    let next = amask(b, m);
     b.set(npc_ref(), next);
     Ok(())
 }
@@ -1259,6 +1676,12 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Flow<B> {
         | Insn::Sll
         | Insn::Srl
         | Insn::Sra
+        | Insn::Mulx
+        | Insn::Udivx
+        | Insn::Sdivx
+        | Insn::Sllx
+        | Insn::Srlx
+        | Insn::Srax
         | Insn::Jmpl
         | Insn::Save
         | Insn::Restore
@@ -1313,6 +1736,12 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Flow<B> {
         | Insn::SllI
         | Insn::SrlI
         | Insn::SraI
+        | Insn::MulxI
+        | Insn::UdivxI
+        | Insn::SdivxI
+        | Insn::SllxI
+        | Insn::SrlxI
+        | Insn::SraxI
         | Insn::JmplI
         | Insn::SaveI
         | Insn::RestoreI
@@ -1386,9 +1815,107 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Flow<B> {
                 _ => unreachable!(),
             }
         }
-        // Ticc。オペランドは (cond, rs1, src2)。
-        Insn::Ticc => ticc(b, o[0] as u8, Gpr(o[1] as u8), Src2::Reg(Gpr(o[2] as u8))),
-        Insn::TiccI => ticc(b, o[0] as u8, Gpr(o[1] as u8), Src2::Imm(sext13(o[2]))),
+        // Ticc/Tcc。オペランドは (cond, rs1, src2)。xcc 桁で
+        // V9 の XCC を選ぶ形を分ける。
+        Insn::Ticc => ticc(
+            b,
+            o[0] as u8,
+            false,
+            Gpr(o[1] as u8),
+            Src2::Reg(Gpr(o[2] as u8)),
+        ),
+        Insn::TiccI => ticc(
+            b,
+            o[0] as u8,
+            false,
+            Gpr(o[1] as u8),
+            Src2::Imm(sext(o[2], 7)),
+        ),
+        Insn::TccI => ticc(
+            b,
+            o[0] as u8,
+            false,
+            Gpr(o[1] as u8),
+            Src2::Imm(sext(o[2], 7)),
+        ),
+        Insn::Tccx => ticc(
+            b,
+            o[0] as u8,
+            true,
+            Gpr(o[1] as u8),
+            Src2::Reg(Gpr(o[2] as u8)),
+        ),
+        Insn::TccxI => ticc(
+            b,
+            o[0] as u8,
+            true,
+            Gpr(o[1] as u8),
+            Src2::Imm(sext(o[2], 8)),
+        ),
+        // MOVcc（cc で ICC/XCC）と MOVfcc（fcc0-3）。
+        // オペランドは (rd, cond, cc, src)。
+        Insn::Movcc => movcc(
+            b,
+            Gpr(o[0] as u8),
+            o[1] as u8,
+            o[2] as u8,
+            Src2::Reg(Gpr(o[3] as u8)),
+        ),
+        Insn::MovccI => movcc(
+            b,
+            Gpr(o[0] as u8),
+            o[1] as u8,
+            o[2] as u8,
+            Src2::Imm(sext(o[3], 11)),
+        ),
+        Insn::Movfcc => movfcc(
+            b,
+            Gpr(o[0] as u8),
+            o[1] as u8,
+            o[2] as u8,
+            Src2::Reg(Gpr(o[3] as u8)),
+        ),
+        Insn::MovfccI => movfcc(
+            b,
+            Gpr(o[0] as u8),
+            o[1] as u8,
+            o[2] as u8,
+            Src2::Imm(sext(o[3], 11)),
+        ),
+        // MOVr。オペランドは (rd, rs1, rcond, src)。rcond 0/4 は
+        // 予約で illegal instruction トラップ。
+        Insn::Movr | Insn::MovrI => {
+            let rcond = o[2] as u8;
+            if !matches!(rcond, 1 | 2 | 3 | 5 | 6 | 7) {
+                return Err(unimp(b, 0));
+            }
+            let s = if matches!(insn, Insn::MovrI) {
+                Src2::Imm(sext(o[3], 10))
+            } else {
+                Src2::Reg(Gpr(o[3] as u8))
+            };
+            movr(b, Gpr(o[0] as u8), Gpr(o[1] as u8), rcond, s)
+        }
+        // POPC。被演算子は rs2 または simm13（rs1 桁は 0 固定）。
+        Insn::Popc => popc(b, Gpr(o[0] as u8), Src2::Reg(Gpr(o[1] as u8))),
+        Insn::PopcI => popc(b, Gpr(o[0] as u8), Src2::Imm(sext13(o[1]))),
+        // CASA/CASXA。レジスタ形のオペランドは (rd, rs1, asi, rs2)、
+        // %asi 形は (rd, rs1, rs2)。
+        Insn::Casa => cas_common(b, Gpr(o[0] as u8), Gpr(o[1] as u8), Gpr(o[3] as u8), false),
+        Insn::CasaI => cas_common(b, Gpr(o[0] as u8), Gpr(o[1] as u8), Gpr(o[2] as u8), false),
+        Insn::Casxa => cas_common(b, Gpr(o[0] as u8), Gpr(o[1] as u8), Gpr(o[3] as u8), true),
+        Insn::CasxaI => cas_common(b, Gpr(o[0] as u8), Gpr(o[1] as u8), Gpr(o[2] as u8), true),
+        // V9 の RETURN。オペランドは (rs1, src2)。
+        Insn::Return => ret(b, Gpr(o[0] as u8), Src2::Reg(Gpr(o[1] as u8))),
+        Insn::ReturnI => ret(b, Gpr(o[0] as u8), Src2::Imm(sext13(o[1]))),
+        // 観測可能な効果のない命令群。
+        Insn::Stbar
+        | Insn::Membar
+        | Insn::Flush
+        | Insn::FlushI
+        | Insn::Saved
+        | Insn::Restored
+        | Insn::Flushw => nop(b),
         // ASR。読み出し形のオペランドは rd、書き込み形は (rs1, src2)。
         Insn::Rdy => rdy(b, Gpr(o[0] as u8)),
         Insn::Wry => wry(b, Gpr(o[0] as u8), Src2::Reg(Gpr(o[1] as u8))),
@@ -1410,7 +1937,14 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Flow<B> {
         | Insn::Rett
         | Insn::RettI
         | Insn::Done
-        | Insn::Retry => Err(privileged(b)),
+        | Insn::Retry
+        | Insn::Allclean
+        | Insn::Otherw
+        | Insn::Normalw
+        | Insn::Invalw
+        | Insn::Rdpr
+        | Insn::Wrpr
+        | Insn::WrprI => Err(privileged(b)),
         Insn::Unimp => Err(unimp(b, o[0])),
     }
 }
@@ -1449,6 +1983,12 @@ fn dispatch3<B: Backend>(b: &mut B, insn: Insn, rd: Gpr, rs1: Gpr, s: Src2, pc: 
         Insn::Sll | Insn::SllI => sll(b, rd, rs1, s),
         Insn::Srl | Insn::SrlI => srl(b, rd, rs1, s),
         Insn::Sra | Insn::SraI => sra(b, rd, rs1, s),
+        Insn::Mulx | Insn::MulxI => mulx(b, rd, rs1, s),
+        Insn::Udivx | Insn::UdivxI => udivx(b, rd, rs1, s),
+        Insn::Sdivx | Insn::SdivxI => sdivx(b, rd, rs1, s),
+        Insn::Sllx | Insn::SllxI => shiftx_common(b, rd, rs1, s, Sh::Ll),
+        Insn::Srlx | Insn::SrlxI => shiftx_common(b, rd, rs1, s, Sh::Rl),
+        Insn::Srax | Insn::SraxI => shiftx_common(b, rd, rs1, s, Sh::Ra),
         Insn::Jmpl | Insn::JmplI => jmpl(b, rd, rs1, s, pc),
         Insn::Save | Insn::SaveI => save(b, rd, rs1, s),
         Insn::Restore | Insn::RestoreI => restore(b, rd, rs1, s),

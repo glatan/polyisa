@@ -144,7 +144,7 @@ mod tests {
     #[test]
     fn insn_count() {
         // 骨格の命令集合（整数演算・load/store 全サイズ・ASI 形・分岐）。
-        assert_eq!(INSNS.len(), 132);
+        assert_eq!(INSNS.len(), 175);
     }
 
     #[test]
@@ -178,9 +178,10 @@ mod tests {
             decode_model_ex(0x81c8_0000, 32, false, FEAT_V7 | FEAT_V8),
             Some(Insn::Rett)
         );
+        // V9 では同じ符号化が非特権の return になる。
         assert_eq!(
             decode_model_ex(0x81c8_0000, 32, true, FEAT_V7 | FEAT_V8 | FEAT_V9),
-            None
+            Some(Insn::Return)
         );
         assert_eq!(
             decode_model_ex(0x8148_0000, 32, true, FEAT_V7 | FEAT_V8 | FEAT_V9),

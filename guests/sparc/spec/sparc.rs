@@ -112,6 +112,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("asi", 12, 5),
         ("rs2", 4, 0),
         ("shcnt", 5, 0),
+        ("shcnt5", 4, 0),
         ("simm13", 12, 0),
         ("disp22", 21, 0),
         ("imm22", 21, 0),
@@ -122,6 +123,21 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("fs", 18, 14),
         ("fd", 29, 25),
         ("opf", 13, 5),
+        // MOVcc 系の cond は 17-14 にあり、分岐の cond(28-25) とは
+        // 別桁なので別名を使う。
+        ("mcond", 17, 14),
+        // MOVcc の cc（1 ビット。0=icc, 1=xcc）。MOVfcc の fcc
+        // （2 ビット、fcc0-3 の選択）。
+        ("xcc", 12, 12),
+        ("fcc", 12, 11),
+        ("simm11", 10, 0),
+        ("rcond", 12, 10),
+        ("simm10", 9, 0),
+        // MEMBAR の 7 ビットマスク。
+        ("mmask", 6, 0),
+        // Ticc の 7 ビット即値と V9 Tcc の 8 ビット即値。
+        ("simm7", 6, 0),
+        ("simm8", 7, 0),
     ] {
         m.fields.push(Field {
             name: name.to_string(),
@@ -277,11 +293,169 @@ pub fn build_model() -> polyisa_isadl::Model {
         fields: vec!["rs1".to_string(), "simm13".to_string()],
         operands: vec![gpr("rs1", Access::Read), val("simm13")],
     });
-    // オペランドなし（done/retry）。
+    // オペランドなし（done/retry/saved/restored/flushw）。
     m.formats.push(Format {
         name: "F3NONE".to_string(),
         fields: vec![],
         operands: vec![],
+    });
+    // シフト即値形（shcnt5/shcnt6 は同じ位置で幅だけ違う）。
+    m.formats.push(Format {
+        name: "F3SH".to_string(),
+        fields: vec![
+            "rd".to_string(),
+            "rs1".to_string(),
+            "shcnt".to_string(),
+        ],
+        operands: vec![
+            gpr("rd", Access::Write),
+            gpr("rs1", Access::Read),
+            val("shcnt"),
+        ],
+    });
+    // 32 ビットシフト即値形。量は 5 ビットで bit5 は予約の 0。
+    m.formats.push(Format {
+        name: "F3SH5".to_string(),
+        fields: vec![
+            "rd".to_string(),
+            "rs1".to_string(),
+            "shcnt5".to_string(),
+        ],
+        operands: vec![
+            gpr("rd", Access::Write),
+            gpr("rs1", Access::Read),
+            val("shcnt5"),
+        ],
+    });
+    // MOVcc レジスタ形（bit18=1、cc は icc/xcc の 1 ビット）。
+    m.formats.push(Format {
+        name: "F3MCC".to_string(),
+        fields: vec![
+            "rd".to_string(),
+            "mcond".to_string(),
+            "xcc".to_string(),
+            "rs2".to_string(),
+        ],
+        operands: vec![
+            gpr("rd", Access::Write),
+            val("mcond"),
+            val("xcc"),
+            gpr("rs2", Access::Read),
+        ],
+    });
+    // MOVcc 即値形（simm11）。
+    m.formats.push(Format {
+        name: "F3MCCI".to_string(),
+        fields: vec![
+            "rd".to_string(),
+            "mcond".to_string(),
+            "xcc".to_string(),
+            "simm11".to_string(),
+        ],
+        operands: vec![
+            gpr("rd", Access::Write),
+            val("mcond"),
+            val("xcc"),
+            val("simm11"),
+        ],
+    });
+    // MOVfcc レジスタ形（bit18=0、cc は fcc0-3 の 2 ビット）。
+    m.formats.push(Format {
+        name: "F3MFCC".to_string(),
+        fields: vec![
+            "rd".to_string(),
+            "mcond".to_string(),
+            "fcc".to_string(),
+            "rs2".to_string(),
+        ],
+        operands: vec![
+            gpr("rd", Access::Write),
+            val("mcond"),
+            val("fcc"),
+            gpr("rs2", Access::Read),
+        ],
+    });
+    // MOVfcc 即値形（simm11）。
+    m.formats.push(Format {
+        name: "F3MFCCI".to_string(),
+        fields: vec![
+            "rd".to_string(),
+            "mcond".to_string(),
+            "fcc".to_string(),
+            "simm11".to_string(),
+        ],
+        operands: vec![
+            gpr("rd", Access::Write),
+            val("mcond"),
+            val("fcc"),
+            val("simm11"),
+        ],
+    });
+    // MOVr レジスタ形（rcond で rs1 と 0 を比較する）。
+    m.formats.push(Format {
+        name: "F3MR".to_string(),
+        fields: vec![
+            "rd".to_string(),
+            "rs1".to_string(),
+            "rcond".to_string(),
+            "rs2".to_string(),
+        ],
+        operands: vec![
+            gpr("rd", Access::Write),
+            gpr("rs1", Access::Read),
+            val("rcond"),
+            gpr("rs2", Access::Read),
+        ],
+    });
+    // MOVr 即値形（simm10）。
+    m.formats.push(Format {
+        name: "F3MRI".to_string(),
+        fields: vec![
+            "rd".to_string(),
+            "rs1".to_string(),
+            "rcond".to_string(),
+            "simm10".to_string(),
+        ],
+        operands: vec![
+            gpr("rd", Access::Write),
+            gpr("rs1", Access::Read),
+            val("rcond"),
+            val("simm10"),
+        ],
+    });
+    // POPC 形（rs1 桁は 0 固定。被演算子は rs2 または simm13）。
+    m.formats.push(Format {
+        name: "F3POPC".to_string(),
+        fields: vec!["rd".to_string(), "rs2".to_string()],
+        operands: vec![gpr("rd", Access::Write), gpr("rs2", Access::Read)],
+    });
+    m.formats.push(Format {
+        name: "F3POPCI".to_string(),
+        fields: vec!["rd".to_string(), "simm13".to_string()],
+        operands: vec![gpr("rd", Access::Write), val("simm13")],
+    });
+    // rd と rs1 の 2 フィールド形（rdpr。rs1 が特権レジスタ番号）。
+    m.formats.push(Format {
+        name: "F3RD1".to_string(),
+        fields: vec!["rd".to_string(), "rs1".to_string()],
+        operands: vec![gpr("rd", Access::Write), gpr("rs1", Access::Read)],
+    });
+    // Ticc の 7 ビット即値形と V9 Tcc の 8 ビット即値形。
+    m.formats.push(Format {
+        name: "F3TI7".to_string(),
+        fields: vec!["cond".to_string(), "rs1".to_string(), "simm7".to_string()],
+        operands: vec![val("cond"), gpr("rs1", Access::Read), val("simm7")],
+    });
+    m.formats.push(Format {
+        name: "F3TI8".to_string(),
+        fields: vec!["cond".to_string(), "rs1".to_string(), "simm8".to_string()],
+        operands: vec![val("cond"), gpr("rs1", Access::Read), val("simm8")],
+    });
+    // MEMBAR の 7 ビットマスク形。
+    m.formats.push(Format {
+        name: "F3MB".to_string(),
+        fields: vec!["mmask".to_string()],
+        operands: vec![val("mmask")],
     });
 
     // 骨格の命令集合。命令群は SP5 以降で足す。ここでは各形式を
@@ -354,12 +528,14 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("sdivcc_i", "F3I", "10 ..... 011111 ..... 1 .............", "sdivcc {rs1}, {simm13}, {rd}", "alu", "v8"),
         ("mulscc", "F3R", "10 ..... 100100 ..... 0 00000000 .....", "mulscc {rs1}, {rs2}, {rd}", "alu", ""),
         ("mulscc_i", "F3I", "10 ..... 100100 ..... 1 .............", "mulscc {rs1}, {simm13}, {rd}", "alu", ""),
+        // シフト。bit12 は V9 の x 桁（64 ビットシフト）なので 32 ビット
+        // 形は 0 に固定する。x 形は sllx/srlx/srax として v9 で登録する。
         ("sll", "F3R", "10 ..... 100101 ..... 0 00000000 .....", "sll {rs1}, {rs2}, {rd}", "alu", ""),
-        ("sll_i", "F3I", "10 ..... 100101 ..... 1 .............", "sll {rs1}, {simm13}, {rd}", "alu", ""),
+        ("sll_i", "F3SH5", "10 ..... 100101 ..... 1 00000000 .....", "sll {rs1}, {shcnt5}, {rd}", "alu", ""),
         ("srl", "F3R", "10 ..... 100110 ..... 0 00000000 .....", "srl {rs1}, {rs2}, {rd}", "alu", ""),
-        ("srl_i", "F3I", "10 ..... 100110 ..... 1 .............", "srl {rs1}, {simm13}, {rd}", "alu", ""),
+        ("srl_i", "F3SH5", "10 ..... 100110 ..... 1 00000000 .....", "srl {rs1}, {shcnt5}, {rd}", "alu", ""),
         ("sra", "F3R", "10 ..... 100111 ..... 0 00000000 .....", "sra {rs1}, {rs2}, {rd}", "alu", ""),
-        ("sra_i", "F3I", "10 ..... 100111 ..... 1 .............", "sra {rs1}, {simm13}, {rd}", "alu", ""),
+        ("sra_i", "F3SH5", "10 ..... 100111 ..... 1 00000000 .....", "sra {rs1}, {shcnt5}, {rd}", "alu", ""),
         ("ld", "F3R", "11 ..... 000000 ..... 0 00000000 .....", "ld [{rs1} + {rs2}], {rd}", "load", ""),
         ("ld_i", "F3I", "11 ..... 000000 ..... 1 .............", "ld [{rs1} + {simm13}], {rd}", "load", ""),
         ("ldub", "F3R", "11 ..... 000001 ..... 0 00000000 .....", "ldub [{rs1} + {rs2}], {rd}", "load", ""),
@@ -409,7 +585,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         // trap type は 128 + ((rs1 + src2) & 0x7f)。V9 では Tcc で
         // 0x100 + N になる（意味論側でモデル判定する）。
         ("ticc", "F3T", "10 0.... 111010 ..... 0 00000000 .....", "t{cond} {rs1} + {rs2}", "trap", ""),
-        ("ticc_i", "F3TI", "10 0.... 111010 ..... 1 .............", "t{cond} {rs1} + {simm13}", "trap", ""),
+        ("ticc_i", "F3TI7", "10 0.... 111010 ..... 1 000000 .......", "t{cond} {rs1} + {simm7}", "trap", ""),
         // ユーザ ASR。V8 の %y と、V9 の %ccr・%pc。
         ("rdy", "F3ASRRD", "10 ..... 101000 00000 0 00000000 00000", "rd %y, {rd}", "misc", ""),
         ("wry", "F3ASWR", "10 00000 110000 ..... 0 00000000 .....", "wr {rs1}, {rs2}, %y", "misc", ""),
@@ -435,6 +611,73 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("wrtbr_i", "F3ASWI", "10 00000 110011 ..... 1 .............", "wr {rs1}, {simm13}, %tbr", "trap", "!v9"),
         ("rett", "F3ASWR", "10 00000 111001 ..... 0 00000000 .....", "rett {rs1} + {rs2}", "trap", "!v9"),
         ("rett_i", "F3ASWI", "10 00000 111001 ..... 1 .............", "rett {rs1} + {simm13}", "trap", "!v9"),
+        // ---- V9 追加分 ----
+        // 64 ビット乗除。mulx は下位 64 ビット、udivx/sdivx は 64 ビット
+        // 被除数（Y は使わない）。V8 の udiv(0x0e)/sdiv(0x0f) とは op3 が
+        // 違うので衝突はない。
+        ("mulx", "F3R", "10 ..... 001001 ..... 0 00000000 .....", "mulx {rs1}, {rs2}, {rd}", "alu", "v9"),
+        ("mulx_i", "F3I", "10 ..... 001001 ..... 1 .............", "mulx {rs1}, {simm13}, {rd}", "alu", "v9"),
+        ("udivx", "F3R", "10 ..... 001101 ..... 0 00000000 .....", "udivx {rs1}, {rs2}, {rd}", "alu", "v9"),
+        ("udivx_i", "F3I", "10 ..... 001101 ..... 1 .............", "udivx {rs1}, {simm13}, {rd}", "alu", "v9"),
+        ("sdivx", "F3R", "10 ..... 101101 ..... 0 00000000 .....", "sdivx {rs1}, {rs2}, {rd}", "alu", "v9"),
+        ("sdivx_i", "F3I", "10 ..... 101101 ..... 1 .............", "sdivx {rs1}, {simm13}, {rd}", "alu", "v9"),
+        // 64 ビットシフト（bit12 の x 桁が 1）。シフト量はレジスタ形が
+        // rs2 の下位 6 ビット、即値形が shcnt6。
+        ("sllx", "F3R", "10 ..... 100101 ..... 0 10000000 .....", "sllx {rs1}, {rs2}, {rd}", "alu", "v9"),
+        ("sllx_i", "F3SH", "10 ..... 100101 ..... 1 1000000 ......", "sllx {rs1}, {shcnt}, {rd}", "alu", "v9"),
+        ("srlx", "F3R", "10 ..... 100110 ..... 0 10000000 .....", "srlx {rs1}, {rs2}, {rd}", "alu", "v9"),
+        ("srlx_i", "F3SH", "10 ..... 100110 ..... 1 1000000 ......", "srlx {rs1}, {shcnt}, {rd}", "alu", "v9"),
+        ("srax", "F3R", "10 ..... 100111 ..... 0 10000000 .....", "srax {rs1}, {rs2}, {rd}", "alu", "v9"),
+        ("srax_i", "F3SH", "10 ..... 100111 ..... 1 1000000 ......", "srax {rs1}, {shcnt}, {rd}", "alu", "v9"),
+        // MOVcc（bit18=1: cc は icc=0/xcc=1 の 1 ビット）と MOVfcc
+        // （bit18=0: cc は fcc0-3 の 2 ビット）。即値は simm11。
+        ("movcc", "F3MCC", "10 ..... 101100 1 .... 0.0000000 .....", "movcc {xcc} {mcond} {rs2} {rd}", "alu", "v9"),
+        ("movcc_i", "F3MCCI", "10 ..... 101100 1 .... 1.0 ...........", "movcc {xcc} {mcond} {simm11} {rd}", "alu", "v9"),
+        ("movfcc", "F3MFCC", "10 ..... 101100 0 .... 0.. 000000 .....", "movfcc {fcc} {mcond} {rs2} {rd}", "alu", "v9"),
+        ("movfcc_i", "F3MFCCI", "10 ..... 101100 0 .... 1.. ...........", "movfcc {fcc} {mcond} {simm11} {rd}", "alu", "v9"),
+        // MOVr。rcond で rs1 と 0 を比較して転送する。
+        ("movr", "F3MR", "10 ..... 101111 ..... 0 ... 00000 .....", "movr {rs1} {rcond} {rs2} {rd}", "alu", "v9"),
+        ("movr_i", "F3MRI", "10 ..... 101111 ..... 1 ... ..........", "movr {rs1} {rcond} {simm10} {rd}", "alu", "v9"),
+        // POPC（rs1 桁は 0 固定）。
+        ("popc", "F3POPC", "10 ..... 101110 00000 0 00000000 .....", "popc {rs2}, {rd}", "alu", "v9"),
+        ("popc_i", "F3POPCI", "10 ..... 101110 00000 1 .............", "popc {simm13}, {rd}", "alu", "v9"),
+        // CASA/CASXA（op=11 のロード/ストア空間）。i=0 は ASI 指定、
+        // i=1 は %asi レジスタを使う。ユーザーモデルでは通常空間に畳む。
+        ("casa", "F3ASR", "11 ..... 111100 ..... 0 ........ .....", "casa [{rs1}] {asi}, {rs2}, {rd}", "load", "v9"),
+        ("casa_i", "F3SR", "11 ..... 111100 ..... 1 00000000 .....", "casa [{rs1}] %asi, {rs2}, {rd}", "load", "v9"),
+        ("casxa", "F3ASR", "11 ..... 111110 ..... 0 ........ .....", "casxa [{rs1}] {asi}, {rs2}, {rd}", "load", "v9"),
+        ("casxa_i", "F3SR", "11 ..... 111110 ..... 1 00000000 .....", "casxa [{rs1}] %asi, {rs2}, {rd}", "load", "v9"),
+        // バリアとキャッシュ制御。ユーザーモデルではいずれも no-op。
+        ("stbar", "F3NONE", "10 00000 101000 01111 0 00000000 00000", "stbar", "misc", ""),
+        ("membar", "F3MB", "10 00000 101000 01111 1 000000 .......", "membar {mmask}", "misc", "v9"),
+        ("flush", "F3ASWR", "10 00000 111011 ..... 0 00000000 .....", "flush {rs1} + {rs2}", "misc", ""),
+        ("flush_i", "F3ASWI", "10 00000 111011 ..... 1 .............", "flush {rs1} + {simm13}", "misc", ""),
+        // V9 のウィンドウ関連。saved/restored は OS の帳尻合わせを
+        // 完了させる印でユーザーモデルでは no-op。flushw は仕様上
+        // window_flush トラップを起こし得るが、ユーザーモデルでは
+        // no-op に畳む（必要になればトラップ経路へ倒す）。
+        // allclean 等は特権命令。
+        ("saved", "F3NONE", "10 00000 110001 00000 0 00000000 00000", "saved", "misc", "v9"),
+        ("restored", "F3NONE", "10 00001 110001 00000 0 00000000 00000", "restored", "misc", "v9"),
+        ("allclean", "F3NONE", "10 00010 110001 00000 0 00000000 00000", "allclean", "trap", "v9"),
+        ("otherw", "F3NONE", "10 00011 110001 00000 0 00000000 00000", "otherw", "trap", "v9"),
+        ("normalw", "F3NONE", "10 00100 110001 00000 0 00000000 00000", "normalw", "trap", "v9"),
+        ("invalw", "F3NONE", "10 00101 110001 00000 0 00000000 00000", "invalw", "trap", "v9"),
+        ("flushw", "F3NONE", "10 00000 101011 00000 0 00000000 00000", "flushw", "trap", "v9"),
+        // V9 の return（rett と同じ op3。非特権で CTI）。
+        ("return", "F3ASWR", "10 00000 111001 ..... 0 00000000 .....", "return {rs1} + {rs2}", "branch", "v9"),
+        ("return_i", "F3ASWI", "10 00000 111001 ..... 1 .............", "return {rs1} + {simm13}", "branch", "v9"),
+        // V9 特権レジスタの rdpr/wrpr（ユーザーモードではトラップ）。
+        ("rdpr", "F3RD1", "10 ..... 101010 ..... 0 00000000 00000", "rdpr {rs1}, {rd}", "trap", "v9"),
+        ("wrpr", "F3R", "10 ..... 110010 ..... 0 00000000 .....", "wrpr {rs1}, {rs2}, {rd}", "trap", "v9"),
+        ("wrpr_i", "F3I", "10 ..... 110010 ..... 1 .............", "wrpr {rs1}, {simm13}, {rd}", "trap", "v9"),
+        // V9 Tcc。xcc 形は bit12 の cc 桁が 1（icc 形は ticc と同じ
+        // 符号化）。icc の即値形で即値の最上位（bit7）が立つものは
+        // V8 の予約桁と重ならないよう別パターンにする（トラップ番号は
+        // 7 ビットに折れるので意味は変わらない）。
+        ("tcc_i", "F3TI7", "10 0.... 111010 ..... 1 000001 .......", "t{cond} %icc, {rs1} + {simm7}", "trap", "v9"),
+        ("tccx", "F3T", "10 0.... 111010 ..... 0 10000000 .....", "t{cond} %xcc, {rs1} + {rs2}", "trap", "v9"),
+        ("tccx_i", "F3TI8", "10 0.... 111010 ..... 1 10000 ........", "t{cond} %xcc, {rs1} + {simm8}", "trap", "v9"),
         ("done", "F3NONE", "10 00000 111110 00000 0 00000000 00000", "done", "trap", "v9"),
         ("retry", "F3NONE", "10 00001 111110 00000 0 00000000 00000", "retry", "trap", "v9"),
     ];
@@ -445,12 +688,24 @@ pub fn build_model() -> polyisa_isadl::Model {
             pattern: Pattern::parse(pattern).expect("valid pattern"),
             when: if feat.is_empty() {
                 Pred::True
-            } else if let Some(neg) = feat.strip_prefix('!') {
-                // "!v9" のように否定指定すると、その feature がない
-                // モデルでのみデコードする（V8 専用の特権命令用）。
-                Pred::Not(Box::new(Pred::Flag(neg.to_string())))
             } else {
-                Pred::Flag((*feat).to_string())
+                // "&" で連言、"!" で否定を指定する。例 "v8&!v9" は
+                // V8 以降だが V9 ではないモデル（V8 専用命令）を表す。
+                let terms: Vec<Pred> = feat
+                    .split('&')
+                    .map(|t| {
+                        if let Some(neg) = t.strip_prefix('!') {
+                            Pred::Not(Box::new(Pred::Flag(neg.to_string())))
+                        } else {
+                            Pred::Flag(t.to_string())
+                        }
+                    })
+                    .collect();
+                if terms.len() == 1 {
+                    terms.into_iter().next().unwrap()
+                } else {
+                    Pred::All(terms)
+                }
             },
             wheres: vec![],
             syntax: syntax.to_string(),
