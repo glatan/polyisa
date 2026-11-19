@@ -578,6 +578,51 @@ pub fn build_model() -> polyisa_isadl::Model {
         ],
     });
 
+    // VIS の f レジスタ 3 項形は F3FP3 を使う（rd/rs1/rs2 すべて
+    // f 番号）。以下は VIS 特有の組み合わせ。
+    // ピクセル比較（整数 rd、2 つの f 被演算子）。
+    m.formats.push(Format {
+        name: "F3VIR".to_string(),
+        fields: vec!["rd".to_string(), "rs1".to_string(), "rs2".to_string()],
+        operands: vec![
+            gpr("rd", Access::Write),
+            fpr("rs1", Access::Read),
+            fpr("rs2", Access::Read),
+        ],
+    });
+    // VIS 単項形（被演算子が rs1 桁。fsrc1/fnot1）。
+    m.formats.push(Format {
+        name: "F3VF1".to_string(),
+        fields: vec!["rd".to_string(), "rs1".to_string()],
+        operands: vec![fpr("rd", Access::Write), fpr("rs1", Access::Read)],
+    });
+    // VIS 定数形（fzero/fone。被演算子なし）。
+    m.formats.push(Format {
+        name: "F3VZ".to_string(),
+        fields: vec!["rd".to_string()],
+        operands: vec![fpr("rd", Access::Write)],
+    });
+    // V9 の %asi 指定ロード形（i=1。ASI は %asi レジスタから読む）。
+    m.formats.push(Format {
+        name: "F3ARI".to_string(),
+        fields: vec!["rd".to_string(), "rs1".to_string(), "simm13".to_string()],
+        operands: vec![
+            gpr("rd", Access::Write),
+            gpr("rs1", Access::Read),
+            val("simm13"),
+        ],
+    });
+    // V9 の %asi 指定ストア形。
+    m.formats.push(Format {
+        name: "F3ASRI".to_string(),
+        fields: vec!["rd".to_string(), "rs1".to_string(), "simm13".to_string()],
+        operands: vec![
+            gpr("rd", Access::Read),
+            gpr("rs1", Access::Read),
+            val("simm13"),
+        ],
+    });
+
     // 骨格の命令集合。命令群は SP5 以降で足す。ここでは各形式を
     // 一通りデコードできる組を宣言する。
     // (名前, 形式, パターン, 構文, 分類, 機能)
@@ -861,6 +906,119 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("fmovdfcc", "F3FMFCC", "10 ..... 110101 0 .... 0 .. 000010 .....", "fmovdfcc {fcc} {mcond} {rs2} {rd}", "float", "v9"),
         ("fmovrs", "F3FMR", "10 ..... 110101 ..... 0 ... 00101 .....", "fmovrs {rs1} {rcond} {rs2} {rd}", "float", "v9"),
         ("fmovrd", "F3FMR", "10 ..... 110101 ..... 0 ... 00110 .....", "fmovrd {rs1} {rcond} {rs2} {rd}", "float", "v9"),
+        // ---- SP11: ユーザ ASI（V9 の i=1 形は %asi レジスタを読む）----
+        ("lda_i", "F3ARI", "11 ..... 010000 ..... 1 .............", "lda [{rs1} + {simm13}] %asi, {rd}", "load", "v9"),
+        ("lduba_i", "F3ARI", "11 ..... 010001 ..... 1 .............", "lduba [{rs1} + {simm13}] %asi, {rd}", "load", "v9"),
+        ("lduha_i", "F3ARI", "11 ..... 010010 ..... 1 .............", "lduha [{rs1} + {simm13}] %asi, {rd}", "load", "v9"),
+        ("ldda_i", "F3ARI", "11 ..... 010011 ..... 1 .............", "ldda [{rs1} + {simm13}] %asi, {rd}", "load", "v9"),
+        ("sta_i", "F3ASRI", "11 ..... 010100 ..... 1 .............", "sta {rd}, [{rs1} + {simm13}] %asi", "store", "v9"),
+        ("stba_i", "F3ASRI", "11 ..... 010101 ..... 1 .............", "stba {rd}, [{rs1} + {simm13}] %asi", "store", "v9"),
+        ("stha_i", "F3ASRI", "11 ..... 010110 ..... 1 .............", "stha {rd}, [{rs1} + {simm13}] %asi", "store", "v9"),
+        ("stda_i", "F3ASRI", "11 ..... 010111 ..... 1 .............", "stda {rd}, [{rs1} + {simm13}] %asi", "store", "v9"),
+        ("ldsba_i", "F3ARI", "11 ..... 011001 ..... 1 .............", "ldsba [{rs1} + {simm13}] %asi, {rd}", "load", "v9"),
+        ("ldsha_i", "F3ARI", "11 ..... 011010 ..... 1 .............", "ldsha [{rs1} + {simm13}] %asi, {rd}", "load", "v9"),
+        ("ldstuba_i", "F3ARI", "11 ..... 011101 ..... 1 .............", "ldstuba [{rs1} + {simm13}] %asi, {rd}", "load", "v9"),
+        ("swapa_i", "F3ASRI", "11 ..... 011111 ..... 1 .............", "swapa {rd}, [{rs1} + {simm13}] %asi", "load", "v9"),
+        ("rdasi", "F3ASRRD", "10 ..... 101000 00011 0 00000000 00000", "rd %asi, {rd}", "misc", "v9"),
+        ("wrasi", "F3ASWR", "10 00011 110000 ..... 0 00000000 .....", "wr {rs1}, {rs2}, %asi", "misc", "v9"),
+        ("wrasi_i", "F3ASWI", "10 00011 110000 ..... 1 .............", "wr {rs1}, {simm13}, %asi", "misc", "v9"),
+        ("rdfprs", "F3ASRRD", "10 ..... 101000 00110 0 00000000 00000", "rd %fprs, {rd}", "misc", "v9"),
+        ("wrfprs", "F3ASWR", "10 00110 110000 ..... 0 00000000 .....", "wr {rs1}, {rs2}, %fprs", "misc", "v9"),
+        ("wrfprs_i", "F3ASWI", "10 00110 110000 ..... 1 .............", "wr {rs1}, {simm13}, %fprs", "misc", "v9"),
+        // ---- SP11: VIS（機能 "vis" / "vis2" でゲート）----
+        ("rdgsr", "F3ASRRD", "10 ..... 101000 10011 0 00000000 00000", "rd %gsr, {rd}", "misc", "v9"),
+        ("wrgsr", "F3ASWR", "10 10011 110000 ..... 0 00000000 .....", "wr {rs1}, {rs2}, %gsr", "misc", "v9"),
+        ("wrgsr_i", "F3ASWI", "10 10011 110000 ..... 1 .............", "wr {rs1}, {simm13}, %gsr", "misc", "v9"),
+        // EDGE（cc 付きは ICC/XCC を s1-s2 で更新）。
+        ("edge8cc", "F3R", "10 ..... 110110 ..... 0 00000000 .....", "edge8cc {rs1}, {rs2}, {rd}", "vis", "vis"),
+        ("edge8lcc", "F3R", "10 ..... 110110 ..... 0 00000010 .....", "edge8lcc {rs1}, {rs2}, {rd}", "vis", "vis"),
+        ("edge16cc", "F3R", "10 ..... 110110 ..... 0 00000100 .....", "edge16cc {rs1}, {rs2}, {rd}", "vis", "vis"),
+        ("edge16lcc", "F3R", "10 ..... 110110 ..... 0 00000110 .....", "edge16lcc {rs1}, {rs2}, {rd}", "vis", "vis"),
+        ("edge32cc", "F3R", "10 ..... 110110 ..... 0 00001000 .....", "edge32cc {rs1}, {rs2}, {rd}", "vis", "vis"),
+        ("edge32lcc", "F3R", "10 ..... 110110 ..... 0 00001010 .....", "edge32lcc {rs1}, {rs2}, {rd}", "vis", "vis"),
+        ("edge8n", "F3R", "10 ..... 110110 ..... 0 00000001 .....", "edge8n {rs1}, {rs2}, {rd}", "vis", "vis2"),
+        ("edge8ln", "F3R", "10 ..... 110110 ..... 0 00000011 .....", "edge8ln {rs1}, {rs2}, {rd}", "vis", "vis2"),
+        ("edge16n", "F3R", "10 ..... 110110 ..... 0 00000101 .....", "edge16n {rs1}, {rs2}, {rd}", "vis", "vis2"),
+        ("edge16ln", "F3R", "10 ..... 110110 ..... 0 00000111 .....", "edge16ln {rs1}, {rs2}, {rd}", "vis", "vis2"),
+        ("edge32n", "F3R", "10 ..... 110110 ..... 0 00001001 .....", "edge32n {rs1}, {rs2}, {rd}", "vis", "vis2"),
+        ("edge32ln", "F3R", "10 ..... 110110 ..... 0 00001011 .....", "edge32ln {rs1}, {rs2}, {rd}", "vis", "vis2"),
+        // ARRAY（アドレスビットの再配置）。
+        ("array8", "F3R", "10 ..... 110110 ..... 0 00010000 .....", "array8 {rs1}, {rs2}, {rd}", "vis", "vis"),
+        ("array16", "F3R", "10 ..... 110110 ..... 0 00010010 .....", "array16 {rs1}, {rs2}, {rd}", "vis", "vis"),
+        ("array32", "F3R", "10 ..... 110110 ..... 0 00010100 .....", "array32 {rs1}, {rs2}, {rd}", "vis", "vis"),
+        // ALIGNADDR（GSR.align を更新）。
+        ("alignaddr", "F3R", "10 ..... 110110 ..... 0 00011000 .....", "alignaddr {rs1}, {rs2}, {rd}", "vis", "vis"),
+        ("alignaddrl", "F3R", "10 ..... 110110 ..... 0 00011010 .....", "alignaddrl {rs1}, {rs2}, {rd}", "vis", "vis"),
+        ("bmask", "F3R", "10 ..... 110110 ..... 0 00011001 .....", "bmask {rs1}, {rs2}, {rd}", "vis", "vis2"),
+        ("bshuffle", "F3FP3", "10 ..... 110110 ..... 0 01001100 .....", "bshuffle {rs1}, {rs2}, {rd}", "vis", "vis2"),
+        // ピクセル比較（結果は整数レジスタのマスク）。
+        ("fpcmple16", "F3VIR", "10 ..... 110110 ..... 0 00100000 .....", "fpcmple16 {rs1}, {rs2}, {rd}", "vis", "vis"),
+        ("fpcmpne16", "F3VIR", "10 ..... 110110 ..... 0 00100010 .....", "fpcmpne16 {rs1}, {rs2}, {rd}", "vis", "vis"),
+        ("fpcmple32", "F3VIR", "10 ..... 110110 ..... 0 00100100 .....", "fpcmple32 {rs1}, {rs2}, {rd}", "vis", "vis"),
+        ("fpcmpne32", "F3VIR", "10 ..... 110110 ..... 0 00100110 .....", "fpcmpne32 {rs1}, {rs2}, {rd}", "vis", "vis"),
+        ("fpcmpgt16", "F3VIR", "10 ..... 110110 ..... 0 00101000 .....", "fpcmpgt16 {rs1}, {rs2}, {rd}", "vis", "vis"),
+        ("fpcmpeq16", "F3VIR", "10 ..... 110110 ..... 0 00101010 .....", "fpcmpeq16 {rs1}, {rs2}, {rd}", "vis", "vis"),
+        ("fpcmpgt32", "F3VIR", "10 ..... 110110 ..... 0 00101100 .....", "fpcmpgt32 {rs1}, {rs2}, {rd}", "vis", "vis"),
+        ("fpcmpeq32", "F3VIR", "10 ..... 110110 ..... 0 00101110 .....", "fpcmpeq32 {rs1}, {rs2}, {rd}", "vis", "vis"),
+        // 乗算系。
+        ("fmul8x16", "F3FP3", "10 ..... 110110 ..... 0 00110001 .....", "fmul8x16 {rs1}, {rs2}, {rd}", "vis", "vis"),
+        ("fmul8x16au", "F3FP3", "10 ..... 110110 ..... 0 00110011 .....", "fmul8x16au {rs1}, {rs2}, {rd}", "vis", "vis"),
+        ("fmul8x16al", "F3FP3", "10 ..... 110110 ..... 0 00110101 .....", "fmul8x16al {rs1}, {rs2}, {rd}", "vis", "vis"),
+        ("fmul8sux16", "F3FP3", "10 ..... 110110 ..... 0 00110110 .....", "fmul8sux16 {rs1}, {rs2}, {rd}", "vis", "vis"),
+        ("fmul8ulx16", "F3FP3", "10 ..... 110110 ..... 0 00110111 .....", "fmul8ulx16 {rs1}, {rs2}, {rd}", "vis", "vis"),
+        ("fmuld8sux16", "F3FP3", "10 ..... 110110 ..... 0 00111000 .....", "fmuld8sux16 {rs1}, {rs2}, {rd}", "vis", "vis"),
+        ("fmuld8ulx16", "F3FP3", "10 ..... 110110 ..... 0 00111001 .....", "fmuld8ulx16 {rs1}, {rs2}, {rd}", "vis", "vis"),
+        // パック。
+        ("fpack32", "F3FP3", "10 ..... 110110 ..... 0 00111010 .....", "fpack32 {rs1}, {rs2}, {rd}", "vis", "vis"),
+        ("fpack16", "F3FP2", "10 ..... 110110 00000 0 00111011 .....", "fpack16 {rs2}, {rd}", "vis", "vis"),
+        ("fpackfix", "F3FP2", "10 ..... 110110 00000 0 00111101 .....", "fpackfix {rs2}, {rd}", "vis", "vis"),
+        // 累積距離・アライン・バイト操作。
+        ("pdist", "F3FP3", "10 ..... 110110 ..... 0 00111110 .....", "pdist {rs1}, {rs2}, {rd}", "vis", "vis"),
+        ("faligndata", "F3FP3", "10 ..... 110110 ..... 0 01001000 .....", "faligndata {rs1}, {rs2}, {rd}", "vis", "vis"),
+        ("fpmerge", "F3FP3", "10 ..... 110110 ..... 0 01001011 .....", "fpmerge {rs1}, {rs2}, {rd}", "vis", "vis"),
+        ("fexpand", "F3FP2", "10 ..... 110110 00000 0 01001101 .....", "fexpand {rs2}, {rd}", "vis", "vis"),
+        // 並列加減算（mod 演算。飽和系は VIS3 以降）。
+        ("fpadd16", "F3FP3", "10 ..... 110110 ..... 0 01010000 .....", "fpadd16 {rs1}, {rs2}, {rd}", "vis", "vis"),
+        ("fpadd16s", "F3FP3", "10 ..... 110110 ..... 0 01010001 .....", "fpadd16s {rs1}, {rs2}, {rd}", "vis", "vis"),
+        ("fpadd32", "F3FP3", "10 ..... 110110 ..... 0 01010010 .....", "fpadd32 {rs1}, {rs2}, {rd}", "vis", "vis"),
+        ("fpadd32s", "F3FP3", "10 ..... 110110 ..... 0 01010011 .....", "fpadd32s {rs1}, {rs2}, {rd}", "vis", "vis"),
+        ("fpsub16", "F3FP3", "10 ..... 110110 ..... 0 01010100 .....", "fpsub16 {rs1}, {rs2}, {rd}", "vis", "vis"),
+        ("fpsub16s", "F3FP3", "10 ..... 110110 ..... 0 01010101 .....", "fpsub16s {rs1}, {rs2}, {rd}", "vis", "vis"),
+        ("fpsub32", "F3FP3", "10 ..... 110110 ..... 0 01010110 .....", "fpsub32 {rs1}, {rs2}, {rd}", "vis", "vis"),
+        ("fpsub32s", "F3FP3", "10 ..... 110110 ..... 0 01010111 .....", "fpsub32s {rs1}, {rs2}, {rd}", "vis", "vis"),
+        // 論理演算（d は 64 ビット、s は下位 32 ビット）。
+        ("fzero", "F3VZ", "10 ..... 110110 00000 0 01100000 00000", "fzero {rd}", "vis", "vis"),
+        ("fzeros", "F3VZ", "10 ..... 110110 00000 0 01100001 00000", "fzeros {rd}", "vis", "vis"),
+        ("fone", "F3VZ", "10 ..... 110110 00000 0 01111110 00000", "fone {rd}", "vis", "vis"),
+        ("fones", "F3VZ", "10 ..... 110110 00000 0 01111111 00000", "fones {rd}", "vis", "vis"),
+        ("fsrc1", "F3VF1", "10 ..... 110110 ..... 0 01110100 00000", "fsrc1 {rs1}, {rd}", "vis", "vis"),
+        ("fsrc1s", "F3VF1", "10 ..... 110110 ..... 0 01110101 00000", "fsrc1s {rs1}, {rd}", "vis", "vis"),
+        ("fsrc2", "F3FP2", "10 ..... 110110 00000 0 01111000 .....", "fsrc2 {rs2}, {rd}", "vis", "vis"),
+        ("fsrc2s", "F3FP2", "10 ..... 110110 00000 0 01111001 .....", "fsrc2s {rs2}, {rd}", "vis", "vis"),
+        ("fnot1", "F3VF1", "10 ..... 110110 ..... 0 01101010 00000", "fnot1 {rs1}, {rd}", "vis", "vis"),
+        ("fnot1s", "F3VF1", "10 ..... 110110 ..... 0 01101011 00000", "fnot1s {rs1}, {rd}", "vis", "vis"),
+        ("fnot2", "F3FP2", "10 ..... 110110 00000 0 01100110 .....", "fnot2 {rs2}, {rd}", "vis", "vis"),
+        ("fnot2s", "F3FP2", "10 ..... 110110 00000 0 01100111 .....", "fnot2s {rs2}, {rd}", "vis", "vis"),
+        ("fnor", "F3FP3", "10 ..... 110110 ..... 0 01100010 .....", "fnor {rs1}, {rs2}, {rd}", "vis", "vis"),
+        ("fnors", "F3FP3", "10 ..... 110110 ..... 0 01100011 .....", "fnors {rs1}, {rs2}, {rd}", "vis", "vis"),
+        ("fandnot2", "F3FP3", "10 ..... 110110 ..... 0 01100100 .....", "fandnot2 {rs1}, {rs2}, {rd}", "vis", "vis"),
+        ("fandnot2s", "F3FP3", "10 ..... 110110 ..... 0 01100101 .....", "fandnot2s {rs1}, {rs2}, {rd}", "vis", "vis"),
+        ("fandnot1", "F3FP3", "10 ..... 110110 ..... 0 01101000 .....", "fandnot1 {rs1}, {rs2}, {rd}", "vis", "vis"),
+        ("fandnot1s", "F3FP3", "10 ..... 110110 ..... 0 01101001 .....", "fandnot1s {rs1}, {rs2}, {rd}", "vis", "vis"),
+        ("fxor", "F3FP3", "10 ..... 110110 ..... 0 01101100 .....", "fxor {rs1}, {rs2}, {rd}", "vis", "vis"),
+        ("fxors", "F3FP3", "10 ..... 110110 ..... 0 01101101 .....", "fxors {rs1}, {rs2}, {rd}", "vis", "vis"),
+        ("fnand", "F3FP3", "10 ..... 110110 ..... 0 01101110 .....", "fnand {rs1}, {rs2}, {rd}", "vis", "vis"),
+        ("fnands", "F3FP3", "10 ..... 110110 ..... 0 01101111 .....", "fnands {rs1}, {rs2}, {rd}", "vis", "vis"),
+        ("fand", "F3FP3", "10 ..... 110110 ..... 0 01110000 .....", "fand {rs1}, {rs2}, {rd}", "vis", "vis"),
+        ("fands", "F3FP3", "10 ..... 110110 ..... 0 01110001 .....", "fands {rs1}, {rs2}, {rd}", "vis", "vis"),
+        ("fxnor", "F3FP3", "10 ..... 110110 ..... 0 01110010 .....", "fxnor {rs1}, {rs2}, {rd}", "vis", "vis"),
+        ("fxnors", "F3FP3", "10 ..... 110110 ..... 0 01110011 .....", "fxnors {rs1}, {rs2}, {rd}", "vis", "vis"),
+        ("fornot2", "F3FP3", "10 ..... 110110 ..... 0 01110110 .....", "fornot2 {rs1}, {rs2}, {rd}", "vis", "vis"),
+        ("fornot2s", "F3FP3", "10 ..... 110110 ..... 0 01110111 .....", "fornot2s {rs1}, {rs2}, {rd}", "vis", "vis"),
+        ("fornot1", "F3FP3", "10 ..... 110110 ..... 0 01111010 .....", "fornot1 {rs1}, {rs2}, {rd}", "vis", "vis"),
+        ("fornot1s", "F3FP3", "10 ..... 110110 ..... 0 01111011 .....", "fornot1s {rs1}, {rs2}, {rd}", "vis", "vis"),
+        ("for", "F3FP3", "10 ..... 110110 ..... 0 01111100 .....", "for {rs1}, {rs2}, {rd}", "vis", "vis"),
+        ("fors", "F3FP3", "10 ..... 110110 ..... 0 01111101 .....", "fors {rs1}, {rs2}, {rd}", "vis", "vis"),
     ];
     for (name, format, pattern, syntax, timing, feat) in insns {
         m.insns.push(Insn {

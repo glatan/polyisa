@@ -81,6 +81,10 @@ pub struct CpuState {
     /// V9 の条件コードレジスタ（%ccr）。下位 4 ビットが ICC、
     /// 上位 4 ビットが XCC。V7/V8 では PSR の ICC を使う。
     pub ccr: u64,
+    /// V9 の ASI レジスタ（%asi）。i=1 の ASI 指定形が読む。
+    pub asi: u64,
+    /// V9 の FPRS（%fprs）。FEF（ビット 2）が f レジスタの有効化。
+    pub fprs: u64,
 }
 
 impl Default for CpuState {
@@ -100,6 +104,9 @@ impl Default for CpuState {
             tick: 0,
             tt: 0,
             ccr: 0,
+            // V9 の ASI_PRIMARY。V8 ではこのフィールドは使わない。
+            asi: 0x80,
+            fprs: 0,
         }
     }
 }
@@ -139,12 +146,14 @@ mod tests {
         assert_eq!(core::mem::offset_of!(CpuState, tick), REG_FILE * 8 + 41 * 8);
         assert_eq!(core::mem::offset_of!(CpuState, tt), REG_FILE * 8 + 42 * 8);
         assert_eq!(core::mem::offset_of!(CpuState, ccr), REG_FILE * 8 + 43 * 8);
+        assert_eq!(core::mem::offset_of!(CpuState, asi), REG_FILE * 8 + 44 * 8);
+        assert_eq!(core::mem::offset_of!(CpuState, fprs), REG_FILE * 8 + 45 * 8);
     }
 
     #[test]
     fn insn_count() {
-        // 骨格の命令集合（整数演算・load/store 全サイズ・ASI 形・分岐）。
-        assert_eq!(INSNS.len(), 228);
+        // 骨格の命令集合（整数演算・load/store 全サイズ・ASI 形・分岐・FPU・VIS）。
+        assert_eq!(INSNS.len(), 330);
     }
 
     #[test]
