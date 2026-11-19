@@ -229,6 +229,8 @@ pub fn exec<B: Backend>(b: &mut B, insn: super::Insn, w: u64, pc: u64) -> Flow<B
         super::Insn::Jsr => jmp_jsr(b, w, pc, true),
         super::Insn::Rts => rts(b),
         super::Insn::Rtr => rtr(b),
+        super::Insn::Scc => scc(b, w, pc),
+        super::Insn::Dbcc => dbcc(b, w, pc),
         super::Insn::Illegal => Err(b.raise(GuestException {
             kind: ExceptionKind::Trap,
             // m68k の例外ベクタ番号 4（Illegal Instruction）。
@@ -1235,11 +1237,16 @@ fn disp_val<B: Backend>(b: &mut B, w: u64, pc: u64) -> Result<(B::V<W32>, u32), 
     }
 }
 
-/// Bcc の条件評価。cc=2..15。C/V/Z/N から論理合成する。
+/// 条件評価。cc=0/1 は T/F（常に真/偽）、2..15 は C/V/Z/N の論理合成。
 // Ref: SPEC-M68K-PRM (Rev 1) §Condition Code Computation.
 fn cond_eval<B: Backend>(b: &mut B, cc: u8) -> B::B {
-    // cc はデコードで 2..=15 に限定される（0/1 は bra/bsr）。
-    debug_assert!((2..=15).contains(&cc));
+    // bcc では 2..=15、scc/dbcc では 0（T=真）と 1（F=偽）も来る。
+    if cc < 2 {
+        // cc=0 は常に真、cc=1 は常に偽。
+        let c = b.konst::<W32>(u32::from(1 - cc));
+        let z = b.konst::<W32>(0);
+        return b.cmp(Cmp::Ne, c, z);
+    }
     let ccr = b.get(ccr_ref());
     let c32 = b.zext::<W8, W32>(ccr);
     let one = b.konst::<W32>(1);
@@ -1394,4 +1401,66 @@ fn rtr<B: Backend>(b: &mut B) -> Flow<B> {
     let v64 = b.zext::<W32, W64>(v);
     b.jump(v64);
     Ok(())
+}
+
+/// scc。条件が真なら EA byte=0xFF、偽なら 0x00。旗不変。
+/// EA は data alterable（emode=1 は dbcc 空間として decode で排他済み）。
+// Ref: SPEC-M68K-PRM (Rev 1) §Scc.
+fn scc<B: Backend>(b: &mut B, w: u64, pc: u64) -> Flow<B> {
+    let emode = ea::ea_mode(w);
+    let ereg = ea::ea_reg(w);
+    debug_assert!(emode != 1);
+    if emode == 7 && ereg >= 2 {
+        return Err(illegal(b));
+    }
+    let (e, _n) = ea::eval(b, emode, ereg, 1, pc + 2)?;
+    let c = cond_eval(b, ((w >> 8) & 0xF) as u8);
+    let ff = b.konst::<W32>(0xFF);
+    let zz = b.konst::<W32>(0);
+    let v = b.select(c, ff, zz);
+    write_ea(b, &e, 1, v)
+}
+
+/// dbcc。条件が真なら何もしない。偽なら Dn の下位 word を 1 減らし、
+/// 結果が 0xFFFF でなければ pc+2+disp16 へ分岐する。
+// Ref: SPEC-M68K-PRM (Rev 1) §DBcc.
+fn dbcc<B: Backend>(b: &mut B, w: u64, pc: u64) -> Flow<B> {
+    let rn = ea::ea_reg(w);
+    let (e, _i) = ea::eval(b, 7, 4, 2, pc + 2)?;
+    let v = match e {
+        Ea::Imm(v) => v,
+        _ => unreachable!("mode7 reg4 は Imm"),
+    };
+    let k = b.konst::<W32>(16);
+    let s = b.shl(v, k);
+    let disp = b.shr_a(s, k);
+    let c = cond_eval(b, ((w >> 8) & 0xF) as u8);
+    let base = b.konst::<W32>(pc.wrapping_add(2) as u32);
+    let t32 = b.add(base, disp);
+    let t64 = b.zext::<W32, W64>(t32);
+    b.if_then_else(
+        c,
+        |_| Ok(()),
+        |bb| {
+            let d = bb.get(D(rn).state());
+            let mk = bb.konst::<W32>(0xFFFF);
+            let hik = bb.konst::<W32>(0xFFFF_0000);
+            let hi = bb.and(d, hik);
+            let lo = bb.and(d, mk);
+            let one = bb.konst::<W32>(1);
+            let lm1 = bb.sub(lo, one);
+            let lo1 = bb.and(lm1, mk);
+            let d2 = bb.or(hi, lo1);
+            bb.set(D(rn).state(), d2);
+            let not_ff = bb.cmp(Cmp::Ne, lo1, mk);
+            bb.if_then_else(
+                not_ff,
+                |bbb| {
+                    bbb.jump(t64);
+                    Ok(())
+                },
+                |_| Ok(()),
+            )
+        },
+    )
 }

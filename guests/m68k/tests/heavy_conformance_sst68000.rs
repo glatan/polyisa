@@ -100,7 +100,9 @@ const FILES: &[&str] = &[
     "JMP",
     "JSR",
     "RTS",
-    "RTR", //
+    "RTR",
+    "Scc",
+    "DBcc", //
     "ANDItoCCR",
     "ANDItoSR",
     "ORItoCCR",
@@ -396,6 +398,14 @@ fn sst68000_conformance() {
                 && (env.pc & 1 == 1 || (t.fina.regs[17] & 0x2000) != (t.init.regs[17] & 0x2000))
             {
                 exc += 1;
+                if std::env::var("POLYISA_SST_DEBUG").is_ok() {
+                    let odd = env.pc & 1 == 1;
+                    let schg = (t.fina.regs[17] & 0x2000) != (t.init.regs[17] & 0x2000);
+                    eprintln!(
+                        "  exc {name}#{i} [{}] init_sr={:04x} odd_pc={odd} s_chg={schg}",
+                        t.name, t.init.regs[17]
+                    );
+                }
                 d.clear();
             }
             if !d.is_empty() {

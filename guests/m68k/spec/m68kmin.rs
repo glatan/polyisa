@@ -5,7 +5,7 @@
 // 宣言する命令は、16ビット固定の実符号化（nop/reset/rts/rtr/rte/illegal）、
 // EA フィールドを持つ move/movea/moveq（C1）、算術・比較（C2）、
 // 論理・単項（C3）、シフト/ローテート（C4）、ビット操作（C5）、
-// 分岐・復帰（C6）。
+// 分岐・復帰（C6）、scc/dbcc（C7）。
 // EA モードの解釈と拡張語の消費は `src/ea.rs`、意味論は `src/sem.rs`。
 // 出典は SPEC-M68K-PRM (M68000PM/AD Rev 1) である。
 // Ref: SPEC-M68K-PRM (Rev 1).
@@ -200,6 +200,12 @@ pub fn build_model() -> polyisa_isadl::Model {
     m.formats.push(Format {
         name: "JF".to_string(),
         fields: vec!["emode".to_string(), "ereg".to_string()],
+        operands: vec![],
+    });
+    // SC: scc/dbcc。emode=1 が dbcc（Dn+変位語）の空間。
+    m.formats.push(Format {
+        name: "SC".to_string(),
+        fields: vec!["cc".to_string(), "emode".to_string(), "ereg".to_string()],
         operands: vec![],
     });
 
@@ -599,6 +605,22 @@ pub fn build_model() -> polyisa_isadl::Model {
         ),
         ("jmp", "JF", "0100 1110 11 ......", "jmp", &[]),
         ("jsr", "JF", "0100 1110 10 ......", "jsr", &[]),
+        // C7: scc/dbcc。scc は emode!=1（emode=1 が dbcc の空間）。
+        // Ref: SPEC-M68K-PRM (Rev 1) §Scc/DBcc.
+        (
+            "scc",
+            "SC",
+            "0101 .... 11 ......",
+            "scc",
+            &[("emode", WhereOp::Ne, 1), ("qsz", WhereOp::Eq, 3)],
+        ),
+        (
+            "dbcc",
+            "SC",
+            "0101 .... 11 001 ...",
+            "dbcc",
+            &[("emode", WhereOp::Eq, 1), ("qsz", WhereOp::Eq, 3)],
+        ),
     ];
     for (name, format, pattern, syntax, wheres) in arith {
         m.insns.push(Insn {
@@ -616,7 +638,7 @@ pub fn build_model() -> polyisa_isadl::Model {
                 .collect(),
             syntax: syntax.to_string(),
             // 分岐系は ctrl、それ以外は misc（サイクルモデルは S14-2）。
-            timing: if matches!(*name, "bra" | "bsr" | "bcc" | "jmp" | "jsr") {
+            timing: if matches!(*name, "bra" | "bsr" | "bcc" | "dbcc" | "jmp" | "jsr") {
                 "ctrl"
             } else {
                 "misc"

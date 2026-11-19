@@ -1219,3 +1219,104 @@ fn jump_return_forms() {
         c => panic!("unexpected ctrl: {c:?}"),
     }
 }
+
+/// C7: scc/dbcc。条件の真偽・Dn 下位ワードの減算・-1 停止を見る。
+// Ref: SPEC-M68K-PRM (Rev 1) §Scc/DBcc.
+#[test]
+fn scc_dbcc_forms() {
+    use polyisa_engine::interp::Ctrl;
+
+    // seq D0（0x57C0: cc=7=EQ）: Z=1 なら 0xFF、Z=0 なら 0x00。
+    let mut env = env_with_code(&[0x57C0]);
+    env.backend.set(sem::ccr_ref(), 1 << sem::sr_bit::Z);
+    env.step(|b| sem::exec(b, Insn::Scc, 0x57C0, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(D(0).state()) & 0xFF, 0xFF);
+    let mut env = env_with_code(&[0x57C0]);
+    env.step(|b| sem::exec(b, Insn::Scc, 0x57C0, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(D(0).state()) & 0xFF, 0x00);
+
+    // st D0（0x50C0: cc=0=T）は常に 0xFF。
+    let mut env = env_with_code(&[0x50C0]);
+    env.step(|b| sem::exec(b, Insn::Scc, 0x50C0, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(D(0).state()) & 0xFF, 0xFF);
+
+    // scc で非 alterable（#imm 宛）は illegal。
+    let mut env = env_with_code(&[0x50FC]);
+    let ex = env
+        .step(|b| sem::exec(b, Insn::Scc, 0x50FC, 0x1000))
+        .unwrap_err();
+    match ex {
+        InterpExit::Exception(x) => assert_eq!(x.code, 4),
+        e => panic!("unexpected: {e:?}"),
+    }
+
+    // dbeq D0, disp（0x57C8 + 変位語）: Z=0 → lo-1、!=0xFFFF なら分岐。
+    let mut env = env_with_code(&[0x57C8, 0x0010]);
+    env.backend.set(D(0).state(), 0x0003);
+    env.step(|b| sem::exec(b, Insn::Dbcc, 0x57C8, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(D(0).state()), 0x0002);
+    match env.backend.ctrl {
+        Ctrl::Jump(t) => assert_eq!(t, 0x1012), // pc+2+0x10
+        c => panic!("unexpected ctrl: {c:?}"),
+    }
+
+    // Z=1（条件真）なら減算も分岐もしない。
+    let mut env = env_with_code(&[0x57C8, 0x0010]);
+    env.backend.set(D(0).state(), 0x0003);
+    env.backend.set(sem::ccr_ref(), 1 << sem::sr_bit::Z);
+    env.step(|b| sem::exec(b, Insn::Dbcc, 0x57C8, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(D(0).state()), 0x0003);
+    assert_eq!(env.backend.ctrl, Ctrl::Fallthrough);
+
+    // lo=0 → lo-1=0xFFFF になれば分岐しない（カウンタ終了）。
+    let mut env = env_with_code(&[0x57C8, 0x0010]);
+    env.backend.set(D(0).state(), 0xA500_0000);
+    env.step(|b| sem::exec(b, Insn::Dbcc, 0x57C8, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(D(0).state()), 0xA500_FFFF);
+    assert_eq!(env.backend.ctrl, Ctrl::Fallthrough);
+}
+
+/// C7: 固定条件の両端と decode 排他。
+#[test]
+fn scc_dbcc_fixed_cc() {
+    use polyisa_engine::interp::Ctrl;
+
+    // sf D0（0x51C0: cc=1=F）は常に 0x00。
+    let mut env = env_with_code(&[0x51C0]);
+    env.backend.set(D(0).state(), 0xFF);
+    env.step(|b| sem::exec(b, Insn::Scc, 0x51C0, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(D(0).state()) & 0xFF, 0x00);
+
+    // dbt（0x50C8: cc=0=T）は減算も分岐もしない。
+    let mut env = env_with_code(&[0x50C8, 0x0010]);
+    env.backend.set(D(0).state(), 0x0003);
+    env.step(|b| sem::exec(b, Insn::Dbcc, 0x50C8, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(D(0).state()), 0x0003);
+    assert_eq!(env.backend.ctrl, Ctrl::Fallthrough);
+
+    // scc をメモリ (a0) 宛に書く。
+    let mut env = env_with_data(&[0x50D0], &[0x00]);
+    env.backend.set(A(0).state(), 0x4000);
+    env.step(|b| sem::exec(b, Insn::Scc, 0x50D0, 0x1000))
+        .unwrap();
+    let mut buf = [0u8; 1];
+    env.backend
+        .mem
+        .read(VirtAddr(0x4000), &mut buf, DRD)
+        .unwrap();
+    assert_eq!(buf[0], 0xFF);
+
+    // decode 排他: emode=1 の語は scc ではなく dbcc。
+    assert_eq!(polyisa_guest_m68k::decode(0x57C0, 16), Some(Insn::Scc));
+    assert_eq!(polyisa_guest_m68k::decode(0x57C8, 16), Some(Insn::Dbcc));
+    // qsz!=3 の語は addq/subq であって scc/dbcc ではない。
+    assert_eq!(polyisa_guest_m68k::decode(0x5240, 16), Some(Insn::Addq));
+}
