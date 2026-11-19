@@ -46,7 +46,7 @@
 | SP2 | `guests/sparc` の段階 2 の試作を本実装に差し替える骨格: CpuState（g/o/i/l レジスタ・CWP・PSR/TSTATE・PC/nPC）、機能（V7・V8・V9・VIS）とモデルの宣言、sem 層、ワークスペース配線 | SP1 | 85df434 |
 | SP3 | デコード方式の決定: 32 ビット固定長の map/パターン。遅延スロットは PC/nPC として実行ループ側で表現 | SP2 | 85df434 |
 | SP4 | `run_sparc` 実行ループ + bare 最小テスト | SP3 | 4c08ee8 |
-| SP5 | 整数演算: add/sub/論理/シフト/sethi と、V8 の umul/smul/udiv/sdiv/mulscc | SP4 | - |
+| SP5 | 整数演算: add/sub/論理/シフト/sethi と、V8 の umul/smul/udiv/sdiv/mulscc | SP4 | 069ed0d |
 | SP6 | load/store 全サイズ・ldstub/swap・ASI 指定形 | SP4 | - |
 | SP7 | 分岐・call・jmpl・return。annul ビットと遅延スロット内の分岐（DCTI couple） | SP4 | - |
 | SP8 | ウィンドウ命令 save/restore・ta/tcc（V8 の Ticc を含む）・ユーザ ASR（rdy/wry、V9 の rdccr/wrccr/rdpc）。rd/wr psr や rett/done/retry は特権命令なので、ユーザーモードでは特権違反トラップの経路だけを実装する | SP4 | - |
