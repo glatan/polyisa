@@ -17774,23 +17774,26 @@ fn run32_rdrand_rdseed() {
         want3,
         "rdrand edx"
     );
-    // 負のデコード検査: F2/F3 形は別命令スロット（RDPID/SENDUIPI/
-    // XSUSLDTRK/予約）なので decode_map は拒否する。
+    // 負のデコード検査: F2 形は予約。F3 形は RDPID/SENDUIPI が
+    // 宣言済みだが、F2 の XSUSLDTRK スロットは未宣言。
     use polyisa_guest_x86::{MODE_ADR_A32, MODE_ADR_SHIFT, MODE_OPD_O32, MODE_OPD_SHIFT};
     let modes = (MODE_OPD_O32 << MODE_OPD_SHIFT) | (MODE_ADR_A32 << MODE_ADR_SHIFT);
     let feats = polyisa_guest_x86::DEFAULT_FEATS;
     for bytes in [
         &[0xF2, 0x0F, 0xC7, 0xF0][..], // F2 rdrand → 予約
-        &[0xF3, 0x0F, 0xC7, 0xF0][..], // F3 rdrand → SENDUIPI/予約
+        &[0xF3, 0x0F, 0xC7, 0xF0][..], // F3 rdrand → SENDUIPI（64 ビット専用）
         &[0xF2, 0x0F, 0xC7, 0xF8][..], // F2 rdseed → 予約
-        &[0xF3, 0x0F, 0xC7, 0xF8][..], // F3 rdseed → RDPID
         &[0xF2, 0x0F, 0x01, 0xE8][..], // F2 serialize → XSUSLDTRK
+        &[0x66, 0x0F, 0x01, 0xE8][..], // 66 serialize → #UD（XED 実測）
     ] {
         assert!(
             polyisa_guest_x86::decode_map(bytes, modes, feats).is_none(),
             "{bytes:?}"
         );
     }
+    // F3 0F C7 F8 は RDSEED ではなく RDPID。
+    let d = polyisa_guest_x86::decode_map(&[0xF3, 0x0F, 0xC7, 0xF8], modes, feats).unwrap();
+    assert_eq!(d.insn, polyisa_guest_x86::Insn::RdpidRv);
     // F3 0F 01 E8 は SERIALIZE ではなく SETSSBSY（CET-SS）。
     let d = polyisa_guest_x86::decode_map(&[0xF3, 0x0F, 0x01, 0xE8], modes, feats).unwrap();
     assert_eq!(d.insn, polyisa_guest_x86::Insn::Setssbsy);
@@ -17799,7 +17802,6 @@ fn run32_rdrand_rdseed() {
         &[0x0F, 0xC7, 0xF0][..],
         &[0x66, 0x0F, 0xC7, 0xF0][..], // rdrand ax
         &[0x0F, 0xC7, 0xF8][..],
-        &[0x66, 0x0F, 0x01, 0xE8][..], // 66 serialize
     ] {
         assert!(
             polyisa_guest_x86::decode_map(bytes, modes, feats).is_some(),
@@ -17882,10 +17884,9 @@ fn run64_fsgsbase_cet() {
             "{bytes:?}"
         );
     }
-    // FSGSBASE は mod=11 専用。mod≠11 の F3 /0 は接頭辞を無視
-    // する FXSAVE として受理される（C1a）。
-    let d = polyisa_guest_x86::decode_map(&[0xF3, 0x0F, 0xAE, 0x00], modes, feats).unwrap();
-    assert_eq!(d.insn, polyisa_guest_x86::Insn::Fxsave);
+    // FSGSBASE は mod=11 専用。mod≠11 の F3 /0 は FXSAVE のスロット
+    // だが、E1b の XED 整合で接頭辞付き FXSAVE は #UD。
+    assert!(polyisa_guest_x86::decode_map(&[0xF3, 0x0F, 0xAE, 0x00], modes, feats).is_none());
     // A4d で UMONITOR が宣言されたので F3 0F AE /6 mod=11 は受理。
     let d = polyisa_guest_x86::decode_map(&[0xF3, 0x0F, 0xAE, 0xF0], modes, feats).unwrap();
     assert_eq!(d.insn, polyisa_guest_x86::Insn::UmonitorRv);
@@ -18021,8 +18022,6 @@ fn run64_xsave_xcr0() {
         (&[0x0F, 0xAE, 0x23][..], Insn::Xsave),
         (&[0x0F, 0xAE, 0x2B][..], Insn::Xrstor),
         (&[0x0F, 0xAE, 0x33][..], Insn::Xsaveopt),
-        // 66 も XSAVE（F3 が PTWRITE、66 は別機能なし）。
-        (&[0x66, 0x0F, 0xAE, 0x23][..], Insn::Xsave),
         // 66 /6 は CLWB。NP /6 mod=11 は MFENCE。
         (&[0x66, 0x0F, 0xAE, 0x33][..], Insn::ClwbMb),
         (&[0x0F, 0xAE, 0xF0][..], Insn::Mfence),
@@ -18032,7 +18031,8 @@ fn run64_xsave_xcr0() {
     }
     for bytes in [
         &[0x0F, 0xAE, 0xE0][..],       // /4 mod=11 → 予約
-        &[0xF3, 0x0F, 0xAE, 0x23][..], // F3 /4 → PTWRITE（未実装）
+        &[0x66, 0x0F, 0xAE, 0x23][..], // 66 /4 → XSAVEC（未宣言）
+        &[0xF3, 0x0F, 0xAE, 0x23][..], // F3 /4 → PTWRITE メモリ形（未宣言）
         &[0x0F, 0x01, 0xD2][..],       // /2 rm=2 → 予約
     ] {
         assert!(decode_map(bytes, modes, feats).is_none(), "{bytes:?}");
@@ -20692,18 +20692,17 @@ fn run64_tsx_uintr_pku() {
     let m64 = MODE_M64 | (MODE_OPD_O32 << MODE_OPD_SHIFT) | (MODE_ADR_A64 << MODE_ADR_SHIFT);
     let m32 = (MODE_OPD_O32 << MODE_OPD_SHIFT) | (MODE_ADR_A32 << MODE_ADR_SHIFT);
     for (bytes, insn) in [
-        (&[0x0F, 0x01, 0xE8][..], Insn::Serialize), // NP rm=0
-        (&[0x66, 0x0F, 0x01, 0xE8][..], Insn::Serialize), // 66 rm=0
+        (&[0x0F, 0x01, 0xE8][..], Insn::Serialize),      // NP rm=0
         (&[0xF3, 0x0F, 0x01, 0xE8][..], Insn::Setssbsy), // F3 rm=0
         (&[0xF3, 0x0F, 0x01, 0xEA][..], Insn::Saveprevssp), // F3 rm=2
-        (&[0xF3, 0x0F, 0x01, 0xEC][..], Insn::Uiret), // F3 rm=4
-        (&[0xF3, 0x0F, 0x01, 0xED][..], Insn::Testui), // F3 rm=5
-        (&[0xF3, 0x0F, 0x01, 0xEE][..], Insn::Clui), // F3 rm=6
-        (&[0xF3, 0x0F, 0x01, 0xEF][..], Insn::Stui), // F3 rm=7
-        (&[0x0F, 0x01, 0xEE][..], Insn::Rdpkru),    // NP rm=6
-        (&[0x0F, 0x01, 0xEF][..], Insn::Wrpkru),    // NP rm=7
-        (&[0x0F, 0x01, 0xD5][..], Insn::Xend),      // /2 rm=5
-        (&[0x0F, 0x01, 0xD6][..], Insn::Xtest),     // /2 rm=6
+        (&[0xF3, 0x0F, 0x01, 0xEC][..], Insn::Uiret),    // F3 rm=4
+        (&[0xF3, 0x0F, 0x01, 0xED][..], Insn::Testui),   // F3 rm=5
+        (&[0xF3, 0x0F, 0x01, 0xEE][..], Insn::Clui),     // F3 rm=6
+        (&[0xF3, 0x0F, 0x01, 0xEF][..], Insn::Stui),     // F3 rm=7
+        (&[0x0F, 0x01, 0xEE][..], Insn::Rdpkru),         // NP rm=6
+        (&[0x0F, 0x01, 0xEF][..], Insn::Wrpkru),         // NP rm=7
+        (&[0x0F, 0x01, 0xD5][..], Insn::Xend),           // /2 rm=5
+        (&[0x0F, 0x01, 0xD6][..], Insn::Xtest),          // /2 rm=6
         (&[0xF3, 0x0F, 0xC7, 0xF0][..], Insn::SenduipiRv),
         (&[0xC6, 0xF8, 0x00][..], Insn::XabortIb),
     ] {
@@ -20716,6 +20715,7 @@ fn run64_tsx_uintr_pku() {
         &[0x0F, 0x01, 0xEB][..],                         // /5 rm=3 予約
         &[0xF3, 0x0F, 0x01, 0xE9][..],                   // F3 rm=1 予約
         &[0xF2, 0x0F, 0x01, 0xE8][..],                   // F2 serialize → XSUSLDTRK
+        &[0x66, 0x0F, 0x01, 0xE8][..],                   // 66 serialize → #UD（XED 実測）
         &[0x0F, 0x01, 0xD4][..],                         // /2 rm=4 予約
         &[0xC7, 0xF9, 0x00, 0x00, 0x00, 0x00][..],       // xbegin rm=1
         &[0xC6, 0xF9, 0x00][..],                         // xabort rm=1
@@ -20813,8 +20813,6 @@ fn run64_movdir_waitpkg() {
     for bytes in [
         &[0x0F, 0x38, 0xF9, 0xC0][..],             // movdiri mod=11 → 予約
         &[0x66, 0x0F, 0x38, 0xF8, 0xC0][..],       // movdir64b mod=11 → 予約
-        &[0xF2, 0x0F, 0x38, 0xF8, 0xC0][..],       // enqcmd mod=11 → 予約
-        &[0xF3, 0x0F, 0x38, 0xF8, 0xC0][..],       // enqcmds mod=11 → 予約
         &[0xF3, 0x0F, 0x3A, 0xF0, 0xC8, 0x00][..], // hreset /1 → 予約
         &[0xF3, 0x0F, 0x3A, 0xF0, 0xC1, 0x00][..], // hreset rm=1 → 予約
         &[0xF3, 0x0F, 0x3A, 0xF0, 0x00, 0x00][..], // hreset mod≠11 → 予約
@@ -20827,6 +20825,15 @@ fn run64_movdir_waitpkg() {
     // NP /6 のメモリ形は C1a で XSAVEOPT として実装済み。
     let d = decode_map(&[0x0F, 0xAE, 0x30], m64, feats).unwrap();
     assert_eq!(d.insn, Insn::Xsaveopt);
+    // 0F 38 F8 の F2/F3 mod=11 は ENQCMD/ENQCMDS ではなく
+    // URDMSR/UWRMSR（ユーザ MSR アクセス）。
+    for (bytes, want) in [
+        (&[0xF2, 0x0F, 0x38, 0xF8, 0xC0][..], Insn::UrdmsrRvEv),
+        (&[0xF3, 0x0F, 0x38, 0xF8, 0xC0][..], Insn::UwrmsrRvEv),
+    ] {
+        let d = decode_map(bytes, m64, feats).unwrap_or_else(|| panic!("{bytes:?}"));
+        assert_eq!(d.insn, want, "{bytes:?}");
+    }
     // 受理系: 各命令の正しい形。
     for bytes in [
         &[0x0F, 0x38, 0xF9, 0x00][..],             // movdiri [eax]

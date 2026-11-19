@@ -3644,9 +3644,8 @@ fn build_map_0f38(m: &mut Model) {
     // FMA（VEX.66）。W=0 が PS/SS、W=1 が PD/SD。各ブロックの
     // 配置は 96=fmaddsub・97=fmsubadd・98/99=fmadd パック/スカラ・
     // 9A/9B=fmsub・9C/9D=fnmadd・9E/9F=fnmsub（132/213/231 は
-    // 0x96/0xA6/0xB6 起点で同配置）。W ゲートがないので名前は
-    // W=0（ps/ss）形で立て、W=1 は意味論が vex_w を見て pd/sd
-    // として動く（逆アセンブル表示は ps/ss になる近似）。
+    // 0x96/0xA6/0xB6 起点で同配置）。`wsel` で W=1 形に pd/sd の
+    // 名前を別立てし、意味論は名前どおりの幅で動く。
     for (base, ord) in [(0x96u8, 0u8), (0xA6, 1), (0xB6, 2)] {
         let os = match ord {
             0 => "132",
