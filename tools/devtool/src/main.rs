@@ -152,9 +152,6 @@ fn cmd_check() -> i32 {
     if let Err(e) = status::check_syscall_tables(&root) {
         eprintln!("check: システムコールの表: {e}");
         failed = true;
-    } else if let Err(e) = status::check_fresh(&root) {
-        eprintln!("check: 実装状況の鮮度: {e}");
-        failed = true;
     }
     if failed {
         1

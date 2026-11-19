@@ -29,7 +29,7 @@ Task と cargo-nextest は外部のツールであり、[参照資料の台帳](
 | `task test:layer LAYER=<層の名前>` | 重いテストのうち、一つの層のテストバイナリだけを `full` プロファイルで実行する。オラクルの扱いは `task test:full` と同じ |
 | `task testdata:fetch` | 取得定義に従ってテストデータを取得し、チェックサムを検証する |
 | `task isagen:dump ISA=<ISA の名前>` | ISADL から生成したコードを書き出す（[ワークスペース](workspace.md)） |
-| `task status` | 実装状況を `docs/status/` に生成する |
+| `task status` | 実装状況のスナップショットを `docs/status/` に生成する（コミットしない） |
 | `task bench` | 性能の計測（[実行エンジン](execution-engine.md)） |
 | `task doctor` | 外部のツールと Rust のターゲットの有無と版を表示する |
 | `task hooks:install` | Git のコミット前のフックを入れる |
@@ -44,7 +44,7 @@ Task と cargo-nextest は外部のツールであり、[参照資料の台帳](
 
 ## 実装状況の生成
 
-`task status` は、追跡しているファイルだけから `docs/status/` を生成する。生成の元は、ISADL の記述、ロードマップの完了条件、設計との差の台帳、cli のシステムコールの表（`RV64_SYSCALLS`、`X86_64_SYSCALLS`、`X86_32_SYSCALLS`）である。テストの結果は含めない。生成物はコミットする。生成の元を変えた変更では、同じ変更の中で `task status` を実行し直す。`task check` は、生成し直した結果と `docs/status/` を比べ、食い違えば失敗する。
+`task status` は、追跡しているファイルだけから `docs/status/` を生成する。生成の元は、ISADL の記述、ロードマップの完了条件、設計との差の台帳、cli のシステムコールの表（`RV64_SYSCALLS`、`X86_64_SYSCALLS`、`X86_32_SYSCALLS`）である。テストの結果は含めない。生成物はコミットせず、命令やシステムコールの実装状況を調べたいときに必要に応じて生成する。`docs/status/` は Git の追跡の対象外とする。
 
 テストは nextest で実行する。エディタから個別のテストを `cargo test` で実行してもよいが、テストの範囲と時間の上限は nextest の設定にだけ書くので、全体の検証には `cargo test` を使わない。nextest は doctest を実行しないので、doctest だけは `task test` が `cargo test --doc` で実行する。
 
@@ -139,12 +139,7 @@ overflow-checks = true
 
 ## 検証の記録
 
-CI がないので、検証の結果は自動では残らない。段階の完了は、注釈付きのタグ `stage-<段階の番号>` で表す。完了の判定に使った検証の記録は、そのタグのメッセージに次のことを書く。
-
-- 実行したタスク
-- `task doctor` が表示したツールの版
-- テストの成功、失敗、未実行の数と、未実行のテストバイナリとその理由
-- 性能の計測の結果
+CI がないので、検証の結果は自動では残らない。段階の完了はコミットで表し、完了の判定に使った検証の要点（実行したタスクと、テストの成功・失敗・未実行の数）は、そのコミットの本文に書く。
 
 nextest の JUnit 形式の出力（`target/nextest/full/junit.xml`）はコミットしない。
 

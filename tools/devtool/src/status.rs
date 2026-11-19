@@ -36,17 +36,6 @@ pub(crate) fn write_status(root: &Path) -> Result<Vec<PathBuf>, String> {
     Ok(written)
 }
 
-pub(crate) fn check_fresh(root: &Path) -> Result<(), String> {
-    let generated = generate_status(root)?;
-    let actual = read_status_dir(&root.join("docs/status"));
-    let violations = freshness_violations(&generated, &actual);
-    if violations.is_empty() {
-        Ok(())
-    } else {
-        Err(violations.join("; "))
-    }
-}
-
 pub(crate) fn generate_status(root: &Path) -> Result<BTreeMap<String, String>, String> {
     let roadmap = read_to_string(&root.join("docs/design/roadmap.md"))?;
     let gaps = read_to_string(&root.join("docs/gaps.md"))?;
@@ -70,55 +59,6 @@ pub(crate) fn check_syscall_tables(root: &Path) -> Result<(), String> {
 
 fn read_to_string(path: &Path) -> Result<String, String> {
     std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))
-}
-
-fn read_status_dir(dir: &Path) -> BTreeMap<String, String> {
-    let mut out = BTreeMap::new();
-    let Ok(rd) = std::fs::read_dir(dir) else {
-        return out;
-    };
-    for entry in rd.flatten() {
-        let path = entry.path();
-        if !path.is_file() {
-            if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
-                out.insert(format!("{name}/"), String::new());
-            }
-            continue;
-        }
-        let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
-            continue;
-        };
-        if let Ok(text) = std::fs::read_to_string(&path) {
-            out.insert(name.to_string(), text);
-        }
-    }
-    out
-}
-
-pub(crate) fn freshness_violations(
-    generated: &BTreeMap<String, String>,
-    actual: &BTreeMap<String, String>,
-) -> Vec<String> {
-    let mut violations = Vec::new();
-    for name in generated.keys() {
-        match actual.get(name) {
-            None => violations.push(format!(
-                "docs/status/{name}: ない。go-task status を実行する"
-            )),
-            Some(body) if body != generated.get(name).expect("key") => violations.push(format!(
-                "docs/status/{name}: 内容が生成結果と異なる。go-task status を実行する"
-            )),
-            Some(_) => {}
-        }
-    }
-    for name in actual.keys() {
-        if !generated.contains_key(name) {
-            violations.push(format!(
-                "docs/status/{name}: 生成しないファイルがある。go-task status を実行する"
-            ));
-        }
-    }
-    violations
 }
 
 struct IndexedModel<'a> {
@@ -722,42 +662,6 @@ mod tests {
         let a = generate_status(&root).expect("first");
         let b = generate_status(&root).expect("second");
         assert_eq!(a, b);
-    }
-
-    #[test]
-    fn fresh_tree_matches_when_generated() {
-        check_fresh(&crate::workspace_root()).expect("fresh");
-    }
-
-    #[test]
-    fn content_diff_is_detected() {
-        let mut generated = BTreeMap::new();
-        generated.insert("README.md".to_string(), "a\n".to_string());
-        let mut actual = generated.clone();
-        actual.insert("README.md".to_string(), "b\n".to_string());
-        let v = freshness_violations(&generated, &actual);
-        assert!(
-            v.iter().any(|s| s.contains("内容が生成結果と異なる")),
-            "{v:?}"
-        );
-        assert!(v.iter().any(|s| s.contains("go-task status")), "{v:?}");
-    }
-
-    #[test]
-    fn missing_file_is_detected() {
-        let mut generated = BTreeMap::new();
-        generated.insert("README.md".to_string(), "a\n".to_string());
-        let v = freshness_violations(&generated, &BTreeMap::new());
-        assert!(v.iter().any(|s| s.contains("ない")), "{v:?}");
-    }
-
-    #[test]
-    fn extra_file_is_detected() {
-        let generated = BTreeMap::new();
-        let mut actual = BTreeMap::new();
-        actual.insert("notes.md".to_string(), "x\n".to_string());
-        let v = freshness_violations(&generated, &actual);
-        assert!(v.iter().any(|s| s.contains("生成しないファイル")), "{v:?}");
     }
 
     #[test]
