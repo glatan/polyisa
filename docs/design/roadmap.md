@@ -47,7 +47,7 @@
 | SP3 | デコード方式の決定: 32 ビット固定長の map/パターン。遅延スロットは PC/nPC として実行ループ側で表現 | SP2 | 85df434 |
 | SP4 | `run_sparc` 実行ループ + bare 最小テスト | SP3 | 4c08ee8 |
 | SP5 | 整数演算: add/sub/論理/シフト/sethi と、V8 の umul/smul/udiv/sdiv/mulscc | SP4 | 069ed0d |
-| SP6 | load/store 全サイズ・ldstub/swap・ASI 指定形 | SP4 | - |
+| SP6 | load/store 全サイズ・ldstub/swap・ASI 指定形 | SP4 | 21fd504 |
 | SP7 | 分岐・call・jmpl・return。annul ビットと遅延スロット内の分岐（DCTI couple） | SP4 | - |
 | SP8 | ウィンドウ命令 save/restore・ta/tcc（V8 の Ticc を含む）・ユーザ ASR（rdy/wry、V9 の rdccr/wrccr/rdpc）。rd/wr psr や rett/done/retry は特権命令なので、ユーザーモードでは特権違反トラップの経路だけを実装する | SP4 | - |
 | SP9 | V9 の追加: movcc/movr・64 ビット演算・PSTATE.AM のアドレスマスク・cas/casx・membar/stbar/flush・popc | SP5-8 | - |
