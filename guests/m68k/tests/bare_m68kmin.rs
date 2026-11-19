@@ -714,9 +714,9 @@ fn decode_c2_spot() {
     assert_eq!(polyisa_guest_m68k::decode(0x5140, 16), Some(Insn::Subq));
     assert_eq!(polyisa_guest_m68k::decode(0xB509, 16), Some(Insn::Cmpm));
     assert_eq!(polyisa_guest_m68k::decode(0x0C12, 16), Some(Insn::Cmpi));
-    // addx/subx の空間（Dn→ea で emode 0/1）は未割当のまま。
-    assert_eq!(polyisa_guest_m68k::decode(0xD301, 16), None);
-    assert_eq!(polyisa_guest_m68k::decode(0xD309, 16), None);
+    // addx/subx: emode 0 は Dn↔Dn、emode 1 は -(Ay),-(Ax)。
+    assert_eq!(polyisa_guest_m68k::decode(0xD301, 16), Some(Insn::AddxD));
+    assert_eq!(polyisa_guest_m68k::decode(0xD309, 16), Some(Insn::AddxM));
 }
 
 #[test]
@@ -2465,4 +2465,504 @@ fn odd_access_param() {
             }
         }
     }
+}
+
+/// D2: 68020 full 形式 EA — IS=1・BD32 の lea（busybox _start の LOAD_GOT 形）。
+#[test]
+fn full_ext_lea_is_bd32() {
+    // lea %pc@(bd32,is),%a5 = 4bfb 0170 001a 3de8
+    // ext @0x1002 → a5 = 0x1002 + 0x001a3de8 = 0x001a4dea
+    let mut env = env_with_code(&[0x4BFB, 0x0170, 0x001A, 0x3DE8]);
+    polyisa_guest_m68k::install_params(
+        &mut env.backend,
+        &polyisa_guest_m68k::model_params("i68020"),
+    );
+    // d0.w は非ゼロでも IS=1 なので寄与しない。
+    env.backend.set(D(0).state(), 7);
+    env.step(|b| sem::exec(b, Insn::Lea, 0x4BFB, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(A(5).state()), 0x1002 + 0x001A3DE8);
+}
+
+/// D2: full 形式 src EA の消費語数（3語）を反映して宛先拡張語を読む。
+/// move.l %a5@(bd32,is),%d16(a6) — src が動的に 3 語消費するので
+/// dest の d16 は pc+8 にある（静的 1 語と見誤ると pc+4 の BD を読む）。
+#[test]
+fn move_full_src_dyn_dest_ext() {
+    // 2d75 0170 0000 006c ff2c  @pc=0x1000
+    // src = *(a5 + 0x6c) → dest = *(a6 - 0xd4)
+    let mut env = env_with_data(&[0x2D75, 0x0170, 0x0000, 0x006C, 0xFF2C], &[]);
+    polyisa_guest_m68k::install_params(
+        &mut env.backend,
+        &polyisa_guest_m68k::model_params("i68020"),
+    );
+    env.backend.set(A(5).state(), 0x4000);
+    env.backend.set(A(6).state(), 0x4100);
+    env.backend
+        .mem
+        .write(VirtAddr(0x406C), &0xDEAD_BEEFu32.to_be_bytes())
+        .unwrap();
+    env.step(|b| sem::exec(b, Insn::MoveL, 0x2D75, 0x1000))
+        .unwrap();
+    let mut buf = [0u8; 4];
+    env.backend
+        .mem
+        .read(VirtAddr(0x402C), &mut buf, DRD)
+        .unwrap();
+    assert_eq!(u32::from_be_bytes(buf), 0xDEADBEEF);
+}
+
+/// D2: neg.l — 結果の negate と NZVC（V は 0x80000000 のときのみ）。
+#[test]
+fn neg_long() {
+    let mut env = env_with_code(&[0x4482]);
+    env.backend.set(D(2).state(), 5);
+    env.backend.set(sem::ccr_ref(), 0x10); // X=1
+    env.step(|b| sem::exec(b, Insn::Neg, 0x4482, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(D(2).state()), (-5i32) as u32);
+    // X=1 N=1（負） Z=0 V=0 C=1（非ゼロ→C）
+    assert_eq!(env.backend.get(sem::ccr_ref()) & 0x1F, 0x19);
+}
+
+/// D2: extb.l — バイト→ロング符号拡張。
+#[test]
+fn extb_long() {
+    let mut env = env_with_code(&[0x49C3]);
+    env.backend.set(D(3).state(), 0x1234_0080);
+    env.step(|b| sem::exec(b, Insn::ExtbL, 0x49C3, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(D(3).state()), 0xFFFF_FF80);
+}
+
+/// D2: bfextu — Dn フィールドの抽出。
+#[test]
+fn bfextu_reg() {
+    // bfextu d0{4:8},d1 = e9c0, ext: dst=1(D1), Do=0, off=4, Dw=0, wid=8 → 0x1108
+    let mut env = env_with_code(&[0xE9C0, 0x1108]);
+    polyisa_guest_m68k::install_params(
+        &mut env.backend,
+        &polyisa_guest_m68k::model_params("i68020"),
+    );
+    env.backend.set(D(0).state(), 0x0AB0_0000);
+    env.step(|b| sem::exec(b, Insn::Bfextu, 0xE9C0, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(D(1).state()), 0xAB);
+}
+
+/// D2: mull — 32x32→32（ext siz=0）。muls.l d0,d1: ext Dl=1 → 0x0001。
+#[test]
+fn mull_32() {
+    let mut env = env_with_code(&[0x4C02, 0x1801]);
+    polyisa_guest_m68k::install_params(
+        &mut env.backend,
+        &polyisa_guest_m68k::model_params("i68020"),
+    );
+    // muls.l d2,d1 — ext[15:12]=Dl（被乗数＋下位積の宛先）、
+    // ext[11]=符号、ext[10]=64 ビット積。0x1801 = Dl=1・符号付き・32。
+    env.backend.set(D(2).state(), (-3i32) as u32);
+    env.backend.set(D(1).state(), 7);
+    env.step(|b| sem::exec(b, Insn::Mull, 0x4C02, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(D(1).state()), (-21i32) as u32);
+}
+
+/// D2: tst.l An — 68020+ では合法、68000 では illegal。
+#[test]
+fn tst_areg_model() {
+    for (model, ok) in [("", false), ("i68020", true)] {
+        let mut env = env_with_code(&[0x4A8C]);
+        if !model.is_empty() {
+            polyisa_guest_m68k::install_params(
+                &mut env.backend,
+                &polyisa_guest_m68k::model_params(model),
+            );
+        }
+        env.backend.set(A(4).state(), 0x8000_0000);
+        let r = env.step(|b| sem::exec(b, Insn::Tst, 0x4A8C, 0x1000));
+        if ok {
+            r.unwrap();
+            // 負 → N=1。X は保持（初期 0）。
+            assert_eq!(env.backend.get(sem::ccr_ref()) & 0x1F, 0x08);
+        } else {
+            match r.expect_err("68000 では An への tst は illegal") {
+                InterpExit::Exception(x) => assert_eq!(x.code, 4),
+                other => panic!("unexpected exit: {other:?}"),
+            }
+        }
+    }
+}
+
+/// D2 デバッグ: move.l d16(a2),d8(a6,d0.l*4,-0xd0)（auxv table 書き込み形）
+/// 2daa 0004 0d20 ff30 — dest = a6 + d0*4 - 0xd0
+#[test]
+fn move_full_dest_bd16() {
+    let mut env = env_with_data(&[0x2DAA, 0x0004, 0x0D20, 0xFF30], &[0; 8]);
+    polyisa_guest_m68k::install_params(
+        &mut env.backend,
+        &polyisa_guest_m68k::model_params("i68020"),
+    );
+    env.backend.set(A(6).state(), 0x40D0);
+    env.backend.set(D(0).state(), 25);
+    env.backend.set(A(2).state(), 0x4000);
+    env.backend
+        .mem
+        .write(VirtAddr(0x4004), &0xDEAD_BEEFu32.to_be_bytes())
+        .unwrap();
+    env.step(|b| sem::exec(b, Insn::MoveL, 0x2DAA, 0x1000))
+        .unwrap();
+    // dest = a6 + d0*4 - 0xd0 = 0x40d0 + 100 - 208 = 0x4064
+    let mut buf = [0u8; 4];
+    env.backend
+        .mem
+        .read(VirtAddr(0x4064), &mut buf, DRD)
+        .unwrap();
+    assert_eq!(u32::from_be_bytes(buf), 0xDEAD_BEEF);
+}
+
+/// D2 デバッグ: lea pc@(bd32,is) のベースが拡張語アドレス(pc+2)であること。
+#[test]
+fn lea_pc_ext_base() {
+    // 4bfb 0170 0013 8bbc @pc=0x1000 → a5 = 0x1002 + 0x138bbc = 0x138dbe
+    let mut env = env_with_code(&[0x4BFB, 0x0170, 0x0013, 0x8BBC]);
+    polyisa_guest_m68k::install_params(
+        &mut env.backend,
+        &polyisa_guest_m68k::model_params("i68020"),
+    );
+    env.step(|b| sem::exec(b, Insn::Lea, 0x4BFB, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(A(5).state()), 0x1002 + 0x138BBC);
+}
+
+/// D2 デバッグ: デコード確認。
+#[test]
+fn decode_d2_insns() {
+    for (w, name) in [
+        (0x4BFBu16, "lea"),
+        (0x2275, "movea"),
+        (0x2271, "movea"),
+        (0x2DAA, "move"),
+    ] {
+        let i = polyisa_guest_m68k::decode_model_ex(
+            w as u128,
+            16,
+            true,
+            polyisa_guest_m68k::model_feats("i68020"),
+        );
+        assert!(i.is_some(), "{name} {w:#06x} が decode されるべき: {i:?}");
+    }
+}
+
+/// D2 レビュー修正: I/IS フィールドの実符号化（gas/binutils 準拠）。
+/// bits[1:0]=OD サイズ（0/1=なし、2=語、3=long）、bit2=postindexed。
+#[test]
+fn full_ext_words_iis() {
+    // BD16 + preindexed・語 OD（iis=2）→ ext1+1+1
+    assert_eq!(ea::full_ext_words(0x0122), 3);
+    // BD32 + 語 OD（iis=2）→ ext1+2+1
+    assert_eq!(ea::full_ext_words(0x0172), 4);
+    // BD16 + long OD（iis=3）→ ext1+1+2
+    assert_eq!(ea::full_ext_words(0x0123), 4);
+    // BD32・インダイレクトなし（iis=0）→ ext1+2（busybox GOT 形）
+    assert_eq!(ea::full_ext_words(0x0170), 3);
+    // BD なし・postindexed null OD（iis=5）→ ext1 のみ
+    assert_eq!(ea::full_ext_words(0x0105), 1);
+}
+
+/// D2 レビュー修正: postindexed（iis=6、語 OD）の評価順序
+/// （索引は間接読み出しの後に足す）。
+#[test]
+fn full_index_postindexed() {
+    // move.l ([a0],d1.w)+od,d0 = 2030 1106 od
+    let mut env = env_with_data(&[0x2030, 0x1106, 0x0100], &[0; 8]);
+    polyisa_guest_m68k::install_params(
+        &mut env.backend,
+        &polyisa_guest_m68k::model_params("i68020"),
+    );
+    env.backend.set(A(0).state(), 0x4000);
+    env.backend.set(D(1).state(), 0x10);
+    env.backend
+        .mem
+        .write(VirtAddr(0x4000), &0x4100u32.to_be_bytes())
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x4210), &0xDEAD_BEEFu32.to_be_bytes())
+        .unwrap();
+    env.step(|b| sem::exec(b, Insn::MoveL, 0x2030, 0x1000))
+        .unwrap();
+    // addr = mem32(a0) + od + d1 = 0x4100 + 0x100 + 0x10 = 0x4210
+    assert_eq!(env.backend.get(D(0).state()), 0xDEAD_BEEF);
+}
+
+/// D2 レビュー修正: preindexed（iis=2、語 OD）の評価順序
+/// （索引は間接読み出しの前に足す）。
+#[test]
+fn full_index_preindexed() {
+    // move.l ([a0,d1.w])+od,d0 = 2030 1102 od
+    let mut env = env_with_data(&[0x2030, 0x1102, 0x0200], &[0; 8]);
+    polyisa_guest_m68k::install_params(
+        &mut env.backend,
+        &polyisa_guest_m68k::model_params("i68020"),
+    );
+    env.backend.set(A(0).state(), 0x4000);
+    env.backend.set(D(1).state(), 0x10);
+    env.backend
+        .mem
+        .write(VirtAddr(0x4010), &0x4200u32.to_be_bytes())
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x4400), &0xCAFE_BABEu32.to_be_bytes())
+        .unwrap();
+    env.step(|b| sem::exec(b, Insn::MoveL, 0x2030, 0x1000))
+        .unwrap();
+    // addr = mem32(a0 + d1) + od = mem32(0x4010) + 0x200 = 0x4400
+    assert_eq!(env.backend.get(D(0).state()), 0xCAFE_BABE);
+}
+
+/// D2 レビュー修正: negx — d=全1・X=1 でも借用（C=X=1）。
+#[test]
+fn negx_borrow_full() {
+    let mut env = env_with_code(&[0x4080]);
+    env.backend.set(D(0).state(), 0xFFFF_FFFF);
+    env.backend.set(sem::ccr_ref(), 0x10); // X=1
+    env.step(|b| sem::exec(b, Insn::Negx, 0x4080, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(D(0).state()), 0);
+    // C=X=1、Z=1（結果 0。Z は累積だが旧 Z=0 → 0。実は Z=0）
+    assert_eq!(env.backend.get(sem::ccr_ref()) & 0x1F, 0x11);
+}
+
+/// D2: subx.l — X 込み減算と累積 Z。
+#[test]
+fn subx_l_borrow() {
+    let mut env = env_with_code(&[0x9580]);
+    env.backend.set(D(2).state(), 5);
+    env.backend.set(D(0).state(), 3);
+    env.backend.set(sem::ccr_ref(), 0x10); // X=1
+    env.step(|b| sem::exec(b, Insn::SubxD, 0x9580, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(D(2).state()), 1);
+    // 借りなし → C=X=0、結果非零 → Z=0。
+    assert_eq!(env.backend.get(sem::ccr_ref()) & 0x1F, 0x00);
+}
+
+/// D2: addx.l — X 込み加算で桁上げ。
+#[test]
+fn addx_l_carry() {
+    let mut env = env_with_code(&[0xD380]);
+    env.backend.set(D(1).state(), 0xFFFF_FFF0);
+    env.backend.set(D(0).state(), 0x20);
+    env.step(|b| sem::exec(b, Insn::AddxD, 0xD380, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(D(1).state()), 0x10);
+    // 桁上げ → C=X=1。
+    assert_eq!(env.backend.get(sem::ccr_ref()) & 0x1F, 0x11);
+}
+
+/// D2: subx のメモリ形式 -(Ay),-(Ax)。
+#[test]
+fn subx_m_predec() {
+    // データ領域 0x4000 からの配置: src=3 は 0x4004、dst=5 は 0x400c。
+    let mut data = [0u8; 16];
+    data[4..8].copy_from_slice(&3u32.to_be_bytes());
+    data[12..16].copy_from_slice(&5u32.to_be_bytes());
+    let mut env = env_with_data(&[0x9588], &data);
+    // 0x9588: dx=2（dst の Ax）、emode=1、dy=0（src の Ay）。
+    env.backend.set(A(0).state(), 0x4008); // src: -(A0) → 0x4004
+    env.backend.set(A(2).state(), 0x4010); // dst: -(A2) → 0x400c
+    env.step(|b| sem::exec(b, Insn::SubxM, 0x9588, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(A(0).state()), 0x4004);
+    assert_eq!(env.backend.get(A(2).state()), 0x400c);
+    let mut buf = [0u8; 4];
+    env.backend
+        .mem
+        .read(polyisa_mem::VirtAddr(0x400c), &mut buf, DRD)
+        .unwrap();
+    assert_eq!(u32::from_be_bytes(buf), 2);
+}
+
+/// D2: cas.l — 一致時は Du を書き、不一致時は Dc に <ea> を入れる。
+#[test]
+fn cas_l_both_paths() {
+    // cas.l d0,d1,(a2) = 0x0ED2 + ext Du=1(bits8:6)/Dc=0(bits2:0) → 0x0040。
+    let mut env = env_with_data(&[0x0ED2, 0x0040], &5u32.to_be_bytes());
+    polyisa_guest_m68k::install_params(
+        &mut env.backend,
+        &polyisa_guest_m68k::model_params("i68020"),
+    );
+    env.backend.set(A(2).state(), 0x4000);
+    // 一致: mem=5, Dc(d0)=5, Du(d1)=7 → mem=7、Z=1。
+    env.backend.set(D(0).state(), 5);
+    env.backend.set(D(1).state(), 7);
+    env.step(|b| sem::exec(b, Insn::Casl, 0x0ED2, 0x1000))
+        .unwrap();
+    let mut buf = [0u8; 4];
+    env.backend
+        .mem
+        .read(polyisa_mem::VirtAddr(0x4000), &mut buf, DRD)
+        .unwrap();
+    assert_eq!(u32::from_be_bytes(buf), 7);
+    assert_eq!(env.backend.get(sem::ccr_ref()) & 0x1F, 0x04); // Z=1
+
+    // 不一致: mem=7, Dc(d2)=5, Du(d3)=9 → mem 不変、Dc=7、Z=0。
+    let mut env = env_with_data(&[0x0ED2, 0x00C2], &7u32.to_be_bytes());
+    polyisa_guest_m68k::install_params(
+        &mut env.backend,
+        &polyisa_guest_m68k::model_params("i68020"),
+    );
+    env.backend.set(A(2).state(), 0x4000);
+    env.backend.set(D(2).state(), 5);
+    env.backend.set(D(3).state(), 9);
+    env.step(|b| sem::exec(b, Insn::Casl, 0x0ED2, 0x1000))
+        .unwrap();
+    let mut buf = [0u8; 4];
+    env.backend
+        .mem
+        .read(polyisa_mem::VirtAddr(0x4000), &mut buf, DRD)
+        .unwrap();
+    assert_eq!(u32::from_be_bytes(buf), 7);
+    assert_eq!(env.backend.get(D(2).state()), 7);
+    assert_eq!(env.backend.get(sem::ccr_ref()) & 0x1F, 0x00); // 7-5=2 → 旗なし
+}
+
+/// D2 レビュー修正: bfexts — 負フィールドの符号拡張。
+#[test]
+fn bfexts_neg() {
+    // bfexts d0{4:8},d1 = ebc0, ext dst=1,off=4,wid=8 → 0x1108
+    let mut env = env_with_code(&[0xEBC0, 0x1108]);
+    polyisa_guest_m68k::install_params(
+        &mut env.backend,
+        &polyisa_guest_m68k::model_params("i68020"),
+    );
+    env.backend.set(D(0).state(), 0x0AB0_0000);
+    env.step(|b| sem::exec(b, Insn::Bfexts, 0xEBC0, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(D(1).state()), 0xFFFF_FFAB);
+}
+
+/// D2 レビュー修正: bfffo — wid<32 のフィールド内先頭セットビット。
+#[test]
+fn bfffo_narrow() {
+    // bfffo d0{4:8},d1 = edc0, ext dst=1,off=4,wid=8 → 0x1108
+    let mut env = env_with_code(&[0xEDC0, 0x1108]);
+    polyisa_guest_m68k::install_params(
+        &mut env.backend,
+        &polyisa_guest_m68k::model_params("i68020"),
+    );
+    // field = 0x0B → フィールド内 LZ=4 → pos = 4+4 = 8
+    env.backend.set(D(0).state(), 0x00B0_0000);
+    env.step(|b| sem::exec(b, Insn::Bfffo, 0xEDC0, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(D(1).state()), 8);
+}
+
+/// D2 レビュー修正: bfins — wid=32 のマージと旗。
+#[test]
+fn bfins_w32() {
+    // bfins d1,d0{0:32} = efc0, ext src=1,off=0,wid=0(=32) → 0x1000
+    let mut env = env_with_code(&[0xEFC0, 0x1000]);
+    polyisa_guest_m68k::install_params(
+        &mut env.backend,
+        &polyisa_guest_m68k::model_params("i68020"),
+    );
+    env.backend.set(D(0).state(), 0x1234_5678);
+    env.backend.set(D(1).state(), 0xDEAD_BEEF);
+    env.step(|b| sem::exec(b, Insn::Bfins, 0xEFC0, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(D(0).state()), 0xDEAD_BEEF);
+    // 旗は挿入フィールド: N=1,Z=0
+    assert_eq!(env.backend.get(sem::ccr_ref()) & 0x0C, 0x08);
+}
+
+/// D2 レビュー修正: neg の full 形式 EA で動的語数が出る。
+#[test]
+fn neg_full_ext_len() {
+    // neg.l d8(a0,full) = 40b0, ext1 0170 → 3 語
+    let n = ea::insn_ext_dyn(Insn::Neg, 0x40B0, true, true, |i| {
+        [0x0170u16, 0, 0x100].get(i as usize).copied()
+    });
+    assert_eq!(n, Some(3));
+}
+
+/// D2 レビュー修正: mull/divl は 68020+ 限定（i68000 では decode 不可）。
+#[test]
+fn mull_model_gate() {
+    assert!(
+        polyisa_guest_m68k::decode_model_ex(0x4C00, 16, true, polyisa_guest_m68k::model_feats(""),)
+            .is_none(),
+        "i68000 では mull は illegal"
+    );
+    assert!(
+        polyisa_guest_m68k::decode_model_ex(
+            0x4C00,
+            16,
+            true,
+            polyisa_guest_m68k::model_feats("i68020"),
+        )
+        .is_some()
+    );
+}
+
+/// D2 デバッグ: movea.l d8(a1,a0.l),a1 — busybox TLS アクセス形。
+/// 非整列（addr≡2 mod4）の .l 読み出し値が正しいこと。
+#[test]
+fn movea_brief_tls_pattern() {
+    let mut env = env_with_data(&[0x2271, 0x8800], &[0; 8]);
+    polyisa_guest_m68k::install_params(
+        &mut env.backend,
+        &polyisa_guest_m68k::model_params("i68020"),
+    );
+    env.backend.set(A(1).state(), 0xFFFF_9004);
+    env.backend.set(A(0).state(), 0x0000_B3D2);
+    // ea = 0xffff9004 + 0x0000b3d2 = 0x43d6（データページ内・非整列）
+    env.backend
+        .mem
+        .write(VirtAddr(0x43d4), &0x801a_6f34u32.to_be_bytes())
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x43d8), &0x801a_6f28u32.to_be_bytes())
+        .unwrap();
+    // まず直接 mem.read で値を確かめる
+    let mut buf = [0u8; 4];
+    env.backend
+        .mem
+        .read(VirtAddr(0x43d6), &mut buf, DRD)
+        .unwrap();
+    env.step(|b| sem::exec(b, Insn::MoveaL, 0x2271, 0x1000))
+        .unwrap();
+    assert_eq!(
+        env.backend.get(A(1).state()),
+        0x6F34_801A,
+        "nonaligned .l read"
+    );
+}
+
+/// D2 デバッグ: busybox 実値そのまま（a0=0x801b23d2, tp-0x6ffc 読み出し）。
+#[test]
+fn movea_brief_tls_real() {
+    let mut env = env_with_code(&[0x2271, 0x8800]);
+    polyisa_guest_m68k::install_params(
+        &mut env.backend,
+        &polyisa_guest_m68k::model_params("i68020"),
+    );
+    env.backend
+        .mem
+        .map(VirtAddr(0x801ab000), 1, polyisa_mem::Perms::RW)
+        .unwrap();
+    env.backend.set(A(1).state(), 0xFFFF_9004);
+    env.backend.set(A(0).state(), 0x801B_23D2);
+    // ea = 0x801ab3d6。実ダンプ値を書く
+    let dump: [u8; 16] = [
+        0x00, 0x00, 0x00, 0x00, 0x80, 0x1a, 0x6f, 0x34, 0x80, 0x1a, 0x6f, 0x28, 0x80, 0x1a, 0x6f,
+        0x28,
+    ];
+    env.backend.mem.write(VirtAddr(0x801ab3d0), &dump).unwrap();
+    env.step(|b| sem::exec(b, Insn::MoveaL, 0x2271, 0x1000))
+        .unwrap();
+    let got = env.backend.get(A(1).state());
+    assert_eq!(got, 0x6F34_801A);
 }

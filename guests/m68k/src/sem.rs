@@ -18,7 +18,7 @@ use super::ea::{self, Ea};
 /// （68020 以降）では奇数アドレスの word/long アクセスを許す。
 /// 命令フェッチは全世代で偶数のみなので FETCH 側は変えない。
 // Ref: SPEC-M68K-UM (MC68020) §Bus Operation.
-fn data_align<B: Backend>(b: &mut B) -> Align {
+pub(crate) fn data_align<B: Backend>(b: &mut B) -> Align {
     if b.param::<super::OddAccessParam>() == 1 {
         Align::Unaligned
     } else {
@@ -27,7 +27,7 @@ fn data_align<B: Backend>(b: &mut B) -> Align {
 }
 
 /// データ読み出しのアクセス属性（BE）。
-fn drd<B: Backend>(b: &mut B) -> Access {
+pub(crate) fn drd<B: Backend>(b: &mut B) -> Access {
     Access {
         endian: Endian::Be,
         align: data_align(b),
@@ -36,7 +36,7 @@ fn drd<B: Backend>(b: &mut B) -> Access {
 }
 
 /// データ書き込みのアクセス属性（BE）。
-fn dwr<B: Backend>(b: &mut B) -> Access {
+pub(crate) fn dwr<B: Backend>(b: &mut B) -> Access {
     Access {
         endian: Endian::Be,
         align: data_align(b),
@@ -195,6 +195,11 @@ pub fn exec<B: Backend>(b: &mut B, insn: super::Insn, w: u64, pc: u64) -> Flow<B
         super::Insn::Moveq => moveq(b, w),
         super::Insn::Add | super::Insn::AddDn | super::Insn::AddaL => arith(b, w, pc, false),
         super::Insn::Sub | super::Insn::SubDn | super::Insn::SubaL => arith(b, w, pc, true),
+        super::Insn::AddxD | super::Insn::AddxM => addx_subx(b, w, pc, false),
+        super::Insn::SubxD | super::Insn::SubxM => addx_subx(b, w, pc, true),
+        super::Insn::Casb => cas(b, w, pc, 1),
+        super::Insn::Casw => cas(b, w, pc, 2),
+        super::Insn::Casl => cas(b, w, pc, 4),
         super::Insn::Cmp | super::Insn::CmpaL => cmp_(b, w, pc),
         super::Insn::Cmpm => cmpm(b, w, pc),
         super::Insn::Addq => addq(b, w, pc, false),
@@ -304,6 +309,19 @@ pub fn exec<B: Backend>(b: &mut B, insn: super::Insn, w: u64, pc: u64) -> Flow<B
         super::Insn::Stop => stop(b, w, pc),
         super::Insn::Mv2usp => mvusp(b, w, true),
         super::Insn::Mvfrusp => mvusp(b, w, false),
+        super::Insn::Neg => neg_(b, w, pc, false),
+        super::Insn::Negx => neg_(b, w, pc, true),
+        super::Insn::Mull => mull(b, w, pc),
+        super::Insn::Divl => divl(b, w, pc),
+        super::Insn::ExtbL => extb_l(b, w),
+        super::Insn::Bftst => bf(b, w, pc, BfOp::Tst),
+        super::Insn::Bfchg => bf(b, w, pc, BfOp::Chg),
+        super::Insn::Bfclr => bf(b, w, pc, BfOp::Clr),
+        super::Insn::Bfset => bf(b, w, pc, BfOp::Set),
+        super::Insn::Bfextu => bf(b, w, pc, BfOp::Extu),
+        super::Insn::Bfexts => bf(b, w, pc, BfOp::Exts),
+        super::Insn::Bfffo => bf(b, w, pc, BfOp::Ffo),
+        super::Insn::Bfins => bf(b, w, pc, BfOp::Ins),
         super::Insn::Illegal => Err(b.raise(GuestException {
             kind: ExceptionKind::Trap,
             // m68k の例外ベクタ番号 4（Illegal Instruction）。
@@ -465,7 +483,8 @@ fn move_<B: Backend>(b: &mut B, w: u64, pc: u64, size: u32, is_movea: bool) -> F
     if !is_movea && dmode == 7 && dreg >= 2 {
         return Err(illegal(b));
     }
-    let (src, n1) = ea::eval(b, ea::ea_mode(w), ea::ea_reg(w), size, pc + 2)?;
+    let extv = b.konst::<W64>(pc + 2);
+    let (src, _n1, cnt1) = ea::eval_full_v(b, ea::ea_mode(w), ea::ea_reg(w), size, extv)?;
     let v = read_ea(b, &src, size)?;
     if is_movea {
         let vv = if size == 2 {
@@ -476,8 +495,13 @@ fn move_<B: Backend>(b: &mut B, w: u64, pc: u64, size: u32, is_movea: bool) -> F
         };
         return set_areg(b, dreg, vv);
     }
-    let ext = pc + 2 + u64::from(n1) * 2;
-    let (dst, _n2) = ea::eval(b, dmode, dreg, size, ext)?;
+    // full 形式 EA は語数が動的なので、宛先拡張語の位置は
+    // シンボリック語数から計算する（ext + cnt*2）。
+    let c1_64 = b.zext::<W32, W64>(cnt1);
+    let two = b.konst::<W64>(2);
+    let cbytes = b.mul(c1_64, two);
+    let dext = b.add(extv, cbytes);
+    let (dst, _n2, _c2) = ea::eval_full_v(b, dmode, dreg, size, dext)?;
     write_ea(b, &dst, size, v)?;
     set_nzvc(b, v, size);
     Ok(())
@@ -686,6 +710,130 @@ fn cmpm<B: Backend>(b: &mut B, w: u64, _pc: u64) -> Flow<B> {
     Ok(())
 }
 
+/// addx/subx: X 込みの多倍長加減。Dn↔Dn（emode=0）と
+/// -(Ay),-(Ax)（emode=1）の2形式。借り・桁上げは X 込みの
+/// 演算から出る（s+x が W32 を溢れる角があるため W64 で求める）。
+/// Z は結果零なら旧値を保持する累積更新。X は C に同期する。
+// Ref: SPEC-M68K-PRM (Rev 1) §ADDX/SUBX.
+fn addx_subx<B: Backend>(b: &mut B, w: u64, pc: u64, sub: bool) -> Flow<B> {
+    let size = 1u32 << ea::qsz(w);
+    let dx = ea::dest_reg(w);
+    let dy = ea::ea_reg(w);
+    let (es, ed) = if ea::ea_mode(w) == 1 {
+        let (es, _n1) = ea::eval(b, 4, dy, size, pc + 2)?;
+        let (ed, _n2) = ea::eval(b, 4, dx, size, pc + 2)?;
+        (es, ed)
+    } else {
+        (Ea::D(dy), Ea::D(dx))
+    };
+    let s = read_ea(b, &es, size)?;
+    let d = read_ea(b, &ed, size)?;
+    let x = x_flag(b);
+    let mk = b.konst::<W32>(size_mask(size));
+    let dm = b.and(d, mk);
+    let sm = b.and(s, mk);
+    let dm64 = b.zext::<W32, W64>(dm);
+    let sm64 = b.zext::<W32, W64>(sm);
+    let x64 = b.zext::<W32, W64>(x);
+    let (r64, is_c) = if sub {
+        let t = b.add(sm64, x64);
+        let is_c = b.cmp(Cmp::LtU, dm64, t);
+        (b.sub(dm64, t), is_c)
+    } else {
+        let t0 = b.add(dm64, sm64);
+        let t = b.add(t0, x64);
+        let m64 = b.konst::<W64>(u64::from(size_mask(size)));
+        let is_c = b.cmp(Cmp::GtU, t, m64);
+        (t, is_c)
+    };
+    let r = b.trunc::<W64, W32>(r64);
+    // N/Z/V は set_arith_flags と同じ式だが、C は X 込みで外部
+    // 計算した値を使い X にも写すので自前で組み立てる。
+    let rm = b.and(r, mk);
+    let sign = b.konst::<W32>(1u32 << (size * 8 - 1));
+    let zero = b.konst::<W32>(0);
+    let ds = b.xor(dm, sm);
+    let dr = b.xor(dm, rm);
+    let v_bits = if sub {
+        b.and(ds, dr)
+    } else {
+        let nds = b.not(ds);
+        b.and(nds, dr)
+    };
+    let v_at = b.and(v_bits, sign);
+    let is_v = b.cmp(Cmp::Ne, v_at, zero);
+    let n_at = b.and(rm, sign);
+    let is_n = b.cmp(Cmp::Ne, n_at, zero);
+    let is_z = b.cmp(Cmp::Eq, rm, zero);
+    let ccr = b.get(ccr_ref());
+    let km = b.konst::<W8>(0xE0);
+    let keep = b.and(ccr, km);
+    let z8 = b.konst::<W8>(0);
+    let nk = b.konst::<W8>(1 << sr_bit::N);
+    let zk = b.konst::<W8>(1 << sr_bit::Z);
+    let vk = b.konst::<W8>(1 << sr_bit::V);
+    let ck = b.konst::<W8>(1 << sr_bit::C);
+    let xk = b.konst::<W8>(1 << sr_bit::X);
+    let n8 = b.select(is_n, nk, z8);
+    // 累積 Z: 結果が零なら旧値を維持、非零ならクリア。
+    let zsel = b.and(ccr, zk);
+    let zf = b.select(is_z, zsel, z8);
+    let v8 = b.select(is_v, vk, z8);
+    let c8 = b.select(is_c, ck, z8);
+    let x8 = b.select(is_c, xk, z8);
+    let o1 = b.or(n8, zf);
+    let o2 = b.or(v8, c8);
+    let o3 = b.or(x8, keep);
+    let o12 = b.or(o1, o2);
+    let out = b.or(o12, o3);
+    b.set(ccr_ref(), out);
+    write_ea(b, &ed, size, r)
+}
+
+/// cas: アトミックな比較交換（68020+）。Dc と <ea> を比較し、
+/// 等しければ Du を <ea> に書き、違えば <ea> の値を Dc に入れる。
+/// 旗は Dc - <ea> の cmp 相当（X は不変）。拡張語は
+/// bits[8:6]=Du、bits[2:0]=Dc。
+// Ref: SPEC-M68K-PRM (Rev 1) §CAS.
+fn cas<B: Backend>(b: &mut B, w: u64, pc: u64, size: u32) -> Flow<B> {
+    let emode = ea::ea_mode(w);
+    let ereg = ea::ea_reg(w);
+    // <ea> はメモリの control alterable。Dn/An 直・PC 相対・即値は不可。
+    if !(matches!(emode, 2..=6) || (emode == 7 && ereg <= 1)) {
+        return Err(illegal(b));
+    }
+    let ext = ea::ext_w16(b, pc + 2)?;
+    let e32 = b.zext::<W16, W32>(ext);
+    let du_n = ext_reg(b, e32, 6);
+    let dc_n = ext_reg(b, e32, 0);
+    let (e, _n) = ea::eval(b, emode, ereg, size, pc + 4)?;
+    let mem = read_ea(b, &e, size)?;
+    let dcv = get_dx(b, dc_n);
+    let dc = mask(b, dcv, size);
+    let du = get_dx(b, du_n);
+    // <ea> - Dc の比較旗（PRM: destination operand minus compare
+    // operand。cmp と同じ N/Z/V/C だが被減数はメモリ側、X 不変）。
+    let r = b.sub(mem, dc);
+    set_arith_flags(b, mem, dc, r, size, true, false, false);
+    let eq = b.cmp(Cmp::Eq, dc, mem);
+    b.if_then_else(
+        eq,
+        |bb| write_ea(bb, &e, size, du),
+        |bb| {
+            // Dc のオペランドサイズ分だけ <ea> の値で置き換える
+            // （上位ビットは保持）。
+            let full = get_dx(bb, dc_n);
+            let km = bb.konst::<W32>(size_mask(size));
+            let nm = bb.not(km);
+            let hi = bb.and(full, nm);
+            let lo = bb.and(mem, km);
+            let merged = bb.or(hi, lo);
+            bb.set_indexed(ea::d_array(), dc_n, merged);
+            Ok(())
+        },
+    )
+}
+
 /// addq/subq: 3ビット即値（0 は 8）を EA に加減する。
 /// 宛先 An は旗を更新せず 32 ビット全体を書き換える。
 // Ref: SPEC-M68K-PRM (Rev 1) §ADDQ/SUBQ.
@@ -826,7 +974,20 @@ fn unary<B: Backend>(b: &mut B, w: u64, pc: u64, op: UnOp) -> Flow<B> {
     let size = 1u32 << ea::qsz(w);
     let emode = ea::ea_mode(w);
     let ereg = ea::ea_reg(w);
-    if emode == 1 || (emode == 7 && ereg >= 2) {
+    // CLR/NOT/NEG/NEGX: data alterable のみ。TST は 68020+ で
+    // An 直・PC 相対・即値も合法（byte 即値は常に不可）。
+    let tst = matches!(op, UnOp::Tst) && b.param::<super::EaFullParam>();
+    let ok = if tst {
+        match emode {
+            1 => size > 1,
+            7 if ereg == 4 => size > 1,
+            7 => ereg <= 3,
+            _ => true,
+        }
+    } else {
+        emode != 1 && !(emode == 7 && ereg >= 2)
+    };
+    if !ok {
         return Err(illegal(b));
     }
     let (e, _n) = ea::eval(b, emode, ereg, size, pc + 2)?;
@@ -1305,6 +1466,14 @@ fn disp_val<B: Backend>(b: &mut B, w: u64, pc: u64) -> Result<(B::V<W32>, u32), 
         let s = b.shl(v, k);
         let sv = b.shr_a(s, k);
         Ok((sv, ni))
+    } else if d8 == 0xFF && b.param::<super::Bdisp32Param>() {
+        // 68020+: 32 ビット変位（2 拡張語）。
+        let (e, ni) = ea::eval(b, 7, 4, 4, pc + 2)?;
+        let v = match e {
+            Ea::Imm(v) => v,
+            _ => unreachable!("mode7 reg4 は Imm"),
+        };
+        Ok((v, ni))
     } else {
         let sv = b.konst::<W32>((d8 as i8) as i32 as u32);
         Ok((sv, 0))
@@ -1445,13 +1614,19 @@ fn jmp_jsr<B: Backend>(b: &mut B, w: u64, pc: u64, link: bool) -> Flow<B> {
     if !ctrl {
         return Err(illegal(b));
     }
-    let (e, ni) = ea::eval(b, emode, ereg, 4, pc + 2)?;
+    let extv = b.konst::<W64>(pc + 2);
+    let (e, _ni, cnt) = ea::eval_full_v(b, emode, ereg, 4, extv)?;
     let a = match e {
         Ea::Addr(a) => a,
         _ => unreachable!("制御 EA は Addr"),
     };
     if link {
-        let ret = b.konst::<W32>(pc.wrapping_add(2 + u64::from(ni) * 2) as u32);
+        // リンク先は命令末尾。full 形式 EA で語数が動的なので
+        // シンボリック語数から求める。
+        let two = b.konst::<W32>(2);
+        let nbytes = b.mul(cnt, two);
+        let base = b.konst::<W32>((pc + 2) as u32);
+        let ret = b.add(base, nbytes);
         push_l(b, ret)?;
     }
     b.jump(a);
@@ -2559,5 +2734,711 @@ fn nbcd<B: Backend>(b: &mut B, w: u64, pc: u64) -> Flow<B> {
     let (res8, c, v) = bcd_sub(b, z, dst, x);
     write_ea(b, &e, 1, res8)?;
     bcd_flags(b, res8, c, v);
+    Ok(())
+}
+
+// ---- D2: 68020+ 追加分 ----
+
+/// B 値の選択（select が V<W> のみを取るため W32 経由）。
+fn bsel<B: Backend>(b: &mut B, c: B::B, t: B::B, f: B::B) -> B::B {
+    let one = b.konst::<W32>(1);
+    let zero = b.konst::<W32>(0);
+    let tv = b.select(t, one, zero);
+    let fv = b.select(f, one, zero);
+    let v = b.select(c, tv, fv);
+    b.cmp(Cmp::Ne, v, zero)
+}
+
+/// B 値の否定。
+fn bnot<B: Backend>(b: &mut B, x: B::B) -> B::B {
+    let one = b.konst::<W32>(1);
+    let zero = b.konst::<W32>(0);
+    let v = b.select(x, zero, one);
+    b.cmp(Cmp::Ne, v, zero)
+}
+
+/// 条件付き副作用の糖衣（else なし）。
+fn if_then<B: Backend, F: FnOnce(&mut B) -> Result<(), B::Exit>>(
+    b: &mut B,
+    c: B::B,
+    f: F,
+) -> Result<(), B::Exit> {
+    b.if_then_else(c, f, |_bb| Ok(()))
+}
+
+/// neg/negx <ea>。0 - dst または 0 - dst - X。
+/// NEG の C は dst≠0、NEGX の borrow は dst≠0 または X=1
+/// （被減数 d|x ≠ 0）。Z は NEGX で累積、X は NEGX で C と同値。
+// Ref: SPEC-M68K-PRM (Rev 1) §NEG/NEGX.
+fn neg_<B: Backend>(b: &mut B, w: u64, pc: u64, with_x: bool) -> Flow<B> {
+    let size = 1u32 << ea::qsz(w);
+    let emode = ea::ea_mode(w);
+    let ereg = ea::ea_reg(w);
+    if emode == 1 || (emode == 7 && ereg >= 2) {
+        return Err(illegal(b));
+    }
+    let (e, _n) = ea::eval(b, emode, ereg, size, pc + 2)?;
+    let d = read_ea(b, &e, size)?;
+    let m = b.konst::<W32>(size_mask(size));
+    let dm = b.and(d, m);
+    let x = if with_x { x_flag(b) } else { b.konst::<W32>(0) };
+    let z = b.konst::<W32>(0);
+    let r0 = b.sub(z, dm);
+    let r = b.sub(r0, x);
+    let rm = b.and(r, m);
+    write_ea(b, &e, size, rm)?;
+    // flags
+    let sign = b.konst::<W32>(1u32 << (size * 8 - 1));
+    let zero = b.konst::<W32>(0);
+    // borrow: (d | x) != 0。d=0xFF.. で x=1 の境界でも borrow
+    // が残る点に注意（masked 比較）。
+    let dx = b.or(dm, x);
+    let is_c = b.cmp(Cmp::Ne, dx, zero);
+    let n_at = b.and(rm, sign);
+    let is_n = b.cmp(Cmp::Ne, n_at, zero);
+    let is_z = b.cmp(Cmp::Eq, rm, zero);
+    // V: Dm ∧ Rm（オペランドと結果がともに最小負数）。negx では
+    // X=1 のとき 0x7F.. から 0x80.. になり得るがそれは非溢出。
+    let v_at = {
+        let t = b.and(dm, rm);
+        b.and(t, sign)
+    };
+    let is_v = b.cmp(Cmp::Ne, v_at, zero);
+    let ccr = b.get(ccr_ref());
+    let km0 = b.konst::<W8>(0xE0);
+    let keep = b.and(ccr, km0);
+    let nk = b.konst::<W8>(1 << sr_bit::N);
+    let zk = b.konst::<W8>(1 << sr_bit::Z);
+    let vk = b.konst::<W8>(1 << sr_bit::V);
+    let ck = b.konst::<W8>(1 << sr_bit::C);
+    let z8 = b.konst::<W8>(0);
+    let n8 = b.select(is_n, nk, z8);
+    let v8 = b.select(is_v, vk, z8);
+    let c8 = b.select(is_c, ck, z8);
+    // NEGX では Z は累積（結果非零ならクリア、零なら保持）。
+    let zsel = if with_x { b.and(ccr, zk) } else { zk };
+    let zf = b.select(is_z, zsel, z8);
+    let nv = b.or(n8, v8);
+    let nvc = b.or(nv, c8);
+    let nvcz = b.or(nvc, zf);
+    let out0 = b.or(keep, nvcz);
+    // X は C と同値（NEGX のみ。NEG は X を保持）。
+    let x8 = if with_x {
+        let xk = b.konst::<W8>(1 << sr_bit::X);
+        b.select(is_c, xk, z8)
+    } else {
+        let xk2 = b.konst::<W8>(1 << sr_bit::X);
+        b.and(ccr, xk2)
+    };
+    let out = b.or(out0, x8);
+    b.set(ccr_ref(), out);
+    Ok(())
+}
+
+/// 拡張語の 3 ビットフィールド（シフト `sh`）を取り出す。
+fn ext_reg<B: Backend>(b: &mut B, ext: B::V<W32>, sh: u32) -> B::V<W32> {
+    let s = b.konst::<W32>(sh);
+    let t = b.shr_l(ext, s);
+    let m = b.konst::<W32>(7);
+    b.and(t, m)
+}
+
+/// 拡張語のビット `sh` を B 値として取り出す。
+fn ext_bit<B: Backend>(b: &mut B, ext: B::V<W32>, sh: u32) -> B::B {
+    let s = b.konst::<W32>(sh);
+    let t = b.shr_l(ext, s);
+    let o = b.konst::<W32>(1);
+    let b1 = b.and(t, o);
+    let z = b.konst::<W32>(0);
+    b.cmp(Cmp::Ne, b1, z)
+}
+
+/// ext の 3 ビット番号で Dn を読む。
+fn get_dx<B: Backend>(b: &mut B, num: B::V<W32>) -> B::V<W32> {
+    b.get_indexed(ea::d_array(), num)
+}
+
+/// mull（0x4C00 + ext）。32x32→32 または 64 ビット積。
+/// ext[15:12]=Dl（積下位・32 ビット宛先）、ext[11]=符号、
+/// ext[10]=64 ビット形式、ext[2:0]=Dh（積上位）。68020+。
+// Ref: SPEC-M68K-PRM (Rev 1) §MULS.L/MULU.L.
+fn mull<B: Backend>(b: &mut B, w: u64, pc: u64) -> Flow<B> {
+    let emode = ea::ea_mode(w);
+    let ereg = ea::ea_reg(w);
+    // <ea> は data（An 直は不可。PC 相対・即値は可）。
+    if emode == 1 || (emode == 7 && ereg >= 5) {
+        return Err(illegal(b));
+    }
+    let ext = ea::ext_w16(b, pc + 2)?;
+    let e32 = b.zext::<W16, W32>(ext);
+    // ext[15:12]=Dl（積の下位・32 ビット形式の宛先）、
+    // ext[2:0]=Dh（64 ビット積の上位）。
+    let dl_n = ext_reg(b, e32, 12);
+    let dh_n = ext_reg(b, e32, 0);
+    let is_signed = ext_bit(b, e32, 11);
+    let is64 = ext_bit(b, e32, 10);
+    let (e, _n) = ea::eval(b, emode, ereg, 4, pc + 4)?;
+    let src = read_ea(b, &e, 4)?;
+    let dl = get_dx(b, dl_n);
+    let a64u = b.zext::<W32, W64>(src);
+    let b64u = b.zext::<W32, W64>(dl);
+    let a64s = b.sext::<W32, W64>(src);
+    let b64s = b.sext::<W32, W64>(dl);
+    let a64 = b.select(is_signed, a64s, a64u);
+    let b64 = b.select(is_signed, b64s, b64u);
+    let prod = b.mul(a64, b64);
+    let hi64 = {
+        let s = b.konst::<W64>(32);
+        b.shr_l(prod, s)
+    };
+    let hi = b.trunc::<W64, W32>(hi64);
+    let lo = b.trunc::<W64, W32>(prod);
+    // N/Z: 64 ビット形式は積全体、32 ビット形式は下位のみ。
+    let zero64 = b.konst::<W64>(0);
+    let z0 = b.cmp(Cmp::Eq, prod, zero64);
+    let k0a = b.konst::<W32>(0);
+    let z1 = b.cmp(Cmp::Eq, lo, k0a);
+    let is_z = bsel(b, is64, z0, z1);
+    let n64 = {
+        let s = b.konst::<W64>(63);
+        let t = b.shr_l(prod, s);
+        b.cmp(Cmp::Ne, t, zero64)
+    };
+    let n32 = {
+        let m = b.konst::<W32>(0x8000_0000);
+        let t = b.and(lo, m);
+        let z = b.konst::<W32>(0);
+        b.cmp(Cmp::Ne, t, z)
+    };
+    let is_n = bsel(b, is64, n64, n32);
+    // V: 32 ビット形式で上位に情報が残るとき（mulu: hi≠0、
+    // muls: hi が lo の符号拡張と一致しない）。64 では常に 0。
+    let k0b = b.konst::<W32>(0);
+    let hinz = b.cmp(Cmp::Ne, hi, k0b);
+    let losx = b.sext::<W32, W64>(lo);
+    let losx_hi = {
+        let s = b.konst::<W64>(32);
+        b.shr_l(losx, s)
+    };
+    let sdif = b.cmp(Cmp::Ne, hi64, losx_hi);
+    let v32 = bsel(b, is_signed, sdif, hinz);
+    let kz = b.konst::<W64>(0);
+    let ko = b.konst::<W64>(1);
+    let v64 = b.cmp(Cmp::Ne, kz, ko); // 常に false
+    let is_v = bsel(b, is64, v64, v32);
+    if_then(b, is64, |bb| {
+        bb.set_indexed(ea::d_array(), dh_n, hi);
+        Ok(())
+    })?;
+    b.set_indexed(ea::d_array(), dl_n, lo);
+    // flags: N/Z 更新、V 上記、C=0。
+    let ccr = b.get(ccr_ref());
+    let km0 = b.konst::<W8>(0xF0);
+    let keep = b.and(ccr, km0);
+    let nk = b.konst::<W8>(1 << sr_bit::N);
+    let zk = b.konst::<W8>(1 << sr_bit::Z);
+    let vk = b.konst::<W8>(1 << sr_bit::V);
+    let z8 = b.konst::<W8>(0);
+    let n8 = b.select(is_n, nk, z8);
+    let v8 = b.select(is_v, vk, z8);
+    let zf = b.select(is_z, zk, z8);
+    let nv = b.or(n8, v8);
+    let nvz = b.or(nv, zf);
+    let out = b.or(keep, nvz);
+    b.set(ccr_ref(), out);
+    Ok(())
+}
+
+/// divl（0x4C40 + ext）。32/32→商→Dq・余り→Dr（32 ビット形式）
+/// または 64/32（64 ビット形式、被除数は Dr:Dq）。
+/// ext[15:12]=Dq（被除数・商）、ext[11]=符号、ext[10]=64
+/// ビット被除数、ext[2:0]=Dr（剰余）。68020+。
+// Ref: SPEC-M68K-PRM (Rev 1) §DIVS.L/DIVSL.L/DIVU.L/DIVUL.L.
+fn divl<B: Backend>(b: &mut B, w: u64, pc: u64) -> Flow<B> {
+    let emode = ea::ea_mode(w);
+    let ereg = ea::ea_reg(w);
+    if emode == 1 || (emode == 7 && ereg >= 5) {
+        return Err(illegal(b));
+    }
+    let ext = ea::ext_w16(b, pc + 2)?;
+    let e32 = b.zext::<W16, W32>(ext);
+    // ext[15:12]=Dq（被除数・商）、ext[2:0]=Dr（剰余・64 ビット
+    // 被除数の上位）。
+    let dq_n = ext_reg(b, e32, 12);
+    let dr_n = ext_reg(b, e32, 0);
+    let is_signed = ext_bit(b, e32, 11);
+    let is64 = ext_bit(b, e32, 10);
+    let (e, _n) = ea::eval(b, emode, ereg, 4, pc + 4)?;
+    let src = read_ea(b, &e, 4)?;
+    let dqv = get_dx(b, dq_n);
+    let drv = get_dx(b, dr_n);
+    let zero = b.konst::<W32>(0);
+    let is_z = b.cmp(Cmp::Eq, src, zero);
+    // 0 除算はベクタ 5。
+    b.if_then_else(
+        is_z,
+        |bb| {
+            Err(bb.raise(GuestException {
+                kind: ExceptionKind::Trap,
+                code: 5,
+                addr: None,
+                in_delay_slot: false,
+            }))
+        },
+        |_bb| Ok(()),
+    )?;
+    // 除数は常に 32 ビット（符号形式では i32→i64）。
+    let src64u = b.zext::<W32, W64>(src);
+    let src64s = b.sext::<W32, W64>(src);
+    // 被除数: 32 ビット形式は Dq（符号形式は i32→i64）、
+    // 64 ビット形式は Dr:Dq の結合値。
+    let dq64u = b.zext::<W32, W64>(dqv);
+    let dq64s = b.sext::<W32, W64>(dqv);
+    let dq64 = b.select(is_signed, dq64s, dq64u);
+    let hi64 = {
+        let s = b.konst::<W64>(32);
+        let v = b.zext::<W32, W64>(drv);
+        b.shl(v, s)
+    };
+    let dvd64 = b.or(hi64, dq64u);
+    let dvd = b.select(is64, dvd64, dq64);
+    let qu = b.udiv(dvd, src64u);
+    let qs = b.sdiv(dvd, src64s);
+    let q64 = b.select(is_signed, qs, qu);
+    let ru = b.urem(dvd, src64u);
+    let rs = b.srem(dvd, src64s);
+    let r64 = b.select(is_signed, rs, ru);
+    let q32 = b.trunc::<W64, W32>(q64);
+    let r32 = b.trunc::<W64, W32>(r64);
+    // V: 商が 32 ビットに収まらない。符号なしは上位 32 ビットが
+    // 非零、符号付きは i32 に切ると元に戻らない。
+    let qhi = {
+        let s = b.konst::<W64>(32);
+        b.shr_l(q64, s)
+    };
+    let kz64 = b.konst::<W64>(0);
+    let vu = b.cmp(Cmp::Ne, qhi, kz64);
+    let qs32 = b.sext::<W32, W64>(q32);
+    let vs = b.cmp(Cmp::Ne, qs32, q64);
+    let is_v = bsel(b, is_signed, vs, vu);
+    // flags: N/Z は商、V 上記、C=0。V=1 のとき商・余りは書かない。
+    let sm32 = b.konst::<W32>(0x8000_0000);
+    let n_at = b.and(q32, sm32);
+    let is_n = b.cmp(Cmp::Ne, n_at, zero);
+    let is_qz = b.cmp(Cmp::Eq, q32, zero);
+    let ccr = b.get(ccr_ref());
+    let km0 = b.konst::<W8>(0xF0);
+    let keep = b.and(ccr, km0);
+    let nk = b.konst::<W8>(1 << sr_bit::N);
+    let zk = b.konst::<W8>(1 << sr_bit::Z);
+    let vk = b.konst::<W8>(1 << sr_bit::V);
+    let z8 = b.konst::<W8>(0);
+    let n8 = b.select(is_n, nk, z8);
+    let v8 = b.select(is_v, vk, z8);
+    let zf = b.select(is_qz, zk, z8);
+    let nv = b.or(n8, v8);
+    let nvz = b.or(nv, zf);
+    let out = b.or(keep, nvz);
+    let not_v = bnot(b, is_v);
+    if_then(b, not_v, |bb| {
+        bb.set_indexed(ea::d_array(), dq_n, q32);
+        bb.set_indexed(ea::d_array(), dr_n, r32);
+        Ok(())
+    })?;
+    b.set(ccr_ref(), out);
+    Ok(())
+}
+
+/// extb.l dn（0x49C0+n）。byte→long 符号拡張。68020+。
+// Ref: SPEC-M68K-UM (MC68020) §EXTB.
+fn extb_l<B: Backend>(b: &mut B, w: u64) -> Flow<B> {
+    let rn = ea::ea_reg(w);
+    let d = b.get(D(rn).state());
+    let lo = b.trunc::<W32, W8>(d);
+    let r = b.sext::<W8, W32>(lo);
+    b.set(D(rn).state(), r);
+    set_nzvc(b, r, 4);
+    Ok(())
+}
+
+// ---- D2: 68020 ビットフィールド命令 ----
+
+/// ビットフィールド命令の動作種別。
+#[derive(Clone, Copy)]
+enum BfOp {
+    Tst,
+    Chg,
+    Clr,
+    Set,
+    Extu,
+    Exts,
+    Ffo,
+    Ins,
+}
+
+/// ext 語からフィールドの offset/width を取り出す。
+/// ext[11]=Do（offset が Dn[ext[8:6]]）、ext[5]=Dw（width が
+/// Dn[ext[2:0]]）。即値 width 0 は 32。レジスタ width は mod 32
+/// で 0 → 32。offset のレジスタ指定は Dn 全体。
+// Ref: SPEC-M68K-UM (MC68020) §Bit Field Instructions.
+fn bf_ow<B: Backend>(b: &mut B, ew: B::V<W16>) -> (B::V<W32>, B::V<W32>) {
+    let e32 = b.zext::<W16, W32>(ew);
+    let off_imm = {
+        let s = b.konst::<W32>(6);
+        let t = b.shr_l(e32, s);
+        let m = b.konst::<W32>(31);
+        b.and(t, m)
+    };
+    let off_rn = {
+        let s = b.konst::<W32>(6);
+        let t = b.shr_l(e32, s);
+        let m = b.konst::<W32>(7);
+        b.and(t, m)
+    };
+    let off_rv = b.get_indexed(ea::d_array(), off_rn);
+    let is_do = ext_bit(b, e32, 11);
+    let off = b.select(is_do, off_rv, off_imm);
+    let wid_imm = {
+        let m = b.konst::<W32>(31);
+        b.and(e32, m)
+    };
+    let wid_rn = {
+        let m = b.konst::<W32>(7);
+        b.and(e32, m)
+    };
+    let wid_rv0 = b.get_indexed(ea::d_array(), wid_rn);
+    let wmask = b.konst::<W32>(31);
+    let wid_rv = b.and(wid_rv0, wmask);
+    let is_dw = ext_bit(b, e32, 5);
+    let wid0 = b.select(is_dw, wid_rv, wid_imm);
+    let wz = b.konst::<W32>(0);
+    let is_w0 = b.cmp(Cmp::Eq, wid0, wz);
+    let w32 = b.konst::<W32>(32);
+    let wid = b.select(is_w0, w32, wid0);
+    (off, wid)
+}
+
+/// `wid` ビット幅の下位マスク。shl が全幅シフトを 0 と定義する
+/// ため wid==32 で (1<<32)-1 = 0-1 = 全 1。
+fn bf_mask<B: Backend>(b: &mut B, wid: B::V<W32>) -> B::V<W32> {
+    let one = b.konst::<W32>(1);
+    let s = b.shl(one, wid);
+    let o = b.konst::<W32>(1);
+    b.sub(s, o)
+}
+
+/// 32 ビット左ローテート。`c` は 0..31。
+fn rol32<B: Backend>(b: &mut B, v: B::V<W32>, c: B::V<W32>) -> B::V<W32> {
+    let l = b.shl(v, c);
+    let w = b.konst::<W32>(32);
+    let rc = b.sub(w, c);
+    let r = b.shr_l(v, rc);
+    b.or(l, r)
+}
+
+/// 32 ビット右ローテート。`c` は 0..31。
+fn ror32<B: Backend>(b: &mut B, v: B::V<W32>, c: B::V<W32>) -> B::V<W32> {
+    let r = b.shr_l(v, c);
+    let w = b.konst::<W32>(32);
+    let lc = b.sub(w, c);
+    let l = b.shl(v, lc);
+    b.or(r, l)
+}
+
+/// `v` の MSB（bit31）が立っているか。
+fn msb_of<B: Backend>(b: &mut B, v: B::V<W32>) -> B::B {
+    let m = b.konst::<W32>(0x8000_0000);
+    let t = b.and(v, m);
+    let z = b.konst::<W32>(0);
+    b.cmp(Cmp::Ne, t, z)
+}
+
+/// ext[14:12] の Dn に値を書き込む。
+fn set_dst<B: Backend>(b: &mut B, ew: B::V<W32>, v: B::V<W32>) {
+    let n = ext_reg(b, ew, 12);
+    b.set_indexed(ea::d_array(), n, v);
+}
+
+/// `x` の MSB からの先頭 0 ビット数（x==0 で 32）。
+fn clz32<B: Backend>(b: &mut B, mut x: B::V<W32>) -> B::V<W32> {
+    // 二分探索: 上位 (32 - sh) ビットが 0 なら sh を加算して
+    // x を sh 左シフト。
+    let mut n = b.konst::<W32>(0);
+    for sh in [16u32, 8, 4, 2, 1] {
+        let shv = b.konst::<W32>(32 - sh);
+        let hi = b.shr_l(x, shv);
+        let z = b.konst::<W32>(0);
+        let empty = b.cmp(Cmp::Eq, hi, z);
+        let kv = b.konst::<W32>(sh);
+        let n1 = b.select(empty, kv, z);
+        n = b.add(n, n1);
+        let sl = b.konst::<W32>(sh);
+        let xs = b.shl(x, sl);
+        x = b.select(empty, xs, x);
+    }
+    n
+}
+
+/// フィールド値（下位右詰め）の先頭ゼロ数をフィールド先頭からの
+/// 相対位置に直す。
+fn ffo_val<B: Backend>(b: &mut B, field: B::V<W32>, wid: B::V<W32>) -> B::V<W32> {
+    let clz = clz32(b, field);
+    // フィールドは上位 wid ビットに左詰めされているので、
+    // clz(field) からフィールド外の (32 - width) を引く。
+    let w = b.konst::<W32>(32);
+    let pad = b.sub(w, wid);
+    b.sub(clz, pad)
+}
+
+/// 回転後レジスタ値 `old`（MSB 左詰めフィールド形式）の上位
+/// `wid` ビットを `new` で置き換える。
+fn merge_field<B: Backend>(b: &mut B, old: B::V<W32>, new: B::V<W32>, wid: B::V<W32>) -> B::V<W32> {
+    // 保存部: old を wid 左へ、その後 wid 右へ戻す（上位 wid
+    // ビットを 0 クリア）。shl が全幅シフトを全域 0 と定義する
+    // ため wid==32 でも正しく 0 になる。
+    let t = b.shl(old, wid);
+    let kept = b.shr_l(t, wid);
+    b.or(new, kept)
+}
+
+/// BFINS の挿入フィールドを Dn の下位 wid ビットから作る
+/// （MSB 左詰め形式）。
+fn field_ins<B: Backend>(b: &mut B, v: B::V<W32>, wid: B::V<W32>) -> B::V<W32> {
+    let m = bf_mask(b, wid);
+    let vm = b.and(v, m);
+    let w = b.konst::<W32>(32);
+    let sh = b.sub(w, wid);
+    b.shl(vm, sh)
+}
+
+/// bf 系の旗をフィールド値（MSB 左詰め・width ビット）から
+/// 更新する。N=フィールド MSB、Z=フィールド==0、V/C=0、X 不変。
+fn bf_flags<B: Backend>(b: &mut B, field: B::V<W32>, wid: B::V<W32>) {
+    let m = bf_mask(b, wid);
+    let w = b.konst::<W32>(32);
+    let sh = b.sub(w, wid);
+    let fv = b.shr_l(field, sh);
+    let fm = b.and(fv, m);
+    let z = b.konst::<W32>(0);
+    let is_z = b.cmp(Cmp::Eq, fm, z);
+    let is_n = msb_of(b, field);
+    let ccr = b.get(ccr_ref());
+    // N/Z 更新、V/C 0、X と上位予約は保持。
+    let keep = {
+        let km = b.konst::<W8>(0x1F & !(0b0111));
+        b.and(ccr, km)
+    };
+    let nk = b.konst::<W8>(1 << sr_bit::N);
+    let zk = b.konst::<W8>(1 << sr_bit::Z);
+    let z8 = b.konst::<W8>(0);
+    let n8 = b.select(is_n, nk, z8);
+    let zf = b.select(is_z, zk, z8);
+    let nz = b.or(n8, zf);
+    let out = b.or(keep, nz);
+    b.set(ccr_ref(), out);
+}
+
+/// bf 系 8 命令。<ea> は Dn またはメモリ（An 直・即値は不可。
+/// Tst/Extu/Exts/Ffo は PC 相対可）。
+// Ref: SPEC-M68K-UM (MC68020) §Bit Field Instructions.
+fn bf<B: Backend>(b: &mut B, w: u64, pc: u64, op: BfOp) -> Flow<B> {
+    let emode = ea::ea_mode(w);
+    let ereg = ea::ea_reg(w);
+    let ok = match op {
+        BfOp::Tst | BfOp::Extu | BfOp::Exts | BfOp::Ffo => emode != 1 && !(emode == 7 && ereg == 4),
+        _ => emode != 1 && !(emode == 7 && ereg >= 2),
+    };
+    if !ok {
+        return Err(illegal(b));
+    }
+    let ew16 = ea::ext_w16(b, pc + 2)?;
+    let ew = b.zext::<W16, W32>(ew16);
+    let (off, wid) = bf_ow(b, ew16);
+    let msk = bf_mask(b, wid);
+    if emode == 0 {
+        // ---- Dn 形式: フィールドは off mod 32 から wid ビット ----
+        let rn = ereg;
+        let regv = b.get(D(rn).state());
+        let k31 = b.konst::<W32>(31);
+        let ro = b.and(off, k31);
+        // フィールド抽出: rol(regv, ro) の上位 wid ビット。
+        let rol = rol32(b, regv, ro);
+        let w32c = b.konst::<W32>(32);
+        let fw = b.sub(w32c, wid);
+        let field = b.shr_l(rol, fw);
+        let fmsb = b.shl(field, fw);
+        bf_flags(b, fmsb, wid);
+        match op {
+            BfOp::Tst => {}
+            BfOp::Extu => set_dst(b, ew, field),
+            BfOp::Exts => {
+                // フィールド MSB が立つときだけ符号拡張。
+                let fsgn = msb_of(b, fmsb);
+                let nm = b.not(msk);
+                let sx = b.or(field, nm);
+                let v = b.select(fsgn, sx, field);
+                set_dst(b, ew, v);
+            }
+            BfOp::Chg | BfOp::Clr | BfOp::Set | BfOp::Ins => {
+                let newf = match op {
+                    BfOp::Chg => {
+                        let nf = b.not(field);
+                        b.and(nf, msk)
+                    }
+                    BfOp::Clr => b.konst::<W32>(0),
+                    BfOp::Set => msk,
+                    BfOp::Ins => {
+                        let src_n = ext_reg(b, ew, 12);
+                        let sv = b.get_indexed(ea::d_array(), src_n);
+                        let v = b.and(sv, msk);
+                        // 旗は挿入フィールドから。
+                        let f = field_ins(b, sv, wid);
+                        bf_flags(b, f, wid);
+                        v
+                    }
+                    _ => unreachable!(),
+                };
+                // MSB 左詰めにして差し替え、逆回転で元位置へ。
+                let newf_msb = {
+                    let s = b.sub(w32c, wid);
+                    b.shl(newf, s)
+                };
+                let newv = merge_field(b, rol, newf_msb, wid);
+                let rv = ror32(b, newv, ro);
+                b.set(D(rn).state(), rv);
+            }
+            BfOp::Ffo => {
+                // 結果 = フィールドオフセット + フィールド内位置。
+                let rel = ffo_val(b, field, wid);
+                let fv = b.add(off, rel);
+                let z = b.konst::<W32>(0);
+                let is_f0 = b.cmp(Cmp::Eq, field, z);
+                // 全 0 → offset + width。
+                let sum = b.add(off, wid);
+                let v = b.select(is_f0, sum, fv);
+                set_dst(b, ew, v);
+            }
+        }
+        return Ok(());
+    }
+    // ---- メモリ形式: バイト単位 ----
+    let (e, _n) = ea::eval(b, emode, ereg, 1, pc + 4)?;
+    let ea64 = match e {
+        Ea::Addr(a) => a,
+        _ => unreachable!("bf メモリ形式は Addr"),
+    };
+    // バイトオフセット = off >> 3（符号付き）。
+    let three = b.konst::<W32>(3);
+    let boff = b.shr_a(off, three);
+    let boff64 = b.sext::<W32, W64>(boff);
+    let base = b.add(ea64, boff64);
+    let sbit = {
+        let k7 = b.konst::<W32>(7);
+        b.and(off, k7)
+    };
+    // nbytes = ceil((sbit + wid) / 8) — 最大 5。
+    let nbytes = {
+        let t = b.add(sbit, wid);
+        let k7 = b.konst::<W32>(7);
+        let t2 = b.add(t, k7);
+        let k3 = b.konst::<W32>(3);
+        b.shr_l(t2, k3)
+    };
+    // 最大 5 バイト読んで左詰め 40 ビットバッファにする。
+    let rd = drd(b);
+    let mut buf = b.konst::<W64>(0);
+    for i in 0..5u32 {
+        let iv = b.konst::<W64>(u64::from(i));
+        let ai = b.add(base, iv);
+        let byte8 = b.load::<W8>(ai, rd)?;
+        let bv = b.zext::<W8, W64>(byte8);
+        let sh8 = b.konst::<W64>(8 * u64::from(4 - i));
+        let sv = b.shl(bv, sh8);
+        buf = b.or(buf, sv);
+    }
+    // 抽出: shamt = 40 - sbit - wid（左詰め表現）。
+    let k40 = b.konst::<W64>(40);
+    let sbit64 = b.zext::<W32, W64>(sbit);
+    let wid64 = b.zext::<W32, W64>(wid);
+    let tmp = b.sub(k40, sbit64);
+    let shamt = b.sub(tmp, wid64);
+    let f64 = b.shr_l(buf, shamt);
+    let msk64 = {
+        let one = b.konst::<W64>(1);
+        let s = b.shl(one, wid64);
+        let o = b.konst::<W64>(1);
+        b.sub(s, o)
+    };
+    let fv64 = b.and(f64, msk64);
+    let field = b.trunc::<W64, W32>(fv64);
+    let fmsb = {
+        let w = b.konst::<W32>(32);
+        let s = b.sub(w, wid);
+        b.shl(field, s)
+    };
+    bf_flags(b, fmsb, wid);
+    match op {
+        BfOp::Tst => {}
+        BfOp::Extu => set_dst(b, ew, field),
+        BfOp::Exts => {
+            let fsgn = msb_of(b, fmsb);
+            let nm = b.not(msk);
+            let sx = b.or(field, nm);
+            let v = b.select(fsgn, sx, field);
+            set_dst(b, ew, v);
+        }
+        BfOp::Ffo => {
+            let rel = ffo_val(b, field, wid);
+            let fv = b.add(off, rel);
+            let z = b.konst::<W32>(0);
+            let is_f0 = b.cmp(Cmp::Eq, field, z);
+            let sum = b.add(off, wid);
+            let v = b.select(is_f0, sum, fv);
+            set_dst(b, ew, v);
+        }
+        BfOp::Chg | BfOp::Clr | BfOp::Set | BfOp::Ins => {
+            let newf = match op {
+                BfOp::Chg => {
+                    let nf = b.not(field);
+                    b.and(nf, msk)
+                }
+                BfOp::Clr => b.konst::<W32>(0),
+                BfOp::Set => msk,
+                BfOp::Ins => {
+                    let src_n = ext_reg(b, ew, 12);
+                    let sv = b.get_indexed(ea::d_array(), src_n);
+                    let v = b.and(sv, msk);
+                    let f = field_ins(b, sv, wid);
+                    bf_flags(b, f, wid);
+                    v
+                }
+                _ => unreachable!(),
+            };
+            // buf の [sbit, sbit+wid) を newf に置き換えて書き戻す。
+            let newf64 = b.zext::<W32, W64>(newf);
+            let nf_pos = b.shl(newf64, shamt);
+            let mpos = b.shl(msk64, shamt);
+            let keep_mask = b.not(mpos);
+            let kept = b.and(buf, keep_mask);
+            let nbuf = b.or(kept, nf_pos);
+            // nbytes バイトだけ書き戻す。
+            let wr = dwr(b);
+            for i in 0..5u32 {
+                let sh64 = b.konst::<W64>(8 * u64::from(4 - i));
+                let bshift = b.shr_l(nbuf, sh64);
+                let byte8 = b.trunc::<W64, W8>(bshift);
+                let iv = b.konst::<W64>(u64::from(i));
+                let ai = b.add(base, iv);
+                let take = {
+                    let k = b.konst::<W32>(i);
+                    b.cmp(Cmp::LtU, k, nbytes)
+                };
+                if_then(b, take, |bb| {
+                    bb.store::<W8>(ai, byte8, wr)?;
+                    Ok(())
+                })?;
+            }
+        }
+    }
     Ok(())
 }

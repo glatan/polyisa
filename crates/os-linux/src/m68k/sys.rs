@@ -54,6 +54,9 @@ pub struct Linux {
     mono_start: Option<std::time::Instant>,
     /// ディレクトリ fd の getdents 位置（エントリの通し番号）。
     dir_pos: std::collections::HashMap<u32, usize>,
+    /// set_thread_area が置くスレッドポインタ（m68k Linux は
+    /// カーネルが保持し __m68k_read_tp 経由で返す）。
+    tp: u64,
 }
 
 impl Default for Linux {
@@ -80,6 +83,7 @@ impl Linux {
             stdin_pos: 0,
             mono_start: None,
             dir_pos: std::collections::HashMap::new(),
+            tp: 0,
         }
     }
 
@@ -1051,6 +1055,32 @@ impl Linux {
             }
             // waitpid 相当。子を作れないので常に ECHILD。
             7 | m68k::WAIT4 | m68k::WAITID => fail_ret(E::ECHILD),
+            m68k::GET_THREAD_AREA => ok_ret(self.tp),
+            m68k::SET_THREAD_AREA => {
+                self.tp = args[0];
+                ok_ret(0)
+            }
+            m68k::ATOMIC_CMPXCHG_32 => {
+                // __kernel_cmpxchg(newv=d1, oldv=d2, d3, d4, d5, *mem=a0)。
+                // ポインタは第 6 引数の a0。シングルスレッドなので
+                // 比較→条件付き書き込みで十分。
+                let addr = args[5];
+                let mut buf = [0u8; 4];
+                if env
+                    .backend
+                    .mem
+                    .read(VirtAddr(addr), &mut buf, self.acc(AccessKind::DataRead))
+                    .is_err()
+                {
+                    fail_ret(m68k::errno::EFAULT)
+                } else {
+                    let cur = u32::from_be_bytes(buf);
+                    if u64::from(cur) == args[1] & 0xffff_ffff {
+                        let _ = self.put32(env, addr, args[0] as u32);
+                    }
+                    ok_ret(u64::from(cur))
+                }
+            }
             m68k::GETPID | m68k::GETTID => ok_ret(self.pid()),
             m68k::GETPPID => ok_ret(0),
             m68k::GETPGRP | m68k::GETPGID | m68k::GETSID => ok_ret(self.pid()),

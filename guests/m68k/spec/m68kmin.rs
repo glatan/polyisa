@@ -63,6 +63,18 @@ pub fn build_model() -> polyisa_isadl::Model {
         "initial",
         "MOVEM -(An) で An がマスクに含まれるとき格納する値。68000/68010 は初期値、68020 以降は An-size",
     );
+    m.param(
+        "ea_full",
+        ParamKind::Bool,
+        "false",
+        "EA full 形式拡張語（BD/OD・メモリインダイレクト）。68020 以降のみ",
+    );
+    m.param(
+        "bdisp32",
+        ParamKind::Bool,
+        "false",
+        "分岐の32ビット変位（disp バイト 0xFF）。68020 以降のみ",
+    );
 
     // CPU モデル。親チェーンで機能を累積し、世代差は params で上書きする。
     // 各世代で未実装の命令は世代機能への `when` 述語で表し、
@@ -84,6 +96,8 @@ pub fn build_model() -> polyisa_isadl::Model {
                 ("mvfrsr_priv", "true"),
                 ("odd_access", "allow"),
                 ("movem_base", "dec_opsize"),
+                ("ea_full", "true"),
+                ("bdisp32", "true"),
             ][..],
         ),
         ("i68030", "i68020", &["m68030"][..], &[][..]),
@@ -388,7 +402,11 @@ pub fn build_model() -> polyisa_isadl::Model {
             name: name.to_string(),
             format: format.to_string(),
             pattern: Pattern::parse(pattern).expect("valid pattern"),
-            when: Pred::True,
+            when: if name.starts_with("bf") || name.ends_with('l') && name.len() == 4 {
+                Pred::Flag("m68020".to_string())
+            } else {
+                Pred::True
+            },
             wheres: wheres
                 .iter()
                 .map(|(field, op, rhs)| WhereClause {
@@ -437,6 +455,37 @@ pub fn build_model() -> polyisa_isadl::Model {
             "1001 ... 111 ......",
             "suba.l",
             &[("qsz", WhereOp::Eq, 3)],
+        ),
+        // addx/subx: add/sub の bit8=1 が emode 0/1 に残した
+        // 空間。emode=0 は Dn↔Dn、emode=1 は -(Ay),-(Ax)。
+        // Ref: SPEC-M68K-PRM (Rev 1) §ADDX/SUBX.
+        (
+            "addx_d",
+            "CM",
+            "1101 ... 1 .. 000 ...",
+            "addx",
+            &[("emode", WhereOp::Eq, 0), ("qsz", WhereOp::Ne, 3)],
+        ),
+        (
+            "addx_m",
+            "CM",
+            "1101 ... 1 .. 001 ...",
+            "addx",
+            &[("emode", WhereOp::Eq, 1), ("qsz", WhereOp::Ne, 3)],
+        ),
+        (
+            "subx_d",
+            "CM",
+            "1001 ... 1 .. 000 ...",
+            "subx",
+            &[("emode", WhereOp::Eq, 0), ("qsz", WhereOp::Ne, 3)],
+        ),
+        (
+            "subx_m",
+            "CM",
+            "1001 ... 1 .. 001 ...",
+            "subx",
+            &[("emode", WhereOp::Eq, 1), ("qsz", WhereOp::Ne, 3)],
         ),
         ("cmp", "AE", "1011 ... 0 .. ......", "cmp", &[]),
         (
@@ -572,6 +621,23 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("not", "IE", "0100 0110 .. ......", "not", &[("qsz", WhereOp::Ne, 3)]),
         ("clr", "IE", "0100 0010 .. ......", "clr", &[("qsz", WhereOp::Ne, 3)]),
         ("tst", "IE", "0100 1010 .. ......", "tst", &[("qsz", WhereOp::Ne, 3)]),
+        ("neg", "IE", "0100 0100 .. ......", "neg", &[("qsz", WhereOp::Ne, 3)]),
+        ("negx", "IE", "0100 0000 .. ......", "negx", &[("qsz", WhereOp::Ne, 3)]),
+        // D2: 68020 long 乗除算。拡張語 1 語 + EA。
+        (
+            "mull",
+            "IE",
+            "0100 1100 00 ......",
+            "mull",
+            &[("qsz", WhereOp::Ne, 3)],
+        ),
+        (
+            "divl",
+            "IE",
+            "0100 1100 01 ......",
+            "divl",
+            &[("qsz", WhereOp::Ne, 3)],
+        ),
         // C4: シフト/ローテート。レジスタ形は qsz!=3（qsz=3 はメモリ
         // 形の空間）。メモリ形は bits[11:9] が演算種別・bit8 が方向・
         // word・カウント1固定。
@@ -714,7 +780,15 @@ pub fn build_model() -> polyisa_isadl::Model {
         // emode=1（0x4848-4F）は 68000 では illegal で pea→ベクタ4 が
         // 実機と一致するので残す。
         // Ref: SPEC-M68K-PRM (Rev 1) §LEA/PEA/LINK/UNLK.
-        ("lea", "LF", "0100 ... 1 11 ......", "lea", &[]),
+        // emode=0 は 68020 の extb.l の空間（実機では lea Dn は
+        // illegal）なので lea からは除外する。
+        (
+            "lea",
+            "LF",
+            "0100 ... 1 11 ......",
+            "lea",
+            &[("emode", WhereOp::Ne, 0)],
+        ),
         (
             "pea",
             "JF",
@@ -771,6 +845,14 @@ pub fn build_model() -> polyisa_isadl::Model {
             "LK",
             "0100 1000 1100 0...",
             "ext",
+            &[("emode", WhereOp::Eq, 0)],
+        ),
+        // 68020: extb.l = byte→long 符号拡張。
+        (
+            "extb_l",
+            "LK",
+            "0100 1001 1100 0...",
+            "extb",
             &[("emode", WhereOp::Eq, 0)],
         ),
          // C10: ブロック転送。
@@ -884,13 +966,38 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("mv2ccr", "JF", "0100 0100 11 ......", "move", &[("qsz", WhereOp::Eq, 3)]),
         ("mv2sr", "JF", "0100 0110 11 ......", "move", &[("qsz", WhereOp::Eq, 3)]),
         ("mvfrsr", "JF", "0100 0000 11 ......", "move", &[("qsz", WhereOp::Eq, 3)]),
+        // D2: 68020+ のビットフィールド操作群。bits[7:6]=11 は
+        // レジスタシフトの qsz Ne 3 と対で排他を示し、op は
+        // bits[10:8] の固定値で互いに区別される。
+        ("bftst", "JF", "1110 1000 11 ......", "misc", &[("qsz", WhereOp::Eq, 3)]),
+        ("bfextu", "JF", "1110 1001 11 ......", "misc", &[("qsz", WhereOp::Eq, 3)]),
+        ("bfchg", "JF", "1110 1010 11 ......", "misc", &[("qsz", WhereOp::Eq, 3)]),
+        ("bfexts", "JF", "1110 1011 11 ......", "misc", &[("qsz", WhereOp::Eq, 3)]),
+        ("bfclr", "JF", "1110 1100 11 ......", "misc", &[("qsz", WhereOp::Eq, 3)]),
+        ("bfffo", "JF", "1110 1101 11 ......", "misc", &[("qsz", WhereOp::Eq, 3)]),
+        ("bfset", "JF", "1110 1110 11 ......", "misc", &[("qsz", WhereOp::Eq, 3)]),
+        ("bfins", "JF", "1110 1111 11 ......", "misc", &[("qsz", WhereOp::Eq, 3)]),
+        // D2: 68020+ の cas（アトミックな比較交換）。bits[10:9] が
+        // サイズ（01=b,10=w,11=l）、bits[7:6]=11 で imm 群の
+        // qsz Ne 3 と対で排他を示す。cas2（EA=0x3C 固定）は
+        // 未宣言で、cas の exec が emode7/reg4 を illegal にする。
+        // Ref: SPEC-M68K-PRM (Rev 1) §CAS.
+        ("casb", "JF", "0000 1010 11 ......", "misc", &[("qsz", WhereOp::Eq, 3)]),
+        ("casw", "JF", "0000 1100 11 ......", "misc", &[("qsz", WhereOp::Eq, 3)]),
+        ("casl", "JF", "0000 1110 11 ......", "misc", &[("qsz", WhereOp::Eq, 3)]),
     ];
     for (name, format, pattern, syntax, wheres) in arith {
         m.insns.push(Insn {
             name: name.to_string(),
             format: format.to_string(),
             pattern: Pattern::parse(pattern).expect("valid pattern"),
-            when: Pred::True,
+            when: if name.starts_with("bf")
+                || matches!(*name, "extb_l" | "mull" | "divl" | "casb" | "casw" | "casl")
+            {
+                Pred::Flag("m68020".to_string())
+            } else {
+                Pred::True
+            },
             wheres: wheres
                 .iter()
                 .map(|(field, op, rhs)| WhereClause {

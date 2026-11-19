@@ -20,10 +20,19 @@ use polyisa_engine::interp::{Ctrl, InterpExit};
 use polyisa_engine::run::{Outcome, TrapHandler, TrapOutcome};
 use polyisa_guest_m68k::{decode_model_ex, ea, sem};
 use polyisa_mem::{Access, AccessKind, Align, Endian, Perms, VirtAddr};
-use polyisa_sem::ExceptionKind;
+use polyisa_sem::{Backend, ExceptionKind};
 
 /// 実バイナリの処理量を見込んだ上限。
 const STEP_LIMIT: u64 = 256_000_000;
+
+/// ページフォルト駆動のスタック成長の設定。
+/// `top` はスタック上端、`limit` は下向き成長の下限（RLIMIT_STACK 相当）。
+/// 窓 `[limit, top)` 内の未写像ページへのフォルトで写像を伸ばす。
+#[derive(Clone, Copy)]
+pub struct StackGrowth {
+    pub top: u64,
+    pub limit: u64,
+}
 
 /// 実行する CPU モデルの、ループが読む分。
 #[derive(Clone, Copy, Debug)]
@@ -63,7 +72,14 @@ impl M68kModel {
 }
 
 /// `entry` から `model` で実行する。`sys` は OS パーソナリティ。
-pub fn run(env: &mut BareEnv, entry: u64, model: M68kModel, sys: &mut impl TrapHandler) -> Outcome {
+/// `stack` が `Some` ならページフォルト駆動でスタックを伸ばす。
+pub fn run(
+    env: &mut BareEnv,
+    entry: u64,
+    model: M68kModel,
+    sys: &mut impl TrapHandler,
+    stack: Option<StackGrowth>,
+) -> Outcome {
     env.pc = entry;
     polyisa_guest_m68k::install_params(&mut env.backend, &model.params);
     // PC は32ビットの内部レジスタだがアドレスバスはモデル依存
@@ -75,7 +91,7 @@ pub fn run(env: &mut BareEnv, entry: u64, model: M68kModel, sys: &mut impl TrapH
         sys,
         STEP_LIMIT,
         |env| env.pc,
-        |env, sys| step_m68k(env, sys, model),
+        |env, sys| step_m68k(env, sys, model, stack),
     )
 }
 
@@ -85,6 +101,7 @@ fn step_m68k(
     env: &mut BareEnv,
     sys: &mut impl TrapHandler,
     model: M68kModel,
+    stack: Option<StackGrowth>,
 ) -> Result<(), Outcome> {
     let pc = env.pc;
     let unimpl = |env: &BareEnv, word: u64| Outcome::Unimplemented {
@@ -116,12 +133,24 @@ fn step_m68k(
         return Err(unimpl(env, word));
     };
     // 命令長は先頭ワードの EA フィールドから決める。拡張語自体は
-    // 意味論側が pc+2 以降から backend 経由で読む。
-    let Some(ext) = ea::insn_ext_words(insn, word) else {
+    // 意味論側が pc+2 以降から backend 経由で読む。68020+ では
+    // full 形式 EA・32 ビット分岐変位で語数が拡張語の内容に依存する。
+    let gen020 = env.backend.param::<polyisa_guest_m68k::EaFullParam>();
+    let bdisp32 = env.backend.param::<polyisa_guest_m68k::Bdisp32Param>();
+    let Some(ext) = ea::insn_ext_dyn(insn, word, gen020, bdisp32, |i| {
+        let mut b2 = [0u8; 2];
+        let a = (pc + 2 + u64::from(i) * 2) & model.addr_mask;
+        env.backend.mem.read(VirtAddr(a), &mut b2, acc).ok()?;
+        Some(u16::from_be_bytes(b2))
+    }) else {
         return Err(unimpl(env, word));
     };
     let len = 2 + u64::from(ext) * 2;
-    match env.step(|b| sem::exec(b, insn, word, pc)) {
+    if std::env::var_os("POLYISA_M68K_TRACE").is_some() {
+        eprintln!("pc={pc:#x} w={word:#06x}");
+    }
+    let r = env.step(|b| sem::exec(b, insn, word, pc));
+    match r {
         Ok(()) => {
             if env.backend.ctrl == Ctrl::Fallthrough {
                 // PC は32ビットのアドレス空間で折り返す。
@@ -163,8 +192,59 @@ fn step_m68k(
             }
         }
         // アドレスエラー（14 バイトフレーム）は未接続。
-        Err(InterpExit::Exception(_)) | Err(InterpExit::Unimplemented(_)) => Err(unimpl(env, word)),
+        Err(InterpExit::Exception(e)) => {
+            if stack_grow(env, stack, &e).is_some() {
+                return Ok(());
+            }
+            if std::env::var_os("POLYISA_M68K_DEBUG").is_some() {
+                let usp = env.backend.get(polyisa_guest_m68k::sem::Usp.state());
+                let a: Vec<u32> = (0..7)
+                    .map(|i| env.backend.get(polyisa_guest_m68k::sem::A(i).state()))
+                    .chain(std::iter::once(usp))
+                    .collect();
+                let d: Vec<u32> = (0..7)
+                    .map(|i| env.backend.get(polyisa_guest_m68k::sem::D(i).state()))
+                    .collect();
+                eprintln!("m68k: exception {e:?} at pc={pc:#x} a={a:x?} d={d:x?}");
+            }
+            Err(unimpl(env, word))
+        }
+        Err(InterpExit::Unimplemented(_)) => Err(unimpl(env, word)),
     }
+}
+
+/// ページフォルトをスタック成長として処理する。窓 `[limit, top)` 内の
+/// 未写像ページへのフォルトなら、フォルトしたページから最初に写像済みの
+/// ページの手前までを R/W で写像する。処理したなら `Some` を返す。
+// Ref: SRC-LINUX (7.3) — expand_stack の規約（RLIMIT 内の下方成長）。
+fn stack_grow(
+    env: &mut BareEnv,
+    stack: Option<StackGrowth>,
+    e: &polyisa_sem::GuestException,
+) -> Option<()> {
+    use polyisa_mem::{PAGE_SIZE, PageNo};
+    let s = stack?;
+    if e.kind != ExceptionKind::PageFault {
+        return None;
+    }
+    let a = e.addr?;
+    if a >= s.top || a < s.limit {
+        return None;
+    }
+    let lo = a & !(PAGE_SIZE - 1);
+    // フォルトしたページから上向きに、現状の写像の下端を探す。
+    let mut hi = lo;
+    while hi < s.top && !env.backend.mem.is_mapped(PageNo(hi / PAGE_SIZE)) {
+        hi += PAGE_SIZE;
+    }
+    let pages = (hi - lo) / PAGE_SIZE;
+    if pages == 0 {
+        return None;
+    }
+    env.backend
+        .mem
+        .map(VirtAddr(lo), pages, Perms(Perms::R.0 | Perms::W.0))
+        .ok()
 }
 
 /// m68k の Linux ELF（EM_68K・ELFCLASS32・ビッグエンディアン）を
@@ -278,11 +358,27 @@ pub fn run_elf_m68k(path: &str, argv: &[String]) -> Result<u64, String> {
     // A7 = 初期スタック。SR=0（ユーザモード）なので USP が A7 になる。
     env.backend.set(sem::Usp.state(), sp as u32);
     let mut sys = polyisa_os_linux::m68k::sys::Linux::new();
-    sys.exe_path = path.to_string();
+    // /proc/self/exe の readlink は絶対パスを返す規約。静的 glibc の
+    // _dl_get_origin が先頭が '/' であることを要求する。
+    sys.exe_path = std::fs::canonicalize(path)
+        .map_or_else(|_| path.to_string(), |p| p.to_string_lossy().into_owned());
     sys.init_brk(image_end);
     // Linux ユーザランドは 68020 以降向けにリンクされる。32 ビットの
     // アドレスバスと世代パラメータが要るため i68020 を使う。
-    let out = run(&mut env, entry, M68kModel::named("i68020"), &mut sys);
+    // 初期スタックは像の分だけ写像し、下方向はページフォルト駆動で
+    // RLIMIT_STACK 既定値（8 MiB）まで伸ばす。
+    const STACK_LIMIT: u64 = 8 << 20;
+    let growth = Some(StackGrowth {
+        top,
+        limit: top - STACK_LIMIT,
+    });
+    let out = run(
+        &mut env,
+        entry,
+        M68kModel::named("i68020"),
+        &mut sys,
+        growth,
+    );
     match out {
         Outcome::Exit(code) => Ok(code),
         Outcome::Unimplemented { pc, word } => Err(format!("unimplemented at {pc:#x}: {word:#x}")),
@@ -297,7 +393,6 @@ mod tests {
     use polyisa_engine::run::TrapOutcome;
     use polyisa_guest_m68k::Insn;
     use polyisa_mem::Perms;
-    use polyisa_sem::Backend as _;
 
     /// 語列を RX として写像した環境。`base` が入口。
     fn env_at(base: u64, words: &[u16]) -> BareEnv {
@@ -329,7 +424,7 @@ mod tests {
         // fetch 失敗 → Unimplemented。
         let mut env = env_at(0x1FFA, &[0x4E71, 0x4E71, 0x4E71]);
         let mut sys = NoSys;
-        match run(&mut env, 0x1FFA, M68kModel::m68000(), &mut sys) {
+        match run(&mut env, 0x1FFA, M68kModel::m68000(), &mut sys, None) {
             Outcome::Unimplemented { pc, .. } => assert_eq!(pc, 0x2000),
             o => panic!("unexpected outcome: {o:?}"),
         }
@@ -342,7 +437,7 @@ mod tests {
         // nop の次がデコード不能（0x4E74 は 68000 では未割当）→ Unimplemented。
         let mut env = env_at(0x1000, &[0x4E71, 0x4E74]);
         let mut sys = NoSys;
-        match run(&mut env, 0x1000, M68kModel::m68000(), &mut sys) {
+        match run(&mut env, 0x1000, M68kModel::m68000(), &mut sys, None) {
             Outcome::Unimplemented { pc, word } => {
                 assert_eq!(pc, 0x1002);
                 assert_eq!(word, 0x4E74);
@@ -374,7 +469,7 @@ mod tests {
             .write(VirtAddr(0x2000), &[0x4E, 0x74])
             .unwrap();
         let mut sys = NoSys;
-        match run(&mut env, 0x1000, M68kModel::m68000(), &mut sys) {
+        match run(&mut env, 0x1000, M68kModel::m68000(), &mut sys, None) {
             Outcome::Unimplemented { pc, word } => {
                 assert_eq!(pc, 0x2000);
                 assert_eq!(word, 0x4E74);
@@ -405,7 +500,7 @@ mod tests {
     fn odd_pc_is_unimplemented() {
         let mut env = env_at(0x1000, &[0x4E71]);
         let mut sys = NoSys;
-        match run(&mut env, 0x1001, M68kModel::m68000(), &mut sys) {
+        match run(&mut env, 0x1001, M68kModel::m68000(), &mut sys, None) {
             Outcome::Unimplemented { pc, word } => {
                 assert_eq!(pc, 0x1001);
                 assert_eq!(word, 0);
