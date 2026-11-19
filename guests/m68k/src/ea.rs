@@ -70,6 +70,21 @@ pub const fn ext_words(mode: u8, reg: u8, size: u32) -> Option<u32> {
     }
 }
 
+/// 命令全体が消費する拡張語数。命令長は 2 + 戻り値×2。
+///
+/// EA フィールドの位置とサイズは命令の仕様ごとに違うので、ここが
+/// Insn から `ext_words` への振り分けの契約点になる。F0 形式の
+/// 固定ワード命令は EA を持たないので 0。
+// Ref: SPEC-M68K-PRM (Rev 1).
+#[must_use]
+pub const fn insn_ext_words(insn: super::Insn, w: u64) -> Option<u32> {
+    // F0 形式の固定ワード命令は拡張語を持たない。EA を持つ命令の追加で
+    // Insn → ext_words の振り分けに育つ。
+    let _ = insn;
+    let _ = w;
+    Some(0)
+}
+
 /// EA を評価し、オペランドと消費した拡張語数を返す。
 ///
 /// `mode`/`reg` は先頭ワードの EA フィールド、`size` はオペランドの

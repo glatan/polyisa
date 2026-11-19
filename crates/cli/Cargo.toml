@@ -10,6 +10,7 @@ polyisa-engine = { path = "../engine" }
 polyisa-guest = { path = "../guest" }
 polyisa-guest-aarch64 = { path = "../../guests/aarch64", optional = true }
 polyisa-guest-arm = { path = "../../guests/arm", optional = true }
+polyisa-guest-m68k = { path = "../../guests/m68k", optional = true }
 polyisa-guest-mips = { path = "../../guests/mips", optional = true }
 polyisa-guest-power = { path = "../../guests/power", optional = true }
 polyisa-guest-riscv = { path = "../../guests/riscv", optional = true }
@@ -32,6 +33,7 @@ polyisa-softfloat = { path = "../softfloat" }
 default = [
     "guest-aarch64",
     "guest-arm",
+    "guest-m68k",
     "guest-mips",
     "guest-power",
     "guest-riscv",
@@ -41,6 +43,7 @@ default = [
 ]
 guest-aarch64 = ["dep:polyisa-guest-aarch64", "polyisa-os-linux/guest-aarch64"]
 guest-arm = ["dep:polyisa-guest-arm", "polyisa-os-linux/guest-arm"]
+guest-m68k = ["dep:polyisa-guest-m68k"]
 guest-mips = ["dep:polyisa-guest-mips", "polyisa-os-linux/guest-mips"]
 guest-power = ["dep:polyisa-guest-power", "polyisa-os-linux/guest-power"]
 guest-riscv = ["dep:polyisa-guest-riscv", "polyisa-os-linux/guest-riscv"]

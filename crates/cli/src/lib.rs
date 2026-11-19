@@ -8,6 +8,8 @@
 pub mod run_aarch64;
 #[cfg(feature = "guest-arm")]
 pub mod run_arm;
+#[cfg(feature = "guest-m68k")]
+pub mod run_m68k;
 #[cfg(feature = "guest-mips")]
 pub mod run_mips;
 #[cfg(feature = "guest-power")]
