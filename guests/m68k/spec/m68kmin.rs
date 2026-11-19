@@ -5,7 +5,7 @@
 // 宣言する命令は、16ビット固定の実符号化（nop/reset/rts/rtr/rte/illegal）、
 // EA フィールドを持つ move/movea/moveq（C1）、算術・比較（C2）、
 // 論理・単項（C3）、シフト/ローテート（C4）、ビット操作（C5）、
-// 分岐・復帰（C6）、scc/dbcc（C7）、lea/pea/link/unlk（C8）、exg/swap/ext（C9）、movem/movep（C10）、mulu/muls/divu/divs（C11）。
+// 分岐・復帰（C6）、scc/dbcc（C7）、lea/pea/link/unlk（C8）、exg/swap/ext（C9）、movem/movep（C10）、mulu/muls/divu/divs（C11）、abcd/sbcd/nbcd（C12）。
 // EA モードの解釈と拡張語の消費は `src/ea.rs`、意味論は `src/sem.rs`。
 // 出典は SPEC-M68K-PRM (M68000PM/AD Rev 1) である。
 // Ref: SPEC-M68K-PRM (Rev 1).
@@ -786,6 +786,40 @@ pub fn build_model() -> polyisa_isadl::Model {
             &[("qsz", WhereOp::Eq, 3)],
         ),
         ("divs", "JF", "1000 ... 1 11 ......", "divs", &[]),
+         // C12: BCD 演算。abcd/sbcd は and_b/or_b dn→ea が予約した
+        // emode 0/1（r/m ビットがレジスタ/メモリ形を分ける）。
+        // nbcd は tas 未実装の 0100 1010 空間ではなく
+        // 0100 1000 00 の unary 空間。
+        // Ref: SPEC-M68K-PRM (Rev 1) §ABCD/SBCD/NBCD.
+        (
+            "abcd_r",
+            "XG",
+            "1100 ... 1 0000 0...",
+            "abcd",
+            &[("emode", WhereOp::Eq, 0)],
+        ),
+        (
+            "abcd_m",
+            "XG",
+            "1100 ... 1 0000 1...",
+            "abcd",
+            &[("emode", WhereOp::Eq, 1)],
+        ),
+        (
+            "sbcd_r",
+            "XG",
+            "1000 ... 1 0000 0...",
+            "sbcd",
+            &[("emode", WhereOp::Eq, 0)],
+        ),
+        (
+            "sbcd_m",
+            "XG",
+            "1000 ... 1 0000 1...",
+            "sbcd",
+            &[("emode", WhereOp::Eq, 1)],
+        ),
+        ("nbcd", "JF", "0100 1000 00 ......", "nbcd", &[]),
     ];
     for (name, format, pattern, syntax, wheres) in arith {
         m.insns.push(Insn {

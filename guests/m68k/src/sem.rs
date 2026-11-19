@@ -253,6 +253,11 @@ pub fn exec<B: Backend>(b: &mut B, insn: super::Insn, w: u64, pc: u64) -> Flow<B
         super::Insn::Muls => muldiv(b, w, pc, MulDiv::Muls),
         super::Insn::Divu => muldiv(b, w, pc, MulDiv::Divu),
         super::Insn::Divs => muldiv(b, w, pc, MulDiv::Divs),
+        super::Insn::AbcdR => bcd_reg(b, w, true),
+        super::Insn::AbcdM => bcd_mem(b, w, pc, true),
+        super::Insn::SbcdR => bcd_reg(b, w, false),
+        super::Insn::SbcdM => bcd_mem(b, w, pc, false),
+        super::Insn::Nbcd => nbcd(b, w, pc),
         super::Insn::Illegal => Err(b.raise(GuestException {
             kind: ExceptionKind::Trap,
             // m68k の例外ベクタ番号 4（Illegal Instruction）。
@@ -1946,4 +1951,209 @@ fn div_core<B: Backend>(b: &mut B, d: B::V<W32>, v: B::V<W32>, dn: u8, signed: b
             Ok(())
         },
     )
+}
+
+/// X フラグの値（0/1）。
+fn x_flag<B: Backend>(b: &mut B) -> B::V<W32> {
+    let ccr = b.get(ccr_ref());
+    let x8 = {
+        let km = b.konst::<W8>(1 << sr_bit::X);
+        b.and(ccr, km)
+    };
+    let x32 = b.zext::<W8, W32>(x8);
+    let sh = b.konst::<W32>(4);
+    b.shr_l(x32, sh)
+}
+
+/// BCD フラグ: X=C=十進キャリー、Z は累積（結果が0でなければクリア）、
+/// N=結果の bit7、V は呼び出し側で算出した値。
+fn bcd_flags<B: Backend>(b: &mut B, res8: B::V<W32>, c: B::B, v: B::B) {
+    let ccr = b.get(ccr_ref());
+    // 上位予約のみ保持（X も十進キャリーで上書き）。
+    let km = b.konst::<W8>(0xE0);
+    let keep = b.and(ccr, km);
+    let msb = b.konst::<W32>(0x80);
+    let np = b.and(res8, msb);
+    let z32 = b.konst::<W32>(0);
+    let is_n = b.cmp(Cmp::Ne, np, z32);
+    let is_z = b.cmp(Cmp::Eq, res8, z32);
+    let z8 = b.konst::<W8>(0);
+    let nk = b.konst::<W8>(1 << sr_bit::N);
+    let zk = b.konst::<W8>(1 << sr_bit::Z);
+    let vk = b.konst::<W8>(1 << sr_bit::V);
+    let xck = b.konst::<W8>((1 << sr_bit::X) | (1 << sr_bit::C));
+    // Z は「旧 Z && 結果==0」の累積。値域で AND する。
+    let zsel = b.select(is_z, zk, z8);
+    let old_z = {
+        let zmk = b.konst::<W8>(1 << sr_bit::Z);
+        b.and(ccr, zmk)
+    };
+    let new_z = b.and(old_z, zsel);
+    let n8 = b.select(is_n, nk, z8);
+    let v8 = b.select(v, vk, z8);
+    let xc8 = b.select(c, xck, z8);
+    let nz = b.or(n8, new_z);
+    let vx = b.or(v8, xc8);
+    let fl = b.or(nz, vx);
+    let out = b.or(keep, fl);
+    b.set(ccr_ref(), out);
+}
+
+/// C12: abcd/sbcd のレジスタ形。byte 演算、Dn の上位は保持。
+// Ref: SPEC-M68K-PRM (Rev 1) §ABCD/SBCD.
+fn bcd_reg<B: Backend>(b: &mut B, w: u64, add: bool) -> Flow<B> {
+    let dn = ea::dest_reg(w);
+    let rn = ea::ea_reg(w);
+    let src = {
+        let v = b.get(D(rn).state());
+        let m = b.konst::<W32>(0xFF);
+        b.and(v, m)
+    };
+    let dst_full = b.get(D(dn).state());
+    let dst = {
+        let m = b.konst::<W32>(0xFF);
+        b.and(dst_full, m)
+    };
+    let x = x_flag(b);
+    let (res8, c, v) = if add {
+        bcd_add(b, src, dst, x)
+    } else {
+        bcd_sub(b, dst, src, x)
+    };
+    let km = b.konst::<W32>(0xFFFF_FF00);
+    let hi = b.and(dst_full, km);
+    let nv = b.or(hi, res8);
+    b.set(D(dn).state(), nv);
+    bcd_flags(b, res8, c, v);
+    Ok(())
+}
+
+/// C12: abcd/sbcd のメモリ形 -(Ay),-(Ax)。
+/// Ay==Ax のとき評価順で2回デクリメントされる。
+fn bcd_mem<B: Backend>(b: &mut B, w: u64, pc: u64, add: bool) -> Flow<B> {
+    let ax = ea::dest_reg(w);
+    let ay = ea::ea_reg(w);
+    let (se, _n1) = ea::eval(b, 4, ay, 1, pc + 2)?;
+    let src = read_ea(b, &se, 1)?;
+    let (de, _n2) = ea::eval(b, 4, ax, 1, pc + 2)?;
+    let dst = read_ea(b, &de, 1)?;
+    let x = x_flag(b);
+    let (res8, c, v) = if add {
+        bcd_add(b, src, dst, x)
+    } else {
+        bcd_sub(b, dst, src, x)
+    };
+    write_ea(b, &de, 1, res8)?;
+    bcd_flags(b, res8, c, v);
+    Ok(())
+}
+
+/// BCD 加算: src+dst+x の10進補正。戻り値は (結果 byte, キャリー, オーバーフロー)。
+/// TODO(cpu-models): V の算出式は 68000 固有。68020+ では Param で切り替える。
+/// 補正規則は SST (実機) で検証済み:
+///   lo>9 → lo+=6、res>0x9F → +0x60 かつ C/X=1、V=(res & ~raw) & 0x80。
+fn bcd_add<B: Backend>(
+    b: &mut B,
+    src: B::V<W32>,
+    dst: B::V<W32>,
+    x: B::V<W32>,
+) -> (B::V<W32>, B::B, B::B) {
+    let lm = b.konst::<W32>(0x0F);
+    let sl = b.and(src, lm);
+    let dl = b.and(dst, lm);
+    let slx = b.add(sl, x);
+    let lo = b.add(slx, dl);
+    let nine = b.konst::<W32>(9);
+    let lgt = b.cmp(Cmp::GtU, lo, nine);
+    let six = b.konst::<W32>(6);
+    let z = b.konst::<W32>(0);
+    let adj = b.select(lgt, six, z);
+    let lo2 = b.add(lo, adj);
+    let hm = b.konst::<W32>(0xF0);
+    let sh = b.and(src, hm);
+    let dh = b.and(dst, hm);
+    let t = b.add(sh, dh);
+    let res = b.add(t, lo2);
+    let n9f = b.konst::<W32>(0x9F);
+    let c = b.cmp(Cmp::GtU, res, n9f);
+    let c60 = b.konst::<W32>(0x60);
+    let adj2 = b.select(c, c60, z);
+    let res2 = b.add(res, adj2);
+    let mm = b.konst::<W32>(0xFF);
+    let res8 = b.and(res2, mm);
+    // V = 補正後の bit7 が生和の bit7 と異なって立つ: res & ~raw & 0x80。
+    let sx = b.add(src, x);
+    let raw = {
+        let t = b.add(sx, dst);
+        b.and(t, mm)
+    };
+    let nraw = b.not(raw);
+    let t2 = b.and(res8, nraw);
+    let mk = b.konst::<W32>(0x80);
+    let msb = b.and(t2, mk);
+    let v = b.cmp(Cmp::Ne, msb, z);
+    (res8, c, v)
+}
+
+/// BCD 減算: dst-src-x の10進補正。戻り値は (結果 byte, キャリー, オーバーフロー)。
+/// TODO(cpu-models): V の算出式は 68000 固有。68020+ では Param で切り替える。
+/// 補正規則は SST (実機) で検証済み:
+///   bc=(dst^src^res)&0x110 の bit4 で -6、bit8 で -0x60、
+///   C/X = 補正後 res<0、V=(~res & raw) & 0x80。
+fn bcd_sub<B: Backend>(
+    b: &mut B,
+    dst: B::V<W32>,
+    src: B::V<W32>,
+    x: B::V<W32>,
+) -> (B::V<W32>, B::B, B::B) {
+    let dsx = b.sub(dst, x);
+    let res0 = b.sub(dsx, src);
+    let mm = b.konst::<W32>(0xFF);
+    let raw = b.and(res0, mm);
+    let m1ff = b.konst::<W32>(0x1FF);
+    let res9 = b.and(res0, m1ff);
+    let xs = b.xor(dst, src);
+    let xf = b.xor(xs, res9);
+    let m110 = b.konst::<W32>(0x110);
+    let bc = b.and(xf, m110);
+    let bm = b.konst::<W32>(0x10);
+    let lb = b.and(bc, bm);
+    let z = b.konst::<W32>(0);
+    let bor = b.cmp(Cmp::Ne, lb, z);
+    let six = b.konst::<W32>(6);
+    let adj = b.select(bor, six, z);
+    let res = b.sub(res0, adj);
+    let hm = b.konst::<W32>(0x100);
+    let hb = b.and(bc, hm);
+    let hbz = b.cmp(Cmp::Ne, hb, z);
+    let c60 = b.konst::<W32>(0x60);
+    let adj2 = b.select(hbz, c60, z);
+    let res2 = b.sub(res, adj2);
+    let c = b.cmp(Cmp::LtS, res2, z);
+    let res8 = b.and(res2, mm);
+    // V = 補正後の bit7 が下がり生差では立つ: ~res & raw & 0x80。
+    let nres = b.not(res8);
+    let t2 = b.and(nres, raw);
+    let mk = b.konst::<W32>(0x80);
+    let msb = b.and(t2, mk);
+    let v = b.cmp(Cmp::Ne, msb, z);
+    (res8, c, v)
+}
+
+/// C12: nbcd <ea>。0 - dst - X の10進補正。EA は data alterable。
+// Ref: SPEC-M68K-PRM (Rev 1) §NBCD.
+fn nbcd<B: Backend>(b: &mut B, w: u64, pc: u64) -> Flow<B> {
+    let emode = ea::ea_mode(w);
+    let ereg = ea::ea_reg(w);
+    if emode == 1 || (emode == 7 && ereg >= 2) {
+        return Err(illegal(b));
+    }
+    let (e, _n) = ea::eval(b, emode, ereg, 1, pc + 2)?;
+    let dst = read_ea(b, &e, 1)?;
+    let x = x_flag(b);
+    let z = b.konst::<W32>(0);
+    let (res8, c, v) = bcd_sub(b, z, dst, x);
+    write_ea(b, &e, 1, res8)?;
+    bcd_flags(b, res8, c, v);
+    Ok(())
 }

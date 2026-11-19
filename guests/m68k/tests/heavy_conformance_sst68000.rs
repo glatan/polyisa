@@ -118,7 +118,10 @@ const FILES: &[&str] = &[
     "MULU",
     "MULS",
     "DIVU",
-    "DIVS", //
+    "DIVS",
+    "ABCD",
+    "SBCD",
+    "NBCD", //
     "ANDItoCCR",
     "ANDItoSR",
     "ORItoCCR",

@@ -912,8 +912,12 @@ fn decode_c3_spot() {
     assert_eq!(polyisa_guest_m68k::decode(0xB340, 16), Some(Insn::Eor));
     assert_eq!(polyisa_guest_m68k::decode(0x4640, 16), Some(Insn::Not));
     assert_eq!(polyisa_guest_m68k::decode(0x4A00, 16), Some(Insn::Tst));
-    // or.b Dn→Dn（SBCD の空間）・or.w Dn→An は未割当。
-    assert_eq!(polyisa_guest_m68k::decode(0x8300, 16), None);
+    // or.b Dn→Dn の空間は sbcd（C12 で実装済み）。or.w Dn→An は未割当。
+    assert_eq!(polyisa_guest_m68k::decode(0x8300, 16), Some(Insn::SbcdR));
+    assert_eq!(polyisa_guest_m68k::decode(0x8308, 16), Some(Insn::SbcdM));
+    assert_eq!(polyisa_guest_m68k::decode(0xC100, 16), Some(Insn::AbcdR));
+    assert_eq!(polyisa_guest_m68k::decode(0xC108, 16), Some(Insn::AbcdM));
+    assert_eq!(polyisa_guest_m68k::decode(0x4800, 16), Some(Insn::Nbcd));
     assert_eq!(polyisa_guest_m68k::decode(0x8348, 16), None);
     // and.w Dn→Dn/An の空間は exg（C9 で実装済み）。
     assert_eq!(polyisa_guest_m68k::decode(0xC340, 16), Some(Insn::ExgDd));
@@ -1732,4 +1736,237 @@ fn mul_div() {
     // 語数: ea 拡張語のみ。
     assert_eq!(ea::insn_ext_words(Insn::Mulu, 0xC2C0), Some(0));
     assert_eq!(ea::insn_ext_words(Insn::Divu, 0x82F8), Some(1)); // abs.w
+}
+
+#[test]
+fn bcd_arith() {
+    // abcd d1,d0: 0xC001。09 + 12 = 21（補正あり）。
+    let mut env = env_with_code(&[0xC001]);
+    env.backend.set(D(0).state(), 0xBEEF_0009);
+    env.backend.set(D(1).state(), 0x0000_0012);
+    env.step(|b| sem::exec(b, Insn::AbcdR, 0xC001, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(D(0).state()), 0xBEEF_0021);
+    assert_eq!(env.backend.get(sem::ccr_ref()) & 0x1F, 0);
+
+    // abcd で X 入力: 09 + 12 + 1 = 22。
+    let mut env = env_with_code(&[0xC001]);
+    env.backend.set(D(0).state(), 0x09);
+    env.backend.set(D(1).state(), 0x12);
+    env.backend.set(sem::ccr_ref(), 1 << sem::sr_bit::X);
+    env.step(|b| sem::exec(b, Insn::AbcdR, 0xC001, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(D(0).state()), 0x22);
+
+    // abcd 45 + 55 = 100 → 00 で C/X=1。
+    let mut env = env_with_code(&[0xC001]);
+    env.backend.set(D(0).state(), 0x45);
+    env.backend.set(D(1).state(), 0x55);
+    env.step(|b| sem::exec(b, Insn::AbcdR, 0xC001, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(D(0).state()), 0x00);
+    assert_eq!(
+        env.backend.get(sem::ccr_ref()) & 0x1F,
+        (1 << sem::sr_bit::X) | (1 << sem::sr_bit::C)
+    );
+
+    // abcd の Z は累積: 旧 Z=1 かつ結果 0 → Z=1。
+    let mut env = env_with_code(&[0xC001]);
+    env.backend.set(D(0).state(), 0x45);
+    env.backend.set(D(1).state(), 0x55);
+    env.backend.set(sem::ccr_ref(), 1 << sem::sr_bit::Z);
+    env.step(|b| sem::exec(b, Insn::AbcdR, 0xC001, 0x1000))
+        .unwrap();
+    assert_eq!(
+        env.backend.get(sem::ccr_ref()) & 0x1F,
+        (1 << sem::sr_bit::X) | (1 << sem::sr_bit::Z) | (1 << sem::sr_bit::C)
+    );
+
+    // abcd の V: 18+67=85（生和 bit7=0→結果 bit7=1 → V=1）。
+    let mut env = env_with_code(&[0xC001]);
+    env.backend.set(D(0).state(), 0x18);
+    env.backend.set(D(1).state(), 0x67);
+    env.step(|b| sem::exec(b, Insn::AbcdR, 0xC001, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(D(0).state()), 0x85);
+    assert_eq!(
+        env.backend.get(sem::ccr_ref()) & 0x1F,
+        (1 << sem::sr_bit::V) | (1 << sem::sr_bit::N)
+    );
+
+    // sbcd d1,d0: 0x8001。00 - 01 = 99、borrow で X/C=1、N=1。
+    let mut env = env_with_code(&[0x8001]);
+    env.backend.set(D(0).state(), 0x00);
+    env.backend.set(D(1).state(), 0x01);
+    env.step(|b| sem::exec(b, Insn::SbcdR, 0x8001, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(D(0).state()), 0x99);
+    assert_eq!(
+        env.backend.get(sem::ccr_ref()) & 0x1F,
+        (1 << sem::sr_bit::X) | (1 << sem::sr_bit::N) | (1 << sem::sr_bit::C)
+    );
+
+    // sbcd の実機固有ケース: 0x10 - 0x0F - 1(X) = 0xFA、X/C=1、N=1。
+    // （下位ニブル借用のみで -0x60 補正は入らない）
+    let mut env = env_with_code(&[0x8001]);
+    env.backend.set(D(0).state(), 0x10);
+    env.backend.set(D(1).state(), 0x0F);
+    env.backend.set(sem::ccr_ref(), 1 << sem::sr_bit::X);
+    env.step(|b| sem::exec(b, Insn::SbcdR, 0x8001, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(D(0).state()), 0xFA);
+    assert_eq!(
+        env.backend.get(sem::ccr_ref()) & 0x1F,
+        (1 << sem::sr_bit::X) | (1 << sem::sr_bit::N) | (1 << sem::sr_bit::C)
+    );
+
+    // sbcd 0xA3 - 0xBC = 0x81（両ニブル借用 → -0x66 相当）。
+    let mut env = env_with_code(&[0x8001]);
+    env.backend.set(D(0).state(), 0xA3);
+    env.backend.set(D(1).state(), 0xBC);
+    env.step(|b| sem::exec(b, Insn::SbcdR, 0x8001, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(D(0).state()), 0x81);
+
+    // sbcd 同一値: 0x42 - 0x42 = 0x00（Z は累積: 旧 Z=0 → 0 のまま）。
+    let mut env = env_with_code(&[0x8001]);
+    env.backend.set(D(0).state(), 0x42);
+    env.backend.set(D(1).state(), 0x42);
+    env.step(|b| sem::exec(b, Insn::SbcdR, 0x8001, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(D(0).state()), 0x00);
+    assert_eq!(env.backend.get(sem::ccr_ref()) & 0x1F, 0);
+
+    // nbcd d0: 0x4800。0 - 0x00 - 1(X) = 0x99、X/C=1。
+    let mut env = env_with_code(&[0x4800]);
+    env.backend.set(D(0).state(), 0x00);
+    env.backend.set(sem::ccr_ref(), 1 << sem::sr_bit::X);
+    env.step(|b| sem::exec(b, Insn::Nbcd, 0x4800, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(D(0).state()), 0x99);
+    assert_eq!(
+        env.backend.get(sem::ccr_ref()) & 0x1F,
+        (1 << sem::sr_bit::X) | (1 << sem::sr_bit::N) | (1 << sem::sr_bit::C)
+    );
+
+    // nbcd 0x80 → 0x20、V=1（生差 bit7=1 かつ結果 bit7=0）。
+    let mut env = env_with_code(&[0x4800]);
+    env.backend.set(D(0).state(), 0x80);
+    env.step(|b| sem::exec(b, Insn::Nbcd, 0x4800, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(D(0).state()), 0x20);
+    assert_eq!(
+        env.backend.get(sem::ccr_ref()) & 0x1F,
+        (1 << sem::sr_bit::X) | (1 << sem::sr_bit::V) | (1 << sem::sr_bit::C)
+    );
+
+    // nbcd 0x00 → 0x00。Z 累積: 旧 Z=1 → Z=1、C=0。
+    let mut env = env_with_code(&[0x4800]);
+    env.backend.set(D(0).state(), 0x00);
+    env.backend.set(sem::ccr_ref(), 1 << sem::sr_bit::Z);
+    env.step(|b| sem::exec(b, Insn::Nbcd, 0x4800, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(D(0).state()), 0x00);
+    assert_eq!(env.backend.get(sem::ccr_ref()) & 0x1F, 1 << sem::sr_bit::Z);
+}
+
+#[test]
+fn bcd_mem_predec() {
+    // abcd -(a1),-(a2): 0xC409。src=(a1-1), dst=(a2-1)。結果を a2-1 へ。
+    let mut env = env_with_data(&[0xC409], &[0x11, 0x25]);
+    env.backend.set(A(1).state(), 0x4002);
+    env.backend.set(A(2).state(), 0x4001);
+    env.step(|b| sem::exec(b, Insn::AbcdM, 0xC409, 0x1000))
+        .unwrap();
+    // src=mem[0x4001]=0x25、dst=mem[0x4000]=0x11 → 0x11+0x25=0x36。
+    let mut buf = [0u8; 1];
+    env.backend
+        .mem
+        .read(VirtAddr(0x4000), &mut buf, DRD)
+        .unwrap();
+    assert_eq!(buf[0], 0x36);
+    assert_eq!(env.backend.get(A(1).state()), 0x4001);
+    assert_eq!(env.backend.get(A(2).state()), 0x4000);
+
+    // sbcd -(a1),-(a1): 0x8309。Ax==Ay の別名ケース。
+    // src=(a1-1), dst=(a1-2)。結果を a1-2 へ。実機もこの順序。
+    let mut env = env_with_data(&[0x8309], &[0x12, 0x34]);
+    env.backend.set(A(1).state(), 0x4002);
+    env.step(|b| sem::exec(b, Insn::SbcdM, 0x8309, 0x1000))
+        .unwrap();
+    // src = mem[0x4001] = 0x34、dst = mem[0x4000] = 0x12 → 0x12-0x34 = 0x78。
+    // X/C=1、V=1（生差は負だが補正後は正）。
+    let mut buf = [0u8; 1];
+    env.backend
+        .mem
+        .read(VirtAddr(0x4000), &mut buf, DRD)
+        .unwrap();
+    assert_eq!(buf[0], 0x78);
+    assert_eq!(env.backend.get(A(1).state()), 0x4000);
+    assert_eq!(
+        env.backend.get(sem::ccr_ref()) & 0x1F,
+        (1 << sem::sr_bit::X) | (1 << sem::sr_bit::V) | (1 << sem::sr_bit::C)
+    );
+
+    // abcd -(a7),-(a0): 0xC00F。A7 は byte でも -2。
+    // ユーザモード（S=0）では A7 EA は USP を参照する。
+    let mut env = env_with_data(&[0xC00F], &[0x15, 0x27]);
+    env.backend.set(Usp.state(), 0x4002);
+    env.backend.set(A(0).state(), 0x4002);
+    env.step(|b| sem::exec(b, Insn::AbcdM, 0xC00F, 0x1000))
+        .unwrap();
+    // src = mem[a7-2 = 0x4000] = 0x15、dst = mem[a0-1 = 0x4001] = 0x27。
+    // 0x15 + 0x27 = 0x42 → mem[0x4001]。
+    let mut buf = [0u8; 1];
+    env.backend
+        .mem
+        .read(VirtAddr(0x4001), &mut buf, DRD)
+        .unwrap();
+    assert_eq!(buf[0], 0x42);
+    assert_eq!(env.backend.get(Usp.state()), 0x4000);
+    assert_eq!(env.backend.get(A(0).state()), 0x4001);
+
+    // nbcd は An 直宛が illegal（ベクタ 4）。
+    let mut env = env_with_code(&[0x4808]);
+    match env.step(|b| sem::exec(b, Insn::Nbcd, 0x4808, 0x1000)) {
+        Err(InterpExit::Exception(e)) => assert_eq!(e.code, 4),
+        r => panic!("expected illegal: {r:?}"),
+    }
+
+    // nbcd -(a0): 0x4820。メモリ経路: 0 - 0x30 = 0x70。
+    let mut env = env_with_data(&[0x4820], &[0x30]);
+    env.backend.set(A(0).state(), 0x4001);
+    env.step(|b| sem::exec(b, Insn::Nbcd, 0x4820, 0x1000))
+        .unwrap();
+    let mut buf = [0u8; 1];
+    env.backend
+        .mem
+        .read(VirtAddr(0x4000), &mut buf, DRD)
+        .unwrap();
+    // X/C=1、V=1（生差は負だが補正後は正）。
+    assert_eq!(buf[0], 0x70);
+    assert_eq!(env.backend.get(A(0).state()), 0x4000);
+    assert_eq!(
+        env.backend.get(sem::ccr_ref()) & 0x1F,
+        (1 << sem::sr_bit::X) | (1 << sem::sr_bit::V) | (1 << sem::sr_bit::C)
+    );
+
+    // nbcd の PC 相対・即値宛も illegal。
+    let mut env = env_with_code(&[0x483A]);
+    match env.step(|b| sem::exec(b, Insn::Nbcd, 0x483A, 0x1000)) {
+        Err(InterpExit::Exception(e)) => assert_eq!(e.code, 4),
+        r => panic!("expected illegal: {r:?}"),
+    }
+    let mut env = env_with_code(&[0x483C]);
+    match env.step(|b| sem::exec(b, Insn::Nbcd, 0x483C, 0x1000)) {
+        Err(InterpExit::Exception(e)) => assert_eq!(e.code, 4),
+        r => panic!("expected illegal: {r:?}"),
+    }
+
+    // 語数: abcd/sbcd は 0、nbcd は EA 拡張語数。
+    assert_eq!(ea::insn_ext_words(Insn::AbcdR, 0xC001), Some(0));
+    assert_eq!(ea::insn_ext_words(Insn::SbcdM, 0x8309), Some(0));
+    assert_eq!(ea::insn_ext_words(Insn::Nbcd, 0x4800), Some(0));
+    assert_eq!(ea::insn_ext_words(Insn::Nbcd, 0x4838), Some(1)); // abs.w
+    assert_eq!(ea::insn_ext_words(Insn::Nbcd, 0x4839), Some(2)); // abs.l
 }
