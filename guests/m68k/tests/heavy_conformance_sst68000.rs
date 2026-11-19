@@ -106,7 +106,11 @@ const FILES: &[&str] = &[
     "LEA",
     "PEA",
     "LINK",
-    "UNLINK", //
+    "UNLINK",
+    "EXG",
+    "SWAP",
+    "EXT.w",
+    "EXT.l", //
     "ANDItoCCR",
     "ANDItoSR",
     "ORItoCCR",

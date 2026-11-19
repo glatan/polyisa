@@ -915,9 +915,9 @@ fn decode_c3_spot() {
     // or.b Dn→Dn（SBCD の空間）・or.w Dn→An は未割当。
     assert_eq!(polyisa_guest_m68k::decode(0x8300, 16), None);
     assert_eq!(polyisa_guest_m68k::decode(0x8348, 16), None);
-    // and.w Dn→Dn（EXG dd の空間）・and.w Dn→An（EXG aa）も未割当。
-    assert_eq!(polyisa_guest_m68k::decode(0xC340, 16), None);
-    assert_eq!(polyisa_guest_m68k::decode(0xC348, 16), None);
+    // and.w Dn→Dn/An の空間は exg（C9 で実装済み）。
+    assert_eq!(polyisa_guest_m68k::decode(0xC340, 16), Some(Insn::ExgDd));
+    assert_eq!(polyisa_guest_m68k::decode(0xC348, 16), Some(Insn::ExgAa));
     // tas・move to/from sr の空間（qsz=3）は未割当。
     assert_eq!(polyisa_guest_m68k::decode(0x4AC0, 16), None);
 }
@@ -1408,8 +1408,8 @@ fn lea_pea_link_unlk_edge() {
     assert_eq!(polyisa_guest_m68k::decode(0x4E50, 16), Some(Insn::Link));
     assert_eq!(polyisa_guest_m68k::decode(0x4E59, 16), Some(Insn::Unlk));
     assert_eq!(polyisa_guest_m68k::decode(0x4E71, 16), Some(Insn::Nop));
-    // 0x4840 は swap の空間 — pea の emode=0 は未デコード。
-    assert_eq!(polyisa_guest_m68k::decode(0x4840, 16), None);
+    // 0x4840 は swap（C9 で実装済み）— pea の emode=0 空間。
+    assert_eq!(polyisa_guest_m68k::decode(0x4840, 16), Some(Insn::Swap));
 
     // link a7,#-4: sp は「push 後の sp + disp」。ssp=0x4008 →
     // mem[0x4004]=0x4008、a7=0x4004-4=0x4000。
@@ -1437,4 +1437,82 @@ fn lea_pea_link_unlk_edge() {
     env.step(|b| sem::exec(b, Insn::Unlk, 0x4E5F, 0x1000))
         .unwrap();
     assert_eq!(env.backend.get(sem::Ssp.state()), 0xDEAD_BEEF);
+}
+
+/// C9: exg/swap/ext。
+// Ref: SPEC-M68K-PRM (Rev 1) §EXG/SWAP/EXT.
+#[test]
+fn exg_swap_ext() {
+    // exg d0,d1: 0xC141。32bit 交換、旗不変。
+    let mut env = env_with_code(&[0xC141]);
+    env.backend.set(D(0).state(), 0x1111_2222);
+    env.backend.set(D(1).state(), 0x3333_4444);
+    env.backend.set(sem::ccr_ref(), 0x1F);
+    env.step(|b| sem::exec(b, Insn::ExgDd, 0xC141, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(D(0).state()), 0x3333_4444);
+    assert_eq!(env.backend.get(D(1).state()), 0x1111_2222);
+    assert_eq!(env.backend.get(sem::ccr_ref()), 0x1F);
+
+    // exg a0,a1: 0xC149。
+    let mut env = env_with_code(&[0xC149]);
+    env.backend.set(A(0).state(), 0x1000);
+    env.backend.set(A(1).state(), 0x2000);
+    env.step(|b| sem::exec(b, Insn::ExgAa, 0xC149, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(A(0).state()), 0x2000);
+    assert_eq!(env.backend.get(A(1).state()), 0x1000);
+
+    // exg d0,a0: 0xC188（dreg=0、ereg=0）。
+    let mut env = env_with_code(&[0xC188]);
+    env.backend.set(D(0).state(), 0xAAAA);
+    env.backend.set(A(0).state(), 0xBBBB);
+    env.step(|b| sem::exec(b, Insn::ExgDa, 0xC188, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(D(0).state()), 0xBBBB);
+    assert_eq!(env.backend.get(A(0).state()), 0xAAAA);
+
+    // swap d0: 0x4840。0x1234_5678 → 0x5678_1234、N=0 Z=0、X 保持。
+    let mut env = env_with_code(&[0x4840]);
+    env.backend.set(D(0).state(), 0x1234_5678);
+    env.backend.set(sem::ccr_ref(), 0x1F);
+    env.step(|b| sem::exec(b, Insn::Swap, 0x4840, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(D(0).state()), 0x5678_1234);
+    // 0x1F & !0b1111 | N/Z → bit4(X) のみ残る。
+    assert_eq!(env.backend.get(sem::ccr_ref()), 0x10);
+
+    // swap で負数: 0x0000_8000 → 0x8000_0000 → N=1。
+    let mut env = env_with_code(&[0x4840]);
+    env.backend.set(D(0).state(), 0x0000_8000);
+    env.step(|b| sem::exec(b, Insn::Swap, 0x4840, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(D(0).state()), 0x8000_0000);
+    assert_eq!(env.backend.get(sem::ccr_ref()) & 0x08, 0x08);
+
+    // ext.w d0: 0x4880。byte 0x80 → word 0xFF80、上位 word 保持、N=1。
+    let mut env = env_with_code(&[0x4880]);
+    env.backend.set(D(0).state(), 0xABCD_0080);
+    env.step(|b| sem::exec(b, Insn::ExtW, 0x4880, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(D(0).state()), 0xABCD_FF80);
+    assert_eq!(env.backend.get(sem::ccr_ref()) & 0x08, 0x08);
+
+    // ext.l d0: 0x48C0。word 0x7FFF → 0x0000_7FFF、N=0 Z=0。
+    let mut env = env_with_code(&[0x48C0]);
+    env.backend.set(D(0).state(), 0x1234_7FFF);
+    env.step(|b| sem::exec(b, Insn::ExtL, 0x48C0, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(D(0).state()), 0x0000_7FFF);
+    assert_eq!(env.backend.get(sem::ccr_ref()) & 0x0C, 0x00);
+
+    // decode: exg の空間は and_*_dn と排他。
+    assert_eq!(polyisa_guest_m68k::decode(0xC140, 16), Some(Insn::ExgDd));
+    assert_eq!(polyisa_guest_m68k::decode(0xC148, 16), Some(Insn::ExgAa));
+    assert_eq!(polyisa_guest_m68k::decode(0xC188, 16), Some(Insn::ExgDa));
+    assert_eq!(polyisa_guest_m68k::decode(0x4840, 16), Some(Insn::Swap));
+    assert_eq!(polyisa_guest_m68k::decode(0x4880, 16), Some(Insn::ExtW));
+    assert_eq!(polyisa_guest_m68k::decode(0x48C0, 16), Some(Insn::ExtL));
+    // and.l d0,d0 (0xC180) は emode=0 で残る。
+    assert_eq!(polyisa_guest_m68k::decode(0xC180, 16), Some(Insn::AndLDn));
 }

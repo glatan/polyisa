@@ -5,7 +5,7 @@
 // 宣言する命令は、16ビット固定の実符号化（nop/reset/rts/rtr/rte/illegal）、
 // EA フィールドを持つ move/movea/moveq（C1）、算術・比較（C2）、
 // 論理・単項（C3）、シフト/ローテート（C4）、ビット操作（C5）、
-// 分岐・復帰（C6）、scc/dbcc（C7）、lea/pea/link/unlk（C8）。
+// 分岐・復帰（C6）、scc/dbcc（C7）、lea/pea/link/unlk（C8）、exg/swap/ext（C9）。
 // EA モードの解釈と拡張語の消費は `src/ea.rs`、意味論は `src/sem.rs`。
 // 出典は SPEC-M68K-PRM (M68000PM/AD Rev 1) である。
 // Ref: SPEC-M68K-PRM (Rev 1).
@@ -214,10 +214,16 @@ pub fn build_model() -> polyisa_isadl::Model {
         fields: vec!["dreg".to_string(), "emode".to_string(), "ereg".to_string()],
         operands: vec![],
     });
-    // LK: link/unlk の対象 An。
+    // LK: link/unlk の対象 An、swap/ext の対象 Dn。
     m.formats.push(Format {
         name: "LK".to_string(),
         fields: vec!["ereg".to_string()],
+        operands: vec![],
+    });
+    // XG: exg の2レジスタ。
+    m.formats.push(Format {
+        name: "XG".to_string(),
+        fields: vec!["dreg".to_string(), "ereg".to_string()],
         operands: vec![],
     });
 
@@ -649,6 +655,55 @@ pub fn build_model() -> polyisa_isadl::Model {
         ),
         ("link", "LK", "0100 1110 0101 0...", "link", &[]),
         ("unlk", "LK", "0100 1110 0101 1...", "unlk", &[]),
+         // C9: 交換・拡張。
+        // exg は and.w/l dn→ea が予約した空間（dd/aa は qsz=1 の
+        // emode 0/1、da は qsz=2 の emode=1）。
+        // Ref: SPEC-M68K-PRM (Rev 1) §EXG/SWAP/EXT.
+        (
+            "exg_dd",
+            "XG",
+            "1100 ... 1 0100 0...",
+            "exg",
+            &[("emode", WhereOp::Eq, 0)],
+        ),
+        (
+            "exg_aa",
+            "XG",
+            "1100 ... 1 0100 1...",
+            "exg",
+            &[("emode", WhereOp::Eq, 1)],
+        ),
+        (
+            "exg_da",
+            "XG",
+            "1100 ... 1 1000 1...",
+            "exg",
+            &[("emode", WhereOp::Eq, 1)],
+        ),
+        // swap は pea が予約した emode=0（0100 1000 0100 0ddd）。
+        (
+            "swap",
+            "LK",
+            "0100 1000 0100 0...",
+            "swap",
+            &[("emode", WhereOp::Eq, 0)],
+        ),
+        // ext.w/ext.l は 0100 1000 1x 空間の emode=0
+        // （残りは movem、C10）。
+        (
+            "ext_w",
+            "LK",
+            "0100 1000 1000 0...",
+            "ext",
+            &[("emode", WhereOp::Eq, 0)],
+        ),
+        (
+            "ext_l",
+            "LK",
+            "0100 1000 1100 0...",
+            "ext",
+            &[("emode", WhereOp::Eq, 0)],
+        ),
     ];
     for (name, format, pattern, syntax, wheres) in arith {
         m.insns.push(Insn {

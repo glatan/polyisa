@@ -235,6 +235,12 @@ pub fn exec<B: Backend>(b: &mut B, insn: super::Insn, w: u64, pc: u64) -> Flow<B
         super::Insn::Pea => pea(b, w, pc),
         super::Insn::Link => link(b, w, pc),
         super::Insn::Unlk => unlk(b, w, pc),
+        super::Insn::ExgDd => exg(b, w, false, false),
+        super::Insn::ExgAa => exg(b, w, true, true),
+        super::Insn::ExgDa => exg(b, w, false, true),
+        super::Insn::Swap => swap_(b, w),
+        super::Insn::ExtW => ext_(b, w, false),
+        super::Insn::ExtL => ext_(b, w, true),
         super::Insn::Illegal => Err(b.raise(GuestException {
             kind: ExceptionKind::Trap,
             // m68k の例外ベクタ番号 4（Illegal Instruction）。
@@ -1527,4 +1533,65 @@ fn unlk<B: Backend>(b: &mut B, w: u64, _pc: u64) -> Flow<B> {
     set_areg(b, 7, an)?;
     let v = pop(b, 4)?;
     set_areg(b, rn, v)
+}
+
+/// C9: exg。32 ビット全体を交換する。旗不変。
+// Ref: SPEC-M68K-PRM (Rev 1) §EXG.
+fn exg<B: Backend>(b: &mut B, w: u64, src_is_a: bool, dst_is_a: bool) -> Flow<B> {
+    let rn = ea::ea_reg(w);
+    let dn = ea::dest_reg(w);
+    let (sx, dx) = if src_is_a && dst_is_a {
+        (areg(b, dn), areg(b, rn))
+    } else if dst_is_a {
+        (b.get(D(dn).state()), areg(b, rn))
+    } else {
+        (b.get(D(dn).state()), b.get(D(rn).state()))
+    };
+    if src_is_a {
+        set_areg(b, dn, dx)?;
+    } else {
+        b.set(D(dn).state(), dx);
+    }
+    if dst_is_a {
+        set_areg(b, rn, sx)
+    } else {
+        b.set(D(rn).state(), sx);
+        Ok(())
+    }
+}
+
+/// swap Dn。上位 word と下位 word を交換。N/Z 更新・V/C 0・X 不変。
+// Ref: SPEC-M68K-PRM (Rev 1) §SWAP.
+fn swap_<B: Backend>(b: &mut B, w: u64) -> Flow<B> {
+    let rn = ea::ea_reg(w);
+    let d = b.get(D(rn).state());
+    let k = b.konst::<W32>(16);
+    let hi = b.shl(d, k);
+    let lo = b.shr_l(d, k);
+    let r = b.or(hi, lo);
+    b.set(D(rn).state(), r);
+    set_nzvc(b, r, 4);
+    Ok(())
+}
+
+/// ext.w/ext.l。byte→word / word→long の符号拡張。
+/// ext.w は上位 word を保持する。N/Z 更新・V/C 0・X 不変。
+// Ref: SPEC-M68K-PRM (Rev 1) §EXT.
+fn ext_<B: Backend>(b: &mut B, w: u64, long: bool) -> Flow<B> {
+    let rn = ea::ea_reg(w);
+    let d = b.get(D(rn).state());
+    let r = if long {
+        let lo = b.trunc::<W32, W16>(d);
+        b.sext::<W16, W32>(lo)
+    } else {
+        let lo = b.trunc::<W32, W8>(d);
+        let sw = b.sext::<W8, W16>(lo);
+        let zw = b.zext::<W16, W32>(sw);
+        let mk = b.konst::<W32>(0xFFFF_0000);
+        let hi = b.and(d, mk);
+        b.or(hi, zw)
+    };
+    b.set(D(rn).state(), r);
+    set_nzvc(b, r, if long { 4 } else { 2 });
+    Ok(())
 }
