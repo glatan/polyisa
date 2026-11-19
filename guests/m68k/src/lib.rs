@@ -1,0 +1,97 @@
+// Copyright (c) polyisa contributors
+// SPDX-License-Identifier: MIT OR Apache-2.0
+//! m68k のゲスト ISA。段階14の骨格。
+//!
+//! `CpuState` と機能・モデル宣言、sem 層の土台を提供する。
+//! 命令は16ビット固定の少数（nop/reset/rte/rts/rtr/illegal）だけを持ち、
+//! EA モードの解釈と拡張語の消費はデコード方式の決定後に足す。
+//!
+//! 出典は SPEC-M68K-PRM (M68000PM/AD Rev 1) である。
+//! Ref: SPEC-M68K-PRM (Rev 1).
+
+#![forbid(unsafe_code)]
+
+pub mod sem;
+
+// ISADL モデルから生成した命令集合・デコード・逆アセンブルの殻。
+include!(concat!(env!("OUT_DIR"), "/generated.rs"));
+
+/// m68k の ISA ファミリ名。
+pub struct M68k;
+
+impl polyisa_guest::GuestIsa for M68k {
+    fn family() -> &'static str {
+        "m68k"
+    }
+}
+
+/// CPU 状態。`#[repr(C)]` で配置を固定し、`StateRef` はここを指す。
+#[repr(C)]
+#[derive(Clone, Debug, Default)]
+pub struct CpuState {
+    /// データレジスタ D0〜D7。
+    pub d: [u32; 8],
+    /// アドレスレジスタ A0〜A6。A7 は `usp`/`ssp` に分かれる。
+    pub a: [u32; 7],
+    /// ユーザースタックポインタ（A7、SR.S=0 のとき有効）。
+    pub usp: u32,
+    /// スーパーバイザスタックポインタ（A7、SR.S=1 のとき有効）。
+    pub ssp: u32,
+    /// プログラムカウンタ。
+    pub pc: u32,
+    /// ステータスレジスタ。下位 16 ビットが有効
+    ///（システムバイト: T/S/IPL、ユーザーバイト: CCR の X N Z V C）。
+    pub sr: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use polyisa_guest::GuestIsa;
+
+    #[test]
+    fn family_name() {
+        assert_eq!(M68k::family(), "m68k");
+    }
+
+    #[test]
+    fn state_layout_pinned() {
+        // sem.rs の StateRef が依存する配置を固定する。
+        // 末尾への追加は許すが、既存項目の移動は許さない。
+        assert_eq!(core::mem::offset_of!(CpuState, d), 0);
+        assert_eq!(core::mem::offset_of!(CpuState, a), 8 * 4);
+        assert_eq!(core::mem::offset_of!(CpuState, usp), 8 * 4 + 7 * 4);
+        assert_eq!(core::mem::offset_of!(CpuState, ssp), 8 * 4 + 8 * 4);
+        assert_eq!(core::mem::offset_of!(CpuState, pc), 8 * 4 + 9 * 4);
+        assert_eq!(core::mem::offset_of!(CpuState, sr), 8 * 4 + 10 * 4);
+    }
+
+    #[test]
+    fn insn_count() {
+        // 骨格の固定ワード6件。
+        assert_eq!(INSNS.len(), 6);
+    }
+
+    #[test]
+    fn decode_spot_checks() {
+        // Ref: SPEC-M68K-PRM (Rev 1).
+        assert_eq!(decode(0x4E71, 16), Some(Insn::Nop));
+        assert_eq!(decode(0x4E70, 16), Some(Insn::Reset));
+        assert_eq!(decode(0x4E73, 16), Some(Insn::Rte));
+        assert_eq!(decode(0x4E75, 16), Some(Insn::Rts));
+        assert_eq!(decode(0x4E77, 16), Some(Insn::Rtr));
+        assert_eq!(decode(0x4AFC, 16), Some(Insn::Illegal));
+        assert_eq!(decode(0xFFFF, 16), None);
+    }
+
+    #[test]
+    fn disasm_word_fixed() {
+        assert_eq!(disasm_word(0x4E71, 16).as_deref(), Some("nop"));
+    }
+
+    #[test]
+    fn cpu_models() {
+        assert!(FEATURES.contains(&"m68000"));
+        assert!(MODELS.contains(&"i68000"));
+    }
+}

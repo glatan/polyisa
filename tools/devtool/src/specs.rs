@@ -19,6 +19,9 @@ mod hexagon {
 mod ia64 {
     include!("../../../guests/ia64/spec/ia64min.rs");
 }
+mod m68k {
+    include!("../../../guests/m68k/spec/m68kmin.rs");
+}
 mod mips {
     include!("../../../guests/mips/spec/mipsi.rs");
 }
@@ -73,6 +76,11 @@ const SPECS: &[IsaSpec] = &[
         isa: "ia64",
         rel_paths: &["guests/ia64/spec/ia64min.rs"],
         build: ia64::build_model,
+    },
+    IsaSpec {
+        isa: "m68k",
+        rel_paths: &["guests/m68k/spec/m68kmin.rs"],
+        build: m68k::build_model,
     },
     IsaSpec {
         isa: "mips",

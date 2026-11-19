@@ -906,6 +906,12 @@ fn allowed_deps(pkg: &str) -> Option<&'static [&'static str]> {
             "polyisa-guest",
             "polyisa-timing",
         ],
+        "polyisa-guest-m68k" => &[
+            "polyisa-mem",
+            "polyisa-sem",
+            "polyisa-guest",
+            "polyisa-timing",
+        ],
         "polyisa-guest-s390" => &[
             "polyisa-bits",
             "polyisa-mem",

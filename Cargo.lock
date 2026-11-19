@@ -148,6 +148,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "polyisa-guest-m68k"
+version = "0.0.0"
+dependencies = [
+ "polyisa-engine",
+ "polyisa-guest",
+ "polyisa-isadl",
+ "polyisa-isagen",
+ "polyisa-mem",
+ "polyisa-sem",
+ "polyisa-timing",
+]
+
+[[package]]
 name = "polyisa-guest-mips"
 version = "0.0.0"
 dependencies = [
