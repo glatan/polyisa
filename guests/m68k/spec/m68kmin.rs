@@ -5,7 +5,7 @@
 // 宣言する命令は、16ビット固定の実符号化（nop/reset/rts/rtr/rte/illegal）、
 // EA フィールドを持つ move/movea/moveq（C1）、算術・比較（C2）、
 // 論理・単項（C3）、シフト/ローテート（C4）、ビット操作（C5）、
-// 分岐・復帰（C6）、scc/dbcc（C7）。
+// 分岐・復帰（C6）、scc/dbcc（C7）、lea/pea/link/unlk（C8）。
 // EA モードの解釈と拡張語の消費は `src/ea.rs`、意味論は `src/sem.rs`。
 // 出典は SPEC-M68K-PRM (M68000PM/AD Rev 1) である。
 // Ref: SPEC-M68K-PRM (Rev 1).
@@ -196,7 +196,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         fields: vec!["cc".to_string(), "disp".to_string()],
         operands: vec![],
     });
-    // JF: jmp/jsr の制御 EA。
+    // JF: jmp/jsr/pea の制御 EA。
     m.formats.push(Format {
         name: "JF".to_string(),
         fields: vec!["emode".to_string(), "ereg".to_string()],
@@ -206,6 +206,18 @@ pub fn build_model() -> polyisa_isadl::Model {
     m.formats.push(Format {
         name: "SC".to_string(),
         fields: vec!["cc".to_string(), "emode".to_string(), "ereg".to_string()],
+        operands: vec![],
+    });
+    // LF: lea の宛先 An と制御 EA。
+    m.formats.push(Format {
+        name: "LF".to_string(),
+        fields: vec!["dreg".to_string(), "emode".to_string(), "ereg".to_string()],
+        operands: vec![],
+    });
+    // LK: link/unlk の対象 An。
+    m.formats.push(Format {
+        name: "LK".to_string(),
+        fields: vec!["ereg".to_string()],
         operands: vec![],
     });
 
@@ -621,6 +633,22 @@ pub fn build_model() -> polyisa_isadl::Model {
             "dbcc",
             &[("emode", WhereOp::Eq, 1), ("qsz", WhereOp::Eq, 3)],
         ),
+         // C8: 制御 EA → An / スタックフレーム。
+        // lea: 0100 rrr 1 11 ea。pea: 0100 1000 01 ea。
+        // pea の emode=0 は swap（0100 1000 0100 0ddd、C9）の空間。
+        // emode=1（0x4848-4F）は 68000 では illegal で pea→ベクタ4 が
+        // 実機と一致するので残す。
+        // Ref: SPEC-M68K-PRM (Rev 1) §LEA/PEA/LINK/UNLK.
+        ("lea", "LF", "0100 ... 1 11 ......", "lea", &[]),
+        (
+            "pea",
+            "JF",
+            "0100 1000 01 ......",
+            "pea",
+            &[("emode", WhereOp::Ne, 0)],
+        ),
+        ("link", "LK", "0100 1110 0101 0...", "link", &[]),
+        ("unlk", "LK", "0100 1110 0101 1...", "unlk", &[]),
     ];
     for (name, format, pattern, syntax, wheres) in arith {
         m.insns.push(Insn {

@@ -191,7 +191,8 @@ pub const fn insn_ext_words(insn: super::Insn, w: u64) -> Option<u32> {
         super::Insn::Rts | super::Insn::Rtr => Some(0),
         // scc: EA のみ。dbcc: 変位語1つ。
         super::Insn::Scc => ext_words(ea_mode(w), ea_reg(w), 1),
-        super::Insn::Dbcc => Some(1),
+        super::Insn::Dbcc | super::Insn::Link => Some(1),
+        super::Insn::Lea | super::Insn::Pea => ext_words(ea_mode(w), ea_reg(w), 4),
         // レジスタビット操作: EA のみ（Dn なら拡張語なし）。
         super::Insn::Btst | super::Insn::Bchg | super::Insn::Bclr | super::Insn::Bset => {
             ext_words(ea_mode(w), ea_reg(w), 1)

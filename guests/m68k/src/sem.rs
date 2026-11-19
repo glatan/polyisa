@@ -231,6 +231,10 @@ pub fn exec<B: Backend>(b: &mut B, insn: super::Insn, w: u64, pc: u64) -> Flow<B
         super::Insn::Rtr => rtr(b),
         super::Insn::Scc => scc(b, w, pc),
         super::Insn::Dbcc => dbcc(b, w, pc),
+        super::Insn::Lea => lea(b, w, pc),
+        super::Insn::Pea => pea(b, w, pc),
+        super::Insn::Link => link(b, w, pc),
+        super::Insn::Unlk => unlk(b, w, pc),
         super::Insn::Illegal => Err(b.raise(GuestException {
             kind: ExceptionKind::Trap,
             // m68k の例外ベクタ番号 4（Illegal Instruction）。
@@ -1463,4 +1467,64 @@ fn dbcc<B: Backend>(b: &mut B, w: u64, pc: u64) -> Flow<B> {
             )
         },
     )
+}
+
+/// C8: 制御 EA（jmp/jsr と同じ集合）のアドレスを評価する。
+fn ctrl_ea<B: Backend>(b: &mut B, w: u64, pc: u64) -> Result<B::V<W64>, B::Exit> {
+    let emode = ea::ea_mode(w);
+    let ereg = ea::ea_reg(w);
+    if !(emode == 2 || emode == 5 || emode == 6 || (emode == 7 && ereg <= 3)) {
+        return Err(illegal(b));
+    }
+    let (e, _n) = ea::eval(b, emode, ereg, 4, pc + 2)?;
+    match e {
+        Ea::Addr(a) => Ok(a),
+        _ => unreachable!("制御 EA は Addr"),
+    }
+}
+
+/// lea。制御 EA のアドレスを An へ。旗不変。
+// Ref: SPEC-M68K-PRM (Rev 1) §LEA.
+fn lea<B: Backend>(b: &mut B, w: u64, pc: u64) -> Flow<B> {
+    let a = ctrl_ea(b, w, pc)?;
+    let a32 = b.trunc::<W64, W32>(a);
+    set_areg(b, ea::dest_reg(w), a32)
+}
+
+/// pea。制御 EA のアドレスを long で push する。
+// Ref: SPEC-M68K-PRM (Rev 1) §PEA.
+fn pea<B: Backend>(b: &mut B, w: u64, pc: u64) -> Flow<B> {
+    let a = ctrl_ea(b, w, pc)?;
+    let a32 = b.trunc::<W64, W32>(a);
+    push_l(b, a32)
+}
+
+/// link An,#d16: SP-=4; [SP]=An; An=SP; SP+=d16（符号付き）。
+// Ref: SPEC-M68K-PRM (Rev 1) §LINK.
+fn link<B: Backend>(b: &mut B, w: u64, pc: u64) -> Flow<B> {
+    let (e, _i) = ea::eval(b, 7, 4, 2, pc + 2)?;
+    let v = match e {
+        Ea::Imm(v) => v,
+        _ => unreachable!("mode7 reg4 は Imm"),
+    };
+    let rn = ea::ea_reg(w);
+    let an = areg(b, rn);
+    push_l(b, an)?;
+    let sp = areg(b, 7);
+    set_areg(b, rn, sp)?;
+    let k = b.konst::<W32>(16);
+    let sv = b.shl(v, k);
+    let d = b.shr_a(sv, k);
+    let sp2 = b.add(sp, d);
+    set_areg(b, 7, sp2)
+}
+
+/// unlk An: SP=An; An=[SP]+。rn=7 は最後の書き込み（pop 値）が残る。
+// Ref: SPEC-M68K-PRM (Rev 1) §UNLK.
+fn unlk<B: Backend>(b: &mut B, w: u64, _pc: u64) -> Flow<B> {
+    let rn = ea::ea_reg(w);
+    let an = areg(b, rn);
+    set_areg(b, 7, an)?;
+    let v = pop(b, 4)?;
+    set_areg(b, rn, v)
 }

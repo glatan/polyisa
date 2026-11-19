@@ -102,7 +102,11 @@ const FILES: &[&str] = &[
     "RTS",
     "RTR",
     "Scc",
-    "DBcc", //
+    "DBcc",
+    "LEA",
+    "PEA",
+    "LINK",
+    "UNLINK", //
     "ANDItoCCR",
     "ANDItoSR",
     "ORItoCCR",

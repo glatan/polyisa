@@ -1320,3 +1320,121 @@ fn scc_dbcc_fixed_cc() {
     // qsz!=3 の語は addq/subq であって scc/dbcc ではない。
     assert_eq!(polyisa_guest_m68k::decode(0x5240, 16), Some(Insn::Addq));
 }
+
+/// C8: lea/pea/link/unlk。
+// Ref: SPEC-M68K-PRM (Rev 1) §LEA/PEA/LINK/UNLK.
+#[test]
+fn lea_pea_link_unlk() {
+    // lea (a0),a1: 0x43D0。アドレスそのものを a1 へ（旗不変）。
+    let mut env = env_with_code(&[0x43D0]);
+    env.backend.set(A(0).state(), 0x5000);
+    env.backend.set(sem::ccr_ref(), 0x1F);
+    env.step(|b| sem::exec(b, Insn::Lea, 0x43D0, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(A(1).state()), 0x5000);
+    assert_eq!(env.backend.get(sem::ccr_ref()), 0x1F);
+
+    // lea ($4000).w,a0: 0x41F8 + 拡張語。
+    let mut env = env_with_code(&[0x41F8, 0x4000]);
+    env.step(|b| sem::exec(b, Insn::Lea, 0x41F8, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(A(0).state()), 0x4000);
+
+    // lea に非制御 EA（(a0)+）を与えると illegal。
+    let mut env = env_with_code(&[0x43D8]);
+    assert!(
+        env.step(|b| sem::exec(b, Insn::Lea, 0x43D8, 0x1000))
+            .is_err()
+    );
+
+    // pea (a0): 0x4850。a0 の値を long で push。
+    let mut env = env_with_data(&[0x4850], &[]);
+    env.backend.set(A(0).state(), 0x6000);
+    env.backend.set(sem::Ssp.state(), 0x4004);
+    env.backend.set(sem::sr_ref(), 1 << sem::sr_bit::S);
+    env.step(|b| sem::exec(b, Insn::Pea, 0x4850, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::Ssp.state()), 0x4000);
+    let mut buf = [0u8; 4];
+    env.backend
+        .mem
+        .read(VirtAddr(0x4000), &mut buf, DRD)
+        .unwrap();
+    assert_eq!(u32::from_be_bytes(buf), 0x6000);
+
+    // link a1,#-4: 0x4E51 + 0xFFFC。
+    // ssp=0x4008 → sp-=4 → mem[0x4004]=a1旧値、a1=0x4004、sp=0x4004-4=0x4000。
+    let mut env = env_with_data(&[0x4E51, 0xFFFC], &[]);
+    env.backend.set(A(1).state(), 0x1234_5678);
+    env.backend.set(sem::Ssp.state(), 0x4008);
+    env.backend.set(sem::sr_ref(), 1 << sem::sr_bit::S);
+    env.step(|b| sem::exec(b, Insn::Link, 0x4E51, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(A(1).state()), 0x4004);
+    assert_eq!(env.backend.get(sem::Ssp.state()), 0x4000);
+    env.backend
+        .mem
+        .read(VirtAddr(0x4004), &mut buf, DRD)
+        .unwrap();
+    assert_eq!(u32::from_be_bytes(buf), 0x1234_5678);
+
+    // unlk a1: 0x4E59。sp=a1=0x4000、pop → a1=mem値、sp=0x4004。
+    let mut env = env_with_data(&[0x4E59], &[]);
+    env.backend.set(A(1).state(), 0x4000);
+    env.backend.set(sem::Ssp.state(), 0x4000);
+    env.backend.set(sem::sr_ref(), 1 << sem::sr_bit::S);
+    env.backend
+        .mem
+        .write(VirtAddr(0x4000), &0xABCD_1234u32.to_be_bytes())
+        .unwrap();
+    env.step(|b| sem::exec(b, Insn::Unlk, 0x4E59, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(A(1).state()), 0xABCD_1234);
+    assert_eq!(env.backend.get(sem::Ssp.state()), 0x4004);
+
+    // 語数: link は常に 1、lea/pea は EA 拡張語。
+    assert_eq!(ea::insn_ext_words(Insn::Link, 0x4E51), Some(1));
+    assert_eq!(ea::insn_ext_words(Insn::Unlk, 0x4E59), Some(0));
+    assert_eq!(ea::insn_ext_words(Insn::Lea, 0x41F8), Some(1)); // abs.w
+    assert_eq!(ea::insn_ext_words(Insn::Pea, 0x4850), Some(0)); // (a0)
+}
+
+/// C8: decode 排他と a7 辺の挙動。
+#[test]
+fn lea_pea_link_unlk_edge() {
+    // decode 排他: 0x4ED0=jmp(a0) vs 0x4FD0=lea(a0),a7（bit8）。
+    assert_eq!(polyisa_guest_m68k::decode(0x4ED0, 16), Some(Insn::Jmp));
+    assert_eq!(polyisa_guest_m68k::decode(0x4FD0, 16), Some(Insn::Lea));
+    assert_eq!(polyisa_guest_m68k::decode(0x4E50, 16), Some(Insn::Link));
+    assert_eq!(polyisa_guest_m68k::decode(0x4E59, 16), Some(Insn::Unlk));
+    assert_eq!(polyisa_guest_m68k::decode(0x4E71, 16), Some(Insn::Nop));
+    // 0x4840 は swap の空間 — pea の emode=0 は未デコード。
+    assert_eq!(polyisa_guest_m68k::decode(0x4840, 16), None);
+
+    // link a7,#-4: sp は「push 後の sp + disp」。ssp=0x4008 →
+    // mem[0x4004]=0x4008、a7=0x4004-4=0x4000。
+    let mut env = env_with_data(&[0x4E57, 0xFFFC], &[]);
+    env.backend.set(sem::Ssp.state(), 0x4008);
+    env.backend.set(sem::sr_ref(), 1 << sem::sr_bit::S);
+    env.step(|b| sem::exec(b, Insn::Link, 0x4E57, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::Ssp.state()), 0x4000);
+    let mut buf = [0u8; 4];
+    env.backend
+        .mem
+        .read(VirtAddr(0x4004), &mut buf, DRD)
+        .unwrap();
+    assert_eq!(u32::from_be_bytes(buf), 0x4008);
+
+    // unlk a7: sp=a7 のあと pop 値が a7 に残る（最後の書き込み優先）。
+    let mut env = env_with_data(&[0x4E5F], &[]);
+    env.backend.set(sem::Ssp.state(), 0x4000);
+    env.backend.set(sem::sr_ref(), 1 << sem::sr_bit::S);
+    env.backend
+        .mem
+        .write(VirtAddr(0x4000), &0xDEAD_BEEFu32.to_be_bytes())
+        .unwrap();
+    env.step(|b| sem::exec(b, Insn::Unlk, 0x4E5F, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::Ssp.state()), 0xDEAD_BEEF);
+}
