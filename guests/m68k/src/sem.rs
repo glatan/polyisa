@@ -215,6 +215,14 @@ pub fn exec<B: Backend>(b: &mut B, insn: super::Insn, w: u64, pc: u64) -> Flow<B
         super::Insn::RoxlM => shift_mem(b, w, pc, ShOp::Rox, false),
         super::Insn::RorM => shift_mem(b, w, pc, ShOp::Ro, true),
         super::Insn::RolM => shift_mem(b, w, pc, ShOp::Ro, false),
+        super::Insn::Btst => bit_op(b, w, pc, BitOp::Tst, false),
+        super::Insn::Bchg => bit_op(b, w, pc, BitOp::Chg, false),
+        super::Insn::Bclr => bit_op(b, w, pc, BitOp::Clr, false),
+        super::Insn::Bset => bit_op(b, w, pc, BitOp::Set, false),
+        super::Insn::BtstI => bit_op(b, w, pc, BitOp::Tst, true),
+        super::Insn::BchgI => bit_op(b, w, pc, BitOp::Chg, true),
+        super::Insn::BclrI => bit_op(b, w, pc, BitOp::Clr, true),
+        super::Insn::BsetI => bit_op(b, w, pc, BitOp::Set, true),
         super::Insn::Illegal => Err(b.raise(GuestException {
             kind: ExceptionKind::Trap,
             // m68k の例外ベクタ番号 4（Illegal Instruction）。
@@ -740,6 +748,7 @@ fn unary<B: Backend>(b: &mut B, w: u64, pc: u64, op: UnOp) -> Flow<B> {
         return Err(illegal(b));
     }
     let (e, _n) = ea::eval(b, emode, ereg, size, pc + 2)?;
+    let z = b.konst::<W32>(0);
     match op {
         UnOp::Tst => {
             let d = read_ea(b, &e, size)?;
@@ -747,7 +756,6 @@ fn unary<B: Backend>(b: &mut B, w: u64, pc: u64, op: UnOp) -> Flow<B> {
             Ok(())
         }
         UnOp::Clr => {
-            let z = b.konst::<W32>(0);
             set_nzvc(b, z, size);
             write_ea(b, &e, size, z)
         }
@@ -1119,4 +1127,81 @@ fn shift_mem<B: Backend>(b: &mut B, w: u64, pc: u64, op: ShOp, right: bool) -> F
     let (r, co, vo, xo) = shift_core(b, d, c, 2, op, right, xin);
     set_shift_flags(b, r, 2, co, vo, xo);
     write_ea(b, &e, 2, r)
+}
+
+/// ビット操作の演算種別。
+enum BitOp {
+    /// btst（読み取りのみ、PC 相対・即値 EA も許可）。
+    Tst,
+    /// bchg。
+    Chg,
+    /// bclr。
+    Clr,
+    /// bset。
+    Set,
+}
+
+/// btst/bchg/bclr/bset。Dn 宛は 32 ビット、メモリはバイト。
+/// ビット番号は imm 形が拡張語、reg 形が Dn（それぞれ mod wb）。
+/// Z = テストしたビットの否定。他の旗は不変。
+// Ref: SPEC-M68K-PRM (Rev 1) §BTST/BCHG/BCLR/BSET.
+fn bit_op<B: Backend>(b: &mut B, w: u64, pc: u64, op: BitOp, imm_form: bool) -> Flow<B> {
+    let emode = ea::ea_mode(w);
+    let ereg = ea::ea_reg(w);
+    // An は不可（reg 形は MOVEP 空間として宣言で排他済みだが、
+    // imm 形は実行時に弾く）。
+    if emode == 1 {
+        return Err(illegal(b));
+    }
+    let write = !matches!(op, BitOp::Tst);
+    // emode 7: btst は #imm（reg4）まで可、書き込み系は abs.l（reg1）まで。
+    let lim = if write { 1 } else { 4 };
+    if emode == 7 && ereg > lim {
+        return Err(illegal(b));
+    }
+    let dsz = if emode == 0 { 4 } else { 1 };
+    let ea_pc;
+    let n = if imm_form {
+        // ビット番号は 16 ビット拡張語。
+        let (e, ni) = ea::eval(b, 7, 4, 2, pc + 2)?;
+        ea_pc = pc + 2 + u64::from(ni) * 2;
+        match e {
+            Ea::Imm(v) => v,
+            _ => unreachable!("mode7 reg4 は Imm"),
+        }
+    } else {
+        ea_pc = pc + 2;
+        b.get(D(ea::dest_reg(w)).state())
+    };
+    let (e, _n) = ea::eval(b, emode, ereg, dsz, ea_pc)?;
+    let d = read_ea(b, &e, dsz)?;
+    let one = b.konst::<W32>(1);
+    let mk = b.konst::<W32>(if emode == 0 { 31 } else { 7 });
+    let bn = b.and(n, mk);
+    let s = b.shr_l(d, bn);
+    let bit = b.and(s, one);
+    // Z = !bit。
+    let nb = b.xor(bit, one);
+    let k2 = b.konst::<W32>(2);
+    let nbs = b.shl(nb, k2);
+    let ccr8 = b.get(ccr_ref());
+    let km = b.konst::<W8>(0xFB);
+    let keep = b.and(ccr8, km);
+    let nb8 = b.trunc::<W32, W8>(nbs);
+    let out = b.or(keep, nb8);
+    b.set(ccr_ref(), out);
+    if !write {
+        return Ok(());
+    }
+    let bm = b.shl(one, bn);
+    let r = match op {
+        BitOp::Chg => b.xor(d, bm),
+        BitOp::Clr => {
+            let nm = b.not(bm);
+            b.and(d, nm)
+        }
+        BitOp::Set => b.or(d, bm),
+        BitOp::Tst => unreachable!(),
+    };
+    write_ea(b, &e, dsz, r)
 }

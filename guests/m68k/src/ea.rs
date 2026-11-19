@@ -177,6 +177,17 @@ pub const fn insn_ext_words(insn: super::Insn, w: u64) -> Option<u32> {
             let size = 1u32 << qsz(w);
             ext_words(ea_mode(w), ea_reg(w), size)
         }
+        // レジスタビット操作: EA のみ（Dn なら拡張語なし）。
+        super::Insn::Btst | super::Insn::Bchg | super::Insn::Bclr | super::Insn::Bset => {
+            ext_words(ea_mode(w), ea_reg(w), 1)
+        }
+        // 即値ビット操作: ビット番号語 + EA 語。
+        super::Insn::BtstI | super::Insn::BchgI | super::Insn::BclrI | super::Insn::BsetI => {
+            match ext_words(ea_mode(w), ea_reg(w), 1) {
+                Some(n) => Some(1 + n),
+                None => None,
+            }
+        }
         // メモリシフト: word サイズの EA は一つ。
         super::Insn::AsrM
         | super::Insn::AslM

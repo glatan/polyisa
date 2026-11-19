@@ -90,7 +90,11 @@ const FILES: &[&str] = &[
     "ROXL.l",
     "ROXR.b",
     "ROXR.w",
-    "ROXR.l", //
+    "ROXR.l",
+    "BTST",
+    "BCHG",
+    "BCLR",
+    "BSET", //
     "ANDItoCCR",
     "ANDItoSR",
     "ORItoCCR",

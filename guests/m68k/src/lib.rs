@@ -71,8 +71,8 @@ mod tests {
     #[test]
     fn insn_count() {
         // F0 の固定ワード6件 + move/movea 5件 + moveq + C2 の14件
-        // + C3 の15件（or/and/eor 9、即値3、単項3）+ C4 の16件（シフトreg/mem）。
-        assert_eq!(INSNS.len(), 57);
+        // + C3 の15件（or/and/eor 9、即値3、単項3）+ C4 の16件（シフトreg/mem）+ C5 の8件（ビット操作）。
+        assert_eq!(INSNS.len(), 65);
     }
 
     #[test]

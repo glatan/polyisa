@@ -1003,3 +1003,92 @@ fn shift_mem_form() {
         e => panic!("unexpected: {e:?}"),
     }
 }
+
+/// C5: ビット操作（reg/imm・Dn mod32・メモリ mod8・Z 旗・書き戻し）。
+// Ref: SPEC-M68K-PRM (Rev 1) §BTST/BCHG/BCLR/BSET.
+#[test]
+fn bit_op_forms() {
+    // btst #37, D0: imm 形は拡張語がビット番号。Dn 宛は mod 32 で bit5。
+    // D0 = 0x20 → bit5=1 → Z=0。
+    let mut env = env_with_code(&[0x0800, 0x0025]);
+    env.backend.set(D(0).state(), 0x20);
+    env.step(|b| sem::exec(b, Insn::BtstI, 0x0800, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::ccr_ref()) & (1 << sem::sr_bit::Z), 0);
+
+    // bset D1, D0: D1=7 → bit7 を立てる。D0=0 → 0x80、bit7 は 0→Z=1。
+    let mut env = env_with_code(&[0x03C0]);
+    env.backend.set(D(0).state(), 0);
+    env.backend.set(D(1).state(), 7);
+    env.step(|b| sem::exec(b, Insn::Bset, 0x03C0, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(D(0).state()), 0x80);
+    assert_eq!(
+        env.backend.get(sem::ccr_ref()) & (1 << sem::sr_bit::Z),
+        1 << sem::sr_bit::Z
+    );
+
+    // bclr #9, (a0): メモリはバイト mod8 → bit1 をクリア。0x06 → 0x04。
+    let mut env = env_with_data(&[0x0890, 0x0009], &[0x06]);
+    env.backend.set(A(0).state(), 0x4000);
+    env.step(|b| sem::exec(b, Insn::BclrI, 0x0890, 0x1000))
+        .unwrap();
+    let mut buf = [0u8; 1];
+    env.backend
+        .mem
+        .read(VirtAddr(0x4000), &mut buf, DRD)
+        .unwrap();
+    assert_eq!(buf[0], 0x04);
+    // テスト時の bit1 は 1 だったので Z=0。
+    assert_eq!(env.backend.get(sem::ccr_ref()) & (1 << sem::sr_bit::Z), 0);
+
+    // bchg で非 alterable（PC 相対）は illegal。
+    let mut env = env_with_code(&[0x087A, 0x0000]);
+    let ex = env
+        .step(|b| sem::exec(b, Insn::BchgI, 0x087A, 0x1000))
+        .unwrap_err();
+    match ex {
+        InterpExit::Exception(x) => assert_eq!(x.code, 4),
+        e => panic!("unexpected: {e:?}"),
+    }
+}
+
+/// C5: デコード・拡張語数・旗保持のスポット検査。
+#[test]
+fn decode_c5_spot() {
+    // btst Dn,<ea> = 0000 rrr 1 00 mmm rrr。
+    assert_eq!(polyisa_guest_m68k::decode(0x0101, 16), Some(Insn::Btst));
+    // emode=1 は MOVEP の空間なので decode されない。
+    assert_eq!(polyisa_guest_m68k::decode(0x0148, 16), None);
+    // bchg/bclr/bset reg 形。
+    assert_eq!(polyisa_guest_m68k::decode(0x0141, 16), Some(Insn::Bchg));
+    assert_eq!(polyisa_guest_m68k::decode(0x0181, 16), Some(Insn::Bclr));
+    assert_eq!(polyisa_guest_m68k::decode(0x01C1, 16), Some(Insn::Bset));
+    // imm 形。
+    assert_eq!(polyisa_guest_m68k::decode(0x0800, 16), Some(Insn::BtstI));
+    assert_eq!(polyisa_guest_m68k::decode(0x08C0, 16), Some(Insn::BsetI));
+
+    // 拡張語数: imm 形はビット番号語 + EA 語。
+    assert_eq!(ea::insn_ext_words(Insn::BsetI, 0x08F9), Some(3)); // (xxx).L
+    assert_eq!(ea::insn_ext_words(Insn::BtstI, 0x0800), Some(1)); // Dn
+    assert_eq!(ea::insn_ext_words(Insn::Btst, 0x0101), Some(0));
+    assert_eq!(ea::insn_ext_words(Insn::Btst, 0x013C), Some(1)); // #imm EA
+
+    // btst は #imm EA も合法（即値のビットを読む）。
+    let mut env = env_with_code(&[0x083C, 0x0004, 0x0010]);
+    env.backend.set(sem::ccr_ref(), 0x1F); // XNVCZ 全部立てる
+    env.step(|b| sem::exec(b, Insn::BtstI, 0x083C, 0x1000))
+        .unwrap();
+    // 0x10 の bit4=1 → Z=0、XNVC は保持（0x1F & !Z = 0x1B）。
+    assert_eq!(env.backend.get(sem::ccr_ref()), 0x1B);
+
+    // imm 形で An 直は illegal。
+    let mut env = env_with_code(&[0x0848, 0x0000]);
+    let ex = env
+        .step(|b| sem::exec(b, Insn::BchgI, 0x0848, 0x1000))
+        .unwrap_err();
+    match ex {
+        InterpExit::Exception(x) => assert_eq!(x.code, 4),
+        e => panic!("unexpected: {e:?}"),
+    }
+}

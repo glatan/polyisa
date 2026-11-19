@@ -178,6 +178,14 @@ pub fn build_model() -> polyisa_isadl::Model {
         operands: vec![],
     });
 
+    // BE: ビット操作。レジスタ形は bits[11:9] がソース Dn、
+    // 即値形は拡張語がビット番号で bits[11:8] は 1000 固定。
+    m.formats.push(Format {
+        name: "BE".to_string(),
+        fields: vec!["dreg".to_string(), "emode".to_string(), "ereg".to_string()],
+        operands: vec![],
+    });
+
     // (名前, パターン, 構文, 分類)
     // いずれも拡張語を伴わない16ビット固定の実符号化。
     // Ref: SPEC-M68K-PRM (Rev 1).
@@ -522,6 +530,43 @@ pub fn build_model() -> polyisa_isadl::Model {
             "rol",
             &[("qsz", WhereOp::Eq, 3)],
         ),
+
+        // C5: ビット操作。レジスタ形は bit8=1 + op(bits7-6)、emode=1
+        // は MOVEP の空間として残す。即値形は 0000 1000 + op で
+        // 拡張語がビット番号。
+        // Ref: SPEC-M68K-PRM (Rev 1) §BTST/BCHG/BCLR/BSET.
+        (
+            "btst",
+            "BE",
+            "0000 ... 1 00 ......",
+            "btst",
+            &[("emode", WhereOp::Ne, 1)],
+        ),
+        (
+            "bchg",
+            "BE",
+            "0000 ... 1 01 ......",
+            "bchg",
+            &[("emode", WhereOp::Ne, 1)],
+        ),
+        (
+            "bclr",
+            "BE",
+            "0000 ... 1 10 ......",
+            "bclr",
+            &[("emode", WhereOp::Ne, 1)],
+        ),
+        (
+            "bset",
+            "BE",
+            "0000 ... 1 11 ......",
+            "bset",
+            &[("emode", WhereOp::Ne, 1)],
+        ),
+        ("btst_i", "BE", "0000 1000 00 ......", "btst", &[]),
+        ("bchg_i", "BE", "0000 1000 01 ......", "bchg", &[]),
+        ("bclr_i", "BE", "0000 1000 10 ......", "bclr", &[]),
+        ("bset_i", "BE", "0000 1000 11 ......", "bset", &[]),
     ];
     for (name, format, pattern, syntax, wheres) in arith {
         m.insns.push(Insn {
