@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // m68k 最小の ISADL モデル（段階14）。
 //
-// 宣言する命令は、16ビット固定の実符号化（nop/reset/rts/rtr/rte/illegal）
-// と、EA フィールドを持つ move/movea/moveq（C1 追加分）。
+// 宣言する命令は、16ビット固定の実符号化（nop/reset/rts/rtr/rte/illegal）、
+// EA フィールドを持つ move/movea/moveq（C1）、算術・比較（C2）、
+// 論理・単項（C3）、シフト/ローテート（C4）。
 // EA モードの解釈と拡張語の消費は `src/ea.rs`、意味論は `src/sem.rs`。
 // 出典は SPEC-M68K-PRM (M68000PM/AD Rev 1) である。
 // Ref: SPEC-M68K-PRM (Rev 1).
@@ -78,6 +79,9 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("emode", 5, 3),
         ("ereg", 2, 0),
         ("qsz", 7, 6),
+        // C4: シフト系。dir は方向、sop はレジスタ形の i+op（bits5-3）。
+        ("dir", 8, 8),
+        ("sop", 5, 3),
     ] {
         m.fields.push(Field {
             name: name.to_string(),
@@ -146,6 +150,30 @@ pub fn build_model() -> polyisa_isadl::Model {
             "qsz".to_string(),
             "emode".to_string(),
             "sreg".to_string(),
+        ],
+        operands: vec![],
+    });
+    // SR: レジスタシフト。bits[11:9] はカウント/レジスタ、sop は
+    // i(bit5)+op(bits4-3)、ereg は宛先 Dn。
+    m.formats.push(Format {
+        name: "SR".to_string(),
+        fields: vec![
+            "dreg".to_string(),
+            "dir".to_string(),
+            "qsz".to_string(),
+            "sop".to_string(),
+            "ereg".to_string(),
+        ],
+        operands: vec![],
+    });
+    // SM: メモリシフト（word・カウント1固定）。bits[11:9] は演算種別。
+    m.formats.push(Format {
+        name: "SM".to_string(),
+        fields: vec![
+            "dreg".to_string(),
+            "dir".to_string(),
+            "emode".to_string(),
+            "ereg".to_string(),
         ],
         operands: vec![],
     });
@@ -426,6 +454,74 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("not", "IE", "0100 0110 .. ......", "not", &[("qsz", WhereOp::Ne, 3)]),
         ("clr", "IE", "0100 0010 .. ......", "clr", &[("qsz", WhereOp::Ne, 3)]),
         ("tst", "IE", "0100 1010 .. ......", "tst", &[("qsz", WhereOp::Ne, 3)]),
+        // C4: シフト/ローテート。レジスタ形は qsz!=3（qsz=3 はメモリ
+        // 形の空間）。メモリ形は bits[11:9] が演算種別・bit8 が方向・
+        // word・カウント1固定。
+        // Ref: SPEC-M68K-PRM (Rev 1) §ASL/ASR/LSL/LSR/ROL/ROR/ROXL/ROXR.
+        ("asr", "SR", "1110 ... 0 .. .00 ...", "asr", &[("qsz", WhereOp::Ne, 3)]),
+        ("asl", "SR", "1110 ... 1 .. .00 ...", "asl", &[("qsz", WhereOp::Ne, 3)]),
+        ("lsr", "SR", "1110 ... 0 .. .01 ...", "lsr", &[("qsz", WhereOp::Ne, 3)]),
+        ("lsl", "SR", "1110 ... 1 .. .01 ...", "lsl", &[("qsz", WhereOp::Ne, 3)]),
+        ("roxr", "SR", "1110 ... 0 .. .10 ...", "roxr", &[("qsz", WhereOp::Ne, 3)]),
+        ("roxl", "SR", "1110 ... 1 .. .10 ...", "roxl", &[("qsz", WhereOp::Ne, 3)]),
+        ("ror", "SR", "1110 ... 0 .. .11 ...", "ror", &[("qsz", WhereOp::Ne, 3)]),
+        ("rol", "SR", "1110 ... 1 .. .11 ...", "rol", &[("qsz", WhereOp::Ne, 3)]),
+        (
+            "asr_m",
+            "SM",
+            "1110 000 0 11 ......",
+            "asr",
+            &[("qsz", WhereOp::Eq, 3)],
+        ),
+        (
+            "asl_m",
+            "SM",
+            "1110 000 1 11 ......",
+            "asl",
+            &[("qsz", WhereOp::Eq, 3)],
+        ),
+        (
+            "lsr_m",
+            "SM",
+            "1110 001 0 11 ......",
+            "lsr",
+            &[("qsz", WhereOp::Eq, 3)],
+        ),
+        (
+            "lsl_m",
+            "SM",
+            "1110 001 1 11 ......",
+            "lsl",
+            &[("qsz", WhereOp::Eq, 3)],
+        ),
+        (
+            "roxr_m",
+            "SM",
+            "1110 010 0 11 ......",
+            "roxr",
+            &[("qsz", WhereOp::Eq, 3)],
+        ),
+        (
+            "roxl_m",
+            "SM",
+            "1110 010 1 11 ......",
+            "roxl",
+            &[("qsz", WhereOp::Eq, 3)],
+        ),
+        (
+            "ror_m",
+            "SM",
+            "1110 011 0 11 ......",
+            "ror",
+            &[("qsz", WhereOp::Eq, 3)],
+        ),
+        (
+            "rol_m",
+            "SM",
+            "1110 011 1 11 ......",
+            "rol",
+            &[("qsz", WhereOp::Eq, 3)],
+        ),
     ];
     for (name, format, pattern, syntax, wheres) in arith {
         m.insns.push(Insn {

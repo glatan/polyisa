@@ -177,6 +177,15 @@ pub const fn insn_ext_words(insn: super::Insn, w: u64) -> Option<u32> {
             let size = 1u32 << qsz(w);
             ext_words(ea_mode(w), ea_reg(w), size)
         }
+        // メモリシフト: word サイズの EA は一つ。
+        super::Insn::AsrM
+        | super::Insn::AslM
+        | super::Insn::LsrM
+        | super::Insn::LslM
+        | super::Insn::RoxrM
+        | super::Insn::RoxlM
+        | super::Insn::RorM
+        | super::Insn::RolM => ext_words(ea_mode(w), ea_reg(w), 2),
         // ori/andi/eori: EA フィールドが #imm（to CCR/to SR の特殊
         // 符号化）なら即値語のみ。通常は即値語 + EA 語。
         super::Insn::Ori | super::Insn::Andi | super::Insn::Eori => {

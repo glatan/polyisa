@@ -199,6 +199,22 @@ pub fn exec<B: Backend>(b: &mut B, insn: super::Insn, w: u64, pc: u64) -> Flow<B
         super::Insn::Not => unary(b, w, pc, UnOp::Not),
         super::Insn::Clr => unary(b, w, pc, UnOp::Clr),
         super::Insn::Tst => unary(b, w, pc, UnOp::Tst),
+        super::Insn::Asr => shift_reg(b, w, pc, ShOp::As, true),
+        super::Insn::Asl => shift_reg(b, w, pc, ShOp::As, false),
+        super::Insn::Lsr => shift_reg(b, w, pc, ShOp::Ls, true),
+        super::Insn::Lsl => shift_reg(b, w, pc, ShOp::Ls, false),
+        super::Insn::Roxr => shift_reg(b, w, pc, ShOp::Rox, true),
+        super::Insn::Roxl => shift_reg(b, w, pc, ShOp::Rox, false),
+        super::Insn::Ror => shift_reg(b, w, pc, ShOp::Ro, true),
+        super::Insn::Rol => shift_reg(b, w, pc, ShOp::Ro, false),
+        super::Insn::AsrM => shift_mem(b, w, pc, ShOp::As, true),
+        super::Insn::AslM => shift_mem(b, w, pc, ShOp::As, false),
+        super::Insn::LsrM => shift_mem(b, w, pc, ShOp::Ls, true),
+        super::Insn::LslM => shift_mem(b, w, pc, ShOp::Ls, false),
+        super::Insn::RoxrM => shift_mem(b, w, pc, ShOp::Rox, true),
+        super::Insn::RoxlM => shift_mem(b, w, pc, ShOp::Rox, false),
+        super::Insn::RorM => shift_mem(b, w, pc, ShOp::Ro, true),
+        super::Insn::RolM => shift_mem(b, w, pc, ShOp::Ro, false),
         super::Insn::Illegal => Err(b.raise(GuestException {
             kind: ExceptionKind::Trap,
             // m68k の例外ベクタ番号 4（Illegal Instruction）。
@@ -820,4 +836,287 @@ fn imm_logic<B: Backend>(b: &mut B, w: u64, pc: u64, op: LogicOp) -> Flow<B> {
     let r = combine(b, op, d, s);
     set_nzvc(b, r, size);
     write_ea(b, &e, size, r)
+}
+
+/// シフト/ローテートの演算種別。
+#[derive(Clone, Copy)]
+enum ShOp {
+    /// 算術シフト。
+    As,
+    /// 論理シフト。
+    Ls,
+    /// X 拡張ローテート。
+    Rox,
+    /// ローテート。
+    Ro,
+}
+
+/// 条件を 0/1 の V<W32> にする。
+fn bit_of<B: Backend>(b: &mut B, c: B::B) -> B::V<W32> {
+    let one = b.konst::<W32>(1);
+    let z = b.konst::<W32>(0);
+    b.select(c, one, z)
+}
+
+/// `v` の `k` ビット目を 0/1 で取り出す。
+fn bitk<B: Backend>(b: &mut B, v: B::V<W32>, k: B::V<W32>) -> B::V<W32> {
+    let one = b.konst::<W32>(1);
+    let s = b.shr_l(v, k);
+    b.and(s, one)
+}
+
+/// CCR から X ビットを 0/1 の V<W32> で取り出す。
+fn read_x<B: Backend>(b: &mut B) -> B::V<W32> {
+    let ccr = b.get(ccr_ref());
+    let xk = b.konst::<W8>(1 << sr_bit::X);
+    let x8 = b.and(ccr, xk);
+    let x32 = b.zext::<W8, W32>(x8);
+    let k = b.konst::<W32>(4);
+    b.shr_l(x32, k)
+}
+
+/// シフト結果の旗を更新する。`co`/`vo`/`xo` は 0/1 の生値で、
+/// X は常に `xo` に書き換える（保持が必要な場面では呼び出し側が
+/// 旧値を渡す）。N/Z は結果から、V/C は引数のまま。
+fn set_shift_flags<B: Backend>(
+    b: &mut B,
+    r: B::V<W32>,
+    size: u32,
+    co: B::V<W32>,
+    vo: B::V<W32>,
+    xo: B::V<W32>,
+) {
+    let ccr = b.get(ccr_ref());
+    let km = b.konst::<W8>(0xE0);
+    let keep = b.and(ccr, km);
+    let keep32 = b.zext::<W8, W32>(keep);
+    let mv = mask(b, r, size);
+    let msb = 1u32 << (size * 8 - 1);
+    let mk = b.konst::<W32>(msb);
+    let np = b.and(mv, mk);
+    let z = b.konst::<W32>(0);
+    let pn = b.cmp(Cmp::Ne, np, z);
+    let pz = b.cmp(Cmp::Eq, mv, z);
+    let nn = bit_of(b, pn);
+    let zz = bit_of(b, pz);
+    let k3 = b.konst::<W32>(3);
+    let k2 = b.konst::<W32>(2);
+    let k1 = b.konst::<W32>(1);
+    let k4 = b.konst::<W32>(4);
+    let n8 = b.shl(nn, k3);
+    let z8 = b.shl(zz, k2);
+    let v8 = b.shl(vo, k1);
+    let x8 = b.shl(xo, k4);
+    let o1 = b.or(keep32, x8);
+    let o2 = b.or(o1, n8);
+    let o3 = b.or(o2, z8);
+    let o4 = b.or(o3, v8);
+    let out32 = b.or(o4, co);
+    let out = b.trunc::<W32, W8>(out32);
+    b.set(ccr_ref(), out);
+}
+
+/// `shift_core` の戻り値。(結果, C, V, X) で旗ビットはすべて 0/1。
+type ShOut<B> = (
+    <B as Backend>::V<W32>,
+    <B as Backend>::V<W32>,
+    <B as Backend>::V<W32>,
+    <B as Backend>::V<W32>,
+);
+
+/// シフト/ローテートのコア。`d` は `size` バイトにマスク済みの値、
+/// `c` はカウント（0〜63）、`xin` は 0/1 の X。
+// Ref: SPEC-M68K-PRM (Rev 1) §Condition Code Computation.
+fn shift_core<B: Backend>(
+    b: &mut B,
+    d: B::V<W32>,
+    c: B::V<W32>,
+    size: u32,
+    op: ShOp,
+    right: bool,
+    xin: B::V<W32>,
+) -> ShOut<B> {
+    let wb = size * 8;
+    let z = b.konst::<W32>(0);
+    let one = b.konst::<W32>(1);
+    let wk = b.konst::<W32>(wb);
+    let c0 = b.cmp(Cmp::Eq, c, z);
+    let cbig = b.cmp(Cmp::GeU, c, wk);
+    match (op, right) {
+        (ShOp::Ls, true) => {
+            // lsr: c>=wb なら 0。C = bit(c-1)（1<=c<=wb）。
+            let r0 = b.shr_l(d, c);
+            let r = b.select(cbig, z, r0);
+            let cm1 = b.sub(c, one);
+            let k = b.select(c0, z, cm1);
+            let raw = bitk(b, d, k);
+            let cle = b.cmp(Cmp::LeU, c, wk);
+            let cmid = b.select(cle, raw, z);
+            let cout = b.select(c0, z, cmid);
+            let xo = b.select(c0, xin, cout);
+            (r, cout, z, xo)
+        }
+        (ShOp::Ls, false) | (ShOp::As, false) => {
+            // lsl/asl: c>=wb なら 0。C = bit(wb-c)（1<=c<=wb）。
+            let s = b.shl(d, c);
+            let r0 = mask(b, s, size);
+            let r = b.select(cbig, z, r0);
+            let wmc = b.sub(wk, c);
+            let raw = bitk(b, d, wmc);
+            let cle = b.cmp(Cmp::LeU, c, wk);
+            let cmid = b.select(cle, raw, z);
+            let cout = b.select(c0, z, cmid);
+            let xo = b.select(c0, xin, cout);
+            // asl の V はシフト中に MSB が変化すれば 1。
+            // c<wb: 上位 c+1 ビットが全部同じでなければ 1。
+            // c>=wb: d != 0。
+            let v = if let ShOp::As = op {
+                let w1 = b.konst::<W32>(wb - 1);
+                let k = b.sub(w1, c);
+                let seg = b.shr_l(d, k);
+                let cp1 = b.add(c, one);
+                // cp1=wb のとき shl が overshift → 0 の契約に乗る
+                //（interp/JIT とも「幅以上→0」）。その場合 smask は
+                // 全 1 となり seg との比較は正しい。
+                let m1 = b.shl(one, cp1);
+                let smask = b.sub(m1, one);
+                let p0 = b.cmp(Cmp::Ne, seg, z);
+                let p1 = b.cmp(Cmp::Ne, seg, smask);
+                let b0 = bit_of(b, p0);
+                let b1 = bit_of(b, p1);
+                let vs = b.and(b0, b1);
+                let pd = b.cmp(Cmp::Ne, d, z);
+                let v2 = bit_of(b, pd);
+                let vv = b.select(cbig, v2, vs);
+                b.select(c0, z, vv)
+            } else {
+                z
+            };
+            (r, cout, v, xo)
+        }
+        (ShOp::As, true) => {
+            // asr: 符号複製。c>=wb でも全符号ビットで埋まる。
+            let w64s = b.konst::<W64>(u64::from(64 - wb));
+            let d64 = b.zext::<W32, W64>(d);
+            let t = b.shl(d64, w64s);
+            let ds = b.shr_a(t, w64s);
+            let c64 = b.zext::<W32, W64>(c);
+            let ra = b.shr_a(ds, c64);
+            let r32 = b.trunc::<W64, W32>(ra);
+            let r = mask(b, r32, size);
+            // C = bit(min(c,wb)-1)（c>=1）。c>wb は符号ビット。
+            let cmid = b.select(cbig, wk, c);
+            let cm1 = b.sub(cmid, one);
+            let k = b.select(c0, z, cm1);
+            let raw = bitk(b, d, k);
+            let cout = b.select(c0, z, raw);
+            let xo = b.select(c0, xin, cout);
+            (r, cout, z, xo)
+        }
+        (ShOp::Rox, _) => {
+            // rox: {X, d} の wb+1 ビット鎖を W64 で回す。
+            let wb1 = wb + 1;
+            let wk64 = b.konst::<W64>(u64::from(wb));
+            let w64k = b.konst::<W64>(u64::from(wb1));
+            let mm = b.konst::<W64>((1u64 << wb1) - 1);
+            let d64 = b.zext::<W32, W64>(d);
+            let x64 = b.zext::<W32, W64>(xin);
+            let xs = b.shl(x64, wk64);
+            let comb = b.or(xs, d64);
+            let c64 = b.zext::<W32, W64>(c);
+            let e = b.urem(c64, w64k);
+            let r64 = if right {
+                let lo = b.shr_l(comb, e);
+                let bk = b.sub(w64k, e);
+                let hi = b.shl(comb, bk);
+                let him = b.and(hi, mm);
+                b.or(lo, him)
+            } else {
+                let hi0 = b.shl(comb, e);
+                let him = b.and(hi0, mm);
+                let bk = b.sub(w64k, e);
+                let lo = b.shr_l(comb, bk);
+                b.or(him, lo)
+            };
+            let r32 = b.trunc::<W64, W32>(r64);
+            let r = mask(b, r32, size);
+            let xs2 = b.shr_l(r64, wk64);
+            let xo32 = b.trunc::<W64, W32>(xs2);
+            let xo = b.and(xo32, one);
+            // ROXx は c=0 でも C=X（= xin と同値）。
+            (r, xo, z, xo)
+        }
+        (ShOp::Ro, _) => {
+            // rol/ror: wb ビット回転。e = c mod wb。
+            let e = b.urem(c, wk);
+            let e0 = b.cmp(Cmp::Eq, e, z);
+            let bk = b.sub(wk, e);
+            let r = if right {
+                let lo = b.shr_l(d, e);
+                let hi0 = b.shl(d, bk);
+                let him = mask(b, hi0, size);
+                let hi = b.select(e0, z, him);
+                let t = b.or(lo, hi);
+                mask(b, t, size)
+            } else {
+                let hi0 = b.shl(d, e);
+                let hi = mask(b, hi0, size);
+                let lo0 = b.shr_l(d, bk);
+                let lo = b.select(e0, z, lo0);
+                let t = b.or(hi, lo);
+                mask(b, t, size)
+            };
+            // C = c>0 なら最後に出たビット（ror は結果 MSB、rol は結果 bit0）。
+            let k = if right {
+                b.konst::<W32>(wb - 1)
+            } else {
+                b.konst::<W32>(0)
+            };
+            let mb = bitk(b, r, k);
+            let cout = b.select(c0, z, mb);
+            (r, cout, z, xin)
+        }
+    }
+}
+
+/// レジスタシフト。カウントは imm（0 は 8）または Dn mod 64。
+// Ref: SPEC-M68K-PRM (Rev 1) §ASx/LSx/ROXx/ROx.
+fn shift_reg<B: Backend>(b: &mut B, w: u64, _pc: u64, op: ShOp, right: bool) -> Flow<B> {
+    // qsz=3 はメモリ形の空間で、デコード側で排他済み。
+    debug_assert!(ea::qsz(w) != 3);
+    let size = 1u32 << ea::qsz(w);
+    let n = ea::ea_reg(w);
+    let cn = ea::dest_reg(w);
+    let c = if (w >> 5) & 1 == 0 {
+        let k = if cn == 0 { 8 } else { u32::from(cn) };
+        b.konst::<W32>(k)
+    } else {
+        let v = b.get(D(cn).state());
+        let m = b.konst::<W32>(63);
+        b.and(v, m)
+    };
+    let d0 = b.get(D(n).state());
+    let d = mask(b, d0, size);
+    let xin = read_x(b);
+    let (r, co, vo, xo) = shift_core(b, d, c, size, op, right, xin);
+    set_shift_flags(b, r, size, co, vo, xo);
+    write_ea(b, &Ea::D(n), size, r)
+}
+
+/// メモリシフト。word サイズ・カウント 1 固定。EA はメモリ alterable
+/// のみ（Dn/An 直・PC 相対・即値は illegal）。
+// Ref: SPEC-M68K-PRM (Rev 1) §ASx/LSx/ROXx/ROx.
+fn shift_mem<B: Backend>(b: &mut B, w: u64, pc: u64, op: ShOp, right: bool) -> Flow<B> {
+    let emode = ea::ea_mode(w);
+    let ereg = ea::ea_reg(w);
+    if emode < 2 || (emode == 7 && ereg >= 2) {
+        return Err(illegal(b));
+    }
+    let (e, _n) = ea::eval(b, emode, ereg, 2, pc + 2)?;
+    let d = read_ea(b, &e, 2)?;
+    let c = b.konst::<W32>(1);
+    let xin = read_x(b);
+    let (r, co, vo, xo) = shift_core(b, d, c, 2, op, right, xin);
+    set_shift_flags(b, r, 2, co, vo, xo);
+    write_ea(b, &e, 2, r)
 }

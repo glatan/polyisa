@@ -3,8 +3,9 @@
 //! m68k のゲスト ISA。段階14の骨格。
 //!
 //! `CpuState` と機能・モデル宣言、sem 層の土台を提供する。
-//! 命令は16ビット固定の少数（nop/reset/rte/rts/rtr/illegal）だけを持ち、
-//! EA モードの解釈と拡張語の消費はデコード方式の決定後に足す。
+//! 命令は16ビット固定の制御系（nop/reset/rte/rts/rtr/illegal）に加えて、
+//! EA モード命令群を spec 駆動で段階的に増やしている。
+//! EA モードの解釈と拡張語の消費は `ea.rs`、意味論は `sem.rs`。
 //!
 //! 出典は SPEC-M68K-PRM (M68000PM/AD Rev 1) である。
 //! Ref: SPEC-M68K-PRM (Rev 1).
@@ -70,8 +71,8 @@ mod tests {
     #[test]
     fn insn_count() {
         // F0 の固定ワード6件 + move/movea 5件 + moveq + C2 の14件
-        // + C3 の15件（or/and/eor 9、即値3、単項3）。
-        assert_eq!(INSNS.len(), 41);
+        // + C3 の15件（or/and/eor 9、即値3、単項3）+ C4 の16件（シフトreg/mem）。
+        assert_eq!(INSNS.len(), 57);
     }
 
     #[test]

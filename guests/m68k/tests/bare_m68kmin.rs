@@ -934,3 +934,72 @@ fn or_d_to_pc_relative_is_illegal() {
         other => panic!("unexpected exit: {other:?}"),
     }
 }
+
+/// C4: レジスタシフトの基本（即値カウント・方向・旗）。
+// Ref: SPEC-M68K-PRM (Rev 1) §ASx/LSx/ROXx/ROx.
+#[test]
+fn shift_reg_forms() {
+    // asl.l #2, D0: 0xC000_0001 << 2 = 0x0000_0004。
+    // 符号が 1→0 に変化するので V=1、最後に出たビット=1 で C=X=1。
+    let mut env = env_with_code(&[0xE580]);
+    env.backend.set(D(0).state(), 0xC000_0001);
+    env.step(|b| sem::exec(b, Insn::Asl, 0xE580, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(D(0).state()), 0x0000_0004);
+    assert_eq!(env.backend.get(sem::ccr_ref()) & 0x1F, 0b1_0_0_1_1);
+
+    // lsr.b #4, D0: 0xA5 >> 4 = 0x0A。出たビットは bit3=0 → C=X=0。
+    let mut env = env_with_code(&[0xE808]);
+    env.backend.set(D(0).state(), 0xA5);
+    env.step(|b| sem::exec(b, Insn::Lsr, 0xE808, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(D(0).state()) & 0xFF, 0x0A);
+    assert_eq!(env.backend.get(sem::ccr_ref()) & 0x1F, 0);
+
+    // lsl.l D1,D0 で D1=64 → mod 64 でカウント0。値不変・C=0・X 保持。
+    let mut env = env_with_code(&[0xE3A8]);
+    env.backend.set(D(0).state(), 0x8000_0001);
+    env.backend.set(D(1).state(), 0x40);
+    env.backend.set(sem::ccr_ref(), 1 << sem::sr_bit::X);
+    env.step(|b| sem::exec(b, Insn::Lsl, 0xE3A8, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(D(0).state()), 0x8000_0001);
+    assert_eq!(env.backend.get(sem::ccr_ref()) & 0x1F, 0b1_1_0_0_0);
+
+    // roxr.w #1, D0: X=1 なら {X,D}={1,0x0001}→ 0x8000 + X=1。C=X=1。
+    let mut env = env_with_code(&[0xE250]);
+    env.backend.set(D(0).state(), 0x0001);
+    env.backend.set(sem::ccr_ref(), 1 << sem::sr_bit::X);
+    env.step(|b| sem::exec(b, Insn::Roxr, 0xE250, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(D(0).state()) & 0xFFFF, 0x8000);
+    assert_eq!(env.backend.get(sem::ccr_ref()) & 0x1F, 0b1_1_0_0_1);
+}
+
+/// C4: メモリシフトは word・カウント1 固定、EA はメモリ alterable のみ。
+// Ref: SPEC-M68K-PRM (Rev 1) §ASx.
+#[test]
+fn shift_mem_form() {
+    // asr.w (a0): 0x8001 >>a 1 = 0xC000。N=1, C=X=1。
+    let mut env = env_with_data(&[0xE0D0], &0x8001u16.to_be_bytes());
+    env.backend.set(A(0).state(), 0x4000);
+    env.step(|b| sem::exec(b, Insn::AsrM, 0xE0D0, 0x1000))
+        .unwrap();
+    let mut buf = [0u8; 2];
+    env.backend
+        .mem
+        .read(VirtAddr(0x4000), &mut buf, DRD)
+        .unwrap();
+    assert_eq!(u16::from_be_bytes(buf), 0xC000);
+    assert_eq!(env.backend.get(sem::ccr_ref()) & 0x1F, 0b1_1_0_0_1);
+
+    // EA が Dn 直のメモリシフト符号化は illegal。
+    let mut env = env_with_code(&[0xE0C0]);
+    let ex = env
+        .step(|b| sem::exec(b, Insn::AsrM, 0xE0C0, 0x1000))
+        .unwrap_err();
+    match ex {
+        InterpExit::Exception(x) => assert_eq!(x.code, 4),
+        e => panic!("unexpected: {e:?}"),
+    }
+}
