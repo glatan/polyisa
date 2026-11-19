@@ -77,7 +77,7 @@ pub fn build_model() -> polyisa_isadl::Model {
     );
 
     // CPU モデル。親チェーンで機能を累積し、世代差は params で上書きする。
-    // 各世代で未実装の命令は世代機能への `when` 述語で表し、
+    // 各世代で未実装の命令は世代機能への `when` 述語で表す（版の範囲の残件は Gap: GAP-0043）、
     // 68060 のように後代で削られた命令は remove_features で表す。
     for (name, parent, add, params) in [
         ("generic", "", &["m68000"][..], &[][..]),
@@ -617,7 +617,7 @@ pub fn build_model() -> polyisa_isadl::Model {
             "eori",
             &[("qsz", WhereOp::Ne, 3)],
         ),
-        // 単項系。qsz=3 は tas・move to/from sr の空間として残す。
+        // 単項系。qsz=3 は tas・move to/from sr の空間として残す。Gap: GAP-0042
         ("not", "IE", "0100 0110 .. ......", "not", &[("qsz", WhereOp::Ne, 3)]),
         ("clr", "IE", "0100 0010 .. ......", "clr", &[("qsz", WhereOp::Ne, 3)]),
         ("tst", "IE", "0100 1010 .. ......", "tst", &[("qsz", WhereOp::Ne, 3)]),

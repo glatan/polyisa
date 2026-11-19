@@ -374,7 +374,7 @@ pub fn insn_cycles(insn: Insn, w: u64, ext: u16, rt: &Rt) -> Option<u64> {
             38 + 2 * n + ea_bw(em, er)?
         }
         Insn::Divu | Insn::Divs => {
-            // 除数・被除数に依存（SST 実測で ~76-150）。較正は F2 の対象。
+            // 除数・被除数に依存（SST 実測で ~76-150）。較正は F2 の対象。Gap: GAP-0041
             return None;
         }
         Insn::Asl

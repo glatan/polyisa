@@ -278,10 +278,10 @@ WebAssembly の本格的な実装と、WASI preview1 の OS パーソナリテ�
 
 | ID | 条件 | 判定 |
 |---|---|---|
-| S14-1 | 68000 の SingleStepTests のデータ集と命令の振る舞いが一致する（テスト `heavy_conformance_sst68000`）。 | 未整備 |
-| S14-2 | 68000 のタイミングの検証用の命令列がすべて一致する（SingleStepTests のサイクル数を含めて使う。テスト `heavy_timing_68000`）。 | 未整備 |
-| S14-3 | m68k の配布物のコマンド群が、ゲストのルートを使って正しい出力を返す（テスト `heavy_program_m68k`）。 | 未整備 |
-| S14-4 | ABI 表が SRC-LINUX の UAPI と一致する（clang が m68k に対応しないため層 6 の抽出方法は使えず、`syscall.tbl` と直接照合する。テスト `heavy_abi_m68k`）。 | 未整備 |
+| S14-1 | 68000 の SingleStepTests のデータ集と命令の振る舞いが一致する（テスト `heavy_conformance_sst68000`）。 | テスト：`heavy_conformance_sst68000` |
+| S14-2 | 68000 のタイミングの検証用の命令列がすべて一致する（SingleStepTests のサイクル数を含めて使う。テスト `heavy_timing_68000`）。 | テスト：`heavy_timing_68000` |
+| S14-3 | m68k の配布物のコマンド群が、ゲストのルートを使って正しい出力を返す（テスト `heavy_program_m68k`）。 | テスト：`heavy_program_m68k` |
+| S14-4 | ABI 表が SRC-LINUX の UAPI と一致する（clang が m68k に対応しないため層 6 の抽出方法は使えず、`syscall.tbl` と直接照合する。テスト `heavy_abi_m68k`）。 | テスト：`heavy_abi_m68k` |
 
 ### 段階 15：SPARC
 
