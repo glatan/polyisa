@@ -489,3 +489,267 @@ fn move_b_byte_an_is_undecodable() {
     // movea.w の宛先 An 直は MoveA をデコードする。
     assert_eq!(polyisa_guest_m68k::decode(0x367C, 16), Some(Insn::MoveaW));
 }
+
+#[test]
+fn add_w_ea_to_d() {
+    // add.w (A2),D0: 1101 000 001 010 010 = 0xD052。下位語のみ更新。
+    let mut env = env_with_data(&[0xD052], &0x0090u16.to_be_bytes());
+    env.backend.set(A(2).state(), 0x4000);
+    env.backend.set(D(0).state(), 0x1234_5670);
+    env.step(|b| sem::exec(b, Insn::Add, 0xD052, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(D(0).state()), 0x1234_5700);
+    assert_eq!(env.backend.get(sem::ccr_ref()), 0);
+}
+
+#[test]
+fn add_l_d_to_ea_carry() {
+    // add.l D1,(A2): 1101 001 110 010 010 = 0xD392。Dn→EA 方向。
+    let mut env = env_with_data(&[0xD392], &0x100u32.to_be_bytes());
+    env.backend.set(A(2).state(), 0x4000);
+    env.backend.set(D(1).state(), 0xFFFF_FF80);
+    env.step(|b| sem::exec(b, Insn::AddDn, 0xD392, 0x1000))
+        .unwrap();
+    let mut buf = [0u8; 4];
+    env.backend
+        .mem
+        .read(VirtAddr(0x4000), &mut buf, DRD)
+        .unwrap();
+    assert_eq!(u32::from_be_bytes(buf), 0x80);
+    // 繰り上がりで C=X=1。
+    assert_eq!(
+        env.backend.get(sem::ccr_ref()),
+        (1 << sem::sr_bit::X) | (1 << sem::sr_bit::C)
+    );
+}
+
+#[test]
+fn sub_w_ea_to_d_borrow() {
+    // sub.w D1,D0: 1001 000 001 000 001 = 0x9041。
+    let mut env = env_with_code(&[0x9041]);
+    env.backend.set(D(0).state(), 0xAAAA_0001);
+    env.backend.set(D(1).state(), 0x0002);
+    env.step(|b| sem::exec(b, Insn::Sub, 0x9041, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(D(0).state()), 0xAAAA_FFFF);
+    assert_eq!(
+        env.backend.get(sem::ccr_ref()),
+        (1 << sem::sr_bit::X) | (1 << sem::sr_bit::N) | (1 << sem::sr_bit::C)
+    );
+}
+
+#[test]
+fn sub_l_d_to_ea_order() {
+    // sub.l D1,(A2): 1001 001 110 010 010 = 0x9392。<ea> - Dn の向き。
+    let mut env = env_with_data(&[0x9392], &0x80u32.to_be_bytes());
+    env.backend.set(A(2).state(), 0x4000);
+    env.backend.set(D(1).state(), 0x100);
+    env.step(|b| sem::exec(b, Insn::SubDn, 0x9392, 0x1000))
+        .unwrap();
+    let mut buf = [0u8; 4];
+    env.backend
+        .mem
+        .read(VirtAddr(0x4000), &mut buf, DRD)
+        .unwrap();
+    // 0x80 - 0x100 = 0xFFFFFF80（借り）。
+    assert_eq!(u32::from_be_bytes(buf), 0xFFFF_FF80);
+    assert_eq!(
+        env.backend.get(sem::ccr_ref()),
+        (1 << sem::sr_bit::X) | (1 << sem::sr_bit::N) | (1 << sem::sr_bit::C)
+    );
+}
+
+#[test]
+fn adda_w_sign_extends() {
+    // adda.w #0x8000,A3: 1101 011 011 111 100 = 0xD6FC。
+    let mut env = env_with_code(&[0xD6FC, 0x8000]);
+    env.step(|b| sem::exec(b, Insn::Add, 0xD6FC, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(A(3).state()), 0xFFFF_8000);
+    assert_eq!(ea::insn_ext_words(Insn::Add, 0xD6FC), Some(1));
+    // suba.l D1,A2: 1001 010 111 000 001 = 0x95C1。旗は不変。
+    let mut env = env_with_code(&[0x95C1]);
+    env.backend.set(A(2).state(), 0x1000);
+    env.backend.set(D(1).state(), 1);
+    env.backend.set(sem::ccr_ref(), 0b11111);
+    env.step(|b| sem::exec(b, Insn::SubaL, 0x95C1, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(A(2).state()), 0xFFF);
+    assert_eq!(env.backend.get(sem::ccr_ref()), 0b11111);
+}
+
+#[test]
+fn addq_subq_value_eight() {
+    // addq.b #8,D1: 0101 000 0 00 000 001 = 0x5001。qdat=0 は 8。
+    let mut env = env_with_code(&[0x5001]);
+    env.backend.set(D(1).state(), 0xFC);
+    env.step(|b| sem::exec(b, Insn::Addq, 0x5001, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(D(1).state()), 0x04);
+    assert_eq!(
+        env.backend.get(sem::ccr_ref()),
+        (1 << sem::sr_bit::X) | (1 << sem::sr_bit::C)
+    );
+    // subq.w #8,D0: 0101 000 1 01 000 000 = 0x5140。
+    let mut env = env_with_code(&[0x5140]);
+    env.backend.set(D(0).state(), 0x1000);
+    env.step(|b| sem::exec(b, Insn::Subq, 0x5140, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(D(0).state()), 0xFF8);
+}
+
+#[test]
+fn addq_l_to_a_keeps_flags() {
+    // addq.l #1,A2: 0101 001 0 10 001 010 = 0x528A。An は旗不変。
+    let mut env = env_with_code(&[0x528A]);
+    env.backend.set(A(2).state(), 1);
+    env.backend.set(sem::ccr_ref(), 0b11111);
+    env.step(|b| sem::exec(b, Insn::Addq, 0x528A, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(A(2).state()), 2);
+    assert_eq!(env.backend.get(sem::ccr_ref()), 0b11111);
+}
+
+#[test]
+fn addq_b_to_a_is_illegal() {
+    // addq.b #1,A0: 0101 000 0 00 001 000 = 0x5008。byte 宛て An は illegal。
+    let mut env = env_with_code(&[0x5008]);
+    let e = env
+        .step(|b| sem::exec(b, Insn::Addq, 0x5008, 0x1000))
+        .expect_err("byte 宛て An は illegal");
+    match e {
+        InterpExit::Exception(x) => assert_eq!(x.code, 4),
+        other => panic!("unexpected exit: {other:?}"),
+    }
+}
+
+#[test]
+fn cmp_w_equal_sets_z_preserves_x() {
+    // cmp.w D1,D0: 1011 000 001 000 001 = 0xB041。
+    let mut env = env_with_code(&[0xB041]);
+    env.backend.set(D(0).state(), 0xBEEF_0005);
+    env.backend.set(D(1).state(), 0xDEAD_0005);
+    env.backend.set(sem::ccr_ref(), 1 << sem::sr_bit::X);
+    env.step(|b| sem::exec(b, Insn::Cmp, 0xB041, 0x1000))
+        .unwrap();
+    // Z=1・X は保持・N/V/C=0。D0 は変わらない。
+    assert_eq!(
+        env.backend.get(sem::ccr_ref()),
+        (1 << sem::sr_bit::X) | (1 << sem::sr_bit::Z)
+    );
+    assert_eq!(env.backend.get(D(0).state()), 0xBEEF_0005);
+}
+
+#[test]
+fn cmpa_w_sign_extends() {
+    // cmpa.w #0x8000,A2: 1011 010 011 111 100 = 0xB4FC。opm=3 は cmpa.w。
+    let mut env = env_with_code(&[0xB4FC, 0x8000]);
+    env.backend.set(A(2).state(), 0xFFFF_8000);
+    env.step(|b| sem::exec(b, Insn::Cmp, 0xB4FC, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::ccr_ref()), 1 << sem::sr_bit::Z);
+}
+
+#[test]
+fn cmpm_b_postinc_both() {
+    // cmpm.b (A1)+,(A2)+: 1011 010 1 00 001 001 = 0xB509。
+    let mut env = env_with_data(&[0xB509], &[0x05, 0x03]);
+    env.backend.set(A(1).state(), 0x4000);
+    env.backend.set(A(2).state(), 0x4001);
+    env.step(|b| sem::exec(b, Insn::Cmpm, 0xB509, 0x1000))
+        .unwrap();
+    // (A2)=0x03 - (A1)=0x05 = -2。N=1・C=1。両方のポインタが進む。
+    assert_eq!(
+        env.backend.get(sem::ccr_ref()),
+        (1 << sem::sr_bit::N) | (1 << sem::sr_bit::C)
+    );
+    assert_eq!(env.backend.get(A(1).state()), 0x4001);
+    assert_eq!(env.backend.get(A(2).state()), 0x4002);
+}
+
+#[test]
+fn addi_l_ext_two_words() {
+    // addi.l #0x12345678,D0: 0000 0110 10 000 000 = 0x0680。
+    let mut env = env_with_code(&[0x0680, 0x1234, 0x5678]);
+    env.backend.set(D(0).state(), 1);
+    env.step(|b| sem::exec(b, Insn::Addi, 0x0680, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(D(0).state()), 0x1234_5679);
+    assert_eq!(ea::insn_ext_words(Insn::Addi, 0x0680), Some(2));
+}
+
+#[test]
+fn subi_b_imm() {
+    // subi.b #1,D0: 0000 0100 00 000 000 = 0x0400、拡張語 0x0001。
+    let mut env = env_with_code(&[0x0400, 0x0001]);
+    env.backend.set(D(0).state(), 0xBEEF_0100);
+    env.step(|b| sem::exec(b, Insn::Subi, 0x0400, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(D(0).state()), 0xBEEF_01FF);
+    // 借りで N=C=X。
+    assert_eq!(
+        env.backend.get(sem::ccr_ref()),
+        (1 << sem::sr_bit::X) | (1 << sem::sr_bit::N) | (1 << sem::sr_bit::C)
+    );
+    assert_eq!(ea::insn_ext_words(Insn::Subi, 0x0400), Some(1));
+}
+
+#[test]
+fn cmpi_b_to_mem() {
+    // cmpi.b #5,(A2): 0000 1100 00 010 010 = 0x0C12。
+    let mut env = env_with_data(&[0x0C12, 0x0005], &[0x05]);
+    env.backend.set(A(2).state(), 0x4000);
+    env.step(|b| sem::exec(b, Insn::Cmpi, 0x0C12, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::ccr_ref()), 1 << sem::sr_bit::Z);
+}
+
+#[test]
+fn imm_dest_pc_relative_is_illegal() {
+    // addi.w #1,2(PC): 0000 0110 01 111 010 = 0x067A。宛先 PC 相対は illegal。
+    let mut env = env_with_code(&[0x067A, 0x0001]);
+    let e = env
+        .step(|b| sem::exec(b, Insn::Addi, 0x067A, 0x1000))
+        .expect_err("宛先 PC 相対は illegal");
+    match e {
+        InterpExit::Exception(x) => assert_eq!(x.code, 4),
+        other => panic!("unexpected exit: {other:?}"),
+    }
+}
+
+#[test]
+fn decode_c2_spot() {
+    assert_eq!(polyisa_guest_m68k::decode(0xD052, 16), Some(Insn::Add));
+    assert_eq!(polyisa_guest_m68k::decode(0xD392, 16), Some(Insn::AddDn));
+    assert_eq!(polyisa_guest_m68k::decode(0x95C1, 16), Some(Insn::SubaL));
+    assert_eq!(polyisa_guest_m68k::decode(0x5001, 16), Some(Insn::Addq));
+    assert_eq!(polyisa_guest_m68k::decode(0x5140, 16), Some(Insn::Subq));
+    assert_eq!(polyisa_guest_m68k::decode(0xB509, 16), Some(Insn::Cmpm));
+    assert_eq!(polyisa_guest_m68k::decode(0x0C12, 16), Some(Insn::Cmpi));
+    // addx/subx の空間（Dn→ea で emode 0/1）は未割当のまま。
+    assert_eq!(polyisa_guest_m68k::decode(0xD301, 16), None);
+    assert_eq!(polyisa_guest_m68k::decode(0xD309, 16), None);
+}
+
+#[test]
+fn cmpi_dest_is_strictly_decoded() {
+    // 68000 では cmpi の EA も宛先オペランドとして厳密にデコードされる。
+    // cmpi.w #1,A0: 0000 1100 01 001 000 = 0x0C48 → illegal。
+    let mut env = env_with_code(&[0x0C48, 0x0001]);
+    let e = env
+        .step(|b| sem::exec(b, Insn::Cmpi, 0x0C48, 0x1000))
+        .expect_err("cmpi の An 宛ては illegal");
+    match e {
+        InterpExit::Exception(x) => assert_eq!(x.code, 4),
+        other => panic!("unexpected exit: {other:?}"),
+    }
+    // cmpi.w #1,2(PC): 0000 1100 01 111 010 = 0x0C7A → illegal。
+    let mut env = env_with_code(&[0x0C7A, 0x0001]);
+    let e = env
+        .step(|b| sem::exec(b, Insn::Cmpi, 0x0C7A, 0x1000))
+        .expect_err("cmpi の PC 相対宛ては illegal");
+    match e {
+        InterpExit::Exception(x) => assert_eq!(x.code, 4),
+        other => panic!("unexpected exit: {other:?}"),
+    }
+}

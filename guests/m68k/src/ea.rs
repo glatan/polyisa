@@ -122,8 +122,46 @@ pub const fn insn_ext_words(insn: super::Insn, w: u64) -> Option<u32> {
             let size = move_size(insn);
             ext_words(ea_mode(w), ea_reg(w), size)
         }
+        // add/sub/cmp 系: EA は一つ。オペランドサイズは opm
+        // （bits[8:6]）で決まる（0,4→b、1,3,5→w、2,6,7→l）。
+        super::Insn::Add
+        | super::Insn::AddDn
+        | super::Insn::AddaL
+        | super::Insn::Sub
+        | super::Insn::SubDn
+        | super::Insn::SubaL
+        | super::Insn::Cmp
+        | super::Insn::CmpaL => {
+            let opm = dest_mode(w);
+            let size = match opm {
+                0 | 4 => 1,
+                1 | 3 | 5 => 2,
+                _ => 4,
+            };
+            ext_words(ea_mode(w), ea_reg(w), size)
+        }
+        // addq/subq: EA は一つ。サイズは qsz（bits[7:6]）。
+        super::Insn::Addq | super::Insn::Subq => {
+            let size = 1u32 << qsz(w);
+            ext_words(ea_mode(w), ea_reg(w), size)
+        }
+        // addi/subi/cmpi: 即値の拡張語 + EA の拡張語。
+        super::Insn::Addi | super::Insn::Subi | super::Insn::Cmpi => {
+            let size = 1u32 << qsz(w);
+            let iw = if qsz(w) == 2 { 2 } else { 1 };
+            let Some(e) = ext_words(ea_mode(w), ea_reg(w), size) else {
+                return None;
+            };
+            Some(e + iw)
+        }
         _ => Some(0),
     }
+}
+
+/// 先頭ワードのサイズフィールド（bits[7:6]）。
+#[must_use]
+pub const fn qsz(w: u64) -> u8 {
+    ((w >> 6) & 3) as u8
 }
 
 /// move 系命令のオペランドサイズ（バイト）。

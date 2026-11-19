@@ -73,6 +73,11 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("dmode", 8, 6),
         ("dreg", 11, 9),
         ("qimm", 7, 0),
+        // C2: 算術・比較系のフィールド。emode/ereg は EA、qsz はサイズ。
+        // bits 11-9 のクイック即値・cmpm 宛先レジスタは dreg を再利用する。
+        ("emode", 5, 3),
+        ("ereg", 2, 0),
+        ("qsz", 7, 6),
     ] {
         m.fields.push(Field {
             name: name.to_string(),
@@ -101,6 +106,47 @@ pub fn build_model() -> polyisa_isadl::Model {
     m.formats.push(Format {
         name: "Q".to_string(),
         fields: vec!["dreg".to_string(), "qimm".to_string()],
+        operands: vec![],
+    });
+    // AE: レジスタ・サイズ・EA（add/sub/cmp 系。方向・宛先 An は
+    // パターンの bit8/opm が決める）。
+    m.formats.push(Format {
+        name: "AE".to_string(),
+        fields: vec![
+            "dreg".to_string(),
+            "qsz".to_string(),
+            "emode".to_string(),
+            "ereg".to_string(),
+        ],
+        operands: vec![],
+    });
+    // QE: クイック即値・サイズ・EA（addq/subq 系）。
+    m.formats.push(Format {
+        name: "QE".to_string(),
+        fields: vec![
+            "dreg".to_string(),
+            "qsz".to_string(),
+            "emode".to_string(),
+            "ereg".to_string(),
+        ],
+        operands: vec![],
+    });
+    // IE: サイズ・EA（即値系。即値は拡張語が持つ）。
+    m.formats.push(Format {
+        name: "IE".to_string(),
+        fields: vec!["qsz".to_string(), "emode".to_string(), "ereg".to_string()],
+        operands: vec![],
+    });
+    // CM: cmpm のレジスタ2つとサイズ。emode は固定値だが、EOR
+    // 宣言時の排他検証に使うので宣言する。
+    m.formats.push(Format {
+        name: "CM".to_string(),
+        fields: vec![
+            "dreg".to_string(),
+            "qsz".to_string(),
+            "emode".to_string(),
+            "sreg".to_string(),
+        ],
         operands: vec![],
     });
 
@@ -132,40 +178,51 @@ pub fn build_model() -> polyisa_isadl::Model {
     // byte の An 直が未割当なので source/destination 両方で An を
     // 弾く。Ref: SPEC-M68K-PRM (Rev 1) §MOVE/MOVEA.
     type Cond = (&'static str, WhereOp, u128);
-    type EaDecl = (&'static str, &'static str, &'static str, &'static [Cond]);
+    type EaDecl = (
+        &'static str,
+        &'static str,
+        &'static str,
+        &'static str,
+        &'static [Cond],
+    );
     let ea_insns: &[EaDecl] = &[
         (
             "movea_l",
             "E2",
             "0010 ... 001 ......",
+            "movea.l",
             &[("dmode", WhereOp::Eq, 1)],
         ),
         (
             "movea_w",
             "E2",
             "0011 ... 001 ......",
+            "movea.w",
             &[("dmode", WhereOp::Eq, 1)],
         ),
         (
             "move_b",
             "E2",
             "0001 ............",
+            "move.b",
             &[("dmode", WhereOp::Ne, 1), ("smode", WhereOp::Ne, 1)],
         ),
         (
             "move_w",
             "E2",
             "0011 ............",
+            "move.w",
             &[("dmode", WhereOp::Ne, 1)],
         ),
         (
             "move_l",
             "E2",
             "0010 ............",
+            "move.l",
             &[("dmode", WhereOp::Ne, 1)],
         ),
     ];
-    for (name, format, pattern, wheres) in ea_insns {
+    for (name, format, pattern, syntax, wheres) in ea_insns {
         m.insns.push(Insn {
             name: name.to_string(),
             format: format.to_string(),
@@ -179,7 +236,113 @@ pub fn build_model() -> polyisa_isadl::Model {
                     rhs: WhereRhs::Lit(*rhs),
                 })
                 .collect(),
-            syntax: name.replace('_', "."),
+            syntax: syntax.to_string(),
+            timing: "misc".to_string(),
+        });
+    }
+    // C2: 算術・比較系。opm（bits[8:6]、bit8+qsz）が方向・サイズ・
+    // An 宛てを決める。bit8=1 の空間は ADDX（emode 0/1）・
+    // ADDA.L（opm 7）と分かれるので、*_dn は emode/qsz を where で
+    // 弾き、*_a_l は qsz==3 を where で示す（将来の ADDX 宣言との
+    // 排他検証のため）。addq/subq の qsz==3 は Scc/DBcc の空間。
+    // Ref: SPEC-M68K-PRM (Rev 1) §ADD/SUB/CMP.
+    let arith: &[EaDecl] = &[
+        ("add", "AE", "1101 ... 0 .. ......", "add", &[]),
+        (
+            "add_dn",
+            "AE",
+            "1101 ... 1 .. ......",
+            "add",
+            &[("emode", WhereOp::Ne, 0), ("emode", WhereOp::Ne, 1), ("qsz", WhereOp::Ne, 3)],
+        ),
+        (
+            "adda_l",
+            "AE",
+            "1101 ... 111 ......",
+            "adda.l",
+            &[("qsz", WhereOp::Eq, 3)],
+        ),
+        ("sub", "AE", "1001 ... 0 .. ......", "sub", &[]),
+        (
+            "sub_dn",
+            "AE",
+            "1001 ... 1 .. ......",
+            "sub",
+            &[("emode", WhereOp::Ne, 0), ("emode", WhereOp::Ne, 1), ("qsz", WhereOp::Ne, 3)],
+        ),
+        (
+            "suba_l",
+            "AE",
+            "1001 ... 111 ......",
+            "suba.l",
+            &[("qsz", WhereOp::Eq, 3)],
+        ),
+        ("cmp", "AE", "1011 ... 0 .. ......", "cmp", &[]),
+        (
+            "cmpa_l",
+            "AE",
+            "1011 ... 111 ......",
+            "cmpa.l",
+            &[("qsz", WhereOp::Eq, 3)],
+        ),
+        (
+            "cmpm",
+            "CM",
+            "1011 ... 1 .. 001 ...",
+            "cmpm",
+            &[("qsz", WhereOp::Ne, 3), ("emode", WhereOp::Eq, 1)],
+        ),
+        (
+            "addq",
+            "QE",
+            "0101 ... 0 .. ......",
+            "addq",
+            &[("qsz", WhereOp::Ne, 3)],
+        ),
+        (
+            "subq",
+            "QE",
+            "0101 ... 1 .. ......",
+            "subq",
+            &[("qsz", WhereOp::Ne, 3)],
+        ),
+        (
+            "addi",
+            "IE",
+            "0000 0110 .. ......",
+            "addi",
+            &[("qsz", WhereOp::Ne, 3)],
+        ),
+        (
+            "subi",
+            "IE",
+            "0000 0100 .. ......",
+            "subi",
+            &[("qsz", WhereOp::Ne, 3)],
+        ),
+        (
+            "cmpi",
+            "IE",
+            "0000 1100 .. ......",
+            "cmpi",
+            &[("qsz", WhereOp::Ne, 3)],
+        ),
+    ];
+    for (name, format, pattern, syntax, wheres) in arith {
+        m.insns.push(Insn {
+            name: name.to_string(),
+            format: format.to_string(),
+            pattern: Pattern::parse(pattern).expect("valid pattern"),
+            when: Pred::True,
+            wheres: wheres
+                .iter()
+                .map(|(field, op, rhs)| WhereClause {
+                    field: field.to_string(),
+                    op: *op,
+                    rhs: WhereRhs::Lit(*rhs),
+                })
+                .collect(),
+            syntax: syntax.to_string(),
             timing: "misc".to_string(),
         });
     }

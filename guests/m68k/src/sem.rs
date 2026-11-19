@@ -177,6 +177,15 @@ pub fn exec<B: Backend>(b: &mut B, insn: super::Insn, w: u64, pc: u64) -> Flow<B
         super::Insn::MoveaW => move_(b, w, pc, 2, true),
         super::Insn::MoveaL => move_(b, w, pc, 4, true),
         super::Insn::Moveq => moveq(b, w),
+        super::Insn::Add | super::Insn::AddDn | super::Insn::AddaL => arith(b, w, pc, false),
+        super::Insn::Sub | super::Insn::SubDn | super::Insn::SubaL => arith(b, w, pc, true),
+        super::Insn::Cmp | super::Insn::CmpaL => cmp_(b, w, pc),
+        super::Insn::Cmpm => cmpm(b, w, pc),
+        super::Insn::Addq => addq(b, w, pc, false),
+        super::Insn::Subq => addq(b, w, pc, true),
+        super::Insn::Addi => imm_arith(b, w, pc, ImmOp::Add),
+        super::Insn::Subi => imm_arith(b, w, pc, ImmOp::Sub),
+        super::Insn::Cmpi => imm_arith(b, w, pc, ImmOp::Cmp),
         super::Insn::Illegal => Err(b.raise(GuestException {
             kind: ExceptionKind::Trap,
             // m68k の例外ベクタ番号 4（Illegal Instruction）。
@@ -364,4 +373,268 @@ fn moveq<B: Backend>(b: &mut B, w: u64) -> Flow<B> {
     b.set(D(dreg).state(), v);
     set_nzvc(b, v, 4);
     Ok(())
+}
+
+// ---- C2: 加減算・比較系 ----
+
+/// `size` バイトのマスク値。
+const fn size_mask(size: u32) -> u32 {
+    match size {
+        1 => 0xFF,
+        2 => 0xFFFF,
+        _ => 0xFFFF_FFFF,
+    }
+}
+
+/// 加減算・比較の旗を更新する。`d`・`s`・`r` は W32 の生値で、
+/// ここで `size` にマスクしてから判定する。
+/// `sub`: 減算なら真（C は借り、V の式が変わる）。
+/// `acc_z`: 真なら Z は「結果非零でクリア、零で保持」（BCD 系の複数語連鎖用）。
+/// `set_x`: 真なら X も C に同期する（cmp 系以外）。
+// Ref: SPEC-M68K-PRM (Rev 1) §Condition Codes.
+#[allow(clippy::too_many_arguments)]
+fn set_arith_flags<B: Backend>(
+    b: &mut B,
+    d: B::V<W32>,
+    s: B::V<W32>,
+    r: B::V<W32>,
+    size: u32,
+    sub: bool,
+    acc_z: bool,
+    set_x: bool,
+) {
+    let m = b.konst::<W32>(size_mask(size));
+    let dm = b.and(d, m);
+    let sm = b.and(s, m);
+    let rm = b.and(r, m);
+    let sign = b.konst::<W32>(1u32 << (size * 8 - 1));
+    let zero = b.konst::<W32>(0);
+    let ds = b.xor(dm, sm);
+    let dr = b.xor(dm, rm);
+    // V: 減算は被演算子の符号が違い結果が被減数と違う、加算は
+    // 被演算子の符号が同じで結果と違う。
+    let v_bits = if sub {
+        b.and(ds, dr)
+    } else {
+        let nds = b.not(ds);
+        b.and(nds, dr)
+    };
+    let v_at = b.and(v_bits, sign);
+    let is_v = b.cmp(Cmp::Ne, v_at, zero);
+    // C: 減算は dm < sm（借り）、加算は rm < dm（繰り上がり）。
+    let is_c = if sub {
+        b.cmp(Cmp::LtU, dm, sm)
+    } else {
+        b.cmp(Cmp::LtU, rm, dm)
+    };
+    let n_at = b.and(rm, sign);
+    let is_n = b.cmp(Cmp::Ne, n_at, zero);
+    let is_z = b.cmp(Cmp::Eq, rm, zero);
+    let ccr = b.get(ccr_ref());
+    let km = b.konst::<W8>(0xE0 | u8::from(!set_x) << sr_bit::X);
+    let keep = b.and(ccr, km);
+    let nk = b.konst::<W8>(1 << sr_bit::N);
+    let zk = b.konst::<W8>(1 << sr_bit::Z);
+    let vk = b.konst::<W8>(1 << sr_bit::V);
+    let ck = b.konst::<W8>(1 << sr_bit::C);
+    let z8 = b.konst::<W8>(0);
+    let n8 = b.select(is_n, nk, z8);
+    let v8 = b.select(is_v, vk, z8);
+    let c8 = b.select(is_c, ck, z8);
+    // acc_z なら結果零のとき Z は旧値を保持する。
+    let zsel = if acc_z { b.and(ccr, zk) } else { zk };
+    let zf = b.select(is_z, zsel, z8);
+    let nv = b.or(n8, v8);
+    let nvc = b.or(nv, c8);
+    let nvcz = b.or(nvc, zf);
+    let out0 = b.or(keep, nvcz);
+    // X は C に同期する（set_x のときだけ）。
+    let x8 = if set_x {
+        let xk = b.konst::<W8>(1 << sr_bit::X);
+        b.select(is_c, xk, z8)
+    } else {
+        z8
+    };
+    let out = b.or(out0, x8);
+    b.set(ccr_ref(), out);
+}
+
+/// add/sub（opm 0-2: <ea> op Dn、opm 3/7: <ea> op An、opm 4-6:
+/// Dn op <ea>）。宛先 An は旗を更新しない。
+// Ref: SPEC-M68K-PRM (Rev 1) §ADD/SUB.
+fn arith<B: Backend>(b: &mut B, w: u64, pc: u64, sub: bool) -> Flow<B> {
+    let opm = ea::dest_mode(w);
+    let reg = ea::dest_reg(w);
+    let emode = ea::ea_mode(w);
+    let ereg = ea::ea_reg(w);
+    match opm {
+        0..=2 => {
+            let size = 1u32 << opm;
+            // byte サイズの An オペランドは未割当。
+            if emode == 1 && size == 1 {
+                return Err(illegal(b));
+            }
+            let (e, _n) = ea::eval(b, emode, ereg, size, pc + 2)?;
+            let s = read_ea(b, &e, size)?;
+            let d = b.get(D(reg).state());
+            let r = if sub { b.sub(d, s) } else { b.add(d, s) };
+            set_arith_flags(b, d, s, r, size, sub, false, true);
+            write_ea(b, &Ea::D(reg), size, r)
+        }
+        3 | 7 => {
+            // adda/suba: word オペランドは32ビットに符号拡張。旗は不変。
+            let size = if opm == 3 { 2 } else { 4 };
+            let (e, _n) = ea::eval(b, emode, ereg, size, pc + 2)?;
+            let s0 = read_ea(b, &e, size)?;
+            let s = if opm == 3 {
+                let lo = b.trunc::<W32, W16>(s0);
+                b.sext::<W16, W32>(lo)
+            } else {
+                s0
+            };
+            let a = areg(b, reg);
+            let r = if sub { b.sub(a, s) } else { b.add(a, s) };
+            set_areg(b, reg, r)
+        }
+        _ => {
+            // Dn op <ea>。宛先は alterable（An 直・PC 相対・即値は不可。
+            // emode 0/1 は addx/subx の空間として decode で弾かれる）。
+            let size = 1u32 << (opm - 4);
+            if emode == 1 || (emode == 7 && ereg >= 2) {
+                return Err(illegal(b));
+            }
+            let (e, _n) = ea::eval(b, emode, ereg, size, pc + 2)?;
+            let s = read_ea(b, &e, size)?;
+            let d0 = b.get(D(reg).state());
+            let d = mask(b, d0, size);
+            // sub は <ea> - Dn（被減数は EA 側）。
+            let r = if sub { b.sub(s, d) } else { b.add(s, d) };
+            set_arith_flags(b, s, d, r, size, sub, false, true);
+            write_ea(b, &e, size, r)
+        }
+    }
+}
+
+/// cmp/cmpa（Dn - <ea> または An - <ea>）。旗は N/Z/V/C、
+/// Z は累積、X は不変。
+// Ref: SPEC-M68K-PRM (Rev 1) §CMP/CMPA.
+fn cmp_<B: Backend>(b: &mut B, w: u64, pc: u64) -> Flow<B> {
+    let opm = ea::dest_mode(w);
+    let reg = ea::dest_reg(w);
+    let emode = ea::ea_mode(w);
+    let ereg = ea::ea_reg(w);
+    if opm == 3 || opm == 7 {
+        // cmpa: word オペランドは32ビットに符号拡張。
+        let size = if opm == 3 { 2 } else { 4 };
+        let (e, _n) = ea::eval(b, emode, ereg, size, pc + 2)?;
+        let s0 = read_ea(b, &e, size)?;
+        let s = if opm == 3 {
+            let lo = b.trunc::<W32, W16>(s0);
+            b.sext::<W16, W32>(lo)
+        } else {
+            s0
+        };
+        let d = areg(b, reg);
+        let r = b.sub(d, s);
+        set_arith_flags(b, d, s, r, 4, true, false, false);
+        return Ok(());
+    }
+    let size = 1u32 << opm;
+    if emode == 1 && size == 1 {
+        return Err(illegal(b));
+    }
+    let (e, _n) = ea::eval(b, emode, ereg, size, pc + 2)?;
+    let s = read_ea(b, &e, size)?;
+    let d0 = b.get(D(reg).state());
+    let d = mask(b, d0, size);
+    let r = b.sub(d, s);
+    set_arith_flags(b, d, s, r, size, true, false, false);
+    Ok(())
+}
+
+/// cmpm: (Ay)+ - (Ax)+。両方 postincrement で進む。
+// Ref: SPEC-M68K-PRM (Rev 1) §CMPM.
+fn cmpm<B: Backend>(b: &mut B, w: u64, _pc: u64) -> Flow<B> {
+    let size = 1u32 << ea::qsz(w);
+    let xr = ea::dest_reg(w);
+    let yr = ea::ea_reg(w);
+    let (es, _n) = ea::eval(b, 3, yr, size, 0)?;
+    let s = read_ea(b, &es, size)?;
+    let (ed, _n) = ea::eval(b, 3, xr, size, 0)?;
+    let d = read_ea(b, &ed, size)?;
+    let r = b.sub(d, s);
+    set_arith_flags(b, d, s, r, size, true, false, false);
+    Ok(())
+}
+
+/// addq/subq: 3ビット即値（0 は 8）を EA に加減する。
+/// 宛先 An は旗を更新せず 32 ビット全体を書き換える。
+// Ref: SPEC-M68K-PRM (Rev 1) §ADDQ/SUBQ.
+fn addq<B: Backend>(b: &mut B, w: u64, pc: u64, sub: bool) -> Flow<B> {
+    let size = 1u32 << ea::qsz(w);
+    let emode = ea::ea_mode(w);
+    let ereg = ea::ea_reg(w);
+    let q = ea::dest_reg(w);
+    let v = if q == 0 { 8 } else { u32::from(q) };
+    let s = b.konst::<W32>(v);
+    // byte の An 宛ては未割当。PC 相対・即値宛ては不可。
+    if emode == 1 && size == 1 {
+        return Err(illegal(b));
+    }
+    if emode == 7 && ereg >= 2 {
+        return Err(illegal(b));
+    }
+    if emode == 1 {
+        // An 宛て: 旗は不変、サイズに関係なく32ビット全体。
+        let a = areg(b, ereg);
+        let r = if sub { b.sub(a, s) } else { b.add(a, s) };
+        return set_areg(b, ereg, r);
+    }
+    let (e, _n) = ea::eval(b, emode, ereg, size, pc + 2)?;
+    let d = read_ea(b, &e, size)?;
+    let r = if sub { b.sub(d, s) } else { b.add(d, s) };
+    set_arith_flags(b, d, s, r, size, sub, false, true);
+    write_ea(b, &e, size, r)
+}
+
+/// 即値系の演算種別。
+enum ImmOp {
+    Add,
+    Sub,
+    Cmp,
+}
+
+/// addi/subi/cmpi: 拡張語の即値と EA の演算。cmpi は書き戻さない。
+// Ref: SPEC-M68K-PRM (Rev 1) §ADDI/SUBI/CMPI.
+fn imm_arith<B: Backend>(b: &mut B, w: u64, pc: u64, op: ImmOp) -> Flow<B> {
+    let size = 1u32 << ea::qsz(w);
+    let emode = ea::ea_mode(w);
+    let ereg = ea::ea_reg(w);
+    // 宛先の合法性: 68000 は即値系の EA を宛先オペランドとして厳密に
+    // デコードするため、cmpi でも An 直・PC 相対・即値はすべて illegal
+    // （68020+ で緩和された制約）。
+    if emode == 1 || (emode == 7 && ereg >= 2) {
+        return Err(illegal(b));
+    }
+    let (imm_e, ni) = ea::eval(b, 7, 4, size, pc + 2)?;
+    let s = match imm_e {
+        Ea::Imm(v) => v,
+        _ => unreachable!("mode7 reg4 は Imm"),
+    };
+    let ext = pc + 2 + u64::from(ni) * 2;
+    let (e, _n) = ea::eval(b, emode, ereg, size, ext)?;
+    let d = read_ea(b, &e, size)?;
+    match op {
+        ImmOp::Cmp => {
+            let r = b.sub(d, s);
+            set_arith_flags(b, d, s, r, size, true, false, false);
+            Ok(())
+        }
+        ImmOp::Add | ImmOp::Sub => {
+            let sub = matches!(op, ImmOp::Sub);
+            let r = if sub { b.sub(d, s) } else { b.add(d, s) };
+            set_arith_flags(b, d, s, r, size, sub, false, true);
+            write_ea(b, &e, size, r)
+        }
+    }
 }
