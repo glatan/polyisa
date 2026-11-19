@@ -43,8 +43,8 @@
 | # | 内容 | 前提 | 判定 |
 |---|---|---|---|
 | SP1 | 着手条件: SPEC-SPARC-V9・SPEC-SPARC-PSABI の版確定、V7 の根拠資料の追加登録または範囲からの除外の決定、BIN 登録（sparc32・sparc64 配布物）、SST 類の既存適合データの有無の調査 | - | 98af983 |
-| SP2 | `guests/sparc` の段階 2 の試作を本実装に差し替える骨格: CpuState（g/o/i/l レジスタ・CWP・PSR/TSTATE・PC/nPC）、機能（V7・V8・V9・VIS）とモデルの宣言、sem 層、ワークスペース配線 | SP1 | - |
-| SP3 | デコード方式の決定: 32 ビット固定長の map/パターン。遅延スロットは PC/nPC として実行ループ側で表現 | SP2 | - |
+| SP2 | `guests/sparc` の段階 2 の試作を本実装に差し替える骨格: CpuState（g/o/i/l レジスタ・CWP・PSR/TSTATE・PC/nPC）、機能（V7・V8・V9・VIS）とモデルの宣言、sem 層、ワークスペース配線 | SP1 | 85df434 |
+| SP3 | デコード方式の決定: 32 ビット固定長の map/パターン。遅延スロットは PC/nPC として実行ループ側で表現 | SP2 | 85df434 |
 | SP4 | `run_sparc` 実行ループ + bare 最小テスト | SP3 | - |
 | SP5 | 整数演算: add/sub/論理/シフト/sethi と、V8 の umul/smul/udiv/sdiv/mulscc | SP4 | - |
 | SP6 | load/store 全サイズ・ldstub/swap・ASI 指定形 | SP4 | - |
