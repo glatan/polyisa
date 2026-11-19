@@ -82,10 +82,10 @@ fn illegal_raises_vector4() {
 fn unimplemented_is_undefined() {
     let mut env = env();
     let e = env
-        .step(|b| sem::exec(b, Insn::Rts, 0x4E75, 0))
-        .expect_err("rts は未実装");
+        .step(|b| sem::exec(b, Insn::Reset, 0x4E70, 0))
+        .expect_err("reset は未実装");
     match e {
-        InterpExit::Exception(x) => assert_eq!(x.code, 0x4E75),
+        InterpExit::Exception(x) => assert_eq!(x.code, 0x4E70),
         other => panic!("unexpected exit: {other:?}"),
     }
 }
@@ -1090,5 +1090,132 @@ fn decode_c5_spot() {
     match ex {
         InterpExit::Exception(x) => assert_eq!(x.code, 4),
         e => panic!("unexpected: {e:?}"),
+    }
+}
+
+/// C6: 分岐系。bra/bcc の変位・bsr/jsr の push・jmp/jsr の EA・
+/// rts/rtr の pop と旗規約を見る。
+// Ref: SPEC-M68K-PRM (Rev 1) §BRA/BSR/Bcc/JMP/JSR/RTS/RTR.
+#[test]
+fn branch_forms() {
+    use polyisa_engine::interp::Ctrl;
+
+    // bra byte disp: 0x6002 = bra +2 → pc+2+2。
+    let mut env = env_with_code(&[0x6002]);
+    env.step(|b| sem::exec(b, Insn::Bra, 0x6002, 0x1000))
+        .unwrap();
+    match env.backend.ctrl {
+        Ctrl::Jump(t) => assert_eq!(t, 0x1004),
+        c => panic!("unexpected ctrl: {c:?}"),
+    }
+
+    // bra word disp: 0x6000 + ext 0x0100 → pc+2+0x100。
+    let mut env = env_with_code(&[0x6000, 0x0100]);
+    env.step(|b| sem::exec(b, Insn::Bra, 0x6000, 0x1000))
+        .unwrap();
+    match env.backend.ctrl {
+        Ctrl::Jump(t) => assert_eq!(t, 0x1102),
+        c => panic!("unexpected ctrl: {c:?}"),
+    }
+
+    // beq byte disp -2（0x67FE）: Z=1 なら分岐、Z=0 なら素通り。
+    let mut env = env_with_code(&[0x67FE]);
+    env.backend.set(sem::ccr_ref(), 1 << sem::sr_bit::Z);
+    env.step(|b| sem::exec(b, Insn::Bcc, 0x67FE, 0x1000))
+        .unwrap();
+    match env.backend.ctrl {
+        Ctrl::Jump(t) => assert_eq!(t, 0x1000), // pc+2-2
+        c => panic!("unexpected ctrl: {c:?}"),
+    }
+    let mut env = env_with_code(&[0x67FE]);
+    env.step(|b| sem::exec(b, Insn::Bcc, 0x67FE, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.ctrl, Ctrl::Fallthrough);
+
+    // bsr byte +2: 戻りアドレス pc+2 を push して分岐。
+    let mut env = env_with_data(&[0x6102], &[]);
+    env.backend.set(sem::Ssp.state(), 0x4004);
+    env.backend.set(sem::sr_ref(), 1 << sem::sr_bit::S);
+    env.step(|b| sem::exec(b, Insn::Bsr, 0x6102, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::Ssp.state()), 0x4000);
+    match env.backend.ctrl {
+        Ctrl::Jump(t) => assert_eq!(t, 0x1004),
+        c => panic!("unexpected ctrl: {c:?}"),
+    }
+    let mut buf = [0u8; 4];
+    env.backend
+        .mem
+        .read(VirtAddr(0x4000), &mut buf, DRD)
+        .unwrap();
+    assert_eq!(u32::from_be_bytes(buf), 0x1002);
+}
+
+/// C6: jmp/jsr/rts/rtr。
+#[test]
+fn jump_return_forms() {
+    use polyisa_engine::interp::Ctrl;
+
+    // jmp (a0): 0x4ED0。a0=0x5000 へ飛ぶ。
+    let mut env = env_with_code(&[0x4ED0]);
+    env.backend.set(A(0).state(), 0x5000);
+    env.step(|b| sem::exec(b, Insn::Jmp, 0x4ED0, 0x1000))
+        .unwrap();
+    match env.backend.ctrl {
+        Ctrl::Jump(t) => assert_eq!(t, 0x5000),
+        c => panic!("unexpected ctrl: {c:?}"),
+    }
+
+    // jmp の非制御 EA（postinc）は illegal。
+    let mut env = env_with_code(&[0x4ED8]);
+    let ex = env
+        .step(|b| sem::exec(b, Insn::Jmp, 0x4ED8, 0x1000))
+        .unwrap_err();
+    match ex {
+        InterpExit::Exception(x) => assert_eq!(x.code, 4),
+        e => panic!("unexpected: {e:?}"),
+    }
+
+    // jsr (xxx).l: 0x4EB9 + abs.l。戻り値は pc+6。
+    let mut env = env_with_data(&[0x4EB9, 0x0000, 0x6000], &[]);
+    env.backend.set(sem::Ssp.state(), 0x4004);
+    env.backend.set(sem::sr_ref(), 1 << sem::sr_bit::S);
+    env.step(|b| sem::exec(b, Insn::Jsr, 0x4EB9, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::Ssp.state()), 0x4000);
+    match env.backend.ctrl {
+        Ctrl::Jump(t) => assert_eq!(t, 0x6000),
+        c => panic!("unexpected ctrl: {c:?}"),
+    }
+    let mut buf = [0u8; 4];
+    env.backend
+        .mem
+        .read(VirtAddr(0x4000), &mut buf, DRD)
+        .unwrap();
+    assert_eq!(u32::from_be_bytes(buf), 0x1006);
+
+    // rts: (SP)+ の long を pc へ。
+    let mut env = env_with_data(&[0x4E75], &0x0000_7000u32.to_be_bytes());
+    env.backend.set(sem::Ssp.state(), 0x4000);
+    env.backend.set(sem::sr_ref(), 1 << sem::sr_bit::S);
+    env.step(|b| sem::exec(b, Insn::Rts, 0x4E75, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::Ssp.state()), 0x4004);
+    match env.backend.ctrl {
+        Ctrl::Jump(t) => assert_eq!(t, 0x7000),
+        c => panic!("unexpected ctrl: {c:?}"),
+    }
+
+    // rtr: (SP)+ の word →CCR（5bit）、long →pc。
+    let mut env = env_with_data(&[0x4E77], &[0x00, 0xFA, 0x00, 0x00, 0x70, 0x00]);
+    env.backend.set(sem::Ssp.state(), 0x4000);
+    env.backend.set(sem::sr_ref(), 1 << sem::sr_bit::S);
+    env.step(|b| sem::exec(b, Insn::Rtr, 0x4E77, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::ccr_ref()), 0x1A); // 0xFA & 0x1F
+    assert_eq!(env.backend.get(sem::Ssp.state()), 0x4006);
+    match env.backend.ctrl {
+        Ctrl::Jump(t) => assert_eq!(t, 0x7000),
+        c => panic!("unexpected ctrl: {c:?}"),
     }
 }

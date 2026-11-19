@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! m68k 最小の命令意味論。バックエンドに対して総称的に書く。
 //!
-//! 骨格の段階なので、ここでは CPU 状態の参照と、16ビット固定命令の
-//! 振り分けだけを持つ。EA モードの解釈はデコード方式の決定後に足す。
+//! CPU 状態の参照・EA 評価・命令ごとの意味論を持つ。spec の宣言に
+//! 従って命令群を段階的に実装している。
 //!
 //! 出典は SPEC-M68K-PRM (M68000PM/AD Rev 1) である。
 //! Ref: SPEC-M68K-PRM (Rev 1).
@@ -162,12 +162,11 @@ pub mod sr_bit {
     pub const T: u32 = 15;
 }
 
-/// 骨格の16ビット固定命令を振り分ける。
+/// 命令を振り分ける。
 ///
 /// `insn` は生成デコーダの結果、`w` は命令ワード。`pc` は命令の先頭
-/// アドレス。nop と illegal だけを処理し、残りは未実装として
-/// `Undefined` に落とす。rts/rtr/rte のスタック復帰と reset の外部
-/// 通知は EA・例外処理の経路と一緒に足す。
+/// アドレス。未実装のものは `Undefined` に落とす。rte のスタック
+/// 復帰と reset の外部通知は例外処理の経路と一緒に足す。
 pub fn exec<B: Backend>(b: &mut B, insn: super::Insn, w: u64, pc: u64) -> Flow<B> {
     match insn {
         super::Insn::Nop => Ok(()),
@@ -223,6 +222,13 @@ pub fn exec<B: Backend>(b: &mut B, insn: super::Insn, w: u64, pc: u64) -> Flow<B
         super::Insn::BchgI => bit_op(b, w, pc, BitOp::Chg, true),
         super::Insn::BclrI => bit_op(b, w, pc, BitOp::Clr, true),
         super::Insn::BsetI => bit_op(b, w, pc, BitOp::Set, true),
+        super::Insn::Bra => branch_rel(b, w, pc, None, false),
+        super::Insn::Bsr => branch_rel(b, w, pc, None, true),
+        super::Insn::Bcc => branch_rel(b, w, pc, Some(((w >> 8) & 0xF) as u8), false),
+        super::Insn::Jmp => jmp_jsr(b, w, pc, false),
+        super::Insn::Jsr => jmp_jsr(b, w, pc, true),
+        super::Insn::Rts => rts(b),
+        super::Insn::Rtr => rtr(b),
         super::Insn::Illegal => Err(b.raise(GuestException {
             kind: ExceptionKind::Trap,
             // m68k の例外ベクタ番号 4（Illegal Instruction）。
@@ -1204,4 +1210,188 @@ fn bit_op<B: Backend>(b: &mut B, w: u64, pc: u64, op: BitOp, imm_form: bool) -> 
         BitOp::Tst => unreachable!(),
     };
     write_ea(b, &e, dsz, r)
+}
+
+/// 変位の評価。disp8=0 は 16bit 拡張語、それ以外は sext8
+///（0xFF は byte 変位 -1。32bit 変位は 020 以降の仕様）。
+/// 戻り値は (符号付き変位, 消費拡張語数)。
+// Ref: SPEC-M68K-PRM (Rev 1) §BRA/BSR/Bcc.
+fn disp_val<B: Backend>(b: &mut B, w: u64, pc: u64) -> Result<(B::V<W32>, u32), B::Exit> {
+    let d8 = (w & 0xFF) as u8;
+    if d8 == 0 {
+        let (e, ni) = ea::eval(b, 7, 4, 2, pc + 2)?;
+        let v = match e {
+            Ea::Imm(v) => v,
+            _ => unreachable!("mode7 reg4 は Imm"),
+        };
+        // 符号拡張は W32 内で 16 ビット左→算術右。
+        let k = b.konst::<W32>(16);
+        let s = b.shl(v, k);
+        let sv = b.shr_a(s, k);
+        Ok((sv, ni))
+    } else {
+        let sv = b.konst::<W32>((d8 as i8) as i32 as u32);
+        Ok((sv, 0))
+    }
+}
+
+/// Bcc の条件評価。cc=2..15。C/V/Z/N から論理合成する。
+// Ref: SPEC-M68K-PRM (Rev 1) §Condition Code Computation.
+fn cond_eval<B: Backend>(b: &mut B, cc: u8) -> B::B {
+    // cc はデコードで 2..=15 に限定される（0/1 は bra/bsr）。
+    debug_assert!((2..=15).contains(&cc));
+    let ccr = b.get(ccr_ref());
+    let c32 = b.zext::<W8, W32>(ccr);
+    let one = b.konst::<W32>(1);
+    let bit = |b: &mut B, k: u32| {
+        let kk = b.konst::<W32>(k);
+        let s = b.shr_l(c32, kk);
+        b.and(s, one)
+    };
+    let c0 = bit(b, sr_bit::C);
+    let v1 = bit(b, sr_bit::V);
+    let z2 = bit(b, sr_bit::Z);
+    let n3 = bit(b, sr_bit::N);
+    let nc = b.xor(c0, one);
+    let nv = b.xor(v1, one);
+    let nz = b.xor(z2, one);
+    let nn = b.xor(n3, one);
+    // n==v は n^v の否定。
+    let nxv = b.xor(n3, v1);
+    let eqnv = b.xor(nxv, one);
+    let cv = match cc {
+        2 => b.and(nc, nz),    // hi: !c && !z
+        3 => b.or(c0, z2),     // ls: c || z
+        4 => nc,               // cc/hs: !c
+        5 => c0,               // cs/lo: c
+        6 => nz,               // ne
+        7 => z2,               // eq
+        8 => nv,               // vc
+        9 => v1,               // vs
+        10 => nn,              // pl
+        11 => n3,              // mi
+        12 => eqnv,            // ge: n==v
+        13 => nxv,             // lt: n!=v
+        14 => b.and(eqnv, nz), // gt: n==v && !z
+        _ => b.or(z2, nxv),    // le: z || n!=v
+    };
+    let zero = b.konst::<W32>(0);
+    b.cmp(Cmp::Ne, cv, zero)
+}
+
+/// スタックに long を積む（A7 先行デクリメント）。
+fn push_l<B: Backend>(b: &mut B, v: B::V<W32>) -> Flow<B> {
+    let sp0 = areg(b, 7);
+    let k4 = b.konst::<W32>(4);
+    let sp = b.sub(sp0, k4);
+    let v64 = b.zext::<W32, W64>(v);
+    // 68000 の long 書き込みは word アクセス×2。
+    let s16 = b.konst::<W64>(16);
+    let hi64 = b.shr_l(v64, s16);
+    let hi = b.trunc::<W64, W16>(hi64);
+    let lo = b.trunc::<W64, W16>(v64);
+    let sp64 = b.zext::<W32, W64>(sp);
+    b.store::<W16>(sp64, hi, DWR)?;
+    let two = b.konst::<W64>(2);
+    let a2 = b.add(sp64, two);
+    b.store::<W16>(a2, lo, DWR)?;
+    set_areg(b, 7, sp)
+}
+
+/// スタックから `size` バイト（2 or 4）を取る。4 は word×2。
+fn pop<B: Backend>(b: &mut B, size: u32) -> Result<B::V<W32>, B::Exit> {
+    let sp0 = areg(b, 7);
+    let sp64 = b.zext::<W32, W64>(sp0);
+    let v = if size == 2 {
+        let w16 = b.load::<W16>(sp64, DRD)?;
+        b.zext::<W16, W32>(w16)
+    } else {
+        let hi = b.load::<W16>(sp64, DRD)?;
+        let two = b.konst::<W64>(2);
+        let a2 = b.add(sp64, two);
+        let lo = b.load::<W16>(a2, DRD)?;
+        let hi32 = b.zext::<W16, W32>(hi);
+        let lo32 = b.zext::<W16, W32>(lo);
+        let s = b.konst::<W32>(16);
+        let h = b.shl(hi32, s);
+        b.or(h, lo32)
+    };
+    let kn = b.konst::<W32>(size);
+    let sp = b.add(sp0, kn);
+    set_areg(b, 7, sp)?;
+    Ok(v)
+}
+
+/// bra/bsr/bcc。分岐先は pc+2+変位（32bit 折り返し）。
+/// bsr は戻りアドレス（命令の次）を push してから飛ぶ。
+// Ref: SPEC-M68K-PRM (Rev 1) §BRA/BSR/Bcc.
+fn branch_rel<B: Backend>(b: &mut B, w: u64, pc: u64, cc: Option<u8>, link: bool) -> Flow<B> {
+    let (dv, ni) = disp_val(b, w, pc)?;
+    let base = b.konst::<W32>(pc.wrapping_add(2) as u32);
+    let t32 = b.add(base, dv);
+    let t64 = b.zext::<W32, W64>(t32);
+    if link {
+        let ret = b.konst::<W32>(pc.wrapping_add(2 + u64::from(ni) * 2) as u32);
+        push_l(b, ret)?;
+    }
+    if let Some(cc) = cc {
+        let c = cond_eval(b, cc);
+        b.if_then_else(
+            c,
+            |bb| {
+                bb.jump(t64);
+                Ok(())
+            },
+            |_| Ok(()),
+        )
+    } else {
+        b.jump(t64);
+        Ok(())
+    }
+}
+
+/// jmp/jsr。EA は制御モードのみ（indirect/disp/絶対/PC 相対）。
+// Ref: SPEC-M68K-PRM (Rev 1) §JMP/JSR.
+fn jmp_jsr<B: Backend>(b: &mut B, w: u64, pc: u64, link: bool) -> Flow<B> {
+    let emode = ea::ea_mode(w);
+    let ereg = ea::ea_reg(w);
+    let ctrl = emode == 2 || emode == 5 || emode == 6 || (emode == 7 && ereg <= 3);
+    if !ctrl {
+        return Err(illegal(b));
+    }
+    let (e, ni) = ea::eval(b, emode, ereg, 4, pc + 2)?;
+    let a = match e {
+        Ea::Addr(a) => a,
+        _ => unreachable!("制御 EA は Addr"),
+    };
+    if link {
+        let ret = b.konst::<W32>(pc.wrapping_add(2 + u64::from(ni) * 2) as u32);
+        push_l(b, ret)?;
+    }
+    b.jump(a);
+    Ok(())
+}
+
+/// rts。(SP)+ の long を PC へ。
+// Ref: SPEC-M68K-PRM (Rev 1) §RTS.
+fn rts<B: Backend>(b: &mut B) -> Flow<B> {
+    let v = pop(b, 4)?;
+    let v64 = b.zext::<W32, W64>(v);
+    b.jump(v64);
+    Ok(())
+}
+
+/// rtr。(SP)+ の word を CCR へ、続く long を PC へ。
+// Ref: SPEC-M68K-PRM (Rev 1) §RTR.
+fn rtr<B: Backend>(b: &mut B) -> Flow<B> {
+    let cc = pop(b, 2)?;
+    let cc8 = b.trunc::<W32, W8>(cc);
+    // CCR は 5 ビットのみ実装。スタックの上位 3 ビットは捨てる。
+    let m = b.konst::<W8>(0x1F);
+    let v = b.and(cc8, m);
+    b.set(ccr_ref(), v);
+    let v = pop(b, 4)?;
+    let v64 = b.zext::<W32, W64>(v);
+    b.jump(v64);
+    Ok(())
 }

@@ -4,7 +4,8 @@
 //
 // 宣言する命令は、16ビット固定の実符号化（nop/reset/rts/rtr/rte/illegal）、
 // EA フィールドを持つ move/movea/moveq（C1）、算術・比較（C2）、
-// 論理・単項（C3）、シフト/ローテート（C4）。
+// 論理・単項（C3）、シフト/ローテート（C4）、ビット操作（C5）、
+// 分岐・復帰（C6）。
 // EA モードの解釈と拡張語の消費は `src/ea.rs`、意味論は `src/sem.rs`。
 // 出典は SPEC-M68K-PRM (M68000PM/AD Rev 1) である。
 // Ref: SPEC-M68K-PRM (Rev 1).
@@ -82,6 +83,9 @@ pub fn build_model() -> polyisa_isadl::Model {
         // C4: シフト系。dir は方向、sop はレジスタ形の i+op（bits5-3）。
         ("dir", 8, 8),
         ("sop", 5, 3),
+        // C6: 分岐系。cc は条件コード、disp は 8 ビット変位。
+        ("cc", 11, 8),
+        ("disp", 7, 0),
     ] {
         m.fields.push(Field {
             name: name.to_string(),
@@ -183,6 +187,19 @@ pub fn build_model() -> polyisa_isadl::Model {
     m.formats.push(Format {
         name: "BE".to_string(),
         fields: vec!["dreg".to_string(), "emode".to_string(), "ereg".to_string()],
+        operands: vec![],
+    });
+    // BR: 相対分岐。cc は条件（0=T,1=F,2〜15=Bcc）、disp は 8bit
+    // 変位（0 は 16bit 拡張語を示す）。
+    m.formats.push(Format {
+        name: "BR".to_string(),
+        fields: vec!["cc".to_string(), "disp".to_string()],
+        operands: vec![],
+    });
+    // JF: jmp/jsr の制御 EA。
+    m.formats.push(Format {
+        name: "JF".to_string(),
+        fields: vec!["emode".to_string(), "ereg".to_string()],
         operands: vec![],
     });
 
@@ -567,6 +584,21 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("bchg_i", "BE", "0000 1000 01 ......", "bchg", &[]),
         ("bclr_i", "BE", "0000 1000 10 ......", "bclr", &[]),
         ("bset_i", "BE", "0000 1000 11 ......", "bset", &[]),
+        // C6: 分岐。disp8=0 は 16bit 変位の拡張語を読む（0xFF は
+        // byte 変位 -1。32bit 変位は 020 以降）。jmp/jsr の EA は
+        // 制御モードのみ。
+        // Ref: SPEC-M68K-PRM (Rev 1) §BRA/BSR/Bcc/JMP/JSR.
+        ("bra", "BR", "0110 0000 ........", "bra", &[("cc", WhereOp::Eq, 0)]),
+        ("bsr", "BR", "0110 0001 ........", "bsr", &[("cc", WhereOp::Eq, 1)]),
+        (
+            "bcc",
+            "BR",
+            "0110 .... ........",
+            "bcc",
+            &[("cc", WhereOp::Ne, 0), ("cc", WhereOp::Ne, 1)],
+        ),
+        ("jmp", "JF", "0100 1110 11 ......", "jmp", &[]),
+        ("jsr", "JF", "0100 1110 10 ......", "jsr", &[]),
     ];
     for (name, format, pattern, syntax, wheres) in arith {
         m.insns.push(Insn {
@@ -583,7 +615,13 @@ pub fn build_model() -> polyisa_isadl::Model {
                 })
                 .collect(),
             syntax: syntax.to_string(),
-            timing: "misc".to_string(),
+            // 分岐系は ctrl、それ以外は misc（サイクルモデルは S14-2）。
+            timing: if matches!(*name, "bra" | "bsr" | "bcc" | "jmp" | "jsr") {
+                "ctrl"
+            } else {
+                "misc"
+            }
+            .to_string(),
         });
     }
     m.insns.push(Insn {

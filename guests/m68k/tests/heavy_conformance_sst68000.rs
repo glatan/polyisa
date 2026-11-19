@@ -94,7 +94,13 @@ const FILES: &[&str] = &[
     "BTST",
     "BCHG",
     "BCLR",
-    "BSET", //
+    "BSET",
+    "Bcc",
+    "BSR",
+    "JMP",
+    "JSR",
+    "RTS",
+    "RTR", //
     "ANDItoCCR",
     "ANDItoSR",
     "ORItoCCR",
@@ -229,9 +235,13 @@ fn step_one(env: &mut BareEnv) -> Result<(), InterpExit> {
         return Err(InterpExit::Unimplemented(format!("ea {w:#06x}")));
     };
     env.step(|b| sem::exec(b, insn, w, u64::from(head)))?;
-    // 終了 pc の規約は「初期 pc + 命令長」（分岐時は step が env.pc に済）。
+    // 終了 pc の規約は「初期 pc + 命令長」。SST の pc はプリフェッチ
+    // 分（実行アドレス+4）を指すので、分岐時は step が置いた真の
+    // 分岐先に +4 する。
     if env.backend.ctrl == Ctrl::Fallthrough {
         env.pc = (u64::from(pc) + 2 + u64::from(ext) * 2) & 0xFFFF_FFFF;
+    } else {
+        env.pc = env.pc.wrapping_add(4);
     }
     env.backend.set(sem::pc_ref(), env.pc as u32);
     Ok(())
@@ -356,7 +366,7 @@ fn sst68000_conformance() {
             total += 1;
             // 命令語は実行前に掴んでおく（自己書き換えで変わりうる）。
             let head = head_insn(&env).ok();
-            let d = match step_one(&mut env) {
+            let mut d = match step_one(&mut env) {
                 Ok(()) => diff(&mut env, &t.fina),
                 // 例外配送は未接続。アドレスエラー等を起こすテストは
                 // 終了状態が例外スタックフレームを含むので比較できない。
@@ -368,7 +378,9 @@ fn sst68000_conformance() {
                         ea::insn_ext_words(insn, w)
                             .map(|ext| t.init.regs[18].wrapping_add(2 + ext * 2))
                     });
-                    if natural.is_some_and(|n| t.fina.regs[18] != n) {
+                    if natural.is_some_and(|n| t.fina.regs[18] != n)
+                        || (t.fina.regs[17] & 0x2000) != (t.init.regs[17] & 0x2000)
+                    {
                         exc += 1;
                         Vec::new()
                     } else {
@@ -377,6 +389,15 @@ fn sst68000_conformance() {
                 }
                 Err(e) => vec![format!("exit: {e:?}")],
             };
+            // Ok でも SST 側が例外配送を期待しているケース:
+            // 奇数 pc（次フェッチのアドレスエラー）、または fina.sr の
+            // S ビットが init と違う（例外でスーパーバイザ化）。
+            if !d.is_empty()
+                && (env.pc & 1 == 1 || (t.fina.regs[17] & 0x2000) != (t.init.regs[17] & 0x2000))
+            {
+                exc += 1;
+                d.clear();
+            }
             if !d.is_empty() {
                 diffs += 1;
                 if diffs <= 5 {

@@ -177,6 +177,18 @@ pub const fn insn_ext_words(insn: super::Insn, w: u64) -> Option<u32> {
             let size = 1u32 << qsz(w);
             ext_words(ea_mode(w), ea_reg(w), size)
         }
+        // 分岐: disp8=0 のみ 16bit 変位語を消費。
+        super::Insn::Bra | super::Insn::Bsr | super::Insn::Bcc => {
+            if w & 0xFF == 0 {
+                Some(1)
+            } else {
+                Some(0)
+            }
+        }
+        // jmp/jsr: 制御 EA の語数。
+        super::Insn::Jmp | super::Insn::Jsr => ext_words(ea_mode(w), ea_reg(w), 4),
+        // rts/rtr: 拡張語なし（F0 表に含めずここで扱う）。
+        super::Insn::Rts | super::Insn::Rtr => Some(0),
         // レジスタビット操作: EA のみ（Dn なら拡張語なし）。
         super::Insn::Btst | super::Insn::Bchg | super::Insn::Bclr | super::Insn::Bset => {
             ext_words(ea_mode(w), ea_reg(w), 1)
