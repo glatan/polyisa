@@ -1,9 +1,10 @@
 // Copyright (c) polyisa contributors
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! SPARC V8 試作の ISADL 記述。出典は SPEC-SPARC-V8 Version 8 (1992) である。
+//! SPARC の ISADL 記述。出典は SPEC-SPARC-V7、SPEC-SPARC-V8、
+//! SPEC-SPARC-V9 である。
 
 // Ref: SPEC-SPARC-V8 (Version 8).
-include!("spec/sparcv8.rs");
+include!("spec/sparc.rs");
 
 fn main() {
     println!("cargo::rerun-if-changed=spec/");
