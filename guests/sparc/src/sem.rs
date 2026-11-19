@@ -900,19 +900,29 @@ pub fn call<B: Backend>(b: &mut B, pc: u64, target: u64) -> Flow<B> {
 /// 不成立でも npc を進めるのは、遅延スロットが pc + 4 にあって
 /// commit が pc を npc に写すためで、書き換えないと遅延スロットの
 /// 命令を二度実行することになる。
-/// `a` が立っていて条件が成立したときは、遅延スロットを取り消す
-/// （annul）。
+/// `a` が立っているときの取り消し（annul）規則は 2 通りある。
+/// 条件分岐は不成立のときだけ遅延スロットを取り消し、成立したら
+/// `a` にかかわらず実行する。BA（cond=8）は常に成立するので
+/// `a` が立てば常に遅延スロットを取り消す。
 /// Ref: SPEC-SPARC-V8 (Version 8) §Bicc.
 pub fn bicc<B: Backend>(b: &mut B, a: u8, cond: u8, pc: u64, target: u64) -> Flow<B> {
-    let taken = cond_holds(b, cond);
+    let val = cond_val(b, cond);
+    let zero = b.konst::<W64>(0);
+    let taken = b.cmp::<W64>(Cmp::Ne, val, zero);
     let t = const_w64(b, target);
     let fall = const_w64(b, pc.wrapping_add(8));
     let s = b.select::<W64>(taken, t, fall);
     let npc = wmask(b, s);
     b.set(npc_ref(), npc);
     if a != 0 {
-        // 成立して分岐したときだけ、遅延スロットを取り消す。
-        b.if_then(taken, |bb| {
+        // BA は成立が確定しているので、annul の条件として `taken`
+        // （常に真）をそのまま使う。それ以外は不成立のときだけ。
+        let annul = if cond == 0b1000 {
+            taken
+        } else {
+            b.cmp::<W64>(Cmp::Eq, val, zero)
+        };
+        b.if_then(annul, |bb| {
             let one = bb.konst::<W64>(1);
             bb.set(annul_ref(), one);
             Ok(())
@@ -921,13 +931,12 @@ pub fn bicc<B: Backend>(b: &mut B, a: u8, cond: u8, pc: u64, target: u64) -> Flo
     Ok(())
 }
 
-/// 条件の評価。ICC は PSR の N(23) Z(22) V(21) C(20)。
-/// 返り値は `taken` の判定値。各条件は値演算で 0/1 を組み立てて
-/// 0 でないかを比較する。
+/// 条件の評価値。ICC は PSR の N(23) Z(22) V(21) C(20)。
+/// 返り値は 0/1 の値で、0 なら不成立。各条件は値演算で組み立てる。
 /// V9 の条件コード（%ccr）は TSTATE 側にあり、ここでは V7/V8 の
 /// ICC だけを読む。V9 の Bicc/FBfcc 差分は後続ステップで扱う。
 /// Ref: SPEC-SPARC-V8 (Version 8) §Instruction Descriptions (Bicc).
-fn cond_holds<B: Backend>(b: &mut B, cond: u8) -> B::B {
+fn cond_val<B: Backend>(b: &mut B, cond: u8) -> B::V<W64> {
     let psr = b.get(psr_ref());
     let p64 = b.zext::<W32, W64>(psr);
     let bit = |bb: &mut B, n: u64| -> B::V<W64> {
@@ -958,7 +967,7 @@ fn cond_holds<B: Backend>(b: &mut B, cond: u8) -> B::B {
     let bleu = b.or::<W64>(z, c);
     let g = b.and::<W64>(not_nxv, not_z);
     let gu = b.and::<W64>(not_c, not_z);
-    let val = match cond {
+    match cond {
         0b0000 => zero,    // bn
         0b0001 => z,       // be
         0b0010 => le,      // ble
@@ -975,8 +984,7 @@ fn cond_holds<B: Backend>(b: &mut B, cond: u8) -> B::B {
         0b1101 => not_c,   // bcc
         0b1110 => not_n,   // bpos
         _ => not_v,        // bvc
-    };
-    b.cmp::<W64>(Cmp::Ne, val, zero)
+    }
 }
 
 /// SAVE。旧ウィンドウで加算し、CWP を 1 減らしてから新ウィンドウへ書く。
@@ -1018,14 +1026,22 @@ pub fn unimp<B: Backend>(b: &mut B, imm22: u64) -> B::Exit {
     })
 }
 
-/// 遅延スロットのステップ。annul が 0 のときだけ `slot` を実行し、
-/// ビットを消してから commit する。
-pub fn delay_slot<B: Backend>(b: &mut B, slot: impl FnOnce(&mut B) -> Flow<B>) -> Flow<B> {
+/// 遅延スロット 1 命令ぶん。annul が 0 のときだけ `slot` を実行する。
+/// annul ビットは実行前に消費するため、スロットが制御転送命令の
+/// ときにその命令自身が立てる annul（DCTI couple）が残る。
+/// commit は呼び出し側が行う。
+pub fn delay_slot_exec<B: Backend>(b: &mut B, slot: impl FnOnce(&mut B) -> Flow<B>) -> Flow<B> {
     let annul = b.get(annul_ref());
     let zero = b.konst::<W64>(0);
     let run = b.cmp::<W64>(Cmp::Eq, annul, zero);
-    b.if_then(run, slot)?;
     b.set(annul_ref(), zero);
+    b.if_then(run, slot)
+}
+
+/// 遅延スロットのステップ。annul が 0 のときだけ `slot` を実行し、
+/// commit する。
+pub fn delay_slot<B: Backend>(b: &mut B, slot: impl FnOnce(&mut B) -> Flow<B>) -> Flow<B> {
+    delay_slot_exec(b, slot)?;
     commit(b)
 }
 

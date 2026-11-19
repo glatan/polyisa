@@ -148,6 +148,115 @@ fn ba_without_annul_runs_delay_slot() {
 }
 
 #[test]
+fn annulled_cond_branch_not_taken_skips_slot() {
+    let mut env = env();
+    env.backend.set(sem::pc_ref(), 0x1000);
+    env.backend.set(sem::npc_ref(), 0x1004);
+    // Z=0 なので be,a は不成立。遅延スロットは取り消される。
+    env.backend.set(sem::psr_ref(), 0);
+    env.step(|b| sem::bicc(b, 1, 1, 0x1000, 0x2000)).unwrap();
+    assert_eq!(env.backend.get(sem::annul_ref()), 1);
+    assert_eq!(env.backend.get(sem::npc_ref()), 0x1008);
+    env.step(|b| sem::delay_slot(b, |b| sem::sethi(b, Gpr(1), 1)))
+        .unwrap();
+    assert_eq!(g(&mut env, 1), 0);
+    assert_eq!(env.backend.get(sem::annul_ref()), 0);
+    assert_eq!(env.backend.get(sem::pc_ref()), 0x1008);
+    assert_eq!(env.backend.get(sem::npc_ref()), 0x100c);
+}
+
+#[test]
+fn annulled_cond_branch_taken_runs_slot() {
+    let mut env = env();
+    env.backend.set(sem::pc_ref(), 0x1000);
+    env.backend.set(sem::npc_ref(), 0x1004);
+    // Z=1 なので be,a は成立。成立時は a にかかわらずスロットを実行する。
+    env.backend.set(sem::psr_ref(), 1 << 22);
+    env.step(|b| sem::bicc(b, 1, 1, 0x1000, 0x2000)).unwrap();
+    assert_eq!(env.backend.get(sem::annul_ref()), 0);
+    assert_eq!(env.backend.get(sem::npc_ref()), 0x2000);
+    env.step(|b| sem::delay_slot(b, |b| sem::sethi(b, Gpr(1), 1)))
+        .unwrap();
+    assert_eq!(g(&mut env, 1), 0x400);
+    assert_eq!(env.backend.get(sem::pc_ref()), 0x2000);
+    assert_eq!(env.backend.get(sem::npc_ref()), 0x2004);
+}
+
+#[test]
+fn not_taken_cond_branch_runs_slot() {
+    let mut env = env();
+    env.backend.set(sem::pc_ref(), 0x1000);
+    env.backend.set(sem::npc_ref(), 0x1004);
+    // a=0 では不成立でも遅延スロットを実行し、pc+8 へ進む。
+    env.backend.set(sem::psr_ref(), 0);
+    env.step(|b| sem::bicc(b, 0, 1, 0x1000, 0x2000)).unwrap();
+    assert_eq!(env.backend.get(sem::annul_ref()), 0);
+    assert_eq!(env.backend.get(sem::npc_ref()), 0x1008);
+    env.step(|b| sem::delay_slot(b, |b| sem::sethi(b, Gpr(1), 1)))
+        .unwrap();
+    assert_eq!(g(&mut env, 1), 0x400);
+    assert_eq!(env.backend.get(sem::pc_ref()), 0x1008);
+    assert_eq!(env.backend.get(sem::npc_ref()), 0x100c);
+}
+
+#[test]
+fn call_writes_return_and_jumps() {
+    let mut env = env();
+    env.backend.set(sem::pc_ref(), 0x1000);
+    env.backend.set(sem::npc_ref(), 0x1004);
+    // call は戻りとして命令自身の pc を %o7 に書く。
+    env.step(|b| sem::call(b, 0x1000, 0x4000)).unwrap();
+    assert_eq!(g(&mut env, 15), 0x1000);
+    assert_eq!(env.backend.get(sem::npc_ref()), 0x4000);
+    env.step(|b| sem::delay_slot(b, |b| sem::sethi(b, Gpr(1), 1)))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::pc_ref()), 0x4000);
+    assert_eq!(env.backend.get(sem::npc_ref()), 0x4004);
+}
+
+#[test]
+fn jmpl_writes_return_and_jumps() {
+    let mut env = env();
+    env.backend.set(sem::pc_ref(), 0x1000);
+    env.backend.set(sem::npc_ref(), 0x1004);
+    env.backend.set(Gpr(1).state(), 0x3000);
+    // jmpl %g1+8, %g2。戻り（pc）を %g2 に書き npc は %g1+8。
+    env.step(|b| sem::jmpl(b, Gpr(2), Gpr(1), Src2::Imm(8), 0x1000))
+        .unwrap();
+    assert_eq!(g(&mut env, 2), 0x1000);
+    assert_eq!(env.backend.get(sem::npc_ref()), 0x3008);
+}
+
+#[test]
+fn ret_is_jmpl_to_i7_plus_8() {
+    let mut env = env();
+    env.backend.set(sem::pc_ref(), 0x1000);
+    env.backend.set(sem::npc_ref(), 0x1004);
+    // ret = jmpl %i7+8, %g0。cwp=0 では r31 が i7 に対応する。
+    env.backend.set(Gpr(31).state(), 0x5000);
+    env.step(|b| sem::jmpl(b, Gpr(0), Gpr(31), Src2::Imm(8), 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::npc_ref()), 0x5008);
+    env.step(|b| sem::delay_slot(b, |b| sem::sethi(b, Gpr(1), 1)))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::pc_ref()), 0x5008);
+}
+
+#[test]
+fn cti_in_delay_slot_keeps_its_annul() {
+    let mut env = env();
+    env.backend.set(sem::pc_ref(), 0x1000);
+    env.backend.set(sem::npc_ref(), 0x1004);
+    // 外側の ba と、遅延スロット内の ba,a（DCTI couple）。内側が
+    // 立てる annul は消費されず、次のスロットの判定に残る。
+    env.step(|b| sem::bicc(b, 0, 8, 0x1000, 0x2000)).unwrap();
+    env.step(|b| sem::delay_slot_exec(b, |bb| sem::bicc(bb, 1, 8, 0x1004, 0x3000)))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::annul_ref()), 1);
+    assert_eq!(env.backend.get(sem::npc_ref()), 0x3000);
+}
+
+#[test]
 fn save_maps_out_to_next_in() {
     let mut env = env();
     // cwp 0 の o0（見える番号 8）は物理番号 8。
