@@ -14,6 +14,7 @@
 
 pub mod ea;
 pub mod sem;
+pub mod timing;
 
 // ISADL モデルから生成した命令集合・デコード・逆アセンブルの殻。
 include!(concat!(env!("OUT_DIR"), "/generated.rs"));
