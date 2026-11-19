@@ -70,9 +70,9 @@ mod tests {
 
     #[test]
     fn insn_count() {
-        // F0 の固定ワード6件 + move/movea 5件 + moveq + C2 の14件
-        // + C3 の15件（or/and/eor 9、即値3、単項3）+ C4 の16件（シフトreg/mem）+ C5 の8件（ビット操作）+ C6 の5件（bra/bsr/bcc/jmp/jsr）+ C7 の2件（scc/dbcc）+ C8 の4件 + C9 の6件 + C10 の8件 + C11 の4件 + C12 の5件（bcd）。
-        assert_eq!(INSNS.len(), 99);
+        // F0 の固定ワード11件 + move/movea 5件 + moveq + C2 の14件
+        // + C3 の15件（or/and/eor 9、即値3、単項3）+ C4 の16件（シフトreg/mem）+ C5 の8件（ビット操作）+ C6 の5件（bra/bsr/bcc/jmp/jsr）+ C7 の2件（scc/dbcc）+ C8 の4件 + C9 の6件 + C10 の8件 + C11 の4件 + C12 の5件（bcd）+ C13 の4件（chk/move ccr|sr）。
+        assert_eq!(INSNS.len(), 108);
     }
 
     #[test]
@@ -84,7 +84,9 @@ mod tests {
         assert_eq!(decode(0x4E75, 16), Some(Insn::Rts));
         assert_eq!(decode(0x4E77, 16), Some(Insn::Rtr));
         assert_eq!(decode(0x4AFC, 16), Some(Insn::Illegal));
-        assert_eq!(decode(0xFFFF, 16), None);
+        assert_eq!(decode(0x4E76, 16), Some(Insn::Trapv));
+        assert_eq!(decode(0xA000, 16), Some(Insn::Linea));
+        assert_eq!(decode(0xFFFF, 16), Some(Insn::Linef));
     }
 
     #[test]

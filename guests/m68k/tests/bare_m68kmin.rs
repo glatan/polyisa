@@ -82,10 +82,10 @@ fn illegal_raises_vector4() {
 fn unimplemented_is_undefined() {
     let mut env = env();
     let e = env
-        .step(|b| sem::exec(b, Insn::Reset, 0x4E70, 0))
-        .expect_err("reset は未実装");
+        .step(|b| sem::exec(b, Insn::Stop, 0x4E72, 0))
+        .expect_err("stop は未実装");
     match e {
-        InterpExit::Exception(x) => assert_eq!(x.code, 0x4E70),
+        InterpExit::Exception(x) => assert_eq!(x.code, 0x4E72),
         other => panic!("unexpected exit: {other:?}"),
     }
 }
@@ -1969,4 +1969,247 @@ fn bcd_mem_predec() {
     assert_eq!(ea::insn_ext_words(Insn::Nbcd, 0x4800), Some(0));
     assert_eq!(ea::insn_ext_words(Insn::Nbcd, 0x4838), Some(1)); // abs.w
     assert_eq!(ea::insn_ext_words(Insn::Nbcd, 0x4839), Some(2)); // abs.l
+}
+
+// ---- C13: trap/trapv/chk/reset/linea/linef・move to/from ccr|sr ----
+
+#[test]
+fn c13_decode_spots() {
+    for w in 0x4E40..=0x4E4F {
+        assert_eq!(
+            polyisa_guest_m68k::decode(w, 16),
+            Some(Insn::Trap),
+            "{w:#06x}"
+        );
+    }
+    assert_eq!(polyisa_guest_m68k::decode(0x4E76, 16), Some(Insn::Trapv));
+    assert_eq!(polyisa_guest_m68k::decode(0x4E72, 16), Some(Insn::Stop));
+    assert_eq!(polyisa_guest_m68k::decode(0xA000, 16), Some(Insn::Linea));
+    assert_eq!(polyisa_guest_m68k::decode(0xAFFF, 16), Some(Insn::Linea));
+    assert_eq!(polyisa_guest_m68k::decode(0xF000, 16), Some(Insn::Linef));
+    assert_eq!(polyisa_guest_m68k::decode(0xFFFF, 16), Some(Insn::Linef));
+    // chk d0,d0: 0100 000 110 000 000
+    assert_eq!(polyisa_guest_m68k::decode(0x4180, 16), Some(Insn::Chk));
+    // move <ea>,ccr / <ea>,sr / sr,<ea>
+    assert_eq!(polyisa_guest_m68k::decode(0x44C0, 16), Some(Insn::Mv2ccr));
+    assert_eq!(polyisa_guest_m68k::decode(0x46C0, 16), Some(Insn::Mv2sr));
+    assert_eq!(polyisa_guest_m68k::decode(0x40C0, 16), Some(Insn::Mvfrsr));
+}
+
+#[test]
+fn trap_raises_vector32_plus_n() {
+    let mut env = env();
+    let e = env
+        .step(|b| sem::exec(b, Insn::Trap, 0x4E45, 0))
+        .expect_err("trap は例外");
+    match e {
+        // trap #5 → ベクタ 37。
+        InterpExit::Exception(x) => assert_eq!(x.code, 32 + 5),
+        other => panic!("unexpected exit: {other:?}"),
+    }
+}
+
+#[test]
+fn trapv_raises_only_when_v_set() {
+    // V=0 → 例外なし。
+    let mut env = env();
+    env.step(|b| sem::exec(b, Insn::Trapv, 0x4E76, 0)).unwrap();
+    // V=1 → ベクタ 7。
+    let mut env2 = crate::env();
+    env2.backend
+        .set(sem::ccr_ref(), (1 << sem::sr_bit::V) as u8);
+    let e = env2
+        .step(|b| sem::exec(b, Insn::Trapv, 0x4E76, 0))
+        .expect_err("V=1 の trapv は例外");
+    match e {
+        InterpExit::Exception(x) => assert_eq!(x.code, 7),
+        other => panic!("unexpected exit: {other:?}"),
+    }
+}
+
+#[test]
+fn linea_linef_raise_vectors_10_11() {
+    let mut env = env();
+    let e = env
+        .step(|b| sem::exec(b, Insn::Linea, 0xA123, 0))
+        .expect_err("linea は例外");
+    match e {
+        InterpExit::Exception(x) => assert_eq!(x.code, 10),
+        other => panic!("unexpected exit: {other:?}"),
+    }
+    let mut env2 = crate::env();
+    let e = env2
+        .step(|b| sem::exec(b, Insn::Linef, 0xF123, 0))
+        .expect_err("linef は例外");
+    match e {
+        InterpExit::Exception(x) => assert_eq!(x.code, 11),
+        other => panic!("unexpected exit: {other:?}"),
+    }
+}
+
+#[test]
+fn chk_pass_clears_nzvc() {
+    // chk #5,d0 = 0100 000 110 111 100 = 0x41FC（即値 EA 拡張語）。
+    let mut env = env_with_data(&[0x41FC, 0x0005], &[]);
+    env.backend.set(D(0).state(), 3);
+    env.backend.set(sem::ccr_ref(), 0x1F);
+    env.step(|b| sem::exec(b, Insn::Chk, 0x41FC, 0x1000))
+        .unwrap();
+    // 通過時は X のみ保持。
+    assert_eq!(env.backend.get(sem::ccr_ref()) & 0x1F, 1 << sem::sr_bit::X);
+}
+
+#[test]
+fn chk_trap_bound_and_negative() {
+    // d0=6 > bound 5 → ベクタ 6、N=0。
+    let mut env = env_with_data(&[0x41FC, 0x0005], &[]);
+    env.backend.set(D(0).state(), 6);
+    env.backend.set(sem::ccr_ref(), 0x1F);
+    let e = env
+        .step(|b| sem::exec(b, Insn::Chk, 0x41FC, 0x1000))
+        .expect_err("上限超過で例外");
+    match e {
+        InterpExit::Exception(x) => assert_eq!(x.code, 6),
+        other => panic!("unexpected exit: {other:?}"),
+    }
+    assert_eq!(env.backend.get(sem::ccr_ref()) & (1 << sem::sr_bit::N), 0);
+
+    // d0=-1 < 0 → ベクタ 6、N=1。
+    let mut env2 = env_with_data(&[0x41FC, 0x0005], &[]);
+    env2.backend.set(D(0).state(), 0xFFFF);
+    env2.backend.set(sem::ccr_ref(), 0);
+    let e = env2
+        .step(|b| sem::exec(b, Insn::Chk, 0x41FC, 0x1000))
+        .expect_err("負数で例外");
+    match e {
+        InterpExit::Exception(x) => assert_eq!(x.code, 6),
+        other => panic!("unexpected exit: {other:?}"),
+    }
+    assert_eq!(
+        env2.backend.get(sem::ccr_ref()) & (1 << sem::sr_bit::N),
+        1 << sem::sr_bit::N
+    );
+
+    // chk の An 宛（上限が An）は illegal。
+    let mut env3 = crate::env();
+    let e = env3
+        .step(|b| sem::exec(b, Insn::Chk, 0x4188, 0))
+        .expect_err("chk の An 上限は illegal");
+    match e {
+        InterpExit::Exception(x) => assert_eq!(x.code, 4),
+        other => panic!("unexpected exit: {other:?}"),
+    }
+}
+
+#[test]
+fn move_to_ccr_reads_word_writes_low5() {
+    // move (a0),ccr = 0100 0100 11 010 000 = 0x44D0。
+    // 実機は word 読み。下位 byte の 5bit のみ CCR へ。
+    let mut env = env_with_data(&[0x44D0], &[0x12, 0xBC]);
+    env.backend.set(A(0).state(), 0x4000);
+    env.backend.set(sem::ccr_ref(), 0x05);
+    env.step(|b| sem::exec(b, Insn::Mv2ccr, 0x44D0, 0x1000))
+        .unwrap();
+    // 0xBC & 0x1F = 0x1C（word 0x12BC の下位 byte）。
+    assert_eq!(env.backend.get(sem::ccr_ref()) & 0x1F, 0xBC & 0x1F);
+}
+
+#[test]
+fn move_from_sr_writes_sr() {
+    // move sr,(a0) = 0100 0000 11 010 000 = 0x40D0。
+    // 68000 ではユーザモード（S=0）でも実行可。
+    let mut env = env_with_data(&[0x40D0], &[0, 0]);
+    env.backend.set(A(0).state(), 0x4000);
+    env.backend.set(sem::sr_ref(), 0x001F);
+    env.step(|b| sem::exec(b, Insn::Mvfrsr, 0x40D0, 0x1000))
+        .unwrap();
+    let mut buf = [0u8; 2];
+    env.backend
+        .mem
+        .read(VirtAddr(0x4000), &mut buf, DRD)
+        .unwrap();
+    assert_eq!(u16::from_be_bytes(buf), 0x001F);
+}
+
+#[test]
+fn move_to_sr_requires_supervisor() {
+    // move (a0),sr = 0100 0110 11 010 000 = 0x46D0。
+    // ユーザモード → ベクタ 8。
+    let mut env = env_with_data(&[0x46D0], &[0x27, 0x00]);
+    env.backend.set(A(0).state(), 0x4000);
+    let e = env
+        .step(|b| sem::exec(b, Insn::Mv2sr, 0x46D0, 0x1000))
+        .expect_err("ユーザモードの move to sr は特権違反");
+    match e {
+        InterpExit::Exception(x) => assert_eq!(x.code, 8),
+        other => panic!("unexpected exit: {other:?}"),
+    }
+
+    // スーパーバイザ（S=1）→ sr 更新（0xA71F マスク）。
+    let mut env2 = env_with_data(&[0x46D0], &[0xFF, 0xFF]);
+    env2.backend.set(A(0).state(), 0x4000);
+    env2.backend.set(sem::sr_ref(), 0x2000);
+    env2.step(|b| sem::exec(b, Insn::Mv2sr, 0x46D0, 0x1000))
+        .unwrap();
+    assert_eq!(env2.backend.get(sem::sr_ref()), 0xA71F);
+}
+
+#[test]
+fn reset_requires_supervisor() {
+    // ユーザモード → ベクタ 8。
+    let mut env = env();
+    let e = env
+        .step(|b| sem::exec(b, Insn::Reset, 0x4E70, 0))
+        .expect_err("ユーザモードの reset は特権違反");
+    match e {
+        InterpExit::Exception(x) => assert_eq!(x.code, 8),
+        other => panic!("unexpected exit: {other:?}"),
+    }
+    // スーパーバイザ → 外部リセット（CPU 状態不変）で正常終了。
+    let mut env2 = crate::env();
+    env2.backend.set(sem::sr_ref(), 0x2000);
+    env2.step(|b| sem::exec(b, Insn::Reset, 0x4E70, 0)).unwrap();
+}
+
+#[test]
+fn c13_illegal_eas() {
+    // move <ea>,ccr / <ea>,sr の An 宛は illegal。
+    let mut env = env();
+    let e = env
+        .step(|b| sem::exec(b, Insn::Mv2ccr, 0x44C8, 0))
+        .expect_err("mv2ccr の An 宛は illegal");
+    match e {
+        InterpExit::Exception(x) => assert_eq!(x.code, 4),
+        other => panic!("unexpected exit: {other:?}"),
+    }
+    let mut env2 = crate::env();
+    let e = env2
+        .step(|b| sem::exec(b, Insn::Mv2sr, 0x46C8, 0))
+        .expect_err("mv2sr の An 宛は illegal");
+    match e {
+        InterpExit::Exception(x) => assert_eq!(x.code, 4),
+        other => panic!("unexpected exit: {other:?}"),
+    }
+    // move sr,<ea> の PC 相対・即値宛も illegal（0x40FA / 0x40FC）。
+    for w in [0x40FA, 0x40FC] {
+        let mut env3 = crate::env();
+        let e = env3
+            .step(|b| sem::exec(b, Insn::Mvfrsr, w, 0))
+            .expect_err("mvfrsr の非書換宛は illegal");
+        match e {
+            InterpExit::Exception(x) => assert_eq!(x.code, 4, "{w:#06x}"),
+            other => panic!("unexpected exit: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn chk_bound_equal_passes() {
+    // d0 == bound → 通過（NZVC=0）。
+    let mut env = env_with_data(&[0x41FC, 0x0005], &[]);
+    env.backend.set(D(0).state(), 5);
+    env.backend.set(sem::ccr_ref(), 0x1F);
+    env.step(|b| sem::exec(b, Insn::Chk, 0x41FC, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::ccr_ref()) & 0x1F, 1 << sem::sr_bit::X);
 }

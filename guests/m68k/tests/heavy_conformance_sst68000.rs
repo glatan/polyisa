@@ -128,6 +128,17 @@ const FILES: &[&str] = &[
     "ORItoSR",
     "EORItoCCR",
     "EORItoSR",
+    // C13: trap/chk/move to-from ccr|sr/reset/nop/linea/linef。
+    "CHK",
+    "MOVEtoCCR",
+    "MOVEtoSR",
+    "MOVEfromSR",
+    "NOP",
+    "RESET",
+    "TRAP",
+    "TRAPV",
+    "ILLEGAL_LINEA",
+    "ILLEGAL_LINEF",
 ];
 
 /// u32 のレジスタ列（d0-7, a0-6, usp, ssp, sr, pc）を生値で持つ。

@@ -5,7 +5,8 @@
 // 宣言する命令は、16ビット固定の実符号化（nop/reset/rts/rtr/rte/illegal）、
 // EA フィールドを持つ move/movea/moveq（C1）、算術・比較（C2）、
 // 論理・単項（C3）、シフト/ローテート（C4）、ビット操作（C5）、
-// 分岐・復帰（C6）、scc/dbcc（C7）、lea/pea/link/unlk（C8）、exg/swap/ext（C9）、movem/movep（C10）、mulu/muls/divu/divs（C11）、abcd/sbcd/nbcd（C12）。
+// 分岐・復帰（C6）、scc/dbcc（C7）、lea/pea/link/unlk（C8）、exg/swap/ext（C9）、movem/movep（C10）、mulu/muls/divu/divs（C11）、abcd/sbcd/nbcd（C12）、
+// trap/trapv/chk/reset/linea/linef・move to/from ccr|sr（C13）。
 // EA モードの解釈と拡張語の消費は `src/ea.rs`、意味論は `src/sem.rs`。
 // 出典は SPEC-M68K-PRM (M68000PM/AD Rev 1) である。
 // Ref: SPEC-M68K-PRM (Rev 1).
@@ -248,6 +249,12 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("rte", "0100111001110011", "rte", "ctrl"),
         ("rts", "0100111001110101", "rts", "ctrl"),
         ("rtr", "0100111001110111", "rtr", "ctrl"),
+        ("trapv", "0100111001110110", "trapv", "ctrl"),
+        ("trap", "010011100100....", "trap", "ctrl"),
+        ("stop", "0100111001110010", "stop", "ctrl"),
+        // A-line/F-line エミュレーション例外（ベクタ 10/11）。
+        ("linea", "1010............", "linea", "ctrl"),
+        ("linef", "1111............", "linef", "ctrl"),
     ];
     for (name, pattern, syntax, timing) in insns {
         m.insns.push(Insn {
@@ -820,6 +827,13 @@ pub fn build_model() -> polyisa_isadl::Model {
             &[("emode", WhereOp::Eq, 1)],
         ),
         ("nbcd", "JF", "0100 1000 00 ......", "nbcd", &[]),
+        // C13: chk/move to ccr|sr/move from sr。
+        // Ref: SPEC-M68K-PRM (Rev 1) §CHK, §MOVE to CCR/SR, §MOVE from SR.
+        ("chk", "JF", "0100 ... 110 ......", "chk", &[]),
+        // qsz=3 は not/clr/tst の where Ne 3 と対で排他を示す。
+        ("mv2ccr", "JF", "0100 0100 11 ......", "move", &[("qsz", WhereOp::Eq, 3)]),
+        ("mv2sr", "JF", "0100 0110 11 ......", "move", &[("qsz", WhereOp::Eq, 3)]),
+        ("mvfrsr", "JF", "0100 0000 11 ......", "move", &[("qsz", WhereOp::Eq, 3)]),
     ];
     for (name, format, pattern, syntax, wheres) in arith {
         m.insns.push(Insn {

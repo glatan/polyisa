@@ -189,6 +189,8 @@ pub const fn insn_ext_words(insn: super::Insn, w: u64) -> Option<u32> {
         super::Insn::Jmp | super::Insn::Jsr => ext_words(ea_mode(w), ea_reg(w), 4),
         // rts/rtr: 拡張語なし（F0 表に含めずここで扱う）。
         super::Insn::Rts | super::Insn::Rtr => Some(0),
+        // stop は直後に即値語 1 語を取る（意味論は C14）。
+        super::Insn::Stop => Some(1),
         // scc: EA のみ。dbcc: 変位語1つ。
         super::Insn::Scc => ext_words(ea_mode(w), ea_reg(w), 1),
         super::Insn::Dbcc | super::Insn::Link => Some(1),
@@ -207,6 +209,10 @@ pub const fn insn_ext_words(insn: super::Insn, w: u64) -> Option<u32> {
             Some(0)
         }
         super::Insn::Nbcd => ext_words(ea_mode(w), ea_reg(w), 1),
+        super::Insn::Trap | super::Insn::Trapv | super::Insn::Linea | super::Insn::Linef => Some(0),
+        super::Insn::Chk | super::Insn::Mv2ccr | super::Insn::Mv2sr | super::Insn::Mvfrsr => {
+            ext_words(ea_mode(w), ea_reg(w), 2)
+        }
         // movem はマスク語（pc+2）+ EA 拡張語、movep は変位語1つ。
         super::Insn::MovrmW | super::Insn::MovrmL | super::Insn::MrmemW | super::Insn::MrmemL => {
             match ext_words(ea_mode(w), ea_reg(w), 4) {

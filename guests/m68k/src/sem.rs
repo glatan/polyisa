@@ -258,6 +258,31 @@ pub fn exec<B: Backend>(b: &mut B, insn: super::Insn, w: u64, pc: u64) -> Flow<B
         super::Insn::SbcdR => bcd_reg(b, w, false),
         super::Insn::SbcdM => bcd_mem(b, w, pc, false),
         super::Insn::Nbcd => nbcd(b, w, pc),
+        super::Insn::Trap => Err(b.raise(GuestException {
+            kind: ExceptionKind::Trap,
+            // trap #n → ベクタ 32+n。
+            code: 32 + (w & 0xF),
+            addr: None,
+            in_delay_slot: false,
+        })),
+        super::Insn::Trapv => trapv(b),
+        super::Insn::Linea => Err(b.raise(GuestException {
+            kind: ExceptionKind::Trap,
+            code: 10,
+            addr: None,
+            in_delay_slot: false,
+        })),
+        super::Insn::Linef => Err(b.raise(GuestException {
+            kind: ExceptionKind::Trap,
+            code: 11,
+            addr: None,
+            in_delay_slot: false,
+        })),
+        super::Insn::Chk => chk(b, w, pc),
+        super::Insn::Mv2ccr => mv2ccr(b, w, pc),
+        super::Insn::Mv2sr => mv2sr(b, w, pc),
+        super::Insn::Mvfrsr => mvfrsr(b, w, pc),
+        super::Insn::Reset => reset(b),
         super::Insn::Illegal => Err(b.raise(GuestException {
             kind: ExceptionKind::Trap,
             // m68k の例外ベクタ番号 4（Illegal Instruction）。
@@ -2045,6 +2070,187 @@ fn bcd_mem<B: Backend>(b: &mut B, w: u64, pc: u64, add: bool) -> Flow<B> {
     };
     write_ea(b, &de, 1, res8)?;
     bcd_flags(b, res8, c, v);
+    Ok(())
+}
+
+/// C13: trapv。V 旗が立っていればベクタ 7。
+// Ref: SPEC-M68K-PRM (Rev 1) §TRAPV.
+fn trapv<B: Backend>(b: &mut B) -> Flow<B> {
+    let sr = b.get(sr_ref());
+    let vm = b.konst::<W32>(1 << sr_bit::V);
+    let vb = b.and(sr, vm);
+    let z = b.konst::<W32>(0);
+    let has_v = b.cmp(Cmp::Ne, vb, z);
+    b.if_then_else(
+        has_v,
+        |bb| {
+            Err(bb.raise(GuestException {
+                kind: ExceptionKind::Trap,
+                code: 7,
+                addr: None,
+                in_delay_slot: false,
+            }))
+        },
+        |_| Ok(()),
+    )
+}
+
+/// 特権違反（ベクタ 8）を発生させる。
+// Ref: SPEC-M68K-PRM (Rev 1) §Exception Processing.
+fn privilege<B: Backend>(b: &mut B) -> B::Exit {
+    b.raise(GuestException {
+        kind: ExceptionKind::Trap,
+        code: 8,
+        addr: None,
+        in_delay_slot: false,
+    })
+}
+
+/// S 旗が立っているかを返す。
+fn is_super<B: Backend>(b: &mut B) -> B::B {
+    let sr = b.get(sr_ref());
+    let sm = b.konst::<W32>(1 << sr_bit::S);
+    let sb = b.and(sr, sm);
+    let z = b.konst::<W32>(0);
+    b.cmp(Cmp::Ne, sb, z)
+}
+
+/// C13: reset。特権命令。ユーザモードではベクタ 8。
+/// S=1 では外部リセット線を下げるが、CPU 状態への影響はない。
+// Ref: SPEC-M68K-PRM (Rev 1) §RESET.
+fn reset<B: Backend>(b: &mut B) -> Flow<B> {
+    let sup = is_super(b);
+    b.if_then_else(sup, |_| Ok(()), |bb| Err(privilege(bb)))
+}
+
+/// C13: chk <ea>,Dn。Dn の下位 word を符号付きで上限と比較する。
+/// Dn<0 なら N=1 でベクタ 6、Dn>上限なら N=0 でベクタ 6。
+// Ref: SPEC-M68K-PRM (Rev 1) §CHK.
+fn chk<B: Backend>(b: &mut B, w: u64, pc: u64) -> Flow<B> {
+    let emode = ea::ea_mode(w);
+    let ereg = ea::ea_reg(w);
+    if emode == 1 {
+        return Err(illegal(b));
+    }
+    let dn = ea::dest_reg(w);
+    let (e, _n) = ea::eval(b, emode, ereg, 2, pc + 2)?;
+    let ub16 = read_ea(b, &e, 2)?;
+    let dw = {
+        let v = b.get(D(dn).state());
+        let m = b.konst::<W32>(0xFFFF);
+        b.and(v, m)
+    };
+    let ubw = b.trunc::<W32, W16>(ub16);
+    let ub = b.sext::<W16, W32>(ubw);
+    let d16 = b.trunc::<W32, W16>(dw);
+    let d = b.sext::<W16, W32>(d16);
+    let z = b.konst::<W32>(0);
+    let neg = b.cmp(Cmp::LtS, d, z);
+    let over = b.cmp(Cmp::GtS, d, ub);
+    // SST 実測: 通過時は NZVC=0（X のみ保持）。トラップ時は
+    // Dn<0 なら N=1、Dn>上限なら N=0 でベクタ 6。
+    b.if_then_else(
+        neg,
+        |bb| {
+            let ccr = bb.get(ccr_ref());
+            let nk = bb.konst::<W8>(1 << sr_bit::N);
+            let out = bb.or(ccr, nk);
+            bb.set(ccr_ref(), out);
+            Err(bb.raise(GuestException {
+                kind: ExceptionKind::Trap,
+                // m68k 例外ベクタ 6（CHK）。
+                code: 6,
+                addr: None,
+                in_delay_slot: false,
+            }))
+        },
+        |bb| {
+            bb.if_then_else(
+                over,
+                |cb| {
+                    let ccr = cb.get(ccr_ref());
+                    let nk = cb.konst::<W8>(!(1 << sr_bit::N));
+                    let out = cb.and(ccr, nk);
+                    cb.set(ccr_ref(), out);
+                    Err(cb.raise(GuestException {
+                        kind: ExceptionKind::Trap,
+                        code: 6,
+                        addr: None,
+                        in_delay_slot: false,
+                    }))
+                },
+                |cb| {
+                    let ccr = cb.get(ccr_ref());
+                    let xm = cb.konst::<W8>(1 << sr_bit::X);
+                    let out = cb.and(ccr, xm);
+                    cb.set(ccr_ref(), out);
+                    Ok(())
+                },
+            )
+        },
+    )
+}
+
+/// C13: move <ea>,ccr。ソース byte の下位5ビットを CCR へ。
+// Ref: SPEC-M68K-PRM (Rev 1) §MOVE to CCR.
+fn mv2ccr<B: Backend>(b: &mut B, w: u64, pc: u64) -> Flow<B> {
+    let emode = ea::ea_mode(w);
+    let ereg = ea::ea_reg(w);
+    if emode == 1 {
+        return Err(illegal(b));
+    }
+    // 実機は word 読み（奇数 EA でアドレスエラー）。下位 byte のみ使う。
+    let (e, _n) = ea::eval(b, emode, ereg, 2, pc + 2)?;
+    let v = read_ea(b, &e, 2)?;
+    let m = b.konst::<W32>(0x1F);
+    let v5 = b.and(v, m);
+    let ccr = b.get(ccr_ref());
+    let km = b.konst::<W8>(0xE0);
+    let keep = b.and(ccr, km);
+    let v8 = b.trunc::<W32, W8>(v5);
+    let out = b.or(keep, v8);
+    b.set(ccr_ref(), out);
+    Ok(())
+}
+
+/// C13: move <ea>,sr。特権命令。S=1 なら word を SR へ（実装ビットのみ）。
+// Ref: SPEC-M68K-PRM (Rev 1) §MOVE to SR.
+fn mv2sr<B: Backend>(b: &mut B, w: u64, pc: u64) -> Flow<B> {
+    let emode = ea::ea_mode(w);
+    let ereg = ea::ea_reg(w);
+    // An 上限の illegal は特権検査より先（エミュレータ慣習の
+    // デコード時判定に合わせる。実機の例外優先順位は SST 非検証）。
+    if emode == 1 {
+        return Err(illegal(b));
+    }
+    let sup = is_super(b);
+    b.if_then_else(
+        sup,
+        |bb| {
+            let (e, _n) = ea::eval(bb, emode, ereg, 2, pc + 2)?;
+            let v = read_ea(bb, &e, 2)?;
+            let m = bb.konst::<W32>(0xA71F);
+            let out = bb.and(v, m);
+            bb.set(sr_ref(), out);
+            Ok(())
+        },
+        |bb| Err(privilege(bb)),
+    )
+}
+
+/// C13: move sr,<ea>。68000 ではユーザでも可。実装ビットのみ書き出す。
+// Ref: SPEC-M68K-PRM (Rev 1) §MOVE from SR.
+fn mvfrsr<B: Backend>(b: &mut B, w: u64, pc: u64) -> Flow<B> {
+    let emode = ea::ea_mode(w);
+    let ereg = ea::ea_reg(w);
+    if emode == 1 || (emode == 7 && ereg >= 2) {
+        return Err(illegal(b));
+    }
+    let sr = b.get(sr_ref());
+    let m = b.konst::<W32>(0xA71F);
+    let v = b.and(sr, m);
+    let (e, _n) = ea::eval(b, emode, ereg, 2, pc + 2)?;
+    write_ea(b, &e, 2, v)?;
     Ok(())
 }
 
