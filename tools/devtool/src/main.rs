@@ -823,6 +823,7 @@ fn allowed_deps(pkg: &str) -> Option<&'static [&'static str]> {
             "polyisa-guest-power",
             "polyisa-guest-riscv",
             "polyisa-guest-s390",
+            "polyisa-guest-sparc",
             "polyisa-guest-wasm",
             "polyisa-guest-x86",
             "polyisa-host",

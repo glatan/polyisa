@@ -18,6 +18,8 @@ pub mod run_power;
 pub mod run_riscv;
 #[cfg(feature = "guest-s390")]
 pub mod run_s390;
+#[cfg(feature = "guest-sparc")]
+pub mod run_sparc;
 #[cfg(feature = "guest-wasm")]
 pub mod run_wasm;
 #[cfg(feature = "guest-x86")]

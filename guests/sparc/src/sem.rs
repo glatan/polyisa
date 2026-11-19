@@ -328,7 +328,8 @@ pub fn jmpl<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2, pc: u64) -> Flow<
 pub fn call<B: Backend>(b: &mut B, pc: u64, target: u64) -> Flow<B> {
     let ret = const_w64(b, pc);
     write(b, Gpr(15), ret);
-    let t = const_w64(b, target);
+    let k = const_w64(b, target);
+    let t = wmask(b, k);
     b.set(npc_ref(), t);
     Ok(())
 }
@@ -345,7 +346,8 @@ pub fn bicc<B: Backend>(b: &mut B, a: u8, cond: u8, pc: u64, target: u64) -> Flo
     let taken = cond_holds(b, cond);
     let t = const_w64(b, target);
     let fall = const_w64(b, pc.wrapping_add(8));
-    let npc = b.select::<W64>(taken, t, fall);
+    let s = b.select::<W64>(taken, t, fall);
+    let npc = wmask(b, s);
     b.set(npc_ref(), npc);
     if a != 0 {
         // 成立して分岐したときだけ、遅延スロットを取り消す。
@@ -471,7 +473,8 @@ pub fn commit<B: Backend>(b: &mut B) -> Flow<B> {
     let npc: B::V<W64> = b.get(npc_ref());
     b.set(pc_ref(), npc);
     let four = b.konst::<W64>(4);
-    let next = b.add::<W64>(npc, four);
+    let sum = b.add::<W64>(npc, four);
+    let next = wmask(b, sum);
     b.set(npc_ref(), next);
     Ok(())
 }
