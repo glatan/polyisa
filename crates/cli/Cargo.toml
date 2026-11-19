@@ -68,6 +68,10 @@ name = "heavy_program_i386_applet_probe"
 required-features = ["guest-x86"]
 
 [[test]]
+name = "heavy_program_m68k"
+required-features = ["guest-m68k"]
+
+[[test]]
 name = "heavy_program_mips"
 required-features = ["guest-mips"]
 

@@ -295,6 +295,38 @@ fn stack_grow(
 // Ref: SRC-LINUX (7.3), SPEC-ELF-GABI.
 #[cfg(feature = "guest-m68k")]
 pub fn run_elf_m68k(path: &str, argv: &[String]) -> Result<u64, String> {
+    run_elf_m68k_sys(path, argv, &mut polyisa_os_linux::m68k::sys::Linux::new())
+}
+
+/// 終了コードと標準出力の捕獲を返す。
+#[cfg(feature = "guest-m68k")]
+pub fn run_elf_m68k_captured(path: &str, argv: &[String]) -> Result<(u64, Vec<u8>), String> {
+    run_elf_m68k_captured_in(path, argv, &[])
+}
+
+/// 標準入力 `stdin` を与えて実行し、終了コードと標準出力の捕獲を返す。
+/// 標準エラーを検査するときは `run_elf_m68k_sys` で `sys.io.stderr`
+/// を読む。
+#[cfg(feature = "guest-m68k")]
+pub fn run_elf_m68k_captured_in(
+    path: &str,
+    argv: &[String],
+    stdin: &[u8],
+) -> Result<(u64, Vec<u8>), String> {
+    let mut sys = polyisa_os_linux::m68k::sys::Linux::new();
+    sys.stdin_buf = stdin.to_vec();
+    let code = run_elf_m68k_sys(path, argv, &mut sys)?;
+    Ok((code, sys.io.stdout))
+}
+
+/// `run_elf_m68k` に OS パーソナリティを差し込む形。テストが
+/// syscall の結果（`sys.io` 等）を検査する用途に使う。
+#[cfg(feature = "guest-m68k")]
+pub fn run_elf_m68k_sys(
+    path: &str,
+    argv: &[String],
+    sys: &mut polyisa_os_linux::m68k::sys::Linux,
+) -> Result<u64, String> {
     use polyisa_mem::PAGE_SIZE;
     use polyisa_sem::Backend as _;
 
@@ -400,7 +432,6 @@ pub fn run_elf_m68k(path: &str, argv: &[String]) -> Result<u64, String> {
         .map_err(|e| format!("stack write: {e:?}"))?;
     // A7 = 初期スタック。SR=0（ユーザモード）なので USP が A7 になる。
     env.backend.set(sem::Usp.state(), sp as u32);
-    let mut sys = polyisa_os_linux::m68k::sys::Linux::new();
     // /proc/self/exe の readlink は絶対パスを返す規約。静的 glibc の
     // _dl_get_origin が先頭が '/' であることを要求する。
     sys.exe_path = std::fs::canonicalize(path)
@@ -415,13 +446,7 @@ pub fn run_elf_m68k(path: &str, argv: &[String]) -> Result<u64, String> {
         top,
         limit: top - STACK_LIMIT,
     });
-    let out = run(
-        &mut env,
-        entry,
-        M68kModel::named("i68020"),
-        &mut sys,
-        growth,
-    );
+    let out = run(&mut env, entry, M68kModel::named("i68020"), sys, growth);
     match out {
         Outcome::Exit(code) => Ok(code),
         Outcome::Unimplemented { pc, word } => Err(format!("unimplemented at {pc:#x}: {word:#x}")),

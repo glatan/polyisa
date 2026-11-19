@@ -130,6 +130,10 @@ pub const TEST_REQUIREMENTS: &[TestBinary] = &[
         ],
     },
     TestBinary {
+        binary: "heavy_program_m68k",
+        needs: &[Req::Data(".testdata/bin-distro-m68k/busybox")],
+    },
+    TestBinary {
         binary: "heavy_program_mips",
         needs: &[Req::Tool("clang")],
     },

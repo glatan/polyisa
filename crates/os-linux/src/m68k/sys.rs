@@ -1226,11 +1226,28 @@ impl Linux {
             }
             m68k::STATX => {
                 // statx(dirfd, path, flags, mask, buf)
-                if args[0] as i32 != -100 {
-                    return fail_ret(E::EBADF);
-                }
+                let dirfd = args[0] as i32;
                 let lstat = args[2] & 0x100 != 0;
-                Disp::Ret(self.do_stat(env, None, Some(args[1]), args[4], lstat, true))
+                if dirfd == -100 {
+                    Disp::Ret(self.do_stat(env, None, Some(args[1]), args[4], lstat, true))
+                } else if dirfd >= 0 && args[2] & 0x1000 != 0 {
+                    // 実 fd + AT_EMPTY_PATH(0x1000) + 空 path は fd 自身
+                    // の fstat。dirfd 相対のパス解決は未対応。
+                    match self.read_cstr(env, args[1]) {
+                        Ok(p) if p.is_empty() => Disp::Ret(self.do_stat(
+                            env,
+                            Some(dirfd as u32),
+                            None,
+                            args[4],
+                            lstat,
+                            true,
+                        )),
+                        Ok(_) => fail_ret(E::ENOSYS),
+                        Err(e) => fail_ret(e),
+                    }
+                } else {
+                    fail_ret(E::EBADF)
+                }
             }
             // ---- アクセス・属性 ----
             m68k::ACCESS => {
