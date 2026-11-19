@@ -238,6 +238,51 @@ pub fn build_model() -> polyisa_isadl::Model {
             gpr("rs2", Access::Read),
         ],
     });
+    // Ticc 形式（rd 桁が cond。rs1 + src2 がトラップ番号）。
+    m.formats.push(Format {
+        name: "F3T".to_string(),
+        fields: vec!["cond".to_string(), "rs1".to_string(), "rs2".to_string()],
+        operands: vec![
+            val("cond"),
+            gpr("rs1", Access::Read),
+            gpr("rs2", Access::Read),
+        ],
+    });
+    // Ticc 即値形。
+    m.formats.push(Format {
+        name: "F3TI".to_string(),
+        fields: vec!["cond".to_string(), "rs1".to_string(), "simm13".to_string()],
+        operands: vec![
+            val("cond"),
+            gpr("rs1", Access::Read),
+            val("simm13"),
+        ],
+    });
+    // ASR・特権レジスタの読み出し形（rd のみ。rs1 桁が ASR 番号）。
+    m.formats.push(Format {
+        name: "F3ASRRD".to_string(),
+        fields: vec!["rd".to_string()],
+        operands: vec![gpr("rd", Access::Write)],
+    });
+    // ASR・特権レジスタの書き込み・制御形（rd 桁が ASR 番号）。
+    // rett もこの形で、実引数は rs1 + src2。
+    m.formats.push(Format {
+        name: "F3ASWR".to_string(),
+        fields: vec!["rs1".to_string(), "rs2".to_string()],
+        operands: vec![gpr("rs1", Access::Read), gpr("rs2", Access::Read)],
+    });
+    // 書き込み・制御の即値形。
+    m.formats.push(Format {
+        name: "F3ASWI".to_string(),
+        fields: vec!["rs1".to_string(), "simm13".to_string()],
+        operands: vec![gpr("rs1", Access::Read), val("simm13")],
+    });
+    // オペランドなし（done/retry）。
+    m.formats.push(Format {
+        name: "F3NONE".to_string(),
+        fields: vec![],
+        operands: vec![],
+    });
 
     // 骨格の命令集合。命令群は SP5 以降で足す。ここでは各形式を
     // 一通りデコードできる組を宣言する。
@@ -340,8 +385,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("swap", "F3SR", "11 ..... 001111 ..... 0 00000000 .....", "swap [{rs1} + {rs2}], {rd}", "load", ""),
         ("swap_i", "F3SI", "11 ..... 001111 ..... 1 .............", "swap [{rs1} + {simm13}], {rd}", "load", ""),
         // ASI 指定形（i=0 のみ、asi フィールドを持つ。V8 では特権命令。
-        // 空間選択と特権トラップの経路は SP8 で扱う。ここでは通常の
-        // アドレス空間へのアクセスとして実行する）。
+        // 特権チェックは SP8 の意味論が行い、アドレス空間の選択は
+        // 後続ステップで扱う。ここでは通常の空間へのアクセスに畳む）。
         ("lda", "F3AR", "11 ..... 010000 ..... 0 ........ .....", "lda [{rs1} + {rs2}] {asi}, {rd}", "load", ""),
         ("lduba", "F3AR", "11 ..... 010001 ..... 0 ........ .....", "lduba [{rs1} + {rs2}] {asi}, {rd}", "load", ""),
         ("lduha", "F3AR", "11 ..... 010010 ..... 0 ........ .....", "lduha [{rs1} + {rs2}] {asi}, {rd}", "load", ""),
@@ -360,6 +405,38 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("save_i", "F3I", "10 ..... 111100 ..... 1 .............", "save {rs1}, {simm13}, {rd}", "alu", ""),
         ("restore", "F3R", "10 ..... 111101 ..... 0 00000000 .....", "restore {rs1}, {rs2}, {rd}", "alu", ""),
         ("restore_i", "F3I", "10 ..... 111101 ..... 1 .............", "restore {rs1}, {simm13}, {rd}", "alu", ""),
+        // Ticc。rd 桁は cond（4 ビット、bit29 は予約 0）。
+        // trap type は 128 + ((rs1 + src2) & 0x7f)。V9 では Tcc で
+        // 0x100 + N になる（意味論側でモデル判定する）。
+        ("ticc", "F3T", "10 0.... 111010 ..... 0 00000000 .....", "t{cond} {rs1} + {rs2}", "trap", ""),
+        ("ticc_i", "F3TI", "10 0.... 111010 ..... 1 .............", "t{cond} {rs1} + {simm13}", "trap", ""),
+        // ユーザ ASR。V8 の %y と、V9 の %ccr・%pc。
+        ("rdy", "F3ASRRD", "10 ..... 101000 00000 0 00000000 00000", "rd %y, {rd}", "misc", ""),
+        ("wry", "F3ASWR", "10 00000 110000 ..... 0 00000000 .....", "wr {rs1}, {rs2}, %y", "misc", ""),
+        ("wry_i", "F3ASWI", "10 00000 110000 ..... 1 .............", "wr {rs1}, {simm13}, %y", "misc", ""),
+        ("rdccr", "F3ASRRD", "10 ..... 101000 00010 0 00000000 00000", "rd %ccr, {rd}", "misc", "v9"),
+        ("wrccr", "F3ASWR", "10 00010 110000 ..... 0 00000000 .....", "wr {rs1}, {rs2}, %ccr", "misc", "v9"),
+        ("wrccr_i", "F3ASWI", "10 00010 110000 ..... 1 .............", "wr {rs1}, {simm13}, %ccr", "misc", "v9"),
+        ("rdpc", "F3ASRRD", "10 ..... 101000 00101 0 00000000 00000", "rd %pc, {rd}", "misc", "v9"),
+        // V8 の特権命令。ユーザーモードでは privileged_instruction
+        // トラップの経路だけを実装する（ウィンドウ制御レジスタや
+        // トラップ復帰の実体は扱わない）。rett は遅延スロットを持つが、
+        // トラップが先に起きるので実行ループからは通常命令に見える。
+        // これらは V9 の saved/restored/return/flushw/rdpr/wrpr と
+        // 符号化が衝突するので v9 ではデコードしない。
+        ("rdpsr", "F3ASRRD", "10 ..... 101001 00000 0 00000000 00000", "rd %psr, {rd}", "trap", "!v9"),
+        ("rdwim", "F3ASRRD", "10 ..... 101010 00000 0 00000000 00000", "rd %wim, {rd}", "trap", "!v9"),
+        ("rdtbr", "F3ASRRD", "10 ..... 101011 00000 0 00000000 00000", "rd %tbr, {rd}", "trap", "!v9"),
+        ("wrpsr", "F3ASWR", "10 00000 110001 ..... 0 00000000 .....", "wr {rs1}, {rs2}, %psr", "trap", "!v9"),
+        ("wrpsr_i", "F3ASWI", "10 00000 110001 ..... 1 .............", "wr {rs1}, {simm13}, %psr", "trap", "!v9"),
+        ("wrwim", "F3ASWR", "10 00000 110010 ..... 0 00000000 .....", "wr {rs1}, {rs2}, %wim", "trap", "!v9"),
+        ("wrwim_i", "F3ASWI", "10 00000 110010 ..... 1 .............", "wr {rs1}, {simm13}, %wim", "trap", "!v9"),
+        ("wrtbr", "F3ASWR", "10 00000 110011 ..... 0 00000000 .....", "wr {rs1}, {rs2}, %tbr", "trap", "!v9"),
+        ("wrtbr_i", "F3ASWI", "10 00000 110011 ..... 1 .............", "wr {rs1}, {simm13}, %tbr", "trap", "!v9"),
+        ("rett", "F3ASWR", "10 00000 111001 ..... 0 00000000 .....", "rett {rs1} + {rs2}", "trap", "!v9"),
+        ("rett_i", "F3ASWI", "10 00000 111001 ..... 1 .............", "rett {rs1} + {simm13}", "trap", "!v9"),
+        ("done", "F3NONE", "10 00000 111110 00000 0 00000000 00000", "done", "trap", "v9"),
+        ("retry", "F3NONE", "10 00001 111110 00000 0 00000000 00000", "retry", "trap", "v9"),
     ];
     for (name, format, pattern, syntax, timing, feat) in insns {
         m.insns.push(Insn {
@@ -368,6 +445,10 @@ pub fn build_model() -> polyisa_isadl::Model {
             pattern: Pattern::parse(pattern).expect("valid pattern"),
             when: if feat.is_empty() {
                 Pred::True
+            } else if let Some(neg) = feat.strip_prefix('!') {
+                // "!v9" のように否定指定すると、その feature がない
+                // モデルでのみデコードする（V8 専用の特権命令用）。
+                Pred::Not(Box::new(Pred::Flag(neg.to_string())))
             } else {
                 Pred::Flag((*feat).to_string())
             },

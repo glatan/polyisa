@@ -519,6 +519,78 @@ mod tests {
         assert_eq!(g(&mut env, 2), 0);
     }
 
+    /// トラップ番号を `tt` から読むハンドラ。番号は実行時値なので
+    /// 例外の code ではなく TBR.tt 相当の状態フィールドに積まれる。
+    struct TtSys;
+
+    impl TrapHandler for TtSys {
+        fn handle_trap(&mut self, env: &mut BareEnv, _code: u32) -> TrapOutcome {
+            let tt = env.backend.get(sem::tt_ref());
+            TrapOutcome::Exit(tt as u32)
+        }
+    }
+
+    #[test]
+    fn ta_passes_trap_number_through_tt() {
+        // ta 0x10。tt に 0x80 + 0x10 が積まれてハンドラへ渡る。
+        let mut env = env_at(0x1000, &[0x91d0_2010]);
+        let mut sys = TtSys;
+        match run(&mut env, 0x1000, SparcModel::v8(), &mut sys) {
+            Outcome::Exit(code) => assert_eq!(code, 0x90),
+            o => panic!("unexpected outcome: {o:?}"),
+        }
+    }
+
+    #[test]
+    fn ticc_not_taken_continues() {
+        // ICC=0 で te は不成立。次の命令へ進む。
+        let mut env = env_at(
+            0x1000,
+            &[
+                0x83d0_2010, // te 0x10（cond=1 不成立）
+                0x0300_0001, // sethi 1,%g1
+                0x0000_0000, // unimp
+            ],
+        );
+        let mut sys = NoSys;
+        match run(&mut env, 0x1000, SparcModel::v8(), &mut sys) {
+            Outcome::Unimplemented { pc, .. } => assert_eq!(pc, 0x1008),
+            o => panic!("unexpected outcome: {o:?}"),
+        }
+        assert_eq!(g(&mut env, 1), 0x400);
+    }
+
+    #[test]
+    fn wry_rdy_round_trip_in_loop() {
+        // wry で %y を書き rdy で読む。
+        let mut env = env_at(
+            0x1000,
+            &[
+                0x0300_1234, // sethi 0x1234,%g1
+                0x8180_6fff, // wr %g1, 0xfff, %y（0x48d000 ^ 0xfff）
+                0x8540_0000, // rd %y, %g2
+                0x0000_0000, // unimp
+            ],
+        );
+        let mut sys = NoSys;
+        match run(&mut env, 0x1000, SparcModel::v8(), &mut sys) {
+            Outcome::Unimplemented { pc, .. } => assert_eq!(pc, 0x100c),
+            o => panic!("unexpected outcome: {o:?}"),
+        }
+        assert_eq!(g(&mut env, 2), 0x0048_dfff);
+    }
+
+    #[test]
+    fn rdpsr_traps_in_user_mode() {
+        // rd %psr, %g5 は特権命令。ユーザーモードでは tt=3 でハンドラへ。
+        let mut env = env_at(0x1000, &[0x8b48_0000]);
+        let mut sys = TtSys;
+        match run(&mut env, 0x1000, SparcModel::v8(), &mut sys) {
+            Outcome::Exit(code) => assert_eq!(code, 3),
+            o => panic!("unexpected outcome: {o:?}"),
+        }
+    }
+
     #[test]
     fn dcti_couple_inner_annul_skips_its_slot() {
         // ba 0x1F00; ba,a 0x2000。内側の annul で 0x1008 は取り消され、

@@ -690,14 +690,136 @@ fn swap_exchanges_word() {
 fn exec_decodes_asi_load() {
     let mut env = env();
     // lduba [%g1 + %g0] %asi, %g3 の命令語（op3=010001, i=0,
-    // asi=0x0a）。SP8 までは ASI を通常空間として実行する。
+    // asi=0x0a）。ASI 形は特権命令なので PSR.S を立てて実行する。
+    // アドレス空間の選択は後続ステップまで通常空間に畳まれる。
     let word: u32 = (0b11 << 30) | (3 << 25) | (0b010001 << 19) | (1 << 14) | (0x0a << 5);
     let insn = polyisa_guest_sparc::decode(u128::from(word), 32).unwrap();
     assert_eq!(insn, polyisa_guest_sparc::Insn::Lduba);
+    env.backend.set(sem::psr_ref(), 1 << 7);
     env.backend.set(Gpr(1).state(), 0x600);
     env.backend.set(Gpr(2).state(), 0xab);
     env.step(|b| sem::stb(b, Gpr(2), Gpr(1), Src2::Reg(Gpr(0))))
         .unwrap();
     env.step(|b| sem::exec(b, insn, word, 0)).unwrap();
     assert_eq!(g(&mut env, 3), 0xab);
+}
+
+#[test]
+fn asi_in_user_mode_traps() {
+    let mut env = env();
+    // PSR.S=0 のユーザーモードで ASI 形を実行すると
+    // privileged_instruction（tt=3, code=3）になる。
+    let word: u32 = (0b11 << 30) | (3 << 25) | (0b010001 << 19) | (1 << 14) | (0x0a << 5);
+    let insn = polyisa_guest_sparc::decode(u128::from(word), 32).unwrap();
+    env.backend.set(sem::psr_ref(), 0);
+    let r = env.step(|b| sem::exec(b, insn, word, 0));
+    assert!(r.is_err());
+    assert_eq!(env.backend.get(sem::tt_ref()), 3);
+}
+
+#[test]
+fn ticc_taken_sets_tt_and_traps() {
+    let mut env = env();
+    // Z=1 で te は成立。trap 番号は 0x80 + ((rs1 + operand2) & 0x7f)。
+    env.backend.set(sem::psr_ref(), 1 << 22);
+    env.backend.set(Gpr(1).state(), 0x100);
+    let r = env.step(|b| sem::ticc(b, 1, Gpr(1), Src2::Imm(0x10)));
+    assert!(r.is_err());
+    assert_eq!(env.backend.get(sem::tt_ref()), 0x90);
+}
+
+#[test]
+fn ticc_uses_v9_trap_type_on_word64() {
+    let mut env = env();
+    // word64（V9）では trap type は 0x100 + N。
+    env.backend.set_param::<polyisa_guest_sparc::Word64Param>(1);
+    let r = env.step(|b| sem::ticc(b, 8, Gpr(0), Src2::Imm(0x10)));
+    assert!(r.is_err());
+    assert_eq!(env.backend.get(sem::tt_ref()), 0x110);
+}
+
+#[test]
+fn privileged_uses_v9_opcode_trap_type_on_word64() {
+    let mut env = env();
+    // word64（V9）の特権命令は privileged_opcode=0x11。
+    env.backend.set_param::<polyisa_guest_sparc::Word64Param>(1);
+    let r = env.step(|b| Err::<(), _>(sem::privileged(b)));
+    assert!(r.is_err());
+    assert_eq!(env.backend.get(sem::tt_ref()), 0x11);
+}
+
+#[test]
+fn ticc_not_taken_is_nop() {
+    let mut env = env();
+    // Z=0 で te は不成立。tt は変わらず例外も起きない。
+    env.backend.set(sem::psr_ref(), 0);
+    env.step(|b| sem::ticc(b, 1, Gpr(1), Src2::Imm(0x10)))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::tt_ref()), 0);
+}
+
+#[test]
+fn wry_then_rdy_round_trip() {
+    let mut env = env();
+    env.backend.set(Gpr(1).state(), 0xdead_beef);
+    // wr %g1, 0xfff, %y。書き込みは XOR。Y は 32 ビット。
+    env.step(|b| sem::wry(b, Gpr(1), Src2::Imm(0xfff))).unwrap();
+    assert_eq!(env.backend.get(sem::y_ref()), 0xdead_b110);
+    env.step(|b| sem::rdy(b, Gpr(2))).unwrap();
+    assert_eq!(g(&mut env, 2), 0xdead_b110);
+}
+
+#[test]
+fn wrccr_then_rdccr_round_trip() {
+    let mut env = env();
+    env.backend.set(Gpr(1).state(), 0x1ff);
+    // wr %g1, %g0, %ccr。下位 8 ビットだけが入る。
+    env.step(|b| sem::wrccr(b, Gpr(1), Src2::Reg(Gpr(0))))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::ccr_ref()), 0xff);
+    env.step(|b| sem::rdccr(b, Gpr(2))).unwrap();
+    assert_eq!(g(&mut env, 2), 0xff);
+}
+
+#[test]
+fn rdpc_reads_own_pc() {
+    let mut env = env();
+    env.step(|b| sem::rdpc(b, Gpr(1), 0x3000)).unwrap();
+    assert_eq!(g(&mut env, 1), 0x3000);
+}
+
+#[test]
+fn privileged_insn_traps() {
+    let mut env = env();
+    // rd %psr, %g5（op3=101001）。特権違反で tt=3, code=3。
+    let word: u32 = (0b10 << 30) | (5 << 25) | (0b101001 << 19);
+    let insn = polyisa_guest_sparc::decode(u128::from(word), 32).unwrap();
+    assert_eq!(insn, polyisa_guest_sparc::Insn::Rdpsr);
+    let r = env.step(|b| sem::exec(b, insn, word, 0));
+    assert!(r.is_err());
+    assert_eq!(env.backend.get(sem::tt_ref()), 3);
+}
+
+#[test]
+fn rett_in_user_mode_traps() {
+    let mut env = env();
+    // rett %g1 + %g0（op3=111001, i=0）。ユーザーモードではトラップ。
+    let word: u32 = (0b10 << 30) | (0b111001 << 19) | (1 << 14);
+    let insn = polyisa_guest_sparc::decode(u128::from(word), 32).unwrap();
+    assert_eq!(insn, polyisa_guest_sparc::Insn::Rett);
+    let r = env.step(|b| sem::exec(b, insn, word, 0));
+    assert!(r.is_err());
+    assert_eq!(env.backend.get(sem::tt_ref()), 3);
+}
+
+#[test]
+fn ta_imm_decodes_and_traps() {
+    let mut env = env();
+    // ta 0x10（cond=8 常に成立、i=1, rs1=0, imm=0x10）。
+    let word: u32 = (0b10 << 30) | (8 << 25) | (0b111010 << 19) | (1 << 13) | 0x10;
+    let insn = polyisa_guest_sparc::decode(u128::from(word), 32).unwrap();
+    assert_eq!(insn, polyisa_guest_sparc::Insn::TiccI);
+    let r = env.step(|b| sem::exec(b, insn, word, 0));
+    assert!(r.is_err());
+    assert_eq!(env.backend.get(sem::tt_ref()), 0x90);
 }

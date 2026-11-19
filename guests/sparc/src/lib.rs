@@ -4,7 +4,10 @@
 //!
 //! `CpuState` はグローバル 8 本とウィンドウファイル（最大 32 枚 ×
 //! 16 本）の整数レジスタ、浮動小数点レジスタ、PC/nPC、CWP、
-//! PSR（V7/V8）と TSTATE（V9）、Y、FSR、GSR を持つ。見える
+//! PSR（V7/V8）と TSTATE（V9）、Y、FSR、GSR、TICK に加え、
+//! トラップ種別 `tt`（TBR の tt フィールド相当）と V9 の %ccr を
+//! 持つ。`tt` は実行時のトラップ番号を運ぶ状態で、V8 モデルでは
+//! V8 の、V9 モデルでは V9 の trap type が入る。見える
 //! レジスタ番号 r8-r31 の物理位置は CWP と `nwindows` パラメータで
 //! 決まる。遅延スロットは pc/npc の組で表し、分岐の決定と遅延
 //! スロットの実行を分ける。
@@ -72,6 +75,12 @@ pub struct CpuState {
     pub gsr: u64,
     /// V9 の %tick の基準（仮想時刻は実行ループが読む）。
     pub tick: u64,
+    /// トラップ種別（TBR の tt フィールド相当）。ticc や内部例外が
+    /// トラップ番号をここへ積み、OS パーソナリティがベクタ分岐に使う。
+    pub tt: u64,
+    /// V9 の条件コードレジスタ（%ccr）。下位 4 ビットが ICC、
+    /// 上位 4 ビットが XCC。V7/V8 では PSR の ICC を使う。
+    pub ccr: u64,
 }
 
 impl Default for CpuState {
@@ -89,6 +98,8 @@ impl Default for CpuState {
             fsr: 0,
             gsr: 0,
             tick: 0,
+            tt: 0,
+            ccr: 0,
         }
     }
 }
@@ -126,12 +137,14 @@ mod tests {
         assert_eq!(core::mem::offset_of!(CpuState, fsr), REG_FILE * 8 + 39 * 8);
         assert_eq!(core::mem::offset_of!(CpuState, gsr), REG_FILE * 8 + 40 * 8);
         assert_eq!(core::mem::offset_of!(CpuState, tick), REG_FILE * 8 + 41 * 8);
+        assert_eq!(core::mem::offset_of!(CpuState, tt), REG_FILE * 8 + 42 * 8);
+        assert_eq!(core::mem::offset_of!(CpuState, ccr), REG_FILE * 8 + 43 * 8);
     }
 
     #[test]
     fn insn_count() {
         // 骨格の命令集合（整数演算・load/store 全サイズ・ASI 形・分岐）。
-        assert_eq!(INSNS.len(), 110);
+        assert_eq!(INSNS.len(), 132);
     }
 
     #[test]
@@ -154,6 +167,38 @@ mod tests {
         assert_eq!(decode(0x8200_6003, 32), Some(Insn::AddI));
         assert_eq!(decode(0x81e8_2000, 32), Some(Insn::RestoreI));
         assert_eq!(decode(0xffff_ffff, 32), None);
+    }
+
+    #[test]
+    fn decode_v9_excludes_v8_privileged() {
+        // V8 の特権命令は saved/restored/return/flushw/rdpr/wrpr と
+        // 符号化が衝突するので、v9 feature ではデコードしない。
+        // Ref: SPEC-SPARC-V9 §Privileged Instructions.
+        assert_eq!(
+            decode_model_ex(0x81c8_0000, 32, false, FEAT_V7 | FEAT_V8),
+            Some(Insn::Rett)
+        );
+        assert_eq!(
+            decode_model_ex(0x81c8_0000, 32, true, FEAT_V7 | FEAT_V8 | FEAT_V9),
+            None
+        );
+        assert_eq!(
+            decode_model_ex(0x8148_0000, 32, true, FEAT_V7 | FEAT_V8 | FEAT_V9),
+            None
+        );
+        assert_eq!(
+            decode_model_ex(0x8148_0000, 32, false, FEAT_V7 | FEAT_V8),
+            Some(Insn::Rdpsr)
+        );
+        // v9 ゲート側（rdccr/rdpc）は逆に v9 でのみデコードする。
+        assert_eq!(
+            decode_model_ex(0x8140_8000, 32, true, FEAT_V7 | FEAT_V8 | FEAT_V9),
+            Some(Insn::Rdccr)
+        );
+        assert_eq!(
+            decode_model_ex(0x8140_8000, 32, false, FEAT_V7 | FEAT_V8),
+            None
+        );
     }
 
     #[test]

@@ -104,6 +104,17 @@ pub fn tick_ref() -> StateRef<W64> {
     StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, tick))
 }
 
+/// トラップ種別（TBR.tt 相当）を指す。OS パーソナリティが
+/// トラップ番号を読む場所。
+pub fn tt_ref() -> StateRef<W64> {
+    StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, tt))
+}
+
+/// V9 の %ccr を指す。
+pub fn ccr_ref() -> StateRef<W64> {
+    StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, ccr))
+}
+
 fn reg_array() -> StateArray<W64> {
     StateArray::<W64>::from_layout(core::mem::offset_of!(CpuState, g), 8)
 }
@@ -430,7 +441,7 @@ fn mul_common<B: Backend>(
 /// 除算の共通処理。被除数は {Y, rs1} の 64 ビット。商を rd に書く。
 /// 仕様では除算後の Y は不定だが、本実装は剰余を格納する実装任意の
 /// 選択肢を取る。`signed` で SDIV/UDIV を分ける。0 除算は division by
-/// zero トラップ（tt = 0x2A）。`cc` 形は N,Z を商から、V を商の
+/// zero トラップ（V8 の 0x2a、V9 の 0x28）。`cc` 形は N,Z を商から、V を商の
 /// オーバーフローから更新し、C を 0 にする。
 /// Ref: SPEC-SPARC-V8 (Version 8) §UDIV, §SDIV, §UDIVcc, §SDIVcc.
 fn div_common<B: Backend>(
@@ -445,10 +456,15 @@ fn div_common<B: Backend>(
     let dv = b.trunc::<W64, W32>(yv);
     let zero = b.konst::<W32>(0);
     let isz = b.cmp::<W32>(Cmp::Eq, dv, zero);
+    let v9 = b.param::<super::Word64Param>();
+    let code = if v9 { 0x28 } else { 0x2a };
     b.if_then(isz, |bb| {
+        // division_by_zero。tt は V8 の 0x2a、V9 の 0x28。
+        let tt = bb.konst::<W64>(code);
+        bb.set(tt_ref(), tt);
         Err(bb.raise(polyisa_sem::GuestException {
             kind: polyisa_sem::ExceptionKind::Trap,
-            code: 0x2A,
+            code,
             addr: None,
             in_delay_slot: false,
         }))
@@ -989,8 +1005,10 @@ fn cond_val<B: Backend>(b: &mut B, cond: u8) -> B::V<W64> {
 
 /// SAVE。旧ウィンドウで加算し、CWP を 1 減らしてから新ウィンドウへ書く。
 /// ウィンドウあふれの検出は OS パーソナリティが再現するため、
-/// ここではファイル内を巡回するだけである。
-/// Ref: SPEC-SPARC-V8 (Version 8) §SAVE.
+/// ここではファイル内を巡回するだけである。V9 では CWP の進行
+/// 方向が逆（SAVE で増加）だが、本実装は全モデルで V8 の方向を
+/// 採る。ユーザーモードでは CWP を読めないので観測差はない。
+/// Ref: SPEC-SPARC-V8 (Version 8) §SAVE; SPEC-SPARC-V9 App. E.
 pub fn save<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2) -> Flow<B> {
     let x = read(b, rs1);
     let y = src2(b, s);
@@ -1003,8 +1021,9 @@ pub fn save<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2) -> Flow<B> {
 }
 
 /// RESTORE。現ウィンドウで加算し、CWP を 1 増やしてから戻った
-/// ウィンドウへ書く。
-/// Ref: SPEC-SPARC-V8 (Version 8) §RESTORE.
+/// ウィンドウへ書く。CWP の進行方向は SAVE と同じく全モデルで
+/// V8 の方向を採る（V9 では逆）。
+/// Ref: SPEC-SPARC-V8 (Version 8) §RESTORE; SPEC-SPARC-V9 App. E.
 pub fn restore<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2) -> Flow<B> {
     let x = read(b, rs1);
     let y = src2(b, s);
@@ -1016,14 +1035,159 @@ pub fn restore<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2) -> Flow<B> {
 }
 
 /// UNIMP。illegal instruction トラップとして表す。
-// Ref: SPEC-SPARC-V8 (Version 8) §UNIMP.
+/// tt は V8 の 2、V9 の 0x10。code にはオペランドの imm22 を載せる。
+/// Ref: SPEC-SPARC-V8 (Version 8) §UNIMP; SPEC-SPARC-V9 §Trap Type.
 pub fn unimp<B: Backend>(b: &mut B, imm22: u64) -> B::Exit {
+    let v9 = b.param::<super::Word64Param>();
+    let two = b.konst::<W64>(if v9 { 0x10 } else { 2 });
+    b.set(tt_ref(), two);
     b.raise(polyisa_sem::GuestException {
         kind: polyisa_sem::ExceptionKind::Trap,
         code: u64::from(imm22 as u32),
         addr: None,
         in_delay_slot: false,
     })
+}
+
+/// Ticc。条件が成立すれば trap_instruction。トラップ番号は
+/// 128 + ((rs1 + operand2) & 0x7f) で、実機では TBR の tt
+/// フィールドに積まれる（V9 の Tcc は 0x100 + N）。例外の code は
+/// 定数しか持てないため、番号は `tt` 状態に置いてから Trap を
+/// 上げる。遅延スロットは持たない。
+/// Ref: SPEC-SPARC-V8 (Version 8) §Ticc; SPEC-SPARC-V9 §Tcc.
+pub fn ticc<B: Backend>(b: &mut B, cond: u8, rs1: Gpr, s: Src2) -> Flow<B> {
+    let val = cond_val(b, cond);
+    let zero = b.konst::<W64>(0);
+    let taken = b.cmp::<W64>(Cmp::Ne, val, zero);
+    let x = read(b, rs1);
+    let y = src2(b, s);
+    let sum = b.add::<W64>(x, y);
+    let m = b.konst::<W64>(0x7f);
+    let num = b.and::<W64>(sum, m);
+    let v9 = b.param::<super::Word64Param>();
+    let base = b.konst::<W64>(if v9 { 0x100 } else { 0x80 });
+    let tt = b.add::<W64>(base, num);
+    b.if_then(taken, |bb| {
+        bb.set(tt_ref(), tt);
+        Err(bb.raise(polyisa_sem::GuestException {
+            kind: polyisa_sem::ExceptionKind::Trap,
+            code: 0,
+            addr: None,
+            in_delay_slot: false,
+        }))
+    })
+}
+
+/// RDY（rd %y, rd）。Y は 32 ビット。
+/// Ref: SPEC-SPARC-V8 (Version 8) §RDY.
+pub fn rdy<B: Backend>(b: &mut B, rd: Gpr) -> Flow<B> {
+    let y = b.get(y_ref());
+    let m = wmask(b, y);
+    write(b, rd, m);
+    Ok(())
+}
+
+/// WRY（wr rs1, operand2, %y）。書き込み値は XOR。Y は 32 ビット。
+/// Ref: SPEC-SPARC-V8 (Version 8) §WRY.
+pub fn wry<B: Backend>(b: &mut B, rs1: Gpr, s: Src2) -> Flow<B> {
+    let x = read(b, rs1);
+    let y = src2(b, s);
+    let xored = b.xor::<W64>(x, y);
+    let lo = b.trunc::<W64, W32>(xored);
+    let v = b.zext::<W32, W64>(lo);
+    b.set(y_ref(), v);
+    Ok(())
+}
+
+/// RDCCR（rd %ccr, rd）。%ccr は 8 ビット（XCC+ICC）。
+/// Ref: SPEC-SPARC-V9 §RDASR.
+pub fn rdccr<B: Backend>(b: &mut B, rd: Gpr) -> Flow<B> {
+    let c = b.get(ccr_ref());
+    let m = b.konst::<W64>(0xff);
+    let v = b.and::<W64>(c, m);
+    write(b, rd, v);
+    Ok(())
+}
+
+/// WRCCR（wr rs1, operand2, %ccr）。書き込み値は XOR の下位 8 ビット。
+/// Ref: SPEC-SPARC-V9 §WRASR.
+pub fn wrccr<B: Backend>(b: &mut B, rs1: Gpr, s: Src2) -> Flow<B> {
+    let x = read(b, rs1);
+    let y = src2(b, s);
+    let xored = b.xor::<W64>(x, y);
+    let m = b.konst::<W64>(0xff);
+    let v = b.and::<W64>(xored, m);
+    b.set(ccr_ref(), v);
+    Ok(())
+}
+
+/// RDPC（rd %pc, rd）。命令自身の番地を rd に書く。
+/// Ref: SPEC-SPARC-V9 §RDASR.
+pub fn rdpc<B: Backend>(b: &mut B, rd: Gpr, pc: u64) -> Flow<B> {
+    let v = const_w64(b, pc);
+    write(b, rd, v);
+    Ok(())
+}
+
+/// 特権系トラップの送出。V8 ではすべて privileged_instruction=3。
+/// V9 は `action` で分け、特権命令の実行は privileged_opcode=0x11、
+/// ユーザーモードからの特権操作（restricted ASI アクセスなど）は
+/// privileged_action=0x37 を使う。
+/// Ref: SPEC-SPARC-V8 (Version 8) §Trap Categories;
+/// SPEC-SPARC-V9 §Trap Type.
+fn privileged_trap<B: Backend>(b: &mut B, action: bool) -> B::Exit {
+    let v9 = b.param::<super::Word64Param>();
+    let code = if v9 {
+        if action { 0x37 } else { 0x11 }
+    } else {
+        3
+    };
+    let t = b.konst::<W64>(code);
+    b.set(tt_ref(), t);
+    b.raise(polyisa_sem::GuestException {
+        kind: polyisa_sem::ExceptionKind::Trap,
+        code,
+        addr: None,
+        in_delay_slot: false,
+    })
+}
+
+/// 特権命令をユーザーモードで実行したときの privileged トラップ。
+/// tt は V8 の privileged_instruction=3、V9 の
+/// privileged_opcode=0x11。このモデルはユーザーモードだけを扱うので、
+/// rd/wr psr・wim・tbr、rett、V9 の done/retry は無条件にここへ来る。
+/// Ref: SPEC-SPARC-V8 (Version 8) §Privileged Instructions;
+/// SPEC-SPARC-V9 §Trap Type.
+pub fn privileged<B: Backend>(b: &mut B) -> B::Exit {
+    privileged_trap(b, false)
+}
+
+/// 特権レベルの判定。V7/V8 は PSR.S（ビット 7）、V9 は PSTATE.PRIV
+/// （tstate ビット 10）を見る。非特権なら privileged トラップを上げる
+/// （V8 の privileged_instruction=3、V9 の privileged_action=0x37）。
+/// ASI 指定形が使う。
+/// Ref: SPEC-SPARC-V8 (Version 8) §Privileged Instructions;
+/// SPEC-SPARC-V9 §PSTATE.
+fn privileged_check<B: Backend>(b: &mut B) -> Flow<B> {
+    let sup = if b.param::<super::Word64Param>() {
+        // TSTATE: GL|CCR|ASI|pil|PSTATE|CWP で、PSTATE.PRIV は
+        // TSTATE ビット 10（PSTATE 桁のビット 2）にある。
+        let ts = b.get(tstate_ref());
+        let sh = b.konst::<W64>(10);
+        let s = b.shr_l::<W64>(ts, sh);
+        let one = b.konst::<W64>(1);
+        b.and::<W64>(s, one)
+    } else {
+        let p = b.get(psr_ref());
+        let p64 = b.zext::<W32, W64>(p);
+        let sh = b.konst::<W64>(7);
+        let s = b.shr_l::<W64>(p64, sh);
+        let one = b.konst::<W64>(1);
+        b.and::<W64>(s, one)
+    };
+    let zero = b.konst::<W64>(0);
+    let user = b.cmp::<W64>(Cmp::Eq, sup, zero);
+    b.if_then(user, |bb| Err(privileged_trap(bb, true)))
 }
 
 /// 遅延スロット 1 命令ぶん。annul が 0 のときだけ `slot` を実行する。
@@ -1186,8 +1350,9 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Flow<B> {
             bicc(b, a, cond, pc, target)
         }
         // ASI 指定形。オペランドは (rd, rs1, asi, rs2)。V8 では特権
-        // 命令だが、空間選択と特権トラップは SP8 で扱うため、ここでは
-        // 通常空間へのアクセスに畳み込む。
+        // 命令なので先に権限を確かめる。アドレス空間の選択は
+        // 後続ステップで扱うため、ここでは通常空間へのアクセスに
+        // 畳み込む。
         Insn::Lda
         | Insn::Lduba
         | Insn::Lduha
@@ -1204,6 +1369,7 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Flow<B> {
             let rs1 = Gpr(o[1] as u8);
             let s = Src2::Reg(Gpr(o[3] as u8));
             let rd2 = Gpr(rd.0.wrapping_add(1) & 31);
+            privileged_check(b)?;
             match insn {
                 Insn::Lda => ld(b, rd, rs1, s),
                 Insn::Lduba => ldub(b, rd, rs1, s),
@@ -1220,6 +1386,31 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Flow<B> {
                 _ => unreachable!(),
             }
         }
+        // Ticc。オペランドは (cond, rs1, src2)。
+        Insn::Ticc => ticc(b, o[0] as u8, Gpr(o[1] as u8), Src2::Reg(Gpr(o[2] as u8))),
+        Insn::TiccI => ticc(b, o[0] as u8, Gpr(o[1] as u8), Src2::Imm(sext13(o[2]))),
+        // ASR。読み出し形のオペランドは rd、書き込み形は (rs1, src2)。
+        Insn::Rdy => rdy(b, Gpr(o[0] as u8)),
+        Insn::Wry => wry(b, Gpr(o[0] as u8), Src2::Reg(Gpr(o[1] as u8))),
+        Insn::WryI => wry(b, Gpr(o[0] as u8), Src2::Imm(sext13(o[1]))),
+        Insn::Rdccr => rdccr(b, Gpr(o[0] as u8)),
+        Insn::Wrccr => wrccr(b, Gpr(o[0] as u8), Src2::Reg(Gpr(o[1] as u8))),
+        Insn::WrccrI => wrccr(b, Gpr(o[0] as u8), Src2::Imm(sext13(o[1]))),
+        Insn::Rdpc => rdpc(b, Gpr(o[0] as u8), pc),
+        // 特権命令はユーザーモードでは privileged_instruction トラップ。
+        Insn::Rdpsr
+        | Insn::Rdwim
+        | Insn::Rdtbr
+        | Insn::Wrpsr
+        | Insn::WrpsrI
+        | Insn::Wrwim
+        | Insn::WrwimI
+        | Insn::Wrtbr
+        | Insn::WrtbrI
+        | Insn::Rett
+        | Insn::RettI
+        | Insn::Done
+        | Insn::Retry => Err(privileged(b)),
         Insn::Unimp => Err(unimp(b, o[0])),
     }
 }
