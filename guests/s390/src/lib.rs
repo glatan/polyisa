@@ -12,7 +12,7 @@
 //! 出典は SPEC-S390-ZARCH-POP（SA22-7832）・SPEC-S390-ESA390-POP
 //! （SA22-7201）・SPEC-S390-ABI（s390x ELF psABI）。DFP（10 進浮動小数）と
 //! HFP（16 進浮動小数）の完全実装は範囲外で、それらの命令は
-//! Unimplemented 例外に落とす（docs/notes-stage5-25-pending.md の
+//! Unimplemented 例外に落とす（docs/records.md の
 //! GAP-XXXX 参照）。
 // Ref: SPEC-S390-ZARCH-POP (SA22-7832-13), SPEC-S390-ESA390-POP (SA22-7201-08),
 // Ref: SPEC-S390-ABI.

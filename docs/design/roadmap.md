@@ -14,93 +14,6 @@
 
 完了条件の表の「判定」は、次の三つの形のいずれかである。`テスト：` のあとに続ける名前は、判定に使うテストバイナリであり、バッククォートで囲んで「、」で並べる。名前は `crates/*/tests/` か `guests/*/tests/` にある `.rs` のファイル名から、拡張子を除いたものである。`所有者` は、テストでは判定できず、所有者が判定することを示す。`未整備` は、判定に使えるテストがないことを示す。
 
-### 段階 0：基盤
-
-ワークスペース、検査、基礎のクレートを用意する。
-
-- ワークスペースの定義、`Taskfile.yml`、nextest の設定、コミット前のフック（[開発作業とローカル検証](dev-workflow.md)）
-- devtool の検査（外部依存の禁止、クレート間の依存規則、`cfg` の使用の規則、台帳の検査）
-- [参照資料の台帳](../references.md) のうち、段階 0 と段階 1 で使う項目（RISC-V の仕様と psABI、ELF、Linux カーネルのソース、IEEE 754、TestFloat、riscv-tests、riscv-arch-test、使うツール）の確認
-- `bits`、`testkit`（擬似乱数、性質テストの実行器、SHA-256）
-- `isadl`（ビットパターンのデコーダの入口、フィールド、オペランド、形式、命令、機能、プロファイル、CPU モデルの記述）と `isagen`（命令の型、デコーダ、逆アセンブラ、エンコーダ、往復テストの生成）
-- `sem` のバックエンドトレイトの整数演算、CPU 状態、メモリ、制御の操作
-- `mem` のアドレス空間、ページフレーム、ソフトウェア TLB
-- `engine` のインタプリタと裸実行環境
-
-完了条件：
-
-| ID | 条件 | 判定 |
-|---|---|---|
-| S0-1 | RV64I の命令を ISADL で記述し、裸実行環境で命令単位のテストが通る。 | テスト：`bare_rv64i` |
-| S0-2 | `task check` と `task test` が通り、コミット前のフックが `task check` を実行する。 | 所有者 |
-
-### 段階 1：RISC-V の縦の一本
-
-RISC-V で、ユーザーモードのプログラムの実行までを通す。
-
-- RV32 と RV64 の I、M、A、F、D、C、Zicsr、Zifencei と、汎用 CPU モデル
-- `softfloat` の binary32 と binary64、TestFloat との比較
-- `loader` の ELF、`kernel` と `os-linux` のシステムコールの段階 1 と 2（[ユーザーモード](user-mode.md)）
-- `trace` の命令トレースとシステムコールトレース、`cli` の `run`、`cpus`、`disasm`
-- llvm-objdump とのデコーダの差分テスト、riscv-tests と riscv-arch-test
-
-完了条件：
-
-| ID | 条件 | 判定 |
-|---|---|---|
-| S1-1 | 静的リンクと動的リンクのテストプログラムが、ゲストのルートを使って正しい出力を返す。 | テスト：`heavy_program_hello`、`heavy_program_dyn` |
-| S1-2 | riscv-tests と riscv-arch-test のユーザーモードの対象のテストが通る。 | テスト：`heavy_conformance_riscv_tests`、`heavy_conformance_rv64ui` |
-| S1-3 | 意味論をバックエンドに対して総称的に書いた版と、インタプリタ専用に直接書いた版を、代表的な命令で比較するベンチマークを取り、性能の差を記録する。差が 10% を超えた場合は、原因を調べ、バックエンドトレイトの設計を見直すか、差を受け入れる理由を設計文書に書く。 | 所有者 |
-
-### 段階 2：抽象の試作
-
-以下の ISA の小さな部分集合を、裸実行環境で動かす。本格的な実装は後の段階で行う。
-
-| 試作の対象 | 確かめる抽象 |
-|---|---|
-| Hexagon（パケット、`.new` オペランド、ハードウェアループ） | パケットのステップ、書き込みの一括反映 |
-| IA-64（バンドル、述語、回転レジスタ） | 複数のデコーダの入口、述語実行、動的なレジスタ参照 |
-| SPARC（レジスタウィンドウ、遅延スロットと annul） | 動的なレジスタ参照、遅延スロットのステップ |
-| WebAssembly（モジュールの検証、整数命令、制御命令） | 非線形なプログラムカウンタ、フレームの基底からの参照、トラップ |
-
-完了条件：
-
-| ID | 条件 | 判定 |
-|---|---|---|
-| S2-1 | 各試作で、選んだ命令の単位テストが通る。 | テスト：`bare_hexmin`、`bare_ia64min`、`bare_sparcv8`、`bare_wasmmin` |
-| S2-2 | 共通の抽象の変更点が文書に反映されている。 | 所有者 |
-
-### 段階 3：MIPS
-
-ISA のバージョンの表現と、最初の `exact` のタイミングモデルを確かめる。
-
-- MIPS I から Release 6 までのプロファイル、Release 6 のオペコードの割り当て直し、遅延スロット、MIPS I のロードの遅延スロット、両エンディアン
-- o32、n32、n64 のゲスト ABI、システムコールの段階 3
-- R3000 の CPU モデルと、`exact` のタイミング表、タイミングの検証用の命令列
-
-完了条件：
-
-| ID | 条件 | 判定 |
-|---|---|---|
-| S3-1 | MIPS I と MIPS32 Release 2 と Release 6 の CPU モデルで、それぞれ同じテストプログラムを（Release 6 は再コンパイルして）実行できる。 | テスト：`heavy_program_mips` |
-| S3-2 | R3000 のタイミングの検証用の命令列がすべて一致する。 | テスト：`heavy_timing_r3000` |
-
-### 段階 4：x86
-
-可変長命令、オペコード表、遅延評価のフラグ、x87 を確かめる。
-
-- x86-32 と x86-64 のゲスト ABI、x87 と SSE2 までを最初の範囲とし、後から拡張を足す
-- CPUID の機能からの導出、Intel と AMD の挙動パラメータ
-- ホストの CPU との実行の差分テスト
-- システムコールの段階 4（busybox が動く）
-
-完了条件：
-
-| ID | 条件 | 判定 |
-|---|---|---|
-| S4-1 | x86-64 と x86-32 の busybox のコマンド群のテストが通る。対象のコマンドは、台帳で確認した busybox の `busybox --list` が示すアプレットとする。`df` の扱いは [ADR-0014](../adr/0014-statfs-number-table-only.md) による。 | テスト：`heavy_program_busybox` |
-| S4-2 | この段階の終わりに共通の抽象を見直し、確定させる。 | 所有者 |
-
 ### 段階 5 以降
 
 段階 5 以降は、一段階につき一つの対象に絞る。複数の ISA を一つの段階にまとめると、完了条件の判定を段階全体に閉じられず、遅れている ISA のために先に終わった作業を確定できないからである。段階の順序は目安であり、必要に応じて入れ替える。段階間に依存があるときは、その段階の冒頭に「前提」として書く。
@@ -109,179 +22,7 @@ ISA のバージョンの表現と、最初の `exact` のタイミングモデ�
 
 判定が `未整備` の条件は、判定に使うテストの名前を条件の文に書く。テストはその段階の作業の中で作り、判定を `テスト：` に更新する。
 
-### 段階 5：MIPS の本実装
-
-段階 3 で始めた MIPS を、共通の構造に載せて完成させる。
-
-- MIPS o32 のシステムコール処理を `cli` から `os-linux` へ移す（GAP-0001）
-- 遅延スロットを持つ独自の実行ループを `engine` の実行ループへ移す（GAP-0007）
-- o32、n32、n64 のゲスト ABI と、Release 6 のオペコードの割り当て直しの残り
-
-完了条件：
-
-| ID | 条件 | 判定 |
-|---|---|---|
-| S5-1 | 段階 3 の判定に使ったテストが、移管後も引き続き通る。 | テスト：`heavy_program_mips`、`heavy_timing_r3000` |
-| S5-2 | GAP-0001 と GAP-0007 が解消され、`cli` に MIPS 固有の実行経路が残っていない。 | 所有者 |
-
-### 段階 6：AArch64
-
-AArch64 の本格的な実装と、Linux の aarch64 ゲスト ABI。
-
-- 版の範囲は Armv8.0-A から Armv9.x-A までで、`FEAT_*` を機能として表す。最初の範囲は整数・浮動小数点・AdvSIMD と汎用 CPU モデルとし、SVE、SME、MTE は後から拡張を足す。ベクトル長とストリーミングモードは実行モードとする
-- ユーザー空間からの ID レジスタの読み出しは OS による命令の補完で扱う
-- LP64（リトルエンディアンとビッグエンディアン）のゲスト ABI
-
-完了条件：
-
-| ID | 条件 | 判定 |
-|---|---|---|
-| S6-1 | aarch64 の静的リンクと動的リンクのテストプログラムと、配布物のコマンド群が、ゲストのルートを使って正しい出力を返す（テスト `heavy_program_aarch64`）。 | テスト：`heavy_program_aarch64` |
-| S6-2 | ABI 表が、UAPI ヘッダからの抽出値と一致する（テスト `heavy_abi_aarch64`）。 | テスト：`heavy_abi_aarch64` |
-| S6-3 | llvm-objdump とのデコーダの差分テストが通る（テスト `heavy_oracle_llvm`）。 | テスト：`heavy_oracle_llvm` |
-
-### 段階 7：ARM
-
-ARM（AArch32 とそれ以前）の本格的な実装と、Linux の arm EABI ゲスト ABI。
-
-- 版の範囲は ARMv2 から Armv8-A の AArch32 まで。最初の範囲は ARMv5 から Armv7-A までの ARM と Thumb-2、VFP、NEON と汎用 CPU モデルとする。ARMv2 と ARMv3 の 26 ビットモードと M プロファイルは裸実行環境で検証する
-- ARM と Thumb の切り替え、IT ブロック、条件実行、非整列 `LDR` の回転、BE32 と BE8、kuser helper の特別なアドレス
-- arm EABI のゲスト ABI。ソフトウェア浮動小数点とハードウェア浮動小数点の呼び出し規約の差は ELF の属性で区別する
-
-完了条件：
-
-| ID | 条件 | 判定 |
-|---|---|---|
-| S7-1 | arm のテストプログラムと配布物のコマンド群が、ゲストのルートを使って正しい出力を返す（テスト `heavy_program_arm`）。 | テスト：`heavy_program_arm` |
-| S7-2 | ABI 表が、UAPI ヘッダからの抽出値と一致する（テスト `heavy_abi_arm`）。 | テスト：`heavy_abi_arm` |
-| S7-3 | llvm-objdump とのデコーダの差分テストが通る（テスト `heavy_oracle_arm`）。 | テスト：`heavy_oracle_llvm` |
-
-### 段階 8：Power
-
-Power の本格的な実装と、Linux の ppc32、ppc64、ppc64le ゲスト ABI。
-
-- 版の範囲は POWER、PowerPC（601 から 970 まで）、Power ISA 2.0x から 3.1 まで、Book E（e500 の SPE を含む）。最初の範囲は整数・浮動小数点・AltiVec と汎用 CPU モデルとし、十進浮動小数点と `bcdadd.` は段階 10 で追加する
-- ISA 3.1 の接頭辞付き命令、リトルエンディアンの実行モード、SPE と AltiVec の `conflicts`、`MFPVR` の補完、601 の POWER と PowerPC の二つの機能集合
-- ppc32、ppc64（ELFv1、ビッグエンディアン）、ppc64le（ELFv2）のゲスト ABI。エラーの返しは CR0 の SO ビット
-
-完了条件：
-
-| ID | 条件 | 判定 |
-|---|---|---|
-| S8-1 | ppc64le のテストプログラムと配布物のコマンド群が、ゲストのルートを使って正しい出力を返す（テスト `heavy_program_power`）。 | テスト：`heavy_program_power` |
-| S8-2 | ABI 表が、UAPI ヘッダからの抽出値と一致する（テスト `heavy_abi_power`）。 | テスト：`heavy_abi_power` |
-| S8-3 | llvm-objdump とのデコーダの差分テストが通る（テスト `heavy_oracle_power`）。 | テスト：`heavy_oracle_power` |
-
-### 段階 9：IR と JIT
-
-前提：段階 6 から 8（主対象の ISA が三つ動いている）。
-
-`ir` クレートと `jit` クレートを実装し、x86-64 のホストのバックエンドを持つ（[JIT](jit.md)）。
-
-- ブロック単位の SSA の IR と、IR の解釈実行器。バックエンドトレイトの操作と一対一に対応する操作、ブロックの出口の分類、ブロック内の最適化（定数畳み込み、共通部分式、デッドストア、レジスタ保持）
-- x86-64（System V）のホストのバックエンド。命令のエンコードは x86 の ISADL の記述から生成したエンコーダを使う。実行可能メモリは `host` 経由で、書き込み可能な状態で書いてから実行可能に切り替える
-- 実行回数による階層化、ブロックの連結、タイミングモデルとの接続、観測が要求されたブロックのインタプリタへの切り戻し
-
-完了条件：
-
-| ID | 条件 | 判定 |
-|---|---|---|
-| S9-1 | 三つ以上の主対象の ISA で、JIT とインタプリタの実行結果がブロックの境界ごとに一致する（[検証戦略](testing.md) の層 9、テスト `heavy_jit_diff`）。 | テスト：`heavy_jit_diff` |
-
-### 段階 10：十進演算と非 IEEE 浮動小数点
-
-以降の段階で実装する ISA が必要とする、`decimal` クレートと `softfloat` の非 IEEE 形式（[浮動小数点と十進演算](floating-point.md)）。
-
-- `decimal`：ISA ごとの環境を持つパック十進整数（BCD）の演算と、IEEE 754 十進浮動小数点（DPD 符号化）
-- `softfloat` の拡張：IBM 16 進浮動小数点、DEC の F、D、G、H 形式、68881 の拡張精度
-- Power の十進浮動小数点と `bcdadd.` の意味論はこの段階で追加する。s390 系の 16 進浮動小数点と十進演算は、この段階の基盤の上で段階 11 が実装する
-
-完了条件：
-
-| ID | 条件 | 判定 |
-|---|---|---|
-| S10-1 | `decimal` の演算が decTest と比較して一致する（テスト `heavy_conformance_dectest`）。 | テスト：`heavy_conformance_dectest` |
-| S10-2 | 16 進浮動小数点、DEC の形式、68881 拡張精度が、仕様書の例と一致する（テスト `nonieee_examples`）。 | テスト：`nonieee_examples` |
-
-### 段階 11：s390 系
-
-前提：段階 10（16 進浮動小数点、十進浮動小数点、パック十進）。
-
-s390 系（System/360 から z/Architecture まで）の本格的な実装と、Linux の s390 と s390x ゲスト ABI。
-
-- 版の範囲は System/360 から z/Architecture までで、z/Architecture の世代ごとのファシリティを機能として表す。最初の範囲は ESA/390 の後期と z/Architecture（Linux が動く世代）とし、それより前の世代は裸実行環境で検証する
-- 先頭 2 ビットで決まる 2、4、6 バイトの命令長、24、31、64 ビットのアドレッシングモード、`EX` と `EXRL` の実行時のデコード、`MVCL` などの反復のステップ
-- 16 進・二進・十進浮動小数点とパック十進命令（段階 10 の基盤を使う）
-- s390（31 ビット）と s390x のゲスト ABI
-
-完了条件：
-
-| ID | 条件 | 判定 |
-|---|---|---|
-| S11-1 | s390x のテストプログラムと配布物のコマンド群が、ゲストのルートを使って正しい出力を返す（テスト `heavy_program_s390`）。 | テスト：`heavy_program_s390` |
-| S11-2 | ABI 表が、UAPI ヘッダからの抽出値と一致する（テスト `heavy_abi_s390`）。 | テスト：`heavy_abi_s390` |
-| S11-3 | llvm-objdump（SystemZ）とのデコーダの差分テストが通る（テスト `heavy_oracle_s390`）。 | テスト：`heavy_oracle_s390` |
-| S11-4 | ESA/390 より前の世代の命令単位テストが裸実行環境で通る（テスト `bare_s390`）。 | テスト：`bare_s390` |
-
-### 段階 12：WebAssembly と WASI
-
-WebAssembly の本格的な実装と、WASI preview1 の OS パーソナリティ（`os-wasi`）。WASI は ISA ではなく OS パーソナリティだが、WebAssembly のモジュールからのインポート呼び出しとして現れるため、同じ段階で実装する。
-
-- 版の範囲は 1.0、2.0、3.0 と各提案。最初の範囲は 1.0 と 2.0 の命令と WASI preview1 とし、GC、memory64、マルチメモリは後から拡張を足す
-- モジュールの読み込みと検証、関数ごとの実行用の内部形式、フレームの基底からの動的なレジスタ参照、トラップによる退出
-- 仕様のテストスイート（`.wast`）の構文解析とバイナリ形式へのエンコードを、テスト用の部品として実装する
-- `os-wasi` は仮想カーネルのファイル記述子の表と仮想ファイルシステムを `os-linux` と共有し、プリオープンのディレクトリに対応する
-
-完了条件：
-
-| ID | 条件 | 判定 |
-|---|---|---|
-| S12-1 | WebAssembly 仕様のテストスイートが通る（テスト `heavy_conformance_wasm_spec`）。 | テスト：`heavy_conformance_wasm_spec` |
-| S12-2 | wasmtime との実行の差分テストが通る（テスト `heavy_diff_wasmtime`）。 | テスト：`heavy_diff_wasmtime` |
-| S12-3 | WASI preview1 を使うプログラムが正しい出力を返す（テスト `heavy_program_wasi`）。 | テスト：`heavy_program_wasi` |
-
-### 段階 13：x86 の残り
-
-前提：段階 10（x87 の BCD 命令）。
-
-段階 4 の範囲の外にあった x86 の部分を実装し、ユーザーモードで実行できる命令の全範囲をカバーする。対象は、Intel SDM と AMD APM の台帳で確認した版が定める、ユーザーモードで実行できる命令のすべてである。特権命令とシステムモードの機能（ページテーブル走査、記述子テーブルによる保護機構、割り込みコントローラ、VMX、SGX など）は、[設計概要](overview.md) の非目標どおり対象にしない。
-
-- 記述の基盤。x86min の変形ごとの列挙はこの命令数に対応できないので、オペコード表（`map`）と接頭辞・ModRM/SIB・VEX/EVEX/REX2 のフックを ISADL に実装し、x86 の記述をそれらで書き直す（[ADR-0018](../adr/0018-x86min-enumerated-encoding.md) の「列挙の複製が主な費用になったとき」にあたる）。実行モード（16、32、64 ビットのオペランドサイズとアドレスサイズ、ModRM の 16 ビットアドレッシング）を ISADL でモデル化し（GAP-0029 の解消）、挙動パラメータと機能から識別情報への導出を繋げる（GAP-0027 の解消）
-- 8086、8088、80286。実モードに限り、裸実行環境で検証する（プロテクトモードはシステムモードの範囲）。命令プリフェッチキューによる自己書き換えコードの振る舞いは、機能の側で再現する。世代ごとの差（FLAGS の固定ビット、`PUSH SP` の値、シフト回数のマスク、`0F` が `POP CS`、0x82 のエイリアス、80186 以降の命令の有無、FS・GS と 0x66・0x67 の接頭辞の有無、除算エラーの戻りアドレス、1 MiB でのアドレスの巻き戻し、CPUID の有無）は、機能と挙動パラメータで表す。8088 のバスインターフェースユニットと命令プリフェッチキューは、専用のタイミングモデルとする（[タイミングモデル](timing.md)）
-- x87 の残り。`FBLD`/`FBSTP` は段階 10 の `decimal` を使う。8087、80287 と 80387 以降での擬似非正規化数などの扱いの差は、挙動パラメータとする（[浮動小数点と十進演算](floating-point.md)）。FPU を持たない CPU モデルでは、ESC 命令は世代の規定どおりの振る舞い（8086 ではダミーのフェッチ、80286 では MSW の EM ビットによる INT 7）とする
-- SSE2 以降の拡張のすべて。MMX と 3DNow!（MMX のレジスタは x87 のスタックにエイリアスされる）を含み、SSE3 以降の各版、AES-NI・PCLMUL・SHA・GFNI・RDRAND・RDSEED・ADX・BMI・F16C・FMA、AVX 系、AVX-512 の全サブセット、AVX10（10.3 まで）、ACE（外積による行列演算。v2 まで）、AMX の全拡張、APX（REX2、NDD、拡張 GPR）を実装する。AVX10.3 と ACE v2 が使う 8 ビットと 4 ビットの浮動小数点形式（E4M3、E5M2、E2M1 など）は `softfloat` の形式として追加する（[浮動小数点と十進演算](floating-point.md)）。AMD の拡張（FMA4、XOP、TBM、SSE4a、MONITORX・MWAITX、CLZERO、RDPRU）も、AMD APM が定める範囲で対象とする。AVX 系をユーザーモードで使うために、XCR0 と `XGETBV`、`XSAVE` 系と xsave 領域の配置を持ち、シグナルフレームの浮動小数点状態もこの配置に従う。AMX の利用許可は `arch_prctl` の `ARCH_REQ_XCOMP_PERM` で再現する。CET のユーザー命令（ENDBR とシャドウスタックの操作）、PKU、WAITPKG、MOVDIR、CLDEMOTE、SERIALIZE、HRESET、FSGSBASE 系、TSX も対象とする。TSX のトランザクションの開始は [アーキテクチャ固有の要求](arch-requirements.md) どおり常に失敗させ、挙動パラメータで切り替えられる形にする。WAITPKG の `TPAUSE` の期限は仮想時間に従う。ユーザーモードから読めるシステム状態の命令（`SGDT`、`SIDT`、`SLDT`、`STR`、`SMSW`、`LAR`、`LSL`、`VERR`、`VERW`、`ARPL`）は、CPU モデルと OS パーソナリティが持つモデル化した値を返す。`RDRAND` と `RDSEED` は、決定性の原則に従い、設定した種から生成する擬似乱数を返す。UINTR の命令群（`SENDUIPI`、`UIRET`、`TESTUI`、`CLUI`、`STUI`）と `ENQCMD` のように、実行に OS による許可や設定が要る命令は、許可のない状態の規定の振る舞いとする
-- x86-64 のマイクロアーキテクチャレベルのプロファイル（v1 から v4）と、ベンダーと世代ごとの CPU モデル
-- 80486 と Pentium の `exact` のタイミング表。U/V パイプラインはインオーダーの汎用モデル（段階 3 で R3000 に使ったもの）で表す
-- x32 のゲスト ABI（[ユーザーモード](user-mode.md) の ABI 表の残りの変種）。ELF の `GNU_PROPERTY_X86_FEATURE_*` の注記が要求する機能（IBT、SHSTK など）はローダが読み、CPU モデルにない機能の要求は [CPU モデル](cpu-models.md) の規約どおり警告にとどめる。`SYSENTER` と `SYSEXIT` は x86-32 の Linux のシステムコールの入口として OS パーソナリティに渡し、x86-64 の vsyscall ページ（gettimeofday、time、getcpu の固定アドレス）は [アーキテクチャ固有の要求](arch-requirements.md) の「特別なアドレスを経由する OS の呼び出し」で再現する
-
-完了条件：
-
-| ID | 条件 | 判定 |
-|---|---|---|
-| S13-1 | 8088 と 80286 の SingleStepTests のデータ集と命令の振る舞いが一致する（テスト `heavy_conformance_sst8088`、`heavy_conformance_sst80286`）。 | テスト：`heavy_conformance_sst8088`、`heavy_conformance_sst80286` |
-| S13-2 | 追加した拡張と 80286、x87 の世代差の命令単位テストが裸実行環境で通る（テスト `bare_x86ext`）。 | テスト：`bare_x86ext` |
-| S13-3 | 80486 と Pentium のタイミングの検証用の命令列がすべて一致する（テスト `heavy_timing_i486`、`heavy_timing_pentium`）。 | テスト：`heavy_timing_i486`、`heavy_timing_pentium` |
-| S13-4 | 8088 の専用のタイミングモデルが、SingleStepTests のサイクル数と一致する（テスト `heavy_timing_8088`）。 | テスト：`heavy_timing_8088` |
-| S13-5 | 追加した拡張と 16 ビットモードについて、llvm-objdump と XED とのデコーダの差分テストが通る（テスト `heavy_oracle_llvm`、`heavy_oracle_xed`。両方のオラクルが対応しない拡張は S13-2 で検証する）。 | テスト：`heavy_oracle_llvm`、`heavy_oracle_xed` |
-| S13-6 | ホストの CPU と、ホストが持つ拡張について実行の差分テストが通る（テスト `heavy_diff_host`。GAP-0030 の解消を兼ねる）。ホストが持たない拡張は、Intel SDE（TOOL-INTEL-SDE）が対応する版の範囲で実行の差分テスト（`heavy_diff_sde`）を行う。 | テスト：`heavy_diff_host`、`heavy_diff_sde` |
-| S13-7 | x32 ABI のテストプログラムと、xsave 領域・`XGETBV`・AMX の許可・vsyscall 経由の呼び出しを使うテストプログラムが正しい出力を返す（テスト `heavy_program_x32`、`heavy_program_x86ext`）。 | テスト：`heavy_program_x32`、`heavy_program_x86ext` |
-
-### 段階 14：m68k
-
-前提：段階 10（68881 の拡張精度、BCD）。
-
-- 版の範囲は 68000 から 68060 まで、CPU32、ColdFire、68881 と 68882 の FPU
-- 実効アドレスと拡張語のフック、世代ごとのアライメントの差、68040 と 68060 の未実装命令は OS による命令の補完
-- m68k のゲスト ABI。68000 の専用のタイミングモデル（バスサイクルとプリフェッチ）
-
-完了条件：
-
-| ID | 条件 | 判定 |
-|---|---|---|
-| S14-1 | 68000 の SingleStepTests のデータ集と命令の振る舞いが一致する（テスト `heavy_conformance_sst68000`）。 | テスト：`heavy_conformance_sst68000` |
-| S14-2 | 68000 のタイミングの検証用の命令列がすべて一致する（SingleStepTests のサイクル数を含めて使う。テスト `heavy_timing_68000`）。 | テスト：`heavy_timing_68000` |
-| S14-3 | m68k の配布物のコマンド群が、ゲストのルートを使って正しい出力を返す（テスト `heavy_program_m68k`）。 | テスト：`heavy_program_m68k` |
-| S14-4 | ABI 表が SRC-LINUX の UAPI と一致する（clang が m68k に対応しないため層 6 の抽出方法は使えず、`syscall.tbl` と直接照合する。テスト `heavy_abi_m68k`）。 | テスト：`heavy_abi_m68k` |
+段階 15 から 24 の各段階には、その節の末尾に作業計画がある。構成は各段階で共通であり、着手条件の整備、骨格、命令群、世代差・拡張、ABI・OS パーソナリティ、タイミング、残件整理の順に進める。各ステップの終わりにサブエージェントのレビューを挟み、レビュー後の修正のあとに push する。計画は作業の進行に合わせて更新し、確定したステップにはコミット番号を記録する。
 
 ### 段階 15：SPARC
 
@@ -297,6 +38,27 @@ WebAssembly の本格的な実装と、WASI preview1 の OS パーソナリテ�
 | S15-2 | ABI 表が、UAPI ヘッダからの抽出値と一致する（テスト `heavy_abi_sparc`）。 | 未整備 |
 | S15-3 | llvm-objdump とのデコーダの差分テストが通る（テスト `heavy_oracle_sparc`）。 | 未整備 |
 
+作業計画：
+
+| # | 内容 | 前提 | 判定 |
+|---|---|---|---|
+| SP1 | 着手条件: SPEC-SPARC-V9・SPEC-SPARC-PSABI の版確定、V7 の根拠資料の追加登録または範囲からの除外の決定、BIN 登録（sparc32・sparc64 配布物）、SST 類の既存適合データの有無の調査 | - | - |
+| SP2 | `guests/sparc` の段階 2 の試作を本実装に差し替える骨格: CpuState（g/o/i/l レジスタ・CWP・PSR/TSTATE・PC/nPC）、機能（V7・V8・V9・VIS）とモデルの宣言、sem 層、ワークスペース配線 | SP1 | - |
+| SP3 | デコード方式の決定: 32 ビット固定長の map/パターン。遅延スロットは PC/nPC として実行ループ側で表現 | SP2 | - |
+| SP4 | `run_sparc` 実行ループ + bare 最小テスト | SP3 | - |
+| SP5 | 整数演算: add/sub/論理/シフト/sethi と、V8 の umul/smul/udiv/sdiv/mulscc | SP4 | - |
+| SP6 | load/store 全サイズ・ldstub/swap・ASI 指定形 | SP4 | - |
+| SP7 | 分岐・call・jmpl・return。annul ビットと遅延スロット内の分岐（DCTI couple） | SP4 | - |
+| SP8 | ウィンドウ命令 save/restore・ta/tcc（V8 の Ticc を含む）・ユーザ ASR（rdy/wry、V9 の rdccr/wrccr/rdpc）。rd/wr psr や rett/done/retry は特権命令なので、ユーザーモードでは特権違反トラップの経路だけを実装する | SP4 | - |
+| SP9 | V9 の追加: movcc/movr・64 ビット演算・PSTATE.AM のアドレスマスク・cas/casx・membar/stbar/flush・popc | SP5-8 | - |
+| SP10 | FPU: ldf/stf/lddf・fadd/fsub/fmul/fdiv/fsqrt・fcmp・fcvt・fmov、V9 の fmovcc/fmovr と %fsr | SP4 | - |
+| SP11 | VIS とユーザ ASI。V7/V8/V9 のモデル差を `when` 述語と挙動パラメータで切り分け | SP9,SP10 | - |
+| SP12 | Linux ABI: sparc32/sparc64 の syscall 表、ELF、ウィンドウのあふれと不足を OS パーソナリティで再現 | SP11 | - |
+| SP13 | `heavy_program_sparc`（配布物のコマンド群） | SP12 | S15-1 |
+| SP14 | `heavy_abi_sparc`（UAPI 抽出値との照合） | SP12 | S15-2 |
+| SP15 | `heavy_oracle_sparc`（llvm-objdump 差分） | SP11 | S15-3 |
+| SP16 | 残件整理: 判定列の更新、未整備分の GAP 登録 | SP13-15 | - |
+
 ### 段階 16：Alpha
 
 - 版の範囲は 21064 から 21364 までと、BWX、FIX、CIX、MVI の拡張。`AMASK` と `IMPLVER` は識別情報
@@ -309,6 +71,24 @@ WebAssembly の本格的な実装と、WASI preview1 の OS パーソナリテ�
 |---|---|---|
 | S16-1 | alpha の配布物のコマンド群が、ゲストのルートを使って正しい出力を返す（テスト `heavy_program_alpha`）。 | 未整備 |
 | S16-2 | ABI 表が SRC-LINUX の UAPI と一致することを所有者が確認する。 | 所有者 |
+
+作業計画：
+
+| # | 内容 | 前提 | 判定 |
+|---|---|---|---|
+| AL1 | 着手条件: SPEC-ALPHA-ARM・SPEC-ALPHA-CALLSTD の版確定、BIN 登録、GAP-0023 残項目の点検 | 段階 10 | - |
+| AL2 | `guests/alpha` 骨格: CpuState（r0-31・f0-31・PC・PAL 関連状態）、機能（BWX・FIX・CIX・MVI）とモデル（21064-21364）の宣言、AMASK/IMPLVER を識別情報へ | AL1 | - |
+| AL3 | デコード: 32 ビット固定長、形式別（Operate/Memory/Branch/CALL_PAL）のパターン | AL2 | - |
+| AL4 | `run_alpha` 実行ループ + bare 最小テスト | AL3 | - |
+| AL5 | 整数 Operate 系: add/sub/論理/シフト/比較/cmov・mb/wmb・rpcc/rc/rs | AL4 | - |
+| AL6 | 乗除と拡張（BWX・FIX・CIX・MVI の世代差を `when` 述語で） | AL5 | - |
+| AL7 | load/store・lda・非整列アクセス（ldq_u/stq_u）と補完経路 | AL4 | - |
+| AL8 | 分岐・jmp/jsr/ret | AL4 | - |
+| AL9 | 浮動小数点: load/store・四則・変換（IEEE/VAX 形式は段階 10 の実装を接続） | AL4 | - |
+| AL10 | CALL_PAL を OS パーソナリティへ渡す経路（rduniq/wruniq の TLS 呼出を含む） | AL4 | - |
+| AL11 | Linux ABI: alpha の syscall 表、ELF、8KiB ページ、浮動小数点補完と非整列補完の OS 実装 | AL10 | - |
+| AL12 | `heavy_program_alpha`（配布物のコマンド群） | AL11 | S16-1 |
+| AL13 | ABI 照合（SRC-LINUX UAPI、所有者確認）+ 残件整理・判定列更新 | AL12 | S16-2 |
 
 ### 段階 17：PA-RISC
 
@@ -323,6 +103,22 @@ WebAssembly の本格的な実装と、WASI preview1 の OS パーソナリテ�
 | S17-1 | hppa の配布物のコマンド群が、ゲストのルートを使って正しい出力を返す（テスト `heavy_program_parisc`）。 | 未整備 |
 | S17-2 | ABI 表が SRC-LINUX の UAPI と一致することを所有者が確認する。 | 所有者 |
 
+作業計画：
+
+| # | 内容 | 前提 | 判定 |
+|---|---|---|---|
+| PR1 | 着手条件: SPEC-PARISC-11・SPEC-PARISC-20 の点検（確認済み）、PA-RISC 1.0 の根拠資料の追加登録または範囲からの除外の決定、BIN 登録、GAP-0023 残項目の点検 | - | - |
+| PR2 | `guests/parisc` 骨格: CpuState（GR・CR・SR・IAOQ 前後・PSW）、モデル（1.0・1.1・2.0）の宣言 | PR1 | - |
+| PR3 | デコード: 32 ビット固定長、opcode + completer フィールドの扱い | PR2 | - |
+| PR4 | `run_parisc` 実行ループ: IAOQ の進行と無効化（PSW.N）+ bare 最小テスト | PR3 | - |
+| PR5 | 算術・論理・比較（add/sub/comb/and/or/xor）、extract/deposit・シフト | PR4 | - |
+| PR6 | load/store（空間レジスタ経由を含む）・ldcw/ldcws・mfctl（cr27 の TLS 読み出しを含む）・probe | PR4 | - |
+| PR7 | 分岐: bv/be/bl、遅延分岐と nullify の条件 | PR4 | - |
+| PR8 | システムコール: ゲートウェイページへの分岐という特殊経路（lws の CAS 規約を含む） | PR4 | - |
+| PR9 | FP 命令と MAX 拡張 | PR4 | - |
+| PR10 | Linux ABI: hppa の syscall 表・ELF・`heavy_program_parisc` | PR8,PR9 | S17-1 |
+| PR11 | ABI 照合（SRC-LINUX UAPI、所有者確認）+ 残件整理・判定列更新 | PR10 | S17-2 |
+
 ### 段階 18：SuperH
 
 - 版の範囲は SH-1 から SH-4A までと、SH-2 互換の J-core。SH-2A の 32 ビット命令はデコーダの入口の長さの規則で扱う
@@ -335,6 +131,23 @@ WebAssembly の本格的な実装と、WASI preview1 の OS パーソナリテ�
 |---|---|---|
 | S18-1 | sh4 の配布物のコマンド群が、ゲストのルートを使って正しい出力を返す（テスト `heavy_program_superh`）。 | 未整備 |
 | S18-2 | ABI 表が SRC-LINUX の UAPI と一致することを所有者が確認する。 | 所有者 |
+
+作業計画：
+
+| # | 内容 | 前提 | 判定 |
+|---|---|---|---|
+| SH1 | 着手条件: SPEC-SUPERH-SH2A・SPEC-SUPERH-JCORE の版確定、SH-3/SH-3E の根拠資料の追加登録または範囲からの除外の決定、BIN 登録（sh4 両エンディアン）、GAP-0023 残項目の点検 | - | - |
+| SH2 | `guests/superh` 骨格: CpuState（R0-15・PC/PR/SR/GBR/VBR/MACH/MACL/FPUL・FP/FPSCR）、モデル（SH-1 から SH-4A・J-core）の宣言 | SH1 | - |
+| SH3 | デコード: 16 ビット主体 + SH-2A の 32 ビット命令（デコーダ入口の長さ規則）。両エンディアンの語並び | SH2 | - |
+| SH4 | `run_superh` 実行ループ: 遅延スロットとスロット不正命令の例外 + bare 最小テスト | SH3 | - |
+| SH5 | 算術・論理・比較（add/sub/neg/and/or/xor/cmp 系）・lds/sts（PR/GBR/MACH/MACL/FPUL/FPSCR の転送） | SH4 | - |
+| SH6 | load/store: レジスタ相対・GBR 相対・R0 相対・PC 相対リテラル | SH4 | - |
+| SH7 | 分岐: bf/bt/bra/bsr/bsrf/jsr/rts/trapa と遅延スロット | SH4 | - |
+| SH8 | 乗算・MAC（mul/macl/dmuls・MACH/MACL）・ext/シフト系 | SH4 | - |
+| SH9 | SH-4 FPU: fmov/fadd/fsub/fmul/fdiv/fmac/ftrc/ftst。FPSCR の PR/SZ/FR を実行モードとして扱う | SH4 | - |
+| SH10 | モデル差（SH-1 から SH-4A・SH-2A・J-core）を `when` 述語とパラメータで切り分け。gUSA と SH-4A の movli/movco、J-core の cas.l/shad/shld の扱いを決める | SH5-9 | - |
+| SH11 | Linux ABI: sh4 の syscall 表・ELF・`heavy_program_superh`（両エンディアン） | SH10 | S18-1 |
+| SH12 | ABI 照合（SRC-LINUX UAPI、所有者確認）+ 残件整理・判定列更新 | SH11 | S18-2 |
 
 ### 段階 19：LoongArch
 
@@ -350,6 +163,24 @@ WebAssembly の本格的な実装と、WASI preview1 の OS パーソナリテ�
 | S19-2 | ABI 表が、UAPI ヘッダからの抽出値と一致する（テスト `heavy_abi_loongarch`）。 | 未整備 |
 | S19-3 | llvm-objdump とのデコーダの差分テストが通る（テスト `heavy_oracle_loongarch`）。 | 未整備 |
 
+作業計画：
+
+| # | 内容 | 前提 | 判定 |
+|---|---|---|---|
+| LA1 | 着手条件: SPEC-LOONGARCH-PSABI の版確定、BIN 登録、初期の独自 ABI と本流 ABI の区別の確認 | - | - |
+| LA2 | `guests/loongarch` 骨格: CpuState（r0-31・f0-31・PC・CSR・fcc）、機能（LA32・LA64、LSX/LASX/LBT は機能旗のみ先に）とモデルの宣言 | LA1 | - |
+| LA3 | デコード: 32 ビット固定長、LA32/LA64 の差 | LA2 | - |
+| LA4 | `run_loongarch` 実行ループ + bare 最小テスト（LA32 は Linux 移植がないので裸環境で検証する） | LA3 | - |
+| LA5 | 整数算術・論理・シフト・比較 | LA4 | - |
+| LA6 | load/store・原子（ll/sc・am* 系） | LA4 | - |
+| LA7 | 分岐・jirl・b/bl | LA4 | - |
+| LA8 | CSR・例外・ertn、CPUCFG を識別情報へ接続、syscall/break・dbar/ibar・rdcntvl/rdcntvh/rdcntid/rdtime | LA4 | - |
+| LA9 | FPU（単・倍・fcc による条件分岐） | LA4 | - |
+| LA10 | Linux ABI: 独自 ABI と本流 ABI をゲスト ABI の変種として区別し、syscall 表・ELF・`heavy_program_loongarch` | LA8,LA9 | S19-1 |
+| LA11 | `heavy_abi_loongarch` | LA10 | S19-2 |
+| LA12 | `heavy_oracle_loongarch` | LA9 | S19-3 |
+| LA13 | LSX/LASX/LBT の保留方針の確定（SPEC-LOONGARCH-VEXT 未刊行）+ 残件整理・判定列更新 | LA11,LA12 | - |
+
 ### 段階 20：OpenRISC
 
 - 版の範囲は OpenRISC 1000 アーキテクチャの各版と浮動小数点の拡張。遅延スロットの有無は機能とする
@@ -361,6 +192,21 @@ WebAssembly の本格的な実装と、WASI preview1 の OS パーソナリテ�
 |---|---|---|
 | S20-1 | or1k の配布物のコマンド群が、ゲストのルートを使って正しい出力を返す（テスト `heavy_program_openrisc`）。 | 未整備 |
 | S20-2 | ABI 表が SRC-LINUX の UAPI と一致することを所有者が確認する。 | 所有者 |
+
+作業計画：
+
+| # | 内容 | 前提 | 判定 |
+|---|---|---|---|
+| OR1 | 着手条件: BIN 登録、GAP-0023 残項目の点検 | - | - |
+| OR2 | `guests/openrisc` 骨格: CpuState（r0-31・SR・PPC/NPC・SPR）、遅延スロットの有無の機能旗 | OR1 | - |
+| OR3 | デコード方式の決定（32 ビット固定長） | OR2 | - |
+| OR4 | `run_openrisc` 実行ループ + bare 最小テスト | OR3 | - |
+| OR5 | 算術・論理・シフト・比較（l.add/l.sub/l.and/l.sll/l.sf* 系）・l.cmov | OR4 | - |
+| OR6 | load/store・l.lwa/l.swa・l.msync/l.psync/l.csync | OR4 | - |
+| OR7 | 分岐・l.bf/l.bnf・l.j/l.jal/l.jr/l.jalr・l.sys/l.trap・l.mfspr/l.mtspr | OR4 | - |
+| OR8 | l.mac・浮動小数点拡張 | OR4 | - |
+| OR9 | Linux ABI: or1k の syscall 表・ELF・`heavy_program_openrisc` | OR8 | S20-1 |
+| OR10 | ABI 照合（SRC-LINUX UAPI、所有者確認）+ 残件整理・判定列更新 | OR9 | S20-2 |
 
 ### 段階 21：IA-64
 
@@ -375,6 +221,23 @@ WebAssembly の本格的な実装と、WASI preview1 の OS パーソナリテ�
 | S21-1 | ia64 の配布物のコマンド群が、ゲストのルートを使って正しい出力を返す（テスト `heavy_program_ia64`）。 | 未整備 |
 | S21-2 | ABI 表が SRC-LINUX-66 の UAPI と一致することを所有者が確認する。 | 所有者 |
 
+作業計画：
+
+| # | 内容 | 前提 | 判定 |
+|---|---|---|---|
+| IA1 | 着手条件: SRC-LINUX-66 の点検（確認済み）、ia64 配布物の入手経路の確定（Linux 6.7 で ABI 削除済み）、GAP-0023 残項目の点検 | - | - |
+| IA2 | `guests/ia64` の段階 2 の試作を本実装に差し替える骨格: CpuState（GR 128・回転領域・PR・BR・AR（ar.lc/ar.ec を含む）・NaT・ALAT・RSE 状態）、モデルの宣言 | IA1 | - |
+| IA3 | デコード: 128 ビットバンドル（テンプレート・スロット・stop ビット）の ISADL 表現 | IA2 | - |
+| IA4 | `run_ia64` 実行ループ: バンドル進行と RIP 管理 + bare 最小テスト | IA3 | - |
+| IA5 | 整数算術・比較・述語生成・シフト/extr/mix 系 | IA4 | - |
+| IA6 | load/store・ALAT（advanced load と check）・chk.s/chk.a・mf | IA4 | - |
+| IA7 | 分岐: br.cond/br.call/br.ret/br.cloop/br.cexit/br.wexit・述語実行 | IA4 | - |
+| IA8 | 回転レジスタ・レジスタスタック（alloc/st.spill/ld.fill/flushrs/loadrs/cover、RSE とバッキングストアへの書き出し） | IA4 | - |
+| IA9 | FP（82 ビット形式・fcvt/fma 系。softfloat の拡張精度を接続） | IA4 | - |
+| IA10 | システムコール: `break 0x100000` とゲートページ経由の高速呼出 | IA4 | - |
+| IA11 | Linux ABI（SRC-LINUX-66 の UAPI）・ELF・`heavy_program_ia64` | IA10 | S21-1 |
+| IA12 | ABI 照合（所有者確認）+ 残件整理・判定列更新 | IA11 | S21-2 |
+
 ### 段階 22：Hexagon
 
 - 版の範囲は V5 以降の各版と HVX。パケットのステップ、`.new` オペランド、デュプレックス、定数拡張子、ハードウェアループ
@@ -388,6 +251,25 @@ WebAssembly の本格的な実装と、WASI preview1 の OS パーソナリテ�
 | S22-1 | hexagon の配布物のコマンド群が、ゲストのルートを使って正しい出力を返す（テスト `heavy_program_hexagon`）。 | 未整備 |
 | S22-2 | ABI 表が、UAPI ヘッダからの抽出値と一致する（テスト `heavy_abi_hexagon`）。 | 未整備 |
 | S22-3 | llvm-objdump とのデコーダの差分テストが通る（テスト `heavy_oracle_hexagon`）。 | 未整備 |
+
+作業計画：
+
+| # | 内容 | 前提 | 判定 |
+|---|---|---|---|
+| HX1 | 着手条件: SPEC-HEXAGON-PRM-PREV の版確定、BIN 登録 | - | - |
+| HX2 | `guests/hexagon` の段階 2 の試作を本実装に差し替える骨格: CpuState（r0-31・p0-3・USR・PC・LC/SA・GP・M0/M1・CS0/CS1・スレッド状態）、モデル（V5 以降の各版）の宣言 | HX1 | - |
+| HX3 | デコード: パケット構造（1 から 4 命令・パケット終端ビット・duplex・constant extender） | HX2 | - |
+| HX4 | 実行エンジンの接続: パケット単位の step（同時発行の意味論・`.new` オペランド）+ bare 最小テスト | HX3 | - |
+| HX5 | 整数算術・論理・シフト・combine/mux 系 | HX4 | - |
+| HX6 | load/store・memop・`.new` 書き込み | HX4 | - |
+| HX7 | 分岐・jump/call/jumpr・述語付き実行・allocframe/deallocframe/dealloc_return・endloop・trap0 | HX4 | - |
+| HX8 | ハードウェアループ（loop0/loop1、LC/SA） | HX4 | - |
+| HX9 | HVX | HX4 | - |
+| HX10 | タイミングモデル: 複数ハードウェアスレッドの交互実行を表す専用モデル | HX4 | - |
+| HX11 | Linux ABI: hexagon の syscall 表（trap0）・ELF・`heavy_program_hexagon` | HX5-9 | S22-1 |
+| HX12 | `heavy_abi_hexagon` | HX11 | S22-2 |
+| HX13 | `heavy_oracle_hexagon`（llvm-objdump 差分） | HX9 | S22-3 |
+| HX14 | 残件整理・判定列更新 | HX10,HX12,HX13 | - |
 
 ### 段階 23：VAX
 
@@ -404,6 +286,24 @@ WebAssembly の本格的な実装と、WASI preview1 の OS パーソナリテ�
 |---|---|---|
 | S23-1 | 命令単位のテストが裸実行環境で通る（DEC の形式とパック十進を含む。テスト `bare_vax`）。 | 未整備 |
 
+作業計画：
+
+| # | 内容 | 前提 | 判定 |
+|---|---|---|---|
+| VX1 | 着手条件: SPEC-VAX-MICROVAX の版確定、段階 10 の成果（DEC 形式・パック十進）の確認、GAP-0023 残項目の点検 | 段階 10 | - |
+| VX2 | `guests/vax` 骨格: CpuState（r0-15（AP/FP/SP/PC）・PSL・命令の途中状態）、モデル（11/780 から NVAX・MicroVAX）の宣言 | VX1 | - |
+| VX3 | デコード: 可変長命令とオペランド指定子のフックの ISADL 拡張（指定子の評価・読み書き・長さ） | VX2 | - |
+| VX4 | `run_vax` 実行ループ: 可変長 fetch・中断可能な命令の途中状態 + bare 最小テスト | VX3 | - |
+| VX5 | 整数: mov/add/sub/mul/div/emul/ediv・cmp/tst/clr/inc/dec | VX4 | - |
+| VX6 | 論理・ビット・bitfield・shift/rot | VX4 | - |
+| VX7 | push/pop・queue 命令（insq*/remq* 系）・文字列命令（movc/cmpc/loc/skp/scan/span/matchc/movtc/movtuc/crc）・chmk/chme（段階 25 の BSD パーソナリティが使う） | VX4 | - |
+| VX8 | 分岐・calls/callg/ret のフレーム構築と解除 | VX4 | - |
+| VX9 | 浮動小数点（F・D・G・H。poly 系を含む）・cvt 系。D 形式のワード並び（middle-endian）はオペランド指定子側で扱う | VX4 | - |
+| VX10 | パック十進（movp/cmpp/addp/subp/mulp/divp/cvt 系） | VX9 | - |
+| VX11 | モデル差と MicroVAX 省略命令の OS 補完経路 | VX5-10 | - |
+| VX12 | `bare_vax` テスト群（DEC 形式とパック十進を含む）+ マイクロコード時間の専用タイミングモデル | VX11 | S23-1 |
+| VX13 | 残件整理・判定列更新 | VX12 | - |
+
 ### 段階 24：PDP-11
 
 前提：段階 10（F、D の浮動小数点形式）。
@@ -417,6 +317,18 @@ WebAssembly の本格的な実装と、WASI preview1 の OS パーソナリテ�
 | ID | 条件 | 判定 |
 |---|---|---|
 | S24-1 | 命令単位のテストが裸実行環境で通る（分離 I&D のアドレス空間を含む。テスト `bare_pdp11`）。 | 未整備 |
+
+作業計画：
+
+| # | 内容 | 前提 | 判定 |
+|---|---|---|---|
+| PD1 | 着手条件: SPEC-PDP11-ARCH83・SPEC-PDP11-CIS・SPEC-PDP11-J11 の版確定、LSI-11/11/03 の根拠資料の追加登録または範囲からの除外の決定、段階 10（F・D 形式）の成果確認、GAP-0023 残項目の点検 | 段階 10 | - |
+| PD2 | `guests/pdp11` 骨格: CpuState（r0-7・PSW）、モデル（11/03 から J-11）とオプション（EIS・FIS・FP11・CIS）の機能旗 | PD1 | - |
+| PD3 | デコード: 16 ビット固定・8 モードのオペランド指定子（byte/word の扱い）。long/D 形式の middle-endian（3412）の語順 | PD2 | - |
+| PD4 | `run_pdp11` 実行ループ: ワード fetch・奇数アドレスのアドレスエラー + bare 最小テスト | PD3 | - |
+| PD5 | 整数: mov/add/sub/cmp/bit/bic/bis/clr/com/inc/dec/neg/tst（byte/word） | PD4 | - |
+| PD6 | 論理・シフト・rot/sxt/xor・adc/sbc/swab・scc/ccc | PD4 | - |
+| PD7 | 分岐・sob・jsr/rts/jmp | PD4 | - |
 
 ### 段階 25：追加の OS パーソナリティ
 
