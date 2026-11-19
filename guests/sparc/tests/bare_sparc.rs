@@ -490,3 +490,105 @@ fn shifts() {
         .unwrap();
     assert_eq!(g(&mut env, 3), 0x0000_01e0);
 }
+
+#[test]
+fn load_store_sizes_be() {
+    let mut env = env();
+    env.backend.set(Gpr(1).state(), 0x200);
+    // BE の [0x12 0x34 0x56 0x78] を書いて部分ロードを確かめる。
+    env.backend.set(Gpr(2).state(), 0x1234_5678);
+    env.step(|b| sem::st(b, Gpr(2), Gpr(1), Src2::Reg(Gpr(0))))
+        .unwrap();
+    env.step(|b| sem::ldub(b, Gpr(3), Gpr(1), Src2::Reg(Gpr(0))))
+        .unwrap();
+    assert_eq!(g(&mut env, 3), 0x12);
+    env.step(|b| sem::ldub(b, Gpr(3), Gpr(1), Src2::Imm(3)))
+        .unwrap();
+    assert_eq!(g(&mut env, 3), 0x78);
+    env.step(|b| sem::lduh(b, Gpr(3), Gpr(1), Src2::Imm(2)))
+        .unwrap();
+    assert_eq!(g(&mut env, 3), 0x5678);
+    // 符号拡張。0x80ff_7f00 の先頭バイトと先頭ハーフ。
+    env.backend.set(Gpr(2).state(), 0x80ff_7f00);
+    env.step(|b| sem::st(b, Gpr(2), Gpr(1), Src2::Reg(Gpr(0))))
+        .unwrap();
+    env.step(|b| sem::ldsb(b, Gpr(3), Gpr(1), Src2::Reg(Gpr(0))))
+        .unwrap();
+    assert_eq!(g(&mut env, 3), 0xffff_ff80);
+    env.step(|b| sem::ldsh(b, Gpr(3), Gpr(1), Src2::Reg(Gpr(0))))
+        .unwrap();
+    assert_eq!(g(&mut env, 3), 0xffff_80ff);
+    // stb/sth で部分書き込みし、ld で読み戻す。
+    env.backend.set(Gpr(2).state(), 0xaabb_ccdd);
+    env.step(|b| sem::stb(b, Gpr(2), Gpr(1), Src2::Imm(1)))
+        .unwrap();
+    env.step(|b| sem::sth(b, Gpr(2), Gpr(1), Src2::Imm(2)))
+        .unwrap();
+    env.step(|b| sem::ld(b, Gpr(3), Gpr(1), Src2::Reg(Gpr(0))))
+        .unwrap();
+    assert_eq!(g(&mut env, 3), 0x80dd_ccdd);
+}
+
+#[test]
+fn ldd_std_pair() {
+    let mut env = env();
+    env.backend.set(Gpr(1).state(), 0x300);
+    env.backend.set(Gpr(4).state(), 0xdead_beef);
+    env.backend.set(Gpr(5).state(), 0x1234_5678);
+    // std は rd=hi（アドレス側）、rd2=lo。
+    env.step(|b| sem::std(b, Gpr(4), Gpr(5), Gpr(1), Src2::Reg(Gpr(0))))
+        .unwrap();
+    env.step(|b| sem::ldd(b, Gpr(6), Gpr(7), Gpr(1), Src2::Reg(Gpr(0))))
+        .unwrap();
+    assert_eq!(g(&mut env, 6), 0xdead_beef);
+    assert_eq!(g(&mut env, 7), 0x1234_5678);
+}
+
+#[test]
+fn ldstub_loads_and_sets_ff() {
+    let mut env = env();
+    env.backend.set(Gpr(1).state(), 0x400);
+    env.backend.set(Gpr(2).state(), 0x42);
+    env.step(|b| sem::stb(b, Gpr(2), Gpr(1), Src2::Reg(Gpr(0))))
+        .unwrap();
+    env.step(|b| sem::ldstub(b, Gpr(3), Gpr(1), Src2::Reg(Gpr(0))))
+        .unwrap();
+    // 読んだ値は元のバイト、メモリは 0xff になる。
+    assert_eq!(g(&mut env, 3), 0x42);
+    env.step(|b| sem::ldub(b, Gpr(3), Gpr(1), Src2::Reg(Gpr(0))))
+        .unwrap();
+    assert_eq!(g(&mut env, 3), 0xff);
+}
+
+#[test]
+fn swap_exchanges_word() {
+    let mut env = env();
+    env.backend.set(Gpr(1).state(), 0x500);
+    env.backend.set(Gpr(2).state(), 0xaaaa_bbbb);
+    env.backend.set(Gpr(3).state(), 0x1111_2222);
+    env.step(|b| sem::st(b, Gpr(2), Gpr(1), Src2::Reg(Gpr(0))))
+        .unwrap();
+    env.step(|b| sem::swap(b, Gpr(3), Gpr(1), Src2::Reg(Gpr(0))))
+        .unwrap();
+    // rd はメモリの旧値、メモリは rd の旧値。
+    assert_eq!(g(&mut env, 3), 0xaaaa_bbbb);
+    env.step(|b| sem::ld(b, Gpr(4), Gpr(1), Src2::Reg(Gpr(0))))
+        .unwrap();
+    assert_eq!(g(&mut env, 4), 0x1111_2222);
+}
+
+#[test]
+fn exec_decodes_asi_load() {
+    let mut env = env();
+    // lduba [%g1 + %g0] %asi, %g3 の命令語（op3=010001, i=0,
+    // asi=0x0a）。SP8 までは ASI を通常空間として実行する。
+    let word: u32 = (0b11 << 30) | (3 << 25) | (0b010001 << 19) | (1 << 14) | (0x0a << 5);
+    let insn = polyisa_guest_sparc::decode(u128::from(word), 32).unwrap();
+    assert_eq!(insn, polyisa_guest_sparc::Insn::Lduba);
+    env.backend.set(Gpr(1).state(), 0x600);
+    env.backend.set(Gpr(2).state(), 0xab);
+    env.step(|b| sem::stb(b, Gpr(2), Gpr(1), Src2::Reg(Gpr(0))))
+        .unwrap();
+    env.step(|b| sem::exec(b, insn, word, 0)).unwrap();
+    assert_eq!(g(&mut env, 3), 0xab);
+}

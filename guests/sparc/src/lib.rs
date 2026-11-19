@@ -130,8 +130,8 @@ mod tests {
 
     #[test]
     fn insn_count() {
-        // 骨格の命令集合（整数演算・load/store・分岐の基本組）。
-        assert_eq!(INSNS.len(), 78);
+        // 骨格の命令集合（整数演算・load/store 全サイズ・ASI 形・分岐）。
+        assert_eq!(INSNS.len(), 110);
     }
 
     #[test]

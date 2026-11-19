@@ -22,7 +22,7 @@
 //! Ref: SPEC-SPARC-V9.
 
 use polyisa_mem::{Access, AccessKind, Align, Endian};
-use polyisa_sem::{Backend, Cmp, Flow, StateArray, StateRef, W32, W64};
+use polyisa_sem::{Backend, Cmp, Flow, StateArray, StateRef, W8, W16, W32, W64, Width};
 
 use super::{CpuState, Insn};
 
@@ -198,6 +198,13 @@ const DATA_WRITE: Access = Access {
     endian: Endian::Be,
     align: Align::Natural,
     kind: AccessKind::DataWrite,
+};
+
+/// LDSTUB と SWAP の不可分アクセス。
+const ATOMIC_RW: Access = Access {
+    endian: Endian::Be,
+    align: Align::Natural,
+    kind: AccessKind::AtomicRw,
 };
 
 /// 3 オペランド形の第 2 ソース。レジスタ（i=0）か即値（i=1）。
@@ -720,25 +727,144 @@ pub fn sethi<B: Backend>(b: &mut B, rd: Gpr, imm22: u64) -> Flow<B> {
     Ok(())
 }
 
-/// LD（word。BE・自然整列）。
-pub fn ld<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2) -> Flow<B> {
+/// 実効アドレス。rs1 + src2 をモデルの語幅で包む。V7/V8 のデータ
+/// アクセスも 32 ビットアドレスなので `wmask` をかける。
+/// Ref: SPEC-SPARC-V8 (Version 8) §Load/Store Instructions.
+fn eff_addr<B: Backend>(b: &mut B, rs1: Gpr, s: Src2) -> B::V<W64> {
     let base = read(b, rs1);
     let off = src2(b, s);
-    let addr = b.add::<W64>(base, off);
-    let v: B::V<W32> = b.load::<W32>(addr, DATA_READ)?;
-    let w = b.zext::<W32, W64>(v);
-    write(b, rd, w);
+    let sum = b.add::<W64>(base, off);
+    wmask(b, sum)
+}
+
+/// ロードの共通処理。`se` が立っていれば符号拡張する。
+/// Ref: SPEC-SPARC-V8 (Version 8) §Load Instructions.
+fn ld_common<B: Backend, W: Width>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2, se: bool) -> Flow<B> {
+    let addr = eff_addr(b, rs1, s);
+    let v: B::V<W> = b.load::<W>(addr, DATA_READ)?;
+    let w = if se {
+        b.sext::<W, W64>(v)
+    } else {
+        b.zext::<W, W64>(v)
+    };
+    let m = wmask(b, w);
+    write(b, rd, m);
     Ok(())
 }
 
-/// ST（word。BE・自然整列）。
+/// ストアの共通処理。rd の下位をそのまま格納する。
+/// Ref: SPEC-SPARC-V8 (Version 8) §Store Instructions.
+fn st_common<B: Backend, W: Width>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2) -> Flow<B> {
+    let addr = eff_addr(b, rs1, s);
+    let v = read(b, rd);
+    let lo = b.trunc::<W64, W>(v);
+    b.store::<W>(addr, lo, DATA_WRITE)?;
+    Ok(())
+}
+
+/// LD（word。BE・自然整列）。
+pub fn ld<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2) -> Flow<B> {
+    ld_common::<B, W32>(b, rd, rs1, s, false)
+}
+
+/// LDUB（符号なしバイト）。
+pub fn ldub<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2) -> Flow<B> {
+    ld_common::<B, W8>(b, rd, rs1, s, false)
+}
+
+/// LDSB（符号付きバイト）。
+pub fn ldsb<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2) -> Flow<B> {
+    ld_common::<B, W8>(b, rd, rs1, s, true)
+}
+
+/// LDUH（符号なしハーフワード）。
+pub fn lduh<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2) -> Flow<B> {
+    ld_common::<B, W16>(b, rd, rs1, s, false)
+}
+
+/// LDSH（符号付きハーフワード）。
+pub fn ldsh<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2) -> Flow<B> {
+    ld_common::<B, W16>(b, rd, rs1, s, true)
+}
+
+/// LDD（ダブルワード。rd には上位（アドレス側）、rd2 には下位）。
+/// V8 では rd は偶数でなければならない。奇数のときの結果は不定で、
+/// 本実装は隣接レジスタへの書き込みとして進める。
+/// Ref: SPEC-SPARC-V8 (Version 8) §LDD.
+pub fn ldd<B: Backend>(b: &mut B, rd: Gpr, rd2: Gpr, rs1: Gpr, s: Src2) -> Flow<B> {
+    let addr = eff_addr(b, rs1, s);
+    let v: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    let sh32 = b.konst::<W64>(32);
+    let hi = b.shr_l::<W64>(v, sh32);
+    let mhi = wmask(b, hi);
+    write(b, rd, mhi);
+    // V9 でも各半分は 32 ビットワードとしてレジスタに入るので、
+    // 語幅に関係なく 32 ビットで切って拡張する。
+    let lo32 = b.trunc::<W64, W32>(v);
+    let e = b.zext::<W32, W64>(lo32);
+    let mlo = wmask(b, e);
+    write(b, rd2, mlo);
+    Ok(())
+}
+
+/// ST（word）。
 pub fn st<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2) -> Flow<B> {
-    let base = read(b, rs1);
-    let off = src2(b, s);
-    let addr = b.add::<W64>(base, off);
-    let v: B::V<W64> = read(b, rd);
-    let lo: B::V<W32> = b.trunc::<W64, W32>(v);
-    b.store::<W32>(addr, lo, DATA_WRITE)?;
+    st_common::<B, W32>(b, rd, rs1, s)
+}
+
+/// STB（バイト）。
+pub fn stb<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2) -> Flow<B> {
+    st_common::<B, W8>(b, rd, rs1, s)
+}
+
+/// STH（ハーフワード）。
+pub fn sth<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2) -> Flow<B> {
+    st_common::<B, W16>(b, rd, rs1, s)
+}
+
+/// STD（ダブルワード。rd が上位（アドレス側）、rd2 が下位）。
+/// Ref: SPEC-SPARC-V8 (Version 8) §STD.
+pub fn std<B: Backend>(b: &mut B, rd: Gpr, rd2: Gpr, rs1: Gpr, s: Src2) -> Flow<B> {
+    let addr = eff_addr(b, rs1, s);
+    let hi = read(b, rd);
+    let hi32 = wmask(b, hi);
+    let sh32 = b.konst::<W64>(32);
+    let h = b.shl::<W64>(hi32, sh32);
+    // V9 でも各半分は 32 ビットワードなので、rd2 の上位は捨てる。
+    let lo = read(b, rd2);
+    let lo32 = b.trunc::<W64, W32>(lo);
+    let l = b.zext::<W32, W64>(lo32);
+    let v = b.or::<W64>(h, l);
+    b.store::<W64>(addr, v, DATA_WRITE)?;
+    Ok(())
+}
+
+/// LDSTUB。バイトを読み 0xFF を書き戻す不可分操作。
+/// Ref: SPEC-SPARC-V8 (Version 8) §LDSTUB.
+pub fn ldstub<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2) -> Flow<B> {
+    let addr = eff_addr(b, rs1, s);
+    b.probe(addr, 1, ATOMIC_RW)?;
+    let v: B::V<W8> = b.load::<W8>(addr, ATOMIC_RW)?;
+    let ff = b.konst::<W8>(0xff);
+    b.store::<W8>(addr, ff, ATOMIC_RW)?;
+    let w = b.zext::<W8, W64>(v);
+    let m = wmask(b, w);
+    write(b, rd, m);
+    Ok(())
+}
+
+/// SWAP。メモリのワードと rd の下位 32 ビットを交換する不可分操作。
+/// Ref: SPEC-SPARC-V8 (Version 8) §SWAP.
+pub fn swap<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2) -> Flow<B> {
+    let addr = eff_addr(b, rs1, s);
+    b.probe(addr, 4, ATOMIC_RW)?;
+    let v: B::V<W32> = b.load::<W32>(addr, ATOMIC_RW)?;
+    let rv = read(b, rd);
+    let rv32 = b.trunc::<W64, W32>(rv);
+    b.store::<W32>(addr, rv32, ATOMIC_RW)?;
+    let w = b.zext::<W32, W64>(v);
+    let m = wmask(b, w);
+    write(b, rd, m);
     Ok(())
 }
 
@@ -956,7 +1082,18 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Flow<B> {
         | Insn::Jmpl
         | Insn::Save
         | Insn::Restore
-        | Insn::Ld => dispatch3(
+        | Insn::Ld
+        | Insn::Ldub
+        | Insn::Ldsb
+        | Insn::Lduh
+        | Insn::Ldsh
+        | Insn::Ldd
+        | Insn::Ldstub
+        | Insn::Swap
+        | Insn::St
+        | Insn::Stb
+        | Insn::Sth
+        | Insn::Std => dispatch3(
             b,
             insn,
             Gpr(o[0] as u8),
@@ -999,7 +1136,18 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Flow<B> {
         | Insn::JmplI
         | Insn::SaveI
         | Insn::RestoreI
-        | Insn::LdI => dispatch3(
+        | Insn::LdI
+        | Insn::LdubI
+        | Insn::LdsbI
+        | Insn::LduhI
+        | Insn::LdshI
+        | Insn::LddI
+        | Insn::LdstubI
+        | Insn::SwapI
+        | Insn::StI
+        | Insn::StbI
+        | Insn::SthI
+        | Insn::StdI => dispatch3(
             b,
             insn,
             Gpr(o[0] as u8),
@@ -1007,13 +1155,6 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Flow<B> {
             Src2::Imm(sext13(o[2])),
             pc,
         ),
-        Insn::St => st(
-            b,
-            Gpr(o[0] as u8),
-            Gpr(o[1] as u8),
-            Src2::Reg(Gpr(o[2] as u8)),
-        ),
-        Insn::StI => st(b, Gpr(o[0] as u8), Gpr(o[1] as u8), Src2::Imm(sext13(o[2]))),
         Insn::Sethi => sethi(b, Gpr(o[0] as u8), o[1]),
         Insn::Call => {
             // disp30 は符号拡張して <<2 の PC 相対。
@@ -1027,6 +1168,41 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Flow<B> {
             let disp22 = ((o[2] as i64) << 42) >> 42;
             let target = pc.wrapping_add((disp22 << 2) as u64);
             bicc(b, a, cond, pc, target)
+        }
+        // ASI 指定形。オペランドは (rd, rs1, asi, rs2)。V8 では特権
+        // 命令だが、空間選択と特権トラップは SP8 で扱うため、ここでは
+        // 通常空間へのアクセスに畳み込む。
+        Insn::Lda
+        | Insn::Lduba
+        | Insn::Lduha
+        | Insn::Ldda
+        | Insn::Ldsba
+        | Insn::Ldsha
+        | Insn::Ldstuba
+        | Insn::Sta
+        | Insn::Stba
+        | Insn::Stha
+        | Insn::Stda
+        | Insn::Swapa => {
+            let rd = Gpr(o[0] as u8);
+            let rs1 = Gpr(o[1] as u8);
+            let s = Src2::Reg(Gpr(o[3] as u8));
+            let rd2 = Gpr(rd.0.wrapping_add(1) & 31);
+            match insn {
+                Insn::Lda => ld(b, rd, rs1, s),
+                Insn::Lduba => ldub(b, rd, rs1, s),
+                Insn::Lduha => lduh(b, rd, rs1, s),
+                Insn::Ldda => ldd(b, rd, rd2, rs1, s),
+                Insn::Ldsba => ldsb(b, rd, rs1, s),
+                Insn::Ldsha => ldsh(b, rd, rs1, s),
+                Insn::Ldstuba => ldstub(b, rd, rs1, s),
+                Insn::Sta => st(b, rd, rs1, s),
+                Insn::Stba => stb(b, rd, rs1, s),
+                Insn::Stha => sth(b, rd, rs1, s),
+                Insn::Stda => std(b, rd, rd2, rs1, s),
+                Insn::Swapa => swap(b, rd, rs1, s),
+                _ => unreachable!(),
+            }
         }
         Insn::Unimp => Err(unimp(b, o[0])),
     }
@@ -1070,6 +1246,23 @@ fn dispatch3<B: Backend>(b: &mut B, insn: Insn, rd: Gpr, rs1: Gpr, s: Src2, pc: 
         Insn::Save | Insn::SaveI => save(b, rd, rs1, s),
         Insn::Restore | Insn::RestoreI => restore(b, rd, rs1, s),
         Insn::Ld | Insn::LdI => ld(b, rd, rs1, s),
+        Insn::Ldub | Insn::LdubI => ldub(b, rd, rs1, s),
+        Insn::Ldsb | Insn::LdsbI => ldsb(b, rd, rs1, s),
+        Insn::Lduh | Insn::LduhI => lduh(b, rd, rs1, s),
+        Insn::Ldsh | Insn::LdshI => ldsh(b, rd, rs1, s),
+        Insn::Ldd | Insn::LddI => {
+            let rd2 = Gpr(rd.0.wrapping_add(1) & 31);
+            ldd(b, rd, rd2, rs1, s)
+        }
+        Insn::Ldstub | Insn::LdstubI => ldstub(b, rd, rs1, s),
+        Insn::Swap | Insn::SwapI => swap(b, rd, rs1, s),
+        Insn::St | Insn::StI => st(b, rd, rs1, s),
+        Insn::Stb | Insn::StbI => stb(b, rd, rs1, s),
+        Insn::Sth | Insn::SthI => sth(b, rd, rs1, s),
+        Insn::Std | Insn::StdI => {
+            let rd2 = Gpr(rd.0.wrapping_add(1) & 31);
+            std(b, rd, rd2, rs1, s)
+        }
         _ => unreachable!(),
     }
 }
