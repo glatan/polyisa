@@ -165,8 +165,9 @@ pub mod sr_bit {
 /// 命令を振り分ける。
 ///
 /// `insn` は生成デコーダの結果、`w` は命令ワード。`pc` は命令の先頭
-/// アドレス。未実装のものは `Undefined` に落とす。rte のスタック
-/// 復帰と reset の外部通知は例外処理の経路と一緒に足す。
+/// アドレス。発生した例外は `deliver` がベクタへ配送する（trace/割り込みと
+/// アドレスエラーの 14 バイトフレームは未接続）。reset の外部通知は
+/// バス経路の接続待ち。
 pub fn exec<B: Backend>(b: &mut B, insn: super::Insn, w: u64, pc: u64) -> Flow<B> {
     match insn {
         super::Insn::Nop => Ok(()),
@@ -283,17 +284,14 @@ pub fn exec<B: Backend>(b: &mut B, insn: super::Insn, w: u64, pc: u64) -> Flow<B
         super::Insn::Mv2sr => mv2sr(b, w, pc),
         super::Insn::Mvfrsr => mvfrsr(b, w, pc),
         super::Insn::Reset => reset(b),
+        super::Insn::Rte => rte(b),
+        super::Insn::Stop => stop(b, w, pc),
+        super::Insn::Mv2usp => mvusp(b, w, true),
+        super::Insn::Mvfrusp => mvusp(b, w, false),
         super::Insn::Illegal => Err(b.raise(GuestException {
             kind: ExceptionKind::Trap,
             // m68k の例外ベクタ番号 4（Illegal Instruction）。
             code: 4,
-            addr: None,
-            in_delay_slot: false,
-        })),
-        _ => Err(b.raise(GuestException {
-            kind: ExceptionKind::Undefined,
-            // 診断のため命令ワードを残す。
-            code: w,
             addr: None,
             in_delay_slot: false,
         })),
@@ -2147,15 +2145,20 @@ fn chk<B: Backend>(b: &mut B, w: u64, pc: u64) -> Flow<B> {
     let z = b.konst::<W32>(0);
     let neg = b.cmp(Cmp::LtS, d, z);
     let over = b.cmp(Cmp::GtS, d, ub);
-    // SST 実測: 通過時は NZVC=0（X のみ保持）。トラップ時は
-    // Dn<0 なら N=1、Dn>上限なら N=0 でベクタ 6。
+    // SST 実測: CHK は通過・トラップに関わらず NZVC=0 にし、
+    // Dn<0 のときだけ N=1 になる（トラップ時に積まれる SR も
+    // この値）。X のみ保持する。
+    let ccr = b.get(ccr_ref());
+    let xm = b.konst::<W8>(1 << sr_bit::X);
+    let kept = b.and(ccr, xm);
+    let nk = b.konst::<W8>(1 << sr_bit::N);
+    let zw = b.konst::<W8>(0);
+    let nbit = b.select(neg, nk, zw);
+    let out = b.or(kept, nbit);
+    b.set(ccr_ref(), out);
     b.if_then_else(
         neg,
         |bb| {
-            let ccr = bb.get(ccr_ref());
-            let nk = bb.konst::<W8>(1 << sr_bit::N);
-            let out = bb.or(ccr, nk);
-            bb.set(ccr_ref(), out);
             Err(bb.raise(GuestException {
                 kind: ExceptionKind::Trap,
                 // m68k 例外ベクタ 6（CHK）。
@@ -2168,10 +2171,6 @@ fn chk<B: Backend>(b: &mut B, w: u64, pc: u64) -> Flow<B> {
             bb.if_then_else(
                 over,
                 |cb| {
-                    let ccr = cb.get(ccr_ref());
-                    let nk = cb.konst::<W8>(!(1 << sr_bit::N));
-                    let out = cb.and(ccr, nk);
-                    cb.set(ccr_ref(), out);
                     Err(cb.raise(GuestException {
                         kind: ExceptionKind::Trap,
                         code: 6,
@@ -2179,13 +2178,7 @@ fn chk<B: Backend>(b: &mut B, w: u64, pc: u64) -> Flow<B> {
                         in_delay_slot: false,
                     }))
                 },
-                |cb| {
-                    let ccr = cb.get(ccr_ref());
-                    let xm = cb.konst::<W8>(1 << sr_bit::X);
-                    let out = cb.and(ccr, xm);
-                    cb.set(ccr_ref(), out);
-                    Ok(())
-                },
+                |_| Ok(()),
             )
         },
     )
@@ -2236,6 +2229,143 @@ fn mv2sr<B: Backend>(b: &mut B, w: u64, pc: u64) -> Flow<B> {
         },
         |bb| Err(privilege(bb)),
     )
+}
+
+/// C14: rte。特権命令。スタックから [sr][pc] を復元する。
+/// 実装ビットのみ復元（0xA71F）。復元後の SR.S で A7 が切り替わる。
+// Ref: SPEC-M68K-PRM (Rev 1) §RTE.
+fn rte<B: Backend>(b: &mut B) -> Flow<B> {
+    let sup = is_super(b);
+    b.if_then_else(
+        sup,
+        |bb| {
+            let ssp = bb.get(Ssp.state());
+            let a = bb.zext::<W32, W64>(ssp);
+            let sr16 = bb.load::<W16>(a, DRD)?;
+            let two = bb.konst::<W64>(2);
+            let a2 = bb.add(a, two);
+            let phi = bb.load::<W16>(a2, DRD)?;
+            let four = bb.konst::<W64>(4);
+            let a4 = bb.add(a, four);
+            let plo = bb.load::<W16>(a4, DRD)?;
+            let six = bb.konst::<W32>(6);
+            let ns = bb.add(ssp, six);
+            bb.set(Ssp.state(), ns);
+            let sr32 = bb.zext::<W16, W32>(sr16);
+            let m = bb.konst::<W32>(0xA71F);
+            let sr = bb.and(sr32, m);
+            bb.set(sr_ref(), sr);
+            let phi32 = bb.zext::<W16, W32>(phi);
+            let sh = bb.konst::<W32>(16);
+            let hi_sh = bb.shl(phi32, sh);
+            let plo32 = bb.zext::<W16, W32>(plo);
+            let pc = bb.or(hi_sh, plo32);
+            let pc64 = bb.zext::<W32, W64>(pc);
+            bb.jump(pc64);
+            Ok(())
+        },
+        |bb| Err(privilege(bb)),
+    )
+}
+
+/// C14: stop #imm。特権命令。即値語を SR に読み込み CPU を停止する。
+/// 停止は pc を進めないことで表す（割り込みで目覚める経路は OS 層）。
+// Ref: SPEC-M68K-PRM (Rev 1) §STOP.
+fn stop<B: Backend>(b: &mut B, _w: u64, pc: u64) -> Flow<B> {
+    let sup = is_super(b);
+    b.if_then_else(
+        sup,
+        |bb| {
+            let a = bb.konst::<W64>(pc + 2);
+            let imm = bb.load::<W16>(a, ea::FETCH)?;
+            let imm32 = bb.zext::<W16, W32>(imm);
+            let m = bb.konst::<W32>(0xA71F);
+            let out = bb.and(imm32, m);
+            bb.set(sr_ref(), out);
+            let h64 = bb.konst::<W64>(pc);
+            bb.jump(h64);
+            Ok(())
+        },
+        |bb| Err(privilege(bb)),
+    )
+}
+
+/// C14: move usp,An / move An,usp。特権命令。`to_usp` なら An→USP。
+/// An=7 は実行時の SR.S が選ぶ側（S=1 で来るので SSP）を指す。
+// Ref: SPEC-M68K-PRM (Rev 1) §MOVE USP.
+fn mvusp<B: Backend>(b: &mut B, w: u64, to_usp: bool) -> Flow<B> {
+    let sup = is_super(b);
+    b.if_then_else(
+        sup,
+        |bb| {
+            let n = ea::ea_reg(w);
+            if to_usp {
+                let v = areg(bb, n);
+                bb.set(Usp.state(), v);
+            } else {
+                let v = bb.get(Usp.state());
+                set_areg(bb, n, v)?;
+            }
+            Ok(())
+        },
+        |bb| Err(privilege(bb)),
+    )
+}
+
+/// 例外配送: 6 バイトフレーム [sr][pc hi][pc lo] を SSP に積み、
+/// S=1/T=0 にしてベクタを読みハンドラへジャンプする。
+/// `exec` が `Err(Trap)` で返したときドライバが呼ぶ。
+/// 積み PC はベクタ番号で規則が分かれる:
+///   5（ゼロ除算）/6（CHK）/7（TRAPV）/32-47（TRAP）→ 次命令先頭
+///   4（illegal）/8（特権）/10-11（line）→ 命令自身の先頭
+/// 上記以外のベクタ（trace=9・割り込み 24-31 等）も実機では次命令
+/// 先頭だが、それらを発生させる経路はまだない。アドレスエラー
+/// （14 バイトフレーム）は未接続。
+// Ref: SPEC-M68K-PRM (Rev 1) §Exception Processing.
+pub fn deliver<B: Backend>(b: &mut B, code: u32, head: u64, len: u64) -> Flow<B> {
+    let stacked = if matches!(code, 5 | 6 | 7 | 32..=47) {
+        head + len
+    } else {
+        head
+    };
+    let sr = b.get(sr_ref());
+    let ssp = b.get(Ssp.state());
+    let six = b.konst::<W32>(6);
+    let ns = b.sub(ssp, six);
+    let na = b.zext::<W32, W64>(ns);
+    let sr16 = b.trunc::<W32, W16>(sr);
+    b.store::<W16>(na, sr16, DWR)?;
+    let sp64 = b.konst::<W64>(stacked);
+    let sixteen = b.konst::<W64>(16);
+    let phi64 = b.shr_l(sp64, sixteen);
+    let phi = b.trunc::<W64, W16>(phi64);
+    let two = b.konst::<W64>(2);
+    let a2 = b.add(na, two);
+    b.store::<W16>(a2, phi, DWR)?;
+    let plo = b.trunc::<W64, W16>(sp64);
+    let four = b.konst::<W64>(4);
+    let a4 = b.add(na, four);
+    b.store::<W16>(a4, plo, DWR)?;
+    b.set(Ssp.state(), ns);
+    // 例外エントリは S=1・T=0（フレームには配送前の sr を積んだ）。
+    let tm = b.konst::<W32>(0xFFFF & !0x8000);
+    let cleared = b.and(sr, tm);
+    let sm = b.konst::<W32>(0x2000);
+    let new_sr = b.or(cleared, sm);
+    b.set(sr_ref(), new_sr);
+    // ベクタ読み出し（code*4、68000 は word×2）。
+    let vc = b.konst::<W64>(u64::from(code) * 4);
+    let vhi = b.load::<W16>(vc, DRD)?;
+    let vc2 = b.add(vc, two);
+    let vlo = b.load::<W16>(vc2, DRD)?;
+    let vhi32 = b.zext::<W16, W32>(vhi);
+    let sh = b.konst::<W32>(16);
+    let hi_sh = b.shl(vhi32, sh);
+    let vlo32 = b.zext::<W16, W32>(vlo);
+    let target = b.or(hi_sh, vlo32);
+    let t64 = b.zext::<W32, W64>(target);
+    b.jump(t64);
+    Ok(())
 }
 
 /// C13: move sr,<ea>。68000 ではユーザでも可。実装ビットのみ書き出す。

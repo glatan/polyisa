@@ -255,6 +255,9 @@ pub fn build_model() -> polyisa_isadl::Model {
         // A-line/F-line エミュレーション例外（ベクタ 10/11）。
         ("linea", "1010............", "linea", "ctrl"),
         ("linef", "1111............", "linef", "ctrl"),
+        // C14: move An,usp（0x4E60-67）/ move usp,An（0x4E68-6F）。
+        ("mv2usp", "0100111001100...", "move", "ctrl"),
+        ("mvfrusp", "0100111001101...", "move", "ctrl"),
     ];
     for (name, pattern, syntax, timing) in insns {
         m.insns.push(Insn {

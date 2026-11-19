@@ -9,7 +9,10 @@
 //! からなり、命令長は先頭ワードの EA フィールドから `ea::insn_ext_words` で決める
 //! （拡張語の中身の読み出しは意味論側が backend 経由で行う）。
 //! 命令は偶数アドレスに整列し、データ・命令ともにビッグエンディアン固定。
-//! `trap #n` 等の例外ベクタ配送は未接続で、例外は `Unimplemented` に写す。
+//! Trap 系例外は 6 バイトフレームを積んでベクタへ配送する（アドレス
+//! エラーの 14 バイトフレームは未接続）。デコード不能な語は
+//! `Unimplemented` に写す（実機では illegal ベクタ 4 — デコーダが
+//! 認める範囲外を例外へ写す経路は未接続）。
 //! Ref: SPEC-M68K-PRM (Rev 1).
 
 use polyisa_engine::bare::BareEnv;
@@ -17,6 +20,7 @@ use polyisa_engine::interp::{Ctrl, InterpExit};
 use polyisa_engine::run::{Outcome, TrapHandler};
 use polyisa_guest_m68k::{decode_model_ex, ea, sem};
 use polyisa_mem::{Access, AccessKind, Align, Endian, VirtAddr};
+use polyisa_sem::ExceptionKind;
 
 /// 実バイナリの処理量を見込んだ上限。
 const STEP_LIMIT: u64 = 256_000_000;
@@ -103,7 +107,11 @@ fn step_m68k(
             }
             Ok(())
         }
-        // 例外ベクタの配送は未接続。診断のため命令ワードを残す。
+        // Trap 系例外は 6 バイトフレームを積んでベクタへ（C14）。
+        Err(InterpExit::Exception(e)) if e.kind == ExceptionKind::Trap => env
+            .step(|b| sem::deliver(b, e.code as u32, pc, len))
+            .map_err(|_| unimpl(env, word)),
+        // アドレスエラー（14 バイトフレーム）は未接続。
         Err(InterpExit::Exception(_)) | Err(InterpExit::Unimplemented(_)) => Err(unimpl(env, word)),
     }
 }
@@ -114,6 +122,7 @@ mod tests {
     use polyisa_engine::run::TrapOutcome;
     use polyisa_guest_m68k::Insn;
     use polyisa_mem::Perms;
+    use polyisa_sem::Backend as _;
 
     /// 語列を RX として写像した環境。`base` が入口。
     fn env_at(base: u64, words: &[u16]) -> BareEnv {
@@ -155,31 +164,66 @@ mod tests {
 
     #[test]
     fn undecodable_word_is_unimplemented() {
-        // nop の次がデコード不能（0x0000）→ Unimplemented。
-        let mut env = env_at(0x1000, &[0x4E71, 0x0000]);
+        // nop の次がデコード不能（0x4E74 は 68000 では未割当）→ Unimplemented。
+        let mut env = env_at(0x1000, &[0x4E71, 0x4E74]);
         let mut sys = NoSys;
         match run(&mut env, 0x1000, M68kModel::m68000(), &mut sys) {
             Outcome::Unimplemented { pc, word } => {
                 assert_eq!(pc, 0x1002);
-                assert_eq!(word, 0x0000);
+                assert_eq!(word, 0x4E74);
             }
             o => panic!("unexpected outcome: {o:?}"),
         }
     }
 
     #[test]
-    fn illegal_becomes_unimplemented() {
-        // nop; illegal。illegal は例外ベクタ 4 だが配送は未接続なので
-        // Unimplemented に写る。
+    fn illegal_delivers_vector4_frame() {
+        // nop; illegal。illegal はベクタ 4 へ配送される（C14）:
+        // SSP に [sr][pc] の 6 バイトフレームを積み、S=1 になって
+        // ハンドラへ飛ぶ。ハンドラ先は未定義語で Unimplemented にする。
         let mut env = env_at(0x1000, &[0x4E71, 0x4AFC]);
+        env.backend.mem.map(VirtAddr(0), 1, Perms::RW).unwrap();
+        env.backend.mem.map(VirtAddr(0x4000), 1, Perms::RW).unwrap();
+        env.backend.set(sem::Ssp.state(), 0x4100);
+        // ベクタ 4（0x10）→ ハンドラ先頭 0x2000。未定義語を置く。
+        env.backend
+            .mem
+            .write(VirtAddr(0x10), &[0, 0, 0x20, 0x00])
+            .unwrap();
+        env.backend
+            .mem
+            .map(VirtAddr(0x2000), 1, Perms(0b111))
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x2000), &[0x4E, 0x74])
+            .unwrap();
         let mut sys = NoSys;
         match run(&mut env, 0x1000, M68kModel::m68000(), &mut sys) {
             Outcome::Unimplemented { pc, word } => {
-                assert_eq!(pc, 0x1002);
-                assert_eq!(word, 0x4AFC);
+                assert_eq!(pc, 0x2000);
+                assert_eq!(word, 0x4E74);
             }
             o => panic!("unexpected outcome: {o:?}"),
         }
+        // フレーム: ssp = 0x4100-6、[sr][積み pc=0x1002]（illegal は
+        // 命令自身の先頭）。S=1・T=0 になっている。
+        assert_eq!(env.backend.get(sem::Ssp.state()), 0x40FA);
+        assert_eq!(env.backend.get(sem::sr_ref()) & 0x2000, 0x2000);
+        let mut buf = [0u8; 6];
+        env.backend
+            .mem
+            .read(
+                VirtAddr(0x40FA),
+                &mut buf,
+                Access {
+                    endian: Endian::Be,
+                    align: Align::Natural,
+                    kind: AccessKind::DataRead,
+                },
+            )
+            .unwrap();
+        assert_eq!(&buf[2..6], &[0x00, 0x00, 0x10, 0x02]);
     }
 
     #[test]

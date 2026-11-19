@@ -78,18 +78,6 @@ fn illegal_raises_vector4() {
     }
 }
 
-#[test]
-fn unimplemented_is_undefined() {
-    let mut env = env();
-    let e = env
-        .step(|b| sem::exec(b, Insn::Stop, 0x4E72, 0))
-        .expect_err("stop は未実装");
-    match e {
-        InterpExit::Exception(x) => assert_eq!(x.code, 0x4E72),
-        other => panic!("unexpected exit: {other:?}"),
-    }
-}
-
 // ---- EA 評価（B2: デコード方式の EA 解釈経路） ----
 
 #[test]
@@ -2212,4 +2200,187 @@ fn chk_bound_equal_passes() {
     env.step(|b| sem::exec(b, Insn::Chk, 0x41FC, 0x1000))
         .unwrap();
     assert_eq!(env.backend.get(sem::ccr_ref()) & 0x1F, 1 << sem::sr_bit::X);
+}
+
+// ---- C14: rte/stop/move usp・例外配送 ----
+
+#[test]
+fn c14_decode_spots() {
+    assert_eq!(polyisa_guest_m68k::decode(0x4E60, 16), Some(Insn::Mv2usp));
+    assert_eq!(polyisa_guest_m68k::decode(0x4E67, 16), Some(Insn::Mv2usp));
+    assert_eq!(polyisa_guest_m68k::decode(0x4E68, 16), Some(Insn::Mvfrusp));
+    assert_eq!(polyisa_guest_m68k::decode(0x4E6F, 16), Some(Insn::Mvfrusp));
+}
+
+#[test]
+fn move_usp_both_directions() {
+    // move a0,usp = 0x4E60（S=1 が必要）。
+    let mut env = env();
+    env.backend.set(sem::sr_ref(), 0x2000);
+    env.backend.set(A(0).state(), 0x1234_5678);
+    env.step(|b| sem::exec(b, Insn::Mv2usp, 0x4E60, 0)).unwrap();
+    assert_eq!(env.backend.get(Usp.state()), 0x1234_5678);
+
+    // move usp,a1 = 0x4E69。
+    let mut env2 = crate::env();
+    env2.backend.set(sem::sr_ref(), 0x2000);
+    env2.backend.set(Usp.state(), 0xABCD_EF01);
+    env2.step(|b| sem::exec(b, Insn::Mvfrusp, 0x4E69, 0))
+        .unwrap();
+    assert_eq!(env2.backend.get(A(1).state()), 0xABCD_EF01);
+
+    // ユーザモードでは両方向ともベクタ 8。
+    let mut env3 = crate::env();
+    let e = env3
+        .step(|b| sem::exec(b, Insn::Mv2usp, 0x4E60, 0))
+        .expect_err("ユーザ move to usp は特権違反");
+    match e {
+        InterpExit::Exception(x) => assert_eq!(x.code, 8),
+        other => panic!("unexpected exit: {other:?}"),
+    }
+    let mut env4 = crate::env();
+    let e = env4
+        .step(|b| sem::exec(b, Insn::Mvfrusp, 0x4E68, 0))
+        .expect_err("ユーザ move from usp は特権違反");
+    match e {
+        InterpExit::Exception(x) => assert_eq!(x.code, 8),
+        other => panic!("unexpected exit: {other:?}"),
+    }
+}
+
+#[test]
+fn rte_pops_frame_in_supervisor() {
+    // ssp に [sr][pc] フレームを置いて rte → 復元。
+    let mut env = env_with_data(&[0x4E73], &[0xA7, 0x1F, 0x00, 0x12, 0x34, 0x56]);
+    env.backend.set(sem::sr_ref(), 0x2000);
+    env.backend.set(Ssp.state(), 0x4000);
+    env.step(|b| sem::exec(b, Insn::Rte, 0x4E73, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(Ssp.state()), 0x4006);
+    assert_eq!(env.backend.get(sem::sr_ref()), 0xA71F);
+    // 復元 pc は Jump に残る。
+    match env.backend.ctrl {
+        polyisa_engine::interp::Ctrl::Jump(t) => assert_eq!(t, 0x0012_3456),
+        other => panic!("expected jump: {other:?}"),
+    }
+
+    // ユーザモードではベクタ 8。
+    let mut env2 = crate::env();
+    let e = env2
+        .step(|b| sem::exec(b, Insn::Rte, 0x4E73, 0))
+        .expect_err("ユーザ rte は特権違反");
+    match e {
+        InterpExit::Exception(x) => assert_eq!(x.code, 8),
+        other => panic!("unexpected exit: {other:?}"),
+    }
+}
+
+#[test]
+fn stop_loads_sr_and_halts() {
+    // stop #imm: sr = imm & 0xA71F、pc は戻り先ではなく命令自身へ。
+    let mut env = env_with_data(&[0x4E72, 0xAFFF], &[]);
+    env.backend.set(sem::sr_ref(), 0x2000);
+    env.step(|b| sem::exec(b, Insn::Stop, 0x4E72, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(sem::sr_ref()), 0xA71F);
+    match env.backend.ctrl {
+        polyisa_engine::interp::Ctrl::Jump(t) => assert_eq!(t, 0x1000),
+        other => panic!("expected jump-to-self: {other:?}"),
+    }
+
+    // ユーザモードではベクタ 8。
+    let mut env2 = crate::env();
+    let e = env2
+        .step(|b| sem::exec(b, Insn::Stop, 0x4E72, 0))
+        .expect_err("ユーザ stop は特権違反");
+    match e {
+        InterpExit::Exception(x) => assert_eq!(x.code, 8),
+        other => panic!("unexpected exit: {other:?}"),
+    }
+}
+
+#[test]
+fn deliver_pushes_frame_and_jumps_vector() {
+    // trap #8 相当の配送を直接呼ぶ。フレームは [sr][pc] の 6B。
+    let mut env = env_with_data(&[0x4E48], &[0, 0, 0, 0, 0, 0, 0, 0]);
+    env.backend.set(sem::sr_ref(), 0x001F);
+    env.backend.set(Usp.state(), 0x5000);
+    env.backend.set(Ssp.state(), 0x4100);
+    // ベクタ 40 = trap #8 → 番地 0xA0 にハンドラ先頭を置く。
+    env.backend
+        .mem
+        .map(VirtAddr(0), 1, polyisa_mem::Perms::RW)
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0xA0), &[0x00, 0x00, 0xBE, 0xEF])
+        .unwrap();
+    env.step(|b| sem::deliver(b, 40, 0x1000, 2)).unwrap();
+    // ssp -= 6、S=1、T=0、フレームは [sr][pc]。
+    assert_eq!(env.backend.get(Ssp.state()), 0x40FA);
+    assert_eq!(env.backend.get(sem::sr_ref()) & 0xA000, 0x2000);
+    let mut buf = [0u8; 6];
+    env.backend
+        .mem
+        .read(VirtAddr(0x40FA), &mut buf, DRD)
+        .unwrap();
+    assert_eq!(&buf[..2], &[0x00, 0x1F]); // 配送前の sr
+    assert_eq!(&buf[2..6], &[0x00, 0x00, 0x10, 0x02]); // head+len
+    match env.backend.ctrl {
+        polyisa_engine::interp::Ctrl::Jump(t) => assert_eq!(t, 0xBEEF),
+        other => panic!("expected jump: {other:?}"),
+    }
+
+    // code=8（特権違反）の積み pc は命令自身の先頭。
+    let mut env2 = env_with_data(&[0x4E70], &[]);
+    env2.backend.set(sem::sr_ref(), 0x0000);
+    env2.backend.set(Usp.state(), 0x5000);
+    env2.backend.set(Ssp.state(), 0x4100);
+    env2.backend
+        .mem
+        .map(VirtAddr(0), 1, polyisa_mem::Perms::RW)
+        .unwrap();
+    env2.step(|b| sem::deliver(b, 8, 0x1000, 2)).unwrap();
+    let mut buf2 = [0u8; 6];
+    env2.backend
+        .mem
+        .read(VirtAddr(0x40FA), &mut buf2, DRD)
+        .unwrap();
+    assert_eq!(&buf2[2..6], &[0x00, 0x00, 0x10, 0x00]); // head
+}
+
+#[test]
+fn move_usp_a7_uses_ssp_in_supervisor() {
+    // move a7,usp: S=1 の A7 は SSP を指す。
+    let mut env = env();
+    env.backend.set(sem::sr_ref(), 0x2000);
+    env.backend.set(Ssp.state(), 0x7777_0000);
+    env.step(|b| sem::exec(b, Insn::Mv2usp, 0x4E67, 0)).unwrap();
+    assert_eq!(env.backend.get(Usp.state()), 0x7777_0000);
+
+    // move usp,a7: USP の値は SSP に書かれる。
+    let mut env2 = crate::env();
+    env2.backend.set(sem::sr_ref(), 0x2000);
+    env2.backend.set(Usp.state(), 0x1111_2222);
+    env2.step(|b| sem::exec(b, Insn::Mvfrusp, 0x4E6F, 0))
+        .unwrap();
+    assert_eq!(env2.backend.get(Ssp.state()), 0x1111_2222);
+}
+
+#[test]
+fn rte_restores_user_mode_frame() {
+    // フレームの sr が S=0 なら復帰後はユーザモード（A7=USP）。
+    let mut env = env_with_data(&[0x4E73], &[0x00, 0x1F, 0x00, 0x00, 0x30, 0x00]);
+    env.backend.set(sem::sr_ref(), 0x2000);
+    env.backend.set(Ssp.state(), 0x4000);
+    env.backend.set(Usp.state(), 0x5000);
+    env.step(|b| sem::exec(b, Insn::Rte, 0x4E73, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(Ssp.state()), 0x4006);
+    assert_eq!(env.backend.get(sem::sr_ref()) & 0x2000, 0);
+    assert_eq!(env.backend.get(sem::sr_ref()) & 0x1F, 0x1F);
+    match env.backend.ctrl {
+        polyisa_engine::interp::Ctrl::Jump(t) => assert_eq!(t, 0x3000),
+        other => panic!("expected jump: {other:?}"),
+    }
 }

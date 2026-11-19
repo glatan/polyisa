@@ -19,7 +19,7 @@ use polyisa_sem::{Backend, Cmp, ExceptionKind, GuestException, StateArray, W8, W
 use super::sem::{self, Ssp, Usp};
 
 /// 拡張語の読み出しに使うアクセス属性（BE・命令フェッチ）。
-const FETCH: Access = Access {
+pub(crate) const FETCH: Access = Access {
     endian: Endian::Be,
     align: Align::Natural,
     kind: AccessKind::Fetch,
@@ -187,9 +187,9 @@ pub const fn insn_ext_words(insn: super::Insn, w: u64) -> Option<u32> {
         }
         // jmp/jsr: 制御 EA の語数。
         super::Insn::Jmp | super::Insn::Jsr => ext_words(ea_mode(w), ea_reg(w), 4),
-        // rts/rtr: 拡張語なし（F0 表に含めずここで扱う）。
-        super::Insn::Rts | super::Insn::Rtr => Some(0),
-        // stop は直後に即値語 1 語を取る（意味論は C14）。
+        // rts/rtr/mvusp: 拡張語なし（F0 表に含めずここで扱う）。
+        super::Insn::Rts | super::Insn::Rtr | super::Insn::Mv2usp | super::Insn::Mvfrusp => Some(0),
+        // stop は直後に即値語 1 語を取る。
         super::Insn::Stop => Some(1),
         // scc: EA のみ。dbcc: 変位語1つ。
         super::Insn::Scc => ext_words(ea_mode(w), ea_reg(w), 1),
@@ -257,7 +257,23 @@ pub const fn insn_ext_words(insn: super::Insn, w: u64) -> Option<u32> {
             };
             Some(e + iw)
         }
-        _ => Some(0),
+        // 拡張語を取らない残り（網羅 match: 宣言だけ追加した命令は
+        // ここでコンパイルエラーになり語数契約を忘れない）。
+        super::Insn::Asl
+        | super::Insn::Asr
+        | super::Insn::Cmpm
+        | super::Insn::Illegal
+        | super::Insn::Lsl
+        | super::Insn::Lsr
+        | super::Insn::Moveq
+        | super::Insn::Nop
+        | super::Insn::Reset
+        | super::Insn::Rol
+        | super::Insn::Ror
+        | super::Insn::Roxl
+        | super::Insn::Roxr
+        | super::Insn::Rte
+        | super::Insn::Unlk => Some(0),
     }
 }
 

@@ -20,7 +20,7 @@ use polyisa_engine::interp::{Ctrl, InterpExit};
 use polyisa_guest_m68k::sem::{self, A, D, Ssp, Usp};
 use polyisa_guest_m68k::{CpuState, Insn, ea};
 use polyisa_mem::{Access, AccessKind, Align, Endian, Perms, VirtAddr};
-use polyisa_sem::Backend as _;
+use polyisa_sem::{Backend as _, ExceptionKind};
 use std::path::PathBuf;
 
 /// 実装済みの命令群に対応するファイルだけを走らせる（部分検証）。
@@ -138,7 +138,12 @@ const FILES: &[&str] = &[
     "TRAP",
     "TRAPV",
     "ILLEGAL_LINEA",
-    "ILLEGAL_LINEF",
+    "ILLEGAL_LINEF", //
+    // C14: rte/stop/move usp・例外配送。
+    "RTE",
+    "STOP",
+    "MOVEtoUSP",
+    "MOVEfromUSP",
 ];
 
 /// u32 のレジスタ列（d0-7, a0-6, usp, ssp, sr, pc）を生値で持つ。
@@ -266,12 +271,24 @@ fn step_one(env: &mut BareEnv) -> Result<(), InterpExit> {
     let Some(ext) = ea::insn_ext_words(insn, w) else {
         return Err(InterpExit::Unimplemented(format!("ea {w:#06x}")));
     };
-    env.step(|b| sem::exec(b, insn, w, u64::from(head)))?;
+    let len = 2 + u64::from(ext) * 2;
+    match env.step(|b| sem::exec(b, insn, w, u64::from(head))) {
+        Ok(()) => {}
+        // Trap 系例外はフレームを積んでベクタへ配送する（C14）。
+        // アドレスエラー（14 バイトフレーム）は未接続なので呼び出し側へ返す。
+        Err(InterpExit::Exception(e)) if e.kind == ExceptionKind::Trap => {
+            env.step(|b| sem::deliver(b, e.code as u32, u64::from(head), len))?;
+            env.pc = env.pc.wrapping_add(4);
+            env.backend.set(sem::pc_ref(), env.pc as u32);
+            return Ok(());
+        }
+        Err(e) => return Err(e),
+    }
     // 終了 pc の規約は「初期 pc + 命令長」。SST の pc はプリフェッチ
     // 分（実行アドレス+4）を指すので、分岐時は step が置いた真の
     // 分岐先に +4 する。
     if env.backend.ctrl == Ctrl::Fallthrough {
-        env.pc = (u64::from(pc) + 2 + u64::from(ext) * 2) & 0xFFFF_FFFF;
+        env.pc = (u64::from(pc) + len) & 0xFFFF_FFFF;
     } else {
         env.pc = env.pc.wrapping_add(4);
     }
@@ -400,7 +417,8 @@ fn sst68000_conformance() {
             let head = head_insn(&env).ok();
             let mut d = match step_one(&mut env) {
                 Ok(()) => diff(&mut env, &t.fina),
-                // 例外配送は未接続。アドレスエラー等を起こすテストは
+                // アドレスエラー（14 バイトフレーム）の配送は未接続。
+                // それを起こすテストは終了状態が異なるので比較できない。
                 // 終了状態が例外スタックフレームを含むので比較できない。
                 // ただし例外が「期待された」ことは確認する: MOVE は
                 // 分岐しないので、期待終了 pc = 初期 pc + 命令長。
@@ -421,18 +439,15 @@ fn sst68000_conformance() {
                 }
                 Err(e) => vec![format!("exit: {e:?}")],
             };
-            // Ok でも SST 側が例外配送を期待しているケース:
-            // 奇数 pc（次フェッチのアドレスエラー）、または fina.sr の
-            // S ビットが init と違う（例外でスーパーバイザ化）。
-            if !d.is_empty()
-                && (env.pc & 1 == 1 || (t.fina.regs[17] & 0x2000) != (t.init.regs[17] & 0x2000))
-            {
+            // Ok でも SST 側がアドレスエラーを期待しているケース:
+            // 奇数 pc（次フェッチの奇数アクセス）は未接続の例外なので
+            // 比較できない。Trap 配送は step_one が済ませるので、それ
+            // 以外の S 変化はここでは逃がさない（配送バグを隠さない）。
+            if !d.is_empty() && env.pc & 1 == 1 {
                 exc += 1;
                 if std::env::var("POLYISA_SST_DEBUG").is_ok() {
-                    let odd = env.pc & 1 == 1;
-                    let schg = (t.fina.regs[17] & 0x2000) != (t.init.regs[17] & 0x2000);
                     eprintln!(
-                        "  exc {name}#{i} [{}] init_sr={:04x} odd_pc={odd} s_chg={schg}",
+                        "  exc {name}#{i} [{}] init_sr={:04x} odd_pc",
                         t.name, t.init.regs[17]
                     );
                 }
@@ -461,7 +476,7 @@ fn sst68000_conformance() {
         }
         eprintln!("{name}: {diffs} diffs, {exc} exceptional");
     }
-    eprintln!("total {total} tests, {exceptional} exceptional（例外配送未接続）");
+    eprintln!("total {total} tests, {exceptional} exceptional（アドレスエラー等未接続）");
     for (n, d, c) in &failed_files {
         eprintln!("  {n}: {d}/{c} diffs");
     }
