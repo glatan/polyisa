@@ -60,6 +60,59 @@ pub struct Usp;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Ssp;
 
+/// 浮動小数点データレジスタ番号（FP0〜FP7）。96 ビット拡張形式は
+/// `CpuState.fp` に 3 語の不透明イメージとして保持する
+///（OS の Line-F 補完が往復する領域。算術は未実装）。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Fp(pub u8);
+
+/// FP 制御レジスタ（FPCR）。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Fpcr;
+
+/// FP ステータスレジスタ（FPSR）。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Fpsr;
+
+/// FP 命令アドレスレジスタ（FPIAR）。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Fpiar;
+
+impl Fp {
+    /// 96 ビットイメージの `j` 語目（0〜2）を指す。
+    /// `w(0)` は符号/指数と埋め、`w(1..3)` は 64 ビット仮数。
+    #[must_use]
+    pub const fn w(self, j: u8) -> StateRef<W32> {
+        StateRef::<W32>::from_offset(
+            core::mem::offset_of!(CpuState, fp) + self.0 as usize * 12 + j as usize * 4,
+        )
+    }
+}
+
+impl Fpcr {
+    /// FPCR を指す。
+    #[must_use]
+    pub const fn state() -> StateRef<W32> {
+        StateRef::<W32>::from_offset(core::mem::offset_of!(CpuState, fpcr))
+    }
+}
+
+impl Fpsr {
+    /// FPSR を指す。
+    #[must_use]
+    pub const fn state() -> StateRef<W32> {
+        StateRef::<W32>::from_offset(core::mem::offset_of!(CpuState, fpsr))
+    }
+}
+
+impl Fpiar {
+    /// FPIAR を指す。
+    #[must_use]
+    pub const fn state() -> StateRef<W32> {
+        StateRef::<W32>::from_offset(core::mem::offset_of!(CpuState, fpiar))
+    }
+}
+
 impl D {
     /// CPU 状態の対応する要素を指す。
     #[must_use]

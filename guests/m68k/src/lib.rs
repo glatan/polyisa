@@ -44,6 +44,16 @@ pub struct CpuState {
     /// ステータスレジスタ。下位 16 ビットが有効
     ///（システムバイト: T/S/IPL、ユーザーバイト: CCR の X N Z V C）。
     pub sr: u32,
+    /// FP データレジスタ fp0〜fp7 の 96 ビット拡張形式イメージ
+    ///（fmovem.x が保存/復帰する 12 バイト。内容は不透明 ——
+    /// OS の Line-F 補完が転送するだけで、算術は未実装）。
+    pub fp: [[u32; 3]; 8],
+    /// FP 制御レジスタ（fmovem.l が往復する）。
+    pub fpcr: u32,
+    /// FP ステータスレジスタ。
+    pub fpsr: u32,
+    /// FP 命令アドレスレジスタ。
+    pub fpiar: u32,
 }
 
 #[cfg(test)]
@@ -66,6 +76,10 @@ mod tests {
         assert_eq!(core::mem::offset_of!(CpuState, ssp), 8 * 4 + 8 * 4);
         assert_eq!(core::mem::offset_of!(CpuState, pc), 8 * 4 + 9 * 4);
         assert_eq!(core::mem::offset_of!(CpuState, sr), 8 * 4 + 10 * 4);
+        assert_eq!(core::mem::offset_of!(CpuState, fp), 8 * 4 + 11 * 4);
+        assert_eq!(core::mem::offset_of!(CpuState, fpcr), 8 * 4 + 11 * 4 + 96);
+        assert_eq!(core::mem::offset_of!(CpuState, fpsr), 8 * 4 + 11 * 4 + 100);
+        assert_eq!(core::mem::offset_of!(CpuState, fpiar), 8 * 4 + 11 * 4 + 104);
     }
 
     #[test]

@@ -1007,8 +1007,20 @@ impl TrapHandler for Linux {
     }
 
     fn handle_trap(&mut self, env: &mut BareEnv, code: u32) -> TrapOutcome {
-        // trap #0（ベクタ 32）のみ syscall。他の trap は CPU 例外として
-        // 配送するため呼び出し側へ返す。
+        // trap #0（ベクタ 32）のみ syscall。Line-F（ベクタ 11）は FPU
+        // 命令のカーネル補完（fmovem/fmove 系の転送命令のみ）を試す。
+        // それ以外の trap は CPU 例外として配送するため呼び出し側へ返す。
+        if code == 11 {
+            // 補完に失敗したら Unimplemented を返し、実行ループ側が
+            // Line-F 例外として配送する。
+            return match m68k::fpu::emulate(env, env.pc) {
+                Some(len) => {
+                    env.pc = (env.pc + len) & 0xFFFF_FFFF;
+                    TrapOutcome::Handled
+                }
+                None => TrapOutcome::Unimplemented,
+            };
+        }
         if code != 32 {
             return TrapOutcome::Unimplemented;
         }

@@ -57,6 +57,16 @@ pub trait TrapHandler {
     fn take_exit(&mut self, _env: &mut BareEnv, _code: u32) -> bool {
         false
     }
+
+    /// 解読不能または未実装の命令語 `word`（実行中の pc 位置）。
+    /// コプロセッサ命令のカーネルエミュレーションや、削除命令の
+    /// 補完（68040/68060 の unimplemented integer instruction 相当）
+    /// に使う。Handled ならハンドラが復帰 PC を設定済みの契約
+    /// （`pc` 自動進めはしない）。既定では未実装を返し、呼び出し側が
+    /// 実機の例外（illegal/Line-A/Line-F）に写す。
+    fn handle_unimpl(&mut self, _env: &mut BareEnv, _pc: u64, _word: u64) -> TrapOutcome {
+        TrapOutcome::Unimplemented
+    }
 }
 
 /// 実行ループ。`step` が 1 命令ぶんのフェッチ・解読・意味論とトラップ

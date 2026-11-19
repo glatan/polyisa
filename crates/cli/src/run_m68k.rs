@@ -9,10 +9,11 @@
 //! からなり、命令長は先頭ワードの EA フィールドから `ea::insn_ext_words` で決める
 //! （拡張語の中身の読み出しは意味論側が backend 経由で行う）。
 //! 命令は偶数アドレスに整列し、データ・命令ともにビッグエンディアン固定。
-//! Trap 系例外は 6 バイトフレームを積んでベクタへ配送する（アドレス
-//! エラーの 14 バイトフレームは未接続）。デコード不能な語は
-//! `Unimplemented` に写す（実機では illegal ベクタ 4 — デコーダが
-//! 認める範囲外を例外へ写す経路は未接続）。
+//! Trap 系例外はまず OS パーソナリティに委ね（trap #0=syscall・
+//! Line-F=11 の FPU 補完など）、受けなければ 6 バイトフレームを積んで
+//! ベクタへ配送する（アドレスエラーの 14 バイトフレームは未接続）。
+//! デコード不能・未実装の語は `handle_unimpl` の補完を試したあと
+//! illegal=4・Line-A=10・Line-F=11 のベクタへ写す。
 //! Ref: SPEC-M68K-PRM (Rev 1).
 
 use polyisa_engine::bare::BareEnv;
@@ -130,7 +131,7 @@ fn step_m68k(
     }
     let word = u64::from(u16::from_be_bytes(b2));
     let Some(insn) = decode_model_ex(u128::from(word), 16, true, model.feats) else {
-        return Err(unimpl(env, word));
+        return unimpl_insn(env, sys, pc, word);
     };
     // 命令長は先頭ワードの EA フィールドから決める。拡張語自体は
     // 意味論側が pc+2 以降から backend 経由で読む。68020+ では
@@ -143,7 +144,7 @@ fn step_m68k(
         env.backend.mem.read(VirtAddr(a), &mut b2, acc).ok()?;
         Some(u16::from_be_bytes(b2))
     }) else {
-        return Err(unimpl(env, word));
+        return unimpl_insn(env, sys, pc, word);
     };
     let len = 2 + u64::from(ext) * 2;
     if std::env::var_os("POLYISA_M68K_TRACE").is_some() {
@@ -158,37 +159,37 @@ fn step_m68k(
             }
             Ok(())
         }
-        // trap #0（ベクタ 32）は Linux の syscall 発行点。OS
-        // パーソナリティに委ね、Unimplemented なら素の例外として配送する。
-        // その他の Trap 系例外は 6 バイトフレームを積んでベクタへ（C14）。
+        // Trap 系例外はまず OS パーソナリティに委ねる。trap #0（ベクタ
+        // 32）は Linux の syscall 発行点で、Handled なら pc+len に復帰
+        // する。それ以外のコード（Line-F=11 の FPU 補完など）をハンドラ
+        // が引き受けたときは、復帰 PC はハンドラが設定済みの契約。
+        // Unimplemented なら素の例外として 6 バイトフレームを積んで
+        // ベクタへ配送する（C14）。
         Err(InterpExit::Exception(e)) if e.kind == ExceptionKind::Trap => {
-            if e.code == 32 {
-                match sys.handle_trap(env, e.code as u32) {
-                    TrapOutcome::Handled => {
+            match sys.handle_trap(env, e.code as u32) {
+                TrapOutcome::Handled => {
+                    if e.code == 32 {
                         env.pc = (env.pc + len) & 0xFFFF_FFFF;
-                        Ok(())
                     }
-                    TrapOutcome::Exit(code) => {
-                        if sys.take_exit(env, code) {
-                            Ok(())
-                        } else {
-                            Err(Outcome::Exit(u64::from(code)))
-                        }
-                    }
-                    TrapOutcome::Blocked => {
-                        if sys.on_block(env) {
-                            Ok(())
-                        } else {
-                            Err(Outcome::Deadlock)
-                        }
-                    }
-                    TrapOutcome::Unimplemented => env
-                        .step(|b| sem::deliver(b, e.code as u32, pc, len))
-                        .map_err(|_| unimpl(env, word)),
+                    Ok(())
                 }
-            } else {
-                env.step(|b| sem::deliver(b, e.code as u32, pc, len))
-                    .map_err(|_| unimpl(env, word))
+                TrapOutcome::Exit(code) => {
+                    if sys.take_exit(env, code) {
+                        Ok(())
+                    } else {
+                        Err(Outcome::Exit(u64::from(code)))
+                    }
+                }
+                TrapOutcome::Blocked => {
+                    if sys.on_block(env) {
+                        Ok(())
+                    } else {
+                        Err(Outcome::Deadlock)
+                    }
+                }
+                TrapOutcome::Unimplemented => env
+                    .step(|b| sem::deliver(b, e.code as u32, pc, len))
+                    .map_err(|_| unimpl(env, word)),
             }
         }
         // アドレスエラー（14 バイトフレーム）は未接続。
@@ -209,7 +210,49 @@ fn step_m68k(
             }
             Err(unimpl(env, word))
         }
-        Err(InterpExit::Unimplemented(_)) => Err(unimpl(env, word)),
+        Err(InterpExit::Unimplemented(_)) => unimpl_insn(env, sys, pc, word),
+    }
+}
+
+/// 解読不能・未実装の命令語。OS パーソナリティの補完経路
+///（`handle_unimpl`）を先に試し、受けなければ実機の例外に写す:
+/// Line-A はベクタ 10、Line-F はベクタ 11、その他は illegal ベクタ 4。
+/// ベクタテーブルが読めなければ Unimplemented に落ちる。
+// Ref: SPEC-M68K-PRM (Rev 1) §Exception Vectors.
+fn unimpl_insn(
+    env: &mut BareEnv,
+    sys: &mut impl TrapHandler,
+    pc: u64,
+    word: u64,
+) -> Result<(), Outcome> {
+    match sys.handle_unimpl(env, pc, word) {
+        TrapOutcome::Handled => Ok(()),
+        TrapOutcome::Exit(code) => {
+            if sys.take_exit(env, code) {
+                Ok(())
+            } else {
+                Err(Outcome::Exit(u64::from(code)))
+            }
+        }
+        TrapOutcome::Blocked => {
+            if sys.on_block(env) {
+                Ok(())
+            } else {
+                Err(Outcome::Deadlock)
+            }
+        }
+        TrapOutcome::Unimplemented => {
+            let vec = match word >> 12 {
+                0xA => 10,
+                0xF => 11,
+                _ => 4,
+            };
+            env.step(|b| sem::deliver(b, vec, pc, 0))
+                .map_err(|_| Outcome::Unimplemented {
+                    pc: env.pc,
+                    word: u128::from(word),
+                })
+        }
     }
 }
 
@@ -455,25 +498,14 @@ mod tests {
         env.backend.mem.map(VirtAddr(0), 1, Perms::RW).unwrap();
         env.backend.mem.map(VirtAddr(0x4000), 1, Perms::RW).unwrap();
         env.backend.set(sem::Ssp.state(), 0x4100);
-        // ベクタ 4（0x10）→ ハンドラ先頭 0x2000。未定義語を置く。
+        // ベクタ 4（0x10）→ 0x5000（未写像）。次のフェッチ失敗で止まる。
         env.backend
             .mem
-            .write(VirtAddr(0x10), &[0, 0, 0x20, 0x00])
-            .unwrap();
-        env.backend
-            .mem
-            .map(VirtAddr(0x2000), 1, Perms(0b111))
-            .unwrap();
-        env.backend
-            .mem
-            .write(VirtAddr(0x2000), &[0x4E, 0x74])
+            .write(VirtAddr(0x10), &[0, 0, 0x50, 0x00])
             .unwrap();
         let mut sys = NoSys;
         match run(&mut env, 0x1000, M68kModel::m68000(), &mut sys, None) {
-            Outcome::Unimplemented { pc, word } => {
-                assert_eq!(pc, 0x2000);
-                assert_eq!(word, 0x4E74);
-            }
+            Outcome::Unimplemented { pc, .. } => assert_eq!(pc, 0x5000),
             o => panic!("unexpected outcome: {o:?}"),
         }
         // フレーム: ssp = 0x4100-6、[sr][積み pc=0x1002]（illegal は
@@ -494,6 +526,77 @@ mod tests {
             )
             .unwrap();
         assert_eq!(&buf[2..6], &[0x00, 0x00, 0x10, 0x02]);
+    }
+
+    /// Line-F を補完するハンドラ（復帰 PC はハンドラが設定する契約）。
+    struct FpuStub;
+
+    impl TrapHandler for FpuStub {
+        fn handle_trap(&mut self, env: &mut BareEnv, code: u32) -> TrapOutcome {
+            if code == 11 {
+                env.pc = 0x2000;
+                return TrapOutcome::Handled;
+            }
+            TrapOutcome::Unimplemented
+        }
+    }
+
+    #[test]
+    fn fline_trap_reaches_personality() {
+        // `f228 f0ff 003c`（fmovem.x）で Line-F 例外 → ベクタ 11 が
+        // パーソナリティへ渡り、Handled ならハンドラ設定 PC から続く。
+        let mut env = env_at(0x1000, &[0xF228, 0xF0FF, 0x003C]);
+        env.backend
+            .mem
+            .map(VirtAddr(0x2000), 1, Perms(0b111))
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x2000), &[0x4E, 0x74])
+            .unwrap();
+        let mut sys = FpuStub;
+        match run(&mut env, 0x1000, M68kModel::m68000(), &mut sys, None) {
+            Outcome::Unimplemented { pc, word } => {
+                assert_eq!(pc, 0x2000);
+                assert_eq!(word, 0x4E74);
+            }
+            o => panic!("unexpected outcome: {o:?}"),
+        }
+    }
+
+    #[test]
+    fn undecodable_word_delivers_vector4() {
+        // デコード不能語はパーソナリティが受けなければ illegal
+        // ベクタ 4 へ配送される（フレームには命令自身の pc）。
+        let mut env = env_at(0x1000, &[0x4E74]);
+        env.backend.mem.map(VirtAddr(0), 1, Perms::RW).unwrap();
+        env.backend.mem.map(VirtAddr(0x4000), 1, Perms::RW).unwrap();
+        env.backend.set(sem::Ssp.state(), 0x4100);
+        env.backend
+            .mem
+            .write(VirtAddr(0x10), &[0, 0, 0x50, 0x00])
+            .unwrap();
+        let mut sys = NoSys;
+        // ベクタ 4 → 0x5000 は未写像で、次のフェッチ失敗で止まる。
+        match run(&mut env, 0x1000, M68kModel::m68000(), &mut sys, None) {
+            Outcome::Unimplemented { pc, .. } => assert_eq!(pc, 0x5000),
+            o => panic!("unexpected outcome: {o:?}"),
+        }
+        assert_eq!(env.backend.get(sem::Ssp.state()), 0x40FA);
+        let mut buf = [0u8; 6];
+        env.backend
+            .mem
+            .read(
+                VirtAddr(0x40FA),
+                &mut buf,
+                Access {
+                    endian: Endian::Be,
+                    align: Align::Natural,
+                    kind: AccessKind::DataRead,
+                },
+            )
+            .unwrap();
+        assert_eq!(&buf[2..6], &[0x00, 0x00, 0x10, 0x00]);
     }
 
     #[test]

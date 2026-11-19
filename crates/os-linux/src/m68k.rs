@@ -15,6 +15,11 @@
 #[cfg(feature = "guest-m68k")]
 pub mod sys;
 
+/// Line-F（FPU 命令）のカーネル補完。転送命令のみをエミュレートする。
+/// sys::Linux::handle_trap がベクタ 11 から呼ぶ。
+#[cfg(feature = "guest-m68k")]
+pub mod fpu;
+
 /// errno。asm-generic の値そのまま（ホストと同じ番号）。
 pub mod errno {
     pub const EPERM: u32 = 1;
