@@ -592,7 +592,7 @@ pub fn name(nr: u64) -> Option<&'static str> {
         .map(|i| SYSCALLS[i].1)
 }
 
-/// `task status` の `syscalls.md` はこの表から生成する。
+/// `name` の引き表。番号順なので二分探索する。
 const SYSCALLS: &[(u64, &str)] = &[
     (0, "restart_syscall"),
     (1, "exit"),

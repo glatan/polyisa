@@ -36,6 +36,10 @@ pub const TEST_REQUIREMENTS: &[TestBinary] = &[
         needs: &[Req::Data(".testdata/uapi-arm")],
     },
     TestBinary {
+        binary: "heavy_abi_m68k",
+        needs: &[Req::Data(".testdata/uapi-m68k")],
+    },
+    TestBinary {
         binary: "heavy_abi_power",
         needs: &[Req::Data(".testdata/uapi-powerpc")],
     },
