@@ -139,6 +139,7 @@ pub fn build_model() -> polyisa_isadl::Model {
 
     let gpr = |name: &str, access: Access| Operand {
         name: name.to_string(),
+        field: None,
         regclass: Some("gpr".to_string()),
         access,
     };

@@ -78,11 +78,50 @@ pub fn build_model() -> polyisa_isadl::Model {
             kind: FieldKind::Bits { hi, lo },
         });
     }
+    // 即値フィールド。形式ごとに配置が違うので別名にし、オペランド
+    // 側は構文中の名前（imm/csr/uimm）からリンクする。
+    // Ref: SPEC-RISCV-UNPRIV (20250508) §2.3.
+    m.fields.push(Field {
+        name: "imm_i".to_string(),
+        kind: FieldKind::Bits { hi: 31, lo: 20 },
+    });
+    m.fields.push(Field {
+        name: "imm_u".to_string(),
+        kind: FieldKind::Bits { hi: 31, lo: 12 },
+    });
+    m.fields.push(Field {
+        name: "imm_s".to_string(),
+        kind: FieldKind::Parts {
+            parts: vec![(31, 25), (11, 7)],
+            zfill: 0,
+        },
+    });
+    m.fields.push(Field {
+        name: "imm_b".to_string(),
+        kind: FieldKind::Parts {
+            parts: vec![(31, 31), (7, 7), (30, 25), (11, 8)],
+            zfill: 1,
+        },
+    });
+    m.fields.push(Field {
+        name: "imm_j".to_string(),
+        kind: FieldKind::Parts {
+            parts: vec![(31, 31), (19, 12), (20, 20), (30, 21)],
+            zfill: 1,
+        },
+    });
 
     let gpr = |name: &str, access: Access| Operand {
         name: name.to_string(),
+        field: None,
         regclass: Some("gpr".to_string()),
         access,
+    };
+    let imm = |name: &str, field: &str| Operand {
+        name: name.to_string(),
+        field: Some(field.to_string()),
+        regclass: None,
+        access: Access::Read,
     };
     m.formats.push(Format {
         name: "R".to_string(),
@@ -95,28 +134,60 @@ pub fn build_model() -> polyisa_isadl::Model {
     });
     m.formats.push(Format {
         name: "I".to_string(),
-        fields: vec!["rd".to_string(), "rs1".to_string()],
-        operands: vec![gpr("rd", Access::Write), gpr("rs1", Access::Read)],
+        fields: vec!["rd".to_string(), "rs1".to_string(), "imm_i".to_string()],
+        operands: vec![
+            gpr("rd", Access::Write),
+            gpr("rs1", Access::Read),
+            imm("imm", "imm_i"),
+        ],
+    });
+    // CSR 命令は I の即値領域を CSR 番号として読む（csrrw 系）。即値版は
+    // rs1 の位置を uimm として読む（csrrwi 系）。
+    m.formats.push(Format {
+        name: "C".to_string(),
+        fields: vec!["rd".to_string(), "rs1".to_string(), "imm_i".to_string()],
+        operands: vec![
+            gpr("rd", Access::Write),
+            imm("csr", "imm_i"),
+            gpr("rs1", Access::Read),
+        ],
+    });
+    m.formats.push(Format {
+        name: "CI".to_string(),
+        fields: vec!["rd".to_string(), "rs1".to_string(), "imm_i".to_string()],
+        operands: vec![
+            gpr("rd", Access::Write),
+            imm("csr", "imm_i"),
+            imm("uimm", "rs1"),
+        ],
     });
     m.formats.push(Format {
         name: "S".to_string(),
-        fields: vec!["rs1".to_string(), "rs2".to_string()],
-        operands: vec![gpr("rs1", Access::Read), gpr("rs2", Access::Read)],
+        fields: vec!["rs1".to_string(), "rs2".to_string(), "imm_s".to_string()],
+        operands: vec![
+            gpr("rs1", Access::Read),
+            gpr("rs2", Access::Read),
+            imm("imm", "imm_s"),
+        ],
     });
     m.formats.push(Format {
         name: "B".to_string(),
-        fields: vec!["rs1".to_string(), "rs2".to_string()],
-        operands: vec![gpr("rs1", Access::Read), gpr("rs2", Access::Read)],
+        fields: vec!["rs1".to_string(), "rs2".to_string(), "imm_b".to_string()],
+        operands: vec![
+            gpr("rs1", Access::Read),
+            gpr("rs2", Access::Read),
+            imm("imm", "imm_b"),
+        ],
     });
     m.formats.push(Format {
         name: "U".to_string(),
-        fields: vec!["rd".to_string()],
-        operands: vec![gpr("rd", Access::Write)],
+        fields: vec!["rd".to_string(), "imm_u".to_string()],
+        operands: vec![gpr("rd", Access::Write), imm("imm", "imm_u")],
     });
     m.formats.push(Format {
         name: "J".to_string(),
-        fields: vec!["rd".to_string()],
-        operands: vec![gpr("rd", Access::Write)],
+        fields: vec!["rd".to_string(), "imm_j".to_string()],
+        operands: vec![gpr("rd", Access::Write), imm("imm", "imm_j")],
     });
     // CR（圧縮レジスタ形式。JR群の where 判定と operand 取り出しに使う）。
     m.formats.push(Format {
@@ -221,12 +292,12 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("remw", "R", "0000001 ..... ..... 110 ..... 0111011", "remw {rd}, {rs1}, {rs2}", "div"),
         ("remuw", "R", "0000001 ..... ..... 111 ..... 0111011", "remuw {rd}, {rs1}, {rs2}", "div"),
         // SYSTEM の CSR 系（Zicsr）
-        ("csrrw", "I", "............ ..... 001 ..... 1110011", "csrrw {rd}, {csr}, {rs1}", "system"),
-        ("csrrs", "I", "............ ..... 010 ..... 1110011", "csrrs {rd}, {csr}, {rs1}", "system"),
-        ("csrrc", "I", "............ ..... 011 ..... 1110011", "csrrc {rd}, {csr}, {rs1}", "system"),
-        ("csrrwi", "I", "............ ..... 101 ..... 1110011", "csrrwi {rd}, {csr}, {uimm}", "system"),
-        ("csrrsi", "I", "............ ..... 110 ..... 1110011", "csrrsi {rd}, {csr}, {uimm}", "system"),
-        ("csrrci", "I", "............ ..... 111 ..... 1110011", "csrrci {rd}, {csr}, {uimm}", "system"),
+        ("csrrw", "C", "............ ..... 001 ..... 1110011", "csrrw {rd}, {csr}, {rs1}", "system"),
+        ("csrrs", "C", "............ ..... 010 ..... 1110011", "csrrs {rd}, {csr}, {rs1}", "system"),
+        ("csrrc", "C", "............ ..... 011 ..... 1110011", "csrrc {rd}, {csr}, {rs1}", "system"),
+        ("csrrwi", "CI", "............ ..... 101 ..... 1110011", "csrrwi {rd}, {csr}, {uimm}", "system"),
+        ("csrrsi", "CI", "............ ..... 110 ..... 1110011", "csrrsi {rd}, {csr}, {uimm}", "system"),
+        ("csrrci", "CI", "............ ..... 111 ..... 1110011", "csrrci {rd}, {csr}, {uimm}", "system"),
         // A（不可分操作。aq/rl は単一ホストスレッドでは不可分性に影響しない
         // ため無視する。Ref: SPEC-RISCV-UNPRIV (20250508) §A。）
         ("lr_w", "I", "00010..00000 ..... 010 ..... 0101111", "lr_w {rd}, ({rs1})", "atomic"),

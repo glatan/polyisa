@@ -41,7 +41,7 @@ pub fn generate(model: &Model) -> Result<Generated, GenError> {
         insn_type: gen_insn_type(model),
         decoder: gen_decoder(model)?,
         disassembler: gen_disassembler(model),
-        encoder: gen_encoder(model),
+        encoder: gen_encoder(model)?,
         operands: gen_operands(model),
         metadata: gen_metadata(model),
         map_decoder: gen_map_decoder(model)?,
@@ -187,68 +187,9 @@ fn gen_decoder(model: &Model) -> Result<String, GenError> {
             // `where` 付き：一致後にフィールド値を取り出して条件を評価する。
             s.push_str(&format!("            if {check} {{\n"));
             let tag = to_snake(&insn.name);
-            let mut conds = Vec::new();
-            for (k, w) in insn.wheres.iter().enumerate() {
-                let (hi, lo) = match model.fields.iter().find(|f| f.name == w.field) {
-                    Some(f) => match f.kind {
-                        polyisa_isadl::model::FieldKind::Bits { hi, lo } => (hi, lo),
-                        _ => (0, 0),
-                    },
-                    None => (0, 0),
-                };
-                let width = hi - lo + 1;
-                let mask: u128 = if width >= 128 {
-                    u128::MAX
-                } else {
-                    (1u128 << width) - 1
-                };
-                if lo == 0 {
-                    s.push_str(&format!(
-                        "                let w_{tag}_{k} = word & {mask:#x};\n"
-                    ));
-                } else {
-                    s.push_str(&format!(
-                        "                let w_{tag}_{k} = (word >> {lo}) & {mask:#x};\n"
-                    ));
-                }
-                let op = match w.op {
-                    polyisa_isadl::model::WhereOp::Eq => "==",
-                    polyisa_isadl::model::WhereOp::Ne => "!=",
-                    polyisa_isadl::model::WhereOp::Lt => "<",
-                    polyisa_isadl::model::WhereOp::Le => "<=",
-                    polyisa_isadl::model::WhereOp::Gt => ">",
-                    polyisa_isadl::model::WhereOp::Ge => ">=",
-                };
-                match &w.rhs {
-                    polyisa_isadl::model::WhereRhs::Lit(value) => {
-                        conds.push(format!("w_{tag}_{k} {op} {value:#x}"));
-                    }
-                    polyisa_isadl::model::WhereRhs::Field(name) => {
-                        let (hi2, lo2) = match model.fields.iter().find(|f| f.name == *name) {
-                            Some(f) => match f.kind {
-                                polyisa_isadl::model::FieldKind::Bits { hi, lo } => (hi, lo),
-                                _ => (0, 0),
-                            },
-                            None => (0, 0),
-                        };
-                        let width2 = hi2 - lo2 + 1;
-                        let mask2: u128 = if width2 >= 128 {
-                            u128::MAX
-                        } else {
-                            (1u128 << width2) - 1
-                        };
-                        if lo2 == 0 {
-                            s.push_str(&format!(
-                                "                let w2_{tag}_{k} = word & {mask2:#x};\n"
-                            ));
-                        } else {
-                            s.push_str(&format!(
-                                "                let w2_{tag}_{k} = (word >> {lo2}) & {mask2:#x};\n"
-                            ));
-                        }
-                        conds.push(format!("w_{tag}_{k} {op} w2_{tag}_{k}"));
-                    }
-                }
+            let (decls, conds) = where_decls_conds(model, insn, &tag);
+            for d in &decls {
+                s.push_str(&format!("                {d}\n"));
             }
             s.push_str(&format!(
                 "                if {} {{\n                    return Some(Insn::{});\n                }}\n            }}\n",
@@ -424,14 +365,628 @@ fn gen_disassembler(model: &Model) -> String {
     s
 }
 
-// Gap: GAP-0023
-fn gen_encoder(model: &Model) -> String {
+/// `where` の条件を評価するための、フィールドの取り出しと比較式の生成。
+/// 戻り値は (let 文の並び, 比較式の並び)。フィールドは `Bits` だけが
+/// 来る（検査で他の種別は拒否される）。
+fn where_decls_conds(
+    model: &Model,
+    insn: &polyisa_isadl::model::Insn,
+    tag: &str,
+) -> (Vec<String>, Vec<String>) {
+    let mut decls = Vec::new();
+    let mut conds = Vec::new();
+    let bits_of = |name: &str| match model.fields.iter().find(|f| f.name == name) {
+        Some(f) => match f.kind {
+            polyisa_isadl::model::FieldKind::Bits { hi, lo } => (hi, lo),
+            _ => (0, 0),
+        },
+        None => (0, 0),
+    };
+    for (k, w) in insn.wheres.iter().enumerate() {
+        let (hi, lo) = bits_of(&w.field);
+        let width = hi - lo + 1;
+        let mask: u128 = if width >= 128 {
+            u128::MAX
+        } else {
+            (1u128 << width) - 1
+        };
+        if lo == 0 {
+            decls.push(format!("let w_{tag}_{k} = word & {mask:#x};"));
+        } else {
+            decls.push(format!("let w_{tag}_{k} = (word >> {lo}) & {mask:#x};"));
+        }
+        let op = match w.op {
+            polyisa_isadl::model::WhereOp::Eq => "==",
+            polyisa_isadl::model::WhereOp::Ne => "!=",
+            polyisa_isadl::model::WhereOp::Lt => "<",
+            polyisa_isadl::model::WhereOp::Le => "<=",
+            polyisa_isadl::model::WhereOp::Gt => ">",
+            polyisa_isadl::model::WhereOp::Ge => ">=",
+        };
+        match &w.rhs {
+            polyisa_isadl::model::WhereRhs::Lit(value) => {
+                conds.push(format!("w_{tag}_{k} {op} {value:#x}"));
+            }
+            polyisa_isadl::model::WhereRhs::Field(name) => {
+                let (hi2, lo2) = bits_of(name);
+                let width2 = hi2 - lo2 + 1;
+                let mask2: u128 = if width2 >= 128 {
+                    u128::MAX
+                } else {
+                    (1u128 << width2) - 1
+                };
+                if lo2 == 0 {
+                    decls.push(format!("let w2_{tag}_{k} = word & {mask2:#x};"));
+                } else {
+                    decls.push(format!("let w2_{tag}_{k} = (word >> {lo2}) & {mask2:#x};"));
+                }
+                conds.push(format!("w_{tag}_{k} {op} w2_{tag}_{k}"));
+            }
+        }
+    }
+    (decls, conds)
+}
+
+/// `Parts` フィールドの論理値を命令語に散らすコードと、読み戻して
+/// 論理値を組み立てる式を生成する。`parts` は上位側から並ぶ。
+fn parts_scatter(parts: &[(u32, u32)], v: &str, word: &str, len: u32) -> String {
+    let total: u32 = parts.iter().map(|(hi, lo)| hi - lo + 1).sum();
+    let mut shift = total;
+    let mut out = String::new();
+    for (hi, lo) in parts {
+        let w = hi - lo + 1;
+        shift -= w;
+        // 語の中に収まる分だけを書く。語外の論理ビットは読み戻しの
+        // 一致検査が 0 を要求する。
+        let inw = len.saturating_sub(*lo).min(w);
+        if inw == 0 {
+            continue;
+        }
+        let mask: u64 = if inw >= 64 {
+            u64::MAX
+        } else {
+            (1u64 << inw) - 1
+        };
+        let take = if shift == 0 {
+            format!("({v} & {mask:#x})")
+        } else {
+            format!("(({v} >> {shift}) & {mask:#x})")
+        };
+        if *lo == 0 {
+            out.push_str(&format!("    {word} |= {take} as u128;\n"));
+        } else {
+            out.push_str(&format!("    {word} |= ({take} as u128) << {lo};\n"));
+        }
+    }
+    out
+}
+
+fn parts_gather(parts: &[(u32, u32)], word: &str, dst_ty: &str, len: u32) -> String {
+    // 部 i の論理値上のシフト量は、後続の部の幅の和。語長を越える
+    // 分は取れず、その位置は 0 になる（呼び出し側の一致検査で
+    // 論理値の語外ビットに 0 を要求する形になる）。
+    let mut expr = String::new();
+    let mut first = true;
+    for (i, (hi, lo)) in parts.iter().enumerate() {
+        let w = hi - lo + 1;
+        let inw = len.saturating_sub(*lo).min(w);
+        if inw == 0 {
+            continue;
+        }
+        let mask: u128 = if inw >= 128 {
+            u128::MAX
+        } else {
+            (1u128 << inw) - 1
+        };
+        let get = if *lo == 0 {
+            format!("({word} & {mask:#x})")
+        } else {
+            format!("(({word} >> {lo}) & {mask:#x})")
+        };
+        let shift: u32 = parts[i + 1..].iter().map(|(h, l)| h - l + 1).sum();
+        if !first {
+            expr.push_str(" | ");
+        }
+        first = false;
+        if shift == 0 {
+            expr.push_str(&format!("({get} as {dst_ty})"));
+        } else {
+            expr.push_str(&format!("(({get} as {dst_ty}) << {shift})"));
+        }
+    }
+    if expr.is_empty() {
+        expr.push('0');
+    }
+    expr
+}
+
+/// `when` 述語を満たす `(is_rv64, feats)` を一つ見つける。見つからなければ
+/// `None`（`Pred::False` など）。実空間は `is_rv64` 一変数と `feats` の
+/// 集合で、`flag("rv64") = is_rv64`、`flag("rv32") = !is_rv64` と評価する。
+fn satisfy_when(
+    pred: &polyisa_isadl::pred::Pred,
+    extra: &[String],
+    features: &[polyisa_isadl::model::Feature],
+) -> Option<(bool, u128)> {
+    use polyisa_isadl::pred::{Pred, PredCtx};
+    struct Ctx<'a> {
+        is_rv64: bool,
+        feats: u128,
+        extra: &'a [String],
+    }
+    impl PredCtx for Ctx<'_> {
+        fn flag(&self, name: &str) -> bool {
+            if name == "rv64" {
+                self.is_rv64
+            } else if name == "rv32" {
+                !self.is_rv64
+            } else {
+                self.extra
+                    .iter()
+                    .position(|f| f == name)
+                    .is_some_and(|i| self.feats & (1u128 << i) != 0)
+            }
+        }
+    }
+    // 述語に現れる旗を集める（rv32/rv64 を除く）。
+    fn flags(p: &Pred, out: &mut Vec<String>) {
+        match p {
+            Pred::True | Pred::False => {}
+            Pred::Flag(n) => {
+                if n != "rv32" && n != "rv64" && !out.contains(n) {
+                    out.push(n.clone());
+                }
+            }
+            Pred::Not(i) => flags(i, out),
+            Pred::All(ps) | Pred::Any(ps) => {
+                for q in ps {
+                    flags(q, out);
+                }
+            }
+        }
+    }
+    let mut fs = Vec::new();
+    flags(pred, &mut fs);
+    if fs.len() > 16 {
+        return None;
+    }
+    // 排他宣言された機能を両方立てる組み合わせ（実在しない構成）を除く。
+    let conflicts: Vec<(String, String)> = features
+        .iter()
+        .flat_map(|f| f.conflicts.iter().map(|c| (f.name.clone(), c.clone())))
+        .collect();
+    for is_rv64 in [true, false] {
+        for combo in 0..(1u32 << fs.len()) {
+            let mut feats = 0u128;
+            for (b, f) in fs.iter().enumerate() {
+                if combo & (1 << b) != 0 {
+                    feats |= 1u128 << extra.iter().position(|e| e == f)?;
+                }
+            }
+            let ctx = Ctx {
+                is_rv64,
+                feats,
+                extra,
+            };
+            if conflicts.iter().any(|(a, b)| ctx.flag(a) && ctx.flag(b)) {
+                continue;
+            }
+            if pred.eval(&ctx) {
+                return Some((is_rv64, feats));
+            }
+        }
+    }
+    None
+}
+
+/// エンコードの往復テスト用のオペランド列を採取する。検査を通った
+/// モデルの命令について、候補の直積から条件を満たすものを最大 `want`
+/// 個返す。見つからなければ空。
+fn sample_ops(
+    insn: &polyisa_isadl::model::Insn,
+    fmt: &polyisa_isadl::model::Format,
+    fields: &std::collections::BTreeMap<&str, &polyisa_isadl::model::Field>,
+    want: usize,
+) -> Vec<Vec<u64>> {
+    use polyisa_isadl::model::FieldKind;
+    let fixed_bits = insn.pattern.bits() & insn.pattern.mask();
+    // オペランドごとの候補値。
+    let mut cands: Vec<Vec<u64>> = Vec::new();
+    for op in &fmt.operands {
+        let Some(f) = fields.get(op.field.as_deref().unwrap_or(op.name.as_str())) else {
+            return Vec::new();
+        };
+        let cs: Vec<u64> = match &f.kind {
+            FieldKind::Bits { hi, lo } => {
+                let w = hi - lo + 1;
+                // 語の中に収まるビット数。語外の論理ビットは 0 でなければ
+                // ならず、候補の変形は語内の自由ビットだけで作る。
+                let inw = insn.pattern.len().saturating_sub(*lo).min(w);
+                let fmask: u128 = if inw >= 128 {
+                    u128::MAX
+                } else {
+                    (1u128 << inw) - 1
+                };
+                // パターンの固定ビットと重なる位置は値が強制される。
+                // 残りの自由ビットで変形を作る。
+                let span: u128 = if w >= 128 {
+                    u128::MAX
+                } else {
+                    ((1u128 << w) - 1) << lo
+                };
+                let fixmask = (insn.pattern.mask() & span) >> lo;
+                let must = ((fixed_bits & span) >> lo) & fmask;
+                let free = fmask & !fixmask;
+                let mut v = vec![
+                    must,
+                    must | free.isolate_lowest_one(), // 最小の自由ビット
+                    must | (free >> 1),               // 中間
+                    must | free,                      // 全自由ビット
+                ];
+                v.retain(|x| *x <= fmask.min(u64::MAX as u128));
+                v.dedup();
+                v.iter().map(|x| *x as u64).collect()
+            }
+            FieldKind::Parts { parts, zfill } => {
+                // 部ごとに強制ビットを求め、論理値の領域で変形する。
+                let total: u32 = parts.iter().map(|(h, l)| h - l + 1).sum();
+                let mut must = 0u64;
+                let mut free = 0u64;
+                let mut shift = total;
+                for (hi, lo) in parts {
+                    let w = hi - lo + 1;
+                    shift -= w;
+                    // 語の中に収まる分だけが値になる（語外の論理
+                    // ビットは 0 を要求される）。
+                    let inw = insn.pattern.len().saturating_sub(*lo).min(w);
+                    if inw == 0 {
+                        continue;
+                    }
+                    let pm: u64 = if inw >= 64 {
+                        u64::MAX
+                    } else {
+                        (1u64 << inw) - 1
+                    };
+                    let span = ((1u128 << w) - 1) << lo;
+                    let fix = ((insn.pattern.mask() & span) >> lo) as u64;
+                    let have = ((fixed_bits & span) >> lo) as u64;
+                    must |= (have & fix) << shift;
+                    free |= (pm & !fix) << shift;
+                }
+                let xmax: u64 = if total >= 64 {
+                    u64::MAX
+                } else {
+                    (1u64 << total) - 1
+                };
+                let zf = if *zfill >= 64 {
+                    u64::MAX
+                } else {
+                    (1u64 << zfill) - 1
+                };
+                let mut v = vec![
+                    must,
+                    must | free.isolate_lowest_one(),
+                    must | (free >> 1),
+                    must | free,
+                ];
+                v.retain(|x| *x <= xmax);
+                v.dedup();
+                v.iter()
+                    .map(|x| x << zfill)
+                    .filter(|x| x & zf == 0)
+                    .collect()
+            }
+            FieldKind::Hook { .. } => return Vec::new(),
+        };
+        // 強制ビットが u64 に収まらないなどで候補が空なら採取不能。
+        if cs.is_empty() {
+            return Vec::new();
+        }
+        cands.push(cs);
+    }
+    // 直積を試す（上限つき）。
+    let mut out = Vec::new();
+    let n = cands.len();
+    let mut idx = vec![0usize; n];
+    'outer: for _ in 0..4096 {
+        let ops: Vec<u64> = (0..n).map(|i| cands[i][idx[i]]).collect();
+        if encode_sim(insn, fmt, fields, &ops) {
+            out.push(ops);
+            if out.len() >= want {
+                break;
+            }
+        }
+        // odometer
+        let mut i = n;
+        loop {
+            if i == 0 {
+                break 'outer;
+            }
+            i -= 1;
+            idx[i] += 1;
+            if idx[i] < cands[i].len() {
+                break;
+            }
+            idx[i] = 0;
+        }
+    }
+    out
+}
+
+/// 生成コードと同じ規則でエンコード可否を判定する。往復入力の採取に使う。
+fn encode_sim(
+    insn: &polyisa_isadl::model::Insn,
+    fmt: &polyisa_isadl::model::Format,
+    fields: &std::collections::BTreeMap<&str, &polyisa_isadl::model::Field>,
+    ops: &[u64],
+) -> bool {
+    use polyisa_isadl::model::{FieldKind, WhereOp, WhereRhs};
+    if ops.len() != fmt.operands.len() {
+        return false;
+    }
+    let mut word = insn.pattern.bits();
+    for (i, op) in fmt.operands.iter().enumerate() {
+        let Some(f) = fields.get(op.field.as_deref().unwrap_or(op.name.as_str())) else {
+            return false;
+        };
+        let v = ops[i];
+        match &f.kind {
+            FieldKind::Bits { hi, lo } => {
+                let w = hi - lo + 1;
+                // 語の中に収まる分だけを比較し、語外のビットは 0 を要求する。
+                let inw = insn.pattern.len().saturating_sub(*lo).min(w);
+                if inw == 0 {
+                    if v != 0 {
+                        return false;
+                    }
+                    continue;
+                }
+                if inw < 64 && v >> inw != 0 {
+                    return false;
+                }
+                let mask: u128 = if inw >= 128 {
+                    u128::MAX
+                } else {
+                    (1u128 << inw) - 1
+                };
+                word |= (v as u128 & mask) << lo;
+                if (word >> lo) & mask != v as u128 & mask {
+                    return false;
+                }
+            }
+            FieldKind::Parts { parts, zfill } => {
+                let zf = if *zfill >= 64 {
+                    u64::MAX
+                } else {
+                    (1u64 << zfill) - 1
+                };
+                if v & zf != 0 {
+                    return false;
+                }
+                let x = v >> zfill;
+                let total: u32 = parts.iter().map(|(h, l)| h - l + 1).sum();
+                if total < 64 && x >= (1u64 << total) {
+                    return false;
+                }
+                let mut shift = total;
+                let mut back = 0u64;
+                for (hi, lo) in parts {
+                    let w = hi - lo + 1;
+                    shift -= w;
+                    // 語の中に収まる分だけを書き・読む。語外の論理
+                    // ビットは back に入らず `back != x` が 0 を要求する。
+                    let inw = insn.pattern.len().saturating_sub(*lo).min(w);
+                    if inw == 0 {
+                        continue;
+                    }
+                    let pm: u64 = if inw >= 64 {
+                        u64::MAX
+                    } else {
+                        (1u64 << inw) - 1
+                    };
+                    word |= (((x >> shift) & pm) as u128) << lo;
+                    back |= (((word >> lo) & pm as u128) as u64) << shift;
+                }
+                if back != x {
+                    return false;
+                }
+            }
+            FieldKind::Hook { .. } => return false,
+        }
+    }
+    if !insn.pattern.matches(word) {
+        return false;
+    }
+    let get = |name: &str| -> u128 {
+        match fields.get(name) {
+            Some(f) => match f.kind {
+                FieldKind::Bits { hi, lo } => {
+                    let w = hi - lo + 1;
+                    let mask: u128 = if w >= 128 {
+                        u128::MAX
+                    } else {
+                        (1u128 << w) - 1
+                    };
+                    (word >> lo) & mask
+                }
+                _ => 0,
+            },
+            None => 0,
+        }
+    };
+    for w in &insn.wheres {
+        let lhs = get(&w.field);
+        let rhs = match &w.rhs {
+            WhereRhs::Lit(v) => *v,
+            WhereRhs::Field(n) => get(n),
+        };
+        let ok = match w.op {
+            WhereOp::Eq => lhs == rhs,
+            WhereOp::Ne => lhs != rhs,
+            WhereOp::Lt => lhs < rhs,
+            WhereOp::Le => lhs <= rhs,
+            WhereOp::Gt => lhs > rhs,
+            WhereOp::Ge => lhs >= rhs,
+        };
+        if !ok {
+            return false;
+        }
+    }
+    true
+}
+
+// Gap: GAP-0023 — 列挙経路（`model.insns`）のエンコーダ。`map` 経路
+// （OpKind の逆変換）は 68k の EA 解釈と合わせて別段階で扱う。
+fn gen_encoder(model: &Model) -> Result<String, GenError> {
+    use polyisa_isadl::model::FieldKind;
     let mut s = String::from("// generated by isagen: encoder.\n");
+    let fields: std::collections::BTreeMap<&str, &polyisa_isadl::model::Field> =
+        model.fields.iter().map(|f| (f.name.as_str(), f)).collect();
+    let formats: std::collections::BTreeMap<&str, &polyisa_isadl::model::Format> =
+        model.formats.iter().map(|f| (f.name.as_str(), f)).collect();
+    let extra = extra_flags(model)?;
+    // `encode_*` の名前の一意性を先に確かめる（`to_snake` の衝突検査）。
+    {
+        let mut seen = std::collections::BTreeSet::new();
+        for n in model
+            .insns
+            .iter()
+            .map(|i| i.name.clone())
+            .chain(map_insns(model).iter().map(|m| m.name.clone()))
+        {
+            if !seen.insert(to_snake(&n)) {
+                return Err(GenError::Custom(format!("encode_* の名前が衝突する: {n}")));
+            }
+        }
+    }
     for insn in &model.insns {
+        let fmt = formats[insn.format.as_str()];
         s.push_str(&format!(
-            "pub fn encode_{}(ops: &[u64]) -> Option<u128> {{ let _ = ops; None }}\n",
+            "pub fn encode_{}(ops: &[u64]) -> Option<u128> {{\n",
             to_snake(&insn.name)
         ));
+        if fmt.operands.is_empty() {
+            s.push_str("    if !ops.is_empty() { return None; }\n");
+        } else {
+            s.push_str(&format!(
+                "    if ops.len() != {} {{ return None; }}\n",
+                fmt.operands.len()
+            ));
+        }
+        // 書き込みが一つもない命令（オペランドなし、または全フィールドが
+        // 語外）は `mut` を付けない。
+        let writes = fmt.operands.iter().any(|op| {
+            match &fields[op.field.as_deref().unwrap_or(op.name.as_str())].kind {
+                FieldKind::Bits { hi, lo } => {
+                    insn.pattern.len().saturating_sub(*lo).min(hi - lo + 1) > 0
+                }
+                FieldKind::Parts { parts, .. } => parts
+                    .iter()
+                    .any(|(h, l)| insn.pattern.len().saturating_sub(*l).min(h - l + 1) > 0),
+                FieldKind::Hook { has_encoder } => *has_encoder,
+            }
+        });
+        s.push_str(&format!(
+            "    let {}word: u128 = {:#x};\n",
+            if writes { "mut " } else { "" },
+            insn.pattern.bits()
+        ));
+        for (i, op) in fmt.operands.iter().enumerate() {
+            let f = fields[op.field.as_deref().unwrap_or(op.name.as_str())];
+            match &f.kind {
+                FieldKind::Bits { hi, lo } => {
+                    let w = hi - lo + 1;
+                    // 語の中に収まるビット数。語長を越える部分（圧縮命令が
+                    // 幅広の形式を共有する場合）は書けず、0 を要求する。
+                    let inw = insn.pattern.len().saturating_sub(*lo).min(w);
+                    if inw == 0 {
+                        s.push_str(&format!("    if ops[{i}] != 0 {{ return None; }}\n"));
+                        continue;
+                    }
+                    let mask: u128 = if inw >= 128 {
+                        u128::MAX
+                    } else {
+                        (1u128 << inw) - 1
+                    };
+                    s.push_str(&format!("    let v_{i} = ops[{i}];\n"));
+                    if inw < 64 {
+                        s.push_str(&format!("    if v_{i} >> {inw} != 0 {{ return None; }}\n"));
+                    }
+                    if *lo == 0 {
+                        s.push_str(&format!("    word |= v_{i} as u128;\n"));
+                        s.push_str(&format!(
+                            "    if word & {mask:#x} != v_{i} as u128 {{ return None; }}\n"
+                        ));
+                    } else {
+                        s.push_str(&format!("    word |= (v_{i} as u128) << {lo};\n"));
+                        // 固定ビットが 1 の位置に 0 を置いた場合は読み戻しで
+                        // ずれを検出する（0 を置いた位置はパターン検査が拾う）。
+                        s.push_str(&format!(
+                            "    if (word >> {lo}) & {mask:#x} != v_{i} as u128 {{ return None; }}\n"
+                        ));
+                    }
+                }
+                FieldKind::Parts { parts, zfill } => {
+                    s.push_str(&format!("    let v_{i} = ops[{i}];\n"));
+                    if *zfill > 0 {
+                        let zf: u64 = if *zfill >= 64 {
+                            u64::MAX
+                        } else {
+                            (1u64 << zfill) - 1
+                        };
+                        s.push_str(&format!("    if v_{i} & {zf:#x} != 0 {{ return None; }}\n"));
+                        s.push_str(&format!("    let x_{i} = v_{i} >> {zfill};\n"));
+                    } else {
+                        s.push_str(&format!("    let x_{i} = v_{i};\n"));
+                    }
+                    let total: u32 = parts.iter().map(|(h, l)| h - l + 1).sum();
+                    if total < 64 {
+                        s.push_str(&format!(
+                            "    if x_{i} >= {:#x} {{ return None; }}\n",
+                            1u64 << total
+                        ));
+                    }
+                    s.push_str(&parts_scatter(
+                        parts,
+                        &format!("x_{i}"),
+                        "word",
+                        insn.pattern.len(),
+                    ));
+                    // 読み戻しの一致検査。
+                    let gather = parts_gather(parts, "word", "u64", insn.pattern.len());
+                    s.push_str(&format!("    if ({gather}) != x_{i} {{ return None; }}\n"));
+                }
+                FieldKind::Hook { has_encoder } => {
+                    if *has_encoder {
+                        // フックの逆変換。`encode_field_<名>(word, v)` を
+                        // ゲスト側が書く。
+                        s.push_str(&format!(
+                            "    word = encode_field_{}(word, ops[{i}])?;\n",
+                            to_snake(&op.name)
+                        ));
+                    }
+                }
+            }
+        }
+        // `where` をエンコード時にも評価する。
+        if !insn.wheres.is_empty() {
+            let tag = format!("e_{}", to_snake(&insn.name));
+            let (decls, conds) = where_decls_conds(model, insn, &tag);
+            for d in decls {
+                s.push_str(&format!("    {d}\n"));
+            }
+            s.push_str(&format!(
+                "    if !({}) {{ return None; }}\n",
+                conds.join(" && ")
+            ));
+        }
+        // 最後に固定ビットとの一致を見る。
+        s.push_str(&format!(
+            "    if word & {:#x} != {:#x} {{ return None; }}\n",
+            insn.pattern.mask(),
+            insn.pattern.bits()
+        ));
+        s.push_str("    Some(word)\n}\n");
     }
     for mi in map_insns(model) {
         s.push_str(&format!(
@@ -439,8 +994,118 @@ fn gen_encoder(model: &Model) -> String {
             to_snake(&mi.name)
         ));
     }
-    s.push_str("// TODO: field reverse mapping\n");
-    s
+    // 命令型からの振り分け。
+    s.push_str("pub fn encode(insn: Insn, ops: &[u64]) -> Option<u128> {\n    match insn {\n");
+    for insn in &model.insns {
+        s.push_str(&format!(
+            "        Insn::{} => encode_{}(ops),\n",
+            to_ident(&insn.name),
+            to_snake(&insn.name)
+        ));
+    }
+    for mi in map_insns(model) {
+        s.push_str(&format!(
+            "        Insn::{} => encode_{}(ops),\n",
+            to_ident(&mi.name),
+            to_snake(&mi.name)
+        ));
+    }
+    s.push_str("    }\n}\n");
+    // 語から命令のオペランド値を取り出す。`encode` が受ける `ops` と同じ
+    // 並び・同じ値域（語外のビットは 0）で返す。`Hook` を含む形式は
+    // 取り出せないので空を返す。
+    s.push_str("pub fn extract_ops(insn: Insn, word: u128) -> Vec<u64> {\n");
+    let mut missing = !map_insns(model).is_empty();
+    let mut arms = Vec::new();
+    for insn in &model.insns {
+        let fmt = formats[insn.format.as_str()];
+        let mut pieces = Vec::new();
+        let mut hook = false;
+        for op in &fmt.operands {
+            let f = fields[op.field.as_deref().unwrap_or(op.name.as_str())];
+            match &f.kind {
+                FieldKind::Bits { hi, lo } => {
+                    let w = hi - lo + 1;
+                    let mask: u128 = if w >= 128 {
+                        u128::MAX
+                    } else {
+                        (1u128 << w) - 1
+                    };
+                    if *lo == 0 {
+                        pieces.push(format!("(word & {mask:#x}) as u64"));
+                    } else {
+                        pieces.push(format!("((word >> {lo}) & {mask:#x}) as u64"));
+                    }
+                }
+                FieldKind::Parts { parts, zfill } => {
+                    let gather = parts_gather(parts, "word", "u64", u32::MAX);
+                    if *zfill > 0 {
+                        pieces.push(format!("({gather}) << {zfill}"));
+                    } else {
+                        pieces.push(gather);
+                    }
+                }
+                FieldKind::Hook { .. } => {
+                    hook = true;
+                    break;
+                }
+            }
+        }
+        if hook {
+            missing = true;
+            continue;
+        }
+        arms.push(format!(
+            "        Insn::{} => vec![{}],\n",
+            to_ident(&insn.name),
+            pieces.join(", ")
+        ));
+    }
+    // `word` をどのアームも使わなければ未使用を避ける。
+    if arms.is_empty() || arms.iter().all(|a| !a.contains("word")) {
+        s.push_str("    let _ = word;\n");
+    }
+    s.push_str("    match insn {\n");
+    for a in arms {
+        s.push_str(&a);
+    }
+    if missing {
+        s.push_str("        _ => vec![],\n");
+    }
+    s.push_str("    }\n}\n");
+    // 往復テストの入力表。(命令, ops, 語長, is_rv64, feats)。採取できなかった
+    // 命令は ENCODE_SKIPPED に名前を残す。
+    s.push_str("pub const ENCODE_ROUNDTRIP: &[(Insn, &[u64], u32, bool, u128)] = &[\n");
+    let mut skipped = Vec::new();
+    for insn in &model.insns {
+        let fmt = formats[insn.format.as_str()];
+        let Some((is_rv64, feats)) = satisfy_when(&insn.when, &extra, &model.features) else {
+            skipped.push(insn.name.clone());
+            continue;
+        };
+        let cases = sample_ops(insn, fmt, &fields, 2);
+        if cases.is_empty() {
+            skipped.push(insn.name.clone());
+            continue;
+        }
+        for ops in cases {
+            s.push_str(&format!(
+                "    (Insn::{}, &{:?}, {}, {}, {:#x}),\n",
+                to_ident(&insn.name),
+                ops,
+                insn.pattern.len(),
+                is_rv64,
+                feats
+            ));
+        }
+    }
+    s.push_str("];\n");
+    s.push_str("pub const ENCODE_SKIPPED: &[&str] = &[\n");
+    for n in skipped {
+        s.push_str(&format!("    {n:?},\n"));
+    }
+    s.push_str("];\n");
+    Ok(s)
 }
 
 /// `map` を持つモデル用の、バイト列からのデコーダを生成する。
@@ -1474,24 +2139,28 @@ fn name_const(name: &str) -> String {
 }
 
 fn gen_operands(model: &Model) -> String {
-    use std::collections::BTreeMap;
     let mut s = String::from(
         "// generated by isagen: operands. 32ビット長の形式だけを扱う。\n// 圧縮形式の取り出しは形式の追加後に生成する。\n",
     );
-    let fields: BTreeMap<&str, (u32, u32)> = model
-        .fields
-        .iter()
-        .filter_map(|f| match f.kind {
-            polyisa_isadl::model::FieldKind::Bits { hi, lo } => Some((f.name.as_str(), (hi, lo))),
-            _ => None,
-        })
-        .collect();
+    enum Item {
+        Bits(u32, u32),
+        Parts(Vec<(u32, u32)>, u32),
+    }
     for fmt in &model.formats {
-        let mut items = Vec::new();
+        // フィールド名と、取り出す種別（Bits は u32、Parts は u64）。
+        let mut items: Vec<(String, Item)> = Vec::new();
         for fname in &fmt.fields {
-            if let Some((hi, lo)) = fields.get(fname.as_str()) {
-                items.push((fname.clone(), *hi, *lo));
-            }
+            let Some(f) = model.fields.iter().find(|f| f.name == *fname) else {
+                continue;
+            };
+            let item = match &f.kind {
+                polyisa_isadl::model::FieldKind::Bits { hi, lo } => Item::Bits(*hi, *lo),
+                polyisa_isadl::model::FieldKind::Parts { parts, zfill } => {
+                    Item::Parts(parts.clone(), *zfill)
+                }
+                _ => continue,
+            };
+            items.push((fname.clone(), item));
         }
         if items.is_empty() {
             continue;
@@ -1499,28 +2168,45 @@ fn gen_operands(model: &Model) -> String {
         let ty = format!("Ops{}", to_ident(&fmt.name));
         let f = format!("ops_{}", to_snake(&fmt.name));
         s.push_str(&format!("pub struct {ty} {{ pub raw: u128,"));
-        for (name, _, _) in &items {
-            s.push_str(&format!(" pub {name}: u32,"));
+        for (name, item) in &items {
+            let t = match item {
+                Item::Bits(..) => "u32",
+                Item::Parts(..) => "u64",
+            };
+            s.push_str(&format!(" pub {name}: {t},"));
         }
         s.push_str(" }\n");
         s.push_str(&format!("pub fn {f}(word: u128) -> {ty} {{\n"));
-        for (name, hi, lo) in &items {
-            let width = hi - lo + 1;
-            let mask: u128 = if width >= 128 {
-                u128::MAX
-            } else {
-                (1u128 << width) - 1
-            };
-            if *lo == 0 {
-                s.push_str(&format!("    let {name} = (word & {mask:#x}) as u32;\n"));
-            } else {
-                s.push_str(&format!(
-                    "    let {name} = ((word >> {lo}) & {mask:#x}) as u32;\n"
-                ));
+        for (name, item) in &items {
+            match item {
+                Item::Bits(hi, lo) => {
+                    let width = hi - lo + 1;
+                    let mask: u128 = if width >= 128 {
+                        u128::MAX
+                    } else {
+                        (1u128 << width) - 1
+                    };
+                    if *lo == 0 {
+                        s.push_str(&format!("    let {name} = (word & {mask:#x}) as u32;\n"));
+                    } else {
+                        s.push_str(&format!(
+                            "    let {name} = ((word >> {lo}) & {mask:#x}) as u32;\n"
+                        ));
+                    }
+                }
+                Item::Parts(parts, zfill) => {
+                    // 取り出しは語の実値にだけ触るので語長で絞らない。
+                    let gather = parts_gather(parts, "word", "u64", u32::MAX);
+                    if *zfill > 0 {
+                        s.push_str(&format!("    let {name} = ({gather}) << {zfill};\n"));
+                    } else {
+                        s.push_str(&format!("    let {name} = {gather};\n"));
+                    }
+                }
             }
         }
         s.push_str(&format!("    {ty} {{ raw: word,"));
-        for (name, _, _) in &items {
+        for (name, _) in &items {
             s.push_str(&format!(" {name},"));
         }
         s.push_str(" }\n}\n");
@@ -2273,5 +2959,121 @@ mod tests {
             timing: "alu".to_string(),
         });
         assert!(generate(&m).is_err());
+    }
+
+    #[test]
+    fn encoder_handles_word_boundary_fields() {
+        // 16ビットの c.srli が 32 ビットの R 形式を共有する場合、rs1/rs2
+        // のように語の外に出るフィールドは、語内のビットは語の内容と
+        // 一致させ（bit15=1 が固定なら値は 1）、語外は 0 を要求する。
+        let mut m = Model::new();
+        m.timing_classes.push("alu".to_string());
+        for (name, hi, lo) in [("rd", 11, 7), ("rs1", 19, 15), ("rs2", 24, 20)] {
+            m.fields.push(Field {
+                name: name.to_string(),
+                kind: FieldKind::Bits { hi, lo },
+            });
+        }
+        let gpr = |name: &str, access: Access| Operand {
+            name: name.to_string(),
+            field: None,
+            regclass: Some("gpr".to_string()),
+            access,
+        };
+        m.formats.push(Format {
+            name: "R".to_string(),
+            fields: vec!["rd".to_string(), "rs1".to_string(), "rs2".to_string()],
+            operands: vec![
+                gpr("rd", Access::Write),
+                gpr("rs1", Access::Read),
+                gpr("rs2", Access::Read),
+            ],
+        });
+        m.insns.push(Insn {
+            name: "c_srli".to_string(),
+            format: "R".to_string(),
+            pattern: Pattern::parse("100 0 00 ... ..... 01").unwrap(),
+            when: Pred::True,
+            wheres: vec![],
+            syntax: "c.srli {rd}, {imm}".to_string(),
+            timing: "alu".to_string(),
+        });
+        let fields: std::collections::BTreeMap<&str, &Field> =
+            m.fields.iter().map(|f| (f.name.as_str(), f)).collect();
+        // bit15 固定=1 なので rs1 の語内ビットは 1 でなければならない。
+        assert!(encode_sim(&m.insns[0], &m.formats[0], &fields, &[0, 1, 0]));
+        assert!(!encode_sim(&m.insns[0], &m.formats[0], &fields, &[0, 0, 0]));
+        assert!(!encode_sim(&m.insns[0], &m.formats[0], &fields, &[0, 3, 0]));
+        // 往復入力が採取できる。
+        let cases = sample_ops(&m.insns[0], &m.formats[0], &fields, 2);
+        assert!(!cases.is_empty());
+        // 生成コードも語内ビットだけを比較する。
+        let g = generate(&m).unwrap();
+        assert!(g.encoder.contains("if v_1 >> 1 != 0 { return None; }"));
+        assert!(g.encoder.contains("ENCODE_SKIPPED: &[&str] = &[\n]"));
+    }
+
+    #[test]
+    fn encoder_scatters_parts_fields() {
+        // B 形式相当の分散即値: x = b31 ++ b7 ++ b30:25 ++ b11:8、v = x << 1。
+        let mut m = Model::new();
+        m.timing_classes.push("branch".to_string());
+        for (name, hi, lo) in [("rs1", 19, 15), ("rs2", 24, 20)] {
+            m.fields.push(Field {
+                name: name.to_string(),
+                kind: FieldKind::Bits { hi, lo },
+            });
+        }
+        m.fields.push(Field {
+            name: "imm_b".to_string(),
+            kind: FieldKind::Parts {
+                parts: vec![(31, 31), (7, 7), (30, 25), (11, 8)],
+                zfill: 1,
+            },
+        });
+        let gpr = |name: &str, access: Access| Operand {
+            name: name.to_string(),
+            field: None,
+            regclass: Some("gpr".to_string()),
+            access,
+        };
+        m.formats.push(Format {
+            name: "B".to_string(),
+            fields: vec!["rs1".to_string(), "rs2".to_string(), "imm_b".to_string()],
+            operands: vec![
+                gpr("rs1", Access::Read),
+                gpr("rs2", Access::Read),
+                Operand {
+                    name: "imm".to_string(),
+                    field: Some("imm_b".to_string()),
+                    regclass: None,
+                    access: Access::Read,
+                },
+            ],
+        });
+        m.insns.push(Insn {
+            name: "beq".to_string(),
+            format: "B".to_string(),
+            pattern: Pattern::parse("....... ..... ..... 000 ..... 1100011").unwrap(),
+            when: Pred::True,
+            wheres: vec![],
+            syntax: "beq {rs1}, {rs2}, {imm}".to_string(),
+            timing: "branch".to_string(),
+        });
+        let fields: std::collections::BTreeMap<&str, &Field> =
+            m.fields.iter().map(|f| (f.name.as_str(), f)).collect();
+        // imm=8: x=4 → b11:8=0100 → bit10=1。rs1=1・rs2=2 で 0x0020_8463。
+        assert!(encode_sim(&m.insns[0], &m.formats[0], &fields, &[1, 2, 8]));
+        // 奇数の即値は zfill の検査で弾く。
+        assert!(!encode_sim(&m.insns[0], &m.formats[0], &fields, &[1, 2, 9]));
+        // 往復入力が採取でき、生成コードが分散の形を含む。
+        assert!(!sample_ops(&m.insns[0], &m.formats[0], &fields, 1).is_empty());
+        let g = generate(&m).unwrap();
+        assert!(g.encoder.contains("if v_2 & 0x1 != 0 { return None; }"));
+        assert!(
+            g.encoder
+                .contains("word |= (((x_2 >> 11) & 0x1) as u128) << 31;")
+        );
+        assert!(g.encoder.contains("word |= ((x_2 & 0xf) as u128) << 8;"));
     }
 }

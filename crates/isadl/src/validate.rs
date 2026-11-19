@@ -325,8 +325,9 @@ pub fn validate(model: &Model) -> Report {
                 });
                 continue;
             };
-            match f.kind {
+            match &f.kind {
                 FieldKind::Bits { hi, lo } => {
+                    let (hi, lo) = (*hi, *lo);
                     if lo > hi || hi >= 128 {
                         errors.push(ValidationError::BadField {
                             format: format.name.clone(),
@@ -345,6 +346,33 @@ pub fn validate(model: &Model) -> Report {
                     }
                     seen.push((fname.as_str(), hi, lo));
                 }
+                FieldKind::Parts { parts, zfill } => {
+                    let mut width = *zfill;
+                    let mut bad = parts.is_empty();
+                    for &(hi, lo) in parts {
+                        if lo > hi || hi >= 128 {
+                            bad = true;
+                            break;
+                        }
+                        width += hi - lo + 1;
+                        for (other, ohi, olo) in &seen {
+                            if lo <= *ohi && *olo <= hi {
+                                errors.push(ValidationError::BadField {
+                                    format: format.name.clone(),
+                                    field: format!("{fname} overlaps {other}"),
+                                });
+                            }
+                        }
+                        seen.push((fname.as_str(), hi, lo));
+                    }
+                    // 論理値は u64 のオペランドに収まる必要がある。
+                    if bad || width > 64 {
+                        errors.push(ValidationError::BadField {
+                            format: format.name.clone(),
+                            field: fname.clone(),
+                        });
+                    }
+                }
                 FieldKind::Hook { has_encoder } => {
                     if !has_encoder {
                         errors.push(ValidationError::MissingEncoder {
@@ -352,6 +380,18 @@ pub fn validate(model: &Model) -> Report {
                         });
                     }
                 }
+            }
+        }
+        // オペランドのフィールド（`field` がなければオペランド名）は形式の
+        // フィールド名でなければならない。ずれがあるとエンコーダがその
+        // オペランドを書き込めない。
+        for op in &format.operands {
+            let fname = op.field.as_deref().unwrap_or(op.name.as_str());
+            if !format.fields.iter().any(|n| n == fname) {
+                errors.push(ValidationError::Unresolved {
+                    kind: "operand".to_string(),
+                    name: format!("{}: {}", format.name, op.name),
+                });
             }
         }
     }

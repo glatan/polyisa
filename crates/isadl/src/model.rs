@@ -43,6 +43,11 @@ pub struct RegClass {
 pub enum FieldKind {
     /// 命令語の `[hi:lo]`。
     Bits { hi: u32, lo: u32 },
+    /// 論理値が命令語の複数範囲に分かれるもの（RISC-V の S/B/J 形式の
+    /// 即値など）。`parts` は `(hi, lo)` の範囲を論理値の上位側から
+    /// 並べたもので、デコードは順に連結して論理値を得る。`zfill` は
+    /// 論理値の下位に暗黙の 0 を足す幅（分岐即値の `++ 0b0`）。
+    Parts { parts: Vec<(u32, u32)>, zfill: u32 },
     /// Rust のフック。逆変換の有無でエンコーダ可否が決まる。
     Hook { has_encoder: bool },
 }
@@ -66,6 +71,10 @@ pub enum Access {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Operand {
     pub name: String,
+    /// 値を保持するフィールド。`None` なら `name` と同名のフィールドを
+    /// 使う。構文中の名前（`{imm}` など）と、形式ごとに配置の違う
+    /// フィールド（`imm_i`/`imm_s` など）を分けるために使う。
+    pub field: Option<String>,
     pub regclass: Option<String>,
     pub access: Access,
 }

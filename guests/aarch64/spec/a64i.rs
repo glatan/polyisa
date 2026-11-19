@@ -117,6 +117,7 @@ pub fn build_model() -> polyisa_isadl::Model {
     // 形式（operand メタデータ。解読はパターンの仕事）。
     let gpr = |name: &str, access: Access| Operand {
         name: name.to_string(),
+        field: None,
         regclass: Some("gpr".to_string()),
         access,
     };

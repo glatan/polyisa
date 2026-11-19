@@ -186,4 +186,40 @@ mod tests {
         assert_eq!(decode_model(0x8002, 16, true), None);
         assert_eq!(decode_model(0x8002, 16, false), None);
     }
+
+    #[test]
+    fn encode_spot_checks() {
+        // add x1,x2,x3 = 0x003100b3。Ref: SPEC-RISCV-UNPRIV。
+        assert_eq!(encode(Insn::Add, &[1, 2, 3]), Some(0x0031_00b3));
+        // 範囲外・個数違い・固定ビットとの衝突は None。
+        assert_eq!(encode(Insn::Add, &[1, 2, 32]), None);
+        assert_eq!(encode(Insn::Add, &[1, 2]), None);
+        // fence は全ビット固定。fm=0・pred/succ=iorw で imm は 0x0ff のみ。
+        assert_eq!(encode(Insn::Fence, &[0, 0, 0x0ff]), Some(0x0ff0_000f));
+        assert_eq!(encode(Insn::Fence, &[0, 0, 0]), None);
+        // addi x1,x2,3 = 0x00310093。Ref: SPEC-RISCV-UNPRIV。
+        assert_eq!(encode(Insn::Addi, &[1, 2, 3]), Some(0x0031_0093));
+        // beq x1,x2,8: imm[12|11|10:5|4:1|0] = 0|0|000000|0100|0。
+        assert_eq!(encode(Insn::Beq, &[1, 2, 8]), Some(0x0020_8463));
+    }
+
+    #[test]
+    fn encode_decode_roundtrip() {
+        // 生成した往復表の全件を、生成した encode/decode/抽出で確かめる。
+        for (insn, ops, len, is_rv64, feats) in ENCODE_ROUNDTRIP {
+            let word = encode(*insn, ops).unwrap_or_else(|| {
+                panic!("encode failed: {insn:?} {ops:?}");
+            });
+            let got = decode_model_ex(word, *len, *is_rv64, *feats);
+            assert_eq!(got, Some(*insn), "decode {word:#x} for {insn:?}");
+            assert_eq!(
+                &extract_ops(*insn, word)[..],
+                &ops[..],
+                "ops mismatch for {insn:?} {word:#x}"
+            );
+        }
+        // 採取できなかった命令があれば表の意味が薄れるので、現状は
+        // 空を要求する（Hook 型のオペランドを持つ形式が増えたら見直す）。
+        assert!(ENCODE_SKIPPED.is_empty(), "{:?}", ENCODE_SKIPPED);
+    }
 }
