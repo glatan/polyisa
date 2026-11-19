@@ -49,7 +49,7 @@
 | SP5 | 整数演算: add/sub/論理/シフト/sethi と、V8 の umul/smul/udiv/sdiv/mulscc | SP4 | 069ed0d |
 | SP6 | load/store 全サイズ・ldstub/swap・ASI 指定形 | SP4 | 21fd504 |
 | SP7 | 分岐・call・jmpl・return。annul ビットと遅延スロット内の分岐（DCTI couple） | SP4 | 56a5d64 |
-| SP8 | ウィンドウ命令 save/restore・ta/tcc（V8 の Ticc を含む）・ユーザ ASR（rdy/wry、V9 の rdccr/wrccr/rdpc）。rd/wr psr や rett/done/retry は特権命令なので、ユーザーモードでは特権違反トラップの経路だけを実装する | SP4 | - |
+| SP8 | ウィンドウ命令 save/restore・ta/tcc（V8 の Ticc を含む）・ユーザ ASR（rdy/wry、V9 の rdccr/wrccr/rdpc）。rd/wr psr や rett/done/retry は特権命令なので、ユーザーモードでは特権違反トラップの経路だけを実装する | SP4 | d22e301 |
 | SP9 | V9 の追加: movcc/movr・64 ビット演算・PSTATE.AM のアドレスマスク・cas/casx・membar/stbar/flush・popc | SP5-8 | - |
 | SP10 | FPU: ldf/stf/lddf・fadd/fsub/fmul/fdiv/fsqrt・fcmp・fcvt・fmov、V9 の fmovcc/fmovr と %fsr | SP4 | - |
 | SP11 | VIS とユーザ ASI。V7/V8/V9 のモデル差を `when` 述語と挙動パラメータで切り分け | SP9,SP10 | - |
