@@ -8,7 +8,7 @@
 //! 出典は SPEC-M68K-PRM (M68000PM/AD Rev 1) である。
 //! Ref: SPEC-M68K-PRM (Rev 1).
 
-use polyisa_sem::{Backend, ExceptionKind, Flow, GuestException, StateRef, W8, W32};
+use polyisa_sem::{Backend, Cmp, ExceptionKind, Flow, GuestException, StateRef, W8, W32};
 
 use super::CpuState;
 
@@ -79,6 +79,50 @@ pub const fn sr_ref() -> StateRef<W32> {
 #[must_use]
 pub const fn ccr_ref() -> StateRef<W8> {
     StateRef::<W8>::from_offset(core::mem::offset_of!(CpuState, sr))
+}
+
+/// アドレスレジスタ `n`（0〜7）を読む。n=7 は SR.S で USP/SSP を選ぶ。
+pub fn areg<B: Backend>(b: &mut B, n: u8) -> B::V<W32> {
+    debug_assert!(n < 8);
+    if n == 7 {
+        let s = b.get(sr_ref());
+        let mask = b.konst::<W32>(1 << sr_bit::S);
+        let masked = b.and(s, mask);
+        let zero = b.konst::<W32>(0);
+        let sup = b.cmp(Cmp::Ne, masked, zero);
+        let ssp = b.get(Ssp.state());
+        let usp = b.get(Usp.state());
+        b.select(sup, ssp, usp)
+    } else {
+        b.get(A(n).state())
+    }
+}
+
+/// アドレスレジスタ `n`（0〜7）に書く。n=7 は SR.S で USP/SSP を選ぶ。
+/// 保持先が実行時に決まるので `if_then_else` で書き分ける。
+pub fn set_areg<B: Backend>(b: &mut B, n: u8, v: B::V<W32>) -> Flow<B> {
+    debug_assert!(n < 8);
+    if n == 7 {
+        let s = b.get(sr_ref());
+        let mask = b.konst::<W32>(1 << sr_bit::S);
+        let masked = b.and(s, mask);
+        let zero = b.konst::<W32>(0);
+        let sup = b.cmp(Cmp::Ne, masked, zero);
+        b.if_then_else(
+            sup,
+            |b| {
+                b.set(Ssp.state(), v);
+                Ok(())
+            },
+            |b| {
+                b.set(Usp.state(), v);
+                Ok(())
+            },
+        )
+    } else {
+        b.set(A(n).state(), v);
+        Ok(())
+    }
 }
 
 /// SR の各ビット位置。
