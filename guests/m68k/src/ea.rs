@@ -200,6 +200,9 @@ pub const fn insn_ext_words(insn: super::Insn, w: u64) -> Option<u32> {
         | super::Insn::ExtW
         | super::Insn::ExtL => Some(0),
         super::Insn::Lea | super::Insn::Pea => ext_words(ea_mode(w), ea_reg(w), 4),
+        super::Insn::Mulu | super::Insn::Muls | super::Insn::Divu | super::Insn::Divs => {
+            ext_words(ea_mode(w), ea_reg(w), 2)
+        }
         // movem はマスク語（pc+2）+ EA 拡張語、movep は変位語1つ。
         super::Insn::MovrmW | super::Insn::MovrmL | super::Insn::MrmemW | super::Insn::MrmemL => {
             match ext_words(ea_mode(w), ea_reg(w), 4) {

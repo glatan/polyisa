@@ -114,7 +114,11 @@ const FILES: &[&str] = &[
     "MOVEM.w",
     "MOVEM.l",
     "MOVEP.w",
-    "MOVEP.l", //
+    "MOVEP.l",
+    "MULU",
+    "MULS",
+    "DIVU",
+    "DIVS", //
     "ANDItoCCR",
     "ANDItoSR",
     "ORItoCCR",

@@ -1629,3 +1629,107 @@ fn movem_movep() {
             .is_err()
     );
 }
+
+/// C11: mulu/muls/divu/divs。
+// Ref: SPEC-M68K-PRM (Rev 1) §MULU/MULS/DIVU/DIVS.
+#[test]
+fn mul_div() {
+    // mulu d0,d1: 0xC2C0。0x0003 × 0x0004 = 12、上位 word は無視。
+    let mut env = env_with_code(&[0xC2C0]);
+    env.backend.set(D(0).state(), 0xDEAD_0003);
+    env.backend.set(D(1).state(), 0x0000_0004);
+    env.step(|b| sem::exec(b, Insn::Mulu, 0xC2C0, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(D(1).state()), 12);
+
+    // muls d0,d1: 0xC3C0。-1 × -1 = 1。
+    let mut env = env_with_code(&[0xC3C0]);
+    env.backend.set(D(0).state(), 0x0000_FFFF);
+    env.backend.set(D(1).state(), 0xFFFF_FFFF);
+    env.step(|b| sem::exec(b, Insn::Muls, 0xC3C0, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(D(1).state()), 1);
+
+    // muls で負: -2 × 3 = -6 = 0xFFFF_FFFA → N=1。
+    let mut env = env_with_code(&[0xC3C0]);
+    env.backend.set(D(0).state(), 0x0000_FFFE);
+    env.backend.set(D(1).state(), 0x0000_0003);
+    env.step(|b| sem::exec(b, Insn::Muls, 0xC3C0, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(D(1).state()), 0xFFFF_FFFA);
+    assert_eq!(env.backend.get(sem::ccr_ref()) & 0x08, 0x08);
+
+    // divu d0,d1: 0x82C0。0x1000_0000 ÷ 0x1000 = 0x10000 → ovf。
+    // ovf 規約: V=1, N=1, Z=0, Dn 不変。
+    let mut env = env_with_code(&[0x82C0]);
+    env.backend.set(D(0).state(), 0x0000_1000);
+    env.backend.set(D(1).state(), 0x1000_0000);
+    env.backend.set(sem::ccr_ref(), 0x1F);
+    env.step(|b| sem::exec(b, Insn::Divu, 0x82C0, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(D(1).state()), 0x1000_0000);
+    assert_eq!(env.backend.get(sem::ccr_ref()), 0x1A);
+
+    // divu 商が 16bit を超えると ovf（Dn 不変）。次は正常系:
+    // 100 ÷ 3 = 33 r 1 → d1 = 0x0001_0021。
+    let mut env = env_with_code(&[0x82C0]);
+    env.backend.set(D(0).state(), 3);
+    env.backend.set(D(1).state(), 100);
+    env.step(|b| sem::exec(b, Insn::Divu, 0x82C0, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(D(1).state()), 0x0001_0021);
+
+    // divu 0: 例外ベクタ 5。
+    let mut env = env_with_code(&[0x82C0]);
+    env.backend.set(D(0).state(), 0);
+    env.backend.set(D(1).state(), 100);
+    let r = env.step(|b| sem::exec(b, Insn::Divu, 0x82C0, 0x1000));
+    assert!(r.is_err());
+
+    // divs d0,d1: 0x83C0。-6 ÷ 3 = -2 r 0 → d1 = 0x0000_FFFE。
+    let mut env = env_with_code(&[0x83C0]);
+    env.backend.set(D(0).state(), 3);
+    env.backend.set(D(1).state(), 0xFFFF_FFFA);
+    env.step(|b| sem::exec(b, Insn::Divs, 0x83C0, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(D(1).state()), 0x0000_FFFE);
+
+    // divs の ovf 境界: -32769 は商に収まらない → V=1 N=1。
+    // -7 ÷ 3 = -2 r -1 → d1 = 0xFFFF_FFFE（剰余は負）。
+    let mut env = env_with_code(&[0x83C0]);
+    env.backend.set(D(0).state(), 3);
+    env.backend.set(D(1).state(), 0xFFFF_FFF9); // -7
+    env.step(|b| sem::exec(b, Insn::Divs, 0x83C0, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(D(1).state()), 0xFFFF_FFFE);
+
+    // divs ovf: 0x0002_0000 ÷ 1 = 0x20000 → ovf。Dn 不変。
+    let mut env = env_with_code(&[0x83C0]);
+    env.backend.set(D(0).state(), 1);
+    env.backend.set(D(1).state(), 0x0002_0000);
+    env.step(|b| sem::exec(b, Insn::Divs, 0x83C0, 0x1000))
+        .unwrap();
+    assert_eq!(env.backend.get(D(1).state()), 0x0002_0000);
+
+    // divu 0 はベクタ 5。
+    let mut env = env_with_code(&[0x82C0]);
+    env.backend.set(D(0).state(), 0);
+    env.backend.set(D(1).state(), 0x1234);
+    match env.step(|b| sem::exec(b, Insn::Divu, 0x82C0, 0x1000)) {
+        Err(InterpExit::Exception(e)) => assert_eq!(e.code, 5),
+        r => panic!("expected vector 5: {r:?}"),
+    }
+    // 例外時は Dn 不変。
+    assert_eq!(env.backend.get(D(1).state()), 0x1234);
+
+    // An 直宛 source は illegal（ベクタ 4）。
+    let mut env = env_with_code(&[0x82C8]);
+    match env.step(|b| sem::exec(b, Insn::Divu, 0x82C8, 0x1000)) {
+        Err(InterpExit::Exception(e)) => assert_eq!(e.code, 4),
+        r => panic!("expected illegal: {r:?}"),
+    }
+
+    // 語数: ea 拡張語のみ。
+    assert_eq!(ea::insn_ext_words(Insn::Mulu, 0xC2C0), Some(0));
+    assert_eq!(ea::insn_ext_words(Insn::Divu, 0x82F8), Some(1)); // abs.w
+}

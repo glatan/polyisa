@@ -5,7 +5,7 @@
 // 宣言する命令は、16ビット固定の実符号化（nop/reset/rts/rtr/rte/illegal）、
 // EA フィールドを持つ move/movea/moveq（C1）、算術・比較（C2）、
 // 論理・単項（C3）、シフト/ローテート（C4）、ビット操作（C5）、
-// 分岐・復帰（C6）、scc/dbcc（C7）、lea/pea/link/unlk（C8）、exg/swap/ext（C9）、movem/movep（C10）。
+// 分岐・復帰（C6）、scc/dbcc（C7）、lea/pea/link/unlk（C8）、exg/swap/ext（C9）、movem/movep（C10）、mulu/muls/divu/divs（C11）。
 // EA モードの解釈と拡張語の消費は `src/ea.rs`、意味論は `src/sem.rs`。
 // 出典は SPEC-M68K-PRM (M68000PM/AD Rev 1) である。
 // Ref: SPEC-M68K-PRM (Rev 1).
@@ -196,7 +196,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         fields: vec!["cc".to_string(), "disp".to_string()],
         operands: vec![],
     });
-    // JF: jmp/jsr/pea の制御 EA。
+    // JF: 単一 EA の形式（jmp/jsr/pea の制御 EA、mul/div の data EA）。
     m.formats.push(Format {
         name: "JF".to_string(),
         fields: vec!["emode".to_string(), "ereg".to_string()],
@@ -767,6 +767,25 @@ pub fn build_model() -> polyisa_isadl::Model {
             "movep",
             &[("emode", WhereOp::Eq, 1)],
         ),
+         // C11: 乗除算。mulu/divu は and/or の qsz!=3 が予約した
+        // 空間（muls/divs は bit8=1 側の qsz=3 でパターン排他）。
+        // Ref: SPEC-M68K-PRM (Rev 1) §MULU/MULS/DIVU/DIVS.
+        (
+            "mulu",
+            "JF",
+            "1100 ... 0 11 ......",
+            "mulu",
+            &[("qsz", WhereOp::Eq, 3)],
+        ),
+        ("muls", "JF", "1100 ... 1 11 ......", "muls", &[]),
+        (
+            "divu",
+            "JF",
+            "1000 ... 0 11 ......",
+            "divu",
+            &[("qsz", WhereOp::Eq, 3)],
+        ),
+        ("divs", "JF", "1000 ... 1 11 ......", "divs", &[]),
     ];
     for (name, format, pattern, syntax, wheres) in arith {
         m.insns.push(Insn {

@@ -249,6 +249,10 @@ pub fn exec<B: Backend>(b: &mut B, insn: super::Insn, w: u64, pc: u64) -> Flow<B
         super::Insn::MovepLm => movep(b, w, pc, 4, true),
         super::Insn::MovepWr => movep(b, w, pc, 2, false),
         super::Insn::MovepLr => movep(b, w, pc, 4, false),
+        super::Insn::Mulu => muldiv(b, w, pc, MulDiv::Mulu),
+        super::Insn::Muls => muldiv(b, w, pc, MulDiv::Muls),
+        super::Insn::Divu => muldiv(b, w, pc, MulDiv::Divu),
+        super::Insn::Divs => muldiv(b, w, pc, MulDiv::Divs),
         super::Insn::Illegal => Err(b.raise(GuestException {
             kind: ExceptionKind::Trap,
             // m68k の例外ベクタ番号 4（Illegal Instruction）。
@@ -1832,4 +1836,114 @@ fn movep<B: Backend>(b: &mut B, w: u64, pc: u64, size: u32, mem_to_reg: bool) ->
         }
         Ok(())
     }
+}
+
+#[derive(Clone, Copy)]
+enum MulDiv {
+    Mulu,
+    Muls,
+    Divu,
+    Divs,
+}
+
+/// C11: 乗除算。source EA は data アドレッシング（An 直は illegal）。
+/// divu は Dn.l ÷ ea.w → 商:下位 word・剰余:上位 word。商が 16 ビットに
+/// 収まらなければ V=1 で Dn は変わらない。divs は符号付き同様。
+/// 0 除算は例外ベクタ 5。N/Z は商に対して、V/C は演算規約どおり。
+// Ref: SPEC-M68K-PRM (Rev 1) §MULU/MULS/DIVU/DIVS.
+fn muldiv<B: Backend>(b: &mut B, w: u64, pc: u64, kind: MulDiv) -> Flow<B> {
+    let emode = ea::ea_mode(w);
+    let ereg = ea::ea_reg(w);
+    if emode == 1 || (emode == 7 && ereg >= 5) {
+        return Err(illegal(b));
+    }
+    let (e, _n) = ea::eval(b, emode, ereg, 2, pc + 2)?;
+    let v = read_ea(b, &e, 2)?;
+    let dn = ea::dest_reg(w);
+    let d = b.get(D(dn).state());
+    match kind {
+        MulDiv::Mulu | MulDiv::Muls => {
+            let p = match kind {
+                MulDiv::Mulu => {
+                    let mk = b.konst::<W32>(0xFFFF);
+                    let dl = b.and(d, mk);
+                    b.mul(dl, v)
+                }
+                _ => {
+                    let d16 = b.trunc::<W32, W16>(d);
+                    let v16 = b.trunc::<W32, W16>(v);
+                    let ds = b.sext::<W16, W32>(d16);
+                    let vs = b.sext::<W16, W32>(v16);
+                    b.mul(ds, vs)
+                }
+            };
+            b.set(D(dn).state(), p);
+            set_nzvc(b, p, 4);
+            Ok(())
+        }
+        MulDiv::Divu | MulDiv::Divs => {
+            let z = b.konst::<W32>(0);
+            let is0 = b.cmp(Cmp::Eq, v, z);
+            b.if_then_else(
+                is0,
+                |bb| {
+                    Err(bb.raise(GuestException {
+                        kind: ExceptionKind::Trap,
+                        // m68k 例外ベクタ 5（ゼロ除算）。
+                        code: 5,
+                        addr: None,
+                        in_delay_slot: false,
+                    }))
+                },
+                |bb| div_core(bb, d, v, dn, matches!(kind, MulDiv::Divs)),
+            )
+        }
+    }
+}
+
+/// 除算本体（除数 0 以外）。商の範囲外なら V=1 で Dn を変えない。
+fn div_core<B: Backend>(b: &mut B, d: B::V<W32>, v: B::V<W32>, dn: u8, signed: bool) -> Flow<B> {
+    let (q, r) = if signed {
+        let vs = {
+            let v16 = b.trunc::<W32, W16>(v);
+            b.sext::<W16, W32>(v16)
+        };
+        (b.sdiv(d, vs), b.srem(d, vs))
+    } else {
+        (b.udiv(d, v), b.urem(d, v))
+    };
+    // 商が符号付き/符号なし16ビットに収まるか。
+    let ovf = if signed {
+        let off = b.konst::<W32>(32768);
+        let adj = b.add(q, off);
+        let lim = b.konst::<W32>(65535);
+        b.cmp(Cmp::GtU, adj, lim)
+    } else {
+        let lim = b.konst::<W32>(0xFFFF);
+        b.cmp(Cmp::GtU, q, lim)
+    };
+    b.if_then_else(
+        ovf,
+        |bb| {
+            // 68000 のオーバーフロー規約: V=1, N=1, Z=0, C=0
+            // （Dn は変わらない）。
+            let ccr = bb.get(ccr_ref());
+            let km = bb.konst::<W8>((1 << sr_bit::X) | 0xE0);
+            let keep = bb.and(ccr, km);
+            let nv = bb.konst::<W8>((1 << sr_bit::N) | (1 << sr_bit::V));
+            let out = bb.or(keep, nv);
+            bb.set(ccr_ref(), out);
+            Ok(())
+        },
+        |bb| {
+            let sh = bb.konst::<W32>(16);
+            let rs = bb.shl(r, sh);
+            let qm = bb.konst::<W32>(0xFFFF);
+            let ql = bb.and(q, qm);
+            let res = bb.or(rs, ql);
+            bb.set(D(dn).state(), res);
+            set_nzvc(bb, ql, 2);
+            Ok(())
+        },
+    )
 }
