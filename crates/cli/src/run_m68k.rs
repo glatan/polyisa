@@ -5,8 +5,8 @@
 //! 繰り返しと退出の判定は `engine::run::run` に置き、ここでは 1 ステップぶんの
 //! フェッチ・解読・意味論を `step` として提供する（Power 試作と同じ構造）。
 //!
-//! 命令は16ビットの先頭ワードと EA が要求する0〜2語の拡張語からなり、
-//! 命令長は先頭ワードの EA フィールドから `ea::insn_ext_words` で決める
+//! 命令は16ビットの先頭ワードと EA が要求する拡張語（両 EA で最大4語）
+//! からなり、命令長は先頭ワードの EA フィールドから `ea::insn_ext_words` で決める
 //! （拡張語の中身の読み出しは意味論側が backend 経由で行う）。
 //! 命令は偶数アドレスに整列し、データ・命令ともにビッグエンディアン固定。
 //! `trap #n` 等の例外ベクタ配送は未接続で、例外は `Unimplemented` に写す。
@@ -41,9 +41,9 @@ impl M68kModel {
 /// `entry` から `model` で実行する。`sys` は OS パーソナリティ。
 pub fn run(env: &mut BareEnv, entry: u64, model: M68kModel, sys: &mut impl TrapHandler) -> Outcome {
     env.pc = entry;
-    // 32 ビットのアドレス空間。意味論が 64 ビットで組み立てた
-    // アドレスをアクセス直前に切る。
-    env.backend.addr_mask = 0xFFFF_FFFF;
+    // PC は32ビットの内部レジスタだがアドレスバスは24ビット。
+    // 意味論が 64 ビットで組み立てたアドレスをアクセス直前に切る。
+    env.backend.addr_mask = 0x00FF_FFFF;
     polyisa_engine::run::run(
         env,
         sys,
@@ -76,7 +76,13 @@ fn step_m68k(
         kind: AccessKind::Fetch,
     };
     let mut b2 = [0u8; 2];
-    if env.backend.mem.read(VirtAddr(pc), &mut b2, acc).is_err() {
+    // アドレスバスは24ビットなので pc の上位バイトはバスに出ない。
+    if env
+        .backend
+        .mem
+        .read(VirtAddr(pc & 0x00FF_FFFF), &mut b2, acc)
+        .is_err()
+    {
         return Err(unimpl(env, 0));
     }
     let word = u64::from(u16::from_be_bytes(b2));
@@ -143,8 +149,8 @@ mod tests {
             Outcome::Unimplemented { pc, .. } => assert_eq!(pc, 0x2000),
             o => panic!("unexpected outcome: {o:?}"),
         }
-        // 実行入口で 32 ビットマスクが掛かる契約を固定する。
-        assert_eq!(env.backend.addr_mask, 0xFFFF_FFFF);
+        // 実行入口で 24 ビットバスマスクが掛かる契約を固定する。
+        assert_eq!(env.backend.addr_mask, 0x00FF_FFFF);
     }
 
     #[test]

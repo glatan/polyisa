@@ -1,10 +1,10 @@
 // Copyright (c) polyisa contributors
 // SPDX-License-Identifier: MIT OR Apache-2.0
-// m68k 最小の ISADL モデル（段階14の骨格）。
+// m68k 最小の ISADL モデル（段階14）。
 //
-// B1 はクレート骨格が対象なので、命令は16ビット固定の実符号化のうち
-// 拡張語を伴わないもの（nop/reset/rts/rtr/rte/illegal）だけを宣言する。
-// EA モードの解釈経路と拡張語の消費は B2 以降で決める。
+// 宣言する命令は、16ビット固定の実符号化（nop/reset/rts/rtr/rte/illegal）
+// と、EA フィールドを持つ move/movea/moveq（C1 追加分）。
+// EA モードの解釈と拡張語の消費は `src/ea.rs`、意味論は `src/sem.rs`。
 // 出典は SPEC-M68K-PRM (M68000PM/AD Rev 1) である。
 // Ref: SPEC-M68K-PRM (Rev 1).
 
@@ -64,10 +64,43 @@ pub fn build_model() -> polyisa_isadl::Model {
         prefix: Some("a".to_string()),
     });
 
+    // EA フィールド。source は bits[5:3]/[2:0]、destination は
+    // bits[8:6]/[11:9]。値の評価と拡張語消費は ea.rs が担う。
+    // Ref: SPEC-M68K-PRM (Rev 1) §Effective Addressing.
+    for (name, hi, lo) in [
+        ("sreg", 2u32, 0u32),
+        ("smode", 5, 3),
+        ("dmode", 8, 6),
+        ("dreg", 11, 9),
+        ("qimm", 7, 0),
+    ] {
+        m.fields.push(Field {
+            name: name.to_string(),
+            kind: FieldKind::Bits { hi, lo },
+        });
+    }
+
     // F0: 16ビット固定・オペランドなし（拡張語も伴わない命令）。
     m.formats.push(Format {
         name: "F0".to_string(),
         fields: vec![],
+        operands: vec![],
+    });
+    // E2: move/movea の2EA形式。
+    m.formats.push(Format {
+        name: "E2".to_string(),
+        fields: vec![
+            "sreg".to_string(),
+            "smode".to_string(),
+            "dmode".to_string(),
+            "dreg".to_string(),
+        ],
+        operands: vec![],
+    });
+    // Q: moveq のクイック即値形式。
+    m.formats.push(Format {
+        name: "Q".to_string(),
+        fields: vec!["dreg".to_string(), "qimm".to_string()],
         operands: vec![],
     });
 
@@ -93,5 +126,71 @@ pub fn build_model() -> polyisa_isadl::Model {
             timing: timing.to_string(),
         });
     }
+
+    // movea は move.w/move.l の宛先 An 直と同じ符号化を持つので、
+    // where で dmode==1（An 直）を宣言して排他を示す。move.b は
+    // byte の An 直が未割当なので source/destination 両方で An を
+    // 弾く。Ref: SPEC-M68K-PRM (Rev 1) §MOVE/MOVEA.
+    type Cond = (&'static str, WhereOp, u128);
+    type EaDecl = (&'static str, &'static str, &'static str, &'static [Cond]);
+    let ea_insns: &[EaDecl] = &[
+        (
+            "movea_l",
+            "E2",
+            "0010 ... 001 ......",
+            &[("dmode", WhereOp::Eq, 1)],
+        ),
+        (
+            "movea_w",
+            "E2",
+            "0011 ... 001 ......",
+            &[("dmode", WhereOp::Eq, 1)],
+        ),
+        (
+            "move_b",
+            "E2",
+            "0001 ............",
+            &[("dmode", WhereOp::Ne, 1), ("smode", WhereOp::Ne, 1)],
+        ),
+        (
+            "move_w",
+            "E2",
+            "0011 ............",
+            &[("dmode", WhereOp::Ne, 1)],
+        ),
+        (
+            "move_l",
+            "E2",
+            "0010 ............",
+            &[("dmode", WhereOp::Ne, 1)],
+        ),
+    ];
+    for (name, format, pattern, wheres) in ea_insns {
+        m.insns.push(Insn {
+            name: name.to_string(),
+            format: format.to_string(),
+            pattern: Pattern::parse(pattern).expect("valid pattern"),
+            when: Pred::True,
+            wheres: wheres
+                .iter()
+                .map(|(field, op, rhs)| WhereClause {
+                    field: field.to_string(),
+                    op: *op,
+                    rhs: WhereRhs::Lit(*rhs),
+                })
+                .collect(),
+            syntax: name.replace('_', "."),
+            timing: "misc".to_string(),
+        });
+    }
+    m.insns.push(Insn {
+        name: "moveq".to_string(),
+        format: "Q".to_string(),
+        pattern: Pattern::parse("0111 ... 0 ........").expect("valid pattern"),
+        when: Pred::True,
+        wheres: vec![],
+        syntax: "moveq".to_string(),
+        timing: "misc".to_string(),
+    });
     m
 }

@@ -69,8 +69,8 @@ mod tests {
 
     #[test]
     fn insn_count() {
-        // 骨格の固定ワード6件。
-        assert_eq!(INSNS.len(), 6);
+        // F0 の固定ワード6件 + move/movea 5件 + moveq。
+        assert_eq!(INSNS.len(), 12);
     }
 
     #[test]

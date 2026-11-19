@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! m68k の実効アドレス（EA）の評価。
 //!
-//! 命令は16ビットの先頭ワードと、EA が要求する0〜2語の拡張語からなる
-//! （68020+ の full 形式拡張語は未対応）。
+//! 命令は16ビットの先頭ワードと、EA が要求する拡張語からなる
+//! （1つの EA は最大2語、MOVE は両 EA で最大4語。68020+ の
+//! full 形式拡張語は未対応）。
 //! 先頭ワードは生成デコーダが Insn に解き、ここでは先頭ワード中の
 //! EA フィールド（mode[5:3]・reg[2:0]）をオペランドに解釈する。
 //! 拡張語は命令フェッチとして `ext` 以降の偶数アドレスから backend
@@ -54,7 +55,8 @@ pub enum Ea<B: Backend> {
 /// EA が消費する拡張語数を、先頭ワードの情報だけから求める。
 /// `size` はオペランドのバイト数（1/2/4、無検証・それ以外は
 /// 呼び出し側の前提違反）。mode 7 reg 5〜7 のような未定義の
-/// 組み合わせは None を返す。
+/// 組み合わせは拡張語を消費しないので 0 —— illegal の判定は
+/// `eval`/`mode7` 側の責任で、ここでは語数の契約だけ扱う。
 // Ref: SPEC-M68K-PRM (Rev 1).
 #[must_use]
 pub const fn ext_words(mode: u8, reg: u8, size: u32) -> Option<u32> {
@@ -64,10 +66,34 @@ pub const fn ext_words(mode: u8, reg: u8, size: u32) -> Option<u32> {
             0 | 2 | 3 => Some(1),
             1 => Some(2),
             4 => Some(if size > 2 { 2 } else { 1 }),
-            _ => None,
+            _ => Some(0),
         },
         _ => Some(0),
     }
+}
+
+/// 先頭ワードの source EA フィールド（mode[5:3]）。
+#[must_use]
+pub const fn ea_mode(w: u64) -> u8 {
+    ((w >> 3) & 7) as u8
+}
+
+/// 先頭ワードの source EA フィールド（reg[2:0]）。
+#[must_use]
+pub const fn ea_reg(w: u64) -> u8 {
+    (w & 7) as u8
+}
+
+/// 先頭ワードの destination EA フィールド（mode[8:6]）。
+#[must_use]
+pub const fn dest_mode(w: u64) -> u8 {
+    ((w >> 6) & 7) as u8
+}
+
+/// 先頭ワードの destination EA フィールド（reg[11:9]）。
+#[must_use]
+pub const fn dest_reg(w: u64) -> u8 {
+    ((w >> 9) & 7) as u8
 }
 
 /// 命令全体が消費する拡張語数。命令長は 2 + 戻り値×2。
@@ -78,11 +104,38 @@ pub const fn ext_words(mode: u8, reg: u8, size: u32) -> Option<u32> {
 // Ref: SPEC-M68K-PRM (Rev 1).
 #[must_use]
 pub const fn insn_ext_words(insn: super::Insn, w: u64) -> Option<u32> {
-    // F0 形式の固定ワード命令は拡張語を持たない。EA を持つ命令の追加で
-    // Insn → ext_words の振り分けに育つ。
-    let _ = insn;
-    let _ = w;
-    Some(0)
+    match insn {
+        // move.<b|w|l>: source と destination の EA がそれぞれ語を
+        // 消費しうる。
+        super::Insn::MoveB | super::Insn::MoveW | super::Insn::MoveL => {
+            let size = move_size(insn);
+            let Some(s) = ext_words(ea_mode(w), ea_reg(w), size) else {
+                return None;
+            };
+            let Some(d) = ext_words(dest_mode(w), dest_reg(w), size) else {
+                return None;
+            };
+            Some(s + d)
+        }
+        // movea: destination は An 直なので source だけが語を消費する。
+        super::Insn::MoveaW | super::Insn::MoveaL => {
+            let size = move_size(insn);
+            ext_words(ea_mode(w), ea_reg(w), size)
+        }
+        _ => Some(0),
+    }
+}
+
+/// move 系命令のオペランドサイズ（バイト）。
+/// move/movea 以外の呼び出しは前提違反。
+#[must_use]
+pub const fn move_size(insn: super::Insn) -> u32 {
+    match insn {
+        super::Insn::MoveB => 1,
+        super::Insn::MoveW | super::Insn::MoveaW => 2,
+        super::Insn::MoveL | super::Insn::MoveaL => 4,
+        _ => panic!("move_size: not a move"),
+    }
 }
 
 /// EA を評価し、オペランドと消費した拡張語数を返す。
@@ -116,7 +169,7 @@ pub fn eval<B: Backend>(
         // 2 語境界を保つため 2 進める。
         3 => {
             let old = sem::areg(b, reg);
-            let step = k32(b, post_adj(reg, size));
+            let step = k32(b, an_step(reg, size));
             let new = b.add(old, step);
             sem::set_areg(b, reg, new)?;
             Ok((Ea::Addr(b.zext::<W32, W64>(old)), 0))
@@ -124,7 +177,7 @@ pub fn eval<B: Backend>(
         // -(An): An を size 分下げてから読み出す。
         4 => {
             let old = sem::areg(b, reg);
-            let step = k32(b, post_adj(reg, size));
+            let step = k32(b, an_step(reg, size));
             let new = b.sub(old, step);
             sem::set_areg(b, reg, new)?;
             Ok((Ea::Addr(b.zext::<W32, W64>(new)), 0))
@@ -213,7 +266,7 @@ fn mode7<B: Backend>(b: &mut B, reg: u8, size: u32, ext: u64) -> Result<(Ea<B>, 
 
 /// (An)+ / -(An) の増減量。A7 は byte でも語境界を保つため 2。
 // Ref: SPEC-M68K-PRM (Rev 1) §Address Register Indirect.
-const fn post_adj(reg: u8, size: u32) -> u32 {
+const fn an_step(reg: u8, size: u32) -> u32 {
     if reg == 7 && size == 1 { 2 } else { size }
 }
 
@@ -224,8 +277,9 @@ fn ext_w16<B: Backend>(b: &mut B, addr: u64) -> Result<B::V<W16>, B::Exit> {
 }
 
 /// 簡易拡張語から索引の値と8ビット変位を取り出す。
-/// bit15=D/A、14-12=番号、11=W/L、10-9=スケール（68000 では 0=1倍）、
-/// 7-0=8ビット変位。68020+ の full 形式（bit8=1）はここでは扱わない。
+/// bit15=D/A、14-12=番号、11=W/L、7-0=8ビット変位。
+/// bits 10-8 は 68000 では使われず無視する（68020+ のスケール・
+/// full 形式の判別はここでは扱わない）。
 fn brief_index<B: Backend>(b: &mut B, w: B::V<W16>) -> (B::V<W32>, B::V<W8>) {
     let hi_bit = k16(b, 0x8000);
     let masked = b.and(w, hi_bit);
@@ -248,13 +302,7 @@ fn brief_index<B: Backend>(b: &mut B, w: B::V<W16>) -> (B::V<W32>, B::V<W8>) {
     // W/L: W なら下位16ビットを符号拡張、L ならそのまま。
     let w_part = b.trunc::<W32, W16>(idx_val);
     let sign_ext = b.sext::<W16, W32>(w_part);
-    let idx32 = b.select(is_l, idx_val, sign_ext);
-    let n9 = k16(b, 9);
-    let s_sh = b.shr_l(w, n9);
-    let m3 = k16(b, 3);
-    let scale16 = b.and(s_sh, m3);
-    let scale = b.zext::<W16, W32>(scale16);
-    let index = b.shl(idx32, scale);
+    let index = b.select(is_l, idx_val, sign_ext);
     let disp = b.trunc::<W16, W8>(w);
     (index, disp)
 }
