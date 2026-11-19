@@ -154,6 +154,42 @@ pub const fn insn_ext_words(insn: super::Insn, w: u64) -> Option<u32> {
             };
             Some(e + iw)
         }
+        // or/and/eor 系: EA は一つ。サイズは opm で add/sub と同じ写像。
+        super::Insn::Or
+        | super::Insn::OrBDn
+        | super::Insn::OrWDn
+        | super::Insn::OrLDn
+        | super::Insn::And
+        | super::Insn::AndBDn
+        | super::Insn::AndWDn
+        | super::Insn::AndLDn
+        | super::Insn::Eor => {
+            let opm = dest_mode(w);
+            let size = match opm {
+                0 | 4 => 1,
+                1 | 3 | 5 => 2,
+                _ => 4,
+            };
+            ext_words(ea_mode(w), ea_reg(w), size)
+        }
+        // not/clr/tst: qsz サイズの EA は一つ。
+        super::Insn::Not | super::Insn::Clr | super::Insn::Tst => {
+            let size = 1u32 << qsz(w);
+            ext_words(ea_mode(w), ea_reg(w), size)
+        }
+        // ori/andi/eori: EA フィールドが #imm（to CCR/to SR の特殊
+        // 符号化）なら即値語のみ。通常は即値語 + EA 語。
+        super::Insn::Ori | super::Insn::Andi | super::Insn::Eori => {
+            let size = 1u32 << qsz(w);
+            let iw = if qsz(w) == 2 { 2 } else { 1 };
+            if ea_mode(w) == 7 && ea_reg(w) == 4 {
+                return Some(iw);
+            }
+            let Some(e) = ext_words(ea_mode(w), ea_reg(w), size) else {
+                return None;
+            };
+            Some(e + iw)
+        }
         _ => Some(0),
     }
 }

@@ -159,7 +159,6 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("rte", "0100111001110011", "rte", "ctrl"),
         ("rts", "0100111001110101", "rts", "ctrl"),
         ("rtr", "0100111001110111", "rtr", "ctrl"),
-        ("illegal", "0100101011111100", "illegal", "misc"),
     ];
     for (name, pattern, syntax, timing) in insns {
         m.insns.push(Insn {
@@ -172,6 +171,22 @@ pub fn build_model() -> polyisa_isadl::Model {
             timing: timing.to_string(),
         });
     }
+    // illegal の符号化は tst のパターン空間（`..` が bits[7:6]=11 を
+    // 含む）に内包される。qsz（bits[7:6]）が 3 であることを where で
+    // 示して tst（qsz != 3）との排他を証明する。
+    m.insns.push(Insn {
+        name: "illegal".to_string(),
+        format: "F0".to_string(),
+        pattern: Pattern::parse("0100101011111100").expect("valid pattern"),
+        when: Pred::True,
+        wheres: vec![WhereClause {
+            field: "qsz".to_string(),
+            op: WhereOp::Eq,
+            rhs: WhereRhs::Lit(3),
+        }],
+        syntax: "illegal".to_string(),
+        timing: "misc".to_string(),
+    });
 
     // movea は move.w/move.l の宛先 An 直と同じ符号化を持つので、
     // where で dmode==1（An 直）を宣言して排他を示す。move.b は
@@ -327,6 +342,90 @@ pub fn build_model() -> polyisa_isadl::Model {
             "cmpi",
             &[("qsz", WhereOp::Ne, 3)],
         ),
+        // C3: 論理系。or/and の Dn→ea 方向はサイズごとに別宣言:
+        // or.b は SBCD（emode 0 と 1 の両方を占める）の空間を、
+        // or.w/l は An 直のみ避ける。and.b は ABCD、and.w/l は EXG
+        // （それぞれ emode 0/1）を避ける。eor は cmpm・cmpa と
+        // 排他になるよう emode/qsz で絞る。
+        // Ref: SPEC-M68K-PRM (Rev 1) §OR/AND/EOR.
+        ("or", "AE", "1000 ... 0 .. ......", "or", &[("qsz", WhereOp::Ne, 3)]),
+        (
+            "or_b_dn",
+            "AE",
+            "1000 ... 1 00 ......",
+            "or",
+            &[("emode", WhereOp::Ne, 0), ("emode", WhereOp::Ne, 1)],
+        ),
+        (
+            "or_w_dn",
+            "AE",
+            "1000 ... 1 01 ......",
+            "or",
+            &[("emode", WhereOp::Ne, 1)],
+        ),
+        (
+            "or_l_dn",
+            "AE",
+            "1000 ... 1 10 ......",
+            "or",
+            &[("emode", WhereOp::Ne, 1)],
+        ),
+        (
+            "and",
+            "AE",
+            "1100 ... 0 .. ......",
+            "and",
+            &[("qsz", WhereOp::Ne, 3)],
+        ),
+        (
+            "and_b_dn",
+            "AE",
+            "1100 ... 1 00 ......",
+            "and",
+            &[("emode", WhereOp::Ne, 0), ("emode", WhereOp::Ne, 1)],
+        ),
+        (
+            "and_w_dn",
+            "AE",
+            "1100 ... 1 01 ......",
+            "and",
+            &[("emode", WhereOp::Ne, 0), ("emode", WhereOp::Ne, 1)],
+        ),
+        (
+            "and_l_dn",
+            "AE",
+            "1100 ... 1 10 ......",
+            "and",
+            &[("emode", WhereOp::Ne, 1)],
+        ),
+        (
+            "eor",
+            "AE",
+            "1011 ... 1 .. ......",
+            "eor",
+            &[("qsz", WhereOp::Ne, 3), ("emode", WhereOp::Ne, 1)],
+        ),
+        // 即値論理系。EA フィールドが #imm（emode7 ereg4）のとき
+        // to CCR/to SR の特殊符号化になる（意味論側で振り分け）。
+        ("ori", "IE", "0000 0000 .. ......", "ori", &[("qsz", WhereOp::Ne, 3)]),
+        (
+            "andi",
+            "IE",
+            "0000 0010 .. ......",
+            "andi",
+            &[("qsz", WhereOp::Ne, 3)],
+        ),
+        (
+            "eori",
+            "IE",
+            "0000 1010 .. ......",
+            "eori",
+            &[("qsz", WhereOp::Ne, 3)],
+        ),
+        // 単項系。qsz=3 は tas・move to/from sr の空間として残す。
+        ("not", "IE", "0100 0110 .. ......", "not", &[("qsz", WhereOp::Ne, 3)]),
+        ("clr", "IE", "0100 0010 .. ......", "clr", &[("qsz", WhereOp::Ne, 3)]),
+        ("tst", "IE", "0100 1010 .. ......", "tst", &[("qsz", WhereOp::Ne, 3)]),
     ];
     for (name, format, pattern, syntax, wheres) in arith {
         m.insns.push(Insn {

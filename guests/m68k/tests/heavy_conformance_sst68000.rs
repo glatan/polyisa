@@ -28,10 +28,51 @@ use std::path::PathBuf;
 // ADDQ/SUBQ/ADDI/SUBI/CMPI/CMPM 等のファイルはデータセットに
 // 存在しない（その分は bare テストが担保する）。
 const FILES: &[&str] = &[
-    "MOVE.b", "MOVE.w", "MOVE.l", "MOVEA.w", "MOVEA.l", "MOVE.q", //
-    "ADD.b", "ADD.w", "ADD.l", "ADDA.w", "ADDA.l", //
-    "SUB.b", "SUB.w", "SUB.l", "SUBA.w", "SUBA.l", //
-    "CMP.b", "CMP.w", "CMP.l", "CMPA.w", "CMPA.l",
+    "MOVE.b",
+    "MOVE.w",
+    "MOVE.l",
+    "MOVEA.w",
+    "MOVEA.l",
+    "MOVE.q", //
+    "ADD.b",
+    "ADD.w",
+    "ADD.l",
+    "ADDA.w",
+    "ADDA.l", //
+    "SUB.b",
+    "SUB.w",
+    "SUB.l",
+    "SUBA.w",
+    "SUBA.l", //
+    "CMP.b",
+    "CMP.w",
+    "CMP.l",
+    "CMPA.w",
+    "CMPA.l", //
+    "AND.b",
+    "AND.w",
+    "AND.l",
+    "OR.b",
+    "OR.w",
+    "OR.l",
+    "EOR.b",
+    "EOR.w",
+    "EOR.l", //
+    "NOT.b",
+    "NOT.w",
+    "NOT.l",
+    "CLR.b",
+    "CLR.w",
+    "CLR.l",
+    "TST.b",
+    "TST.w",
+    "TST.l", //
+    "ANDItoCCR",
+    "ANDItoSR",
+    "ORItoCCR",
+    "ORItoSR",
+    "EORItoCCR",
+    "EORItoSR",
 ];
 
 /// u32 のレジスタ列（d0-7, a0-6, usp, ssp, sr, pc）を生値で持つ。

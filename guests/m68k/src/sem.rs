@@ -186,6 +186,19 @@ pub fn exec<B: Backend>(b: &mut B, insn: super::Insn, w: u64, pc: u64) -> Flow<B
         super::Insn::Addi => imm_arith(b, w, pc, ImmOp::Add),
         super::Insn::Subi => imm_arith(b, w, pc, ImmOp::Sub),
         super::Insn::Cmpi => imm_arith(b, w, pc, ImmOp::Cmp),
+        super::Insn::Or | super::Insn::OrBDn | super::Insn::OrWDn | super::Insn::OrLDn => {
+            logic(b, w, pc, LogicOp::Or)
+        }
+        super::Insn::And | super::Insn::AndBDn | super::Insn::AndWDn | super::Insn::AndLDn => {
+            logic(b, w, pc, LogicOp::And)
+        }
+        super::Insn::Eor => logic(b, w, pc, LogicOp::Eor),
+        super::Insn::Ori => imm_logic(b, w, pc, LogicOp::Or),
+        super::Insn::Andi => imm_logic(b, w, pc, LogicOp::And),
+        super::Insn::Eori => imm_logic(b, w, pc, LogicOp::Eor),
+        super::Insn::Not => unary(b, w, pc, UnOp::Not),
+        super::Insn::Clr => unary(b, w, pc, UnOp::Clr),
+        super::Insn::Tst => unary(b, w, pc, UnOp::Tst),
         super::Insn::Illegal => Err(b.raise(GuestException {
             kind: ExceptionKind::Trap,
             // m68k の例外ベクタ番号 4（Illegal Instruction）。
@@ -637,4 +650,174 @@ fn imm_arith<B: Backend>(b: &mut B, w: u64, pc: u64, op: ImmOp) -> Flow<B> {
             write_ea(b, &e, size, r)
         }
     }
+}
+
+/// or/and/eor の演算種別。
+enum LogicOp {
+    Or,
+    And,
+    Eor,
+}
+
+/// 論理演算 `d op s`（値は `size` バイトにマスク済みを想定）。
+fn combine<B: Backend>(b: &mut B, op: LogicOp, d: B::V<W32>, s: B::V<W32>) -> B::V<W32> {
+    match op {
+        LogicOp::Or => b.or(d, s),
+        LogicOp::And => b.and(d, s),
+        LogicOp::Eor => b.xor(d, s),
+    }
+}
+
+/// or/and/eor。opm 0-2 は `<ea> op Dn`、4-6 は `Dn op <ea>`
+/// （eor は後者のみ）。旗は N/Z を結果に従い V/C=0、X は保持。
+// Ref: SPEC-M68K-PRM (Rev 1) §OR/AND/EOR.
+fn logic<B: Backend>(b: &mut B, w: u64, pc: u64, op: LogicOp) -> Flow<B> {
+    let opm = ea::dest_mode(w);
+    let reg = ea::dest_reg(w);
+    let emode = ea::ea_mode(w);
+    let ereg = ea::ea_reg(w);
+    if opm <= 2 {
+        // <ea> op Dn。byte の An ソースは未割当。
+        let size = 1u32 << opm;
+        if emode == 1 && size == 1 {
+            return Err(illegal(b));
+        }
+        let (e, _n) = ea::eval(b, emode, ereg, size, pc + 2)?;
+        let s = read_ea(b, &e, size)?;
+        let d0 = b.get(D(reg).state());
+        let d = mask(b, d0, size);
+        let r = combine(b, op, d, s);
+        set_nzvc(b, r, size);
+        write_ea(b, &Ea::D(reg), size, r)
+    } else {
+        // Dn op <ea>。宛先は data alterable（An 直・PC 相対・即値は不可）。
+        let size = 1u32 << (opm - 4);
+        if emode == 1 || (emode == 7 && ereg >= 2) {
+            return Err(illegal(b));
+        }
+        let (e, _n) = ea::eval(b, emode, ereg, size, pc + 2)?;
+        let s = read_ea(b, &e, size)?;
+        let d0 = b.get(D(reg).state());
+        let d = mask(b, d0, size);
+        let r = combine(b, op, d, s);
+        set_nzvc(b, r, size);
+        write_ea(b, &e, size, r)
+    }
+}
+
+/// not/clr/tst の演算種別。
+enum UnOp {
+    Not,
+    Clr,
+    Tst,
+}
+
+/// not/clr/tst。EA は data alterable（An 直・PC 相対・即値は illegal。
+/// tst も 68000 では宛先オペランドとして厳密にデコードされる）。
+/// 旗は N/Z を結果に従い V/C=0、X は保持。clr は Z=1。
+// Ref: SPEC-M68K-PRM (Rev 1) §NOT/CLR/TST.
+fn unary<B: Backend>(b: &mut B, w: u64, pc: u64, op: UnOp) -> Flow<B> {
+    let size = 1u32 << ea::qsz(w);
+    let emode = ea::ea_mode(w);
+    let ereg = ea::ea_reg(w);
+    if emode == 1 || (emode == 7 && ereg >= 2) {
+        return Err(illegal(b));
+    }
+    let (e, _n) = ea::eval(b, emode, ereg, size, pc + 2)?;
+    match op {
+        UnOp::Tst => {
+            let d = read_ea(b, &e, size)?;
+            set_nzvc(b, d, size);
+            Ok(())
+        }
+        UnOp::Clr => {
+            let z = b.konst::<W32>(0);
+            set_nzvc(b, z, size);
+            write_ea(b, &e, size, z)
+        }
+        UnOp::Not => {
+            let d = read_ea(b, &e, size)?;
+            let n = b.not(d);
+            let r = mask(b, n, size);
+            set_nzvc(b, r, size);
+            write_ea(b, &e, size, r)
+        }
+    }
+}
+
+/// ori/andi/eori。EA が #imm（emode7 ereg4）のとき to CCR（byte）/
+/// to SR（word）の特殊符号化になる。to SR はスーパーバイザ必須。
+// Ref: SPEC-M68K-PRM (Rev 1) §ANDI/ORI/EORI to CCR/SR.
+fn imm_logic<B: Backend>(b: &mut B, w: u64, pc: u64, op: LogicOp) -> Flow<B> {
+    let size = 1u32 << ea::qsz(w);
+    let emode = ea::ea_mode(w);
+    let ereg = ea::ea_reg(w);
+    if emode == 7 && ereg == 4 {
+        let (imm_e, _ni) = ea::eval(b, 7, 4, size, pc + 2)?;
+        let s = match imm_e {
+            Ea::Imm(v) => v,
+            _ => unreachable!("mode7 reg4 は Imm"),
+        };
+        return match size {
+            1 => {
+                // to CCR: 即値の下位バイトで演算。書き込み可能なのは
+                // 旗5ビットのみ（上位3ビットはハードウェア上 0）。
+                let old = b.get(ccr_ref());
+                let im = b.trunc::<W32, W8>(s);
+                let r = match op {
+                    LogicOp::Or => b.or(old, im),
+                    LogicOp::And => b.and(old, im),
+                    LogicOp::Eor => b.xor(old, im),
+                };
+                let km = b.konst::<W8>(0x1F);
+                let rm = b.and(r, km);
+                b.set(ccr_ref(), rm);
+                Ok(())
+            }
+            2 => {
+                // to SR: スーパーバイザ必須（違反はベクタ 8）。
+                let old = b.get(sr_ref());
+                let sm = b.konst::<W32>(1 << sr_bit::S);
+                let sv = b.and(old, sm);
+                let z = b.konst::<W32>(0);
+                let is_s = b.cmp(Cmp::Ne, sv, z);
+                b.if_then_else(
+                    is_s,
+                    |bb| {
+                        let im = mask(bb, s, 2);
+                        let r = combine(bb, op, old, im);
+                        // SR の書き込み可能ビットは T|S|IPL|CCR = 0xA71F。
+                        let km = bb.konst::<W32>(0xA71F);
+                        let rm = bb.and(r, km);
+                        bb.set(sr_ref(), rm);
+                        Ok(())
+                    },
+                    |bb| {
+                        Err(bb.raise(GuestException {
+                            kind: ExceptionKind::Trap,
+                            code: 8,
+                            addr: None,
+                            in_delay_slot: false,
+                        }))
+                    },
+                )
+            }
+            _ => Err(illegal(b)),
+        };
+    }
+    // 宛先は data alterable（An 直・PC 相対・即値は illegal）。
+    if emode == 1 || (emode == 7 && ereg >= 2) {
+        return Err(illegal(b));
+    }
+    let (imm_e, ni) = ea::eval(b, 7, 4, size, pc + 2)?;
+    let s = match imm_e {
+        Ea::Imm(v) => v,
+        _ => unreachable!("mode7 reg4 は Imm"),
+    };
+    let ext = pc + 2 + u64::from(ni) * 2;
+    let (e, _n) = ea::eval(b, emode, ereg, size, ext)?;
+    let d = read_ea(b, &e, size)?;
+    let r = combine(b, op, d, s);
+    set_nzvc(b, r, size);
+    write_ea(b, &e, size, r)
 }
