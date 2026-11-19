@@ -14,19 +14,35 @@ use polyisa_sem::{Backend, Cmp, ExceptionKind, Flow, GuestException, StateRef, W
 use super::CpuState;
 use super::ea::{self, Ea};
 
-/// データ読み出しのアクセス属性（BE・自然整列）。
-const DRD: Access = Access {
-    endian: Endian::Be,
-    align: Align::Natural,
-    kind: AccessKind::DataRead,
-};
+/// データアクセスの整列要求。`odd_access` が `allow` のモデル
+/// （68020 以降）では奇数アドレスの word/long アクセスを許す。
+/// 命令フェッチは全世代で偶数のみなので FETCH 側は変えない。
+// Ref: SPEC-M68K-UM (MC68020) §Bus Operation.
+fn data_align<B: Backend>(b: &mut B) -> Align {
+    if b.param::<super::OddAccessParam>() == 1 {
+        Align::Unaligned
+    } else {
+        Align::Natural
+    }
+}
 
-/// データ書き込みのアクセス属性（BE・自然整列）。
-const DWR: Access = Access {
-    endian: Endian::Be,
-    align: Align::Natural,
-    kind: AccessKind::DataWrite,
-};
+/// データ読み出しのアクセス属性（BE）。
+fn drd<B: Backend>(b: &mut B) -> Access {
+    Access {
+        endian: Endian::Be,
+        align: data_align(b),
+        kind: AccessKind::DataRead,
+    }
+}
+
+/// データ書き込みのアクセス属性（BE）。
+fn dwr<B: Backend>(b: &mut B) -> Access {
+    Access {
+        endian: Endian::Be,
+        align: data_align(b),
+        kind: AccessKind::DataWrite,
+    }
+}
 
 /// データレジスタ番号（D0〜D7）。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -337,20 +353,24 @@ fn read_ea<B: Backend>(b: &mut B, e: &Ea<B>, size: u32) -> Result<B::V<W32>, B::
         }
         Ea::Addr(a) => match size {
             1 => {
-                let v = b.load::<W8>(*a, DRD)?;
+                let __da0 = drd(b);
+                let v = b.load::<W8>(*a, __da0)?;
                 Ok(b.zext::<W8, W32>(v))
             }
             2 => {
-                let v = b.load::<W16>(*a, DRD)?;
+                let __da0 = drd(b);
+                let v = b.load::<W16>(*a, __da0)?;
                 Ok(b.zext::<W16, W32>(v))
             }
             // 68000 のバスは16ビットで、long は上位→下位の word アクセス
             // 2回（偶数整列のみ必須。4バイト整列ではない）。
             _ => {
-                let hi = b.load::<W16>(*a, DRD)?;
+                let __da0 = drd(b);
+                let hi = b.load::<W16>(*a, __da0)?;
                 let two = b.konst::<W64>(2);
                 let a2 = b.add(*a, two);
-                let lo = b.load::<W16>(a2, DRD)?;
+                let __da0 = drd(b);
+                let lo = b.load::<W16>(a2, __da0)?;
                 let hi32 = b.zext::<W16, W32>(hi);
                 let shift = b.konst::<W32>(16);
                 let hi_sh = b.shl(hi32, shift);
@@ -384,22 +404,26 @@ fn write_ea<B: Backend>(b: &mut B, e: &Ea<B>, size: u32, v: B::V<W32>) -> Flow<B
         Ea::Addr(a) => match size {
             1 => {
                 let v8 = b.trunc::<W32, W8>(v);
-                b.store::<W8>(*a, v8, DWR)
+                let __da0 = dwr(b);
+                b.store::<W8>(*a, v8, __da0)
             }
             2 => {
                 let v16 = b.trunc::<W32, W16>(v);
-                b.store::<W16>(*a, v16, DWR)
+                let __da0 = dwr(b);
+                b.store::<W16>(*a, v16, __da0)
             }
             // long は上位→下位の word アクセス2回（偶数整列のみ必須）。
             _ => {
                 let shift = b.konst::<W32>(16);
                 let hi32 = b.shr_l(v, shift);
                 let hi = b.trunc::<W32, W16>(hi32);
-                b.store::<W16>(*a, hi, DWR)?;
+                let __da0 = dwr(b);
+                b.store::<W16>(*a, hi, __da0)?;
                 let lo = b.trunc::<W32, W16>(v);
                 let two = b.konst::<W64>(2);
                 let a2 = b.add(*a, two);
-                b.store::<W16>(a2, lo, DWR)
+                let __da0 = dwr(b);
+                b.store::<W16>(a2, lo, __da0)
             }
         },
         // An 直・即値は move の宛先に使えない。
@@ -1348,10 +1372,12 @@ fn push_l<B: Backend>(b: &mut B, v: B::V<W32>) -> Flow<B> {
     let hi = b.trunc::<W64, W16>(hi64);
     let lo = b.trunc::<W64, W16>(v64);
     let sp64 = b.zext::<W32, W64>(sp);
-    b.store::<W16>(sp64, hi, DWR)?;
+    let __da0 = dwr(b);
+    b.store::<W16>(sp64, hi, __da0)?;
     let two = b.konst::<W64>(2);
     let a2 = b.add(sp64, two);
-    b.store::<W16>(a2, lo, DWR)?;
+    let __da0 = dwr(b);
+    b.store::<W16>(a2, lo, __da0)?;
     set_areg(b, 7, sp)
 }
 
@@ -1360,13 +1386,16 @@ fn pop<B: Backend>(b: &mut B, size: u32) -> Result<B::V<W32>, B::Exit> {
     let sp0 = areg(b, 7);
     let sp64 = b.zext::<W32, W64>(sp0);
     let v = if size == 2 {
-        let w16 = b.load::<W16>(sp64, DRD)?;
+        let __da0 = drd(b);
+        let w16 = b.load::<W16>(sp64, __da0)?;
         b.zext::<W16, W32>(w16)
     } else {
-        let hi = b.load::<W16>(sp64, DRD)?;
+        let __da0 = drd(b);
+        let hi = b.load::<W16>(sp64, __da0)?;
         let two = b.konst::<W64>(2);
         let a2 = b.add(sp64, two);
-        let lo = b.load::<W16>(a2, DRD)?;
+        let __da0 = drd(b);
+        let lo = b.load::<W16>(a2, __da0)?;
         let hi32 = b.zext::<W16, W32>(hi);
         let lo32 = b.zext::<W16, W32>(lo);
         let s = b.konst::<W32>(16);
@@ -1710,7 +1739,8 @@ fn movem_r2m<B: Backend>(b: &mut B, w: u64, pc: u64, size: u32) -> Flow<B> {
         b.if_then_else(
             sets[i],
             |bb| {
-                bb.probe(addrs[i], size, DWR)?;
+                let __da0 = dwr(bb);
+                bb.probe(addrs[i], size, __da0)?;
                 Ok(())
             },
             |_| Ok(()),
@@ -1718,23 +1748,37 @@ fn movem_r2m<B: Backend>(b: &mut B, w: u64, pc: u64, size: u32) -> Flow<B> {
     }
     for i in 0..16usize {
         let rn = if emode == 4 { 15 - i as u8 } else { i as u8 };
-        let rv = mask_reg(b, rn);
+        // -(An) で基底の An がマスクに含まれるとき、68000/68010 は
+        // 初期値を、68020 以降は初期値 - オペランドサイズを格納する
+        // （movem_base パラメータ）。An の更新は転送後に行うため
+        // mask_reg で読める値はどちらの世代でも初期値。
+        // Ref: SPEC-M68K-PRM (Rev 1) §MOVEM.
+        let rv = if emode == 4 && rn == ereg + 8 && b.param::<super::MovemBaseParam>() == 1 {
+            let sz = b.konst::<W64>(u64::from(size));
+            let v = b.sub(base, sz);
+            b.trunc::<W64, W32>(v)
+        } else {
+            mask_reg(b, rn)
+        };
         let a = addrs[i];
         b.if_then_else(
             sets[i],
             |bb| {
                 if size == 2 {
                     let v = bb.trunc::<W32, W16>(rv);
-                    bb.store::<W16>(a, v, DWR)
+                    let __da0 = dwr(bb);
+                    bb.store::<W16>(a, v, __da0)
                 } else {
                     let sh = bb.konst::<W32>(16);
                     let hi32 = bb.shr_l(rv, sh);
                     let hi = bb.trunc::<W32, W16>(hi32);
-                    bb.store::<W16>(a, hi, DWR)?;
+                    let __da0 = dwr(bb);
+                    bb.store::<W16>(a, hi, __da0)?;
                     let lo = bb.trunc::<W32, W16>(rv);
                     let two = bb.konst::<W64>(2);
                     let a2 = bb.add(a, two);
-                    bb.store::<W16>(a2, lo, DWR)
+                    let __da0 = dwr(bb);
+                    bb.store::<W16>(a2, lo, __da0)
                 }
             },
             |_| Ok(()),
@@ -1788,13 +1832,16 @@ fn movem_m2r<B: Backend>(b: &mut B, w: u64, pc: u64, size: u32) -> Flow<B> {
             sets[i],
             |bb| {
                 vals[i] = if size == 2 {
-                    let w16 = bb.load::<W16>(a, DRD)?;
+                    let __da0 = drd(bb);
+                    let w16 = bb.load::<W16>(a, __da0)?;
                     bb.sext::<W16, W32>(w16)
                 } else {
-                    let hi = bb.load::<W16>(a, DRD)?;
+                    let __da0 = drd(bb);
+                    let hi = bb.load::<W16>(a, __da0)?;
                     let two = bb.konst::<W64>(2);
                     let a2 = bb.add(a, two);
-                    let lo = bb.load::<W16>(a2, DRD)?;
+                    let __da0 = drd(bb);
+                    let lo = bb.load::<W16>(a2, __da0)?;
                     let hi32 = bb.zext::<W16, W32>(hi);
                     let sh = bb.konst::<W32>(16);
                     let hs = bb.shl(hi32, sh);
@@ -1845,7 +1892,8 @@ fn movep<B: Backend>(b: &mut B, w: u64, pc: u64, size: u32, mem_to_reg: bool) ->
         for i in 0..size {
             let off = b.konst::<W64>(u64::from(i) * 2);
             let a = b.add(addr, off);
-            let byte = b.load::<W8>(a, DRD)?;
+            let __da0 = drd(b);
+            let byte = b.load::<W8>(a, __da0)?;
             let b32 = b.zext::<W8, W32>(byte);
             let sh = b.konst::<W32>((size - 1 - i) * 8);
             let part = b.shl(b32, sh);
@@ -1860,7 +1908,8 @@ fn movep<B: Backend>(b: &mut B, w: u64, pc: u64, size: u32, mem_to_reg: bool) ->
             let v8 = b.trunc::<W32, W8>(v);
             let off = b.konst::<W64>(u64::from(i) * 2);
             let a = b.add(addr, off);
-            b.store::<W8>(a, v8, DWR)?;
+            let __da0 = dwr(b);
+            b.store::<W8>(a, v8, __da0)?;
         }
         Ok(())
     }
@@ -2241,13 +2290,16 @@ fn rte<B: Backend>(b: &mut B) -> Flow<B> {
         |bb| {
             let ssp = bb.get(Ssp.state());
             let a = bb.zext::<W32, W64>(ssp);
-            let sr16 = bb.load::<W16>(a, DRD)?;
+            let __da0 = drd(bb);
+            let sr16 = bb.load::<W16>(a, __da0)?;
             let two = bb.konst::<W64>(2);
             let a2 = bb.add(a, two);
-            let phi = bb.load::<W16>(a2, DRD)?;
+            let __da0 = drd(bb);
+            let phi = bb.load::<W16>(a2, __da0)?;
             let four = bb.konst::<W64>(4);
             let a4 = bb.add(a, four);
-            let plo = bb.load::<W16>(a4, DRD)?;
+            let __da0 = drd(bb);
+            let plo = bb.load::<W16>(a4, __da0)?;
             let six = bb.konst::<W32>(6);
             let ns = bb.add(ssp, six);
             bb.set(Ssp.state(), ns);
@@ -2334,18 +2386,21 @@ pub fn deliver<B: Backend>(b: &mut B, code: u32, head: u64, len: u64) -> Flow<B>
     let ns = b.sub(ssp, six);
     let na = b.zext::<W32, W64>(ns);
     let sr16 = b.trunc::<W32, W16>(sr);
-    b.store::<W16>(na, sr16, DWR)?;
+    let __da0 = dwr(b);
+    b.store::<W16>(na, sr16, __da0)?;
     let sp64 = b.konst::<W64>(stacked);
     let sixteen = b.konst::<W64>(16);
     let phi64 = b.shr_l(sp64, sixteen);
     let phi = b.trunc::<W64, W16>(phi64);
     let two = b.konst::<W64>(2);
     let a2 = b.add(na, two);
-    b.store::<W16>(a2, phi, DWR)?;
+    let __da0 = dwr(b);
+    b.store::<W16>(a2, phi, __da0)?;
     let plo = b.trunc::<W64, W16>(sp64);
     let four = b.konst::<W64>(4);
     let a4 = b.add(na, four);
-    b.store::<W16>(a4, plo, DWR)?;
+    let __da0 = dwr(b);
+    b.store::<W16>(a4, plo, __da0)?;
     b.set(Ssp.state(), ns);
     // 例外エントリは S=1・T=0（フレームには配送前の sr を積んだ）。
     let tm = b.konst::<W32>(0xFFFF & !0x8000);
@@ -2355,9 +2410,11 @@ pub fn deliver<B: Backend>(b: &mut B, code: u32, head: u64, len: u64) -> Flow<B>
     b.set(sr_ref(), new_sr);
     // ベクタ読み出し（code*4、68000 は word×2）。
     let vc = b.konst::<W64>(u64::from(code) * 4);
-    let vhi = b.load::<W16>(vc, DRD)?;
+    let __da0 = drd(b);
+    let vhi = b.load::<W16>(vc, __da0)?;
     let vc2 = b.add(vc, two);
-    let vlo = b.load::<W16>(vc2, DRD)?;
+    let __da0 = drd(b);
+    let vlo = b.load::<W16>(vc2, __da0)?;
     let vhi32 = b.zext::<W16, W32>(vhi);
     let sh = b.konst::<W32>(16);
     let hi_sh = b.shl(vhi32, sh);
@@ -2376,6 +2433,17 @@ fn mvfrsr<B: Backend>(b: &mut B, w: u64, pc: u64) -> Flow<B> {
     if emode == 1 || (emode == 7 && ereg >= 2) {
         return Err(illegal(b));
     }
+    // 68010 以降は特権命令（mvfrsr_priv）。68000 ではユーザでも読める。
+    if b.param::<super::MvfrsrPrivParam>() {
+        let sup = is_super(b);
+        return b.if_then_else(sup, |bb| mvfrsr_move(bb, w, pc), |bb| Err(privilege(bb)));
+    }
+    mvfrsr_move(b, w, pc)
+}
+
+fn mvfrsr_move<B: Backend>(b: &mut B, w: u64, pc: u64) -> Flow<B> {
+    let emode = ea::ea_mode(w);
+    let ereg = ea::ea_reg(w);
     let sr = b.get(sr_ref());
     let m = b.konst::<W32>(0xA71F);
     let v = b.and(sr, m);

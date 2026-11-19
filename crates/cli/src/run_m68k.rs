@@ -30,6 +30,8 @@ const STEP_LIMIT: u64 = 256_000_000;
 pub struct M68kModel {
     /// `decode_model_ex` に渡す機能ビット。
     pub feats: u128,
+    /// 意味論が `b.param` で読む挙動パラメータ。
+    pub params: polyisa_guest_m68k::Params,
 }
 
 impl M68kModel {
@@ -38,6 +40,17 @@ impl M68kModel {
     pub const fn m68000() -> Self {
         Self {
             feats: polyisa_guest_m68k::FEAT_M68000,
+            params: polyisa_guest_m68k::DEFAULT_PARAMS,
+        }
+    }
+
+    /// モデル名（`MODELS` のいずれか）から解決する。
+    /// 未知の名前は既定モデルになる。
+    #[must_use]
+    pub fn named(name: &str) -> Self {
+        Self {
+            feats: polyisa_guest_m68k::model_feats(name),
+            params: polyisa_guest_m68k::model_params(name),
         }
     }
 }
@@ -45,6 +58,7 @@ impl M68kModel {
 /// `entry` から `model` で実行する。`sys` は OS パーソナリティ。
 pub fn run(env: &mut BareEnv, entry: u64, model: M68kModel, sys: &mut impl TrapHandler) -> Outcome {
     env.pc = entry;
+    polyisa_guest_m68k::install_params(&mut env.backend, &model.params);
     // PC は32ビットの内部レジスタだがアドレスバスは24ビット。
     // 意味論が 64 ビットで組み立てたアドレスをアクセス直前に切る。
     env.backend.addr_mask = 0x00FF_FFFF;

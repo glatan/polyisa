@@ -2384,3 +2384,85 @@ fn rte_restores_user_mode_frame() {
         other => panic!("expected jump: {other:?}"),
     }
 }
+
+// D1: CPU モデルの挙動パラメータ（cpu-models.md の param 句）。
+// Ref: SPEC-M68K-PRM (Rev 1) §MOVEM / §MOVE from SR と
+// SPEC-M68K-UM (MC68020) の奇数アクセス。
+
+/// 68010 以降の MOVE from SR は特権命令。
+#[test]
+fn mvfrsr_privileged_on_68010() {
+    // move from sr,d0。68000（既定）ではユーザモードでも成功する。
+    let mut env = env_with_code(&[0x40C0]);
+    env.backend.set(sem::sr_ref(), 0);
+    env.step(|b| sem::exec(b, Insn::Mvfrsr, 0x40C0, 0x1000))
+        .expect("68000 ではユーザでも読める");
+
+    // i68010 のパラメータでは特権違反（ベクタ 8）。
+    let mut env = env_with_code(&[0x40C0]);
+    polyisa_guest_m68k::install_params(
+        &mut env.backend,
+        &polyisa_guest_m68k::model_params("i68010"),
+    );
+    env.backend.set(sem::sr_ref(), 0);
+    let e = env
+        .step(|b| sem::exec(b, Insn::Mvfrsr, 0x40C0, 0x1000))
+        .expect_err("68010+ では特権違反");
+    match e {
+        InterpExit::Exception(x) => assert_eq!(x.code, 8),
+        other => panic!("unexpected exit: {other:?}"),
+    }
+}
+
+/// MOVEM -(An) で An がマスクに含まれるときの格納値の世代差。
+#[test]
+fn movem_base_in_list_param() {
+    // movem.l a0,-(a0)。predec マスクは reg r ↔ bit 15-r で A0=bit7。
+    for (model, want) in [("", 0x4800u32), ("i68020", 0x47FC)] {
+        let mut env = env_with_data(&[0x48E0, 0x0080], &[]);
+        if !model.is_empty() {
+            polyisa_guest_m68k::install_params(
+                &mut env.backend,
+                &polyisa_guest_m68k::model_params(model),
+            );
+        }
+        env.backend.set(A(0).state(), 0x4800);
+        env.step(|b| sem::exec(b, Insn::MovrmL, 0x48E0, 0x1000))
+            .unwrap();
+        let mut buf = [0u8; 4];
+        env.backend
+            .mem
+            .read(VirtAddr(0x47FC), &mut buf, DRD)
+            .unwrap();
+        assert_eq!(u32::from_be_bytes(buf), want, "model={model:?}");
+        // An は転送後に最終アドレスへ更新される。
+        assert_eq!(env.backend.get(A(0).state()), 0x47FC);
+    }
+}
+
+/// 68020 以降は奇数アドレスの word アクセスを許す。
+#[test]
+fn odd_access_param() {
+    // move.w (a0),d0。a0 = 0x4001（奇数）。
+    for (model, ok) in [("", false), ("i68020", true)] {
+        let mut env = env_with_data(&[0x3010], &[0; 8]);
+        if !model.is_empty() {
+            polyisa_guest_m68k::install_params(
+                &mut env.backend,
+                &polyisa_guest_m68k::model_params(model),
+            );
+        }
+        env.backend.set(A(0).state(), 0x4001);
+        let r = env.step(|b| sem::exec(b, Insn::MoveW, 0x3010, 0x1000));
+        if ok {
+            r.expect("68020+ では奇数アクセスを許す");
+        } else {
+            match r.expect_err("68000 ではアドレスエラー") {
+                InterpExit::Exception(x) => {
+                    assert_eq!(x.kind, polyisa_sem::ExceptionKind::Align)
+                }
+                other => panic!("unexpected exit: {other:?}"),
+            }
+        }
+    }
+}

@@ -99,6 +99,26 @@ mod tests {
     #[test]
     fn cpu_models() {
         assert!(FEATURES.contains(&"m68000"));
-        assert!(MODELS.contains(&"i68000"));
+        for n in ["i68000", "i68010", "i68020", "i68030", "i68040", "i68060"] {
+            assert!(MODELS.contains(&n), "{n}");
+        }
+        // 親チェーンで世代機能が累積する。
+        assert_eq!(
+            model_feats("i68060"),
+            FEAT_M68000 | FEAT_M68010 | FEAT_M68020 | FEAT_M68030 | FEAT_M68040 | FEAT_M68060
+        );
+        // 挙動パラメータは世代ごとに上書きされる。
+        let p000 = model_params("i68000");
+        assert_eq!(p000.odd_access, 0);
+        assert!(!p000.mvfrsr_priv);
+        assert_eq!(p000.movem_base, 0);
+        let p010 = model_params("i68010");
+        assert!(p010.mvfrsr_priv);
+        assert_eq!(p010.odd_access, 0);
+        let p020 = model_params("i68020");
+        assert_eq!(p020.odd_access, 1);
+        assert_eq!(p020.movem_base, 1);
+        // パラメータも親チェーンで継承される。
+        assert_eq!(model_params("i68060"), p020);
     }
 }

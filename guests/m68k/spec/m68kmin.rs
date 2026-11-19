@@ -42,12 +42,59 @@ pub fn build_model() -> polyisa_isadl::Model {
             conflicts: vec![],
         });
     }
-    for (name, parent, add) in [
-        ("generic", "", &["m68000"][..]),
-        ("i68000", "generic", &[][..]),
+    // 世代ごとの挙動差は挙動パラメータで表す（cpu-models.md の param）。
+    // Ref: SPEC-M68K-PRM (Rev 1) §MOVE from SR / §MOVEM と
+    // SPEC-M68K-UM (MC68020) のバス動作。
+    m.param(
+        "odd_access",
+        ParamKind::Enum(vec!["addr_error".to_string(), "allow".to_string()]),
+        "addr_error",
+        "奇数アドレスの word/long データアクセス。68000/68010 はアドレスエラー、68020 以降は許可",
+    );
+    m.param(
+        "mvfrsr_priv",
+        ParamKind::Bool,
+        "false",
+        "MOVE from SR の特権性。68000 はユーザでも読める、68010 以降は特権違反",
+    );
+    m.param(
+        "movem_base",
+        ParamKind::Enum(vec!["initial".to_string(), "dec_opsize".to_string()]),
+        "initial",
+        "MOVEM -(An) で An がマスクに含まれるとき格納する値。68000/68010 は初期値、68020 以降は An-size",
+    );
+
+    // CPU モデル。親チェーンで機能を累積し、世代差は params で上書きする。
+    // 各世代で未実装の命令は世代機能への `when` 述語で表し、
+    // 68060 のように後代で削られた命令は remove_features で表す。
+    for (name, parent, add, params) in [
+        ("generic", "", &["m68000"][..], &[][..]),
+        ("i68000", "generic", &[][..], &[][..]),
+        (
+            "i68010",
+            "i68000",
+            &["m68010"][..],
+            &[("mvfrsr_priv", "true")][..],
+        ),
+        (
+            "i68020",
+            "i68010",
+            &["m68020"][..],
+            &[
+                ("mvfrsr_priv", "true"),
+                ("odd_access", "allow"),
+                ("movem_base", "dec_opsize"),
+            ][..],
+        ),
+        ("i68030", "i68020", &["m68030"][..], &[][..]),
+        ("i68040", "i68030", &["m68040"][..], &[][..]),
+        ("i68060", "i68040", &["m68060"][..], &[][..]),
     ] {
         m.models.push(ModelDef {
-            params: vec![],
+            params: params
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
             name: name.to_string(),
             parent: parent.to_string(),
             add_features: add.iter().map(|s| s.to_string()).collect(),
