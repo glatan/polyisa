@@ -257,10 +257,17 @@ pub fn insn_cycles(insn: Insn, w: u64, ext: u16, rt: &Rt) -> Option<u64> {
         | Insn::AndLDn
         | Insn::OrBDn
         | Insn::OrWDn
-        | Insn::OrLDn
-        | Insn::Eor => {
+        | Insn::OrLDn => {
             let size = 1u32 << (dm - 4);
             (if size == 4 { 12 } else { 8 }) + wr_ea(em, er, size)?
+        }
+        Insn::Eor => {
+            // EOR は Dn→<ea> のみ。Dn 宛先は純粋演算の時間（4/8）。
+            if em == 0 {
+                if osz == 4 { 8 } else { 4 }
+            } else {
+                (if osz == 4 { 12 } else { 8 }) + wr_ea(em, er, osz as u32)?
+            }
         }
         Insn::AddaL | Insn::SubaL => alu_dst_dn(em, er, 4)?,
         Insn::Cmp => {
@@ -399,6 +406,12 @@ pub fn insn_cycles(insn: Insn, w: u64, ext: u16, rt: &Rt) -> Option<u64> {
         Insn::Btst => {
             if em == 0 {
                 6
+            } else if em == 7 && er == 4 {
+                // 即値宛先は 6+4=10。
+                10
+            } else if em == 1 {
+                // An 宛先は未定義エンコード。
+                return None;
             } else {
                 4 + rd_ea(em, er, 1)?
             }
@@ -407,6 +420,9 @@ pub fn insn_cycles(insn: Insn, w: u64, ext: u16, rt: &Rt) -> Option<u64> {
             if em == 0 {
                 // ビット番号 mod 32 が 16 以上で +2。
                 if rt.bit.unwrap_or(0) >= 16 { 8 } else { 6 }
+            } else if em == 1 || (em == 7 && er >= 2) {
+                // An・PC 相対・即値は未定義エンコード。
+                return None;
             } else {
                 8 + wr_ea(em, er, 1)?
             }
@@ -414,6 +430,8 @@ pub fn insn_cycles(insn: Insn, w: u64, ext: u16, rt: &Rt) -> Option<u64> {
         Insn::Bclr => {
             if em == 0 {
                 if rt.bit.unwrap_or(0) >= 16 { 10 } else { 8 }
+            } else if em == 1 || (em == 7 && er >= 2) {
+                return None;
             } else {
                 8 + wr_ea(em, er, 1)?
             }
@@ -421,20 +439,27 @@ pub fn insn_cycles(insn: Insn, w: u64, ext: u16, rt: &Rt) -> Option<u64> {
         Insn::BtstI => {
             if em == 0 {
                 10
+            } else if em == 1 {
+                return None;
             } else {
                 8 + rd_ea(em, er, 1)?
             }
         }
         Insn::BchgI | Insn::BsetI => {
             if em == 0 {
-                if ext >= 16 { 12 } else { 10 }
+                // ビット番号は mod 32 が効く。
+                if ext % 32 >= 16 { 12 } else { 10 }
+            } else if em == 1 || (em == 7 && er >= 2) {
+                return None;
             } else {
                 12 + wr_ea(em, er, 1)?
             }
         }
         Insn::BclrI => {
             if em == 0 {
-                if ext >= 16 { 14 } else { 12 }
+                if ext % 32 >= 16 { 14 } else { 12 }
+            } else if em == 1 || (em == 7 && er >= 2) {
+                return None;
             } else {
                 12 + wr_ea(em, er, 1)?
             }
@@ -719,8 +744,16 @@ mod tests {
         assert_eq!(insn_cycles(Insn::Bset, 0x0bc0, 0, &hi), Some(8));
         assert_eq!(insn_cycles(Insn::Bclr, 0x0b80, 0, &lo), Some(8));
         assert_eq!(insn_cycles(Insn::Bclr, 0x0b80, 0, &hi), Some(10));
-        // static は ext>=16 で +2: BSET #,D1 = 10（ext=1）
+        // static は ext%32>=16 で +2: BSET #,D1 = 10（ext=1, 0xd8a1%32=1）
         assert_eq!(insn_cycles(Insn::BsetI, 0x08c1, 1, &rt()), Some(10));
+        assert_eq!(insn_cycles(Insn::BsetI, 0x08c1, 0xd8a1, &rt()), Some(10));
+        // BCLR #,D0 ext=0xa500%32=0 → 12、BCHG #,D2 ext=0xc06a%32=10 → 10
+        assert_eq!(insn_cycles(Insn::BclrI, 0x0880, 0xa500, &rt()), Some(12));
+        assert_eq!(insn_cycles(Insn::BchgI, 0x0842, 0xc06a, &rt()), Some(10));
+        // BTST Dn,#imm（即値宛先）= 10、EOR.b/l Dn,Dn = 4/8
+        assert_eq!(insn_cycles(Insn::Btst, 0x033c, 0, &rt()), Some(10));
+        assert_eq!(insn_cycles(Insn::Eor, 0xbf06, 0, &rt()), Some(4));
+        assert_eq!(insn_cycles(Insn::Eor, 0xb781, 0, &rt()), Some(8));
         // TRAP = 38、ORI to CCR = 20
         assert_eq!(insn_cycles(Insn::Trap, 0x4e40, 0, &rt()), Some(38));
         assert_eq!(insn_cycles(Insn::Ori, 0x003c, 0, &rt()), Some(20));
