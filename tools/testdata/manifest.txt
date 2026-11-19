@@ -15,3 +15,6 @@ TEST-RISCV-ARCH-TEST https://github.com/riscv-non-isa/riscv-arch-test.git 7569d0
 # 対応確認：2026-11-09 に `git ls-remote` で取得元 HEAD==a9c849f、
 # 手元 .testdata/testfloat の HEAD==a9c849f を確認済み。
 TEST-TESTFLOAT https://github.com/ucb-bar/berkeley-testfloat-3.git a9c849f1b0eb0264b626d9686ffae167d996e3be .testdata/testfloat
+# SST m68000（.json.bin：レジスタ・RAM・プリフェッチ2ワード・
+# FC/UDS/LDS つきバストランザクション。decode.py が形式の一次根拠）
+TEST-SINGLESTEP-68000 https://github.com/SingleStepTests/m68000.git 64b253116a3de04aaac4346c43680960dc9b67e5 .testdata/sst-68000
