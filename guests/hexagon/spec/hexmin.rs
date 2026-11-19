@@ -39,6 +39,7 @@ pub fn build_model() -> polyisa_isadl::Model {
     m.regclasses.push(RegClass {
         name: "gpr".to_string(),
         dynamic: false,
+        prefix: Some("r".to_string()),
     });
 
     for (name, hi, lo) in [("rd", 20, 16), ("rs1", 15, 11), ("rs2", 10, 6)] {
@@ -76,11 +77,11 @@ pub fn build_model() -> polyisa_isadl::Model {
     // 実符号化の parse/duplex/imm 拡張は本格実装で足す。
     // Ref: SPEC-HEXAGON-PRM (V73).
     let insns: &[(&str, &str, &str, &str, &str)] = &[
-        ("add", "F3", "00000001 ........................", "r{rd} = add(r{rs1}, r{rs2})", "alu"),
-        ("sub", "F3", "00000010 ........................", "r{rd} = sub(r{rs1}, r{rs2})", "alu"),
-        ("and", "F3", "00000011 ........................", "r{rd} = and(r{rs1}, r{rs2})", "alu"),
-        ("or", "F3", "00000100 ........................", "r{rd} = or(r{rs1}, r{rs2})", "alu"),
-        ("mov_imm", "F3", "00000101 ........................", "r{rd} = #{imm}", "alu"),
+        ("add", "F3", "00000001 ........................", "{rd} = add({rs1}, {rs2})", "alu"),
+        ("sub", "F3", "00000010 ........................", "{rd} = sub({rs1}, {rs2})", "alu"),
+        ("and", "F3", "00000011 ........................", "{rd} = and({rs1}, {rs2})", "alu"),
+        ("or", "F3", "00000100 ........................", "{rd} = or({rs1}, {rs2})", "alu"),
+        ("mov_imm", "F3", "00000101 ........................", "{rd} = #{imm}", "alu"),
         ("jump", "F1", "00000110 ........................", "jump {imm}", "jump"),
     ];
     for (name, format, pattern, syntax, timing) in insns {

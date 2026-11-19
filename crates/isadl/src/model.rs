@@ -36,6 +36,9 @@ pub struct RegClass {
     pub name: String,
     /// 実行時に位置を計算するかどうか。
     pub dynamic: bool,
+    /// 逆アセンブル表示の接頭辞（RISC-V の `x`、MIPS の `$` など）。
+    /// `None` なら番号だけを表示する。
+    pub prefix: Option<String>,
 }
 
 /// フィールドの取り出し方。

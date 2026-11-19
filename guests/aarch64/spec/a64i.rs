@@ -61,6 +61,7 @@ pub fn build_model() -> polyisa_isadl::Model {
     m.regclasses.push(RegClass {
         name: "gpr".to_string(),
         dynamic: false,
+        prefix: Some("x".to_string()),
     });
 
     // ビットフィールド宣言。A64 のフィールドは命令形式で位置がばらけるため、

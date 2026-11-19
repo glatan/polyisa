@@ -40,6 +40,7 @@ pub fn build_model() -> polyisa_isadl::Model {
     m.regclasses.push(RegClass {
         name: "gpr".to_string(),
         dynamic: false,
+        prefix: Some("r".to_string()),
     });
 
     for (name, hi, lo) in [

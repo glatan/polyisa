@@ -38,6 +38,7 @@ pub fn build_model() -> polyisa_isadl::Model {
     m.regclasses.push(RegClass {
         name: "local".to_string(),
         dynamic: false,
+        prefix: None,
     });
 
     // F1: オペランドを取り出さない形式（imm/labelidx は本格実装で足す）。

@@ -46,6 +46,7 @@ pub fn build_model() -> polyisa_isadl::Model {
     m.regclasses.push(RegClass {
         name: "gpr".to_string(),
         dynamic: false,
+        prefix: Some("r".to_string()),
     });
 
     // 形式。オペランドのメタデータのみ（解読はパターンの仕事）。

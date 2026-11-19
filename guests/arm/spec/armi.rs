@@ -54,6 +54,7 @@ pub fn build_model() -> polyisa_isadl::Model {
     m.regclasses.push(RegClass {
         name: "gpr".to_string(),
         dynamic: false,
+        prefix: Some("r".to_string()),
     });
 
     // `where` の参照用に cond をフィールドとして持つ（形式には入れない）。

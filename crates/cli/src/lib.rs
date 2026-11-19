@@ -492,9 +492,9 @@ pub fn parse_command(args: &[String]) -> Command {
 ///（`0b11` 以外は16ビット）。RISC-V のみ。`guest-riscv` 機能で有効になる。
 #[cfg(feature = "guest-riscv")]
 #[must_use]
-pub fn disassemble_riscv(word: u128) -> Option<&'static str> {
+pub fn disassemble_riscv(word: u128) -> Option<String> {
     let len = if word & 0b11 == 0b11 { 32 } else { 16 };
-    polyisa_guest_riscv::decode(word, len).map(polyisa_guest_riscv::disasm)
+    polyisa_guest_riscv::disasm_word(word, len)
 }
 
 /// `disasm` の引数（16進文字列）を語に直す。`0x` 接頭辞の有無は問わない。
@@ -532,10 +532,14 @@ mod tests {
     fn disasm_add_and_c_addi() {
         // add x1,x2,x3 と c.addi x1,1（llvm-mc の符号化と一致）。
         assert_eq!(
-            disassemble_riscv(0x0031_00b3),
-            Some("add {rd}, {rs1}, {rs2}")
+            disassemble_riscv(0x0031_00b3).as_deref(),
+            Some("add x1, x2, x3")
         );
-        assert_eq!(disassemble_riscv(0x0085), Some("c.addi {rd}, {imm}"));
+        // c.addi は形式 R を共有し、{imm} は宣言オペランドがないので残る。
+        assert_eq!(
+            disassemble_riscv(0x0085).as_deref(),
+            Some("c.addi x1, {imm}")
+        );
         assert_eq!(disassemble_riscv(0xffff_ffff), None);
     }
 

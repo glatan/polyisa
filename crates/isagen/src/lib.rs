@@ -362,6 +362,88 @@ fn gen_disassembler(model: &Model) -> String {
         ));
     }
     s.push_str("    }\n}\n");
+    // 語をデコードし、構文の {名} をオペランド値で埋める。オペランド値は
+    // `extract_ops` と同じ規則（レジスタは接頭辞つき、即値は 10 進）。
+    // 埋められない穴（未宣言のプレースホルダ）はそのまま残す。
+    s.push_str(
+        "pub fn disasm_word(word: u128, len: u32) -> Option<String> {\n    \
+            let insn = decode(word, len)?;\n    render_ops(insn, word)\n}\n",
+    );
+    s.push_str("fn render_ops(insn: Insn, word: u128) -> Option<String> {\n");
+    let formats: std::collections::BTreeMap<&str, &polyisa_isadl::model::Format> =
+        model.formats.iter().map(|f| (f.name.as_str(), f)).collect();
+    let fields: std::collections::BTreeMap<&str, &polyisa_isadl::model::Field> =
+        model.fields.iter().map(|f| (f.name.as_str(), f)).collect();
+    let regprefix = |op: &polyisa_isadl::model::Operand| -> Option<&str> {
+        op.regclass.as_deref().and_then(|c| {
+            model
+                .regclasses
+                .iter()
+                .find(|r| r.name == c)
+                .and_then(|r| r.prefix.as_deref())
+        })
+    };
+    let mut arms = Vec::new();
+    let mut missing = !map_insns(model).is_empty();
+    for insn in &model.insns {
+        let fmt = formats[insn.format.as_str()];
+        // Hook フィールドを持つオペランドが形式に1つでもあれば
+        // `extract_ops` がアームを出さない（空 vec を返す）ので、
+        // render_ops 側も同じ条件でアームを出さない。
+        let hook = fmt.operands.iter().any(|op| {
+            matches!(
+                fields[op.field.as_deref().unwrap_or(op.name.as_str())].kind,
+                polyisa_isadl::model::FieldKind::Hook { .. }
+            )
+        });
+        if hook {
+            missing = true;
+            continue;
+        }
+        // 構文中の穴を埋める置き換えだけを出す。
+        let mut replaces = Vec::new();
+        for (i, op) in fmt.operands.iter().enumerate() {
+            let ph = format!("{{{}}}", op.name);
+            if !insn.syntax.contains(&ph) {
+                continue;
+            }
+            let val = match regprefix(op) {
+                Some(p) => format!("format!(\"{{}}{{}}\", {p:?}, o[{i}])"),
+                None => format!("o[{i}].to_string()"),
+            };
+            replaces.push(format!("s = s.replace({ph:?}, &{val});"));
+        }
+        let mut arm = format!("        Insn::{} => {{\n", to_ident(&insn.name));
+        if replaces.is_empty() {
+            arm.push_str(&format!(
+                "            Some({:?}.to_string())\n",
+                insn.syntax
+            ));
+        } else {
+            arm.push_str("            let o = extract_ops(insn, word);\n");
+            arm.push_str(&format!(
+                "            let mut s = {:?}.to_string();\n",
+                insn.syntax
+            ));
+            for r in replaces {
+                arm.push_str(&format!("            {r}\n"));
+            }
+            arm.push_str("            Some(s)\n");
+        }
+        arm.push_str("        }\n");
+        arms.push(arm);
+    }
+    if !arms.iter().any(|a| a.contains("extract_ops")) {
+        s.push_str("    let _ = word;\n");
+    }
+    s.push_str("    match insn {\n");
+    for a in arms {
+        s.push_str(&a);
+    }
+    if missing {
+        s.push_str("        _ => Some(disasm(insn).to_string()),\n");
+    }
+    s.push_str("    }\n}\n");
     s
 }
 

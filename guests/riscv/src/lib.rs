@@ -222,4 +222,22 @@ mod tests {
         // 空を要求する（Hook 型のオペランドを持つ形式が増えたら見直す）。
         assert!(ENCODE_SKIPPED.is_empty(), "{:?}", ENCODE_SKIPPED);
     }
+
+    #[test]
+    fn disasm_word_fills_operands() {
+        // 生成したエンコーダで組み立てた語をそのまま逆アセンブルする。
+        let w = encode(Insn::Add, &[1, 2, 3]).unwrap();
+        assert_eq!(disasm_word(w, 32).as_deref(), Some("add x1, x2, x3"));
+        let w = encode(Insn::Addi, &[5, 6, 7]).unwrap();
+        assert_eq!(disasm_word(w, 32).as_deref(), Some("addi x5, x6, 7"));
+        let w = encode(Insn::Beq, &[1, 2, 8]).unwrap();
+        assert_eq!(disasm_word(w, 32).as_deref(), Some("beq x1, x2, 8"));
+        let w = encode(Insn::Sw, &[2, 3, 12]).unwrap();
+        assert_eq!(disasm_word(w, 32).as_deref(), Some("sw x3, 12(x2)"));
+        let w = encode(Insn::Csrrw, &[1, 0x300, 2]).unwrap();
+        assert_eq!(disasm_word(w, 32).as_deref(), Some("csrrw x1, 768, x2"));
+        // 命令語のない列は None。穴のない構文はそのまま返る。
+        assert_eq!(disasm_word(0xffff_ffff, 32), None);
+        assert_eq!(disasm_word(0x0000_0073, 32).as_deref(), Some("ecall"));
+    }
 }
