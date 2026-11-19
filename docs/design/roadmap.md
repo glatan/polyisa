@@ -406,44 +406,6 @@ ISA 固有のタイミング（68000、80486、Pentium、VAX）は各 ISA の段
 
 LLVM の対応しない ISA（m68k、Alpha、PA-RISC、SuperH、OpenRISC、IA-64、VAX、PDP-11）では、オラクルの逆アセンブラと、テストの命令列を組み立てる手段がない。これらの ISA の命令単位のテストは ISADL から生成したエンコーダで組み立てるので、エンコーダとオペランド入りの逆アセンブラの生成（GAP-0023 の解消）を着手の条件に含める。
 
-### 段階ごとの確認対象
-
-所有者が確認する台帳項目は、段階ごとにおおむね次のとおりである。版・用途の確定を含む。
-
-| 段階 | 仕様書 | ABI・テスト・ツール |
-|---|---|---|
-| 段階 2（Hexagon 試作） | SPEC-HEXAGON-PRM（版確定） | TOOL-LLVM（確認済みで足りるか点検）、リンカ方針 |
-| 段階 2（IA-64 試作） | SPEC-IA64-SDM（版確定） | オラクルなし（手組ベクタは SPEC の F 許可が条件） |
-| 段階 2（SPARC 試作） | SPEC-SPARC-V8（V9 要否含む） | TOOL-LLVM（確認済み） |
-| 段階 2（WASM 試作） | SPEC-WASM-CORE、SPEC-WASI-P1（版確定） | TEST-WASM-SPEC、TOOL-WASMTIME（用途Xは確認時に付与） |
-| 段階 3（MIPS） | SPEC-MIPS-IV/R6/R3000（版確定） | o32/n32/n64 の ABI 文書（未登録分は追加）、TOOL-LLVM |
-| 段階 4（x86） | SPEC-X86 各書、SPEC-X86-PSABI（登録済み、版は確認時に確定） | busybox 等の BIN（未登録分は追加） |
-| 段階 5（MIPS の本実装） | SPEC-MIPS-IV/R6/R3000（確認済み） | SPEC-MIPS-ABI-N32（版確定）、SRC-LINUX |
-| 段階 6（AArch64） | SPEC-ARM-ARM-A（確認済み） | SPEC-AARCH64-ABI（確認済み）、SPEC-AARCH64-ELF（版確定）、BIN（aarch64 の配布物、未登録分は追加）、TOOL-LLVM |
-| 段階 7（ARM） | SPEC-ARM-ARM-A、SPEC-ARM-ARM-V7AR、SPEC-ARM-ARM-LEGACY（確認済み） | SPEC-ARM-EABI（確認済み）、BIN（未登録分は追加）、TOOL-LLVM |
-| 段階 8（Power） | SPEC-POWER-ISA（確認済み）、SPEC-POWERPC-PEM（版確定）、SPEC-POWER-PEM64（版確定）、SPEC-POWER-601-UM（版確定）、SPEC-POWER-ALTIVEC-PEM（版確定）、SPEC-POWER-EREF（版確定）、SPEC-POWER-SPE-PEM（版確定） | SPEC-POWER-ABI（確認済み）、SPEC-POWER-ABI32（版確定）、BIN（未登録分は追加）、TOOL-LLVM |
-| 段階 9（IR と JIT） | 既存の確認済み項目で足りるか点検（x86 のエンコーダ生成に使う記述は段階 4 と同じ資料） | — |
-| 段階 10（十進演算と非 IEEE 浮動小数点） | SPEC-DECIMAL-ARITH（確認済み）、各形式の根拠（SPEC-S390-ZARCH-POP、SPEC-VAX-ARM、SPEC-M68K-FPU） | TEST-DECTEST（確認済み） |
-| 段階 11（s390 系） | SPEC-S390-ZARCH-POP（確認済み）、SPEC-S390-ESA390-POP（版確定）、SPEC-S390-S360-POP（版確定） | SPEC-S390-ABI（確認済み）、SPEC-S390-ABI-31（版確定）、BIN（未登録分は追加）、TOOL-LLVM |
-| 段階 12（WebAssembly と WASI） | SPEC-WASM-CORE、SPEC-WASI-P1（確認済み） | TEST-WASM-SPEC、TOOL-WASMTIME |
-| 段階 13（x86 の残り） | SPEC-X86-8086（確認済み）、SPEC-X86-8087（版確定。SPEC-X86-8086 への収録を先に点検）、SPEC-X86-I186（版確定）、SPEC-X86-I286（版確定）、SPEC-X86-I386（版確定）、SPEC-X86-I387（版確定。80387 以降の x87 挙動差）、SPEC-X86-I486（版確定）、SPEC-X86-PENTIUM（確認済み）、SPEC-X86-INTEL-SDM（拡張の全範囲をカバーする版の確定。APX・AMX・AVX10 の収録を確認し、不足分は別資料を追加登録）、SPEC-X86-AMD-APM（版確定。Vol.3 Rev 3.39 で 3DNow!・FMA4・XOP・TBM の収録を確認済み）、SPEC-X86-APX（版確定）、SPEC-X86-ISE（版確定。SDM にない拡張の根拠）、SPEC-X86-AVX10-2（版確定）、SPEC-X86-ACE-V1（版確定）、SPEC-X86-ACE-AVX10-3（版確定）、SPEC-X86-PSABI（確認済み。x32 は同じ文書の ILP32 の節）、SPEC-X86-I386-PSABI（版確定） | TEST-SINGLESTEP-8088、TEST-SINGLESTEP-80286（版確定）、TEST-SINGLESTEP-80386（版確定。386EX の実モード）、MEAS-UOPS-INFO、MEAS-AGNER、MEAS-INSTLATX64（版確定。CPU モデルの識別情報）、SPEC-X86-INTEL-OPT-V2（版確定。旧世代の公式レイテンシ）、SRC-LINUX（確認済み。x32 のシステムコール表と `arch_prctl` の定数）、TOOL-XED（版確定。第2のデコードオラクル）、TOOL-INTEL-SDE（版確定。未出荷拡張の実行差分オラクル）、TOOL-GCC-X32（版確定。x32 のテストバイナリは公式配布がなく自前ビルド）、BIN（新しい拡張を使う配布物、未登録分は追加） |
-| 段階 14（m68k） | SPEC-M68K-PRM、SPEC-M68K-UM、SPEC-M68K-FPU（確認済み）、SPEC-M68K-CPU32（版確定）、SPEC-M68K-COLDFIRE（版確定） | SPEC-M68K-ABI（版確定）、TEST-SINGLESTEP-68000、SRC-LINUX、BIN（未登録分は追加） |
-| 段階 15（SPARC） | SPEC-SPARC-V8（確認済み）、SPEC-SPARC-V9（版確定） | SPEC-SPARC-PSABI（版確定）、SRC-LINUX、BIN（未登録分は追加）、TOOL-LLVM |
-| 段階 16（Alpha） | SPEC-ALPHA-ARM（版確定） | SPEC-ALPHA-CALLSTD（版確定）、SRC-LINUX、BIN（未登録分は追加） |
-| 段階 17（PA-RISC） | SPEC-PARISC-11、SPEC-PARISC-20（確認済み） | SRC-LINUX、BIN（未登録分は追加） |
-| 段階 18（SuperH） | SPEC-SUPERH-SH2、SPEC-SUPERH-SH4（確認済み）、SPEC-SUPERH-SH2A（版確定）、SPEC-SUPERH-JCORE（版確定） | SRC-LINUX、BIN（未登録分は追加） |
-| 段階 19（LoongArch） | SPEC-LOONGARCH-RM（確認済み）、SPEC-LOONGARCH-VEXT（未刊行。公開を待つか方針を決める） | SPEC-LOONGARCH-PSABI（版確定）、SRC-LINUX、BIN（未登録分は追加）、TOOL-LLVM |
-| 段階 20（OpenRISC） | SPEC-OPENRISC-1000（確認済み） | SRC-LINUX、BIN（未登録分は追加） |
-| 段階 21（IA-64） | SPEC-IA64-SDM（確認済み） | SRC-LINUX-66、BIN（未登録分は追加） |
-| 段階 22（Hexagon） | SPEC-HEXAGON-PRM（確認済み）、SPEC-HEXAGON-PRM-PREV（版確定） | SRC-LINUX、BIN（未登録分は追加）、TOOL-LLVM |
-| 段階 23（VAX） | SPEC-VAX-ARM（確認済み）、SPEC-VAX-MICROVAX（版確定） | — |
-| 段階 24（PDP-11） | SPEC-PDP11-HANDBOOK（確認済み）、SPEC-PDP11-ARCH83（版確定）、SPEC-PDP11-CIS（版確定）、SPEC-PDP11-J11（版確定） | — |
-| 段階 25（追加の OS パーソナリティ） | SPEC-UNIX-V7（版確定）、SPEC-BSD-43（版確定）、SPEC-ARM-SEMIHOST（版確定） | V7 と BSD のバイナリ（未登録分は追加） |
-| 段階 26（システムコールの段階 5） | SRC-LINUX（確認済み）、SPEC-LINUX-MANPAGES（確認済み） | BIN（未登録分は追加） |
-| 段階 27（タイミングの残り） | SPEC-SIFIVE-U74（確認済み）ほか対象の CPU の資料 | 較正用のベンチマーク集（未登録分は追加） |
-| 段階 28（ホストの移植） | SPEC-WIN32（版確定）、SRC-XNU（版確定） | 各ホスト OS の文書（未登録分は追加） |
-| 段階 29（GDB 接続） | SPEC-GDB-RSP（版確定） | TOOL-GDB（確認済み） |
-
 ## 各段階に共通の完了条件
 
 どの段階でも、次のことを完了の条件に含める。
