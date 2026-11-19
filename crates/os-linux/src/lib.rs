@@ -42,6 +42,11 @@ pub mod aarch64;
 // Ref: SRC-LINUX (7.3).
 pub mod arm;
 
+/// m68k（Linux・32ビット・ビッグエンディアン）のシステムコール番号と
+/// syscall 処理（`sys` の実装だけ `guest-m68k` 機能の内側）。
+// Ref: SRC-LINUX (7.3).
+pub mod m68k;
+
 /// Power（ppc64・ELFv2）のシステムコール番号と syscall 処理。
 // Ref: SRC-LINUX (7.3), SPEC-POWER-ABI (ELFv2 r1.5).
 pub mod power;
@@ -84,6 +89,7 @@ pub enum GuestAbi {
     MipsO32,
     Aarch64Linux,
     ArmLinux,
+    M68kLinux,
 }
 
 /// 実行ループとの境界。定義は実行エンジンにある。
@@ -470,6 +476,7 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
         GuestAbi::MipsO32 => mips_o32::name(nr),
         GuestAbi::Aarch64Linux => aarch64::name(nr),
         GuestAbi::ArmLinux => arm::name(nr),
+        GuestAbi::M68kLinux => m68k::name(nr),
         GuestAbi::Unknown => None,
     }
 }

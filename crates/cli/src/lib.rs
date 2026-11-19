@@ -197,6 +197,28 @@ fn run_mips_elf(_path: &str, _argv: &[String], _spec: Option<&CpuSpec>) -> Resul
     Err("この polyisa は mips ゲストなしでビルドされた".to_string())
 }
 
+#[cfg(feature = "guest-m68k")]
+fn run_m68k_elf(path: &str, argv: &[String], spec: Option<&CpuSpec>) -> Result<u64, String> {
+    let sel = spec
+        .map(|s| {
+            resolve_sel(
+                "m68k",
+                polyisa_guest_m68k::MODEL_DEFS,
+                polyisa_guest_m68k::FEATURE_DEFS,
+                polyisa_guest_m68k::FEAT_BITS,
+                s,
+            )
+        })
+        .transpose()?;
+    let _ = sel;
+    run_m68k::run_elf_m68k(path, argv)
+}
+
+#[cfg(not(feature = "guest-m68k"))]
+fn run_m68k_elf(_path: &str, _argv: &[String], _spec: Option<&CpuSpec>) -> Result<u64, String> {
+    Err("この polyisa は m68k ゲストなしでビルドされた".to_string())
+}
+
 #[cfg(feature = "guest-arm")]
 fn run_arm_elf(path: &str, argv: &[String], spec: Option<&CpuSpec>) -> Result<u64, String> {
     let sel = spec
@@ -424,6 +446,10 @@ pub fn run_path_opts(
                 // EM_ARM（AArch32・ARM 状態）。Ref: AAELF32 §4.1。
                 check("arm")?;
                 run_arm_elf(path, argv, spec.as_ref())
+            } else if ehdr.machine == 4 {
+                // EM_68K。Ref: binutils include/elf/common.h。
+                check("m68k")?;
+                run_m68k_elf(path, argv, spec.as_ref())
             } else if ehdr.machine == 8 {
                 // EM_MIPS。Ref: SRC-LINUX (7.3)。アーキテクチャとエンディアンは ELF ヘッダから取る。
                 check("mips")?;

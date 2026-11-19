@@ -15,6 +15,7 @@ polyisa-mem = { path = "../mem" }
 polyisa-sem = { path = "../sem" }
 polyisa-guest-aarch64 = { path = "../../guests/aarch64", optional = true }
 polyisa-guest-arm = { path = "../../guests/arm", optional = true }
+polyisa-guest-m68k = { path = "../../guests/m68k", optional = true }
 polyisa-guest-mips = { path = "../../guests/mips", optional = true }
 polyisa-guest-power = { path = "../../guests/power", optional = true }
 polyisa-guest-riscv = { path = "../../guests/riscv", optional = true }
@@ -24,6 +25,7 @@ polyisa-guest-x86 = { path = "../../guests/x86", optional = true }
 [features]
 guest-aarch64 = ["dep:polyisa-guest-aarch64"]
 guest-arm = ["dep:polyisa-guest-arm"]
+guest-m68k = ["dep:polyisa-guest-m68k"]
 guest-mips = ["dep:polyisa-guest-mips"]
 guest-power = ["dep:polyisa-guest-power"]
 guest-riscv = ["dep:polyisa-guest-riscv"]
