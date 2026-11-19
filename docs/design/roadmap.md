@@ -52,7 +52,7 @@
 | SP8 | ウィンドウ命令 save/restore・ta/tcc（V8 の Ticc を含む）・ユーザ ASR（rdy/wry、V9 の rdccr/wrccr/rdpc）。rd/wr psr や rett/done/retry は特権命令なので、ユーザーモードでは特権違反トラップの経路だけを実装する | SP4 | d22e301 |
 | SP9 | V9 の追加: movcc/movr・64 ビット演算・PSTATE.AM のアドレスマスク・cas/casx・membar/stbar/flush・popc | SP5-8 | fb4b060 |
 | SP10 | FPU: ldf/stf/lddf・fadd/fsub/fmul/fdiv/fsqrt・fcmp・fcvt・fmov、V9 の fmovcc/fmovr と %fsr | SP4 | 275db52 |
-| SP11 | VIS とユーザ ASI。V7/V8/V9 のモデル差を `when` 述語と挙動パラメータで切り分け | SP9,SP10 | - |
+| SP11 | VIS とユーザ ASI。V7/V8/V9 のモデル差を `when` 述語と挙動パラメータで切り分け | SP9,SP10 | e9965cc |
 | SP12 | Linux ABI: sparc32/sparc64 の syscall 表、ELF、ウィンドウのあふれと不足を OS パーソナリティで再現 | SP11 | - |
 | SP13 | `heavy_program_sparc`（配布物のコマンド群） | SP12 | S15-1 |
 | SP14 | `heavy_abi_sparc`（UAPI 抽出値との照合） | SP12 | S15-2 |
