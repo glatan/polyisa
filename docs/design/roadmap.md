@@ -22,73 +22,9 @@
 
 判定が `未整備` の条件は、判定に使うテストの名前を条件の文に書く。テストはその段階の作業の中で作り、判定を `テスト：` に更新する。
 
-段階 15 から 24 の各段階には、その節の末尾に作業計画がある。構成は各段階で共通であり、着手条件の整備、骨格、命令群、世代差・拡張、ABI・OS パーソナリティ、タイミング、残件整理の順に進める。各ステップの終わりにサブエージェントのレビューを挟み、レビュー後の修正のあとに push する。計画は作業の進行に合わせて更新する。作業計画の判定列には対応する完了条件の ID を記し、完了の判定は完了条件の表で行う。
+段階 15 以降の各段階には、その節の末尾に作業計画がある。構成は各段階で共通であり、着手条件の整備、骨格、命令群、世代差・拡張、ABI・OS パーソナリティ、タイミング、残件整理の順に進める。各ステップの終わりにサブエージェントのレビューを挟み、レビュー後の修正のあとに push する。作業計画の判定列には対応する完了条件の ID を記し、完了の判定は完了条件の表で行う。
 
-### 段階 15：SPARC
-
-- 版の範囲は V7、V8、V9 と VIS。レジスタウィンドウ（動的なレジスタ参照、ウィンドウ数は CPU モデルのパラメータ）、ウィンドウのあふれと不足は OS パーソナリティが再現
-- 遅延スロット、annul ビット、遅延スロット内の分岐（DCTI couple）、ユーザーが使える ASI、PSTATE.AM のアドレスマスク
-- sparc32 と sparc64 のゲスト ABI
-
-完了条件：
-
-| ID | 条件 | 判定 |
-|---|---|---|
-| S15-1 | sparc64 のテストプログラムと配布物のコマンド群が、ゲストのルートを使って正しい出力を返す（テスト `heavy_program_sparc`）。 | テスト：`heavy_program_sparc` |
-| S15-2 | ABI 表が、UAPI ヘッダからの抽出値と一致する（テスト `heavy_abi_sparc`）。 | テスト：`heavy_abi_sparc` |
-| S15-3 | llvm-objdump とのデコーダの差分テストが通る（テスト `heavy_oracle_sparc`）。 | テスト：`heavy_oracle_sparc` |
-
-作業計画：
-
-| # | 内容 | 前提 | 判定 |
-|---|---|---|---|
-| SP1 | 着手条件: SPEC-SPARC-V9・SPEC-SPARC-PSABI の版確定、V7 の根拠資料の追加登録または範囲からの除外の決定、BIN 登録（sparc32・sparc64 配布物）、SST 類の既存適合データの有無の調査 | - | - |
-| SP2 | `guests/sparc` の段階 2 の試作を本実装に差し替える骨格: CpuState（g/o/i/l レジスタ・CWP・PSR/TSTATE・PC/nPC）、機能（V7・V8・V9・VIS）とモデルの宣言、sem 層、ワークスペース配線 | SP1 | - |
-| SP3 | デコード方式の決定: 32 ビット固定長の map/パターン。遅延スロットは PC/nPC として実行ループ側で表現 | SP2 | - |
-| SP4 | `run_sparc` 実行ループ + bare 最小テスト | SP3 | - |
-| SP5 | 整数演算: add/sub/論理/シフト/sethi と、V8 の umul/smul/udiv/sdiv/mulscc | SP4 | - |
-| SP6 | load/store 全サイズ・ldstub/swap・ASI 指定形 | SP4 | - |
-| SP7 | 分岐・call・jmpl・return。annul ビットと遅延スロット内の分岐（DCTI couple） | SP4 | - |
-| SP8 | ウィンドウ命令 save/restore・ta/tcc（V8 の Ticc を含む）・ユーザ ASR（rdy/wry、V9 の rdccr/wrccr/rdpc）。rd/wr psr や rett/done/retry は特権命令なので、ユーザーモードでは特権違反トラップの経路だけを実装する | SP4 | - |
-| SP9 | V9 の追加: movcc/movr・64 ビット演算・PSTATE.AM のアドレスマスク・cas/casx・membar/stbar/flush・popc | SP5-8 | - |
-| SP10 | FPU: ldf/stf/lddf・fadd/fsub/fmul/fdiv/fsqrt・fcmp・fcvt・fmov、V9 の fmovcc/fmovr と %fsr | SP4 | - |
-| SP11 | VIS とユーザ ASI。V7/V8/V9 のモデル差を `when` 述語と挙動パラメータで切り分け | SP9,SP10 | - |
-| SP12 | Linux ABI: sparc32/sparc64 の syscall 表、ELF、ウィンドウのあふれと不足を OS パーソナリティで再現 | SP11 | - |
-| SP13 | `heavy_program_sparc`（配布物のコマンド群） | SP12 | S15-1 |
-| SP14 | `heavy_abi_sparc`（UAPI 抽出値との照合） | SP12 | S15-2 |
-| SP15 | `heavy_oracle_sparc`（llvm-objdump 差分） | SP11 | S15-3 |
-| SP16 | 残件整理: 判定列の更新、未整備分の GAP 登録 | SP13-15 | - |
-
-### 段階 16：Alpha
-
-- 版の範囲は 21064 から 21364 までと、BWX、FIX、CIX、MVI の拡張。`AMASK` と `IMPLVER` は識別情報
-- `CALL_PAL` の PAL コードの役割は OS パーソナリティ、浮動小数点の補完と非整列アクセスの補完は OS による命令の補完、8 KiB のページサイズ
-- alpha のゲスト ABI
-
-完了条件：
-
-| ID | 条件 | 判定 |
-|---|---|---|
-| S16-1 | alpha の配布物のコマンド群が、ゲストのルートを使って正しい出力を返す（テスト `heavy_program_alpha`）。 | テスト：`heavy_program_alpha` |
-| S16-2 | ABI 表が、UAPI の syscall.tbl と一致する（テスト `heavy_abi_alpha`）。 | テスト：`heavy_abi_alpha` |
-
-作業計画：
-
-| # | 内容 | 前提 | 判定 |
-|---|---|---|---|
-| AL1 | 着手条件: SPEC-ALPHA-ARM・SPEC-ALPHA-CALLSTD の版確定、BIN 登録、GAP-0023 残項目の点検 | 段階 10 | - |
-| AL2 | `guests/alpha` 骨格: CpuState（r0-31・f0-31・PC・PAL 関連状態）、機能（BWX・FIX・CIX・MVI）とモデル（21064-21364）の宣言、AMASK/IMPLVER を識別情報へ | AL1 | テスト：bare_alpha |
-| AL3 | デコード: 32 ビット固定長、形式別（Operate/Memory/Branch/CALL_PAL）のパターン | AL2 | テスト：bare_alpha（AL2 と一体で実装・レビュー済み） |
-| AL4 | `run_alpha` 実行ループ + bare 最小テスト | AL3 | テスト：bare_alpha・run_alpha（ELF64・e_machine=0x9026・r30=sp の入口も接続済み） |
-| AL5 | 整数 Operate 系: add/sub/論理/シフト/比較/cmov・mb/wmb・rpcc/rc/rs | AL4 | テスト：bare_alpha（/v 修飾の算術例外・ext/ins/msk の高位形も網羅） |
-| AL6 | 乗除と拡張（BWX・FIX・CIX・MVI の世代差を `when` 述語で） | AL5 | テスト：bare_alpha（mul/umulh・/v 例外・CIX 系計数・MVI パック/minmax・世代ゲート） |
-| AL7 | load/store・lda・非整列アクセス（ldq_u/stq_u）と補完経路 | AL4 | テスト：bare_alpha（ldq_u 整列化・ldl_l/stq_c・ra=31 UNOP・整列例外） |
-| AL8 | 分岐・jmp/jsr/ret | AL4 | テスト：bare_alpha（全条件・-0.0 畳み・NaN ビット判定・リンク非書込） |
-| AL9 | 浮動小数点: load/store・四則・変換（IEEE/VAX 形式は段階 10 の実装を接続） | AL4 | テスト：bare_alpha（S/T 往復・四則・cmpt・変換・cpys/fcmov・FPCR・cvtlq/cvtql）。残課題: VAX F/G 形式と /s 例外モデル、cvttq の modulo 変換（GAP へ） |
-| AL10 | CALL_PAL を OS パーソナリティへ渡す経路（rduniq/wruniq の TLS 呼出を含む） | AL4 | テスト：os-linux alpha::sys（callsys 往復・ENOSYS・brk・rduniq/wruniq・PAL 振分）＋実バイナリで callsys 到達 |
-| AL11 | Linux ABI: alpha の syscall 表、ELF、8KiB ページ、浮動小数点補完と非整列補完の OS 実装 | AL10 | テスト：os-linux alpha::sys（39 件: ABI 規約・FdTable 系・stat/stat64・getdents64 改ページ・mmap/brk 衝突・statfs64 宣言サイズ・rlimit 番号・osf_sigaction・dup2→標準入出力・kill/時刻・pwrite64・各 EFAULT/EINVAL）＋実バイナリ BusyBox スモーク（echo/df/ls/cp/touch/date/uname/id/free/uptime 等）。補完は CPU 側完結につき OS 経路なし。残課題は GAP-0045/0046 へ |
-| AL12 | `heavy_program_alpha`（配布物のコマンド群） | AL11 | S16-1 |
-| AL13 | ABI 照合（SRC-LINUX-ALPHA-UAPI の tbl との照合）+ 残件整理・判定列更新 | AL12 | S16-2 |
+この文書は未完のタスクだけを載せる。完了した作業計画の行はその時点で削除し、完了条件をすべて満たした段階は節ごと削除する。完了した段階の実績と残件は `docs/records.md` に記録する。段階の詳細な計画（実装項目と事実の出所の対応表）とレビューの記録は `.local/` に置く作業文書に残す。詳しい手順は [開発の流れ](dev-workflow.md) の「段階の進め方」を見る。
 
 ### 段階 17：PA-RISC
 
@@ -107,10 +43,6 @@
 
 | # | 内容 | 前提 | 判定 |
 |---|---|---|---|
-| PR1 | 着手条件: SPEC-PARISC-11・SPEC-PARISC-20 の点検（確認済み）、PA-RISC 1.0 の根拠資料の追加登録または範囲からの除外の決定、BIN 登録、GAP-0023 残項目の点検 | - | - |
-| PR2 | `guests/parisc` 骨格: CpuState（GR・CR・SR・IAOQ 前後・PSW）、モデル（1.1・2.0）の宣言 | PR1 | - |
-| PR3 | デコード: 32 ビット固定長、opcode + completer フィールドの扱い | PR2 | - |
-| PR4 | `run_parisc` 実行ループ: IAOQ の進行と無効化（PSW.N）+ bare 最小テスト | PR3 | - |
 | PR5 | 算術・論理・比較（add/sub/comb/and/or/xor）、extract/deposit・シフト | PR4 | - |
 | PR6 | load/store（空間レジスタ経由を含む）・ldcw/ldcws・mfctl（cr27 の TLS 読み出しを含む）・probe | PR4 | - |
 | PR7 | 分岐: bv/be/bl、遅延分岐と nullify の条件 | PR4 | - |

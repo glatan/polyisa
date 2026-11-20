@@ -21,7 +21,10 @@
 | 12 | WebAssembly と WASI | 完了 |
 | 13 | x86 の残り | 完了 |
 | 14 | m68k | 完了 |
-| 15-24 | SPARC〜PDP-11 | 未着手（作業計画は `design/roadmap.md` の各段階） |
+| 15 | SPARC | 完了 |
+| 16 | Alpha | 完了 |
+| 17 | PA-RISC | 進行中（作業計画は `design/roadmap.md` の該当段階） |
+| 18-24 | SuperH〜PDP-11 | 未着手（作業計画は `design/roadmap.md` の各段階） |
 | 25-29 | OS パーソナリティ・システムコール段階 5・タイミング・ホスト移植・GDB | 未着手 |
 
 ## 対応した内容
@@ -418,6 +421,32 @@ WebAssembly の本格的な実装と、WASI preview1 の OS パーソナリテ�
 残っている事項：
 
 - GAP-0040（アドレスエラーの 14 バイトフレーム配送）・GAP-0041（DIV 値依存時間・例外経路サイクル）・GAP-0042（TAS）・GAP-0043（68010/68020+ 残り・68040/68060 差分・FPU 算術・CPU32・ColdFire）
+
+### 段階 15：SPARC
+
+対応した内容：
+
+- `guests/sparc`（spec・sem）・`run_sparc`・`os-linux::sparc`（sparc32/sparc64 の syscall 表、ウィンドウのあふれと不足の OS 再現）
+- 版の範囲 V7・V8・V9 と VIS のうちユーザーモード実行に要る命令群（整数・load/store・分岐と annul/DCTI couple・ウィンドウ命令・ユーザ ASR・FPU・movcc/movr・cas/casx）
+- `heavy_program_sparc`（sparc32/sparc64 の配布物コマンド群）・`heavy_abi_sparc`（UAPI 照合）・`heavy_oracle_sparc`（llvm-mc とのデコード差分、オラクル用途）
+
+残っている事項：
+
+- GAP-0044（版の範囲の未実装分：ユーザ ASR の一部・タグ演算・コプロセッサ命令・V9 quad FPU 等）・GAP-0049（仕様書が実装依存とする領域の意味論）
+
+### 段階 16：Alpha
+
+対応した内容：
+
+- `guests/alpha`（spec・sem）・`run_alpha`・`os-linux::alpha`（syscall 表・FdTable 系・8KiB ページ）
+- 整数 Operate・乗除と拡張（BWX/FIX/CIX/MVI）・load/store と非整列・分岐・IEEE 浮動小数点一式
+- `CALL_PAL` の Linux パーソナリティ経路（callsys・rduniq/wruniq）
+- `heavy_program_alpha`（配布物コマンド群）・`heavy_abi_alpha`（UAPI の syscall.tbl 照合）
+- 規則9 是正の過程で仕様との実差分を修正（CVTLQ/FTOIS の符号拡張、`/v` 例外時の宛先書き込み順）
+
+残っている事項：
+
+- GAP-0045（VAX F/G 形式・/s・/i 例外モデル・FPCR 集約・cvttq の modulo 変換）・GAP-0046（syscall ABI の意図的な簡略化）・GAP-0050（仕様書が黙っている動作の簡略化）
 
 ## 残っている事項（横断）
 
