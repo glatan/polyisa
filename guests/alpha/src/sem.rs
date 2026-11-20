@@ -13,8 +13,11 @@
 //! 除算命令はない。
 //! 段階16-7 で整数 load/store（ldq_u/stq_u・ldl_l/ldq_l/
 //! stl_c/stq_c を含む）を足した。
-//! 条件分岐は段階16-8 で足す（それ以外の命令は `Ok(false)` を
-//! 返し、呼び出し側が未実装として扱う）。
+//! 段階16-8 で整数・FP の条件分岐を足した（jmp/jsr/ret と
+//! br/bsr は段階16-4 で実装済み）。FP 有効フラグ（FEN）の検査は
+//! 段階16-9 で FPCR まわりと一緒に扱う。
+//! （それ以外の命令は `Ok(false)` を返し、呼び出し側が未実装と
+//! して扱う）。
 //!
 //! 出典は SPEC-ALPHA-ARM。ext/ins/msk/zap と cmpbge・/v 修飾の
 //! 細部は QEMU（SRC-QEMU）と照合済み。
@@ -24,8 +27,8 @@ use polyisa_mem::{Access, AccessKind, Align, Endian};
 use polyisa_sem::{Backend, Cmp, ExceptionKind, GuestException, StateRef, W8, W16, W32, W64};
 
 use super::{
-    CpuState, Insn, ops_fbrw, ops_fmbr, ops_fmfcw, ops_fmld, ops_fopl, ops_foplz, ops_fopr,
-    ops_foprz, ops_fpal, ops_fret,
+    CpuState, Insn, ops_fbrr, ops_fbrw, ops_ffb, ops_fmbr, ops_fmfcw, ops_fmld, ops_fopl,
+    ops_foplz, ops_fopr, ops_foprz, ops_fpal, ops_fret,
 };
 
 /// 整数レジスタ参照。r31 は読み出しで常に 0、書き込みは破棄される。
@@ -58,6 +61,7 @@ impl Gpr {
 }
 
 /// FP レジスタ参照。f31 は読み出しで常に 0（書き込みは破棄）。
+// Ref: SPEC-ALPHA-ARM §Floating-point registers.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Fpr(pub u8);
 
@@ -66,6 +70,22 @@ impl Fpr {
     #[must_use]
     pub fn state(self) -> StateRef<W64> {
         StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, f) + (self.0 as usize) * 8)
+    }
+
+    /// 読み出し。f31 はハード的に +0.0（全ビット 0）を返す。
+    pub fn get<B: Backend>(self, b: &mut B) -> B::V<W64> {
+        if self.0 == 31 {
+            b.konst::<W64>(0)
+        } else {
+            b.get(self.state())
+        }
+    }
+
+    /// 書き込み。f31 への書き込みは捨てる。
+    pub fn set<B: Backend>(self, b: &mut B, v: B::V<W64>) {
+        if self.0 != 31 {
+            b.set(self.state(), v);
+        }
     }
 }
 
@@ -879,6 +899,86 @@ fn operate_z<B: Backend>(b: &mut B, insn: Insn, word: u32) -> Result<bool, B::Ex
     Ok(true)
 }
 
+/// 整数条件分岐（0x38-0x3F）。ra を符号付き/ビット0 で試す。
+/// リンクは書かない。条件が真なら pc+4+sext(disp21)<<2 へ。
+// Ref: SPEC-ALPHA-ARM §4.3, SRC-QEMU (gen_bcond).
+fn bcond<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<bool, B::Exit> {
+    let o = ops_fbrr(u128::from(word));
+    let v = Gpr(o.ra as u8).get(b);
+    let z = b.konst::<W64>(0);
+    let c = match insn {
+        // blbc/blbs は最下位ビットだけを試す。
+        Insn::Blbc => {
+            let t = and_k(b, v, 1);
+            b.cmp(Cmp::Eq, t, z)
+        }
+        Insn::Blbs => {
+            let t = and_k(b, v, 1);
+            b.cmp(Cmp::Ne, t, z)
+        }
+        Insn::Beq => b.cmp(Cmp::Eq, v, z),
+        Insn::Bne => b.cmp(Cmp::Ne, v, z),
+        Insn::Blt => b.cmp(Cmp::LtS, v, z),
+        Insn::Ble => b.cmp(Cmp::LeS, v, z),
+        Insn::Bge => b.cmp(Cmp::GeS, v, z),
+        Insn::Bgt => b.cmp(Cmp::GtS, v, z),
+        _ => unreachable!("bcond called for non-branch insn"),
+    };
+    let target = pc
+        .wrapping_add(4)
+        .wrapping_add((sext21(o.disp21) << 2) as u64);
+    b.branch(c, target);
+    Ok(true)
+}
+
+/// FP 条件分岐（0x31-0x37）。レジスタをビット列として試す
+/// （FP 比較ではない）。-0.0 は符号で負だが値としては 0 なので、
+/// lt/ge は -0.0 を +0.0 に畳み、eq/ne は符号桁を除いて比べる
+/// （QEMU の gen_fold_mzero と同じ）。le/gt は生の符号比較で
+/// -0.0 も「0 以下」に入る。
+// Ref: SPEC-ALPHA-ARM §4.3, SRC-QEMU (gen_fbcond/gen_fold_mzero).
+fn fbcond<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<bool, B::Exit> {
+    let o = ops_ffb(u128::from(word));
+    let v = Fpr(o.fa as u8).get(b);
+    let z = b.konst::<W64>(0);
+    let c = match insn {
+        // eq/ne: 符号桁を除いた全桁が 0 か。
+        Insn::Fbeq => {
+            let t = and_k(b, v, 0x7fff_ffff_ffff_ffff);
+            b.cmp(Cmp::Eq, t, z)
+        }
+        Insn::Fbne => {
+            let t = and_k(b, v, 0x7fff_ffff_ffff_ffff);
+            b.cmp(Cmp::Ne, t, z)
+        }
+        // lt/ge: -0.0（=INT64_MIN のビット列）を +0.0 に畳んでから
+        // 符号付き比較。
+        Insn::Fblt | Insn::Fbge => {
+            let mz = b.konst::<W64>(i64::MIN as u64);
+            let is_mz = b.cmp(Cmp::Eq, v, mz);
+            let f = b.select(is_mz, z, v);
+            b.cmp(
+                if insn == Insn::Fblt {
+                    Cmp::LtS
+                } else {
+                    Cmp::GeS
+                },
+                f,
+                z,
+            )
+        }
+        // le/gt: -0.0 はそのまま符号比較に入る。
+        Insn::Fble => b.cmp(Cmp::LeS, v, z),
+        Insn::Fbgt => b.cmp(Cmp::GtS, v, z),
+        _ => unreachable!("fbcond called for non-branch insn"),
+    };
+    let target = pc
+        .wrapping_add(4)
+        .wrapping_add((sext21(o.disp21) << 2) as u64);
+    b.branch(c, target);
+    Ok(true)
+}
+
 /// メモリ命令（段階16-7）。`ld ra, disp16(rb)` / `st ra, disp16(rb)`。
 /// ra=31 を宛てとする load は prefetch/UNOP でフォールトしない
 /// （QEMU の gen_load_int と同じ扱い）。
@@ -1034,6 +1134,18 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
             Gpr(o.ra as u8).set(b, link);
             b.jump(target);
             Ok(true)
+        }
+        // ---- 段階16-8: 条件分岐 ----
+        Insn::Blbc
+        | Insn::Beq
+        | Insn::Blt
+        | Insn::Ble
+        | Insn::Blbs
+        | Insn::Bne
+        | Insn::Bge
+        | Insn::Bgt => bcond(b, insn, word, pc),
+        Insn::Fbeq | Insn::Fblt | Insn::Fble | Insn::Fbne | Insn::Fbge | Insn::Fbgt => {
+            fbcond(b, insn, word, pc)
         }
         // ret zero, (rb), hint: (rb & ~3) へ飛ぶ（ra を書かない）。
         // Ref: SPEC-ALPHA-ARM §4.3 ret.

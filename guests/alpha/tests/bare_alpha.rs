@@ -207,8 +207,8 @@ fn call_pal_raises_trap_with_palfn() {
 #[test]
 fn unimplemented_insns_return_false() {
     let mut env = env();
-    // 条件分岐 fbeq は段階16-8。ここでは false。
-    let word = 0xc420_0001u32;
+    // FP load ldt は段階16-9。ここでは false。
+    let word = 0x8c1f_0000u32;
     let insn = dec(word).unwrap();
     let ok = env.step(|b| sem::exec(b, insn, word, 0)).unwrap();
     assert!(!ok);
@@ -228,8 +228,13 @@ const fn opl(op: u32, ra: u32, lit: u32, f: u32, rc: u32) -> u32 {
 
 /// 1 命令を実行する。戻り値は `exec` の受理可否。
 fn run1(env: &mut BareEnv, word: u32) -> bool {
+    run1_at(env, word, 0)
+}
+
+/// pc を指定して 1 命令を実行する。
+fn run1_at(env: &mut BareEnv, word: u32, pc: u64) -> bool {
     let insn = dec(word).unwrap();
-    env.step(|b| sem::exec(b, insn, word, 0)).unwrap()
+    env.step(|b| sem::exec(b, insn, word, pc)).unwrap()
 }
 
 #[test]
@@ -794,6 +799,135 @@ fn load_locked_store_conditional() {
     env.backend.set(sem::Gpr(13).state(), 1);
     assert!(run1(&mut env, memw(0x2f, 13, 1, 0)));
     assert_eq!(gpr(&mut env, 13), 0);
+}
+
+// ---- 段階16-8: 条件分岐 ----
+
+/// 分岐形式（op, ra, disp21）。
+const fn brw(op: u32, ra: u32, disp21: u32) -> u32 {
+    (op << 26) | (ra << 21) | (disp21 & 0x1fffff)
+}
+
+#[test]
+fn integer_conditional_branches() {
+    let mut env = env();
+    // beq r1=0,+1 → pc+4+4 = pc+8 に飛ぶ。ra にリンクは書かない。
+    env.backend.set(sem::Gpr(1).state(), 0);
+    assert!(run1_at(&mut env, brw(0x39, 1, 1), 0x1000));
+    assert_eq!(env.pc, 0x1008);
+    assert_eq!(gpr(&mut env, 1), 0);
+    // beq r31 は常に真。
+    env.pc = 0;
+    assert!(run1_at(&mut env, brw(0x39, 31, 1), 0x1000));
+    assert_eq!(env.pc, 0x1008);
+    // 偽側は素通し（env.pc は変わらない）。リンクも書かない。
+    env.pc = 0;
+    env.backend.set(sem::Gpr(2).state(), 1);
+    assert!(run1_at(&mut env, brw(0x39, 2, 1), 0x1000));
+    assert_eq!(env.pc, 0);
+    assert_eq!(gpr(&mut env, 2), 1);
+    // bne、負 displacement（disp=-2 → pc+4-8 = pc-4）。
+    env.backend.set(sem::Gpr(3).state(), 5);
+    assert!(run1_at(&mut env, brw(0x3d, 3, 0x1f_fffe), 0x2000));
+    assert_eq!(env.pc, 0x1ffc);
+    // 符号条件: -1 は lt/le/ge/gt をそれぞれ真/真/偽/偽にする。
+    env.pc = 0;
+    env.backend.set(sem::Gpr(4).state(), -1i64 as u64);
+    assert!(run1_at(&mut env, brw(0x3a, 4, 1), 0x1000));
+    assert_eq!(env.pc, 0x1008);
+    env.pc = 0;
+    assert!(run1_at(&mut env, brw(0x3b, 4, 1), 0x1000));
+    assert_eq!(env.pc, 0x1008);
+    env.pc = 0;
+    assert!(run1_at(&mut env, brw(0x3e, 4, 1), 0x1000));
+    assert_eq!(env.pc, 0);
+    env.pc = 0;
+    assert!(run1_at(&mut env, brw(0x3f, 4, 1), 0x1000));
+    assert_eq!(env.pc, 0);
+    // blbc/blbs は最下位ビット。
+    env.backend.set(sem::Gpr(5).state(), 2);
+    env.pc = 0;
+    assert!(run1_at(&mut env, brw(0x38, 5, 1), 0x1000));
+    assert_eq!(env.pc, 0x1008);
+    env.pc = 0;
+    assert!(run1_at(&mut env, brw(0x3c, 5, 1), 0x1000));
+    assert_eq!(env.pc, 0);
+    env.backend.set(sem::Gpr(5).state(), 3);
+    env.pc = 0;
+    assert!(run1_at(&mut env, brw(0x3c, 5, 1), 0x1000));
+    assert_eq!(env.pc, 0x1008);
+}
+
+#[test]
+fn fp_conditional_branches() {
+    let mut env = env();
+    // fbeq: +0.0 → 真、-0.0 → 真（符号桁を除いて比べる）、1.0 → 偽。
+    env.pc = 0;
+    env.backend.set(sem::Fpr(1).state(), 0);
+    assert!(run1_at(&mut env, brw(0x31, 1, 1), 0x1000));
+    assert_eq!(env.pc, 0x1008);
+    env.pc = 0;
+    env.backend.set(sem::Fpr(1).state(), i64::MIN as u64); // -0.0
+    assert!(run1_at(&mut env, brw(0x31, 1, 1), 0x1000));
+    assert_eq!(env.pc, 0x1008);
+    env.pc = 0;
+    env.backend.set(sem::Fpr(1).state(), 0x3ff0_0000_0000_0000); // +1.0
+    assert!(run1_at(&mut env, brw(0x31, 1, 1), 0x1000));
+    assert_eq!(env.pc, 0);
+    // fbne: -0.0 → 偽、1.0 → 真。
+    env.backend.set(sem::Fpr(1).state(), i64::MIN as u64);
+    assert!(run1_at(&mut env, brw(0x35, 1, 1), 0x1000));
+    assert_eq!(env.pc, 0);
+    env.backend.set(sem::Fpr(1).state(), 0x3ff0_0000_0000_0000);
+    env.pc = 0;
+    assert!(run1_at(&mut env, brw(0x35, 1, 1), 0x1000));
+    assert_eq!(env.pc, 0x1008);
+    // fblt: -0.0 → 偽（+0.0 に畳む）、-1.0 → 真。
+    env.backend.set(sem::Fpr(1).state(), i64::MIN as u64);
+    env.pc = 0;
+    assert!(run1_at(&mut env, brw(0x32, 1, 1), 0x1000));
+    assert_eq!(env.pc, 0);
+    env.backend.set(sem::Fpr(1).state(), 0xbff0_0000_0000_0000); // -1.0
+    env.pc = 0;
+    assert!(run1_at(&mut env, brw(0x32, 1, 1), 0x1000));
+    assert_eq!(env.pc, 0x1008);
+    // fble: -0.0 は「0 以下」→ 真。fbgT: -0.0 → 偽。
+    env.backend.set(sem::Fpr(1).state(), i64::MIN as u64);
+    env.pc = 0;
+    assert!(run1_at(&mut env, brw(0x33, 1, 1), 0x1000));
+    assert_eq!(env.pc, 0x1008);
+    env.pc = 0;
+    assert!(run1_at(&mut env, brw(0x37, 1, 1), 0x1000));
+    assert_eq!(env.pc, 0);
+    // fbge: -0.0 → 真、-1.0 → 偽。
+    env.backend.set(sem::Fpr(1).state(), i64::MIN as u64);
+    env.pc = 0;
+    assert!(run1_at(&mut env, brw(0x36, 1, 1), 0x1000));
+    assert_eq!(env.pc, 0x1008);
+    env.backend.set(sem::Fpr(1).state(), 0xbff0_0000_0000_0000);
+    env.pc = 0;
+    assert!(run1_at(&mut env, brw(0x36, 1, 1), 0x1000));
+    assert_eq!(env.pc, 0);
+    // f31 は +0.0 を読む → fbeq 真。
+    env.pc = 0;
+    assert!(run1_at(&mut env, brw(0x31, 31, 1), 0x1000));
+    assert_eq!(env.pc, 0x1008);
+    // NaN の扱いはビット単位（IEEE 比較ではない）。負 NaN は負の
+    // ビット列 → fblt/fble 真。正 NaN → fbge/fbgt 真。
+    env.backend.set(sem::Fpr(1).state(), 0xfff8_0000_0000_0000); // -NaN
+    env.pc = 0;
+    assert!(run1_at(&mut env, brw(0x32, 1, 1), 0x1000));
+    assert_eq!(env.pc, 0x1008);
+    env.pc = 0;
+    assert!(run1_at(&mut env, brw(0x33, 1, 1), 0x1000));
+    assert_eq!(env.pc, 0x1008);
+    env.backend.set(sem::Fpr(1).state(), 0x7ff8_0000_0000_0000); // +NaN
+    env.pc = 0;
+    assert!(run1_at(&mut env, brw(0x36, 1, 1), 0x1000));
+    assert_eq!(env.pc, 0x1008);
+    env.pc = 0;
+    assert!(run1_at(&mut env, brw(0x37, 1, 1), 0x1000));
+    assert_eq!(env.pc, 0x1008);
 }
 
 #[test]
