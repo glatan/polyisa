@@ -6,6 +6,8 @@
 
 #[cfg(feature = "guest-aarch64")]
 pub mod run_aarch64;
+#[cfg(feature = "guest-alpha")]
+pub mod run_alpha;
 #[cfg(feature = "guest-arm")]
 pub mod run_arm;
 #[cfg(feature = "guest-m68k")]
@@ -78,6 +80,9 @@ pub fn parse_cpu_spec(s: &str) -> Result<CpuSpec, String> {
 /// モデル名と機能の足し引きを、そのファミリの生成表で `CpuSel` に解決する。
 #[cfg(any(
     feature = "guest-aarch64",
+    feature = "guest-alpha",
+    feature = "guest-arm",
+    feature = "guest-m68k",
     feature = "guest-mips",
     feature = "guest-power",
     feature = "guest-riscv",
@@ -242,6 +247,27 @@ fn run_sparc_elf(path: &str, argv: &[String], spec: Option<&CpuSpec>) -> Result<
 #[cfg(not(feature = "guest-sparc"))]
 fn run_sparc_elf(_path: &str, _argv: &[String], _spec: Option<&CpuSpec>) -> Result<u64, String> {
     Err("この polyisa は sparc ゲストなしでビルドされた".to_string())
+}
+
+#[cfg(feature = "guest-alpha")]
+fn run_alpha_elf(path: &str, argv: &[String], spec: Option<&CpuSpec>) -> Result<u64, String> {
+    let sel = spec
+        .map(|s| {
+            resolve_sel(
+                "alpha",
+                polyisa_guest_alpha::MODEL_DEFS,
+                polyisa_guest_alpha::FEATURE_DEFS,
+                polyisa_guest_alpha::FEAT_BITS,
+                s,
+            )
+        })
+        .transpose()?;
+    run_alpha::run_elf_alpha_sel(path, argv, sel.as_ref())
+}
+
+#[cfg(not(feature = "guest-alpha"))]
+fn run_alpha_elf(_path: &str, _argv: &[String], _spec: Option<&CpuSpec>) -> Result<u64, String> {
+    Err("この polyisa は alpha ゲストなしでビルドされた".to_string())
 }
 
 #[cfg(feature = "guest-arm")]
@@ -521,6 +547,10 @@ pub fn run_path_opts(
                 // EM_SPARCV9（sparc64）。Ref: binutils include/elf/common.h。
                 check("sparc")?;
                 run_sparc_elf(path, argv, spec.as_ref())
+            } else if ehdr.machine == 0x9026 {
+                // EM_ALPHA_EXP。Ref: binutils include/elf/common.h。
+                check("alpha")?;
+                run_alpha_elf(path, argv, spec.as_ref())
             } else {
                 Err(format!("未対応の e_machine: {}", ehdr.machine))
             }

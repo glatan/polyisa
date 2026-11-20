@@ -95,3 +95,117 @@ fn disasm_renders_mnemonic() {
     assert_eq!(disasm(Insn::Ldq), "ldq {ra}, {disp16}({rb})");
     assert_eq!(disasm(Insn::CallPal), "call_pal {palfn}");
 }
+
+// ---- 段階16-4: 実行の最小集合 ----
+
+use polyisa_engine::bare::BareEnv;
+use polyisa_engine::interp::InterpExit;
+use polyisa_guest_alpha::sem;
+use polyisa_sem::Backend as _;
+
+fn env() -> BareEnv {
+    BareEnv::new(core::mem::size_of::<CpuState>())
+}
+
+fn gpr(env: &mut BareEnv, n: u8) -> u64 {
+    env.backend.get(sem::Gpr(n).state())
+}
+
+/// `lda ra, disp(rb)`（op=001000）。
+const fn lda(ra: u32, rb: u32, disp: u32) -> u32 {
+    (0x08 << 26) | (ra << 21) | (rb << 16) | (disp & 0xffff)
+}
+
+#[test]
+fn lda_loads_constant_from_r31() {
+    let mut env = env();
+    // lda r1, 42(r31)。
+    let insn = dec(lda(1, 31, 42)).unwrap();
+    let ok = env.step(|b| sem::exec(b, insn, lda(1, 31, 42), 0)).unwrap();
+    assert!(ok);
+    assert_eq!(gpr(&mut env, 1), 42);
+}
+
+#[test]
+fn ldah_shifts_disp16() {
+    let mut env = env();
+    // ldah r1, 0x1234(r31) → r1 = 0x1234_0000。
+    let word = (0x09 << 26) | (1 << 21) | (31 << 16) | 0x1234;
+    let insn = dec(word).unwrap();
+    let ok = env.step(|b| sem::exec(b, insn, word, 0)).unwrap();
+    assert!(ok);
+    assert_eq!(gpr(&mut env, 1), 0x1234_0000);
+}
+
+#[test]
+fn ldah_scales_only_the_displacement() {
+    let mut env = env();
+    env.backend.set(sem::Gpr(2).state(), 0x5000);
+    // ldah r1, 1(r2): 変位だけ <<16 して rb に足す → 0x5000+0x10000。
+    let word = (0x09 << 26) | (1 << 21) | (2 << 16) | 1;
+    let insn = dec(word).unwrap();
+    let ok = env.step(|b| sem::exec(b, insn, word, 0)).unwrap();
+    assert!(ok);
+    assert_eq!(gpr(&mut env, 1), 0x1_5000);
+}
+
+#[test]
+fn lda_writes_to_r31_are_dropped() {
+    let mut env = env();
+    // lda r31, 1(r31): r31 への書き込みは破棄される。
+    let word = lda(31, 31, 1);
+    let insn = dec(word).unwrap();
+    let ok = env.step(|b| sem::exec(b, insn, word, 0)).unwrap();
+    assert!(ok);
+    assert_eq!(gpr(&mut env, 31), 0);
+}
+
+#[test]
+fn br_links_and_jumps_forward() {
+    let mut env = env();
+    // br r1, +2 語先（disp21=2 → pc+4+8）。
+    let word = (0x30 << 26) | (1 << 21) | 2;
+    let insn = dec(word).unwrap();
+    let ok = env.step(|b| sem::exec(b, insn, word, 0x1000)).unwrap();
+    assert!(ok);
+    assert_eq!(gpr(&mut env, 1), 0x1004);
+    assert_eq!(env.backend.ctrl, polyisa_engine::interp::Ctrl::Jump(0x100c));
+}
+
+#[test]
+fn ret_jumps_through_rb() {
+    let mut env = env();
+    env.backend.set(sem::Gpr(26).state(), 0x2222);
+    // ret $31,($26),1（低2ビットはマスクされる）。検証済みの
+    // 実エンコード 0x6bfa8001 と同じ、subcode=10・hint=1 を使う。
+    let word = (0x1a << 26) | (26 << 16) | 0x8001;
+    let insn = dec(word).unwrap();
+    let ok = env.step(|b| sem::exec(b, insn, word, 0x1000)).unwrap();
+    assert!(ok);
+    assert_eq!(env.backend.ctrl, polyisa_engine::interp::Ctrl::Jump(0x2220));
+}
+
+#[test]
+fn call_pal_raises_trap_with_palfn() {
+    let mut env = env();
+    // call_pal 0x83（callsys）。
+    let word = 0x83u32;
+    let insn = dec(word).unwrap();
+    match env.step(|b| sem::exec::<_>(b, insn, word, 0)) {
+        Err(InterpExit::Exception(e)) => {
+            assert_eq!(e.kind, polyisa_sem::ExceptionKind::Trap);
+            assert_eq!(e.code, 0x83);
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[test]
+fn operate_insns_are_unimplemented_for_now() {
+    let mut env = env();
+    // bis $31,$31,$31 は段階16-5 の整数 Operate。ここでは false。
+    let word = 0x47ff_041fu32;
+    let insn = dec(word).unwrap();
+    let ok = env.step(|b| sem::exec(b, insn, word, 0)).unwrap();
+    assert!(!ok);
+}

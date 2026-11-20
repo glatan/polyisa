@@ -9,6 +9,7 @@ rust-version = "1.99"
 polyisa-engine = { path = "../engine" }
 polyisa-guest = { path = "../guest" }
 polyisa-guest-aarch64 = { path = "../../guests/aarch64", optional = true }
+polyisa-guest-alpha = { path = "../../guests/alpha", optional = true }
 polyisa-guest-arm = { path = "../../guests/arm", optional = true }
 polyisa-guest-m68k = { path = "../../guests/m68k", optional = true }
 polyisa-guest-mips = { path = "../../guests/mips", optional = true }
@@ -33,6 +34,7 @@ polyisa-softfloat = { path = "../softfloat" }
 [features]
 default = [
     "guest-aarch64",
+    "guest-alpha",
     "guest-arm",
     "guest-m68k",
     "guest-mips",
@@ -44,6 +46,7 @@ default = [
     "guest-x86",
 ]
 guest-aarch64 = ["dep:polyisa-guest-aarch64", "polyisa-os-linux/guest-aarch64"]
+guest-alpha = ["dep:polyisa-guest-alpha"]
 guest-arm = ["dep:polyisa-guest-arm", "polyisa-os-linux/guest-arm"]
 guest-m68k = ["dep:polyisa-guest-m68k", "polyisa-os-linux/guest-m68k"]
 guest-mips = ["dep:polyisa-guest-mips", "polyisa-os-linux/guest-mips"]

@@ -13,6 +13,7 @@ dependencies = [
  "polyisa-engine",
  "polyisa-guest",
  "polyisa-guest-aarch64",
+ "polyisa-guest-alpha",
  "polyisa-guest-arm",
  "polyisa-guest-m68k",
  "polyisa-guest-mips",
@@ -108,9 +109,12 @@ dependencies = [
 name = "polyisa-guest-alpha"
 version = "0.0.0"
 dependencies = [
+ "polyisa-engine",
  "polyisa-guest",
  "polyisa-isadl",
  "polyisa-isagen",
+ "polyisa-mem",
+ "polyisa-sem",
 ]
 
 [[package]]

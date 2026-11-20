@@ -14,6 +14,9 @@
 // ISADL モデルから生成した命令集合・デコード・逆アセンブルの殻。
 include!(concat!(env!("OUT_DIR"), "/generated.rs"));
 
+/// 命令の意味論（段階16-4 の最小集合）。
+pub mod sem;
+
 /// Alpha の ISA ファミリ名。
 pub struct Alpha;
 

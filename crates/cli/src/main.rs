@@ -89,6 +89,10 @@ fn main() {
             for m in polyisa_guest_sparc::MODELS {
                 println!("sparc:{m}");
             }
+            #[cfg(feature = "guest-alpha")]
+            for m in polyisa_guest_alpha::MODELS {
+                println!("alpha:{m}");
+            }
         }
         polyisa_cli::Command::Disasm => {
             #[cfg(feature = "guest-riscv")]
