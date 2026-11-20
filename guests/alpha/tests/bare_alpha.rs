@@ -205,10 +205,10 @@ fn call_pal_raises_trap_with_palfn() {
 }
 
 #[test]
-fn load_store_insns_are_unimplemented_for_now() {
+fn unimplemented_insns_return_false() {
     let mut env = env();
-    // ldq $1,0($2) は段階16-7 の load/store。ここでは false。
-    let word = 0xa402_0000u32;
+    // 条件分岐 fbeq は段階16-8。ここでは false。
+    let word = 0xc420_0001u32;
     let insn = dec(word).unwrap();
     let ok = env.step(|b| sem::exec(b, insn, word, 0)).unwrap();
     assert!(!ok);
@@ -697,6 +697,103 @@ fn operate_mvi_pack_and_minmax() {
     // リテラル形: minub8 r1(0),0x55,r17 → 0。
     assert!(run1(&mut env, opl(0x1c, 1, 0x55, 0x3a, 17)));
     assert_eq!(gpr(&mut env, 17), 0);
+}
+
+// ---- 段階16-7: load/store ----
+
+/// メモリ形式（opcode, ra, disp(rb)）。
+const fn memw(op: u32, ra: u32, rb: u32, disp: u32) -> u32 {
+    (op << 26) | (ra << 21) | (rb << 16) | (disp & 0xffff)
+}
+
+#[test]
+fn load_store_roundtrip() {
+    let mut env = env();
+    env.map_rw(0x1_0000, 2).unwrap();
+    env.backend.set(sem::Gpr(1).state(), 0x1_0008);
+    // stq r2,0(r1); ldq r3,0(r1)。
+    env.backend.set(sem::Gpr(2).state(), 0x1122_3344_5566_7788);
+    assert!(run1(&mut env, memw(0x2d, 2, 1, 0)));
+    assert!(run1(&mut env, memw(0x29, 3, 1, 0)));
+    assert_eq!(gpr(&mut env, 3), 0x1122_3344_5566_7788);
+    // stl + ldl: ldl は符号拡張して返す。
+    env.backend.set(sem::Gpr(4).state(), 0x8000_0000);
+    assert!(run1(&mut env, memw(0x2c, 4, 1, 0xfff8)));
+    assert!(run1(&mut env, memw(0x28, 5, 1, 0xfff8)));
+    assert_eq!(gpr(&mut env, 5), 0xffff_ffff_8000_0000);
+    // stb/ldbu・stw/ldwu（BWX）。負 displacement も試す。
+    assert!(run1(&mut env, memw(0x0e, 4, 1, 0xffff)));
+    assert!(run1(&mut env, memw(0x0a, 6, 1, 0xffff)));
+    assert_eq!(gpr(&mut env, 6), 0);
+    env.backend.set(sem::Gpr(7).state(), 0xcafe);
+    assert!(run1(&mut env, memw(0x0d, 7, 1, 0xfffe)));
+    assert!(run1(&mut env, memw(0x0c, 8, 1, 0xfffe)));
+    assert_eq!(gpr(&mut env, 8), 0xcafe);
+}
+
+#[test]
+fn ldq_u_stq_u_mask_address() {
+    let mut env = env();
+    env.map_rw(0x1_0000, 1).unwrap();
+    // 非整列の実効アドレスでも & ~7 に丸めて整列 quad アクセス。
+    env.backend.set(sem::Gpr(1).state(), 0x1_0003);
+    env.backend.set(sem::Gpr(2).state(), 0xaabb_ccdd_eeff_0011);
+    assert!(run1(&mut env, memw(0x0f, 2, 1, 0)));
+    assert!(run1(&mut env, memw(0x0b, 3, 1, 0)));
+    assert_eq!(gpr(&mut env, 3), 0xaabb_ccdd_eeff_0011);
+    // 整列 ldq を同じ番地（非整列指定）に当てると整列例外。
+    let word = memw(0x29, 4, 1, 0);
+    let insn = dec(word).unwrap();
+    assert!(matches!(
+        env.step(|b| sem::exec::<_>(b, insn, word, 0)),
+        Err(InterpExit::Exception(_))
+    ));
+    // ra=31 宛ての load は UNOP — 未写像の番地でも止まらない。
+    env.backend.set(sem::Gpr(9).state(), 0x5555_0000);
+    assert!(run1(&mut env, memw(0x0b, 31, 9, 0)));
+    assert!(run1(&mut env, memw(0x29, 31, 9, 0)));
+}
+
+#[test]
+fn load_locked_store_conditional() {
+    let mut env = env();
+    env.map_rw(0x1_0000, 1).unwrap();
+    env.backend.set(sem::Gpr(1).state(), 0x1_0000);
+    env.backend.set(sem::Gpr(2).state(), 0xdead_beef);
+    assert!(run1(&mut env, memw(0x2d, 2, 1, 0)));
+    // ldq_l → stq_c（同じ番地）は成功して 1。
+    assert!(run1(&mut env, memw(0x2b, 3, 1, 0)));
+    assert_eq!(gpr(&mut env, 3), 0xdead_beef);
+    env.backend.set(sem::Gpr(4).state(), 42);
+    assert!(run1(&mut env, memw(0x2f, 4, 1, 0)));
+    assert_eq!(gpr(&mut env, 4), 1);
+    assert!(run1(&mut env, memw(0x29, 5, 1, 0)));
+    assert_eq!(gpr(&mut env, 5), 42);
+    // 予約なしの stq_c は失敗して 0。番地も書かれない。
+    env.backend.set(sem::Gpr(6).state(), 77);
+    assert!(run1(&mut env, memw(0x2f, 6, 1, 0)));
+    assert_eq!(gpr(&mut env, 6), 0);
+    assert!(run1(&mut env, memw(0x29, 7, 1, 0)));
+    assert_eq!(gpr(&mut env, 7), 42);
+    // ldl_l/stl_c のペアも同様（ldl_l は符号拡張）。
+    assert!(run1(&mut env, memw(0x2a, 8, 1, 0)));
+    assert_eq!(gpr(&mut env, 8), 42);
+    env.backend.set(sem::Gpr(9).state(), 0x8000_0000);
+    assert!(run1(&mut env, memw(0x2e, 9, 1, 0)));
+    assert_eq!(gpr(&mut env, 9), 1);
+    assert!(run1(&mut env, memw(0x28, 10, 1, 0)));
+    assert_eq!(gpr(&mut env, 10), 0xffff_ffff_8000_0000);
+    // 予約なしの stl_c も 0 を返して書かない。
+    env.backend.set(sem::Gpr(11).state(), 7);
+    assert!(run1(&mut env, memw(0x2e, 11, 1, 0)));
+    assert_eq!(gpr(&mut env, 11), 0);
+    // ld*_l→st*_c の間の自分の store でも予約は解除される
+    // （interp バックエンドの規約）。
+    assert!(run1(&mut env, memw(0x2b, 12, 1, 0)));
+    assert!(run1(&mut env, memw(0x2d, 2, 1, 0)));
+    env.backend.set(sem::Gpr(13).state(), 1);
+    assert!(run1(&mut env, memw(0x2f, 13, 1, 0)));
+    assert_eq!(gpr(&mut env, 13), 0);
 }
 
 #[test]

@@ -11,14 +11,17 @@
 //! 段階16-6 で乗算と拡張命令（BWX/CIX/MVI。FIX は FP 側の世代
 //! ゲートのみで整数意味論を持たない）を足した。Alpha に整数
 //! 除算命令はない。
-//! 条件分岐は段階16-8、load/store は段階16-7 で足す（それ以外
-//! の命令は `Ok(false)` を返し、呼び出し側が未実装として扱う）。
+//! 段階16-7 で整数 load/store（ldq_u/stq_u・ldl_l/ldq_l/
+//! stl_c/stq_c を含む）を足した。
+//! 条件分岐は段階16-8 で足す（それ以外の命令は `Ok(false)` を
+//! 返し、呼び出し側が未実装として扱う）。
 //!
 //! 出典は SPEC-ALPHA-ARM。ext/ins/msk/zap と cmpbge・/v 修飾の
 //! 細部は QEMU（SRC-QEMU）と照合済み。
 //! Ref: SPEC-ALPHA-ARM, SRC-QEMU.
 
-use polyisa_sem::{Backend, Cmp, ExceptionKind, GuestException, StateRef, W32, W64};
+use polyisa_mem::{Access, AccessKind, Align, Endian};
+use polyisa_sem::{Backend, Cmp, ExceptionKind, GuestException, StateRef, W8, W16, W32, W64};
 
 use super::{
     CpuState, Insn, ops_fbrw, ops_fmbr, ops_fmfcw, ops_fmld, ops_fopl, ops_foplz, ops_fopr,
@@ -346,6 +349,35 @@ fn sext_lane<B: Backend>(b: &mut B, x: B::V<W64>, bits: u64) -> B::V<W64> {
     let t = shl_n(b, x, 64 - bits);
     sra_n(b, t, 64 - bits)
 }
+
+/// メモリアクセスの属性。Alpha はリトルエンディアン。
+/// 整列 ldl/ldq/stl/stq は自然境界を要求し、違反は例外になる
+/// （カーネルが補完するのが Alpha の流儀）。
+/// ldq_u/stq_u は意味論側でアドレスを整列させるので同じ属性でよい。
+// Ref: SPEC-ALPHA-ARM §4.8.
+const DATA_READ: Access = Access {
+    endian: Endian::Le,
+    align: Align::Natural,
+    kind: AccessKind::DataRead,
+};
+
+const DATA_WRITE: Access = Access {
+    endian: Endian::Le,
+    align: Align::Natural,
+    kind: AccessKind::DataWrite,
+};
+
+const LR_ACC: Access = Access {
+    endian: Endian::Le,
+    align: Align::Natural,
+    kind: AccessKind::LoadReserved,
+};
+
+const SC_ACC: Access = Access {
+    endian: Endian::Le,
+    align: Align::Natural,
+    kind: AccessKind::StoreConditional,
+};
 
 /// 整数オーバーフロー例外。`/v` 修飾の算術が使う。
 /// code=1 は polyisa 内部の算術例外識別子（Alpha の整数
@@ -847,6 +879,113 @@ fn operate_z<B: Backend>(b: &mut B, insn: Insn, word: u32) -> Result<bool, B::Ex
     Ok(true)
 }
 
+/// メモリ命令（段階16-7）。`ld ra, disp16(rb)` / `st ra, disp16(rb)`。
+/// ra=31 を宛てとする load は prefetch/UNOP でフォールトしない
+/// （QEMU の gen_load_int と同じ扱い）。
+// Ref: SPEC-ALPHA-ARM §4.8, SRC-QEMU (gen_load_int/gen_store_int).
+fn mem<B: Backend>(b: &mut B, insn: Insn, word: u32) -> Result<bool, B::Exit> {
+    // FMLD/FMST/FMSTC は桁配置（ra/rb/disp16）が同じなので
+    // ops_fmld で兼ねる。
+    let o = ops_fmld(u128::from(word));
+    // ra=31 宛ての load はプリフェッチ/UNOP。アドレス計算も
+    // 読み出しも行わない（QEMU の gen_load_int と同じ扱い）。
+    if o.ra == 31
+        && matches!(
+            insn,
+            Insn::Ldbu | Insn::Ldwu | Insn::Ldl | Insn::Ldq | Insn::LdqU | Insn::LdlL | Insn::LdqL
+        )
+    {
+        return Ok(true);
+    }
+    // ldq_u/stq_u は下位 3 ビットを落とした整列 quadword アクセス。
+    // 非整列の実データ受け渡しは ext/ins/msk（段階16-5）との組で行う。
+    let ea = {
+        let base = Gpr(o.rb as u8).get(b);
+        let d = b.konst::<W64>((o.disp16 as i16) as i64 as u64);
+        let a = b.add(base, d);
+        if matches!(insn, Insn::LdqU | Insn::StqU) {
+            and_k(b, a, !7u64)
+        } else {
+            a
+        }
+    };
+    let ra = Gpr(o.ra as u8);
+    match insn {
+        Insn::Ldbu => {
+            let v: B::V<W8> = b.load(ea, DATA_READ)?;
+            let v = b.zext::<W8, W64>(v);
+            ra.set(b, v);
+        }
+        Insn::Ldwu => {
+            let v: B::V<W16> = b.load(ea, DATA_READ)?;
+            let v = b.zext::<W16, W64>(v);
+            ra.set(b, v);
+        }
+        // ldl は符号拡張して 64 ビットに入れる。
+        Insn::Ldl => {
+            let v: B::V<W32> = b.load(ea, DATA_READ)?;
+            let v = b.sext::<W32, W64>(v);
+            ra.set(b, v);
+        }
+        Insn::Ldq | Insn::LdqU => {
+            let v: B::V<W64> = b.load(ea, DATA_READ)?;
+            ra.set(b, v);
+        }
+        Insn::LdlL => {
+            let v: B::V<W32> = b.load_reserved(ea, LR_ACC)?;
+            let v = b.sext::<W32, W64>(v);
+            ra.set(b, v);
+        }
+        Insn::LdqL => {
+            let v: B::V<W64> = b.load_reserved(ea, LR_ACC)?;
+            ra.set(b, v);
+        }
+        Insn::Stb => {
+            let v = ra.get(b);
+            let v = b.trunc::<W64, W8>(v);
+            b.store(ea, v, DATA_WRITE)?;
+        }
+        Insn::Stw => {
+            let v = ra.get(b);
+            let v = b.trunc::<W64, W16>(v);
+            b.store(ea, v, DATA_WRITE)?;
+        }
+        Insn::Stl => {
+            let v = ra.get(b);
+            let v = b.trunc::<W64, W32>(v);
+            b.store(ea, v, DATA_WRITE)?;
+        }
+        Insn::Stq | Insn::StqU => {
+            let v = ra.get(b);
+            b.store(ea, v, DATA_WRITE)?;
+        }
+        // st*_c は成否を ra に返す（1=成功）。ra は読み・書き両方。
+        // 予約は load_reserved が立てる番地+幅と厳密一致するとき
+        // だけ成功する（別サイズの LL/SC 混在は失敗側。ARM は実装
+        // 依存なので保守的に扱う）。自分自身の store でも予約は
+        // 解除される（interp バックエンドの規約）。
+        Insn::StlC => {
+            let v = ra.get(b);
+            let v = b.trunc::<W64, W32>(v);
+            let ok = b.store_conditional(ea, v, SC_ACC)?;
+            let one = b.konst::<W64>(1);
+            let zero = b.konst::<W64>(0);
+            let f = b.select(ok, one, zero);
+            ra.set(b, f);
+        }
+        Insn::StqC => {
+            let v = ra.get(b);
+            let ok = b.store_conditional(ea, v, SC_ACC)?;
+            let one = b.konst::<W64>(1);
+            let zero = b.konst::<W64>(0);
+            let f = b.select(ok, one, zero);
+            ra.set(b, f);
+        }
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
 /// 命令の意味論。`Ok(true)` は実行完了、`Ok(false)` はこの段階では
 /// 未実装（呼び出し側が `Outcome::Unimplemented` に写す）。
 /// `pc` はこの命令の番地。
@@ -1098,6 +1237,21 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
         | Insn::Unpkbl
         | Insn::Pkwb
         | Insn::Pklb => operate_z(b, insn, word),
+        // ---- 段階16-7: load/store ----
+        Insn::Ldbu
+        | Insn::Ldwu
+        | Insn::Ldl
+        | Insn::Ldq
+        | Insn::LdqU
+        | Insn::LdlL
+        | Insn::LdqL
+        | Insn::Stb
+        | Insn::Stw
+        | Insn::Stl
+        | Insn::Stq
+        | Insn::StqU
+        | Insn::StlC
+        | Insn::StqC => mem(b, insn, word),
         // ---- 段階16-5: MISC ----
         // バリアとトラップバリア。順序付き実行のインタプリタでは
         // mb/wmb/trapb/excb は何もしない（trapb の実確定は PAL
