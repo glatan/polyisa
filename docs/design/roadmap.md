@@ -85,7 +85,7 @@
 | AL7 | load/store・lda・非整列アクセス（ldq_u/stq_u）と補完経路 | AL4 | テスト：bare_alpha（ldq_u 整列化・ldl_l/stq_c・ra=31 UNOP・整列例外） |
 | AL8 | 分岐・jmp/jsr/ret | AL4 | テスト：bare_alpha（全条件・-0.0 畳み・NaN ビット判定・リンク非書込） |
 | AL9 | 浮動小数点: load/store・四則・変換（IEEE/VAX 形式は段階 10 の実装を接続） | AL4 | テスト：bare_alpha（S/T 往復・四則・cmpt・変換・cpys/fcmov・FPCR・cvtlq/cvtql）。残課題: VAX F/G 形式と /s 例外モデル、cvttq の modulo 変換（GAP へ） |
-| AL10 | CALL_PAL を OS パーソナリティへ渡す経路（rduniq/wruniq の TLS 呼出を含む） | AL4 | - |
+| AL10 | CALL_PAL を OS パーソナリティへ渡す経路（rduniq/wruniq の TLS 呼出を含む） | AL4 | テスト：os-linux alpha::sys（callsys 往復・ENOSYS・brk・rduniq/wruniq・PAL 振分）＋実バイナリで callsys 到達 |
 | AL11 | Linux ABI: alpha の syscall 表、ELF、8KiB ページ、浮動小数点補完と非整列補完の OS 実装 | AL10 | - |
 | AL12 | `heavy_program_alpha`（配布物のコマンド群） | AL11 | S16-1 |
 | AL13 | ABI 照合（SRC-LINUX UAPI、所有者確認）+ 残件整理・判定列更新 | AL12 | S16-2 |
