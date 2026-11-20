@@ -162,6 +162,18 @@ pub const TEST_REQUIREMENTS: &[TestBinary] = &[
         needs: &[Req::Tool("clang"), Req::Data(".testdata/bin-distro-s390x")],
     },
     TestBinary {
+        binary: "heavy_program_sparc",
+        needs: &[
+            Req::Tool("clang"),
+            Req::Data(".testdata/bin-distro-sparc/busybox"),
+            Req::Data(".testdata/bin-distro-sparc64/busybox"),
+        ],
+    },
+    TestBinary {
+        binary: "heavy_program_alpha",
+        needs: &[Req::Data(".testdata/bin-distro-alpha/busybox")],
+    },
+    TestBinary {
         binary: "heavy_program_x32",
         needs: &[Req::Tool("x86_64-linux-gnux32-gcc-14")],
     },

@@ -98,6 +98,10 @@ name = "heavy_program_sparc"
 required-features = ["guest-sparc"]
 
 [[test]]
+name = "heavy_program_alpha"
+required-features = ["guest-alpha"]
+
+[[test]]
 name = "heavy_jit_diff"
 required-features = ["guest-aarch64", "guest-arm", "guest-x86"]
 

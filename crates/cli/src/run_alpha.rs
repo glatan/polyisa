@@ -8,8 +8,7 @@
 //! `Fallthrough` のままなら pc+4 に進める。
 //!
 //! `call_pal` は機能番号を code に載せた Trap 例外として OS
-//! パーソナリティへ委ねる（Handled なら pc+4 に復帰）。実際の
-//! PAL/syscall の中身は段階16-10 以降で実装する。
+//! パーソナリティへ委ねる（Handled なら pc+4 に復帰）。
 //! Ref: SPEC-ALPHA-ARM.
 
 use polyisa_engine::bare::BareEnv;
@@ -228,6 +227,25 @@ pub fn run_elf_alpha_sel(
         limit: STACK_TOP - STACK_LIMIT,
     });
     finish(run(&mut env, entry, model, &mut NoSys, growth))
+}
+
+/// 終了コードと標準出力の捕獲を返す。
+pub fn run_elf_alpha_captured(path: &str, argv: &[String]) -> Result<(u64, Vec<u8>), String> {
+    run_elf_alpha_captured_in(path, argv, &[])
+}
+
+/// 標準入力 `stdin` を与えて実行し、終了コードと標準出力の捕獲を返す。
+/// 標準エラーを検査するときは `run_elf_alpha_sys` で `sys.io.stderr`
+/// を読む。
+pub fn run_elf_alpha_captured_in(
+    path: &str,
+    argv: &[String],
+    stdin: &[u8],
+) -> Result<(u64, Vec<u8>), String> {
+    let mut sys = polyisa_os_linux::alpha::sys::Linux::new();
+    sys.stdin_buf = stdin.to_vec();
+    let code = run_elf_alpha_sys(path, argv, None, &mut sys)?;
+    Ok((code, sys.io.stdout))
 }
 
 /// Linux パーソナリティとモデルを指定する `run_elf_alpha`。
