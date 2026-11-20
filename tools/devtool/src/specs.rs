@@ -10,6 +10,9 @@ use polyisa_isadl::Model;
 mod aarch64 {
     include!("../../../guests/aarch64/spec/a64i.rs");
 }
+mod alpha {
+    include!("../../../guests/alpha/spec/alpha.rs");
+}
 mod arm {
     include!("../../../guests/arm/spec/armi.rs");
 }
@@ -61,6 +64,11 @@ const SPECS: &[IsaSpec] = &[
         isa: "aarch64",
         rel_paths: &["guests/aarch64/spec/a64i.rs"],
         build: aarch64::build_model,
+    },
+    IsaSpec {
+        isa: "alpha",
+        rel_paths: &["guests/alpha/spec/alpha.rs"],
+        build: alpha::build_model,
     },
     IsaSpec {
         isa: "arm",
