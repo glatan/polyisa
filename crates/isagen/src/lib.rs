@@ -149,11 +149,21 @@ fn gen_decoder(model: &Model) -> Result<String, GenError> {
     if !uses_feats {
         s.push_str("    let _ = feats;\n");
     }
-    s.push_str("    match len {\n");
+    // 命令がないモデルでは `word` を参照するアームが出ない。
+    if model.insns.is_empty() {
+        s.push_str("    let _ = word;\n");
+    }
     // 長さごとに分岐する。RISC-V C拡張の16ビット命令と32ビット命令の混在を想定する。
     let mut lens: Vec<u32> = model.insns.iter().map(|i| i.pattern.len()).collect();
     lens.sort_unstable();
     lens.dedup();
+    if lens.is_empty() {
+        // 命令がないモデル。`_` だけの match は
+        // clippy::match_single_binding に触れるので `None` を直接返す。
+        s.push_str("    let _ = len;\n    None\n}\n");
+        return Ok(s);
+    }
+    s.push_str("    match len {\n");
     for l in lens {
         s.push_str(&format!("        {l} => {{\n"));
         for insn in model.insns.iter().filter(|i| i.pattern.len() == l) {
@@ -361,6 +371,10 @@ fn gen_disassembler(model: &Model) -> String {
             mi.syntax
         ));
     }
+    // 命令がないモデルでは `Bad` だけが残る（gen_insn_type 参照）。
+    if model.insns.is_empty() {
+        s.push_str("        Insn::Bad => \"bad\",\n");
+    }
     s.push_str("    }\n}\n");
     // 語をデコードし、構文の {名} をオペランド値で埋める。オペランド値は
     // `extract_ops` と同じ規則（レジスタは接頭辞つき、即値は 10 進）。
@@ -435,6 +449,14 @@ fn gen_disassembler(model: &Model) -> String {
     }
     if !arms.iter().any(|a| a.contains("extract_ops")) {
         s.push_str("    let _ = word;\n");
+    }
+    if arms.is_empty() {
+        // アームが一つもない（空モデルの `Bad` のみ、または全命令が
+        // `Hook` を持つ）とき `_` だけの match は
+        // clippy::match_single_binding に触れるので、フォールバック式を
+        // そのまま返す。
+        s.push_str("    Some(disasm(insn).to_string())\n}\n");
+        return s;
     }
     s.push_str("    match insn {\n");
     for a in arms {
@@ -1076,8 +1098,13 @@ fn gen_encoder(model: &Model) -> Result<String, GenError> {
             to_snake(&mi.name)
         ));
     }
-    // 命令型からの振り分け。
-    s.push_str("pub fn encode(insn: Insn, ops: &[u64]) -> Option<u128> {\n    match insn {\n");
+    // 命令型からの振り分け。命令がないモデルでは `ops` を使うアームが
+    // 出ないので明示的に破棄する。
+    s.push_str("pub fn encode(insn: Insn, ops: &[u64]) -> Option<u128> {\n");
+    if model.insns.is_empty() {
+        s.push_str("    let _ = ops;\n");
+    }
+    s.push_str("    match insn {\n");
     for insn in &model.insns {
         s.push_str(&format!(
             "        Insn::{} => encode_{}(ops),\n",
@@ -1091,6 +1118,10 @@ fn gen_encoder(model: &Model) -> Result<String, GenError> {
             to_ident(&mi.name),
             to_snake(&mi.name)
         ));
+    }
+    // 命令がないモデルでは `Bad` だけが残る（gen_insn_type 参照）。
+    if model.insns.is_empty() {
+        s.push_str("        Insn::Bad => None,\n");
     }
     s.push_str("    }\n}\n");
     // 語から命令のオペランド値を取り出す。`encode` が受ける `ops` と同じ
@@ -1147,14 +1178,22 @@ fn gen_encoder(model: &Model) -> Result<String, GenError> {
     if arms.is_empty() || arms.iter().all(|a| !a.contains("word")) {
         s.push_str("    let _ = word;\n");
     }
-    s.push_str("    match insn {\n");
-    for a in arms {
-        s.push_str(&a);
+    if arms.is_empty() {
+        // アームが一つもない（空モデルの `Bad` のみ、または全命令が
+        // `Hook` を持つ）とき `_` だけの match は
+        // clippy::match_single_binding に触れるので、フォールバック式を
+        // そのまま返す。
+        s.push_str("    let _ = insn;\n    vec![]\n}\n");
+    } else {
+        s.push_str("    match insn {\n");
+        for a in arms {
+            s.push_str(&a);
+        }
+        if missing {
+            s.push_str("        _ => vec![],\n");
+        }
+        s.push_str("    }\n}\n");
     }
-    if missing {
-        s.push_str("        _ => vec![],\n");
-    }
-    s.push_str("    }\n}\n");
     // 往復テストの入力表。(命令, ops, 語長, is_rv64, feats)。採取できなかった
     // 命令は ENCODE_SKIPPED に名前を残す。
     s.push_str("pub const ENCODE_ROUNDTRIP: &[(Insn, &[u64], u32, bool, u128)] = &[\n");

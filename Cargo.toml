@@ -29,6 +29,7 @@ members = [
     "guests/riscv",
     "guests/sparc",
     "guests/mips",
+    "guests/parisc",
     "guests/x86",
     "guests/wasm",
     "guests/hexagon",

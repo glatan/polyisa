@@ -28,6 +28,9 @@ mod m68k {
 mod mips {
     include!("../../../guests/mips/spec/mipsi.rs");
 }
+mod parisc {
+    include!("../../../guests/parisc/spec/parisc.rs");
+}
 mod power {
     include!("../../../guests/power/spec/poweri.rs");
 }
@@ -94,6 +97,11 @@ const SPECS: &[IsaSpec] = &[
         isa: "mips",
         rel_paths: &["guests/mips/spec/mipsi.rs"],
         build: mips::build_model,
+    },
+    IsaSpec {
+        isa: "parisc",
+        rel_paths: &["guests/parisc/spec/parisc.rs"],
+        build: parisc::build_model,
     },
     IsaSpec {
         isa: "power",

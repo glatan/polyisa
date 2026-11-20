@@ -192,6 +192,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "polyisa-guest-parisc"
+version = "0.0.0"
+dependencies = [
+ "polyisa-engine",
+ "polyisa-guest",
+ "polyisa-isadl",
+ "polyisa-isagen",
+ "polyisa-mem",
+ "polyisa-sem",
+]
+
+[[package]]
 name = "polyisa-guest-power"
 version = "0.0.0"
 dependencies = [
