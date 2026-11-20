@@ -74,6 +74,10 @@ fn extension_features_gate_decode() {
     let ctpop = 0x73e5_0606u128;
     assert_eq!(decode_model_ex(ctpop, 32, false, ALL), Some(Insn::Ctpop));
     assert_eq!(decode_model_ex(ctpop, 32, false, FEAT_MVI), None);
+    // minub8 $5,$6,$7（MVI。0x1C/f=0x3a）。
+    let minub8 = (0x1cu128 << 26) | (5 << 21) | (6 << 16) | (0x3a << 5) | 7;
+    assert_eq!(decode_model_ex(minub8, 32, false, ALL), Some(Insn::Minub8));
+    assert_eq!(decode_model_ex(minub8, 32, false, FEAT_CIX), None);
     // 世代ゲート。wh64 は EV56、wh64en は EV7 の追加。
     let wh64 = 0x6000_f800u128;
     let wh64en = 0x6000_fc00u128;
@@ -539,6 +543,160 @@ fn operate_scaled_longword_sign_extends() {
     assert_eq!(env.backend.get(sem::rx_flag_ref()), 1);
     assert!(run1(&mut env, 0x63e0_e000)); // rc r31
     assert_eq!(env.backend.get(sem::rx_flag_ref()), 0);
+}
+
+// ---- 段階16-6: 乗算と拡張 ----
+
+/// 0x1C の 1 入力形（FOPRZ。ra 桁は不使用 → 31 を置く）。
+const fn oprz(ra: u32, rb: u32, f: u32, rc: u32) -> u32 {
+    opr(0x1c, ra, rb, f, rc)
+}
+
+#[test]
+fn operate_mul_family() {
+    let mut env = env();
+    env.backend.set(sem::Gpr(1).state(), 7);
+    env.backend.set(sem::Gpr(2).state(), 6);
+    // mull r1,r2,r3 = 42（op=0x13 f=0x00）。
+    assert!(run1(&mut env, opr(0x13, 1, 2, 0x00, 3)));
+    assert_eq!(gpr(&mut env, 3), 42);
+    // mulq r1,r2,r4 = 42。
+    assert!(run1(&mut env, opr(0x13, 1, 2, 0x20, 4)));
+    assert_eq!(gpr(&mut env, 4), 42);
+    // mull: 積の低 32 だけを符号拡張（0x8000_0000*2 → 0）。
+    env.backend.set(sem::Gpr(5).state(), 0x8000_0000);
+    assert!(run1(&mut env, opl(0x13, 5, 2, 0x00, 6)));
+    assert_eq!(gpr(&mut env, 6), 0);
+    // umulh: 0xffffffffffffffff * 同 = hi 0xfffffffffffffffe。
+    env.backend.set(sem::Gpr(7).state(), -1i64 as u64);
+    assert!(run1(&mut env, opr(0x13, 7, 7, 0x30, 8)));
+    assert_eq!(gpr(&mut env, 8), 0xffff_ffff_ffff_fffe);
+    // mull/v: 32 ビットに収まれば通す、溢れれば Trap(code=1)。
+    env.backend.set(sem::Gpr(9).state(), 0x1_0000);
+    assert!(run1(&mut env, opl(0x13, 9, 0x10, 0x40, 10)));
+    assert_eq!(gpr(&mut env, 10), 0x10_0000);
+    env.backend.set(sem::Gpr(11).state(), 0x8000_0000);
+    let word = opl(0x13, 11, 2, 0x40, 12);
+    let insn = dec(word).unwrap();
+    assert!(matches!(
+        env.step(|b| sem::exec::<_>(b, insn, word, 0)),
+        Err(InterpExit::Exception(_))
+    ));
+    // mulq/v: i64::MAX*2 は溢れる、3*7 は通る。
+    env.backend.set(sem::Gpr(13).state(), i64::MAX as u64);
+    let word = opl(0x13, 13, 2, 0x60, 14);
+    let insn = dec(word).unwrap();
+    assert!(matches!(
+        env.step(|b| sem::exec::<_>(b, insn, word, 0)),
+        Err(InterpExit::Exception(_))
+    ));
+    assert!(run1(&mut env, opl(0x13, 1, 3, 0x60, 15)));
+    assert_eq!(gpr(&mut env, 15), 21);
+}
+
+#[test]
+fn operate_extension_unary() {
+    let mut env = env();
+    // sextb/sextw（BWX、f=0x00/0x01）。ra 桁は不使用。
+    env.backend.set(sem::Gpr(1).state(), 0x80);
+    assert!(run1(&mut env, oprz(31, 1, 0x00, 2)));
+    assert_eq!(gpr(&mut env, 2), -128i64 as u64);
+    env.backend.set(sem::Gpr(1).state(), 0x8000);
+    assert!(run1(&mut env, oprz(31, 1, 0x01, 3)));
+    assert_eq!(gpr(&mut env, 3), -32768i64 as u64);
+    // ctpop/ctlz/cttz（CIX）。
+    env.backend.set(sem::Gpr(1).state(), -1i64 as u64);
+    assert!(run1(&mut env, oprz(31, 1, 0x30, 4)));
+    assert_eq!(gpr(&mut env, 4), 64);
+    env.backend.set(sem::Gpr(1).state(), 1);
+    assert!(run1(&mut env, oprz(31, 1, 0x32, 5)));
+    assert_eq!(gpr(&mut env, 5), 63);
+    env.backend.set(sem::Gpr(1).state(), i64::MIN as u64);
+    assert!(run1(&mut env, oprz(31, 1, 0x33, 6)));
+    assert_eq!(gpr(&mut env, 6), 63);
+    // 0 の端は 64。
+    env.backend.set(sem::Gpr(1).state(), 0);
+    assert!(run1(&mut env, oprz(31, 1, 0x32, 7)));
+    assert_eq!(gpr(&mut env, 7), 64);
+    assert!(run1(&mut env, oprz(31, 1, 0x33, 8)));
+    assert_eq!(gpr(&mut env, 8), 64);
+    assert!(run1(&mut env, oprz(31, 1, 0x30, 9)));
+    assert_eq!(gpr(&mut env, 9), 0);
+    // ctlz の中間値（0x0100.. → 先頭ゼロ 7）。
+    env.backend.set(sem::Gpr(1).state(), 0x0100_0000_0000_0000);
+    assert!(run1(&mut env, oprz(31, 1, 0x32, 10)));
+    assert_eq!(gpr(&mut env, 10), 7);
+    // sextb/sextw のリテラル形（QEMU も受理する FOPLZ）。
+    // sextb #0x80 → -128、sextw #0x80 → +128。
+    // (0x1c<<26)|(31<<21)|(0x80<<13)|(1<<12)|(f<<5)|rc。
+    assert_eq!(dec(0x73f0_1005u32), Some(Insn::SextbI));
+    assert!(run1(&mut env, 0x73f0_1005));
+    assert_eq!(gpr(&mut env, 5), -128i64 as u64);
+    assert_eq!(dec(0x73f0_1026u32), Some(Insn::SextwI));
+    assert!(run1(&mut env, 0x73f0_1026));
+    assert_eq!(gpr(&mut env, 6), 0x80);
+}
+
+#[test]
+fn operate_mvi_pack_and_minmax() {
+    let mut env = env();
+    // unpkbw: バイト 0-3 → ワード 0-3。
+    env.backend.set(sem::Gpr(1).state(), 0xdead_beef);
+    assert!(run1(&mut env, oprz(31, 1, 0x34, 2)));
+    assert_eq!(gpr(&mut env, 2), 0x00de_00ad_00be_00ef);
+    // pkwb: その逆。
+    assert!(run1(&mut env, oprz(31, 2, 0x36, 3)));
+    assert_eq!(gpr(&mut env, 3), 0xdead_beef);
+    // unpkbl: バイト 0 → ロング0、バイト1 → ロング1。
+    env.backend.set(sem::Gpr(1).state(), 0xbeef);
+    assert!(run1(&mut env, oprz(31, 1, 0x35, 4)));
+    assert_eq!(gpr(&mut env, 4), 0x0000_00be_0000_00ef);
+    // pklb: その逆。
+    assert!(run1(&mut env, oprz(31, 4, 0x37, 5)));
+    assert_eq!(gpr(&mut env, 5), 0xbeef);
+    // perr: バイトごとの絶対差の和。
+    env.backend.set(sem::Gpr(1).state(), 0);
+    env.backend.set(sem::Gpr(6).state(), 0x0102_0304_0506_0708);
+    assert!(run1(&mut env, opr(0x1c, 1, 6, 0x31, 7)));
+    assert_eq!(gpr(&mut env, 7), 36);
+    // minub8: 0 と全1の min → 0。
+    env.backend.set(sem::Gpr(6).state(), -1i64 as u64);
+    assert!(run1(&mut env, opr(0x1c, 1, 6, 0x3a, 8)));
+    assert_eq!(gpr(&mut env, 8), 0);
+    // minsb8: 全-1 と 1 の符号付き min → -1。
+    env.backend.set(sem::Gpr(9).state(), 0x0101_0101_0101_0101);
+    assert!(run1(&mut env, opr(0x1c, 6, 9, 0x38, 10)));
+    assert_eq!(gpr(&mut env, 10), -1i64 as u64);
+    // minsw4: ワード単位の符号付き min。
+    env.backend.set(sem::Gpr(11).state(), 0x8000_8000_8000_8000);
+    env.backend.set(sem::Gpr(12).state(), 0x0001_0001_0001_0001);
+    assert!(run1(&mut env, opr(0x1c, 11, 12, 0x39, 13)));
+    assert_eq!(gpr(&mut env, 13), 0x8000_8000_8000_8000);
+    // maxuw4: ワード単位の unsigned max。
+    env.backend.set(sem::Gpr(14).state(), 0xffff_0000_ffff_0000);
+    env.backend.set(sem::Gpr(15).state(), 0x0000_ffff_0000_ffff);
+    assert!(run1(&mut env, opr(0x1c, 14, 15, 0x3d, 16)));
+    assert_eq!(gpr(&mut env, 16), 0xffff_ffff_ffff_ffff);
+    // maxsb8: 符号付きバイト max。0x80..(-1 各バイト) vs 0x01.. → 1。
+    env.backend.set(sem::Gpr(18).state(), 0x8080_8080_8080_8080);
+    assert!(run1(&mut env, opr(0x1c, 9, 18, 0x3e, 19)));
+    assert_eq!(gpr(&mut env, 19), 0x0101_0101_0101_0101);
+    // maxsw4: 符号付きワード max。0x7fff 各ワード vs 0xffff(-1) 各
+    // ワード → 0x7fff 側。
+    env.backend.set(sem::Gpr(20).state(), 0x7fff_7fff_7fff_7fff);
+    assert!(run1(&mut env, opr(0x1c, 20, 6, 0x3f, 21)));
+    assert_eq!(gpr(&mut env, 21), 0x7fff_7fff_7fff_7fff);
+    // minuw4: unsigned ワード min。0x0001 各ワード vs 0xffff 各
+    // ワード → 0x0001 側。
+    env.backend.set(sem::Gpr(22).state(), 0xffff_ffff_ffff_ffff);
+    assert!(run1(&mut env, opr(0x1c, 12, 22, 0x3b, 23)));
+    assert_eq!(gpr(&mut env, 23), 0x0001_0001_0001_0001);
+    // maxub8: unsigned バイト max。0x80.. vs 0x01.. → 0x80 側。
+    assert!(run1(&mut env, opr(0x1c, 9, 18, 0x3c, 24)));
+    assert_eq!(gpr(&mut env, 24), 0x8080_8080_8080_8080);
+    // リテラル形: minub8 r1(0),0x55,r17 → 0。
+    assert!(run1(&mut env, opl(0x1c, 1, 0x55, 0x3a, 17)));
+    assert_eq!(gpr(&mut env, 17), 0);
 }
 
 #[test]

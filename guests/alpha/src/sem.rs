@@ -8,9 +8,11 @@
 //! トラップ発生、PAL 予約オペコードの Undefined 例外。
 //! 段階16-5 で整数 Operate 系（算術・論理・比較・cmov・シフト・
 //! バイト操作・`mb`/`wmb`・`rpcc`/`rc`/`rs`）を足した。
-//! 条件分岐は段階16-8、load/store は段階16-7、乗除算と拡張命令
-//! （BWX/FIX/CIX/MVI）は段階16-6 で足す（それ以外の命令は
-//! `Ok(false)` を返し、呼び出し側が未実装として扱う）。
+//! 段階16-6 で乗算と拡張命令（BWX/CIX/MVI。FIX は FP 側の世代
+//! ゲートのみで整数意味論を持たない）を足した。Alpha に整数
+//! 除算命令はない。
+//! 条件分岐は段階16-8、load/store は段階16-7 で足す（それ以外
+//! の命令は `Ok(false)` を返し、呼び出し側が未実装として扱う）。
 //!
 //! 出典は SPEC-ALPHA-ARM。ext/ins/msk/zap と cmpbge・/v 修飾の
 //! 細部は QEMU（SRC-QEMU）と照合済み。
@@ -19,7 +21,8 @@
 use polyisa_sem::{Backend, Cmp, ExceptionKind, GuestException, StateRef, W32, W64};
 
 use super::{
-    CpuState, Insn, ops_fbrw, ops_fmbr, ops_fmfcw, ops_fmld, ops_fopl, ops_fopr, ops_fpal, ops_fret,
+    CpuState, Insn, ops_fbrw, ops_fmbr, ops_fmfcw, ops_fmld, ops_fopl, ops_foplz, ops_fopr,
+    ops_foprz, ops_fpal, ops_fret,
 };
 
 /// 整数レジスタ参照。r31 は読み出しで常に 0、書き込みは破棄される。
@@ -239,8 +242,115 @@ fn or_k<B: Backend>(b: &mut B, v: B::V<W64>, k: u64) -> B::V<W64> {
     b.or(v, kk)
 }
 
+/// 算術シフト（定数）。
+fn sra_n<B: Backend>(b: &mut B, v: B::V<W64>, n: u64) -> B::V<W64> {
+    let k = b.konst::<W64>(n);
+    b.shr_a(v, k)
+}
+
+/// SWAR のポップカウント（Hacker's Delight の定番手順）。
+// Ref: SPEC-ALPHA-ARM §4.7.6 ctpop; 手順は Hacker's Delight.
+fn ctpop64<B: Backend>(b: &mut B, x: B::V<W64>) -> B::V<W64> {
+    let t = {
+        let s = shr_n(b, x, 1);
+        and_k(b, s, 0x5555_5555_5555_5555)
+    };
+    let x = b.sub(x, t);
+    let x = {
+        let lo = and_k(b, x, 0x3333_3333_3333_3333);
+        let s = shr_n(b, x, 2);
+        let hi = and_k(b, s, 0x3333_3333_3333_3333);
+        b.add(lo, hi)
+    };
+    let x = {
+        let s = shr_n(b, x, 4);
+        let t = b.add(x, s);
+        and_k(b, t, 0x0f0f_0f0f_0f0f_0f0f)
+    };
+    let m = b.konst::<W64>(0x0101_0101_0101_0101);
+    let x = b.mul(x, m);
+    shr_n(b, x, 56)
+}
+
+/// 64 ビットの先頭ゼロ数（CIX の ctlz）。x=0 なら 64。
+// Ref: SPEC-ALPHA-ARM §4.7.6 ctlz.
+fn ctlz64<B: Backend>(b: &mut B, x: B::V<W64>) -> B::V<W64> {
+    // 最上位の立っているビット以下を全て 1 に畳んでから ~x の
+    // popcount を取る。
+    let mut y = x;
+    for s in [1u64, 2, 4, 8, 16, 32] {
+        let t = shr_n(b, y, s);
+        y = b.or(y, t);
+    }
+    let nx = b.not(y);
+    ctpop64(b, nx)
+}
+
+/// 64 ビットの後端ゼロ数（CIX の cttz）。x=0 なら 64。
+// Ref: SPEC-ALPHA-ARM §4.7.6 cttz.
+fn cttz64<B: Backend>(b: &mut B, x: B::V<W64>) -> B::V<W64> {
+    // (~x) & (x-1) は最下位の立っているビットの下側が全て 1。
+    // x=0 では (~0)&(0-1) = 全 1 → 64。
+    let nx = b.not(x);
+    let one = b.konst::<W64>(1);
+    let xm1 = b.sub(x, one);
+    let t = b.and(nx, xm1);
+    ctpop64(b, t)
+}
+
+/// バイト/ワードごとの SIMD min/max（MVI）。
+/// lanes = 8（バイト）または 4（ワード）。signed で符号付き比較。
+// Ref: SRC-QEMU (helper_min*/helper_max*).
+fn simd_minmax<B: Backend>(
+    b: &mut B,
+    a: B::V<W64>,
+    v: B::V<W64>,
+    lanes: u64,
+    signed: bool,
+    is_min: bool,
+) -> B::V<W64> {
+    let bits = 64 / lanes;
+    let lane_mask = (1u64 << bits) - 1;
+    let mut res = b.konst::<W64>(0);
+    for i in 0..lanes {
+        let sh = i * bits;
+        let x = {
+            let t = shr_n(b, a, sh);
+            and_k(b, t, lane_mask)
+        };
+        let y = {
+            let t = shr_n(b, v, sh);
+            and_k(b, t, lane_mask)
+        };
+        let (xe, ye) = if signed {
+            (sext_lane(b, x, bits), sext_lane(b, y, bits))
+        } else {
+            (x, y)
+        };
+        let op = match (signed, is_min) {
+            (true, true) => Cmp::LtS,
+            (true, false) => Cmp::GtS,
+            (false, true) => Cmp::LtU,
+            (false, false) => Cmp::GtU,
+        };
+        let c = b.cmp(op, xe, ye);
+        let m = b.select(c, x, y);
+        let t = shl_n(b, m, sh);
+        res = b.or(res, t);
+    }
+    res
+}
+
+/// レーン値を 64 ビットへ符号拡張する。
+fn sext_lane<B: Backend>(b: &mut B, x: B::V<W64>, bits: u64) -> B::V<W64> {
+    let t = shl_n(b, x, 64 - bits);
+    sra_n(b, t, 64 - bits)
+}
+
 /// 整数オーバーフロー例外。`/v` 修飾の算術が使う。
-/// code は Alpha の算術例外サブコード EXC_M_IOV=1（整数オーバーフロー）。
+/// code=1 は polyisa 内部の算術例外識別子（Alpha の整数
+/// オーバーフロー = QEMU の EXC_M_IOV マスク位に対応するが、
+/// ここの値は内部コードであり UAPI/ARM の定数ではない）。
 // Ref: SRC-QEMU (arith_excp / EXC_M_IOV).
 fn overflow<B: Backend>(b: &mut B) -> B::Exit {
     b.raise(GuestException {
@@ -557,6 +667,186 @@ fn operate_v<B: Backend>(b: &mut B, insn: Insn, word: u32) -> Result<bool, B::Ex
     Ok(true)
 }
 
+/// 乗算命令（opcode 0x13、FOPR/FOPL）。Alpha に整数除算命令はなく
+/// （ソフトウェアで合成する）、乗算と UMULH だけが存在する。
+// Ref: SPEC-ALPHA-ARM §4.7.4, SRC-QEMU (translate.c case 0x13).
+fn operate_mul<B: Backend>(b: &mut B, insn: Insn, word: u32) -> Result<bool, B::Exit> {
+    let (a, v, rc) = opr_ops(b, word);
+    match insn {
+        Insn::Mull | Insn::MullI => {
+            let t = b.mul(a, v);
+            let r = sext_w32(b, t);
+            rc.set(b, r);
+        }
+        Insn::Mulq | Insn::MulqI => {
+            let t = b.mul(a, v);
+            rc.set(b, t);
+        }
+        // umulh: unsigned 64×64 の上位 64 ビット。
+        Insn::Umulh | Insn::UmulhI => {
+            let t = b.mulhu(a, v);
+            rc.set(b, t);
+        }
+        // mull/v: sext32 したオペランドの積が 32 ビットに収まることを
+        // 要する（sext32(r) != r で例外）。
+        Insn::MullV | Insn::MullVI => {
+            let aa = sext_w32(b, a);
+            let vv = sext_w32(b, v);
+            let r = b.mul(aa, vv);
+            let r32 = sext_w32(b, r);
+            let ovf = b.cmp(Cmp::Ne, r32, r);
+            b.if_then(ovf, |b| Err(overflow(b)))?;
+            rc.set(b, r32);
+        }
+        // mulq/v: 積の上位 64 が下位の符号拡張と一致しないなら
+        // 桁あふれ（QEMU check_overflow(hi, sar(lo,63)) と同じ）。
+        Insn::MulqV | Insn::MulqVI => {
+            let lo = b.mul(a, v);
+            let hi = b.mulh(a, v);
+            let s = sra_n(b, lo, 63);
+            let ovf = b.cmp(Cmp::Ne, hi, s);
+            b.if_then(ovf, |b| Err(overflow(b)))?;
+            rc.set(b, lo);
+        }
+        _ => unreachable!("operate_mul called for non-mul insn"),
+    }
+    Ok(true)
+}
+
+/// 拡張命令の 2 入力形（0x1C の FOPR/FOPL。MVI の perr/min/max）。
+// Ref: SPEC-ALPHA-ARM §4.7.6, SRC-QEMU (int_helper.c).
+fn operate_mvi<B: Backend>(b: &mut B, insn: Insn, word: u32) -> Result<bool, B::Exit> {
+    let (a, v, rc) = opr_ops(b, word);
+    let res = match insn {
+        // perr: バイトごとの絶対差の和（pixel error = SAD）。
+        // Ref: SRC-QEMU (helper_perr).
+        Insn::Perr => {
+            let mut res = b.konst::<W64>(0);
+            for i in 0..8u64 {
+                let sh = i * 8;
+                let x = {
+                    let t = shr_n(b, a, sh);
+                    and_k(b, t, 0xff)
+                };
+                let y = {
+                    let t = shr_n(b, v, sh);
+                    and_k(b, t, 0xff)
+                };
+                let d = b.sub(x, y);
+                // |d| = (d ^ sign) - sign。
+                let s = sra_n(b, d, 63);
+                let x2 = b.xor(d, s);
+                let ad = b.sub(x2, s);
+                res = b.add(res, ad);
+            }
+            res
+        }
+        Insn::Minsb8 | Insn::Minsb8I => simd_minmax(b, a, v, 8, true, true),
+        Insn::Minub8 | Insn::Minub8I => simd_minmax(b, a, v, 8, false, true),
+        Insn::Minsw4 | Insn::Minsw4I => simd_minmax(b, a, v, 4, true, true),
+        Insn::Minuw4 | Insn::Minuw4I => simd_minmax(b, a, v, 4, false, true),
+        Insn::Maxsb8 | Insn::Maxsb8I => simd_minmax(b, a, v, 8, true, false),
+        Insn::Maxub8 | Insn::Maxub8I => simd_minmax(b, a, v, 8, false, false),
+        Insn::Maxsw4 | Insn::Maxsw4I => simd_minmax(b, a, v, 4, true, false),
+        Insn::Maxuw4 | Insn::Maxuw4I => simd_minmax(b, a, v, 4, false, false),
+        _ => unreachable!("operate_mvi called for non-mvi insn"),
+    };
+    rc.set(b, res);
+    Ok(true)
+}
+
+/// 拡張命令の 1 入力形（0x1C の FOPRZ。BWX/CIX/MVI）。
+// Ref: SPEC-ALPHA-ARM §4.7.5/§4.7.6, SRC-QEMU (translate.c case 0x1C).
+fn operate_z<B: Backend>(b: &mut B, insn: Insn, word: u32) -> Result<bool, B::Exit> {
+    // リテラル形は sextb/sextw のみ存在する（他の 0x1C 命令は
+    // REQUIRE_NO_LIT 相当でリテラル形を持たない）。
+    if matches!(insn, Insn::SextbI | Insn::SextwI) {
+        let o = ops_foplz(u128::from(word));
+        let v = b.konst::<W64>(u64::from(o.lit8));
+        let res = if insn == Insn::SextbI {
+            let t = shl_n(b, v, 56);
+            sra_n(b, t, 56)
+        } else {
+            let t = shl_n(b, v, 48);
+            sra_n(b, t, 48)
+        };
+        Gpr(o.rc as u8).set(b, res);
+        return Ok(true);
+    }
+    let o = ops_foprz(u128::from(word));
+    let v = Gpr(o.rb as u8).get(b);
+    let res = match insn {
+        // sextb/sextw（BWX）: 下位バイト/ワードの符号拡張。
+        Insn::Sextb => {
+            let t = shl_n(b, v, 56);
+            sra_n(b, t, 56)
+        }
+        Insn::Sextw => {
+            let t = shl_n(b, v, 48);
+            sra_n(b, t, 48)
+        }
+        // ctpop/ctlz/cttz（CIX）。
+        Insn::Ctpop => ctpop64(b, v),
+        Insn::Ctlz => ctlz64(b, v),
+        Insn::Cttz => cttz64(b, v),
+        // unpkbw（MVI）: バイト 0-3 をワード 0-3 へゼロ拡張で展開。
+        Insn::Unpkbw => {
+            let b0 = and_k(b, v, 0xff);
+            let b1 = {
+                let t = and_k(b, v, 0xff00);
+                shl_n(b, t, 8)
+            };
+            let b2 = {
+                let t = and_k(b, v, 0xff_0000);
+                shl_n(b, t, 16)
+            };
+            let b3 = {
+                let t = and_k(b, v, 0xff00_0000);
+                shl_n(b, t, 24)
+            };
+            let lo = b.or(b0, b1);
+            let hi = b.or(b2, b3);
+            b.or(lo, hi)
+        }
+        // unpkbl: バイト 0 → ロングワード 0、バイト 1 → ロングワード 1。
+        Insn::Unpkbl => {
+            let lo = and_k(b, v, 0xff);
+            let t = and_k(b, v, 0xff00);
+            let hi = shl_n(b, t, 24);
+            b.or(lo, hi)
+        }
+        // pkwb: 各ワードの下位バイトを下位 4 バイトへ詰める。
+        Insn::Pkwb => {
+            let b0 = and_k(b, v, 0xff);
+            let b1 = {
+                let t = shr_n(b, v, 8);
+                and_k(b, t, 0xff00)
+            };
+            let b2 = {
+                let t = shr_n(b, v, 16);
+                and_k(b, t, 0xff_0000)
+            };
+            let b3 = {
+                let t = shr_n(b, v, 24);
+                and_k(b, t, 0xff00_0000)
+            };
+            let lo = b.or(b0, b1);
+            let hi = b.or(b2, b3);
+            b.or(lo, hi)
+        }
+        // pklb: 各ロングワードの下位バイトを下位 2 バイトへ。
+        Insn::Pklb => {
+            let lo = and_k(b, v, 0xff);
+            let t = shr_n(b, v, 24);
+            let hi = and_k(b, t, 0xff00);
+            b.or(lo, hi)
+        }
+        _ => unreachable!("operate_z called for non-z insn"),
+    };
+    Gpr(o.rc as u8).set(b, res);
+    Ok(true)
+}
+
 /// 命令の意味論。`Ok(true)` は実行完了、`Ok(false)` はこの段階では
 /// 未実装（呼び出し側が `Outcome::Unimplemented` に写す）。
 /// `pc` はこの命令の番地。
@@ -766,6 +1056,48 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
         | Insn::MsklhI
         | Insn::Mskqh
         | Insn::MskqhI => operate(b, insn, word),
+        // ---- 段階16-6: 乗算と拡張命令 ----
+        // 乗算（0x13）。Alpha に整数除算命令はない。
+        Insn::Mull
+        | Insn::MullI
+        | Insn::Mulq
+        | Insn::MulqI
+        | Insn::Umulh
+        | Insn::UmulhI
+        | Insn::MullV
+        | Insn::MullVI
+        | Insn::MulqV
+        | Insn::MulqVI => operate_mul(b, insn, word),
+        // MVI の 2 入力形（perr/min/max。0x1C の FOPR/FOPL）。
+        Insn::Perr
+        | Insn::Minsb8
+        | Insn::Minsb8I
+        | Insn::Minub8
+        | Insn::Minub8I
+        | Insn::Minsw4
+        | Insn::Minsw4I
+        | Insn::Minuw4
+        | Insn::Minuw4I
+        | Insn::Maxsb8
+        | Insn::Maxsb8I
+        | Insn::Maxub8
+        | Insn::Maxub8I
+        | Insn::Maxsw4
+        | Insn::Maxsw4I
+        | Insn::Maxuw4
+        | Insn::Maxuw4I => operate_mvi(b, insn, word),
+        // BWX/CIX/MVI の 1 入力形（0x1C の FOPRZ/FOPLZ）。
+        Insn::Sextb
+        | Insn::SextbI
+        | Insn::Sextw
+        | Insn::SextwI
+        | Insn::Ctpop
+        | Insn::Ctlz
+        | Insn::Cttz
+        | Insn::Unpkbw
+        | Insn::Unpkbl
+        | Insn::Pkwb
+        | Insn::Pklb => operate_z(b, insn, word),
         // ---- 段階16-5: MISC ----
         // バリアとトラップバリア。順序付き実行のインタプリタでは
         // mb/wmb/trapb/excb は何もしない（trapb の実確定は PAL
