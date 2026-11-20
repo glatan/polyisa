@@ -37,12 +37,24 @@ impl AlphaModel {
     }
 }
 
+/// スタックの成長窓。未写像フォルトをこの範囲で埋める。
+// Ref: SRC-LINUX (7.3) — expand_stack の規約（RLIMIT 内の下方成長）。
+#[derive(Clone, Copy, Debug)]
+pub struct StackGrowth {
+    /// スタック上端。
+    pub top: u64,
+    /// これより下は伸ばさない。
+    pub limit: u64,
+}
+
 /// `entry` から `model` で実行する。`sys` は OS パーソナリティ。
+/// `stack` はページフォルト駆動のスタック成長窓（不要なら `None`）。
 pub fn run(
     env: &mut BareEnv,
     entry: u64,
     model: AlphaModel,
     sys: &mut impl TrapHandler,
+    stack: Option<StackGrowth>,
 ) -> Outcome {
     env.pc = entry;
     polyisa_engine::run::run(
@@ -50,7 +62,7 @@ pub fn run(
         sys,
         STEP_LIMIT,
         |env| env.pc,
-        |env, sys| step_alpha(env, sys, model),
+        |env, sys| step_alpha(env, sys, model, stack),
     )
 }
 
@@ -69,6 +81,7 @@ fn step_alpha(
     env: &mut BareEnv,
     sys: &mut impl TrapHandler,
     model: AlphaModel,
+    stack: Option<StackGrowth>,
 ) -> Result<(), Outcome> {
     let pc = env.pc;
     let unimpl = |env: &BareEnv, word: u64| Outcome::Unimplemented {
@@ -128,6 +141,15 @@ fn step_alpha(
                 TrapOutcome::Unimplemented => Err(unimpl(env, u64::from(word))),
             }
         }
+        // ページフォルトはスタック成長窓の内側なら写像を伸ばして
+        // 同一命令をやり直す（pc はまだ進んでいない）。
+        Err(InterpExit::Exception(e)) if e.kind == ExceptionKind::PageFault => {
+            if stack_grow(env, stack, &e).is_some() {
+                Ok(())
+            } else {
+                Err(unimpl(env, u64::from(word)))
+            }
+        }
         // PAL 予約オペコードの Undefined など。その他の例外は
         // この段階では未実装に写す。
         Err(InterpExit::Exception(_)) | Err(InterpExit::Unimplemented(_)) => {
@@ -136,9 +158,37 @@ fn step_alpha(
     }
 }
 
+/// ページフォルトをスタック成長として処理する。
+// Ref: SRC-LINUX (7.3) — expand_stack。
+fn stack_grow(
+    env: &mut BareEnv,
+    stack: Option<StackGrowth>,
+    e: &polyisa_sem::GuestException,
+) -> Option<()> {
+    use polyisa_mem::{PAGE_SIZE, PageNo};
+    let s = stack?;
+    if e.kind != ExceptionKind::PageFault {
+        return None;
+    }
+    let a = e.addr?;
+    if a >= s.top || a < s.limit {
+        return None;
+    }
+    let lo = a & !(PAGE_SIZE - 1);
+    let mut hi = lo;
+    while hi < s.top && !env.backend.mem.is_mapped(PageNo(hi / PAGE_SIZE)) {
+        hi += PAGE_SIZE;
+    }
+    let pages = (hi - lo) / PAGE_SIZE;
+    if pages == 0 {
+        return None;
+    }
+    env.backend.mem.map(VirtAddr(lo), pages, Perms::RW).ok()
+}
+
 /// ELF64・EM_ALPHA_EXP（0x9026）の静的実行。
-/// `sys` がなければ `call_pal` で止まるため、os-linux の Alpha
-/// パーソナリティが来る段階16-10/11 までは動作確認用の入口。
+/// `sys` がなければ `call_pal` で止まるため、OS パーソナリティ
+/// なしの裸実行は動作確認用の入口。
 pub fn run_elf_alpha(path: &str, argv: &[String]) -> Result<u64, String> {
     run_elf_alpha_sel(path, argv, None)
 }
@@ -149,16 +199,58 @@ pub fn run_elf_alpha_sel(
     argv: &[String],
     sel: Option<&polyisa_isadl::select::CpuSel>,
 ) -> Result<u64, String> {
-    run_elf_alpha_sys(path, argv, sel, &mut NoSys)
+    let (mut env, entry, model, ..) = setup_alpha_elf(path, argv, sel)?;
+    let growth = Some(StackGrowth {
+        top: STACK_TOP,
+        limit: STACK_TOP - STACK_LIMIT,
+    });
+    finish(run(&mut env, entry, model, &mut NoSys, growth))
 }
 
-/// `sys` とモデルを指定する `run_elf_alpha`。
+/// Linux パーソナリティとモデルを指定する `run_elf_alpha`。
 pub fn run_elf_alpha_sys(
     path: &str,
     argv: &[String],
     sel: Option<&polyisa_isadl::select::CpuSel>,
-    sys: &mut impl TrapHandler,
+    sys: &mut polyisa_os_linux::alpha::sys::Linux,
 ) -> Result<u64, String> {
+    let (mut env, entry, model, image_end) = setup_alpha_elf(path, argv, sel)?;
+    sys.init_brk(image_end);
+    // /proc/self/exe の readlink は絶対パスを返す規約。
+    sys.exe_path = std::fs::canonicalize(path)
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| path.to_string());
+    let growth = Some(StackGrowth {
+        top: STACK_TOP,
+        limit: STACK_TOP - STACK_LIMIT,
+    });
+    finish(run(&mut env, entry, model, sys, growth))
+}
+
+/// スタック上端。カーネルの STACK_TOP_MAX（0x0012_0000_0000）と
+/// 同値にする。TASK_SIZE は 42 ビットユーザ空間（0x400_0000_0000）。
+// Ref: SRC-LINUX (7.3) — arch/alpha/include/asm/processor.h.
+const STACK_TOP: u64 = 0x0001_2000_0000;
+/// スタック成長窓の下限。Linux 既定の RLIMIT_STACK（8 MiB）。
+const STACK_LIMIT: u64 = 8 << 20;
+
+/// `Outcome` を実行結果へ写す。
+fn finish(o: Outcome) -> Result<u64, String> {
+    match o {
+        Outcome::Exit(code) => Ok(code),
+        Outcome::StepLimit { pc } => Err(format!("ステップ数を超過（pc={pc:#x}）")),
+        Outcome::Deadlock => Err("デッドロック".to_string()),
+        Outcome::Unimplemented { pc, word } => Err(format!("未実装: pc={pc:#x} word={word:#x}")),
+    }
+}
+
+/// ELF の検証・写像・初期スタックの構築。
+/// 返り値は `(env, entry, model, image_end)`。
+fn setup_alpha_elf(
+    path: &str,
+    argv: &[String],
+    sel: Option<&polyisa_isadl::select::CpuSel>,
+) -> Result<(BareEnv, u64, AlphaModel, u64), String> {
     use polyisa_mem::PAGE_SIZE;
     use polyisa_sem::Backend as _;
 
@@ -210,11 +302,15 @@ pub fn run_elf_alpha_sys(
     };
     polyisa_loader::elf::load_segments_bias(&bytes, &phdrs, &mut env.backend.mem, main_bias)
         .map_err(|e| format!("load: {e:?}"))?;
+    let image_end = phdrs
+        .iter()
+        .filter(|p| p.seg_type == 1)
+        .map(|p| p.vaddr + p.memsz)
+        .max()
+        .unwrap_or(0)
+        + main_bias;
     let entry = main_bias + ehdr.entry;
-    // スタック上端。Alpha のユーザ空間は 43 ビット級なので、実効
-    // TASK_SIZE 内の値を置く（照合は段階16-11 の ABI 作業で行う）。
-    let top: u64 = 0x0000_2000_0000_0000;
-    let img_top = top - 0x1_0000;
+    let img_top = STACK_TOP - 0x1_0000;
     let mut arg_bytes = vec![path.as_bytes().to_vec()];
     for a in argv {
         arg_bytes.push(a.as_bytes().to_vec());
@@ -222,7 +318,7 @@ pub fn run_elf_alpha_sys(
     // 最小限のスタック（argc/argv/auxv）は Linux の初期化と同じ
     // 配置にする。AT_PHDR 等の残りは段階16-11 で足す。
     let auxv: Vec<(u64, u64)> = vec![
-        (6, 0x1000), // AT_PAGESZ
+        (6, 0x2000), // AT_PAGESZ（Alpha Linux のページは 8KiB）
         (9, entry),  // AT_ENTRY
         (11, 0),     // AT_UID
         (12, 0),     // AT_EUID
@@ -233,8 +329,11 @@ pub fn run_elf_alpha_sys(
     ];
     let (img, sp) =
         polyisa_os_linux::build_initial_stack_endian(img_top, &arg_bytes, &[], &auxv, Endian::Le);
+    // 初期スタックは像の分だけ写像し、下方向はページフォルト駆動で
+    // `STACK_LIMIT` まで伸ばす。glibc は起動時の大きなフレーム確保で
+    // `stq r31,-N(r30)` のプローブを打つため、伸長は必須。
     let stack_base = sp & !(PAGE_SIZE - 1);
-    let stack_pages = (top - stack_base) / PAGE_SIZE;
+    let stack_pages = (STACK_TOP - stack_base) / PAGE_SIZE;
     env.backend
         .mem
         .map(VirtAddr(stack_base), stack_pages, Perms::RW)
@@ -245,12 +344,7 @@ pub fn run_elf_alpha_sys(
         .map_err(|_| "スタックの書き込みに失敗".to_string())?;
     // r30 = sp が ABI のエントリ条件（argc/argv 領域を指す）。
     env.backend.set(sem::Gpr(30).state(), sp);
-    match run(&mut env, entry, model, sys) {
-        Outcome::Exit(code) => Ok(code),
-        Outcome::StepLimit { pc } => Err(format!("ステップ数を超過（pc={pc:#x}）")),
-        Outcome::Deadlock => Err("デッドロック".to_string()),
-        Outcome::Unimplemented { pc, word } => Err(format!("未実装: pc={pc:#x} word={word:#x}")),
-    }
+    Ok((env, entry, model, image_end))
 }
 
 /// PAL/syscall を受けないスタブ。`call_pal` で止めるだけの
@@ -302,7 +396,13 @@ mod tests {
         // call_pal 0 として Trap を上げ、NoSys が受けないので停止。
         let mut env = env_at(0x1000, &[lda(1, 31, 42), lda(2, 31, 0xffff)]);
         let mut sys = NoSys;
-        match run(&mut env, 0x1000, AlphaModel { feats: ALL_FEATS }, &mut sys) {
+        match run(
+            &mut env,
+            0x1000,
+            AlphaModel { feats: ALL_FEATS },
+            &mut sys,
+            None,
+        ) {
             Outcome::Unimplemented { pc, .. } => assert_eq!(pc, 0x1008),
             o => panic!("unexpected outcome: {o:?}"),
         }
@@ -324,7 +424,13 @@ mod tests {
             ],
         );
         let mut sys = NoSys;
-        match run(&mut env, 0x1000, AlphaModel { feats: ALL_FEATS }, &mut sys) {
+        match run(
+            &mut env,
+            0x1000,
+            AlphaModel { feats: ALL_FEATS },
+            &mut sys,
+            None,
+        ) {
             Outcome::Unimplemented { pc, .. } => assert_eq!(pc, 0x100c),
             o => panic!("unexpected outcome: {o:?}"),
         }
@@ -339,7 +445,13 @@ mod tests {
         // 受けないので Unimplemented になる。
         let mut env = env_at(0x1000, &[0x0000_0083]);
         let mut sys = NoSys;
-        match run(&mut env, 0x1000, AlphaModel { feats: ALL_FEATS }, &mut sys) {
+        match run(
+            &mut env,
+            0x1000,
+            AlphaModel { feats: ALL_FEATS },
+            &mut sys,
+            None,
+        ) {
             Outcome::Unimplemented { pc, .. } => assert_eq!(pc, 0x1000),
             o => panic!("unexpected outcome: {o:?}"),
         }

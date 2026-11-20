@@ -262,7 +262,12 @@ fn run_alpha_elf(path: &str, argv: &[String], spec: Option<&CpuSpec>) -> Result<
             )
         })
         .transpose()?;
-    run_alpha::run_elf_alpha_sel(path, argv, sel.as_ref())
+    run_alpha::run_elf_alpha_sys(
+        path,
+        argv,
+        sel.as_ref(),
+        &mut polyisa_os_linux::alpha::sys::Linux::new(),
+    )
 }
 
 #[cfg(not(feature = "guest-alpha"))]

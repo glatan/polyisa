@@ -17,6 +17,10 @@
 #[cfg(feature = "guest-x86")]
 pub mod x86;
 
+/// Alpha AXP の Linux パーソナリティ（call_pal/callsys の処理と ABI 定数）。
+/// `sys` の実装だけ `guest-alpha` 機能の内側。
+pub mod alpha;
+
 /// MIPS の Linux パーソナリティ（o32/n32/n64 の syscall 処理と ABI 定数）。
 // Ref: SRC-LINUX (7.3).
 #[cfg(feature = "guest-mips")]

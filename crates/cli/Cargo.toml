@@ -46,7 +46,7 @@ default = [
     "guest-x86",
 ]
 guest-aarch64 = ["dep:polyisa-guest-aarch64", "polyisa-os-linux/guest-aarch64"]
-guest-alpha = ["dep:polyisa-guest-alpha"]
+guest-alpha = ["dep:polyisa-guest-alpha", "polyisa-os-linux/guest-alpha"]
 guest-arm = ["dep:polyisa-guest-arm", "polyisa-os-linux/guest-arm"]
 guest-m68k = ["dep:polyisa-guest-m68k", "polyisa-os-linux/guest-m68k"]
 guest-mips = ["dep:polyisa-guest-mips", "polyisa-os-linux/guest-mips"]
