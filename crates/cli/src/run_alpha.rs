@@ -57,13 +57,36 @@ pub fn run(
     stack: Option<StackGrowth>,
 ) -> Outcome {
     env.pc = entry;
-    polyisa_engine::run::run(
+    let trace = std::env::var_os("POLYISA_ALPHA_TRACE").is_some();
+    let mut hist = std::collections::VecDeque::with_capacity(512);
+    let o = polyisa_engine::run::run(
         env,
         sys,
         STEP_LIMIT,
         |env| env.pc,
-        |env, sys| step_alpha(env, sys, model, stack),
-    )
+        |env, sys| {
+            if trace {
+                hist.push_back(env.pc);
+                if hist.len() > 512 {
+                    hist.pop_front();
+                }
+            }
+            step_alpha(env, sys, model, stack)
+        },
+    );
+    if trace && !matches!(o, Outcome::Exit(_)) {
+        eprintln!(
+            "alpha: last pcs: {}",
+            hist.iter()
+                .map(|p| format!("{p:#x}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+        for i in [0u8, 9, 15, 16, 19, 26, 27, 29, 30] {
+            eprintln!("  r{i} = {:#x}", env.backend.get(sem::Gpr(i).state()));
+        }
+    }
+    o
 }
 
 /// 命令フェッチ用のアクセス属性。

@@ -34,6 +34,34 @@ pub fn symlink(_old: &str, _new: &str) -> std::io::Result<()> {
     ))
 }
 
+/// パスの許可ビットを変える（chmod）。ゲストの chmod 系実装が使う。
+/// 非 Unix ホストでは成功だけ返す。
+#[cfg(unix)]
+pub fn chmod(path: &str, mode: u32) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+}
+
+/// 非 Unix ホストでは成功だけ返す。
+#[cfg(not(unix))]
+pub fn chmod(_path: &str, _mode: u32) -> std::io::Result<()> {
+    Ok(())
+}
+
+/// 開いたファイルの許可ビットを変える。`O_CREAT` で作ったファイルへ
+/// mode を適用する用途で、非 Unix ホストでは成功だけ返す。
+#[cfg(unix)]
+pub fn fchmod(f: &std::fs::File, mode: u32) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+    f.set_permissions(std::fs::Permissions::from_mode(mode))
+}
+
+/// 非 Unix ホストでは成功だけ返す。
+#[cfg(not(unix))]
+pub fn fchmod(_f: &std::fs::File, _mode: u32) -> std::io::Result<()> {
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
