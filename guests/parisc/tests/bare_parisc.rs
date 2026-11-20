@@ -419,3 +419,302 @@ fn exec_ble_links_and_jumps() {
     assert_eq!(iaoq_f(&mut env), 0x1004);
     assert_eq!(iaoq_b(&mut env), 0x3000);
 }
+
+// ---- shift/extract/deposit 意味論検査（段階17・Step0）----
+// busybox の起動コードが extru/depi/zdepi を使う（0xd3351bf8 で
+// 未実装停止したことから発覚）。位置は HP の左端起算で、語には
+// 32-len（clen）や 31-p（cp）の形で入る。
+// Ref: SPEC-PARISC-11 §5-122〜135, SPEC-PARISC-20 §7-38〜50・§7-122〜124.
+
+fn set_sar(env: &mut BareEnv, v: u64) {
+    env.backend.set(sem::Cr(11).state(), v);
+}
+
+fn fpr(env: &mut BareEnv, n: u8) -> u64 {
+    env.backend.get(sem::Fpr(n).state())
+}
+
+fn set_fpr(env: &mut BareEnv, n: u8, v: u64) {
+    env.backend.set(sem::Fpr(n).state(), v);
+}
+
+#[test]
+fn exec_extru_imm_extracts_low_bits() {
+    let mut env = env();
+    set_q(&mut env, 0x1000);
+    set_gpr(&mut env, 5, 0xdead_beef);
+    // extru r5,31,8,r6（0xd0a6_1bf8: pos=31、len=8 → 下位 8 ビット）。
+    step(&mut env, 0xd0a6_1bf8);
+    assert_eq!(gpr(&mut env, 6), 0xef);
+    // busybox で停止していた実例語: extru r25,31,8,r21。
+    set_gpr(&mut env, 25, 0x1234);
+    step(&mut env, 0xd335_1bf8);
+    assert_eq!(gpr(&mut env, 21), 0x34);
+    // extrs の符号拡張: pos=8、len=4 でフィールド最上位が 1。
+    set_gpr(&mut env, 5, 0x0400_0000);
+    step(&mut env, 0xd0a6_1d1c);
+    assert_eq!(gpr(&mut env, 6), 0xffff_fff8);
+    // 同じ形で符号ビット 0 → 0 拡張。
+    set_gpr(&mut env, 5, 0x0080_0000);
+    step(&mut env, 0xd0a6_1d1c);
+    assert_eq!(gpr(&mut env, 6), 1);
+}
+
+#[test]
+fn exec_extru_cond_nullifies_next() {
+    let mut env = env();
+    set_q(&mut env, 0x1000);
+    set_gpr(&mut env, 5, 0);
+    // extru,= r5,31,8,r6（c=1、"="は Table 5-7 の index 1）。
+    // res==0 → PSW.N で次の add が無効化される。
+    step(&mut env, 0xd0a6_3bf8);
+    assert_eq!(gpr(&mut env, 6), 0);
+    step(&mut env, 0x0822_0603); // add r1,r2,r3 → 無効化
+    assert_eq!(gpr(&mut env, 3), 0);
+}
+
+#[test]
+fn exec_extr_sar_forms() {
+    let mut env = env();
+    set_q(&mut env, 0x1000);
+    // ExtrSar（32 ビット可変）: pos=CR[11]&31。
+    set_gpr(&mut env, 5, 0xdead_beef);
+    set_sar(&mut env, 31);
+    step(&mut env, 0xd0a6_1018); // extru r5,sar(len=8),r6
+    assert_eq!(gpr(&mut env, 6), 0xef);
+    // 左端を超える符号付き抽出は tlen=pos+1 で符号拡張する。
+    // sar=2、len=8: r5 の bit31=1 が符号として上へ伸びる。
+    set_gpr(&mut env, 5, 0x8000_0000);
+    set_sar(&mut env, 2);
+    step(&mut env, 0xd0a6_1418); // extrs r5,sar(len=8),r6
+    assert_eq!(gpr(&mut env, 6), 0xffff_fffc);
+    // ExtrSarD（64 ビット可変）: pos=CR[11]&63。
+    set_gpr(&mut env, 5, 0xdead_beef_cafe);
+    set_sar(&mut env, 63);
+    step(&mut env, 0xd0a6_1218); // extrd,u r5,sar(len=8),r6
+    assert_eq!(gpr(&mut env, 6), 0xfe);
+}
+
+#[test]
+fn exec_extrd_imm() {
+    let mut env = env();
+    set_q(&mut env, 0x1000);
+    // extrd,u r5,32,8,r6（pos=32 → cpos6=cat(1,0)=32）。
+    // HP 位置 32..39 は LSB の bits 31..38 → 下位語の先頭バイト。
+    set_gpr(&mut env, 5, 0x1122_3344_5566_7788);
+    step(&mut env, 0xd8a6_0818);
+    assert_eq!(gpr(&mut env, 6), 0x88);
+    // extrd,s: フィールド最上位が符号として全体へ伸びる。
+    set_gpr(&mut env, 5, 0xffff_ffff_ffff_ff80);
+    step(&mut env, 0xd8a6_0c18);
+    assert_eq!(gpr(&mut env, 6), 0xffff_ffff_ffff_ffff);
+    // 符号ビット 0 → 0 拡張（field=0x7f、bits 31..37）。
+    set_gpr(&mut env, 5, 0x7f << 31);
+    step(&mut env, 0xd8a6_0c18);
+    assert_eq!(gpr(&mut env, 6), 0x7f);
+}
+
+#[test]
+fn exec_shrp_forms() {
+    let mut env = env();
+    set_q(&mut env, 0x1000);
+    // ShrpSar（VSHD、32 ビット）: cat(r1{1..31},r2)>>sar の下位 32。
+    set_gpr(&mut env, 1, 0xabcd_ef01);
+    set_gpr(&mut env, 2, 0x2345_6789);
+    set_sar(&mut env, 4);
+    step(&mut env, 0xd041_0006); // shrp r2,r1,r6
+    assert_eq!(gpr(&mut env, 6), 0x1234_5678);
+    // 回転（r1=r2）でも同じ規則（32 ビットのローテート）。
+    set_gpr(&mut env, 1, 0x1234_5678);
+    set_gpr(&mut env, 2, 0x1234_5678);
+    set_sar(&mut env, 8);
+    step(&mut env, 0xd041_0006);
+    assert_eq!(gpr(&mut env, 6), u64::from(0x1234_5678u32.rotate_right(8)));
+    // ShrpSarD（SHRPD 可変）: cat(r1{1..63},r2)>>sar。
+    set_gpr(&mut env, 1, 0x5555_5555_5555_5555);
+    set_gpr(&mut env, 2, 0xaaaa_aaaa_aaaa_aaaa);
+    set_sar(&mut env, 36);
+    step(&mut env, 0xd041_0206);
+    let want =
+        (((0x5555_5555_5555_5555u128 & ((1 << 63) - 1)) << 64) | 0xaaaa_aaaa_aaaa_aaaau128) >> 36;
+    assert_eq!(gpr(&mut env, 6), want as u64);
+    // ShrpImm（SHD/SHRPW 固定）: sa=31-cpos。
+    set_gpr(&mut env, 1, 0xf0f0_f0f0);
+    set_gpr(&mut env, 2, 0x0f0f_0f0f);
+    step(&mut env, 0xd041_0966); // shrp r2,r1,20,r6
+    let want =
+        ((((0xf0f0_f0f0u128 & ((1 << 31) - 1)) << 32) | 0x0f0f_0f0fu128) >> 20) & 0xffff_ffff;
+    assert_eq!(gpr(&mut env, 6), want as u64);
+    // ShrpImmD（SHRPD 固定）: sa=63-cpos6。
+    step(&mut env, 0xd041_0766); // shrpd r2,r1,36,r6
+    let want = (((0xf0f0_f0f0u128 & ((1 << 63) - 1)) << 64) | 0x0f0f_0f0fu128) >> 36;
+    assert_eq!(gpr(&mut env, 6), want as u64);
+}
+
+#[test]
+fn exec_dep_forms() {
+    let mut env = env();
+    set_q(&mut env, 0x1000);
+    // DepSar（VDEP、nz=1 併合）: tpos=sar=20 → 下位 8 ビットを
+    // LSB 位置 31-20=11 に挿入。
+    set_gpr(&mut env, 6, 0x1234_5678);
+    set_gpr(&mut env, 1, 0xab);
+    set_sar(&mut env, 20);
+    step(&mut env, 0xd4c1_0418); // dep r1,sar(len=8),r6
+    assert_eq!(gpr(&mut env, 6), 0x1234_5678 & !(0xff << 11) | 0xab << 11);
+    // sar=3 → tpos<len-1 は上端切り詰め（src 下位 4 ビットが最上端へ）。
+    set_gpr(&mut env, 6, 0x1234_5678);
+    set_sar(&mut env, 3);
+    step(&mut env, 0xd4c1_0418);
+    assert_eq!(gpr(&mut env, 6), 0xb234_5678);
+    // DepSarD（DEPD 可変）: tpos=sar=40 → shl=23。
+    set_gpr(&mut env, 6, 0x1122_3344_5566_7788);
+    set_sar(&mut env, 40);
+    step(&mut env, 0xd4c1_0618); // depd r1,sar(len=8),r6
+    assert_eq!(
+        gpr(&mut env, 6),
+        0x1122_3344_5566_7788 & !(0xff << 23) | 0xab << 23
+    );
+}
+
+#[test]
+fn exec_dep_imm_forms() {
+    let mut env = env();
+    set_q(&mut env, 0x1000);
+    // DepImm（DEP、nz=1）: p=11 → cpos=20 → 下位 8 ビットを
+    // LSB 位置 20 に挿入。
+    set_gpr(&mut env, 6, 0x1234_5678);
+    set_gpr(&mut env, 1, 0xab);
+    step(&mut env, 0xd4c1_0e98); // dep r1,11,8,r6
+    assert_eq!(gpr(&mut env, 6), 0x1ab4_5678);
+    // ZDEP（nz=0）は併合先を 0 化してから挿入。
+    step(&mut env, 0xd4c1_0a98); // zdep r1,11,8,r6
+    assert_eq!(gpr(&mut env, 6), 0xab << 20);
+    // DepImmD（DEPD 固定）: pos=32 → cpos6=31 → 下位 8 ビットを
+    // LSB 位置 31 に挿入。
+    set_gpr(&mut env, 6, 0x1122_3344_5566_7788);
+    step(&mut env, 0xf0c1_07f8); // depd r1,32,8,r6
+    assert_eq!(
+        gpr(&mut env, 6),
+        0x1122_3344_5566_7788 & !(0xffu64 << 31) | 0xabu64 << 31
+    );
+}
+
+#[test]
+fn exec_depi_forms() {
+    let mut env = env();
+    set_q(&mut env, 0x1000);
+    // DepiSar（VDEPI、nz=1、d=0）: 符号拡張即値の下位 len を挿入。
+    set_gpr(&mut env, 6, 0x1234_5678);
+    set_sar(&mut env, 20);
+    step(&mut env, 0xd4df_1418); // depi -1,sar(len=8),r6
+    assert_eq!(gpr(&mut env, 6), 0x1234_5678 & !(0xff << 11) | 0xff << 11);
+    // DepiImm nz=0（ZDEPI）: -1 の下位 16 ビットを p=8 に置く。
+    step(&mut env, 0xd4df_1af0); // depi -1,8,16,r6
+    assert_eq!(gpr(&mut env, 6), 0xff80_0000);
+    // DepiImm nz=1（DEPI）: +5 を併合挿入。
+    set_gpr(&mut env, 6, 0x00ff_ffff);
+    step(&mut env, 0xd4ca_1ef0); // depi 5,8,16,r6
+    assert_eq!(gpr(&mut env, 6), 0x00ff_ffff & !(0xffff << 23) | 5 << 23);
+    // DepiImmD（DEPDI 固定）: +3 を pos=32（LSB 31）に。
+    step(&mut env, 0xf4c6_03f8); // depdi 3,32,8,r6
+    assert_eq!(gpr(&mut env, 6), 3u64 << 31);
+}
+
+// ---- stby/stdby・FP ロード/ストア検査（段階17・Step0）----
+// memcpy が fldd/fstd と stby を使うので、ビット移動だけ実装する。
+use polyisa_mem::{Access, AccessKind, Align, Endian, Perms, VirtAddr};
+
+const MEM_READ: Access = Access {
+    endian: Endian::Be,
+    align: Align::Natural,
+    kind: AccessKind::DataRead,
+};
+
+fn mem_bytes(env: &mut BareEnv, addr: u64, n: usize) -> Vec<u8> {
+    let mut buf = vec![0u8; n];
+    env.backend
+        .mem
+        .read(VirtAddr(addr), &mut buf, MEM_READ)
+        .unwrap();
+    buf
+}
+
+#[test]
+fn exec_stby_begin_end_bytes() {
+    let mut env = env();
+    set_q(&mut env, 0x1000);
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    // stby,b r2,0(r6): a=0、m=0。EA&3=1 → ワードの bytes 1..3 に
+    // r2 の BE バイト 1..3 を書く。
+    set_gpr(&mut env, 6, 0x2001);
+    set_gpr(&mut env, 2, 0xaabb_ccdd);
+    step(&mut env, 0x0cc2_1300);
+    assert_eq!(mem_bytes(&mut env, 0x2000, 4), [0x00, 0xbb, 0xcc, 0xdd]);
+    // stby,e r2,0(r6): a=1。ワード先頭から EA 直前まで → byte0 だけ。
+    env.backend
+        .mem
+        .write(VirtAddr(0x2000), &[0, 0, 0, 0])
+        .unwrap();
+    step(&mut env, 0x0cc2_3300);
+    assert_eq!(mem_bytes(&mut env, 0x2000, 4), [0xaa, 0, 0, 0]);
+    // stby,b,m r2,4(r6): EA=更新前の r6、書き戻しは (r6+4)&~3。
+    set_gpr(&mut env, 6, 0x2001);
+    set_gpr(&mut env, 2, 0xaabb_ccdd);
+    step(&mut env, 0x0cc2_1328);
+    assert_eq!(gpr(&mut env, 6), 0x2004);
+}
+
+#[test]
+fn exec_stdby_begin() {
+    let mut env = env();
+    set_q(&mut env, 0x1000);
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    // stdby,b r2,0(r6): EA&7=1 → ダブルワードの bytes 1..7。
+    set_gpr(&mut env, 6, 0x2001);
+    set_gpr(&mut env, 2, 0x1122_3344_5566_7788);
+    step(&mut env, 0x0cc2_1340);
+    assert_eq!(
+        mem_bytes(&mut env, 0x2000, 8),
+        [0x00, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88]
+    );
+}
+
+#[test]
+fn exec_fp_load_store_moves_bits() {
+    let mut env = env();
+    set_q(&mut env, 0x1000);
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    // fstd fr5,0(r6): 64 ビットをそのまま格納（busybox の memcpy
+    // で実際に停止した語 0x2c30122c と同形式）。
+    set_gpr(&mut env, 6, 0x2000);
+    set_fpr(&mut env, 5, 0x1122_3344_5566_7788);
+    step(&mut env, 0x2cc0_1205);
+    assert_eq!(
+        mem_bytes(&mut env, 0x2000, 8),
+        [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88]
+    );
+    // fldd fr7,0(r6): 同じ内容を別レジスタへ読み戻す。
+    step(&mut env, 0x2cc0_1007);
+    assert_eq!(fpr(&mut env, 7), 0x1122_3344_5566_7788);
+    // fstw fr4R,0(r6): opcode 0x09。右半分（下位 32 ビット）だけ
+    // を書く（r64t = cat(bit6=1,t5=4) = 36 → 4R）。
+    set_fpr(&mut env, 4, 0xaabb_ccdd_1122_3344);
+    step(&mut env, 0x24c0_1244);
+    assert_eq!(mem_bytes(&mut env, 0x2000, 4), [0x11, 0x22, 0x33, 0x44]);
+    // fstw fr4L: 左半分（上位 32 ビット）。r64t=4。
+    step(&mut env, 0x24c0_1204);
+    assert_eq!(mem_bytes(&mut env, 0x2000, 4), [0xaa, 0xbb, 0xcc, 0xdd]);
+    // fldw fr8R: メモリ 4 バイトを右半分に読む（左半分は保持）。
+    set_fpr(&mut env, 8, 0xdead_beef_cafe_f00d);
+    step(&mut env, 0x24c0_1048);
+    assert_eq!(fpr(&mut env, 8), 0xdead_beef_aabb_ccdd);
+    // flddx インデックス形式: EA = r6 + r7。
+    env.backend
+        .mem
+        .write(VirtAddr(0x2008), &0xfeed_face_0bad_c0deu64.to_be_bytes())
+        .unwrap();
+    set_gpr(&mut env, 7, 0x8);
+    step(&mut env, 0x2cc7_0009);
+    assert_eq!(fpr(&mut env, 9), 0xfeed_face_0bad_c0de);
+}

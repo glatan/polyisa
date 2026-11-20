@@ -24,6 +24,12 @@
 //!   スロット中の `ldi %r20` が syscall 番号を置けるように
 //!   するためである。
 //!
+//! - シフト・抽出・挿入: `shrp`（SHRPW/SHRPD = VSHD/SHD、SAR/
+//!   即値、32/64 ビット）、`extr`（EXTR*/EXTRD、SAR/即値、
+//!   符号拡張選択）、`dep`/`depi`（DEP/DEPI/ZDEP/ZDEPI と
+//!   DEPD/DEPW/DEPDI、SAR/即値、併合・零置換選択）。位置は
+//!   HP の左端起算記法を LSB シフト量に換算して評価する。
+//!
 //! 条件コードは 32 ビット（d=0）と 64 ビット（d=1）の両方を
 //! 評価する。`dcor`/`ds`/`hadd` 等の MAX/十進補正や FP は
 //! 未実装（`Ok(false)`）。
@@ -122,6 +128,35 @@ impl Sr {
     pub fn set<B: Backend>(self, b: &mut B, v: B::V<W64>) {
         b.set(self.state(), v);
     }
+}
+
+/// FPR の 32 ビット半分の読み出し。`r64` は L/R 選択付きの
+/// 6 ビット番号（bit5=0 → 左半分＝64 ビットレジスタの上位
+/// 32 ビット、bit5=1 → 右半分＝下位 32 ビット）。
+/// Ref: SPEC-PARISC-20 §8（Table 8-1。frnL/frnR の命名規則）.
+fn fpr_get_w<B: Backend>(b: &mut B, r64: u64) -> B::V<W64> {
+    let d = b.get(Fpr((r64 & 31) as u8).state());
+    if r64 & 32 != 0 {
+        and_n(b, d, 0xffff_ffff)
+    } else {
+        shr_n(b, d, 32)
+    }
+}
+
+/// FPR の 32 ビット半分への書き込み（`fpr_get_w` と同じ規則）。
+fn fpr_set_w<B: Backend>(b: &mut B, r64: u64, v: B::V<W64>) {
+    let st = Fpr((r64 & 31) as u8).state();
+    let old = b.get(st);
+    let new = if r64 & 32 != 0 {
+        let hi = and_n(b, old, 0xffff_ffff_0000_0000);
+        let lo = and_n(b, v, 0xffff_ffff);
+        b.or(hi, lo)
+    } else {
+        let lo = and_n(b, old, 0xffff_ffff);
+        let hi = shl_n(b, v, 32);
+        b.or(hi, lo)
+    };
+    b.set(st, new);
 }
 
 /// PSW の位置。ユーザモードに必要なビットのみを管理する独自
@@ -676,6 +711,160 @@ fn unit_add_cond<B: Backend>(
         }
     };
     if cf & 1 != 0 { bnot(b, c) } else { c }
+}
+
+// ----------------------------------------------------------------
+// shift pair / extract / deposit の共通部品。
+// HP の bit 記法（左端=0）の位置 pos は、LSB 起算では
+// (31-pos) / (63-pos) のシフト量に対応する。
+// Ref: SPEC-PARISC-11 §5-122〜5-135（VSHD/SHD/VEXTR*/EXTR*/
+// VDEP*/DEP*/ZVDEP*/ZDEP*/VDEPI*/DEPI*/ZVDEPI/ZDEPI）、
+// SPEC-PARISC-20 §7-38〜45（DEPD/DEPDI/DEPW/DEPWI）、
+// §7-48〜50（EXTRD/EXTRW）、§7-122〜124（SHRPD/SHRPW）、
+// 付録E Table E-1（assemble_6）。
+// ----------------------------------------------------------------
+
+/// `assemble_6(cl,clen)` = `32*cl + 32 - clen`。`len6` は
+/// cat(cl,clen) の連結値（cl は len6 の bit5）。
+/// Ref: SPEC-PARISC-20 付録E Table E-1.
+fn assemble_6(len6: u64) -> u64 {
+    32 * (len6 >> 5) + 32 - (len6 & 31)
+}
+
+/// `w` ビット分のマスク（w >= 64 は全 1）。
+const fn mask64w(w: u64) -> u64 {
+    if w >= 64 { !0 } else { (1u64 << w) - 1 }
+}
+
+/// extract 共通部。`tpos` は HP 位置の実行時値（可変形は SAR、
+/// 固定形は語の pos 桁をそのまま）。`len` は復元済みの実長
+/// （1..=64 のデコード時定数）。`se` は符号拡張選択。
+/// `d`=false は 32 ビット形で結果を下位 32 ビットに揃える。
+///
+/// 可変形でフィールドが左端（HP bit0）を超える場合、
+/// EXTR*/EXTRD,U 系は超えた分が 0 になり、EXTRS/EXTRD,S 系は
+/// フィールド幅 `min(len, tpos+1)` の最上位ビットで符号拡張される
+/// （SPEC-PARISC-20 EXTRD operation の `tlen` 処理。入力側の
+/// 符号拡張と併せて、32 ビット形では sext64 入力→len 幅の抽出→
+/// `pext = min(len-1, tpos)` からの再拡張で spec と同じ結果に
+/// なる）。固定形の `pos < len-1` は未定義だが、同じ式の結果を
+/// そのまま書く（切り詰めとして読める決定的な値）。
+// Gap: GAP-0053
+fn do_extr<B: Backend>(
+    b: &mut B,
+    r: B::V<W64>,
+    tpos: B::V<W64>,
+    len: u64,
+    se: bool,
+    d: bool,
+) -> B::V<W64> {
+    let msb: u64 = if d { 63 } else { 31 };
+    let sh = {
+        let m = k(b, msb);
+        b.sub(m, tpos)
+    };
+    // 32 ビット形の符号付き可変抽出は、左端を超えた分に元語の
+    // 符号ビットが入るので入力を先に 64 ビット符号拡張する
+    // （SPEC-PARISC-11 VEXTRS operation の sign_ext_64 入力）。
+    let src = if d {
+        r
+    } else if se {
+        sext_bits(b, r, 32)
+    } else {
+        and_n(b, r, 0xffff_ffff)
+    };
+    let shifted = b.shr_l(src, sh);
+    let field = and_n(b, shifted, mask64w(len));
+    let res = if se {
+        // 動的幅の符号拡張: フィールド最上位位置 pext =
+        // min(len-1, tpos) を符号ビットとして上を埋める。
+        // shl/sra の対で任意幅の符号拡張を作る。
+        let l1 = k(b, len - 1);
+        let lt = b.cmp(Cmp::LtU, tpos, l1);
+        let pext = b.select::<W64>(lt, tpos, l1);
+        let m63 = k(b, 63u64);
+        let s = b.sub(m63, pext);
+        let f = b.shl(field, s);
+        b.shr_a(f, s)
+    } else {
+        field
+    };
+    if d { res } else { and_n(b, res, 0xffff_ffff) }
+}
+
+/// deposit 共通部。`old_t` は併合先（nz=1 のときだけ読む）、
+/// `tpos` は HP 位置の実行時値、`src` は右詰めフィールド源
+/// （depi は low_sign_ext 済みの 5 ビット即値）。`len` は実長。
+/// `nz`=false（Z 完語）は `old_t` を 0 として併合する。
+///
+/// 可変形でフィールドが左端を超える場合は `tpos+1` ビットに
+/// 切り詰めて最上端に置く（SPEC-PARISC-11 VDEP/VDEPI、
+/// SPEC-PARISC-20 DEPD/DEPDI の `tpos-len+1 < 0` 側）。
+/// 固定形の超過は未定義だが同じ式で決定的に評価する。
+// Gap: GAP-0053
+fn do_dep<B: Backend>(
+    b: &mut B,
+    old_t: B::V<W64>,
+    tpos: B::V<W64>,
+    src: B::V<W64>,
+    len: u64,
+    nz: bool,
+    d: bool,
+) -> B::V<W64> {
+    let msb: u64 = if d { 63 } else { 31 };
+    // 32 ビット形（DEPW/DEPWI と PA1.1 DEP/DEPI 系）の併合元は
+    // 下位 32 ビットだけを見る（SPEC-PARISC-20 DEPW: 左半は
+    // undeﬁned → zext32 を正準形として採用）。
+    let base = if nz {
+        if d {
+            old_t
+        } else {
+            and_n(b, old_t, 0xffff_ffff)
+        }
+    } else {
+        k(b, 0)
+    };
+    let shl = {
+        let m = k(b, msb);
+        b.sub(m, tpos)
+    };
+    let fmask = k(b, mask64w(len));
+    // 通常側: len ビットを shl 位置へ挿入し、残りを base から残す。
+    let src_f = b.and(src, fmask);
+    let ins = b.shl(src_f, shl);
+    let win = {
+        let w = b.shl(fmask, shl);
+        b.not(w)
+    };
+    let kept = b.and(base, win);
+    let merged = b.or(kept, ins);
+    // 上端はみ出し側（可変形のみ到達）: LSB 位置 shl より上を
+    // `src` の右詰め tpos+1 ビットで、以下を base で埋める。
+    // src の上位は 64 ビット境界で落ちるのでマスク不要。
+    let l1 = k(b, len - 1);
+    let over = b.cmp(Cmp::LtU, tpos, l1);
+    let low_mask = {
+        let all = k(b, !0u64);
+        let s = b.shl(all, shl);
+        b.not(s)
+    };
+    let low = b.and(base, low_mask);
+    let hi = b.shl(src, shl);
+    let over_res = b.or(low, hi);
+    let res = b.select::<W64>(over, over_res, merged);
+    if d { res } else { and_n(b, res, 0xffff_ffff) }
+}
+
+/// extract/deposit/shift の条件適用。c!=0 のときだけ PSW.N を
+/// 結果に応じて立てる（N は消費済みで 0 から始まるので
+/// `cond` 値の代入でよい）。`d` は条件表の幅選択
+/// （SPEC-PARISC-11 Table 5-7 / SPEC-PARISC-20 Table D-13/D-14）。
+fn sed_nullify<B: Backend>(b: &mut B, c: u64, d: bool, res: B::V<W64>) {
+    if c != 0 {
+        let cond = sed_cond(b, c, d, res);
+        let cv = bval(b, cond);
+        set_psw_n(b, cv);
+    }
 }
 
 // ----------------------------------------------------------------
@@ -1784,6 +1973,336 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
             if m != 0 {
                 Gr(ops[0] as u8).set(b, new_base);
             }
+        }
+        // ---- STBY/STDBY（memcpy の端処理用の部分ストア）----
+        Insn::Stby | Insn::Stdby => {
+            // ops = [b, r, sp, a, m, disp]。a=0 は ,B（EA バイトから
+            // そのワード/ダブルワードの末尾まで）、a=1 は ,E（ワード
+            // 先頭から EA 直前まで）を BE 順で書く。m=1 は
+            // GR[b] = (GR[b]+disp) & ~mask の更新で、B,M の EA は
+            // 更新前の GR[b] そのもの。PSW.E=0（BE）側のみ実装
+            // （hppa32 Linux は常に BE）。
+            // Gap: GAP-0053
+            // Ref: SPEC-PARISC-11 §STBYS, SPEC-PARISC-20 §STDBY.
+            let is_d = insn == Insn::Stdby;
+            let wmask: u64 = if is_d { 7 } else { 3 };
+            let base = Gr(ops[0] as u8).get(b);
+            let disp = im5(ops[5]);
+            let a = ops[3];
+            let m = ops[4];
+            // B,M（a=0,m=1）だけ EA = 更新前の GR[b]。
+            let off = if a == 0 && m != 0 {
+                base
+            } else {
+                add_n(b, base, disp)
+            };
+            let j = and_n(b, off, wmask);
+            let a_addr = and_n(b, off, !wmask);
+            let r = Gr(ops[1] as u8).get(b);
+            let n: u64 = if is_d { 8 } else { 4 };
+            // バイト k を書く条件: B は k>=j、E は k<j。
+            // 部分書きなので W8 ストアを個数分だけ述語付きで並べる。
+            for kk in 0..n {
+                let kc = k(b, kk);
+                let store_it = if a == 0 {
+                    b.cmp(Cmp::GeU, kc, j)
+                } else {
+                    b.cmp(Cmp::LtU, kc, j)
+                };
+                let addr = b.add(a_addr, kc);
+                let byte = shr_n(b, r, (n - 1 - kk) * 8);
+                b.if_then(store_it, |b| {
+                    let v = b.trunc::<W64, W8>(byte);
+                    b.store(addr, v, DATA_WRITE)
+                })?;
+            }
+            if m != 0 {
+                // 更新後のベースはアライン済み。
+                let nb = and_n(b, off, !wmask);
+                // E,M / B,M ともに (GR[b]+disp) & ~mask。B,M は
+                // off=GR[b] なので別計算。
+                let nb = if a == 0 {
+                    let t = add_n(b, base, disp);
+                    and_n(b, t, !wmask)
+                } else {
+                    nb
+                };
+                Gr(ops[0] as u8).set(b, nb);
+            }
+        }
+        // ---- FP load/store（ビット移動のみ。演算なし）----
+        Insn::Fldwx | Insn::Fstwx | Insn::Flddx | Insn::FstdIdx => {
+            // ops = [b, x, sp, u, m, t]。u(,s)はワード=<<2・
+            // ダブルワード=<<3 の事前スケール。m(,m)は EA=base の
+            // 事後更新（b += dx）。cc は無視。
+            // Gap: GAP-0053
+            // Ref: SPEC-PARISC-20 §FLDW/FSTW/FLDD/FSTD Operation.
+            let is_d = matches!(insn, Insn::Flddx | Insn::FstdIdx);
+            let x = Gr(ops[1] as u8).get(b);
+            let dx = if ops[3] != 0 {
+                shl_n(b, x, if is_d { 3 } else { 2 })
+            } else {
+                x
+            };
+            let m: i64 = if ops[4] != 0 { 1 } else { 0 };
+            let (ea, new_base) = gva(b, ops[0], dx, 0, m);
+            let t = ops[5];
+            match insn {
+                Insn::Fldwx => {
+                    let v: B::V<W32> = b.load(ea, DATA_READ)?;
+                    let v = b.zext::<W32, W64>(v);
+                    fpr_set_w(b, t, v);
+                }
+                Insn::Fstwx => {
+                    let v = fpr_get_w(b, t);
+                    let v = b.trunc::<W64, W32>(v);
+                    b.store(ea, v, DATA_WRITE)?;
+                }
+                Insn::Flddx => {
+                    let v: B::V<W64> = b.load(ea, DATA_READ)?;
+                    b.set(Fpr(t as u8).state(), v);
+                }
+                _ => {
+                    let v = b.get(Fpr(t as u8).state());
+                    b.store(ea, v, DATA_WRITE)?;
+                }
+            }
+            if m != 0 {
+                Gr(ops[0] as u8).set(b, new_base);
+            }
+        }
+        Insn::Fldwi | Insn::Fstwi | Insn::Flddi | Insn::FstdIm5 => {
+            // ops = [b, im5, sp, ma, t]。ma = m(bit5)<<1|a(bit13):
+            // m=1 でベース更新（a=0 事後、a=1 事前）。
+            let m = ma_to_m(ops[3]);
+            let disp = im5(ops[1]);
+            let zero = k(b, 0);
+            let (ea, new_base) = gva(b, ops[0], zero, disp, m);
+            let t = ops[4];
+            match insn {
+                Insn::Fldwi => {
+                    let v: B::V<W32> = b.load(ea, DATA_READ)?;
+                    let v = b.zext::<W32, W64>(v);
+                    fpr_set_w(b, t, v);
+                }
+                Insn::Fstwi => {
+                    let v = fpr_get_w(b, t);
+                    let v = b.trunc::<W64, W32>(v);
+                    b.store(ea, v, DATA_WRITE)?;
+                }
+                Insn::Flddi => {
+                    let v: B::V<W64> = b.load(ea, DATA_READ)?;
+                    b.set(Fpr(t as u8).state(), v);
+                }
+                _ => {
+                    let v = b.get(Fpr(t as u8).state());
+                    b.store(ea, v, DATA_WRITE)?;
+                }
+            }
+            if m != 0 {
+                Gr(ops[0] as u8).set(b, new_base);
+            }
+        }
+        Insn::Fldd | Insn::Fstd => {
+            // ops = [b, t, off]。Format 3/Format 43-44 系の長変位
+            // （LDD/STD と同じ im10a+m+a+i レイアウト）。
+            let w = u64::from(word);
+            let i = w & 1;
+            let im10a = (w >> 4) & 0x3ff;
+            let d16 = (((-(i as i64)) as u64) << 13 | (im10a << 3)) as u16 as i16 as i64;
+            let m = ma_to_m((w >> 2) & 3);
+            let zero = k(b, 0);
+            let (ea, new_base) = gva(b, ops[0], zero, d16 as u64, m);
+            if insn == Insn::Fldd {
+                let v: B::V<W64> = b.load(ea, DATA_READ)?;
+                b.set(Fpr(ops[1] as u8).state(), v);
+            } else {
+                let v = b.get(Fpr(ops[1] as u8).state());
+                b.store(ea, v, DATA_WRITE)?;
+            }
+            if m != 0 {
+                Gr(ops[0] as u8).set(b, new_base);
+            }
+        }
+        Insn::FldwO | Insn::FldwO0 | Insn::FstwO | Insn::FstwO0 => {
+            // ops = [b, f, offa, a]。長変位のワード形。
+            // FldwO0/FstwO0（Format 43、opcode 0x17/0x1f、bit2=0）
+            // はベース更新なし。FldwO/FstwO（0x16/0x1e、Format 44）
+            // は a=1 が事前、a=0 が事後。
+            // Ref: SPEC-PARISC-20 §FLDW/FSTW（Formats 43/44）.
+            let has_mod = matches!(insn, Insn::FldwO | Insn::FstwO);
+            let m: i64 = if has_mod {
+                if ops[3] != 0 { -1 } else { 1 }
+            } else {
+                0
+            };
+            let d16 = expand_12a(u64::from(word));
+            let zero = k(b, 0);
+            let (ea, new_base) = gva(b, ops[0], zero, d16, m);
+            let t = ops[1];
+            if matches!(insn, Insn::FldwO | Insn::FldwO0) {
+                let v: B::V<W32> = b.load(ea, DATA_READ)?;
+                let v = b.zext::<W32, W64>(v);
+                fpr_set_w(b, t, v);
+            } else {
+                let v = fpr_get_w(b, t);
+                let v = b.trunc::<W64, W32>(v);
+                b.store(ea, v, DATA_WRITE)?;
+            }
+            if m != 0 {
+                Gr(ops[0] as u8).set(b, new_base);
+            }
+        }
+        // ---- shift pair（SHRPW/SHRPD = VSHD/SHD）----
+        Insn::ShrpSar => {
+            // ops = [r2, r1, c, d, t]。d=0 は 32 ビット形
+            // （cat(GR[r1]{1..31},GR[r2]{32..63}) >> sar{0..4} の
+            // 下位 32 ビット）、d=1 は SHRPD 可変
+            // （cat(GR[r1]{1..63},GR[r2]) >> sar の下位 64 ビット）。
+            // Ref: SPEC-PARISC-11 §VSHD, SPEC-PARISC-20 §SHRPD/SHRPW.
+            let r2 = Gr(ops[0] as u8).get(b);
+            let r1 = Gr(ops[1] as u8).get(b);
+            let sar = Cr(11).get(b);
+            if ops[3] == 0 {
+                let sar5 = and_n(b, sar, 31);
+                let hi = {
+                    let m = and_n(b, r1, 0x7fff_ffff);
+                    shl_n(b, m, 32)
+                };
+                let lo = and_n(b, r2, 0xffff_ffff);
+                let cat = b.or(hi, lo);
+                let v = b.shr_l(cat, sar5);
+                let res = and_n(b, v, 0xffff_ffff);
+                Gr(ops[4] as u8).set(b, res);
+                sed_nullify(b, ops[2], false, res);
+            } else {
+                let sar6 = and_n(b, sar, 63);
+                let hi = and_n(b, r1, 0x7fff_ffff_ffff_ffff);
+                let z = k(b, 0);
+                let is0 = b.cmp(Cmp::Eq, sar6, z);
+                let s64 = {
+                    let m = k(b, 64);
+                    b.sub(m, sar6)
+                };
+                let h = b.shl(hi, s64);
+                let l = b.shr_l(r2, sar6);
+                let shifted = b.or(h, l);
+                let res = b.select::<W64>(is0, r2, shifted);
+                Gr(ops[4] as u8).set(b, res);
+                sed_nullify(b, ops[2], true, res);
+            }
+        }
+        Insn::ShrpImm => {
+            // ops = [r2, r1, c, cpos, t]。SHD/SHRPW 固定:
+            // sa = 31 - cpos（cpos は語の値のまま渡される）。
+            let r2 = Gr(ops[0] as u8).get(b);
+            let r1 = Gr(ops[1] as u8).get(b);
+            let sh = 31 - ops[3];
+            let hi = {
+                let m = and_n(b, r1, 0x7fff_ffff);
+                shl_n(b, m, 32)
+            };
+            let lo = and_n(b, r2, 0xffff_ffff);
+            let cat = b.or(hi, lo);
+            let v = shr_n(b, cat, sh);
+            let res = and_n(b, v, 0xffff_ffff);
+            Gr(ops[4] as u8).set(b, res);
+            sed_nullify(b, ops[2], false, res);
+        }
+        Insn::ShrpImmD => {
+            // ops = [r2, r1, c, cpos6, t]。SHRPD 固定:
+            // sa = 63 - cpos6（cat(cp,cpos) = 63-sa の連結）。
+            let r2 = Gr(ops[0] as u8).get(b);
+            let r1 = Gr(ops[1] as u8).get(b);
+            let sh = 63 - ops[3];
+            let hi = and_n(b, r1, 0x7fff_ffff_ffff_ffff);
+            let res = if sh == 0 {
+                r2
+            } else {
+                let h = shl_n(b, hi, 64 - sh);
+                let l = shr_n(b, r2, sh);
+                b.or(h, l)
+            };
+            Gr(ops[4] as u8).set(b, res);
+            sed_nullify(b, ops[2], true, res);
+        }
+        // ---- extract（EXTR*/EXTRD）----
+        Insn::ExtrSar | Insn::ExtrSarD => {
+            // ops = [r, t, c, se, clen]。可変形は pos = SAR
+            // （32 ビット形は {1..5} の 5 ビットだけを見る）。
+            let r = Gr(ops[0] as u8).get(b);
+            let sar = Cr(11).get(b);
+            let d = insn == Insn::ExtrSarD;
+            let len = if d { assemble_6(ops[4]) } else { 32 - ops[4] };
+            let pos = and_n(b, sar, if d { 63 } else { 31 });
+            let res = do_extr(b, r, pos, len, ops[3] != 0, d);
+            Gr(ops[1] as u8).set(b, res);
+            sed_nullify(b, ops[2], d, res);
+        }
+        Insn::ExtrImm | Insn::ExtrImmD => {
+            // ops = [r, t, c, se, pos, clen]。pos は HP 位置を
+            // そのまま持つ（EXTR*/EXTRD 固定形は補数でない。
+            // SPEC-PARISC-11 付録D Table D-8、SPEC-PARISC-20 §EXTRD）。
+            let r = Gr(ops[0] as u8).get(b);
+            let d = insn == Insn::ExtrImmD;
+            let len = if d { assemble_6(ops[5]) } else { 32 - ops[5] };
+            let pos = k(b, ops[4]);
+            let res = do_extr(b, r, pos, len, ops[3] != 0, d);
+            Gr(ops[1] as u8).set(b, res);
+            sed_nullify(b, ops[2], d, res);
+        }
+        // ---- deposit（VDEP/DEP/ZVDEP/ZDEP、DEPD/DEPW）----
+        Insn::DepSar | Insn::DepSarD => {
+            // ops = [t, r, c, nz, clen]。可変形は tpos = SAR。
+            // nz=0 は ZVDEP/ZDEP 系（併合先を先に 0 化）。
+            let t = Gr(ops[0] as u8).get(b);
+            let r = Gr(ops[1] as u8).get(b);
+            let sar = Cr(11).get(b);
+            let d = insn == Insn::DepSarD;
+            let len = if d { assemble_6(ops[4]) } else { 32 - ops[4] };
+            let tpos = and_n(b, sar, if d { 63 } else { 31 });
+            let res = do_dep(b, t, tpos, r, len, ops[3] != 0, d);
+            Gr(ops[0] as u8).set(b, res);
+            sed_nullify(b, ops[2], d, res);
+        }
+        Insn::DepImm | Insn::DepImmD => {
+            // ops = [t, r, c, nz, cpos, clen]。語の位置桁は
+            // cp = 31-p / cat(cp,cpos) = 63-pos をそのまま持つので、
+            // HP 位置へ戻すと LSB シフト量と一致する。
+            let t = Gr(ops[0] as u8).get(b);
+            let r = Gr(ops[1] as u8).get(b);
+            let d = insn == Insn::DepImmD;
+            let len = if d { assemble_6(ops[5]) } else { 32 - ops[5] };
+            let tpos = k(b, if d { 63 - ops[4] } else { 31 - ops[4] });
+            let res = do_dep(b, t, tpos, r, len, ops[3] != 0, d);
+            Gr(ops[0] as u8).set(b, res);
+            sed_nullify(b, ops[2], d, res);
+        }
+        Insn::DepiSar => {
+            // ops = [t, i, c, nz, d, clen]。d=0 は ZVDEPI/VDEPI
+            // （32 ビット形）、d=1 は DEPDI 可変（len6a の cl が
+            // 立つ）。i は im5_16 の low_sign_ext 即値。
+            let t = Gr(ops[0] as u8).get(b);
+            let src = k(b, im5(ops[1]));
+            let sar = Cr(11).get(b);
+            let d = ops[4] != 0;
+            let len = assemble_6(ops[5]);
+            let tpos = and_n(b, sar, if d { 63 } else { 31 });
+            let res = do_dep(b, t, tpos, src, len, ops[3] != 0, d);
+            Gr(ops[0] as u8).set(b, res);
+            sed_nullify(b, ops[2], d, res);
+        }
+        Insn::DepiImm | Insn::DepiImmD => {
+            // ops = [t, i, c, nz, cpos, clen]。ZDEPI/DEPI 系と
+            // DEPDI 固定形。
+            let t = Gr(ops[0] as u8).get(b);
+            let src = k(b, im5(ops[1]));
+            let d = insn == Insn::DepiImmD;
+            let len = if d { assemble_6(ops[5]) } else { 32 - ops[5] };
+            let tpos = k(b, if d { 63 - ops[4] } else { 31 - ops[4] });
+            let res = do_dep(b, t, tpos, src, len, ops[3] != 0, d);
+            Gr(ops[0] as u8).set(b, res);
+            sed_nullify(b, ops[2], d, res);
         }
         // ---- システム系（ユーザが使えるもの）----
         Insn::Sync | Insn::Fdc => {}

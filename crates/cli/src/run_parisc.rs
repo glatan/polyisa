@@ -296,6 +296,9 @@ fn step_parisc(
         if stack_grow(env, stack, &e).is_some() {
             return Ok(());
         }
+        if std::env::var_os("POLYISA_PARISC_TRACE").is_some() {
+            eprintln!("parisc: fetch fault pc={addr:#x} word=0xffffffff");
+        }
         return Err(unimpl(0xffff_ffff));
     }
     let word = u32::from_be_bytes(b4);
@@ -360,6 +363,12 @@ fn step_parisc(
             if stack_grow(env, stack, &e).is_some() {
                 Ok(())
             } else {
+                if std::env::var_os("POLYISA_PARISC_TRACE").is_some() {
+                    eprintln!(
+                        "parisc: page fault pc={addr:#x} word={word:#x} fault_addr={:?}",
+                        e.addr
+                    );
+                }
                 Err(unimpl(u64::from(word)))
             }
         }
