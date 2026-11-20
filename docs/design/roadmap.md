@@ -69,7 +69,7 @@
 
 | ID | 条件 | 判定 |
 |---|---|---|
-| S16-1 | alpha の配布物のコマンド群が、ゲストのルートを使って正しい出力を返す（テスト `heavy_program_alpha`）。 | 未整備 |
+| S16-1 | alpha の配布物のコマンド群が、ゲストのルートを使って正しい出力を返す（テスト `heavy_program_alpha`）。 | テスト：`heavy_program_alpha` |
 | S16-2 | ABI 表が SRC-LINUX の UAPI と一致することを所有者が確認する。 | 所有者 |
 
 作業計画：
