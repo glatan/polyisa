@@ -15,9 +15,9 @@
 use polyisa_engine::bare::BareEnv;
 use polyisa_engine::interp::{Ctrl, InterpExit};
 use polyisa_engine::run::{Outcome, TrapHandler, TrapOutcome};
-use polyisa_guest_alpha::{decode_model_ex, sem};
+use polyisa_guest_alpha::{Insn, decode_model_ex, sem};
 use polyisa_mem::{Access, AccessKind, Align, Endian, Perms, VirtAddr};
-use polyisa_sem::ExceptionKind;
+use polyisa_sem::{Backend as _, ExceptionKind};
 
 /// 実バイナリの処理量を見込んだ上限。
 const STEP_LIMIT: u64 = 256_000_000;
@@ -89,6 +89,10 @@ fn step_alpha(
         return Err(unimpl(env, u64::from(word)));
     };
     let r = env.step(|b| sem::exec(b, insn, word, pc));
+    // rpcc が読む疑似サイクルカウンタを1命令ぶん進める。例外発生でも
+    // その命令は消費されたので、完了したステップは全て数える。
+    let c = env.backend.get(sem::cycle_ref());
+    env.backend.set(sem::cycle_ref(), c + 1);
     match r {
         Ok(true) => {
             if env.backend.ctrl == Ctrl::Fallthrough {
@@ -99,7 +103,9 @@ fn step_alpha(
         // `exec` が受けなかった命令（この段階の範囲外）。
         Ok(false) => Err(unimpl(env, u64::from(word))),
         // call_pal は OS パーソナリティへ。Handled なら pc+4 に復帰。
-        Err(InterpExit::Exception(e)) if e.kind == ExceptionKind::Trap => {
+        // 命令語で分別しないと /v 算術例外（code=1）の Trap が
+        // call_pal 1 に化けるため、insn == CallPal で絞る。
+        Err(InterpExit::Exception(e)) if e.kind == ExceptionKind::Trap && insn == Insn::CallPal => {
             match sys.handle_trap(env, e.code as u32) {
                 TrapOutcome::Handled => {
                     env.pc += 4;
@@ -260,7 +266,6 @@ impl TrapHandler for NoSys {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use polyisa_sem::Backend as _;
 
     /// 語列（32ビット LE）を RX として写像した環境。`base` が入口。
     fn env_at(base: u64, words: &[u32]) -> BareEnv {

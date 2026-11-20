@@ -40,4 +40,9 @@ pub struct CpuState {
     pub pc: u64,
     /// PAL の rduniq/wruniq が転送するユニーク値（スレッドポインタ）。
     pub uniq: u64,
+    /// `rpcc` が読む簡易サイクルカウンタ。実行ループが1命令ごとに
+    /// インクリメントする（実時間ではなく命令数）。
+    pub cycle: u64,
+    /// `rc`/`rs` が読み書きする RX フラグバイト。
+    pub rx_flag: u64,
 }

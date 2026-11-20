@@ -6,16 +6,21 @@
 //! `lda`/`ldah`（アドレス形成＝定数ロード）、無条件の制御移譲
 //! （`br`/`bsr`/`jmp`/`jsr`/`jsr_coroutine`/`ret`）、`call_pal` の
 //! トラップ発生、PAL 予約オペコードの Undefined 例外。
-//! 条件分岐は段階16-8、load/store は段階16-7、整数 Operate は
-//! 段階16-5 で足す（それ以外の命令は `Ok(false)` を返し、
-//! 呼び出し側が未実装として扱う）。
+//! 段階16-5 で整数 Operate 系（算術・論理・比較・cmov・シフト・
+//! バイト操作・`mb`/`wmb`・`rpcc`/`rc`/`rs`）を足した。
+//! 条件分岐は段階16-8、load/store は段階16-7、乗除算と拡張命令
+//! （BWX/FIX/CIX/MVI）は段階16-6 で足す（それ以外の命令は
+//! `Ok(false)` を返し、呼び出し側が未実装として扱う）。
 //!
-//! 出典は SPEC-ALPHA-ARM である。
-//! Ref: SPEC-ALPHA-ARM.
+//! 出典は SPEC-ALPHA-ARM。ext/ins/msk/zap と cmpbge・/v 修飾の
+//! 細部は QEMU（SRC-QEMU）と照合済み。
+//! Ref: SPEC-ALPHA-ARM, SRC-QEMU.
 
-use polyisa_sem::{Backend, StateRef, W64};
+use polyisa_sem::{Backend, Cmp, ExceptionKind, GuestException, StateRef, W32, W64};
 
-use super::{CpuState, Insn, ops_fbrw, ops_fmbr, ops_fmld, ops_fpal, ops_fret};
+use super::{
+    CpuState, Insn, ops_fbrw, ops_fmbr, ops_fmfcw, ops_fmld, ops_fopl, ops_fopr, ops_fpal, ops_fret,
+};
 
 /// 整数レジスタ参照。r31 は読み出しで常に 0、書き込みは破棄される。
 // Ref: SPEC-ALPHA-ARM §Integer registers.
@@ -76,6 +81,18 @@ pub fn uniq_ref() -> StateRef<W64> {
     StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, uniq))
 }
 
+/// `rpcc` が読む簡易サイクルカウンタの状態位置。
+#[must_use]
+pub fn cycle_ref() -> StateRef<W64> {
+    StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, cycle))
+}
+
+/// `rc`/`rs` が読み書きする RX フラグバイトの状態位置。
+#[must_use]
+pub fn rx_flag_ref() -> StateRef<W64> {
+    StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, rx_flag))
+}
+
 /// `disp16` の符号拡張値。
 fn sext16(v: u32) -> i64 {
     i64::from(v as u16 as i16)
@@ -84,6 +101,460 @@ fn sext16(v: u32) -> i64 {
 /// `disp21` の符号拡張値。分岐変位はさらに左2シフトして使う。
 fn sext21(v: u32) -> i64 {
     i64::from(v) << 43 >> 43
+}
+
+// ---- 段階16-5: 整数 OPERATE のヘルパ ----
+
+/// `zap`/`ext`/`msk`/`ins` 系のバイト選択マスク（bit i = バイト i の
+/// 有効性）を 64 ビットマスクへ広げる。QEMU の `zapnot_mask` と同じ。
+// Ref: SRC-QEMU (target/alpha/translate.c zapnot_mask).
+fn zap_mask(m8: u8) -> u64 {
+    let mut m = 0u64;
+    for i in 0..8 {
+        if m8 >> i & 1 != 0 {
+            m |= 0xff << (i * 8);
+        }
+    }
+    m
+}
+
+/// `v` の下位 8 ビットをバイト選択マスクとして動的に広げる
+/// （`zap`/`zapnot` 用）。
+fn zap_mask_of<B: Backend>(b: &mut B, v: B::V<W64>) -> B::V<W64> {
+    let mut m = b.konst::<W64>(0);
+    for i in 0..8u64 {
+        let ik = b.konst::<W64>(i);
+        let bit = b.shr_l(v, ik);
+        let one = b.konst::<W64>(1);
+        let bit = b.and(bit, one);
+        let wk = b.konst::<W64>(0xffu64 << (i * 8));
+        let w = b.mul(bit, wk);
+        m = b.or(m, w);
+    }
+    m
+}
+
+/// W32 への切り詰めと符号拡張（*l 系命令は結果を符号拡張する）。
+// Ref: SPEC-ALPHA-ARM §4.7.1 (longword results are sign-extended).
+fn sext_w32<B: Backend>(b: &mut B, v: B::V<W64>) -> B::V<W64> {
+    let t = b.trunc::<W64, W32>(v);
+    b.sext::<W32, W64>(t)
+}
+
+/// 定数右論理シフト。
+fn shr_n<B: Backend>(b: &mut B, v: B::V<W64>, n: u64) -> B::V<W64> {
+    let k = b.konst::<W64>(n);
+    b.shr_l(v, k)
+}
+
+/// 定数左シフト。
+fn shl_n<B: Backend>(b: &mut B, v: B::V<W64>, n: u64) -> B::V<W64> {
+    let k = b.konst::<W64>(n);
+    b.shl(v, k)
+}
+
+/// 定数 AND。
+fn and_k<B: Backend>(b: &mut B, v: B::V<W64>, k: u64) -> B::V<W64> {
+    let kk = b.konst::<W64>(k);
+    b.and(v, kk)
+}
+
+/// 比較結果を 0/1 の整数値にする。
+fn cmp_to_int<B: Backend>(b: &mut B, op: Cmp, a: B::V<W64>, v: B::V<W64>) -> B::V<W64> {
+    let c = b.cmp(op, a, v);
+    let one = b.konst::<W64>(1);
+    let zero = b.konst::<W64>(0);
+    b.select(c, one, zero)
+}
+
+/// FOPR/FOPL オペランドを (ra値, 第2ソース値, rc) にほぐす。
+/// bit12=1 のリテラル形では第2ソースが lit8 のゼロ拡張。
+fn opr_ops<B: Backend>(b: &mut B, word: u32) -> (B::V<W64>, B::V<W64>, Gpr) {
+    if word & 0x1000 != 0 {
+        let o = ops_fopl(u128::from(word));
+        let a = Gpr(o.ra as u8).get(b);
+        let v = b.konst::<W64>(u64::from(o.lit8));
+        (a, v, Gpr(o.rc as u8))
+    } else {
+        let o = ops_fopr(u128::from(word));
+        let a = Gpr(o.ra as u8).get(b);
+        let v = Gpr(o.rb as u8).get(b);
+        (a, v, Gpr(o.rc as u8))
+    }
+}
+
+/// `cmpbge`: バイトごとの unsigned 比較で、バイト i の結果が結果の
+/// bit i に入る。16 ビットレーンの SWAR（QEMU helper_cmpbge と同じ
+/// 手順）: (a|0x100) - b のレーン内差分で、借りなしなら bit8 が残る。
+// Ref: SRC-QEMU (helper_cmpbge).
+fn cmpbge<B: Backend>(b: &mut B, a: B::V<W64>, v: B::V<W64>) -> B::V<W64> {
+    let lane = 0x00ff_00ff_00ff_00ff;
+    let carry = 0x0100_0100_0100_0100;
+    let al = and_k(b, a, lane);
+    let bl = and_k(b, v, lane);
+    let a8 = shr_n(b, a, 8);
+    let v8 = shr_n(b, v, 8);
+    let ah = and_k(b, a8, lane);
+    let bh = and_k(b, v8, lane);
+    let cl = {
+        let t = or_k(b, al, carry);
+        let d = b.sub(t, bl);
+        and_k(b, d, carry)
+    };
+    let ch = {
+        let t = or_k(b, ah, carry);
+        let d = b.sub(t, bh);
+        and_k(b, d, carry)
+    };
+    // レーン k の借りなしビットは位置 8+16k。結果ビット 2k に集める。
+    let gather = |b: &mut B, x: B::V<W64>| {
+        let g0 = {
+            let t = shr_n(b, x, 8);
+            and_k(b, t, 0x01)
+        };
+        let g1 = {
+            let t = shr_n(b, x, 22);
+            and_k(b, t, 0x04)
+        };
+        let g2 = {
+            let t = shr_n(b, x, 36);
+            and_k(b, t, 0x10)
+        };
+        let g3 = {
+            let t = shr_n(b, x, 50);
+            and_k(b, t, 0x40)
+        };
+        let lo = b.or(g0, g1);
+        let hi = b.or(g2, g3);
+        b.or(lo, hi)
+    };
+    let lo = gather(b, cl);
+    let hi = gather(b, ch);
+    let hi1 = shl_n(b, hi, 1);
+    b.or(lo, hi1)
+}
+
+fn or_k<B: Backend>(b: &mut B, v: B::V<W64>, k: u64) -> B::V<W64> {
+    let kk = b.konst::<W64>(k);
+    b.or(v, kk)
+}
+
+/// 整数オーバーフロー例外。`/v` 修飾の算術が使う。
+/// code は Alpha の算術例外サブコード EXC_M_IOV=1（整数オーバーフロー）。
+// Ref: SRC-QEMU (arith_excp / EXC_M_IOV).
+fn overflow<B: Backend>(b: &mut B) -> B::Exit {
+    b.raise(GuestException {
+        kind: ExceptionKind::Trap,
+        code: 1,
+        addr: None,
+        in_delay_slot: false,
+    })
+}
+
+/// pos=0 で「64 ビット右シフト → 0」を表すため、QEMU と同じ二段
+/// シフト（`>>(~pos8 & 63)` のあと `>>1`）で 64-pos*8 右に寄せる。
+// Ref: SRC-QEMU (gen_ins_h/gen_msk_h).
+fn h_shr<B: Backend>(b: &mut B, x: B::V<W64>, pos8: B::V<W64>) -> B::V<W64> {
+    let n = b.not(pos8);
+    let s1 = and_k(b, n, 63);
+    let t = b.shr_l(x, s1);
+    let one = b.konst::<W64>(1);
+    b.shr_l(t, one)
+}
+
+/// 整数 OPERATE（段階16-5）。オペランド形式は FOPR/FOPL の対で、
+/// bit12=1 がリテラル形。各バリアントの意味は SPEC-ALPHA-ARM
+/// §4.7、細部は QEMU と照合済み。
+// Ref: SPEC-ALPHA-ARM, SRC-QEMU (target/alpha/translate.c).
+fn operate<B: Backend>(b: &mut B, insn: Insn, word: u32) -> Result<bool, B::Exit> {
+    let (a, v, rc) = opr_ops(b, word);
+    let zero = b.konst::<W64>(0);
+    // _h 形のバイト操作で使う位置量（pos = 第2ソースの下位3ビット）。
+    // pos8 = pos*8、h_left = (64-pos*8) & 63、h_shr は pos8 版の
+    // 二段右シフト（pos=0 → 結果 0）。
+    let pos8 = {
+        let t = and_k(b, v, 7);
+        shl_n(b, t, 3)
+    };
+    let h_left = {
+        let n = b.sub(zero, pos8);
+        and_k(b, n, 63)
+    };
+    let res = match insn {
+        // ---- 0x10: 算術・比較 ----
+        // *l 系は低 32 ビット演算の結果を符号拡張して格納する。
+        // Ref: SPEC-ALPHA-ARM §4.7.1.
+        Insn::Addl | Insn::AddlI => {
+            let t = b.add(a, v);
+            sext_w32(b, t)
+        }
+        Insn::Subl | Insn::SublI => {
+            let t = b.sub(a, v);
+            sext_w32(b, t)
+        }
+        Insn::S4addl | Insn::S4addlI => {
+            let s = shl_n(b, a, 2);
+            let t = b.add(s, v);
+            sext_w32(b, t)
+        }
+        Insn::S4subl | Insn::S4sublI => {
+            let s = shl_n(b, a, 2);
+            let t = b.sub(s, v);
+            sext_w32(b, t)
+        }
+        Insn::S8addl | Insn::S8addlI => {
+            let s = shl_n(b, a, 3);
+            let t = b.add(s, v);
+            sext_w32(b, t)
+        }
+        Insn::S8subl | Insn::S8sublI => {
+            let s = shl_n(b, a, 3);
+            let t = b.sub(s, v);
+            sext_w32(b, t)
+        }
+        Insn::Addq | Insn::AddqI => b.add(a, v),
+        Insn::Subq | Insn::SubqI => b.sub(a, v),
+        Insn::S4addq | Insn::S4addqI => {
+            let s = shl_n(b, a, 2);
+            b.add(s, v)
+        }
+        Insn::S4subq | Insn::S4subqI => {
+            let s = shl_n(b, a, 2);
+            b.sub(s, v)
+        }
+        Insn::S8addq | Insn::S8addqI => {
+            let s = shl_n(b, a, 3);
+            b.add(s, v)
+        }
+        Insn::S8subq | Insn::S8subqI => {
+            let s = shl_n(b, a, 3);
+            b.sub(s, v)
+        }
+        Insn::Cmpbge | Insn::CmpbgeI => cmpbge(b, a, v),
+        Insn::Cmpult | Insn::CmpultI => cmp_to_int(b, Cmp::LtU, a, v),
+        Insn::Cmpule | Insn::CmpuleI => cmp_to_int(b, Cmp::LeU, a, v),
+        Insn::Cmpeq | Insn::CmpeqI => cmp_to_int(b, Cmp::Eq, a, v),
+        Insn::Cmplt | Insn::CmpltI => cmp_to_int(b, Cmp::LtS, a, v),
+        Insn::Cmple | Insn::CmpleI => cmp_to_int(b, Cmp::LeS, a, v),
+        // ---- 0x11: 論理・条件移動 ----
+        Insn::And | Insn::AndI => b.and(a, v),
+        Insn::Bis | Insn::BisI => b.or(a, v),
+        Insn::Xor | Insn::XorI => b.xor(a, v),
+        Insn::Bic | Insn::BicI => {
+            let n = b.not(v);
+            b.and(a, n)
+        }
+        Insn::Ornot | Insn::OrnotI => {
+            let n = b.not(v);
+            b.or(a, n)
+        }
+        Insn::Eqv | Insn::EqvI => {
+            let x = b.xor(a, v);
+            b.not(x)
+        }
+        // cmov は条件が偽なら rc の元値を保持する。
+        Insn::Cmovlbs
+        | Insn::CmovlbsI
+        | Insn::Cmovlbc
+        | Insn::CmovlbcI
+        | Insn::Cmoveq
+        | Insn::CmoveqI
+        | Insn::Cmovne
+        | Insn::CmovneI
+        | Insn::Cmovlt
+        | Insn::CmovltI
+        | Insn::Cmovge
+        | Insn::CmovgeI
+        | Insn::Cmovle
+        | Insn::CmovleI
+        | Insn::Cmovgt
+        | Insn::CmovgtI => {
+            let cond = match insn {
+                Insn::Cmovlbs | Insn::CmovlbsI => {
+                    let t = and_k(b, a, 1);
+                    b.cmp(Cmp::Ne, t, zero)
+                }
+                Insn::Cmovlbc | Insn::CmovlbcI => {
+                    let t = and_k(b, a, 1);
+                    b.cmp(Cmp::Eq, t, zero)
+                }
+                Insn::Cmoveq | Insn::CmoveqI => b.cmp(Cmp::Eq, a, zero),
+                Insn::Cmovne | Insn::CmovneI => b.cmp(Cmp::Ne, a, zero),
+                Insn::Cmovlt | Insn::CmovltI => b.cmp(Cmp::LtS, a, zero),
+                Insn::Cmovge | Insn::CmovgeI => b.cmp(Cmp::GeS, a, zero),
+                Insn::Cmovle | Insn::CmovleI => b.cmp(Cmp::LeS, a, zero),
+                _ => b.cmp(Cmp::GtS, a, zero),
+            };
+            let old = rc.get(b);
+            b.select(cond, v, old)
+        }
+        // ---- 0x12: バイト操作・シフト ----
+        // pos = 第2ソースの下位 3 ビット（即値形も同じ）。
+        // Ref: SPEC-ALPHA-ARM §4.7.5.
+        Insn::Srl | Insn::SrlI => {
+            let n = and_k(b, v, 63);
+            b.shr_l(a, n)
+        }
+        Insn::Sll | Insn::SllI => {
+            let n = and_k(b, v, 63);
+            b.shl(a, n)
+        }
+        Insn::Sra | Insn::SraI => {
+            let n = and_k(b, v, 63);
+            b.shr_a(a, n)
+        }
+        // zap はマスクの立つバイトを消し、zapnot は残す。
+        Insn::Zap | Insn::ZapI => {
+            let nv = b.not(v);
+            let m = zap_mask_of(b, nv);
+            b.and(a, m)
+        }
+        Insn::Zapnot | Insn::ZapnotI => {
+            let m = zap_mask_of(b, v);
+            b.and(a, m)
+        }
+        // ext_l: フィールドを下に引き下ろして下位を取る。
+        Insn::Extbl
+        | Insn::ExtblI
+        | Insn::Extwl
+        | Insn::ExtwlI
+        | Insn::Extll
+        | Insn::ExtllI
+        | Insn::Extql
+        | Insn::ExtqlI => {
+            let m8 = match insn {
+                Insn::Extbl | Insn::ExtblI => 0x01,
+                Insn::Extwl | Insn::ExtwlI => 0x03,
+                Insn::Extll | Insn::ExtllI => 0x0f,
+                _ => 0xff,
+            };
+            let m = b.konst::<W64>(zap_mask(m8));
+            let t = b.shr_l(a, pos8);
+            b.and(t, m)
+        }
+        // ext_h: 高位側フィールド = va << (64-pos*8) の下位マスク分。
+        Insn::Extwh | Insn::ExtwhI | Insn::Extlh | Insn::ExtlhI | Insn::Extqh | Insn::ExtqhI => {
+            let m8 = match insn {
+                Insn::Extwh | Insn::ExtwhI => 0x03,
+                Insn::Extlh | Insn::ExtlhI => 0x0f,
+                _ => 0xff,
+            };
+            let m = b.konst::<W64>(zap_mask(m8));
+            let t = b.shl(a, h_left);
+            b.and(t, m)
+        }
+        Insn::Insbl
+        | Insn::InsblI
+        | Insn::Inswl
+        | Insn::InswlI
+        | Insn::Insll
+        | Insn::InsllI
+        | Insn::Insql
+        | Insn::InsqlI => {
+            let m8 = match insn {
+                Insn::Insbl | Insn::InsblI => 0x01,
+                Insn::Inswl | Insn::InswlI => 0x03,
+                Insn::Insll | Insn::InsllI => 0x0f,
+                _ => 0xff,
+            };
+            let m = b.konst::<W64>(zap_mask(m8));
+            let t = b.and(a, m);
+            b.shl(t, pos8)
+        }
+        Insn::Inswh | Insn::InswhI | Insn::Inslh | Insn::InslhI | Insn::Insqh | Insn::InsqhI => {
+            let m8 = match insn {
+                Insn::Inswh | Insn::InswhI => 0x03,
+                Insn::Inslh | Insn::InslhI => 0x0f,
+                _ => 0xff,
+            };
+            let m = b.konst::<W64>(zap_mask(m8));
+            let t = b.and(a, m);
+            h_shr(b, t, pos8)
+        }
+        // msk はフィールド分を消す（a & ~shifted_mask）。
+        Insn::Mskbl
+        | Insn::MskblI
+        | Insn::Mskwl
+        | Insn::MskwlI
+        | Insn::Mskll
+        | Insn::MskllI
+        | Insn::Mskql
+        | Insn::MskqlI => {
+            let m8 = match insn {
+                Insn::Mskbl | Insn::MskblI => 0x01,
+                Insn::Mskwl | Insn::MskwlI => 0x03,
+                Insn::Mskll | Insn::MskllI => 0x0f,
+                _ => 0xff,
+            };
+            let m = b.konst::<W64>(zap_mask(m8));
+            let s = b.shl(m, pos8);
+            let n = b.not(s);
+            b.and(a, n)
+        }
+        Insn::Mskwh | Insn::MskwhI | Insn::Msklh | Insn::MsklhI | Insn::Mskqh | Insn::MskqhI => {
+            let m8 = match insn {
+                Insn::Mskwh | Insn::MskwhI => 0x03,
+                Insn::Msklh | Insn::MsklhI => 0x0f,
+                _ => 0xff,
+            };
+            let m = b.konst::<W64>(zap_mask(m8));
+            let s = h_shr(b, m, pos8);
+            let n = b.not(s);
+            b.and(a, n)
+        }
+        _ => unreachable!("operate called for non-operate insn"),
+    };
+    rc.set(b, res);
+    Ok(true)
+}
+
+/// `/v` 修飾の算術（オーバーフローで整数オーバーフロー例外）。
+/// 符号付き加減算の桁あふれを検査し、あれば rc を書かず例外を
+/// 上げる。
+// Ref: SPEC-ALPHA-ARM §4.7.1 (/v qualifier), SRC-QEMU (check_overflow).
+fn operate_v<B: Backend>(b: &mut B, insn: Insn, word: u32) -> Result<bool, B::Exit> {
+    let (a, v, rc) = opr_ops(b, word);
+    let is_long = matches!(
+        insn,
+        Insn::AddlV | Insn::AddlVI | Insn::SublV | Insn::SublVI
+    );
+    let is_sub = matches!(
+        insn,
+        Insn::SublV | Insn::SublVI | Insn::SubqV | Insn::SubqVI
+    );
+    // *l 形はオペランドをまず符号拡張してから 64 ビットで演算する。
+    let (aa, vv) = if is_long {
+        (sext_w32(b, a), sext_w32(b, v))
+    } else {
+        (a, v)
+    };
+    let r = if is_sub { b.sub(aa, vv) } else { b.add(aa, vv) };
+    // オーバーフロー条件（QEMU check_overflow と同じ意味）:
+    //   *l 形: 32 ビット符号付き演算 — 結果が sext32 で復元できない
+    //          （sext32(r) != r）なら桁あふれ。
+    //   *q 形: 64 ビット — add は両オペランドの符号が同じ（~(a^v) の
+    //          MSB）で結果の符号が a と違う（(a^r) の MSB）。sub は
+    //          オペランドの符号が違い、結果の符号が a と違う。
+    let ovf = if is_long {
+        let r32 = sext_w32(b, r);
+        b.cmp(Cmp::Ne, r32, r)
+    } else {
+        let x1 = b.xor(aa, vv);
+        let x2 = b.xor(aa, r);
+        let m = if is_sub {
+            b.and(x1, x2)
+        } else {
+            let n = b.not(x1);
+            b.and(n, x2)
+        };
+        let bit = shr_n(b, m, 63);
+        let zero = b.konst::<W64>(0);
+        b.cmp(Cmp::Ne, bit, zero)
+    };
+    b.if_then(ovf, |b| Err(overflow(b)))?;
+    let res = if is_long { sext_w32(b, r) } else { r };
+    rc.set(b, res);
+    Ok(true)
 }
 
 /// 命令の意味論。`Ok(true)` は実行完了、`Ok(false)` はこの段階では
@@ -167,6 +638,164 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
                 addr: None,
                 in_delay_slot: false,
             }))
+        }
+        // ---- 段階16-5: 整数 OPERATE ----
+        // /v 修飾（オーバーフロー検査付き）。
+        Insn::AddlV
+        | Insn::AddlVI
+        | Insn::SublV
+        | Insn::SublVI
+        | Insn::AddqV
+        | Insn::AddqVI
+        | Insn::SubqV
+        | Insn::SubqVI => operate_v(b, insn, word),
+        // 算術・論理・比較・cmov・シフト・バイト操作。
+        Insn::Addl
+        | Insn::AddlI
+        | Insn::Subl
+        | Insn::SublI
+        | Insn::S4addl
+        | Insn::S4addlI
+        | Insn::S4subl
+        | Insn::S4sublI
+        | Insn::S8addl
+        | Insn::S8addlI
+        | Insn::S8subl
+        | Insn::S8sublI
+        | Insn::Addq
+        | Insn::AddqI
+        | Insn::Subq
+        | Insn::SubqI
+        | Insn::S4addq
+        | Insn::S4addqI
+        | Insn::S4subq
+        | Insn::S4subqI
+        | Insn::S8addq
+        | Insn::S8addqI
+        | Insn::S8subq
+        | Insn::S8subqI
+        | Insn::Cmpbge
+        | Insn::CmpbgeI
+        | Insn::Cmpult
+        | Insn::CmpultI
+        | Insn::Cmpule
+        | Insn::CmpuleI
+        | Insn::Cmpeq
+        | Insn::CmpeqI
+        | Insn::Cmplt
+        | Insn::CmpltI
+        | Insn::Cmple
+        | Insn::CmpleI
+        | Insn::And
+        | Insn::AndI
+        | Insn::Bis
+        | Insn::BisI
+        | Insn::Xor
+        | Insn::XorI
+        | Insn::Bic
+        | Insn::BicI
+        | Insn::Ornot
+        | Insn::OrnotI
+        | Insn::Eqv
+        | Insn::EqvI
+        | Insn::Cmovlbs
+        | Insn::CmovlbsI
+        | Insn::Cmovlbc
+        | Insn::CmovlbcI
+        | Insn::Cmoveq
+        | Insn::CmoveqI
+        | Insn::Cmovne
+        | Insn::CmovneI
+        | Insn::Cmovlt
+        | Insn::CmovltI
+        | Insn::Cmovge
+        | Insn::CmovgeI
+        | Insn::Cmovle
+        | Insn::CmovleI
+        | Insn::Cmovgt
+        | Insn::CmovgtI
+        | Insn::Srl
+        | Insn::SrlI
+        | Insn::Sll
+        | Insn::SllI
+        | Insn::Sra
+        | Insn::SraI
+        | Insn::Zap
+        | Insn::ZapI
+        | Insn::Zapnot
+        | Insn::ZapnotI
+        | Insn::Extbl
+        | Insn::ExtblI
+        | Insn::Extwl
+        | Insn::ExtwlI
+        | Insn::Extll
+        | Insn::ExtllI
+        | Insn::Extql
+        | Insn::ExtqlI
+        | Insn::Extwh
+        | Insn::ExtwhI
+        | Insn::Extlh
+        | Insn::ExtlhI
+        | Insn::Extqh
+        | Insn::ExtqhI
+        | Insn::Insbl
+        | Insn::InsblI
+        | Insn::Inswl
+        | Insn::InswlI
+        | Insn::Insll
+        | Insn::InsllI
+        | Insn::Insql
+        | Insn::InsqlI
+        | Insn::Inswh
+        | Insn::InswhI
+        | Insn::Inslh
+        | Insn::InslhI
+        | Insn::Insqh
+        | Insn::InsqhI
+        | Insn::Mskbl
+        | Insn::MskblI
+        | Insn::Mskwl
+        | Insn::MskwlI
+        | Insn::Mskll
+        | Insn::MskllI
+        | Insn::Mskql
+        | Insn::MskqlI
+        | Insn::Mskwh
+        | Insn::MskwhI
+        | Insn::Msklh
+        | Insn::MsklhI
+        | Insn::Mskqh
+        | Insn::MskqhI => operate(b, insn, word),
+        // ---- 段階16-5: MISC ----
+        // バリアとトラップバリア。順序付き実行のインタプリタでは
+        // mb/wmb/trapb/excb は何もしない（trapb の実確定は PAL
+        // 実装時）。
+        // Ref: SPEC-ALPHA-ARM §4.7.6.
+        Insn::Trapb | Insn::Excb | Insn::Mb | Insn::Wmb => Ok(true),
+        // プリフェッチ/キャッシュ制御ヒント。性能ヒントなので無視
+        // してよい（EV5+ の wh64/ecb/wh64en も同じ扱い）。
+        // Ref: SPEC-ALPHA-ARM §4.7.6.
+        Insn::Fetch | Insn::FetchM | Insn::Ecb | Insn::Wh64 | Insn::Wh64en => Ok(true),
+        // rpcc ra: プロセスサイクルカウンタを読む。実時間ではなく
+        // 実行ループが1命令ごとに進める疑似カウンタを返す。
+        // Ref: SPEC-ALPHA-ARM §4.11.5.
+        Insn::Rpcc => {
+            let o = ops_fmfcw(u128::from(word));
+            let c = b.get(cycle_ref());
+            Gpr(o.ra as u8).set(b, c);
+            Ok(true)
+        }
+        // rc ra / rs ra: rx_flag を読み出し、rc は 0、rs は 1 に
+        // する（クリティカルセクションのフラグ。単一スレッドでは
+        // 通常 0 のまま遷移する）。
+        // Ref: SPEC-ALPHA-ARM §4.11.5.
+        Insn::Rc | Insn::Rs => {
+            let o = ops_fmfcw(u128::from(word));
+            let f = b.get(rx_flag_ref());
+            Gpr(o.ra as u8).set(b, f);
+            let nv = b.konst::<W64>(u64::from(insn == Insn::Rs));
+            b.set(rx_flag_ref(), nv);
+            Ok(true)
         }
         _ => Ok(false),
     }
