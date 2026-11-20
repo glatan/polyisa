@@ -136,7 +136,7 @@ impl Linux {
     }
 
     /// ゲストから見た pid。単一プロセスの模型なので常に 1（init）
-    /// を返す（QEMU はホストの pid を返すが、ここでは再現性を優先）。
+    /// を返す（再現性のため固定 pid とする本実装の設計判断）。
     fn pid(&mut self) -> u64 {
         if self.pid == 0 {
             self.pid = 1;
@@ -1927,8 +1927,9 @@ impl Linux {
             nr::GETRANDOM => self.sys_getrandom(env, args[0], args[1]).into(),
             nr::GETPAGESIZE => AlphaResult::Value(self.sys_getpagesize()),
             // getxpid/getxuid/getxgid は第2戻り値を a4($20) に書く
-            // （ppid/euid/egid — glibc の getppid 系が依存）。
-            // Ref: SRC-QEMU — linux-user/alpha syscall 往復。
+            // （ppid/euid/egid を返す Alpha 固有の syscall ABI）。
+            // Ref: SRC-LINUX (arch/alpha/kernel/sys_alpha.c —
+            //      getxpid/getxuid/getxgid は第2値を a4 に返す)。
             nr::GETXPID => {
                 set_reg(env, 20, 1); // a4 = ppid
                 AlphaResult::Value(self.pid())

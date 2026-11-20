@@ -14847,7 +14847,7 @@ fn check_gnu_properties(
         GNU_PROPERTY_X86_ISA_1_USED, gnu_properties,
     };
     // FEATURE_1_AND: 立っている全ビットの機能を必要とする。
-    // Ref: binutils include/elf/common.h。
+    // 値はカーネルが CET の判定に使うもの（Ref: SRC-LINUX）。
     const F1: &[(u64, &str)] = &[(0x1, "cet_ibt"), (0x2, "cet_ss")];
     // FEATURE_2_USED/NEEDED: プログラムが使うレジスタ状態の成分。
     // bit0 (X86) は基本機能で常に立つ。XSAVEC はモデルにない。

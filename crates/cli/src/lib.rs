@@ -14,6 +14,8 @@ pub mod run_arm;
 pub mod run_m68k;
 #[cfg(feature = "guest-mips")]
 pub mod run_mips;
+#[cfg(feature = "guest-parisc")]
+pub mod run_parisc;
 #[cfg(feature = "guest-power")]
 pub mod run_power;
 #[cfg(feature = "guest-riscv")]
@@ -84,6 +86,7 @@ pub fn parse_cpu_spec(s: &str) -> Result<CpuSpec, String> {
     feature = "guest-arm",
     feature = "guest-m68k",
     feature = "guest-mips",
+    feature = "guest-parisc",
     feature = "guest-power",
     feature = "guest-riscv",
     feature = "guest-s390",
@@ -273,6 +276,27 @@ fn run_alpha_elf(path: &str, argv: &[String], spec: Option<&CpuSpec>) -> Result<
 #[cfg(not(feature = "guest-alpha"))]
 fn run_alpha_elf(_path: &str, _argv: &[String], _spec: Option<&CpuSpec>) -> Result<u64, String> {
     Err("この polyisa は alpha ゲストなしでビルドされた".to_string())
+}
+
+#[cfg(feature = "guest-parisc")]
+fn run_parisc_elf(path: &str, argv: &[String], spec: Option<&CpuSpec>) -> Result<u64, String> {
+    let sel = spec
+        .map(|s| {
+            resolve_sel(
+                "parisc",
+                polyisa_guest_parisc::MODEL_DEFS,
+                polyisa_guest_parisc::FEATURE_DEFS,
+                polyisa_guest_parisc::FEAT_BITS,
+                s,
+            )
+        })
+        .transpose()?;
+    run_parisc::run_elf_parisc_sel(path, argv, sel.as_ref())
+}
+
+#[cfg(not(feature = "guest-parisc"))]
+fn run_parisc_elf(_path: &str, _argv: &[String], _spec: Option<&CpuSpec>) -> Result<u64, String> {
+    Err("この polyisa は parisc ゲストなしでビルドされた".to_string())
 }
 
 #[cfg(feature = "guest-arm")]
@@ -503,7 +527,7 @@ pub fn run_path_opts(
                 check("arm")?;
                 run_arm_elf(path, argv, spec.as_ref())
             } else if ehdr.machine == 4 {
-                // EM_68K。Ref: binutils include/elf/common.h。
+                // EM_68K=4。Ref: SRC-LINUX (include/uapi/linux/elf-em.h)。
                 check("m68k")?;
                 run_m68k_elf(path, argv, spec.as_ref())
             } else if ehdr.machine == 8 {
@@ -511,9 +535,13 @@ pub fn run_path_opts(
                 check("mips")?;
                 run_mips_elf(path, argv, spec.as_ref())
             } else if matches!(ehdr.machine, 2 | 18) {
-                // EM_SPARC / EM_SPARC32PLUS。Ref: binutils include/elf/common.h。
+                // EM_SPARC=2 / EM_SPARC32PLUS=18。Ref: SRC-LINUX (include/uapi/linux/elf-em.h)。
                 check("sparc")?;
                 run_sparc_elf(path, argv, spec.as_ref())
+            } else if ehdr.machine == 15 {
+                // EM_PARISC=15。Ref: SRC-LINUX (include/uapi/linux/elf-em.h)。
+                check("parisc")?;
+                run_parisc_elf(path, argv, spec.as_ref())
             } else {
                 Err(format!("未対応の e_machine: {}", ehdr.machine))
             }
@@ -549,11 +577,11 @@ pub fn run_path_opts(
                 check("s390")?;
                 run_s390_elf(path, argv, spec.as_ref(), root)
             } else if ehdr.machine == 43 {
-                // EM_SPARCV9（sparc64）。Ref: binutils include/elf/common.h。
+                // EM_SPARCV9=43（sparc64）。Ref: SRC-LINUX (include/uapi/linux/elf-em.h)。
                 check("sparc")?;
                 run_sparc_elf(path, argv, spec.as_ref())
             } else if ehdr.machine == 0x9026 {
-                // EM_ALPHA_EXP。Ref: binutils include/elf/common.h。
+                // EM_ALPHA=0x9026。Ref: SRC-LINUX (include/uapi/linux/elf-em.h)。
                 check("alpha")?;
                 run_alpha_elf(path, argv, spec.as_ref())
             } else {
@@ -626,7 +654,7 @@ mod tests {
     #[cfg(feature = "guest-riscv")]
     #[test]
     fn disasm_add_and_c_addi() {
-        // add x1,x2,x3 と c.addi x1,1（llvm-mc の符号化と一致）。
+        // add x1,x2,x3 と c.addi x1,1（SPEC-RISCV-UNPRIV の符号化）。
         assert_eq!(
             disassemble_riscv(0x0031_00b3).as_deref(),
             Some("add x1, x2, x3")

@@ -315,8 +315,7 @@ pub const GNU_PROPERTY_X86_ISA_1_NEEDED: u32 = 0xc000_8002;
 /// `PT_GNU_PROPERTY` の `"GNU"` ノートからプロパティを列挙する。
 /// 返り値は `(type, value)` の列で、値は 4 バイトまたは 8 バイトの
 /// 整数だけを拾う。ノートがなければ空を返す。
-// Ref: SPEC-X86-PSABI（ELF extensions, "Program Properties"）と
-// binutils `include/elf/common.h` のプロパティ定義。
+// Ref: SPEC-X86-PSABI（ELF extensions, "Program Properties"）。
 #[must_use]
 pub fn gnu_properties(bytes: &[u8], phdrs: &[Phdr], little: bool) -> Vec<(u32, u64)> {
     // プロパティ項目の整列は ELFCLASS で決まる（64 は 8、32 は 4）。

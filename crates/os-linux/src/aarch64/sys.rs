@@ -221,7 +221,8 @@ impl Linux {
             .map_err(|_| errno::EFAULT)
     }
 
-    /// ゲストのルートを設ける（qemu-user の `-L` と同じ約束）。
+    /// ゲストのルートを設ける。ゲストの絶対パスをこのディレクトリ
+    /// 配下に閉じ込める（polyisa 側の設計判断）。
     /// 空に戻すと従来通りホストのパスを素通しする。
     /// root 指定時に cwd が未設定なら `/` から始める。
     pub fn set_guest_root(&mut self, root: &str) {

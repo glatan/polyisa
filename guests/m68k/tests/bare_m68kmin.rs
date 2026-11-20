@@ -2653,8 +2653,9 @@ fn decode_d2_insns() {
     }
 }
 
-/// D2 レビュー修正: I/IS フィールドの実符号化（gas/binutils 準拠）。
+/// D2 レビュー修正: I/IS フィールドの実符号化（full extension word）。
 /// bits[1:0]=OD サイズ（0/1=なし、2=語、3=long）、bit2=postindexed。
+/// Ref: SPEC-M68K-PRM (Rev 1) — 命令拡張語の I/IS フィールド。
 #[test]
 fn full_ext_words_iis() {
     // BD16 + preindexed・語 OD（iis=2）→ ext1+1+1

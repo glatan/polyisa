@@ -5,7 +5,7 @@
 //! 同じ `.wasm` を `wasmtime run` と polyisa の WASI ホストで動かし、
 //! stdout と終了コードを比較する。`wasmtime` バイナリがなければ
 //! devtool test:plan がこのバイナリを対象から外す（Req::Tool）。
-//! Ref: TOOL-WASMTIME, SPEC-WASI-P1.
+//! wasmtime は実行比較のオラクル（用途X）。Ref: SPEC-WASI-P1.
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};

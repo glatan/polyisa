@@ -437,7 +437,8 @@ pub fn build_model() -> polyisa_isadl::Model {
     // 001000: bovc(rs>=rt) / beqc(0<rs<rt) / beqzalc(rs=0,rt!=0)
     // 011000: bnvc(rs>=rt) / bnec(0<rs<rt) / bnezalc(rs=0,rt!=0)
     // 000110/000111/010110/010111: *alc/*(z)c/*uc·*c を rs==0 / rs==rt /
-    // その他（rs!=0 && rs!=rt）で分ける（rt==0 は R6 では予約）。
+    // その他（rs!=0 && rs!=rt）で分ける。rt==0 の行は compact branch では
+    // なく pre-R6 の *Z/*ZL 系の領域（この表では扱わない）。
     // Ref: SPEC-MIPS-R6 (Rev 6.06).
     let lit = |field: &str, op: WhereOp, v: u128| WhereClause {
         field: field.to_string(),
@@ -485,9 +486,11 @@ pub fn build_model() -> polyisa_isadl::Model {
             ],
             "bnezalc {rt}, {imm}",
         ),
-        // BLEZ 群。2R 形式は rs!=0 && rs!=rt のすべてを受ける
-        // （QEMU gen_compute_compact_branch と同じ寛さ。rs>rt は SPEC 上
-        // 予約の可能性があるので保留事項とする）。
+        // BLEZ 群。2R 形式は rs!=0 && rt!=0 && rs!=rt をすべて受ける。
+        // 大小どちらの並びも仕様上は同じ命令の有効な符号化（符号化図の
+        // 制約は rs != rt のみ）で、BLEC/BGTC/BLEUC/BGTUC の別名は同じ
+        // 符号化を指すアセンブリ・イディオム。
+        // Ref: SPEC-MIPS-R6 (Rev 6.06) — B<cond>C / Table A.29.
         ("blezalc", "000110", vec![lit("rs", WhereOp::Eq, 0), lit("rt", WhereOp::Ne, 0)], "blezalc {rt}, {imm}"),
         (
             "bgezalc",

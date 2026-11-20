@@ -517,6 +517,11 @@ fn check_refs_full() -> Result<(), String> {
         violations.push(e);
     }
 
+    // 規則9：ISA の事実を書く場所（guests の spec/ と src/）に
+    // 二次実装の名前は書けない。オラクル・テスト入力は tests/ に
+    // あるので対象外。
+    violations.extend(scan_forbidden_impls(&root));
+
     // 4：著作権表示と SPDX 識別子の走査。台帳は対象外。
     violations.extend(scan_notices(&root));
 
@@ -563,6 +568,45 @@ fn parse_register(text: &str) -> std::collections::BTreeMap<String, RegisterEntr
         table.insert(id.to_string(), RegisterEntry { uses });
     }
     table
+}
+
+/// 規則9 の走査。ISA の事実を書く場所（`guests/*/spec` と
+/// `guests/*/src` の .rs）に二次実装の名前（大文字小文字を
+/// 区別しない qemu・binutils・llvm・capstone・unicorn・
+/// bochs）が現れたら違反とする。オラクルとテスト入力は `tests/`
+/// 側にあり、ここには来ない。
+fn scan_forbidden_impls(root: &std::path::Path) -> Vec<String> {
+    const BAD: &[&str] = &["qemu", "binutils", "llvm", "capstone", "unicorn", "bochs"];
+    let mut out = Vec::new();
+    let Ok(guests) = std::fs::read_dir(root.join("guests")) else {
+        return out;
+    };
+    for g in guests.flatten() {
+        for sub in ["spec", "src"] {
+            let dir = g.path().join(sub);
+            let mut files = Vec::new();
+            collect_files(&dir, &mut files);
+            files.sort();
+            for f in files {
+                if f.extension().and_then(|s| s.to_str()) != Some("rs") {
+                    continue;
+                }
+                let Ok(text) = std::fs::read_to_string(&f) else {
+                    continue;
+                };
+                let rel = f.strip_prefix(root).unwrap_or(&f).display().to_string();
+                for (i, line) in text.lines().enumerate() {
+                    let low = line.to_lowercase();
+                    for bad in BAD {
+                        if low.contains(bad) {
+                            out.push(format!("{}:{}: 二次実装名 {bad:?}（規則9）", rel, i + 1));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out
 }
 
 /// 固定書式の注記の1件。`need` は参照の場所に応じた用途。
@@ -796,6 +840,7 @@ fn allowed_deps(pkg: &str) -> Option<&'static [&'static str]> {
             "polyisa-guest-arm",
             "polyisa-guest-m68k",
             "polyisa-guest-mips",
+            "polyisa-guest-parisc",
             "polyisa-guest-power",
             "polyisa-guest-riscv",
             "polyisa-guest-s390",
@@ -823,6 +868,7 @@ fn allowed_deps(pkg: &str) -> Option<&'static [&'static str]> {
             "polyisa-guest-arm",
             "polyisa-guest-m68k",
             "polyisa-guest-mips",
+            "polyisa-guest-parisc",
             "polyisa-guest-power",
             "polyisa-guest-riscv",
             "polyisa-guest-s390",
@@ -885,6 +931,12 @@ fn allowed_deps(pkg: &str) -> Option<&'static [&'static str]> {
             "polyisa-timing",
         ],
         "polyisa-guest-alpha" => &["polyisa-mem", "polyisa-sem", "polyisa-guest"],
+        "polyisa-guest-parisc" => &[
+            "polyisa-mem",
+            "polyisa-sem",
+            "polyisa-guest",
+            "polyisa-engine",
+        ],
         "polyisa-guest-mips" => &[
             "polyisa-bits",
             "polyisa-softfloat",

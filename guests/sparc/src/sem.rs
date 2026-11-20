@@ -526,9 +526,9 @@ fn shift_common<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2, sh: Sh) -> Fl
         Sh::Rl => b.shr_l::<W32>(x32, n32),
         Sh::Ra => b.shr_a::<W32>(x32, n32),
     };
-    // V9 でも 32 ビットシフトは 32 ビット結果。sll/srl はゼロ拡張、
-    // sra は符号拡張で rd に入る（QEMU translate.c の ext32u/ext32s
-    // の使い分けに合わせる）。
+    // V9 でも 32 ビットシフトは 32 ビット結果。sll/srl は上位
+    // 32 ビットを 0 に（ゼロ拡張）、sra は bit31 を上位 32 ビットへ
+    // 複製する（符号拡張）。Ref: SPEC-SPARC-V9 §Shift (SLL/SRL/SRA).
     let e = if sh == Sh::Ra {
         b.sext::<W32, W64>(r)
     } else {
@@ -572,7 +572,7 @@ fn mul_common<B: Backend>(
     let y = src2(b, s);
     if b.param::<super::Word64Param>() {
         // V9: rd には全 64 ビット積、Y には積の bit63-32 が入る。
-        // Ref: SPEC-SPARC-V9 §UMUL §SMUL, QEMU translate.c gen_op_multiply.
+        // Ref: SPEC-SPARC-V9 §Multiply (32-bit) (UMUL/SMUL).
         let x32 = b.trunc::<W64, W32>(x);
         let y32 = b.trunc::<W64, W32>(y);
         let (xe, ye) = if signed {
@@ -990,9 +990,10 @@ pub fn ldsh<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2) -> Flow<B> {
 }
 
 /// LDD（ダブルワード。rd には上位（アドレス側）、rd2 には下位）。
-/// rd は偶数でなければならない。奇数は illegal instruction として
-/// 扱う（QEMU の gen_align_check と同じ）。
-/// Ref: SPEC-SPARC-V8 (Version 8) §LDD.
+/// rd は偶数でなければならない。奇数の宛先レジスタ番号を指す
+/// LDD/STD は illegal_instruction トラップ。
+/// Ref: SPEC-SPARC-V8 (Version 8) §LDD;
+///      SPEC-SPARC-V9 §Register-Pair Operands.
 pub fn ldd<B: Backend>(b: &mut B, rd: Gpr, rd2: Gpr, rs1: Gpr, s: Src2) -> Flow<B> {
     if rd.0 & 1 != 0 {
         return Err(unimp(b, 0));
@@ -1747,7 +1748,7 @@ pub fn ret<B: Backend>(b: &mut B, rs1: Gpr, s: Src2) -> Flow<B> {
     // V9 の RETURN は RESTORE を内蔵する（遅延スロットは戻った窓で
     // 実行される）。CANRESTORE が 0 なら window_underflow（fill_*_normal）
     // トラップを上げる。
-    // Ref: SPEC-SPARC-V9 §RETURN; QEMU translate.c do_return.
+    // Ref: SPEC-SPARC-V9 §RETURN, §RESTORE.
     window_guard(b, canrestore_ref(), 0xc0)?;
     let base = read(b, rs1);
     let off = src2(b, s);
@@ -1832,10 +1833,12 @@ fn fp_check<B: Backend>(b: &mut B) -> Flow<B> {
 }
 
 /// d 形命令の rd/rs 桁を f 配列のスロット番号に写す。
-/// f 配列は 32 個の倍精度スロットを持ち、rd 桁の bit0 は番号の
-/// bit4 を担う（%f32-%f62 偶数は bit0=1 の rd=1,3,...,31）。
-/// 番号は (x>>1)|((x&1)<<4)。V8 は 16 スロットのみ有効。
-/// Ref: SRC-QEMU extract_dfpreg, SPEC-SPARC-V9 §F Registers.
+/// f 配列は 32 個の倍精度スロットを持ち、V9 では命令桁の bit0 が
+/// レジスタ番号の bit5 を担う（%f32-%f62 偶数は bit0=1 の
+/// rd=1,3,...,31）。6 ビット番号は (x&0x1e)|((x&1)<<5) なので、
+/// スロット番号はその半分の (x>>1)|((x&1)<<4)。V8 は 16 スロット
+/// のみ有効。
+/// Ref: SPEC-SPARC-V9 §Floating-Point Register Number Encoding.
 fn dreg_num<B: Backend>(b: &mut B, x: u8) -> u8 {
     if b.param::<super::Word64Param>() {
         (x >> 1) | ((x & 1) << 4)
@@ -1846,7 +1849,9 @@ fn dreg_num<B: Backend>(b: &mut B, x: u8) -> u8 {
 
 /// 単精度 %fN の読み出し。スロット N>>1 の半分（N 偶数=上位
 /// 32 ビット、奇数=下位 32 ビット）をゼロ拡張して返す。
-/// Ref: SRC-QEMU gen_offset_fpr_F.
+/// 偶数 %fN が倍精度レジスタの上位半分を成すエイリアスは
+/// Ref: SPEC-SPARC-V9 §Floating-Point Registers（単精度と倍精度の
+///      レジスタ配置図）.
 fn fget_single<B: Backend>(b: &mut B, n: u8) -> Result<B::V<W64>, B::Exit> {
     let v: B::V<W64> = b.get(Fpr(n >> 1).state());
     if n & 1 == 0 {
@@ -1858,11 +1863,22 @@ fn fget_single<B: Backend>(b: &mut B, n: u8) -> Result<B::V<W64>, B::Exit> {
     }
 }
 
-/// FPRS.DL（bit0）を立てる（QEMU gen_update_fprs_dirty）。
-fn fprs_dl<B: Backend>(b: &mut B) {
+/// f レジスタへの書き込みで FPRS の dirty ビットを立てる。
+/// 変更が下半分（%f0-%f31 とエイリアスするスロット 0-15）に及ぶ
+/// とき DL（bit0）、上半分（%f32-%f62、スロット 16-31）に及ぶとき
+/// DU（bit1）を立てる。引数は書き込みが及ぶスロット番号の両端。
+/// Ref: SPEC-SPARC-V9 §FPRS_dirty_lower, §FPRS_dirty_upper.
+fn fprs_dirty<B: Backend>(b: &mut B, lo: u8, hi: u8) {
     let f = b.get(fprs_ref());
-    let one = b.konst::<W64>(1);
-    let f = b.or::<W64>(f, one);
+    let mut bits = 0u64;
+    if lo < 16 {
+        bits |= 0b01;
+    }
+    if hi >= 16 {
+        bits |= 0b10;
+    }
+    let bit = b.konst::<W64>(bits);
+    let f = b.or::<W64>(f, bit);
     b.set(fprs_ref(), f);
 }
 
@@ -1876,14 +1892,14 @@ fn fgetw64<B: Backend>(b: &mut B, x: u8) -> Result<B::V<W64>, B::Exit> {
 fn fputw64<B: Backend>(b: &mut B, x: u8, v: B::V<W64>) -> Result<(), B::Exit> {
     let d = dreg_num::<B>(b, x);
     b.set(Fpr(d).state(), v);
-    fprs_dl(b);
+    fprs_dirty(b, d, d);
     Ok(())
 }
 
 /// 単精度 %fN の書き込み。スロット N>>1 の半分だけを差し替える
-/// （N 偶数=上位、奇数=下位）。FPRS.DL（bit0）を立てる
-/// （QEMU gen_update_fprs_dirty）。
-/// Ref: SRC-QEMU gen_offset_fpr_F.
+/// （N 偶数=上位、奇数=下位）。単精度は %f0-%f31（下半分）だけを
+/// 指すので FPRS.DL（bit0）を立てる。
+/// Ref: SPEC-SPARC-V9 §Floating-Point Registers, §FPRS_dirty_lower.
 fn fput_slot<B: Backend>(b: &mut B, n: u8, v: B::V<W64>) {
     let old = b.get(Fpr(n >> 1).state());
     let m32 = b.konst::<W64>(0xffff_ffff);
@@ -1903,7 +1919,7 @@ fn fput_slot<B: Backend>(b: &mut B, n: u8, v: B::V<W64>) {
     };
     let w = b.or::<W64>(kept, vv);
     b.set(Fpr(n >> 1).state(), w);
-    fprs_dl(b);
+    fprs_dirty(b, n >> 1, n >> 1);
 }
 
 /// f レジスタの読み出し。F32 は単精度 %fN の半分、F64 は
@@ -3131,10 +3147,13 @@ fn bswap64<B: Backend>(b: &mut B, v: B::V<W64>) -> B::V<W64> {
     out
 }
 
-/// BLK 系 ASI かどうかの判定。QEMU resolve_asi の一覧と同じ
-/// 集合 {0x16,0x17,0x1e,0x1f,0x70,0x71,0x78,0x79,0xe0,0xe2,
-/// 0xf0,0xf1,0xf8,0xf9} に絞る。
-/// Ref: SPEC-SPARC-V9 §Block Load and Store, SRC-QEMU.
+/// BLK 系 ASI かどうかの判定。対象は UltraSPARC 系のブロック
+/// 転送 ASI の集合 {0x16,0x17,0x1e,0x1f,0x70,0x71,0x78,0x79,
+/// 0xe0,0xe2,0xf0,0xf1,0xf8,0xf9} に絞る。これらの ASI 割当は
+/// V9 では実装依存領域（ASI 表の impl. dep. 行）で、ブロック転送の
+/// 意味は一次資料に根拠のない設計判断。
+// Gap: GAP-0049（実装依存 ASI の意味は一次資料に根拠なし）。
+/// Ref: SPEC-SPARC-V9 §Address Space Identifiers (ASI 表).
 fn is_blk_asi<B: Backend>(b: &mut B, asi: B::V<W64>) -> B::B {
     let one = b.konst::<W64>(1);
     let z = b.konst::<W64>(0);
@@ -3159,13 +3178,16 @@ fn is_blk_asi<B: Backend>(b: &mut B, asi: B::V<W64>) -> B::B {
     b.cmp::<W64>(Cmp::Ne, acc, z)
 }
 
-/// LDDFA/STDFA の BLK 系 ASI 転送（64 バイト）。fd 桁は
-/// extract_dfpreg（QEMU）で d 番号 R = (fd&0x1e)|((fd&1)<<5)
-/// に写す。転送は連続する 8 個の倍精度スロット f[R/2 .. R/2+7]
-/// なので、R は 8 の倍数かつ R ≤ 48（%d48 まで。%d56 から始めると
-/// 8 個目が %d70 となり範囲を超える）でなければならない。
-/// リトル ASI（asi の bit3）は各ダブルワードをバイト反転する。
-/// Ref: SPEC-SPARC-V9 §Block Load and Store, SRC-QEMU.
+/// LDDFA/STDFA の BLK 系 ASI 転送（64 バイト）。fd 桁は V9 の
+/// d 形レジスタ番号規則（命令桁 bit0 が番号の bit5）で
+/// R = (fd&0x1e)|((fd&1)<<5) に写す。転送は連続する 8 個の
+/// 倍精度スロット f[R/2 .. R/2+7] なので、R は 8 の倍数かつ
+/// R ≤ 48（%d48 まで。%d56 から始めると 8 個目が %d70 となり
+/// 範囲を超える）でなければならない。リトル ASI（asi の bit3）は
+/// 各ダブルワードをバイト反転する。64 バイト転送の意味は実装依存
+/// ASI の利用で、一次資料に根拠のない設計判断。
+/// Ref: SPEC-SPARC-V9 §Floating-Point Register Number Encoding,
+///      §Address Space Identifiers (ASI 表).
 fn fasi_blk<B: Backend>(
     b: &mut B,
     insn: Insn,
@@ -3184,9 +3206,9 @@ fn fasi_blk<B: Backend>(
     }
     let d0 = r >> 1;
     let addr = eff_addr(b, rs1, s);
-    // ブロック転送は 64 バイト整列が要る（QEMU の
-    // gen_check_align）。メモリ層の自然整列検査では 8 バイトまで
-    // しか見ないので、ここで 64 バイト境界を確かめる。
+    // ブロック転送は 64 バイト整列が要る（実装依存 ASI の意味で
+    // 一次資料に根拠のない設計判断）。メモリ層の自然整列検査では
+    // 8 バイトまでしか見ないので、ここで 64 バイト境界を確かめる。
     let m = b.konst::<W64>(0x3f);
     let mis = b.and::<W64>(addr, m);
     let z0 = b.konst::<W64>(0);
@@ -3213,7 +3235,7 @@ fn fasi_blk<B: Backend>(
                 let v = b.select::<W64>(little, sw, v);
                 b.set(Fpr(d0 + i).state(), v);
             }
-            fprs_dl(b);
+            fprs_dirty(b, d0, d0 + 7);
             Ok(())
         }
         Insn::Stdfa | Insn::StdfaI => {
@@ -3233,7 +3255,9 @@ fn fasi_blk<B: Backend>(
 
 /// FL8 系 SHORT ASI 転送。LDDFA/STDFA 限定で f[fd] の最下位
 /// 1 バイトだけを転送する。1 バイトなのでリトル形でも同じ。
-/// Ref: SPEC-SPARC-V9 §Partial and Short Load/Store, SRC-QEMU.
+/// FL8 系 ASI は V9 の実装依存 ASI 領域で、部分転送の意味は
+/// 一次資料に根拠のない設計判断。
+/// Ref: SPEC-SPARC-V9 §Address Space Identifiers (ASI 表).
 fn fasi_short8<B: Backend>(b: &mut B, insn: Insn, fd: u8, rs1: Gpr, s: Src2) -> Flow<B> {
     let addr = eff_addr(b, rs1, s);
     match insn {
@@ -3253,8 +3277,9 @@ fn fasi_short8<B: Backend>(b: &mut B, insn: Insn, fd: u8, rs1: Gpr, s: Src2) -> 
 
 /// FL16 系 SHORT ASI 転送。LDDFA/STDFA 限定で f[fd] の最下位
 /// 2 バイトだけを転送する。リトル ASI ではハーフワードを
-/// バイト反転する。
-/// Ref: SPEC-SPARC-V9 §Partial and Short Load/Store, SRC-QEMU.
+/// バイト反転する。FL16 系 ASI は V9 の実装依存 ASI 領域で、
+/// 部分転送の意味は一次資料に根拠のない設計判断。
+/// Ref: SPEC-SPARC-V9 §Address Space Identifiers (ASI 表).
 fn fasi_short16<B: Backend>(
     b: &mut B,
     insn: Insn,
@@ -3295,9 +3320,11 @@ fn fasi_short16<B: Backend>(
 
 /// FPU の ASI 指定アクセス。BLK 系 ASI では 64 バイト転送、
 /// FL8/FL16 系では 1/2 バイト転送、それ以外は
-/// ldf/lddf/stf/stdf/ldqf/stqf と同じ。
-/// Ref: SPEC-SPARC-V9 §Alternate Space Floating-Point
-///      Load/Store Instructions, SRC-QEMU.
+/// ldf/lddf/stf/stdf/ldqf/stqf と同じ。BLK/FL 系 ASI への分岐は
+/// V9 の実装依存 ASI 領域の利用で設計判断。
+/// Ref: SPEC-SPARC-V9 §Load Floating-Point from Alternate Space,
+///      §Store Floating-Point into Alternate Space,
+///      §Address Space Identifiers (ASI 表).
 fn fasi_access<B: Backend>(
     b: &mut B,
     insn: Insn,
@@ -3325,8 +3352,8 @@ fn fasi_access<B: Backend>(
         Insn::Lddfa | Insn::LddfaI | Insn::Stdfa | Insn::StdfaI
     ) {
         // BLK/SHORT ASI は lddfa/stdfa だけが使う。それ以外の
-        // FP-ASI 命令で指定すると illegal instruction。
-        // Ref: SRC-QEMU gen_ldf_asi (GET_ASI_BLOCK/SHORT → TT_ILL_INSN).
+        // FP-ASI 命令で指定すると illegal instruction とする
+        // （実装依存 ASI の扱いで、一次資料に根拠のない設計判断）。
         let blk = is_blk_asi(b, asi);
         return b.if_then_else(
             blk,
@@ -3372,10 +3399,13 @@ fn fasi_access<B: Backend>(
     )
 }
 
-/// LDQFA。16 バイト。q 番号（extract_qfpreg）は 4 の倍数で
-/// なければならない。連続する 2 スロットへ書く。
-/// Ref: SPEC-SPARC-V9 §Alternate Space Floating-Point
-///      Load/Store Instructions.
+/// LDQFA。16 バイト。q 番号（6 ビット番号）は 4 の倍数で
+/// なければならない。連続する 2 スロットへ書く。4 の倍数でない
+/// 場合は本則では fp_exception_other（FSR.ftt=invalid_fp_register）
+/// だが、本モデルは FSR.ftt を持たないので illegal instruction に
+/// 畳む（設計判断）。
+/// Ref: SPEC-SPARC-V9 §Load Floating-Point from Alternate Space,
+///      §Floating-Point Register Number Encoding.
 fn ldqf<B: Backend>(b: &mut B, fd: u8, rs1: Gpr, s: Src2) -> Flow<B> {
     // fd の bit1（R の bit1）が立つと 4 の倍数にならない。
     if fd & 2 != 0 {
@@ -3394,13 +3424,13 @@ fn ldqf<B: Backend>(b: &mut B, fd: u8, rs1: Gpr, s: Src2) -> Flow<B> {
     let a2 = b.add::<W64>(addr, eight);
     let lo: B::V<W64> = b.load::<W64>(a2, DATA_READ)?;
     b.set(Fpr(q0 + 1).state(), lo);
-    fprs_dl(b);
+    fprs_dirty(b, q0, q0 + 1);
     Ok(())
 }
 
-/// STQFA。16 バイト。q 番号の制約は LDQFA と同じ。
-/// Ref: SPEC-SPARC-V9 §Alternate Space Floating-Point
-///      Load/Store Instructions.
+/// STQFA。16 バイト。q 番号の制約と非整列時の扱いは LDQFA と
+/// 同じ（illegal instruction に畳む設計判断）。
+/// Ref: SPEC-SPARC-V9 §Store Floating-Point into Alternate Space.
 fn stqf<B: Backend>(b: &mut B, fd: u8, rs1: Gpr, s: Src2) -> Flow<B> {
     if fd & 2 != 0 {
         return Err(unimp(b, 0));
@@ -3438,8 +3468,10 @@ fn wrasi<B: Backend>(b: &mut B, rs1: Gpr, s: Src2) -> Flow<B> {
     Ok(())
 }
 
-/// RDGSR/WRGSR（V9、非特権）。FPU 無効時は fp_disabled
-/// （QEMU は rdgsr/wrgsr で gen_trap_ifnofpu を呼ぶ）。
+/// RDGSR/WRGSR（V9、非特権）。%gsr は ASR 19 で V9 の実装依存
+/// ASR（impl. dep. #47/#48）。FPU 無効時に fp_disabled とするのは
+/// UltraSPARC 系の拡張の扱いで、一次資料に根拠のない設計判断。
+/// Ref: SPEC-SPARC-V9 §Read State Register, §Write State Register.
 fn rdgsr<B: Backend>(b: &mut B, rd: Gpr) -> Flow<B> {
     fp_check(b)?;
     let v = b.get(gsr_ref());
@@ -3467,9 +3499,9 @@ fn wrfprs<B: Backend>(b: &mut B, rs1: Gpr, s: Src2) -> Flow<B> {
     let x = read(b, rs1);
     let y = src2(b, s);
     let v = b.xor::<W64>(x, y);
-    // QEMU は下位 32 ビットをそのまま保持する。定義ビットは
-    // DU|DL|FEF の 3 ビットだけだが、読み戻し互換のためマスクは
-    // 32 ビットに留める。
+    // 定義ビットは DU|DL|FEF の 3 ビットだけだが、予約ビットの
+    // 読み戻しは仕様書が黙っているので、下位 32 ビットをそのまま
+    // 保持する設計判断とする。
     let m = b.konst::<W64>(0xffff_ffff);
     let w = b.and::<W64>(v, m);
     b.set(fprs_ref(), w);
@@ -3479,7 +3511,9 @@ fn wrfprs<B: Backend>(b: &mut B, rs1: Gpr, s: Src2) -> Flow<B> {
 /// EDGE8/EDGE16/EDGE32 系。s1 の要素位置から s2 の要素位置までの
 /// マスクを作る。同じアライン 8 バイト内なら left & right、
 /// さもなくば left だけ。cc 形は s1-s2 で ICC/XCC を更新する。
-/// Ref: SPEC-SPARC-V9 §Edge Mask Instructions.
+/// Ref: SPEC-SPARC-V9 §Implementation-Dependent Instructions.
+///      VIS（op3=110110 = IMPDEP1 空間）の意味論は実装依存で、
+///      一次資料に根拠のない設計判断。
 fn edge<B: Backend>(
     b: &mut B,
     rd: Gpr,
@@ -3534,8 +3568,10 @@ fn edge<B: Backend>(
         (left, right)
     };
     let comb = b.and::<W64>(left, right);
-    // s1 と s2 が同じ 8 バイトブロック内か。比較マスクは
-    // PSTATE.AM の影響を受ける（QEMU address_mask_i(-8)）。
+    // s1 と s2 が同じ 8 バイトブロック内か。PSTATE.AM=1 では
+    // アドレスの上位 32 ビットが 0 扱いになるので、比較マスクにも
+    // AM を適用する（V9 §PSTATE.AM の規則を EDGE の比較に
+    // 広げる設計判断）。
     let x = b.xor::<W64>(a, c);
     let am = b.konst::<W64>(!7u64);
     let am = amask(b, am);
@@ -3564,7 +3600,9 @@ fn edge<B: Backend>(
 
 /// ARRAY8/ARRAY16/ARRAY32。rs1 のアドレスフィールドを並べ替えて
 /// 要素サイズ（1/2/4 = `elem_log` だけ左シフト）を掛ける。
-/// Ref: SPEC-SPARC-V9 §Array Addressing Instructions.
+/// Ref: SPEC-SPARC-V9 §Implementation-Dependent Instructions.
+///      VIS（IMPDEP1 空間）の意味論は実装依存で、一次資料に
+///      根拠のない設計判断。
 fn array<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr, elem_log: u64) -> Flow<B> {
     let a = read(b, rs1);
     let c = read(b, rs2);
@@ -3638,7 +3676,9 @@ fn array<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr, elem_log: u64) -> F
 
 /// ALIGNADDR/ALIGNADDRL。rd = (rs1+rs2) & ~8、GSR.align =
 /// （little なら反転した）和の下位 3 ビット。
-/// Ref: SPEC-SPARC-V9 §Align Address Instructions.
+/// Ref: SPEC-SPARC-V9 §Implementation-Dependent Instructions.
+///      VIS（IMPDEP1 空間）の意味論は実装依存で、一次資料に
+///      根拠のない設計判断。
 fn alignaddr<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr, little: bool) -> Flow<B> {
     let a = read(b, rs1);
     let c = read(b, rs2);
@@ -3663,7 +3703,9 @@ fn alignaddr<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr, little: bool) -
 }
 
 /// BMASK（VIS2）。rd = rs1+rs2、GSR[63:32] に和の下位 32 ビット。
-/// Ref: SPEC-SPARC-V9 §Byte Mask and Shuffle.
+/// Ref: SPEC-SPARC-V9 §Implementation-Dependent Instructions.
+///      VIS（IMPDEP1 空間）の意味論は実装依存で、一次資料に
+///      根拠のない設計判断。
 fn bmask<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr) -> Flow<B> {
     let a = read(b, rs1);
     let c = read(b, rs2);
@@ -3691,7 +3733,9 @@ fn lane_s<B: Backend>(b: &mut B, v: B::V<W64>, w: u8, i: u8) -> B::V<W64> {
 
 /// FPCMP 系。レーンごとの符号付き比較の結果を整数 rd の
 /// ビットマスクにする（ビット i = レーン i）。
-/// Ref: SPEC-SPARC-V9 §Partitioned Compare Instructions.
+/// Ref: SPEC-SPARC-V9 §Implementation-Dependent Instructions.
+///      VIS（IMPDEP1 空間）の意味論は実装依存で、一次資料に
+///      根拠のない設計判断。
 fn fpcmp<B: Backend>(b: &mut B, rd: Gpr, rs1: u8, rs2: u8, w: u8, op: Cmp) -> Flow<B> {
     fp_check(b)?;
     let a = fgetw64(b, rs1)?;
@@ -3715,7 +3759,9 @@ fn fpcmp<B: Backend>(b: &mut B, rd: Gpr, rs1: u8, rs2: u8, w: u8, op: Cmp) -> Fl
 
 /// FMUL8x16。rs1 の下位 32 ビット中の 4 個の符号なしバイトと
 /// rs2 の 4 個の符号付き 16 ビットの積を (x + 0x80) >> 8 する。
-/// Ref: SPEC-SPARC-V9 §FMUL8x16.
+/// Ref: SPEC-SPARC-V9 §Implementation-Dependent Instructions.
+///      VIS（IMPDEP1 空間）の意味論は実装依存で、一次資料に
+///      根拠のない設計判断。
 fn fmul8x16<B: Backend>(b: &mut B, rd: u8, rs1: u8, rs2: u8) -> Flow<B> {
     fp_check(b)?;
     let a = fget_single::<B>(b, rs1)?;
@@ -3742,14 +3788,17 @@ fn fmul8x16<B: Backend>(b: &mut B, rd: u8, rs1: u8, rs2: u8) -> Flow<B> {
 
 /// FMUL8x16AU/AL。rs1（32 ビット）の 4 バイトに、rs2 の上位
 /// （au）または下位（al）16 ビットの定数を掛ける。
-/// Ref: SPEC-SPARC-V9 §FMUL8x16AU, §FMUL8x16AL.
+/// Ref: SPEC-SPARC-V9 §Implementation-Dependent Instructions.
+///      VIS（IMPDEP1 空間）の意味論は実装依存で、一次資料に
+///      根拠のない設計判断。
 fn fmul8x16a<B: Backend>(b: &mut B, rd: u8, rs1: u8, rs2: u8, upper: bool) -> Flow<B> {
     fp_check(b)?;
     let a = fget_single::<B>(b, rs1)?;
     let s2 = fget_single::<B>(b, rs2)?;
     let t = if upper {
-        // AU は 32 ビット値の上位半分を符号付きで使う
-        // （QEMU は 32 ビットの sari）。s2[31:16] を符号拡張する。
+        // AU は 32 ビット値の上位半分を符号付きで使う。VIS の
+        // 意味論は V9 範囲外なので、s2[31:16] の符号拡張は
+        // 設計判断。
         let s32 = b.konst::<W64>(32);
         let t = b.shl::<W64>(s2, s32);
         let s48 = b.konst::<W64>(48);
@@ -3781,7 +3830,9 @@ fn fmul8x16a<B: Backend>(b: &mut B, rd: u8, rs1: u8, rs2: u8, upper: bool) -> Fl
 /// FMUL8SUx16 / FMUL8ULx16。rs1 の各 16 ビット語の上位バイト
 /// （su = 符号付き）または下位バイト（ul = 符号なし）と rs2 の
 /// 符号付き 16 ビットの積。
-/// Ref: SPEC-SPARC-V9 §FMUL8SUx16, §FMUL8ULx16.
+/// Ref: SPEC-SPARC-V9 §Implementation-Dependent Instructions.
+///      VIS（IMPDEP1 空間）の意味論は実装依存で、一次資料に
+///      根拠のない設計判断。
 fn fmul8sux16<B: Backend>(b: &mut B, rd: u8, rs1: u8, rs2: u8, upper: bool) -> Flow<B> {
     fp_check(b)?;
     let a = fgetw64(b, rs1)?;
@@ -3821,7 +3872,9 @@ fn fmul8sux16<B: Backend>(b: &mut B, rd: u8, rs1: u8, rs2: u8, upper: bool) -> F
 /// 上位（su = 符号付きで左 8 シフト相当）または下位（ul = 符号
 /// なし）バイトと rs2 の符号付き 16 ビットの積。結果は 32 ビット
 /// レーンに入る。
-/// Ref: SPEC-SPARC-V9 §FMULD8SUx16, §FMULD8ULx16.
+/// Ref: SPEC-SPARC-V9 §Implementation-Dependent Instructions.
+///      VIS（IMPDEP1 空間）の意味論は実装依存で、一次資料に
+///      根拠のない設計判断。
 fn fmuld8x16<B: Backend>(b: &mut B, rd: u8, rs1: u8, rs2: u8, upper: bool) -> Flow<B> {
     fp_check(b)?;
     let a = fget_single::<B>(b, rs1)?;
@@ -3861,7 +3914,9 @@ fn clip64<B: Backend>(b: &mut B, v: B::V<W64>, lo: i64, hi: i64) -> B::V<W64> {
 
 /// FPACK16。rs2 の 4 個の符号付き 16 ビットを GSR.scale でスケール
 /// し、>> 7 のあと符号なし 8 ビットに飽和する。結果は 32 ビット。
-/// Ref: SPEC-SPARC-V9 §FPACK16.
+/// Ref: SPEC-SPARC-V9 §Implementation-Dependent Instructions.
+///      VIS（IMPDEP1 空間）の意味論は実装依存で、一次資料に
+///      根拠のない設計判断。
 fn fpack16<B: Backend>(b: &mut B, rd: u8, rs2: u8) -> Flow<B> {
     fp_check(b)?;
     let c = fgetw64(b, rs2)?;
@@ -3889,7 +3944,9 @@ fn fpack16<B: Backend>(b: &mut B, rd: u8, rs2: u8) -> Flow<B> {
 /// FPACK32。rd[63:32] = rs1 << 8（新バイトを残す）、rs2 の 2 個の
 /// 符号付き 32 ビットをスケール → >> 23 → 符号なし 8 ビット飽和で
 /// 各ワードの最下位バイトに入れる。
-/// Ref: SPEC-SPARC-V9 §FPACK32.
+/// Ref: SPEC-SPARC-V9 §Implementation-Dependent Instructions.
+///      VIS（IMPDEP1 空間）の意味論は実装依存で、一次資料に
+///      根拠のない設計判断。
 fn fpack32<B: Backend>(b: &mut B, rd: u8, rs1: u8, rs2: u8) -> Flow<B> {
     fp_check(b)?;
     let a = fgetw64(b, rs1)?;
@@ -3918,7 +3975,9 @@ fn fpack32<B: Backend>(b: &mut B, rd: u8, rs1: u8, rs2: u8) -> Flow<B> {
 
 /// FPACKFIX。rs2 の 2 個の符号付き 32 ビットをスケール → >> 16
 /// → 符号付き 16 ビット飽和。結果は 32 ビット。
-/// Ref: SPEC-SPARC-V9 §FPACKFIX.
+/// Ref: SPEC-SPARC-V9 §Implementation-Dependent Instructions.
+///      VIS（IMPDEP1 空間）の意味論は実装依存で、一次資料に
+///      根拠のない設計判断。
 fn fpackfix<B: Backend>(b: &mut B, rd: u8, rs2: u8) -> Flow<B> {
     fp_check(b)?;
     let c = fgetw64(b, rs2)?;
@@ -3946,7 +4005,9 @@ fn fpackfix<B: Backend>(b: &mut B, rd: u8, rs2: u8) -> Flow<B> {
 
 /// PDIST。rs1 と rs2 の対応する 8 バイトの絶対差の和を rd（累積
 /// レジスタ）に加える。
-/// Ref: SPEC-SPARC-V9 §PDIST.
+/// Ref: SPEC-SPARC-V9 §Implementation-Dependent Instructions.
+///      VIS（IMPDEP1 空間）の意味論は実装依存で、一次資料に
+///      根拠のない設計判断。
 fn pdist<B: Backend>(b: &mut B, rd: u8, rs1: u8, rs2: u8) -> Flow<B> {
     fp_check(b)?;
     let a = fgetw64(b, rs1)?;
@@ -3970,7 +4031,9 @@ fn pdist<B: Backend>(b: &mut B, rd: u8, rs1: u8, rs2: u8) -> Flow<B> {
 
 /// FALIGNDATA。GSR.align × 8 ビットだけ (rs1:rs2) の連結をずらす。
 /// align=0 なら rs1。
-/// Ref: SPEC-SPARC-V9 §FALIGNDATA.
+/// Ref: SPEC-SPARC-V9 §Implementation-Dependent Instructions.
+///      VIS（IMPDEP1 空間）の意味論は実装依存で、一次資料に
+///      根拠のない設計判断。
 fn faligndata<B: Backend>(b: &mut B, rd: u8, rs1: u8, rs2: u8) -> Flow<B> {
     fp_check(b)?;
     let a = fgetw64(b, rs1)?;
@@ -3997,7 +4060,9 @@ fn faligndata<B: Backend>(b: &mut B, rd: u8, rs1: u8, rs2: u8) -> Flow<B> {
 }
 
 /// FPMERGE。rs1・rs2 の下位 32 ビットのバイトを交互に連結する。
-/// Ref: SPEC-SPARC-V9 §FPMERGE.
+/// Ref: SPEC-SPARC-V9 §Implementation-Dependent Instructions.
+///      VIS（IMPDEP1 空間）の意味論は実装依存で、一次資料に
+///      根拠のない設計判断。
 fn fpmerge<B: Backend>(b: &mut B, rd: u8, rs1: u8, rs2: u8) -> Flow<B> {
     fp_check(b)?;
     let a = fget_single::<B>(b, rs1)?;
@@ -4025,7 +4090,9 @@ fn fpmerge<B: Backend>(b: &mut B, rd: u8, rs1: u8, rs2: u8) -> Flow<B> {
 
 /// FEXPAND。rs2 の下位 32 ビットの各バイトを <<4 した 16 ビットに
 /// 展開する。
-/// Ref: SPEC-SPARC-V9 §FEXPAND.
+/// Ref: SPEC-SPARC-V9 §Implementation-Dependent Instructions.
+///      VIS（IMPDEP1 空間）の意味論は実装依存で、一次資料に
+///      根拠のない設計判断。
 fn fexpand<B: Backend>(b: &mut B, rd: u8, rs2: u8) -> Flow<B> {
     fp_check(b)?;
     let c = fget_single::<B>(b, rs2)?;
@@ -4046,7 +4113,9 @@ fn fexpand<B: Backend>(b: &mut B, rd: u8, rs2: u8) -> Flow<B> {
 
 /// BSHUFFLE（VIS2）。GSR[63:32] のニブルが選ぶバイトを並べる。
 /// ニブル 0-7 は rs2 のバイト、8-15 は rs1 のバイト。
-/// Ref: SPEC-SPARC-V9 §Byte Mask and Shuffle.
+/// Ref: SPEC-SPARC-V9 §Implementation-Dependent Instructions.
+///      VIS（IMPDEP1 空間）の意味論は実装依存で、一次資料に
+///      根拠のない設計判断。
 fn bshuffle<B: Backend>(b: &mut B, rd: u8, rs1: u8, rs2: u8) -> Flow<B> {
     fp_check(b)?;
     let a = fgetw64(b, rs1)?;
@@ -4089,7 +4158,9 @@ fn bshuffle<B: Backend>(b: &mut B, rd: u8, rs1: u8, rs2: u8) -> Flow<B> {
 /// 下位 32 ビットだけを読み書きする（s 形）。
 /// 加算: (a&lo)+(c&lo) に符号ビットを xor で加える。
 /// 減算: d=(a|hi)-(c&lo) の下位と、bit(w-1)=~(a^c^d) を合成する。
-/// Ref: SPEC-SPARC-V9 §Partitioned Add/Subtract.
+/// Ref: SPEC-SPARC-V9 §Implementation-Dependent Instructions.
+///      VIS（IMPDEP1 空間）の意味論は実装依存で、一次資料に
+///      根拠のない設計判断。
 fn vparith<B: Backend>(
     b: &mut B,
     rd: u8,
@@ -4160,7 +4231,9 @@ enum VLog {
 }
 
 /// VIS の論理演算。d 形は 64 ビットペア、s 形は下位 32 ビット。
-/// Ref: SPEC-SPARC-V9 §Logical Operations.
+/// Ref: SPEC-SPARC-V9 §Implementation-Dependent Instructions.
+///      VIS（IMPDEP1 空間）の意味論は実装依存で、一次資料に
+///      根拠のない設計判断。
 fn vlogic<B: Backend>(b: &mut B, rd: u8, rs1: u8, rs2: u8, op: VLog, single: bool) -> Flow<B> {
     fp_check(b)?;
     let (a, c) = if single {
@@ -4214,7 +4287,9 @@ fn vlogic<B: Backend>(b: &mut B, rd: u8, rs1: u8, rs2: u8, op: VLog, single: boo
 }
 
 /// FSRC1/FNOT1。rs1 桁の値をそのまま／反転して写す。
-/// Ref: SPEC-SPARC-V9 §Logical Operations.
+/// Ref: SPEC-SPARC-V9 §Implementation-Dependent Instructions.
+///      VIS（IMPDEP1 空間）の意味論は実装依存で、一次資料に
+///      根拠のない設計判断。
 fn vunary1<B: Backend>(b: &mut B, rd: u8, rs1: u8, neg: bool, single: bool) -> Flow<B> {
     fp_check(b)?;
     let a = if single {

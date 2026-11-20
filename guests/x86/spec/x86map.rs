@@ -1170,7 +1170,8 @@ pub fn build_maps(m: &mut Model) {
     }
     // PKU。F2/66 は無視される接頭辞なので NoF3 で受理し、
     // F3 は m64 では CLUI/STUI に譲る（i386 では CLUI 系が
-    // 無効なので F3 も RDPKRU/WRPKRU に落ちる — llvm 実測）。
+    // 無効なので F3 も RDPKRU/WRPKRU に落ちる）。
+    // Gap: GAP-0051（接頭辞受理の厳しさは SDM 一次照合未了）。
     for (rm, name) in [(6u8, "rdpkru"), (7, "wrpkru")] {
         let mut it = mi(name, &[], Some(5), PfxSel::NoF3, Pred::True, name, "system");
         it.group_mod = Some(true);
@@ -1181,8 +1182,8 @@ pub fn build_maps(m: &mut Model) {
         it.group_rm = Some(rm);
         m0f.push(MapItem::Insn(0x01, it));
     }
-    // XCR0（/2 rm=0/1）。66/F2/F3 は #UD（XED 実測。llvm は
-    // 接頭辞を無視して受理する）。
+    // XCR0（/2 rm=0/1）。66/F2/F3 は #UD とする受理条件
+    // （SDM 一次照合は GAP-0051）。
     // XSETBV は特権命令だが CPL はモデル化しない。
     for (rm, name) in [(0u8, "xgetbv"), (1, "xsetbv")] {
         let mut it = mi(name, &[], Some(2), PfxSel::Plain, Pred::True, name, "system");
@@ -1269,7 +1270,7 @@ pub fn build_maps(m: &mut Model) {
             g("nop_ev", 0, &[Ea(V)], "nop {e}", "alu"),
         ),
         // CLDEMOTE（0F 1C /0、メモリ形のみ）。全接頭辞を無視
-        // する（llvm 実測で NP/66/F2/F3 いずれも受理）。
+        // して受理する（GAP-0051）。
         // キャッシュ階層はモデル化しないので no-op。
         MapItem::Insn(
             0x1C,
@@ -1277,12 +1278,12 @@ pub fn build_maps(m: &mut Model) {
         ),
         MapItem::Insn(0x31, n("rdtsc", &[], "rdtsc", "system")),
         // 0F AE グループ。mod!=11 は MXCSR/CLFLUSH、mod=11 は fence。
-        // FXSAVE/FXRSTOR（/0 /1 メモリ形）は 66/F2/F3 で #UD
-        // （XED 実測。llvm は接頭辞を無視して受理する）。
+        // FXSAVE/FXRSTOR（/0 /1 メモリ形）は 66/F2/F3 で #UD とする
+        // 受理条件（SDM 一次照合は GAP-0051）。
         MapItem::Insn(0xAE, gmp("fxsave", 0, false, &[Ea(Q64)], PfxSel::Plain, "fxsave {e}", "system")),
         MapItem::Insn(0xAE, gmp("fxrstor", 1, false, &[Ea(Q64)], PfxSel::Plain, "fxrstor {e}", "system")),
         // XSAVE（/4）は 66 が XSAVEC（未宣言）に譲られるので
-        // Plain。XRSTOR（/5）も 66/F2/F3 で #UD（XED 実測）。
+        // Plain。XRSTOR（/5）も 66/F2/F3 で #UD（GAP-0051）。
         // XSAVEOPT（/6）は NP のみで 66 は CLWB/XSAVES、
         // F3 は CLRSSBSY に譲る。
         MapItem::Insn(0xAE, gmp("xsave", 4, false, &[Ea(Q64)], PfxSel::Plain, "xsave {e}", "system")),
@@ -1338,7 +1339,7 @@ pub fn build_maps(m: &mut Model) {
         // PTWRITE 系、66/F2 も別命令なので Plain で切る。
         MapItem::Insn(0xAE, gmp("lfence", 5, true, &[], PfxSel::Plain, "lfence", "alu")),
         MapItem::Insn(0xAE, gmp("mfence", 6, true, &[], PfxSel::Plain, "mfence", "alu")),
-        // CLFLUSH は F2/F3 を無視して受理（llvm 実測）するが、
+        // CLFLUSH は F2/F3 を無視して受理するが（GAP-0051）、
         // 66 は CLFLUSHOPT なので No66 で切る。
         MapItem::Insn(0xAE, gmp("clflush_mb", 7, false, &[Ea(B8)], PfxSel::No66, "clflush {e}", "alu")),
         MapItem::Insn(0xAE, gmp("sfence", 7, true, &[], PfxSel::Plain, "sfence", "alu")),

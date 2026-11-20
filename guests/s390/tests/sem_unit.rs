@@ -201,10 +201,11 @@ fn ldr_adbr_sdbr_mdbr_ddbr() {
 }
 
 #[test]
-fn madbr_fused_rrf() {
-    // MADBR は RRF-a: `B3 1e | r1 0 | r2 r3`。byte2 上位が r1（宛先）、
-    // byte3 上位が r2、下位が r3。b3 1e 20 80 は madbr %f2,%f8,%f0 →
-    // f2 = f0*f8 + f2（llvm-mc の encode で確認済み）。
+fn madbr_fused_rrd() {
+    // MADBR は RRD 形式: `B3 1e | r1 0 | r3 r2`。オペランド順は
+    // R1,R3,R2 で、r1 = r3*r2 + r1。b3 1e 20 80 は madbr %f2,%f8,%f0 →
+    // f2 = f8*f0 + f2。
+    // Ref: SPEC-S390-ZARCH-POP — MULTIPLY AND ADD / RRD 形式。
     let mut e = env();
     e.backend.set(Fpr(8).state(), 0x4014_0000_0000_0000); // 5.0
     e.backend.set(Fpr(0).state(), 0x4000_0000_0000_0000); // 2.0
@@ -757,7 +758,9 @@ fn cds_uses_low_halves() {
 
 #[test]
 fn ecag_returns_all_ones() {
-    // ECAG: キャッシュ情報がない場合（QEMU と同じ）全 1 を返す。
+    // ECAG: モデルが属性データを提供しない場合、仕様は R1 を全 1 に
+    // すると定める。
+    // Ref: SPEC-S390-ZARCH-POP — EXTRACT CPU ATTRIBUTE。
     let mut e = env();
     // ecag %r4,%r5,8(%r6) → eb 45 60 08 00 4c。
     run(&mut e, Insn::Eb, 0xeb45_6008_004c, 0x100);

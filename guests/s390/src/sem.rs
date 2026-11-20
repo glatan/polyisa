@@ -3505,7 +3505,8 @@ pub fn b3<B: Backend>(b: &mut B, w: u64, _pc: u64) -> Flow<B> {
             b.set(fr(r1), d);
             Ok(())
         }
-        // 2 値演算。0x0e/0x0f/0x1e/0x1f は RRF-a の MAE/MAD/MSE/MSD で別途処理。
+        // 2 値演算。0x0e/0x0f/0x1e/0x1f は RRD の MAEBR/MADBR/
+        // MSEBR/MSDBR で別途処理。
         0x08..=0x0d | 0x14 | 0x15 | 0x17 | 0x18..=0x1d | 0x48..=0x4d => fp_bin(b, f, r1, r2),
         0x16 => {
             // SQXBR: 拡張平方根は f64 近似。
@@ -3515,14 +3516,16 @@ pub fn b3<B: Backend>(b: &mut B, w: u64, _pc: u64) -> Flow<B> {
             b.set(fr(r1), __h545);
             Ok(())
         }
-        // 3 値演算（RRF-a: byte2 上位 nibble が r1、byte3 上位が r2、下位が r3）。
-        // MAEBR/MADBR: f1 = f3*f2 + f1、MSEBR/MSDBR: f1 = f3*f2 - f1。
-        // フィールド配置は 2 値 RRE と異なる: `B3 ff | r1 0 | r2 r3`。
+        // 3 値演算（RRD 形式: `B3 ff | r1 0 | r3 r2`。byte2 上位が r1、
+        // byte3 上位が r3、下位が r2。フィールド配置は 2 値 RRE と異なる）。
+        // オペランド順は R1,R3,R2。MAEBR/MADBR: r1 = r3*r2 + r1、
+        // MSEBR/MSDBR: r1 = r3*r2 - r1。
         0x0e | 0x1e | 0x0f | 0x1f => {
-            let (dr, mr2, r3) = (m3, r1, r2);
+            // RRD: byte2 上位が r1（宛先）、byte3 上位が r3、下位が r2。
+            let (dr, mr3, s2) = (m3, r1, r2);
             let short = matches!(f, 0x0e | 0x0f);
-            let a64 = fg64(b, r3, short);
-            let y64 = fg64(b, mr2, short);
+            let a64 = fg64(b, s2, short);
+            let y64 = fg64(b, mr3, short);
             let acc = fg64(b, dr, short);
             let addend = if matches!(f, 0x0f | 0x1f) {
                 let __hs = k(b, 0x8000_0000_0000_0000);
@@ -4438,8 +4441,11 @@ pub fn eb<B: Backend>(b: &mut B, w: u64, _pc: u64) -> Flow<B> {
             cs_op(b, w, a)
         }
         0x4c => {
-            // ECAG: キャッシュ属性の抽出。キャッシュ情報を提供しない
-            // （QEMU と同じ）ので全 1 を返す。
+            // ECAG（EXTRACT CPU ATTRIBUTE）: ASI/AI/LI で属性を選ぶ。
+            // 指定がすべて有効でもモデルがそのデータを提供しない場合、
+            // 仕様は R1 を全 1 にすると定める。polyisa はキャッシュ
+            // 属性も CPU 速度も提供しないので常に全 1 を返す。
+            // Ref: SPEC-S390-ZARCH-POP — EXTRACT CPU ATTRIBUTE。
             let v = k(b, u64::MAX);
             set_g(b, r, v);
             let _ = a;

@@ -24,9 +24,7 @@
 //! （それ以外の命令は `Ok(false)` を返し、呼び出し側が未実装と
 //! して扱う）。
 //!
-//! 出典は SPEC-ALPHA-ARM。ext/ins/msk/zap と cmpbge・/v 修飾の
-//! 細部は QEMU（SRC-QEMU）と照合済み。
-//! Ref: SPEC-ALPHA-ARM, SRC-QEMU.
+//! Ref: SPEC-ALPHA-ARM.
 
 use polyisa_mem::{Access, AccessKind, Align, Endian};
 use polyisa_sem::{
@@ -140,8 +138,9 @@ fn sext21(v: u32) -> i64 {
 // ---- 段階16-5: 整数 OPERATE のヘルパ ----
 
 /// `zap`/`ext`/`msk`/`ins` 系のバイト選択マスク（bit i = バイト i の
-/// 有効性）を 64 ビットマスクへ広げる。QEMU の `zapnot_mask` と同じ。
-// Ref: SRC-QEMU (target/alpha/translate.c zapnot_mask).
+/// 有効性）を 64 ビットマスクへ広げる。BYTE_ZAP の bit i ↔ byte i
+/// の対応に従う。
+// Ref: SPEC-ALPHA-ARM §4.6.6.
 fn zap_mask(m8: u8) -> u64 {
     let mut m = 0u64;
     for i in 0..8 {
@@ -169,7 +168,7 @@ fn zap_mask_of<B: Backend>(b: &mut B, v: B::V<W64>) -> B::V<W64> {
 }
 
 /// W32 への切り詰めと符号拡張（*l 系命令は結果を符号拡張する）。
-// Ref: SPEC-ALPHA-ARM §4.7.1 (longword results are sign-extended).
+// Ref: SPEC-ALPHA-ARM §4.4.1 (Rc is a proper sign extension).
 fn sext_w32<B: Backend>(b: &mut B, v: B::V<W64>) -> B::V<W64> {
     let t = b.trunc::<W64, W32>(v);
     b.sext::<W32, W64>(t)
@@ -218,9 +217,11 @@ fn opr_ops<B: Backend>(b: &mut B, word: u32) -> (B::V<W64>, B::V<W64>, Gpr) {
 }
 
 /// `cmpbge`: バイトごとの unsigned 比較で、バイト i の結果が結果の
-/// bit i に入る。16 ビットレーンの SWAR（QEMU helper_cmpbge と同じ
-/// 手順）: (a|0x100) - b のレーン内差分で、借りなしなら bit8 が残る。
-// Ref: SRC-QEMU (helper_cmpbge).
+/// bit i に入る。ARM の定義は a + ~b + 1 のレーン内キャリー伝播。
+/// ここでは借り回りのない 16 ビットレーン SWAR で同じ値を作る:
+/// (a|0x100) - b のレーン内差分で、借りなしなら bit8 が残る
+/// （実装手順は本実装の選択）。
+// Ref: SPEC-ALPHA-ARM §4.6.1.
 fn cmpbge<B: Backend>(b: &mut B, a: B::V<W64>, v: B::V<W64>) -> B::V<W64> {
     let lane = 0x00ff_00ff_00ff_00ff;
     let carry = 0x0100_0100_0100_0100;
@@ -280,7 +281,7 @@ fn sra_n<B: Backend>(b: &mut B, v: B::V<W64>, n: u64) -> B::V<W64> {
 }
 
 /// SWAR のポップカウント（Hacker's Delight の定番手順）。
-// Ref: SPEC-ALPHA-ARM §4.7.6 ctpop; 手順は Hacker's Delight.
+// Ref: SPEC-ALPHA-ARM §4.4.8 ctpop; 手順は Hacker's Delight.
 fn ctpop64<B: Backend>(b: &mut B, x: B::V<W64>) -> B::V<W64> {
     let t = {
         let s = shr_n(b, x, 1);
@@ -304,7 +305,7 @@ fn ctpop64<B: Backend>(b: &mut B, x: B::V<W64>) -> B::V<W64> {
 }
 
 /// 64 ビットの先頭ゼロ数（CIX の ctlz）。x=0 なら 64。
-// Ref: SPEC-ALPHA-ARM §4.7.6 ctlz.
+// Ref: SPEC-ALPHA-ARM §4.4.7 ctlz.
 fn ctlz64<B: Backend>(b: &mut B, x: B::V<W64>) -> B::V<W64> {
     // 最上位の立っているビット以下を全て 1 に畳んでから ~x の
     // popcount を取る。
@@ -318,7 +319,7 @@ fn ctlz64<B: Backend>(b: &mut B, x: B::V<W64>) -> B::V<W64> {
 }
 
 /// 64 ビットの後端ゼロ数（CIX の cttz）。x=0 なら 64。
-// Ref: SPEC-ALPHA-ARM §4.7.6 cttz.
+// Ref: SPEC-ALPHA-ARM §4.4.9 cttz.
 fn cttz64<B: Backend>(b: &mut B, x: B::V<W64>) -> B::V<W64> {
     // (~x) & (x-1) は最下位の立っているビットの下側が全て 1。
     // x=0 では (~0)&(0-1) = 全 1 → 64。
@@ -331,7 +332,7 @@ fn cttz64<B: Backend>(b: &mut B, x: B::V<W64>) -> B::V<W64> {
 
 /// バイト/ワードごとの SIMD min/max（MVI）。
 /// lanes = 8（バイト）または 4（ワード）。signed で符号付き比較。
-// Ref: SRC-QEMU (helper_min*/helper_max*).
+// Ref: SPEC-ALPHA-ARM §4.13.1.
 fn simd_minmax<B: Backend>(
     b: &mut B,
     a: B::V<W64>,
@@ -382,7 +383,7 @@ fn sext_lane<B: Backend>(b: &mut B, x: B::V<W64>, bits: u64) -> B::V<W64> {
 /// 整列 ldl/ldq/stl/stq は自然境界を要求し、違反は例外になる
 /// （カーネルが補完するのが Alpha の流儀）。
 /// ldq_u/stq_u は意味論側でアドレスを整列させるので同じ属性でよい。
-// Ref: SPEC-ALPHA-ARM §4.8.
+// Ref: SPEC-ALPHA-ARM §4.2 (alignment exception).
 const DATA_READ: Access = Access {
     endian: Endian::Le,
     align: Align::Natural,
@@ -407,11 +408,10 @@ const SC_ACC: Access = Access {
     kind: AccessKind::StoreConditional,
 };
 
-/// 整数オーバーフロー例外。`/v` 修飾の算術が使う。
-/// code=1 は polyisa 内部の算術例外識別子（Alpha の整数
-/// オーバーフロー = QEMU の EXC_M_IOV マスク位に対応するが、
-/// ここの値は内部コードであり UAPI/ARM の定数ではない）。
-// Ref: SRC-QEMU (arith_excp / EXC_M_IOV).
+/// 整数オーバーフロー例外。`/v` 修飾の算術が使う（ARM の Integer
+/// Overflow (IOV) arithmetic trap に対応）。code=1 は polyisa 内部の
+/// 算術例外識別子で、UAPI/ARM の定数ではない。
+// Ref: SPEC-ALPHA-ARM §4.7.7.9.
 fn overflow<B: Backend>(b: &mut B) -> B::Exit {
     b.raise(GuestException {
         kind: ExceptionKind::Trap,
@@ -421,9 +421,11 @@ fn overflow<B: Backend>(b: &mut B) -> B::Exit {
     })
 }
 
-/// pos=0 で「64 ビット右シフト → 0」を表すため、QEMU と同じ二段
-/// シフト（`>>(~pos8 & 63)` のあと `>>1`）で 64-pos*8 右に寄せる。
-// Ref: SRC-QEMU (gen_ins_h/gen_msk_h).
+/// INSxH/MSKxH の `RIGHT_SHIFT(x, 64 - pos*8)`。pos=0 では 64
+/// ビットシフトでフィールドが語外に逃げて 0 になる。Backend の
+/// シフト回数は 63 で頭打ちなので、二段（`>>(~pos8 & 63)` のあと
+/// `>>1`）で 64-pos*8 右に寄せる（実装手順は本実装の選択）。
+// Ref: SPEC-ALPHA-ARM §4.6.3/§4.6.4.
 fn h_shr<B: Backend>(b: &mut B, x: B::V<W64>, pos8: B::V<W64>) -> B::V<W64> {
     let n = b.not(pos8);
     let s1 = and_k(b, n, 63);
@@ -434,8 +436,8 @@ fn h_shr<B: Backend>(b: &mut B, x: B::V<W64>, pos8: B::V<W64>) -> B::V<W64> {
 
 /// 整数 OPERATE（段階16-5）。オペランド形式は FOPR/FOPL の対で、
 /// bit12=1 がリテラル形。各バリアントの意味は SPEC-ALPHA-ARM
-/// §4.7、細部は QEMU と照合済み。
-// Ref: SPEC-ALPHA-ARM, SRC-QEMU (target/alpha/translate.c).
+/// §4.4-§4.6。
+// Ref: SPEC-ALPHA-ARM.
 fn operate<B: Backend>(b: &mut B, insn: Insn, word: u32) -> Result<bool, B::Exit> {
     let (a, v, rc) = opr_ops(b, word);
     let zero = b.konst::<W64>(0);
@@ -453,7 +455,7 @@ fn operate<B: Backend>(b: &mut B, insn: Insn, word: u32) -> Result<bool, B::Exit
     let res = match insn {
         // ---- 0x10: 算術・比較 ----
         // *l 系は低 32 ビット演算の結果を符号拡張して格納する。
-        // Ref: SPEC-ALPHA-ARM §4.7.1.
+        // Ref: SPEC-ALPHA-ARM §4.4.1.
         Insn::Addl | Insn::AddlI => {
             let t = b.add(a, v);
             sext_w32(b, t)
@@ -560,7 +562,7 @@ fn operate<B: Backend>(b: &mut B, insn: Insn, word: u32) -> Result<bool, B::Exit
         }
         // ---- 0x12: バイト操作・シフト ----
         // pos = 第2ソースの下位 3 ビット（即値形も同じ）。
-        // Ref: SPEC-ALPHA-ARM §4.7.5.
+        // Ref: SPEC-ALPHA-ARM §4.5.3-§4.5.4, §4.6.2-§4.6.6.
         Insn::Srl | Insn::SrlI => {
             let n = and_k(b, v, 63);
             b.shr_l(a, n)
@@ -679,9 +681,9 @@ fn operate<B: Backend>(b: &mut B, insn: Insn, word: u32) -> Result<bool, B::Exit
 }
 
 /// `/v` 修飾の算術（オーバーフローで整数オーバーフロー例外）。
-/// 符号付き加減算の桁あふれを検査し、あれば rc を書かず例外を
-/// 上げる。
-// Ref: SPEC-ALPHA-ARM §4.7.1 (/v qualifier), SRC-QEMU (check_overflow).
+/// 符号付き加減算の桁あふれを検査する。桁あふれ時でも真値の下位
+/// ビットを宛先に書いてから例外を上げる。
+// Ref: SPEC-ALPHA-ARM §4.4.1-§4.4.3 (/V qualifier).
 fn operate_v<B: Backend>(b: &mut B, insn: Insn, word: u32) -> Result<bool, B::Exit> {
     let (a, v, rc) = opr_ops(b, word);
     let is_long = matches!(
@@ -699,7 +701,7 @@ fn operate_v<B: Backend>(b: &mut B, insn: Insn, word: u32) -> Result<bool, B::Ex
         (a, v)
     };
     let r = if is_sub { b.sub(aa, vv) } else { b.add(aa, vv) };
-    // オーバーフロー条件（QEMU check_overflow と同じ意味）:
+    // オーバーフロー条件:
     //   *l 形: 32 ビット符号付き演算 — 結果が sext32 で復元できない
     //          （sext32(r) != r）なら桁あふれ。
     //   *q 形: 64 ビット — add は両オペランドの符号が同じ（~(a^v) の
@@ -721,15 +723,16 @@ fn operate_v<B: Backend>(b: &mut B, insn: Insn, word: u32) -> Result<bool, B::Ex
         let zero = b.konst::<W64>(0);
         b.cmp(Cmp::Ne, bit, zero)
     };
-    b.if_then(ovf, |b| Err(overflow(b)))?;
+    // 桁あふれでも真値の下位ビットは宛先に書く（§4.4.3）。
     let res = if is_long { sext_w32(b, r) } else { r };
     rc.set(b, res);
+    b.if_then(ovf, |b| Err(overflow(b)))?;
     Ok(true)
 }
 
 /// 乗算命令（opcode 0x13、FOPR/FOPL）。Alpha に整数除算命令はなく
 /// （ソフトウェアで合成する）、乗算と UMULH だけが存在する。
-// Ref: SPEC-ALPHA-ARM §4.7.4, SRC-QEMU (translate.c case 0x13).
+// Ref: SPEC-ALPHA-ARM §4.4.10-§4.4.12.
 fn operate_mul<B: Backend>(b: &mut B, insn: Insn, word: u32) -> Result<bool, B::Exit> {
     let (a, v, rc) = opr_ops(b, word);
     match insn {
@@ -748,25 +751,27 @@ fn operate_mul<B: Backend>(b: &mut B, insn: Insn, word: u32) -> Result<bool, B::
             rc.set(b, t);
         }
         // mull/v: sext32 したオペランドの積が 32 ビットに収まることを
-        // 要する（sext32(r) != r で例外）。
+        // 要する（sext32(r) != r で例外）。桁あふれ時も切り詰め結果を
+        // 書いてから例外を上げる。
         Insn::MullV | Insn::MullVI => {
             let aa = sext_w32(b, a);
             let vv = sext_w32(b, v);
             let r = b.mul(aa, vv);
             let r32 = sext_w32(b, r);
             let ovf = b.cmp(Cmp::Ne, r32, r);
-            b.if_then(ovf, |b| Err(overflow(b)))?;
             rc.set(b, r32);
+            b.if_then(ovf, |b| Err(overflow(b)))?;
         }
         // mulq/v: 積の上位 64 が下位の符号拡張と一致しないなら
-        // 桁あふれ（QEMU check_overflow(hi, sar(lo,63)) と同じ）。
+        // 桁あふれ。桁あふれ時も下位 64 ビットを書いてから例外を
+        // 上げる（§4.4.11）。
         Insn::MulqV | Insn::MulqVI => {
             let lo = b.mul(a, v);
             let hi = b.mulh(a, v);
             let s = sra_n(b, lo, 63);
             let ovf = b.cmp(Cmp::Ne, hi, s);
-            b.if_then(ovf, |b| Err(overflow(b)))?;
             rc.set(b, lo);
+            b.if_then(ovf, |b| Err(overflow(b)))?;
         }
         _ => unreachable!("operate_mul called for non-mul insn"),
     }
@@ -774,12 +779,12 @@ fn operate_mul<B: Backend>(b: &mut B, insn: Insn, word: u32) -> Result<bool, B::
 }
 
 /// 拡張命令の 2 入力形（0x1C の FOPR/FOPL。MVI の perr/min/max）。
-// Ref: SPEC-ALPHA-ARM §4.7.6, SRC-QEMU (int_helper.c).
+// Ref: SPEC-ALPHA-ARM §4.13.1-§4.13.2.
 fn operate_mvi<B: Backend>(b: &mut B, insn: Insn, word: u32) -> Result<bool, B::Exit> {
     let (a, v, rc) = opr_ops(b, word);
     let res = match insn {
         // perr: バイトごとの絶対差の和（pixel error = SAD）。
-        // Ref: SRC-QEMU (helper_perr).
+        // Ref: SPEC-ALPHA-ARM §4.13.2.
         Insn::Perr => {
             let mut res = b.konst::<W64>(0);
             for i in 0..8u64 {
@@ -816,10 +821,11 @@ fn operate_mvi<B: Backend>(b: &mut B, insn: Insn, word: u32) -> Result<bool, B::
 }
 
 /// 拡張命令の 1 入力形（0x1C の FOPRZ。BWX/CIX/MVI）。
-// Ref: SPEC-ALPHA-ARM §4.7.5/§4.7.6, SRC-QEMU (translate.c case 0x1C).
+// Ref: SPEC-ALPHA-ARM §4.4.7-§4.4.9, §4.6.5, §4.13.3-§4.13.4.
 fn operate_z<B: Backend>(b: &mut B, insn: Insn, word: u32) -> Result<bool, B::Exit> {
-    // リテラル形は sextb/sextw のみ存在する（他の 0x1C 命令は
-    // REQUIRE_NO_LIT 相当でリテラル形を持たない）。
+    // リテラル形は sextb/sextw のみ存在する（`SEXTx #b.ib` 形を
+    // ARM が明示するのはこの 2 命令だけ。ctpop/ctlz/cttz や
+    // pk/unpk はレジスタ形のみ）。
     if matches!(insn, Insn::SextbI | Insn::SextwI) {
         let o = ops_foplz(u128::from(word));
         let v = b.konst::<W64>(u64::from(o.lit8));
@@ -909,7 +915,7 @@ fn operate_z<B: Backend>(b: &mut B, insn: Insn, word: u32) -> Result<bool, B::Ex
 
 /// 整数条件分岐（0x38-0x3F）。ra を符号付き/ビット0 で試す。
 /// リンクは書かない。条件が真なら pc+4+sext(disp21)<<2 へ。
-// Ref: SPEC-ALPHA-ARM §4.3, SRC-QEMU (gen_bcond).
+// Ref: SPEC-ALPHA-ARM §4.3.1.
 fn bcond<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<bool, B::Exit> {
     let o = ops_fbrr(u128::from(word));
     let v = Gpr(o.ra as u8).get(b);
@@ -940,11 +946,11 @@ fn bcond<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<bool, 
 }
 
 /// FP 条件分岐（0x31-0x37）。レジスタをビット列として試す
-/// （FP 比較ではない）。-0.0 は符号で負だが値としては 0 なので、
-/// lt/ge は -0.0 を +0.0 に畳み、eq/ne は符号桁を除いて比べる
-/// （QEMU の gen_fold_mzero と同じ）。le/gt は生の符号比較で
-/// -0.0 も「0 以下」に入る。
-// Ref: SPEC-ALPHA-ARM §4.3, SRC-QEMU (gen_fbcond/gen_fold_mzero).
+/// （FP 比較ではない）。テストは「符号桁と、残りが全て 0 か」に
+/// 基づき、±0 は等しく 0 として扱う。-0.0 は符号で負だが値として
+/// は 0 なので、lt/ge は -0.0 を +0.0 に畳み、eq/ne は符号桁を
+/// 除いて比べる。le/gt は生の符号比較で -0.0 も「0 以下」に入る。
+// Ref: SPEC-ALPHA-ARM §4.9, §4.9.1.
 fn fbcond<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<bool, B::Exit> {
     let o = ops_ffb(u128::from(word));
     let v = Fpr(o.fa as u8).get(b);
@@ -988,15 +994,16 @@ fn fbcond<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<bool,
 }
 
 /// メモリ命令（段階16-7）。`ld ra, disp16(rb)` / `st ra, disp16(rb)`。
-/// ra=31 を宛てとする load は prefetch/UNOP でフォールトしない
-/// （QEMU の gen_load_int と同じ扱い）。
-// Ref: SPEC-ALPHA-ARM §4.8, SRC-QEMU (gen_load_int/gen_store_int).
+/// ra=31 を宛てとする load は prefetch でフォールトしない（§3.1.2:
+/// R31 宛の load には例外を上げない。LDL は PREFETCH、LDQ は
+/// PREFETCH_EN として動く。§4.11.8）。
+// Ref: SPEC-ALPHA-ARM §4.2, §3.1.2, §4.11.8.
 fn mem<B: Backend>(b: &mut B, insn: Insn, word: u32) -> Result<bool, B::Exit> {
     // FMLD/FMST/FMSTC は桁配置（ra/rb/disp16）が同じなので
     // ops_fmld で兼ねる。
     let o = ops_fmld(u128::from(word));
-    // ra=31 宛ての load はプリフェッチ/UNOP。アドレス計算も
-    // 読み出しも行わない（QEMU の gen_load_int と同じ扱い）。
+    // ra=31 宛ての load はプリフェッチ。結果は破棄され例外も
+    // 上がらないので、アドレス計算も読み出しも行わない（§3.1.2）。
     if o.ra == 31
         && matches!(
             insn,
@@ -1097,8 +1104,8 @@ fn mem<B: Backend>(b: &mut B, insn: Insn, word: u32) -> Result<bool, B::Exit> {
 // ---- 段階16-9: 浮動小数点 ----
 
 /// IEEE S 形式: レジスタ内部表現（64 ビット）を f32 のビット列へ
-/// 畳む。QEMU の `s_to_float32_int` と同じ変換。
-// Ref: SRC-QEMU (target/alpha/fpu_helper.c s_to_float32_int).
+/// 畳む。STS の `Fav<63:62> || Fav<58:29>` そのもの。
+// Ref: SPEC-ALPHA-ARM §4.8.7.
 fn sreg_to_f32<B: Backend>(b: &mut B, v: B::V<W64>) -> B::V<F32> {
     let hi = shr_n(b, v, 32);
     let hi = and_k(b, hi, 0xc000_0000);
@@ -1109,9 +1116,9 @@ fn sreg_to_f32<B: Backend>(b: &mut B, v: B::V<W64>) -> B::V<F32> {
 }
 
 /// f32 のビット列を IEEE S 形式のレジスタ内部表現へ広げる。
-/// QEMU の `float32_to_s_int`（Linux `s_mem_to_reg`）と同じ変換。
+/// LDS の MAP_S（8 ビット指数 → 11 ビットの展開）に従う。
 /// 11 ビット指数は f32 の指数を MSB で場合分けして復元する。
-// Ref: SRC-QEMU (target/alpha/fpu_helper.c float32_to_s_int).
+// Ref: SPEC-ALPHA-ARM §4.8.3, Table 2-2 (MAP_S).
 fn f32_to_sreg<B: Backend>(b: &mut B, v: B::V<F32>) -> B::V<W64> {
     let fi = b.zext::<F32, W64>(v);
     let sign = shr_n(b, fi, 31);
@@ -1140,12 +1147,14 @@ fn f32_to_sreg<B: Backend>(b: &mut B, v: B::V<F32>) -> B::V<W64> {
     b.or::<W64>(r, frac)
 }
 
-/// fpfn の丸めモード修飾 fn[7:6] → softfloat の丸めコード
-/// （0=RNE 1=RTZ 2=RDN 3=RUP）。`/d`（FPCR 動的丸め）は
-/// Backend 経由で FPCR の値をホスト側の u8 として読めないため、
-/// リセット既定の最近接偶数に畳む。Linux ユーザ空間では FPCR の
-/// dyn_rm が最近接のまま動くことがほぼ全てなので実害は小さい。
-// Ref: SRC-QEMU (target/alpha/translate.c gen_qual_roundmode).
+/// fpfn の丸めモード修飾 fn[7:6]（RND 桁: 0=/C 1=/M 2=既定 3=/D）
+/// → polyisa 内部の丸めコード（0=RNE 1=RTZ 2=RDN 3=RUP）。
+/// `/d`（FPCR 動的丸め）は Backend 経由で FPCR の値をホスト側の
+/// u8 として読めないため、リセット既定の最近接偶数に畳む
+/// （設計判断。Linux ユーザ空間では FPCR の dyn_rm が最近接の
+/// まま動くことがほぼ全てなので実害は小さい）。
+// Gap: GAP-0050（/d は FPCR を読めず最近接偶数に畳む）。
+// Ref: SPEC-ALPHA-ARM §4.7.9 Table 4-12.
 fn fp_rm(fpfn: u32) -> u8 {
     match (fpfn >> 6) & 3 {
         0 => 1, // /c: 0 方向へ切り捨て
@@ -1158,7 +1167,7 @@ fn fp_rm(fpfn: u32) -> u8 {
 /// S 内部表現と f32 ビット列の相互変換。fa=31 を宛てとする load は
 /// prefetch/UNOP でフォールトしない（整数ロードと同じ扱い）。
 /// VAX F/G 形式の ldf/ldg/stf/stg は本段階では未実装。
-// Ref: SPEC-ALPHA-ARM §4.9, SRC-QEMU (gen_ldf..gen_stt).
+// Ref: SPEC-ALPHA-ARM §4.8.3-§4.8.8, §3.1.3.
 fn fmem<B: Backend>(b: &mut B, insn: Insn, word: u32) -> Result<bool, B::Exit> {
     // FFLD/FFST は桁配置（fa/rb/disp16）が同じなので ops_ffld で
     // 兼ねる（整数側の FMLD/FMST と同じ構造）。
@@ -1204,12 +1213,12 @@ fn fmem<B: Backend>(b: &mut B, insn: Insn, word: u32) -> Result<bool, B::Exit> {
 /// 修飾（ソフトウェア完了）と /i（inexact 検出）は受け付けるが
 /// 例外を起こさず結果だけを返す。FPCR の例外集約ビットは
 /// mf_fpcr/mt_fpcr の読み書きのみを保証する。
-// Ref: SPEC-ALPHA-ARM §4.7, SRC-QEMU (fpu_helper.c).
+// Ref: SPEC-ALPHA-ARM §4.10.
 fn fop<B: Backend>(b: &mut B, insn: Insn, word: u32) -> Result<bool, B::Exit> {
     match insn {
-        // FITF: 整数→FP 転送。rb 桁が 31 固定なのは ARM の予約で、
-        // QEMU も rb!=31 を invalid 扱いにするだけ。ここでは値を
-        // 無視して動く。
+        // FITF: 整数→FP 転送。rb 桁は 31 固定（§4.10.19 "The Rb
+        // field must be R31"）。rb!=31 の動作は規定されていない
+        // ので値を無視して動く（設計判断）。
         Insn::Itofs => {
             let o = ops_fitf(u128::from(word));
             let v = Gpr(o.ra as u8).get(b);
@@ -1223,14 +1232,15 @@ fn fop<B: Backend>(b: &mut B, insn: Insn, word: u32) -> Result<bool, B::Exit> {
             let v = Gpr(o.ra as u8).get(b);
             Fpr(o.fc as u8).set(b, v);
         }
-        // FFTI: FP→整数転送。ftois は S 内部表現→f32 ビット列の
-        // 下位 32 ビットをゼロ拡張、ftoit は生の 64 ビット転送。
+        // FFTI: FP→整数転送。ftois は S 内部表現→f32 ビット列を
+        // 符号拡張（§4.10.18: Rc<63:32> ← SEXT(Fav<63>)）、
+        // ftoit は生の 64 ビット転送。
         Insn::Ftois => {
             let o = ops_ffti(u128::from(word));
             let v = Fpr(o.fa as u8).get(b);
             let f = sreg_to_f32(b, v);
             let w = b.trunc::<F32, W32>(f);
-            let w = b.zext::<W32, W64>(w);
+            let w = b.sext::<W32, W64>(w);
             Gpr(o.rc as u8).set(b, w);
         }
         Insn::Ftoit => {
@@ -1410,7 +1420,8 @@ fn fop<B: Backend>(b: &mut B, insn: Insn, word: u32) -> Result<bool, B::Exit> {
             let o = ops_ffp3(u128::from(word));
             let av = Fpr(o.fa as u8).get(b);
             let z = b.konst::<W64>(0);
-            // fbcond と同じビット列ベースの条件（gen_fold_mzero）。
+            // fbcond と同じビット列ベースの条件（§4.10.3 — §4.9 の
+            // テストに同じ）。
             let c = match insn {
                 Insn::Fcmoveq | Insn::Fcmovne => {
                     let t = and_k(b, av, 0x7fff_ffff_ffff_ffff);
@@ -1446,21 +1457,23 @@ fn fop<B: Backend>(b: &mut B, insn: Insn, word: u32) -> Result<bool, B::Exit> {
             let w = b.select(c, bv, keep);
             Fpr(o.fc as u8).set(b, w);
         }
-        // cvtlq: (v>>29 & 0x3fffffff) | ((v<<32) & 0xc000000000000000)。
-        // 整数レジスタ値を S 内部表現の指数下位へ移す変換。
-        // Ref: SRC-QEMU (translate.c gen_cvtlq).
+        // cvtlq: Fc ← SEXT(Fbv<63:62> || Fbv<58:29>)。L 形式
+        // （整数を <63:62,58:29> に持つ表現）を quadword 整数に戻す。
+        // Ref: SPEC-ALPHA-ARM §4.10.2.
         Insn::Cvtlq => {
             let o = ops_ffp2q(u128::from(word));
             let v = Fpr(o.fb as u8).get(b);
+            let hi = shr_n(b, v, 32);
+            let hi = and_k(b, hi, 0xc000_0000);
             let lo = shr_n(b, v, 29);
             let lo = and_k(b, lo, 0x3fff_ffff);
-            let hi = shl_n(b, v, 32);
-            let hi = and_k(b, hi, 0xc000_0000_0000_0000);
-            let w = b.or::<W64>(hi, lo);
+            let x = b.or::<W64>(hi, lo);
+            let w = sext_w32(b, x);
             Fpr(o.fc as u8).set(b, w);
         }
-        // cvtql: ((v & 0xc0000000) << 32) | ((v & 0x3fffffff) << 29)。
-        // Ref: SRC-QEMU (fpu_helper.c helper_cvtql).
+        // cvtql: Fc ← Fbv<31:30> || 0<2:0> || Fbv<29:0> || 0<28:0>。
+        // quadword 整数を L 形式へ畳む。
+        // Ref: SPEC-ALPHA-ARM §4.10.2.
         Insn::Cvtql => {
             let o = ops_ffp2q(u128::from(word));
             let v = Fpr(o.fb as u8).get(b);
@@ -1485,7 +1498,7 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
         // lda ra, disp(rb): ra = rb + sext(disp16)。
         // ldah ra, disp(rb): ra = rb + (sext(disp16) << 16)。
         // rb=31 なら定数ロードとして働く（実行ループの最小命令）。
-        // Ref: SPEC-ALPHA-ARM §4.3 lda/ldah.
+        // Ref: SPEC-ALPHA-ARM §4.2.1 lda/ldah.
         Insn::Lda | Insn::Ldah => {
             let o = ops_fmld(u128::from(word));
             let rb = Gpr(o.rb as u8).get(b);
@@ -1499,7 +1512,7 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
         // br ra, disp / bsr ra, disp。ra = pc+4 へリンクして
         // pc+4+sext(disp21)<<2 へ飛ぶ。br の ra=31 は hint だけなので
         // 同じコードで処理できる。
-        // Ref: SPEC-ALPHA-ARM §4.3 br/bsr.
+        // Ref: SPEC-ALPHA-ARM §4.3.2 br/bsr.
         Insn::Br | Insn::Bsr => {
             let o = ops_fbrw(u128::from(word));
             let link = b.konst::<W64>(pc + 4);
@@ -1514,7 +1527,7 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
         // jmp/jsr/jsr_coroutine ra, (rb), hint。
         // ra = pc+4 を保持して (rb & ~3) へ飛ぶ。hint は予測の手掛かり
         // で、インタプリタでは使わない。
-        // Ref: SPEC-ALPHA-ARM §4.3 jmp/jsr/jsr_coroutine.
+        // Ref: SPEC-ALPHA-ARM §4.3.3 jmp/jsr/jsr_coroutine.
         Insn::Jmp | Insn::Jsr | Insn::JsrCoroutine => {
             let o = ops_fmbr(u128::from(word));
             let rb = Gpr(o.rb as u8).get(b);
@@ -1538,7 +1551,7 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
             fbcond(b, insn, word, pc)
         }
         // ret zero, (rb), hint: (rb & ~3) へ飛ぶ（ra を書かない）。
-        // Ref: SPEC-ALPHA-ARM §4.3 ret.
+        // Ref: SPEC-ALPHA-ARM §4.3.3 ret.
         Insn::Ret => {
             let o = ops_fret(u128::from(word));
             let rb = Gpr(o.rb as u8).get(b);
@@ -1549,7 +1562,7 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
         }
         // call_pal: PALcode 呼び出し。OS パーソナリティが機能番号で
         // 振り分けるため、code に palfn を載せて Trap を上げる。
-        // Ref: SPEC-ALPHA-ARM §4.11 call_pal.
+        // Ref: SPEC-ALPHA-ARM §4.11.2 call_pal.
         Insn::CallPal => {
             let o = ops_fpal(u128::from(word));
             Err(b.raise(polyisa_sem::GuestException {
@@ -1561,7 +1574,7 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
         }
         // PAL 予約オペコード（0x19/0x1B/0x1D/0x1E/0x1F）は
         // Reserved Instruction Fault。Undefined として上げる。
-        // Ref: SPEC-ALPHA-ARM §4.11.
+        // Ref: SPEC-ALPHA-ARM §6.4.
         Insn::Pal19 | Insn::Pal1b | Insn::Pal1d | Insn::Pal1e | Insn::Pal1f => {
             Err(b.raise(polyisa_sem::GuestException {
                 kind: polyisa_sem::ExceptionKind::Undefined,
@@ -1809,15 +1822,15 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
         // バリアとトラップバリア。順序付き実行のインタプリタでは
         // mb/wmb/trapb/excb は何もしない（trapb の実確定は PAL
         // 実装時）。
-        // Ref: SPEC-ALPHA-ARM §4.7.6.
+        // Ref: SPEC-ALPHA-ARM §4.11.4, §4.11.7, §4.11.10, §4.11.12.
         Insn::Trapb | Insn::Excb | Insn::Mb | Insn::Wmb => Ok(true),
         // プリフェッチ/キャッシュ制御ヒント。性能ヒントなので無視
         // してよい（EV5+ の wh64/ecb/wh64en も同じ扱い）。
-        // Ref: SPEC-ALPHA-ARM §4.7.6.
+        // Ref: SPEC-ALPHA-ARM §4.11.3, §4.11.5, §4.11.11.
         Insn::Fetch | Insn::FetchM | Insn::Ecb | Insn::Wh64 | Insn::Wh64en => Ok(true),
         // rpcc ra: プロセスサイクルカウンタを読む。実時間ではなく
         // 実行ループが1命令ごとに進める疑似カウンタを返す。
-        // Ref: SPEC-ALPHA-ARM §4.11.5.
+        // Ref: SPEC-ALPHA-ARM §4.11.9.
         Insn::Rpcc => {
             let o = ops_fmfcw(u128::from(word));
             let c = b.get(cycle_ref());
@@ -1827,7 +1840,7 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
         // rc ra / rs ra: rx_flag を読み出し、rc は 0、rs は 1 に
         // する（クリティカルセクションのフラグ。単一スレッドでは
         // 通常 0 のまま遷移する）。
-        // Ref: SPEC-ALPHA-ARM §4.11.5.
+        // Ref: SPEC-ALPHA-ARM §4.12.1.
         Insn::Rc | Insn::Rs => {
             let o = ops_fmfcw(u128::from(word));
             let f = b.get(rx_flag_ref());

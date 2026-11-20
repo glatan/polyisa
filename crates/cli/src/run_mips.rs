@@ -1309,7 +1309,7 @@ pub fn run_elf_mips_sel(
 fn abi_from_elf(class64: bool, flags: u32) -> Result<polyisa_os_linux::mips::sys::Abi, String> {
     const EF_MIPS_ABI2: u32 = 0x20;
     // EF_MIPS_ABI マスク: o32=0x1000, o64=0x2000, eabi32=0x3000, eabi64=0x4000。
-    // Ref: SRC-LINUX (7.3) と binutils elf/mips.h。
+    // Ref: SRC-LINUX (7.3) の arch/mips/include/uapi/asm/elf.h。
     match flags & 0xf000 {
         0x0000 | 0x1000 => {}
         abi => {
@@ -1326,7 +1326,7 @@ fn abi_from_elf(class64: bool, flags: u32) -> Result<polyisa_os_linux::mips::sys
 }
 
 /// `e_flags` の EF_MIPS_ARCH とエンディアンから CPU モデルを決める。
-/// 値は binutils `include/elf/mips.h`（LLVM `BinaryFormat/ELF.h` と同じ）:
+/// 値はカーネルの arch/mips/include/uapi/asm/elf.h（Ref: SRC-LINUX）:
 /// 0=MIPS1, 1-4=MIPS2/3/4/5, 5=MIPS32, 6=MIPS64, 7=MIPS32r2,
 /// 8=MIPS64r2, 9=MIPS32r6, a=MIPS64r6。
 /// Ref: SRC-LINUX (7.3)。

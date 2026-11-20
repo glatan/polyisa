@@ -297,7 +297,7 @@ fn setup_alpha_elf(
 
     let bytes = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
     let ehdr = polyisa_loader::elf::parse_ehdr(&bytes).map_err(|e| format!("ehdr: {e:?}"))?;
-    // EM_ALPHA_EXP=0x9026。Ref: binutils include/elf/common.h.
+    // EM_ALPHA=0x9026。Ref: SRC-LINUX (include/uapi/linux/elf-em.h).
     if ehdr.machine != 0x9026 {
         return Err(format!("未対応の e_machine: {}", ehdr.machine));
     }
@@ -405,8 +405,9 @@ fn setup_alpha_elf(
     let (img, sp) =
         polyisa_os_linux::build_initial_stack_endian(img_top, &arg_bytes, &[], &auxv, Endian::Le);
     // 初期スタックは像の分だけ写像し、下方向はページフォルト駆動で
-    // `STACK_LIMIT` まで伸ばす。glibc は起動時の大きなフレーム確保で
-    // `stq r31,-N(r30)` のプローブを打つため、伸長は必須。
+    // `STACK_LIMIT` まで伸ばす。起動時に大きなフレームを確保する
+    // コードは `stq r31,-N(r30)` のようなスタックプローブを打つため、
+    // 伸長は必須。
     let stack_base = sp & !(PAGE_SIZE - 1);
     let stack_pages = (STACK_TOP - stack_base) / PAGE_SIZE;
     env.backend

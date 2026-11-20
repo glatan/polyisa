@@ -379,7 +379,7 @@ pub fn run_elf_sparc_sys(
 
     let bytes = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
     // EM_SPARC=2, EM_SPARC32PLUS=18, EM_SPARCV9=43。
-    // Ref: binutils include/elf/common.h.
+    // Ref: SRC-LINUX (include/uapi/linux/elf-em.h).
     let (ehdr, phdrs, phent, model, top) = match bytes.get(4) {
         Some(1) => {
             let ehdr =
@@ -513,9 +513,9 @@ pub fn run_elf_sparc_sys(
     env.backend.set(sem::Gpr(14).state(), o6);
     // 初期ウィンドウ状態。現窓だけ使用中で残りは空きにする。
     // cansave は NWINDOWS-2 が規約。CANSAVE+CANRESTORE+OTHERWIN の
-    // 和が NWINDOWS-2 であり、全窓を live にすると先端フレームの
-    // out バンクが最浅フレームの in バンクと物理衝突するため、
-    // 常に 1 窓分の clean 窓を残す。Ref: SRC-LINUX, SRC-QEMU.
+    // 和が NWINDOWS-2 であり、現窓と ins/outs が他窓と重なって
+    // 未使用でなければならない overlap 窓の 2 窓は計上しない。
+    // Ref: SPEC-SPARC-V9 §Overlapping Windows, SRC-LINUX.
     let nw = u64::from(model.params.nwindows);
     env.backend.set(sem::cansave_ref(), nw - 2);
     if is64 {

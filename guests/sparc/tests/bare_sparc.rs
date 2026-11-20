@@ -1846,9 +1846,10 @@ fn save_traps_when_cansave_empty() {
     // V8 の window_overflow = 0x05。CWP とカウンタは変えない。
     assert_eq!(env.backend.get(sem::tt_ref()), 0x05);
     assert_eq!(env.backend.get(sem::cwp_ref()), 0);
-    // SAVED で窓を空きに戻すと SAVE が通る。saved は
-    // cansave++・canrestore--（QEMU と同じ遷移）なので、退避済みの
-    // 使用窓がある想定で canrestore=1 を置く。
+    // SAVED で窓を空きに戻すと SAVE が通る。saved は OTHERWIN=0
+    // のモデルでは cansave++・canrestore--（SPEC-SPARC-V9 §SAVED
+    // の遷移）なので、退避済みの使用窓がある想定で canrestore=1
+    // を置く。
     env.backend.set(sem::canrestore_ref(), 1);
     env.step(sem::saved).unwrap();
     assert_eq!(env.backend.get(sem::cansave_ref()), 1);
@@ -1868,8 +1869,9 @@ fn restore_traps_when_canrestore_empty() {
     assert_eq!(env.backend.get(sem::tt_ref()), 0x06);
     assert_eq!(env.backend.get(sem::cwp_ref()), 0);
     // RESTORED で埋め戻せる窓を戻すと RESTORE が通る。restored は
-    // canrestore++・cansave--（QEMU と同じ遷移）なので、
-    // cansave は 7→6→7 に戻る。
+    // OTHERWIN=0 のモデルでは canrestore++・cansave--
+    // （SPEC-SPARC-V9 §RESTORED の遷移）なので、cansave は
+    // 7→6→7 に戻る。
     env.step(sem::restored).unwrap();
     env.step(|b| sem::restore(b, Gpr(0), Gpr(0), Src2::Reg(Gpr(0))))
         .unwrap();

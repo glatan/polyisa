@@ -42,6 +42,7 @@ BSD 系の資産は `D` と `C` を許可できる。GPL 系の資産と Arm の
 6. 台帳に登録する前の資料は、成果物のいかなる用途にも使わない。ただし、利用条件を確かめるために資料を読むことは除く。設計文書での引用は記述の形を示す例示に限り、実装の根拠にしない。例示の引用は検査の対象外とする。
 7. 用途の欄は `R`、`F`、`T`、`X`、`D`、`C` の組み合わせをカンマ区切りで書く（例：`R,F`）。`—` はいかなる用途の許可も表さない。`D` と `C` は BSD 系の資産に限り、原文を確認して許可する。GPL 系の資産と Arm の機械可読仕様には `D` と `C` を許可しない。
 8. 開発の立ち上げに必要な道具（`TOOL-RUST`、`TOOL-GIT`、`TOOL-CURL`、`TOOL-TASK`、`TOOL-NEXTEST`）は、他の項目に先立って登録する。それまでの開発作業は、利用条件を確かめる範囲（規則 6 の例外）に位置づける。
+9. ISA・ABI の事実（エンコーディング、意味論、定数、構造体の配置、動作の規則）の根拠は一次資料に限る。ISA の事実は `SPEC-` の ISA 仕様書とプロセッサの公式文書、ABI の事実は ABI の仕様書とカーネルの UAPI（`SRC-LINUX` 等、対象 OS そのものの一次資料）から取る。他のエミュレータ、アセンブラ、逆アセンブラ、コンパイラ、リンカ（QEMU、binutils、gcc、LLVM、Capstone、Unicorn、Bochs 等、二次実装のすべて）を事実の根拠（用途 `R`、`F`）に使ってはならない。「照合に使っただけ」も根拠の混入とみなす。二次実装に許される用途は `X`（オラクルとしての実行）と `T`・`BIN`（テストの入力）だけである。仕様書が黙っている事項（未割当エンコーディングの動作、実装定義の値）は二次実装の動作を写さず、設計判断として `docs/gaps.md` に記録する。
 
 ## 機械的な検査
 
@@ -57,8 +58,9 @@ BSD 系の資産は `D` と `C` を許可できる。GPL 系の資産と Arm の
    | `testkit` の表に書いたツールと、devtool が実行するツール | `X` |
 
 3. テストデータの取得先（`.testdata/`）が `.gitignore` の対象であり、`git ls-files` に現れない。取得定義（`tools/testdata/manifest.txt`）がある場合は、各行の ID が台帳にあり、用途 `T` が許可されていること。
-4. 台帳と自前のライセンス文を除くリポジトリのファイルに、polyisa のもの以外の著作権表示と SPDX のライセンス識別子が含まれていない。走査するのは `Copyright`、`©`、`SPDX-License-Identifier` の文字列であり、台帳の `docs/references.md` と自前の `LICENSE-MIT`、`LICENSE-APACHE` は対象外とする。自前の `MIT OR Apache-2.0` の識別子行と `polyisa contributors` の著作権行は許可する。
-5. `Cargo.lock` にワークスペース外のパッケージがない（[ADR-0001](adr/0001-no-external-crates.md)）。
+4. `guests/*/spec` と `guests/*/src` の Rust に、二次実装の名前（`qemu`、`binutils`、`llvm`、`capstone`、`unicorn`、`bochs` の大文字小文字を区別しない文字列）が含まれていない（規則9 の走査）。オラクル・テスト入力としての言及は `tests/` に置くため対象外。
+5. 台帳と自前のライセンス文を除くリポジトリのファイルに、polyisa のもの以外の著作権表示と SPDX のライセンス識別子が含まれていない。走査するのは `Copyright`、`©`、`SPDX-License-Identifier` の文字列であり、台帳の `docs/references.md` と自前の `LICENSE-MIT`、`LICENSE-APACHE` は対象外とする。自前の `MIT OR Apache-2.0` の識別子行と `polyisa contributors` の著作権行は許可する。
+6. `Cargo.lock` にワークスペース外のパッケージがない（[ADR-0001](adr/0001-no-external-crates.md)）。
 
 設計文書と台帳は、1 と 2 の検査の対象外とする。設計文書に現れる ID は、記述の形を示す例示とみなす。設計文書での資料の参照（`R`）は、規則 1 と 6 によって管理する。
 
@@ -193,7 +195,7 @@ BSD 系の資産は `D` と `C` を許可できる。GPL 系の資産と Arm の
 | SRC-LINUX-POWERPC-UAPI | Linux カーネル v6.6 の powerpc UAPI 番号の正本（`arch/powerpc/kernel/syscalls/syscall.tbl`） | Linux カーネルの開発者 | 6.6 | os-linux（power） | GNU GPL version 2。UAPI は Linux-syscall-note の例外でユーザ空間利用可 | T | `https://raw.githubusercontent.com/torvalds/linux/v6.6/` 配下の当該ファイルを `.testdata/uapi-powerpc` に置き、heavy_abi_power が番号表と突き合わせる。ppc64 は abi 列が common・nospu・64 の行を使う。リポジトリに含めない |
 | SRC-LINUX-S390-UAPI | Linux カーネル v6.6 の s390 UAPI 番号の正本（`arch/s390/kernel/syscalls/syscall.tbl`） | Linux カーネルの開発者 | 6.6 | os-linux（s390） | GNU GPL version 2。UAPI は Linux-syscall-note の例外でユーザ空間利用可 | T | `https://raw.githubusercontent.com/torvalds/linux/v6.6/` 配下の当該ファイルを `.testdata/uapi-s390` に置き、heavy_abi_s390 が番号表と突き合わせる。s390x は abi 列が common・64 の行を使う。リポジトリに含めない |
 | SRC-LINUX-SPARC-UAPI | Linux カーネル v7.3 の sparc UAPI 番号の正本（`arch/sparc/kernel/syscalls/syscall.tbl`） | Linux カーネルの開発者 | 7.3 | os-linux（sparc32・sparc64） | GNU GPL version 2。UAPI は Linux-syscall-note の例外でユーザ空間利用可 | T | `https://kernel.googlesource.com/pub/scm/linux/kernel/git/torvalds/linux/+/refs/tags/v7.3/` 配下の当該ファイルを `.testdata/uapi-sparc` に置き、heavy_abi_sparc が番号表と突き合わせる。abi 列は common・32・64。v6.6 系と違い 435（clone3）以降が埋まる版を正本とする。リポジトリに含めない |
-| SRC-QEMU | QEMU のソース（SPARC の ASI 集合・fp レジスタの写像・特権トラップの振る舞いの根拠） | QEMU 開発者 | 10.1 | guests/sparc | GNU GPL version 2 | R,F | 番号・写像の事実を自前表現で記述。コードの翻訳はしない |
+| SRC-QEMU | QEMU のソース | QEMU 開発者 | 10.1 | 検証 | GNU GPL version 2 | X | オラクルとしての実行に限る（規則9）。二次実装は事実の根拠にしない。リポジトリに含めない |
 | SRC-XNU | XNU カーネルのソース（macOS の mmap、時計、スレッドの振る舞いの根拠） | Apple | main @ f6217f8（2025-10-16） | macOS ホスト | APSL 2.0（xnu の LICENSE） | R | 事実の確認に読むだけとし、コードの翻訳はしない |
 | SRC-SOFTFLOAT3 | Berkeley SoftFloat-3（TestFloat 生成器のビルドに使用） | John Hauser（UC Berkeley） | Release 3e（commit 07ebd29d） | softfloat（TestFloat 実行） | BSD 3-clause（COPYING.txt。Regents of the University of California） | X | リポジトリに含めない。版は `git ls-remote` で HEAD==07ebd29d を確認、COPYING.txt は BSD 3-clause 型文面 |
 
@@ -250,9 +252,9 @@ BSD 系の資産は `D` と `C` を許可できる。GPL 系の資産と Arm の
 | TOOL-NEXTEST | cargo-nextest | nextest-rs | 0.9.151 | テストの実行 | Apache-2.0 OR MIT（LICENSE-APACHE、LICENSE-MIT） | X | 別プロセスで実行する。複製・再配布しない |
 | TOOL-GIT | Git | Git プロジェクト | 2.56.0 | 開発作業、テストデータの取得 | GNU GPL version 2（COPYING。v2 のみ） | X | 別プロセスで実行する。複製・再配布・組み込みをしない |
 | TOOL-CURL | curl | curl プロジェクト | 8.23.0 | テストデータの取得 | curl license（COPYING） | X | 別プロセスで実行する。複製・再配布しない |
-| TOOL-LLVM | LLVM と clang（llvm-objdump を含む） | LLVM プロジェクト | 23.1.6（`Containerfile` のイメージ内。ホスト手元検証は 23.1.4） | 検証 | Apache-2.0 WITH LLVM-exception（LICENSE.TXT） | X,R,F | 別プロセスで実行する。複製・再配布・組み込みをしない |
+| TOOL-LLVM | LLVM と clang（llvm-objdump を含む） | LLVM プロジェクト | 23.1.6（`Containerfile` のイメージ内。ホスト手元検証は 23.1.4） | 検証 | Apache-2.0 WITH LLVM-exception（LICENSE.TXT） | X | 別プロセスで実行する。複製・再配布・組み込みをしない。オラクルとしての実行に限る（規則9） |
 | TOOL-GDB | GDB | GNU プロジェクト | 18.1（手元検証） | 検証 | GNU GPL version 3（COPYING） | X | 別プロセスで実行する。複製・再配布・組み込みをしない |
-| TOOL-WASMTIME | wasmtime | Bytecode Alliance | 50.0.1（手元検証） | wasm の検証 | Apache-2.0 with LLVM exception（LICENSE） | X,R,F | 別プロセスで実行する。複製・再配布・組み込みをしない |
+| TOOL-WASMTIME | wasmtime | Bytecode Alliance | 50.0.1（手元検証） | wasm の検証 | Apache-2.0 with LLVM exception（LICENSE） | X | 別プロセスで実行する。複製・再配布・組み込みをしない。オラクルとしての実行に限る（規則9） |
 | TOOL-QEMU | QEMU | QEMU プロジェクト | 10.0.13（`Containerfile` のイメージ内に導入） | 検証（用意できた環境だけ） | GNU GPL version 2（LICENSE。全体。手元未検証） | X | 別プロセスで実行する。複製・再配布・組み込みをしない |
 | TOOL-BINUTILS | GNU binutils | GNU プロジェクト | 2.47（手元検証） | 検証（用意できた環境だけ） | GNU GPL version 3（COPYING） | X | 別プロセスで実行する。複製・再配布・組み込みをしない |
 | TOOL-XED | Intel XED（x86 エンコーダ・デコーダ。コマンドラインのデコーダを別プロセスで使う） | Intel（intelxed/xed） | v2026.08.23 | x86 のデコードの検証 | Apache License 2.0（LICENSE 原文で確認） | X | llvm-objdump より新しい拡張への追従が速い第2のデコードオラクル（v2026.08.23 で ACE-V1・APX に対応）。版を変えるときは確認をやり直す。ルートの `Containerfile` でソースビルドして `/opt/xed` に導入済み |

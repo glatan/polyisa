@@ -335,7 +335,7 @@ pub fn run_elf_m68k_sys(
         return Err("m68k は ELFCLASS32 のみ対応".to_string());
     }
     let ehdr = polyisa_loader::elf::parse_ehdr32(&bytes).map_err(|e| format!("ehdr: {e:?}"))?;
-    // EM_68K=4。Ref: binutils include/elf/common.h.
+    // EM_68K=4。Ref: SRC-LINUX (include/uapi/linux/elf-em.h).
     const EM_68K: u16 = 4;
     if ehdr.machine != EM_68K {
         return Err(format!("未対応の e_machine: {}", ehdr.machine));

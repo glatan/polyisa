@@ -1166,7 +1166,7 @@ fn crs1(w: u16) -> u8 {
     c_reg3(w, 7)
 }
 
-/// C.ADDI4SPN の nzuimm[9:2]。llvm-mc の符号化と突合済み。
+/// C.ADDI4SPN の nzuimm[9:2]。Ref: SPEC-RISCV-UNPRIV（C 拡張の即値表）。
 fn c_addi4spn_uimm(w: u16) -> u32 {
     let w = w as u32;
     (((w >> 7) & 0xF) << 6) | (((w >> 11) & 3) << 4) | (((w >> 5) & 1) << 3) | (((w >> 6) & 1) << 2)
@@ -1198,7 +1198,7 @@ fn c_addi16sp_imm(w: u16) -> i64 {
 }
 
 /// C.LUI の nzimm[17:12]。6ビット符号付きで、sem側で12ビット左へ寄せる。
-/// llvm-mc の符号化と突合済み（c.lui s0, 0xfffe1 → 0x7405）。
+/// Ref: SPEC-RISCV-UNPRIV（C 拡張の即値表）。
 fn c_lui_imm(w: u16) -> i64 {
     let w = w as u32;
     let v = (((w >> 12) & 1) << 5) | ((w >> 2) & 0x1F);
@@ -1243,8 +1243,8 @@ fn c_j_imm(w: u16) -> i64 {
 }
 
 /// CB 形式の分岐オフセット（符号付き）。
-/// ビット配置は wavedrom（c-cb-format-ls.edn）と llvm-mc で突合済み。
 /// inst[12]=off[8]、inst[11:10]=off[4:3]、inst[6:2]=off[7:6|2:1|5]。
+/// Ref: SPEC-RISCV-UNPRIV（C 拡張の即値表）。
 fn c_b_imm(w: u16) -> i64 {
     let w = w as u32;
     let v = (((w >> 12) & 1) << 8)
@@ -1279,16 +1279,17 @@ fn c_swsp_uimm(w: u16) -> u32 {
 }
 
 /// CL 形式の倍精度ロード・ストア即値（c.ld/c.sd 用）の uimm[7:3]。
-/// llvm-mc 単ビットプローブで突合済み。
 /// inst[12:10]=off[5:3]、inst[6:5]=off[7:6]。
+/// Ref: SPEC-RISCV-UNPRIV（C 拡張の即値表）。
 fn c_ld_uimm(w: u16) -> u32 {
     let w = w as u32;
     (((w >> 10) & 7) << 3) | (((w >> 5) & 3) << 6)
 }
 
-/// C.LDSP の uimm[8:3]。llvm-mc 単ビットプローブで突合済み。
+/// C.LDSP の uimm[8:3]。
 /// inst[12]=off[5]、inst[6:5]=off[4:3]、inst[4:2]=off[8:6]。
 /// inst[7] は rd の一部でありオフセットに含めない。
+/// Ref: SPEC-RISCV-UNPRIV（C 拡張の即値表）。
 fn c_ldsp_uimm(w: u16) -> u32 {
     let w = w as u32;
     (((w >> 5) & 1) << 3)
@@ -1299,8 +1300,9 @@ fn c_ldsp_uimm(w: u16) -> u32 {
         | (((w >> 4) & 1) << 8)
 }
 
-/// C.SDSP の uimm[8:3]。llvm-mc 単ビットプローブで突合済み。
+/// C.SDSP の uimm[8:3]。
 /// inst[12:10]=off[5:3]、inst[9:7]=off[8:6]。
+/// Ref: SPEC-RISCV-UNPRIV（C 拡張の即値表）。
 fn c_sdsp_uimm(w: u16) -> u32 {
     let w = w as u32;
     (((w >> 10) & 1) << 3)

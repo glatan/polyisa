@@ -448,8 +448,8 @@ fn operate_ext_ins_msk() {
 fn operate_h_forms_boundary_positions() {
     let mut env = env();
     env.backend.set(sem::Gpr(1).state(), 0xb7b6_b5b4_b3b2_b1b8);
-    // pos=0: ins_h/msk_h は「64 シフト」で全フィールドが前の語側に
-    // 逃げるため 0 / 無変化（QEMU の二段シフトと同じ）。
+    // pos=0: ins_h/msk_h は「64 ビットシフト」で全フィールドが語外に
+    // 逃げるため 0 / 無変化（ARM §4.6.3/§4.6.4 の byte_loc=64）。
     env.backend.set(sem::Gpr(2).state(), 0);
     // insqh r1,r2,r3: pos=0 → 0。
     assert!(run1(&mut env, opr(0x12, 1, 2, 0x77, 3)));
@@ -493,8 +493,9 @@ fn operate_v_overflow_traps() {
         }
         other => panic!("unexpected: {other:?}"),
     }
-    // オーバーフロー時は rc を書かない。
-    assert_eq!(gpr(&mut env, 2), 0);
+    // オーバーフロー時も真値の下位 64 ビットは rc に書かれる
+    // （ARM §4.4.3）。
+    assert_eq!(gpr(&mut env, 2), 0x8000_0000_0000_0000);
     // 桁あふれなしなら普通に書く。
     env.backend.set(sem::Gpr(3).state(), 41);
     assert!(run1(&mut env, opl(0x10, 3, 1, 0x60, 4)));
@@ -632,7 +633,7 @@ fn operate_extension_unary() {
     env.backend.set(sem::Gpr(1).state(), 0x0100_0000_0000_0000);
     assert!(run1(&mut env, oprz(31, 1, 0x32, 10)));
     assert_eq!(gpr(&mut env, 10), 7);
-    // sextb/sextw のリテラル形（QEMU も受理する FOPLZ）。
+    // sextb/sextw のリテラル形（ARM §4.6.5 の `SEXTx #b.ib` 形）。
     // sextb #0x80 → -128、sextw #0x80 → +128。
     // (0x1c<<26)|(31<<21)|(0x80<<13)|(1<<12)|(f<<5)|rc。
     assert_eq!(dec(0x73f0_1005u32), Some(Insn::SextbI));
@@ -1143,9 +1144,14 @@ fn fp_itof_ftoi_moves() {
     env.backend.set(sem::Gpr(1).state(), 0x3f80_0000);
     assert!(run1(&mut env, fitf(1, 0x004, 2)));
     assert_eq!(fpr(&mut env, 2), S_ONE);
-    // ftois f2,r3: 逆変換で f32 ビット列をゼロ拡張して返す。
+    // ftois f2,r3: 逆変換で f32 ビット列を符号拡張して返す。
     assert!(run1(&mut env, ffti(2, 0x078, 3)));
     assert_eq!(gpr(&mut env, 3), 0x3f80_0000);
+    // ftois は符号拡張する（ARM §4.10.18: Rc<63:32> ← SEXT(Fav<63>)）。
+    env.backend.set(sem::Gpr(7).state(), -1i64 as u64);
+    assert!(run1(&mut env, fitf(7, 0x004, 8)));
+    assert!(run1(&mut env, ffti(8, 0x078, 9)));
+    assert_eq!(gpr(&mut env, 9), -1i64 as u64);
     // itoft r4,f5 / ftoit f5,r6 は生の 64 ビット転送。
     env.backend.set(sem::Gpr(4).state(), 0xdead_beef_cafe_f00d);
     assert!(run1(&mut env, fitf(4, 0x024, 5)));
@@ -1199,7 +1205,15 @@ fn fp_fpcr_and_cvtlq_cvtql() {
     env.backend.set(sem::Fpr(3).state(), 42);
     assert!(run1(&mut env, fop2(0x17, 3, 0x030, 4)));
     assert_eq!(fpr(&mut env, 4), 0x0000_0005_4000_0000);
-    // cvtlq f4,f5: 逆方向に畳む（QEMU の gen_cvtlq の式）。
+    // cvtlq f4,f5: L 形式を quadword に戻す（ARM §4.10.2
+    // SEXT(Fbv<63:62> || Fbv<58:29>)）→ 42 に戻る。
     assert!(run1(&mut env, fop2(0x17, 4, 0x010, 5)));
-    assert_eq!(fpr(&mut env, 5), 0x4000_0000_0000_002a);
+    assert_eq!(fpr(&mut env, 5), 42);
+    // 負値: cvtql(-1) → <63:62>=11, <58:29>=0x3fffffff。
+    env.backend.set(sem::Fpr(6).state(), -1i64 as u64);
+    assert!(run1(&mut env, fop2(0x17, 6, 0x030, 7)));
+    assert_eq!(fpr(&mut env, 7), 0xc7ff_ffff_e000_0000);
+    // cvtlq で -1 に戻る（符号拡張）。
+    assert!(run1(&mut env, fop2(0x17, 7, 0x010, 8)));
+    assert_eq!(fpr(&mut env, 8), -1i64 as u64);
 }

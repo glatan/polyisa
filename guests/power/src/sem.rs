@@ -5,9 +5,8 @@
 //!
 //! XO フィールドの細かい振り分けは `x31`・`x19`・`x63` 等の入口が
 //! 行う（ARM 試作と同じ粗分類＋意味論振り分け）。出典は
-//! SPEC-POWER-ISA（Power ISA v3.1C）である。XO の数値は llvm-mc の
-//! 符号化（TOOL-LLVM）で確認した。
-// Ref: SPEC-POWER-ISA (v3.1C), SPEC-POWER-ABI (ELFv2 r1.5), TOOL-LLVM.
+//! SPEC-POWER-ISA（Power ISA v3.1C）である。
+// Ref: SPEC-POWER-ISA (v3.1C), SPEC-POWER-ABI (ELFv2 r1.5).
 
 use polyisa_mem::{Access, AccessKind, Align, Endian};
 use polyisa_sem::{
@@ -7308,7 +7307,7 @@ pub fn x4<B: Backend>(b: &mut B, word: u32, _pc: u64, _le: bool) -> Flow<B> {
     let xo11 = word & 0x7ff;
     // ---- BCD（パック十進、Z22 形式）----
     // xo10 = 512+256*ps が bcdadd.、544+256*ps が bcdsub.。
-    // （llvm-mc：bcdadd. 1,2,3,0 → 0x10221c01、bcdsub. → 0x10221c41）
+    // （VX-form の XO: bcdadd.=1、bcdsub.=65。Ref: SPEC-POWER-ISA Book I §6.15）
     if word & 1 == 1 {
         match (word >> 1) & 0x3ff {
             512 | 768 | 544 | 800 => {

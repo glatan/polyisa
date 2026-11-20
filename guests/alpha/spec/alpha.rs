@@ -731,11 +731,9 @@ pub fn build_model() -> polyisa_isadl::Model {
             "alu",
         );
     }
-    // sextb/sextw のリテラル形。binutils は OPRZ1（レジスタ形）しか
-    // 持たないが、operate 形式のリテラル位は形式として汎用で、
-    // QEMU もこれら 2 命令だけは受理・実行する（REQUIRE_NO_LIT が
-    // ない）。ctpop 等には REQUIRE_NO_LIT がありリテラル形はない。
-    // Ref: SRC-QEMU (translate.c case 0x1C).
+    // sextb/sextw のリテラル形。ARM §4.6.5 が
+    // `SEXTx #b.ib,Rc.wq !Operate format` を明示するので受理する。
+    // Ref: SPEC-ALPHA-ARM §4.6.5.
     for (nm, f) in [("sextb", "0000000"), ("sextw", "0000001")] {
         ins(
             &format!("{nm}_i"),
