@@ -92,7 +92,7 @@
 
 ### 段階 17：PA-RISC
 
-- 版の範囲は PA-RISC 1.0、1.1、2.0 と MAX。命令アドレスキューと遅延分岐、無効化（PSW の N ビット）
+- 版の範囲は PA-RISC 1.1・2.0 と MAX。命令アドレスキューと遅延分岐、無効化（PSW の N ビット）。PA-RISC 1.0 は公開の根拠資料がなく（公開の正本は 1.1 の SPEC-PARISC-11 から）、Linux の 32 ビット ABI も PA 1.1 以上を要求するため範囲から除外する
 - Linux のシステムコールはゲートウェイページへの分岐（特別なアドレスを経由する OS の呼び出し）
 - hppa（32 ビット）のゲスト ABI
 
@@ -108,7 +108,7 @@
 | # | 内容 | 前提 | 判定 |
 |---|---|---|---|
 | PR1 | 着手条件: SPEC-PARISC-11・SPEC-PARISC-20 の点検（確認済み）、PA-RISC 1.0 の根拠資料の追加登録または範囲からの除外の決定、BIN 登録、GAP-0023 残項目の点検 | - | - |
-| PR2 | `guests/parisc` 骨格: CpuState（GR・CR・SR・IAOQ 前後・PSW）、モデル（1.0・1.1・2.0）の宣言 | PR1 | - |
+| PR2 | `guests/parisc` 骨格: CpuState（GR・CR・SR・IAOQ 前後・PSW）、モデル（1.1・2.0）の宣言 | PR1 | - |
 | PR3 | デコード: 32 ビット固定長、opcode + completer フィールドの扱い | PR2 | - |
 | PR4 | `run_parisc` 実行ループ: IAOQ の進行と無効化（PSW.N）+ bare 最小テスト | PR3 | - |
 | PR5 | 算術・論理・比較（add/sub/comb/and/or/xor）、extract/deposit・シフト | PR4 | - |
