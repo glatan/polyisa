@@ -70,7 +70,7 @@
 | ID | 条件 | 判定 |
 |---|---|---|
 | S16-1 | alpha の配布物のコマンド群が、ゲストのルートを使って正しい出力を返す（テスト `heavy_program_alpha`）。 | テスト：`heavy_program_alpha` |
-| S16-2 | ABI 表が SRC-LINUX の UAPI と一致することを所有者が確認する。 | 所有者 |
+| S16-2 | ABI 表が、UAPI の syscall.tbl と一致する（テスト `heavy_abi_alpha`）。 | テスト：`heavy_abi_alpha` |
 
 作業計画：
 
@@ -88,7 +88,7 @@
 | AL10 | CALL_PAL を OS パーソナリティへ渡す経路（rduniq/wruniq の TLS 呼出を含む） | AL4 | テスト：os-linux alpha::sys（callsys 往復・ENOSYS・brk・rduniq/wruniq・PAL 振分）＋実バイナリで callsys 到達 |
 | AL11 | Linux ABI: alpha の syscall 表、ELF、8KiB ページ、浮動小数点補完と非整列補完の OS 実装 | AL10 | テスト：os-linux alpha::sys（39 件: ABI 規約・FdTable 系・stat/stat64・getdents64 改ページ・mmap/brk 衝突・statfs64 宣言サイズ・rlimit 番号・osf_sigaction・dup2→標準入出力・kill/時刻・pwrite64・各 EFAULT/EINVAL）＋実バイナリ BusyBox スモーク（echo/df/ls/cp/touch/date/uname/id/free/uptime 等）。補完は CPU 側完結につき OS 経路なし。残課題は GAP-0045/0046 へ |
 | AL12 | `heavy_program_alpha`（配布物のコマンド群） | AL11 | S16-1 |
-| AL13 | ABI 照合（SRC-LINUX UAPI、所有者確認）+ 残件整理・判定列更新 | AL12 | S16-2 |
+| AL13 | ABI 照合（SRC-LINUX-ALPHA-UAPI の tbl との照合）+ 残件整理・判定列更新 | AL12 | S16-2 |
 
 ### 段階 17：PA-RISC
 
