@@ -8,10 +8,10 @@
 //! errno。スレッドポインタは `rduniq`（0x9e）が v0 に、
 //! `wruniq`（0x9f）が a0 の値を保持域へ転送する。
 //! errno の値は OSF 系の独自表（1–34 は errno-base と同値だが
-//! EDEADLK=11 で、35 以降は独自番号）。`O_*`/`MAP_*` の表は
-//! 段階16-11 で追加する。
+//! EDEADLK=11 で、35 以降は独自番号）。
 //! syscall 番号表は `arch/alpha/kernel/syscalls/syscall.tbl` 由来の
-//! 事実であり、AL13 の ABI 照合で UAPI 台帳と突き合わせる。
+//! 事実であり、`heavy_abi_alpha` が UAPI 台帳
+//! （SRC-LINUX-ALPHA-UAPI）と突き合わせる。
 // Ref: SRC-LINUX (7.3), SPEC-ALPHA-ARM.
 
 /// Alpha の Linux syscall 処理と PAL 関数の振り分け。
@@ -286,7 +286,7 @@ pub mod mman {
 /// `AT_FDCWD`。
 pub const AT_FDCWD: i64 = -100;
 
-/// 番号→名前（syscall.tbl の主要エントリ。未知は None）。
+/// 番号→名前（syscall.tbl の全エントリ。未知は None）。
 #[must_use]
 pub fn name(nr: u64) -> Option<&'static str> {
     Some(match nr {

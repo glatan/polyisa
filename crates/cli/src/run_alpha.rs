@@ -343,6 +343,37 @@ fn setup_alpha_elf(
     };
     polyisa_loader::elf::load_segments_bias(&bytes, &phdrs, &mut env.backend.mem, main_bias)
         .map_err(|e| format!("load: {e:?}"))?;
+    // 主像の phdr 表のゲスト内番地（AT_PHDR）。表は先頭の PT_LOAD が
+    // 覆うのが普通で、覆っていなければ像の直前に1ページ置く。
+    let phdr_addr = match phdrs
+        .iter()
+        .find(|p| p.seg_type == 1 && p.offset <= ehdr.phoff && ehdr.phoff < p.offset + p.filesz)
+    {
+        Some(p) => main_bias + p.vaddr + (ehdr.phoff - p.offset),
+        None => {
+            let min_vaddr = phdrs
+                .iter()
+                .filter(|p| p.seg_type == 1)
+                .map(|p| p.vaddr & !(PAGE_SIZE - 1))
+                .min()
+                .unwrap_or(0);
+            let at = (main_bias + min_vaddr)
+                .checked_sub(PAGE_SIZE)
+                .ok_or_else(|| "phdr 表の置き場がない".to_string())?;
+            const PHENT: u64 = 56; // ELF64 の phdr は 56 バイト固定。
+            let lo = ehdr.phoff as usize;
+            let hi = lo + ehdr.phnum as usize * PHENT as usize;
+            env.backend
+                .mem
+                .map(VirtAddr(at), 1, Perms::RW)
+                .map_err(|_| "phdr 表の写像に失敗".to_string())?;
+            env.backend
+                .mem
+                .write(VirtAddr(at), &bytes[lo..hi])
+                .map_err(|_| "phdr 表の書き込みに失敗".to_string())?;
+            at
+        }
+    };
     let image_end = phdrs
         .iter()
         .filter(|p| p.seg_type == 1)
@@ -357,16 +388,19 @@ fn setup_alpha_elf(
         arg_bytes.push(a.as_bytes().to_vec());
     }
     // 最小限のスタック（argc/argv/auxv）は Linux の初期化と同じ
-    // 配置にする。AT_PHDR 等の残りは段階16-11 で足す。
+    // 配置にする。
     let auxv: Vec<(u64, u64)> = vec![
-        (6, 0x2000), // AT_PAGESZ（Alpha Linux のページは 8KiB）
-        (9, entry),  // AT_ENTRY
-        (11, 0),     // AT_UID
-        (12, 0),     // AT_EUID
-        (13, 0),     // AT_GID
-        (14, 0),     // AT_EGID
-        (17, 100),   // AT_CLKTCK
-        (23, 0),     // AT_SECURE
+        (3, phdr_addr),             // AT_PHDR
+        (4, 56),                    // AT_PHENT
+        (5, u64::from(ehdr.phnum)), // AT_PHNUM
+        (6, 0x2000),                // AT_PAGESZ（Alpha Linux のページは 8KiB）
+        (9, entry),                 // AT_ENTRY
+        (11, 0),                    // AT_UID
+        (12, 0),                    // AT_EUID
+        (13, 0),                    // AT_GID
+        (14, 0),                    // AT_EGID
+        (17, 100),                  // AT_CLKTCK
+        (23, 0),                    // AT_SECURE
     ];
     let (img, sp) =
         polyisa_os_linux::build_initial_stack_endian(img_top, &arg_bytes, &[], &auxv, Endian::Le);
@@ -389,7 +423,7 @@ fn setup_alpha_elf(
 }
 
 /// PAL/syscall を受けないスタブ。`call_pal` で止めるだけの
-/// 裸実行に使う（OS パーソナリティは段階16-10 以降）。
+/// 裸実行（`NoSys`）に使う。
 pub struct NoSys;
 
 impl TrapHandler for NoSys {

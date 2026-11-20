@@ -1,10 +1,9 @@
 // Copyright (c) polyisa contributors
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! Alpha AXP のゲスト ISA。段階16の骨格。
+//! Alpha AXP のゲスト ISA。段階16の本実装。
 //!
 //! `CpuState` と機能・モデル宣言、ISADL から生成した命令集合・
-//! デコード・逆アセンブルの殻を提供する。命令の意味論は後続の
-//! 段階で `sem` 層として足す。
+//! デコード・逆アセンブルを提供する。命令の意味論は `sem` 層。
 //!
 //! 出典は SPEC-ALPHA-ARM である。
 //! Ref: SPEC-ALPHA-ARM.
@@ -14,7 +13,7 @@
 // ISADL モデルから生成した命令集合・デコード・逆アセンブルの殻。
 include!(concat!(env!("OUT_DIR"), "/generated.rs"));
 
-/// 命令の意味論（段階16-4 の最小集合）。
+/// 命令の意味論。範囲は `sem` 層のヘッダにある。
 pub mod sem;
 
 /// Alpha の ISA ファミリ名。
