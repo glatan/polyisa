@@ -570,38 +570,45 @@ fn parse_register(text: &str) -> std::collections::BTreeMap<String, RegisterEntr
     table
 }
 
-/// 規則9 の走査。ISA の事実を書く場所（`guests/*/spec` と
-/// `guests/*/src` の .rs）に二次実装の名前（大文字小文字を
+/// 規則9 の走査。ISA・ABI の事実を書く場所（`guests/*/spec`、
+/// `guests/*/src`、`crates/*/src` の .rs。`crates/testkit` は
+/// ツール要求の表なので対象外）に二次実装の名前（大文字小文字を
 /// 区別しない qemu・binutils・llvm・capstone・unicorn・
 /// bochs）が現れたら違反とする。オラクルとテスト入力は `tests/`
 /// 側にあり、ここには来ない。
 fn scan_forbidden_impls(root: &std::path::Path) -> Vec<String> {
     const BAD: &[&str] = &["qemu", "binutils", "llvm", "capstone", "unicorn", "bochs"];
     let mut out = Vec::new();
-    let Ok(guests) = std::fs::read_dir(root.join("guests")) else {
-        return out;
-    };
-    for g in guests.flatten() {
-        for sub in ["spec", "src"] {
-            let dir = g.path().join(sub);
-            let mut files = Vec::new();
-            collect_files(&dir, &mut files);
-            files.sort();
-            for f in files {
-                if f.extension().and_then(|s| s.to_str()) != Some("rs") {
-                    continue;
-                }
-                let Ok(text) = std::fs::read_to_string(&f) else {
-                    continue;
-                };
-                let rel = f.strip_prefix(root).unwrap_or(&f).display().to_string();
-                for (i, line) in text.lines().enumerate() {
-                    let low = line.to_lowercase();
-                    for bad in BAD {
-                        if low.contains(bad) {
-                            out.push(format!("{}:{}: 二次実装名 {bad:?}（規則9）", rel, i + 1));
-                        }
-                    }
+    let mut files = Vec::new();
+    if let Ok(guests) = std::fs::read_dir(root.join("guests")) {
+        for g in guests.flatten() {
+            for sub in ["spec", "src"] {
+                collect_files(&g.path().join(sub), &mut files);
+            }
+        }
+    }
+    if let Ok(crates) = std::fs::read_dir(root.join("crates")) {
+        for c in crates.flatten() {
+            if c.file_name() == "testkit" {
+                continue;
+            }
+            collect_files(&c.path().join("src"), &mut files);
+        }
+    }
+    files.sort();
+    for f in files {
+        if f.extension().and_then(|s| s.to_str()) != Some("rs") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&f) else {
+            continue;
+        };
+        let rel = f.strip_prefix(root).unwrap_or(&f).display().to_string();
+        for (i, line) in text.lines().enumerate() {
+            let low = line.to_lowercase();
+            for bad in BAD {
+                if low.contains(bad) {
+                    out.push(format!("{}:{}: 二次実装名 {bad:?}（規則9）", rel, i + 1));
                 }
             }
         }

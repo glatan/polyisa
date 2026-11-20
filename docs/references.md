@@ -58,7 +58,7 @@ BSD 系の資産は `D` と `C` を許可できる。GPL 系の資産と Arm の
    | `testkit` の表に書いたツールと、devtool が実行するツール | `X` |
 
 3. テストデータの取得先（`.testdata/`）が `.gitignore` の対象であり、`git ls-files` に現れない。取得定義（`tools/testdata/manifest.txt`）がある場合は、各行の ID が台帳にあり、用途 `T` が許可されていること。
-4. `guests/*/spec` と `guests/*/src` の Rust に、二次実装の名前（`qemu`、`binutils`、`llvm`、`capstone`、`unicorn`、`bochs` の大文字小文字を区別しない文字列）が含まれていない（規則9 の走査）。オラクル・テスト入力としての言及は `tests/` に置くため対象外。
+4. `guests/*/spec`、`guests/*/src`、`crates/*/src` の Rust に、二次実装の名前（`qemu`、`binutils`、`llvm`、`capstone`、`unicorn`、`bochs` の大文字小文字を区別しない文字列）が含まれていない（規則9 の走査）。`crates/testkit` はツール要求の表なので対象外。オラクル・テスト入力としての言及は `tests/` に置くため対象外。
 5. 台帳と自前のライセンス文を除くリポジトリのファイルに、polyisa のもの以外の著作権表示と SPDX のライセンス識別子が含まれていない。走査するのは `Copyright`、`©`、`SPDX-License-Identifier` の文字列であり、台帳の `docs/references.md` と自前の `LICENSE-MIT`、`LICENSE-APACHE` は対象外とする。自前の `MIT OR Apache-2.0` の識別子行と `polyisa contributors` の著作権行は許可する。
 6. `Cargo.lock` にワークスペース外のパッケージがない（[ADR-0001](adr/0001-no-external-crates.md)）。
 
