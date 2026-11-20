@@ -80,7 +80,7 @@
 | AL2 | `guests/alpha` 骨格: CpuState（r0-31・f0-31・PC・PAL 関連状態）、機能（BWX・FIX・CIX・MVI）とモデル（21064-21364）の宣言、AMASK/IMPLVER を識別情報へ | AL1 | テスト：bare_alpha |
 | AL3 | デコード: 32 ビット固定長、形式別（Operate/Memory/Branch/CALL_PAL）のパターン | AL2 | テスト：bare_alpha（AL2 と一体で実装・レビュー済み） |
 | AL4 | `run_alpha` 実行ループ + bare 最小テスト | AL3 | テスト：bare_alpha・run_alpha（ELF64・e_machine=0x9026・r30=sp の入口も接続済み） |
-| AL5 | 整数 Operate 系: add/sub/論理/シフト/比較/cmov・mb/wmb・rpcc/rc/rs | AL4 | - |
+| AL5 | 整数 Operate 系: add/sub/論理/シフト/比較/cmov・mb/wmb・rpcc/rc/rs | AL4 | テスト：bare_alpha（/v 修飾の算術例外・ext/ins/msk の高位形も網羅） |
 | AL6 | 乗除と拡張（BWX・FIX・CIX・MVI の世代差を `when` 述語で） | AL5 | - |
 | AL7 | load/store・lda・非整列アクセス（ldq_u/stq_u）と補完経路 | AL4 | - |
 | AL8 | 分岐・jmp/jsr/ret | AL4 | - |
