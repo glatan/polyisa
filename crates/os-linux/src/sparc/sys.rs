@@ -109,7 +109,7 @@ impl Linux {
     /// 6 以降（スタック引数）は扱う syscall がないので 0 とする。
     /// 32 ビットモデルでは下位 32 ビットだけが意味を持つ。
     // Ref: SRC-LINUX (7.3) — syscall(2) の sparc 規約。
-    fn arg(&self, env: &mut BareEnv, i: usize) -> u64 {
+    fn arg(&mut self, env: &mut BareEnv, i: usize) -> u64 {
         if i >= 6 {
             return 0;
         }
@@ -122,7 +122,7 @@ impl Linux {
     /// （偶数レジスタへのそろえは行わない。pread64 の
     /// poshi/poslo は o3/o4 に入る）。
     // Ref: SRC-LINUX (7.3) — arch/sparc/kernel/sys_sparc32.c.
-    fn arg64(&self, env: &mut BareEnv, idx: usize) -> u64 {
+    fn arg64(&mut self, env: &mut BareEnv, idx: usize) -> u64 {
         if is_v9(env) {
             return self.arg(env, idx);
         }
@@ -137,65 +137,80 @@ impl Linux {
         }
     }
 
-    /// ポインタ幅の語をメモリから読む（失敗は 0）。
-    fn mem_u(&self, env: &mut BareEnv, addr: u64) -> u64 {
+    /// ポインタ幅の語をメモリから読む（失敗は 0）。未写像なら
+    /// スタック成長窓の内側に限って写像を伸ばしてもう一度試す。
+    fn mem_u(&mut self, env: &mut BareEnv, addr: u64) -> u64 {
         let ws = wsize(env) as usize;
         let mut b = [0u8; 8];
-        env.backend
+        let acc = self.acc(AccessKind::DataRead);
+        if env
+            .backend
             .mem
-            .read(VirtAddr(addr), &mut b[..ws], self.acc(AccessKind::DataRead))
-            .map_or(0, |()| {
-                if ws == 8 {
-                    u64::from_be_bytes(b)
-                } else {
-                    u64::from(u32::from_be_bytes(b[..4].try_into().unwrap()))
-                }
-            })
+            .read(VirtAddr(addr), &mut b[..ws], acc)
+            .is_err()
+            && !(self.grow_stack(env, addr, ws as u64)
+                && env
+                    .backend
+                    .mem
+                    .read(VirtAddr(addr), &mut b[..ws], acc)
+                    .is_ok())
+        {
+            return 0;
+        }
+        if ws == 8 {
+            u64::from_be_bytes(b)
+        } else {
+            u64::from(u32::from_be_bytes(b[..4].try_into().unwrap()))
+        }
     }
 
-    /// ポインタ幅の語をメモリに書く。
-    fn put_u(&self, env: &mut BareEnv, addr: u64, v: u64) -> bool {
-        if wsize(env) == 8 {
-            env.backend.mem.write(VirtAddr(addr), &v.to_be_bytes())
+    /// ポインタ幅の語をメモリに書く。未写像ならスタック成長窓の
+    /// 内側に限って写像を伸ばしてもう一度試す（カーネルの
+    /// copy_to_user と同じくフォルト駆動で伸びる想定）。
+    fn put_u(&mut self, env: &mut BareEnv, addr: u64, v: u64) -> bool {
+        let ws = wsize(env);
+        let b = if ws == 8 {
+            v.to_be_bytes().to_vec()
         } else {
-            env.backend
-                .mem
-                .write(VirtAddr(addr), &(v as u32).to_be_bytes())
-        }
-        .is_ok()
+            (v as u32).to_be_bytes().to_vec()
+        };
+        self.put_bytes(env, addr, &b)
     }
 
     /// 32 ビット値を書く。
-    fn put32(&self, env: &mut BareEnv, addr: u64, v: u32) -> bool {
-        env.backend
-            .mem
-            .write(VirtAddr(addr), &v.to_be_bytes())
-            .is_ok()
+    fn put32(&mut self, env: &mut BareEnv, addr: u64, v: u32) -> bool {
+        self.put_bytes(env, addr, &v.to_be_bytes())
     }
 
     /// 64 ビット値を書く。
-    fn put64(&self, env: &mut BareEnv, addr: u64, v: u64) -> bool {
-        env.backend
-            .mem
-            .write(VirtAddr(addr), &v.to_be_bytes())
-            .is_ok()
+    fn put64(&mut self, env: &mut BareEnv, addr: u64, v: u64) -> bool {
+        self.put_bytes(env, addr, &v.to_be_bytes())
     }
 
     /// 16 ビット値を書く。
-    fn put16(&self, env: &mut BareEnv, addr: u64, v: u16) -> bool {
-        env.backend
-            .mem
-            .write(VirtAddr(addr), &v.to_be_bytes())
-            .is_ok()
+    fn put16(&mut self, env: &mut BareEnv, addr: u64, v: u16) -> bool {
+        self.put_bytes(env, addr, &v.to_be_bytes())
+    }
+
+    /// `put_u`/`put32`/`put64`/`put16` の共通部。
+    fn put_bytes(&mut self, env: &mut BareEnv, addr: u64, data: &[u8]) -> bool {
+        if env.backend.mem.write(VirtAddr(addr), data).is_ok() {
+            return true;
+        }
+        self.grow_stack(env, addr, data.len() as u64)
+            && env.backend.mem.write(VirtAddr(addr), data).is_ok()
     }
 
     /// C 文字列を読む。上限 4096。
-    fn read_cstr(&self, env: &mut BareEnv, addr: u64) -> Result<Vec<u8>, u32> {
+    fn read_cstr(&mut self, env: &mut BareEnv, addr: u64) -> Result<Vec<u8>, u32> {
         let mut out = Vec::new();
         let acc = self.acc(AccessKind::DataRead);
         for a in (addr..).take(4096) {
             let mut b = [0u8; 1];
-            if env.backend.mem.read(VirtAddr(a), &mut b, acc).is_err() {
+            if env.backend.mem.read(VirtAddr(a), &mut b, acc).is_err()
+                && !(self.grow_stack(env, a, 1)
+                    && env.backend.mem.read(VirtAddr(a), &mut b, acc).is_ok())
+            {
                 return Err(sparc::errno::EFAULT);
             }
             if b[0] == 0 {
@@ -206,23 +221,31 @@ impl Linux {
         Err(sparc::errno::ENAMETOOLONG)
     }
 
-    fn read_bytes(&self, env: &mut BareEnv, addr: u64, len: usize) -> Result<Vec<u8>, u32> {
+    fn read_bytes(&mut self, env: &mut BareEnv, addr: u64, len: usize) -> Result<Vec<u8>, u32> {
         let mut buf = vec![0u8; len.min(1 << 20)];
         if buf.is_empty() {
             return Ok(buf);
         }
-        env.backend
-            .mem
-            .read(VirtAddr(addr), &mut buf, self.acc(AccessKind::DataRead))
-            .map_err(|_| sparc::errno::EFAULT)?;
+        let acc = self.acc(AccessKind::DataRead);
+        if env.backend.mem.read(VirtAddr(addr), &mut buf, acc).is_err()
+            && !(self.grow_stack(env, addr, buf.len() as u64)
+                && env.backend.mem.read(VirtAddr(addr), &mut buf, acc).is_ok())
+        {
+            return Err(sparc::errno::EFAULT);
+        }
         Ok(buf)
     }
 
-    fn write_bytes(&self, env: &mut BareEnv, addr: u64, data: &[u8]) -> Result<(), u32> {
-        env.backend
-            .mem
-            .write(VirtAddr(addr), data)
-            .map_err(|_| sparc::errno::EFAULT)
+    fn write_bytes(&mut self, env: &mut BareEnv, addr: u64, data: &[u8]) -> Result<(), u32> {
+        if env.backend.mem.write(VirtAddr(addr), data).is_ok() {
+            return Ok(());
+        }
+        if self.grow_stack(env, addr, data.len() as u64)
+            && env.backend.mem.write(VirtAddr(addr), data).is_ok()
+        {
+            return Ok(());
+        }
+        Err(sparc::errno::EFAULT)
     }
 
     /// ゲストのパスをホストのパスへ（相対は cwd から）。
@@ -307,11 +330,13 @@ impl Linux {
         }
     }
 
-    /// ホストのメタデータをゲストの stat 形に写す。レイアウトは ABI で
-    /// 違い、sparc32 は `struct stat64`（104B）、sparc64 は
-    /// `struct stat`（104B）を使う（E3 で照合）。
+    /// ホストのメタデータをゲストの stat 形に写す。レイアウトは ABI と
+    /// syscall で違う。sparc32 の `stat64` 系と sparc64 の `stat` 系が
+    /// 104B（中身は別形）。`statx` は `put_statx`、sparc64 の
+    /// `stat64` 系は `put_kstat64`、sparc32 の `stat` 系は
+    /// `put_stat32` を使う（E3 で照合）。
     /// Ref: SRC-LINUX (7.3) — arch/sparc/include/uapi/asm/stat.h.
-    fn put_stat(&self, env: &mut BareEnv, addr: u64, md: &polyisa_host::Stat) -> bool {
+    fn put_stat(&mut self, env: &mut BareEnv, addr: u64, md: &polyisa_host::Stat) -> bool {
         let mut ok = true;
         if is_v9(env) {
             // sparc64 struct stat（104B）:
@@ -362,7 +387,7 @@ impl Linux {
 
     /// `statx`（256B）。使うフィールドだけ立てる
     /// （mask には取れた項目の合併を書く）。形は ABI 共通。
-    fn put_statx(&self, env: &mut BareEnv, addr: u64, md: &polyisa_host::Stat) -> bool {
+    fn put_statx(&mut self, env: &mut BareEnv, addr: u64, md: &polyisa_host::Stat) -> bool {
         // statx: 0 u32 mask, 4 u32 blksize, 8 u64 attributes,
         // 16 u32 nlink, 20 u32 uid, 24 u32 gid, 28 u16 mode, 30 u16 spare,
         // 32 u64 ino, 40 u64 size, 48 u64 blocks, 56 u64 attrs_mask,
@@ -388,7 +413,64 @@ impl Linux {
         ok
     }
 
-    /// `stat` 系の共通部。`dirfd`/`path`/`fd` と statx かの区別を取る。
+    /// sparc64 の `stat64` 系 syscall が書く `struct kernel_stat64`
+    /// （144B）。ユーザの `struct stat` とは別形で、glibc が
+    /// `xstatconv` で変換する。
+    /// Ref: SRC-LINUX (7.3) — arch/sparc/include/uapi/asm/stat.h.
+    fn put_kstat64(&mut self, env: &mut BareEnv, addr: u64, md: &polyisa_host::Stat) -> bool {
+        // 0: u64 dev, 8: u64 ino, 16: u64 nlink, 24: u32 mode,
+        // 28: u32 uid, 32: u32 gid, 36: pad, 40: u64 rdev,
+        // 48: i64 size, 56: i64 blksize, 64: i64 blocks,
+        // 72/88/104: {sec,nsec} の時刻、120: unused[3]
+        let mut ok = true;
+        ok &= self.put64(env, addr, md.dev);
+        ok &= self.put64(env, addr + 8, md.ino);
+        ok &= self.put64(env, addr + 16, md.nlink);
+        ok &= self.put32(env, addr + 24, md.mode);
+        ok &= self.put32(env, addr + 28, md.uid);
+        ok &= self.put32(env, addr + 32, md.gid);
+        ok &= self.put64(env, addr + 40, md.rdev);
+        ok &= self.put64(env, addr + 48, md.size);
+        ok &= self.put64(env, addr + 56, md.blksize);
+        ok &= self.put64(env, addr + 64, md.blocks);
+        ok &= self.put64(env, addr + 72, md.atime as u64);
+        ok &= self.put64(env, addr + 80, md.atime_nsec as u64);
+        ok &= self.put64(env, addr + 88, md.mtime as u64);
+        ok &= self.put64(env, addr + 96, md.mtime_nsec as u64);
+        ok &= self.put64(env, addr + 104, md.ctime as u64);
+        ok &= self.put64(env, addr + 112, md.ctime_nsec as u64);
+        ok
+    }
+
+    /// sparc32 の `stat` 系 syscall が書く旧 `struct stat`（64B）。
+    /// Ref: SRC-LINUX (7.3) — arch/sparc/include/uapi/asm/stat.h.
+    fn put_stat32(&mut self, env: &mut BareEnv, addr: u64, md: &polyisa_host::Stat) -> bool {
+        // 0: u16 dev, 4: u32 ino, 8: u32 mode, 12: i16 nlink,
+        // 14: u16 uid, 16: u16 gid, 18: u16 rdev, 20: i32 size,
+        // 24/28: atime sec/nsec, 32/36: mtime, 40/44: ctime,
+        // 48: i32 blksize, 52: i32 blocks, 56: unused[2]
+        let mut ok = true;
+        ok &= self.put16(env, addr, md.dev as u16);
+        ok &= self.put32(env, addr + 4, md.ino as u32);
+        ok &= self.put32(env, addr + 8, md.mode);
+        ok &= self.put16(env, addr + 12, md.nlink as u16);
+        ok &= self.put16(env, addr + 14, md.uid as u16);
+        ok &= self.put16(env, addr + 16, md.gid as u16);
+        ok &= self.put16(env, addr + 18, md.rdev as u16);
+        ok &= self.put32(env, addr + 20, md.size as u32);
+        ok &= self.put32(env, addr + 24, md.atime as u32);
+        ok &= self.put32(env, addr + 28, md.atime_nsec as u32);
+        ok &= self.put32(env, addr + 32, md.mtime as u32);
+        ok &= self.put32(env, addr + 36, md.mtime_nsec as u32);
+        ok &= self.put32(env, addr + 40, md.ctime as u32);
+        ok &= self.put32(env, addr + 44, md.ctime_nsec as u32);
+        ok &= self.put32(env, addr + 48, md.blksize as u32);
+        ok &= self.put32(env, addr + 52, md.blocks as u32);
+        ok
+    }
+
+    /// `stat` 系の共通部。`dirfd`/`path`/`fd` と書き込むバッファの
+    /// レイアウト（`StatFmt`）を取る。
     fn do_stat(
         &mut self,
         env: &mut BareEnv,
@@ -396,7 +478,7 @@ impl Linux {
         path_addr: Option<u64>,
         out: u64,
         lstat: bool,
-        statx: bool,
+        fmt: StatFmt,
     ) -> u64 {
         let md = match (fd, path_addr) {
             (Some(fd), _) => match fd {
@@ -434,10 +516,12 @@ impl Linux {
             }
             _ => return fail(sparc::errno::EINVAL),
         };
-        let ok = if statx {
-            self.put_statx(env, out, &md)
-        } else {
-            self.put_stat(env, out, &md)
+        let ok = match fmt {
+            StatFmt::Statx => self.put_statx(env, out, &md),
+            StatFmt::Stat64 if is_v9(env) => self.put_kstat64(env, out, &md),
+            StatFmt::Stat64 => self.put_stat(env, out, &md),
+            StatFmt::Stat if is_v9(env) => self.put_stat(env, out, &md),
+            StatFmt::Stat => self.put_stat32(env, out, &md),
         };
         if ok {
             ret(0)
@@ -982,7 +1066,7 @@ impl Linux {
     }
 
     /// `timespec`（ポインタ幅の語×2）を書く。
-    fn put_timespec(&self, env: &mut BareEnv, addr: u64, sec: u64, nsec: u64) -> bool {
+    fn put_timespec(&mut self, env: &mut BareEnv, addr: u64, sec: u64, nsec: u64) -> bool {
         let ws = wsize(env);
         self.put_u(env, addr, sec) && self.put_u(env, addr + ws, nsec)
     }
@@ -1022,7 +1106,7 @@ impl Linux {
 
     /// 窓 `w`（物理番号）の退避域の先頭アドレス。その窓の
     /// %o6（%sp）が指し、V9 では 2047 の BIAS を足す。
-    fn win_spill_addr(&self, env: &mut BareEnv, w: u64) -> u64 {
+    fn win_spill_addr(&mut self, env: &mut BareEnv, w: u64) -> u64 {
         let v9 = is_v9(env);
         let i = win_slot(env, w, 6);
         let sp = slot(env, i);
@@ -1102,7 +1186,53 @@ impl Linux {
             }
         }
         env.backend.set(sem::canrestore_ref(), 0);
-        env.backend.set(sem::cansave_ref(), nw - 1);
+        env.backend.set(sem::cansave_ref(), nw - 2);
+        next_insn(env);
+        TrapOutcome::Handled
+    }
+
+    /// `ta 0x6e`（sparc64 getcontext）。ユーザの %o0 が指す
+    /// ucontext にトラップ時点のコンテキストを書く。カーネルは
+    /// `sparc64_get_context` で struct をゼロ初期化してから
+    /// sigmask・mc_gregs（tstate/pc/npc/y/g1-g7/o0-o7）・
+    /// mc_fp・mc_i7 を書き、FPU 領域は enab=0 のまま残す。
+    /// Ref: SRC-LINUX — arch/sparc/kernel/signal_64.c,
+    /// arch/sparc/include/uapi/asm/uctx.h.
+    ///
+    /// ユーザレイアウト（64 ビット、オフセット 16 進）:
+    ///   uc_link@00, uc_flags@08, uc_sigmask@10, pad@18,
+    ///   mc_gregs@20（TSTATE/PC/NPC/Y/G1-G7/O0-O7 の順 19 語）、
+    ///   mc_fp@b8, mc_i7@c0, mc_fpregs@c8（enab=0）。
+    ///   uc_mcontext は long double 整列で 0x20 から始まる。
+    fn do_getcontext(&mut self, env: &mut BareEnv) -> TrapOutcome {
+        const UC_SIZE: u64 = 0x1e0;
+        let ucp = reg(env, 8);
+        if !self
+            .write_bytes(env, ucp, &vec![0u8; UC_SIZE as usize])
+            .is_ok()
+        {
+            return TrapOutcome::Unimplemented;
+        }
+        // sigmask はシグナル非対応のため 0（ゼロ初期化済み）。
+        let npc = env.backend.get(sem::npc_ref());
+        let mut g = [0u64; 19];
+        g[0] = env.backend.get(sem::tstate_ref());
+        g[1] = npc;
+        g[2] = npc.wrapping_add(4);
+        g[3] = env.backend.get(sem::y_ref());
+        for (i, slot) in g.iter_mut().enumerate().skip(4) {
+            *slot = reg(env, (i - 3) as u8);
+        }
+        for (i, v) in g.iter().enumerate() {
+            if !self.put64(env, ucp + 0x20 + i as u64 * 8, *v) {
+                return TrapOutcome::Unimplemented;
+            }
+        }
+        let fp = reg(env, 30);
+        let i7 = reg(env, 31);
+        if !self.put64(env, ucp + 0xb8, fp) || !self.put64(env, ucp + 0xc0, i7) {
+            return TrapOutcome::Unimplemented;
+        }
         next_insn(env);
         TrapOutcome::Handled
     }
@@ -1127,13 +1257,15 @@ impl Linux {
         true
     }
 
-    /// ウィンドウあふれ。cansave==0 で save できないとき、最古の窓
-    /// （save 方向の隣 = 物理番号で p-1）を退避して空きにし、
-    /// pc を動かさず save を再実行させる。
+    /// ウィンドウあふれ。cansave==0 で save できないとき、最古の
+    /// in-register 祖先窓（restore 方向の端 = 物理番号で
+    /// p+canrestore）を退避して clean 窓にし、pc を動かさず
+    /// save を再実行させる。save が入る窓（物理 p-1）は clean 窓
+    /// であり、退避対象ではない。
     fn do_win_overflow(&mut self, env: &mut BareEnv) -> TrapOutcome {
         let nw = nwindows(env);
         let p = cur_win(env);
-        let w = (p + nw - 1) % nw;
+        let w = (p + env.backend.get(sem::canrestore_ref())) % nw;
         if !self.spill_window(env, w) {
             // 退避先が未写像なら、スタック成長窓の内側に限って
             // 写像を伸ばしてもう一度試す。
@@ -1165,8 +1297,13 @@ impl Linux {
                 return TrapOutcome::Unimplemented;
             }
         }
+        // RESTORED と同じ規約：埋め戻した窓が live に戻るので
+        // canrestore を増やし、clean 窩が 1 枚減る分 cansave を
+        // 減らす。
         let cr = env.backend.get(sem::canrestore_ref());
         env.backend.set(sem::canrestore_ref(), cr + 1);
+        let cs = env.backend.get(sem::cansave_ref());
+        env.backend.set(sem::cansave_ref(), cs.saturating_sub(1));
         TrapOutcome::Handled
     }
 }
@@ -1371,6 +1508,16 @@ fn host_errno(e: i32) -> u32 {
 }
 
 /// dispatch の戻り。
+/// `stat` 系が書くバッファのレイアウト指定。
+enum StatFmt {
+    /// `stat`/`lstat`/`fstat`（`newfstatat` 相当含む）。
+    Stat,
+    /// `stat64`/`lstat64`/`fstat64`/`fstatat64`。
+    Stat64,
+    /// `statx`。
+    Statx,
+}
+
 enum Disp {
     /// %o0 に書く値（内部表現。負なら -errno）。
     Ret(u64),
@@ -1407,6 +1554,15 @@ impl TrapHandler for Linux {
             0x90 | 0x16d => self.syscall(env),
             // ta 3（flushw）。窓の退避を全部行ってから次へ進む。
             0x83 | 0x103 => self.do_flushw(env),
+            // ta 0x6e（sparc64 getcontext）。ucontext をユーザ
+            // メモリに書き、トラップ命令の次へ進む。
+            0x16e => {
+                if is_v9(env) {
+                    self.do_getcontext(env)
+                } else {
+                    TrapOutcome::Unimplemented
+                }
+            }
             // V8 の window_overflow。V9 は spill_*_normal（0x80–0x9f）。
             0x05 => {
                 if is_v9(env) {
@@ -1450,13 +1606,20 @@ impl Linux {
         if trace() {
             let name = sparc::name(nr).unwrap_or("?");
             eprintln!(
-                "sys {nr} {name} o0={:#x} o1={:#x}",
+                "sys {nr} {name} o0={:#x} o1={:#x} o2={:#x} o3={:#x} o4={:#x} o5={:#x}",
                 self.arg(env, 0),
-                self.arg(env, 1)
+                self.arg(env, 1),
+                self.arg(env, 2),
+                self.arg(env, 3),
+                self.arg(env, 4),
+                self.arg(env, 5),
             );
         }
         match self.dispatch(env, nr) {
             Disp::Ret(v) => {
+                if trace() {
+                    eprintln!("  -> {v:#x}");
+                }
                 if is_err_r(v) {
                     set_carry(env, true);
                     set_reg(env, 8, (v as i64).unsigned_abs());
@@ -1611,28 +1774,54 @@ impl Linux {
                 }
             }
             // ---- stat 系 ----
-            N::STAT | N::STAT64 => {
-                Disp::Ret(self.do_stat(env, None, Some(args[0]), args[1], false, false))
+            N::STAT => {
+                Disp::Ret(self.do_stat(env, None, Some(args[0]), args[1], false, StatFmt::Stat))
             }
-            N::LSTAT | N::LSTAT64 | N::OLDLSTAT => {
-                Disp::Ret(self.do_stat(env, None, Some(args[0]), args[1], true, false))
+            N::STAT64 => {
+                Disp::Ret(self.do_stat(env, None, Some(args[0]), args[1], false, StatFmt::Stat64))
             }
-            N::FSTAT | N::FSTAT64 => {
-                Disp::Ret(self.do_stat(env, Some(args[0] as u32), None, args[1], false, false))
+            N::LSTAT | N::OLDLSTAT => {
+                Disp::Ret(self.do_stat(env, None, Some(args[0]), args[1], true, StatFmt::Stat))
             }
+            N::LSTAT64 => {
+                Disp::Ret(self.do_stat(env, None, Some(args[0]), args[1], true, StatFmt::Stat64))
+            }
+            N::FSTAT => Disp::Ret(self.do_stat(
+                env,
+                Some(args[0] as u32),
+                None,
+                args[1],
+                false,
+                StatFmt::Stat,
+            )),
+            N::FSTAT64 => Disp::Ret(self.do_stat(
+                env,
+                Some(args[0] as u32),
+                None,
+                args[1],
+                false,
+                StatFmt::Stat64,
+            )),
             N::FSTATAT64 => {
                 if args[0] as i32 != -100 {
                     return fail_ret(E::EBADF);
                 }
                 let lstat = args[3] & 0x100 != 0; // AT_SYMLINK_NOFOLLOW
-                Disp::Ret(self.do_stat(env, None, Some(args[1]), args[2], lstat, false))
+                Disp::Ret(self.do_stat(env, None, Some(args[1]), args[2], lstat, StatFmt::Stat64))
             }
             N::STATX => {
                 // statx(dirfd, path, flags, mask, buf)
                 let dirfd = args[0] as i32;
                 let lstat = args[2] & 0x100 != 0;
                 if dirfd == -100 {
-                    Disp::Ret(self.do_stat(env, None, Some(args[1]), args[4], lstat, true))
+                    Disp::Ret(self.do_stat(
+                        env,
+                        None,
+                        Some(args[1]),
+                        args[4],
+                        lstat,
+                        StatFmt::Statx,
+                    ))
                 } else if dirfd >= 0 && args[2] & 0x1000 != 0 {
                     // 実 fd + AT_EMPTY_PATH(0x1000) + 空 path は fd 自身
                     // の fstat。dirfd 相対のパス解決は未対応。
@@ -1643,7 +1832,7 @@ impl Linux {
                             None,
                             args[4],
                             lstat,
-                            true,
+                            StatFmt::Statx,
                         )),
                         Ok(_) => fail_ret(E::ENOSYS),
                         Err(e) => fail_ret(e),

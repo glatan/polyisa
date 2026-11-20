@@ -125,10 +125,23 @@ fn step(
     stack: Option<StackGrowth>,
 ) -> Result<(), Outcome> {
     let pc = get_u64(env, sem::pc_ref().offset()) & model.addr_mask;
-    // 命令フェッチは 4 バイト整列。非整列の mem_address_not_aligned
-    // トラップは後続ステップで配送する。
+    // 命令フェッチは 4 バイト整列。非整列なら
+    // mem_address_not_aligned（tt=0x07）を通常のトラップ経路で配送する。
     if pc & 3 != 0 {
-        return Err(Outcome::Unimplemented { pc, word: 0 });
+        env.backend.set(sem::tt_ref(), 0x07);
+        return finish(
+            env,
+            sys,
+            InterpExit::Exception(polyisa_sem::GuestException {
+                kind: ExceptionKind::Trap,
+                code: 0,
+                addr: Some(pc),
+                in_delay_slot: false,
+            }),
+            pc,
+            0,
+            stack,
+        );
     }
     let word = match fetch(env, pc) {
         Some(w) => w,
@@ -336,6 +349,25 @@ pub fn run_elf_sparc(path: &str, argv: &[String]) -> Result<u64, String> {
     run_elf_sparc_sys(path, argv, &mut polyisa_os_linux::sparc::sys::Linux::new())
 }
 
+/// 終了コードと標準出力の捕獲を返す。
+pub fn run_elf_sparc_captured(path: &str, argv: &[String]) -> Result<(u64, Vec<u8>), String> {
+    run_elf_sparc_captured_in(path, argv, &[])
+}
+
+/// 標準入力 `stdin` を与えて実行し、終了コードと標準出力の捕獲を返す。
+/// 標準エラーを検査するときは `run_elf_sparc_sys` で `sys.io.stderr`
+/// を読む。
+pub fn run_elf_sparc_captured_in(
+    path: &str,
+    argv: &[String],
+    stdin: &[u8],
+) -> Result<(u64, Vec<u8>), String> {
+    let mut sys = polyisa_os_linux::sparc::sys::Linux::new();
+    sys.stdin_buf = stdin.to_vec();
+    let code = run_elf_sparc_sys(path, argv, &mut sys)?;
+    Ok((code, sys.io.stdout))
+}
+
 /// `sys` の状態を引き継いで SPARC の Linux ELF を実行する。
 pub fn run_elf_sparc_sys(
     path: &str,
@@ -374,8 +406,8 @@ pub fn run_elf_sparc_sys(
                 phdrs,
                 56u64,
                 SparcModel::named("ultrasparc3"),
-                // 実機の STACK_TOP64（0x7ff0_0000_0000）に合わせる。
-                0x0000_7ff0_0000_0000u64,
+                // 実機の STACK_TOP64（2^43 - 2^32）に合わせる。
+                0x0000_07ff_0000_0000u64,
             )
         }
         _ => return Err("ELFCLASS32/64 ではない".to_string()),
@@ -472,18 +504,28 @@ pub fn run_elf_sparc_sys(
         .write(VirtAddr(sp), &img)
         .map_err(|e| format!("stack write: {e:?}"))?;
     // 初期 %sp は見える番号の %o6 に入る。CWP=0 の物理位置は o6 と
-    // 一致する。V9 では ABI の STACK_BIAS（2047）だけ下にずらす。
-    // Ref: SPEC-SPARC-V9 §STACK_BIAS.
-    let o6 = if is64 { sp - 2047 } else { sp };
+    // 一致する。カーネル規約では先頭にレジスタ保存領域があり argc
+    // はその直後に置く。保存領域は sparc32 が 16×4=64 バイト、
+    // sparc64 が 16×8=128 バイトで、V9 では加えて ABI の
+    // STACK_BIAS（2047）を引く。
+    // Ref: SPEC-SPARC-V9 §STACK_BIAS, SRC-LINUX.
+    let o6 = if is64 { sp - 128 - 2047 } else { sp - 64 };
     env.backend.set(sem::Gpr(14).state(), o6);
     // 初期ウィンドウ状態。現窓だけ使用中で残りは空きにする。
+    // cansave は NWINDOWS-2 が規約。CANSAVE+CANRESTORE+OTHERWIN の
+    // 和が NWINDOWS-2 であり、全窓を live にすると先端フレームの
+    // out バンクが最浅フレームの in バンクと物理衝突するため、
+    // 常に 1 窓分の clean 窓を残す。Ref: SRC-LINUX, SRC-QEMU.
     let nw = u64::from(model.params.nwindows);
-    env.backend.set(sem::cansave_ref(), nw - 1);
+    env.backend.set(sem::cansave_ref(), nw - 2);
     if is64 {
         // Linux は起動時から FPU を使える状態でユーザを走らせる
         // （PSTATE.PEF + FPRS.FEF）。
         env.backend.set(sem::tstate_ref(), 1 << 12);
         env.backend.set(sem::fprs_ref(), 0b100);
+    } else {
+        // V8 も同じく PSR.EF（bit 12）を立てて FPU を有効にする。
+        env.backend.set(sem::psr_ref(), 1 << 12);
     }
     // /proc/self/exe の readlink は絶対パスを返す規約。
     sys.exe_path = std::fs::canonicalize(path)

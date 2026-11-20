@@ -210,14 +210,26 @@ fn wmask<B: Backend>(b: &mut B, v: B::V<W64>) -> B::V<W64> {
     }
 }
 
-/// 32 ビット演算の結果を rd の値に包む。V7/V8 では下位 32 ビット、
-/// V9 では 32 ビット演算の結果を符号拡張して 64 ビットの rd に書く。
-/// アドレス計算など全幅演算は `wmask` の方を使う。
+/// 符号付き 32 ビット演算の結果を rd の値に包む。V7/V8 では下位
+/// 32 ビット、V9 では符号拡張して 64 ビットの rd に書く。
+/// 符号なし 32 ビット結果は `zmask`、全幅演算は `wmask` を使う。
 /// Ref: SPEC-SPARC-V9 §Integer Register Usage.
 fn emask<B: Backend>(b: &mut B, v: B::V<W64>) -> B::V<W64> {
     if b.param::<super::Word64Param>() {
         let lo = b.trunc::<W64, W32>(v);
         b.sext::<W32, W64>(lo)
+    } else {
+        wmask(b, v)
+    }
+}
+
+/// 符号なし 32 ビット演算の結果を rd の値に包む。V7/V8 では下位
+/// 32 ビット、V9 ではゼロ拡張して 64 ビットの rd に書く。
+/// Ref: SPEC-SPARC-V9 §Integer Register Usage.
+fn zmask<B: Backend>(b: &mut B, v: B::V<W64>) -> B::V<W64> {
+    if b.param::<super::Word64Param>() {
+        let lo = b.trunc::<W64, W32>(v);
+        b.zext::<W32, W64>(lo)
     } else {
         wmask(b, v)
     }
@@ -268,6 +280,7 @@ const ATOMIC_RW: Access = Access {
 };
 
 /// 3 オペランド形の第 2 ソース。レジスタ（i=0）か即値（i=1）。
+#[derive(Clone, Copy)]
 pub enum Src2 {
     /// `rs2` レジスタを読む。
     Reg(Gpr),
@@ -410,7 +423,7 @@ fn add_common<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2, cc: bool, carry
     let cv = b.select::<W64>(cin, one, zero);
     let t = b.add::<W64>(x, y);
     let sum = b.add::<W64>(t, cv);
-    let v = emask(b, sum);
+    let v = wmask(b, sum);
     write(b, rd, v);
     if cc {
         let x32 = b.trunc::<W64, W32>(x);
@@ -435,7 +448,7 @@ fn sub_common<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2, cc: bool, carry
     let bv = b.select::<W64>(bin, one, zero);
     let d = b.sub::<W64>(x, y);
     let diff = b.sub::<W64>(d, bv);
-    let v = emask(b, diff);
+    let v = wmask(b, diff);
     write(b, rd, v);
     if cc {
         let nb = inv_b(b, bin);
@@ -481,7 +494,7 @@ fn logic_common<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2, op: LOp, cc: 
             b.not::<W64>(t)
         }
     };
-    let v = emask(b, t);
+    let v = wmask(b, t);
     write(b, rd, v);
     if cc {
         let f = false_b(b);
@@ -494,7 +507,7 @@ fn logic_common<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2, op: LOp, cc: 
 /// レジスタ形・即値形のどちらでも量は 5 ビット。V9 でも 32 ビット
 /// シフトはこの動作で、bit12 の x 桁は 0 に固定している。
 /// Ref: SPEC-SPARC-V8 (Version 8) §SLL, §SRL, §SRA.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Sh {
     Ll,
     Rl,
@@ -513,7 +526,14 @@ fn shift_common<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2, sh: Sh) -> Fl
         Sh::Rl => b.shr_l::<W32>(x32, n32),
         Sh::Ra => b.shr_a::<W32>(x32, n32),
     };
-    let e = b.sext::<W32, W64>(r);
+    // V9 でも 32 ビットシフトは 32 ビット結果。sll/srl はゼロ拡張、
+    // sra は符号拡張で rd に入る（QEMU translate.c の ext32u/ext32s
+    // の使い分けに合わせる）。
+    let e = if sh == Sh::Ra {
+        b.sext::<W32, W64>(r)
+    } else {
+        b.zext::<W32, W64>(r)
+    };
     let v = wmask(b, e);
     write(b, rd, v);
     Ok(())
@@ -550,6 +570,27 @@ fn mul_common<B: Backend>(
 ) -> Flow<B> {
     let x = read(b, rs1);
     let y = src2(b, s);
+    if b.param::<super::Word64Param>() {
+        // V9: rd には全 64 ビット積、Y には積の bit63-32 が入る。
+        // Ref: SPEC-SPARC-V9 §UMUL §SMUL, QEMU translate.c gen_op_multiply.
+        let x32 = b.trunc::<W64, W32>(x);
+        let y32 = b.trunc::<W64, W32>(y);
+        let (xe, ye) = if signed {
+            (b.sext::<W32, W64>(x32), b.sext::<W32, W64>(y32))
+        } else {
+            (b.zext::<W32, W64>(x32), b.zext::<W32, W64>(y32))
+        };
+        let p = b.mul::<W64>(xe, ye);
+        write(b, rd, p);
+        let sh = b.konst::<W64>(32);
+        let yv = b.shr_l::<W64>(p, sh);
+        b.set(y_ref(), yv);
+        if cc {
+            let f = false_b(b);
+            set_cc(b, p, f, f, f, f);
+        }
+        return Ok(());
+    }
     let x32 = b.trunc::<W64, W32>(x);
     let y32 = b.trunc::<W64, W32>(y);
     let lo = b.mul::<W32>(x32, y32);
@@ -653,7 +694,11 @@ fn div_common<B: Backend>(
         b.konst::<W64>(0xffff_ffff)
     };
     let qsat = b.select::<W64>(fits, q, sat);
-    let v = emask(b, qsat);
+    let v = if signed {
+        emask(b, qsat)
+    } else {
+        zmask(b, qsat)
+    };
     write(b, rd, v);
     let rm = wmask(b, r);
     b.set(y_ref(), rm);
@@ -869,12 +914,14 @@ pub fn sra<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2) -> Flow<B> {
 }
 
 /// SETHI。imm22 を上位に置く（rd = imm22 << 10）。V9 は 32 ビット目の
-/// 符号を上位 32 ビットへ拡張する。V7/V8 は `wmask` で上位を捨てる。
+/// imm22 << 10 を書き、上位 32 ビットは 0 で埋める。分岐の
+/// disp22 と違い sethi の定数は符号拡張しない。ゼロ拡張しないと
+/// `sethi %hi(x)` で上位ビットを持つ 32 ビット定数を作れない。
 /// Ref: SPEC-SPARC-V8 (Version 8) §SETHI.
 /// Ref: SPEC-SPARC-V9 §SETHI.
 pub fn sethi<B: Backend>(b: &mut B, rd: Gpr, imm22: u64) -> Flow<B> {
     let v32 = b.konst::<W32>((imm22 << 10) as u32);
-    let s = b.sext::<W32, W64>(v32);
+    let s = b.zext::<W32, W64>(v32);
     let v = wmask(b, s);
     write(b, rd, v);
     Ok(())
@@ -943,8 +990,8 @@ pub fn ldsh<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2) -> Flow<B> {
 }
 
 /// LDD（ダブルワード。rd には上位（アドレス側）、rd2 には下位）。
-/// V8 では rd は偶数でなければならない。奇数のときの結果は不定で、
-/// 本実装は隣接レジスタへの書き込みとして進める。
+/// rd は偶数でなければならない。奇数は illegal instruction として
+/// 扱う（QEMU の gen_align_check と同じ）。
 /// Ref: SPEC-SPARC-V8 (Version 8) §LDD.
 pub fn ldd<B: Backend>(b: &mut B, rd: Gpr, rd2: Gpr, rs1: Gpr, s: Src2) -> Flow<B> {
     if rd.0 & 1 != 0 {
@@ -1026,6 +1073,30 @@ pub fn swap<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2) -> Flow<B> {
     let w = b.zext::<W32, W64>(v);
     let m = wmask(b, w);
     write(b, rd, m);
+    Ok(())
+}
+
+/// LDSW（V9。符号付きワード → 64 ビット符号拡張）。
+/// Ref: SPEC-SPARC-V9 §LDSW.
+pub fn ldsw<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2) -> Flow<B> {
+    ld_common::<B, W32>(b, rd, rs1, s, true)
+}
+
+/// LDX（V9。ダブルワード、全 64 ビット）。
+/// Ref: SPEC-SPARC-V9 §LDX.
+pub fn ldx<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2) -> Flow<B> {
+    let addr = eff_addr(b, rs1, s);
+    let v: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    write(b, rd, v);
+    Ok(())
+}
+
+/// STX（V9。ダブルワード、全 64 ビット）。
+/// Ref: SPEC-SPARC-V9 §STX.
+pub fn stx<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2) -> Flow<B> {
+    let addr = eff_addr(b, rs1, s);
+    let v = read(b, rd);
+    b.store::<W64>(addr, v, DATA_WRITE)?;
     Ok(())
 }
 
@@ -1386,18 +1457,21 @@ pub fn restore<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, s: Src2) -> Flow<B> {
 }
 
 /// SAVED。窓の退避を終えたことをカーネルが知らせる命令で、
-/// ここでは CANSAVE を 1 戻す（退避した窓が空きに戻った分）。
+/// CANSAVE を 1 増やし CANRESTORE を 1 減らす（otherwin は
+/// モデルしないので常に 0 扱い）。
 /// Ref: SPEC-SPARC-V9 §SAVED.
 pub fn saved<B: Backend>(b: &mut B) -> Flow<B> {
     step_counter(b, cansave_ref(), 1);
+    step_counter(b, canrestore_ref(), -1);
     Ok(())
 }
 
 /// RESTORED。窓の埋め戻しを終えたことをカーネルが知らせる命令で、
-/// ここでは CANRESTORE を 1 戻す。
+/// CANRESTORE を 1 増やし CANSAVE を 1 減らす。
 /// Ref: SPEC-SPARC-V9 §RESTORED.
 pub fn restored<B: Backend>(b: &mut B) -> Flow<B> {
     step_counter(b, canrestore_ref(), 1);
+    step_counter(b, cansave_ref(), -1);
     Ok(())
 }
 
@@ -1642,8 +1716,10 @@ fn cas_common<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr, wide: bool) ->
     let base = read(b, rs1);
     let a = wmask(b, base);
     let addr = amask(b, a);
-    let cmp = read(b, rd);
-    let newv = read(b, rs2);
+    // CAS の比較値は rs2、格納する新値は rd。rd にはメモリの
+    // 旧値を返す。Ref: SPEC-SPARC-V9 §CASA/CASXA.
+    let cmp = read(b, rs2);
+    let newv = read(b, rd);
     if wide {
         b.probe(addr, 8, ATOMIC_RW)?;
         let old: B::V<W64> = b.load::<W64>(addr, ATOMIC_RW)?;
@@ -1668,11 +1744,20 @@ fn cas_common<B: Backend>(b: &mut B, rd: Gpr, rs1: Gpr, rs2: Gpr, wide: bool) ->
 /// 付き CTI だが、rd への戻り書き込みはしない。非特権命令。
 /// Ref: SPEC-SPARC-V9 §RETURN.
 pub fn ret<B: Backend>(b: &mut B, rs1: Gpr, s: Src2) -> Flow<B> {
+    // V9 の RETURN は RESTORE を内蔵する（遅延スロットは戻った窓で
+    // 実行される）。CANRESTORE が 0 なら window_underflow（fill_*_normal）
+    // トラップを上げる。
+    // Ref: SPEC-SPARC-V9 §RETURN; QEMU translate.c do_return.
+    window_guard(b, canrestore_ref(), 0xc0)?;
     let base = read(b, rs1);
     let off = src2(b, s);
     let sum = b.add::<W64>(base, off);
     let m = wmask(b, sum);
     let target = amask(b, m);
+    let nw = nwindows(b);
+    step_cwp(b, nw - 1);
+    step_counter(b, canrestore_ref(), -1);
+    step_counter(b, cansave_ref(), 1);
     b.set(npc_ref(), target);
     Ok(())
 }
@@ -1746,62 +1831,86 @@ fn fp_check<B: Backend>(b: &mut B) -> Flow<B> {
     Ok(())
 }
 
-/// 倍精度ペアの基底スロット。V9 では奇数フィールドが上位倍精度
-/// バンク %d32-%d62 を指すが、本モデルはバンクを持たないので
-/// illegal instruction とする。V8 では奇数フィールドは予約で
-/// あり、QEMU と同様に偶数へ畳む。フィールド 31 は f[32] が
-/// 存在しないためどちらの場合でもここで遮断される。
-/// Ref: SPEC-SPARC-V9 §5.1.4.1.
-fn fpair_base<B: Backend>(b: &mut B, r: u8) -> Result<u8, B::Exit> {
-    if r & 1 == 0 {
-        Ok(r)
-    } else if b.param::<super::Word64Param>() {
-        Err(unimp(b, 0))
+/// d 形命令の rd/rs 桁を f 配列のスロット番号に写す。
+/// f 配列は 32 個の倍精度スロットを持ち、rd 桁の bit0 は番号の
+/// bit4 を担う（%f32-%f62 偶数は bit0=1 の rd=1,3,...,31）。
+/// 番号は (x>>1)|((x&1)<<4)。V8 は 16 スロットのみ有効。
+/// Ref: SRC-QEMU extract_dfpreg, SPEC-SPARC-V9 §F Registers.
+fn dreg_num<B: Backend>(b: &mut B, x: u8) -> u8 {
+    if b.param::<super::Word64Param>() {
+        (x >> 1) | ((x & 1) << 4)
     } else {
-        Ok(r & !1)
+        (x >> 1) & 0xf
     }
 }
 
-/// スロット r,r+1 を連結した生の 64 ビット。倍精度（d レジスタ）は
-/// 偶数 r のスロット r が上位ワード、r+1 が下位ワードを持つ。
-/// %f(2n) が %dn の上位 32 ビットになる配置である。
-/// Ref: SPEC-SPARC-V8 (Version 8) §Floating-Point Data Types.
-fn fgetw64<B: Backend>(b: &mut B, r: u8) -> Result<B::V<W64>, B::Exit> {
-    let r = fpair_base(b, r)?;
-    let hi: B::V<W64> = b.get(Fpr(r).state());
-    let lo: B::V<W64> = b.get(Fpr(r + 1).state());
-    let sh = b.konst::<W64>(32);
-    let h = b.shl::<W64>(hi, sh);
-    let m = b.konst::<W64>(0xffff_ffff);
-    let l = b.and::<W64>(lo, m);
-    Ok(b.or::<W64>(h, l))
+/// 単精度 %fN の読み出し。スロット N>>1 の半分（N 偶数=上位
+/// 32 ビット、奇数=下位 32 ビット）をゼロ拡張して返す。
+/// Ref: SRC-QEMU gen_offset_fpr_F.
+fn fget_single<B: Backend>(b: &mut B, n: u8) -> Result<B::V<W64>, B::Exit> {
+    let v: B::V<W64> = b.get(Fpr(n >> 1).state());
+    if n & 1 == 0 {
+        let sh = b.konst::<W64>(32);
+        Ok(b.shr_l::<W64>(v, sh))
+    } else {
+        let m = b.konst::<W64>(0xffff_ffff);
+        Ok(b.and::<W64>(v, m))
+    }
 }
 
-fn fputw64<B: Backend>(b: &mut B, r: u8, v: B::V<W64>) -> Result<(), B::Exit> {
-    let r = fpair_base(b, r)?;
-    let sh = b.konst::<W64>(32);
-    let hi = b.shr_l::<W64>(v, sh);
-    let m = b.konst::<W64>(0xffff_ffff);
-    let lo = b.and::<W64>(v, m);
-    fput_slot(b, r, hi);
-    fput_slot(b, r + 1, lo);
-    Ok(())
-}
-
-/// 単精度スロットへの書き込み。FPRS.DL（bit0）を立てる
-/// （QEMU gen_update_fprs_dirty。%f0-%f31 の書き込みは DL）。
-fn fput_slot<B: Backend>(b: &mut B, r: u8, v: B::V<W64>) {
-    b.set(Fpr(r).state(), v);
+/// FPRS.DL（bit0）を立てる（QEMU gen_update_fprs_dirty）。
+fn fprs_dl<B: Backend>(b: &mut B) {
     let f = b.get(fprs_ref());
     let one = b.konst::<W64>(1);
     let f = b.or::<W64>(f, one);
     b.set(fprs_ref(), f);
 }
 
-/// f レジスタの読み出し。F32 はスロット r の下位 32 ビット。
+/// d 形命令の 64 ビット読み出し。`x` は rd/rs 桁の生の値。
+/// Ref: SPEC-SPARC-V9 §Floating-Point Data Types.
+fn fgetw64<B: Backend>(b: &mut B, x: u8) -> Result<B::V<W64>, B::Exit> {
+    let d = dreg_num::<B>(b, x);
+    Ok(b.get(Fpr(d).state()))
+}
+
+fn fputw64<B: Backend>(b: &mut B, x: u8, v: B::V<W64>) -> Result<(), B::Exit> {
+    let d = dreg_num::<B>(b, x);
+    b.set(Fpr(d).state(), v);
+    fprs_dl(b);
+    Ok(())
+}
+
+/// 単精度 %fN の書き込み。スロット N>>1 の半分だけを差し替える
+/// （N 偶数=上位、奇数=下位）。FPRS.DL（bit0）を立てる
+/// （QEMU gen_update_fprs_dirty）。
+/// Ref: SRC-QEMU gen_offset_fpr_F.
+fn fput_slot<B: Backend>(b: &mut B, n: u8, v: B::V<W64>) {
+    let old = b.get(Fpr(n >> 1).state());
+    let m32 = b.konst::<W64>(0xffff_ffff);
+    let v32 = b.and::<W64>(v, m32);
+    let (keep, hi) = if n & 1 == 0 {
+        (0xffff_ffffu64, true)
+    } else {
+        (0xffff_ffff_0000_0000u64, false)
+    };
+    let kk = b.konst::<W64>(keep);
+    let kept = b.and::<W64>(old, kk);
+    let vv = if hi {
+        let sh = b.konst::<W64>(32);
+        b.shl::<W64>(v32, sh)
+    } else {
+        v32
+    };
+    let w = b.or::<W64>(kept, vv);
+    b.set(Fpr(n >> 1).state(), w);
+    fprs_dl(b);
+}
+
+/// f レジスタの読み出し。F32 は単精度 %fN の半分、F64 は
+/// d 形の番号変換を通したスロット全体。
 fn fget<B: Backend, F: Width>(b: &mut B, r: u8) -> Result<B::V<F>, B::Exit> {
     if F::BITS == 32 {
-        let v: B::V<W64> = b.get(Fpr(r).state());
+        let v = fget_single::<B>(b, r)?;
         Ok(b.trunc::<W64, F>(v))
     } else {
         let v = fgetw64(b, r)?;
@@ -1889,11 +1998,11 @@ fn fp3<B: Backend, F: Width>(b: &mut B, rd: u8, rs1: u8, rs2: u8, op: Fp3) -> Fl
     Ok(())
 }
 
-/// FMOVS。スロットの下位 32 ビットをそのままコピーする。
+/// FMOVS。単精度 %fN の 32 ビットをそのままコピーする。
 /// Ref: SPEC-SPARC-V8 (Version 8) §FMOVS.
 fn fmovs<B: Backend>(b: &mut B, rd: u8, rs2: u8) -> Flow<B> {
     fp_check(b)?;
-    let v: B::V<W64> = b.get(Fpr(rs2).state());
+    let v = fget_single::<B>(b, rs2)?;
     fput_slot(b, rd, v);
     Ok(())
 }
@@ -1907,22 +2016,34 @@ fn fmovd<B: Backend>(b: &mut B, rd: u8, rs2: u8) -> Flow<B> {
     Ok(())
 }
 
-/// FNEGS/FABSS と FNEGD/FABSD。符号ビットはスロットのビット 31
-/// （倍精度では上位ワード側スロットのビット 31）で、どちらの精度
-/// でも同じ位置にある。`neg` なら反転、さもなくば消去。
+/// FNEGS/FABSS（`double`=false）と FNEGD/FABSD（`double`=true）。
+/// 符号ビットは単精度なら値のビット 31、倍精度ならスロットの
+/// ビット 63。`neg` なら反転、さもなくば消去。
 /// Ref: SPEC-SPARC-V8 (Version 8) §FNEGS, §FABSS; SPEC-SPARC-V9 §FNEG, §FABS.
-fn fsgn<B: Backend>(b: &mut B, rd: u8, rs2: u8, neg: bool) -> Flow<B> {
+fn fsgn<B: Backend>(b: &mut B, rd: u8, rs2: u8, neg: bool, double: bool) -> Flow<B> {
     fp_check(b)?;
-    let v: B::V<W64> = b.get(Fpr(rs2).state());
-    let s = b.konst::<W64>(0x8000_0000);
-    let w = if neg {
-        b.xor::<W64>(v, s)
+    if double {
+        let v = fgetw64(b, rs2)?;
+        let s = b.konst::<W64>(0x8000_0000_0000_0000);
+        let w = if neg {
+            b.xor::<W64>(v, s)
+        } else {
+            let n = b.not::<W64>(s);
+            b.and::<W64>(v, n)
+        };
+        fputw64(b, rd, w)
     } else {
-        let n = b.not::<W64>(s);
-        b.and::<W64>(v, n)
-    };
-    fput_slot(b, rd, w);
-    Ok(())
+        let v = fget_single::<B>(b, rs2)?;
+        let s = b.konst::<W64>(0x8000_0000);
+        let w = if neg {
+            b.xor::<W64>(v, s)
+        } else {
+            let n = b.not::<W64>(s);
+            b.and::<W64>(v, n)
+        };
+        fput_slot(b, rd, w);
+        Ok(())
+    }
 }
 
 /// FSQRTS/FSQRTD。
@@ -1946,7 +2067,7 @@ fn i2f_common<B: Backend, F: Width>(b: &mut B, rd: u8, rs2: u8, wide: bool) -> F
         let w = fgetw64(b, rs2)?;
         b.fcvt_from_s64::<F>(w, 0)
     } else {
-        let x: B::V<W64> = b.get(Fpr(rs2).state());
+        let x = fget_single::<B>(b, rs2)?;
         let x32 = b.trunc::<W64, W32>(x);
         b.fcvt_from_s32::<F>(x32, 0)
     };
@@ -2058,7 +2179,7 @@ fn lddf<B: Backend>(b: &mut B, fd: u8, rs1: Gpr, s: Src2) -> Flow<B> {
 fn stf<B: Backend>(b: &mut B, fs: u8, rs1: Gpr, s: Src2) -> Flow<B> {
     fp_check(b)?;
     let addr = eff_addr(b, rs1, s);
-    let v: B::V<W64> = b.get(Fpr(fs).state());
+    let v = fget_single::<B>(b, fs)?;
     let w = b.trunc::<W64, W32>(v);
     b.store::<W32>(addr, w, DATA_WRITE)?;
     Ok(())
@@ -2276,6 +2397,9 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Flow<B> {
         | Insn::Ldd
         | Insn::Ldstub
         | Insn::Swap
+        | Insn::Ldsw
+        | Insn::Ldx
+        | Insn::Stx
         | Insn::St
         | Insn::Stb
         | Insn::Sth
@@ -2336,6 +2460,9 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Flow<B> {
         | Insn::LddI
         | Insn::LdstubI
         | Insn::SwapI
+        | Insn::LdswI
+        | Insn::LdxI
+        | Insn::StxI
         | Insn::StI
         | Insn::StbI
         | Insn::SthI
@@ -2406,6 +2533,10 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Flow<B> {
         | Insn::Ldsba
         | Insn::Ldsha
         | Insn::Ldstuba
+        | Insn::Ldswa
+        | Insn::Ldxa
+        | Insn::Stxa
+        | Insn::Prefetch
         | Insn::Sta
         | Insn::Stba
         | Insn::Stha
@@ -2417,6 +2548,14 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Flow<B> {
             let asi = const_w64(b, o[2]);
             asi_access(b, insn, rd, rs1, s, asi)
         }
+        // FPU の ASI 指定形。rd は f レジスタ番号。
+        Insn::Ldfa | Insn::Ldqfa | Insn::Lddfa | Insn::Stfa | Insn::Stqfa | Insn::Stdfa => {
+            let fd = o[0] as u8;
+            let rs1 = Gpr(o[1] as u8);
+            let s = Src2::Reg(Gpr(o[3] as u8));
+            let asi = const_w64(b, o[2]);
+            fasi_access(b, insn, fd, rs1, s, asi)
+        }
         // V9 の %asi 指定形（i=1。ASI は %asi レジスタから読む）。
         Insn::LdaI
         | Insn::LdubaI
@@ -2425,6 +2564,10 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Flow<B> {
         | Insn::LdsbaI
         | Insn::LdshaI
         | Insn::LdstubaI
+        | Insn::LdswaI
+        | Insn::LdxaI
+        | Insn::StxaI
+        | Insn::PrefetchI
         | Insn::StaI
         | Insn::StbaI
         | Insn::SthaI
@@ -2435,6 +2578,14 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Flow<B> {
             let s = Src2::Imm(sext13(o[2]));
             let asi = b.get(asi_ref());
             asi_access(b, insn, rd, rs1, s, asi)
+        }
+        // FPU の %asi 指定形。rd は f レジスタ番号。
+        Insn::LdfaI | Insn::LdqfaI | Insn::LddfaI | Insn::StfaI | Insn::StqfaI | Insn::StdfaI => {
+            let fd = o[0] as u8;
+            let rs1 = Gpr(o[1] as u8);
+            let s = Src2::Imm(sext13(o[2]));
+            let asi = b.get(asi_ref());
+            fasi_access(b, insn, fd, rs1, s, asi)
         }
         // Ticc/Tcc。オペランドは (cond, rs1, src2)。xcc 桁で
         // V9 の XCC を選ぶ形を分ける。
@@ -2530,7 +2681,13 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Flow<B> {
         Insn::CasaI => {
             let asi = b.get(asi_ref());
             asi_priv_check(b, asi)?;
-            cas_common(b, Gpr(o[0] as u8), Gpr(o[1] as u8), Gpr(o[2] as u8), false)
+            cas_common(
+                b,
+                Gpr(o[0] as u8),
+                Gpr(o[1] as u8),
+                Gpr((o[2] & 0x1f) as u8),
+                false,
+            )
         }
         Insn::Casxa => {
             let asi = const_w64(b, o[2]);
@@ -2540,13 +2697,23 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Flow<B> {
         Insn::CasxaI => {
             let asi = b.get(asi_ref());
             asi_priv_check(b, asi)?;
-            cas_common(b, Gpr(o[0] as u8), Gpr(o[1] as u8), Gpr(o[2] as u8), true)
+            cas_common(
+                b,
+                Gpr(o[0] as u8),
+                Gpr(o[1] as u8),
+                Gpr((o[2] & 0x1f) as u8),
+                true,
+            )
         }
         // V9 の RETURN。オペランドは (rs1, src2)。
         Insn::Return => ret(b, Gpr(o[0] as u8), Src2::Reg(Gpr(o[1] as u8))),
         Insn::ReturnI => ret(b, Gpr(o[0] as u8), Src2::Imm(sext13(o[1]))),
         // 観測可能な効果のない命令群。
-        Insn::Stbar | Insn::Membar | Insn::Flush | Insn::FlushI | Insn::Flushw => nop(b),
+        Insn::Stbar | Insn::Membar | Insn::Flush | Insn::FlushI => nop(b),
+        // FLUSHW（命令）は V9 では特権。ユーザーモードで使う
+        // flushw は `ta 3`（ST_FLUSH_WINDOWS トラップ）で、
+        // パーソナリティが退避を再現する。
+        Insn::Flushw => Err(privileged(b)),
         // SAVED/RESTORED は V9 では特権命令。ユーザーモードでは
         // privileged_opcode（0x11）。パーソナリティは `saved`/
         // `restored` を直接呼んで窓カウンタを戻す。
@@ -2572,8 +2739,10 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Flow<B> {
         // FPop1 単項形。オペランドは (fd, fs2)。
         Insn::Fmovs => fmovs(b, o[0] as u8, o[1] as u8),
         Insn::Fmovd => fmovd(b, o[0] as u8, o[1] as u8),
-        Insn::Fnegs | Insn::Fnegd => fsgn(b, o[0] as u8, o[1] as u8, true),
-        Insn::Fabss | Insn::Fabsd => fsgn(b, o[0] as u8, o[1] as u8, false),
+        Insn::Fnegs => fsgn(b, o[0] as u8, o[1] as u8, true, false),
+        Insn::Fnegd => fsgn(b, o[0] as u8, o[1] as u8, true, true),
+        Insn::Fabss => fsgn(b, o[0] as u8, o[1] as u8, false, false),
+        Insn::Fabsd => fsgn(b, o[0] as u8, o[1] as u8, false, true),
         Insn::Fsqrts => fsqrt::<B, F32>(b, o[0] as u8, o[1] as u8),
         Insn::Fsqrtd => fsqrt::<B, F64>(b, o[0] as u8, o[1] as u8),
         Insn::Fitos => i2f_common::<B, F32>(b, o[0] as u8, o[1] as u8, false),
@@ -2896,6 +3065,9 @@ fn dispatch3<B: Backend>(b: &mut B, insn: Insn, rd: Gpr, rs1: Gpr, s: Src2, pc: 
             let rd2 = Gpr(rd.0.wrapping_add(1) & 31);
             ldd(b, rd, rd2, rs1, s)
         }
+        Insn::Ldsw | Insn::LdswI => ldsw(b, rd, rs1, s),
+        Insn::Ldx | Insn::LdxI => ldx(b, rd, rs1, s),
+        Insn::Stx | Insn::StxI => stx(b, rd, rs1, s),
         Insn::Ldstub | Insn::LdstubI => ldstub(b, rd, rs1, s),
         Insn::Swap | Insn::SwapI => swap(b, rd, rs1, s),
         Insn::St | Insn::StI => st(b, rd, rs1, s),
@@ -2931,13 +3103,321 @@ fn asi_access<B: Backend>(
         Insn::Ldsba | Insn::LdsbaI => ldsb(b, rd, rs1, s),
         Insn::Ldsha | Insn::LdshaI => ldsh(b, rd, rs1, s),
         Insn::Ldstuba | Insn::LdstubaI => ldstub(b, rd, rs1, s),
+        Insn::Ldswa | Insn::LdswaI => ldsw(b, rd, rs1, s),
+        Insn::Ldxa | Insn::LdxaI => ldx(b, rd, rs1, s),
+        Insn::Stxa | Insn::StxaI => stx(b, rd, rs1, s),
         Insn::Sta | Insn::StaI => st(b, rd, rs1, s),
         Insn::Stba | Insn::StbaI => stb(b, rd, rs1, s),
         Insn::Stha | Insn::SthaI => sth(b, rd, rs1, s),
         Insn::Stda | Insn::StdaI => std(b, rd, rd2, rs1, s),
         Insn::Swapa | Insn::SwapaI => swap(b, rd, rs1, s),
+        Insn::Prefetch | Insn::PrefetchI => nop(b),
         _ => unreachable!(),
     }
+}
+
+/// 64 ビット値のバイト反転。
+fn bswap64<B: Backend>(b: &mut B, v: B::V<W64>) -> B::V<W64> {
+    let mut out = b.konst::<W64>(0);
+    let m = b.konst::<W64>(0xff);
+    for i in 0..8u64 {
+        let sh = b.konst::<W64>(i * 8);
+        let byte = b.shr_l::<W64>(v, sh);
+        let byte = b.and::<W64>(byte, m);
+        let shl = b.konst::<W64>((7 - i) * 8);
+        let w = b.shl::<W64>(byte, shl);
+        out = b.or::<W64>(out, w);
+    }
+    out
+}
+
+/// BLK 系 ASI かどうかの判定。QEMU resolve_asi の一覧と同じ
+/// 集合 {0x16,0x17,0x1e,0x1f,0x70,0x71,0x78,0x79,0xe0,0xe2,
+/// 0xf0,0xf1,0xf8,0xf9} に絞る。
+/// Ref: SPEC-SPARC-V9 §Block Load and Store, SRC-QEMU.
+fn is_blk_asi<B: Backend>(b: &mut B, asi: B::V<W64>) -> B::B {
+    let one = b.konst::<W64>(1);
+    let z = b.konst::<W64>(0);
+    // (asi & 0xf6) == {0x70,0xf0,0x16} で BLK/リトル形/4V 形を
+    // 拾う。bit0・bit3 を落とした共通部分。
+    let m = b.konst::<W64>(0xf6);
+    let m = b.and::<W64>(asi, m);
+    let mut acc = z;
+    for k in [0x70u64, 0xf0, 0x16] {
+        let k = b.konst::<W64>(k);
+        let c = b.cmp::<W64>(Cmp::Eq, m, k);
+        let v = b.select::<W64>(c, one, z);
+        acc = b.or::<W64>(acc, v);
+    }
+    // BLK_COMMIT は {0xe0,0xe2}。bit1 だけを落とす。
+    let m2 = b.konst::<W64>(0xfd);
+    let m2 = b.and::<W64>(asi, m2);
+    let ke0 = b.konst::<W64>(0xe0);
+    let c = b.cmp::<W64>(Cmp::Eq, m2, ke0);
+    let v = b.select::<W64>(c, one, z);
+    let acc = b.or::<W64>(acc, v);
+    b.cmp::<W64>(Cmp::Ne, acc, z)
+}
+
+/// LDDFA/STDFA の BLK 系 ASI 転送（64 バイト）。fd 桁は
+/// extract_dfpreg（QEMU）で d 番号 R = (fd&0x1e)|((fd&1)<<5)
+/// に写す。転送は連続する 8 個の倍精度スロット f[R/2 .. R/2+7]
+/// なので、R は 8 の倍数かつ R ≤ 48（%d48 まで。%d56 から始めると
+/// 8 個目が %d70 となり範囲を超える）でなければならない。
+/// リトル ASI（asi の bit3）は各ダブルワードをバイト反転する。
+/// Ref: SPEC-SPARC-V9 §Block Load and Store, SRC-QEMU.
+fn fasi_blk<B: Backend>(
+    b: &mut B,
+    insn: Insn,
+    fd: u8,
+    rs1: Gpr,
+    s: Src2,
+    asi: B::V<W64>,
+) -> Flow<B> {
+    let r = if b.param::<super::Word64Param>() {
+        (fd & 0x1e) | ((fd & 1) << 5)
+    } else {
+        fd & 0x1e
+    };
+    if r & 7 != 0 || r > 48 {
+        return Err(unimp(b, 0));
+    }
+    let d0 = r >> 1;
+    let addr = eff_addr(b, rs1, s);
+    // ブロック転送は 64 バイト整列が要る（QEMU の
+    // gen_check_align）。メモリ層の自然整列検査では 8 バイトまで
+    // しか見ないので、ここで 64 バイト境界を確かめる。
+    let m = b.konst::<W64>(0x3f);
+    let mis = b.and::<W64>(addr, m);
+    let z0 = b.konst::<W64>(0);
+    let bad = b.cmp::<W64>(Cmp::Ne, mis, z0);
+    b.if_then(bad, |bb| {
+        Err(bb.raise(polyisa_sem::GuestException {
+            kind: polyisa_sem::ExceptionKind::Align,
+            code: 0,
+            addr: None,
+            in_delay_slot: false,
+        }))
+    })?;
+    let eight = b.konst::<W64>(8);
+    let lit = b.and::<W64>(asi, eight);
+    let z = b.konst::<W64>(0);
+    let little = b.cmp::<W64>(Cmp::Ne, lit, z);
+    match insn {
+        Insn::Lddfa | Insn::LddfaI => {
+            for i in 0..8u8 {
+                let off = b.konst::<W64>(u64::from(i) * 8);
+                let a = b.add::<W64>(addr, off);
+                let v: B::V<W64> = b.load::<W64>(a, DATA_READ)?;
+                let sw = bswap64(b, v);
+                let v = b.select::<W64>(little, sw, v);
+                b.set(Fpr(d0 + i).state(), v);
+            }
+            fprs_dl(b);
+            Ok(())
+        }
+        Insn::Stdfa | Insn::StdfaI => {
+            for i in 0..8u8 {
+                let v: B::V<W64> = b.get(Fpr(d0 + i).state());
+                let sw = bswap64(b, v);
+                let v = b.select::<W64>(little, sw, v);
+                let off = b.konst::<W64>(u64::from(i) * 8);
+                let a = b.add::<W64>(addr, off);
+                b.store::<W64>(a, v, DATA_WRITE)?;
+            }
+            Ok(())
+        }
+        _ => unreachable!(),
+    }
+}
+
+/// FL8 系 SHORT ASI 転送。LDDFA/STDFA 限定で f[fd] の最下位
+/// 1 バイトだけを転送する。1 バイトなのでリトル形でも同じ。
+/// Ref: SPEC-SPARC-V9 §Partial and Short Load/Store, SRC-QEMU.
+fn fasi_short8<B: Backend>(b: &mut B, insn: Insn, fd: u8, rs1: Gpr, s: Src2) -> Flow<B> {
+    let addr = eff_addr(b, rs1, s);
+    match insn {
+        Insn::Lddfa | Insn::LddfaI => {
+            let v: B::V<W8> = b.load::<W8>(addr, DATA_READ)?;
+            let v64 = b.zext::<W8, W64>(v);
+            fputw64(b, fd, v64)
+        }
+        Insn::Stdfa | Insn::StdfaI => {
+            let v64 = fgetw64(b, fd)?;
+            let v = b.trunc::<W64, W8>(v64);
+            b.store::<W8>(addr, v, DATA_WRITE)
+        }
+        _ => unreachable!(),
+    }
+}
+
+/// FL16 系 SHORT ASI 転送。LDDFA/STDFA 限定で f[fd] の最下位
+/// 2 バイトだけを転送する。リトル ASI ではハーフワードを
+/// バイト反転する。
+/// Ref: SPEC-SPARC-V9 §Partial and Short Load/Store, SRC-QEMU.
+fn fasi_short16<B: Backend>(
+    b: &mut B,
+    insn: Insn,
+    fd: u8,
+    rs1: Gpr,
+    s: Src2,
+    asi: B::V<W64>,
+) -> Flow<B> {
+    let addr = eff_addr(b, rs1, s);
+    let eight = b.konst::<W64>(8);
+    let lit = b.and::<W64>(asi, eight);
+    let z = b.konst::<W64>(0);
+    let little = b.cmp::<W64>(Cmp::Ne, lit, z);
+    let bswap = |b: &mut B, v: B::V<W16>| {
+        let k = b.konst::<W16>(8);
+        let lo = b.shl::<W16>(v, k);
+        let hi = b.shr_l::<W16>(v, k);
+        b.or::<W16>(hi, lo)
+    };
+    match insn {
+        Insn::Lddfa | Insn::LddfaI => {
+            let v: B::V<W16> = b.load::<W16>(addr, DATA_READ)?;
+            let sw = bswap(b, v);
+            let v = b.select::<W16>(little, sw, v);
+            let v64 = b.zext::<W16, W64>(v);
+            fputw64(b, fd, v64)
+        }
+        Insn::Stdfa | Insn::StdfaI => {
+            let v64 = fgetw64(b, fd)?;
+            let v = b.trunc::<W64, W16>(v64);
+            let sw = bswap(b, v);
+            let v = b.select::<W16>(little, sw, v);
+            b.store::<W16>(addr, v, DATA_WRITE)
+        }
+        _ => unreachable!(),
+    }
+}
+
+/// FPU の ASI 指定アクセス。BLK 系 ASI では 64 バイト転送、
+/// FL8/FL16 系では 1/2 バイト転送、それ以外は
+/// ldf/lddf/stf/stdf/ldqf/stqf と同じ。
+/// Ref: SPEC-SPARC-V9 §Alternate Space Floating-Point
+///      Load/Store Instructions, SRC-QEMU.
+fn fasi_access<B: Backend>(
+    b: &mut B,
+    insn: Insn,
+    fd: u8,
+    rs1: Gpr,
+    s: Src2,
+    asi: B::V<W64>,
+) -> Flow<B> {
+    asi_priv_check(b, asi)?;
+    fp_check(b)?;
+    // SHORT ASI。bit0=S、bit3=L を落として
+    // (asi & 0xf4) == 0xd0 で FL8（0xd0-0xd1,0xd8-0xd9）と
+    // FL16（0xd2-0xd3,0xda-0xdb）の両方を拾う。
+    let m = b.konst::<W64>(0xf4);
+    let m = b.and::<W64>(asi, m);
+    let k = b.konst::<W64>(0xd0);
+    let is_short = b.cmp::<W64>(Cmp::Eq, m, k);
+    // FL16 だけ bit1 が立つ。
+    let m2 = b.konst::<W64>(2);
+    let m2 = b.and::<W64>(asi, m2);
+    let z = b.konst::<W64>(0);
+    let is16 = b.cmp::<W64>(Cmp::Ne, m2, z);
+    if !matches!(
+        insn,
+        Insn::Lddfa | Insn::LddfaI | Insn::Stdfa | Insn::StdfaI
+    ) {
+        // BLK/SHORT ASI は lddfa/stdfa だけが使う。それ以外の
+        // FP-ASI 命令で指定すると illegal instruction。
+        // Ref: SRC-QEMU gen_ldf_asi (GET_ASI_BLOCK/SHORT → TT_ILL_INSN).
+        let blk = is_blk_asi(b, asi);
+        return b.if_then_else(
+            blk,
+            |bb| Err(unimp(bb, 0)),
+            |bb| {
+                bb.if_then_else(
+                    is_short,
+                    |bbb| Err(unimp(bbb, 0)),
+                    |bbb| match insn {
+                        Insn::Ldfa | Insn::LdfaI => ldf(bbb, fd, rs1, s),
+                        Insn::Stfa | Insn::StfaI => stf(bbb, fd, rs1, s),
+                        Insn::Ldqfa | Insn::LdqfaI => ldqf(bbb, fd, rs1, s),
+                        Insn::Stqfa | Insn::StqfaI => stqf(bbb, fd, rs1, s),
+                        _ => unreachable!(),
+                    },
+                )
+            },
+        );
+    }
+    let is_blk = is_blk_asi(b, asi);
+    b.if_then_else(
+        is_blk,
+        |bb| fasi_blk(bb, insn, fd, rs1, s, asi),
+        |bb| {
+            bb.if_then_else(
+                is_short,
+                |bbb| {
+                    bbb.if_then_else(
+                        is16,
+                        |c| fasi_short16(c, insn, fd, rs1, s, asi),
+                        |c| fasi_short8(c, insn, fd, rs1, s),
+                    )
+                },
+                |bbb| {
+                    if matches!(insn, Insn::Lddfa | Insn::LddfaI) {
+                        lddf(bbb, fd, rs1, s)
+                    } else {
+                        stdf(bbb, fd, rs1, s)
+                    }
+                },
+            )
+        },
+    )
+}
+
+/// LDQFA。16 バイト。q 番号（extract_qfpreg）は 4 の倍数で
+/// なければならない。連続する 2 スロットへ書く。
+/// Ref: SPEC-SPARC-V9 §Alternate Space Floating-Point
+///      Load/Store Instructions.
+fn ldqf<B: Backend>(b: &mut B, fd: u8, rs1: Gpr, s: Src2) -> Flow<B> {
+    // fd の bit1（R の bit1）が立つと 4 の倍数にならない。
+    if fd & 2 != 0 {
+        return Err(unimp(b, 0));
+    }
+    let rq = if b.param::<super::Word64Param>() {
+        (fd & 0x1c) | ((fd & 1) << 5)
+    } else {
+        fd & 0x1c
+    };
+    let q0 = rq >> 1;
+    let addr = eff_addr(b, rs1, s);
+    let hi: B::V<W64> = b.load::<W64>(addr, DATA_READ)?;
+    b.set(Fpr(q0).state(), hi);
+    let eight = b.konst::<W64>(8);
+    let a2 = b.add::<W64>(addr, eight);
+    let lo: B::V<W64> = b.load::<W64>(a2, DATA_READ)?;
+    b.set(Fpr(q0 + 1).state(), lo);
+    fprs_dl(b);
+    Ok(())
+}
+
+/// STQFA。16 バイト。q 番号の制約は LDQFA と同じ。
+/// Ref: SPEC-SPARC-V9 §Alternate Space Floating-Point
+///      Load/Store Instructions.
+fn stqf<B: Backend>(b: &mut B, fd: u8, rs1: Gpr, s: Src2) -> Flow<B> {
+    if fd & 2 != 0 {
+        return Err(unimp(b, 0));
+    }
+    let rq = if b.param::<super::Word64Param>() {
+        (fd & 0x1c) | ((fd & 1) << 5)
+    } else {
+        fd & 0x1c
+    };
+    let q0 = rq >> 1;
+    let addr = eff_addr(b, rs1, s);
+    let hi: B::V<W64> = b.get(Fpr(q0).state());
+    b.store::<W64>(addr, hi, DATA_WRITE)?;
+    let eight = b.konst::<W64>(8);
+    let a2 = b.add::<W64>(addr, eight);
+    let lo: B::V<W64> = b.get(Fpr(q0 + 1).state());
+    b.store::<W64>(a2, lo, DATA_WRITE)
 }
 
 /// RDASI/WRASI（V9、非特権）。%asi は 8 ビット。
@@ -3238,7 +3718,7 @@ fn fpcmp<B: Backend>(b: &mut B, rd: Gpr, rs1: u8, rs2: u8, w: u8, op: Cmp) -> Fl
 /// Ref: SPEC-SPARC-V9 §FMUL8x16.
 fn fmul8x16<B: Backend>(b: &mut B, rd: u8, rs1: u8, rs2: u8) -> Flow<B> {
     fp_check(b)?;
-    let a: B::V<W64> = b.get(Fpr(rs1).state());
+    let a = fget_single::<B>(b, rs1)?;
     let c = fgetw64(b, rs2)?;
     let mut acc = b.konst::<W64>(0);
     for i in 0..4u8 {
@@ -3265,8 +3745,8 @@ fn fmul8x16<B: Backend>(b: &mut B, rd: u8, rs1: u8, rs2: u8) -> Flow<B> {
 /// Ref: SPEC-SPARC-V9 §FMUL8x16AU, §FMUL8x16AL.
 fn fmul8x16a<B: Backend>(b: &mut B, rd: u8, rs1: u8, rs2: u8, upper: bool) -> Flow<B> {
     fp_check(b)?;
-    let a: B::V<W64> = b.get(Fpr(rs1).state());
-    let s2: B::V<W64> = b.get(Fpr(rs2).state());
+    let a = fget_single::<B>(b, rs1)?;
+    let s2 = fget_single::<B>(b, rs2)?;
     let t = if upper {
         // AU は 32 ビット値の上位半分を符号付きで使う
         // （QEMU は 32 ビットの sari）。s2[31:16] を符号拡張する。
@@ -3344,8 +3824,8 @@ fn fmul8sux16<B: Backend>(b: &mut B, rd: u8, rs1: u8, rs2: u8, upper: bool) -> F
 /// Ref: SPEC-SPARC-V9 §FMULD8SUx16, §FMULD8ULx16.
 fn fmuld8x16<B: Backend>(b: &mut B, rd: u8, rs1: u8, rs2: u8, upper: bool) -> Flow<B> {
     fp_check(b)?;
-    let a: B::V<W64> = b.get(Fpr(rs1).state());
-    let s2: B::V<W64> = b.get(Fpr(rs2).state());
+    let a = fget_single::<B>(b, rs1)?;
+    let s2 = fget_single::<B>(b, rs2)?;
     let mut acc = b.konst::<W64>(0);
     for i in 0..2u8 {
         let w0 = lane_s::<B>(b, a, 16, i);
@@ -3520,8 +4000,8 @@ fn faligndata<B: Backend>(b: &mut B, rd: u8, rs1: u8, rs2: u8) -> Flow<B> {
 /// Ref: SPEC-SPARC-V9 §FPMERGE.
 fn fpmerge<B: Backend>(b: &mut B, rd: u8, rs1: u8, rs2: u8) -> Flow<B> {
     fp_check(b)?;
-    let a: B::V<W64> = b.get(Fpr(rs1).state());
-    let c: B::V<W64> = b.get(Fpr(rs2).state());
+    let a = fget_single::<B>(b, rs1)?;
+    let c = fget_single::<B>(b, rs2)?;
     let mut acc = b.konst::<W64>(0);
     // 結果の上位から s1.b3, s2.b3, s1.b2, s2.b2, s1.b1, s2.b1,
     // s1.b0, s2.b0。バイト位置 8i はレーン i（下位から）に対応。
@@ -3548,7 +4028,7 @@ fn fpmerge<B: Backend>(b: &mut B, rd: u8, rs1: u8, rs2: u8) -> Flow<B> {
 /// Ref: SPEC-SPARC-V9 §FEXPAND.
 fn fexpand<B: Backend>(b: &mut B, rd: u8, rs2: u8) -> Flow<B> {
     fp_check(b)?;
-    let c: B::V<W64> = b.get(Fpr(rs2).state());
+    let c = fget_single::<B>(b, rs2)?;
     let mut acc = b.konst::<W64>(0);
     for i in 0..4u8 {
         let sh = b.konst::<W64>(8 * i as u64);
@@ -3621,12 +4101,7 @@ fn vparith<B: Backend>(
 ) -> Flow<B> {
     fp_check(b)?;
     let (a, c) = if single {
-        let m32 = b.konst::<W64>(0xffff_ffff);
-        let x: B::V<W64> = b.get(Fpr(rs1).state());
-        let x = b.and::<W64>(x, m32);
-        let y: B::V<W64> = b.get(Fpr(rs2).state());
-        let y = b.and::<W64>(y, m32);
-        (x, y)
+        (fget_single::<B>(b, rs1)?, fget_single::<B>(b, rs2)?)
     } else {
         (fgetw64(b, rs1)?, fgetw64(b, rs2)?)
     };
@@ -3689,8 +4164,8 @@ enum VLog {
 fn vlogic<B: Backend>(b: &mut B, rd: u8, rs1: u8, rs2: u8, op: VLog, single: bool) -> Flow<B> {
     fp_check(b)?;
     let (a, c) = if single {
-        let x: B::V<W64> = b.get(Fpr(rs1).state());
-        let y: B::V<W64> = b.get(Fpr(rs2).state());
+        let x = fget_single::<B>(b, rs1)?;
+        let y = fget_single::<B>(b, rs2)?;
         (x, y)
     } else {
         (fgetw64(b, rs1)?, fgetw64(b, rs2)?)
@@ -3743,7 +4218,7 @@ fn vlogic<B: Backend>(b: &mut B, rd: u8, rs1: u8, rs2: u8, op: VLog, single: boo
 fn vunary1<B: Backend>(b: &mut B, rd: u8, rs1: u8, neg: bool, single: bool) -> Flow<B> {
     fp_check(b)?;
     let a = if single {
-        b.get(Fpr(rs1).state())
+        fget_single::<B>(b, rs1)?
     } else {
         fgetw64(b, rs1)?
     };

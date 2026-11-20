@@ -22,6 +22,32 @@ fn g(env: &mut BareEnv, r: u8) -> u64 {
     env.backend.get(Gpr(r).state())
 }
 
+/// 単精度 %fN を書く。f 配列は倍精度スロット 32 個で、%fN は
+/// スロット N>>1 の半分（偶数=上位、奇数=下位）。
+fn fset_s(env: &mut BareEnv, n: u8, v: u64) {
+    let old = env.backend.get(Fpr(n >> 1).state());
+    let new = if n & 1 == 0 {
+        (old & 0xffff_ffff) | (v << 32)
+    } else {
+        (old & 0xffff_ffff_0000_0000) | (v & 0xffff_ffff)
+    };
+    env.backend.set(Fpr(n >> 1).state(), new);
+}
+
+fn fget_s(env: &mut BareEnv, n: u8) -> u64 {
+    let v = env.backend.get(Fpr(n >> 1).state());
+    if n & 1 == 0 { v >> 32 } else { v & 0xffff_ffff }
+}
+
+/// 倍精度 %dN（偶数）= スロット N>>1 全体。
+fn fset_d(env: &mut BareEnv, n: u8, v: u64) {
+    env.backend.set(Fpr(n >> 1).state(), v);
+}
+
+fn fget_d(env: &mut BareEnv, n: u8) -> u64 {
+    env.backend.get(Fpr(n >> 1).state())
+}
+
 #[test]
 fn add_sub_logic() {
     let mut env = env();
@@ -877,10 +903,11 @@ fn v9_mulx_and_divx_use_full_width() {
 }
 
 #[test]
-fn v9_alu32_sign_extends_result() {
+fn v9_alu_uses_full_operands() {
     let mut env = env();
     env.backend.set_param::<polyisa_guest_sparc::Word64Param>(1);
-    // V9 の 32 ビット演算は結果を符号拡張して rd に書く。
+    // V9 の add/sub/logic は全 64 ビットで演算し、結果をそのまま
+    // rd に書く（符号拡張はしない。ICC の N だけ bit31 を見る）。
     env.backend.set(Gpr(1).state(), 0xffff_ffff_ffff_ffff);
     env.step(|b| sem::add(b, Gpr(2), Gpr(1), Src2::Imm(1)))
         .unwrap();
@@ -888,7 +915,22 @@ fn v9_alu32_sign_extends_result() {
     env.backend.set(Gpr(1).state(), 0x7fff_ffff);
     env.step(|b| sem::add(b, Gpr(2), Gpr(1), Src2::Imm(1)))
         .unwrap();
-    assert_eq!(g(&mut env, 2), 0xffff_ffff_8000_0000);
+    assert_eq!(g(&mut env, 2), 0x8000_0000);
+}
+
+#[test]
+fn v9_sethi_zero_extends() {
+    let mut env = env();
+    env.backend.set_param::<polyisa_guest_sparc::Word64Param>(1);
+    // sethi %hi(0x80808080), %g1。V9 の sethi は上位 32 ビットを
+    // 0 で埋める（符号拡張しない）。符号拡張だと %hi/%lo の
+    // 2 命令で上位ビット付き定数を作れない。
+    env.step(|b| sem::sethi(b, Gpr(1), 0x202020)).unwrap();
+    assert_eq!(g(&mut env, 1), 0x8080_8000);
+    // or %g1, %lo(0x80808080), %g1 で 0x80808080 になる。
+    env.step(|b| sem::or(b, Gpr(1), Gpr(1), Src2::Imm(0x80)))
+        .unwrap();
+    assert_eq!(g(&mut env, 1), 0x8080_8080);
 }
 
 #[test]
@@ -969,9 +1011,9 @@ fn v9_casa_exchanges_on_match() {
     let mut env = env();
     env.backend.set_param::<polyisa_guest_sparc::Word64Param>(1);
     env.backend.set(Gpr(1).state(), 0x600);
-    env.backend.set(Gpr(2).state(), 0xaaaa_bbbb); // 比較値
-    env.backend.set(Gpr(3).state(), 0x1111_2222); // 新値
-    env.step(|b| sem::st(b, Gpr(2), Gpr(1), Src2::Reg(Gpr(0))))
+    env.backend.set(Gpr(2).state(), 0x1111_2222); // 新値（rd）
+    env.backend.set(Gpr(3).state(), 0xaaaa_bbbb); // 比較値（rs2）
+    env.step(|b| sem::st(b, Gpr(3), Gpr(1), Src2::Reg(Gpr(0))))
         .unwrap();
     // casa [%g1] 0x80, %g3, %g2（op3=111100, i=0, asi=0x80）。
     let word: u32 = (0b11 << 30) | (2 << 25) | (0b111100 << 19) | (1 << 14) | (0x80 << 5) | 3;
@@ -984,7 +1026,7 @@ fn v9_casa_exchanges_on_match() {
     assert_eq!(g(&mut env, 4), 0x1111_2222);
     assert_eq!(g(&mut env, 2), 0xaaaa_bbbb);
     // 不一致ならメモリは変わらず rd に現値が戻る。
-    env.backend.set(Gpr(2).state(), 0xdead_beef);
+    env.backend.set(Gpr(3).state(), 0xdead_beef);
     env.step(|b| sem::exec(b, insn, word, 0)).unwrap();
     env.step(|b| sem::ld(b, Gpr(4), Gpr(1), Src2::Reg(Gpr(0))))
         .unwrap();
@@ -997,15 +1039,16 @@ fn v9_casxa_exchanges_doubleword() {
     let mut env = env();
     env.backend.set_param::<polyisa_guest_sparc::Word64Param>(1);
     env.backend.set(Gpr(1).state(), 0x700);
-    env.backend.set(Gpr(2).state(), 0x0123_4567_89ab_cdef);
-    env.backend.set(Gpr(3).state(), 0xdead_beef_cafe_f00d);
-    // メモリを st 2 発で用意する（ldx/stx は未実装）。
+    env.backend.set(Gpr(2).state(), 0xdead_beef_cafe_f00d); // 新値（rd）
+    env.backend.set(Gpr(3).state(), 0x0123_4567_89ab_cdef); // 比較値（rs2）
+    // メモリを st 2 発で用意する。
     env.backend.set(Gpr(4).state(), 0x0123_4567);
     env.step(|b| sem::st(b, Gpr(4), Gpr(1), Src2::Reg(Gpr(0))))
         .unwrap();
     env.backend.set(Gpr(4).state(), 0x89ab_cdef);
     env.step(|b| sem::st(b, Gpr(4), Gpr(1), Src2::Imm(4)))
         .unwrap();
+    // メモリには比較値（rs2=%g3）が置かれている。
     // casxa [%g1] 0x80, %g3, %g2（op3=111110）。
     let word: u32 = (0b11 << 30) | (2 << 25) | (0b111110 << 19) | (1 << 14) | (0x80 << 5) | 3;
     let insn = dec_v9(word);
@@ -1023,6 +1066,8 @@ fn v9_return_sets_npc() {
     env.backend.set_param::<polyisa_guest_sparc::Word64Param>(1);
     env.backend.set(Gpr(1).state(), 0x1230);
     // return %g1 + 4（op3=111001, i=1）。rett と同じ op3 で非特権。
+    // return は restore と同じく戻る窓が必要なので canrestore=1。
+    env.backend.set(sem::canrestore_ref(), 1);
     let word: u32 = (0b10 << 30) | (0b111001 << 19) | (1 << 14) | (1 << 13) | 4;
     let insn = dec_v9(word);
     assert_eq!(insn, polyisa_guest_sparc::Insn::ReturnI);
@@ -1088,11 +1133,11 @@ fn v9_nop_insns_do_nothing() {
     let insn = dec_v9(word);
     assert_eq!(insn, polyisa_guest_sparc::Insn::Membar);
     env.step(|b| sem::exec(b, insn, word, 0)).unwrap();
-    // flushw も本モデルでは no-op。
-    let fw: u32 = (0b10 << 30) | (0b101011 << 19);
-    let insn2 = dec_v9(fw);
-    assert_eq!(insn2, polyisa_guest_sparc::Insn::Flushw);
-    env.step(|b| sem::exec(b, insn2, fw, 0)).unwrap();
+    // prefetch（op3=101101）も no-op。
+    let pf: u32 = (0b11 << 30) | (0b101101 << 19) | (1 << 14) | (0x8b << 5);
+    let insn2 = dec_v9(pf);
+    assert_eq!(insn2, polyisa_guest_sparc::Insn::Prefetch);
+    env.step(|b| sem::exec(b, insn2, pf, 0)).unwrap();
 }
 
 #[test]
@@ -1215,20 +1260,20 @@ fn fp_disabled_traps_when_ef_clear() {
 #[test]
 fn fadds_computes_single_sum() {
     let mut env = fp_env();
-    env.backend.set(Fpr(1).state(), 0x3fc0_0000); // 1.5f
-    env.backend.set(Fpr(2).state(), 0x4010_0000); // 2.25f
+    fset_s(&mut env, 1, 0x3fc0_0000); // 1.5f
+    fset_s(&mut env, 2, 0x4010_0000); // 2.25f
     let word: u32 = (0b10 << 30) | (3 << 25) | (0b110100 << 19) | (1 << 14) | (0x41 << 5) | 2;
     env.step(|b| sem::exec(b, dec_v8(word), word, 0)).unwrap();
     // 3.75f。
-    assert_eq!(env.backend.get(Fpr(3).state()), 0x4070_0000);
+    assert_eq!(fget_s(&mut env, 3), 0x4070_0000);
 }
 
 #[test]
 fn fcmpd_writes_fcc() {
     let mut env = fp_env();
-    // %d2 = 1.0（f2 が上位）、%d4 = 2.0。2.0 > 1.0 なので lt=1。
-    env.backend.set(Fpr(2).state(), 0x3ff0_0000);
-    env.backend.set(Fpr(4).state(), 0x4000_0000);
+    // %d2 = 1.0、%d4 = 2.0。2.0 > 1.0 なので lt=1。
+    fset_d(&mut env, 2, 0x3ff0_0000_0000_0000);
+    fset_d(&mut env, 4, 0x4000_0000_0000_0000);
     let word: u32 = (0b10 << 30) | (0b110101 << 19) | (2 << 14) | (0x52 << 5) | 4;
     env.step(|b| sem::exec(b, dec_v8(word), word, 0)).unwrap();
     assert_eq!(env.backend.get(sem::fsr_ref()) & (0b11 << 10), 1 << 10);
@@ -1238,29 +1283,29 @@ fn fcmpd_writes_fcc() {
 fn fp_conversions() {
     let mut env = fp_env();
     // fstoi %f2(-1.5f), %f3 → -1。
-    env.backend.set(Fpr(2).state(), 0xbfc0_0000);
+    fset_s(&mut env, 2, 0xbfc0_0000);
     let word: u32 = (0b10 << 30) | (3 << 25) | (0b110100 << 19) | (0xd1 << 5) | 2;
     env.step(|b| sem::exec(b, dec_v8(word), word, 0)).unwrap();
-    assert_eq!(env.backend.get(Fpr(3).state()), (-1i32) as u32 as u64);
+    assert_eq!(fget_s(&mut env, 3), (-1i32) as u32 as u64);
     // fitos %f4(42), %f5 → 42.0f。
-    env.backend.set(Fpr(4).state(), 42);
+    fset_s(&mut env, 4, 42);
     let word2: u32 = (0b10 << 30) | (5 << 25) | (0b110100 << 19) | (0xc4 << 5) | 4;
     env.step(|b| sem::exec(b, dec_v8(word2), word2, 0)).unwrap();
-    assert_eq!(env.backend.get(Fpr(5).state()), 0x4228_0000);
+    assert_eq!(fget_s(&mut env, 5), 0x4228_0000);
 }
 
 #[test]
 fn ldf_stf_roundtrip() {
     let mut env = fp_env();
     env.backend.set(Gpr(1).state(), 0x1_0000);
-    env.backend.set(Fpr(1).state(), 0xdead_beef);
+    fset_s(&mut env, 1, 0xdead_beef);
     // stf %f1, [%g1 + 0]。
     let word: u32 = (0b11 << 30) | (1 << 25) | (0b100100 << 19) | (1 << 14) | (1 << 13);
     env.step(|b| sem::exec(b, dec_v8(word), word, 0)).unwrap();
     // ldf [%g1 + 0], %f5。
     let word2: u32 = (0b11 << 30) | (5 << 25) | (0b100000 << 19) | (1 << 14) | (1 << 13);
     env.step(|b| sem::exec(b, dec_v8(word2), word2, 0)).unwrap();
-    assert_eq!(env.backend.get(Fpr(5).state()), 0xdead_beef);
+    assert_eq!(fget_s(&mut env, 5), 0xdead_beef);
 }
 
 #[test]
@@ -1270,14 +1315,14 @@ fn v9_fmovscc_moves_on_icc() {
     env.backend.set(sem::tstate_ref(), 1 << 12); // PSTATE.PEF
     env.backend.set(sem::fprs_ref(), 0b100); // FPRS.FEF
     env.backend.set(sem::ccr_ref(), 0b0100); // icc.z=1
-    env.backend.set(Fpr(5).state(), 0xdead_beef);
+    fset_s(&mut env, 5, 0xdead_beef);
     // fmovscc %icc, e(cond=1), %f5, %f3。bit18=0, bit13=1, cc=0。
     let word: u32 =
         (0b10 << 30) | (3 << 25) | (0b110101 << 19) | (1 << 14) | (1 << 13) | (1 << 5) | 5;
     let insn = dec_v9(word);
     assert_eq!(insn, polyisa_guest_sparc::Insn::Fmovscc);
     env.step(|b| sem::exec(b, insn, word, 0)).unwrap();
-    assert_eq!(env.backend.get(Fpr(3).state()), 0xdead_beef);
+    assert_eq!(fget_s(&mut env, 3), 0xdead_beef);
 }
 
 #[test]
@@ -1286,8 +1331,8 @@ fn v9_fcmp_selects_fccn() {
     env.backend.set_param::<polyisa_guest_sparc::Word64Param>(1);
     env.backend.set(sem::tstate_ref(), 1 << 12); // PSTATE.PEF
     env.backend.set(sem::fprs_ref(), 0b100); // FPRS.FEF
-    env.backend.set(Fpr(2).state(), 0x4000_0000); // 2.0f
-    env.backend.set(Fpr(4).state(), 0x3f80_0000); // 1.0f
+    fset_s(&mut env, 2, 0x4000_0000); // 2.0f
+    fset_s(&mut env, 4, 0x3f80_0000); // 1.0f
     // fcmps %fcc1, %f2, %f4 → gt=2 を fcc1（FSR bit32-33）へ。
     let word: u32 = (0b10 << 30) | (1 << 25) | (0b110101 << 19) | (2 << 14) | (0x51 << 5) | 4;
     let insn = dec_v9(word);
@@ -1315,40 +1360,40 @@ fn v9_fstox_converts_single_to_i64() {
     assert_eq!(insn, polyisa_guest_sparc::Insn::Fstox);
     let word2: u32 = (0b10 << 30) | (4 << 25) | (0b110100 << 19) | (0x82 << 5) | 2;
     assert_eq!(dec_v9(word2), polyisa_guest_sparc::Insn::Fdtox);
-    env.backend.set(Fpr(2).state(), 0xbfc0_0000); // -1.5f
+    fset_s(&mut env, 2, 0xbfc0_0000); // -1.5f
     env.step(|b| sem::exec(b, insn, word, 0)).unwrap();
-    // -1 を 64 ビットで %d4 に書く（f4=上位, f5=下位）。
-    assert_eq!(env.backend.get(Fpr(4).state()), 0xffff_ffff);
-    assert_eq!(env.backend.get(Fpr(5).state()), 0xffff_ffff);
+    // -1 を 64 ビットで %d4 に書く。
+    assert_eq!(fget_d(&mut env, 4), 0xffff_ffff_ffff_ffff);
 }
 
 #[test]
-fn v9_odd_d_field_is_illegal() {
+fn v9_odd_d_field_uses_upper_bank() {
     let mut env = v9_fp_env();
     env.backend.set(Gpr(1).state(), 0x1_0000);
-    // lddf [%g1 + 0], %f31 — フィールド 31 は上位バンク %d62（未モデル）。
+    env.backend.set(Gpr(2).state(), 0x0123_4567_89ab_cdef);
+    env.step(|b| sem::stx(b, Gpr(2), Gpr(1), Src2::Reg(Gpr(0))))
+        .unwrap();
+    // lddf [%g1 + 0], %f31 — V9 では奇数桁は上位バンクを指し、
+    // フィールド 31 は %d62（スロット 31）。合法。
     let word: u32 = (0b11 << 30) | (31 << 25) | (0b100011 << 19) | (1 << 14) | (1 << 13);
     let insn = dec_v9(word);
     assert_eq!(insn, polyisa_guest_sparc::Insn::LddfI);
-    let r = env.step(|b| sem::exec(b, insn, word, 0));
-    assert!(r.is_err());
-    // f[32] 相当（pc のオフセット）に書き込まれていないこと。
-    assert_eq!(env.backend.get(sem::pc_ref()), 0);
+    env.step(|b| sem::exec(b, insn, word, 0)).unwrap();
+    assert_eq!(env.backend.get(Fpr(31).state()), 0x0123_4567_89ab_cdef);
 }
 
 #[test]
 fn v8_odd_d_field_aligns_to_even() {
     let mut env = fp_env();
-    env.backend.set(Fpr(2).state(), 0x3ff0_0000); // %d2 = 1.0
-    env.backend.set(Fpr(4).state(), 0x4000_0000); // %d4 = 2.0
+    fset_d(&mut env, 2, 0x3ff0_0000_0000_0000); // %d2 = 1.0
+    fset_d(&mut env, 4, 0x4000_0000_0000_0000); // %d4 = 2.0
     // faddd %d2, %d4, %d31 → V8 では %d30 に畳む。
     let word: u32 = (0b10 << 30) | (31 << 25) | (0b110100 << 19) | (2 << 14) | (0x42 << 5) | 4;
     let insn = dec_v8(word);
     assert_eq!(insn, polyisa_guest_sparc::Insn::Faddd);
     env.step(|b| sem::exec(b, insn, word, 0)).unwrap();
     // 3.0 = 0x40080000_00000000。
-    assert_eq!(env.backend.get(Fpr(30).state()), 0x4008_0000);
-    assert_eq!(env.backend.get(Fpr(31).state()), 0);
+    assert_eq!(fget_d(&mut env, 30), 0x4008_0000_0000_0000);
 }
 
 #[test]
@@ -1358,7 +1403,7 @@ fn v9_ldfsr_preserves_fcc1_3() {
     // fcc1 = gt（2）を FSR bit32-33 に置く。
     env.backend.set(sem::fsr_ref(), 2u64 << 32);
     // stf でメモリに 0x0000_0c00（fcc0=3 だけの値）を置く。
-    env.backend.set(Fpr(6).state(), 0x0000_0c00);
+    fset_s(&mut env, 6, 0x0000_0c00);
     let st: u32 = (0b11 << 30) | (6 << 25) | (0b100100 << 19) | (1 << 14) | (1 << 13);
     env.step(|b| sem::exec(b, dec_v9(st), st, 0)).unwrap();
     // ldfsr [%g1]。
@@ -1521,23 +1566,19 @@ fn vis_alignaddr_and_faligndata() {
     assert_eq!(env.backend.get(sem::gsr_ref()) & 7, (-0x1013i64 & 7) as u64);
     // faligndata %f2, %f4, %f6。align=3 なら 24 ビット左の連結。
     env.backend.set(sem::gsr_ref(), 3);
-    env.backend.set(Fpr(2).state(), 0x1111_2222);
-    env.backend.set(Fpr(3).state(), 0x3333_4444);
-    env.backend.set(Fpr(4).state(), 0x5555_6666);
-    env.backend.set(Fpr(5).state(), 0x7777_8888);
+    fset_d(&mut env, 2, 0x1111_2222_3333_4444);
+    fset_d(&mut env, 4, 0x5555_6666_7777_8888);
     let w: u32 = (0b10 << 30) | (6 << 25) | (0b110110 << 19) | (2 << 14) | (0x48 << 5) | 4;
     let insn = dec_vis(w);
     assert_eq!(insn, polyisa_guest_sparc::Insn::Faligndata);
     env.step(|b| sem::exec(b, insn, w, 0)).unwrap();
     // (0x1111222233334444 << 24) | (0x5555666677778888 >> 40)
     //   = 0x22333344_44555566。
-    assert_eq!(env.backend.get(Fpr(6).state()), 0x2233_3344);
-    assert_eq!(env.backend.get(Fpr(7).state()), 0x4455_5566);
+    assert_eq!(fget_d(&mut env, 6), 0x2233_3344_4455_5566);
     // align=0 なら rs1 そのもの。
     env.backend.set(sem::gsr_ref(), 0);
     env.step(|b| sem::exec(b, insn, w, 0)).unwrap();
-    assert_eq!(env.backend.get(Fpr(6).state()), 0x1111_2222);
-    assert_eq!(env.backend.get(Fpr(7).state()), 0x3333_4444);
+    assert_eq!(fget_d(&mut env, 6), 0x1111_2222_3333_4444);
 }
 
 #[test]
@@ -1592,30 +1633,24 @@ fn vis_bmask_and_bshuffle() {
     assert_eq!(env.backend.get(sem::gsr_ref()) >> 32, 0x400);
     // bshuffle %f2, %f4, %f6。マスク 0x76543210 → rs1 をそのまま、
     // 0xfedcba98 → rs2 をそのまま選ぶ。
-    env.backend.set(Fpr(2).state(), 0x1111_2222);
-    env.backend.set(Fpr(3).state(), 0x3333_4444);
-    env.backend.set(Fpr(4).state(), 0xaaaa_bbbb);
-    env.backend.set(Fpr(5).state(), 0xcccc_dddd);
+    fset_d(&mut env, 2, 0x1111_2222_3333_4444);
+    fset_d(&mut env, 4, 0xaaaa_bbbb_cccc_dddd);
     let w: u32 = (0b10 << 30) | (6 << 25) | (0b110110 << 19) | (2 << 14) | (0x4c << 5) | 4;
     let insn = dec_vis2(w);
     assert_eq!(insn, polyisa_guest_sparc::Insn::Bshuffle);
     env.backend.set(sem::gsr_ref(), 0x7654_3210u64 << 32);
     env.step(|b| sem::exec(b, insn, w, 0)).unwrap();
-    assert_eq!(env.backend.get(Fpr(6).state()), 0x1111_2222);
-    assert_eq!(env.backend.get(Fpr(7).state()), 0x3333_4444);
+    assert_eq!(fget_d(&mut env, 6), 0x1111_2222_3333_4444);
     env.backend.set(sem::gsr_ref(), 0xfedc_ba98u64 << 32);
     env.step(|b| sem::exec(b, insn, w, 0)).unwrap();
-    assert_eq!(env.backend.get(Fpr(6).state()), 0xaaaa_bbbb);
-    assert_eq!(env.backend.get(Fpr(7).state()), 0xcccc_dddd);
+    assert_eq!(fget_d(&mut env, 6), 0xaaaa_bbbb_cccc_dddd);
 }
 
 #[test]
 fn vis_fpcmpeq16_bitmask() {
     let mut env = v9_fp_env();
-    env.backend.set(Fpr(2).state(), 0x0001_0002);
-    env.backend.set(Fpr(3).state(), 0x0003_0004);
-    env.backend.set(Fpr(4).state(), 0x0001_0002);
-    env.backend.set(Fpr(5).state(), 0x0003_ffff);
+    fset_d(&mut env, 2, 0x0001_0002_0003_0004);
+    fset_d(&mut env, 4, 0x0001_0002_0003_ffff);
     // fpcmpeq16 %f2, %f4, %g5。レーン3だけ不一致 → 0b1110。
     let word: u32 = (0b10 << 30) | (5 << 25) | (0b110110 << 19) | (2 << 14) | (0x2a << 5) | 4;
     let insn = dec_vis(word);
@@ -1627,42 +1662,35 @@ fn vis_fpcmpeq16_bitmask() {
 #[test]
 fn vis_fpadd16_sub16_lane_arithmetic() {
     let mut env = v9_fp_env();
-    env.backend.set(Fpr(2).state(), 0x0001_ffff);
-    env.backend.set(Fpr(3).state(), 0x0003_0004);
-    env.backend.set(Fpr(4).state(), 0x0010_0001);
-    env.backend.set(Fpr(5).state(), 0x0030_0040);
+    fset_d(&mut env, 2, 0x0001_ffff_0003_0004);
+    fset_d(&mut env, 4, 0x0010_0001_0030_0040);
     // fpadd16 %f2, %f4, %f6。レーン 1 は 0xffff+1 → 0 に戻る（桁上がりなし）。
     let word: u32 = (0b10 << 30) | (6 << 25) | (0b110110 << 19) | (2 << 14) | (0x50 << 5) | 4;
     let insn = dec_vis(word);
     assert_eq!(insn, polyisa_guest_sparc::Insn::Fpadd16);
     env.step(|b| sem::exec(b, insn, word, 0)).unwrap();
-    assert_eq!(env.backend.get(Fpr(6).state()), 0x0011_0000);
-    assert_eq!(env.backend.get(Fpr(7).state()), 0x0033_0044);
-    // fpsub16s %f2, %f4, %f8。単精度形は下位 32 ビットだけ。
-    // lanes: 0x0003-0x0030 = -0x2d = 0xffd3、0x0004-0x0040 = -0x3c = 0xffc4。
-    // 下位 16 ビットレーンは Fpr(2) ではなく… s 形は %f2 の下位 32 ビットを使う。
-    // Fpr(2)=0x0001ffff → 0x0001-0x0010=fff1、0xffff-0x0001=fffe → 0xfff1_fffe。
+    assert_eq!(fget_d(&mut env, 6), 0x0011_0000_0033_0044);
+    // fpsub16s %f2, %f4, %f8。単精度形は %f2 / %f4 の値を使う。
+    // 0x0001-0x0010=fff1、0xffff-0x0001=fffe → 0xfff1_fffe。
     let ws: u32 = (0b10 << 30) | (8 << 25) | (0b110110 << 19) | (2 << 14) | (0x55 << 5) | 4;
     let insn = dec_vis(ws);
     assert_eq!(insn, polyisa_guest_sparc::Insn::Fpsub16s);
     env.step(|b| sem::exec(b, insn, ws, 0)).unwrap();
-    assert_eq!(env.backend.get(Fpr(8).state()), 0xfff1_fffe);
+    assert_eq!(fget_s(&mut env, 8), 0xfff1_fffe);
 }
 
 #[test]
 fn vis_fmul8x16_and_pack() {
     let mut env = v9_fp_env();
-    env.backend.set(Fpr(2).state(), 0x0102_0304);
-    env.backend.set(Fpr(4).state(), 0x0100_0200);
-    env.backend.set(Fpr(5).state(), 0x0300_0400);
+    fset_s(&mut env, 2, 0x0102_0304);
+    fset_d(&mut env, 4, 0x0100_0200_0300_0400);
     // fmul8x16 %f2, %f4, %f6。(u8 * s16 + 0x80) >> 8。
     // byte i * word i: 4*1024→16、3*768→9、2*512→4、1*256→1。
     let word: u32 = (0b10 << 30) | (6 << 25) | (0b110110 << 19) | (2 << 14) | (0x31 << 5) | 4;
     let insn = dec_vis(word);
     assert_eq!(insn, polyisa_guest_sparc::Insn::Fmul8x16);
     env.step(|b| sem::exec(b, insn, word, 0)).unwrap();
-    assert_eq!(env.backend.get(Fpr(6).state()), 0x0001_0004);
-    assert_eq!(env.backend.get(Fpr(7).state()), 0x0009_0010);
+    assert_eq!(fget_d(&mut env, 6), 0x0001_0004_0009_0010);
     // fpack16 %f4, %f8。GSR.scale=0 で >> 7 → u8 に飽和。
     // lanes: 0x0100=256→2、0x0200=512→4、0x0300=768→6、0x0400=1024→8。
     env.backend.set(sem::gsr_ref(), 0);
@@ -1670,54 +1698,48 @@ fn vis_fmul8x16_and_pack() {
     let insn = dec_vis(w);
     assert_eq!(insn, polyisa_guest_sparc::Insn::Fpack16);
     env.step(|b| sem::exec(b, insn, w, 0)).unwrap();
-    assert_eq!(env.backend.get(Fpr(8).state()), 0x0204_0608);
+    assert_eq!(fget_s(&mut env, 8), 0x0204_0608);
     // 負値は 0、256 超は 255 に飽和する。
-    env.backend.set(Fpr(4).state(), 0x8000_ffff);
-    env.backend.set(Fpr(5).state(), 0x4000_0080);
+    fset_d(&mut env, 4, 0x8000_ffff_4000_0080);
     env.step(|b| sem::exec(b, insn, w, 0)).unwrap();
     // lane0: 0x0080=128>>7→1、lane1: 0x4000=16384>>7=128、lane2: 0xffff=-1→0、
     // lane3: 0x8000=-32768→0。
-    assert_eq!(env.backend.get(Fpr(8).state()), 0x0000_8001);
+    assert_eq!(fget_s(&mut env, 8), 0x0000_8001);
 }
 
 #[test]
 fn vis_fpmerge_fexpand_fpackfix() {
     let mut env = v9_fp_env();
-    env.backend.set(Fpr(2).state(), 0xa1b2_c3d4);
-    env.backend.set(Fpr(4).state(), 0x1122_3344);
+    fset_s(&mut env, 2, 0xa1b2_c3d4);
+    fset_s(&mut env, 4, 0x1122_3344);
     // fpmerge %f2, %f4, %f6。バイトを交互に並べる。
     let word: u32 = (0b10 << 30) | (6 << 25) | (0b110110 << 19) | (2 << 14) | (0x4b << 5) | 4;
     let insn = dec_vis(word);
     assert_eq!(insn, polyisa_guest_sparc::Insn::Fpmerge);
     env.step(|b| sem::exec(b, insn, word, 0)).unwrap();
-    assert_eq!(env.backend.get(Fpr(6).state()), 0xa111_b222);
-    assert_eq!(env.backend.get(Fpr(7).state()), 0xc333_d444);
+    assert_eq!(fget_d(&mut env, 6), 0xa111_b222_c333_d444);
     // fexpand %f4, %f8。各バイトを <<4 の 16 ビットに展開。
     let we: u32 = (0b10 << 30) | (8 << 25) | (0b110110 << 19) | (0x4d << 5) | 4;
     let insn = dec_vis(we);
     assert_eq!(insn, polyisa_guest_sparc::Insn::Fexpand);
     env.step(|b| sem::exec(b, insn, we, 0)).unwrap();
-    assert_eq!(env.backend.get(Fpr(8).state()), 0x0110_0220);
-    assert_eq!(env.backend.get(Fpr(9).state()), 0x0330_0440);
+    assert_eq!(fget_d(&mut env, 8), 0x0110_0220_0330_0440);
     // fpackfix %f4, %f10。scale=0 で >>16、符号付き 16 ビット飽和。
     env.backend.set(sem::gsr_ref(), 0);
-    env.backend.set(Fpr(4).state(), 0x0001_0000);
-    env.backend.set(Fpr(5).state(), 0x7fff_ffff);
+    fset_d(&mut env, 4, 0x0001_0000_7fff_ffff);
     let wf: u32 = (0b10 << 30) | (10 << 25) | (0b110110 << 19) | (0x3d << 5) | 4;
     let insn = dec_vis(wf);
     assert_eq!(insn, polyisa_guest_sparc::Insn::Fpackfix);
     env.step(|b| sem::exec(b, insn, wf, 0)).unwrap();
     // lane0 = 0x7fffffff>>16 = 0x7fff、lane1 = 0x00010000>>16 = 1。
-    assert_eq!(env.backend.get(Fpr(10).state()), 0x0001_7fff);
+    assert_eq!(fget_s(&mut env, 10), 0x0001_7fff);
 }
 
 #[test]
 fn vis_fpack32_and_pdist() {
     let mut env = v9_fp_env();
-    env.backend.set(Fpr(2).state(), 0xaabb_ccdd);
-    env.backend.set(Fpr(3).state(), 0xeeff_0011);
-    env.backend.set(Fpr(4).state(), 0x0400_0000);
-    env.backend.set(Fpr(5).state(), 0xffff_ffff);
+    fset_d(&mut env, 2, 0xaabb_ccdd_eeff_0011);
+    fset_d(&mut env, 4, 0x0400_0000_ffff_ffff);
     env.backend.set(sem::gsr_ref(), 0);
     // fpack32 %f2, %f4, %f6。rs1 を <<8 して末尾バイトを埋める。
     let word: u32 = (0b10 << 30) | (6 << 25) | (0b110110 << 19) | (2 << 14) | (0x3a << 5) | 4;
@@ -1726,22 +1748,17 @@ fn vis_fpack32_and_pdist() {
     env.step(|b| sem::exec(b, insn, word, 0)).unwrap();
     // lane0 = -1 → 0、lane1 = 0x04000000>>23 = 8。rs1<<8 の各ワード
     // 最下位バイトはクリアされて飽和値が入る。
-    assert_eq!(env.backend.get(Fpr(6).state()), 0xbbcc_dd08);
-    assert_eq!(env.backend.get(Fpr(7).state()), 0xff00_1100);
+    assert_eq!(fget_d(&mut env, 6), 0xbbcc_dd08_ff00_1100);
     // pdist %f2, %f4, %f8。8 バイトの絶対差の和を rd に累積。
-    env.backend.set(Fpr(2).state(), 0x0102_0304);
-    env.backend.set(Fpr(3).state(), 0x0506_0708);
-    env.backend.set(Fpr(4).state(), 0x0807_0605);
-    env.backend.set(Fpr(5).state(), 0x0403_0201);
-    env.backend.set(Fpr(8).state(), 0);
-    env.backend.set(Fpr(9).state(), 5);
+    fset_d(&mut env, 2, 0x0102_0304_0506_0708);
+    fset_d(&mut env, 4, 0x0807_0605_0403_0201);
+    fset_d(&mut env, 8, 5);
     let wp: u32 = (0b10 << 30) | (8 << 25) | (0b110110 << 19) | (2 << 14) | (0x3e << 5) | 4;
     let insn = dec_vis(wp);
     assert_eq!(insn, polyisa_guest_sparc::Insn::Pdist);
     env.step(|b| sem::exec(b, insn, wp, 0)).unwrap();
     // 7+5+3+1+1+3+5+7 = 32、累積 5 → 37。
-    assert_eq!(env.backend.get(Fpr(8).state()), 0);
-    assert_eq!(env.backend.get(Fpr(9).state()), 37);
+    assert_eq!(fget_d(&mut env, 8), 37);
 }
 
 #[test]
@@ -1763,16 +1780,15 @@ fn vis_fef_gates_vis_ops() {
 #[test]
 fn vis_fmul8x16au_sign_extends_constant() {
     let mut env = v9_fp_env();
-    env.backend.set(Fpr(2).state(), 0x0202_0202);
+    fset_s(&mut env, 2, 0x0202_0202);
     // AU の定数は rs2 の上位 16 ビットの符号付き値。0x8000 → -32768。
-    env.backend.set(Fpr(4).state(), 0x8000_0000);
+    fset_s(&mut env, 4, 0x8000_0000);
     // fmul8x16au %f2, %f4, %f6。(2 * -32768 + 0x80) >> 8 = -256 = 0xff00。
     let word: u32 = (0b10 << 30) | (6 << 25) | (0b110110 << 19) | (2 << 14) | (0x33 << 5) | 4;
     let insn = dec_vis(word);
     assert_eq!(insn, polyisa_guest_sparc::Insn::Fmul8x16au);
     env.step(|b| sem::exec(b, insn, word, 0)).unwrap();
-    assert_eq!(env.backend.get(Fpr(6).state()), 0xff00_ff00);
-    assert_eq!(env.backend.get(Fpr(7).state()), 0xff00_ff00);
+    assert_eq!(fget_d(&mut env, 6), 0xff00_ff00_ff00_ff00);
 }
 
 #[test]
@@ -1830,7 +1846,10 @@ fn save_traps_when_cansave_empty() {
     // V8 の window_overflow = 0x05。CWP とカウンタは変えない。
     assert_eq!(env.backend.get(sem::tt_ref()), 0x05);
     assert_eq!(env.backend.get(sem::cwp_ref()), 0);
-    // SAVED で窓を空きに戻すと SAVE が通る。
+    // SAVED で窓を空きに戻すと SAVE が通る。saved は
+    // cansave++・canrestore--（QEMU と同じ遷移）なので、退避済みの
+    // 使用窓がある想定で canrestore=1 を置く。
+    env.backend.set(sem::canrestore_ref(), 1);
     env.step(sem::saved).unwrap();
     assert_eq!(env.backend.get(sem::cansave_ref()), 1);
     env.step(|b| sem::save(b, Gpr(0), Gpr(0), Src2::Reg(Gpr(0))))
@@ -1848,13 +1867,15 @@ fn restore_traps_when_canrestore_empty() {
     // V8 の window_underflow = 0x06。
     assert_eq!(env.backend.get(sem::tt_ref()), 0x06);
     assert_eq!(env.backend.get(sem::cwp_ref()), 0);
-    // RESTORED で埋め戻せる窓を戻すと RESTORE が通る。
+    // RESTORED で埋め戻せる窓を戻すと RESTORE が通る。restored は
+    // canrestore++・cansave--（QEMU と同じ遷移）なので、
+    // cansave は 7→6→7 に戻る。
     env.step(sem::restored).unwrap();
     env.step(|b| sem::restore(b, Gpr(0), Gpr(0), Src2::Reg(Gpr(0))))
         .unwrap();
     assert_eq!(env.backend.get(sem::cwp_ref()), 1);
     assert_eq!(env.backend.get(sem::canrestore_ref()), 0);
-    assert_eq!(env.backend.get(sem::cansave_ref()), 8);
+    assert_eq!(env.backend.get(sem::cansave_ref()), 7);
 }
 
 #[test]
@@ -1941,4 +1962,199 @@ fn v9_fbpfcc_selects_fcc_and_annuls() {
     env.step(|b| sem::fbpfcc(b, 1, 0b1000, 0, 0x100, 0x300))
         .unwrap();
     assert_eq!(env.backend.get(sem::annul_ref()), 1);
+}
+
+#[test]
+fn v9_flushw_is_privileged() {
+    let mut env = env();
+    env.backend.set_param::<polyisa_guest_sparc::Word64Param>(1);
+    // flushw（op3=101011）はユーザーモードでは
+    // privileged_opcode（tt=0x11）。`ta 3` のソフトウェア
+    // flushw とは別経路。
+    let word: u32 = (0b10 << 30) | (0b101011 << 19);
+    let insn = dec_v9(word);
+    assert_eq!(insn, polyisa_guest_sparc::Insn::Flushw);
+    let r = env.step(|b| sem::exec(b, insn, word, 0));
+    assert!(r.is_err());
+    assert_eq!(env.backend.get(sem::tt_ref()), 0x11);
+}
+
+#[test]
+fn v9_casxa_asi_form_exchanges_and_rejects_reserved_bits() {
+    let mut env = env();
+    env.backend.set_param::<polyisa_guest_sparc::Word64Param>(1);
+    env.backend.set(sem::asi_ref(), 0x80);
+    env.backend.set(Gpr(1).state(), 0x700);
+    env.backend.set(Gpr(2).state(), 0xdead_beef_cafe_f00d); // rd（新値）
+    env.backend.set(Gpr(3).state(), 0x0123_4567_89ab_cdef); // rs2（比較値）
+    env.backend.set(Gpr(4).state(), 0x0123_4567);
+    env.step(|b| sem::st(b, Gpr(4), Gpr(1), Src2::Reg(Gpr(0))))
+        .unwrap();
+    env.backend.set(Gpr(4).state(), 0x89ab_cdef);
+    env.step(|b| sem::st(b, Gpr(4), Gpr(1), Src2::Imm(4)))
+        .unwrap();
+    // casxa_i [%g1] %asi, %g3, %g2（i=1、rs2 フィールドは下位
+    // 5 ビット）。
+    let word: u32 = (0b11 << 30) | (2 << 25) | (0b111110 << 19) | (1 << 14) | (1 << 13) | 3;
+    let insn = dec_v9(word);
+    assert_eq!(insn, polyisa_guest_sparc::Insn::CasxaI);
+    env.step(|b| sem::exec(b, insn, word, 0)).unwrap();
+    // %g3 とメモリが一致するので交換が起き、rd には旧値が戻る。
+    assert_eq!(g(&mut env, 2), 0x0123_4567_89ab_cdef);
+    env.step(|b| sem::ldx(b, Gpr(4), Gpr(1), Src2::Reg(Gpr(0))))
+        .unwrap();
+    assert_eq!(g(&mut env, 4), 0xdead_beef_cafe_f00d);
+    // 予約ビット（rs2 フィールドの上位）が立つ語は解読できない。
+    let bad: u32 = (0b11 << 30) | (2 << 25) | (0b111110 << 19) | (1 << 14) | (1 << 13) | 0x143;
+    assert!(polyisa_guest_sparc::decode_model_ex(u128::from(bad), 32, true, V9_FEATS).is_none());
+}
+
+#[test]
+fn v9_fasi_blk_loads_eight_slots() {
+    let mut env = v9_fp_env();
+    env.backend.set(Gpr(1).state(), 0x1_0000);
+    // 64 バイトを stx で用意する。
+    for i in 0..8u64 {
+        env.backend.set(Gpr(2).state(), 0x1000 + i);
+        env.step(|b| sem::stx(b, Gpr(2), Gpr(1), Src2::Imm((i * 8) as i64)))
+            .unwrap();
+    }
+    // lddfa [%g1 + %g0] 0xf0, %f0（fd フィールド=0 → %d0 から
+    // 8 スロット）。
+    let word: u32 = (0b11 << 30) | (0b110011 << 19) | (1 << 14) | (0xf0 << 5);
+    let insn = dec_v9(word);
+    assert_eq!(insn, polyisa_guest_sparc::Insn::Lddfa);
+    env.step(|b| sem::exec(b, insn, word, 0)).unwrap();
+    for i in 0..8u8 {
+        assert_eq!(fget_d(&mut env, i * 2), 0x1000 + u64::from(i));
+    }
+    // stdfa で書き戻せることも確かめる。
+    let w: u32 = (0b11 << 30) | (0b110111 << 19) | (1 << 14) | (0xf0 << 5);
+    let insn = dec_v9(w);
+    assert_eq!(insn, polyisa_guest_sparc::Insn::Stdfa);
+    env.step(|b| sem::exec(b, insn, w, 0)).unwrap();
+}
+
+#[test]
+fn v9_fasi_blk_out_of_range_field_traps() {
+    let mut env = v9_fp_env();
+    env.backend.set(Gpr(1).state(), 0x1_0000);
+    let pc0 = env.backend.get(sem::pc_ref());
+    let npc0 = env.backend.get(sem::npc_ref());
+    let cwp0 = env.backend.get(sem::cwp_ref());
+    // fd=25 → R=56。R%8==0 でも R>48 は 8 スロット目が f 配列を
+    // 越えるので illegal。状態破壊がないことも併せて見る
+    // （Fpr(28..) の先は pc/npc/cwp にエイリアスする）。
+    let word: u32 = (0b11 << 30) | (25 << 25) | (0b110011 << 19) | (1 << 14) | (0xf0 << 5);
+    let insn = dec_v9(word);
+    assert_eq!(insn, polyisa_guest_sparc::Insn::Lddfa);
+    let r = env.step(|b| sem::exec(b, insn, word, 0));
+    assert!(r.is_err());
+    assert_eq!(env.backend.get(sem::tt_ref()), 0x10);
+    assert_eq!(env.backend.get(sem::pc_ref()), pc0);
+    assert_eq!(env.backend.get(sem::npc_ref()), npc0);
+    assert_eq!(env.backend.get(sem::cwp_ref()), cwp0);
+}
+
+#[test]
+fn v9_fasi_blk_requires_64_byte_alignment() {
+    let mut env = v9_fp_env();
+    // fd=0 は合法でもアドレスが 64 バイト境界に乗らないと
+    // mem_address_not_aligned 相当の例外になる（8 バイトには
+    // 揃っているが 64 バイトには揃っていない 0x10008）。
+    env.backend.set(Gpr(1).state(), 0x1_0008);
+    let word: u32 = (0b11 << 30) | (0b110011 << 19) | (1 << 14) | (0xf0 << 5);
+    let insn = dec_v9(word);
+    assert_eq!(insn, polyisa_guest_sparc::Insn::Lddfa);
+    let r = env.step(|b| sem::exec(b, insn, word, 0));
+    assert!(r.is_err());
+}
+
+#[test]
+fn v9_fasi_blk_on_wrong_size_traps() {
+    let mut env = v9_fp_env();
+    env.backend.set(Gpr(1).state(), 0x1_0000);
+    // BLK ASI は lddfa/stdfa 限定。ldfa に付けると illegal。
+    let w: u32 = (0b11 << 30) | (0b110000 << 19) | (1 << 14) | (0xf0 << 5);
+    let insn = dec_v9(w);
+    assert_eq!(insn, polyisa_guest_sparc::Insn::Ldfa);
+    let r = env.step(|b| sem::exec(b, insn, w, 0));
+    assert!(r.is_err());
+    assert_eq!(env.backend.get(sem::tt_ref()), 0x10);
+    // SHORT ASI（0xd0 系）も同じく lddfa/stdfa 限定。
+    let w2: u32 = (0b11 << 30) | (0b110110 << 19) | (1 << 14) | (0xd0 << 5);
+    let insn2 = dec_v9(w2);
+    assert_eq!(insn2, polyisa_guest_sparc::Insn::Stqfa);
+    let r2 = env.step(|b| sem::exec(b, insn2, w2, 0));
+    assert!(r2.is_err());
+    assert_eq!(env.backend.get(sem::tt_ref()), 0x10);
+}
+
+#[test]
+fn v9_fasi_short_loads_bytes() {
+    let mut env = v9_fp_env();
+    env.backend.set(Gpr(1).state(), 0x1_0000);
+    env.backend.set(Gpr(2).state(), 0x5a);
+    env.step(|b| sem::stb(b, Gpr(2), Gpr(1), Src2::Reg(Gpr(0))))
+        .unwrap();
+    // lddfa [%g1 + %g0] 0xd0, %f2 — FL8 は 1 バイトをゼロ拡張で
+    // 載せる。fd=2 → スロット 1（%d2）。
+    let word: u32 = (0b11 << 30) | (2 << 25) | (0b110011 << 19) | (1 << 14) | (0xd0 << 5);
+    let insn = dec_v9(word);
+    assert_eq!(insn, polyisa_guest_sparc::Insn::Lddfa);
+    env.step(|b| sem::exec(b, insn, word, 0)).unwrap();
+    assert_eq!(fget_d(&mut env, 2), 0x5a);
+}
+
+#[test]
+fn v9_ldqfa_rejects_misaligned_field() {
+    let mut env = v9_fp_env();
+    env.backend.set(Gpr(1).state(), 0x1_0000);
+    // fd=2 は q 番号が 4 の倍数にならないので illegal。
+    let word: u32 = (0b11 << 30) | (2 << 25) | (0b110010 << 19) | (1 << 14) | (0x80 << 5);
+    let insn = dec_v9(word);
+    assert_eq!(insn, polyisa_guest_sparc::Insn::Ldqfa);
+    let r = env.step(|b| sem::exec(b, insn, word, 0));
+    assert!(r.is_err());
+    assert_eq!(env.backend.get(sem::tt_ref()), 0x10);
+    // fd=0 は受理される（16 バイトを 2 スロットへ）。
+    let word0: u32 = (0b11 << 30) | (0b110010 << 19) | (1 << 14) | (0x80 << 5);
+    let insn0 = dec_v9(word0);
+    env.step(|b| sem::exec(b, insn0, word0, 0)).unwrap();
+}
+
+#[test]
+fn v9_ldx_stx_ldsw_full_width() {
+    let mut env = env();
+    env.backend.set_param::<polyisa_guest_sparc::Word64Param>(1);
+    env.backend.set(Gpr(1).state(), 0x1_0000);
+    env.backend.set(Gpr(2).state(), 0xfedc_ba98_7654_3210);
+    env.step(|b| sem::stx(b, Gpr(2), Gpr(1), Src2::Reg(Gpr(0))))
+        .unwrap();
+    env.step(|b| sem::ldx(b, Gpr(3), Gpr(1), Src2::Reg(Gpr(0))))
+        .unwrap();
+    assert_eq!(g(&mut env, 3), 0xfedc_ba98_7654_3210);
+    // ldsw は 32 ビットを符号拡張する。
+    env.step(|b| sem::ldsw(b, Gpr(4), Gpr(1), Src2::Reg(Gpr(0))))
+        .unwrap();
+    assert_eq!(g(&mut env, 4), 0xffff_ffff_fedc_ba98);
+}
+
+#[test]
+fn v9_ldxa_stxa_use_asi_register() {
+    let mut env = env();
+    env.backend.set_param::<polyisa_guest_sparc::Word64Param>(1);
+    // i=1 の形は %asi レジスタを読む。0x80（ASI_P）は非制限。
+    env.backend.set(sem::asi_ref(), 0x80);
+    env.backend.set(Gpr(1).state(), 0x1_0000);
+    env.backend.set(Gpr(2).state(), 0x1122_3344_5566_7788);
+    let w: u32 = (0b11 << 30) | (2 << 25) | (0b011110 << 19) | (1 << 14) | (1 << 13);
+    let insn = dec_v9(w);
+    assert_eq!(insn, polyisa_guest_sparc::Insn::StxaI);
+    env.step(|b| sem::exec(b, insn, w, 0)).unwrap();
+    let w2: u32 = (0b11 << 30) | (3 << 25) | (0b011011 << 19) | (1 << 14) | (1 << 13);
+    let insn2 = dec_v9(w2);
+    assert_eq!(insn2, polyisa_guest_sparc::Insn::LdxaI);
+    env.step(|b| sem::exec(b, insn2, w2, 0)).unwrap();
+    assert_eq!(g(&mut env, 3), 0x1122_3344_5566_7788);
 }

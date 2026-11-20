@@ -91,6 +91,10 @@ name = "heavy_program_s390"
 required-features = ["guest-s390"]
 
 [[test]]
+name = "heavy_program_sparc"
+required-features = ["guest-sparc"]
+
+[[test]]
 name = "heavy_jit_diff"
 required-features = ["guest-aarch64", "guest-arm", "guest-x86"]
 
