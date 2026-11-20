@@ -14,8 +14,13 @@
 //! 段階16-7 で整数 load/store（ldq_u/stq_u・ldl_l/ldq_l/
 //! stl_c/stq_c を含む）を足した。
 //! 段階16-8 で整数・FP の条件分岐を足した（jmp/jsr/ret と
-//! br/bsr は段階16-4 で実装済み）。FP 有効フラグ（FEN）の検査は
-//! 段階16-9 で FPCR まわりと一緒に扱う。
+//! br/bsr は段階16-4 で実装済み）。
+//! 段階16-9 で IEEE 浮動小数点（lds/ldt/sts/stt、S/T 形式の
+//! 四則・比較・平方根・変換、itof/ftoi・cpys・fcmov・
+//! mf_fpcr/mt_fpcr）を足した。ユーザ空間実行では FEN=1 固定
+//! （OS プリエンプション境界の FEN 管理は本段階の対象外）。
+//! VAX F/G 形式（ldf/ldg/stf/stg・0x15 系・sqrtf/sqrtg・
+//! itoff）と /s 修飾の例外モデルは未実装。
 //! （それ以外の命令は `Ok(false)` を返し、呼び出し側が未実装と
 //! して扱う）。
 //!
@@ -24,11 +29,14 @@
 //! Ref: SPEC-ALPHA-ARM, SRC-QEMU.
 
 use polyisa_mem::{Access, AccessKind, Align, Endian};
-use polyisa_sem::{Backend, Cmp, ExceptionKind, GuestException, StateRef, W8, W16, W32, W64};
+use polyisa_sem::{
+    Backend, Cmp, ExceptionKind, F32, F64, GuestException, StateRef, W8, W16, W32, W64,
+};
 
 use super::{
-    CpuState, Insn, ops_fbrr, ops_fbrw, ops_ffb, ops_fmbr, ops_fmfcw, ops_fmld, ops_fopl,
-    ops_foplz, ops_fopr, ops_foprz, ops_fpal, ops_fret,
+    CpuState, Insn, ops_fbrr, ops_fbrw, ops_ffb, ops_ffld, ops_ffp2q, ops_ffp3, ops_ffp3q,
+    ops_ffti, ops_fitf, ops_fmbr, ops_fmfcw, ops_fmld, ops_fopl, ops_foplz, ops_fopr, ops_foprz,
+    ops_fpal, ops_fret,
 };
 
 /// 整数レジスタ参照。r31 は読み出しで常に 0、書き込みは破棄される。
@@ -1086,6 +1094,388 @@ fn mem<B: Backend>(b: &mut B, insn: Insn, word: u32) -> Result<bool, B::Exit> {
     Ok(true)
 }
 
+// ---- 段階16-9: 浮動小数点 ----
+
+/// IEEE S 形式: レジスタ内部表現（64 ビット）を f32 のビット列へ
+/// 畳む。QEMU の `s_to_float32_int` と同じ変換。
+// Ref: SRC-QEMU (target/alpha/fpu_helper.c s_to_float32_int).
+fn sreg_to_f32<B: Backend>(b: &mut B, v: B::V<W64>) -> B::V<F32> {
+    let hi = shr_n(b, v, 32);
+    let hi = and_k(b, hi, 0xc000_0000);
+    let lo = shr_n(b, v, 29);
+    let lo = and_k(b, lo, 0x3fff_ffff);
+    let r = b.or::<W64>(hi, lo);
+    b.trunc::<W64, F32>(r)
+}
+
+/// f32 のビット列を IEEE S 形式のレジスタ内部表現へ広げる。
+/// QEMU の `float32_to_s_int`（Linux `s_mem_to_reg`）と同じ変換。
+/// 11 ビット指数は f32 の指数を MSB で場合分けして復元する。
+// Ref: SRC-QEMU (target/alpha/fpu_helper.c float32_to_s_int).
+fn f32_to_sreg<B: Backend>(b: &mut B, v: B::V<F32>) -> B::V<W64> {
+    let fi = b.zext::<F32, W64>(v);
+    let sign = shr_n(b, fi, 31);
+    let sign = shl_n(b, sign, 63);
+    let frac = and_k(b, fi, 0x007f_ffff);
+    let frac = shl_n(b, frac, 29);
+    let exp_msb = shr_n(b, fi, 30);
+    let exp_msb = and_k(b, exp_msb, 1);
+    let exp_low = shr_n(b, fi, 23);
+    let exp_low = and_k(b, exp_low, 0x7f);
+    let zero = b.konst::<W64>(0);
+    let msb1 = b.cmp(Cmp::Ne, exp_msb, zero);
+    let k7f = b.konst::<W64>(0x7f);
+    let is7f = b.cmp(Cmp::Eq, exp_low, k7f);
+    let lo_z = b.cmp(Cmp::Eq, exp_low, zero);
+    // exp_msb=1 かつ low==0x7f は Inf/NaN で 0x7ff。それ以外の
+    // exp_msb=1 は 0x400|low、exp_msb=0 は low!=0 なら 0x380|low。
+    let e_all = b.konst::<W64>(0x7ff);
+    let e_hi = or_k(b, exp_low, 0x400);
+    let e_hi = b.select(is7f, e_all, e_hi);
+    let e_lo = or_k(b, exp_low, 0x380);
+    let e_lo = b.select(lo_z, exp_low, e_lo);
+    let exp = b.select(msb1, e_hi, e_lo);
+    let exp = shl_n(b, exp, 52);
+    let r = b.or::<W64>(sign, exp);
+    b.or::<W64>(r, frac)
+}
+
+/// fpfn の丸めモード修飾 fn[7:6] → softfloat の丸めコード
+/// （0=RNE 1=RTZ 2=RDN 3=RUP）。`/d`（FPCR 動的丸め）は
+/// Backend 経由で FPCR の値をホスト側の u8 として読めないため、
+/// リセット既定の最近接偶数に畳む。Linux ユーザ空間では FPCR の
+/// dyn_rm が最近接のまま動くことがほぼ全てなので実害は小さい。
+// Ref: SRC-QEMU (target/alpha/translate.c gen_qual_roundmode).
+fn fp_rm(fpfn: u32) -> u8 {
+    match (fpfn >> 6) & 3 {
+        0 => 1, // /c: 0 方向へ切り捨て
+        1 => 2, // /m: 負無限大方向
+        _ => 0, // 2=/n 既定・3=/d 動的（既定=最近接偶数に畳む）
+    }
+}
+
+/// FP load/store（段階16-9）。ldt/stt は生の 64 ビット、lds/sts は
+/// S 内部表現と f32 ビット列の相互変換。fa=31 を宛てとする load は
+/// prefetch/UNOP でフォールトしない（整数ロードと同じ扱い）。
+/// VAX F/G 形式の ldf/ldg/stf/stg は本段階では未実装。
+// Ref: SPEC-ALPHA-ARM §4.9, SRC-QEMU (gen_ldf..gen_stt).
+fn fmem<B: Backend>(b: &mut B, insn: Insn, word: u32) -> Result<bool, B::Exit> {
+    // FFLD/FFST は桁配置（fa/rb/disp16）が同じなので ops_ffld で
+    // 兼ねる（整数側の FMLD/FMST と同じ構造）。
+    let o = ops_ffld(u128::from(word));
+    if o.fa == 31 && matches!(insn, Insn::Lds | Insn::Ldt) {
+        return Ok(true);
+    }
+    let base = Gpr(o.rb as u8).get(b);
+    let d = b.konst::<W64>((o.disp16 as i16) as i64 as u64);
+    let ea = b.add(base, d);
+    let fa = Fpr(o.fa as u8);
+    match insn {
+        Insn::Lds => {
+            let v: B::V<W32> = b.load(ea, DATA_READ)?;
+            let f = b.trunc::<W32, F32>(v);
+            let w = f32_to_sreg(b, f);
+            fa.set(b, w);
+        }
+        Insn::Ldt => {
+            let v: B::V<W64> = b.load(ea, DATA_READ)?;
+            fa.set(b, v);
+        }
+        Insn::Sts => {
+            let v = fa.get(b);
+            let f = sreg_to_f32(b, v);
+            let w = b.trunc::<F32, W32>(f);
+            b.store(ea, w, DATA_WRITE)?;
+        }
+        Insn::Stt => {
+            let v = fa.get(b);
+            b.store(ea, v, DATA_WRITE)?;
+        }
+        // VAX F/G 形式はレジスタ内部表現とメモリ形式の変換が別
+        // 系統（VaxF/VaxG 軸）なので本段階では未実装。
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
+/// FP Operate 系（段階16-9 の IEEE 側）。S 形式は内部表現↔f32 を
+/// 介して演算し、T 形式は生の f64 ビット列として演算する。
+/// cmpt* の真値は 0x4000000000000000（f64 の 2.0）。fn[10] の /s
+/// 修飾（ソフトウェア完了）と /i（inexact 検出）は受け付けるが
+/// 例外を起こさず結果だけを返す。FPCR の例外集約ビットは
+/// mf_fpcr/mt_fpcr の読み書きのみを保証する。
+// Ref: SPEC-ALPHA-ARM §4.7, SRC-QEMU (fpu_helper.c).
+fn fop<B: Backend>(b: &mut B, insn: Insn, word: u32) -> Result<bool, B::Exit> {
+    match insn {
+        // FITF: 整数→FP 転送。rb 桁が 31 固定なのは ARM の予約で、
+        // QEMU も rb!=31 を invalid 扱いにするだけ。ここでは値を
+        // 無視して動く。
+        Insn::Itofs => {
+            let o = ops_fitf(u128::from(word));
+            let v = Gpr(o.ra as u8).get(b);
+            let v32 = b.trunc::<W64, W32>(v);
+            let f = b.trunc::<W32, F32>(v32);
+            let w = f32_to_sreg(b, f);
+            Fpr(o.fc as u8).set(b, w);
+        }
+        Insn::Itoft => {
+            let o = ops_fitf(u128::from(word));
+            let v = Gpr(o.ra as u8).get(b);
+            Fpr(o.fc as u8).set(b, v);
+        }
+        // FFTI: FP→整数転送。ftois は S 内部表現→f32 ビット列の
+        // 下位 32 ビットをゼロ拡張、ftoit は生の 64 ビット転送。
+        Insn::Ftois => {
+            let o = ops_ffti(u128::from(word));
+            let v = Fpr(o.fa as u8).get(b);
+            let f = sreg_to_f32(b, v);
+            let w = b.trunc::<F32, W32>(f);
+            let w = b.zext::<W32, W64>(w);
+            Gpr(o.rc as u8).set(b, w);
+        }
+        Insn::Ftoit => {
+            let o = ops_ffti(u128::from(word));
+            let v = Fpr(o.fa as u8).get(b);
+            Gpr(o.rc as u8).set(b, v);
+        }
+        // IEEE S 形式の二項演算（FFP3Q）。
+        Insn::Adds | Insn::Subs | Insn::Muls | Insn::Divs => {
+            let o = ops_ffp3q(u128::from(word));
+            let rm = fp_rm(o.fpfn);
+            let av = Fpr(o.fa as u8).get(b);
+            let bv = Fpr(o.fb as u8).get(b);
+            let af = sreg_to_f32(b, av);
+            let bf = sreg_to_f32(b, bv);
+            let r = match insn {
+                Insn::Adds => b.fadd_r::<F32>(af, bf, rm),
+                Insn::Subs => b.fsub_r::<F32>(af, bf, rm),
+                Insn::Muls => b.fmul_r::<F32>(af, bf, rm),
+                _ => b.fdiv_r::<F32>(af, bf, rm),
+            };
+            let w = f32_to_sreg(b, r);
+            Fpr(o.fc as u8).set(b, w);
+        }
+        // IEEE T 形式の二項演算（生の f64 ビット列）。
+        Insn::Addt | Insn::Subt | Insn::Mult | Insn::Divt => {
+            let o = ops_ffp3q(u128::from(word));
+            let rm = fp_rm(o.fpfn);
+            let av = Fpr(o.fa as u8).get(b);
+            let bv = Fpr(o.fb as u8).get(b);
+            let af = b.trunc::<W64, F64>(av);
+            let bf = b.trunc::<W64, F64>(bv);
+            let r = match insn {
+                Insn::Addt => b.fadd_r::<F64>(af, bf, rm),
+                Insn::Subt => b.fsub_r::<F64>(af, bf, rm),
+                Insn::Mult => b.fmul_r::<F64>(af, bf, rm),
+                _ => b.fdiv_r::<F64>(af, bf, rm),
+            };
+            let w = b.trunc::<F64, W64>(r);
+            Fpr(o.fc as u8).set(b, w);
+        }
+        // IEEE T 形式の比較。真なら 0x4000000000000000（f64 の
+        // 2.0）を書く。cmptun は非順序（NaN 含有）で真。
+        Insn::Cmptun | Insn::Cmpteq | Insn::Cmptlt | Insn::Cmptle => {
+            let o = ops_ffp3q(u128::from(word));
+            let av = Fpr(o.fa as u8).get(b);
+            let bv = Fpr(o.fb as u8).get(b);
+            let af = b.trunc::<W64, F64>(av);
+            let bf = b.trunc::<W64, F64>(bv);
+            let c = match insn {
+                Insn::Cmptun => {
+                    // 非順序 = !(a<=b || b<=a)。
+                    let le = b.fle::<F64>(af, bf);
+                    let ge = b.fle::<F64>(bf, af);
+                    let one = b.konst::<W64>(1);
+                    let zero = b.konst::<W64>(0);
+                    let l = b.select(le, one, zero);
+                    let g = b.select(ge, one, zero);
+                    let e = b.or::<W64>(l, g);
+                    b.cmp(Cmp::Eq, e, zero)
+                }
+                Insn::Cmpteq => b.feq::<F64>(af, bf),
+                Insn::Cmptlt => b.flt::<F64>(af, bf),
+                _ => b.fle::<F64>(af, bf),
+            };
+            let t = b.konst::<W64>(0x4000_0000_0000_0000);
+            let zero = b.konst::<W64>(0);
+            let w = b.select(c, t, zero);
+            Fpr(o.fc as u8).set(b, w);
+        }
+        // IEEE 平方根（FFP2Q）。
+        Insn::Sqrts => {
+            let o = ops_ffp2q(u128::from(word));
+            let rm = fp_rm(o.fpfn);
+            let bv = Fpr(o.fb as u8).get(b);
+            let bf = sreg_to_f32(b, bv);
+            let r = b.fsqrt_r::<F32>(bf, rm);
+            let w = f32_to_sreg(b, r);
+            Fpr(o.fc as u8).set(b, w);
+        }
+        Insn::Sqrtt => {
+            let o = ops_ffp2q(u128::from(word));
+            let rm = fp_rm(o.fpfn);
+            let bv = Fpr(o.fb as u8).get(b);
+            let bf = b.trunc::<W64, F64>(bv);
+            let r = b.fsqrt_r::<F64>(bf, rm);
+            let w = b.trunc::<F64, W64>(r);
+            Fpr(o.fc as u8).set(b, w);
+        }
+        // IEEE 変換（FFP2Q）。cvtts は T→S、cvtst/cvtst_s は
+        // S→T、cvttq は T→整数、cvtqs/cvtqt は整数→S/T。
+        Insn::Cvtts => {
+            let o = ops_ffp2q(u128::from(word));
+            let rm = fp_rm(o.fpfn);
+            let bv = Fpr(o.fb as u8).get(b);
+            let bf = b.trunc::<W64, F64>(bv);
+            let r = b.fcvt_ff::<F64, F32>(bf, rm);
+            let w = f32_to_sreg(b, r);
+            Fpr(o.fc as u8).set(b, w);
+        }
+        Insn::Cvtst | Insn::CvtstS => {
+            let o = ops_ffp2q(u128::from(word));
+            let rm = fp_rm(o.fpfn);
+            let bv = Fpr(o.fb as u8).get(b);
+            let bf = sreg_to_f32(b, bv);
+            let r = b.fcvt_ff::<F32, F64>(bf, rm);
+            let w = b.trunc::<F64, W64>(r);
+            Fpr(o.fc as u8).set(b, w);
+        }
+        // cvttq: オーバーフロー時は飽和ではなく切り捨て結果を返す
+        // のが ARM の定義（コンパイラが unsigned 変換に使う）。
+        // Backend の fcvt_s64 は飽和する実装なので、飽和点の違いは
+        // 本段階では残課題とする。
+        Insn::Cvttq => {
+            let o = ops_ffp2q(u128::from(word));
+            let rm = fp_rm(o.fpfn);
+            let bv = Fpr(o.fb as u8).get(b);
+            let bf = b.trunc::<W64, F64>(bv);
+            let w = b.fcvt_s64::<F64>(bf, rm);
+            Fpr(o.fc as u8).set(b, w);
+        }
+        Insn::Cvtqs => {
+            let o = ops_ffp2q(u128::from(word));
+            let rm = fp_rm(o.fpfn);
+            let bv = Fpr(o.fb as u8).get(b);
+            let r = b.fcvt_from_s64::<F32>(bv, rm);
+            let w = f32_to_sreg(b, r);
+            Fpr(o.fc as u8).set(b, w);
+        }
+        Insn::Cvtqt => {
+            let o = ops_ffp2q(u128::from(word));
+            let rm = fp_rm(o.fpfn);
+            let bv = Fpr(o.fb as u8).get(b);
+            let r = b.fcvt_from_s64::<F64>(bv, rm);
+            let w = b.trunc::<F64, W64>(r);
+            Fpr(o.fc as u8).set(b, w);
+        }
+        // 0x17 系（FFP3、修飾子なし）。符号・指数のビット合成と
+        // fcmov・FPCR 転送・cvtlq/cvtql。
+        Insn::Cpys | Insn::Cpysn | Insn::Cpyse => {
+            let o = ops_ffp3(u128::from(word));
+            let av = Fpr(o.fa as u8).get(b);
+            let bv = Fpr(o.fb as u8).get(b);
+            // cpys: (a & sign)|(b & ~sign)。cpysn は a の符号を反転、
+            // cpyse は符号+指数（0xfff0000000000000）を a から取る。
+            // （cpys f31,fx,fy が fabs(fx) のイディオムになる向き）。
+            let (mask, neg) = match insn {
+                Insn::Cpys | Insn::Cpysn => (0x8000_0000_0000_0000u64, insn == Insn::Cpysn),
+                _ => (0xfff0_0000_0000_0000u64, false),
+            };
+            let an = b.not::<W64>(av);
+            let am = if neg {
+                and_k(b, an, mask)
+            } else {
+                and_k(b, av, mask)
+            };
+            let bk = and_k(b, bv, !mask);
+            let w = b.or::<W64>(am, bk);
+            Fpr(o.fc as u8).set(b, w);
+        }
+        Insn::MtFpcr => {
+            let o = ops_ffp3(u128::from(word));
+            let v = Fpr(o.fa as u8).get(b);
+            b.set(fpcr_ref(), v);
+        }
+        Insn::MfFpcr => {
+            let o = ops_ffp3(u128::from(word));
+            let v = b.get(fpcr_ref());
+            Fpr(o.fa as u8).set(b, v);
+        }
+        Insn::Fcmoveq
+        | Insn::Fcmovne
+        | Insn::Fcmovlt
+        | Insn::Fcmovge
+        | Insn::Fcmovle
+        | Insn::Fcmovgt => {
+            let o = ops_ffp3(u128::from(word));
+            let av = Fpr(o.fa as u8).get(b);
+            let z = b.konst::<W64>(0);
+            // fbcond と同じビット列ベースの条件（gen_fold_mzero）。
+            let c = match insn {
+                Insn::Fcmoveq | Insn::Fcmovne => {
+                    let t = and_k(b, av, 0x7fff_ffff_ffff_ffff);
+                    b.cmp(
+                        if insn == Insn::Fcmoveq {
+                            Cmp::Eq
+                        } else {
+                            Cmp::Ne
+                        },
+                        t,
+                        z,
+                    )
+                }
+                Insn::Fcmovlt | Insn::Fcmovge => {
+                    let mz = b.konst::<W64>(i64::MIN as u64);
+                    let is_mz = b.cmp(Cmp::Eq, av, mz);
+                    let f = b.select(is_mz, z, av);
+                    b.cmp(
+                        if insn == Insn::Fcmovlt {
+                            Cmp::LtS
+                        } else {
+                            Cmp::GeS
+                        },
+                        f,
+                        z,
+                    )
+                }
+                Insn::Fcmovle => b.cmp(Cmp::LeS, av, z),
+                _ => b.cmp(Cmp::GtS, av, z),
+            };
+            let bv = Fpr(o.fb as u8).get(b);
+            let keep = Fpr(o.fc as u8).get(b);
+            let w = b.select(c, bv, keep);
+            Fpr(o.fc as u8).set(b, w);
+        }
+        // cvtlq: (v>>29 & 0x3fffffff) | ((v<<32) & 0xc000000000000000)。
+        // 整数レジスタ値を S 内部表現の指数下位へ移す変換。
+        // Ref: SRC-QEMU (translate.c gen_cvtlq).
+        Insn::Cvtlq => {
+            let o = ops_ffp2q(u128::from(word));
+            let v = Fpr(o.fb as u8).get(b);
+            let lo = shr_n(b, v, 29);
+            let lo = and_k(b, lo, 0x3fff_ffff);
+            let hi = shl_n(b, v, 32);
+            let hi = and_k(b, hi, 0xc000_0000_0000_0000);
+            let w = b.or::<W64>(hi, lo);
+            Fpr(o.fc as u8).set(b, w);
+        }
+        // cvtql: ((v & 0xc0000000) << 32) | ((v & 0x3fffffff) << 29)。
+        // Ref: SRC-QEMU (fpu_helper.c helper_cvtql).
+        Insn::Cvtql => {
+            let o = ops_ffp2q(u128::from(word));
+            let v = Fpr(o.fb as u8).get(b);
+            let hi = and_k(b, v, 0xc000_0000);
+            let hi = shl_n(b, hi, 32);
+            let lo = and_k(b, v, 0x3fff_ffff);
+            let lo = shl_n(b, lo, 29);
+            let w = b.or::<W64>(hi, lo);
+            Fpr(o.fc as u8).set(b, w);
+        }
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
 /// 命令の意味論。`Ok(true)` は実行完了、`Ok(false)` はこの段階では
 /// 未実装（呼び出し側が `Outcome::Unimplemented` に写す）。
 /// `pc` はこの命令の番地。
@@ -1364,6 +1754,57 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
         | Insn::StqU
         | Insn::StlC
         | Insn::StqC => mem(b, insn, word),
+        // ---- 段階16-9: 浮動小数点 load/store ----
+        // ldf/ldg/stf/stg（VAX F/G 形式）は fmem 内で Ok(false) に
+        // なり、未実装として扱われる。
+        Insn::Ldf
+        | Insn::Ldg
+        | Insn::Lds
+        | Insn::Ldt
+        | Insn::Stf
+        | Insn::Stg
+        | Insn::Sts
+        | Insn::Stt => fmem(b, insn, word),
+        // ---- 段階16-9: 浮動小数点 Operate（IEEE 側）----
+        // VAX 側（0x15: addf..cvtqg、sqrtf/sqrtg、itoff）は
+        // Ok(false) で未実装に落ちる。
+        Insn::Itofs
+        | Insn::Itoft
+        | Insn::Ftois
+        | Insn::Ftoit
+        | Insn::Adds
+        | Insn::Subs
+        | Insn::Muls
+        | Insn::Divs
+        | Insn::Addt
+        | Insn::Subt
+        | Insn::Mult
+        | Insn::Divt
+        | Insn::Cmptun
+        | Insn::Cmpteq
+        | Insn::Cmptlt
+        | Insn::Cmptle
+        | Insn::Sqrts
+        | Insn::Sqrtt
+        | Insn::Cvtts
+        | Insn::Cvtst
+        | Insn::CvtstS
+        | Insn::Cvttq
+        | Insn::Cvtqs
+        | Insn::Cvtqt
+        | Insn::Cpys
+        | Insn::Cpysn
+        | Insn::Cpyse
+        | Insn::MtFpcr
+        | Insn::MfFpcr
+        | Insn::Fcmoveq
+        | Insn::Fcmovne
+        | Insn::Fcmovlt
+        | Insn::Fcmovge
+        | Insn::Fcmovle
+        | Insn::Fcmovgt
+        | Insn::Cvtlq
+        | Insn::Cvtql => fop(b, insn, word),
         // ---- 段階16-5: MISC ----
         // バリアとトラップバリア。順序付き実行のインタプリタでは
         // mb/wmb/trapb/excb は何もしない（trapb の実確定は PAL

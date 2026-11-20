@@ -207,8 +207,9 @@ fn call_pal_raises_trap_with_palfn() {
 #[test]
 fn unimplemented_insns_return_false() {
     let mut env = env();
-    // FP load ldt は段階16-9。ここでは false。
-    let word = 0x8c1f_0000u32;
+    // VAX F 形式の ldf f31,0(r31) は段階16-9 でも未実装（VAX
+    // F/G 形式は対象外）。ここでは false。
+    let word = (0x20u32 << 26) | (31 << 21) | (31 << 16);
     let insn = dec(word).unwrap();
     let ok = env.step(|b| sem::exec(b, insn, word, 0)).unwrap();
     assert!(!ok);
@@ -955,4 +956,250 @@ fn misc_nops_and_counters() {
     assert!(run1(&mut env, 0x6060_e000));
     assert_eq!(gpr(&mut env, 3), 1);
     assert_eq!(env.backend.get(sem::rx_flag_ref()), 0);
+}
+
+// ---- 段階16-9: 浮動小数点 ----
+
+/// FP レジスタの読み出し（内部表現のまま）。
+fn fpr(env: &mut BareEnv, n: u8) -> u64 {
+    env.backend.get(sem::Fpr(n).state())
+}
+
+/// FP OPERATE 3 項形（fpfn は fn[10:0] 全体。bits 15-5）。
+const fn fop3(op: u32, fa: u32, fb: u32, fpfn: u32, fc: u32) -> u32 {
+    (op << 26) | (fa << 21) | (fb << 16) | (fpfn << 5) | fc
+}
+
+/// FP OPERATE 2 項形（fa 桁は 31 固定）。
+const fn fop2(op: u32, fb: u32, fpfn: u32, fc: u32) -> u32 {
+    (op << 26) | (31 << 21) | (fb << 16) | (fpfn << 5) | fc
+}
+
+/// 整数→FP 転送形（FITF。rb 桁は 31 固定）。
+const fn fitf(ra: u32, fn11: u32, fc: u32) -> u32 {
+    (0x14 << 26) | (ra << 21) | (31 << 16) | (fn11 << 5) | fc
+}
+
+/// FP→整数転送形（FFTI。rb 桁は 31 固定）。
+const fn ffti(fa: u32, fn11: u32, rc: u32) -> u32 {
+    (0x1c << 26) | (fa << 21) | (31 << 16) | (fn11 << 5) | rc
+}
+
+// S 形式内部表現の定数（f32 の 1.0/2.0/3.0/42.0）。
+const S_ONE: u64 = 0x3ff0_0000_0000_0000;
+const S_TWO: u64 = 0x4000_0000_0000_0000;
+const S_THREE: u64 = 0x4008_0000_0000_0000;
+const S_42: u64 = 0x4045_0000_0000_0000;
+// T 形式は生の f64 ビット列。
+const T_ONE: u64 = 0x3ff0_0000_0000_0000;
+const T_TWO: u64 = 0x4000_0000_0000_0000;
+const T_THREE: u64 = 0x4008_0000_0000_0000;
+const T_42: u64 = 0x4045_0000_0000_0000;
+const T_NAN: u64 = 0x7ff8_0000_0000_0000;
+/// cmpt* の真値（f64 の 2.0）。
+const CMP_TRUE: u64 = 0x4000_0000_0000_0000;
+
+#[test]
+fn fp_load_store_t_roundtrip() {
+    let mut env = env();
+    env.map_rw(0x1_0000, 2).unwrap();
+    env.backend.set(sem::Gpr(1).state(), 0x1_0008);
+    env.backend.set(sem::Fpr(2).state(), 0x1122_3344_5566_7788);
+    // stt f2,0(r1); ldt f3,0(r1) — 生の 64 ビット転送。
+    assert!(run1(&mut env, memw(0x27, 2, 1, 0)));
+    assert!(run1(&mut env, memw(0x23, 3, 1, 0)));
+    assert_eq!(fpr(&mut env, 3), 0x1122_3344_5566_7788);
+    // 整数側からも同じビット列が見える。
+    assert!(run1(&mut env, memw(0x29, 5, 1, 0)));
+    assert_eq!(gpr(&mut env, 5), 0x1122_3344_5566_7788);
+    // stt してから ldt で戻す。負 displacement も試す。
+    env.backend.set(sem::Fpr(4).state(), T_ONE);
+    assert!(run1(&mut env, memw(0x27, 4, 1, 0xfff8)));
+    assert!(run1(&mut env, memw(0x23, 6, 1, 0xfff8)));
+    assert_eq!(fpr(&mut env, 6), T_ONE);
+}
+
+#[test]
+fn fp_load_store_s_roundtrip() {
+    let mut env = env();
+    env.map_rw(0x1_0000, 1).unwrap();
+    env.backend.set(sem::Gpr(1).state(), 0x1_0000);
+    // f32 の 1.0 (0x3f800000) を lds で読むと S 内部表現になる。
+    env.backend.set(sem::Gpr(2).state(), 0x3f80_0000);
+    assert!(run1(&mut env, memw(0x2c, 2, 1, 0))); // stl
+    assert!(run1(&mut env, memw(0x22, 3, 1, 0))); // lds
+    assert_eq!(fpr(&mut env, 3), S_ONE);
+    // sts はメモリに f32 ビット列を書き戻す。
+    env.backend.set(sem::Fpr(4).state(), S_TWO);
+    assert!(run1(&mut env, memw(0x26, 4, 1, 0))); // sts
+    assert!(run1(&mut env, memw(0x28, 5, 1, 0))); // ldl（符号拡張）
+    assert_eq!(gpr(&mut env, 5), 0x4000_0000);
+    // lds f31,0(r1) は UNOP/prefetch でメモリを読まない。
+    assert!(run1(&mut env, memw(0x22, 31, 31, 0)));
+}
+
+#[test]
+fn fp_arith_s_and_t() {
+    let mut env = env();
+    // adds f1,f2,f3: 1.0 + 2.0 = 3.0。無修飾の fn11 は rm bits=10
+    // （/n=最近接偶数）なので基本 op + 0x080。
+    env.backend.set(sem::Fpr(1).state(), S_ONE);
+    env.backend.set(sem::Fpr(2).state(), S_TWO);
+    assert!(run1(&mut env, fop3(0x16, 1, 2, 0x080, 3)));
+    assert_eq!(fpr(&mut env, 3), S_THREE);
+    // subs: 3.0 - 1.0 = 2.0（fn=0x081）。
+    env.backend.set(sem::Fpr(4).state(), S_THREE);
+    assert!(run1(&mut env, fop3(0x16, 4, 1, 0x081, 5)));
+    assert_eq!(fpr(&mut env, 5), S_TWO);
+    // muls: 2.0 * 3.0 = 6.0 → f32 6.0=0x40c00000 → sreg。
+    assert!(run1(&mut env, fop3(0x16, 2, 4, 0x082, 6)));
+    assert_eq!(fpr(&mut env, 6), 0x4018_0000_0000_0000);
+    // divs: 3.0 / 2.0 = 1.5 → f32 0x3fc00000 → sreg 0x3ff8...。
+    assert!(run1(&mut env, fop3(0x16, 4, 2, 0x083, 7)));
+    assert_eq!(fpr(&mut env, 7), 0x3ff8_0000_0000_0000);
+    // addt/subt/mult/divt は生 f64 で同じ値を通す。
+    env.backend.set(sem::Fpr(8).state(), T_ONE);
+    env.backend.set(sem::Fpr(9).state(), T_TWO);
+    assert!(run1(&mut env, fop3(0x16, 8, 9, 0x0a0, 10)));
+    assert_eq!(fpr(&mut env, 10), T_THREE);
+    env.backend.set(sem::Fpr(11).state(), T_THREE);
+    assert!(run1(&mut env, fop3(0x16, 11, 9, 0x0a3, 12)));
+    assert_eq!(fpr(&mut env, 12), 0x3ff8_0000_0000_0000); // 1.5
+    // adds/su（/s+/u 修飾、rm=/n の fn11=0x580）も同じ結果。
+    assert!(run1(&mut env, fop3(0x16, 1, 2, 0x580, 13)));
+    assert_eq!(fpr(&mut env, 13), S_THREE);
+    // /m（負無限大方向丸め、fn[7:6]=01）の経路: 0.1+0.2 は
+    // 表現可能境界の丸めが見える。0x3fb999999999999a+0x3fc999999999999a。
+    // 結果の正確な下位は softfloat 任せだが、/n との差分が出ない
+    // 正確値（1.0+2.0）では同じになる。
+    assert!(run1(&mut env, fop3(0x16, 1, 2, 0x0c0, 14)));
+    assert_eq!(fpr(&mut env, 14), S_THREE);
+}
+
+#[test]
+fn fp_cmpt_and_unordered() {
+    let mut env = env();
+    env.backend.set(sem::Fpr(1).state(), T_ONE);
+    env.backend.set(sem::Fpr(2).state(), T_TWO);
+    // cmpteq: 1.0 == 2.0 → 0。cmptlt: 1.0 < 2.0 → 真。cmptle も真。
+    assert!(run1(&mut env, fop3(0x16, 1, 2, 0x0a5, 3)));
+    assert_eq!(fpr(&mut env, 3), 0);
+    assert!(run1(&mut env, fop3(0x16, 1, 2, 0x0a6, 3)));
+    assert_eq!(fpr(&mut env, 3), CMP_TRUE);
+    assert!(run1(&mut env, fop3(0x16, 2, 2, 0x0a7, 3)));
+    assert_eq!(fpr(&mut env, 3), CMP_TRUE);
+    assert!(run1(&mut env, fop3(0x16, 2, 1, 0x0a6, 3)));
+    assert_eq!(fpr(&mut env, 3), 0); // 2.0 < 1.0 は偽
+    // cmptun: 順序付きなら 0、NaN を含むと真。
+    assert!(run1(&mut env, fop3(0x16, 1, 2, 0x0a4, 3)));
+    assert_eq!(fpr(&mut env, 3), 0);
+    env.backend.set(sem::Fpr(4).state(), T_NAN);
+    assert!(run1(&mut env, fop3(0x16, 4, 1, 0x0a4, 3)));
+    assert_eq!(fpr(&mut env, 3), CMP_TRUE);
+    // NaN では le/lt/eq も全て偽。
+    assert!(run1(&mut env, fop3(0x16, 4, 1, 0x0a7, 3)));
+    assert_eq!(fpr(&mut env, 3), 0);
+}
+
+#[test]
+fn fp_sqrt_and_cvt() {
+    let mut env = env();
+    // sqrts f1,f2: sqrt(4.0)=2.0。f32 4.0=0x40800000 → sreg。
+    env.backend.set(sem::Fpr(1).state(), 0x4010_0000_0000_0000);
+    assert!(run1(&mut env, fop2(0x14, 1, 0x00b, 2)));
+    assert_eq!(fpr(&mut env, 2), S_TWO);
+    // sqrtt: sqrt(9.0)=3.0。f64 9.0 = 0x4022_0000_0000_0000。
+    env.backend.set(sem::Fpr(3).state(), 0x4022_0000_0000_0000);
+    assert!(run1(&mut env, fop2(0x14, 3, 0x02b, 4)));
+    assert_eq!(fpr(&mut env, 4), T_THREE);
+    // cvtts f5,f6: T 2.5 → S。f32 2.5=0x40200000 → sreg。
+    env.backend.set(sem::Fpr(5).state(), 0x4004_0000_0000_0000);
+    assert!(run1(&mut env, fop2(0x16, 5, 0x02c, 6)));
+    assert_eq!(fpr(&mut env, 6), 0x4004_0000_0000_0000);
+    // cvtst f7,f8: S 2.0 → T 2.0。
+    env.backend.set(sem::Fpr(7).state(), S_TWO);
+    assert!(run1(&mut env, fop2(0x16, 7, 0x2ac, 8)));
+    assert_eq!(fpr(&mut env, 8), T_TWO);
+    // cvtst/s も同じ変換経路。
+    assert!(run1(&mut env, fop2(0x16, 7, 0x6ac, 9)));
+    assert_eq!(fpr(&mut env, 9), T_TWO);
+    // cvttq f10,f11: 3.7 → 3（無修飾 = /c 0 方向切り捨て）。
+    env.backend.set(sem::Fpr(10).state(), 0x400d_9999_9999_999a);
+    assert!(run1(&mut env, fop2(0x16, 10, 0x02f, 11)));
+    assert_eq!(fpr(&mut env, 11), 3);
+    // cvtqs f12,f13: int 42 → S 42.0。
+    env.backend.set(sem::Fpr(12).state(), 42);
+    assert!(run1(&mut env, fop2(0x16, 12, 0x03c, 13)));
+    assert_eq!(fpr(&mut env, 13), S_42);
+    // cvtqt: int 42 → T 42.0。
+    assert!(run1(&mut env, fop2(0x16, 12, 0x03e, 14)));
+    assert_eq!(fpr(&mut env, 14), T_42);
+}
+
+#[test]
+fn fp_itof_ftoi_moves() {
+    let mut env = env();
+    // itofs r1,f2: r の下位 32 ビットを S 内部表現へ。
+    env.backend.set(sem::Gpr(1).state(), 0x3f80_0000);
+    assert!(run1(&mut env, fitf(1, 0x004, 2)));
+    assert_eq!(fpr(&mut env, 2), S_ONE);
+    // ftois f2,r3: 逆変換で f32 ビット列をゼロ拡張して返す。
+    assert!(run1(&mut env, ffti(2, 0x078, 3)));
+    assert_eq!(gpr(&mut env, 3), 0x3f80_0000);
+    // itoft r4,f5 / ftoit f5,r6 は生の 64 ビット転送。
+    env.backend.set(sem::Gpr(4).state(), 0xdead_beef_cafe_f00d);
+    assert!(run1(&mut env, fitf(4, 0x024, 5)));
+    assert_eq!(fpr(&mut env, 5), 0xdead_beef_cafe_f00d);
+    assert!(run1(&mut env, ffti(5, 0x070, 6)));
+    assert_eq!(gpr(&mut env, 6), 0xdead_beef_cafe_f00d);
+}
+
+#[test]
+fn fp_cpys_and_fcmov() {
+    let mut env = env();
+    // cpys f1,f2,f3: 符号は f1、残りは f2 から。
+    env.backend.set(sem::Fpr(1).state(), 0x0000_0000_0000_1111);
+    env.backend.set(sem::Fpr(2).state(), 0x8000_0000_0000_2222);
+    assert!(run1(&mut env, fop3(0x17, 1, 2, 0x020, 3)));
+    assert_eq!(fpr(&mut env, 3), 0x0000_0000_0000_2222);
+    // cpysn: f1 の符号を反転して取る。
+    assert!(run1(&mut env, fop3(0x17, 1, 2, 0x021, 4)));
+    assert_eq!(fpr(&mut env, 4), 0x8000_0000_0000_2222);
+    // cpyse: 符号+指数（上位 12 ビット）を f1 から取る。
+    assert!(run1(&mut env, fop3(0x17, 1, 2, 0x022, 5)));
+    assert_eq!(fpr(&mut env, 5), 0x0000_0000_0000_2222);
+    // cpys f31,f6,f7 = fabs(f6) のイディオム。
+    env.backend.set(sem::Fpr(6).state(), 0xbff0_0000_0000_0000); // -1.0
+    assert!(run1(&mut env, fop3(0x17, 31, 6, 0x020, 7)));
+    assert_eq!(fpr(&mut env, 7), T_ONE);
+    // fcmoveq f6,f7,f8: fa=0 のとき rc←rb。
+    env.backend.set(sem::Fpr(7).state(), T_TWO);
+    assert!(run1(&mut env, fop3(0x17, 31, 7, 0x02a, 8)));
+    assert_eq!(fpr(&mut env, 8), T_TWO);
+    // fa≠0 なら rc は据え置き。
+    env.backend.set(sem::Fpr(6).state(), T_ONE);
+    env.backend.set(sem::Fpr(9).state(), T_THREE);
+    assert!(run1(&mut env, fop3(0x17, 6, 7, 0x02a, 9)));
+    assert_eq!(fpr(&mut env, 9), T_THREE);
+    // fcmovlt: 負の fa（-0.0 ではなく真の負）で真。
+    env.backend.set(sem::Fpr(10).state(), 0xbff0_0000_0000_0000);
+    assert!(run1(&mut env, fop3(0x17, 10, 7, 0x02c, 11)));
+    assert_eq!(fpr(&mut env, 11), T_TWO);
+}
+
+#[test]
+fn fp_fpcr_and_cvtlq_cvtql() {
+    let mut env = env();
+    // mt_fpcr f1 で書き、mf_fpcr f2 で読み戻す。
+    env.backend.set(sem::Fpr(1).state(), 0x0c00_0000_0000_0000);
+    assert!(run1(&mut env, fop3(0x17, 1, 31, 0x024, 31)));
+    assert!(run1(&mut env, fop3(0x17, 2, 31, 0x025, 31)));
+    assert_eq!(fpr(&mut env, 2), 0x0c00_0000_0000_0000);
+    // cvtql f3,f4: 整数 42 を S 内部表現の整数領域へ。
+    env.backend.set(sem::Fpr(3).state(), 42);
+    assert!(run1(&mut env, fop2(0x17, 3, 0x030, 4)));
+    assert_eq!(fpr(&mut env, 4), 0x0000_0005_4000_0000);
+    // cvtlq f4,f5: 逆方向に畳む（QEMU の gen_cvtlq の式）。
+    assert!(run1(&mut env, fop2(0x17, 4, 0x010, 5)));
+    assert_eq!(fpr(&mut env, 5), 0x4000_0000_0000_002a);
 }
