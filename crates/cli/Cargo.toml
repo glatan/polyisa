@@ -13,6 +13,7 @@ polyisa-guest-alpha = { path = "../../guests/alpha", optional = true }
 polyisa-guest-arm = { path = "../../guests/arm", optional = true }
 polyisa-guest-m68k = { path = "../../guests/m68k", optional = true }
 polyisa-guest-mips = { path = "../../guests/mips", optional = true }
+polyisa-guest-parisc = { path = "../../guests/parisc", optional = true }
 polyisa-guest-power = { path = "../../guests/power", optional = true }
 polyisa-guest-riscv = { path = "../../guests/riscv", optional = true }
 polyisa-guest-s390 = { path = "../../guests/s390", optional = true }
@@ -38,6 +39,7 @@ default = [
     "guest-arm",
     "guest-m68k",
     "guest-mips",
+    "guest-parisc",
     "guest-power",
     "guest-riscv",
     "guest-s390",
@@ -50,6 +52,7 @@ guest-alpha = ["dep:polyisa-guest-alpha", "polyisa-os-linux/guest-alpha"]
 guest-arm = ["dep:polyisa-guest-arm", "polyisa-os-linux/guest-arm"]
 guest-m68k = ["dep:polyisa-guest-m68k", "polyisa-os-linux/guest-m68k"]
 guest-mips = ["dep:polyisa-guest-mips", "polyisa-os-linux/guest-mips"]
+guest-parisc = ["dep:polyisa-guest-parisc", "polyisa-os-linux/guest-parisc"]
 guest-power = ["dep:polyisa-guest-power", "polyisa-os-linux/guest-power"]
 guest-riscv = ["dep:polyisa-guest-riscv", "polyisa-os-linux/guest-riscv"]
 guest-s390 = ["dep:polyisa-guest-s390", "polyisa-os-linux/guest-s390"]

@@ -1,0 +1,842 @@
+// Copyright (c) polyisa contributors
+// SPDX-License-Identifier: MIT OR Apache-2.0
+//! PA-RISC Linux の syscall 処理。`cli` の実行ループからページゼロの
+//! ゲートウェイ入口を `handle_trap` の code として委譲される。
+//!
+//! 規約（SRC-LINUX — arch/parisc syscall 規約）:
+//! - 発行点は `ble 0x100(%sr2,%r0)`。ゲートウェイ番地 `0x100` が
+//!   `handle_trap` の code に来る。
+//! - 番号は `r20`、引数は `r26`（arg0）から `r21`（arg5）へ降順、
+//!   戻り値は `r28`（エラーは負の errno）、戻り番地は `r31`。
+//!   キュー（`iaoq_f`/`iaoq_b`）の `r31` への復帰は実行ループ側。
+//! - `0xb0` は LWS-CAS（`r20`=副番号、`r26`=adr、`r25`=old、
+//!   `r24`=new。結果 `r28`、状態 `r21`=0/-errno）。
+//! - `0xe0`（set_thread_pointer: `cr27 = r26`）は実行ループの
+//!   内蔵処理で、ここには来ない。
+//!
+//! 実装対象は bare バイナリの起動に必要な最小集合と、静的大部分の
+//! libc 初期化が呼ぶ ioctl/mmap/brk/uname/get*id/sigaction 系。
+//! fork/clone/execve/ファイルシステムは未対応（ENOSYS）。
+
+use polyisa_engine::bare::BareEnv;
+use polyisa_guest_parisc::sem;
+use polyisa_mem::{Access, AccessKind, Align, Endian, Perms, VirtAddr};
+use polyisa_sem::Backend as _;
+
+use crate::parisc::{errno, gate, lws, mman};
+use crate::{TrapHandler, TrapOutcome};
+
+/// PA-RISC の write が集めたバイト。標準出力と標準エラーを分ける。
+#[derive(Default)]
+pub struct PariscIo {
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+}
+
+/// PA-RISC Linux の syscall 状態機械。`r20`=番号、`r26`–`r21`=引数。
+pub struct Linux {
+    /// 標準入出力の capture。テストが読む。
+    pub io: PariscIo,
+    /// プログラムブレーク。0 は未初期化。
+    heap_end: u64,
+    /// brk 領域の開始（ELF の image_end）。`init_brk` が設定する。
+    brk_start: u64,
+    /// mmap の次に置く場所。末尾から伸ばす。
+    mmap_next: u64,
+    umask: u32,
+    /// ホストから見たプロセス識別子。getpid/gettid が返す。
+    pid: u64,
+    /// ゲストの実行ファイルのホストパス。/proc/self/exe の readlink 用。
+    pub exe_path: String,
+    /// 報告済みの未実装番号（一度だけ出す）。
+    reported: Vec<u64>,
+    /// 標準入力へ供給するバイト。
+    pub stdin_buf: Vec<u8>,
+    stdin_pos: usize,
+    /// MONOTONIC 時計の起点。
+    mono_start: Option<std::time::Instant>,
+    /// getrandom の決定的乱数状態。
+    rand_state: u64,
+}
+
+impl Default for Linux {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Linux {
+    /// PA-RISC Linux の状態機械を作る。データはビッグエンディアン。
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            io: PariscIo::default(),
+            heap_end: 0,
+            brk_start: 0,
+            mmap_next: 0x6000_0000,
+            umask: 0o22,
+            pid: 0,
+            exe_path: String::new(),
+            reported: Vec::new(),
+            stdin_buf: Vec::new(),
+            stdin_pos: 0,
+            mono_start: None,
+            rand_state: 0x9e37_79b9_7f4a_7c15,
+        }
+    }
+
+    /// ELF の `image_end` からプログラムブレークを初期化する。
+    pub fn init_brk(&mut self, image_end: u64) {
+        let e = image_end.div_ceil(4096) * 4096;
+        self.brk_start = e;
+        self.heap_end = e;
+        // mmap 領域はヒープの後ろに十分な間を取る。
+        self.mmap_next = self.mmap_next.max(e + 0x400_0000);
+    }
+
+    fn pid(&mut self) -> u64 {
+        if self.pid == 0 {
+            self.pid = 1;
+        }
+        self.pid
+    }
+
+    fn mono(&mut self) -> std::time::Duration {
+        self.mono_start
+            .get_or_insert_with(std::time::Instant::now)
+            .elapsed()
+    }
+
+    // ---- メモリ補助（BE・32 ビット ABI）----
+
+    fn acc(&self, kind: AccessKind) -> Access {
+        Access {
+            endian: Endian::Be,
+            align: Align::Unaligned,
+            kind,
+        }
+    }
+
+    fn read_bytes(&mut self, env: &mut BareEnv, addr: u64, len: usize) -> Option<Vec<u8>> {
+        let mut v = vec![0u8; len];
+        env.backend
+            .mem
+            .read(VirtAddr(addr), &mut v, self.acc(AccessKind::DataRead))
+            .ok()?;
+        Some(v)
+    }
+
+    fn write_bytes(&mut self, env: &mut BareEnv, addr: u64, data: &[u8]) -> bool {
+        env.backend.mem.write(VirtAddr(addr), data).is_ok()
+    }
+
+    fn get32(&mut self, env: &mut BareEnv, addr: u64) -> Option<u64> {
+        env.backend
+            .mem
+            .read_value(VirtAddr(addr), 4, self.acc(AccessKind::DataRead))
+            .ok()
+    }
+
+    // ---- レジスタ ABI ----
+
+    /// 引数 `i`（0 起算）。arg0=r26, arg1=r25, …, arg5=r21、
+    /// 番号は `arg(env, 6)`（r20）。戻りは下位 32 ビットのみ。
+    // Ref: SRC-LINUX (7.3) — syscall(2) の hppa 規約。
+    fn arg(env: &mut BareEnv, i: usize) -> u64 {
+        env.backend.get(sem::Gr(26 - i as u8).state()) & 0xffff_ffff
+    }
+
+    fn ret(env: &mut BareEnv, v: u64) {
+        env.backend.set(sem::Gr(28).state(), v);
+    }
+
+    // ---- syscall 本体 ----
+
+    /// `write`/`writev`。fd 1/2 は capture とホスト出力、0 は EBADF。
+    /// fd の検査は len==0 の早期リターンより先（vfs_write と同順）。
+    fn sys_write(&mut self, env: &mut BareEnv, fd: u64, buf: u64, len: u64) -> u64 {
+        if fd != 1 && fd != 2 {
+            return (-(errno::EBADF as i64)) as u64;
+        }
+        let n = usize::try_from(len).unwrap_or(1 << 20).min(1 << 20);
+        let Some(data) = self.read_bytes(env, buf, n) else {
+            return (-(errno::EFAULT as i64)) as u64;
+        };
+        match fd {
+            1 => {
+                self.io.stdout.extend_from_slice(&data);
+                use std::io::Write as _;
+                let _ = std::io::stdout().write_all(&data);
+            }
+            _ => {
+                self.io.stderr.extend_from_slice(&data);
+                use std::io::Write as _;
+                let _ = std::io::stderr().write_all(&data);
+            }
+        }
+        data.len() as u64
+    }
+
+    fn sys_writev(&mut self, env: &mut BareEnv, fd: u64, iov: u64, cnt: u64) -> u64 {
+        if fd != 1 && fd != 2 {
+            return (-(errno::EBADF as i64)) as u64;
+        }
+        let mut total = 0u64;
+        for i in 0..cnt.min(1024) {
+            let Some(base) = self.get32(env, iov + i * 8) else {
+                return (-(errno::EFAULT as i64)) as u64;
+            };
+            let Some(len) = self.get32(env, iov + i * 8 + 4) else {
+                return (-(errno::EFAULT as i64)) as u64;
+            };
+            let n = self.sys_write(env, fd, base, len);
+            if (n as i64) < 0 {
+                return n;
+            }
+            total += n;
+            if n != len {
+                break;
+            }
+        }
+        total
+    }
+
+    /// `read`/`readv`。fd 0 は `stdin_buf` を順送り。
+    fn sys_read(&mut self, env: &mut BareEnv, fd: u64, buf: u64, len: u64) -> u64 {
+        if fd != 0 {
+            return (-(errno::EBADF as i64)) as u64;
+        }
+        let avail = self.stdin_buf.len().saturating_sub(self.stdin_pos);
+        let n = (len as usize).min(avail);
+        let chunk = self.stdin_buf[self.stdin_pos..self.stdin_pos + n].to_vec();
+        self.stdin_pos += n;
+        if n > 0 && !self.write_bytes(env, buf, &chunk) {
+            return (-(errno::EFAULT as i64)) as u64;
+        }
+        n as u64
+    }
+
+    fn sys_readv(&mut self, env: &mut BareEnv, fd: u64, iov: u64, cnt: u64) -> u64 {
+        if fd != 0 {
+            return (-(errno::EBADF as i64)) as u64;
+        }
+        let mut total = 0u64;
+        for i in 0..cnt.min(1024) {
+            let Some(base) = self.get32(env, iov + i * 8) else {
+                return (-(errno::EFAULT as i64)) as u64;
+            };
+            let Some(len) = self.get32(env, iov + i * 8 + 4) else {
+                return (-(errno::EFAULT as i64)) as u64;
+            };
+            let n = self.sys_read(env, fd, base, len);
+            if (n as i64) < 0 {
+                return n;
+            }
+            total += n;
+            if n != len {
+                break;
+            }
+        }
+        total
+    }
+
+    /// `brk`（alpha と同じ規約。0 は現ブレークを返す）。
+    fn sys_brk(&mut self, env: &mut BareEnv, addr: u64) -> u64 {
+        if addr == 0 {
+            return self.heap_end;
+        }
+        if addr < self.brk_start {
+            return self.heap_end;
+        }
+        if addr > self.heap_end {
+            let lo = self.heap_end.div_ceil(4096) * 4096;
+            let hi = addr.div_ceil(4096) * 4096;
+            if (lo..hi)
+                .step_by(4096)
+                .any(|a| env.backend.mem.is_mapped(polyisa_mem::PageNo(a / 4096)))
+            {
+                return self.heap_end;
+            }
+            if hi > lo
+                && env
+                    .backend
+                    .mem
+                    .map(VirtAddr(lo), (hi - lo) / 4096, Perms::RW)
+                    .is_err()
+            {
+                return self.heap_end;
+            }
+        }
+        self.heap_end = addr;
+        addr
+    }
+
+    /// `mmap`/`mmap2`。無名 PRIVATE/FIXED のみ。ファイル写像は
+    /// ENODEV（`pgoff` の単位差は mmap2 で <<12 だが無名写像では無意味）。
+    fn sys_mmap(&mut self, env: &mut BareEnv, args: &[u64; 6]) -> u64 {
+        let (addr, len, prot, flags) = (args[0], args[1], args[2] as u32, args[3] as u32);
+        if len == 0 || len > (1 << 30) {
+            return (-(errno::EINVAL as i64)) as u64;
+        }
+        if flags & mman::MAP_ANONYMOUS == 0 {
+            return (-(errno::ENODEV as i64)) as u64; // ファイル写像は未対応
+        }
+        if flags & mman::MAP_FIXED != 0 && addr & 0xfff != 0 {
+            return (-(errno::EINVAL as i64)) as u64;
+        }
+        let pages = len.div_ceil(4096);
+        let base = if flags & mman::MAP_FIXED != 0 {
+            addr & !0xfff
+        } else {
+            let mut b = self.mmap_next;
+            let mut tries = 0;
+            while (b..b + pages * 4096)
+                .step_by(4096)
+                .any(|a| env.backend.mem.is_mapped(polyisa_mem::PageNo(a / 4096)))
+            {
+                tries += 1;
+                if tries > 4096 {
+                    return (-(errno::ENOMEM as i64)) as u64;
+                }
+                b += 4096;
+            }
+            self.mmap_next = b + pages * 4096;
+            b
+        };
+        let mut p = 0u8;
+        if prot & mman::PROT_READ != 0 {
+            p |= Perms::R.0;
+        }
+        if prot & mman::PROT_WRITE != 0 {
+            p |= Perms::W.0;
+        }
+        if prot & mman::PROT_EXEC != 0 {
+            p |= Perms::X.0;
+        }
+        if env
+            .backend
+            .mem
+            .map(VirtAddr(base), pages, Perms(p))
+            .is_err()
+        {
+            return (-(errno::ENOMEM as i64)) as u64;
+        }
+        base
+    }
+
+    /// `munmap`。
+    fn sys_munmap(&mut self, env: &mut BareEnv, addr: u64, len: u64) -> u64 {
+        if len == 0 || addr & 0xfff != 0 {
+            return (-(errno::EINVAL as i64)) as u64;
+        }
+        let Some(end) = addr.checked_add(len) else {
+            return (-(errno::EINVAL as i64)) as u64;
+        };
+        if len > (1 << 30) {
+            return (-(errno::ENOMEM as i64)) as u64;
+        }
+        let pages = end.div_ceil(4096) - addr / 4096;
+        env.backend.mem.unmap(VirtAddr(addr), pages);
+        0
+    }
+
+    /// `mprotect`。範囲をページ境界に丸めて権限を変える。
+    fn sys_mprotect(&mut self, env: &mut BareEnv, addr: u64, len: u64, prot: u64) -> u64 {
+        let lo = addr & !0xfff;
+        let Some(end) = addr.checked_add(len) else {
+            return (-(errno::EINVAL as i64)) as u64;
+        };
+        let hi = end.div_ceil(4096) * 4096;
+        if hi <= lo {
+            return (-(errno::EINVAL as i64)) as u64;
+        }
+        let mut p = 0u8;
+        if prot as u32 & mman::PROT_READ != 0 {
+            p |= Perms::R.0;
+        }
+        if prot as u32 & mman::PROT_WRITE != 0 {
+            p |= Perms::W.0;
+        }
+        if prot as u32 & mman::PROT_EXEC != 0 {
+            p |= Perms::X.0;
+        }
+        if env
+            .backend
+            .mem
+            .protect(VirtAddr(lo), (hi - lo) / 4096, Perms(p))
+            .is_err()
+        {
+            return (-(errno::ENOMEM as i64)) as u64;
+        }
+        0
+    }
+
+    /// `uname`。machine は "parisc"。
+    fn sys_uname(&mut self, env: &mut BareEnv, addr: u64) -> u64 {
+        const FIELDS: [&str; 6] = [
+            "Linux",
+            "polyisa",
+            "7.3.0",
+            "#1 polyisa",
+            "parisc",
+            "(none)",
+        ];
+        let mut image = [0u8; 65 * 6];
+        for (i, s) in FIELDS.iter().enumerate() {
+            let b = s.as_bytes();
+            image[65 * i..65 * i + b.len()].copy_from_slice(b);
+        }
+        if !self.write_bytes(env, addr, &image) {
+            return (-(errno::EFAULT as i64)) as u64;
+        }
+        0
+    }
+
+    /// `sysinfo`（hppa32 の struct sysinfo: 4 バイト long。
+    /// uptime@0、loads[3]@4、totalram@16、freeram@20、mem_unit@52）。
+    fn sys_sysinfo(&mut self, env: &mut BareEnv, addr: u64) -> u64 {
+        let secs = self.mono().as_secs();
+        let mut img = [0u8; 112];
+        img[..4].copy_from_slice(&(secs as u32).to_be_bytes());
+        img[16..20].copy_from_slice(&(512u32 << 20).to_be_bytes()); // totalram
+        img[20..24].copy_from_slice(&(256u32 << 20).to_be_bytes()); // freeram
+        img[52..56].copy_from_slice(&1u32.to_be_bytes()); // mem_unit
+        if !self.write_bytes(env, addr, &img) {
+            return (-(errno::EFAULT as i64)) as u64;
+        }
+        0
+    }
+
+    /// `times`（tms: long×4 = 16 バイト。戻り値はクロック）。
+    fn sys_times(&mut self, env: &mut BareEnv, addr: u64) -> u64 {
+        let us = self.mono().as_micros() as u64;
+        let ticks = us / 10_000; // USER_HZ=100 換算
+        if addr != 0 {
+            let mut img = [0u8; 16];
+            img[..4].copy_from_slice(&(ticks as u32).to_be_bytes());
+            if !self.write_bytes(env, addr, &img) {
+                return (-(errno::EFAULT as i64)) as u64;
+            }
+        }
+        ticks
+    }
+
+    /// `gettimeofday`（tv_sec/tv_usec の long×2）。
+    fn sys_gettimeofday(&mut self, env: &mut BareEnv, tv: u64, _tz: u64) -> u64 {
+        let d = self.mono();
+        if tv != 0 {
+            let mut img = [0u8; 8];
+            img[..4].copy_from_slice(&(d.as_secs() as u32).to_be_bytes());
+            img[4..8].copy_from_slice(&d.subsec_micros().to_be_bytes());
+            if !self.write_bytes(env, tv, &img) {
+                return (-(errno::EFAULT as i64)) as u64;
+            }
+        }
+        0
+    }
+
+    /// `clock_gettime`（timespec: long sec + long nsec）。
+    fn sys_clock_gettime(&mut self, env: &mut BareEnv, _clk: u64, ts: u64) -> u64 {
+        let d = self.mono();
+        let mut img = [0u8; 8];
+        img[..4].copy_from_slice(&(d.as_secs() as u32).to_be_bytes());
+        img[4..8].copy_from_slice(&d.subsec_nanos().to_be_bytes());
+        if !self.write_bytes(env, ts, &img) {
+            return (-(errno::EFAULT as i64)) as u64;
+        }
+        0
+    }
+
+    /// `clock_gettime64`（timespec64: i64 sec + i64 nsec）。
+    fn sys_clock_gettime64(&mut self, env: &mut BareEnv, _clk: u64, ts: u64) -> u64 {
+        let d = self.mono();
+        let mut img = [0u8; 16];
+        img[..8].copy_from_slice(&(d.as_secs() as i64).to_be_bytes());
+        img[8..16].copy_from_slice(&(i64::from(d.subsec_nanos())).to_be_bytes());
+        if !self.write_bytes(env, ts, &img) {
+            return (-(errno::EFAULT as i64)) as u64;
+        }
+        0
+    }
+
+    /// `clock_getres`（timespec: long sec + long nsec = 1ns 分解能）。
+    fn sys_clock_getres(&mut self, env: &mut BareEnv, _clk: u64, res: u64) -> u64 {
+        if res != 0 {
+            let mut img = [0u8; 8];
+            img[4..8].copy_from_slice(&1u32.to_be_bytes());
+            if !self.write_bytes(env, res, &img) {
+                return (-(errno::EFAULT as i64)) as u64;
+            }
+        }
+        0
+    }
+
+    /// `getrandom`。決定的 xorshift で埋める（再現性のため）。
+    fn sys_getrandom(&mut self, env: &mut BareEnv, buf: u64, len: u64, _flags: u64) -> u64 {
+        let n = usize::try_from(len).unwrap_or(1 << 20).min(1 << 20);
+        let mut out = vec![0u8; n];
+        let mut s = self.rand_state;
+        for b in out.iter_mut() {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            *b = s as u8;
+        }
+        self.rand_state = s;
+        if !self.write_bytes(env, buf, &out) {
+            return (-(errno::EFAULT as i64)) as u64;
+        }
+        n as u64
+    }
+
+    /// `getcwd`。
+    fn sys_getcwd(&mut self, env: &mut BareEnv, buf: u64, len: u64) -> u64 {
+        let s = "/";
+        let n = s.len() + 1;
+        if n as u64 > len {
+            return (-(errno::ERANGE as i64)) as u64;
+        }
+        if !self.write_bytes(env, buf, s.as_bytes())
+            || !self.write_bytes(env, buf + s.len() as u64, &[0])
+        {
+            return (-(errno::EFAULT as i64)) as u64;
+        }
+        n as u64
+    }
+
+    /// `readlink`/`readlinkat`。/proc/self/exe だけ `exe_path`、
+    /// ほかは ENOENT。
+    fn sys_readlink(&mut self, env: &mut BareEnv, path_addr: u64, buf: u64, len: u64) -> u64 {
+        let path = self.read_cstr(env, path_addr).unwrap_or_default();
+        let path = String::from_utf8_lossy(&path);
+        let target = if path == "/proc/self/exe" {
+            self.exe_path.clone()
+        } else {
+            return (-(errno::ENOENT as i64)) as u64;
+        };
+        let b = target.as_bytes();
+        let n = b.len().min(len as usize);
+        if !self.write_bytes(env, buf, &b[..n]) {
+            return (-(errno::EFAULT as i64)) as u64;
+        }
+        n as u64
+    }
+
+    fn read_cstr(&mut self, env: &mut BareEnv, addr: u64) -> Option<Vec<u8>> {
+        let mut out = Vec::new();
+        for i in 0..4096u64 {
+            let mut b = [0u8; 1];
+            env.backend
+                .mem
+                .read(VirtAddr(addr + i), &mut b, self.acc(AccessKind::DataRead))
+                .ok()?;
+            if b[0] == 0 {
+                return Some(out);
+            }
+            out.push(b[0]);
+        }
+        Some(out)
+    }
+
+    /// 通常 syscall（code=0x100）のディスパッチ。
+    // Ref: SRC-LINUX (7.3) — syscall 規約（r20=nr, r26..r21=args, r28=ret）。
+    fn syscall(&mut self, env: &mut BareEnv) -> TrapOutcome {
+        let n = Self::arg(env, 6); // r20
+        let args: [u64; 6] = [
+            Self::arg(env, 0),
+            Self::arg(env, 1),
+            Self::arg(env, 2),
+            Self::arg(env, 3),
+            Self::arg(env, 4),
+            Self::arg(env, 5),
+        ];
+        let name = super::name(n);
+        let r: Option<u64> = match name {
+            Some("exit") | Some("exit_group") => {
+                return TrapOutcome::Exit(args[0] as u32);
+            }
+            Some("write") => Some(self.sys_write(env, args[0], args[1], args[2])),
+            Some("writev") => Some(self.sys_writev(env, args[0], args[1], args[2])),
+            Some("read") => Some(self.sys_read(env, args[0], args[1], args[2])),
+            Some("readv") => Some(self.sys_readv(env, args[0], args[1], args[2])),
+            Some("brk") => Some(self.sys_brk(env, args[0])),
+            Some("uname") => Some(self.sys_uname(env, args[0])),
+            Some("sysinfo") => Some(self.sys_sysinfo(env, args[0])),
+            Some("times") => Some(self.sys_times(env, args[0])),
+            Some("gettimeofday") => Some(self.sys_gettimeofday(env, args[0], args[1])),
+            Some("clock_gettime") => Some(self.sys_clock_gettime(env, args[0], args[1])),
+            Some("clock_gettime64") => Some(self.sys_clock_gettime64(env, args[0], args[1])),
+            Some("clock_getres") => Some(self.sys_clock_getres(env, args[0], args[1])),
+            Some("nanosleep") | Some("clock_nanosleep") => Some(0),
+            Some("getcwd") => Some(self.sys_getcwd(env, args[0], args[1])),
+            Some("readlink") => Some(self.sys_readlink(env, args[0], args[1], args[2])),
+            Some("readlinkat") => {
+                // AT_FDCWD の /proc/self/exe のみ。
+                Some(self.sys_readlink(env, args[1], args[2], args[3]))
+            }
+            Some("mmap") | Some("mmap2") => Some(self.sys_mmap(env, &args)),
+            Some("munmap") => Some(self.sys_munmap(env, args[0], args[1])),
+            Some("mprotect") => Some(self.sys_mprotect(env, args[0], args[1], args[2])),
+            Some("ioctl") => Some((-(errno::ENOTTY as i64)) as u64),
+            Some("lseek") | Some("_llseek") => Some((-(errno::ESPIPE as i64)) as u64),
+            Some("access") | Some("faccessat") | Some("faccessat2") => {
+                Some((-(errno::ENOENT as i64)) as u64)
+            }
+            Some("set_tid_address") | Some("getpid") | Some("gettid") => Some(self.pid()),
+            Some("getppid") => Some(self.pid()),
+            Some("getuid") | Some("geteuid") | Some("getgid") | Some("getegid") => Some(0),
+            Some("getgroups") => Some(0),
+            Some("getpgrp") | Some("getsid") | Some("getpgid") => Some(0),
+            Some("umask") => {
+                let old = self.umask;
+                self.umask = (args[0] as u32) & 0o777;
+                Some(u64::from(old))
+            }
+            // 標準 fd だけが開いている。close 0-2 は成功扱い、
+            // それ以外は EBADF。
+            Some("close") => {
+                if args[0] <= 2 {
+                    Some(0)
+                } else {
+                    Some((-(errno::EBADF as i64)) as u64)
+                }
+            }
+            Some("time") => {
+                let secs = self.mono().as_secs();
+                if args[0] != 0 && !self.write_bytes(env, args[0], &(secs as u32).to_be_bytes()) {
+                    Some((-(errno::EFAULT as i64)) as u64)
+                } else {
+                    Some(secs)
+                }
+            }
+            Some("sched_getaffinity") => {
+                // 1 CPU として 0b1 を書く（未写像なら EFAULT）。
+                let mask = args[2];
+                if mask != 0 && args[1] >= 4 && !self.write_bytes(env, mask, &1u32.to_be_bytes()) {
+                    Some((-(errno::EFAULT as i64)) as u64)
+                } else {
+                    Some(0)
+                }
+            }
+            Some("rt_sigaction")
+            | Some("rt_sigprocmask")
+            | Some("sigprocmask")
+            | Some("sigpending")
+            | Some("rt_sigpending")
+            | Some("sigaltstack")
+            | Some("sigsuspend")
+            | Some("rt_sigsuspend")
+            | Some("set_robust_list")
+            | Some("personality")
+            | Some("sched_yield") => Some(0),
+            Some("getrandom") => Some(self.sys_getrandom(env, args[0], args[1], args[2])),
+            _ => {
+                // 未実装は既定で ENOSYS を返して続ける（設計:
+                // docs/design/user-mode.md の「未実装のシステムコール」）。
+                if !self.reported.contains(&n) {
+                    self.reported.push(n);
+                    eprintln!(
+                        "run: unhandled parisc syscall {n} ({})",
+                        name.unwrap_or("?")
+                    );
+                }
+                Some((-(errno::ENOSYS as i64)) as u64)
+            }
+        };
+        if let Some(v) = r {
+            Self::ret(env, v);
+        }
+        TrapOutcome::Handled
+    }
+
+    /// LWS-CAS（gate::LWS）。`r20`=副番号（0=CAS、2=CAS2）、
+    /// `r26`=adr。状態は `r21`（0/-errno）。
+    /// which=0（CAS）: `r25`=old、`r24`=new。読めた元の値は `r28`
+    /// に返す（読めなかった場合は `r28` を触らない）。
+    /// which=2（CAS2）: `r25`/`r24` は old/new 値へのポインタ、
+    /// `r23` はサイズコード。`r28` は成否（0=成功、非0=失敗）。
+    // Ref: SRC-LINUX — arch/parisc/kernel/syscall.S
+    // `lws_compare_and_swap` / `lws_compare_and_swap_2`。
+    fn lws(&mut self, env: &mut BareEnv) -> TrapOutcome {
+        let which = Self::arg(env, 6); // r20
+        let adr = Self::arg(env, 0);
+        let old = Self::arg(env, 1);
+        let new = Self::arg(env, 2);
+        let status: u32 = match which {
+            lws::CAS => {
+                if adr & 3 != 0 {
+                    errno::EFAULT
+                } else {
+                    match self.get32(env, adr) {
+                        None => errno::EFAULT,
+                        Some(cur) => {
+                            Self::ret(env, cur);
+                            if cur == old
+                                && !self.write_bytes(env, adr, &(new as u32).to_be_bytes())
+                            {
+                                errno::EFAULT
+                            } else {
+                                0
+                            }
+                        }
+                    }
+                }
+            }
+            lws::CAS2 => self.lws_cas2(env, adr, old, new),
+            _ => errno::ENOSYS,
+        };
+        env.backend
+            .set(sem::Gr(21).state(), (-(status as i64)) as u64);
+        TrapOutcome::Handled
+    }
+
+    /// LWS `which=2`（CAS2、`lws_compare_and_swap_2`）。
+    /// `r23`=サイズコード（0/1/2/3 → 8/16/32/64 ビット。>=4 は
+    /// ENOSYS）。`r25`/`r24` から old/new を読み、`adr` の
+    /// `size` バイトと比較して一致なら new を書く。`r28` は
+    /// 0=成功・非0=不一致。読み書きの失敗は `r28`=1 と
+    /// `r21`=-EFAULT。ロック競合（EAGAIN）は単一スレッド
+    /// モデルでは起きないため対象外。
+    // Ref: SRC-LINUX — arch/parisc/kernel/syscall.S
+    // `lws_compare_and_swap_2`。
+    fn lws_cas2(&mut self, env: &mut BareEnv, adr: u64, old_p: u64, new_p: u64) -> u32 {
+        let size = Self::arg(env, 3); // r23
+        if size > 3 {
+            return errno::ENOSYS;
+        }
+        let n = 1usize << size;
+        let (Some(old), Some(new), Some(cur)) = (
+            self.read_bytes(env, old_p, n),
+            self.read_bytes(env, new_p, n),
+            self.read_bytes(env, adr, n),
+        ) else {
+            Self::ret(env, 1);
+            return errno::EFAULT;
+        };
+        if cur != old {
+            Self::ret(env, 1);
+            return 0;
+        }
+        if !self.write_bytes(env, adr, &new) {
+            Self::ret(env, 1);
+            return errno::EFAULT;
+        }
+        Self::ret(env, 0);
+        0
+    }
+}
+
+impl TrapHandler for Linux {
+    /// `code` は実行ループが載せるゲートウェイ番地（0x100=syscall、
+    /// 0xb0=LWS）。それ以外の番地は未対応。
+    fn handle_trap(&mut self, env: &mut BareEnv, code: u32) -> TrapOutcome {
+        match code {
+            gate::SYSCALL => self.syscall(env),
+            gate::LWS => self.lws(env),
+            _ => TrapOutcome::Unimplemented,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use polyisa_guest_parisc::CpuState;
+
+    fn env() -> BareEnv {
+        BareEnv::new(core::mem::size_of::<CpuState>())
+    }
+
+    fn set_r(env: &mut BareEnv, r: u8, v: u64) {
+        env.backend.set(sem::Gr(r).state(), v);
+    }
+
+    fn get_r(env: &mut BareEnv, r: u8) -> u64 {
+        env.backend.get(sem::Gr(r).state())
+    }
+
+    /// `syscall.tbl` の表と `syscall_name` の ABI 引きが一致する。
+    #[test]
+    fn parisc_syscall_table_matches_guest_abi() {
+        assert_eq!(
+            crate::syscall_name(crate::GuestAbi::PariscLinux, 4),
+            Some("write")
+        );
+        assert_eq!(
+            crate::syscall_name(crate::GuestAbi::PariscLinux, 59),
+            Some("uname")
+        );
+        assert_eq!(
+            crate::syscall_name(crate::GuestAbi::PariscLinux, 222),
+            Some("exit_group")
+        );
+        assert_eq!(
+            crate::syscall_name(crate::GuestAbi::PariscLinux, 9999),
+            None
+        );
+        // 表は番号昇順（binary_search が成り立つ）。
+        for w in crate::parisc::SYSCALLS.windows(2) {
+            assert!(w[0].0 < w[1].0, "表が昇順でない: {w:?}");
+        }
+    }
+
+    /// 未実装 syscall は ENOSYS を r28 に返して続ける。
+    #[test]
+    fn unimplemented_syscall_returns_enosys_and_continues() {
+        let mut sys = Linux::new();
+        let mut env = env();
+        set_r(&mut env, 20, 9999);
+        assert!(matches!(
+            sys.handle_trap(&mut env, gate::SYSCALL),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(get_r(&mut env, 28), (-(errno::ENOSYS as i64)) as u64);
+    }
+
+    /// `exit_group` は Exit として返る（r28 は触らない）。
+    #[test]
+    fn exit_group_returns_exit_outcome() {
+        let mut sys = Linux::new();
+        let mut env = env();
+        set_r(&mut env, 20, crate::parisc::nr::EXIT_GROUP);
+        set_r(&mut env, 26, 7);
+        assert!(matches!(
+            sys.handle_trap(&mut env, gate::SYSCALL),
+            TrapOutcome::Exit(7)
+        ));
+    }
+
+    /// write(1,…) は stdout に乗り、戻り値はバイト数。
+    #[test]
+    fn write_captures_stdout() {
+        let mut sys = Linux::new();
+        let mut env = env();
+        env.backend.mem.map(VirtAddr(0x4000), 1, Perms::RW).unwrap();
+        env.backend.mem.write(VirtAddr(0x4000), b"ok\n\0").unwrap();
+        set_r(&mut env, 20, crate::parisc::nr::WRITE);
+        set_r(&mut env, 26, 1);
+        set_r(&mut env, 25, 0x4000);
+        set_r(&mut env, 24, 3);
+        assert!(matches!(
+            sys.handle_trap(&mut env, gate::SYSCALL),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(sys.io.stdout, b"ok\n");
+        assert_eq!(get_r(&mut env, 28), 3);
+    }
+
+    /// 0x100/0xb0 以外のゲートウェイ番地は Unimplemented。
+    #[test]
+    fn unknown_gateway_offset_is_unimplemented() {
+        let mut sys = Linux::new();
+        let mut env = env();
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x00),
+            TrapOutcome::Unimplemented
+        ));
+        assert!(matches!(
+            sys.handle_trap(&mut env, 0x400),
+            TrapOutcome::Unimplemented
+        ));
+    }
+}

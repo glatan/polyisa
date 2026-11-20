@@ -93,6 +93,10 @@ fn main() {
             for m in polyisa_guest_alpha::MODELS {
                 println!("alpha:{m}");
             }
+            #[cfg(feature = "guest-parisc")]
+            for m in polyisa_guest_parisc::MODELS {
+                println!("parisc:{m}");
+            }
         }
         polyisa_cli::Command::Disasm => {
             #[cfg(feature = "guest-riscv")]

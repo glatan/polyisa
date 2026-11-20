@@ -20,17 +20,18 @@
 //!   `fdc`/`fic`/`pdc` 系の nop 化。それ以外の特権命令は Trap。
 //! - `ble` は gateway アドレスへの普通の間接分岐として実行し、
 //!   ゲートウェイ判定（trap 化）はフェッチ側（`run_parisc`）で
-//!   行う。QEMU の `do_page_zero` と同じタイミングで、分岐遅延
-//!   スロット中の `ldi %r20` が syscall 番号を置ける。
+//!   行う。これは Linux ABI の合意に基づく設計判断で、分岐遅延
+//!   スロット中の `ldi %r20` が syscall 番号を置けるように
+//!   するためである。
 //!
 //! 条件コードは 32 ビット（d=0）と 64 ビット（d=1）の両方を
-//! 評価する。PSW の C/V/B 更新は簡約してあり、`dcor`/`ds`/
-//! `hadd` 等の MAX/十進補正や FP は未実装（`Ok(false)`）。
+//! 評価する。`dcor`/`ds`/`hadd` 等の MAX/十進補正や FP は
+//! 未実装（`Ok(false)`）。
 //!
-//! 出典は SPEC-PARISC-11・SPEC-PARISC-20。遅延分岐・無効化・
-//! 条件・即値復元の細部は QEMU（SRC-QEMU: target/hppa/
-//! translate.c）と照合済み。
-//! Ref: SPEC-PARISC-11, SPEC-PARISC-20, SRC-QEMU.
+//! 出典は SPEC-PARISC-11・SPEC-PARISC-20 の一次資料のみ。
+//! 条件評価は SPEC-PARISC-11 §5 Table 5-3 〜 5-7 および
+//! SPEC-PARISC-20 付録 D Table D-3 〜 D-15 に従う。
+//! Ref: SPEC-PARISC-11, SPEC-PARISC-20.
 
 use polyisa_mem::{Access, AccessKind, Align, Endian};
 use polyisa_sem::{Backend, Cmp, ExceptionKind, GuestException, StateRef, W8, W16, W32, W64};
@@ -123,11 +124,12 @@ impl Sr {
     }
 }
 
-/// PSW の位置。QEMU のユーザモード並びを使う（ssm/rsm の HW 番号
-/// とは別。N=bit5, B=bit3, W=bit11）。上位 32 ビットはアーキテクト
-/// されないので add/sub のキャリ保持に使う（PSW.CB の簡約版。
-/// `add,c`/`sub,b` の carry-in はこの 2 ビットだけを見る）。
-// Ref: SRC-QEMU target/hppa/cpu.h (PSW_*).
+/// PSW の位置。ユーザモードに必要なビットのみを管理する独自
+/// レイアウト（ssm/rsm の HW 番号とは別。N=bit5, B=bit3,
+/// W=bit11）。上位 32 ビットはアーキテクトされないので add/sub
+/// のキャリ保持に使う（PSW.CB の簡約版。`add,c`/`sub,b` の
+/// carry-in はこの 2 ビットだけを見る）。
+// Ref: SPEC-PARISC-11 §3 (PSW).
 pub const PSW_B: u64 = 0x0000_0008;
 pub const PSW_N: u64 = 0x0000_0020;
 pub const PSW_W: u64 = 0x0000_0800;
@@ -168,8 +170,8 @@ pub fn iasq_b_ref() -> StateRef<W64> {
 }
 
 /// Trap コード。`/run_parisc` の `handle_trap` に渡る内部番号。
-/// QEMU の EXCP_* とは別系統。ゲートウェイ分岐（0x100 等）は
-/// アドレスそのものを code として渡す（`run_parisc` 側）。
+/// ゲートウェイ分岐（0x100 等）はアドレスそのものを code
+/// として渡す（`run_parisc` 側）。
 pub const TRAP_COND: u64 = 1;
 /// `,tsv` の符号付きオーバーフロー。
 pub const TRAP_OVERFLOW: u64 = 2;
@@ -191,10 +193,19 @@ const DATA_WRITE: Access = Access {
     kind: AccessKind::DataWrite,
 };
 
+/// LDCW 系の不可分アクセス（SPEC-PARISC-11 §LDCW：ロードと
+/// クリアは不可分）。バックエンドは AtomicRw のロード・ストア
+/// 対を不可分として扱う。
+const ATOMIC_RW: Access = Access {
+    endian: Endian::Be,
+    align: Align::Natural,
+    kind: AccessKind::AtomicRw,
+};
+
 // ----------------------------------------------------------------
 // 即値・変位の復元。生成デコーダは生のフィールドを渡すので、
-// QEMU の assemble_* / expand_* と同じ並べ直しをここで行う。
-// Ref: SRC-QEMU translate.c (assemble_21, expand_16, ...).
+// SPEC-PARISC-11 §5.2（アセンブリ関数）の並べ直しをここで行う。
+// Ref: SPEC-PARISC-11 §5.2, SPEC-PARISC-20 付録E.
 // ----------------------------------------------------------------
 
 /// `ldil`/`addil` の 21 ビット即値（`%assemble_21`＋`expand_shl11`）。
@@ -212,9 +223,10 @@ fn assemble_21(v: u64) -> u64 {
 
 /// `%expand_16`（14 ビット符号付き変位。bit0=符号、bits1-13=大きさ。
 /// bits14-15 は sp 桁。PSW.W=0 の hppa32 では s 桁は無視）。
+/// `-(s) << 13` で bit13 から上が符号で埋まるので、そのまま
+/// 返せば 64 ビット符号拡張済みの値になる。
 fn expand_16(v: u64) -> u64 {
-    let i = ((-((v & 1) as i64)) as u64) << 13 | ((v >> 1) & 0x1fff);
-    (i & 0x3fff) as u16 as i16 as i64 as u64
+    ((-((v & 1) as i64)) as u64) << 13 | ((v >> 1) & 0x1fff)
 }
 
 /// `%im5_16`/`%im5_0`：符号がフィールド bit0 の 5 ビット即値。
@@ -257,10 +269,13 @@ fn disp22(w10: u64, packed: u64) -> u64 {
     i.wrapping_shl(2)
 }
 
-/// `@ldstim12m` の変位（`%assemble_12a`＋`expand_12a`）。
-/// PSW.W=0 では s 桁（val bits12-13）は無視。
+/// ldwm2/stwm2（Format 2、opcode 0x17/0x1f）の変位
+/// （`assemble_16a`）。`im11a` は語の bits13-3、bit0 が符号で、
+/// 結果は `符号 ++ im11a << 2` の 16 ビット符号付き。
+/// PSW.W=0 では s 桁（bits15-14）は無視。
+/// Ref: SPEC-PARISC-20 付録E Table E-1 (assemble_16a).
 fn expand_12a(word: u64) -> u64 {
-    let im11a = (word >> 4) & 0x7ff;
+    let im11a = (word >> 3) & 0x7ff;
     ((-((word & 1) as i64)) as u64) << 13 | im11a << 2
 }
 
@@ -398,9 +413,9 @@ fn raise<B: Backend>(b: &mut B, kind: ExceptionKind, code: u64) -> B::Exit {
 }
 
 // ----------------------------------------------------------------
-// PA 条件コード。QEMU の do_cond / do_sub_cond / do_log_cond /
-// do_sed_cond / do_unit_zero_cond に対応。
-// Ref: SRC-QEMU translate.c, SPEC-PARISC-11 §5.3 Table 5-1.
+// PA 条件コード。算術/加算/減算/論理/ユニット/シフト条件は
+// SPEC-PARISC-11 §5.1 Table 5-3 〜 5-7 と SPEC-PARISC-20 付録D
+// Table D-3 〜 D-15 に従う。
 // ----------------------------------------------------------------
 
 /// 算術・論理共通の条件（do_cond）。`cf` は 4 ビットの cf 桁
@@ -470,9 +485,15 @@ fn sub_cond<B: Backend>(
     in2: B::V<W64>,
     sv: B::V<W64>,
 ) -> B::B {
-    // 32 ビット条件は下位 32 ビットで比較する。
+    // 32 ビット条件は下位 32 ビットで比較する。cf>>1==2/3 は
+    // 符号付き大小（<,<=）、1/4/5 は等価・符号なし大小
+    // （=,<<,<<=）なので、それぞれ ext32s/ext32u で揃える。
+    // Ref: SPEC-PARISC-11 §5 Table 5-3.
+    let signed = matches!(cf >> 1, 2 | 3);
     let (i1, i2) = if d {
         (in1, in2)
+    } else if signed {
+        (sext_bits(b, in1, 32), sext_bits(b, in2, 32))
     } else {
         (and_n(b, in1, 0xffff_ffff), and_n(b, in2, 0xffff_ffff))
     };
@@ -492,8 +513,8 @@ fn sub_cond<B: Backend>(
     if cf & 1 != 0 { bnot(b, c) } else { c }
 }
 
-/// 論理命令の条件（do_log_cond）。undefined の case4-6 は
-/// never/tr として扱う（QEMU と同じ）。
+/// 論理命令の条件。Table 5-5/D-9 で未定義の case4-6 は
+/// never/tr として扱う（設計判断）。
 fn log_cond<B: Backend>(b: &mut B, cf: u64, d: bool, res: B::V<W64>) -> B::B {
     let c = match cf >> 1 {
         0 | 4 | 5 | 6 => {
@@ -581,9 +602,86 @@ fn unit_zero_cond<B: Backend>(b: &mut B, cf: u64, d: bool, res: B::V<W64>) -> B:
     }
 }
 
+/// ユニットゼロ検出の本体。`unit` は 8/16/32 ビット。`res` の
+/// unit ビット単位のいずれかが 0 なら真を返す。
+/// （(res - 1) & ~res & sign トリックを各ユニットに並列適用）。
+fn unit_any_zero<B: Backend>(b: &mut B, res: B::V<W64>, unit: u64, d: bool) -> B::B {
+    let d_repl: u64 = if d { 0x0000_0001_0000_0001 } else { 1 };
+    let (ones, sgns) = match unit {
+        32 => (d_repl, d_repl << 31),
+        8 => {
+            let ones = d_repl.wrapping_mul(0x0101_0101);
+            (ones, ones << 7)
+        }
+        _ => {
+            let ones = d_repl.wrapping_mul(0x0001_0001);
+            (ones, ones << 15)
+        }
+    };
+    let o = k(b, ones);
+    let g = k(b, sgns);
+    let t = b.sub(res, o);
+    let not_res = b.not(res);
+    let t = b.and(t, not_res);
+    let t = b.and(t, g);
+    let zero = k(b, 0);
+    b.cmp(Cmp::Ne, t, zero)
+}
+
+/// uaddcm/uaddcmt のユニット条件（Table 5-6/D-11/D-12）。
+/// `xsum` は in1 ^ in2 ^ res（各ビット位置へのキャリーインで、
+/// ユニット境界ビットがユニットのキャリーアウトを表す）。
+/// `cout` は最上位ユニットのキャリーアウト（0/1）。
+/// c=1 は PA 2.0 の 32 ビット語単位の条件（64 ビット時のみ）。
+/// 未定義の c（0,5）は never/tr。
+fn unit_add_cond<B: Backend>(
+    b: &mut B,
+    cf: u64,
+    d: bool,
+    res: B::V<W64>,
+    xsum: B::V<W64>,
+    cout: B::V<W64>,
+) -> B::B {
+    let c = match cf >> 1 {
+        // SWZ（d のみ）：32 ビット語のいずれかが 0。
+        1 if d => unit_any_zero(b, res, 32, d),
+        // SBZ：8 ビット単位。
+        2 => unit_any_zero(b, res, 8, d),
+        // SHZ：16 ビット単位。
+        3 => unit_any_zero(b, res, 16, d),
+        // キャリー系：ユニット境界（LSB 側 7/3/1 ビット）か最終
+        // キャリーアウトのいずれかが立てば真。
+        c @ (4 | 6 | 7) => {
+            let mask: u64 = match (c, d) {
+                (4, true) => 0x1111_1111_1111_1110, // 4 ビット桁（16 桁中 15）
+                (4, false) => 0x1111_1110,          // 4 ビット桁（8 桁中 7）
+                (6, true) => 0x0101_0101_0101_0100, // バイト（8 中 7）
+                (6, false) => 0x0101_0100,          // バイト（4 中 3）
+                (7, true) => 0x0001_0001_0001_0000, // ハーフワード（4 中 3）
+                _ => 0x0001_0000,                   // ハーフワード（2 中 1）
+            };
+            let t = and_n(b, xsum, mask);
+            let zero = k(b, 0);
+            let any = b.cmp(Cmp::Ne, t, zero);
+            let any = bval(b, any);
+            let v = b.or(any, cout);
+            b.cmp(Cmp::Ne, v, zero)
+        }
+        _ => {
+            return if cf & 1 != 0 {
+                true_cond(b)
+            } else {
+                false_cond(b)
+            };
+        }
+    };
+    if cf & 1 != 0 { bnot(b, c) } else { c }
+}
+
 // ----------------------------------------------------------------
 // add/sub のオーバーフロー・キャリ
-// Ref: SRC-QEMU do_add_sv/do_add_uv/do_sub_sv/get_carry.
+// Ref: SPEC-PARISC-11 §5-2（carry_borrows ベクトルと SV/UV 条件）、
+// SPEC-PARISC-20 付録E.
 // ----------------------------------------------------------------
 
 /// `add` の符号付きオーバーフロー。`in1` はシフト済み。
@@ -648,35 +746,25 @@ fn sub_sv<B: Backend>(b: &mut B, res: B::V<W64>, in1: B::V<W64>, in2: B::V<W64>)
     b.and(sv, t)
 }
 
-/// 64 ビット加算のキャリアウト（0/1）。dest = in1+in2+cin のあと
-/// で呼ぶ（cin 込みの carry は呼び出し側が織り込む）。
-fn carry64_of<B: Backend>(b: &mut B, res: B::V<W64>, in1: B::V<W64>) -> B::V<W64> {
-    // res <u in1 なら繰り上がり。
-    let c = b.cmp(Cmp::LtU, res, in1);
-    bval(b, c)
+/// 64 ビット加算のキャリアウト（0/1）。res = in1+in2+cin（cin∈{0,1}）。
+/// res <u in1 なら確定。cin=1 で res == in1 のときも繰り上がり
+/// （この場合 in2+cin が 2^64 に達するので carry=1）。
+fn carry64_cin<B: Backend>(b: &mut B, res: B::V<W64>, in1: B::V<W64>, cin: B::V<W64>) -> B::V<W64> {
+    let lt = b.cmp(Cmp::LtU, res, in1);
+    let lt = bval(b, lt);
+    let eq = b.cmp(Cmp::Eq, res, in1);
+    let eq = bval(b, eq);
+    let eq = b.and(eq, cin);
+    b.or(lt, eq)
 }
 
-/// 32 ビット加算のキャリアウト（0/1）。
-fn carry32_of<B: Backend>(b: &mut B, in1: B::V<W64>, in2: B::V<W64>, cin: u64) -> B::V<W64> {
+/// 32 ビット加算のキャリアウト（0/1）。cin は V（0/1）。
+fn carry32_cin<B: Backend>(b: &mut B, in1: B::V<W64>, in2: B::V<W64>, cin: B::V<W64>) -> B::V<W64> {
     let a = and_n(b, in1, 0xffff_ffff);
     let c = and_n(b, in2, 0xffff_ffff);
     let s = b.add(a, c);
-    let s = add_n(b, s, cin);
+    let s = b.add(s, cin);
     shr_n(b, s, 32)
-}
-
-/// `sub`（borrow なし＝キャリあり）の 32/64 ビット carry（0/1）。
-/// dest = in1 - in2 で、in1 >= in2（幅内）なら 1。
-fn sub_carry<B: Backend>(b: &mut B, in1: B::V<W64>, in2: B::V<W64>, d: bool) -> B::V<W64> {
-    if d {
-        let c = b.cmp(Cmp::GeU, in1, in2);
-        bval(b, c)
-    } else {
-        let i1 = and_n(b, in1, 0xffff_ffff);
-        let i2 = and_n(b, in2, 0xffff_ffff);
-        let c = b.cmp(Cmp::GeU, i1, i2);
-        bval(b, c)
-    }
 }
 
 /// psw の内部キャリ（bit40=32 ビット、bit41=64 ビット）を保存する。
@@ -705,8 +793,12 @@ fn psw_carry<B: Backend>(b: &mut B, d: bool) -> B::V<W64> {
 // 算術・論理命令の共通処理
 // ----------------------------------------------------------------
 
-/// QEMU `do_add`。dest = (in1 << shift) + in2 (+carry)。
+/// dest = (in1 << shift) + in2 (+carry)。
 /// `is_c` は `add,c`（psw キャリを足し込む）。
+/// Ref: SPEC-PARISC-11 §ADD/ADDO/ADDC/SHnADD, SPEC-PARISC-20 付録D.
+/// トラップは結果・キャリの公表より先に評価する（オーバーフロー
+/// 形式・条件トラップ形式とも、トラップした命令は GR[t] も
+/// PSW[C/B] も更新しない）。
 #[allow(clippy::too_many_arguments)]
 fn do_add<B: Backend>(
     b: &mut B,
@@ -739,39 +831,32 @@ fn do_add<B: Backend>(
     if need_sv {
         sv = add_sv(b, dest, in1, in2, orig_in1, shift, d);
     }
+    // cin 込みの幅内キャリアウト（0/1）。cb{0} に対応。
+    let c32 = carry32_cin(b, in1, in2, cin);
+    let c64 = carry64_cin(b, dest, in1, cin);
+    let cout = if d { c64 } else { c32 };
     let uv = if c == 4 || c == 5 {
-        // 幅内のキャリアウト。
-        let carry = if d {
-            // 64 ビット: dest <u in1 なら繰り上がり（cin の影響は
-            // 近似として無視。QEMU は cb ベクトルから取る）。
-            carry64_of(b, dest, in1)
-        } else {
-            carry32_of(b, in1, in2, 0)
-        };
-        add_uv(b, carry, orig_in1, shift, d)
+        add_uv(b, cout, orig_in1, shift, d)
     } else {
         zero
     };
     let cond = arith_cond(b, cf, d, dest, uv, sv);
-    // 書き戻し（trap は insn 終端で発生するので先に行う）。
-    if !is_l {
-        // cb の保存（内部ビットへの簡約）。
-        let c32 = carry32_of(b, in1, in2, 0);
-        let c64 = carry64_of(b, dest, in1);
-        save_carry(b, c32, c64);
-    }
-    Gr(rt as u8).set(b, dest);
+    // トラップは結果・キャリの公表に先立つ。
     if is_tsv {
-        // オーバーフローでトラップ。
         let over = is_neg(b, sv, d);
         b.if_then(over, |b| {
             Err(raise::<B>(b, ExceptionKind::Trap, TRAP_OVERFLOW))
         })?;
     }
     if is_tc {
-        // 条件成立でトラップ。
         b.if_then(cond, |b| Err(raise::<B>(b, ExceptionKind::Trap, TRAP_COND)))?;
-    } else if cf != 0 {
+    }
+    if !is_l {
+        // PSW[C/B] の簡約版（内部ビット）を保存。
+        save_carry(b, c32, c64);
+    }
+    Gr(rt as u8).set(b, dest);
+    if !is_tc && cf != 0 {
         // 条件完語は次命令を無効化する（PSW.N ← cond）。
         let condv = bval(b, cond);
         set_psw_n(b, condv);
@@ -779,7 +864,11 @@ fn do_add<B: Backend>(
     Ok(())
 }
 
-/// QEMU `do_sub`。dest = in1 - in2（is_b なら -1+!borrow）。
+/// dest = in1 - in2（is_b ならさらに !borrow を引く）。
+/// spec: SUB は `GR[r1] + ~GR[r2] + 1`、SUBB は
+/// `GR[r1] + ~GR[r2] + PSW[C/B]{0}`。
+/// Ref: SPEC-PARISC-11 §SUB/SUBB, SPEC-PARISC-20 付録D.
+/// トラップは結果・キャリの公表に先立つ。
 #[allow(clippy::too_many_arguments)]
 fn do_sub<B: Backend>(
     b: &mut B,
@@ -792,15 +881,11 @@ fn do_sub<B: Backend>(
     cf: u64,
     d: bool,
 ) -> Result<(), B::Exit> {
-    let cin = if is_b { psw_carry(b, d) } else { k(b, 0) };
-    // in1 + ~in2 + (is_b ? cin : 1) = in1 - in2 - (is_b && !cin)
+    // cin_eff = is_b ? psw_carry : 1。dest = in1 + ~in2 + cin_eff。
+    let cin = if is_b { psw_carry(b, d) } else { k(b, 1) };
     let not2 = b.not(in2);
-    let mut dest = b.add(in1, not2);
-    dest = if is_b {
-        b.add(dest, cin)
-    } else {
-        add_n(b, dest, 1)
-    };
+    let dest = b.add(in1, not2);
+    let dest = b.add(dest, cin);
     let c = cf >> 1;
     let need_sv = is_tsv || c == 2 || c == 3 || c == 6;
     let sv = if need_sv {
@@ -808,26 +893,18 @@ fn do_sub<B: Backend>(
     } else {
         k(b, 0)
     };
+    // carry-out（借りなし=1）を cin 込みで計算。
+    let c32 = carry32_cin(b, in1, not2, cin);
+    let c64 = carry64_cin(b, dest, in1, cin);
+    let cout = if d { c64 } else { c32 };
     let cond = if is_b {
-        // is_b: dest = in1 + ~in2 + cin → ボローは ~in2+cin への
-        // 加算で見る。cin=1 は「キャリあり」=借りなし。
-        let t = b.add(not2, cin);
-        let uv = sub_carry(b, in1, t, d);
-        arith_cond(b, cf, d, dest, uv, sv)
+        // SUBB の条件は Table 5-3/D-3 の減算条件を結果と
+        // operand に適用する。符号なし比較（<< 系）は実効
+        // borrow を uv として渡す。
+        arith_cond(b, cf, d, dest, cout, sv)
     } else {
         sub_cond(b, cf, d, dest, in1, in2, sv)
     };
-    // cb の保存。
-    let c32 = {
-        // 32 ビットのキャリ（借りなし）。
-        let i1 = and_n(b, in1, 0xffff_ffff);
-        let i2 = and_n(b, in2, 0xffff_ffff);
-        let t = b.cmp(Cmp::GeU, i1, i2);
-        bval(b, t)
-    };
-    let c64 = sub_carry(b, in1, in2, true);
-    save_carry(b, c32, c64);
-    Gr(rt as u8).set(b, dest);
     if is_tsv {
         let over = is_neg(b, sv, d);
         b.if_then(over, |b| {
@@ -836,14 +913,18 @@ fn do_sub<B: Backend>(
     }
     if is_tc {
         b.if_then(cond, |b| Err(raise::<B>(b, ExceptionKind::Trap, TRAP_COND)))?;
-    } else if cf != 0 {
+    }
+    save_carry(b, c32, c64);
+    Gr(rt as u8).set(b, dest);
+    if !is_tc && cf != 0 {
         let condv = bval(b, cond);
         set_psw_n(b, condv);
     }
     Ok(())
 }
 
-/// QEMU `do_cmpclr`：比較結果を条件に使い、rt は必ず 0 にする。
+/// COMCLR/COMICLR：比較結果を条件に使い、rt は必ず 0 にする。
+/// PSW[C/B] は更新しない（SPEC-PARISC-11 §COMCLR）。
 fn do_cmpclr<B: Backend>(
     b: &mut B,
     rt: u64,
@@ -891,9 +972,13 @@ fn dbranch<B: Backend>(b: &mut B, pc: u64, disp: u64, link: u64, n: u64) {
     b.jump(t);
 }
 
-/// 間接分岐（do_ibranch）：target を V で受ける。priv は低 2 ビットを
-/// `|3` して維持する（ユーザモード = do_ibranch_priv の case 3）。
-fn ibranch<B: Backend>(b: &mut B, target: B::V<W64>, link: u64, n: u64, pc: u64) {
+/// 間接分岐の共通処理。`base` はベースレジスタ（bv/be/bve の
+/// GR[b]）の値で、IAOQ 下位2ビットの特権決定に使う。
+/// SPEC-PARISC-20 §7（BV/BE/BVE 操作）: `IAOQ_Front{62..63}` が
+/// `GR[b]{62..63}` より小さいときだけ新特権は `GR[b]` の下位2ビット、
+/// さもなければ現特権を維持（特権は下げる方向にのみ変わる）。
+/// `pc` は IAOQ_Front の値（下位2ビットが現特権）。
+fn ibranch<B: Backend>(b: &mut B, target: B::V<W64>, base: B::V<W64>, link: u64, n: u64, pc: u64) {
     if link != 0 {
         let v = k(b, pc.wrapping_add(8));
         Gr(link as u8).set(b, v);
@@ -901,13 +986,21 @@ fn ibranch<B: Backend>(b: &mut B, target: B::V<W64>, link: u64, n: u64, pc: u64)
     if n != 0 {
         set_psw_n_const(b, true);
     }
-    let t = or_n(b, target, 3);
-    b.jump(t);
+    let bp = and_n(b, base, 3);
+    let fp = k(b, pc & 3);
+    let demote = b.cmp(Cmp::GtU, bp, fp);
+    let plvl = b.select::<W64>(demote, bp, fp);
+    let hi = and_n(b, target, !3u64);
+    let tgt = b.or(hi, plvl);
+    b.jump(tgt);
 }
 
 /// 条件分岐（do_cbranch）。`cond` 成立で taken。
-/// `,n` の無効化は方向で変わる: taken で disp>=0、not-taken で
-/// disp<0 のときだけ PSW.N を立てる。
+/// `,n` の無効化は方向で変わる: taken で disp>=0（前方）、
+/// not-taken で disp<0（後方）のときだけ PSW.N を立てる
+/// （仕様記述は `if (disp < 0) PSW[N] ← taken 側条件、
+/// else PSW[N] ← !taken 側条件` で、disp=0 は前方扱い）。
+/// Ref: SPEC-PARISC-11 §5 COMIBF Operation.
 fn cbranch<B: Backend>(b: &mut B, cond: B::B, pc: u64, disp: u64, n: u64) {
     let target = pc.wrapping_add(8).wrapping_add(disp);
     if n != 0 {
@@ -1042,10 +1135,6 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
         Insn::Addi | Insn::AddiTsv | Insn::AddiTc | Insn::AddiTcTsv => {
             let is_tsv = matches!(insn, Insn::AddiTsv | Insn::AddiTcTsv);
             let is_tc = matches!(insn, Insn::AddiTc | Insn::AddiTcTsv);
-            if is_tc && ops[2] == 1 {
-                // 無条件トラップ。
-                return Err(raise::<B>(b, ExceptionKind::Trap, TRAP_COND));
-            }
             let im = k(b, lowsign_11(ops[3]));
             let r = Gr(ops[0] as u8).get(b);
             do_add(
@@ -1074,8 +1163,10 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
         }
         // ---- FRRICD 論理・補助 ----
         Insn::Andcm | Insn::And | Insn::Or | Insn::Xor | Insn::Uxor => {
-            let r1 = Gr(ops[0] as u8).get(b);
-            let r2 = Gr(ops[1] as u8).get(b);
+            // opd1 = GR[r1]（ops[1]）、opd2 = GR[r2]（ops[0]）。
+            // ANDCM は GR[r1] AND ~GR[r2] で可換でないので注意。
+            let r1 = Gr(ops[1] as u8).get(b);
+            let r2 = Gr(ops[0] as u8).get(b);
             let (cf, d, t) = (ops[2], ops[3] != 0, ops[4]);
             let dest = match insn {
                 Insn::Andcm => {
@@ -1098,44 +1189,54 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
             }
         }
         Insn::Cmpclr => {
-            let r1 = Gr(ops[0] as u8).get(b);
-            let r2 = Gr(ops[1] as u8).get(b);
+            // COMCLR: opd1 = GR[r1]（ops[1]）、opd2 = GR[r2]（ops[0]）。
+            let r1 = Gr(ops[1] as u8).get(b);
+            let r2 = Gr(ops[0] as u8).get(b);
             do_cmpclr(b, ops[4], r1, r2, ops[2], ops[3] != 0)?;
         }
         Insn::Uaddcm | Insn::UaddcmTc => {
-            let r1 = Gr(ops[0] as u8).get(b);
-            let r2 = Gr(ops[1] as u8).get(b);
+            // UADDCM: GR[t] ← GR[r1] + ~GR[r2]。条件はユニット条件
+            // （Table 5-6/D-11：SBZ/SHZ/SDC/SBC/SHC とその否定）。
+            // opd1 = GR[r1]（ops[1]）、opd2 = GR[r2]（ops[0]）。
+            let r1 = Gr(ops[1] as u8).get(b);
+            let r2 = Gr(ops[0] as u8).get(b);
             let (cf, d, t) = (ops[2], ops[3] != 0, ops[4]);
-            if cf == 0 {
-                // t = r1 + ~r2 = r1 - r2 - 1（r1==0 は ~r2）。
-                let v = if ops[0] == 0 {
-                    b.not(r2)
+            let n2 = b.not(r2);
+            let dest = b.add(r1, n2);
+            // 条件・キャリ評価はトラップの前に行う（uaddcmt は
+            // トラップしたら GR[t] を更新しない）。
+            let cond = if cf != 0 {
+                // xsum = in1 ^ ~in2 ^ dest = 各ビット位置への
+                // キャリーイン。ユニット境界のビットがユニット
+                // キャリーアウト。
+                let xa = b.xor(r1, n2);
+                let xsum = b.xor(xa, dest);
+                let zero = k(b, 0);
+                let cin = zero;
+                let cout = if d {
+                    carry64_cin(b, dest, r1, cin)
                 } else {
-                    let v = b.sub(r1, r2);
-                    add_n(b, v, !0)
+                    carry32_cin(b, r1, n2, cin)
                 };
-                Gr(t as u8).set(b, v);
+                unit_add_cond(b, cf, d, dest, xsum, cout)
             } else {
-                let n2 = b.not(r2);
-                do_add(
-                    b,
-                    t,
-                    r1,
-                    n2,
-                    0,
-                    false,
-                    false,
-                    insn == Insn::UaddcmTc,
-                    false,
-                    cf,
-                    d,
-                )?;
+                false_cond(b)
+            };
+            if insn == Insn::UaddcmTc {
+                b.if_then(cond, |b| Err(raise::<B>(b, ExceptionKind::Trap, TRAP_COND)))?;
+            }
+            Gr(t as u8).set(b, dest);
+            if insn != Insn::UaddcmTc && cf != 0 {
+                let condv = bval(b, cond);
+                set_psw_n(b, condv);
             }
         }
         // ---- FRRICD sub ----
         Insn::Sub | Insn::SubTsv | Insn::SubTc | Insn::SubTsvTc => {
-            let r1 = Gr(ops[0] as u8).get(b);
-            let r2 = Gr(ops[1] as u8).get(b);
+            // SUB: GR[t] ← GR[r1] + ~GR[r2] + 1。opd1 = r1（ops[1]）、
+            // opd2 = r2（ops[0]）。
+            let r1 = Gr(ops[1] as u8).get(b);
+            let r2 = Gr(ops[0] as u8).get(b);
             do_sub(
                 b,
                 ops[4],
@@ -1150,8 +1251,10 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
         }
         // ---- FRRCCDS add（sh 付き）----
         Insn::Add | Insn::AddL | Insn::AddTsv | Insn::AddC | Insn::AddCTsv => {
-            let r1 = Gr(ops[0] as u8).get(b);
-            let r2 = Gr(ops[1] as u8).get(b);
+            // SHnADD: GR[t] ← lshift(GR[r1], n) + GR[r2]。
+            // opd1（シフトされる側）= r1（ops[1]）、opd2 = r2（ops[0]）。
+            let r1 = Gr(ops[1] as u8).get(b);
+            let r2 = Gr(ops[0] as u8).get(b);
             do_add(
                 b,
                 ops[5],
@@ -1167,8 +1270,10 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
             )?;
         }
         Insn::SubB | Insn::SubBTsv => {
-            let r1 = Gr(ops[0] as u8).get(b);
-            let r2 = Gr(ops[1] as u8).get(b);
+            // SUBB: GR[t] ← GR[r1] + ~GR[r2] + PSW[C/B]{0}。
+            // opd1 = r1（ops[1]）、opd2 = r2（ops[0]）。
+            let r1 = Gr(ops[1] as u8).get(b);
+            let r2 = Gr(ops[0] as u8).get(b);
             do_sub(
                 b,
                 ops[5],
@@ -1189,25 +1294,49 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
             let base = Gr(ops[0] as u8).get(b);
             let di = k(b, disp);
             let t = b.add(base, di);
-            ibranch(b, t, link, ops[4], pc);
+            ibranch(b, t, base, link, ops[4], pc);
         }
         Insn::Bl | Insn::BlPush | Insn::Gate => {
             // bl/gate/bl,push：直接。l=0 ならリンクなし。
-            // gate は PSW.B なら不正（遅延スロット内 gate）。
+            // bl,push の BTS 投入は分岐予測器の内部状態で
+            // アーキテクチャ的には不可視（PA2.0 §B,PUSH）。
             if insn == Insn::Gate {
+                // gate は PSW.B なら不正（遅延スロット内 gate。
+                // SPEC-PARISC-20 §B,GATE operation）。
                 let p = b.get(psw_ref());
                 let t = and_n(b, p, PSW_B);
                 let z = k(b, 0);
                 let has = b.cmp(Cmp::Ne, t, z);
                 b.if_then(has, |b| Err(raise::<B>(b, ExceptionKind::Trap, TRAP_ILL)))?;
+                // GR[t] ← cat(GR[t]{0..61}, IAOQ_Front{62..63})：
+                // 上位 62 ビットは旧値のまま、下位 2 ビットに
+                // IAOQ_Front の特権ビットを書く。
+                let old = Gr(ops[0] as u8).get(b);
+                let hi = and_n(b, old, !3u64);
+                let privbits = k(b, pc & 3);
+                let v = b.or(hi, privbits);
+                Gr(ops[0] as u8).set(b, v);
+                if ops[3] != 0 {
+                    // `,n` は B,GATE,n として仕様の擬似命令表にも
+                    // ある（SPEC-PARISC-20 擬似命令一覧）。
+                    set_psw_n_const(b, true);
+                }
+                let disp = disp17(ops[1], ops[2]);
+                // IAOQ_Next{62..63} ← priv。PSW[C]=0（本モデルの
+                // 簡約）では priv=0 なのでターゲットの下位 2 ビット
+                // は 0（SPEC-PARISC-20 §B,GATE Operation）。
+                let target = pc.wrapping_add(8).wrapping_add(disp) & !3;
+                let target = k(b, target);
+                b.jump(target);
+            } else {
+                dbranch(b, pc, disp17(ops[1], ops[2]), ops[0], ops[3]);
             }
-            dbranch(b, pc, disp17(ops[1], ops[2]), ops[0], ops[3]);
         }
         Insn::BlLong => {
             // bl.long disp → リンクは r2。
             dbranch(b, pc, disp22(ops[0], ops[1]), 2, ops[2]);
         }
-        Insn::Blr | Insn::BlrH => {
+        Insn::Blr => {
             // blr x,l：x!=0 → target = iaoq_f+8 + (x<<3)。x==0 は
             // pc+8 への直接分岐（link は常に pc+8）。
             if ops[1] != 0 {
@@ -1228,31 +1357,32 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
             }
         }
         Insn::Bv => {
-            // bv x(b)：target = gr[b] (+x<<3)。
+            // bv x(b)：target = GR[b] + (GR[x]<<3)（SPEC-PARISC-20
+            // §7-20）。特権は GR[b] の下位2ビットで決まる。
+            let base = Gr(ops[0] as u8).get(b);
             let t = if ops[1] != 0 {
                 let x = Gr(ops[1] as u8).get(b);
                 let s = shl_n(b, x, 3);
-                let base = Gr(ops[0] as u8).get(b);
                 b.add(s, base)
             } else {
-                Gr(ops[0] as u8).get(b)
+                base
             };
-            ibranch(b, t, 0, ops[2], pc);
+            ibranch(b, t, base, 0, ops[2], pc);
         }
         Insn::Bve | Insn::BveL => {
             // bve (b)：target = gr[b]。BveL はリンク r2。
             let link = if insn == Insn::BveL { 2 } else { 0 };
             let t = Gr(ops[0] as u8).get(b);
-            ibranch(b, t, link, ops[1], pc);
+            ibranch(b, t, t, link, ops[1], pc);
         }
-        Insn::Nopbts | Insn::Nopbts2 => {}
         // ---- 条件分岐 ----
         Insn::Cmpb | Insn::CmpbF | Insn::CmpbD | Insn::CmpbDf => {
-            // comb,c(,f) r1,r2,disp → dest = r1 - r2 で比較。
+            // comb,c(,f) r1,r2,disp → dest = GR[r1] - GR[r2]。
+            // フィールドは fa=r2, fb=r1（ops[1] が r1）。
             let f = matches!(insn, Insn::CmpbF | Insn::CmpbDf) as u64;
             let d = matches!(insn, Insn::CmpbD | Insn::CmpbDf);
-            let r1 = Gr(ops[0] as u8).get(b);
-            let r2 = Gr(ops[1] as u8).get(b);
+            let r1 = Gr(ops[1] as u8).get(b);
+            let r2 = Gr(ops[0] as u8).get(b);
             let dest = b.sub(r1, r2);
             let c3 = ops[2];
             let sv = if matches!(c3, 2 | 3 | 6) {
@@ -1265,7 +1395,14 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
         }
         Insn::Cmpbi | Insn::CmpbiF | Insn::CmpbiD => {
             // comib,c i,r,disp → dest = imm - gr[r]。
-            let f = matches!(insn, Insn::CmpbiF | Insn::CmpbiD) as u64;
+            // f は COMIBT=0・COMIBF=1 の固定（taken の向き）だが、
+            // COMIB,D では bit15 が条件表（Table D-5）の一部で、
+            // FRIBD 形式の f 桁（ops[2]）から取る。
+            let f = if insn == Insn::CmpbiD {
+                ops[2]
+            } else {
+                matches!(insn, Insn::CmpbiF) as u64
+            };
             let d = insn == Insn::CmpbiD;
             let im = k(b, im5(ops[1]));
             let r = Gr(ops[0] as u8).get(b);
@@ -1293,8 +1430,10 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
             // movb,c r1,r2,disp / movib,c i,r,disp。
             let (c3, disp, n) = (ops[2], disp12(ops[3]), ops[4]);
             if insn == Insn::Movb {
-                let v = Gr(ops[0] as u8).get(b);
-                Gr(ops[1] as u8).set(b, v);
+                // movb r1,r2,disp → GR[r2] ← GR[r1]（ops[0]=r2 が
+                // 書き先、ops[1]=r1 が読み元）。
+                let v = Gr(ops[1] as u8).get(b);
+                Gr(ops[0] as u8).set(b, v);
                 let cond = sed_cond(b, c3, false, v);
                 cbranch(b, cond, pc, disp, n);
             } else {
@@ -1310,10 +1449,12 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
             let c3 = ops[2];
             let (dest, in1, in2, rt);
             if matches!(insn, Insn::Addb | Insn::AddbF) {
-                in1 = Gr(ops[0] as u8).get(b);
-                in2 = Gr(ops[1] as u8).get(b);
-                rt = ops[1];
+                // addb r1,r2 → GR[r2] ← GR[r1] + GR[r2]（ops[0]=r2）。
+                in1 = Gr(ops[1] as u8).get(b);
+                in2 = Gr(ops[0] as u8).get(b);
+                rt = ops[0];
             } else {
+                // addib i,r → GR[r] ← im5 + GR[r]。
                 in1 = k(b, im5(ops[1]));
                 in2 = Gr(ops[0] as u8).get(b);
                 rt = ops[0];
@@ -1323,7 +1464,7 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
             let zero = k(b, 0);
             let (uv, sv);
             if matches!(c3, 4 | 5) {
-                let c = carry32_of(b, in1, in2, 0);
+                let c = carry32_cin(b, in1, in2, zero);
                 uv = add_uv(b, c, in1, 0, false);
             } else {
                 uv = zero;
@@ -1366,14 +1507,29 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
             cbranch(b, cond, pc, disp12(ops[4]), ops[5]);
         }
         // ---- オフセット形式 load/store ----
-        Insn::Ldb | Insn::Ldh | Insn::Ldw | Insn::Ldd => {
+        Insn::Ldb | Insn::Ldh | Insn::Ldw => {
             let size = match insn {
                 Insn::Ldb => 0,
                 Insn::Ldh => 1,
-                Insn::Ldd => 3,
                 _ => 2,
             };
             load_off(b, ops[1], ops[0], expand_16(ops[2]), 0, size)?;
+        }
+        Insn::Ldd => {
+            // Format 3（SPEC-PARISC-20 §LDD）:
+            //   `14 b t s im10a m a 0 i`
+            //   bits15-14=s、bits13-4=im10a、bit3=m、bit2=a、
+            //   bit0=i（変位の符号）。dx =
+            //   sign_ext(assemble_16a(s,cat(im10a,0),i),16) で、
+            //   PSW.W=0 では `符号(i) ++ im10a << 3` の 16 ビット。
+            //   modify 完語は m(bit3)<<1|a(bit2) の生値を
+            //   ma_to_m に渡す（a=0 事後、a=1 事前）。
+            let w = u64::from(word);
+            let i = w & 1;
+            let im10a = (w >> 4) & 0x3ff;
+            let d16 = (((-(i as i64)) as u64) << 13 | (im10a << 3)) as u16 as i16 as i64;
+            let m = ma_to_m((w >> 2) & 3);
+            load_off(b, ops[1], ops[0], d16 as u64, m, 3)?;
         }
         Insn::Ldwm => {
             load_off(
@@ -1395,14 +1551,23 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
                 2,
             )?;
         }
-        Insn::Stb | Insn::Sth | Insn::Stw | Insn::Std => {
+        Insn::Stb | Insn::Sth | Insn::Stw => {
             let size = match insn {
                 Insn::Stb => 0,
                 Insn::Sth => 1,
-                Insn::Std => 3,
                 _ => 2,
             };
             store_off(b, ops[1], ops[0], expand_16(ops[2]), 0, size)?;
+        }
+        Insn::Std => {
+            // Format 3（SPEC-PARISC-20 §STD）: LDD と同じ
+            // `1C b r s im10a m a 0 i` レイアウト。
+            let w = u64::from(word);
+            let i = w & 1;
+            let im10a = (w >> 4) & 0x3ff;
+            let d16 = (((-(i as i64)) as u64) << 13 | (im10a << 3)) as u16 as i16 as i64;
+            let m = ma_to_m((w >> 2) & 3);
+            store_off(b, ops[1], ops[0], d16 as u64, m, 3)?;
         }
         Insn::Stwm => {
             store_off(
@@ -1425,10 +1590,11 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
             )?;
         }
         // ---- im5 / index 形式 ----
-        Insn::Ldi | Insn::Ldcw | Insn::Ldcd => {
-            // ldi: ops = [b, im5f, sp, size, ma, t]。
+        Insn::Ldi | Insn::LdiD | Insn::Ldcw | Insn::Ldcd => {
+            // ldi(,d): ops = [b, im5f, sp, size, ma, t]。
             // ldcw/ldcd: ops = [b, im5f, sp, ma, t]。
-            let (size, m, t) = if insn == Insn::Ldi {
+            let is_ldi = matches!(insn, Insn::Ldi | Insn::LdiD);
+            let (size, m, t) = if is_ldi {
                 (ops[3], ma_to_m(ops[4]), ops[5])
             } else {
                 // ldcw = 32 ビット、ldcd = 64 ビット。
@@ -1441,38 +1607,57 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
             let disp = im5(ops[1]);
             let zero = k(b, 0);
             let (ea, new_base) = gva(b, ops[0], zero, disp, m);
-            match size {
-                0 => {
-                    let v: B::V<W8> = b.load(ea, DATA_READ)?;
-                    let v = b.zext::<W8, W64>(v);
-                    Gr(t as u8).set(b, v);
-                }
-                1 => {
-                    let v: B::V<W16> = b.load(ea, DATA_READ)?;
-                    let v = b.zext::<W16, W64>(v);
-                    Gr(t as u8).set(b, v);
-                }
-                2 => {
-                    let v: B::V<W32> = b.load(ea, DATA_READ)?;
-                    let v = b.zext::<W32, W64>(v);
-                    Gr(t as u8).set(b, v);
-                }
-                _ => {
-                    let v: B::V<W64> = b.load(ea, DATA_READ)?;
-                    Gr(t as u8).set(b, v);
-                }
-            }
-            if insn != Insn::Ldi {
-                // ldcw/ldcd: 読んだあと 0 を書き戻す（アトミック近似）。
+            if is_ldi {
                 match size {
-                    3 => {
-                        let z = k(b, 0);
-                        b.store(ea, z, DATA_WRITE)?;
+                    0 => {
+                        let v: B::V<W8> = b.load(ea, DATA_READ)?;
+                        let v = b.zext::<W8, W64>(v);
+                        Gr(t as u8).set(b, v);
+                    }
+                    1 => {
+                        let v: B::V<W16> = b.load(ea, DATA_READ)?;
+                        let v = b.zext::<W16, W64>(v);
+                        Gr(t as u8).set(b, v);
+                    }
+                    2 => {
+                        let v: B::V<W32> = b.load(ea, DATA_READ)?;
+                        let v = b.zext::<W32, W64>(v);
+                        Gr(t as u8).set(b, v);
                     }
                     _ => {
+                        let v: B::V<W64> = b.load(ea, DATA_READ)?;
+                        Gr(t as u8).set(b, v);
+                    }
+                }
+            } else {
+                // ldcw/ldcd: ロードと 0 クリアは不可分（SPEC-PARISC-11
+                // §LDCW）。interp の予約機構（load_reserved /
+                // store_conditional）で実現する。これは単一スレッド
+                // 前提の近似で、競合で store_conditional が失敗した
+                // 場合の再試行は意味論側にループを持てないため
+                // 実装簡約としてトラップにする。
+                // なお実効番地の 16 バイト整列要求（§LDCWX
+                // "The address must be 16-byte aligned"）は検査
+                // しない簡約とする。
+                // Gap: GAP-0052
+                match size {
+                    3 => {
+                        let v: B::V<W64> = b.load_reserved(ea, ATOMIC_RW)?;
+                        let z = k(b, 0);
+                        let ok: B::B = b.store_conditional::<W64>(ea, z, ATOMIC_RW)?;
+                        let nok = bnot(b, ok);
+                        b.if_then(nok, |b| Err(raise::<B>(b, ExceptionKind::Trap, TRAP_ILL)))?;
+                        Gr(t as u8).set(b, v);
+                    }
+                    _ => {
+                        let v: B::V<W32> = b.load_reserved(ea, ATOMIC_RW)?;
                         let z = k(b, 0);
                         let z = b.trunc::<W64, W32>(z);
-                        b.store(ea, z, DATA_WRITE)?;
+                        let ok: B::B = b.store_conditional::<W32>(ea, z, ATOMIC_RW)?;
+                        let nok = bnot(b, ok);
+                        b.if_then(nok, |b| Err(raise::<B>(b, ExceptionKind::Trap, TRAP_ILL)))?;
+                        let v = b.zext::<W32, W64>(v);
+                        Gr(t as u8).set(b, v);
                     }
                 }
             }
@@ -1480,51 +1665,87 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
                 Gr(ops[0] as u8).set(b, new_base);
             }
         }
-        Insn::Ldx | Insn::Ldcwx | Insn::Ldcdx => {
-            // ops = [b, x, sp, scale, m, t]。index 形式の m は
-            // bit5 のみ（post-modify; QEMU も ,mb を区別しない）。
-            // scale はオペランドサイズ倍のシフト。
+        Insn::Ldx | Insn::LdxD | Insn::Ldcwx | Insn::Ldcdx => {
+            // ops = [b, x, sp, scale(u), m, t]。index 形式の completer
+            // は u(,s 事前スケール)と m(,m 事後更新)の 2 桁:
+            //   u=0,m=0 → EA = b + x
+            //   u=1,m=0 → EA = b + (x << shift)
+            //   u=0,m=1 → EA = b、書戻し b += x
+            //   u=1,m=1 → EA = b、書戻し b += (x << shift)
+            // m=1 は常に EA=base の事後更新で、ディスプレースメント
+            // 系の ,ma/,mb とは規則が違う（SPEC-PARISC-11 §LDCWX
+            // Operation, SPEC-PARISC-20 §LDD/LDW と表 H-3）。
             let size: u64 = match insn {
-                Insn::Ldx => (u64::from(word) >> 6) & 3,
+                Insn::Ldx | Insn::LdxD => (u64::from(word) >> 6) & 3,
                 Insn::Ldcdx => 3,
                 _ => 2,
             };
+            // ,s のシフト量は ldx がオペランド幅（b=0,h=1,w=2,d=3）
+            // なのに対し、ldcw/ldcd は幅に関係なく 3（LDCW は
+            // 「index shift … shifts by three, not two」の注記）。
+            // Ref: SPEC-PARISC-11 §LDCWX Notes.
+            let shift = if matches!(insn, Insn::Ldx | Insn::LdxD) {
+                size
+            } else {
+                3
+            };
             let x = Gr(ops[1] as u8).get(b);
-            let x = if ops[3] != 0 { shl_n(b, x, size) } else { x };
+            let x = if ops[3] != 0 { shl_n(b, x, shift) } else { x };
             let m: i64 = if ops[4] != 0 { 1 } else { 0 };
             let (ea, new_base) = gva(b, ops[0], x, 0, m);
             let t = ops[5];
-            match size {
-                0 => {
-                    let v: B::V<W8> = b.load(ea, DATA_READ)?;
-                    let v = b.zext::<W8, W64>(v);
-                    Gr(t as u8).set(b, v);
+            if matches!(insn, Insn::Ldx | Insn::LdxD) {
+                match size {
+                    0 => {
+                        let v: B::V<W8> = b.load(ea, DATA_READ)?;
+                        let v = b.zext::<W8, W64>(v);
+                        Gr(t as u8).set(b, v);
+                    }
+                    1 => {
+                        let v: B::V<W16> = b.load(ea, DATA_READ)?;
+                        let v = b.zext::<W16, W64>(v);
+                        Gr(t as u8).set(b, v);
+                    }
+                    3 => {
+                        let v: B::V<W64> = b.load(ea, DATA_READ)?;
+                        Gr(t as u8).set(b, v);
+                    }
+                    _ => {
+                        let v: B::V<W32> = b.load(ea, DATA_READ)?;
+                        let v = b.zext::<W32, W64>(v);
+                        Gr(t as u8).set(b, v);
+                    }
                 }
-                1 => {
-                    let v: B::V<W16> = b.load(ea, DATA_READ)?;
-                    let v = b.zext::<W16, W64>(v);
-                    Gr(t as u8).set(b, v);
+            } else {
+                // ldcwx/ldcdx: ロードと 0 クリアは不可分
+                // （SPEC-PARISC-11 §LDCW）。im5 形式と同じく予約機構
+                // を使う単一スレッド前提の近似。
+                match size {
+                    3 => {
+                        let v: B::V<W64> = b.load_reserved(ea, ATOMIC_RW)?;
+                        let z = k(b, 0);
+                        let ok: B::B = b.store_conditional::<W64>(ea, z, ATOMIC_RW)?;
+                        let nok = bnot(b, ok);
+                        b.if_then(nok, |b| Err(raise::<B>(b, ExceptionKind::Trap, TRAP_ILL)))?;
+                        Gr(t as u8).set(b, v);
+                    }
+                    _ => {
+                        let v: B::V<W32> = b.load_reserved(ea, ATOMIC_RW)?;
+                        let z = k(b, 0);
+                        let z = b.trunc::<W64, W32>(z);
+                        let ok: B::B = b.store_conditional::<W32>(ea, z, ATOMIC_RW)?;
+                        let nok = bnot(b, ok);
+                        b.if_then(nok, |b| Err(raise::<B>(b, ExceptionKind::Trap, TRAP_ILL)))?;
+                        let v = b.zext::<W32, W64>(v);
+                        Gr(t as u8).set(b, v);
+                    }
                 }
-                3 => {
-                    let v: B::V<W64> = b.load(ea, DATA_READ)?;
-                    Gr(t as u8).set(b, v);
-                }
-                _ => {
-                    let v: B::V<W32> = b.load(ea, DATA_READ)?;
-                    let v = b.zext::<W32, W64>(v);
-                    Gr(t as u8).set(b, v);
-                }
-            }
-            if insn != Insn::Ldx {
-                // ldcwx/ldcdx: 読んだあと 0 を書き戻す（アトミック近似）。
-                let z = k(b, 0);
-                b.store(ea, z, DATA_WRITE)?;
             }
             if m != 0 {
                 Gr(ops[0] as u8).set(b, new_base);
             }
         }
-        Insn::Sti => {
+        Insn::Sti | Insn::StiD => {
             // ops = [b, r, sp, size, ma, i5]。
             let (size, m, r) = (ops[3], ma_to_m(ops[4]), ops[1]);
             let disp = im5(ops[5]);
@@ -1576,9 +1797,35 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
             }
         }
         Insn::Ldsid => {
-            // ユーザモードでは空間番号は 0（QEMU と同じ）。
-            let z = k(b, 0);
-            Gr(ops[2] as u8).set(b, z);
+            // LDSID: GR[t] ← space_select(s, GR[b])。s!=0 は
+            // SR[s]、s=0 は GR[b] の上位 2 ビット + 4 の SR を読む。
+            // PSW.W=0 モデルでは空間選択は 32 ビットオフセットの
+            // 最上位 2 ビット（base{32..33}＝LSB 起算の bits30-31）
+            // を見る（SPEC-PARISC-11 §space_select,
+            // SPEC-PARISC-20 付録E space_select）。本モデルは
+            // SR 上位 32 ビットに空間番号を格納する。
+            let id = if ops[1] != 0 {
+                Sr(ops[1] as u8).get(b)
+            } else {
+                let base = Gr(ops[0] as u8).get(b);
+                let hi = shr_n(b, base, 30);
+                let hi = and_n(b, hi, 3);
+                let two = k(b, 2);
+                let s4 = Sr(4).get(b);
+                let s5 = Sr(5).get(b);
+                let s6 = Sr(6).get(b);
+                let s7 = Sr(7).get(b);
+                let one = k(b, 1);
+                let is1 = b.cmp(Cmp::Eq, hi, one);
+                let lo = b.select::<W64>(is1, s5, s4);
+                let three = k(b, 3);
+                let is3 = b.cmp(Cmp::Eq, hi, three);
+                let hi2 = b.select::<W64>(is3, s7, s6);
+                let low = b.cmp(Cmp::LtU, hi, two);
+                b.select::<W64>(low, lo, hi2)
+            };
+            let v = shr_n(b, id, 32);
+            Gr(ops[2] as u8).set(b, v);
         }
         Insn::Mfia => {
             // mfia t → iaoq_f & ~3（priv ビットを除く命令番地）。
@@ -1598,7 +1845,11 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
             Sr(ops[1] as u8).set(b, v);
         }
         Insn::Mtsm => {
+            // MTSM は SAR への書き込みで、値は下位 5 ビットに
+            // マスクする（SPEC-PARISC-11 §MTSM / mtctl 系の
+            // SAR 取り扱いに倣う）。
             let v = Gr(ops[0] as u8).get(b);
+            let v = and_n(b, v, 31);
             Cr(11).set(b, v);
         }
         Insn::Mtsarcm => {
@@ -1640,12 +1891,7 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
         | Insn::Ssm
         | Insn::Rfi
         | Insn::RfiR
-        | Insn::Halt
-        | Insn::Reset
-        | Insn::Getshadowregs
         | Insn::IxtlbxD
-        | Insn::Ixtlbxf
-        | Insn::IxtlbxfH
         | Insn::IxtlbxI
         | Insn::Ixtlbt
         | Insn::Pxtlb

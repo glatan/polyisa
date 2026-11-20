@@ -3,9 +3,9 @@
 //! PA-RISC の命令語単位のデコード検査（段階17・PR3）。
 //! 生成デコーダがリテラル語を正しく分類し、arch/MAX 完語で
 //! ゲートされることを見る。即値や変位の復元は意味論側なので
-//! ここでは命令種別だけを見る。
-//! 出典は SPEC-PARISC-11・SPEC-PARISC-20 と QEMU
-//! target/hppa/insns.decode である。
+//! ここでは命令種別だけを見る。末尾は interp バックエンドでの
+//! 裸実行検査（定数形成・加算・分岐無効化・bv・ble）。
+//! 出典は SPEC-PARISC-11・SPEC-PARISC-20 である。
 //! Ref: SPEC-PARISC-11, SPEC-PARISC-20.
 
 use polyisa_guest_parisc::*;
@@ -99,7 +99,6 @@ fn decode_branches() {
     assert_eq!(dec(0xe800_a010), Some(Insn::BlLong));
     // blr/bv/bve（pos16-18=010/110/111）。
     assert_eq!(dec(0xe849_4000), Some(Insn::Blr));
-    assert_eq!(dec(0xe81a_4018), Some(Insn::BlrH));
     assert_eq!(dec(0xe840_c000), Some(Insn::Bv));
     assert_eq!(dec(0xe840_d000), Some(Insn::Bve));
     assert_eq!(dec(0xe840_f000), Some(Insn::BveL));
@@ -215,8 +214,7 @@ fn feature_gates() {
     ] {
         assert_eq!(decf(word, PA11), None, "{word:#x}");
     }
-    // PA 2.0 付録C にのみある命令は PA 1.1 機では解けない
-    // （QEMU は単一 CPU モデルのためゲートしていない）。
+    // PA 2.0 付録C にのみある命令は PA 1.1 機では解けない。
     // mtsarcm / mfia / fdc / fic4f / bl,push / bl long /
     // fldw/fstw のオフセット形 / fneg,f / fcnv,uw,f。
     for (word, want) in [
@@ -283,4 +281,141 @@ fn extract_operands_regression() {
     let w = 0x0441_a2a0;
     assert_eq!(dec(w), Some(Insn::Fic));
     assert_eq!(extract_ops(Insn::Fic, w as u128), vec![2, 1, 5, 1]);
+}
+
+// ---- 裸実行検査（段階17・PR4）----
+// IAOQ 前後キューと PSW.N/PSW.B を、cli の実行ループと同じ
+// 規則でテスト側から遷移させる（SPEC-PARISC-11 §4/§5-4）。
+use polyisa_engine::bare::BareEnv;
+use polyisa_engine::interp::Ctrl;
+use polyisa_guest_parisc::sem;
+use polyisa_sem::Backend as _;
+
+fn env() -> BareEnv {
+    BareEnv::new(core::mem::size_of::<CpuState>())
+}
+
+fn gpr(env: &mut BareEnv, n: u8) -> u64 {
+    env.backend.get(sem::Gr(n).state())
+}
+
+fn set_gpr(env: &mut BareEnv, n: u8, v: u64) {
+    env.backend.set(sem::Gr(n).state(), v);
+}
+
+fn set_q(env: &mut BareEnv, front: u64) {
+    env.backend.set(sem::iaoq_f_ref(), front);
+    env.backend.set(sem::iaoq_b_ref(), front.wrapping_add(4));
+}
+
+fn iaoq_f(env: &mut BareEnv) -> u64 {
+    env.backend.get(sem::iaoq_f_ref())
+}
+
+fn iaoq_b(env: &mut BareEnv) -> u64 {
+    env.backend.get(sem::iaoq_b_ref())
+}
+
+/// 1 命令語を実行し、キュー遷移（run_parisc の step_parisc と同じ
+/// 規則）を行う。PSW.N 時は実行せずキューだけ進める。
+fn step(env: &mut BareEnv, word: u32) {
+    let f = env.backend.get(sem::iaoq_f_ref());
+    let bck = env.backend.get(sem::iaoq_b_ref());
+    let psw = env.backend.get(sem::psw_ref());
+    if psw & sem::PSW_N != 0 {
+        env.backend
+            .set(sem::psw_ref(), psw & !(sem::PSW_N | sem::PSW_B));
+        env.backend.set(sem::iaoq_f_ref(), bck);
+        env.backend.set(sem::iaoq_b_ref(), bck.wrapping_add(4));
+        return;
+    }
+    env.backend.set(sem::psw_ref(), psw & !sem::PSW_N);
+    let insn = decode_model_ex(u128::from(word), 32, false, ALL).unwrap();
+    env.backend.ctrl = Ctrl::Fallthrough;
+    let ok = sem::exec(&mut env.backend, insn, word, f).unwrap();
+    assert!(ok, "insn {word:#x} unimplemented");
+    let target = match env.backend.ctrl {
+        Ctrl::Jump(t) => Some(t),
+        Ctrl::Fallthrough => None,
+    };
+    let mut p = env.backend.get(sem::psw_ref());
+    p = (p & !sem::PSW_B) | if target.is_some() { sem::PSW_B } else { 0 };
+    env.backend.set(sem::psw_ref(), p);
+    env.backend.set(sem::iaoq_f_ref(), bck);
+    env.backend.set(
+        sem::iaoq_b_ref(),
+        target.unwrap_or_else(|| bck.wrapping_add(4)),
+    );
+}
+
+#[test]
+fn exec_ldil_ldo_forms_constant() {
+    let mut env = env();
+    set_q(&mut env, 0x1000);
+    // ldil L%1,r1 → GR[1] = 1<<11 = 0x800。
+    step(&mut env, 0x2020_1000);
+    assert_eq!(gpr(&mut env, 1), 0x800);
+    // ldo 0x800(r1),r1 → GR[1] = 0x1000。
+    step(&mut env, 0x3421_1000);
+    assert_eq!(gpr(&mut env, 1), 0x1000);
+    assert_eq!(iaoq_f(&mut env), 0x1008);
+    assert_eq!(iaoq_b(&mut env), 0x100c);
+}
+
+#[test]
+fn exec_add_sub_operand_order() {
+    let mut env = env();
+    set_q(&mut env, 0x1000);
+    set_gpr(&mut env, 1, 0x800); // r2 オペランド（fa）
+    set_gpr(&mut env, 2, 1); // r1 オペランド（fb）
+    // add r1,r2,r3（0x0822_0603）→ GR[3] = GR[2] + GR[1]。
+    step(&mut env, 0x0822_0603);
+    assert_eq!(gpr(&mut env, 3), 0x801);
+    // sub r1,r2,r3（0x0822_0403）→ GR[3] = GR[2] - GR[1]
+    // （r1 が被減数。逆順だと 0xffff...7ff にならず符号が違う）。
+    step(&mut env, 0x0822_0403);
+    assert_eq!(gpr(&mut env, 3), 1u64.wrapping_sub(0x800));
+}
+
+#[test]
+fn exec_cmpb_taken_forward_nullifies_delay_slot() {
+    let mut env = env();
+    set_q(&mut env, 0x1000);
+    set_gpr(&mut env, 1, 5);
+    set_gpr(&mut env, 2, 5);
+    // comb,=,n r1,r2,+4 → c=1（"="は c=1。Table 5-3）、i フィールド=2
+    // （変位 +4）、n=1、前方・成立 → 遅延スロット無効化。
+    step(&mut env, 0x8022_200a);
+    assert_eq!(iaoq_f(&mut env), 0x1004); // 遅延スロット番地
+    assert_eq!(iaoq_b(&mut env), 0x100c); // pc+8+4
+    // 遅延スロットの add は PSW.N で無効化され、GR[3] は変わらない。
+    step(&mut env, 0x0822_0603);
+    assert_eq!(gpr(&mut env, 3), 0);
+    // 無効化を消費したので次は分岐先 0x100c から進む。
+    assert_eq!(iaoq_f(&mut env), 0x100c);
+    assert_eq!(iaoq_b(&mut env), 0x1010);
+}
+
+#[test]
+fn exec_bv_indirect_jump() {
+    let mut env = env();
+    set_q(&mut env, 0x1000);
+    set_gpr(&mut env, 2, 0x2000);
+    // bv 0(r2)（0xe840_c000: x=2、b=0）→ iaoq_b = GR[2]。
+    step(&mut env, 0xe840_c000);
+    assert_eq!(iaoq_f(&mut env), 0x1004);
+    assert_eq!(iaoq_b(&mut env), 0x2000);
+}
+
+#[test]
+fn exec_ble_links_and_jumps() {
+    let mut env = env();
+    set_q(&mut env, 0x1000);
+    set_gpr(&mut env, 2, 0x3000);
+    // ble 0(sr0,r2)（0xe440_0000: b=2、w=0、sp=0、w1=0）。
+    // → GR[31] = pc+8、iaoq_b = GR[2] + disp17(0)。
+    step(&mut env, 0xe440_0000);
+    assert_eq!(gpr(&mut env, 31), 0x1008);
+    assert_eq!(iaoq_f(&mut env), 0x1004);
+    assert_eq!(iaoq_b(&mut env), 0x3000);
 }

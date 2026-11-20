@@ -51,6 +51,11 @@ pub mod arm;
 // Ref: SRC-LINUX (7.3).
 pub mod m68k;
 
+/// PA-RISC（hppa32・ビッグエンディアン）のシステムコール番号と
+/// syscall 処理（`sys` の実装だけ `guest-parisc` 機能の内側）。
+// Ref: SRC-LINUX (7.3).
+pub mod parisc;
+
 /// Power（ppc64・ELFv2）のシステムコール番号と syscall 処理。
 // Ref: SRC-LINUX (7.3), SPEC-POWER-ABI (ELFv2 r1.5).
 pub mod power;
@@ -98,6 +103,7 @@ pub enum GuestAbi {
     Aarch64Linux,
     ArmLinux,
     M68kLinux,
+    PariscLinux,
 }
 
 /// 実行ループとの境界。定義は実行エンジンにある。
@@ -485,6 +491,7 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
         GuestAbi::Aarch64Linux => aarch64::name(nr),
         GuestAbi::ArmLinux => arm::name(nr),
         GuestAbi::M68kLinux => m68k::name(nr),
+        GuestAbi::PariscLinux => parisc::name(nr),
         GuestAbi::Unknown => None,
     }
 }
