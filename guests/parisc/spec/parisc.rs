@@ -10,15 +10,16 @@
 // PA-RISC 1.0 は公開の根拠資料がないため範囲外（段階17 の
 // 着手条件で除外を決定）。対象は 1.1・2.0 と MAX 拡張。
 //
-// デコード表は QEMU target/hppa/insns.decode を正本として
-// 写した。QEMU の `%assemble_*`/`expand_*` による即値復元は意味
-// 論側の仕事なので、ここでは生ビット列のフィールドとして宣言し、
-// 符号や左右の転置は行わない。completer の値（cf/c/sh/d/size/ma 等）
-// もそのまま値オペランドとして渡し、解釈は意味論で行う。
+// デコード表の転記元は QEMU target/hppa/insns.decode で、
+// 固定ビットは SPEC-PARISC-11 付録D および SPEC-PARISC-20 付録C
+// と全件照合済み。QEMU の `%assemble_*`/`expand_*` による即値
+// 復元は意味論側の仕事なので、ここでは生ビット列のフィールドと
+// して宣言し、符号や左右の転置は行わない。completer の値
+// （cf/c/sh/d/size/ma 等）もそのまま値オペランドとして渡し、
+// 解釈は意味論で行う。
 //
 // HP の bit 記法は MSB=0 で、フィールド桁番号はこのファイルでは
 // すべて LSB=0（QEMU と同じ）に揃えてある。
-// 出典は SPEC-PARISC-11・SPEC-PARISC-20 である。
 // Ref: SPEC-PARISC-11, SPEC-PARISC-20.
 
 use polyisa_isadl::model::*;
@@ -207,10 +208,12 @@ pub fn build_model() -> polyisa_isadl::Model {
         &["fb", "c3"],
         vec![gr("r", "fb", Access::Read), val("sp", "c3")],
     ));
+    // mtctl の fa 桁は制御レジスタ番号で GR ではない（FMFCTL と
+    // 同じく regclass 無しの値オペランド）。
     m.formats.push(fmt(
         "FMTCTL",
         &["fa", "fb"],
-        vec![gr("t", "fa", Access::Read), gr("r", "fb", Access::Read)],
+        vec![val("t", "fa"), gr("r", "fb", Access::Read)],
     ));
     // mt* でソース 1 本だけを読むもの（mtsm/mtsarcm）。
     m.formats
@@ -1106,25 +1109,12 @@ pub fn build_model() -> polyisa_isadl::Model {
         vec![gr("r", "fa", Access::Read), val("i", "im21")],
     ));
 
+    // 機能述語は isadl の `when` 文法（`&&`・`||`・`!`・括弧）。
     let pred = |feat: &str| -> Pred {
         if feat.is_empty() {
             return Pred::True;
         }
-        let terms: Vec<Pred> = feat
-            .split('&')
-            .map(|t| {
-                if let Some(neg) = t.strip_prefix('!') {
-                    Pred::Not(Box::new(Pred::Flag(neg.to_string())))
-                } else {
-                    Pred::Flag(t.to_string())
-                }
-            })
-            .collect();
-        if terms.len() == 1 {
-            terms.into_iter().next().unwrap()
-        } else {
-            Pred::All(terms)
-        }
+        polyisa_isadl::pred::parse(feat).expect("valid when")
     };
     let mut ins = |name: &str,
                    format: &str,
@@ -1182,12 +1172,14 @@ pub fn build_model() -> polyisa_isadl::Model {
         vec![],
         "system",
     );
+    // mtsarcm は PA 2.0 付録C にのみある。QEMU は単一 CPU
+    // モデルのためゲートしないが、PA1.1 では未割当。
     ins(
         "mtsarcm",
         "F1R",
         "000000 01011 ..... ... 11000110 00000",
         "mtsarcm {r}",
-        "",
+        "pa20",
         vec![],
         "system",
     );
@@ -1200,12 +1192,14 @@ pub fn build_model() -> polyisa_isadl::Model {
         vec![],
         "system",
     );
+    // mfia は PA 2.0 付録C にのみある。QEMU は単一 CPU
+    // モデルのためゲートしないが、PA1.1 では未割当。
     ins(
         "mfia",
         "F1TW",
         "000000 ..... 00000 ... 10100101 .....",
         "mfia {t}",
-        "",
+        "pa20",
         vec![],
         "system",
     );
@@ -1227,6 +1221,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         vec![],
         "system",
     );
+    // SYNCDMA（bits11:15 = 0x10）はこのパターンが吸収する。
     ins(
         "sync",
         "FNONE",
@@ -1281,7 +1276,9 @@ pub fn build_model() -> polyisa_isadl::Model {
         vec![],
         "system",
     );
-    // QEMU ファームウェア専用の人命令（非公式スロット）。
+    // QEMU ファームウェア専用の人工命令（非公式スロット）。
+    // 0x3F は Table D-1/C-1 の両版で未割当。QEMU/SeaBIOS-hppa
+    // 専用で、実機では不正命令。
     for (nm, pat) in [
         ("halt", "11111111111111011110101011010000"),
         ("reset", "11111111111111011110101011010001"),
@@ -1300,12 +1297,15 @@ pub fn build_model() -> polyisa_isadl::Model {
     );
 
     // ---- Memory Management（opcode 0x01）----
+    // fdc の即値形（ext 0xCA）は PA 2.0 付録C にのみある。
+    // QEMU は単一 CPU モデルのためゲートしないが、PA1.1 では
+    // 未割当。
     ins(
         "fdc",
         "FNONE",
         "000001 ..... ..... .. 11001010 0 .....",
         "fdc ({b})",
-        "",
+        "pa20",
         vec![],
         "system",
     );
@@ -1327,27 +1327,32 @@ pub fn build_model() -> polyisa_isadl::Model {
         vec![],
         "system",
     );
+    // instruction MM の s は Figure D-2/C-2 上 3 ビット
+    // （bits16:18）なので、pxtlb_s 系と同じ FMMXS を使う。
     ins(
         "fic",
-        "FMMX",
+        "FMMXS",
         "000001 ..... ..... ... 0001010 . .....",
         "fic {x}({b})",
         "",
         vec![],
         "system",
     );
+    // fic4f（PA 2.0 の fdc/fic 統合形）は PA 2.0 付録C にのみ
+    // ある。QEMU は単一 CPU モデルのためゲートしないが、PA1.1
+    // では未割当。data-MM なので sp は FMMX の 2 ビット。
     ins(
         "fic4f",
         "FMMX",
         "000001 ..... ..... .. 01001111 . 00000",
         "fic {x}({b})",
-        "",
+        "pa20",
         vec![],
         "system",
     );
     ins(
         "fice",
-        "FMMX",
+        "FMMXS",
         "000001 ..... ..... ... 0001011 . .....",
         "fice ({b})",
         "",
@@ -1378,7 +1383,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         "FIXBX",
         "000001 ..... ..... .. 0100000 . 0 00000",
         "ixtlbx {r}, ({b})",
-        "pa11&!pa20",
+        "pa11 && !pa20",
         vec![],
         "system",
     );
@@ -1387,16 +1392,17 @@ pub fn build_model() -> polyisa_isadl::Model {
         "FIXBXS",
         "000001 ..... ..... ... 000000 . 0 00000",
         "ixtlbx {r}, ({b})",
-        "pa11&!pa20",
+        "pa11 && !pa20",
         vec![],
         "system",
     );
+    // ixtlbxf 系は仕様書に根拠なし（QEMU/PCX-L 由来）。
     ins(
         "ixtlbxf",
         "FIXF",
         "000001 00000 ..... 00 0 . 01000 . 0 00000",
         "ixtlbxf {r}",
-        "pa11&!pa20",
+        "pa11 && !pa20",
         vec![],
         "system",
     );
@@ -1405,7 +1411,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         "FIXF",
         "000001 01001 ..... 01 0 . 01000 . 0 00000",
         "ixtlbxf {r}",
-        "pa11&!pa20",
+        "pa11 && !pa20",
         vec![],
         "system",
     );
@@ -1575,7 +1581,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         "FRRSH",
         "000010 ..... ..... 0000 0111.. 0 .....",
         "hshladd {r2}, {r1}, {t}",
-        "max1",
+        "max1 || max2",
         vec![wne("sh", 0)],
         "alu",
     );
@@ -1602,7 +1608,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         "FRRSH",
         "000010 ..... ..... 0000 0101.. 0 .....",
         "hshradd {r2}, {r1}, {t}",
-        "max1",
+        "max1 || max2",
         vec![wne("sh", 0)],
         "alu",
     );
@@ -1672,7 +1678,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         "alu",
     );
 
-    // MAX-1（PA7100LC/PA7300LC のマルチメディア半語演算）。
+    // 半語加減算は MAX-1（PA7100LC/PA7300LC）にあり、PA 2.0
+    // 付録C Table C-5/C-12 にも掲載があるので max1||max2。
     for (nm, pat) in [
         ("hadd", "00000011 11 0"),
         ("hadd_ss", "00000011 01 0"),
@@ -1687,7 +1694,7 @@ pub fn build_model() -> polyisa_isadl::Model {
             "FRRR",
             &format!("000010 ..... ..... {pat} ....."),
             &format!("{nm} {{r2}}, {{r1}}, {{t}}"),
-            "max1",
+            "max1 || max2",
             vec![],
             "alu",
         );
@@ -1756,17 +1763,21 @@ pub fn build_model() -> polyisa_isadl::Model {
         vec![],
         "alu",
     );
+    // PERMH は MAX-1 にもある（PA 2.0 付録C Table C-5/C-12
+    // にも掲載）ので max1||max2。hshl/hshr/mixh/mixw は MAX-2
+    // 限定。
     ins(
         "permh",
         "FPERMH",
         "111110 ..... ..... 0 .. 0 .. .. .. 0 .....",
         "permh {r1}, {r2}, {t}",
-        "max2",
+        "max1 || max2",
         vec![],
         "alu",
     );
 
-    // ---- Index Mem（opcode 0x03/0x09/0x0b）----
+    // ---- Index Mem（opcode 0x03）と Copr_w/Copr_dw
+    // （0x09/0x0b、仕様用語のコプロセッサ load/store）----
     // size は 0..3 = b/h/w/d。size=3 は PA 2.0 機だけで有効
     // （デコードは受理し、意味論が版で弾く）。
     ins(
@@ -2108,12 +2119,15 @@ pub fn build_model() -> polyisa_isadl::Model {
         vec![],
         "store",
     );
+    // fldw/fstw のオフセット形（0x16/0x17/0x1e/0x1f の bit29=0
+    // 側）は PA 2.0 付録C にのみある。QEMU は単一 CPU モデルの
+    // ためゲートしないが、PA1.1 では未割当。
     ins(
         "fldw_o",
         "FFOWL",
         "010110 ..... ..... ................",
         "fldw {f}, {off}({b})",
-        "",
+        "pa20",
         vec![],
         "load",
     );
@@ -2122,7 +2136,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         "FFOWL",
         "010111 ..... ..... .............0..",
         "fldw {f}, {off}({b})",
-        "",
+        "pa20",
         vec![],
         "load",
     );
@@ -2131,7 +2145,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         "FFOWS",
         "011110 ..... ..... ................",
         "fstw {f}, {off}({b})",
-        "",
+        "pa20",
         vec![],
         "store",
     );
@@ -2140,7 +2154,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         "FFOWS",
         "011111 ..... ..... .............0..",
         "fstw {f}, {off}({b})",
-        "",
+        "pa20",
         vec![],
         "store",
     );
@@ -2251,7 +2265,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         "cmpb_f",
         "FRRB",
         "100010 ..... ..... ... ........... . .",
-        "combt {r1}, {r2}, {disp}",
+        "combf {r1}, {r2}, {disp}",
         "",
         vec![],
         "branch",
@@ -2269,7 +2283,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         "cmpb_df",
         "FRRB",
         "101111 ..... ..... ... ........... . .",
-        "combt,d {r1}, {r2}, {disp}",
+        "combf,d {r1}, {r2}, {disp}",
         "pa20",
         vec![],
         "branch",
@@ -2287,7 +2301,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         "cmpbi_f",
         "FRIB",
         "100011 ..... ..... ... ........... . .",
-        "comibt {i}, {r}, {disp}",
+        "comibf {i}, {r}, {disp}",
         "",
         vec![],
         "branch",
@@ -2314,7 +2328,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         "addb_f",
         "FADDB",
         "101010 ..... ..... ... ........... . .",
-        "addbt {r1}, {r2}, {disp}",
+        "addbf {r1}, {r2}, {disp}",
         "",
         vec![],
         "branch",
@@ -2332,7 +2346,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         "addbi_f",
         "FADDBI",
         "101011 ..... ..... ... ........... . .",
-        "addibt {i}, {r}, {disp}",
+        "addibf {i}, {r}, {disp}",
         "",
         vec![],
         "branch",
@@ -2505,12 +2519,15 @@ pub fn build_model() -> polyisa_isadl::Model {
         vec![],
         "branch",
     );
+    // bl,push と bl の長変位形（ext3=100/101）は PA 2.0 付録C
+    // にのみある。QEMU は単一 CPU モデルのためゲートしないが、
+    // PA1.1 では未割当。
     ins(
         "bl_push",
         "FBL",
         "111010 ..... ..... 100 ........... . .",
         "bl,push {disp}, {l}",
-        "",
+        "pa20",
         vec![],
         "branch",
     );
@@ -2519,7 +2536,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         "FBLL",
         "111010 .......... 101 ........... . .",
         "bl {disp}, r2",
-        "",
+        "pa20",
         vec![],
         "branch",
     );
@@ -2532,7 +2549,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         vec![],
         "branch",
     );
-    // HP-UX 9.05 インストーラの非公式 BLR。
+    // 仕様書に根拠なし（QEMU/HP-UX 9 由来）。HP-UX 9.05
+    // インストーラの非公式 BLR。
     ins(
         "blr_h",
         "FBLR",
@@ -2542,6 +2560,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         vec![],
         "branch",
     );
+    // nopbts 系は仕様書に根拠なし（QEMU/HP-UX 9/PCX-L 由来）。
     ins(
         "nopbts",
         "FNONE",
@@ -2588,7 +2607,9 @@ pub fn build_model() -> polyisa_isadl::Model {
         "branch",
     );
 
-    // ---- FP（opcode 0x0c = PA 1.1、0x0e = PA 2.0）----
+    // ---- FP（opcode 0x0c/0x0e）----
+    // 0x0e は PA1.1 にも存在するが L/R 半面選択の意味論が
+    // 異なるため、PA 2.0 の 64 レジスタ形のみモデル化する。
     ins(
         "fid_f",
         "FNONE",
@@ -2599,26 +2620,29 @@ pub fn build_model() -> polyisa_isadl::Model {
         "fp",
     );
     // class 0（r,t）。pos21-26 = 00 000 0。
-    for (nm, sub) in [
-        ("fcpy_f", "010 00"),
-        ("fabs_f", "011 00"),
-        ("fsqrt_f", "100 00"),
-        ("frnd_f", "101 00"),
-        ("fneg_f", "110 00"),
-        ("fnegabs_f", "111 00"),
-        ("fcpy_d", "010 01"),
-        ("fabs_d", "011 01"),
-        ("fsqrt_d", "100 01"),
-        ("frnd_d", "101 01"),
-        ("fneg_d", "110 01"),
-        ("fnegabs_d", "111 01"),
+    // fneg/fnegabs（sub 6,7）は PA 2.0 付録C にのみある。
+    // QEMU は単一 CPU モデルのためゲートしないが、PA1.1 では
+    // 未割当。
+    for (nm, sub, feat) in [
+        ("fcpy_f", "010 00", ""),
+        ("fabs_f", "011 00", ""),
+        ("fsqrt_f", "100 00", ""),
+        ("frnd_f", "101 00", ""),
+        ("fneg_f", "110 00", "pa20"),
+        ("fnegabs_f", "111 00", "pa20"),
+        ("fcpy_d", "010 01", ""),
+        ("fabs_d", "011 01", ""),
+        ("fsqrt_d", "100 01", ""),
+        ("frnd_d", "101 01", ""),
+        ("fneg_d", "110 01", "pa20"),
+        ("fnegabs_d", "111 01", "pa20"),
     ] {
         ins(
             nm,
             "FF01",
             &format!("001100 ..... 00000 {sub} 000000 ....."),
             &format!("{nm} {{r}}, {{t}}"),
-            "",
+            feat,
             vec![],
             "fp",
         );
@@ -2662,40 +2686,43 @@ pub fn build_model() -> polyisa_isadl::Model {
     }
     // class 1（fcnv。pos14-16 が変換種、pos17-18 が元 fmt、
     // pos19-20 が先 fmt、pos21-26 = 01 000 0）。
-    for (nm, pat) in [
-        ("fcnv_d_f", "000 00 01"),
-        ("fcnv_f_d", "000 01 00"),
-        ("fcnv_w_f", "001 00 00"),
-        ("fcnv_q_f", "001 00 01"),
-        ("fcnv_w_d", "001 01 00"),
-        ("fcnv_q_d", "001 01 01"),
-        ("fcnv_f_w", "010 00 00"),
-        ("fcnv_d_w", "010 00 01"),
-        ("fcnv_f_q", "010 01 00"),
-        ("fcnv_d_q", "010 01 01"),
-        ("fcnv_t_f_w", "011 00 00"),
-        ("fcnv_t_d_w", "011 00 01"),
-        ("fcnv_t_f_q", "011 01 00"),
-        ("fcnv_t_d_q", "011 01 01"),
-        ("fcnv_uw_f", "101 00 00"),
-        ("fcnv_uq_f", "101 00 01"),
-        ("fcnv_uw_d", "101 01 00"),
-        ("fcnv_uq_d", "101 01 01"),
-        ("fcnv_f_uw", "110 00 00"),
-        ("fcnv_d_uw", "110 00 01"),
-        ("fcnv_f_uq", "110 01 00"),
-        ("fcnv_d_uq", "110 01 01"),
-        ("fcnv_t_f_uw", "111 00 00"),
-        ("fcnv_t_d_uw", "111 00 01"),
-        ("fcnv_t_f_uq", "111 01 00"),
-        ("fcnv_t_d_uq", "111 01 01"),
+    // 符号なし・切捨て変換（sub 5,6,7）は PA 2.0 付録C にのみ
+    // ある。QEMU は単一 CPU モデルのためゲートしないが、
+    // PA1.1 では未割当。
+    for (nm, pat, feat) in [
+        ("fcnv_d_f", "000 00 01", ""),
+        ("fcnv_f_d", "000 01 00", ""),
+        ("fcnv_w_f", "001 00 00", ""),
+        ("fcnv_q_f", "001 00 01", ""),
+        ("fcnv_w_d", "001 01 00", ""),
+        ("fcnv_q_d", "001 01 01", ""),
+        ("fcnv_f_w", "010 00 00", ""),
+        ("fcnv_d_w", "010 00 01", ""),
+        ("fcnv_f_q", "010 01 00", ""),
+        ("fcnv_d_q", "010 01 01", ""),
+        ("fcnv_t_f_w", "011 00 00", ""),
+        ("fcnv_t_d_w", "011 00 01", ""),
+        ("fcnv_t_f_q", "011 01 00", ""),
+        ("fcnv_t_d_q", "011 01 01", ""),
+        ("fcnv_uw_f", "101 00 00", "pa20"),
+        ("fcnv_uq_f", "101 00 01", "pa20"),
+        ("fcnv_uw_d", "101 01 00", "pa20"),
+        ("fcnv_uq_d", "101 01 01", "pa20"),
+        ("fcnv_f_uw", "110 00 00", "pa20"),
+        ("fcnv_d_uw", "110 00 01", "pa20"),
+        ("fcnv_f_uq", "110 01 00", "pa20"),
+        ("fcnv_d_uq", "110 01 01", "pa20"),
+        ("fcnv_t_f_uw", "111 00 00", "pa20"),
+        ("fcnv_t_d_uw", "111 00 01", "pa20"),
+        ("fcnv_t_f_uq", "111 01 00", "pa20"),
+        ("fcnv_t_d_uq", "111 01 01", "pa20"),
     ] {
         ins(
             nm,
             "FF01",
             &format!("001100 ..... 000 {pat} 010000 ....."),
             &format!("{nm} {{r}}, {{t}}"),
-            "",
+            feat,
             vec![],
             "fp",
         );
@@ -2840,12 +2867,13 @@ pub fn build_model() -> polyisa_isadl::Model {
             "fp",
         );
     }
+    // xmpyu は PA1.1 Table D-20 にもあるので非ゲート。
     ins(
         "xmpyu",
         "FXXY",
         "001110 ..... ..... 010 .0111 .00 .....",
         "xmpyu {r1}, {r2}, {t}",
-        "pa20",
+        "",
         vec![],
         "fp",
     );

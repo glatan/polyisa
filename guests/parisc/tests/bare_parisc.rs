@@ -13,6 +13,8 @@ use polyisa_guest_parisc::*;
 const ALL: u128 = FEAT_PA11 | FEAT_PA20 | FEAT_MAX1 | FEAT_MAX2;
 const PA11: u128 = FEAT_PA11;
 const PA11_MAX1: u128 = FEAT_PA11 | FEAT_MAX1;
+// pa8000 モデルの機能集合（PA 2.0 + MAX-2、MAX-1 なし）。
+const PA8000: u128 = FEAT_PA11 | FEAT_PA20 | FEAT_MAX2;
 
 fn dec(word: u32) -> Option<Insn> {
     decode_model_ex(word as u128, 32, false, ALL)
@@ -213,17 +215,37 @@ fn feature_gates() {
     ] {
         assert_eq!(decf(word, PA11), None, "{word:#x}");
     }
-    // mfia と fldw の offset 形は QEMU が pa20 を見ないので非ゲート。
-    assert_eq!(decf(0x0000_14a5, PA11), Some(Insn::Mfia));
-    assert_eq!(decf(0x5843_0000, PA11), Some(Insn::FldwO));
+    // PA 2.0 付録C にのみある命令は PA 1.1 機では解けない
+    // （QEMU は単一 CPU モデルのためゲートしていない）。
+    // mtsarcm / mfia / fdc / fic4f / bl,push / bl long /
+    // fldw/fstw のオフセット形 / fneg,f / fcnv,uw,f。
+    for (word, want) in [
+        (0x0161_18c0u32, Insn::Mtsarcm),
+        (0x0000_14a5, Insn::Mfia),
+        (0x0440_3280, Insn::Fdc),
+        (0x0442_13c0, Insn::Fic4f),
+        (0xebe0_8008, Insn::BlPush),
+        (0xe800_a010, Insn::BlLong),
+        (0x5843_0000, Insn::FldwO),
+        (0x7843_0000, Insn::FstwO),
+        (0x3020_c002, Insn::FnegF),
+        (0x3022_8202, Insn::FcnvUwF),
+    ] {
+        assert_eq!(decf(word, PA8000), Some(want), "{word:#x}");
+        assert_eq!(decf(word, PA11), None, "{word:#x}");
+    }
     // opcode 0x0e の PA 2.0 FP 形。
     assert_eq!(decf(0x3820_4002, ALL), Some(Insn::FcpyFw));
     assert_eq!(decf(0x3820_4002, PA11), None);
+    // xmpyu は PA1.1 Table D-20 にもあるので PA 1.1 で解ける。
     assert_eq!(decf(0x3800_4700, ALL), Some(Insn::Xmpyu));
-    assert_eq!(decf(0x3800_4700, PA11), None);
-    // MAX-1 は max1、MAX-2 は max2 が要る。
+    assert_eq!(decf(0x3800_4700, PA11), Some(Insn::Xmpyu));
+    // 半語加減算と PERMH は MAX-1 にも MAX-2 にもある。
     assert_eq!(decf(0x0822_03c3, PA11_MAX1), Some(Insn::Hadd));
+    assert_eq!(decf(0x0822_03c3, PA8000), Some(Insn::Hadd));
     assert_eq!(decf(0x0822_03c3, PA11), None);
+    assert_eq!(decf(0xf822_6644, PA8000), Some(Insn::Permh));
+    assert_eq!(decf(0xf822_6644, PA11_MAX1), Some(Insn::Permh));
     assert_eq!(decf(0xf800_8903, ALL), Some(Insn::Hshl));
     assert_eq!(decf(0xf800_8903, PA11_MAX1), None);
     // PA1.x 専用の ixtlbx は pa20 機では解けない（ixtlbt は
@@ -256,4 +278,9 @@ fn extract_operands_regression() {
     let w = 0x0464_c040;
     assert_eq!(decf(w, PA11), Some(Insn::IxtlbxI));
     assert_eq!(extract_ops(Insn::IxtlbxI, w as u128), vec![3, 4, 6, 1]);
+    // fic（instruction MM）の s も Figure D-2/C-2 上 3 ビット
+    // （bits16:18）。sp=5 は 2 ビットでは表せない。
+    let w = 0x0441_a2a0;
+    assert_eq!(dec(w), Some(Insn::Fic));
+    assert_eq!(extract_ops(Insn::Fic, w as u128), vec![2, 1, 5, 1]);
 }
