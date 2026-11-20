@@ -22,7 +22,7 @@
 
 判定が `未整備` の条件は、判定に使うテストの名前を条件の文に書く。テストはその段階の作業の中で作り、判定を `テスト：` に更新する。
 
-段階 15 から 24 の各段階には、その節の末尾に作業計画がある。構成は各段階で共通であり、着手条件の整備、骨格、命令群、世代差・拡張、ABI・OS パーソナリティ、タイミング、残件整理の順に進める。各ステップの終わりにサブエージェントのレビューを挟み、レビュー後の修正のあとに push する。計画は作業の進行に合わせて更新し、確定したステップにはコミット番号を記録する。
+段階 15 から 24 の各段階には、その節の末尾に作業計画がある。構成は各段階で共通であり、着手条件の整備、骨格、命令群、世代差・拡張、ABI・OS パーソナリティ、タイミング、残件整理の順に進める。各ステップの終わりにサブエージェントのレビューを挟み、レビュー後の修正のあとに push する。計画は作業の進行に合わせて更新する。作業計画の判定列には対応する完了条件の ID を記し、完了の判定は完了条件の表で行う。
 
 ### 段階 15：SPARC
 
@@ -34,7 +34,7 @@
 
 | ID | 条件 | 判定 |
 |---|---|---|
-| S15-1 | sparc64 のテストプログラムと配布物のコマンド群が、ゲストのルートを使って正しい出力を返す（テスト `heavy_program_sparc`）。 | 未整備 |
+| S15-1 | sparc64 のテストプログラムと配布物のコマンド群が、ゲストのルートを使って正しい出力を返す（テスト `heavy_program_sparc`）。 | テスト：`heavy_program_sparc` |
 | S15-2 | ABI 表が、UAPI ヘッダからの抽出値と一致する（テスト `heavy_abi_sparc`）。 | 未整備 |
 | S15-3 | llvm-objdump とのデコーダの差分テストが通る（テスト `heavy_oracle_sparc`）。 | 未整備 |
 
@@ -42,18 +42,18 @@
 
 | # | 内容 | 前提 | 判定 |
 |---|---|---|---|
-| SP1 | 着手条件: SPEC-SPARC-V9・SPEC-SPARC-PSABI の版確定、V7 の根拠資料の追加登録または範囲からの除外の決定、BIN 登録（sparc32・sparc64 配布物）、SST 類の既存適合データの有無の調査 | - | 98af983 |
-| SP2 | `guests/sparc` の段階 2 の試作を本実装に差し替える骨格: CpuState（g/o/i/l レジスタ・CWP・PSR/TSTATE・PC/nPC）、機能（V7・V8・V9・VIS）とモデルの宣言、sem 層、ワークスペース配線 | SP1 | 85df434 |
-| SP3 | デコード方式の決定: 32 ビット固定長の map/パターン。遅延スロットは PC/nPC として実行ループ側で表現 | SP2 | 85df434 |
-| SP4 | `run_sparc` 実行ループ + bare 最小テスト | SP3 | 4c08ee8 |
-| SP5 | 整数演算: add/sub/論理/シフト/sethi と、V8 の umul/smul/udiv/sdiv/mulscc | SP4 | 069ed0d |
-| SP6 | load/store 全サイズ・ldstub/swap・ASI 指定形 | SP4 | 21fd504 |
-| SP7 | 分岐・call・jmpl・return。annul ビットと遅延スロット内の分岐（DCTI couple） | SP4 | 56a5d64 |
-| SP8 | ウィンドウ命令 save/restore・ta/tcc（V8 の Ticc を含む）・ユーザ ASR（rdy/wry、V9 の rdccr/wrccr/rdpc）。rd/wr psr や rett/done/retry は特権命令なので、ユーザーモードでは特権違反トラップの経路だけを実装する | SP4 | d22e301 |
-| SP9 | V9 の追加: movcc/movr・64 ビット演算・PSTATE.AM のアドレスマスク・cas/casx・membar/stbar/flush・popc | SP5-8 | fb4b060 |
-| SP10 | FPU: ldf/stf/lddf・fadd/fsub/fmul/fdiv/fsqrt・fcmp・fcvt・fmov、V9 の fmovcc/fmovr と %fsr | SP4 | 275db52 |
-| SP11 | VIS とユーザ ASI。V7/V8/V9 のモデル差を `when` 述語と挙動パラメータで切り分け | SP9,SP10 | e9965cc |
-| SP12 | Linux ABI: sparc32/sparc64 の syscall 表、ELF、ウィンドウのあふれと不足を OS パーソナリティで再現 | SP11 | dc747fa |
+| SP1 | 着手条件: SPEC-SPARC-V9・SPEC-SPARC-PSABI の版確定、V7 の根拠資料の追加登録または範囲からの除外の決定、BIN 登録（sparc32・sparc64 配布物）、SST 類の既存適合データの有無の調査 | - | - |
+| SP2 | `guests/sparc` の段階 2 の試作を本実装に差し替える骨格: CpuState（g/o/i/l レジスタ・CWP・PSR/TSTATE・PC/nPC）、機能（V7・V8・V9・VIS）とモデルの宣言、sem 層、ワークスペース配線 | SP1 | - |
+| SP3 | デコード方式の決定: 32 ビット固定長の map/パターン。遅延スロットは PC/nPC として実行ループ側で表現 | SP2 | - |
+| SP4 | `run_sparc` 実行ループ + bare 最小テスト | SP3 | - |
+| SP5 | 整数演算: add/sub/論理/シフト/sethi と、V8 の umul/smul/udiv/sdiv/mulscc | SP4 | - |
+| SP6 | load/store 全サイズ・ldstub/swap・ASI 指定形 | SP4 | - |
+| SP7 | 分岐・call・jmpl・return。annul ビットと遅延スロット内の分岐（DCTI couple） | SP4 | - |
+| SP8 | ウィンドウ命令 save/restore・ta/tcc（V8 の Ticc を含む）・ユーザ ASR（rdy/wry、V9 の rdccr/wrccr/rdpc）。rd/wr psr や rett/done/retry は特権命令なので、ユーザーモードでは特権違反トラップの経路だけを実装する | SP4 | - |
+| SP9 | V9 の追加: movcc/movr・64 ビット演算・PSTATE.AM のアドレスマスク・cas/casx・membar/stbar/flush・popc | SP5-8 | - |
+| SP10 | FPU: ldf/stf/lddf・fadd/fsub/fmul/fdiv/fsqrt・fcmp・fcvt・fmov、V9 の fmovcc/fmovr と %fsr | SP4 | - |
+| SP11 | VIS とユーザ ASI。V7/V8/V9 のモデル差を `when` 述語と挙動パラメータで切り分け | SP9,SP10 | - |
+| SP12 | Linux ABI: sparc32/sparc64 の syscall 表、ELF、ウィンドウのあふれと不足を OS パーソナリティで再現 | SP11 | - |
 | SP13 | `heavy_program_sparc`（配布物のコマンド群） | SP12 | S15-1 |
 | SP14 | `heavy_abi_sparc`（UAPI 抽出値との照合） | SP12 | S15-2 |
 | SP15 | `heavy_oracle_sparc`（llvm-objdump 差分） | SP11 | S15-3 |
