@@ -36,7 +36,7 @@
 |---|---|---|
 | S15-1 | sparc64 のテストプログラムと配布物のコマンド群が、ゲストのルートを使って正しい出力を返す（テスト `heavy_program_sparc`）。 | テスト：`heavy_program_sparc` |
 | S15-2 | ABI 表が、UAPI ヘッダからの抽出値と一致する（テスト `heavy_abi_sparc`）。 | テスト：`heavy_abi_sparc` |
-| S15-3 | llvm-objdump とのデコーダの差分テストが通る（テスト `heavy_oracle_sparc`）。 | 未整備 |
+| S15-3 | llvm-objdump とのデコーダの差分テストが通る（テスト `heavy_oracle_sparc`）。 | テスト：`heavy_oracle_sparc` |
 
 作業計画：
 
