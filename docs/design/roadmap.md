@@ -77,8 +77,8 @@
 | # | 内容 | 前提 | 判定 |
 |---|---|---|---|
 | AL1 | 着手条件: SPEC-ALPHA-ARM・SPEC-ALPHA-CALLSTD の版確定、BIN 登録、GAP-0023 残項目の点検 | 段階 10 | - |
-| AL2 | `guests/alpha` 骨格: CpuState（r0-31・f0-31・PC・PAL 関連状態）、機能（BWX・FIX・CIX・MVI）とモデル（21064-21364）の宣言、AMASK/IMPLVER を識別情報へ | AL1 | - |
-| AL3 | デコード: 32 ビット固定長、形式別（Operate/Memory/Branch/CALL_PAL）のパターン | AL2 | - |
+| AL2 | `guests/alpha` 骨格: CpuState（r0-31・f0-31・PC・PAL 関連状態）、機能（BWX・FIX・CIX・MVI）とモデル（21064-21364）の宣言、AMASK/IMPLVER を識別情報へ | AL1 | テスト：bare_alpha |
+| AL3 | デコード: 32 ビット固定長、形式別（Operate/Memory/Branch/CALL_PAL）のパターン | AL2 | テスト：bare_alpha（AL2 と一体で実装・レビュー済み） |
 | AL4 | `run_alpha` 実行ループ + bare 最小テスト | AL3 | - |
 | AL5 | 整数 Operate 系: add/sub/論理/シフト/比較/cmov・mb/wmb・rpcc/rc/rs | AL4 | - |
 | AL6 | 乗除と拡張（BWX・FIX・CIX・MVI の世代差を `when` 述語で） | AL5 | - |
