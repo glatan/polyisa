@@ -201,10 +201,12 @@ fn fpr_set_w<B: Backend>(b: &mut B, r64: u64, v: B::V<W64>) {
 ///   T               : bit25     → 38
 ///   D               : bit26     → 37
 ///   enables VZ OUI  : bits27..31→ 36..32
-/// PA 2.0 の的付け比較では同じ領域を CA{0..6}（HP bits6..12
-/// → u64 57..51）として読む。キューとの共有は spec 上
-/// undefined の相互上書きで、実機のレイアウトどおりの
-/// 決定的エイリアス。
+/// PA 2.0 の的付け比較では CA{0..6}（HP bits10..16 → u64
+/// 53..47）を読み書きする。Figure 8-6 第 2 形式では CA が
+/// CQ{0..6} と同一物理ビットに置かれる（C・CQ{7..10} は第 2
+/// 形式では un）。キュー比較後は CA が、的付け比較後は
+/// CQ/C が spec 上 undefined で、同一ビットを書くこの
+/// 決定的エイリアスはその範囲内。
 /// Ref: SPEC-PARISC-11 §6 Figure 6-6, SPEC-PARISC-20 §8 Figure 8-6.
 pub const FPSR_FLAG_V: u64 = 1 << 63;
 /// 0 除算フラグ。
@@ -221,9 +223,10 @@ pub const FPSR_FLAGS: u64 = 0xf800_0000_0000_0000;
 pub const FPSR_C: u64 = 1 << 58;
 /// 比較キュー（CQ{0} が bit53、CQ{10} が bit43）。
 pub const FPSR_CQ: u64 = 0x003f_f800_0000_0000;
-/// 比較配列（PA 2.0 的付け比較。CA{0} が bit57、CA{6} が
-/// bit51。領域は reserved+CQ{0..2} と重なる）。
-pub const FPSR_CA: u64 = 0x0fe0_0000_0000_0000;
+/// 比較配列（PA 2.0 的付け比較。CA{0} が bit53、CA{6} が
+/// bit47。Figure 8-6 第 2 形式どおり CQ{0..6} と同一物理
+/// ビット）。
+pub const FPSR_CA: u64 = 0x003f_8000_0000_0000;
 /// 丸めモード（0=最近接偶数、1=0 方向、2=+∞、3=-∞）。
 pub const FPSR_RM: u64 = 0x0000_0600_0000_0000;
 /// 遅延トラップ武装ビット。ロードは T=1 を立てられるが、
@@ -1377,11 +1380,12 @@ fn fp_cmp<B: Backend>(
         let nf = b.or(keep, nc);
         b.set(st, nf);
     } else {
-        // 的付け比較: CA{y-1} ← 結果。CA は HP bits 6..12
-        // （CA{i} は u64 bit 57-i → CA{y-1} は bit 58-y）。
-        // C/CQ は spec 上 undefined だが決定的に変更しない。
+        // 的付け比較: CA{y-1} ← 結果。CA{i} は CQ{i} と同一
+        // 物理ビットで u64 bit 53-i（HP bit 10+i）→ CA{y-1}
+        // は bit 54-y。C・残りの CQ は spec 上 undefined だが
+        // 決定的に変更しない。
         // Ref: SPEC-PARISC-20 §8 Figure 8-6（第 2 形式）。
-        let bit = 58 - y;
+        let bit = 54 - y;
         let keep = and_n(b, f0, !(1u64 << bit));
         let rv = shl_n(b, res, bit);
         let nv = b.or(keep, rv);
@@ -1431,13 +1435,20 @@ fn fp_test<B: Backend>(b: &mut B, y: u64, c: u64) -> Result<(), B::Exit> {
                 b.and(not_c, zv)
             }
             // REJ/REJ8: (C==1 && CQ{g}) || 指定ペアが両方 1。
+            // cbit は 0/1 値なので cq の該当ビットと別途比較する
+            // （cand: REJ=CQ{5}、REJ8=CQ{3}。cq ローカルでは
+            // CQ{i}=bit(10-i)）。
             2 | 6 => {
                 let (cand, pairs): (u64, &[u64]) = if c == 2 {
                     (0x20, &[0x410, 0x208, 0x104, 0x82, 0x41][..])
                 } else {
                     (0x80, &[0x440, 0x220, 0x110][..])
                 };
-                let mut sat = and_n(b, cbit, cand);
+                let m0 = and_n(b, cq, cand);
+                let candv = k(b, cand);
+                let e0 = b.cmp(Cmp::Eq, m0, candv);
+                let e0v = bval(b, e0);
+                let mut sat = b.and(cbit, e0v);
                 for &p in pairs {
                     let m = and_n(b, cq, p);
                     let pv = k(b, p);
@@ -1450,9 +1461,9 @@ fn fp_test<B: Backend>(b: &mut B, y: u64, c: u64) -> Result<(), B::Exit> {
             _ => zero,
         }
     } else {
-        // 的付けテスト: CA{xor(y,1)-1}（u64 bit 58-(y^1)。
-        // CA{i} は u64 bit 57-i）。
-        let ca_sh = shr_n(b, f0, 58 - (y ^ 1));
+        // 的付けテスト: CA{xor(y,1)-1}（u64 bit 54-(y^1)。
+        // CA{i} は CQ{i} と同じ u64 bit 53-i）。
+        let ca_sh = shr_n(b, f0, 54 - (y ^ 1));
         and_n(b, ca_sh, 1)
     };
     set_psw_n(b, sat);

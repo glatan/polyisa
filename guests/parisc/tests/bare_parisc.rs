@@ -2066,8 +2066,9 @@ fn exec_fcmp_queue_and_target() {
     step(&mut env, enc(Insn::FcmpF, &[4, 4, 0, 28]));
     assert_eq!(fpr(&mut env, 0) & sem::FPSR_C, 0);
     assert_eq!(fpsr_flags(&mut env), 0);
-    // 的付け比較: y=1 → CA{0}（HP bit6=u64 bit57）に
-    // `>=`=21 の結果。通知 NaN 入力なら V も立つ。
+    // 的付け比較: y=1 → CA{0}（HP bit10=u64 bit53。CQ{0}
+    // と同一物理ビット）に `>=`=21 の結果。通知 NaN 入力なら
+    // V も立つ。
     set_fpr(&mut env, 0, 0);
     set_fpr(&mut env, 4, 0x7fc0_0000_0000_0000); // 通知 NaN
     step(&mut env, enc(Insn::FcmpF, &[4, 5, 1, 21]));
@@ -2077,8 +2078,52 @@ fn exec_fcmp_queue_and_target() {
     set_fpr(&mut env, 4, 0x4040_0000_0000_0000);
     set_fpr(&mut env, 5, 0x3f80_0000_0000_0000);
     step(&mut env, enc(Insn::FcmpF, &[4, 5, 1, 21]));
-    assert_ne!(fpr(&mut env, 0) & (1 << 57), 0, "CA{{0}}=1");
+    assert_ne!(fpr(&mut env, 0) & (1 << 53), 0, "CA{{0}}=1");
     assert_eq!(fpsr_flags(&mut env), 0);
+}
+
+// 的付け比較の CA 位置を fstd fr0 で外部観測する回帰検査。
+// Figure 8-6 第 2 形式では CA{0..6} は CQ{0..6} と同一物理
+// ビット（HP bits10-16 = u64 bits53-47）にある。
+// Ref: SPEC-PARISC-20 §8-9 Figure 8-6.
+#[test]
+fn exec_fcmp_targeted_ca_observed_via_fstd() {
+    let mut env = env();
+    set_q(&mut env, 0x1000);
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    set_gpr(&mut env, 6, 0x2000);
+    set_fpr(&mut env, 4, 0x3f80_0000_0000_0000); // fr4L = 1.0
+    set_fpr(&mut env, 5, 0x4040_0000_0000_0000); // fr5L = 3.0
+    let stored = |env: &mut BareEnv| -> u64 {
+        step(env, enc(Insn::Fstd, &[6, 0, 2])); // fstd fr0,0(r6)
+        let b = mem_bytes(env, 0x2000, 8);
+        u64::from_be_bytes(b.try_into().unwrap())
+    };
+    // y=3 → CA{2}（u64 bit51）へ `<`=8（invalid 要求なし）の
+    // 結果: 1.0<3.0 → CA{2}=1。CA{0..6} は CQ{0..6} と同じ
+    // u64 bits53-47 に現れ、それ以外の status ビットは 0。
+    set_fpr(&mut env, 0, 0);
+    step(&mut env, enc(Insn::FcmpF, &[4, 5, 3, 8]));
+    let s = stored(&mut env);
+    assert_eq!(s & sem::FPSR_CA, 1 << 51, "CA{{2}}=1 は u64 bit51");
+    assert_eq!(
+        s & (1 << 55),
+        0,
+        "旧実装位置（y=3 では u64 bit55=HP bit8）には書かない"
+    );
+    // y=7 → CA{6}（u64 bit47）へ `=`=4: 1.0==3.0 は偽で 0。
+    step(&mut env, enc(Insn::FcmpF, &[4, 5, 7, 4]));
+    let s = stored(&mut env);
+    assert_eq!(s & sem::FPSR_CA, 1 << 51, "CA{{6}}=0、CA{{2}}=1 のまま");
+    // fr4L=fr5L にして y=1 → CA{0}（u64 bit53）が立つ。
+    set_fpr(&mut env, 5, 0x3f80_0000_0000_0000); // fr5L = 1.0
+    step(&mut env, enc(Insn::FcmpF, &[4, 5, 1, 4]));
+    let s = stored(&mut env);
+    assert_eq!(
+        s & sem::FPSR_CA,
+        (1 << 53) | (1 << 51),
+        "CA{{0}}=1（u64 bit53）、CA{{2}}=1"
+    );
 }
 
 // FTEST: キューテスト/的付けテストが PSW.N を立てる。
@@ -2130,6 +2175,55 @@ fn exec_ftest_sets_psw_n() {
     step(&mut env, enc(Insn::FcmpF, &[4, 5, 1, 4])); // CA{0}=1 のみ
     step(&mut env, enc(Insn::Ftest, &[2, 0]));
     assert_eq!(env.backend.get(sem::psw_ref()) & sem::PSW_N, 0);
+}
+
+// FTEST の REJ（c=2）/REJ8（c=6）回帰検査。条件式の先頭項
+// `C==1 && CQ{g}==1`（REJ は CQ{5}、REJ8 は CQ{3}）とペア項
+// の OR を分けて見る。CQ{i} は u64 bit(53-i)。
+// Ref: SPEC-PARISC-11 Table 6-14, SPEC-PARISC-20 Table 8-13.
+#[test]
+fn exec_ftest_rej_rej8() {
+    let mut env = env();
+    set_q(&mut env, 0x1000);
+    let psw_n = |env: &mut BareEnv| env.backend.get(sem::psw_ref()) & sem::PSW_N;
+    // REJ: C=1 だけでは成立しない（CQ{5}=0・ペアなし）。
+    set_fpr(&mut env, 0, sem::FPSR_C);
+    step(&mut env, enc(Insn::Ftest, &[1, 2]));
+    assert_eq!(psw_n(&mut env), 0, "C のみでは REJ は偽");
+    // REJ: CQ{5}=1（u64 bit48）だけでも C=0 なら偽。
+    set_fpr(&mut env, 0, 1 << 48);
+    step(&mut env, enc(Insn::Ftest, &[1, 2]));
+    assert_eq!(psw_n(&mut env), 0, "CQ{{5}} のみでは REJ は偽");
+    // REJ: C=1 && CQ{5}=1 → 真（C 項のみ。CQ{6}=0 で全ペア偽）。
+    set_fpr(&mut env, 0, sem::FPSR_C | (1 << 48));
+    step(&mut env, enc(Insn::Ftest, &[1, 2]));
+    assert_ne!(psw_n(&mut env), 0, "C && CQ{{5}} で REJ は真");
+    step(&mut env, enc(Insn::FcmpF, &[0, 0, 0, 0])); // nullify 消費
+    // REJ: C=0 でも CQ{0}&&CQ{6}（bit53+bit47）のペア項で真。
+    set_fpr(&mut env, 0, (1 << 53) | (1 << 47));
+    step(&mut env, enc(Insn::Ftest, &[1, 2]));
+    assert_ne!(psw_n(&mut env), 0, "CQ{{0}}&&CQ{{6}} のペアで REJ は真");
+    step(&mut env, enc(Insn::FcmpF, &[0, 0, 0, 0])); // nullify 消費
+    // REJ: CQ{0}=1・CQ{5}=1 ではどのペアも不成立で偽。
+    set_fpr(&mut env, 0, (1 << 53) | (1 << 48));
+    step(&mut env, enc(Insn::Ftest, &[1, 2]));
+    assert_eq!(psw_n(&mut env), 0, "ペア不成立なら REJ は偽");
+    // REJ8: C=1 && CQ{3}=1（u64 bit50）→ 真（C 項のみ。
+    // CQ{0}=0 なので全ペア偽）。
+    set_fpr(&mut env, 0, sem::FPSR_C | (1 << 50));
+    step(&mut env, enc(Insn::Ftest, &[1, 6]));
+    assert_ne!(psw_n(&mut env), 0, "C && CQ{{3}} で REJ8 は真");
+    step(&mut env, enc(Insn::FcmpF, &[0, 0, 0, 0])); // nullify 消費
+    // REJ8: C=0 でも CQ{0}&&CQ{4}（bit53+bit49）のペアで真。
+    set_fpr(&mut env, 0, (1 << 53) | (1 << 49));
+    step(&mut env, enc(Insn::Ftest, &[1, 6]));
+    assert_ne!(psw_n(&mut env), 0, "CQ{{0}}&&CQ{{4}} のペアで REJ8 は真");
+    step(&mut env, enc(Insn::FcmpF, &[0, 0, 0, 0])); // nullify 消費
+    // REJ8: C=1 && CQ{2}=1（bit51）のみ → CQ{3}=0 で C 項は偽、
+    // CQ{2}&&CQ{6} も CQ{6}=0 で偽 → 全体偽。
+    set_fpr(&mut env, 0, sem::FPSR_C | (1 << 51));
+    step(&mut env, enc(Insn::Ftest, &[1, 6]));
+    assert_eq!(psw_n(&mut env), 0, "CQ{{3}}=0 なら REJ8 は偽");
 }
 
 // 多重演算（fmpyadd/fmpysub: 分解型）と融合 fmpyfadd。

@@ -2646,8 +2646,9 @@ pub fn build_model() -> polyisa_isadl::Model {
             "fp",
         );
     }
-    // class 1（fcnv。pos14-16 が変換種、pos17-18 が元 fmt、
-    // pos19-20 が先 fmt、pos21-26 = 01 000 0）。
+    // class 1（fcnv。形式行 `0C r 0 sub df sf 1 0 0 t` どおり
+    // pos14-16 が変換種 sub、pos17-18 が先 fmt の df、
+    // pos19-20 が元 fmt の sf、pos21-26 = 01 000 0）。
     // 符号なし・切捨て変換（sub 5,6,7）は PA 2.0 付録C にのみ
     // あり、PA1.1 では未割当。
     for (nm, pat, feat) in [
