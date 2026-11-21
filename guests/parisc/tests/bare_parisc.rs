@@ -287,9 +287,9 @@ fn extract_operands_regression() {
 // IAOQ 前後キューと PSW.N/PSW.B を、cli の実行ループと同じ
 // 規則でテスト側から遷移させる（SPEC-PARISC-11 §4/§5-4）。
 use polyisa_engine::bare::BareEnv;
-use polyisa_engine::interp::Ctrl;
+use polyisa_engine::interp::{Ctrl, InterpExit};
 use polyisa_guest_parisc::sem;
-use polyisa_sem::Backend as _;
+use polyisa_sem::{Backend as _, ExceptionKind};
 
 fn env() -> BareEnv {
     BareEnv::new(core::mem::size_of::<CpuState>())
@@ -853,6 +853,106 @@ fn exec_dcor_cond_nullifies_next() {
     assert_eq!(gpr(&mut env, 8), 0x1111_1111_1117_1117u64);
 }
 
+// ---- add,c / sub,b の桁キャリ消費と SAR 幅（段階17・PR5 レビュー #2）----
+// cb 状態の語の桁キャリ C/B{8}（bit28）と dw の C/B{0}（bit60）を
+// add で作り、add,c/sub,b が cin として正しく消費することを見る。
+// add,c/sub,b は自身も cb を更新するので、消費側の直前には都度
+// cb を立て直す。
+// Ref: SPEC-PARISC-20 §7-5（C/B）・§7-3（ADDC/SUBB の Operation）.
+
+/// cb 状態（PSW[C/B] ベクトル）を直接書くテスト用ヘルパ。
+fn set_cb(env: &mut BareEnv, v: u64) {
+    env.backend.set(sem::cb_ref(), v);
+}
+
+#[test]
+fn exec_addc_subb_consume_cb() {
+    let mut env = env();
+    set_q(&mut env, 0x1000);
+    // 語の出口キャリ C/B{8} だけを add で立てる:
+    // 0xFFFF_FFFF + 1 は bit32 へのキャリを生じるが 64 ビットの
+    // キャリアウト（C/B{0}＝bit60）は立たない。
+    set_gpr(&mut env, 4, 0xffff_ffff);
+    set_gpr(&mut env, 5, 1);
+    step(&mut env, 0x0885_0606); // add r4,r5,r6
+    assert_eq!(cb(&mut env), 0x1111_1111);
+    set_gpr(&mut env, 7, 5);
+    set_gpr(&mut env, 8, 3);
+    // add,c r7,r8,r9: cin = C/B{8} = 1 → 5+3+1 = 9。
+    step(&mut env, 0x0907_0709);
+    assert_eq!(gpr(&mut env, 9), 9);
+    // sub,b r7,r8,r9: cin = 1 → borrow なしで 5-3-0 = 2。
+    set_cb(&mut env, 1 << 28);
+    step(&mut env, 0x0907_0509);
+    assert_eq!(gpr(&mut env, 9), 2);
+    // cin = 0 なら borrow が入る: 5-3-1 = 1。
+    set_cb(&mut env, 0);
+    step(&mut env, 0x0907_0509);
+    assert_eq!(gpr(&mut env, 9), 1);
+    // add,c も cin = 0 → 5+3+0 = 8。
+    set_cb(&mut env, 0);
+    step(&mut env, 0x0907_0709);
+    assert_eq!(gpr(&mut env, 9), 8);
+    // ,d 形は C/B{0}（bit60）を消費する。dw の出口キャリだけを
+    // add で立てる: 0xFFFF_FFFF_0000_0000 どうしの和は 64 ビットの
+    // キャリアウトを生じるが語の出口キャリ（bit32）は 0。
+    set_gpr(&mut env, 4, 0xffff_ffff_0000_0000);
+    set_gpr(&mut env, 5, 0xffff_ffff_0000_0000);
+    step(&mut env, 0x0885_0606); // add r4,r5,r6
+    assert_eq!(cb(&mut env), 0x1111_1111_0000_0000);
+    // add,c,d → cin = C/B{0} = 1 で 5+3+1 = 9（語形なら 8）。
+    step(&mut env, 0x0907_0729);
+    assert_eq!(gpr(&mut env, 9), 9);
+    // sub,b,d → borrow なしで 5-3-0 = 2。
+    set_cb(&mut env, 1 << 60);
+    step(&mut env, 0x0907_0529);
+    assert_eq!(gpr(&mut env, 9), 2);
+    // cin = 0 → 5-3-1 = 1。
+    set_cb(&mut env, 0);
+    step(&mut env, 0x0907_0529);
+    assert_eq!(gpr(&mut env, 9), 1);
+}
+
+#[test]
+fn exec_mtctl_mfctl_sar_widths() {
+    let mut env = env();
+    set_q(&mut env, 0x1000);
+    // mtctl r4,%sar: SAR は 6 ビットレジスタ（GR[r]{26..31}）。
+    // 0x1BD & 63 = 61 が入る（6 ビットを超える桁は捨てる）。
+    // Ref: SPEC-PARISC-20 §MTCTL/§MFCTL.
+    set_gpr(&mut env, 4, 0x1bd);
+    step(&mut env, 0x0164_1840);
+    // mfctl,w %sar,r5 は SAR 全 6 ビット（61）、mfctl %sar,r6 は
+    // 下位 5 ビット（61 & 31 = 29）。
+    step(&mut env, 0x0160_48a5);
+    assert_eq!(gpr(&mut env, 5), 61);
+    step(&mut env, 0x0160_08a6);
+    assert_eq!(gpr(&mut env, 6), 29);
+    // 6 ビット保持は pos > 31 が見える消費側で観測できる:
+    // extrd,u r5,sar(len=8),r6 は pos = sar&63 = 61 で LSB の
+    // bits2-9 を取る（5 ビットに潰れていれば pos=29 で別値
+    // 0xd1 になる）。
+    set_gpr(&mut env, 5, 0x1122_3344_5566_7788);
+    step(&mut env, 0xd0a6_1218);
+    assert_eq!(gpr(&mut env, 6), 0xe2);
+    // mtsarcm r4: ~GR[r]{26..31}。r4=2 → ~2 & 63 = 61。
+    // Ref: SPEC-PARISC-20 §MTSARCM.
+    set_gpr(&mut env, 4, 2);
+    step(&mut env, 0x0164_18c0);
+    step(&mut env, 0x0160_48a5); // mfctl,w %sar,r5
+    assert_eq!(gpr(&mut env, 5), 61);
+    // mfctl のユーザ不可読レジスタ（cr0）は特権操作トラップ。
+    let insn = dec(0x0000_08a5).unwrap();
+    assert_eq!(insn, Insn::Mfctl);
+    let f = iaoq_f(&mut env);
+    let r = sem::exec(&mut env.backend, insn, 0x0000_08a5, f);
+    let Err(InterpExit::Exception(e)) = r else {
+        panic!("mfctl %cr0 should trap: {r:?}");
+    };
+    assert_eq!(e.kind, ExceptionKind::Trap);
+    assert_eq!(e.code, sem::TRAP_PRIV);
+}
+
 // mtsm は PSW システムマスクへの移動で最上位特権のみ。ユーザ
 // モデルでは privileged operation trap になる（#6 対応）。
 #[test]
@@ -864,5 +964,9 @@ fn exec_mtsm_traps_as_privileged() {
     assert_eq!(insn, Insn::Mtsm);
     let f = iaoq_f(&mut env);
     let r = sem::exec(&mut env.backend, insn, 0x0004_1860, f);
-    assert!(r.is_err());
+    let Err(InterpExit::Exception(e)) = r else {
+        panic!("mtsm should trap: {r:?}");
+    };
+    assert_eq!(e.kind, ExceptionKind::Trap);
+    assert_eq!(e.code, sem::TRAP_PRIV);
 }

@@ -1193,9 +1193,18 @@ fn do_sub<B: Backend>(
     let c64 = carry64_cin(b, dest, in1, cin);
     let cout = if d { c64 } else { c32 };
     let cond = if is_b {
-        // SUBB の条件は Table 5-3/D-3 の減算条件を結果と
-        // operand に適用する。符号なし比較（<< 系）は実効
-        // borrow を uv として渡す。
+        // SUBB の条件は、cin を含めた結果と cout で評価する。
+        // Table 5-3/D-3 の字義は「opd1 vs opd2（GR の生値）」の
+        // 被演算子比較だが、その表は cin=1 固定の SUB 系で書かれた
+        // もので、cin=0（borrow 継続）の等号縁では字義とはずれる
+        // （`=` が in1==in2+1、`<<` が in1<=in2 となる）。cin を含む
+        // 実効減数で評価する読みは、多語の borrow 連鎖の条件として
+        // 意味を持つ（`<<` が「この語でも借りが残る」を表す）唯一の
+        // 読みで、spec 自身の `<<`＝「unsigned overflow（減算結果
+        // が 0 未満）」の定義とも整合する。cin=1 では両読み一致。
+        // Ref: SPEC-PARISC-11 §5 Table 5-3, SPEC-PARISC-20 付録D
+        // Table D-3.
+        // Gap: GAP-0054
         arith_cond(b, cf, d, dest, cout, sv)
     } else {
         sub_cond(b, cf, d, dest, in1, in2, sv)
