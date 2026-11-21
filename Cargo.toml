@@ -37,6 +37,7 @@ members = [
     "guests/power",
     "guests/s390",
     "guests/m68k",
+    "guests/superh",
 ]
 resolver = "2"
 

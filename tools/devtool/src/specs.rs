@@ -43,6 +43,9 @@ mod s390 {
 mod sparc {
     include!("../../../guests/sparc/spec/sparc.rs");
 }
+mod superh {
+    include!("../../../guests/superh/spec/superh.rs");
+}
 mod wasm {
     include!("../../../guests/wasm/spec/wasmmin.rs");
 }
@@ -122,6 +125,11 @@ const SPECS: &[IsaSpec] = &[
         isa: "sparc",
         rel_paths: &["guests/sparc/spec/sparc.rs"],
         build: sparc::build_model,
+    },
+    IsaSpec {
+        isa: "superh",
+        rel_paths: &["guests/superh/spec/superh.rs"],
+        build: superh::build_model,
     },
     IsaSpec {
         isa: "wasm",

@@ -852,6 +852,7 @@ fn allowed_deps(pkg: &str) -> Option<&'static [&'static str]> {
             "polyisa-guest-riscv",
             "polyisa-guest-s390",
             "polyisa-guest-sparc",
+            "polyisa-guest-superh",
             "polyisa-guest-x86",
             "polyisa-host",
             "polyisa-mem",
@@ -880,6 +881,7 @@ fn allowed_deps(pkg: &str) -> Option<&'static [&'static str]> {
             "polyisa-guest-riscv",
             "polyisa-guest-s390",
             "polyisa-guest-sparc",
+            "polyisa-guest-superh",
             "polyisa-guest-wasm",
             "polyisa-guest-x86",
             "polyisa-host",
@@ -937,6 +939,7 @@ fn allowed_deps(pkg: &str) -> Option<&'static [&'static str]> {
             "polyisa-guest",
             "polyisa-timing",
         ],
+        "polyisa-guest-superh" => &["polyisa-mem", "polyisa-sem", "polyisa-guest"],
         "polyisa-guest-alpha" => &["polyisa-mem", "polyisa-sem", "polyisa-guest"],
         "polyisa-guest-parisc" => &[
             "polyisa-softfloat",

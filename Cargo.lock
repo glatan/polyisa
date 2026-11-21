@@ -22,6 +22,7 @@ dependencies = [
  "polyisa-guest-riscv",
  "polyisa-guest-s390",
  "polyisa-guest-sparc",
+ "polyisa-guest-superh",
  "polyisa-guest-wasm",
  "polyisa-guest-x86",
  "polyisa-host",
@@ -273,6 +274,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "polyisa-guest-superh"
+version = "0.0.0"
+dependencies = [
+ "polyisa-engine",
+ "polyisa-guest",
+ "polyisa-isadl",
+ "polyisa-isagen",
+ "polyisa-mem",
+ "polyisa-sem",
+]
+
+[[package]]
 name = "polyisa-guest-wasm"
 version = "0.0.0"
 dependencies = [
@@ -381,6 +394,7 @@ dependencies = [
  "polyisa-guest-riscv",
  "polyisa-guest-s390",
  "polyisa-guest-sparc",
+ "polyisa-guest-superh",
  "polyisa-guest-x86",
  "polyisa-host",
  "polyisa-kernel",
