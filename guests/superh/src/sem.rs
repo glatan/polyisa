@@ -47,7 +47,7 @@
 
 use polyisa_mem::{Access, AccessKind, Align, Endian};
 use polyisa_sem::{
-    Backend, Cmp, ExceptionKind, F32, F64, GuestException, StateRef, W8, W16, W32, W64,
+    Backend, Cmp, ExceptionKind, F32, F64, GuestException, StateArray, StateRef, W8, W16, W32, W64,
 };
 
 use super::{CpuState, Insn, extract_ops};
@@ -269,6 +269,22 @@ fn bnot<B: Backend>(b: &mut B, c: B::B) -> B::B {
     b.cmp(Cmp::Ne, v, zero)
 }
 
+/// `B::B` 同士の論理積。
+fn band<B: Backend>(b: &mut B, a: B::B, c: B::B) -> B::B {
+    let av = bval(b, a);
+    let cv = bval(b, c);
+    let v = b.and(av, cv);
+    nz(b, v)
+}
+
+/// `B::B` 同士の論理和。
+fn bor<B: Backend>(b: &mut B, a: B::B, c: B::B) -> B::B {
+    let av = bval(b, a);
+    let cv = bval(b, c);
+    let v = b.or(av, cv);
+    nz(b, v)
+}
+
 /// `c ? t : f`。
 fn selv<B: Backend>(b: &mut B, c: B::B, t: B::V<W32>, f: B::V<W32>) -> B::V<W32> {
     b.select::<W32>(c, t, f)
@@ -381,6 +397,59 @@ fn axd_get<B: Backend>(b: &mut B, i: u64) -> B::V<W32> {
     selv(b, s, a, x)
 }
 
+/// 建築上の XDn への書き込み（FR バンクと逆の側）。
+fn axd_set<B: Backend>(b: &mut B, i: u64, v: B::V<W32>) -> Result<(), B::Exit> {
+    let sel = get_fpscr_bit(b, FPSCR_FR);
+    let zz = k(b, 0);
+    let s = b.cmp(Cmp::Ne, sel, zz);
+    b.if_then_else(
+        s,
+        |b| {
+            b.set(fr_ref(i as u8), v);
+            Ok(())
+        },
+        |b| {
+            b.set(xf_ref(i as u8), v);
+            Ok(())
+        },
+    )
+}
+
+/// SZ=1 対転送のペア読み出し（上位語, 下位語）。命令語の 4 ビット
+/// レジスタ桁 `field` が奇数のときは XDn（FR バンクと逆の側）の
+/// ペアを指し、偶数のときは FR バンクのペアを指す。ペア内の語順は
+/// `field & 14` が先・`+1` が後（対転送の並びはエンディアンに
+/// 依らない。各 32 ビット半分だけがエンディアン変換される）。
+/// Ref: SPEC-SUPERH-SH4 §6（FMOV の SZ=1 対転送と XDn）、
+/// SPEC-SUPERH-SH4 §8.6（pair access は半分ごとに変換される）.
+fn pair_get<B: Backend>(b: &mut B, field: u64) -> (B::V<W32>, B::V<W32>) {
+    let i = field & 14;
+    if field & 1 != 0 {
+        (axd_get(b, i), axd_get(b, i + 1))
+    } else {
+        (afr_get(b, i), afr_get(b, i + 1))
+    }
+}
+
+/// SZ=1 対転送のペア書き込み。`field` の奇数ビットで FR↔XD を
+/// 切替える（`pair_get` と同じ規則）。
+/// Ref: SPEC-SUPERH-SH4 §6.
+fn pair_set<B: Backend>(
+    b: &mut B,
+    field: u64,
+    hi: B::V<W32>,
+    lo: B::V<W32>,
+) -> Result<(), B::Exit> {
+    let i = field & 14;
+    if field & 1 != 0 {
+        axd_set(b, i, hi)?;
+        axd_set(b, i + 1, lo)
+    } else {
+        afr_set(b, i, hi)?;
+        afr_set(b, i + 1, lo)
+    }
+}
+
 /// DR ペアを F64 のビット列にする。DRn = FR[n]（上位）:FR[n+1]（下位）、
 /// `i` は偶数のペア基底（`n & 14`）。
 /// Ref: SPEC-SUPERH-SH4 §6（DR レジスタ）.
@@ -426,7 +495,11 @@ fn fv_get<B: Backend>(b: &mut B, base: u64, i: u64) -> B::V<F32> {
 /// 2 語ロードの結果（SZ=1 の対転送。上位語・下位語）。
 type Word2<B> = (<B as Backend>::V<W32>, <B as Backend>::V<W32>);
 
-/// 2 語ロード（SZ=1 の対転送。ea/ea+4）。
+/// 2 語ロード（SZ=1 の対転送。ea/ea+4）。返す (先, 後) は
+/// メモリの昇順の語で、ペアの `&14` 側・`+1` 側にそのまま対応する
+/// （対転送の語順はエンディアン不変。LE でも BE でも
+/// mem[ea]→ペア先頭、mem[ea+4]→ペア後続）。
+/// Ref: SPEC-SUPERH-SH4 §8.6（pair access）.
 fn load2<B: Backend>(b: &mut B, ea: B::V<W32>, endian: Endian) -> Result<Word2<B>, B::Exit> {
     let hi = load_s(b, ea, 4, false, endian)?;
     let ea2 = add_n(b, ea, 4);
@@ -1109,7 +1182,7 @@ pub fn exec<B: Backend>(
         }
         Insn::Div0s => {
             // Q=MSB(Rn)、M=MSB(Rm)、T=!(Q==M)。
-            // Ref: SPEC-SUPERH-SH2A §6.4.
+            // Ref: SPEC-SUPERH-SH2A §6.4.16.
             let rn = rget(b, ops[0]);
             let rm = rget(b, ops[1]);
             let q0 = shr_n(b, rn, 31);
@@ -1122,6 +1195,8 @@ pub fn exec<B: Backend>(
             set_t(b, x);
         }
         Insn::Div0u => {
+            // M=Q=T=0。
+            // Ref: SPEC-SUPERH-SH2A §6.4.17.
             let z0 = k(b, 0);
             let z1 = k(b, 0);
             let z2 = k(b, 0);
@@ -1268,30 +1343,49 @@ pub fn exec<B: Backend>(
             rset(b, ops[0], p);
         }
         Insn::Divs => {
-            // Rn = Rn / R0（符号付き、0 除算では T=1）。
-            // Ref: SPEC-SUPERH-SH2A §6.4.
+            // DIVS R0,Rn: Rn = Rn / R0（符号付き商のみ）。
+            // 0 除算は 0 除算例外、INT_MIN ÷ -1 はオーバーフロー
+            // 例外。T ビットは変化しない（T Bit 欄は "—"）。
+            // いずれも ExceptionKind::DivZero で退出する（ユーザ
+            // レベルでは SIGFPE 相当）。
+            // Ref: SPEC-SUPERH-SH2A §6.3.13.
             let rn = rget(b, ops[0]);
             let d = R(0).get(b);
             let zz = k(b, 0);
-            let z = b.cmp(Cmp::Eq, d, zz);
-            let q = b.sdiv(rn, d);
-            let one = k(b, 1);
-            let v = selv(b, z, one, q);
-            rset(b, ops[0], v);
-            let tv = bval(b, z);
-            set_t(b, tv);
+            let dz = b.cmp(Cmp::Eq, d, zz);
+            let imm = k(b, 0x8000_0000);
+            let m1 = k(b, 0xffff_ffff);
+            let is_min = b.cmp(Cmp::Eq, rn, imm);
+            let is_m1 = b.cmp(Cmp::Eq, d, m1);
+            let both = band(b, is_min, is_m1);
+            let bad = bor(b, dz, both);
+            b.if_then_else(
+                bad,
+                |b| Err(raise::<B>(b, ExceptionKind::DivZero, 0)),
+                |b| {
+                    let q = b.sdiv(rn, d);
+                    rset(b, ops[0], q);
+                    Ok(())
+                },
+            )?;
         }
         Insn::Divu => {
+            // DIVU R0,Rn: Rn = Rn / R0（符号無し商のみ）。
+            // 0 除算は 0 除算例外。T ビットは変化しない。
+            // Ref: SPEC-SUPERH-SH2A §6.3.14.
             let rn = rget(b, ops[0]);
             let d = R(0).get(b);
             let zz = k(b, 0);
-            let z = b.cmp(Cmp::Eq, d, zz);
-            let q = b.udiv(rn, d);
-            let one = k(b, 1);
-            let v = selv(b, z, one, q);
-            rset(b, ops[0], v);
-            let tv = bval(b, z);
-            set_t(b, tv);
+            let dz = b.cmp(Cmp::Eq, d, zz);
+            b.if_then_else(
+                dz,
+                |b| Err(raise::<B>(b, ExceptionKind::DivZero, 0)),
+                |b| {
+                    let q = b.udiv(rn, d);
+                    rset(b, ops[0], q);
+                    Ok(())
+                },
+            )?;
         }
         Insn::ClipsB | Insn::ClipsW | Insn::ClipuB | Insn::ClipuW => {
             let x = rget(b, ops[0]);
@@ -1404,7 +1498,9 @@ pub fn exec<B: Backend>(
             set_t_cmp(b, c);
         }
         // ---- ビット命令（レジスタ形式） ----
-        Insn::BclrReg | Insn::BstReg | Insn::BldReg => {
+        // 対象は Rn の LSB 8 ビット（imm3=0-7）。
+        // Ref: SPEC-SUPERH-SH2A §6.3.8/§6.3.9/§6.3.4/§6.3.2.
+        Insn::BclrReg | Insn::BsetReg | Insn::BstReg | Insn::BldReg => {
             let n = ops[0] as u8;
             let bit = ops[1] as u32;
             let x = R(n).get(b);
@@ -1417,12 +1513,19 @@ pub fn exec<B: Backend>(
                     let v = b.and(x, inv);
                     R(n).set(b, v);
                 }
+                Insn::BsetReg => {
+                    let v = b.or(x, bmask);
+                    R(n).set(b, v);
+                }
                 Insn::BstReg => {
+                    // T を対象ビットへ書き込む。T=0 ならクリア、
+                    // T=1 ならセット（セットだけでは T=0 の
+                    // 書き込みにならない）。
                     let t = get_t(b);
-                    let zz = k(b, 0);
-                    let sel = b.cmp(Cmp::Ne, t, zz);
-                    let orv = b.or(x, bmask);
-                    let v = selv(b, sel, orv, x);
+                    let tb = shl_n(b, t, bit);
+                    let inv = b.not(bmask);
+                    let keep = b.and(x, inv);
+                    let v = b.or(keep, tb);
                     R(n).set(b, v);
                 }
                 _ => {
@@ -1434,7 +1537,11 @@ pub fn exec<B: Backend>(
             }
         }
         // ---- ビット命令（メモリ形式・SH-2A） ----
+        // `0011nnnn0iii1001` + 下位語。バイトを読み、T との間で
+        // ビットをやり取りする。
+        // Ref: SPEC-SUPERH-SH2A §5, §6.3.1-§6.3.10.
         Insn::BclrD12
+        | Insn::BsetD12
         | Insn::BstD12
         | Insn::BldD12
         | Insn::BandD12
@@ -1456,6 +1563,13 @@ pub fn exec<B: Backend>(
                     let m = b.shl(one, bc);
                     let inv = b.not(m);
                     let nv = b.and(v, inv);
+                    store_s(b, ea, nv, 1, endian)?;
+                }
+                Insn::BsetD12 => {
+                    let one = k(b, 1);
+                    let bc = k(b, u64::from(bit));
+                    let m = b.shl(one, bc);
+                    let nv = b.or(v, m);
                     store_s(b, ea, nv, 1, endian)?;
                 }
                 Insn::BstD12 => {
@@ -1934,31 +2048,55 @@ pub fn exec<B: Backend>(
             set_t(b, write);
         }
         Insn::Ldbank | Insn::Stbank => {
-            // R0-R7 の退避/復帰（SH-2A の LDBANK/STBANK。
-            // Rm/Rn が指す先に R0-R7 を 8 ワード置く近似。
-            // Ref: SPEC-SUPERH-SH2A §6.3.
-            let base = rget(b, ops[0]);
-            for i in 0..8u32 {
-                let ea = add_n(b, base, i * 4);
-                if insn == Insn::Stbank {
-                    let v = R(i as u8).get(b);
-                    store_s(b, ea, v, 4, endian)?;
-                } else {
-                    let v = load_s(b, ea, 4, true, endian)?;
-                    R(i as u8).set(b, v);
-                }
+            // SH-2A の LDBANK/STBANK。Rm/Rn の「値」がバンクエントリを
+            // 指す（bank = Rn[15:7]、entry = Rn[6:2]。entry は
+            // R0_BANK–R14_BANK・GBR・MACH・MACL・PR・VTO）で、
+            // 転送されるのは R0 の 1 語だけ（メモリアクセスではない）。
+            // 本モデルのバンク記憶は `rbank`（bank0 の R0_BANK–
+            // R7_BANK 相当）だけなので bank=0 かつ entry<8 のみ意味を
+            // 持ち、それ以外のエントリは読めば 0・書き込みは捨てる
+            // 近似とする（バンクファイル全体・IBNR/BO/BE・割込の
+            // 自動退避はモデルしない）。
+            // Ref: SPEC-SUPERH-SH2A §6.3.17/§6.3.35, §7.4.2.
+            // Gap: GAP-0061
+            let a = rget(b, ops[0]);
+            let b7 = shr_n(b, a, 7);
+            let bank = and_n(b, b7, 0x1ff);
+            let e2 = shr_n(b, a, 2);
+            let entry = and_n(b, e2, 0x1f);
+            let zz = k(b, 0);
+            let in_bank = b.cmp(Cmp::Eq, bank, zz);
+            let arr = StateArray::<W32>::from_layout(core::mem::offset_of!(CpuState, rbank), 4);
+            let r0v = R(0).get(b);
+            if insn == Insn::Stbank {
+                // STBANK: R0 → エントリ。bank=0 かつ entry<8 のみ書く
+                // （entry は実行時値なので if_then で守る）。
+                b.if_then(in_bank, |b| {
+                    let idx = and_n(b, entry, 7);
+                    b.set_indexed(arr, idx, r0v);
+                    Ok(())
+                })?;
+            } else {
+                // LDBANK: エントリ → R0（範囲外は 0）。
+                let idx = and_n(b, entry, 7);
+                let v = if_then_w(b, in_bank, |b| b.get_indexed(arr, idx), |b| k(b, 0));
+                R(0).set(b, v);
             }
         }
         // ---- FP ----
         // fr[]/xf[] はビットイメージ。F32/F64 への解釈は trunc の
         // 再解釈で行う。FPSCR.FR で FR/XD バンクが入れ替わり、
         // SZ=1 で FMOV 系は 8 バイトの対転送、PR=1 で算術・比較・
-        // FLOAT/FTRC/FNEG/FABS/FSQRT/FLDI 系は DR ペアの倍精度として
+        // FLOAT/FTRC/FNEG/FABS/FSQRT 系は DR ペアの倍精度として
         // 再解釈される（同一符号化の実行モード。独立符号化ではない）。
         // Ref: SPEC-SUPERH-SH4 §6.
         Insn::FmovSLd | Insn::FmovSLdp | Insn::FmovSIdxLd => {
             // fmov.s @Rm,FRn / @Rm+,FRn / @(R0,Rm),FRn。
-            // ops = [n(FR), m(ベースR)]。SZ=1 は対転送（DR ペア）。
+            // ops = [n(FR), m(ベースR)]。SZ=1 は対転送（FR ペア。
+            // n の奇数なら XDn）。@Rm+ の更新幅は SZ=1 で +8、
+            // SZ=0 で +4。
+            // Ref: SPEC-SUPERH-SH4 §6（FMOV @Rm+,DRn は "post-
+            // incremented by 8"）.
             let base = rget(b, ops[1]);
             let ea = if insn == Insn::FmovSIdxLd {
                 let r0 = R(0).get(b);
@@ -1971,10 +2109,8 @@ pub fn exec<B: Backend>(
             b.if_then_else(
                 sz,
                 |b| {
-                    let dr = ops[0] & 14;
                     let (hi, lo) = load2(b, ea, endian)?;
-                    afr_set(b, dr, hi)?;
-                    afr_set(b, dr + 1, lo)
+                    pair_set(b, ops[0], hi, lo)
                 },
                 |b| {
                     let v = load_s(b, ea, 4, true, endian)?;
@@ -1982,30 +2118,37 @@ pub fn exec<B: Backend>(
                 },
             )?;
             if insn == Insn::FmovSLdp {
-                let bump = add_n(b, ea, 4);
+                let four = k(b, 4);
+                let eight = k(b, 8);
+                let inc = selv(b, sz, eight, four);
+                let bump = b.add(ea, inc);
                 rset(b, ops[1], bump);
             }
         }
         Insn::FmovSSt | Insn::FmovSStp | Insn::FmovSIdxSt => {
             // fmov.s FRm,@Rn / FRm,@-Rn / FRm,@(R0,Rn)。
-            // ops = [n(ベースR), m(FR)]。
+            // ops = [n(ベースR), m(FR)]。SZ=1 は対転送（m の奇数なら
+            // XDm）。@-Rn の先行減算は SZ=1 で -8、SZ=0 で -4。
+            // Ref: SPEC-SUPERH-SH4 §6（FMOV DRm,@-Rn は "pre-
+            // decremented by 8"）.
             let base = rget(b, ops[0]);
+            let sz_v = get_fpscr_bit(b, FPSCR_SZ);
+            let sz = nz(b, sz_v);
             let ea = if insn == Insn::FmovSIdxSt {
                 let r0 = R(0).get(b);
                 b.add(base, r0)
             } else if insn == Insn::FmovSStp {
-                add_n(b, base, (-4i32) as u32)
+                let four = k(b, 4);
+                let eight = k(b, 8);
+                let dec = selv(b, sz, eight, four);
+                b.sub(base, dec)
             } else {
                 base
             };
-            let sz_v = get_fpscr_bit(b, FPSCR_SZ);
-            let sz = nz(b, sz_v);
             b.if_then_else(
                 sz,
                 |b| {
-                    let dr = ops[1] & 14;
-                    let hi = afr_get(b, dr);
-                    let lo = afr_get(b, dr + 1);
+                    let (hi, lo) = pair_get(b, ops[1]);
                     store_s(b, ea, hi, 4, endian)?;
                     let ea2 = add_n(b, ea, 4);
                     store_s(b, ea2, lo, 4, endian)
@@ -2036,10 +2179,8 @@ pub fn exec<B: Backend>(
                 b.if_then_else(
                     sz,
                     |b| {
-                        let dr = ops[fr_i] & 14;
                         let (hi, lo) = load2(b, ea, endian)?;
-                        afr_set(b, dr, hi)?;
-                        afr_set(b, dr + 1, lo)
+                        pair_set(b, ops[fr_i], hi, lo)
                     },
                     |b| {
                         let v = load_s(b, ea, 4, true, endian)?;
@@ -2050,9 +2191,7 @@ pub fn exec<B: Backend>(
                 b.if_then_else(
                     sz,
                     |b| {
-                        let dr = ops[fr_i] & 14;
-                        let hi = afr_get(b, dr);
-                        let lo = afr_get(b, dr + 1);
+                        let (hi, lo) = pair_get(b, ops[fr_i]);
                         store_s(b, ea, hi, 4, endian)?;
                         let ea2 = add_n(b, ea, 4);
                         store_s(b, ea2, lo, 4, endian)
@@ -2065,20 +2204,20 @@ pub fn exec<B: Backend>(
             }
         }
         Insn::FmovReg => {
-            // fmov FRm,FRn — ビット転送。SZ=1 は対転送（FRn/FRn+1 の
-            // 両方を動かす）。fmov 系の転送幅は SZ だけで決まり
-            // PR は参照しない（SPEC-SUPERH-SH4 §6 fmov 項）。
+            // fmov FRm,FRn — ビット転送。SZ=1 は対転送（FR ペア。
+            // n/m それぞれの奇数ビットが立つ側は XDn/XDm で、
+            // DRm→XDn・XDm→DRn・XDm→XDn の各組合せがこの一手で
+            // 起きる）。fmov 系の転送幅は SZ だけで決まり PR は
+            // 参照しない。
+            // Ref: SPEC-SUPERH-SH4 §6 fmov 項（nnn0/mmm0=DR、
+            // nnn1/mmm1=XD）.
             let sz_v = get_fpscr_bit(b, FPSCR_SZ);
             let pair = nz(b, sz_v);
             b.if_then_else(
                 pair,
                 |b| {
-                    let n = ops[0] & 14;
-                    let m = ops[1] & 14;
-                    let hi = afr_get(b, m);
-                    let lo = afr_get(b, m + 1);
-                    afr_set(b, n, hi)?;
-                    afr_set(b, n + 1, lo)
+                    let (hi, lo) = pair_get(b, ops[1]);
+                    pair_set(b, ops[0], hi, lo)
                 },
                 |b| {
                     let v = afr_get(b, ops[1]);
@@ -2213,8 +2352,22 @@ pub fn exec<B: Backend>(
             );
             b.set(fpul_ref(), v);
         }
-        Insn::Fneg | Insn::Fabs | Insn::Fsqrt | Insn::Fldi0 | Insn::Fldi1 => {
-            // PR=1 は DR ペア上の単項演算（FLDI は倍精度定数）。
+        Insn::Fldi0 | Insn::Fldi1 => {
+            // FLDI0/FLDI1 は単精度固定の命令で、PR には従わない。
+            // 常に FRn へ 32 ビット定数を書く（0x00000000 /
+            // 0x3f800000）。PR=1 での実行は規格上未定義だが、
+            // 擬似コードは無条件の FRn 書き込みなのでそれに倣う。
+            // Ref: SPEC-SUPERH-SH4A §10.3.8/§10.3.9（"FR[n] =
+            // 0x00000000/0x3F800000"・PR=0 のみ有効）.
+            let v = if insn == Insn::Fldi0 {
+                k(b, 0)
+            } else {
+                k(b, 0x3f80_0000)
+            };
+            afr_set(b, ops[0], v)?;
+        }
+        Insn::Fneg | Insn::Fabs | Insn::Fsqrt => {
+            // PR=1 は DR ペア上の単項演算。
             let pr_v = get_fpscr_bit(b, FPSCR_PR);
             let pr = nz(b, pr_v);
             b.if_then_else(
@@ -2222,16 +2375,6 @@ pub fn exec<B: Backend>(
                 |b| {
                     let n = ops[0] & 14;
                     match insn {
-                        Insn::Fldi0 => {
-                            let z = k64(b, 0);
-                            let r: B::V<F64> = b.trunc(z);
-                            dr_set(b, n, r)
-                        }
-                        Insn::Fldi1 => {
-                            let w = k64(b, 0x3ff0_0000_0000_0000);
-                            let r: B::V<F64> = b.trunc(w);
-                            dr_set(b, n, r)
-                        }
                         Insn::Fneg => {
                             let w64: B::V<W64> = {
                                 let v = dr_get(b, n);
@@ -2261,8 +2404,6 @@ pub fn exec<B: Backend>(
                 },
                 |b| {
                     let v: B::V<W32> = match insn {
-                        Insn::Fldi0 => k(b, 0),
-                        Insn::Fldi1 => k(b, 0x3f80_0000),
                         Insn::Fneg => {
                             let a = afr_get(b, ops[0]);
                             let sgn = k(b, 0x8000_0000);

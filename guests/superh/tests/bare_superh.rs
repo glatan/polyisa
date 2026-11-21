@@ -566,3 +566,249 @@ fn exec_movli_movco() {
         .unwrap();
     assert_eq!(u32::from_le_bytes(b), 0x1234_5678);
 }
+
+// ---- 段階18 回帰（レビュー指摘由来） ----
+
+/// データ読み書き用の既定 Access。
+fn dacc(endian: Endian) -> Access {
+    Access {
+        endian,
+        align: Align::Natural,
+        kind: AccessKind::DataRead,
+    }
+}
+
+/// メモリに 32 ビット値をエンディアンに従って書く。
+fn store32(env: &mut BareEnv, addr: u64, v: u32, endian: Endian) {
+    let b = match endian {
+        Endian::Le => v.to_le_bytes(),
+        Endian::Be => v.to_be_bytes(),
+    };
+    env.backend.mem.write(VirtAddr(addr), &b).unwrap();
+}
+
+/// メモリから 32 ビット値をエンディアンに従って読む。
+fn load32(env: &mut BareEnv, addr: u64, endian: Endian) -> u32 {
+    let mut b = [0u8; 4];
+    env.backend
+        .mem
+        .read(VirtAddr(addr), &mut b, dacc(endian))
+        .unwrap();
+    match endian {
+        Endian::Le => u32::from_le_bytes(b),
+        Endian::Be => u32::from_be_bytes(b),
+    }
+}
+
+#[test]
+fn exec_fmov_pair_sz1() {
+    // SZ=1 の fmov.s は 8 バイトの対転送。@Rm+ は +8、@-Rn は -8。
+    // メモリ語順はエンディアン不変: mem[ea]→ペア先頭 FR(2i)、
+    // mem[ea+4]→FR(2i+1)（各 32 ビット半分が独立にエンディアン
+    // 変換される。SH-4 §8.6 の pair access 図は LE/BE ともこの写像）。
+    // Ref: SPEC-SUPERH-SH4 §6（fmov の post-increment/pre-decrement
+    // は SZ=1 で 8）・§8.6.
+    for endian in [Endian::Le, Endian::Be] {
+        let mut env = bare();
+        env.map_rw(0x2000, 2).unwrap();
+        store32(&mut env, 0x2000, 0x1111_1111, endian);
+        store32(&mut env, 0x2004, 0x2222_2222, endian);
+        set_gpr(&mut env, 4, 0x2000);
+        env.backend.set(sem::fpscr_ref(), sem::FPSCR_SZ);
+        // fmov.s @r4+, fr6 = 0xF649。n=6 偶数 → DR6={FR6,FR7}。
+        sem::exec(&mut env.backend, Insn::FmovSLdp, 0xF649, 0x1000, endian).unwrap();
+        assert_eq!(gpr(&mut env, 4), 0x2008, "{endian:?}: @Rm+ is +8");
+        assert_eq!(env.backend.get(sem::fr_ref(6)), 0x1111_1111, "{endian:?}");
+        assert_eq!(env.backend.get(sem::fr_ref(7)), 0x2222_2222, "{endian:?}");
+        // fmov.s fr6, @-r4 = 0xF46B。SZ=1 なら先行減算は -8。
+        env.backend.set(sem::fr_ref(6), 0xaaaa_aaaa);
+        env.backend.set(sem::fr_ref(7), 0xbbbb_bbbb);
+        set_gpr(&mut env, 4, 0x3000);
+        sem::exec(&mut env.backend, Insn::FmovSStp, 0xF46B, 0x1000, endian).unwrap();
+        assert_eq!(gpr(&mut env, 4), 0x2ff8, "{endian:?}: @-Rn is -8");
+        assert_eq!(load32(&mut env, 0x2ff8, endian), 0xaaaa_aaaa, "{endian:?}");
+        assert_eq!(load32(&mut env, 0x2ffc, endian), 0xbbbb_bbbb, "{endian:?}");
+    }
+}
+
+#[test]
+fn exec_fmov_pair_xd_bank() {
+    // SZ=1 でフィールドの奇数側は XD（反対バンク）のペア。
+    // FR=0 のとき奇数フィールドは XF バンクを読み書きし、
+    // FR=1 では FR/XF が入れ替わる。DRm→XDn のクロスバンク対転送も
+    // 単一の fmov で起きる。Ref: SPEC-SUPERH-SH4A §10.3（load_quad
+    // の XD[n>>1]）.
+    let mut env = bare();
+    env.map_rw(0x2000, 1).unwrap();
+    store32(&mut env, 0x2000, 0x1111_1111, Endian::Le);
+    store32(&mut env, 0x2004, 0x2222_2222, Endian::Le);
+    set_gpr(&mut env, 4, 0x2000);
+    env.backend.set(sem::fpscr_ref(), sem::FPSCR_SZ);
+    // fmov.s @r4+, fr7 = 0xF749。n=7 奇数 → XD6={XF6,XF7}。
+    sem::exec(&mut env.backend, Insn::FmovSLdp, 0xF749, 0x1000, Endian::Le).unwrap();
+    assert_eq!(
+        env.backend.get(sem::xf_ref(6)),
+        0x1111_1111,
+        "odd field -> XD pair"
+    );
+    assert_eq!(env.backend.get(sem::xf_ref(7)), 0x2222_2222);
+    assert_eq!(env.backend.get(sem::fr_ref(6)), 0, "FR bank untouched");
+    assert_eq!(env.backend.get(sem::fr_ref(7)), 0);
+    // fmov fr6, fr7 (0xF76C) + SZ=1: DR6={FR6,FR7} → XD6={XF6,XF7}
+    // のクロスバンク対転送。
+    env.backend.set(sem::fr_ref(6), 0x3333_3333);
+    env.backend.set(sem::fr_ref(7), 0x4444_4444);
+    sem::exec(&mut env.backend, Insn::FmovReg, 0xF76C, 0x1000, Endian::Le).unwrap();
+    assert_eq!(env.backend.get(sem::xf_ref(6)), 0x3333_3333);
+    assert_eq!(env.backend.get(sem::xf_ref(7)), 0x4444_4444);
+    // FR=1 でバンクが入れ替わる: m=6 偶数は XF の DR6、n=7 奇数は
+    // FR の XD6。XF6/XF7 → FR6/FR7 の対転送になる。
+    env.backend
+        .set(sem::fpscr_ref(), sem::FPSCR_SZ | sem::FPSCR_FR);
+    env.backend.set(sem::fr_ref(6), 0);
+    env.backend.set(sem::fr_ref(7), 0);
+    sem::exec(&mut env.backend, Insn::FmovReg, 0xF76C, 0x1000, Endian::Le).unwrap();
+    assert_eq!(env.backend.get(sem::fr_ref(6)), 0x3333_3333);
+    assert_eq!(env.backend.get(sem::fr_ref(7)), 0x4444_4444);
+}
+
+#[test]
+fn exec_fldi_single_precision() {
+    // FLDI0/FLDI1 は PR に依らず FRn へ単精度定数を書く
+    // （PR=1 で実行しても DR ペアにはならない）。
+    // Ref: SPEC-SUPERH-SH4A §10.3.8/§10.3.9.
+    let mut env = bare();
+    env.backend.set(sem::fpscr_ref(), sem::FPSCR_PR);
+    // fldi1 fr5 = 0xF59D。
+    sem::exec(&mut env.backend, Insn::Fldi1, 0xF59D, 0x1000, Endian::Le).unwrap();
+    assert_eq!(
+        env.backend.get(sem::fr_ref(5)),
+        0x3f80_0000,
+        "FLDI1 writes single"
+    );
+    assert_eq!(env.backend.get(sem::fr_ref(6)), 0, "no DR pair write");
+    // fldi0 fr5 = 0xF58D。
+    sem::exec(&mut env.backend, Insn::Fldi0, 0xF58D, 0x1000, Endian::Le).unwrap();
+    assert_eq!(env.backend.get(sem::fr_ref(5)), 0);
+    assert_eq!(env.backend.get(sem::fr_ref(6)), 0);
+}
+
+#[test]
+fn decode_and_exec_bset() {
+    // SH-2A の BSET。レジスタ形式 `10000110nnnn1iii` と disp12 形式
+    // `0011nnnn0iii1001 0001dddddddddddd`。
+    // Ref: SPEC-SUPERH-SH2A §6.3.8.
+    assert_eq!(dec(0x863d), Some(Insn::BsetReg)); // bset #5, r3
+    assert_eq!(dec32(0x3239_1055), Some(Insn::BsetD12)); // bset.b #3, @(0x55,r2)
+    let mut env = bare();
+    set_gpr(&mut env, 3, 0);
+    sem::exec(&mut env.backend, Insn::BsetReg, 0x863d, 0x1000, Endian::Le).unwrap();
+    assert_eq!(gpr(&mut env, 3), 1 << 5);
+    // disp12 形式はバイトを読み、imm3 ビットを立てて書き戻す。
+    env.map_rw(0x2000, 1).unwrap();
+    env.backend.mem.write(VirtAddr(0x2055), &[0x00u8]).unwrap();
+    set_gpr(&mut env, 2, 0x2000);
+    sem::exec(
+        &mut env.backend,
+        Insn::BsetD12,
+        0x3239_1055,
+        0x1000,
+        Endian::Le,
+    )
+    .unwrap();
+    let mut b = [0u8; 1];
+    env.backend
+        .mem
+        .read(VirtAddr(0x2055), &mut b, dacc(Endian::Le))
+        .unwrap();
+    assert_eq!(b[0], 1 << 3);
+}
+
+#[test]
+fn exec_bst_writes_t() {
+    // BST は T を対象ビットへ書き込む。T=0 ならクリア、T=1 なら
+    // セット（「セットのみ」では T=0 の書き込みを表せない）。
+    // Ref: SPEC-SUPERH-SH2A §6.3.9.
+    let mut env = bare();
+    set_gpr(&mut env, 3, 0xff);
+    // clrt; bst #5, r3（0x8735）→ T=0 なのでビット 5 はクリア。
+    sem::exec(&mut env.backend, Insn::Clrt, 0x0008, 0x1000, Endian::Le).unwrap();
+    sem::exec(&mut env.backend, Insn::BstReg, 0x8735, 0x1000, Endian::Le).unwrap();
+    assert_eq!(gpr(&mut env, 3), 0xff & !(1 << 5), "bst with T=0 clears");
+    // sett; bst #4, r3（0x8734）→ ビット 4 も立つ。
+    set_gpr(&mut env, 3, 0);
+    sem::exec(&mut env.backend, Insn::Sett, 0x0018, 0x1000, Endian::Le).unwrap();
+    sem::exec(&mut env.backend, Insn::BstReg, 0x8734, 0x1000, Endian::Le).unwrap();
+    assert_eq!(gpr(&mut env, 3), 1 << 4, "bst with T=1 sets");
+}
+
+#[test]
+fn exec_bank_transfer() {
+    // LDBANK/STBANK は R0 の 1 語だけをバンクエントリとやり取り
+    // する（メモリを触らない）。エントリは Rn の値で指す
+    // （bank=Rn[15:7], entry=Rn[6:2]）。モデルは bank0 の
+    // R0_BANK–R7_BANK 相当のみで、範囲外は読めば 0・書き込みは
+    // 捨てる。Ref: SPEC-SUPERH-SH2A §6.3.17/§6.3.35, §7.4.2.
+    // Gap: GAP-0061
+    let mut env = bare();
+    set_gpr(&mut env, 0, 0xcafe_f00d);
+    set_gpr(&mut env, 5, 3 << 2); // bank0, entry3 → rbank[3]
+    // stbank r0, @r5 = 0x45E1。
+    sem::exec(&mut env.backend, Insn::Stbank, 0x45e1, 0x1000, Endian::Le).unwrap();
+    assert_eq!(env.backend.get(sem::rbank_ref(3)), 0xcafe_f00d);
+    assert_eq!(gpr(&mut env, 0), 0xcafe_f00d, "stbank does not clear R0");
+    // ldbank @r5, r0 = 0x45E5。
+    set_gpr(&mut env, 0, 0);
+    sem::exec(&mut env.backend, Insn::Ldbank, 0x45e5, 0x1000, Endian::Le).unwrap();
+    assert_eq!(gpr(&mut env, 0), 0xcafe_f00d);
+    // 範囲外バンク: 書き込みは捨て、読みは 0。
+    set_gpr(&mut env, 5, 1 << 7); // bank1, entry0
+    set_gpr(&mut env, 0, 0xaaaa_aaaa);
+    sem::exec(&mut env.backend, Insn::Stbank, 0x45e1, 0x1000, Endian::Le).unwrap();
+    set_gpr(&mut env, 0, 0);
+    sem::exec(&mut env.backend, Insn::Ldbank, 0x45e5, 0x1000, Endian::Le).unwrap();
+    assert_eq!(gpr(&mut env, 0), 0);
+}
+
+#[test]
+fn exec_divs_divu() {
+    // SH-2A の DIVS/DIVU（R0 が除数、商のみ）。0 除算は 0 除算例外、
+    // DIVS の INT_MIN ÷ -1 はオーバーフロー例外。T は変化しない。
+    // Ref: SPEC-SUPERH-SH2A §6.3.13/§6.3.14.
+    let mut env = bare();
+    set_gpr(&mut env, 2, 100);
+    set_gpr(&mut env, 0, 7);
+    // divs r0, r2 = 0x4294。
+    sem::exec(&mut env.backend, Insn::Divs, 0x4294, 0x1000, Endian::Le).unwrap();
+    assert_eq!(gpr(&mut env, 2), 14);
+    // 負数の商は 0 方向切捨て。
+    set_gpr(&mut env, 2, (-100i32) as u32);
+    sem::exec(&mut env.backend, Insn::Divs, 0x4294, 0x1000, Endian::Le).unwrap();
+    assert_eq!(gpr(&mut env, 2) as i32, -14);
+    // divu r0, r2 = 0x4284。
+    set_gpr(&mut env, 2, 0xffff_ffff);
+    sem::exec(&mut env.backend, Insn::Divu, 0x4284, 0x1000, Endian::Le).unwrap();
+    assert_eq!(gpr(&mut env, 2), 0xffff_ffff / 7);
+    // T は変化しない（事前に T=1 を立てても残る）。
+    sem::exec(&mut env.backend, Insn::Sett, 0x0018, 0x1000, Endian::Le).unwrap();
+    set_gpr(&mut env, 2, 10);
+    sem::exec(&mut env.backend, Insn::Divu, 0x4284, 0x1000, Endian::Le).unwrap();
+    assert_eq!(sr(&mut env) & sem::SR_T, 1, "divu leaves T alone");
+    // 0 除算は DivZero 例外。
+    set_gpr(&mut env, 0, 0);
+    match sem::exec(&mut env.backend, Insn::Divu, 0x4284, 0x1000, Endian::Le) {
+        Err(InterpExit::Exception(e)) => assert_eq!(e.kind, ExceptionKind::DivZero),
+        r => panic!("divu by zero: {r:?}"),
+    }
+    match sem::exec(&mut env.backend, Insn::Divs, 0x4294, 0x1000, Endian::Le) {
+        Err(InterpExit::Exception(e)) => assert_eq!(e.kind, ExceptionKind::DivZero),
+        r => panic!("divs by zero: {r:?}"),
+    }
+    // INT_MIN / -1 はオーバーフロー例外。
+    set_gpr(&mut env, 0, 0xffff_ffff);
+    set_gpr(&mut env, 2, 0x8000_0000);
+    match sem::exec(&mut env.backend, Insn::Divs, 0x4294, 0x1000, Endian::Le) {
+        Err(InterpExit::Exception(e)) => assert_eq!(e.kind, ExceptionKind::DivZero),
+        r => panic!("divs overflow: {r:?}"),
+    }
+}

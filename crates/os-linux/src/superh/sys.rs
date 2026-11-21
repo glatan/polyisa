@@ -504,10 +504,28 @@ impl Linux {
         // statx: 0 u32 mask, 4 u32 blksize, 8 u64 attributes,
         // 16 u32 nlink, 20 u32 uid, 24 u32 gid, 28 u16 mode, 30 u16 spare,
         // 32 u64 ino, 40 u64 size, 48 u64 blocks, 56 u64 attrs_mask,
-        // 64 atime {i64 sec,i32 nsec,u32 pad}, 80 btime, 96 ctime, 112 mtime,
+        // 64 atime {i64 sec,i32 nsec,i32 reserved}, 80 btime,
+        // 96 ctime, 112 mtime,
         // 128 u32 rdev_major, 132 u32 rdev_minor,
-        // 136 u32 dev_major, 140 u32 dev_minor, 144 u64 spare[14]
-        self.put32(env, addr, 0x0fff)?; // STATX_ALL 相当
+        // 136 u32 dev_major, 140 u32 dev_minor,
+        // 144 u64 mnt_id, 152 u32 dio_mem_align, 156 u32 dio_off_align,
+        // 160 u64 spare[12]。
+        // 予約・未対応フィールドは 0 で埋める（btime/mnt_id 等は
+        // 未提供）。書き込むのは STATX_BASIC_STATS（0x7ff）の範囲
+        // なので mask もそれに合わせる。
+        // Ref: SRC-LINUX — include/uapi/linux/stat.h（struct statx）.
+        for i in 0..32u64 {
+            self.put64(env, addr + i * 8, 0)?;
+        }
+        // Linux の dev_t 符号化から major/minor を取り出す
+        // （new_encode_dev/new_decode_dev の逆）。
+        fn major(d: u64) -> u32 {
+            (((d >> 8) & 0xfff) | (d >> 32)) as u32
+        }
+        fn minor(d: u64) -> u32 {
+            ((d & 0xff) | ((d >> 12) & !0xff)) as u32
+        }
+        self.put32(env, addr, 0x07ff)?; // STATX_BASIC_STATS
         self.put32(env, addr + 4, md.blksize as u32)?;
         self.put32(env, addr + 16, md.nlink as u32)?;
         self.put32(env, addr + 20, md.uid)?;
@@ -521,7 +539,11 @@ impl Linux {
         self.put64(env, addr + 96, md.ctime as u64)?;
         self.put32(env, addr + 104, md.ctime_nsec as u32)?;
         self.put64(env, addr + 112, md.mtime as u64)?;
-        self.put32(env, addr + 120, md.mtime_nsec as u32)
+        self.put32(env, addr + 120, md.mtime_nsec as u32)?;
+        self.put32(env, addr + 128, major(md.rdev))?;
+        self.put32(env, addr + 132, minor(md.rdev))?;
+        self.put32(env, addr + 136, major(md.dev))?;
+        self.put32(env, addr + 140, minor(md.dev))
     }
 
     /// stat 系の共通部。`target` は fd かホストパス。レイアウトは
@@ -1169,7 +1191,20 @@ impl Linux {
             }
             // ---- アクセス・属性 ----
             N::ACCESS => self.sys_access(env, -100, a[0]),
-            N::FACCESSAT | N::FACCESSAT2 => self.sys_access(env, a[0] as i32 as i64, a[1]),
+            N::FACCESSAT => self.sys_access(env, a[0] as i32 as i64, a[1]),
+            N::FACCESSAT2 => {
+                // faccessat2(dirfd, path, mode, flags)。flags は
+                // AT_EACCESS/AT_SYMLINK_NOFOLLOW/AT_EMPTY_PATH を
+                // 取る。単一ユーザ・単一プロセス近似では効かせられ
+                // ないので、flags=0 のみ faccessat と同じ扱いにし、
+                // 非 0 は ENOSYS とする。
+                // Ref: SRC-LINUX — fs/open.c（do_faccessat）.
+                if a[3] != 0 {
+                    Err(e(E::ENOSYS))
+                } else {
+                    self.sys_access(env, a[0] as i32 as i64, a[1])
+                }
+            }
             N::CHMOD | N::FCHMOD | N::FCHMODAT => Ok(0),
             N::CHOWN
             | N::FCHOWN
@@ -1719,6 +1754,7 @@ impl Linux {
             | N::FSPICK
             | N::PIDFD_OPEN
             | N::PIDFD_SEND_SIGNAL
+            | N::PIDFD_GETFD
             | N::CLOSE_RANGE
             | N::PROCESS_MADVISE
             | N::EPOLL_PWAIT2

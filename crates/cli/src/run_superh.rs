@@ -373,11 +373,20 @@ fn step_superh(
                     });
                 }
             };
-            if slen != 2 {
-                return Err(Outcome::Unimplemented {
-                    pc: spc,
-                    word: u128::from(sword),
-                });
+            // slot-illegal の事前判定。32 ビット命令・PC を書き換える
+            // 命令（分岐・RTE）・RESBANK・DIVS・DIVU は遅延スロットに
+            // 置けず、解読時点で slot illegal 例外になる。副作用を
+            // 起こす前に止める。
+            // Ref: SPEC-SUPERH-SH2A §4（delay slot）。
+            if slen != 2
+                || branch_any(sinsn)
+                || matches!(
+                    sinsn,
+                    Insn::Resbank | Insn::Divs | Insn::Divu | Insn::Rte | Insn::Sleep
+                )
+            {
+                let t = sys.handle_trap(env, sem::TRAP_ILL as u32);
+                return trap_result(env, sys, t, u64::from(sword), $next);
             }
             let rs = exec_at(env, sinsn, sword, spc, model.endian);
             match rs {
@@ -415,16 +424,9 @@ fn step_superh(
             (sinsn, sword, ctrl)
         }};
     }
-    let (sinsn, sword, _s_taken) = run_slot!(spc, |env: &mut BareEnv| {
+    let (_sinsn, _sword, _s_taken) = run_slot!(spc, |env: &mut BareEnv| {
         env.pc = taken.unwrap_or_else(|| pc.wrapping_add(4))
     });
-    if branch_any(sinsn) {
-        // スロット中の分岐は slot-illegal。
-        return Err(Outcome::Unimplemented {
-            pc: spc,
-            word: u128::from(sword),
-        });
-    }
     env.pc = taken.unwrap_or_else(|| pc.wrapping_add(4));
     Ok(())
 }
@@ -505,8 +507,9 @@ pub fn run_elf_superh_sys(
         0x0c | 0x11 => "sh4a",        // EF_SH4A・EF_SH4A_NOFPU
         0x0d | 0x13 => "sh2a",        // EF_SH2A・EF_SH2A_NOFPU
         0x14 => "sh3",                // EF_SH3_NOMMU
-        0x15 | 0x17 => "sh4",         // EF_SH2A_SH4*_：両コア共通の命令範囲
-        0x16 | 0x18 => "sh3e",        // EF_SH2A_SH3*：SH-3/SH-3E 共通範囲
+        0x15 | 0x17 => "sh4",         // EF_SH2A_SH4_NOFPU・EF_SH2A_SH4：SH2A/SH4 共通範囲
+        0x16 => "sh3",                // EF_SH2A_SH3E_NOFPU：nofpu オブジェクトは sh3
+        0x18 => "sh3e",               // EF_SH2A_SH3E：SH2A/SH3E 共通範囲
         4 | 5 | 6 | 7 | 0xa => "sh4", // DSP 系・EF_SH_UNKNOWN は sh4 に近似
         _ => "sh4",
     };
@@ -539,7 +542,10 @@ pub fn run_elf_superh_sys(
             .map(|p| p.vaddr & !(PAGE_SIZE - 1))
             .min()
             .unwrap_or(0);
-        MAIN_DYN_BASE - min_vaddr
+        // min_vaddr が基盤を上回るレイアウトでも飽和・巻戻しで
+        // panic しないよう wrapping で引く（負のバイアスは 2 の
+        // 補数として加算側で相殺される）。
+        MAIN_DYN_BASE.wrapping_sub(min_vaddr)
     } else {
         0
     };
@@ -549,14 +555,16 @@ pub fn run_elf_superh_sys(
         .map(|p| p.vaddr + p.memsz)
         .max()
         .unwrap_or(0)
-        + main_bias;
+        .wrapping_add(main_bias);
     polyisa_loader::elf::load_segments_bias(&bytes, &phdrs, &mut env.backend.mem, main_bias)
         .map_err(|e| format!("load: {e:?}"))?;
     let phdr_addr = match phdrs
         .iter()
         .find(|p| p.seg_type == 1 && p.offset <= ehdr.phoff && ehdr.phoff < p.offset + p.filesz)
     {
-        Some(p) => main_bias + p.vaddr + (ehdr.phoff - p.offset),
+        Some(p) => main_bias
+            .wrapping_add(p.vaddr)
+            .wrapping_add(ehdr.phoff - p.offset),
         None => {
             let min_vaddr = phdrs
                 .iter()
@@ -564,7 +572,8 @@ pub fn run_elf_superh_sys(
                 .map(|p| p.vaddr & !(PAGE_SIZE - 1))
                 .min()
                 .unwrap_or(0);
-            let at = (main_bias + min_vaddr)
+            let at = main_bias
+                .wrapping_add(min_vaddr)
                 .checked_sub(PAGE_SIZE)
                 .ok_or_else(|| "phdr 表の置き場がない".to_string())?;
             const PHENT32: u64 = 32; // ELF32 の phdr は 32 バイト固定。
@@ -581,13 +590,17 @@ pub fn run_elf_superh_sys(
             at
         }
     };
-    let entry = main_bias + ehdr.entry;
+    let entry = main_bias.wrapping_add(ehdr.entry);
     let top = 0xbfff_f000u64;
     let img_top = top - 0x1_0000;
     let mut arg_bytes = vec![path.as_bytes().to_vec()];
     for a in argv {
         arg_bytes.push(a.as_bytes().to_vec());
     }
+    // auxv。AT_RANDOM (25) が指す 16 バイトと AT_EXECFN (31) は
+    // build_initial_stack32_endian が像の末尾に自前で詰めるので、
+    // ここで渡すのは残りだけ。AT_HWCAP は SH UAPI が HWCAP を
+    // 定義しないので 0。
     let auxv: Vec<(u64, u64)> = vec![
         (3, phdr_addr),             // AT_PHDR
         (4, 32),                    // AT_PHENT
@@ -599,6 +612,7 @@ pub fn run_elf_superh_sys(
         (12, 0),                    // AT_EUID
         (13, 0),                    // AT_GID
         (14, 0),                    // AT_EGID
+        (16, 0),                    // AT_HWCAP
         (17, 100),                  // AT_CLKTCK
         (23, 0),                    // AT_SECURE
     ];
@@ -634,17 +648,6 @@ pub fn run_elf_superh_sys(
             },
         );
         eprintln!("superh: stack img at {sp:#x}: {b:02x?}");
-        let mut b = [0u8; 8];
-        let _ = env.backend.mem.read(
-            VirtAddr(0x5a0d84),
-            &mut b,
-            Access {
-                endian,
-                align: Align::Unaligned,
-                kind: AccessKind::DataRead,
-            },
-        );
-        eprintln!("superh: mem@0x5a0d84: {b:02x?}");
     }
     // SH の初期 SP は R15。
     env.backend.set(sem::R(15).state(), sp as u32);

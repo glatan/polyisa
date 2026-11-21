@@ -588,6 +588,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("stc_tbr", "FN", "0000....01001010", "stc tbr, {n}", "system"),
         ("ldc_tbr", "FM", "0100....01001010", "ldc {m}, tbr", "system"),
         ("bclr_reg", "FNI3", "10000110....0...", "bclr #{i3}, {n}", "alu"),
+        ("bset_reg", "FNI3", "10000110....1...", "bset #{i3}, {n}", "alu"),
         ("bld_reg", "FNI3", "10000111....1...", "bld #{i3}, {n}", "alu"),
         ("bst_reg", "FNI3", "10000111....0...", "bst #{i3}, {n}", "alu"),
     ] {
@@ -638,6 +639,7 @@ pub fn build_model() -> polyisa_isadl::Model {
     // Ref: SPEC-SUPERH-SH2A §5.
     for (name, pattern, syntax) in [
         ("bclr_d12", "0011....0...1001 0000............", "bclr.b #{i3}, @({d},{n})"),
+        ("bset_d12", "0011....0...1001 0001............", "bset.b #{i3}, @({d},{n})"),
         ("bst_d12", "0011....0...1001 0010............", "bst.b #{i3}, @({d},{n})"),
         ("bld_d12", "0011....0...1001 0011............", "bld.b #{i3}, @({d},{n})"),
         ("band_d12", "0011....0...1001 0100............", "band.b #{i3}, @({d},{n})"),

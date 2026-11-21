@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! SuperH（SH-4・32ビット）の Linux ゲスト ABI 共通部。
 //!
-//! 規約：syscall 番号は R3、引数は R4–R9、戻り値は R0、失敗は
+//! 規約：syscall 番号は R3、引数は R4–R7・R0・R1 の順、戻り値は R0、失敗は
 //! R0 = -errno。発行点は `trapa #16`–`#31`（`#0x10`–`#0x1f`。
 //! Linux は引数の個数分だけ入口即値を使い分ける）。
 //! errno は asm-generic の値そのまま。番号表は
@@ -413,8 +413,9 @@ pub mod nr {
     pub const PIDFD_OPEN: u64 = 434;
     pub const CLOSE_RANGE: u64 = 436;
     pub const OPENAT2: u64 = 437;
-    pub const FACCESSAT2: u64 = 438;
-    pub const PROCESS_MADVISE: u64 = 439;
+    pub const PIDFD_GETFD: u64 = 438;
+    pub const FACCESSAT2: u64 = 439;
+    pub const PROCESS_MADVISE: u64 = 440;
     pub const EPOLL_PWAIT2: u64 = 441;
     pub const MOUNT_SETATTR: u64 = 442;
     pub const QUOTACTL_FD: u64 = 443;
