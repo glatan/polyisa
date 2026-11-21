@@ -334,6 +334,15 @@ fn expand_12a(word: u64) -> u64 {
     ((-((word & 1) as i64)) as u64) << 13 | im11a << 2
 }
 
+/// `%assemble_3`：3 ビットの空間レジスタ番号を復元する。
+/// `cat(x{2},x{0..1})` — フィールドの最下位ビット（HP 記法 x{2}、
+/// 語では bit13）が結果の最上位になる。逆変換は
+/// `((sr & 3) << 1) | (sr >> 2)`。
+/// Ref: SPEC-PARISC-20 付録E Table E-1, SPEC-PARISC-11 §5-9.
+fn assemble_3(f: u64) -> u64 {
+    ((f & 1) << 2) | (f >> 1)
+}
+
 /// `%ma_to_m`：m(bit5)<<1|a(bit13) の 2 ビットから modify 値。
 /// 0/1→0、2→+1（事後: EA=base, base+=ofs）、3→-1（事前: EA=ofs,
 /// base+=ofs）。
@@ -1714,6 +1723,11 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
         // ---- 分岐 ----
         Insn::Be | Insn::Ble => {
             // be/ble disp(sr,b)：間接。be は l=0、ble は l=r31。
+            // spec は `IASQ_Next ← SR[assemble_3(s)]`（ops[2]）と
+            // ble では `SR[0] ← IASQ_Back` を書くが、本モデルは
+            // IASQ/空間レジスタ選択を持たないので読まない
+            // （PSW.C=0 の Level 0 近似）。
+            // Gap: GAP-0052
             let link = if insn == Insn::Ble { 31 } else { 0 };
             let disp = disp17(ops[1], ops[3]);
             let base = Gr(ops[0] as u8).get(b);
@@ -2642,16 +2656,23 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
             Gr(ops[0] as u8).set(b, v);
         }
         Insn::Mfsp => {
-            // mfsp sr,t → sr[sp] >> 32。
-            let v = Sr(ops[0] as u8).get(b);
+            // mfsp sr,t → sr[sp] >> 32。sp の 3 ビット桁は
+            // `sr ← assemble_3(s)` で復元（SPEC-PARISC-20 §7-93
+            // MFSP Operation、付録E Table E-1）。
+            let v = Sr(assemble_3(ops[0]) as u8).get(b);
             let v = shr_n(b, v, 32);
             Gr(ops[1] as u8).set(b, v);
         }
         Insn::Mtsp => {
-            // mtsp r,sr → sr[i] = r << 32。
+            // mtsp r,sr → sr[i] = r << 32。sp の 3 ビット桁は
+            // `sr ← assemble_3(s)` で復元（SPEC-PARISC-20 §7-102
+            // MTSP Operation、付録E Table E-1）。`sr >= 5 && priv
+            // != 0` の privileged_register_trap は本モデルの
+            // 特権レベル固定（IAOQ 下位 2 ビット = 0＝最上位）で
+            // 発生しない。
             let s = Gr(ops[0] as u8).get(b);
             let v = shl_n(b, s, 32);
-            Sr(ops[1] as u8).set(b, v);
+            Sr(assemble_3(ops[1]) as u8).set(b, v);
         }
         Insn::Mtsm => {
             // MTSM は PSW システムマスクへの移動で、SAR とは無関係。

@@ -427,6 +427,230 @@ fn exec_ble_links_and_jumps() {
     assert_eq!(iaoq_b(&mut env), 0x3000);
 }
 
+// ---- 分岐監査の回帰（段階17・PR7）----
+// `,n` 無効化は方向×条件成立の 4 象限で検査する。spec の規則は
+// `if (n) { if (disp<0) PSW[N] ← !cond; else PSW[N] ← cond }` で、
+// 前方成立・後方不成立のとき遅延スロットが無効化される。
+// Ref: SPEC-PARISC-11 §5-67〜§5-81（BE/BLE/MOVB/MOVIB/COMB/
+// COMIB/ADDB/ADDIB/BB Operation）、SPEC-PARISC-20 付録D
+// Table D-3..D-15.
+
+/// 遅延スロットは `ldo 5(r0),r6`。分岐命令や setup が触らない
+/// レジスタ r6 の書き込み有無で無効化を観測する。
+const DSLOT: u32 = 0x3406_000a;
+
+/// `,n` 分岐の 4 象限。word_ft/word_ff は前方 +4、word_bt/word_bf
+/// は後方 -4 の語（真/偽で即値桁が変わる族は別語を渡す）。
+/// 後方 -4 は assemble_12 で i=-1：w=1（bit0）、w1=0x7FF
+/// （bit2=w1{10}=1、bits3-12=0x3FF）、n=1（bit1）→ bits0-12=0x1FFF。
+/// setup がレジスタを用意して条件の真偽を決める。
+fn check_quadrants(
+    word_ft: u32,
+    word_ff: u32,
+    word_bt: u32,
+    word_bf: u32,
+    setup_t: &dyn Fn(&mut BareEnv),
+    setup_f: &dyn Fn(&mut BareEnv),
+) {
+    for (word, setup, nullify, want_b) in [
+        (word_ft, setup_t, true, 0x100c_u64), // 前方・成立 → 無効化・pc+8+4
+        (word_ff, setup_f, false, 0x1008),    // 前方・不成立 → 実行・pc+8
+        (word_bt, setup_t, false, 0x1004),    // 後方・成立 → 実行・pc+8-4
+        (word_bf, setup_f, true, 0x1008),     // 後方・不成立 → 無効化・pc+8
+    ] {
+        let mut env = env();
+        set_q(&mut env, 0x1000);
+        setup(&mut env);
+        step(&mut env, word);
+        assert_eq!(iaoq_b(&mut env), want_b, "branch {word:#x}");
+        step(&mut env, DSLOT);
+        let nulled = gpr(&mut env, 6) == 0;
+        assert_eq!(nulled, nullify, "branch {word:#x} nullify={nullify}");
+        // 無効化の消費後・通常実行後ともキューは want_b 側へ進む。
+        assert_eq!(iaoq_f(&mut env), want_b, "branch {word:#x}");
+    }
+}
+
+#[test]
+fn exec_cond_branch_nullify_quadrants() {
+    // comb,=,n r1,r2,±4（r1=GR2, r2=GR1）。`=`: r1==r2。
+    check_quadrants(
+        0x8022_200a,
+        0x8022_200a,
+        0x8022_3fff,
+        0x8022_3fff,
+        &|e| {
+            set_gpr(e, 1, 5);
+            set_gpr(e, 2, 5);
+        },
+        &|e| {
+            set_gpr(e, 1, 5);
+            set_gpr(e, 2, 7);
+        },
+    );
+    // comib,=,n 8,r3,±4。`=`: imm==r → r3=8 で成立。
+    check_quadrants(
+        0x8470_200a,
+        0x8470_200a,
+        0x8470_3fff,
+        0x8470_3fff,
+        &|e| set_gpr(e, 3, 8),
+        &|e| set_gpr(e, 3, 5),
+    );
+    // addb,=,n r1,r2,±4（r1=GR2, r2=GR1）。`=`: r1+r2==0。
+    check_quadrants(
+        0xa022_200a,
+        0xa022_200a,
+        0xa022_3fff,
+        0xa022_3fff,
+        &|e| {
+            set_gpr(e, 1, u64::MAX);
+            set_gpr(e, 2, 1);
+        },
+        &|e| {
+            set_gpr(e, 1, 1);
+            set_gpr(e, 2, 1);
+        },
+    );
+    // addib,=,n 8,r3,±4。`=`: 8+r3==0 → r3=-8 で成立。
+    check_quadrants(
+        0xa470_200a,
+        0xa470_200a,
+        0xa470_3fff,
+        0xa470_3fff,
+        &|e| set_gpr(e, 3, u64::MAX - 7),
+        &|e| set_gpr(e, 3, 1),
+    );
+    // movb,=,n r1,r2,±4（r1=GR2 が移し元）。`=`: 移した値==0。
+    check_quadrants(
+        0xca22_200a,
+        0xca22_200a,
+        0xca22_3fff,
+        0xca22_3fff,
+        &|e| set_gpr(e, 2, 0),
+        &|e| set_gpr(e, 2, 9),
+    );
+    // movib,<,n i,r4,±4（条件は即値側にしか効かないので真偽で語を
+    // 変える: -1 → `<` 成立、+1 → 不成立）。
+    check_quadrants(
+        0xcc81_400a,
+        0xcc82_400a,
+        0xcc81_5fff,
+        0xcc82_5fff,
+        &|_| {},
+        &|_| {},
+    );
+    // bb,>=,n r3,0,±4（pos0 は語の最上位ビット＝LSB31）。
+    // `>=`: ビットが 0 で成立。
+    check_quadrants(
+        0xc403_c00a,
+        0xc403_c00a,
+        0xc403_dfff,
+        0xc403_dfff,
+        &|e| set_gpr(e, 3, 0),
+        &|e| set_gpr(e, 3, 0x8000_0000),
+    );
+    // bb,<,n r3,0,±4（`<`: ビットが 1 で成立）。
+    check_quadrants(
+        0xc403_400a,
+        0xc403_400a,
+        0xc403_5fff,
+        0xc403_5fff,
+        &|e| set_gpr(e, 3, 0x8000_0000),
+        &|e| set_gpr(e, 3, 0),
+    );
+}
+
+#[test]
+fn exec_branch_link_privilege_and_n() {
+    // bl 8,r5: GR[5] ← IAOQ_Back + 4（= pc+8）、分岐先 pc+8+8。
+    // Ref: SPEC-PARISC-11 §5-64/§B.
+    let mut env = env();
+    set_q(&mut env, 0x1000);
+    step(&mut env, 0xe8a0_0010);
+    assert_eq!(gpr(&mut env, 5), 0x1008);
+    assert_eq!(iaoq_b(&mut env), 0x1010);
+
+    // bv r3(r2): target = GR[b] + (GR[x]<<3)。GR[b] の下位2ビット
+    // が現特権より大きければターゲットの特権を降格（下位2ビット
+    // 継承）。小さいときは現特権を維持。
+    // Ref: SPEC-PARISC-11 §5-66, SPEC-PARISC-20 §7-19.
+    set_gpr(&mut env, 2, 0x2001);
+    set_gpr(&mut env, 3, 2);
+    step(&mut env, 0xe843_c000);
+    assert_eq!(iaoq_b(&mut env), 0x2011); // 0x2010 | priv 1
+    set_gpr(&mut env, 2, 0x2000);
+    step(&mut env, 0xe843_c000);
+    assert_eq!(iaoq_b(&mut env), 0x2010);
+
+    // ble 0(sr0,r2)@f=0x2011: GR[31] = pc+8 = 0x2019、
+    // target = GR[b]+0 = 0x3003（priv 3 へ降格）。
+    set_gpr(&mut env, 2, 0x3003);
+    step(&mut env, 0xe440_0000);
+    assert_eq!(gpr(&mut env, 31), 0x2019);
+    assert_eq!(iaoq_b(&mut env), 0x3003);
+
+    // be 4(sr0,r2)@f=0x2010: リンクなし。target = GR[b] + 4、
+    // GR[b] の下位2ビットは 0 で現特権 0 を維持 → 0x3004。
+    set_gpr(&mut env, 2, 0x3000);
+    step(&mut env, 0xe040_0008);
+    assert_eq!(iaoq_b(&mut env), 0x3004);
+
+    // bv,n 0(r2)@f=0x3003: ,n で遅延スロットを無効化。pc の
+    // 下位2ビットは 3 なのでターゲットは priv 3 を維持する。
+    set_gpr(&mut env, 2, 0x4000);
+    step(&mut env, 0xe840_c002);
+    step(&mut env, DSLOT);
+    assert_eq!(gpr(&mut env, 6), 0);
+    assert_eq!(iaoq_f(&mut env), 0x4003);
+}
+
+#[test]
+fn exec_mtsp_mfsp_assemble3() {
+    // mtsp/mfsp の s 桁は `sr ← assemble_3(s)` で復元される
+    // （cat(s{2},s{0..1}): s の bit0 が SR 番号の bit2）。
+    // Ref: SPEC-PARISC-20 付録E Table E-1, §7-93/§7-102,
+    // SPEC-PARISC-11 §5-147/§5-150.
+    let mut env = env();
+    set_q(&mut env, 0x1000);
+    set_gpr(&mut env, 4, 0xdead_beef);
+    // mtsp r4,sr2: sr2 の符号化 s = ((2&3)<<1)|(2>>2) = 4。
+    // SR の格納は上位 32 ビット（PA 1.1 Level 1 モデル慣行）。
+    step(&mut env, 0x0004_9820);
+    assert_eq!(env.backend.get(sem::Sr(2).state()), 0xdead_beef_0000_0000);
+    // mfsp sr2,r9 → r9 = 0xdead_beef。
+    step(&mut env, 0x0000_84a9);
+    assert_eq!(gpr(&mut env, 9), 0xdead_beef);
+    // sr5 は符号化 3（assemble_3(3) = 5）。
+    set_gpr(&mut env, 4, 0x1234_5678);
+    step(&mut env, 0x0004_7820);
+    assert_eq!(env.backend.get(sem::Sr(5).state()), 0x1234_5678_0000_0000);
+    step(&mut env, 0x0000_64a9);
+    assert_eq!(gpr(&mut env, 9), 0x1234_5678);
+}
+
+#[test]
+fn exec_gate_in_delay_slot_traps() {
+    // gate は遅延スロット（PSW.B）で illegal instruction trap。
+    // Ref: SPEC-PARISC-11 §5-63/§GATE `if (PSW[B])
+    // illegal_instruction_trap`, SPEC-PARISC-20 §B,GATE.
+    let mut env = env();
+    set_q(&mut env, 0x1000);
+    set_gpr(&mut env, 2, 0x2000);
+    // bv 0(r2) で PSW.B を立てて遅延スロット状態にする。
+    step(&mut env, 0xe840_c000);
+    // gate +0,r0（0xe800_2000）を遅延スロットとして実行 → トラップ。
+    let insn = dec(0xe800_2000).unwrap();
+    assert_eq!(insn, Insn::Gate);
+    let f = iaoq_f(&mut env);
+    let r = sem::exec(&mut env.backend, insn, 0xe800_2000, f);
+    let Err(InterpExit::Exception(e)) = r else {
+        panic!("gate in delay slot should trap: {r:?}");
+    };
+    assert_eq!(e.kind, ExceptionKind::Trap);
+    assert_eq!(e.code, sem::TRAP_ILL);
+}
+
 // ---- shift/extract/deposit 意味論検査（段階17・Step0）----
 // busybox の起動コードが extru/depi/zdepi を使う（0xd3351bf8 で
 // 未実装停止したことから発覚）。位置は HP の左端起算で、語には

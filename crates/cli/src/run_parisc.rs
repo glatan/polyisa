@@ -696,14 +696,19 @@ mod tests {
     }
 
     /// `ble disp(sr,b)`（disp >= 0 で 4 整列）。
-    /// sr 桁は bits13-15（assemble_sr3: bit13=LSB、bits14-15=上位2）。
+    /// sr 桁は bits13-15 の 3 ビットで、空間レジスタ番号は
+    /// `assemble_3(s) = cat(s{2},s{0..1})` で復元される
+    /// （SPEC-PARISC-20 付録E Table E-1）。即ち s の bit0（語の
+    /// bit13）が SR 番号の bit2、s の bit1..2（語の bit14..15）が
+    /// SR 番号の bit0..1 になるので、sr → s の逆変換は
+    /// `((sr & 3) << 1) | (sr >> 2)`。
     fn ble(disp: u32, sr: u8, b: u8) -> u32 {
         let i = disp >> 2;
+        let s = ((sr as u32 & 3) << 1) | (sr as u32 >> 2);
         0xe400_0000
             | (b as u32) << 21
             | ((i >> 11) & 0x1f) << 16
-            | (sr as u32 & 1) << 13
-            | (sr as u32 >> 1) << 14
+            | s << 13
             | ((i >> 10) & 1) << 2
             | (i & 0x3ff) << 3
     }
