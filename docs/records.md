@@ -23,7 +23,7 @@
 | 14 | m68k | 完了 |
 | 15 | SPARC | 完了 |
 | 16 | Alpha | 完了 |
-| 17 | PA-RISC | 進行中（作業計画は `design/roadmap.md` の該当段階） |
+| 17 | PA-RISC | 完了 |
 | 18-24 | SuperH〜PDP-11 | 未着手（作業計画は `design/roadmap.md` の各段階） |
 | 25-29 | OS パーソナリティ・システムコール段階 5・タイミング・ホスト移植・GDB | 未着手 |
 
@@ -447,6 +447,19 @@ WebAssembly の本格的な実装と、WASI preview1 の OS パーソナリテ�
 残っている事項：
 
 - GAP-0045（VAX F/G 形式・/s・/i 例外モデル・FPCR 集約・cvttq の modulo 変換）・GAP-0046（syscall ABI の意図的な簡略化）・GAP-0050（仕様書が黙っている動作の簡略化）
+
+### 段階 17：PA-RISC
+
+対応した内容：
+
+- `guests/parisc`（spec・sem）・`run_parisc`・`os-linux::parisc`（hppa32 syscall 表・FdTable 系・ゲートウェイページの 3 入口と LWS）
+- 版の範囲 PA-RISC 1.1・2.0 と MAX のうちユーザーモード実行に要る命令群（整数・extract/deposit・load/store・LDCW 系・分岐と無効化・IAOQ キュー・FP・MAX-1/MAX-2）。PA-RISC 1.0 は根拠資料がないため範囲から除外
+- `heavy_program_parisc`（配布物コマンド群）・`heavy_abi_parisc`（UAPI の syscall.tbl 照合。abi ∈ {common,32} の 408 エントリ）
+
+残っている事項：
+
+- S17-2 の所有者確認（`heavy_abi_parisc` が機械的証拠）
+- GAP-0047（SPOPn・debug SFU・COPR uid≠0・PA1.1 の 0x0E 半面選択形の未モデル分）・GAP-0052（LDCW 予約近似・GATE 特権・IASQ・トラップ復帰等の簡略化）・GAP-0053（未定義域の決定的評価）・GAP-0054（SUBB 系の条件評価の読み）・GAP-0055（絶対番地アクセスと PROBE の簡略化）・GAP-0056（ゲートウェイページの近似）・GAP-0057（FP 例外トラップの配送）・GAP-0058（syscall ABI の意図的な簡略化）
 
 ## 残っている事項（横断）
 
