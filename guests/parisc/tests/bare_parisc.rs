@@ -1869,3 +1869,357 @@ fn exec_fp_status_register() {
     step(&mut env, 0x3085_0600); // fadd,f fr4,fr5,fr0
     assert_eq!(fpr(&mut env, 0), 0x5a5a_5a5a_5a5a_5a5a);
 }
+
+// ---- FP 変換/比較/多重・融合演算（段階17 PR9b）----
+// 出典: SPEC-PARISC-11 §6-45..§6-48（FCNV 系）・§6-23（NaN/
+// 例外）・§6-19 Table 6-17（多重演算の半レジスタ指定）・
+// §6-57..§6-59、SPEC-PARISC-20 §8-16 Table 8-11/8-12・
+// Table 8-13..8-17・§9-4 FCMP・§9-16/§9-17 FMPYFADD/
+// FMPYNFADD・§9-28 FTEST・§9-30 XMPYU・§10（例外結果）。
+// エンコードは生成された encode() を使い、オペランド順は
+// ISADL の extract_ops と同じ。
+
+fn enc(i: Insn, ops: &[u64]) -> u32 {
+    encode(i, ops).unwrap() as u32
+}
+
+// f32/d32 の相互変換と丸め・例外フラグ。
+#[test]
+fn exec_fcnv_float_float() {
+    let mut env = env();
+    set_q(&mut env, 0x1000);
+    // fcnv,d_f fr5,fr6: 1.5d → 0x3fc0_0000（正確、例外なし）。
+    set_fpr(&mut env, 5, 0x3ff8_0000_0000_0000);
+    step(&mut env, enc(Insn::FcnvDF, &[5, 6]));
+    assert_eq!(fpr(&mut env, 6) >> 32, 0x3fc0_0000);
+    assert_eq!(fpsr_flags(&mut env), 0);
+    // fcnv,f_d fr6,fr7: 単精度→倍精度は常に正確。
+    step(&mut env, enc(Insn::FcnvFD, &[6, 7]));
+    assert_eq!(fpr(&mut env, 7), 0x3ff8_0000_0000_0000);
+    assert_eq!(fpsr_flags(&mut env), 0);
+    // 1+2^-52 を単精度へ: 最近接は 1.0、+∞ 方向は 1.0+ulp。
+    // どちらも inexact。
+    set_fpr(&mut env, 5, 0x3ff0_0000_0000_0001);
+    set_rm(&mut env, 0);
+    step(&mut env, enc(Insn::FcnvDF, &[5, 6]));
+    assert_eq!(fpr(&mut env, 6) >> 32, 0x3f80_0000);
+    assert_eq!(fpsr_flags(&mut env), 0x01);
+    set_rm(&mut env, 2);
+    step(&mut env, enc(Insn::FcnvDF, &[5, 6]));
+    assert_eq!(fpr(&mut env, 6) >> 32, 0x3f80_0001);
+    assert_eq!(fpsr_flags(&mut env), 0x01);
+    // 2^130 は単精度の範囲外: 最近接は +∞（O+I）、0 方向は
+    // 最大有限値 0x7f7f_ffff（O+I）。SPEC-PARISC-20 Table 10-7。
+    set_fpr(&mut env, 5, 0x4810_0000_0000_0000);
+    set_rm(&mut env, 0);
+    step(&mut env, enc(Insn::FcnvDF, &[5, 6]));
+    assert_eq!(fpr(&mut env, 6) >> 32, 0x7f80_0000);
+    assert_eq!(fpsr_flags(&mut env), 0x04 | 0x01);
+    set_rm(&mut env, 1);
+    step(&mut env, enc(Insn::FcnvDF, &[5, 6]));
+    assert_eq!(fpr(&mut env, 6) >> 32, 0x7f7f_ffff);
+    assert_eq!(fpsr_flags(&mut env), 0x04 | 0x01);
+    // NaN 変換: 倍精度通知 NaN（b1=1）→ 単精度では静止化
+    // （b1→0・残り 0 なので b2=1）して V を立てる。
+    // Ref: SPEC-PARISC-11 §6-23, SPEC-PARISC-20 §8-23.
+    set_rm(&mut env, 0);
+    set_fpr(&mut env, 5, 0x7ff8_0000_0000_0000);
+    step(&mut env, enc(Insn::FcnvDF, &[5, 6]));
+    assert_eq!(fpr(&mut env, 6) >> 32, 0x7fa0_0000);
+    assert_eq!(fpsr_flags(&mut env), 0x10);
+    // 逆方向でも同じ規則: 通知 NaN → 静止 NaN + V。
+    set_fpr(&mut env, 0, 0);
+    set_fpr(&mut env, 6, 0x7fc0_0000_dead_beef);
+    step(&mut env, enc(Insn::FcnvFD, &[6, 7]));
+    assert_eq!(fpr(&mut env, 7), 0x7ff4_0000_0000_0000);
+    assert_eq!(fpsr_flags(&mut env), 0x10);
+}
+
+// 整数→浮動小数点（w/q/uw/uq）。
+#[test]
+fn exec_fcnv_int_to_float() {
+    let mut env = env();
+    set_q(&mut env, 0x1000);
+    set_rm(&mut env, 0);
+    // fcnv,w_f fr4,fr6: fr4L の int 7 → 7.0f。
+    set_fpr(&mut env, 4, 0x0000_0007_dead_beef);
+    step(&mut env, enc(Insn::FcnvWF, &[4, 6]));
+    assert_eq!(fpr(&mut env, 6) >> 32, 0x40e0_0000);
+    // fcnv,w_d fr4,fr7: int -3 → -3.0d（符号つき）。
+    set_fpr(&mut env, 4, 0xffff_fffd_0000_0000);
+    step(&mut env, enc(Insn::FcnvWD, &[4, 7]));
+    assert_eq!(fpr(&mut env, 7), 0xc008_0000_0000_0000);
+    // fcnv,uw_d fr4,fr7: 0xffff_fffd を符号なしで 4294967293.0d。
+    step(&mut env, enc(Insn::FcnvUwD, &[4, 7]));
+    assert_eq!(fpr(&mut env, 7), 0x41ef_ffff_ffa0_0000);
+    // fcnv,q_f fr5,fr6: i64 9 → 9.0f。
+    set_fpr(&mut env, 5, 0x0000_0000_0000_0009);
+    step(&mut env, enc(Insn::FcnvQF, &[5, 6]));
+    assert_eq!(fpr(&mut env, 6) >> 32, 0x4110_0000);
+    // fcnv,uq_d fr5,fr7: u64::MAX → 2^64 = 0x43f0...（inexact）。
+    set_fpr(&mut env, 5, 0xffff_ffff_ffff_ffff);
+    step(&mut env, enc(Insn::FcnvUqD, &[5, 7]));
+    assert_eq!(fpr(&mut env, 7), 0x43f0_0000_0000_0000);
+    assert_eq!(fpsr_flags(&mut env), 0x01);
+    // fcnv,q_d fr5,fr7: -1 → -1.0d（符号つき 64 ビット）。
+    step(&mut env, enc(Insn::FcnvQD, &[5, 7]));
+    assert_eq!(fpr(&mut env, 7), 0xbff0_0000_0000_0000);
+    // fcnv,uw_f fr4,fr6: u32::MAX → 2^32（inexact）。
+    set_fpr(&mut env, 4, 0xffff_ffff_0000_0000);
+    step(&mut env, enc(Insn::FcnvUwF, &[4, 6]));
+    assert_eq!(fpr(&mut env, 6) >> 32, 0x4f80_0000);
+    assert_eq!(fpsr_flags(&mut env), 0x01);
+}
+
+// 浮動小数点→整数（T 完語と符号なし形を含む）。
+#[test]
+fn exec_fcnv_float_to_int() {
+    let mut env = env();
+    set_q(&mut env, 0x1000);
+    // fcnv,f_w fr4,fr6: 2.5f は RM で分岐。
+    set_fpr(&mut env, 4, 0x4020_0000_0000_0000);
+    for (rm, want) in [(0u64, 2u64), (1, 2), (2, 3), (3, 2)] {
+        set_rm(&mut env, rm);
+        step(&mut env, enc(Insn::FcnvFW, &[4, 6]));
+        assert_eq!(fpr(&mut env, 6) >> 32, want, "rm={rm}");
+        assert_eq!(fpsr_flags(&mut env), 0x01, "rm={rm}: inexact");
+    }
+    // -2.5f の T 完語（fcnv_t_f_w）は RM に依らず -2。
+    set_fpr(&mut env, 4, 0xc020_0000_0000_0000);
+    for rm in [0u64, 1, 2, 3] {
+        set_rm(&mut env, rm);
+        step(&mut env, enc(Insn::FcnvTFW, &[4, 6]));
+        assert_eq!(fpr(&mut env, 6) >> 32, 0xffff_fffe, "rm={rm}");
+        assert_eq!(fpsr_flags(&mut env), 0x01);
+    }
+    // fcnv,d_q fr5,fr7: -3.7d を T 完語で i64 -3。
+    set_fpr(&mut env, 5, 0xc00d_9999_9999_999a);
+    set_rm(&mut env, 0);
+    step(&mut env, enc(Insn::FcnvTDQ, &[5, 7]));
+    assert_eq!(fpr(&mut env, 7), 0xffff_ffff_ffff_fffd);
+    assert_eq!(fpsr_flags(&mut env), 0x01);
+    // fcnv,f_uw fr4,fr6: 3.5f → 符号なし 4。
+    set_fpr(&mut env, 4, 0x4060_0000_0000_0000);
+    step(&mut env, enc(Insn::FcnvFUw, &[4, 6]));
+    assert_eq!(fpr(&mut env, 6) >> 32, 4);
+    // fcnv,d_uq fr5,fr7: 2.9d T 完語 → u64 2。
+    set_fpr(&mut env, 5, 0x4007_3333_3333_3333);
+    step(&mut env, enc(Insn::FcnvTDUq, &[5, 7]));
+    assert_eq!(fpr(&mut env, 7), 2);
+    // NaN→整数は invalid で「最大整数」を配達 + V フラグ。
+    // Ref: SPEC-PARISC-20 Table 10-6。累積した inexact を
+    // 先に掃いてから見る。
+    set_fpr(&mut env, 0, 0);
+    set_fpr(&mut env, 4, 0x7f80_0001_0000_0000); // PA 静止 NaN
+    step(&mut env, enc(Insn::FcnvFW, &[4, 6]));
+    assert_eq!(fpr(&mut env, 6) >> 32, 0x7fff_ffff);
+    assert_eq!(fpsr_flags(&mut env), 0x10);
+    // ±∞ → int も invalid + V（値は飽和）。
+    set_fpr(&mut env, 0, 0);
+    set_fpr(&mut env, 4, 0x7f80_0000_0000_0000); // +inf
+    step(&mut env, enc(Insn::FcnvFW, &[4, 6]));
+    assert_eq!(fpsr_flags(&mut env), 0x10);
+}
+
+// FCMP: キュー比較の C/CQ 更新・的付け CA 書き込み・
+// unordered と invalid の扱い。
+#[test]
+fn exec_fcmp_queue_and_target() {
+    let mut env = env();
+    set_q(&mut env, 0x1000);
+    set_fpr(&mut env, 4, 0x3f80_0000_0000_0000); // fr4L = 1.0
+    set_fpr(&mut env, 5, 0x4040_0000_0000_0000); // fr5L = 3.0
+    // fcmp,f fr4,fr5,`<`=9（<、unordered で invalid）:
+    // 1.0<3.0 なので C←1、CQ は右シフト。
+    step(&mut env, enc(Insn::FcmpF, &[4, 5, 0, 9]));
+    assert_ne!(fpr(&mut env, 0) & sem::FPSR_C, 0);
+    assert_eq!(fpsr_flags(&mut env), 0);
+    // 直後の fcmp,d fr6,fr7 `=`=4: 2.0==2.0 → C=1、CQ{0} に
+    // 前の C=1 が入る（u64 bit53）。
+    set_fpr(&mut env, 6, 0x4000_0000_0000_0000);
+    set_fpr(&mut env, 7, 0x4000_0000_0000_0000);
+    step(&mut env, enc(Insn::FcmpD, &[6, 7, 0, 4]));
+    let s = fpr(&mut env, 0);
+    assert_ne!(s & sem::FPSR_C, 0);
+    assert_ne!(s & (1 << 53), 0, "CQ{{0}} ← 前 C");
+    assert_eq!(fpsr_flags(&mut env), 0);
+    // 今度は 1.0<3.0 に `>`=17（invalid 要求あり、gt のみ）:
+    // 結果 0 で C=0、CQ{0}←前 C=1。
+    step(&mut env, enc(Insn::FcmpF, &[4, 5, 0, 17]));
+    let s = fpr(&mut env, 0);
+    assert_eq!(s & sem::FPSR_C, 0);
+    // unordered: qNaN 同士を `,<=`=13（lt|eq + invalid 要求）。
+    // 結果は 0、V フラグが立つ。
+    set_fpr(&mut env, 4, 0x7f80_0001_0000_0000); // PA 静止 NaN
+    step(&mut env, enc(Insn::FcmpF, &[4, 4, 0, 13]));
+    assert_eq!(fpr(&mut env, 0) & sem::FPSR_C, 0);
+    assert_eq!(fpsr_flags(&mut env), 0x10);
+    // `,?`=2（unordered のみ・invalid 要求なし）なら C=1、
+    // V は立たない。
+    set_fpr(&mut env, 0, 0);
+    step(&mut env, enc(Insn::FcmpF, &[4, 4, 0, 2]));
+    assert_ne!(fpr(&mut env, 0) & sem::FPSR_C, 0);
+    assert_eq!(fpsr_flags(&mut env), 0);
+    // `,!?`=28（ordered、invalid 要求なし）は unordered で
+    // C=0・V なし。
+    set_fpr(&mut env, 0, 0);
+    step(&mut env, enc(Insn::FcmpF, &[4, 4, 0, 28]));
+    assert_eq!(fpr(&mut env, 0) & sem::FPSR_C, 0);
+    assert_eq!(fpsr_flags(&mut env), 0);
+    // 的付け比較: y=1 → CA{0}（HP bit6=u64 bit57）に
+    // `>=`=21 の結果。通知 NaN 入力なら V も立つ。
+    set_fpr(&mut env, 0, 0);
+    set_fpr(&mut env, 4, 0x7fc0_0000_0000_0000); // 通知 NaN
+    step(&mut env, enc(Insn::FcmpF, &[4, 5, 1, 21]));
+    assert_eq!(fpsr_flags(&mut env), 0x10, "sNaN は常に invalid");
+    // 普通の値での的付け: 3.0>=1.0 → CA{0}=1。
+    set_fpr(&mut env, 0, 0);
+    set_fpr(&mut env, 4, 0x4040_0000_0000_0000);
+    set_fpr(&mut env, 5, 0x3f80_0000_0000_0000);
+    step(&mut env, enc(Insn::FcmpF, &[4, 5, 1, 21]));
+    assert_ne!(fpr(&mut env, 0) & (1 << 57), 0, "CA{{0}}=1");
+    assert_eq!(fpsr_flags(&mut env), 0);
+}
+
+// FTEST: キューテスト/的付けテストが PSW.N を立てる。
+#[test]
+fn exec_ftest_sets_psw_n() {
+    let mut env = env();
+    set_q(&mut env, 0x1000);
+    // C=1 を作ってから簡易テスト（c=0、y=1）→ PSW.N=1。
+    set_fpr(&mut env, 4, 0x3f80_0000_0000_0000);
+    set_fpr(&mut env, 5, 0x3f80_0000_0000_0000);
+    step(&mut env, enc(Insn::FcmpF, &[4, 5, 0, 4])); // `=` → C=1
+    step(&mut env, enc(Insn::Ftest, &[1, 0]));
+    assert_ne!(
+        env.backend.get(sem::psw_ref()) & sem::PSW_N,
+        0,
+        "Simple Test で PSW.N"
+    );
+    // ACC（c=1）: C=0 && CQ{0..10}==0 のとき真。
+    // 直前の C は 1 なので、まず C=0 の比較を入れて CQ を
+    // 進める: `,false?`=0 は必ず 0 → C=0、CQ{0}=1 が残り
+    // ACC は偽のはず。
+    step(&mut env, enc(Insn::FcmpF, &[4, 5, 0, 0]));
+    step(&mut env, enc(Insn::Ftest, &[1, 1]));
+    assert_eq!(env.backend.get(sem::psw_ref()) & sem::PSW_N, 0);
+    // CQ を空にするため C=0 の比較を 12 回回してから ACC
+    // （キューの古い C=1 が CQ{10} まで流れて排出される）。
+    for _ in 0..12 {
+        step(&mut env, enc(Insn::FcmpF, &[4, 5, 0, 0]));
+    }
+    step(&mut env, enc(Insn::Ftest, &[1, 1]));
+    assert_ne!(env.backend.get(sem::psw_ref()) & sem::PSW_N, 0);
+    // 的付けテスト: CA{0} に 1 を置く的付け比較（y=1）後、
+    // y=0（xor(0+1,1)=0 で CA{0} を指す）の FTEST → N=1。
+    // 直前の ACC テストで立った N はこの fcmp を nullify
+    // するので、先に空ステップで消費しておく。
+    step(&mut env, enc(Insn::FcmpF, &[4, 5, 0, 0])); // nullify 消費
+    set_fpr(&mut env, 0, 0);
+    step(&mut env, enc(Insn::FcmpF, &[4, 5, 1, 4])); // CA{0} ← (1.0==1.0)
+    step(&mut env, enc(Insn::Ftest, &[0, 0]));
+    assert_ne!(
+        env.backend.get(sem::psw_ref()) & sem::PSW_N,
+        0,
+        "CA{{0}}=1 の的付けテスト"
+    );
+    // CA{2} が 0 なら対応する的付けテスト（y=(2+1)^1=2）は
+    // N を立てない。ここでも立った N を空ステップで消費する。
+    step(&mut env, enc(Insn::FcmpF, &[4, 5, 0, 0])); // nullify 消費
+    set_fpr(&mut env, 0, 0);
+    step(&mut env, enc(Insn::FcmpF, &[4, 5, 1, 4])); // CA{0}=1 のみ
+    step(&mut env, enc(Insn::Ftest, &[2, 0]));
+    assert_eq!(env.backend.get(sem::psw_ref()) & sem::PSW_N, 0);
+}
+
+// 多重演算（fmpyadd/fmpysub: 分解型）と融合 fmpyfadd。
+#[test]
+fn exec_fmpy_multi_and_fused() {
+    let mut env = env();
+    set_q(&mut env, 0x1000);
+    set_rm(&mut env, 0);
+    // fmpyadd,f: 5 ビット指定子は上位 16 レジスタの半分選択
+    // （Table 8-17: spec 0→16L, 16→16R, 1→17L …）。
+    // rm1=0(fr16L=2.0f)*rm2=1(fr17L=3.0f) → tm=2(fr18L)=6.0f。
+    // ta=3(fr19L=10.0f)+ra=4(fr20L=4.0f) → ta=14.0f。
+    set_fpr(&mut env, 16, 0x4000_0000_1234_5678);
+    set_fpr(&mut env, 17, 0x4040_0000_0000_0000);
+    set_fpr(&mut env, 18, 0xdead_beef_dead_beef);
+    set_fpr(&mut env, 19, 0x4120_0000_0000_0000);
+    set_fpr(&mut env, 20, 0x4080_0000_0000_0000);
+    step(&mut env, enc(Insn::FmpyaddF, &[0, 1, 3, 4, 2]));
+    assert_eq!(fpr(&mut env, 18) >> 32, 0x40c0_0000, "tm=6.0");
+    assert_eq!(fpr(&mut env, 19) >> 32, 0x4160_0000, "ta=14.0");
+    assert_eq!(fpsr_flags(&mut env), 0);
+    // spec 16 は右半分（fr16R）を選ぶ: rm1=16 → fr16R。
+    set_fpr(&mut env, 16, 0x0000_0000_4000_0000); // fr16R = 2.0f
+    step(&mut env, enc(Insn::FmpyaddF, &[16, 1, 3, 4, 2]));
+    assert_eq!(fpr(&mut env, 18) >> 32, 0x40c0_0000);
+    // fmpysub,d: 5 ビット指定子は全レジスタ。
+    // rm1=5(4.0d)*rm2=6(2.0d) → tm=7 = 8.0d。
+    // ta=8(20.0d)-ra=9(5.0d) → ta = 15.0d。
+    set_fpr(&mut env, 5, 0x4010_0000_0000_0000);
+    set_fpr(&mut env, 6, 0x4000_0000_0000_0000);
+    set_fpr(&mut env, 7, 0);
+    set_fpr(&mut env, 8, 0x4034_0000_0000_0000);
+    set_fpr(&mut env, 9, 0x4014_0000_0000_0000);
+    step(&mut env, enc(Insn::FmpysubD, &[5, 6, 8, 9, 7]));
+    assert_eq!(fpr(&mut env, 7), 0x4020_0000_0000_0000, "tm=8.0");
+    assert_eq!(fpr(&mut env, 8), 0x402e_0000_0000_0000, "ta=15.0");
+    // fmpyadd,d も独立 2 演算: 積と和が別々に丸められる。
+    // ta は直前の fmpysub で 15.0d に更新済みで、ra=20.0d を
+    // 足して 35.0d。
+    set_fpr(&mut env, 9, 0x4034_0000_0000_0000); // ra=20.0d
+    step(&mut env, enc(Insn::FmpyaddD, &[5, 6, 8, 9, 7]));
+    assert_eq!(fpr(&mut env, 7), 0x4020_0000_0000_0000);
+    assert_eq!(fpr(&mut env, 8), 0x4041_8000_0000_0000, "ta=35.0");
+    // fmpyfadd,f: 全オペランド 6 ビット半レジスタ指定。
+    // r64 の 0-31 が各レジスタの左半分、32-63 が右半分。
+    // rm1=4(fr4L=2.0f)*rm2=36(fr4R=3.0f)+ra3=10(fr10L=4.0f)
+    // → t=12(fr12L) = 10.0f。
+    set_fpr(&mut env, 4, 0x4000_0000_4040_0000);
+    set_fpr(&mut env, 10, 0x4080_0000_0000_0000);
+    set_fpr(&mut env, 12, 0);
+    step(&mut env, enc(Insn::FmpyfaddF, &[4, 36, 10, 0, 12]));
+    assert_eq!(fpr(&mut env, 12) >> 32, 0x4120_0000);
+    // fmpyfadd,d は融合: 中間積は無限精度。
+    // (2^53+1)*1.0 - 2^53 は、積を先に丸めると 0 だが融合では
+    // 正確に 1.0。Ref: SPEC-PARISC-20 §9-16。
+    set_fpr(&mut env, 5, 0x4330_0000_0000_0001); // 2^53+1
+    set_fpr(&mut env, 6, 0x3ff0_0000_0000_0000); // 1.0
+    set_fpr(&mut env, 7, 0xc330_0000_0000_0000); // -2^53
+    step(&mut env, enc(Insn::FmpyfaddD, &[5, 6, 7, 0, 8]));
+    assert_eq!(fpr(&mut env, 8), 0x3ff0_0000_0000_0000, "1.0");
+    assert_eq!(fpsr_flags(&mut env), 0);
+    // fmpynfadd,d（neg=1）は積の符号を反転:
+    // -(4.0*0.5)+1.0 = -1.0。
+    set_fpr(&mut env, 5, 0x4010_0000_0000_0000); // 4.0
+    set_fpr(&mut env, 6, 0x3fe0_0000_0000_0000); // 0.5
+    set_fpr(&mut env, 7, 0x3ff0_0000_0000_0000); // 1.0
+    step(&mut env, enc(Insn::FmpyfaddD, &[5, 6, 7, 1, 8]));
+    assert_eq!(fpr(&mut env, 8), 0xbff0_0000_0000_0000, "-1.0");
+    // invalid 列挙: 0×∞ → 既定 NaN + V（フラグ経路の近似）。
+    set_fpr(&mut env, 5, 0x0000_0000_0000_0000); // +0.0
+    set_fpr(&mut env, 6, 0x7ff0_0000_0000_0000); // +inf
+    set_fpr(&mut env, 7, 0x3ff0_0000_0000_0000);
+    step(&mut env, enc(Insn::FmpyfaddD, &[5, 6, 7, 0, 8]));
+    assert_eq!(fpr(&mut env, 8), 0x7ff4_0000_0000_0000);
+    assert_eq!(fpsr_flags(&mut env), 0x10);
+}
+
+// XMPYU: 半レジスタの 32 ビットを符号なし乗算し全レジスタへ。
+#[test]
+fn exec_xmpyu() {
+    let mut env = env();
+    set_q(&mut env, 0x1000);
+    // fr4L=0xffff_ffff, fr5L=0xffff_ffff → 0xffff_fffe_0000_0001。
+    set_fpr(&mut env, 4, 0xffff_ffff_1111_1111);
+    set_fpr(&mut env, 5, 0xffff_ffff_2222_2222);
+    step(&mut env, enc(Insn::Xmpyu, &[4, 5, 6]));
+    assert_eq!(fpr(&mut env, 6), 0xffff_fffe_0000_0001);
+    // 右半分も選べる: r64=36+... fr4R（r64=36）=0x1111_1111。
+    step(&mut env, enc(Insn::Xmpyu, &[36, 5, 7]));
+    assert_eq!(fpr(&mut env, 7), 0x1111_1110_eeee_eeef);
+    // 例外フラグは立たない（固定小数点）。
+    assert_eq!(fpsr_flags(&mut env), 0);
+}

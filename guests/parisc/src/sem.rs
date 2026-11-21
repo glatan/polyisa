@@ -38,9 +38,12 @@
 //! 条件コードは 32 ビット（d=0）と 64 ビット（d=1）の両方を
 //! 評価する。段階17-9a で FPSR（f[0] の上位 32 ビット）と
 //! FP class0/3 演算（fcpy/fabs/fsqrt/frnd/fneg/fnegabs、
-//! fadd/fsub/fmpy/fdiv、0C/0E 両形式）を実装した。例外は
-//! フラグ集約のみ（トラップ配送経路なし。GAP-0057）。
-//! `hadd` 等の MAX、fcnv/fcmp/fmpyadd 系は未実装
+//! fadd/fsub/fmpy/fdiv、0C/0E 両形式）を実装し、段階17-9b
+//! で class1 変換（fcnv 全形式・T 完語・PA 2.0 の符号なし
+//! 形式）、fcmp/ftest（C/CQ・CA 更新）、多重演算
+//! （fmpyadd/fmpysub）と融合演算 fmpyfadd/fmpynfadd、
+//! xmpyu を実装した。例外はフラグ集約のみ（トラップ配送
+//! 経路なし。GAP-0057）。`hadd` 等の MAX 系は未実装
 //! （`Ok(false)`）。
 //!
 //! 出典は SPEC-PARISC-11・SPEC-PARISC-20 の一次資料のみ。
@@ -196,6 +199,10 @@ fn fpr_set_w<B: Backend>(b: &mut B, r64: u64, v: B::V<W64>) {
 ///   T               : bit25     → 38
 ///   D               : bit26     → 37
 ///   enables VZ OUI  : bits27..31→ 36..32
+/// PA 2.0 の的付け比較では同じ領域を CA{0..6}（HP bits6..12
+/// → u64 57..51）として読む。キューとの共有は spec 上
+/// undefined の相互上書きで、実機のレイアウトどおりの
+/// 決定的エイリアス。
 /// Ref: SPEC-PARISC-11 §6 Figure 6-6, SPEC-PARISC-20 §8 Figure 8-6.
 pub const FPSR_FLAG_V: u64 = 1 << 63;
 /// 0 除算フラグ。
@@ -208,10 +215,13 @@ pub const FPSR_FLAG_U: u64 = 1 << 60;
 pub const FPSR_FLAG_I: u64 = 1 << 59;
 /// 例外フラグ 5 個のマスク。
 pub const FPSR_FLAGS: u64 = 0xf800_0000_0000_0000;
-/// 比較ビット（FCMP の結果。PR9b で更新経路を入れる）。
+/// 比較ビット（キュー FCMP の結果）。
 pub const FPSR_C: u64 = 1 << 58;
 /// 比較キュー（CQ{0} が bit53、CQ{10} が bit43）。
 pub const FPSR_CQ: u64 = 0x003f_f800_0000_0000;
+/// 比較配列（PA 2.0 的付け比較。CA{0} が bit57、CA{6} が
+/// bit51。領域は reserved+CQ{0..2} と重なる）。
+pub const FPSR_CA: u64 = 0x0fe0_0000_0000_0000;
 /// 丸めモード（0=最近接偶数、1=0 方向、2=+∞、3=-∞）。
 pub const FPSR_RM: u64 = 0x0000_0600_0000_0000;
 /// 遅延トラップ武装ビット。ロードは T=1 を立てられるが、
@@ -297,7 +307,7 @@ fn fpsr_flags_of(f: u8) -> u64 {
 
 /// FP 演算対象の形式定数。単精度値は u64 の下位 32 ビットに
 /// 正規化して扱う。
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 struct FpFmt {
     ebits: u32,
     mbits: u32,
@@ -723,24 +733,18 @@ fn fp0<B: Backend>(b: &mut B, subop: u8, r64: u64, t64: u64, sgl: bool) -> Resul
     }
 }
 
-/// class 3 の算術（fadd/fsub/fmpy/fdiv）。`subop` は
-/// 0=fadd 1=fsub 2=fmpy 3=fdiv。`ra/rb/rt` はレジスタ番号
-/// （sgl では半レジスタ r64、dbl では 5 ビット reg）。
-// Ref: SPEC-PARISC-11 §6-53..§6-56, SPEC-PARISC-20 §9.
-fn fp3<B: Backend>(
-    b: &mut B,
-    subop: u8,
-    ra: u64,
-    rb: u64,
-    rt: u64,
-    sgl: bool,
-) -> Result<(), B::Exit> {
-    let f = if sgl { FMT_SGL } else { FMT_DBL };
-    let (a, c) = if sgl {
-        (fp_src_w(b, ra), fp_src_w(b, rb))
-    } else {
-        (fp_src_d(b, ra), fp_src_d(b, rb))
-    };
+/// fp3/fmpyadd 系で共用する事前計算。RM ループの外で作る
+/// NaN 選択・フラグ・invalid 判定。
+struct Fp3Pre<B: Backend> {
+    any_nan_b: B::B,
+    nan_sel: B::V<W64>,
+    nan_flags: B::V<W64>,
+    inv0: B::V<W64>,
+}
+
+/// class 3 二項演算（fadd/fsub/fmpy/fdiv）の事前計算。
+/// `subop` は 0=fadd 1=fsub 2=fmpy 3=fdiv。
+fn fp3_pre<B: Backend>(b: &mut B, f: FpFmt, subop: u8, a: B::V<W64>, c: B::V<W64>) -> Fp3Pre<B> {
     let an = fp_nan(b, f, a);
     let cn = fp_nan(b, f, c);
     let zero = k(b, 0);
@@ -770,6 +774,478 @@ fn fp3<B: Backend>(
     // の近似。NaN 入力では isinf/iszero が共に 0 なので
     // この値は必ず 0 になる）。
     let inv0 = fp3_invalid(b, f, subop, a, c);
+    Fp3Pre {
+        any_nan_b,
+        nan_sel,
+        nan_flags,
+        inv0,
+    }
+}
+
+/// class 3 二項演算の 1 回の評価（RM ループ内で m 固定）。
+/// 戻り値は (結果, FPSR フラグビット)。
+fn fp3_eval<B: Backend>(
+    b: &mut B,
+    f: FpFmt,
+    subop: u8,
+    m: u8,
+    a: B::V<W64>,
+    c: B::V<W64>,
+    pre: &Fp3Pre<B>,
+) -> (B::V<W64>, B::V<W64>) {
+    let zero = k(b, 0);
+    let sf = pa_to_sf_rm(m);
+    let res0: B::V<W64> = if f == FMT_SGL {
+        let af: B::V<F32> = b.trunc(a);
+        let cf: B::V<F32> = b.trunc(c);
+        let r: B::V<F32> = match subop {
+            0 => b.fadd_r::<F32>(af, cf, sf),
+            1 => b.fsub_r::<F32>(af, cf, sf),
+            2 => b.fmul_r::<F32>(af, cf, sf),
+            _ => b.fdiv_r::<F32>(af, cf, sf),
+        };
+        b.zext::<F32, W64>(r)
+    } else {
+        let af: B::V<F64> = b.trunc(a);
+        let cf: B::V<F64> = b.trunc(c);
+        let r: B::V<F64> = match subop {
+            0 => b.fadd_r::<F64>(af, cf, sf),
+            1 => b.fsub_r::<F64>(af, cf, sf),
+            2 => b.fmul_r::<F64>(af, cf, sf),
+            _ => b.fdiv_r::<F64>(af, cf, sf),
+        };
+        b.trunc::<F64, W64>(r)
+    };
+    let fl = b.fp_flags();
+    // invalid は既定 NaN に差し替え V を立てる。
+    // backend フラグとビット判定の OR で検出
+    // （IR でもビット判定側が効く。GAP-0057）。
+    let inv = or_n(b, pre.inv0, (fl & polyisa_softfloat::FP_NV != 0) as u64);
+    let ib = b.cmp(Cmp::Ne, inv, zero);
+    let dn = k(b, f.default_nan());
+    let res0 = b.select(ib, dn, res0);
+    let res = b.select(pre.any_nan_b, pre.nan_sel, res0);
+    let bf = k(b, fpsr_flags_of(fl));
+    let vf = shl_n(b, inv, 63);
+    let be_flags = b.or(bf, vf);
+    let flags = b.select(pre.any_nan_b, pre.nan_flags, be_flags);
+    (res, flags)
+}
+
+/// class 3 の算術（fadd/fsub/fmpy/fdiv）。`subop` は
+/// 0=fadd 1=fsub 2=fmpy 3=fdiv。`ra/rb/rt` はレジスタ番号
+/// （sgl では半レジスタ r64、dbl では 5 ビット reg）。
+// Ref: SPEC-PARISC-11 §6-53..§6-56, SPEC-PARISC-20 §9.
+fn fp3<B: Backend>(
+    b: &mut B,
+    subop: u8,
+    ra: u64,
+    rb: u64,
+    rt: u64,
+    sgl: bool,
+) -> Result<(), B::Exit> {
+    let f = if sgl { FMT_SGL } else { FMT_DBL };
+    let (a, c) = if sgl {
+        (fp_src_w(b, ra), fp_src_w(b, rb))
+    } else {
+        (fp_src_d(b, ra), fp_src_d(b, rb))
+    };
+    let pre = fp3_pre(b, f, subop, a, c);
+    let rm = fpsr_rm(b);
+    for m in 0u8..4 {
+        let mv = k(b, u64::from(m));
+        let eq = b.cmp(Cmp::Eq, rm, mv);
+        b.if_then(eq, |b| {
+            let (res, flags) = fp3_eval(b, f, subop, m, a, c, &pre);
+            if sgl {
+                fp_dst_w(b, rt, res);
+            } else {
+                fp_dst_d(b, rt, res);
+            }
+            fpsr_or(b, flags);
+            Ok(())
+        })?;
+    }
+    Ok(())
+}
+
+/// PA の 5 ビット単精度レジスタ指定子（多重演算命令と
+/// fmpyfadd の ra3 で使う「上位 16 レジスタ」選択）を
+/// 6 ビット半レジスタ番号へ写像する。
+/// spec s → `16 + (s & 15) + ((s & 16) << 1)`（s=16 が
+/// 16R、s=0 は spec 上 not allowed だが 16L に決定的評価）。
+// Ref: SPEC-PARISC-11 §6-19 Table 6-17,
+//      SPEC-PARISC-20 §8-21 Table 8-17.
+fn fp_top_reg(spec: u64) -> u64 {
+    16 + (spec & 15) + ((spec & 16) << 1)
+}
+
+/// class 1 の変換命令（FCNVFF/FCNVXF/FCNVFX/FCNVFXT と
+/// PA 2.0 の符号なし版・0E の半レジスタ形）。`sf` は変換元の
+/// 浮動小数点形式（固定小数点なら None）、`df` は変換先の
+/// 浮動小数点形式（同上）。`q` は固定小数点側が 64 ビット
+/// （q/dw/uq）、`uns` は符号なし、`tr` は T 完語（0 方向
+/// 丸め強制）。`r`/`t` はレジスタ指定子で、32 ビット側は
+/// 半レジスタ番号 r64（0C 形の 5 ビット spec はそのまま
+/// 左半分を指す）、64 ビット側は全レジスタ番号。
+///
+/// NaN→整数変換は spec 上 invalid（pa11 では unimplemented
+/// 例外だが配送経路がないため pa20 の invalid 意味に寄せる
+/// — GAP-0057）。結果は「最大整数」を配達（符号つきは正の
+/// 最大、符号なしは全 1）。浮動小数点→浮動小数点の NaN は
+/// PA 規則で幅変換して静止化する。
+// Ref: SPEC-PARISC-11 §6-45..§6-48 FCNV*, §6-23（NaN/例外）、
+// SPEC-PARISC-20 §8-16 Table 8-11・§9 FCNV・§8-23 "NaN
+// Operations"・§10-9（整数変換の deliver 規則）。
+#[allow(clippy::too_many_arguments)]
+fn fp_cnv<B: Backend>(
+    b: &mut B,
+    sf: Option<FpFmt>,
+    df: Option<FpFmt>,
+    q: bool,
+    uns: bool,
+    tr: bool,
+    r: u64,
+    t: u64,
+) -> Result<(), B::Exit> {
+    let src64 = sf.map_or(q, |f| f == FMT_DBL);
+    let dst64 = df.map_or(q, |f| f == FMT_DBL);
+    let a = if src64 {
+        fp_src_d(b, r)
+    } else {
+        fp_src_w(b, r)
+    };
+    let zero = k(b, 0);
+    // 変換元が浮動小数点なら NaN/±∞ をビット判定で持つ
+    // （fp_flags()=0 の IR 経路でも invalid 処理が効く近似）。
+    let (nan_v, snan_v, inf_v) = if let Some(f) = sf {
+        let n = fp_nan(b, f, a);
+        let iv = fp_isinf(b, f, a);
+        (n.nan, n.snan, iv)
+    } else {
+        (zero, zero, zero)
+    };
+    let nan_b = b.cmp(Cmp::Ne, nan_v, zero);
+    let rm = fpsr_rm(b);
+    for m in 0u8..4 {
+        let mv = k(b, u64::from(m));
+        let eq = b.cmp(Cmp::Eq, rm, mv);
+        b.if_then(eq, |b| {
+            let srm = if tr {
+                polyisa_softfloat::Rm::Rtz as u8
+            } else {
+                pa_to_sf_rm(m)
+            };
+            let (res, flags): (B::V<W64>, B::V<W64>) = match (sf, df) {
+                (Some(sf), Some(df)) => {
+                    // ---- 浮動小数点→浮動小数点 ----
+                    let r0: B::V<W64> = if sf.mbits < df.mbits {
+                        let af: B::V<F32> = b.trunc(a);
+                        let rr = b.fcvt_ff::<F32, F64>(af, srm);
+                        b.trunc::<F64, W64>(rr)
+                    } else {
+                        let ad: B::V<F64> = b.trunc(a);
+                        let rr = b.fcvt_ff::<F64, F32>(ad, srm);
+                        b.zext::<F32, W64>(rr)
+                    };
+                    let fl = b.fp_flags();
+                    // NaN は幅変換した仮数を PA 規則で静止化し
+                    // 符号を保持する（下位が全 0 になったときは
+                    // b2 を立てて infinity 化を防ぐ）。
+                    // Ref: SPEC-PARISC-20 §8-23（変換の NaN）。
+                    let sfrac = and_n(b, a, sf.frac_mask());
+                    let dfrac0 = if sf.mbits < df.mbits {
+                        shl_n(b, sfrac, u64::from(df.mbits - sf.mbits))
+                    } else {
+                        shr_n(b, sfrac, u64::from(sf.mbits - df.mbits))
+                    };
+                    let b1 = 1u64 << (df.mbits - 1);
+                    let q1 = and_n(b, dfrac0, !b1);
+                    let low = and_n(b, dfrac0, b1 - 1);
+                    let lz = b.cmp(Cmp::Eq, low, zero);
+                    let b2 = k(b, 1u64 << (df.mbits - 2));
+                    let b2v = b.select(lz, b2, zero);
+                    let dfrac = b.or(q1, b2v);
+                    let sgn = and_n(b, a, sf.sign_bit());
+                    let dsgn = if sf.mbits < df.mbits {
+                        shl_n(b, sgn, 32)
+                    } else {
+                        shr_n(b, sgn, 32)
+                    };
+                    let em = k(b, df.exp_mask());
+                    let se = b.or(dsgn, em);
+                    let nanres = b.or(se, dfrac);
+                    let res = b.select(nan_b, nanres, r0);
+                    // NaN 入力のフラグは sNaN→V、qNaN→なしに
+                    // 置き換える（backend が PA qNaN=IEEE sNaN
+                    // で立てる疑似 NV を抑える）。
+                    let nf = shl_n(b, snan_v, 63);
+                    let bf = k(b, fpsr_flags_of(fl));
+                    let flags = b.select(nan_b, nf, bf);
+                    (res, flags)
+                }
+                (None, Some(df)) => {
+                    // ---- 固定小数点→浮動小数点（例外は
+                    // inexact のみ。丸めは RM）----
+                    let r0: B::V<W64> = if df == FMT_DBL {
+                        let rr: B::V<F64> = if q {
+                            if uns {
+                                b.fcvt_from_u64::<F64>(a, srm)
+                            } else {
+                                b.fcvt_from_s64::<F64>(a, srm)
+                            }
+                        } else {
+                            let x: B::V<W32> = b.trunc(a);
+                            if uns {
+                                b.fcvt_from_u32::<F64>(x, srm)
+                            } else {
+                                b.fcvt_from_s32::<F64>(x, srm)
+                            }
+                        };
+                        b.trunc::<F64, W64>(rr)
+                    } else {
+                        let rr: B::V<F32> = if q {
+                            if uns {
+                                b.fcvt_from_u64::<F32>(a, srm)
+                            } else {
+                                b.fcvt_from_s64::<F32>(a, srm)
+                            }
+                        } else {
+                            let x: B::V<W32> = b.trunc(a);
+                            if uns {
+                                b.fcvt_from_u32::<F32>(x, srm)
+                            } else {
+                                b.fcvt_from_s32::<F32>(x, srm)
+                            }
+                        };
+                        b.zext::<F32, W64>(rr)
+                    };
+                    let fl = b.fp_flags();
+                    (r0, k(b, fpsr_flags_of(fl)))
+                }
+                (Some(sf), None) => {
+                    // ---- 浮動小数点→固定小数点。整数の範囲
+                    // 外・±∞・NaN は invalid で「もっとも近い
+                    // 整数」（飽和値）を配達する。T 完語は
+                    // srm=RTZ 固定。
+                    let (r0, sat): (B::V<W64>, u64) = if q {
+                        let rr: B::V<W64> = if sf == FMT_SGL {
+                            let af: B::V<F32> = b.trunc(a);
+                            if uns {
+                                b.fcvt_u64::<F32>(af, srm)
+                            } else {
+                                b.fcvt_s64::<F32>(af, srm)
+                            }
+                        } else {
+                            let ad: B::V<F64> = b.trunc(a);
+                            if uns {
+                                b.fcvt_u64::<F64>(ad, srm)
+                            } else {
+                                b.fcvt_s64::<F64>(ad, srm)
+                            }
+                        };
+                        (rr, if uns { u64::MAX } else { i64::MAX as u64 })
+                    } else {
+                        let rr: B::V<W32> = if sf == FMT_SGL {
+                            let af: B::V<F32> = b.trunc(a);
+                            if uns {
+                                b.fcvt_u32::<F32>(af, srm)
+                            } else {
+                                b.fcvt_s32::<F32>(af, srm)
+                            }
+                        } else {
+                            let ad: B::V<F64> = b.trunc(a);
+                            if uns {
+                                b.fcvt_u32::<F64>(ad, srm)
+                            } else {
+                                b.fcvt_s32::<F64>(ad, srm)
+                            }
+                        };
+                        (
+                            b.zext::<W32, W64>(rr),
+                            if uns { 0xffff_ffff } else { 0x7fff_ffff },
+                        )
+                    };
+                    let fl = b.fp_flags();
+                    // NaN→int は invalid で最大整数を配達。
+                    // ±∞ も invalid で backend の飽和値。
+                    // 検出はビット判定と backend フラグの OR。
+                    let satv = k(b, sat);
+                    let res = b.select(nan_b, satv, r0);
+                    let inv = b.or(nan_v, inf_v);
+                    let bf = k(b, fpsr_flags_of(fl));
+                    let vf = shl_n(b, inv, 63);
+                    (res, b.or(bf, vf))
+                }
+                _ => (zero, zero),
+            };
+            if dst64 {
+                fp_dst_d(b, t, res);
+            } else {
+                fp_dst_w(b, t, res);
+            }
+            fpsr_or(b, flags);
+            Ok(())
+        })?;
+    }
+    Ok(())
+}
+
+/// PA 1.1/2.0 の多重演算命令 FMPYADD/FMPYSUB。積
+/// （rm1*rm2 → tm）と加減算（ta±ra → ta）はそれぞれ独立に
+/// RM で丸めて別々に格納する分解型で、融合演算ではない。
+/// `sub` が true なら fmpysub（ta−ra）、false なら
+/// fmpyadd（ta+ra）。sgl の 5 ビット指定子は上位 16
+/// レジスタの半分選択（Table 6-17/8-17）で、dbl は全
+/// レジスタ。同一レジスタを共有する符号化や ra=16L/reg0
+/// は spec 上 undefined なので決定的に素通り評価する。
+// Ref: SPEC-PARISC-11 §6-19（形式/未定義条件）・§6-57
+// FMPYADD・§6-58 FMPYSUB, SPEC-PARISC-20 §8-19（複数
+// 演算命令の説明）・Figure 8-9・Table 8-15..8-17.
+#[allow(clippy::too_many_arguments)]
+fn fp_mpyadd<B: Backend>(
+    b: &mut B,
+    sub: bool,
+    rm1: u64,
+    rm2: u64,
+    ta: u64,
+    ra: u64,
+    tm: u64,
+    sgl: bool,
+) -> Result<(), B::Exit> {
+    let f = if sgl { FMT_SGL } else { FMT_DBL };
+    let (m1, m2, ta64, ra64, tm64) = if sgl {
+        (
+            fp_top_reg(rm1),
+            fp_top_reg(rm2),
+            fp_top_reg(ta),
+            fp_top_reg(ra),
+            fp_top_reg(tm),
+        )
+    } else {
+        (rm1, rm2, ta, ra, tm)
+    };
+    let (v1, v2, ta_v, ra_v) = if sgl {
+        (
+            fp_src_w(b, m1),
+            fp_src_w(b, m2),
+            fp_src_w(b, ta64),
+            fp_src_w(b, ra64),
+        )
+    } else {
+        (
+            fp_src_d(b, m1),
+            fp_src_d(b, m2),
+            fp_src_d(b, ta64),
+            fp_src_d(b, ra64),
+        )
+    };
+    let asub = u8::from(sub);
+    let pre_mul = fp3_pre(b, f, 2, v1, v2);
+    let pre_as = fp3_pre(b, f, asub, ta_v, ra_v);
+    let rm = fpsr_rm(b);
+    for m in 0u8..4 {
+        let mv = k(b, u64::from(m));
+        let eq = b.cmp(Cmp::Eq, rm, mv);
+        b.if_then(eq, |b| {
+            // 積と加減算は同じ RM で別々に丸める。
+            let (rp, fp_) = fp3_eval(b, f, 2, m, v1, v2, &pre_mul);
+            let (rs, fs) = fp3_eval(b, f, asub, m, ta_v, ra_v, &pre_as);
+            if sgl {
+                fp_dst_w(b, tm64, rp);
+                fp_dst_w(b, ta64, rs);
+            } else {
+                fp_dst_d(b, tm64, rp);
+                fp_dst_d(b, ta64, rs);
+            }
+            let fl2 = b.or(fp_, fs);
+            fpsr_or(b, fl2);
+            Ok(())
+        })?;
+    }
+    Ok(())
+}
+
+/// PA 2.0 の融合演算 FMPYFADD/FMPYNFADD（neg 完語）。
+/// `rm1*rm2` を中間無限精度で求め、`neg=1` なら符号を反転
+/// して `ra3` と加え、最後に一度だけ RM で丸める（融合）。
+/// sgl では rm1/rm2/ra3/t が全て 6 ビット半レジスタ指定
+/// （r64a/r64b/r64c/r64t）、dbl では全て 5 ビット全
+/// レジスタ。
+// Ref: SPEC-PARISC-20 §8-18（融合演算の説明）・Figure 8-8・
+// Table 8-14・§9-16 FMPYFADD・§9-17 FMPYNFADD.
+fn fp_mpyfadd<B: Backend>(
+    b: &mut B,
+    sgl: bool,
+    rm1: u64,
+    rm2: u64,
+    ra3: u64,
+    neg: u64,
+    t: u64,
+) -> Result<(), B::Exit> {
+    let f = if sgl { FMT_SGL } else { FMT_DBL };
+    let (m1, m2, a3, t64) = (rm1, rm2, ra3, t);
+    let (v1, v2, v3) = if sgl {
+        (fp_src_w(b, m1), fp_src_w(b, m2), fp_src_w(b, a3))
+    } else {
+        (fp_src_d(b, m1), fp_src_d(b, m2), fp_src_d(b, a3))
+    };
+    let zero = k(b, 0);
+    // 積の符号（FMPYNFADD は反転済み）。fmpynfadd の否定は
+    // 積の結果だけに作用するので NaN 選択は元の値を使う。
+    let v1n = if neg != 0 {
+        let sb = k(b, f.sign_bit());
+        b.xor(v1, sb)
+    } else {
+        v1
+    };
+    // NaN 解析（sNaN 優先・先オペランド優先で静止化/コピー。
+    // 積の否定は NaN のコピーには作用しない）。
+    let n1 = fp_nan(b, f, v1);
+    let n2 = fp_nan(b, f, v2);
+    let n3 = fp_nan(b, f, v3);
+    let n12_nan = b.or(n1.nan, n2.nan);
+    let any_nan = b.or(n12_nan, n3.nan);
+    let n12_snan = b.or(n1.snan, n2.snan);
+    let any_snan = b.or(n12_snan, n3.snan);
+    let any_nan_b = b.cmp(Cmp::Ne, any_nan, zero);
+    let any_snan_b = b.cmp(Cmp::Ne, any_snan, zero);
+    let b1_nan_b = b.cmp(Cmp::Ne, n1.nan, zero);
+    let b1_snan_b = b.cmp(Cmp::Ne, n1.snan, zero);
+    let b2_snan_b = b.cmp(Cmp::Ne, n2.snan, zero);
+    let b2_nan_b = b.cmp(Cmp::Ne, n2.nan, zero);
+    // 選択: sNaN があれば先頭側（rm1→rm2→ra3 の順）の sNaN
+    // を静止化。qNaN のみなら同順で先の qNaN をそのまま写す。
+    // Ref: SPEC-PARISC-11 §6-23 "NaN Operations".
+    let s_sel = b.select(b2_snan_b, n2.quieted, n3.quieted);
+    let s_sel = b.select(b1_snan_b, n1.quieted, s_sel);
+    let q_sel = b.select(b2_nan_b, v2, v3);
+    let q_sel = b.select(b1_nan_b, v1, q_sel);
+    let nan_sel = b.select(any_snan_b, s_sel, q_sel);
+    let vflag = k(b, FPSR_FLAG_V);
+    let nan_flags = b.select(any_snan_b, vflag, zero);
+    // invalid の列挙（非 NaN 入力）: 0×∞ と「積が ±∞ で
+    // 加算相手が逆符号の ±∞」。積の符号は neg を含める。
+    let (i1, i2, i3) = (fp_isinf(b, f, v1n), fp_isinf(b, f, v2), fp_isinf(b, f, v3));
+    let (z1, z2) = (fp_iszero(b, f, v1n), fp_iszero(b, f, v2));
+    let zi = {
+        let p = b.and(z1, i2);
+        let q = b.and(i1, z2);
+        b.or(p, q)
+    };
+    let inf_inf = {
+        let pinf = b.or(i1, i2);
+        let psign = {
+            let s1 = fp_sign(b, f, v1n);
+            let s2 = fp_sign(b, f, v2);
+            b.xor(s1, s2)
+        };
+        let s3 = fp_sign(b, f, v3);
+        let opp = b.xor(psign, s3);
+        let pc = b.and(pinf, i3);
+        b.and(pc, opp)
+    };
+    let inv0 = b.or(zi, inf_inf);
     let rm = fpsr_rm(b);
     for m in 0u8..4 {
         let mv = k(b, u64::from(m));
@@ -777,48 +1253,207 @@ fn fp3<B: Backend>(
         b.if_then(eq, |b| {
             let sf = pa_to_sf_rm(m);
             let res0: B::V<W64> = if sgl {
-                let af: B::V<F32> = b.trunc(a);
-                let cf: B::V<F32> = b.trunc(c);
-                let r: B::V<F32> = match subop {
-                    0 => b.fadd_r::<F32>(af, cf, sf),
-                    1 => b.fsub_r::<F32>(af, cf, sf),
-                    2 => b.fmul_r::<F32>(af, cf, sf),
-                    _ => b.fdiv_r::<F32>(af, cf, sf),
-                };
+                let af: B::V<F32> = b.trunc(v1n);
+                let bf: B::V<F32> = b.trunc(v2);
+                let cf: B::V<F32> = b.trunc(v3);
+                let r = b.fmadd_r::<F32>(af, bf, cf, sf);
                 b.zext::<F32, W64>(r)
             } else {
-                let af: B::V<F64> = b.trunc(a);
-                let cf: B::V<F64> = b.trunc(c);
-                let r: B::V<F64> = match subop {
-                    0 => b.fadd_r::<F64>(af, cf, sf),
-                    1 => b.fsub_r::<F64>(af, cf, sf),
-                    2 => b.fmul_r::<F64>(af, cf, sf),
-                    _ => b.fdiv_r::<F64>(af, cf, sf),
-                };
+                let af: B::V<F64> = b.trunc(v1n);
+                let bf: B::V<F64> = b.trunc(v2);
+                let cf: B::V<F64> = b.trunc(v3);
+                let r = b.fmadd_r::<F64>(af, bf, cf, sf);
                 b.trunc::<F64, W64>(r)
             };
             let fl = b.fp_flags();
-            // invalid は既定 NaN に差し替え V を立てる。
-            // backend フラグとビット判定の OR で検出
-            // （IR でもビット判定側が効く。GAP-0057）。
             let inv = or_n(b, inv0, (fl & polyisa_softfloat::FP_NV != 0) as u64);
             let ib = b.cmp(Cmp::Ne, inv, zero);
             let dn = k(b, f.default_nan());
             let res0 = b.select(ib, dn, res0);
             let res = b.select(any_nan_b, nan_sel, res0);
             if sgl {
-                fp_dst_w(b, rt, res);
+                fp_dst_w(b, t64, res);
             } else {
-                fp_dst_d(b, rt, res);
+                fp_dst_d(b, t64, res);
             }
-            let bf = k(b, fpsr_flags_of(fl));
+            let bf2 = k(b, fpsr_flags_of(fl));
             let vf = shl_n(b, inv, 63);
-            let be_flags = b.or(bf, vf);
-            let flags = b.select(any_nan_b, nan_flags, be_flags);
+            let be_flags = b.or(bf2, vf);
+            // NaN 入力でも invalid 条件が立てば V を残す
+            // （qNaN + 0×∞ 等。nan_flags に inv0 を OR）。
+            let iv0f = shl_n(b, inv0, 63);
+            let nanf = b.or(nan_flags, iv0f);
+            let flags = b.select(any_nan_b, nanf, be_flags);
             fpsr_or(b, flags);
             Ok(())
         })?;
     }
+    Ok(())
+}
+
+/// FCMP（0C の ,f/,d と 0E の ,fw/,dw）。`c` は条件完語
+/// （c{0}..c{4} = 値の bit4..bit0 で >,<,=,unordered,invalid
+/// 要求）、`y` は 0=キュー比較 / 1..7=CA{y-1} への的付け
+/// 比較。sgl では r1/r2 が半レジスタ指定、dbl では全
+/// レジスタ。
+// Ref: SPEC-PARISC-11 §6-60..§6-61 FCMP・Table 6-13,
+// SPEC-PARISC-20 §8-16..§8-17 Table 8-12・§9-4 FCMP.
+fn fp_cmp<B: Backend>(
+    b: &mut B,
+    r1: u64,
+    r2: u64,
+    y: u64,
+    c: u64,
+    sgl: bool,
+) -> Result<(), B::Exit> {
+    let f = if sgl { FMT_SGL } else { FMT_DBL };
+    let (a, d) = if sgl {
+        (fp_src_w(b, r1), fp_src_w(b, r2))
+    } else {
+        (fp_src_d(b, r1), fp_src_d(b, r2))
+    };
+    let an = fp_nan(b, f, a);
+    let dn = fp_nan(b, f, d);
+    let zero = k(b, 0);
+    let one = k(b, 1);
+    let any_nan = b.or(an.nan, dn.nan);
+    let any_snan = b.or(an.snan, dn.snan);
+    // 関係の厳密比較。NaN では unordered で lt/eq/gt は 0。
+    // backend の feq/flt も NaN で false を返すが、ビット判定で
+    // 決定的に 0 マスクし、比較で積まれた疑似フラグは捨てる。
+    let (lt_c, eq_c, gt_c) = if sgl {
+        let af: B::V<F32> = b.trunc(a);
+        let cf: B::V<F32> = b.trunc(d);
+        (
+            b.flt::<F32>(af, cf),
+            b.feq::<F32>(af, cf),
+            b.flt::<F32>(cf, af),
+        )
+    } else {
+        let af: B::V<F64> = b.trunc(a);
+        let cf: B::V<F64> = b.trunc(d);
+        (
+            b.flt::<F64>(af, cf),
+            b.feq::<F64>(af, cf),
+            b.flt::<F64>(cf, af),
+        )
+    };
+    let _ = b.fp_flags();
+    let nn = b.xor(any_nan, one);
+    let ltv = bval(b, lt_c);
+    let eqv = bval(b, eq_c);
+    let gtv = bval(b, gt_c);
+    let lt = b.and(ltv, nn);
+    let eq = b.and(eqv, nn);
+    let gt = b.and(gtv, nn);
+    // 結果 = (c{0}&&gt) | (c{1}&&lt) | (c{2}&&eq) | (c{3}&&unord)。
+    let mut res = if c & 0x02 != 0 { any_nan } else { zero };
+    if c & 0x04 != 0 {
+        res = b.or(res, eq);
+    }
+    if c & 0x08 != 0 {
+        res = b.or(res, lt);
+    }
+    if c & 0x10 != 0 {
+        res = b.or(res, gt);
+    }
+    let st = Fpr(0).state();
+    let f0 = b.get(st);
+    if y == 0 {
+        // キュー比較: CQ を右 1 シフトして CQ{0}←C、C←結果。
+        let c_sh = shr_n(b, f0, 58);
+        let old_c = and_n(b, c_sh, 1);
+        let cq_sh0 = shr_n(b, f0, 43);
+        let cq = and_n(b, cq_sh0, 0x7ff);
+        let cq_sh = shr_n(b, cq, 1);
+        let c_in = shl_n(b, old_c, 10);
+        let cq2 = b.or(cq_sh, c_in);
+        let keep = and_n(b, f0, !(FPSR_C | FPSR_CQ));
+        let c_v = shl_n(b, res, 58);
+        let cq_v = shl_n(b, cq2, 43);
+        let nc = b.or(c_v, cq_v);
+        let nf = b.or(keep, nc);
+        b.set(st, nf);
+    } else {
+        // 的付け比較: CA{y-1} ← 結果。CA は HP bits 6..12
+        // （CA{i} は u64 bit 57-i → CA{y-1} は bit 58-y）。
+        // C/CQ は spec 上 undefined だが決定的に変更しない。
+        // Ref: SPEC-PARISC-20 §8 Figure 8-6（第 2 形式）。
+        let bit = 58 - y;
+        let keep = and_n(b, f0, !(1u64 << bit));
+        let rv = shl_n(b, res, bit);
+        let nv = b.or(keep, rv);
+        b.set(st, nv);
+    }
+    // invalid = sNaN | (NaN && c{4})。untrapped invalid でも
+    // 結果式が unordered&&c{3} と同じ値を与える。
+    let cnv = and_n(b, any_nan, c & 1);
+    let inv = b.or(any_snan, cnv);
+    let iv = shl_n(b, inv, 63);
+    fpsr_or(b, iv);
+    Ok(())
+}
+
+/// FTEST。`y==1` はキューテスト（C/CQ を Table 6-14/8-13
+/// の条件で評価）、`y!=1` は的付けテスト（CA{xor(y,1)-1} を
+/// 見る。c は spec 上 0 必須で、非 0 は決定的に無視する）。
+/// 条件が立てば PSW.N←1（次命令を nullify）。
+// Ref: SPEC-PARISC-11 §6-62 FTEST・Table 6-14,
+// SPEC-PARISC-20 §9-28 FTEST・Table 8-13.
+fn fp_test<B: Backend>(b: &mut B, y: u64, c: u64) -> Result<(), B::Exit> {
+    let zero = k(b, 0);
+    let one = k(b, 1);
+    let f0 = b.get(Fpr(0).state());
+    let c_sh = shr_n(b, f0, 58);
+    let cbit = and_n(b, c_sh, 1);
+    let cq_sh = shr_n(b, f0, 43);
+    let cq = and_n(b, cq_sh, 0x7ff);
+    let not_c = b.xor(cbit, one);
+    let sat = if y == 1 {
+        match c {
+            // 簡易テスト: C == 1。
+            0 => cbit,
+            // ACC 系: C==0 かつ CQ{0..n} が全 0
+            // （u64 側の CQ{i} は cq の bit(10-i)）。
+            1 | 5 | 9 | 13 | 17 => {
+                let mask: u64 = match c {
+                    1 => 0x7ff,
+                    5 => 0x7f0,
+                    9 => 0x7c0,
+                    13 => 0x700,
+                    _ => 0x400,
+                };
+                let m = and_n(b, cq, mask);
+                let z = b.cmp(Cmp::Eq, m, zero);
+                let zv = bval(b, z);
+                b.and(not_c, zv)
+            }
+            // REJ/REJ8: (C==1 && CQ{g}) || 指定ペアが両方 1。
+            2 | 6 => {
+                let (cand, pairs): (u64, &[u64]) = if c == 2 {
+                    (0x20, &[0x410, 0x208, 0x104, 0x82, 0x41][..])
+                } else {
+                    (0x80, &[0x440, 0x220, 0x110][..])
+                };
+                let mut sat = and_n(b, cbit, cand);
+                for &p in pairs {
+                    let m = and_n(b, cq, p);
+                    let pv = k(b, p);
+                    let e = b.cmp(Cmp::Eq, m, pv);
+                    let ev = bval(b, e);
+                    sat = b.or(sat, ev);
+                }
+                sat
+            }
+            _ => zero,
+        }
+    } else {
+        // 的付けテスト: CA{xor(y,1)-1}（u64 bit 58-(y^1)。
+        // CA{i} は u64 bit 57-i）。
+        let ca_sh = shr_n(b, f0, 58 - (y ^ 1));
+        and_n(b, ca_sh, 1)
+    };
+    set_psw_n(b, sat);
     Ok(())
 }
 
@@ -3148,6 +3783,123 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
         Insn::FsubD | Insn::FsubDw => fp3(b, 1, ops[0], ops[1], ops[2], false)?,
         Insn::FmpyD | Insn::FmpyDw => fp3(b, 2, ops[0], ops[1], ops[2], false)?,
         Insn::FdivD | Insn::FdivDw => fp3(b, 3, ops[0], ops[1], ops[2], false)?,
+        // ---- FP class 1 変換（0C と 0E の w/dw 形）----
+        // f↔d。
+        Insn::FcnvDF | Insn::FcnvDFw => fp_cnv(
+            b,
+            Some(FMT_DBL),
+            Some(FMT_SGL),
+            false,
+            false,
+            false,
+            ops[0],
+            ops[1],
+        )?,
+        Insn::FcnvFD | Insn::FcnvFDw => fp_cnv(
+            b,
+            Some(FMT_SGL),
+            Some(FMT_DBL),
+            false,
+            false,
+            false,
+            ops[0],
+            ops[1],
+        )?,
+        // int→float（w/q 符号つき、uw/uq 符号なし）。
+        Insn::FcnvWF | Insn::FcnvWFw => {
+            fp_cnv(b, None, Some(FMT_SGL), false, false, false, ops[0], ops[1])?
+        }
+        Insn::FcnvQF | Insn::FcnvQFw => {
+            fp_cnv(b, None, Some(FMT_SGL), true, false, false, ops[0], ops[1])?
+        }
+        Insn::FcnvWD | Insn::FcnvWDw => {
+            fp_cnv(b, None, Some(FMT_DBL), false, false, false, ops[0], ops[1])?
+        }
+        Insn::FcnvQD | Insn::FcnvQDw => {
+            fp_cnv(b, None, Some(FMT_DBL), true, false, false, ops[0], ops[1])?
+        }
+        Insn::FcnvUwF | Insn::FcnvUwFw => {
+            fp_cnv(b, None, Some(FMT_SGL), false, true, false, ops[0], ops[1])?
+        }
+        Insn::FcnvUqF | Insn::FcnvUqFw => {
+            fp_cnv(b, None, Some(FMT_SGL), true, true, false, ops[0], ops[1])?
+        }
+        Insn::FcnvUwD | Insn::FcnvUwDw => {
+            fp_cnv(b, None, Some(FMT_DBL), false, true, false, ops[0], ops[1])?
+        }
+        Insn::FcnvUqD | Insn::FcnvUqDw => {
+            fp_cnv(b, None, Some(FMT_DBL), true, true, false, ops[0], ops[1])?
+        }
+        // float→int（w/q 符号つき、uw/uq 符号なし、T は RTZ）。
+        Insn::FcnvFW | Insn::FcnvFWw => {
+            fp_cnv(b, Some(FMT_SGL), None, false, false, false, ops[0], ops[1])?
+        }
+        Insn::FcnvDW | Insn::FcnvDWw => {
+            fp_cnv(b, Some(FMT_DBL), None, false, false, false, ops[0], ops[1])?
+        }
+        Insn::FcnvFQ | Insn::FcnvFQw => {
+            fp_cnv(b, Some(FMT_SGL), None, true, false, false, ops[0], ops[1])?
+        }
+        Insn::FcnvDQ | Insn::FcnvDQw => {
+            fp_cnv(b, Some(FMT_DBL), None, true, false, false, ops[0], ops[1])?
+        }
+        Insn::FcnvTFW | Insn::FcnvTFWw => {
+            fp_cnv(b, Some(FMT_SGL), None, false, false, true, ops[0], ops[1])?
+        }
+        Insn::FcnvTDW | Insn::FcnvTDWw => {
+            fp_cnv(b, Some(FMT_DBL), None, false, false, true, ops[0], ops[1])?
+        }
+        Insn::FcnvTFQ | Insn::FcnvTFQw => {
+            fp_cnv(b, Some(FMT_SGL), None, true, false, true, ops[0], ops[1])?
+        }
+        Insn::FcnvTDQ | Insn::FcnvTDQw => {
+            fp_cnv(b, Some(FMT_DBL), None, true, false, true, ops[0], ops[1])?
+        }
+        Insn::FcnvFUw | Insn::FcnvFUww => {
+            fp_cnv(b, Some(FMT_SGL), None, false, true, false, ops[0], ops[1])?
+        }
+        Insn::FcnvDUw | Insn::FcnvDUww => {
+            fp_cnv(b, Some(FMT_DBL), None, false, true, false, ops[0], ops[1])?
+        }
+        Insn::FcnvFUq | Insn::FcnvFUqw => {
+            fp_cnv(b, Some(FMT_SGL), None, true, true, false, ops[0], ops[1])?
+        }
+        Insn::FcnvDUq | Insn::FcnvDUqw => {
+            fp_cnv(b, Some(FMT_DBL), None, true, true, false, ops[0], ops[1])?
+        }
+        Insn::FcnvTFUw | Insn::FcnvTFUww => {
+            fp_cnv(b, Some(FMT_SGL), None, false, true, true, ops[0], ops[1])?
+        }
+        Insn::FcnvTDUw | Insn::FcnvTDUww => {
+            fp_cnv(b, Some(FMT_DBL), None, false, true, true, ops[0], ops[1])?
+        }
+        Insn::FcnvTFUq | Insn::FcnvTFUqw => {
+            fp_cnv(b, Some(FMT_SGL), None, true, true, true, ops[0], ops[1])?
+        }
+        Insn::FcnvTDUq | Insn::FcnvTDUqw => {
+            fp_cnv(b, Some(FMT_DBL), None, true, true, true, ops[0], ops[1])?
+        }
+        // ---- FCMP/FTEST ----
+        Insn::FcmpF | Insn::FcmpFw => fp_cmp(b, ops[0], ops[1], ops[2], ops[3], true)?,
+        Insn::FcmpD | Insn::FcmpDw => fp_cmp(b, ops[0], ops[1], ops[2], ops[3], false)?,
+        Insn::Ftest => fp_test(b, ops[0], ops[1])?,
+        // ---- 多重演算（分解型）と融合演算 ----
+        Insn::FmpyaddF => fp_mpyadd(b, false, ops[0], ops[1], ops[2], ops[3], ops[4], true)?,
+        Insn::FmpysubF => fp_mpyadd(b, true, ops[0], ops[1], ops[2], ops[3], ops[4], true)?,
+        Insn::FmpyaddD => fp_mpyadd(b, false, ops[0], ops[1], ops[2], ops[3], ops[4], false)?,
+        Insn::FmpysubD => fp_mpyadd(b, true, ops[0], ops[1], ops[2], ops[3], ops[4], false)?,
+        Insn::FmpyfaddF => fp_mpyfadd(b, true, ops[0], ops[1], ops[2], ops[3], ops[4])?,
+        Insn::FmpyfaddD => fp_mpyfadd(b, false, ops[0], ops[1], ops[2], ops[3], ops[4])?,
+        // ---- XMPYU（0E のみ）----
+        Insn::Xmpyu => {
+            // 半レジスタ指定の 32 ビットを符号なし整数として
+            // 掛け、全レジスタに 64 ビット積を置く。
+            // Ref: SPEC-PARISC-11 §6-59, SPEC-PARISC-20 §9-30.
+            let a = fp_src_w(b, ops[0]);
+            let c = fp_src_w(b, ops[1]);
+            let p = b.mul(a, c);
+            fp_dst_d(b, ops[2], p);
+        }
         // ---- shift pair（SHRPW/SHRPD = VSHD/SHD）----
         Insn::ShrpSar => {
             // ops = [r2, r1, c, d, t]。d=0 は 32 ビット形
