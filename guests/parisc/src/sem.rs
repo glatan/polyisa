@@ -43,8 +43,10 @@
 //! 形式）、fcmp/ftest（C/CQ・CA 更新）、多重演算
 //! （fmpyadd/fmpysub）と融合演算 fmpyfadd/fmpynfadd、
 //! xmpyu を実装した。例外はフラグ集約のみ（トラップ配送
-//! 経路なし。GAP-0057）。`hadd` 等の MAX 系は未実装
-//! （`Ok(false)`）。
+//! 経路なし。GAP-0057）。段階17-9c で MAX-1/MAX-2 の半語
+//! 並列演算（hadd/havg/hsub・`,ss`/`,us` 飽和、hshladd/
+//! hshradd、hshl/hshr）と再配置（permh/mixh/mixw）を
+//! 実装した。
 //!
 //! 出典は SPEC-PARISC-11・SPEC-PARISC-20 の一次資料のみ。
 //! 条件評価は SPEC-PARISC-11 §5 Table 5-3 〜 5-7 および
@@ -2699,10 +2701,92 @@ fn store_off<B: Backend>(
 }
 
 // ----------------------------------------------------------------
+// MAX-1/MAX-2 半語並列演算・再配置
+// ----------------------------------------------------------------
+
+/// `v` の下位 16 ビットを符号拡張する。半語の符号つき評価は
+/// 64 ビット（i64 領域）の中間表現で行う。
+fn sext16<B: Backend>(b: &mut B, v: B::V<W64>) -> B::V<W64> {
+    sext_bits(b, v, 16)
+}
+
+/// 符号つき半語飽和（sat=1 の `,ss` 完語と hshladd/hshradd）。
+/// `v` は i64 領域の中間結果で、>0x7fff なら 0x7fff、
+/// <-0x8000 なら 0x8000 に強制する。
+// Ref: SPEC-PARISC-20 §6-5 Table 6-3.
+fn sat_s16<B: Backend>(b: &mut B, v: B::V<W64>) -> B::V<W64> {
+    let max = k(b, 0x7fff);
+    let min = k(b, 0xffff_ffff_ffff_8000);
+    let over = b.cmp(Cmp::GtS, v, max);
+    let under = b.cmp(Cmp::LtS, v, min);
+    let w = and_n(b, v, 0xffff);
+    let lo = k(b, 0x8000);
+    let w = b.select::<W64>(under, lo, w);
+    b.select::<W64>(over, max, w)
+}
+
+/// 符号なし半語飽和（sat=0 の `,us` 完語）。`v` は i64 領域の
+/// 中間結果（r1 側は符号なし、r2 側は符号ありとして評価済み）
+/// で、>0xffff なら 0xffff、<0 なら 0 に強制する。
+// Ref: SPEC-PARISC-20 §6-5 Table 6-4.
+fn sat_u16<B: Backend>(b: &mut B, v: B::V<W64>) -> B::V<W64> {
+    let max = k(b, 0xffff);
+    let zero = k(b, 0);
+    let over = b.cmp(Cmp::GtS, v, max);
+    let under = b.cmp(Cmp::LtS, v, zero);
+    let w = b.select::<W64>(under, zero, v);
+    b.select::<W64>(over, max, w)
+}
+
+/// 半語×4 の 1 入力並列演算。`x` のレーン j（j=0 が最上位
+/// ＝HP{0..15}）の符号なし値から `f` で結果レーンを作り、
+/// GR[t] に並べて書く（結果は下位 16 ビットだけを使う）。
+fn hpar1<B: Backend>(b: &mut B, x: B::V<W64>, t: u64, f: impl Fn(&mut B, B::V<W64>) -> B::V<W64>) {
+    let mut acc = k(b, 0);
+    for j in 0..4u64 {
+        let sh = 48 - 16 * j;
+        let a = shr_n(b, x, sh);
+        let a = and_n(b, a, 0xffff);
+        let res = f(b, a);
+        let res = and_n(b, res, 0xffff);
+        let res = shl_n(b, res, sh);
+        acc = b.or(acc, res);
+    }
+    Gr(t as u8).set(b, acc);
+}
+
+/// 半語×4 の 2 入力並列演算。`f` はレーンごとの 2 つの
+/// 符号なし値（0..0xffff）から結果レーンを作る。残りは
+/// hpar1 と同じ。
+fn hpar2<B: Backend>(
+    b: &mut B,
+    x: B::V<W64>,
+    y: B::V<W64>,
+    t: u64,
+    f: impl Fn(&mut B, B::V<W64>, B::V<W64>) -> B::V<W64>,
+) {
+    let mut acc = k(b, 0);
+    for j in 0..4u64 {
+        let sh = 48 - 16 * j;
+        let a = shr_n(b, x, sh);
+        let a = and_n(b, a, 0xffff);
+        let c = shr_n(b, y, sh);
+        let c = and_n(b, c, 0xffff);
+        let res = f(b, a, c);
+        let res = and_n(b, res, 0xffff);
+        let res = shl_n(b, res, sh);
+        acc = b.or(acc, res);
+    }
+    Gr(t as u8).set(b, acc);
+}
+
+// ----------------------------------------------------------------
 // エントリ
 // ----------------------------------------------------------------
 
-/// 命令 1 個の実行。`Ok(true)` = 実行した、`Ok(false)` = 未実装。
+/// 命令 1 個の実行。`Ok(true)` = 実行した、`Ok(false)` = 未実装
+/// （現在全バリアントを網羅するため返らない。呼び出し側の
+/// 未実装検知経路のため bool は残す）。
 /// 呼び出し側は `pc` に `iaoq_f`（priv ビット込み）を渡す。
 #[allow(clippy::too_many_lines)]
 pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<bool, B::Exit> {
@@ -4060,6 +4144,185 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
             Gr(ops[0] as u8).set(b, res);
             sed_nullify(b, ops[2], d, res);
         }
+        // ---- MAX-1/MAX-2 半語並列演算・再配置 ----
+        // opd1 = GR[r1]（ops[1] = fb 桁）、opd2 = GR[r2]
+        // （ops[0] = fa 桁）の取り決めは FRRR 形の整数演算と
+        // 同じ（spec の `HADD,cmplt r1,r2,t` は r1 が fb 側）。
+        // 半語加減算と hshladd/hshradd/permh は MAX-1 と
+        // MAX-2 の両方にあり、hshl/hshr/mixh/mixw は MAX-2
+        // 限定（デコード側の機能旗で制御済み）。
+        // Ref: SPEC-PARISC-20 §7-58..§7-64（半語算術・シフト）、
+        // §7-94..§7-95（mix）、§7-108..§7-109（permh）、
+        // §6-5 Table 6-3/6-4（飽和の定義）、
+        // 付録C Table C-5/C-12（エンコーディング）。
+        Insn::Hadd
+        | Insn::HaddSs
+        | Insn::HaddUs
+        | Insn::Hsub
+        | Insn::HsubSs
+        | Insn::HsubUs
+        | Insn::Havg => {
+            let r2 = Gr(ops[0] as u8).get(b);
+            let r1 = Gr(ops[1] as u8).get(b);
+            hpar2(b, r1, r2, ops[2], |b, x, y| {
+                match insn {
+                    // 剰余演算（sat=3）。レーンの 16 ビット和は
+                    // hpar2 側で切り詰める。
+                    Insn::Hadd => b.add(x, y),
+                    // ,ss は両オペランド符号ありで飽和。
+                    Insn::HaddSs => {
+                        let xs = sext16(b, x);
+                        let ys = sext16(b, y);
+                        let s = b.add(xs, ys);
+                        sat_s16(b, s)
+                    }
+                    // ,us は r1 が符号なし・r2 が符号ありで、
+                    // 結果を符号なしに飽和。
+                    Insn::HaddUs => {
+                        let ys = sext16(b, y);
+                        let s = b.add(x, ys);
+                        sat_u16(b, s)
+                    }
+                    Insn::Hsub => b.sub(x, y),
+                    Insn::HsubSs => {
+                        let xs = sext16(b, x);
+                        let ys = sext16(b, y);
+                        let s = b.sub(xs, ys);
+                        sat_s16(b, s)
+                    }
+                    Insn::HsubUs => {
+                        let ys = sext16(b, y);
+                        let s = b.sub(x, ys);
+                        sat_u16(b, s)
+                    }
+                    _ => {
+                        // havg：17 ビット和の桁上がりを結果の
+                        // 最上位へ回して 1 右シフトする。端数は
+                        // 非バイアス丸めで奇数側へ寄せる
+                        // （new_lsb = sum{14}|sum{15} で、
+                        // (sum>>1)|(sum&1) と同値）。
+                        // Ref: SPEC-PARISC-20 §7-59 HAVG
+                        // Operation.
+                        let s = b.add(x, y);
+                        let q = shr_n(b, s, 1);
+                        let lsb = and_n(b, s, 1);
+                        b.or(q, lsb)
+                    }
+                }
+            });
+        }
+        Insn::Hshladd | Insn::Hshradd => {
+            // GR[r1]（ops[1]）を sa=1..3（ops[2]。wne(sh,0) で
+            // 0 は排除済み）シフトして GR[r2]（ops[0]）を足す。
+            // hshladd は lshift で、符号飽和はシフト段でも判定
+            // する（Table 6-3: シフトアウトしたビットがシフト後の
+            // 最上位と異なれば、被演算子の最上位ビットの向きへ
+            // 飽和 — i64 領域の sext16(r1)<<sa が i16 に収まら
+            // ないのと同値で、方向は s の符号＝r1 の符号）。
+            // hshradd は符号つき右シフトなのでシフト段の結果は
+            // 常に i16 に収まり、加算側の飽和だけを見る。
+            // Ref: SPEC-PARISC-20 §7-61, §7-63.
+            let r2 = Gr(ops[0] as u8).get(b);
+            let r1 = Gr(ops[1] as u8).get(b);
+            let sa = ops[2];
+            hpar2(b, r1, r2, ops[3], |b, x, y| {
+                let xs = sext16(b, x);
+                let ys = sext16(b, y);
+                if insn == Insn::Hshladd {
+                    let s = shl_n(b, xs, sa);
+                    // s が i16 に収まるなら加算の飽和へ。
+                    let s16 = sext16(b, s);
+                    let ok = b.cmp(Cmp::Eq, s, s16);
+                    let sum = b.add(s, ys);
+                    let sat_sum = sat_s16(b, sum);
+                    let sat_shl = sat_s16(b, s);
+                    b.select::<W64>(ok, sat_sum, sat_shl)
+                } else {
+                    let s = sra_n(b, xs, sa);
+                    let sum = b.add(s, ys);
+                    sat_s16(b, sum)
+                }
+            });
+        }
+        Insn::Hshl => {
+            // ops = [r, i, t]（r は fb 桁）。各半語を sa=0..15
+            // 左シフトし、境界を越えるビットは捨てる。
+            // Ref: SPEC-PARISC-20 §7-60.
+            let r = Gr(ops[0] as u8).get(b);
+            let sa = ops[1];
+            hpar1(b, r, ops[2], |b, x| shl_n(b, x, sa));
+        }
+        Insn::HshrS | Insn::HshrU => {
+            // ops = [r, i, t]（r は fa 桁で hshl と桁が違う）。
+            // ,u は論理シフト、,s は半語の符号による算術シフト。
+            // Ref: SPEC-PARISC-20 §7-62.
+            let r = Gr(ops[0] as u8).get(b);
+            let sa = ops[1];
+            hpar1(b, r, ops[2], |b, x| {
+                if insn == Insn::HshrU {
+                    shr_n(b, x, sa)
+                } else {
+                    let xs = sext16(b, x);
+                    sra_n(b, xs, sa)
+                }
+            });
+        }
+        Insn::MixhL | Insn::MixhR | Insn::MixwL | Insn::MixwR => {
+            // 入力は r1=ops[1]（fb）、r2=ops[0]（fa）。`,l` は
+            // 各入力ワードの左半語を、`,r` は右半語を交互に
+            // 並べる（MIXH,L は r1h0|r2h0|r1h2|r2h2）。
+            // MIXW は語単位で同じ選択をする（§6-5 の再配置命令
+            // の記述「a word from the first operand is merged
+            // with a word from the second」）。
+            // Ref: SPEC-PARISC-20 §6-5, §7-94/§7-95 Operation.
+            let r2 = Gr(ops[0] as u8).get(b);
+            let r1 = Gr(ops[1] as u8).get(b);
+            let v = match insn {
+                Insn::MixhL => {
+                    let a = and_n(b, r1, 0xffff_0000_ffff_0000);
+                    let c = shr_n(b, r2, 16);
+                    let c = and_n(b, c, 0x0000_ffff_0000_ffff);
+                    b.or(a, c)
+                }
+                Insn::MixhR => {
+                    let a = shl_n(b, r1, 16);
+                    let a = and_n(b, a, 0xffff_0000_ffff_0000);
+                    let c = and_n(b, r2, 0x0000_ffff_0000_ffff);
+                    b.or(a, c)
+                }
+                Insn::MixwL => {
+                    let a = and_n(b, r1, 0xffff_ffff_0000_0000);
+                    let c = shr_n(b, r2, 32);
+                    b.or(a, c)
+                }
+                _ => {
+                    let a = shl_n(b, r1, 32);
+                    let c = and_n(b, r2, 0xffff_ffff);
+                    b.or(a, c)
+                }
+            };
+            Gr(ops[2] as u8).set(b, v);
+        }
+        Insn::Permh => {
+            // ops = [r1(fa), r2(fb), c0, c1, c2, c3, t]。
+            // 4 桁の完語 c0..c3 が結果の各半語（左から順）に置く
+            // ソース半語の番号（0 が最上位）。spec の形式は
+            // `PERMH,c r,t` でソースは 1 個で、語の fa/fb 両桁に
+            // 同じ r が入る（付録C Figure C-9 の `3E r r`）。
+            // 両桁が一致しない符号化は spec が黙っているので、
+            // 本モデルは fa 桁（ops[0]）をソースに取る決定的扱い。
+            // Ref: SPEC-PARISC-20 §7-108/§7-109, 付録C Figure C-9.
+            // Gap: GAP-0053
+            let r = Gr(ops[0] as u8).get(b);
+            let mut acc = k(b, 0);
+            for (i, c) in [ops[2], ops[3], ops[4], ops[5]].into_iter().enumerate() {
+                let src = shr_n(b, r, 48 - 16 * c);
+                let src = and_n(b, src, 0xffff);
+                let dst = shl_n(b, src, 48 - 16 * i as u64);
+                acc = b.or(acc, dst);
+            }
+            Gr(ops[6] as u8).set(b, acc);
+        }
         // ---- システム系（ユーザが使えるもの）----
         Insn::Sync | Insn::Fdc => {}
         Insn::Fdcx | Insn::Fdce | Insn::Fic | Insn::Fic4f | Insn::Fice | Insn::Pdc => {
@@ -4240,8 +4503,6 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
             // Ref: SPEC-PARISC-11 §DIAG, SPEC-PARISC-20 §7-46.
             return Err(raise::<B>(b, ExceptionKind::Trap, TRAP_PRIV));
         }
-        // その他は未実装。
-        _ => return Ok(false),
     }
     Ok(true)
 }

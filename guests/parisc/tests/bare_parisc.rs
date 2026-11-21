@@ -2223,3 +2223,203 @@ fn exec_xmpyu() {
     // 例外フラグは立たない（固定小数点）。
     assert_eq!(fpsr_flags(&mut env), 0);
 }
+
+// ---- MAX-1/MAX-2 半語並列演算・再配置（段階17・PR9c）----
+// 半語レーンは左（最上位）から 0..3。期待値は
+// SPEC-PARISC-20 §6-5 Table 6-3/6-4（飽和規則）、§7-58..§7-64
+// （hadd/havg/hsub/hshladd/hshradd/hshl/hshr）、§7-94/§7-95
+// （mixh/mixw）、付録C Figure C-9/Table C-12（permh のエンコード
+// と c0..c3）から出している。FRRR 系の ops は [r2,r1,t] で、
+// spec 構文の第 1 オペランド r1 が fb 桁（= ops[1]）側。
+
+// hadd/hsub の剰余演算とオペランド順（hsub は r1-r2）。
+#[test]
+fn exec_hadd_hsub_modular() {
+    let mut env = env();
+    set_q(&mut env, 0x1000);
+    // r1 側は GR2（fb 桁）、r2 側は GR1（fa 桁）。
+    set_gpr(&mut env, 2, 0x0005_0006_0007_0008);
+    set_gpr(&mut env, 1, 0x0001_0002_0003_0004);
+    // hadd → (5+1)|(6+2)|(7+3)|(8+4)。
+    step(&mut env, enc(Insn::Hadd, &[1, 2, 3]));
+    assert_eq!(gpr(&mut env, 3), 0x0006_0008_000a_000c);
+    // hsub → (5-1)|(6-2)|(7-3)|(8-4)。逆順なら負になるので
+    // 被演算子順の検査になる。
+    step(&mut env, enc(Insn::Hsub, &[1, 2, 3]));
+    assert_eq!(gpr(&mut env, 3), 0x0004_0004_0004_0004);
+    // 剰余演算はレーン内で回り込むだけで隣レーンを侵さない:
+    // (ffff+1→0000)|(ffff+ffff→fffe)|(8000+8000→0000)|(0+ffff)。
+    set_gpr(&mut env, 2, 0xffff_ffff_8000_0000);
+    set_gpr(&mut env, 1, 0x0001_ffff_8000_ffff);
+    step(&mut env, enc(Insn::Hadd, &[1, 2, 3]));
+    assert_eq!(gpr(&mut env, 3), 0x0000_fffe_0000_ffff);
+}
+
+// ,ss 飽和（両オペランド符号あり、Table 6-3）。
+#[test]
+fn exec_hadd_hsub_signed_saturation() {
+    let mut env = env();
+    set_q(&mut env, 0x1000);
+    // hadd,ss → sat(7fff+1)|sat(7fff-1)|sat(-8000-1)|(0+0)
+    //        = 7fff|7ffe|8000|0000。
+    set_gpr(&mut env, 2, 0x7fff_7fff_8000_0000);
+    set_gpr(&mut env, 1, 0x0001_ffff_ffff_0000);
+    step(&mut env, enc(Insn::HaddSs, &[1, 2, 3]));
+    assert_eq!(gpr(&mut env, 3), 0x7fff_7ffe_8000_0000);
+    // hsub,ss → sat(-8000-1)|sat(7fff+1)|sat(0+8000)|sat(1-2)
+    //        = 8000|7fff|7fff|ffff。
+    set_gpr(&mut env, 2, 0x8000_7fff_0000_0001);
+    set_gpr(&mut env, 1, 0x0001_ffff_8000_0002);
+    step(&mut env, enc(Insn::HsubSs, &[1, 2, 3]));
+    assert_eq!(gpr(&mut env, 3), 0x8000_7fff_7fff_ffff);
+}
+
+// ,us 飽和（r1 側は符号なし・r2 側は符号あり、結果は符号なし。
+// Table 6-4）。
+#[test]
+fn exec_hadd_hsub_unsigned_saturation() {
+    let mut env = env();
+    set_q(&mut env, 0x1000);
+    // hadd,us → usat(ffff+1)|(1-1)|(0+1)|usat(5-16)
+    //        = ffff|0000|0001|0000。
+    set_gpr(&mut env, 2, 0xffff_0001_0000_0005);
+    set_gpr(&mut env, 1, 0x0001_ffff_0001_fff0);
+    step(&mut env, enc(Insn::HaddUs, &[1, 2, 3]));
+    assert_eq!(gpr(&mut env, 3), 0xffff_0000_0001_0000);
+    // hsub,us → usat(0-1)|usat(ffff+1)|(5-5)|(8000-(-7fff))
+    //        = 0000|ffff|0000|ffff。
+    set_gpr(&mut env, 2, 0x0000_ffff_0005_8000);
+    set_gpr(&mut env, 1, 0x0001_ffff_0005_8001);
+    step(&mut env, enc(Insn::HsubUs, &[1, 2, 3]));
+    assert_eq!(gpr(&mut env, 3), 0x0000_ffff_0000_ffff);
+}
+
+// havg の桁上がり回し込みと非バイアス丸め。
+#[test]
+fn exec_havg_carry_and_rounding() {
+    let mut env = env();
+    set_q(&mut env, 0x1000);
+    // §7-59 Operation: sum の桁上がりを結果最上位へ回し、
+    // new_lsb = sum{14}|sum{15} で奇数側へ寄せる。
+    // (1+0→1)|(ffff+ffff=1fffe→ffff)|(ffff+1=10000→8000)|
+    // (0+3=3→1)。
+    set_gpr(&mut env, 2, 0x0001_ffff_ffff_0000);
+    set_gpr(&mut env, 1, 0x0000_ffff_0001_0003);
+    step(&mut env, enc(Insn::Havg, &[1, 2, 3]));
+    assert_eq!(gpr(&mut env, 3), 0x0001_ffff_8000_0001);
+    // 和がちょうど偶数なら丸めは効かない: (4+6)/2=5。
+    set_gpr(&mut env, 2, 0x0004_0000_0000_0002);
+    set_gpr(&mut env, 1, 0x0006_0000_0000_0002);
+    step(&mut env, enc(Insn::Havg, &[1, 2, 3]));
+    assert_eq!(gpr(&mut env, 3), 0x0005_0000_0000_0002);
+}
+
+// hshladd/hshradd のシフト＋符号飽和加算（FRRSH 形。
+// ops は [r2,r1,sa,t]）。
+#[test]
+fn exec_hshladd_shift_and_add_saturation() {
+    let mut env = env();
+    set_q(&mut env, 0x1000);
+    // sa=1: 0x4000<<1 は 16 ビットに収まらず正側飽和、
+    // 0x8000(-2^15)<<1 は負側飽和、収まるときは加算で判定。
+    // → 7fff|(4000+1)|8000|sat(2+7fff)=7fff。
+    set_gpr(&mut env, 2, 0x4000_2000_8000_0001);
+    set_gpr(&mut env, 1, 0x0001_0001_0001_7fff);
+    step(&mut env, enc(Insn::Hshladd, &[1, 2, 1, 3]));
+    assert_eq!(gpr(&mut env, 3), 0x7fff_4001_8000_7fff);
+    // sa=3: 0x1000<<3=0x8000 → 正側飽和。0xe000(-2^13)<<3
+    // は負側飽和。7<<3+1=0x39、-1<<3+0=-8。
+    set_gpr(&mut env, 2, 0x1000_e000_0007_ffff);
+    set_gpr(&mut env, 1, 0x0000_0000_0001_0000);
+    step(&mut env, enc(Insn::Hshladd, &[1, 2, 3, 3]));
+    assert_eq!(gpr(&mut env, 3), 0x7fff_8000_0039_fff8);
+}
+
+#[test]
+fn exec_hshradd_arith_shift_and_add() {
+    let mut env = env();
+    set_q(&mut env, 0x1000);
+    // sa=2: (-8000)>>2=-2000(-8192)、0x4001>>2=0x1000、
+    // -8>>2=-2、0x7fff>>2=0x1fff。各 +1。
+    // → e001|1001|ffff|2000。
+    set_gpr(&mut env, 2, 0x8000_4001_fff8_7fff);
+    set_gpr(&mut env, 1, 0x0001_0001_0001_0001);
+    step(&mut env, enc(Insn::Hshradd, &[1, 2, 2, 3]));
+    assert_eq!(gpr(&mut env, 3), 0xe001_1001_ffff_2000);
+    // sa=1: 加算側の飽和 sat(3fff+7fff)=7fff、ちょうど
+    // -2^15 に収まる (-4000)+(-4000)=-8000→8000、
+    // (1>>1)+(-8000)=-8000→8000、2000+4000=6000。
+    set_gpr(&mut env, 2, 0x7fff_8000_0001_4000);
+    set_gpr(&mut env, 1, 0x7fff_c000_8000_4000);
+    step(&mut env, enc(Insn::Hshradd, &[1, 2, 1, 3]));
+    assert_eq!(gpr(&mut env, 3), 0x7fff_8000_8000_6000);
+}
+
+// hshl/hshr は MAX-2 の sa=0..15 シフト（hshl の r は fb 桁、
+// hshr の r は fa 桁と違う）。
+#[test]
+fn exec_hshl_hshr_lane_shifts() {
+    let mut env = env();
+    set_q(&mut env, 0x1000);
+    set_gpr(&mut env, 1, 0x0001_8001_ffff_4000);
+    // hshl sa=4 → 0010|0010|fff0|0000（境界越えのビットは捨てる）。
+    step(&mut env, enc(Insn::Hshl, &[1, 4, 2]));
+    assert_eq!(gpr(&mut env, 2), 0x0010_0010_fff0_0000);
+    // sa=0 は恒等、sa=15 は最下位ビットだけが最上位へ残る。
+    step(&mut env, enc(Insn::Hshl, &[1, 0, 2]));
+    assert_eq!(gpr(&mut env, 2), 0x0001_8001_ffff_4000);
+    step(&mut env, enc(Insn::Hshl, &[1, 15, 2]));
+    assert_eq!(gpr(&mut env, 2), 0x8000_8000_8000_0000);
+    // hshr,u は論理シフト、hshr,s は半語符号で拡張。
+    step(&mut env, enc(Insn::HshrU, &[1, 4, 2]));
+    assert_eq!(gpr(&mut env, 2), 0x0000_0800_0fff_0400);
+    step(&mut env, enc(Insn::HshrS, &[1, 4, 2]));
+    assert_eq!(gpr(&mut env, 2), 0x0000_f800_ffff_0400);
+    step(&mut env, enc(Insn::HshrS, &[1, 15, 2]));
+    assert_eq!(gpr(&mut env, 2), 0x0000_ffff_ffff_0000);
+}
+
+// mixh/mixw の左右選択（ops は [r2,r1,t]）。
+#[test]
+fn exec_mixh_mixw_lane_selection() {
+    let mut env = env();
+    set_q(&mut env, 0x1000);
+    // r1=GR2=aaaa|bbbb|cccc|dddd、r2=GR1=1111|2222|3333|4444。
+    set_gpr(&mut env, 2, 0xaaaa_bbbb_cccc_dddd);
+    set_gpr(&mut env, 1, 0x1111_2222_3333_4444);
+    // mixh,l: r1{0..15}|r2{0..15}|r1{32..47}|r2{32..47}
+    //      = aaaa|1111|cccc|3333。
+    step(&mut env, enc(Insn::MixhL, &[1, 2, 3]));
+    assert_eq!(gpr(&mut env, 3), 0xaaaa_1111_cccc_3333);
+    // mixh,r: r1{16..31}|r2{16..31}|r1{48..63}|r2{48..63}
+    //      = bbbb|2222|dddd|4444。
+    step(&mut env, enc(Insn::MixhR, &[1, 2, 3]));
+    assert_eq!(gpr(&mut env, 3), 0xbbbb_2222_dddd_4444);
+    // mixw,l: r1{0..31}|r2{0..31} = aaaabbbb|11112222。
+    step(&mut env, enc(Insn::MixwL, &[1, 2, 3]));
+    assert_eq!(gpr(&mut env, 3), 0xaaaa_bbbb_1111_2222);
+    // mixw,r: r1{32..63}|r2{32..63} = ccccdddd|33334444。
+    step(&mut env, enc(Insn::MixwR, &[1, 2, 3]));
+    assert_eq!(gpr(&mut env, 3), 0xcccc_dddd_3333_4444);
+}
+
+// permh の任意レーン置換（ops は [r1,r2,c0,c1,c2,c3,t]。
+// spec では fa/fb 両桁に同じ r が入る）。
+#[test]
+fn exec_permh_lane_permutation() {
+    let mut env = env();
+    set_q(&mut env, 0x1000);
+    // GR4 = aaaa|bbbb|cccc|dddd（半語番号 0|1|2|3）。
+    set_gpr(&mut env, 4, 0xaaaa_bbbb_cccc_dddd);
+    // c=3210 は逆順（§7-109 のプログラミングノートの図）。
+    step(&mut env, enc(Insn::Permh, &[4, 4, 3, 2, 1, 0, 5]));
+    assert_eq!(gpr(&mut env, 5), 0xdddd_cccc_bbbb_aaaa);
+    // c=0123 は恒等、c=0000 は最上位半語の全レーン複製。
+    step(&mut env, enc(Insn::Permh, &[4, 4, 0, 1, 2, 3, 5]));
+    assert_eq!(gpr(&mut env, 5), 0xaaaa_bbbb_cccc_dddd);
+    step(&mut env, enc(Insn::Permh, &[4, 4, 0, 0, 0, 0, 5]));
+    assert_eq!(gpr(&mut env, 5), 0xaaaa_aaaa_aaaa_aaaa);
+    // 任意順 c=1,3,0,2 → bbbb|dddd|aaaa|cccc。
+    step(&mut env, enc(Insn::Permh, &[4, 4, 1, 3, 0, 2, 5]));
+    assert_eq!(gpr(&mut env, 5), 0xbbbb_dddd_aaaa_cccc);
+}
