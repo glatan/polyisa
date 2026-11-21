@@ -23,8 +23,9 @@
 //! 命令列であり、本実装は各オフセットを ABI 上の入口として
 //! 直接振り分ける）。カーネルのユーザ到達入口は 0xb0（LWS）、
 //! 0xe0（set_thread_pointer）、0x100（syscall）の 3 つで、
-//! 残りは `break 0,0`（KILL_INSN）の埋め草か 0x104 以降の
-//! カーネル内部コード（GAP-0056）。0xe0 は内蔵処理で
+//! 0x00-0xaf・0xb8-0xdf・0xf0-0xff は `break 0,0`（KILL_INSN）
+//! の埋め草、0x104 以降はカーネル内部コード（GAP-0056）。
+//! 0xe0 は内蔵処理で
 //! `cr27 = r26` して `r31` へ戻り、それ以外はオフセットを
 //! `code` に載せて `TrapHandler::handle_trap` へ渡す（Handled
 //! なら `r31` へ戻る。Linux は入口側で `depi PRIV_USER` 済みの

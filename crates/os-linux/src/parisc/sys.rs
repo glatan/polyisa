@@ -656,7 +656,7 @@ impl Linux {
     /// （0=CAS32、1=CAS64、2=CAS2、3=atomic_xchg、4=atomic_store、
     /// 5 以上は ENOSYS）。
     /// which=0（CAS）: `r25`=old、`r24`=new。読めた元の値は `r28`
-    /// に返す。フォルト時は `r28`=1（カーネルの lws_fault と同じ）。
+    /// に返す。
     /// which=1 は 32 ビットカーネルでは ENOSYS（lws_exit_nosys）。
     /// which=2（CAS2）: `r25`/`r24` は old/new 値へのポインタ、
     /// `r23` はサイズコード。`r28` は成否（0=成功、非0=失敗）。
@@ -664,44 +664,37 @@ impl Linux {
     /// ポインタ、`r23`=旧値の書き戻し先。
     /// which=4（atomic_store）: `r25`=サイズコード、`r24`=値への
     /// ポインタ。
+    /// 正本の `lws_start` は which<5 のディスパッチ前に `r28` を
+    /// `lws_table` の番地で破壊する（"Scratch use of r28"）。
+    /// which>=5 は `comiclr,>>`→`b,n lws_exit_nosys` が先行する
+    /// ため `r28` は不変。プローブ域（ロック・クリティカル部の前）
+    /// のフォルトは `lws_fault`（`r28`=1、`r21`=-EFAULT）、
+    /// クリティカル部のフォルトは `lws_pagefault`（`r28`=3、
+    /// `r21`=-EAGAIN）。ロック競合（EAGAIN、`r28`=1/2）は単一
+    /// スレッドモデルでは起きないため対象外。
     // Ref: SRC-LINUX — arch/parisc/kernel/syscall.S
-    // `lws_table` / `lws_compare_and_swap` / `lws_compare_and_swap_2`
-    // / `lws_atomic_xchg` / `lws_atomic_store`。
+    // `lws_start` / `lws_table` / `lws_compare_and_swap`
+    // / `lws_compare_and_swap_2` / `lws_atomic_xchg`
+    // / `lws_atomic_store` / `lws_fault` / `lws_pagefault`。
     fn lws(&mut self, env: &mut BareEnv) -> TrapOutcome {
         let which = Self::arg(env, 6); // r20
         let adr = Self::arg(env, 0);
         let old = Self::arg(env, 1);
         let new = Self::arg(env, 2);
+        if which < lws::ENTRIES {
+            // `ldo R%lws_table(%r1),%r28` — ディスパッチ前の
+            // スクラッチ破壊。
+            Self::ret(env, lws::TABLE_ADDR);
+        }
         let status: u32 = match which {
-            lws::CAS => {
-                if adr & 3 != 0 {
-                    Self::ret(env, 1);
-                    errno::EFAULT
-                } else {
-                    match self.get32(env, adr) {
-                        None => {
-                            Self::ret(env, 1);
-                            errno::EFAULT
-                        }
-                        Some(cur) => {
-                            Self::ret(env, cur);
-                            if cur == old
-                                && !self.write_bytes(env, adr, &(new as u32).to_be_bytes())
-                            {
-                                Self::ret(env, 1);
-                                errno::EFAULT
-                            } else {
-                                0
-                            }
-                        }
-                    }
-                }
-            }
+            lws::CAS => self.lws_cas(env, adr, old, new),
+            // which=1（CAS64）は 32 ビットカーネルでは
+            // `b,n lws_exit_nosys`（r28 は上で破壊済み）。
+            lws::CAS64 => errno::ENOSYS,
             lws::CAS2 => self.lws_cas2(env, adr, old, new),
             lws::XCHG => self.lws_xchg(env, adr),
             lws::STORE => self.lws_store(env, adr),
-            // which=1（CAS64）は 32 ビットカーネルでは ENOSYS、
-            // which>=5 は lws_exit_nosys（r28 を触らない）。
+            // which>=5 は r28 不変のまま lws_exit_nosys。
             _ => errno::ENOSYS,
         };
         env.backend
@@ -709,36 +702,94 @@ impl Linux {
         TrapOutcome::Handled
     }
 
+    /// `lws_fault`（プローブ域のフォルト）: `r28`=1、`r21`=-EFAULT。
+    // Ref: SRC-LINUX — syscall.S `lws_fault`
+    // （ldo 1(%r0),%r28 / ldo -EFAULT(%r0),%r21）。
+    fn lws_fault(env: &mut BareEnv) -> u32 {
+        Self::ret(env, 1);
+        errno::EFAULT
+    }
+
+    /// `lws_pagefault`（クリティカル部のフォルト）: `r28`=3、
+    /// `r21`=-EAGAIN。プローブを通った後のロード/ストアがページ
+    /// 跨ぎ等でフォルトした場合に到達する。
+    // Ref: SRC-LINUX — syscall.S `lws_pagefault`
+    // （ldo 3(%r0),%r28 / ldo -EAGAIN(%r0),%r21）。
+    fn lws_pagefault(env: &mut BareEnv) -> u32 {
+        Self::ret(env, 3);
+        errno::EAGAIN
+    }
+
+    /// LWS `which=0`（CAS、`lws_compare_and_swap`）。
+    /// `r26`=adr、`r25`=old、`r24`=new。読めた元の値は `r28` に
+    /// 返す（不一致でも）。正本は比較の前に `ldw`+`proberi`+
+    /// `stbys,e` で r26 の読み・書き可否を無条件に検査する。
+    /// 非整列 adr は整列検査をせず、非整列データ参照トラップの
+    /// `handle_unaligned` によるエミュレートで成立する（`stbys,e`
+    /// も非整列 adr では語先頭〜adr 未満を 0 で埋める副作用を
+    /// 持つ）。
+    // Ref: SRC-LINUX — arch/parisc/kernel/syscall.S
+    // `lws_compare_and_swap`（traps.c/unaligned.c の非整列
+    // エミュレート経路を含む）。
+    fn lws_cas(&mut self, env: &mut BareEnv, adr: u64, old: u64, new: u64) -> u32 {
+        // `ldw 0(%r26)` — 読みプローブ。`proberi` の読みアクセス権
+        // 検査はフラットメモリでは読み可否と同義。
+        let Some(cur) = self.get32(env, adr) else {
+            return Self::lws_fault(env);
+        };
+        // `stbys,e %r0,0(%r26)` — 書込可否の検査（非整列なら語先頭
+        // 〜adr 未満の 0 書きも行う）。
+        if !self.stbys_probe(env, adr) {
+            return Self::lws_fault(env);
+        }
+        // クリティカル部の `ldw`+`sub,<>`+`stw`。プローブ済みの再読は
+        // 失敗しないので cur をそのまま使う。書込の失敗（ページ跨ぎ
+        // の後半が書込不可等）は lws_pagefault。
+        Self::ret(env, cur);
+        if cur == old && !self.write_bytes(env, adr, &(new as u32).to_be_bytes()) {
+            return Self::lws_pagefault(env);
+        }
+        0
+    }
+
     /// LWS `which=2`（CAS2、`lws_compare_and_swap_2`）。
     /// `r23`=サイズコード（0/1/2/3 → 8/16/32/64 ビット。>=4 は
     /// ENOSYS）。`r25`/`r24` から old/new を読み、`adr` の
     /// `size` バイトと比較して一致なら new を書く。`r28` は
-    /// 0=成功・非0=不一致。読み書きの失敗は `r28`=1 と
-    /// `r21`=-EFAULT。ロック競合（EAGAIN）は単一スレッド
-    /// モデルでは起きないため対象外。
+    /// 0=成功・非0=不一致。正本は `cas2_lock_start` で r26 を
+    /// 語整列した番地に `ldw`+`proberi`+`stbys,e` を無条件実行
+    /// してからロック・比較に入る。
     // Ref: SRC-LINUX — arch/parisc/kernel/syscall.S
-    // `lws_compare_and_swap_2`。
+    // `lws_compare_and_swap_2` / `cas2_lock_start`。
     fn lws_cas2(&mut self, env: &mut BareEnv, adr: u64, old_p: u64, new_p: u64) -> u32 {
         let size = Self::arg(env, 3); // r23
         if size > 3 {
             return errno::ENOSYS;
         }
         let n = 1usize << size;
-        let (Some(old), Some(new), Some(cur)) = (
+        // old/new 値の読み込み（各 arm の ldX。非整列はエミュレート）。
+        let (Some(old), Some(new)) = (
             self.read_bytes(env, old_p, n),
             self.read_bytes(env, new_p, n),
-            self.read_bytes(env, adr, n),
         ) else {
-            Self::ret(env, 1);
-            return errno::EFAULT;
+            return Self::lws_fault(env);
+        };
+        // `depi` で語整列した r26 に `ldw`+`proberi`+`stbys,e` を
+        // 無条件実行（読み可否+書き可否。語先頭への stbys,e は
+        // 何も書かない）。
+        if self.read_bytes(env, adr & !3, 4).is_none() || !self.stbys_probe(env, adr & !3) {
+            return Self::lws_fault(env);
+        }
+        // クリティカル部の比較・書込の失敗は lws_pagefault。
+        let Some(cur) = self.read_bytes(env, adr, n) else {
+            return Self::lws_pagefault(env);
         };
         if cur != old {
             Self::ret(env, 1);
             return 0;
         }
         if !self.write_bytes(env, adr, &new) {
-            Self::ret(env, 1);
-            return errno::EFAULT;
+            return Self::lws_pagefault(env);
         }
         Self::ret(env, 0);
         0
@@ -748,9 +799,14 @@ impl Linux {
     /// `r25`=サイズコード（0/1/2/3 → 8/16/32/64 ビット。>=4 は
     /// ENOSYS）、`r24`=new 値へのポインタ、`r23`=旧値の書き戻し先。
     /// カーネルの代入順どおり「`*r23 = *r26` → `*r26 = *r24`」で、
-    /// `r28` は 0=成功・非0=失敗。読み書きの失敗は `r28`=1 と
-    /// `r21`=-EFAULT。
-    // Ref: SRC-LINUX — arch/parisc/kernel/syscall.S `lws_atomic_xchg`。
+    /// `r28` は 0=成功・非0=失敗。
+    /// 正本は各 arm で `*r24` の読み（+proberi）と `*r23` への
+    /// `stbys,e`（8/16bit は語整列した番地、32bit は r23 そのもの、
+    /// 64bit は語整列した 2 語）を行い、ついで `atomic_xchg_start`
+    /// で語整列した r26 の `ldw`+`stbys,e` を実行してから
+    /// クリティカル部に入る（部分書き込みを残さない）。
+    // Ref: SRC-LINUX — arch/parisc/kernel/syscall.S `lws_atomic_xchg`
+    // / `atomic_xchg_start`。
     fn lws_xchg(&mut self, env: &mut BareEnv, adr: u64) -> u32 {
         let size = Self::arg(env, 1); // r25
         let new_p = Self::arg(env, 2); // r24
@@ -759,32 +815,39 @@ impl Linux {
             return errno::ENOSYS;
         }
         let n = 1usize << size;
-        // カーネルはクリティカル部の前に `*r24` の読みと
-        // `*r23`/`*r26` の stbys,e プローブでフォルトを先に検出する
-        // （部分書き込みを残さない）。値自体は書き込み直前に読み直す。
-        let (Some(_), Some(cur)) = (self.read_bytes(env, new_p, n), self.read_bytes(env, adr, n))
-        else {
-            Self::ret(env, 1);
-            return errno::EFAULT;
+        // 各 arm の先頭: `*r24` の読み（+proberi 相当）。
+        if self.read_bytes(env, new_p, n).is_none() {
+            return Self::lws_fault(env);
+        }
+        // `*r23` の書込可否。arm ごとの stbys,e の形状は上の
+        // コメントどおり（32bit arm の非整列 r23 では stbys,e が
+        // 語先頭〜r23 未満を 0 で埋める）。
+        let old_ok = match size {
+            3 => self.stbys_probe(env, old_p & !3) && self.stbys_probe(env, (old_p & !3) + 4),
+            2 => self.stbys_probe(env, old_p),
+            _ => self.stbys_probe(env, old_p & !3),
         };
-        if !self.can_write(env, old_p) || !self.can_write(env, adr) {
-            Self::ret(env, 1);
-            return errno::EFAULT;
+        if !old_ok {
+            return Self::lws_fault(env);
+        }
+        // `atomic_xchg_start`: 語整列した r26 の `ldw`+`stbys,e`。
+        if self.read_bytes(env, adr & !3, 4).is_none() || !self.stbys_probe(env, adr & !3) {
+            return Self::lws_fault(env);
         }
         // カーネルと同じ順で逐次化する: `*r23 = *r26` の後に
         // `*r24` を読み直して `*r26` に書く（r23==r24 の別名でも
-        // 結果が一致する）。
+        // 結果が一致する）。クリティカル部のフォルトは lws_pagefault。
+        let Some(cur) = self.read_bytes(env, adr, n) else {
+            return Self::lws_pagefault(env);
+        };
         if !self.write_bytes(env, old_p, &cur) {
-            Self::ret(env, 1);
-            return errno::EFAULT;
+            return Self::lws_pagefault(env);
         }
         let Some(new) = self.read_bytes(env, new_p, n) else {
-            Self::ret(env, 1);
-            return errno::EFAULT;
+            return Self::lws_pagefault(env);
         };
         if !self.write_bytes(env, adr, &new) {
-            Self::ret(env, 1);
-            return errno::EFAULT;
+            return Self::lws_pagefault(env);
         }
         Self::ret(env, 0);
         0
@@ -793,9 +856,12 @@ impl Linux {
     /// LWS `which=4`（atomic_store、`lws_atomic_store`）。
     /// `r25`=サイズコード（0/1/2/3 → 8/16/32/64 ビット。>=4 は
     /// ENOSYS）、`r24`=値へのポインタ。`*r26 = *r24`。
-    /// `r28` は 0=成功・非0=失敗。読み書きの失敗は `r28`=1 と
-    /// `r21`=-EFAULT。
-    // Ref: SRC-LINUX — arch/parisc/kernel/syscall.S `lws_atomic_store`。
+    /// `r28` は 0=成功・非0=失敗。正本は各 arm で `*r24` の読み、
+    /// ついで `atomic_store_start` で語整列した r26 の `ldw`（読み
+    /// 可否）+`stbys,e`（書き可否）を実行してからクリティカル部に
+    /// 入る。
+    // Ref: SRC-LINUX — arch/parisc/kernel/syscall.S `lws_atomic_store`
+    // / `atomic_store_start`。
     fn lws_store(&mut self, env: &mut BareEnv, adr: u64) -> u32 {
         let size = Self::arg(env, 1); // r25
         let val_p = Self::arg(env, 2); // r24
@@ -803,20 +869,24 @@ impl Linux {
             return errno::ENOSYS;
         }
         let n = 1usize << size;
+        // 各 arm の先頭: `*r24` の読み（非整列はエミュレート）。
         let Some(val) = self.read_bytes(env, val_p, n) else {
-            Self::ret(env, 1);
-            return errno::EFAULT;
+            return Self::lws_fault(env);
         };
+        // `atomic_store_start`: 語整列した r26 の `ldw`+`stbys,e`。
+        if self.read_bytes(env, adr & !3, 4).is_none() || !self.stbys_probe(env, adr & !3) {
+            return Self::lws_fault(env);
+        }
+        // クリティカル部の `*r26 = *r24` の失敗は lws_pagefault。
         if !self.write_bytes(env, adr, &val) {
-            Self::ret(env, 1);
-            return errno::EFAULT;
+            return Self::lws_pagefault(env);
         }
         Self::ret(env, 0);
         0
     }
 
     /// 書き込み可否のプローブ（値は書かない）。カーネルの
-    /// `stbys,e` 相当で、先頭バイトを W 要求として読む。
+    /// `stbys,e`（整列番地）相当で、先頭バイトを W 要求として読む。
     // Ref: SRC-LINUX — syscall.S `stbys,e`（page fault 事前検査）。
     fn can_write(&self, env: &mut BareEnv, addr: u64) -> bool {
         let mut b = [0u8; 1];
@@ -824,6 +894,19 @@ impl Linux {
             .mem
             .read(VirtAddr(addr), &mut b, self.acc(AccessKind::DataWrite))
             .is_ok()
+    }
+
+    /// `stbys,e %r0,0(addr)`（PSW.E=0）相当の書込プローブ。addr が
+    /// 語の先頭バイトなら何も書かず保護だけ検査し、非整列なら語
+    /// 先頭〜addr 未満を r0=0 で埋める。検査の可否を返す。
+    // Ref: SPEC-PARISC-11 §5-52 / SRC-LINUX — syscall.S の
+    // `stbys,e` プローブ。
+    fn stbys_probe(&mut self, env: &mut BareEnv, addr: u64) -> bool {
+        if !self.can_write(env, addr) {
+            return false;
+        }
+        let pad = (addr & 3) as usize;
+        pad == 0 || self.write_bytes(env, addr & !3, &[0u8; 3][..pad])
     }
 }
 
@@ -942,9 +1025,12 @@ mod tests {
     }
 
     /// LWS which=1（ELF64 CAS 入口）は 32 ビットカーネルどおり
-    /// ENOSYS を r21 に返し、r28 は触らない。
+    /// ENOSYS を r21 に返す。which<5 のディスパッチ前に
+    /// `ldo R%lws_table(%r1),%r28` が走るため r28 は lws_table の
+    /// 番地で破壊される。
     // Ref: SRC-LINUX — syscall.S `lws_compare_and_swap64` は
-    // !CONFIG_64BIT で `lws_exit_nosys` に分岐。
+    // !CONFIG_64BIT で `lws_exit_nosys` に分岐。`lws_start` の
+    // "Scratch use of r28"（syscall.S:514）。
     #[test]
     fn lws_cas64_is_enosys_on_32bit() {
         let mut sys = Linux::new();
@@ -956,10 +1042,27 @@ mod tests {
             TrapOutcome::Handled
         ));
         assert_eq!(get_r(&mut env, 21), (-(errno::ENOSYS as i64)) as u64);
+        assert_eq!(get_r(&mut env, 28), lws::TABLE_ADDR);
+    }
+
+    /// which>=5 の ENOSYS は `comiclr,>>`→`b,n lws_exit_nosys` が
+    /// `ldo R%lws_table,%r28` より先に分岐するため r28 は不変。
+    // Ref: SRC-LINUX — syscall.S `lws_start`（syscall.S:509-514）。
+    #[test]
+    fn lws_invalid_which_is_enosys_and_keeps_r28() {
+        let mut sys = Linux::new();
+        let mut env = env();
+        set_r(&mut env, 20, lws::ENTRIES); // which=5
+        set_r(&mut env, 28, 0xdead_beef);
+        assert!(matches!(
+            sys.handle_trap(&mut env, gate::LWS),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(get_r(&mut env, 21), (-(errno::ENOSYS as i64)) as u64);
         assert_eq!(get_r(&mut env, 28), 0xdead_beef);
     }
 
-    /// LWS which=0（CAS）のフォルトは r28=1・r21=-EFAULT
+    /// LWS which=0（CAS）のプローブ域フォルトは r28=1・r21=-EFAULT
     /// （カーネルの lws_fault と同じ）。
     // Ref: SRC-LINUX — syscall.S `lws_fault`: ldo 1,%r28 / -EFAULT,%r21。
     #[test]
@@ -976,7 +1079,7 @@ mod tests {
         ));
         assert_eq!(get_r(&mut env, 28), 1);
         assert_eq!(get_r(&mut env, 21), (-(errno::EFAULT as i64)) as u64);
-        // 非整列 adr も EFAULT + r28=1。
+        // 未写像の非整列 adr も読みプローブ（ldw）で EFAULT + r28=1。
         let mut env2 = BareEnv::new(core::mem::size_of::<CpuState>());
         set_r(&mut env2, 20, lws::CAS);
         set_r(&mut env2, 26, 0x5002);
@@ -986,6 +1089,149 @@ mod tests {
         ));
         assert_eq!(get_r(&mut env2, 28), 1);
         assert_eq!(get_r(&mut env2, 21), (-(errno::EFAULT as i64)) as u64);
+    }
+
+    /// LWS which=0（CAS）は読み取り専用ページでは不一致・一致に
+    /// 関わらず比較前の `stbys,e` 書込プローブで r28=1・r21=-EFAULT
+    /// （正本は比較の前に書込可否を検査する）。
+    // Ref: SRC-LINUX — syscall.S `lws_compare_and_swap` の
+    // `stbys,e %r0,0(%r26)`（extable → lws_fault）。
+    #[test]
+    fn lws_cas_write_probe_faults_on_read_only() {
+        let mut sys = Linux::new();
+        let mut env = env();
+        env.backend.mem.map(VirtAddr(0x4000), 1, Perms::RW).unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x4000), &0x1111_2222u32.to_be_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .protect(VirtAddr(0x4000), 1, Perms::R)
+            .unwrap();
+        set_r(&mut env, 20, lws::CAS);
+        set_r(&mut env, 26, 0x4000);
+        set_r(&mut env, 25, 0x9999_9999); // 不一致でも
+        set_r(&mut env, 24, 0x3333_4444);
+        assert!(matches!(
+            sys.handle_trap(&mut env, gate::LWS),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(get_r(&mut env, 28), 1);
+        assert_eq!(get_r(&mut env, 21), (-(errno::EFAULT as i64)) as u64);
+        // 読めるので元値は破壊されない（proberi ではなく
+        // lws_fault の ldo 1,%r28 が来る）。
+        assert_eq!(sys.get32(&mut env, 0x4000), Some(0x1111_2222));
+    }
+
+    /// LWS which=0（CAS）の非整列 adr は写像+許可があれば非整列
+    /// エミュレート（正本の handle_unaligned）で成立する。
+    /// `stbys,e %r0,0(%r26)` は語先頭〜adr 未満を 0 で埋める副作用を
+    /// 持つ（SPEC-PARISC-11 §5-52）。
+    // Ref: SRC-LINUX — traps.c/unaligned.c の非整列エミュレート経路。
+    #[test]
+    fn lws_cas_unaligned_succeeds_on_mapped() {
+        let mut sys = Linux::new();
+        let mut env = env();
+        env.backend.mem.map(VirtAddr(0x4000), 1, Perms::RW).unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x4000), &0xaabb_ccddu32.to_be_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x4004), &0x1122_3344u32.to_be_bytes())
+            .unwrap();
+        set_r(&mut env, 20, lws::CAS);
+        set_r(&mut env, 26, 0x4002); // 非整列
+        set_r(&mut env, 25, 0xccdd_1122); // old = [0x4002,0x4006)
+        set_r(&mut env, 24, 0x5566_7788); // new
+        assert!(matches!(
+            sys.handle_trap(&mut env, gate::LWS),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(get_r(&mut env, 28), 0xccdd_1122); // 元値
+        assert_eq!(get_r(&mut env, 21), 0);
+        // 交差した語内容: stbys,e が [0x4000,0x4002) を 0 書きし、
+        // CAS が [0x4002,0x4006) に new を書く。
+        assert_eq!(sys.get32(&mut env, 0x4000), Some(0x0000_5566));
+        assert_eq!(sys.get32(&mut env, 0x4004), Some(0x7788_3344));
+    }
+
+    /// LWS which=0（CAS）のクリティカル部フォルトは `lws_pagefault`
+    /// の r28=3・r21=-EAGAIN（プローブ域の r28=1・-EFAULT と区別）。
+    /// プローブを通った後の `stw` がページ跨ぎで後半だけ書込不可の
+    /// 場合に到達する。
+    // Ref: SRC-LINUX — syscall.S `lws_pagefault`（critical region の
+    // fixup → ldo 3,%r28 / -EAGAIN,%r21）。
+    #[test]
+    fn lws_cas_critical_fault_sets_r28_eagain() {
+        let mut sys = Linux::new();
+        let mut env = env();
+        env.backend.mem.map(VirtAddr(0x4000), 1, Perms::RW).unwrap();
+        env.backend.mem.map(VirtAddr(0x5000), 1, Perms::RW).unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x4ffe), &0x1122u16.to_be_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x5000), &0x3344u16.to_be_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .protect(VirtAddr(0x5000), 1, Perms::R)
+            .unwrap();
+        set_r(&mut env, 20, lws::CAS);
+        set_r(&mut env, 26, 0x4ffe); // [0x4ffe,0x5002) に跨る
+        set_r(&mut env, 25, 0x1122_3344); // 一致
+        set_r(&mut env, 24, 0x5566_7788);
+        assert!(matches!(
+            sys.handle_trap(&mut env, gate::LWS),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(get_r(&mut env, 28), 3);
+        assert_eq!(get_r(&mut env, 21), (-(errno::EAGAIN as i64)) as u64);
+    }
+
+    /// LWS which=2（CAS2）も比較の前に語整列した r26 の `ldw`+
+    /// `stbys,e` を無条件実行する。読み取り専用ページでは不一致で
+    /// あっても r28=1・r21=-EFAULT。
+    // Ref: SRC-LINUX — syscall.S `cas2_lock_start`（ldw/proberi/
+    // stbys,e → lws_fault）。
+    #[test]
+    fn lws_cas2_write_probe_faults_on_read_only() {
+        let mut sys = Linux::new();
+        let mut env = env();
+        env.backend.mem.map(VirtAddr(0x4000), 1, Perms::RW).unwrap();
+        env.backend.mem.map(VirtAddr(0x5000), 1, Perms::RW).unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x4100), &0x11u32.to_be_bytes())
+            .unwrap(); // old
+        env.backend
+            .mem
+            .write(VirtAddr(0x4200), &0x22u32.to_be_bytes())
+            .unwrap(); // new
+        env.backend
+            .mem
+            .write(VirtAddr(0x5000), &0x33u32.to_be_bytes())
+            .unwrap(); // cur != old
+        env.backend
+            .mem
+            .protect(VirtAddr(0x5000), 1, Perms::R)
+            .unwrap();
+        set_r(&mut env, 20, lws::CAS2);
+        set_r(&mut env, 26, 0x5000); // R-only かつ不一致
+        set_r(&mut env, 25, 0x4100);
+        set_r(&mut env, 24, 0x4200);
+        set_r(&mut env, 23, 2); // 32bit
+        assert!(matches!(
+            sys.handle_trap(&mut env, gate::LWS),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(get_r(&mut env, 28), 1);
+        assert_eq!(get_r(&mut env, 21), (-(errno::EFAULT as i64)) as u64);
     }
 
     /// LWS which=3（atomic_xchg）: `*r23 = *r26` してから
@@ -1018,7 +1264,9 @@ mod tests {
         assert_eq!(sys.get32(&mut env, 0x4300), Some(0x1122_3344));
         assert_eq!(sys.get32(&mut env, 0x4100), Some(0xaabb_ccdd));
 
-        // サイズコード >=4 は ENOSYS（r28 不変）。
+        // サイズコード >=4 は ENOSYS。which<5 のディスパッチ前に
+        // `ldo R%lws_table,%r28` が走るので r28 は lws_table 番地で
+        // 破壊される。
         let mut env2 = BareEnv::new(core::mem::size_of::<CpuState>());
         env2.backend
             .mem
@@ -1033,7 +1281,7 @@ mod tests {
             TrapOutcome::Handled
         ));
         assert_eq!(get_r(&mut env2, 21), (-(errno::ENOSYS as i64)) as u64);
-        assert_eq!(get_r(&mut env2, 28), 0xdead_beef);
+        assert_eq!(get_r(&mut env2, 28), lws::TABLE_ADDR);
     }
 
     /// LWS which=4（atomic_store）: `*r26 = *r24`。r28=0・r21=0。
@@ -1081,5 +1329,29 @@ mod tests {
         ));
         assert_eq!(get_r(&mut env2, 28), 1);
         assert_eq!(get_r(&mut env2, 21), (-(errno::EFAULT as i64)) as u64);
+
+        // 書込専用ページも `ldw` の読みプローブで r28=1・r21=-EFAULT
+        // （正本は `atomic_store_start` で語整列した r26 の `ldw`+
+        // `stbys,e` を実行する）。
+        let mut env3 = BareEnv::new(core::mem::size_of::<CpuState>());
+        env3.backend
+            .mem
+            .map(VirtAddr(0x4000), 1, Perms::RW)
+            .unwrap();
+        env3.backend
+            .mem
+            .write(VirtAddr(0x4200), &0x77u32.to_be_bytes())
+            .unwrap();
+        env3.backend.mem.map(VirtAddr(0x8000), 1, Perms::W).unwrap();
+        set_r(&mut env3, 20, lws::STORE);
+        set_r(&mut env3, 26, 0x8000);
+        set_r(&mut env3, 25, 2);
+        set_r(&mut env3, 24, 0x4200);
+        assert!(matches!(
+            sys.handle_trap(&mut env3, gate::LWS),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(get_r(&mut env3, 28), 1);
+        assert_eq!(get_r(&mut env3, 21), (-(errno::EFAULT as i64)) as u64);
     }
 }

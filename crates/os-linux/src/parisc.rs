@@ -4,7 +4,8 @@
 //!
 //! 番号は `arch/parisc/kernel/syscalls/syscall.tbl` 由来の事実。
 //! hppa は asm-generic ではなく独自の連番を持つ（レガシ系）。errno
-//! と O_*/PROT_*/MAP_* は asm-generic の値を使う。syscall の発行点は
+//! は 1–34 が asm-generic/errno-base.h と同値で 35 以上は HP-UX 系の
+//! 独自値、O_*/MAP_* も独自値を持つ。syscall の発行点は
 //! ページゼロのゲートウェイ `ble 0x100(%sr2,%r0)`、番号は `r20`、引数は
 //! `r26`（arg0）から `r21`（arg5）へ降順、戻り値は `r28`（エラーは
 //! 負の errno）、戻り番地は `r31`。
@@ -24,11 +25,19 @@ pub mod gate {
     pub const SYSCALL: u32 = 0x100;
 }
 
-/// LWS（軽量 syscall）の副番号。`r20` が番号、`r26`=adr、
-/// `r25`=old、`r24`=new、結果は `r28`、状態は `r21`（0/-errno）。
+/// LWS（軽量 syscall）の副番号。`r20` が番号、`r26`=adr、結果は
+/// `r28`、状態は `r21`（0/-errno）。`r25`/`r24`/`r23` の意味は
+/// which ごとに異なる（各 const の doc）。
 /// カーネルの `lws_table` は 5 エントリ（`__NR_lws_entries`=5）。
 /// Ref: SRC-LINUX — arch/parisc/kernel/syscall.S `lws_table`・`lws_*`.
 pub mod lws {
+    /// `__NR_lws_entries`（5）。which>=5 は `comiclr,>>` で
+    /// `lws_exit_nosys` に先行分岐するため r28 は不変。
+    pub const ENTRIES: u64 = 5;
+    /// `lws_table` のカーネル番地の代表値。`lws_start` は which<5
+    /// のディスパッチ前に `r28` をこの番地で破壊する（"Scratch use
+    /// of r28"）。ユーザに意味を持たないカーネル空間番地。
+    pub const TABLE_ADDR: u64 = 0x1010_0000;
     /// CAS: `old` と `*adr` が等しければ `new` を書く。`r28` に元値、
     /// `r21` に 0/-errno（compare_and_swap32、ELF32 用入口）。
     pub const CAS: u64 = 0;
@@ -47,8 +56,10 @@ pub mod lws {
     pub const STORE: u64 = 4;
 }
 
-/// 汎用 errno（hppa は asm-generic と同じ値）。負で `r28` に返す。
-// Ref: SRC-LINUX (7.3) `include/uapi/asm-generic/errno*.h`。
+/// hppa の errno。1–34 は `asm-generic/errno-base.h` と同値、35 以上は
+/// `uapi/asm/errno.h` の独自表（HP-UX 系の値。ENOSYS=251 など）。
+/// 負で `r28` に返す。
+// Ref: SRC-LINUX (7.3) — arch/parisc/include/uapi/asm/errno.h.
 pub mod errno {
     pub const EPERM: u32 = 1;
     pub const ENOENT: u32 = 2;
@@ -75,34 +86,39 @@ pub mod errno {
     pub const EROFS: u32 = 30;
     pub const EPIPE: u32 = 32;
     pub const ERANGE: u32 = 34;
-    pub const ENAMETOOLONG: u32 = 36;
-    pub const ENOSYS: u32 = 38;
-    pub const ELOOP: u32 = 40;
-    pub const EOVERFLOW: u32 = 75;
-    pub const EOPNOTSUPP: u32 = 95;
+    pub const EOVERFLOW: u32 = 72;
+    pub const EOPNOTSUPP: u32 = 223;
+    pub const ENAMETOOLONG: u32 = 248;
+    pub const ELOOP: u32 = 249;
+    pub const ENOSYS: u32 = 251;
 }
 
-/// `mmap`/`mprotect` の prot と flags（asm-generic 値）。
+/// `mmap`/`mprotect` の prot と flags。hppa の MAP_FIXED=0x04 と
+/// MAP_ANONYMOUS=0x10 は asm-generic（0x10/0x20）と異なる独自値。
+/// PROT_* と MAP_SHARED/MAP_PRIVATE（linux/mman.h）は汎用と同じ。
+// Ref: SRC-LINUX (7.3) — arch/parisc/include/uapi/asm/mman.h.
 pub mod mman {
     pub const PROT_READ: u32 = 1;
     pub const PROT_WRITE: u32 = 2;
     pub const PROT_EXEC: u32 = 4;
     pub const MAP_SHARED: u32 = 1;
     pub const MAP_PRIVATE: u32 = 2;
-    pub const MAP_FIXED: u32 = 0x10;
-    pub const MAP_ANONYMOUS: u32 = 0x20;
+    pub const MAP_FIXED: u32 = 0x04;
+    pub const MAP_ANONYMOUS: u32 = 0x10;
 }
 
-/// `open`/`openat` の O_*（asm-generic 値）。
+/// `open`/`openat` の O_*。hppa は独自のビット位置に置く（TRUNC
+/// だけ arch 側の定義がなく asm-generic/fcntl.h の値）。
+// Ref: SRC-LINUX (7.3) — arch/parisc/include/uapi/asm/fcntl.h.
 pub mod oflag {
-    pub const CREAT: u64 = 0o100;
-    pub const EXCL: u64 = 0o200;
-    pub const TRUNC: u64 = 0o1000;
-    pub const APPEND: u64 = 0o2000;
-    pub const NONBLOCK: u64 = 0o4000;
-    pub const DIRECTORY: u64 = 0o200000;
-    pub const NOFOLLOW: u64 = 0o400000;
-    pub const CLOEXEC: u64 = 0o2000000;
+    pub const CREAT: u64 = 0o400; // 1 << 8
+    pub const EXCL: u64 = 0o2000; // 1 << 10
+    pub const TRUNC: u64 = 0o1000; // 1 << 9（asm-generic）
+    pub const APPEND: u64 = 0o10; // 1 << 3
+    pub const NONBLOCK: u64 = 0o200000; // 1 << 16
+    pub const DIRECTORY: u64 = 0o10000; // 1 << 12
+    pub const NOFOLLOW: u64 = 0o200; // 1 << 7
+    pub const CLOEXEC: u64 = 0o1000_0000; // 1 << 21
 }
 
 // ---- 番号（syscall.tbl。実装で使う分を名前付き定数に）----
