@@ -719,6 +719,140 @@ fn exec_fp_load_store_moves_bits() {
     assert_eq!(fpr(&mut env, 9), 0xfeed_face_0bad_c0de);
 }
 
+// ---- ds / dcor 意味論検査（段階17）----
+// 出典: SPEC-PARISC-11 §5-111（DS）・§5-113/§5-114（DCOR/IDCOR）、
+// SPEC-PARISC-20 §7-47（DS）・§7-36（DCOR）・§7-5（PSW C/B/V）。
+// 語形は `02 r2 r1 c f 010001 0 t`（ds）、`02 r 0 c f 10111 e1 d t`
+// （dcor: e1=2、dcor,i: e1=3）。
+
+/// PSW[C/B] の桁キャリベクトル（cb 状態）を読む。
+fn cb(env: &mut BareEnv) -> u64 {
+    env.backend.get(sem::cb_ref())
+}
+
+/// PSW.V（除算訂正ビット）を読む。
+fn psw_v(env: &mut BareEnv) -> u64 {
+    env.backend.get(sem::psw_ref()) & sem::PSW_V
+}
+
+#[test]
+fn exec_ds_add_path_consumes_cb8() {
+    let mut env = env();
+    set_q(&mut env, 0x1000);
+    // 語の桁キャリ C/B{8}（cb の bit28）を add で立てる:
+    // 0x8000_0000 + 0x8000_0000 は bit32 へのキャリを生じる。
+    set_gpr(&mut env, 4, 0x8000_0000);
+    set_gpr(&mut env, 5, 0x8000_0000);
+    step(&mut env, 0x0885_0606); // add r4,r5,r6
+    assert_eq!(cb(&mut env), 1 << 28);
+    // ds r2,r1,r3（PSW.V=0 → 加算側）。partial = (r1<<1)|cb8
+    // = (4<<1)|1 = 9、dest = 9 + 2 = 0xB。
+    set_gpr(&mut env, 1, 4);
+    set_gpr(&mut env, 2, 2);
+    step(&mut env, 0x0841_0443); // ds r2,r1,r3
+    assert_eq!(gpr(&mut env, 3), 0xB);
+    // x = 9 ^ 2 ^ 0xB = 0 → 桁キャリ列は 0。V ← 0 ^ r2{31}(=0) = 0。
+    assert_eq!(cb(&mut env), 0);
+    assert_eq!(psw_v(&mut env), 0);
+}
+
+#[test]
+fn exec_ds_subtract_path_updates_v_and_cb() {
+    let mut env = env();
+    set_q(&mut env, 0x1000);
+    // まず V=1 を作る: cb8=0（初期 cb=0）、r2 の語符号ビットが 1。
+    // partial = (0<<1)|0 = 0、V=0 → dest = 0 + 0x8000_0000。
+    set_gpr(&mut env, 4, 0);
+    set_gpr(&mut env, 5, 0x8000_0000);
+    step(&mut env, 0x08a4_0443); // ds r5,r4,r3
+    assert_eq!(gpr(&mut env, 3), 0x8000_0000);
+    assert_eq!(cb(&mut env), 0);
+    assert_ne!(psw_v(&mut env), 0); // V ← cb8_new(0) ^ r2{31}(1)
+    // 次の ds は V=1 → 減算側。r1=0x20、cb8=0 → partial = 0x40。
+    set_gpr(&mut env, 4, 0x20);
+    step(&mut env, 0x08a4_0443); // ds r5,r4,r3
+    // dest = 0x40 + ~0x8000_0000 + 1 = 0x40 - 0x8000_0000。
+    assert_eq!(gpr(&mut env, 3), 0xffff_ffff_8000_0040u64);
+    // x = 0x40 ^ ~0x8000_0000 ^ dest = 0xffff_ffff（語）→ 語の
+    // 下位 7 桁にキャリ（bit0,4,...,24）。語の出口キャリは 0。
+    assert_eq!(cb(&mut env), 0x0111_1111);
+    // V ← cb8_new(0) ^ r2{31}(1) = 1（減算側が継続）。
+    assert_ne!(psw_v(&mut env), 0);
+}
+
+#[test]
+fn exec_ds_cond_nullifies_next() {
+    let mut env = env();
+    set_q(&mut env, 0x1000);
+    // ds,od（c=7,f=0 → cf=0xE）。V=0 の加算側: 結果が奇数なら
+    // 次命令を無効化。partial = (5<<1)|0 = 0xA、dest = 0xA+3 = 0xD。
+    set_gpr(&mut env, 5, 5);
+    set_gpr(&mut env, 3, 3);
+    step(&mut env, 0x0865_e443); // ds,od r3,r5,r3
+    assert_eq!(gpr(&mut env, 3), 0xD);
+    // PSW.N → 次の ldo は無効化される。
+    step(&mut env, 0x3404_0040); // ldo 0x20(r0),r4
+    assert_eq!(gpr(&mut env, 4), 0);
+    // ds,tr（c=0,f=1 → cf=1）は常に次命令を無効化する。
+    step(&mut env, 0x0865_1443); // ds,tr r3,r5,r3
+    step(&mut env, 0x3404_0040); // ldo 0x20(r0),r4 → 無効化
+    assert_eq!(gpr(&mut env, 4), 0);
+}
+
+#[test]
+fn exec_dcor_bcd_chain() {
+    let mut env = env();
+    set_q(&mut env, 0x1000);
+    // SPEC-PARISC-20 §7-36 Programming Note の BCD 加算手順:
+    // 1234 + 5678 + 1000 = 7912（BCD）。nines = 0x9999...。
+    set_gpr(&mut env, 4, 0x9999_9999_9999_9999); // nines
+    set_gpr(&mut env, 5, 0x1234); // ra
+    set_gpr(&mut env, 6, 0x5678); // rb
+    set_gpr(&mut env, 7, 0x1000); // rc
+    // uaddcm r4,r5,r8 → r8 = ra + ~nines = 0x1234 + 0x6666..6。
+    step(&mut env, 0x0885_0988);
+    assert_eq!(gpr(&mut env, 8), 0x6666_6666_6666_789A);
+    // add r6,r8,r8 → r8 += rb。桁 0: A+8=0x12、桁 1: 9+7+1=0x11
+    // → C/B は桁 0・1 に立つ（cb = 0x11）。
+    step(&mut env, 0x08c8_0608);
+    assert_eq!(gpr(&mut env, 8), 0x6666_6666_6666_CF12);
+    assert_eq!(cb(&mut env), 0x11);
+    // dcor,i r8,r8 → 桁 0・1 に +6（バイアスを保つ訂正）。
+    step(&mut env, 0x0900_0bc8);
+    assert_eq!(gpr(&mut env, 8), 0x6666_6666_6666_CF78);
+    // add r7,r8,r8 → r8 += rc = 0x1000。桁キャリなし → cb = 0。
+    step(&mut env, 0x08e8_0608);
+    assert_eq!(gpr(&mut env, 8), 0x6666_6666_6666_DF78);
+    assert_eq!(cb(&mut env), 0);
+    // dcor r8,r8 → C/B=0 の全桁に -6 → 最終 BCD 0x7912。
+    step(&mut env, 0x0900_0b88);
+    assert_eq!(gpr(&mut env, 8), 0x7912);
+}
+
+#[test]
+fn exec_dcor_cond_nullifies_next() {
+    let mut env = env();
+    set_q(&mut env, 0x1000);
+    // cb = 0x0001_0001（桁 0 と 4 のキャリ）を add で作る:
+    // 0x000F_000F + 0x0001_0001（桁 0: F+1、桁 4: F+1）。
+    set_gpr(&mut env, 4, 0x000f_000f);
+    set_gpr(&mut env, 5, 0x0001_0001);
+    step(&mut env, 0x0885_0606); // add r4,r5,r6
+    assert_eq!(cb(&mut env), 0x0001_0001);
+    // dcor,nbz r8,r9（c=2,f=1 → cf=5）。C/B=0 の桁は -6、
+    // C/B=1 の桁 0・4 はそのまま → res = r8 - 0x6666..6660_6660。
+    // 語の全バイトが非零 → NBZ 成立 → 次命令を無効化。
+    set_gpr(&mut env, 8, 0x1111_1111_1111_1111);
+    step(&mut env, 0x0900_5b89);
+    assert_eq!(gpr(&mut env, 9), 0xaaaa_aaaa_aab0_aab1u64);
+    step(&mut env, 0x340a_0040); // ldo 0x20(r0),r10 → 無効化
+    assert_eq!(gpr(&mut env, 10), 0);
+    // dcor,i は +6 側: 桁 0・4 にのみ 0x6。
+    set_gpr(&mut env, 8, 0x1111_1111_1111_1111);
+    step(&mut env, 0x0900_0bc8); // dcor,i r8,r8
+    assert_eq!(gpr(&mut env, 8), 0x1111_1111_1117_1117u64);
+}
+
 // mtsm は PSW システムマスクへの移動で最上位特権のみ。ユーザ
 // モデルでは privileged operation trap になる（#6 対応）。
 #[test]

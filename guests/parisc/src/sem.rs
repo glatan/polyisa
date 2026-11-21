@@ -30,9 +30,14 @@
 //!   DEPD/DEPW/DEPDI、SAR/即値、併合・零置換選択）。位置は
 //!   HP の左端起算記法を LSB シフト量に換算して評価する。
 //!
+//! - 十進補正・除算ステップ: `dcor`/`dcor,i`（PSW[C/B] の桁
+//!   キャリに従う BCD 訂正。桁キャリ列は `cb` 状態に保持）と
+//!   `ds`（非回復除算の 1 ビットステップ。PSW.V と語の桁
+//!   キャリ C/B{8} を更新する）。
+//!
 //! 条件コードは 32 ビット（d=0）と 64 ビット（d=1）の両方を
-//! 評価する。`dcor`/`ds`/`hadd` 等の MAX/十進補正や FP は
-//! 未実装（`Ok(false)`）。
+//! 評価する。`hadd` 等の MAX や FP 演算は未実装
+//! （`Ok(false)`）。
 //!
 //! 出典は SPEC-PARISC-11・SPEC-PARISC-20 の一次資料のみ。
 //! 条件評価は SPEC-PARISC-11 §5 Table 5-3 〜 5-7 および
@@ -170,17 +175,16 @@ fn fpr_set_w<B: Backend>(b: &mut B, r64: u64, v: B::V<W64>) {
 
 /// PSW の位置。ユーザモードに必要なビットのみを管理する独自
 /// レイアウト（ssm/rsm の HW 番号とは別。N=bit5, B=bit3,
-/// W=bit11）。上位 32 ビットはアーキテクトされないので add/sub
-/// のキャリ保持に使う（PSW.CB の簡約版。`add,c`/`sub,b` の
-/// carry-in はこの 2 ビットだけを見る）。
+/// V=bit6, W=bit11）。桁キャリ列 PSW[C/B] は別途 `cb` 状態に
+/// 持ち、`add,c`/`sub,b`/`ds` が参照する。
 // Ref: SPEC-PARISC-11 §3 (PSW).
 pub const PSW_B: u64 = 0x0000_0008;
 pub const PSW_N: u64 = 0x0000_0020;
+/// DS（非回復除算の 1 ステップ）が更新する除算訂正ビット。
+/// 内部レイアウトでは psw bit6 に置く。
+/// Ref: SPEC-PARISC-11 §3 (PSW), SPEC-PARISC-20 §7-5.
+pub const PSW_V: u64 = 0x0000_0040;
 pub const PSW_W: u64 = 0x0000_0800;
-/// 32 ビット演算のキャリアウト（cb の bit32）を保持する内部ビット。
-pub const PSW_CARRY32: u64 = 1 << 40;
-/// 64 ビット演算のキャリアウト（cb_msb）を保持する内部ビット。
-pub const PSW_CARRY64: u64 = 1 << 41;
 
 /// PSW の位置。
 #[must_use]
@@ -483,8 +487,14 @@ fn arith_cond<B: Backend>(
 ) -> B::B {
     let zero = k(b, 0);
     let c = match cf >> 1 {
-        // never
-        0 => return false_cond(b),
+        // never / TR（f=1）
+        0 => {
+            return if cf & 1 != 0 {
+                true_cond(b)
+            } else {
+                false_cond(b)
+            };
+        }
         // = / <>
         1 => is_zero(b, res, d),
         // < / >=  ((N^V)：res^sv の符号）
@@ -561,6 +571,65 @@ fn sub_cond<B: Backend>(
         }
     };
     let c = b.cmp(op, i1, i2);
+    if cf & 1 != 0 { bnot(b, c) } else { c }
+}
+
+/// DS の減算側（PSW.V=1）の条件解釈。c1..c3 は被演算子比較、
+/// c4/5 は DS 定義の符号なしオーバーフロー（シフトアウト桁を
+/// 含む）、c6/7 は結果の sv/奇偶。`opd1` はシフト済み値、
+/// `opd2` は減数 GR[r2]（どちらも下位 32 ビットを見る）。
+/// Ref: SPEC-PARISC-11 §5.1（DS の条件は V に応じ減算/加算条件に
+/// 類似）および Table 5-3、SPEC-PARISC-20 §7-47/付録D Table D-3.
+fn ds_sub_cond<B: Backend>(
+    b: &mut B,
+    cf: u64,
+    res: B::V<W64>,
+    opd1: B::V<W64>,
+    opd2: B::V<W64>,
+    uv: B::V<W64>,
+    sv: B::V<W64>,
+) -> B::B {
+    let zero = k(b, 0);
+    let c = match cf >> 1 {
+        // never / TR（f=1）
+        0 => {
+            return if cf & 1 != 0 {
+                true_cond(b)
+            } else {
+                false_cond(b)
+            };
+        }
+        // =（opd1 == opd2 ⟺ 語の結果が 0）
+        1 => is_zero(b, res, false),
+        // < / <=（符号付き被演算子比較）
+        2 | 3 => {
+            let i1 = sext_bits(b, opd1, 32);
+            let i2 = sext_bits(b, opd2, 32);
+            if cf >> 1 == 2 {
+                b.cmp(Cmp::LtS, i1, i2)
+            } else {
+                b.cmp(Cmp::LeS, i1, i2)
+            }
+        }
+        // <<（UV：シフトアウト桁 | 語の borrow）
+        4 => b.cmp(Cmp::Ne, uv, zero),
+        // <<=（UV | 語の結果が 0）
+        5 => {
+            let u = b.cmp(Cmp::Ne, uv, zero);
+            let u = bval(b, u);
+            let z = is_zero(b, res, false);
+            let z = bval(b, z);
+            let t = b.or(u, z);
+            b.cmp(Cmp::Ne, t, zero)
+        }
+        // SV
+        6 => is_neg(b, sv, false),
+        // OD
+        _ => {
+            let t = and_n(b, res, 1);
+            b.cmp(Cmp::Ne, t, zero)
+        }
+    };
     if cf & 1 != 0 { bnot(b, c) } else { c }
 }
 
@@ -701,15 +770,24 @@ fn unit_add_cond<B: Backend>(
         // SHZ：16 ビット単位。
         3 => unit_any_zero(b, res, 16, d),
         // キャリー系：ユニット境界（LSB 側 7/3/1 ビット）か最終
-        // キャリーアウトのいずれかが立てば真。
-        c @ (4 | 6 | 7) => {
+        // キャリーアウトのいずれかが立てば真。c=5 は dw のみ
+        // （SWC）。d=false の c=5 は未定義 → never/tr。
+        c @ (4..=7) => {
             let mask: u64 = match (c, d) {
                 (4, true) => 0x1111_1111_1111_1110, // 4 ビット桁（16 桁中 15）
                 (4, false) => 0x1111_1110,          // 4 ビット桁（8 桁中 7）
+                (5, true) => 0x0000_0001_0000_0000, // 32 ビット語（2 中 1）
                 (6, true) => 0x0101_0101_0101_0100, // バイト（8 中 7）
                 (6, false) => 0x0101_0100,          // バイト（4 中 3）
                 (7, true) => 0x0001_0001_0001_0000, // ハーフワード（4 中 3）
-                _ => 0x0001_0000,                   // ハーフワード（2 中 1）
+                (7, false) => 0x0001_0000,          // ハーフワード（2 中 1）
+                _ => {
+                    return if cf & 1 != 0 {
+                        true_cond(b)
+                    } else {
+                        false_cond(b)
+                    };
+                }
             };
             let t = and_n(b, xsum, mask);
             let zero = k(b, 0);
@@ -1444,6 +1522,123 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
             }
             Gr(t as u8).set(b, dest);
             if insn != Insn::UaddcmTc && cf != 0 {
+                let condv = bval(b, cond);
+                set_psw_n(b, condv);
+            }
+        }
+        Insn::Ds => {
+            // DS,cond r1,r2,t：非回復除算の 1 ビットステップ。
+            // ops = [r2, r1, cf, t]。
+            //   partial = cat(lshift(GR[r1],1), PSW[C/B]{8})
+            //   if (PSW[V]) GR[t] ← partial + ~GR[r2] + 1
+            //   else        GR[t] ← partial + GR[r2]
+            //   PSW[C/B] ← carry_borrows（本演算の桁キャリ列）
+            //   PSW[V] ← xor(carry_borrows{8}, GR[r2]{32})
+            // 商ビットが語の桁キャリ C/B{8} になる。
+            // Ref: SPEC-PARISC-11 §5-111, SPEC-PARISC-20 §7-47.
+            let r2 = Gr(ops[0] as u8).get(b);
+            let r1 = Gr(ops[1] as u8).get(b);
+            let (cf, t) = (ops[2], ops[3]);
+            // シフトインする商ビット候補は語の桁キャリ C/B{8}。
+            let cb8 = psw_carry(b, false);
+            let r1s = shl_n(b, r1, 1);
+            let partial = b.or(r1s, cb8);
+            // 旧 PSW[V] で加算/減算を切り替える。
+            let p = b.get(psw_ref());
+            let pv = and_n(b, p, PSW_V);
+            let zero = k(b, 0);
+            let v_set = b.cmp(Cmp::Ne, pv, zero);
+            let not2 = b.not(r2);
+            let in2 = b.select::<W64>(v_set, not2, r2);
+            let cin = bval(b, v_set);
+            let dest = b.add(partial, in2);
+            let dest = b.add(dest, cin);
+            // 桁キャリ列（C/B{0..15}）と 64 ビットの出口キャリ。
+            let c64 = carry64_cin(b, dest, partial, cin);
+            save_carry(b, partial, in2, dest, c64);
+            // PSW[V] ← carry_borrows{8}（語の出口キャリ＝
+            // bit32 へのキャリ）xor GR[r2]{32}（語の符号 = LSB
+            // bit31）。
+            let x = b.xor(partial, in2);
+            let x = b.xor(x, dest);
+            let xs = shr_n(b, x, 32);
+            let cb8_new = and_n(b, xs, 1);
+            let r2sh = shr_n(b, r2, 31);
+            let r2s = and_n(b, r2sh, 1);
+            let vnew = b.xor(cb8_new, r2s);
+            let p = and_n(b, p, !PSW_V);
+            let vbit = shl_n(b, vnew, 6);
+            let p = b.or(p, vbit);
+            b.set(psw_ref(), p);
+            Gr(t as u8).set(b, dest);
+            if cf != 0 {
+                // sv: 「シフトアウトした語最上位ビットとシフト後の
+                // 語最上位ビットが異なる（r1{31} != r1{30}）」に
+                // 加減算の通常の符号付きオーバーフローを OR したもの。
+                // uv: 「語最上位のシフトアウトが 1」に語演算の
+                // 符号なしオーバーフローを OR したもの。
+                // 条件表は旧 PSW.V で切り替わる（V=0 は加算条件、
+                // V=1 は減算条件。SPEC-PARISC-11 §5.1）。
+                let sv = add_sv(b, dest, partial, in2, r1, 1, false);
+                let carry32 = cb8_new;
+                let r1m = shr_n(b, r1, 31);
+                let shifted_out = and_n(b, r1m, 1);
+                let uv_add = b.or(carry32, shifted_out);
+                let one = k(b, 1);
+                let borrow = b.xor(carry32, one);
+                let uv_sub = b.or(borrow, shifted_out);
+                let c_add = arith_cond(b, cf, false, dest, uv_add, sv);
+                let c_sub = ds_sub_cond(b, cf, dest, partial, r2, uv_sub, sv);
+                let c_add = bval(b, c_add);
+                let c_sub = bval(b, c_sub);
+                let c = b.select::<W64>(v_set, c_sub, c_add);
+                set_psw_n(b, c);
+            }
+        }
+        Insn::Dcor | Insn::DcorI => {
+            // DCOR/DCOR,I：16 桁 BCD 訂正。ops = [r, cf, d, t]。
+            // C/B{0..15} は cb 状態の bit4j ベクトル
+            // （C/B{15-j} が bit4j）。中間訂正（dcor,i）は
+            // C/B=1 の桁に +6、最終訂正（dcor）は C/B=0 の桁に -6
+            // （cat の n 番目の 4 ビット項が C/B{n} 対応）。
+            // sel<<1 | sel<<2 で各桁に 0x6 を立てる。
+            // PSW[C/B] は更新しない。条件はユニット条件
+            // （Table D-11/D-12）。
+            // Ref: SPEC-PARISC-20 §7-36, SPEC-PARISC-11
+            // §5-113/§5-114.
+            let r = Gr(ops[0] as u8).get(b);
+            let (cf, d, t) = (ops[1], ops[2] != 0, ops[3]);
+            let cbv = b.get(cb_ref());
+            let sel = and_n(b, cbv, 0x1111_1111_1111_1111);
+            let (res, xsum, cout) = if insn == Insn::DcorI {
+                let c1 = shl_n(b, sel, 1);
+                let c2 = shl_n(b, sel, 2);
+                let corr = b.or(c1, c2);
+                let res = b.add(r, corr);
+                let x = b.xor(r, corr);
+                let x = b.xor(x, res);
+                let zero = k(b, 0);
+                let cout = carry64_cin(b, res, r, zero);
+                (res, x, cout)
+            } else {
+                let nsel = b.not(sel);
+                let nsel = and_n(b, nsel, 0x1111_1111_1111_1111);
+                let c1 = shl_n(b, nsel, 1);
+                let c2 = shl_n(b, nsel, 2);
+                let corr = b.or(c1, c2);
+                // res = r - corr = r + ~corr + 1
+                let ncorr = b.not(corr);
+                let res = b.add(r, ncorr);
+                let one_v = k(b, 1);
+                let res = b.add(res, one_v);
+                let x = b.xor(r, ncorr);
+                let x = b.xor(x, res);
+                let cout = carry64_cin(b, res, r, one_v);
+                (res, x, cout)
+            };
+            Gr(t as u8).set(b, res);
+            if cf != 0 {
+                let cond = unit_add_cond(b, cf, d, res, xsum, cout);
                 let condv = bval(b, cond);
                 set_psw_n(b, condv);
             }
