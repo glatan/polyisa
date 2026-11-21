@@ -36,7 +36,7 @@
 
 | ID | 条件 | 判定 |
 |---|---|---|
-| S18-1 | sh4 両エンディアンの BusyBox（LE は BIN-DISTRO-SH4、BE は自前ビルドの BIN-DISTRO-SH4EB）のコマンド群が、ゲストのルートを使って正しい出力を返す（テスト `heavy_program_superh`）。 | 未整備 |
+| S18-1 | sh4 両エンディアンの BusyBox（LE は BIN-DISTRO-SH4、BE は自前ビルドの BIN-DISTRO-SH4EB）のコマンド群が、ゲストのルートを使って正しい出力を返す（テスト `heavy_program_superh`）。 | テスト：`heavy_program_superh` |
 | S18-2 | ABI 表が SRC-LINUX の UAPI と一致することを所有者が確認する。 | 所有者 |
 
 作業計画：
