@@ -43,7 +43,6 @@
 
 | # | 内容 | 前提 | 判定 |
 |---|---|---|---|
-| PR9 | FP 命令と MAX 拡張 | PR4 | - |
 | PR10 | Linux ABI: hppa の syscall 表・ELF・`heavy_program_parisc` | PR8,PR9 | S17-1 |
 | PR11 | ABI 照合（SRC-LINUX UAPI、所有者確認）+ 残件整理・判定列更新 | PR10 | S17-2 |
 
