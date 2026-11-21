@@ -43,7 +43,6 @@
 
 | # | 内容 | 前提 | 判定 |
 |---|---|---|---|
-| PR5 | 算術・論理・比較（add/sub/comb/and/or/xor）、extract/deposit・シフト | PR4 | - |
 | PR6 | load/store（空間レジスタ経由を含む）・ldcw/ldcws・mfctl（cr27 の TLS 読み出しを含む）・probe | PR4 | - |
 | PR7 | 分岐: bv/be/bl、遅延分岐と nullify の条件 | PR4 | - |
 | PR8 | システムコール: ゲートウェイページへの分岐という特殊経路（lws の CAS 規約を含む） | PR4 | - |
