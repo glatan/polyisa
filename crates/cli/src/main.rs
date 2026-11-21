@@ -101,6 +101,10 @@ fn main() {
             for m in polyisa_guest_superh::MODELS {
                 println!("superh:{m}");
             }
+            #[cfg(feature = "guest-loongarch")]
+            for m in polyisa_guest_loongarch::MODELS {
+                println!("loongarch:{m}");
+            }
         }
         polyisa_cli::Command::Disasm => {
             #[cfg(feature = "guest-riscv")]

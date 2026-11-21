@@ -10,6 +10,9 @@ pub mod run_aarch64;
 pub mod run_alpha;
 #[cfg(feature = "guest-arm")]
 pub mod run_arm;
+#[cfg(feature = "guest-riscv")]
+#[cfg(feature = "guest-loongarch")]
+pub mod run_loongarch;
 #[cfg(feature = "guest-m68k")]
 pub mod run_m68k;
 #[cfg(feature = "guest-mips")]
@@ -18,7 +21,7 @@ pub mod run_mips;
 pub mod run_parisc;
 #[cfg(feature = "guest-power")]
 pub mod run_power;
-#[cfg(feature = "guest-riscv")]
+
 pub mod run_riscv;
 #[cfg(feature = "guest-s390")]
 pub mod run_s390;
@@ -93,6 +96,7 @@ pub fn parse_cpu_spec(s: &str) -> Result<CpuSpec, String> {
     feature = "guest-riscv",
     feature = "guest-s390",
     feature = "guest-sparc",
+    feature = "guest-loongarch",
     feature = "guest-superh",
     feature = "guest-x86"
 ))]
@@ -321,6 +325,31 @@ fn run_superh_elf(path: &str, argv: &[String], spec: Option<&CpuSpec>) -> Result
 #[cfg(not(feature = "guest-superh"))]
 fn run_superh_elf(_path: &str, _argv: &[String], _spec: Option<&CpuSpec>) -> Result<u64, String> {
     Err("この polyisa は superh ゲストなしでビルドされた".to_string())
+}
+
+#[cfg(feature = "guest-loongarch")]
+fn run_loongarch_elf(path: &str, argv: &[String], spec: Option<&CpuSpec>) -> Result<u64, String> {
+    let sel = spec
+        .map(|s| {
+            resolve_sel(
+                "loongarch",
+                polyisa_guest_loongarch::MODEL_DEFS,
+                polyisa_guest_loongarch::FEATURE_DEFS,
+                polyisa_guest_loongarch::FEAT_BITS,
+                s,
+            )
+        })
+        .transpose()?;
+    run_loongarch::run_elf_loongarch_sel(path, argv, sel.as_ref())
+}
+
+#[cfg(not(feature = "guest-loongarch"))]
+fn run_loongarch_elf(
+    _path: &str,
+    _argv: &[String],
+    _spec: Option<&CpuSpec>,
+) -> Result<u64, String> {
+    Err("この polyisa は loongarch ゲストなしでビルドされた".to_string())
 }
 
 #[cfg(feature = "guest-arm")]
@@ -570,6 +599,11 @@ pub fn run_path_opts(
                 // EM_SH=42。Ref: SRC-LINUX (include/uapi/linux/elf-em.h)。
                 check("superh")?;
                 run_superh_elf(path, argv, spec.as_ref())
+            } else if ehdr.machine == 258 {
+                // EM_LOONGARCH=258・ELFCLASS32 は LA32。
+                // Ref: SRC-LINUX (include/uapi/linux/elf-em.h).
+                check("loongarch")?;
+                run_loongarch_elf(path, argv, spec.as_ref())
             } else {
                 Err(format!("未対応の e_machine: {}", ehdr.machine))
             }
@@ -612,6 +646,11 @@ pub fn run_path_opts(
                 // EM_ALPHA=0x9026。Ref: SRC-LINUX (include/uapi/linux/elf-em.h)。
                 check("alpha")?;
                 run_alpha_elf(path, argv, spec.as_ref())
+            } else if ehdr.machine == 258 {
+                // EM_LOONGARCH=258（LA64）。Ref: SRC-LINUX
+                // (include/uapi/linux/elf-em.h).
+                check("loongarch")?;
+                run_loongarch_elf(path, argv, spec.as_ref())
             } else {
                 Err(format!("未対応の e_machine: {}", ehdr.machine))
             }

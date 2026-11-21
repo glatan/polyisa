@@ -77,6 +77,11 @@ pub mod sparc;
 // Ref: SRC-LINUX (7.3).
 pub mod superh;
 
+/// LoongArch（LA64/LA32）のシステムコール番号と syscall 処理
+/// （`sys` の実装だけ `guest-loongarch` 機能の内側）。
+// Ref: SRC-LINUX — include/uapi/asm-generic/unistd.h.
+pub mod loongarch;
+
 /// x86 の 32ビット（Linux の i386 ABI、EM_386）のシステムコール番号。
 // Ref: SRC-LINUX (7.3).
 pub mod x86_32;
