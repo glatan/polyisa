@@ -217,12 +217,12 @@ pub const FPSR_RM: u64 = 0x0000_0600_0000_0000;
 /// 遅延トラップ武装ビット。ロードは T=1 を立てられるが、
 /// 「T=1 で次の FP 命令が完了強制トラップ」の起動はモデル化
 /// しない（例外配送経路がない。倍長 fstd fr0 で T←0 だけは
-/// SPEC-PARISC-11 §6-39 どおり行う）。
+/// SPEC-PARISC-11 §6-11 の T フィールド規定どおり行う）。
 // Gap: GAP-0057
 pub const FPSR_T: u64 = 1 << 38;
 /// denormal を 0 扱いする高速モード。本モデルは「D ビットを
 /// 持たない実装」として常に D=0 の意味論（フルの denormal
-/// 処理）を採る。SPEC-PARISC-11 §6-25 が実装を任意とする。
+/// 処理）を採る。SPEC-PARISC-11 §6-11 が実装を任意とする。
 pub const FPSR_D: u64 = 1 << 37;
 /// 例外トラップイネーブル（bit36=V、35=Z、34=O、33=U、32=I）。
 /// 例外の発生はフラグ集約のみで、enable が立っていても
@@ -260,7 +260,7 @@ fn fpsr_rm<B: Backend>(b: &mut B) -> B::V<W64> {
 /// PA-RISC の RM 値（0=最近接 1=0 方向 2=+∞ 3=-∞）を
 /// softfloat/RISC-V の rm 値（`Rm` 列挙: Rdn=2, Rup=3）に
 /// 写像する。
-// Ref: SPEC-PARISC-11 §6-19 Table 6-2（PA の RM 配列は
+// Ref: SPEC-PARISC-11 §6-10 Table 6-5（PA の RM 配列は
 // 2 と 3 が IEEE 754-2008 / RISC-V と入れ替わっている）。
 fn pa_to_sf_rm(m: u8) -> u8 {
     match m {
@@ -384,6 +384,81 @@ fn fp_nan<B: Backend>(b: &mut B, f: FpFmt, x: B::V<W64>) -> FpNan<B> {
     FpNan { nan, snan, quieted }
 }
 
+/// 絶対値部（指数|仮数）が全 0、つまり ±0 かどうか（u64 の 0/1）。
+fn fp_iszero<B: Backend>(b: &mut B, f: FpFmt, x: B::V<W64>) -> B::V<W64> {
+    let zero = k(b, 0);
+    let mag = and_n(b, x, f.exp_mask() | f.frac_mask());
+    let z = b.cmp(Cmp::Eq, mag, zero);
+    bval(b, z)
+}
+
+/// ±∞（指数が全 1・仮数が 0）かどうか（u64 の 0/1）。
+fn fp_isinf<B: Backend>(b: &mut B, f: FpFmt, x: B::V<W64>) -> B::V<W64> {
+    let zero = k(b, 0);
+    let em = k(b, f.exp_mask());
+    let exp = and_n(b, x, f.exp_mask());
+    let frac = and_n(b, x, f.frac_mask());
+    let e_ok = b.cmp(Cmp::Eq, exp, em);
+    let f_z = b.cmp(Cmp::Eq, frac, zero);
+    let ev = bval(b, e_ok);
+    let fv = bval(b, f_z);
+    b.and(ev, fv)
+}
+
+/// 符号ビット（u64 の 0/1）。
+fn fp_sign<B: Backend>(b: &mut B, f: FpFmt, x: B::V<W64>) -> B::V<W64> {
+    let zero = k(b, 0);
+    let s = and_n(b, x, f.sign_bit());
+    let nz = b.cmp(Cmp::Ne, s, zero);
+    bval(b, nz)
+}
+
+/// class 3 二項演算の invalid 条件（非 NaN 入力の場合のみ）を
+/// オペランドのビット列から直接判定する。`fp_flags()` が
+/// 定数 0 の IR 経路でも既定 NaN 置換と V フラグが効く近似。
+/// interp では backend フラグと同値なので両方を OR する。
+/// `subop` は fp3 と同じ番号（0=fadd 1=fsub 2=fmpy 3=fdiv）。
+// Ref: SPEC-PARISC-11 §6-21/§6-22（Invalid operation:
+// (−∞)+(+∞)、(+∞)−(+∞)、0×∞、0/0、∞/∞ 等）・§6-53..§6-56。
+fn fp3_invalid<B: Backend>(
+    b: &mut B,
+    f: FpFmt,
+    subop: u8,
+    a: B::V<W64>,
+    c: B::V<W64>,
+) -> B::V<W64> {
+    let one = k(b, 1);
+    let a_inf = fp_isinf(b, f, a);
+    let c_inf = fp_isinf(b, f, c);
+    let both_inf = b.and(a_inf, c_inf);
+    match subop {
+        // add: 異符号の ±∞ 同士。sub: 同符号の ±∞ 同士。
+        0 | 1 => {
+            let a_sg = fp_sign(b, f, a);
+            let c_sg = fp_sign(b, f, c);
+            let sg_eq_b = b.cmp(Cmp::Eq, a_sg, c_sg);
+            let sg_eq = bval(b, sg_eq_b);
+            let cond = if subop == 0 { b.xor(sg_eq, one) } else { sg_eq };
+            b.and(both_inf, cond)
+        }
+        // mpy: 0×∞（どちらかが ±0・どちらかが ±∞）。
+        2 => {
+            let a_z = fp_iszero(b, f, a);
+            let c_z = fp_iszero(b, f, c);
+            let p = b.and(a_z, c_inf);
+            let q = b.and(a_inf, c_z);
+            b.or(p, q)
+        }
+        // div: 0/0 または ∞/∞。
+        _ => {
+            let a_z = fp_iszero(b, f, a);
+            let c_z = fp_iszero(b, f, c);
+            let zz = b.and(a_z, c_z);
+            b.or(zz, both_inf)
+        }
+    }
+}
+
 /// FP ソースの読み出し（単精度・正規化 32 ビット値）。
 /// load/store 以外の命令で fr0L は +0.0 を供給する。その他の
 /// f[0] 半分や例外レジスタ（1..3）は非ロード/ストア命令での
@@ -428,7 +503,7 @@ fn fp_dst_d<B: Backend>(b: &mut B, r: u64, v: B::V<W64>) {
 /// softfloat 層に round-to-integral 演算はないため、指数部で
 /// 「落ちる桁」の範囲を決めて RM どおりに丸め入れる。指数が
 /// 大きい値（±∞ を含む）は既に整数なのでそのまま返す。
-// Ref: SPEC-PARISC-11 §6-46 FRND, SPEC-PARISC-20 §9 FRND.
+// Ref: SPEC-PARISC-11 §6-52 FRND, SPEC-PARISC-20 §9 FRND.
 fn fp_rnd<B: Backend>(b: &mut B, f: FpFmt, m: u8, x: B::V<W64>) -> (B::V<W64>, B::V<W64>) {
     let zero = k(b, 0);
     let one = k(b, 1);
@@ -538,7 +613,7 @@ fn fp_rnd<B: Backend>(b: &mut B, f: FpFmt, m: u8, x: B::V<W64>) -> (B::V<W64>, B
 /// （2=fcpy 3=fabs 4=fsqrt 5=frnd 6=fneg 7=fnegabs）。
 /// `r64`/`t64` は 6 ビット半レジスタ番号（0C 形式の `_f` は
 /// 5 ビット reg をそのまま渡せば左半分になる）。
-// Ref: SPEC-PARISC-11 §6-36..§6-47, SPEC-PARISC-20 §9.
+// Ref: SPEC-PARISC-11 §6-49..§6-52, SPEC-PARISC-20 §9.
 fn fp0<B: Backend>(b: &mut B, subop: u8, r64: u64, t64: u64, sgl: bool) -> Result<(), B::Exit> {
     let f = if sgl { FMT_SGL } else { FMT_DBL };
     let a = if sgl {
@@ -549,7 +624,8 @@ fn fp0<B: Backend>(b: &mut B, subop: u8, r64: u64, t64: u64, sgl: bool) -> Resul
     match subop {
         // FCPY/FABS/FNEG/FNEGABS は非算術で NaN のペイロード
         // をそのまま通し、IEEE 例外を一切起こさない。
-        // Ref: SPEC-PARISC-11 §6-36/§6-37/§6-44/§6-45.
+        // Ref: SPEC-PARISC-11 §6-49/§6-50, SPEC-PARISC-20 §9
+        // （FNEG/FNEGABS は PA 2.0 での追加）。
         2 | 3 | 6 | 7 => {
             let v = match subop {
                 2 => a,
@@ -579,6 +655,23 @@ fn fp0<B: Backend>(b: &mut B, subop: u8, r64: u64, t64: u64, sgl: bool) -> Resul
             let nan_sel = b.select(asnan_b, an.quieted, a);
             let vflag = k(b, FPSR_FLAG_V);
             let nan_flag = b.select(asnan_b, vflag, zero);
+            // FSQRT の非 NaN 入力 invalid（負の有限値・−∞）を
+            // オペランドのビット列から判定する。backend の
+            // fp_flags() と OR するので interp の結果は変わら
+            // ず、fp_flags()=0 の IR 経路でも既定 NaN 置換と
+            // V フラグが効く近似になる（GAP-0057）。
+            let inv0 = if subop == 4 {
+                let sgn = fp_sign(b, f, a);
+                let mag = and_n(b, a, f.exp_mask() | f.frac_mask());
+                let nz = b.cmp(Cmp::Ne, mag, zero);
+                let nzv = bval(b, nz);
+                let pre = b.and(sgn, nzv);
+                let one_v = k(b, 1);
+                let nq = b.xor(an.nan, one_v);
+                b.and(pre, nq)
+            } else {
+                zero
+            };
             let rm = fpsr_rm(b);
             for m in 0u8..4 {
                 let mv = k(b, u64::from(m));
@@ -597,16 +690,17 @@ fn fp0<B: Backend>(b: &mut B, subop: u8, r64: u64, t64: u64, sgl: bool) -> Resul
                             b.trunc::<F64, W64>(rr)
                         };
                         let fl = b.fp_flags();
-                        // 非 NaN 入力での invalid（負値/−∞）は
-                        // 既定 NaN に差し替える。IR では
-                        // fp_flags()=0 なので差し替えない
-                        // （GAP-0027 系の既知の JIT 制限）。
-                        let r = if fl & polyisa_softfloat::FP_NV != 0 {
-                            k(b, f.default_nan())
-                        } else {
-                            r
-                        };
-                        (r, k(b, fpsr_flags_of(fl)))
+                        // invalid（負値/−∞）は既定 NaN に差し
+                        // 替え、V を立てる。検出は backend フラ
+                        // グとビット判定の OR（IR 近似は
+                        // fp3_invalid と同じ。GAP-0057）。
+                        let inv = or_n(b, inv0, (fl & polyisa_softfloat::FP_NV != 0) as u64);
+                        let ib = b.cmp(Cmp::Ne, inv, zero);
+                        let dn = k(b, f.default_nan());
+                        let r = b.select(ib, dn, r);
+                        let bf = k(b, fpsr_flags_of(fl));
+                        let vf = shl_n(b, inv, 63);
+                        (r, b.or(bf, vf))
                     } else {
                         // FRND。backend 演算は通さず整数ビットで
                         // 丸める。inexact をフラグに写像。
@@ -632,7 +726,7 @@ fn fp0<B: Backend>(b: &mut B, subop: u8, r64: u64, t64: u64, sgl: bool) -> Resul
 /// class 3 の算術（fadd/fsub/fmpy/fdiv）。`subop` は
 /// 0=fadd 1=fsub 2=fmpy 3=fdiv。`ra/rb/rt` はレジスタ番号
 /// （sgl では半レジスタ r64、dbl では 5 ビット reg）。
-// Ref: SPEC-PARISC-11 §6-48..§6-53, SPEC-PARISC-20 §9.
+// Ref: SPEC-PARISC-11 §6-53..§6-56, SPEC-PARISC-20 §9.
 fn fp3<B: Backend>(
     b: &mut B,
     subop: u8,
@@ -669,6 +763,13 @@ fn fp3<B: Backend>(
     let nan_sel = b.select(asnan_b, an.quieted, bq_sel);
     let vflag = k(b, FPSR_FLAG_V);
     let nan_flags = b.select(any_snan_b, vflag, zero);
+    // 非 NaN 入力の invalid（∞−∞、0×∞、0/0、∞/∞）を
+    // オペランドのビット判定で持つ。backend フラグと OR
+    // するので interp は変わらず、fp_flags()=0 の IR
+    // 経路でも既定 NaN 置換と V フラグが効く（GAP-0057
+    // の近似。NaN 入力では isinf/iszero が共に 0 なので
+    // この値は必ず 0 になる）。
+    let inv0 = fp3_invalid(b, f, subop, a, c);
     let rm = fpsr_rm(b);
     for m in 0u8..4 {
         let mv = k(b, u64::from(m));
@@ -697,20 +798,22 @@ fn fp3<B: Backend>(
                 b.trunc::<F64, W64>(r)
             };
             let fl = b.fp_flags();
-            // 非 NaN 入力の invalid（∞−∞、0/0 等）は既定 NaN
-            // に差し替える。IR では fp_flags()=0（GAP-0027 系）。
-            let res0 = if fl & polyisa_softfloat::FP_NV != 0 {
-                k(b, f.default_nan())
-            } else {
-                res0
-            };
+            // invalid は既定 NaN に差し替え V を立てる。
+            // backend フラグとビット判定の OR で検出
+            // （IR でもビット判定側が効く。GAP-0057）。
+            let inv = or_n(b, inv0, (fl & polyisa_softfloat::FP_NV != 0) as u64);
+            let ib = b.cmp(Cmp::Ne, inv, zero);
+            let dn = k(b, f.default_nan());
+            let res0 = b.select(ib, dn, res0);
             let res = b.select(any_nan_b, nan_sel, res0);
             if sgl {
                 fp_dst_w(b, rt, res);
             } else {
                 fp_dst_d(b, rt, res);
             }
-            let be_flags = k(b, fpsr_flags_of(fl));
+            let bf = k(b, fpsr_flags_of(fl));
+            let vf = shl_n(b, inv, 63);
+            let be_flags = b.or(bf, vf);
             let flags = b.select(any_nan_b, nan_flags, be_flags);
             fpsr_or(b, flags);
             Ok(())

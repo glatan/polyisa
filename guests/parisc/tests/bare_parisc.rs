@@ -1499,7 +1499,7 @@ fn exec_diag_traps_as_privileged() {
 
 // ---- FP 演算（段階17 PR9a）----
 // 出典: SPEC-PARISC-11 §6 Table 6-5（RM）、§6-23（NaN/符号）、
-// §6-36..§6-53（class 0/3）、Figure 6-6（FPSR フィールド）、
+// §6-49..§6-56（class 0/3）、Figure 6-6（FPSR フィールド）、
 // SPEC-PARISC-20 §8 Table 8-1（frNL/frNR 規則）・§9。
 // FPSR（f[0] の上位 32 ビット）のフラグは u64 の bits63..59
 // （V,Z,O,U,I の順）、RM は bits42..41。
@@ -1541,12 +1541,22 @@ fn exec_fp_class0_nonarith_moves_bits() {
     step(&mut env, 0x3080_480b);
     assert_eq!(fpr(&mut env, 11), 0x7ff4_dead_beef_1234);
     // 非算術の符号操作は NaN 入力でも例外フラグを立てない。
-    set_fpr(&mut env, 4, 0x7fc0_0000_0000_0000); // PA の通知型 NaN
-    step(&mut env, 0x3080_600c); // fabs,d
-    step(&mut env, 0x3080_c00d); // fneg,d
-    step(&mut env, 0x3080_e010); // fnegabs,d
+    set_fpr(&mut env, 4, 0x7fc0_0000_0000_0000); // PA の通知型 NaN（fr4L）
+    step(&mut env, 0x3080_600c); // fabs,f fr4,fr12
+    step(&mut env, 0x3080_c00d); // fneg,f fr4,fr13
+    step(&mut env, 0x3080_e010); // fnegabs,f fr4,fr16
     assert_eq!(fpsr_flags(&mut env), 0);
     assert_eq!(fpr(&mut env, 16) >> 32, 0xffc0_0000);
+    // `,d`（fmt=01・全幅）の非算術 NaN でも同じ規則:
+    // ペイロードを保存し例外フラグは立たない。
+    set_fpr(&mut env, 4, 0xfff4_dead_beef_1234); // 負の通知型 NaN
+    step(&mut env, 0x3080_680c); // fabs,d fr4,fr12
+    assert_eq!(fpr(&mut env, 12), 0x7ff4_dead_beef_1234);
+    step(&mut env, 0x3080_c80d); // fneg,d fr4,fr13
+    assert_eq!(fpr(&mut env, 13), 0x7ff4_dead_beef_1234);
+    step(&mut env, 0x3080_e810); // fnegabs,d fr4,fr16
+    assert_eq!(fpr(&mut env, 16), 0xfff4_dead_beef_1234);
+    assert_eq!(fpsr_flags(&mut env), 0);
 }
 
 // RM（FPSR bits42..41）ごとの算術結果。1/3 と -1/3 の無限二進
@@ -1594,7 +1604,7 @@ fn exec_fp_arith_rounding_modes() {
     assert_eq!(fpsr_flags(&mut env), 0x04 | 0x01);
 }
 
-// FRND は丸めて整数値の浮動小数点にする（SPEC-PARISC-11 §6-46）。
+// FRND は丸めて整数値の浮動小数点にする（SPEC-PARISC-11 §6-52）。
 // 語形は fcpy と同じで sub=101。
 #[test]
 fn exec_fp_frnd_rounding_modes() {
