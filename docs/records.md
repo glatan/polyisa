@@ -24,7 +24,8 @@
 | 15 | SPARC | 完了 |
 | 16 | Alpha | 完了 |
 | 17 | PA-RISC | 完了 |
-| 18-24 | SuperH〜PDP-11 | 未着手（作業計画は `design/roadmap.md` の各段階） |
+| 18 | SuperH | 完了 |
+| 19-24 | LoongArch〜PDP-11 | 未着手（作業計画は `design/roadmap.md` の各段階） |
 | 25-29 | OS パーソナリティ・システムコール段階 5・タイミング・ホスト移植・GDB | 未着手 |
 
 ## 対応した内容
@@ -460,6 +461,19 @@ WebAssembly の本格的な実装と、WASI preview1 の OS パーソナリテ�
 
 - S17-2 の所有者確認（`heavy_abi_parisc` が機械的証拠）
 - GAP-0047（SPOPn・debug SFU・COPR uid≠0・PA1.1 の 0x0E 半面選択形の未モデル分）・GAP-0052（LDCW 予約近似・GATE 特権・IASQ・トラップ復帰等の簡略化）・GAP-0053（未定義域の決定的評価）・GAP-0054（SUBB 系の条件評価の読み）・GAP-0055（絶対番地アクセスと PROBE の簡略化）・GAP-0056（ゲートウェイページの近似）・GAP-0057（FP 例外トラップの配送）・GAP-0058（syscall ABI の意図的な簡略化）
+
+### 段階 18：SuperH
+
+対応した内容：
+
+- `guests/superh`（spec・sem）・`run_superh`・`os-linux::superh`（sh4 syscall 表・FdTable 系・dirfd 解決を含む両エンディアンの直列化）
+- 版の範囲 SH-1 から SH-4A・J-core のうちユーザーモード実行に要る命令群（SH-2A の 32 ビット命令はデコーダ入口の長さ規則、遅延スロットとスロット不正命令例外、FPSCR の PR/SZ/FR を実行モードとする SH-4 FPU、DIV1 の Q 更新は J-core 式）
+- `heavy_program_superh`（sh4 両エンディアンの BusyBox。LE は BIN-DISTRO-SH4、BE は自前ビルドの BIN-DISTRO-SH4EB。e_flags でモデルを選択し SH-4A 側の synco/movli/movco を解決）・`heavy_abi_superh`（SRC-LINUX-SH-UAPI の syscall.tbl 照合。abi 列は全行 common の 437 エントリ）
+
+残っている事項：
+
+- S18-2 の所有者確認（`heavy_abi_superh` が機械的証拠）
+- GAP-0059（意味論の意図的な簡略化）・GAP-0060（syscall ABI の意図的な簡略化）・GAP-0061（SH-2A レジスタバンクの部分モデル）
 
 ## 残っている事項（横断）
 

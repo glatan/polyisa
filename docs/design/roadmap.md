@@ -26,35 +26,6 @@
 
 この文書は未完のタスクだけを載せる。完了した作業計画の行はその時点で削除し、完了条件をすべて満たした段階は節ごと削除する。完了した段階の実績と残件は `docs/records.md` に記録する。段階の詳細な計画（実装項目と事実の出所の対応表）とレビューの記録は `.local/` に置く作業文書に残す。詳しい手順は [開発の流れ](dev-workflow.md) の「段階の進め方」を見る。
 
-### 段階 18：SuperH
-
-- 版の範囲は SH-1 から SH-4A までと、SH-2 互換の J-core。SH-2A の 32 ビット命令はデコーダの入口の長さの規則で扱う。SH-3/SH-3E は公開のソフトウェアマニュアル（SPEC-SUPERH-SH3、REJ09B0317-0400 Rev.4.00）を追加登録して範囲に残す（SH3-DSP の DSP 命令は対象外）。SH-4A 固有命令と gUSA の根拠は SPEC-SUPERH-SH4A（REJ09B0003-0150Z Rev.1.50）を追加登録した
-- SH-4 の FPSCR の PR、SZ、FR は実行モード。遅延スロット内の分岐はスロット不正命令の例外。gUSA は再開可能な不可分列
-- sh4（両エンディアン）のゲスト ABI
-
-完了条件：
-
-| ID | 条件 | 判定 |
-|---|---|---|
-| S18-1 | sh4 両エンディアンの BusyBox（LE は BIN-DISTRO-SH4、BE は自前ビルドの BIN-DISTRO-SH4EB）のコマンド群が、ゲストのルートを使って正しい出力を返す（テスト `heavy_program_superh`）。 | テスト：`heavy_program_superh` |
-| S18-2 | ABI 表が SRC-LINUX の UAPI と一致することを所有者が確認する。 | 所有者 |
-
-作業計画：
-
-| # | 内容 | 前提 | 判定 |
-|---|---|---|---|
-| SH2 | `guests/superh` 骨格: CpuState（R0-15・PC/PR/SR/GBR/VBR/MACH/MACL/FPUL・FP/FPSCR）、モデル（SH-1 から SH-4A・J-core）の宣言 | - | - |
-| SH3 | デコード: 16 ビット主体 + SH-2A の 32 ビット命令（デコーダ入口の長さ規則）。両エンディアンの語並び | SH2 | - |
-| SH4 | `run_superh` 実行ループ: 遅延スロットとスロット不正命令の例外 + bare 最小テスト | SH3 | - |
-| SH5 | 算術・論理・比較（add/sub/neg/and/or/xor/cmp 系）・lds/sts（PR/GBR/MACH/MACL/FPUL/FPSCR の転送） | SH4 | - |
-| SH6 | load/store: レジスタ相対・GBR 相対・R0 相対・PC 相対リテラル | SH4 | - |
-| SH7 | 分岐: bf/bt/bra/bsr/bsrf/jsr/rts/trapa と遅延スロット | SH4 | - |
-| SH8 | 乗算・MAC（mul/macl/dmuls・MACH/MACL）・ext/シフト系 | SH4 | - |
-| SH9 | SH-4 FPU: fmov/fadd/fsub/fmul/fdiv/fmac/ftrc/ftst。FPSCR の PR/SZ/FR を実行モードとして扱う | SH4 | - |
-| SH10 | モデル差（SH-1 から SH-4A・SH-2A・J-core）を `when` 述語とパラメータで切り分け。gUSA と SH-4A の movli/movco、J-core の cas.l/shad/shld の扱いを決める | SH5-9 | - |
-| SH11 | Linux ABI: sh4 の syscall 表・ELF・`heavy_program_superh`（両エンディアン） | SH10 | S18-1 |
-| SH12 | ABI 照合（SRC-LINUX UAPI、所有者確認）+ 残件整理・判定列更新 | SH11 | S18-2 |
-
 ### 段階 19：LoongArch
 
 - 版の範囲は LA32 と LA64、LSX、LASX、LBT の拡張。LBT が参照する x86 と ARM の状態は CPU 状態に含める。LSX、LASX、LBT の公式仕様（Reference Manual の Vol.2、Vol.3）は未刊行であり、公開されるまで拡張の実装は保留する（SPEC-LOONGARCH-VEXT）
