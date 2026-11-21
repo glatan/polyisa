@@ -28,15 +28,15 @@
 
 ### 段階 19：LoongArch
 
-- 版の範囲は LA32 と LA64、LSX、LASX、LBT の拡張。LBT が参照する x86 と ARM の状態は CPU 状態に含める。LSX、LASX、LBT の公式仕様（Reference Manual の Vol.2、Vol.3）は未刊行であり、公開されるまで拡張の実装は保留する（SPEC-LOONGARCH-VEXT）
-- 初期の独自の ABI と本流の ABI はゲスト ABI の変種として区別する。`CPUCFG` は識別情報
+- 版の範囲は LA32 と LA64、LSX、LASX、LBT の拡張。LBT が参照する x86 と ARM の状態は CPU 状態に含める。LSX、LASX、LBT の公式仕様（Reference Manual の Vol.2、Vol.3）は SPEC-LOONGARCH-VEXT（英語版 v1.00）として登録済みであり、拡張の実装を対象に含めるかは LA13 の棚卸しで確定する（それまでは機能旗のみ）
+- 初期の独自の ABI（旧ワールド、e_flags[7:6]=v0）と本流の ABI（新ワールド、v1）は `e_flags[7:6]` の ABI version で区別するゲスト ABI の変種とする。実装対象は新ワールドのみ（入手可能な配布物はすべて新ワールドであり、旧ワールドのテスト入力の入手経路がない）。`CPUCFG` は識別情報
 - LA64 のゲスト ABI
 
 完了条件：
 
 | ID | 条件 | 判定 |
 |---|---|---|
-| S19-1 | la64 のテストプログラムと配布物のコマンド群が、ゲストのルートを使って正しい出力を返す（テスト `heavy_program_loongarch`）。 | 未整備 |
+| S19-1 | la64 のテストプログラムと配布物（BIN-DISTRO-LOONGARCH の Alpine minirootfs）のコマンド群が、ゲストのルートを使って正しい出力を返す（テスト `heavy_program_loongarch`）。 | 未整備 |
 | S19-2 | ABI 表が、UAPI ヘッダからの抽出値と一致する（テスト `heavy_abi_loongarch`）。 | 未整備 |
 | S19-3 | llvm-objdump とのデコーダの差分テストが通る（テスト `heavy_oracle_loongarch`）。 | 未整備 |
 
@@ -44,10 +44,9 @@
 
 | # | 内容 | 前提 | 判定 |
 |---|---|---|---|
-| LA1 | 着手条件: SPEC-LOONGARCH-PSABI の版確定、BIN 登録、初期の独自 ABI と本流 ABI の区別の確認 | - | - |
-| LA2 | `guests/loongarch` 骨格: CpuState（r0-31・f0-31・PC・CSR・fcc）、機能（LA32・LA64、LSX/LASX/LBT は機能旗のみ先に）とモデルの宣言 | LA1 | - |
+| LA2 | `guests/loongarch` 骨格: CpuState（r0-31・f0-31・PC・CSR・fcc）、機能（LA32・LA64、LSX/LASX/LBT は機能旗のみ先に）とモデルの宣言 | - | - |
 | LA3 | デコード: 32 ビット固定長、LA32/LA64 の差 | LA2 | - |
-| LA4 | `run_loongarch` 実行ループ + bare 最小テスト（LA32 は Linux 移植がないので裸環境で検証する） | LA3 | - |
+| LA4 | `run_loongarch` 実行ループ + bare 最小テスト（LA32 は Linux の配布物がないので裸環境で検証する） | LA3 | - |
 | LA5 | 整数算術・論理・シフト・比較 | LA4 | - |
 | LA6 | load/store・原子（ll/sc・am* 系） | LA4 | - |
 | LA7 | 分岐・jirl・b/bl | LA4 | - |
@@ -56,7 +55,7 @@
 | LA10 | Linux ABI: 独自 ABI と本流 ABI をゲスト ABI の変種として区別し、syscall 表・ELF・`heavy_program_loongarch` | LA8,LA9 | S19-1 |
 | LA11 | `heavy_abi_loongarch` | LA10 | S19-2 |
 | LA12 | `heavy_oracle_loongarch` | LA9 | S19-3 |
-| LA13 | LSX/LASX/LBT の保留方針の確定（SPEC-LOONGARCH-VEXT 未刊行）+ 残件整理・判定列更新 | LA11,LA12 | - |
+| LA13 | LSX/LASX/LBT の実装範囲の棚卸し（SPEC-LOONGARCH-VEXT）+ 残件整理・判定列更新 | LA11,LA12 | - |
 
 ### 段階 20：OpenRISC
 
