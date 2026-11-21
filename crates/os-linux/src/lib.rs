@@ -72,6 +72,11 @@ pub mod s390;
 // Ref: SRC-LINUX (7.3).
 pub mod sparc;
 
+/// SuperH（SH-4・32ビット）のシステムコール番号と syscall 処理
+/// （`sys` の実装だけ `guest-superh` 機能の内側）。
+// Ref: SRC-LINUX (7.3).
+pub mod superh;
+
 /// x86 の 32ビット（Linux の i386 ABI、EM_386）のシステムコール番号。
 // Ref: SRC-LINUX (7.3).
 pub mod x86_32;
@@ -104,6 +109,7 @@ pub enum GuestAbi {
     ArmLinux,
     M68kLinux,
     PariscLinux,
+    SuperhLinux,
 }
 
 /// 実行ループとの境界。定義は実行エンジンにある。
@@ -492,6 +498,7 @@ pub fn syscall_name(abi: GuestAbi, nr: u64) -> Option<&'static str> {
         GuestAbi::ArmLinux => arm::name(nr),
         GuestAbi::M68kLinux => m68k::name(nr),
         GuestAbi::PariscLinux => parisc::name(nr),
+        GuestAbi::SuperhLinux => superh::name(nr),
         GuestAbi::Unknown => None,
     }
 }
