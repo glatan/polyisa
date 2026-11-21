@@ -36,7 +36,7 @@
 
 | ID | 条件 | 判定 |
 |---|---|---|
-| S17-1 | hppa の配布物のコマンド群が、ゲストのルートを使って正しい出力を返す（テスト `heavy_program_parisc`）。 | 未整備 |
+| S17-1 | hppa の配布物のコマンド群が、ゲストのルートを使って正しい出力を返す（テスト `heavy_program_parisc`）。 | テスト：`heavy_program_parisc` |
 | S17-2 | ABI 表が SRC-LINUX の UAPI と一致することを所有者が確認する。 | 所有者 |
 
 作業計画：

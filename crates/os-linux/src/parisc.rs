@@ -196,6 +196,8 @@ pub mod errno {
     pub const ENOTRECOVERABLE: u32 = 255;
     pub const ERFKILL: u32 = 256;
     pub const EHWPOISON: u32 = 257;
+    /// EFTYPE（generic 134 の hppa 値。hppa errno 表の末尾）。
+    pub const EFTYPE: u32 = 258;
 }
 
 /// `mmap`/`mprotect` の prot と flags。hppa の MAP_FIXED=0x04 と
@@ -227,7 +229,11 @@ pub mod oflag {
     pub const NONBLOCK: u64 = 0o200000; // 1 << 16
     pub const DIRECTORY: u64 = 0o10000; // 1 << 12
     pub const NOFOLLOW: u64 = 0o200; // 1 << 7
+    /// O_DIRECT（1<<14。hppa は定義しないので asm-generic の値）。
+    pub const DIRECT: u64 = 0o40000;
     pub const CLOEXEC: u64 = 0o1000_0000; // 1 << 21
+    /// O_NOATIME（1<<20。hppa 定義。F_SETFL で変更可能）。
+    pub const NOATIME: u64 = 0o4000_0000;
     /// O_LARGEFILE（1<<11。64 ビットサイズは常時受理するので解釈は不要）。
     pub const LARGEFILE: u64 = 0o4000;
     /// O_PATH（1<<22。fd はパス保持のみ）。
@@ -243,8 +249,84 @@ pub mod at {
     pub const SYMLINK_NOFOLLOW: u64 = 0x100;
     /// AT_REMOVEDIR（unlinkat でディレクトリを消す）。
     pub const REMOVEDIR: u64 = 0x200;
+    /// AT_EACCESS（faccessat2 で実効 uid ではなく実 uid で検査）。
+    /// AT_REMOVEDIR と同じ 0x200 のビットを共有する（呼び出しごとに
+    /// 意味が異なる UAPI）。
+    pub const EACCESS: u64 = 0x200;
     /// AT_EMPTY_PATH。空のパスは dirfd 自身を対象にする。
     pub const EMPTY_PATH: u64 = 0x1000;
+    /// AT_NO_AUTOMOUNT（statx 等で受理される）。
+    pub const NO_AUTOMOUNT: u64 = 0x800;
+    /// AT_STATX_SYNC_TYPE（statx の同期モード指定の許容 mask）。
+    pub const STATX_SYNC_TYPE: u64 = 0x6000;
+}
+
+/// `fcntl`/`fcntl64` のコマンド。hppa は 8–14 を独自値に変え
+/// （GETLK64=8/SETLK64=9/SETLKW64=10/GETOWN=11/SETOWN=12/
+/// SETSIG=13/GETSIG=14。asm-generic ではこの区間は
+/// SETOWN/GETOWN/SETSIG/GETSIG/GETLK64/SETLK64/SETLKW64）、
+/// 0–7 と 15 以降は asm-generic/fcntl.h の汎用値。
+/// flock の l_type（F_RDLCK=1/F_WRLCK=2/F_UNLCK=3）も hppa 独自。
+// Ref: SRC-LINUX (7.3) — arch/parisc/include/uapi/asm/fcntl.h
+// と include/uapi/asm-generic/fcntl.h.
+pub mod fcntl {
+    pub const DUPFD: u32 = 0;
+    pub const GETFD: u32 = 1;
+    pub const SETFD: u32 = 2;
+    pub const GETFL: u32 = 3;
+    pub const SETFL: u32 = 4;
+    pub const GETLK: u32 = 5;
+    pub const SETLK: u32 = 6;
+    pub const SETLKW: u32 = 7;
+    // ---- hppa 独自（asm/fcntl.h）----
+    pub const GETLK64: u32 = 8;
+    pub const SETLK64: u32 = 9;
+    pub const SETLKW64: u32 = 10;
+    pub const GETOWN: u32 = 11;
+    pub const SETOWN: u32 = 12;
+    pub const SETSIG: u32 = 13;
+    pub const GETSIG: u32 = 14;
+    // ---- asm-generic ----
+    pub const SETOWN_EX: u32 = 15;
+    pub const GETOWN_EX: u32 = 16;
+    pub const GETOWNER_UIDS: u32 = 17;
+    /// OFD ロック（asm-generic。flock64 形）。
+    pub const OFD_GETLK: u32 = 36;
+    pub const OFD_SETLK: u32 = 37;
+    pub const OFD_SETLKW: u32 = 38;
+    /// F_LINUX_SPECIFIC_BASE=1024 からの相対値。
+    pub const SETLEASE: u32 = 1024;
+    pub const GETLEASE: u32 = 1025;
+    pub const NOTIFY: u32 = 1026;
+    pub const DUPFD_QUERY: u32 = 1027;
+    pub const CREATED_QUERY: u32 = 1028;
+    pub const DUPFD_CLOEXEC: u32 = 1030;
+    pub const SETPIPE_SZ: u32 = 1031;
+    pub const GETPIPE_SZ: u32 = 1032;
+    pub const GET_RW_HINT: u32 = 1035;
+    pub const SET_RW_HINT: u32 = 1036;
+    pub const GET_FILE_RW_HINT: u32 = 1037;
+    pub const SET_FILE_RW_HINT: u32 = 1038;
+    /// flock の l_type（hppa は 1/2/3 — generic の 0/1/2 とずれる）。
+    pub const RDLCK: u16 = 1;
+    pub const WRLCK: u16 = 2;
+    pub const UNLCK: u16 = 3;
+    /// F_SETFL が変更を許すビット（SETFL_MASK）。
+    /// hppa の O_NDELAY は O_NONBLOCK と同値。
+    pub const SETFL_MASK: u64 = super::oflag::APPEND
+        | super::oflag::NONBLOCK
+        | super::oflag::DIRECT
+        | super::oflag::NOATIME;
+    /// FD_CLOEXEC（F_GETFD/F_SETFD のビット）。
+    pub const FD_CLOEXEC: u64 = 1;
+    /// DN_MULTISHOT（F_NOTIFY の arg から除いて有効判定）。
+    pub const DN_MULTISHOT: u64 = 0x8000_0000;
+    /// 既定のパイプ容量（F_GETPIPE_SZ の応答）。
+    pub const PIPE_SIZE: u64 = 65536;
+    /// f_owner_ex の type（F_OWNER_TID/PID/PGRP）。
+    pub const OWNER_PGRP: u32 = 2;
+    /// rw_hint の上限（RWH_WRITE_LIFE_MAX）。
+    pub const RW_HINT_MAX: u64 = 5;
 }
 
 /// hppa のシグナル番号。`uapi/asm/signal.h` は汎用でなく HP-UX 系の
@@ -252,6 +334,8 @@ pub mod at {
 /// 1–15 は汎用と同じ。
 // Ref: SRC-LINUX (7.3) — arch/parisc/include/uapi/asm/signal.h.
 pub mod sig {
+    /// SIGKILL（9。1–15 は汎用と同値。ブロック不可）。
+    pub const KILL: u32 = 9;
     pub const USR1: u32 = 16;
     pub const USR2: u32 = 17;
     pub const CHLD: u32 = 18;
@@ -268,6 +352,13 @@ pub mod sig {
     pub const URG: u32 = 29;
     pub const XFSZ: u32 = 30;
     pub const SYS: u32 = 31;
+
+    /// シグナル番号（1–64）→ sigset_t のビット。1<<(n-1)。
+    /// カーネルの sigmask() と同じ定義。
+    #[inline]
+    pub const fn bit(n: u32) -> u64 {
+        1u64 << (n - 1)
+    }
 }
 
 /// rlimit の資源番号（asm-generic/resource.h。hppa は汎用の並び）。
@@ -287,6 +378,8 @@ pub mod res {
     pub const RLIM_INFINITY: u64 = 0xffff_ffff;
     /// `prlimit64` の `struct rlimit64`（u64×2）での無限値。
     pub const RLIM64_INFINITY: u64 = 0xffff_ffff_ffff_ffff;
+    /// RLIM_NLIMITS（16。これ以上の資源番号は EINVAL）。
+    pub const NLIMITS: u64 = 16;
 }
 
 // ---- 番号（syscall.tbl。実装で使う分を名前付き定数に）----

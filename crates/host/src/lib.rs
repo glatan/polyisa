@@ -62,6 +62,109 @@ pub fn fchmod(_f: &std::fs::File, _mode: u32) -> std::io::Result<()> {
     Ok(())
 }
 
+/// 特殊ファイルを作る（mknod）。`mode` は S_IFMT の型ビット込み、
+/// `dev` は S_IFCHR/S_IFBLK のデバイス番号。std に可搬 API がないため
+/// Unix では libc mknod を直接呼ぶ。非 Unix ホストでは Unsupported。
+#[cfg(unix)]
+pub fn mknod(path: &str, mode: u32, dev: u64) -> std::io::Result<()> {
+    unsafe extern "C" {
+        fn mknod(path: *const std::ffi::c_char, mode: u32, dev: u64) -> i32;
+    }
+    let c = std::ffi::CString::new(path)
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "NUL in path"))?;
+    // SAFETY: c は NUL 終端を保証した生きたバッファ。mknod は呼び出し
+    // 中だけ読む。
+    let r = unsafe { mknod(c.as_ptr(), mode, dev) };
+    if r == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+/// 非 Unix ホストでは Unsupported を返す。
+#[cfg(not(unix))]
+pub fn mknod(_path: &str, _mode: u32, _dev: u64) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "mknod is not supported on this host",
+    ))
+}
+
+/// シンボリックリンク自体の時刻を変える（utimensat の
+/// AT_SYMLINK_NOFOLLOW 相当）。`atime`/`mtime` は (sec, nsec) の
+/// Option で、None は「その時刻を触らない」（UTIME_OMIT 相当）。
+/// std にはリンク自身の時刻を変える API がないため Unix では
+/// libc utimensat を直接呼ぶ。非 Unix ホストでは Unsupported。
+#[cfg(unix)]
+pub fn lutimes(
+    path: &str,
+    atime: Option<(i64, i64)>,
+    mtime: Option<(i64, i64)>,
+) -> std::io::Result<()> {
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct Timespec {
+        tv_sec: i64,
+        tv_nsec: i64,
+    }
+    unsafe extern "C" {
+        fn utimensat(
+            dirfd: i32,
+            path: *const std::ffi::c_char,
+            times: *const Timespec,
+            flags: i32,
+        ) -> i32;
+    }
+    const UTIME_OMIT: i64 = (1 << 30) - 2;
+    let ts = [
+        atime.map_or(
+            Timespec {
+                tv_sec: 0,
+                tv_nsec: UTIME_OMIT,
+            },
+            |(s, n)| Timespec {
+                tv_sec: s,
+                tv_nsec: n,
+            },
+        ),
+        mtime.map_or(
+            Timespec {
+                tv_sec: 0,
+                tv_nsec: UTIME_OMIT,
+            },
+            |(s, n)| Timespec {
+                tv_sec: s,
+                tv_nsec: n,
+            },
+        ),
+    ];
+    let c = std::ffi::CString::new(path)
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "NUL in path"))?;
+    // SAFETY: c は NUL 終端を保証した生きたバッファ。ts は呼び出し中だけ
+    // 読まれる正しいレイアウトの配列。AT_FDCWD=-100・AT_SYMLINK_NOFOLLOW
+    // =0x100。
+    let r = unsafe { utimensat(-100, c.as_ptr(), ts.as_ptr(), 0x100) };
+    if r == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+/// 非 Unix ホストでは Unsupported を返す。
+#[cfg(not(unix))]
+pub fn lutimes(
+    _path: &str,
+    _atime: Option<(i64, i64)>,
+    _mtime: Option<(i64, i64)>,
+) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "lutimes is not supported on this host",
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

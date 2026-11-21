@@ -34,7 +34,7 @@ use polyisa_kernel::FdTable;
 use polyisa_mem::{Access, AccessKind, Align, Endian, Perms, VirtAddr};
 use polyisa_sem::Backend as _;
 
-use crate::parisc::{at, errno, gate, lws, mman, nr, oflag, res};
+use crate::parisc::{at, errno, gate, lws, mman, nr, oflag, res, sig};
 use crate::{TrapHandler, TrapOutcome};
 
 /// AT_FDCWD。
@@ -48,6 +48,23 @@ type DirScan = (Vec<(u64, String, u8)>, usize);
 pub struct PariscIo {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
+}
+
+/// fcntl が追跡する fd ごとの状態。open/dup/fcntl が保守する
+/// （kernel の filp->f_flags・FD_CLOEXEC・FMODE_CREATED 相当）。
+#[derive(Clone, Copy, Default)]
+struct FdMeta {
+    /// ゲストの file status flags（hppa O_* 値。O_CLOEXEC は
+    /// f_flags に入らないので除く）。
+    flags: u32,
+    /// FD_CLOEXEC（F_GETFD/F_SETFD の対象）。
+    cloexec: bool,
+    /// この open が O_CREAT でファイルを新規作成したか
+    /// （F_CREATED_QUERY の応答。kernel の FMODE_CREATED）。
+    created: bool,
+    /// 同一ファイル記述の ID（dup 系は同じ値を持つ）。
+    /// F_DUPFD_QUERY の比較に使う。
+    desc: u64,
 }
 
 /// PA-RISC Linux の syscall 状態機械。`r20`=番号、`r26`–`r21`=引数。
@@ -90,6 +107,10 @@ pub struct Linux {
     std_fds: [Option<std::fs::File>; 3],
     /// 0–2 の close 状態。
     std_closed: [bool; 3],
+    /// fd ごとの fcntl 状態（flags/cloexec/created）。
+    fd_meta: HashMap<u32, FdMeta>,
+    /// ファイル記述 ID の発行元（0–2 は標準 fd が使う）。
+    next_fd_desc: u64,
 }
 
 impl Default for Linux {
@@ -152,6 +173,8 @@ impl Linux {
             proc_name: [0; 16],
             std_fds: [None, None, None],
             std_closed: [false; 3],
+            fd_meta: HashMap::new(),
+            next_fd_desc: 3,
         }
     }
 
@@ -209,8 +232,7 @@ impl Linux {
             .ok()
     }
 
-    /// BE の u16 を読む（現状はテストの dirent 検査だけが使う）。
-    #[cfg(test)]
+    /// BE の u16 を読む。
     fn get16(&mut self, env: &mut BareEnv, addr: u64) -> Option<u64> {
         env.backend
             .mem
@@ -331,6 +353,17 @@ impl Linux {
         } else {
             self.fds.get(fd).is_some()
         }
+    }
+
+    /// fd の fcntl 状態。未記録なら 0–2 の既定値（0=RDONLY、
+    /// 1/2=WRONLY、いずれも O_LARGEFILE 付き）を返す。
+    fn fd_meta_of(&self, fd: u32) -> FdMeta {
+        self.fd_meta.get(&fd).copied().unwrap_or_else(|| FdMeta {
+            flags: (fd.min(2) & 1) | oflag::LARGEFILE as u32,
+            cloexec: false,
+            created: false,
+            desc: u64::from(fd),
+        })
     }
 
     /// 標準 fd の複製に使うホストファイル。差し替え済みは
@@ -740,6 +773,7 @@ impl Linux {
         if fd < 3 {
             self.std_fds[fd as usize] = None;
             self.std_closed[fd as usize] = true;
+            self.fd_meta.remove(&fd);
             return Ok(0);
         }
         if self.fds.get(fd).is_none() {
@@ -748,6 +782,7 @@ impl Linux {
         self.fds.clear(fd);
         self.fds.forget_path(fd);
         self.dir_scans.remove(&fd);
+        self.fd_meta.remove(&fd);
         Ok(0)
     }
 
@@ -804,6 +839,20 @@ impl Linux {
                 }
                 let fd = self.alloc_file(f)?;
                 self.fds.remember_path(fd, host);
+                // filp->f_flags 相当を記録する。32 ビットカーネルは
+                // open 時に O_LARGEFILE を必ず立てる
+                // （build_open_flags の force_o_largefile）。O_CLOEXEC
+                // は f_flags に入らず FD フラグ側へ移る。
+                self.fd_meta.insert(
+                    fd,
+                    FdMeta {
+                        flags: (flags | oflag::LARGEFILE as u32) & !(oflag::CLOEXEC as u32),
+                        cloexec: flags & oflag::CLOEXEC as u32 != 0,
+                        created: flags as u64 & oflag::CREAT != 0 && !existed,
+                        desc: self.next_fd_desc,
+                    },
+                );
+                self.next_fd_desc += 1;
                 Ok(u64::from(fd))
             }
             Err(e) => Err(host_errno(e)),
@@ -812,12 +861,14 @@ impl Linux {
 
     /// `dup`/`dup2`/`dup3`。`strict` は dup3（同値 EINVAL、flags は
     /// O_CLOEXEC のみ許可）。newfd が 0–2 なら標準入出力の差し替え。
+    /// `cloexec` は dup3 の O_CLOEXEC — dup/dup2/fcntl-F_DUPFD は偽。
     fn sys_dup(
         &mut self,
         _env: &mut BareEnv,
         fd: u32,
         newfd: Option<u32>,
         strict: bool,
+        cloexec: bool,
     ) -> Result<u64, u32> {
         let g = if fd < 3 {
             self.std_clone(fd)?
@@ -856,14 +907,44 @@ impl Linux {
                 None => self.fds.forget_path(nfd),
             }
         }
+        // f_flags は複製されるが cloexec は dup3 の O_CLOEXEC だけ立つ
+        // （dup/dup2 は必ず外れる）。
+        let mut m = self.fd_meta_of(fd);
+        m.cloexec = cloexec;
+        self.fd_meta.insert(nfd, m);
         Ok(u64::from(nfd))
     }
 
-    /// `fcntl`/`fcntl64`。複製（F_DUPFD=0、F_DUPFD_CLOEXEC=1030）
-    /// だけ実装し、フラグ系は成功だけ返す。
-    fn sys_fcntl(&mut self, _env: &mut BareEnv, fd: u32, cmd: u32, arg: u64) -> Result<u64, u32> {
+    /// `fcntl`/`fcntl64`。カーネルの `do_fcntl` が受理するコマンドを
+    /// 実装する（`long err = -EINVAL` の既定値どおり、未知コマンドは
+    /// EINVAL）。フラグ系は `fd_meta` が追跡する f_flags/cloexec を
+    /// 読み書きする（ホストファイルへは反映しない — GAP-0058）。
+    // Ref: SRC-LINUX (7.3) — fs/fcntl.c `do_fcntl`。
+    fn sys_fcntl(&mut self, env: &mut BareEnv, fd: u32, cmd: u32, arg: u64) -> Result<u64, u32> {
+        use crate::parisc::fcntl as fc;
+        if !self.fd_open(fd) {
+            return Err(errno::EBADF);
+        }
+        let meta = self.fd_meta_of(fd);
+        // O_PATH の fd が許すコマンドは CREATED_QUERY/DUPFD/
+        // DUPFD_CLOEXEC/DUPFD_QUERY/GETFD/SETFD/GETFL のみ
+        // （check_fcntl_cmd）。
+        if meta.flags as u64 & oflag::PATH != 0
+            && !matches!(
+                cmd,
+                fc::CREATED_QUERY
+                    | fc::DUPFD
+                    | fc::DUPFD_CLOEXEC
+                    | fc::DUPFD_QUERY
+                    | fc::GETFD
+                    | fc::SETFD
+                    | fc::GETFL
+            )
+        {
+            return Err(errno::EBADF);
+        }
         match cmd {
-            0 | 1030 => {
+            fc::DUPFD | fc::DUPFD_CLOEXEC => {
                 if arg >= u64::from(Self::MAX_FD) {
                     return Err(errno::EINVAL);
                 }
@@ -887,9 +968,174 @@ impl Linux {
                 if let Some(p) = self.fds.path_of(fd).map(str::to_string) {
                     self.fds.remember_path(nfd, p);
                 }
+                let mut m = self.fd_meta_of(fd);
+                m.cloexec = cmd == fc::DUPFD_CLOEXEC;
+                self.fd_meta.insert(nfd, m);
                 Ok(u64::from(nfd))
             }
-            1..=4 => Ok(0),
+            // f_dupfd_query: arg fd が同じ file 記述を指すか。
+            fc::DUPFD_QUERY => {
+                if !self.fd_open(arg as u32) {
+                    return Err(errno::EBADF);
+                }
+                Ok(u64::from(self.fd_meta_of(arg as u32).desc == meta.desc))
+            }
+            // FMODE_CREATED — この open が O_CREAT で作ったか。
+            fc::CREATED_QUERY => Ok(u64::from(meta.created)),
+            fc::GETFD => Ok(u64::from(meta.cloexec)),
+            fc::SETFD => {
+                let mut m = meta;
+                m.cloexec = arg & fc::FD_CLOEXEC != 0;
+                self.fd_meta.insert(fd, m);
+                Ok(0)
+            }
+            fc::GETFL => Ok(u64::from(meta.flags)),
+            fc::SETFL => {
+                // SETFL_MASK = O_APPEND|O_NONBLOCK|O_NDELAY|O_DIRECT|
+                // O_NOATIME（hppa 値）。それ以外のビットは保つ。
+                let mut m = meta;
+                m.flags = ((arg & fc::SETFL_MASK) | (u64::from(m.flags) & !fc::SETFL_MASK)) as u32;
+                self.fd_meta.insert(fd, m);
+                Ok(0)
+            }
+            fc::GETLK | fc::GETLK64 | fc::OFD_GETLK => {
+                // flock/flock64 とも l_type@0・l_whence@2。
+                let ty = self.get16(env, arg).ok_or(errno::EFAULT)? as u16;
+                let wh = self.get16(env, arg + 2).ok_or(errno::EFAULT)? as u16;
+                if !matches!(ty, fc::RDLCK | fc::WRLCK | fc::UNLCK) || wh > 2 {
+                    return Err(errno::EINVAL);
+                }
+                // 競合ロックはない — l_type = F_UNLCK を書き戻す。
+                if !self.put16(env, arg, fc::UNLCK) {
+                    return Err(errno::EFAULT);
+                }
+                Ok(0)
+            }
+            fc::SETLK
+            | fc::SETLK64
+            | fc::SETLKW
+            | fc::SETLKW64
+            | fc::OFD_SETLK
+            | fc::OFD_SETLKW => {
+                let ty = self.get16(env, arg).ok_or(errno::EFAULT)? as u16;
+                let wh = self.get16(env, arg + 2).ok_or(errno::EFAULT)? as u16;
+                if !matches!(ty, fc::RDLCK | fc::WRLCK | fc::UNLCK) || wh > 2 {
+                    return Err(errno::EINVAL);
+                }
+                Ok(0)
+            }
+            fc::GETOWN => Ok(0),
+            fc::SETOWN => {
+                // who>0 は pid、who<0 は -pgid（INT_MIN は EINVAL）。
+                let who = arg as u32 as i32;
+                if who == i32::MIN {
+                    return Err(errno::EINVAL);
+                }
+                let pid = i64::from(who.unsigned_abs());
+                if pid != 0 && pid != self.pid() as i64 {
+                    return Err(errno::ESRCH);
+                }
+                Ok(0)
+            }
+            fc::GETOWN_EX => {
+                // f_owner_ex {type, pid} = {F_OWNER_TID=0, 0}。
+                if !self.put32(env, arg, 0) || !self.put32(env, arg + 4, 0) {
+                    return Err(errno::EFAULT);
+                }
+                Ok(0)
+            }
+            fc::SETOWN_EX => {
+                let ty = self.get32(env, arg).ok_or(errno::EFAULT)? as u32;
+                let pid = self.get32(env, arg + 4).ok_or(errno::EFAULT)? as u32;
+                if ty > fc::OWNER_PGRP {
+                    return Err(errno::EINVAL);
+                }
+                if pid != 0 && u64::from(pid) != self.pid() {
+                    return Err(errno::ESRCH);
+                }
+                Ok(0)
+            }
+            fc::GETOWNER_UIDS => {
+                // uid/euid（root モデルでは 0,0）。
+                if !self.put32(env, arg, 0) || !self.put32(env, arg + 4, 0) {
+                    return Err(errno::EFAULT);
+                }
+                Ok(0)
+            }
+            fc::GETSIG => Ok(0),
+            fc::SETSIG => {
+                // valid_signal(signum) — 0..=_NSIG(64)。
+                if arg > 64 {
+                    return Err(errno::EINVAL);
+                }
+                Ok(0)
+            }
+            fc::GETLEASE => Ok(u64::from(fc::UNLCK)),
+            fc::SETLEASE => {
+                // hppa の l_type は 1=RDLCK/2=WRLCK/3=UNLCK。非 UNLCK
+                // のリースは通常ファイルにだけ張れる。
+                if !(1..=3).contains(&arg) {
+                    return Err(errno::EINVAL);
+                }
+                if arg != u64::from(fc::UNLCK) {
+                    let is_reg = self
+                        .file_of(fd)
+                        .and_then(|f| polyisa_host::fstat(f).ok())
+                        .is_some_and(|m| m.mode & 0o170000 == 0o100000);
+                    if !is_reg {
+                        return Err(errno::EINVAL);
+                    }
+                }
+                Ok(0)
+            }
+            fc::NOTIFY => {
+                // arg & ~DN_MULTISHOT == 0 は監視解除（常に成功）。
+                if arg & !fc::DN_MULTISHOT == 0 {
+                    return Ok(0);
+                }
+                // dnotify はディレクトリのみ。
+                match self.file_of(fd) {
+                    Some(f) => {
+                        let m = polyisa_host::fstat(f).map_err(host_errno)?;
+                        if m.mode & 0o170000 == 0o040000 {
+                            Ok(0)
+                        } else {
+                            Err(errno::ENOTDIR)
+                        }
+                    }
+                    None => Err(errno::ENOTDIR),
+                }
+            }
+            fc::SETPIPE_SZ | fc::GETPIPE_SZ => {
+                // FIFO（pipe end）以外は EBADF。FIFO なら既定容量。
+                let is_fifo = self
+                    .file_of(fd)
+                    .and_then(|f| polyisa_host::fstat(f).ok())
+                    .is_some_and(|m| m.mode & 0o170000 == 0o010000);
+                if !is_fifo {
+                    return Err(errno::EBADF);
+                }
+                if cmd == fc::GETPIPE_SZ {
+                    Ok(fc::PIPE_SIZE)
+                } else if arg < 4096 {
+                    Err(errno::EINVAL)
+                } else {
+                    Ok(arg.div_ceil(4096) * 4096)
+                }
+            }
+            fc::GET_RW_HINT | fc::GET_FILE_RW_HINT => {
+                if !self.put64(env, arg, 0) {
+                    return Err(errno::EFAULT);
+                }
+                Ok(0)
+            }
+            fc::SET_RW_HINT | fc::SET_FILE_RW_HINT => {
+                let h = self.get64(env, arg).ok_or(errno::EFAULT)?;
+                if h > fc::RW_HINT_MAX {
+                    return Err(errno::EINVAL);
+                }
+                Ok(0)
+            }
             _ => Err(errno::EINVAL),
         }
     }
@@ -979,6 +1225,13 @@ impl Linux {
         let path = self.read_cstr(env, path_addr)?;
         let at_empty = flags & at::EMPTY_PATH != 0;
         let lstat = flags & at::SYMLINK_NOFOLLOW != 0;
+        // flags は AT_SYMLINK_NOFOLLOW|AT_NO_AUTOMOUNT|AT_EMPTY_PATH|
+        // AT_STATX_SYNC_TYPE のみ受理（do_statx）。
+        if flags & !(at::SYMLINK_NOFOLLOW | at::NO_AUTOMOUNT | at::EMPTY_PATH | at::STATX_SYNC_TYPE)
+            != 0
+        {
+            return Err(errno::EINVAL);
+        }
         let md = if path.is_empty() && at_empty && dirfd >= 0 {
             match self.file_of(dirfd as u32) {
                 Some(f) => polyisa_host::fstat(f).map_err(host_errno)?,
@@ -1002,8 +1255,12 @@ impl Linux {
         // 64 atime {i64 sec,u32 nsec,u32 pad}, 80 btime, 96 ctime, 112 mtime,
         // 128 u32 rdev_major, 132 u32 rdev_minor,
         // 136 u32 dev_major, 140 u32 dev_minor, 144 u64 spare[14]
-        let mut ok = true;
-        ok &= self.put32(env, out, 0x0fff); // STATX_ALL 相当
+        //
+        // カーネルは構造体をゼロ初期化してから埋める。btime はホスト
+        // から取れないため mask は STATX_BASIC_STATS(0x7ff) とし、
+        // BTIME(0x800) は立てない（未記入領域はゼロ）。
+        let mut ok = self.write_bytes(env, out, &[0u8; 256]);
+        ok &= self.put32(env, out, 0x07ff);
         ok &= self.put32(env, out + 4, md.blksize as u32);
         ok &= self.put32(env, out + 16, md.nlink as u32);
         ok &= self.put32(env, out + 20, md.uid);
@@ -1018,6 +1275,10 @@ impl Linux {
         ok &= self.put32(env, out + 104, md.ctime_nsec as u32);
         ok &= self.put64(env, out + 112, md.mtime as u64);
         ok &= self.put32(env, out + 120, md.mtime_nsec as u32);
+        ok &= self.put32(env, out + 128, dev_major(md.rdev));
+        ok &= self.put32(env, out + 132, dev_minor(md.rdev));
+        ok &= self.put32(env, out + 136, dev_major(md.dev));
+        ok &= self.put32(env, out + 140, dev_minor(md.dev));
         if ok { Ok(0) } else { Err(errno::EFAULT) }
     }
 
@@ -1026,14 +1287,17 @@ impl Linux {
     /// （104B。arm/m68k 型の generic stat64 と同じ並び）を BE で書く。
     // Ref: SRC-LINUX (7.3) — arch/parisc/include/uapi/asm/stat.h。
     fn put_stat(&mut self, env: &mut BareEnv, a: u64, m: &polyisa_host::Stat, wide: bool) -> bool {
-        let mut ok = true;
+        // カーネルの cp_stat/cp_stat64 は memset で構造体を 0 初期化
+        // してから書く — pad・未使用領域・予約フィールドをすべて
+        // ゼロにする。
+        let mut ok = self.write_bytes(env, a, &[0u8; 104]);
         if wide {
-            // stat64: dev u64@0, pad@8, __st_ino@12(未使用), mode@16,
-            // nlink@20, uid@24, gid@28, rdev u64@32, pad@40, size i64@48,
-            // blksize i32@56, pad@60, blocks i64@64, atime@72, ansec@76,
-            // mtime@80, mnsec@84, ctime@88, cnsec@92, ino u64@96
+            // stat64: dev u64@0, __pad1@8, __st_ino@12(書かれない),
+            // mode@16, nlink@20, uid@24, gid@28, rdev u64@32, __pad2@40,
+            // size i64@48, blksize i32@56, pad@60, blocks i64@64,
+            // atime@72, ansec@76, mtime@80, mnsec@84, ctime@88,
+            // cnsec@92, ino u64@96
             ok &= self.put64(env, a, m.dev);
-            ok &= self.put32(env, a + 12, m.ino as u32);
             ok &= self.put32(env, a + 16, m.mode);
             ok &= self.put32(env, a + 20, m.nlink as u32);
             ok &= self.put32(env, a + 24, m.uid);
@@ -1051,7 +1315,8 @@ impl Linux {
             ok &= self.put64(env, a + 96, m.ino);
         } else {
             // stat: dev u32@0, ino u32@4, mode u16@8, nlink u16@10,
-            // reserved1@12, reserved2@14, rdev u32@16, size i32@20,
+            // reserved1@12, reserved2@14（いずれもゼロ埋め済み）、
+            // rdev u32@16, size i32@20,
             // atime@24, ansec@28, mtime@32, mnsec@36, ctime@40, cnsec@44,
             // blksize i32@48, blocks i32@52, unused1-4 u32@56..68,
             // unused5 u16@72, fstype i16@74, realdev u32@76,
@@ -1124,13 +1389,23 @@ impl Linux {
     }
 
     /// `access`/`faccessat`/`faccessat2`（mode: F_OK=0, X_OK=1, W_OK=2, R_OK=4）。
+    /// faccessat2 は第4引数 flags（AT_EACCESS/AT_SYMLINK_NOFOLLOW/
+    /// AT_EMPTY_PATH）を受理し、それ以外のビットは EINVAL。
+    /// access/faccessat は flags を取らないので 0 を渡す。
+    // Ref: SRC-LINUX — fs/open.c do_faccessat（flags 検査）。
     fn sys_access(
         &mut self,
         env: &mut BareEnv,
         dirfd: i64,
         path_addr: u64,
         mode: u64,
+        flags: u64,
     ) -> Result<u64, u32> {
+        // faccessat2 の有効 flags = AT_EACCESS|AT_SYMLINK_NOFOLLOW|
+        // AT_EMPTY_PATH。access/faccessat は 0。
+        if flags & !(at::EACCESS | at::SYMLINK_NOFOLLOW | at::EMPTY_PATH) != 0 {
+            return Err(errno::EINVAL);
+        }
         let path = self.read_cstr(env, path_addr)?;
         let host = self.host_path_at(dirfd, &path)?;
         match polyisa_host::stat(&host) {
@@ -1205,11 +1480,14 @@ impl Linux {
         buf: u64,
         count: u64,
     ) -> Result<u64, u32> {
-        if self.fds.get(fd).is_none() {
+        // fd 検査が先（fd_empty → EBADF）。開いているがディレクトリ
+        // でない fd（標準 fd・通常ファイル・パス未記憶）は ENOTDIR
+        // （iterate_dir が非ディレクトリで失敗するのと同じ）。
+        if !self.fd_open(fd) {
             return Err(errno::EBADF);
         }
-        if count < 24 {
-            return Err(errno::EINVAL);
+        if fd < 3 {
+            return Err(errno::ENOTDIR);
         }
         if !self.dir_scans.contains_key(&fd) {
             let path = self
@@ -1259,6 +1537,13 @@ impl Linux {
             i += 1;
         }
         *pos = i;
+        // 残っている最初のエントリがバッファに入らない場合は EINVAL
+        // （filldir64 の buf->error = -EINVAL）。何件か書けたか
+        // ディレクトリの末尾ならそのまま返す（空ディレクトリでは
+        // 小さな count でも 0）。
+        if out.is_empty() && i < entries.len() {
+            return Err(errno::EINVAL);
+        }
         if !self.write_bytes(env, buf, &out) {
             return Err(errno::EFAULT);
         }
@@ -1423,6 +1708,10 @@ impl Linux {
     /// asm-generic/resource.h の汎用順序（STACK=3、NOFILE=7、AS=9）。
     // Ref: SRC-LINUX (7.3) — include/uapi/asm-generic/resource.h.
     fn sys_getrlimit(&mut self, env: &mut BareEnv, addr: u64, r: u64) -> Result<u64, u32> {
+        // resource >= RLIM_NLIMITS(16) は EINVAL（do_prlimit）。
+        if r >= res::NLIMITS {
+            return Err(errno::EINVAL);
+        }
         let (cur, max) = match r {
             res::STACK => (8 << 20, res::RLIM_INFINITY),
             res::NOFILE => (u64::from(Self::MAX_FD), u64::from(Self::MAX_FD)),
@@ -1436,6 +1725,9 @@ impl Linux {
 
     /// `prlimit64`（struct rlimit64 = u64×2）を old_limit へ書く。
     fn sys_prlimit64(&mut self, env: &mut BareEnv, addr: u64, r: u64) -> Result<u64, u32> {
+        if r >= res::NLIMITS {
+            return Err(errno::EINVAL);
+        }
         let (cur, max) = match r {
             res::STACK => (8 << 20, res::RLIM64_INFINITY),
             res::NOFILE => (u64::from(Self::MAX_FD), u64::from(Self::MAX_FD)),
@@ -1445,6 +1737,95 @@ impl Linux {
             return Err(errno::EFAULT);
         }
         Ok(0)
+    }
+
+    /// `capget`。cap_user_header {version u32, pid i32} を読み、
+    /// cap_user_data {effective, permitted, inheritable}×tocopy を
+    /// 書く。root 模型なので effective/permitted は CAP_FULL_SET、
+    /// inheritable は空。バージョン不正なら V3 を書き戻して EINVAL。
+    // Ref: SRC-LINUX (7.3) — kernel/capability.c sys_capget と
+    // include/uapi/linux/capability.h。
+    fn sys_capget(&mut self, env: &mut BareEnv, hdr: u64, datap: u64) -> Result<u64, u32> {
+        const V1: u32 = 0x1998_0330;
+        const V2: u32 = 0x2007_1026;
+        const V3: u32 = 0x2008_0522; // _KERNEL_CAPABILITY_VERSION
+        let version = self.get32(env, hdr).ok_or(errno::EFAULT)? as u32;
+        let pid = self.get32(env, hdr + 4).ok_or(errno::EFAULT)? as u32 as i32;
+        let tocopy = match version {
+            V1 => 1,
+            V2 | V3 => 2,
+            _ => {
+                // 未対応バージョンは V3 を書き戻して EINVAL。
+                if !self.put32(env, hdr, V3) {
+                    return Err(errno::EFAULT);
+                }
+                return Err(errno::EINVAL);
+            }
+        };
+        // pid==0 は自分。他 pid は単一プロセス模型では存在しない。
+        if pid != 0 && i64::from(pid) != self.pid() as i64 {
+            return Err(errno::ESRCH);
+        }
+        if datap == 0 {
+            return Ok(0); // データ不要の問い合わせ
+        }
+        // CAP_LAST_CAP=40 → 上位 u32 は 0x1ff。
+        let full: [u32; 2] = [0xffff_ffff, 0x1ff];
+        for i in 0..tocopy {
+            let a = datap + (i * 12) as u64;
+            if !self.put32(env, a, full[i as usize])
+                || !self.put32(env, a + 4, full[i as usize])
+                || !self.put32(env, a + 8, 0)
+            {
+                return Err(errno::EFAULT);
+            }
+        }
+        Ok(0)
+    }
+
+    /// `mknod`/`mknodat`。カーネルの `may_mknod` どおり REG/CHR/BLK/
+    /// FIFO/SOCK/mode 0 を受理し、DIR は EPERM、不明型は EINVAL。
+    /// FIFO/SOCK はホストの mknod で実ノードを作る。CHR/BLK は
+    /// CAP_MKNOD 相当で許可するが、非 root ホストで作れないときは
+    /// 通常ファイルを置く近似（GAP-0058）。
+    // Ref: SRC-LINUX (7.3) — fs/namei.c may_mknod/vfs_mknod。
+    fn sys_mknod(
+        &mut self,
+        env: &mut BareEnv,
+        dirfd: i64,
+        path_addr: u64,
+        mode: u32,
+        dev: u64,
+    ) -> Result<u64, u32> {
+        const IFMT: u32 = 0o170000;
+        const IFIFO: u32 = 0o010000;
+        const IFSOCK: u32 = 0o140000;
+        const IFDIR: u32 = 0o040000;
+        const IFREG: u32 = 0o100000;
+        let ty = mode & IFMT;
+        match ty {
+            0 | IFREG | IFSOCK | IFIFO | 0o020000 | 0o060000 => {}
+            IFDIR => return Err(errno::EPERM),
+            _ => return Err(errno::EINVAL),
+        }
+        let path = self.read_cstr(env, path_addr)?;
+        let host = self.host_path_at(dirfd, &path)?;
+        if ty == IFSOCK || ty == IFIFO {
+            return polyisa_host::mknod(&host, ty | (mode & 0o7777 & !self.umask), dev)
+                .map(|_| 0)
+                .map_err(host_errno);
+        }
+        // 0/REG/CHR/BLK: 非 root ホストで CHR/BLK が作れないときは
+        // 通常ファイルを置く近似。mode 0 は S_IFREG として扱う。
+        let ty2 = if ty == 0 { IFREG } else { ty };
+        let r = polyisa_host::mknod(&host, ty2 | (mode & 0o7777 & !self.umask), dev);
+        match r {
+            Ok(()) => Ok(0),
+            Err(_) => std::fs::File::create(&host)
+                .and_then(|_| polyisa_host::chmod(&host, (mode & 0o7777) & !self.umask))
+                .map(|_| 0)
+                .map_err(host_errno),
+        }
     }
 
     /// timespec（i32 sec + i32 nsec、hppa32 の old_timespec32）を書く。
@@ -1611,6 +1992,11 @@ impl Linux {
         is_path: bool,
         sz: u64,
     ) -> Result<u64, u32> {
+        // statfs64 は sz == sizeof(struct statfs64)=88 を要求
+        // （sys_statfs64/sys_fstatfs64）。statfs は sz を取らない。
+        if wide && sz != 88 {
+            return Err(errno::EINVAL);
+        }
         if is_path {
             let path = self.read_cstr(env, target)?;
             let host = self.host_path(&path);
@@ -1622,7 +2008,9 @@ impl Linux {
         } else if self.fds.get(target as u32).is_none() {
             return Err(errno::EBADF);
         }
-        let mut ok = true;
+        // カーネルは構造体をゼロ初期化してから埋める — spare 領域
+        // と末尾パディングをゼロにする（statfs=64B、statfs64=88B）。
+        let mut ok = self.write_bytes(env, addr, &vec![0u8; if wide { 88 } else { 64 }]);
         if wide {
             // statfs64: u32 type, u32 bsize, u64 blocks..ffree,
             // fsid(8B), u32 namelen, u32 frsize, u32 flags, u32 spare[4]。
@@ -1636,7 +2024,7 @@ impl Linux {
             ok &= self.put64(env, addr + 48, 0); // fsid
             ok &= self.put32(env, addr + 56, 255);
             ok &= self.put32(env, addr + 60, 4096);
-            ok &= self.put32(env, addr + 64, 0);
+            ok &= self.put32(env, addr + 64, 1); // f_flags = ST_VALID
         } else {
             // statfs: u32 の列 + fsid(8B) + namelen + frsize + flags + spare[4]。
             let fields = [0xEF53u32, 4096, 1 << 22, 1 << 21, 1 << 21, 1 << 20, 1 << 19];
@@ -1646,8 +2034,8 @@ impl Linux {
             ok &= self.put64(env, addr + 28, 0); // fsid
             ok &= self.put32(env, addr + 36, 255);
             ok &= self.put32(env, addr + 40, 4096);
+            ok &= self.put32(env, addr + 44, 1); // f_flags = ST_VALID
         }
-        let _ = sz;
         if ok { Ok(0) } else { Err(errno::EFAULT) }
     }
 
@@ -1692,17 +2080,23 @@ impl Linux {
     }
 
     /// `utimensat`/`futimesat`/`utimes`/`utimensat_time64`。
-    /// times==NULL は現在時刻。futimesat で path が空なら dirfd
-    /// 自体のファイルを対象にする（futimens 相当）。
-    /// `timeval` は {i32 sec, i32 usec}、`ts64` は {i64 sec, i64 nsec}、
-    /// それ以外は {i32 sec, i32 nsec}。
-    // Ref: SRC-LINUX (7.3) — utimensat(2)。
+    /// times==NULL は現在時刻。カーネルの do_utimes どおり、
+    /// filename==NULL かつ dfd!=AT_FDCWD は fd 経路（flags!=0 は
+    /// EINVAL）、それ以外は path 経路で AT_SYMLINK_NOFOLLOW/
+    /// AT_EMPTY_PATH のみ受理する。`timeval` は {i32 sec, i32 usec}、
+    /// `ts64` は {i64 sec, i64 nsec}、それ以外は {i32 sec, i32 nsec}。
+    /// 負の tv_sec は pre-epoch として受理する（timespec64_valid は
+    /// utimes 経路では呼ばれない — fs/utimes.c の nsec_valid のみ）。
+    // Ref: SRC-LINUX (7.3) — fs/utimes.c do_utimes/do_utimes_fd/
+    // do_utimes_path/nsec_valid。
+    #[allow(clippy::too_many_arguments)]
     fn sys_utimens(
         &mut self,
         env: &mut BareEnv,
         dirfd: i64,
         path_addr: u64,
         times_addr: u64,
+        flags: u64,
         timeval: bool,
         ts64: bool,
     ) -> Result<u64, u32> {
@@ -1731,16 +2125,30 @@ impl Linux {
                 Ok(match nsec {
                     UTIME_NOW => Some(now),
                     UTIME_OMIT => None,
-                    n if n < 1_000_000_000 => Some(
-                        std::time::UNIX_EPOCH
-                            + std::time::Duration::new(sec.max(0) as u64, n as u32),
-                    ),
+                    n if n < 1_000_000_000 => {
+                        // 負の tv_sec は pre-epoch（epoch より前）。
+                        let t = if sec >= 0 {
+                            std::time::UNIX_EPOCH + std::time::Duration::new(sec as u64, n as u32)
+                        } else {
+                            std::time::UNIX_EPOCH
+                                .checked_sub(std::time::Duration::new(sec.unsigned_abs(), 0))
+                                .map(|t| t + std::time::Duration::new(0, n as u32))
+                                .ok_or(errno::EINVAL)?
+                        };
+                        Some(t)
+                    }
                     _ => return Err(errno::EINVAL),
                 })
             };
             let stride = if ts64 { 16 } else { 8 };
             atime = read_ts(times_addr)?;
             mtime = read_ts(times_addr + stride)?;
+        }
+        // 両方 UTIME_OMIT なら「何もしない」— パス/fd の検査より
+        // 先に成功を返す（カーネルが do_utimes に入る前に return 0
+        // するのと同じ）。
+        if times_addr != 0 && atime.is_none() && mtime.is_none() {
+            return Ok(0);
         }
         let mut ft = std::fs::FileTimes::new();
         if let Some(a) = atime {
@@ -1754,18 +2162,62 @@ impl Linux {
         } else {
             self.read_cstr(env, path_addr)?
         };
+        // do_utimes: filename==NULL && dfd != AT_FDCWD → do_utimes_fd
+        // （flags!=0 は EINVAL）。それ以外は do_utimes_path。
+        if path_addr == 0 && dirfd != AT_FDCWD {
+            if flags != 0 {
+                return Err(errno::EINVAL);
+            }
+            let f = self.file_of(dirfd as u32).ok_or(errno::EBADF)?;
+            return f.set_times(ft).map(|_| 0).map_err(host_errno);
+        }
+        // do_utimes_path: AT_SYMLINK_NOFOLLOW|AT_EMPTY_PATH のみ受理。
+        if flags & !(at::SYMLINK_NOFOLLOW | at::EMPTY_PATH) != 0 {
+            return Err(errno::EINVAL);
+        }
         if path.is_empty() {
+            // 空パスは AT_EMPTY_PATH が必須。dirfd のファイルを
+            // 対象にする（dfd!=AT_FDCWD ならその fd、FDCWD なら
+            // カーネルは cwd を対象とするが、模型では ENOENT でなく
+            // cwd 自体を対象にしてもよい — ここでは fd 経路として
+            // dirfd を要求する形を維持する）。
+            if flags & at::EMPTY_PATH == 0 {
+                return Err(errno::ENOENT);
+            }
             if dirfd < 0 {
                 return Err(errno::EBADF);
             }
-            let f = self.fds.get(dirfd as u32).ok_or(errno::EBADF)?;
+            let f = self.file_of(dirfd as u32).ok_or(errno::EBADF)?;
             return f.set_times(ft).map(|_| 0).map_err(host_errno);
         }
         let host = self.host_path_at(dirfd, &path)?;
-        let f = std::fs::OpenOptions::new()
-            .write(true)
-            .open(&host)
-            .map_err(host_errno)?;
+        if flags & at::SYMLINK_NOFOLLOW != 0 {
+            // シンボリックリンク自体の時刻（utimensat(2) の
+            // AT_SYMLINK_NOFOLLOW）。
+            let to_pair = |t: Option<std::time::SystemTime>| -> Option<(i64, i64)> {
+                t.map(|t| match t.duration_since(std::time::UNIX_EPOCH) {
+                    Ok(d) => (d.as_secs() as i64, i64::from(d.subsec_nanos())),
+                    Err(e) => {
+                        let d = e.duration();
+                        if d.subsec_nanos() == 0 {
+                            (-(d.as_secs() as i64), 0)
+                        } else {
+                            (
+                                -(d.as_secs() as i64) - 1,
+                                1_000_000_000 - i64::from(d.subsec_nanos()),
+                            )
+                        }
+                    }
+                })
+            };
+            return polyisa_host::lutimes(&host, to_pair(atime), to_pair(mtime))
+                .map(|_| 0)
+                .map_err(host_errno);
+        }
+        // LOOKUP_FOLLOW 経路: File::open（読み）して set_times。
+        // futimens は fd の書き許可を要求しないので write(true)
+        // では開かない（ディレクトリや R/O ファイルでも成立する）。
+        let f = std::fs::File::open(&host).map_err(host_errno)?;
         f.set_times(ft).map(|_| 0).map_err(host_errno)
     }
 
@@ -1786,8 +2238,13 @@ impl Linux {
         } else {
             let a = self.get32(env, times_addr).ok_or(errno::EFAULT)? as u32 as i32;
             let m = self.get32(env, times_addr + 4).ok_or(errno::EFAULT)? as u32 as i32;
-            let at = std::time::UNIX_EPOCH + std::time::Duration::new(a.max(0) as u64, 0);
-            let mt = std::time::UNIX_EPOCH + std::time::Duration::new(m.max(0) as u64, 0);
+            // timespec64_valid は tv_sec<0 を拒む → EINVAL
+            // （sys_utime の utimbuf→timespec 変換）。
+            if a < 0 || m < 0 {
+                return Err(errno::EINVAL);
+            }
+            let at = std::time::UNIX_EPOCH + std::time::Duration::new(a as u64, 0);
+            let mt = std::time::UNIX_EPOCH + std::time::Duration::new(m as u64, 0);
             std::fs::FileTimes::new().set_accessed(at).set_modified(mt)
         };
         let f = std::fs::OpenOptions::new()
@@ -1872,12 +2329,15 @@ impl Linux {
         }
         if set != 0 {
             let v = self.get64(env, set).ok_or(errno::EFAULT)?;
-            self.sig_mask = match how {
+            let m = match how {
                 0 => self.sig_mask | v,
                 1 => self.sig_mask & !v,
                 2 => v,
                 _ => return Err(errno::EINVAL),
             };
+            // SIGKILL/SIGSTOP はブロック不可（sigprocmask の
+            // sigmask_lock 下で SIGKILL/SIGSTOP ビットを落とす）。
+            self.sig_mask = m & !(sig::bit(sig::KILL) | sig::bit(sig::STOP));
         }
         Ok(0)
     }
@@ -1895,12 +2355,13 @@ impl Linux {
         }
         if set != 0 {
             let v = self.get32(env, set).ok_or(errno::EFAULT)?;
-            self.sig_mask = match how {
+            let m = match how {
                 0 => self.sig_mask | v,
                 1 => self.sig_mask & !v,
                 2 => v,
                 _ => return Err(errno::EINVAL),
             };
+            self.sig_mask = m & !(sig::bit(sig::KILL) | sig::bit(sig::STOP));
         }
         Ok(0)
     }
@@ -2100,7 +2561,28 @@ impl Linux {
                     None => bad(errno::EBADF),
                 }
             }
-            nr::CHOWN | nr::LCHOWN | nr::FCHOWNAT | nr::FCHOWN => ok(0),
+            // chown-family: 所有者変更は単一 root 模型（GAP-0058）で
+            // no-op だが、カーネルが chown_common で lookup するのと
+            // 同じく対象の存在を検査する（パスは ENOENT、fd は EBADF）。
+            nr::CHOWN => res(self.sys_path_op(env, AT_FDCWD, args[0], |p| {
+                polyisa_host::stat(p).map(|_| ())
+            })),
+            nr::LCHOWN => res(self.sys_path_op(env, AT_FDCWD, args[0], |p| {
+                polyisa_host::lstat(p).map(|_| ())
+            })),
+            nr::FCHOWNAT => {
+                // fchownat(dirfd, path, uid, gid, flags)。対象があれば ok。
+                res(self.sys_path_op(env, args[0] as u32 as i32 as i64, args[1], |p| {
+                    polyisa_host::stat(p).map(|_| ())
+                }))
+            }
+            nr::FCHOWN => {
+                if self.fd_open(args[0] as u32) {
+                    ok(0)
+                } else {
+                    bad(errno::EBADF)
+                }
+            }
             nr::TRUNCATE => {
                 let len = args[1] as u32 as i32 as i64;
                 res(self.sys_path_op(env, AT_FDCWD, args[0], |p| {
@@ -2134,28 +2616,38 @@ impl Linux {
                 }
             }
             nr::MKNOD | nr::MKNODAT => {
-                let mode = args[if n == nr::MKNOD { 1 } else { 2 }] as u32;
-                if mode & 0o170000 != 0 && mode & 0o170000 != 0o100000 {
-                    bad(errno::EPERM)
+                // mknod: (path, mode, dev) — dev は u64 で hi=args[2]。
+                // mknodat: (dirfd, path, mode, dev) — dev u64 hi=3。
+                let (d, p, mode, dev) = if n == nr::MKNOD {
+                    (
+                        AT_FDCWD,
+                        args[0],
+                        args[1] as u32,
+                        (args[2] << 32) | args[3],
+                    )
                 } else {
-                    let (d, p) = if n == nr::MKNOD {
-                        (AT_FDCWD, args[0])
-                    } else {
-                        (args[0] as u32 as i32 as i64, args[1])
-                    };
-                    let perm = (mode & 0o7777) & !self.umask;
-                    res(self.sys_path_op(env, d, p, |p| {
-                        std::fs::File::create(p).and_then(|_| polyisa_host::chmod(p, perm))
-                    }))
-                }
+                    (
+                        args[0] as u32 as i32 as i64,
+                        args[1],
+                        args[2] as u32,
+                        (args[3] << 32) | args[4],
+                    )
+                };
+                res(self.sys_mknod(env, d, p, mode, dev))
             }
-            nr::DUP => res(self.sys_dup(env, args[0] as u32, None, false)),
-            nr::DUP2 => res(self.sys_dup(env, args[0] as u32, Some(args[1] as u32), false)),
+            nr::DUP => res(self.sys_dup(env, args[0] as u32, None, false, false)),
+            nr::DUP2 => res(self.sys_dup(env, args[0] as u32, Some(args[1] as u32), false, false)),
             nr::DUP3 => {
                 if args[2] != 0 && args[2] & !(oflag::CLOEXEC) != 0 {
                     bad(errno::EINVAL)
                 } else {
-                    res(self.sys_dup(env, args[0] as u32, Some(args[1] as u32), true))
+                    res(self.sys_dup(
+                        env,
+                        args[0] as u32,
+                        Some(args[1] as u32),
+                        true,
+                        args[2] & oflag::CLOEXEC != 0,
+                    ))
                 }
             }
             nr::FCNTL | nr::FCNTL64 => {
@@ -2192,12 +2684,21 @@ impl Linux {
                 args[2],
                 args[4],
             )),
-            nr::ACCESS => res(self.sys_access(env, AT_FDCWD, args[0], args[1])),
-            nr::FACCESSAT | nr::FACCESSAT2 => res(self.sys_access(
+            nr::ACCESS => res(self.sys_access(env, AT_FDCWD, args[0], args[1], 0)),
+            nr::FACCESSAT => res(self.sys_access(
                 env,
                 args[0] as u32 as i32 as i64,
                 args[1],
                 args[2],
+                0,
+            )),
+            // faccessat2(dirfd, path, mode, flags) — 第4引数 flags。
+            nr::FACCESSAT2 => res(self.sys_access(
+                env,
+                args[0] as u32 as i32 as i64,
+                args[1],
+                args[2],
+                args[3],
             )),
             nr::READLINK => res(self.sys_readlink(env, AT_FDCWD, args[0], args[1], args[2])),
             nr::READLINKAT => res(self.sys_readlink(
@@ -2228,9 +2729,19 @@ impl Linux {
             nr::STATFS64 => res(self.sys_statfs(env, args[2], true, args[0], true, args[1])),
             nr::FSTATFS64 => res(self.sys_statfs(env, args[2], true, args[0], false, args[1])),
             nr::GETRLIMIT => res(self.sys_getrlimit(env, args[1], args[0])),
-            nr::SETRLIMIT => ok(0),
+            nr::SETRLIMIT => {
+                // resource >= RLIM_NLIMITS は EINVAL。
+                if args[0] >= res::NLIMITS {
+                    bad(errno::EINVAL)
+                } else {
+                    ok(0)
+                }
+            }
             nr::PRLIMIT64 => {
-                if args[3] != 0 {
+                // resource >= RLIM_NLIMITS は EINVAL。
+                if args[1] >= res::NLIMITS {
+                    bad(errno::EINVAL)
+                } else if args[3] != 0 {
                     res(self.sys_prlimit64(env, args[3], args[1]))
                 } else {
                     ok(0)
@@ -2301,27 +2812,25 @@ impl Linux {
             | nr::SETGROUPS
             | nr::SETSID
             | nr::CAPSET => ok(0),
-            nr::CAPGET => {
-                // cap_user_data（{u32×3}×2 = 24B）をゼロ埋め。
-                if args[1] != 0 && !self.write_bytes(env, args[1], &[0u8; 24]) {
-                    return bad(errno::EFAULT);
-                }
-                ok(0)
-            }
-            nr::UTIMES => res(self.sys_utimens(env, AT_FDCWD, args[0], args[1], true, false)),
+            nr::CAPGET => res(self.sys_capget(env, args[0], args[1])),
+            nr::UTIMES => res(self.sys_utimens(env, AT_FDCWD, args[0], args[1], 0, true, false)),
             nr::FUTIMESAT => res(self.sys_utimens(
                 env,
                 args[0] as u32 as i32 as i64,
                 args[1],
                 args[2],
+                0,
                 true,
                 false,
             )),
+            // utimensat(dirfd, path, times, flags)。hppa は utimensat の
+            // 第4引数 flags を取る（compat_utimensat）。
             nr::UTIMENSAT => res(self.sys_utimens(
                 env,
                 args[0] as u32 as i32 as i64,
                 args[1],
                 args[2],
+                args[3],
                 false,
                 false,
             )),
@@ -2330,6 +2839,7 @@ impl Linux {
                 args[0] as u32 as i32 as i64,
                 args[1],
                 args[2],
+                args[3],
                 false,
                 true,
             )),
@@ -2340,17 +2850,20 @@ impl Linux {
                 env, args[0], args[1], args[2], args[3],
             )),
             nr::SIGPROCMASK => res(self.sys_sigprocmask(env, args[0], args[1], args[2])),
+            // 単一プロセス・配送なし模型（GAP-0058）では pending
+            // は常に空。blocked マスク（sig_mask）ではなく pending
+            // sigset を返す。
             nr::RT_SIGPENDING => {
                 if args[1] != 8 {
                     bad(errno::EINVAL)
-                } else if self.put64(env, args[0], self.sig_mask) {
+                } else if self.put64(env, args[0], 0) {
                     ok(0)
                 } else {
                     bad(errno::EFAULT)
                 }
             }
             nr::SIGPENDING => {
-                if self.put32(env, args[0], self.sig_mask as u32) {
+                if self.put32(env, args[0], 0) {
                     ok(0)
                 } else {
                     bad(errno::EFAULT)
@@ -2359,7 +2872,8 @@ impl Linux {
             nr::SGETMASK => ok(self.sig_mask),
             nr::SSETMASK => {
                 let old = self.sig_mask;
-                self.sig_mask = args[0] & 0xffff_ffff;
+                self.sig_mask =
+                    args[0] & 0xffff_ffff & !(sig::bit(sig::KILL) | sig::bit(sig::STOP));
                 ok(old)
             }
             nr::SIGNAL => ok(0), // 旧ハンドラ=SIG_DFL
@@ -2843,6 +3357,17 @@ impl Linux {
     }
 }
 
+/// Linux の dev_t（u64）→ major 番号（gnu_dev_major の式）。
+// Ref: SRC-LINUX — include/linux/kdev_t.h の MAJOR 展開規約。
+fn dev_major(dev: u64) -> u32 {
+    (((dev >> 8) & 0xfff) as u32) | ((dev >> 32) as u32 & !0xfff)
+}
+
+/// Linux の dev_t（u64）→ minor 番号（gnu_dev_minor の式）。
+fn dev_minor(dev: u64) -> u32 {
+    ((dev & 0xff) as u32) | (((dev >> 12) & 0xffff_ff00) as u32)
+}
+
 /// ホストの io エラーを hppa の errno へ写す。hppa の errno は
 /// 1–34 が asm-generic/errno-base.h と同値、35 以上は HP-UX 系の
 /// 独自表（ENOSYS=251 など）。マッピングはホスト（generic Linux）
@@ -2885,29 +3410,30 @@ fn host_errno(e: std::io::Error) -> u32 {
         Some(33) => errno::EDOM,
         Some(34) => errno::ERANGE,
         // --- generic errno.h の値（ホスト側）→ hppa 独自表 ---
-        Some(35) => errno::EDEADLK,          // 45
-        Some(36) => errno::ENAMETOOLONG,     // 248
-        Some(37) => errno::ENOLCK,           // 46
-        Some(38) => errno::ENOSYS,           // 251
-        Some(39) => errno::ENOTEMPTY,        // 247
-        Some(40) => errno::ELOOP,            // 249
-        Some(41) => errno::ENOMSG,           // 35
-        Some(42) => errno::EIDRM,            // 36
-        Some(43) => errno::ECHRNG,           // 37
-        Some(44) => errno::EL2NSYNC,         // 38
-        Some(45) => errno::EL3HLT,           // 39
-        Some(46) => errno::EL3RST,           // 40
-        Some(47) => errno::ELNRNG,           // 41
-        Some(48) => errno::EUNATCH,          // 42
-        Some(49) => errno::ENOCSI,           // 43
-        Some(50) => errno::EL2HLT,           // 44
-        Some(51) => errno::EBADE,            // 160
-        Some(52) => errno::EBADR,            // 161
-        Some(53) => errno::EXFULL,           // 162
-        Some(54) => errno::ENOANO,           // 163
-        Some(55) => errno::EBADRQC,          // 164
-        Some(56) => errno::EBADSLT,          // 165
-        Some(57) => errno::EDEADLK,          // EDEADLOCK = EDEADLK
+        Some(35) => errno::EDEADLK,      // 45
+        Some(36) => errno::ENAMETOOLONG, // 248
+        Some(37) => errno::ENOLCK,       // 46
+        Some(38) => errno::ENOSYS,       // 251
+        Some(39) => errno::ENOTEMPTY,    // 247
+        Some(40) => errno::ELOOP,        // 249
+        // generic の 41 は未定義の穴（40=ELOOP の次は 42=ENOMSG）。
+        Some(42) => errno::ENOMSG,           // 35
+        Some(43) => errno::EIDRM,            // 36
+        Some(44) => errno::ECHRNG,           // 37
+        Some(45) => errno::EL2NSYNC,         // 38
+        Some(46) => errno::EL3HLT,           // 39
+        Some(47) => errno::EL3RST,           // 40
+        Some(48) => errno::ELNRNG,           // 41
+        Some(49) => errno::EUNATCH,          // 42
+        Some(50) => errno::ENOCSI,           // 43
+        Some(51) => errno::EL2HLT,           // 44
+        Some(52) => errno::EBADE,            // 160
+        Some(53) => errno::EBADR,            // 161
+        Some(54) => errno::EXFULL,           // 162
+        Some(55) => errno::ENOANO,           // 163
+        Some(56) => errno::EBADRQC,          // 164
+        Some(57) => errno::EBADSLT,          // 165
+        Some(58) => errno::EDEADLK,          // EDEADLOCK = EDEADLK
         Some(59) => errno::EBFONT,           // 166
         Some(60) => errno::ENOSTR,           // 54
         Some(61) => errno::ENODATA,          // 51
@@ -2983,6 +3509,7 @@ fn host_errno(e: std::io::Error) -> u32 {
         Some(131) => errno::ENOTRECOVERABLE, // 255
         Some(132) => errno::ERFKILL,         // 256
         Some(133) => errno::EHWPOISON,       // 257
+        Some(134) => errno::EFTYPE,          // 258
         _ => errno::EIO,
     }
 }
@@ -3674,5 +4201,416 @@ mod tests {
         ));
         assert_eq!(get_r(&mut env3, 28), 1);
         assert_eq!(get_r(&mut env3, 21), (-(errno::EFAULT as i64)) as u64);
+    }
+
+    /// メモリ上のゲスト文字列を書く補助（パス引数用）。
+    fn put_cstr(env: &mut BareEnv, addr: u64, s: &str) {
+        env.backend.mem.write(VirtAddr(addr), s.as_bytes()).unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(addr + s.len() as u64), &[0])
+            .unwrap();
+    }
+
+    fn err_of(env: &mut BareEnv) -> u32 {
+        (-(get_r(env, 28) as i64)) as u32
+    }
+
+    /// mknod FIFO/SOCK/REG は非特権でも許可（may_mknod）。
+    /// S_IFDIR は EPERM、不明型は EINVAL。
+    // Ref: SRC-LINUX — fs/namei.c may_mknod。
+    #[test]
+    fn mknod_allows_fifo_socket_and_regular_but_not_dir() {
+        let dir = std::env::temp_dir().join("polyisa-parisc-mknod");
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in ["fifo-node", "sock-node", "reg-node", "dir-node", "bad-node"] {
+            let _ = std::fs::remove_file(dir.join(name));
+        }
+        let mut sys = Linux::new();
+        let mut env = env();
+        env.backend.mem.map(VirtAddr(0x4000), 1, Perms::RW).unwrap();
+        let base = dir.to_str().unwrap();
+        // mknod(path, S_IFIFO|0o644, 0) → 0（非特権で FIFO 可）。
+        let p = format!("{base}/fifo-node");
+        put_cstr(&mut env, 0x4000, &p);
+        set_r(&mut env, 20, nr::MKNOD);
+        set_r(&mut env, 26, 0x4000);
+        set_r(&mut env, 25, 0o010000 | 0o644);
+        sys.handle_trap(&mut env, gate::SYSCALL);
+        assert_eq!(get_r(&mut env, 28), 0, "FIFO mknod");
+        // mknod(path, S_IFSOCK|0o644, 0) → 0。
+        let p = format!("{base}/sock-node");
+        put_cstr(&mut env, 0x4000, &p);
+        set_r(&mut env, 25, 0o140000 | 0o644);
+        sys.handle_trap(&mut env, gate::SYSCALL);
+        assert_eq!(get_r(&mut env, 28), 0, "SOCK mknod");
+        // mknod(path, S_IFREG|0o644, 0) → 0。
+        let p = format!("{base}/reg-node");
+        put_cstr(&mut env, 0x4000, &p);
+        set_r(&mut env, 25, 0o100000 | 0o644);
+        sys.handle_trap(&mut env, gate::SYSCALL);
+        assert_eq!(get_r(&mut env, 28), 0, "REG mknod");
+        // mknod(path, S_IFDIR, 0) → EPERM。
+        let p = format!("{base}/dir-node");
+        put_cstr(&mut env, 0x4000, &p);
+        set_r(&mut env, 25, 0o040000 | 0o755);
+        sys.handle_trap(&mut env, gate::SYSCALL);
+        assert_eq!(err_of(&mut env), errno::EPERM, "DIR mknod");
+        // 不明な型ビット（S_IFMT の残り、例 0o030000=LNK）は EINVAL。
+        let p = format!("{base}/bad-node");
+        put_cstr(&mut env, 0x4000, &p);
+        set_r(&mut env, 25, 0o030000 | 0o777);
+        sys.handle_trap(&mut env, gate::SYSCALL);
+        assert_eq!(err_of(&mut env), errno::EINVAL, "unknown type mknod");
+    }
+
+    /// host_errno: generic 134 → hppa EFTYPE(258)。
+    /// generic 41 は穴（ENOMSG ではない — 穴は EIO に落ちる設計は
+    /// カーネルの errno 変換ではなく写像表の不在として扱う）。
+    #[test]
+    fn host_errno_maps_eftype_and_holes() {
+        assert_eq!(
+            host_errno(std::io::Error::from_raw_os_error(134)),
+            errno::EFTYPE
+        );
+        // generic 42–57 の写像先（代表: 42→ENOMSG, 43→EIDRM）。
+        assert_eq!(
+            host_errno(std::io::Error::from_raw_os_error(42)),
+            errno::ENOMSG
+        );
+        assert_eq!(
+            host_errno(std::io::Error::from_raw_os_error(43)),
+            errno::EIDRM
+        );
+        // generic 133 → EHWPOISON(257)。
+        assert_eq!(
+            host_errno(std::io::Error::from_raw_os_error(133)),
+            errno::EHWPOISON
+        );
+    }
+
+    /// statx は構造体をゼロ初期化し、mask は書き込んだ領域のみ
+    /// （STATX_BASIC_STATS=0x7ff、BTIME 0x800 は立てない）。btime・
+    /// spare 領域はゼロ。
+    #[test]
+    fn statx_mask_and_zeroed_btime() {
+        let dir = std::env::temp_dir().join("polyisa-parisc-statx");
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("x.txt");
+        std::fs::write(&p, b"abc").unwrap();
+        let mut sys = Linux::new();
+        let mut env = env();
+        env.backend.mem.map(VirtAddr(0x4000), 1, Perms::RW).unwrap();
+        env.backend.mem.map(VirtAddr(0x8000), 2, Perms::RW).unwrap();
+        // 出力域を非ゼロで汚しておき、ゼロ初期化を検査する。
+        env.backend
+            .mem
+            .write(VirtAddr(0x8000), &[0xAAu8; 256])
+            .unwrap();
+        put_cstr(&mut env, 0x4000, p.to_str().unwrap());
+        set_r(&mut env, 20, nr::STATX);
+        set_r(&mut env, 26, (-100i64) as u64); // AT_FDCWD
+        set_r(&mut env, 25, 0x4000);
+        set_r(&mut env, 24, 0); // flags
+        set_r(&mut env, 23, 0xfff); // mask（要求は自由）
+        set_r(&mut env, 22, 0x8000);
+        sys.handle_trap(&mut env, gate::SYSCALL);
+        assert_eq!(get_r(&mut env, 28), 0);
+        // mask は BASIC_STATS(0x7ff) のみ（btime 未供給）。
+        assert_eq!(sys.get32(&mut env, 0x8000), Some(0x7ff));
+        // btime 領域（80..96）はゼロ。
+        assert_eq!(sys.get64(&mut env, 0x8000 + 80), Some(0));
+        assert_eq!(sys.get64(&mut env, 0x8000 + 88), Some(0));
+        // size@40 = 3。
+        assert_eq!(sys.get64(&mut env, 0x8000 + 40), Some(3));
+        // spare[14]（144 以降）はゼロ。
+        assert_eq!(sys.get64(&mut env, 0x8000 + 144), Some(0));
+        assert_eq!(sys.get64(&mut env, 0x8000 + 248), Some(0));
+    }
+
+    /// stat/stat64 は pad・予約領域をゼロ初期化する。
+    /// stat64: __pad1@8、__st_ino@12、__pad2@40、pad@60。
+    #[test]
+    fn stat64_zeroes_padding() {
+        let dir = std::env::temp_dir().join("polyisa-parisc-statpad");
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("p.txt");
+        std::fs::write(&p, b"q").unwrap();
+        let mut sys = Linux::new();
+        let mut env = env();
+        env.backend.mem.map(VirtAddr(0x4000), 1, Perms::RW).unwrap();
+        env.backend.mem.map(VirtAddr(0x8000), 1, Perms::RW).unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x8000), &[0xBBu8; 104])
+            .unwrap();
+        put_cstr(&mut env, 0x4000, p.to_str().unwrap());
+        set_r(&mut env, 20, nr::STAT64);
+        set_r(&mut env, 26, 0x4000);
+        set_r(&mut env, 25, 0x8000);
+        sys.handle_trap(&mut env, gate::SYSCALL);
+        assert_eq!(get_r(&mut env, 28), 0);
+        assert_eq!(sys.get64(&mut env, 0x8000 + 8), Some(0), "__pad1");
+        assert_eq!(sys.get32(&mut env, 0x8000 + 12), Some(0), "__st_ino");
+        assert_eq!(sys.get64(&mut env, 0x8000 + 40), Some(0), "__pad2");
+        assert_eq!(sys.get32(&mut env, 0x8000 + 60), Some(0), "pad");
+    }
+
+    /// fcntl: 未知コマンドは EINVAL、F_GETFL は open の status
+    /// フラグ（O_LARGEFILE 強制込み）、F_SETFL は SETFL_MASK のみ。
+    // Ref: SRC-LINUX — fs/fcntl.c do_fcntl（err=-EINVAL の既定）。
+    #[test]
+    fn fcntl_getfl_setfl_and_unknown_cmd() {
+        let dir = std::env::temp_dir().join("polyisa-parisc-fcntl");
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("f.bin");
+        std::fs::write(&p, b"").unwrap();
+        let mut sys = Linux::new();
+        let mut env = env();
+        env.backend.mem.map(VirtAddr(0x4000), 1, Perms::RW).unwrap();
+        put_cstr(&mut env, 0x4000, p.to_str().unwrap());
+        // open(path, O_RDWR=2)
+        set_r(&mut env, 20, nr::OPEN);
+        set_r(&mut env, 26, 0x4000);
+        set_r(&mut env, 25, 2);
+        sys.handle_trap(&mut env, gate::SYSCALL);
+        let fd = get_r(&mut env, 28);
+        // F_GETFL(3): O_RDWR|O_LARGEFILE(0o4000)。
+        set_r(&mut env, 20, nr::FCNTL);
+        set_r(&mut env, 26, fd);
+        set_r(&mut env, 25, 3);
+        sys.handle_trap(&mut env, gate::SYSCALL);
+        let fl = get_r(&mut env, 28);
+        assert_eq!(fl & 0o3, 2, "access mode");
+        assert_ne!(fl & oflag::LARGEFILE, 0, "O_LARGEFILE 強制");
+        // 未知コマンド（9999）→ EINVAL。
+        set_r(&mut env, 25, 9999);
+        sys.handle_trap(&mut env, gate::SYSCALL);
+        assert_eq!(err_of(&mut env), errno::EINVAL, "unknown fcntl");
+        // F_SETFL(4) で O_APPEND(0o10) を立てる → F_GETFL に反映。
+        set_r(&mut env, 25, 4);
+        set_r(&mut env, 24, oflag::APPEND);
+        sys.handle_trap(&mut env, gate::SYSCALL);
+        assert_eq!(get_r(&mut env, 28), 0);
+        set_r(&mut env, 25, 3);
+        set_r(&mut env, 24, 0);
+        sys.handle_trap(&mut env, gate::SYSCALL);
+        assert_ne!(get_r(&mut env, 28) & oflag::APPEND, 0);
+        // F_GETFD(1) / F_SETFD(2) の cloexec。
+        set_r(&mut env, 25, 1);
+        sys.handle_trap(&mut env, gate::SYSCALL);
+        assert_eq!(get_r(&mut env, 28), 0, "初期 cloexec なし");
+        set_r(&mut env, 25, 2);
+        set_r(&mut env, 24, 1); // FD_CLOEXEC
+        sys.handle_trap(&mut env, gate::SYSCALL);
+        assert_eq!(get_r(&mut env, 28), 0);
+        set_r(&mut env, 25, 1);
+        set_r(&mut env, 24, 0);
+        sys.handle_trap(&mut env, gate::SYSCALL);
+        assert_eq!(get_r(&mut env, 28), 1, "FD_CLOEXEC 設定後");
+    }
+
+    /// sigpending は pending（空）を返す — blocked マスクではない。
+    /// SIGKILL/SIGSTOP はブロック不可（mask から落ちる）。
+    #[test]
+    fn sigpending_is_empty_and_kill_unblockable() {
+        let mut sys = Linux::new();
+        let mut env = env();
+        env.backend.mem.map(VirtAddr(0x4000), 1, Perms::RW).unwrap();
+        env.backend.mem.map(VirtAddr(0x8000), 1, Perms::RW).unwrap();
+        // rt_sigprocmask(SIG_SETMASK=2, {KILL|STOP|USR1}, NULL, 8)
+        let m = sig::bit(sig::KILL) | sig::bit(sig::STOP) | sig::bit(sig::USR1);
+        env.backend
+            .mem
+            .write(VirtAddr(0x4000), &m.to_be_bytes())
+            .unwrap();
+        set_r(&mut env, 20, nr::RT_SIGPROCMASK);
+        set_r(&mut env, 26, 2);
+        set_r(&mut env, 25, 0x4000);
+        set_r(&mut env, 24, 0);
+        set_r(&mut env, 23, 8);
+        sys.handle_trap(&mut env, gate::SYSCALL);
+        assert_eq!(get_r(&mut env, 28), 0);
+        // mask から KILL/STOP が落ちて USR1 だけ残る。
+        assert_eq!(sys.sig_mask, sig::bit(sig::USR1));
+        // rt_sigpending(buf, 8) → pending=0（blocked ではない）。
+        set_r(&mut env, 20, nr::RT_SIGPENDING);
+        set_r(&mut env, 26, 0x8000);
+        set_r(&mut env, 25, 8);
+        sys.handle_trap(&mut env, gate::SYSCALL);
+        assert_eq!(get_r(&mut env, 28), 0);
+        assert_eq!(sys.get64(&mut env, 0x8000), Some(0), "pending は空");
+        // sigpending は sigsetsize を取らない（旧型 u32）。
+        set_r(&mut env, 20, nr::SIGPENDING);
+        set_r(&mut env, 26, 0x8000);
+        sys.handle_trap(&mut env, gate::SYSCALL);
+        assert_eq!(get_r(&mut env, 28), 0);
+        assert_eq!(sys.get32(&mut env, 0x8000), Some(0));
+    }
+
+    /// getrlimit/setrlimit は resource >= RLIM_NLIMITS(16) で EINVAL。
+    #[test]
+    fn rlimit_rejects_invalid_resource() {
+        let mut sys = Linux::new();
+        let mut env = env();
+        env.backend.mem.map(VirtAddr(0x4000), 1, Perms::RW).unwrap();
+        // getrlimit(16, buf) → EINVAL。
+        set_r(&mut env, 20, nr::GETRLIMIT);
+        set_r(&mut env, 26, 16);
+        set_r(&mut env, 25, 0x4000);
+        sys.handle_trap(&mut env, gate::SYSCALL);
+        assert_eq!(err_of(&mut env), errno::EINVAL);
+        // setrlimit(16, buf) → EINVAL。
+        set_r(&mut env, 20, nr::SETRLIMIT);
+        sys.handle_trap(&mut env, gate::SYSCALL);
+        assert_eq!(err_of(&mut env), errno::EINVAL);
+        // setrlimit(7=NOFILE) → 0。
+        set_r(&mut env, 26, res::NOFILE);
+        sys.handle_trap(&mut env, gate::SYSCALL);
+        assert_eq!(get_r(&mut env, 28), 0);
+    }
+
+    /// statfs64 は sz != 88 で EINVAL。
+    #[test]
+    fn statfs64_validates_size() {
+        let dir = std::env::temp_dir().join("polyisa-parisc-statfs");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut sys = Linux::new();
+        let mut env = env();
+        env.backend.mem.map(VirtAddr(0x4000), 1, Perms::RW).unwrap();
+        env.backend.mem.map(VirtAddr(0x8000), 1, Perms::RW).unwrap();
+        put_cstr(&mut env, 0x4000, dir.to_str().unwrap());
+        // statfs64(path, sz=88, buf) → 0。
+        set_r(&mut env, 20, nr::STATFS64);
+        set_r(&mut env, 26, 0x4000);
+        set_r(&mut env, 25, 88);
+        set_r(&mut env, 24, 0x8000);
+        sys.handle_trap(&mut env, gate::SYSCALL);
+        assert_eq!(get_r(&mut env, 28), 0, "sz=88 は成功");
+        assert_eq!(sys.get32(&mut env, 0x8000), Some(0xEF53));
+        // statfs64(path, sz=64, buf) → EINVAL。
+        set_r(&mut env, 25, 64);
+        sys.handle_trap(&mut env, gate::SYSCALL);
+        assert_eq!(err_of(&mut env), errno::EINVAL, "sz=64 は EINVAL");
+    }
+
+    /// capget は root の CAP_FULL_SET を返す（V1/V2/V3 で tocopy が
+    /// 変わる。version 不正は EINVAL + V3 書き戻し）。
+    // Ref: SRC-LINUX — kernel/capability.c sys_capget。
+    #[test]
+    fn capget_returns_full_capability_set() {
+        let mut sys = Linux::new();
+        let mut env = env();
+        env.backend.mem.map(VirtAddr(0x4000), 1, Perms::RW).unwrap();
+        env.backend.mem.map(VirtAddr(0x8000), 1, Perms::RW).unwrap();
+        // cap_user_header {version=0x20080522, pid=0}
+        env.backend
+            .mem
+            .write(VirtAddr(0x4000), &0x2008_0522u32.to_be_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x4004), &0i32.to_be_bytes())
+            .unwrap();
+        set_r(&mut env, 20, nr::CAPGET);
+        set_r(&mut env, 26, 0x4000);
+        set_r(&mut env, 25, 0x8000);
+        sys.handle_trap(&mut env, gate::SYSCALL);
+        assert_eq!(get_r(&mut env, 28), 0);
+        // data[0]: effective=0xffffffff, permitted=0xffffffff,
+        // inheritable=0。
+        assert_eq!(sys.get32(&mut env, 0x8000), Some(0xffff_ffff));
+        assert_eq!(sys.get32(&mut env, 0x8004), Some(0xffff_ffff));
+        assert_eq!(sys.get32(&mut env, 0x8008), Some(0));
+        // data[1]: effective=0x1ff（CAP_LAST_CAP=40）。
+        assert_eq!(sys.get32(&mut env, 0x800c), Some(0x1ff));
+        // 不正 version → EINVAL + hdr に V3 を書き戻す。
+        env.backend
+            .mem
+            .write(VirtAddr(0x4000), &0xDEAD_BEEFu32.to_be_bytes())
+            .unwrap();
+        sys.handle_trap(&mut env, gate::SYSCALL);
+        assert_eq!(err_of(&mut env), errno::EINVAL);
+        assert_eq!(sys.get32(&mut env, 0x4000), Some(0x2008_0522));
+    }
+
+    /// utimensat: 不明 flags は EINVAL、fd 経路で flags≠0 は
+    /// EINVAL、負の tv_sec は受理（pre-epoch）。
+    // Ref: SRC-LINUX — fs/utimes.c do_utimes/do_utimes_fd。
+    #[test]
+    fn utimensat_validates_flags_and_negative_sec() {
+        let dir = std::env::temp_dir().join("polyisa-parisc-utime");
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("u.txt");
+        std::fs::write(&p, b"z").unwrap();
+        let mut sys = Linux::new();
+        let mut env = env();
+        env.backend.mem.map(VirtAddr(0x4000), 1, Perms::RW).unwrap();
+        env.backend.mem.map(VirtAddr(0x8000), 1, Perms::RW).unwrap();
+        put_cstr(&mut env, 0x4000, p.to_str().unwrap());
+        // 不明 flags（例 0x1000=AT_EMPTY_PATH 以外の 0x8000）→ EINVAL。
+        set_r(&mut env, 20, nr::UTIMENSAT);
+        set_r(&mut env, 26, (-100i64) as u64);
+        set_r(&mut env, 25, 0x4000);
+        set_r(&mut env, 24, 0x8000); // times
+        set_r(&mut env, 23, 0x8000); // 無効 flag
+        // timespec {sec=1000,nsec=0}×2 を書く。
+        for i in 0..2 {
+            env.backend
+                .mem
+                .write(VirtAddr(0x8000 + i * 8), &1000i32.to_be_bytes())
+                .unwrap();
+            env.backend
+                .mem
+                .write(VirtAddr(0x8004 + i * 8), &0i32.to_be_bytes())
+                .unwrap();
+        }
+        sys.handle_trap(&mut env, gate::SYSCALL);
+        assert_eq!(err_of(&mut env), errno::EINVAL, "不明 flags");
+        // 有効 flags=0、負 tv_sec=-1 は受理される（pre-epoch）。
+        env.backend
+            .mem
+            .write(VirtAddr(0x8000), &(-1i32).to_be_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x8008), &(-1i32).to_be_bytes())
+            .unwrap();
+        set_r(&mut env, 23, 0);
+        sys.handle_trap(&mut env, gate::SYSCALL);
+        assert_eq!(get_r(&mut env, 28), 0, "負 tv_sec は受理");
+    }
+
+    /// getdents64: 開いた通常ファイルの fd は ENOTDIR、未オープンは
+    /// EBADF。ディレクトリでバッファ不足でも EINVAL。
+    #[test]
+    fn getdents64_enotdir_and_buffer_errors() {
+        let dir = std::env::temp_dir().join("polyisa-parisc-dents2");
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("reg.txt");
+        std::fs::write(&p, b"r").unwrap();
+        let mut sys = Linux::new();
+        let mut env = env();
+        env.backend.mem.map(VirtAddr(0x4000), 1, Perms::RW).unwrap();
+        env.backend.mem.map(VirtAddr(0x8000), 2, Perms::RW).unwrap();
+        put_cstr(&mut env, 0x4000, p.to_str().unwrap());
+        // open(通常ファイル) → fd=3
+        set_r(&mut env, 20, nr::OPEN);
+        set_r(&mut env, 26, 0x4000);
+        set_r(&mut env, 25, 0);
+        sys.handle_trap(&mut env, gate::SYSCALL);
+        let fd = get_r(&mut env, 28);
+        assert_eq!(fd, 3);
+        // getdents64(通常ファイル fd, buf, 1024) → ENOTDIR。
+        set_r(&mut env, 20, nr::GETDENTS64);
+        set_r(&mut env, 26, fd);
+        set_r(&mut env, 25, 0x8000);
+        set_r(&mut env, 24, 1024);
+        sys.handle_trap(&mut env, gate::SYSCALL);
+        assert_eq!(err_of(&mut env), errno::ENOTDIR);
+        // getdents64(未オープン 99, …) → EBADF。
+        set_r(&mut env, 26, 99);
+        sys.handle_trap(&mut env, gate::SYSCALL);
+        assert_eq!(err_of(&mut env), errno::EBADF);
     }
 }
