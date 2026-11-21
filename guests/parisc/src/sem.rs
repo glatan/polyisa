@@ -1341,30 +1341,34 @@ fn load_off<B: Backend>(
 ) -> Result<(), B::Exit> {
     let zero = k(b, 0);
     let (ea, new_base) = gva(b, rb, zero, disp, m);
-    match size {
+    // ロード値は局所に受けてから書き戻す。spec の Operation は
+    // 基底更新（switch 内の `GR[b] ← GR[b] + dx`）を先に行い
+    // `GR[t] ← mem_load(...)` を後に書くので、完了時の結果は
+    // b == t でもロード値が勝つ（SPEC-PARISC-11 §5-34/§5-42
+    // 「If base register modification is specified and b = t,
+    // the value loaded is the aligned word」、SPEC-PARISC-20
+    // §7-87）。例外が起きた場合はどちらの GR も更新しない
+    // （ロードの前に書き戻しをしない）ので、フォルト後の再実行
+    // で基底が二重に更新されることはない。
+    let v: B::V<W64> = match size {
         0 => {
             let v: B::V<W8> = b.load(ea, DATA_READ)?;
-            let v = b.zext::<W8, W64>(v);
-            Gr(t as u8).set(b, v);
+            b.zext::<W8, W64>(v)
         }
         1 => {
             let v: B::V<W16> = b.load(ea, DATA_READ)?;
-            let v = b.zext::<W16, W64>(v);
-            Gr(t as u8).set(b, v);
+            b.zext::<W16, W64>(v)
         }
         2 => {
             let v: B::V<W32> = b.load(ea, DATA_READ)?;
-            let v = b.zext::<W32, W64>(v);
-            Gr(t as u8).set(b, v);
+            b.zext::<W32, W64>(v)
         }
-        _ => {
-            let v: B::V<W64> = b.load(ea, DATA_READ)?;
-            Gr(t as u8).set(b, v);
-        }
-    }
+        _ => b.load(ea, DATA_READ)?,
+    };
     if m != 0 {
         Gr(rb as u8).set(b, new_base);
     }
+    Gr(t as u8).set(b, v);
     Ok(())
 }
 
@@ -2033,7 +2037,11 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
             let disp = im5(ops[1]);
             let zero = k(b, 0);
             let (ea, new_base) = gva(b, ops[0], zero, disp, m);
-            if !is_atomic {
+            // ロード値は局所に受け、基底更新の書き戻し→GR[t] 書込の
+            // 順にする（spec の Operation と同じ順序）。b == t では
+            // ロード値が勝つ（SPEC-PARISC-11 §5-42/§5-45/§5-46,
+            // SPEC-PARISC-20 §7-78/§7-87）。
+            let v: B::V<W64> = if !is_atomic {
                 // ldaw/ldda は絶対番地（phys_mem_load）かつ特権
                 // 命令で、通常の ldw/ldd との差は「保護を検査しない
                 // 物理アクセス」と特権制限だけ。本モデルは特権遷移を
@@ -2048,23 +2056,17 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
                 match size {
                     0 => {
                         let v: B::V<W8> = b.load(ea, DATA_READ)?;
-                        let v = b.zext::<W8, W64>(v);
-                        Gr(t as u8).set(b, v);
+                        b.zext::<W8, W64>(v)
                     }
                     1 => {
                         let v: B::V<W16> = b.load(ea, DATA_READ)?;
-                        let v = b.zext::<W16, W64>(v);
-                        Gr(t as u8).set(b, v);
+                        b.zext::<W16, W64>(v)
                     }
                     2 => {
                         let v: B::V<W32> = b.load(ea, DATA_READ)?;
-                        let v = b.zext::<W32, W64>(v);
-                        Gr(t as u8).set(b, v);
+                        b.zext::<W32, W64>(v)
                     }
-                    _ => {
-                        let v: B::V<W64> = b.load(ea, DATA_READ)?;
-                        Gr(t as u8).set(b, v);
-                    }
+                    _ => b.load(ea, DATA_READ)?,
                 }
             } else {
                 // ldcw/ldcd: ロードと 0 クリアは不可分（SPEC-PARISC-11
@@ -2084,7 +2086,7 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
                         let ok: B::B = b.store_conditional::<W64>(ea, z, ATOMIC_RW)?;
                         let nok = bnot(b, ok);
                         b.if_then(nok, |b| Err(raise::<B>(b, ExceptionKind::Trap, TRAP_ILL)))?;
-                        Gr(t as u8).set(b, v);
+                        v
                     }
                     _ => {
                         let v: B::V<W32> = b.load_reserved(ea, ATOMIC_RW)?;
@@ -2093,14 +2095,14 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
                         let ok: B::B = b.store_conditional::<W32>(ea, z, ATOMIC_RW)?;
                         let nok = bnot(b, ok);
                         b.if_then(nok, |b| Err(raise::<B>(b, ExceptionKind::Trap, TRAP_ILL)))?;
-                        let v = b.zext::<W32, W64>(v);
-                        Gr(t as u8).set(b, v);
+                        b.zext::<W32, W64>(v)
                     }
                 }
-            }
+            };
             if m != 0 {
                 Gr(ops[0] as u8).set(b, new_base);
             }
+            Gr(t as u8).set(b, v);
         }
         Insn::Ldx | Insn::LdxD | Insn::Ldcwx | Insn::Ldcdx | Insn::Ldawx | Insn::Lddax => {
             // ops = [b, x, sp, scale(u), m, t]。index 形式の completer
@@ -2133,7 +2135,11 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
             let m: i64 = if ops[4] != 0 { 1 } else { 0 };
             let (ea, new_base) = gva(b, ops[0], x, 0, m);
             let t = ops[5];
-            if !matches!(insn, Insn::Ldcwx | Insn::Ldcdx) {
+            // ロード値は局所に受け、基底更新の書き戻し→GR[t] 書込の
+            // 順にする（spec の Operation と同じ順序）。b == t では
+            // ロード値が勝つ（SPEC-PARISC-11 §5-36/§5-39/§5-40,
+            // SPEC-PARISC-20 §7-78/§7-87）。
+            let v: B::V<W64> = if !matches!(insn, Insn::Ldcwx | Insn::Ldcdx) {
                 // ldx/ldx_d/ldawx/lddax は通常のロード。ldawx/lddax
                 // は絶対番地（phys_mem_load）かつ特権命令だが、im5
                 // 形式の ldaw/ldda と同じく Level-0 記述に従い通常
@@ -2144,22 +2150,16 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
                 match size {
                     0 => {
                         let v: B::V<W8> = b.load(ea, DATA_READ)?;
-                        let v = b.zext::<W8, W64>(v);
-                        Gr(t as u8).set(b, v);
+                        b.zext::<W8, W64>(v)
                     }
                     1 => {
                         let v: B::V<W16> = b.load(ea, DATA_READ)?;
-                        let v = b.zext::<W16, W64>(v);
-                        Gr(t as u8).set(b, v);
+                        b.zext::<W16, W64>(v)
                     }
-                    3 => {
-                        let v: B::V<W64> = b.load(ea, DATA_READ)?;
-                        Gr(t as u8).set(b, v);
-                    }
+                    3 => b.load(ea, DATA_READ)?,
                     _ => {
                         let v: B::V<W32> = b.load(ea, DATA_READ)?;
-                        let v = b.zext::<W32, W64>(v);
-                        Gr(t as u8).set(b, v);
+                        b.zext::<W32, W64>(v)
                     }
                 }
             } else {
@@ -2173,7 +2173,7 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
                         let ok: B::B = b.store_conditional::<W64>(ea, z, ATOMIC_RW)?;
                         let nok = bnot(b, ok);
                         b.if_then(nok, |b| Err(raise::<B>(b, ExceptionKind::Trap, TRAP_ILL)))?;
-                        Gr(t as u8).set(b, v);
+                        v
                     }
                     _ => {
                         let v: B::V<W32> = b.load_reserved(ea, ATOMIC_RW)?;
@@ -2182,14 +2182,14 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
                         let ok: B::B = b.store_conditional::<W32>(ea, z, ATOMIC_RW)?;
                         let nok = bnot(b, ok);
                         b.if_then(nok, |b| Err(raise::<B>(b, ExceptionKind::Trap, TRAP_ILL)))?;
-                        let v = b.zext::<W32, W64>(v);
-                        Gr(t as u8).set(b, v);
+                        b.zext::<W32, W64>(v)
                     }
                 }
-            }
+            };
             if m != 0 {
                 Gr(ops[0] as u8).set(b, new_base);
             }
+            Gr(t as u8).set(b, v);
         }
         Insn::Sti | Insn::StiD => {
             // ops = [b, r, sp, size, ma, i5]。
@@ -2721,7 +2721,7 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
             // 要求した R/W 許可を持つ」なら 1、さもなければ 0 と近似
             // する（結果 GR への書き込み自体は spec どおり）。
             // Ref: SPEC-PARISC-11 §5-154..§5-157 Operation,
-            // SPEC-PARISC-20 §7-100/§7-101.
+            // SPEC-PARISC-20 §7-113/§7-114.
             // Gap: GAP-0055
             let (rb, w, t) = (ops[0], ops[4], ops[5]);
             let ea = Gr(rb as u8).get(b);
@@ -2735,12 +2735,13 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
             Gr(t as u8).set(b, ok);
         }
         Insn::Break => {
-            // ops = [i5a, i13b]。2 つの即値オペランドはトラップ
+            // ops = [im5, im13]（構文 `BREAK im5,im13` の順）。
+            // 2 つの即値オペランドはトラップ
             // ハンドラへのソフトウェア引数で、ハードウェアは
             // break instruction trap を起こすだけ。現在の例外
             // モデルは kind+code しか持たず即値を渡せないので、
             // 種別 Break に code=0 で畳む。
-            // Ref: SPEC-PARISC-11 §BREAK, SPEC-PARISC-20 §7-32.
+            // Ref: SPEC-PARISC-11 §BREAK, SPEC-PARISC-20 §7-18.
             return Err(raise::<B>(b, ExceptionKind::Break, 0));
         }
         // ---- 特権・未対応の命令は Trap へ ----
@@ -2763,7 +2764,7 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
             // diag は implementation-defined な診断命令で
             // priv != 0 では privileged_operation_trap。ユーザ
             // 専用モデルでは常に TRAP_PRIV。
-            // Ref: SPEC-PARISC-11 §DIAG, SPEC-PARISC-20 §7-50.
+            // Ref: SPEC-PARISC-11 §DIAG, SPEC-PARISC-20 §7-46.
             return Err(raise::<B>(b, ExceptionKind::Trap, TRAP_PRIV));
         }
         // その他は未実装。

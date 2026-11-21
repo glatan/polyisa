@@ -123,6 +123,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("cp5", 9, 5),
         ("len5", 4, 0),
         ("im5", 4, 0),
+        ("im13", 25, 13),
         ("im5h", 20, 16),
         ("im11", 10, 0),
         ("im16", 15, 0),
@@ -195,11 +196,15 @@ pub fn build_model() -> polyisa_isadl::Model {
 
     // オペランドなし（全桁固定 or 捨てる桁だけの命令）。
     m.formats.push(fmt("FNONE", &[], vec![]));
-    // break: i3/i5 の即値は意味論で使うので拾う。
+    // break: spec レイアウトは `00 im13 00 im5`（im13 = bits25-13,
+    // im5 = bits4-0、bits12-5 は固定 0）。構文順は `BREAK im5,im13`
+    // なのでオペランドもその順にする。即値はトラップハンドラへの
+    // ソフトウェア引数で意味論は使わないが、取出しは spec どおり。
+    // Ref: SPEC-PARISC-11 §BREAK, SPEC-PARISC-20 §7-18.
     m.formats.push(fmt(
         "FBRK",
-        &["fa", "fb"],
-        vec![val("i3", "fa"), val("i5", "fb")],
+        &["im5", "im13"],
+        vec![val("im5", "im5"), val("im13", "im13")],
     ));
     // mtsp/mfsp: 空間レジスタは assemble_sr3 の素の 3 ビット。
     m.formats.push(fmt(
@@ -1142,7 +1147,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         "break",
         "FBRK",
         "000000 ..... ..... ... 00000000 .....",
-        "break {i5}, {i3}",
+        "break {im5}, {im13}",
         "",
         vec![],
         "system",

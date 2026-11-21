@@ -281,6 +281,13 @@ fn extract_operands_regression() {
     let w = 0x0441_a2a0;
     assert_eq!(dec(w), Some(Insn::Fic));
     assert_eq!(extract_ops(Insn::Fic, w as u128), vec![2, 1, 5, 1]);
+    // break のレイアウトは spec の `00 im13 00 im5`（im13 =
+    // bits25-13、im5 = bits4-0）。旧宣言の fa/fb（i3/i5）は
+    // im13 の一部で、真の im5 桁は取れていなかった。
+    // Ref: SPEC-PARISC-11 §BREAK, SPEC-PARISC-20 §7-18.
+    let w = 0x0246_8005; // break 5,0x1234
+    assert_eq!(dec(w), Some(Insn::Break));
+    assert_eq!(extract_ops(Insn::Break, w as u128), vec![5, 0x1234]);
 }
 
 // ---- 裸実行検査（段階17・PR4）----
@@ -977,7 +984,7 @@ fn exec_mtsm_traps_as_privileged() {
 // 畳む（GAP-0055）。probe も access-right メタデータのない
 // フラットメモリ近似（マップ済み＋要求許可なら 1）で検査する。
 // Ref: SPEC-PARISC-11 §5-45/§5-39/§5-51/§5-154..§5-157,
-// SPEC-PARISC-20 §7-78/§7-87/§7-138/§7-100/§7-101.
+// SPEC-PARISC-20 §7-78/§7-87/§7-138/§7-113/§7-114.
 
 #[test]
 fn exec_ldaw_ldda_short_forms() {
@@ -1081,6 +1088,110 @@ fn exec_staw_stda_short_forms() {
     );
 }
 
+// ---- 基底更新ロードで b == t の書き込み順（段階17・PR6 レビュー #1）----
+// spec の Operation は基底更新（`GR[b] ← GR[b] + dx`）を先に行い
+// `GR[t] ← mem_load(...)` を後に書くので、`,ma`/`,mb`/`,m`/`,sm` 完語
+// で b == t のときロード値が書き戻し値に勝つ。
+// Ref: SPEC-PARISC-11 §5-34/§5-42/§5-36/§5-39/§5-45/§5-40/§5-46
+// （"If base register modification is specified and b = t, the value
+// loaded is the …"）、SPEC-PARISC-20 §7-78/§7-87.
+
+#[test]
+fn exec_load_modify_base_eq_target_keeps_loaded() {
+    let mut env = env();
+    set_q(&mut env, 0x1000);
+    env.backend.mem.map(VirtAddr(0x1000), 2, Perms::RW).unwrap();
+    // 0x1ff8 の qword 書込みの後で 0x1ffc の word 書込みが下位
+    // 4 バイトを上書きするので、0x1ff8 の 64 ビットは
+    // 0x9999_8888_aaaa_0001 になる。
+    env.backend
+        .mem
+        .write(VirtAddr(0x1ff8), &0x9999_8888_7777_6666u64.to_be_bytes())
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x1ffc), &0xaaaa_0001u32.to_be_bytes())
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2000), &0x1212_3434_5656_7878u64.to_be_bytes())
+        .unwrap();
+    set_gpr(&mut env, 7, 8);
+
+    // オフセット形式（load_off 経路）: ldwm は常に基底更新。
+    // ldwm -4(r9),r9（disp<0 → 事前更新、EA = 0x1ffc）。
+    set_gpr(&mut env, 9, 0x2000);
+    step(&mut env, 0x4d29_3ff9);
+    assert_eq!(gpr(&mut env, 9), 0xaaaa_0001); // 0x1ffc ではない
+    // Format 3 の ldd,mb r9,-8(r9)（EA = 0x1ff8 の 64 ビット。
+    // 実メモリ値は上書き後の 0x9999_8888_aaaa_0001）。
+    set_gpr(&mut env, 9, 0x2000);
+    step(&mut env, 0x5129_3ffd);
+    assert_eq!(gpr(&mut env, 9), 0x9999_8888_aaaa_0001);
+
+    // im5 形式: ldw,ma r9,4(r9)（事後、EA = 旧 r9 = 0x2000）。
+    set_gpr(&mut env, 9, 0x2000);
+    step(&mut env, 0x0d28_10a9);
+    assert_eq!(gpr(&mut env, 9), 0x1212_3434); // 0x2004 ではない
+    // ldw,mb r9,-4(r9)（事前、EA = 0x1ffc）。
+    set_gpr(&mut env, 9, 0x2000);
+    step(&mut env, 0x0d39_30a9);
+    assert_eq!(gpr(&mut env, 9), 0xaaaa_0001);
+
+    // index 形式: ldbx,m r7(r9),r9（EA = r9、書戻しは r9+r7）。
+    set_gpr(&mut env, 9, 0x2000);
+    step(&mut env, 0x0d27_0029);
+    assert_eq!(gpr(&mut env, 9), 0x12); // 先頭バイト
+    // ldwx,m r7(r9),r9（u=0,m=1 → ,m 完語）。
+    set_gpr(&mut env, 9, 0x2000);
+    step(&mut env, 0x0d27_00a9);
+    assert_eq!(gpr(&mut env, 9), 0x1212_3434); // 0x2008 ではない
+
+    // 不可分ロード: ldcw,mb r9,-4(r9)（事前、EA = 0x1ffc、
+    // ロードと 0 クリアは不可分）。
+    set_gpr(&mut env, 9, 0x2000);
+    step(&mut env, 0x0d39_31e9);
+    assert_eq!(gpr(&mut env, 9), 0xaaaa_0001);
+    assert_eq!(mem_bytes(&mut env, 0x1ffc, 4), [0, 0, 0, 0]);
+    // ldcd,ma r9,8(r9)（事後、EA = 0x2000 の 64 ビット）。
+    set_gpr(&mut env, 9, 0x2000);
+    step(&mut env, 0x0d30_1169);
+    assert_eq!(gpr(&mut env, 9), 0x1212_3434_5656_7878);
+    // ldcwx,m r7(r9),r9 / ldcdx,m r7(r9),r9（index 形の ,m）。
+    env.backend
+        .mem
+        .write(VirtAddr(0x2000), &0xabcd_0000_1111_2222u64.to_be_bytes())
+        .unwrap();
+    set_gpr(&mut env, 9, 0x2000);
+    step(&mut env, 0x0d27_01e9);
+    assert_eq!(gpr(&mut env, 9), 0xabcd_0000);
+    // ldcwx が 0x2000-0x2003 を 0 クリアしたので、ldcdx が読む
+    // 64 ビットは上位 32 ビットが 0。
+    set_gpr(&mut env, 9, 0x2000);
+    step(&mut env, 0x0d27_0169);
+    assert_eq!(gpr(&mut env, 9), 0x0000_0000_1111_2222);
+    assert_eq!(mem_bytes(&mut env, 0x2000, 8), [0; 8]);
+
+    // 絶対番地形: ldaw,ma r9,4(r9) / ldda,ma r9,8(r9)。
+    env.backend
+        .mem
+        .write(VirtAddr(0x2000), &0xabcd_0000_1111_2222u64.to_be_bytes())
+        .unwrap();
+    set_gpr(&mut env, 9, 0x2000);
+    step(&mut env, 0x0d28_11a9);
+    assert_eq!(gpr(&mut env, 9), 0xabcd_0000);
+    set_gpr(&mut env, 9, 0x2000);
+    step(&mut env, 0x0d30_1129);
+    assert_eq!(gpr(&mut env, 9), 0xabcd_0000_1111_2222);
+    // ldawx,m r7(r9),r9 / lddax,sm r7(r9),r9（,m / ,sm 完語）。
+    set_gpr(&mut env, 9, 0x2000);
+    step(&mut env, 0x0d27_01a9);
+    assert_eq!(gpr(&mut env, 9), 0xabcd_0000);
+    set_gpr(&mut env, 9, 0x2000);
+    step(&mut env, 0x0d27_2129);
+    assert_eq!(gpr(&mut env, 9), 0xabcd_0000_1111_2222);
+}
+
 #[test]
 fn exec_probe_read_write() {
     let mut env = env();
@@ -1126,7 +1237,7 @@ fn exec_probe_read_write() {
 
 // break は break instruction trap を起こす。例外モデルは即値を
 // 運ばないので種別 Break + code=0 で畳む。
-// Ref: SPEC-PARISC-11 §BREAK, SPEC-PARISC-20 §7-32.
+// Ref: SPEC-PARISC-11 §BREAK, SPEC-PARISC-20 §7-18.
 #[test]
 fn exec_break_raises_break_trap() {
     let mut env = env();
@@ -1145,7 +1256,7 @@ fn exec_break_raises_break_trap() {
 
 // diag は実装依存の診断命令で priv != 0 では特権操作トラップ。
 // ユーザ専用モデルでは常に TRAP_PRIV。
-// Ref: SPEC-PARISC-11 §DIAG, SPEC-PARISC-20 §7-50.
+// Ref: SPEC-PARISC-11 §DIAG, SPEC-PARISC-20 §7-46.
 #[test]
 fn exec_diag_traps_as_privileged() {
     let mut env = env();
