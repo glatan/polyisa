@@ -21,12 +21,16 @@
 //! フェッチ番地が 0x1000 未満なら Linux のゲートウェイページ
 //! （設計判断: 実機ではカーネルがページゼロに置くゲートウェイ
 //! 命令列であり、本実装は各オフセットを ABI 上の入口として
-//! 直接振り分ける）。0xe0 は set_thread_pointer 入口で
-//! `cr27 = r26` して `r31` へ戻る内蔵処理、それ以外は
-//! オフセットを `code` に載せて `TrapHandler::handle_trap`
-//! へ渡す（Handled なら `r31` へ戻る。Linux では `r31` が
-//! 呼び出し側に戻る規約）。
-//! Ref: SPEC-PARISC-11 §4, SRC-LINUX (arch/parisc gateway page).
+//! 直接振り分ける）。カーネルのユーザ到達入口は 0xb0（LWS）、
+//! 0xe0（set_thread_pointer）、0x100（syscall）の 3 つで、
+//! 残りは `break 0,0`（KILL_INSN）の埋め草か 0x104 以降の
+//! カーネル内部コード（GAP-0056）。0xe0 は内蔵処理で
+//! `cr27 = r26` して `r31` へ戻り、それ以外はオフセットを
+//! `code` に載せて `TrapHandler::handle_trap` へ渡す（Handled
+//! なら `r31` へ戻る。Linux は入口側で `depi PRIV_USER` 済みの
+//! `r31` に復帰する規約）。
+//! Ref: SPEC-PARISC-11 §4, SRC-LINUX (arch/parisc/kernel/syscall.S
+//! `linux_gateway_page`).
 
 use polyisa_engine::bare::BareEnv;
 use polyisa_engine::interp::{Ctrl, InterpExit};
@@ -132,9 +136,11 @@ fn set_queue(env: &mut BareEnv, f: u64, b: u64) {
 
 /// `r31`（RP）への復帰。ゲートウェイ・トラップの Handled 帰路
 /// （`iaoq_f = gr[31] | 3`、`iaoq_b = iaoq_f + 4` の通常遷移。
-/// 下位2ビットのユーザ特権付与は Linux のページゼロ
-/// ゲートウェイの復帰規約に倣う）。
-// Ref: SRC-LINUX (arch/parisc gateway page).
+/// 下位2ビットへのユーザ特権付与はカーネルが STP/LWS 入口と
+/// syscall_exit で行う `depi PRIV_USER,31,2,%r31`（PRIV_USER=3）
+/// と同じ規約）。
+// Ref: SRC-LINUX — arch/parisc/kernel/syscall.S, entry.S
+// `depi PRIV_USER,31,2,%r31`（asm/assembly.h の PRIV_USER=3）.
 fn gate_ret(env: &mut BareEnv) {
     let r = env.backend.get(sem::Gr(31).state()) | 3;
     set_queue(env, r, r.wrapping_add(4));
@@ -237,7 +243,8 @@ fn gateway(env: &mut BareEnv, sys: &mut impl TrapHandler, addr: u64) -> Result<(
     }
     match addr {
         // SET_THREAD_POINTER: cr27 = r26 で r31 へ戻る。
-        // Ref: SRC-LINUX (arch/parisc gateway page, offset 0xe0).
+        // Ref: SRC-LINUX (arch/parisc/kernel/syscall.S, offset 0xe0
+        // `set_thread_pointer`: gate/depi PRIV_USER/be/mtctl).
         0xe0 => {
             let tp = env.backend.get(sem::Gr(26).state());
             env.backend.set(sem::Cr(27).state(), tp);
@@ -246,6 +253,9 @@ fn gateway(env: &mut BareEnv, sys: &mut impl TrapHandler, addr: u64) -> Result<(
             Ok(())
         }
         // それ以外はオフセットをそのまま code に載せて OS 側へ。
+        // Gap: GAP-0056 — 3 入口（0xb0/0xe0/0x100）以外のオフセットは
+        // カーネルの KILL_INSN 領域・内部コードだが、パーソナリティの
+        // Unimplemented に畳む近似（Linux では実行中断）。
         _ => {
             env.steps += 1;
             let t = sys.handle_trap(env, addr as u32);

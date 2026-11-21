@@ -26,14 +26,25 @@ pub mod gate {
 
 /// LWS（軽量 syscall）の副番号。`r20` が番号、`r26`=adr、
 /// `r25`=old、`r24`=new、結果は `r28`、状態は `r21`（0/-errno）。
-/// Ref: SRC-LINUX — arch/parisc/kernel/syscall.S `lws_*`.
+/// カーネルの `lws_table` は 5 エントリ（`__NR_lws_entries`=5）。
+/// Ref: SRC-LINUX — arch/parisc/kernel/syscall.S `lws_table`・`lws_*`.
 pub mod lws {
     /// CAS: `old` と `*adr` が等しければ `new` を書く。`r28` に元値、
-    /// `r21` に 0/-errno。
+    /// `r21` に 0/-errno（compare_and_swap32、ELF32 用入口）。
     pub const CAS: u64 = 0;
+    /// ELF64 用入口（compare_and_swap64）。32 ビットカーネルでは
+    /// `lws_exit_nosys` に分岐するため ENOSYS が正しい応答。
+    pub const CAS64: u64 = 1;
     /// 新 CAS（`r25`/`r24`=old/new へのポインタ、`r23`=サイズ
-    /// コード）。`r28` に成否（0=成功）、`r21` に 0/-errno。
+    /// コード 0/1/2/3 → 8/16/32/64 ビット）。`r28` に成否（0=成功）、
+    /// `r21` に 0/-errno（compare_and_swap_2）。
     pub const CAS2: u64 = 2;
+    /// 不可分交換（atomic_xchg。`r25`=サイズコード、
+    /// `r24`=new 値へのポインタ、`r23`=旧値の書き戻し先）。
+    pub const XCHG: u64 = 3;
+    /// 不可分ストア（atomic_store。`r25`=サイズコード、
+    /// `r24`=値へのポインタ）。
+    pub const STORE: u64 = 4;
 }
 
 /// 汎用 errno（hppa は asm-generic と同じ値）。負で `r28` に返す。

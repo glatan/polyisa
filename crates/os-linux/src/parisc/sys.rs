@@ -9,8 +9,10 @@
 //! - 番号は `r20`、引数は `r26`（arg0）から `r21`（arg5）へ降順、
 //!   戻り値は `r28`（エラーは負の errno）、戻り番地は `r31`。
 //!   キュー（`iaoq_f`/`iaoq_b`）の `r31` への復帰は実行ループ側。
-//! - `0xb0` は LWS-CAS（`r20`=副番号、`r26`=adr、`r25`=old、
-//!   `r24`=new。結果 `r28`、状態 `r21`=0/-errno）。
+//! - `0xb0` は LWS（`r20`=副番号 0=CAS/1=CAS64/2=CAS2/3=xchg/
+//!   4=store、`r26`=adr。CAS は `r25`=old・`r24`=new、CAS2/
+//!   xchg/store はポインタ経由＋サイズコード。結果 `r28`、
+//!   状態 `r21`=0/-errno）。
 //! - `0xe0`（set_thread_pointer: `cr27 = r26`）は実行ループの
 //!   内蔵処理で、ここには来ない。
 //!
@@ -649,14 +651,22 @@ impl Linux {
         TrapOutcome::Handled
     }
 
-    /// LWS-CAS（gate::LWS）。`r20`=副番号（0=CAS、2=CAS2）、
-    /// `r26`=adr。状態は `r21`（0/-errno）。
+    /// LWS-CAS（gate::LWS）。`r20`=副番号、`r26`=adr。
+    /// 状態は `r21`（0/-errno）。which 表はカーネルの `lws_table`
+    /// （0=CAS32、1=CAS64、2=CAS2、3=atomic_xchg、4=atomic_store、
+    /// 5 以上は ENOSYS）。
     /// which=0（CAS）: `r25`=old、`r24`=new。読めた元の値は `r28`
-    /// に返す（読めなかった場合は `r28` を触らない）。
+    /// に返す。フォルト時は `r28`=1（カーネルの lws_fault と同じ）。
+    /// which=1 は 32 ビットカーネルでは ENOSYS（lws_exit_nosys）。
     /// which=2（CAS2）: `r25`/`r24` は old/new 値へのポインタ、
     /// `r23` はサイズコード。`r28` は成否（0=成功、非0=失敗）。
+    /// which=3（atomic_xchg）: `r25`=サイズコード、`r24`=new 値への
+    /// ポインタ、`r23`=旧値の書き戻し先。
+    /// which=4（atomic_store）: `r25`=サイズコード、`r24`=値への
+    /// ポインタ。
     // Ref: SRC-LINUX — arch/parisc/kernel/syscall.S
-    // `lws_compare_and_swap` / `lws_compare_and_swap_2`。
+    // `lws_table` / `lws_compare_and_swap` / `lws_compare_and_swap_2`
+    // / `lws_atomic_xchg` / `lws_atomic_store`。
     fn lws(&mut self, env: &mut BareEnv) -> TrapOutcome {
         let which = Self::arg(env, 6); // r20
         let adr = Self::arg(env, 0);
@@ -665,15 +675,20 @@ impl Linux {
         let status: u32 = match which {
             lws::CAS => {
                 if adr & 3 != 0 {
+                    Self::ret(env, 1);
                     errno::EFAULT
                 } else {
                     match self.get32(env, adr) {
-                        None => errno::EFAULT,
+                        None => {
+                            Self::ret(env, 1);
+                            errno::EFAULT
+                        }
                         Some(cur) => {
                             Self::ret(env, cur);
                             if cur == old
                                 && !self.write_bytes(env, adr, &(new as u32).to_be_bytes())
                             {
+                                Self::ret(env, 1);
                                 errno::EFAULT
                             } else {
                                 0
@@ -683,6 +698,10 @@ impl Linux {
                 }
             }
             lws::CAS2 => self.lws_cas2(env, adr, old, new),
+            lws::XCHG => self.lws_xchg(env, adr),
+            lws::STORE => self.lws_store(env, adr),
+            // which=1（CAS64）は 32 ビットカーネルでは ENOSYS、
+            // which>=5 は lws_exit_nosys（r28 を触らない）。
             _ => errno::ENOSYS,
         };
         env.backend
@@ -723,6 +742,88 @@ impl Linux {
         }
         Self::ret(env, 0);
         0
+    }
+
+    /// LWS `which=3`（atomic_xchg、`lws_atomic_xchg`）。
+    /// `r25`=サイズコード（0/1/2/3 → 8/16/32/64 ビット。>=4 は
+    /// ENOSYS）、`r24`=new 値へのポインタ、`r23`=旧値の書き戻し先。
+    /// カーネルの代入順どおり「`*r23 = *r26` → `*r26 = *r24`」で、
+    /// `r28` は 0=成功・非0=失敗。読み書きの失敗は `r28`=1 と
+    /// `r21`=-EFAULT。
+    // Ref: SRC-LINUX — arch/parisc/kernel/syscall.S `lws_atomic_xchg`。
+    fn lws_xchg(&mut self, env: &mut BareEnv, adr: u64) -> u32 {
+        let size = Self::arg(env, 1); // r25
+        let new_p = Self::arg(env, 2); // r24
+        let old_p = Self::arg(env, 3); // r23
+        if size > 3 {
+            return errno::ENOSYS;
+        }
+        let n = 1usize << size;
+        // カーネルはクリティカル部の前に `*r24` の読みと
+        // `*r23`/`*r26` の stbys,e プローブでフォルトを先に検出する
+        // （部分書き込みを残さない）。値自体は書き込み直前に読み直す。
+        let (Some(_), Some(cur)) = (self.read_bytes(env, new_p, n), self.read_bytes(env, adr, n))
+        else {
+            Self::ret(env, 1);
+            return errno::EFAULT;
+        };
+        if !self.can_write(env, old_p) || !self.can_write(env, adr) {
+            Self::ret(env, 1);
+            return errno::EFAULT;
+        }
+        // カーネルと同じ順で逐次化する: `*r23 = *r26` の後に
+        // `*r24` を読み直して `*r26` に書く（r23==r24 の別名でも
+        // 結果が一致する）。
+        if !self.write_bytes(env, old_p, &cur) {
+            Self::ret(env, 1);
+            return errno::EFAULT;
+        }
+        let Some(new) = self.read_bytes(env, new_p, n) else {
+            Self::ret(env, 1);
+            return errno::EFAULT;
+        };
+        if !self.write_bytes(env, adr, &new) {
+            Self::ret(env, 1);
+            return errno::EFAULT;
+        }
+        Self::ret(env, 0);
+        0
+    }
+
+    /// LWS `which=4`（atomic_store、`lws_atomic_store`）。
+    /// `r25`=サイズコード（0/1/2/3 → 8/16/32/64 ビット。>=4 は
+    /// ENOSYS）、`r24`=値へのポインタ。`*r26 = *r24`。
+    /// `r28` は 0=成功・非0=失敗。読み書きの失敗は `r28`=1 と
+    /// `r21`=-EFAULT。
+    // Ref: SRC-LINUX — arch/parisc/kernel/syscall.S `lws_atomic_store`。
+    fn lws_store(&mut self, env: &mut BareEnv, adr: u64) -> u32 {
+        let size = Self::arg(env, 1); // r25
+        let val_p = Self::arg(env, 2); // r24
+        if size > 3 {
+            return errno::ENOSYS;
+        }
+        let n = 1usize << size;
+        let Some(val) = self.read_bytes(env, val_p, n) else {
+            Self::ret(env, 1);
+            return errno::EFAULT;
+        };
+        if !self.write_bytes(env, adr, &val) {
+            Self::ret(env, 1);
+            return errno::EFAULT;
+        }
+        Self::ret(env, 0);
+        0
+    }
+
+    /// 書き込み可否のプローブ（値は書かない）。カーネルの
+    /// `stbys,e` 相当で、先頭バイトを W 要求として読む。
+    // Ref: SRC-LINUX — syscall.S `stbys,e`（page fault 事前検査）。
+    fn can_write(&self, env: &mut BareEnv, addr: u64) -> bool {
+        let mut b = [0u8; 1];
+        env.backend
+            .mem
+            .read(VirtAddr(addr), &mut b, self.acc(AccessKind::DataWrite))
+            .is_ok()
     }
 }
 
@@ -838,5 +939,147 @@ mod tests {
             sys.handle_trap(&mut env, 0x400),
             TrapOutcome::Unimplemented
         ));
+    }
+
+    /// LWS which=1（ELF64 CAS 入口）は 32 ビットカーネルどおり
+    /// ENOSYS を r21 に返し、r28 は触らない。
+    // Ref: SRC-LINUX — syscall.S `lws_compare_and_swap64` は
+    // !CONFIG_64BIT で `lws_exit_nosys` に分岐。
+    #[test]
+    fn lws_cas64_is_enosys_on_32bit() {
+        let mut sys = Linux::new();
+        let mut env = env();
+        set_r(&mut env, 20, lws::CAS64);
+        set_r(&mut env, 28, 0xdead_beef);
+        assert!(matches!(
+            sys.handle_trap(&mut env, gate::LWS),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(get_r(&mut env, 21), (-(errno::ENOSYS as i64)) as u64);
+        assert_eq!(get_r(&mut env, 28), 0xdead_beef);
+    }
+
+    /// LWS which=0（CAS）のフォルトは r28=1・r21=-EFAULT
+    /// （カーネルの lws_fault と同じ）。
+    // Ref: SRC-LINUX — syscall.S `lws_fault`: ldo 1,%r28 / -EFAULT,%r21。
+    #[test]
+    fn lws_cas_fault_sets_r28_and_errno() {
+        let mut sys = Linux::new();
+        let mut env = env();
+        set_r(&mut env, 20, lws::CAS);
+        set_r(&mut env, 26, 0x5000); // 未写像
+        set_r(&mut env, 25, 1);
+        set_r(&mut env, 24, 2);
+        assert!(matches!(
+            sys.handle_trap(&mut env, gate::LWS),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(get_r(&mut env, 28), 1);
+        assert_eq!(get_r(&mut env, 21), (-(errno::EFAULT as i64)) as u64);
+        // 非整列 adr も EFAULT + r28=1。
+        let mut env2 = BareEnv::new(core::mem::size_of::<CpuState>());
+        set_r(&mut env2, 20, lws::CAS);
+        set_r(&mut env2, 26, 0x5002);
+        assert!(matches!(
+            sys.handle_trap(&mut env2, gate::LWS),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(get_r(&mut env2, 28), 1);
+        assert_eq!(get_r(&mut env2, 21), (-(errno::EFAULT as i64)) as u64);
+    }
+
+    /// LWS which=3（atomic_xchg）: `*r23 = *r26` してから
+    /// `*r26 = *r24`。r28=0・r21=0。
+    // Ref: SRC-LINUX — syscall.S `lws_atomic_xchg`。
+    #[test]
+    fn lws_atomic_xchg_swaps_via_old_out() {
+        let mut sys = Linux::new();
+        let mut env = env();
+        env.backend.mem.map(VirtAddr(0x4000), 1, Perms::RW).unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x4100), &0x1122_3344u32.to_be_bytes())
+            .unwrap();
+        env.backend
+            .mem
+            .write(VirtAddr(0x4200), &0xaabb_ccddu32.to_be_bytes())
+            .unwrap();
+        set_r(&mut env, 20, lws::XCHG);
+        set_r(&mut env, 26, 0x4100); // exchange address
+        set_r(&mut env, 25, 2); // size: 32bit
+        set_r(&mut env, 24, 0x4200); // new value ptr
+        set_r(&mut env, 23, 0x4300); // old value out ptr
+        assert!(matches!(
+            sys.handle_trap(&mut env, gate::LWS),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(get_r(&mut env, 28), 0);
+        assert_eq!(get_r(&mut env, 21), 0);
+        assert_eq!(sys.get32(&mut env, 0x4300), Some(0x1122_3344));
+        assert_eq!(sys.get32(&mut env, 0x4100), Some(0xaabb_ccdd));
+
+        // サイズコード >=4 は ENOSYS（r28 不変）。
+        let mut env2 = BareEnv::new(core::mem::size_of::<CpuState>());
+        env2.backend
+            .mem
+            .map(VirtAddr(0x4000), 1, Perms::RW)
+            .unwrap();
+        set_r(&mut env2, 20, lws::XCHG);
+        set_r(&mut env2, 26, 0x4100);
+        set_r(&mut env2, 25, 4);
+        set_r(&mut env2, 28, 0xdead_beef);
+        assert!(matches!(
+            sys.handle_trap(&mut env2, gate::LWS),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(get_r(&mut env2, 21), (-(errno::ENOSYS as i64)) as u64);
+        assert_eq!(get_r(&mut env2, 28), 0xdead_beef);
+    }
+
+    /// LWS which=4（atomic_store）: `*r26 = *r24`。r28=0・r21=0。
+    // Ref: SRC-LINUX — syscall.S `lws_atomic_store`。
+    #[test]
+    fn lws_atomic_store_writes_value() {
+        let mut sys = Linux::new();
+        let mut env = env();
+        env.backend.mem.map(VirtAddr(0x4000), 1, Perms::RW).unwrap();
+        env.backend.mem.write(VirtAddr(0x4200), &[0x77u8]).unwrap();
+        set_r(&mut env, 20, lws::STORE);
+        set_r(&mut env, 26, 0x4100); // dest
+        set_r(&mut env, 25, 0); // size: 8bit
+        set_r(&mut env, 24, 0x4200); // value ptr
+        assert!(matches!(
+            sys.handle_trap(&mut env, gate::LWS),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(get_r(&mut env, 28), 0);
+        assert_eq!(get_r(&mut env, 21), 0);
+        let mut b = [0u8; 4];
+        env.backend
+            .mem
+            .read(VirtAddr(0x4100), &mut b, sys.acc(AccessKind::DataRead))
+            .unwrap();
+        assert_eq!(b, [0x77, 0, 0, 0]);
+
+        // 未写像の書き込み先は r28=1・r21=-EFAULT。
+        let mut env2 = BareEnv::new(core::mem::size_of::<CpuState>());
+        env2.backend
+            .mem
+            .map(VirtAddr(0x4000), 1, Perms::RW)
+            .unwrap();
+        env2.backend
+            .mem
+            .write(VirtAddr(0x4200), &0x77u32.to_be_bytes())
+            .unwrap();
+        set_r(&mut env2, 20, lws::STORE);
+        set_r(&mut env2, 26, 0x9100); // 未写像
+        set_r(&mut env2, 25, 2);
+        set_r(&mut env2, 24, 0x4200);
+        assert!(matches!(
+            sys.handle_trap(&mut env2, gate::LWS),
+            TrapOutcome::Handled
+        ));
+        assert_eq!(get_r(&mut env2, 28), 1);
+        assert_eq!(get_r(&mut env2, 21), (-(errno::EFAULT as i64)) as u64);
     }
 }
