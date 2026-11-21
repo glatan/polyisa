@@ -1496,3 +1496,366 @@ fn exec_diag_traps_as_privileged() {
     assert_eq!(e.kind, ExceptionKind::Trap);
     assert_eq!(e.code, sem::TRAP_PRIV);
 }
+
+// ---- FP 演算（段階17 PR9a）----
+// 出典: SPEC-PARISC-11 §6 Table 6-5（RM）、§6-23（NaN/符号）、
+// §6-36..§6-53（class 0/3）、Figure 6-6（FPSR フィールド）、
+// SPEC-PARISC-20 §8 Table 8-1（frNL/frNR 規則）・§9。
+// FPSR（f[0] の上位 32 ビット）のフラグは u64 の bits63..59
+// （V,Z,O,U,I の順）、RM は bits42..41。
+
+/// FPSR の丸めモードをセットする（その他の status ビットは 0）。
+fn set_rm(env: &mut BareEnv, rm: u64) {
+    set_fpr(env, 0, rm << 41);
+}
+
+/// FPSR 例外フラグ 5 個を [V,Z,O,U,I] の 0x10..0x01 として取り出す。
+fn fpsr_flags(env: &mut BareEnv) -> u64 {
+    (fpr(env, 0) >> 59) & 0x1f
+}
+
+// class 0（0C 形: `0C r 0 sub fmt 0 0 t`。`f` は左半分の単精度、
+// `d` は全幅の倍精度）と class 3（`0C r1 r2 sub fmt 3 0 t`）。
+#[test]
+fn exec_fp_class0_nonarith_moves_bits() {
+    let mut env = env();
+    set_q(&mut env, 0x1000);
+    // fcpy,f fr4,fr5: 左半分だけコピーし右半分は保持。
+    set_fpr(&mut env, 4, 0xbfc0_0000_1122_3344);
+    set_fpr(&mut env, 5, 0xdead_beef_cafe_f00d);
+    step(&mut env, 0x3080_4005);
+    assert_eq!(fpr(&mut env, 5), 0xbfc0_0000_cafe_f00d);
+    // fabs,f fr4,fr6: 符号ビットを落とす。
+    step(&mut env, 0x3080_6006);
+    assert_eq!(fpr(&mut env, 6) >> 32, 0x3fc0_0000);
+    // fneg,f fr4,fr7: 符号を反転。
+    step(&mut env, 0x3080_c007);
+    assert_eq!(fpr(&mut env, 7) >> 32, 0x3fc0_0000);
+    // fnegabs,f fr4,fr8: 符号を 1 にする。
+    set_fpr(&mut env, 4, 0x3fc0_0000_0000_0000);
+    step(&mut env, 0x3080_e008);
+    assert_eq!(fpr(&mut env, 8) >> 32, 0xbfc0_0000);
+    // fcpy,d は全 64 ビットをペイロード込みで写す（NaN でも
+    // 例外を起こさずビットを保存する）。
+    set_fpr(&mut env, 4, 0x7ff4_dead_beef_1234);
+    step(&mut env, 0x3080_480b);
+    assert_eq!(fpr(&mut env, 11), 0x7ff4_dead_beef_1234);
+    // 非算術の符号操作は NaN 入力でも例外フラグを立てない。
+    set_fpr(&mut env, 4, 0x7fc0_0000_0000_0000); // PA の通知型 NaN
+    step(&mut env, 0x3080_600c); // fabs,d
+    step(&mut env, 0x3080_c00d); // fneg,d
+    step(&mut env, 0x3080_e010); // fnegabs,d
+    assert_eq!(fpsr_flags(&mut env), 0);
+    assert_eq!(fpr(&mut env, 16) >> 32, 0xffc0_0000);
+}
+
+// RM（FPSR bits42..41）ごとの算術結果。1/3 と -1/3 の無限二進
+// 分数が 4 モードで IEEE どおりに分岐する。
+#[test]
+fn exec_fp_arith_rounding_modes() {
+    let mut env = env();
+    set_q(&mut env, 0x1000);
+    set_fpr(&mut env, 4, 0x3f80_0000_0000_0000); // fr4L = 1.0
+    set_fpr(&mut env, 5, 0x4040_0000_0000_0000); // fr5L = 3.0
+    // fdiv,f fr4,fr5,fr6 = 0x3085_6606。
+    for (rm, want) in [
+        (0u64, 0x3eaa_aaabu64), // 最近接
+        (1, 0x3eaa_aaaa),       // 0 方向
+        (2, 0x3eaa_aaab),       // +∞ 方向
+        (3, 0x3eaa_aaaa),       // -∞ 方向
+    ] {
+        set_rm(&mut env, rm);
+        step(&mut env, 0x3085_6606);
+        assert_eq!(fpr(&mut env, 6) >> 32, want, "rm={rm}");
+        assert_eq!(fpsr_flags(&mut env), 0x01, "rm={rm}: inexact");
+    }
+    // 負の商では +∞/-∞ が入れ替わる。
+    set_fpr(&mut env, 4, 0xbf80_0000_0000_0000); // fr4L = -1.0
+    for (rm, want) in [
+        (0u64, 0xbeaa_aaabu64),
+        (1, 0xbeaa_aaaa),
+        (2, 0xbeaa_aaaa),
+        (3, 0xbeaa_aaab),
+    ] {
+        set_rm(&mut env, rm);
+        step(&mut env, 0x3085_6606);
+        assert_eq!(fpr(&mut env, 6) >> 32, want, "neg rm={rm}");
+    }
+    // オーバーフローはモードで +∞ か最大有限値に分岐する。
+    set_fpr(&mut env, 4, 0x7f7f_ffff_0000_0000); // fr4L = FLT_MAX
+    set_fpr(&mut env, 5, 0x4000_0000_0000_0000); // fr5L = 2.0
+    set_rm(&mut env, 0);
+    step(&mut env, 0x3085_4606); // fmpy,f
+    assert_eq!(fpr(&mut env, 6) >> 32, 0x7f80_0000); // +inf
+    assert_eq!(fpsr_flags(&mut env), 0x04 | 0x01); // O + I
+    set_fpr(&mut env, 0, 1 << 41); // RM = RTZ
+    step(&mut env, 0x3085_4606);
+    assert_eq!(fpr(&mut env, 6) >> 32, 0x7f7f_ffff); // 最大有限値
+    assert_eq!(fpsr_flags(&mut env), 0x04 | 0x01);
+}
+
+// FRND は丸めて整数値の浮動小数点にする（SPEC-PARISC-11 §6-46）。
+// 語形は fcpy と同じで sub=101。
+#[test]
+fn exec_fp_frnd_rounding_modes() {
+    let mut env = env();
+    set_q(&mut env, 0x1000);
+    set_fpr(&mut env, 4, 0x3fc0_0000_0000_0000); // fr4L = 1.5
+    // frnd,f fr4,fr8 = 0x3080_a008。
+    for (rm, want) in [
+        (0u64, 0x4000_0000u64), // RNE → 2.0
+        (1, 0x3f80_0000),       // RTZ → 1.0
+        (2, 0x4000_0000),       // RUP → 2.0
+        (3, 0x3f80_0000),       // RDN → 1.0
+    ] {
+        set_rm(&mut env, rm);
+        step(&mut env, 0x3080_a008);
+        assert_eq!(fpr(&mut env, 8) >> 32, want, "1.5 rm={rm}");
+        assert_eq!(fpsr_flags(&mut env), 0x01, "1.5 rm={rm}: inexact");
+    }
+    // 同距離は偶数へ（2.5 → 2.0）。
+    set_fpr(&mut env, 4, 0x4020_0000_0000_0000); // fr4L = 2.5
+    set_rm(&mut env, 0);
+    step(&mut env, 0x3080_a008);
+    assert_eq!(fpr(&mut env, 8) >> 32, 0x4000_0000); // 2.0
+    set_fpr(&mut env, 0, 2 << 41); // RUP
+    step(&mut env, 0x3080_a008);
+    assert_eq!(fpr(&mut env, 8) >> 32, 0x4040_0000); // 3.0
+    // 0.5 は RNE で +0.0（偶数側）。RUP では +1.0。
+    set_fpr(&mut env, 4, 0x3f00_0000_0000_0000);
+    set_rm(&mut env, 0);
+    step(&mut env, 0x3080_a008);
+    assert_eq!(fpr(&mut env, 8) >> 32, 0);
+    set_fpr(&mut env, 0, 2 << 41);
+    step(&mut env, 0x3080_a008);
+    assert_eq!(fpr(&mut env, 8) >> 32, 0x3f80_0000); // +1.0
+    // -0.25 は RUP で -0.0（符号は保持）、RDN で -1.0。
+    set_fpr(&mut env, 4, 0xbe80_0000_0000_0000);
+    set_fpr(&mut env, 0, 2 << 41);
+    step(&mut env, 0x3080_a008);
+    assert_eq!(fpr(&mut env, 8) >> 32, 0x8000_0000); // -0.0
+    set_fpr(&mut env, 0, 3 << 41);
+    step(&mut env, 0x3080_a008);
+    assert_eq!(fpr(&mut env, 8) >> 32, 0xbf80_0000); // -1.0
+    // 既に整数の値（2.0）は正確に戻る。
+    set_fpr(&mut env, 4, 0x4000_0000_0000_0000);
+    set_rm(&mut env, 0);
+    step(&mut env, 0x3080_a008);
+    assert_eq!(fpr(&mut env, 8) >> 32, 0x4000_0000);
+    assert_eq!(fpsr_flags(&mut env), 0);
+}
+
+// NaN の極性は IEEE 754-2008 と逆（仮数 b1=1 が通知型、0 が
+// 静止型）。結果の NaN 選択は SPEC-PARISC-11 §6-23 の規則。
+#[test]
+fn exec_fp_nan_polarity_and_quieting() {
+    let mut env = env();
+    set_q(&mut env, 0x1000);
+    set_fpr(&mut env, 4, 0x3f80_0000_0000_0000); // fr4L = 1.0
+    // PA 静止型 NaN（b1=0）は IEEE の通知型に見えるが、PA では
+    // 例外なしにそのまま伝搬する。
+    set_fpr(&mut env, 5, 0x7f80_0001_0000_0000); // fr5L = qNaN
+    set_rm(&mut env, 0);
+    step(&mut env, 0x3085_0606); // fadd,f fr4,fr5,fr6
+    assert_eq!(fpr(&mut env, 6) >> 32, 0x7f80_0001);
+    assert_eq!(fpsr_flags(&mut env), 0);
+    // PA 通知型 NaN（b1=1）は静止化（b1→0。残り仮数が全 0 なら
+    // b2→1）して V を立てる。
+    set_fpr(&mut env, 5, 0x7fc0_0000_0000_0000); // fr5L = sNaN
+    step(&mut env, 0x3085_0606);
+    assert_eq!(fpr(&mut env, 6) >> 32, 0x7fa0_0000);
+    assert_eq!(fpsr_flags(&mut env), 0x10); // V
+    // 第 1 オペランド側の通知型も同じ静止化を受ける。
+    set_fpr(&mut env, 4, 0x7fd0_0000_0000_0000); // fr4L = sNaN(残り仮数あり)
+    set_fpr(&mut env, 5, 0x3f80_0000_0000_0000);
+    step(&mut env, 0x3085_0606);
+    assert_eq!(fpr(&mut env, 6) >> 32, 0x7f90_0000);
+    // sNaN は qNaN より優先して選ばれる。
+    set_fpr(&mut env, 4, 0x7f80_0001_0000_0000); // qNaN
+    set_fpr(&mut env, 5, 0x7fc0_0000_0000_0000); // sNaN
+    step(&mut env, 0x3085_0606);
+    assert_eq!(fpr(&mut env, 6) >> 32, 0x7fa0_0000);
+    // 非 NaN オペランドの無効演算（∞-∞、0×∞、0/0、sqrt(負)）は
+    // 既定 NaN（b2=1、他は 0）と V フラグになる。
+    set_fpr(&mut env, 4, 0x7f80_0000_0000_0000); // fr4L = +inf
+    set_fpr(&mut env, 5, 0x7f80_0000_0000_0000); // fr5L = +inf
+    set_fpr(&mut env, 0, 0); // フラグをクリアして確認しやすくする
+    step(&mut env, 0x3085_2606); // fsub,f inf-inf
+    assert_eq!(fpr(&mut env, 6) >> 32, 0x7fa0_0000);
+    assert_eq!(fpsr_flags(&mut env), 0x10);
+    set_fpr(&mut env, 5, 0x0000_0000_0000_0000); // fr5L = +0.0
+    set_fpr(&mut env, 0, 0);
+    step(&mut env, 0x3085_4606); // fmpy,f inf*0
+    assert_eq!(fpr(&mut env, 6) >> 32, 0x7fa0_0000);
+    assert_eq!(fpsr_flags(&mut env), 0x10);
+    // 0/0 も無効演算。1/0 は 0 除算（Z）。
+    set_fpr(&mut env, 4, 0x0000_0000_0000_0000);
+    set_fpr(&mut env, 0, 0);
+    step(&mut env, 0x3085_6606); // fdiv,f 0/0
+    assert_eq!(fpr(&mut env, 6) >> 32, 0x7fa0_0000);
+    assert_eq!(fpsr_flags(&mut env), 0x10);
+    set_fpr(&mut env, 4, 0x3f80_0000_0000_0000); // 1.0
+    set_fpr(&mut env, 0, 0);
+    step(&mut env, 0x3085_6606); // fdiv,f 1.0/0.0
+    assert_eq!(fpr(&mut env, 6) >> 32, 0x7f80_0000); // +inf
+    assert_eq!(fpsr_flags(&mut env), 0x08); // Z
+    // fsqrt(-1.0) → 既定 NaN + V。fsqrt(-0.0) は -0.0 のまま。
+    set_fpr(&mut env, 4, 0xbf80_0000_0000_0000);
+    set_fpr(&mut env, 0, 0);
+    step(&mut env, 0x3080_8007); // fsqrt,f fr4,fr7
+    assert_eq!(fpr(&mut env, 7) >> 32, 0x7fa0_0000);
+    assert_eq!(fpsr_flags(&mut env), 0x10);
+    set_fpr(&mut env, 4, 0x8000_0000_0000_0000);
+    set_fpr(&mut env, 0, 0);
+    step(&mut env, 0x3080_8007);
+    assert_eq!(fpr(&mut env, 7) >> 32, 0x8000_0000);
+    assert_eq!(fpsr_flags(&mut env), 0);
+    // 倍精度でも同じ極性。fr4 = dbl sNaN。
+    set_fpr(&mut env, 4, 0x7ff8_0000_0000_0000);
+    set_fpr(&mut env, 5, 0x3ff0_0000_0000_0000); // 1.0
+    set_fpr(&mut env, 0, 0);
+    step(&mut env, 0x3085_0e06); // fadd,d
+    assert_eq!(fpr(&mut env, 6), 0x7ff4_0000_0000_0000);
+    assert_eq!(fpsr_flags(&mut env), 0x10);
+}
+
+// 非正規化数（denormal）はフル精度で扱う（D ビット高速モードは
+// モデル化しない）。UF は「結果が微小かつ不正確」のときだけ立つ。
+#[test]
+fn exec_fp_denormals_and_underflow() {
+    let mut env = env();
+    set_q(&mut env, 0x1000);
+    set_rm(&mut env, 0);
+    // 最小 denormal + denormal は正確な denormal（UF なし）。
+    set_fpr(&mut env, 4, 0x0000_0001_0000_0000);
+    set_fpr(&mut env, 5, 0x0000_0002_0000_0000);
+    step(&mut env, 0x3085_0606); // fadd,f
+    assert_eq!(fpr(&mut env, 6) >> 32, 0x0000_0003);
+    assert_eq!(fpsr_flags(&mut env), 0);
+    // denormal のまま最大値: 0x007fffff + 0x00000001。
+    set_fpr(&mut env, 4, 0x007f_ffff_0000_0000);
+    set_fpr(&mut env, 5, 0x0000_0001_0000_0000);
+    step(&mut env, 0x3085_0606);
+    assert_eq!(fpr(&mut env, 6) >> 32, 0x0080_0000); // 最小正規数
+    // denormal × 0.75 → 0.75ulp → 1ulp に丸まるが微小かつ
+    // 不正確なので U + I。
+    set_fpr(&mut env, 4, 0x0000_0001_0000_0000);
+    set_fpr(&mut env, 5, 0x3f40_0000_0000_0000); // 0.75
+    set_fpr(&mut env, 0, 0);
+    step(&mut env, 0x3085_4606); // fmpy,f
+    assert_eq!(fpr(&mut env, 6) >> 32, 0x0000_0001);
+    assert_eq!(fpsr_flags(&mut env), 0x02 | 0x01); // U + I
+    // denormal × 0.5 は 0.5ulp → RNE では +0（タイを偶数側へ）。
+    set_fpr(&mut env, 5, 0x3f00_0000_0000_0000); // 0.5
+    set_fpr(&mut env, 0, 0);
+    step(&mut env, 0x3085_4606);
+    assert_eq!(fpr(&mut env, 6) >> 32, 0);
+    assert_eq!(fpsr_flags(&mut env), 0x02 | 0x01); // U + I
+    // フラグは sticky：直後の正確な演算では消えない。
+    set_fpr(&mut env, 4, 0x3f80_0000_0000_0000);
+    set_fpr(&mut env, 5, 0x3f80_0000_0000_0000);
+    step(&mut env, 0x3085_0606); // 1.0 + 1.0 = 2.0 正確
+    assert_eq!(fpr(&mut env, 6) >> 32, 0x4000_0000);
+    assert_eq!(fpsr_flags(&mut env), 0x02 | 0x01); // U+I は保持
+    // 非正規化オペランドの fsqrt も扱える。sqrt(0x00000002)
+    // = sqrt(2·2^-149) = 2^-74（正規数、正確）。
+    set_fpr(&mut env, 4, 0x0000_0002_0000_0000);
+    set_fpr(&mut env, 0, 0);
+    step(&mut env, 0x3080_8007); // fsqrt,f
+    assert_eq!(fpr(&mut env, 7) >> 32, 0x1a80_0000);
+    assert_eq!(fpsr_flags(&mut env), 0);
+}
+
+// L/R 半レジスタ選択（0E 形）。`fw` は 6 ビット番号（bit5=R）、
+// `dw` は 5 ビット全レジスタ。0C の `,f` は左半分。
+#[test]
+fn exec_fp_lr_half_selection() {
+    let mut env = env();
+    set_q(&mut env, 0x1000);
+    set_rm(&mut env, 0);
+    set_fpr(&mut env, 4, 0x3f80_0000_4000_0000); // fr4L=1.0 fr4R=2.0
+    set_fpr(&mut env, 5, 0x4040_0000_4080_0000); // fr5L=3.0 fr5R=4.0
+    set_fpr(&mut env, 6, 0xdead_beef_cafe_babe);
+    // fadd,fw fr4R,fr5R,fr6R: 2.0+4.0=6.0 を右半分へ。左は保持。
+    step(&mut env, 0x3885_16c6);
+    assert_eq!(fpr(&mut env, 6), 0xdead_beef_40c0_0000);
+    // fadd,fw fr4L,fr5L,fr6L: 1.0+3.0=4.0 を左半分へ。
+    step(&mut env, 0x3885_0606);
+    assert_eq!(fpr(&mut env, 6), 0x4080_0000_40c0_0000);
+    // fcpy,fw fr4R,fr7L: 右→左の交差コピー。
+    set_fpr(&mut env, 7, 0x1111_2222_3333_4444);
+    step(&mut env, 0x3880_4087);
+    assert_eq!(fpr(&mut env, 7), 0x4000_0000_3333_4444);
+    // fsqrt,fw fr5R,fr9R: sqrt(4.0)=2.0。
+    set_fpr(&mut env, 9, 0xa5a5_a5a5_5a5a_5a5a);
+    step(&mut env, 0x38a0_80c9);
+    assert_eq!(fpr(&mut env, 9), 0xa5a5_a5a5_4000_0000);
+    // fmpy,fw fr4R,fr5R,fr8R: 2.0*4.0=8.0。
+    set_fpr(&mut env, 8, 0x0123_4567_89ab_cdef);
+    step(&mut env, 0x3885_56c8);
+    assert_eq!(fpr(&mut env, 8), 0x0123_4567_4100_0000);
+    // 0C の `,d` 形と 0E の `,dw` 形は同じ全幅演算。
+    set_fpr(&mut env, 4, 0x3ff0_0000_0000_0000); // 1.0
+    set_fpr(&mut env, 5, 0x4008_0000_0000_0000); // 3.0
+    step(&mut env, 0x3085_0e06); // fadd,d
+    assert_eq!(fpr(&mut env, 6), 0x4010_0000_0000_0000); // 4.0
+    set_fpr(&mut env, 6, 0);
+    step(&mut env, 0x3885_0e06); // fadd,dw
+    assert_eq!(fpr(&mut env, 6), 0x4010_0000_0000_0000);
+    // fcpy,dw fr4,fr11: 全 64 ビットのコピー。
+    step(&mut env, 0x3880_480b);
+    assert_eq!(fpr(&mut env, 11), 0x3ff0_0000_0000_0000);
+    // fr0 は非 load/store のソースとして +0.0 を供給する。
+    // fadd,f fr0,fr4,fr6（r1=0）→ fr6L = fr4L。
+    set_fpr(&mut env, 4, 0x3f80_0000_1234_5678); // fr4L = 1.0
+    set_fpr(&mut env, 6, 0);
+    step(&mut env, 0x3004_0606);
+    assert_eq!(fpr(&mut env, 6), 0x3f80_0000_0000_0000);
+}
+
+// FPSR（f[0] 上位）: FID の model/revision、fstd fr0 の T クリア、
+// enable ビットはフラグ集約のみ（トラップ配送なし、GAP-0057）。
+#[test]
+fn exec_fp_status_register() {
+    let mut env = env();
+    set_q(&mut env, 0x1000);
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    // FID: model/revision 以外の status ビットは不定（モデルでは
+    // 0）、model=0（ソフトウェアエミュレーション予約）・
+    // revision=4。下位半分（例外レジスタ 1）は保持。
+    set_fpr(&mut env, 0, 0xa5a5_a5a5_5a5a_5a5a);
+    step(&mut env, 0x3000_0000); // fid
+    assert_eq!(fpr(&mut env, 0), 0x0000_2000_5a5a_5a5a);
+    // fstd fr0,0(r6): 格納される値は T 込みの現値で、完了後に
+    // FPSR.T ← 0。
+    set_fpr(
+        &mut env,
+        0,
+        sem::FPSR_T | (2u64 << 41) | 0x0000_0000_1234_5678,
+    );
+    set_gpr(&mut env, 6, 0x2000);
+    step(&mut env, 0x2cc0_1200); // fstd fr0,0(r6)
+    assert_eq!(
+        mem_bytes(&mut env, 0x2000, 8),
+        [0x00, 0x00, 0x04, 0x40, 0x12, 0x34, 0x56, 0x78]
+    );
+    assert_eq!(fpr(&mut env, 0) & sem::FPSR_T, 0);
+    // enable ビットが立っていても例外はフラグ集約のみ（トラップ
+    // 配送経路がない設計判断）。
+    set_fpr(&mut env, 0, sem::FPSR_ENA); // 全 enable = 1
+    set_fpr(&mut env, 4, 0x0000_0000_0000_0000);
+    set_fpr(&mut env, 5, 0x0000_0000_0000_0000);
+    step(&mut env, 0x3085_6606); // fdiv,f 0/0
+    assert_eq!(fpr(&mut env, 6) >> 32, 0x7fa0_0000);
+    assert_eq!(
+        fpr(&mut env, 0) & sem::FPSR_FLAG_V,
+        sem::FPSR_FLAG_V,
+        "enable でもフラグ集約のみ"
+    );
+    // fr0 宛の書き込みは非 load/store では捨てられる
+    // （undefined op の決定的評価）。
+    set_fpr(&mut env, 0, 0x5a5a_5a5a_5a5a_5a5a);
+    set_fpr(&mut env, 4, 0x3f80_0000_0000_0000);
+    step(&mut env, 0x3085_0600); // fadd,f fr4,fr5,fr0
+    assert_eq!(fpr(&mut env, 0), 0x5a5a_5a5a_5a5a_5a5a);
+}
