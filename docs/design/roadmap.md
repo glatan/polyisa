@@ -28,7 +28,7 @@
 
 ### 段階 18：SuperH
 
-- 版の範囲は SH-1 から SH-4A までと、SH-2 互換の J-core。SH-2A の 32 ビット命令はデコーダの入口の長さの規則で扱う
+- 版の範囲は SH-1 から SH-4A までと、SH-2 互換の J-core。SH-2A の 32 ビット命令はデコーダの入口の長さの規則で扱う。SH-3/SH-3E は公開のソフトウェアマニュアル（SPEC-SUPERH-SH3、REJ09B0317-0400 Rev.4.00）を追加登録して範囲に残す（SH3-DSP の DSP 命令は対象外）。SH-4A 固有命令と gUSA の根拠は SPEC-SUPERH-SH4A（REJ09B0003-0150Z Rev.1.50）を追加登録した
 - SH-4 の FPSCR の PR、SZ、FR は実行モード。遅延スロット内の分岐はスロット不正命令の例外。gUSA は再開可能な不可分列
 - sh4（両エンディアン）のゲスト ABI
 
@@ -36,15 +36,14 @@
 
 | ID | 条件 | 判定 |
 |---|---|---|
-| S18-1 | sh4 の配布物のコマンド群が、ゲストのルートを使って正しい出力を返す（テスト `heavy_program_superh`）。 | 未整備 |
+| S18-1 | sh4 両エンディアンの BusyBox（LE は BIN-DISTRO-SH4、BE は自前ビルドの BIN-DISTRO-SH4EB）のコマンド群が、ゲストのルートを使って正しい出力を返す（テスト `heavy_program_superh`）。 | 未整備 |
 | S18-2 | ABI 表が SRC-LINUX の UAPI と一致することを所有者が確認する。 | 所有者 |
 
 作業計画：
 
 | # | 内容 | 前提 | 判定 |
 |---|---|---|---|
-| SH1 | 着手条件: SPEC-SUPERH-SH2A・SPEC-SUPERH-JCORE の版確定、SH-3/SH-3E の根拠資料の追加登録または範囲からの除外の決定、BIN 登録（sh4 両エンディアン）、GAP-0023 残項目の点検 | - | - |
-| SH2 | `guests/superh` 骨格: CpuState（R0-15・PC/PR/SR/GBR/VBR/MACH/MACL/FPUL・FP/FPSCR）、モデル（SH-1 から SH-4A・J-core）の宣言 | SH1 | - |
+| SH2 | `guests/superh` 骨格: CpuState（R0-15・PC/PR/SR/GBR/VBR/MACH/MACL/FPUL・FP/FPSCR）、モデル（SH-1 から SH-4A・J-core）の宣言 | - | - |
 | SH3 | デコード: 16 ビット主体 + SH-2A の 32 ビット命令（デコーダ入口の長さ規則）。両エンディアンの語並び | SH2 | - |
 | SH4 | `run_superh` 実行ループ: 遅延スロットとスロット不正命令の例外 + bare 最小テスト | SH3 | - |
 | SH5 | 算術・論理・比較（add/sub/neg/and/or/xor/cmp 系）・lds/sts（PR/GBR/MACH/MACL/FPUL/FPSCR の転送） | SH4 | - |
