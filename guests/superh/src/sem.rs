@@ -1145,22 +1145,17 @@ pub fn exec<B: Backend>(
             let sub = b.sub(rn2, rm);
             let add = b.add(rn2, rm);
             let after = selv(b, sub_case, sub, add);
-            // tmp1: sub 系は (after > rn2)（borrow）、add 系は
+            // cb: sub 系は (after > rn2)（borrow）、add 系は
             // (after < rn2)（carry）。
             let sc = b.cmp(Cmp::GtU, after, rn2);
             let ac = b.cmp(Cmp::GtU, rn2, after);
             let scv = bval(b, sc);
             let acv = bval(b, ac);
-            let tmp1 = selv(b, sub_case, scv, acv);
-            // new_q==0 側: sub 系は Q=tmp1、add 系は Q=!tmp1。
-            // new_q==1 側はその逆。
-            let one = k(b, 1);
-            let inv = b.xor(tmp1, one);
-            let q0 = selv(b, sub_case, tmp1, inv);
-            let q1 = selv(b, sub_case, inv, tmp1);
-            let zz = k(b, 0);
-            let nz = b.cmp(Cmp::Ne, new_q, zz);
-            let qf = selv(b, nz, q1, q0);
+            let cb = selv(b, sub_case, scv, acv);
+            // Q' = new_q ⊕ M ⊕ cb（Ref: SPEC-SUPERH-JCORE —
+            // datapath.vhm の `a_msb xor sr_in.m xor co_or_borrow`）。
+            let qm = b.xor(new_q, mbit);
+            let qf = b.xor(qm, cb);
             rset(b, ops[0], after);
             set_flag(b, SR_Q, qf);
             // T = (Q == M)。

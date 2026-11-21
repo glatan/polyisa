@@ -1840,8 +1840,8 @@ impl TrapHandler for Linux {
         if trace() {
             let name = superh::name(nr).unwrap_or("?");
             eprintln!(
-                "sys {nr} {name} a0={:#x} a1={:#x} a2={:#x}",
-                a[0], a[1], a[2]
+                "sys {nr} {name} pc={:#x} a0={:#x} a1={:#x} a2={:#x} a3={:#x} a4={:#x} a5={:#x}",
+                env.pc, a[0], a[1], a[2], a[3], a[4], a[5]
             );
         }
         match nr {

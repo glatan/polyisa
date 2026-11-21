@@ -326,7 +326,8 @@ fn step_superh(
             let regs: Vec<u64> = (0..16)
                 .map(|i| u64::from(env.backend.get(sem::R(i).state())))
                 .collect();
-            eprintln!("{pc:#x}: {word:#x} {insn:?} {regs:x?}");
+            let pr = u64::from(env.backend.get(sem::pr_ref()));
+            eprintln!("{pc:#x}: {word:#x} {insn:?} pr={pr:#x} {regs:x?}");
         }
     }
     let r = exec_at(env, insn, word, pc, model.endian);

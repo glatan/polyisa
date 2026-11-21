@@ -103,6 +103,32 @@ fn decode_feature_gating() {
     assert_eq!(decode_model_ex(0x006b, 16, false, SH2), None);
 }
 
+#[test]
+fn decode_sh4a_gating() {
+    // SH-4A 追加分は sh4a 機能だけで解読できる（0x00ab は SH-4 では
+    // 未割当。BE BusyBox が SH-4A バイナリで synco を踏む経路）。
+    // Ref: SPEC-SUPERH-SH4A.
+    let sh4 = SH2; // sh1+sh2+sh3+sh4 相当（sh4a 無し）
+    assert_eq!(dec(0x00ab), Some(Insn::Synco));
+    assert_eq!(decode_model_ex(0x00ab, 16, false, sh4), None);
+    // movli.l @r4, r0 / movco.l r0, @r4。
+    assert_eq!(dec(0x0463), Some(Insn::Movli));
+    assert_eq!(dec(0x0473), Some(Insn::Movco));
+    assert_eq!(decode_model_ex(0x0463, 16, false, sh4), None);
+    assert_eq!(decode_model_ex(0x0473, 16, false, sh4), None);
+    // icbi/prefi/dbr 系も同じく sh4a ゲート。
+    assert_eq!(decode_model_ex(0x04e3, 16, false, sh4), None); // icbi @r4
+    assert_eq!(decode_model_ex(0x04d3, 16, false, sh4), None); // prefi @r4
+    assert_eq!(decode_model_ex(0x00fa, 16, false, sh4), None); // stc dbr, r0
+    // movua.l は sh4a と sh2a の両方で解読できる。
+    assert_eq!(dec(0x40a9), Some(Insn::MovuaL));
+    assert_eq!(decode_model_ex(0x40a9, 16, false, sh4), None);
+    assert_eq!(
+        decode_model_ex(0x40a9, 16, false, SH2 | FEAT_SH2A),
+        Some(Insn::MovuaL)
+    );
+}
+
 // ---- 裸実行検査 ----
 
 fn bare() -> BareEnv {
@@ -464,4 +490,79 @@ fn exec_cmp_str() {
     let ok = sem::exec(&mut env.backend, Insn::CmpStr, 0x3124, 0x1000, Endian::Le).unwrap();
     assert!(ok);
     assert_eq!(sr(&mut env) & sem::SR_T, 1);
+}
+
+#[test]
+fn exec_div1_div0u_unsigned_divide() {
+    // r1:r2 / r0 の教科書的な 64:32 無符号除算。
+    // `div0u; (rotcl r2; div1 r0,r1)×32; rotcl r2` で商が r2 に
+    // 集約される（各 rotcl が T に配って次の div1 の代入元にし、
+    // 帰ってきた商ビットを r2 の LSB に拾う）。
+    // div1 の Q 更新は `Q' = MSB(Rn) ^ M ^ (add: carry | sub: borrow)`、
+    // T'=(Q'==M) でなければならず、ずれると商が化ける（glibc の udiv
+    // 経路で観測した回帰）。Ref: SPEC-SUPERH-SH4, SPEC-SUPERH-JCORE.
+    for &(dividend, divisor) in [
+        (5u32, 0x1000u32),
+        (0x6e14d005, 0x1000),
+        (0xdeadbeef, 3),
+        (0xffff_ffff, 1),
+        (0, 7),
+        (1, 1),
+        (0x8000_0000, 2),
+        (0xffff_fffe, 3),
+        (123456789, 1000),
+    ]
+    .iter()
+    {
+        let mut env = bare();
+        set_gpr(&mut env, 0, divisor);
+        set_gpr(&mut env, 1, 0);
+        set_gpr(&mut env, 2, dividend);
+        sem::exec(&mut env.backend, Insn::Div0u, 0x0019, 0x1000, Endian::Le).unwrap();
+        for _ in 0..32 {
+            // rotcl r2 = 4n24、div1 r0,r1 = 3nm4。
+            sem::exec(&mut env.backend, Insn::Rotcl, 0x4224, 0x1000, Endian::Le).unwrap();
+            sem::exec(&mut env.backend, Insn::Div1, 0x3104, 0x1000, Endian::Le).unwrap();
+        }
+        sem::exec(&mut env.backend, Insn::Rotcl, 0x4224, 0x1000, Endian::Le).unwrap();
+        assert_eq!(
+            gpr(&mut env, 2),
+            dividend.wrapping_div(divisor),
+            "{dividend:#x} / {divisor:#x}"
+        );
+    }
+}
+
+#[test]
+fn exec_movli_movco() {
+    // SH-4A の load-reserved / store-conditional 対。単発なら
+    // movco は必ず成功して T=1。Ref: SPEC-SUPERH-SH4A.
+    let mut env = bare();
+    env.map_rw(0x2000, 1).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2000), &0xdead_beefu32.to_le_bytes())
+        .unwrap();
+    set_gpr(&mut env, 4, 0x2000);
+    // movli.l @r4, r0。
+    sem::exec(&mut env.backend, Insn::Movli, 0x0463, 0x1000, Endian::Le).unwrap();
+    assert_eq!(gpr(&mut env, 0), 0xdead_beef);
+    // movco.l r0, @r4。
+    set_gpr(&mut env, 0, 0x1234_5678);
+    sem::exec(&mut env.backend, Insn::Movco, 0x0473, 0x1000, Endian::Le).unwrap();
+    assert_eq!(sr(&mut env) & sem::SR_T, 1, "movco should succeed");
+    let mut b = [0u8; 4];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(0x2000),
+            &mut b,
+            Access {
+                endian: Endian::Le,
+                align: Align::Natural,
+                kind: AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    assert_eq!(u32::from_le_bytes(b), 0x1234_5678);
 }
