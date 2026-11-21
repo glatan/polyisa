@@ -2011,16 +2011,21 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
             )?;
         }
         // ---- im5 / index 形式 ----
-        Insn::Ldi | Insn::LdiD | Insn::Ldcw | Insn::Ldcd => {
+        Insn::Ldi | Insn::LdiD | Insn::Ldcw | Insn::Ldcd | Insn::Ldaw | Insn::Ldda => {
             // ldi(,d): ops = [b, im5f, sp, size, ma, t]。
-            // ldcw/ldcd: ops = [b, im5f, sp, ma, t]。
+            // ldcw/ldcd/ldaw/ldda: ops = [b, im5f, sp, ma, t]。
             let is_ldi = matches!(insn, Insn::Ldi | Insn::LdiD);
+            let is_atomic = matches!(insn, Insn::Ldcw | Insn::Ldcd);
             let (size, m, t) = if is_ldi {
                 (ops[3], ma_to_m(ops[4]), ops[5])
             } else {
-                // ldcw = 32 ビット、ldcd = 64 ビット。
+                // ldcw/ldaw = 32 ビット、ldcd/ldda = 64 ビット。
                 (
-                    if insn == Insn::Ldcd { 3 } else { 2 },
+                    if matches!(insn, Insn::Ldcd | Insn::Ldda) {
+                        3
+                    } else {
+                        2
+                    },
                     ma_to_m(ops[3]),
                     ops[4],
                 )
@@ -2028,7 +2033,18 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
             let disp = im5(ops[1]);
             let zero = k(b, 0);
             let (ea, new_base) = gva(b, ops[0], zero, disp, m);
-            if is_ldi {
+            if !is_atomic {
+                // ldaw/ldda は絶対番地（phys_mem_load）かつ特権
+                // 命令で、通常の ldw/ldd との差は「保護を検査しない
+                // 物理アクセス」と特権制限だけ。本モデルは特権遷移を
+                // 持たず空間/保護の区別がないので、Level 0 記述
+                // （"Except for the privilege level restriction,
+                // this instruction functions identically to LOAD
+                // WORD SHORT"）に従い通常ロードに畳む。staw も同じ
+                // 扱いで既に実装済み。
+                // Ref: SPEC-PARISC-11 §5-45/§5-39 Level 0 注記,
+                // SPEC-PARISC-20 §7-78/§7-87.
+                // Gap: GAP-0055
                 match size {
                     0 => {
                         let v: B::V<W8> = b.load(ea, DATA_READ)?;
@@ -2086,7 +2102,7 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
                 Gr(ops[0] as u8).set(b, new_base);
             }
         }
-        Insn::Ldx | Insn::LdxD | Insn::Ldcwx | Insn::Ldcdx => {
+        Insn::Ldx | Insn::LdxD | Insn::Ldcwx | Insn::Ldcdx | Insn::Ldawx | Insn::Lddax => {
             // ops = [b, x, sp, scale(u), m, t]。index 形式の completer
             // は u(,s 事前スケール)と m(,m 事後更新)の 2 桁:
             //   u=0,m=0 → EA = b + x
@@ -2098,24 +2114,33 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
             // Operation, SPEC-PARISC-20 §LDD/LDW と表 H-3）。
             let size: u64 = match insn {
                 Insn::Ldx | Insn::LdxD => (u64::from(word) >> 6) & 3,
-                Insn::Ldcdx => 3,
+                Insn::Ldcdx | Insn::Lddax => 3,
                 _ => 2,
             };
-            // ,s のシフト量は ldx がオペランド幅（b=0,h=1,w=2,d=3）
-            // なのに対し、ldcw/ldcd は幅に関係なく 3（LDCW は
-            // 「index shift … shifts by three, not two」の注記）。
-            // Ref: SPEC-PARISC-11 §LDCWX Notes.
-            let shift = if matches!(insn, Insn::Ldx | Insn::LdxD) {
-                size
-            } else {
+            // ,s のシフト量はオペランド幅（b=0,h=1,w=2,d=3）が規則で、
+            // ldawx は 2・lddax は 3。ldcw/ldcd は幅に関係なく 3
+            // （LDCW は「index shift … shifts by three, not two」の
+            // 注記）。ldawx/lddax は幅と一致するので size を使う。
+            // Ref: SPEC-PARISC-11 §LDCWX/§LDWAX Operation,
+            // SPEC-PARISC-20 §7-78/§7-87.
+            let shift = if matches!(insn, Insn::Ldcwx | Insn::Ldcdx) {
                 3
+            } else {
+                size
             };
             let x = Gr(ops[1] as u8).get(b);
             let x = if ops[3] != 0 { shl_n(b, x, shift) } else { x };
             let m: i64 = if ops[4] != 0 { 1 } else { 0 };
             let (ea, new_base) = gva(b, ops[0], x, 0, m);
             let t = ops[5];
-            if matches!(insn, Insn::Ldx | Insn::LdxD) {
+            if !matches!(insn, Insn::Ldcwx | Insn::Ldcdx) {
+                // ldx/ldx_d/ldawx/lddax は通常のロード。ldawx/lddax
+                // は絶対番地（phys_mem_load）かつ特権命令だが、im5
+                // 形式の ldaw/ldda と同じく Level-0 記述に従い通常
+                // ロードに畳む。
+                // Ref: SPEC-PARISC-11 §5-39 Level 0 注記,
+                // SPEC-PARISC-20 §7-87.
+                // Gap: GAP-0055
                 match size {
                     0 => {
                         let v: B::V<W8> = b.load(ea, DATA_READ)?;
@@ -2192,16 +2217,28 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
                 Gr(ops[0] as u8).set(b, new_base);
             }
         }
-        Insn::Staw => {
-            // ops = [b, r, sp, ma, i5]。32 ビットの atomic store
-            // （ordered）は単純ストアで近似する。
+        Insn::Staw | Insn::Stda => {
+            // ops = [b, r, sp, ma, i5]。staw/stda は絶対番地
+            // （phys_mem_store）かつ特権命令で、通常の stw/std との
+            // 差は「保護を検査しない物理アクセス」と特権制限だけ。
+            // 本モデルは特権遷移を持たず空間/保護の区別がないので、
+            // Level 0 記述に従い通常ストアに畳む（32 ビットの
+            // atomic ordered store も単一スレッドでは単純ストア）。
+            // stda は 64 ビット（PA 2.0）。
+            // Ref: SPEC-PARISC-11 §5-51 Level 0 注記,
+            // SPEC-PARISC-20 §7-138.
+            // Gap: GAP-0055
             let (m, r) = (ma_to_m(ops[3]), ops[1]);
             let disp = im5(ops[4]);
             let zero = k(b, 0);
             let (ea, new_base) = gva(b, ops[0], zero, disp, m);
             let v = Gr(r as u8).get(b);
-            let v = b.trunc::<W64, W32>(v);
-            b.store(ea, v, DATA_WRITE)?;
+            if insn == Insn::Stda {
+                b.store(ea, v, DATA_WRITE)?;
+            } else {
+                let v = b.trunc::<W64, W32>(v);
+                b.store(ea, v, DATA_WRITE)?;
+            }
             if m != 0 {
                 Gr(ops[0] as u8).set(b, new_base);
             }
@@ -2667,6 +2704,45 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
                 return Err(raise::<B>(b, ExceptionKind::Trap, TRAP_PRIV));
             }
         }
+        // ---- PROBE / BREAK / DIAG ----
+        Insn::Probe => {
+            // ops = [b, ri, sp, imm, w, t]。4 形式を 1 宣言で受ける:
+            //   prober/probew   … imm=0 で ri は GR 番号
+            //   proberi/probewi … imm=1 で ri は 5 ビット即値フィールド
+            //   prober/proberi  … w=0 で読み許可を検査
+            //   probew/probewi  … w=1 で書き許可を検査
+            // spec の番地は offset ← GR[b] だけで、ri/i は番地に
+            // 加えない（「two rightmost bits of the GRr / immediate
+            // value」で与える検査対象特権レベル）。spec の意味論は
+            // 対象ページのアクセス権（access rights / protection ID）
+            // と PSW・TLB の組で「この権限・特権でアクセス可能か」
+            // を問い合わせる。本モデルはフラットメモリで access-right
+            // メタデータも特権遷移も持たないので「マップされていて
+            // 要求した R/W 許可を持つ」なら 1、さもなければ 0 と近似
+            // する（結果 GR への書き込み自体は spec どおり）。
+            // Ref: SPEC-PARISC-11 §5-154..§5-157 Operation,
+            // SPEC-PARISC-20 §7-100/§7-101.
+            // Gap: GAP-0055
+            let (rb, w, t) = (ops[0], ops[4], ops[5]);
+            let ea = Gr(rb as u8).get(b);
+            let acc = if w != 0 { DATA_WRITE } else { DATA_READ };
+            // 1 バイト分プローブする（ページ境界またぎは本モデルの
+            // 近似範囲外。先頭バイトの許可で代表させる）。
+            let ok = match b.probe(ea, 1, acc) {
+                Ok(()) => k(b, 1),
+                Err(_) => k(b, 0),
+            };
+            Gr(t as u8).set(b, ok);
+        }
+        Insn::Break => {
+            // ops = [i5a, i13b]。2 つの即値オペランドはトラップ
+            // ハンドラへのソフトウェア引数で、ハードウェアは
+            // break instruction trap を起こすだけ。現在の例外
+            // モデルは kind+code しか持たず即値を渡せないので、
+            // 種別 Break に code=0 で畳む。
+            // Ref: SPEC-PARISC-11 §BREAK, SPEC-PARISC-20 §7-32.
+            return Err(raise::<B>(b, ExceptionKind::Break, 0));
+        }
         // ---- 特権・未対応の命令は Trap へ ----
         Insn::Rsm
         | Insn::Ssm
@@ -2682,10 +2758,15 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
         | Insn::Pxtlbe
         | Insn::PxtlbeS
         | Insn::Lpa
-        | Insn::Lci => {
+        | Insn::Lci
+        | Insn::Diag => {
+            // diag は implementation-defined な診断命令で
+            // priv != 0 では privileged_operation_trap。ユーザ
+            // 専用モデルでは常に TRAP_PRIV。
+            // Ref: SPEC-PARISC-11 §DIAG, SPEC-PARISC-20 §7-50.
             return Err(raise::<B>(b, ExceptionKind::Trap, TRAP_PRIV));
         }
-        // break/diag などその他は未実装。
+        // その他は未実装。
         _ => return Ok(false),
     }
     Ok(true)

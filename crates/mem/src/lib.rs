@@ -235,7 +235,10 @@ impl AddressSpace {
         let kind_perm = match acc.kind {
             AccessKind::DataRead | AccessKind::AtomicRw | AccessKind::LoadReserved => Perms::R,
             AccessKind::Fetch => Perms::X,
-            AccessKind::DataWrite | AccessKind::StoreConditional => Perms::R,
+            // probe(addr,len,DataWrite/StoreConditional) は「書き込み
+            // 系アクセスが可能か」の検査なので、読み出し経路でも
+            // W を要求する（実際の store 側の検査と揃える）。
+            AccessKind::DataWrite | AccessKind::StoreConditional => Perms::W,
         };
         let mut off = 0;
         while off < buf.len() {

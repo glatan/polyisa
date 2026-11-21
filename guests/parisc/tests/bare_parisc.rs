@@ -970,3 +970,193 @@ fn exec_mtsm_traps_as_privileged() {
     assert_eq!(e.kind, ExceptionKind::Trap);
     assert_eq!(e.code, sem::TRAP_PRIV);
 }
+
+// ---- 絶対番地ロード/ストア・probe・break・diag（段階17・PR6）----
+// ldaw/ldda/ldawx/lddax/stda は絶対番地かつ特権命令だが、本モデルは
+// 特権遷移を持たないので Level 0 記述どおり通常ロード/ストアに
+// 畳む（GAP-0055）。probe も access-right メタデータのない
+// フラットメモリ近似（マップ済み＋要求許可なら 1）で検査する。
+// Ref: SPEC-PARISC-11 §5-45/§5-39/§5-51/§5-154..§5-157,
+// SPEC-PARISC-20 §7-78/§7-87/§7-138/§7-100/§7-101.
+
+#[test]
+fn exec_ldaw_ldda_short_forms() {
+    let mut env = env();
+    set_q(&mut env, 0x1000);
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2000), &0xdead_beefu32.to_be_bytes())
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2008), &0x1122_3344_5566_7788u64.to_be_bytes())
+        .unwrap();
+    // ldaw r9,0(r6): 32 ビットの絶対ロード（通常 ldw と同じ動作）。
+    set_gpr(&mut env, 6, 0x2000);
+    step(&mut env, 0x0cc0_1189);
+    assert_eq!(gpr(&mut env, 9), 0xdead_beef);
+    assert_eq!(gpr(&mut env, 6), 0x2000); // 修飾なしなので基底不変。
+    // ldaw,ma r9,4(r6): EA = 旧基底 0x2000、書戻し r6 = 0x2004。
+    step(&mut env, 0x0cc8_11a9);
+    assert_eq!(gpr(&mut env, 9), 0xdead_beef);
+    assert_eq!(gpr(&mut env, 6), 0x2004);
+    // ldaw,mb r9,-4(r6): 先に r6 = 0x2000 に更新してから読む。
+    // im5 フィールドは (値<<1)|符号の配置で -4 は 25（0b11001）。
+    step(&mut env, 0x0cd9_31a9);
+    assert_eq!(gpr(&mut env, 9), 0xdead_beef);
+    assert_eq!(gpr(&mut env, 6), 0x2000);
+    // ldda r9,8(r6): 64 ビット形（PA 2.0）。im5=+8 はフィールド 16。
+    step(&mut env, 0x0cd0_1109);
+    assert_eq!(gpr(&mut env, 9), 0x1122_3344_5566_7788);
+}
+
+#[test]
+fn exec_ldawx_lddax_indexed_forms() {
+    let mut env = env();
+    set_q(&mut env, 0x1000);
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2000), &0xcafe_babeu32.to_be_bytes())
+        .unwrap();
+    env.backend
+        .mem
+        .write(VirtAddr(0x2008), &0xfeed_0000_1111_2222u64.to_be_bytes())
+        .unwrap();
+    set_gpr(&mut env, 6, 0x2000);
+    set_gpr(&mut env, 7, 8);
+    // ldawx r7(r6),r9: u=0,m=0 → EA = r6 + r7 = 0x2008 の語。
+    step(&mut env, 0x0cc7_0189);
+    assert_eq!(gpr(&mut env, 9), 0xfeed_0000);
+    // ldawx,s r7(r6),r9: u=1 → x<<2 で EA = 0x2000 + 32（語は
+    // 0x2020 に無いので 0。先に書いておく）。
+    env.backend
+        .mem
+        .write(VirtAddr(0x2020), &0x0000_4242u32.to_be_bytes())
+        .unwrap();
+    step(&mut env, 0x0cc7_2189);
+    assert_eq!(gpr(&mut env, 9), 0x4242);
+    assert_eq!(gpr(&mut env, 6), 0x2000); // m=0 なので基底不変。
+    // ldawx,m r7(r6),r9: m=1 → EA = r6（0x2000）の語を読み、
+    // 書戻し r6 += r7。
+    step(&mut env, 0x0cc7_01a9);
+    assert_eq!(gpr(&mut env, 9), 0xcafe_babe);
+    assert_eq!(gpr(&mut env, 6), 0x2008);
+    // lddax r7(r6),r9: 64 ビット index 形。EA = 0x2008+8 = 0x2010。
+    env.backend
+        .mem
+        .write(VirtAddr(0x2010), &0xa5a5_5a5a_1234_5678u64.to_be_bytes())
+        .unwrap();
+    step(&mut env, 0x0cc7_0109);
+    assert_eq!(gpr(&mut env, 9), 0xa5a5_5a5a_1234_5678);
+    // lddax,s r1(r6),r9: u=1 → x<<3。r1=1 で EA = 0x2008+8 = 0x2010。
+    set_gpr(&mut env, 1, 1);
+    step(&mut env, 0x0cc1_2109);
+    assert_eq!(gpr(&mut env, 9), 0xa5a5_5a5a_1234_5678);
+}
+
+#[test]
+fn exec_staw_stda_short_forms() {
+    let mut env = env();
+    set_q(&mut env, 0x1000);
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    set_gpr(&mut env, 6, 0x2000);
+    set_gpr(&mut env, 7, 0x1122_3344_5566_7788);
+    // staw r7,0(r6): 32 ビットの絶対ストア（下位 32 ビットを書く）。
+    step(&mut env, 0x0cc7_1380);
+    assert_eq!(mem_bytes(&mut env, 0x2000, 4), [0x55, 0x66, 0x77, 0x88]);
+    // stda r7,0(r6): 64 ビット形（PA 2.0）。
+    step(&mut env, 0x0cc7_13c0);
+    assert_eq!(
+        mem_bytes(&mut env, 0x2000, 8),
+        [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88]
+    );
+    // stda,ma r7,8(r6): EA = 旧基底、書戻し r6 += 8。
+    step(&mut env, 0x0cc7_13f0);
+    assert_eq!(gpr(&mut env, 6), 0x2008);
+    assert_eq!(
+        mem_bytes(&mut env, 0x2000, 8),
+        [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88]
+    );
+}
+
+#[test]
+fn exec_probe_read_write() {
+    let mut env = env();
+    set_q(&mut env, 0x1000);
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env.backend.mem.map(VirtAddr(0x4000), 1, Perms::R).unwrap();
+    // prober (r6),r3,r9: RW ページは読み可 → 1。
+    // r3 の下位 2 ビットは検査対象特権だがフラットモデルでは結果に
+    // 影響しない（GAP-0055）。
+    set_gpr(&mut env, 6, 0x2000);
+    set_gpr(&mut env, 3, 0xffff_fffd);
+    step(&mut env, 0x04c3_1189);
+    assert_eq!(gpr(&mut env, 9), 1);
+    // probew (r6),r3,r9: 同じページは書き可 → 1。
+    step(&mut env, 0x04c3_11c9);
+    assert_eq!(gpr(&mut env, 9), 1);
+    // R-only ページ: prober → 1、probew → 0。
+    set_gpr(&mut env, 6, 0x4000);
+    step(&mut env, 0x04c3_1189);
+    assert_eq!(gpr(&mut env, 9), 1);
+    set_gpr(&mut env, 9, 0xdead);
+    step(&mut env, 0x04c3_11c9);
+    assert_eq!(gpr(&mut env, 9), 0);
+    // 未写像: prober/probew とも 0（spec ではハンドラが GR[t]←0
+    // に畳むのと同じ観測結果）。
+    set_gpr(&mut env, 6, 0x8000);
+    set_gpr(&mut env, 9, 0xdead);
+    step(&mut env, 0x04c3_1189);
+    assert_eq!(gpr(&mut env, 9), 0);
+    step(&mut env, 0x04c3_11c9);
+    assert_eq!(gpr(&mut env, 9), 0);
+    // proberi/probewi: bit13=1 で ri フィールドは 5 ビット即値
+    // （その下位 2 ビットが検査対象特権）。番地は GR[b] のみ。
+    set_gpr(&mut env, 6, 0x2000);
+    step(&mut env, 0x04c3_3189); // proberi (r6),3,r9 → 1
+    assert_eq!(gpr(&mut env, 9), 1);
+    step(&mut env, 0x04c3_31c9); // probewi (r6),3,r9 → 1
+    assert_eq!(gpr(&mut env, 9), 1);
+    set_gpr(&mut env, 6, 0x4000);
+    step(&mut env, 0x04c3_31c9); // probewi on R-only → 0
+    assert_eq!(gpr(&mut env, 9), 0);
+}
+
+// break は break instruction trap を起こす。例外モデルは即値を
+// 運ばないので種別 Break + code=0 で畳む。
+// Ref: SPEC-PARISC-11 §BREAK, SPEC-PARISC-20 §7-32.
+#[test]
+fn exec_break_raises_break_trap() {
+    let mut env = env();
+    set_q(&mut env, 0x1000);
+    // break 1,2（000000 i5 i13 ... 00000000 ... → 0x0022_0000）。
+    let insn = dec(0x0022_0000).unwrap();
+    assert_eq!(insn, Insn::Break);
+    let f = iaoq_f(&mut env);
+    let r = sem::exec(&mut env.backend, insn, 0x0022_0000, f);
+    let Err(InterpExit::Exception(e)) = r else {
+        panic!("break should trap: {r:?}");
+    };
+    assert_eq!(e.kind, ExceptionKind::Break);
+    assert_eq!(e.code, 0);
+}
+
+// diag は実装依存の診断命令で priv != 0 では特権操作トラップ。
+// ユーザ専用モデルでは常に TRAP_PRIV。
+// Ref: SPEC-PARISC-11 §DIAG, SPEC-PARISC-20 §7-50.
+#[test]
+fn exec_diag_traps_as_privileged() {
+    let mut env = env();
+    set_q(&mut env, 0x1000);
+    let insn = dec(0x1400_0000).unwrap();
+    assert_eq!(insn, Insn::Diag);
+    let f = iaoq_f(&mut env);
+    let r = sem::exec(&mut env.backend, insn, 0x1400_0000, f);
+    let Err(InterpExit::Exception(e)) = r else {
+        panic!("diag should trap: {r:?}");
+    };
+    assert_eq!(e.kind, ExceptionKind::Trap);
+    assert_eq!(e.code, sem::TRAP_PRIV);
+}
