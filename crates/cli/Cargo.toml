@@ -105,6 +105,10 @@ name = "heavy_program_alpha"
 required-features = ["guest-alpha"]
 
 [[test]]
+name = "heavy_program_parisc"
+required-features = ["guest-parisc"]
+
+[[test]]
 name = "heavy_jit_diff"
 required-features = ["guest-aarch64", "guest-arm", "guest-x86"]
 

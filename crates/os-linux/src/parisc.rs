@@ -57,22 +57,31 @@ pub mod lws {
 }
 
 /// hppa の errno。1–34 は `asm-generic/errno-base.h` と同値、35 以上は
-/// `uapi/asm/errno.h` の独自表（HP-UX 系の値。ENOSYS=251 など）。
+/// `uapi/asm/errno.h` の独自表（HP-UX 系の値。ENOTEMPTY=247・
+/// ENAMETOOLONG=248・ELOOP=249・ENOSYS=251、ソケット系は 216–245）。
 /// 負で `r28` に返す。
-// Ref: SRC-LINUX (7.3) — arch/parisc/include/uapi/asm/errno.h.
+// Ref: SRC-LINUX (7.3) — arch/parisc/include/uapi/asm/errno.h
+// と asm-generic/errno-base.h.
 pub mod errno {
+    // ---- asm-generic/errno-base.h と同値（1–34）----
     pub const EPERM: u32 = 1;
     pub const ENOENT: u32 = 2;
+    pub const ESRCH: u32 = 3;
     pub const EINTR: u32 = 4;
     pub const EIO: u32 = 5;
+    pub const ENXIO: u32 = 6;
+    pub const E2BIG: u32 = 7;
     pub const ENOEXEC: u32 = 8;
     pub const EBADF: u32 = 9;
+    pub const ECHILD: u32 = 10;
     pub const EAGAIN: u32 = 11;
     pub const ENOMEM: u32 = 12;
     pub const EACCES: u32 = 13;
     pub const EFAULT: u32 = 14;
+    pub const ENOTBLK: u32 = 15;
     pub const EBUSY: u32 = 16;
     pub const EEXIST: u32 = 17;
+    pub const EXDEV: u32 = 18;
     pub const ENODEV: u32 = 19;
     pub const ENOTDIR: u32 = 20;
     pub const EISDIR: u32 = 21;
@@ -80,17 +89,113 @@ pub mod errno {
     pub const ENFILE: u32 = 23;
     pub const EMFILE: u32 = 24;
     pub const ENOTTY: u32 = 25;
+    pub const ETXTBSY: u32 = 26;
     pub const EFBIG: u32 = 27;
     pub const ENOSPC: u32 = 28;
     pub const ESPIPE: u32 = 29;
     pub const EROFS: u32 = 30;
+    pub const EMLINK: u32 = 31;
     pub const EPIPE: u32 = 32;
+    pub const EDOM: u32 = 33;
     pub const ERANGE: u32 = 34;
+    // ---- uapi/asm/errno.h の独自表（35 以上）----
+    pub const ENOMSG: u32 = 35;
+    pub const EIDRM: u32 = 36;
+    pub const ECHRNG: u32 = 37;
+    pub const EL2NSYNC: u32 = 38;
+    pub const EL3HLT: u32 = 39;
+    pub const EL3RST: u32 = 40;
+    pub const ELNRNG: u32 = 41;
+    pub const EUNATCH: u32 = 42;
+    pub const ENOCSI: u32 = 43;
+    pub const EL2HLT: u32 = 44;
+    pub const EDEADLK: u32 = 45;
+    pub const ENOLCK: u32 = 46;
+    pub const EILSEQ: u32 = 47;
+    pub const ENONET: u32 = 50;
+    pub const ENODATA: u32 = 51;
+    pub const ETIME: u32 = 52;
+    pub const ENOSR: u32 = 53;
+    pub const ENOSTR: u32 = 54;
+    pub const ENOPKG: u32 = 55;
+    pub const ENOLINK: u32 = 57;
+    pub const EADV: u32 = 58;
+    pub const ESRMNT: u32 = 59;
+    pub const ECOMM: u32 = 60;
+    pub const EPROTO: u32 = 61;
+    pub const EMULTIHOP: u32 = 64;
+    pub const EDOTDOT: u32 = 66;
+    pub const EBADMSG: u32 = 67;
+    pub const EUSERS: u32 = 68;
+    pub const EDQUOT: u32 = 69;
+    pub const ESTALE: u32 = 70;
+    pub const EREMOTE: u32 = 71;
     pub const EOVERFLOW: u32 = 72;
+    pub const EBADE: u32 = 160;
+    pub const EBADR: u32 = 161;
+    pub const EXFULL: u32 = 162;
+    pub const ENOANO: u32 = 163;
+    pub const EBADRQC: u32 = 164;
+    pub const EBADSLT: u32 = 165;
+    pub const EBFONT: u32 = 166;
+    pub const ENOTUNIQ: u32 = 167;
+    pub const EBADFD: u32 = 168;
+    pub const EREMCHG: u32 = 169;
+    pub const ELIBACC: u32 = 170;
+    pub const ELIBBAD: u32 = 171;
+    pub const ELIBSCN: u32 = 172;
+    pub const ELIBMAX: u32 = 173;
+    pub const ELIBEXEC: u32 = 174;
+    pub const ERESTART: u32 = 175;
+    pub const ESTRPIPE: u32 = 176;
+    pub const EUCLEAN: u32 = 177;
+    pub const ENOTNAM: u32 = 178;
+    pub const ENAVAIL: u32 = 179;
+    pub const EISNAM: u32 = 180;
+    pub const EREMOTEIO: u32 = 181;
+    pub const ENOMEDIUM: u32 = 182;
+    pub const EMEDIUMTYPE: u32 = 183;
+    pub const ENOKEY: u32 = 184;
+    pub const EKEYEXPIRED: u32 = 185;
+    pub const EKEYREVOKED: u32 = 186;
+    pub const EKEYREJECTED: u32 = 187;
+    pub const ENOTSOCK: u32 = 216;
+    pub const EDESTADDRREQ: u32 = 217;
+    pub const EMSGSIZE: u32 = 218;
+    pub const EPROTOTYPE: u32 = 219;
+    pub const ENOPROTOOPT: u32 = 220;
+    pub const EPROTONOSUPPORT: u32 = 221;
+    pub const ESOCKTNOSUPPORT: u32 = 222;
     pub const EOPNOTSUPP: u32 = 223;
+    pub const EPFNOSUPPORT: u32 = 224;
+    pub const EAFNOSUPPORT: u32 = 225;
+    pub const EADDRINUSE: u32 = 226;
+    pub const EADDRNOTAVAIL: u32 = 227;
+    pub const ENETDOWN: u32 = 228;
+    pub const ENETUNREACH: u32 = 229;
+    pub const ENETRESET: u32 = 230;
+    pub const ECONNABORTED: u32 = 231;
+    pub const ECONNRESET: u32 = 232;
+    pub const ENOBUFS: u32 = 233;
+    pub const EISCONN: u32 = 234;
+    pub const ENOTCONN: u32 = 235;
+    pub const ESHUTDOWN: u32 = 236;
+    pub const ETOOMANYREFS: u32 = 237;
+    pub const ETIMEDOUT: u32 = 238;
+    pub const ECONNREFUSED: u32 = 239;
+    pub const EHOSTDOWN: u32 = 241;
+    pub const EHOSTUNREACH: u32 = 242;
+    pub const EALREADY: u32 = 244;
+    pub const EINPROGRESS: u32 = 245;
+    pub const ENOTEMPTY: u32 = 247;
     pub const ENAMETOOLONG: u32 = 248;
     pub const ELOOP: u32 = 249;
     pub const ENOSYS: u32 = 251;
+    pub const ECANCELLED: u32 = 253;
+    pub const EOWNERDEAD: u32 = 254;
+    pub const ENOTRECOVERABLE: u32 = 255;
+    pub const ERFKILL: u32 = 256;
+    pub const EHWPOISON: u32 = 257;
 }
 
 /// `mmap`/`mprotect` の prot と flags。hppa の MAP_FIXED=0x04 と
@@ -107,10 +212,14 @@ pub mod mman {
     pub const MAP_ANONYMOUS: u32 = 0x10;
 }
 
-/// `open`/`openat` の O_*。hppa は独自のビット位置に置く（TRUNC
-/// だけ arch 側の定義がなく asm-generic/fcntl.h の値）。
-// Ref: SRC-LINUX (7.3) — arch/parisc/include/uapi/asm/fcntl.h.
+/// `open`/`openat` の O_*。hppa は独自のビット位置に置く。
+/// ACCMODE/TRUNC など arch 側に定義のないものは asm-generic/fcntl.h
+/// の値（ACCMODE=3 は読み書きモードの下位 2 ビット）。
+// Ref: SRC-LINUX (7.3) — arch/parisc/include/uapi/asm/fcntl.h
+// と include/uapi/asm-generic/fcntl.h.
 pub mod oflag {
+    /// アクセスモードのマスク（0=RDONLY/1=WRONLY/2=RDWR、汎用値）。
+    pub const ACCMODE: u64 = 0o3;
     pub const CREAT: u64 = 0o400; // 1 << 8
     pub const EXCL: u64 = 0o2000; // 1 << 10
     pub const TRUNC: u64 = 0o1000; // 1 << 9（asm-generic）
@@ -119,67 +228,317 @@ pub mod oflag {
     pub const DIRECTORY: u64 = 0o10000; // 1 << 12
     pub const NOFOLLOW: u64 = 0o200; // 1 << 7
     pub const CLOEXEC: u64 = 0o1000_0000; // 1 << 21
+    /// O_LARGEFILE（1<<11。64 ビットサイズは常時受理するので解釈は不要）。
+    pub const LARGEFILE: u64 = 0o4000;
+    /// O_PATH（1<<22。fd はパス保持のみ）。
+    pub const PATH: u64 = 0o2000_0000;
+}
+
+/// *at 系 syscall の dirfd とフラグ（汎用 UAPI）。
+// Ref: SRC-LINUX (7.3) — include/uapi/linux/fcntl.h.
+pub mod at {
+    /// AT_FDCWD（現在の作業ディレクトリを指す dirfd）。
+    pub const FDCWD: i64 = -100;
+    /// AT_SYMLINK_NOFOLLOW。シンボリックリンクをたどらない。
+    pub const SYMLINK_NOFOLLOW: u64 = 0x100;
+    /// AT_REMOVEDIR（unlinkat でディレクトリを消す）。
+    pub const REMOVEDIR: u64 = 0x200;
+    /// AT_EMPTY_PATH。空のパスは dirfd 自身を対象にする。
+    pub const EMPTY_PATH: u64 = 0x1000;
+}
+
+/// hppa のシグナル番号。`uapi/asm/signal.h` は汎用でなく HP-UX 系の
+/// 独自並び（USR1=16、PWR=19、IO=22、WINCH=23、URG=29、SYS=31）。
+/// 1–15 は汎用と同じ。
+// Ref: SRC-LINUX (7.3) — arch/parisc/include/uapi/asm/signal.h.
+pub mod sig {
+    pub const USR1: u32 = 16;
+    pub const USR2: u32 = 17;
+    pub const CHLD: u32 = 18;
+    pub const PWR: u32 = 19;
+    pub const VTALRM: u32 = 20;
+    pub const PROF: u32 = 21;
+    pub const IO: u32 = 22;
+    pub const WINCH: u32 = 23;
+    pub const STOP: u32 = 24;
+    pub const TSTP: u32 = 25;
+    pub const CONT: u32 = 26;
+    pub const TTIN: u32 = 27;
+    pub const TTOU: u32 = 28;
+    pub const URG: u32 = 29;
+    pub const XFSZ: u32 = 30;
+    pub const SYS: u32 = 31;
+}
+
+/// rlimit の資源番号（asm-generic/resource.h。hppa は汎用の並び）。
+// Ref: SRC-LINUX (7.3) — include/uapi/asm-generic/resource.h.
+pub mod res {
+    pub const CPU: u64 = 0;
+    pub const FSIZE: u64 = 1;
+    pub const DATA: u64 = 2;
+    pub const STACK: u64 = 3;
+    pub const CORE: u64 = 4;
+    pub const RSS: u64 = 5;
+    pub const NPROC: u64 = 6;
+    pub const NOFILE: u64 = 7;
+    pub const MEMLOCK: u64 = 8;
+    pub const AS: u64 = 9;
+    /// hppa32 の `struct rlimit`（u32×2）での無限値。
+    pub const RLIM_INFINITY: u64 = 0xffff_ffff;
+    /// `prlimit64` の `struct rlimit64`（u64×2）での無限値。
+    pub const RLIM64_INFINITY: u64 = 0xffff_ffff_ffff_ffff;
 }
 
 // ---- 番号（syscall.tbl。実装で使う分を名前付き定数に）----
 pub mod nr {
+    pub const RESTART_SYSCALL: u64 = 0;
     pub const EXIT: u64 = 1;
+    pub const FORK: u64 = 2;
     pub const READ: u64 = 3;
     pub const WRITE: u64 = 4;
     pub const OPEN: u64 = 5;
     pub const CLOSE: u64 = 6;
+    pub const WAITPID: u64 = 7;
+    pub const CREAT: u64 = 8;
+    pub const LINK: u64 = 9;
+    pub const UNLINK: u64 = 10;
+    pub const EXECVE: u64 = 11;
+    pub const CHDIR: u64 = 12;
+    pub const TIME: u64 = 13;
+    pub const MKNOD: u64 = 14;
+    pub const CHMOD: u64 = 15;
+    pub const LCHOWN: u64 = 16;
+    pub const STAT: u64 = 18;
     pub const LSEEK: u64 = 19;
     pub const GETPID: u64 = 20;
+    pub const MOUNT: u64 = 21;
+    pub const SETUID: u64 = 23;
     pub const GETUID: u64 = 24;
+    pub const STIME: u64 = 25;
+    pub const PTRACE: u64 = 26;
+    pub const ALARM: u64 = 27;
     pub const FSTAT: u64 = 28;
+    pub const PAUSE: u64 = 29;
+    pub const UTIME: u64 = 30;
     pub const ACCESS: u64 = 33;
+    pub const NICE: u64 = 34;
+    pub const SYNC: u64 = 36;
+    pub const KILL: u64 = 37;
+    pub const RENAME: u64 = 38;
+    pub const MKDIR: u64 = 39;
+    pub const RMDIR: u64 = 40;
+    pub const DUP: u64 = 41;
+    pub const PIPE: u64 = 42;
+    pub const TIMES: u64 = 43;
     pub const BRK: u64 = 45;
+    pub const SETGID: u64 = 46;
     pub const GETGID: u64 = 47;
+    pub const SIGNAL: u64 = 48;
     pub const GETEUID: u64 = 49;
     pub const GETEGID: u64 = 50;
+    pub const ACCT: u64 = 51;
+    pub const UMOUNT2: u64 = 52;
     pub const IOCTL: u64 = 54;
+    pub const FCNTL: u64 = 55;
+    pub const SETPGID: u64 = 57;
     pub const UNAME: u64 = 59;
     pub const UMASK: u64 = 60;
+    pub const CHROOT: u64 = 61;
+    pub const USTAT: u64 = 62;
     pub const DUP2: u64 = 63;
     pub const GETPPID: u64 = 64;
+    pub const GETPGRP: u64 = 65;
+    pub const SETSID: u64 = 66;
+    pub const PIVOT_ROOT: u64 = 67;
+    pub const SGETMASK: u64 = 68;
+    pub const SSETMASK: u64 = 69;
+    pub const SETREUID: u64 = 70;
+    pub const SETREGID: u64 = 71;
+    pub const MINCORE: u64 = 72;
     pub const SIGPENDING: u64 = 73;
+    pub const SETHOSTNAME: u64 = 74;
+    pub const SETRLIMIT: u64 = 75;
+    pub const GETRLIMIT: u64 = 76;
+    pub const GETRUSAGE: u64 = 77;
     pub const GETTIMEOFDAY: u64 = 78;
+    pub const SETTIMEOFDAY: u64 = 79;
     pub const GETGROUPS: u64 = 80;
+    pub const SETGROUPS: u64 = 81;
+    pub const SYMLINK: u64 = 83;
+    pub const LSTAT: u64 = 84;
     pub const READLINK: u64 = 85;
+    pub const USELIB: u64 = 86;
+    pub const SWAPON: u64 = 87;
+    pub const REBOOT: u64 = 88;
     pub const MMAP2: u64 = 89;
     pub const MMAP: u64 = 90;
     pub const MUNMAP: u64 = 91;
+    pub const TRUNCATE: u64 = 92;
+    pub const FTRUNCATE: u64 = 93;
+    pub const FCHMOD: u64 = 94;
+    pub const FCHOWN: u64 = 95;
+    pub const GETPRIORITY: u64 = 96;
+    pub const SETPRIORITY: u64 = 97;
+    pub const STATFS: u64 = 99;
+    pub const FSTATFS: u64 = 100;
+    pub const STAT64: u64 = 101;
+    pub const SYSLOG: u64 = 103;
+    pub const SETITIMER: u64 = 104;
+    pub const GETITIMER: u64 = 105;
+    pub const CAPGET: u64 = 106;
+    pub const CAPSET: u64 = 107;
+    pub const PREAD64: u64 = 108;
+    pub const PWRITE64: u64 = 109;
+    pub const GETCWD: u64 = 110;
+    pub const VHANGUP: u64 = 111;
+    pub const FSTAT64: u64 = 112;
+    pub const VFORK: u64 = 113;
+    pub const WAIT4: u64 = 114;
+    pub const SWAPOFF: u64 = 115;
+    pub const SYSINFO: u64 = 116;
+    pub const FSYNC: u64 = 118;
+    pub const MADVISE: u64 = 119;
+    pub const CLONE: u64 = 120;
+    pub const SETDOMAINNAME: u64 = 121;
+    pub const SENDFILE: u64 = 122;
+    pub const ADJTIMEX: u64 = 124;
     pub const MPROTECT: u64 = 125;
     pub const SIGPROCMASK: u64 = 126;
-    pub const GETCWD: u64 = 110;
-    pub const FSTAT64: u64 = 112;
-    pub const SYSINFO: u64 = 116;
+    pub const INIT_MODULE: u64 = 128;
+    pub const DELETE_MODULE: u64 = 129;
+    pub const QUOTACTL: u64 = 131;
+    pub const GETPGID: u64 = 132;
+    pub const FCHDIR: u64 = 133;
+    pub const BDFLUSH: u64 = 134;
+    pub const SYSFS: u64 = 135;
+    pub const PERSONALITY: u64 = 136;
+    pub const SETFSUID: u64 = 138;
+    pub const SETFSGID: u64 = 139;
     pub const _LLSEEK: u64 = 140;
+    pub const GETDENTS: u64 = 141;
     pub const _NEWSELECT: u64 = 142;
+    pub const FLOCK: u64 = 143;
+    pub const MSYNC: u64 = 144;
     pub const READV: u64 = 145;
     pub const WRITEV: u64 = 146;
+    pub const GETSID: u64 = 147;
+    pub const FDATASYNC: u64 = 148;
+    pub const _SYSCTL: u64 = 149;
+    pub const MLOCK: u64 = 150;
+    pub const MUNLOCK: u64 = 151;
+    pub const MLOCKALL: u64 = 152;
+    pub const MUNLOCKALL: u64 = 153;
+    pub const SCHED_SETPARAM: u64 = 154;
+    pub const SCHED_GETPARAM: u64 = 155;
+    pub const SCHED_SETSCHEDULER: u64 = 156;
+    pub const SCHED_GETSCHEDULER: u64 = 157;
+    pub const SCHED_YIELD: u64 = 158;
+    pub const SCHED_GET_PRIORITY_MAX: u64 = 159;
+    pub const SCHED_GET_PRIORITY_MIN: u64 = 160;
+    pub const SCHED_RR_GET_INTERVAL: u64 = 161;
     pub const NANOSLEEP: u64 = 162;
+    pub const MREMAP: u64 = 163;
+    pub const SETRESUID: u64 = 164;
+    pub const GETRESUID: u64 = 165;
     pub const SIGALTSTACK: u64 = 166;
+    pub const POLL: u64 = 168;
+    pub const SETRESGID: u64 = 170;
+    pub const GETRESGID: u64 = 171;
+    pub const PRCTL: u64 = 172;
+    pub const RT_SIGRETURN: u64 = 173;
     pub const RT_SIGACTION: u64 = 174;
     pub const RT_SIGPROCMASK: u64 = 175;
     pub const RT_SIGPENDING: u64 = 176;
+    pub const RT_SIGTIMEDWAIT: u64 = 177;
+    pub const RT_SIGQUEUEINFO: u64 = 178;
     pub const RT_SIGSUSPEND: u64 = 179;
+    pub const CHOWN: u64 = 180;
+    pub const LSTAT64: u64 = 198;
+    pub const TRUNCATE64: u64 = 199;
+    pub const FTRUNCATE64: u64 = 200;
     pub const GETDENTS64: u64 = 201;
     pub const FCNTL64: u64 = 202;
     pub const GETTID: u64 = 206;
+    pub const READAHEAD: u64 = 207;
+    pub const TKILL: u64 = 208;
+    pub const SENDFILE64: u64 = 209;
+    pub const FUTEX: u64 = 210;
+    pub const SCHED_SETAFFINITY: u64 = 211;
+    pub const SCHED_GETAFFINITY: u64 = 212;
     pub const EXIT_GROUP: u64 = 222;
+    pub const EPOLL_CREATE: u64 = 224;
+    pub const REMAP_FILE_PAGES: u64 = 227;
+    pub const WAITID: u64 = 235;
+    pub const FADVISE64_64: u64 = 236;
     pub const SET_TID_ADDRESS: u64 = 237;
+    pub const SETXATTR: u64 = 238;
+    pub const LSETXATTR: u64 = 239;
+    pub const FSETXATTR: u64 = 240;
+    pub const GETXATTR: u64 = 241;
+    pub const LGETXATTR: u64 = 242;
+    pub const FGETXATTR: u64 = 243;
+    pub const LISTXATTR: u64 = 244;
+    pub const LLISTXATTR: u64 = 245;
+    pub const FLISTXATTR: u64 = 246;
+    pub const REMOVEXATTR: u64 = 247;
+    pub const LREMOVEXATTR: u64 = 248;
+    pub const FREMOVEXATTR: u64 = 249;
+    pub const CLOCK_SETTIME: u64 = 255;
     pub const CLOCK_GETTIME: u64 = 256;
     pub const CLOCK_GETRES: u64 = 257;
+    pub const CLOCK_NANOSLEEP: u64 = 258;
+    pub const TGKILL: u64 = 259;
+    pub const IOPRIO_SET: u64 = 267;
+    pub const IOPRIO_GET: u64 = 268;
+    pub const PSELECT6: u64 = 273;
+    pub const PPOLL: u64 = 274;
     pub const OPENAT: u64 = 275;
+    pub const MKDIRAT: u64 = 276;
+    pub const MKNODAT: u64 = 277;
+    pub const FCHOWNAT: u64 = 278;
+    pub const FUTIMESAT: u64 = 279;
     pub const FSTATAT64: u64 = 280;
+    pub const UNLINKAT: u64 = 281;
+    pub const RENAMEAT: u64 = 282;
+    pub const LINKAT: u64 = 283;
+    pub const SYMLINKAT: u64 = 284;
     pub const READLINKAT: u64 = 285;
+    pub const FCHMODAT: u64 = 286;
     pub const FACCESSAT: u64 = 287;
     pub const SET_ROBUST_LIST: u64 = 289;
+    pub const GET_ROBUST_LIST: u64 = 290;
+    pub const SYNC_FILE_RANGE: u64 = 292;
+    pub const GETCPU: u64 = 296;
+    pub const STATFS64: u64 = 298;
+    pub const FSTATFS64: u64 = 299;
+    pub const UTIMENSAT: u64 = 301;
+    pub const FALLOCATE: u64 = 305;
+    pub const DUP3: u64 = 312;
+    pub const PIPE2: u64 = 313;
+    pub const RT_TGSIGQUEUEINFO: u64 = 317;
+    pub const PRLIMIT64: u64 = 321;
+    pub const CLOCK_ADJTIME: u64 = 324;
+    pub const SYNCFS: u64 = 327;
+    pub const UTIMES: u64 = 336;
+    pub const RENAMEAT2: u64 = 337;
     pub const GETRANDOM: u64 = 339;
+    pub const EXECVEAT: u64 = 342;
+    pub const MLOCK2: u64 = 345;
     pub const STATX: u64 = 349;
     pub const RSEQ: u64 = 354;
+    pub const CACHEFLUSH: u64 = 356;
     pub const CLOCK_GETTIME64: u64 = 403;
+    pub const CLOCK_SETTIME64: u64 = 404;
+    pub const CLOCK_ADJTIME64: u64 = 405;
+    pub const CLOCK_GETRES_TIME64: u64 = 406;
+    pub const CLOCK_NANOSLEEP_TIME64: u64 = 407;
+    pub const UTIMENSAT_TIME64: u64 = 412;
+    pub const PSELECT6_TIME64: u64 = 413;
+    pub const PPOLL_TIME64: u64 = 414;
+    pub const FUTEX_TIME64: u64 = 422;
+    pub const SCHED_RR_GET_INTERVAL_TIME64: u64 = 423;
+    pub const CLONE3: u64 = 435;
+    pub const FACCESSAT2: u64 = 439;
 }
 
 /// `syscall.tbl` の common 列（32 ビット列と同名）。報告と
