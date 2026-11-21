@@ -24,6 +24,8 @@ pub mod run_riscv;
 pub mod run_s390;
 #[cfg(feature = "guest-sparc")]
 pub mod run_sparc;
+#[cfg(feature = "guest-superh")]
+pub mod run_superh;
 #[cfg(feature = "guest-wasm")]
 pub mod run_wasm;
 #[cfg(feature = "guest-x86")]
@@ -91,6 +93,7 @@ pub fn parse_cpu_spec(s: &str) -> Result<CpuSpec, String> {
     feature = "guest-riscv",
     feature = "guest-s390",
     feature = "guest-sparc",
+    feature = "guest-superh",
     feature = "guest-x86"
 ))]
 fn resolve_sel(
@@ -297,6 +300,27 @@ fn run_parisc_elf(path: &str, argv: &[String], spec: Option<&CpuSpec>) -> Result
 #[cfg(not(feature = "guest-parisc"))]
 fn run_parisc_elf(_path: &str, _argv: &[String], _spec: Option<&CpuSpec>) -> Result<u64, String> {
     Err("この polyisa は parisc ゲストなしでビルドされた".to_string())
+}
+
+#[cfg(feature = "guest-superh")]
+fn run_superh_elf(path: &str, argv: &[String], spec: Option<&CpuSpec>) -> Result<u64, String> {
+    let sel = spec
+        .map(|s| {
+            resolve_sel(
+                "superh",
+                polyisa_guest_superh::MODEL_DEFS,
+                polyisa_guest_superh::FEATURE_DEFS,
+                polyisa_guest_superh::FEAT_BITS,
+                s,
+            )
+        })
+        .transpose()?;
+    run_superh::run_elf_superh_sel(path, argv, sel.as_ref())
+}
+
+#[cfg(not(feature = "guest-superh"))]
+fn run_superh_elf(_path: &str, _argv: &[String], _spec: Option<&CpuSpec>) -> Result<u64, String> {
+    Err("この polyisa は superh ゲストなしでビルドされた".to_string())
 }
 
 #[cfg(feature = "guest-arm")]
@@ -542,6 +566,10 @@ pub fn run_path_opts(
                 // EM_PARISC=15。Ref: SRC-LINUX (include/uapi/linux/elf-em.h)。
                 check("parisc")?;
                 run_parisc_elf(path, argv, spec.as_ref())
+            } else if ehdr.machine == 42 {
+                // EM_SH=42。Ref: SRC-LINUX (include/uapi/linux/elf-em.h)。
+                check("superh")?;
+                run_superh_elf(path, argv, spec.as_ref())
             } else {
                 Err(format!("未対応の e_machine: {}", ehdr.machine))
             }

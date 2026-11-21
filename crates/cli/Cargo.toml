@@ -18,6 +18,7 @@ polyisa-guest-power = { path = "../../guests/power", optional = true }
 polyisa-guest-riscv = { path = "../../guests/riscv", optional = true }
 polyisa-guest-s390 = { path = "../../guests/s390", optional = true }
 polyisa-guest-sparc = { path = "../../guests/sparc", optional = true }
+polyisa-guest-superh = { path = "../../guests/superh", optional = true }
 polyisa-guest-wasm = { path = "../../guests/wasm", optional = true }
 polyisa-guest-x86 = { path = "../../guests/x86", optional = true }
 polyisa-host = { path = "../host" }
@@ -44,6 +45,7 @@ default = [
     "guest-riscv",
     "guest-s390",
     "guest-sparc",
+    "guest-superh",
     "guest-wasm",
     "guest-x86",
 ]
@@ -57,6 +59,7 @@ guest-power = ["dep:polyisa-guest-power", "polyisa-os-linux/guest-power"]
 guest-riscv = ["dep:polyisa-guest-riscv", "polyisa-os-linux/guest-riscv"]
 guest-s390 = ["dep:polyisa-guest-s390", "polyisa-os-linux/guest-s390"]
 guest-sparc = ["dep:polyisa-guest-sparc", "polyisa-os-linux/guest-sparc"]
+guest-superh = ["dep:polyisa-guest-superh", "polyisa-os-linux/guest-superh"]
 guest-wasm = [
     "dep:polyisa-guest-wasm",
     "dep:polyisa-os-wasi",
@@ -107,6 +110,10 @@ required-features = ["guest-alpha"]
 [[test]]
 name = "heavy_program_parisc"
 required-features = ["guest-parisc"]
+
+[[test]]
+name = "heavy_program_superh"
+required-features = ["guest-superh"]
 
 [[test]]
 name = "heavy_jit_diff"

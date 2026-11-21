@@ -97,6 +97,10 @@ fn main() {
             for m in polyisa_guest_parisc::MODELS {
                 println!("parisc:{m}");
             }
+            #[cfg(feature = "guest-superh")]
+            for m in polyisa_guest_superh::MODELS {
+                println!("superh:{m}");
+            }
         }
         polyisa_cli::Command::Disasm => {
             #[cfg(feature = "guest-riscv")]

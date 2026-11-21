@@ -186,6 +186,17 @@ pub const TEST_REQUIREMENTS: &[TestBinary] = &[
         needs: &[Req::Data(".testdata/bin-distro-alpha/busybox")],
     },
     TestBinary {
+        binary: "heavy_abi_superh",
+        needs: &[Req::Data(".testdata/uapi-sh")],
+    },
+    TestBinary {
+        binary: "heavy_program_superh",
+        needs: &[
+            Req::Data(".testdata/bin-distro-sh4/busybox"),
+            Req::Data(".testdata/bin-distro-sh4eb/busybox"),
+        ],
+    },
+    TestBinary {
         binary: "heavy_program_parisc",
         needs: &[Req::Data(".testdata/bin-distro-hppa/busybox")],
     },

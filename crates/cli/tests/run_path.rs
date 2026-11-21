@@ -327,3 +327,96 @@ fn run_path_executes_aarch64_be_initial_stack() {
     let _ = std::fs::remove_file(&path);
     assert_eq!(r, Ok(1));
 }
+
+#[cfg(feature = "guest-superh")]
+fn hello_superh(be: bool) -> Vec<u8> {
+    // 手組みの SH 命令列。write(1, msg, 13) して exit(7)。
+    // R3=番号、R4–R6=引数。発行点は trapa #0x10+引数の個数。
+    // 0x10000: mov #4, R3        ; write
+    // 0x10002: mov #1, R4        ; fd=1
+    // 0x10004: mov.l @(2,pc), R5 ; R5 = .long[0x10010] = msg
+    // 0x10006: mov #13, R6       ; len
+    // 0x10008: trapa #0x13       ; syscall（3引数）
+    // 0x1000a: mov #1, R3        ; exit
+    // 0x1000c: mov #7, R4        ; code
+    // 0x1000e: trapa #0x11       ; syscall（1引数）
+    // 0x10010: .long 0x10014     ; msg へのポインタ（ゲスト endian）
+    // 0x10014: msg
+    let words: &[u16] = &[
+        0xE304, 0xE401, 0xD502, 0xE60D, 0xC313, 0xE301, 0xE407, 0xC311,
+    ];
+    let msg = b"Hello, poly!\n";
+    let mut code = Vec::new();
+    for w in words {
+        let b = if be { w.to_be_bytes() } else { w.to_le_bytes() };
+        code.extend_from_slice(&b);
+    }
+    let pool = if be {
+        0x10014u32.to_be_bytes()
+    } else {
+        0x10014u32.to_le_bytes()
+    };
+    code.extend_from_slice(&pool);
+    code.extend_from_slice(msg);
+    let mut f = Vec::new();
+    let data = if be { 2u8 } else { 1u8 };
+    f.extend_from_slice(&[0x7f, b'E', b'L', b'F', 1, data, 1, 0]);
+    f.extend_from_slice(&[0u8; 8]);
+    let w16 = |v: u16| if be { v.to_be_bytes() } else { v.to_le_bytes() };
+    let w32 = |v: u32| if be { v.to_be_bytes() } else { v.to_le_bytes() };
+    f.extend_from_slice(&w16(2)); // ET_EXEC
+    f.extend_from_slice(&w16(42)); // EM_SH
+    f.extend_from_slice(&w32(1));
+    f.extend_from_slice(&w32(0x10000)); // entry
+    f.extend_from_slice(&w32(52)); // phoff
+    f.extend_from_slice(&w32(0));
+    f.extend_from_slice(&w32(0));
+    f.extend_from_slice(&w16(52));
+    f.extend_from_slice(&w16(32));
+    f.extend_from_slice(&w16(1));
+    f.extend_from_slice(&w16(0));
+    f.extend_from_slice(&w16(0));
+    f.extend_from_slice(&w16(0));
+    let seg_len = code.len() as u32;
+    f.extend_from_slice(&w32(1)); // PT_LOAD
+    f.extend_from_slice(&w32(84)); // offset
+    f.extend_from_slice(&w32(0x10000));
+    f.extend_from_slice(&w32(0x10000));
+    f.extend_from_slice(&w32(seg_len));
+    f.extend_from_slice(&w32(seg_len));
+    f.extend_from_slice(&w32(5)); // R+X
+    f.extend_from_slice(&w32(0x1000));
+    f.extend_from_slice(&code);
+    f
+}
+
+#[cfg(feature = "guest-superh")]
+#[test]
+fn run_path_executes_superh_le_hello() {
+    let path = write_temp("hello_sh4", &hello_superh(false));
+    let r = polyisa_cli::run_path(&path.to_string_lossy(), &[]);
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(r, Ok(7));
+}
+
+#[cfg(feature = "guest-superh")]
+#[test]
+fn run_path_executes_superh_be_hello() {
+    let path = write_temp("hello_sh4eb", &hello_superh(true));
+    let r = polyisa_cli::run_path(&path.to_string_lossy(), &[]);
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(r, Ok(7));
+}
+
+#[cfg(feature = "guest-superh")]
+#[test]
+fn superh_captured_stdout() {
+    use polyisa_cli::run_superh::run_elf_superh_captured;
+    let path = write_temp("hello_sh4_cap", &hello_superh(false));
+    let path_s = path.to_string_lossy().into_owned();
+    let r = run_elf_superh_captured(&path_s, &[]);
+    let _ = std::fs::remove_file(&path);
+    let (code, out) = r.unwrap();
+    assert_eq!(code, 7);
+    assert_eq!(out, b"Hello, poly!\n");
+}
