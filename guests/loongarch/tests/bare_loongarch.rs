@@ -313,3 +313,169 @@ fn exec_counters_cpucfg() {
     step(&mut env, enc(Insn::Cpucfg, &[4, 5]));
     assert_eq!(gpr(&mut env, 4), 0);
 }
+
+// ---- LA5: 整数算術・ビット操作の実行検査 ----
+
+#[test]
+fn exec_la5_counts_and_reversals() {
+    let mut env = env();
+    // clz.w / ctz.w。
+    set_gpr(&mut env, 5, 0x00f0_0000);
+    step(&mut env, enc(Insn::ClzW, &[4, 5]));
+    assert_eq!(gpr(&mut env, 4), 8);
+    step(&mut env, enc(Insn::CtzW, &[4, 5]));
+    assert_eq!(gpr(&mut env, 4), 20);
+    // clz.d / ctz.d。
+    set_gpr(&mut env, 5, 0x80);
+    step(&mut env, enc(Insn::ClzD, &[4, 5]));
+    assert_eq!(gpr(&mut env, 4), 56);
+    step(&mut env, enc(Insn::CtzD, &[4, 5]));
+    assert_eq!(gpr(&mut env, 4), 7);
+    // clo.w: rj[31:0]=0xffff_ff00 → leading ones は 24。
+    set_gpr(&mut env, 5, 0xffff_ff00);
+    step(&mut env, enc(Insn::CloW, &[4, 5]));
+    assert_eq!(gpr(&mut env, 4), 24);
+    // revb.2h: 各半語内バイト交換 → 0x2211_4433。
+    set_gpr(&mut env, 5, 0x1122_3344);
+    step(&mut env, enc(Insn::Revb2h, &[4, 5]));
+    assert_eq!(gpr(&mut env, 4), 0x2211_4433);
+    // revb.d: 全バイト反転。
+    set_gpr(&mut env, 5, 0x0123_4567_89ab_cdef);
+    step(&mut env, enc(Insn::RevbD, &[4, 5]));
+    assert_eq!(gpr(&mut env, 4), 0xefcd_ab89_6745_2301);
+    // revh.d: 半語順の全反転。
+    step(&mut env, enc(Insn::RevhD, &[4, 5]));
+    assert_eq!(gpr(&mut env, 4), 0xcdef_89ab_4567_0123);
+    // revh.2w: 各 32 ビット語内の半語交換。
+    step(&mut env, enc(Insn::Revh2w, &[4, 5]));
+    assert_eq!(gpr(&mut env, 4), 0x4567_0123_cdef_89ab);
+    // bitrev.w: 0xf0 → 0x0f00_0000。
+    set_gpr(&mut env, 5, 0xf0);
+    step(&mut env, enc(Insn::BitrevW, &[4, 5]));
+    assert_eq!(gpr(&mut env, 4), 0x0000_0000_0f00_0000);
+    // bitrev.d: 1 → 0x8000_0000_0000_0000。
+    set_gpr(&mut env, 5, 1);
+    step(&mut env, enc(Insn::BitrevD, &[4, 5]));
+    assert_eq!(gpr(&mut env, 4), 0x8000_0000_0000_0000);
+    // bitrev.4b: 各バイト内ビット反転: 0x01_80 → 0x80_01。
+    set_gpr(&mut env, 5, 0x0180);
+    step(&mut env, enc(Insn::Bitrev4b, &[4, 5]));
+    assert_eq!(gpr(&mut env, 4), 0x8001);
+}
+
+#[test]
+fn exec_la5_mul_div() {
+    let mut env = env();
+    set_gpr(&mut env, 5, 7);
+    set_gpr(&mut env, 6, 6);
+    step(&mut env, enc(Insn::MulW, &[4, 5, 6]));
+    assert_eq!(gpr(&mut env, 4), 42);
+    // mulh.w: 0x10000 * 0x10000 = 0x1_0000_0000 の上位 32 → 1。
+    set_gpr(&mut env, 5, 0x1_0000);
+    set_gpr(&mut env, 6, 0x1_0000);
+    step(&mut env, enc(Insn::MulhW, &[4, 5, 6]));
+    assert_eq!(gpr(&mut env, 4), 1);
+    // mulh.wu: 同 → 1。
+    step(&mut env, enc(Insn::MulhWu, &[4, 5, 6]));
+    assert_eq!(gpr(&mut env, 4), 1);
+    // mulw.d.w: (-1) * 2 = -2 の 64 ビット積。
+    set_gpr(&mut env, 5, 0xffff_ffff);
+    set_gpr(&mut env, 6, 2);
+    step(&mut env, enc(Insn::MulwDW, &[4, 5, 6]));
+    assert_eq!(gpr(&mut env, 4), (-2i64) as u64);
+    // mulw.d.wu: 0xffff_ffff * 2 = 0x1_ffff_fffe。
+    step(&mut env, enc(Insn::MulwDWu, &[4, 5, 6]));
+    assert_eq!(gpr(&mut env, 4), 0x1_ffff_fffe);
+    // mul.d / mulh.d: -2 * 3 = -6、上位は -1。
+    set_gpr(&mut env, 5, (-2i64) as u64);
+    set_gpr(&mut env, 6, 3);
+    step(&mut env, enc(Insn::MulD, &[4, 5, 6]));
+    assert_eq!(gpr(&mut env, 4), (-6i64) as u64);
+    step(&mut env, enc(Insn::MulhD, &[4, 5, 6]));
+    assert_eq!(gpr(&mut env, 4), (-1i64) as u64);
+    // mulh.du: max * max の上位。
+    set_gpr(&mut env, 5, u64::MAX);
+    set_gpr(&mut env, 6, u64::MAX);
+    step(&mut env, enc(Insn::MulhDu, &[4, 5, 6]));
+    assert_eq!(gpr(&mut env, 4), u64::MAX - 1);
+    // div.d / mod.d: 20 / 6 = 3 余り 2。
+    set_gpr(&mut env, 5, 20);
+    set_gpr(&mut env, 6, 6);
+    step(&mut env, enc(Insn::DivD, &[4, 5, 6]));
+    assert_eq!(gpr(&mut env, 4), 3);
+    step(&mut env, enc(Insn::ModD, &[4, 5, 6]));
+    assert_eq!(gpr(&mut env, 4), 2);
+    // div.w: -20 / 6 = -3（0 方向切り捨て）。
+    set_gpr(&mut env, 5, (-20i64) as u64);
+    step(&mut env, enc(Insn::DivW, &[4, 5, 6]));
+    assert_eq!(gpr(&mut env, 4), (-3i64) as u64);
+    step(&mut env, enc(Insn::ModW, &[4, 5, 6]));
+    assert_eq!(gpr(&mut env, 4), (-2i64) as u64);
+    // div.du: max / 2 = 0x7fff_ffff_ffff_ffff。
+    set_gpr(&mut env, 5, u64::MAX);
+    set_gpr(&mut env, 6, 2);
+    step(&mut env, enc(Insn::DivDu, &[4, 5, 6]));
+    assert_eq!(gpr(&mut env, 4), 0x7fff_ffff_ffff_ffff);
+    // mod.du: max % 2 = 1。
+    step(&mut env, enc(Insn::ModDu, &[4, 5, 6]));
+    assert_eq!(gpr(&mut env, 4), 1);
+    // crc.w.b.w / crcc.w.b.w: rj=0 に 0xff を 1 バイト供給。
+    set_gpr(&mut env, 5, 0);
+    set_gpr(&mut env, 6, 0xff);
+    step(&mut env, enc(Insn::CrcWBW, &[4, 5, 6]));
+    assert_eq!(gpr(&mut env, 4), 0x2d02_ef8d);
+    step(&mut env, enc(Insn::CrccWBW, &[4, 5, 6]));
+    assert_eq!(gpr(&mut env, 4), 0xad7d_5351);
+    // crc.w.h.w: 2 バイト 0x5678。
+    set_gpr(&mut env, 6, 0x5678);
+    step(&mut env, enc(Insn::CrcWHW, &[4, 5, 6]));
+    assert_eq!(gpr(&mut env, 4), 0x65ee_073f);
+}
+
+#[test]
+fn exec_la5_rotr_bstr_misc() {
+    let mut env = env();
+    // rotr.d: 1 >>rot 1 = 0x8000_0000_0000_0000。
+    set_gpr(&mut env, 5, 1);
+    set_gpr(&mut env, 6, 1);
+    step(&mut env, enc(Insn::RotrD, &[4, 5, 6]));
+    assert_eq!(gpr(&mut env, 4), 0x8000_0000_0000_0000);
+    // rotr.w: rk[4:0] のみ有効（33 → 1）。
+    set_gpr(&mut env, 6, 33);
+    step(&mut env, enc(Insn::RotrW, &[4, 5, 6]));
+    assert_eq!(gpr(&mut env, 4), (-0x8000_0000i64) as u64);
+    // rotri.w: 0x8000_0000 rotr 4 → 0x0800_0000。
+    set_gpr(&mut env, 5, 0x8000_0000);
+    step(&mut env, enc(Insn::RotriW, &[4, 5, 4]));
+    assert_eq!(gpr(&mut env, 4), 0x0800_0000);
+    // bstrpick.d: rj=0xf0f0, msb=11, lsb=4 → 0x0f0。
+    set_gpr(&mut env, 5, 0xf0f0);
+    step(&mut env, enc(Insn::BstrpickD, &[4, 5, 15, 8]));
+    assert_eq!(gpr(&mut env, 4), 0xf0);
+    // bstrins.w: rd[19:16] = rj[3:0]、bit31=1 なので sext。
+    set_gpr(&mut env, 4, 0xaaaa_aaaa);
+    set_gpr(&mut env, 5, 0xf);
+    step(&mut env, enc(Insn::BstrinsW, &[4, 5, 19, 16]));
+    assert_eq!(gpr(&mut env, 4), 0xffff_ffff_aaaf_aaaa);
+    // maskeqz / masknez。
+    set_gpr(&mut env, 5, 0x55);
+    set_gpr(&mut env, 6, 0);
+    step(&mut env, enc(Insn::Maskeqz, &[4, 5, 6]));
+    assert_eq!(gpr(&mut env, 4), 0);
+    step(&mut env, enc(Insn::Masknez, &[4, 5, 6]));
+    assert_eq!(gpr(&mut env, 4), 0x55);
+    // alsl.d: rj << (sa2+1) + rk = 0x100 << 3 + 0x30 = 0x830。
+    set_gpr(&mut env, 5, 0x100);
+    set_gpr(&mut env, 6, 0x30);
+    step(&mut env, enc(Insn::AlslD, &[4, 5, 6, 2]));
+    assert_eq!(gpr(&mut env, 4), 0x830);
+    // bytepick.d: {rk, rj} >> 16。
+    set_gpr(&mut env, 5, 0x1122_3344_5566_7788);
+    set_gpr(&mut env, 6, 0xaabb_ccdd_eeff_0011);
+    step(&mut env, enc(Insn::BytepickD, &[4, 5, 6, 2]));
+    assert_eq!(gpr(&mut env, 4), 0x0011_1122_3344_5566);
+    // addu16i.d: rj + sext(0x8000 << 16) = 0x1_0000_0000 - 0x8000_0000。
+    set_gpr(&mut env, 5, 0x1_0000_0000);
+    step(&mut env, enc(Insn::Addu16iD, &[4, 5, 0x8000]));
+    assert_eq!(gpr(&mut env, 4), 0x8000_0000);
+}

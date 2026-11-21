@@ -259,6 +259,185 @@ fn ldst_ea<B: Backend>(b: &mut B, ops: &[u64]) -> B::V<W64> {
     b.add(base, d)
 }
 
+/// 64 ビットの leading zeros（二分木選択）。
+fn clz64<B: Backend>(b: &mut B, v: B::V<W64>) -> B::V<W64> {
+    let mut count = k(b, 64);
+    let mut rem = v;
+    for w in [32u64, 16, 8, 4, 2] {
+        let wv = k(b, w);
+        let hi = b.shr_l(rem, wv);
+        let zero = k(b, 0);
+        let nz = b.cmp::<W64>(Cmp::Ne, hi, zero);
+        let sub = b.sub(count, wv);
+        count = b.select::<W64>(nz, sub, count);
+        rem = b.select::<W64>(nz, hi, rem);
+    }
+    let one = k(b, 1);
+    let hi = b.shr_l(rem, one);
+    let zero = k(b, 0);
+    let nz = b.cmp::<W64>(Cmp::Ne, hi, zero);
+    let two = k(b, 2);
+    let a = b.sub(count, two);
+    let e = b.sub(count, rem);
+    b.select::<W64>(nz, a, e)
+}
+
+/// 32 ビットの leading zeros。
+fn clz32<B: Backend>(b: &mut B, v: B::V<W64>) -> B::V<W64> {
+    let a = zext_w(b, v);
+    let c = clz64(b, a);
+    let w = k(b, 32);
+    b.sub(c, w)
+}
+
+/// 64 ビットの trailing zeros（v==0 なら 64）。
+fn ctz64<B: Backend>(b: &mut B, v: B::V<W64>) -> B::V<W64> {
+    let zero = k(b, 0);
+    let neg = b.sub(zero, v);
+    let lsb = b.and(v, neg);
+    let c = clz64(b, lsb);
+    let w = k(b, 63);
+    let r = b.sub(w, c);
+    let is0 = b.cmp::<W64>(Cmp::Eq, v, zero);
+    let w64 = k(b, 64);
+    b.select::<W64>(is0, w64, r)
+}
+
+/// 32 ビットの trailing zeros（v==0 なら 32）。
+fn ctz32<B: Backend>(b: &mut B, v: B::V<W64>) -> B::V<W64> {
+    let a = zext_w(b, v);
+    let r = ctz64(b, a);
+    // 32 ビット入力では 0 のとき 64 ではなく 32。
+    let w = k(b, 32);
+    let zero = k(b, 0);
+    let is0 = b.cmp::<W64>(Cmp::Eq, a, zero);
+    let over = b.cmp::<W64>(Cmp::GtU, r, w);
+    let capped = b.select::<W64>(over, w, r);
+    b.select::<W64>(is0, w, capped)
+}
+
+/// `v` を `bits` 幅で右回転（`bits` は 32 または 64）。
+fn rotr<B: Backend>(b: &mut B, a: B::V<W64>, n: B::V<W64>, bits: u32) -> B::V<W64> {
+    let mut a = a;
+    if bits == 32 {
+        a = zext_w(b, a);
+    }
+    let w = k(b, u64::from(bits));
+    let l = b.sub(w, n);
+    let lo = b.shr_l::<W64>(a, n);
+    let hi = b.shl::<W64>(a, l);
+    let v = b.or(lo, hi);
+    if bits == 32 { zext_w(b, v) } else { v }
+}
+
+/// `unit` バイト区切りごとにバイト順を反転（host 側定数畳み）。
+/// `width` は全体のビット幅（32 または 64）。
+fn byte_swap_in<B: Backend>(b: &mut B, v: B::V<W64>, unit: u32, width: u32) -> B::V<W64> {
+    let mut out = k(b, 0);
+    let n = width / (unit * 8);
+    for i in 0..n {
+        let sh_lo = k(b, u64::from(i * unit * 8));
+        let chunk = b.shr_l::<W64>(v, sh_lo);
+        let mut rev = k(b, 0);
+        for j in 0..unit {
+            let sh = k(b, u64::from(j * 8));
+            let byte = b.shr_l::<W64>(chunk, sh);
+            let m = k(b, 0xff);
+            let byte = b.and(byte, m);
+            let to = k(b, u64::from((unit - 1 - j) * 8));
+            let placed = b.shl::<W64>(byte, to);
+            rev = b.or(rev, placed);
+        }
+        let to = k(b, u64::from(i * unit * 8));
+        let placed = b.shl::<W64>(rev, to);
+        out = b.or(out, placed);
+    }
+    out
+}
+
+/// `group` ビット幅の区切りごとに `unit` ビット要素の順序を反転する。
+/// revh.2w は (unit=16, group=32, width=64)、revh.d は (16, 64, 64)。
+fn grp_swap<B: Backend>(b: &mut B, v: B::V<W64>, unit: u32, group: u32, width: u32) -> B::V<W64> {
+    let mut out = k(b, 0);
+    let n = group / unit;
+    for g in (0..width).step_by(group as usize) {
+        for i in 0..n {
+            let sh = k(b, u64::from(g + i * unit));
+            let chunk = b.shr_l::<W64>(v, sh);
+            let m = k(b, (1u64 << unit) - 1);
+            let chunk = b.and(chunk, m);
+            let to = k(b, u64::from(g + (n - 1 - i) * unit));
+            let placed = b.shl::<W64>(chunk, to);
+            out = b.or(out, placed);
+        }
+    }
+    out
+}
+
+/// 全ビット反転（`bits` 幅）。
+fn bitrev<B: Backend>(b: &mut B, v: B::V<W64>, bits: u32) -> B::V<W64> {
+    let mut out = k(b, 0);
+    for i in 0..bits {
+        let sh = k(b, u64::from(i));
+        let bit = b.shr_l::<W64>(v, sh);
+        let one = k(b, 1);
+        let bit = b.and(bit, one);
+        let to = k(b, u64::from(bits - 1 - i));
+        let placed = b.shl::<W64>(bit, to);
+        out = b.or(out, placed);
+    }
+    out
+}
+
+/// 各 8 ビット区切り内でビット反転。
+fn bitrev_bytes<B: Backend>(b: &mut B, v: B::V<W64>, width: u32) -> B::V<W64> {
+    let mut out = k(b, 0);
+    for i in 0..(width / 8) {
+        let sh = k(b, u64::from(i * 8));
+        let byte = b.shr_l::<W64>(v, sh);
+        let m = k(b, 0xff);
+        let byte = b.and(byte, m);
+        let rev = bitrev(b, byte, 8);
+        let to = k(b, u64::from(i * 8));
+        let placed = b.shl::<W64>(rev, to);
+        out = b.or(out, placed);
+    }
+    out
+}
+
+/// CRC のビット逐次更新（poly は反映形 0xEDB88320/0x82F63B78）。
+/// `bits` 分のシフト回数を畳み込み展開する。
+/// Ref: SPEC-LOONGARCH-RM §2.2.1.14（CRC/CRCC の多項式）.
+fn crc32<B: Backend>(b: &mut B, mut c: B::V<W32>, poly: u32, bits: u32) -> B::V<W32> {
+    for _ in 0..bits {
+        let one = b.konst::<W32>(1);
+        let lsb = b.and::<W32>(c, one);
+        let n1 = b.konst::<W32>(1);
+        let shifted = b.shr_l::<W32>(c, n1);
+        let p = b.konst::<W32>(poly);
+        let x = b.xor::<W32>(shifted, p);
+        let z = b.konst::<W32>(0);
+        let is1 = b.cmp::<W32>(Cmp::Ne, lsb, z);
+        c = b.select::<W32>(is1, x, shifted);
+    }
+    c
+}
+
+/// `insn` が .w 形の単項演算（rj → rd、sext 書き戻し）。
+fn un_w<B: Backend>(b: &mut B, ops: &[u64], f: impl FnOnce(&mut B, B::V<W64>) -> B::V<W64>) {
+    let a = rget(b, ops[1]);
+    let v = f(b, a);
+    let v = sext_w(b, v);
+    rset(b, ops[0], v);
+}
+
+/// `insn` が .d 形の単項演算。
+fn un_d<B: Backend>(b: &mut B, ops: &[u64], f: impl FnOnce(&mut B, B::V<W64>) -> B::V<W64>) {
+    let a = rget(b, ops[1]);
+    let v = f(b, a);
+    rset(b, ops[0], v);
+}
+
 /// 1 命令の意味論を実行する。`word` は命令語、`pc` は命令番地、
 /// `la64` は LA64 モデルで動いているか。戻り値 `Ok(true)` は
 /// 実行済み（PC の進めは実行ループ側）、`Ok(false)` は未実装。
@@ -426,6 +605,385 @@ pub fn exec<B: Backend>(
             let a = rget(b, ops[1]);
             let t = b.trunc::<W64, W16>(a);
             let v = b.sext::<W16, W64>(t);
+            rset(b, ops[0], v);
+        }
+        // ---- 整数ビット操作・乗除（LA5）----
+        Insn::CloW => un_w(b, &ops, |b, x| {
+            let nx = b.not(x);
+            clz32(b, nx)
+        }),
+        Insn::ClzW => un_w(b, &ops, |b, x| clz32(b, x)),
+        Insn::CtoW => un_w(b, &ops, |b, x| {
+            let nx = b.not(x);
+            ctz32(b, nx)
+        }),
+        Insn::CtzW => un_w(b, &ops, |b, x| ctz32(b, x)),
+        Insn::CloD => un_d(b, &ops, |b, x| {
+            let nx = b.not(x);
+            clz64(b, nx)
+        }),
+        Insn::ClzD => un_d(b, &ops, |b, x| clz64(b, x)),
+        Insn::CtoD => un_d(b, &ops, |b, x| {
+            let nx = b.not(x);
+            ctz64(b, nx)
+        }),
+        Insn::CtzD => un_d(b, &ops, |b, x| ctz64(b, x)),
+        Insn::Revb2h => un_w(b, &ops, |b, x| byte_swap_in(b, x, 2, 32)),
+        Insn::Revb4h => un_d(b, &ops, |b, x| byte_swap_in(b, x, 2, 64)),
+        Insn::Revb2w => un_d(b, &ops, |b, x| byte_swap_in(b, x, 4, 64)),
+        Insn::RevbD => un_d(b, &ops, |b, x| byte_swap_in(b, x, 8, 64)),
+        Insn::Revh2w => un_d(b, &ops, |b, x| grp_swap(b, x, 16, 32, 64)),
+        Insn::RevhD => un_d(b, &ops, |b, x| grp_swap(b, x, 16, 64, 64)),
+        Insn::Bitrev4b => un_w(b, &ops, |b, x| bitrev_bytes(b, x, 32)),
+        Insn::Bitrev8b => un_d(b, &ops, |b, x| bitrev_bytes(b, x, 64)),
+        Insn::BitrevW => un_w(b, &ops, |b, x| {
+            let a = zext_w(b, x);
+            bitrev(b, a, 32)
+        }),
+        Insn::BitrevD => un_d(b, &ops, |b, x| bitrev(b, x, 64)),
+        Insn::Maskeqz => {
+            let a = rget(b, ops[1]);
+            let cnd = rget(b, ops[2]);
+            let zero = k(b, 0);
+            let eq = b.cmp::<W64>(Cmp::Eq, cnd, zero);
+            let z = k(b, 0);
+            let v = b.select::<W64>(eq, z, a);
+            rset(b, ops[0], v);
+        }
+        Insn::Masknez => {
+            let a = rget(b, ops[1]);
+            let cnd = rget(b, ops[2]);
+            let zero = k(b, 0);
+            let ne = b.cmp::<W64>(Cmp::Ne, cnd, zero);
+            let z = k(b, 0);
+            let v = b.select::<W64>(ne, z, a);
+            rset(b, ops[0], v);
+        }
+        Insn::AlslW => {
+            // rd = sext32((rj[31:0] << (sa2+1)) + rk[31:0])。
+            let a = rget(b, ops[1]);
+            let c = rget(b, ops[2]);
+            let sh = k(b, ops[3] + 1);
+            let s = b.shl::<W64>(a, sh);
+            let v = b.add(s, c);
+            let v = sext_w(b, v);
+            rset(b, ops[0], v);
+        }
+        Insn::AlslWu => {
+            let a = rget(b, ops[1]);
+            let c = rget(b, ops[2]);
+            let sh = k(b, ops[3] + 1);
+            let s = b.shl::<W64>(a, sh);
+            let v = b.add(s, c);
+            let v = zext_w(b, v);
+            rset(b, ops[0], v);
+        }
+        Insn::AlslD => {
+            let a = rget(b, ops[1]);
+            let c = rget(b, ops[2]);
+            let sh = k(b, ops[3] + 1);
+            let s = b.shl::<W64>(a, sh);
+            let v = b.add(s, c);
+            rset(b, ops[0], v);
+        }
+        Insn::BytepickW => {
+            // rd = ({rk, rj} >> (8*sa2))[31:0] の sext 書き戻し。
+            let a = rget(b, ops[1]);
+            let c = rget(b, ops[2]);
+            let sh32 = k(b, 32);
+            let cat_hi = b.shl::<W64>(c, sh32);
+            let a32 = b.trunc::<W64, W32>(a);
+            let a64 = b.zext::<W32, W64>(a32);
+            let cat = b.or(cat_hi, a64);
+            let sh = k(b, ops[3] * 8);
+            let v = b.shr_l::<W64>(cat, sh);
+            let v = sext_w(b, v);
+            rset(b, ops[0], v);
+        }
+        Insn::BytepickD => {
+            // rd = {rk[8*(8-sa3):0], rj[63:8*(8-sa3)]}。
+            let a = rget(b, ops[1]);
+            let c = rget(b, ops[2]);
+            let n = 64 - ops[3] * 8;
+            let sh_n = k(b, n);
+            let hi = b.shl::<W64>(c, sh_n);
+            let sh_r = k(b, 64 - n);
+            let lo = b.shr_l::<W64>(a, sh_r);
+            let v = b.or(hi, lo);
+            rset(b, ops[0], v);
+        }
+        Insn::RotrW => {
+            let a = rget(b, ops[1]);
+            let n0 = rget(b, ops[2]);
+            let m = k(b, 31);
+            let n = b.and(n0, m);
+            let v = rotr(b, a, n, 32);
+            let v = sext_w(b, v);
+            rset(b, ops[0], v);
+        }
+        Insn::RotrD => {
+            let a = rget(b, ops[1]);
+            let n0 = rget(b, ops[2]);
+            let m = k(b, 63);
+            let n = b.and(n0, m);
+            let v = rotr(b, a, n, 64);
+            rset(b, ops[0], v);
+        }
+        Insn::RotriW => {
+            let a = rget(b, ops[1]);
+            let n = k(b, ops[2] & 31);
+            let v = rotr(b, a, n, 32);
+            let v = sext_w(b, v);
+            rset(b, ops[0], v);
+        }
+        Insn::RotriD => {
+            let a = rget(b, ops[1]);
+            let n = k(b, ops[2] & 63);
+            let v = rotr(b, a, n, 64);
+            rset(b, ops[0], v);
+        }
+        Insn::BstrinsW => {
+            // rd[msb:lsb] = rj[msb-lsb:0]（下位 32 ビット・sext 書き戻し）。
+            let (msb, lsb) = (ops[2] as u32, ops[3] as u32);
+            let width = msb - lsb + 1;
+            let rj = rget(b, ops[1]);
+            let rd = rget(b, ops[0]);
+            let field = {
+                let m = k(
+                    b,
+                    if width == 64 {
+                        u64::MAX
+                    } else {
+                        (1u64 << width) - 1
+                    },
+                );
+                let f = b.and(rj, m);
+                let sh = k(b, u64::from(lsb));
+                b.shl::<W64>(f, sh)
+            };
+            let mask = {
+                let m: u64 = ((1u64 << width) - 1) << lsb;
+                k(b, m)
+            };
+            let keep = {
+                let nm = b.not(mask);
+                b.and(rd, nm)
+            };
+            let v = b.or(keep, field);
+            let v = sext_w(b, v);
+            rset(b, ops[0], v);
+        }
+        Insn::BstrpickW => {
+            // rd = zext32(rj[msb:lsb]) の sext 書き戻し。
+            let (msb, lsb) = (ops[2] as u32, ops[3] as u32);
+            let width = msb - lsb + 1;
+            let rj = rget(b, ops[1]);
+            let sh = k(b, u64::from(lsb));
+            let f = b.shr_l::<W64>(rj, sh);
+            let m = k(
+                b,
+                if width == 64 {
+                    u64::MAX
+                } else {
+                    (1u64 << width) - 1
+                },
+            );
+            let v = b.and(f, m);
+            let v = sext_w(b, v);
+            rset(b, ops[0], v);
+        }
+        Insn::BstrinsD => {
+            let (msb, lsb) = (ops[2] as u32, ops[3] as u32);
+            let width = msb - lsb + 1;
+            let rj = rget(b, ops[1]);
+            let rd = rget(b, ops[0]);
+            let field = {
+                let m = k(
+                    b,
+                    if width == 64 {
+                        u64::MAX
+                    } else {
+                        (1u64 << width) - 1
+                    },
+                );
+                let f = b.and(rj, m);
+                let sh = k(b, u64::from(lsb));
+                b.shl::<W64>(f, sh)
+            };
+            let mask = {
+                let m: u64 = if width == 64 {
+                    u64::MAX
+                } else {
+                    ((1u64 << width) - 1) << lsb
+                };
+                k(b, m)
+            };
+            let keep = {
+                let nm = b.not(mask);
+                b.and(rd, nm)
+            };
+            let v = b.or(keep, field);
+            rset(b, ops[0], v);
+        }
+        Insn::BstrpickD => {
+            let (msb, lsb) = (ops[2] as u32, ops[3] as u32);
+            let width = msb - lsb + 1;
+            let rj = rget(b, ops[1]);
+            let sh = k(b, u64::from(lsb));
+            let f = b.shr_l::<W64>(rj, sh);
+            let m = k(
+                b,
+                if width == 64 {
+                    u64::MAX
+                } else {
+                    (1u64 << width) - 1
+                },
+            );
+            let v = b.and(f, m);
+            rset(b, ops[0], v);
+        }
+        Insn::Addu16iD => {
+            // rd = rj + sext(si16 << 16)。
+            let a = rget(b, ops[1]);
+            let d = k(b, sext_n(ops[2] << 16, 32));
+            let v = b.add(a, d);
+            rset(b, ops[0], v);
+        }
+        Insn::MulW => {
+            let a = rget(b, ops[1]);
+            let c = rget(b, ops[2]);
+            let a32 = b.trunc::<W64, W32>(a);
+            let c32 = b.trunc::<W64, W32>(c);
+            let p = b.mul::<W32>(a32, c32);
+            let v = b.sext::<W32, W64>(p);
+            rset(b, ops[0], v);
+        }
+        Insn::MulhW => {
+            let a = rget(b, ops[1]);
+            let c = rget(b, ops[2]);
+            let a32 = b.trunc::<W64, W32>(a);
+            let c32 = b.trunc::<W64, W32>(c);
+            let p = b.mulh::<W32>(a32, c32);
+            let v = b.sext::<W32, W64>(p);
+            rset(b, ops[0], v);
+        }
+        Insn::MulhWu => {
+            let a = rget(b, ops[1]);
+            let c = rget(b, ops[2]);
+            let a32 = b.trunc::<W64, W32>(a);
+            let c32 = b.trunc::<W64, W32>(c);
+            let p = b.mulhu::<W32>(a32, c32);
+            let v = b.sext::<W32, W64>(p);
+            rset(b, ops[0], v);
+        }
+        Insn::MulwDW => {
+            // rd = sext32(rj) * sext32(rk) の 64 ビット積。
+            let a = rget(b, ops[1]);
+            let c = rget(b, ops[2]);
+            let a32 = b.trunc::<W64, W32>(a);
+            let c32 = b.trunc::<W64, W32>(c);
+            let p = b.mulh::<W32>(a32, c32);
+            let lo = b.mul::<W32>(a32, c32);
+            let lo64 = b.zext::<W32, W64>(lo);
+            let hi64 = b.zext::<W32, W64>(p);
+            let sh = k(b, 32);
+            let hi_sh = b.shl::<W64>(hi64, sh);
+            let v = b.or(hi_sh, lo64);
+            rset(b, ops[0], v);
+        }
+        Insn::MulwDWu => {
+            // rd = zext32(rj) *u zext32(rk) の 64 ビット積。
+            let a = rget(b, ops[1]);
+            let c = rget(b, ops[2]);
+            let a32 = b.trunc::<W64, W32>(a);
+            let c32 = b.trunc::<W64, W32>(c);
+            let p = b.mulhu::<W32>(a32, c32);
+            let lo = b.mul::<W32>(a32, c32);
+            let lo64 = b.zext::<W32, W64>(lo);
+            let hi64 = b.zext::<W32, W64>(p);
+            let sh = k(b, 32);
+            let hi_sh = b.shl::<W64>(hi64, sh);
+            let v = b.or(hi_sh, lo64);
+            rset(b, ops[0], v);
+        }
+        Insn::MulD => bin3(b, &ops, false, |b, x, y| b.mul::<W64>(x, y)),
+        Insn::MulhD => bin3(b, &ops, false, |b, x, y| b.mulh::<W64>(x, y)),
+        Insn::MulhDu => bin3(b, &ops, false, |b, x, y| b.mulhu::<W64>(x, y)),
+        Insn::DivW => {
+            let a = rget(b, ops[1]);
+            let c = rget(b, ops[2]);
+            let a32 = b.trunc::<W64, W32>(a);
+            let c32 = b.trunc::<W64, W32>(c);
+            let q = b.sdiv::<W32>(a32, c32);
+            let v = b.sext::<W32, W64>(q);
+            rset(b, ops[0], v);
+        }
+        Insn::ModW => {
+            let a = rget(b, ops[1]);
+            let c = rget(b, ops[2]);
+            let a32 = b.trunc::<W64, W32>(a);
+            let c32 = b.trunc::<W64, W32>(c);
+            let q = b.srem::<W32>(a32, c32);
+            let v = b.sext::<W32, W64>(q);
+            rset(b, ops[0], v);
+        }
+        Insn::DivWu => {
+            let a = rget(b, ops[1]);
+            let c = rget(b, ops[2]);
+            let a32 = b.trunc::<W64, W32>(a);
+            let c32 = b.trunc::<W64, W32>(c);
+            let q = b.udiv::<W32>(a32, c32);
+            let v = b.sext::<W32, W64>(q);
+            rset(b, ops[0], v);
+        }
+        Insn::ModWu => {
+            let a = rget(b, ops[1]);
+            let c = rget(b, ops[2]);
+            let a32 = b.trunc::<W64, W32>(a);
+            let c32 = b.trunc::<W64, W32>(c);
+            let q = b.urem::<W32>(a32, c32);
+            let v = b.sext::<W32, W64>(q);
+            rset(b, ops[0], v);
+        }
+        Insn::DivD => bin3(b, &ops, false, |b, x, y| b.sdiv::<W64>(x, y)),
+        Insn::ModD => bin3(b, &ops, false, |b, x, y| b.srem::<W64>(x, y)),
+        Insn::DivDu => bin3(b, &ops, false, |b, x, y| b.udiv::<W64>(x, y)),
+        Insn::ModDu => bin3(b, &ops, false, |b, x, y| b.urem::<W64>(x, y)),
+        Insn::CrcWBW
+        | Insn::CrcWHW
+        | Insn::CrcWWW
+        | Insn::CrcWDW
+        | Insn::CrccWBW
+        | Insn::CrccWHW
+        | Insn::CrccWWW
+        | Insn::CrccWDW => {
+            // CRC: rd = CRC32(rj, rk の下位 n バイト)。crc 系は
+            // 0xEDB88320、crcc 系は 0x82F63B78（反映形）。
+            // Ref: SPEC-LOONGARCH-RM §2.2.1.14.
+            let crc_c = matches!(
+                insn,
+                Insn::CrccWBW | Insn::CrccWHW | Insn::CrccWWW | Insn::CrccWDW
+            );
+            let poly: u32 = if crc_c { 0x82f6_3b78 } else { 0xedb8_8320 };
+            let bytes: u64 = match insn {
+                Insn::CrcWBW | Insn::CrccWBW => 1,
+                Insn::CrcWHW | Insn::CrccWHW => 2,
+                Insn::CrcWWW | Insn::CrccWWW => 4,
+                _ => 8,
+            };
+            let rj = rget(b, ops[1]);
+            let rk = rget(b, ops[2]);
+            let mut c = b.trunc::<W64, W32>(rj);
+            for i in 0..bytes {
+                let sh = k(b, i * 8);
+                let byte = b.shr_l::<W64>(rk, sh);
+                let m8 = k(b, 0xff);
+                let byte = b.and(byte, m8);
+                let b32 = b.trunc::<W64, W32>(byte);
+                c = b.xor::<W32>(c, b32);
+                c = crc32(b, c, poly, 8);
+            }
+            let v = b.zext::<W32, W64>(c);
             rset(b, ops[0], v);
         }
         // ---- 単純 load/store ----
