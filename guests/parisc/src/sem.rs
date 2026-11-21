@@ -1311,8 +1311,8 @@ fn ibranch<B: Backend>(b: &mut B, target: B::V<W64>, base: B::V<W64>, link: u64,
 /// 条件分岐（do_cbranch）。`cond` 成立で taken。
 /// `,n` の無効化は方向で変わる: taken で disp>=0（前方）、
 /// not-taken で disp<0（後方）のときだけ PSW.N を立てる
-/// （仕様記述は `if (disp < 0) PSW[N] ← taken 側条件、
-/// else PSW[N] ← !taken 側条件` で、disp=0 は前方扱い）。
+/// （仕様記述は `if (disp < 0) PSW[N] ← !cond_satisfied;
+/// else PSW[N] ← cond_satisfied` で、disp=0 は前方扱い）。
 /// Ref: SPEC-PARISC-11 §5 COMIBF Operation.
 fn cbranch<B: Backend>(b: &mut B, cond: B::B, pc: u64, disp: u64, n: u64) {
     let target = pc.wrapping_add(8).wrapping_add(disp);
@@ -1797,7 +1797,7 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
         }
         Insn::Bv => {
             // bv x(b)：target = GR[b] + (GR[x]<<3)（SPEC-PARISC-20
-            // §7-20）。特権は GR[b] の下位2ビットで決まる。
+            // §7-19）。特権は GR[b] の下位2ビットで決まる。
             let base = Gr(ops[0] as u8).get(b);
             let t = if ops[1] != 0 {
                 let x = Gr(ops[1] as u8).get(b);

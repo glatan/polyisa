@@ -531,7 +531,8 @@ fn exec_cond_branch_nullify_quadrants() {
         &|e| set_gpr(e, 2, 9),
     );
     // movib,<,n i,r4,±4（条件は即値側にしか効かないので真偽で語を
-    // 変える: -1 → `<` 成立、+1 → 不成立）。
+    // 変える: -16 → `<` 成立、+1 → 不成立。im5 桁は bit0 が符号で
+    // 1 → -16、2 → +1）。
     check_quadrants(
         0xcc81_400a,
         0xcc82_400a,
@@ -564,7 +565,7 @@ fn exec_cond_branch_nullify_quadrants() {
 #[test]
 fn exec_branch_link_privilege_and_n() {
     // bl 8,r5: GR[5] ← IAOQ_Back + 4（= pc+8）、分岐先 pc+8+8。
-    // Ref: SPEC-PARISC-11 §5-64/§B.
+    // Ref: SPEC-PARISC-11 §5-62/§B.
     let mut env = env();
     set_q(&mut env, 0x1000);
     step(&mut env, 0xe8a0_0010);
