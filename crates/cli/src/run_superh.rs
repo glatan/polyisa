@@ -489,7 +489,26 @@ pub fn run_elf_superh_sys(
     if polyisa_loader::elf::parse_interp(&bytes, &phdrs).is_some() {
         return Err("PT_INTERP のある SuperH ELF は未対応（静的のみ）".to_string());
     }
-    // `--cpu` 省略時は sh4（Linux SH-4 の ABI の基盤モデル）。
+    // `--cpu` 省略時は ELF の e_flags（EM_SH のアーキテクチャフラグ）
+    // からモデルを引く。0xc は SH-4A、0x17 は SH2A-or-SH4 の慣習の
+    // 割当（BIN-DISTRO-SH4/SH4EB 台帳の記述と一致）。未知・未対応の
+    // 値は sh4（Linux SH-4 ABI の基盤モデル）に畳む。
+    let flags = ehdr.flags & 0xff;
+    let model_name = match flags {
+        1 => "sh1",                   // EF_SH1
+        2 => "sh2",                   // EF_SH2
+        3 => "sh3",                   // EF_SH3
+        8 => "sh3e",                  // EF_SH3E
+        9 | 0x10 | 0x12 => "sh4",     // EF_SH4・EF_SH4_NOFPU・EF_SH4_NOMMU_NOFPU
+        0x0b => "sh2e",               // EF_SH2E
+        0x0c | 0x11 => "sh4a",        // EF_SH4A・EF_SH4A_NOFPU
+        0x0d | 0x13 => "sh2a",        // EF_SH2A・EF_SH2A_NOFPU
+        0x14 => "sh3",                // EF_SH3_NOMMU
+        0x15 | 0x17 => "sh4",         // EF_SH2A_SH4*_：両コア共通の命令範囲
+        0x16 | 0x18 => "sh3e",        // EF_SH2A_SH3*：SH-3/SH-3E 共通範囲
+        4 | 5 | 6 | 7 | 0xa => "sh4", // DSP 系・EF_SH_UNKNOWN は sh4 に近似
+        _ => "sh4",
+    };
     let default_sel;
     let sel = match sel {
         Some(s) => s,
@@ -498,7 +517,7 @@ pub fn run_elf_superh_sys(
                 polyisa_guest_superh::MODEL_DEFS,
                 polyisa_guest_superh::FEATURE_DEFS,
                 polyisa_guest_superh::FEAT_BITS,
-                "sh4",
+                model_name,
                 &[],
                 &[],
             )

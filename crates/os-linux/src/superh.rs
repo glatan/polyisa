@@ -59,6 +59,9 @@ pub mod errno {
     pub const ENOSYS: u32 = 38;
     pub const ENOTEMPTY: u32 = 39;
     pub const ELOOP: u32 = 40;
+    /// ENOTSUP は Linux では EOPNOTSUPP と同じ値。
+    pub const EOPNOTSUPP: u32 = 95;
+    pub const ENOTSUP: u32 = 95;
 }
 
 /// syscall 番号。`arch/sh/kernel/syscalls/syscall.tbl` の
@@ -120,6 +123,11 @@ pub mod nr {
     pub const GETPGRP: u64 = 65;
     pub const SETSID: u64 = 66;
     pub const SIGACTION: u64 = 67;
+    pub const SETREUID: u64 = 70;
+    pub const SETREGID: u64 = 71;
+    pub const SIGSUSPEND: u64 = 72;
+    pub const SIGPENDING: u64 = 73;
+    pub const SETHOSTNAME: u64 = 74;
     pub const SETRLIMIT: u64 = 75;
     pub const GETRUSAGE: u64 = 77;
     pub const GETTIMEOFDAY: u64 = 78;
@@ -152,6 +160,7 @@ pub mod nr {
     pub const WAIT4: u64 = 114;
     pub const SWAPOFF: u64 = 115;
     pub const SYSINFO: u64 = 116;
+    pub const IPC: u64 = 117;
     pub const FSYNC: u64 = 118;
     pub const SIGRETURN: u64 = 119;
     pub const CLONE: u64 = 120;
@@ -259,29 +268,197 @@ pub mod nr {
     pub const FUTEX: u64 = 240;
     pub const SCHED_SETAFFINITY: u64 = 241;
     pub const SCHED_GETAFFINITY: u64 = 242;
+    pub const IO_SETUP: u64 = 245;
+    pub const IO_DESTROY: u64 = 246;
+    pub const IO_GETEVENTS: u64 = 247;
+    pub const IO_SUBMIT: u64 = 248;
+    pub const IO_CANCEL: u64 = 249;
+    pub const FADVISE64: u64 = 250;
     pub const EXIT_GROUP: u64 = 252;
+    pub const LOOKUP_DCOOKIE: u64 = 253;
+    pub const EPOLL_CREATE: u64 = 254;
+    pub const EPOLL_CTL: u64 = 255;
+    pub const EPOLL_WAIT: u64 = 256;
+    pub const REMAP_FILE_PAGES: u64 = 257;
+    pub const SET_TID_ADDRESS: u64 = 258;
+    pub const TIMER_CREATE: u64 = 259;
+    pub const TIMER_SETTIME: u64 = 260;
+    pub const TIMER_GETTIME: u64 = 261;
+    pub const TIMER_GETOVERRUN: u64 = 262;
+    pub const TIMER_DELETE: u64 = 263;
+    pub const CLOCK_SETTIME: u64 = 264;
     pub const CLOCK_GETTIME: u64 = 265;
     pub const CLOCK_GETRES: u64 = 266;
+    pub const CLOCK_NANOSLEEP: u64 = 267;
     pub const STATFS64: u64 = 268;
     pub const FSTATFS64: u64 = 269;
     pub const TGKILL: u64 = 270;
     pub const UTIMES: u64 = 271;
     pub const FADVISE64_64: u64 = 272;
-    pub const IO_SETUP: u64 = 245;
-    pub const FADVISE64: u64 = 250;
-    pub const EPOLL_CREATE: u64 = 254;
-    pub const REMAP_FILE_PAGES: u64 = 257;
-    pub const SET_TID_ADDRESS: u64 = 258;
+    pub const MBIND: u64 = 274;
+    pub const GET_MEMPOLICY: u64 = 275;
+    pub const SET_MEMPOLICY: u64 = 276;
+    pub const MQ_OPEN: u64 = 277;
+    pub const MQ_UNLINK: u64 = 278;
+    pub const MQ_TIMEDSEND: u64 = 279;
+    pub const MQ_TIMEDRECEIVE: u64 = 280;
+    pub const MQ_NOTIFY: u64 = 281;
+    pub const MQ_GETSETATTR: u64 = 282;
+    pub const KEXEC_LOAD: u64 = 283;
+    pub const WAITID: u64 = 284;
+    pub const ADD_KEY: u64 = 285;
+    pub const REQUEST_KEY: u64 = 286;
+    pub const KEYCTL: u64 = 287;
+    pub const IOPRIO_SET: u64 = 288;
+    pub const IOPRIO_GET: u64 = 289;
+    pub const INOTIFY_INIT: u64 = 290;
+    pub const INOTIFY_ADD_WATCH: u64 = 291;
+    pub const INOTIFY_RM_WATCH: u64 = 292;
+    pub const MIGRATE_PAGES: u64 = 294;
     pub const OPENAT: u64 = 295;
+    pub const MKDIRAT: u64 = 296;
+    pub const MKNODAT: u64 = 297;
+    pub const FCHOWNAT: u64 = 298;
+    pub const FUTIMESAT: u64 = 299;
     pub const FSTATAT64: u64 = 300;
     pub const UNLINKAT: u64 = 301;
+    pub const RENAMEAT: u64 = 302;
+    pub const LINKAT: u64 = 303;
+    pub const SYMLINKAT: u64 = 304;
     pub const READLINKAT: u64 = 305;
+    pub const FCHMODAT: u64 = 306;
+    pub const FACCESSAT: u64 = 307;
+    pub const PSELECT6: u64 = 308;
+    pub const PPOLL: u64 = 309;
+    pub const UNSHARE: u64 = 310;
     pub const SET_ROBUST_LIST: u64 = 311;
+    pub const GET_ROBUST_LIST: u64 = 312;
     pub const SPLICE: u64 = 313;
+    pub const TEE: u64 = 315;
+    pub const VMSPLICE: u64 = 316;
+    pub const MOVE_PAGES: u64 = 317;
     pub const GETCPU: u64 = 318;
+    pub const EPOLL_PWAIT: u64 = 319;
+    pub const UTIMENSAT: u64 = 320;
+    pub const SIGNALFD: u64 = 321;
+    pub const TIMERFD_CREATE: u64 = 322;
     pub const EVENTFD: u64 = 323;
+    pub const FALLOCATE: u64 = 324;
+    pub const TIMERFD_SETTIME: u64 = 325;
+    pub const TIMERFD_GETTIME: u64 = 326;
+    pub const SIGNALFD4: u64 = 327;
+    pub const EVENTFD2: u64 = 328;
+    pub const EPOLL_CREATE1: u64 = 329;
+    pub const DUP3: u64 = 330;
+    pub const PIPE2: u64 = 331;
+    pub const INOTIFY_INIT1: u64 = 332;
+    pub const PREADV: u64 = 333;
+    pub const PWRITEV: u64 = 334;
+    pub const RT_TGSIGQUEUEINFO: u64 = 335;
+    pub const PERF_EVENT_OPEN: u64 = 336;
+    pub const FANOTIFY_INIT: u64 = 337;
+    pub const FANOTIFY_MARK: u64 = 338;
+    pub const PRLIMIT64: u64 = 339;
+    pub const RECVMMSG: u64 = 357;
+    pub const CLOCK_ADJTIME: u64 = 361;
+    pub const SYNCFS: u64 = 362;
+    pub const SENDMMSG: u64 = 363;
+    pub const SETNS: u64 = 364;
+    pub const PROCESS_VM_READV: u64 = 365;
+    pub const PROCESS_VM_WRITEV: u64 = 366;
+    pub const KCMP: u64 = 367;
+    pub const FINIT_MODULE: u64 = 368;
+    pub const SCHED_GETATTR: u64 = 369;
+    pub const SCHED_SETATTR: u64 = 370;
+    pub const RENAMEAT2: u64 = 371;
+    pub const SECCOMP: u64 = 372;
     pub const GETRANDOM: u64 = 373;
+    pub const MEMFD_CREATE: u64 = 374;
+    pub const BPF: u64 = 375;
+    pub const EXECVEAT: u64 = 376;
+    pub const USERFAULTFD: u64 = 377;
+    pub const MEMBARRIER: u64 = 378;
+    pub const MLOCK2: u64 = 379;
+    pub const COPY_FILE_RANGE: u64 = 380;
+    pub const STATX: u64 = 383;
+    pub const RSEQ: u64 = 387;
     pub const CLOCK_GETTIME64: u64 = 403;
+    pub const CLOCK_SETTIME64: u64 = 404;
+    pub const CLOCK_GETRES_TIME64: u64 = 406;
+    pub const CLOCK_NANOSLEEP_TIME64: u64 = 407;
+    pub const TIMER_GETTIME64: u64 = 408;
+    pub const TIMER_SETTIME64: u64 = 409;
+    pub const TIMERFD_GETTIME64: u64 = 410;
+    pub const TIMERFD_SETTIME64: u64 = 411;
+    pub const UTIMENSAT_TIME64: u64 = 412;
+    pub const PSELECT6_TIME64: u64 = 413;
+    pub const PPOLL_TIME64: u64 = 414;
+    pub const RECVMMSG_TIME64: u64 = 417;
+    pub const MQ_TIMEDSEND_TIME64: u64 = 418;
+    pub const MQ_TIMEDRECEIVE_TIME64: u64 = 419;
+    pub const SEMTIMEDOP_TIME64: u64 = 420;
+    pub const RT_SIGTIMEDWAIT_TIME64: u64 = 421;
+    pub const FUTEX_TIME64: u64 = 422;
+    pub const SCHED_RR_GET_INTERVAL_TIME64: u64 = 423;
+    pub const PIDFD_SEND_SIGNAL: u64 = 424;
+    pub const IO_URING_SETUP: u64 = 425;
+    pub const IO_URING_ENTER: u64 = 426;
+    pub const IO_URING_REGISTER: u64 = 427;
+    pub const OPEN_TREE: u64 = 428;
+    pub const MOVE_MOUNT: u64 = 429;
+    pub const FSOPEN: u64 = 430;
+    pub const FSCONFIG: u64 = 431;
+    pub const FSMOUNT: u64 = 432;
+    pub const FSPICK: u64 = 433;
+    pub const PIDFD_OPEN: u64 = 434;
+    pub const CLOSE_RANGE: u64 = 436;
+    pub const OPENAT2: u64 = 437;
+    pub const FACCESSAT2: u64 = 438;
+    pub const PROCESS_MADVISE: u64 = 439;
+    pub const EPOLL_PWAIT2: u64 = 441;
+    pub const MOUNT_SETATTR: u64 = 442;
+    pub const QUOTACTL_FD: u64 = 443;
+    pub const LSETXATTR: u64 = 227;
+    pub const FSETXATTR: u64 = 228;
+    pub const LGETXATTR: u64 = 230;
+    pub const FGETXATTR: u64 = 231;
+    pub const LISTXATTR: u64 = 232;
+    pub const LLISTXATTR: u64 = 233;
+    pub const FLISTXATTR: u64 = 234;
+    pub const REMOVEXATTR: u64 = 235;
+    pub const LREMOVEXATTR: u64 = 236;
+    pub const FREMOVEXATTR: u64 = 237;
+}
+
+/// `open`/`openat` の `O_*`（asm-generic）。
+// Ref: SRC-LINUX (7.3) — include/uapi/asm-generic/fcntl.h.
+pub mod oflag {
+    /// アクセスモードのマスク。
+    pub const ACCMODE: u32 = 3;
+    /// O_CREAT。
+    pub const CREAT: u32 = 0o100;
+    /// O_EXCL。
+    pub const EXCL: u32 = 0o200;
+    /// O_TRUNC。
+    pub const TRUNC: u32 = 0o1000;
+    /// O_APPEND。
+    pub const APPEND: u32 = 0o2000;
+    /// O_DIRECTORY。
+    pub const DIRECTORY: u32 = 0o40000;
+    /// O_NOFOLLOW。
+    pub const NOFOLLOW: u32 = 0o100000;
+}
+
+/// `mmap`/`mmap2` のフラグ（asm-generic）。
+pub mod mmap_flag {
+    /// MAP_SHARED。
+    pub const SHARED: u32 = 1;
+    /// MAP_PRIVATE。
+    pub const PRIVATE: u32 = 2;
+    /// MAP_FIXED。
+    pub const FIXED: u32 = 0x10;
+    /// MAP_ANONYMOUS。
+    pub const ANONYMOUS: u32 = 0x20;
 }
 
 /// `mprotect`/`mmap` の prot ビット（generic ABI）。
