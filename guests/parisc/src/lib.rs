@@ -58,4 +58,10 @@ pub struct CpuState {
     /// （キャリ・オーバーフロ）・W（2.0 のワイド）など。
     /// Ref: SPEC-PARISC-11 §2.5.
     pub psw: u64,
+    /// PSW[C/B] の内部表現。`add`/`sub`/`shladd`/`ds` が更新する
+    /// 16 個の BCD 桁キャリを、LSB 起算で桁 j のキャリアウトを
+    /// bit 4j に置くベクトルとして持つ（bit28 が語の
+    /// C/B{8}、bit60 が C/B{0} に対応する）。
+    /// Ref: SPEC-PARISC-20 §7-5（PSW C/B フィールド）.
+    pub cb: u64,
 }

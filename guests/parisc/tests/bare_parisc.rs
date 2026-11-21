@@ -718,3 +718,17 @@ fn exec_fp_load_store_moves_bits() {
     step(&mut env, 0x2cc7_0009);
     assert_eq!(fpr(&mut env, 9), 0xfeed_face_0bad_c0de);
 }
+
+// mtsm は PSW システムマスクへの移動で最上位特権のみ。ユーザ
+// モデルでは privileged operation trap になる（#6 対応）。
+#[test]
+fn exec_mtsm_traps_as_privileged() {
+    let mut env = env();
+    set_q(&mut env, 0x1000);
+    // mtsm r4（形式 000000 00000 r 000 11000011 00000 → 0x0004_1860）。
+    let insn = dec(0x0004_1860).unwrap();
+    assert_eq!(insn, Insn::Mtsm);
+    let f = iaoq_f(&mut env);
+    let r = sem::exec(&mut env.backend, insn, 0x0004_1860, f);
+    assert!(r.is_err());
+}

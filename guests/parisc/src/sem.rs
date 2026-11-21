@@ -134,6 +134,15 @@ impl Sr {
 /// 6 ビット番号（bit5=0 → 左半分＝64 ビットレジスタの上位
 /// 32 ビット、bit5=1 → 右半分＝下位 32 ビット）。
 /// Ref: SPEC-PARISC-20 §8（Table 8-1。frnL/frnR の命名規則）.
+///
+/// FLDW/FSTW では 0R・1L/1R・2L/2R・3L/3R（r64 ∈
+/// {1,2,3,32,33,34,35}）の指定が未定義操作（undefined op）
+/// だが、本モデルは半レジスタへの決定的なアクセスとして
+/// 評価する。また fr0L へのロードが起こす「先行 FP 命令の
+/// 完了強制」は FP パイプラインをモデル化していないため
+/// 恒等的に不要（Status レジスタの T ビットを立てる値の
+/// ロードも未定義だが検査しない）。
+// Gap: GAP-0053
 fn fpr_get_w<B: Backend>(b: &mut B, r64: u64) -> B::V<W64> {
     let d = b.get(Fpr((r64 & 31) as u8).state());
     if r64 & 32 != 0 {
@@ -177,6 +186,13 @@ pub const PSW_CARRY64: u64 = 1 << 41;
 #[must_use]
 pub fn psw_ref() -> StateRef<W64> {
     StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, psw))
+}
+
+/// PSW[C/B] 桁キャリベクトル（`CpuState::cb`）の位置。
+/// bit 4j は桁 j のキャリアウト（HP 記法の C/B{15-j}）。
+#[must_use]
+pub fn cb_ref() -> StateRef<W64> {
+    StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, cb))
 }
 
 /// IAOQ front（現在実行中の命令番地）の位置。
@@ -956,26 +972,38 @@ fn carry32_cin<B: Backend>(b: &mut B, in1: B::V<W64>, in2: B::V<W64>, cin: B::V<
     shr_n(b, s, 32)
 }
 
-/// psw の内部キャリ（bit40=32 ビット、bit41=64 ビット）を保存する。
-fn save_carry<B: Backend>(b: &mut B, c32: B::V<W64>, c64: B::V<W64>) {
-    let p = b.get(psw_ref());
-    let p = and_n(b, p, !(PSW_CARRY32 | PSW_CARRY64));
-    let lo = shl_n(b, c32, 40);
-    let p = b.or(p, lo);
-    let hi = shl_n(b, c64, 41);
-    let p = b.or(p, hi);
-    b.set(psw_ref(), p);
+/// PSW[C/B] の桁キャリベクトルを `cb` 状態へ保存する。
+/// `x = in1 ^ in2 ^ dest` の bit i は「bit i へのキャリ」なので、
+/// x を 4 ビット右シフト（`x >> 4`）すると各 4 ビット桁の出口
+/// キャリが bit 4j（= C/B{15-j}）に揃う。bit60（C/B{0}）は全体の
+/// キャリアウトを別計算で入れる。`in2` は実効の第 2 加数
+/// （減算なら ~in2 + cin の ~in2 側）。
+/// Ref: SPEC-PARISC-20 §7-5（C/B は各 BCD 桁のキャリ）.
+fn save_carry<B: Backend>(
+    b: &mut B,
+    in1: B::V<W64>,
+    in2: B::V<W64>,
+    dest: B::V<W64>,
+    c64: B::V<W64>,
+) {
+    let x = b.xor(in1, in2);
+    let x = b.xor(x, dest);
+    let xs = shr_n(b, x, 4);
+    let cbv = and_n(b, xs, 0x1111_1111_1111_1111);
+    let top = shl_n(b, c64, 60);
+    let cbv = b.or(cbv, top);
+    b.set(cb_ref(), cbv);
 }
 
-/// `add,c`/`sub,b` の carry-in（0/1 の V）。
+/// `add,c`/`sub,b`/`ds` が参照する語形・dw 形の桁キャリ
+/// （0/1 の V）。d=false は C/B{8}（語のキャリ＝bit32 への
+/// キャリ）、d=true は C/B{0}（64 ビットのキャリアウト）。
+/// Ref: SPEC-PARISC-20 §7-5.
 fn psw_carry<B: Backend>(b: &mut B, d: bool) -> B::V<W64> {
-    let p = b.get(psw_ref());
-    let bit = if d { PSW_CARRY64 } else { PSW_CARRY32 };
-    let m = k(b, bit);
-    let t = b.and(p, m);
-    let zero = k(b, 0);
-    let nz = b.cmp(Cmp::Ne, t, zero);
-    bval(b, nz)
+    let cbv = b.get(cb_ref());
+    let sh = if d { 60 } else { 28 };
+    let v = shr_n(b, cbv, sh);
+    and_n(b, v, 1)
 }
 
 // ----------------------------------------------------------------
@@ -1041,8 +1069,8 @@ fn do_add<B: Backend>(
         b.if_then(cond, |b| Err(raise::<B>(b, ExceptionKind::Trap, TRAP_COND)))?;
     }
     if !is_l {
-        // PSW[C/B] の簡約版（内部ビット）を保存。
-        save_carry(b, c32, c64);
+        // PSW[C/B] の桁キャリ列を保存。
+        save_carry(b, in1, in2, dest, c64);
     }
     Gr(rt as u8).set(b, dest);
     if !is_tc && cf != 0 {
@@ -1103,7 +1131,7 @@ fn do_sub<B: Backend>(
     if is_tc {
         b.if_then(cond, |b| Err(raise::<B>(b, ExceptionKind::Trap, TRAP_COND)))?;
     }
-    save_carry(b, c32, c64);
+    save_carry(b, in1, not2, dest, c64);
     Gr(rt as u8).set(b, dest);
     if !is_tc && cf != 0 {
         let condv = bval(b, cond);
@@ -2000,6 +2028,18 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
             let a_addr = and_n(b, off, !wmask);
             let r = Gr(ops[1] as u8).get(b);
             let n: u64 = if is_d { 8 } else { 4 };
+            // ,E で j=0 のとき 1 バイトも書かないが、spec は
+            // アライン済みワードへの保護検査（と dirty 記録）を
+            // 要求する。バイトを書かずに検査だけする手段として
+            // probe を使う（未写像は検出できるが書込許可自体の
+            // 判定・dirty 記録は本メモリ抽象では表せない）。
+            // Ref: SPEC-PARISC-20 §7-139 STDBY.
+            // Gap: GAP-0053
+            if a == 1 {
+                let zero = k(b, 0);
+                let jz = b.cmp(Cmp::Eq, j, zero);
+                b.if_then(jz, |b| b.probe(a_addr, 1, DATA_WRITE))?;
+            }
             // バイト k を書く条件: B は k>=j、E は k<j。
             // 部分書きなので W8 ストアを個数分だけ述語付きで並べる。
             for kk in 0..n {
@@ -2279,14 +2319,23 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
             sed_nullify(b, ops[2], d, res);
         }
         Insn::DepiSar => {
-            // ops = [t, i, c, nz, d, clen]。d=0 は ZVDEPI/VDEPI
+            // ops = [t, i, c, nz, d, len6a]。d=0 は ZVDEPI/VDEPI
             // （32 ビット形）、d=1 は DEPDI 可変（len6a の cl が
             // 立つ）。i は im5_16 の low_sign_ext 即値。
+            // 語形は `len ← assemble_6(0,clen)`（SPEC-PARISC-20
+            // §DEPWI operation）なので len6a の cl 桁は見ない
+            // （d=0 かつ cl=1 は未定義だが、spec 式どおり cl を
+            // 無視する決定的な値として評価する）。
+            // Ref: SPEC-PARISC-20 §7-43 DEPWI.
             let t = Gr(ops[0] as u8).get(b);
             let src = k(b, im5(ops[1]));
             let sar = Cr(11).get(b);
             let d = ops[4] != 0;
-            let len = assemble_6(ops[5]);
+            let len = if d {
+                assemble_6(ops[5])
+            } else {
+                32 - (ops[5] & 31)
+            };
             let tpos = and_n(b, sar, if d { 63 } else { 31 });
             let res = do_dep(b, t, tpos, src, len, ops[3] != 0, d);
             Gr(ops[0] as u8).set(b, res);
@@ -2364,22 +2413,26 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
             Sr(ops[1] as u8).set(b, v);
         }
         Insn::Mtsm => {
-            // MTSM は SAR への書き込みで、値は下位 5 ビットに
-            // マスクする（SPEC-PARISC-11 §MTSM / mtctl 系の
-            // SAR 取り扱いに倣う）。
-            let v = Gr(ops[0] as u8).get(b);
-            let v = and_n(b, v, 31);
-            Cr(11).set(b, v);
+            // MTSM は PSW システムマスクへの移動で、SAR とは無関係。
+            // 最上位特権のみ実行可のためユーザモデルでは privileged
+            // operation trap とする（SPEC-PARISC-11 §MTSM:
+            // `if (priv != 0) privileged_operation_trap`、
+            // SPEC-PARISC-20 §MTSM 同文）。
+            return Err(raise::<B>(b, ExceptionKind::Trap, TRAP_PRIV));
         }
         Insn::Mtsarcm => {
+            // CR[11] ← ~GR[r]{26..31}：SAR は 6 ビットレジスタ。
+            // Ref: SPEC-PARISC-20 §MTSARCM.
             let s = Gr(ops[0] as u8).get(b);
             let n = b.not(s);
-            let v = and_n(b, n, 31);
+            let v = and_n(b, n, 63);
             Cr(11).set(b, v);
         }
         Insn::Mfctl => {
-            // ops = [ctl, e(,w), t]。SAR は ,w なしで下位 5 ビットに
-            // マスク。cr1（interval timer）・26/27 は読める。
+            // ops = [ctl, e(,w), t]。SAR は ,w なしで 5 ビット形
+            // `GR[t] ← CR[11]{1..5}`（6 ビット SAR の下位 5 ビット）、
+            // ,w 付きでは SAR 全体を返す。cr1・26/27 は読める。
+            // Ref: SPEC-PARISC-20 §MFCTL.
             let (ctl, e, t) = (ops[0], ops[1] != 0, ops[2]);
             match ctl {
                 11 => {
@@ -2396,10 +2449,15 @@ pub fn exec<B: Backend>(b: &mut B, insn: Insn, word: u32, pc: u64) -> Result<boo
         }
         Insn::Mtctl => {
             // ops = [ctl, r]。SAR だけユーザから書ける。
+            // `CR[11] ← GR[r]{26..31}`：SAR は 6 ビットレジスタ。
+            // PA 1.1 では SAR は 5 ビット（CR[11] ← GR[r]{27..31}）
+            // だが、語形の読み手は全て下位 5 ビットだけ見るので、
+            // 6 ビット格納でも PA 1.1 の観測可能な動作は変わらない。
+            // Ref: SPEC-PARISC-20 §MTCTL, SPEC-PARISC-11 §MTCTL.
             let (ctl, r) = (ops[0], ops[1]);
             if ctl == 11 {
                 let s = Gr(r as u8).get(b);
-                let v = and_n(b, s, 31);
+                let v = and_n(b, s, 63);
                 Cr(11).set(b, v);
             } else {
                 return Err(raise::<B>(b, ExceptionKind::Trap, TRAP_PRIV));
