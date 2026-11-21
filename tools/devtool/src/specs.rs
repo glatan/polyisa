@@ -22,6 +22,9 @@ mod hexagon {
 mod ia64 {
     include!("../../../guests/ia64/spec/ia64min.rs");
 }
+mod loongarch {
+    include!("../../../guests/loongarch/spec/loongarch.rs");
+}
 mod m68k {
     include!("../../../guests/m68k/spec/m68kmin.rs");
 }
@@ -90,6 +93,11 @@ const SPECS: &[IsaSpec] = &[
         isa: "ia64",
         rel_paths: &["guests/ia64/spec/ia64min.rs"],
         build: ia64::build_model,
+    },
+    IsaSpec {
+        isa: "loongarch",
+        rel_paths: &["guests/loongarch/spec/loongarch.rs"],
+        build: loongarch::build_model,
     },
     IsaSpec {
         isa: "m68k",

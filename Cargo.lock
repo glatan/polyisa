@@ -15,6 +15,7 @@ dependencies = [
  "polyisa-guest-aarch64",
  "polyisa-guest-alpha",
  "polyisa-guest-arm",
+ "polyisa-guest-loongarch",
  "polyisa-guest-m68k",
  "polyisa-guest-mips",
  "polyisa-guest-parisc",
@@ -162,6 +163,18 @@ dependencies = [
  "polyisa-sem",
  "polyisa-softfloat",
  "polyisa-timing",
+]
+
+[[package]]
+name = "polyisa-guest-loongarch"
+version = "0.0.0"
+dependencies = [
+ "polyisa-engine",
+ "polyisa-guest",
+ "polyisa-isadl",
+ "polyisa-isagen",
+ "polyisa-mem",
+ "polyisa-sem",
 ]
 
 [[package]]
@@ -387,6 +400,7 @@ dependencies = [
  "polyisa-guest-aarch64",
  "polyisa-guest-alpha",
  "polyisa-guest-arm",
+ "polyisa-guest-loongarch",
  "polyisa-guest-m68k",
  "polyisa-guest-mips",
  "polyisa-guest-parisc",

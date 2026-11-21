@@ -38,6 +38,7 @@ members = [
     "guests/s390",
     "guests/m68k",
     "guests/superh",
+    "guests/loongarch",
 ]
 resolver = "2"
 
