@@ -369,25 +369,43 @@ impl Linux {
             Endian::Be => v.to_be_bytes(),
             Endian::Le => v.to_le_bytes(),
         };
-        b[0..4].copy_from_slice(&w32(0x1fff)); // mask = STATX_ALL
-        b[4..8].copy_from_slice(&w32(4096)); // blksize
-        b[8..16].copy_from_slice(&w64(0x1fff)); // attributes
+        // Linux の dev_t 符号化（new_encode_dev）から major/minor
+        // を取り出す（new_decode_dev の逆）。
+        let major = |d: u64| -> u32 { (((d >> 8) & 0xfff) | (d >> 32)) as u32 };
+        let minor = |d: u64| -> u32 { ((d & 0xff) | ((d >> 12) & !0xff)) as u32 };
+        // UAPI `struct statx`（include/uapi/linux/stat.h）の
+        // オフセット: ino@0x20、size@0x28、blocks@0x30、
+        // attributes_mask@0x38、atime@0x40、btime@0x50、
+        // ctime@0x60、mtime@0x70、rdev_{major,minor}@0x80/0x84、
+        // dev_{major,minor}@0x88/0x8c、mnt_id@0x90。
+        // btime/mnt_id/attributes は未提供なので 0 のまま残し、
+        // mask は STATX_BASIC_STATS（提供分）に合わせる。
+        b[0..4].copy_from_slice(&w32(0x7ff)); // mask = STATX_BASIC_STATS
+        b[4..8].copy_from_slice(&w32(md.blksize as u32)); // blksize
+        // attributes @0x08 = 0。
         b[16..20].copy_from_slice(&w32(md.nlink as u32));
         b[20..24].copy_from_slice(&w32(md.uid));
         b[24..28].copy_from_slice(&w32(md.gid));
-        b[28..32].copy_from_slice(&w32(md.mode as u16 as u32));
-        b[40..48].copy_from_slice(&w64(md.ino));
-        b[48..56].copy_from_slice(&w64(md.size));
-        b[56..64].copy_from_slice(&w64(md.blocks));
-        b[64..72].copy_from_slice(&w64(0x1fff)); // attributes_mask
-        b[80..88].copy_from_slice(&w64(md.atime as u64));
-        b[88..92].copy_from_slice(&w32(md.atime_nsec as u32));
-        b[112..120].copy_from_slice(&w64(md.ctime as u64));
-        b[120..124].copy_from_slice(&w32(md.ctime_nsec as u32));
-        b[128..136].copy_from_slice(&w64(md.mtime as u64));
-        b[136..140].copy_from_slice(&w32(md.mtime_nsec as u32));
-        b[144..148].copy_from_slice(&w32(md.rdev as u32));
-        b[152..156].copy_from_slice(&w32(md.dev as u32));
+        b[28..30].copy_from_slice(&match self.endian {
+            Endian::Be => (md.mode as u16).to_be_bytes(),
+            Endian::Le => (md.mode as u16).to_le_bytes(),
+        });
+        b[32..40].copy_from_slice(&w64(md.ino));
+        b[40..48].copy_from_slice(&w64(md.size));
+        b[48..56].copy_from_slice(&w64(md.blocks));
+        // attributes_mask @0x38 = 0（attributes を出さない）。
+        b[64..72].copy_from_slice(&w64(md.atime as u64));
+        b[72..76].copy_from_slice(&w32(md.atime_nsec as u32));
+        // btime @0x50 未提供。
+        b[96..104].copy_from_slice(&w64(md.ctime as u64));
+        b[104..108].copy_from_slice(&w32(md.ctime_nsec as u32));
+        b[112..120].copy_from_slice(&w64(md.mtime as u64));
+        b[120..124].copy_from_slice(&w32(md.mtime_nsec as u32));
+        b[128..132].copy_from_slice(&w32(major(md.rdev)));
+        b[132..136].copy_from_slice(&w32(minor(md.rdev)));
+        b[136..140].copy_from_slice(&w32(major(md.dev)));
+        b[140..144].copy_from_slice(&w32(minor(md.dev)));
+        // mnt_id @0x90 未提供。
         match self.write_bytes(env, out, &b) {
             Ok(()) => 0,
             Err(e) => Self::fail(e),
@@ -1513,6 +1531,60 @@ mod tests {
         // MAP_PRIVATE|MAP_ANONYMOUS, PROT_READ|PROT_WRITE。
         let base = sys.do_mmap(&mut env, 0, 0x1000, 3, 0x22, u32::MAX, 0);
         assert_eq!(base, 0x2_0000, "ヒープの直後の空きを返す");
+    }
+
+    /// `struct statx` の UAPI オフセット検査（回帰: ino 以降が
+    /// +8 ずれていた）。`include/uapi/linux/stat.h` 正本。
+    #[cfg(unix)]
+    #[test]
+    fn statx_writes_uapi_layout() {
+        let dir = std::env::temp_dir().join(format!("polyisa-aa-statx-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("f"), b"abc").unwrap();
+        let mut sys = Linux::default();
+        sys.set_guest_root(&dir.to_string_lossy());
+        let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_aarch64::CpuState>());
+        env.backend
+            .mem
+            .map(VirtAddr(0x10000), 1, Perms::RW)
+            .unwrap();
+        // ゲストパス "/f" をメモリへ。
+        env.backend.mem.write(VirtAddr(0x10000), b"/f\0").unwrap();
+        assert_eq!(sys.do_statx(&mut env, 0x10000, 0x10400), 0);
+        let mut b = [0u8; 256];
+        let acc = Access {
+            endian: Endian::Le,
+            align: Align::Unaligned,
+            kind: AccessKind::DataRead,
+        };
+        env.backend
+            .mem
+            .read(VirtAddr(0x10400), &mut b, acc)
+            .unwrap();
+        let r32 = |o: usize| u32::from_le_bytes(b[o..o + 4].try_into().unwrap());
+        let r64 = |o: usize| u64::from_le_bytes(b[o..o + 8].try_into().unwrap());
+        let md = polyisa_host::stat(&dir.join("f").to_string_lossy()).unwrap();
+        assert_eq!(r32(0x00), 0x7ff, "mask = STATX_BASIC_STATS");
+        assert_eq!(r64(0x08), 0, "attributes 未提供");
+        assert_eq!(r32(0x1c) as u16, md.mode as u16);
+        assert_eq!(r64(0x20), md.ino, "ino @0x20");
+        assert_eq!(r64(0x28), 3, "size @0x28");
+        assert_eq!(r64(0x30), md.blocks, "blocks @0x30");
+        assert_eq!(r64(0x38), 0, "attributes_mask @0x38");
+        assert_eq!(r64(0x40), md.atime as u64, "atime @0x40");
+        assert_eq!(r32(0x48), md.atime_nsec as u32);
+        assert_eq!(r64(0x50), 0, "btime 未提供");
+        assert_eq!(r64(0x60), md.ctime as u64, "ctime @0x60");
+        assert_eq!(r32(0x68), md.ctime_nsec as u32);
+        assert_eq!(r64(0x70), md.mtime as u64, "mtime @0x70");
+        assert_eq!(r32(0x78), md.mtime_nsec as u32);
+        let dev = md.dev;
+        let major = (((dev >> 8) & 0xfff) | (dev >> 32)) as u32;
+        let minor = ((dev & 0xff) | ((dev >> 12) & !0xff)) as u32;
+        assert_eq!(r32(0x88), major, "dev_major @0x88");
+        assert_eq!(r32(0x8c), minor, "dev_minor @0x8c");
+        assert_eq!(r64(0x90), 0, "mnt_id 未提供");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[cfg(unix)]
