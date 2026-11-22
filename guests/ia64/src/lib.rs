@@ -1,11 +1,18 @@
 // Copyright (c) polyisa contributors
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! IA-64 のゲスト ISA。段階21 の骨格。
+//! IA-64 のゲスト ISA。段階21。
 //!
 //! IA-64 の命令は 41 ビットのスロット語で、3 個を束ねた 128 ビットの
 //! バンドルをフェッチ単位とする。`CpuState` と機能・モデル宣言、
-//! ISADL から生成した命令集合・デコード・逆アセンブルの殻を提供する。
-//! 実命令のデコードは IA3、実行ループは IA4 で足す。
+//! ISADL から生成した命令集合・デコード・逆アセンブルを提供する。
+//! 実行ループは IA4 で足す。
+//!
+//! 同一のスロット語は実行ユニットの文脈で別命令になるため、全命令の
+//! `when` が `unit_*` 文脈旗を要求し、文脈なしの `decode`/`disasm`
+//! では何もデコードできない。スロット語の公開入口は
+//! `bundle::decode_slot`（Unit 文脈を渡す）、バンドル語は
+//! `bundle::decode_bundle`。生成 API を直接使う場合は
+//! `decode_model_ex`/`disasm_word_ex` に FEAT_UNIT_* を渡す。
 //! 対象は Linux ユーザモードの Itanium 系（版の範囲は Itanium から
 //! Itanium 9700 系まで）。
 //! 出典は SPEC-IA64-SDM Rev 2.3 (2010-05) である。

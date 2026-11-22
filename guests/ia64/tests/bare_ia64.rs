@@ -10,9 +10,10 @@ use polyisa_engine::interp::InterpExit;
 use polyisa_guest_ia64::bundle::{self, Unit};
 use polyisa_guest_ia64::{
     CpuState, FEAT_ITANIUM, FEAT_ITANIUM2, FEAT_UNIT_A, FEAT_UNIT_I, IP_SLOT_MASK, Insn,
-    decode_model_ex, disasm_word_ex, encode_add, encode_br_cond_sptk_few, encode_fma_s0,
-    encode_ld4, encode_mov_ip, encode_movl, encode_nop_i, encode_nop_x, encode_st4,
-    encode_sub_imm8, sem,
+    decode_model_ex, disasm_word_ex, encode_add, encode_br_cond_sptk_few, encode_break_f,
+    encode_brl_cond_sptk_few, encode_cmp_lt_or, encode_fma_s0, encode_hint_f, encode_ld4,
+    encode_mov_ip, encode_movl, encode_nop_f, encode_nop_i, encode_nop_x, encode_padd1,
+    encode_pcmp4_eq, encode_psub1, encode_st4, encode_sub_imm8, extract_ops, sem,
 };
 
 fn env() -> BareEnv {
@@ -307,4 +308,118 @@ fn context_flags_select_interpretation() {
         Some(Insn::Add)
     );
     assert_eq!(decode_model_ex(w, 41, true, CPU | FEAT_UNIT_I), None);
+}
+
+// ---- 段階21 IA3 レビュー修正の回帰テスト ----
+// 修正した符号化が gas が出す実語と一致し、旧（誤りの）
+// オペコード空間や固定桁を倒した語が当該命令に解釈されない
+// ことを確かめる。
+// Ref: SPEC-IA64-SDM (Rev 2.3) / binutils ia64-opc-{a,b,f,x}.c.
+
+#[test]
+fn cmp_lt_or_is_or_space() {
+    // gas が `cmp.lt.or p2,p3 = r4, r0`（疑似形式、r3 桁側の
+    // オペランド順）に出す語と一致する。
+    // OpX2TbTaC(0xd, 0, 1, 0, 0)、r2 桁 [19:13] は建築的に
+    // r0 のため 0 固定。
+    let w = encode_cmp_lt_or(&[0, 2, 3, 4]).unwrap();
+    assert_eq!(w, 0x01b0_1840_0080);
+    assert_eq!(bundle::decode_slot(Unit::I, w, CPU), Some(Insn::CmpLtOr));
+    // A 型なので M スロットでも同じ解釈。
+    assert_eq!(bundle::decode_slot(Unit::M, w, CPU), Some(Insn::CmpLtOr));
+    let t = disasm_word_ex(w, 41, true, CPU | FEAT_UNIT_I | FEAT_UNIT_A).expect("disasm");
+    assert!(t.contains("cmp.lt.or p2, p3 = r4, r0"), "{t}");
+    // 旧誤りパターンの空間（cmp4.lt 相当: op=0xc,x2=1,tb=0）は
+    // cmp_lt_or に解釈されない。
+    let old_space = 0x1840_1840_0080u128;
+    assert_ne!(
+        bundle::decode_slot(Unit::I, old_space, CPU),
+        Some(Insn::CmpLtOr)
+    );
+    // r2 桁を立てた語は受理しない（r0 固定の桁）。
+    let bad_r2 = w | (5u128 << 13);
+    assert_ne!(
+        bundle::decode_slot(Unit::I, bad_r2, CPU),
+        Some(Insn::CmpLtOr)
+    );
+    assert_eq!(extract_ops(Insn::CmpLtOr, w), vec![0, 2, 3, 4]);
+}
+
+#[test]
+fn pcmp4_eq_field_layout() {
+    // gas が `pcmp4.eq r10 = r30, r31` に出す語と一致する。
+    // OpX2aZaZbX4X2b(8, 1, 1, 0, 9, 0)。
+    let w = encode_pcmp4_eq(&[0, 10, 30, 31]).unwrap();
+    assert_eq!(w, 0x0115_21f3_c280);
+    assert_eq!(w & 0x1fff8000000, 0x11520000000);
+    assert_eq!(bundle::decode_slot(Unit::I, w, CPU), Some(Insn::Pcmp4Eq));
+    // za(bit36)・x4・x2b を変えた語は pcmp4.eq ではない
+    // （旧パターンが指していた空間は別命令か未定義）。
+    assert_ne!(
+        bundle::decode_slot(Unit::I, w ^ (1u128 << 36), CPU),
+        Some(Insn::Pcmp4Eq)
+    );
+    let x4_changed = (w & !(0xfu128 << 29)) | (4u128 << 29);
+    assert_ne!(
+        bundle::decode_slot(Unit::I, x4_changed, CPU),
+        Some(Insn::Pcmp4Eq)
+    );
+    let x2b_changed = w | (1u128 << 27);
+    assert_ne!(
+        bundle::decode_slot(Unit::I, x2b_changed, CPU),
+        Some(Insn::Pcmp4Eq)
+    );
+}
+
+#[test]
+fn padd_psub_za_pinned() {
+    // binutils: padd1 (8,1,0,0,0,0)、psub1 (8,1,0,0,1,0)。
+    // za(bit36) は 0 固定。
+    let w = encode_padd1(&[0, 5, 6, 7]).unwrap();
+    assert_eq!(w & 0x1fff8000000, 0x10400000000);
+    assert_eq!(bundle::decode_slot(Unit::I, w, CPU), Some(Insn::Padd1));
+    let w2 = encode_psub1(&[0, 5, 6, 7]).unwrap();
+    assert_eq!(w2 & 0x1fff8000000, 0x10420000000);
+    assert_eq!(bundle::decode_slot(Unit::I, w2, CPU), Some(Insn::Psub1));
+    // za を立てると padd4/psub4 の空間（未収録）で、1 系ではない。
+    for (bad, insn) in [
+        (w | (1u128 << 36), Insn::Padd1),
+        (w2 | (1u128 << 36), Insn::Psub1),
+    ] {
+        assert_ne!(bundle::decode_slot(Unit::I, bad, CPU), Some(insn));
+    }
+}
+
+#[test]
+fn f_unit_misc_x3_pinned() {
+    // break.f/nop.f/hint.f は x3[35:33]=0 固定（正本 F15/F16）。
+    for (enc, insn) in [
+        (encode_break_f(&[0, 0]), Insn::BreakF),
+        (encode_nop_f(&[0, 0]), Insn::NopF),
+        (encode_hint_f(&[0, 0]), Insn::HintF),
+    ] {
+        let w = enc.expect("encode");
+        assert_eq!(bundle::decode_slot(Unit::F, w, CPU), Some(insn));
+        // x3 の下位 2 ビットを立てた語は当該命令ではない。
+        assert_ne!(
+            bundle::decode_slot(Unit::F, w | (0b110u128 << 33), CPU),
+            Some(insn)
+        );
+    }
+}
+
+#[test]
+fn brl_cond_btype_pinned() {
+    // OpBtypePaWhaD(0xc, 0, 0, 0, 0): btype[8:6]=0 が sptk.few。
+    let w = encode_brl_cond_sptk_few(&[0, 0x100]).unwrap();
+    assert_eq!(w & 0x7ee000011c0, 0x18000000000);
+    assert_eq!(
+        bundle::decode_slot(Unit::X, w, CPU),
+        Some(Insn::BrlCondSptkFew)
+    );
+    // btype≠0（例えば ret の 4）は受理しない。
+    assert_ne!(
+        bundle::decode_slot(Unit::X, w | (4u128 << 6), CPU),
+        Some(Insn::BrlCondSptkFew)
+    );
 }
