@@ -12,14 +12,12 @@ polyisa-decimal = { path = "../../crates/decimal" }
 polyisa-mem = { path = "../../crates/mem" }
 polyisa-sem = { path = "../../crates/sem" }
 polyisa-guest = { path = "../../crates/guest" }
+polyisa-engine = { path = "../../crates/engine" }
 polyisa-timing = { path = "../../crates/timing" }
 
 [build-dependencies]
 polyisa-isadl = { path = "../../crates/isadl" }
 polyisa-isagen = { path = "../../crates/isagen" }
-
-[dev-dependencies]
-polyisa-engine = { path = "../../crates/engine" }
 
 [lints]
 workspace = true

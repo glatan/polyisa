@@ -845,6 +845,7 @@ fn allowed_deps(pkg: &str) -> Option<&'static [&'static str]> {
             "polyisa-guest-aarch64",
             "polyisa-guest-alpha",
             "polyisa-guest-arm",
+            "polyisa-guest-hexagon",
             "polyisa-guest-ia64",
             "polyisa-guest-loongarch",
             "polyisa-guest-m68k",
@@ -877,6 +878,7 @@ fn allowed_deps(pkg: &str) -> Option<&'static [&'static str]> {
             "polyisa-guest-aarch64",
             "polyisa-guest-alpha",
             "polyisa-guest-arm",
+            "polyisa-guest-hexagon",
             "polyisa-guest-ia64",
             "polyisa-guest-loongarch",
             "polyisa-guest-m68k",
@@ -1007,6 +1009,7 @@ fn allowed_deps(pkg: &str) -> Option<&'static [&'static str]> {
             "polyisa-mem",
             "polyisa-sem",
             "polyisa-guest",
+            "polyisa-engine",
             "polyisa-timing",
         ],
         "polyisa-guest-ia64" => &[

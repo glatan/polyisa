@@ -1,14 +1,16 @@
 // Copyright (c) polyisa contributors
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! Hexagon 最小の ISADL 記述。出典は SPEC-HEXAGON-PRM V73 である。
+//! Hexagon の ISADL 記述。主正本は SPEC-HEXAGON-PRM V79
+//! （80-N2040-60 Rev AB）、版差は SPEC-HEXAGON-PRM-PREV 群。
 
-// Ref: SPEC-HEXAGON-PRM (V73).
-include!("spec/hexmin.rs");
+// Ref: SPEC-HEXAGON-PRM (V79), SPEC-HEXAGON-PRM-PREV.
+include!("spec/hexagon.rs");
 
 fn main() {
     println!("cargo::rerun-if-changed=spec/");
     println!("cargo::rerun-if-changed=build.rs");
     let model = build_model();
+    // 命令語は 32 ビット。duplex・constant extender も 1 語。
     for insn in &model.insns {
         assert!(insn.pattern.len() == 32, "{}", insn.name);
     }

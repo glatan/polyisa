@@ -17,7 +17,7 @@ mod arm {
     include!("../../../guests/arm/spec/armi.rs");
 }
 mod hexagon {
-    include!("../../../guests/hexagon/spec/hexmin.rs");
+    include!("../../../guests/hexagon/spec/hexagon.rs");
 }
 mod ia64 {
     include!("../../../guests/ia64/spec/ia64.rs");
@@ -89,7 +89,7 @@ const SPECS: &[IsaSpec] = &[
     },
     IsaSpec {
         isa: "hexagon",
-        rel_paths: &["guests/hexagon/spec/hexmin.rs"],
+        rel_paths: &["guests/hexagon/spec/hexagon.rs"],
         build: hexagon::build_model,
     },
     IsaSpec {
