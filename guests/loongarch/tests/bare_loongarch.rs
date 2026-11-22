@@ -794,3 +794,98 @@ fn exec_la6_ldgt_ldle() {
     step(&mut env, enc(Insn::StgtW, &[4, 5, 6]));
     assert_eq!(peek(&mut env, 0x2000, 4), 0x77);
 }
+
+// ---- LA7: 条件分岐・ASRT ----
+
+/// FCC 束を書く（LA9 の fcc 書き込みと同じ表現）。
+fn set_fcc(env: &mut BareEnv, v: u64) {
+    env.backend.set(sem::fcc_ref(), v);
+}
+
+#[test]
+fn exec_la7_cond_branches() {
+    let mut env = env();
+    set_gpr(&mut env, 5, 0x10);
+    set_gpr(&mut env, 6, 0x10);
+    // beq r5,r6,offs=+8 → pc=0x1000+8。
+    step_at(&mut env, enc(Insn::Beq, &[5, 6, 2]), 0x1000);
+    assert_eq!(env.pc, 0x1008);
+    // bne r5,r6 → 不成立 → fallthrough。
+    step_at(&mut env, enc(Insn::Bne, &[5, 6, 4]), 0x1000);
+    assert_eq!(env.pc, 0x1004);
+    // blt: r5(-1) < r6(0) → taken、負の offs。
+    set_gpr(&mut env, 5, (-1i64) as u64);
+    set_gpr(&mut env, 6, 0);
+    step_at(&mut env, enc(Insn::Blt, &[5, 6, 0xfffe]), 0x2000);
+    assert_eq!(env.pc, 0x1ff8);
+    // bge: -1 >= 0 は不成立。
+    step_at(&mut env, enc(Insn::Bge, &[5, 6, 3]), 0x2000);
+    assert_eq!(env.pc, 0x2004);
+    // bltu: -1(=u64::MAX) < 0 は不成立。
+    step_at(&mut env, enc(Insn::Bltu, &[5, 6, 3]), 0x2000);
+    assert_eq!(env.pc, 0x2004);
+    // bgeu: u64::MAX >= 0 → taken。
+    step_at(&mut env, enc(Insn::Bgeu, &[5, 6, 3]), 0x2000);
+    assert_eq!(env.pc, 0x200c);
+    // beqz: r5==0 → taken、offs21 は <<2 済みで渡す。
+    set_gpr(&mut env, 5, 0);
+    step_at(&mut env, enc(Insn::Beqz, &[5, 0x40]), 0x3000);
+    assert_eq!(env.pc, 0x3040);
+    // bnez: r5!=0 → taken。
+    set_gpr(&mut env, 5, 7);
+    step_at(&mut env, enc(Insn::Bnez, &[5, 0x20]), 0x3000);
+    assert_eq!(env.pc, 0x3020);
+}
+
+#[test]
+fn exec_la7_fcc_branches() {
+    let mut env = env();
+    // bceqz: fcc3=0 → taken。
+    set_fcc(&mut env, 0);
+    step_at(&mut env, enc(Insn::Bceqz, &[3, 0x10]), 0x4000);
+    assert_eq!(env.pc, 0x4010);
+    // bcnez: fcc3=1 → taken。
+    set_fcc(&mut env, 1 << 3);
+    step_at(&mut env, enc(Insn::Bcnez, &[3, 0x10]), 0x4000);
+    assert_eq!(env.pc, 0x4010);
+    // fcc3=1 のとき bceqz は fallthrough。
+    step_at(&mut env, enc(Insn::Bceqz, &[3, 0x10]), 0x4000);
+    assert_eq!(env.pc, 0x4004);
+    // fcc0 は独立。fcc0=1 で fcc3 の分岐は影響なし。
+    set_fcc(&mut env, 1);
+    step_at(&mut env, enc(Insn::Bcnez, &[3, 0x10]), 0x4000);
+    assert_eq!(env.pc, 0x4004);
+    step_at(&mut env, enc(Insn::Bcnez, &[0, 0x10]), 0x4000);
+    assert_eq!(env.pc, 0x4010);
+}
+
+#[test]
+fn exec_la7_asrt() {
+    use polyisa_engine::interp::InterpExit;
+    use polyisa_sem::ExceptionKind;
+    let mut env = env();
+    set_gpr(&mut env, 5, 0x10);
+    set_gpr(&mut env, 6, 0x20);
+    // asrtle.d: rj(0x10) <= rk(0x20) → no-op。
+    step(&mut env, enc(Insn::AsrtleD, &[5, 6]));
+    // asrtle.d: rj > rk → BCE 例外。
+    set_gpr(&mut env, 5, 0x30);
+    let word = enc(Insn::AsrtleD, &[5, 6]);
+    let insn = decode_model_ex(u128::from(word), 32, true, LA64).unwrap();
+    let r = sem::exec(&mut env.backend, insn, word, 0x1000, true);
+    match r {
+        Err(InterpExit::Exception(e)) => {
+            assert_eq!(e.kind, ExceptionKind::Trap);
+            assert_eq!(e.code, sem::TRAP_BND);
+        }
+        _ => panic!("asrtle.d should raise bound check"),
+    }
+    // asrtgt.d: rj(0x30) > rk(0x20) → no-op。
+    step(&mut env, enc(Insn::AsrtgtD, &[5, 6]));
+    // asrtgt.d: rj <= rk → 例外。
+    set_gpr(&mut env, 5, 0x20);
+    let word = enc(Insn::AsrtgtD, &[5, 6]);
+    let insn = decode_model_ex(u128::from(word), 32, true, LA64).unwrap();
+    let r = sem::exec(&mut env.backend, insn, word, 0x1000, true);
+    assert!(matches!(r, Err(InterpExit::Exception(_))));
+}

@@ -1563,6 +1563,63 @@ pub fn exec<B: Backend>(
             rset(b, ops[0], ra);
             b.jump(t);
         }
+        // ---- 条件分岐（LA7）----
+        // Ref: SPEC-LOONGARCH-RM §2.2.4.1.
+        Insn::Beq | Insn::Bne | Insn::Blt | Insn::Bge | Insn::Bltu | Insn::Bgeu => {
+            // ops = [rj, rd, offs16]。ターゲットは pc + sext(offs << 2)。
+            let x = rget(b, ops[0]);
+            let y = rget(b, ops[1]);
+            let cond = match insn {
+                Insn::Beq => Cmp::Eq,
+                Insn::Bne => Cmp::Ne,
+                Insn::Blt => Cmp::LtS,
+                Insn::Bge => Cmp::GeS,
+                Insn::Bltu => Cmp::LtU,
+                _ => Cmp::GeU,
+            };
+            let c = b.cmp::<W64>(cond, x, y);
+            let t = pc.wrapping_add(offs_n(ops[2], 16, false) as u64);
+            b.branch(c, t);
+        }
+        Insn::Beqz | Insn::Bnez => {
+            // ops = [rj, offs21]。ターゲットは pc + sext(offs21 << 2)。
+            let x = rget(b, ops[0]);
+            let zero = k(b, 0);
+            let cond = if insn == Insn::Beqz { Cmp::Eq } else { Cmp::Ne };
+            let c = b.cmp::<W64>(cond, x, zero);
+            let t = pc.wrapping_add(offs_n(ops[1], 21, true) as u64);
+            b.branch(c, t);
+        }
+        Insn::Bceqz | Insn::Bcnez => {
+            // ops = [cj, offs21]。FCC[cj] が条件。
+            // Ref: SPEC-LOONGARCH-RM §3.4.7.
+            let fcc = b.get(fcc_ref());
+            let sh = k(b, ops[0]);
+            let bit0 = b.shr_l::<W64>(fcc, sh);
+            let one = k(b, 1);
+            let bit = b.and(bit0, one);
+            let zero = k(b, 0);
+            let cond = if insn == Insn::Bceqz {
+                Cmp::Eq
+            } else {
+                Cmp::Ne
+            };
+            let c = b.cmp::<W64>(cond, bit, zero);
+            let t = pc.wrapping_add(offs_n(ops[1], 21, true) as u64);
+            b.branch(c, t);
+        }
+        Insn::AsrtleD | Insn::AsrtgtD => {
+            // ops = [rj, rk]。asrtle: rj > rk で BCE、asrtgt: rj <= rk で BCE。
+            // Ref: SPEC-LOONGARCH-RM §2.2.10.3.
+            let a = rget(b, ops[0]);
+            let lim = rget(b, ops[1]);
+            let c = if insn == Insn::AsrtleD {
+                b.cmp::<W64>(Cmp::GtS, a, lim)
+            } else {
+                b.cmp::<W64>(Cmp::LeS, a, lim)
+            };
+            b.if_then(c, |b| Err(raise::<B>(b, ExceptionKind::Trap, TRAP_BND)))?;
+        }
         // ---- 例外・バリア ----
         Insn::Syscall => {
             // OS パーソナリティが拾う。code = TRAP_SYS | code15。
