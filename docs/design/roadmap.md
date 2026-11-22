@@ -28,22 +28,21 @@
 
 ### 段階 20：OpenRISC
 
-- 版の範囲は OpenRISC 1000 アーキテクチャの各版と浮動小数点の拡張。遅延スロットの有無は機能とする
+- 版の範囲は OpenRISC 1000 アーキテクチャの各版と浮動小数点の拡張。遅延スロットの有無は機能とする（SPEC-OPENRISC-1000 では CPUCFGR[ND] が示す実装選択肢であり、ND=0 では分岐・ジャンプの成立に 1 命令の遅延スロットが伴う。Linux ユーザ空間の対象とする実装は遅延スロットあり）
 - or1k のゲスト ABI
 
 完了条件：
 
 | ID | 条件 | 判定 |
 |---|---|---|
-| S20-1 | or1k の配布物のコマンド群が、ゲストのルートを使って正しい出力を返す（テスト `heavy_program_openrisc`）。 | 未整備 |
+| S20-1 | or1k の配布物（BIN-DISTRO-OR1K の busybox rootfs）のコマンド群が、ゲストのルートを使って正しい出力を返す（テスト `heavy_program_openrisc`）。 | 未整備 |
 | S20-2 | ABI 表が SRC-LINUX の UAPI と一致することを所有者が確認する。 | 所有者 |
 
 作業計画：
 
 | # | 内容 | 前提 | 判定 |
 |---|---|---|---|
-| OR1 | 着手条件: BIN 登録、GAP-0023 残項目の点検 | - | - |
-| OR2 | `guests/openrisc` 骨格: CpuState（r0-31・SR・PPC/NPC・SPR）、遅延スロットの有無の機能旗 | OR1 | - |
+| OR2 | `guests/openrisc` 骨格: CpuState（r0-31・SR・PPC/NPC・SPR）、遅延スロットの有無の機能旗 | - | - |
 | OR3 | デコード方式の決定（32 ビット固定長） | OR2 | - |
 | OR4 | `run_openrisc` 実行ループ + bare 最小テスト | OR3 | - |
 | OR5 | 算術・論理・シフト・比較（l.add/l.sub/l.and/l.sll/l.sf* 系）・l.cmov | OR4 | - |
