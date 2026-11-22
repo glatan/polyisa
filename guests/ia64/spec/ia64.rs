@@ -44,6 +44,9 @@ pub fn build_model() -> polyisa_isadl::Model {
     //   Itanium ↔ Itanium 2 系の二世代粒度で、符号化面の追加もこの
     //   粒度に収まるため IA3 はこの二旗で確定とする（細分化が要る
     //   差異が出た時点で旗を足す）。
+    // - `poulson`: Itanium 9500 系（Poulson）で追加された命令群
+    //   （clz, mpy4, mpyshl4）。`itanium2` を含意する。正本 Rev 2.3
+    //   には未収録で、実装依存の追加命令として版差の旗を分ける。
     // - `unit_*`: デコード文脈旗。CPU 世代ではなく、テンプレートが
     //   各スロットに割り当てる実行ユニットの文脈を `when` に写す
     //   もの（上記のモデル注記を参照）。A 型は I/M 両スロットに
@@ -55,6 +58,7 @@ pub fn build_model() -> polyisa_isadl::Model {
     for (name, implies, conflicts) in [
         ("itanium", &[][..], &[][..]),
         ("itanium2", &["itanium"][..], &[][..]),
+        ("poulson", &["itanium2"][..], &[][..]),
         ("unit_a", &[][..], &["unit_f", "unit_b", "unit_x"][..]),
         ("unit_i", &[][..], &["unit_m", "unit_f", "unit_b", "unit_x"][..]),
         ("unit_m", &[][..], &["unit_f", "unit_b", "unit_x"][..]),
@@ -70,11 +74,12 @@ pub fn build_model() -> polyisa_isadl::Model {
     }
 
     // CPU モデル。generic は Itanium 系のベースライン、itanium2 は
-    // Itanium 2 系（9700 系をこの範囲の最終として含める）。
+    // Itanium 2 系（9700 系をこの範囲の最終として含め、9500 系の
+    // poulson 追加命令も入れる）。
     // unit_* は文脈旗なのでモデルには含めない。
     for (name, parent, add) in [
         ("generic", "", &["itanium"][..]),
-        ("itanium2", "generic", &["itanium2"][..]),
+        ("itanium2", "generic", &["itanium2", "poulson"][..]),
     ] {
         m.models.push(ModelDef {
             params: vec![],
@@ -138,7 +143,10 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("len4", 30, 27),    // dep の長さ-1
         ("len6", 32, 27),    // extr/dep.z の長さ-1
         ("pos6", 19, 14),    // extr/tbit の位置
-        ("mbtype4", 23, 20), // mux のバイト型
+        ("mbtype4", 23, 20), // mux1 のバイト型
+        ("mhtype8", 27, 20), // mux2 のハーフワード型
+        ("cnt2b", 28, 27),   // pshladd/pshradd のシフト量 1-3
+        ("ct2d", 31, 30),    // pmpyshr2 のシフト量選択子 {0,7,15,16}
         ("inc3", 15, 13),    // fetchadd の増分
         ("sof", 19, 13),     // alloc の size of frame
         ("sol", 26, 20),     // alloc の size of locals
@@ -398,6 +406,58 @@ pub fn build_model() -> polyisa_isadl::Model {
             gr("r1", "r1", Access::Write),
             gr("r2", "r2", Access::Read),
             val("mbtype4", "mbtype4"),
+        ],
+    ));
+    m.formats.push(fmt(
+        "FRRM8",
+        &["qp", "r1", "r2", "mhtype8"],
+        vec![
+            qp(),
+            gr("r1", "r1", Access::Write),
+            gr("r2", "r2", Access::Read),
+            val("mhtype8", "mhtype8"),
+        ],
+    ));
+    m.formats.push(fmt(
+        "FRRC2",
+        &["qp", "r1", "r2", "r3", "ct2d"],
+        vec![
+            qp(),
+            gr("r1", "r1", Access::Write),
+            gr("r2", "r2", Access::Read),
+            gr("r3", "r3", Access::Read),
+            val("ct2d", "ct2d"),
+        ],
+    ));
+    m.formats.push(fmt(
+        "FRR5",
+        &["qp", "r1", "r3", "cnt5"],
+        vec![
+            qp(),
+            gr("r1", "r1", Access::Write),
+            gr("r3", "r3", Access::Read),
+            val("cnt5", "cnt5"),
+        ],
+    ));
+    m.formats.push(fmt(
+        "FRRCR2",
+        &["qp", "r1", "r2", "cnt2b", "r3"],
+        vec![
+            qp(),
+            gr("r1", "r1", Access::Write),
+            gr("r2", "r2", Access::Read),
+            val("cnt2b", "cnt2b"),
+            gr("r3", "r3", Access::Read),
+        ],
+    ));
+    m.formats.push(fmt(
+        "FPPI5",
+        &["qp", "p1", "p2", "immu5b"],
+        vec![
+            qp(),
+            pr("p1", "p1", Access::Write),
+            pr("p2", "p2", Access::Write),
+            val("immu5b", "immu5b"),
         ],
     ));
     m.formats.push(fmt(
@@ -864,6 +924,12 @@ pub fn build_model() -> polyisa_isadl::Model {
             Pred::Flag("itanium2".to_string()),
         ])
     };
+    let poulson_i = || {
+        Pred::All(vec![
+            Pred::Flag("unit_i".to_string()),
+            Pred::Flag("poulson".to_string()),
+        ])
+    };
 
     // ---- A 型（I/M スロット共通の整数 ALU・multimedia 系）。
     // A1: 3 項レジスタ演算（Op=8、x2a/ve/x4/x2b が拡張）。
@@ -927,46 +993,130 @@ pub fn build_model() -> polyisa_isadl::Model {
         "({qp}) addl {r1} = {imm22}, {r3_2}",
         "alu",
     ));
-    // A6/A7: cmp/cmp4（Op=c/d/e、ta が .unc/.orcm などの拡張）。
-    for (n, pat, syn) in [
-        ("cmp_lt", "11000000....................0............", "cmp.lt {p1}, {p2} = {r2}, {r3}"),
-        ("cmp_eq", "11100000....................0............", "cmp.eq {p1}, {p2} = {r2}, {r3}"),
-        ("cmp4_eq", "11100010....................0............", "cmp4.eq {p1}, {p2} = {r2}, {r3}"),
+    // A6/A7: cmp/cmp4（Op=c/d/e）。
+    // 形式は x2 で決まる: 0=cmp レジスタ形、1=cmp4 レジスタ形、
+    // 2=cmp 即値形、3=cmp4 即値形。tb=1 は並列不等号形（第一ソースが
+    // 建築的に r0、r2 桁 [19:13] は 0 固定）で、imm 形では tb は
+    // imm8 の符号ビットになる（区別は x2 が担う）。
+    // (ta, c) の意味: 非並列形は ta=0 で正規(c=0)/.unc(c=1)、
+    // ta=1 で型更新の eq(c=0)/ne(c=1)。並列形は (ta,c) が
+    // r3 と 0 の符号付き関係を選ぶ（lt(0,0), ge(0,1), le(1,0),
+    // gt(1,1)。建築上の左辺は 0 だが、本モデルは正本 Table2-17 の
+    // 疑似形式（「a rel 0」のオペランド交換行）に合わせて
+    // "cmp.X p1,p2 = r3, r0" の綴りを採る）。
+    for (op, rel, ty) in [
+        ("1100", "lt", "and"),       // 符号付き lt 系・.and 型
+        ("1101", "ltu", "or"),       // 符号なし lt 系・.or 型
+        ("1110", "eq", "or.andcm"),  // 等号系・.or.andcm 型
     ] {
-        m.insns.push(ins(n, "FPPRR", pat, ua(), &format!("({{qp}}) {syn}"), "alu"));
+        let ty_s = ty.replace('.', "_");
+        for (x2s, w4) in [("00", ""), ("01", "4")] {
+            let pfx = format!("cmp{w4}");
+            // 非並列（tb=0）: 正規/unc（ta=0）と eq/ne 型更新（ta=1）。
+            for (ta, c, rn, sfx) in [
+                ("0", "0", rel, ""),
+                ("0", "1", rel, ".unc"),
+                ("1", "0", "eq", ty),
+                ("1", "1", "ne", ty),
+            ] {
+                let rsfx = if sfx.is_empty() {
+                    String::new()
+                } else {
+                    format!(".{}", sfx.trim_start_matches('.'))
+                };
+                let nsfx = ty_s.replace('.', "_");
+                let name = if ta == "0" {
+                    format!("{pfx}_{rn}{}", sfx.replace('.', "_"))
+                } else {
+                    format!("{pfx}_{rn}_{nsfx}")
+                };
+                let pat = format!("{op}0{x2s}{ta}....................{c}............");
+                let syn = format!("{pfx}.{rn}{rsfx} {{p1}}, {{p2}} = {{r2}}, {{r3}}");
+                m.insns.push(ins(&name, "FPPRR", &pat, ua(), &format!("({{qp}}) {syn}"), "alu"));
+            }
+            // 並列（tb=1、r2=0 固定）: r3 vs 0 の符号付き不等号。
+            for (ta, c, prn) in [
+                ("0", "0", "lt"),
+                ("0", "1", "ge"),
+                ("1", "0", "le"),
+                ("1", "1", "gt"),
+            ] {
+                let name = format!("{pfx}_{prn}_{ty_s}");
+                let pat = format!("{op}1{x2s}{ta}.............0000000{c}............");
+                let syn = format!("{pfx}.{prn}.{ty} {{p1}}, {{p2}} = {{r3}}, r0");
+                m.insns.push(ins(&name, "FPPR", &pat, ua(), &format!("({{qp}}) {syn}"), "alu"));
+            }
+        }
+        // 即値形（x2=2,3）: tb は imm8 の一部なので '.' のまま。
+        for (x2s, w4) in [("10", ""), ("11", "4")] {
+            let pfx = format!("cmp{w4}");
+            for (ta, c, rn, sfx) in [
+                ("0", "0", rel, ""),
+                ("0", "1", rel, ".unc"),
+                ("1", "0", "eq", ty),
+                ("1", "1", "ne", ty),
+            ] {
+                let rsfx = if sfx.is_empty() {
+                    String::new()
+                } else {
+                    format!(".{}", sfx.trim_start_matches('.'))
+                };
+                let nsfx = ty_s.replace('.', "_");
+                let name = if ta == "0" {
+                    format!("{pfx}_{rn}{}_i", sfx.replace('.', "_"))
+                } else {
+                    format!("{pfx}_{rn}_{nsfx}_i")
+                };
+                let pat = format!("{op}.{x2s}{ta}....................{c}............");
+                let syn = format!("{pfx}.{rn}{rsfx} {{p1}}, {{p2}} = {{imm8}}, {{r3}}");
+                m.insns.push(ins(&name, "FPPIR", &pat, ua(), &format!("({{qp}}) {syn}"), "alu"));
+            }
+        }
     }
-    // A7 の並列不等号比較（or/and 系）は第一ソースが建築的に r0 で、
-    // r2 桁 [19:13] は 0 固定。`cmp.lt.or p1,p2 = r3, r0` は
-    // OpX2TbTaC(0xd, 0, 1, 0, 0) の疑似形式（正本 Table2-17 の
-    // 「a < 0 → gt の 0 > a」相当のオペランド交換行）。canonical 形は
-    // 同符号化の `cmp.gt.or = r0, r3` だが、本モデルは lt.or の
-    // 綴りを採る。
-    m.insns.push(ins(
-        "cmp_lt_or",
-        "FPPR",
-        "11011000.............00000000............",
-        ua(),
-        "({qp}) cmp.lt.or {p1}, {p2} = {r3}, r0",
-        "alu",
-    ));
-    m.insns.push(ins(
-        "cmp_eq_i",
-        "FPPIR",
-        "1110.100....................0............",
-        ua(),
-        "({qp}) cmp.eq {p1}, {p2} = {imm8}, {r3}",
-        "alu",
-    ));
-    // A9: multimedia ALU（A 型空間に住む並列演算）。
-    // OpX2aZaZbX4X2b: padd1 (8,1,0,0,0,0)、psub1 (8,1,0,0,1,0)、
-    // pcmp4.eq (8,1,1,0,9,0)。
+    // A9: multimedia ALU（A 型空間に住む並列演算）。x2a=1 固定、
+    // za が要素幅（0=1/2 バイト、1=4 バイト）、zb が 1↔2 バイト、
+    // x4 が演算種別、x2b が完了子。符号なし加減算・平均・比較のみ
+    // （飽和形 padd.sss 等は要素幅の飽和処理を後段に譲り IA5 では
+    // 宣言しない）。
     for (n, pat, syn) in [
         ("padd1", "10000010000000...........................", "padd1 {r1} = {r2}, {r3}"),
+        ("padd2", "10000011000000...........................", "padd2 {r1} = {r2}, {r3}"),
+        ("padd4", "10001010000000...........................", "padd4 {r1} = {r2}, {r3}"),
         ("psub1", "10000010000100...........................", "psub1 {r1} = {r2}, {r3}"),
+        ("psub2", "10000011000100...........................", "psub2 {r1} = {r2}, {r3}"),
+        ("psub4", "10001010000100...........................", "psub4 {r1} = {r2}, {r3}"),
+        ("pavg1", "10000010001010...........................", "pavg1 {r1} = {r2}, {r3}"),
+        ("pavg2", "10000011001010...........................", "pavg2 {r1} = {r2}, {r3}"),
+        ("pavg1_raz", "10000010001011...........................", "pavg1.raz {r1} = {r2}, {r3}"),
+        ("pavg2_raz", "10000011001011...........................", "pavg2.raz {r1} = {r2}, {r3}"),
+        ("pavgsub1", "10000010001110...........................", "pavgsub1 {r1} = {r2}, {r3}"),
+        ("pavgsub2", "10000011001110...........................", "pavgsub2 {r1} = {r2}, {r3}"),
+        ("pcmp1_eq", "10000010100100...........................", "pcmp1.eq {r1} = {r2}, {r3}"),
+        ("pcmp2_eq", "10000011100100...........................", "pcmp2.eq {r1} = {r2}, {r3}"),
         ("pcmp4_eq", "10001010100100...........................", "pcmp4.eq {r1} = {r2}, {r3}"),
+        ("pcmp1_gt", "10000010100101...........................", "pcmp1.gt {r1} = {r2}, {r3}"),
+        ("pcmp2_gt", "10000011100101...........................", "pcmp2.gt {r1} = {r2}, {r3}"),
+        ("pcmp4_gt", "10001010100101...........................", "pcmp4.gt {r1} = {r2}, {r3}"),
     ] {
         m.insns.push(ins(n, "FRRR", pat, ua(), &format!("({{qp}}) {syn}"), "alu"));
     }
+    // A5: pshladd2/pshradd2（16 ビット要素のシフト＋加算。
+    // cnt2b は 1-3 の直接値）。
+    for (n, pat, syn) in [
+        ("pshladd2", "100000110100.............................", "pshladd2 {r1} = {r2}, {cnt2b}, {r3}"),
+        ("pshradd2", "100000110110.............................", "pshradd2 {r1} = {r2}, {cnt2b}, {r3}"),
+    ] {
+        m.insns.push(ins(n, "FRRCR2", pat, ua(), &format!("({{qp}}) {syn}"), "alu"));
+    }
+    // A2: shladdp4（shladd の 32 ビットポインタ形）。
+    m.insns.push(ins(
+        "shladdp4",
+        "FRRCR",
+        "1000.0000110.............................",
+        ua(),
+        "({qp}) shladdp4 {r1} = {r2}, {cnt2a}, {r3}",
+        "alu",
+    ));
 
     // ---- I 型（整数・制御。Op=0,4,5,7）。
     // I29: break/nop/hint（x6 拡張、immu21）。
@@ -977,7 +1127,9 @@ pub fn build_model() -> polyisa_isadl::Model {
     ] {
         m.insns.push(ins(n, "FI21", pat, ui(), &format!("({{qp}}) {syn}"), "misc"));
     }
-    // I19/I20/I21/I22: 制御・特殊レジスタ移動。
+    // I21-I29: 制御・特殊レジスタ移動。x6/x3 拡張は OpX3X6/OpX3 の
+    // 正本マクロに対応（b1 は [8:6]、b2 は [15:13]、tag13b は
+    // [32:24] zfill4）。
     for (n, fmt_, pat, syn) in [
         ("mov_ip", "FR1", "0000.000110000...........................", "mov {r1} = ip"),
         ("mov_pr", "FR1", "0000.000110011...........................", "mov {r1} = pr"),
@@ -987,7 +1139,11 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("mov_i_from_ar", "FRAR", "0000.000110010...........................", "mov {r1} = {ar3}"),
         ("mov_to_pr", "FRI17", "0000.011.................................", "mov pr = {r2}, {imm17}"),
         ("mov_pr_rot", "FI44", "0000.010.................................", "mov pr.rot = {imm44}"),
-        ("mov_ret", "FBRT", "0000.111.........0001....................", "mov.ret {b1} = {r2}, {tag13b}"),
+        // OpX3XbIhWh(0,7,xb,0,1): mov to BR。xb=0 が通常 mov、
+        // xb=1 が mov.ret（分岐予報タグつき復帰 mov）。ih=0・wh=1
+        // を固定する。
+        ("mov_br", "FBRT", "0000.111.........0001....................", "mov {b1} = {r2}, {tag13b}"),
+        ("mov_ret", "FBRT", "0000.111.........0101....................", "mov.ret {b1} = {r2}, {tag13b}"),
     ] {
         m.insns.push(ins(n, fmt_, pat, ui(), &format!("({{qp}}) {syn}"), "misc"));
     }
@@ -1000,17 +1156,33 @@ pub fn build_model() -> polyisa_isadl::Model {
         "({qp}) chk.s.i {r2}, {tgt25b}",
         "misc",
     ));
-    // I26: 符号・ゼロ拡張、桁操作（x6b 拡張）。
+    // I29: 符号・ゼロ拡張、桁操作（OpX3X6(0,0,x6) 拡張）。
     for (n, pat, syn) in [
         ("zxt1", "0000.000010000...........................", "zxt1 {r1} = {r3}"),
+        ("zxt2", "0000.000010001...........................", "zxt2 {r1} = {r3}"),
+        ("zxt4", "0000.000010010...........................", "zxt4 {r1} = {r3}"),
         ("sxt1", "0000.000010100...........................", "sxt1 {r1} = {r3}"),
+        ("sxt2", "0000.000010101...........................", "sxt2 {r1} = {r3}"),
+        ("sxt4", "0000.000010110...........................", "sxt4 {r1} = {r3}"),
         ("czx1_l", "0000.000011000...........................", "czx1.l {r1} = {r3}"),
-        ("clz", "0111001101101............................", "clz {r1} = {r3}"),
+        ("czx2_l", "0000.000011001...........................", "czx2.l {r1} = {r3}"),
+        ("czx1_r", "0000.000011100...........................", "czx1.r {r1} = {r3}"),
+        ("czx2_r", "0000.000011101...........................", "czx2.r {r1} = {r3}"),
         ("popcnt", "0111001101001............................", "popcnt {r1} = {r3}"),
     ] {
         m.insns.push(ins(n, "FRR", pat, ui(), &format!("({{qp}}) {syn}"), "alu"));
     }
-    // I27: mux。
+    // clz は Itanium 9500 系（Poulson）で追加され、正本 Rev 2.3 には
+    // 未収録。実装依存の追加命令として `poulson` 旗に括る。
+    m.insns.push(ins(
+        "clz",
+        "FRR",
+        "0111001111001............................",
+        poulson_i(),
+        "({qp}) clz {r1} = {r3}",
+        "alu",
+    ));
+    // I3/I4: mux（x2a=3 のバイト・ハーフワード並び替え）。
     m.insns.push(ins(
         "mux1",
         "FRRM",
@@ -1019,22 +1191,82 @@ pub fn build_model() -> polyisa_isadl::Model {
         "({qp}) mux1 {r1} = {r2}, {mbtype4}",
         "alu",
     ));
-    // I15/I16: I-unit multimedia（unpack/mix/pshl）。
+    m.insns.push(ins(
+        "mux2",
+        "FRRM8",
+        "0111011101010............................",
+        ui(),
+        "({qp}) mux2 {r1} = {r2}, {mhtype8}",
+        "alu",
+    ));
+    // I1/I2: MM mpy/mix/pack/unpack（x2a=2、OpZaZbVeX2aX2bX2c）。
     for (n, pat, syn) in [
-        ("unpack1_h", "0111010000100............................", "unpack1.h {r1} = {r2}, {r3}"),
+        ("mix1_r", "0111010001000............................", "mix1.r {r1} = {r2}, {r3}"),
         ("mix1_l", "0111010001010............................", "mix1.l {r1} = {r2}, {r3}"),
-        ("pshl2", "0111000100100............................", "pshl2 {r1} = {r2}, {r3}"),
+        ("mix2_r", "0111010101000............................", "mix2.r {r1} = {r2}, {r3}"),
+        ("mix2_l", "0111010101010............................", "mix2.l {r1} = {r2}, {r3}"),
+        ("mix4_r", "0111110001000............................", "mix4.r {r1} = {r2}, {r3}"),
+        ("mix4_l", "0111110001010............................", "mix4.l {r1} = {r2}, {r3}"),
+        ("pack2_uss", "0111010100000............................", "pack2.uss {r1} = {r2}, {r3}"),
+        ("pack2_sss", "0111010100010............................", "pack2.sss {r1} = {r2}, {r3}"),
+        ("pack4_sss", "0111110000010............................", "pack4.sss {r1} = {r2}, {r3}"),
+        ("unpack1_h", "0111010000100............................", "unpack1.h {r1} = {r2}, {r3}"),
+        ("unpack1_l", "0111010000110............................", "unpack1.l {r1} = {r2}, {r3}"),
+        ("unpack2_h", "0111010100100............................", "unpack2.h {r1} = {r2}, {r3}"),
+        ("unpack2_l", "0111010100110............................", "unpack2.l {r1} = {r2}, {r3}"),
+        ("unpack4_h", "0111110000100............................", "unpack4.h {r1} = {r2}, {r3}"),
+        ("unpack4_l", "0111110000110............................", "unpack4.l {r1} = {r2}, {r3}"),
+        ("pmin1_u", "0111010000001............................", "pmin1.u {r1} = {r2}, {r3}"),
+        ("pmax1_u", "0111010000101............................", "pmax1.u {r1} = {r2}, {r3}"),
+        ("pmin2", "0111010100011............................", "pmin2 {r1} = {r2}, {r3}"),
+        ("pmax2", "0111010100111............................", "pmax2 {r1} = {r2}, {r3}"),
+        ("psad1", "0111010001011............................", "psad1 {r1} = {r2}, {r3}"),
+        // pmpy2 はサイズ 2 の x2b=1/3・x2c=3 枠で .r/.l を選ぶ。
+        ("pmpy2_r", "0111010101101............................", "pmpy2.r {r1} = {r2}, {r3}"),
+        ("pmpy2_l", "0111010101111............................", "pmpy2.l {r1} = {r2}, {r3}"),
     ] {
         m.insns.push(ins(n, "FRRR", pat, ui(), &format!("({{qp}}) {syn}"), "alu"));
     }
-    m.insns.push(ins(
-        "pshl2_i",
-        "FRRC5",
-        "0111011100101............................",
-        ui(),
-        "({qp}) pshl2 {r1} = {r2}, {ccnt5}",
-        "alu",
-    ));
+    // I1: pmpyshr2（可変シフト枠 x2a=0、x2b が符号/符号なしを
+    // 選ぶ。count2={0,7,15,16}）。
+    for (n, pat, syn) in [
+        ("pmpyshr2", "011100010..11............................", "pmpyshr2 {r1} = {r2}, {r3}, {ct2d}"),
+        ("pmpyshr2_u", "011100010..01............................", "pmpyshr2.u {r1} = {r2}, {r3}, {ct2d}"),
+    ] {
+        m.insns.push(ins(n, "FRRC2", pat, ui(), &format!("({{qp}}) {syn}"), "alu"));
+    }
+    // mpy4/mpyshl4 も Poulson 追加（clz と同じ括り）。
+    for (n, pat, syn) in [
+        ("mpy4", "0111100001101............................", "mpy4 {r1} = {r2}, {r3}"),
+        ("mpyshl4", "0111100001111............................", "mpyshl4 {r1} = {r2}, {r3}"),
+    ] {
+        m.insns.push(ins(n, "FRRR", pat, poulson_i(), &format!("({{qp}}) {syn}"), "alu"));
+    }
+    // I5/I7: MM/整数シフト（可変。pshr 系のソース順は {r3}, {r2}）。
+    for (n, pat, syn) in [
+        ("pshl2", "0111000100100............................", "pshl2 {r1} = {r2}, {r3}"),
+        ("pshl4", "0111100000100............................", "pshl4 {r1} = {r2}, {r3}"),
+        ("shl", "0111100100100............................", "shl {r1} = {r2}, {r3}"),
+        ("pshr2", "0111000100010............................", "pshr2 {r1} = {r3}, {r2}"),
+        ("pshr4", "0111100000010............................", "pshr4 {r1} = {r3}, {r2}"),
+        ("shr", "0111100100010............................", "shr {r1} = {r3}, {r2}"),
+        ("pshr2_u", "0111000100000............................", "pshr2.u {r1} = {r3}, {r2}"),
+        ("pshr4_u", "0111100000000............................", "pshr4.u {r1} = {r3}, {r2}"),
+        ("shr_u", "0111100100000............................", "shr.u {r1} = {r3}, {r2}"),
+    ] {
+        m.insns.push(ins(n, "FRRR", pat, ui(), &format!("({{qp}}) {syn}"), "alu"));
+    }
+    // I6/I8: MM シフト（即値。左は ccnt5=31-値、右は cnt5 直接値）。
+    for (n, fmt_, pat, syn) in [
+        ("pshl2_i", "FRRC5", "0111011100101............................", "pshl2 {r1} = {r2}, {ccnt5}"),
+        ("pshl4_i", "FRRC5", "0111111000101............................", "pshl4 {r1} = {r2}, {ccnt5}"),
+        ("pshr2_i", "FRR5", "0111001100011............................", "pshr2 {r1} = {r3}, {cnt5}"),
+        ("pshr4_i", "FRR5", "0111101000011............................", "pshr4 {r1} = {r3}, {cnt5}"),
+        ("pshr2_u_i", "FRR5", "0111001100001............................", "pshr2.u {r1} = {r3}, {cnt5}"),
+        ("pshr4_u_i", "FRR5", "0111101000001............................", "pshr4.u {r1} = {r3}, {cnt5}"),
+    ] {
+        m.insns.push(ins(n, fmt_, pat, ui(), &format!("({{qp}}) {syn}"), "alu"));
+    }
     // I10/I11/I12/I13/I14: dep/extr/shrp。
     m.insns.push(ins(
         "shrp",
@@ -1050,6 +1282,14 @@ pub fn build_model() -> polyisa_isadl::Model {
         "0101.010...................1.............",
         ui(),
         "({qp}) extr {r1} = {r3}, {pos6}, {len6}",
+        "alu",
+    ));
+    m.insns.push(ins(
+        "extr_u",
+        "FRRPL",
+        "0101.010...................0.............",
+        ui(),
+        "({qp}) extr.u {r1} = {r3}, {pos6}, {len6}",
         "alu",
     ));
     m.insns.push(ins(
@@ -1084,25 +1324,58 @@ pub fn build_model() -> polyisa_isadl::Model {
         "({qp}) dep {r1} = {imm1}, {r3}, {cpos6b}, {len6}",
         "alu",
     ));
-    // I30/I31: テストビット・NaT テスト。
-    m.insns.push(ins(
-        "tbit_z",
-        "FPPRP",
-        "01010000...................00............",
-        ui(),
-        "({qp}) tbit.z {p1}, {p2} = {r3}, {pos6}",
-        "alu",
-    ));
-    m.insns.push(ins(
-        "tnat_z",
-        "FPPR",
-        "01010000...................10............",
-        ui(),
-        "({qp}) tnat.z {p1}, {p2} = {r3}",
-        "alu",
-    ));
+    // I16/I17/I30: テストビット・NaT テスト・フィーチャテスト
+    // （OpX2TaTbYa[Xc]C(5,0,ta,tb,ya,[xc],c)。tb=bit36、ta=bit33、
+    // ya=bit13、c=bit12、tf では xc=bit19 も固定 1）。
+    // 関係完了子 z/nz は非並列（ta=tb=0）では c が .unc でアセンブラ
+    // 疑似の nz は p1/p2 交換なので宣言しない。並列形では c が関係
+    // 極性（z=c0 / nz=c1）。正本の正規（TBIT/TNAT/TF）行のみを宣言
+    // する。tnat は bit19=0 を固定して tf と排他にする。
+    for (pfx, yaxc) in [("tbit", "0."), ("tnat", "10"), ("tf", "11")] {
+        for (ta, tb, c, sfx) in [
+            ("0", "0", "0", "z"),
+            ("0", "0", "1", "z_unc"),
+            ("0", "1", "0", "z_and"),
+            ("0", "1", "1", "nz_and"),
+            ("1", "0", "0", "z_or"),
+            ("1", "0", "1", "nz_or"),
+            ("1", "1", "0", "z_or_andcm"),
+            ("1", "1", "1", "nz_or_andcm"),
+        ] {
+            let (y, xc) = (yaxc.chars().next().unwrap(), yaxc.chars().nth(1).unwrap());
+            let pat = format!(
+                "0101{tb}00{ta}.............{xc}.....{y}{c}............"
+            );
+            let ty_sfx = match (ta, tb) {
+                ("0", "0") => if c == "0" { "" } else { ".unc" },
+                ("0", "1") => ".and",
+                ("1", "0") => ".or",
+                _ => ".or.andcm",
+            };
+            let rel = if c == "0" || (ta == "0" && tb == "0") { "z" } else { "nz" };
+            let syn_sfx = if pfx == "tbit" { "{r3}, {pos6}" } else if pfx == "tnat" { "{r3}" } else { "{immu5b}" };
+            let syn = format!("{pfx}.{rel}{ty_sfx} {{p1}}, {{p2}} = {syn_sfx}");
+            let fmt_ = if pfx == "tbit" { "FPPRP" } else if pfx == "tnat" { "FPPR" } else { "FPPI5" };
+            m.insns.push(ins(
+                &format!("{pfx}_{sfx}"),
+                fmt_,
+                &pat,
+                ui(),
+                &format!("({{qp}}) {syn}"),
+                "alu",
+            ));
+        }
+    }
 
     // ---- M 型（メモリ・システム。Op=0,1,4,5,6,7）。
+    // M43: break/nop/hint（I29/F15/B9 と同じ OpX6Y 拡張、immu21）。
+    for (n, pat, syn) in [
+        ("break_m", "0000.000000000...........................", "break.m {immu21}"),
+        ("nop_m", "0000.0000000010..........................", "nop.m {immu21}"),
+        ("hint_m", "0000.0000000011..........................", "hint.m {immu21}"),
+    ] {
+        m.insns.push(ins(n, "FI21", pat, um(), &format!("({{qp}}) {syn}"), "misc"));
+    }
     // M1: 整数ロード（x6 拡張でサイズ・完了子）。
     for (n, pat, syn) in [
         ("ld1", "01000000000000...........................", "ld1 {r1} = [{r3}]"),

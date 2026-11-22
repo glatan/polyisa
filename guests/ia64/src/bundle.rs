@@ -42,11 +42,12 @@ pub enum Unit {
 /// 記した通り後回しで、現段階は手書き表とする。
 pub fn insn_unit(insn: Insn) -> Unit {
     match insn {
+        // A 型（整数 ALU・比較・multimedia。I/M スロット共用）。
         Insn::Shladd
+        | Insn::Shladdp4
         | Insn::Adds
         | Insn::Addp4I
         | Insn::Addl
-        | Insn::CmpEqI
         | Insn::Add
         | Insn::Add1
         | Insn::Sub
@@ -62,23 +63,108 @@ pub fn insn_unit(insn: Insn) -> Unit {
         | Insn::OrImm8
         | Insn::XorImm8
         | Insn::CmpLt
-        | Insn::CmpEq
-        | Insn::Cmp4Eq
+        | Insn::CmpLtUnc
+        | Insn::CmpEqAnd
+        | Insn::CmpNeAnd
+        | Insn::CmpLtAnd
+        | Insn::CmpGeAnd
+        | Insn::CmpLeAnd
+        | Insn::CmpGtAnd
+        | Insn::Cmp4Lt
+        | Insn::Cmp4LtUnc
+        | Insn::Cmp4EqAnd
+        | Insn::Cmp4NeAnd
+        | Insn::Cmp4LtAnd
+        | Insn::Cmp4GeAnd
+        | Insn::Cmp4LeAnd
+        | Insn::Cmp4GtAnd
+        | Insn::CmpLtI
+        | Insn::CmpLtUncI
+        | Insn::CmpEqAndI
+        | Insn::CmpNeAndI
+        | Insn::Cmp4LtI
+        | Insn::Cmp4LtUncI
+        | Insn::Cmp4EqAndI
+        | Insn::Cmp4NeAndI
+        | Insn::CmpLtu
+        | Insn::CmpLtuUnc
+        | Insn::CmpEqOr
+        | Insn::CmpNeOr
         | Insn::CmpLtOr
+        | Insn::CmpGeOr
+        | Insn::CmpLeOr
+        | Insn::CmpGtOr
+        | Insn::Cmp4Ltu
+        | Insn::Cmp4LtuUnc
+        | Insn::Cmp4EqOr
+        | Insn::Cmp4NeOr
+        | Insn::Cmp4LtOr
+        | Insn::Cmp4GeOr
+        | Insn::Cmp4LeOr
+        | Insn::Cmp4GtOr
+        | Insn::CmpLtuI
+        | Insn::CmpLtuUncI
+        | Insn::CmpEqOrI
+        | Insn::CmpNeOrI
+        | Insn::Cmp4LtuI
+        | Insn::Cmp4LtuUncI
+        | Insn::Cmp4EqOrI
+        | Insn::Cmp4NeOrI
+        | Insn::CmpEq
+        | Insn::CmpEqUnc
+        | Insn::CmpEqOrAndcm
+        | Insn::CmpNeOrAndcm
+        | Insn::CmpLtOrAndcm
+        | Insn::CmpGeOrAndcm
+        | Insn::CmpLeOrAndcm
+        | Insn::CmpGtOrAndcm
+        | Insn::Cmp4Eq
+        | Insn::Cmp4EqUnc
+        | Insn::Cmp4EqOrAndcm
+        | Insn::Cmp4NeOrAndcm
+        | Insn::Cmp4LtOrAndcm
+        | Insn::Cmp4GeOrAndcm
+        | Insn::Cmp4LeOrAndcm
+        | Insn::Cmp4GtOrAndcm
+        | Insn::CmpEqI
+        | Insn::CmpEqUncI
+        | Insn::CmpEqOrAndcmI
+        | Insn::CmpNeOrAndcmI
+        | Insn::Cmp4EqI
+        | Insn::Cmp4EqUncI
+        | Insn::Cmp4EqOrAndcmI
+        | Insn::Cmp4NeOrAndcmI
         | Insn::Padd1
+        | Insn::Padd2
+        | Insn::Padd4
         | Insn::Psub1
-        | Insn::Pcmp4Eq => Unit::A,
+        | Insn::Psub2
+        | Insn::Psub4
+        | Insn::Pavg1
+        | Insn::Pavg2
+        | Insn::Pavg1Raz
+        | Insn::Pavg2Raz
+        | Insn::Pavgsub1
+        | Insn::Pavgsub2
+        | Insn::Pcmp1Eq
+        | Insn::Pcmp2Eq
+        | Insn::Pcmp4Eq
+        | Insn::Pcmp1Gt
+        | Insn::Pcmp2Gt
+        | Insn::Pcmp4Gt
+        | Insn::Pshladd2
+        | Insn::Pshradd2 => Unit::A,
+        // I 型（整数・制御・シフト・multimedia・テスト）。
         Insn::ChkSI
         | Insn::Mux1
-        | Insn::Pshl2I
+        | Insn::Mux2
         | Insn::Shrp
         | Insn::Extr
+        | Insn::ExtrU
         | Insn::DepZ
         | Insn::DepZImm
         | Insn::Dep
         | Insn::DepImm
-        | Insn::TbitZ
-        | Insn::TnatZ
         | Insn::BreakI
         | Insn::NopI
         | Insn::HintI
@@ -90,18 +176,91 @@ pub fn insn_unit(insn: Insn) -> Unit {
         | Insn::MovIFromAr
         | Insn::MovToPr
         | Insn::MovPrRot
+        | Insn::MovBr
         | Insn::MovRet
         | Insn::Zxt1
+        | Insn::Zxt2
+        | Insn::Zxt4
         | Insn::Sxt1
+        | Insn::Sxt2
+        | Insn::Sxt4
         | Insn::Czx1L
+        | Insn::Czx2L
+        | Insn::Czx1R
+        | Insn::Czx2R
         | Insn::Clz
         | Insn::Popcnt
-        | Insn::Unpack1H
+        | Insn::Mix1R
         | Insn::Mix1L
-        | Insn::Pshl2 => Unit::I,
+        | Insn::Mix2R
+        | Insn::Mix2L
+        | Insn::Mix4R
+        | Insn::Mix4L
+        | Insn::Pack2Uss
+        | Insn::Pack2Sss
+        | Insn::Pack4Sss
+        | Insn::Unpack1H
+        | Insn::Unpack1L
+        | Insn::Unpack2H
+        | Insn::Unpack2L
+        | Insn::Unpack4H
+        | Insn::Unpack4L
+        | Insn::Pmin1U
+        | Insn::Pmax1U
+        | Insn::Pmin2
+        | Insn::Pmax2
+        | Insn::Psad1
+        | Insn::Pmpy2R
+        | Insn::Pmpy2L
+        | Insn::Pmpyshr2
+        | Insn::Pmpyshr2U
+        | Insn::Mpy4
+        | Insn::Mpyshl4
+        | Insn::Pshl2
+        | Insn::Pshl4
+        | Insn::Shl
+        | Insn::Pshr2
+        | Insn::Pshr4
+        | Insn::Shr
+        | Insn::Pshr2U
+        | Insn::Pshr4U
+        | Insn::ShrU
+        | Insn::Pshl2I
+        | Insn::Pshl4I
+        | Insn::Pshr2I
+        | Insn::Pshr4I
+        | Insn::Pshr2UI
+        | Insn::Pshr4UI
+        | Insn::TbitZ
+        | Insn::TbitZUnc
+        | Insn::TbitZAnd
+        | Insn::TbitNzAnd
+        | Insn::TbitZOr
+        | Insn::TbitNzOr
+        | Insn::TbitZOrAndcm
+        | Insn::TbitNzOrAndcm
+        | Insn::TnatZ
+        | Insn::TnatZUnc
+        | Insn::TnatZAnd
+        | Insn::TnatNzAnd
+        | Insn::TnatZOr
+        | Insn::TnatNzOr
+        | Insn::TnatZOrAndcm
+        | Insn::TnatNzOrAndcm
+        | Insn::TfZ
+        | Insn::TfZUnc
+        | Insn::TfZAnd
+        | Insn::TfNzAnd
+        | Insn::TfZOr
+        | Insn::TfNzOr
+        | Insn::TfZOrAndcm
+        | Insn::TfNzOrAndcm => Unit::I,
         Insn::Ld8R
         | Insn::Ld8I
         | Insn::St8I
+        | Insn::BreakM
+        | Insn::NopM
+        | Insn::HintM
         | Insn::Xchg4
         | Insn::Fetchadd4Acq
         | Insn::ProbeR

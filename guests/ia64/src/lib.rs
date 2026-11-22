@@ -143,6 +143,9 @@ pub struct CpuState {
     pub alat: [u64; ALAT_ENTRIES],
     /// ALAT の有効エントリのビットマスク。
     pub alat_valid: u64,
+    /// PSR{5:0}（ユーザマスク）。sum/rum/mov psr.um が触る器。
+    /// 個別ビット（be/up/ac/mfl/mfh/ic）の実効は後段の段階。
+    pub psr_um: u64,
 }
 
 impl Default for CpuState {
@@ -168,6 +171,7 @@ impl Default for CpuState {
             rse_dirty: 0,
             alat: [0; ALAT_ENTRIES],
             alat_valid: 0,
+            psr_um: 0,
         }
     }
 }

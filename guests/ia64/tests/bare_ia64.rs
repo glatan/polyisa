@@ -49,7 +49,11 @@ fn state_layout_pinned() {
         core::mem::offset_of!(CpuState, alat_valid),
         cfm + 16 + 32 * 8
     );
-    assert_eq!(core::mem::size_of::<CpuState>(), cfm + 16 + 32 * 8 + 8);
+    assert_eq!(
+        core::mem::offset_of!(CpuState, psr_um),
+        cfm + 16 + 32 * 8 + 8
+    );
+    assert_eq!(core::mem::size_of::<CpuState>(), cfm + 16 + 32 * 8 + 16);
 }
 
 #[test]
@@ -703,4 +707,1045 @@ fn run_loop_exits_via_driver() {
     );
     assert_eq!(o, Outcome::Exit(7));
     assert_eq!(sem::gr_get(&env.backend, 4), 42);
+}
+
+// ---- 段階21 IA5: 整数・比較・述語テスト・シフト・MM・転送の意味論 ----
+// 命令語は生成 encode_* で組み立て、exec を直接呼ぶ。即値・位置系の
+// オペランドはフィールド符号化の値（len=len-1、cpos6=63-pos、
+// cnt2a=count-1、ccnt5=31-count、immu5b=tf の imm-32）。
+// Ref: SPEC-IA64-SDM (Rev 2.3).
+
+use polyisa_guest_ia64::{
+    encode_add_1, encode_addp4, encode_addp4_i, encode_and, encode_and_imm8, encode_andcm,
+    encode_break_m, encode_cmp_eq, encode_cmp_eq_and, encode_cmp_eq_or_andcm, encode_cmp_lt,
+    encode_cmp_lt_and, encode_cmp_lt_or_andcm, encode_cmp_lt_unc, encode_cmp_lt_unc_i,
+    encode_cmp_ltu_i, encode_cmp4_eq_unc, encode_cmp4_lt, encode_czx1_l, encode_czx1_r, encode_dep,
+    encode_dep_imm, encode_dep_z, encode_dep_z_imm, encode_extr, encode_extr_u, encode_hint_m,
+    encode_mix1_l, encode_mix4_r, encode_mov_br, encode_mov_from_br, encode_mov_i_from_ar,
+    encode_mov_i_to_ar, encode_mov_m_from_ar, encode_mov_m_to_ar, encode_mov_pr, encode_mov_pr_rot,
+    encode_mov_psr_um, encode_mov_ret, encode_mov_to_pr, encode_mpy4, encode_mux1, encode_nop_m,
+    encode_or, encode_pack2_sss, encode_pack2_uss, encode_pack4_sss, encode_padd2, encode_pavg1,
+    encode_pavg2_raz, encode_pavgsub1, encode_pcmp1_eq, encode_pcmp2_gt, encode_pmax2,
+    encode_pmin1_u, encode_pmpy2_l, encode_pmpy2_r, encode_pmpyshr2, encode_pmpyshr2_u,
+    encode_popcnt, encode_psad1, encode_pshl2, encode_pshl2_i, encode_pshladd2, encode_pshr2,
+    encode_pshr2_u_i, encode_pshradd2, encode_rum, encode_shl, encode_shladd, encode_shladdp4,
+    encode_shr, encode_shr_u, encode_shrp, encode_sub, encode_sub_1, encode_sum, encode_sxt1,
+    encode_tbit_nz_and, encode_tbit_nz_or_andcm, encode_tbit_z, encode_tbit_z_unc, encode_tf_z,
+    encode_tnat_nz_and, encode_tnat_z, encode_unpack1_h, encode_unpack4_l, encode_xor,
+    encode_xor_imm8, encode_zxt2,
+};
+use polyisa_sem::{Backend as _, StateRef, W64};
+
+/// exec を 1 命令呼び、Ok の真偽を返す。
+fn x(env: &mut BareEnv, insn: Insn, w: u128) -> bool {
+    sem::exec(&mut env.backend, insn, w, 0x1000).unwrap()
+}
+
+/// exec の失敗（Trap の code）。
+fn xerr(env: &mut BareEnv, insn: Insn, w: u128) -> u64 {
+    match sem::exec(&mut env.backend, insn, w, 0x1000).unwrap_err() {
+        InterpExit::Exception(e) => e.code,
+        e => panic!("trap 以外の退出: {e:?}"),
+    }
+}
+
+fn gr(env: &BareEnv, i: u32) -> u64 {
+    sem::gr_get(&env.backend, i)
+}
+
+fn nat(env: &BareEnv, i: u32) -> bool {
+    sem::nat_get(&env.backend, i)
+}
+
+fn p(env: &BareEnv, i: u32) -> bool {
+    sem::pred(&env.backend, i)
+}
+
+fn set_gr(env: &mut BareEnv, i: u32, v: u64) {
+    sem::gr_set(&mut env.backend, i, v);
+}
+
+/// 16 ビット要素 4 個を束ねる。
+fn p16(e0: u64, e1: u64, e2: u64, e3: u64) -> u64 {
+    e0 | e1 << 16 | e2 << 32 | e3 << 48
+}
+
+/// バイト要素 8 個を束ねる。
+fn p8(v: [u64; 8]) -> u64 {
+    v.iter()
+        .enumerate()
+        .fold(0, |a, (i, e)| a | (e & 0xff) << (8 * i))
+}
+
+#[test]
+fn alu_three_operand_and_nat() {
+    let mut env = env();
+    set_gr(&mut env, 1, 40);
+    set_gr(&mut env, 2, 2);
+    assert!(x(&mut env, Insn::Add, encode_add(&[0, 4, 1, 2]).unwrap()));
+    assert_eq!(gr(&env, 4), 42);
+    assert!(!nat(&env, 4));
+    x(&mut env, Insn::Add1, encode_add_1(&[0, 4, 1, 2]).unwrap());
+    assert_eq!(gr(&env, 4), 43);
+    x(&mut env, Insn::Sub, encode_sub(&[0, 4, 1, 2]).unwrap());
+    assert_eq!(gr(&env, 4), 38);
+    x(&mut env, Insn::Sub1, encode_sub_1(&[0, 4, 1, 2]).unwrap());
+    assert_eq!(gr(&env, 4), 37);
+    // ラップの確認。sub 0 - 1 = !0。
+    set_gr(&mut env, 1, 0);
+    set_gr(&mut env, 2, 1);
+    x(&mut env, Insn::Sub, encode_sub(&[0, 4, 1, 2]).unwrap());
+    assert_eq!(gr(&env, 4), u64::MAX);
+    // ソース NaT が結果へ伝播する。
+    set_gr(&mut env, 2, 3);
+    sem::nat_set(&mut env.backend, 2, true);
+    x(&mut env, Insn::Add, encode_add(&[0, 4, 1, 2]).unwrap());
+    assert_eq!(gr(&env, 4), 3);
+    assert!(nat(&env, 4));
+    // 片方だけの NaT で伝播し、nat が無ければ落ちる。
+    x(&mut env, Insn::Add, encode_add(&[0, 4, 1, 2]).unwrap());
+    sem::nat_set(&mut env.backend, 2, false);
+    x(&mut env, Insn::Add, encode_add(&[0, 5, 1, 2]).unwrap());
+    assert!(!nat(&env, 5));
+}
+
+#[test]
+fn alu_logic_and_imm8() {
+    let mut env = env();
+    set_gr(&mut env, 1, 0xf0f0_0f0f);
+    set_gr(&mut env, 2, 0x0ff0_ff00);
+    x(&mut env, Insn::And, encode_and(&[0, 4, 1, 2]).unwrap());
+    assert_eq!(gr(&env, 4), 0x00f0_0f00);
+    x(&mut env, Insn::Andcm, encode_andcm(&[0, 4, 1, 2]).unwrap());
+    assert_eq!(gr(&env, 4), 0xf000_000f);
+    x(&mut env, Insn::Or, encode_or(&[0, 4, 1, 2]).unwrap());
+    assert_eq!(gr(&env, 4), 0xfff0_ff0f);
+    x(&mut env, Insn::Xor, encode_xor(&[0, 4, 1, 2]).unwrap());
+    assert_eq!(gr(&env, 4), 0xff00_f00f);
+    // imm8 形: imm は符号拡張される。0x80 は -128。
+    set_gr(&mut env, 3, 10);
+    x(
+        &mut env,
+        Insn::AndImm8,
+        encode_and_imm8(&[0, 4, 0x80, 3]).unwrap(),
+    );
+    assert_eq!(gr(&env, 4), 10u64 & 0xffff_ffff_ffff_ff80);
+    x(
+        &mut env,
+        Insn::XorImm8,
+        encode_xor_imm8(&[0, 4, 0x7f, 3]).unwrap(),
+    );
+    assert_eq!(gr(&env, 4), 10 ^ 0x7f);
+    // NaT は r3 側のみ見る。
+    sem::nat_set(&mut env.backend, 3, true);
+    x(
+        &mut env,
+        Insn::AndImm8,
+        encode_and_imm8(&[0, 5, 0x7f, 3]).unwrap(),
+    );
+    assert!(nat(&env, 5));
+}
+
+#[test]
+fn addp4_and_shladd() {
+    let mut env = env();
+    // addp4: 下位 32 ビットの和、上位は r3{31:30} を {62:61} に移す。
+    set_gr(&mut env, 1, 0xffff_ffff);
+    set_gr(&mut env, 2, 0xc000_0002);
+    x(&mut env, Insn::Addp4, encode_addp4(&[0, 4, 1, 2]).unwrap());
+    // 0xffff_ffff + 0xc000_0002 = 0x1_c000_0001 → 下位 32 は 0xc000_0001、
+    // r3{31:30}=3 → bits{62:61}=3。
+    assert_eq!(gr(&env, 4), 0x6000_0000_c000_0001);
+    // addp4_i も同じ後処理（imm14=1 + r3 として処理）。
+    x(
+        &mut env,
+        Insn::Addp4I,
+        encode_addp4_i(&[0, 4, 1, 2]).unwrap(),
+    );
+    assert_eq!(gr(&env, 4), 0x6000_0000_c000_0003);
+    // shladd: (r2 << (cnt2a+1)) + r3。cnt2a=1 → 2 シフト。
+    set_gr(&mut env, 5, 3);
+    set_gr(&mut env, 6, 7);
+    x(
+        &mut env,
+        Insn::Shladd,
+        encode_shladd(&[0, 4, 5, 1, 6]).unwrap(),
+    );
+    assert_eq!(gr(&env, 4), 19);
+    // shladdp4 は結果を addp4 後処理する。
+    set_gr(&mut env, 6, 0x8000_0001);
+    x(
+        &mut env,
+        Insn::Shladdp4,
+        encode_shladdp4(&[0, 4, 5, 1, 6]).unwrap(),
+    );
+    // (3<<2)+0x80000001 = 0x8000000d → zext32 = 0x8000000d、
+    // r3{31:30}=2 → bits62:61 = 2。
+    assert_eq!(gr(&env, 4), 0x4000_0000_8000_000d);
+}
+
+#[test]
+fn cmp_normal_and_unc() {
+    let mut env = env();
+    set_gr(&mut env, 10, 5);
+    set_gr(&mut env, 11, 7);
+    // cmp.lt: 5 < 7 → p5=1, p6=0。
+    x(
+        &mut env,
+        Insn::CmpLt,
+        encode_cmp_lt(&[0, 5, 6, 10, 11]).unwrap(),
+    );
+    assert!(p(&env, 5));
+    assert!(!p(&env, 6));
+    // 逆向き: 7 < 5 → p5=0, p6=1。
+    x(
+        &mut env,
+        Insn::CmpLt,
+        encode_cmp_lt(&[0, 5, 6, 11, 10]).unwrap(),
+    );
+    assert!(!p(&env, 5));
+    assert!(p(&env, 6));
+    // .unc は qp 偽でも p1=p2=0 に沈める。
+    sem::pr_set(&mut env.backend, (1 << 5) | (1 << 6));
+    let w = encode_cmp_lt_unc(&[9, 5, 6, 10, 11]).unwrap(); // (p9)
+    x(&mut env, Insn::CmpLtUnc, w);
+    assert!(!p(&env, 5));
+    assert!(!p(&env, 6));
+    // qp 真なら普通に評価する。
+    sem::pr_set(&mut env.backend, 1 << 9);
+    x(&mut env, Insn::CmpLtUnc, w);
+    assert!(p(&env, 5));
+    assert!(!p(&env, 6));
+    // ソース NaT は p1=p2=0。
+    sem::nat_set(&mut env.backend, 10, true);
+    x(
+        &mut env,
+        Insn::CmpLt,
+        encode_cmp_lt(&[0, 5, 6, 10, 11]).unwrap(),
+    );
+    assert!(!p(&env, 5));
+    assert!(!p(&env, 6));
+    // p1 == p2 は不正命令。
+    assert_eq!(
+        xerr(
+            &mut env,
+            Insn::CmpLt,
+            encode_cmp_lt(&[0, 5, 5, 10, 11]).unwrap()
+        ),
+        sem::TRAP_ILL
+    );
+}
+
+#[test]
+fn cmp4_is_32bit_and_imm_forms() {
+    let mut env = env();
+    // cmp4 は下位 32 ビットだけを比べる。64 ビットでは 1 < 2 だが
+    // 32 ビットでは -1 > ... ではなく 1 < 2 のまま。
+    set_gr(&mut env, 10, 0xffff_ffff_0000_0001);
+    set_gr(&mut env, 11, 2);
+    x(
+        &mut env,
+        Insn::Cmp4Lt,
+        encode_cmp4_lt(&[0, 5, 6, 10, 11]).unwrap(),
+    );
+    assert!(p(&env, 5));
+    // 32 ビットの負数: 0xffff_ffff は -1 < 2 → p5=1（64 ビットなら偽）。
+    set_gr(&mut env, 10, 0xffff_ffff);
+    x(
+        &mut env,
+        Insn::Cmp4Lt,
+        encode_cmp4_lt(&[0, 5, 6, 10, 11]).unwrap(),
+    );
+    assert!(p(&env, 5));
+    // ltu imm8 形: 符号なしで imm8 vs r3。127 <u 5 は偽 → p6=1。
+    set_gr(&mut env, 11, 5);
+    x(
+        &mut env,
+        Insn::CmpLtuI,
+        encode_cmp_ltu_i(&[0, 5, 6, 0x7f, 11]).unwrap(),
+    );
+    assert!(!p(&env, 5));
+    assert!(p(&env, 6));
+    x(
+        &mut env,
+        Insn::CmpLtuI,
+        encode_cmp_ltu_i(&[0, 5, 6, 2, 11]).unwrap(),
+    );
+    assert!(p(&env, 5)); // 2 <u 5 → 真
+    assert!(!p(&env, 6));
+    // .unc の即値形も qp 偽でクリア。
+    sem::pr_set(&mut env.backend, (1 << 5) | (1 << 6));
+    x(
+        &mut env,
+        Insn::CmpLtUncI,
+        encode_cmp_lt_unc_i(&[9, 5, 6, 0, 11]).unwrap(),
+    );
+    assert!(!p(&env, 5));
+    assert!(!p(&env, 6));
+    // cmp4.unc も同じく qp 偽クリア。
+    sem::pr_set(&mut env.backend, (1 << 5) | (1 << 6));
+    x(
+        &mut env,
+        Insn::Cmp4EqUnc,
+        encode_cmp4_eq_unc(&[9, 5, 6, 10, 11]).unwrap(),
+    );
+    assert!(!p(&env, 5));
+    assert!(!p(&env, 6));
+}
+
+#[test]
+fn cmp_parallel_and_accumulating() {
+    let mut env = env();
+    set_gr(&mut env, 9, u64::MAX); // -1
+    // 並列 and 形「a rel 0」疑似形式: cmp.lt.and = r9 < 0。
+    sem::pr_set(&mut env.backend, (1 << 5) | (1 << 6));
+    x(
+        &mut env,
+        Insn::CmpLtAnd,
+        encode_cmp_lt_and(&[0, 5, 6, 9]).unwrap(),
+    );
+    assert!(p(&env, 5));
+    assert!(p(&env, 6));
+    // 偽なら両方 0 に沈む。
+    set_gr(&mut env, 9, 3);
+    x(
+        &mut env,
+        Insn::CmpLtAnd,
+        encode_cmp_lt_and(&[0, 5, 6, 9]).unwrap(),
+    );
+    assert!(!p(&env, 5));
+    assert!(!p(&env, 6));
+    // .or 形: 真で両方 1、偽で据え置き。
+    set_gr(&mut env, 9, u64::MAX);
+    x(
+        &mut env,
+        Insn::CmpLtOr,
+        encode_cmp_lt_or(&[0, 5, 6, 9]).unwrap(),
+    );
+    assert!(p(&env, 5));
+    assert!(p(&env, 6));
+    // 偽で据え置き（p7 は関係ないビットなので残る）。
+    sem::pr_set(&mut env.backend, 1 << 7);
+    set_gr(&mut env, 9, 4);
+    x(
+        &mut env,
+        Insn::CmpLtOr,
+        encode_cmp_lt_or(&[0, 5, 6, 9]).unwrap(),
+    );
+    assert!(p(&env, 5) || !p(&env, 6));
+    assert!(p(&env, 7));
+    // .or.andcm 形: 真で p1=1,p2=0。
+    set_gr(&mut env, 9, u64::MAX);
+    x(
+        &mut env,
+        Insn::CmpLtOrAndcm,
+        encode_cmp_lt_or_andcm(&[0, 5, 6, 9]).unwrap(),
+    );
+    assert!(p(&env, 5));
+    assert!(!p(&env, 6));
+    // レジスタ形の .and は関係が eq/ne。
+    set_gr(&mut env, 10, 5);
+    set_gr(&mut env, 11, 5);
+    sem::pr_set(&mut env.backend, (1 << 5) | (1 << 6));
+    x(
+        &mut env,
+        Insn::CmpEqAnd,
+        encode_cmp_eq_and(&[0, 5, 6, 10, 11]).unwrap(),
+    );
+    assert!(p(&env, 5));
+    set_gr(&mut env, 11, 6);
+    x(
+        &mut env,
+        Insn::CmpEqAnd,
+        encode_cmp_eq_and(&[0, 5, 6, 10, 11]).unwrap(),
+    );
+    assert!(!p(&env, 5));
+    assert!(!p(&env, 6));
+    // .or.andcm レジスタ形。
+    x(
+        &mut env,
+        Insn::CmpEqOrAndcm,
+        encode_cmp_eq_or_andcm(&[0, 5, 6, 10, 10]).unwrap(),
+    );
+    assert!(p(&env, 5));
+    assert!(!p(&env, 6));
+}
+
+#[test]
+fn tbit_tnat_tf_predicates() {
+    let mut env = env();
+    set_gr(&mut env, 9, 1 << 40);
+    // tbit.z: bit40=1 → z は偽 → p5=0,p6=1。
+    x(
+        &mut env,
+        Insn::TbitZ,
+        encode_tbit_z(&[0, 5, 6, 9, 40]).unwrap(),
+    );
+    assert!(!p(&env, 5));
+    assert!(p(&env, 6));
+    // tbit.z.unc は qp 偽でもクリア。
+    sem::pr_set(&mut env.backend, (1 << 5) | (1 << 6));
+    x(
+        &mut env,
+        Insn::TbitZUnc,
+        encode_tbit_z_unc(&[9, 5, 6, 9, 40]).unwrap(),
+    );
+    assert!(!p(&env, 5));
+    assert!(!p(&env, 6));
+    // tbit.nz.and: bit40=1 → 真 → 据え置き。
+    sem::pr_set(&mut env.backend, (1 << 5) | (1 << 6));
+    x(
+        &mut env,
+        Insn::TbitNzAnd,
+        encode_tbit_nz_and(&[0, 5, 6, 9, 40]).unwrap(),
+    );
+    assert!(p(&env, 5));
+    assert!(p(&env, 6));
+    // r9.nat が立つと .and は両方 0。
+    sem::nat_set(&mut env.backend, 9, true);
+    x(
+        &mut env,
+        Insn::TbitNzAnd,
+        encode_tbit_nz_and(&[0, 5, 6, 9, 40]).unwrap(),
+    );
+    assert!(!p(&env, 5));
+    assert!(!p(&env, 6));
+    // tbit.nz.or.andcm: 真で p1=1,p2=0。
+    sem::nat_set(&mut env.backend, 9, false);
+    x(
+        &mut env,
+        Insn::TbitNzOrAndcm,
+        encode_tbit_nz_or_andcm(&[0, 5, 6, 9, 40]).unwrap(),
+    );
+    assert!(p(&env, 5));
+    assert!(!p(&env, 6));
+    // tnat.z: r9.nat=0 → z は真 → p5=1,p6=0。
+    x(&mut env, Insn::TnatZ, encode_tnat_z(&[0, 5, 6, 9]).unwrap());
+    assert!(p(&env, 5));
+    assert!(!p(&env, 6));
+    // tnat.nz.and: nat=1 で真 → 据え置き。
+    sem::nat_set(&mut env.backend, 9, true);
+    sem::pr_set(&mut env.backend, (1 << 5) | (1 << 6));
+    x(
+        &mut env,
+        Insn::TnatNzAnd,
+        encode_tnat_nz_and(&[0, 5, 6, 9]).unwrap(),
+    );
+    assert!(p(&env, 5));
+    assert!(p(&env, 6));
+    // tf: features 32-63 は未定義で常に 0 → z は常に真。
+    x(&mut env, Insn::TfZ, encode_tf_z(&[0, 5, 6, 0]).unwrap());
+    assert!(p(&env, 5));
+    assert!(!p(&env, 6));
+}
+
+#[test]
+fn integer_shifts() {
+    let mut env = env();
+    set_gr(&mut env, 5, 1);
+    set_gr(&mut env, 6, 4);
+    x(&mut env, Insn::Shl, encode_shl(&[0, 4, 5, 6]).unwrap());
+    assert_eq!(gr(&env, 4), 16);
+    // count > 63 → 0。
+    set_gr(&mut env, 6, 70);
+    x(&mut env, Insn::Shl, encode_shl(&[0, 4, 5, 6]).unwrap());
+    assert_eq!(gr(&env, 4), 0);
+    // shr: オペランド順は [r1, r2(count), r3(data)]。
+    set_gr(&mut env, 5, 0x8000_0000_0000_0000);
+    set_gr(&mut env, 6, 4);
+    x(&mut env, Insn::Shr, encode_shr(&[0, 4, 6, 5]).unwrap());
+    assert_eq!(gr(&env, 4), 0xf800_0000_0000_0000);
+    x(&mut env, Insn::ShrU, encode_shr_u(&[0, 4, 6, 5]).unwrap());
+    assert_eq!(gr(&env, 4), 0x0800_0000_0000_0000);
+    // shrp: [r2:r3] >> cnt6。cnt6=4。r2 の下位 nibble=0 なので上位 4 ビットは 0。
+    set_gr(&mut env, 5, 0x1234_5678_9abc_def0);
+    set_gr(&mut env, 6, 0x0fed_cba9_8765_4321);
+    x(&mut env, Insn::Shrp, encode_shrp(&[0, 4, 5, 6, 4]).unwrap());
+    assert_eq!(gr(&env, 4), 0x00fe_dcba_9876_5432);
+    // cnt6=0 は r3 そのまま。
+    x(&mut env, Insn::Shrp, encode_shrp(&[0, 4, 5, 6, 0]).unwrap());
+    assert_eq!(gr(&env, 4), 0x0fed_cba9_8765_4321);
+}
+
+#[test]
+fn extract_and_deposit() {
+    let mut env = env();
+    set_gr(&mut env, 5, 0xdead_beef_1234_5678);
+    // extr: bits[15:4] = 0x567 → 符号つきは bit11 まで取ると…
+    // pos=4,len=8 → 0x67 → sext 8 = 0x67。
+    x(&mut env, Insn::Extr, encode_extr(&[0, 4, 5, 4, 7]).unwrap());
+    assert_eq!(gr(&env, 4), 0x67);
+    // pos=4,len=8 で先頭ビットが立つ例: pos=60,len=4 → 0xd…上位
+    // 0xd = 1101 → sext4 = -3。
+    x(
+        &mut env,
+        Insn::Extr,
+        encode_extr(&[0, 4, 5, 60, 3]).unwrap(),
+    );
+    assert_eq!(gr(&env, 4), u64::MAX - 2);
+    // extr.u はゼロ拡張。
+    x(
+        &mut env,
+        Insn::ExtrU,
+        encode_extr_u(&[0, 4, 5, 60, 3]).unwrap(),
+    );
+    assert_eq!(gr(&env, 4), 0xd);
+    // pos+len が 64 を超えると切られる: pos=60,len=8 → len=4。
+    x(
+        &mut env,
+        Insn::ExtrU,
+        encode_extr_u(&[0, 4, 5, 60, 7]).unwrap(),
+    );
+    assert_eq!(gr(&env, 4), 0xd);
+    // dep.z: pos=8,len=8（cpos6a=63-8=55、len6=7）で下位 8 ビットを置く。
+    set_gr(&mut env, 5, 0xab);
+    x(
+        &mut env,
+        Insn::DepZ,
+        encode_dep_z(&[0, 4, 5, 55, 7]).unwrap(),
+    );
+    assert_eq!(gr(&env, 4), 0xab00);
+    // dep.z imm8: 0x80 → -128 を len で切ると下位 8 ビット全部。
+    x(
+        &mut env,
+        Insn::DepZImm,
+        encode_dep_z_imm(&[0, 4, 0x80, 55, 7]).unwrap(),
+    );
+    assert_eq!(gr(&env, 4), 0x8000);
+    // dep (merge): r3 の pos 近傍だけを r2 の右詰めフィールドで置く。
+    set_gr(&mut env, 5, 0xab);
+    set_gr(&mut env, 6, u64::MAX);
+    // cpos6c=63-8=55、len4=7 → bits[15:8] = 0xab。
+    x(
+        &mut env,
+        Insn::Dep,
+        encode_dep(&[0, 4, 5, 6, 55, 7]).unwrap(),
+    );
+    assert_eq!(gr(&env, 4), 0xffff_ffff_ffff_abff);
+    // dep imm1: 1 を 1 ビットだけ deposit。imm1=1 → -1 (全 1)。
+    // pos=8,len=1 → bit8 = 1。
+    set_gr(&mut env, 6, 0);
+    x(
+        &mut env,
+        Insn::DepImm,
+        encode_dep_imm(&[0, 4, 1, 6, 55, 0]).unwrap(),
+    );
+    assert_eq!(gr(&env, 4), 0x100);
+    // NaT: merge 形は r2|r3、ゼロ形は r2 のみ。
+    sem::nat_set(&mut env.backend, 6, true);
+    x(
+        &mut env,
+        Insn::Dep,
+        encode_dep(&[0, 4, 5, 6, 55, 7]).unwrap(),
+    );
+    assert!(nat(&env, 4));
+    sem::nat_set(&mut env.backend, 6, false);
+    x(
+        &mut env,
+        Insn::DepZ,
+        encode_dep_z(&[0, 4, 5, 55, 7]).unwrap(),
+    );
+    assert!(!nat(&env, 4));
+}
+
+#[test]
+fn extend_count_and_czx() {
+    let mut env = env();
+    set_gr(&mut env, 5, 0x0000_0000_ff12_3480);
+    x(&mut env, Insn::Zxt2, encode_zxt2(&[0, 4, 5]).unwrap());
+    assert_eq!(gr(&env, 4), 0x3480);
+    x(&mut env, Insn::Sxt1, encode_sxt1(&[0, 4, 5]).unwrap());
+    assert_eq!(gr(&env, 4), 0xffff_ffff_ffff_ff80);
+    // czx1.l は MSB 側からゼロバイトを探す。byte7=0 → 0。
+    set_gr(&mut env, 5, 0x00ff_eeff_1122_3344);
+    x(&mut env, Insn::Czx1L, encode_czx1_l(&[0, 4, 5]).unwrap());
+    assert_eq!(gr(&env, 4), 0);
+    // czx1.r は LSB 側から。最初のゼロバイトは byte7 → 7。
+    x(&mut env, Insn::Czx1R, encode_czx1_r(&[0, 4, 5]).unwrap());
+    assert_eq!(gr(&env, 4), 7);
+    // ゼロが無いと要素数（8）。
+    set_gr(&mut env, 5, 0x0102_0304_0506_0708);
+    x(&mut env, Insn::Czx1R, encode_czx1_r(&[0, 4, 5]).unwrap());
+    assert_eq!(gr(&env, 4), 8);
+    // popcnt。
+    set_gr(&mut env, 5, 0xffff_0000_ffff_0000);
+    x(&mut env, Insn::Popcnt, encode_popcnt(&[0, 4, 5]).unwrap());
+    assert_eq!(gr(&env, 4), 32);
+}
+
+#[test]
+fn parallel_alu_multimedia() {
+    let mut env = env();
+    let a = p16(1, 2, 0xffff, 0x8000);
+    let c = p16(3, 0xfffe, 2, 1);
+    set_gr(&mut env, 5, a);
+    set_gr(&mut env, 6, c);
+    // padd2: 要素ごとの 16 ビット加算（wrap）。
+    x(&mut env, Insn::Padd2, encode_padd2(&[0, 4, 5, 6]).unwrap());
+    assert_eq!(gr(&env, 4), p16(4, 0x10000 & 0xffff, 1, 0x8001));
+    // pavg1: (a+b+1)/2 ではなく (a+b)>>1 | lsb。bytes 200,200 → 200。
+    set_gr(&mut env, 5, p8([200, 10, 0, 0, 0, 0, 0, 0]));
+    set_gr(&mut env, 6, p8([200, 21, 0, 0, 0, 0, 0, 0]));
+    x(&mut env, Insn::Pavg1, encode_pavg1(&[0, 4, 5, 6]).unwrap());
+    assert_eq!(gr(&env, 4), p8([200, (31 >> 1) | 1, 0, 0, 0, 0, 0, 0]));
+    // pavg2.raz: (a+b+1)>>1。
+    set_gr(&mut env, 5, p16(10, 0, 0, 0));
+    set_gr(&mut env, 6, p16(11, 0, 0, 0));
+    x(
+        &mut env,
+        Insn::Pavg2Raz,
+        encode_pavg2_raz(&[0, 4, 5, 6]).unwrap(),
+    );
+    assert_eq!(gr(&env, 4), 11);
+    // pavgsub1: 半分の差（9 ビットの 2 の補数で >>1）。
+    set_gr(&mut env, 5, p8([10, 0, 0, 0, 0, 0, 0, 0]));
+    set_gr(&mut env, 6, p8([20, 0, 0, 0, 0, 0, 0, 0]));
+    x(
+        &mut env,
+        Insn::Pavgsub1,
+        encode_pavgsub1(&[0, 4, 5, 6]).unwrap(),
+    );
+    // -10 → 0x1f6 & 0x1ff → >>1 |0 → 0xfb。
+    assert_eq!(gr(&env, 4), 0xfb);
+    // pcmp1.eq / pcmp2.gt。
+    set_gr(&mut env, 5, p8([7, 8, 0, 0, 0, 0, 0, 0]));
+    set_gr(&mut env, 6, p8([7, 9, 0, 0, 0, 0, 0, 0]));
+    x(
+        &mut env,
+        Insn::Pcmp1Eq,
+        encode_pcmp1_eq(&[0, 4, 5, 6]).unwrap(),
+    );
+    // byte0 は 7==7 → 0xff、byte1 は 8!=9 → 0、byte2-7 は 0==0 → 0xff。
+    assert_eq!(gr(&env, 4), 0xffff_ffff_ffff_00ff);
+    set_gr(&mut env, 5, p16(5, 0xfffe, 0, 0));
+    set_gr(&mut env, 6, p16(4, 1, 0, 0));
+    x(
+        &mut env,
+        Insn::Pcmp2Gt,
+        encode_pcmp2_gt(&[0, 4, 5, 6]).unwrap(),
+    );
+    // elem0: 5>4 → 0xffff、elem1: -2>1 → 0、elem2-3: 0>0 → 0。
+    assert_eq!(gr(&env, 4), 0xffff);
+    assert_eq!((gr(&env, 4) >> 16) & 0xffff, 0); // -2 > 1 は偽
+}
+
+#[test]
+fn parallel_shiftadd_saturation() {
+    let mut env = env();
+    // pshladd2: シフト飽和→加算飽和。cnt2b=0 → count=1。
+    set_gr(&mut env, 5, p16(0x4000, 1, 0, 0));
+    set_gr(&mut env, 6, p16(1, 0x7fff, 0, 0));
+    x(
+        &mut env,
+        Insn::Pshladd2,
+        encode_pshladd2(&[0, 4, 5, 0, 6]).unwrap(),
+    );
+    // 0x4000<<1 = 0x8000 → sat16 = 0x7fff; +1 → 0x7fff (飽和)。
+    // 1<<1 = 2; +0x7fff = 0x8001 → sat16 = 0x7fff。
+    assert_eq!(gr(&env, 4), p16(0x7fff, 0x7fff, 0, 0));
+    // pshradd2: 算術右シフト→加算飽和。cnt2b=1 → count=2。
+    set_gr(&mut env, 5, p16(0xfff0, 0x8000, 0, 0));
+    set_gr(&mut env, 6, p16(1, 0, 0, 0));
+    x(
+        &mut env,
+        Insn::Pshradd2,
+        encode_pshradd2(&[0, 4, 5, 1, 6]).unwrap(),
+    );
+    // -16>>2 = -4; +1 = -3 = 0xfffd。-32768>>2 = -8192 = 0xe000。
+    assert_eq!(gr(&env, 4), p16(0xfffd, 0xe000, 0, 0));
+    // cnt2b=3 は予約 → 不正命令。
+    assert_eq!(
+        xerr(
+            &mut env,
+            Insn::Pshladd2,
+            encode_pshladd2(&[0, 4, 5, 3, 6]).unwrap()
+        ),
+        sem::TRAP_ILL
+    );
+}
+
+#[test]
+fn parallel_shifts() {
+    let mut env = env();
+    set_gr(&mut env, 5, p16(1, 0x8000, 0xffff, 0x7fff));
+    set_gr(&mut env, 6, 4);
+    // pshl2 var: count=r6 min 16。
+    x(&mut env, Insn::Pshl2, encode_pshl2(&[0, 4, 5, 6]).unwrap());
+    assert_eq!(gr(&env, 4), p16(16, 0, 0xfff0, 0xfff0));
+    // count > 16 → 16。
+    set_gr(&mut env, 6, 20);
+    x(&mut env, Insn::Pshl2, encode_pshl2(&[0, 4, 5, 6]).unwrap());
+    assert_eq!(gr(&env, 4), 0);
+    // pshr2 var: オペランド [r1, r2(count), r3(data)]。
+    set_gr(&mut env, 6, 4);
+    x(&mut env, Insn::Pshr2, encode_pshr2(&[0, 4, 6, 5]).unwrap());
+    assert_eq!(gr(&env, 4), p16(0, 0xf800, 0xffff, 0x07ff));
+    // pshr2.u 即値形: cnt5 直接値。
+    x(
+        &mut env,
+        Insn::Pshr2UI,
+        encode_pshr2_u_i(&[0, 4, 5, 4]).unwrap(),
+    );
+    assert_eq!(gr(&env, 4), p16(0, 0x0800, 0x0fff, 0x07ff));
+    // pshl2 即値形: ccnt5 = 31-count。count=3 → 28。
+    set_gr(&mut env, 5, p16(1, 2, 3, 4));
+    x(
+        &mut env,
+        Insn::Pshl2I,
+        encode_pshl2_i(&[0, 4, 5, 28]).unwrap(),
+    );
+    assert_eq!(gr(&env, 4), p16(8, 16, 24, 32));
+}
+
+#[test]
+fn mux_mix_pack_unpack() {
+    let mut env = env();
+    let src = p8([7, 6, 5, 4, 3, 2, 1, 0]);
+    set_gr(&mut env, 5, src);
+    // mux1 @rev (mbtype4=0xb) はバイト順を逆転する。
+    x(&mut env, Insn::Mux1, encode_mux1(&[0, 4, 5, 0xb]).unwrap());
+    assert_eq!(gr(&env, 4), src.swap_bytes());
+    // 予約された mbtype4 は不正命令フォールト。
+    assert_eq!(
+        xerr(&mut env, Insn::Mux1, encode_mux1(&[0, 4, 5, 1]).unwrap()),
+        sem::TRAP_ILL
+    );
+    // mix1.l: 奇数要素同士を y→x で交互に並べる。y=0x11 連続、
+    // x の奇数バイトは 6,4,2,0。
+    set_gr(&mut env, 6, 0x1111_1111_1111_1111);
+    x(&mut env, Insn::Mix1L, encode_mix1_l(&[0, 4, 5, 6]).unwrap());
+    assert_eq!(gr(&env, 4), 0x0011_0211_0411_0611);
+    // mix4.r: 偶数 32 ビット要素の y→x 交互。y0=0xdef0,x0=0x5678。
+    set_gr(&mut env, 5, 0x0000_1234_0000_5678);
+    set_gr(&mut env, 6, 0x0000_9abc_0000_def0);
+    x(&mut env, Insn::Mix4R, encode_mix4_r(&[0, 4, 5, 6]).unwrap());
+    assert_eq!(gr(&env, 4), 0x0000_5678_0000_def0);
+    // unpack1.h: x/y の上位バイトを交互に。
+    set_gr(&mut env, 5, 0xaa_bb_cc_dd_ee_ff_00_11);
+    set_gr(&mut env, 6, 0x22_33_44_55_66_77_88_99);
+    x(
+        &mut env,
+        Insn::Unpack1H,
+        encode_unpack1_h(&[0, 4, 5, 6]).unwrap(),
+    );
+    assert_eq!(gr(&env, 4), 0xaa22_bb33_cc44_dd55);
+    // unpack4.l: 32 ビット要素の下位同士。y0,x0。
+    x(
+        &mut env,
+        Insn::Unpack4L,
+        encode_unpack4_l(&[0, 4, 5, 6]).unwrap(),
+    );
+    assert_eq!(gr(&env, 4), 0xee_ff_00_11_66_77_88_99);
+    // pack2.sss: 16 ビット符号つきを 8 ビット飽和。
+    set_gr(&mut env, 5, p16(200, 0x8100, 0, 0));
+    set_gr(&mut env, 6, p16(100, 0x7fff, 0, 0));
+    x(
+        &mut env,
+        Insn::Pack2Sss,
+        encode_pack2_sss(&[0, 4, 5, 6]).unwrap(),
+    );
+    // y: 100→100, 0x7fff→0x7f; x: 200→0x7f, -32512→0x80。
+    assert_eq!(gr(&env, 4), p8([100, 0x7f, 0, 0, 0x7f, 0x80, 0, 0]));
+    // pack2.uss: 負は 0 に飽和。
+    set_gr(&mut env, 6, p16(0x8000, 300, 0, 0));
+    x(
+        &mut env,
+        Insn::Pack2Uss,
+        encode_pack2_uss(&[0, 4, 5, 6]).unwrap(),
+    );
+    assert_eq!(gr(&env, 4) & 0xffff, 0xff00); // -32768→0, 300→0xff
+    // pack4.sss: 32 ビット → 16 ビット飽和。
+    set_gr(&mut env, 5, 0x0000_0001_0000_0000); // x0=0, x1=1
+    set_gr(&mut env, 6, 0x0000_0000_0000_7fff); // y0=0x7fff, y1=0
+    x(
+        &mut env,
+        Insn::Pack4Sss,
+        encode_pack4_sss(&[0, 4, 5, 6]).unwrap(),
+    );
+    // y0→0x7fff, y1→0, x0→0, x1→1（上位半分が r2 側）。
+    assert_eq!(gr(&env, 4), p16(0x7fff, 0, 0, 1));
+}
+
+#[test]
+fn pmin_pmax_psad_mpy() {
+    let mut env = env();
+    set_gr(&mut env, 5, p8([5, 200, 0, 0, 0, 0, 0, 0]));
+    set_gr(&mut env, 6, p8([9, 100, 0, 0, 0, 0, 0, 0]));
+    x(
+        &mut env,
+        Insn::Pmin1U,
+        encode_pmin1_u(&[0, 4, 5, 6]).unwrap(),
+    );
+    assert_eq!(gr(&env, 4), p8([5, 100, 0, 0, 0, 0, 0, 0]));
+    set_gr(&mut env, 5, p16(0xfffe, 5, 0, 0)); // -2, 5
+    set_gr(&mut env, 6, p16(1, 0x8000, 0, 0)); // 1, -32768
+    x(&mut env, Insn::Pmax2, encode_pmax2(&[0, 4, 5, 6]).unwrap());
+    assert_eq!(gr(&env, 4), p16(1, 5, 0, 0));
+    // psad1: 絶対差の和。
+    set_gr(&mut env, 5, p8([10, 20, 0, 0, 0, 0, 0, 0]));
+    set_gr(&mut env, 6, p8([30, 5, 0, 0, 0, 0, 0, 0]));
+    x(&mut env, Insn::Psad1, encode_psad1(&[0, 4, 5, 6]).unwrap());
+    assert_eq!(gr(&env, 4), 35);
+    // mpy4: 32 ビット要素ごとの積の下位 32 ビット（Poulson）。
+    set_gr(&mut env, 5, 0x0000_0004_0000_0003);
+    set_gr(&mut env, 6, 0x0000_0005_0000_0006);
+    x(&mut env, Insn::Mpy4, encode_mpy4(&[0, 4, 5, 6]).unwrap());
+    assert_eq!(gr(&env, 4), 0x0000_0014_0000_0012);
+    // pmpy2.r: 要素 0/2 の符号つき積を 32 ビットで置く。
+    set_gr(&mut env, 5, p16(3, 0xffff, 5, 7));
+    set_gr(&mut env, 6, p16(4, 2, 6, 8));
+    x(
+        &mut env,
+        Insn::Pmpy2R,
+        encode_pmpy2_r(&[0, 4, 5, 6]).unwrap(),
+    );
+    assert_eq!(gr(&env, 4), 0x0000_001e_0000_000c); // 5*6=30, 3*4=12
+    // pmpy2.l: 要素 1/3。(-1)*2=-2、7*8=56。
+    x(
+        &mut env,
+        Insn::Pmpy2L,
+        encode_pmpy2_l(&[0, 4, 5, 6]).unwrap(),
+    );
+    assert_eq!(gr(&env, 4), 0x0000_0038_ffff_fffe);
+    // pmpyshr2（ct2d=3 → count=16）: 積の上位 16 ビット。
+    set_gr(&mut env, 5, p16(0x4000, 0x8000, 1, 0xffff));
+    set_gr(&mut env, 6, p16(2, 2, 3, 4));
+    x(
+        &mut env,
+        Insn::Pmpyshr2,
+        encode_pmpyshr2(&[0, 4, 5, 6, 3]).unwrap(),
+    );
+    // 0x4000*2=0x8000→0、-32768*2=-65536→0xffff、3→0、-4→0xffff。
+    assert_eq!(gr(&env, 4), p16(0, 0xffff, 0, 0xffff));
+    // pmpyshr2.u（ct2d=0 → count=0）: 積の下位 16 ビット。
+    x(
+        &mut env,
+        Insn::Pmpyshr2U,
+        encode_pmpyshr2_u(&[0, 4, 5, 6, 0]).unwrap(),
+    );
+    // 0x8000、0x0000、3、0xfffc（0xffff*4 符号なし=0x3fffc→0xfffc）。
+    assert_eq!(gr(&env, 4), p16(0x8000, 0, 3, 0xfffc));
+}
+
+#[test]
+fn register_transfers() {
+    let mut env = env();
+    // mov r1 = ip: バンドルアドレス（下位 4 ビット 0）。
+    sem::exec(
+        &mut env.backend,
+        Insn::MovIp,
+        encode_mov_ip(&[0, 3]).unwrap(),
+        0x12342,
+    )
+    .unwrap();
+    assert_eq!(gr(&env, 3), 0x12340);
+    // mov r1 = pr。
+    sem::pr_set(&mut env.backend, (1 << 5) | (1 << 9));
+    x(&mut env, Insn::MovPr, encode_mov_pr(&[0, 3]).unwrap());
+    assert_eq!(gr(&env, 3), (1 << 5) | (1 << 9) | 1);
+    // mov to pr: imm17 のマスクで r2 を PR へ写す。
+    // mask17 の bits5,7 → m7a=0b1010000 → field = 0xa0。
+    set_gr(&mut env, 2, (1 << 5) | (1 << 7));
+    sem::pr_set(&mut env.backend, 0);
+    x(
+        &mut env,
+        Insn::MovToPr,
+        encode_mov_to_pr(&[0, 2, 0xa0]).unwrap(),
+    );
+    assert!(p(&env, 5));
+    assert!(p(&env, 7));
+    assert!(!p(&env, 6));
+    assert!(p(&env, 0)); // p0 は常に 1
+    // mov r1 = psr.um（sum/rum で書いた値が読める）。
+    x(&mut env, Insn::Sum, encode_sum(&[0, 0b101011]).unwrap());
+    x(
+        &mut env,
+        Insn::MovPsrUm,
+        encode_mov_psr_um(&[0, 4]).unwrap(),
+    );
+    assert_eq!(gr(&env, 4), 0b101011);
+    x(&mut env, Insn::Rum, encode_rum(&[0, 0b001010]).unwrap());
+    x(
+        &mut env,
+        Insn::MovPsrUm,
+        encode_mov_psr_um(&[0, 4]).unwrap(),
+    );
+    assert_eq!(gr(&env, 4), 0b100001);
+    // mov.pr.rot: imm44（sext44）の bits16-63 を pr.rot に写す。
+    // フィールド値 0x0fff_ffff_0000（bits{43:16}=1）→ sext44 で
+    // 0xffff_ffff_ffff_0000 → p16-63 = 1。
+    x(
+        &mut env,
+        Insn::MovPrRot,
+        encode_mov_pr_rot(&[0, 0x0fff_ffff_0000]).unwrap(),
+    );
+    for i in 16..64 {
+        assert!(p(&env, i), "p{i}");
+    }
+    // BR 転送。
+    env.backend.set(sem::br_ref(3), 0x5000);
+    x(
+        &mut env,
+        Insn::MovFromBr,
+        encode_mov_from_br(&[0, 4, 3]).unwrap(),
+    );
+    assert_eq!(gr(&env, 4), 0x5000);
+    set_gr(&mut env, 5, 0x6000);
+    x(&mut env, Insn::MovBr, encode_mov_br(&[0, 2, 5, 0]).unwrap());
+    assert_eq!(env.backend.get(sem::br_ref(2)), 0x6000);
+    // mov.ret も BR 書き込み（ret の予報タグは無視）。
+    x(
+        &mut env,
+        Insn::MovRet,
+        encode_mov_ret(&[0, 2, 5, 0]).unwrap(),
+    );
+    assert_eq!(env.backend.get(sem::br_ref(2)), 0x6000);
+    // ソース NaT は消費フォールト骨格 → TRAP_NAT。
+    sem::nat_set(&mut env.backend, 5, true);
+    assert_eq!(
+        xerr(&mut env, Insn::MovBr, encode_mov_br(&[0, 2, 5, 0]).unwrap()),
+        sem::TRAP_NAT
+    );
+}
+
+#[test]
+fn ar_transfers() {
+    let mut env = env();
+    // mov.i ar.lc = r10 → mov.i r11 = ar.lc の往復。
+    set_gr(&mut env, 10, 1234);
+    x(
+        &mut env,
+        Insn::MovIToAr,
+        encode_mov_i_to_ar(&[0, 65, 10]).unwrap(),
+    );
+    x(
+        &mut env,
+        Insn::MovIFromAr,
+        encode_mov_i_from_ar(&[0, 11, 65]).unwrap(),
+    );
+    assert_eq!(gr(&env, 11), 1234);
+    // mov.m ar.ccv = r10 / mov.m r11 = ar.ccv。
+    x(
+        &mut env,
+        Insn::MovMToAr,
+        encode_mov_m_to_ar(&[0, 32, 10]).unwrap(),
+    );
+    x(
+        &mut env,
+        Insn::MovMFromAr,
+        encode_mov_m_from_ar(&[0, 11, 32]).unwrap(),
+    );
+    assert_eq!(gr(&env, 11), 1234);
+    // ar.itc は M 側から読める（既定 0）。
+    env.backend.set(
+        StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, itc)),
+        0x777,
+    );
+    x(
+        &mut env,
+        Insn::MovMFromAr,
+        encode_mov_m_from_ar(&[0, 11, 44]).unwrap(),
+    );
+    assert_eq!(gr(&env, 11), 0x777);
+    // I 形式は pfs/lc/ec 以外を触れない（unat は M 専用）。
+    assert_eq!(
+        xerr(
+            &mut env,
+            Insn::MovIFromAr,
+            encode_mov_i_from_ar(&[0, 11, 36]).unwrap()
+        ),
+        sem::TRAP_ILL
+    );
+    // ar.itc への書き込みは読み取り専用 → 不正。
+    assert_eq!(
+        xerr(
+            &mut env,
+            Insn::MovMToAr,
+            encode_mov_m_to_ar(&[0, 44, 10]).unwrap()
+        ),
+        sem::TRAP_ILL
+    );
+    // ar.rsc へのユーザ書き込みはカーネル AR → フォールト。
+    assert_eq!(
+        xerr(
+            &mut env,
+            Insn::MovMToAr,
+            encode_mov_m_to_ar(&[0, 16, 10]).unwrap()
+        ),
+        sem::TRAP_ILL
+    );
+    // bspstore 書き込みは bsp も更新される（rsc.mode=0 のとき）。
+    x(
+        &mut env,
+        Insn::MovMToAr,
+        encode_mov_m_to_ar(&[0, 18, 10]).unwrap(),
+    );
+    assert_eq!(
+        env.backend
+            .get(StateRef::<W64>::from_offset(core::mem::offset_of!(
+                CpuState, bspstore
+            ))),
+        1234
+    );
+    assert_eq!(
+        env.backend
+            .get(StateRef::<W64>::from_offset(core::mem::offset_of!(
+                CpuState, bsp
+            ))),
+        1234
+    );
+}
+
+#[test]
+fn predicated_group_step() {
+    // MII: slot0 に cmp.eq（A 型は M スロットに置ける）、slot1 に
+    // (p6) add、slot2 に (p7) add。1 群内で cmp の結果が述語として
+    // 後続スロットへ届く。
+    let mut env = run_env();
+    sem::gr_set(&mut env.backend, 1, 40);
+    sem::gr_set(&mut env.backend, 2, 40);
+    let cmp = encode_cmp_eq(&[0, 6, 7, 1, 2]).unwrap() as u64;
+    let add4 = encode_add(&[6, 4, 1, 2]).unwrap() as u64;
+    let add5 = encode_add(&[7, 5, 1, 2]).unwrap() as u64;
+    put_bundle(&mut env, BASE, mk_bundle(0, true, cmp, add4, add5));
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(sem::gr_get(&env.backend, 4), 80); // p6 成立 → 実行
+    assert_eq!(sem::gr_get(&env.backend, 5), 0); // p7 不成立 → 抑止
+    // 等しくない場合は逆。
+    let mut env = run_env();
+    sem::gr_set(&mut env.backend, 1, 40);
+    sem::gr_set(&mut env.backend, 2, 41);
+    put_bundle(&mut env, BASE, mk_bundle(0, true, cmp, add4, add5));
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(sem::gr_get(&env.backend, 4), 0);
+    assert_eq!(sem::gr_get(&env.backend, 5), 81);
+}
+
+#[test]
+fn m_unit_break_nop_extr_u() {
+    // M43: nop.m / hint.m / break.m が M スロットで解読される。
+    let w = encode_nop_m(&[0, 0x11]).unwrap();
+    assert_eq!(bundle::decode_slot(Unit::M, w, CPU), Some(Insn::NopM));
+    let w = encode_break_m(&[0, 0x123]).unwrap();
+    assert_eq!(bundle::decode_slot(Unit::M, w, CPU), Some(Insn::BreakM));
+    // 意味論: nop.m は無害、break.m は即値を code に載せる。
+    let mut env = env();
+    assert!(x(&mut env, Insn::NopM, encode_nop_m(&[0, 0]).unwrap()));
+    assert!(x(&mut env, Insn::HintM, encode_hint_m(&[0, 0]).unwrap()));
+    assert_eq!(
+        xerr(&mut env, Insn::BreakM, encode_break_m(&[0, 0x123]).unwrap()),
+        0x123
+    );
+    // extr.u は I スロットで解読・逆アセンブルされる。
+    let w = encode_extr_u(&[0, 4, 5, 8, 7]).unwrap();
+    assert_eq!(bundle::decode_slot(Unit::I, w, CPU), Some(Insn::ExtrU));
+    let t = disasm_word_ex(w, 41, true, CPU | FEAT_UNIT_I | FEAT_UNIT_A).unwrap();
+    assert!(t.contains("extr.u"), "{t}");
+    // .unc の逆アセンブルは単一の点（..unc にならない）。
+    let w = encode_cmp_lt_unc(&[0, 5, 6, 10, 11]).unwrap();
+    let t = disasm_word_ex(w, 41, true, CPU | FEAT_UNIT_I | FEAT_UNIT_A).unwrap();
+    assert!(t.contains("cmp.lt.unc"), "{t}");
+    assert!(!t.contains(".."), "{t}");
 }
