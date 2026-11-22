@@ -43,7 +43,6 @@
 
 | # | 内容 | 前提 | 判定 |
 |---|---|---|---|
-| IA4 | `run_ia64` 実行ループ: バンドル進行と RIP 管理 + bare 最小テスト | IA3 | - |
 | IA5 | 整数算術・比較・述語生成・シフト/extr/mix 系 | IA4 | - |
 | IA6 | load/store・ALAT（advanced load と check）・chk.s/chk.a・mf | IA4 | - |
 | IA7 | 分岐: br.cond/br.call/br.ret/br.cloop/br.cexit/br.wexit・述語実行 | IA4 | - |

@@ -3,13 +3,34 @@
 //! IA-64 の命令意味論（段階21 の骨格）。
 //!
 //! 具体値インタプリタ（`InterpBackend`）上で動く。命令の実装は
-//! IA5 以降で足し、この骨格では全命令を `Unimplemented` で落とす。
+//! IA5 以降で足す。IA4 では進行検査のための最小集合（nop/hint・
+//! `break` の Trap 退出・add/adds/addl/movl/mov.ip/br.cond.sptk.few）
+//! だけを実装し、残りは `Unimplemented` で落とす。
 //! Ref: SPEC-IA64-SDM (Rev 2.3).
 
-use polyisa_engine::interp::{InterpBackend, InterpExit};
-use polyisa_sem::{StateRef, W64};
+use polyisa_engine::interp::{Ctrl, InterpBackend, InterpExit};
+use polyisa_sem::{ExceptionKind, GuestException, StateRef, W64};
 
-use crate::{CpuState, Insn};
+use crate::{CpuState, Insn, extract_ops};
+
+/// `handle_trap` に渡る内部番号。`break` は即値（immu21/imm62）を
+/// そのまま code に載せるため、ぶつからない値を不正命令用に取る。
+pub const TRAP_ILL: u64 = u64::MAX;
+
+fn trap(code: u64) -> InterpExit {
+    InterpExit::Exception(GuestException {
+        kind: ExceptionKind::Trap,
+        code,
+        addr: None,
+        in_delay_slot: false,
+    })
+}
+
+/// 符号拡張（bits は元の幅）。
+fn sext(v: u64, bits: u32) -> u64 {
+    let sh = 64 - bits;
+    (((v << sh) as i64) >> sh) as u64
+}
 
 fn get64(b: &InterpBackend, r: StateRef<W64>) -> u64 {
     let off = r.offset();
@@ -110,8 +131,58 @@ pub fn cfm_ref() -> StateRef<W64> {
 
 /// 1 スロットぶんの意味論。`ip` はこの命令の命令ポインタ（下位
 /// 4 ビットがスロット番号）、`word` はスロット語（41 ビット。
-/// X 系は 82 ビット）。骨格では全命令を未実装として落とす。
+/// X 系は 82 ビット）。修飾述語 qp（word[5:0]）が偽なら意味論を
+/// 実行せず `Ok(false)` で進む（副作用の一括抑制はこの入口が担う。
+/// cmp 系のように qp 偽でも述語を書く形式は IA5 が個別に扱う）。
+/// `Ok(true)` は意味論を実行したこと。
 pub fn exec(b: &mut InterpBackend, insn: Insn, word: u128, ip: u64) -> Result<bool, InterpExit> {
-    let _ = (b, word, ip);
-    Err(InterpExit::Unimplemented(format!("{insn:?}")))
+    if !pred(b, (word & 0x3f) as u32) {
+        return Ok(false);
+    }
+    let ops = extract_ops(insn, word);
+    match insn {
+        Insn::NopI
+        | Insn::NopF
+        | Insn::NopB
+        | Insn::NopX
+        | Insn::HintI
+        | Insn::HintF
+        | Insn::HintB
+        | Insn::HintX => {}
+        Insn::BreakI | Insn::BreakF | Insn::BreakB | Insn::BreakX => {
+            // code は即値。0x100000（__IA64_BREAK_SYSCALL）の意味は
+            // OS パーソナリティ側（IA10/IA11）が解釈する。
+            return Err(trap(ops[1]));
+        }
+        // 進行検査のための最小意味論。NaT は伝播だけを入れ、NaT
+        // 消費の検査は IA6 に譲る。
+        Insn::Add => {
+            let v = gr_get(b, ops[2] as u32).wrapping_add(gr_get(b, ops[3] as u32));
+            let nat = nat_get(b, ops[2] as u32) || nat_get(b, ops[3] as u32);
+            gr_set(b, ops[1] as u32, v);
+            nat_set(b, ops[1] as u32, nat);
+        }
+        Insn::Adds | Insn::Addl => {
+            let bits = if insn == Insn::Adds { 14 } else { 22 };
+            let v = sext(ops[2], bits).wrapping_add(gr_get(b, ops[3] as u32));
+            let nat = nat_get(b, ops[3] as u32);
+            gr_set(b, ops[1] as u32, v);
+            nat_set(b, ops[1] as u32, nat);
+        }
+        Insn::Movl => {
+            gr_set(b, ops[1] as u32, ops[2]);
+            nat_set(b, ops[1] as u32, false);
+        }
+        Insn::MovIp => {
+            // 建築の IP はバンドルアドレス（下位 4 ビットは常に 0）。
+            gr_set(b, ops[1] as u32, ip & !0xf);
+            nat_set(b, ops[1] as u32, false);
+        }
+        Insn::BrCondSptkFew => {
+            // tgt25c は IP 相対（バンドルアドレス基準、下位 4 ビット 0）。
+            b.ctrl = Ctrl::Jump((ip & !0xf).wrapping_add(sext(ops[1], 25)));
+        }
+        _ => return Err(InterpExit::Unimplemented(format!("{insn:?}"))),
+    }
+    Ok(true)
 }

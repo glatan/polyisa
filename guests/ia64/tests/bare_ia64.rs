@@ -11,9 +11,9 @@ use polyisa_guest_ia64::bundle::{self, Unit};
 use polyisa_guest_ia64::{
     CpuState, FEAT_ITANIUM, FEAT_ITANIUM2, FEAT_UNIT_A, FEAT_UNIT_I, IP_SLOT_MASK, Insn,
     decode_model_ex, disasm_word_ex, encode_add, encode_br_cond_sptk_few, encode_break_f,
-    encode_brl_cond_sptk_few, encode_cmp_lt_or, encode_fma_s0, encode_hint_f, encode_ld4,
-    encode_mov_ip, encode_movl, encode_nop_f, encode_nop_i, encode_nop_x, encode_padd1,
-    encode_pcmp4_eq, encode_psub1, encode_st4, encode_sub_imm8, extract_ops, sem,
+    encode_break_i, encode_brl_cond_sptk_few, encode_cmp_lt_or, encode_fma_s0, encode_hint_f,
+    encode_ld4, encode_mov_ip, encode_movl, encode_nop_b, encode_nop_f, encode_nop_i, encode_nop_x,
+    encode_padd1, encode_pcmp4_eq, encode_psub1, encode_st4, encode_sub_imm8, extract_ops, sem,
 };
 
 fn env() -> BareEnv {
@@ -93,8 +93,29 @@ fn ip_slot_field() {
 #[test]
 fn exec_is_unimplemented() {
     let mut env = env();
-    let e = sem::exec(&mut env.backend, Insn::Add, 0, 0).unwrap_err();
+    let e = sem::exec(&mut env.backend, Insn::FmaS0, 0, 0).unwrap_err();
     assert!(matches!(e, InterpExit::Unimplemented(_)));
+}
+
+#[test]
+fn exec_qp_suppression() {
+    let mut env = env();
+    // qp が偽なら意味論を実行しない（副作用なしで進む）。
+    sem::gr_set(&mut env.backend, 1, 40);
+    sem::gr_set(&mut env.backend, 2, 2);
+    let w = encode_add(&[6, 4, 1, 2]).unwrap(); // (p6) add r4 = r1, r2
+    let ok = sem::exec(&mut env.backend, Insn::Add, w, 0).unwrap();
+    assert!(!ok);
+    assert_eq!(sem::gr_get(&env.backend, 4), 0);
+    // qp が偽なら未実装の命令でも落ちない。
+    let ld = encode_ld4(&[6, 4, 2]).unwrap();
+    let ok = sem::exec(&mut env.backend, Insn::Ld4, ld, 0).unwrap();
+    assert!(!ok);
+    // p6 を立てると実行される。
+    sem::pr_set(&mut env.backend, 1 << 6);
+    let ok = sem::exec(&mut env.backend, Insn::Add, w, 0).unwrap();
+    assert!(ok);
+    assert_eq!(sem::gr_get(&env.backend, 4), 42);
 }
 
 // ---- 段階21 IA3: バンドル・スロット語・生成符号化の最小検査 ----
@@ -422,4 +443,264 @@ fn brl_cond_btype_pinned() {
         bundle::decode_slot(Unit::X, w | (4u128 << 6), CPU),
         Some(Insn::BrlCondSptkFew)
     );
+}
+
+// ---- 段階21 IA4: 実行ループ（バンドル進行・RIP 管理）の最小検査 ----
+// `run::step` が RIP（バンドルアドレス|スロット番号）で 16 バイトの
+// バンドルを読み、命令群を stop・末端・分岐成立で切ることを確かめる。
+// Ref: SPEC-IA64-SDM (Rev 2.3).
+
+use polyisa_engine::run::{Outcome, TrapHandler, TrapOutcome};
+use polyisa_guest_ia64::run;
+use polyisa_mem::{Perms, VirtAddr};
+
+const BASE: u64 = 0x1_0000;
+
+/// トラップを捌かないハンドラ。`handled` 記録つきの別型を下で使う。
+struct NoSys;
+
+impl TrapHandler for NoSys {
+    fn handle_trap(&mut self, _env: &mut BareEnv, _code: u32) -> TrapOutcome {
+        TrapOutcome::Unimplemented
+    }
+}
+
+/// 実行・読み書き可能なページを BASE に写像した環境。
+fn run_env() -> BareEnv {
+    let mut env = env();
+    env.backend
+        .mem
+        .map(VirtAddr(BASE), 1, Perms(Perms::RW.0 | Perms::X.0))
+        .unwrap();
+    env
+}
+
+fn put_bundle(env: &mut BareEnv, addr: u64, b: u128) {
+    env.backend
+        .mem
+        .write(VirtAddr(addr), &b.to_le_bytes())
+        .unwrap();
+}
+
+fn step(env: &mut BareEnv) -> Result<(), Outcome> {
+    run::step(env, &mut NoSys, CPU)
+}
+
+#[test]
+fn bundle_group_progression() {
+    // MII（テンプレート 0）に stop ビット。3 スロットが 1 群で進む。
+    let mut env = run_env();
+    sem::gr_set(&mut env.backend, 1, 40);
+    sem::gr_set(&mut env.backend, 2, 2);
+    let add4 = encode_add(&[0, 4, 1, 2]).unwrap() as u64;
+    let add5 = encode_add(&[0, 5, 1, 2]).unwrap() as u64;
+    let nop = encode_nop_i(&[0, 0]).unwrap() as u64;
+    put_bundle(&mut env, BASE, mk_bundle(0, true, add4, add5, nop));
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(sem::gr_get(&env.backend, 4), 42);
+    assert_eq!(sem::gr_get(&env.backend, 5), 42);
+    assert_eq!(env.pc, BASE + 16);
+    // 状態の ip 面も次の命令位置に同期する。
+    use polyisa_sem::Backend as _;
+    assert_eq!(env.backend.get(sem::ip_ref()), BASE + 16);
+}
+
+#[test]
+fn stop_boundary_splits_step() {
+    // MII（テンプレート 1）は slot1 後にストップ。1 ステップは
+    // slot0-1 だけを進め、次は slot2 から。
+    let mut env = run_env();
+    sem::gr_set(&mut env.backend, 1, 40);
+    sem::gr_set(&mut env.backend, 2, 2);
+    let add4 = encode_add(&[0, 4, 1, 2]).unwrap() as u64;
+    let add5 = encode_add(&[0, 5, 1, 2]).unwrap() as u64;
+    let add6 = encode_add(&[0, 6, 1, 2]).unwrap() as u64;
+    put_bundle(&mut env, BASE, mk_bundle(1, true, add4, add5, add6));
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, BASE | 2);
+    assert_eq!(sem::gr_get(&env.backend, 5), 42);
+    assert_eq!(sem::gr_get(&env.backend, 6), 0);
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, BASE + 16);
+    assert_eq!(sem::gr_get(&env.backend, 6), 42);
+}
+
+#[test]
+fn slot_entry_and_ip_read() {
+    // スロット 1 への進入。slot1 の mov r3 = ip はバンドル
+    // アドレス（建築の IP は下位 4 ビット 0）を読む。
+    let mut env = run_env();
+    let nop = encode_nop_i(&[0, 0]).unwrap() as u64;
+    let movip = encode_mov_ip(&[0, 3]).unwrap() as u64;
+    put_bundle(&mut env, BASE, mk_bundle(0, true, nop, movip, nop));
+    env.pc = BASE | 1;
+    step(&mut env).unwrap();
+    assert_eq!(sem::gr_get(&env.backend, 3), BASE);
+    assert_eq!(env.pc, BASE + 16);
+}
+
+#[test]
+fn mlx_lx_insn_progresses_as_one() {
+    // MLX は slot1+slot2 が 1 命令。スロット 1 への進入で L+X
+    // 命令が走り、スロット番号 1 の ip を持つ。
+    let mut env = run_env();
+    let add = encode_add(&[0, 4, 1, 2]).unwrap() as u64;
+    let movl = encode_movl(&[0, 8, 0x0123_4567_89ab_cdef]).unwrap();
+    let x_lo = (movl & ((1u128 << 41) - 1)) as u64;
+    let l_hi = (movl >> 41) as u64;
+    let b = mk_bundle(2, true, add, l_hi, x_lo);
+    // slot0 からの通常進行。
+    sem::gr_set(&mut env.backend, 1, 40);
+    sem::gr_set(&mut env.backend, 2, 2);
+    put_bundle(&mut env, BASE, b);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(sem::gr_get(&env.backend, 4), 42);
+    assert_eq!(sem::gr_get(&env.backend, 8), 0x0123_4567_89ab_cdef);
+    assert_eq!(env.pc, BASE + 16);
+    // slot1 への進入も同じ命令を実行する。
+    sem::gr_set(&mut env.backend, 8, 0);
+    env.pc = BASE | 1;
+    step(&mut env).unwrap();
+    assert_eq!(sem::gr_get(&env.backend, 8), 0x0123_4567_89ab_cdef);
+    assert_eq!(env.pc, BASE + 16);
+    // slot2 への進入は長命令の途中で、不正として TRAP_ILL に
+    // 落ちる（NoSys は Unimplemented を返す）。
+    env.pc = BASE | 2;
+    assert_eq!(
+        step(&mut env),
+        Err(Outcome::Unimplemented {
+            pc: BASE | 2,
+            word: 0
+        })
+    );
+}
+
+#[test]
+fn taken_branch_skips_group_tail() {
+    // MBB（テンプレート 9）で slot1 の br.cond が成立したら
+    // slot2 の br.cond（別の着地点）は実行しない。
+    let mut env = run_env();
+    let t1 = 0x2_0000u64;
+    let t2 = 0x3_0000u64;
+    let add = encode_add(&[0, 4, 1, 2]).unwrap() as u64;
+    // tgt25c はバンドルアドレスからの変位（下位 4 ビット 0 の値）。
+    let br1 = encode_br_cond_sptk_few(&[0, t1 - BASE]).unwrap() as u64;
+    let br2 = encode_br_cond_sptk_few(&[0, t2 - BASE]).unwrap() as u64;
+    put_bundle(&mut env, BASE, mk_bundle(9, true, add, br1, br2));
+    sem::gr_set(&mut env.backend, 1, 40);
+    sem::gr_set(&mut env.backend, 2, 2);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(sem::gr_get(&env.backend, 4), 42);
+    assert_eq!(env.pc, t1);
+}
+
+#[test]
+fn qp_false_branch_not_taken() {
+    // (p6) br.cond で p6 が偽ならスルーして次の命令位置へ進む。
+    let mut env = run_env();
+    let t1 = 0x2_0000u64;
+    let add = encode_add(&[0, 4, 1, 2]).unwrap() as u64;
+    let br = encode_br_cond_sptk_few(&[6, t1 - BASE]).unwrap() as u64;
+    let nop = encode_nop_b(&[0, 0]).unwrap() as u64;
+    put_bundle(&mut env, BASE, mk_bundle(9, true, add, br, nop));
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, BASE + 16);
+    // p6 を立てると成立する。
+    sem::pr_set(&mut env.backend, 1 << 6);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, t1);
+}
+
+#[test]
+fn break_traps_and_resumes_at_next_insn() {
+    // break.i は即値を code に載せて OS パーソナリティへ渡り、
+    // Handled なら次の命令位置（スロットを 1 進めた ip）で再開。
+    struct Rec {
+        code: u32,
+    }
+    impl TrapHandler for Rec {
+        fn handle_trap(&mut self, _env: &mut BareEnv, code: u32) -> TrapOutcome {
+            self.code = code;
+            TrapOutcome::Handled
+        }
+    }
+    let mut env = run_env();
+    let mut sys = Rec { code: 0 };
+    let add = encode_add(&[0, 4, 1, 2]).unwrap() as u64;
+    let brk = encode_break_i(&[0, 0x100000]).unwrap() as u64;
+    let nop = encode_nop_i(&[0, 0]).unwrap() as u64;
+    put_bundle(&mut env, BASE, mk_bundle(0, true, add, brk, nop));
+    sem::gr_set(&mut env.backend, 1, 40);
+    sem::gr_set(&mut env.backend, 2, 2);
+    env.pc = BASE;
+    run::step(&mut env, &mut sys, CPU).unwrap();
+    assert_eq!(sys.code, 0x100000);
+    assert_eq!(sem::gr_get(&env.backend, 4), 42);
+    assert_eq!(env.pc, BASE | 2);
+}
+
+#[test]
+fn exit_outcome_propagates() {
+    struct ExitSys;
+    impl TrapHandler for ExitSys {
+        fn handle_trap(&mut self, _env: &mut BareEnv, _code: u32) -> TrapOutcome {
+            TrapOutcome::Exit(42)
+        }
+    }
+    let mut env = run_env();
+    let brk = encode_break_i(&[0, 0x100000]).unwrap() as u64;
+    let nop = encode_nop_i(&[0, 0]).unwrap() as u64;
+    put_bundle(&mut env, BASE, mk_bundle(0, true, nop, brk, nop));
+    env.pc = BASE;
+    let mut sys = ExitSys;
+    assert_eq!(run::step(&mut env, &mut sys, CPU), Err(Outcome::Exit(42)));
+}
+
+#[test]
+fn reserved_template_is_ill() {
+    // 予約テンプレート（3）は TRAP_ILL。NoSys は Unimplemented。
+    let mut env = run_env();
+    let nop = encode_nop_i(&[0, 0]).unwrap() as u64;
+    put_bundle(&mut env, BASE, mk_bundle(3, true, nop, nop, nop));
+    env.pc = BASE;
+    assert!(matches!(
+        step(&mut env),
+        Err(Outcome::Unimplemented { pc: BASE, .. })
+    ));
+}
+
+#[test]
+fn run_loop_exits_via_driver() {
+    // engine::run::run 駆動で 2 バンドル進んで break → Exit。
+    struct ExitSys;
+    impl TrapHandler for ExitSys {
+        fn handle_trap(&mut self, _env: &mut BareEnv, _code: u32) -> TrapOutcome {
+            TrapOutcome::Exit(7)
+        }
+    }
+    let mut env = run_env();
+    let add = encode_add(&[0, 4, 1, 2]).unwrap() as u64;
+    let nop = encode_nop_i(&[0, 0]).unwrap() as u64;
+    let brk = encode_break_i(&[0, 0x100000]).unwrap() as u64;
+    put_bundle(&mut env, BASE, mk_bundle(0, true, add, nop, nop));
+    put_bundle(&mut env, BASE + 16, mk_bundle(0, true, nop, brk, nop));
+    sem::gr_set(&mut env.backend, 1, 40);
+    sem::gr_set(&mut env.backend, 2, 2);
+    env.pc = BASE;
+    let mut sys = ExitSys;
+    let o = polyisa_engine::run::run(
+        &mut env,
+        &mut sys,
+        16,
+        |env| env.pc,
+        |env, sys| run::step(env, sys, CPU),
+    );
+    assert_eq!(o, Outcome::Exit(7));
+    assert_eq!(sem::gr_get(&env.backend, 4), 42);
 }

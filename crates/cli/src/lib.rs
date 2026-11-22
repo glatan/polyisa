@@ -10,6 +10,8 @@ pub mod run_aarch64;
 pub mod run_alpha;
 #[cfg(feature = "guest-arm")]
 pub mod run_arm;
+#[cfg(feature = "guest-ia64")]
+pub mod run_ia64;
 #[cfg(feature = "guest-loongarch")]
 pub mod run_loongarch;
 #[cfg(feature = "guest-m68k")]
@@ -91,6 +93,7 @@ pub fn parse_cpu_spec(s: &str) -> Result<CpuSpec, String> {
     feature = "guest-aarch64",
     feature = "guest-alpha",
     feature = "guest-arm",
+    feature = "guest-ia64",
     feature = "guest-m68k",
     feature = "guest-mips",
     feature = "guest-parisc",
