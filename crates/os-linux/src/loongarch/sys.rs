@@ -43,6 +43,7 @@ mod errno {
     pub const EFAULT: u64 = 14;
     pub const EINVAL: u64 = 22;
     pub const ENOTTY: u64 = 25;
+    pub const ENOTDIR: u64 = 20;
     pub const ERANGE: u64 = 34;
     pub const ENAMETOOLONG: u64 = 36;
     pub const ENOSYS: u64 = 38;
@@ -77,15 +78,21 @@ pub struct Linux {
     pid: u64,
     /// ゲストの作業ディレクトリ。空はホストの作業ディレクトリ。
     cwd: String,
+    /// ゲストのルート。空は隔離なし（従来動作）。
+    guest_root: String,
     /// 実行ファイルのパス。`readlinkat("/proc/self/exe")` が返す。
     pub exe_path: String,
     /// 標準入力へ供給するバイト。
     pub stdin_buf: Vec<u8>,
     stdin_pos: usize,
+    /// ディレクトリ fd の getdents 位置（次に出すエントリの添字）。
+    dir_pos: std::collections::BTreeMap<u32, u64>,
     /// MONOTONIC 時計の起点。
     mono_start: Option<std::time::Instant>,
     /// LA32 モデルか（ポインタ引数を 32 ビットに折り返す）。
     pub la64: bool,
+    /// umask の保持値。
+    umask: u32,
     /// 報告済みの未実装番号（一度だけ出す）。
     reported: Vec<u64>,
 }
@@ -114,13 +121,21 @@ impl Linux {
             mmap_next: 0x0000_0000_7000_0000,
             pid: std::process::id().into(),
             cwd: String::new(),
+            guest_root: String::new(),
             exe_path: String::new(),
             stdin_buf: Vec::new(),
             stdin_pos: 0,
+            dir_pos: std::collections::BTreeMap::new(),
             mono_start: None,
             la64: true,
+            umask: 0o22,
             reported: Vec::new(),
         }
+    }
+
+    /// ゲストのルートを設定する（`--root`・テストの chroot 相当）。
+    pub fn set_guest_root(&mut self, root: &str) {
+        self.guest_root = root.to_string();
     }
 
     /// アクセス属性（常に LE・非整列許容）。
@@ -325,6 +340,7 @@ impl Linux {
     }
 
     /// `openat`（O_* フラグは asm-generic の値）。
+    /// O_NOFOLLOW（0o400000）がなければ最終要素のリンクを辿る。
     fn sys_openat(
         &mut self,
         env: &mut BareEnv,
@@ -334,8 +350,14 @@ impl Linux {
         _mode: u64,
     ) -> Result<u64, u64> {
         let guest_path = self.cstr(env, path)?;
-        let Some(full) = self.host_path(dirfd, &guest_path) else {
-            return Err(errno::EBADF);
+        const O_NOFOLLOW: u64 = 0o400000;
+        let full = if flags & O_NOFOLLOW != 0 {
+            self.host_path(dirfd, &guest_path)
+        } else {
+            self.host_path_followed(dirfd, &guest_path)
+        };
+        let Some(full) = full else {
+            return Err(errno::EACCES);
         };
         let accmode = flags & 3;
         let mut opt = std::fs::OpenOptions::new();
@@ -407,35 +429,551 @@ impl Linux {
         Ok(0)
     }
 
-    /// `newfstatat`（AT_FDCWD と通常パス。flag は最小限）。
+    /// `newfstatat`。AT_SYMLINK_NOFOLLOW（0x100）で最終要素の
+    /// リンク解釈を止める。
     fn sys_fstatat(
         &mut self,
         env: &mut BareEnv,
         dirfd: u64,
         path: u64,
         addr: u64,
+        flags: u64,
+    ) -> Result<u64, u64> {
+        let guest_path = self.cstr(env, path)?;
+        const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
+        let full = if flags & AT_SYMLINK_NOFOLLOW != 0 {
+            self.host_path(dirfd, &guest_path)
+        } else {
+            self.host_path_followed(dirfd, &guest_path)
+        };
+        let Some(full) = full else {
+            return Err(errno::EACCES);
+        };
+        let md = if flags & AT_SYMLINK_NOFOLLOW != 0 {
+            polyisa_host::lstat(&full)
+        } else {
+            polyisa_host::stat(&full)
+        }
+        .map_err(|e| host_errno(e.raw_os_error()))?;
+        self.put_stat(env, addr, &md)?;
+        Ok(0)
+    }
+
+    /// `statx`（asm-generic の `struct statx`、256 バイト）。
+    /// Ref: SRC-LINUX — include/uapi/linux/stat.h.
+    fn sys_statx(
+        &mut self,
+        env: &mut BareEnv,
+        dirfd: u64,
+        path: u64,
+        flags: u64,
+        _mask: u64,
+        out: u64,
+    ) -> Result<u64, u64> {
+        let guest_path = self.cstr(env, path)?;
+        const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
+        const AT_EMPTY_PATH: u64 = 0x1000;
+        let full = if flags & AT_EMPTY_PATH != 0 && guest_path.is_empty() {
+            self.fds
+                .path_of(dirfd as u32)
+                .map(str::to_string)
+                .unwrap_or_default()
+        } else if flags & AT_SYMLINK_NOFOLLOW != 0 {
+            match self.host_path(dirfd, &guest_path) {
+                Some(p) => p,
+                None => return Err(errno::EACCES),
+            }
+        } else {
+            match self.host_path_followed(dirfd, &guest_path) {
+                Some(p) => p,
+                None => return Err(errno::EACCES),
+            }
+        };
+        let md = if flags & AT_SYMLINK_NOFOLLOW != 0 {
+            polyisa_host::lstat(&full)
+        } else {
+            polyisa_host::stat(&full)
+        }
+        .map_err(|e| host_errno(e.raw_os_error()))?;
+        let mut b = [0u8; 256];
+        let w32 = |v: u32, b: &mut [u8]| b.copy_from_slice(&v.to_le_bytes());
+        let w64 = |v: u64, b: &mut [u8]| b.copy_from_slice(&v.to_le_bytes());
+        w32(0x1fff, &mut b[0..4]); // mask = STATX_ALL
+        w32(4096, &mut b[4..8]); // blksize
+        w64(0, &mut b[8..16]); // attributes
+        w32(md.nlink as u32, &mut b[16..20]);
+        w32(md.uid, &mut b[20..24]);
+        w32(md.gid, &mut b[24..28]);
+        w32(md.mode as u16 as u32, &mut b[28..32]);
+        w64(md.ino, &mut b[40..48]);
+        w64(md.size, &mut b[48..56]);
+        w64(md.blocks, &mut b[56..64]);
+        w64(0x1fff, &mut b[64..72]); // attributes_mask
+        w64(md.atime as u64, &mut b[80..88]);
+        w32(md.atime_nsec as u32, &mut b[88..92]);
+        w64(md.ctime as u64, &mut b[112..120]);
+        w32(md.ctime_nsec as u32, &mut b[120..124]);
+        w64(md.mtime as u64, &mut b[128..136]);
+        w32(md.mtime_nsec as u32, &mut b[136..140]);
+        w32(md.rdev as u32, &mut b[144..148]);
+        w32(md.dev as u32, &mut b[152..156]);
+        self.put_bytes(env, out, &b)?;
+        Ok(0)
+    }
+
+    /// `faccessat`。実在確認だけ（モードの検査はしない）。
+    fn sys_faccessat(
+        &mut self,
+        env: &mut BareEnv,
+        dirfd: u64,
+        path: u64,
+        _mode: u64,
         _flags: u64,
     ) -> Result<u64, u64> {
         let guest_path = self.cstr(env, path)?;
+        let Some(full) = self.host_path_followed(dirfd, &guest_path) else {
+            return Err(errno::EACCES);
+        };
+        match std::fs::metadata(&full) {
+            Ok(_) => Ok(0),
+            Err(e) => Err(host_errno(e.raw_os_error())),
+        }
+    }
+
+    /// `getdents64`。linux_dirent64: u64 d_ino, u64 d_off, u16 d_reclen,
+    /// u8 d_type, name\0。`.`/`..` を先頭に合成する。
+    fn sys_getdents64(
+        &mut self,
+        env: &mut BareEnv,
+        fd: u32,
+        buf: u64,
+        count: u64,
+    ) -> Result<u64, u64> {
+        let path = self.fds.path_of(fd).map(str::to_string).unwrap_or_default();
+        if path.is_empty() {
+            return Err(errno::ENOTDIR);
+        }
+        let rd = std::fs::read_dir(&path).map_err(|e| host_errno(e.raw_os_error()))?;
+        let mut entries: Vec<(u64, String, u8)> = rd
+            .filter_map(std::result::Result::ok)
+            .map(|e| {
+                let ino = polyisa_host::dirent_ino(&e);
+                let ft = e.file_type().ok();
+                let t = if ft.is_some_and(|t| t.is_dir()) {
+                    4u8
+                } else if ft.is_some_and(|t| t.is_symlink()) {
+                    10
+                } else {
+                    8
+                };
+                (ino, e.file_name().to_string_lossy().into_owned(), t)
+            })
+            .collect();
+        entries.sort_by(|a, b| a.1.cmp(&b.1));
+        let mut all = vec![(1u64, ".".to_string(), 4u8), (1, "..".to_string(), 4u8)];
+        all.extend(entries);
+        let count = count as usize;
+        // 呼び出しごとに位置を進める。d_off は次のエントリの添字 +1。
+        let mut i = usize::try_from(self.dir_pos.get(&fd).copied().unwrap_or(0)).unwrap_or(0);
+        let mut out = Vec::new();
+        for (ino, name, t) in all.iter().skip(i) {
+            let reclen = 19 + name.len() + 1;
+            let aligned = reclen.next_multiple_of(8);
+            if out.len() + aligned > count {
+                break;
+            }
+            let next = (i + 1) as u64;
+            out.extend_from_slice(&ino.to_le_bytes());
+            out.extend_from_slice(&next.to_le_bytes());
+            out.extend_from_slice(&(aligned as u16).to_le_bytes());
+            out.push(*t);
+            out.extend_from_slice(name.as_bytes());
+            out.push(0);
+            out.resize(out.len() + (aligned - reclen), 0);
+            i += 1;
+        }
+        self.dir_pos.insert(fd, i as u64);
+        self.put_bytes(env, buf, &out)?;
+        Ok(out.len() as u64)
+    }
+
+    /// `gettimeofday`。timeval = {sec, usec}。
+    fn sys_gettimeofday(&mut self, env: &mut BareEnv, tv: u64, _tz: u64) -> Result<u64, u64> {
+        if tv != 0 {
+            let d = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default();
+            self.put_u64(env, tv, d.as_secs())?;
+            self.put_u64(env, tv + 8, u64::from(d.subsec_micros()))?;
+        }
+        Ok(0)
+    }
+
+    /// `sysinfo`。合成値（free 1 GiB 総メモリ 1 GiB 風）。
+    fn sys_sysinfo(&mut self, env: &mut BareEnv, addr: u64) -> Result<u64, u64> {
+        let mut b = [0u8; 112];
+        let w64 = |v: u64, b: &mut [u8]| b.copy_from_slice(&v.to_le_bytes());
+        let w32 = |v: u32, b: &mut [u8]| b.copy_from_slice(&v.to_le_bytes());
+        let w16 = |v: u16, b: &mut [u8]| b.copy_from_slice(&v.to_le_bytes());
+        let start = *self.mono_start.get_or_insert_with(std::time::Instant::now);
+        w64(start.elapsed().as_secs(), &mut b[0..8]); // uptime
+        // loads[3] は 0 のまま。
+        w64(1 << 30, &mut b[32..40]); // totalram
+        w64(1 << 30, &mut b[40..48]); // freeram
+        w64(1 << 29, &mut b[48..56]); // sharedram
+        w16(2, &mut b[104..106]); // procs
+        w32(1, &mut b[108..112]); // mem_unit
+        self.put_bytes(env, addr, &b)?;
+        Ok(0)
+    }
+
+    /// `times`。tms 4×u64 を 0 で返し、経過 tick を戻す。
+    fn sys_times(&mut self, env: &mut BareEnv, buf: u64) -> Result<u64, u64> {
+        if buf != 0 {
+            self.put_bytes(env, buf, &[0u8; 32])?;
+        }
+        let start = *self.mono_start.get_or_insert_with(std::time::Instant::now);
+        Ok(start.elapsed().as_millis() as u64 / 10)
+    }
+
+    /// `getrusage`。最小の 0 初期化（ru_utime/ru_stime のみ使う実装が多い）。
+    fn sys_getrusage(&mut self, env: &mut BareEnv, _who: u64, buf: u64) -> Result<u64, u64> {
+        self.put_bytes(env, buf, &[0u8; 144])?;
+        Ok(0)
+    }
+
+    /// `statfs`/`fstatfs` 共通の合成値書き込み（asm-generic、120 バイト）。
+    fn put_statfs(&self, env: &mut BareEnv, addr: u64) -> Result<(), u64> {
+        let mut b = [0u8; 120];
+        let w64 = |v: u64, b: &mut [u8]| b.copy_from_slice(&v.to_le_bytes());
+        w64(0x0102_1997, &mut b[0..8]); // f_type = TMPFS 風
+        w64(4096, &mut b[8..16]); // f_bsize
+        w64(1 << 20, &mut b[16..24]); // f_blocks
+        w64(1 << 19, &mut b[24..32]); // f_bfree
+        w64(1 << 19, &mut b[32..40]); // f_bavail
+        w64(255, &mut b[64..72]); // f_namelen
+        w64(4096, &mut b[72..80]); // f_frsize
+        self.put_bytes(env, addr, &b)
+    }
+
+    /// `statfs`。パスの存在確認だけ行う。
+    fn sys_statfs(&mut self, env: &mut BareEnv, path: u64, addr: u64) -> Result<u64, u64> {
+        let guest_path = self.cstr(env, path)?;
+        let Some(full) = self.host_path_followed((-100i64) as u64, &guest_path) else {
+            return Err(errno::EACCES);
+        };
+        if std::fs::metadata(&full).is_err() {
+            return Err(errno::ENOENT);
+        }
+        self.put_statfs(env, addr)?;
+        Ok(0)
+    }
+
+    /// `mkdirat`。
+    fn sys_mkdirat(
+        &mut self,
+        env: &mut BareEnv,
+        dirfd: u64,
+        path: u64,
+        _mode: u64,
+    ) -> Result<u64, u64> {
+        let guest_path = self.cstr(env, path)?;
         let Some(full) = self.host_path(dirfd, &guest_path) else {
+            return Err(errno::EACCES);
+        };
+        std::fs::create_dir(&full).map_err(|e| host_errno(e.raw_os_error()))?;
+        Ok(0)
+    }
+
+    /// `unlinkat`。AT_REMOVEDIR（0x200）で `rmdir` 扱い。
+    fn sys_unlinkat(
+        &mut self,
+        env: &mut BareEnv,
+        dirfd: u64,
+        path: u64,
+        flags: u64,
+    ) -> Result<u64, u64> {
+        let guest_path = self.cstr(env, path)?;
+        let Some(full) = self.host_path(dirfd, &guest_path) else {
+            return Err(errno::EACCES);
+        };
+        const AT_REMOVEDIR: u64 = 0x200;
+        let r = if flags & AT_REMOVEDIR != 0 {
+            std::fs::remove_dir(&full)
+        } else {
+            std::fs::remove_file(&full)
+        };
+        r.map_err(|e| host_errno(e.raw_os_error()))?;
+        Ok(0)
+    }
+
+    /// `renameat`。
+    fn sys_renameat(
+        &mut self,
+        env: &mut BareEnv,
+        oldfd: u64,
+        old: u64,
+        newfd: u64,
+        new: u64,
+    ) -> Result<u64, u64> {
+        let old_g = self.cstr(env, old)?;
+        let new_g = self.cstr(env, new)?;
+        let (Some(oh), Some(nh)) = (self.host_path(oldfd, &old_g), self.host_path(newfd, &new_g))
+        else {
+            return Err(errno::EACCES);
+        };
+        std::fs::rename(&oh, &nh).map_err(|e| host_errno(e.raw_os_error()))?;
+        Ok(0)
+    }
+
+    /// `symlinkat`（ホストの symlink として作る）。
+    fn sys_symlinkat(
+        &mut self,
+        env: &mut BareEnv,
+        target: u64,
+        newdirfd: u64,
+        linkpath: u64,
+    ) -> Result<u64, u64> {
+        let target_g = self.cstr(env, target)?;
+        let link_g = self.cstr(env, linkpath)?;
+        let Some(lh) = self.host_path(newdirfd, &link_g) else {
+            return Err(errno::EACCES);
+        };
+        polyisa_host::symlink(&target_g, &lh).map_err(|e| host_errno(e.raw_os_error()))?;
+        Ok(0)
+    }
+
+    /// `ftruncate`/`truncate`。
+    fn sys_truncate(
+        &mut self,
+        env: &mut BareEnv,
+        fd_or_path: u64,
+        is_fd: bool,
+        dirfd: u64,
+        len: u64,
+    ) -> Result<u64, u64> {
+        if is_fd {
+            let Some(f) = self.fds.get_mut(fd_or_path as u32) else {
+                return Err(errno::EBADF);
+            };
+            f.set_len(len).map_err(|e| host_errno(e.raw_os_error()))?;
+        } else {
+            let guest_path = self.cstr(env, fd_or_path)?;
+            let Some(full) = self.host_path(dirfd, &guest_path) else {
+                return Err(errno::EACCES);
+            };
+            let f = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&full)
+                .map_err(|e| host_errno(e.raw_os_error()))?;
+            f.set_len(len).map_err(|e| host_errno(e.raw_os_error()))?;
+        }
+        Ok(0)
+    }
+
+    /// `fchmod`（host chmod 相当）。
+    fn sys_fchmod(&mut self, fd: u32, mode: u64) -> Result<u64, u64> {
+        let Some(f) = self.fds.get(fd) else {
             return Err(errno::EBADF);
         };
-        let md = polyisa_host::lstat(&full).map_err(|e| host_errno(e.raw_os_error()))?;
-        self.put_stat(env, addr, &md)?;
+        polyisa_host::fchmod(f, (mode & 0o7777) as u32)
+            .map_err(|e| host_errno(e.raw_os_error()))?;
+        Ok(0)
+    }
+
+    /// `fchmodat`（AT_SYMLINK_NOFOLLOW なしのパスだけ）。
+    fn sys_fchmodat(
+        &mut self,
+        env: &mut BareEnv,
+        dirfd: u64,
+        path: u64,
+        mode: u64,
+    ) -> Result<u64, u64> {
+        let guest_path = self.cstr(env, path)?;
+        let Some(full) = self.host_path_followed(dirfd, &guest_path) else {
+            return Err(errno::EACCES);
+        };
+        polyisa_host::chmod(&full, (mode & 0o7777) as u32)
+            .map_err(|e| host_errno(e.raw_os_error()))?;
+        Ok(0)
+    }
+
+    /// `utimensat`。times が NULL なら現在時刻、配列なら
+    /// atime/mtime を mtime だけ std で近似する。
+    /// Gap: GAP-0062（atime 側の反映はしない）。
+    fn sys_utimensat(
+        &mut self,
+        env: &mut BareEnv,
+        dirfd: u64,
+        path: u64,
+        times: u64,
+        flags: u64,
+    ) -> Result<u64, u64> {
+        let guest_path = self.cstr(env, path)?;
+        const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
+        let full = if flags & AT_SYMLINK_NOFOLLOW != 0 {
+            self.host_path(dirfd, &guest_path)
+        } else {
+            self.host_path_followed(dirfd, &guest_path)
+        };
+        let Some(full) = full else {
+            return Err(errno::EACCES);
+        };
+        let mtime = if times == 0 {
+            std::time::SystemTime::now()
+        } else {
+            let sec = self.mem_u64(env, times + 16);
+            let nsec = self.mem_u64(env, times + 24);
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::new(sec, nsec as u32)
+        };
+        let f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&full)
+            .map_err(|e| host_errno(e.raw_os_error()))?;
+        f.set_modified(mtime)
+            .map_err(|e| host_errno(e.raw_os_error()))?;
+        Ok(0)
+    }
+
+    /// `sendfile`。オフセット指定なし（out_fd の現位置へ継ぎ足す）
+    /// の近似。in_fd の現位置は進める。
+    fn sys_sendfile(
+        &mut self,
+        env: &mut BareEnv,
+        out_fd: u32,
+        in_fd: u32,
+        off: u64,
+        count: u64,
+    ) -> Result<u64, u64> {
+        let count = (count as usize).min(1 << 24);
+        let mut pos: Option<u64> = None;
+        if off != 0 {
+            pos = Some(self.mem_u64(env, off));
+        }
+        let data = {
+            let Some(f) = self.fds.get_mut(in_fd) else {
+                return Err(errno::EBADF);
+            };
+            if let Some(p) = pos
+                && f.seek(SeekFrom::Start(p)).is_err()
+            {
+                return Err(errno::EINVAL);
+            }
+            let mut buf = vec![0u8; count];
+            match f.read(&mut buf) {
+                Ok(n) => {
+                    buf.truncate(n);
+                    buf
+                }
+                Err(e) => return Err(host_errno(e.raw_os_error())),
+            }
+        };
+        let n = match self.writer(out_fd)? {
+            WriteFd::Stdout => {
+                self.io.stdout.extend_from_slice(&data);
+                let _ = std::io::stdout().write_all(&data);
+                data.len()
+            }
+            WriteFd::Stderr => {
+                self.io.stderr.extend_from_slice(&data);
+                let _ = std::io::stderr().write_all(&data);
+                data.len()
+            }
+            WriteFd::File => match self.fds.get_mut(out_fd).unwrap().write(&data) {
+                Ok(n) => n,
+                Err(e) => return Err(host_errno(e.raw_os_error())),
+            },
+        };
+        if off != 0 {
+            self.put_u64(env, off, pos.unwrap_or(0) + n as u64)?;
+        }
+        Ok(n as u64)
+    }
+
+    /// `pread64`。
+    fn sys_pread64(
+        &mut self,
+        env: &mut BareEnv,
+        fd: u32,
+        buf: u64,
+        len: u64,
+        off: u64,
+    ) -> Result<u64, u64> {
+        let len = (len as usize).min(1 << 20);
+        let mut tmp = vec![0u8; len];
+        let n = match self.fds.get_mut(fd) {
+            Some(f) => {
+                if f.seek(SeekFrom::Start(off)).is_err() {
+                    return Err(errno::EINVAL);
+                }
+                match f.read(&mut tmp) {
+                    Ok(n) => n,
+                    Err(e) => return Err(host_errno(e.raw_os_error())),
+                }
+            }
+            None => return Err(errno::EBADF),
+        };
+        self.put_bytes(env, buf, &tmp[..n])?;
+        Ok(n as u64)
+    }
+
+    /// `chdir`。ゲストの cwd を更新するだけ（ホストの cwd は触らない）。
+    fn sys_chdir(&mut self, env: &mut BareEnv, path: u64) -> Result<u64, u64> {
+        let guest_path = self.cstr(env, path)?;
+        let Some(full) = self.host_path_followed((-100i64) as u64, &guest_path) else {
+            return Err(errno::EACCES);
+        };
+        match std::fs::metadata(&full) {
+            Ok(md) if md.is_dir() => {}
+            Ok(_) => return Err(errno::ENOTDIR),
+            Err(e) => return Err(host_errno(e.raw_os_error())),
+        }
+        self.cwd = crate::guest_path::join_guest_path(&self.cwd, &guest_path);
         Ok(0)
     }
 
     /// ゲストパスをホストパスへ写す。dirfd は AT_FDCWD(-100)
     /// か `remember_path` で覚えたディレクトリ fd。
+    /// 最終要素のシンボリックリンクは辿らない。
     fn host_path(&self, dirfd: u64, guest_path: &str) -> Option<String> {
         const AT_FDCWD: u64 = (-100i64) as u64;
         if guest_path.starts_with('/') || dirfd == AT_FDCWD {
-            Some(crate::guest_path::join_guest_path(&self.cwd, guest_path))
+            crate::guest_path::resolve_guest_path(&self.guest_root, &self.cwd, guest_path)
         } else {
-            self.fds
-                .path_of(dirfd as u32)
-                .map(|dir| format!("{}/{}", dir.trim_end_matches('/'), guest_path))
+            let dir = self.fds.path_of(dirfd as u32)?;
+            // dirfd 経路はホストのディレクトリパスに直接連結する
+            // （resolve の root は既に dir の中に含まれる）。
+            let joined = format!("{}/{}", dir.trim_end_matches('/'), guest_path);
+            Some(joined)
         }
+    }
+
+    /// `host_path` に最終要素のシンボリックリンク解釈を重ねる。
+    /// dirfd 経路は `resolve_guest_path_links` に root+cwd で渡せる
+    /// ゲスト側のフルパスを先に組み立てる。
+    fn host_path_followed(&self, dirfd: u64, guest_path: &str) -> Option<String> {
+        const AT_FDCWD: u64 = (-100i64) as u64;
+        if guest_path.starts_with('/') || dirfd == AT_FDCWD || self.guest_root.is_empty() {
+            if guest_path.starts_with('/') || dirfd == AT_FDCWD {
+                return crate::guest_path::resolve_guest_path_links(
+                    &self.guest_root,
+                    &self.cwd,
+                    guest_path,
+                );
+            }
+            // guest_root なしの dirfd 相対は host_path と同じ連結後、
+            // ホスト側で辿る（最小近似）。
+            return self.host_path(dirfd, guest_path);
+        }
+        // dirfd 相対: dir のホストパスを guest_root から剥がして
+        // ゲスト側の絶対パスに戻し、リンク解釈へ回す。
+        let dir = self.fds.path_of(dirfd as u32)?;
+        let root_trim = self.guest_root.trim_end_matches('/');
+        let rel = dir
+            .strip_prefix(root_trim)
+            .map(|s| s.trim_start_matches('/'))?;
+        let g = format!("/{rel}/{guest_path}");
+        crate::guest_path::resolve_guest_path_links(&self.guest_root, "/", &g)
     }
 
     /// `brk`。0 なら現在値を返す。伸びる側は領域の写像として行う。
@@ -566,14 +1104,14 @@ impl Linux {
         let fields: [&[u8]; 6] = [
             b"Linux",
             b"polyisa",
-            b"6.6.0-polyisa",
-            b"#1",
+            b"7.3.0",
+            b"#1 polyisa",
             if self.la64 {
                 b"loongarch64"
             } else {
                 b"loongarch32"
             },
-            b"",
+            b"(none)",
         ];
         let mut buf = vec![0u8; 6 * 65];
         for (i, s) in fields.iter().enumerate() {
@@ -791,11 +1329,32 @@ impl Linux {
             loongarch::nr::WRITEV => self.sys_writev(env, a[0] as u32, a[1], a[2]),
             loongarch::nr::READ => self.sys_read(env, a[0] as u32, a[1], a[2]),
             loongarch::nr::READV => self.sys_readv(env, a[0] as u32, a[1], a[2]),
+            loongarch::nr::PREAD64 => self.sys_pread64(env, a[0] as u32, a[1], a[2], a[3]),
+            loongarch::nr::SENDFILE => self.sys_sendfile(env, a[0] as u32, a[1] as u32, a[2], a[3]),
             loongarch::nr::CLOSE => self.sys_close(a[0] as u32),
             loongarch::nr::LSEEK => self.sys_lseek(a[0] as u32, a[1] as i64, a[2]),
             loongarch::nr::OPENAT => self.sys_openat(env, a[0], a[1], a[2], a[3]),
             loongarch::nr::FSTAT => self.sys_fstat(env, a[0] as u32, a[1]),
             loongarch::nr::NEWFSTATAT => self.sys_fstatat(env, a[0], a[1], a[2], a[3]),
+            loongarch::nr::STATX => self.sys_statx(env, a[0], a[1], a[2], a[3], a[4]),
+            loongarch::nr::FACCESSAT => self.sys_faccessat(env, a[0], a[1], a[2], a[3]),
+            loongarch::nr::GETDENTS64 => self.sys_getdents64(env, a[0] as u32, a[1], a[2]),
+            loongarch::nr::MKDIRAT => self.sys_mkdirat(env, a[0], a[1], a[2]),
+            loongarch::nr::UNLINKAT => self.sys_unlinkat(env, a[0], a[1], a[2]),
+            loongarch::nr::RENAMEAT => self.sys_renameat(env, a[0], a[1], a[2], a[3]),
+            loongarch::nr::SYMLINKAT => self.sys_symlinkat(env, a[0], a[1], a[2]),
+            loongarch::nr::TRUNCATE => self.sys_truncate(env, a[0], false, (-100i64) as u64, a[1]),
+            loongarch::nr::FTRUNCATE => self.sys_truncate(env, a[0], true, 0, a[1]),
+            loongarch::nr::FCHMOD => self.sys_fchmod(a[0] as u32, a[1]),
+            loongarch::nr::FCHMODAT => self.sys_fchmodat(env, a[0], a[1], a[2]),
+            loongarch::nr::STATFS => self.sys_statfs(env, a[0], a[1]),
+            loongarch::nr::FSTATFS => self.put_statfs(env, a[1]).map(|()| 0),
+            loongarch::nr::UTIMENSAT => self.sys_utimensat(env, a[0], a[1], a[2], a[3]),
+            loongarch::nr::CHDIR => self.sys_chdir(env, a[0]),
+            loongarch::nr::GETTIMEOFDAY => self.sys_gettimeofday(env, a[0], a[1]),
+            loongarch::nr::SYSINFO => self.sys_sysinfo(env, a[0]),
+            loongarch::nr::TIMES => self.sys_times(env, a[0]),
+            loongarch::nr::GETRUSAGE => self.sys_getrusage(env, a[0], a[1]),
             loongarch::nr::BRK => Ok(self.sys_brk(env, a[0])),
             loongarch::nr::MMAP => self.sys_mmap(env, a[0], a[1], a[2], a[3], a[4], a[5]),
             loongarch::nr::MUNMAP => self.sys_munmap(env, a[0], a[1]),
@@ -821,13 +1380,35 @@ impl Linux {
             loongarch::nr::GETUID
             | loongarch::nr::GETEUID
             | loongarch::nr::GETGID
-            | loongarch::nr::GETEGID => Ok(1000),
+            | loongarch::nr::GETEGID => Ok(0),
             loongarch::nr::SET_TID_ADDRESS => Ok(self.pid),
-            loongarch::nr::SET_ROBUST_LIST
+            // umask は新旧の入れ替えだけを行う。
+            loongarch::nr::UMASK => {
+                let old = self.umask;
+                self.umask = (a[0] & 0o777) as u32;
+                Ok(u64::from(old))
+            }
+            // prctl/シグナル枠組み/バリア系は登録受理のみ（配送しない）。
+            loongarch::nr::PRCTL
+            | loongarch::nr::SIGALTSTACK
+            | loongarch::nr::SETPRIORITY
+            | loongarch::nr::MADVISE
+            | loongarch::nr::MSYNC
+            | loongarch::nr::MINCORE
+            | loongarch::nr::FLOCK
+            | loongarch::nr::SYNC
+            | loongarch::nr::FSYNC
+            | loongarch::nr::FDATASYNC
+            | loongarch::nr::SET_ROBUST_LIST
             | loongarch::nr::RT_SIGACTION
             | loongarch::nr::RT_SIGPROCMASK
             | loongarch::nr::RT_SIGRETURN
             | loongarch::nr::SCHED_YIELD => Ok(0),
+            loongarch::nr::GETPRIORITY => Ok(0),
+            // clock_nanosleep は相对時刻のみ nanosleep に委ねる。
+            loongarch::nr::CLOCK_NANOSLEEP => self.sys_nanosleep(env, a[2], a[3]),
+            // 単一プロセス・単一スレッド模型: fork/exec/待機/パイプ/
+            // ソケット系は ENOSYS。GAP-0062。
             // futex は単一スレッド模型で常に即座に返す。
             loongarch::nr::FUTEX => Ok(0),
             _ => {

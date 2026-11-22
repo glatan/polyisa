@@ -231,6 +231,30 @@ pub fn run_elf_loongarch_sel(
     run_elf_loongarch_sys(path, argv, sel, &mut sys)
 }
 
+/// `run_elf_loongarch_sel` にゲストルートを添える形（`--root` の配線）。
+/// `root` は PT_INTERP の動的ローダ解決と `sys` のパス閉じ込めに使う。
+pub fn run_elf_loongarch_root(
+    path: &str,
+    argv: &[String],
+    sel: Option<&polyisa_isadl::select::CpuSel>,
+    root: Option<&str>,
+) -> Result<u64, String> {
+    let mut sys = polyisa_os_linux::loongarch::sys::Linux::new();
+    run_elf_loongarch_impl(path, argv, sel, &mut sys, root)
+}
+
+/// `run_elf_loongarch_sys` にゲストルートを添える形。
+/// PT_INTERP 経路の動的リンクと root 内のファイル参照を試すテストに使う。
+pub fn run_elf_loongarch_sys_root(
+    path: &str,
+    argv: &[String],
+    sel: Option<&polyisa_isadl::select::CpuSel>,
+    sys: &mut polyisa_os_linux::loongarch::sys::Linux,
+    root: Option<&str>,
+) -> Result<u64, String> {
+    run_elf_loongarch_impl(path, argv, sel, sys, root)
+}
+
 /// 終了コードと標準出力の捕獲を返す。
 pub fn run_elf_loongarch_captured(path: &str, argv: &[String]) -> Result<(u64, Vec<u8>), String> {
     run_elf_loongarch_captured_in(path, argv, &[])
@@ -255,10 +279,29 @@ pub fn run_elf_loongarch_sys(
     sel: Option<&polyisa_isadl::select::CpuSel>,
     sys: &mut polyisa_os_linux::loongarch::sys::Linux,
 ) -> Result<u64, String> {
+    run_elf_loongarch_impl(path, argv, sel, sys, None)
+}
+
+/// `run_elf_loongarch_sys` にゲストルートを添えた実体。
+/// `root` は PT_INTERP の動的ローダ解決と `sys` のパス閉じ込めに使う。
+fn run_elf_loongarch_impl(
+    path: &str,
+    argv: &[String],
+    sel: Option<&polyisa_isadl::select::CpuSel>,
+    sys: &mut polyisa_os_linux::loongarch::sys::Linux,
+    root: Option<&str>,
+) -> Result<u64, String> {
     use polyisa_mem::PAGE_SIZE;
     use polyisa_sem::Backend as _;
 
-    let bytes = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
+    // root 指定時は ELF のパスもゲストの名前空間（chroot と同じ規則）。
+    // `/bin/echo` のようなリンクは root 内で解決される。
+    let host_elf = match root {
+        Some(root) => polyisa_os_linux::guest_path::resolve_guest_path_links(root, "/", path)
+            .ok_or_else(|| format!("{path}: ゲストルートの外を指す"))?,
+        None => path.to_string(),
+    };
+    let bytes = std::fs::read(&host_elf).map_err(|e| format!("read {path}: {e}"))?;
     let class = *bytes.get(4).unwrap_or(&0);
     let little = *bytes.get(5).unwrap_or(&0) == 1;
     if !little {
@@ -285,16 +328,22 @@ pub fn run_elf_loongarch_sys(
     if ehdr.machine != EM_LOONGARCH {
         return Err(format!("未対応の e_machine: {}", ehdr.machine));
     }
-    let (file_type, entry, phoff, phnum) = (ehdr.file_type, ehdr.entry, ehdr.phoff, ehdr.phnum);
-    // e_flags の ABI 版は [7:6]。NW=0x40。OW(0x0)は LA10 で
-    // 明示する方針。Ref: SPEC-LOONGARCH-PSABI（e_flags ABI 版）.
+    let (file_type, ehdr_entry, phoff, phnum) =
+        (ehdr.file_type, ehdr.entry, ehdr.phoff, ehdr.phnum);
+    // e_flags の ABI 版は [7:6]。新ワールド（v1=0x40）のみ受理する。
+    // 旧ワールド（v0=0x00）は再配置型が異なり、入手可能なテスト入力も
+    // ないため明示に拒否する（GAP-0062 に記録）。v2/v3（0x80/0xc0）も
+    // 未割当てとして拒否。
+    // Ref: SPEC-LOONGARCH-PSABI — laelf §e_flags（OBJ-v1）.
     let flags = ehdr.flags;
-    let abi_version = flags & 0xc0;
-    if abi_version != 0x40 && abi_version != 0 {
-        return Err(format!("未対応の ABI 版 e_flags={flags:#x}"));
+    if flags & 0xc0 != 0x40 {
+        return Err(format!(
+            "未対応の e_flags={flags:#x}（新ワールド OBJ-v1 のみ受理。旧ワールドは未対応）"
+        ));
     }
     // モデルは `--cpu` があれば従い、なければ ELF クラスで引く。
-    let model_name = if la64 { "la64" } else { "la32" };
+    // 64 ビットの既定は la464（la64 機能を持つ先頭モデル）。
+    let model_name = if la64 { "la464" } else { "la32" };
     let default_sel;
     let sel = match sel {
         Some(s) => s,
@@ -341,7 +390,66 @@ pub fn run_elf_loongarch_sys(
     let image_end = image_end.wrapping_add(main_bias);
     polyisa_loader::elf::load_segments_bias(&bytes, &phdrs, &mut env.backend.mem, main_bias)
         .map_err(|e| format!("load: {e:?}"))?;
-    // PT_INTERP は LA10 の動的ロード経路で扱う。ここでは拒まない。
+    // PT_INTERP の動的ローダを像として読み、その入口から始める。
+    // aarch64/ppc64le の先例と同じ経路。
+    // Ref: SPEC-ELF-GABI (Edition 4.1＋2001-04-24 DRAFT).
+    let interp_path = polyisa_loader::elf::parse_interp(&bytes, &phdrs);
+    if let Some(r) = root {
+        sys.set_guest_root(r);
+    } else if interp_path.is_some() {
+        return Err("PT_INTERP のある ELF には --root が必要".to_string());
+    }
+    const INTERP_BASE: u64 = 0x0000_7f00_0000_0000;
+    let (run_entry, interp_bias) = if let Some(gpath) = interp_path {
+        let host =
+            polyisa_os_linux::guest_path::resolve_guest_path(root.unwrap_or(""), "/", &gpath)
+                .ok_or_else(|| format!("interp {gpath} が root 外を指す"))?;
+        let ibytes = std::fs::read(&host).map_err(|e| format!("read interp {host}: {e}"))?;
+        let (ila64, iehdr) = match ibytes.get(4) {
+            Some(2) => {
+                let e = polyisa_loader::elf::parse_ehdr(&ibytes)
+                    .map_err(|e| format!("interp ehdr: {e:?}"))?;
+                (true, e)
+            }
+            Some(1) => {
+                let e = polyisa_loader::elf::parse_ehdr32(&ibytes)
+                    .map_err(|e| format!("interp ehdr: {e:?}"))?;
+                (false, e)
+            }
+            _ => return Err(format!("interp {host} は ELF ではない")),
+        };
+        if ila64 != la64 || iehdr.machine != EM_LOONGARCH || !iehdr.little {
+            return Err(format!(
+                "interp {host} は主像と同じ LoongArch の ELF ではない"
+            ));
+        }
+        // 動的ローダも新ワールドのみ受理する。
+        if iehdr.flags & 0xc0 != 0x40 {
+            return Err(format!("interp {host} は新ワールドの ELF ではない"));
+        }
+        let iphdrs = if ila64 {
+            polyisa_loader::elf::parse_phdrs(&ibytes, &iehdr)
+        } else {
+            polyisa_loader::elf::parse_phdrs32(&ibytes, &iehdr)
+        }
+        .map_err(|e| format!("interp phdrs: {e:?}"))?;
+        let imin = iphdrs
+            .iter()
+            .filter(|p| p.seg_type == 1)
+            .map(|p| p.vaddr & !(PAGE_SIZE - 1))
+            .min()
+            .unwrap_or(0);
+        let ibias = if iehdr.file_type == ET_DYN {
+            INTERP_BASE - imin
+        } else {
+            0
+        };
+        polyisa_loader::elf::load_segments_bias(&ibytes, &iphdrs, &mut env.backend.mem, ibias)
+            .map_err(|e| format!("interp load: {e:?}"))?;
+        (ibias + iehdr.entry, ibias)
+    } else {
+        (main_bias + ehdr_entry, 0)
+    };
     let phdr_addr = {
         let found = phdrs
             .iter()
@@ -373,7 +481,8 @@ pub fn run_elf_loongarch_sys(
             }
         }
     };
-    let entry = main_bias.wrapping_add(entry);
+    // AT_ENTRY は主像の入口。PT_INTERP 時の実行入口はローダ側。
+    let entry_main = main_bias.wrapping_add(ehdr_entry);
     let top = if la64 {
         0x0000_7fff_ffff_f000u64
     } else {
@@ -384,23 +493,34 @@ pub fn run_elf_loongarch_sys(
     for a in argv {
         arg_bytes.push(a.as_bytes().to_vec());
     }
-    // auxv。AT_RANDOM・AT_EXECFN は build_initial_stack64 が詰める。
-    let auxv: Vec<(u64, u64)> = vec![
-        (3, phdr_addr),                    // AT_PHDR
-        (4, if la64 { 56 } else { 32 }),   // AT_PHENT
-        (5, u64::from(phnum)),             // AT_PHNUM
-        (6, 0x1000),                       // AT_PAGESZ
-        (8, 0),                            // AT_FLAGS
-        (9, entry),                        // AT_ENTRY
-        (11, 0),                           // AT_UID
-        (12, 0),                           // AT_EUID
-        (13, 0),                           // AT_GID
-        (14, 0),                           // AT_EGID
-        (16, if la64 { 0x1f } else { 0 }), // AT_HWCAP（LA64 の LAM/LAM_UA 等は LA10 で整備）
-        (17, 100),                         // AT_CLKTCK
-        (23, 0),                           // AT_SECURE
-        (25, 0),                           // AT_RANDOM（詰め物はスタック側で置く）
+    // AT_HWCAP。arch/loongarch/include/uapi/asm/hwcap.h の値:
+    // CPUCFG=1, LAM=2, UAL=4, FPU=8, CRC32=0x40, COMPLEX=0x80,
+    // CRYPTO=0x100, LVZ=0x200（LSX/LASX/LBT は実装しないので立てない）。
+    // Ref: SRC-LINUX — arch/loongarch/include/uapi/asm/hwcap.h.
+    let hwcap: u64 = if la64 {
+        0x1 | 0x2 | 0x4 | 0x8 | 0x40 | 0x80 | 0x100
+    } else {
+        0
+    };
+    // auxv。AT_RANDOM・AT_EXECFN は build_initial_stack が詰める。
+    let mut auxv: Vec<(u64, u64)> = vec![
+        (3, phdr_addr),                  // AT_PHDR
+        (4, if la64 { 56 } else { 32 }), // AT_PHENT
+        (5, u64::from(phnum)),           // AT_PHNUM
+        (6, 0x1000),                     // AT_PAGESZ
+        (8, 0),                          // AT_FLAGS
+        (9, entry_main),                 // AT_ENTRY
+        (11, 0),                         // AT_UID
+        (12, 0),                         // AT_EUID
+        (13, 0),                         // AT_GID
+        (14, 0),                         // AT_EGID
+        (16, hwcap),                     // AT_HWCAP
+        (17, 100),                       // AT_CLKTCK
+        (23, 0),                         // AT_SECURE
     ];
+    if interp_bias != 0 {
+        auxv.push((7, interp_bias)); // AT_BASE
+    }
     let envv: Vec<Vec<u8>> = std::env::var("POLYISA_LOONGARCH_ENV")
         .map(|s| s.split(':').map(|e| e.as_bytes().to_vec()).collect())
         .unwrap_or_default();
@@ -430,7 +550,7 @@ pub fn run_elf_loongarch_sys(
     sys.init_brk(image_end);
     let outcome = run(
         &mut env,
-        entry,
+        run_entry,
         model,
         sys,
         Some(StackGrowth {

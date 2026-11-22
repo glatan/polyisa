@@ -328,7 +328,12 @@ fn run_superh_elf(_path: &str, _argv: &[String], _spec: Option<&CpuSpec>) -> Res
 }
 
 #[cfg(feature = "guest-loongarch")]
-fn run_loongarch_elf(path: &str, argv: &[String], spec: Option<&CpuSpec>) -> Result<u64, String> {
+fn run_loongarch_elf(
+    path: &str,
+    argv: &[String],
+    spec: Option<&CpuSpec>,
+    root: Option<&str>,
+) -> Result<u64, String> {
     let sel = spec
         .map(|s| {
             resolve_sel(
@@ -340,7 +345,7 @@ fn run_loongarch_elf(path: &str, argv: &[String], spec: Option<&CpuSpec>) -> Res
             )
         })
         .transpose()?;
-    run_loongarch::run_elf_loongarch_sel(path, argv, sel.as_ref())
+    run_loongarch::run_elf_loongarch_root(path, argv, sel.as_ref(), root)
 }
 
 #[cfg(not(feature = "guest-loongarch"))]
@@ -348,6 +353,7 @@ fn run_loongarch_elf(
     _path: &str,
     _argv: &[String],
     _spec: Option<&CpuSpec>,
+    _root: Option<&str>,
 ) -> Result<u64, String> {
     Err("この polyisa は loongarch ゲストなしでビルドされた".to_string())
 }
@@ -603,7 +609,7 @@ pub fn run_path_opts(
                 // EM_LOONGARCH=258・ELFCLASS32 は LA32。
                 // Ref: SRC-LINUX (include/uapi/linux/elf-em.h).
                 check("loongarch")?;
-                run_loongarch_elf(path, argv, spec.as_ref())
+                run_loongarch_elf(path, argv, spec.as_ref(), None)
             } else {
                 Err(format!("未対応の e_machine: {}", ehdr.machine))
             }
@@ -611,8 +617,8 @@ pub fn run_path_opts(
         CLASS_64 => {
             let ehdr =
                 polyisa_loader::elf::parse_ehdr(&bytes).map_err(|e| format!("ehdr: {e:?}"))?;
-            if root.is_some() && !matches!(ehdr.machine, 183 | 21 | 22) {
-                return Err("--root は現状 aarch64・ppc64・s390x のみ対応".to_string());
+            if root.is_some() && !matches!(ehdr.machine, 183 | 21 | 22 | 258) {
+                return Err("--root は現状 aarch64・ppc64・s390x・loongarch のみ対応".to_string());
             }
             // EM_RISCV=243。Ref: SPEC-RISCV-PSABI (v1.0).
             if ehdr.machine == 243 {
@@ -650,7 +656,7 @@ pub fn run_path_opts(
                 // EM_LOONGARCH=258（LA64）。Ref: SRC-LINUX
                 // (include/uapi/linux/elf-em.h).
                 check("loongarch")?;
-                run_loongarch_elf(path, argv, spec.as_ref())
+                run_loongarch_elf(path, argv, spec.as_ref(), root)
             } else {
                 Err(format!("未対応の e_machine: {}", ehdr.machine))
             }
