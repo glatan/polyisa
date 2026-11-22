@@ -156,6 +156,8 @@ pub fn build_model() -> polyisa_isadl::Model {
     for (name, parts, zfill) in [
         ("diclass", vec![(31, 29), (13, 13)], 0),
         ("imm26", vec![(27, 16), (13, 0)], 0),
+        // trap0(#u6) の分割即値（bits[10:8]+[4:2]）。
+        ("tu6", vec![(10, 8), (4, 2)], 0),
         ("s16", vec![(23, 22), (20, 16), (13, 5)], 0),
         ("ai16", vec![(27, 21), (13, 5)], 0),
         ("ui16", vec![(23, 22), (13, 0)], 0),
@@ -300,6 +302,8 @@ pub fn build_model() -> polyisa_isadl::Model {
     ));
     // jump/call の PC 相対形。
     m.formats.push(fmt("FJ", &["r22"], vec![val("target", "r22")]));
+    // trap0(#u6)。
+    m.formats.push(fmt("FTRAP", &["tu6"], vec![val("u", "tu6")]));
     // jumpr/callr のレジスタ形。
     m.formats.push(fmt(
         "FJR",
@@ -522,6 +526,10 @@ pub fn build_model() -> polyisa_isadl::Model {
         // jumpr/callr のレジスタ形。Ref: J indirect jump/call.
         ("jumpr", "FJR", "01010010100.....................", "jumpr {s}", "branch"),
         ("callr", "FJR", "01010000101.....................", "callr {s}", "branch"),
+        // trap0(#u6)。ユーザモードの #1 が OS 呼出し。trap1/2 は
+        // 特権でユーザ範囲外（HX7 で範囲を確定）。
+        // Ref: system instructions.
+        ("trap0", "FTRAP", "01010100000.....................", "trap0(#{u})", "system"),
         // Rd = Cs / Cd = Rs。Ref: CR control register transfer.
         ("rdcr", "FRDC", "01101010000.....................", "{d}=c{c}", "system"),
         ("wrcr", "FWRC", "01100010001.....................", "c{d}={s}", "system"),

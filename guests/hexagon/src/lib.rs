@@ -18,6 +18,7 @@
 #![forbid(unsafe_code)]
 
 pub mod packet;
+pub mod run;
 pub mod sem;
 
 // ISADL モデルから生成した命令集合・デコード・逆アセンブルの殻。

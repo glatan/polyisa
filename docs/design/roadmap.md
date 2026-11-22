@@ -44,7 +44,6 @@
 
 | # | 内容 | 前提 | 判定 |
 |---|---|---|---|
-| HX4 | 実行エンジンの接続: パケット単位の step（同時発行の意味論・`.new` オペランド）+ bare 最小テスト | HX3 | - |
 | HX5 | 整数算術・論理・シフト・combine/mux 系 | HX4 | - |
 | HX6 | load/store・memop・`.new` 書き込み | HX4 | - |
 | HX7 | 分岐・jump/call/jumpr・述語付き実行・allocframe/deallocframe/dealloc_return・endloop・trap0 | HX4 | - |

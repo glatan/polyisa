@@ -113,13 +113,17 @@ fn new_reads_packet_temp() {
 fn dotif_suppresses() {
     let mut env = env();
     sem::p_set(&mut env.backend, 0, 0xff);
+    let with = |cond: Option<sem::DotIf>| sem::Ctx {
+        cond,
+        ..sem::Ctx::default()
+    };
     // if (p0) は真で抑制しない（Unimplemented に達する）。
     let c = sem::DotIf {
         p: 0,
         neg: false,
         new: false,
     };
-    let e = sem::exec(&mut env.backend, Insn::Nop, 0, Some(c)).unwrap_err();
+    let e = sem::exec(&mut env.backend, Insn::DxL2Deallocframe, 0, with(Some(c))).unwrap_err();
     assert!(matches!(e, InterpExit::Unimplemented(_)));
     // if (!p0) は偽なので抑制される。
     let c = sem::DotIf {
@@ -128,7 +132,7 @@ fn dotif_suppresses() {
         new: false,
     };
     assert_eq!(
-        sem::exec(&mut env.backend, Insn::Nop, 0, Some(c)),
+        sem::exec(&mut env.backend, Insn::Nop, 0, with(Some(c))),
         Ok(false)
     );
     // if (p1) で p1 未設定は抑制される。
@@ -138,7 +142,7 @@ fn dotif_suppresses() {
         new: false,
     };
     assert_eq!(
-        sem::exec(&mut env.backend, Insn::Nop, 0, Some(c)),
+        sem::exec(&mut env.backend, Insn::Nop, 0, with(Some(c))),
         Ok(false)
     );
 }
@@ -146,7 +150,14 @@ fn dotif_suppresses() {
 #[test]
 fn exec_is_unimplemented() {
     let mut env = env();
-    let e = sem::exec(&mut env.backend, Insn::Nop, 0, None).unwrap_err();
+    // frame 系（allocframe/deallocframe/dealloc_return）は HX7。
+    let e = sem::exec(
+        &mut env.backend,
+        Insn::DxL2Deallocframe,
+        0,
+        sem::Ctx::default(),
+    )
+    .unwrap_err();
     assert!(matches!(e, InterpExit::Unimplemented(_)));
 }
 
@@ -745,4 +756,267 @@ fn disasm_representative() {
         disasm_word_ex(0x0123_5159, 32, true, 0).as_deref(),
         Some("immext #4772185")
     );
+}
+
+// ---- HX4: パケット単位 step ----
+// `run::step` が PC から語を読んでパケットを確定し、スロット命令を
+// 同時発行の意味論（読みはパケット開始時点、書き込みは終端で一括
+// commit）で実行することを確かめる。
+// Ref: SPEC-HEXAGON-PRM (V79) Section 10.
+
+use polyisa_engine::run::{Outcome, TrapHandler, TrapOutcome};
+use polyisa_guest_hexagon::run;
+use polyisa_mem::{Perms, VirtAddr};
+use polyisa_sem::Backend as _;
+
+const BASE: u64 = 0x1_0000;
+
+/// トラップを捌かないハンドラ。
+struct NoSys;
+
+impl TrapHandler for NoSys {
+    fn handle_trap(&mut self, _env: &mut BareEnv, _code: u32) -> TrapOutcome {
+        TrapOutcome::Unimplemented
+    }
+}
+
+/// 実行・読み書き可能なページを BASE に写像した環境。
+fn run_env() -> BareEnv {
+    let mut env = env();
+    env.backend
+        .mem
+        .map(VirtAddr(BASE), 1, Perms(Perms::RW.0 | Perms::X.0))
+        .unwrap();
+    env
+}
+
+/// 命令語列を書き込む。
+fn put(env: &mut BareEnv, addr: u64, words: &[u32]) {
+    let mut b = Vec::new();
+    for w in words {
+        b.extend_from_slice(&w.to_le_bytes());
+    }
+    env.backend.mem.write(VirtAddr(addr), &b).unwrap();
+}
+
+fn step(env: &mut BareEnv) -> Result<(), Outcome> {
+    run::step(env, &mut NoSys, 0)
+}
+
+#[test]
+fn packet_progress() {
+    // 1 語パケットが 2 連続。pc は語ごとに進み、commit が確定させる。
+    let mut env = run_env();
+    let w1 = with_pp(encode(Insn::AddRi, &[1, 0, 5]).unwrap() as u32, 3);
+    let w2 = with_pp(encode(Insn::AddRi, &[2, 1, 7]).unwrap() as u32, 3);
+    put(&mut env, BASE, &[w1, w2]);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(sem::r_get(&env.backend, 1), 5);
+    assert_eq!(env.pc, BASE + 4);
+    // 状態の pc 面も次のパケットに同期する。
+    assert_eq!(env.backend.get(sem::pc_ref()), BASE as u32 + 4);
+    step(&mut env).unwrap();
+    // 直前のパケットで確定した r1 を読む。
+    assert_eq!(sem::r_get(&env.backend, 2), 12);
+    assert_eq!(env.pc, BASE + 8);
+}
+
+#[test]
+fn simultaneous_old_reads() {
+    // { r1 = add(r0,#5) ; r2 = add(r1,#1) } — r2 はパケット開始
+    // 時点の r1（0）を読む。同時発行で先行命令の生産値は見えない。
+    let mut env = run_env();
+    let w1 = with_pp(encode(Insn::AddRi, &[1, 0, 5]).unwrap() as u32, 1);
+    let w2 = with_pp(encode(Insn::AddRi, &[2, 1, 1]).unwrap() as u32, 3);
+    put(&mut env, BASE, &[w1, w2]);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(sem::r_get(&env.backend, 1), 5);
+    assert_eq!(sem::r_get(&env.backend, 2), 1);
+}
+
+#[test]
+fn simultaneous_swap_duplex() {
+    // { r1 = r2 ; r2 = r1 }（duplex A/A、llvm-mc 実符号 0x30213012）。
+    // 両方が古い値を読むので値が入れ替わる。
+    let mut env = run_env();
+    sem::r_set(&mut env.backend, 1, 0xaa);
+    sem::r_set(&mut env.backend, 2, 0xbb);
+    let dup = packet::pack_duplex(0x1012, 0x1021, Group::A, Group::A).unwrap();
+    assert_eq!(dup, 0x3021_3012);
+    put(&mut env, BASE, &[dup]);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(sem::r_get(&env.backend, 1), 0xbb);
+    assert_eq!(sem::r_get(&env.backend, 2), 0xaa);
+}
+
+#[test]
+fn new_predicate_transfer() {
+    // { p0 = cmp.eq(r3,#0) ; if (p0.new) r19 = #0 }
+    // （llvm-mc 実符号 0x39303a4b）。p0.new は同一パケット内の
+    // 生産値を読む。
+    let mut env = run_env();
+    put(&mut env, BASE, &[0x3930_3a4b]);
+    env.pc = BASE;
+    // 生産値が真 → 条件クリアが効く。
+    sem::r_set(&mut env.backend, 3, 0);
+    sem::r_set(&mut env.backend, 19, 0xdead);
+    step(&mut env).unwrap();
+    assert_eq!(sem::r_get(&env.backend, 19), 0);
+    assert_eq!(sem::p_get(&env.backend, 0), 0xff);
+    // 生産値が偽 → 抑制されて r19 は変わらない。
+    let mut env = run_env();
+    put(&mut env, BASE, &[0x3930_3a4b]);
+    env.pc = BASE;
+    sem::r_set(&mut env.backend, 3, 5);
+    sem::r_set(&mut env.backend, 19, 0xdead);
+    step(&mut env).unwrap();
+    assert_eq!(sem::r_get(&env.backend, 19), 0xdead);
+    assert_eq!(sem::p_get(&env.backend, 0), 0);
+}
+
+#[test]
+fn dotif_suppresses_at_step() {
+    // { r0 = #0 ; if ([!]p0) r19 = #0 }（llvm-mc 実符号）。
+    // 条件形の述語選択桁をフェッチ層が DotIf に写す。
+    for (word, p0, want) in [
+        (0x2800_3a6b, 0x00, 0xdead), // if (p0)、p0 偽 → 抑制
+        (0x2800_3a6b, 0xff, 0),      // if (p0)、p0 真 → 実行
+        (0x2800_3a7b, 0x00, 0),      // if (!p0)、p0 偽 → 実行
+        (0x2800_3a7b, 0xff, 0xdead), // if (!p0)、p0 真 → 抑制
+    ] {
+        let mut env = run_env();
+        put(&mut env, BASE, &[word]);
+        env.pc = BASE;
+        sem::p_set(&mut env.backend, 0, p0);
+        sem::r_set(&mut env.backend, 19, 0xdead);
+        step(&mut env).unwrap();
+        assert_eq!(
+            sem::r_get(&env.backend, 19),
+            want,
+            "word={word:#x} p0={p0:#x}"
+        );
+        // 無条件側の r0 は必ず書かれる。
+        assert_eq!(sem::r_get(&env.backend, 0), 0);
+    }
+}
+
+#[test]
+fn duplex_memory_exec() {
+    // { r3 = memw(r4+#0) ; r0 = add(r0,#0) }（duplex L1/A、
+    // llvm-mc 実符号 0x40000043）。メモリ系 subinsn も実行する。
+    let mut env = run_env();
+    env.backend
+        .mem
+        .write(VirtAddr(BASE + 0x100), &0x1234_5678u32.to_le_bytes())
+        .unwrap();
+    put(&mut env, BASE, &[0x4000_0043]);
+    env.pc = BASE;
+    sem::r_set(&mut env.backend, 4, (BASE + 0x100) as u32);
+    sem::r_set(&mut env.backend, 0, 41);
+    step(&mut env).unwrap();
+    assert_eq!(sem::r_get(&env.backend, 3), 0x1234_5678);
+    // add(r0,#0) は実行されるが値は変わらない。
+    assert_eq!(sem::r_get(&env.backend, 0), 41);
+}
+
+#[test]
+fn packet_jump_and_call() {
+    // { jump #8 } — pc 相対の直接分岐。
+    let mut env = run_env();
+    let w = with_pp(encode(Insn::JumpPcrel, &[8]).unwrap() as u32, 3);
+    put(&mut env, BASE, &[w]);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, BASE + 8);
+    // { call #8 } — LR（r31）に次のパケットを残して分岐。
+    let mut env = run_env();
+    let w = with_pp(encode(Insn::CallPcrel, &[8]).unwrap() as u32, 3);
+    put(&mut env, BASE, &[w]);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, BASE + 8);
+    assert_eq!(sem::r_get(&env.backend, 31), (BASE + 4) as u32);
+    // { jumpr r4 } — 間接分岐。
+    let mut env = run_env();
+    let w = with_pp(encode(Insn::Jumpr, &[4]).unwrap() as u32, 3);
+    put(&mut env, BASE, &[w]);
+    env.pc = BASE;
+    sem::r_set(&mut env.backend, 4, 0x2400);
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, 0x2400);
+}
+
+/// trap の即値を記録するハンドラ。
+struct Rec {
+    code: Option<u32>,
+    outcome: TrapOutcome,
+}
+
+impl TrapHandler for Rec {
+    fn handle_trap(&mut self, _env: &mut BareEnv, code: u32) -> TrapOutcome {
+        self.code = Some(code);
+        self.outcome
+    }
+}
+
+#[test]
+fn trap0_exits_to_os() {
+    // trap0(#1)（llvm-mc 実符号 0x5400c004）。即値を code に載せて
+    // OS パーソナリティへ退出する。
+    let mut env = run_env();
+    put(&mut env, BASE, &[0x5400_c004, with_pp(NOP, 3)]);
+    env.pc = BASE;
+    let mut sys = Rec {
+        code: None,
+        outcome: TrapOutcome::Exit(42),
+    };
+    let o = run::step(&mut env, &mut sys, 0);
+    assert_eq!(o, Err(Outcome::Exit(42)));
+    assert_eq!(sys.code, Some(1));
+    // Handled なら次のパケットから続行する。
+    let mut env = run_env();
+    put(&mut env, BASE, &[0x5400_c004, with_pp(NOP, 3)]);
+    env.pc = BASE;
+    let mut sys = Rec {
+        code: None,
+        outcome: TrapOutcome::Handled,
+    };
+    run::step(&mut env, &mut sys, 0).unwrap();
+    assert_eq!(sys.code, Some(1));
+    assert_eq!(env.pc, BASE + 4);
+}
+
+#[test]
+fn endloop_marker_recorded() {
+    // Parse 10 のループ終端標識が CpuState.endloop に転記される
+    // （LC/SA の処理自体は HX8）。
+    let mut env = run_env();
+    put(&mut env, BASE, &[with_pp(NOP, 2), with_pp(NOP, 3)]);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(env.backend.get(sem::endloop_ref()), 1);
+    assert_eq!(env.pc, BASE + 8);
+}
+
+#[test]
+fn illegal_packet_is_trap() {
+    // 復号できない語は illegal パケットとして handle_trap(TRAP_ILL)。
+    let mut env = run_env();
+    put(&mut env, BASE, &[0xffff_ffff]);
+    env.pc = BASE;
+    assert_eq!(
+        step(&mut env),
+        Err(Outcome::Unimplemented {
+            pc: BASE,
+            word: 0xffff_ffff
+        })
+    );
+    // split の失敗（終端なし）も同じ。
+    let mut env = run_env();
+    put(&mut env, BASE, &[with_pp(NOP, 1)]);
+    env.pc = BASE;
+    assert!(matches!(step(&mut env), Err(Outcome::Unimplemented { .. })));
 }

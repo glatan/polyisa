@@ -105,6 +105,10 @@ fn main() {
             for m in polyisa_guest_ia64::MODELS {
                 println!("ia64:{m}");
             }
+            #[cfg(feature = "guest-hexagon")]
+            for m in polyisa_guest_hexagon::MODELS {
+                println!("hexagon:{m}");
+            }
             #[cfg(feature = "guest-loongarch")]
             for m in polyisa_guest_loongarch::MODELS {
                 println!("loongarch:{m}");
