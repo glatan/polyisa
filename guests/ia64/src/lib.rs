@@ -88,7 +88,9 @@ pub mod cfm_bit {
 /// Ref: SPEC-IA64-SDM (Rev 2.3).
 pub const IP_SLOT_MASK: u64 = 0xf;
 
-/// ALAT の登録エントリ数。
+/// ALAT の表の大きさ。実際の有効エントリは前半 16 個で、後半
+/// 16 個は対応するタグ（目的 GR・サイズ）を収める
+/// （sem.rs の ALAT_N/ALAT_TAG と同じ契約）。
 /// Ref: SPEC-IA64-SDM (Rev 2.3).
 pub const ALAT_ENTRIES: usize = 32;
 
@@ -138,14 +140,17 @@ pub struct CpuState {
     /// RSE の汚れレジスタの追跡（バッキングストアへの書き出し制御。
     /// 追跡の粒度は IA8 で確定する）。
     pub rse_dirty: u64,
-    /// ALAT の登録表。advanced load の登録・照合・無効化の器
-    /// （エントリの保持内容は IA6 で確定する）。
+    /// ALAT の登録表。エントリ i の対として `alat[i]`（アドレス）と
+    /// `alat[16+i]`（タグ: 目的 GR 番号{6:0} + サイズの log2
+    /// {10:8}）を使う 16 エントリ・挿入順 FIFO。
     pub alat: [u64; ALAT_ENTRIES],
-    /// ALAT の有効エントリのビットマスク。
+    /// ALAT の有効エントリのビットマスク（下位 16 ビットを使用）。
     pub alat_valid: u64,
     /// PSR{5:0}（ユーザマスク）。sum/rum/mov psr.um が触る器。
     /// 個別ビット（be/up/ac/mfl/mfh/ic）の実効は後段の段階。
     pub psr_um: u64,
+    /// ar.csd（cmp8xchg16/ld16/st16 が使う 16 バイトの高位側）。
+    pub csd: u64,
 }
 
 impl Default for CpuState {
@@ -172,6 +177,7 @@ impl Default for CpuState {
             alat: [0; ALAT_ENTRIES],
             alat_valid: 0,
             psr_um: 0,
+            csd: 0,
         }
     }
 }

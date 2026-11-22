@@ -11,10 +11,19 @@ use polyisa_guest_ia64::bundle::{self, Unit};
 use polyisa_guest_ia64::{
     CpuState, FEAT_ITANIUM, FEAT_ITANIUM2, FEAT_UNIT_A, FEAT_UNIT_I, IP_SLOT_MASK, Insn,
     decode_model_ex, disasm_word_ex, encode_add, encode_br_cond_sptk_few, encode_break_f,
-    encode_break_i, encode_brl_cond_sptk_few, encode_cmp_lt_or, encode_fma_s0, encode_hint_f,
-    encode_ld4, encode_mov_ip, encode_movl, encode_nop_b, encode_nop_f, encode_nop_i, encode_nop_x,
-    encode_padd1, encode_pcmp4_eq, encode_psub1, encode_st4, encode_sub_imm8, extract_ops, sem,
+    encode_break_i, encode_brl_cond_sptk_few, encode_chk_a_clr, encode_chk_a_nc, encode_chk_s_m,
+    encode_cmp_lt_or, encode_cmp8xchg16_acq, encode_cmpxchg4_acq, encode_cmpxchg8_acq,
+    encode_fetchadd4_acq, encode_fetchadd8_rel, encode_fma_s0, encode_hint_f, encode_invala,
+    encode_ld1, encode_ld2, encode_ld4, encode_ld4_acq, encode_ld8, encode_ld8_a, encode_ld8_a_i,
+    encode_ld8_acq, encode_ld8_bias, encode_ld8_c_clr, encode_ld8_c_nc, encode_ld8_fill,
+    encode_ld8_fill_i, encode_ld8_i, encode_ld8_r, encode_ld8_s, encode_ld16, encode_mov_ip,
+    encode_movl, encode_nop_b, encode_nop_f, encode_nop_i, encode_nop_x, encode_padd1,
+    encode_pcmp4_eq, encode_psub1, encode_st1, encode_st2, encode_st4, encode_st8, encode_st8_i,
+    encode_st8_rel, encode_st8_spill, encode_st8_spill_i, encode_st16, encode_sub_imm8,
+    encode_xchg8, extract_ops, sem,
 };
+use polyisa_mem::{Access, AccessKind, Align, Endian, VirtAddr};
+use polyisa_sem::ExceptionKind;
 
 fn env() -> BareEnv {
     BareEnv::new(core::mem::size_of::<CpuState>())
@@ -53,7 +62,9 @@ fn state_layout_pinned() {
         core::mem::offset_of!(CpuState, psr_um),
         cfm + 16 + 32 * 8 + 8
     );
-    assert_eq!(core::mem::size_of::<CpuState>(), cfm + 16 + 32 * 8 + 16);
+    // ar.csd は IA6 で末尾に足した（16 バイト系の高位側）。
+    assert_eq!(core::mem::offset_of!(CpuState, csd), cfm + 16 + 32 * 8 + 16);
+    assert_eq!(core::mem::size_of::<CpuState>(), cfm + 16 + 32 * 8 + 24);
 }
 
 #[test]
@@ -456,7 +467,7 @@ fn brl_cond_btype_pinned() {
 
 use polyisa_engine::run::{Outcome, TrapHandler, TrapOutcome};
 use polyisa_guest_ia64::run;
-use polyisa_mem::{Perms, VirtAddr};
+use polyisa_mem::Perms;
 
 const BASE: u64 = 0x1_0000;
 
@@ -1748,4 +1759,579 @@ fn m_unit_break_nop_extr_u() {
     let t = disasm_word_ex(w, 41, true, CPU | FEAT_UNIT_I | FEAT_UNIT_A).unwrap();
     assert!(t.contains("cmp.lt.unc"), "{t}");
     assert!(!t.contains(".."), "{t}");
+}
+
+// ---- 段階21 IA6: メモリ・ALAT・セマフォ ----
+// sem::exec で命令語を直接実行し、BareEnv の写像メモリ越しに
+// 幅・拡張・NaT・ALAT・回復分岐・アトミックを確かめる。
+// Ref: SPEC-IA64-SDM (Rev 2.3) 3.1.6-3.1.8.
+
+const MEM: u64 = 0x2_0000;
+
+const DRD: Access = Access {
+    endian: Endian::Le,
+    align: Align::Natural,
+    kind: AccessKind::DataRead,
+};
+const DWR: Access = Access {
+    endian: Endian::Le,
+    align: Align::Natural,
+    kind: AccessKind::DataWrite,
+};
+
+fn wmem(env: &mut BareEnv, addr: u64, v: u64, sz: usize) {
+    env.backend
+        .mem
+        .write_value(VirtAddr(addr), v, sz, DWR)
+        .expect("wmem");
+}
+
+fn rmem(env: &BareEnv, addr: u64, sz: usize) -> u64 {
+    env.mem().read_value(VirtAddr(addr), sz, DRD).expect("rmem")
+}
+
+/// AR のテスト書き込み（ccv/csd/unat 用）。
+fn set_ar(env: &mut BareEnv, off: usize, v: u64) {
+    use polyisa_sem::{Backend, StateRef, W64};
+    env.backend.set(StateRef::<W64>::from_offset(off), v);
+}
+
+fn get_ar(env: &mut BareEnv, off: usize) -> u64 {
+    use polyisa_sem::{Backend, StateRef, W64};
+    env.backend.get(StateRef::<W64>::from_offset(off))
+}
+
+/// `sem::exec` の薄い包み（qb=0、p0=1 が既定で効く）。
+fn ia6x(env: &mut BareEnv, insn: Insn, w: u128) -> bool {
+    sem::exec(&mut env.backend, insn, w, 0).expect("exec")
+}
+
+#[test]
+fn ia6_load_widths_zero_extend() {
+    let mut env = env();
+    env.map_rw(MEM, 1).unwrap();
+    wmem(&mut env, MEM, 0x1122_3344_5566_7788, 8);
+    sem::gr_set(&mut env.backend, 3, MEM);
+    ia6x(&mut env, Insn::Ld1, encode_ld1(&[0, 1, 3]).unwrap());
+    assert_eq!(sem::gr_get(&env.backend, 1), 0x88);
+    assert!(!sem::nat_get(&env.backend, 1));
+    ia6x(&mut env, Insn::Ld2, encode_ld2(&[0, 1, 3]).unwrap());
+    assert_eq!(sem::gr_get(&env.backend, 1), 0x7788);
+    ia6x(&mut env, Insn::Ld4, encode_ld4(&[0, 1, 3]).unwrap());
+    assert_eq!(sem::gr_get(&env.backend, 1), 0x5566_7788);
+    ia6x(&mut env, Insn::Ld8, encode_ld8(&[0, 1, 3]).unwrap());
+    assert_eq!(sem::gr_get(&env.backend, 1), 0x1122_3344_5566_7788);
+    // ld.acq/ld.bias も同じ読み出し（順序ヒントは実効なし）。
+    ia6x(&mut env, Insn::Ld8Acq, encode_ld8_acq(&[0, 1, 3]).unwrap());
+    assert_eq!(sem::gr_get(&env.backend, 1), 0x1122_3344_5566_7788);
+    ia6x(
+        &mut env,
+        Insn::Ld8Bias,
+        encode_ld8_bias(&[0, 1, 3]).unwrap(),
+    );
+    assert_eq!(sem::gr_get(&env.backend, 1), 0x1122_3344_5566_7788);
+    // 既に立っている NaT は通常ロードでクリアされる。
+    sem::nat_set(&mut env.backend, 1, true);
+    ia6x(&mut env, Insn::Ld4Acq, encode_ld4_acq(&[0, 1, 3]).unwrap());
+    assert_eq!(sem::gr_get(&env.backend, 1), 0x5566_7788);
+    assert!(!sem::nat_get(&env.backend, 1));
+}
+
+#[test]
+fn ia6_store_widths_and_post_inc() {
+    let mut env = env();
+    env.map_rw(MEM, 1).unwrap();
+    sem::gr_set(&mut env.backend, 3, MEM);
+    sem::gr_set(&mut env.backend, 4, 0xaabb_ccdd_eeff_0011);
+    ia6x(&mut env, Insn::St1, encode_st1(&[0, 3, 4]).unwrap());
+    assert_eq!(rmem(&env, MEM, 1), 0x11);
+    ia6x(&mut env, Insn::St2, encode_st2(&[0, 3, 4]).unwrap());
+    assert_eq!(rmem(&env, MEM, 2), 0x0011);
+    ia6x(&mut env, Insn::St4, encode_st4(&[0, 3, 4]).unwrap());
+    assert_eq!(rmem(&env, MEM, 4), 0xeeff_0011);
+    ia6x(&mut env, Insn::St8, encode_st8(&[0, 3, 4]).unwrap());
+    assert_eq!(rmem(&env, MEM, 8), 0xaabb_ccdd_eeff_0011);
+    // st8.rel も同じ書き込み（リリース順序は単一スレッドで実効なし）。
+    ia6x(&mut env, Insn::St8Rel, encode_st8_rel(&[0, 3, 4]).unwrap());
+    assert_eq!(rmem(&env, MEM, 8), 0xaabb_ccdd_eeff_0011);
+    // ポストインクリメント: st8 [r3] = r2, 8 → r3 += 8・NaT クリア。
+    sem::nat_set(&mut env.backend, 3, true);
+    sem::gr_set(&mut env.backend, 3, MEM + 0x40);
+    sem::nat_set(&mut env.backend, 3, false);
+    let ok = sem::exec(
+        &mut env.backend,
+        Insn::St8I,
+        encode_st8_i(&[0, 3, 4, 8]).unwrap(),
+        0,
+    )
+    .unwrap();
+    assert!(ok);
+    assert_eq!(sem::gr_get(&env.backend, 3), MEM + 0x48);
+    assert!(!sem::nat_get(&env.backend, 3));
+    assert_eq!(rmem(&env, MEM + 0x40, 8), 0xaabb_ccdd_eeff_0011);
+}
+
+#[test]
+fn ia6_load_post_inc() {
+    let mut env = env();
+    env.map_rw(MEM, 1).unwrap();
+    wmem(&mut env, MEM, 0xdead_beef_cafe_f00d, 8);
+    wmem(&mut env, MEM + 8, 0x1122_3344_5566_7788, 8);
+    // 即値更新: ld8 r1 = [r3], 8。
+    sem::gr_set(&mut env.backend, 3, MEM);
+    ia6x(&mut env, Insn::Ld8I, encode_ld8_i(&[0, 1, 3, 8]).unwrap());
+    assert_eq!(sem::gr_get(&env.backend, 1), 0xdead_beef_cafe_f00d);
+    assert_eq!(sem::gr_get(&env.backend, 3), MEM + 8);
+    // レジスタ更新: ld8 r1 = [r3], r2。
+    sem::gr_set(&mut env.backend, 2, 0x10);
+    ia6x(&mut env, Insn::Ld8R, encode_ld8_r(&[0, 1, 3, 2]).unwrap());
+    assert_eq!(sem::gr_get(&env.backend, 1), 0x1122_3344_5566_7788);
+    assert_eq!(sem::gr_get(&env.backend, 3), MEM + 0x18);
+    // レジスタ更新は r2 の NaT を伝播する。
+    sem::gr_set(&mut env.backend, 3, MEM);
+    sem::nat_set(&mut env.backend, 2, true);
+    ia6x(&mut env, Insn::Ld8R, encode_ld8_r(&[0, 1, 3, 2]).unwrap());
+    assert!(sem::nat_get(&env.backend, 3));
+    sem::nat_set(&mut env.backend, 2, false);
+    // r1 == r3 のベース更新は Illegal Operation。
+    let e = sem::exec(
+        &mut env.backend,
+        Insn::Ld8I,
+        encode_ld8_i(&[0, 3, 3, 8]).unwrap(),
+        0,
+    )
+    .unwrap_err();
+    assert!(matches!(e, InterpExit::Exception(_)));
+}
+
+#[test]
+fn ia6_nat_address_consumption() {
+    let mut env = env();
+    env.map_rw(MEM, 1).unwrap();
+    wmem(&mut env, MEM, 0x1122_3344_5566_7788, 8);
+    // 通常ロードは r3.NaT で Register NaT Consumption。
+    sem::gr_set(&mut env.backend, 3, MEM);
+    sem::nat_set(&mut env.backend, 3, true);
+    let e = sem::exec(
+        &mut env.backend,
+        Insn::Ld8,
+        encode_ld8(&[0, 1, 3]).unwrap(),
+        0,
+    )
+    .unwrap_err();
+    assert!(matches!(e, InterpExit::Exception(_)));
+    // 投機ロード（.s）はフォールトを繰り延べ r1=NaT。
+    ia6x(&mut env, Insn::Ld8S, encode_ld8_s(&[0, 1, 3]).unwrap());
+    assert!(sem::nat_get(&env.backend, 1));
+    // .a は非投機（消費フォールト）。
+    let e = sem::exec(
+        &mut env.backend,
+        Insn::Ld8A,
+        encode_ld8_a(&[0, 1, 3]).unwrap(),
+        0,
+    )
+    .unwrap_err();
+    assert!(matches!(e, InterpExit::Exception(_)));
+    // ストアも r3/r2 の NaT を消費する。
+    sem::nat_set(&mut env.backend, 3, false);
+    sem::nat_set(&mut env.backend, 4, true);
+    let e = sem::exec(
+        &mut env.backend,
+        Insn::St8,
+        encode_st8(&[0, 3, 4]).unwrap(),
+        0,
+    )
+    .unwrap_err();
+    assert!(matches!(e, InterpExit::Exception(_)));
+    sem::nat_set(&mut env.backend, 4, false);
+}
+
+#[test]
+fn ia6_alignment_faults() {
+    let mut env = env();
+    env.map_rw(MEM, 1).unwrap();
+    for (insn, w) in [
+        (Insn::Ld2, encode_ld2(&[0, 1, 3]).unwrap()),
+        (Insn::Ld4, encode_ld4(&[0, 1, 3]).unwrap()),
+        (Insn::Ld8, encode_ld8(&[0, 1, 3]).unwrap()),
+    ] {
+        sem::gr_set(&mut env.backend, 3, MEM + 1);
+        let e = sem::exec(&mut env.backend, insn, w, 0).unwrap_err();
+        assert!(
+            matches!(
+                e,
+                InterpExit::Exception(polyisa_sem::GuestException {
+                    kind: ExceptionKind::Align,
+                    ..
+                })
+            ),
+            "{insn:?} が整列フォールトにならない"
+        );
+    }
+    // ストア側も同じ規則。
+    sem::gr_set(&mut env.backend, 4, 0);
+    let e = sem::exec(
+        &mut env.backend,
+        Insn::St8,
+        encode_st8(&[0, 3, 4]).unwrap(),
+        0,
+    )
+    .unwrap_err();
+    assert!(matches!(e, InterpExit::Exception(_)));
+}
+
+#[test]
+fn ia6_alat_lifecycle() {
+    use polyisa_engine::interp::Ctrl;
+    let mut env = env();
+    env.map_rw(MEM, 1).unwrap();
+    wmem(&mut env, MEM, 0x1, 8);
+    wmem(&mut env, MEM + 8, 0x2, 8);
+    let alat_valid = core::mem::offset_of!(CpuState, alat_valid);
+    // ld8.a が reg タグのエントリを登録する。
+    sem::gr_set(&mut env.backend, 3, MEM);
+    ia6x(&mut env, Insn::Ld8A, encode_ld8_a(&[0, 10, 3]).unwrap());
+    assert_eq!(sem::gr_get(&env.backend, 10), 1);
+    assert_ne!(get_ar(&mut env, alat_valid), 0);
+    // chk.a.nc: エントリがあれば分岐しない。
+    ia6x(
+        &mut env,
+        Insn::ChkANc,
+        encode_chk_a_nc(&[0, 10, 0x40]).unwrap(),
+    );
+    assert!(!matches!(env.backend.ctrl, Ctrl::Jump(_)));
+    // 同じアドレスへのストアでエントリが無効化され、
+    // 次の chk.a は回復先へ飛ぶ。
+    sem::gr_set(&mut env.backend, 4, MEM);
+    sem::gr_set(&mut env.backend, 5, 0x9);
+    ia6x(&mut env, Insn::St8, encode_st8(&[0, 4, 5]).unwrap());
+    ia6x(
+        &mut env,
+        Insn::ChkANc,
+        encode_chk_a_nc(&[0, 10, 0x40]).unwrap(),
+    );
+    assert_eq!(env.backend.ctrl, Ctrl::Jump(0x40));
+    env.backend.ctrl = Ctrl::Fallthrough;
+    // ld8.c.nc は再読み出ししてエントリを再登録する。
+    ia6x(
+        &mut env,
+        Insn::Ld8CNc,
+        encode_ld8_c_nc(&[0, 10, 3]).unwrap(),
+    );
+    assert_eq!(sem::gr_get(&env.backend, 10), 0x9);
+    ia6x(
+        &mut env,
+        Insn::ChkANc,
+        encode_chk_a_nc(&[0, 10, 0x40]).unwrap(),
+    );
+    assert!(!matches!(env.backend.ctrl, Ctrl::Jump(_)));
+    // invala は全エントリを空にする。
+    ia6x(&mut env, Insn::Invala, encode_invala(&[0]).unwrap());
+    assert_eq!(get_ar(&mut env, alat_valid), 0);
+}
+
+#[test]
+fn ia6_chk_a_clr_clears_entry() {
+    use polyisa_engine::interp::Ctrl;
+    let mut env = env();
+    env.map_rw(MEM, 1).unwrap();
+    wmem(&mut env, MEM, 0x7, 8);
+    sem::gr_set(&mut env.backend, 3, MEM);
+    ia6x(&mut env, Insn::Ld8A, encode_ld8_a(&[0, 10, 3]).unwrap());
+    // chk.a.clr 成功時はエントリを消す → 2 度目は失敗して飛ぶ。
+    ia6x(
+        &mut env,
+        Insn::ChkAClr,
+        encode_chk_a_clr(&[0, 10, 0x40]).unwrap(),
+    );
+    assert!(!matches!(env.backend.ctrl, Ctrl::Jump(_)));
+    ia6x(
+        &mut env,
+        Insn::ChkANc,
+        encode_chk_a_nc(&[0, 10, 0x40]).unwrap(),
+    );
+    assert_eq!(env.backend.ctrl, Ctrl::Jump(0x40));
+    // ld8.c.clr も reg タグのエントリを消して読む。
+    env.backend.ctrl = Ctrl::Fallthrough;
+    ia6x(&mut env, Insn::Ld8A, encode_ld8_a(&[0, 11, 3]).unwrap());
+    ia6x(
+        &mut env,
+        Insn::Ld8CClr,
+        encode_ld8_c_clr(&[0, 11, 3]).unwrap(),
+    );
+    assert_eq!(sem::gr_get(&env.backend, 11), 0x7);
+    ia6x(
+        &mut env,
+        Insn::ChkANc,
+        encode_chk_a_nc(&[0, 11, 0x40]).unwrap(),
+    );
+    assert_eq!(env.backend.ctrl, Ctrl::Jump(0x40));
+}
+
+#[test]
+fn ia6_alat_fifo_replacement() {
+    use polyisa_engine::interp::Ctrl;
+    let mut env = env();
+    env.map_rw(MEM, 4).unwrap();
+    for i in 0..32u64 {
+        wmem(&mut env, MEM + i * 8, i + 1, 8);
+    }
+    // 16 エントリの FIFO: r10-r25 に 17 個登録すると
+    // 最古の r10 用が追い出される。
+    for r in 10u64..27 {
+        sem::gr_set(&mut env.backend, 3, MEM + (r - 10) * 8);
+        ia6x(&mut env, Insn::Ld8A, encode_ld8_a(&[0, r, 3]).unwrap());
+    }
+    // r10（最古）は無効化されている → chk.a 失敗で分岐。
+    ia6x(
+        &mut env,
+        Insn::ChkANc,
+        encode_chk_a_nc(&[0, 10, 0x40]).unwrap(),
+    );
+    assert_eq!(env.backend.ctrl, Ctrl::Jump(0x40));
+    // r26（最新）は残っている → 成功。
+    env.backend.ctrl = Ctrl::Fallthrough;
+    ia6x(
+        &mut env,
+        Insn::ChkANc,
+        encode_chk_a_nc(&[0, 26, 0x40]).unwrap(),
+    );
+    assert!(!matches!(env.backend.ctrl, Ctrl::Jump(_)));
+}
+
+#[test]
+fn ia6_chk_s_branches_on_nat() {
+    use polyisa_engine::interp::Ctrl;
+    let mut env = env();
+    sem::gr_set(&mut env.backend, 2, 5);
+    // r2 が NaT でなければ進む。
+    ia6x(
+        &mut env,
+        Insn::ChkSM,
+        encode_chk_s_m(&[0, 2, 0x80]).unwrap(),
+    );
+    assert!(!matches!(env.backend.ctrl, Ctrl::Jump(_)));
+    // NaT なら回復先へ。
+    sem::nat_set(&mut env.backend, 2, true);
+    ia6x(
+        &mut env,
+        Insn::ChkSM,
+        encode_chk_s_m(&[0, 2, 0x80]).unwrap(),
+    );
+    assert_eq!(env.backend.ctrl, Ctrl::Jump(0x80));
+    env.backend.ctrl = Ctrl::Fallthrough;
+}
+
+#[test]
+fn ia6_ld_fill_spill_nat() {
+    let mut env = env();
+    env.map_rw(MEM, 1).unwrap();
+    let unat = core::mem::offset_of!(CpuState, unat);
+    // st8.spill は NaT を UNAT[paddr[8:3]] に書き、
+    // r2 の NaT を消費しない（NaT データとして運ぶ）。
+    sem::gr_set(&mut env.backend, 3, MEM);
+    sem::gr_set(&mut env.backend, 4, 0x1122_3344_5566_7788);
+    sem::nat_set(&mut env.backend, 4, true);
+    ia6x(
+        &mut env,
+        Insn::St8Spill,
+        encode_st8_spill(&[0, 3, 4]).unwrap(),
+    );
+    assert_eq!(rmem(&env, MEM, 8), 0x1122_3344_5566_7788);
+    assert_eq!(get_ar(&mut env, unat) & 1, 1);
+    // ld8.fill で NaT が復帰する。
+    ia6x(
+        &mut env,
+        Insn::Ld8Fill,
+        encode_ld8_fill(&[0, 5, 3]).unwrap(),
+    );
+    assert_eq!(sem::gr_get(&env.backend, 5), 0x1122_3344_5566_7788);
+    assert!(sem::nat_get(&env.backend, 5));
+    // 非 NaT なら UNAT も落ちる。
+    sem::nat_set(&mut env.backend, 4, false);
+    ia6x(
+        &mut env,
+        Insn::St8Spill,
+        encode_st8_spill(&[0, 3, 4]).unwrap(),
+    );
+    assert_eq!(get_ar(&mut env, unat) & 1, 0);
+    ia6x(
+        &mut env,
+        Insn::Ld8Fill,
+        encode_ld8_fill(&[0, 5, 3]).unwrap(),
+    );
+    assert!(!sem::nat_get(&env.backend, 5));
+    // spill/fill のポストインクリメント（imm 形式）。
+    sem::gr_set(&mut env.backend, 3, MEM);
+    ia6x(
+        &mut env,
+        Insn::St8SpillI,
+        encode_st8_spill_i(&[0, 3, 4, 8]).unwrap(),
+    );
+    assert_eq!(sem::gr_get(&env.backend, 3), MEM + 8);
+    ia6x(
+        &mut env,
+        Insn::Ld8FillI,
+        encode_ld8_fill_i(&[0, 5, 3, 0x1f8]).unwrap(),
+    );
+    assert_eq!(sem::gr_get(&env.backend, 3), MEM);
+}
+
+#[test]
+fn ia6_atomics() {
+    let mut env = env();
+    env.map_rw(MEM, 1).unwrap();
+    let ccv = core::mem::offset_of!(CpuState, ccv);
+    let csd = core::mem::offset_of!(CpuState, csd);
+    // cmpxchg4.acq: ccv 一致 → 交換、r1 = 旧値。
+    wmem(&mut env, MEM, 0xaaaa_5555, 4);
+    set_ar(&mut env, ccv, 0xaaaa_5555);
+    sem::gr_set(&mut env.backend, 3, MEM);
+    sem::gr_set(&mut env.backend, 2, 0xbbbb_6666);
+    ia6x(
+        &mut env,
+        Insn::Cmpxchg4Acq,
+        encode_cmpxchg4_acq(&[0, 1, 3, 2]).unwrap(),
+    );
+    assert_eq!(sem::gr_get(&env.backend, 1), 0xaaaa_5555);
+    assert_eq!(rmem(&env, MEM, 4), 0xbbbb_6666);
+    // ccv 不一致 → 書き込まず、r1 = 読んだ値。
+    set_ar(&mut env, ccv, 0x1111);
+    ia6x(
+        &mut env,
+        Insn::Cmpxchg4Acq,
+        encode_cmpxchg4_acq(&[0, 1, 3, 2]).unwrap(),
+    );
+    assert_eq!(sem::gr_get(&env.backend, 1), 0xbbbb_6666);
+    assert_eq!(rmem(&env, MEM, 4), 0xbbbb_6666);
+    // fetchadd4.acq inc=1（inc3=3）。
+    ia6x(
+        &mut env,
+        Insn::Fetchadd4Acq,
+        encode_fetchadd4_acq(&[0, 1, 3, 3]).unwrap(),
+    );
+    assert_eq!(sem::gr_get(&env.backend, 1), 0xbbbb_6666);
+    assert_eq!(rmem(&env, MEM, 4), 0xbbbb_6667);
+    // fetchadd8.rel inc=-16（inc3=4）。
+    wmem(&mut env, MEM + 8, 0x30, 8);
+    sem::gr_set(&mut env.backend, 3, MEM + 8);
+    ia6x(
+        &mut env,
+        Insn::Fetchadd8Rel,
+        encode_fetchadd8_rel(&[0, 1, 3, 4]).unwrap(),
+    );
+    assert_eq!(sem::gr_get(&env.backend, 1), 0x30);
+    assert_eq!(rmem(&env, MEM + 8, 8), 0x20);
+    // xchg8。
+    sem::gr_set(&mut env.backend, 2, 0x77);
+    ia6x(&mut env, Insn::Xchg8, encode_xchg8(&[0, 1, 3, 2]).unwrap());
+    assert_eq!(sem::gr_get(&env.backend, 1), 0x20);
+    assert_eq!(rmem(&env, MEM + 8, 8), 0x77);
+    // cmpxchg8.acq。
+    set_ar(&mut env, ccv, 0x77);
+    sem::gr_set(&mut env.backend, 2, 0x88);
+    ia6x(
+        &mut env,
+        Insn::Cmpxchg8Acq,
+        encode_cmpxchg8_acq(&[0, 1, 3, 2]).unwrap(),
+    );
+    assert_eq!(rmem(&env, MEM + 8, 8), 0x88);
+    // cmp8xchg16.acq: [r3] の 8 バイトと ccv が一致すれば
+    // (r3 & ~0xf) の 16 バイトに {r2, ar.csd} を書く。
+    wmem(&mut env, MEM + 0x10, 0x10, 8);
+    wmem(&mut env, MEM + 0x18, 0x11, 8);
+    set_ar(&mut env, ccv, 0x11);
+    set_ar(&mut env, csd, 0x2222);
+    sem::gr_set(&mut env.backend, 3, MEM + 0x18);
+    sem::gr_set(&mut env.backend, 2, 0x1111);
+    ia6x(
+        &mut env,
+        Insn::Cmp8xchg16Acq,
+        encode_cmp8xchg16_acq(&[0, 1, 3, 2]).unwrap(),
+    );
+    assert_eq!(sem::gr_get(&env.backend, 1), 0x11);
+    assert_eq!(rmem(&env, MEM + 0x10, 8), 0x1111);
+    assert_eq!(rmem(&env, MEM + 0x18, 8), 0x2222);
+}
+
+#[test]
+fn ia6_ld16_st16() {
+    let mut env = env();
+    env.map_rw(MEM, 1).unwrap();
+    let csd = core::mem::offset_of!(CpuState, csd);
+    // st16: {r2, ar.csd} を 16 バイト整列アドレスへ。
+    set_ar(&mut env, csd, 0x9999_8888_7777_6666);
+    sem::gr_set(&mut env.backend, 3, MEM);
+    sem::gr_set(&mut env.backend, 4, 0x5555_4444_3333_2222);
+    ia6x(&mut env, Insn::St16, encode_st16(&[0, 3, 4]).unwrap());
+    assert_eq!(rmem(&env, MEM, 8), 0x5555_4444_3333_2222);
+    assert_eq!(rmem(&env, MEM + 8, 8), 0x9999_8888_7777_6666);
+    // ld16: {r1, ar.csd} に戻す。
+    wmem(&mut env, MEM, 0x10, 8);
+    wmem(&mut env, MEM + 8, 0x20, 8);
+    ia6x(&mut env, Insn::Ld16, encode_ld16(&[0, 5, 3]).unwrap());
+    assert_eq!(sem::gr_get(&env.backend, 5), 0x10);
+    assert_eq!(get_ar(&mut env, csd), 0x20);
+    // 16 バイト整列違反はフォールト。
+    sem::gr_set(&mut env.backend, 3, MEM + 8);
+    let e = sem::exec(
+        &mut env.backend,
+        Insn::Ld16,
+        encode_ld16(&[0, 5, 3]).unwrap(),
+        0,
+    )
+    .unwrap_err();
+    assert!(matches!(e, InterpExit::Exception(_)));
+    let e = sem::exec(
+        &mut env.backend,
+        Insn::St16,
+        encode_st16(&[0, 3, 4]).unwrap(),
+        0,
+    )
+    .unwrap_err();
+    assert!(matches!(e, InterpExit::Exception(_)));
+}
+
+#[test]
+fn ia6_advanced_load_post_inc() {
+    let mut env = env();
+    env.map_rw(MEM, 1).unwrap();
+    wmem(&mut env, MEM, 0x41, 8);
+    // ld8.a も imm ポストインクリメント形を持つ。
+    sem::gr_set(&mut env.backend, 3, MEM);
+    ia6x(
+        &mut env,
+        Insn::Ld8AI,
+        encode_ld8_a_i(&[0, 10, 3, 8]).unwrap(),
+    );
+    assert_eq!(sem::gr_get(&env.backend, 10), 0x41);
+    assert_eq!(sem::gr_get(&env.backend, 3), MEM + 8);
+    // エントリは旧アドレス（更新前の r3）で登録されている。
+    ia6x(
+        &mut env,
+        Insn::ChkANc,
+        encode_chk_a_nc(&[0, 10, 0x40]).unwrap(),
+    );
+    use polyisa_engine::interp::Ctrl;
+    assert!(!matches!(env.backend.ctrl, Ctrl::Jump(_)));
+}
+
+#[test]
+fn ia6_qp_suppression_memory() {
+    let mut env = env();
+    env.map_rw(MEM, 1).unwrap();
+    wmem(&mut env, MEM, 0x5a, 8);
+    sem::gr_set(&mut env.backend, 3, MEM);
+    // (p6) ld8 / st8 / chk.a / xchg は p6=0 では走らない。
+    let w = encode_ld8(&[6, 1, 3]).unwrap();
+    let ok = sem::exec(&mut env.backend, Insn::Ld8, w, 0).unwrap();
+    assert!(!ok);
+    assert_eq!(sem::gr_get(&env.backend, 1), 0);
+    let w = encode_st8(&[6, 3, 1]).unwrap();
+    let ok = sem::exec(&mut env.backend, Insn::St8, w, 0).unwrap();
+    assert!(!ok);
+    assert_eq!(rmem(&env, MEM, 8), 0x5a);
+    let w = encode_xchg8(&[6, 1, 3, 1]).unwrap();
+    let ok = sem::exec(&mut env.backend, Insn::Xchg8, w, 0).unwrap();
+    assert!(!ok);
 }

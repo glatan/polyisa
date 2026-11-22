@@ -32,7 +32,7 @@ pub fn build_model() -> polyisa_isadl::Model {
     let mut m = polyisa_isadl::Model::new();
 
     for class in [
-        "alu", "load", "store", "branch", "system", "fp", "misc",
+        "alu", "load", "store", "branch", "system", "fp", "misc", "mem",
     ] {
         m.timing_classes.push(class.to_string());
     }
@@ -1376,72 +1376,192 @@ pub fn build_model() -> polyisa_isadl::Model {
     ] {
         m.insns.push(ins(n, "FI21", pat, um(), &format!("({{qp}}) {syn}"), "misc"));
     }
-    // M1: 整数ロード（x6 拡張でサイズ・完了子）。
-    for (n, pat, syn) in [
-        ("ld1", "01000000000000...........................", "ld1 {r1} = [{r3}]"),
-        ("ld2", "01000000001000...........................", "ld2 {r1} = [{r3}]"),
-        ("ld4", "01000000010000...........................", "ld4 {r1} = [{r3}]"),
-        ("ld8", "01000000011000...........................", "ld8 {r1} = [{r3}]"),
-        ("ld8_fill", "01000011011000...........................", "ld8.fill {r1} = [{r3}]"),
-        ("ld1_a", "01000001000000...........................", "ld1.a {r1} = [{r3}]"),
-        ("ld1_c_nc", "01000100100000...........................", "ld1.c.nc {r1} = [{r3}]"),
-        ("ld16", "01000101000001...........................", "ld16 {r1} = ar.csd, [{r3}]"),
-    ] {
-        m.insns.push(ins(n, "FRR", pat, um(), &format!("({{qp}}) {syn}"), "load"));
+    // M1-M5/M16/M17: 整数ロードストア・セマフォ（IA6）。x6a 拡張の
+    // 表で一括宣言する。ヒント場（hint[29:28]・hlfa[19]・hlf[12]）は
+    // 性能ヒントのみで意味を持たないため '.' にして、完了子の
+    // バリエーション（.nt1/.nt2/.nta/.dN）を 1 命令として受ける
+    // （逆アセンブルは正準名を出す）。
+    // Ref: SPEC-IA64-SDM (Rev 2.3) opcode extension tables.
+    let m_pat = |m_: u64, x6a: u64, x: u64| -> String {
+        format!("0100{}{:06b}..{}", m_, x6a, x) + &".".repeat(27)
+    };
+    let mi_pat = |x6a: u64| -> String {
+        format!("0101.{:06b}...", x6a) + &".".repeat(27)
+    };
+    // (insn 名接尾辞, 構文の完了子, x6a ベース)。0x18-0x1f は
+    // fill/getf 系、0x2c-0x2f は ld16.acq/未使用。
+    let ld_ty: [(&str, &str, u64); 9] = [
+        ("", "", 0x00),
+        ("_s", ".s", 0x04),
+        ("_a", ".a", 0x08),
+        ("_sa", ".sa", 0x0c),
+        ("_bias", ".bias", 0x10),
+        ("_acq", ".acq", 0x14),
+        ("_c_clr", ".c.clr", 0x20),
+        ("_c_nc", ".c.nc", 0x24),
+        ("_c_clr_acq", ".c.clr.acq", 0x28),
+    ];
+    for (sz_n, sz_i) in [("1", 0u64), ("2", 1), ("4", 2), ("8", 3)] {
+        for (suf, syn, base) in ld_ty {
+            let x6a = base + sz_i;
+            let n = format!("ld{sz_n}{suf}");
+            let a = format!("ld{sz_n}{syn}");
+            m.insns.push(ins(
+                &n,
+                "FRR",
+                &m_pat(0, x6a, 0),
+                um(),
+                &format!("({{qp}}) {a} {{r1}} = [{{r3}}]"),
+                "mem",
+            ));
+            m.insns.push(ins(
+                &format!("{n}_r"),
+                "FLDR",
+                &m_pat(1, x6a, 0),
+                um(),
+                &format!("({{qp}}) {a} {{r1}} = [{{r3}}], {{r2}}"),
+                "mem",
+            ));
+            m.insns.push(ins(
+                &format!("{n}_i"),
+                "FLDI",
+                &mi_pat(x6a),
+                um(),
+                &format!("({{qp}}) {a} {{r1}} = [{{r3}}], {{imm9b}}"),
+                "mem",
+            ));
+        }
     }
-    // M2/M3: post-increment（r2 / imm9）。
-    m.insns.push(ins(
-        "ld8_r",
-        "FLDR",
-        "01001000011000...........................",
-        um(),
-        "({qp}) ld8 {r1} = [{r3}], {r2}",
-        "load",
-    ));
-    m.insns.push(ins(
-        "ld8_i",
-        "FLDI",
-        "0101.00001100............................",
-        um(),
-        "({qp}) ld8 {r1} = [{r3}], {imm9b}",
-        "load",
-    ));
-    // M4: ストア。
-    for (n, pat, syn) in [
-        ("st1", "01000110000000...........................", "st1 [{r3}] = {r2}"),
-        ("st2", "01000110001000...........................", "st2 [{r3}] = {r2}"),
-        ("st4", "01000110010000...........................", "st4 [{r3}] = {r2}"),
-        ("st8", "01000110011000...........................", "st8 [{r3}] = {r2}"),
-        ("st8_spill", "01000111011000...........................", "st8.spill [{r3}] = {r2}"),
-        ("st16", "01000110000001...........................", "st16 [{r3}] = {r2}, ar.csd"),
+    // ld8.fill: RSE 連携ロード（NaT は UNAT[paddr[8:3]] から復帰）。
+    for (suf, fmt_, pat, tail) in [
+        ("", "FRR", m_pat(0, 0x1b, 0), ""),
+        ("_r", "FLDR", m_pat(1, 0x1b, 0), ", {r2}"),
+        ("_i", "FLDI", mi_pat(0x1b), ", {imm9b}"),
     ] {
-        m.insns.push(ins(n, "FSTR", pat, um(), &format!("({{qp}}) {syn}"), "store"));
+        m.insns.push(ins(
+            &format!("ld8_fill{suf}"),
+            fmt_,
+            &pat,
+            um(),
+            &format!("({{qp}}) ld8.fill {{r1}} = [{{r3}}]{tail}"),
+            "mem",
+        ));
     }
-    m.insns.push(ins(
-        "st8_i",
-        "FSTI",
-        "0101.11001100............................",
-        um(),
-        "({qp}) st8 [{r3}] = {r2}, {imm9a}",
-        "store",
-    ));
-    // M17/M16: セマフォ。
-    m.insns.push(ins(
-        "xchg4",
-        "FLDR",
-        "01000001010001...........................",
-        um(),
-        "({qp}) xchg4 {r1} = [{r3}], {r2}",
-        "load",
-    ));
-    m.insns.push(ins(
-        "fetchadd4_acq",
-        "FFA",
-        "01000010010001...........................",
-        um(),
-        "({qp}) fetchadd4.acq {r1} = [{r3}], {inc3}",
-        "load",
-    ));
+    // ld16 / ld16.acq: 16 バイトを {r1, ar.csd} に載せる（X=1）。
+    for (n, syn, x6a) in [
+        ("ld16", "ld16", 0x28u64),
+        ("ld16_acq", "ld16.acq", 0x2c),
+    ] {
+        m.insns.push(ins(
+            n,
+            "FRR",
+            &m_pat(0, x6a, 1),
+            um(),
+            &format!("({{qp}}) {syn} {{r1}} = ar.csd, [{{r3}}]"),
+            "mem",
+        ));
+    }
+    // ストア。.rel はリリース順序ヒント（単一スレッドでは順序のみ）。
+    for (sz_n, sz_i) in [("1", 0u64), ("2", 1), ("4", 2), ("8", 3)] {
+        for (suf, syn, base) in [("", "", 0x30u64), ("_rel", ".rel", 0x34)] {
+            let x6a = base + sz_i;
+            let n = format!("st{sz_n}{suf}");
+            let a = format!("st{sz_n}{syn}");
+            m.insns.push(ins(
+                &n,
+                "FSTR",
+                &m_pat(0, x6a, 0),
+                um(),
+                &format!("({{qp}}) {a} [{{r3}}] = {{r2}}"),
+                "mem",
+            ));
+            m.insns.push(ins(
+                &format!("{n}_i"),
+                "FSTI",
+                &mi_pat(x6a),
+                um(),
+                &format!("({{qp}}) {a} [{{r3}}] = {{r2}}, {{imm9a}}"),
+                "mem",
+            ));
+        }
+    }
+    // st8.spill: NaT を UNAT[paddr[8:3]] に書き出す。
+    for (suf, fmt_, pat, tail) in [
+        ("", "FSTR", m_pat(0, 0x3b, 0), ""),
+        ("_i", "FSTI", mi_pat(0x3b), ", {imm9a}"),
+    ] {
+        m.insns.push(ins(
+            &format!("st8_spill{suf}"),
+            fmt_,
+            &pat,
+            um(),
+            &format!("({{qp}}) st8.spill [{{r3}}] = {{r2}}{tail}"),
+            "mem",
+        ));
+    }
+    // st16 / st16.rel（X=1。{r2, ar.csd} の 16 バイト）。
+    for (n, syn, x6a) in [
+        ("st16", "st16", 0x30u64),
+        ("st16_rel", "st16.rel", 0x34),
+    ] {
+        m.insns.push(ins(
+            n,
+            "FSTR",
+            &m_pat(0, x6a, 1),
+            um(),
+            &format!("({{qp}}) {syn} [{{r3}}] = {{r2}}, ar.csd"),
+            "mem",
+        ));
+    }
+    // セマフォ（全て m=0・X=1）。xchg=0x08-0x0b、cmpxchg=サイズ|rel<<2
+    // （0x00-0x07）、fetchadd4/8.acq=0x12/0x13・.rel=0x16/0x17、
+    // cmp8xchg16.acq/rel=0x20/0x24。
+    for (sz_n, sz_i) in [("1", 0u64), ("2", 1), ("4", 2), ("8", 3)] {
+        m.insns.push(ins(
+            &format!("xchg{sz_n}"),
+            "FLDR",
+            &m_pat(0, 0x08 + sz_i, 1),
+            um(),
+            &format!("({{qp}}) xchg{sz_n} {{r1}} = [{{r3}}], {{r2}}"),
+            "mem",
+        ));
+        for (sem, soff) in [("acq", 0u64), ("rel", 4)] {
+            m.insns.push(ins(
+                &format!("cmpxchg{sz_n}_{sem}"),
+                "FLDR",
+                &m_pat(0, sz_i + soff, 1),
+                um(),
+                &format!(
+                    "({{qp}}) cmpxchg{sz_n}.{sem} {{r1}} = [{{r3}}], {{r2}}, ar.ccv"
+                ),
+                "mem",
+            ));
+        }
+    }
+    for (sz_n, sz_off) in [("4", 0u64), ("8", 1)] {
+        for (sem, soff) in [("acq", 0u64), ("rel", 4)] {
+            m.insns.push(ins(
+                &format!("fetchadd{sz_n}_{sem}"),
+                "FFA",
+                &m_pat(0, 0x12 + sz_off + soff, 1),
+                um(),
+                &format!("({{qp}}) fetchadd{sz_n}.{sem} {{r1}} = [{{r3}}], {{inc3}}"),
+                "mem",
+            ));
+        }
+    }
+    for (sem, soff) in [("acq", 0u64), ("rel", 4)] {
+        m.insns.push(ins(
+            &format!("cmp8xchg16_{sem}"),
+            "FLDR",
+            &m_pat(0, 0x20 + soff, 1),
+            um(),
+            &format!(
+                "({{qp}}) cmp8xchg16.{sem} {{r1}} = [{{r3}}], {{r2}}, ar.csd, ar.ccv"
+            ),
+            "mem",
+        ));
+    }
     // M22/M25: probe。
     m.insns.push(ins(
         "probe_r",
@@ -1629,11 +1749,27 @@ pub fn build_model() -> polyisa_isadl::Model {
         "misc",
     ));
     m.insns.push(ins(
+        "chk_a_clr",
+        "FRTC",
+        "0000.101.................................",
+        um(),
+        "({qp}) chk.a.clr {r1}, {tgt25c}",
+        "misc",
+    ));
+    m.insns.push(ins(
         "chk_a_nc_f",
         "FFTC",
         "0000.110.................................",
         um(),
         "({qp}) chk.a.nc {f1}, {tgt25c}",
+        "misc",
+    ));
+    m.insns.push(ins(
+        "chk_a_clr_f",
+        "FFTC",
+        "0000.111.................................",
+        um(),
+        "({qp}) chk.a.clr {f1}, {tgt25c}",
         "misc",
     ));
     // M24/M26/M28/M29/M30: システム系 misc。
@@ -1654,6 +1790,14 @@ pub fn build_model() -> polyisa_isadl::Model {
         "00010000110000...........................",
         um(),
         "({qp}) fc {r3}",
+        "misc",
+    ));
+    m.insns.push(ins(
+        "fc_i",
+        "FM3",
+        "00011000110000...........................",
+        um(),
+        "({qp}) fc.i {r3}",
         "misc",
     ));
     m.insns.push(ins(
@@ -1694,7 +1838,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("famin_s0", "0000.000010110...........................", "famin.s0 {f1} = {f2}, {f3}"),
         ("famax_s0", "0000.000010111...........................", "famax.s0 {f1} = {f2}, {f3}"),
         ("fmerge_s", "0000...0010000...........................", "fmerge.s {f1} = {f2}, {f3}"),
-        ("fmerge_se", "0000...0010001...........................", "fmerge.se {f1} = {f2}, {f3}"),
+        ("fmerge_ns", "0000...0010001...........................", "fmerge.ns {f1} = {f2}, {f3}"),
+        ("fmerge_se", "0000...0010010...........................", "fmerge.se {f1} = {f2}, {f3}"),
         ("fand", "0000...0101100...........................", "fand {f1} = {f2}, {f3}"),
         ("fandcm", "0000...0101101...........................", "fandcm {f1} = {f2}, {f3}"),
         ("for", "0000...0101110...........................", "for {f1} = {f2}, {f3}"),

@@ -292,12 +292,147 @@ pub fn insn_unit(insn: Insn) -> Unit {
         | Insn::Ld1A
         | Insn::Ld1CNc
         | Insn::Ld16
+        | Insn::Ld1S
+        | Insn::Ld2S
+        | Insn::Ld4S
+        | Insn::Ld8S
+        | Insn::Ld2A
+        | Insn::Ld4A
+        | Insn::Ld8A
+        | Insn::Ld1Sa
+        | Insn::Ld2Sa
+        | Insn::Ld4Sa
+        | Insn::Ld8Sa
+        | Insn::Ld1Bias
+        | Insn::Ld2Bias
+        | Insn::Ld4Bias
+        | Insn::Ld8Bias
+        | Insn::Ld1Acq
+        | Insn::Ld2Acq
+        | Insn::Ld4Acq
+        | Insn::Ld8Acq
+        | Insn::Ld1CClr
+        | Insn::Ld2CClr
+        | Insn::Ld4CClr
+        | Insn::Ld8CClr
+        | Insn::Ld2CNc
+        | Insn::Ld4CNc
+        | Insn::Ld8CNc
+        | Insn::Ld1CClrAcq
+        | Insn::Ld2CClrAcq
+        | Insn::Ld4CClrAcq
+        | Insn::Ld8CClrAcq
+        | Insn::Ld1R
+        | Insn::Ld2R
+        | Insn::Ld4R
+        | Insn::Ld1SR
+        | Insn::Ld2SR
+        | Insn::Ld4SR
+        | Insn::Ld8SR
+        | Insn::Ld1AR
+        | Insn::Ld2AR
+        | Insn::Ld4AR
+        | Insn::Ld8AR
+        | Insn::Ld1SaR
+        | Insn::Ld2SaR
+        | Insn::Ld4SaR
+        | Insn::Ld8SaR
+        | Insn::Ld1BiasR
+        | Insn::Ld2BiasR
+        | Insn::Ld4BiasR
+        | Insn::Ld8BiasR
+        | Insn::Ld1AcqR
+        | Insn::Ld2AcqR
+        | Insn::Ld4AcqR
+        | Insn::Ld8AcqR
+        | Insn::Ld1CClrR
+        | Insn::Ld2CClrR
+        | Insn::Ld4CClrR
+        | Insn::Ld8CClrR
+        | Insn::Ld1CNcR
+        | Insn::Ld2CNcR
+        | Insn::Ld4CNcR
+        | Insn::Ld8CNcR
+        | Insn::Ld1CClrAcqR
+        | Insn::Ld2CClrAcqR
+        | Insn::Ld4CClrAcqR
+        | Insn::Ld8CClrAcqR
+        | Insn::Ld1I
+        | Insn::Ld2I
+        | Insn::Ld4I
+        | Insn::Ld1SI
+        | Insn::Ld2SI
+        | Insn::Ld4SI
+        | Insn::Ld8SI
+        | Insn::Ld1AI
+        | Insn::Ld2AI
+        | Insn::Ld4AI
+        | Insn::Ld8AI
+        | Insn::Ld1SaI
+        | Insn::Ld2SaI
+        | Insn::Ld4SaI
+        | Insn::Ld8SaI
+        | Insn::Ld1BiasI
+        | Insn::Ld2BiasI
+        | Insn::Ld4BiasI
+        | Insn::Ld8BiasI
+        | Insn::Ld1AcqI
+        | Insn::Ld2AcqI
+        | Insn::Ld4AcqI
+        | Insn::Ld8AcqI
+        | Insn::Ld1CClrI
+        | Insn::Ld2CClrI
+        | Insn::Ld4CClrI
+        | Insn::Ld8CClrI
+        | Insn::Ld1CNcI
+        | Insn::Ld2CNcI
+        | Insn::Ld4CNcI
+        | Insn::Ld8CNcI
+        | Insn::Ld1CClrAcqI
+        | Insn::Ld2CClrAcqI
+        | Insn::Ld4CClrAcqI
+        | Insn::Ld8CClrAcqI
+        | Insn::Ld8FillR
+        | Insn::Ld8FillI
+        | Insn::Ld16Acq
         | Insn::St1
         | Insn::St2
         | Insn::St4
         | Insn::St8
         | Insn::St8Spill
         | Insn::St16
+        | Insn::St1Rel
+        | Insn::St2Rel
+        | Insn::St4Rel
+        | Insn::St8Rel
+        | Insn::St1I
+        | Insn::St2I
+        | Insn::St4I
+        | Insn::St1RelI
+        | Insn::St2RelI
+        | Insn::St4RelI
+        | Insn::St8RelI
+        | Insn::St8SpillI
+        | Insn::St16Rel
+        | Insn::Xchg1
+        | Insn::Xchg2
+        | Insn::Xchg8
+        | Insn::Cmpxchg1Acq
+        | Insn::Cmpxchg2Acq
+        | Insn::Cmpxchg4Acq
+        | Insn::Cmpxchg8Acq
+        | Insn::Cmpxchg1Rel
+        | Insn::Cmpxchg2Rel
+        | Insn::Cmpxchg4Rel
+        | Insn::Cmpxchg8Rel
+        | Insn::Fetchadd4Rel
+        | Insn::Fetchadd8Acq
+        | Insn::Fetchadd8Rel
+        | Insn::Cmp8xchg16Acq
+        | Insn::Cmp8xchg16Rel
+        | Insn::ChkAClr
+        | Insn::ChkAClrF
+        | Insn::FcI
         | Insn::Ldfe
         | Insn::Ldf8
         | Insn::Ldfs
@@ -344,6 +479,7 @@ pub fn insn_unit(insn: Insn) -> Unit {
         | Insn::FaminS0
         | Insn::FamaxS0
         | Insn::FmergeS
+        | Insn::FmergeNs
         | Insn::FmergeSe
         | Insn::Fand
         | Insn::Fandcm

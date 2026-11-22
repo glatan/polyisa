@@ -44,7 +44,6 @@
 | # | 内容 | 前提 | 判定 |
 |---|---|---|---|
 | IA5 | 整数算術・比較・述語生成・シフト/extr/mix 系 | IA4 | - |
-| IA6 | load/store・ALAT（advanced load と check）・chk.s/chk.a・mf | IA4 | - |
 | IA7 | 分岐: br.cond/br.call/br.ret/br.cloop/br.cexit/br.wexit・述語実行 | IA4 | - |
 | IA8 | 回転レジスタ・レジスタスタック（alloc/st.spill/ld.fill/flushrs/loadrs/cover、RSE とバッキングストアへの書き出し） | IA4 | - |
 | IA9 | FP（82 ビット形式・fcvt/fma 系。softfloat の拡張精度を接続） | IA4 | - |
