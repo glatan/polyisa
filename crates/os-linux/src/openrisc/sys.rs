@@ -573,7 +573,8 @@ impl Linux {
             nr::IOCTL => Err(errno::ENOTTY),
             nr::FCNTL => {
                 // F_GETFD=1・F_SETFD=2・F_GETFL=3・F_SETFL=4 のみ受理。
-                if self.fds.get(a[0] as u32).is_none() {
+                // 標準三役は fds 表にないので番号で通す。
+                if a[0] > 2 && self.fds.get(a[0] as u32).is_none() {
                     Err(errno::EBADF)
                 } else {
                     match a[1] {
@@ -636,6 +637,15 @@ impl Linux {
             nr::GETPID | nr::GETTID => Ok(self.pid),
             nr::GETPPID => Ok(1),
             nr::GETUID | nr::GETEUID | nr::GETGID | nr::GETEGID => Ok(0),
+            // uid/gid の変更系は単一ユーザ近似で受理のみ。
+            nr::SETREGID
+            | nr::SETGID
+            | nr::SETREUID
+            | nr::SETUID
+            | nr::SETRESUID
+            | nr::SETRESGID
+            | nr::SETFSUID
+            | nr::SETFSGID => Ok(0),
             nr::BRK => Ok(self.sys_brk(env, a[0])),
             nr::MUNMAP => Ok(0),
             nr::MMAP => self.sys_mmap(env, a),

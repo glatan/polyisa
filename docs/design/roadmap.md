@@ -35,21 +35,13 @@
 
 | ID | 条件 | 判定 |
 |---|---|---|
-| S20-1 | or1k の配布物（BIN-DISTRO-OR1K の busybox rootfs）のコマンド群が、ゲストのルートを使って正しい出力を返す（テスト `heavy_program_openrisc`）。 | 未整備 |
+| S20-1 | or1k の配布物（BIN-DISTRO-OR1K の busybox rootfs）のコマンド群が、ゲストのルートを使って正しい出力を返す（テスト `heavy_program_openrisc`）。 | テスト：`heavy_program_openrisc` |
 | S20-2 | ABI 表が SRC-LINUX の UAPI と一致することを所有者が確認する。 | 所有者 |
 
 作業計画：
 
 | # | 内容 | 前提 | 判定 |
 |---|---|---|---|
-| OR2 | `guests/openrisc` 骨格: CpuState（r0-31・SR・PPC/NPC・SPR）、遅延スロットの有無の機能旗 | - | - |
-| OR3 | デコード方式の決定（32 ビット固定長） | OR2 | - |
-| OR4 | `run_openrisc` 実行ループ + bare 最小テスト | OR3 | - |
-| OR5 | 算術・論理・シフト・比較（l.add/l.sub/l.and/l.sll/l.sf* 系）・l.cmov | OR4 | - |
-| OR6 | load/store・l.lwa/l.swa・l.msync/l.psync/l.csync | OR4 | - |
-| OR7 | 分岐・l.bf/l.bnf・l.j/l.jal/l.jr/l.jalr・l.sys/l.trap・l.mfspr/l.mtspr | OR4 | - |
-| OR8 | l.mac・浮動小数点拡張 | OR4 | - |
-| OR9 | Linux ABI: or1k の syscall 表・ELF・`heavy_program_openrisc` | OR8 | S20-1 |
 | OR10 | ABI 照合（SRC-LINUX UAPI、所有者確認）+ 残件整理・判定列更新 | OR9 | S20-2 |
 
 ### 段階 21：IA-64

@@ -218,6 +218,29 @@ pub fn run_elf_openrisc_root(
     sel: Option<&polyisa_isadl::select::CpuSel>,
     root: Option<&str>,
 ) -> Result<u64, String> {
+    let mut sys = polyisa_os_linux::openrisc::sys::Linux::new();
+    run_elf_openrisc_impl(path, argv, sel, &mut sys, root)
+}
+
+/// `run_elf_openrisc_root` に `sys` を注入する形。
+/// 標準入出力の捕獲（`sys.io`）とゲストルートのテストに使う。
+pub fn run_elf_openrisc_sys_root(
+    path: &str,
+    argv: &[String],
+    sel: Option<&polyisa_isadl::select::CpuSel>,
+    sys: &mut polyisa_os_linux::openrisc::sys::Linux,
+    root: Option<&str>,
+) -> Result<u64, String> {
+    run_elf_openrisc_impl(path, argv, sel, sys, root)
+}
+
+fn run_elf_openrisc_impl(
+    path: &str,
+    argv: &[String],
+    sel: Option<&polyisa_isadl::select::CpuSel>,
+    sys: &mut polyisa_os_linux::openrisc::sys::Linux,
+    root: Option<&str>,
+) -> Result<u64, String> {
     use polyisa_mem::PAGE_SIZE;
     use polyisa_sem::Backend as _;
 
@@ -259,7 +282,6 @@ pub fn run_elf_openrisc_root(
     let feats = sel.feats;
     let dslot = feats & polyisa_guest_openrisc::FEAT_DSLOT != 0;
     let model = OpenriscModel { feats, dslot };
-    let mut sys = polyisa_os_linux::openrisc::sys::Linux::new();
     sys.exe_path = path.to_string();
     let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_openrisc::CpuState>());
     env.backend.addr_mask = 0xffff_ffff;
@@ -430,7 +452,7 @@ pub fn run_elf_openrisc_root(
         &mut env,
         run_entry,
         model,
-        &mut sys,
+        sys,
         Some(StackGrowth {
             top,
             limit: image_end & !(PAGE_SIZE - 1),

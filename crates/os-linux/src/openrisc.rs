@@ -42,6 +42,14 @@ pub mod nr {
     pub const RT_SIGACTION: u64 = 134;
     pub const RT_SIGPROCMASK: u64 = 135;
     pub const UNAME: u64 = 160;
+    pub const SETREGID: u64 = 143;
+    pub const SETGID: u64 = 144;
+    pub const SETREUID: u64 = 145;
+    pub const SETUID: u64 = 146;
+    pub const SETRESUID: u64 = 147;
+    pub const SETRESGID: u64 = 149;
+    pub const SETFSUID: u64 = 151;
+    pub const SETFSGID: u64 = 152;
     pub const GETPID: u64 = 172;
     pub const GETPPID: u64 = 173;
     pub const GETUID: u64 = 174;
