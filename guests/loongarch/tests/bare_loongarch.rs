@@ -1382,3 +1382,126 @@ fn exec_la9_fp_memory() {
     step(&mut env, enc(Insn::FstleD, &[4, 5, 6]));
     assert_eq!(peek(&mut env, 0x2000, 8), F64_4);
 }
+
+// ---- LA13 LSX の意味論（段階19 レビュー修正の回帰）。
+// Ref: SPEC-LOONGARCH-VEXT Vol.2 §1.2.1.24（VLDI）,
+// §1.2.8.2（VLDREPL）, §2.2.40（Bit_Reverse / VBITREVI）.
+
+/// vr n を読む。
+fn vr(env: &mut BareEnv, n: u32) -> u128 {
+    env.backend.get_indexed(sem::vr_array(), n)
+}
+
+/// vr n を書く。
+fn set_vr(env: &mut BareEnv, n: u32, v: u128) {
+    env.backend.set_indexed(sem::vr_array(), n, v);
+}
+
+/// LSX 命令を実行する（`lsx` 機能旗込みでデコード）。
+fn step_lsx(env: &mut BareEnv, word: u32) {
+    let insn = decode_model_ex(u128::from(word), 32, true, LA64 | FEAT_LSX).unwrap();
+    env.backend.ctrl = Ctrl::Fallthrough;
+    let ok = sem::exec(&mut env.backend, insn, word, 0x1000, true).unwrap();
+    assert!(ok, "insn {word:#x} unimplemented");
+    match env.backend.ctrl {
+        Ctrl::Jump(t) => env.pc = t,
+        Ctrl::Fallthrough => env.pc = 0x1004,
+    }
+}
+
+/// 各 .d 要素が同じ 64 ビット値の 128 ビット値を組み立てる。
+fn d2(d: u64) -> u128 {
+    u128::from(d) | (u128::from(d) << 64)
+}
+
+#[test]
+fn exec_lsx_vldi_all_modes() {
+    // Set_Value(i13) の全パターン。x[12]=0 は要素幅選択＋
+    // SignExtend(x[9:0])（B は x[7:0]）、x[12]=1 は x[11:8] の
+    // 0–12 の展開パターン。
+    let cases: &[(u64, u64)] = &[
+        // x[12]=0（x[11:10] = 00:B / 01:H / 10:W / 11:D）。
+        (0x000, 0x0000_0000_0000_0000), // B splat 0
+        (0x07f, 0x7f7f_7f7f_7f7f_7f7f), // B splat 0x7f
+        (0x0ff, 0xffff_ffff_ffff_ffff), // B splat 0xff
+        (0x7ff, 0xffff_ffff_ffff_ffff), // H sext10(-1)
+        (0x600, 0xfe00_fe00_fe00_fe00), // H sext10(-512)
+        (0x4ff, 0x00ff_00ff_00ff_00ff), // H sext10(255)
+        (0x955, 0x0000_0155_0000_0155), // W sext10(0x155)
+        (0xbff, 0xffff_ffff_ffff_ffff), // W sext10(-1)
+        (0xe00, 0xffff_ffff_ffff_fe00), // D sext10(-512)
+        (0xdff, 0x0000_0000_0000_01ff), // D 511
+        // x[12]=1（x[11:8] = 0–12）、t = 0x5a。
+        (0x105a, 0x0000_005a_0000_005a), // 0: {2{24'0,t}}
+        (0x115a, 0x0000_5a00_0000_5a00), // 1: {2{16'0,t,8'0}}
+        (0x125a, 0x005a_0000_005a_0000), // 2: {2{8'0,t,16'0}}
+        (0x135a, 0x5a00_0000_5a00_0000), // 3: {2{t,24'0}}
+        (0x145a, 0x005a_005a_005a_005a), // 4: {4{8'0,t}}
+        (0x155a, 0x5a00_5a00_5a00_5a00), // 5: {4{t,8'0}}
+        (0x165a, 0x0000_5aff_0000_5aff), // 6: {2{16'0,t,8'hFF}}
+        (0x175a, 0x005a_ffff_005a_ffff), // 7: {2{8'0,t,16'hFFFF}}
+        (0x185a, 0x5a5a_5a5a_5a5a_5a5a), // 8: {8{t}}
+        // 9: ビット展開 t=0xa5（bits 0,2,5,7 → 各 byte 0xff）。
+        (0x19a5, 0xff00_ff00_00ff_00ff),
+        // 10/11: fp32 様 {s,~e6,{5{e6}},m,19'0} t=0x7f。
+        (0x1a7f, 0x3ff8_0000_3ff8_0000), // 10: .d の両半分
+        (0x1b7f, 0x3ff8_0000_0000_0000), // 11: 上位 32 ビットのみ
+        // 12: fp64 様 {s,~e6,{8{e6}},m,48'0} t=0x7f。
+        (0x1c7f, 0x3fff_0000_0000_0000),
+    ];
+    for &(imm, d) in cases {
+        let mut env = env();
+        step_lsx(&mut env, enc(Insn::Vldi, &[0, imm]));
+        assert_eq!(vr(&mut env, 0), d2(d), "vldi imm={imm:#x}");
+    }
+    // mode 13–15 は INE → ILL 例外に畳む（GAP-0063）。
+    for mode in 13u64..=15 {
+        let mut env = env();
+        let w = enc(Insn::Vldi, &[0, 0x1000 | (mode << 8)]);
+        let insn = decode_model_ex(u128::from(w), 32, true, LA64 | FEAT_LSX).unwrap();
+        assert!(
+            sem::exec(&mut env.backend, insn, w, 0x1000, true).is_err(),
+            "vldi mode {mode} は例外"
+        );
+    }
+}
+
+#[test]
+fn exec_lsx_vldrepl_d_signed_offset() {
+    // si9 は [18:10] の符号つきで <<3 スケール（負オフセットの
+    // 回帰: 旧実装は [17:10] の 8 ビット非符号）。
+    let mut env = mem_env();
+    poke64(&mut env, 0x2000, 0x1122_3344_5566_7788);
+    // si9 = -2（9 ビットの 2 の補数 0x1fe）→ オフセット -16。
+    set_gpr(&mut env, 5, 0x2010);
+    step_lsx(&mut env, enc(Insn::VldreplD, &[0, 5, 0x1fe]));
+    assert_eq!(vr(&mut env, 0), d2(0x1122_3344_5566_7788));
+    // si9 = +2 → オフセット +16。
+    let mut env = mem_env();
+    poke64(&mut env, 0x2010, 0xaabb_ccdd_eeff_0011);
+    set_gpr(&mut env, 5, 0x2000);
+    step_lsx(&mut env, enc(Insn::VldreplD, &[0, 5, 2]));
+    assert_eq!(vr(&mut env, 0), d2(0xaabb_ccdd_eeff_0011));
+}
+
+#[test]
+fn exec_lsx_vbitrevi_d_toggle() {
+    // vd.d[i] = vj.d[i] ^ (1<<ui6)（ui6 番目のビットだけ反転。
+    // 旧実装は bitrev+rotate だった）。
+    let mut env = env();
+    let lo = 0x1122_3344_5566_7788u64;
+    let hi = 0xaabb_ccdd_eeff_0011u64;
+    set_vr(&mut env, 1, u128::from(lo) | (u128::from(hi) << 64));
+    step_lsx(&mut env, enc(Insn::VbitreviD, &[0, 1, 5]));
+    assert_eq!(
+        vr(&mut env, 0),
+        u128::from(lo ^ (1 << 5)) | (u128::from(hi ^ (1 << 5)) << 64)
+    );
+    // ui6=63 で最上位ビットの反転（同じ vj 入力で再実行）。
+    set_vr(&mut env, 1, u128::from(lo) | (u128::from(hi) << 64));
+    step_lsx(&mut env, enc(Insn::VbitreviD, &[0, 1, 63]));
+    assert_eq!(
+        vr(&mut env, 0),
+        u128::from(lo ^ (1 << 63)) | (u128::from(hi ^ (1 << 63)) << 64)
+    );
+}

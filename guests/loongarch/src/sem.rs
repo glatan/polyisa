@@ -1097,50 +1097,82 @@ fn vbin<B: Backend>(
     vset(b, ops[0], v);
 }
 
-/// VLDI の mode 選択（imm[12:8]）から 128 ビット定数を生成する。
-/// mode 表は SPEC-LOONGARCH-RM Vol.2 の VLDI 節に基づく。
-/// 未対応の mode は `None` を返し、呼び出し側が ILL に畳む。
-fn vldi_value(mode: u64, imm8: u64) -> Option<u128> {
-    let byte = imm8 & 0xff;
-    let splat = |w: u64, ebits: u32| -> u128 {
-        let mut v = 0u128;
-        for i in 0..(128 / ebits) {
-            v |= (w as u128 & ((1u128 << ebits) - 1)) << (i * ebits);
+/// VLDI の i13 から各 .d 要素の 64 ビット値を生成する。
+/// 表は Vol.2（LSX）`Set_Value(bits(13) x)` の擬似コード:
+/// `x[12]==0` は `x[11:10]` が要素幅（00=B/01=H/10=W/11=D）を
+/// 選び `SignExtend(x[9:0])` を全要素に撒く（B は x[7:0]）。
+/// `x[12]==1` は `x[11:8]` が 0–12 の展開パターンを選ぶ
+/// （13–15 は INE 例外 → 呼び出し側で ILL に畳む）。
+/// Ref: SPEC-LOONGARCH-VEXT Vol.2 §2.2.47（Set_Value）,
+/// §1.2.1.24（[X]VLDI）.
+fn vldi_value(imm13: u64) -> Option<u64> {
+    let x = imm13 & 0x1fff;
+    let t = x & 0xff;
+    let splat = |w: u64, ebits: u32| -> u64 {
+        let mut v = 0u64;
+        for i in 0..(64 / ebits) {
+            v |= (w & ((1u64 << ebits) - 1)) << (i * ebits);
         }
         v
     };
-    let sext8 = |bits: u32| -> u64 {
-        let s = (((byte as i64) << 56) >> 56) as u64;
-        s & ((1u64 << bits) - 1)
-    };
-    Some(match mode {
-        // imm8 を各バイトへ。
-        0 => splat(byte, 8),
-        // sext8 を各 h/w/d へ。
-        1 => splat(sext8(64), 16),
-        2 => splat(sext8(64), 32),
-        3 => splat(sext8(64), 64),
-        // imm8 << 8 を各 h へ。
-        4 => splat(byte << 8, 16),
-        // imm8 << 16 / << 8 を各 w へ。
-        5 => splat(byte << 16, 32),
-        6 => splat(byte << 8, 32),
-        // (imm8 << 8) | 0xff / (imm8 << 16) | 0xffff を各 w へ。
-        7 => splat((byte << 8) | 0xff, 32),
-        8 => splat((byte << 16) | 0xffff, 32),
-        // imm8 のビット j を byte j の 0x00/0xff マスクへ展開。
-        14 => {
-            let mut v = 0u128;
-            for j in 0..16u32 {
-                let bit = if j < 8 { (byte >> j) & 1 } else { 0 };
-                if bit == 1 {
-                    v |= 0xffu128 << (j * 8);
+    let d = if x & 0x1000 == 0 {
+        match (x >> 10) & 3 {
+            0 => splat(t, 8),
+            _ => {
+                let sx = (((x & 0x3ff) << 54) as i64 >> 54) as u64;
+                match (x >> 10) & 3 {
+                    1 => splat(sx, 16),
+                    2 => splat(sx, 32),
+                    _ => sx,
                 }
             }
-            v
         }
-        _ => return None,
-    })
+    } else {
+        // fp32/fp64 様パターンの指数部を組み立てる共通部。
+        // s = x[7]、e6 = x[6]（反転込みの指数上位）、m = x[5:0]。
+        let s = (x >> 7) & 1;
+        let e6 = (x >> 6) & 1;
+        let m = x & 0x3f;
+        match (x >> 8) & 0xf {
+            // 32 ビット要素への即値配置（各 .d の両半分）。
+            0 => t | (t << 32),         // {2{24'0, x}}
+            1 => (t << 8) | (t << 40),  // {2{16'0, x, 8'0}}
+            2 => (t << 16) | (t << 48), // {2{8'0, x, 16'0}}
+            3 => (t << 24) | (t << 56), // {2{x, 24'0}}
+            // 16 ビット要素への即値配置。
+            4 => splat(t, 16),      // {4{8'0, x}}
+            5 => splat(t << 8, 16), // {4{x, 8'0}}
+            // 32 ビット要素の下位ビットを 1 埋め。
+            6 => splat((t << 8) | 0xff, 32), // {2{16'0, x, 8'hFF}}
+            7 => splat((t << 16) | 0xffff, 32), // {2{8'0, x, 16'hFFFF}}
+            // バイト撒き。
+            8 => splat(t, 8), // {8{x}}
+            // ビット展開: byte j = {8{x[j]}}。
+            9 => {
+                let mut v = 0u64;
+                for j in 0..8u32 {
+                    if (t >> j) & 1 == 1 {
+                        v |= 0xffu64 << (j * 8);
+                    }
+                }
+                v
+            }
+            // fp32 様: {x[7], ~x[6], {5{x[6]}}, x[5:0], 19'b0} を
+            // .d の両半分（10）か上位 32 ビットのみ（11）へ。
+            10 | 11 => {
+                let p = (s << 31) | ((!e6 & 1) << 30) | ((e6 * 0x1f) << 25) | (m << 19);
+                if (x >> 8) & 0xf == 10 {
+                    p | (p << 32)
+                } else {
+                    p << 32
+                }
+            }
+            // fp64 様: {x[7], ~x[6], {8{x[6]}}, x[5:0], 48'b0}。
+            12 => (s << 63) | ((!e6 & 1) << 62) | ((e6 * 0xff) << 54) | (m << 48),
+            _ => return None,
+        }
+    };
+    Some(d)
 }
 
 /// 1 命令の意味論を実行する。`word` は命令語、`pc` は命令番地、
@@ -2866,9 +2898,12 @@ pub fn exec<B: Backend>(
             b.store::<W128>(ea, v, STORE)?;
         }
         Insn::VldreplD => {
-            // ea = rj + imm8*8（.d のオフセットは要素単位）。
+            // ea = rj + SignExtend(si9 << 3)（si9 は符号つき。
+            // 負オフセットも受理する）。
+            // Ref: Vol.2 §1.2.8.2（[X]VLDREPL.D）.
             let base = rget(b, ops[1]);
-            let d = k(b, ops[2] << 3);
+            let off = (((ops[2] & 0x1ff) << 55) as i64 >> 55) as u64;
+            let d = k(b, off << 3);
             let ea = b.add(base, d);
             let e = b.load::<W64>(ea, DATA)?;
             let v = vsplat(b, e, 64);
@@ -3041,23 +3076,15 @@ pub fn exec<B: Backend>(
             vset(b, ops[0], v);
         }
         Insn::VbitreviD => {
-            // vd.d[i] = rol(bitrev(vj.d[i]), ui6)。
-            // Ref: RM Vol.2 VBITREVI.
+            // vd.d[i] = Bit_Reverse(vj.d[i], ui6) — ui6 番目の
+            // ビットだけ反転（トグル）。bitrev+rotate ではない。
+            // Ref: Vol.2 §2.2.40（Bit_Reverse）, VBITREVI.D 節.
             let vj = vget(b, ops[1]);
-            let n = ops[2] & 63;
+            let mask = k(b, 1u64 << (ops[2] & 63));
             let mut v = k128(b, 0);
             for i in 0..2 {
                 let a = vlane(b, vj, 64, i);
-                let r = bitrev(b, a, 64);
-                let e = if n == 0 {
-                    r
-                } else {
-                    let shl = k(b, n);
-                    let shr = k(b, 64 - n);
-                    let lo = b.shl::<W64>(r, shl);
-                    let hi = b.shr_l::<W64>(r, shr);
-                    b.or(lo, hi)
-                };
+                let e = b.xor(a, mask);
                 v = vlane_set(b, v, 64, i, e);
             }
             vset(b, ops[0], v);
@@ -3074,15 +3101,14 @@ pub fn exec<B: Backend>(
             vset(b, ops[0], v);
         }
         Insn::Vldi => {
-            // si13[12:8] が展開 mode、si13[7:0] が即値。
-            let imm = ops[1];
-            let mode = (imm >> 8) & 0x1f;
-            let Some(vv) = vldi_value(mode, imm) else {
-                // Gap: GAP-0063（未対応 mode は誤値を置かず
-                // ILL に畳む）。
+            // si13 全体が展開指定。各 .d 要素は同じ 64 ビット値
+            // （`VR[vd].D[i] = Set_Value(i13)`）。
+            let Some(d) = vldi_value(ops[1]) else {
+                // mode 13–15 は INE 例外。Gap: GAP-0063
+                // （ILL に畳む）。
                 return Err(raise::<B>(b, ExceptionKind::Trap, TRAP_ILL));
             };
-            let v = k128(b, vv);
+            let v = k128(b, u128::from(d) | (u128::from(d) << 64));
             vset(b, ops[0], v);
         }
         Insn::VseqW => {

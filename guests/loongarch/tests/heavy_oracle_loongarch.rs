@@ -303,6 +303,9 @@ fn render_poly(insn: Insn, word: u64) -> Option<String> {
             "fcsr" | "fcsrd" | "fcsrj" => format!("$fcsr{v}"),
             "si12" => format!("{}", sext(v, 12)),
             "si13" => format!("{}", sext(v, 13)),
+            // VLDREPL.D の si9 は LLVM がバイトオフセット
+            // （si9<<3）を出す。
+            "si9" => format!("{}", sext(v, 9) << 3),
             "si14" => format!("{}", sext(v, 14) << 2),
             "si16" => format!("{}", sext(v, 16)),
             "si20" => format!("{}", sext(v, 20)),

@@ -136,11 +136,14 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("seq8", 17, 10),
         ("csr", 23, 10),
         ("op5", 4, 0),
-        // LSX 系の桁。si13 は VLDI のパターン選択＋即値、imm8 は
-        // VLDREPL のスケール済みオフセットと VSHUF4I の選択即値、
-        // vidx2/vidx1 は VPICKVE2GR/VINSGR2VR の要素番号。
+        // LSX 系の桁。si13 は VLDI のパターン選択＋即値、si9 は
+        // VLDREPL.D の符号つきオフセット、imm8 は VSHUF4I の
+        // 選択即値、vidx2/vidx1 は VPICKVE2GR/VINSGR2VR の要素番号。
         // Ref: SPEC-LOONGARCH-RM Vol.2（LSX 命令形式）.
         ("si13", 17, 5),
+        // si9 は VLDREPL.D の符号つき要素オフセット [18:10]
+        // （Vol.2: VA = GR[rj] + SignExtend(si9 << 3)）。
+        ("si9", 18, 10),
         ("imm8", 17, 10),
         ("vidx2", 11, 10),
         ("vidx1", 10, 10),
@@ -661,14 +664,15 @@ pub fn build_model() -> polyisa_isadl::Model {
             gr("rk", "rk", Access::Read),
         ],
     ));
-    // vd, rj, imm8（VLDREPL.*。imm8 は要素幅でスケール済み）。
+    // vd, rj, si9（VLDREPL.D。si9 は符号つきで、意味論で
+    // 要素幅 8 倍にスケールする）。
     m.formats.push(fmt(
         "FVLDREPL",
-        &["imm8", "rj", "rd"],
+        &["si9", "rj", "rd"],
         vec![
             vr("vd", "rd", Access::Write),
             gr("rj", "rj", Access::Read),
-            val("imm8", "imm8"),
+            val("si9", "si9"),
         ],
     ));
     // vd, vj, imm8（VSHUF4I.*）。
@@ -1175,7 +1179,7 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("vldx", "FVLDX", "00111000110100000...............", f_lsx(), "vldx {vd}, {rj}, {rk}", "alu"),
         ("vstx", "FVLDX", "00111000110100010...............", f_lsx(), "vstx {vd}, {rj}, {rk}", "alu"),
         // 要素幅でスケール済みオフセットの全要素複写 load（.d のみ）。
-        ("vldrepl_d", "FVLDREPL", "00110000000100..................", f_lsx(), "vldrepl.d {vd}, {rj}, {imm8}", "alu"),
+        ("vldrepl_d", "FVLDREPL", "0011000000010...................", f_lsx(), "vldrepl.d {vd}, {rj}, {si9}", "alu"),
         // 汎用レジスタの全要素複写。
         ("vreplgr2vr_w", "FVRG2", "0111001010011111000010..........", f_lsx(), "vreplgr2vr.w {vd}, {rj}", "alu"),
         ("vreplgr2vr_d", "FVRG2", "0111001010011111000011..........", f_lsx(), "vreplgr2vr.d {vd}, {rj}", "alu"),

@@ -548,27 +548,43 @@ impl Linux {
         }
         .map_err(|e| host_errno(e.raw_os_error()))?;
         let mut b = [0u8; 256];
+        let w16 = |v: u16, b: &mut [u8]| b.copy_from_slice(&v.to_le_bytes());
         let w32 = |v: u32, b: &mut [u8]| b.copy_from_slice(&v.to_le_bytes());
         let w64 = |v: u64, b: &mut [u8]| b.copy_from_slice(&v.to_le_bytes());
-        w32(0x1fff, &mut b[0..4]); // mask = STATX_ALL
-        w32(4096, &mut b[4..8]); // blksize
-        w64(0, &mut b[8..16]); // attributes
+        // Linux の dev_t 符号化（new_encode_dev）から major/minor
+        // を取り出す（new_decode_dev の逆）。
+        let major = |d: u64| -> u32 { (((d >> 8) & 0xfff) | (d >> 32)) as u32 };
+        let minor = |d: u64| -> u32 { ((d & 0xff) | ((d >> 12) & !0xff)) as u32 };
+        // UAPI `struct statx`（include/uapi/linux/stat.h）の
+        // オフセット: ino@0x20、size@0x28、blocks@0x30、
+        // attributes_mask@0x38、atime@0x40、btime@0x50、
+        // ctime@0x60、mtime@0x70、rdev_{major,minor}@0x80/0x84、
+        // dev_{major,minor}@0x88/0x8c、mnt_id@0x90。
+        // btime/mnt_id/attributes は未提供なので 0 のまま残し、
+        // mask は STATX_BASIC_STATS（提供分）に合わせる。
+        w32(0x7ff, &mut b[0..4]); // mask = STATX_BASIC_STATS
+        w32(md.blksize as u32, &mut b[4..8]); // blksize
+        // attributes @0x08 = 0。
         w32(md.nlink as u32, &mut b[16..20]);
         w32(md.uid, &mut b[20..24]);
         w32(md.gid, &mut b[24..28]);
-        w32(md.mode as u16 as u32, &mut b[28..32]);
-        w64(md.ino, &mut b[40..48]);
-        w64(md.size, &mut b[48..56]);
-        w64(md.blocks, &mut b[56..64]);
-        w64(0x1fff, &mut b[64..72]); // attributes_mask
-        w64(md.atime as u64, &mut b[80..88]);
-        w32(md.atime_nsec as u32, &mut b[88..92]);
-        w64(md.ctime as u64, &mut b[112..120]);
-        w32(md.ctime_nsec as u32, &mut b[120..124]);
-        w64(md.mtime as u64, &mut b[128..136]);
-        w32(md.mtime_nsec as u32, &mut b[136..140]);
-        w32(md.rdev as u32, &mut b[144..148]);
-        w32(md.dev as u32, &mut b[152..156]);
+        w16(md.mode as u16, &mut b[28..30]);
+        w64(md.ino, &mut b[32..40]);
+        w64(md.size, &mut b[40..48]);
+        w64(md.blocks, &mut b[48..56]);
+        // attributes_mask @0x38 = 0（attributes を出さない）。
+        w64(md.atime as u64, &mut b[64..72]);
+        w32(md.atime_nsec as u32, &mut b[72..76]);
+        // btime @0x50 未提供。
+        w64(md.ctime as u64, &mut b[96..104]);
+        w32(md.ctime_nsec as u32, &mut b[104..108]);
+        w64(md.mtime as u64, &mut b[112..120]);
+        w32(md.mtime_nsec as u32, &mut b[120..124]);
+        w32(major(md.rdev), &mut b[128..132]);
+        w32(minor(md.rdev), &mut b[132..136]);
+        w32(major(md.dev), &mut b[136..140]);
+        w32(minor(md.dev), &mut b[140..144]);
+        // mnt_id @0x90 未提供。
         self.put_bytes(env, out, &b)?;
         Ok(0)
     }
@@ -1511,5 +1527,59 @@ impl TrapHandler for Linux {
         self.brk_start = (image_end + 0xfff) & !0xfff;
         // LA32 でも 0x7000_0000 に置く（両方とも入る値）。
         self.mmap_next = 0x0000_0000_7000_0000;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `struct statx` の UAPI オフセット検査（回帰: ino 以降が
+    /// +8 ずれていた）。`include/uapi/linux/stat.h` 正本。
+    #[test]
+    fn statx_writes_uapi_layout() {
+        let dir = std::env::temp_dir().join(format!("polyisa-la-statx-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("f");
+        std::fs::write(&f, b"abc").unwrap();
+        let mut sys = Linux::new();
+        let mut env = BareEnv::new(core::mem::size_of::<polyisa_guest_loongarch::CpuState>());
+        // 出力バッファ + 空の path 文字列領域。
+        env.backend
+            .mem
+            .map(VirtAddr(0x10000), 1, Perms::RW)
+            .unwrap();
+        let file = std::fs::File::open(&f).unwrap();
+        let fd = sys.fds.alloc(Some(file));
+        sys.fds.remember_path(fd, f.to_string_lossy().into_owned());
+        // AT_EMPTY_PATH(0x1000) + 空 path → fd の記憶パスを stat。
+        let r = sys.sys_statx(&mut env, u64::from(fd), 0x10000, 0x1000, 0, 0x10400);
+        assert_eq!(r, Ok(0));
+        let b = sys.get_bytes(&mut env, 0x10400, 256).unwrap();
+        let r32 = |o: usize| -> u32 { u32::from_le_bytes(b[o..o + 4].try_into().unwrap()) };
+        let r64 = |o: usize| -> u64 { u64::from_le_bytes(b[o..o + 8].try_into().unwrap()) };
+        let md = polyisa_host::stat(&f.to_string_lossy()).unwrap();
+        assert_eq!(r32(0x00), 0x7ff, "mask = STATX_BASIC_STATS");
+        assert_eq!(r64(0x08), 0, "attributes 未提供");
+        assert_eq!(r32(0x1c) as u16, md.mode as u16);
+        assert_eq!(r64(0x20), md.ino, "ino @0x20");
+        assert_eq!(r64(0x28), 3, "size @0x28");
+        assert_eq!(r64(0x30), md.blocks, "blocks @0x30");
+        assert_eq!(r64(0x38), 0, "attributes_mask @0x38");
+        assert_eq!(r64(0x40), md.atime as u64, "atime @0x40");
+        assert_eq!(r32(0x48), md.atime_nsec as u32);
+        assert_eq!(r64(0x50), 0, "btime 未提供");
+        assert_eq!(r64(0x60), md.ctime as u64, "ctime @0x60");
+        assert_eq!(r32(0x68), md.ctime_nsec as u32);
+        assert_eq!(r64(0x70), md.mtime as u64, "mtime @0x70");
+        assert_eq!(r32(0x78), md.mtime_nsec as u32);
+        // dev_major/minor @0x88/0x8c（new_decode_dev の値）。
+        let dev = md.dev;
+        let major = (((dev >> 8) & 0xfff) | (dev >> 32)) as u32;
+        let minor = ((dev & 0xff) | ((dev >> 12) & !0xff)) as u32;
+        assert_eq!(r32(0x88), major, "dev_major @0x88");
+        assert_eq!(r32(0x8c), minor, "dev_minor @0x8c");
+        assert_eq!(r64(0x90), 0, "mnt_id 未提供");
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

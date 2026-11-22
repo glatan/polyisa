@@ -494,13 +494,17 @@ fn run_elf_loongarch_impl(
         arg_bytes.push(a.as_bytes().to_vec());
     }
     // AT_HWCAP。arch/loongarch/include/uapi/asm/hwcap.h の値:
-    // CPUCFG=1, LAM=2, UAL=4, FPU=8, CRC32=0x40, COMPLEX=0x80,
-    // CRYPTO=0x100, LVZ=0x200（LSX/LASX/LBT は実装しないので立てない）。
+    // CPUCFG=1, LAM=2, UAL=4, FPU=8, LSX=0x10, LASX=0x20,
+    // CRC32=0x40, COMPLEX=0x80, CRYPTO=0x100, LVZ=0x200。
+    // 広告は CPUCFG の値と一貫させる（SRC-LINUX
+    // arch/loongarch/kernel/cpu-probe.c の写像）: 部分実装の
+    // LSX は立て、未実装の COMPLEX/CRYPTO/LASX/LBT は立てない。
+    // LA32 は CRC/LSX/LAM を持たない（LA64 限定命令のため）。
     // Ref: SRC-LINUX — arch/loongarch/include/uapi/asm/hwcap.h.
     let hwcap: u64 = if la64 {
-        0x1 | 0x2 | 0x4 | 0x8 | 0x40 | 0x80 | 0x100
+        0x1 | 0x2 | 0x4 | 0x8 | 0x10 | 0x40
     } else {
-        0
+        0x1 | 0x4 | 0x8
     };
     // auxv。AT_RANDOM・AT_EXECFN は build_initial_stack が詰める。
     let mut auxv: Vec<(u64, u64)> = vec![
@@ -578,13 +582,28 @@ fn init_cpucfg(env: &mut BareEnv, la64: bool) {
     };
     // word0: PRID（実装者識別。Loongson 風の 0x0014_xxxx 系）。
     set(env, 0, 0x0014_a000);
-    // word1: アーキテクチャ情報。LA64=bit1, LA32=bit0、
-    // PGMMU=bit4、IOCSR=bit5、PALEN/VABILEN は後で足す。
-    let w1 = if la64 { 1 << 1 } else { 1 << 0 } | (1 << 4) | (1 << 5);
+    // word1: アーキテクチャ情報。ARCH[1:0]（2'b10=LA64, 2'b01=LA32）、
+    // PGMMU=bit2、IOCSR=bit3、PALEN=bits11:4（PA-1）、
+    // VALEN=bits19:12（VA-1）、UAL=bit20、CRC=bit25。
+    // PALEN/VALEN は la464 相当の名目値 48-1 とする近似
+    // （GAP-0063 の CPUCFG 固定値表）。
+    // Ref: SPEC-LOONGARCH-RM §2.2.10.2 Table 3.
+    let arch = if la64 { 2 } else { 1 };
+    let mut w1 = arch | (1 << 2) | (1 << 3) | (47 << 4) | (47 << 12) | (1 << 20);
+    if la64 {
+        w1 |= 1 << 25; // CRC（crc*/crcc* は LA64 限定）
+    }
     set(env, 1, w1);
-    // word2: 拡張機能（FP=1, FP_SP=2, FP_DP=4, FP_ver=bits5-7,
-    // LSX=bit12, LASX=bit13, LBT=bit16-18, LVZ=bit9?）。
-    // LA8 の段階では基本 FP+拡張宣言のみ。
-    set(env, 2, 1 | 2 | 4 | (2 << 5));
+    // word2: 拡張機能（FP=bit0, FP_SP=bit1, FP_DP=bit2,
+    // FP_ver=bits5:3（1=IEEE754-2008 初版）、LSX=bit6,
+    // LASX=bit7, COMPLEX=bit8, CRYPTO=bit9, LAM=bit22）。
+    // LSX（部分実装）と LAM（am*.b/h 系実装済み）は LA64 のみ
+    // 立てる。COMPLEX/CRYPTO/LASX/LBT は未実装なので立てない
+    // （AT_HWCAP と一貫させる）。
+    let mut w2 = 1 | 2 | 4 | (1 << 3);
+    if la64 {
+        w2 |= (1 << 6) | (1 << 22); // LSX, LAM
+    }
+    set(env, 2, w2);
     // word3: 機能情報（CC 方式・LSPW 等）。既定 0 のまま。
 }
