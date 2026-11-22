@@ -267,13 +267,29 @@ pub fn insn_unit(insn: Insn) -> Unit {
         | Insn::ProbeWFault
         | Insn::LdfsR
         | Insn::LdfsI
+        | Insn::LdfeR
+        | Insn::Ldf8R
+        | Insn::LdfdR
+        | Insn::LdfFillR
+        | Insn::LdfeI
+        | Insn::Ldf8I
+        | Insn::LdfdI
+        | Insn::LdfFillI
         | Insn::Stf8I
+        | Insn::StfeI
+        | Insn::StfsI
+        | Insn::StfdI
+        | Insn::StfSpillI
         | Insn::Ldfp8
+        | Insn::Ldfp8I16
         | Insn::LfetchR
         | Insn::LfetchI
         | Insn::GetfSig
+        | Insn::GetfS
         | Insn::GetfD
+        | Insn::GetfExp
         | Insn::SetfSig
+        | Insn::SetfS
         | Insn::SetfD
         | Insn::SetfExp
         | Insn::Alloc
@@ -461,23 +477,63 @@ pub fn insn_unit(insn: Insn) -> Unit {
         | Insn::SrlzI
         | Insn::SyncI => Unit::M,
         Insn::FclassM
+        | Insn::FclassMUnc
         | Insn::FrcpaS0
+        | Insn::FrcpaS1
+        | Insn::FrcpaS2
+        | Insn::FrcpaS3
         | Insn::FrsqrtaS0
+        | Insn::FrsqrtaS1
+        | Insn::FrsqrtaS2
+        | Insn::FrsqrtaS3
         | Insn::FsetcS0
+        | Insn::FsetcS1
+        | Insn::FsetcS2
+        | Insn::FsetcS3
         | Insn::FclrfS0
+        | Insn::FclrfS1
+        | Insn::FclrfS2
+        | Insn::FclrfS3
         | Insn::FchkfS0
+        | Insn::FchkfS1
+        | Insn::FchkfS2
+        | Insn::FchkfS3
         | Insn::FmaS0
+        | Insn::FmaS1
+        | Insn::FmaS2
+        | Insn::FmaS3
         | Insn::FmaDS0
+        | Insn::FmaDS1
+        | Insn::FmaDS2
+        | Insn::FmaDS3
         | Insn::FmsS0
+        | Insn::FmsS1
+        | Insn::FmsS2
+        | Insn::FmsS3
         | Insn::FnmaS0
+        | Insn::FnmaS1
+        | Insn::FnmaS2
+        | Insn::FnmaS3
         | Insn::Fselect
         | Insn::XmaL
         | Insn::XmaH
         | Insn::XmaHu
         | Insn::FminS0
+        | Insn::FminS1
+        | Insn::FminS2
+        | Insn::FminS3
         | Insn::FmaxS0
+        | Insn::FmaxS1
+        | Insn::FmaxS2
+        | Insn::FmaxS3
         | Insn::FaminS0
+        | Insn::FaminS1
+        | Insn::FaminS2
+        | Insn::FaminS3
         | Insn::FamaxS0
+        | Insn::FamaxS1
+        | Insn::FamaxS2
+        | Insn::FamaxS3
         | Insn::FmergeS
         | Insn::FmergeNs
         | Insn::FmergeSe
@@ -494,10 +550,53 @@ pub fn insn_unit(insn: Insn) -> Unit {
         | Insn::FsxtR
         | Insn::FpcmpEqS0
         | Insn::FcmpEqS0
+        | Insn::FcmpEqS1
+        | Insn::FcmpEqS2
+        | Insn::FcmpEqS3
+        | Insn::FcmpUnordS0
+        | Insn::FcmpUnordS1
+        | Insn::FcmpUnordS2
+        | Insn::FcmpUnordS3
         | Insn::FcmpLtS0
+        | Insn::FcmpLtS1
+        | Insn::FcmpLtS2
+        | Insn::FcmpLtS3
+        | Insn::FcmpLeS0
+        | Insn::FcmpLeS1
+        | Insn::FcmpLeS2
+        | Insn::FcmpLeS3
         | Insn::FcmpEqUncS0
+        | Insn::FcmpEqUncS1
+        | Insn::FcmpEqUncS2
+        | Insn::FcmpEqUncS3
+        | Insn::FcmpUnordUncS0
+        | Insn::FcmpUnordUncS1
+        | Insn::FcmpUnordUncS2
+        | Insn::FcmpUnordUncS3
+        | Insn::FcmpLtUncS0
+        | Insn::FcmpLtUncS1
+        | Insn::FcmpLtUncS2
+        | Insn::FcmpLtUncS3
+        | Insn::FcmpLeUncS0
+        | Insn::FcmpLeUncS1
+        | Insn::FcmpLeUncS2
+        | Insn::FcmpLeUncS3
         | Insn::FcvtFxS0
+        | Insn::FcvtFxS1
+        | Insn::FcvtFxS2
+        | Insn::FcvtFxS3
+        | Insn::FcvtFxuS0
+        | Insn::FcvtFxuS1
+        | Insn::FcvtFxuS2
+        | Insn::FcvtFxuS3
         | Insn::FcvtFxTruncS0
+        | Insn::FcvtFxTruncS1
+        | Insn::FcvtFxTruncS2
+        | Insn::FcvtFxTruncS3
+        | Insn::FcvtFxuTruncS0
+        | Insn::FcvtFxuTruncS1
+        | Insn::FcvtFxuTruncS2
+        | Insn::FcvtFxuTruncS3
         | Insn::FcvtXf
         | Insn::FpcvtFxS0
         | Insn::BreakF

@@ -94,6 +94,8 @@ pub type F64 = Binary<11, 52>;
 
 /// DEC の F/D/G/H 形式（VAX・PDP-11・Alpha）。
 pub mod decfp;
+/// IA-64 の 82 ビット浮動小数点レジスタファイル形式。
+pub mod ia64ext;
 /// IBM の十六進浮動小数点（S/360 系 HFP）。
 pub mod ibmhex;
 /// Motorola 68881/68882 の拡張精度形式。

@@ -15,6 +15,8 @@
 use polyisa_engine::interp::{Ctrl, InterpBackend, InterpExit};
 use polyisa_mem::{Access, AccessKind, Align, Endian};
 use polyisa_sem::{Backend as _, ExceptionKind, GuestException, StateRef, W8, W16, W32, W64};
+use polyisa_softfloat::ia64ext::{BIAS as FR_BIAS, FClass, FMT_D, Fmt, Ia64Ext};
+use polyisa_softfloat::{F32, FP_NV, Rm};
 
 use crate::{CpuState, INSNS, Insn, ar, cfm_bit, extract_ops};
 
@@ -791,7 +793,8 @@ fn is_unc(i: Insn) -> bool {
             | Insn::TbitZUnc
             | Insn::TnatZUnc
             | Insn::TfZUnc
-    )
+            | Insn::FclassMUnc
+    ) || fcmp_kind(i).is_some_and(|(_, unc, _)| unc)
 }
 
 /// cmp/tbit/tnat/tf の PR 対更新。`rel` は評価した関係の真偽、
@@ -876,6 +879,723 @@ fn exec_test(b: &mut InterpBackend, k: (TKind, bool, CTy), ops: &[u64]) -> Resul
     let r = if nz { bit } else { !bit };
     pr_pair_update(b, p1, p2, ty, r, nat);
     Ok(())
+}
+
+// ==================== IA9: 浮動小数点（82 ビット形式・FPSR）====================
+//
+// FR f_i は u128 下位 82 ビットの `{sign 1, exp 17（バイアス
+// 0xFFFF）, sig 64}` を保持する（softfloat::ia64ext）。f0=+0.0・
+// f1=+1.0 は定数で、書き込みは Illegal Operation。f32-f127 は
+// 回転域で `phys = 32 + ((v-32+rrb.fr) mod 96)` に改名する。
+// NaT は別ビットではなく NaTVal エンコーディング `{0, 0x1FFFE, 0}`
+// として器に保持される（GR の NaT ビットと違い FR 自身が運ぶ）。
+// FPSR（ar.fpsr）の sf0-sf3 は {traps 6 ビット, 予約 1, 旗 6,
+// 制御 7} を 13 ビットずつ持ち、旗は演算ごとに OR で畳む。
+// トラップ有効ビットが立ってもフォールトしない近似
+// （ユーザモードの FP 例外処理は OS 面。docs/gaps.md GAP-0068）。
+// Ref: SPEC-IA64-SDM (Rev 2.3) Vol1 5 章・Vol3 FP 節。
+
+/// FR f_i の器の先頭オフセット（16 バイト格納。{sig, {exp,sign}}）。
+fn fr_off(i: u32) -> usize {
+    core::mem::offset_of!(CpuState, fr) + i as usize * 16
+}
+
+fn fr_read(b: &InterpBackend, i: u32) -> Ia64Ext {
+    let off = fr_off(i);
+    let lo = u64::from_le_bytes(b.state[off..off + 8].try_into().expect("w64"));
+    let hi = u64::from_le_bytes(b.state[off + 8..off + 16].try_into().expect("w64"));
+    Ia64Ext::from_bits((u128::from(hi) << 64) | u128::from(lo))
+}
+
+fn fr_write(b: &mut InterpBackend, i: u32, v: Ia64Ext) {
+    let off = fr_off(i);
+    let bits = v.bits();
+    b.state[off..off + 8].copy_from_slice(&(bits as u64).to_le_bytes());
+    b.state[off + 8..off + 16].copy_from_slice(&((bits >> 64) as u64).to_le_bytes());
+}
+
+/// 仮想 FR f_i → 物理番号。f0-f31 は静的、f32-f127 は rrb.fr の
+/// 96 項リングで回す（GR と違いフレーム窓は掛からない）。
+/// Ref: SPEC-IA64-SDM (Rev 2.3).
+fn phys_fr(b: &InterpBackend, i: u32) -> u32 {
+    if i < 32 {
+        return i;
+    }
+    let rrb = cf(get64(b, cfm_ref()), cfm_bit::RRB_FR, 7) as u32;
+    32 + (i - 32 + rrb) % 96
+}
+
+/// 仮想 FR f_i の値。f0/f1 は定数面を返す。
+#[must_use]
+pub fn fr_get(b: &InterpBackend, i: u32) -> Ia64Ext {
+    match i {
+        0 => Ia64Ext::ZERO,
+        1 => Ia64Ext::ONE,
+        _ => fr_read(b, phys_fr(b, i)),
+    }
+}
+
+/// 仮想 FR f_i への書き込み。f0/f1 への書き込みは Illegal
+/// Operation（定数器なので建築の規則どおり fault にする）。
+pub fn fr_set(b: &mut InterpBackend, i: u32, v: Ia64Ext) -> Result<(), InterpExit> {
+    if i < 2 {
+        return Err(trap(TRAP_ILL));
+    }
+    fr_write(b, phys_fr(b, i), v);
+    Ok(())
+}
+
+/// ar.fpsr の状態面。
+#[must_use]
+pub fn fpsr_ref() -> StateRef<W64> {
+    StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, fpsr))
+}
+
+/// sf_n（0-3）の 13 ビット面（fpsr{6+13n+12:6+13n}）。
+fn sf_get(b: &InterpBackend, n: u32) -> u64 {
+    (get64(b, fpsr_ref()) >> (6 + 13 * n)) & 0x1fff
+}
+
+fn sf_put(b: &mut InterpBackend, n: u32, v: u64) {
+    let r = fpsr_ref();
+    let sh = 6 + 13 * n;
+    set64(
+        b,
+        r,
+        (get64(b, r) & !(0x1fffu64 << sh)) | ((v & 0x1fff) << sh),
+    );
+}
+
+/// sf_n の旗場（{12:7} = {v,d,z,o,u,i}）へ softfloat の旗を OR
+/// で畳む。D 旗はオペランドの非正規（unnormalized 含む）で別途
+/// 立てる。
+fn sf_flags(b: &mut InterpBackend, n: u32, ieee: u8, d_op: bool) {
+    let rel = ((u64::from(ieee) & 0x10) << 3)   // FP_NV → v（sf{7}）
+        | (u64::from(d_op) << 8)              // d（sf{8}）
+        | ((u64::from(ieee) & 0x08) << 6)     // FP_DZ → z（sf{9}）
+        | ((u64::from(ieee) & 0x04) << 8)     // FP_OF → o（sf{10}）
+        | ((u64::from(ieee) & 0x02) << 10)    // FP_UF → u（sf{11}）
+        | ((u64::from(ieee) & 0x01) << 12); // FP_NX → i（sf{12}）
+    if rel != 0 {
+        sf_put(b, n, sf_get(b, n) | rel);
+    }
+}
+
+/// sf_n の制御場が選ぶ出力形式・丸めモード・ftz。
+#[derive(Clone, Copy)]
+struct SfCtrl {
+    rm: Rm,
+    fmt: Fmt,
+    ftz: bool,
+}
+
+fn sf_ctrl(b: &InterpBackend, n: u32) -> SfCtrl {
+    let sf = sf_get(b, n);
+    let rm = [Rm::Rne, Rm::Rdn, Rm::Rup, Rm::Rtz][((sf >> 4) & 3) as usize];
+    let pc = (sf >> 2) & 3;
+    let wre = sf & 2 != 0;
+    let ftz = sf & 1 != 0;
+    // pc: 0=単精度・2=倍精度・3=レジスタ。pc=1 は予約で
+    // レジスタ形式に畳む近似（docs/gaps.md GAP-0068）。
+    let (sig, emin, emax) = match pc {
+        0 => (24, -126, 127),
+        2 => (53, -1022, 1023),
+        _ => (64, -16382, 16383),
+    };
+    let fmt = if wre {
+        Fmt {
+            sig,
+            emin: 1 - FR_BIAS,
+            emax: FR_BIAS,
+        }
+    } else {
+        Fmt { sig, emin, emax }
+    };
+    SfCtrl { rm, fmt, ftz }
+}
+
+/// オペランドの非正規（unnormalized 含む）→ FPSR の D 旗の種。
+fn den_op(v: Ia64Ext) -> bool {
+    v.is_denormal_operand()
+}
+
+/// F10 fma 系の（種別 0=fma/1=fms/2=fnma/3=fma.d, sf 番号）。
+fn fma_kind(i: Insn) -> Option<(u8, u32)> {
+    use Insn::*;
+    Some(match i {
+        FmaS0 => (0, 0),
+        FmaS1 => (0, 1),
+        FmaS2 => (0, 2),
+        FmaS3 => (0, 3),
+        FmsS0 => (1, 0),
+        FmsS1 => (1, 1),
+        FmsS2 => (1, 2),
+        FmsS3 => (1, 3),
+        FnmaS0 => (2, 0),
+        FnmaS1 => (2, 1),
+        FnmaS2 => (2, 2),
+        FnmaS3 => (2, 3),
+        FmaDS0 => (3, 0),
+        FmaDS1 => (3, 1),
+        FmaDS2 => (3, 2),
+        FmaDS3 => (3, 3),
+        _ => return None,
+    })
+}
+
+/// fma 系の実行。`f1 = f3*f4 演 f2`、.d は倍精度形式、それ
+/// 以外は sf の pc/wre が選ぶ形式に 1 回丸めする。NaTVal 入力は
+/// NaTVal を伝播して旗は立てない（GR の NaT と同じ消費規則）。
+fn exec_fma(b: &mut InterpBackend, kind: u8, sf: u32, ops: &[u64]) -> Result<(), InterpExit> {
+    let (a3, a4, a2) = (
+        fr_get(b, ops[2] as u32),
+        fr_get(b, ops[3] as u32),
+        fr_get(b, ops[4] as u32),
+    );
+    let d_op = den_op(a3) || den_op(a4) || den_op(a2);
+    let (r, fl) = if a3.is_natval() || a4.is_natval() || a2.is_natval() {
+        (Ia64Ext::NATVAL, 0)
+    } else {
+        let c = sf_ctrl(b, sf);
+        let fmt = if kind == 3 { FMT_D } else { c.fmt };
+        let (x, y, z) = match kind {
+            // fms: a3*a4 - a2、fnma: -(a3*a4) + a2。
+            1 => (a3, a4, a2.negated()),
+            2 => (a3, a4.negated(), a2),
+            _ => (a3, a4, a2),
+        };
+        x.fmadd(y, z, c.rm, fmt, c.ftz)
+    };
+    sf_flags(b, sf, fl, d_op);
+    fr_set(b, ops[1] as u32, r)
+}
+
+/// fcvt.fx/fxu(.trunc) の（符号なしか, trunc か, sf 番号）。
+fn fcvt_fx_kind(i: Insn) -> Option<(bool, bool, u32)> {
+    use Insn::*;
+    Some(match i {
+        FcvtFxS0 => (false, false, 0),
+        FcvtFxS1 => (false, false, 1),
+        FcvtFxS2 => (false, false, 2),
+        FcvtFxS3 => (false, false, 3),
+        FcvtFxuS0 => (true, false, 0),
+        FcvtFxuS1 => (true, false, 1),
+        FcvtFxuS2 => (true, false, 2),
+        FcvtFxuS3 => (true, false, 3),
+        FcvtFxTruncS0 => (false, true, 0),
+        FcvtFxTruncS1 => (false, true, 1),
+        FcvtFxTruncS2 => (false, true, 2),
+        FcvtFxTruncS3 => (false, true, 3),
+        FcvtFxuTruncS0 => (true, true, 0),
+        FcvtFxuTruncS1 => (true, true, 1),
+        FcvtFxuTruncS2 => (true, true, 2),
+        FcvtFxuTruncS3 => (true, true, 3),
+        _ => return None,
+    })
+}
+
+/// fcvt.fx/fxu(.trunc): FR 値を整数に変換して「整数形式」
+/// `{sign 0, exp 0x1003E, sig=整数}` で書き戻す。
+fn exec_fcvt_fx(
+    b: &mut InterpBackend,
+    unsigned: bool,
+    trunc: bool,
+    sf: u32,
+    ops: &[u64],
+) -> Result<(), InterpExit> {
+    let v = fr_get(b, ops[2] as u32);
+    let (r, fl) = if v.is_natval() {
+        (Ia64Ext::NATVAL, 0)
+    } else {
+        let c = sf_ctrl(b, sf);
+        let rm = if trunc { Rm::Rtz } else { c.rm };
+        let (u, f) = v.to_int(unsigned, rm);
+        (Ia64Ext::int_form(u), f)
+    };
+    sf_flags(b, sf, fl, den_op(v));
+    fr_set(b, ops[1] as u32, r)
+}
+
+/// fmin/fmax/famin/famax の（max か, abs か, sf 番号）。
+fn fmin_kind(i: Insn) -> Option<(bool, bool, u32)> {
+    use Insn::*;
+    Some(match i {
+        FminS0 => (false, false, 0),
+        FminS1 => (false, false, 1),
+        FminS2 => (false, false, 2),
+        FminS3 => (false, false, 3),
+        FmaxS0 => (true, false, 0),
+        FmaxS1 => (true, false, 1),
+        FmaxS2 => (true, false, 2),
+        FmaxS3 => (true, false, 3),
+        FaminS0 => (false, true, 0),
+        FaminS1 => (false, true, 1),
+        FaminS2 => (false, true, 2),
+        FaminS3 => (false, true, 3),
+        FamaxS0 => (true, true, 0),
+        FamaxS1 => (true, true, 1),
+        FamaxS2 => (true, true, 2),
+        FamaxS3 => (true, true, 3),
+        _ => return None,
+    })
+}
+
+fn exec_fmin(
+    b: &mut InterpBackend,
+    max: bool,
+    abs: bool,
+    sf: u32,
+    ops: &[u64],
+) -> Result<(), InterpExit> {
+    let (a2, a3) = (fr_get(b, ops[2] as u32), fr_get(b, ops[3] as u32));
+    let d_op = den_op(a2) || den_op(a3);
+    let (r, fl) = if a2.is_natval() || a3.is_natval() {
+        (Ia64Ext::NATVAL, 0)
+    } else {
+        a2.min_max(a3, max, abs)
+    };
+    sf_flags(b, sf, fl, d_op);
+    fr_set(b, ops[1] as u32, r)
+}
+
+/// fcmp の（関係 0=eq/1=unord/2=lt/3=le, unc か, sf 番号）。
+fn fcmp_kind(i: Insn) -> Option<(u8, bool, u32)> {
+    use Insn::*;
+    Some(match i {
+        FcmpEqS0 => (0, false, 0),
+        FcmpEqS1 => (0, false, 1),
+        FcmpEqS2 => (0, false, 2),
+        FcmpEqS3 => (0, false, 3),
+        FcmpUnordS0 => (1, false, 0),
+        FcmpUnordS1 => (1, false, 1),
+        FcmpUnordS2 => (1, false, 2),
+        FcmpUnordS3 => (1, false, 3),
+        FcmpLtS0 => (2, false, 0),
+        FcmpLtS1 => (2, false, 1),
+        FcmpLtS2 => (2, false, 2),
+        FcmpLtS3 => (2, false, 3),
+        FcmpLeS0 => (3, false, 0),
+        FcmpLeS1 => (3, false, 1),
+        FcmpLeS2 => (3, false, 2),
+        FcmpLeS3 => (3, false, 3),
+        FcmpEqUncS0 => (0, true, 0),
+        FcmpEqUncS1 => (0, true, 1),
+        FcmpEqUncS2 => (0, true, 2),
+        FcmpEqUncS3 => (0, true, 3),
+        FcmpUnordUncS0 => (1, true, 0),
+        FcmpUnordUncS1 => (1, true, 1),
+        FcmpUnordUncS2 => (1, true, 2),
+        FcmpUnordUncS3 => (1, true, 3),
+        FcmpLtUncS0 => (2, true, 0),
+        FcmpLtUncS1 => (2, true, 1),
+        FcmpLtUncS2 => (2, true, 2),
+        FcmpLtUncS3 => (2, true, 3),
+        FcmpLeUncS0 => (3, true, 0),
+        FcmpLeUncS1 => (3, true, 1),
+        FcmpLeUncS2 => (3, true, 2),
+        FcmpLeUncS3 => (3, true, 3),
+        _ => return None,
+    })
+}
+
+/// fcmp 系の実行。NaTVal 入力は両述語を落とす（GR の NaT と
+/// 同じ規則）。旗は SNaN 入力・eq/unord 以外の関係での QNaN
+/// 入力で V を立てる（eq/unord は quiet 比較）。
+fn exec_fcmp(b: &mut InterpBackend, rel: u8, sf: u32, ops: &[u64]) -> Result<(), InterpExit> {
+    let (p1, p2) = (ops[1] as u32, ops[2] as u32);
+    if p1 == p2 {
+        return Err(trap(TRAP_ILL));
+    }
+    let (a, c) = (fr_get(b, ops[3] as u32), fr_get(b, ops[4] as u32));
+    if a.is_natval() || c.is_natval() {
+        pr_bit(b, p1, false);
+        pr_bit(b, p2, false);
+        return Ok(());
+    }
+    use core::cmp::Ordering;
+    let ord = a.compare(c);
+    let r = match rel {
+        0 => ord == Some(Ordering::Equal),
+        1 => ord.is_none(),
+        2 => ord == Some(Ordering::Less),
+        _ => matches!(ord, Some(Ordering::Less | Ordering::Equal)),
+    };
+    // SNaN は全関係で、eq/unord 以外の関係（lt/le）では QNaN も
+    // V を立てる（eq/unord は quiet 比較）。
+    let mut fl = 0u8;
+    if a.class() == FClass::SNan
+        || c.class() == FClass::SNan
+        || rel >= 2 && (a.class() == FClass::QNan || c.class() == FClass::QNan)
+    {
+        fl |= FP_NV;
+    }
+    sf_flags(b, sf, fl, den_op(a) || den_op(c));
+    pr_pair_update(b, p1, p2, CTy::Norm, r, false);
+    Ok(())
+}
+
+/// fclass の実行。9 ビットのクラス選択との一致で述語対を
+/// 書く（hit → p1=1,p2=0。NaTVal は選択の nat ビットで試せる）。
+fn exec_fclass(b: &mut InterpBackend, ops: &[u64]) -> Result<(), InterpExit> {
+    let (p1, p2) = (ops[1] as u32, ops[2] as u32);
+    if p1 == p2 {
+        return Err(trap(TRAP_ILL));
+    }
+    let v = fr_get(b, ops[3] as u32);
+    let hit = v.fclass_hit(ops[4] as u32);
+    pr_pair_update(b, p1, p2, CTy::Norm, hit, false);
+    Ok(())
+}
+
+/// F7 系の 3 項 FP（論理・マージ・パック・並列比較）。
+/// 結果の {sign, exp} は種別ごとの固定値。NaTVal 入力は
+/// NaTVal を返す。
+fn exec_f3(b: &mut InterpBackend, insn: Insn, ops: &[u64]) -> Result<(), InterpExit> {
+    let (a2, a3) = (fr_get(b, ops[2] as u32), fr_get(b, ops[3] as u32));
+    if a2.is_natval() || a3.is_natval() {
+        return fr_set(b, ops[1] as u32, Ia64Ext::NATVAL);
+    }
+    let (s2, s3) = (a2.sig(), a3.sig());
+    let r = match insn {
+        Insn::Fand => Ia64Ext::int_form(s2 & s3),
+        Insn::Fandcm => Ia64Ext::int_form(s2 & !s3),
+        Insn::For => Ia64Ext::int_form(s2 | s3),
+        Insn::Fxor => Ia64Ext::int_form(s2 ^ s3),
+        Insn::FmergeS => Ia64Ext::from_parts(a3.sign_bit(), a2.exp_field(), s2),
+        Insn::FmergeNs => Ia64Ext::from_parts(!a3.sign_bit(), a2.exp_field(), s2),
+        Insn::FmergeSe => Ia64Ext::from_parts(a3.sign_bit(), a3.exp_field(), s2),
+        Insn::Fpack => {
+            // 各オペランドを単精度ビットに落として左右に並べる。
+            let l = a2.to_bin::<8, 23>(Rm::Rne).0 as u32;
+            let r = a3.to_bin::<8, 23>(Rm::Rne).0 as u32;
+            Ia64Ext::int_form((u64::from(l) << 32) | u64::from(r))
+        }
+        Insn::Fswap | Insn::FswapNl => {
+            // 左（f2 左）と右（f3 右）を入れ替える。.nl は左を
+            // さらに符号反転する。
+            let mut sig = ((s3 & 0xffff_ffff) << 32) | (s2 >> 32);
+            if insn == Insn::FswapNl {
+                sig ^= 1u64 << 63;
+            }
+            Ia64Ext::int_form(sig)
+        }
+        Insn::FmixL => Ia64Ext::int_form((s2 & 0xffff_ffff_0000_0000) | (s3 >> 32)),
+        Insn::FmixR => Ia64Ext::int_form(((s2 & 0xffff_ffff) << 32) | (s3 & 0xffff_ffff)),
+        Insn::FsxtL | Insn::FsxtR => {
+            // 各要素の符号ビットを 32 ビットマスクに伸ばす。
+            let (b2, b3) = if insn == Insn::FsxtL {
+                (s2 >> 63 & 1, s3 >> 63 & 1)
+            } else {
+                (s2 >> 31 & 1, s3 >> 31 & 1)
+            };
+            let m = |b: u64| if b == 1 { 0xffff_ffffu64 } else { 0 };
+            Ia64Ext::int_form((m(b2) << 32) | m(b3))
+        }
+        Insn::FpcmpEqS0 => {
+            // 並列単精度の左右をそれぞれ f32 として等値比較し、
+            // 32 ビットマスクを結果仮数へ。
+            let m = |x: u64, y: u64| {
+                if F32::from_bits(x).eq(F32::from_bits(y)).0 {
+                    0xffff_ffffu64
+                } else {
+                    0
+                }
+            };
+            let l = m(s2 >> 32, s3 >> 32);
+            let r = m(s2 & 0xffff_ffff, s3 & 0xffff_ffff);
+            Ia64Ext::int_form((l << 32) | r)
+        }
+        _ => return Err(trap(TRAP_ILL)),
+    };
+    fr_set(b, ops[1] as u32, r)
+}
+
+/// F10 fselect/xma。ops は [qp, f1, f3, f4, f2]。
+fn exec_fsel_xma(b: &mut InterpBackend, insn: Insn, ops: &[u64]) -> Result<(), InterpExit> {
+    let (a3, a4, a2) = (
+        fr_get(b, ops[2] as u32),
+        fr_get(b, ops[3] as u32),
+        fr_get(b, ops[4] as u32),
+    );
+    if a3.is_natval() || a4.is_natval() || a2.is_natval() {
+        return fr_set(b, ops[1] as u32, Ia64Ext::NATVAL);
+    }
+    let r = match insn {
+        Insn::Fselect => {
+            // f2 の仮数 bit0 で左右を選ぶ。
+            if a2.sig() & 1 == 1 { a4 } else { a3 }
+        }
+        Insn::XmaL => {
+            // 符号つき 64×64 の積の下位 64 + 加数。
+            let p = i128::from(a3.sig() as i64) * i128::from(a4.sig() as i64);
+            Ia64Ext::int_form((p as u64).wrapping_add(a2.sig()))
+        }
+        Insn::XmaH => {
+            // 符号つき積の上位 64 + 加数。
+            let p = i128::from(a3.sig() as i64) * i128::from(a4.sig() as i64);
+            Ia64Ext::int_form(((p >> 64) as u64).wrapping_add(a2.sig()))
+        }
+        Insn::XmaHu => {
+            // 符号なし積の上位 64 + 加数。
+            let p = u128::from(a3.sig()) * u128::from(a4.sig());
+            Ia64Ext::int_form((p >> 64) as u64 | a2.sig())
+        }
+        _ => return Err(trap(TRAP_ILL)),
+    };
+    fr_set(b, ops[1] as u32, r)
+}
+
+/// frcpa/frsqrta。結果と単一述語を書く（近似の規則で述語 0
+/// になる組み合わせがある。NaTVal は NaTVal + 述語 0）。
+fn exec_fapprox(b: &mut InterpBackend, insn: Insn, sf: u32, ops: &[u64]) -> Result<(), InterpExit> {
+    let (pred, v, fl) = match insn {
+        Insn::FrcpaS0 | Insn::FrcpaS1 | Insn::FrcpaS2 | Insn::FrcpaS3 => {
+            let (a2, a3) = (fr_get(b, ops[3] as u32), fr_get(b, ops[4] as u32));
+            let d_op = den_op(a2) || den_op(a3);
+            let (p, v) = a2.frcpa(a3);
+            let mut fl = 0u8;
+            if !p && !v.is_natval() {
+                // 近似不能な組み合わせ（NaN・inf/inf・0/0）は
+                // invalid。
+                fl |= FP_NV;
+            }
+            // 有限・非零 ÷ 0 は Z 旗（inf・QNAN・0/0 は除く）。
+            if a3.is_zero() && !a2.is_inf() && !a2.is_nan() && !a2.is_zero() {
+                fl |= 0x08;
+            }
+            (p, v, (fl, d_op))
+        }
+        _ => {
+            let a3 = fr_get(b, ops[3] as u32);
+            let d_op = den_op(a3);
+            let (p, v) = a3.frsqrta();
+            let mut fl = 0u8;
+            if !p && !v.is_natval() {
+                fl |= FP_NV;
+            }
+            // 0 の逆平方根は inf で Z 旗。
+            if a3.is_zero() {
+                fl |= 0x08;
+            }
+            (p, v, (fl, d_op))
+        }
+    };
+    sf_flags(b, sf, fl.0, fl.1);
+    pr_bit(b, ops[2] as u32, pred);
+    fr_set(b, ops[1] as u32, v)
+}
+
+/// FP ロード。形式: s/d は IEEE 変換、8 は整数形式、e は拡張
+/// メモリ形式（80 ビット。16 バイト整列の器）、fill は
+/// `{sig, {sign,exp}}` の 16 バイト器。`*_r` は r2 加算、`*_i`
+/// は imm9b 加算のベース更新。
+fn exec_ldf(b: &mut InterpBackend, insn: Insn, ops: &[u64], w: u64) -> Result<(), InterpExit> {
+    let (f1, r3) = (ops[1] as u32, ops[2] as u32);
+    let ea = gr_get(b, r3);
+    if nat_get(b, r3) {
+        return Err(trap(TRAP_NAT));
+    }
+    let v = match insn {
+        Insn::Ldfs | Insn::LdfsR | Insn::LdfsI => {
+            if !ea.is_multiple_of(4) {
+                return Err(align_fault(ea));
+            }
+            Ia64Ext::from_bin::<8, 23>(mem_ld(b, ea, 4)?)
+        }
+        Insn::Ldfd | Insn::LdfdR | Insn::LdfdI => {
+            if !ea.is_multiple_of(8) {
+                return Err(align_fault(ea));
+            }
+            Ia64Ext::from_bin::<11, 52>(mem_ld(b, ea, 8)?)
+        }
+        Insn::Ldf8 | Insn::Ldf8R | Insn::Ldf8I => {
+            if !ea.is_multiple_of(8) {
+                return Err(align_fault(ea));
+            }
+            Ia64Ext::int_form(mem_ld(b, ea, 8)?)
+        }
+        Insn::Ldfe | Insn::LdfeR | Insn::LdfeI => {
+            if !ea.is_multiple_of(16) {
+                return Err(align_fault(ea));
+            }
+            let sig = mem_ld(b, ea, 8)?;
+            let se = mem_ld(b, ea + 8, 2)? as u16;
+            Ia64Ext::from_ext80(se, sig)
+        }
+        Insn::LdfFill | Insn::LdfFillR | Insn::LdfFillI => {
+            if !ea.is_multiple_of(16) {
+                return Err(align_fault(ea));
+            }
+            let sig = mem_ld(b, ea, 8)?;
+            let se = mem_ld(b, ea + 8, 8)? & 0x3ffff;
+            Ia64Ext::from_bits((u128::from(se) << 64) | u128::from(sig))
+        }
+        _ => return Err(trap(TRAP_ILL)),
+    };
+    fr_set(b, f1, v)?;
+    if matches!(
+        insn,
+        Insn::LdfsR
+            | Insn::LdfdR
+            | Insn::Ldf8R
+            | Insn::LdfeR
+            | Insn::LdfFillR
+            | Insn::LdfsI
+            | Insn::LdfdI
+            | Insn::Ldf8I
+            | Insn::LdfeI
+            | Insn::LdfFillI
+    ) {
+        ld_post_inc(b, w);
+    }
+    Ok(())
+}
+
+/// FP ペアロード ldfp8。[r3]・[r3+8] を整数形式で f1/f2 へ。
+/// 16 バイト整列。_i16 形は r3 += 16 のベース更新を伴う。
+fn exec_ldfp(b: &mut InterpBackend, insn: Insn, ops: &[u64]) -> Result<(), InterpExit> {
+    let (f1, f2, r3) = (ops[1] as u32, ops[2] as u32, ops[3] as u32);
+    let ea = gr_get(b, r3);
+    if nat_get(b, r3) {
+        return Err(trap(TRAP_NAT));
+    }
+    if !ea.is_multiple_of(16) {
+        return Err(align_fault(ea));
+    }
+    let lo = mem_ld(b, ea, 8)?;
+    let hi = mem_ld(b, ea + 8, 8)?;
+    fr_set(b, f1, Ia64Ext::int_form(lo))?;
+    fr_set(b, f2, Ia64Ext::int_form(hi))?;
+    if insn == Insn::Ldfp8I16 {
+        wr_gr(b, r3, ea.wrapping_add(16), nat_get(b, r3));
+    }
+    Ok(())
+}
+
+/// FP ストア。NaTVal を通常形式でストアしようとすると
+/// Register NaT Consumption フォールト（spill はエンコーディ
+/// ングをそのまま運ぶので例外的に通る）。
+fn exec_stf(b: &mut InterpBackend, insn: Insn, ops: &[u64], w: u64) -> Result<(), InterpExit> {
+    let (r3, f2) = (ops[1] as u32, ops[2] as u32);
+    let ea = gr_get(b, r3);
+    if nat_get(b, r3) {
+        return Err(trap(TRAP_NAT));
+    }
+    let v = fr_get(b, f2);
+    match insn {
+        Insn::Stfs | Insn::StfsI => {
+            if v.is_natval() || !ea.is_multiple_of(4) {
+                return Err(if v.is_natval() {
+                    trap(TRAP_NAT)
+                } else {
+                    align_fault(ea)
+                });
+            }
+            let bits = v.to_bin::<8, 23>(Rm::Rne).0;
+            mem_st(b, ea, 4, bits)?;
+        }
+        Insn::Stfd | Insn::StfdI => {
+            if v.is_natval() || !ea.is_multiple_of(8) {
+                return Err(if v.is_natval() {
+                    trap(TRAP_NAT)
+                } else {
+                    align_fault(ea)
+                });
+            }
+            let bits = v.to_bin::<11, 52>(Rm::Rne).0;
+            mem_st(b, ea, 8, bits)?;
+        }
+        Insn::Stf8 | Insn::Stf8I => {
+            if v.is_natval() || !ea.is_multiple_of(8) {
+                return Err(if v.is_natval() {
+                    trap(TRAP_NAT)
+                } else {
+                    align_fault(ea)
+                });
+            }
+            mem_st(b, ea, 8, v.sig())?;
+        }
+        Insn::Stfe | Insn::StfeI => {
+            if v.is_natval() || !ea.is_multiple_of(16) {
+                return Err(if v.is_natval() {
+                    trap(TRAP_NAT)
+                } else {
+                    align_fault(ea)
+                });
+            }
+            let (se, sig) = v.to_ext80();
+            mem_st(b, ea, 8, sig)?;
+            mem_st(b, ea + 8, 2, u64::from(se))?;
+        }
+        Insn::StfSpill | Insn::StfSpillI => {
+            if !ea.is_multiple_of(16) {
+                return Err(align_fault(ea));
+            }
+            let se = (v.bits() >> 64) & 0x3ffff;
+            mem_st(b, ea, 8, v.sig())?;
+            mem_st(b, ea + 8, 8, se as u64)?;
+        }
+        _ => return Err(trap(TRAP_ILL)),
+    }
+    let sz = match insn {
+        Insn::Stfs | Insn::StfsI => 4,
+        Insn::Stfd | Insn::StfdI | Insn::Stf8 | Insn::Stf8I => 8,
+        _ => 16,
+    };
+    alat_inval_range(b, ea, sz);
+    if matches!(
+        insn,
+        Insn::StfsI | Insn::StfdI | Insn::Stf8I | Insn::StfeI | Insn::StfSpillI
+    ) {
+        st_post_inc(b, w);
+    }
+    Ok(())
+}
+
+/// getf/setf（FR↔GR 転送）。NaTVal は getf で r1=NaT、
+/// setf でソース NaT は NaTVal に伝播する。
+fn exec_ftf(b: &mut InterpBackend, insn: Insn, ops: &[u64]) -> Result<(), InterpExit> {
+    match insn {
+        Insn::GetfSig | Insn::GetfS | Insn::GetfD | Insn::GetfExp => {
+            let v = fr_get(b, ops[2] as u32);
+            let nat = v.is_natval();
+            let r = match insn {
+                Insn::GetfSig => v.sig(),
+                Insn::GetfExp => ((v.bits() >> 64) & 0x3ffff) as u64,
+                Insn::GetfS => v.to_bin::<8, 23>(Rm::Rne).0,
+                _ => v.to_bin::<11, 52>(Rm::Rne).0,
+            };
+            wr_gr(b, ops[1] as u32, r, nat);
+            Ok(())
+        }
+        Insn::SetfSig | Insn::SetfS | Insn::SetfD | Insn::SetfExp => {
+            let r2 = ops[2] as u32;
+            let v = if nat_get(b, r2) {
+                Ia64Ext::NATVAL
+            } else {
+                let x = gr_get(b, r2);
+                match insn {
+                    Insn::SetfSig => Ia64Ext::int_form(x),
+                    Insn::SetfExp => Ia64Ext::from_parts(x >> 17 & 1 != 0, (x & 0x1ffff) as u32, 0),
+                    Insn::SetfS => Ia64Ext::from_bin::<8, 23>(x & 0xffff_ffff),
+                    _ => Ia64Ext::from_bin::<11, 52>(x),
+                }
+            };
+            fr_set(b, ops[1] as u32, v)
+        }
+        _ => Err(trap(TRAP_ILL)),
+    }
+}
+
+/// sf 番号の取り出し（fsetc/fclrf/fchkf 共用）。
+fn sfno(i: Insn) -> u32 {
+    use Insn::*;
+    match i {
+        FsetcS1 | FclrfS1 | FchkfS1 => 1,
+        FsetcS2 | FclrfS2 | FchkfS2 => 2,
+        FsetcS3 | FclrfS3 | FchkfS3 => 3,
+        _ => 0,
+    }
 }
 
 // ==================== IA6: メモリ・ALAT・単一スレッドセマフォ ====================
@@ -1209,8 +1929,9 @@ fn fetch_inc(v: u64) -> u64 {
 fn ld_post_inc(b: &mut InterpBackend, w: u64) {
     let r3 = ((w >> 20) & 0x7f) as u32;
     match (w >> 37) & 0xf {
-        // imm_base_update_form（Op 5）。NaT は r3 のまま。
-        5 => {
+        // imm_base_update_form（Op 5 の整数形と Op 7 の FP 形は
+        // 同じ imm9 並び）。NaT は r3 のまま。
+        5 | 7 => {
             let i9 = ((w >> 36) & 1) << 8 | ((w >> 27) & 1) << 7 | (w >> 13) & 0x7f;
             let v = gr_get(b, r3).wrapping_add(sext(i9, 9));
             wr_gr(b, r3, v, nat_get(b, r3));
@@ -1448,11 +2169,11 @@ fn exec_mem(b: &mut InterpBackend, w: u64) -> Result<(), InterpExit> {
     Ok(())
 }
 
-/// chk.a（reg タグで ALAT 照合）と chk.s（GR NaT 検査）の
-/// 回復分岐。失敗時はバンドル基準の tgt25 に飛ぶ。
-/// FR 版は FR/NaTVal を持たない本モデルではエントリが
-/// あり得ず、chk.a.f は常に失敗・chk.s(f) は常に成功とする
-/// （FR 未実装の実装選択。docs/gaps.md 参照）。
+/// chk.a（reg タグで ALAT 照合）と chk.s（NaT 検査）の
+/// 回復分岐。失敗時はバンドル基準の tgt25 に飛ぶ。GR 版は
+/// GR NaT ビットを、FR 版（chk.s f2）は NaTVal を検査する。
+/// chk.a.f は FP アドバンスド・ロード（ldf.a）を持たない本
+/// モデルではエントリがあり得ず常に失敗とする。
 fn exec_chk(b: &mut InterpBackend, insn: Insn, ops: &[u64], ip: u64) {
     let target = (ip & !0xf).wrapping_add(sext(ops[2], 25));
     let fail = match insn {
@@ -1467,6 +2188,7 @@ fn exec_chk(b: &mut InterpBackend, insn: Insn, ops: &[u64], ip: u64) {
         }
         Insn::ChkANcF | Insn::ChkAClrF => true,
         Insn::ChkSM | Insn::ChkSI => nat_get(b, ops[1] as u32),
+        Insn::ChkS => fr_get(b, ops[1] as u32).is_natval(),
         _ => false,
     };
     if fail {
@@ -2247,6 +2969,160 @@ pub fn exec(b: &mut InterpBackend, insn: Insn, word: u128, ip: u64) -> Result<bo
             }
             n = cf_put(n, cfm_bit::RRB_PR, 6, 0);
             set64(b, cfm_ref(), n);
+        }
+        // ---- FP メモリ（IA9。M 系なので base 更新・NaT 消費は
+        // exec_ldf/exec_stf 内部で扱う）。
+        Insn::Ldfs
+        | Insn::Ldfd
+        | Insn::Ldf8
+        | Insn::Ldfe
+        | Insn::LdfFill
+        | Insn::LdfsR
+        | Insn::LdfdR
+        | Insn::Ldf8R
+        | Insn::LdfeR
+        | Insn::LdfFillR
+        | Insn::LdfsI
+        | Insn::LdfdI
+        | Insn::Ldf8I
+        | Insn::LdfeI
+        | Insn::LdfFillI => exec_ldf(b, insn, &ops, word as u64)?,
+        Insn::Ldfp8 | Insn::Ldfp8I16 => exec_ldfp(b, insn, &ops)?,
+        Insn::Stfs
+        | Insn::Stfd
+        | Insn::Stf8
+        | Insn::Stfe
+        | Insn::StfSpill
+        | Insn::StfsI
+        | Insn::StfdI
+        | Insn::Stf8I
+        | Insn::StfeI
+        | Insn::StfSpillI => exec_stf(b, insn, &ops, word as u64)?,
+        // ---- FR↔GR 転送。
+        Insn::GetfSig
+        | Insn::GetfS
+        | Insn::GetfD
+        | Insn::GetfExp
+        | Insn::SetfSig
+        | Insn::SetfS
+        | Insn::SetfD
+        | Insn::SetfExp => exec_ftf(b, insn, &ops)?,
+        // ---- F10 融合乗加算系（fma/fms/fnma/fma.d × sf0-3）。
+        i if fma_kind(i).is_some() => {
+            let (kind, sf) = fma_kind(i).expect("fma kind");
+            exec_fma(b, kind, sf, &ops)?;
+        }
+        Insn::Fselect | Insn::XmaL | Insn::XmaH | Insn::XmaHu => {
+            exec_fsel_xma(b, insn, &ops)?;
+        }
+        // ---- min/max と絶対値版（×sf0-3）。
+        i if fmin_kind(i).is_some() => {
+            let (max, abs, sf) = fmin_kind(i).expect("fmin kind");
+            exec_fmin(b, max, abs, sf, &ops)?;
+        }
+        // ---- F7 データ整形・論理・並列比較。
+        Insn::FmergeS
+        | Insn::FmergeNs
+        | Insn::FmergeSe
+        | Insn::Fand
+        | Insn::Fandcm
+        | Insn::For
+        | Insn::Fxor
+        | Insn::Fpack
+        | Insn::Fswap
+        | Insn::FswapNl
+        | Insn::FmixL
+        | Insn::FmixR
+        | Insn::FsxtL
+        | Insn::FsxtR
+        | Insn::FpcmpEqS0 => exec_f3(b, insn, &ops)?,
+        // ---- fcmp（eq/unord/lt/le × unc × sf0-3）。.unc で qp
+        // 偽の場合は is_unc の共通経路が両述語を落とす。
+        i if fcmp_kind(i).is_some() => {
+            let (rel, _, sf) = fcmp_kind(i).expect("fcmp kind");
+            exec_fcmp(b, rel, sf, &ops)?;
+        }
+        Insn::FclassM | Insn::FclassMUnc => exec_fclass(b, &ops)?,
+        // ---- 近似（frcpa/frsqrta × sf0-3）。
+        Insn::FrcpaS0 | Insn::FrcpaS1 | Insn::FrcpaS2 | Insn::FrcpaS3 => {
+            let sf = match insn {
+                Insn::FrcpaS1 => 1,
+                Insn::FrcpaS2 => 2,
+                _ => u32::from(insn == Insn::FrcpaS3) * 3,
+            };
+            exec_fapprox(b, insn, sf, &ops)?;
+        }
+        Insn::FrsqrtaS0 | Insn::FrsqrtaS1 | Insn::FrsqrtaS2 | Insn::FrsqrtaS3 => {
+            let sf = match insn {
+                Insn::FrsqrtaS1 => 1,
+                Insn::FrsqrtaS2 => 2,
+                _ => u32::from(insn == Insn::FrsqrtaS3) * 3,
+            };
+            exec_fapprox(b, insn, sf, &ops)?;
+        }
+        // ---- 変換（fcvt.fx/fxu(.trunc) ×sf0-3、fcvt.xf、fpcvt）。
+        i if fcvt_fx_kind(i).is_some() => {
+            let (u, t, sf) = fcvt_fx_kind(i).expect("fcvt kind");
+            exec_fcvt_fx(b, u, t, sf, &ops)?;
+        }
+        Insn::FcvtXf => {
+            let v = fr_get(b, ops[2] as u32);
+            let r = if v.is_natval() {
+                Ia64Ext::NATVAL
+            } else {
+                // 整数形式の 64 ビット仮数を符号つき整数として
+                // 浮動小数点へ（2^64 未満は必ず正確）。
+                Ia64Ext::from_i64(v.sig() as i64)
+            };
+            fr_set(b, ops[1] as u32, r)?;
+        }
+        Insn::FpcvtFxS0 => {
+            // 並列単精度の左右 32 ビット車線をそれぞれ符号つき
+            // 32 ビット整数へ（範囲外は飽和 + V 旗）。
+            let v = fr_get(b, ops[2] as u32);
+            let (r, fl) = if v.is_natval() {
+                (Ia64Ext::NATVAL, 0)
+            } else {
+                let c = sf_ctrl(b, 0);
+                let sig = v.sig();
+                let (l, fl) = F32::from_bits(sig >> 32).to_i32(c.rm);
+                let (h, fh) = F32::from_bits(sig & 0xffff_ffff).to_i32(c.rm);
+                (
+                    Ia64Ext::int_form(((l as u32 as u64) << 32) | u64::from(h as u32)),
+                    fl | fh,
+                )
+            };
+            sf_flags(b, 0, fl, den_op(v));
+            fr_set(b, ops[1] as u32, r)?;
+        }
+        // ---- FPSR 制御。fsetc は制御面{6:0}を
+        // `(ctrl & amask7) | omask7` に、 fclrf は旗場{12:7}を
+        // 消し、 fchkf は旗と無効でないトラップの交差で回復
+        // 分岐を取る。
+        Insn::FsetcS0 | Insn::FsetcS1 | Insn::FsetcS2 | Insn::FsetcS3 => {
+            let sf = sfno(insn);
+            let ctl = sf_get(b, sf) & !0x7f | (sf_get(b, sf) & ops[1] | ops[2]) & 0x7f;
+            sf_put(b, sf, ctl);
+        }
+        Insn::FclrfS0 | Insn::FclrfS1 | Insn::FclrfS2 | Insn::FclrfS3 => {
+            sf_put(b, sfno(insn), sf_get(b, sfno(insn)) & 0x7f);
+        }
+        Insn::FchkfS0 | Insn::FchkfS1 | Insn::FchkfS2 | Insn::FchkfS3 => {
+            let sf = sfno(insn);
+            let fld = sf_get(b, sf);
+            let flags = (fld >> 7) & 0x3f;
+            // sf0 は traps{5:0}（fpsr 下位 6 ビット）が個別に例外を
+            // 無効化し、sf1-3 は td（sf{6}）で一括無効。いずれかの
+            // 立った旗に対応する例外が有効なら回復分岐へ。
+            let pend = if sf == 0 {
+                flags & !(get64(b, fpsr_ref()) & 0x3f)
+            } else {
+                flags & u64::from(fld & 0x40 == 0).wrapping_neg()
+            };
+            if pend != 0 {
+                let target = (ip & !0xf).wrapping_add(sext(ops[1], 25));
+                b.ctrl = Ctrl::Jump(target);
+            }
         }
         _ => return Err(InterpExit::Unimplemented(format!("{insn:?}"))),
     }

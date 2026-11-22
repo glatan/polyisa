@@ -160,6 +160,14 @@ pub struct CpuState {
     /// 駐在域の下端は `gr_bot`、末尾は 基底+sof で、溢れた分は
     /// ar.bspstore 指すバッキングストアへ書き出す（IA8 の RSE）。
     pub gr_base: u64,
+    /// 浮動小数点レジスタ f0-f127。各項は 82 ビットのレジスタ
+    /// ファイル形式 `{符号1, 指数17, 仮数64}` を u128 の下位に
+    /// 保持する（sem.rs の FP 節）。f0=+0.0・f1=+1.0 は定数で、
+    /// 書き込みは違法（sem 側で TRAP_ILL）。f32-f127 は回転域で、
+    /// 論理番号は CFM の rrb.fr で物理番号に解決する。
+    /// NaT は別ビットではなく NaTVal エンコーディング
+    /// `{0, 0x1FFFE, 0}` として器に保持される。
+    pub fr: [u128; 128],
 }
 
 impl Default for CpuState {
@@ -178,7 +186,12 @@ impl Default for CpuState {
             rnat: 0,
             unat: 0,
             ccv: 0,
-            fpsr: 0,
+            // fpsr の電源投入時値（SDM）: traps{5:0}=0x28（o,i
+            // 例外無効）・sf0{9:10}=z,o 旗。ユーザモードの FP 例外
+            // フォールト自体はまだ配線していない（docs/gaps.md
+            // GAP-0068）が、traps/td ビットは建築どおり保持し
+            // fchkf の判定に使う。
+            fpsr: 0x0009_8028,
             rsc: 0,
             itc: 0,
             cfm: 0,
@@ -188,6 +201,7 @@ impl Default for CpuState {
             psr_um: 0,
             csd: 0,
             gr_base: 0,
+            fr: [0; 128],
         }
     }
 }

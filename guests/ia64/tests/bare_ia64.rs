@@ -69,7 +69,11 @@ fn state_layout_pinned() {
         core::mem::offset_of!(CpuState, gr_base),
         cfm + 16 + 32 * 8 + 24
     );
-    assert_eq!(core::mem::size_of::<CpuState>(), cfm + 16 + 32 * 8 + 32);
+    // fr は IA9 で末尾に足した（82 ビット形式の FR ファイル。
+    // u128 配列なので先頭は 16 バイト整列に揃う）。
+    let fr = (cfm + 16 + 32 * 8 + 32 + 15) & !15;
+    assert_eq!(core::mem::offset_of!(CpuState, fr), fr);
+    assert_eq!(core::mem::size_of::<CpuState>(), fr + 128 * 16);
 }
 
 #[test]
@@ -113,7 +117,9 @@ fn ip_slot_field() {
 #[test]
 fn exec_is_unimplemented() {
     let mut env = env();
-    let e = sem::exec(&mut env.backend, Insn::FmaS0, 0, 0).unwrap_err();
+    // probe.r はユーザーモード対象外で未実装（IA9 で FMA 系は
+    // 実装済みになったので別の未実装命令で確かめる）。
+    let e = sem::exec(&mut env.backend, Insn::ProbeR, 0, 0).unwrap_err();
     assert!(matches!(e, InterpExit::Unimplemented(_)));
 }
 
@@ -3209,4 +3215,592 @@ fn ia8_nat_collection_hole() {
     assert!(!sem::nat_get(&env.backend, 36));
     assert_eq!(sem::gr_get(&env.backend, 35), 0x5003);
     assert_eq!(sem::gr_get(&env.backend, 55), 0x5017);
+}
+
+// ==================== 段階21 IA9: 浮動小数点 ====================
+// 82 ビット FR 形式・FPSR sf の旗・FMA 系・FR↔GR 転送・FP メモリ
+// 形式・fcmp/fclass の述語対・回転 FR・NaTVal を確かめる。
+// Ref: SPEC-IA64-SDM (Rev 2.3).
+
+use polyisa_guest_ia64::{
+    encode_chk_s, encode_fand, encode_fchkf_s0, encode_fclass_m, encode_fclrf_s0,
+    encode_fcmp_eq_s0, encode_fcmp_lt_s0, encode_fcmp_lt_unc_s0, encode_fcmp_unord_s0,
+    encode_fcvt_fx_s0, encode_fcvt_fx_trunc_s0, encode_fcvt_xf, encode_fma_d_s0, encode_fmax_s0,
+    encode_fmin_s0, encode_fms_s0, encode_fnma_s0, encode_fpack, encode_frcpa_s0,
+    encode_frsqrta_s0, encode_fsetc_s0, encode_getf_d, encode_getf_exp, encode_getf_s,
+    encode_getf_sig, encode_ldf_fill, encode_ldf8, encode_ldfd, encode_ldfe, encode_ldfp8,
+    encode_ldfp8_i16, encode_ldfs_i, encode_setf_d, encode_setf_exp, encode_setf_s,
+    encode_setf_sig, encode_stf_spill, encode_stf8, encode_stf8_i, encode_stfd, encode_stfe,
+    encode_stfs, encode_xma_hu, encode_xma_l,
+};
+use polyisa_softfloat::Rm;
+use polyisa_softfloat::ia64ext::Ia64Ext;
+
+fn fr(env: &BareEnv, i: u32) -> Ia64Ext {
+    sem::fr_get(&env.backend, i)
+}
+
+fn set_fr(env: &mut BareEnv, i: u32, v: Ia64Ext) {
+    sem::fr_set(&mut env.backend, i, v).expect("fr_set");
+}
+
+/// r2 経由で f64 ビットを FR f_i へ（setf.d）。
+fn setf_d(env: &mut BareEnv, f: u32, bits: u64) {
+    set_gr(env, 2, bits);
+    x(
+        env,
+        Insn::SetfD,
+        encode_setf_d(&[0, u64::from(f), 2]).unwrap(),
+    );
+}
+
+/// FR f_i を getf.d で f64 ビットとして読む（r5 はテスト
+/// 内の退避先。r3 はアドレス保持用に残す）。
+fn getf_d(env: &mut BareEnv, f: u32) -> u64 {
+    x(
+        env,
+        Insn::GetfD,
+        encode_getf_d(&[0, 5, u64::from(f)]).unwrap(),
+    );
+    gr(env, 5)
+}
+
+fn fpsr(env: &mut BareEnv) -> u64 {
+    use polyisa_sem::Backend as _;
+    env.backend.get(sem::fpsr_ref())
+}
+
+#[test]
+fn ia9_fr_constants_and_protected_writes() {
+    let mut env = env();
+    // f0=+0.0・f1=+1.0 は定数。
+    assert_eq!(fr(&env, 0).to_bin::<11, 52>(Rm::Rne).0, 0.0f64.to_bits());
+    assert_eq!(fr(&env, 1).to_bin::<11, 52>(Rm::Rne).0, 1.0f64.to_bits());
+    // f0/f1 への書き込みは Illegal Operation fault。
+    set_gr(&mut env, 2, 7);
+    assert_eq!(
+        xerr(
+            &mut env,
+            Insn::SetfSig,
+            encode_setf_sig(&[0, 0, 2]).unwrap()
+        ),
+        sem::TRAP_ILL
+    );
+    assert_eq!(
+        xerr(&mut env, Insn::SetfS, encode_setf_s(&[0, 1, 2]).unwrap()),
+        sem::TRAP_ILL
+    );
+    // 定数が壊れていないこと。
+    assert_eq!(fr(&env, 0).to_bin::<11, 52>(Rm::Rne).0, 0);
+    assert_eq!(fr(&env, 1).to_bin::<11, 52>(Rm::Rne).0, 1.0f64.to_bits());
+}
+
+#[test]
+fn ia9_setf_getf_forms() {
+    let mut env = env();
+    // setf.sig: 整数形式 {sign=0, exp=0x1003E, sig=r2}。
+    set_gr(&mut env, 2, 0xdead_beef);
+    x(
+        &mut env,
+        Insn::SetfSig,
+        encode_setf_sig(&[0, 8, 2]).unwrap(),
+    );
+    assert_eq!(fr(&env, 8).sig(), 0xdead_beef);
+    assert_eq!(fr(&env, 8).exp_field(), 0x1_003e);
+    // getf.sig で往復。
+    x(
+        &mut env,
+        Insn::GetfSig,
+        encode_getf_sig(&[0, 3, 8]).unwrap(),
+    );
+    assert_eq!(gr(&env, 3), 0xdead_beef);
+    // setf.exp: r2{16:0}=指数・{17}=符号。仮数は 0。
+    set_gr(&mut env, 2, 0x2_8000);
+    x(
+        &mut env,
+        Insn::SetfExp,
+        encode_setf_exp(&[0, 9, 2]).unwrap(),
+    );
+    assert!(fr(&env, 9).sign_bit());
+    assert_eq!(fr(&env, 9).exp_field(), 0x8000);
+    x(
+        &mut env,
+        Insn::GetfExp,
+        encode_getf_exp(&[0, 4, 9]).unwrap(),
+    );
+    assert_eq!(gr(&env, 4) & 0x3ffff, 0x2_8000);
+    // setf.d/getf.d・setf.s/getf.s の IEEE 往復。
+    setf_d(&mut env, 10, 2.5f64.to_bits());
+    assert_eq!(getf_d(&mut env, 10), 0x4004_0000_0000_0000);
+    x(&mut env, Insn::GetfS, encode_getf_s(&[0, 5, 10]).unwrap());
+    assert_eq!(gr(&env, 5), 2.5f32.to_bits() as u64);
+    // setf.s: f32 ビットをレジスタ形式へ広げる。
+    set_gr(&mut env, 2, 0x3fc0_0000);
+    x(&mut env, Insn::SetfS, encode_setf_s(&[0, 11, 2]).unwrap());
+    assert_eq!(getf_d(&mut env, 11), 1.5f64.to_bits());
+    // ソース GR の NaT は NaTVal に伝播し、 getf で NaT へ戻る。
+    sem::nat_set(&mut env.backend, 2, true);
+    x(
+        &mut env,
+        Insn::SetfSig,
+        encode_setf_sig(&[0, 12, 2]).unwrap(),
+    );
+    assert!(fr(&env, 12).is_natval());
+    x(
+        &mut env,
+        Insn::GetfSig,
+        encode_getf_sig(&[0, 6, 12]).unwrap(),
+    );
+    assert!(nat(&env, 6));
+}
+
+#[test]
+fn ia9_fma_family() {
+    let mut env = env();
+    setf_d(&mut env, 2, 4.0f64.to_bits());
+    setf_d(&mut env, 3, 2.0f64.to_bits());
+    setf_d(&mut env, 4, 3.0f64.to_bits());
+    // fma.s0: sf0 の pc=0（既定）で単精度形式に丸めても 10.0 は厳密。
+    x(
+        &mut env,
+        Insn::FmaS0,
+        encode_fma_s0(&[0, 8, 3, 4, 2]).unwrap(),
+    );
+    assert_eq!(getf_d(&mut env, 8), 10.0f64.to_bits());
+    // fma.d.s0 は常に倍精度形式。
+    x(
+        &mut env,
+        Insn::FmaDS0,
+        encode_fma_d_s0(&[0, 9, 3, 4, 2]).unwrap(),
+    );
+    assert_eq!(getf_d(&mut env, 9), 10.0f64.to_bits());
+    // fms: 2*3-4 = 2。fnma: -(2*3)+4 = -2。
+    x(
+        &mut env,
+        Insn::FmsS0,
+        encode_fms_s0(&[0, 10, 3, 4, 2]).unwrap(),
+    );
+    assert_eq!(getf_d(&mut env, 10), 2.0f64.to_bits());
+    x(
+        &mut env,
+        Insn::FnmaS0,
+        encode_fnma_s0(&[0, 11, 3, 4, 2]).unwrap(),
+    );
+    assert_eq!(getf_d(&mut env, 11), (-2.0f64).to_bits());
+    // 厳密相殺は +0（RNE）。
+    setf_d(&mut env, 2, (-6.0f64).to_bits());
+    x(
+        &mut env,
+        Insn::FmaS0,
+        encode_fma_s0(&[0, 12, 3, 4, 2]).unwrap(),
+    );
+    assert_eq!(getf_d(&mut env, 12), 0u64);
+    // NaTVal オペランドは NaTVal を伝播する。
+    set_fr(&mut env, 13, Ia64Ext::NATVAL);
+    x(
+        &mut env,
+        Insn::FmaS0,
+        encode_fma_s0(&[0, 14, 3, 4, 13]).unwrap(),
+    );
+    assert!(fr(&env, 14).is_natval());
+}
+
+#[test]
+fn ia9_fcmp_pairs_unc_and_nat() {
+    let mut env = env();
+    setf_d(&mut env, 8, 1.0f64.to_bits());
+    setf_d(&mut env, 9, 2.0f64.to_bits());
+    // lt: p1=関係・p2=否定。
+    x(
+        &mut env,
+        Insn::FcmpLtS0,
+        encode_fcmp_lt_s0(&[0, 6, 7, 8, 9]).unwrap(),
+    );
+    assert!(p(&env, 6));
+    assert!(!p(&env, 7));
+    x(
+        &mut env,
+        Insn::FcmpEqS0,
+        encode_fcmp_eq_s0(&[0, 6, 7, 8, 9]).unwrap(),
+    );
+    assert!(!p(&env, 6));
+    assert!(p(&env, 7));
+    // QNaN は unord で真（quiet 比較で fault しない）。
+    set_fr(&mut env, 10, Ia64Ext::QNAN);
+    x(
+        &mut env,
+        Insn::FcmpUnordS0,
+        encode_fcmp_unord_s0(&[0, 6, 7, 8, 10]).unwrap(),
+    );
+    assert!(p(&env, 6));
+    assert!(!p(&env, 7));
+    // .unc: qp が偽でも両述語を 0 に沈める。
+    sem::pr_set(&mut env.backend, 1 << 10 | 1 << 11);
+    x(
+        &mut env,
+        Insn::FcmpLtUncS0,
+        encode_fcmp_lt_unc_s0(&[5, 10, 11, 8, 9]).unwrap(),
+    );
+    assert!(!p(&env, 10));
+    assert!(!p(&env, 11));
+    // NaTVal オペランドは両述語を 0 にする。
+    set_fr(&mut env, 11, Ia64Ext::NATVAL);
+    sem::pr_set(&mut env.backend, 1 << 6 | 1 << 7);
+    x(
+        &mut env,
+        Insn::FcmpEqS0,
+        encode_fcmp_eq_s0(&[0, 6, 7, 8, 11]).unwrap(),
+    );
+    assert!(!p(&env, 6));
+    assert!(!p(&env, 7));
+    // p1==p2 は Illegal Operation。
+    assert_eq!(
+        xerr(
+            &mut env,
+            Insn::FcmpEqS0,
+            encode_fcmp_eq_s0(&[0, 6, 6, 8, 9]).unwrap(),
+        ),
+        sem::TRAP_ILL
+    );
+}
+
+#[test]
+fn ia9_fcvt_xf_int_form() {
+    let mut env = env();
+    setf_d(&mut env, 8, 3.5f64.to_bits());
+    // fcvt.fx（RNE）: 3.5 → 4。結果は整数形式（exp=0x1003E）。
+    x(
+        &mut env,
+        Insn::FcvtFxS0,
+        encode_fcvt_fx_s0(&[0, 9, 8]).unwrap(),
+    );
+    assert_eq!(fr(&env, 9).exp_field(), 0x1_003e);
+    assert_eq!(fr(&env, 9).sig(), 4);
+    // fcvt.fx.trunc: 3.5 → 3。
+    x(
+        &mut env,
+        Insn::FcvtFxTruncS0,
+        encode_fcvt_fx_trunc_s0(&[0, 9, 8]).unwrap(),
+    );
+    assert_eq!(fr(&env, 9).sig(), 3);
+    // fcvt.xf: 整数形式 → 浮動小数点。42 → 42.0。
+    set_gr(&mut env, 2, 42);
+    x(
+        &mut env,
+        Insn::SetfSig,
+        encode_setf_sig(&[0, 10, 2]).unwrap(),
+    );
+    x(
+        &mut env,
+        Insn::FcvtXf,
+        encode_fcvt_xf(&[0, 11, 10]).unwrap(),
+    );
+    assert_eq!(getf_d(&mut env, 11), 42.0f64.to_bits());
+    // fcvt.fx の NaTVal は伝播する。
+    set_fr(&mut env, 12, Ia64Ext::NATVAL);
+    x(
+        &mut env,
+        Insn::FcvtFxS0,
+        encode_fcvt_fx_s0(&[0, 13, 12]).unwrap(),
+    );
+    assert!(fr(&env, 13).is_natval());
+}
+
+#[test]
+fn ia9_fclass_and_approx() {
+    let mut env = env();
+    setf_d(&mut env, 8, 2.0f64.to_bits());
+    // fclass.m: @pos|@norm（0x011）選択で p1=1。qnan 選択で
+    // p1=0・p2=1（NaN 系は符号クラスを問わない）。
+    x(
+        &mut env,
+        Insn::FclassM,
+        encode_fclass_m(&[0, 6, 7, 8, 0x011]).unwrap(),
+    );
+    assert!(p(&env, 6));
+    assert!(!p(&env, 7));
+    x(
+        &mut env,
+        Insn::FclassM,
+        encode_fclass_m(&[0, 6, 7, 8, 0x080]).unwrap(),
+    );
+    assert!(!p(&env, 6));
+    assert!(p(&env, 7));
+    // frcpa: 2/8 = 0.25（2 の冪で厳密）、述語は 1。
+    setf_d(&mut env, 9, 8.0f64.to_bits());
+    x(
+        &mut env,
+        Insn::FrcpaS0,
+        encode_frcpa_s0(&[0, 10, 6, 8, 9]).unwrap(),
+    );
+    assert!(p(&env, 6));
+    assert_eq!(getf_d(&mut env, 10), 0.25f64.to_bits());
+    // frcpa(0,0): 述語 0・V 旗。
+    x(
+        &mut env,
+        Insn::FrcpaS0,
+        encode_frcpa_s0(&[0, 10, 6, 0, 0]).unwrap(),
+    );
+    assert!(!p(&env, 6));
+    assert_ne!(fpsr(&mut env) & (1 << 13), 0); // sf0 flag v
+    // frsqrta: 1/sqrt(4) = 0.5、述語 1。
+    setf_d(&mut env, 9, 4.0f64.to_bits());
+    x(
+        &mut env,
+        Insn::FrsqrtaS0,
+        encode_frsqrta_s0(&[0, 10, 6, 9]).unwrap(),
+    );
+    assert!(p(&env, 6));
+    assert_eq!(getf_d(&mut env, 10), 0.5f64.to_bits());
+    // frsqrta(0) = inf・述語 1・Z 旗。
+    x(
+        &mut env,
+        Insn::FrsqrtaS0,
+        encode_frsqrta_s0(&[0, 10, 6, 0]).unwrap(),
+    );
+    assert!(p(&env, 6));
+    assert!(fr(&env, 10).is_inf());
+    assert_ne!(fpsr(&mut env) & (1 << 15), 0); // sf0 flag z
+}
+
+#[test]
+fn ia9_fp_mem_forms() {
+    let mut env = env();
+    env.map_rw(MEM, 1).unwrap();
+    set_gr(&mut env, 3, MEM);
+    setf_d(&mut env, 8, 2.5f64.to_bits());
+    // stfd/ldfd: IEEE 倍精度の 8 バイト。
+    x(&mut env, Insn::Stfd, encode_stfd(&[0, 3, 8]).unwrap());
+    assert_eq!(rmem(&env, MEM, 8), 0x4004_0000_0000_0000);
+    x(&mut env, Insn::Ldfd, encode_ldfd(&[0, 9, 3]).unwrap());
+    assert_eq!(getf_d(&mut env, 9), 0x4004_0000_0000_0000);
+    // stfs/ldfs: 4 バイト単精度。
+    x(&mut env, Insn::Stfs, encode_stfs(&[0, 3, 8]).unwrap());
+    assert_eq!(rmem(&env, MEM, 4), 2.5f32.to_bits() as u64);
+    // stf8/ldf8: 仮数 64 ビットをそのまま（整数形式の往復）。
+    set_gr(&mut env, 2, 0x1122_3344_5566_7788);
+    x(
+        &mut env,
+        Insn::SetfSig,
+        encode_setf_sig(&[0, 10, 2]).unwrap(),
+    );
+    x(&mut env, Insn::Stf8, encode_stf8(&[0, 3, 10]).unwrap());
+    assert_eq!(rmem(&env, MEM, 8), 0x1122_3344_5566_7788);
+    x(&mut env, Insn::Ldf8, encode_ldf8(&[0, 11, 3]).unwrap());
+    assert_eq!(fr(&env, 11).exp_field(), 0x1_003e);
+    assert_eq!(fr(&env, 11).sig(), 0x1122_3344_5566_7788);
+    // stfe: 16 バイト整列の器に {sig 8B, {sign,exp} 2B}。
+    x(&mut env, Insn::Stfe, encode_stfe(&[0, 3, 8]).unwrap());
+    assert_eq!(rmem(&env, MEM, 8), 0xa000_0000_0000_0000);
+    assert_eq!(rmem(&env, MEM + 8, 2), 0x4000);
+    // ldfe で往復。
+    x(&mut env, Insn::Ldfe, encode_ldfe(&[0, 12, 3]).unwrap());
+    assert_eq!(getf_d(&mut env, 12), 2.5f64.to_bits());
+    // stf.spill/ldf.fill: NaTVal を運ぶ 16 バイト形式。
+    set_fr(&mut env, 13, Ia64Ext::NATVAL);
+    x(
+        &mut env,
+        Insn::StfSpill,
+        encode_stf_spill(&[0, 3, 13]).unwrap(),
+    );
+    assert_eq!(rmem(&env, MEM + 8, 8) & 0x3ffff, 0x1_fffe);
+    x(
+        &mut env,
+        Insn::LdfFill,
+        encode_ldf_fill(&[0, 14, 3]).unwrap(),
+    );
+    assert!(fr(&env, 14).is_natval());
+    // 通常形式への NaTVal ストアは NaT 消費フォールト。
+    assert_eq!(
+        xerr(&mut env, Insn::Stfd, encode_stfd(&[0, 3, 13]).unwrap()),
+        sem::TRAP_NAT
+    );
+}
+
+#[test]
+fn ia9_fp_mem_post_inc_and_pairs() {
+    let mut env = env();
+    env.map_rw(MEM, 1).unwrap();
+    wmem(&mut env, MEM, 0x1111, 8);
+    wmem(&mut env, MEM + 8, 0x2222, 8);
+    set_gr(&mut env, 3, MEM);
+    // ldfp8: [r3]・[r3+8] を整数形式で f1/f2 へ。
+    x(&mut env, Insn::Ldfp8, encode_ldfp8(&[0, 8, 9, 3]).unwrap());
+    assert_eq!(fr(&env, 8).sig(), 0x1111);
+    assert_eq!(fr(&env, 9).sig(), 0x2222);
+    // ldfp8 の +16 ベース更新形。
+    x(
+        &mut env,
+        Insn::Ldfp8I16,
+        encode_ldfp8_i16(&[0, 8, 9, 3]).unwrap(),
+    );
+    assert_eq!(gr(&env, 3), MEM + 16);
+    // ストアの即値ポストインクリメント（r3 += imm9）。
+    set_gr(&mut env, 3, MEM);
+    set_gr(&mut env, 2, 0xabcd);
+    x(
+        &mut env,
+        Insn::SetfSig,
+        encode_setf_sig(&[0, 10, 2]).unwrap(),
+    );
+    x(
+        &mut env,
+        Insn::Stf8I,
+        encode_stf8_i(&[0, 3, 10, 8]).unwrap(),
+    );
+    assert_eq!(gr(&env, 3), MEM + 8);
+    assert_eq!(rmem(&env, MEM, 8), 0xabcd);
+    // ロードの即値ポストインクリメント。
+    x(
+        &mut env,
+        Insn::LdfsI,
+        encode_ldfs_i(&[0, 11, 3, 4]).unwrap(),
+    );
+    assert_eq!(gr(&env, 3), MEM + 12);
+}
+
+#[test]
+fn ia9_fpsr_control_and_fchkf() {
+    use polyisa_engine::interp::Ctrl;
+    let mut env = env();
+    // BareEnv は状態を 0 初期化する（traps{5:0}=0 で全例外有効。
+    // CpuState::default() は建築の 0x0009_8028）。
+    assert_eq!(fpsr(&mut env) & 0x3f, 0);
+    // fclrf.s0 は旗場{12:7}を消す。
+    ia6x(&mut env, Insn::FclrfS0, encode_fclrf_s0(&[0]).unwrap());
+    assert_eq!(fpsr(&mut env) >> 6 & 0x1fff & 0xfc0, 0);
+    // fsetc.s0 amask=0x7f omask=1: ftz=1 にする。
+    ia6x(
+        &mut env,
+        Insn::FsetcS0,
+        encode_fsetc_s0(&[0, 0x7f, 1]).unwrap(),
+    );
+    assert_eq!(fpsr(&mut env) >> 6 & 1, 1);
+    // QNaN の整数変換は V 旗を立てる（結果は整数不定値）。
+    set_fr(&mut env, 8, Ia64Ext::QNAN);
+    ia6x(
+        &mut env,
+        Insn::FcvtFxS0,
+        encode_fcvt_fx_s0(&[0, 9, 8]).unwrap(),
+    );
+    assert_eq!(fr(&env, 9).sig(), 0x8000_0000_0000_0000);
+    assert_ne!(fpsr(&mut env) & (1 << 13), 0); // sf0 flag v
+    // v 例外は traps{0}=0 で有効 → fchkf.s0 は回復先へ分岐。
+    env.backend.ctrl = Ctrl::Fallthrough;
+    ia6x(
+        &mut env,
+        Insn::FchkfS0,
+        encode_fchkf_s0(&[0, 0x80]).unwrap(),
+    );
+    assert_eq!(env.backend.ctrl, Ctrl::Jump(0x80));
+    // 旗を消せば分岐しない。
+    ia6x(&mut env, Insn::FclrfS0, encode_fclrf_s0(&[0]).unwrap());
+    env.backend.ctrl = Ctrl::Fallthrough;
+    ia6x(
+        &mut env,
+        Insn::FchkfS0,
+        encode_fchkf_s0(&[0, 0x80]).unwrap(),
+    );
+    assert!(!matches!(env.backend.ctrl, Ctrl::Jump(_)));
+}
+
+#[test]
+fn ia9_chk_s_f_and_fr_rotation() {
+    use polyisa_engine::interp::Ctrl;
+    let mut env = env();
+    // chk.s f2: NaTVal で回復先へ。通常値なら進む。
+    setf_d(&mut env, 8, 1.0f64.to_bits());
+    ia6x(&mut env, Insn::ChkS, encode_chk_s(&[0, 8, 0x80]).unwrap());
+    assert!(!matches!(env.backend.ctrl, Ctrl::Jump(_)));
+    set_fr(&mut env, 8, Ia64Ext::NATVAL);
+    ia6x(&mut env, Insn::ChkS, encode_chk_s(&[0, 8, 0x80]).unwrap());
+    assert_eq!(env.backend.ctrl, Ctrl::Jump(0x80));
+    // 回転 FR: rrb.fr=1 で f32→phys33・f127→phys32 に改名される。
+    set_fr(&mut env, 32, Ia64Ext::int_form(0xaaaa));
+    set_fr(&mut env, 33, Ia64Ext::int_form(0xbbbb));
+    env.backend.set(sem::cfm_ref(), 1u64 << cfm_bit::RRB_FR);
+    assert_eq!(fr(&env, 32).sig(), 0xbbbb);
+    assert_eq!(fr(&env, 127).sig(), 0xaaaa);
+    env.backend.set(sem::cfm_ref(), 0);
+    assert_eq!(fr(&env, 32).sig(), 0xaaaa);
+}
+
+#[test]
+fn ia9_misc_f_ops() {
+    let mut env = env();
+    setf_d(&mut env, 8, 1.0f64.to_bits());
+    setf_d(&mut env, 9, 2.0f64.to_bits());
+    // fmin/fmax。
+    x(
+        &mut env,
+        Insn::FminS0,
+        encode_fmin_s0(&[0, 10, 8, 9]).unwrap(),
+    );
+    assert_eq!(getf_d(&mut env, 10), 1.0f64.to_bits());
+    x(
+        &mut env,
+        Insn::FmaxS0,
+        encode_fmax_s0(&[0, 10, 8, 9]).unwrap(),
+    );
+    assert_eq!(getf_d(&mut env, 10), 2.0f64.to_bits());
+    // xma.l: 整数形式 3*4+1 の下位。
+    for (f, v) in [(11u32, 3u64), (12, 4), (13, 1)] {
+        set_gr(&mut env, 2, v);
+        x(
+            &mut env,
+            Insn::SetfSig,
+            encode_setf_sig(&[0, u64::from(f), 2]).unwrap(),
+        );
+    }
+    x(
+        &mut env,
+        Insn::XmaL,
+        encode_xma_l(&[0, 14, 11, 12, 13]).unwrap(),
+    );
+    assert_eq!(fr(&env, 14).sig(), 13);
+    // xma.hu: 0xFFFF...*2 の上位。
+    set_gr(&mut env, 2, u64::MAX);
+    x(
+        &mut env,
+        Insn::SetfSig,
+        encode_setf_sig(&[0, 11, 2]).unwrap(),
+    );
+    set_gr(&mut env, 2, 2);
+    x(
+        &mut env,
+        Insn::SetfSig,
+        encode_setf_sig(&[0, 12, 2]).unwrap(),
+    );
+    set_gr(&mut env, 2, 0);
+    x(
+        &mut env,
+        Insn::SetfSig,
+        encode_setf_sig(&[0, 13, 2]).unwrap(),
+    );
+    x(
+        &mut env,
+        Insn::XmaHu,
+        encode_xma_hu(&[0, 14, 11, 12, 13]).unwrap(),
+    );
+    assert_eq!(fr(&env, 14).sig(), 1);
+    // fand: 仮数 AND。
+    set_gr(&mut env, 2, 0xf0f0);
+    x(
+        &mut env,
+        Insn::SetfSig,
+        encode_setf_sig(&[0, 11, 2]).unwrap(),
+    );
+    set_gr(&mut env, 2, 0x0ff0);
+    x(
+        &mut env,
+        Insn::SetfSig,
+        encode_setf_sig(&[0, 12, 2]).unwrap(),
+    );
+    x(&mut env, Insn::Fand, encode_fand(&[0, 14, 11, 12]).unwrap());
+    assert_eq!(fr(&env, 14).sig(), 0x00f0);
+    // fpack: 左右 32 ビットに f32 ビットを並べる。
+    x(&mut env, Insn::Fpack, encode_fpack(&[0, 14, 8, 9]).unwrap());
+    let sig = fr(&env, 14).sig();
+    assert_eq!(sig >> 32, 1.0f32.to_bits() as u64);
+    assert_eq!(sig & 0xffff_ffff, 2.0f32.to_bits() as u64);
 }

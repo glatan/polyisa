@@ -1594,22 +1594,26 @@ pub fn build_model() -> polyisa_isadl::Model {
     ] {
         m.insns.push(ins(n, "FFLD", pat, um(), &format!("({{qp}}) {syn}"), "load"));
     }
-    m.insns.push(ins(
-        "ldfs_r",
-        "FFLDR",
-        "01101000010000...........................",
-        um(),
-        "({qp}) ldfs {f1} = [{r3}], {r2}",
-        "load",
-    ));
-    m.insns.push(ins(
-        "ldfs_i",
-        "FFLDI",
-        "0111.00001000............................",
-        um(),
-        "({qp}) ldfs {f1} = [{r3}], {imm9b}",
-        "load",
-    ));
+    // FP ロードのポストインクリメント（レジスタ形 m=1）。
+    for (n, pat, syn) in [
+        ("ldfe_r", "01101000000000...........................", "ldfe {f1} = [{r3}], {r2}"),
+        ("ldf8_r", "01101000001000...........................", "ldf8 {f1} = [{r3}], {r2}"),
+        ("ldfs_r", "01101000010000...........................", "ldfs {f1} = [{r3}], {r2}"),
+        ("ldfd_r", "01101000011000...........................", "ldfd {f1} = [{r3}], {r2}"),
+        ("ldf_fill_r", "01101011011000...........................", "ldf.fill {f1} = [{r3}], {r2}"),
+    ] {
+        m.insns.push(ins(n, "FFLDR", pat, um(), &format!("({{qp}}) {syn}"), "load"));
+    }
+    // FP ロードのポストインクリメント（即値形 op=7、imm9b）。
+    for (n, pat, syn) in [
+        ("ldfe_i", "0111.00000000............................", "ldfe {f1} = [{r3}], {imm9b}"),
+        ("ldf8_i", "0111.00000100............................", "ldf8 {f1} = [{r3}], {imm9b}"),
+        ("ldfs_i", "0111.00001000............................", "ldfs {f1} = [{r3}], {imm9b}"),
+        ("ldfd_i", "0111.00001100............................", "ldfd {f1} = [{r3}], {imm9b}"),
+        ("ldf_fill_i", "0111.01101100............................", "ldf.fill {f1} = [{r3}], {imm9b}"),
+    ] {
+        m.insns.push(ins(n, "FFLDI", pat, um(), &format!("({{qp}}) {syn}"), "load"));
+    }
     // M9/M11: FP ストア。
     for (n, pat, syn) in [
         ("stfe", "01100110000000...........................", "stfe [{r3}] = {f2}"),
@@ -1620,21 +1624,31 @@ pub fn build_model() -> polyisa_isadl::Model {
     ] {
         m.insns.push(ins(n, "FFST", pat, um(), &format!("({{qp}}) {syn}"), "store"));
     }
-    m.insns.push(ins(
-        "stf8_i",
-        "FFSTI",
-        "0111.11000100............................",
-        um(),
-        "({qp}) stf8 [{r3}] = {f2}, {imm9a}",
-        "store",
-    ));
-    // M12: FP ペアロード。
+    // FP ストアのポストインクリメント（即値形 op=7、imm9a）。
+    for (n, pat, syn) in [
+        ("stfe_i", "0111.11000000............................", "stfe [{r3}] = {f2}, {imm9a}"),
+        ("stf8_i", "0111.11000100............................", "stf8 [{r3}] = {f2}, {imm9a}"),
+        ("stfs_i", "0111.11001000............................", "stfs [{r3}] = {f2}, {imm9a}"),
+        ("stfd_i", "0111.11001100............................", "stfd [{r3}] = {f2}, {imm9a}"),
+        ("stf_spill_i", "0111.11101100............................", "stf.spill [{r3}] = {f2}, {imm9a}"),
+    ] {
+        m.insns.push(ins(n, "FFSTI", pat, um(), &format!("({{qp}}) {syn}"), "store"));
+    }
+    // M12: FP ペアロード。m=1・x=1 は +16 固定のポストインクリメント形。
     m.insns.push(ins(
         "ldfp8",
         "FFLP",
         "01100000001001...........................",
         um(),
         "({qp}) ldfp8 {f1}, {f2} = [{r3}]",
+        "load",
+    ));
+    m.insns.push(ins(
+        "ldfp8_i16",
+        "FFLP",
+        "01101000001001...........................",
+        um(),
+        "({qp}) ldfp8 {f1}, {f2} = [{r3}], 16",
         "load",
     ));
     // M13-M15: lfetch。
@@ -1671,6 +1685,14 @@ pub fn build_model() -> polyisa_isadl::Model {
         "misc",
     ));
     m.insns.push(ins(
+        "getf_s",
+        "FRF",
+        "01000011110..1...........................",
+        um(),
+        "({qp}) getf.s {r1} = {f2}",
+        "misc",
+    ));
+    m.insns.push(ins(
         "getf_d",
         "FRF",
         "01000011111..1...........................",
@@ -1679,11 +1701,27 @@ pub fn build_model() -> polyisa_isadl::Model {
         "misc",
     ));
     m.insns.push(ins(
+        "getf_exp",
+        "FRF",
+        "01000011101..1...........................",
+        um(),
+        "({qp}) getf.exp {r1} = {f2}",
+        "misc",
+    ));
+    m.insns.push(ins(
         "setf_sig",
         "FFR",
         "01100011100..1...........................",
         um(),
         "({qp}) setf.sig {f1} = {r2}",
+        "misc",
+    ));
+    m.insns.push(ins(
+        "setf_s",
+        "FFR",
+        "01100011110..1...........................",
+        um(),
+        "({qp}) setf.s {f1} = {r2}",
         "misc",
     ));
     m.insns.push(ins(
@@ -1824,11 +1862,26 @@ pub fn build_model() -> polyisa_isadl::Model {
 
     // ---- F 型（浮動小数点。Op=0,1,4,5,8,9,a-e）。
     // F10: 4 項 FP 演算（fma 系・xma 系・fselect）。
+    // fma/fma.d/fms/fnma は sf 場（bits[35:34]）を sf0-sf3 で展開する
+    // （fms は pb=1 なので「1001x」、fnma は pb=1+xb=1 の「11x」）。
+    for sf in 0..4 {
+        for (n, pfx, syn) in [
+            ("fma", "10000", "fma"),
+            ("fma_d", "10010", "fma.d"),
+            ("fms", "10100", "fms"),
+            ("fnma", "11000", "fnma"),
+        ] {
+            m.insns.push(ins(
+                &format!("{n}_s{sf}"),
+                "FFMA",
+                &format!("{pfx}{sf:02b}.................................."),
+                uf(),
+                &format!("({{qp}}) {syn}.s{sf} {{f1}} = {{f3}}, {{f4}}, {{f2}}"),
+                "fp",
+            ));
+        }
+    }
     for (n, pat, syn) in [
-        ("fma_s0", "1000000..................................", "fma.s0 {f1} = {f3}, {f4}, {f2}"),
-        ("fma_d_s0", "1001000..................................", "fma.d.s0 {f1} = {f3}, {f4}, {f2}"),
-        ("fms_s0", "1010000..................................", "fms.s0 {f1} = {f3}, {f4}, {f2}"),
-        ("fnma_s0", "1100000..................................", "fnma.s0 {f1} = {f3}, {f4}, {f2}"),
         ("fselect", "11100....................................", "fselect {f1} = {f3}, {f4}, {f2}"),
         ("xma_l", "1110100..................................", "xma.l {f1} = {f3}, {f4}, {f2}"),
         ("xma_h", "1110111..................................", "xma.h {f1} = {f3}, {f4}, {f2}"),
@@ -1837,11 +1890,25 @@ pub fn build_model() -> polyisa_isadl::Model {
         m.insns.push(ins(n, "FFMA", pat, uf(), &format!("({{qp}}) {syn}"), "fp"));
     }
     // F7: 3 項 FP 演算・論理・マージ。
+    // fmin/fmax/famin/famax は xb=0 で sf 場（bits[35:34]）を展開する。
+    for sf in 0..4 {
+        for (n, x6lo, syn) in [
+            ("fmin", "00", "fmin"),
+            ("fmax", "01", "fmax"),
+            ("famin", "10", "famin"),
+            ("famax", "11", "famax"),
+        ] {
+            m.insns.push(ins(
+                &format!("{n}_s{sf}"),
+                "FFF3",
+                &format!("0000.{:03b}0101{x6lo}...........................", sf << 1),
+                uf(),
+                &format!("({{qp}}) {syn}.s{sf} {{f1}} = {{f2}}, {{f3}}"),
+                "fp",
+            ));
+        }
+    }
     for (n, pat, syn) in [
-        ("fmin_s0", "0000.000010100...........................", "fmin.s0 {f1} = {f2}, {f3}"),
-        ("fmax_s0", "0000.000010101...........................", "fmax.s0 {f1} = {f2}, {f3}"),
-        ("famin_s0", "0000.000010110...........................", "famin.s0 {f1} = {f2}, {f3}"),
-        ("famax_s0", "0000.000010111...........................", "famax.s0 {f1} = {f2}, {f3}"),
         ("fmerge_s", "0000...0010000...........................", "fmerge.s {f1} = {f2}, {f3}"),
         ("fmerge_ns", "0000...0010001...........................", "fmerge.ns {f1} = {f2}, {f3}"),
         ("fmerge_se", "0000...0010010...........................", "fmerge.se {f1} = {f2}, {f3}"),
@@ -1860,13 +1927,32 @@ pub fn build_model() -> polyisa_isadl::Model {
     ] {
         m.insns.push(ins(n, "FFF3", pat, uf(), &format!("({{qp}}) {syn}"), "fp"));
     }
-    // F8: FP 比較。
-    for (n, pat, syn) in [
-        ("fcmp_eq_s0", "01000000....................0............", "fcmp.eq.s0 {p1}, {p2} = {f2}, {f3}"),
-        ("fcmp_lt_s0", "01001000....................0............", "fcmp.lt.s0 {p1}, {p2} = {f2}, {f3}"),
-        ("fcmp_eq_unc_s0", "01000000....................1............", "fcmp.eq.unc.s0 {p1}, {p2} = {f2}, {f3}"),
-    ] {
-        m.insns.push(ins(n, "FPPF", pat, uf(), &format!("({{qp}}) {syn}"), "fp"));
+    // F8/F9: FP 比較の展開。rb（bit36）×ra（bit33）が関係
+    // （eq=00, unord=01, lt=10, le=11）、bit12 が .unc、
+    // bits[35:34] が sf。
+    for sf in 0..4 {
+        for (n, rb, ra, syn) in [
+            ("fcmp_eq", 0, 0, "eq"),
+            ("fcmp_unord", 0, 1, "unord"),
+            ("fcmp_lt", 1, 0, "lt"),
+            ("fcmp_le", 1, 1, "le"),
+        ] {
+            for unc in 0..2 {
+                let u = if unc == 1 { ".unc" } else { "" };
+                m.insns.push(ins(
+                    &format!("{n}{}_s{sf}", if unc == 1 { "_unc" } else { "" }),
+                    "FPPF",
+                    &format!(
+                        "0100{rb}{sf:02b}{ra}....................{unc}............"
+                    ),
+                    uf(),
+                    &format!(
+                        "({{qp}}) fcmp.{syn}{u}.s{sf} {{p1}}, {{p2}} = {{f2}}, {{f3}}"
+                    ),
+                    "fp",
+                ));
+            }
+        }
     }
     // F5: fclass。
     m.insns.push(ins(
@@ -1877,59 +1963,84 @@ pub fn build_model() -> polyisa_isadl::Model {
         "({qp}) fclass.m {p1}, {p2} = {f2}, {immu9}",
         "fp",
     ));
-    // F6: 近似・逆数。
     m.insns.push(ins(
-        "frcpa_s0",
-        "FFPFF",
-        "00000001.................................",
+        "fclass_m_unc",
+        "FPPFI",
+        "0101........................1............",
         uf(),
-        "({qp}) frcpa.s0 {f1}, {p2} = {f2}, {f3}",
+        "({qp}) fclass.m.unc {p1}, {p2} = {f2}, {immu9}",
         "fp",
     ));
-    m.insns.push(ins(
-        "frsqrta_s0",
-        "FFPF",
-        "00001001.................................",
-        uf(),
-        "({qp}) frsqrta.s0 {f1}, {p2} = {f3}",
-        "fp",
-    ));
-    // F8/F9: 変換。
+    // F6: 近似・逆数。bits[35:34] が sf。
+    for sf in 0..4 {
+        m.insns.push(ins(
+            &format!("frcpa_s{sf}"),
+            "FFPFF",
+            &format!("00000{sf:02b}1................................."),
+            uf(),
+            &format!("({{qp}}) frcpa.s{sf} {{f1}}, {{p2}} = {{f2}}, {{f3}}"),
+            "fp",
+        ));
+        m.insns.push(ins(
+            &format!("frsqrta_s{sf}"),
+            "FFPF",
+            &format!("00001{sf:02b}1................................."),
+            uf(),
+            &format!("({{qp}}) frsqrta.s{sf} {{f1}}, {{p2}} = {{f3}}"),
+            "fp",
+        ));
+    }
+    // F8/F9: 変換。fcvt.fx/fxu(.trunc) は sf 場を展開する。
+    for sf in 0..4 {
+        for (n, x6, syn) in [
+            ("fcvt_fx", "011000", "fcvt.fx"),
+            ("fcvt_fxu", "011001", "fcvt.fxu"),
+            ("fcvt_fx_trunc", "011010", "fcvt.fx.trunc"),
+            ("fcvt_fxu_trunc", "011011", "fcvt.fxu.trunc"),
+        ] {
+            m.insns.push(ins(
+                &format!("{n}_s{sf}"),
+                "FFF2",
+                &format!("0000.{:03b}{x6}...........................", sf << 1),
+                uf(),
+                &format!("({{qp}}) {syn}.s{sf} {{f1}} = {{f2}}"),
+                "fp",
+            ));
+        }
+    }
     for (n, pat, syn) in [
-        ("fcvt_fx_s0", "0000.000011000...........................", "fcvt.fx.s0 {f1} = {f2}"),
-        ("fcvt_fx_trunc_s0", "0000.000011010...........................", "fcvt.fx.trunc.s0 {f1} = {f2}"),
         ("fcvt_xf", "0000...0011100...........................", "fcvt.xf {f1} = {f2}"),
         ("fpcvt_fx_s0", "0001.000011000...........................", "fpcvt.fx.s0 {f1} = {f2}"),
     ] {
         m.insns.push(ins(n, "FFF2", pat, uf(), &format!("({{qp}}) {syn}"), "fp"));
     }
-    // F11: fsetc（am/sf 制御）。
-    m.insns.push(ins(
-        "fsetc_s0",
-        "FII7",
-        "0000.000000100...........................",
-        uf(),
-        "({qp}) fsetc.s0 {immu7a}, {immu7b}",
-        "fp",
-    ));
-    // F12: fclrf。
-    m.insns.push(ins(
-        "fclrf_s0",
-        "F0",
-        "0000.000000101...........................",
-        uf(),
-        "({qp}) fclrf.s0",
-        "fp",
-    ));
-    // F13: fchkf。
-    m.insns.push(ins(
-        "fchkf_s0",
-        "FT25",
-        "0000.000001000...........................",
-        uf(),
-        "({qp}) fchkf.s0 {tgt25}",
-        "misc",
-    ));
+    // F11/F12/F13: sf 制御。bits[35:34] が対象の sf。
+    for sf in 0..4 {
+        m.insns.push(ins(
+            &format!("fsetc_s{sf}"),
+            "FII7",
+            &format!("0000.{:03b}000100...........................", sf << 1),
+            uf(),
+            &format!("({{qp}}) fsetc.s{sf} {{immu7a}}, {{immu7b}}"),
+            "fp",
+        ));
+        m.insns.push(ins(
+            &format!("fclrf_s{sf}"),
+            "F0",
+            &format!("0000.{:03b}000101...........................", sf << 1),
+            uf(),
+            &format!("({{qp}}) fclrf.s{sf}"),
+            "fp",
+        ));
+        m.insns.push(ins(
+            &format!("fchkf_s{sf}"),
+            "FT25",
+            &format!("0000.{:03b}001000...........................", sf << 1),
+            uf(),
+            &format!("({{qp}}) fchkf.s{sf} {{tgt25}}"),
+            "misc",
+        ));
+    }
     // F15/F16: FP break/nop/hint（x3[35:33]=0 固定、x6/y 拡張）。
     for (n, pat, syn) in [
         ("break_f", "0000.000000000...........................", "break.f {immu21}"),

@@ -15,6 +15,9 @@ polyisa-guest = { path = "../../crates/guest" }
 polyisa-engine = { path = "../../crates/engine" }
 polyisa-timing = { path = "../../crates/timing" }
 
+[dev-dependencies]
+polyisa-softfloat = { path = "../../crates/softfloat" }
+
 [build-dependencies]
 polyisa-isadl = { path = "../../crates/isadl" }
 polyisa-isagen = { path = "../../crates/isagen" }
