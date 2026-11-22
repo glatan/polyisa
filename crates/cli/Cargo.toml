@@ -121,6 +121,10 @@ name = "heavy_program_ia64"
 required-features = ["guest-ia64"]
 
 [[test]]
+name = "heavy_abi_ia64"
+required-features = ["guest-ia64"]
+
+[[test]]
 name = "heavy_program_parisc"
 required-features = ["guest-parisc"]
 

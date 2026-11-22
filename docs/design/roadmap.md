@@ -37,7 +37,7 @@
 | ID | 条件 | 判定 |
 |---|---|---|
 | S21-1 | ia64 の配布物（BIN-DISTRO-IA64 の busybox-static）のコマンド群が、ゲストのルートを使って正しい出力を返す（テスト `heavy_program_ia64`）。 | テスト：`heavy_program_ia64` |
-| S21-2 | ABI 表が SRC-LINUX-66 の UAPI と一致することを所有者が確認する。 | 所有者 |
+| S21-2 | ABI 表が SRC-LINUX-66 の UAPI と一致することを所有者が確認する（機械照合の証拠は `heavy_abi_ia64`）。 | テスト：`heavy_abi_ia64` |
 
 作業計画：
 
