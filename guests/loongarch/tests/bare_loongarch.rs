@@ -889,3 +889,128 @@ fn exec_la7_asrt() {
     let r = sem::exec(&mut env.backend, insn, word, 0x1000, true);
     assert!(matches!(r, Err(InterpExit::Exception(_))));
 }
+
+// ---- LA8: CSR・特権入口 ----
+
+/// CSR 値を読む（CpuState.csr 配列の直接参照）。
+fn csr_val(env: &mut BareEnv, n: usize) -> u64 {
+    use polyisa_sem::W64;
+    env.backend.get(polyisa_sem::StateRef::<W64>::from_offset(
+        core::mem::offset_of!(CpuState, csr) + n * 8,
+    ))
+}
+
+#[test]
+fn exec_la8_csr() {
+    use polyisa_guest_loongarch::csr;
+    let mut env = env();
+    // csrwr rd, csr: rd の値を CSR へ書き、rd ← 旧値（0）。
+    set_gpr(&mut env, 4, 0xdead_beef);
+    step(&mut env, enc(Insn::Csrwr, &[4, 1, csr::SAVE0 as u64]));
+    assert_eq!(csr_val(&mut env, csr::SAVE0), 0xdead_beef);
+    assert_eq!(gpr(&mut env, 4), 0);
+    // csrrd rd, csr: CSR 値を読む。
+    step(&mut env, enc(Insn::Csrrd, &[5, 0, csr::SAVE0 as u64]));
+    assert_eq!(gpr(&mut env, 5), 0xdead_beef);
+    // csrxchg rd, rj, csr: mask=rj で CSR 一部差し替え。
+    // CSR=0xdead_beef, rd=0x1234, rj(mask)=0xff00 →
+    // CSR=(0xdead_beef & ~0xff00) | (0x1234 & 0xff00) = 0xdead_12ef。
+    set_gpr(&mut env, 6, 0x1234);
+    set_gpr(&mut env, 7, 0xff00);
+    step(&mut env, enc(Insn::Csrxchg, &[6, 7, csr::SAVE0 as u64]));
+    assert_eq!(csr_val(&mut env, csr::SAVE0), 0xdead_12ef);
+    assert_eq!(gpr(&mut env, 6), 0xdead_beef);
+    // 範囲外 CSR（>= 512）は読み 0・書き捨て。
+    step(&mut env, enc(Insn::Csrrd, &[5, 0, 0x600]));
+    assert_eq!(gpr(&mut env, 5), 0);
+    set_gpr(&mut env, 4, 0xaa);
+    step(&mut env, enc(Insn::Csrwr, &[4, 1, 0x600]));
+    assert_eq!(gpr(&mut env, 4), 0);
+}
+
+#[test]
+fn exec_la8_ertn() {
+    use polyisa_guest_loongarch::csr;
+    let mut env = env();
+    // ERA=0x8000、PRMD[2:0]=5、CRMD=0x1f8 →
+    // ertn: pc=0x8000、CRMD = (0x1f8 & ~7) | 5 = 0x1fd。
+    env.backend.set(
+        polyisa_sem::StateRef::<polyisa_sem::W64>::from_offset(
+            core::mem::offset_of!(CpuState, csr) + csr::ERA * 8,
+        ),
+        0x8000,
+    );
+    env.backend.set(
+        polyisa_sem::StateRef::<polyisa_sem::W64>::from_offset(
+            core::mem::offset_of!(CpuState, csr) + csr::PRMD * 8,
+        ),
+        5,
+    );
+    env.backend.set(
+        polyisa_sem::StateRef::<polyisa_sem::W64>::from_offset(
+            core::mem::offset_of!(CpuState, csr) + csr::CRMD * 8,
+        ),
+        0x1f8,
+    );
+    step_at(&mut env, enc(Insn::Ertn, &[]), 0x1000);
+    assert_eq!(env.pc, 0x8000);
+    assert_eq!(csr_val(&mut env, csr::CRMD), 0x1fd);
+}
+
+#[test]
+fn exec_la8_priv_approx() {
+    use polyisa_engine::interp::InterpExit;
+    let mut env = env();
+    // TLB 系・cacop・idle・invtlb・ldpte は no-op。
+    for i in [
+        Insn::Tlbclr,
+        Insn::Tlbfill,
+        Insn::Tlbflush,
+        Insn::Tlbrd,
+        Insn::Tlbsrch,
+        Insn::Tlbwr,
+    ] {
+        step(&mut env, enc(i, &[]));
+    }
+    step(&mut env, enc(Insn::Idle, &[0]));
+    step(&mut env, enc(Insn::Cacop, &[0, 5, 0]));
+    step(&mut env, enc(Insn::Invtlb, &[0, 5, 6]));
+    step(&mut env, enc(Insn::Ldpte, &[5, 0]));
+    // lddir は rd ← 0。
+    set_gpr(&mut env, 4, 0xff);
+    step(&mut env, enc(Insn::Lddir, &[4, 5, 0]));
+    assert_eq!(gpr(&mut env, 4), 0);
+    // iocsrrd.d は rd ← 0、iocsrwr.* は no-op。
+    set_gpr(&mut env, 4, 0xff);
+    step(&mut env, enc(Insn::IocsrrdD, &[4, 5]));
+    assert_eq!(gpr(&mut env, 4), 0);
+    step(&mut env, enc(Insn::IocsrwrD, &[4, 5]));
+    // dbcl は例外。code = TRAP_DBG_BASE | code15。
+    let word = enc(Insn::Dbcl, &[0x123]);
+    let insn = decode_model_ex(u128::from(word), 32, true, LA64).unwrap();
+    let r = sem::exec(&mut env.backend, insn, word, 0x1000, true);
+    match r {
+        Err(InterpExit::Exception(e)) => {
+            assert_eq!(e.code, sem::TRAP_DBG_BASE | 0x123);
+        }
+        _ => panic!("dbcl should trap"),
+    }
+}
+
+#[test]
+fn exec_la8_rdtime_cntid() {
+    let mut env = env();
+    env.backend.set(sem::cnt_ref(), 0x0123_4567_89ab_cdef);
+    // rdtime.d: rd ← 全 64 ビット、rj ← Counter ID（近似 0）。
+    set_gpr(&mut env, 6, 0xff);
+    step(&mut env, enc(Insn::RdtimeD, &[4, 6]));
+    assert_eq!(gpr(&mut env, 4), 0x0123_4567_89ab_cdef);
+    assert_eq!(gpr(&mut env, 6), 0);
+    // rdtimel.w: rd ← sext(low32)、rj ← 0。
+    step(&mut env, enc(Insn::RdtimelW, &[4, 6]));
+    assert_eq!(gpr(&mut env, 4), (-0x7654_3211i64) as u64);
+    assert_eq!(gpr(&mut env, 6), 0);
+    // rdtimeh.w: rd ← sext(high32)。
+    step(&mut env, enc(Insn::RdtimehW, &[4, 6]));
+    assert_eq!(gpr(&mut env, 4), 0x0123_4567);
+}

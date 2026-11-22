@@ -13,7 +13,7 @@ use polyisa_sem::{
     Backend, Cmp, ExceptionKind, GuestException, StateArray, StateRef, W8, W16, W32, W64, Width,
 };
 
-use crate::{CpuState, Insn, extract_ops};
+use crate::{CpuState, Insn, csr, extract_ops};
 
 /// Trap コード（`handle_trap` に渡る内部番号）。
 /// `syscall` の発行点（code15 は命令語の即値）。OS
@@ -23,6 +23,8 @@ pub const TRAP_SYS: u64 = 0x1000;
 pub const TRAP_ILL: u64 = 4;
 /// `break` 発行点。code = `TRAP_BRK_BASE` | code15。
 pub const TRAP_BRK_BASE: u64 = 0x2000;
+/// `dbcl` 発行点。code = `TRAP_DBG_BASE` | code15。
+pub const TRAP_DBG_BASE: u64 = 0x4000;
 
 /// CPU 状態の位置たち。
 #[must_use]
@@ -477,6 +479,34 @@ const ACC_SC: Access = Access {
 /// bound check 例外の trap コード（`handle_trap` へ渡る内部番号）。
 /// Ref: SPEC-LOONGARCH-RM §2.2.3.4（BCE）.
 pub const TRAP_BND: u64 = 5;
+
+/// CSR 読み出し。idx >= 512 の未割当て番号は 0 を返す
+/// （配列近似。Gap: GAP-0063）。
+fn csr_load<B: Backend>(b: &mut B, idx: u64) -> B::V<W64> {
+    let i64v = k(b, idx);
+    let idx32 = b.trunc::<W64, W32>(i64v);
+    let lim = b.konst::<W32>(512);
+    let over = b.cmp::<W32>(Cmp::GeU, idx32, lim);
+    // idx >= 512 でも配列内を読むために下位 9 ビットに折る。
+    let mask = b.konst::<W32>(0x1ff);
+    let safe = b.and(idx32, mask);
+    let raw = b.get_indexed(csr_array(), safe);
+    let zero = k(b, 0);
+    b.select::<W64>(over, zero, raw)
+}
+
+/// CSR 書き込み。idx >= 512 の未割当て番号は捨てる
+/// （配列近似。Gap: GAP-0063）。
+fn csr_store<B: Backend>(b: &mut B, idx: u64, v: B::V<W64>) -> Result<(), B::Exit> {
+    let i64v = k(b, idx);
+    let idx32 = b.trunc::<W64, W32>(i64v);
+    let lim = b.konst::<W32>(512);
+    let ok = b.cmp::<W32>(Cmp::LtU, idx32, lim);
+    b.if_then(ok, |b| {
+        b.set_indexed(csr_array(), idx32, v);
+        Ok(())
+    })
+}
 
 /// ldgt/ldle/stgt/stle の境界検査。`gt` なら `rj > rk`、
 /// さもなければ `rj <= rk` が合法。違反時は BCE に畳む。
@@ -1633,10 +1663,15 @@ pub fn exec<B: Backend>(
             // Gap: GAP-0063（マルチスレッドの順序付けは未対応）。
         }
         // ---- カウンタ ----
+        // rd ← StableCounter、rj ← Counter ID。Counter ID は
+        // モデルしないため 0 を返す。Gap: GAP-0063.
+        // Ref: SPEC-LOONGARCH-RM §2.2.10.4.
         Insn::RdtimelW => {
             let c = b.get(cnt_ref());
             let v = sext_w(b, c);
             rset(b, ops[0], v);
+            let zero = k(b, 0);
+            rset(b, ops[1], zero);
         }
         Insn::RdtimehW => {
             let c = b.get(cnt_ref());
@@ -1644,10 +1679,14 @@ pub fn exec<B: Backend>(
             let v0 = b.shr_l::<W64>(c, n);
             let v = sext_w(b, v0);
             rset(b, ops[0], v);
+            let zero = k(b, 0);
+            rset(b, ops[1], zero);
         }
         Insn::RdtimeD => {
             let v = b.get(cnt_ref());
             rset(b, ops[0], v);
+            let zero = k(b, 0);
+            rset(b, ops[1], zero);
         }
         Insn::Cpucfg => {
             // cpucfg[ rj ] を rd へ。未設定語は 0 を返す。
@@ -1661,6 +1700,93 @@ pub fn exec<B: Backend>(
             let v = b.select::<W32>(over, zero, raw);
             let v64 = b.zext::<W32, W64>(v);
             rset(b, ops[0], v64);
+        }
+        // ---- CSR 読み書き（LA8）----
+        // csr[ idx ] は 512 エントリの配列近似。idx >= 512 の
+        // 未割当て番号は読み 0・書き捨て。特権レベルの検査は
+        // しない。Gap: GAP-0063.
+        // Ref: SPEC-LOONGARCH-RM §4.1.7.
+        Insn::Csrrd => {
+            // ops = [rd, rj(=0), csr14]。
+            let v = csr_load::<B>(b, ops[2]);
+            rset(b, ops[0], v);
+        }
+        Insn::Csrwr => {
+            // ops = [rd, rj(=1), csr14]。CSR ← rd 旧値、rd ← CSR 旧値。
+            let old = csr_load::<B>(b, ops[2]);
+            let nv = rget(b, ops[0]);
+            csr_store(b, ops[2], nv)?;
+            rset(b, ops[0], old);
+        }
+        Insn::Csrxchg => {
+            // ops = [rd, rj, csr14]。rj を書きマスクに使い、
+            // CSR = (CSR & ~mask) | (rd & mask)、rd ← CSR 旧値。
+            let old = csr_load::<B>(b, ops[2]);
+            let mask = rget(b, ops[1]);
+            let rd = rget(b, ops[0]);
+            let nmask = b.not(mask);
+            let keep = b.and(old, nmask);
+            let put = b.and(rd, mask);
+            let nv = b.or(keep, put);
+            csr_store(b, ops[2], nv)?;
+            rset(b, ops[0], old);
+        }
+        Insn::Ertn => {
+            // pc ← CSR.ERA、CRMD[2:0]（PLV・IE）← PRMD[2:0]
+            // （PPLV・PIE）。割込・ネストの配送はモデルしない。
+            // Gap: GAP-0063.
+            // Ref: SPEC-LOONGARCH-RM §4.1.7.
+            let idx = k(b, csr::ERA as u64);
+            let idx32 = b.trunc::<W64, W32>(idx);
+            let era = b.get_indexed(csr_array(), idx32);
+            let pidx = k(b, csr::PRMD as u64);
+            let pidx32 = b.trunc::<W64, W32>(pidx);
+            let prmd = b.get_indexed(csr_array(), pidx32);
+            let cidx = k(b, csr::CRMD as u64);
+            let cidx32 = b.trunc::<W64, W32>(cidx);
+            let crmd = b.get_indexed(csr_array(), cidx32);
+            let mask7 = k(b, !7u64);
+            let keep = b.and(crmd, mask7);
+            let bits = k(b, 7);
+            let low = b.and(prmd, bits);
+            let ncrmd = b.or(keep, low);
+            b.set_indexed(csr_array(), cidx32, ncrmd);
+            b.jump(era);
+        }
+        // ---- 特権・システム近似（LA8）----
+        // MMU/TLB・キャッシュ・IOCSR・省電力をモデルしないため、
+        // TLB 操作・CACOP・IOCSR・IDLE・INVTLB・LDDIR/LDPTE は
+        // 表層のみの no-op 近似。Gap: GAP-0063.
+        Insn::Tlbclr
+        | Insn::Tlbfill
+        | Insn::Tlbflush
+        | Insn::Tlbrd
+        | Insn::Tlbsrch
+        | Insn::Tlbwr
+        | Insn::Invtlb
+        | Insn::Cacop
+        | Insn::Ldpte => {}
+        Insn::Idle => {
+            // 割込待ち。単一スレッド・割込なしの模型では
+            // 直ちに復帰する no-op。Gap: GAP-0063.
+        }
+        Insn::Lddir => {
+            // ページテーブル走査は MMU 未モデルのため rd ← 0。
+            // Gap: GAP-0063.
+            let zero = k(b, 0);
+            rset(b, ops[0], zero);
+        }
+        Insn::IocsrrdB | Insn::IocsrrdH | Insn::IocsrrdW | Insn::IocsrrdD => {
+            // IOCSR 空間はモデルしないので 0 を返す。Gap: GAP-0063.
+            let zero = k(b, 0);
+            rset(b, ops[0], zero);
+        }
+        Insn::IocsrwrB | Insn::IocsrwrH | Insn::IocsrwrW | Insn::IocsrwrD => {}
+        Insn::Dbcl => {
+            // デバッグ例外入口。デバッグモードを持たないため
+            // 例外として発火させ、code = TRAP_DBG_BASE | code15。
+            // Gap: GAP-0063.
+            return Err(raise::<B>(b, ExceptionKind::Trap, TRAP_DBG_BASE | ops[0]));
         }
         _ => return Ok(false),
     }
