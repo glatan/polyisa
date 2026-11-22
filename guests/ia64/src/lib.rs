@@ -137,9 +137,12 @@ pub struct CpuState {
     pub itc: u64,
     /// CFM（現在フレームマーカ。ビット位置は `cfm_bit`）。
     pub cfm: u64,
-    /// RSE の汚れレジスタの追跡（バッキングストアへの書き出し制御。
-    /// 追跡の粒度は IA8 で確定する）。
-    pub rse_dirty: u64,
+    /// RSE の駐在域の下端。最古の駐在スタックレジスタが写る物理
+    /// リング位置（r32-r127 の 96 項リング内オフセット）。駐在域は
+    /// gr_bot から現フレームの末尾までの連続区間で、区間内の各
+    /// レジスタのバッキングストアアドレスは ar.bsp と CFM から
+    /// 一意に求まる（sem.rs の RSE 節）。
+    pub gr_bot: u64,
     /// ALAT の登録表。エントリ i の対として `alat[i]`（アドレス）と
     /// `alat[16+i]`（タグ: 目的 GR 番号{6:0} + サイズの log2
     /// {10:8}）を使う 16 エントリ・挿入順 FIFO。
@@ -153,8 +156,9 @@ pub struct CpuState {
     pub csd: u64,
     /// レジスタスタックのフレーム基底。仮想 GR r32 が写る物理
     /// リング位置（r32-r127 の 96 項リング内オフセット）。
-    /// call で sol 分だけ進み、ret/cover で戻る最小モデル。
-    /// バッキングストア連携は IA8。
+    /// call で sol 分、cover で sof 分だけ進み、ret で戻る。
+    /// 駐在域の下端は `gr_bot`、末尾は 基底+sof で、溢れた分は
+    /// ar.bspstore 指すバッキングストアへ書き出す（IA8 の RSE）。
     pub gr_base: u64,
 }
 
@@ -178,7 +182,7 @@ impl Default for CpuState {
             rsc: 0,
             itc: 0,
             cfm: 0,
-            rse_dirty: 0,
+            gr_bot: 0,
             alat: [0; ALAT_ENTRIES],
             alat_valid: 0,
             psr_um: 0,

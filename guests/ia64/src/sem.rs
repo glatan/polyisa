@@ -334,8 +334,9 @@ fn exec_loop_br(b: &mut InterpBackend, insn: Insn, ops: &[u64], ip: u64) -> Resu
 /// を b_link に置き、現 CFM を pfs.pfm、EC を pfs.pec に退避する
 /// （ppl はユーザーモードで観測しない）。被呼び出し側の新規
 /// フレームは呼び出し側 out 域（sof-sol、sol=sor=0、rrb=0）。
-/// RSE のバッキングストア保全（rse_preserve_frame）は IA8 の範囲
-/// で、ここでは gr_base を sol 分だけ進める最小モデルとする。
+/// ar.bsp は呼び出し側 out 域の先頭＝被呼び出し側フレームの
+/// 基底なので sol 個分進める（駐在域の大きさは変わらない。
+/// rse_preserve_frame 相当の dirty 化は bsp の移動で表れる）。
 /// Ref: SPEC-IA64-SDM (Rev 2.3) Vol3 br/brl。
 fn br_call_common(b: &mut InterpBackend, link: u32, target: u64, ip: u64) {
     set64(b, br_ref(link), (ip & !0xf).wrapping_add(16));
@@ -347,6 +348,12 @@ fn br_call_common(b: &mut InterpBackend, link: u32, target: u64, ip: u64) {
     let sof = cf(cfm, cfm_bit::SOF, 7);
     let gb = get64(b, gr_base_ref());
     set64(b, gr_base_ref(), (gb + sol) % 96);
+    let bsp = get64(b, ar_ref(ar::BSP as u64).expect("bsp"));
+    set64(
+        b,
+        ar_ref(ar::BSP as u64).expect("bsp"),
+        rse_move(bsp, sol as i64),
+    );
     let mut n = cfm;
     // sol > sof の不整合 CFM（pfs 経由でしか起きない）でも
     // ホスト側で panic しないよう saturating にする。
@@ -360,19 +367,35 @@ fn br_call_common(b: &mut InterpBackend, link: u32, target: u64, ip: u64) {
     b.ctrl = Ctrl::Jump(target);
 }
 
-/// br.ret の共通動作。pfs.pfm/pec で CFM/EC を戻し、gr_base を
-/// 退避時の sol 分だけ戻す。RSE のフレーム復元
-/// （rse_restore_frame・強制ロード）は IA8 の範囲。
+/// br.ret の共通動作。pfs.pfm/pec で CFM/EC を戻し、ar.bsp と
+/// gr_base を退避時の sol 分だけ戻す。復帰フレームの基底 idx
+/// が負（呼び出し側 reg が駐在域の下を回って退避済み）なら、
+/// その分をバッキングストアから読み戻す強制フィルを行う
+/// （rse_restore_frame + mandatory RSE loads 相当）。
 /// Ref: SPEC-IA64-SDM (Rev 2.3) Vol3 br。
-fn br_ret_common(b: &mut InterpBackend, target: u64) {
+fn br_ret_common(b: &mut InterpBackend, target: u64) -> Result<(), InterpExit> {
     let pfs = get64(b, ar_ref(ar::PFS as u64).expect("pfs"));
     let pfm = pfs & mask(38);
-    let sol = cf(pfm, cfm_bit::SOL, 7);
+    let sol = cf(pfm, cfm_bit::SOL, 7) as i64;
+    let bsp_old = get64(b, ar_ref(ar::BSP as u64).expect("bsp"));
+    let bsp = rse_move(bsp_old, -sol);
+    let nbase = base_idx(b) as i64 - sol;
+    if nbase < 0 {
+        let bot = gr_bot(b) as i64;
+        for j in nbase..0 {
+            let off = (bot + j).rem_euclid(96) as u64;
+            let a = rse_move(bsp, j - nbase);
+            rse_load(b, off, a)?;
+        }
+        set64(b, gr_bot_ref(), (bot + nbase).rem_euclid(96) as u64);
+    }
     let gb = get64(b, gr_base_ref());
-    set64(b, gr_base_ref(), (gb + 96 - sol % 96) % 96);
+    set64(b, gr_base_ref(), (gb + 96 - sol as u64 % 96) % 96);
+    set64(b, ar_ref(ar::BSP as u64).expect("bsp"), bsp);
     set64(b, cfm_ref(), pfm);
     set64(b, ar_ref(ar::EC as u64).expect("ec"), (pfs >> 58) & mask(6));
     b.ctrl = Ctrl::Jump(target);
+    Ok(())
 }
 
 /// PSR{5:0}（ユーザマスク）の面。
@@ -450,6 +473,10 @@ fn ar_write(b: &mut InterpBackend, i: u64, v: u64, i_form: bool) -> Result<(), I
             set64(b, r, v);
             if a == ar::BSPSTORE {
                 set64(b, ar_ref(ar::BSP as u64).expect("bsp"), v);
+                // 新しい書き出し位置の NaT 集積を穴から RNAT
+                // に読み戻す（正本の mov to ar.bspstore 規則）。
+                let r = mem_ld(b, rse_hole(v), 8)?;
+                set64(b, ar_ref(ar::RNAT as u64).expect("rnat"), r);
             }
             Ok(())
         }
@@ -1021,6 +1048,150 @@ fn unat_ref() -> StateRef<W64> {
 
 fn ccv_ref() -> StateRef<W64> {
     StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, ccv))
+}
+
+// ==================== IA8: レジスタスタック・RSE ====================
+//
+// モデル: スタック域の駐在レジスタは 96 項リング（gr[32..128]）の
+// 連続区間で、下端は `CpuState::gr_bot`、現フレーム基底は
+// `gr_base`、末尾は基底+sof。駐在指数 idx = (リング位置-gr_bot)
+// mod 96。idx j のバッキングストアアドレスは「idx 0 のアドレス
+// （bot_addr = bsp から base_idx 個下）」から j 個上。
+// バッキングストアは 63 レジスタごとに 1 つの NaT 集積スロット
+// （{8:3}=63 の 8 バイト）を持つ。ar.bspstore は逐次ストアの
+// 書き出し位置で、それより下のアドレスは（古くとも）1 度は
+// メモリに書かれている。書き出された reg の NaT は ar.rnat に
+// 集積し、{8:3}=62 の書き出しで穴へ rnat を吐き出す。
+// Ref: SPEC-IA64-SDM (Rev 2.3) Vol2 6 章・Vol3 RSE 節。
+//      SRC-LINUX-66 uapi-asm/rse.h（スロット位置・穴の規則）。
+
+/// RSC.loadrs{29:16}（バイト数フィールドの位置）。
+const RSC_LOADRS: u32 = 16;
+
+/// バッキングストアを n レジスタ分動かす（符号つき）。
+/// NaT 集積スロット（{8:3}=63）はレジスタを持たず飛ばす。
+/// SRC-LINUX-66 uapi-asm/rse.h の ia64_rse_skip_regs と同じ規則。
+fn rse_move(a: u64, n: i64) -> u64 {
+    let pos = ((a >> 3) & 63) as i64;
+    let mut delta = pos + n;
+    if n < 0 {
+        delta -= 0x3e;
+    }
+    a.wrapping_add(((n + delta / 63) as u64).wrapping_mul(8))
+}
+
+/// a の属する 512B グループの NaT 集積スロット。
+fn rse_hole(a: u64) -> u64 {
+    a | 0x1f8
+}
+
+/// 駐在域下端のリング位置（gr_bot）の面。
+fn gr_bot_ref() -> StateRef<W64> {
+    StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, gr_bot))
+}
+
+fn gr_bot(b: &InterpBackend) -> u64 {
+    get64(b, gr_bot_ref())
+}
+
+/// 現フレーム基底の駐在指数（駐在域内での基底の相対位置）。
+fn base_idx(b: &InterpBackend) -> u64 {
+    (get64(b, gr_base_ref()) + 96 - gr_bot(b)) % 96
+}
+
+/// 駐在域下端（idx 0）のバッキングストアアドレス。
+fn bot_addr(b: &InterpBackend) -> u64 {
+    let bsp = get64(b, ar_ref(ar::BSP as u64).expect("bsp"));
+    rse_move(bsp, -(base_idx(b) as i64))
+}
+
+/// 物理 GR 番号 i の NaT ビット（仮想改名を通さない）。
+fn nat_phys(b: &InterpBackend, i: u32) -> bool {
+    let (off, m) = nat_off(i);
+    let v = u64::from_le_bytes(b.state[off..off + 8].try_into().expect("w64"));
+    v & m != 0
+}
+
+fn nat_phys_set(b: &mut InterpBackend, i: u32, nat: bool) {
+    let (off, m) = nat_off(i);
+    let mut v = u64::from_le_bytes(b.state[off..off + 8].try_into().expect("w64"));
+    if nat {
+        v |= m;
+    } else {
+        v &= !m;
+    }
+    b.state[off..off + 8].copy_from_slice(&v.to_le_bytes());
+}
+
+/// 駐在レジスタ 1 個をバッキングストアへ書き出す（RSE ストア）。
+/// `off` はリング位置（gr[32+off]）、`a` はバッキングアドレス
+/// （{8:3}!=63）。a >= ar.bspstore なら逐次ストアとして
+/// bspstore を進め NaT を ar.rnat に集積する（{8:3}=62 の次は
+/// 穴なので rnat を書き出して 0 に戻す）。a < bspstore なら
+/// 再ストア: 値を書き直し、NaT は同じグループなら未書き出しの
+/// rnat を、過去グループならメモリの穴を直接更新する。
+fn rse_store(b: &mut InterpBackend, off: u64, a: u64) -> Result<(), InterpExit> {
+    let phys = 32 + off as u32;
+    let nat = u64::from(nat_phys(b, phys));
+    mem_st(b, a, 8, get64(b, gr_ref(phys)))?;
+    let pos = (a >> 3) & 63;
+    let bsr = ar_ref(ar::BSPSTORE as u64).expect("bspstore");
+    let rnr = ar_ref(ar::RNAT as u64).expect("rnat");
+    let bs = get64(b, bsr);
+    if a >= bs {
+        let r = (get64(b, rnr) & !(1 << pos)) | (nat << pos);
+        if pos == 62 {
+            mem_st(b, a + 8, 8, r)?;
+            set64(b, rnr, 0);
+            set64(b, bsr, a + 16);
+        } else {
+            set64(b, rnr, r);
+            set64(b, bsr, a + 8);
+        }
+    } else if a >> 9 == bs >> 9 {
+        set64(b, rnr, (get64(b, rnr) & !(1 << pos)) | (nat << pos));
+    } else {
+        let hole = rse_hole(a);
+        let w = mem_ld(b, hole, 8)?;
+        mem_st(b, hole, 8, (w & !(1 << pos)) | (nat << pos))?;
+    }
+    Ok(())
+}
+
+/// バッキングストアから駐在レジスタ 1 個を読み戻す
+/// （RSE フィル）。NaT の出どころはストア時と同じ規則
+/// （同じグループは未書き出しの ar.rnat、過去グループは
+/// メモリの穴）。
+fn rse_load(b: &mut InterpBackend, off: u64, a: u64) -> Result<(), InterpExit> {
+    let phys = 32 + off as u32;
+    let v = mem_ld(b, a, 8)?;
+    let pos = (a >> 3) & 63;
+    let bs = get64(b, ar_ref(ar::BSPSTORE as u64).expect("bspstore"));
+    let nat = if a < bs && a >> 9 == bs >> 9 {
+        get64(b, ar_ref(ar::RNAT as u64).expect("rnat")) >> pos & 1
+    } else if a < bs {
+        mem_ld(b, rse_hole(a), 8)? >> pos & 1
+    } else {
+        0
+    } != 0;
+    set64(b, gr_ref(phys), v);
+    nat_phys_set(b, phys, nat);
+    Ok(())
+}
+
+/// 駐在域の下端から n 個をバッキングストアへ追い出し、gr_bot
+/// を進める（追い出した reg の正本はメモリ側になる）。
+fn rse_evict(b: &mut InterpBackend, mut n: u64) -> Result<(), InterpExit> {
+    let mut a = bot_addr(b);
+    let mut bot = gr_bot(b);
+    while n > 0 {
+        rse_store(b, bot, a)?;
+        a = rse_move(a, 1);
+        bot = (bot + 1) % 96;
+        n -= 1;
+    }
+    set64(b, gr_bot_ref(), bot);
+    Ok(())
 }
 
 /// fetchadd の inc3 場。値は符号 {bit2} と強度 {bit1:0} →
@@ -1977,7 +2148,7 @@ pub fn exec(b: &mut InterpBackend, insn: Insn, word: u128, ip: u64) -> Result<bo
         }
         Insn::BrRet => {
             let t = get64(b, br_ref(ops[1] as u32)) & !0xf;
-            br_ret_common(b, t);
+            br_ret_common(b, t)?;
         }
         // 分岐予測ヒント。建築状態に影響しない（nop 同値。
         // SPEC-IA64-SDM Vol3 brp）。
@@ -1990,8 +2161,8 @@ pub fn exec(b: &mut InterpBackend, insn: Insn, word: u128, ip: u64) -> Result<bo
             let t = (ip & !0xf).wrapping_add(ops[2]);
             br_call_common(b, ops[1] as u32, t, ip);
         }
-        // ---- フレーム操作（IA7 の CFM 最小モデル。RSE 書き出し
-        // やバッキングストア連携は IA8）。
+        // ---- フレーム操作（CFM の更新＋リングが溢れる分の
+        // バッキングストア書き出しは IA8 の RSE 節を参照）。
         Insn::Alloc => {
             // ops = [r1, sof, sol, sor]（qp は符号化で 0 固定）。
             let (r1, sof, sol, sor) = (ops[0] as u32, ops[1], ops[2], ops[3]);
@@ -2007,6 +2178,14 @@ pub fn exec(b: &mut InterpBackend, insn: Insn, word: u128, ip: u64) -> Result<bo
                 // TRAP_ILL に畳む）。
                 return Err(trap(TRAP_ILL));
             }
+            // フレーム拡大で 96 項リングが溢れる分だけ最古の駐在
+            // reg をバッキングストアへ追い出す（RSE の強制ストア。
+            // 現フレーム自身は追い出し対象にならない: 追い出し数
+            // は常に base_idx 以下に収まる）。
+            let top = base_idx(b) + sof;
+            if top > 96 {
+                rse_evict(b, top - 96)?;
+            }
             // 新フレームで r1 = 旧 ar.pfs を書く（CFM 更新が先。
             // gr_base は不変。入力域は同じ物理に留まる）。
             let mut n = cf_put(cfm, cfm_bit::SOF, 7, sof);
@@ -2017,13 +2196,48 @@ pub fn exec(b: &mut InterpBackend, insn: Insn, word: u128, ip: u64) -> Result<bo
             wr_gr(b, r1, pfs, false);
         }
         Insn::Cover => {
-            // 旧フレーム全体を保存域にする（新フレームはサイズ 0、
-            // base を旧 sof 分だけ進める。SPEC-IA64-SDM Vol3 cover）。
+            // 旧フレーム全体を dirty 域にする（新フレームは
+            // サイズ 0、base と ar.bsp を旧 sof 分だけ進める。
+            // SPEC-IA64-SDM Vol3 cover）。
             let cfm = get64(b, cfm_ref());
             let sof = cf(cfm, cfm_bit::SOF, 7);
             let gb = get64(b, gr_base_ref());
             set64(b, gr_base_ref(), (gb + sof) % 96);
+            let bsp = get64(b, ar_ref(ar::BSP as u64).expect("bsp"));
+            set64(
+                b,
+                ar_ref(ar::BSP as u64).expect("bsp"),
+                rse_move(bsp, sof as i64),
+            );
             set64(b, cfm_ref(), 0);
+        }
+        // ---- RSE 制御（IA8）。
+        Insn::Flushrs => {
+            // 現フレームを除く全駐在 reg をバッキングストアへ
+            // 書き出す。dirty 域は [bspstore, bsp) なので、完了後は
+            // bspstore = bsp（dirty 域が空）。
+            rse_evict(b, base_idx(b))?;
+            let bsp = get64(b, ar_ref(ar::BSP as u64).expect("bsp"));
+            set64(b, ar_ref(ar::BSPSTORE as u64).expect("bspstore"), bsp);
+        }
+        Insn::Loadrs => {
+            // RSC.loadrs{29:16} バイト分を bsp より下から読み戻す。
+            // 駐在 reg（現フレームと下側の未退避分）は対象外で、
+            // 退避済み（非駐在）の分だけリング下端を広げて戻す。
+            // loadrs==0 や駐在域が 96 個に達していれば何もしない。
+            let bytes = (get64(b, ar_ref(ar::RSC as u64).expect("rsc")) >> RSC_LOADRS) & 0x3fff;
+            let below = base_idx(b);
+            let bsp = get64(b, ar_ref(ar::BSP as u64).expect("bsp"));
+            let mut live = below + cf(get64(b, cfm_ref()), cfm_bit::SOF, 7);
+            let mut k = below;
+            while k < bytes / 8 && live < 96 {
+                k += 1;
+                let a = rse_move(bsp, -(k as i64));
+                let bot = (gr_bot(b) + 95) % 96;
+                rse_load(b, bot, a)?;
+                set64(b, gr_bot_ref(), bot);
+                live += 1;
+            }
         }
         Insn::Clrrrb | Insn::ClrrrbPr => {
             let mut n = get64(b, cfm_ref());

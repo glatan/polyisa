@@ -52,7 +52,7 @@ fn state_layout_pinned() {
     assert_eq!(core::mem::offset_of!(CpuState, itc), pfs + 80);
     let cfm = pfs + 88;
     assert_eq!(core::mem::offset_of!(CpuState, cfm), cfm);
-    assert_eq!(core::mem::offset_of!(CpuState, rse_dirty), cfm + 8);
+    assert_eq!(core::mem::offset_of!(CpuState, gr_bot), cfm + 8);
     assert_eq!(core::mem::offset_of!(CpuState, alat), cfm + 16);
     assert_eq!(
         core::mem::offset_of!(CpuState, alat_valid),
@@ -1679,7 +1679,12 @@ fn ar_transfers() {
         ),
         sem::TRAP_ILL
     );
-    // bspstore 書き込みは bsp も更新される（rsc.mode=0 のとき）。
+    // bspstore 書き込みは bsp も更新され、新しい位置の NaT 集積
+    // をバッキングストアの穴（addr|0x1f8）から rnat に読む
+    // （rsc.mode=0 のとき）。
+    env.map_rw(MEM, 1).unwrap();
+    wmem(&mut env, MEM | 0x1f8, 0x5aa5, 8);
+    sem::gr_set(&mut env.backend, 10, MEM);
     x(
         &mut env,
         Insn::MovMToAr,
@@ -1690,14 +1695,21 @@ fn ar_transfers() {
             .get(StateRef::<W64>::from_offset(core::mem::offset_of!(
                 CpuState, bspstore
             ))),
-        1234
+        MEM
     );
     assert_eq!(
         env.backend
             .get(StateRef::<W64>::from_offset(core::mem::offset_of!(
                 CpuState, bsp
             ))),
-        1234
+        MEM
+    );
+    assert_eq!(
+        env.backend
+            .get(StateRef::<W64>::from_offset(core::mem::offset_of!(
+                CpuState, rnat
+            ))),
+        0x5aa5
     );
 }
 
@@ -2345,7 +2357,7 @@ use polyisa_guest_ia64::{
     cfm_bit, encode_alloc, encode_br_call, encode_br_call_ind, encode_br_cexit, encode_br_cloop,
     encode_br_cond_ind, encode_br_ctop, encode_br_ia, encode_br_ret, encode_br_wexit,
     encode_br_wtop, encode_brl_call, encode_brp, encode_brp_ind, encode_brp_ret, encode_clrrrb,
-    encode_clrrrb_pr, encode_cover,
+    encode_clrrrb_pr, encode_cover, encode_flushrs, encode_loadrs,
 };
 
 const LC_OFF: usize = core::mem::offset_of!(CpuState, lc);
@@ -2940,4 +2952,261 @@ fn ia7_cover_and_clrrrb() {
     assert_eq!(cff(&mut env, cfm_bit::RRB_FR, 7), 0);
     assert_eq!(cff(&mut env, cfm_bit::RRB_PR, 6), 0);
     assert_eq!(cff(&mut env, cfm_bit::SOF, 7), 16);
+}
+
+// ---- 段階21 IA8: 回転レジスタ・レジスタスタック・RSE ----
+// スタック域は 96 項リングの連続区間（下端 gr_bot、現フレーム
+// 基底 gr_base、末尾 基底+sof）として追跡し、溢れた分は実際に
+// ar.bspstore 指すバッキングストアへ書き出す。63 レジスタごとの
+// NaT 集積スロット（{8:3}=63）は飛ばし、書き出した reg の NaT
+// は ar.rnat に集積して穴へ吐き出す。
+// Ref: SPEC-IA64-SDM (Rev 2.3) Vol2 6 章・Vol3 RSE 節。
+
+const BSP: u64 = 0x4_0000; // 位置 0 のバッキングストア先頭。
+const BSP_OFF: usize = core::mem::offset_of!(CpuState, bsp);
+const BSPSTORE_OFF: usize = core::mem::offset_of!(CpuState, bspstore);
+const RNAT_OFF: usize = core::mem::offset_of!(CpuState, rnat);
+const RSC_OFF: usize = core::mem::offset_of!(CpuState, rsc);
+const GBOT_OFF: usize = core::mem::offset_of!(CpuState, gr_bot);
+
+/// バッキングストアを BSP に写像して bsp=bspstore=BSP とした環境。
+fn rse_env() -> BareEnv {
+    let mut env = env2();
+    env.map_rw(BSP, 4).unwrap();
+    set_arv(&mut env, BSP_OFF, BSP);
+    set_arv(&mut env, BSPSTORE_OFF, BSP);
+    env
+}
+
+#[test]
+fn ia8_call_cover_move_bsp() {
+    // br.call は ar.bsp を sol 個分、cover は旧 sof 個分進める。
+    // 位置 60 から開始して NaT 穴（{8:3}=63）を跨ぐことを確かめる。
+    let mut env = rse_env();
+    let a0 = BSP + 8 * 60;
+    set_arv(&mut env, BSP_OFF, a0);
+    set_arv(&mut env, BSPSTORE_OFF, a0);
+    // cfm: sof=12, sol=5。
+    env.backend.set(sem::cfm_ref(), 12 | (5 << 7));
+    x(
+        &mut env,
+        Insn::BrCall,
+        encode_br_call(&[0, 1, 0x40]).unwrap(),
+    );
+    // pos60+5 regs: 61,62, 穴, pos0,pos1,pos2 → a0+48。
+    assert_eq!(arv(&mut env, BSP_OFF), a0 + 8 * 6);
+    // cover は旧 sof（call 後の 7）分だけ進める: pos2+7=pos9 → +56。
+    x(&mut env, Insn::Cover, encode_cover(&[]).unwrap());
+    assert_eq!(arv(&mut env, BSP_OFF), a0 + 8 * 6 + 8 * 7);
+    assert_eq!(arv(&mut env, CFM_OFF), 0);
+    assert_eq!(arv(&mut env, GB_OFF), 12);
+}
+
+#[test]
+fn ia8_alloc_grow_forces_stores() {
+    // フレーム拡大で 96 項リングが溢れると最古の駐在 reg が
+    // バッキングストアへ書き出され、NaT は ar.rnat に集積される。
+    let mut env = rse_env();
+    x(
+        &mut env,
+        Insn::Alloc,
+        encode_alloc(&[3, 90, 80, 0]).unwrap(),
+    );
+    for i in 0..80u32 {
+        sem::gr_set(&mut env.backend, 32 + i, 0xa000 + u64::from(i));
+    }
+    sem::nat_set(&mut env.backend, 40, true);
+    x(
+        &mut env,
+        Insn::BrCall,
+        encode_br_call(&[0, 1, 0x40]).unwrap(),
+    );
+    // pos0+80 regs → 穴を 1 つ跨ぐので bsp = BSP+8*81。
+    assert_eq!(arv(&mut env, BSP_OFF), BSP + 8 * 81);
+    // callee の out0（= caller の r112）が共有域として見える。
+    assert_eq!(sem::gr_get(&env.backend, 32), 0);
+    // alloc sof=50 → top=130 > 96 → caller r32..r65（idx 0..33）書き出し。
+    x(&mut env, Insn::Alloc, encode_alloc(&[3, 50, 0, 0]).unwrap());
+    assert_eq!(arv(&mut env, GBOT_OFF), 34);
+    assert_eq!(arv(&mut env, BSPSTORE_OFF), BSP + 8 * 34);
+    for i in 0..34u64 {
+        assert_eq!(rmem(&env, BSP + 8 * i, 8), 0xa000 + i);
+    }
+    // r40（idx 8, pos8）の NaT は rnat bit8 に集積。
+    assert_eq!(arv(&mut env, RNAT_OFF), 1 << 8);
+    // br.ret で caller フレーム（sol=80）へ戻る: base_idx=46-80=-34
+    // → 退避した 34 個がメモリから値と NaT ごと復帰する。
+    env.backend.set(sem::br_ref(0), 0x8000);
+    x(&mut env, Insn::BrRet, encode_br_ret(&[0, 0]).unwrap());
+    assert_eq!(cff(&mut env, cfm_bit::SOF, 7), 90);
+    assert_eq!(cff(&mut env, cfm_bit::SOL, 7), 80);
+    assert_eq!(arv(&mut env, BSP_OFF), BSP);
+    assert_eq!(arv(&mut env, GBOT_OFF), 0);
+    assert_eq!(sem::gr_get(&env.backend, 32), 0xa000);
+    assert_eq!(sem::gr_get(&env.backend, 71), 0xa027);
+    assert!(sem::nat_get(&env.backend, 40));
+    assert!(!sem::nat_get(&env.backend, 41));
+}
+
+#[test]
+fn ia8_nested_call_ret() {
+    // A→B→C の入れ子で下側フレームが退避・復帰する往復。
+    let mut env = rse_env();
+    // A: sof=40 sol=30 → locals r32..r61, outs r62..r71。
+    x(
+        &mut env,
+        Insn::Alloc,
+        encode_alloc(&[3, 40, 30, 0]).unwrap(),
+    );
+    for i in 0..30u32 {
+        sem::gr_set(&mut env.backend, 32 + i, 0x1000 + u64::from(i));
+    }
+    sem::gr_set(&mut env.backend, 62, 0xb001);
+    // A→B（sol=30）: B の in0 は A の out0 と同じ物理 reg。
+    x(
+        &mut env,
+        Insn::BrCall,
+        encode_br_call(&[0, 6, 0x40]).unwrap(),
+    );
+    assert_eq!(sem::gr_get(&env.backend, 32), 0xb001);
+    // B: sof=50 sol=40 → locals r32..r71, outs r72..r81。
+    x(
+        &mut env,
+        Insn::Alloc,
+        encode_alloc(&[33, 50, 40, 0]).unwrap(),
+    );
+    for i in 0..40u32 {
+        sem::gr_set(&mut env.backend, 32 + i, 0x2000 + u64::from(i));
+    }
+    sem::gr_set(&mut env.backend, 72, 0xc002);
+    // B→C（sol=40）: C の in0 は B の out0。
+    x(
+        &mut env,
+        Insn::BrCall,
+        encode_br_call(&[0, 6, 0x80]).unwrap(),
+    );
+    assert_eq!(sem::gr_get(&env.backend, 32), 0xc002);
+    // C: alloc sof=40 → top=110 → A の r32..r45（idx 0..13）が退避。
+    x(
+        &mut env,
+        Insn::Alloc,
+        encode_alloc(&[33, 40, 0, 0]).unwrap(),
+    );
+    assert_eq!(arv(&mut env, GBOT_OFF), 14);
+    for i in 0..14u64 {
+        assert_eq!(rmem(&env, BSP + 8 * i, 8), 0x1000 + i);
+    }
+    // C→B: pfm=B の cfm（sof=50 sol=40）→ nbase=56-40=16 → 復帰不要。
+    env.backend.set(sem::br_ref(0), 0x9000);
+    x(&mut env, Insn::BrRet, encode_br_ret(&[0, 0]).unwrap());
+    assert_eq!(cff(&mut env, cfm_bit::SOF, 7), 50);
+    assert_eq!(cff(&mut env, cfm_bit::SOL, 7), 40);
+    assert_eq!(sem::gr_get(&env.backend, 32), 0x2000);
+    assert_eq!(sem::gr_get(&env.backend, 71), 0x2027);
+    // B→A: B が ar.pfs を r3 に退避していた想定で復元してから ret。
+    // A の sol=30 → nbase=16-30=-14 → 退避した 14 個を読み戻す。
+    set_arv(&mut env, PFS_OFF, 40 | (30 << 7));
+    env.backend.set(sem::br_ref(0), 0xa000);
+    x(&mut env, Insn::BrRet, encode_br_ret(&[0, 0]).unwrap());
+    assert_eq!(cff(&mut env, cfm_bit::SOF, 7), 40);
+    assert_eq!(cff(&mut env, cfm_bit::SOL, 7), 30);
+    assert_eq!(arv(&mut env, GBOT_OFF), 0);
+    for i in 0..30u32 {
+        assert_eq!(sem::gr_get(&env.backend, 32 + i), 0x1000 + u64::from(i));
+    }
+    // A の out0 スロットは B の in0 と共有なので B が書いた値。
+    assert_eq!(sem::gr_get(&env.backend, 62), 0x2000);
+}
+
+#[test]
+fn ia8_flushrs_loadrs() {
+    // flushrs で現フレームを除く駐在 reg が全書き出しされ、
+    // loadrs で RSC.loadrs バイト分が読み戻される。
+    let mut env = rse_env();
+    // A: sof=50 sol=40 → locals r32..r71。
+    x(
+        &mut env,
+        Insn::Alloc,
+        encode_alloc(&[3, 50, 40, 0]).unwrap(),
+    );
+    for i in 0..40u32 {
+        sem::gr_set(&mut env.backend, 32 + i, 0x4000 + u64::from(i));
+    }
+    sem::nat_set(&mut env.backend, 35, true);
+    x(
+        &mut env,
+        Insn::BrCall,
+        encode_br_call(&[0, 6, 0x40]).unwrap(),
+    );
+    // flushrs → 下側 40 個を書き出し、bspstore=bsp で dirty 域は空。
+    x(&mut env, Insn::Flushrs, encode_flushrs(&[]).unwrap());
+    assert_eq!(arv(&mut env, GBOT_OFF), 40);
+    assert_eq!(arv(&mut env, BSPSTORE_OFF), arv(&mut env, BSP_OFF));
+    for i in 0..40u64 {
+        assert_eq!(rmem(&env, BSP + 8 * i, 8), 0x4000 + i);
+    }
+    // r35（idx 3）の NaT → rnat bit3。
+    assert_eq!(arv(&mut env, RNAT_OFF), 1 << 3);
+    // loadrs: RSC.loadrs{29:16} にバイト数。40 個=320B 全部戻す。
+    set_arv(&mut env, RSC_OFF, (40 * 8) << 16);
+    x(&mut env, Insn::Loadrs, encode_loadrs(&[]).unwrap());
+    assert_eq!(arv(&mut env, GBOT_OFF), 0);
+    // bspstore は変わらない（書き出し位置はそのまま）。
+    assert_eq!(arv(&mut env, BSPSTORE_OFF), arv(&mut env, BSP_OFF));
+    // ret で A フレームへ: nbase=40-40=0 → 全て駐在で値が揃う。
+    env.backend.set(sem::br_ref(0), 0x8000);
+    x(&mut env, Insn::BrRet, encode_br_ret(&[0, 0]).unwrap());
+    assert_eq!(cff(&mut env, cfm_bit::SOF, 7), 50);
+    assert_eq!(sem::gr_get(&env.backend, 32), 0x4000);
+    assert_eq!(sem::gr_get(&env.backend, 71), 0x4027);
+    assert!(sem::nat_get(&env.backend, 35));
+}
+
+#[test]
+fn ia8_nat_collection_hole() {
+    // 位置 62 の書き出しで ar.rnat が穴（{8:3}=63 の 8B）へ出る。
+    // 次グループの reg は穴の直後に置かれる。
+    let mut env = env2();
+    let a0 = BSP + 8 * 60; // pos 60
+    env.map_rw(BSP, 4).unwrap();
+    set_arv(&mut env, BSP_OFF, a0);
+    set_arv(&mut env, BSPSTORE_OFF, a0);
+    // caller sof=60 sol=60 → locals r32..r91 が pos 60,61,62,0.. へ。
+    x(
+        &mut env,
+        Insn::Alloc,
+        encode_alloc(&[3, 60, 60, 0]).unwrap(),
+    );
+    for i in 0..60u32 {
+        sem::gr_set(&mut env.backend, 32 + i, 0x5000 + u64::from(i));
+    }
+    sem::nat_set(&mut env.backend, 33, true); // pos 61
+    sem::nat_set(&mut env.backend, 34, true); // pos 62
+    sem::nat_set(&mut env.backend, 35, true); // 次グループ pos 0
+    x(
+        &mut env,
+        Insn::BrCall,
+        encode_br_call(&[0, 1, 0x40]).unwrap(),
+    );
+    // callee alloc sof=60 → top=120 → 24 個（r32..r55）書き出し。
+    x(&mut env, Insn::Alloc, encode_alloc(&[3, 60, 0, 0]).unwrap());
+    assert_eq!(rmem(&env, a0, 8), 0x5000);
+    assert_eq!(rmem(&env, a0 + 8, 8), 0x5001);
+    assert_eq!(rmem(&env, a0 + 16, 8), 0x5002);
+    // 穴（a0+24）には pos 60..62 まで集積した rnat が出る。
+    assert_eq!(rmem(&env, a0 + 24, 8), (1 << 61) | (1 << 62));
+    // r35 は次グループ pos0 → a0+32。その NaT は新 rnat の bit0。
+    assert_eq!(rmem(&env, a0 + 32, 8), 0x5003);
+    assert_eq!(arv(&mut env, RNAT_OFF), 1);
+    // 退避分を全部読み戻せることを ret で確かめる: nbase=36-60=-24。
+    env.backend.set(sem::br_ref(0), 0x8000);
+    x(&mut env, Insn::BrRet, encode_br_ret(&[0, 0]).unwrap());
+    assert_eq!(cff(&mut env, cfm_bit::SOF, 7), 60);
+    // 穴越えの NaT はメモリの穴から、同グループの NaT は rnat から。
+    assert!(sem::nat_get(&env.backend, 33));
+    assert!(sem::nat_get(&env.backend, 34));
+    assert!(sem::nat_get(&env.backend, 35));
+    assert!(!sem::nat_get(&env.backend, 36));
+    assert_eq!(sem::gr_get(&env.backend, 35), 0x5003);
+    assert_eq!(sem::gr_get(&env.backend, 55), 0x5017);
 }
