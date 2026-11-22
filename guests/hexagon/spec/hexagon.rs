@@ -137,6 +137,20 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("d5", 4, 0),    // 5 ビットデスティネーションレジスタ
         ("c5", 20, 16),  // 制御レジスタ番号（Rd=Cs / Cd=Rs）
         ("pd2", 1, 0),   // 述語デスティネーション（2 ビット）
+        // ---- HX5: 整数語彙の追加桁 ----
+        ("ps2", 17, 16), // 述語ソース Ps（P 演算、bits[17:16]）
+        ("pt2", 9, 8),   // 述語ソース Pt（P 演算、bits[9:8]）
+        ("pu2b", 7, 6),  // 述語ソース Pu（3 入力 P 演算）
+        ("pu2", 6, 5),   // 述語選択/キャリー Px（mux・carry・valignb 等）
+        ("pu2i", 22, 21), // mux 即値系の Pu
+        ("pu2j", 24, 23), // mux(#s8,#S8) の Pu
+        ("psx", 17, 16), // Rd = Ps の Ps
+        ("rx5", 4, 0),   // 累積/破壊的更新の Rx・insert/tableidx/add3 の宛先やソース
+        ("iu6", 13, 8),  // u6/s6 即値（64 ビットシフト・bitsclr・tableidx・add(clb,#s6)）
+        ("xu3", 7, 5),   // u3 即値（addasl・valignb・vspliceb）
+        ("ai8", 12, 5),  // 8 ビット即値（combine・mux・cmpb/cmph・累積・cmp.eq→Rd）
+        ("iu9", 13, 5),  // 9 ビット即値（cmp.gtu #u9）
+        ("pc6", 12, 7),  // add(pc,#u6) の u6
     ] {
         m.fields.push(Field {
             name: name.to_string(),
@@ -164,6 +178,26 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("ls11", vec![(26, 25), (13, 5)], 2),
         ("ss11", vec![(26, 25), (13, 13), (7, 0)], 2),
         ("r22", vec![(24, 16), (13, 1)], 2),
+        // ---- HX5: 分割即値 ----
+        // ai10: ICLASS7 系の s10/u9（bits{21}+{13:5}）。
+        ("ai10", vec![(21, 21), (13, 5)], 0),
+        // cs8: combine(#s8,#S8) の第 2 即値（bits{22:16}+{13}）。
+        ("cs8", vec![(22, 16), (13, 13)], 0),
+        // cu6: combine(#s8,#U6) の第 2 即値（bits{21:16}+{13}）。
+        ("cu6", vec![(21, 16), (13, 13)], 0),
+        // xtu4: tableidx の u4（bits{21}+{7:5}）。
+        ("xtu4", vec![(21, 21), (7, 5)], 0),
+        // xw5/xw6: extract/insert の幅（32 ビットは
+        // bits{22:21}+{7:5}、64 ビットは bits{23:21}+{7:5}）。
+        ("xw5", vec![(22, 21), (7, 5)], 0),
+        ("xw6", vec![(23, 21), (7, 5)], 0),
+        // xa6: add(Rs,add(Ru,#s6)) 系の s6（bits{22:21}+{13}+{7:5}）。
+        ("xa6", vec![(22, 21), (13, 13), (7, 5)], 0),
+        // xu8: add/sub/and/or(#u8,{asl,lsr}(Rx,#U5)) の u8
+        // （bits{23:21}+{13}+{7:5}+{3}）。
+        ("xu8", vec![(23, 21), (13, 13), (7, 5), (3, 3)], 0),
+        // lsl6: lsl(#s6,Rt) の s6（bits{20:16}+{5}）。
+        ("lsl6", vec![(20, 16), (5, 5)], 0),
     ] {
         m.fields.push(Field {
             name: name.to_string(),
@@ -330,6 +364,372 @@ pub fn build_model() -> polyisa_isadl::Model {
             preg("d", "pd2", Access::Write),
             gpr("s", "s5", Access::Read),
             gpr("t", "t5", Access::Read),
+        ],
+    ));
+
+    // ---- HX5 形式 ----
+    // mux/valignb/vspliceb/vmux/carry の述語選択付き 3 項形。
+    m.formats.push(fmt(
+        "FMUX",
+        &["s5", "t5", "d5", "pu2"],
+        vec![
+            gpr("d", "d5", Access::Write),
+            preg("p", "pu2", Access::Read),
+            gpr("s", "s5", Access::Read),
+            gpr("t", "t5", Access::Read),
+        ],
+    ));
+    // mux(Pu,Rs,#s8) / mux(Pu,#s8,Rs)。
+    m.formats.push(fmt(
+        "FMUXI",
+        &["s5", "d5", "ai8", "pu2i"],
+        vec![
+            gpr("d", "d5", Access::Write),
+            preg("p", "pu2i", Access::Read),
+            gpr("s", "s5", Access::Read),
+            val("imm", "ai8"),
+        ],
+    ));
+    // mux(Pu,#s8,#S8)（第 2 即値は bits{22:16}+{13} の cs8）。
+    m.formats.push(fmt(
+        "FMUXII",
+        &["d5", "ai8", "cs8", "pu2j"],
+        vec![
+            gpr("d", "d5", Access::Write),
+            preg("p", "pu2j", Access::Read),
+            val("imm1", "ai8"),
+            val("imm2", "cs8"),
+        ],
+    ));
+    // Rd = op(Rs,#i8) 系（combine・Rd=cmp.eq・mux の共用骨格）。
+    m.formats.push(fmt(
+        "FRI8",
+        &["s5", "d5", "ai8"],
+        vec![
+            gpr("d", "d5", Access::Write),
+            gpr("s", "s5", Access::Read),
+            val("imm", "ai8"),
+        ],
+    ));
+    // Rdd = combine(#s8,#S8)。
+    m.formats.push(fmt(
+        "FCII",
+        &["d5", "ai8", "cs8"],
+        vec![
+            gpr("d", "d5", Access::Write),
+            val("imm1", "ai8"),
+            val("imm2", "cs8"),
+        ],
+    ));
+    // Rdd = combine(#s8,#U6)。
+    m.formats.push(fmt(
+        "FCU6",
+        &["d5", "ai8", "cu6"],
+        vec![
+            gpr("d", "d5", Access::Write),
+            val("imm1", "ai8"),
+            val("imm2", "cu6"),
+        ],
+    ));
+    // Rd = and/or/sub(#s10 or Rs,#s10)（ICLASS7 の s10 系）。
+    m.formats.push(fmt(
+        "FRI10",
+        &["s5", "d5", "ai10"],
+        vec![
+            gpr("d", "d5", Access::Write),
+            gpr("s", "s5", Access::Read),
+            val("imm", "ai10"),
+        ],
+    ));
+    // Pd = cmp.*(Rs,#imm)（s10 系と u9 系）。
+    m.formats.push(fmt(
+        "FCMPI",
+        &["s5", "pd2", "ai10"],
+        vec![
+            preg("d", "pd2", Access::Write),
+            gpr("s", "s5", Access::Read),
+            val("imm", "ai10"),
+        ],
+    ));
+    m.formats.push(fmt(
+        "FCMPIU",
+        &["s5", "pd2", "iu9"],
+        vec![
+            preg("d", "pd2", Access::Write),
+            gpr("s", "s5", Access::Read),
+            val("imm", "iu9"),
+        ],
+    ));
+    // Pd = cmpb/cmph.*(Rs,#u8 or #s8)。
+    m.formats.push(fmt(
+        "FCMPBI",
+        &["s5", "pd2", "ai8"],
+        vec![
+            preg("d", "pd2", Access::Write),
+            gpr("s", "s5", Access::Read),
+            val("imm", "ai8"),
+        ],
+    ));
+    // Rx op= op(Rs,Rt) / Rx=insert(Rs,Rtt) 等の破壊的 3 項形
+    // （Rx は bits[4:0]）。
+    m.formats.push(fmt(
+        "FXRR",
+        &["s5", "t5", "rx5"],
+        vec![
+            gpr("x", "rx5", Access::ReadWrite),
+            gpr("s", "s5", Access::Read),
+            gpr("t", "t5", Access::Read),
+        ],
+    ));
+    // Rx op= op(Rs,#i8)。
+    m.formats.push(fmt(
+        "FXI8",
+        &["s5", "rx5", "ai8"],
+        vec![
+            gpr("x", "rx5", Access::ReadWrite),
+            gpr("s", "s5", Access::Read),
+            val("imm", "ai8"),
+        ],
+    ));
+    // Rx op= op(Rs,#s10)。
+    m.formats.push(fmt(
+        "FXI10",
+        &["s5", "rx5", "ai10"],
+        vec![
+            gpr("x", "rx5", Access::ReadWrite),
+            gpr("s", "s5", Access::Read),
+            val("imm", "ai10"),
+        ],
+    ));
+    // Rx op= shift(Rs,#u5)。
+    m.formats.push(fmt(
+        "FXSH",
+        &["s5", "t5", "rx5"],
+        vec![
+            gpr("x", "rx5", Access::ReadWrite),
+            gpr("s", "s5", Access::Read),
+            val("imm", "t5"),
+        ],
+    ));
+    // Rxx op= shift(Rss,#u6)。
+    m.formats.push(fmt(
+        "FXSH6",
+        &["s5", "rx5", "iu6"],
+        vec![
+            gpr("x", "rx5", Access::ReadWrite),
+            gpr("s", "s5", Access::Read),
+            val("imm", "iu6"),
+        ],
+    ));
+    // Rd = addasl(Rt,Rs,#u3) 系（シフト付き加算）と
+    // valignb/vspliceb の #u3 形。
+    m.formats.push(fmt(
+        "FASL3",
+        &["s5", "t5", "d5", "xu3"],
+        vec![
+            gpr("d", "d5", Access::Write),
+            gpr("s", "s5", Access::Read),
+            gpr("t", "t5", Access::Read),
+            val("imm", "xu3"),
+        ],
+    ));
+    // 単項形の即値添え（add(clb(Rs),#s6)）。
+    m.formats.push(fmt(
+        "FCLADD",
+        &["s5", "d5", "iu6"],
+        vec![
+            gpr("d", "d5", Access::Write),
+            gpr("s", "s5", Access::Read),
+            val("imm", "iu6"),
+        ],
+    ));
+    // extract/insert の幅・オフセット即値形。
+    m.formats.push(fmt(
+        "FXTR",
+        &["s5", "d5", "t5", "xw5"],
+        vec![
+            gpr("d", "d5", Access::Write),
+            gpr("s", "s5", Access::Read),
+            val("width", "t5"),
+            val("off", "xw5"),
+        ],
+    ));
+    m.formats.push(fmt(
+        "FXTR64",
+        &["s5", "d5", "iu6", "xw6"],
+        vec![
+            gpr("d", "d5", Access::Write),
+            gpr("s", "s5", Access::Read),
+            val("width", "iu6"),
+            val("off", "xw6"),
+        ],
+    ));
+    m.formats.push(fmt(
+        "FINS",
+        &["s5", "rx5", "t5", "xw5"],
+        vec![
+            gpr("x", "rx5", Access::ReadWrite),
+            gpr("s", "s5", Access::Read),
+            val("width", "t5"),
+            val("off", "xw5"),
+        ],
+    ));
+    m.formats.push(fmt(
+        "FINS64",
+        &["s5", "rx5", "iu6", "xw6"],
+        vec![
+            gpr("x", "rx5", Access::ReadWrite),
+            gpr("s", "s5", Access::Read),
+            val("width", "iu6"),
+            val("off", "xw6"),
+        ],
+    ));
+    // Rx = tableidx(Rs,#u4,#S6)。
+    m.formats.push(fmt(
+        "FTIDX",
+        &["s5", "rx5", "xtu4", "iu6"],
+        vec![
+            gpr("x", "rx5", Access::ReadWrite),
+            gpr("s", "s5", Access::Read),
+            val("imm", "xtu4"),
+            val("off", "iu6"),
+        ],
+    ));
+    // Rd = add/sub(Rs,add/sub(Ru,#s6))（Rd が bits[12:8]、
+    // Ru が bits[4:0]、s6 は分割即値）。
+    m.formats.push(fmt(
+        "FADD3",
+        &["s5", "t5", "rx5", "xa6"],
+        vec![
+            gpr("d", "t5", Access::Write),
+            gpr("s", "s5", Access::Read),
+            gpr("u", "rx5", Access::Read),
+            val("imm", "xa6"),
+        ],
+    ));
+    // Rx = or(Ru,and(Rx,#s10))。
+    m.formats.push(fmt(
+        "FOAC",
+        &["x5", "rx5", "ai10"],
+        vec![
+            gpr("x", "x5", Access::ReadWrite),
+            gpr("u", "rx5", Access::Read),
+            val("imm", "ai10"),
+        ],
+    ));
+    // Rx = add/sub/and/or(#u8,{asl,lsr}(Rx,#U5))。
+    m.formats.push(fmt(
+        "FSHIMM",
+        &["x5", "t5", "xu8"],
+        vec![
+            gpr("x", "x5", Access::ReadWrite),
+            val("ushift", "t5"),
+            val("imm", "xu8"),
+        ],
+    ));
+    // Rd = lsl(#s6,Rt)。
+    m.formats.push(fmt(
+        "FLSL",
+        &["d5", "t5", "lsl6"],
+        vec![
+            gpr("d", "d5", Access::Write),
+            val("imm", "lsl6"),
+            gpr("t", "t5", Access::Read),
+        ],
+    ));
+    // Rd = add(pc,#u6)。
+    m.formats.push(fmt(
+        "FPC6",
+        &["d5", "pc6"],
+        vec![gpr("d", "d5", Access::Write), val("imm", "pc6")],
+    ));
+
+    // Rd = shift(Rs,#u5) / Rd=setbit(Rs,#u5) 等の u5 即値形。
+    m.formats.push(fmt(
+        "FSHI",
+        &["s5", "d5", "t5"],
+        vec![
+            gpr("d", "d5", Access::Write),
+            gpr("s", "s5", Access::Read),
+            val("imm", "t5"),
+        ],
+    ));
+    // Rdd = shift(Rss,#u6) / Pd=bitsclr(Rs,#u6) の u6 即値形。
+    m.formats.push(fmt(
+        "FSHI6",
+        &["s5", "d5", "iu6"],
+        vec![
+            gpr("d", "d5", Access::Write),
+            gpr("s", "s5", Access::Read),
+            val("imm", "iu6"),
+        ],
+    ));
+    // Pd = tstbit(Rs,#u5) 系（述語デスティネーション + u5）。
+    m.formats.push(fmt(
+        "FPTST",
+        &["s5", "pd2", "t5"],
+        vec![
+            preg("d", "pd2", Access::Write),
+            gpr("s", "s5", Access::Read),
+            val("imm", "t5"),
+        ],
+    ));
+    // Pd = bitsclr(Rs,#u6) 系。
+    m.formats.push(fmt(
+        "FPCLR",
+        &["s5", "pd2", "iu6"],
+        vec![
+            preg("d", "pd2", Access::Write),
+            gpr("s", "s5", Access::Read),
+            val("imm", "iu6"),
+        ],
+    ));
+    // Pd = and/or/xor(Ps,Pt) の 2 入力述語形。
+    m.formats.push(fmt(
+        "FP3",
+        &["ps2", "pt2", "pd2"],
+        vec![
+            preg("d", "pd2", Access::Write),
+            preg("s", "ps2", Access::Read),
+            preg("t", "pt2", Access::Read),
+        ],
+    ));
+    // Pd = and/or(Ps,and/or(Pt,Pu)) の 3 入力述語形。
+    m.formats.push(fmt(
+        "FP4",
+        &["ps2", "pt2", "pu2b", "pd2"],
+        vec![
+            preg("d", "pd2", Access::Write),
+            preg("s", "ps2", Access::Read),
+            preg("t", "pt2", Access::Read),
+            preg("u", "pu2b", Access::Read),
+        ],
+    ));
+    // Pd = not(Ps)。
+    m.formats.push(fmt(
+        "FPN",
+        &["ps2", "pd2"],
+        vec![
+            preg("d", "pd2", Access::Write),
+            preg("s", "ps2", Access::Read),
+        ],
+    ));
+    // Rd = Ps。
+    m.formats.push(fmt(
+        "FRFP",
+        &["psx", "d5"],
+        vec![
+            gpr("d", "d5", Access::Write),
+            preg("s", "psx", Access::Read),
+        ],
+    ));
+    // Pd = Rs。
+    m.formats.push(fmt(
+        "FPRF",
+        &["s5", "pd2"],
+        vec![
+            preg("d", "pd2", Access::Write),
+            gpr("s", "s5", Access::Read),
         ],
     ));
 
@@ -536,6 +936,424 @@ pub fn build_model() -> polyisa_isadl::Model {
         // Pd = cmp.eq/gt(Rs,Rt)。Ref: ALU32 compare.
         ("cmpeq_rr", "FCMP", "11110010000.............000000..", "p{d}=cmp.eq({s},{t})", "alu"),
         ("cmpgt_rr", "FCMP", "11110010010.............000000..", "p{d}=cmp.gt({s},{t})", "alu"),
+    ] {
+        m.insns.push(ins(name, format, pattern, base(), syntax, timing));
+    }
+
+    // ---- HX5: 整数算術・論理・シフト・combine/mux 系。
+    // ALU32/XTYPE の加減算・論理・半語演算、64 ビット対レジスタ
+    // 演算、述語生産比較・述語演算、シフト/ローテートとその累積形、
+    // ビット計数・ビットフィールド・テーブルビット、飽和/パック系、
+    // combine/mux/min/max、整列/交差/複製のスカラベクトル系。
+    // 語彙は V79 正本のビットマップから機械抽出し、参照
+    // アセンブラの実符号と照合済み。
+    // Ref: SPEC-HEXAGON-PRM (V79) ALU32/XTYPE/PERM/PRED/BIT chapters.
+    for (name, format, pattern, syntax, timing) in [
+        ("add_sat_rr", "FRR", "11110110010.....................", "add {d},{s},{t}:sat", "alu"),
+        ("and_rr", "FRR", "11110001000.....................", "and {d},{s},{t}", "alu"),
+        ("andn2_rr", "FRR", "11110001100.....................", "and {t},~{s}", "alu"),
+        ("or_rr", "FRR", "11110001001.....................", "or {d},{s},{t}", "alu"),
+        ("orn2_rr", "FRR", "11110001101.....................", "or {t},~{s}", "alu"),
+        ("xor_rr", "FRR", "11110001011.....................", "xor {d},{s},{t}", "alu"),
+        ("sub_rr", "FRR", "11110011001.....................", "sub {t},{s}", "alu"),
+        ("sub_sat_rr", "FRR", "11110110110.....................", "sub {t},{s}:sat", "alu"),
+        ("vaddh_rr", "FRR", "11110110000.....................", "vaddh {d},{s},{t}", "alu"),
+        ("vaddh_sat_rr", "FRR", "11110110001.....................", "vaddh {d},{s},{t}:sat", "alu"),
+        ("vadduh_sat_rr", "FRR", "11110110011.....................", "vadduh {d},{s},{t}:sat", "alu"),
+        ("vavgh_rr", "FRR", "11110111.00.....................", "vavgh {d},{s},{t}", "alu"),
+        ("vavgh_rnd_rr", "FRR", "11110111.01.....................", "vavgh {d},{s},{t}:rnd", "alu"),
+        ("vnavgh_rr", "FRR", "11110111.11.....................", "vnavgh {t},{s}", "alu"),
+        ("vsubh_rr", "FRR", "11110110100.....................", "vsubh {t},{s}", "alu"),
+        ("vsubh_sat_rr", "FRR", "11110110101.....................", "vsubh {t},{s}:sat", "alu"),
+        ("vsubuh_sat_rr", "FRR", "11110110111.....................", "vsubuh {t},{s}:sat", "alu"),
+        ("and_ri", "FRI10", "0111011000......................", "and {d},{s},#{imm}", "alu"),
+        ("or_ri", "FRI10", "0111011010......................", "or {d},{s},#{imm}", "alu"),
+        ("sub_ir", "FRI10", "0111011001......................", "sub #{imm},{s}", "alu"),
+        ("aslh", "FRS", "01110000000.......0.............", "aslh {d},{s}", "alu"),
+        ("asrh", "FRS", "01110000001.......0.............", "asrh {d},{s}", "alu"),
+        ("sxtb", "FRS", "01110000101.......0.............", "sxtb {d},{s}", "alu"),
+        ("sxth", "FRS", "01110000111.......0.............", "sxth {d},{s}", "alu"),
+        ("zxth", "FRS", "01110000110.......0.............", "zxth {d},{s}", "alu"),
+        ("combine_rr", "FRR", "111101010.......................", "combine {dd},{s},{t}", "alu"),
+        ("comb_hh", "FRR", "11110011100.....................", "combine {d},{t}.h,{s}.h", "alu"),
+        ("comb_hl", "FRR", "11110011101.....................", "combine {d},{t}.h,{s}.l", "alu"),
+        ("comb_lh", "FRR", "11110011110.....................", "combine {d},{t}.l,{s}.h", "alu"),
+        ("comb_ll", "FRR", "11110011111.....................", "combine {d},{t}.l,{s}.l", "alu"),
+        ("packhl", "FRR", "111101011.......................", "packhl {dd},{s},{t}", "alu"),
+        ("comb_ri", "FRI8", "01110011.00.......1.............", "combine {dd},{s},#{imm}", "alu"),
+        ("comb_ir", "FRI8", "01110011.01.......1.............", "combine {dd},#{imm},{s}", "alu"),
+        ("comb_ii", "FCII", "011111000.......................", "combine {dd},#{imm1},#{imm2}", "alu"),
+        ("comb_iu6", "FCU6", "011111001.......................", "combine {dd},#{imm1},#{imm2}", "alu"),
+        ("mux_rr", "FMUX", "11110100........................", "mux p{p},{s},{t}", "alu"),
+        ("mux_ri", "FMUXI", "011100110.........0.............", "mux p{p},{s},#{imm}", "alu"),
+        ("mux_ir", "FMUXI", "011100111.........0.............", "mux p{p},#{imm},{s}", "alu"),
+        ("mux_ii", "FMUXII", "0111101.........................", "mux p{p},#{imm1},#{imm2}", "alu"),
+        ("cmpgtu_rr", "FCMP", "11110010.11................000..", "p{d}=cmp.gtu({s},{t})", "alu"),
+        ("cmpeqn_rr", "FCMP", "11110010.00................100..", "p{d}=!cmp.eq({s},{t})", "alu"),
+        ("cmpgtn_rr", "FCMP", "11110010.10................100..", "p{d}=!cmp.gt({s},{t})", "alu"),
+        ("cmpgtun_rr", "FCMP", "11110010.11................100..", "p{d}=!cmp.gtu({s},{t})", "alu"),
+        ("cmpeq_i", "FCMPI", "0111010100.................000..", "p{d}=cmp.eq({s},#{imm})", "alu"),
+        ("cmpgt_i", "FCMPI", "0111010101.................000..", "p{d}=cmp.gt({s},#{imm})", "alu"),
+        ("cmpgtu_i", "FCMPIU", "01110101100................000..", "p{d}=cmp.gtu({s},#{imm})", "alu"),
+        ("cmpeqn_i", "FCMPI", "0111010100.................100..", "p{d}=!cmp.eq({s},#{imm})", "alu"),
+        ("cmpgtn_i", "FCMPI", "0111010101.................100..", "p{d}=!cmp.gt({s},#{imm})", "alu"),
+        ("cmpgtun_i", "FCMPIU", "01110101100................100..", "p{d}=!cmp.gtu({s},#{imm})", "alu"),
+        ("cmpeq_rd_rr", "FRR", "11110011010.....................", "cmp.eq {d},{s},{t}", "alu"),
+        ("cmpeqn_rd_rr", "FRR", "11110011011.....................", "!cmp.eq {d},{s},{t}", "alu"),
+        ("cmpeq_rd_i", "FRI8", "01110011.10.......1.............", "cmp.eq {d},{s},#{imm}", "alu"),
+        ("cmpeqn_rd_i", "FRI8", "01110011.11.......1.............", "!cmp.eq {d},{s},#{imm}", "alu"),
+        ("pand", "FP3", "011010110000......0.............", "p{d}=and(p{t},p{s})", "alu"),
+        ("por", "FP3", "011010110010......0.............", "p{d}=or(p{t},p{s})", "alu"),
+        ("pxor", "FP3", "011010110100......0.............", "p{d}=xor(p{s},p{t})", "alu"),
+        ("pandn", "FP3", "011010110110......0.............", "p{d}=and(p{t},!p{s})", "alu"),
+        ("porn", "FP3", "011010111110......0.............", "p{d}=or(p{t},!p{s})", "alu"),
+        ("pnot", "FPN", "011010111100......0.............", "p{d}=not(p{s})", "alu"),
+        ("pany8", "FPN", "011010111000......0.............", "p{d}=any8(p{s})", "alu"),
+        ("pall8", "FPN", "011010111010......0.............", "p{d}=all8(p{s})", "alu"),
+        ("pfc9", "FP3", "01101011000000..111000..100100..", "p{d}=fastcorner9(p{s},p{t})", "alu"),
+        ("pfc9n", "FP3", "01101011000100..111000..100100..", "p{d}=!fastcorner9(p{s},p{t})", "alu"),
+        ("pand_a", "FP4", "011010110001......0.............", "p{d}=and(p{s},and(p{t},p{u}))", "alu"),
+        ("pand_o", "FP4", "011010110011......0.............", "p{d}=and(p{s},or(p{t},p{u}))", "alu"),
+        ("por_a", "FP4", "011010110101......0.............", "p{d}=or(p{s},and(p{t},p{u}))", "alu"),
+        ("por_o", "FP4", "011010110111......0.............", "p{d}=or(p{s},or(p{t},p{u}))", "alu"),
+        ("pand_an", "FP4", "011010111001......0.............", "p{d}=and(p{s},and(p{t},!p{u}))", "alu"),
+        ("pand_on", "FP4", "011010111011......0.............", "p{d}=and(p{s},or(p{t},!p{u}))", "alu"),
+        ("por_an", "FP4", "011010111101......0.............", "p{d}=or(p{s},and(p{t},!p{u}))", "alu"),
+        ("por_on", "FP4", "011010111111......0.............", "p{d}=or(p{s},or(p{t},!p{u}))", "alu"),
+        ("rd_ps", "FRFP", "10001001.1......................", "{d}=p{s}", "alu"),
+        ("pd_rs", "FPRF", "10000101010.....................", "p{d}={s}", "alu"),
+        ("add64", "FRR", "11010011000.............111.....", "add {dd},{ss},{tt}", "alu"),
+        ("add64_sat", "FRR", "11010011011.............101.....", "add {dd},{ss},{tt}:sat", "alu"),
+        ("add64_raw_lo", "FRR", "11010011011.............110.....", "add {dd},{ss},{tt}:raw:lo", "alu"),
+        ("add64_raw_hi", "FRR", "11010011011.............111.....", "add {dd},{ss},{tt}:raw:hi", "alu"),
+        ("sub64", "FRR", "11010011001.............111.....", "sub {dd},{tt},{ss}", "alu"),
+        ("and64", "FRR", "11010011111.............000.....", "and {dd},{ss},{tt}", "alu"),
+        ("andn64", "FRR", "11010011111.............001.....", "and {dd},{tt},~{ss}", "alu"),
+        ("or64", "FRR", "11010011111.............010.....", "or {dd},{ss},{tt}", "alu"),
+        ("orn64", "FRR", "11010011111.............011.....", "or {dd},{tt},~{ss}", "alu"),
+        ("xor64", "FRR", "11010011111.............100.....", "xor {dd},{ss},{tt}", "alu"),
+        ("not64", "FRS", "10000000100.............100.....", "not {dd},{ss}", "alu"),
+        ("neg64", "FRS", "10000000100.............101.....", "neg {dd},{ss}", "alu"),
+        ("abs64", "FRS", "10000000100.............110.....", "abs {dd},{ss}", "alu"),
+        ("abs", "FRS", "10001100100.............100.....", "abs {d},{s}", "alu"),
+        ("abs_sat", "FRS", "10001100100.............101.....", "abs {d},{s}:sat", "alu"),
+        ("neg_sat", "FRS", "10001100100.............110.....", "neg {d},{s}:sat", "alu"),
+        ("sxtw", "FRS", "1000010001..............00......", "sxtw {dd},{s}", "alu"),
+        ("modwrap", "FRR", "11010011111.............111.....", "modwrap {d},{s},{t}", "alu"),
+        ("add_carry", "FMUX", "11000010110.....................", "add {dd},{ss},{tt},p{p}:carry", "alu"),
+        ("sub_carry", "FMUX", "11000010111.....................", "sub {dd},{ss},{tt},p{p}:carry", "alu"),
+        ("max", "FRR", "11010101110.............0.......", "max {d},{s},{t}", "alu"),
+        ("maxu", "FRR", "11010101110.............1.......", "maxu {d},{s},{t}", "alu"),
+        ("min", "FRR", "11010101101.............0.......", "min {d},{t},{s}", "alu"),
+        ("minu", "FRR", "11010101101.............1.......", "minu {d},{t},{s}", "alu"),
+        ("max64", "FRR", "11010011110.............100.....", "max {dd},{ss},{tt}", "alu"),
+        ("maxu64", "FRR", "11010011110.............101.....", "maxu {dd},{ss},{tt}", "alu"),
+        ("min64", "FRR", "11010011101.............110.....", "min {dd},{tt},{ss}", "alu"),
+        ("minu64", "FRR", "11010011101.............111.....", "minu {dd},{tt},{ss}", "alu"),
+        ("cmp64_eq", "FCMP", "11010010100.............000.....", "p{d}=cmp.eq({ss},{tt})", "alu"),
+        ("cmp64_gt", "FCMP", "11010010100.............010.....", "p{d}=cmp.gt({ss},{tt})", "alu"),
+        ("cmp64_gtu", "FCMP", "11010010100.............100.....", "p{d}=cmp.gtu({ss},{tt})", "alu"),
+        ("add_ll", "FRR", "11010101000.............00......", "add {d},{t}.l,{s}.l", "alu"),
+        ("add_lh", "FRR", "11010101000.............01......", "add {d},{t}.l,{s}.h", "alu"),
+        ("add_ll_sat", "FRR", "11010101000.............10......", "add {d},{t}.l,{s}.l:sat", "alu"),
+        ("add_lh_sat", "FRR", "11010101000.............11......", "add {d},{t}.l,{s}.h:sat", "alu"),
+        ("add_ll_s16", "FRR", "11010101010.............000.....", "add {d},{t}.l,{s}.l:<<16", "alu"),
+        ("add_lh_s16", "FRR", "11010101010.............001.....", "add {d},{t}.l,{s}.h:<<16", "alu"),
+        ("add_hl_s16", "FRR", "11010101010.............010.....", "add {d},{t}.h,{s}.l:<<16", "alu"),
+        ("add_hh_s16", "FRR", "11010101010.............011.....", "add {d},{t}.h,{s}.h:<<16", "alu"),
+        ("add_ll_sat_s16", "FRR", "11010101010.............100.....", "add {d},{t}.l,{s}.l:sat:<<16", "alu"),
+        ("add_lh_sat_s16", "FRR", "11010101010.............101.....", "add {d},{t}.l,{s}.h:sat:<<16", "alu"),
+        ("add_hl_sat_s16", "FRR", "11010101010.............110.....", "add {d},{t}.h,{s}.l:sat:<<16", "alu"),
+        ("add_hh_sat_s16", "FRR", "11010101010.............111.....", "add {d},{t}.h,{s}.h:sat:<<16", "alu"),
+        ("sub_ll", "FRR", "11010101001.............00......", "sub {d},{t}.l,{s}.l", "alu"),
+        ("sub_lh", "FRR", "11010101001.............01......", "sub {d},{t}.l,{s}.h", "alu"),
+        ("sub_ll_sat", "FRR", "11010101001.............10......", "sub {d},{t}.l,{s}.l:sat", "alu"),
+        ("sub_lh_sat", "FRR", "11010101001.............11......", "sub {d},{t}.l,{s}.h:sat", "alu"),
+        ("sub_ll_s16", "FRR", "11010101011.............000.....", "sub {d},{t}.l,{s}.l:<<16", "alu"),
+        ("sub_lh_s16", "FRR", "11010101011.............001.....", "sub {d},{t}.l,{s}.h:<<16", "alu"),
+        ("sub_hl_s16", "FRR", "11010101011.............010.....", "sub {d},{t}.h,{s}.l:<<16", "alu"),
+        ("sub_hh_s16", "FRR", "11010101011.............011.....", "sub {d},{t}.h,{s}.h:<<16", "alu"),
+        ("sub_ll_sat_s16", "FRR", "11010101011.............100.....", "sub {d},{t}.l,{s}.l:sat:<<16", "alu"),
+        ("sub_lh_sat_s16", "FRR", "11010101011.............101.....", "sub {d},{t}.l,{s}.h:sat:<<16", "alu"),
+        ("sub_hl_sat_s16", "FRR", "11010101011.............110.....", "sub {d},{t}.h,{s}.l:sat:<<16", "alu"),
+        ("sub_hh_sat_s16", "FRR", "11010101011.............111.....", "sub {d},{t}.h,{s}.h:sat:<<16", "alu"),
+        ("asr_i", "FSHI", "10001100000.......0.....000.....", "asr {d},{s},#{imm}", "alu"),
+        ("lsr_i", "FSHI", "10001100000.......0.....001.....", "lsr {d},{s},#{imm}", "alu"),
+        ("asl_i", "FSHI", "10001100000.......0.....010.....", "asl {d},{s},#{imm}", "alu"),
+        ("asl_i_sat", "FSHI", "10001100010.......0.....010.....", "asl {d},{s},#{imm}:sat", "alu"),
+        ("rol_i", "FSHI", "10001100000.......0.....011.....", "rol {d},{s},#{imm}", "alu"),
+        ("asr64_i", "FSHI6", "10000000000.............000.....", "asr {dd},{ss},#{imm}", "alu"),
+        ("lsr64_i", "FSHI6", "10000000000.............001.....", "lsr {dd},{ss},#{imm}", "alu"),
+        ("asl64_i", "FSHI6", "10000000000.............010.....", "asl {dd},{ss},#{imm}", "alu"),
+        ("rol64_i", "FSHI6", "10000000000.............011.....", "rol {dd},{ss},#{imm}", "alu"),
+        ("asr_rr", "FRR", "1100011001..............00......", "asr {d},{s},{t}", "alu"),
+        ("asl_rr", "FRR", "1100011001..............10......", "asl {d},{s},{t}", "alu"),
+        ("lsr_rr", "FRR", "1100011001..............01......", "lsr {d},{s},{t}", "alu"),
+        ("lsl_rr", "FRR", "1100011001..............11......", "lsl {d},{s},{t}", "alu"),
+        ("asl_rr_sat", "FRR", "1100011000..............10......", "asl {d},{s},{t}:sat", "alu"),
+        ("asr_rr_sat", "FRR", "1100011000..............00......", "asr {d},{s},{t}:sat", "alu"),
+        ("asr64_rr", "FRR", "1100001110..............00......", "asr {dd},{ss},{t}", "alu"),
+        ("asl64_rr", "FRR", "1100001110..............10......", "asl {dd},{ss},{t}", "alu"),
+        ("lsr64_rr", "FRR", "1100001110..............01......", "lsr {dd},{ss},{t}", "alu"),
+        ("lsl64_rr", "FRR", "1100001110..............11......", "lsl {dd},{ss},{t}", "alu"),
+        ("lsl_ir", "FLSL", "1100011010..............11......", "lsl {d},#{imm},{t}", "alu"),
+        ("addasl", "FASL3", "11000100000.......0.............", "addasl {d},{t},{s},#{imm}", "alu"),
+        ("add_asr_i", "FXSH", "1000111000........0.....100.....", "{x}+=asr({s},#{imm})", "alu"),
+        ("add_lsr_i", "FXSH", "1000111000........0.....101.....", "{x}+=lsr({s},#{imm})", "alu"),
+        ("add_asl_i", "FXSH", "1000111000........0.....110.....", "{x}+=asl({s},#{imm})", "alu"),
+        ("add_rol_i", "FXSH", "1000111000........0.....111.....", "{x}+=rol({s},#{imm})", "alu"),
+        ("sub_asr_i", "FXSH", "1000111000........0.....000.....", "{x}-=asr({s},#{imm})", "alu"),
+        ("sub_lsr_i", "FXSH", "1000111000........0.....001.....", "{x}-=lsr({s},#{imm})", "alu"),
+        ("sub_asl_i", "FXSH", "1000111000........0.....010.....", "{x}-=asl({s},#{imm})", "alu"),
+        ("sub_rol_i", "FXSH", "1000111000........0.....011.....", "{x}-=rol({s},#{imm})", "alu"),
+        ("and_asr_i", "FXSH", "1000111001........0.....000.....", "{x}&=asr({s},#{imm})", "alu"),
+        ("and_lsr_i", "FXSH", "1000111001........0.....001.....", "{x}&=lsr({s},#{imm})", "alu"),
+        ("and_asl_i", "FXSH", "1000111001........0.....010.....", "{x}&=asl({s},#{imm})", "alu"),
+        ("and_rol_i", "FXSH", "1000111001........0.....011.....", "{x}&=rol({s},#{imm})", "alu"),
+        ("or_asr_i", "FXSH", "1000111001........0.....100.....", "{x}|=asr({s},#{imm})", "alu"),
+        ("or_lsr_i", "FXSH", "1000111001........0.....101.....", "{x}|=lsr({s},#{imm})", "alu"),
+        ("or_asl_i", "FXSH", "1000111001........0.....110.....", "{x}|=asl({s},#{imm})", "alu"),
+        ("or_rol_i", "FXSH", "1000111001........0.....111.....", "{x}|=rol({s},#{imm})", "alu"),
+        ("xor_lsr_i", "FXSH", "1000111010........0.....001.....", "{x}^=lsr({s},#{imm})", "alu"),
+        ("xor_asl_i", "FXSH", "1000111010........0.....010.....", "{x}^=asl({s},#{imm})", "alu"),
+        ("xor_rol_i", "FXSH", "1000111010........0.....011.....", "{x}^=rol({s},#{imm})", "alu"),
+        ("add64_asr_i", "FXSH6", "1000001000..............100.....", "{xx}+=asr({ss},#{imm})", "alu"),
+        ("add64_lsr_i", "FXSH6", "1000001000..............101.....", "{xx}+=lsr({ss},#{imm})", "alu"),
+        ("add64_asl_i", "FXSH6", "1000001000..............110.....", "{xx}+=asl({ss},#{imm})", "alu"),
+        ("add64_rol_i", "FXSH6", "1000001000..............111.....", "{xx}+=rol({ss},#{imm})", "alu"),
+        ("sub64_asr_i", "FXSH6", "1000001000..............000.....", "{xx}-=asr({ss},#{imm})", "alu"),
+        ("sub64_lsr_i", "FXSH6", "1000001000..............001.....", "{xx}-=lsr({ss},#{imm})", "alu"),
+        ("sub64_asl_i", "FXSH6", "1000001000..............010.....", "{xx}-=asl({ss},#{imm})", "alu"),
+        ("sub64_rol_i", "FXSH6", "1000001000..............011.....", "{xx}-=rol({ss},#{imm})", "alu"),
+        ("and64_asr_i", "FXSH6", "1000001001..............000.....", "{xx}&=asr({ss},#{imm})", "alu"),
+        ("and64_lsr_i", "FXSH6", "1000001001..............001.....", "{xx}&=lsr({ss},#{imm})", "alu"),
+        ("and64_asl_i", "FXSH6", "1000001001..............010.....", "{xx}&=asl({ss},#{imm})", "alu"),
+        ("and64_rol_i", "FXSH6", "1000001001..............011.....", "{xx}&=rol({ss},#{imm})", "alu"),
+        ("or64_asr_i", "FXSH6", "1000001001..............100.....", "{xx}|=asr({ss},#{imm})", "alu"),
+        ("or64_lsr_i", "FXSH6", "1000001001..............101.....", "{xx}|=lsr({ss},#{imm})", "alu"),
+        ("or64_asl_i", "FXSH6", "1000001001..............110.....", "{xx}|=asl({ss},#{imm})", "alu"),
+        ("or64_rol_i", "FXSH6", "1000001001..............111.....", "{xx}|=rol({ss},#{imm})", "alu"),
+        ("xor64_lsr_i", "FXSH6", "1000001010..............001.....", "{xx}^=lsr({ss},#{imm})", "alu"),
+        ("xor64_asl_i", "FXSH6", "1000001010..............010.....", "{xx}^=asl({ss},#{imm})", "alu"),
+        ("xor64_rol_i", "FXSH6", "1000001010..............011.....", "{xx}^=rol({ss},#{imm})", "alu"),
+        ("add_asr", "FXRR", "1100110011..............00......", "{x}+=asr({s},{t})", "alu"),
+        ("add_lsr", "FXRR", "1100110011..............01......", "{x}+=lsr({s},{t})", "alu"),
+        ("add_asl", "FXRR", "1100110011..............10......", "{x}+=asl({s},{t})", "alu"),
+        ("add_lsl", "FXRR", "1100110011..............11......", "{x}+=lsl({s},{t})", "alu"),
+        ("sub_asr", "FXRR", "1100110010..............00......", "{x}-=asr({s},{t})", "alu"),
+        ("sub_lsr", "FXRR", "1100110010..............01......", "{x}-=lsr({s},{t})", "alu"),
+        ("sub_asl", "FXRR", "1100110010..............10......", "{x}-=asl({s},{t})", "alu"),
+        ("sub_lsl", "FXRR", "1100110010..............11......", "{x}-=lsl({s},{t})", "alu"),
+        ("or_asr", "FXRR", "1100110000..............00......", "{x}|=asr({s},{t})", "alu"),
+        ("or_lsr", "FXRR", "1100110000..............01......", "{x}|=lsr({s},{t})", "alu"),
+        ("or_asl", "FXRR", "1100110000..............10......", "{x}|=asl({s},{t})", "alu"),
+        ("or_lsl", "FXRR", "1100110000..............11......", "{x}|=lsl({s},{t})", "alu"),
+        ("add64_asr", "FXRR", "11001011110.............00......", "{xx}+=asr({ss},{t})", "alu"),
+        ("add64_lsr", "FXRR", "11001011110.............01......", "{xx}+=lsr({ss},{t})", "alu"),
+        ("add64_asl", "FXRR", "11001011110.............10......", "{xx}+=asl({ss},{t})", "alu"),
+        ("add64_lsl", "FXRR", "11001011110.............11......", "{xx}+=lsl({ss},{t})", "alu"),
+        ("sub64_asr", "FXRR", "11001011100.............00......", "{xx}-=asr({ss},{t})", "alu"),
+        ("sub64_lsr", "FXRR", "11001011100.............01......", "{xx}-=lsr({ss},{t})", "alu"),
+        ("sub64_asl", "FXRR", "11001011100.............10......", "{xx}-=asl({ss},{t})", "alu"),
+        ("sub64_lsl", "FXRR", "11001011100.............11......", "{xx}-=lsl({ss},{t})", "alu"),
+        ("or64_asr", "FXRR", "11001011000.............00......", "{xx}|=asr({ss},{t})", "alu"),
+        ("or64_lsr", "FXRR", "11001011000.............01......", "{xx}|=lsr({ss},{t})", "alu"),
+        ("or64_asl", "FXRR", "11001011000.............10......", "{xx}|=asl({ss},{t})", "alu"),
+        ("or64_lsl", "FXRR", "11001011000.............11......", "{xx}|=lsl({ss},{t})", "alu"),
+        ("add_acc", "FXRR", "11101111000.......0.....001.....", "{x}+=add({s},{t})", "alu"),
+        ("sub_acc", "FXRR", "11101111100.......0.....001.....", "{x}-=add({s},{t})", "alu"),
+        ("addsub_acc", "FXRR", "11101111000.......0.....011.....", "{x}+=sub({t},{s})", "alu"),
+        ("add_acc_i", "FXI8", "111000100.........0.............", "{x}+=add({s},#{imm})", "alu"),
+        ("sub_acc_i", "FXI8", "111000101.........0.............", "{x}-=add({s},#{imm})", "alu"),
+        ("and_and", "FXRR", "11101111010.......0.....000.....", "{x}&=and({s},{t})", "alu"),
+        ("and_andn", "FXRR", "11101111001.......0.....001.....", "{x}&=and({s},~{t})", "alu"),
+        ("and_or", "FXRR", "11101111010.......0.....001.....", "{x}&=or({s},{t})", "alu"),
+        ("and_xor", "FXRR", "11101111010.......0.....010.....", "{x}&=xor({s},{t})", "alu"),
+        ("or_and", "FXRR", "11101111010.......0.....011.....", "{x}|=and({s},{t})", "alu"),
+        ("or_andn", "FXRR", "11101111001.......0.....000.....", "{x}|=and({s},~{t})", "alu"),
+        ("or_or", "FXRR", "11101111110.......0.....000.....", "{x}|=or({s},{t})", "alu"),
+        ("or_xor", "FXRR", "11101111110.......0.....001.....", "{x}|=xor({s},{t})", "alu"),
+        ("xor_and", "FXRR", "11101111110.......0.....010.....", "{x}^=and({s},{t})", "alu"),
+        ("xor_or", "FXRR", "11101111110.......0.....011.....", "{x}^=or({s},{t})", "alu"),
+        ("xor_xor", "FXRR", "11101111100.......0.....011.....", "{x}^=xor({s},{t})", "alu"),
+        ("xor_andn", "FXRR", "11101111001.......0.....010.....", "{x}^=and({s},~{t})", "alu"),
+        ("xor64_xor", "FXRR", "1100101010........0.....000.....", "{xx}^=xor({ss},{tt})", "alu"),
+        ("or_and_i", "FXI10", "1101101000......................", "{x}|=and({s},#{imm})", "alu"),
+        ("or_or_i", "FXI10", "1101101010......................", "{x}|=or({s},#{imm})", "alu"),
+        ("or_ac", "FOAC", "1101101001......................", "{x}=or({u},and({x},#{imm}))", "alu"),
+        ("add3", "FADD3", "110110110.......................", "add {d},{s},add({u},#{imm})", "alu"),
+        ("sub3", "FADD3", "110110111.......................", "add {d},{s},sub(#{imm},{u})", "alu"),
+        ("cadd_asl", "FSHIMM", "11011110...................0.10.", "{x}=add(#{imm},asl({x},#{ushift}))", "alu"),
+        ("csub_asl", "FSHIMM", "11011110...................0.11.", "{x}=sub(#{imm},asl({x},#{ushift}))", "alu"),
+        ("cand_asl", "FSHIMM", "11011110...................0.00.", "{x}=and(#{imm},asl({x},#{ushift}))", "alu"),
+        ("cor_asl", "FSHIMM", "11011110...................0.01.", "{x}=or(#{imm},asl({x},#{ushift}))", "alu"),
+        ("cadd_lsr", "FSHIMM", "11011110...................1.10.", "{x}=add(#{imm},lsr({x},#{ushift}))", "alu"),
+        ("csub_lsr", "FSHIMM", "11011110...................1.11.", "{x}=sub(#{imm},lsr({x},#{ushift}))", "alu"),
+        ("cand_lsr", "FSHIMM", "11011110...................1.00.", "{x}=and(#{imm},lsr({x},#{ushift}))", "alu"),
+        ("cor_lsr", "FSHIMM", "11011110...................1.01.", "{x}=or(#{imm},lsr({x},#{ushift}))", "alu"),
+        ("asr_i_rnd", "FSHI", "10001100010.......0.....000.....", "asr {d},{s},#{imm}:rnd", "alu"),
+        ("asr64_i_rnd", "FSHI6", "10000000110.............111.....", "asr {dd},{ss},#{imm}:rnd", "alu"),
+        ("cl0", "FRS", "10001100000.............101.....", "cl0 {d},{s}", "alu"),
+        ("cl1", "FRS", "10001100000.............110.....", "cl1 {d},{s}", "alu"),
+        ("clb", "FRS", "10001100000.............100.....", "clb {d},{s}", "alu"),
+        ("cl064", "FRS", "10001000010.............010.....", "cl0 {d},{ss}", "alu"),
+        ("cl164", "FRS", "10001000010.............100.....", "cl1 {d},{ss}", "alu"),
+        ("clb64", "FRS", "10001000010.............000.....", "clb {d},{ss}", "alu"),
+        ("normamt", "FRS", "10001100000.............111.....", "normamt {d},{s}", "alu"),
+        ("normamt64", "FRS", "10001000011.............000.....", "normamt {d},{ss}", "alu"),
+        ("clbadd", "FCLADD", "10001100001.............000.....", "add(clb {d},{s},#{imm})", "alu"),
+        ("clbadd64", "FCLADD", "10001000011.............010.....", "add(clb {d},{ss},#{imm})", "alu"),
+        ("ct0", "FRS", "10001100010.............100.....", "ct0 {d},{s}", "alu"),
+        ("ct1", "FRS", "10001100010.............101.....", "ct1 {d},{s}", "alu"),
+        ("ct064", "FRS", "10001000111.............010.....", "ct0 {d},{ss}", "alu"),
+        ("ct164", "FRS", "10001000111.............100.....", "ct1 {d},{ss}", "alu"),
+        ("popcount", "FRS", "10001000011.............011.....", "popcount {d},{ss}", "alu"),
+        ("parity", "FRR", "11010101111.....................", "parity {d},{s},{t}", "alu"),
+        ("parity64", "FRR", "11010000........................", "parity {d},{ss},{tt}", "alu"),
+        ("brev", "FRS", "10001100010.............110.....", "brev {d},{s}", "alu"),
+        ("brev64", "FRS", "10000000110.............110.....", "brev {dd},{ss}", "alu"),
+        ("swiz", "FRS", "10001100100.............111.....", "swiz {d},{s}", "alu"),
+        ("tstbit_i", "FPTST", "10000101000.......0.............", "p{d}=tstbit({s},#{imm})", "alu"),
+        ("tstbitn_i", "FPTST", "10000101001.......0.............", "p{d}=!tstbit({s},#{imm})", "alu"),
+        ("tstbit_r", "FCMP", "11000111000.....................", "p{d}=tstbit({s},{t})", "alu"),
+        ("tstbitn_r", "FCMP", "11000111001.....................", "p{d}=!tstbit({s},{t})", "alu"),
+        ("setbit_i", "FSHI", "10001100110.......0.....000.....", "setbit {d},{s},#{imm}", "alu"),
+        ("clrbit_i", "FSHI", "10001100110.......0.....001.....", "clrbit {d},{s},#{imm}", "alu"),
+        ("togglebit_i", "FSHI", "10001100110.......0.....010.....", "togglebit {d},{s},#{imm}", "alu"),
+        ("setbit_r", "FRR", "1100011010..............00......", "setbit {d},{s},{t}", "alu"),
+        ("clrbit_r", "FRR", "1100011010..............01......", "clrbit {d},{s},{t}", "alu"),
+        ("togglebit_r", "FRR", "1100011010..............10......", "togglebit {d},{s},{t}", "alu"),
+        ("bitsclr_r", "FCMP", "11000111100.....................", "p{d}=bitsclr({s},{t})", "alu"),
+        ("bitsclrn_r", "FCMP", "11000111101.....................", "p{d}=!bitsclr({s},{t})", "alu"),
+        ("bitsset_r", "FCMP", "11000111010.....................", "p{d}=bitsset({s},{t})", "alu"),
+        ("bitssetn_r", "FCMP", "11000111011.....................", "p{d}=!bitsset({s},{t})", "alu"),
+        ("bitsclr_i", "FPCLR", "10000101100.....................", "p{d}=bitsclr({s},#{imm})", "alu"),
+        ("bitsclrn_i", "FPCLR", "10000101101.....................", "p{d}=!bitsclr({s},#{imm})", "alu"),
+        ("extract", "FXTR", "100011011.........0.............", "extract {d},{s},#{width},#{off}", "alu"),
+        ("extractu", "FXTR", "100011010.........0.............", "extractu {d},{s},#{width},#{off}", "alu"),
+        ("extract64", "FXTR64", "10001010........................", "extract {dd},{ss},#{width},#{off}", "alu"),
+        ("extractu64", "FXTR64", "10000001........................", "extractu {dd},{ss},#{width},#{off}", "alu"),
+        ("extract_r", "FRR", "1100100100..............01......", "extract {d},{s},{tt}", "alu"),
+        ("extractu_r", "FRR", "1100100100..............00......", "extractu {d},{s},{tt}", "alu"),
+        ("extract64_r", "FRR", "1100000111..............10......", "extract {dd},{ss},{tt}", "alu"),
+        ("extractu64_r", "FRR", "1100000100..............00......", "extractu {dd},{ss},{tt}", "alu"),
+        ("insert", "FINS", "100011110.........0.............", "insert {x},{s},#{width},#{off}", "alu"),
+        ("insert64", "FINS64", "10000011........................", "insert {xx},{ss},#{width},#{off}", "alu"),
+        ("insert_r", "FXRR", "11001000........................", "insert {x},{s},{tt}", "alu"),
+        ("insert64_r", "FXRR", "110010100.........0.............", "insert {xx},{ss},{tt}", "alu"),
+        ("bitsplit_i", "FSHI", "10001000110.......0.....100.....", "bitsplit {dd},{s},#{imm}", "alu"),
+        ("bitsplit_r", "FRR", "11010100..1.....................", "bitsplit {dd},{s},{t}", "alu"),
+        ("cmpb_eq", "FCMP", "11000111110.............110.....", "p{d}=cmpb.eq({s},{t})", "alu"),
+        ("cmpb_gt", "FCMP", "11000111110.............010.....", "p{d}=cmpb.gt({s},{t})", "alu"),
+        ("cmpb_gtu", "FCMP", "11000111110.............111.....", "p{d}=cmpb.gtu({s},{t})", "alu"),
+        ("cmpb_eq_i", "FCMPBI", "11011101.00................00...", "p{d}=cmpb.eq({s},#{imm})", "alu"),
+        ("cmpb_gt_i", "FCMPBI", "11011101.01................00...", "p{d}=cmpb.gt({s},#{imm})", "alu"),
+        ("cmpb_gtu_i", "FCMPBI", "11011101.10........0.......00...", "p{d}=cmpb.gtu({s},#{imm})", "alu"),
+        ("cmph_eq", "FCMP", "11000111110.............011.....", "p{d}=cmph.eq({s},{t})", "alu"),
+        ("cmph_gt", "FCMP", "11000111110.............100.....", "p{d}=cmph.gt({s},{t})", "alu"),
+        ("cmph_gtu", "FCMP", "11000111110.............101.....", "p{d}=cmph.gtu({s},{t})", "alu"),
+        ("cmph_gt_i", "FCMPBI", "11011101.01................01...", "p{d}=cmph.gt({s},#{imm})", "alu"),
+        ("cmph_gtu_i", "FCMPBI", "11011101.10........0.......01...", "p{d}=cmph.gtu({s},#{imm})", "alu"),
+        ("sat", "FRS", "10001000110.............000.....", "sat {d},{ss}", "alu"),
+        ("sath", "FRS", "10001100110.............100.....", "sath {d},{s}", "alu"),
+        ("satuh", "FRS", "10001100110.............101.....", "satuh {d},{s}", "alu"),
+        ("satb", "FRS", "10001100110.............111.....", "satb {d},{s}", "alu"),
+        ("satub", "FRS", "10001100110.............110.....", "satub {d},{s}", "alu"),
+        ("round_sat", "FRS", "10001000110.............001.....", "round {d},{ss}:sat", "alu"),
+        ("round_i", "FSHI", "10001100111.......0.....10......", "round {d},{s},#{imm}", "alu"),
+        ("round_i_sat", "FSHI", "10001100111.......0.....11......", "round {d},{s},#{imm}:sat", "alu"),
+        ("round_r", "FRR", "1100011011..............10......", "round {d},{s},{t}", "alu"),
+        ("round_r_sat", "FRR", "1100011011..............11......", "round {d},{s},{t}:sat", "alu"),
+        ("cround_i", "FSHI", "10001100111.......0.....00......", "cround {d},{s},#{imm}", "alu"),
+        ("cround_r", "FRR", "1100011011..............00......", "cround {d},{s},{t}", "alu"),
+        ("vsathub", "FRS", "10001000000.............000.....", "vsathub {d},{ss}", "alu"),
+        ("vsathb", "FRS", "10001000000.............110.....", "vsathb {d},{ss}", "alu"),
+        ("vsathub_p", "FRS", "10000000000.............100.....", "vsathub {dd},{ss}", "alu"),
+        ("vsathb_p", "FRS", "10000000000.............111.....", "vsathb {dd},{ss}", "alu"),
+        ("vaddhub_sat", "FRR", "1100000101..............001.....", "vaddhub {d},{ss},{tt}:sat", "alu"),
+        ("tableidxb", "FTIDX", "1000011100......................", "tableidxb {x},{s},#{imm},#{off}", "alu"),
+        ("tableidxh", "FTIDX", "1000011101......................", "tableidxh {x},{s},#{imm},#{off}", "alu"),
+        ("tableidxw", "FTIDX", "1000011110......................", "tableidxw {x},{s},#{imm},#{off}", "alu"),
+        ("tableidxd", "FTIDX", "1000011111......................", "tableidxd {x},{s},#{imm},#{off}", "alu"),
+        ("cmph_eq_i", "FCMPBI", "11011101.00................01...", "p{d}=cmph.eq({s},#{imm})", "alu"),
+        ("vsatwh", "FRS", "10001000000.............010.....", "vsatwh {d},{ss}", "alu"),
+        ("vsatwuh", "FRS", "10001000000.............100.....", "vsatwuh {d},{ss}", "alu"),
+        ("vsathub_rs", "FRS", "1000110010..............01......", "vsathub {d},{s}", "alu"),
+        ("vsathb_rs", "FRS", "1000110010..............00......", "vsathb {d},{s}", "alu"),
+        ("vsatwh_p", "FRS", "10000000000.............110.....", "vsatwh {dd},{ss}", "alu"),
+        ("vsatwuh_p", "FRS", "10000000000.............101.....", "vsatwuh {dd},{ss}", "alu"),
+        ("vrndwh", "FRS", "10001000100.............100.....", "vrndwh {d},{ss}", "alu"),
+        ("vrndwh_sat", "FRS", "10001000100.............110.....", "vrndwh {d},{ss}:sat", "alu"),
+        ("vaddub64", "FRR", "11010011000.............000.....", "vaddub {dd},{ss},{tt}", "alu"),
+        ("vaddub64_sat", "FRR", "11010011000.............001.....", "vaddub {dd},{ss},{tt}:sat", "alu"),
+        ("vaddh64", "FRR", "11010011000.............010.....", "vaddh {dd},{ss},{tt}", "alu"),
+        ("vaddh64_sat", "FRR", "11010011000.............011.....", "vaddh {dd},{ss},{tt}:sat", "alu"),
+        ("vadduh64_sat", "FRR", "11010011000.............100.....", "vadduh {dd},{ss},{tt}:sat", "alu"),
+        ("vaddw64", "FRR", "11010011000.............101.....", "vaddw {dd},{ss},{tt}", "alu"),
+        ("vaddw64_sat", "FRR", "11010011000.............110.....", "vaddw {dd},{ss},{tt}:sat", "alu"),
+        ("vsubub64", "FRR", "11010011001.............000.....", "vsubub {dd},{tt},{ss}", "alu"),
+        ("vsubub64_sat", "FRR", "11010011001.............001.....", "vsubub {dd},{tt},{ss}:sat", "alu"),
+        ("vsubh64", "FRR", "11010011001.............010.....", "vsubh {dd},{tt},{ss}", "alu"),
+        ("vsubh64_sat", "FRR", "11010011001.............011.....", "vsubh {dd},{tt},{ss}:sat", "alu"),
+        ("vsubuh64_sat", "FRR", "11010011001.............100.....", "vsubuh {dd},{tt},{ss}:sat", "alu"),
+        ("vsubw64", "FRR", "11010011001.............101.....", "vsubw {dd},{tt},{ss}", "alu"),
+        ("vsubw64_sat", "FRR", "11010011001.............110.....", "vsubw {dd},{tt},{ss}:sat", "alu"),
+        ("vavgub64", "FRR", "11010011010.............000.....", "vavgub {dd},{ss},{tt}", "alu"),
+        ("vavgub64_rnd", "FRR", "11010011010.............001.....", "vavgub {dd},{ss},{tt}:rnd", "alu"),
+        ("vavguh64", "FRR", "11010011010.............101.....", "vavguh {dd},{ss},{tt}", "alu"),
+        ("vavguh64_rnd", "FRR", "11010011010.............11......", "vavguh {dd},{ss},{tt}:rnd", "alu"),
+        ("vavgh64", "FRR", "11010011010.............010.....", "vavgh {dd},{ss},{tt}", "alu"),
+        ("vavgh64_rnd", "FRR", "11010011010.............011.....", "vavgh {dd},{ss},{tt}:rnd", "alu"),
+        ("vavgh64_crnd", "FRR", "11010011010.............100.....", "vavgh {dd},{ss},{tt}:crnd", "alu"),
+        ("vavgw64", "FRR", "11010011011.............000.....", "vavgw {dd},{ss},{tt}", "alu"),
+        ("vavgw64_rnd", "FRR", "11010011011.............001.....", "vavgw {dd},{ss},{tt}:rnd", "alu"),
+        ("vavgw64_crnd", "FRR", "11010011011.............010.....", "vavgw {dd},{ss},{tt}:crnd", "alu"),
+        ("vavguw64", "FRR", "11010011011.............011.....", "vavguw {dd},{ss},{tt}", "alu"),
+        ("vavguw64_rnd", "FRR", "11010011011.............100.....", "vavguw {dd},{ss},{tt}:rnd", "alu"),
+        ("vnavgh64", "FRR", "11010011100.............000.....", "vnavgh {dd},{tt},{ss}", "alu"),
+        ("vnavgh64_rnd_sat", "FRR", "11010011100.............001.....", "vnavgh {dd},{tt},{ss}:rnd:sat", "alu"),
+        ("vnavgh64_crnd_sat", "FRR", "11010011100.............010.....", "vnavgh {dd},{tt},{ss}:crnd:sat", "alu"),
+        ("vnavgw64", "FRR", "11010011100.............011.....", "vnavgw {dd},{tt},{ss}", "alu"),
+        ("vnavgw64_rnd_sat", "FRR", "11010011100.............10......", "vnavgw {dd},{tt},{ss}:rnd:sat", "alu"),
+        ("vnavgw64_crnd_sat", "FRR", "11010011100.............11......", "vnavgw {dd},{tt},{ss}:crnd:sat", "alu"),
+        ("vmaxub64", "FRR", "11010011110.............000.....", "vmaxub {dd},{tt},{ss}", "alu"),
+        ("vmaxb64", "FRR", "11010011110.............110.....", "vmaxb {dd},{tt},{ss}", "alu"),
+        ("vmaxuh64", "FRR", "11010011110.............010.....", "vmaxuh {dd},{tt},{ss}", "alu"),
+        ("vmaxh64", "FRR", "11010011110.............001.....", "vmaxh {dd},{tt},{ss}", "alu"),
+        ("vmaxw64", "FRR", "11010011110.............011.....", "vmaxw {dd},{tt},{ss}", "alu"),
+        ("vmaxuw64", "FRR", "11010011101.............101.....", "vmaxuw {dd},{tt},{ss}", "alu"),
+        ("vminub64", "FRR", "11010011101.............000.....", "vminub {dd},{tt},{ss}", "alu"),
+        ("vminb64", "FRR", "11010011110.............111.....", "vminb {dd},{tt},{ss}", "alu"),
+        ("vminuh64", "FRR", "11010011101.............010.....", "vminuh {dd},{tt},{ss}", "alu"),
+        ("vminh64", "FRR", "11010011101.............001.....", "vminh {dd},{tt},{ss}", "alu"),
+        ("vminw64", "FRR", "11010011101.............011.....", "vminw {dd},{tt},{ss}", "alu"),
+        ("vminuw64", "FRR", "11010011101.............100.....", "vminuw {dd},{tt},{ss}", "alu"),
+        ("vmux", "FMUX", "11010001........................", "vmux {dd},p{p},{ss},{tt}", "alu"),
+        ("valignb_i", "FASL3", "110000000.......................", "valignb {dd},{tt},{ss},#{imm}", "alu"),
+        ("valignb_p", "FMUX", "110000100.......................", "valignb {dd},{tt},{ss},p{p}", "alu"),
+        ("vspliceb_i", "FASL3", "110000001.......................", "vspliceb {dd},{ss},{tt},#{imm}", "alu"),
+        ("vspliceb_p", "FMUX", "11000010100.....................", "vspliceb {dd},{ss},{tt},p{p}", "alu"),
+        ("vcnegh", "FRR", "1100001111..............01......", "vcnegh {dd},{ss},{t}", "alu"),
+        ("vrcnegh", "FXRR", "11001011001.......1.....111.....", "{xx}+=vrcnegh({ss},{t})", "alu"),
+        ("interleave", "FRS", "10000000110.............101.....", "interleave {dd},{ss}", "alu"),
+        ("deinterleave", "FRS", "10000000110.............100.....", "deinterleave {dd},{ss}", "alu"),
+        ("lfs", "FRR", "1100000110..............110.....", "lfs {dd},{ss},{tt}", "alu"),
+        ("vtrunehb", "FRS", "10001000100.............010.....", "vtrunehb {d},{ss}", "alu"),
+        ("vtrunohb", "FRS", "10001000100.............000.....", "vtrunohb {d},{ss}", "alu"),
+        ("vtrunewh", "FRR", "1100000110..............010.....", "vtrunewh {dd},{ss},{tt}", "alu"),
+        ("vtrunowh", "FRR", "1100000110..............100.....", "vtrunowh {dd},{ss},{tt}", "alu"),
+        ("vtrunehb_p", "FRR", "1100000110..............011.....", "vtrunehb {dd},{ss},{tt}", "alu"),
+        ("vtrunohb_p", "FRR", "1100000110..............101.....", "vtrunohb {dd},{ss},{tt}", "alu"),
+        ("vsplatb", "FRS", "10001100010.............111.....", "vsplatb {d},{s}", "alu"),
+        ("vsplatb_p", "FRS", "1000010001..............10......", "vsplatb {dd},{s}", "alu"),
+        ("vsplath", "FRS", "1000010001..............01......", "vsplath {dd},{s}", "alu"),
+        ("vsxtbh", "FRS", "1000010000..............00......", "vsxtbh {dd},{s}", "alu"),
+        ("vsxthw", "FRS", "1000010000..............10......", "vsxthw {dd},{s}", "alu"),
+        ("vzxtbh", "FRS", "1000010000..............01......", "vzxtbh {dd},{s}", "alu"),
+        ("vzxthw", "FRS", "1000010000..............11......", "vzxthw {dd},{s}", "alu"),
+        ("andn_rr", "FRR", "11110001010.....................", "and {d},{s},~{t}", "alu"),
+        ("orn_rr", "FRR", "11110001110.....................", "or {d},{s},~{t}", "alu"),
+        ("addpc", "FPC6", "0110101001001001................", "add {d},pc,#{imm}", "alu"),
     ] {
         m.insns.push(ins(name, format, pattern, base(), syntax, timing));
     }

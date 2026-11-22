@@ -293,6 +293,236 @@ fn ximm(ext: Option<u32>, raw: u64, shift: u32, bits: u32) -> u32 {
     }
 }
 
+// ---- HX5: 整数意味論の共用ヘルパ ----
+
+/// 対レジスタの値（偶数側が下位ワード、奇数側が上位ワード）。
+fn r64(b: &InterpBackend, i: u32) -> u64 {
+    u64::from(r_get(b, i)) | (u64::from(r_get(b, i + 1)) << 32)
+}
+
+/// 対レジスタへの書き込み（パケット未確定域経由）。
+fn pkt_w64(b: &mut InterpBackend, i: u32, v: u64) {
+    pkt_w(b, i, v as u32);
+    pkt_w(b, i + 1, (v >> 32) as u32);
+}
+
+/// USR.OVF（bit0）を立てる。:sat 系・sat 系で飽和が起きた
+/// ときに粘着セットする。
+fn ovf(b: &mut InterpBackend) {
+    set32(b, usr_ref(), get32(b, usr_ref()) | 1);
+}
+
+/// 符号 n ビット飽和。クランプしたら USR.OVF を立てて
+/// 飽和値を返し、収まれば値のまま返す。
+fn satn(b: &mut InterpBackend, v: i64, n: u32) -> u64 {
+    let hi = (1i64 << (n - 1)) - 1;
+    let lo = -(1i64 << (n - 1));
+    let mask = if n >= 64 { u64::MAX } else { (1u64 << n) - 1 };
+    if v > hi {
+        ovf(b);
+        hi as u64
+    } else if v < lo {
+        ovf(b);
+        (lo as u64) & mask
+    } else {
+        (v as u64) & mask
+    }
+}
+
+/// 符号 n ビット飽和（USR.OVF を立てない内部用）。
+fn satq(v: i64, n: u32) -> u64 {
+    let hi = (1i64 << (n - 1)) - 1;
+    let lo = -(1i64 << (n - 1));
+    v.clamp(lo, hi) as u64
+}
+
+/// 符号なし n ビット飽和。クランプしたら USR.OVF を立てる。
+fn usatn(b: &mut InterpBackend, v: i64, n: u32) -> u64 {
+    let hi = (1i64 << n) - 1;
+    if v > hi {
+        ovf(b);
+        hi as u64
+    } else if v < 0 {
+        ovf(b);
+        0
+    } else {
+        v as u64
+    }
+}
+
+/// 32 ビット符号飽和（sat_32）。
+fn sat32(b: &mut InterpBackend, v: i64) -> u32 {
+    satn(b, v, 32) as u32
+}
+
+/// 16 ビット符号飽和（sat_16）。
+fn sat16(b: &mut InterpBackend, v: i64) -> u32 {
+    satn(b, v, 16) as u32
+}
+
+/// 符号拡張 u32 → i64。
+fn sx32(v: u32) -> i64 {
+    i64::from(v as i32)
+}
+
+/// v の i 番目の符号付き半語（h[i]）。
+fn sh(v: u32, i: u32) -> i64 {
+    i64::from(((v >> (16 * i)) & 0xffff) as u16 as i16)
+}
+
+/// v の i 番目の符号なし半語（uh[i]）。
+fn uh(v: u32, i: u32) -> i64 {
+    i64::from((v >> (16 * i)) & 0xffff)
+}
+
+/// 64 ビット値の i 番目の符号付き半語。
+fn sh64(v: u64, i: u32) -> i64 {
+    i64::from(((v >> (16 * i)) & 0xffff) as u16 as i16)
+}
+
+/// 64 ビット値の i 番目の符号付きバイト。
+fn sb64(v: u64, i: u32) -> i64 {
+    i64::from(((v >> (8 * i)) & 0xff) as u8 as i8)
+}
+
+/// 64 ビット値の i 番目の符号なしバイト。
+fn ub64(v: u64, i: u32) -> u64 {
+    (v >> (8 * i)) & 0xff
+}
+
+/// 64 ビット値の i 番目の符号付きワード。
+fn sw64(v: u64, i: u32) -> i64 {
+    i64::from(((v >> (32 * i)) & 0xffff_ffff) as u32 as i32)
+}
+
+/// 64 ビット値の i 番目の符号なしワード。
+fn uw64(v: u64, i: u32) -> u64 {
+    (v >> (32 * i)) & 0xffff_ffff
+}
+
+/// 4 バイトをまとめて u32 にする。
+fn pack4(b0: u64, b1: u64, b2: u64, b3: u64) -> u32 {
+    (b0 as u32) | ((b1 as u32) << 8) | ((b2 as u32) << 16) | ((b3 as u32) << 24)
+}
+
+/// 述語値（真=0xff、偽=0x00）。
+fn pval(v: bool) -> u8 {
+    if v { 0xff } else { 0 }
+}
+
+/// シフト量（Rt の下位 7 ビットを符号拡張した -64..63）。
+fn shamt(t: u32) -> i32 {
+    ((t as i32) << 25) >> 25
+}
+
+/// 32 ビット asr（shamt>0 は算術右、それ以外は符号拡張しつつ左）。
+fn f_asr32(v: u32, sh: i32) -> u32 {
+    let x = i64::from(v as i32);
+    if sh > 0 {
+        (x >> sh.min(63)) as u32
+    } else {
+        (x << (-sh).min(63)) as u32
+    }
+}
+
+/// 32 ビット asl（shamt>0 は符号拡張しつつ左、それ以外は算術右）。
+fn f_asl32(v: u32, sh: i32) -> u32 {
+    f_asr32(v, -sh)
+}
+
+/// 32 ビット lsr（shamt>0 は論理右、それ以外は論理左）。
+fn f_lsr32(v: u32, sh: i32) -> u32 {
+    let x = u64::from(v);
+    if sh > 0 {
+        (x >> sh.min(63)) as u32
+    } else {
+        (x << (-sh).min(63)) as u32
+    }
+}
+
+/// 32 ビット lsl（shamt>0 は論理左、それ以外は論理右）。
+fn f_lsl32(v: u32, sh: i32) -> u32 {
+    f_lsr32(v, -sh)
+}
+
+/// 64 ビット asr（対レジスタ）。
+fn f_asr64(v: u64, sh: i32) -> u64 {
+    let x = v as i64;
+    if sh > 0 {
+        (x >> sh.min(63)) as u64
+    } else {
+        (x << (-sh).min(63)) as u64
+    }
+}
+
+/// 64 ビット asl（対レジスタ）。
+fn f_asl64(v: u64, sh: i32) -> u64 {
+    f_asr64(v, -sh)
+}
+
+/// 64 ビット lsr（対レジスタ）。
+fn f_lsr64(v: u64, sh: i32) -> u64 {
+    if sh > 0 {
+        v >> sh.min(63)
+    } else {
+        v << (-sh).min(63)
+    }
+}
+
+/// 64 ビット lsl（対レジスタ）。
+fn f_lsl64(v: u64, sh: i32) -> u64 {
+    f_lsr64(v, -sh)
+}
+
+/// asr の :rnd（v + 2^(n-1)）>>n の算術シフト。n=0 は v そのまま。
+fn f_rnd(v: i64, n: u32) -> i64 {
+    if n == 0 {
+        v
+    } else {
+        (v + (1i64 << (n - 1))) >> n
+    }
+}
+
+/// cround 系の half-to-even 丸め。v を n ビット右へ、半端は偶数側。
+fn f_crnd(v: i64, n: u32) -> i64 {
+    if n == 0 {
+        return v;
+    }
+    let r = f_rnd(v, n);
+    let mask = (1i64 << n) - 1;
+    let dropped = v & mask;
+    if dropped == (1i64 << (n - 1)) && r & 1 == 1 {
+        r - 1
+    } else {
+        r
+    }
+}
+
+/// ビット interleave（Rdd = interleave(hi,lo)、out[2i]=lo[i]、
+/// out[2i+1]=hi[i]）。
+fn f_interleave(v: u64) -> u64 {
+    let lo = v & 0xffff_ffff;
+    let hi = v >> 32;
+    let mut r = 0u64;
+    for i in 0..32 {
+        r |= ((lo >> i) & 1) << (2 * i);
+        r |= ((hi >> i) & 1) << (2 * i + 1);
+    }
+    r
+}
+
+/// ビット deinterleave（偶数ビットを下位ワードに、奇数ビットを
+/// 上位ワードに詰める）。
+fn f_deinterleave(v: u64) -> u64 {
+    let mut lo = 0u64;
+    let mut hi = 0u64;
+    for i in 0..32 {
+        lo |= ((v >> (2 * i)) & 1) << i;
+        hi |= ((v >> (2 * i + 1)) & 1) << i;
+    }
+    (hi << 32) | lo
+}
+
 /// duplex subinsn の 4 ビット部分集合符号 → 汎用レジスタ番号
 /// （r0-7→0-7、r16-23→8-15）。
 /// Ref: SPEC-HEXAGON-PRM (V79) sub-instructions.
@@ -394,6 +624,2003 @@ pub fn exec(b: &mut InterpBackend, insn: Insn, word: u128, cx: Ctx) -> Result<bo
             let v = (r_get(b, ops[1] as u32) as i32) > (r_get(b, ops[2] as u32) as i32);
             pkt_pw(b, ops[0] as u32, if v { 0xff } else { 0 });
         }
+
+        // ---- HX5: ALU32 算術・論理 ----
+        Insn::AddSatRr => {
+            let v = sx32(r_get(b, ops[1] as u32)) + sx32(r_get(b, ops[2] as u32));
+            let v = sat32(b, v);
+            pkt_w(b, ops[0] as u32, v);
+        }
+        Insn::AndRr => pkt_w(
+            b,
+            ops[0] as u32,
+            r_get(b, ops[1] as u32) & r_get(b, ops[2] as u32),
+        ),
+        Insn::AndnRr => pkt_w(
+            b,
+            ops[0] as u32,
+            r_get(b, ops[1] as u32) & !r_get(b, ops[2] as u32),
+        ),
+        Insn::Andn2Rr => pkt_w(
+            b,
+            ops[0] as u32,
+            r_get(b, ops[2] as u32) & !r_get(b, ops[1] as u32),
+        ),
+        Insn::OrRr => pkt_w(
+            b,
+            ops[0] as u32,
+            r_get(b, ops[1] as u32) | r_get(b, ops[2] as u32),
+        ),
+        Insn::OrnRr => pkt_w(
+            b,
+            ops[0] as u32,
+            r_get(b, ops[1] as u32) | !r_get(b, ops[2] as u32),
+        ),
+        Insn::Orn2Rr => pkt_w(
+            b,
+            ops[0] as u32,
+            r_get(b, ops[2] as u32) | !r_get(b, ops[1] as u32),
+        ),
+        Insn::XorRr => pkt_w(
+            b,
+            ops[0] as u32,
+            r_get(b, ops[1] as u32) ^ r_get(b, ops[2] as u32),
+        ),
+        Insn::SubRr => pkt_w(
+            b,
+            ops[0] as u32,
+            r_get(b, ops[2] as u32).wrapping_sub(r_get(b, ops[1] as u32)),
+        ),
+        Insn::SubSatRr => {
+            let v = sx32(r_get(b, ops[2] as u32)) - sx32(r_get(b, ops[1] as u32));
+            let v = sat32(b, v);
+            pkt_w(b, ops[0] as u32, v);
+        }
+        Insn::AndRi => {
+            let v = r_get(b, ops[1] as u32) & ximm(cx.ext, ops[2], 0, 10);
+            pkt_w(b, ops[0] as u32, v);
+        }
+        Insn::OrRi => {
+            let v = r_get(b, ops[1] as u32) | ximm(cx.ext, ops[2], 0, 10);
+            pkt_w(b, ops[0] as u32, v);
+        }
+        Insn::SubIr => {
+            let v = ximm(cx.ext, ops[2], 0, 10).wrapping_sub(r_get(b, ops[1] as u32));
+            pkt_w(b, ops[0] as u32, v);
+        }
+        // ---- 符号/ゼロ拡張・半語シフト ----
+        Insn::Aslh => {
+            let v = r_get(b, ops[1] as u32);
+            pkt_w(b, ops[0] as u32, v << 16);
+        }
+        Insn::Asrh => {
+            let v = r_get(b, ops[1] as u32);
+            pkt_w(b, ops[0] as u32, ((v as i32) >> 16) as u32);
+        }
+        Insn::Sxtb => {
+            let v = r_get(b, ops[1] as u32);
+            pkt_w(b, ops[0] as u32, sext(u64::from(v), 8));
+        }
+        Insn::Sxth => {
+            let v = r_get(b, ops[1] as u32);
+            pkt_w(b, ops[0] as u32, sext(u64::from(v), 16));
+        }
+        Insn::Zxth => {
+            let v = r_get(b, ops[1] as u32);
+            pkt_w(b, ops[0] as u32, v & 0xffff);
+        }
+        // ---- 半語ベクトル（32 ビット）----
+        Insn::VaddhRr
+        | Insn::VaddhSatRr
+        | Insn::VadduhSatRr
+        | Insn::VavghRr
+        | Insn::VavghRndRr
+        | Insn::VnavghRr
+        | Insn::VsubhRr
+        | Insn::VsubhSatRr
+        | Insn::VsubuhSatRr => {
+            let s = r_get(b, ops[1] as u32);
+            let t = r_get(b, ops[2] as u32);
+            let mut r = 0u32;
+            for i in 0..2 {
+                let v = match insn {
+                    Insn::VaddhRr => sh(s, i).wrapping_add(sh(t, i)) & 0xffff,
+                    Insn::VaddhSatRr => {
+                        i64::from(satn(b, sh(s, i) + sh(t, i), 16) as u32 as i32) & 0xffff
+                    }
+                    Insn::VadduhSatRr => {
+                        i64::from(usatn(b, uh(s, i) + uh(t, i), 16) as u32) & 0xffff
+                    }
+                    Insn::VavghRr => ((sh(s, i) + sh(t, i)) >> 1) & 0xffff,
+                    Insn::VavghRndRr => ((sh(s, i) + sh(t, i) + 1) >> 1) & 0xffff,
+                    Insn::VnavghRr => ((sh(t, i) - sh(s, i)) >> 1) & 0xffff,
+                    Insn::VsubhRr => sh(t, i).wrapping_sub(sh(s, i)) & 0xffff,
+                    Insn::VsubhSatRr => {
+                        i64::from(satn(b, sh(t, i) - sh(s, i), 16) as u32 as i32) & 0xffff
+                    }
+                    Insn::VsubuhSatRr => {
+                        i64::from(usatn(b, uh(t, i) - uh(s, i), 16) as u32) & 0xffff
+                    }
+                    _ => unreachable!(),
+                };
+                r |= ((v as u32) & 0xffff) << (16 * i);
+            }
+            pkt_w(b, ops[0] as u32, r);
+        }
+        // ---- combine・packhl・mux ----
+        Insn::CombineRr => {
+            let v = u64::from(r_get(b, ops[2] as u32)) | (u64::from(r_get(b, ops[1] as u32)) << 32);
+            pkt_w64(b, ops[0] as u32, v);
+        }
+        Insn::CombHh | Insn::CombHl | Insn::CombLh | Insn::CombLl => {
+            let s = r_get(b, ops[1] as u32);
+            let t = r_get(b, ops[2] as u32);
+            let (th, sl) = match insn {
+                Insn::CombHh => (t >> 16, s >> 16),
+                Insn::CombHl => (t >> 16, s & 0xffff),
+                Insn::CombLh => (t & 0xffff, s >> 16),
+                _ => (t & 0xffff, s & 0xffff),
+            };
+            pkt_w(b, ops[0] as u32, (th << 16) | sl);
+        }
+        Insn::CombRi => {
+            let v =
+                u64::from(ximm(cx.ext, ops[2], 0, 8)) | (u64::from(r_get(b, ops[1] as u32)) << 32);
+            pkt_w64(b, ops[0] as u32, v);
+        }
+        Insn::CombIr => {
+            let v =
+                u64::from(r_get(b, ops[1] as u32)) | (u64::from(ximm(cx.ext, ops[2], 0, 8)) << 32);
+            pkt_w64(b, ops[0] as u32, v);
+        }
+        Insn::CombIi => {
+            let v = u64::from(ximm(cx.ext, ops[2], 0, 8))
+                | (u64::from(ximm(cx.ext, ops[1], 0, 8)) << 32);
+            pkt_w64(b, ops[0] as u32, v);
+        }
+        Insn::CombIu6 => {
+            let v = u64::from(ops[2] as u32) | (u64::from(ximm(cx.ext, ops[1], 0, 8)) << 32);
+            pkt_w64(b, ops[0] as u32, v);
+        }
+        Insn::Packhl => {
+            let s = r_get(b, ops[1] as u32);
+            let t = r_get(b, ops[2] as u32);
+            let lo = (t & 0xffff) | ((s & 0xffff) << 16);
+            let hi = (t >> 16) | (s & 0xffff_0000);
+            pkt_w64(b, ops[0] as u32, (u64::from(hi) << 32) | u64::from(lo));
+        }
+        Insn::MuxRr => {
+            let v = if pred(b, ops[1] as u32) {
+                r_get(b, ops[2] as u32)
+            } else {
+                r_get(b, ops[3] as u32)
+            };
+            pkt_w(b, ops[0] as u32, v);
+        }
+        Insn::MuxRi => {
+            let v = if pred(b, ops[1] as u32) {
+                r_get(b, ops[2] as u32)
+            } else {
+                ximm(cx.ext, ops[3], 0, 8)
+            };
+            pkt_w(b, ops[0] as u32, v);
+        }
+        Insn::MuxIr => {
+            let v = if pred(b, ops[1] as u32) {
+                ximm(cx.ext, ops[3], 0, 8)
+            } else {
+                r_get(b, ops[2] as u32)
+            };
+            pkt_w(b, ops[0] as u32, v);
+        }
+        Insn::MuxIi => {
+            let v = if pred(b, ops[1] as u32) {
+                ximm(cx.ext, ops[2], 0, 8)
+            } else {
+                ximm(cx.ext, ops[3], 0, 8)
+            };
+            pkt_w(b, ops[0] as u32, v);
+        }
+        // ---- 比較 → 述語 ----
+        Insn::CmpgtuRr => pkt_pw(
+            b,
+            ops[0] as u32,
+            pval(r_get(b, ops[1] as u32) > r_get(b, ops[2] as u32)),
+        ),
+        Insn::CmpeqnRr => pkt_pw(
+            b,
+            ops[0] as u32,
+            pval(r_get(b, ops[1] as u32) != r_get(b, ops[2] as u32)),
+        ),
+        Insn::CmpgtnRr => pkt_pw(
+            b,
+            ops[0] as u32,
+            pval((r_get(b, ops[1] as u32) as i32) <= (r_get(b, ops[2] as u32) as i32)),
+        ),
+        Insn::CmpgtunRr => pkt_pw(
+            b,
+            ops[0] as u32,
+            pval(r_get(b, ops[1] as u32) <= r_get(b, ops[2] as u32)),
+        ),
+        Insn::CmpeqI => pkt_pw(
+            b,
+            ops[0] as u32,
+            pval(r_get(b, ops[1] as u32) == ximm(cx.ext, ops[2], 0, 10)),
+        ),
+        Insn::CmpgtI => pkt_pw(
+            b,
+            ops[0] as u32,
+            pval((r_get(b, ops[1] as u32) as i32) > (ximm(cx.ext, ops[2], 0, 10) as i32)),
+        ),
+        Insn::CmpgtuI => pkt_pw(
+            b,
+            ops[0] as u32,
+            pval(r_get(b, ops[1] as u32) > ximm(cx.ext, ops[2], 0, 9)),
+        ),
+        Insn::CmpeqnI => pkt_pw(
+            b,
+            ops[0] as u32,
+            pval(r_get(b, ops[1] as u32) != ximm(cx.ext, ops[2], 0, 10)),
+        ),
+        Insn::CmpgtnI => pkt_pw(
+            b,
+            ops[0] as u32,
+            pval((r_get(b, ops[1] as u32) as i32) <= (ximm(cx.ext, ops[2], 0, 10) as i32)),
+        ),
+        Insn::CmpgtunI => pkt_pw(
+            b,
+            ops[0] as u32,
+            pval(r_get(b, ops[1] as u32) <= ximm(cx.ext, ops[2], 0, 9)),
+        ),
+        Insn::CmpeqRdRr => pkt_w(
+            b,
+            ops[0] as u32,
+            u32::from(r_get(b, ops[1] as u32) == r_get(b, ops[2] as u32)),
+        ),
+        Insn::CmpeqnRdRr => pkt_w(
+            b,
+            ops[0] as u32,
+            u32::from(r_get(b, ops[1] as u32) != r_get(b, ops[2] as u32)),
+        ),
+        Insn::CmpeqRdI => pkt_w(
+            b,
+            ops[0] as u32,
+            u32::from(r_get(b, ops[1] as u32) == ximm(cx.ext, ops[2], 0, 8)),
+        ),
+        Insn::CmpeqnRdI => pkt_w(
+            b,
+            ops[0] as u32,
+            u32::from(r_get(b, ops[1] as u32) != ximm(cx.ext, ops[2], 0, 8)),
+        ),
+        // ---- バイト・半語比較 ----
+        Insn::CmpbEq
+        | Insn::CmpbGt
+        | Insn::CmpbGtu
+        | Insn::CmphEq
+        | Insn::CmphGt
+        | Insn::CmphGtu => {
+            let s = r_get(b, ops[1] as u32);
+            let t = r_get(b, ops[2] as u32);
+            let v = match insn {
+                Insn::CmpbEq => s & 0xff == t & 0xff,
+                Insn::CmpbGt => (s & 0xff) as u8 as i8 > (t & 0xff) as u8 as i8,
+                Insn::CmpbGtu => s & 0xff > t & 0xff,
+                Insn::CmphEq => s & 0xffff == t & 0xffff,
+                Insn::CmphGt => (s & 0xffff) as u16 as i16 > (t & 0xffff) as u16 as i16,
+                _ => s & 0xffff > t & 0xffff,
+            };
+            pkt_pw(b, ops[0] as u32, pval(v));
+        }
+        Insn::CmpbEqI
+        | Insn::CmpbGtI
+        | Insn::CmpbGtuI
+        | Insn::CmphEqI
+        | Insn::CmphGtI
+        | Insn::CmphGtuI => {
+            let s = r_get(b, ops[1] as u32);
+            let imm8 = ops[2] as u32;
+            let v = match insn {
+                Insn::CmpbEqI => s & 0xff == imm8 & 0xff,
+                Insn::CmpbGtI => (s & 0xff) as u8 as i8 > (sext(ops[2], 8) & 0xff) as u8 as i8,
+                Insn::CmpbGtuI => s & 0xff > imm8 & 0x7f,
+                Insn::CmphEqI => s & 0xffff == imm8 & 0xffff,
+                Insn::CmphGtI => {
+                    (s & 0xffff) as u16 as i16 > (sext(ops[2], 8) & 0xffff) as u16 as i16
+                }
+                _ => s & 0xffff > imm8 & 0x7f,
+            };
+            pkt_pw(b, ops[0] as u32, pval(v));
+        }
+        // ---- 述語演算・転送 ----
+        Insn::Pand => pkt_pw(
+            b,
+            ops[0] as u32,
+            p_get(b, ops[2] as u32) & p_get(b, ops[1] as u32),
+        ),
+        Insn::Por => pkt_pw(
+            b,
+            ops[0] as u32,
+            p_get(b, ops[2] as u32) | p_get(b, ops[1] as u32),
+        ),
+        Insn::Pxor => pkt_pw(
+            b,
+            ops[0] as u32,
+            p_get(b, ops[1] as u32) ^ p_get(b, ops[2] as u32),
+        ),
+        Insn::Pandn => pkt_pw(
+            b,
+            ops[0] as u32,
+            p_get(b, ops[2] as u32) & !p_get(b, ops[1] as u32),
+        ),
+        Insn::Porn => pkt_pw(
+            b,
+            ops[0] as u32,
+            p_get(b, ops[2] as u32) | !p_get(b, ops[1] as u32),
+        ),
+        Insn::Pnot => pkt_pw(b, ops[0] as u32, !p_get(b, ops[1] as u32)),
+        Insn::Pfc9 | Insn::Pfc9n => {
+            // tmp.h[0]=tmp.h[1]=(Ps<<8)|Pt; 9 回の AND 縮退で
+            // 「9 連続ビットが立つか」を検出する。
+            let v = ((u64::from(p_get(b, ops[1] as u32)) << 8)
+                | u64::from(p_get(b, ops[2] as u32)))
+                * 0x1_0001;
+            let mut v = v;
+            for _ in 1..9 {
+                v &= v >> 1;
+            }
+            pkt_pw(b, ops[0] as u32, pval((v != 0) ^ (insn == Insn::Pfc9n)));
+        }
+        Insn::Pany8 => pkt_pw(b, ops[0] as u32, pval(p_get(b, ops[1] as u32) != 0)),
+        Insn::Pall8 => pkt_pw(b, ops[0] as u32, pval(p_get(b, ops[1] as u32) == 0xff)),
+        Insn::PandA
+        | Insn::PandO
+        | Insn::PorA
+        | Insn::PorO
+        | Insn::PandAn
+        | Insn::PandOn
+        | Insn::PorAn
+        | Insn::PorOn => {
+            let (s, t, u) = (
+                p_get(b, ops[1] as u32),
+                p_get(b, ops[2] as u32),
+                p_get(b, ops[3] as u32),
+            );
+            let un = matches!(
+                insn,
+                Insn::PandAn | Insn::PandOn | Insn::PorAn | Insn::PorOn
+            );
+            let u2 = if un { !u } else { u };
+            let inner = if matches!(insn, Insn::PandA | Insn::PandAn | Insn::PorA | Insn::PorAn) {
+                t & u2
+            } else {
+                t | u2
+            };
+            let outer = if matches!(
+                insn,
+                Insn::PandA | Insn::PandO | Insn::PandAn | Insn::PandOn
+            ) {
+                s & inner
+            } else {
+                s | inner
+            };
+            pkt_pw(b, ops[0] as u32, outer);
+        }
+        Insn::RdPs => pkt_w(b, ops[0] as u32, u32::from(p_get(b, ops[1] as u32))),
+        Insn::PdRs => pkt_pw(b, ops[0] as u32, r_get(b, ops[1] as u32) as u8),
+
+        // ---- HX5: XTYPE 64 ビット対レジスタ演算 ----
+        Insn::Add64 => pkt_w64(
+            b,
+            ops[0] as u32,
+            r64(b, ops[1] as u32).wrapping_add(r64(b, ops[2] as u32)),
+        ),
+        Insn::Add64Sat => {
+            let v = (r64(b, ops[1] as u32) as i64 as i128) + (r64(b, ops[2] as u32) as i64 as i128);
+            let v = if v > i64::MAX as i128 {
+                ovf(b);
+                i64::MAX as u64
+            } else if v < i64::MIN as i128 {
+                ovf(b);
+                i64::MIN as u64
+            } else {
+                v as u64
+            };
+            pkt_w64(b, ops[0] as u32, v);
+        }
+        Insn::Add64RawLo => pkt_w64(
+            b,
+            ops[0] as u32,
+            r64(b, ops[1] as u32).wrapping_add(r64(b, ops[2] as u32)) & 0xffff_ffff,
+        ),
+        Insn::Add64RawHi => pkt_w64(
+            b,
+            ops[0] as u32,
+            r64(b, ops[1] as u32).wrapping_add(r64(b, ops[2] as u32)) & 0xffff_ffff_0000_0000,
+        ),
+        Insn::Sub64 => pkt_w64(
+            b,
+            ops[0] as u32,
+            r64(b, ops[2] as u32).wrapping_sub(r64(b, ops[1] as u32)),
+        ),
+        Insn::And64 => pkt_w64(
+            b,
+            ops[0] as u32,
+            r64(b, ops[1] as u32) & r64(b, ops[2] as u32),
+        ),
+        Insn::Andn64 => pkt_w64(
+            b,
+            ops[0] as u32,
+            r64(b, ops[2] as u32) & !r64(b, ops[1] as u32),
+        ),
+        Insn::Or64 => pkt_w64(
+            b,
+            ops[0] as u32,
+            r64(b, ops[1] as u32) | r64(b, ops[2] as u32),
+        ),
+        Insn::Orn64 => pkt_w64(
+            b,
+            ops[0] as u32,
+            r64(b, ops[2] as u32) | !r64(b, ops[1] as u32),
+        ),
+        Insn::Xor64 => pkt_w64(
+            b,
+            ops[0] as u32,
+            r64(b, ops[1] as u32) ^ r64(b, ops[2] as u32),
+        ),
+        Insn::Not64 => pkt_w64(b, ops[0] as u32, !r64(b, ops[1] as u32)),
+        Insn::Neg64 => pkt_w64(
+            b,
+            ops[0] as u32,
+            (r64(b, ops[1] as u32) as i64).wrapping_neg() as u64,
+        ),
+        Insn::Abs64 => {
+            let v = r64(b, ops[1] as u32) as i64;
+            pkt_w64(b, ops[0] as u32, v.unsigned_abs());
+        }
+        Insn::Abs => {
+            let v = r_get(b, ops[1] as u32) as i32;
+            pkt_w(b, ops[0] as u32, v.unsigned_abs());
+        }
+        Insn::AbsSat | Insn::NegSat => {
+            let v = r_get(b, ops[1] as u32) as i32;
+            let v = if v == i32::MIN {
+                ovf(b);
+                i32::MAX
+            } else if insn == Insn::AbsSat {
+                v.abs()
+            } else {
+                -v
+            };
+            pkt_w(b, ops[0] as u32, v as u32);
+        }
+        Insn::Sxtw => pkt_w64(
+            b,
+            ops[0] as u32,
+            r_get(b, ops[1] as u32) as i32 as i64 as u64,
+        ),
+        Insn::Modwrap => {
+            let s = r_get(b, ops[1] as u32);
+            let t = r_get(b, ops[2] as u32);
+            let v = if (s as i32) < 0 {
+                s.wrapping_add(t)
+            } else if s >= t {
+                s - t
+            } else {
+                s
+            };
+            pkt_w(b, ops[0] as u32, v);
+        }
+        // ---- キャリー付き加減算 ----
+        Insn::AddCarry | Insn::SubCarry => {
+            let p = ops[1] as u32;
+            let s = r64(b, ops[2] as u32);
+            let t = r64(b, ops[3] as u32);
+            let c = u64::from(p_get(b, p) & 1);
+            let (v, carry) = if insn == Insn::AddCarry {
+                let (v, c1) = s.overflowing_add(t);
+                let (v, c2) = v.overflowing_add(c);
+                (v, c1 | c2)
+            } else {
+                let t = !t;
+                let (v, c1) = s.overflowing_add(t);
+                let (v, c2) = v.overflowing_add(c);
+                (v, c1 | c2)
+            };
+            pkt_w64(b, ops[0] as u32, v);
+            pkt_pw(b, p, pval(carry));
+        }
+        // ---- min/max ----
+        Insn::Max => pkt_w(
+            b,
+            ops[0] as u32,
+            (r_get(b, ops[1] as u32) as i32).max(r_get(b, ops[2] as u32) as i32) as u32,
+        ),
+        Insn::Maxu => pkt_w(
+            b,
+            ops[0] as u32,
+            r_get(b, ops[1] as u32).max(r_get(b, ops[2] as u32)),
+        ),
+        Insn::Min => pkt_w(
+            b,
+            ops[0] as u32,
+            (r_get(b, ops[2] as u32) as i32).min(r_get(b, ops[1] as u32) as i32) as u32,
+        ),
+        Insn::Minu => pkt_w(
+            b,
+            ops[0] as u32,
+            r_get(b, ops[2] as u32).min(r_get(b, ops[1] as u32)),
+        ),
+        Insn::Max64 => pkt_w64(
+            b,
+            ops[0] as u32,
+            (r64(b, ops[1] as u32) as i64).max(r64(b, ops[2] as u32) as i64) as u64,
+        ),
+        Insn::Maxu64 => pkt_w64(
+            b,
+            ops[0] as u32,
+            r64(b, ops[1] as u32).max(r64(b, ops[2] as u32)),
+        ),
+        Insn::Min64 => pkt_w64(
+            b,
+            ops[0] as u32,
+            (r64(b, ops[2] as u32) as i64).min(r64(b, ops[1] as u32) as i64) as u64,
+        ),
+        Insn::Minu64 => pkt_w64(
+            b,
+            ops[0] as u32,
+            r64(b, ops[2] as u32).min(r64(b, ops[1] as u32)),
+        ),
+        // ---- 64 ビット比較 ----
+        Insn::Cmp64Eq => pkt_pw(
+            b,
+            ops[0] as u32,
+            pval(r64(b, ops[1] as u32) == r64(b, ops[2] as u32)),
+        ),
+        Insn::Cmp64Gt => pkt_pw(
+            b,
+            ops[0] as u32,
+            pval((r64(b, ops[1] as u32) as i64) > (r64(b, ops[2] as u32) as i64)),
+        ),
+        Insn::Cmp64Gtu => pkt_pw(
+            b,
+            ops[0] as u32,
+            pval(r64(b, ops[1] as u32) > r64(b, ops[2] as u32)),
+        ),
+        // ---- 半語加減算 ----
+        Insn::AddLl
+        | Insn::AddLh
+        | Insn::AddLlSat
+        | Insn::AddLhSat
+        | Insn::AddLlS16
+        | Insn::AddLhS16
+        | Insn::AddHlS16
+        | Insn::AddHhS16
+        | Insn::AddLlSatS16
+        | Insn::AddLhSatS16
+        | Insn::AddHlSatS16
+        | Insn::AddHhSatS16
+        | Insn::SubLl
+        | Insn::SubLh
+        | Insn::SubLlSat
+        | Insn::SubLhSat
+        | Insn::SubLlS16
+        | Insn::SubLhS16
+        | Insn::SubHlS16
+        | Insn::SubHhS16
+        | Insn::SubLlSatS16
+        | Insn::SubLhSatS16
+        | Insn::SubHlSatS16
+        | Insn::SubHhSatS16 => {
+            let s = r_get(b, ops[1] as u32);
+            let t = r_get(b, ops[2] as u32);
+            // 半語選択: {t_half, s_half, shift16, sat}。s の H 選択は
+            // *_lh/_hh 系のみ（t は L の _l_ 系と H の _h_ 系）。
+            let (th, sh_, s16, is_sat, is_sub) = match insn {
+                Insn::AddLl | Insn::AddLlSat | Insn::AddLlS16 | Insn::AddLlSatS16 => (
+                    0,
+                    0,
+                    insn != Insn::AddLl && insn != Insn::AddLlSat,
+                    insn != Insn::AddLl && insn != Insn::AddLlS16,
+                    false,
+                ),
+                Insn::AddLh | Insn::AddLhSat | Insn::AddLhS16 | Insn::AddLhSatS16 => (
+                    0,
+                    1,
+                    insn != Insn::AddLh && insn != Insn::AddLhSat,
+                    insn != Insn::AddLh && insn != Insn::AddLhS16,
+                    false,
+                ),
+                Insn::AddHlS16 => (1, 0, true, false, false),
+                Insn::AddHhS16 => (1, 1, true, false, false),
+                Insn::AddHlSatS16 => (1, 0, true, true, false),
+                Insn::AddHhSatS16 => (1, 1, true, true, false),
+                Insn::SubLl | Insn::SubLlSat | Insn::SubLlS16 | Insn::SubLlSatS16 => (
+                    0,
+                    0,
+                    insn != Insn::SubLl && insn != Insn::SubLlSat,
+                    insn != Insn::SubLl && insn != Insn::SubLlS16,
+                    true,
+                ),
+                Insn::SubLh | Insn::SubLhSat | Insn::SubLhS16 | Insn::SubLhSatS16 => (
+                    0,
+                    1,
+                    insn != Insn::SubLh && insn != Insn::SubLhSat,
+                    insn != Insn::SubLh && insn != Insn::SubLhS16,
+                    true,
+                ),
+                Insn::SubHlS16 => (1, 0, true, false, true),
+                Insn::SubHhS16 => (1, 1, true, false, true),
+                Insn::SubHlSatS16 => (1, 0, true, true, true),
+                _ => (1, 1, true, true, true),
+            };
+            let a = sh(t, th);
+            let b_ = sh(s, sh_);
+            let v = if is_sub { a - b_ } else { a + b_ };
+            let v = if is_sat {
+                let c = v.clamp(-0x8000, 0x7fff);
+                if c != v {
+                    ovf(b);
+                }
+                c
+            } else {
+                v
+            };
+            let v = if s16 { (v as u32) << 16 } else { v as u32 };
+            let v = if !s16 {
+                sext(u64::from(v & 0xffff), 16)
+            } else {
+                v
+            };
+            pkt_w(b, ops[0] as u32, v);
+        }
+        // ---- シフト（即値形）----
+        Insn::AsrI => pkt_w(
+            b,
+            ops[0] as u32,
+            f_asr32(r_get(b, ops[1] as u32), ops[2] as u32 as i32),
+        ),
+        Insn::LsrI => pkt_w(
+            b,
+            ops[0] as u32,
+            f_lsr32(r_get(b, ops[1] as u32), ops[2] as u32 as i32),
+        ),
+        Insn::AslI => pkt_w(
+            b,
+            ops[0] as u32,
+            f_asl32(r_get(b, ops[1] as u32), ops[2] as u32 as i32),
+        ),
+        Insn::AslISat => {
+            let v = sx32(r_get(b, ops[1] as u32)) << (ops[2] as u32);
+            let v = sat32(b, v);
+            pkt_w(b, ops[0] as u32, v);
+        }
+        Insn::RolI => pkt_w(
+            b,
+            ops[0] as u32,
+            r_get(b, ops[1] as u32).rotate_left(ops[2] as u32),
+        ),
+        Insn::AsrIRnd => {
+            let v = f_rnd(sx32(r_get(b, ops[1] as u32)), ops[2] as u32);
+            pkt_w(b, ops[0] as u32, v as u32);
+        }
+        Insn::Asr64I => pkt_w64(
+            b,
+            ops[0] as u32,
+            f_asr64(r64(b, ops[1] as u32), ops[2] as u32 as i32),
+        ),
+        Insn::Lsr64I => pkt_w64(
+            b,
+            ops[0] as u32,
+            f_lsr64(r64(b, ops[1] as u32), ops[2] as u32 as i32),
+        ),
+        Insn::Asl64I => pkt_w64(
+            b,
+            ops[0] as u32,
+            f_asl64(r64(b, ops[1] as u32), ops[2] as u32 as i32),
+        ),
+        Insn::Rol64I => pkt_w64(
+            b,
+            ops[0] as u32,
+            r64(b, ops[1] as u32).rotate_left(ops[2] as u32),
+        ),
+        Insn::Asr64IRnd => {
+            let v = f_rnd(r64(b, ops[1] as u32) as i64, ops[2] as u32);
+            pkt_w64(b, ops[0] as u32, v as u64);
+        }
+        // ---- シフト（レジスタ形）----
+        Insn::AsrRr => pkt_w(
+            b,
+            ops[0] as u32,
+            f_asr32(r_get(b, ops[1] as u32), shamt(r_get(b, ops[2] as u32))),
+        ),
+        Insn::AslRr => pkt_w(
+            b,
+            ops[0] as u32,
+            f_asl32(r_get(b, ops[1] as u32), shamt(r_get(b, ops[2] as u32))),
+        ),
+        Insn::LsrRr => pkt_w(
+            b,
+            ops[0] as u32,
+            f_lsr32(r_get(b, ops[1] as u32), shamt(r_get(b, ops[2] as u32))),
+        ),
+        Insn::LslRr => pkt_w(
+            b,
+            ops[0] as u32,
+            f_lsl32(r_get(b, ops[1] as u32), shamt(r_get(b, ops[2] as u32))),
+        ),
+        Insn::AslRrSat | Insn::AsrRrSat => {
+            let v = r_get(b, ops[1] as u32);
+            let sh = shamt(r_get(b, ops[2] as u32));
+            let r = if insn == Insn::AslRrSat {
+                if sh > 0 {
+                    sat32(b, sx32(v) << sh)
+                } else {
+                    f_asl32(v, sh)
+                }
+            } else if sh > 0 {
+                f_asr32(v, sh)
+            } else {
+                sat32(b, sx32(v) << (-sh))
+            };
+            pkt_w(b, ops[0] as u32, r);
+        }
+        Insn::Asr64Rr => pkt_w64(
+            b,
+            ops[0] as u32,
+            f_asr64(r64(b, ops[1] as u32), shamt(r_get(b, ops[2] as u32))),
+        ),
+        Insn::Asl64Rr => pkt_w64(
+            b,
+            ops[0] as u32,
+            f_asl64(r64(b, ops[1] as u32), shamt(r_get(b, ops[2] as u32))),
+        ),
+        Insn::Lsr64Rr => pkt_w64(
+            b,
+            ops[0] as u32,
+            f_lsr64(r64(b, ops[1] as u32), shamt(r_get(b, ops[2] as u32))),
+        ),
+        Insn::Lsl64Rr => pkt_w64(
+            b,
+            ops[0] as u32,
+            f_lsl64(r64(b, ops[1] as u32), shamt(r_get(b, ops[2] as u32))),
+        ),
+        Insn::LslIr => {
+            // s は 32 ビット値として zxt してから論理シフトする。
+            let s = u64::from(sext(ops[1], 6));
+            let sh = shamt(r_get(b, ops[2] as u32));
+            let v = if sh > 0 {
+                (s << sh.min(63)) as u32
+            } else {
+                (s >> (-sh).min(63)) as u32
+            };
+            pkt_w(b, ops[0] as u32, v);
+        }
+        Insn::Addasl => pkt_w(
+            b,
+            ops[0] as u32,
+            r_get(b, ops[2] as u32)
+                .wrapping_add(r_get(b, ops[1] as u32).wrapping_shl(ops[3] as u32)),
+        ),
+        // ---- シフト累積（32/64、即値/レジスタ）----
+        Insn::AddAsrI
+        | Insn::AddLsrI
+        | Insn::AddAslI
+        | Insn::AddRolI
+        | Insn::SubAsrI
+        | Insn::SubLsrI
+        | Insn::SubAslI
+        | Insn::SubRolI
+        | Insn::AndAsrI
+        | Insn::AndLsrI
+        | Insn::AndAslI
+        | Insn::AndRolI
+        | Insn::OrAsrI
+        | Insn::OrLsrI
+        | Insn::OrAslI
+        | Insn::OrRolI
+        | Insn::XorLsrI
+        | Insn::XorAslI
+        | Insn::XorRolI => {
+            let x = ops[0] as u32;
+            let s = r_get(b, ops[1] as u32);
+            let n = ops[2] as u32 as i32;
+            let v = match insn {
+                Insn::AddAsrI | Insn::SubAsrI | Insn::AndAsrI | Insn::OrAsrI => f_asr32(s, n),
+                Insn::AddLsrI | Insn::SubLsrI | Insn::AndLsrI | Insn::OrLsrI | Insn::XorLsrI => {
+                    f_lsr32(s, n)
+                }
+                Insn::AddAslI | Insn::SubAslI | Insn::AndAslI | Insn::OrAslI | Insn::XorAslI => {
+                    f_asl32(s, n)
+                }
+                _ => s.rotate_left(n as u32),
+            };
+            let old = r_get(b, x);
+            let r = match insn {
+                Insn::AddAsrI | Insn::AddLsrI | Insn::AddAslI | Insn::AddRolI => {
+                    old.wrapping_add(v)
+                }
+                Insn::SubAsrI | Insn::SubLsrI | Insn::SubAslI | Insn::SubRolI => {
+                    old.wrapping_sub(v)
+                }
+                Insn::AndAsrI | Insn::AndLsrI | Insn::AndAslI | Insn::AndRolI => old & v,
+                Insn::OrAsrI | Insn::OrLsrI | Insn::OrAslI | Insn::OrRolI => old | v,
+                _ => old ^ v,
+            };
+            pkt_w(b, x, r);
+        }
+        Insn::Add64AsrI
+        | Insn::Add64LsrI
+        | Insn::Add64AslI
+        | Insn::Add64RolI
+        | Insn::Sub64AsrI
+        | Insn::Sub64LsrI
+        | Insn::Sub64AslI
+        | Insn::Sub64RolI
+        | Insn::And64AsrI
+        | Insn::And64LsrI
+        | Insn::And64AslI
+        | Insn::And64RolI
+        | Insn::Or64AsrI
+        | Insn::Or64LsrI
+        | Insn::Or64AslI
+        | Insn::Or64RolI
+        | Insn::Xor64LsrI
+        | Insn::Xor64AslI
+        | Insn::Xor64RolI => {
+            let x = ops[0] as u32;
+            let s = r64(b, ops[1] as u32);
+            let n = ops[2] as u32 as i32;
+            let v = match insn {
+                Insn::Add64AsrI | Insn::Sub64AsrI | Insn::And64AsrI | Insn::Or64AsrI => {
+                    f_asr64(s, n)
+                }
+                Insn::Add64LsrI
+                | Insn::Sub64LsrI
+                | Insn::And64LsrI
+                | Insn::Or64LsrI
+                | Insn::Xor64LsrI => f_lsr64(s, n),
+                Insn::Add64AslI
+                | Insn::Sub64AslI
+                | Insn::And64AslI
+                | Insn::Or64AslI
+                | Insn::Xor64AslI => f_asl64(s, n),
+                _ => s.rotate_left(n as u32),
+            };
+            let old = r64(b, x);
+            let r = match insn {
+                Insn::Add64AsrI | Insn::Add64LsrI | Insn::Add64AslI | Insn::Add64RolI => {
+                    old.wrapping_add(v)
+                }
+                Insn::Sub64AsrI | Insn::Sub64LsrI | Insn::Sub64AslI | Insn::Sub64RolI => {
+                    old.wrapping_sub(v)
+                }
+                Insn::And64AsrI | Insn::And64LsrI | Insn::And64AslI | Insn::And64RolI => old & v,
+                Insn::Or64AsrI | Insn::Or64LsrI | Insn::Or64AslI | Insn::Or64RolI => old | v,
+                _ => old ^ v,
+            };
+            pkt_w64(b, x, r);
+        }
+        Insn::AddAsr
+        | Insn::AddLsr
+        | Insn::AddAsl
+        | Insn::AddLsl
+        | Insn::SubAsr
+        | Insn::SubLsr
+        | Insn::SubAsl
+        | Insn::SubLsl
+        | Insn::OrAsr
+        | Insn::OrLsr
+        | Insn::OrAsl
+        | Insn::OrLsl => {
+            let x = ops[0] as u32;
+            let s = r_get(b, ops[1] as u32);
+            let sh = shamt(r_get(b, ops[2] as u32));
+            let v = match insn {
+                Insn::AddAsr | Insn::SubAsr | Insn::OrAsr => f_asr32(s, sh),
+                Insn::AddLsr | Insn::SubLsr | Insn::OrLsr => f_lsr32(s, sh),
+                Insn::AddAsl | Insn::SubAsl | Insn::OrAsl => f_asl32(s, sh),
+                _ => f_lsl32(s, sh),
+            };
+            let old = r_get(b, x);
+            let r = if matches!(
+                insn,
+                Insn::AddAsr | Insn::AddLsr | Insn::AddAsl | Insn::AddLsl
+            ) {
+                old.wrapping_add(v)
+            } else if matches!(
+                insn,
+                Insn::SubAsr | Insn::SubLsr | Insn::SubAsl | Insn::SubLsl
+            ) {
+                old.wrapping_sub(v)
+            } else {
+                old | v
+            };
+            pkt_w(b, x, r);
+        }
+        Insn::Add64Asr
+        | Insn::Add64Lsr
+        | Insn::Add64Asl
+        | Insn::Add64Lsl
+        | Insn::Sub64Asr
+        | Insn::Sub64Lsr
+        | Insn::Sub64Asl
+        | Insn::Sub64Lsl
+        | Insn::Or64Asr
+        | Insn::Or64Lsr
+        | Insn::Or64Asl
+        | Insn::Or64Lsl => {
+            let x = ops[0] as u32;
+            let s = r64(b, ops[1] as u32);
+            let sh = shamt(r_get(b, ops[2] as u32));
+            let v = match insn {
+                Insn::Add64Asr | Insn::Sub64Asr | Insn::Or64Asr => f_asr64(s, sh),
+                Insn::Add64Lsr | Insn::Sub64Lsr | Insn::Or64Lsr => f_lsr64(s, sh),
+                Insn::Add64Asl | Insn::Sub64Asl | Insn::Or64Asl => f_asl64(s, sh),
+                _ => f_lsl64(s, sh),
+            };
+            let old = r64(b, x);
+            let r = if matches!(
+                insn,
+                Insn::Add64Asr | Insn::Add64Lsr | Insn::Add64Asl | Insn::Add64Lsl
+            ) {
+                old.wrapping_add(v)
+            } else if matches!(
+                insn,
+                Insn::Sub64Asr | Insn::Sub64Lsr | Insn::Sub64Asl | Insn::Sub64Lsl
+            ) {
+                old.wrapping_sub(v)
+            } else {
+                old | v
+            };
+            pkt_w64(b, x, r);
+        }
+        // ---- 加減算・論理の累積 ----
+        Insn::AddAcc => pkt_w(
+            b,
+            ops[0] as u32,
+            r_get(b, ops[0] as u32)
+                .wrapping_add(r_get(b, ops[1] as u32).wrapping_add(r_get(b, ops[2] as u32))),
+        ),
+        Insn::SubAcc => pkt_w(
+            b,
+            ops[0] as u32,
+            r_get(b, ops[0] as u32)
+                .wrapping_sub(r_get(b, ops[1] as u32).wrapping_add(r_get(b, ops[2] as u32))),
+        ),
+        Insn::AddsubAcc => pkt_w(
+            b,
+            ops[0] as u32,
+            r_get(b, ops[0] as u32)
+                .wrapping_add(r_get(b, ops[2] as u32).wrapping_sub(r_get(b, ops[1] as u32))),
+        ),
+        Insn::AddAccI => pkt_w(
+            b,
+            ops[0] as u32,
+            r_get(b, ops[0] as u32)
+                .wrapping_add(r_get(b, ops[1] as u32).wrapping_add(ximm(cx.ext, ops[2], 0, 8))),
+        ),
+        Insn::SubAccI => pkt_w(
+            b,
+            ops[0] as u32,
+            r_get(b, ops[0] as u32)
+                .wrapping_sub(r_get(b, ops[1] as u32).wrapping_add(ximm(cx.ext, ops[2], 0, 8))),
+        ),
+        Insn::AndAnd => pkt_w(
+            b,
+            ops[0] as u32,
+            r_get(b, ops[0] as u32) & (r_get(b, ops[1] as u32) & r_get(b, ops[2] as u32)),
+        ),
+        Insn::AndAndn => pkt_w(
+            b,
+            ops[0] as u32,
+            r_get(b, ops[0] as u32) & (r_get(b, ops[1] as u32) & !r_get(b, ops[2] as u32)),
+        ),
+        Insn::AndOr => pkt_w(
+            b,
+            ops[0] as u32,
+            r_get(b, ops[0] as u32) & (r_get(b, ops[1] as u32) | r_get(b, ops[2] as u32)),
+        ),
+        Insn::AndXor => pkt_w(
+            b,
+            ops[0] as u32,
+            r_get(b, ops[0] as u32) & (r_get(b, ops[1] as u32) ^ r_get(b, ops[2] as u32)),
+        ),
+        Insn::OrAnd => pkt_w(
+            b,
+            ops[0] as u32,
+            r_get(b, ops[0] as u32) | (r_get(b, ops[1] as u32) & r_get(b, ops[2] as u32)),
+        ),
+        Insn::OrAndn => pkt_w(
+            b,
+            ops[0] as u32,
+            r_get(b, ops[0] as u32) | (r_get(b, ops[1] as u32) & !r_get(b, ops[2] as u32)),
+        ),
+        Insn::OrOr => pkt_w(
+            b,
+            ops[0] as u32,
+            r_get(b, ops[0] as u32) | (r_get(b, ops[1] as u32) | r_get(b, ops[2] as u32)),
+        ),
+        Insn::OrXor => pkt_w(
+            b,
+            ops[0] as u32,
+            r_get(b, ops[0] as u32) | (r_get(b, ops[1] as u32) ^ r_get(b, ops[2] as u32)),
+        ),
+        Insn::XorAnd => pkt_w(
+            b,
+            ops[0] as u32,
+            r_get(b, ops[0] as u32) ^ (r_get(b, ops[1] as u32) & r_get(b, ops[2] as u32)),
+        ),
+        Insn::XorOr => pkt_w(
+            b,
+            ops[0] as u32,
+            r_get(b, ops[0] as u32) ^ (r_get(b, ops[1] as u32) | r_get(b, ops[2] as u32)),
+        ),
+        Insn::XorXor => pkt_w(
+            b,
+            ops[0] as u32,
+            r_get(b, ops[0] as u32) ^ (r_get(b, ops[1] as u32) ^ r_get(b, ops[2] as u32)),
+        ),
+        Insn::XorAndn => pkt_w(
+            b,
+            ops[0] as u32,
+            r_get(b, ops[0] as u32) ^ (r_get(b, ops[1] as u32) & !r_get(b, ops[2] as u32)),
+        ),
+        Insn::Xor64Xor => pkt_w64(
+            b,
+            ops[0] as u32,
+            r64(b, ops[0] as u32) ^ (r64(b, ops[1] as u32) ^ r64(b, ops[2] as u32)),
+        ),
+        Insn::OrAndI => pkt_w(
+            b,
+            ops[0] as u32,
+            r_get(b, ops[0] as u32) | (r_get(b, ops[1] as u32) & ximm(cx.ext, ops[2], 0, 10)),
+        ),
+        Insn::OrOrI => pkt_w(
+            b,
+            ops[0] as u32,
+            r_get(b, ops[0] as u32) | (r_get(b, ops[1] as u32) | ximm(cx.ext, ops[2], 0, 10)),
+        ),
+        Insn::OrAc => pkt_w(
+            b,
+            ops[0] as u32,
+            r_get(b, ops[1] as u32) | (r_get(b, ops[0] as u32) & ximm(cx.ext, ops[2], 0, 10)),
+        ),
+        // ---- 3 入力加算 ----
+        Insn::Add3 => pkt_w(
+            b,
+            ops[0] as u32,
+            r_get(b, ops[1] as u32)
+                .wrapping_add(r_get(b, ops[2] as u32))
+                .wrapping_add(ximm(cx.ext, ops[3], 0, 6)),
+        ),
+        Insn::Sub3 => pkt_w(
+            b,
+            ops[0] as u32,
+            r_get(b, ops[1] as u32)
+                .wrapping_sub(r_get(b, ops[2] as u32))
+                .wrapping_add(ximm(cx.ext, ops[3], 0, 6)),
+        ),
+        // ---- 複合シフト即値形（Rx = op(#u8,{asl,lsr}(Rx,#U5))）----
+        Insn::CaddAsl
+        | Insn::CsubAsl
+        | Insn::CandAsl
+        | Insn::CorAsl
+        | Insn::CaddLsr
+        | Insn::CsubLsr
+        | Insn::CandLsr
+        | Insn::CorLsr => {
+            let x = ops[0] as u32;
+            let n = ops[1] as u32;
+            let v = if matches!(
+                insn,
+                Insn::CaddAsl | Insn::CsubAsl | Insn::CandAsl | Insn::CorAsl
+            ) {
+                r_get(b, x).wrapping_shl(n)
+            } else {
+                r_get(b, x).wrapping_shr(n)
+            };
+            let imm = ops[2] as u32;
+            let r = match insn {
+                Insn::CaddAsl | Insn::CaddLsr => imm.wrapping_add(v),
+                Insn::CsubAsl | Insn::CsubLsr => imm.wrapping_sub(v),
+                Insn::CandAsl | Insn::CandLsr => imm & v,
+                _ => imm | v,
+            };
+            pkt_w(b, x, r);
+        }
+        Insn::Addpc => pkt_w(
+            b,
+            ops[0] as u32,
+            cx.pc.wrapping_add(ximm(cx.ext, ops[1], 0, 6)),
+        ),
+        // ---- ビット計数 ----
+        Insn::Cl0 => pkt_w(b, ops[0] as u32, r_get(b, ops[1] as u32).leading_zeros()),
+        Insn::Cl1 => pkt_w(b, ops[0] as u32, r_get(b, ops[1] as u32).leading_ones()),
+        Insn::Clb => {
+            let v = r_get(b, ops[1] as u32);
+            let n = if (v as i32) < 0 {
+                v.leading_ones()
+            } else {
+                v.leading_zeros()
+            };
+            pkt_w(b, ops[0] as u32, n);
+        }
+        Insn::Cl064 => pkt_w(b, ops[0] as u32, r64(b, ops[1] as u32).leading_zeros()),
+        Insn::Cl164 => pkt_w(b, ops[0] as u32, r64(b, ops[1] as u32).leading_ones()),
+        Insn::Clb64 => {
+            let v = r64(b, ops[1] as u32);
+            let n = if (v as i64) < 0 {
+                v.leading_ones()
+            } else {
+                v.leading_zeros()
+            };
+            pkt_w(b, ops[0] as u32, n);
+        }
+        Insn::Normamt => {
+            let v = r_get(b, ops[1] as u32);
+            let n = if v == 0 {
+                0
+            } else {
+                v.leading_zeros().max(v.leading_ones()) - 1
+            };
+            pkt_w(b, ops[0] as u32, n);
+        }
+        Insn::Normamt64 => {
+            let v = r64(b, ops[1] as u32);
+            let n = if v == 0 {
+                0
+            } else {
+                v.leading_zeros().max(v.leading_ones()) - 1
+            };
+            pkt_w(b, ops[0] as u32, n);
+        }
+        Insn::Clbadd => {
+            let v = r_get(b, ops[1] as u32);
+            let n = v.leading_zeros().max(v.leading_ones());
+            pkt_w(b, ops[0] as u32, n.wrapping_add(ximm(cx.ext, ops[2], 0, 6)));
+        }
+        Insn::Clbadd64 => {
+            let v = r64(b, ops[1] as u32);
+            let n = v.leading_zeros().max(v.leading_ones());
+            pkt_w(b, ops[0] as u32, n.wrapping_add(ximm(cx.ext, ops[2], 0, 6)));
+        }
+        Insn::Ct0 => pkt_w(b, ops[0] as u32, r_get(b, ops[1] as u32).trailing_zeros()),
+        Insn::Ct1 => pkt_w(b, ops[0] as u32, r_get(b, ops[1] as u32).trailing_ones()),
+        Insn::Ct064 => pkt_w(b, ops[0] as u32, r64(b, ops[1] as u32).trailing_zeros()),
+        Insn::Ct164 => pkt_w(b, ops[0] as u32, r64(b, ops[1] as u32).trailing_ones()),
+        Insn::Popcount => pkt_w(b, ops[0] as u32, r64(b, ops[1] as u32).count_ones()),
+        // ---- パリティ・ビット反転 ----
+        Insn::Parity => pkt_w(
+            b,
+            ops[0] as u32,
+            (r_get(b, ops[1] as u32) & r_get(b, ops[2] as u32)).count_ones() & 1,
+        ),
+        Insn::Parity64 => pkt_w(
+            b,
+            ops[0] as u32,
+            (r64(b, ops[1] as u32) & r64(b, ops[2] as u32)).count_ones() & 1,
+        ),
+        Insn::Brev => pkt_w(b, ops[0] as u32, r_get(b, ops[1] as u32).reverse_bits()),
+        Insn::Brev64 => pkt_w64(b, ops[0] as u32, r64(b, ops[1] as u32).reverse_bits()),
+        Insn::Swiz => pkt_w(b, ops[0] as u32, r_get(b, ops[1] as u32).swap_bytes()),
+        // ---- ビット検査・操作 ----
+        Insn::TstbitI | Insn::TstbitnI => {
+            let v = r_get(b, ops[1] as u32) & (1u32 << ops[2]) != 0;
+            pkt_pw(b, ops[0] as u32, pval(v ^ (insn == Insn::TstbitnI)));
+        }
+        Insn::TstbitR | Insn::TstbitnR => {
+            let sh = shamt(r_get(b, ops[2] as u32)).unsigned_abs().min(63);
+            let v = (u64::from(r_get(b, ops[1] as u32)) & (1u64 << sh)) != 0;
+            pkt_pw(b, ops[0] as u32, pval(v ^ (insn == Insn::TstbitnR)));
+        }
+        Insn::SetbitI => pkt_w(b, ops[0] as u32, r_get(b, ops[1] as u32) | (1u32 << ops[2])),
+        Insn::ClrbitI => pkt_w(
+            b,
+            ops[0] as u32,
+            r_get(b, ops[1] as u32) & !(1u32 << ops[2]),
+        ),
+        Insn::TogglebitI => pkt_w(b, ops[0] as u32, r_get(b, ops[1] as u32) ^ (1u32 << ops[2])),
+        Insn::SetbitR | Insn::ClrbitR | Insn::TogglebitR => {
+            let sh = shamt(r_get(b, ops[2] as u32)).unsigned_abs().min(63);
+            let bit = 1u64 << sh;
+            let s = u64::from(r_get(b, ops[1] as u32));
+            let v = match insn {
+                Insn::SetbitR => s | bit,
+                Insn::ClrbitR => s & !bit,
+                _ => s ^ bit,
+            };
+            pkt_w(b, ops[0] as u32, v as u32);
+        }
+        Insn::BitsclrR | Insn::BitsclrnR | Insn::BitssetR | Insn::BitssetnR => {
+            let s = r_get(b, ops[1] as u32);
+            let t = r_get(b, ops[2] as u32);
+            let set = matches!(insn, Insn::BitssetR | Insn::BitssetnR);
+            let neg = matches!(insn, Insn::BitsclrnR | Insn::BitssetnR);
+            let v = if set { s & t == t } else { s & t == 0 };
+            pkt_pw(b, ops[0] as u32, pval(v ^ neg));
+        }
+        Insn::BitsclrI | Insn::BitsclrnI => {
+            let v = r_get(b, ops[1] as u32) & (ops[2] as u32) == 0;
+            pkt_pw(b, ops[0] as u32, pval(v ^ (insn == Insn::BitsclrnI)));
+        }
+        // ---- ビットフィールド ----
+        Insn::Extract | Insn::Extractu => {
+            let s = r_get(b, ops[1] as u32);
+            let width = ops[2].min(32);
+            let off = ops[3] as u32;
+            let v = if width == 0 {
+                0
+            } else {
+                (u64::from(s) >> off.min(32)) & ((1u64 << width) - 1)
+            };
+            let v = if insn == Insn::Extract {
+                if width >= 32 {
+                    v as u32
+                } else {
+                    sext(v, width as u32)
+                }
+            } else {
+                v as u32
+            };
+            pkt_w(b, ops[0] as u32, v);
+        }
+        Insn::Extract64 | Insn::Extractu64 => {
+            let s = r64(b, ops[1] as u32);
+            let width = ops[2].min(64);
+            let off = ops[3].min(64) as u32;
+            let v = if width == 0 {
+                0
+            } else {
+                (s >> off)
+                    & if width >= 64 {
+                        u64::MAX
+                    } else {
+                        (1u64 << width) - 1
+                    }
+            };
+            let v = if insn == Insn::Extract64 && width < 64 {
+                let sh = 64 - width as u32;
+                (((v << sh) as i64) >> sh) as u64
+            } else {
+                v
+            };
+            pkt_w64(b, ops[0] as u32, v);
+        }
+        Insn::ExtractR | Insn::ExtractuR | Insn::Extract64R | Insn::Extractu64R => {
+            let s = r64(b, ops[1] as u32);
+            let tt = r64(b, ops[2] as u32);
+            let width = (tt >> 32) & 0x3f;
+            let off = shamt(tt as u32);
+            let is64 = matches!(insn, Insn::Extract64R | Insn::Extractu64R);
+            let signed = matches!(insn, Insn::ExtractR | Insn::Extract64R);
+            let s = if is64 { s } else { s & 0xffff_ffff };
+            let v = if off > 0 {
+                s >> off.min(63)
+            } else {
+                s << (-off).min(63)
+            };
+            let v = if width == 0 {
+                0
+            } else if width >= 64 {
+                v
+            } else {
+                v & ((1u64 << width) - 1)
+            };
+            let v = if signed && width < 64 && width > 0 {
+                let sh = 64 - width as u32;
+                (((v << sh) as i64) >> sh) as u64
+            } else {
+                v
+            };
+            if is64 {
+                pkt_w64(b, ops[0] as u32, v);
+            } else {
+                pkt_w(b, ops[0] as u32, v as u32);
+            }
+        }
+        Insn::Insert | Insn::Insert64 => {
+            let is64 = insn == Insn::Insert64;
+            let s = if is64 {
+                r64(b, ops[1] as u32)
+            } else {
+                u64::from(r_get(b, ops[1] as u32))
+            };
+            let x = ops[0] as u32;
+            let old = if is64 {
+                r64(b, x)
+            } else {
+                u64::from(r_get(b, x))
+            };
+            let width = ops[2].min(64);
+            let off = ops[3].min(64) as u32;
+            let v = if width == 0 {
+                old
+            } else {
+                let mask = if width >= 64 {
+                    u64::MAX
+                } else {
+                    ((1u64 << width) - 1) << off.min(63)
+                };
+                // (Rs & ((1<<width)-1)) << off
+                let fmask = if width >= 64 {
+                    u64::MAX
+                } else {
+                    (1u64 << width) - 1
+                };
+                (old & !mask) | ((s & fmask) << off.min(63))
+            };
+            if is64 {
+                pkt_w64(b, x, v);
+            } else {
+                pkt_w(b, x, v as u32);
+            }
+        }
+        Insn::InsertR | Insn::Insert64R => {
+            let is64 = insn == Insn::Insert64R;
+            let s = if is64 {
+                r64(b, ops[1] as u32)
+            } else {
+                u64::from(r_get(b, ops[1] as u32))
+            };
+            let tt = r64(b, ops[2] as u32);
+            let width = (tt >> 32) & 0x3f;
+            let off = shamt(tt as u32);
+            let x = ops[0] as u32;
+            let old = if is64 {
+                r64(b, x)
+            } else {
+                u64::from(r_get(b, x))
+            };
+            let v = if off < 0 {
+                0
+            } else {
+                let fmask = if width >= 64 {
+                    u64::MAX
+                } else {
+                    (1u64 << width) - 1
+                };
+                let off = off as u32;
+                let mask = if off >= 63 { 0 } else { fmask << off.min(63) };
+                (old & !mask) | ((s & fmask) << off.min(63))
+            };
+            if is64 {
+                pkt_w64(b, x, v);
+            } else {
+                pkt_w(b, x, v as u32);
+            }
+        }
+        Insn::BitsplitI | Insn::BitsplitR => {
+            let s = r_get(b, ops[1] as u32);
+            let n = if insn == Insn::BitsplitI {
+                ops[2] as u32 & 0x1f
+            } else {
+                r_get(b, ops[2] as u32) & 0x1f
+            };
+            let hi = s >> n;
+            let lo = s & ((1u32 << n) - 1);
+            pkt_w64(b, ops[0] as u32, (u64::from(hi) << 32) | u64::from(lo));
+        }
+        Insn::Tableidxb | Insn::Tableidxh | Insn::Tableidxw | Insn::Tableidxd => {
+            let x = ops[0] as u32;
+            let s = r_get(b, ops[1] as u32);
+            let width = ops[2] as u32;
+            let adj = match insn {
+                Insn::Tableidxb => 0,
+                Insn::Tableidxh => 1,
+                Insn::Tableidxw => 2,
+                _ => 3,
+            };
+            let off = (sext(ops[3], 6) as i32 + adj).clamp(0, 31) as u32;
+            let field = if width == 0 {
+                0
+            } else {
+                (u64::from(s) >> off.min(31)) & ((1u64 << width.min(32)) - 1)
+            };
+            let mask = ((1u64 << width.min(32)) - 1) << adj;
+            let v =
+                (u64::from(r_get(b, x)) & !mask) | ((field & ((1u64 << width.min(32)) - 1)) << adj);
+            pkt_w(b, x, v as u32);
+        }
+        // ---- 飽和・丸め・パック ----
+        Insn::Sat => {
+            let v = sat32(b, r64(b, ops[1] as u32) as i64);
+            pkt_w(b, ops[0] as u32, v);
+        }
+        Insn::Sath => {
+            // sat_16 の結果は 32 ビットに符号拡張して書き込む。
+            let v = sext(u64::from(sat16(b, sx32(r_get(b, ops[1] as u32)))), 16);
+            pkt_w(b, ops[0] as u32, v);
+        }
+        Insn::Satuh => {
+            let v = usatn(b, sx32(r_get(b, ops[1] as u32)), 16) as u32;
+            pkt_w(b, ops[0] as u32, v);
+        }
+        Insn::Satb => {
+            let v = sext(satn(b, sx32(r_get(b, ops[1] as u32)), 8), 8);
+            pkt_w(b, ops[0] as u32, v);
+        }
+        Insn::Satub => {
+            let v = usatn(b, sx32(r_get(b, ops[1] as u32)), 8) as u32;
+            pkt_w(b, ops[0] as u32, v);
+        }
+        Insn::RoundSat => {
+            // tmp = sat64(Rss + 0x080000000); Rd = tmp.w[1]。
+            let v = (r64(b, ops[1] as u32) as i64 as i128) + 0x8000_0000i128;
+            let v = if v > i64::MAX as i128 {
+                ovf(b);
+                i64::MAX
+            } else if v < i64::MIN as i128 {
+                ovf(b);
+                i64::MIN
+            } else {
+                v as i64
+            };
+            pkt_w(b, ops[0] as u32, (v >> 32) as u32);
+        }
+        Insn::RoundI | Insn::RoundR => {
+            let s = sx32(r_get(b, ops[1] as u32));
+            let n = if insn == Insn::RoundI {
+                ops[2] as u32 & 0x1f
+            } else {
+                r_get(b, ops[2] as u32) & 0x1f
+            };
+            pkt_w(b, ops[0] as u32, f_rnd(s, n) as u32);
+        }
+        Insn::RoundISat | Insn::RoundRSat => {
+            let s = sx32(r_get(b, ops[1] as u32));
+            let n = if insn == Insn::RoundISat {
+                ops[2] as u32 & 0x1f
+            } else {
+                r_get(b, ops[2] as u32) & 0x1f
+            };
+            let v = if n == 0 {
+                s
+            } else {
+                sat32(b, s + (1i64 << (n - 1))) as i32 as i64
+            };
+            pkt_w(b, ops[0] as u32, (v >> n) as u32);
+        }
+        Insn::CroundI | Insn::CroundR => {
+            let s = sx32(r_get(b, ops[1] as u32));
+            let n = if insn == Insn::CroundI {
+                ops[2] as u32 & 0x1f
+            } else {
+                r_get(b, ops[2] as u32) & 0x1f
+            };
+            pkt_w(b, ops[0] as u32, f_crnd(s, n) as u32);
+        }
+        Insn::Vsathub => {
+            let s = r64(b, ops[1] as u32);
+            let mut r = 0u32;
+            for i in 0..4 {
+                r |= ((usatn(b, sh64(s, i), 8) as u32) & 0xff) << (8 * i);
+            }
+            pkt_w(b, ops[0] as u32, r);
+        }
+        Insn::Vsathb => {
+            let s = r64(b, ops[1] as u32);
+            let mut r = 0u32;
+            for i in 0..4 {
+                r |= ((satn(b, sh64(s, i), 8) as u32) & 0xff) << (8 * i);
+            }
+            pkt_w(b, ops[0] as u32, r);
+        }
+        Insn::VsathubRs => {
+            let s = r_get(b, ops[1] as u32);
+            let r = (usatn(b, sh(s, 0), 8) as u32 & 0xff)
+                | ((usatn(b, sh(s, 1), 8) as u32 & 0xff) << 8);
+            pkt_w(b, ops[0] as u32, r);
+        }
+        Insn::VsathbRs => {
+            let s = r_get(b, ops[1] as u32);
+            let r =
+                (satn(b, sh(s, 0), 8) as u32 & 0xff) | ((satn(b, sh(s, 1), 8) as u32 & 0xff) << 8);
+            pkt_w(b, ops[0] as u32, r);
+        }
+        Insn::Vsatwh | Insn::Vsatwuh => {
+            let s = r64(b, ops[1] as u32);
+            let mut r = 0u32;
+            for i in 0..2 {
+                let v = if insn == Insn::Vsatwh {
+                    satn(b, sw64(s, i), 16)
+                } else {
+                    usatn(b, sw64(s, i), 16)
+                };
+                r |= ((v as u32) & 0xffff) << (16 * i);
+            }
+            pkt_w(b, ops[0] as u32, r);
+        }
+        Insn::VsatwhP | Insn::VsatwuhP => {
+            let s = r64(b, ops[1] as u32);
+            let mut r = 0u64;
+            for i in 0..2 {
+                let v = if insn == Insn::VsatwhP {
+                    satn(b, sw64(s, i), 16)
+                } else {
+                    usatn(b, sw64(s, i), 16)
+                };
+                r |= (v & 0xffff_ffff) << (32 * i);
+            }
+            pkt_w64(b, ops[0] as u32, r);
+        }
+        Insn::VsathubP | Insn::VsathbP => {
+            let s = r64(b, ops[1] as u32);
+            let mut r = 0u64;
+            for i in 0..4 {
+                let v = if insn == Insn::VsathubP {
+                    usatn(b, sh64(s, i), 8)
+                } else {
+                    satn(b, sh64(s, i), 8)
+                };
+                r |= (v & 0xffff) << (16 * i);
+            }
+            pkt_w64(b, ops[0] as u32, r);
+        }
+        Insn::Vrndwh | Insn::VrndwhSat => {
+            let s = r64(b, ops[1] as u32);
+            let mut r = 0u32;
+            for i in 0..2 {
+                let v = sw64(s, i) + 0x8000;
+                let v = if insn == Insn::VrndwhSat {
+                    sat32(b, v) as i64
+                } else {
+                    v
+                };
+                r |= (((v >> 16) as u32) & 0xffff) << (16 * i);
+            }
+            pkt_w(b, ops[0] as u32, r);
+        }
+        Insn::VaddhubSat => {
+            let s = r64(b, ops[1] as u32);
+            let t = r64(b, ops[2] as u32);
+            let mut r = 0u32;
+            for i in 0..4 {
+                r |= ((usatn(b, sh64(s, i) + sh64(t, i), 8) as u32) & 0xff) << (8 * i);
+            }
+            pkt_w(b, ops[0] as u32, r);
+        }
+        // ---- 64 ビットベクトル加減算・平均・min/max ----
+        Insn::Vaddub64
+        | Insn::Vaddub64Sat
+        | Insn::Vaddh64
+        | Insn::Vaddh64Sat
+        | Insn::Vadduh64Sat
+        | Insn::Vaddw64
+        | Insn::Vaddw64Sat
+        | Insn::Vsubub64
+        | Insn::Vsubub64Sat
+        | Insn::Vsubh64
+        | Insn::Vsubh64Sat
+        | Insn::Vsubuh64Sat
+        | Insn::Vsubw64
+        | Insn::Vsubw64Sat => {
+            let s = r64(b, ops[1] as u32);
+            let t = r64(b, ops[2] as u32);
+            // t - s は vsub* 系（Rtt が被減数）、vadd は s + t。
+            let mut r = 0u64;
+            let byte = matches!(
+                insn,
+                Insn::Vaddub64 | Insn::Vaddub64Sat | Insn::Vsubub64 | Insn::Vsubub64Sat
+            );
+            let half = !byte
+                && !matches!(
+                    insn,
+                    Insn::Vaddw64 | Insn::Vaddw64Sat | Insn::Vsubw64 | Insn::Vsubw64Sat
+                );
+            let n = if byte {
+                8
+            } else if half {
+                4
+            } else {
+                2
+            };
+            for i in 0..n {
+                let (av, bv, bits) = if byte {
+                    (ub64(t, i) as i64, ub64(s, i) as i64, 8)
+                } else if half {
+                    (sh64(t, i), sh64(s, i), 16)
+                } else {
+                    (sw64(t, i), sw64(s, i), 32)
+                };
+                let is_sub = matches!(
+                    insn,
+                    Insn::Vsubub64
+                        | Insn::Vsubub64Sat
+                        | Insn::Vsubh64
+                        | Insn::Vsubh64Sat
+                        | Insn::Vsubuh64Sat
+                        | Insn::Vsubw64
+                        | Insn::Vsubw64Sat
+                );
+                let v = if is_sub { av - bv } else { bv + av };
+                let sat = matches!(
+                    insn,
+                    Insn::Vaddub64Sat
+                        | Insn::Vaddh64Sat
+                        | Insn::Vadduh64Sat
+                        | Insn::Vaddw64Sat
+                        | Insn::Vsubub64Sat
+                        | Insn::Vsubh64Sat
+                        | Insn::Vsubuh64Sat
+                        | Insn::Vsubw64Sat
+                );
+                let unsigned = matches!(
+                    insn,
+                    Insn::Vaddub64Sat | Insn::Vadduh64Sat | Insn::Vsubub64Sat | Insn::Vsubuh64Sat
+                );
+                let v = if sat {
+                    if unsigned {
+                        usatn(b, v, bits)
+                    } else {
+                        satn(b, v, bits)
+                    }
+                } else {
+                    (v as u64) & ((1u64 << bits) - 1)
+                };
+                r |= (v & ((1u64 << bits) - 1)) << (bits * i);
+            }
+            pkt_w64(b, ops[0] as u32, r);
+        }
+        Insn::Vavgub64
+        | Insn::Vavgub64Rnd
+        | Insn::Vavguh64
+        | Insn::Vavguh64Rnd
+        | Insn::Vavgh64
+        | Insn::Vavgh64Rnd
+        | Insn::Vavgh64Crnd
+        | Insn::Vavgw64
+        | Insn::Vavgw64Rnd
+        | Insn::Vavgw64Crnd
+        | Insn::Vavguw64
+        | Insn::Vavguw64Rnd
+        | Insn::Vnavgh64
+        | Insn::Vnavgh64RndSat
+        | Insn::Vnavgh64CrndSat
+        | Insn::Vnavgw64
+        | Insn::Vnavgw64RndSat
+        | Insn::Vnavgw64CrndSat => {
+            let s = r64(b, ops[1] as u32);
+            let t = r64(b, ops[2] as u32);
+            let mut r = 0u64;
+            let navg = matches!(
+                insn,
+                Insn::Vnavgh64
+                    | Insn::Vnavgh64RndSat
+                    | Insn::Vnavgh64CrndSat
+                    | Insn::Vnavgw64
+                    | Insn::Vnavgw64RndSat
+                    | Insn::Vnavgw64CrndSat
+            );
+            let (n, bits, unsigned) = if matches!(
+                insn,
+                Insn::Vavgw64
+                    | Insn::Vavgw64Rnd
+                    | Insn::Vavgw64Crnd
+                    | Insn::Vavguw64
+                    | Insn::Vavguw64Rnd
+                    | Insn::Vnavgw64
+                    | Insn::Vnavgw64RndSat
+                    | Insn::Vnavgw64CrndSat
+            ) {
+                (2, 32, matches!(insn, Insn::Vavguw64 | Insn::Vavguw64Rnd))
+            } else if matches!(insn, Insn::Vavgub64 | Insn::Vavgub64Rnd) {
+                (8, 8, true)
+            } else {
+                (4, 16, matches!(insn, Insn::Vavguh64 | Insn::Vavguh64Rnd))
+            };
+            let rnd = matches!(
+                insn,
+                Insn::Vavgub64Rnd
+                    | Insn::Vavguh64Rnd
+                    | Insn::Vavgh64Rnd
+                    | Insn::Vavgw64Rnd
+                    | Insn::Vavguw64Rnd
+                    | Insn::Vnavgh64RndSat
+                    | Insn::Vnavgw64RndSat
+            );
+            let crnd = matches!(
+                insn,
+                Insn::Vavgh64Crnd
+                    | Insn::Vavgw64Crnd
+                    | Insn::Vnavgh64CrndSat
+                    | Insn::Vnavgw64CrndSat
+            );
+            let sat = matches!(
+                insn,
+                Insn::Vnavgh64RndSat
+                    | Insn::Vnavgh64CrndSat
+                    | Insn::Vnavgw64RndSat
+                    | Insn::Vnavgw64CrndSat
+            );
+            for i in 0..n {
+                let (av, bv) = if bits == 32 {
+                    (
+                        if unsigned {
+                            uw64(t, i) as i64
+                        } else {
+                            sw64(t, i)
+                        },
+                        if unsigned {
+                            uw64(s, i) as i64
+                        } else {
+                            sw64(s, i)
+                        },
+                    )
+                } else if bits == 16 {
+                    (
+                        if unsigned {
+                            (t >> (16 * i)) as u16 as i64
+                        } else {
+                            sh64(t, i)
+                        },
+                        if unsigned {
+                            (s >> (16 * i)) as u16 as i64
+                        } else {
+                            sh64(s, i)
+                        },
+                    )
+                } else {
+                    (ub64(t, i) as i64, ub64(s, i) as i64)
+                };
+                let mut v = if navg { av - bv } else { av + bv };
+                v = if crnd {
+                    f_crnd(v, 1)
+                } else {
+                    (v + i64::from(rnd)) >> 1
+                };
+                let v = if sat {
+                    satn(b, v, bits)
+                } else {
+                    v as u64 & ((1u64 << bits) - 1)
+                };
+                r |= (v & ((1u64 << bits) - 1)) << (bits * i);
+            }
+            pkt_w64(b, ops[0] as u32, r);
+        }
+        Insn::Vmaxub64
+        | Insn::Vmaxb64
+        | Insn::Vmaxuh64
+        | Insn::Vmaxh64
+        | Insn::Vmaxw64
+        | Insn::Vmaxuw64
+        | Insn::Vminub64
+        | Insn::Vminb64
+        | Insn::Vminuh64
+        | Insn::Vminh64
+        | Insn::Vminw64
+        | Insn::Vminuw64 => {
+            let s = r64(b, ops[1] as u32);
+            let t = r64(b, ops[2] as u32);
+            let mut r = 0u64;
+            let (n, bits, unsigned, ismax) = match insn {
+                Insn::Vmaxub64 => (8, 8, true, true),
+                Insn::Vmaxb64 => (8, 8, false, true),
+                Insn::Vmaxuh64 => (4, 16, true, true),
+                Insn::Vmaxh64 => (4, 16, false, true),
+                Insn::Vmaxw64 => (2, 32, false, true),
+                Insn::Vmaxuw64 => (2, 32, true, true),
+                Insn::Vminub64 => (8, 8, true, false),
+                Insn::Vminb64 => (8, 8, false, false),
+                Insn::Vminuh64 => (4, 16, true, false),
+                Insn::Vminh64 => (4, 16, false, false),
+                Insn::Vminw64 => (2, 32, false, false),
+                _ => (2, 32, true, false),
+            };
+            for i in 0..n {
+                let (av, bv) = if unsigned {
+                    (
+                        if bits == 8 {
+                            ub64(t, i)
+                        } else if bits == 16 {
+                            (sh64(t, i) as u16) as u64
+                        } else {
+                            uw64(t, i)
+                        },
+                        if bits == 8 {
+                            ub64(s, i)
+                        } else if bits == 16 {
+                            (sh64(s, i) as u16) as u64
+                        } else {
+                            uw64(s, i)
+                        },
+                    )
+                } else {
+                    (
+                        if bits == 8 {
+                            sb64(t, i) as u64
+                        } else if bits == 16 {
+                            sh64(t, i) as u64
+                        } else {
+                            sw64(t, i) as u64
+                        },
+                        if bits == 8 {
+                            sb64(s, i) as u64
+                        } else if bits == 16 {
+                            sh64(s, i) as u64
+                        } else {
+                            sw64(s, i) as u64
+                        },
+                    )
+                };
+                let v = if unsigned {
+                    if ismax { av.max(bv) } else { av.min(bv) }
+                } else if ismax {
+                    (av as i64).max(bv as i64) as u64
+                } else {
+                    (av as i64).min(bv as i64) as u64
+                };
+                r |= (v & ((1u64 << bits) - 1)) << (bits * i);
+            }
+            pkt_w64(b, ops[0] as u32, r);
+        }
+        // ---- 整列・交差・複製 ----
+        Insn::Vmux => {
+            let p = p_get(b, ops[1] as u32);
+            let s = r64(b, ops[2] as u32);
+            let t = r64(b, ops[3] as u32);
+            let mut r = 0u64;
+            for i in 0..8 {
+                r |= (if p >> i & 1 != 0 {
+                    ub64(s, i)
+                } else {
+                    ub64(t, i)
+                }) << (8 * i);
+            }
+            pkt_w64(b, ops[0] as u32, r);
+        }
+        Insn::ValignbI => {
+            let s = r64(b, ops[1] as u32);
+            let t = r64(b, ops[2] as u32);
+            let u = ops[3] as u32 & 7;
+            let v = (s >> (u * 8)) | (t << ((8 - u) * 8));
+            pkt_w64(b, ops[0] as u32, v);
+        }
+        Insn::ValignbP => {
+            let s = r64(b, ops[2] as u32);
+            let t = r64(b, ops[3] as u32);
+            let u = u32::from(p_get(b, ops[1] as u32) & 7);
+            let v = (s >> (u * 8)) | (t << ((8 - u) * 8));
+            pkt_w64(b, ops[0] as u32, v);
+        }
+        Insn::VsplicebI => {
+            let s = r64(b, ops[1] as u32);
+            let t = r64(b, ops[2] as u32);
+            let u = ops[3] as u32 & 7;
+            let v = (t << (u * 8)) | (s & if u == 0 { 0 } else { (1u64 << (u * 8)) - 1 });
+            pkt_w64(b, ops[0] as u32, v);
+        }
+        Insn::VsplicebP => {
+            let s = r64(b, ops[2] as u32);
+            let t = r64(b, ops[3] as u32);
+            let u = u32::from(p_get(b, ops[1] as u32) & 7);
+            let v = (t << (u * 8)) | (s & if u == 0 { 0 } else { (1u64 << (u * 8)) - 1 });
+            pkt_w64(b, ops[0] as u32, v);
+        }
+        Insn::Vcnegh => {
+            let s = r64(b, ops[1] as u32);
+            let t = r_get(b, ops[2] as u32);
+            let mut r = 0u64;
+            for i in 0..4 {
+                let v = if t >> i & 1 != 0 {
+                    satq(-sh64(s, i), 16)
+                } else {
+                    sh64(s, i) as u64 & 0xffff
+                };
+                r |= (v & 0xffff) << (16 * i);
+            }
+            pkt_w64(b, ops[0] as u32, r);
+        }
+        Insn::Vrcnegh => {
+            let x = ops[0] as u32;
+            let s = r64(b, ops[1] as u32);
+            let t = r_get(b, ops[2] as u32);
+            let mut r = r64(b, x);
+            for i in 0..4 {
+                let v = if t >> i & 1 != 0 {
+                    -sh64(s, i)
+                } else {
+                    sh64(s, i)
+                };
+                r = r.wrapping_add(v as u64);
+            }
+            pkt_w64(b, x, r);
+        }
+        Insn::Interleave => pkt_w64(b, ops[0] as u32, f_interleave(r64(b, ops[1] as u32))),
+        Insn::Deinterleave => pkt_w64(b, ops[0] as u32, f_deinterleave(r64(b, ops[1] as u32))),
+        Insn::Lfs => {
+            let s = r64(b, ops[1] as u32);
+            let t = r64(b, ops[2] as u32);
+            let v = (s >> 1) | (u64::from((s & t).count_ones() & 1) << 63);
+            pkt_w64(b, ops[0] as u32, v);
+        }
+        Insn::Vtrunehb => {
+            let s = r64(b, ops[1] as u32);
+            let r = pack4(ub64(s, 0), ub64(s, 2), ub64(s, 4), ub64(s, 6));
+            pkt_w(b, ops[0] as u32, r);
+        }
+        Insn::Vtrunohb => {
+            let s = r64(b, ops[1] as u32);
+            let r = pack4(ub64(s, 1), ub64(s, 3), ub64(s, 5), ub64(s, 7));
+            pkt_w(b, ops[0] as u32, r);
+        }
+        Insn::Vtrunewh => {
+            let s = r64(b, ops[1] as u32);
+            let t = r64(b, ops[2] as u32);
+            let r = (t & 0xffff)
+                | ((t >> 16) & 0xffff_0000_0000)
+                | ((s & 0xffff) << 32)
+                | ((s >> 16) & 0xffff_0000_0000_0000);
+            pkt_w64(b, ops[0] as u32, r);
+        }
+        Insn::Vtrunowh => {
+            let s = r64(b, ops[1] as u32);
+            let t = r64(b, ops[2] as u32);
+            let r = ((t >> 16) & 0xffff)
+                | ((t >> 32) & 0xffff_0000)
+                | ((s >> 16) & 0xffff_0000_0000)
+                | ((s >> 48) & 0xffff) << 48;
+            pkt_w64(b, ops[0] as u32, r);
+        }
+        Insn::VtrunehbP => {
+            let s = r64(b, ops[1] as u32);
+            let t = r64(b, ops[2] as u32);
+            let lo = pack4(ub64(t, 0), ub64(t, 2), ub64(t, 4), ub64(t, 6));
+            let hi = pack4(ub64(s, 0), ub64(s, 2), ub64(s, 4), ub64(s, 6));
+            pkt_w64(b, ops[0] as u32, (u64::from(hi) << 32) | u64::from(lo));
+        }
+        Insn::VtrunohbP => {
+            let s = r64(b, ops[1] as u32);
+            let t = r64(b, ops[2] as u32);
+            let lo = pack4(ub64(t, 1), ub64(t, 3), ub64(t, 5), ub64(t, 7));
+            let hi = pack4(ub64(s, 1), ub64(s, 3), ub64(s, 5), ub64(s, 7));
+            pkt_w64(b, ops[0] as u32, (u64::from(hi) << 32) | u64::from(lo));
+        }
+        Insn::Vsplatb => {
+            let v = r_get(b, ops[1] as u32) & 0xff;
+            pkt_w(b, ops[0] as u32, v * 0x0101_0101);
+        }
+        Insn::VsplatbP => {
+            let v = r_get(b, ops[1] as u32) & 0xff;
+            pkt_w64(b, ops[0] as u32, v as u64 * 0x0101_0101_0101_0101);
+        }
+        Insn::Vsplath => {
+            let v = u64::from(r_get(b, ops[1] as u32) & 0xffff);
+            pkt_w64(b, ops[0] as u32, v * 0x0001_0001_0001_0001);
+        }
+        Insn::Vsxtbh => {
+            let s = r_get(b, ops[1] as u32);
+            let mut r = 0u64;
+            for i in 0..4 {
+                r |= ((i64::from((s >> (8 * i)) as u8 as i8) as u64) & 0xffff) << (16 * i);
+            }
+            pkt_w64(b, ops[0] as u32, r);
+        }
+        Insn::Vsxthw => {
+            let s = r_get(b, ops[1] as u32);
+            let mut r = 0u64;
+            for i in 0..2 {
+                r |= ((i64::from(((s >> (16 * i)) & 0xffff) as u16 as i16) as u64) & 0xffff_ffff)
+                    << (32 * i);
+            }
+            pkt_w64(b, ops[0] as u32, r);
+        }
+        Insn::Vzxtbh => {
+            let s = r_get(b, ops[1] as u32);
+            let mut r = 0u64;
+            for i in 0..4 {
+                r |= (u64::from((s >> (8 * i)) & 0xff)) << (16 * i);
+            }
+            pkt_w64(b, ops[0] as u32, r);
+        }
+        Insn::Vzxthw => {
+            let s = r_get(b, ops[1] as u32);
+            let mut r = 0u64;
+            for i in 0..2 {
+                r |= (u64::from((s >> (16 * i)) & 0xffff)) << (32 * i);
+            }
+            pkt_w64(b, ops[0] as u32, r);
+        }
+
         // extender はフェッチ層で対結合済み。単独では来ない。
         Insn::Immext => return Err(trap(TRAP_ILL)),
         // ---- duplex subinsn（13 ビット語）----

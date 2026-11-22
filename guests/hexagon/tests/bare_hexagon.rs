@@ -1020,3 +1020,880 @@ fn illegal_packet_is_trap() {
     env.pc = BASE;
     assert!(matches!(step(&mut env), Err(Outcome::Unimplemented { .. })));
 }
+/// HX5: llvm-mc が出した正規符号と decode/ops の対応表。
+/// （word, Insn, extract_ops の生値, 元の asm）
+const HX5_WORDS: &[(u32, Insn, &[u64])] = &[
+    (0x00004000, Insn::Immext, &[0]),                // immext(#0x0)
+    (0x6a49c803, Insn::Addpc, &[3, 16]),             // r3=add(pc,#0x10)
+    (0x6b01e290, Insn::Pfc9, &[0, 1, 2]),            // p0=fastcorner9(p1,p2)
+    (0x6b02c100, Insn::Pand, &[0, 2, 1]),            // p0=and(p1,p2)
+    (0x6b11c2c0, Insn::PandA, &[0, 1, 2, 3]),        // p0=and(p1,and(p2,p3))
+    (0x6b11e290, Insn::Pfc9n, &[0, 1, 2]),           // p0=!fastcorner9(p1,p2)
+    (0x6b22c100, Insn::Por, &[0, 2, 1]),             // p0=or(p1,p2)
+    (0x6b31c2c0, Insn::PandO, &[0, 1, 2, 3]),        // p0=and(p1,or(p2,p3))
+    (0x6b41c200, Insn::Pxor, &[0, 1, 2]),            // p0=xor(p1,p2)
+    (0x6b51c2c0, Insn::PorA, &[0, 1, 2, 3]),         // p0=or(p1,and(p2,p3))
+    (0x6b62c100, Insn::Pandn, &[0, 2, 1]),           // p0=and(p1,!p2)
+    (0x6b71c2c0, Insn::PorO, &[0, 1, 2, 3]),         // p0=or(p1,or(p2,p3))
+    (0x6b81c000, Insn::Pany8, &[0, 1]),              // p0=any8(p1)
+    (0x6b91c2c0, Insn::PandAn, &[0, 1, 2, 3]),       // p0=and(p1,and(p2,!p3))
+    (0x6ba1c000, Insn::Pall8, &[0, 1]),              // p0=all8(p1)
+    (0x6bb1c2c0, Insn::PandOn, &[0, 1, 2, 3]),       // p0=and(p1,or(p2,!p3))
+    (0x6bc1c000, Insn::Pnot, &[0, 1]),               // p0=not(p1)
+    (0x6bd1c2c0, Insn::PorAn, &[0, 1, 2, 3]),        // p0=or(p1,and(p2,!p3))
+    (0x6be2c100, Insn::Porn, &[0, 2, 1]),            // p0=or(p1,!p2)
+    (0x6bf1c2c0, Insn::PorOn, &[0, 1, 2, 3]),        // p0=or(p1,or(p2,!p3))
+    (0x7004c003, Insn::Aslh, &[3, 4]),               // r3=aslh(r4)
+    (0x7024c003, Insn::Asrh, &[3, 4]),               // r3=asrh(r4)
+    (0x70a4c003, Insn::Sxtb, &[3, 4]),               // r3=sxtb(r4)
+    (0x70c4c003, Insn::Zxth, &[3, 4]),               // r3=zxth(r4)
+    (0x70e4c003, Insn::Sxth, &[3, 4]),               // r3=sxth(r4)
+    (0x7304c243, Insn::MuxRi, &[3, 0, 4, 18]),       // r3=mux(p0,r4,#0x12)
+    (0x7304e244, Insn::CombRi, &[4, 4, 18]),         // r5:4=combine(r4,#0x12)
+    (0x7324e244, Insn::CombIr, &[4, 4, 18]),         // r5:4=combine(#0x12,r4)
+    (0x7344e243, Insn::CmpeqRdI, &[3, 4, 18]),       // r3=cmp.eq(r4,#0x12)
+    (0x7364e243, Insn::CmpeqnRdI, &[3, 4, 18]),      // r3=!cmp.eq(r4,#0x12)
+    (0x7384c243, Insn::MuxIr, &[3, 0, 4, 18]),       // r3=mux(p0,#0x12,r4)
+    (0x7504c240, Insn::CmpeqI, &[0, 4, 18]),         // p0=cmp.eq(r4,#0x12)
+    (0x7504c250, Insn::CmpeqnI, &[0, 4, 18]),        // p0=!cmp.eq(r4,#0x12)
+    (0x7544c240, Insn::CmpgtI, &[0, 4, 18]),         // p0=cmp.gt(r4,#0x12)
+    (0x7544c250, Insn::CmpgtnI, &[0, 4, 18]),        // p0=!cmp.gt(r4,#0x12)
+    (0x7584c240, Insn::CmpgtuI, &[0, 4, 18]),        // p0=cmp.gtu(r4,#0x12)
+    (0x7584c250, Insn::CmpgtunI, &[0, 4, 18]),       // p0=!cmp.gtu(r4,#0x12)
+    (0x7604c243, Insn::AndRi, &[3, 4, 18]),          // r3=and(r4,#0x12)
+    (0x7644c243, Insn::SubIr, &[3, 4, 18]),          // r3=sub(#0x12,r4)
+    (0x7684c243, Insn::OrRi, &[3, 4, 18]),           // r3=or(r4,#0x12)
+    (0x7a1ac243, Insn::MuxIi, &[3, 0, 18, 52]),      // r3=mux(p0,#0x12,#0x34)
+    (0x7c1ac244, Insn::CombIi, &[4, 18, 52]),        // r5:4=combine(#0x12,#0x34)
+    (0x7c80c244, Insn::CombIu6, &[4, 18, 0]),        // r5:4=combine(#0x12,##0x0)
+    (0x8004c504, Insn::Asr64I, &[4, 4, 5]),          // r5:4=asr(r5:4,#0x5)
+    (0x8004c524, Insn::Lsr64I, &[4, 4, 5]),          // r5:4=lsr(r5:4,#0x5)
+    (0x8004c544, Insn::Asl64I, &[4, 4, 5]),          // r5:4=asl(r5:4,#0x5)
+    (0x8004c564, Insn::Rol64I, &[4, 4, 5]),          // r5:4=rol(r5:4,#0x5)
+    (0x8006c084, Insn::VsathubP, &[4, 6]),           // r5:4=vsathub(r7:6)
+    (0x8006c0a4, Insn::VsatwuhP, &[4, 6]),           // r5:4=vsatwuh(r7:6)
+    (0x8006c0c4, Insn::VsatwhP, &[4, 6]),            // r5:4=vsatwh(r7:6)
+    (0x8006c0e4, Insn::VsathbP, &[4, 6]),            // r5:4=vsathb(r7:6)
+    (0x8084c084, Insn::Not64, &[4, 4]),              // r5:4=not(r5:4)
+    (0x8084c0a4, Insn::Neg64, &[4, 4]),              // r5:4=neg(r5:4)
+    (0x8084c0c4, Insn::Abs64, &[4, 4]),              // r5:4=abs(r5:4)
+    (0x80c4c084, Insn::Deinterleave, &[4, 4]),       // r5:4=deinterleave(r5:4)
+    (0x80c4c0a4, Insn::Interleave, &[4, 4]),         // r5:4=interleave(r5:4)
+    (0x80c4c0c4, Insn::Brev64, &[4, 4]),             // r5:4=brev(r5:4)
+    (0x80c4c5e4, Insn::Asr64IRnd, &[4, 4, 5]),       // r5:4=asr(r5:4,#0x5):rnd
+    (0x8206c504, Insn::Sub64AsrI, &[4, 6, 5]),       // r5:4-=asr(r7:6,#0x5)
+    (0x8206c524, Insn::Sub64LsrI, &[4, 6, 5]),       // r5:4-=lsr(r7:6,#0x5)
+    (0x8206c544, Insn::Sub64AslI, &[4, 6, 5]),       // r5:4-=asl(r7:6,#0x5)
+    (0x8206c564, Insn::Sub64RolI, &[4, 6, 5]),       // r5:4-=rol(r7:6,#0x5)
+    (0x8206c584, Insn::Add64AsrI, &[4, 6, 5]),       // r5:4+=asr(r7:6,#0x5)
+    (0x8206c5a4, Insn::Add64LsrI, &[4, 6, 5]),       // r5:4+=lsr(r7:6,#0x5)
+    (0x8206c5c4, Insn::Add64AslI, &[4, 6, 5]),       // r5:4+=asl(r7:6,#0x5)
+    (0x8206c5e4, Insn::Add64RolI, &[4, 6, 5]),       // r5:4+=rol(r7:6,#0x5)
+    (0x8246c504, Insn::And64AsrI, &[4, 6, 5]),       // r5:4&=asr(r7:6,#0x5)
+    (0x8246c524, Insn::And64LsrI, &[4, 6, 5]),       // r5:4&=lsr(r7:6,#0x5)
+    (0x8246c544, Insn::And64AslI, &[4, 6, 5]),       // r5:4&=asl(r7:6,#0x5)
+    (0x8246c564, Insn::And64RolI, &[4, 6, 5]),       // r5:4&=rol(r7:6,#0x5)
+    (0x8246c584, Insn::Or64AsrI, &[4, 6, 5]),        // r5:4|=asr(r7:6,#0x5)
+    (0x8246c5a4, Insn::Or64LsrI, &[4, 6, 5]),        // r5:4|=lsr(r7:6,#0x5)
+    (0x8246c5c4, Insn::Or64AslI, &[4, 6, 5]),        // r5:4|=asl(r7:6,#0x5)
+    (0x8246c5e4, Insn::Or64RolI, &[4, 6, 5]),        // r5:4|=rol(r7:6,#0x5)
+    (0x8286c524, Insn::Xor64LsrI, &[4, 6, 5]),       // r5:4^=lsr(r7:6,#0x5)
+    (0x8286c544, Insn::Xor64AslI, &[4, 6, 5]),       // r5:4^=asl(r7:6,#0x5)
+    (0x8286c564, Insn::Xor64RolI, &[4, 6, 5]),       // r5:4^=rol(r7:6,#0x5)
+    (0x8404c004, Insn::Vsxtbh, &[4, 4]),             // r5:4=vsxtbh(r4)
+    (0x8404c044, Insn::Vzxtbh, &[4, 4]),             // r5:4=vzxtbh(r4)
+    (0x8404c084, Insn::Vsxthw, &[4, 4]),             // r5:4=vsxthw(r4)
+    (0x8404c0c4, Insn::Vzxthw, &[4, 4]),             // r5:4=vzxthw(r4)
+    (0x8444c004, Insn::Sxtw, &[4, 4]),               // r5:4=sxtw(r4)
+    (0x8444c044, Insn::Vsplath, &[4, 4]),            // r5:4=vsplath(r4)
+    (0x8444c084, Insn::VsplatbP, &[4, 4]),           // r5:4=vsplatb(r4)
+    (0x8504c300, Insn::TstbitI, &[0, 4, 3]),         // p0=tstbit(r4,#0x3)
+    (0x8524c300, Insn::TstbitnI, &[0, 4, 3]),        // p0=!tstbit(r4,#0x3)
+    (0x8543c000, Insn::PdRs, &[0, 3]),               // p0=r3
+    (0x8584ff00, Insn::BitsclrI, &[0, 4, 63]),       // p0=bitsclr(r4,#0x3f)
+    (0x8704caa3, Insn::Tableidxb, &[3, 4, 5, 10]),   // r3=tableidxb(r4,#0x5,#0xa):raw
+    (0x8744c9a3, Insn::Tableidxh, &[3, 4, 5, 9]),    // r3=tableidxh(r4,#0x5,#0x9):raw
+    (0x8784c8a3, Insn::Tableidxw, &[3, 4, 5, 8]),    // r3=tableidxw(r4,#0x5,#0x8):raw
+    (0x87c4c7a3, Insn::Tableidxd, &[3, 4, 5, 7]),    // r3=tableidxd(r4,#0x5,#0x7):raw
+    (0x8804c003, Insn::Vsathub, &[3, 4]),            // r3=vsathub(r5:4)
+    (0x8804c043, Insn::Vsatwh, &[3, 4]),             // r3=vsatwh(r5:4)
+    (0x8804c083, Insn::Vsatwuh, &[3, 4]),            // r3=vsatwuh(r5:4)
+    (0x8804c0c3, Insn::Vsathb, &[3, 4]),             // r3=vsathb(r5:4)
+    (0x8844c003, Insn::Clb64, &[3, 4]),              // r3=clb(r5:4)
+    (0x8844c043, Insn::Cl064, &[3, 4]),              // r3=cl0(r5:4)
+    (0x8844c083, Insn::Cl164, &[3, 4]),              // r3=cl1(r5:4)
+    (0x8864c003, Insn::Normamt64, &[3, 4]),          // r3=normamt(r5:4)
+    (0x8864c063, Insn::Popcount, &[3, 4]),           // r3=popcount(r5:4)
+    (0x8864fe43, Insn::Clbadd64, &[3, 4, 62]),       // r3=add(clb(r5:4),#-0x2)
+    (0x8884c003, Insn::Vtrunohb, &[3, 4]),           // r3=vtrunohb(r5:4)
+    (0x8884c043, Insn::Vtrunehb, &[3, 4]),           // r3=vtrunehb(r5:4)
+    (0x8884c083, Insn::Vrndwh, &[3, 4]),             // r3=vrndwh(r5:4)
+    (0x8884c0c3, Insn::VrndwhSat, &[3, 4]),          // r3=vrndwh(r5:4):sat
+    (0x88c4c003, Insn::Sat, &[3, 4]),                // r3=sat(r5:4)
+    (0x88c4c023, Insn::RoundSat, &[3, 4]),           // r3=round(r5:4):sat
+    (0x88c4c784, Insn::BitsplitI, &[4, 4, 7]),       // r5:4=bitsplit(r4,#0x7)
+    (0x88e4c043, Insn::Ct064, &[3, 4]),              // r3=ct0(r5:4)
+    (0x88e4c083, Insn::Ct164, &[3, 4]),              // r3=ct1(r5:4)
+    (0x8940c003, Insn::RdPs, &[3, 0]),               // r3=p0
+    (0x8c04c083, Insn::Clb, &[3, 4]),                // r3=clb(r4)
+    (0x8c04c0a3, Insn::Cl0, &[3, 4]),                // r3=cl0(r4)
+    (0x8c04c0c3, Insn::Cl1, &[3, 4]),                // r3=cl1(r4)
+    (0x8c04c0e3, Insn::Normamt, &[3, 4]),            // r3=normamt(r4)
+    (0x8c04c503, Insn::AsrI, &[3, 4, 5]),            // r3=asr(r4,#0x5)
+    (0x8c04c523, Insn::LsrI, &[3, 4, 5]),            // r3=lsr(r4,#0x5)
+    (0x8c04c543, Insn::AslI, &[3, 4, 5]),            // r3=asl(r4,#0x5)
+    (0x8c04c563, Insn::RolI, &[3, 4, 5]),            // r3=rol(r4,#0x5)
+    (0x8c24fe03, Insn::Clbadd, &[3, 4, 62]),         // r3=add(clb(r4),#-0x2)
+    (0x8c44c083, Insn::Ct0, &[3, 4]),                // r3=ct0(r4)
+    (0x8c44c0a3, Insn::Ct1, &[3, 4]),                // r3=ct1(r4)
+    (0x8c44c0c3, Insn::Brev, &[3, 4]),               // r3=brev(r4)
+    (0x8c44c0e3, Insn::Vsplatb, &[3, 4]),            // r3=vsplatb(r4)
+    (0x8c44c503, Insn::AsrIRnd, &[3, 4, 5]),         // r3=asr(r4,#0x5):rnd
+    (0x8c44c543, Insn::AslISat, &[3, 4, 5]),         // r3=asl(r4,#0x5):sat
+    (0x8c84c003, Insn::VsathbRs, &[3, 4]),           // r3=vsathb(r4)
+    (0x8c84c043, Insn::VsathubRs, &[3, 4]),          // r3=vsathub(r4)
+    (0x8c84c083, Insn::Abs, &[3, 4]),                // r3=abs(r4)
+    (0x8c84c0a3, Insn::AbsSat, &[3, 4]),             // r3=abs(r4):sat
+    (0x8c84c0c3, Insn::NegSat, &[3, 4]),             // r3=neg(r4):sat
+    (0x8c84c0e3, Insn::Swiz, &[3, 4]),               // r3=swiz(r4)
+    (0x8cc4c083, Insn::Sath, &[3, 4]),               // r3=sath(r4)
+    (0x8cc4c0a3, Insn::Satuh, &[3, 4]),              // r3=satuh(r4)
+    (0x8cc4c0c3, Insn::Satub, &[3, 4]),              // r3=satub(r4)
+    (0x8cc4c0e3, Insn::Satb, &[3, 4]),               // r3=satb(r4)
+    (0x8cc4c303, Insn::SetbitI, &[3, 4, 3]),         // r3=setbit(r4,#0x3)
+    (0x8cc4c323, Insn::ClrbitI, &[3, 4, 3]),         // r3=clrbit(r4,#0x3)
+    (0x8cc4c343, Insn::TogglebitI, &[3, 4, 3]),      // r3=togglebit(r4,#0x3)
+    (0x8ce4c503, Insn::CroundI, &[3, 4, 5]),         // r3=cround(r4,#0x5)
+    (0x8ce4c583, Insn::RoundI, &[3, 4, 5]),          // r3=round(r4,#0x5)
+    (0x8ce4c5c3, Insn::RoundISat, &[3, 4, 5]),       // r3=round(r4,#0x5):sat
+    (0x8d24c543, Insn::Extractu, &[3, 4, 5, 10]),    // r3=extractu(r4,#0x5,#0xa)
+    (0x8da4c543, Insn::Extract, &[3, 4, 5, 10]),     // r3=extract(r4,#0x5,#0xa)
+    (0x8e04c503, Insn::SubAsrI, &[3, 4, 5]),         // r3-=asr(r4,#0x5)
+    (0x8e04c523, Insn::SubLsrI, &[3, 4, 5]),         // r3-=lsr(r4,#0x5)
+    (0x8e04c543, Insn::SubAslI, &[3, 4, 5]),         // r3-=asl(r4,#0x5)
+    (0x8e04c563, Insn::SubRolI, &[3, 4, 5]),         // r3-=rol(r4,#0x5)
+    (0x8e04c583, Insn::AddAsrI, &[3, 4, 5]),         // r3+=asr(r4,#0x5)
+    (0x8e04c5a3, Insn::AddLsrI, &[3, 4, 5]),         // r3+=lsr(r4,#0x5)
+    (0x8e04c5c3, Insn::AddAslI, &[3, 4, 5]),         // r3+=asl(r4,#0x5)
+    (0x8e04c5e3, Insn::AddRolI, &[3, 4, 5]),         // r3+=rol(r4,#0x5)
+    (0x8e44c503, Insn::AndAsrI, &[3, 4, 5]),         // r3&=asr(r4,#0x5)
+    (0x8e44c523, Insn::AndLsrI, &[3, 4, 5]),         // r3&=lsr(r4,#0x5)
+    (0x8e44c543, Insn::AndAslI, &[3, 4, 5]),         // r3&=asl(r4,#0x5)
+    (0x8e44c563, Insn::AndRolI, &[3, 4, 5]),         // r3&=rol(r4,#0x5)
+    (0x8e44c583, Insn::OrAsrI, &[3, 4, 5]),          // r3|=asr(r4,#0x5)
+    (0x8e44c5a3, Insn::OrLsrI, &[3, 4, 5]),          // r3|=lsr(r4,#0x5)
+    (0x8e44c5c3, Insn::OrAslI, &[3, 4, 5]),          // r3|=asl(r4,#0x5)
+    (0x8e44c5e3, Insn::OrRolI, &[3, 4, 5]),          // r3|=rol(r4,#0x5)
+    (0x8e84c523, Insn::XorLsrI, &[3, 4, 5]),         // r3^=lsr(r4,#0x5)
+    (0x8e84c543, Insn::XorAslI, &[3, 4, 5]),         // r3^=asl(r4,#0x5)
+    (0x8e84c563, Insn::XorRolI, &[3, 4, 5]),         // r3^=rol(r4,#0x5)
+    (0x8f24c543, Insn::Insert, &[3, 4, 5, 10]),      // r3=insert(r4,#0x5,#0xa)
+    (0xc006c464, Insn::ValignbI, &[4, 6, 4, 3]),     // r5:4=valignb(r5:4,r7:6,#0x3)
+    (0xc084c664, Insn::VsplicebI, &[4, 4, 6, 3]),    // r5:4=vspliceb(r5:4,r7:6,#0x3)
+    (0xc104c606, Insn::Extractu64R, &[6, 4, 6]),     // r7:6=extractu(r5:4,r7:6)
+    (0xc144c623, Insn::VaddhubSat, &[3, 4, 6]),      // r3=vaddhub(r5:4,r7:6):sat
+    (0xc184c644, Insn::Vtrunewh, &[4, 4, 6]),        // r5:4=vtrunewh(r5:4,r7:6)
+    (0xc184c664, Insn::VtrunehbP, &[4, 4, 6]),       // r5:4=vtrunehb(r5:4,r7:6)
+    (0xc184c684, Insn::Vtrunowh, &[4, 4, 6]),        // r5:4=vtrunowh(r5:4,r7:6)
+    (0xc184c6a4, Insn::VtrunohbP, &[4, 4, 6]),       // r5:4=vtrunohb(r5:4,r7:6)
+    (0xc184c6c4, Insn::Lfs, &[4, 4, 6]),             // r5:4=lfs(r5:4,r7:6)
+    (0xc1c4c686, Insn::Extract64R, &[6, 4, 6]),      // r7:6=extract(r5:4,r7:6)
+    (0xc206c404, Insn::ValignbP, &[4, 0, 6, 4]),     // r5:4=valignb(r5:4,r7:6,p0)
+    (0xc284c604, Insn::VsplicebP, &[4, 0, 4, 6]),    // r5:4=vspliceb(r5:4,r7:6,p0)
+    (0xc2c4c604, Insn::AddCarry, &[4, 0, 4, 6]),     // r5:4=add(r5:4,r7:6,p0):carry
+    (0xc2e4c604, Insn::SubCarry, &[4, 0, 4, 6]),     // r5:4=sub(r5:4,r7:6,p0):carry
+    (0xc384c504, Insn::Asr64Rr, &[4, 4, 5]),         // r5:4=asr(r5:4,r5)
+    (0xc384c544, Insn::Lsr64Rr, &[4, 4, 5]),         // r5:4=lsr(r5:4,r5)
+    (0xc384c584, Insn::Asl64Rr, &[4, 4, 5]),         // r5:4=asl(r5:4,r5)
+    (0xc384c5c4, Insn::Lsl64Rr, &[4, 4, 5]),         // r5:4=lsl(r5:4,r5)
+    (0xc3c4c444, Insn::Vcnegh, &[4, 4, 4]),          // r5:4=vcnegh(r5:4,r4)
+    (0xc405c463, Insn::Addasl, &[3, 5, 4, 3]),       // r3=addasl(r4,r5,#0x3)
+    (0xc604c503, Insn::AsrRrSat, &[3, 4, 5]),        // r3=asr(r4,r5):sat
+    (0xc604c583, Insn::AslRrSat, &[3, 4, 5]),        // r3=asl(r4,r5):sat
+    (0xc644c503, Insn::AsrRr, &[3, 4, 5]),           // r3=asr(r4,r5)
+    (0xc644c543, Insn::LsrRr, &[3, 4, 5]),           // r3=lsr(r4,r5)
+    (0xc644c583, Insn::AslRr, &[3, 4, 5]),           // r3=asl(r4,r5)
+    (0xc644c5c3, Insn::LslRr, &[3, 4, 5]),           // r3=lsl(r4,r5)
+    (0xc684c503, Insn::SetbitR, &[3, 4, 5]),         // r3=setbit(r4,r5)
+    (0xc684c543, Insn::ClrbitR, &[3, 4, 5]),         // r3=clrbit(r4,r5)
+    (0xc684c583, Insn::TogglebitR, &[3, 4, 5]),      // r3=togglebit(r4,r5)
+    (0xc69fc5c3, Insn::LslIr, &[3, 62, 5]),          // r3=lsl(#-0x2,r5)
+    (0xc6c4c503, Insn::CroundR, &[3, 4, 5]),         // r3=cround(r4,r5)
+    (0xc6c4c583, Insn::RoundR, &[3, 4, 5]),          // r3=round(r4,r5)
+    (0xc6c4c5c3, Insn::RoundRSat, &[3, 4, 5]),       // r3=round(r4,r5):sat
+    (0xc704c500, Insn::TstbitR, &[0, 4, 5]),         // p0=tstbit(r4,r5)
+    (0xc724c500, Insn::TstbitnR, &[0, 4, 5]),        // p0=!tstbit(r4,r5)
+    (0xc744c500, Insn::BitssetR, &[0, 4, 5]),        // p0=bitsset(r4,r5)
+    (0xc784c500, Insn::BitsclrR, &[0, 4, 5]),        // p0=bitsclr(r4,r5)
+    (0xc7a4c500, Insn::BitsclrnR, &[0, 4, 5]),       // p0=!bitsclr(r4,r5)
+    (0xc7c4c540, Insn::CmpbGt, &[0, 4, 5]),          // p0=cmpb.gt(r4,r5)
+    (0xc7c4c560, Insn::CmphEq, &[0, 4, 5]),          // p0=cmph.eq(r4,r5)
+    (0xc7c4c580, Insn::CmphGt, &[0, 4, 5]),          // p0=cmph.gt(r4,r5)
+    (0xc7c4c5a0, Insn::CmphGtu, &[0, 4, 5]),         // p0=cmph.gtu(r4,r5)
+    (0xc7c4c5c0, Insn::CmpbEq, &[0, 4, 5]),          // p0=cmpb.eq(r4,r5)
+    (0xc7c4c5e0, Insn::CmpbGtu, &[0, 4, 5]),         // p0=cmpb.gtu(r4,r5)
+    (0xc804c403, Insn::InsertR, &[3, 4, 4]),         // r3=insert(r4,r5:4)
+    (0xc904c403, Insn::ExtractuR, &[3, 4, 4]),       // r3=extractu(r4,r5:4)
+    (0xc904c443, Insn::ExtractR, &[3, 4, 4]),        // r3=extract(r4,r5:4)
+    (0xca04c606, Insn::Insert64R, &[6, 4, 6]),       // r7:6=insert(r5:4,r7:6)
+    (0xca84c604, Insn::Xor64Xor, &[4, 4, 6]),        // r5:4^=xor(r5:4,r7:6)
+    (0xcb06c504, Insn::Or64Asr, &[4, 6, 5]),         // r5:4|=asr(r7:6,r5)
+    (0xcb06c544, Insn::Or64Lsr, &[4, 6, 5]),         // r5:4|=lsr(r7:6,r5)
+    (0xcb06c584, Insn::Or64Asl, &[4, 6, 5]),         // r5:4|=asl(r7:6,r5)
+    (0xcb06c5c4, Insn::Or64Lsl, &[4, 6, 5]),         // r5:4|=lsl(r7:6,r5)
+    (0xcb26e4e4, Insn::Vrcnegh, &[4, 6, 4]),         // r5:4+=vrcnegh(r7:6,r4)
+    (0xcb86c504, Insn::Sub64Asr, &[4, 6, 5]),        // r5:4-=asr(r7:6,r5)
+    (0xcb86c544, Insn::Sub64Lsr, &[4, 6, 5]),        // r5:4-=lsr(r7:6,r5)
+    (0xcb86c584, Insn::Sub64Asl, &[4, 6, 5]),        // r5:4-=asl(r7:6,r5)
+    (0xcb86c5c4, Insn::Sub64Lsl, &[4, 6, 5]),        // r5:4-=lsl(r7:6,r5)
+    (0xcbc6c504, Insn::Add64Asr, &[4, 6, 5]),        // r5:4+=asr(r7:6,r5)
+    (0xcbc6c544, Insn::Add64Lsr, &[4, 6, 5]),        // r5:4+=lsr(r7:6,r5)
+    (0xcbc6c584, Insn::Add64Asl, &[4, 6, 5]),        // r5:4+=asl(r7:6,r5)
+    (0xcbc6c5c4, Insn::Add64Lsl, &[4, 6, 5]),        // r5:4+=lsl(r7:6,r5)
+    (0xcc04c503, Insn::OrAsr, &[3, 4, 5]),           // r3|=asr(r4,r5)
+    (0xcc04c543, Insn::OrLsr, &[3, 4, 5]),           // r3|=lsr(r4,r5)
+    (0xcc04c583, Insn::OrAsl, &[3, 4, 5]),           // r3|=asl(r4,r5)
+    (0xcc04c5c3, Insn::OrLsl, &[3, 4, 5]),           // r3|=lsl(r4,r5)
+    (0xcc84c503, Insn::SubAsr, &[3, 4, 5]),          // r3-=asr(r4,r5)
+    (0xcc84c543, Insn::SubLsr, &[3, 4, 5]),          // r3-=lsr(r4,r5)
+    (0xcc84c583, Insn::SubAsl, &[3, 4, 5]),          // r3-=asl(r4,r5)
+    (0xcc84c5c3, Insn::SubLsl, &[3, 4, 5]),          // r3-=lsl(r4,r5)
+    (0xccc4c503, Insn::AddAsr, &[3, 4, 5]),          // r3+=asr(r4,r5)
+    (0xccc4c543, Insn::AddLsr, &[3, 4, 5]),          // r3+=lsr(r4,r5)
+    (0xccc4c583, Insn::AddAsl, &[3, 4, 5]),          // r3+=asl(r4,r5)
+    (0xccc4c5c3, Insn::AddLsl, &[3, 4, 5]),          // r3+=lsl(r4,r5)
+    (0xd004c603, Insn::Parity64, &[3, 4, 6]),        // r3=parity(r5:4,r7:6)
+    (0xd104c604, Insn::Vmux, &[4, 0, 4, 6]),         // r5:4=vmux(p0,r5:4,r7:6)
+    (0xd284c600, Insn::Cmp64Eq, &[0, 4, 6]),         // p0=cmp.eq(r5:4,r7:6)
+    (0xd284c640, Insn::Cmp64Gt, &[0, 4, 6]),         // p0=cmp.gt(r5:4,r7:6)
+    (0xd284c680, Insn::Cmp64Gtu, &[0, 4, 6]),        // p0=cmp.gtu(r5:4,r7:6)
+    (0xd304c604, Insn::Vaddub64, &[4, 4, 6]),        // r5:4=vaddub(r5:4,r7:6)
+    (0xd304c624, Insn::Vaddub64Sat, &[4, 4, 6]),     // r5:4=vaddub(r5:4,r7:6):sat
+    (0xd304c644, Insn::Vaddh64, &[4, 4, 6]),         // r5:4=vaddh(r5:4,r7:6)
+    (0xd304c664, Insn::Vaddh64Sat, &[4, 4, 6]),      // r5:4=vaddh(r5:4,r7:6):sat
+    (0xd304c684, Insn::Vadduh64Sat, &[4, 4, 6]),     // r5:4=vadduh(r5:4,r7:6):sat
+    (0xd304c6a4, Insn::Vaddw64, &[4, 4, 6]),         // r5:4=vaddw(r5:4,r7:6)
+    (0xd304c6c4, Insn::Vaddw64Sat, &[4, 4, 6]),      // r5:4=vaddw(r5:4,r7:6):sat
+    (0xd304c6e4, Insn::Add64, &[4, 4, 6]),           // r5:4=add(r5:4,r7:6)
+    (0xd326c404, Insn::Vsubub64, &[4, 6, 4]),        // r5:4=vsubub(r5:4,r7:6)
+    (0xd326c424, Insn::Vsubub64Sat, &[4, 6, 4]),     // r5:4=vsubub(r5:4,r7:6):sat
+    (0xd326c444, Insn::Vsubh64, &[4, 6, 4]),         // r5:4=vsubh(r5:4,r7:6)
+    (0xd326c464, Insn::Vsubh64Sat, &[4, 6, 4]),      // r5:4=vsubh(r5:4,r7:6):sat
+    (0xd326c484, Insn::Vsubuh64Sat, &[4, 6, 4]),     // r5:4=vsubuh(r5:4,r7:6):sat
+    (0xd326c4a4, Insn::Vsubw64, &[4, 6, 4]),         // r5:4=vsubw(r5:4,r7:6)
+    (0xd326c4c4, Insn::Vsubw64Sat, &[4, 6, 4]),      // r5:4=vsubw(r5:4,r7:6):sat
+    (0xd326c4e4, Insn::Sub64, &[4, 6, 4]),           // r5:4=sub(r5:4,r7:6)
+    (0xd344c604, Insn::Vavgub64, &[4, 4, 6]),        // r5:4=vavgub(r5:4,r7:6)
+    (0xd344c624, Insn::Vavgub64Rnd, &[4, 4, 6]),     // r5:4=vavgub(r5:4,r7:6):rnd
+    (0xd344c644, Insn::Vavgh64, &[4, 4, 6]),         // r5:4=vavgh(r5:4,r7:6)
+    (0xd344c664, Insn::Vavgh64Rnd, &[4, 4, 6]),      // r5:4=vavgh(r5:4,r7:6):rnd
+    (0xd344c684, Insn::Vavgh64Crnd, &[4, 4, 6]),     // r5:4=vavgh(r5:4,r7:6):crnd
+    (0xd344c6a4, Insn::Vavguh64, &[4, 4, 6]),        // r5:4=vavguh(r5:4,r7:6)
+    (0xd344c6c4, Insn::Vavguh64Rnd, &[4, 4, 6]),     // r5:4=vavguh(r5:4,r7:6):rnd
+    (0xd364c604, Insn::Vavgw64, &[4, 4, 6]),         // r5:4=vavgw(r5:4,r7:6)
+    (0xd364c624, Insn::Vavgw64Rnd, &[4, 4, 6]),      // r5:4=vavgw(r5:4,r7:6):rnd
+    (0xd364c644, Insn::Vavgw64Crnd, &[4, 4, 6]),     // r5:4=vavgw(r5:4,r7:6):crnd
+    (0xd364c664, Insn::Vavguw64, &[4, 4, 6]),        // r5:4=vavguw(r5:4,r7:6)
+    (0xd364c684, Insn::Vavguw64Rnd, &[4, 4, 6]),     // r5:4=vavguw(r5:4,r7:6):rnd
+    (0xd364c6a4, Insn::Add64Sat, &[4, 4, 6]),        // r5:4=add(r5:4,r7:6):sat
+    (0xd364c6c4, Insn::Add64RawLo, &[4, 4, 6]),      // r5:4=add(r5:4,r7:6):raw:lo
+    (0xd364c6e4, Insn::Add64RawHi, &[4, 4, 6]),      // r5:4=add(r5:4,r7:6):raw:hi
+    (0xd386c404, Insn::Vnavgh64, &[4, 6, 4]),        // r5:4=vnavgh(r5:4,r7:6)
+    (0xd386c424, Insn::Vnavgh64RndSat, &[4, 6, 4]),  // r5:4=vnavgh(r5:4,r7:6):rnd:sat
+    (0xd386c444, Insn::Vnavgh64CrndSat, &[4, 6, 4]), // r5:4=vnavgh(r5:4,r7:6):crnd:sat
+    (0xd386c464, Insn::Vnavgw64, &[4, 6, 4]),        // r5:4=vnavgw(r5:4,r7:6)
+    (0xd386c484, Insn::Vnavgw64RndSat, &[4, 6, 4]),  // r5:4=vnavgw(r5:4,r7:6):rnd:sat
+    (0xd386c4c4, Insn::Vnavgw64CrndSat, &[4, 6, 4]), // r5:4=vnavgw(r5:4,r7:6):crnd:sat
+    (0xd3a6c404, Insn::Vminub64, &[4, 6, 4]),        // r5:4=vminub(r5:4,r7:6)
+    (0xd3a6c424, Insn::Vminh64, &[4, 6, 4]),         // r5:4=vminh(r5:4,r7:6)
+    (0xd3a6c444, Insn::Vminuh64, &[4, 6, 4]),        // r5:4=vminuh(r5:4,r7:6)
+    (0xd3a6c464, Insn::Vminw64, &[4, 6, 4]),         // r5:4=vminw(r5:4,r7:6)
+    (0xd3a6c484, Insn::Vminuw64, &[4, 6, 4]),        // r5:4=vminuw(r5:4,r7:6)
+    (0xd3a6c4a4, Insn::Vmaxuw64, &[4, 6, 4]),        // r5:4=vmaxuw(r5:4,r7:6)
+    (0xd3a6c4c4, Insn::Min64, &[4, 6, 4]),           // r5:4=min(r5:4,r7:6)
+    (0xd3a6c4e4, Insn::Minu64, &[4, 6, 4]),          // r5:4=minu(r5:4,r7:6)
+    (0xd3c4c684, Insn::Max64, &[4, 4, 6]),           // r5:4=max(r5:4,r7:6)
+    (0xd3c4c6a4, Insn::Maxu64, &[4, 4, 6]),          // r5:4=maxu(r5:4,r7:6)
+    (0xd3c6c404, Insn::Vmaxub64, &[4, 6, 4]),        // r5:4=vmaxub(r5:4,r7:6)
+    (0xd3c6c424, Insn::Vmaxh64, &[4, 6, 4]),         // r5:4=vmaxh(r5:4,r7:6)
+    (0xd3c6c444, Insn::Vmaxuh64, &[4, 6, 4]),        // r5:4=vmaxuh(r5:4,r7:6)
+    (0xd3c6c464, Insn::Vmaxw64, &[4, 6, 4]),         // r5:4=vmaxw(r5:4,r7:6)
+    (0xd3c6c4c4, Insn::Vmaxb64, &[4, 6, 4]),         // r5:4=vmaxb(r5:4,r7:6)
+    (0xd3c6c4e4, Insn::Vminb64, &[4, 6, 4]),         // r5:4=vminb(r5:4,r7:6)
+    (0xd3e4c5e3, Insn::Modwrap, &[3, 4, 5]),         // r3=modwrap(r4,r5)
+    (0xd3e4c604, Insn::And64, &[4, 4, 6]),           // r5:4=and(r5:4,r7:6)
+    (0xd3e4c624, Insn::Andn64, &[4, 4, 6]),          // r5:4=and(r7:6,~r5:4)
+    (0xd3e4c644, Insn::Or64, &[4, 4, 6]),            // r5:4=or(r5:4,r7:6)
+    (0xd3e4c664, Insn::Orn64, &[4, 4, 6]),           // r5:4=or(r7:6,~r5:4)
+    (0xd3e4c684, Insn::Xor64, &[4, 4, 6]),           // r5:4=xor(r5:4,r7:6)
+    (0xd424c504, Insn::BitsplitR, &[4, 4, 5]),       // r5:4=bitsplit(r4,r5)
+    (0xd505c403, Insn::AddLl, &[3, 5, 4]),           // r3=add(r4.l,r5.l)
+    (0xd505c403, Insn::AddLl, &[3, 5, 4]),           // r3=add(r4.l,r5.l)
+    (0xd505c443, Insn::AddLh, &[3, 5, 4]),           // r3=add(r4.l,r5.h)
+    (0xd505c443, Insn::AddLh, &[3, 5, 4]),           // r3=add(r4.l,r5.h)
+    (0xd505c483, Insn::AddLlSat, &[3, 5, 4]),        // r3=add(r4.l,r5.l):sat
+    (0xd505c483, Insn::AddLlSat, &[3, 5, 4]),        // r3=add(r4.l,r5.l):sat
+    (0xd505c4c3, Insn::AddLhSat, &[3, 5, 4]),        // r3=add(r4.l,r5.h):sat
+    (0xd505c4c3, Insn::AddLhSat, &[3, 5, 4]),        // r3=add(r4.l,r5.h):sat
+    (0xd525c403, Insn::SubLl, &[3, 5, 4]),           // r3=sub(r4.l,r5.l)
+    (0xd525c443, Insn::SubLh, &[3, 5, 4]),           // r3=sub(r4.l,r5.h)
+    (0xd525c483, Insn::SubLlSat, &[3, 5, 4]),        // r3=sub(r4.l,r5.l):sat
+    (0xd525c4c3, Insn::SubLhSat, &[3, 5, 4]),        // r3=sub(r4.l,r5.h):sat
+    (0xd545c403, Insn::AddLlS16, &[3, 5, 4]),        // r3=add(r4.l,r5.l):<<16
+    (0xd545c423, Insn::AddLhS16, &[3, 5, 4]),        // r3=add(r4.l,r5.h):<<16
+    (0xd545c443, Insn::AddHlS16, &[3, 5, 4]),        // r3=add(r4.h,r5.l):<<16
+    (0xd545c463, Insn::AddHhS16, &[3, 5, 4]),        // r3=add(r4.h,r5.h):<<16
+    (0xd545c483, Insn::AddLlSatS16, &[3, 5, 4]),     // r3=add(r4.l,r5.l):sat:<<16
+    (0xd545c4a3, Insn::AddLhSatS16, &[3, 5, 4]),     // r3=add(r4.l,r5.h):sat:<<16
+    (0xd545c4c3, Insn::AddHlSatS16, &[3, 5, 4]),     // r3=add(r4.h,r5.l):sat:<<16
+    (0xd545c4e3, Insn::AddHhSatS16, &[3, 5, 4]),     // r3=add(r4.h,r5.h):sat:<<16
+    (0xd565c403, Insn::SubLlS16, &[3, 5, 4]),        // r3=sub(r4.l,r5.l):<<16
+    (0xd565c423, Insn::SubLhS16, &[3, 5, 4]),        // r3=sub(r4.l,r5.h):<<16
+    (0xd565c443, Insn::SubHlS16, &[3, 5, 4]),        // r3=sub(r4.h,r5.l):<<16
+    (0xd565c463, Insn::SubHhS16, &[3, 5, 4]),        // r3=sub(r4.h,r5.h):<<16
+    (0xd565c483, Insn::SubLlSatS16, &[3, 5, 4]),     // r3=sub(r4.l,r5.l):sat:<<16
+    (0xd565c4a3, Insn::SubLhSatS16, &[3, 5, 4]),     // r3=sub(r4.l,r5.h):sat:<<16
+    (0xd565c4c3, Insn::SubHlSatS16, &[3, 5, 4]),     // r3=sub(r4.h,r5.l):sat:<<16
+    (0xd565c4e3, Insn::SubHhSatS16, &[3, 5, 4]),     // r3=sub(r4.h,r5.h):sat:<<16
+    (0xd5a5c403, Insn::Min, &[3, 5, 4]),             // r3=min(r4,r5)
+    (0xd5a5c483, Insn::Minu, &[3, 5, 4]),            // r3=minu(r4,r5)
+    (0xd5c4c503, Insn::Max, &[3, 4, 5]),             // r3=max(r4,r5)
+    (0xd5c4c583, Insn::Maxu, &[3, 4, 5]),            // r3=maxu(r4,r5)
+    (0xd5e4c503, Insn::Parity, &[3, 4, 5]),          // r3=parity(r4,r5)
+    (0xda04c243, Insn::OrAndI, &[3, 4, 18]),         // r3|=and(r4,#0x12)
+    (0xda43c244, Insn::OrAc, &[3, 4, 18]),           // r3=or(r4,and(r3,#0x12))
+    (0xda84c243, Insn::OrOrI, &[3, 4, 18]),          // r3|=or(r4,#0x12)
+    (0xdb24c345, Insn::Add3, &[3, 4, 5, 18]),        // r3=add(r4,add(r5,#0x12))
+    (0xdba4c345, Insn::Sub3, &[3, 4, 5, 18]),        // r3=add(r4,sub(#0x12,r5))
+    (0xdd04c240, Insn::CmpbEqI, &[0, 4, 18]),        // p0=cmpb.eq(r4,#0x12)
+    (0xdd04c248, Insn::CmphEqI, &[0, 4, 18]),        // p0=cmph.eq(r4,#0x12)
+    (0xdd24c240, Insn::CmpbGtI, &[0, 4, 18]),        // p0=cmpb.gt(r4,#0x12)
+    (0xdd24c248, Insn::CmphGtI, &[0, 4, 18]),        // p0=cmph.gt(r4,#0x12)
+    (0xdd44c240, Insn::CmpbGtuI, &[0, 4, 18]),       // p0=cmpb.gtu(r4,#0x12)
+    (0xdd44c248, Insn::CmphGtuI, &[0, 4, 18]),       // p0=cmph.gtu(r4,#0x12)
+    (0xde03e420, Insn::CandAsl, &[3, 4, 18]),        // r3=and(#0x12,asl(r3,#0x4))
+    (0xde03e422, Insn::CorAsl, &[3, 4, 18]),         // r3=or(#0x12,asl(r3,#0x4))
+    (0xde03e424, Insn::CaddAsl, &[3, 4, 18]),        // r3=add(#0x12,asl(r3,#0x4))
+    (0xde03e426, Insn::CsubAsl, &[3, 4, 18]),        // r3=sub(#0x12,asl(r3,#0x4))
+    (0xde03e430, Insn::CandLsr, &[3, 4, 18]),        // r3=and(#0x12,lsr(r3,#0x4))
+    (0xde03e432, Insn::CorLsr, &[3, 4, 18]),         // r3=or(#0x12,lsr(r3,#0x4))
+    (0xde03e434, Insn::CaddLsr, &[3, 4, 18]),        // r3=add(#0x12,lsr(r3,#0x4))
+    (0xde03e436, Insn::CsubLsr, &[3, 4, 18]),        // r3=sub(#0x12,lsr(r3,#0x4))
+    (0xe204c243, Insn::AddAccI, &[3, 4, 18]),        // r3+=add(r4,#0x12)
+    (0xe284c243, Insn::SubAccI, &[3, 4, 18]),        // r3-=add(r4,#0x12)
+    (0xef04c523, Insn::AddAcc, &[3, 4, 5]),          // r3+=add(r4,r5)
+    (0xef05c463, Insn::AddsubAcc, &[3, 5, 4]),       // r3+=sub(r4,r5)
+    (0xef25c403, Insn::OrAndn, &[3, 5, 4]),          // r3|=and(r5,~r4)
+    (0xef25c423, Insn::AndAndn, &[3, 5, 4]),         // r3&=and(r5,~r4)
+    (0xef25c443, Insn::XorAndn, &[3, 5, 4]),         // r3^=and(r5,~r4)
+    (0xef44c503, Insn::AndAnd, &[3, 4, 5]),          // r3&=and(r4,r5)
+    (0xef44c523, Insn::AndOr, &[3, 4, 5]),           // r3&=or(r4,r5)
+    (0xef44c543, Insn::AndXor, &[3, 4, 5]),          // r3&=xor(r4,r5)
+    (0xef44c563, Insn::OrAnd, &[3, 4, 5]),           // r3|=and(r4,r5)
+    (0xef84c523, Insn::SubAcc, &[3, 4, 5]),          // r3-=add(r4,r5)
+    (0xef84c563, Insn::XorXor, &[3, 4, 5]),          // r3^=xor(r4,r5)
+    (0xefc4c503, Insn::OrOr, &[3, 4, 5]),            // r3|=or(r4,r5)
+    (0xefc4c523, Insn::OrXor, &[3, 4, 5]),           // r3|=xor(r4,r5)
+    (0xefc4c543, Insn::XorAnd, &[3, 4, 5]),          // r3^=and(r4,r5)
+    (0xefc4c563, Insn::XorOr, &[3, 4, 5]),           // r3^=or(r4,r5)
+    (0xf104c503, Insn::AndRr, &[3, 4, 5]),           // r3=and(r4,r5)
+    (0xf124c503, Insn::OrRr, &[3, 4, 5]),            // r3=or(r4,r5)
+    (0xf164c503, Insn::XorRr, &[3, 4, 5]),           // r3=xor(r4,r5)
+    (0xf184c503, Insn::Andn2Rr, &[3, 4, 5]),         // r3=and(r5,~r4)
+    (0xf1a4c503, Insn::Orn2Rr, &[3, 4, 5]),          // r3=or(r5,~r4)
+    (0xf204c500, Insn::CmpeqRr, &[0, 4, 5]),         // p0=cmp.eq(r4,r5)
+    (0xf204c510, Insn::CmpeqnRr, &[0, 4, 5]),        // p0=!cmp.eq(r4,r5)
+    (0xf244c500, Insn::CmpgtRr, &[0, 4, 5]),         // p0=cmp.gt(r4,r5)
+    (0xf244c510, Insn::CmpgtnRr, &[0, 4, 5]),        // p0=!cmp.gt(r4,r5)
+    (0xf264c500, Insn::CmpgtuRr, &[0, 4, 5]),        // p0=cmp.gtu(r4,r5)
+    (0xf264c510, Insn::CmpgtunRr, &[0, 4, 5]),       // p0=!cmp.gtu(r4,r5)
+    (0xf304c503, Insn::AddRr, &[3, 4, 5]),           // r3=add(r4,r5)
+    (0xf325c403, Insn::SubRr, &[3, 5, 4]),           // r3=sub(r4,r5)
+    (0xf344c503, Insn::CmpeqRdRr, &[3, 4, 5]),       // r3=cmp.eq(r4,r5)
+    (0xf364c503, Insn::CmpeqnRdRr, &[3, 4, 5]),      // r3=!cmp.eq(r4,r5)
+    (0xf385c403, Insn::CombHh, &[3, 5, 4]),          // r3=combine(r4.h,r5.h)
+    (0xf3a5c403, Insn::CombHl, &[3, 5, 4]),          // r3=combine(r4.h,r5.l)
+    (0xf3c5c403, Insn::CombLh, &[3, 5, 4]),          // r3=combine(r4.l,r5.h)
+    (0xf3e5c403, Insn::CombLl, &[3, 5, 4]),          // r3=combine(r4.l,r5.l)
+    (0xf404c503, Insn::MuxRr, &[3, 0, 4, 5]),        // r3=mux(p0,r4,r5)
+    (0xf504c504, Insn::CombineRr, &[4, 4, 5]),       // r5:4=combine(r4,r5)
+    (0xf584c504, Insn::Packhl, &[4, 4, 5]),          // r5:4=packhl(r4,r5)
+    (0xf604c503, Insn::VaddhRr, &[3, 4, 5]),         // r3=vaddh(r4,r5)
+    (0xf624c503, Insn::VaddhSatRr, &[3, 4, 5]),      // r3=vaddh(r4,r5):sat
+    (0xf644c503, Insn::AddSatRr, &[3, 4, 5]),        // r3=add(r4,r5):sat
+    (0xf664c503, Insn::VadduhSatRr, &[3, 4, 5]),     // r3=vadduh(r4,r5):sat
+    (0xf685c403, Insn::VsubhRr, &[3, 5, 4]),         // r3=vsubh(r4,r5)
+    (0xf6a5c403, Insn::VsubhSatRr, &[3, 5, 4]),      // r3=vsubh(r4,r5):sat
+    (0xf6e5c403, Insn::VsubuhSatRr, &[3, 5, 4]),     // r3=vsubuh(r4,r5):sat
+    (0xf704c503, Insn::VavghRr, &[3, 4, 5]),         // r3=vavgh(r4,r5)
+    (0xf724c503, Insn::VavghRndRr, &[3, 4, 5]),      // r3=vavgh(r4,r5):rnd
+    (0xf765c403, Insn::VnavghRr, &[3, 5, 4]),        // r3=vnavgh(r4,r5)
+];
+
+#[test]
+fn hx5_decode_map() {
+    for &(w, insn, ops) in HX5_WORDS {
+        assert_eq!(decode(w.into(), 32), Some(insn), "word {w:#010x}");
+        assert_eq!(extract_ops(insn, u128::from(w)), ops, "ops {w:#010x}");
+    }
+}
+// ---- HX5: 実行意味論 ----
+
+/// 1 命令パケット（pp=3 埋込みの llvm-mc 符号）を実行する。
+fn exec1(env: &mut BareEnv, word: u32) {
+    put(env, BASE, &[word]);
+    env.pc = BASE;
+    step(env).unwrap();
+}
+
+#[test]
+fn hx5_alu32() {
+    let mut env = run_env();
+    sem::r_set(&mut env.backend, 4, 0x7fff_ffff);
+    sem::r_set(&mut env.backend, 5, 2);
+    // r3 = add(r4,r5):sat — 飽和 + USR.OVF。
+    exec1(&mut env, 0xf644c503);
+    assert_eq!(sem::r_get(&env.backend, 3), 0x7fff_ffff);
+    assert_eq!(env.backend.get(sem::usr_ref()) & 1, 1);
+    // r3 = sub(r4,r5) — 第 1 被演算子 - 第 2 被演算子。
+    exec1(&mut env, 0xf325c403);
+    assert_eq!(sem::r_get(&env.backend, 3), 0x7fff_fffd);
+    // r3 = and(r5,~r4) — 2 & ~0x7fffffff = 0。
+    exec1(&mut env, 0xf184c503);
+    assert_eq!(sem::r_get(&env.backend, 3), 0);
+    sem::r_set(&mut env.backend, 4, 0xffff_fffd);
+    exec1(&mut env, 0xf184c503);
+    assert_eq!(sem::r_get(&env.backend, 3), 2);
+    // r3 = or(r5,~r4) — 2 | ~0xffff_fffd = 2。
+    exec1(&mut env, 0xf1a4c503);
+    assert_eq!(sem::r_get(&env.backend, 3), 2);
+    // r3 = xor(r4,r5) — 0xffff_fffd ^ 2。
+    exec1(&mut env, 0xf164c503);
+    assert_eq!(sem::r_get(&env.backend, 3), 0xffff_ffff);
+    // r3 = sub(#0x12,r4) — 0x12 - 0xffff_fffd = 0x15。
+    exec1(&mut env, 0x7644c243);
+    assert_eq!(sem::r_get(&env.backend, 3), 0x15);
+    // r3 = sub(r4,r5):sat — 0x80000000 - 2 のアンダーフロー。
+    sem::r_set(&mut env.backend, 4, 0x8000_0000);
+    exec1(&mut env, 0xf6c5c403);
+    assert_eq!(sem::r_get(&env.backend, 3), 0x8000_0000);
+}
+
+#[test]
+fn hx5_combine_mux() {
+    let mut env = run_env();
+    sem::r_set(&mut env.backend, 4, 0x1111_2222);
+    sem::r_set(&mut env.backend, 5, 0x3333_4444);
+    // r5:4 = combine(r4,r5) — 下位=第 2 オペランド、上位=第 1。
+    exec1(&mut env, 0xf504c504);
+    assert_eq!(sem::r_get(&env.backend, 4), 0x3333_4444);
+    assert_eq!(sem::r_get(&env.backend, 5), 0x1111_2222);
+    // r3 = combine(r4.h,r5.l) — 直前の combine で確定した
+    // r4=0x33334444, r5=0x11112222 を読む。(t.h<<16)|s.l。
+    exec1(&mut env, 0xf3a5c403);
+    assert_eq!(sem::r_get(&env.backend, 3), 0x3333_2222);
+    // r5:4 = combine(#0x12,#0x34)。
+    exec1(&mut env, 0x7c1ac244);
+    assert_eq!(sem::r_get(&env.backend, 4), 0x34);
+    assert_eq!(sem::r_get(&env.backend, 5), 0x12);
+    // r5:4 = packhl(r4,r5) — w0=(t.l,s.l)、w1=(t.h,s.h)。
+    sem::r_set(&mut env.backend, 4, 0xaaaa_1111);
+    sem::r_set(&mut env.backend, 5, 0xbbbb_2222);
+    exec1(&mut env, 0xf584c504);
+    assert_eq!(sem::r_get(&env.backend, 4), 0x1111_2222);
+    assert_eq!(sem::r_get(&env.backend, 5), 0xaaaa_bbbb);
+    // mux: p0=0 → 第 3 オペランド、p0=1 → 第 2。
+    sem::p_set(&mut env.backend, 0, 0);
+    exec1(&mut env, 0xf404c503); // r3 = mux(p0,r4,r5)
+    assert_eq!(sem::r_get(&env.backend, 3), 0xaaaa_bbbb);
+    sem::p_set(&mut env.backend, 0, 0xff);
+    exec1(&mut env, 0xf404c503);
+    assert_eq!(sem::r_get(&env.backend, 3), 0x1111_2222);
+    // r3 = mux(p0,#0x12,#0x34)。
+    exec1(&mut env, 0x7a1ac243);
+    assert_eq!(sem::r_get(&env.backend, 3), 0x12);
+}
+
+#[test]
+fn hx5_predicates() {
+    let mut env = run_env();
+    sem::r_set(&mut env.backend, 4, 5);
+    sem::r_set(&mut env.backend, 5, 7);
+    exec1(&mut env, 0xf204c500); // p0 = cmp.eq(r4,r5)
+    assert_eq!(sem::p_get(&env.backend, 0), 0);
+    exec1(&mut env, 0xf244c500); // p0 = cmp.gt(r4,r5)
+    assert_eq!(sem::p_get(&env.backend, 0), 0);
+    exec1(&mut env, 0xf264c500); // p0 = cmp.gtu(r4,r5)
+    assert_eq!(sem::p_get(&env.backend, 0), 0);
+    exec1(&mut env, 0xf244c510); // p0 = !cmp.gt(r4,r5)
+    assert_eq!(sem::p_get(&env.backend, 0), 0xff);
+    sem::r_set(&mut env.backend, 4, 0xffff_ffff);
+    exec1(&mut env, 0xf264c500); // gtu: 0xffffffff > 7
+    assert_eq!(sem::p_get(&env.backend, 0), 0xff);
+    exec1(&mut env, 0xf244c500); // gt: -1 > 7 → false
+    assert_eq!(sem::p_get(&env.backend, 0), 0);
+    // 即値比較。p0 = cmp.gtu(r4,#0x12) — u9 として解釈。
+    exec1(&mut env, 0x7584c240);
+    assert_eq!(sem::p_get(&env.backend, 0), 0xff);
+    // r3 = p0（zxt）、p0 = r3。
+    exec1(&mut env, 0x8940c003);
+    assert_eq!(sem::r_get(&env.backend, 3), 0xff);
+    sem::r_set(&mut env.backend, 3, 0xaa);
+    exec1(&mut env, 0x8543c000); // p0 = r3
+    assert_eq!(sem::p_get(&env.backend, 0), 0xaa);
+    // p 演算。p0 = and(p1,or(p2,!p3))。
+    sem::p_set(&mut env.backend, 1, 0xff);
+    sem::p_set(&mut env.backend, 2, 0);
+    sem::p_set(&mut env.backend, 3, 0xff);
+    exec1(&mut env, 0x6bb1c2c0); // and(p1,or(p2,!p3))
+    assert_eq!(sem::p_get(&env.backend, 0), 0);
+    sem::p_set(&mut env.backend, 3, 0);
+    exec1(&mut env, 0x6bb1c2c0);
+    assert_eq!(sem::p_get(&env.backend, 0), 0xff);
+    // fastcorner9: 9 連続ビット。p1=0xff,p2=0xff → 連続 16 ビット → 真。
+    sem::p_set(&mut env.backend, 1, 0xff);
+    sem::p_set(&mut env.backend, 2, 0xff);
+    exec1(&mut env, 0x6b01e290);
+    assert_eq!(sem::p_get(&env.backend, 0), 0xff);
+    // (0xff<<8)|0x7f = 0xff7f → 複製で 16 連続 → 真。
+    sem::p_set(&mut env.backend, 2, 0x7f);
+    exec1(&mut env, 0x6b01e290);
+    assert_eq!(sem::p_get(&env.backend, 0), 0xff);
+    // (0x3f<<8)|0x7f = 0x3f7f → 最長 7 連続 → 偽。
+    sem::p_set(&mut env.backend, 1, 0x3f);
+    exec1(&mut env, 0x6b01e290);
+    assert_eq!(sem::p_get(&env.backend, 0), 0);
+    // cmpb/cmph。p0 = cmpb.eq(r4,r5)。
+    sem::r_set(&mut env.backend, 4, 0x12);
+    sem::r_set(&mut env.backend, 5, 0x112);
+    exec1(&mut env, 0xc7c4c5c0);
+    assert_eq!(sem::p_get(&env.backend, 0), 0xff);
+    exec1(&mut env, 0xc7c4c560); // cmph.eq
+    assert_eq!(sem::p_get(&env.backend, 0), 0);
+}
+
+#[test]
+fn hx5_pair_ops() {
+    let mut env = run_env();
+    sem::r_set(&mut env.backend, 4, 0xffff_ffff);
+    sem::r_set(&mut env.backend, 5, 0x7fff_ffff);
+    sem::r_set(&mut env.backend, 6, 1);
+    sem::r_set(&mut env.backend, 7, 0);
+    // r5:4 = add(r5:4,r7:6):sat — 0x7fff..ff + 1 で飽和。
+    exec1(&mut env, 0xd364c6a4);
+    assert_eq!(sem::r_get(&env.backend, 4), 0xffff_ffff);
+    assert_eq!(sem::r_get(&env.backend, 5), 0x7fff_ffff);
+    // r5:4 = sub(r5:4,r7:6) — 第 1 ペア - 第 2 ペア。
+    exec1(&mut env, 0xd326c4e4);
+    assert_eq!(sem::r_get(&env.backend, 4), 0xffff_fffe);
+    assert_eq!(sem::r_get(&env.backend, 5), 0x7fff_ffff);
+    // p0 = cmp.gtu(r5:4,r7:6) — 0x7fff..fe > 1 → 真。
+    exec1(&mut env, 0xd284c680);
+    assert_eq!(sem::p_get(&env.backend, 0), 0xff);
+    // r5:4 = max(r5:4,r7:6) — 符号。
+    exec1(&mut env, 0xd3c4c684);
+    assert_eq!(
+        (sem::r_get(&env.backend, 4), sem::r_get(&env.backend, 5)),
+        (0xffff_fffe, 0x7fff_ffff)
+    );
+    // carry: p0=0xff（繰上り 1）。
+    sem::p_set(&mut env.backend, 0, 0xff);
+    sem::r_set(&mut env.backend, 4, 0xffff_ffff);
+    sem::r_set(&mut env.backend, 5, 0xffff_ffff);
+    sem::r_set(&mut env.backend, 6, 1);
+    sem::r_set(&mut env.backend, 7, 0);
+    exec1(&mut env, 0xc2c4c604); // r5:4 = add(r5:4,r7:6,p0):carry
+    assert_eq!(sem::r_get(&env.backend, 4), 1);
+    assert_eq!(sem::r_get(&env.backend, 5), 0);
+    assert_eq!(sem::p_get(&env.backend, 0), 0xff); // キャリーアウト。
+}
+
+#[test]
+fn hx5_shifts() {
+    let mut env = run_env();
+    sem::r_set(&mut env.backend, 4, 0x8000_0001);
+    sem::r_set(&mut env.backend, 5, 5);
+    // r3 = asr(r4,#5)。
+    exec1(&mut env, 0x8c04c503);
+    assert_eq!(sem::r_get(&env.backend, 3), 0xfc00_0000);
+    // r3 = lsr(r4,#5)。
+    exec1(&mut env, 0x8c04c523);
+    assert_eq!(sem::r_get(&env.backend, 3), 0x0400_0000);
+    // r3 = rol(r4,#5)。
+    exec1(&mut env, 0x8c04c563);
+    assert_eq!(sem::r_get(&env.backend, 3), 0x0000_0030);
+    // r3 = asr(r4,r5): r5=5 → 算術右 5。
+    exec1(&mut env, 0xc644c503);
+    assert_eq!(sem::r_get(&env.backend, 3), 0xfc00_0000);
+    // 負シフト量: r5 = -3 → 左 3。
+    sem::r_set(&mut env.backend, 5, 0xffff_fffd);
+    exec1(&mut env, 0xc644c583); // r3 = asl(r4,r5) — 負量は算術右
+    assert_eq!(sem::r_get(&env.backend, 3), 0xf000_0000);
+    // asl:sat — 0x40000000 asl 1 → 飽和。
+    sem::r_set(&mut env.backend, 4, 0x4000_0000);
+    sem::r_set(&mut env.backend, 5, 1);
+    exec1(&mut env, 0xc604c583);
+    assert_eq!(sem::r_get(&env.backend, 3), 0x7fff_ffff);
+    // 64 ビット。r5:4 = lsl(r5:4,r5) — r5=5 がシフト量。
+    sem::r_set(&mut env.backend, 4, 1);
+    sem::r_set(&mut env.backend, 5, 5);
+    exec1(&mut env, 0xc384c5c4);
+    assert_eq!(
+        (sem::r_get(&env.backend, 4), sem::r_get(&env.backend, 5)),
+        (0x0000_0020, 0x0000_00a0)
+    );
+    // r3 = lsl(#-2,r5) — zxt した 0xfffffffe を論理シフト。
+    sem::r_set(&mut env.backend, 5, 4);
+    exec1(&mut env, 0xc69fc5c3);
+    assert_eq!(sem::r_get(&env.backend, 3), 0xffff_ffe0);
+    // r3 = addasl(r4,r5,#3) = r4 + r5<<3。
+    sem::r_set(&mut env.backend, 4, 10);
+    sem::r_set(&mut env.backend, 5, 2);
+    exec1(&mut env, 0xc405c463);
+    assert_eq!(sem::r_get(&env.backend, 3), 26);
+    // r3 += asr(r4,#5) — 破壊的累積は同じ語の古い r3 を読む。
+    sem::r_set(&mut env.backend, 3, 100);
+    sem::r_set(&mut env.backend, 4, 0x8000_0000);
+    exec1(&mut env, 0x8e04c583);
+    assert_eq!(
+        sem::r_get(&env.backend, 3),
+        100u32.wrapping_add(0xfc00_0000)
+    );
+}
+
+#[test]
+fn hx5_bits() {
+    let mut env = run_env();
+    sem::r_set(&mut env.backend, 4, 0x00f0_f000);
+    exec1(&mut env, 0x8c04c0a3); // cl0
+    assert_eq!(sem::r_get(&env.backend, 3), 8);
+    exec1(&mut env, 0x8c04c0c3); // cl1（先頭 1 の個数=0）
+    assert_eq!(sem::r_get(&env.backend, 3), 0);
+    sem::r_set(&mut env.backend, 4, 0xffff_f0f0);
+    exec1(&mut env, 0x8c04c0c3); // cl1（先頭 1 の個数=16+4=20）
+    assert_eq!(sem::r_get(&env.backend, 3), 20);
+    exec1(&mut env, 0x8c04c083); // clb = 先頭符号ビット列=20
+    assert_eq!(sem::r_get(&env.backend, 3), 20);
+    exec1(&mut env, 0x8c44c083); // ct0（末尾 0 の個数=4）
+    assert_eq!(sem::r_get(&env.backend, 3), 4);
+    sem::r_set(&mut env.backend, 4, 0x0000_ffff);
+    exec1(&mut env, 0x8c44c0a3); // ct1（末尾 1 の個数=16）
+    assert_eq!(sem::r_get(&env.backend, 3), 16);
+    exec1(&mut env, 0x8c04c0e3); // normamt = 16-1=15
+    assert_eq!(sem::r_get(&env.backend, 3), 15);
+    sem::r_set(&mut env.backend, 4, 0xaaa5_555a);
+    sem::r_set(&mut env.backend, 5, 0xffff_00ff);
+    exec1(&mut env, 0xd5e4c503); // parity = popcount(r4&r5)&1
+    let want = (0xaaa5_555au32 & 0xffff_00ff).count_ones() & 1;
+    assert_eq!(sem::r_get(&env.backend, 3), want);
+    exec1(&mut env, 0x8c44c0c3); // brev
+    assert_eq!(sem::r_get(&env.backend, 3), 0xaaa5_555au32.reverse_bits());
+    exec1(&mut env, 0x8c84c0e3); // swiz
+    assert_eq!(sem::r_get(&env.backend, 3), 0x5a55_a5aa);
+    // popcount(r5:4)。
+    sem::r_set(&mut env.backend, 4, 0xffff_ffff);
+    sem::r_set(&mut env.backend, 5, 1);
+    exec1(&mut env, 0x8864c063);
+    assert_eq!(sem::r_get(&env.backend, 3), 33);
+    // tstbit/setbit/clrbit/togglebit。
+    sem::r_set(&mut env.backend, 4, 0x8);
+    exec1(&mut env, 0x8504c300); // p0 = tstbit(r4,#3)
+    assert_eq!(sem::p_get(&env.backend, 0), 0xff);
+    exec1(&mut env, 0x8524c300); // !tstbit
+    assert_eq!(sem::p_get(&env.backend, 0), 0);
+    sem::r_set(&mut env.backend, 4, 0);
+    exec1(&mut env, 0x8cc4c303); // r3 = setbit(r4,#3)
+    assert_eq!(sem::r_get(&env.backend, 3), 8);
+    exec1(&mut env, 0x8cc4c323); // r3 = clrbit(r4,#3)
+    assert_eq!(sem::r_get(&env.backend, 3), 0);
+    exec1(&mut env, 0x8cc4c343); // r3 = togglebit(r4,#3)
+    assert_eq!(sem::r_get(&env.backend, 3), 8);
+    // bitsclr/bitsset。
+    sem::r_set(&mut env.backend, 4, 0xc);
+    sem::r_set(&mut env.backend, 5, 0xf);
+    exec1(&mut env, 0xc784c500); // p0 = bitsclr(r4,r5) — r4&r5!=0 → 偽
+    assert_eq!(sem::p_get(&env.backend, 0), 0);
+    sem::r_set(&mut env.backend, 4, 0x30);
+    exec1(&mut env, 0xc784c500); // r4&r5==0 → 真
+    assert_eq!(sem::p_get(&env.backend, 0), 0xff);
+    exec1(&mut env, 0xc744c500); // bitsset(r4,r5) — r4&r5==r5? 0x30&0xf!=0xf → 偽
+    assert_eq!(sem::p_get(&env.backend, 0), 0);
+}
+
+#[test]
+fn hx5_bitfield() {
+    let mut env = run_env();
+    // extract: 幅 5、オフセット 10 → 符号拡張。
+    sem::r_set(&mut env.backend, 4, 0b0_1111 << 10);
+    exec1(&mut env, 0x8da4c543); // r3 = extract(r4,#5,#10)
+    assert_eq!(sem::r_get(&env.backend, 3), 0xf);
+    sem::r_set(&mut env.backend, 4, 0b1_0000 << 10); // フィールド先頭ビット=1
+    exec1(&mut env, 0x8da4c543);
+    assert_eq!(sem::r_get(&env.backend, 3), 0xffff_fff0);
+    exec1(&mut env, 0x8d24c543); // r3 = extractu(r4,#5,#10)
+    assert_eq!(sem::r_get(&env.backend, 3), 0x10);
+    // insert: r3 の [14:10] を r4 の下位 5 ビットで置換。
+    sem::r_set(&mut env.backend, 3, 0xffff_ffff);
+    sem::r_set(&mut env.backend, 4, 0b1_0101);
+    exec1(&mut env, 0x8f24c543); // r3 = insert(r4,#5,#10)
+    assert_eq!(sem::r_get(&env.backend, 3), 0xffff_d7ff);
+    // bitsplit: #7 で分割。
+    sem::r_set(&mut env.backend, 4, 0x1234_567f);
+    exec1(&mut env, 0x88c4c784);
+    assert_eq!(sem::r_get(&env.backend, 4), 0x7f);
+    assert_eq!(sem::r_get(&env.backend, 5), 0x1234_567f >> 7);
+    // tableidxb(r4,#5,#10):raw — off=10、幅 5 でフィールド抽出。
+    sem::r_set(&mut env.backend, 3, 0xdead_beef);
+    sem::r_set(&mut env.backend, 4, 0x0000_5430); // off10..14 = 0b10101
+    exec1(&mut env, 0x8704caa3);
+    let field = (0x5430u32 >> 10) & 0x1f;
+    let want = (0xdead_beef & !0x1f) | field;
+    assert_eq!(sem::r_get(&env.backend, 3), want);
+}
+
+#[test]
+fn hx5_sat_round() {
+    let mut env = run_env();
+    // sat(r5:4): 64→32 飽和。
+    sem::r_set(&mut env.backend, 4, 0x0000_0001);
+    sem::r_set(&mut env.backend, 5, 0x7fff_ffff);
+    exec1(&mut env, 0x88c4c003);
+    assert_eq!(sem::r_get(&env.backend, 3), 0x7fff_ffff);
+    assert_eq!(env.backend.get(sem::usr_ref()) & 1, 1);
+    // sath/satuh/satb/satub。
+    sem::r_set(&mut env.backend, 4, 0x0001_2345);
+    exec1(&mut env, 0x8cc4c083); // sath
+    assert_eq!(sem::r_get(&env.backend, 3), 0x7fff);
+    exec1(&mut env, 0x8cc4c0a3); // satuh
+    assert_eq!(sem::r_get(&env.backend, 3), 0xffff);
+    sem::r_set(&mut env.backend, 4, 0xffff_ff80); // -128
+    exec1(&mut env, 0x8cc4c0e3); // satb → -128
+    assert_eq!(sem::r_get(&env.backend, 3), 0xffff_ff80);
+    exec1(&mut env, 0x8cc4c0c3); // satub → 負→0
+    assert_eq!(sem::r_get(&env.backend, 3), 0);
+    // round(r5:4):sat — sat64(x+0x080000000) の上位ワード。
+    sem::r_set(&mut env.backend, 4, 0xf800_0000);
+    sem::r_set(&mut env.backend, 5, 0x7fff_ffff);
+    exec1(&mut env, 0x88c4c023);
+    assert_eq!(sem::r_get(&env.backend, 3), 0x7fff_ffff);
+    // vsathub / vsathb / vsatwh / vsatwuh（64→32 パック）。
+    sem::r_set(&mut env.backend, 4, 0x8001_7fff);
+    sem::r_set(&mut env.backend, 5, 0x0080_ffff);
+    exec1(&mut env, 0x8804c003); // vsathub — usat_8(h[i])→ub[i]
+    assert_eq!(sem::r_get(&env.backend, 3), 0x8000_00ff);
+    exec1(&mut env, 0x8804c0c3); // vsathb — sat_8(h[i])→b[i]
+    assert_eq!(sem::r_get(&env.backend, 3), 0x7fff_807f);
+    // vrndwh。
+    sem::r_set(&mut env.backend, 4, 0x0000_8000);
+    sem::r_set(&mut env.backend, 5, 0x0000_8001);
+    exec1(&mut env, 0x8884c083);
+    assert_eq!(sem::r_get(&env.backend, 3), 0x0001_0001);
+}
+
+#[test]
+fn hx5_vector() {
+    let mut env = run_env();
+    // vtrunehb / vtrunohb: 偶数/奇数バイトを集める。
+    sem::r_set(&mut env.backend, 4, 0x3322_1100);
+    sem::r_set(&mut env.backend, 5, 0x7766_5544);
+    exec1(&mut env, 0x8884c043); // r3 = vtrunehb(r5:4)
+    assert_eq!(sem::r_get(&env.backend, 3), 0x6644_2200);
+    exec1(&mut env, 0x8884c003); // vtrunohb
+    assert_eq!(sem::r_get(&env.backend, 3), 0x7755_3311);
+    // vsplatb / vsplath。
+    sem::r_set(&mut env.backend, 4, 0x0000_00ab);
+    exec1(&mut env, 0x8c44c0e3); // r3 = vsplatb(r4)
+    assert_eq!(sem::r_get(&env.backend, 3), 0xabab_abab);
+    exec1(&mut env, 0x8444c044); // r5:4 = vsplath(r4)
+    assert_eq!(sem::r_get(&env.backend, 4), 0x00ab_00ab);
+    assert_eq!(sem::r_get(&env.backend, 5), 0x00ab_00ab);
+    // vsxtbh/vzxtbh（バイト→半語、符号/ゼロ拡張）。
+    sem::r_set(&mut env.backend, 4, 0x80ff_7f01);
+    exec1(&mut env, 0x8404c004); // r5:4 = vsxtbh(r4)
+    assert_eq!(sem::r_get(&env.backend, 4), 0x007f_0001);
+    assert_eq!(sem::r_get(&env.backend, 5), 0xff80_ffff);
+    sem::r_set(&mut env.backend, 4, 0x80ff_7f01);
+    exec1(&mut env, 0x8404c044); // r5:4 = vzxtbh(r4)
+    assert_eq!(sem::r_get(&env.backend, 4), 0x007f_0001);
+    assert_eq!(sem::r_get(&env.backend, 5), 0x0080_00ff);
+    // interleave/deinterleave。
+    sem::r_set(&mut env.backend, 4, 0xffff_ffff);
+    sem::r_set(&mut env.backend, 5, 0);
+    exec1(&mut env, 0x80c4c0a4); // r5:4 = interleave(r5:4)
+    assert_eq!(sem::r_get(&env.backend, 4), 0x5555_5555);
+    assert_eq!(sem::r_get(&env.backend, 5), 0x5555_5555);
+    exec1(&mut env, 0x80c4c084); // r5:4 = deinterleave — 元の対に戻る
+    assert_eq!(
+        (sem::r_get(&env.backend, 4), sem::r_get(&env.backend, 5)),
+        (0xffff_ffff, 0)
+    );
+    // valignb: (Rss>>>24)|(Rtt<<40)。
+    sem::r_set(&mut env.backend, 4, 0x11);
+    sem::r_set(&mut env.backend, 5, 0x22);
+    sem::r_set(&mut env.backend, 6, 0x33);
+    sem::r_set(&mut env.backend, 7, 0x44);
+    exec1(&mut env, 0xc006c464); // valignb(r5:4,r7:6,#3)
+    assert_eq!(
+        (sem::r_get(&env.backend, 4), sem::r_get(&env.backend, 5)),
+        (0x0000_4400, 0x0000_1100)
+    );
+    // vaddh（32 ビット 2 レーン）。
+    sem::r_set(&mut env.backend, 4, 0x0002_7fff);
+    sem::r_set(&mut env.backend, 5, 0x0001_0002);
+    exec1(&mut env, 0xf604c503);
+    assert_eq!(sem::r_get(&env.backend, 3), 0x0003_8001);
+    exec1(&mut env, 0xf624c503); // :sat → 下位 0x8001→sat→0x7fff
+    assert_eq!(sem::r_get(&env.backend, 3), 0x0003_7fff);
+}
+
+#[test]
+fn hx5_misc() {
+    let mut env = run_env();
+    // add(pc,#u6) — PC = BASE → BASE+16。
+    exec1(&mut env, 0x6a49c803);
+    assert_eq!(sem::r_get(&env.backend, 3), BASE as u32 + 0x10);
+    // modwrap: 3 mod 5 = 3、6 mod 5 = 1、-1 mod 5 = 4。
+    sem::r_set(&mut env.backend, 4, 6);
+    sem::r_set(&mut env.backend, 5, 5);
+    exec1(&mut env, 0xd3e4c5e3);
+    assert_eq!(sem::r_get(&env.backend, 3), 1);
+    sem::r_set(&mut env.backend, 4, 0xffff_ffff);
+    exec1(&mut env, 0xd3e4c5e3);
+    assert_eq!(sem::r_get(&env.backend, 3), 4);
+    // max/min/maxu/minu（32 ビット）。
+    sem::r_set(&mut env.backend, 4, 0xffff_ffff); // -1
+    sem::r_set(&mut env.backend, 5, 7);
+    exec1(&mut env, 0xd5c4c503); // r3 = max(r4,r5) — 符号 → 7
+    assert_eq!(sem::r_get(&env.backend, 3), 7);
+    exec1(&mut env, 0xd5c4c583); // r3 = maxu(r4,r5) — 無符号 → 0xffffffff
+    assert_eq!(sem::r_get(&env.backend, 3), 0xffff_ffff);
+    exec1(&mut env, 0xd5a5c403); // r3 = min(r4,r5) — 符号 → -1
+    assert_eq!(sem::r_get(&env.backend, 3), 0xffff_ffff);
+    exec1(&mut env, 0xd5a5c483); // r3 = minu(r4,r5) — 無符号 → 7
+    assert_eq!(sem::r_get(&env.backend, 3), 7);
+    // sxtw。
+    sem::r_set(&mut env.backend, 4, 0xffff_8000);
+    exec1(&mut env, 0x8444c004);
+    assert_eq!(
+        (sem::r_get(&env.backend, 4), sem::r_get(&env.backend, 5)),
+        (0xffff_8000, 0xffff_ffff)
+    );
+    // abs/abs:sat/neg:sat。
+    sem::r_set(&mut env.backend, 4, 0x8000_0000);
+    exec1(&mut env, 0x8c84c0a3); // abs(r4):sat → 0x7fffffff
+    assert_eq!(sem::r_get(&env.backend, 3), 0x7fff_ffff);
+    exec1(&mut env, 0x8c84c0c3); // neg(r4):sat → 0x7fffffff
+    assert_eq!(sem::r_get(&env.backend, 3), 0x7fff_ffff);
+    // 複合三項: r3 = add(r4,add(r5,#-2)) → db64e3c5。
+    sem::r_set(&mut env.backend, 4, 10);
+    sem::r_set(&mut env.backend, 5, 7);
+    exec1(&mut env, 0xdb64e3c5);
+    assert_eq!(sem::r_get(&env.backend, 3), 15);
+    // r3 = add(r4,sub(#0x12,r5)) → r4 - r5 + 0x12。
+    exec1(&mut env, 0xdba4c345);
+    assert_eq!(sem::r_get(&env.backend, 3), 21);
+    // r3 |= or(r4,#0x12)。
+    sem::r_set(&mut env.backend, 3, 1);
+    exec1(&mut env, 0xda84c243);
+    assert_eq!(sem::r_get(&env.backend, 3), 1 | (10 | 0x12));
+}
