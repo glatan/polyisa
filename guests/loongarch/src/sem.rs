@@ -10,7 +10,8 @@
 
 use polyisa_mem::{Access, AccessKind, Align, Endian};
 use polyisa_sem::{
-    Backend, Cmp, ExceptionKind, GuestException, StateArray, StateRef, W8, W16, W32, W64, Width,
+    Backend, Cmp, ExceptionKind, Flow, GuestException, StateArray, StateRef, W8, W16, W32, W64,
+    Width,
 };
 
 use crate::{CpuState, Insn, csr, extract_ops};
@@ -575,9 +576,416 @@ fn am_bh<B: Backend, W: Width>(
     Ok(())
 }
 
+// ---- スカラ FP 補助（LA9）----
+// Ref: SPEC-LOONGARCH-RM §3.1-§3.2.
+
+/// backend の Rm 定数（polyisa-softfloat の Rm と同じ並び）。
+/// Ref: SPEC-LOONGARCH-RM §3.1.4.
+const RM_RNE: u8 = 0;
+const RM_RTZ: u8 = 1;
+const RM_RDN: u8 = 2;
+const RM_RUP: u8 = 3;
+
+/// FR[`i`] のビット列。
+fn fget<B: Backend>(b: &mut B, i: u64) -> B::V<W64> {
+    b.get(fr_ref(i as u32))
+}
+
+/// FR[`i`] にビット列を書く。
+fn fset<B: Backend>(b: &mut B, i: u64, v: B::V<W64>) {
+    b.set(fr_ref(i as u32), v);
+}
+
+/// FR[`i`] の下位 32 ビット。
+fn fget32<B: Backend>(b: &mut B, i: u64) -> B::V<W32> {
+    let v = fget(b, i);
+    b.trunc::<W64, W32>(v)
+}
+
+/// FR[`i`] の下位 32 ビットに書く。上位は 0 で畳む
+/// （spec は「不確定」なので決定的に 0 を選ぶ）。
+fn fset32<B: Backend>(b: &mut B, i: u64, v: B::V<W32>) {
+    let v = b.zext::<W32, W64>(v);
+    fset(b, i, v);
+}
+
+/// `fp_flags` を FCSR0 の Cause[28:24]・Flags[20:16] に反映する。
+/// backend のフラグ並び（NV,DZ,OF,UF,NX）は LoongArch の VZOUI と
+/// 同じ順なのでそのまま写せる。Enables が立っていても
+/// FP 例外トラップにはしない近似。Gap: GAP-0063.
+/// Ref: SPEC-LOONGARCH-RM §3.1.4（FCSR0 定義）.
+fn fpo_end<B: Backend>(b: &mut B) {
+    let fl = u64::from(b.fp_flags());
+    if fl == 0 {
+        return;
+    }
+    let i0 = b.konst::<W32>(0);
+    let f = b.get_indexed(fcsr_array(), i0);
+    let flv = b.konst::<W32>(fl as u32);
+    let sh24 = b.konst::<W32>(24);
+    let cause = b.shl::<W32>(flv, sh24);
+    // Cause は直近の演算のもので置き換える。
+    let keep = b.konst::<W32>(!0x1f00_0000);
+    let kept = b.and::<W32>(f, keep);
+    let nv = b.or::<W32>(kept, cause);
+    // Flags は累積。
+    let sh16 = b.konst::<W32>(16);
+    let flg = b.shl::<W32>(flv, sh16);
+    let nv = b.or::<W32>(nv, flg);
+    b.set_indexed(fcsr_array(), i0, nv);
+}
+
+/// FCSR0 の RM ビット（[9:8]）を backend 値で取る。
+fn fcsr_rm_bits<B: Backend>(b: &mut B) -> B::V<W32> {
+    let i0 = b.konst::<W32>(0);
+    let f = b.get_indexed(fcsr_array(), i0);
+    let sh = b.konst::<W32>(8);
+    let v = b.shr_l::<W32>(f, sh);
+    let m = b.konst::<W32>(3);
+    b.and::<W32>(v, m)
+}
+
+/// FCSR.RM に従って `f(b, rm)` を呼ぶ。LoongArch の RM 値
+/// （0=RNE,1=RZ,2=RP,3=RM）を backend の Rm 値（Rne,Rtz,Rdn,Rup）
+/// に写像する。Ref: SPEC-LOONGARCH-RM §3.1.4.
+fn with_la_rm<B: Backend>(b: &mut B, f: impl Fn(&mut B, u8) -> Flow<B>) -> Flow<B> {
+    let rm = fcsr_rm_bits(b);
+    let is = |b: &mut B, n: u32| {
+        let kv = b.konst::<W32>(n);
+        b.cmp::<W32>(Cmp::Eq, rm, kv)
+    };
+    // LA 0→Rne(0), 1→Rtz(1), 2→Rup(3), 3→Rdn(2)。
+    let c0 = is(b, 0);
+    b.if_then_else(
+        c0,
+        |b| f(b, RM_RNE),
+        |b| {
+            let c1 = is(b, 1);
+            b.if_then_else(
+                c1,
+                |b| f(b, RM_RTZ),
+                |b| {
+                    let c2 = is(b, 2);
+                    b.if_then_else(c2, |b| f(b, RM_RUP), |b| f(b, RM_RDN))
+                },
+            )
+        },
+    )
+}
+
+/// FCC[`i`] の 0/1 値。
+fn fcc_bit<B: Backend>(b: &mut B, i: u64) -> B::V<W64> {
+    let f = b.get(fcc_ref());
+    let n = k(b, i);
+    let v = b.shr_l::<W64>(f, n);
+    let one = k(b, 1);
+    b.and::<W64>(v, one)
+}
+
+/// FCC[`i`] に 0/1 値 `bit` を書く（`bit` は 0 か 1 の値）。
+fn fcc_set<B: Backend>(b: &mut B, i: u64, bit: B::V<W64>) {
+    let f = b.get(fcc_ref());
+    let n = k(b, i);
+    let one = k(b, 1);
+    let mask = b.shl::<W64>(one, n);
+    let nmask = b.not::<W64>(mask);
+    let clr = b.and::<W64>(f, nmask);
+    let put = b.shl::<W64>(bit, n);
+    let nv = b.or::<W64>(clr, put);
+    b.set(fcc_ref(), nv);
+}
+
+/// 浮動小数点の符号ビットを倒す（|x|）。
+fn fabs_v<B: Backend, F: Width>(b: &mut B, a: B::V<F>) -> B::V<F> {
+    let m = b.konst::<F>(F::from_u128((1u128 << (F::BITS - 1)) - 1));
+    b.and::<F>(a, m)
+}
+
+/// 浮動小数点の符号ビットを反転する（-x）。
+fn fneg_v<B: Backend, F: Width>(b: &mut B, a: B::V<F>) -> B::V<F> {
+    let m = b.konst::<F>(F::from_u128(1u128 << (F::BITS - 1)));
+    b.xor::<F>(a, m)
+}
+
+/// .s 形式の二項 FP 演算（ops = [fd, fj, fk]）。
+fn fbin32<B: Backend>(
+    b: &mut B,
+    ops: &[u64],
+    f: impl FnOnce(&mut B, B::V<W32>, B::V<W32>) -> B::V<W32>,
+) {
+    let a = fget32(b, ops[1]);
+    let c = fget32(b, ops[2]);
+    let r = f(b, a, c);
+    fset32(b, ops[0], r);
+    fpo_end(b);
+}
+
+/// .d 形式の二項 FP 演算。
+fn fbin64<B: Backend>(
+    b: &mut B,
+    ops: &[u64],
+    f: impl FnOnce(&mut B, B::V<W64>, B::V<W64>) -> B::V<W64>,
+) {
+    let a = fget(b, ops[1]);
+    let c = fget(b, ops[2]);
+    let r = f(b, a, c);
+    fset(b, ops[0], r);
+    fpo_end(b);
+}
+
+/// .s 形式の一項 FP 演算（ops = [fd, fj]）。
+fn funa32<B: Backend>(b: &mut B, ops: &[u64], f: impl FnOnce(&mut B, B::V<W32>) -> B::V<W32>) {
+    let a = fget32(b, ops[1]);
+    let r = f(b, a);
+    fset32(b, ops[0], r);
+    fpo_end(b);
+}
+
+/// .d 形式の一項 FP 演算。
+fn funa64<B: Backend>(b: &mut B, ops: &[u64], f: impl FnOnce(&mut B, B::V<W64>) -> B::V<W64>) {
+    let a = fget(b, ops[1]);
+    let r = f(b, a);
+    fset(b, ops[0], r);
+    fpo_end(b);
+}
+
+/// FMAXA/FMINA 相当の絶対値比較。`gt` なら |x|>|y| で x、
+/// それ以外は y。|x|==|y| なら fmax/fmin に倒す。
+/// Ref: SPEC-LOONGARCH-RM §3.2.1.4.
+fn fmag<B: Backend, F: Width>(b: &mut B, a: B::V<F>, c: B::V<F>, gt: bool) -> B::V<F> {
+    let aa = fabs_v::<B, F>(b, a);
+    let cc = fabs_v::<B, F>(b, c);
+    let big = b.flt::<F>(cc, aa);
+    let small = b.flt::<F>(aa, cc);
+    let rb = b.select::<F>(big, a, c);
+    let rs = b.select::<F>(small, a, c);
+    if gt { rb } else { rs }
+}
+
+/// FSCALEB 近似。`a * 2^n`（`n` は `nbits` の符号付き整数）。
+/// 2^n を浮動小数点ビットとして組み立てて `fmul` に流す。
+/// 非正規化途中結果は近似（Gap: GAP-0063）。
+/// Ref: SPEC-LOONGARCH-RM §3.2.1.7.
+fn fscaleb_v<B: Backend, F: Width>(b: &mut B, a: B::V<F>, nbits: B::V<F>) -> B::V<F> {
+    let (eb, mb, bias) = if F::BITS == 64 {
+        (11u32, 52u64, 1023i64)
+    } else {
+        (8u32, 23u64, 127i64)
+    };
+    // n を符号付き整数として取り出す（.s は fk[31:0]、.d は fk）。
+    let n64: B::V<W64> = if F::BITS == 64 {
+        b.zext::<F, W64>(nbits)
+    } else {
+        b.sext::<F, W64>(nbits)
+    };
+    // exp = clamp(n + bias, 0, (1<<eb)-1)。
+    let biasv = k(b, bias as u64);
+    let raw = b.add::<W64>(n64, biasv);
+    let zero = k(b, 0);
+    let lim = k(b, (1u64 << eb) - 1);
+    let neg = b.cmp::<W64>(Cmp::LtS, raw, zero);
+    let c0 = b.select::<W64>(neg, zero, raw);
+    let over = b.cmp::<W64>(Cmp::GtS, c0, lim);
+    let e = b.select::<W64>(over, lim, c0);
+    // pow2 = e << mb の浮動小数点ビット。
+    let sh = k(b, mb);
+    let p64 = b.shl::<W64>(e, sh);
+    let p = b.trunc::<W64, F>(p64);
+    b.fmul::<F>(a, p)
+}
+
+/// FLOGB。`logB(x)` の IEEE 754 規則（±0→-inf、±inf→+inf、
+/// NaN→NaN、非正規化数は正規化後の指数）をビット操作で畳む。
+/// logB(±0) の divByZero フラグは立てない近似（Gap: GAP-0063）。
+/// Ref: SPEC-LOONGARCH-RM §3.2.1.7.
+fn flogb_v<B: Backend, F: Width>(b: &mut B, a: B::V<F>) -> B::V<F> {
+    let (eb, mb, bias) = if F::BITS == 64 {
+        (11u64, 52u64, 1023i64)
+    } else {
+        (8u64, 23u64, 127i64)
+    };
+    let emax = (1u64 << eb) - 1;
+    let mmask = (1u64 << mb) - 1;
+    let a64 = b.zext::<F, W64>(a);
+    let sh_mb = k(b, mb);
+    let expf0 = b.shr_l::<W64>(a64, sh_mb);
+    let emaxv = k(b, emax);
+    let expf = b.and::<W64>(expf0, emaxv);
+    let mmv = k(b, mmask);
+    let frac = b.and::<W64>(a64, mmv);
+    let zero = k(b, 0);
+    let e_is_max = b.cmp::<W64>(Cmp::Eq, expf, emaxv);
+    let e_is_zero = b.cmp::<W64>(Cmp::Eq, expf, zero);
+    let f_nz = b.cmp::<W64>(Cmp::Ne, frac, zero);
+    // floor_log2(frac) を f64 への変換で取る（frac!=0 のとき正確）。
+    let ffr = b.fcvt_from_u64::<W64>(frac, RM_RNE);
+    let sh52 = k(b, 52);
+    let e0 = b.shr_l::<W64>(ffr, sh52);
+    let m2047 = k(b, 0x7ff);
+    let e1 = b.and::<W64>(e0, m2047);
+    let b1023 = k(b, 1023);
+    let p = b.sub::<W64>(e1, b1023);
+    // 非正規化: e = p - (mb + bias - 1)。
+    let adj = k(b, (mb as i64 + bias - 1) as u64);
+    let e_sub = b.sub::<W64>(p, adj);
+    let biasv = k(b, bias as u64);
+    let e_norm = b.sub::<W64>(expf, biasv);
+    let e = b.select::<W64>(e_is_zero, e_sub, e_norm);
+    let e32 = b.trunc::<W64, W32>(e);
+    let r_norm = b.fcvt_from_s32::<F>(e32, RM_RNE);
+    // 結果の選択: nan→a、inf→+inf、zero→-inf、他→float(e)。
+    let pinf = b.konst::<F>(F::from_u128((emax as u128) << mb));
+    let ninf = b.konst::<F>(F::from_u128(
+        ((emax as u128) << mb) | (1u128 << (F::BITS - 1)),
+    ));
+    // exp==emax の内側: frac!=0 は NaN→a、frac==0 は inf→+inf。
+    let inner = b.select::<F>(f_nz, a, pinf);
+    let non_zero = b.select::<F>(e_is_max, inner, r_norm);
+    // exp==0 の内側: frac!=0 は非正規化→float(e)、frac==0 は ±0→-inf。
+    let z_side = b.select::<F>(f_nz, r_norm, ninf);
+    b.select::<F>(e_is_zero, z_side, non_zero)
+}
+
+/// FCLASS の RISC-V 並びを LoongArch 並びに写す
+/// （LA: bit0=sNaN,bit1=qNaN,bit2..9 = -inf,-norm,-sub,-0,+0,+sub,+norm,+inf）。
+/// Ref: SPEC-LOONGARCH-RM §3.2.1.8（Table 8）.
+fn fclass_la<B: Backend, F: Width>(b: &mut B, a: B::V<F>) -> B::V<W32> {
+    let rv = b.fclass::<F>(a);
+    let m = b.konst::<W32>(0xff);
+    let lo = b.and::<W32>(rv, m);
+    let sh2 = b.konst::<W32>(2);
+    let lo = b.shl::<W32>(lo, sh2);
+    let sh8 = b.konst::<W32>(8);
+    let hi0 = b.shr_l::<W32>(rv, sh8);
+    let m3 = b.konst::<W32>(3);
+    let hi = b.and::<W32>(hi0, m3);
+    b.or::<W32>(lo, hi)
+}
+
+/// FTINT.{W/L}.{S/D}・FTINTR*。`src` は F、結果幅は `to64`。
+/// fd に整数ビットを書く（.w は下位 32 ビット、上位 0）。
+/// Ref: SPEC-LOONGARCH-RM §3.2.3.2-§3.2.3.3.
+fn ftint<B: Backend, F: Width>(b: &mut B, ops: &[u64], to64: bool, rm: u8) -> Flow<B> {
+    let a = fget(b, ops[1]);
+    let a = b.trunc::<W64, F>(a);
+    if to64 {
+        let i = b.fcvt_s64::<F>(a, rm);
+        fset(b, ops[0], i);
+    } else {
+        let i = b.fcvt_s32::<F>(a, rm);
+        fset32(b, ops[0], i);
+    }
+    fpo_end(b);
+    Ok(())
+}
+
+/// FFINT{S/D}.{W/L}。fj の整数ビットを F に変換する。
+/// Ref: SPEC-LOONGARCH-RM §3.2.3.2.
+fn ffint<B: Backend, F: Width>(b: &mut B, ops: &[u64], from64: bool, rm: u8) -> Flow<B> {
+    let a64 = fget(b, ops[1]);
+    let v = if from64 {
+        b.fcvt_from_s64::<F>(a64, rm)
+    } else {
+        let a = b.trunc::<W64, W32>(a64);
+        b.fcvt_from_s32::<F>(a, rm)
+    };
+    // .s は下位 32 ビットに書き、上位は 0（不確定の決定解）。
+    let vv = b.zext::<F, W64>(v);
+    fset(b, ops[0], vv);
+    fpo_end(b);
+    Ok(())
+}
+
+/// FRINT。AArch64 と同じく s64 経由の丸め近似。
+/// |x|>=2^63・NaN・inf は入力をそのまま返す。
+/// Ref: SPEC-LOONGARCH-RM §3.2.3.4.
+fn frint_v<B: Backend, F: Width>(b: &mut B, a: B::V<F>, rm: u8) -> B::V<F> {
+    let lim_bits: u128 = if F::BITS == 64 {
+        0x43e0_0000_0000_0000
+    } else {
+        0x5f00_0000
+    };
+    let lim = b.konst::<F>(F::from_u128(lim_bits));
+    let abs = fabs_v::<B, F>(b, a);
+    let small = b.flt::<F>(abs, lim);
+    let i = b.fcvt_s64::<F>(a, rm);
+    let r = b.fcvt_from_s64::<F>(i, RM_RNE);
+    let via_int = b.select::<F>(small, r, a);
+    let ordered = b.feq::<F>(a, a);
+    b.select::<F>(ordered, via_int, a)
+}
+
+/// FCMP.cond の 22 条件を評価し 0/1 を返す。`cond` は命令語の
+/// 5 ビット値。S/C の区別（signaling）による例外は畳まない近似
+/// （Gap: GAP-0063）。Ref: SPEC-LOONGARCH-RM §3.2.2.1（Table 9）.
+fn fcmp_res<B: Backend, F: Width>(b: &mut B, a: B::V<F>, c: B::V<F>, cond: u64) -> B::V<W64> {
+    let one = k(b, 1);
+    let zero = k(b, 0);
+    let lt = {
+        let cnd = b.flt::<F>(a, c);
+        b.select::<W64>(cnd, one, zero)
+    };
+    let eq = {
+        let cnd = b.feq::<F>(a, c);
+        b.select::<W64>(cnd, one, zero)
+    };
+    let gt = {
+        let cnd = b.flt::<F>(c, a);
+        b.select::<W64>(cnd, one, zero)
+    };
+    let un = {
+        let l1 = {
+            let cnd = b.fle::<F>(a, c);
+            b.select::<W64>(cnd, one, zero)
+        };
+        let l2 = {
+            let cnd = b.fle::<F>(c, a);
+            b.select::<W64>(cnd, one, zero)
+        };
+        let or = b.or::<W64>(l1, l2);
+        let n = b.not::<W64>(or);
+        b.and::<W64>(n, one)
+    };
+    // 条件群を先に組み立てる。
+    let lt_eq = b.or::<W64>(lt, eq);
+    let un_lt = b.or::<W64>(un, lt);
+    let un_eq = b.or::<W64>(un, eq);
+    let ule = b.or::<W64>(un_lt, eq);
+    let lt_gt = b.or::<W64>(lt, gt);
+    let ordered = b.or::<W64>(lt_eq, gt);
+    let une = b.or::<W64>(un_lt, gt);
+    match cond & 0x1f {
+        // CAF/SAF。
+        0x00 | 0x01 => zero,
+        // CLT/SLT。
+        0x02 | 0x03 => lt,
+        // CEQ/SEQ。
+        0x04 | 0x05 => eq,
+        // CLE/SLE。
+        0x06 | 0x07 => lt_eq,
+        // CUN/SUN。
+        0x08 | 0x09 => un,
+        // CULT/SULT。
+        0x0a | 0x0b => un_lt,
+        // CUEQ/SUEQ。
+        0x0c | 0x0d => un_eq,
+        // CULE/SULE。
+        0x0e | 0x0f => ule,
+        // CNE/SNE。
+        0x10 | 0x11 => lt_gt,
+        // COR/SOR。
+        0x14 | 0x15 => ordered,
+        // CUNE/SUNE。
+        0x18 | 0x19 => une,
+        // 未定義 cond は false に畳む。
+        _ => zero,
+    }
+}
+
 /// 1 命令の意味論を実行する。`word` は命令語、`pc` は命令番地、
 /// `la64` は LA64 モデルで動いているか。戻り値 `Ok(true)` は
-/// 実行済み（PC の進めは実行ループ側）、`Ok(false)` は未実装。
+/// 実行済み（PC の進めは実行ループ側）。全 `Insn` 変種を網羅する
+/// （match の網羅性で検査）。特権・近似系は GAP-0063 を参照。
 // Ref: SPEC-LOONGARCH-RM §2, §3, §4.
 #[allow(clippy::too_many_lines)]
 pub fn exec<B: Backend>(
@@ -1788,7 +2196,490 @@ pub fn exec<B: Backend>(
             // Gap: GAP-0063.
             return Err(raise::<B>(b, ExceptionKind::Trap, TRAP_DBG_BASE | ops[0]));
         }
-        _ => return Ok(false),
+        // ---- スカラ FP 算術（LA9。丸めは FCSR.RM に従う）----
+        // Ref: SPEC-LOONGARCH-RM §3.2.1.1.
+        Insn::FaddS => {
+            with_la_rm(b, |b, rm| {
+                fbin32(b, &ops, |b, x, y| b.fadd_r::<W32>(x, y, rm));
+                Ok(())
+            })?;
+        }
+        Insn::FaddD => {
+            with_la_rm(b, |b, rm| {
+                fbin64(b, &ops, |b, x, y| b.fadd_r::<W64>(x, y, rm));
+                Ok(())
+            })?;
+        }
+        Insn::FsubS => {
+            with_la_rm(b, |b, rm| {
+                fbin32(b, &ops, |b, x, y| b.fsub_r::<W32>(x, y, rm));
+                Ok(())
+            })?;
+        }
+        Insn::FsubD => {
+            with_la_rm(b, |b, rm| {
+                fbin64(b, &ops, |b, x, y| b.fsub_r::<W64>(x, y, rm));
+                Ok(())
+            })?;
+        }
+        Insn::FmulS => {
+            with_la_rm(b, |b, rm| {
+                fbin32(b, &ops, |b, x, y| b.fmul_r::<W32>(x, y, rm));
+                Ok(())
+            })?;
+        }
+        Insn::FmulD => {
+            with_la_rm(b, |b, rm| {
+                fbin64(b, &ops, |b, x, y| b.fmul_r::<W64>(x, y, rm));
+                Ok(())
+            })?;
+        }
+        Insn::FdivS => {
+            with_la_rm(b, |b, rm| {
+                fbin32(b, &ops, |b, x, y| b.fdiv_r::<W32>(x, y, rm));
+                Ok(())
+            })?;
+        }
+        Insn::FdivD => {
+            with_la_rm(b, |b, rm| {
+                fbin64(b, &ops, |b, x, y| b.fdiv_r::<W64>(x, y, rm));
+                Ok(())
+            })?;
+        }
+        // FMA 系。FMSUB=fj*fk-fa、FNMADD=-(fj*fk+fa)、
+        // FNMSUB=-(fj*fk-fa)。Ref: §3.2.1.2.
+        Insn::FmaddS | Insn::FmsubS | Insn::FnmaddS | Insn::FnmsubS => {
+            with_la_rm(b, |b, rm| {
+                let x = fget32(b, ops[1]);
+                let y = fget32(b, ops[2]);
+                let mut z = fget32(b, ops[3]);
+                if insn == Insn::FmsubS || insn == Insn::FnmsubS {
+                    z = fneg_v::<B, W32>(b, z);
+                }
+                let r0 = b.fmadd_r::<W32>(x, y, z, rm);
+                let r = if insn == Insn::FnmaddS || insn == Insn::FnmsubS {
+                    fneg_v::<B, W32>(b, r0)
+                } else {
+                    r0
+                };
+                fset32(b, ops[0], r);
+                fpo_end(b);
+                Ok(())
+            })?;
+        }
+        Insn::FmaddD | Insn::FmsubD | Insn::FnmaddD | Insn::FnmsubD => {
+            with_la_rm(b, |b, rm| {
+                let x = fget(b, ops[1]);
+                let y = fget(b, ops[2]);
+                let mut z = fget(b, ops[3]);
+                if insn == Insn::FmsubD || insn == Insn::FnmsubD {
+                    z = fneg_v::<B, W64>(b, z);
+                }
+                let r0 = b.fmadd_r::<W64>(x, y, z, rm);
+                let r = if insn == Insn::FnmaddD || insn == Insn::FnmsubD {
+                    fneg_v::<B, W64>(b, r0)
+                } else {
+                    r0
+                };
+                fset(b, ops[0], r);
+                fpo_end(b);
+                Ok(())
+            })?;
+        }
+        // FMIN/FMAX は IEEE maxNum/minNum。Ref: §3.2.1.3.
+        Insn::FminS => fbin32(b, &ops, |b, x, y| b.fmin::<W32>(x, y)),
+        Insn::FminD => fbin64(b, &ops, |b, x, y| b.fmin::<W64>(x, y)),
+        Insn::FmaxS => fbin32(b, &ops, |b, x, y| b.fmax::<W32>(x, y)),
+        Insn::FmaxD => fbin64(b, &ops, |b, x, y| b.fmax::<W64>(x, y)),
+        // FMAXA/FMINA は絶対値比較。Ref: §3.2.1.4.
+        Insn::FmaxaS => fbin32(b, &ops, |b, x, y| fmag::<B, W32>(b, x, y, true)),
+        Insn::FmaxaD => fbin64(b, &ops, |b, x, y| fmag::<B, W64>(b, x, y, true)),
+        Insn::FminaS => fbin32(b, &ops, |b, x, y| fmag::<B, W32>(b, x, y, false)),
+        Insn::FminaD => fbin64(b, &ops, |b, x, y| fmag::<B, W64>(b, x, y, false)),
+        // FABS/FNEG/FMOV は符号ビット操作・コピー。Ref: §3.2.1.5/§3.4.1.
+        Insn::FabsS => funa32(b, &ops, |b, x| fabs_v::<B, W32>(b, x)),
+        Insn::FabsD => funa64(b, &ops, |b, x| fabs_v::<B, W64>(b, x)),
+        Insn::FnegS => funa32(b, &ops, |b, x| fneg_v::<B, W32>(b, x)),
+        Insn::FnegD => funa64(b, &ops, |b, x| fneg_v::<B, W64>(b, x)),
+        Insn::FmovS => funa32(b, &ops, |_b, x| x),
+        Insn::FmovD => funa64(b, &ops, |_b, x| x),
+        // FSQRT・FRECIP/FRSQRT・近似系。近似命令（FRECIPE/
+        // FRSQRTE）は正確演算で代替（Gap: GAP-0063）。
+        // Ref: §3.2.1.9-§3.2.1.10.
+        Insn::FsqrtS | Insn::FrsqrtS | Insn::FrsqrteS => {
+            with_la_rm(b, |b, rm| {
+                let a = fget32(b, ops[1]);
+                let s = b.fsqrt_r::<W32>(a, rm);
+                let r = if insn == Insn::FsqrtS {
+                    s
+                } else {
+                    let one = b.konst::<W32>(0x3f80_0000);
+                    b.fdiv::<W32>(one, s)
+                };
+                fset32(b, ops[0], r);
+                fpo_end(b);
+                Ok(())
+            })?;
+        }
+        Insn::FsqrtD | Insn::FrsqrtD | Insn::FrsqrteD => {
+            with_la_rm(b, |b, rm| {
+                let a = fget(b, ops[1]);
+                let s = b.fsqrt_r::<W64>(a, rm);
+                let r = if insn == Insn::FsqrtD {
+                    s
+                } else {
+                    let one = b.konst::<W64>(0x3ff0_0000_0000_0000);
+                    b.fdiv::<W64>(one, s)
+                };
+                fset(b, ops[0], r);
+                fpo_end(b);
+                Ok(())
+            })?;
+        }
+        Insn::FrecipS | Insn::FrecipeS => {
+            with_la_rm(b, |b, rm| {
+                let a = fget32(b, ops[1]);
+                let one = b.konst::<W32>(0x3f80_0000);
+                let r = b.fdiv_r::<W32>(one, a, rm);
+                fset32(b, ops[0], r);
+                fpo_end(b);
+                Ok(())
+            })?;
+        }
+        Insn::FrecipD | Insn::FrecipeD => {
+            with_la_rm(b, |b, rm| {
+                let a = fget(b, ops[1]);
+                let one = b.konst::<W64>(0x3ff0_0000_0000_0000);
+                let r = b.fdiv_r::<W64>(one, a, rm);
+                fset(b, ops[0], r);
+                fpo_end(b);
+                Ok(())
+            })?;
+        }
+        // FSCALEB/FLOGB/FCOPYSIGN。Ref: §3.2.1.7.
+        Insn::FscalebS => fbin32(b, &ops, |b, x, y| fscaleb_v::<B, W32>(b, x, y)),
+        Insn::FscalebD => fbin64(b, &ops, |b, x, y| fscaleb_v::<B, W64>(b, x, y)),
+        Insn::FlogbS => funa32(b, &ops, |b, x| flogb_v::<B, W32>(b, x)),
+        Insn::FlogbD => funa64(b, &ops, |b, x| flogb_v::<B, W64>(b, x)),
+        Insn::FcopysignS => fbin32(b, &ops, |b, x, y| b.fsgnj::<W32>(x, y)),
+        Insn::FcopysignD => fbin64(b, &ops, |b, x, y| b.fsgnj::<W64>(x, y)),
+        // FCLASS。Ref: §3.2.1.8.
+        Insn::FclassS => {
+            let a = fget32(b, ops[1]);
+            let v = fclass_la::<B, W32>(b, a);
+            fset32(b, ops[0], v);
+        }
+        Insn::FclassD => {
+            let a = fget(b, ops[1]);
+            let v = fclass_la::<B, W64>(b, a);
+            let v64 = b.zext::<W32, W64>(v);
+            fset(b, ops[0], v64);
+        }
+        // FCMP.cond。ops = [cc, fj, fk, cond]。Ref: §3.2.2.1.
+        Insn::FcmpCondS => {
+            let a = fget32(b, ops[1]);
+            let c = fget32(b, ops[2]);
+            let r = fcmp_res::<B, W32>(b, a, c, ops[3]);
+            fcc_set(b, ops[0], r);
+            fpo_end(b);
+        }
+        Insn::FcmpCondD => {
+            let a = fget(b, ops[1]);
+            let c = fget(b, ops[2]);
+            let r = fcmp_res::<B, W64>(b, a, c, ops[3]);
+            fcc_set(b, ops[0], r);
+            fpo_end(b);
+        }
+        // FCVT。Ref: §3.2.3.1.
+        // FCVT.S.D は f64→f32（丸めは FCSR.RM）、FCVT.D.S は f32→f64（正確）。
+        Insn::FcvtSD => {
+            with_la_rm(b, |b, rm| {
+                let a = fget(b, ops[1]);
+                let v = b.fcvt_ff::<W64, W32>(a, rm);
+                fset32(b, ops[0], v);
+                fpo_end(b);
+                Ok(())
+            })?;
+        }
+        Insn::FcvtDS => {
+            let a = fget32(b, ops[1]);
+            let v = b.fcvt_ff::<W32, W64>(a, RM_RNE);
+            fset(b, ops[0], v);
+            fpo_end(b);
+        }
+        // FTINT（動的 rm は FCSR.RM）。Ref: §3.2.3.2.
+        Insn::FtintWS => with_la_rm(b, |b, rm| ftint::<B, W32>(b, &ops, false, rm))?,
+        Insn::FtintLS => with_la_rm(b, |b, rm| ftint::<B, W32>(b, &ops, true, rm))?,
+        Insn::FtintWD => with_la_rm(b, |b, rm| ftint::<B, W64>(b, &ops, false, rm))?,
+        Insn::FtintLD => with_la_rm(b, |b, rm| ftint::<B, W64>(b, &ops, true, rm))?,
+        // FTINTR*（固定 rm。LA の RM/RP/RZ/RNE は backend の
+        // Rdn/Rup/Rtz/Rne）。Ref: §3.2.3.3.
+        Insn::FtintrmWS => ftint::<B, W32>(b, &ops, false, RM_RDN)?,
+        Insn::FtintrmLS => ftint::<B, W32>(b, &ops, true, RM_RDN)?,
+        Insn::FtintrmWD => ftint::<B, W64>(b, &ops, false, RM_RDN)?,
+        Insn::FtintrmLD => ftint::<B, W64>(b, &ops, true, RM_RDN)?,
+        Insn::FtintrpWS => ftint::<B, W32>(b, &ops, false, RM_RUP)?,
+        Insn::FtintrpLS => ftint::<B, W32>(b, &ops, true, RM_RUP)?,
+        Insn::FtintrpWD => ftint::<B, W64>(b, &ops, false, RM_RUP)?,
+        Insn::FtintrpLD => ftint::<B, W64>(b, &ops, true, RM_RUP)?,
+        Insn::FtintrzWS => ftint::<B, W32>(b, &ops, false, RM_RTZ)?,
+        Insn::FtintrzLS => ftint::<B, W32>(b, &ops, true, RM_RTZ)?,
+        Insn::FtintrzWD => ftint::<B, W64>(b, &ops, false, RM_RTZ)?,
+        Insn::FtintrzLD => ftint::<B, W64>(b, &ops, true, RM_RTZ)?,
+        Insn::FtintrneWS => ftint::<B, W32>(b, &ops, false, RM_RNE)?,
+        Insn::FtintrneLS => ftint::<B, W32>(b, &ops, true, RM_RNE)?,
+        Insn::FtintrneWD => ftint::<B, W64>(b, &ops, false, RM_RNE)?,
+        Insn::FtintrneLD => ftint::<B, W64>(b, &ops, true, RM_RNE)?,
+        // FFINT（動的 rm）。Ref: §3.2.3.2.
+        Insn::FfintSW => with_la_rm(b, |b, rm| ffint::<B, W32>(b, &ops, false, rm))?,
+        Insn::FfintSL => with_la_rm(b, |b, rm| ffint::<B, W32>(b, &ops, true, rm))?,
+        Insn::FfintDW => with_la_rm(b, |b, rm| ffint::<B, W64>(b, &ops, false, rm))?,
+        Insn::FfintDL => with_la_rm(b, |b, rm| ffint::<B, W64>(b, &ops, true, rm))?,
+        // FRINT（動的 rm）。Ref: §3.2.3.4.
+        Insn::FrintS => {
+            with_la_rm(b, |b, rm| {
+                let a = fget32(b, ops[1]);
+                let v = frint_v::<B, W32>(b, a, rm);
+                fset32(b, ops[0], v);
+                fpo_end(b);
+                Ok(())
+            })?;
+        }
+        Insn::FrintD => {
+            with_la_rm(b, |b, rm| {
+                let a = fget(b, ops[1]);
+                let v = frint_v::<B, W64>(b, a, rm);
+                fset(b, ops[0], v);
+                fpo_end(b);
+                Ok(())
+            })?;
+        }
+        // FSEL。ops = [fd, fj, fk, ca]。ca=0 → fj、1 → fk。
+        // Ref: §3.2.4.2.
+        Insn::Fsel => {
+            let bit = fcc_bit(b, ops[3]);
+            let zero = k(b, 0);
+            let c = b.cmp::<W64>(Cmp::Ne, bit, zero);
+            let a = fget(b, ops[1]);
+            let v = fget(b, ops[2]);
+            let r = b.select::<W64>(c, v, a);
+            fset(b, ops[0], r);
+        }
+        // ---- FP・整数・FCC 間転送 ----
+        // Ref: §3.2.4.3-§3.2.4.7.
+        Insn::Movgr2frW => {
+            let v = rget(b, ops[1]);
+            let v = b.trunc::<W64, W32>(v);
+            fset32(b, ops[0], v);
+        }
+        Insn::Movgr2frhW => {
+            // fd[63:32] ← GR[rj][31:0]、fd[31:0] 不変。
+            let old = fget(b, ops[0]);
+            let lo_mask = k(b, 0xffff_ffff);
+            let lo = b.and::<W64>(old, lo_mask);
+            let g = rget(b, ops[1]);
+            let g32 = b.and::<W64>(g, lo_mask);
+            let sh = k(b, 32);
+            let hi = b.shl::<W64>(g32, sh);
+            let v = b.or::<W64>(hi, lo);
+            fset(b, ops[0], v);
+        }
+        Insn::Movgr2frD => {
+            let v = rget(b, ops[1]);
+            fset(b, ops[0], v);
+        }
+        Insn::Movfr2grS => {
+            let v = fget32(b, ops[1]);
+            let v = b.sext::<W32, W64>(v);
+            rset(b, ops[0], v);
+        }
+        Insn::Movfrh2grS => {
+            let v = fget(b, ops[1]);
+            let sh = k(b, 32);
+            let hi = b.shr_l::<W64>(v, sh);
+            let hi32 = b.trunc::<W64, W32>(hi);
+            let v = b.sext::<W32, W64>(hi32);
+            rset(b, ops[0], v);
+        }
+        Insn::Movfr2grD => {
+            let v = fget(b, ops[1]);
+            rset(b, ops[0], v);
+        }
+        Insn::Movgr2fcsr => {
+            // ops = [fcsrd, rj]。fcsr1-3 は FCSR0 のエイリアスとして
+            // 対応フィールドへ写す（fcsr[1..3] の実配列は使わない）。
+            // Ref: SPEC-LOONGARCH-RM §3.1.4, §3.2.4.5.
+            let g = rget(b, ops[1]);
+            let g32 = b.trunc::<W64, W32>(g);
+            let i0 = b.konst::<W32>(0);
+            let old = b.get_indexed(fcsr_array(), i0);
+            let nv = match ops[0] {
+                0 => g32,
+                1 => {
+                    let keep = b.konst::<W32>(!0x1f);
+                    let w = b.konst::<W32>(0x1f);
+                    let a = b.and::<W32>(old, keep);
+                    let p = b.and::<W32>(g32, w);
+                    b.or::<W32>(a, p)
+                }
+                2 => {
+                    let keep = b.konst::<W32>(!0x1fff_0000);
+                    let w = b.konst::<W32>(0x1fff_0000);
+                    let a = b.and::<W32>(old, keep);
+                    let p = b.and::<W32>(g32, w);
+                    b.or::<W32>(a, p)
+                }
+                3 => {
+                    let keep = b.konst::<W32>(!0x300);
+                    let w = b.konst::<W32>(0x300);
+                    let a = b.and::<W32>(old, keep);
+                    let p = b.and::<W32>(g32, w);
+                    b.or::<W32>(a, p)
+                }
+                _ => old,
+            };
+            if ops[0] <= 3 {
+                b.set_indexed(fcsr_array(), i0, nv);
+            }
+        }
+        Insn::Movfcsr2gr => {
+            // ops = [rd, fcsrj]。fcsr1-3 の読みは FCSR0 の対応
+            // フィールドを返す。
+            let i0 = b.konst::<W32>(0);
+            let f = b.get_indexed(fcsr_array(), i0);
+            let v = match ops[1] {
+                0 => f,
+                1 => {
+                    let m = b.konst::<W32>(0x1f);
+                    b.and::<W32>(f, m)
+                }
+                2 => {
+                    let m = b.konst::<W32>(0x1fff_0000);
+                    b.and::<W32>(f, m)
+                }
+                3 => {
+                    let m = b.konst::<W32>(0x300);
+                    b.and::<W32>(f, m)
+                }
+                _ => b.konst::<W32>(0),
+            };
+            let v = b.sext::<W32, W64>(v);
+            rset(b, ops[0], v);
+        }
+        Insn::Movfr2cf => {
+            // ops = [cd, fj]。FCC[cd] ← FR[fj][0]。
+            let v = fget(b, ops[1]);
+            let one = k(b, 1);
+            let bit = b.and::<W64>(v, one);
+            fcc_set(b, ops[0], bit);
+        }
+        Insn::Movcf2fr => {
+            // ops = [fd, cj]。FR[fd][0] ← FCC[cj]（他ビット不変）。
+            let bit = fcc_bit(b, ops[1]);
+            let old = fget(b, ops[0]);
+            let m = k(b, !1u64);
+            let keep = b.and::<W64>(old, m);
+            let v = b.or::<W64>(keep, bit);
+            fset(b, ops[0], v);
+        }
+        Insn::Movgr2cf => {
+            // ops = [cd, rj]。FCC[cd] ← GR[rj][0]。
+            let v = rget(b, ops[1]);
+            let one = k(b, 1);
+            let bit = b.and::<W64>(v, one);
+            fcc_set(b, ops[0], bit);
+        }
+        Insn::Movcf2gr => {
+            // ops = [rd, cj]。GR[rd] ← FCC[cj]（0/1）。
+            let bit = fcc_bit(b, ops[1]);
+            rset(b, ops[0], bit);
+        }
+        // ---- FP load/store ----
+        // Ref: SPEC-LOONGARCH-RM §3.2.6.
+        Insn::FldS => {
+            let ea = ldst_ea(b, &ops);
+            let v = b.load::<W32>(ea, DATA)?;
+            fset32(b, ops[0], v);
+        }
+        Insn::FldD => {
+            let ea = ldst_ea(b, &ops);
+            let v = b.load::<W64>(ea, DATA)?;
+            fset(b, ops[0], v);
+        }
+        Insn::FstS => {
+            let ea = ldst_ea(b, &ops);
+            let v = fget32(b, ops[0]);
+            b.store::<W32>(ea, v, STORE)?;
+        }
+        Insn::FstD => {
+            let ea = ldst_ea(b, &ops);
+            let v = fget(b, ops[0]);
+            b.store::<W64>(ea, v, STORE)?;
+        }
+        Insn::FldxS => {
+            let ea = ldx_ea(b, &ops);
+            let v = b.load::<W32>(ea, DATA)?;
+            fset32(b, ops[0], v);
+        }
+        Insn::FldxD => {
+            let ea = ldx_ea(b, &ops);
+            let v = b.load::<W64>(ea, DATA)?;
+            fset(b, ops[0], v);
+        }
+        Insn::FstxS => {
+            let ea = ldx_ea(b, &ops);
+            let v = fget32(b, ops[0]);
+            b.store::<W32>(ea, v, STORE)?;
+        }
+        Insn::FstxD => {
+            let ea = ldx_ea(b, &ops);
+            let v = fget(b, ops[0]);
+            b.store::<W64>(ea, v, STORE)?;
+        }
+        Insn::FldgtS | Insn::FldgtD => {
+            bound_check(b, &ops, true)?;
+            let ea = rget(b, ops[1]);
+            if insn == Insn::FldgtS {
+                let v = b.load::<W32>(ea, DATA)?;
+                fset32(b, ops[0], v);
+            } else {
+                let v = b.load::<W64>(ea, DATA)?;
+                fset(b, ops[0], v);
+            }
+        }
+        Insn::FldleS | Insn::FldleD => {
+            bound_check(b, &ops, false)?;
+            let ea = rget(b, ops[1]);
+            if insn == Insn::FldleS {
+                let v = b.load::<W32>(ea, DATA)?;
+                fset32(b, ops[0], v);
+            } else {
+                let v = b.load::<W64>(ea, DATA)?;
+                fset(b, ops[0], v);
+            }
+        }
+        Insn::FstgtS | Insn::FstgtD => {
+            bound_check(b, &ops, true)?;
+            let ea = rget(b, ops[1]);
+            if insn == Insn::FstgtS {
+                let v = fget32(b, ops[0]);
+                b.store::<W32>(ea, v, STORE)?;
+            } else {
+                let v = fget(b, ops[0]);
+                b.store::<W64>(ea, v, STORE)?;
+            }
+        }
+        Insn::FstleS | Insn::FstleD => {
+            bound_check(b, &ops, false)?;
+            let ea = rget(b, ops[1]);
+            if insn == Insn::FstleS {
+                let v = fget32(b, ops[0]);
+                b.store::<W32>(ea, v, STORE)?;
+            } else {
+                let v = fget(b, ops[0]);
+                b.store::<W64>(ea, v, STORE)?;
+            }
+        }
     }
     Ok(true)
 }

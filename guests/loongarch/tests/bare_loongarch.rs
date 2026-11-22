@@ -1014,3 +1014,371 @@ fn exec_la8_rdtime_cntid() {
     step(&mut env, enc(Insn::RdtimehW, &[4, 6]));
     assert_eq!(gpr(&mut env, 4), 0x0123_4567);
 }
+
+// ---- LA9: スカラ FP ----
+
+/// FR[`n`] のビット列。
+fn fr(env: &mut BareEnv, n: u32) -> u64 {
+    env.backend.get(sem::fr_ref(n))
+}
+
+fn set_fr(env: &mut BareEnv, n: u32, v: u64) {
+    env.backend.set(sem::fr_ref(n), v);
+}
+
+/// FCC 束。
+fn fcc_bundle(env: &mut BareEnv) -> u64 {
+    env.backend.get(sem::fcc_ref())
+}
+
+/// FCSR 語を読む。
+fn fcsr_val(env: &mut BareEnv, n: u32) -> u32 {
+    use polyisa_sem::W32;
+    env.backend.get(polyisa_sem::StateRef::<W32>::from_offset(
+        core::mem::offset_of!(CpuState, fcsr) + n as usize * 4,
+    ))
+}
+
+fn set_fcsr(env: &mut BareEnv, n: u32, v: u32) {
+    use polyisa_sem::W32;
+    env.backend.set(
+        polyisa_sem::StateRef::<W32>::from_offset(
+            core::mem::offset_of!(CpuState, fcsr) + n as usize * 4,
+        ),
+        v,
+    );
+}
+
+const F64_1: u64 = 0x3ff0_0000_0000_0000;
+const F64_2: u64 = 0x4000_0000_0000_0000;
+const F64_3: u64 = 0x4008_0000_0000_0000;
+const F64_4: u64 = 0x4010_0000_0000_0000;
+const F64_HALF: u64 = 0x3fe0_0000_0000_0000;
+const F64_N2: u64 = 0xc000_0000_0000_0000;
+const F64_NAN: u64 = 0x7ff8_0000_0000_0000;
+const F32_1: u64 = 0x3f80_0000;
+const F32_2: u64 = 0x4000_0000;
+const F32_N1_5: u64 = 0xbfc0_0000;
+
+#[test]
+fn exec_la9_fp_arith() {
+    let mut env = env();
+    // fadd.d 1.0 + 2.0 = 3.0。
+    set_fr(&mut env, 1, F64_1);
+    set_fr(&mut env, 2, F64_2);
+    step(&mut env, enc(Insn::FaddD, &[0, 1, 2]));
+    assert_eq!(fr(&mut env, 0), F64_3);
+    // fsub.d 3.0 - 1.0 = 2.0。
+    step(&mut env, enc(Insn::FsubD, &[0, 0, 1]));
+    assert_eq!(fr(&mut env, 0), F64_2);
+    // fmul.d 2.0 * 2.0 = 4.0。
+    step(&mut env, enc(Insn::FmulD, &[0, 0, 0]));
+    assert_eq!(fr(&mut env, 0), F64_4);
+    // fdiv.d 4.0 / 4.0 = 1.0。
+    step(&mut env, enc(Insn::FdivD, &[0, 0, 0]));
+    assert_eq!(fr(&mut env, 0), F64_1);
+    // fadd.s: f32 ビットは下位 32 ビット。1.0f + 2.0f = 3.0f。
+    set_fr(&mut env, 1, F32_1);
+    set_fr(&mut env, 2, F32_2);
+    step(&mut env, enc(Insn::FaddS, &[0, 1, 2]));
+    assert_eq!(fr(&mut env, 0), 0x4040_0000);
+    // fsqrt.d 4.0 = 2.0。
+    set_fr(&mut env, 1, F64_4);
+    step(&mut env, enc(Insn::FsqrtD, &[0, 1]));
+    assert_eq!(fr(&mut env, 0), F64_2);
+    // frecip.d 2.0 = 0.5、frsqrt.d 4.0 = 0.5。
+    set_fr(&mut env, 1, F64_2);
+    step(&mut env, enc(Insn::FrecipD, &[0, 1]));
+    assert_eq!(fr(&mut env, 0), F64_HALF);
+    set_fr(&mut env, 1, F64_4);
+    step(&mut env, enc(Insn::FrsqrtD, &[0, 1]));
+    assert_eq!(fr(&mut env, 0), F64_HALF);
+    // 近似命令は正確演算で代替。
+    set_fr(&mut env, 1, F64_2);
+    step(&mut env, enc(Insn::FrecipeD, &[0, 1]));
+    assert_eq!(fr(&mut env, 0), F64_HALF);
+    step(&mut env, enc(Insn::FrsqrteD, &[0, 1]));
+    assert_eq!(fr(&mut env, 0), (1.0f64 / 2f64.sqrt()).to_bits());
+    // FP の割込フラグが FCSR0 に載る: 1/2 は正確だが、
+    // 0/0 → NaN で invalid が立つ。
+    set_fr(&mut env, 1, 0);
+    set_fr(&mut env, 2, 0);
+    step(&mut env, enc(Insn::FdivD, &[0, 1, 2]));
+    assert!(fcsr_val(&mut env, 0) & (1 << 28) != 0, "cause.V");
+    assert!(fcsr_val(&mut env, 0) & (1 << 20) != 0, "flags.V");
+}
+
+#[test]
+fn exec_la9_fp_min_max_mag_sign() {
+    let mut env = env();
+    set_fr(&mut env, 1, F64_1);
+    set_fr(&mut env, 2, F64_N2);
+    // fmax.d(1.0, -2.0) = 1.0、fmin.d = -2.0。
+    step(&mut env, enc(Insn::FmaxD, &[0, 1, 2]));
+    assert_eq!(fr(&mut env, 0), F64_1);
+    step(&mut env, enc(Insn::FminD, &[0, 1, 2]));
+    assert_eq!(fr(&mut env, 0), F64_N2);
+    // fmaxa.d(1.0, -2.0) = -2.0（|x| が大きい方）、fmina.d = 1.0。
+    step(&mut env, enc(Insn::FmaxaD, &[0, 1, 2]));
+    assert_eq!(fr(&mut env, 0), F64_N2);
+    step(&mut env, enc(Insn::FminaD, &[0, 1, 2]));
+    assert_eq!(fr(&mut env, 0), F64_1);
+    // fabs/fneg/fmov/fcopysign。
+    step(&mut env, enc(Insn::FabsD, &[0, 2]));
+    assert_eq!(fr(&mut env, 0), F64_2);
+    step(&mut env, enc(Insn::FnegD, &[0, 1]));
+    assert_eq!(fr(&mut env, 0), 0xbff0_0000_0000_0000);
+    step(&mut env, enc(Insn::FmovD, &[0, 1]));
+    assert_eq!(fr(&mut env, 0), F64_1);
+    step(&mut env, enc(Insn::FcopysignD, &[0, 1, 2]));
+    assert_eq!(fr(&mut env, 0), F64_1 | (1u64 << 63));
+}
+
+#[test]
+fn exec_la9_fp_fma() {
+    let mut env = env();
+    set_fr(&mut env, 1, F64_2);
+    set_fr(&mut env, 2, F64_3);
+    set_fr(&mut env, 3, F64_1);
+    // fmadd.d = 2*3+1 = 7.0。
+    step(&mut env, enc(Insn::FmaddD, &[0, 1, 2, 3]));
+    assert_eq!(fr(&mut env, 0), 0x401c_0000_0000_0000);
+    // fmsub.d = 2*3-1 = 5.0。
+    step(&mut env, enc(Insn::FmsubD, &[0, 1, 2, 3]));
+    assert_eq!(fr(&mut env, 0), 0x4014_0000_0000_0000);
+    // fnmadd.d = -(2*3+1) = -7.0。
+    step(&mut env, enc(Insn::FnmaddD, &[0, 1, 2, 3]));
+    assert_eq!(fr(&mut env, 0), 0xc01c_0000_0000_0000);
+    // fnmsub.d = -(2*3-1) = -5.0。
+    step(&mut env, enc(Insn::FnmsubD, &[0, 1, 2, 3]));
+    assert_eq!(fr(&mut env, 0), 0xc014_0000_0000_0000);
+}
+
+#[test]
+fn exec_la9_fp_scaleb_logb_class() {
+    let mut env = env();
+    // fscaleb.d 1.0 * 2^3 = 8.0。fk は整数ビット 3。
+    set_fr(&mut env, 1, F64_1);
+    set_fr(&mut env, 2, 3);
+    step(&mut env, enc(Insn::FscalebD, &[0, 1, 2]));
+    assert_eq!(fr(&mut env, 0), 0x4020_0000_0000_0000);
+    // 負の n: 4.0 * 2^-2 = 1.0。
+    set_fr(&mut env, 1, F64_4);
+    set_fr(&mut env, 2, (-2i64) as u64);
+    step(&mut env, enc(Insn::FscalebD, &[0, 1, 2]));
+    assert_eq!(fr(&mut env, 0), F64_1);
+    // flogb.d 8.0 = 3.0。flogb.d 0.5 = -1.0。flogb.d 0.0 = -inf。
+    set_fr(&mut env, 1, 0x4020_0000_0000_0000);
+    step(&mut env, enc(Insn::FlogbD, &[0, 1]));
+    assert_eq!(fr(&mut env, 0), F64_3);
+    set_fr(&mut env, 1, F64_HALF);
+    step(&mut env, enc(Insn::FlogbD, &[0, 1]));
+    assert_eq!(fr(&mut env, 0), 0xbff0_0000_0000_0000);
+    set_fr(&mut env, 1, 0);
+    step(&mut env, enc(Insn::FlogbD, &[0, 1]));
+    assert_eq!(fr(&mut env, 0), 0xfff0_0000_0000_0000);
+    // 非正規化: 最小 denormal（2^-1074）→ -1074.0。
+    set_fr(&mut env, 1, 1);
+    step(&mut env, enc(Insn::FlogbD, &[0, 1]));
+    assert_eq!(fr(&mut env, 0), (-1074.0f64).to_bits());
+    // fclass.d: 1.0 → bit8(+norm)、-inf → bit2、0 → bit6、NaN → bit1。
+    set_fr(&mut env, 1, F64_1);
+    step(&mut env, enc(Insn::FclassD, &[0, 1]));
+    assert_eq!(fr(&mut env, 0), 1 << 8);
+    set_fr(&mut env, 1, 0xfff0_0000_0000_0000);
+    step(&mut env, enc(Insn::FclassD, &[0, 1]));
+    assert_eq!(fr(&mut env, 0), 1 << 2);
+    set_fr(&mut env, 1, 0);
+    step(&mut env, enc(Insn::FclassD, &[0, 1]));
+    assert_eq!(fr(&mut env, 0), 1 << 6);
+    set_fr(&mut env, 1, F64_NAN);
+    step(&mut env, enc(Insn::FclassD, &[0, 1]));
+    assert_eq!(fr(&mut env, 0), 1 << 1);
+    set_fr(&mut env, 1, 1);
+    step(&mut env, enc(Insn::FclassD, &[0, 1]));
+    assert_eq!(fr(&mut env, 0), 1 << 7);
+}
+
+#[test]
+fn exec_la9_fcmp() {
+    let mut env = env();
+    set_fr(&mut env, 1, F64_1);
+    set_fr(&mut env, 2, F64_2);
+    // CEQ(4): 1.0 == 2.0 → 0。CLT(2): 1.0 < 2.0 → 1。
+    step(&mut env, enc(Insn::FcmpCondD, &[0, 1, 2, 4]));
+    assert_eq!(fcc_bundle(&mut env) & 1, 0);
+    step(&mut env, enc(Insn::FcmpCondD, &[1, 1, 2, 2]));
+    assert_eq!((fcc_bundle(&mut env) >> 1) & 1, 1);
+    // CLE(6): 1.0 <= 2.0 → 1。CNE(16): 1.0 != 2.0 → 1。
+    step(&mut env, enc(Insn::FcmpCondD, &[2, 1, 2, 6]));
+    assert_eq!((fcc_bundle(&mut env) >> 2) & 1, 1);
+    step(&mut env, enc(Insn::FcmpCondD, &[3, 1, 2, 0x10]));
+    assert_eq!((fcc_bundle(&mut env) >> 3) & 1, 1);
+    // NaN: CUN(8) → 1、COR(0x14) → 0、CUNE(0x18) → 1。
+    set_fr(&mut env, 1, F64_NAN);
+    step(&mut env, enc(Insn::FcmpCondD, &[4, 1, 2, 8]));
+    assert_eq!((fcc_bundle(&mut env) >> 4) & 1, 1);
+    step(&mut env, enc(Insn::FcmpCondD, &[5, 1, 2, 0x14]));
+    assert_eq!((fcc_bundle(&mut env) >> 5) & 1, 0);
+    step(&mut env, enc(Insn::FcmpCondD, &[6, 1, 2, 0x18]));
+    assert_eq!((fcc_bundle(&mut env) >> 6) & 1, 1);
+    // .s 形式でも動く。fcc7 に CEQ(4)。
+    set_fr(&mut env, 1, F32_1);
+    set_fr(&mut env, 2, F32_2);
+    step(&mut env, enc(Insn::FcmpCondS, &[7, 1, 2, 4]));
+    assert_eq!((fcc_bundle(&mut env) >> 7) & 1, 0);
+}
+
+#[test]
+fn exec_la9_fsel_and_moves() {
+    let mut env = env();
+    set_fr(&mut env, 1, F64_1);
+    set_fr(&mut env, 2, F64_2);
+    // fsel: fcc3=0 → fj(1.0)、fcc3=1 → fk(2.0)。
+    set_fcc(&mut env, 0);
+    step(&mut env, enc(Insn::Fsel, &[0, 1, 2, 3]));
+    assert_eq!(fr(&mut env, 0), F64_1);
+    set_fcc(&mut env, 1 << 3);
+    step(&mut env, enc(Insn::Fsel, &[0, 1, 2, 3]));
+    assert_eq!(fr(&mut env, 0), F64_2);
+    // movgr2fr.d / movfr2gr.d。
+    set_gpr(&mut env, 5, F64_3);
+    step(&mut env, enc(Insn::Movgr2frD, &[4, 5]));
+    assert_eq!(fr(&mut env, 4), F64_3);
+    step(&mut env, enc(Insn::Movfr2grD, &[6, 4]));
+    assert_eq!(gpr(&mut env, 6), F64_3);
+    // movgr2fr.w: 下位 32 ビット、上位 0。
+    set_gpr(&mut env, 5, 0xffff_ffff_3f80_0000);
+    step(&mut env, enc(Insn::Movgr2frW, &[4, 5]));
+    assert_eq!(fr(&mut env, 4), 0x3f80_0000);
+    // movgr2frh.w: 上位 32 ビット、下位不変。
+    set_gpr(&mut env, 5, 0x1234_5678);
+    step(&mut env, enc(Insn::Movgr2frhW, &[4, 5]));
+    assert_eq!(fr(&mut env, 4), 0x1234_5678_3f80_0000);
+    // movfr2gr.s / movfrh2gr.s: 符号拡張。
+    step(&mut env, enc(Insn::Movfr2grS, &[6, 4]));
+    assert_eq!(gpr(&mut env, 6), 0x3f80_0000);
+    step(&mut env, enc(Insn::Movfrh2grS, &[6, 4]));
+    assert_eq!(gpr(&mut env, 6), 0x1234_5678);
+    // movfr2cf / movcf2fr / movgr2cf / movcf2gr。
+    set_fr(&mut env, 1, 3);
+    step(&mut env, enc(Insn::Movfr2cf, &[2, 1]));
+    assert_eq!((fcc_bundle(&mut env) >> 2) & 1, 1);
+    set_fr(&mut env, 4, 0xdead_beef);
+    step(&mut env, enc(Insn::Movcf2fr, &[4, 2]));
+    assert_eq!(fr(&mut env, 4), 0xdead_beef | 1);
+    set_gpr(&mut env, 5, 4);
+    step(&mut env, enc(Insn::Movgr2cf, &[5, 5]));
+    assert_eq!((fcc_bundle(&mut env) >> 5) & 1, 0);
+    step(&mut env, enc(Insn::Movcf2gr, &[6, 2]));
+    assert_eq!(gpr(&mut env, 6), 1);
+    // movgr2fcsr / movfcsr2gr: fcsr0 全語、fcsr3 は RM エイリアス。
+    set_gpr(&mut env, 5, 0x1f1f_00ff);
+    step(&mut env, enc(Insn::Movgr2fcsr, &[0, 5]));
+    assert_eq!(fcsr_val(&mut env, 0), 0x1f1f_00ff);
+    step(&mut env, enc(Insn::Movfcsr2gr, &[6, 0]));
+    assert_eq!(gpr(&mut env, 6), 0x1f1f_00ff);
+    // fcsr3=RM エイリアス: 書き込みは FCSR0[9:8]、読みはそのビット。
+    set_gpr(&mut env, 5, 0x200);
+    step(&mut env, enc(Insn::Movgr2fcsr, &[3, 5]));
+    assert_eq!(fcsr_val(&mut env, 0) & 0x300, 0x200);
+    assert_eq!(fcsr_val(&mut env, 0) & !0x300, 0x1f1f_00ff & !0x300);
+    step(&mut env, enc(Insn::Movfcsr2gr, &[6, 3]));
+    assert_eq!(gpr(&mut env, 6), 0x200);
+    // fcsr1=enables エイリアス。
+    set_gpr(&mut env, 5, 0x1e);
+    step(&mut env, enc(Insn::Movgr2fcsr, &[1, 5]));
+    assert_eq!(fcsr_val(&mut env, 0) & 0x1f, 0x1e);
+    step(&mut env, enc(Insn::Movfcsr2gr, &[6, 1]));
+    assert_eq!(gpr(&mut env, 6), 0x1e);
+}
+
+#[test]
+fn exec_la9_fp_convert() {
+    let mut env = env();
+    // ffint.d.w: 42 → 42.0。
+    set_fr(&mut env, 1, 42);
+    step(&mut env, enc(Insn::FfintDW, &[0, 1]));
+    assert_eq!(fr(&mut env, 0), (42.0f64).to_bits());
+    // ffint.s.l: -7 → -7.0f。
+    set_fr(&mut env, 1, (-7i64) as u64);
+    step(&mut env, enc(Insn::FfintSL, &[0, 1]));
+    assert_eq!(fr(&mut env, 0), (-7.0f32).to_bits() as u64);
+    // ftint.l.d: 2.9 → 2（RNE）、ftintrp.l.d → 3。
+    set_fr(&mut env, 1, (2.9f64).to_bits());
+    step(&mut env, enc(Insn::FtintLD, &[0, 1]));
+    assert_eq!(fr(&mut env, 0), 3); // RNE 2.9 → 3
+    step(&mut env, enc(Insn::FtintrzLD, &[0, 1]));
+    assert_eq!(fr(&mut env, 0), 2);
+    step(&mut env, enc(Insn::FtintrpLD, &[0, 1]));
+    assert_eq!(fr(&mut env, 0), 3);
+    step(&mut env, enc(Insn::FtintrmLD, &[0, 1]));
+    assert_eq!(fr(&mut env, 0), 2);
+    // ftint.w.s: -1.6f → -2（RNE）、ftintrne.w.s も -2、
+    // ftintrz.w.s → -1。
+    set_fr(&mut env, 1, F32_N1_5);
+    step(&mut env, enc(Insn::FtintrneWS, &[0, 1]));
+    assert_eq!(fr(&mut env, 0), (-2i32) as u32 as u64);
+    step(&mut env, enc(Insn::FtintrzWS, &[0, 1]));
+    assert_eq!(fr(&mut env, 0), (-1i32) as u32 as u64);
+    // ftint の動的 rm: FCSR.RM=RZ(1) → -1.5 → -1。
+    set_fcsr(&mut env, 0, 1 << 8);
+    step(&mut env, enc(Insn::FtintWS, &[0, 1]));
+    assert_eq!(fr(&mut env, 0), (-1i32) as u32 as u64);
+    set_fcsr(&mut env, 0, 0);
+    // fcvt.s.d: 1.5 → 1.5f。fcvt.d.s 戻す。
+    set_fr(&mut env, 1, (1.5f64).to_bits());
+    step(&mut env, enc(Insn::FcvtSD, &[0, 1]));
+    assert_eq!(fr(&mut env, 0), 0x3fc0_0000);
+    step(&mut env, enc(Insn::FcvtDS, &[0, 0]));
+    assert_eq!(fr(&mut env, 0), (1.5f64).to_bits());
+    // frint.d: 2.5 → 2.0（RNE）、FCSR.RM=RP(2) → 3.0。
+    set_fr(&mut env, 1, (2.5f64).to_bits());
+    step(&mut env, enc(Insn::FrintD, &[0, 1]));
+    assert_eq!(fr(&mut env, 0), F64_2);
+    set_fcsr(&mut env, 0, 2 << 8);
+    step(&mut env, enc(Insn::FrintD, &[0, 1]));
+    assert_eq!(fr(&mut env, 0), F64_3);
+    set_fcsr(&mut env, 0, 0);
+    // ffint.s.w: 丸めが効く（-2.5 int はないので int→fp は正確）。
+    set_fr(&mut env, 1, 0x8000_0001);
+    step(&mut env, enc(Insn::FfintSW, &[0, 1]));
+    assert_eq!(fr(&mut env, 0), (-2147483647.0f32).to_bits() as u64);
+}
+
+#[test]
+fn exec_la9_fp_memory() {
+    let mut env = mem_env();
+    poke64(&mut env, 0x2000, F64_3);
+    set_gpr(&mut env, 5, 0x2000);
+    // fld.d f4 ← [r5+0]。
+    step(&mut env, enc(Insn::FldD, &[4, 5, 0]));
+    assert_eq!(fr(&mut env, 4), F64_3);
+    // fld.s f4 ← [r5+8]（下位 32、上位 0）。
+    poke64(&mut env, 0x2008, 0xffff_ffff_4040_0000);
+    step(&mut env, enc(Insn::FldS, &[4, 5, 8]));
+    assert_eq!(fr(&mut env, 4), 0x4040_0000);
+    // fst.d / fst.s。
+    set_fr(&mut env, 4, F64_1);
+    step(&mut env, enc(Insn::FstD, &[4, 5, 16]));
+    assert_eq!(peek(&mut env, 0x2010, 8), F64_1);
+    set_fr(&mut env, 4, 0xaabb_ccdd_1234_5678);
+    step(&mut env, enc(Insn::FstS, &[4, 5, 24]));
+    assert_eq!(peek(&mut env, 0x2018, 4), 0x1234_5678);
+    // fldx.d / fstx.s（ea = rj + rk）。
+    set_gpr(&mut env, 6, 0x20);
+    poke64(&mut env, 0x2020, F64_2);
+    step(&mut env, enc(Insn::FldxD, &[4, 5, 6]));
+    assert_eq!(fr(&mut env, 4), F64_2);
+    set_fr(&mut env, 4, 0x4040_0000);
+    step(&mut env, enc(Insn::FstxS, &[4, 5, 6]));
+    assert_eq!(peek(&mut env, 0x2020, 4), 0x4040_0000);
+    // fldgt.d / fstle.d（bound check）。
+    set_gpr(&mut env, 6, 0x1000);
+    step(&mut env, enc(Insn::FldgtD, &[4, 5, 6]));
+    assert_eq!(fr(&mut env, 4), F64_3);
+    set_fr(&mut env, 4, F64_4);
+    set_gpr(&mut env, 6, 0x2000);
+    step(&mut env, enc(Insn::FstleD, &[4, 5, 6]));
+    assert_eq!(peek(&mut env, 0x2000, 8), F64_4);
+}
