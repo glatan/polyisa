@@ -11,6 +11,7 @@ polyisa-guest = { path = "../guest" }
 polyisa-guest-aarch64 = { path = "../../guests/aarch64", optional = true }
 polyisa-guest-alpha = { path = "../../guests/alpha", optional = true }
 polyisa-guest-arm = { path = "../../guests/arm", optional = true }
+polyisa-guest-ia64 = { path = "../../guests/ia64", optional = true }
 polyisa-guest-loongarch = { path = "../../guests/loongarch", optional = true }
 polyisa-guest-m68k = { path = "../../guests/m68k", optional = true }
 polyisa-guest-mips = { path = "../../guests/mips", optional = true }
@@ -40,6 +41,7 @@ default = [
     "guest-aarch64",
     "guest-alpha",
     "guest-arm",
+    "guest-ia64",
     "guest-loongarch",
     "guest-m68k",
     "guest-mips",
@@ -56,6 +58,7 @@ default = [
 guest-aarch64 = ["dep:polyisa-guest-aarch64", "polyisa-os-linux/guest-aarch64"]
 guest-alpha = ["dep:polyisa-guest-alpha", "polyisa-os-linux/guest-alpha"]
 guest-arm = ["dep:polyisa-guest-arm", "polyisa-os-linux/guest-arm"]
+guest-ia64 = ["dep:polyisa-guest-ia64", "polyisa-os-linux/guest-ia64"]
 guest-loongarch = ["dep:polyisa-guest-loongarch", "polyisa-os-linux/guest-loongarch"]
 guest-m68k = ["dep:polyisa-guest-m68k", "polyisa-os-linux/guest-m68k"]
 guest-mips = ["dep:polyisa-guest-mips", "polyisa-os-linux/guest-mips"]

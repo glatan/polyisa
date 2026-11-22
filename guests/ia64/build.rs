@@ -1,16 +1,21 @@
 // Copyright (c) polyisa contributors
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! IA-64 最小の ISADL 記述。出典は SPEC-IA64-SDM Rev 2.3 である。
+//! IA-64 の ISADL 記述。出典は SPEC-IA64-SDM Rev 2.3 である。
 
 // Ref: SPEC-IA64-SDM (Rev 2.3).
-include!("spec/ia64min.rs");
+include!("spec/ia64.rs");
 
 fn main() {
     println!("cargo::rerun-if-changed=spec/");
     println!("cargo::rerun-if-changed=build.rs");
     let model = build_model();
+    // スロット語は 41 ビット。MLX の X スロットは 82 ビット。
     for insn in &model.insns {
-        assert!(insn.pattern.len() == 128, "{}", insn.name);
+        assert!(
+            insn.pattern.len() == 41 || insn.pattern.len() == 82,
+            "{}",
+            insn.name
+        );
     }
     let report = polyisa_isadl::validate(&model);
     assert!(
