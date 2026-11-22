@@ -13,6 +13,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod bundle;
 pub mod sem;
 
 // ISADL モデルから生成した命令集合・デコード・逆アセンブルの殻。

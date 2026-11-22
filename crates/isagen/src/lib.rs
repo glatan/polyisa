@@ -383,6 +383,13 @@ fn gen_disassembler(model: &Model) -> String {
         "pub fn disasm_word(word: u128, len: u32) -> Option<String> {\n    \
             let insn = decode(word, len)?;\n    render_ops(insn, word)\n}\n",
     );
+    // `when` の機能旗を呼び出し側が選ぶ版（ADR-0006）。IA-64 のように
+    // 文脈（テンプレートのスロット種別）で符号化空間が変わる ISA が
+    // 使う。`is_rv64` と `feats` は `decode_model_ex` と同じ意味。
+    s.push_str(
+        "pub fn disasm_word_ex(word: u128, len: u32, is_rv64: bool, feats: u128) -> Option<String> {\n    \
+            let insn = decode_model_ex(word, len, is_rv64, feats)?;\n    render_ops(insn, word)\n}\n",
+    );
     s.push_str("fn render_ops(insn: Insn, word: u128) -> Option<String> {\n");
     let formats: std::collections::BTreeMap<&str, &polyisa_isadl::model::Format> =
         model.formats.iter().map(|f| (f.name.as_str(), f)).collect();
@@ -1056,9 +1063,14 @@ fn gen_encoder(model: &Model) -> Result<String, GenError> {
                         "word",
                         insn.pattern.len(),
                     ));
-                    // 読み戻しの一致検査。
+                    // 読み戻しの一致検査。`|` の結合が要る多部分
+                    // だけ括り、単一部の二重括弧は避ける。
                     let gather = parts_gather(parts, "word", "u64", insn.pattern.len());
-                    s.push_str(&format!("    if ({gather}) != x_{i} {{ return None; }}\n"));
+                    if gather.contains(" | ") {
+                        s.push_str(&format!("    if ({gather}) != x_{i} {{ return None; }}\n"));
+                    } else {
+                        s.push_str(&format!("    if {gather} != x_{i} {{ return None; }}\n"));
+                    }
                 }
                 FieldKind::Hook { has_encoder } => {
                     if *has_encoder {
@@ -1153,7 +1165,14 @@ fn gen_encoder(model: &Model) -> Result<String, GenError> {
                 FieldKind::Parts { parts, zfill } => {
                     let gather = parts_gather(parts, "word", "u64", u32::MAX);
                     if *zfill > 0 {
-                        pieces.push(format!("({gather}) << {zfill}"));
+                        // 複数部の `|` を結合してからシフトする必要が
+                        // ある。単一部（すでに括弧つき）を余分に括ると
+                        // clippy::double_parens に触れる。
+                        if gather.contains(" | ") {
+                            pieces.push(format!("({gather}) << {zfill}"));
+                        } else {
+                            pieces.push(format!("{gather} << {zfill}"));
+                        }
                     } else {
                         pieces.push(gather);
                     }
@@ -2319,7 +2338,11 @@ fn gen_operands(model: &Model) -> String {
                     // 取り出しは語の実値にだけ触るので語長で絞らない。
                     let gather = parts_gather(parts, "word", "u64", u32::MAX);
                     if *zfill > 0 {
-                        s.push_str(&format!("    let {name} = ({gather}) << {zfill};\n"));
+                        if gather.contains(" | ") {
+                            s.push_str(&format!("    let {name} = ({gather}) << {zfill};\n"));
+                        } else {
+                            s.push_str(&format!("    let {name} = {gather} << {zfill};\n"));
+                        }
                     } else {
                         s.push_str(&format!("    let {name} = {gather};\n"));
                     }

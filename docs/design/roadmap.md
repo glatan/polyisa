@@ -43,7 +43,6 @@
 
 | # | 内容 | 前提 | 判定 |
 |---|---|---|---|
-| IA3 | デコード: 128 ビットバンドル（テンプレート・スロット・stop ビット）の ISADL 表現 | IA2 | - |
 | IA4 | `run_ia64` 実行ループ: バンドル進行と RIP 管理 + bare 最小テスト | IA3 | - |
 | IA5 | 整数算術・比較・述語生成・シフト/extr/mix 系 | IA4 | - |
 | IA6 | load/store・ALAT（advanced load と check）・chk.s/chk.a・mf | IA4 | - |

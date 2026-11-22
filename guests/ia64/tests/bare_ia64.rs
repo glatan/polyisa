@@ -7,7 +7,13 @@
 
 use polyisa_engine::bare::BareEnv;
 use polyisa_engine::interp::InterpExit;
-use polyisa_guest_ia64::{CpuState, IP_SLOT_MASK, Insn, sem};
+use polyisa_guest_ia64::bundle::{self, Unit};
+use polyisa_guest_ia64::{
+    CpuState, FEAT_ITANIUM, FEAT_ITANIUM2, FEAT_UNIT_A, FEAT_UNIT_I, IP_SLOT_MASK, Insn,
+    decode_model_ex, disasm_word_ex, encode_add, encode_br_cond_sptk_few, encode_fma_s0,
+    encode_ld4, encode_mov_ip, encode_movl, encode_nop_i, encode_nop_x, encode_st4,
+    encode_sub_imm8, sem,
+};
 
 fn env() -> BareEnv {
     BareEnv::new(core::mem::size_of::<CpuState>())
@@ -86,6 +92,219 @@ fn ip_slot_field() {
 #[test]
 fn exec_is_unimplemented() {
     let mut env = env();
-    let e = sem::exec(&mut env.backend, Insn::Bad, 0, 0).unwrap_err();
+    let e = sem::exec(&mut env.backend, Insn::Add, 0, 0).unwrap_err();
     assert!(matches!(e, InterpExit::Unimplemented(_)));
+}
+
+// ---- 段階21 IA3: バンドル・スロット語・生成符号化の最小検査 ----
+// 命令語は生成 encode_* で組み立て、スロット文脈つきの
+// decode_model_ex / disasm_word_ex で往復させる。
+// Ref: SPEC-IA64-SDM (Rev 2.3).
+
+const CPU: u128 = FEAT_ITANIUM | FEAT_ITANIUM2;
+
+/// テンプレート値・ストップビット・3 スロットから 128 ビット
+/// バンドル語を組み立てる。slot0=bits[45:5]、slot1=bits[86:46]、
+/// slot2=bits[127:87]。
+fn mk_bundle(templ: u8, stop: bool, s0: u64, s1: u64, s2: u64) -> u128 {
+    (s2 as u128) << 87
+        | (s1 as u128) << 46
+        | (s0 as u128) << 5
+        | (templ as u128) << 1
+        | stop as u128
+}
+
+/// スロット文脈で encode→decode→再符号化の往復を確かめ、
+/// 逆アセンブルが指定のニーモニックで始まることを確認する。
+fn slot_roundtrip(unit: Unit, enc: Option<u128>, want_insn: Insn, want: &str) -> u128 {
+    let word = enc.expect("encode");
+    let insn = bundle::decode_slot(unit, word, CPU).expect("decode");
+    assert_eq!(insn, want_insn);
+    assert!(bundle::fits_slot(bundle::insn_unit(insn), unit));
+    let text = disasm_word_ex(
+        word,
+        bundle::slot_len(unit),
+        true,
+        CPU | bundle::slot_feats(unit),
+    )
+    .expect("disasm");
+    assert!(text.contains(want), "{want} を含まない: {text}");
+    word
+}
+
+#[test]
+fn a_unit_forms() {
+    // A1 型: add r1 = r2, r3（qp=0, r1=5, r2=6, r3=7）
+    let w = slot_roundtrip(Unit::I, encode_add(&[0, 5, 6, 7]), Insn::Add, "add r5");
+    // A 型は I/M 両スロットに置ける。
+    assert_eq!(bundle::decode_slot(Unit::M, w, CPU), Some(Insn::Add));
+    // A3 型: sub_imm8 r1 = imm8, r3
+    let w2 = slot_roundtrip(
+        Unit::M,
+        encode_sub_imm8(&[0, 9, 0x23, 8]),
+        Insn::SubImm8,
+        "sub r9 = 35",
+    );
+    // I スロットでもデコードできる（A 型）。
+    assert_eq!(bundle::decode_slot(Unit::I, w2, CPU), Some(Insn::SubImm8));
+    // F 文脈では同じ語が fma.s0 として解釈される
+    // （IA-64 はテンプレートなしでは一意でない）。add にはならない。
+    assert_ne!(bundle::decode_slot(Unit::F, w, CPU), Some(Insn::Add));
+}
+
+#[test]
+fn i_unit_forms() {
+    // mov.i r1 = ip
+    let w = slot_roundtrip(Unit::I, encode_mov_ip(&[0, 3]), Insn::MovIp, "mov r3 = ip");
+    // M スロットでは同じ 41 ビット語は別命令（dep 等）に解釈される
+    // かデコード不能になるが、mov.ip にはならない。
+    assert_ne!(bundle::decode_slot(Unit::M, w, CPU), Some(Insn::MovIp));
+    // nop.i（imm21=0）
+    slot_roundtrip(Unit::I, encode_nop_i(&[0, 0]), Insn::NopI, "nop.i");
+}
+
+#[test]
+fn m_unit_forms() {
+    // ld4 r1 = [r3]
+    let w = slot_roundtrip(Unit::M, encode_ld4(&[0, 4, 2]), Insn::Ld4, "ld4 r4 = [r2]");
+    // I 文脈では dep 等の別命令として解釈されるが、ld4 にはならない。
+    assert_ne!(bundle::decode_slot(Unit::I, w, CPU), Some(Insn::Ld4));
+    // st4 [r3] = r2
+    slot_roundtrip(Unit::M, encode_st4(&[0, 7, 6]), Insn::St4, "st4 [r7] = r6");
+}
+
+#[test]
+fn f_unit_forms() {
+    // fma.s.s0 f1 = f3, f4, f2（F1 型。operand 順は qp, f1, f3, f4, f2）
+    let w = slot_roundtrip(
+        Unit::F,
+        encode_fma_s0(&[0, 8, 9, 10, 11]),
+        Insn::FmaS0,
+        "fma.s0 f8 = f9, f10, f11",
+    );
+    // I 文脈でも別命令として解釈され得るが、F 命令ではない。
+    assert_ne!(bundle::decode_slot(Unit::I, w, CPU), Some(Insn::FmaS0));
+}
+
+#[test]
+fn b_unit_forms() {
+    // br.cond.sptk.few tgt21（16 バイト整列分岐先の IP 相対値）
+    let w = slot_roundtrip(
+        Unit::B,
+        encode_br_cond_sptk_few(&[0, 0x40]),
+        Insn::BrCondSptkFew,
+        "br.cond.sptk.few",
+    );
+    assert_ne!(
+        bundle::decode_slot(Unit::M, w, CPU),
+        Some(Insn::BrCondSptkFew)
+    );
+}
+
+#[test]
+fn x_unit_82bit_forms() {
+    // movl r1 = imm64（82 ビット語）
+    let w = slot_roundtrip(
+        Unit::X,
+        encode_movl(&[0, 12, 0xdead_beef_1234_5678]),
+        Insn::Movl,
+        "movl r12",
+    );
+    assert_eq!(bundle::slot_len(Unit::X), 82);
+    // nop.x imm62
+    slot_roundtrip(Unit::X, encode_nop_x(&[0, 0x1f]), Insn::NopX, "nop.x");
+    // 82 ビット語の上位は 41 ビット L スロットをまたぐ。
+    assert_eq!(w >> 82, 0);
+    assert_ne!(w >> 41, 0);
+}
+
+#[test]
+fn operand_extraction_roundtrip() {
+    use polyisa_guest_ia64::extract_ops;
+    let w = encode_add(&[3, 5, 6, 7]).unwrap();
+    let insn = bundle::decode_slot(Unit::I, w, CPU).unwrap();
+    let ops = extract_ops(insn, w);
+    assert_eq!(ops, vec![3, 5, 6, 7]);
+    assert_eq!(encode_add(&ops), Some(w));
+}
+
+#[test]
+fn template_table_matches_sdm() {
+    let t = &bundle::TEMPLATES;
+    // 有効 12 個、予約 4 個（3, a, d, f）。
+    assert_eq!(t.iter().filter(|d| d.is_some()).count(), 12);
+    for i in [3usize, 0xa, 0xd, 0xf] {
+        assert!(t[i].is_none());
+    }
+    assert_eq!(t[0].unwrap().slots, [Unit::M, Unit::I, Unit::I]);
+    assert_eq!(t[2].unwrap().slots, [Unit::M, Unit::L, Unit::X]);
+    assert_eq!(t[5].unwrap().boundary, 1);
+    assert_eq!(t[1].unwrap().boundary, 2);
+}
+
+#[test]
+fn bundle_fields_and_stops() {
+    let nop_i = encode_nop_i(&[0, 0]).unwrap() as u64;
+    let ld4 = encode_ld4(&[0, 4, 2]).unwrap() as u64;
+    // MII テンプレート 1（slot1 後にストップ）、s ビット 0。
+    let b = mk_bundle(1, false, ld4, nop_i, nop_i);
+    assert_eq!(bundle::template_index(b), 1);
+    assert!(!bundle::bundle_stop(b));
+    assert_eq!(bundle::bundle_slot(b, 0), ld4);
+    assert_eq!(bundle::bundle_slot(b, 1), nop_i);
+    assert_eq!(bundle::bundle_slot(b, 2), nop_i);
+    assert_eq!(bundle::template_stops(b), Some([false, true, false]));
+}
+
+#[test]
+fn decode_mii_bundle() {
+    let ld4 = encode_ld4(&[0, 4, 2]).unwrap() as u64;
+    let add = encode_add(&[0, 5, 6, 7]).unwrap() as u64;
+    let nop_i = encode_nop_i(&[0, 0]).unwrap() as u64;
+    let b = mk_bundle(0, true, ld4, add, nop_i);
+    let insns = bundle::decode_bundle(b, CPU).expect("decode MII");
+    assert_eq!(insns.len(), 3);
+    assert_eq!(insns[0].insn, Insn::Ld4);
+    assert_eq!(insns[1].insn, Insn::Add); // A 型が I スロットに収まる
+    assert_eq!(insns[2].insn, Insn::NopI);
+    assert_eq!(insns[0].slot, 0);
+    assert_eq!(insns[2].slot, 2);
+}
+
+#[test]
+fn decode_mlx_bundle() {
+    let ld4 = encode_ld4(&[0, 4, 2]).unwrap() as u64;
+    let movl = encode_movl(&[0, 12, 0x0123_4567_89ab_cdef]).unwrap();
+    let x_lo = (movl & ((1u128 << 41) - 1)) as u64; // slot2 = X 半分
+    let l_hi = (movl >> 41) as u64; // slot1 = L 半分
+    let b = mk_bundle(2, false, ld4, l_hi, x_lo);
+    assert_eq!(bundle::template_desc(b).unwrap().name, "MLX");
+    assert_eq!(bundle::bundle_x_word(b), movl);
+    let insns = bundle::decode_bundle(b, CPU).expect("decode MLX");
+    assert_eq!(insns.len(), 2);
+    assert_eq!(insns[0].insn, Insn::Ld4);
+    assert_eq!(insns[1].slot, 2);
+    assert_eq!(insns[1].insn, Insn::Movl);
+}
+
+#[test]
+fn template_unit_mismatch_rejected() {
+    // I 専用の mov.i を B スロットに置いた MIB 風の語は
+    // decode_bundle を失敗させる（スロット文脈で解釈しない）。
+    let mov_ip = encode_mov_ip(&[0, 3]).unwrap() as u64;
+    let ld4 = encode_ld4(&[0, 4, 2]).unwrap() as u64;
+    let add = encode_add(&[0, 5, 6, 7]).unwrap() as u64;
+    let b = mk_bundle(8, false, ld4, add, mov_ip); // MIB: slot2 は B
+    assert!(bundle::decode_bundle(b, CPU).is_none());
+}
+
+#[test]
+fn context_flags_select_interpretation() {
+    // 同じ 41 ビット語でも文脈フィーチャで型が変わる。
+    let w = encode_add(&[0, 5, 6, 7]).unwrap();
+    assert_eq!(
+        decode_model_ex(w, 41, true, CPU | FEAT_UNIT_I | FEAT_UNIT_A),
+        Some(Insn::Add)
+    );
+    assert_eq!(decode_model_ex(w, 41, true, CPU | FEAT_UNIT_I), None);
 }
