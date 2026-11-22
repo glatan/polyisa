@@ -44,7 +44,6 @@
 
 | # | 内容 | 前提 | 判定 |
 |---|---|---|---|
-| HX1 | 着手条件: SPEC-HEXAGON-PRM-PREV の版確定、BIN 登録 | - | - |
 | HX2 | `guests/hexagon` の段階 2 の試作を本実装に差し替える骨格: CpuState（r0-31・p0-3・USR・PC・LC/SA・GP・M0/M1・CS0/CS1・スレッド状態）、モデル（V5 以降の各版）の宣言 | HX1 | - |
 | HX3 | デコード: パケット構造（1 から 4 命令・パケット終端ビット・duplex・constant extender） | HX2 | - |
 | HX4 | 実行エンジンの接続: パケット単位の step（同時発行の意味論・`.new` オペランド）+ bare 最小テスト | HX3 | - |
