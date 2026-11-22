@@ -27,7 +27,8 @@
 | 18 | SuperH | 完了 |
 | 19 | LoongArch | 完了 |
 | 20 | OpenRISC | 完了 |
-| 21-24 | IA-64〜PDP-11 | 未着手（作業計画は `design/roadmap.md` の各段階） |
+| 21 | IA-64 | 完了 |
+| 22-24 | Hexagon〜PDP-11 | 未着手（作業計画は `design/roadmap.md` の各段階） |
 | 25-29 | OS パーソナリティ・システムコール段階 5・タイミング・ホスト移植・GDB | 未着手 |
 
 ## 対応した内容
@@ -507,6 +508,21 @@ WebAssembly の本格的な実装と、WASI preview1 の OS パーソナリテ�
 - S20-2 の所有者確認（`heavy_abi_openrisc` が機械的証拠）
 - ORBIS64・ORVDX64・カスタム命令（`l.cust1-8`・`lf.cust1.*`）の未実装（機能旗の宣言のみ）と、特権専用の `l.rfe`・例外配送・`l.lwa`/`l.swa` の単一スレッド近似（GAP-0066）
 - GAP-0064（syscall ABI の意図的な簡略化。単一プロセス・単一スレッド模型、`or1k_atomic` 未実装、dirfd/O_* フラグの近似、決定論的ダミー getrandom 等）・GAP-0065（lazymap 窓のデマンドページ近似）・GAP-0067（generic Backend 化の未対応）
+
+### 段階 21：IA-64
+
+対応した内容：
+
+- `guests/ia64`（spec・sem・bundle）・`run_ia64`・`os-linux::ia64`（アーチ固有 `syscall.tbl` の表番号（0–452・abi 全行 common・355 エントリ）に `NR_BASE`=1024 を足す規約で畳む。FdTable 系・dirfd 解決・単一プロセス模型）
+- 版の範囲 Itanium〜Itanium 9700 系のうちユーザーモード実行に要る命令群。128 ビットバンドルはテンプレート（bits[4:0]）でスロットのユニット要求と stop を決め、41 ビットのスロット語（MLX の X は 82 ビット語）を ISADL の語長分岐でデコード。整数・比較と述語生成・メモリ（ld/st 系・ALAT・chk・セマフォ）・分岐と call/ret・ループ・回転分岐・回転改名と RSE（96 項リング駐在域・バッキングストアへの書き出し/読み戻し・NaT 集積穴）・82 ビット FP（`{sign,exp17,sig64}`、fma 系・fcmp・sf0–3・NaTVal）
+- syscall は `break 0x100000` とゲートページ（`GATE_ADDR+PERCPU_PAGE_SIZE` に実バンドルを供給し via_break/via_epc 両入口を break に畳む。auxv の AT_SYSINFO/AT_SYSINFO_EHDR）と、ELF64 EXEC（静的）ローダ・初期スタック
+- `bare_ia64`（層1–3: デコード・エンコード往復と裸実行の命令単位検査）・`heavy_program_ia64`（BIN-DISTRO-IA64 の busybox-static 1.35.0 コマンド群。basic 18 件＋stdin 4 件）・`heavy_abi_ia64`（`.testdata/uapi-ia64` の syscall.tbl 照合。+1024 生成規則の固定・nr 定数 203 件の番号ピン留め・名表 355 件の双方向照合）
+
+残っている事項：
+
+- S21-2 の所有者確認（`heavy_abi_ia64` が機械的証拠）
+- GAP-0068（意味論の意図的な簡略化。ALAT の単一スレッド近似・RSE 書き出し粒度・ヒント/予測無視・バリア no-op・特権/IA-32 系の範囲外・FP 例外配送なし・syscall ABI の単一プロセス簡略化等を包摂）
+- Insn→実行ユニット対応表は `bundle.rs` の `insn_unit` 手書き表。属性表としての生成化は GAP-0023 の残項目
 
 ## 残っている事項（横断）
 
