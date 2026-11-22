@@ -31,7 +31,7 @@ OS のサービスは三つの部分に分かれる。
 | alpha | Linux | alpha | |
 | parisc | Linux | hppa（32 ビット） | 64 ビットのユーザー空間の ABI は Linux に存在しない |
 | superh | Linux | sh4（両エンディアン） | |
-| loongarch | Linux | LA64 | |
+| loongarch | Linux | LA64 | ELF `e_flags[7:6]` の OBJ-v1（新ワールド）のみ受理し、旧ワールド（v0）と未割当て値はローダが拒否する。LSX は Alpine/musl が実行する部分集合のみ実装、LASX・LBT は機能旗の宣言のみ |
 | openrisc | Linux | or1k | |
 | ia64 | Linux | ia64 | Linux 6.7 で削除された。削除前のカーネルの ABI を対象にする |
 | hexagon | Linux | hexagon | |
