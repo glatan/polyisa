@@ -1348,7 +1348,7 @@ fn exec_fsel_xma(b: &mut InterpBackend, insn: Insn, ops: &[u64]) -> Result<(), I
         Insn::XmaHu => {
             // 符号なし積の上位 64 + 加数。
             let p = u128::from(a3.sig()) * u128::from(a4.sig());
-            Ia64Ext::int_form((p >> 64) as u64 | a2.sig())
+            Ia64Ext::int_form(((p >> 64) as u64).wrapping_add(a2.sig()))
         }
         _ => return Err(trap(TRAP_ILL)),
     };
@@ -2266,6 +2266,17 @@ pub fn exec(b: &mut InterpBackend, insn: Insn, word: u128, ip: u64) -> Result<bo
             // code は即値。0x100000（__IA64_BREAK_SYSCALL）の意味は
             // OS パーソナリティ側（IA10/IA11）が解釈する。
             return Err(trap(ops[1]));
+        }
+        // ---- lfetch（M13-M15）。プリフェッチは性能ヒントのみだが、
+        // r3.NaT の消費規則とポストインクリメントは残る。
+        Insn::Lfetch | Insn::LfetchExcl | Insn::LfetchFault | Insn::LfetchR | Insn::LfetchI => {
+            // 形式は FM3/FLFR/FLFI で r3 は ops[1]。
+            if nat_get(b, ops[1] as u32) {
+                return Err(trap(TRAP_NAT));
+            }
+            if matches!(insn, Insn::LfetchR | Insn::LfetchI) {
+                ld_post_inc(b, word as u64);
+            }
         }
         // ---- A1: 3 項 ALU・addp4。
         Insn::Add | Insn::Add1 | Insn::Sub | Insn::Sub1 | Insn::Addp4 => {

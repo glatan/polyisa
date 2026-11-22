@@ -264,6 +264,27 @@ fn run_sparc_elf(_path: &str, _argv: &[String], _spec: Option<&CpuSpec>) -> Resu
     Err("この polyisa は sparc ゲストなしでビルドされた".to_string())
 }
 
+#[cfg(feature = "guest-ia64")]
+fn run_ia64_elf(path: &str, argv: &[String], spec: Option<&CpuSpec>) -> Result<u64, String> {
+    let sel = spec
+        .map(|s| {
+            resolve_sel(
+                "ia64",
+                polyisa_guest_ia64::MODEL_DEFS,
+                polyisa_guest_ia64::FEATURE_DEFS,
+                polyisa_guest_ia64::FEAT_BITS,
+                s,
+            )
+        })
+        .transpose()?;
+    run_ia64::run_elf_ia64_sel(path, argv, sel.as_ref())
+}
+
+#[cfg(not(feature = "guest-ia64"))]
+fn run_ia64_elf(_path: &str, _argv: &[String], _spec: Option<&CpuSpec>) -> Result<u64, String> {
+    Err("この polyisa は ia64 ゲストなしでビルドされた".to_string())
+}
+
 #[cfg(feature = "guest-alpha")]
 fn run_alpha_elf(path: &str, argv: &[String], spec: Option<&CpuSpec>) -> Result<u64, String> {
     let sel = spec
@@ -696,6 +717,11 @@ pub fn run_path_opts(
                 // EM_ALPHA=0x9026。Ref: SRC-LINUX (include/uapi/linux/elf-em.h)。
                 check("alpha")?;
                 run_alpha_elf(path, argv, spec.as_ref())
+            } else if ehdr.machine == 50 {
+                // EM_IA_64=50。Ref: SRC-LINUX-66
+                // (kernel-asm/elf.h elf_check_arch)。
+                check("ia64")?;
+                run_ia64_elf(path, argv, spec.as_ref())
             } else if ehdr.machine == 258 {
                 // EM_LOONGARCH=258（LA64）。Ref: SRC-LINUX
                 // (include/uapi/linux/elf-em.h).

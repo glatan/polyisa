@@ -152,3 +152,24 @@ fn integer_form() {
     let v = Ia64Ext::int_form(0xdead_beef);
     assert_eq!(v.bits() >> 64, EXP_INT as u128);
 }
+
+#[test]
+fn divdi3_recip_seq() {
+    // glibc __divdi3 相当の frcpa+Newton 反復を再現（6/2）。
+    // frcpa は 1/f3（除数の逆数）を返す建築で、商は反復で組み立てる。
+    let a = Ia64Ext::from_i64(6);
+    let b = Ia64Ext::from_i64(2);
+    let (p, y0) = a.frcpa(b);
+    assert!(p);
+    let (e, _) = b.fmadd(y0.negated(), Ia64Ext::ONE, Rm::Rne, FMT_REG, false);
+    let (q0, _) = a.fmadd(y0, Ia64Ext::ZERO, Rm::Rne, FMT_REG, false);
+    let (y1, _) = e.fmadd(y0, y0, Rm::Rne, FMT_REG, false);
+    let (q1, _) = e.fmadd(q0, q0, Rm::Rne, FMT_REG, false);
+    let (e2, _) = e.fmadd(e, Ia64Ext::ZERO, Rm::Rne, FMT_REG, false);
+    let (y2, _) = y1.fmadd(e2, y1, Rm::Rne, FMT_REG, false);
+    let (q2, _) = q1.fmadd(e2, q1, Rm::Rne, FMT_REG, false);
+    let (r, _) = b.fmadd(q2.negated(), a, Rm::Rne, FMT_REG, false);
+    let (q, _) = r.fmadd(y2, q2, Rm::Rne, FMT_REG, false);
+    let (i, _) = q.to_int(true, Rm::Rtz);
+    assert_eq!(i, 3);
+}

@@ -36,14 +36,13 @@
 
 | ID | 条件 | 判定 |
 |---|---|---|
-| S21-1 | ia64 の配布物（BIN-DISTRO-IA64 の busybox-static）のコマンド群が、ゲストのルートを使って正しい出力を返す（テスト `heavy_program_ia64`）。 | 未整備 |
+| S21-1 | ia64 の配布物（BIN-DISTRO-IA64 の busybox-static）のコマンド群が、ゲストのルートを使って正しい出力を返す（テスト `heavy_program_ia64`）。 | テスト：`heavy_program_ia64` |
 | S21-2 | ABI 表が SRC-LINUX-66 の UAPI と一致することを所有者が確認する。 | 所有者 |
 
 作業計画：
 
 | # | 内容 | 前提 | 判定 |
 |---|---|---|---|
-| IA11 | Linux ABI（SRC-LINUX-66 の UAPI）・ELF・`heavy_program_ia64` | IA10 | S21-1 |
 | IA12 | ABI 照合（所有者確認）+ 残件整理・判定列更新 | IA11 | S21-2 |
 
 ### 段階 22：Hexagon

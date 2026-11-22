@@ -116,6 +116,20 @@ pub fn step(env: &mut BareEnv, sys: &mut impl TrapHandler, feats: u128) -> Resul
         let Some(insn) = bundle::decode_slot(unit, word, feats) else {
             return unimpl_insn(env, sys, cur, cur, word);
         };
+        // デバッグ: POLYISA_IA64_TRACE_INSN で命令語と被演算子
+        // レジスタ値を出す（r1/r2/r3 場の位置は全形式で共通）。
+        if std::env::var_os("POLYISA_IA64_TRACE_INSN").is_some() {
+            let (r1, r2, r3) = ((word >> 6) & 0x7f, (word >> 13) & 0x7f, (word >> 20) & 0x7f);
+            eprintln!(
+                "ia64 ip={cur:#x} {insn:?} word={word:#x} \
+                 r1({r1})={:#x} r2({r2})={:#x} r3({r3})={:#x} sp={:#x} gp={:#x}",
+                sem::gr_get(&env.backend, r1 as u32),
+                sem::gr_get(&env.backend, r2 as u32),
+                sem::gr_get(&env.backend, r3 as u32),
+                sem::gr_get(&env.backend, 12),
+                sem::gr_get(&env.backend, 1),
+            );
+        }
         // 次の命令位置。群境界かどうかにかかわらずスロットを 1 進める。
         let next = if end == 2 {
             baddr.wrapping_add(16)

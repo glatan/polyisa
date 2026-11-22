@@ -956,9 +956,9 @@ impl Ia64Ext {
         Self::from_parts(neg, e17, sig)
     }
 
-    /// frcpa（f2/f3 の近似）の値と条件述語。
+    /// frcpa（1/f3 の逆数近似）の値と条件述語。
     /// 近似の規則に従い、計算不能な組み合わせでは述語 0 を返す。
-    /// 商自体は正しい丸めで求める（建築の近似誤差の上限を大きく
+    /// 逆数自体は正しい丸めで求める（建築の近似誤差の上限を大きく
     /// 下回る。テーブル方式との差は docs/gaps.md GAP-0068）。
     #[must_use]
     pub fn frcpa(self, other: Self) -> (bool, Self) {
@@ -976,7 +976,10 @@ impl Ia64Ext {
             (_, _, _, true) => (true, Self::inf(neg)),
             (_, true, _, _) => (true, Self::zero_signed(neg)),
             (true, _, _, _) => (true, Self::inf(neg)),
-            _ => (true, a.div(b, Rm::Rne, FMT_REG).0),
+            // 近似対象は f3 の逆数（1/f3）。f2 は述語と特別値
+            // 決定だけに使う（SDM FRCPA 表）。正確な商は呼出側が
+            // Newton 反復で組み立てる。
+            _ => (true, Self::ONE.div(b, Rm::Rne, FMT_REG).0),
         }
     }
 

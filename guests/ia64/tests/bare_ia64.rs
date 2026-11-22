@@ -3526,7 +3526,8 @@ fn ia9_fclass_and_approx() {
     );
     assert!(!p(&env, 6));
     assert!(p(&env, 7));
-    // frcpa: 2/8 = 0.25（2 の冪で厳密）、述語は 1。
+    // frcpa: 1/f3 = 1/8 = 0.125（2 の冪で厳密）、述語は 1。
+    // f2 は述語と特別値の決定だけに使う（SDM FRCPA 表）。
     setf_d(&mut env, 9, 8.0f64.to_bits());
     x(
         &mut env,
@@ -3534,7 +3535,7 @@ fn ia9_fclass_and_approx() {
         encode_frcpa_s0(&[0, 10, 6, 8, 9]).unwrap(),
     );
     assert!(p(&env, 6));
-    assert_eq!(getf_d(&mut env, 10), 0.25f64.to_bits());
+    assert_eq!(getf_d(&mut env, 10), 0.125f64.to_bits());
     // frcpa(0,0): 述語 0・V 旗。
     x(
         &mut env,
