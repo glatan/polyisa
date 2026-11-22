@@ -36,15 +36,14 @@
 
 | ID | 条件 | 判定 |
 |---|---|---|
-| S21-1 | ia64 の配布物のコマンド群が、ゲストのルートを使って正しい出力を返す（テスト `heavy_program_ia64`）。 | 未整備 |
+| S21-1 | ia64 の配布物（BIN-DISTRO-IA64 の busybox-static）のコマンド群が、ゲストのルートを使って正しい出力を返す（テスト `heavy_program_ia64`）。 | 未整備 |
 | S21-2 | ABI 表が SRC-LINUX-66 の UAPI と一致することを所有者が確認する。 | 所有者 |
 
 作業計画：
 
 | # | 内容 | 前提 | 判定 |
 |---|---|---|---|
-| IA1 | 着手条件: SRC-LINUX-66 の点検（確認済み）、ia64 配布物の入手経路の確定（Linux 6.7 で ABI 削除済み）、GAP-0023 残項目の点検 | - | - |
-| IA2 | `guests/ia64` の段階 2 の試作を本実装に差し替える骨格: CpuState（GR 128・回転領域・PR・BR・AR（ar.lc/ar.ec を含む）・NaT・ALAT・RSE 状態）、モデルの宣言 | IA1 | - |
+| IA2 | `guests/ia64` の段階 2 の試作を本実装に差し替える骨格: CpuState（GR 128・回転領域・PR・BR・AR（ar.lc/ar.ec を含む）・NaT・ALAT・RSE 状態）、モデルの宣言 | - | - |
 | IA3 | デコード: 128 ビットバンドル（テンプレート・スロット・stop ビット）の ISADL 表現 | IA2 | - |
 | IA4 | `run_ia64` 実行ループ: バンドル進行と RIP 管理 + bare 最小テスト | IA3 | - |
 | IA5 | 整数算術・比較・述語生成・シフト/extr/mix 系 | IA4 | - |
