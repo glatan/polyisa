@@ -87,6 +87,11 @@ pub mod loongarch;
 // Ref: SRC-LINUX-OPENRISC-UAPI.
 pub mod openrisc;
 
+/// IA-64（Itanium）のシステムコール ABI 定数と syscall 処理
+/// （`sys` の実装だけ `guest-ia64` 機能の内側）。
+// Ref: SRC-LINUX-66.
+pub mod ia64;
+
 /// x86 の 32ビット（Linux の i386 ABI、EM_386）のシステムコール番号。
 // Ref: SRC-LINUX (7.3).
 pub mod x86_32;

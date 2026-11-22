@@ -803,6 +803,21 @@ pub fn bundle_x_word(bundle: u128) -> u128 {
     ((bundle_slot(bundle, 1) as u128) << 41) | bundle_slot(bundle, 2) as u128
 }
 
+/// テンプレート値・ストップビット・3 スロット語から 128 ビット
+/// バンドル語を組み立てる（`bundle_slot`/`bundle_stop`/
+/// `template_index` の逆）。MLX の L+X 命令は s1 に L 半分・
+/// s2 に X 半分を渡す。各場はマスクで切る。
+/// Ref: SPEC-IA64-SDM (Rev 2.3).
+#[must_use]
+pub fn pack_bundle(template: u8, stop: bool, s0: u64, s1: u64, s2: u64) -> u128 {
+    let m = u128::from(SLOT_MASK);
+    ((u128::from(s2) & m) << 87)
+        | ((u128::from(s1) & m) << 46)
+        | ((u128::from(s0) & m) << 5)
+        | (u128::from(template & 0xf) << 1)
+        | u128::from(stop)
+}
+
 /// スロットごとのストップ位置。[slot0後, slot1後, slot2後]。
 /// slot2 後はバンドルのストップビット。
 pub fn template_stops(bundle: u128) -> Option<[bool; 3]> {

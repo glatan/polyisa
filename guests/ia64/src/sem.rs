@@ -165,6 +165,16 @@ fn nat2(b: &InterpBackend, x: u32, y: u32) -> bool {
     nat_get(b, x) || nat_get(b, y)
 }
 
+/// 現在フレームの出力レジスタ out_i の値（= 仮想 r_{32+sol+i}）。
+/// Linux の syscall 引数規約（out0-out5）が読む面。回転域に
+/// 掛かるときの改名は `phys_gr` が担う。
+/// Ref: SPEC-IA64-SDM (Rev 2.3).
+#[must_use]
+pub fn out_get(b: &InterpBackend, i: u32) -> u64 {
+    let sol = cf(get64(b, cfm_ref()), cfm_bit::SOL, 7) as u32;
+    gr_get(b, 32 + sol + i)
+}
+
 /// 述語レジスタの面。
 #[must_use]
 pub fn pr_ref() -> StateRef<W64> {
