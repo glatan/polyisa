@@ -18,6 +18,7 @@ dependencies = [
  "polyisa-guest-loongarch",
  "polyisa-guest-m68k",
  "polyisa-guest-mips",
+ "polyisa-guest-openrisc",
  "polyisa-guest-parisc",
  "polyisa-guest-power",
  "polyisa-guest-riscv",
@@ -204,6 +205,19 @@ dependencies = [
  "polyisa-sem",
  "polyisa-softfloat",
  "polyisa-timing",
+]
+
+[[package]]
+name = "polyisa-guest-openrisc"
+version = "0.0.0"
+dependencies = [
+ "polyisa-engine",
+ "polyisa-guest",
+ "polyisa-isadl",
+ "polyisa-isagen",
+ "polyisa-mem",
+ "polyisa-sem",
+ "polyisa-softfloat",
 ]
 
 [[package]]
@@ -403,6 +417,7 @@ dependencies = [
  "polyisa-guest-loongarch",
  "polyisa-guest-m68k",
  "polyisa-guest-mips",
+ "polyisa-guest-openrisc",
  "polyisa-guest-parisc",
  "polyisa-guest-power",
  "polyisa-guest-riscv",

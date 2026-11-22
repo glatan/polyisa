@@ -31,6 +31,9 @@ mod m68k {
 mod mips {
     include!("../../../guests/mips/spec/mipsi.rs");
 }
+mod openrisc {
+    include!("../../../guests/openrisc/spec/openrisc.rs");
+}
 mod parisc {
     include!("../../../guests/parisc/spec/parisc.rs");
 }
@@ -108,6 +111,11 @@ const SPECS: &[IsaSpec] = &[
         isa: "mips",
         rel_paths: &["guests/mips/spec/mipsi.rs"],
         build: mips::build_model,
+    },
+    IsaSpec {
+        isa: "openrisc",
+        rel_paths: &["guests/openrisc/spec/openrisc.rs"],
+        build: openrisc::build_model,
     },
     IsaSpec {
         isa: "parisc",

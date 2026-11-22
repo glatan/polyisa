@@ -19,6 +19,7 @@ polyisa-guest-arm = { path = "../../guests/arm", optional = true }
 polyisa-guest-loongarch = { path = "../../guests/loongarch", optional = true }
 polyisa-guest-m68k = { path = "../../guests/m68k", optional = true }
 polyisa-guest-mips = { path = "../../guests/mips", optional = true }
+polyisa-guest-openrisc = { path = "../../guests/openrisc", optional = true }
 polyisa-guest-parisc = { path = "../../guests/parisc", optional = true }
 polyisa-guest-power = { path = "../../guests/power", optional = true }
 polyisa-guest-riscv = { path = "../../guests/riscv", optional = true }
@@ -34,6 +35,7 @@ guest-arm = ["dep:polyisa-guest-arm"]
 guest-loongarch = ["dep:polyisa-guest-loongarch"]
 guest-m68k = ["dep:polyisa-guest-m68k"]
 guest-mips = ["dep:polyisa-guest-mips"]
+guest-openrisc = ["dep:polyisa-guest-openrisc"]
 guest-parisc = ["dep:polyisa-guest-parisc"]
 guest-power = ["dep:polyisa-guest-power"]
 guest-riscv = ["dep:polyisa-guest-riscv"]
