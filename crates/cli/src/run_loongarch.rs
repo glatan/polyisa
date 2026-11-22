@@ -548,6 +548,9 @@ fn run_elf_loongarch_impl(
     // LoongArch の初期 SP は $sp = $r3。
     env.backend.set(sem::r_ref(3), sp);
     sys.init_brk(image_end);
+    // syscall のユーザバッファアクセスも GROWSDOWN 窓内なら
+    // ページを遅延割付する（StackGrowth と同じ範囲）。
+    sys.set_stack_window(top - 0x200_0000, top);
     let outcome = run(
         &mut env,
         run_entry,

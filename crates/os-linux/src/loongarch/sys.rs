@@ -20,7 +20,7 @@ use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use polyisa_engine::bare::BareEnv;
 use polyisa_guest_loongarch::sem;
 use polyisa_kernel::FdTable;
-use polyisa_mem::{Access, AccessKind, Align, Endian, Perms, VirtAddr};
+use polyisa_mem::{Access, AccessKind, Align, Endian, PAGE_SIZE, PageNo, Perms, VirtAddr};
 use polyisa_sem::Backend as _;
 
 use crate::{TrapHandler, TrapOutcome, loongarch};
@@ -95,6 +95,12 @@ pub struct Linux {
     umask: u32,
     /// 報告済みの未実装番号（一度だけ出す）。
     reported: Vec<u64>,
+    /// スタック成長窓 `[lo, hi)`。syscall が読み書きする
+    /// ユーザバッファがこの窓内の未マップページに掛かるとき、
+    /// Linux の GROWSDOWN VMA 相当に遅延割付する。
+    /// 0/0 は成長しない（root 未指定の旧来動作）。
+    stack_lo: u64,
+    stack_hi: u64,
 }
 
 impl Default for Linux {
@@ -130,6 +136,41 @@ impl Linux {
             la64: true,
             umask: 0o22,
             reported: Vec::new(),
+            stack_lo: 0,
+            stack_hi: 0,
+        }
+    }
+
+    /// syscall のバッファアクセスが伸ばし得るスタック窓を設定する。
+    /// ローダが `StackGrowth` に渡す `[limit, top)` と同じ範囲。
+    /// Ref: SRC-LINUX (7.3) — expand_stack / GROWSDOWN VMA は
+    /// カーネルのユーザコピー（copy_to_user 等）でも下方成長する。
+    pub fn set_stack_window(&mut self, lo: u64, hi: u64) {
+        self.stack_lo = lo;
+        self.stack_hi = hi;
+    }
+
+    /// `[addr, addr+len)` の未マップページをスタック窓の中で割付る。
+    /// 窓外に掛かる場合でも窓内の分は埋める（Linux は VMA に
+    /// 部分的に掛かる copy_to_user で窓内のページは埋める）。
+    fn grow_stack(&self, env: &mut BareEnv, addr: u64, len: u64) {
+        if self.stack_hi <= self.stack_lo || len == 0 {
+            return;
+        }
+        let first = addr & !PAGE_SIZE.wrapping_sub(1);
+        let last = addr.wrapping_add(len - 1) & !PAGE_SIZE.wrapping_sub(1);
+        let mut p = first;
+        while p <= last {
+            if p >= self.stack_lo
+                && p < self.stack_hi
+                && !env.backend.mem.is_mapped(PageNo(p / PAGE_SIZE))
+            {
+                let _ = env.backend.mem.map(VirtAddr(p), 1, Perms::RW);
+            }
+            p = p.wrapping_add(PAGE_SIZE);
+            if p == 0 {
+                break;
+            }
         }
     }
 
@@ -168,23 +209,34 @@ impl Linux {
         if buf.is_empty() {
             return Ok(buf);
         }
-        env.backend
+        let a = self.ptr(addr);
+        if env
+            .backend
             .mem
-            .read(
-                VirtAddr(self.ptr(addr)),
-                &mut buf,
-                self.acc(AccessKind::DataRead),
-            )
-            .map_err(|_| errno::EFAULT)?;
+            .read(VirtAddr(a), &mut buf, self.acc(AccessKind::DataRead))
+            .is_err()
+        {
+            // スタック窓内なら GROWSDOWN 相当に割付てから再試行。
+            self.grow_stack(env, a, buf.len() as u64);
+            env.backend
+                .mem
+                .read(VirtAddr(a), &mut buf, self.acc(AccessKind::DataRead))
+                .map_err(|_| errno::EFAULT)?;
+        }
         Ok(buf)
     }
 
     /// ゲストメモリへバイト列を書く。
     fn put_bytes(&self, env: &mut BareEnv, addr: u64, data: &[u8]) -> Result<(), u64> {
-        env.backend
-            .mem
-            .write(VirtAddr(self.ptr(addr)), data)
-            .map_err(|_| errno::EFAULT)
+        let a = self.ptr(addr);
+        if env.backend.mem.write(VirtAddr(a), data).is_err() {
+            self.grow_stack(env, a, data.len() as u64);
+            env.backend
+                .mem
+                .write(VirtAddr(a), data)
+                .map_err(|_| errno::EFAULT)?;
+        }
+        Ok(())
     }
 
     /// ゲストの u64 を読む。
@@ -938,7 +990,16 @@ impl Linux {
     fn host_path(&self, dirfd: u64, guest_path: &str) -> Option<String> {
         const AT_FDCWD: u64 = (-100i64) as u64;
         if guest_path.starts_with('/') || dirfd == AT_FDCWD {
-            crate::guest_path::resolve_guest_path(&self.guest_root, &self.cwd, guest_path)
+            let r = crate::guest_path::resolve_guest_path(&self.guest_root, &self.cwd, guest_path)?;
+            // devtmpfs 相当: ゲストルート配下にノードが無い `/dev/…`
+            // はホストの devtmpfs へ通す（GAP-0062 のデバイス近似）。
+            if !self.guest_root.is_empty()
+                && guest_path.starts_with("/dev/")
+                && !std::path::Path::new(&r).exists()
+            {
+                return Some(guest_path.to_string());
+            }
+            Some(r)
         } else {
             let dir = self.fds.path_of(dirfd as u32)?;
             // dirfd 経路はホストのディレクトリパスに直接連結する
@@ -955,11 +1016,19 @@ impl Linux {
         const AT_FDCWD: u64 = (-100i64) as u64;
         if guest_path.starts_with('/') || dirfd == AT_FDCWD || self.guest_root.is_empty() {
             if guest_path.starts_with('/') || dirfd == AT_FDCWD {
-                return crate::guest_path::resolve_guest_path_links(
+                let r = crate::guest_path::resolve_guest_path_links(
                     &self.guest_root,
                     &self.cwd,
                     guest_path,
-                );
+                )?;
+                // `host_path` と同じ devtmpfs 近似（GAP-0062）。
+                if !self.guest_root.is_empty()
+                    && guest_path.starts_with("/dev/")
+                    && !std::path::Path::new(&r).exists()
+                {
+                    return Some(guest_path.to_string());
+                }
+                return Some(r);
             }
             // guest_root なしの dirfd 相対は host_path と同じ連結後、
             // ホスト側で辿る（最小近似）。
