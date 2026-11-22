@@ -19,6 +19,9 @@
 // ISADL モデルから生成した命令集合・デコード・逆アセンブルの殻。
 include!(concat!(env!("OUT_DIR"), "/generated.rs"));
 
+/// 命令の意味論（段階20 OR5-OR8）。
+pub mod sem;
+
 /// OpenRISC の ISA ファミリ名。
 pub struct Openrisc;
 
@@ -105,6 +108,10 @@ pub mod spr {
     pub const TTMR: u16 = addr(10, 0);
     /// ティックタイマカウント。
     pub const TTCR: u16 = addr(10, 1);
+    /// PIC のマスクレジスタ（割り込みは未実装。値は保持のみ）。
+    pub const PICMR: u16 = addr(9, 0);
+    /// PIC の状態レジスタ（読み出しは常に 0）。
+    pub const PICSR: u16 = addr(9, 2);
 }
 
 /// SR のビット位置。
@@ -179,7 +186,7 @@ pub mod cpucfgr_bit {
 /// （OpenRISC 1000 の 32 ビット実装のみ対象。ORBIS64 は宣言のみ）。
 /// Ref: SPEC-OPENRISC-1000 §4（レジスタ構成）.
 #[repr(C)]
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct CpuState {
     /// 汎用レジスタ r0-r31。r0 は常に 0（実装選択: 読み出しで 0 を
     /// 返し、書き込みは捨てる。§4.1 はソフトウェア責任と述べるが
@@ -224,4 +231,43 @@ pub struct CpuState {
     /// 読み取り専用値。ND ビットは `dslot` 機能旗に連動する。
     /// Ref: SPEC-OPENRISC-1000 §16.4.
     pub cpucfgr: u64,
+    /// 算術例外制御（SPR AECR）。
+    pub aecr: u64,
+    /// 算術例外状態（SPR AESR）。
+    pub aesr: u64,
+    /// ティックタイマモード（SPR TTMR）。
+    pub ttmr: u64,
+    /// PIC マスク（SPR PICMR。割り込み配送は未実装）。
+    pub picmr: u64,
+    /// 例外レジスタ拡張: [0..16)=EPCR、[16..32)=EEAR、[32..48)=ESR。
+    /// ユーザモデルでは l.rfe 等の特権経路がこれを読むだけで、
+    /// 例外の配送自体は行わない（Gap）。
+    pub ex: [u64; 48],
+}
+
+impl Default for CpuState {
+    fn default() -> Self {
+        Self {
+            r: [0; 32],
+            pc: 0,
+            npc: 0,
+            ppc: 0,
+            sr: 0,
+            maclo: 0,
+            machi: 0,
+            fpmaddlo: 0,
+            fpmaddhi: 0,
+            fpcsr: 0,
+            evbar: 0,
+            ttcr: 0,
+            vr: 0,
+            upr: 0,
+            cpucfgr: 0,
+            aecr: 0,
+            aesr: 0,
+            ttmr: 0,
+            picmr: 0,
+            ex: [0; 48],
+        }
+    }
 }

@@ -10,8 +10,8 @@ polyisa-guest = { path = "../../crates/guest" }
 polyisa-mem = { path = "../../crates/mem" }
 polyisa-sem = { path = "../../crates/sem" }
 polyisa-softfloat = { path = "../../crates/softfloat" }
-
-[dev-dependencies]
+# 意味論は具体値インタプリタ（InterpBackend）上に書く近似。
+# 他ゲストの generic B: Backend 化は後続段階の課題（Gap）。
 polyisa-engine = { path = "../../crates/engine" }
 
 [build-dependencies]
