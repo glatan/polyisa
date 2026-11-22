@@ -10,7 +10,7 @@
 
 use polyisa_mem::{Access, AccessKind, Align, Endian};
 use polyisa_sem::{
-    Backend, Cmp, ExceptionKind, GuestException, StateArray, StateRef, W8, W16, W32, W64,
+    Backend, Cmp, ExceptionKind, GuestException, StateArray, StateRef, W8, W16, W32, W64, Width,
 };
 
 use crate::{CpuState, Insn, extract_ops};
@@ -436,6 +436,113 @@ fn un_d<B: Backend>(b: &mut B, ops: &[u64], f: impl FnOnce(&mut B, B::V<W64>) ->
     let a = rget(b, ops[1]);
     let v = f(b, a);
     rset(b, ops[0], v);
+}
+
+/// ldx/stx 系の実効番地（`ea = rj + rk`）。
+fn ldx_ea<B: Backend>(b: &mut B, ops: &[u64]) -> B::V<W64> {
+    let a = rget(b, ops[1]);
+    let c = rget(b, ops[2]);
+    b.add(a, c)
+}
+
+/// ldptr/stptr/ll/sc の実効番地（`ea = rj + sext(si14 << 2)`）。
+/// Ref: SPEC-LOONGARCH-RM §2.2.3.2, §2.2.7.
+fn ptr_ea<B: Backend>(b: &mut B, ops: &[u64]) -> B::V<W64> {
+    let a = rget(b, ops[1]);
+    let d = k(b, sext_n(ops[2], 14) << 2);
+    b.add(a, d)
+}
+
+/// AM* のアクセス属性（read-modify-write）。
+const ACC_AM: Access = Access {
+    endian: Endian::Le,
+    align: Align::Natural,
+    kind: AccessKind::AtomicRw,
+};
+
+/// LL 系の予約ロード属性。
+const ACC_LL: Access = Access {
+    endian: Endian::Le,
+    align: Align::Natural,
+    kind: AccessKind::LoadReserved,
+};
+
+/// SC 系の条件付きストア属性。
+const ACC_SC: Access = Access {
+    endian: Endian::Le,
+    align: Align::Natural,
+    kind: AccessKind::StoreConditional,
+};
+
+/// bound check 例外の trap コード（`handle_trap` へ渡る内部番号）。
+/// Ref: SPEC-LOONGARCH-RM §2.2.3.4（BCE）.
+pub const TRAP_BND: u64 = 5;
+
+/// ldgt/ldle/stgt/stle の境界検査。`gt` なら `rj > rk`、
+/// さもなければ `rj <= rk` が合法。違反時は BCE に畳む。
+/// Ref: SPEC-LOONGARCH-RM §2.2.3.4.
+fn bound_check<B: Backend>(b: &mut B, ops: &[u64], gt: bool) -> Result<(), B::Exit> {
+    let a = rget(b, ops[1]);
+    let c = rget(b, ops[2]);
+    let op = if gt { Cmp::GtS } else { Cmp::LeS };
+    let ok = b.cmp::<W64>(op, a, c);
+    b.if_then_else(
+        ok,
+        |_| Ok(()),
+        |b| Err(raise::<B>(b, ExceptionKind::Trap, TRAP_BND)),
+    )
+}
+
+/// am*.w 共通。ops = [rd, rj, rk]。`old = *rj32`、
+/// `*rj32 = f(old, rk32)`、`rd = sext(old)`。
+/// Ref: SPEC-LOONGARCH-RM §2.2.7.1.
+fn am_w<B: Backend>(
+    b: &mut B,
+    ops: &[u64],
+    f: impl FnOnce(&mut B, B::V<W32>, B::V<W32>) -> B::V<W32>,
+) -> Result<(), B::Exit> {
+    let ea = rget(b, ops[1]);
+    let x64 = rget(b, ops[2]);
+    let x = b.trunc::<W64, W32>(x64);
+    let old = b.load::<W32>(ea, ACC_AM)?;
+    let new = f(b, old, x);
+    b.store::<W32>(ea, new, ACC_AM)?;
+    let v = b.sext::<W32, W64>(old);
+    rset(b, ops[0], v);
+    Ok(())
+}
+
+/// am*.d 共通（ops = [rd, rj, rk]）。
+fn am_d<B: Backend>(
+    b: &mut B,
+    ops: &[u64],
+    f: impl FnOnce(&mut B, B::V<W64>, B::V<W64>) -> B::V<W64>,
+) -> Result<(), B::Exit> {
+    let ea = rget(b, ops[1]);
+    let x = rget(b, ops[2]);
+    let old = b.load::<W64>(ea, ACC_AM)?;
+    let new = f(b, old, x);
+    b.store::<W64>(ea, new, ACC_AM)?;
+    rset(b, ops[0], old);
+    Ok(())
+}
+
+/// am*.b/.h 共通（FAM3 形で ops = [rd, rk, rj]。番地は rj、
+/// データは rk）。`rd = sext(old)`。
+fn am_bh<B: Backend, W: Width>(
+    b: &mut B,
+    ops: &[u64],
+    f: impl FnOnce(&mut B, B::V<W>, B::V<W>) -> B::V<W>,
+) -> Result<(), B::Exit> {
+    let ea = rget(b, ops[2]);
+    let x64 = rget(b, ops[1]);
+    let x = b.trunc::<W64, W>(x64);
+    let old = b.load::<W>(ea, ACC_AM)?;
+    let new = f(b, old, x);
+    b.store::<W>(ea, new, ACC_AM)?;
+    let v = b.sext::<W, W64>(old);
+    rset(b, ops[0], v);
+    Ok(())
 }
 
 /// 1 命令の意味論を実行する。`word` は命令語、`pc` は命令番地、
@@ -1044,6 +1151,397 @@ pub fn exec<B: Backend>(
             let ea = ldst_ea(b, &ops);
             let v = rget(b, ops[0]);
             b.store::<W64>(ea, v, STORE)?;
+        }
+        // ---- index 付き load/store（ea = rj + rk、LA6）----
+        // Ref: SPEC-LOONGARCH-RM §2.2.3.3.
+        Insn::LdxB | Insn::LdxBu => {
+            let ea = ldx_ea(b, &ops);
+            let v = b.load::<W8>(ea, DATA)?;
+            let v = if insn == Insn::LdxB {
+                b.sext::<W8, W64>(v)
+            } else {
+                b.zext::<W8, W64>(v)
+            };
+            rset(b, ops[0], v);
+        }
+        Insn::LdxH | Insn::LdxHu => {
+            let ea = ldx_ea(b, &ops);
+            let v = b.load::<W16>(ea, DATA)?;
+            let v = if insn == Insn::LdxH {
+                b.sext::<W16, W64>(v)
+            } else {
+                b.zext::<W16, W64>(v)
+            };
+            rset(b, ops[0], v);
+        }
+        Insn::LdxW | Insn::LdxWu => {
+            let ea = ldx_ea(b, &ops);
+            let v = b.load::<W32>(ea, DATA)?;
+            let v = if insn == Insn::LdxW {
+                b.sext::<W32, W64>(v)
+            } else {
+                b.zext::<W32, W64>(v)
+            };
+            rset(b, ops[0], v);
+        }
+        Insn::LdxD => {
+            let ea = ldx_ea(b, &ops);
+            let v = b.load::<W64>(ea, DATA)?;
+            rset(b, ops[0], v);
+        }
+        Insn::StxB => {
+            let ea = ldx_ea(b, &ops);
+            let v0 = rget(b, ops[0]);
+            let v = b.trunc::<W64, W8>(v0);
+            b.store::<W8>(ea, v, STORE)?;
+        }
+        Insn::StxH => {
+            let ea = ldx_ea(b, &ops);
+            let v0 = rget(b, ops[0]);
+            let v = b.trunc::<W64, W16>(v0);
+            b.store::<W16>(ea, v, STORE)?;
+        }
+        Insn::StxW => {
+            let ea = ldx_ea(b, &ops);
+            let v0 = rget(b, ops[0]);
+            let v = b.trunc::<W64, W32>(v0);
+            b.store::<W32>(ea, v, STORE)?;
+        }
+        Insn::StxD => {
+            let ea = ldx_ea(b, &ops);
+            let v = rget(b, ops[0]);
+            b.store::<W64>(ea, v, STORE)?;
+        }
+        // ---- ldptr/stptr（ea = rj + sext(si14 << 2)、LA6）----
+        // Ref: SPEC-LOONGARCH-RM §2.2.3.2.
+        Insn::LdptrW => {
+            let ea = ptr_ea(b, &ops);
+            let v = b.load::<W32>(ea, DATA)?;
+            let v = b.sext::<W32, W64>(v);
+            rset(b, ops[0], v);
+        }
+        Insn::LdptrD => {
+            let ea = ptr_ea(b, &ops);
+            let v = b.load::<W64>(ea, DATA)?;
+            rset(b, ops[0], v);
+        }
+        Insn::StptrW => {
+            let ea = ptr_ea(b, &ops);
+            let v0 = rget(b, ops[0]);
+            let v = b.trunc::<W64, W32>(v0);
+            b.store::<W32>(ea, v, STORE)?;
+        }
+        Insn::StptrD => {
+            let ea = ptr_ea(b, &ops);
+            let v = rget(b, ops[0]);
+            b.store::<W64>(ea, v, STORE)?;
+        }
+        // ---- LL/SC（LA6。interp の予約機構に載せる）----
+        // Ref: SPEC-LOONGARCH-RM §2.2.7.4.
+        Insn::LlW => {
+            let ea = ptr_ea(b, &ops);
+            let v = b.load_reserved::<W32>(ea, ACC_LL)?;
+            let v = b.sext::<W32, W64>(v);
+            rset(b, ops[0], v);
+        }
+        Insn::LlD => {
+            let ea = ptr_ea(b, &ops);
+            let v = b.load_reserved::<W64>(ea, ACC_LL)?;
+            rset(b, ops[0], v);
+        }
+        Insn::ScW => {
+            let ea = ptr_ea(b, &ops);
+            let v0 = rget(b, ops[0]);
+            let v = b.trunc::<W64, W32>(v0);
+            let ok = b.store_conditional::<W32>(ea, v, ACC_SC)?;
+            let one = k(b, 1);
+            let zero = k(b, 0);
+            let r = b.select::<W64>(ok, one, zero);
+            rset(b, ops[0], r);
+        }
+        Insn::ScD => {
+            let ea = ptr_ea(b, &ops);
+            let v = rget(b, ops[0]);
+            let ok = b.store_conditional::<W64>(ea, v, ACC_SC)?;
+            let one = k(b, 1);
+            let zero = k(b, 0);
+            let r = b.select::<W64>(ok, one, zero);
+            rset(b, ops[0], r);
+        }
+        Insn::ScQ => {
+            // sc.q rd, rk, rj: [rj] ← GR[rd]、[rj+8] ← GR[rk]、
+            // rd ← 成功旗。番地は 16 バイト整列必須。
+            // Ref: SPEC-LOONGARCH-RM §2.2.7.4.
+            let ea = rget(b, ops[2]);
+            let m = k(b, 15);
+            let low = b.and(ea, m);
+            let zero = k(b, 0);
+            let mis = b.cmp::<W64>(Cmp::Ne, low, zero);
+            b.if_then(mis, |b| Err(raise::<B>(b, ExceptionKind::Align, 0)))?;
+            let lo = rget(b, ops[0]);
+            let ok = b.store_conditional::<W64>(ea, lo, ACC_SC)?;
+            let one = k(b, 1);
+            let okv = b.select::<W64>(ok, one, zero);
+            // 予約が生きていたときだけ上位 64 ビットも書く。
+            let doit = b.cmp::<W64>(Cmp::Ne, okv, zero);
+            b.if_then(doit, |b| {
+                let hi = rget(b, ops[1]);
+                let eight = k(b, 8);
+                let ea2 = b.add(ea, eight);
+                b.store::<W64>(ea2, hi, STORE)
+            })?;
+            rset(b, ops[0], okv);
+        }
+        // llacq/screl は FR2 形（ea = GR[rj]）。単一スレッドでは
+        // acquire/release の区別は効かない。Gap: GAP-0063.
+        Insn::LlacqW => {
+            let ea = rget(b, ops[1]);
+            let v = b.load_reserved::<W32>(ea, ACC_LL)?;
+            let v = b.sext::<W32, W64>(v);
+            rset(b, ops[0], v);
+        }
+        Insn::LlacqD => {
+            let ea = rget(b, ops[1]);
+            let v = b.load_reserved::<W64>(ea, ACC_LL)?;
+            rset(b, ops[0], v);
+        }
+        Insn::ScrelW => {
+            let ea = rget(b, ops[1]);
+            let v0 = rget(b, ops[0]);
+            let v = b.trunc::<W64, W32>(v0);
+            let ok = b.store_conditional::<W32>(ea, v, ACC_SC)?;
+            let one = k(b, 1);
+            let zero = k(b, 0);
+            let r = b.select::<W64>(ok, one, zero);
+            rset(b, ops[0], r);
+        }
+        Insn::ScrelD => {
+            let ea = rget(b, ops[1]);
+            let v = rget(b, ops[0]);
+            let ok = b.store_conditional::<W64>(ea, v, ACC_SC)?;
+            let one = k(b, 1);
+            let zero = k(b, 0);
+            let r = b.select::<W64>(ok, one, zero);
+            rset(b, ops[0], r);
+        }
+        // preld/preldx はプリフェッチヒント。キャッシュを持たない
+        // モデルでは効果なしの no-op。Gap: GAP-0063.
+        Insn::Preld | Insn::Preldx => {}
+        // ---- bound check 付き load/store（LA6）----
+        // Ref: SPEC-LOONGARCH-RM §2.2.3.4（BCE）.
+        Insn::LdgtB | Insn::LdgtH | Insn::LdgtW | Insn::LdgtD => {
+            bound_check(b, &ops, true)?;
+            let ea = rget(b, ops[1]);
+            let v = match insn {
+                Insn::LdgtB => {
+                    let x = b.load::<W8>(ea, DATA)?;
+                    b.sext::<W8, W64>(x)
+                }
+                Insn::LdgtH => {
+                    let x = b.load::<W16>(ea, DATA)?;
+                    b.sext::<W16, W64>(x)
+                }
+                Insn::LdgtW => {
+                    let x = b.load::<W32>(ea, DATA)?;
+                    b.sext::<W32, W64>(x)
+                }
+                _ => b.load::<W64>(ea, DATA)?,
+            };
+            rset(b, ops[0], v);
+        }
+        Insn::LdleB | Insn::LdleH | Insn::LdleW | Insn::LdleD => {
+            bound_check(b, &ops, false)?;
+            let ea = rget(b, ops[1]);
+            let v = match insn {
+                Insn::LdleB => {
+                    let x = b.load::<W8>(ea, DATA)?;
+                    b.sext::<W8, W64>(x)
+                }
+                Insn::LdleH => {
+                    let x = b.load::<W16>(ea, DATA)?;
+                    b.sext::<W16, W64>(x)
+                }
+                Insn::LdleW => {
+                    let x = b.load::<W32>(ea, DATA)?;
+                    b.sext::<W32, W64>(x)
+                }
+                _ => b.load::<W64>(ea, DATA)?,
+            };
+            rset(b, ops[0], v);
+        }
+        Insn::StgtB | Insn::StgtH | Insn::StgtW | Insn::StgtD => {
+            bound_check(b, &ops, true)?;
+            let ea = rget(b, ops[1]);
+            let v0 = rget(b, ops[0]);
+            match insn {
+                Insn::StgtB => {
+                    let v = b.trunc::<W64, W8>(v0);
+                    b.store::<W8>(ea, v, STORE)?;
+                }
+                Insn::StgtH => {
+                    let v = b.trunc::<W64, W16>(v0);
+                    b.store::<W16>(ea, v, STORE)?;
+                }
+                Insn::StgtW => {
+                    let v = b.trunc::<W64, W32>(v0);
+                    b.store::<W32>(ea, v, STORE)?;
+                }
+                _ => b.store::<W64>(ea, v0, STORE)?,
+            }
+        }
+        Insn::StleB | Insn::StleH | Insn::StleW | Insn::StleD => {
+            bound_check(b, &ops, false)?;
+            let ea = rget(b, ops[1]);
+            let v0 = rget(b, ops[0]);
+            match insn {
+                Insn::StleB => {
+                    let v = b.trunc::<W64, W8>(v0);
+                    b.store::<W8>(ea, v, STORE)?;
+                }
+                Insn::StleH => {
+                    let v = b.trunc::<W64, W16>(v0);
+                    b.store::<W16>(ea, v, STORE)?;
+                }
+                Insn::StleW => {
+                    let v = b.trunc::<W64, W32>(v0);
+                    b.store::<W32>(ea, v, STORE)?;
+                }
+                _ => b.store::<W64>(ea, v0, STORE)?,
+            }
+        }
+        // ---- AM*（read-modify-write。単一スレッド近似。
+        // _db はデータバリアを兼ねるが単一スレッドでは効果なし。
+        // Gap: GAP-0063）----
+        // Ref: SPEC-LOONGARCH-RM §2.2.7.1/§2.2.7.2.
+        Insn::AmaddW | Insn::AmaddDbW => {
+            am_w(b, &ops, |b, x, y| b.add::<W32>(x, y))?;
+        }
+        Insn::AmaddD | Insn::AmaddDbD => {
+            am_d(b, &ops, |b, x, y| b.add::<W64>(x, y))?;
+        }
+        Insn::AmaddB | Insn::AmaddDbB => {
+            am_bh::<B, W8>(b, &ops, |b, x, y| b.add::<W8>(x, y))?;
+        }
+        Insn::AmaddH | Insn::AmaddDbH => {
+            am_bh::<B, W16>(b, &ops, |b, x, y| b.add::<W16>(x, y))?;
+        }
+        Insn::AmswapW | Insn::AmswapDbW => {
+            am_w(b, &ops, |_b, _x, y| y)?;
+        }
+        Insn::AmswapD | Insn::AmswapDbD => {
+            am_d(b, &ops, |_b, _x, y| y)?;
+        }
+        Insn::AmswapB | Insn::AmswapDbB => {
+            am_bh::<B, W8>(b, &ops, |_b, _x, y| y)?;
+        }
+        Insn::AmswapH | Insn::AmswapDbH => {
+            am_bh::<B, W16>(b, &ops, |_b, _x, y| y)?;
+        }
+        Insn::AmandW | Insn::AmandDbW => {
+            am_w(b, &ops, |b, x, y| b.and::<W32>(x, y))?;
+        }
+        Insn::AmandD | Insn::AmandDbD => {
+            am_d(b, &ops, |b, x, y| b.and::<W64>(x, y))?;
+        }
+        Insn::AmorW | Insn::AmorDbW => {
+            am_w(b, &ops, |b, x, y| b.or::<W32>(x, y))?;
+        }
+        Insn::AmorD | Insn::AmorDbD => {
+            am_d(b, &ops, |b, x, y| b.or::<W64>(x, y))?;
+        }
+        Insn::AmxorW | Insn::AmxorDbW => {
+            am_w(b, &ops, |b, x, y| b.xor::<W32>(x, y))?;
+        }
+        Insn::AmxorD | Insn::AmxorDbD => {
+            am_d(b, &ops, |b, x, y| b.xor::<W64>(x, y))?;
+        }
+        Insn::AmmaxW | Insn::AmmaxDbW => {
+            am_w(b, &ops, |b, x, y| {
+                let c = b.cmp::<W32>(Cmp::LtS, x, y);
+                b.select::<W32>(c, y, x)
+            })?;
+        }
+        Insn::AmmaxD | Insn::AmmaxDbD => {
+            am_d(b, &ops, |b, x, y| {
+                let c = b.cmp::<W64>(Cmp::LtS, x, y);
+                b.select::<W64>(c, y, x)
+            })?;
+        }
+        Insn::AmmaxWu | Insn::AmmaxDbWu => {
+            am_w(b, &ops, |b, x, y| {
+                let c = b.cmp::<W32>(Cmp::LtU, x, y);
+                b.select::<W32>(c, y, x)
+            })?;
+        }
+        Insn::AmmaxDu | Insn::AmmaxDbDu => {
+            am_d(b, &ops, |b, x, y| {
+                let c = b.cmp::<W64>(Cmp::LtU, x, y);
+                b.select::<W64>(c, y, x)
+            })?;
+        }
+        Insn::AmminW | Insn::AmminDbW => {
+            am_w(b, &ops, |b, x, y| {
+                let c = b.cmp::<W32>(Cmp::LtS, x, y);
+                b.select::<W32>(c, x, y)
+            })?;
+        }
+        Insn::AmminD | Insn::AmminDbD => {
+            am_d(b, &ops, |b, x, y| {
+                let c = b.cmp::<W64>(Cmp::LtS, x, y);
+                b.select::<W64>(c, x, y)
+            })?;
+        }
+        Insn::AmminWu | Insn::AmminDbWu => {
+            am_w(b, &ops, |b, x, y| {
+                let c = b.cmp::<W32>(Cmp::LtU, x, y);
+                b.select::<W32>(c, x, y)
+            })?;
+        }
+        Insn::AmminDu | Insn::AmminDbDu => {
+            am_d(b, &ops, |b, x, y| {
+                let c = b.cmp::<W64>(Cmp::LtU, x, y);
+                b.select::<W64>(c, x, y)
+            })?;
+        }
+        // ---- AMCAS（ops = [rd, rk, rj]。*rj が rd と一致すれば
+        // rk を書き、rd ← 旧値）----
+        // Ref: SPEC-LOONGARCH-RM §2.2.7.3.
+        Insn::AmcasB | Insn::AmcasDbB => {
+            let ea = rget(b, ops[2]);
+            let nv64 = rget(b, ops[1]);
+            let ov64 = rget(b, ops[0]);
+            let nv = b.trunc::<W64, W8>(nv64);
+            let ov = b.trunc::<W64, W8>(ov64);
+            let old = b.cmpxchg::<W8>(ea, ov, nv, ACC_AM)?;
+            let v = b.sext::<W8, W64>(old);
+            rset(b, ops[0], v);
+        }
+        Insn::AmcasH | Insn::AmcasDbH => {
+            let ea = rget(b, ops[2]);
+            let nv64 = rget(b, ops[1]);
+            let ov64 = rget(b, ops[0]);
+            let nv = b.trunc::<W64, W16>(nv64);
+            let ov = b.trunc::<W64, W16>(ov64);
+            let old = b.cmpxchg::<W16>(ea, ov, nv, ACC_AM)?;
+            let v = b.sext::<W16, W64>(old);
+            rset(b, ops[0], v);
+        }
+        Insn::AmcasW | Insn::AmcasDbW => {
+            let ea = rget(b, ops[2]);
+            let nv64 = rget(b, ops[1]);
+            let ov64 = rget(b, ops[0]);
+            let nv = b.trunc::<W64, W32>(nv64);
+            let ov = b.trunc::<W64, W32>(ov64);
+            let old = b.cmpxchg::<W32>(ea, ov, nv, ACC_AM)?;
+            let v = b.sext::<W32, W64>(old);
+            rset(b, ops[0], v);
+        }
+        Insn::AmcasD | Insn::AmcasDbD => {
+            let ea = rget(b, ops[2]);
+            let nv = rget(b, ops[1]);
+            let ov = rget(b, ops[0]);
+            let old = b.cmpxchg::<W64>(ea, ov, nv, ACC_AM)?;
+            rset(b, ops[0], old);
         }
         // ---- 基本分岐（LA7 で残りを足す）----
         Insn::B | Insn::Bl => {

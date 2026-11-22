@@ -479,3 +479,318 @@ fn exec_la5_rotr_bstr_misc() {
     step(&mut env, enc(Insn::Addu16iD, &[4, 5, 0x8000]));
     assert_eq!(gpr(&mut env, 4), 0x8000_0000);
 }
+
+// ---- LA6: index・ptr 形式、LL/SC、AM*、bound check ----
+
+/// メモリページを 1 枚張った環境を返す。
+fn mem_env() -> BareEnv {
+    use polyisa_mem::{Perms, VirtAddr};
+    let mut env = env();
+    env.backend.mem.map(VirtAddr(0x2000), 1, Perms::RW).unwrap();
+    env
+}
+
+/// 8 バイトをメモリに書く。
+fn poke64(env: &mut BareEnv, addr: u64, v: u64) {
+    use polyisa_mem::{Access, AccessKind, Align, Endian, VirtAddr};
+    let acc = Access {
+        endian: Endian::Le,
+        align: Align::Natural,
+        kind: AccessKind::DataWrite,
+    };
+    env.backend
+        .mem
+        .write_value(VirtAddr(addr), v, 8, acc)
+        .unwrap();
+}
+
+/// メモリから `n` バイトを読む。
+fn peek(env: &mut BareEnv, addr: u64, n: usize) -> u64 {
+    use polyisa_mem::{Access, AccessKind, Align, Endian, VirtAddr};
+    let acc = Access {
+        endian: Endian::Le,
+        align: Align::Natural,
+        kind: AccessKind::DataRead,
+    };
+    env.backend.mem.read_value(VirtAddr(addr), n, acc).unwrap()
+}
+
+#[test]
+fn exec_la6_ldx_stx() {
+    let mut env = mem_env();
+    poke64(&mut env, 0x2000, 0xdead_beef_1234_5678);
+    set_gpr(&mut env, 5, 0x1ff0);
+    set_gpr(&mut env, 6, 0x10);
+    // ldx.d r4 ← [r5+r6]。
+    step(&mut env, enc(Insn::LdxD, &[4, 5, 6]));
+    assert_eq!(gpr(&mut env, 4), 0xdead_beef_1234_5678);
+    // ldx.b は符号拡張。
+    set_gpr(&mut env, 6, 0x17);
+    step(&mut env, enc(Insn::LdxB, &[4, 5, 6]));
+    assert_eq!(gpr(&mut env, 4), (-0x22i64) as u64);
+    // ldx.bu はゼロ拡張。
+    step(&mut env, enc(Insn::LdxBu, &[4, 5, 6]));
+    assert_eq!(gpr(&mut env, 4), 0xde);
+    // ldx.h / ldx.hu。
+    set_gpr(&mut env, 6, 0x10);
+    step(&mut env, enc(Insn::LdxH, &[4, 5, 6]));
+    assert_eq!(gpr(&mut env, 4), 0x5678);
+    poke64(&mut env, 0x2010, 0x8000);
+    set_gpr(&mut env, 6, 0x20);
+    step(&mut env, enc(Insn::LdxHu, &[4, 5, 6]));
+    assert_eq!(gpr(&mut env, 4), 0x8000);
+    step(&mut env, enc(Insn::LdxH, &[4, 5, 6]));
+    assert_eq!(gpr(&mut env, 4), (-0x8000i64) as u64);
+    // ldx.w / ldx.wu。
+    poke64(&mut env, 0x2018, 0x8000_0001);
+    set_gpr(&mut env, 6, 0x28);
+    step(&mut env, enc(Insn::LdxW, &[4, 5, 6]));
+    assert_eq!(gpr(&mut env, 4), (-0x7fff_ffffi64) as u64);
+    step(&mut env, enc(Insn::LdxWu, &[4, 5, 6]));
+    assert_eq!(gpr(&mut env, 4), 0x8000_0001);
+    // stx.b/h/w/d（ea = r5 + r6 = 0x2018）。
+    set_gpr(&mut env, 4, 0xaabb_ccdd_eeff_0099);
+    step(&mut env, enc(Insn::StxD, &[4, 5, 6]));
+    assert_eq!(peek(&mut env, 0x2018, 8), 0xaabb_ccdd_eeff_0099);
+    step(&mut env, enc(Insn::StxB, &[4, 5, 6]));
+    assert_eq!(peek(&mut env, 0x2018, 1), 0x99);
+    step(&mut env, enc(Insn::StxH, &[4, 5, 6]));
+    assert_eq!(peek(&mut env, 0x2018, 2), 0x0099);
+    step(&mut env, enc(Insn::StxW, &[4, 5, 6]));
+    assert_eq!(peek(&mut env, 0x2018, 4), 0xeeff_0099);
+}
+
+#[test]
+fn exec_la6_ldptr_stptr() {
+    let mut env = mem_env();
+    poke64(&mut env, 0x2000, 0x8000_0001_dead_beef);
+    set_gpr(&mut env, 5, 0x2008);
+    // ldptr.w: si14=-2（0x3ffe）→ ea = rj - 8 = 0x2000。
+    step(&mut env, enc(Insn::LdptrW, &[4, 5, 0x3ffe]));
+    assert_eq!(gpr(&mut env, 4), (-0x2152_4111i64) as u64);
+    // ldptr.d。
+    step(&mut env, enc(Insn::LdptrD, &[4, 5, 0x3ffe]));
+    assert_eq!(gpr(&mut env, 4), 0x8000_0001_dead_beef);
+    // stptr.w は下位 32 ビット。si14=1 → ea = 0x200c。
+    set_gpr(&mut env, 4, 0xffff_ffff_1234_5678);
+    step(&mut env, enc(Insn::StptrW, &[4, 5, 1]));
+    assert_eq!(peek(&mut env, 0x200c, 4), 0x1234_5678);
+    // stptr.d: si14=0 → ea = rj = 0x2008。
+    step(&mut env, enc(Insn::StptrD, &[4, 5, 0]));
+    assert_eq!(peek(&mut env, 0x2008, 8), 0xffff_ffff_1234_5678);
+    // 負の si14（0x3ffc → -4 → ea = 0x2010 - 16 = 0x2000）。
+    // 0x2008 は stptr.d で 0xffff_ffff_1234_5678 に更新済みだが、
+    // 0x2000 の上位 32 ビットは変わっていない。
+    set_gpr(&mut env, 5, 0x2010);
+    step(&mut env, enc(Insn::LdptrD, &[4, 5, 0x3ffc]));
+    assert_eq!(gpr(&mut env, 4), 0x8000_0001_dead_beef);
+}
+
+#[test]
+fn exec_la6_ll_sc() {
+    let mut env = mem_env();
+    poke64(&mut env, 0x2000, 0x55);
+    set_gpr(&mut env, 5, 0x2000);
+    // ll.w → 旧値を sext で読む。
+    step(&mut env, enc(Insn::LlW, &[4, 5, 0]));
+    assert_eq!(gpr(&mut env, 4), 0x55);
+    // sc.w は予約が生きているので成功、書き込み、rd=1。
+    set_gpr(&mut env, 4, 0xaa);
+    step(&mut env, enc(Insn::ScW, &[4, 5, 0]));
+    assert_eq!(gpr(&mut env, 4), 1);
+    assert_eq!(peek(&mut env, 0x2000, 4), 0xaa);
+    // 予約なしの sc.w は失敗で rd=0、書き込まない。
+    set_gpr(&mut env, 4, 0xbb);
+    step(&mut env, enc(Insn::ScW, &[4, 5, 0]));
+    assert_eq!(gpr(&mut env, 4), 0);
+    assert_eq!(peek(&mut env, 0x2000, 4), 0xaa);
+    // ll.d → sc.d。
+    step(&mut env, enc(Insn::LlD, &[4, 5, 0]));
+    assert_eq!(gpr(&mut env, 4), 0xaa);
+    set_gpr(&mut env, 4, 0x0123_4567_89ab_cdef);
+    step(&mut env, enc(Insn::ScD, &[4, 5, 0]));
+    assert_eq!(gpr(&mut env, 4), 1);
+    assert_eq!(peek(&mut env, 0x2000, 8), 0x0123_4567_89ab_cdef);
+    // llacq/screl（ea = GR[rj]）。
+    step(&mut env, enc(Insn::LlacqW, &[4, 5]));
+    assert_eq!(gpr(&mut env, 4), (-0x7654_3211i64) as u64);
+    set_gpr(&mut env, 4, 0x77);
+    step(&mut env, enc(Insn::ScrelW, &[4, 5]));
+    assert_eq!(gpr(&mut env, 4), 1);
+    assert_eq!(peek(&mut env, 0x2000, 4), 0x77);
+    step(&mut env, enc(Insn::LlacqD, &[4, 5]));
+    assert_eq!(gpr(&mut env, 4), 0x0123_4567_0000_0077);
+    set_gpr(&mut env, 4, 0x1111_2222_3333_4444);
+    step(&mut env, enc(Insn::ScrelD, &[4, 5]));
+    assert_eq!(gpr(&mut env, 4), 1);
+    assert_eq!(peek(&mut env, 0x2000, 8), 0x1111_2222_3333_4444);
+    // ll → 重なる番地への store で予約を潰し sc は失敗。
+    step(&mut env, enc(Insn::LlW, &[4, 5, 0]));
+    set_gpr(&mut env, 6, 9);
+    step(&mut env, enc(Insn::StB, &[6, 5, 0]));
+    set_gpr(&mut env, 4, 0x55);
+    step(&mut env, enc(Insn::ScW, &[4, 5, 0]));
+    assert_eq!(gpr(&mut env, 4), 0);
+    // sc.q: [rj] ← rd、[rj+8] ← rk、rd ← 1。
+    step(&mut env, enc(Insn::LlD, &[4, 5, 0]));
+    set_gpr(&mut env, 4, 0xaaaa_aaaa_aaaa_aaaa);
+    set_gpr(&mut env, 6, 0xbbbb_bbbb_bbbb_bbbb);
+    step(&mut env, enc(Insn::ScQ, &[4, 6, 5]));
+    assert_eq!(gpr(&mut env, 4), 1);
+    assert_eq!(peek(&mut env, 0x2000, 8), 0xaaaa_aaaa_aaaa_aaaa);
+    assert_eq!(peek(&mut env, 0x2008, 8), 0xbbbb_bbbb_bbbb_bbbb);
+}
+
+#[test]
+fn exec_la6_am() {
+    let mut env = mem_env();
+    poke64(&mut env, 0x2000, 0x1_0000_0100);
+    set_gpr(&mut env, 5, 0x2000);
+    set_gpr(&mut env, 6, 0x200);
+    // amadd.w: rd ← 旧値(sext)、mem += rk[31:0]。
+    step(&mut env, enc(Insn::AmaddW, &[4, 5, 6]));
+    assert_eq!(gpr(&mut env, 4), 0x100);
+    assert_eq!(peek(&mut env, 0x2000, 4), 0x300);
+    // amadd.d: rd ← 旧値、mem += rk。
+    step(&mut env, enc(Insn::AmaddD, &[4, 5, 6]));
+    assert_eq!(gpr(&mut env, 4), 0x1_0000_0300);
+    assert_eq!(peek(&mut env, 0x2000, 8), 0x1_0000_0500);
+    // amswap.d。
+    set_gpr(&mut env, 6, 0xdead_beef);
+    step(&mut env, enc(Insn::AmswapD, &[4, 5, 6]));
+    assert_eq!(gpr(&mut env, 4), 0x1_0000_0500);
+    assert_eq!(peek(&mut env, 0x2000, 8), 0xdead_beef);
+    // amand.d / amor.d / amxor.d。
+    set_gpr(&mut env, 6, 0xff);
+    step(&mut env, enc(Insn::AmandD, &[4, 5, 6]));
+    assert_eq!(gpr(&mut env, 4), 0xdead_beef);
+    assert_eq!(peek(&mut env, 0x2000, 8), 0xef);
+    step(&mut env, enc(Insn::AmorD, &[4, 5, 6]));
+    assert_eq!(peek(&mut env, 0x2000, 8), 0xff);
+    set_gpr(&mut env, 6, 0x0f);
+    step(&mut env, enc(Insn::AmxorD, &[4, 5, 6]));
+    assert_eq!(peek(&mut env, 0x2000, 8), 0xf0);
+    // ammax.d: 符号付き max(mem, rk)。mem=0xf0、rk=-1 → 0xf0。
+    set_gpr(&mut env, 6, (-1i64) as u64);
+    step(&mut env, enc(Insn::AmmaxD, &[4, 5, 6]));
+    assert_eq!(gpr(&mut env, 4), 0xf0);
+    assert_eq!(peek(&mut env, 0x2000, 8), 0xf0);
+    // ammax.du: mem=0xf0、rk=-1（unsigned 巨大）→ -1。
+    step(&mut env, enc(Insn::AmmaxDu, &[4, 5, 6]));
+    assert_eq!(peek(&mut env, 0x2000, 8), (-1i64) as u64);
+    // ammin.d: mem=-1、rk=5 → -1。
+    set_gpr(&mut env, 6, 5);
+    step(&mut env, enc(Insn::AmminD, &[4, 5, 6]));
+    assert_eq!(peek(&mut env, 0x2000, 8), (-1i64) as u64);
+    // ammin.du: mem=-1（巨大）、rk=5 → 5。
+    step(&mut env, enc(Insn::AmminDu, &[4, 5, 6]));
+    assert_eq!(peek(&mut env, 0x2000, 8), 5);
+    // ammax.wu: mem=5、rk=0xffff_ff00 → 0xff00 側（sext で戻る）。
+    set_gpr(&mut env, 6, 0xffff_ff00);
+    step(&mut env, enc(Insn::AmmaxWu, &[4, 5, 6]));
+    assert_eq!(gpr(&mut env, 4), 5);
+    assert_eq!(peek(&mut env, 0x2000, 4), 0xffff_ff00);
+    // amadd.b / amswap.b（FAM3 形、番地は rj）。
+    poke64(&mut env, 0x2010, 0x1f);
+    set_gpr(&mut env, 7, 0x2010);
+    set_gpr(&mut env, 6, 0x10);
+    step(&mut env, enc(Insn::AmaddB, &[4, 6, 7]));
+    assert_eq!(gpr(&mut env, 4), 0x1f);
+    assert_eq!(peek(&mut env, 0x2010, 1), 0x2f);
+    set_gpr(&mut env, 6, 0xcc);
+    step(&mut env, enc(Insn::AmswapB, &[4, 6, 7]));
+    assert_eq!(gpr(&mut env, 4), 0x2f);
+    assert_eq!(peek(&mut env, 0x2010, 1), 0xcc);
+    // amadd.h / amswap.h（ea = rj = 0x2010）。
+    set_gpr(&mut env, 6, 0x23);
+    step(&mut env, enc(Insn::AmaddH, &[4, 6, 7]));
+    assert_eq!(gpr(&mut env, 4), 0xcc);
+    assert_eq!(peek(&mut env, 0x2010, 2), 0xef);
+    set_gpr(&mut env, 6, 0x1234);
+    step(&mut env, enc(Insn::AmswapH, &[4, 6, 7]));
+    assert_eq!(gpr(&mut env, 4), 0xef);
+    assert_eq!(peek(&mut env, 0x2010, 2), 0x1234);
+    // _db 系は単一スレッドで同じ動作。
+    poke64(&mut env, 0x2020, 1);
+    set_gpr(&mut env, 7, 0x2020);
+    step(&mut env, enc(Insn::AmaddDbD, &[4, 7, 6]));
+    assert_eq!(gpr(&mut env, 4), 1);
+    assert_eq!(peek(&mut env, 0x2020, 8), 1 + 0x1234);
+}
+
+#[test]
+fn exec_la6_amcas() {
+    let mut env = mem_env();
+    poke64(&mut env, 0x2000, 0x55);
+    set_gpr(&mut env, 5, 0x2000);
+    set_gpr(&mut env, 6, 0xaa);
+    // amcas.b: rd=期待値 0x55、一致 → 書き込み、rd ← 旧値 0x55。
+    set_gpr(&mut env, 4, 0x55);
+    step(&mut env, enc(Insn::AmcasB, &[4, 6, 5]));
+    assert_eq!(gpr(&mut env, 4), 0x55);
+    assert_eq!(peek(&mut env, 0x2000, 1), 0xaa);
+    // 不一致（mem=0xaa、期待 0x55）→ 書き込まず、rd ← 0xaa（sext）。
+    set_gpr(&mut env, 4, 0x55);
+    step(&mut env, enc(Insn::AmcasB, &[4, 6, 5]));
+    assert_eq!(gpr(&mut env, 4), (-0x56i64) as u64);
+    assert_eq!(peek(&mut env, 0x2000, 1), 0xaa);
+    // amcas.d: 一致する 64 ビット比較。
+    poke64(&mut env, 0x2010, 0x0123_4567_89ab_cdef);
+    set_gpr(&mut env, 5, 0x2010);
+    set_gpr(&mut env, 6, 0xfeed_face_cafe_beef);
+    set_gpr(&mut env, 4, 0x0123_4567_89ab_cdef);
+    step(&mut env, enc(Insn::AmcasD, &[4, 6, 5]));
+    assert_eq!(gpr(&mut env, 4), 0x0123_4567_89ab_cdef);
+    assert_eq!(peek(&mut env, 0x2010, 8), 0xfeed_face_cafe_beef);
+    // amcas.w / amcas_db.w。
+    poke64(&mut env, 0x2020, 0x8000_0001);
+    set_gpr(&mut env, 5, 0x2020);
+    set_gpr(&mut env, 6, 0x4000_0002);
+    set_gpr(&mut env, 4, 0x8000_0001);
+    step(&mut env, enc(Insn::AmcasW, &[4, 6, 5]));
+    assert_eq!(gpr(&mut env, 4), (-0x7fff_ffffi64) as u64);
+    assert_eq!(peek(&mut env, 0x2020, 4), 0x4000_0002);
+    // amcas.h。
+    poke64(&mut env, 0x2028, 0x7777);
+    set_gpr(&mut env, 5, 0x2028);
+    set_gpr(&mut env, 6, 0x8888);
+    set_gpr(&mut env, 4, 0x7777);
+    step(&mut env, enc(Insn::AmcasDbH, &[4, 6, 5]));
+    assert_eq!(gpr(&mut env, 4), 0x7777);
+    assert_eq!(peek(&mut env, 0x2028, 2), 0x8888);
+}
+
+#[test]
+fn exec_la6_ldgt_ldle() {
+    use polyisa_engine::interp::InterpExit;
+    use polyisa_sem::ExceptionKind;
+    let mut env = mem_env();
+    poke64(&mut env, 0x2000, 0x99);
+    set_gpr(&mut env, 5, 0x2000);
+    set_gpr(&mut env, 6, 0x1000);
+    // rj > rk なので ldgt.b は成功、sext 読み。
+    step(&mut env, enc(Insn::LdgtB, &[4, 5, 6]));
+    assert_eq!(gpr(&mut env, 4), (-0x67i64) as u64);
+    // ldle.b: rj <= rk は不成立（0x2000 > 0x1000）→ BCE 例外。
+    let word = enc(Insn::LdleB, &[4, 5, 6]);
+    let insn = decode_model_ex(u128::from(word), 32, true, LA64).unwrap();
+    let r = sem::exec(&mut env.backend, insn, word, 0x1000, true);
+    match r {
+        Err(InterpExit::Exception(e)) => {
+            assert_eq!(e.kind, ExceptionKind::Trap);
+            assert_eq!(e.code, sem::TRAP_BND);
+        }
+        _ => panic!("ldle.b should raise bound check"),
+    }
+    // rj <= rk を満たせば ldle.d は読める。
+    set_gpr(&mut env, 6, 0x2000);
+    step(&mut env, enc(Insn::LdleD, &[4, 5, 6]));
+    assert_eq!(gpr(&mut env, 4), 0x99);
+    // stgt.d / stle.d。
+    set_gpr(&mut env, 4, 0x77);
+    step(&mut env, enc(Insn::StleD, &[4, 5, 6]));
+    assert_eq!(peek(&mut env, 0x2000, 8), 0x77);
+    set_gpr(&mut env, 6, 0x1000);
+    step(&mut env, enc(Insn::StgtW, &[4, 5, 6]));
+    assert_eq!(peek(&mut env, 0x2000, 4), 0x77);
+}
