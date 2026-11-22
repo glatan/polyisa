@@ -26,7 +26,8 @@
 | 17 | PA-RISC | 完了 |
 | 18 | SuperH | 完了 |
 | 19 | LoongArch | 完了 |
-| 20-24 | OpenRISC〜PDP-11 | 未着手（作業計画は `design/roadmap.md` の各段階） |
+| 20 | OpenRISC | 完了 |
+| 21-24 | IA-64〜PDP-11 | 未着手（作業計画は `design/roadmap.md` の各段階） |
 | 25-29 | OS パーソナリティ・システムコール段階 5・タイミング・ホスト移植・GDB | 未着手 |
 
 ## 対応した内容
@@ -491,6 +492,21 @@ WebAssembly の本格的な実装と、WASI preview1 の OS パーソナリテ�
 - S19-1〜S19-3 はすべてテスト判定で確定しており、所有者確認の残件はない
 - LASX・LBT の命令実装（棚卸しの結論どおり未実装のまま。入手可能な配布物の登場時に再検討）・LSX の部分実装の残り語彙・旧ワールド（e_flags v0）ABI の実装（テスト入力の入手経路がない）
 - GAP-0062（syscall ABI の意図的な簡略化。devtmpfs フォールスルーと GROWSDOWN 相当の syscall バッファ窓を含む）・GAP-0063（意味論の意図的な簡略化）
+
+### 段階 20：OpenRISC
+
+対応した内容：
+
+- `guests/openrisc`（spec・sem）・`run_openrisc`・`os-linux::openrisc`（or1k の syscall 表は共通表 `scripts/syscall.tbl` を abi ∈ {common,32,or1k,time32,stat64,rlimit,renameat} で畳んだ 348 エントリと固有の `or1k_atomic`(244)。FdTable 系・dirfd 解決・`/dev/*` のホスト devtmpfs へのフォールスルー）
+- 版の範囲 OpenRISC 1000 の各版と浮動小数点の拡張のうちユーザーモード実行に要る命令群（32 ビット固定長・BE の ORBIS32 全語彙、整数・load/store・分岐と遅延スロット、SPR・l.mac 系、ORFPX32 と ORFPX64A32）。遅延スロットの有無は機能 `dslot`（既定あり、CPUCFGR[ND]=0 相当）。ORBIS64・ORVDX64 は機能旗の宣言のみで命令の割当てなし
+- モデルは or1200（`dslot`）と mor1kx（or1200＋`fpu`）。ELF32 BE ランナ（EM_OPENRISC=92、EXEC と PT_INTERP `/lib/ld-musl-or1k.so.1` の動的リンク経路）と Linux パーソナリティ（`l.sys` → ベクタ 0xc00 の Trap 受け渡し、nr=r11・引数 r3-r8・戻り値 r11/-errno）
+- `bare_openrisc`・`sem_openrisc`（層1–3: デコード・エンコード往復と裸実行の命令単位検査）・`heavy_abi_openrisc`（`.testdata/uapi-openrisc` の syscall.tbl 照合。Makefile.syscalls の opt-in 固定・番号ピン留め・双方向照合）・`heavy_program_openrisc`（BIN-DISTRO-OR1K の musl busybox rootfs コマンド群とゲストルートの検査）
+
+残っている事項：
+
+- S20-2 の所有者確認（`heavy_abi_openrisc` が機械的証拠）
+- ORBIS64・ORVDX64・カスタム命令（`l.cust1-8`・`lf.cust1.*`）の未実装（機能旗の宣言のみ）と、特権専用の `l.rfe`・例外配送・`l.lwa`/`l.swa` の単一スレッド近似（GAP-0066）
+- GAP-0064（syscall ABI の意図的な簡略化。単一プロセス・単一スレッド模型、`or1k_atomic` 未実装、dirfd/O_* フラグの近似、決定論的ダミー getrandom 等）・GAP-0065（lazymap 窓のデマンドページ近似）・GAP-0067（generic Backend 化の未対応）
 
 ## 残っている事項（横断）
 
