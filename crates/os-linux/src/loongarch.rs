@@ -7,7 +7,8 @@
 //! `syscall`（慣例の即値 0）。番号表は asm-generic
 //! （include/uapi/asm-generic/unistd.h）そのまま。la64 は
 //! `scripts/syscall.tbl` の abi ∈ {common, 64, memfd_secret} の
-//! 行を使い、stat64・rlimit・32・time32 の opt-in 行は持たない
+//! 行を使い、stat64・rlimit・32・time32・renameat の opt-in 行は
+//! 持たない（nr 38 は未配線。実装は renameat も受理する近似）
 //! （`arch/loongarch/kernel/Makefile.syscalls` が opt-in するのは
 //! memfd_secret のみ）。
 //! Ref: SRC-LINUX — arch/loongarch/kernel/entry.S,
@@ -112,6 +113,7 @@ pub mod nr {
     pub const MPROTECT: u64 = 226;
     pub const WAIT4: u64 = 260;
     pub const PRLIMIT64: u64 = 261;
+    pub const RENAMEAT2: u64 = 276;
     pub const GETRANDOM: u64 = 278;
     pub const EXECVEAT: u64 = 281;
     pub const STATX: u64 = 291;
@@ -131,7 +133,7 @@ pub fn name(nr: u64) -> Option<&'static str> {
 /// abi ∈ {common, 64, memfd_secret} の 325 行。
 /// SRC-LINUX-LOONGARCH-UAPI）。
 /// Ref: SRC-LINUX-LOONGARCH-UAPI — scripts/syscall.tbl.
-const SYSCALLS: &[(u64, &str)] = &[
+pub const SYSCALLS: &[(u64, &str)] = &[
     (0, "io_setup"),
     (1, "io_destroy"),
     (2, "io_submit"),
