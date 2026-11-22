@@ -25,7 +25,8 @@
 | 16 | Alpha | 完了 |
 | 17 | PA-RISC | 完了 |
 | 18 | SuperH | 完了 |
-| 19-24 | LoongArch〜PDP-11 | 未着手（作業計画は `design/roadmap.md` の各段階） |
+| 19 | LoongArch | 完了 |
+| 20-24 | OpenRISC〜PDP-11 | 未着手（作業計画は `design/roadmap.md` の各段階） |
 | 25-29 | OS パーソナリティ・システムコール段階 5・タイミング・ホスト移植・GDB | 未着手 |
 
 ## 対応した内容
@@ -474,6 +475,22 @@ WebAssembly の本格的な実装と、WASI preview1 の OS パーソナリテ�
 
 - S18-2 の所有者確認（`heavy_abi_superh` が機械的証拠）
 - GAP-0059（意味論の意図的な簡略化）・GAP-0060（syscall ABI の意図的な簡略化）・GAP-0061（SH-2A レジスタバンクの部分モデル）
+
+### 段階 19：LoongArch
+
+対応した内容：
+
+- `guests/loongarch`（spec・sem）・`run_loongarch`・`os-linux::loongarch`（asm-generic 系の la64 syscall 表・FdTable 系・ゲストルート内のパス解決と `/dev/*` のホスト devtmpfs へのフォールスルー）
+- 版の範囲 LA32・LA64 のうちユーザーモード実行に要る命令群（32 ビット固定長のデコード、整数算術・load/store・ll/sc と am 系の予約、分岐と jirl・境界検査、CSR 列と ertn の簡易遷移、CPUCFG を識別情報とする構成、スカラ FPU と fcc による条件分岐）。LA32 は配布物がないため裸実行環境で検証
+- LSX は Alpine 3.24 の musl/BusyBox が実際に実行する命令に限定した部分実装（LA13 の棚卸しで確定した語彙）。LASX・LBT は機能旗の宣言のみ（LASX/LBT のバイナリは現行の入手可能な配布物に存在しないという棚卸しの結論）
+- 新旧 ABI は `e_flags[7:6]` の ABI version で区別し、OBJ-v1（新ワールド）のみ受理して旧ワールドと未割当て値はローダが拒否
+- `bare_loongarch`（層1–3: デコードと裸実行の命令単位検査）・`heavy_oracle_loongarch`（llvm-objdump との busybox 全語照合）・`heavy_abi_loongarch`（`.testdata/uapi-loongarch` の syscall.tbl 照合。abi ∈ {common,64,memfd_secret}）・`heavy_program_loongarch`（BIN-DISTRO-LOONGARCH の Alpine minirootfs コマンド群とゲストルートの検査）
+
+残っている事項：
+
+- S19-1〜S19-3 はすべてテスト判定で確定しており、所有者確認の残件はない
+- LASX・LBT の命令実装（棚卸しの結論どおり未実装のまま。入手可能な配布物の登場時に再検討）・LSX の部分実装の残り語彙・旧ワールド（e_flags v0）ABI の実装（テスト入力の入手経路がない）
+- GAP-0062（syscall ABI の意図的な簡略化。devtmpfs フォールスルーと GROWSDOWN 相当の syscall バッファ窓を含む）・GAP-0063（意味論の意図的な簡略化）
 
 ## 残っている事項（横断）
 

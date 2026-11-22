@@ -26,20 +26,6 @@
 
 この文書は未完のタスクだけを載せる。完了した作業計画の行はその時点で削除し、完了条件をすべて満たした段階は節ごと削除する。完了した段階の実績と残件は `docs/records.md` に記録する。段階の詳細な計画（実装項目と事実の出所の対応表）とレビューの記録は `.local/` に置く作業文書に残す。詳しい手順は [開発の流れ](dev-workflow.md) の「段階の進め方」を見る。
 
-### 段階 19：LoongArch
-
-- 版の範囲は LA32 と LA64、LSX、LASX、LBT の拡張。LSX は Alpine 3.24 の musl/BusyBox が実際に実行する命令に限定した部分実装（`vr` レジスタと命令語彙は LA13 の棚卸しで確定した範囲）。LASX・LBT は機能旗の宣言のみで、LBT が参照する x86・ARM の変換状態は `CpuState` に持たない（LASX/LBT のバイナリは現行の入手可能な配布物に存在しないため）。LSX、LASX、LBT の公式仕様（Reference Manual の Vol.2、Vol.3）は SPEC-LOONGARCH-VEXT（英語版 v1.00）として登録済み
-- 初期の独自の ABI（旧ワールド、e_flags[7:6]=v0）と本流の ABI（新ワールド、v1）は `e_flags[7:6]` の ABI version で区別するゲスト ABI の変種とする。実装対象は新ワールドのみ（入手可能な配布物はすべて新ワールドであり、旧ワールドのテスト入力の入手経路がない）。`CPUCFG` は識別情報
-- LA64 のゲスト ABI
-
-完了条件：
-
-| ID | 条件 | 判定 |
-|---|---|---|
-| S19-1 | la64 のテストプログラムと配布物（BIN-DISTRO-LOONGARCH の Alpine minirootfs）のコマンド群が、ゲストのルートを使って正しい出力を返す（テスト `heavy_program_loongarch`）。 | テスト：`heavy_program_loongarch` |
-| S19-2 | ABI 表が、UAPI ヘッダからの抽出値と一致する（テスト `heavy_abi_loongarch`）。 | テスト：`heavy_abi_loongarch` |
-| S19-3 | llvm-objdump とのデコーダの差分テストが通る（テスト `heavy_oracle_loongarch`）。 | テスト：`heavy_oracle_loongarch` |
-
 ### 段階 20：OpenRISC
 
 - 版の範囲は OpenRISC 1000 アーキテクチャの各版と浮動小数点の拡張。遅延スロットの有無は機能とする
