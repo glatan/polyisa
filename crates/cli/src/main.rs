@@ -105,6 +105,10 @@ fn main() {
             for m in polyisa_guest_loongarch::MODELS {
                 println!("loongarch:{m}");
             }
+            #[cfg(feature = "guest-openrisc")]
+            for m in polyisa_guest_openrisc::MODELS {
+                println!("openrisc:{m}");
+            }
         }
         polyisa_cli::Command::Disasm => {
             #[cfg(feature = "guest-riscv")]

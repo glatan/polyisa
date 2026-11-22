@@ -82,6 +82,11 @@ pub mod superh;
 // Ref: SRC-LINUX — include/uapi/asm-generic/unistd.h.
 pub mod loongarch;
 
+/// OpenRISC（or1k・32ビット・BE）のシステムコール番号と syscall 処理
+/// （`sys` の実装だけ `guest-openrisc` 機能の内側）。
+// Ref: SRC-LINUX-OPENRISC-UAPI.
+pub mod openrisc;
+
 /// x86 の 32ビット（Linux の i386 ABI、EM_386）のシステムコール番号。
 // Ref: SRC-LINUX (7.3).
 pub mod x86_32;

@@ -17,6 +17,8 @@ pub mod run_loongarch;
 pub mod run_m68k;
 #[cfg(feature = "guest-mips")]
 pub mod run_mips;
+#[cfg(feature = "guest-openrisc")]
+pub mod run_openrisc;
 #[cfg(feature = "guest-parisc")]
 pub mod run_parisc;
 #[cfg(feature = "guest-power")]
@@ -358,6 +360,37 @@ fn run_loongarch_elf(
     Err("この polyisa は loongarch ゲストなしでビルドされた".to_string())
 }
 
+#[cfg(feature = "guest-openrisc")]
+fn run_openrisc_elf(
+    path: &str,
+    argv: &[String],
+    spec: Option<&CpuSpec>,
+    root: Option<&str>,
+) -> Result<u64, String> {
+    let sel = spec
+        .map(|s| {
+            resolve_sel(
+                "openrisc",
+                polyisa_guest_openrisc::MODEL_DEFS,
+                polyisa_guest_openrisc::FEATURE_DEFS,
+                polyisa_guest_openrisc::FEAT_BITS,
+                s,
+            )
+        })
+        .transpose()?;
+    run_openrisc::run_elf_openrisc_root(path, argv, sel.as_ref(), root)
+}
+
+#[cfg(not(feature = "guest-openrisc"))]
+fn run_openrisc_elf(
+    _path: &str,
+    _argv: &[String],
+    _spec: Option<&CpuSpec>,
+    _root: Option<&str>,
+) -> Result<u64, String> {
+    Err("この polyisa は openrisc ゲストなしでビルドされた".to_string())
+}
+
 #[cfg(feature = "guest-arm")]
 fn run_arm_elf(path: &str, argv: &[String], spec: Option<&CpuSpec>) -> Result<u64, String> {
     let sel = spec
@@ -568,11 +601,13 @@ pub fn run_path_opts(
     };
     match bytes[4] {
         CLASS_32 => {
-            if root.is_some() {
-                return Err("--root は現状 aarch64 のみ対応".to_string());
-            }
             let ehdr =
                 polyisa_loader::elf::parse_ehdr32(&bytes).map_err(|e| format!("ehdr: {e:?}"))?;
+            if root.is_some() && ehdr.machine != 92 {
+                return Err(
+                    "--root は現状 aarch64・ppc64・s390x・loongarch・openrisc のみ対応".to_string(),
+                );
+            }
             // EM_386=3。Ref: SRC-LINUX (7.3).
             if ehdr.machine == 3 {
                 check("x86")?;
@@ -605,6 +640,10 @@ pub fn run_path_opts(
                 // EM_SH=42。Ref: SRC-LINUX (include/uapi/linux/elf-em.h)。
                 check("superh")?;
                 run_superh_elf(path, argv, spec.as_ref())
+            } else if ehdr.machine == 92 {
+                // EM_OPENRISC=92。Ref: SRC-LINUX (include/uapi/linux/elf-em.h)。
+                check("openrisc")?;
+                run_openrisc_elf(path, argv, spec.as_ref(), root)
             } else if ehdr.machine == 258 {
                 // EM_LOONGARCH=258・ELFCLASS32 は LA32。
                 // Ref: SRC-LINUX (include/uapi/linux/elf-em.h).
@@ -618,7 +657,9 @@ pub fn run_path_opts(
             let ehdr =
                 polyisa_loader::elf::parse_ehdr(&bytes).map_err(|e| format!("ehdr: {e:?}"))?;
             if root.is_some() && !matches!(ehdr.machine, 183 | 21 | 22 | 258) {
-                return Err("--root は現状 aarch64・ppc64・s390x・loongarch のみ対応".to_string());
+                return Err(
+                    "--root は現状 aarch64・ppc64・s390x・loongarch・openrisc のみ対応".to_string(),
+                );
             }
             // EM_RISCV=243。Ref: SPEC-RISCV-PSABI (v1.0).
             if ehdr.machine == 243 {
