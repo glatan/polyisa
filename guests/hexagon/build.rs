@@ -10,9 +10,15 @@ fn main() {
     println!("cargo::rerun-if-changed=spec/");
     println!("cargo::rerun-if-changed=build.rs");
     let model = build_model();
-    // 命令語は 32 ビット。duplex・constant extender も 1 語。
+    // 命令語は 32 ビット。duplex の subinsn は 13 ビット語として
+    // 宣言し、実行側が duplex 語から取り出して decode_model_ex に
+    // 渡す（ia64 の 41 ビットスロットと同じ扱い）。
     for insn in &model.insns {
-        assert!(insn.pattern.len() == 32, "{}", insn.name);
+        assert!(
+            insn.pattern.len() == 32 || insn.pattern.len() == 13,
+            "{}",
+            insn.name
+        );
     }
     let report = polyisa_isadl::validate(&model);
     assert!(
