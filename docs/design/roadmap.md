@@ -43,9 +43,6 @@
 
 | # | 内容 | 前提 | 判定 |
 |---|---|---|---|
-| IA5 | 整数算術・比較・述語生成・シフト/extr/mix 系 | IA4 | - |
-| IA8 | 回転レジスタ・レジスタスタック（alloc/st.spill/ld.fill/flushrs/loadrs/cover、RSE とバッキングストアへの書き出し） | IA4 | - |
-| IA9 | FP（82 ビット形式・fcvt/fma 系。softfloat の拡張精度を接続） | IA4 | - |
 | IA10 | システムコール: `break 0x100000` とゲートページ経由の高速呼出 | IA4 | - |
 | IA11 | Linux ABI（SRC-LINUX-66 の UAPI）・ELF・`heavy_program_ia64` | IA10 | S21-1 |
 | IA12 | ABI 照合（所有者確認）+ 残件整理・判定列更新 | IA11 | S21-2 |
