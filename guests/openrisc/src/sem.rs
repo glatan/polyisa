@@ -11,7 +11,7 @@
 //! - `l.sys` は例外ベクタ 0xc00、`l.trap` は 0xe00 の
 //!   `ExceptionKind::Trap` を上げ、OS パーソナリティに委ねる。
 //! - 予約カスタム命令（l.cust1-8・lf.cust1.*）と特権専用の
-//!   l.rfe は未実装として止める（Gap）。
+//!   l.rfe は未実装として止める（Gap: GAP-0066）。
 //! - l.ld/l.sd（ORBIS64）は宣言のみの機能で、実行時は未実装。
 //! Ref: SPEC-OPENRISC-1000 §5.3（ORBIS32）, §5.4（ORFPX32/64）,
 //! §5.5（ORFPX64A32）, §6（例外）.
@@ -210,7 +210,8 @@ fn s32(b: &mut InterpBackend, a: u64, v: u64) -> Result<(), InterpExit> {
     b.store::<W32>(a, v as u32, DATA_W)
 }
 
-/// SPR の読み出し。未実装グループは 0 を返す（Gap）。
+/// SPR の読み出し。未実装グループは 0 を返す。
+/// Gap: GAP-0066
 /// Ref: SPEC-OPENRISC-1000 §4.3 表 4-1, §4.4 表 4-2.
 pub fn spr_read(b: &InterpBackend, adr: u16) -> u64 {
     use spr::*;
@@ -245,7 +246,8 @@ pub fn spr_read(b: &InterpBackend, adr: u16) -> u64 {
 
 /// SPR の書き込み。SR はユーザ可書ビットのみ、FPCSR は全ビット、
 /// 読み取り専用の構成レジスタ（VR/UPR/CPUCFGR 等）は無視する。
-/// 特権 SPR への書き込み制限はユーザモデルの近似（Gap）。
+/// 特権 SPR への書き込み制限はユーザモデルの近似。
+/// Gap: GAP-0066
 pub fn spr_write(b: &mut InterpBackend, adr: u16, v: u64) {
     use spr::*;
     let v = v & 0xffff_ffff;
@@ -414,13 +416,32 @@ enum FpCond {
     Un,
 }
 
+/// lf.sf*.* の FPCSR 例外処理。全比較で無限入力→FPCSR[INF]。
+/// IVF は順序付き比較のみ: sfeq/sfne は signaling NaN のみ
+/// （softfloat `eq` の NV 規約）、sfgt/sfge/sflt/sfle は任意の
+/// NaN（softfloat `lt` の NV 規約）。sfu* と sfun は IVF を
+/// 立てない（spec 各項の Exceptions に IVF の記載なし）。
+/// Ref: SPEC-OPENRISC-1000 §18（lf.sf*.* 各項の Exceptions）.
+fn fp_cmp_ex(b: &mut InterpBackend, inf: bool, nv: u8) {
+    if inf {
+        let c = get_u64(b, fpcsr_ref()) | (1 << fpcsr_bit::INF);
+        b.set(fpcsr_ref(), c);
+    }
+    fp_merge_flags(b, nv);
+}
+
 /// lf.sf*.s: rA,rB を単精度として比較し SR[F] を書く。
 fn fpcmp_s(b: &mut InterpBackend, a: u64, c: u64, cond: FpCond) {
     let (x, y) = (f32_of(a), f32_of(c));
     let unord = x.is_nan() || y.is_nan();
     let (eq, fe) = x.eq(y);
     let (lt, fl) = x.lt(y);
-    fp_merge_flags(b, fe | fl);
+    let nv = match cond {
+        FpCond::Eq | FpCond::Ne => fe,
+        FpCond::Gt | FpCond::Ge | FpCond::Lt | FpCond::Le => fl,
+        _ => 0,
+    };
+    fp_cmp_ex(b, x.is_inf() || y.is_inf(), nv);
     set_f(b, fp_cmp(cond, unord, eq, lt));
 }
 
@@ -433,23 +454,41 @@ fn fpcmp_d(b: &mut InterpBackend, a: u64, a2: u64, c: u64, c2: u64, cond: FpCond
     let unord = x.is_nan() || y.is_nan();
     let (eq, fe) = x.eq(y);
     let (lt, fl) = x.lt(y);
-    fp_merge_flags(b, fe | fl);
+    let nv = match cond {
+        FpCond::Eq | FpCond::Ne => fe,
+        FpCond::Gt | FpCond::Ge | FpCond::Lt | FpCond::Le => fl,
+        _ => 0,
+    };
+    fp_cmp_ex(b, x.is_inf() || y.is_inf(), nv);
     set_f(b, fp_cmp(cond, unord, eq, lt));
 }
 
-/// MAC アキュムレータの 64 ビット加減算。
-/// Ref: SPEC-OPENRISC-1000 §5.3（l.mac/l.msb/l.macrc）.
-fn mac_add(b: &mut InterpBackend, prod: u64, sub: bool, cy_on_add: bool) {
+/// MAC アキュムレータの 64 ビット加減算とフラグ代入。
+/// l.mac/l.maci/l.msb は加減算段の符号あり桁溢れを SR[OV] へ、
+/// l.macu/l.msbu は符号なし桁溢れ（加算キャリー・減算ボロー）を
+/// SR[CY] へ「代入」する。桁溢れしないときは対応フラグが落ちる。
+/// Ref: SPEC-OPENRISC-1000 §5.3（l.mac/l.maci/l.macu/l.msb/l.msbu の
+/// 32-bit Implementation）.
+fn mac_acc(b: &mut InterpBackend, prod: u64, sub: bool, signed: bool) {
     let acc = (get_u64(b, machi_ref()) << 32) | get_u64(b, maclo_ref());
-    let acc = if sub {
-        acc.wrapping_sub(prod)
+    let (acc2, ov) = if signed {
+        let (r, o) = if sub {
+            (acc as i64).overflowing_sub(prod as i64)
+        } else {
+            (acc as i64).overflowing_add(prod as i64)
+        };
+        (r as u64, o)
+    } else if sub {
+        acc.overflowing_sub(prod)
     } else {
-        acc.wrapping_add(prod)
+        acc.overflowing_add(prod)
     };
-    b.set(maclo_ref(), acc & 0xffff_ffff);
-    b.set(machi_ref(), (acc >> 32) & 0xffff_ffff);
-    if cy_on_add && !sub && acc < prod {
-        sr_bit_set(b, sr_bit::CY, true);
+    b.set(maclo_ref(), acc2 & 0xffff_ffff);
+    b.set(machi_ref(), (acc2 >> 32) & 0xffff_ffff);
+    if signed {
+        sr_bit_set(b, sr_bit::OV, ov);
+    } else {
+        sr_bit_set(b, sr_bit::CY, ov);
     }
 }
 
@@ -577,6 +616,9 @@ pub fn exec(
             rset(b, g(0), sext(v, 16));
             Ok(false)
         }
+        // l.lwa/l.swa は予約機構に載せるが、単一スレッド模型の
+        // ため l.swa は常に成功する（競合による失敗は発生しない）。
+        // Gap: GAP-0066
         Insn::LLwa => {
             let a = rget(b, g(1)).wrapping_add(sext(g(2), 16)) & 0xffff_ffff;
             let v = u64::from(b.load_reserved::<W32>(a, ATOMIC)?);
@@ -724,16 +766,17 @@ pub fn exec(
                 (x as u32 as u64) * (y as u32 as u64)
             };
             let sub = matches!(insn, Insn::LMsb | Insn::LMsbu);
-            // l.macu は加算桁溢れで SR[CY]。符号付きは OV を
-            // 立てない実装選択（spec 本文は曖昧。Gap）。
-            mac_add(b, prod, sub, insn == Insn::LMacu);
+            // 加減算段の桁溢れをフラグへ代入: 符号付き（l.mac/l.msb）
+            // は SR[OV]、符号なし（l.macu/l.msbu）は SR[CY]。
+            // 非桁溢れ時は落ちる。Ref: §5.3 各項.
+            mac_acc(b, prod, sub, signed);
             Ok(false)
         }
         Insn::LMaci => {
             let x = rget(b, g(0));
             let y = sext(g(1), 16);
             let prod = ((x as u32 as i32 as i64) * (y as i64)) as u64;
-            mac_add(b, prod, false, false);
+            mac_acc(b, prod, false, true);
             Ok(false)
         }
         Insn::LMuld | Insn::LMuldu => {
@@ -857,22 +900,23 @@ pub fn exec(
             let x = rget(b, g(1)) as u32 as i32;
             let y = rget(b, g(2)) as u32 as i32;
             if y == 0 {
-                // 0 除算: OV を立て宛先は不定（ここでは据え置き）。
+                // SR[OV] ← rB==0。0 除算の rD は不定（据え置き）。
                 // Ref: §5.3（l.div）.
                 sr_bit_set(b, sr_bit::OV, true);
             } else {
-                let (q, ov) = x.overflowing_div(y);
-                sr_bit_set(b, sr_bit::OV, ov);
-                sr_bit_set(b, sr_bit::CY, false);
-                if !ov {
-                    rset(b, g(0), q as u32 as u64);
-                }
+                // spec は OV ← (rB==0) の代入のみ。INT_MIN/-1 は
+                // 桁溢れ扱いにせず OV を落とし、商はラップ結果を
+                // 書く。CY は l.div では代入対象外なので不変。
+                sr_bit_set(b, sr_bit::OV, false);
+                let (q, _) = x.overflowing_div(y);
+                rset(b, g(0), q as u32 as u64);
             }
             Ok(false)
         }
         Insn::LDivu => {
             let x = rget(b, g(1)) as u32;
             let y = rget(b, g(2)) as u32;
+            // SR[CY] ← rB==0 の代入。OV は不変。Ref: §5.3（l.divu）.
             match x.checked_div(y) {
                 Some(q) => {
                     sr_bit_set(b, sr_bit::CY, false);

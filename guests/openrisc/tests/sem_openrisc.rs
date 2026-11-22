@@ -7,7 +7,7 @@
 
 use polyisa_engine::bare::BareEnv;
 use polyisa_engine::interp::InterpExit;
-use polyisa_guest_openrisc::{CpuState, Insn, encode, sem, sr_bit};
+use polyisa_guest_openrisc::{CpuState, Insn, encode, fpcsr_bit, sem, sr_bit};
 use polyisa_mem::{Perms, VirtAddr};
 use polyisa_sem::Backend as _;
 
@@ -526,4 +526,143 @@ fn delay_slot_advance() {
     e.step(|b| sem::exec(b, Insn::LJal, enc(Insn::LJal, &[0]), pc, true))
         .unwrap();
     assert_eq!(e.backend.get(sem::r_ref(9)), pc + 8);
+}
+
+/// MED-3 回帰: l.mac/l.maci/l.msb は加減算段の符号あり桁溢れを
+/// SR[OV] へ「代入」し（非桁溢れで落ちる）、l.macu/l.msbu は
+/// 符号なし桁溢れ（キャリー/ボロー）を SR[CY] へ代入する。
+/// Ref: SPEC-OPENRISC-1000 §5.3（各項の 32-bit Implementation）.
+#[test]
+fn mac_flag_assignments() {
+    let mut e = env();
+    e.backend.set(sem::r_ref(3), 1);
+    e.backend.set(sem::r_ref(4), 1);
+    // acc = i64::MAX に積 +1 を足すと符号あり加算が桁溢れ → OV=1。
+    e.backend.set(sem::machi_ref(), 0x7fff_ffff);
+    e.backend.set(sem::maclo_ref(), 0xffff_ffff);
+    exec1(&mut e, Insn::LMac, enc(Insn::LMac, &[3, 4]), 0x1000).unwrap();
+    assert_ne!(e.backend.get(sem::sr_ref()) & (1 << sr_bit::OV), 0);
+    // 続く非桁溢れの l.mac は OV を落とす（代入）。
+    e.backend.set(sem::machi_ref(), 0);
+    e.backend.set(sem::maclo_ref(), 1);
+    exec1(&mut e, Insn::LMac, enc(Insn::LMac, &[3, 4]), 0x1000).unwrap();
+    assert_eq!(e.backend.get(sem::sr_ref()) & (1 << sr_bit::OV), 0);
+    // l.msb: acc = i64::MIN、積=1 → MIN-1 で符号あり桁溢れ → OV=1。
+    e.backend.set(sem::machi_ref(), 0x8000_0000);
+    e.backend.set(sem::maclo_ref(), 0);
+    exec1(&mut e, Insn::LMsb, enc(Insn::LMsb, &[3, 4]), 0x1000).unwrap();
+    assert_ne!(e.backend.get(sem::sr_ref()) & (1 << sr_bit::OV), 0);
+    // 続く非桁溢れの l.msb は OV を落とす。
+    e.backend.set(sem::machi_ref(), 0);
+    e.backend.set(sem::maclo_ref(), 5);
+    exec1(&mut e, Insn::LMsb, enc(Insn::LMsb, &[3, 4]), 0x1000).unwrap();
+    assert_eq!(e.backend.get(sem::sr_ref()) & (1 << sr_bit::OV), 0);
+    // l.maci も OV を代入する（acc=i64::MAX + 正の積）。
+    e.backend.set(sem::machi_ref(), 0x7fff_ffff);
+    e.backend.set(sem::maclo_ref(), 0xffff_ffff);
+    exec1(&mut e, Insn::LMaci, enc(Insn::LMaci, &[3, 1]), 0x1000).unwrap();
+    assert_ne!(e.backend.get(sem::sr_ref()) & (1 << sr_bit::OV), 0);
+    // l.macu: acc = u64::MAX + 1 → キャリーで CY=1。
+    e.backend.set(sem::machi_ref(), 0xffff_ffff);
+    e.backend.set(sem::maclo_ref(), 0xffff_ffff);
+    exec1(&mut e, Insn::LMacu, enc(Insn::LMacu, &[3, 4]), 0x1000).unwrap();
+    assert_ne!(e.backend.get(sem::sr_ref()) & (1 << sr_bit::CY), 0);
+    // 続く非桁溢れで CY=0（代入）。
+    e.backend.set(sem::machi_ref(), 0);
+    e.backend.set(sem::maclo_ref(), 1);
+    exec1(&mut e, Insn::LMacu, enc(Insn::LMacu, &[3, 4]), 0x1000).unwrap();
+    assert_eq!(e.backend.get(sem::sr_ref()) & (1 << sr_bit::CY), 0);
+    // l.msbu: acc=0 - 1 → ボローで CY=1。
+    e.backend.set(sem::machi_ref(), 0);
+    e.backend.set(sem::maclo_ref(), 0);
+    exec1(&mut e, Insn::LMsbu, enc(Insn::LMsbu, &[3, 4]), 0x1000).unwrap();
+    assert_ne!(e.backend.get(sem::sr_ref()) & (1 << sr_bit::CY), 0);
+    // 続く非ボローで CY=0（代入）。
+    e.backend.set(sem::machi_ref(), 0);
+    e.backend.set(sem::maclo_ref(), 5);
+    exec1(&mut e, Insn::LMsbu, enc(Insn::LMsbu, &[3, 4]), 0x1000).unwrap();
+    assert_eq!(e.backend.get(sem::sr_ref()) & (1 << sr_bit::CY), 0);
+}
+
+/// LOW 回帰: l.div は SR[OV] ← (rB==0) のみを代入し、
+/// INT_MIN/-1 では OV を立てず CY にも触れない。l.divu は
+/// SR[CY] ← (rB==0) の代入で OV に触れない。
+/// Ref: SPEC-OPENRISC-1000 §5.3（l.div/l.divu）.
+#[test]
+fn div_flag_edges() {
+    let mut e = env();
+    e.backend.set(sem::r_ref(3), 0x8000_0000); // INT_MIN
+    e.backend.set(sem::r_ref(4), 0xffff_ffff); // -1
+    // CY=1 を前置し l.div が CY を不変にするか見る。
+    e.backend.set(sem::sr_ref(), 1 << sr_bit::CY);
+    exec1(&mut e, Insn::LDiv, enc(Insn::LDiv, &[5, 3, 4]), 0x1000).unwrap();
+    let sr = e.backend.get(sem::sr_ref());
+    assert_eq!(sr & (1 << sr_bit::OV), 0, "INT_MIN/-1 は OV を立てない");
+    assert_ne!(sr & (1 << sr_bit::CY), 0, "l.div は CY に触れない");
+    assert_eq!(rget(&mut e, 5), 0x8000_0000, "商はラップ結果");
+    // 通常除算でも OV=0 のまま。
+    e.backend.set(sem::r_ref(4), 2);
+    e.backend.set(sem::sr_ref(), 1 << sr_bit::OV);
+    exec1(&mut e, Insn::LDiv, enc(Insn::LDiv, &[5, 3, 4]), 0x1000).unwrap();
+    assert_eq!(e.backend.get(sem::sr_ref()) & (1 << sr_bit::OV), 0);
+    assert_eq!(rget(&mut e, 5), 0xc000_0000, "INT_MIN/2 = -0x40000000");
+    // l.divu の 0 除算は CY=1 で OV を触らない。
+    e.backend.set(sem::r_ref(4), 0);
+    e.backend.set(sem::sr_ref(), 1 << sr_bit::OV);
+    exec1(&mut e, Insn::LDivu, enc(Insn::LDivu, &[5, 3, 4]), 0x1000).unwrap();
+    let sr = e.backend.get(sem::sr_ref());
+    assert_ne!(sr & (1 << sr_bit::CY), 0);
+    assert_ne!(sr & (1 << sr_bit::OV), 0, "l.divu は OV に触れない");
+    // l.divu の正常除算は CY を落とす。
+    e.backend.set(sem::r_ref(4), 2);
+    exec1(&mut e, Insn::LDivu, enc(Insn::LDivu, &[5, 3, 4]), 0x1000).unwrap();
+    assert_eq!(e.backend.get(sem::sr_ref()) & (1 << sr_bit::CY), 0);
+}
+
+/// LOW 回帰: lf.sf*.s の FPCSR 例外。無限入力は全比較で INF。
+/// IVF は順序付き比較のみ: sfeq/sfne は signaling NaN、sflt 系は
+/// 任意の NaN で立つ。sfu*/sfun は IVF を立てない。
+/// Ref: SPEC-OPENRISC-1000 §18（lf.sf*.s 各項の Exceptions）.
+#[test]
+fn fp_cmp_fpcsr_flags() {
+    let mut e = env();
+    const INF32: u64 = 0x7f80_0000;
+    const QNAN: u64 = 0x7fc0_0000;
+    const SNAN: u64 = 0x7f80_0001;
+    const ONE: u64 = 0x3f80_0000;
+    fn run(e: &mut BareEnv, i: Insn) -> u64 {
+        exec1(e, i, enc(i, &[3, 4]), 0x1000).unwrap();
+        e.backend.get(sem::fpcsr_ref())
+    }
+    // 無限入力 → INF（順序付き・unordered 共通）。
+    e.backend.set(sem::r_ref(3), INF32);
+    e.backend.set(sem::r_ref(4), ONE);
+    e.backend.set(sem::fpcsr_ref(), 0);
+    assert_ne!(run(&mut e, Insn::LfSfeqS) & (1 << fpcsr_bit::INF), 0);
+    e.backend.set(sem::fpcsr_ref(), 0);
+    assert_ne!(run(&mut e, Insn::LfSfunS) & (1 << fpcsr_bit::INF), 0);
+    // 非無限・非 NaN なら INF は立たない。
+    e.backend.set(sem::r_ref(3), ONE);
+    e.backend.set(sem::fpcsr_ref(), 0);
+    assert_eq!(run(&mut e, Insn::LfSfeqS) & (1 << fpcsr_bit::INF), 0);
+    // quiet NaN + sfeq → IVF なし（sNaN のみが対象）。
+    e.backend.set(sem::r_ref(3), QNAN);
+    e.backend.set(sem::fpcsr_ref(), 0);
+    assert_eq!(run(&mut e, Insn::LfSfeqS) & (1 << fpcsr_bit::IVF), 0);
+    // signaling NaN + sfeq → IVF。
+    e.backend.set(sem::r_ref(3), SNAN);
+    e.backend.set(sem::fpcsr_ref(), 0);
+    assert_ne!(run(&mut e, Insn::LfSfeqS) & (1 << fpcsr_bit::IVF), 0);
+    // quiet NaN + sflt（順序付き大小比較）→ IVF。
+    e.backend.set(sem::r_ref(3), QNAN);
+    e.backend.set(sem::fpcsr_ref(), 0);
+    assert_ne!(run(&mut e, Insn::LfSfltS) & (1 << fpcsr_bit::IVF), 0);
+    // signaling NaN + sfueq（unordered）→ IVF なし。
+    e.backend.set(sem::r_ref(3), SNAN);
+    e.backend.set(sem::fpcsr_ref(), 0);
+    assert_eq!(run(&mut e, Insn::LfSfueqS) & (1 << fpcsr_bit::IVF), 0);
+    // sfun は NaN 入力で F=1。
+    e.backend.set(sem::sr_ref(), 0);
+    run(&mut e, Insn::LfSfunS);
+    assert_ne!(e.backend.get(sem::sr_ref()) & (1 << sr_bit::F), 0);
 }

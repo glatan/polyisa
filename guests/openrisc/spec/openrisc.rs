@@ -416,7 +416,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("l_sflts", "FAB", "11100101100.....................", base(), "l_sflts {a}, {b}", "alu"),
         ("l_sfles", "FAB", "11100101101.....................", base(), "l_sfles {a}, {b}", "alu"),
         // カスタム命令の予約（実装定義。語彙として宣言し、意味論は
-        // 未実装として Undefined を上げる。Gap）。
+        // 未実装として Undefined を上げる）。
+        // Gap: GAP-0066
         ("l_cust1", "FN0", "011100..........................", base(), "l.cust1", "misc"),
         ("l_cust2", "FN0", "011101..........................", base(), "l.cust2", "misc"),
         ("l_cust3", "FN0", "011110..........................", base(), "l.cust3", "misc"),

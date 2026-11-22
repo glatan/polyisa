@@ -122,6 +122,14 @@ name = "heavy_program_superh"
 required-features = ["guest-superh"]
 
 [[test]]
+name = "heavy_program_loongarch"
+required-features = ["guest-loongarch"]
+
+[[test]]
+name = "heavy_program_openrisc"
+required-features = ["guest-openrisc"]
+
+[[test]]
 name = "heavy_jit_diff"
 required-features = ["guest-aarch64", "guest-arm", "guest-x86"]
 

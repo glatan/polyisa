@@ -10,7 +10,6 @@ pub mod run_aarch64;
 pub mod run_alpha;
 #[cfg(feature = "guest-arm")]
 pub mod run_arm;
-#[cfg(feature = "guest-riscv")]
 #[cfg(feature = "guest-loongarch")]
 pub mod run_loongarch;
 #[cfg(feature = "guest-m68k")]
@@ -24,6 +23,7 @@ pub mod run_parisc;
 #[cfg(feature = "guest-power")]
 pub mod run_power;
 
+#[cfg(feature = "guest-riscv")]
 pub mod run_riscv;
 #[cfg(feature = "guest-s390")]
 pub mod run_s390;

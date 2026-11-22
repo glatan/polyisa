@@ -4,16 +4,23 @@
 //!
 //! 規約: syscall 番号は r11、引数は r3-r8、戻り値は r11、
 //! 失敗は r11 = -errno。発行点は `l.sys`（例外ベクタ 0xc00）。
-//! 番号表は asm-generic（arch/openrisc/include/uapi/asm/unistd.h が
-//! asm-generic/unistd.h を引く）に or1k_atomic=244 を加えたもの。
-//! Ref: SRC-LINUX-OPENRISC-UAPI — arch/openrisc/include/uapi/asm/unistd.h,
+//! 番号表は asm-generic の 32 ビット系（`scripts/syscall.tbl` を
+//! `arch/openrisc/kernel/Makefile.syscalls` の
+//! `syscall_abis_32 += or1k time32 stat64 rlimit renameat` で畳んだ
+//! `unistd_32.h`）である。32 ビット系のため nr62 は `sys_llseek`
+//! （結果ポインタ規約）、nr222 は `sys_mmap2`（pgoff 単位）、
+//! nr79/80 は `fstatat64`/`fstat64`（asm-generic `struct stat64`
+//! の time32 レイアウト）である。
+//! Ref: SRC-LINUX-OPENRISC-UAPI — scripts/syscall.tbl,
+//! arch/openrisc/kernel/Makefile.syscalls,
 //! arch/openrisc/kernel/entry.S（l.sys 発行点と r3-r8/r11 規約）.
 
 /// OpenRISC Linux の syscall 処理。`guest-openrisc` 機能で有効になる。
 #[cfg(feature = "guest-openrisc")]
 pub mod sys;
 
-/// syscall 番号定数（asm-generic + or1k_atomic）。
+/// syscall 番号定数（`scripts/syscall.tbl` の or1k 32 ビット ABI
+/// 畳み込み。定数名は tbl の entry 名に揃える）。
 /// Ref: SRC-LINUX-OPENRISC-UAPI.
 pub mod nr {
     pub const IOCTL: u64 = 29;
@@ -23,15 +30,19 @@ pub mod nr {
     pub const FACCESSAT: u64 = 48;
     pub const OPENAT: u64 = 56;
     pub const CLOSE: u64 = 57;
-    pub const LSEEK: u64 = 62;
+    /// `62 32 llseek sys_llseek` — (fd, off_hi, off_lo, result*, whence)。
+    pub const LLSEEK: u64 = 62;
     pub const READ: u64 = 63;
     pub const WRITE: u64 = 64;
     pub const READV: u64 = 65;
     pub const WRITEV: u64 = 66;
+    /// `pread64(fd, buf, len, pos)` — pos は r6:r7 の 64 ビット対（BE）。
     pub const PREAD64: u64 = 67;
     pub const READLINKAT: u64 = 78;
-    pub const NEWFSTATAT: u64 = 79;
-    pub const FSTAT: u64 = 80;
+    /// `79 stat64 fstatat64 sys_fstatat64` — stat64 構造体（time32）。
+    pub const FSTATAT64: u64 = 79;
+    /// `80 stat64 fstat64 sys_fstat64` — stat64 構造体（time32）。
+    pub const FSTAT64: u64 = 80;
     pub const EXIT: u64 = 93;
     pub const EXIT_GROUP: u64 = 94;
     pub const SET_TID_ADDRESS: u64 = 96;
@@ -59,7 +70,8 @@ pub mod nr {
     pub const GETTID: u64 = 178;
     pub const BRK: u64 = 214;
     pub const MUNMAP: u64 = 215;
-    pub const MMAP: u64 = 222;
+    /// `222 32 mmap2 sys_mmap2` — offset 引数は 4KiB ページ単位。
+    pub const MMAP2: u64 = 222;
     pub const MPROTECT: u64 = 226;
     pub const OR1K_ATOMIC: u64 = 244;
     pub const PRLIMIT64: u64 = 261;
