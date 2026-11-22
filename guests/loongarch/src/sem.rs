@@ -11,7 +11,7 @@
 use polyisa_mem::{Access, AccessKind, Align, Endian};
 use polyisa_sem::{
     Backend, Cmp, ExceptionKind, Flow, GuestException, StateArray, StateRef, W8, W16, W32, W64,
-    Width,
+    W128, Width,
 };
 
 use crate::{CpuState, Insn, csr, extract_ops};
@@ -89,6 +89,13 @@ pub fn csr_array() -> StateArray<W64> {
     StateArray::<W64>::from_layout(core::mem::offset_of!(CpuState, csr), 8)
 }
 
+/// LSX ベクトルレジスタ列（16 バイト幅。添字は vr 番号）。
+/// Ref: SPEC-LOONGARCH-RM Vol.2 §1.
+#[must_use]
+pub fn vr_array() -> StateArray<W128> {
+    StateArray::<W128>::from_layout(core::mem::offset_of!(CpuState, vr), 16)
+}
+
 /// 定数。
 fn k<B: Backend>(b: &mut B, v: u64) -> B::V<W64> {
     b.konst::<W64>(v)
@@ -131,17 +138,20 @@ fn sext_n(v: u64, bits: u32) -> u64 {
     (((v as i64) << (64 - bits)) >> (64 - bits)) as u64
 }
 
-/// データアクセス属性（常に LE・自然整列）。
+/// データアクセス属性（常に LE・非整列許容）。実機では
+/// 非整列の ld/st をハードウェアが透過的に処理し、musl の
+/// memcpy/memset もそれに依存するため Unaligned を選ぶ。
+/// Ref: SPEC-LOONGARCH-RM §2.2.3（非整列アクセス）.
 const DATA: Access = Access {
     endian: Endian::Le,
-    align: Align::Natural,
+    align: Align::Unaligned,
     kind: AccessKind::DataRead,
 };
 
-/// ストア用属性。
+/// ストア用属性（DATA と同じく非整列許容）。
 const STORE: Access = Access {
     endian: Endian::Le,
-    align: Align::Natural,
+    align: Align::Unaligned,
     kind: AccessKind::DataWrite,
 };
 
@@ -980,6 +990,157 @@ fn fcmp_res<B: Backend, F: Width>(b: &mut B, a: B::V<F>, c: B::V<F>, cond: u64) 
         // 未定義 cond は false に畳む。
         _ => zero,
     }
+}
+
+// ---- LSX の部分集合（LA13）。Alpine/musl/BusyBox が実際に
+// 実行する命令のみ。ここにない LSX 命令は decode が通っても
+// exec 側で Unimplemented ではなく網羅済みのため、語彙自体を
+// 宣言しない方針を取った。Ref: SPEC-LOONGARCH-RM Vol.2.
+
+/// 128 ビット定数。
+fn k128<B: Backend>(b: &mut B, v: u128) -> B::V<W128> {
+    b.konst::<W128>(v)
+}
+
+/// vr`i` のビット列。
+fn vget<B: Backend>(b: &mut B, i: u64) -> B::V<W128> {
+    let ix = b.konst::<W32>(i as u32);
+    b.get_indexed(vr_array(), ix)
+}
+
+/// vr`i` にビット列を書く。
+fn vset<B: Backend>(b: &mut B, i: u64, v: B::V<W128>) {
+    let ix = b.konst::<W32>(i as u32);
+    b.set_indexed(vr_array(), ix, v);
+}
+
+/// ベクトル `v` の `ebits` ビット要素 `idx` を W64 で取り出す
+/// （ゼロ拡張済み）。
+fn vlane<B: Backend>(b: &mut B, v: B::V<W128>, ebits: u32, idx: u32) -> B::V<W64> {
+    let sh = k128(b, u128::from(idx * ebits));
+    let x = b.shr_l::<W128>(v, sh);
+    let m = k128(b, (1u128 << ebits) - 1);
+    let x = b.and(x, m);
+    b.trunc::<W128, W64>(x)
+}
+
+/// ベクトル `acc` の `ebits` ビット要素 `idx` に `e` を置いた値を返す。
+fn vlane_set<B: Backend>(
+    b: &mut B,
+    acc: B::V<W128>,
+    ebits: u32,
+    idx: u32,
+    e: B::V<W64>,
+) -> B::V<W128> {
+    let m = k128(b, (1u128 << ebits) - 1);
+    let e = b.zext::<W64, W128>(e);
+    let e = b.and(e, m);
+    let sh = k128(b, u128::from(idx * ebits));
+    let e = b.shl(e, sh);
+    b.or(acc, e)
+}
+
+/// 全 `ebits` ビット要素に `e` を複写したベクトルを返す。
+fn vsplat<B: Backend>(b: &mut B, e: B::V<W64>, ebits: u32) -> B::V<W128> {
+    let m = k128(b, (1u128 << ebits) - 1);
+    let e = b.zext::<W64, W128>(e);
+    let mut v = b.and(e, m);
+    for i in 1..(128 / ebits) {
+        let sh = k128(b, u128::from(i * ebits));
+        let y = b.shl(v, sh);
+        v = b.or(v, y);
+    }
+    v
+}
+
+/// 32 ビット popcount（SWAR）。Ref: HAKMEM item 169.
+fn popcnt32<B: Backend>(b: &mut B, v: B::V<W64>) -> B::V<W64> {
+    let m1 = k(b, 0x5555_5555);
+    let m2 = k(b, 0x3333_3333);
+    let m4 = k(b, 0x0f0f_0f0f);
+    let one = k(b, 1);
+    let two = k(b, 2);
+    let four = k(b, 4);
+    let h = k(b, 0x0101_0101);
+    let a = b.shr_l::<W64>(v, one);
+    let a = b.and(a, m1);
+    let v = b.sub(v, a);
+    let a = b.shr_l::<W64>(v, two);
+    let a = b.and(a, m2);
+    let v = b.and(v, m2);
+    let v = b.add(v, a);
+    let a = b.shr_l::<W64>(v, four);
+    let v = b.add(v, a);
+    let v = b.and(v, m4);
+    let v = b.mul::<W64>(v, h);
+    let sh = k(b, 24);
+    b.shr_l::<W64>(v, sh)
+}
+
+/// 要素ごとの 2 項演算（`ebits` ビット要素）。
+/// `vd[i] = f(vj[i], vk[i])`。
+fn vbin<B: Backend>(
+    b: &mut B,
+    ops: &[u64],
+    ebits: u32,
+    f: impl Fn(&mut B, B::V<W64>, B::V<W64>) -> B::V<W64>,
+) {
+    let vj = vget(b, ops[1]);
+    let vk = vget(b, ops[2]);
+    let mut v = k128(b, 0);
+    for i in 0..(128 / ebits) {
+        let a = vlane(b, vj, ebits, i);
+        let c = vlane(b, vk, ebits, i);
+        let e = f(b, a, c);
+        v = vlane_set(b, v, ebits, i, e);
+    }
+    vset(b, ops[0], v);
+}
+
+/// VLDI の mode 選択（imm[12:8]）から 128 ビット定数を生成する。
+/// mode 表は SPEC-LOONGARCH-RM Vol.2 の VLDI 節に基づく。
+/// 未対応の mode は `None` を返し、呼び出し側が ILL に畳む。
+fn vldi_value(mode: u64, imm8: u64) -> Option<u128> {
+    let byte = imm8 & 0xff;
+    let splat = |w: u64, ebits: u32| -> u128 {
+        let mut v = 0u128;
+        for i in 0..(128 / ebits) {
+            v |= (w as u128 & ((1u128 << ebits) - 1)) << (i * ebits);
+        }
+        v
+    };
+    let sext8 = |bits: u32| -> u64 {
+        let s = (((byte as i64) << 56) >> 56) as u64;
+        s & ((1u64 << bits) - 1)
+    };
+    Some(match mode {
+        // imm8 を各バイトへ。
+        0 => splat(byte, 8),
+        // sext8 を各 h/w/d へ。
+        1 => splat(sext8(64), 16),
+        2 => splat(sext8(64), 32),
+        3 => splat(sext8(64), 64),
+        // imm8 << 8 を各 h へ。
+        4 => splat(byte << 8, 16),
+        // imm8 << 16 / << 8 を各 w へ。
+        5 => splat(byte << 16, 32),
+        6 => splat(byte << 8, 32),
+        // (imm8 << 8) | 0xff / (imm8 << 16) | 0xffff を各 w へ。
+        7 => splat((byte << 8) | 0xff, 32),
+        8 => splat((byte << 16) | 0xffff, 32),
+        // imm8 のビット j を byte j の 0x00/0xff マスクへ展開。
+        14 => {
+            let mut v = 0u128;
+            for j in 0..16u32 {
+                let bit = if j < 8 { (byte >> j) & 1 } else { 0 };
+                if bit == 1 {
+                    v |= 0xffu128 << (j * 8);
+                }
+            }
+            v
+        }
+        _ => return None,
+    })
 }
 
 /// 1 命令の意味論を実行する。`word` は命令語、`pc` は命令番地、
@@ -2679,6 +2840,274 @@ pub fn exec<B: Backend>(
                 let v = fget(b, ops[0]);
                 b.store::<W64>(ea, v, STORE)?;
             }
+        }
+        // ---- LSX の部分集合（LA13）----
+        // Ref: SPEC-LOONGARCH-RM Vol.2.
+        // Gap: GAP-0063（VLD/VST の 16 バイト整列規則は
+        // 検査しない非整列アクセス近似）。
+        Insn::Vld => {
+            let ea = ldst_ea(b, &ops);
+            let v = b.load::<W128>(ea, DATA)?;
+            vset(b, ops[0], v);
+        }
+        Insn::Vst => {
+            let ea = ldst_ea(b, &ops);
+            let v = vget(b, ops[0]);
+            b.store::<W128>(ea, v, STORE)?;
+        }
+        Insn::Vldx => {
+            let ea = ldx_ea(b, &ops);
+            let v = b.load::<W128>(ea, DATA)?;
+            vset(b, ops[0], v);
+        }
+        Insn::Vstx => {
+            let ea = ldx_ea(b, &ops);
+            let v = vget(b, ops[0]);
+            b.store::<W128>(ea, v, STORE)?;
+        }
+        Insn::VldreplD => {
+            // ea = rj + imm8*8（.d のオフセットは要素単位）。
+            let base = rget(b, ops[1]);
+            let d = k(b, ops[2] << 3);
+            let ea = b.add(base, d);
+            let e = b.load::<W64>(ea, DATA)?;
+            let v = vsplat(b, e, 64);
+            vset(b, ops[0], v);
+        }
+        Insn::Vreplgr2vrW | Insn::Vreplgr2vrD => {
+            let ebits = if insn == Insn::Vreplgr2vrW { 32 } else { 64 };
+            let e = rget(b, ops[1]);
+            let v = vsplat(b, e, ebits);
+            vset(b, ops[0], v);
+        }
+        Insn::Vpickve2grW => {
+            // .w は符号拡張して GR へ。Ref: RM Vol.2 VPICKVE2GR.
+            let v = vget(b, ops[1]);
+            let e = vlane(b, v, 32, ops[2] as u32 & 3);
+            let t = b.trunc::<W64, W32>(e);
+            let e = b.sext::<W32, W64>(t);
+            rset(b, ops[0], e);
+        }
+        Insn::Vpickve2grDu => {
+            let v = vget(b, ops[1]);
+            let e = vlane(b, v, 64, ops[2] as u32 & 1);
+            rset(b, ops[0], e);
+        }
+        Insn::Vinsgr2vrW => {
+            // vd の要素 idx だけを rj[31:0] で置き換える。
+            let idx = ops[2] as u32 & 3;
+            let lane: u128 = 0xffff_ffffu128 << (idx * 32);
+            let cur = vget(b, ops[0]);
+            let nm = k128(b, !lane);
+            let keep = b.and(cur, nm);
+            let g = rget(b, ops[1]);
+            let e = vlane_set(b, keep, 32, idx, g);
+            vset(b, ops[0], e);
+        }
+        Insn::VpcntW => {
+            let vj = vget(b, ops[1]);
+            let mut v = k128(b, 0);
+            for i in 0..4 {
+                let a = vlane(b, vj, 32, i);
+                let e = popcnt32(b, a);
+                v = vlane_set(b, v, 32, i, e);
+            }
+            vset(b, ops[0], v);
+        }
+        Insn::VsetnezV => {
+            // FCC.cd = (vj != 0)。Ref: RM Vol.2 VSETNEZ.
+            let v = vget(b, ops[1]);
+            let z = k128(b, 0);
+            let ne = b.cmp::<W128>(Cmp::Ne, v, z);
+            let one = k(b, 1);
+            let zero = k(b, 0);
+            let bit = b.select::<W64>(ne, one, zero);
+            fcc_set(b, ops[0], bit);
+        }
+        Insn::VsrliW => {
+            let vj = vget(b, ops[1]);
+            let n = ops[2] & 31;
+            let mut v = k128(b, 0);
+            for i in 0..4 {
+                let a = vlane(b, vj, 32, i);
+                let sh = k(b, n);
+                let e = b.shr_l::<W64>(a, sh);
+                v = vlane_set(b, v, 32, i, e);
+            }
+            vset(b, ops[0], v);
+        }
+        Insn::VslliW => {
+            let vj = vget(b, ops[1]);
+            let n = ops[2] & 31;
+            let mut v = k128(b, 0);
+            for i in 0..4 {
+                let a = vlane(b, vj, 32, i);
+                let sh = k(b, n);
+                let e = b.shl::<W64>(a, sh);
+                v = vlane_set(b, v, 32, i, e);
+            }
+            vset(b, ops[0], v);
+        }
+        Insn::VshufW => {
+            // vd.w[i] = vj.w[vk.w[i] mod 4]。Ref: RM Vol.2 VSHUF.
+            let vj = vget(b, ops[1]);
+            let vk = vget(b, ops[2]);
+            let mut v = k128(b, 0);
+            for i in 0..4 {
+                let n64 = vlane(b, vk, 32, i);
+                let n = b.zext::<W64, W128>(n64);
+                let m = k128(b, 3);
+                let n = b.and(n, m);
+                let sc = k128(b, 5);
+                let off = b.shl::<W128>(n, sc);
+                let shifted = b.shr_l::<W128>(vj, off);
+                let e = b.trunc::<W128, W64>(shifted);
+                let m64 = k(b, 0xffff_ffff);
+                let e = b.and(e, m64);
+                v = vlane_set(b, v, 32, i, e);
+            }
+            vset(b, ops[0], v);
+        }
+        Insn::VshufB => {
+            // vd.b[i] = concat(vj,vk).b[va.b[i] & 31]。
+            // 即値が 16 未満なら vj、以上なら vk の下位 16 バイト。
+            let vj = vget(b, ops[1]);
+            let vk = vget(b, ops[2]);
+            let va = vget(b, ops[3]);
+            let mut v = k128(b, 0);
+            for i in 0..16 {
+                let n64 = vlane(b, va, 8, i);
+                let n = b.zext::<W64, W128>(n64);
+                let m = k128(b, 31);
+                let n = b.and(n, m);
+                let lim = k128(b, 16);
+                let lt = b.cmp::<W128>(Cmp::LtU, n, lim);
+                let src = b.select::<W128>(lt, vj, vk);
+                let m15 = k128(b, 15);
+                let nn = b.and(n, m15);
+                let sc = k128(b, 3);
+                let off = b.shl::<W128>(nn, sc);
+                let shifted = b.shr_l::<W128>(src, off);
+                let e = b.trunc::<W128, W64>(shifted);
+                let m8 = k(b, 0xff);
+                let e = b.and(e, m8);
+                v = vlane_set(b, v, 8, i, e);
+            }
+            vset(b, ops[0], v);
+        }
+        Insn::Vshuf4iB => {
+            // 4 バイトの束ごとに imm8 の 2 ビット対で選ぶ。
+            // byte i の選択子は imm8[2*(i mod 4)+1 : 2*(i mod 4)]。
+            let vj = vget(b, ops[1]);
+            let imm = ops[2];
+            let mut v = k128(b, 0);
+            for i in 0..16u32 {
+                let sel = ((imm >> (2 * (i & 3))) & 3) as u32;
+                let src = 4 * (i >> 2) + sel;
+                let e = vlane(b, vj, 8, src);
+                v = vlane_set(b, v, 8, i, e);
+            }
+            vset(b, ops[0], v);
+        }
+        Insn::VilvlB | Insn::VilvlH => {
+            // 下位半分の要素を交互配置。vd[2i]=vj[i]、vd[2i+1]=vk[i]。
+            let ebits = if insn == Insn::VilvlB { 8 } else { 16 };
+            let vj = vget(b, ops[1]);
+            let vk = vget(b, ops[2]);
+            let half = 64 / ebits;
+            let mut v = k128(b, 0);
+            for i in 0..half {
+                let a = vlane(b, vj, ebits, i);
+                v = vlane_set(b, v, ebits, 2 * i, a);
+                let c = vlane(b, vk, ebits, i);
+                v = vlane_set(b, v, ebits, 2 * i + 1, c);
+            }
+            vset(b, ops[0], v);
+        }
+        Insn::VexthWuHu | Insn::VexthHuBu => {
+            // 上位半分の要素をゼロ拡張して倍幅へ。
+            // hu.bu: byte→half、wu.hu: half→word。
+            let (se, de, cnt) = if insn == Insn::VexthHuBu {
+                (8u32, 16u32, 8u32)
+            } else {
+                (16u32, 32u32, 4u32)
+            };
+            let vj = vget(b, ops[1]);
+            let mut v = k128(b, 0);
+            for i in 0..cnt {
+                let a = vlane(b, vj, se, i + cnt);
+                v = vlane_set(b, v, de, i, a);
+            }
+            vset(b, ops[0], v);
+        }
+        Insn::VbitreviD => {
+            // vd.d[i] = rol(bitrev(vj.d[i]), ui6)。
+            // Ref: RM Vol.2 VBITREVI.
+            let vj = vget(b, ops[1]);
+            let n = ops[2] & 63;
+            let mut v = k128(b, 0);
+            for i in 0..2 {
+                let a = vlane(b, vj, 64, i);
+                let r = bitrev(b, a, 64);
+                let e = if n == 0 {
+                    r
+                } else {
+                    let shl = k(b, n);
+                    let shr = k(b, 64 - n);
+                    let lo = b.shl::<W64>(r, shl);
+                    let hi = b.shr_l::<W64>(r, shr);
+                    b.or(lo, hi)
+                };
+                v = vlane_set(b, v, 64, i, e);
+            }
+            vset(b, ops[0], v);
+        }
+        Insn::VsubiDu => {
+            let vj = vget(b, ops[1]);
+            let c = k(b, ops[2] & 31);
+            let mut v = k128(b, 0);
+            for i in 0..2 {
+                let a = vlane(b, vj, 64, i);
+                let e = b.sub(a, c);
+                v = vlane_set(b, v, 64, i, e);
+            }
+            vset(b, ops[0], v);
+        }
+        Insn::Vldi => {
+            // si13[12:8] が展開 mode、si13[7:0] が即値。
+            let imm = ops[1];
+            let mode = (imm >> 8) & 0x1f;
+            let Some(vv) = vldi_value(mode, imm) else {
+                // Gap: GAP-0063（未対応 mode は誤値を置かず
+                // ILL に畳む）。
+                return Err(raise::<B>(b, ExceptionKind::Trap, TRAP_ILL));
+            };
+            let v = k128(b, vv);
+            vset(b, ops[0], v);
+        }
+        Insn::VseqW => {
+            vbin(b, &ops, 32, |b, a, c| {
+                let eq = b.cmp::<W64>(Cmp::Eq, a, c);
+                let all = k(b, 0xffff_ffff);
+                let z = k(b, 0);
+                b.select::<W64>(eq, all, z)
+            });
+        }
+        Insn::VaddD => vbin(b, &ops, 64, |b, a, c| b.add(a, c)),
+        Insn::VsubD => vbin(b, &ops, 64, |b, a, c| b.sub(a, c)),
+        Insn::VxorV | Insn::VorV | Insn::VandV | Insn::VnorV => {
+            let vj = vget(b, ops[1]);
+            let vk = vget(b, ops[2]);
+            let v = match insn {
+                Insn::VxorV => b.xor::<W128>(vj, vk),
+                Insn::VorV => b.or::<W128>(vj, vk),
+                Insn::VandV => b.and::<W128>(vj, vk),
+                _ => {
+                    let t = b.or::<W128>(vj, vk);
+                    b.not(t)
+                }
+            };
+            vset(b, ops[0], v);
         }
     }
     Ok(true)

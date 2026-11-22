@@ -30,8 +30,10 @@ pub fn build_model() -> polyisa_isadl::Model {
         m.timing_classes.push(class.to_string());
     }
 
-    // アーキテクチャの幅。la32 と la64 は排他。`lsx`/`lasx`/`lbt` は
-    // 拡張の宣言のみで、命令の割当ては LA13 で棚卸す。
+    // アーキテクチャの幅。la32 と la64 は排他。`lsx` は
+    // Alpine/musl が実際に実行する部分集合だけを実装し、
+    // `lasx`/`lbt` は拡張の宣言のみで命令の割当てはない
+    // （LA13 の棚卸しを参照）。
     // Ref: SPEC-LOONGARCH-RM §1.2（LA32/LA64）, §1.4（拡張構成）.
     for (name, implies, conflicts) in [
         ("la32", &[][..], &["la64"][..]),
@@ -53,7 +55,10 @@ pub fn build_model() -> polyisa_isadl::Model {
     for (name, parent, add) in [
         ("la32", "", &["la32"][..]),
         ("la264", "la32", &[][..]),
-        ("la464", "", &["la64"][..]),
+        // la464 は実機の機能構成（LSX 内蔵）に合わせて `lsx` を
+        // 持たせる。la664 は親から継承する。
+        // Ref: SPEC-LOONGARCH-RM §1.4（LS464 の標準構成）.
+        ("la464", "", &["la64", "lsx"][..]),
         ("la664", "la464", &[][..]),
     ] {
         m.models.push(ModelDef {
@@ -88,6 +93,13 @@ pub fn build_model() -> polyisa_isadl::Model {
         name: "fcsr".to_string(),
         dynamic: false,
         prefix: Some("$fcsr".to_string()),
+    });
+    // LSX の 128 ビットベクトルレジスタ vr0-vr31。
+    // Ref: SPEC-LOONGARCH-RM Vol.2 §1（LSX 概要）.
+    m.regclasses.push(RegClass {
+        name: "vr".to_string(),
+        dynamic: false,
+        prefix: Some("$vr".to_string()),
     });
 
     // 単一範囲の桁。Ref: SPEC-LOONGARCH-RM Appendix B.
@@ -124,6 +136,14 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("seq8", 17, 10),
         ("csr", 23, 10),
         ("op5", 4, 0),
+        // LSX 系の桁。si13 は VLDI のパターン選択＋即値、imm8 は
+        // VLDREPL のスケール済みオフセットと VSHUF4I の選択即値、
+        // vidx2/vidx1 は VPICKVE2GR/VINSGR2VR の要素番号。
+        // Ref: SPEC-LOONGARCH-RM Vol.2（LSX 命令形式）.
+        ("si13", 17, 5),
+        ("imm8", 17, 10),
+        ("vidx2", 11, 10),
+        ("vidx1", 10, 10),
     ] {
         m.fields.push(Field {
             name: name.to_string(),
@@ -180,6 +200,12 @@ pub fn build_model() -> polyisa_isadl::Model {
         name: name.to_string(),
         field: Some(field.to_string()),
         regclass: Some("fcsr".to_string()),
+        access,
+    };
+    let vr = |name: &str, field: &str, access: Access| Operand {
+        name: name.to_string(),
+        field: Some(field.to_string()),
+        regclass: Some("vr".to_string()),
         access,
     };
     let val = |name: &str, field: &str| Operand {
@@ -561,6 +587,143 @@ pub fn build_model() -> polyisa_isadl::Model {
         ],
     ));
 
+    // ---- LSX 用フォーマット。Ref: SPEC-LOONGARCH-RM Vol.2.
+    // vd, vj, vk の 3 項（要素演算・VILVL・VSHUF.H/W/D 等）。
+    m.formats.push(fmt(
+        "FV3R",
+        &["rk", "rj", "rd"],
+        vec![
+            vr("vd", "rd", Access::Write),
+            vr("vj", "rj", Access::Read),
+            vr("vk", "rk", Access::Read),
+        ],
+    ));
+    // vd, vj, vk, va の 4 項（VSHUF.B）。
+    m.formats.push(fmt(
+        "FV4R",
+        &["ra", "rk", "rj", "rd"],
+        vec![
+            vr("vd", "rd", Access::Write),
+            vr("vj", "rj", Access::Read),
+            vr("vk", "rk", Access::Read),
+            vr("va", "ra", Access::Read),
+        ],
+    ));
+    // vd, vj の 2 項（VREPLGR2VR 系・VEXT*/VPCNT*）。
+    m.formats.push(fmt(
+        "FV2R",
+        &["rj", "rd"],
+        vec![vr("vd", "rd", Access::Write), vr("vj", "rj", Access::Read)],
+    ));
+    // vd, rj の 2 項（VREPLGR2VR。rj は汎用レジスタ）。
+    m.formats.push(fmt(
+        "FVRG2",
+        &["rj", "rd"],
+        vec![vr("vd", "rd", Access::Write), gr("rj", "rj", Access::Read)],
+    ));
+    // vd, vj, ui5（VSRLLI/VSRLI/VADDI/VSUBI 系）。
+    m.formats.push(fmt(
+        "FVUI5",
+        &["ui5", "rj", "rd"],
+        vec![
+            vr("vd", "rd", Access::Write),
+            vr("vj", "rj", Access::Read),
+            val("ui5", "ui5"),
+        ],
+    ));
+    // vd, vj, ui6（VBITREVI.D・VSLLI.D/VSRLLI.D 系）。
+    m.formats.push(fmt(
+        "FVUI6",
+        &["ui6", "rj", "rd"],
+        vec![
+            vr("vd", "rd", Access::Write),
+            vr("vj", "rj", Access::Read),
+            val("ui6", "ui6"),
+        ],
+    ));
+    // vd, rj, si12（VLD/VST）。
+    m.formats.push(fmt(
+        "FVLD",
+        &["si12", "rj", "rd"],
+        vec![
+            vr("vd", "rd", Access::ReadWrite),
+            gr("rj", "rj", Access::Read),
+            val("si12", "si12"),
+        ],
+    ));
+    // vd, rj, rk（VLDX/VSTX）。
+    m.formats.push(fmt(
+        "FVLDX",
+        &["rk", "rj", "rd"],
+        vec![
+            vr("vd", "rd", Access::ReadWrite),
+            gr("rj", "rj", Access::Read),
+            gr("rk", "rk", Access::Read),
+        ],
+    ));
+    // vd, rj, imm8（VLDREPL.*。imm8 は要素幅でスケール済み）。
+    m.formats.push(fmt(
+        "FVLDREPL",
+        &["imm8", "rj", "rd"],
+        vec![
+            vr("vd", "rd", Access::Write),
+            gr("rj", "rj", Access::Read),
+            val("imm8", "imm8"),
+        ],
+    ));
+    // vd, vj, imm8（VSHUF4I.*）。
+    m.formats.push(fmt(
+        "FVSHUF4I",
+        &["imm8", "rj", "rd"],
+        vec![
+            vr("vd", "rd", Access::Write),
+            vr("vj", "rj", Access::Read),
+            val("imm8", "imm8"),
+        ],
+    ));
+    // rd, vj, vidx2（VPICKVE2GR.W 等、2 ビット要素番号）。
+    m.formats.push(fmt(
+        "FVPICK2",
+        &["vidx2", "rj", "rd"],
+        vec![
+            gr("rd", "rd", Access::Write),
+            vr("vj", "rj", Access::Read),
+            val("vidx2", "vidx2"),
+        ],
+    ));
+    // rd, vj, vidx1（VPICKVE2GR.DU、1 ビット要素番号）。
+    m.formats.push(fmt(
+        "FVPICK1",
+        &["vidx1", "rj", "rd"],
+        vec![
+            gr("rd", "rd", Access::Write),
+            vr("vj", "rj", Access::Read),
+            val("vidx1", "vidx1"),
+        ],
+    ));
+    // vd, rj, vidx2（VINSGR2VR.W。挿入なので vd は読み書き）。
+    m.formats.push(fmt(
+        "FVINS2",
+        &["vidx2", "rj", "rd"],
+        vec![
+            vr("vd", "rd", Access::ReadWrite),
+            gr("rj", "rj", Access::Read),
+            val("vidx2", "vidx2"),
+        ],
+    ));
+    // cd, vj（VSETNEZ.V/VSETEQZ.V）。
+    m.formats.push(fmt(
+        "FVCD",
+        &["rj", "cd"],
+        vec![fcc("cd", "cd", Access::Write), vr("vj", "rj", Access::Read)],
+    ));
+    // vd, si13（VLDI）。
+    m.formats.push(fmt(
+        "FVLDI",
+        &["si13", "rd"],
+        vec![vr("vd", "rd", Access::Write), val("si13", "si13")],
+    ));
+
     let ins = |name: &str, format: &str, pattern: &str, when: Pred, syntax: &str, timing: &str| {
         Insn {
             name: name.to_string(),
@@ -574,6 +737,7 @@ pub fn build_model() -> polyisa_isadl::Model {
     };
     let base = || Pred::True;
     let f_la64 = || Pred::Flag("la64".to_string());
+    let f_lsx = || Pred::Flag("lsx".to_string());
 
     // ---- ユーザモード全語彙 + 特権命令の符号化（LA3）。
     // LA32 必須の部分集合は SPEC-LOONGARCH-RM 表 2 に従い、
@@ -995,6 +1159,57 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("bltu", "FBCOND", "011010..........................", base(), "bltu {rj}, {rd}, {offs}", "branch"),
         ("bgeu", "FBCOND", "011011..........................", base(), "bgeu {rj}, {rd}, {offs}", "branch"),
 
+    ] {
+        m.insns.push(ins(name, format, pattern, when, syntax, timing));
+    }
+
+    // ---- LSX の部分集合（LA13）。Alpine 3.24 の musl/BusyBox が
+    // 実際に実行する命令に限定して実装する。完全な LSX 語彙は
+    // 膨大なため、ここにない LSX 命令は未実装エラーとして
+    // 可視化する（宣言のみの語彙テーブルは持たない）。
+    // Ref: SPEC-LOONGARCH-RM Vol.2（LSX）, Appendix B.
+    for (name, format, pattern, when, syntax, timing) in [
+        // ベクトル load/store。
+        ("vld", "FVLD", "0010110000......................", f_lsx(), "vld {vd}, {rj}, {si12}", "alu"),
+        ("vst", "FVLD", "0010110001......................", f_lsx(), "vst {vd}, {rj}, {si12}", "alu"),
+        ("vldx", "FVLDX", "00111000110100000...............", f_lsx(), "vldx {vd}, {rj}, {rk}", "alu"),
+        ("vstx", "FVLDX", "00111000110100010...............", f_lsx(), "vstx {vd}, {rj}, {rk}", "alu"),
+        // 要素幅でスケール済みオフセットの全要素複写 load（.d のみ）。
+        ("vldrepl_d", "FVLDREPL", "00110000000100..................", f_lsx(), "vldrepl.d {vd}, {rj}, {imm8}", "alu"),
+        // 汎用レジスタの全要素複写。
+        ("vreplgr2vr_w", "FVRG2", "0111001010011111000010..........", f_lsx(), "vreplgr2vr.w {vd}, {rj}", "alu"),
+        ("vreplgr2vr_d", "FVRG2", "0111001010011111000011..........", f_lsx(), "vreplgr2vr.d {vd}, {rj}", "alu"),
+        // 要素 ⇔ 汎用レジスタの転送。
+        ("vpickve2gr_w", "FVPICK2", "01110010111011111110............", f_lsx(), "vpickve2gr.w {rd}, {vj}, {vidx2}", "alu"),
+        ("vpickve2gr_du", "FVPICK1", "011100101111001111110...........", f_lsx(), "vpickve2gr.du {rd}, {vj}, {vidx1}", "alu"),
+        ("vinsgr2vr_w", "FVINS2", "01110010111010111110............", f_lsx(), "vinsgr2vr.w {vd}, {rj}, {vidx2}", "alu"),
+        // 要素ごとの popcount と全要素非零判定（FCC への書き出し）。
+        ("vpcnt_w", "FV2R", "0111001010011100001010..........", f_lsx(), "vpcnt.w {vd}, {vj}", "alu"),
+        ("vsetnez_v", "FVCD", "0111001010011100100111..........", f_lsx(), "vsetnez.v {cd}, {vj}", "alu"),
+        // 要素シフト。
+        ("vsrli_w", "FVUI5", "01110011001100001...............", f_lsx(), "vsrli.w {vd}, {vj}, {ui5}", "alu"),
+        ("vslli_w", "FVUI5", "01110011001011001...............", f_lsx(), "vslli.w {vd}, {vj}, {ui5}", "alu"),
+        // シャッフル・インタリーブ・拡張。
+        ("vshuf_w", "FV3R", "01110001011110110...............", f_lsx(), "vshuf.w {vd}, {vj}, {vk}", "alu"),
+        ("vshuf_b", "FV4R", "000011010101....................", f_lsx(), "vshuf.b {vd}, {vj}, {vk}, {va}", "alu"),
+        ("vshuf4i_b", "FVSHUF4I", "01110011100100..................", f_lsx(), "vshuf4i.b {vd}, {vj}, {imm8}", "alu"),
+        ("vilvl_b", "FV3R", "01110001000110100...............", f_lsx(), "vilvl.b {vd}, {vj}, {vk}", "alu"),
+        ("vilvl_h", "FV3R", "01110001000110101...............", f_lsx(), "vilvl.h {vd}, {vj}, {vk}", "alu"),
+        ("vexth_wu_hu", "FV2R", "0111001010011110111101..........", f_lsx(), "vexth.wu.hu {vd}, {vj}", "alu"),
+        ("vexth_hu_bu", "FV2R", "0111001010011110111100..........", f_lsx(), "vexth.hu.bu {vd}, {vj}", "alu"),
+        // ビット反転＋回転・要素即値・パターン即値ロード。
+        ("vbitrevi_d", "FVUI6", "0111001100011001................", f_lsx(), "vbitrevi.d {vd}, {vj}, {ui6}", "alu"),
+        ("vsubi_du", "FVUI5", "01110010100011011...............", f_lsx(), "vsubi.du {vd}, {vj}, {ui5}", "alu"),
+        ("vldi", "FVLDI", "01110011111000..................", f_lsx(), "vldi {vd}, {si13}", "alu"),
+        // 要素演算（.d/.w 中心の最小集合）。
+        ("vseq_w", "FV3R", "01110000000000010...............", f_lsx(), "vseq.w {vd}, {vj}, {vk}", "alu"),
+        ("vadd_d", "FV3R", "01110000000010111...............", f_lsx(), "vadd.d {vd}, {vj}, {vk}", "alu"),
+        ("vsub_d", "FV3R", "01110000000011011...............", f_lsx(), "vsub.d {vd}, {vj}, {vk}", "alu"),
+        // 128 ビット幅の bitwise。
+        ("vxor_v", "FV3R", "01110001001001110...............", f_lsx(), "vxor.v {vd}, {vj}, {vk}", "alu"),
+        ("vor_v", "FV3R", "01110001001001101...............", f_lsx(), "vor.v {vd}, {vj}, {vk}", "alu"),
+        ("vand_v", "FV3R", "01110001001001100...............", f_lsx(), "vand.v {vd}, {vj}, {vk}", "alu"),
+        ("vnor_v", "FV3R", "01110001001001111...............", f_lsx(), "vnor.v {vd}, {vj}, {vk}", "alu"),
     ] {
         m.insns.push(ins(name, format, pattern, when, syntax, timing));
     }

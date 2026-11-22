@@ -75,6 +75,10 @@ pub struct CpuState {
     pub r: [u64; 32],
     /// FP レジスタ f0-f31 のビットイメージ（単精度は下位 32 ビット）。
     pub f: [u64; 32],
+    /// LSX ベクトルレジスタ vr0-vr31 のビットイメージ。
+    /// LSX は実装済み部分集合のみが触る（LA13 参照）。
+    /// Ref: SPEC-LOONGARCH-RM Vol.2 §1（LSX 概要）.
+    pub vr: [u128; 32],
     /// プログラムカウンタ（実行中の命令番地）。
     pub pc: u64,
     /// 浮動小数点条件フラグ FCC0-FCC7（下位 8 ビット）。
@@ -100,6 +104,7 @@ impl Default for CpuState {
         Self {
             r: [0; 32],
             f: [0; 32],
+            vr: [0; 32],
             pc: 0,
             fcc: 0,
             fcsr: [0; 4],
