@@ -75,12 +75,12 @@ pub mod cfm_bit {
     pub const SOL: u32 = 7;
     /// Size of Rotating [17:14]。
     pub const SOR: u32 = 14;
-    /// 回転基底 GR [25:19]。
-    pub const RRB_GR: u32 = 19;
-    /// 回転基底 FR [32:26]。
-    pub const RRB_FR: u32 = 26;
-    /// 回転基底 PR [38:33]。
-    pub const RRB_PR: u32 = 33;
+    /// 回転基底 GR [24:18]。
+    pub const RRB_GR: u32 = 18;
+    /// 回転基底 FR [31:25]。
+    pub const RRB_FR: u32 = 25;
+    /// 回転基底 PR [37:32]。
+    pub const RRB_PR: u32 = 32;
 }
 
 /// 命令ポインタの下位 4 ビット。バンドル内のスロット番号（0-2）が
@@ -151,6 +151,11 @@ pub struct CpuState {
     pub psr_um: u64,
     /// ar.csd（cmp8xchg16/ld16/st16 が使う 16 バイトの高位側）。
     pub csd: u64,
+    /// レジスタスタックのフレーム基底。仮想 GR r32 が写る物理
+    /// リング位置（r32-r127 の 96 項リング内オフセット）。
+    /// call で sol 分だけ進み、ret/cover で戻る最小モデル。
+    /// バッキングストア連携は IA8。
+    pub gr_base: u64,
 }
 
 impl Default for CpuState {
@@ -178,6 +183,7 @@ impl Default for CpuState {
             alat_valid: 0,
             psr_um: 0,
             csd: 0,
+            gr_base: 0,
         }
     }
 }

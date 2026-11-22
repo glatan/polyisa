@@ -868,6 +868,11 @@ pub fn build_model() -> polyisa_isadl::Model {
         &["qp", "tgt25c", "tag13"],
         vec![qp(), val("tgt25c", "tgt25c"), val("tag13", "tag13")],
     ));
+    m.formats.push(fmt(
+        "FB2T",
+        &["b2", "tag13"],
+        vec![br("b2", "b2", Access::Read), val("tag13", "tag13")],
+    ));
     // X 系（82 ビット語。word[40:0]=X スロット、word[81:41]=L スロット）。
     m.formats.push(fmt(
         "FXI64",
@@ -1943,67 +1948,100 @@ pub fn build_model() -> polyisa_isadl::Model {
     ] {
         m.insns.push(ins(n, "FI21", pat, ub(), &format!("({{qp}}) {syn}"), "misc"));
     }
-    // B0: cover/clrrb（qp=0 が固定、LAST を示す）。
+    // B0: cover/clrrrb（qp=0 が固定、LAST を示す。正本の綴りどおり
+    // r が 3 つ）。
     for (n, pat, syn) in [
         ("cover", "0000....000010.....................000000", "cover"),
-        ("clrrb", "0000....000100.....................000000", "clrrb"),
-        ("clrrb_pr", "0000....000101.....................000000", "clrrb.pr"),
+        ("clrrrb", "0000....000100.....................000000", "clrrrb"),
+        ("clrrrb_pr", "0000....000101.....................000000", "clrrrb.pr"),
     ] {
         m.insns.push(ins(n, "F0U", pat, ub(), syn, "system"));
     }
-    // B1/B2: IP 相対分岐（btype/d/pa/wha 拡張、tgt25c）。
+    // B1: IP 相対分岐（Op=4、btype 拡張、tgt25c）。予測ヒント
+    // （d{35}・wh{34:33}・p{12}）は受理するが意味論では無視する
+    // 近似とし、完了子ごとの宣言は畳む（GAP-0068 参照）。
     m.insns.push(ins(
-        "br_cond_sptk_few",
+        "br_cond",
         "FBT25",
-        "0100.000....................0...000......",
+        "0100............................000......",
         ub(),
-        "({qp}) br.cond.sptk.few {tgt25c}",
+        "({qp}) br.cond {tgt25c}",
         "branch",
     ));
+    // B2: ループ分岐（スロット 2 限定。cloop/ctop/cexit は qp 無効、
+    // wtop/wexit は qp を条件に使う）。
+    for (n, btype, syn) in [
+        ("br_wexit", "010", "({qp}) br.wexit {tgt25c}"),
+        ("br_wtop", "011", "({qp}) br.wtop {tgt25c}"),
+        ("br_cloop", "101", "({qp}) br.cloop {tgt25c}"),
+        ("br_cexit", "110", "({qp}) br.cexit {tgt25c}"),
+        ("br_ctop", "111", "({qp}) br.ctop {tgt25c}"),
+    ] {
+        m.insns.push(ins(
+            n,
+            "FBT25",
+            &format!("0100............................{btype}......"),
+            ub(),
+            syn,
+            "branch",
+        ));
+    }
+    // B3: IP 相対 call（Op=5、b1 にリンク、tgt25c）。
     m.insns.push(ins(
-        "br_cloop_sptk_few",
-        "FBT25",
-        "0100.000....................0...101......",
-        ub(),
-        "({qp}) br.cloop.sptk.few {tgt25c}",
-        "branch",
-    ));
-    // B3: IP 相対 call（b1 にリンク、tgt25c）。
-    m.insns.push(ins(
-        "br_call_sptk_few",
+        "br_call",
         "FBBT",
-        "0101.000....................0............",
+        "0101.....................................",
         ub(),
-        "({qp}) br.call.sptk.few {b1} = {tgt25c}",
+        "({qp}) br.call {b1} = {tgt25c}",
         "branch",
     ));
-    // B4: 間接 return（x6=0x21、btype=4）。
+    // B4: 間接分岐（Op=0、x6=0x20）と間接 return（x6=0x21）。
+    for (n, x6, btype, syn) in [
+        ("br_cond_ind", "100000", "000", "({qp}) br.cond {b2}"),
+        ("br_ia", "100000", "001", "({qp}) br.ia {b2}"),
+        ("br_ret", "100001", "100", "({qp}) br.ret {b2}"),
+    ] {
+        m.insns.push(ins(
+            n,
+            "FB2",
+            &format!("0000....{x6}..................{btype}......"),
+            ub(),
+            syn,
+            "branch",
+        ));
+    }
+    // B5: 間接 call（Op=1。whc{34:32}・p{12}・d{35} は無視）。
     m.insns.push(ins(
-        "br_ret_sptk_few",
-        "FB2",
-        "0000.000100001..............0...100......",
-        ub(),
-        "({qp}) br.ret.sptk.few {b2}",
-        "branch",
-    ));
-    // B5: 間接 call（Op=1、pa/whc/d 拡張）。
-    m.insns.push(ins(
-        "br_call_ind_sptk_few",
+        "br_call_ind",
         "FBB",
-        "0001.0001...................0............",
+        "0001.....................................",
         ub(),
-        "({qp}) br.call.sptk.few {b1} = {b2}",
+        "({qp}) br.call {b1} = {b2}",
         "branch",
     ));
-    // B6/B7: brp（分岐ヒント。IP 相対）。
+    // B6: IP 相対分岐予測（Op=7。ih{35}・wh{4:3} は無視）。
     m.insns.push(ins(
-        "brp_sptk",
+        "brp",
         "FBPT",
-        "0111.0..............................00...",
+        "0111.....................................",
         ub(),
-        "({qp}) brp.sptk {tgt25c}, {tag13}",
+        "brp {tgt25c}, {tag13}",
         "misc",
     ));
+    // B7: 間接分岐予測（Op=2、x6=0x10）と return 予測（x6=0x11）。
+    for (n, x6, syn) in [
+        ("brp_ind", "010000", "brp {b2}, {tag13}"),
+        ("brp_ret", "010001", "brp.ret {b2}, {tag13}"),
+    ] {
+        m.insns.push(ins(
+            n,
+            "FB2T",
+            &format!("0010....{x6}..........................."),
+            ub(),
+            syn,
+            "misc",
+        ));
+    }
 
     // ---- X 型（82 ビット語。MLX テンプレートの L+X スロット。
     // word[40:0] が X スロット（slot2）、word[81:41] が L スロット
@@ -2029,19 +2067,19 @@ pub fn build_model() -> polyisa_isadl::Model {
     // X3/X4: 長距離分岐（Itanium 2 で追加。tgt60 は X[40:2]+
     // L の tgt 部分、word[42:41] は 0 固定）。
     m.insns.push(ins(
-        "brl_cond_sptk_few",
+        "brl_cond",
         "FXT60",
-        ".......................................001100.000....................0...000......",
+        ".......................................001100............................000......",
         ux2(),
-        "({qp}) brl.cond.sptk.few {tgt60}",
+        "({qp}) brl.cond {tgt60}",
         "branch",
     ));
     m.insns.push(ins(
-        "brl_call_sptk_few",
+        "brl_call",
         "FXBT",
-        ".......................................001101.000....................0............",
+        ".......................................001101.....................................",
         ux2(),
-        "({qp}) brl.call.sptk.few {b1} = {tgt60}",
+        "({qp}) brl.call {b1} = {tgt60}",
         "branch",
     ));
 

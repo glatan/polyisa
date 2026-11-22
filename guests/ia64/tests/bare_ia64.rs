@@ -10,17 +10,17 @@ use polyisa_engine::interp::InterpExit;
 use polyisa_guest_ia64::bundle::{self, Unit};
 use polyisa_guest_ia64::{
     CpuState, FEAT_ITANIUM, FEAT_ITANIUM2, FEAT_UNIT_A, FEAT_UNIT_I, IP_SLOT_MASK, Insn,
-    decode_model_ex, disasm_word_ex, encode_add, encode_br_cond_sptk_few, encode_break_f,
-    encode_break_i, encode_brl_cond_sptk_few, encode_chk_a_clr, encode_chk_a_nc, encode_chk_s_m,
-    encode_cmp_lt_or, encode_cmp8xchg16_acq, encode_cmpxchg4_acq, encode_cmpxchg8_acq,
-    encode_fetchadd4_acq, encode_fetchadd8_rel, encode_fma_s0, encode_hint_f, encode_invala,
-    encode_ld1, encode_ld2, encode_ld4, encode_ld4_acq, encode_ld8, encode_ld8_a, encode_ld8_a_i,
-    encode_ld8_acq, encode_ld8_bias, encode_ld8_c_clr, encode_ld8_c_nc, encode_ld8_fill,
-    encode_ld8_fill_i, encode_ld8_i, encode_ld8_r, encode_ld8_s, encode_ld16, encode_mov_ip,
-    encode_movl, encode_nop_b, encode_nop_f, encode_nop_i, encode_nop_x, encode_padd1,
-    encode_pcmp4_eq, encode_psub1, encode_st1, encode_st2, encode_st4, encode_st8, encode_st8_i,
-    encode_st8_rel, encode_st8_spill, encode_st8_spill_i, encode_st16, encode_sub_imm8,
-    encode_xchg8, extract_ops, sem,
+    decode_model_ex, disasm_word_ex, encode_add, encode_br_cond, encode_break_f, encode_break_i,
+    encode_brl_cond, encode_chk_a_clr, encode_chk_a_nc, encode_chk_s_m, encode_cmp_lt_or,
+    encode_cmp8xchg16_acq, encode_cmpxchg4_acq, encode_cmpxchg8_acq, encode_fetchadd4_acq,
+    encode_fetchadd8_rel, encode_fma_s0, encode_hint_f, encode_invala, encode_ld1, encode_ld2,
+    encode_ld4, encode_ld4_acq, encode_ld8, encode_ld8_a, encode_ld8_a_i, encode_ld8_acq,
+    encode_ld8_bias, encode_ld8_c_clr, encode_ld8_c_nc, encode_ld8_fill, encode_ld8_fill_i,
+    encode_ld8_i, encode_ld8_r, encode_ld8_s, encode_ld16, encode_mov_ip, encode_movl,
+    encode_nop_b, encode_nop_f, encode_nop_i, encode_nop_x, encode_padd1, encode_pcmp4_eq,
+    encode_psub1, encode_st1, encode_st2, encode_st4, encode_st8, encode_st8_i, encode_st8_rel,
+    encode_st8_spill, encode_st8_spill_i, encode_st16, encode_sub_imm8, encode_xchg8, extract_ops,
+    sem,
 };
 use polyisa_mem::{Access, AccessKind, Align, Endian, VirtAddr};
 use polyisa_sem::ExceptionKind;
@@ -64,7 +64,12 @@ fn state_layout_pinned() {
     );
     // ar.csd は IA6 で末尾に足した（16 バイト系の高位側）。
     assert_eq!(core::mem::offset_of!(CpuState, csd), cfm + 16 + 32 * 8 + 16);
-    assert_eq!(core::mem::size_of::<CpuState>(), cfm + 16 + 32 * 8 + 24);
+    // gr_base は IA7 で末尾に足した（フレーム基底のリング位置）。
+    assert_eq!(
+        core::mem::offset_of!(CpuState, gr_base),
+        cfm + 16 + 32 * 8 + 24
+    );
+    assert_eq!(core::mem::size_of::<CpuState>(), cfm + 16 + 32 * 8 + 32);
 }
 
 #[test]
@@ -225,17 +230,9 @@ fn f_unit_forms() {
 
 #[test]
 fn b_unit_forms() {
-    // br.cond.sptk.few tgt21（16 バイト整列分岐先の IP 相対値）
-    let w = slot_roundtrip(
-        Unit::B,
-        encode_br_cond_sptk_few(&[0, 0x40]),
-        Insn::BrCondSptkFew,
-        "br.cond.sptk.few",
-    );
-    assert_ne!(
-        bundle::decode_slot(Unit::M, w, CPU),
-        Some(Insn::BrCondSptkFew)
-    );
+    // br.cond tgt25c（16 バイト整列分岐先の IP 相対値）
+    let w = slot_roundtrip(Unit::B, encode_br_cond(&[0, 0x40]), Insn::BrCond, "br.cond");
+    assert_ne!(bundle::decode_slot(Unit::M, w, CPU), Some(Insn::BrCond));
 }
 
 #[test]
@@ -446,17 +443,14 @@ fn f_unit_misc_x3_pinned() {
 
 #[test]
 fn brl_cond_btype_pinned() {
-    // OpBtypePaWhaD(0xc, 0, 0, 0, 0): btype[8:6]=0 が sptk.few。
-    let w = encode_brl_cond_sptk_few(&[0, 0x100]).unwrap();
+    // OpBtypePaWhaD(0xc, 0, 0, 0, 0): btype[8:6]=0 が brl.cond。
+    let w = encode_brl_cond(&[0, 0x100]).unwrap();
     assert_eq!(w & 0x7ee000011c0, 0x18000000000);
-    assert_eq!(
-        bundle::decode_slot(Unit::X, w, CPU),
-        Some(Insn::BrlCondSptkFew)
-    );
+    assert_eq!(bundle::decode_slot(Unit::X, w, CPU), Some(Insn::BrlCond));
     // btype≠0（例えば ret の 4）は受理しない。
     assert_ne!(
         bundle::decode_slot(Unit::X, w | (4u128 << 6), CPU),
-        Some(Insn::BrlCondSptkFew)
+        Some(Insn::BrlCond)
     );
 }
 
@@ -602,8 +596,8 @@ fn taken_branch_skips_group_tail() {
     let t2 = 0x3_0000u64;
     let add = encode_add(&[0, 4, 1, 2]).unwrap() as u64;
     // tgt25c はバンドルアドレスからの変位（下位 4 ビット 0 の値）。
-    let br1 = encode_br_cond_sptk_few(&[0, t1 - BASE]).unwrap() as u64;
-    let br2 = encode_br_cond_sptk_few(&[0, t2 - BASE]).unwrap() as u64;
+    let br1 = encode_br_cond(&[0, t1 - BASE]).unwrap() as u64;
+    let br2 = encode_br_cond(&[0, t2 - BASE]).unwrap() as u64;
     put_bundle(&mut env, BASE, mk_bundle(9, true, add, br1, br2));
     sem::gr_set(&mut env.backend, 1, 40);
     sem::gr_set(&mut env.backend, 2, 2);
@@ -619,7 +613,7 @@ fn qp_false_branch_not_taken() {
     let mut env = run_env();
     let t1 = 0x2_0000u64;
     let add = encode_add(&[0, 4, 1, 2]).unwrap() as u64;
-    let br = encode_br_cond_sptk_few(&[6, t1 - BASE]).unwrap() as u64;
+    let br = encode_br_cond(&[6, t1 - BASE]).unwrap() as u64;
     let nop = encode_nop_b(&[0, 0]).unwrap() as u64;
     put_bundle(&mut env, BASE, mk_bundle(9, true, add, br, nop));
     env.pc = BASE;
@@ -2334,4 +2328,616 @@ fn ia6_qp_suppression_memory() {
     let w = encode_xchg8(&[6, 1, 3, 1]).unwrap();
     let ok = sem::exec(&mut env.backend, Insn::Xchg8, w, 0).unwrap();
     assert!(!ok);
+}
+
+// ---- 段階21 IA7: 分岐・ループ分岐・述語実行・フレーム最小モデル ----
+// br/brl 系の全形式・call/ret のリンクと pfs/cfm/gr_base・ループの
+// lc/ec/rrb/PR63・回転改名・qp 規則を確かめる。exec の ip 引数は
+// バンドルアドレス|スロット番号（ループ分岐はスロット 2 = 0x1002）。
+// Ref: SPEC-IA64-SDM (Rev 2.3).
+
+fn env2() -> BareEnv {
+    env()
+}
+
+use polyisa_engine::interp::Ctrl;
+use polyisa_guest_ia64::{
+    cfm_bit, encode_alloc, encode_br_call, encode_br_call_ind, encode_br_cexit, encode_br_cloop,
+    encode_br_cond_ind, encode_br_ctop, encode_br_ia, encode_br_ret, encode_br_wexit,
+    encode_br_wtop, encode_brl_call, encode_brp, encode_brp_ind, encode_brp_ret, encode_clrrrb,
+    encode_clrrrb_pr, encode_cover,
+};
+
+const LC_OFF: usize = core::mem::offset_of!(CpuState, lc);
+const EC_OFF: usize = core::mem::offset_of!(CpuState, ec);
+const PFS_OFF: usize = core::mem::offset_of!(CpuState, pfs);
+const GB_OFF: usize = core::mem::offset_of!(CpuState, gr_base);
+const CFM_OFF: usize = core::mem::offset_of!(CpuState, cfm);
+
+fn sref(off: usize) -> StateRef<W64> {
+    StateRef::<W64>::from_offset(off)
+}
+
+fn arv(env: &mut BareEnv, off: usize) -> u64 {
+    env.backend.get(sref(off))
+}
+
+fn set_arv(env: &mut BareEnv, off: usize, v: u64) {
+    env.backend.set(sref(off), v);
+}
+
+/// CFM の [lo, lo+w) フィールド。
+fn cff(env: &mut BareEnv, lo: u32, w: u32) -> u64 {
+    (arv(env, CFM_OFF) >> lo) & ((1u64 << w) - 1)
+}
+
+/// exec をスロット `s` の ip で呼ぶ。
+fn xs(env: &mut BareEnv, insn: Insn, w: u128, s: u64) -> bool {
+    sem::exec(&mut env.backend, insn, w, 0x1000 | s).unwrap()
+}
+
+fn xs_err(env: &mut BareEnv, insn: Insn, w: u128, s: u64) -> u64 {
+    match sem::exec(&mut env.backend, insn, w, 0x1000 | s).unwrap_err() {
+        InterpExit::Exception(e) => e.code,
+        e => panic!("trap 以外の退出: {e:?}"),
+    }
+}
+
+fn taken(env: &BareEnv) -> Option<u64> {
+    match env.backend.ctrl {
+        Ctrl::Jump(t) => Some(t),
+        _ => None,
+    }
+}
+
+#[test]
+fn ia7_branch_forms_decode() {
+    // IP 相対・間接・call・ret・ループ・予測・長分岐の各形式を
+    // エンコード→デコード→逆アセンブルで往復する。
+    slot_roundtrip(
+        Unit::B,
+        encode_br_cond_ind(&[0, 3]),
+        Insn::BrCondInd,
+        "br.cond b3",
+    );
+    slot_roundtrip(
+        Unit::B,
+        encode_br_call(&[0, 1, 0x40]),
+        Insn::BrCall,
+        "br.call b1",
+    );
+    slot_roundtrip(
+        Unit::B,
+        encode_br_call_ind(&[0, 6, 2]),
+        Insn::BrCallInd,
+        "br.call b6 = b2",
+    );
+    slot_roundtrip(Unit::B, encode_br_ret(&[0, 5]), Insn::BrRet, "br.ret b5");
+    slot_roundtrip(Unit::B, encode_br_ia(&[0, 2]), Insn::BrIa, "br.ia b2");
+    slot_roundtrip(
+        Unit::B,
+        encode_br_cloop(&[0, 0x40]),
+        Insn::BrCloop,
+        "br.cloop",
+    );
+    slot_roundtrip(Unit::B, encode_br_ctop(&[0, 0x40]), Insn::BrCtop, "br.ctop");
+    slot_roundtrip(
+        Unit::B,
+        encode_br_cexit(&[0, 0x40]),
+        Insn::BrCexit,
+        "br.cexit",
+    );
+    slot_roundtrip(Unit::B, encode_br_wtop(&[0, 0x40]), Insn::BrWtop, "br.wtop");
+    slot_roundtrip(
+        Unit::B,
+        encode_br_wexit(&[0, 0x40]),
+        Insn::BrWexit,
+        "br.wexit",
+    );
+    slot_roundtrip(Unit::B, encode_brp(&[0, 0x40, 0x1230]), Insn::Brp, "brp");
+    slot_roundtrip(Unit::B, encode_brp_ind(&[2, 0x1230]), Insn::BrpInd, "brp");
+    slot_roundtrip(
+        Unit::B,
+        encode_brp_ret(&[6, 0x1230]),
+        Insn::BrpRet,
+        "brp.ret",
+    );
+    // ヒント桁は受理される（無視する近似）。
+    let w = encode_br_cond(&[0, 0x40]).unwrap();
+    assert_eq!(
+        bundle::decode_slot(Unit::B, w | (0b110u128 << 33), CPU),
+        Some(Insn::BrCond)
+    );
+    // X 系: brl.cond / brl.call（82 ビット語、Unit::X 文脈）。
+    slot_roundtrip(
+        Unit::X,
+        encode_brl_cond(&[0, 0x4000]),
+        Insn::BrlCond,
+        "brl.cond",
+    );
+    slot_roundtrip(
+        Unit::X,
+        encode_brl_call(&[0, 1, 0x4000]),
+        Insn::BrlCall,
+        "brl.call",
+    );
+}
+
+#[test]
+fn ia7_indirect_branch() {
+    let mut env = env2();
+    // BR 間接。ターゲットの下位 4 ビットは捨てる。
+    env.backend.set(sem::br_ref(2), 0x2043);
+    x(
+        &mut env,
+        Insn::BrCondInd,
+        encode_br_cond_ind(&[0, 2]).unwrap(),
+    );
+    assert_eq!(taken(&env), Some(0x2040));
+    // qp 偽では飛ばない。
+    env.backend.ctrl = Ctrl::Fallthrough;
+    let ok = x(
+        &mut env,
+        Insn::BrCondInd,
+        encode_br_cond_ind(&[6, 2]).unwrap(),
+    );
+    assert!(!ok);
+    assert_eq!(taken(&env), None);
+}
+
+#[test]
+fn ia7_call_link_and_frame() {
+    let mut env = env2();
+    // 呼び出し側フレーム sof=10, sol=4, sor=0, EC=3。
+    let cfm0 = 10 | (4 << 7);
+    env.backend.set(sem::cfm_ref(), cfm0);
+    set_arv(&mut env, EC_OFF, 3);
+    x(
+        &mut env,
+        Insn::BrCall,
+        encode_br_call(&[0, 1, 0x40]).unwrap(),
+    );
+    assert_eq!(taken(&env), Some(0x1040));
+    // リンク値 = 次バンドル先頭（IP+16）。
+    assert_eq!(env.backend.get(sem::br_ref(1)), 0x1010);
+    // pfs = 旧 cfm（pfm）| ec<<58（pec）。
+    assert_eq!(arv(&mut env, PFS_OFF), cfm0 | (3u64 << 58));
+    // 新 CFM: sof=sof-sol=6、sol=sor=0、rrb 全クリア。
+    assert_eq!(arv(&mut env, CFM_OFF), 6);
+    // フレーム基底が sol 分進む。
+    assert_eq!(arv(&mut env, GB_OFF), 4);
+    // qp 偽の call はリンクもフレームも書かない。
+    let mut env = env2();
+    env.backend.set(sem::cfm_ref(), cfm0);
+    let ok = x(
+        &mut env,
+        Insn::BrCall,
+        encode_br_call(&[6, 1, 0x40]).unwrap(),
+    );
+    assert!(!ok);
+    assert_eq!(env.backend.get(sem::br_ref(1)), 0);
+    assert_eq!(arv(&mut env, CFM_OFF), cfm0);
+    assert_eq!(arv(&mut env, GB_OFF), 0);
+}
+
+#[test]
+fn ia7_indirect_call_and_ret() {
+    let mut env = env2();
+    let cfm0 = 10 | (4 << 7);
+    env.backend.set(sem::cfm_ref(), cfm0);
+    set_arv(&mut env, EC_OFF, 5);
+    env.backend.set(sem::br_ref(3), 0x5007);
+    x(
+        &mut env,
+        Insn::BrCallInd,
+        encode_br_call_ind(&[0, 6, 3]).unwrap(),
+    );
+    // ターゲットの下位 4 ビットは捨てる。
+    assert_eq!(taken(&env), Some(0x5000));
+    assert_eq!(env.backend.get(sem::br_ref(6)), 0x1010);
+    assert_eq!(arv(&mut env, GB_OFF), 4);
+    // ret: pfs に戻すフレームを仕込み、b0 経由で戻る。
+    let mut env = env2();
+    let pfm = 20 | (6 << 7) | (1 << 14); // sof=20 sol=6 sor=1
+    set_arv(&mut env, PFS_OFF, pfm | (7u64 << 58));
+    env.backend.set(sem::cfm_ref(), 5);
+    set_arv(&mut env, GB_OFF, 6);
+    env.backend.set(sem::br_ref(0), 0x8003);
+    x(&mut env, Insn::BrRet, encode_br_ret(&[0, 0]).unwrap());
+    assert_eq!(taken(&env), Some(0x8000));
+    assert_eq!(arv(&mut env, CFM_OFF), pfm);
+    assert_eq!(arv(&mut env, EC_OFF), 7);
+    // gr_base が sol 分戻る（6-6=0）。
+    assert_eq!(arv(&mut env, GB_OFF), 0);
+}
+
+#[test]
+fn ia7_cloop() {
+    let mut env = env2();
+    // LC!=0 → LC-- で成立。ターゲットはバンドル基準 IP 相対。
+    set_arv(&mut env, LC_OFF, 3);
+    xs(
+        &mut env,
+        Insn::BrCloop,
+        encode_br_cloop(&[0, 0x40]).unwrap(),
+        2,
+    );
+    assert_eq!(taken(&env), Some(0x1040));
+    assert_eq!(arv(&mut env, LC_OFF), 2);
+    // LC==0 → 不成立、LC 据え置き。
+    env.backend.ctrl = Ctrl::Fallthrough;
+    set_arv(&mut env, LC_OFF, 0);
+    xs(
+        &mut env,
+        Insn::BrCloop,
+        encode_br_cloop(&[0, 0x40]).unwrap(),
+        2,
+    );
+    assert_eq!(taken(&env), None);
+    assert_eq!(arv(&mut env, LC_OFF), 0);
+    // qp 場が偽の述語を指しても LC は書かれ、LC!=0 なら成立する
+    // （cloop は qp を条件にも抑制にも使わない）。
+    env.backend.ctrl = Ctrl::Fallthrough;
+    set_arv(&mut env, LC_OFF, 3);
+    xs(
+        &mut env,
+        Insn::BrCloop,
+        encode_br_cloop(&[6, 0x40]).unwrap(),
+        2,
+    );
+    assert_eq!(taken(&env), Some(0x1040));
+    assert_eq!(arv(&mut env, LC_OFF), 2);
+    // スロット 2 限定。0/1 は成立の有無に関わらず TRAP_ILL。
+    let w = encode_br_cloop(&[0, 0x40]).unwrap();
+    assert_eq!(xs_err(&mut env, Insn::BrCloop, w, 0), sem::TRAP_ILL);
+    assert_eq!(xs_err(&mut env, Insn::BrCloop, w, 1), sem::TRAP_ILL);
+    // qp 偽の述語を指してもスロット規則は同じ。
+    let w = encode_br_cloop(&[6, 0x40]).unwrap();
+    assert_eq!(xs_err(&mut env, Insn::BrCloop, w, 0), sem::TRAP_ILL);
+}
+
+#[test]
+fn ia7_ctop_cexit() {
+    let mut env = env2();
+    // sof=16, sor=4（回転域 32）。LC=5 → prolog/kernel:
+    // LC--・PR63=1・RRB--、ctop は成立。
+    env.backend.set(sem::cfm_ref(), 16 | (4 << 14));
+    set_arv(&mut env, LC_OFF, 5);
+    xs(
+        &mut env,
+        Insn::BrCtop,
+        encode_br_ctop(&[0, 0x80]).unwrap(),
+        2,
+    );
+    assert_eq!(taken(&env), Some(0x1080));
+    assert_eq!(arv(&mut env, LC_OFF), 4);
+    // PR[63]=1 は仮想 p63 への書き込み（rrb.pr=0 では物理 63 に一致）。
+    // 回転後は物理 63 が仮想 p16=次段 kernel 述語として読める。
+    assert_ne!(env.backend.get(sem::pr_ref()) & (1 << 63), 0);
+    assert!(sem::pred(&env.backend, 16));
+    assert_eq!(cff(&mut env, cfm_bit::RRB_GR, 7), 31);
+    assert_eq!(cff(&mut env, cfm_bit::RRB_FR, 7), 95);
+    assert_eq!(cff(&mut env, cfm_bit::RRB_PR, 6), 47);
+    // 2 周目: rrb.pr=47 のまま仮想 p63 に書くと物理 62 に落ち、
+    // 回転で rrb.pr=46 になり仮想 p16 は再び 1（段述語が継続）。
+    // 物理固定ビットに書く実装だと 3 周目以降が揃わない。
+    set_arv(&mut env, LC_OFF, 5);
+    xs(
+        &mut env,
+        Insn::BrCtop,
+        encode_br_ctop(&[0, 0x80]).unwrap(),
+        2,
+    );
+    assert_eq!(cff(&mut env, cfm_bit::RRB_PR, 6), 46);
+    assert!(sem::pred(&env.backend, 16));
+    assert!(sem::pred(&env.backend, 17));
+    // epilog: LC=0, EC=3 → EC>1 で ctop 成立・EC--・RRB--・PR63=0。
+    let mut env = env2();
+    env.backend.set(sem::cfm_ref(), 16 | (4 << 14));
+    set_arv(&mut env, EC_OFF, 3);
+    xs(
+        &mut env,
+        Insn::BrCtop,
+        encode_br_ctop(&[0, 0x80]).unwrap(),
+        2,
+    );
+    assert_eq!(taken(&env), Some(0x1080));
+    assert_eq!(arv(&mut env, EC_OFF), 2);
+    // PR[63]=0 は仮想 p63 への書き込み（rrb.pr=0 で物理 63 と一致）。
+    assert_eq!(env.backend.get(sem::pr_ref()) & (1 << 63), 0);
+    assert_eq!(cff(&mut env, cfm_bit::RRB_GR, 7), 31);
+    // 最終周: LC=0, EC=1 → ctop 不成立だが EC--・最終回転は走る。
+    let mut env = env2();
+    env.backend.set(sem::cfm_ref(), 16 | (4 << 14));
+    set_arv(&mut env, EC_OFF, 1);
+    xs(
+        &mut env,
+        Insn::BrCtop,
+        encode_br_ctop(&[0, 0x80]).unwrap(),
+        2,
+    );
+    assert_eq!(taken(&env), None);
+    assert_eq!(arv(&mut env, EC_OFF), 0);
+    assert_eq!(cff(&mut env, cfm_bit::RRB_GR, 7), 31);
+    // cexit: LC=0, EC=1 → 成立（出口）。LC=5 では不成立。
+    let mut env = env2();
+    env.backend.set(sem::cfm_ref(), 16 | (4 << 14));
+    set_arv(&mut env, EC_OFF, 1);
+    xs(
+        &mut env,
+        Insn::BrCexit,
+        encode_br_cexit(&[0, 0x80]).unwrap(),
+        2,
+    );
+    assert_eq!(taken(&env), Some(0x1080));
+    assert_eq!(arv(&mut env, EC_OFF), 0);
+    let mut env = env2();
+    set_arv(&mut env, LC_OFF, 5);
+    xs(
+        &mut env,
+        Insn::BrCexit,
+        encode_br_cexit(&[0, 0x80]).unwrap(),
+        2,
+    );
+    assert_eq!(taken(&env), None);
+    assert_eq!(arv(&mut env, LC_OFF), 4);
+    // sor=0 では rrb.gr は動かない（回転域なし）。
+    let mut env = env2();
+    env.backend
+        .set(sem::cfm_ref(), 16 | (2 << 18) | (3 << 25) | (7 << 32));
+    set_arv(&mut env, LC_OFF, 5);
+    xs(
+        &mut env,
+        Insn::BrCtop,
+        encode_br_ctop(&[0, 0x80]).unwrap(),
+        2,
+    );
+    assert_eq!(cff(&mut env, cfm_bit::RRB_GR, 7), 2);
+    assert_eq!(cff(&mut env, cfm_bit::RRB_FR, 7), 2); // (3+95)%96
+    assert_eq!(cff(&mut env, cfm_bit::RRB_PR, 6), 6); // (7+47)%48
+}
+
+#[test]
+fn ia7_wtop_wexit() {
+    // wtop: qp=1 → kernel。成立・EC 据え置き・RRB--・PR63=0。
+    let mut env = env2();
+    env.backend.set(sem::cfm_ref(), 16 | (4 << 14));
+    sem::pr_set(&mut env.backend, 1 << 6);
+    set_arv(&mut env, EC_OFF, 3);
+    xs(
+        &mut env,
+        Insn::BrWtop,
+        encode_br_wtop(&[6, 0x80]).unwrap(),
+        2,
+    );
+    assert_eq!(taken(&env), Some(0x1080));
+    assert_eq!(arv(&mut env, EC_OFF), 3);
+    assert_eq!(cff(&mut env, cfm_bit::RRB_GR, 7), 31);
+    // wtop: qp=0, EC=3 → EC>1 で成立・EC--・回転。
+    let mut env = env2();
+    env.backend.set(sem::cfm_ref(), 16 | (4 << 14));
+    set_arv(&mut env, EC_OFF, 3);
+    xs(
+        &mut env,
+        Insn::BrWtop,
+        encode_br_wtop(&[6, 0x80]).unwrap(),
+        2,
+    );
+    assert_eq!(taken(&env), Some(0x1080));
+    assert_eq!(arv(&mut env, EC_OFF), 2);
+    // wtop: qp=0, EC=1 → 不成立だが EC--・最終回転は走る。
+    let mut env = env2();
+    env.backend.set(sem::cfm_ref(), 16 | (4 << 14));
+    set_arv(&mut env, EC_OFF, 1);
+    xs(
+        &mut env,
+        Insn::BrWtop,
+        encode_br_wtop(&[6, 0x80]).unwrap(),
+        2,
+    );
+    assert_eq!(taken(&env), None);
+    assert_eq!(arv(&mut env, EC_OFF), 0);
+    assert_eq!(cff(&mut env, cfm_bit::RRB_GR, 7), 31);
+    // wexit: qp=0, EC=1 → 成立（出口）。qp=1 では不成立だが
+    // 回転は走る（kernel 継続の副作用）。
+    let mut env = env2();
+    env.backend.set(sem::cfm_ref(), 16 | (4 << 14));
+    set_arv(&mut env, EC_OFF, 1);
+    xs(
+        &mut env,
+        Insn::BrWexit,
+        encode_br_wexit(&[6, 0x80]).unwrap(),
+        2,
+    );
+    assert_eq!(taken(&env), Some(0x1080));
+    let mut env = env2();
+    env.backend.set(sem::cfm_ref(), 16 | (4 << 14));
+    sem::pr_set(&mut env.backend, 1 << 6);
+    xs(
+        &mut env,
+        Insn::BrWexit,
+        encode_br_wexit(&[6, 0x80]).unwrap(),
+        2,
+    );
+    assert_eq!(taken(&env), None);
+    assert_eq!(cff(&mut env, cfm_bit::RRB_GR, 7), 31);
+    // スロット 0 では qp 真偽に関わらず TRAP_ILL。
+    let w = encode_br_wtop(&[6, 0x80]).unwrap();
+    assert_eq!(xs_err(&mut env, Insn::BrWtop, w, 0), sem::TRAP_ILL);
+}
+
+#[test]
+fn ia7_rotation_renames() {
+    let mut env = env2();
+    // cfm: sof=16, sol=4, sor=1（末尾 8 個が回転域）, rrb.gr=2。
+    // 仮想 r40（回転域先頭 off=8）→ 物理 32+((8+2)%8+0)= r42。
+    // 回転域外の r36（off=4）は素通りで物理 32+4=r36。
+    env.backend
+        .set(sem::cfm_ref(), 16 | (4 << 7) | (1 << 14) | (2 << 18));
+    env.backend.set(sem::gr_ref(42), 0x1234);
+    env.backend.set(sem::gr_ref(36), 0x5678);
+    assert_eq!(sem::gr_get(&env.backend, 40), 0x1234);
+    assert_eq!(sem::gr_get(&env.backend, 36), 0x5678);
+    // 書き込みも同じ改名を通る。
+    sem::gr_set(&mut env.backend, 47, 0x9abc); // off=15 → 32+((15-8+2)%8+8)=32+9=41
+    assert_eq!(env.backend.get(sem::gr_ref(41)), 0x9abc);
+    // rrb.pr: 仮想 p16 → 物理 16+((16-16+5)%48)=21。
+    env.backend.set(sem::cfm_ref(), 16 | (5 << 32));
+    env.backend.set(sem::pr_ref(), 1 << 21);
+    assert!(sem::pred(&env.backend, 16));
+    assert!(!sem::pred(&env.backend, 21)); // 仮想 21→物理 26
+    // gr_base: フレーム基底がずれると写先もずれる。
+    let mut env = env2();
+    env.backend.set(sem::cfm_ref(), 16 | (4 << 7));
+    set_arv(&mut env, GB_OFF, 10);
+    env.backend.set(sem::gr_ref(42), 0x77); // 32+((10+0)%96)
+    assert_eq!(sem::gr_get(&env.backend, 32), 0x77);
+}
+
+#[test]
+fn ia7_brl() {
+    let mut env = env2();
+    // tgt60 は <<4 済み変位。正・負の両方でバンドル基準 IP 相対。
+    x(
+        &mut env,
+        Insn::BrlCond,
+        encode_brl_cond(&[0, 0x4000]).unwrap(),
+    );
+    assert_eq!(taken(&env), Some(0x5000));
+    env.backend.ctrl = Ctrl::Fallthrough;
+    x(
+        &mut env,
+        Insn::BrlCond,
+        encode_brl_cond(&[0, (-0x20i64) as u64]).unwrap(),
+    );
+    assert_eq!(taken(&env), Some(0x0fe0));
+    // brl.call もリンクとフレーム効果を持つ。
+    let mut env = env2();
+    env.backend.set(sem::cfm_ref(), 10 | (4 << 7));
+    x(
+        &mut env,
+        Insn::BrlCall,
+        encode_brl_call(&[0, 1, 0x4000]).unwrap(),
+    );
+    assert_eq!(taken(&env), Some(0x5000));
+    assert_eq!(env.backend.get(sem::br_ref(1)), 0x1010);
+    assert_eq!(arv(&mut env, CFM_OFF), 6);
+    // Itanium 2 専用。itanium のみではデコードしない。
+    let w = encode_brl_cond(&[0, 0x100]).unwrap();
+    assert_eq!(bundle::decode_slot(Unit::X, w, FEAT_ITANIUM), None);
+    assert_eq!(bundle::decode_slot(Unit::X, w, CPU), Some(Insn::BrlCond));
+}
+
+#[test]
+fn ia7_brp_is_noop() {
+    let mut env = env2();
+    set_arv(&mut env, LC_OFF, 5);
+    set_arv(&mut env, EC_OFF, 3);
+    x(&mut env, Insn::Brp, encode_brp(&[0, 0x40, 0x1230]).unwrap());
+    x(
+        &mut env,
+        Insn::BrpInd,
+        encode_brp_ind(&[2, 0x1230]).unwrap(),
+    );
+    x(
+        &mut env,
+        Insn::BrpRet,
+        encode_brp_ret(&[6, 0x1230]).unwrap(),
+    );
+    // 建築状態に影響しない。
+    assert_eq!(arv(&mut env, LC_OFF), 5);
+    assert_eq!(arv(&mut env, EC_OFF), 3);
+    assert_eq!(taken(&env), None);
+}
+
+#[test]
+fn ia7_br_ia_traps() {
+    let mut env = env2();
+    // br.ia は IA-32 モード遷移。ユーザーモード範囲外なので
+    // qp 場の真偽に関わらず常に TRAP_ILL。
+    assert_eq!(
+        xerr(&mut env, Insn::BrIa, encode_br_ia(&[0, 2]).unwrap()),
+        sem::TRAP_ILL
+    );
+    assert_eq!(
+        xerr(&mut env, Insn::BrIa, encode_br_ia(&[6, 2]).unwrap()),
+        sem::TRAP_ILL
+    );
+}
+
+#[test]
+fn ia7_alloc() {
+    let mut env = env2();
+    set_arv(&mut env, PFS_OFF, 0xdead);
+    x(
+        &mut env,
+        Insn::Alloc,
+        encode_alloc(&[33, 20, 8, 2]).unwrap(),
+    );
+    // r1 = 旧 ar.pfs、CFM は即時更新。
+    assert_eq!(gr(&env, 33), 0xdead);
+    assert_eq!(cff(&mut env, cfm_bit::SOF, 7), 20);
+    assert_eq!(cff(&mut env, cfm_bit::SOL, 7), 8);
+    assert_eq!(cff(&mut env, cfm_bit::SOR, 4), 2);
+    // sof>96 / sol>sof / sor*8>sof は不正命令。
+    assert_eq!(
+        xerr(
+            &mut env,
+            Insn::Alloc,
+            encode_alloc(&[33, 97, 0, 0]).unwrap()
+        ),
+        sem::TRAP_ILL
+    );
+    assert_eq!(
+        xerr(
+            &mut env,
+            Insn::Alloc,
+            encode_alloc(&[33, 10, 20, 0]).unwrap()
+        ),
+        sem::TRAP_ILL
+    );
+    assert_eq!(
+        xerr(
+            &mut env,
+            Insn::Alloc,
+            encode_alloc(&[33, 10, 0, 2]).unwrap()
+        ),
+        sem::TRAP_ILL
+    );
+    // sor を変えるとき rrb が残っていれば予約場フォールト。
+    let mut env = env2();
+    env.backend.set(sem::cfm_ref(), 20 | (1 << 18));
+    assert_eq!(
+        xerr(
+            &mut env,
+            Insn::Alloc,
+            encode_alloc(&[33, 20, 0, 2]).unwrap()
+        ),
+        sem::TRAP_ILL
+    );
+}
+
+#[test]
+fn ia7_cover_and_clrrrb() {
+    let mut env = env2();
+    // cover: 旧フレーム（sof=12）を丸ごと保存域にして CFM=0。
+    env.backend.set(sem::cfm_ref(), 12 | (5 << 7) | (1 << 14));
+    x(&mut env, Insn::Cover, encode_cover(&[]).unwrap());
+    assert_eq!(arv(&mut env, CFM_OFF), 0);
+    assert_eq!(arv(&mut env, GB_OFF), 12);
+    // clrrrb は全 rrb を、clrrrb.pr は rrb.pr だけをクリアする。
+    let mut env = env2();
+    let cfm0 = 16 | (4 << 7) | (1 << 14) | (3 << 18) | (7 << 25) | (9 << 32);
+    env.backend.set(sem::cfm_ref(), cfm0);
+    x(&mut env, Insn::ClrrrbPr, encode_clrrrb_pr(&[]).unwrap());
+    assert_eq!(cff(&mut env, cfm_bit::RRB_PR, 6), 0);
+    assert_eq!(cff(&mut env, cfm_bit::RRB_GR, 7), 3);
+    assert_eq!(cff(&mut env, cfm_bit::RRB_FR, 7), 7);
+    assert_eq!(cff(&mut env, cfm_bit::SOF, 7), 16);
+    env.backend.set(sem::cfm_ref(), cfm0);
+    x(&mut env, Insn::Clrrrb, encode_clrrrb(&[]).unwrap());
+    assert_eq!(cff(&mut env, cfm_bit::RRB_GR, 7), 0);
+    assert_eq!(cff(&mut env, cfm_bit::RRB_FR, 7), 0);
+    assert_eq!(cff(&mut env, cfm_bit::RRB_PR, 6), 0);
+    assert_eq!(cff(&mut env, cfm_bit::SOF, 7), 16);
 }

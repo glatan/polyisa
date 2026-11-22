@@ -503,24 +503,29 @@ pub fn insn_unit(insn: Insn) -> Unit {
         | Insn::BreakF
         | Insn::NopF
         | Insn::HintF => Unit::F,
-        Insn::BrCondSptkFew
-        | Insn::BrCloopSptkFew
-        | Insn::BrCallSptkFew
-        | Insn::BrRetSptkFew
-        | Insn::BrCallIndSptkFew
-        | Insn::BrpSptk
+        Insn::BrCond
+        | Insn::BrWexit
+        | Insn::BrWtop
+        | Insn::BrCloop
+        | Insn::BrCexit
+        | Insn::BrCtop
+        | Insn::BrCall
+        | Insn::BrCondInd
+        | Insn::BrIa
+        | Insn::BrRet
+        | Insn::BrCallInd
+        | Insn::Brp
+        | Insn::BrpInd
+        | Insn::BrpRet
         | Insn::BreakB
         | Insn::NopB
         | Insn::HintB
         | Insn::Cover
-        | Insn::Clrrb
-        | Insn::ClrrbPr => Unit::B,
-        Insn::Movl
-        | Insn::BrlCondSptkFew
-        | Insn::BrlCallSptkFew
-        | Insn::BreakX
-        | Insn::NopX
-        | Insn::HintX => Unit::X,
+        | Insn::Clrrrb
+        | Insn::ClrrrbPr => Unit::B,
+        Insn::Movl | Insn::BrlCond | Insn::BrlCall | Insn::BreakX | Insn::NopX | Insn::HintX => {
+            Unit::X
+        }
     }
 }
 

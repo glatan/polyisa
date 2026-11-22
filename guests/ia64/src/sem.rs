@@ -16,7 +16,7 @@ use polyisa_engine::interp::{Ctrl, InterpBackend, InterpExit};
 use polyisa_mem::{Access, AccessKind, Align, Endian};
 use polyisa_sem::{Backend as _, ExceptionKind, GuestException, StateRef, W8, W16, W32, W64};
 
-use crate::{CpuState, INSNS, Insn, ar, extract_ops};
+use crate::{CpuState, INSNS, Insn, ar, cfm_bit, extract_ops};
 
 /// `handle_trap` に渡る内部番号。`break` は即値（immu21/imm62）を
 /// そのまま code に載せるため、ぶつからない値を不正命令用に取る。
@@ -59,22 +59,66 @@ fn set64(b: &mut InterpBackend, r: StateRef<W64>, v: u64) {
     b.state[off..off + 8].copy_from_slice(&v.to_le_bytes());
 }
 
-/// GR r_i の状態面。
+/// GR r_i の状態面。`i` は物理番号。
 #[must_use]
 pub fn gr_ref(i: u32) -> StateRef<W64> {
     StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, gr) + (i as usize) * 8)
 }
 
-/// GR r_i の値。r0 は常に 0。
-#[must_use]
-pub fn gr_get(b: &InterpBackend, i: u32) -> u64 {
-    if i == 0 { 0 } else { get64(b, gr_ref(i)) }
+/// CFM の [lo, lo+w) フィールド。
+fn cf(cfm: u64, lo: u32, w: u32) -> u64 {
+    (cfm >> lo) & mask(w)
 }
 
-/// GR r_i への代入。r0 への書き込みは捨てる。
+/// CFM の [lo, lo+w) フィールドへ書く。
+fn cf_put(cfm: u64, lo: u32, w: u32, v: u64) -> u64 {
+    (cfm & !(mask(w) << lo)) | ((v & mask(w)) << lo)
+}
+
+/// フレーム基底（物理リングの r32 写先オフセット）の面。
+fn gr_base_ref() -> StateRef<W64> {
+    StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, gr_base))
+}
+
+/// 仮想 GR r_i → 物理番号。r0-r31 は静的で等番号。フレーム域
+/// r32-r(31+sof) は gr_base で写し、末尾 8·sor の回転域ではさらに
+/// rrb.gr 分だけ回す（`phys = base+((v-base+rrb) mod 8sor)`）。
+/// フレーム外の r_i は等番号に落とす近似（建築上は不定領域）。
+/// Ref: SPEC-IA64-SDM (Rev 2.3).
+fn phys_gr(b: &InterpBackend, i: u32) -> u32 {
+    if i < 32 {
+        return i;
+    }
+    let cfm = get64(b, cfm_ref());
+    let (sof, sor) = (cf(cfm, cfm_bit::SOF, 7), cf(cfm, cfm_bit::SOR, 4));
+    let off = u64::from(i) - 32;
+    if off >= sof {
+        return i;
+    }
+    let off = if sor != 0 && off >= sof - 8 * sor {
+        let rrb = cf(cfm, cfm_bit::RRB_GR, 7);
+        let base = sof - 8 * sor;
+        base + (off - base + rrb) % (8 * sor)
+    } else {
+        off
+    };
+    32 + ((get64(b, gr_base_ref()) + off) % 96) as u32
+}
+
+/// 仮想 GR r_i の値。r0 は常に 0。
+#[must_use]
+pub fn gr_get(b: &InterpBackend, i: u32) -> u64 {
+    if i == 0 {
+        0
+    } else {
+        get64(b, gr_ref(phys_gr(b, i)))
+    }
+}
+
+/// 仮想 GR r_i への代入。r0 への書き込みは捨てる。
 pub fn gr_set(b: &mut InterpBackend, i: u32, v: u64) {
     if i != 0 {
-        set64(b, gr_ref(i), v);
+        set64(b, gr_ref(phys_gr(b, i)), v);
     }
 }
 
@@ -88,7 +132,7 @@ fn nat_off(i: u32) -> (usize, u64) {
 /// GR r_i の NaT ビット。
 #[must_use]
 pub fn nat_get(b: &InterpBackend, i: u32) -> bool {
-    let (off, mask) = nat_off(i);
+    let (off, mask) = nat_off(phys_gr(b, i));
     let v = u64::from_le_bytes(b.state[off..off + 8].try_into().expect("w64"));
     v & mask != 0
 }
@@ -99,7 +143,7 @@ pub fn nat_set(b: &mut InterpBackend, i: u32, nat: bool) {
     if i == 0 {
         return;
     }
-    let (off, mask) = nat_off(i);
+    let (off, mask) = nat_off(phys_gr(b, i));
     let mut v = u64::from_le_bytes(b.state[off..off + 8].try_into().expect("w64"));
     if nat {
         v |= mask;
@@ -136,19 +180,36 @@ pub fn pr_set(b: &mut InterpBackend, v: u64) {
     set64(b, pr_ref(), v | 1);
 }
 
+/// 仮想 PR p_i → 物理番号。p0-p15 は静的で等番号。回転域
+/// p16-p63 では rrb.pr 分だけ回す（`phys = 16+((i-16+rrb) mod 48)`）。
+/// Ref: SPEC-IA64-SDM (Rev 2.3).
+fn phys_pr(b: &InterpBackend, i: u32) -> u32 {
+    if i < 16 {
+        return i;
+    }
+    let cfm = get64(b, cfm_ref());
+    let rrb = cf(cfm, cfm_bit::RRB_PR, 6);
+    if rrb == 0 {
+        i
+    } else {
+        16 + ((i - 16 + rrb as u32) % 48)
+    }
+}
+
 /// 述語 p_i の値。
 #[must_use]
 pub fn pred(b: &InterpBackend, i: u32) -> bool {
-    (pr_get(b) >> i) & 1 != 0
+    (pr_get(b) >> phys_pr(b, i)) & 1 != 0
 }
 
-/// 述語 p_i への代入（p0 は `pr_set` が 1 に保つ）。
+/// 述語 p_i への代入（p0 は `pr_set` が 1 に保つ）。`i` は仮想番号。
 fn pr_bit(b: &mut InterpBackend, i: u32, v: bool) {
     let mut p = pr_get(b);
+    let phys = phys_pr(b, i);
     if v {
-        p |= 1u64 << i;
+        p |= 1u64 << phys;
     } else {
-        p &= !(1u64 << i);
+        p &= !(1u64 << phys);
     }
     pr_set(b, p);
 }
@@ -169,6 +230,149 @@ pub fn ip_ref() -> StateRef<W64> {
 #[must_use]
 pub fn cfm_ref() -> StateRef<W64> {
     StateRef::<W64>::from_offset(core::mem::offset_of!(CpuState, cfm))
+}
+
+/// ループ分岐（B2）か。これらはスロット 2 限定で、qp を副作用の
+/// 抑制には使わない特別系（SPEC-IA64-SDM: cloop/ctop/cexit は
+/// LC/EC/RRB/PR[63] を qp に関わらず書き、wtop/wexit は EC/
+/// RRB/PR[63] を同じく書く）。
+fn is_loop_br(insn: Insn) -> bool {
+    matches!(
+        insn,
+        Insn::BrCloop | Insn::BrCtop | Insn::BrCexit | Insn::BrWtop | Insn::BrWexit
+    )
+}
+
+/// rotate_regs(): 各 RRB を対応回転域の大きさを法に 1 減らす
+/// （GR: 8·sor（sor==0 なら据え置き）、FR: 96、PR: 48）。
+/// Ref: SPEC-IA64-SDM (Rev 2.3) Vol3 疑似コード関数表。
+fn rotate_regs(b: &mut InterpBackend) {
+    let mut cfm = get64(b, cfm_ref());
+    let sor = cf(cfm, cfm_bit::SOR, 4);
+    if sor != 0 {
+        let n = 8 * sor;
+        let v = (cf(cfm, cfm_bit::RRB_GR, 7) + n - 1) % n;
+        cfm = cf_put(cfm, cfm_bit::RRB_GR, 7, v);
+    }
+    let v = (cf(cfm, cfm_bit::RRB_FR, 7) + 95) % 96;
+    cfm = cf_put(cfm, cfm_bit::RRB_FR, 7, v);
+    let v = (cf(cfm, cfm_bit::RRB_PR, 6) + 47) % 48;
+    cfm = cf_put(cfm, cfm_bit::RRB_PR, 6, v);
+    set64(b, cfm_ref(), cfm);
+}
+
+/// ループ分岐（B2）の意味論。`ip` の下位 4 ビットはスロット番号
+/// で、2 以外なら Illegal Operation fault（成立の有無に関わら
+/// ず）。戻り値のエラーは TRAP_ILL のみ。
+/// Ref: SPEC-IA64-SDM (Rev 2.3) Vol3 br。
+fn exec_loop_br(b: &mut InterpBackend, insn: Insn, ops: &[u64], ip: u64) -> Result<(), InterpExit> {
+    if ip & 0xf != 2 {
+        return Err(trap(TRAP_ILL));
+    }
+    let lc_ref = ar_ref(ar::LC as u64).expect("lc");
+    let ec_ref = ar_ref(ar::EC as u64).expect("ec");
+    let (lc, ec) = (get64(b, lc_ref), get64(b, ec_ref));
+    let qp = ops[0] as u32;
+    let taken = match insn {
+        // cloop: LC!=0 なら LC-- で成立。LC==0 では据え置き。
+        Insn::BrCloop => {
+            if lc != 0 {
+                set64(b, lc_ref, lc - 1);
+                true
+            } else {
+                false
+            }
+        }
+        // ctop/cexit: LC!=0（prolog/kernel）は LC--・PR63=1・回転。
+        // LC==0 && EC!=0（epilog）は EC--・PR63=0・回転。LC==EC==0
+        // では PR63=0 のみ（回転停止）。
+        // PR[63] は仮想（改名済み）p63 への書き込みで、rrb.pr 回転と
+        // 対になって「次周の仮想 p16 に立つ」仕組みを作る。物理固定
+        // ビットに書くと 3 周目以降の段述語が揃わない。
+        Insn::BrCtop | Insn::BrCexit => {
+            if lc != 0 {
+                set64(b, lc_ref, lc - 1);
+                pr_bit(b, 63, true);
+                rotate_regs(b);
+            } else if ec != 0 {
+                set64(b, ec_ref, ec - 1);
+                pr_bit(b, 63, false);
+                rotate_regs(b);
+            } else {
+                pr_bit(b, 63, false);
+            }
+            let t = lc != 0 || ec > 1;
+            (insn == Insn::BrCtop) == t
+        }
+        // wtop/wexit: qp が条件。qp==1 では回転のみ（EC 据え置き
+        // kernel/prolog）、qp==0 && EC!=0 では EC--・回転、
+        // qp==EC==0 では停止。PR63 は常に 0。
+        _ => {
+            let q = pred(b, qp);
+            if q {
+                pr_bit(b, 63, false);
+                rotate_regs(b);
+            } else if ec != 0 {
+                set64(b, ec_ref, ec - 1);
+                pr_bit(b, 63, false);
+                rotate_regs(b);
+            } else {
+                pr_bit(b, 63, false);
+            }
+            let t = q || ec > 1;
+            (insn == Insn::BrWtop) == t
+        }
+    };
+    if taken {
+        let target = (ip & !0xf).wrapping_add(sext(ops[1], 25));
+        b.ctrl = Ctrl::Jump(target);
+    }
+    Ok(())
+}
+
+/// br.call/brl.call の共通動作。リンク（次バンドル先頭 = IP+16）
+/// を b_link に置き、現 CFM を pfs.pfm、EC を pfs.pec に退避する
+/// （ppl はユーザーモードで観測しない）。被呼び出し側の新規
+/// フレームは呼び出し側 out 域（sof-sol、sol=sor=0、rrb=0）。
+/// RSE のバッキングストア保全（rse_preserve_frame）は IA8 の範囲
+/// で、ここでは gr_base を sol 分だけ進める最小モデルとする。
+/// Ref: SPEC-IA64-SDM (Rev 2.3) Vol3 br/brl。
+fn br_call_common(b: &mut InterpBackend, link: u32, target: u64, ip: u64) {
+    set64(b, br_ref(link), (ip & !0xf).wrapping_add(16));
+    let cfm = get64(b, cfm_ref());
+    let ec = get64(b, ar_ref(ar::EC as u64).expect("ec"));
+    let pfs = (cfm & mask(38)) | ((ec & mask(6)) << 58);
+    set64(b, ar_ref(ar::PFS as u64).expect("pfs"), pfs);
+    let sol = cf(cfm, cfm_bit::SOL, 7);
+    let sof = cf(cfm, cfm_bit::SOF, 7);
+    let gb = get64(b, gr_base_ref());
+    set64(b, gr_base_ref(), (gb + sol) % 96);
+    let mut n = cfm;
+    // sol > sof の不整合 CFM（pfs 経由でしか起きない）でも
+    // ホスト側で panic しないよう saturating にする。
+    n = cf_put(n, cfm_bit::SOF, 7, sof.saturating_sub(sol));
+    n = cf_put(n, cfm_bit::SOL, 7, 0);
+    n = cf_put(n, cfm_bit::SOR, 4, 0);
+    n = cf_put(n, cfm_bit::RRB_GR, 7, 0);
+    n = cf_put(n, cfm_bit::RRB_FR, 7, 0);
+    n = cf_put(n, cfm_bit::RRB_PR, 6, 0);
+    set64(b, cfm_ref(), n);
+    b.ctrl = Ctrl::Jump(target);
+}
+
+/// br.ret の共通動作。pfs.pfm/pec で CFM/EC を戻し、gr_base を
+/// 退避時の sol 分だけ戻す。RSE のフレーム復元
+/// （rse_restore_frame・強制ロード）は IA8 の範囲。
+/// Ref: SPEC-IA64-SDM (Rev 2.3) Vol3 br。
+fn br_ret_common(b: &mut InterpBackend, target: u64) {
+    let pfs = get64(b, ar_ref(ar::PFS as u64).expect("pfs"));
+    let pfm = pfs & mask(38);
+    let sol = cf(pfm, cfm_bit::SOL, 7);
+    let gb = get64(b, gr_base_ref());
+    set64(b, gr_base_ref(), (gb + 96 - sol % 96) % 96);
+    set64(b, cfm_ref(), pfm);
+    set64(b, ar_ref(ar::EC as u64).expect("ec"), (pfs >> 58) & mask(6));
+    b.ctrl = Ctrl::Jump(target);
 }
 
 /// PSR{5:0}（ユーザマスク）の面。
@@ -1113,6 +1317,18 @@ fn alat_cmp_reg(b: &InterpBackend, reg: u64) -> bool {
 /// `Ok(true)` は意味論を実行したこと。
 pub fn exec(b: &mut InterpBackend, insn: Insn, word: u128, ip: u64) -> Result<bool, InterpExit> {
     let ops = extract_ops(insn, word);
+    // ループ分岐は qp で副作用が抑制されない特別系（LC/EC/RRB/
+    // PR[63] は qp に関わらず書かれる。SPEC-IA64-SDM Vol3 br）。
+    if is_loop_br(insn) {
+        exec_loop_br(b, insn, &ops, ip)?;
+        return Ok(true);
+    }
+    // br.ia は非述語命令（符号化上 qp=0）で IA-32 モードへの
+    // 移行を行う。IA-32 は Linux ia64 ユーザーモードの対象外
+    // （gaps.md）なので、qp 場の真偽に関わらず常に不正命令。
+    if insn == Insn::BrIa {
+        return Err(trap(TRAP_ILL));
+    }
     if !pred(b, (word & 0x3f) as u32) {
         if is_unc(insn) {
             let (p1, p2) = (ops[1] as u32, ops[2] as u32);
@@ -1741,9 +1957,82 @@ pub fn exec(b: &mut InterpBackend, insn: Insn, word: u128, ip: u64) -> Result<bo
         Insn::Movl => {
             wr_gr(b, ops[1] as u32, ops[2], false);
         }
-        Insn::BrCondSptkFew => {
-            // tgt25c は IP 相対（バンドルアドレス基準、下位 4 ビット 0）。
+        // ---- B 系分岐（IA7）。ターゲットはバンドル基準 IP 相対
+        // （tgt25c/tgt60 は <<4 済み）または BR 間接。Itanium 分岐
+        // は下位 4 ビットを捨てる。予測ヒント（bwh/ih/dh/p）は
+        // 受理するが無視する（gaps.md）。
+        Insn::BrCond => {
             b.ctrl = Ctrl::Jump((ip & !0xf).wrapping_add(sext(ops[1], 25)));
+        }
+        Insn::BrCondInd => {
+            b.ctrl = Ctrl::Jump(get64(b, br_ref(ops[1] as u32)) & !0xf);
+        }
+        Insn::BrCall => {
+            let t = (ip & !0xf).wrapping_add(sext(ops[2], 25));
+            br_call_common(b, ops[1] as u32, t, ip);
+        }
+        Insn::BrCallInd => {
+            let t = get64(b, br_ref(ops[2] as u32)) & !0xf;
+            br_call_common(b, ops[1] as u32, t, ip);
+        }
+        Insn::BrRet => {
+            let t = get64(b, br_ref(ops[1] as u32)) & !0xf;
+            br_ret_common(b, t);
+        }
+        // 分岐予測ヒント。建築状態に影響しない（nop 同値。
+        // SPEC-IA64-SDM Vol3 brp）。
+        Insn::Brp | Insn::BrpInd | Insn::BrpRet => {}
+        Insn::BrlCond => {
+            // tgt60 は <<4 済みの 64 ビット変位（bit63 が符号）。
+            b.ctrl = Ctrl::Jump((ip & !0xf).wrapping_add(ops[1]));
+        }
+        Insn::BrlCall => {
+            let t = (ip & !0xf).wrapping_add(ops[2]);
+            br_call_common(b, ops[1] as u32, t, ip);
+        }
+        // ---- フレーム操作（IA7 の CFM 最小モデル。RSE 書き出し
+        // やバッキングストア連携は IA8）。
+        Insn::Alloc => {
+            // ops = [r1, sof, sol, sor]（qp は符号化で 0 固定）。
+            let (r1, sof, sol, sor) = (ops[0] as u32, ops[1], ops[2], ops[3]);
+            if sof > 96 || sol > sof || sor * 8 > sof {
+                return Err(trap(TRAP_ILL));
+            }
+            let cfm = get64(b, cfm_ref());
+            let rrbs = cf(cfm, cfm_bit::RRB_GR, 7)
+                | cf(cfm, cfm_bit::RRB_FR, 7)
+                | cf(cfm, cfm_bit::RRB_PR, 6);
+            if sor != cf(cfm, cfm_bit::SOR, 4) && rrbs != 0 {
+                // Reserved Register/Field fault（trap 語彙は
+                // TRAP_ILL に畳む）。
+                return Err(trap(TRAP_ILL));
+            }
+            // 新フレームで r1 = 旧 ar.pfs を書く（CFM 更新が先。
+            // gr_base は不変。入力域は同じ物理に留まる）。
+            let mut n = cf_put(cfm, cfm_bit::SOF, 7, sof);
+            n = cf_put(n, cfm_bit::SOL, 7, sol);
+            n = cf_put(n, cfm_bit::SOR, 4, sor);
+            set64(b, cfm_ref(), n);
+            let pfs = get64(b, ar_ref(ar::PFS as u64).expect("pfs"));
+            wr_gr(b, r1, pfs, false);
+        }
+        Insn::Cover => {
+            // 旧フレーム全体を保存域にする（新フレームはサイズ 0、
+            // base を旧 sof 分だけ進める。SPEC-IA64-SDM Vol3 cover）。
+            let cfm = get64(b, cfm_ref());
+            let sof = cf(cfm, cfm_bit::SOF, 7);
+            let gb = get64(b, gr_base_ref());
+            set64(b, gr_base_ref(), (gb + sof) % 96);
+            set64(b, cfm_ref(), 0);
+        }
+        Insn::Clrrrb | Insn::ClrrrbPr => {
+            let mut n = get64(b, cfm_ref());
+            if insn == Insn::Clrrrb {
+                n = cf_put(n, cfm_bit::RRB_GR, 7, 0);
+                n = cf_put(n, cfm_bit::RRB_FR, 7, 0);
+            }
+            n = cf_put(n, cfm_bit::RRB_PR, 6, 0);
+            set64(b, cfm_ref(), n);
         }
         _ => return Err(InterpExit::Unimplemented(format!("{insn:?}"))),
     }
