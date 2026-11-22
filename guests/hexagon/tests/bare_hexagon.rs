@@ -160,7 +160,11 @@ fn with_pp(word: u32, pp: u32) -> u32 {
 const NOP: u32 = 0x7f00_0000; // nop（pp は with_pp で付ける）
 const ADD_RI: u32 = 0xb004_00a3; // r3 = add(r4,#5)
 const LDW: u32 = 0x9184_0003; // r3 = memw(r4+#0)
+const STW: u32 = 0xa184_0500; // memw(r4+#0) = r5
 const JUMPR: u32 = 0x5284_0000; // jumpr r4
+const JUMP: u32 = 0x5800_0004; // jump #8
+const IFP0JUMP: u32 = 0x5c00_0004; // if (p0) jump #8
+const CALLR: u32 = 0x50a0_0000; // callr r0
 const RDCR: u32 = 0x6a08_0003; // r3 = c8
 
 #[test]
@@ -492,14 +496,24 @@ fn slot_assignment() {
     assert_eq!(s[0].slot, 0); // 単独 LD は slot0 固定
     let (pkt, _) = packet::split(&[with_pp(JUMPR, 3)]).unwrap();
     let s = packet::expand(&pkt).unwrap();
+    assert_eq!(s[0].slot, 2); // JR は slot 2 固定
+    let (pkt, _) = packet::split(&[with_pp(JUMP, 3)]).unwrap();
+    let s = packet::expand(&pkt).unwrap();
     assert_eq!(s[0].slot, 3); // J は {2,3} の上位
+    let (pkt, _) = packet::split(&[with_pp(CALLR, 3)]).unwrap();
+    let s = packet::expand(&pkt).unwrap();
+    assert_eq!(s[0].slot, 2); // callr も JR 系で slot 2 固定
     let (pkt, _) = packet::split(&[with_pp(RDCR, 3)]).unwrap();
     let s = packet::expand(&pkt).unwrap();
     assert_eq!(s[0].slot, 3); // CR は slot3 固定
     // { J ; ALU32 }（メモリ順 = slot3 → slot0 の単調減少）。
-    let (pkt, _) = packet::split(&[with_pp(JUMPR, 1), with_pp(ADD_RI, 3)]).unwrap();
+    let (pkt, _) = packet::split(&[with_pp(JUMP, 1), with_pp(ADD_RI, 3)]).unwrap();
     let s = packet::expand(&pkt).unwrap();
     assert_eq!((s[0].slot, s[1].slot), (3, 2));
+    // { JR ; ALU32 } → JR は slot 2 固定で ALU32 は下位へ。
+    let (pkt, _) = packet::split(&[with_pp(JUMPR, 1), with_pp(ADD_RI, 3)]).unwrap();
+    let s = packet::expand(&pkt).unwrap();
+    assert_eq!((s[0].slot, s[1].slot), (2, 1));
     // { ALU32 ; LD } → LD が slot0、ALU32 は上位へ。
     let (pkt, _) = packet::split(&[with_pp(ADD_RI, 1), with_pp(LDW, 3)]).unwrap();
     let s = packet::expand(&pkt).unwrap();
@@ -545,6 +559,175 @@ fn new_predicate_producer() {
     let dup = packet::pack_duplex(0x1a4b, 0x1010, Group::A, Group::A).unwrap();
     let (pkt, _) = packet::split(&[p0eq, dup]).unwrap();
     assert!(packet::expand(&pkt).is_ok());
+    // 32 ビット Pd=cmp.gt も生成側になる（cmp.eq だけでなく
+    // Pd=[!]cmp.* 全般を認識する）。
+    let p0gt = with_pp(0xf243_c400, 1);
+    let dup = packet::pack_duplex(0x1a4b, 0x1010, Group::A, Group::A).unwrap();
+    let (pkt, _) = packet::split(&[p0gt, dup]).unwrap();
+    assert!(packet::expand(&pkt).is_ok());
+    // L2 jumpr/dealloc_return の dprd3=6/7（p0.new/!p0.new）も
+    // .new 消費側。生成側がないと拒否。
+    let dup = packet::pack_duplex(0x1fc6, 0x0043, Group::L2, Group::L1).unwrap();
+    let (pkt, _) = packet::split(&[dup]).unwrap();
+    assert_eq!(packet::expand(&pkt).unwrap_err(), ComposeError::NewProducer);
+    // 生成側を添えれば受理（p0.new と !p0.new の両方）。
+    for jumpr_new in [0x1fc6u16, 0x1fc7] {
+        let dup = packet::pack_duplex(jumpr_new, 0x0043, Group::L2, Group::L1).unwrap();
+        let (pkt, _) = packet::split(&[p0eq, dup]).unwrap();
+        assert!(packet::expand(&pkt).is_ok());
+    }
+}
+
+#[test]
+fn too_many_insns() {
+    // duplex は subinsn 2 個を消費するので、3 命令 + duplex は 5
+    // 命令分で超過。
+    let dup = packet::pack_duplex(0x1010, 0x1010, Group::A, Group::A).unwrap();
+    let words = [
+        with_pp(ADD_RI, 1),
+        with_pp(ADD_RI, 1),
+        with_pp(ADD_RI, 1),
+        dup,
+    ];
+    let (pkt, _) = packet::split(&words).unwrap();
+    assert_eq!(
+        packet::expand(&pkt).unwrap_err(),
+        ComposeError::TooManyInsns
+    );
+    // 4 命令（2 + duplex）はギリギリ収まる。
+    let words = [with_pp(ADD_RI, 1), with_pp(ADD_RI, 1), dup];
+    let (pkt, _) = packet::split(&words).unwrap();
+    assert!(packet::expand(&pkt).is_ok());
+}
+
+#[test]
+fn dual_store_and_mem_noshuf() {
+    // dual store: ST 2 個は slot1/slot0（llvm-mc 実符号でも
+    // { memw(..)=.. ; memw(..)=.. } は同符号化）。
+    let (pkt, _) = packet::split(&[with_pp(STW, 1), with_pp(STW, 3)]).unwrap();
+    let s = packet::expand(&pkt).unwrap();
+    assert_eq!((s[0].slot, s[1].slot), (1, 0));
+    // slot1 store + slot0 load（:mem_noshuf が付く形。符号化上は
+    // 区別できないので受理する）。
+    let (pkt, _) = packet::split(&[with_pp(STW, 1), with_pp(LDW, 3)]).unwrap();
+    let s = packet::expand(&pkt).unwrap();
+    assert_eq!((s[0].slot, s[1].slot), (1, 0));
+    // 逆順（load が slot1、store が slot0）も受理。
+    let (pkt, _) = packet::split(&[with_pp(LDW, 1), with_pp(STW, 3)]).unwrap();
+    let s = packet::expand(&pkt).unwrap();
+    assert_eq!((s[0].slot, s[1].slot), (1, 0));
+    // 単独 ST は slot0 固定で、ST を先頭にすると後続が割り当て
+    // られない。
+    let (pkt, _) = packet::split(&[with_pp(ADD_RI, 1), with_pp(STW, 3)]).unwrap();
+    let s = packet::expand(&pkt).unwrap();
+    assert_eq!((s[0].slot, s[1].slot), (3, 0));
+    let (pkt, _) = packet::split(&[with_pp(STW, 1), with_pp(ADD_RI, 3)]).unwrap();
+    assert_eq!(
+        packet::expand(&pkt).unwrap_err(),
+        ComposeError::NoSlotAssign
+    );
+}
+
+#[test]
+fn program_flow_combo() {
+    // 無条件 jump を先頭には置けない。
+    let (pkt, _) = packet::split(&[with_pp(JUMP, 1), with_pp(JUMP, 3)]).unwrap();
+    assert_eq!(
+        packet::expand(&pkt).unwrap_err(),
+        ComposeError::BadJumpCombo
+    );
+    // JR 系は dual jump を組めない（前後どちらでも拒否）。
+    let (pkt, _) = packet::split(&[with_pp(JUMPR, 1), with_pp(JUMP, 3)]).unwrap();
+    assert_eq!(
+        packet::expand(&pkt).unwrap_err(),
+        ComposeError::BadJumpCombo
+    );
+    let (pkt, _) = packet::split(&[with_pp(JUMP, 1), with_pp(JUMPR, 3)]).unwrap();
+    assert_eq!(
+        packet::expand(&pkt).unwrap_err(),
+        ComposeError::BadJumpCombo
+    );
+    // 3 個のフロー命令も拒否。
+    let words = [with_pp(JUMP, 1), with_pp(JUMP, 1), with_pp(JUMP, 3)];
+    let (pkt, _) = packet::split(&words).unwrap();
+    assert_eq!(
+        packet::expand(&pkt).unwrap_err(),
+        ComposeError::BadJumpCombo
+    );
+    // 条件付き jump + 無条件 jump は合法（先頭が条件付き）。
+    let (pkt, _) = packet::split(&[with_pp(IFP0JUMP, 1), with_pp(JUMP, 3)]).unwrap();
+    let s = packet::expand(&pkt).unwrap();
+    assert_eq!((s[0].slot, s[1].slot), (3, 2));
+    // jumpr R31 subinsn もフロー命令で、dual を組めない。
+    let dup = packet::pack_duplex(0x1fc0, 0x1010, Group::L2, Group::A).unwrap();
+    let (pkt, _) = packet::split(&[with_pp(JUMP, 1), dup]).unwrap();
+    assert_eq!(
+        packet::expand(&pkt).unwrap_err(),
+        ComposeError::BadJumpCombo
+    );
+    // jumpr R31 単独（deallocframe との同パケット）は受理。
+    let dup = packet::pack_duplex(0x1fc0, 0x1f00, Group::L2, Group::L2).unwrap();
+    let (pkt, _) = packet::split(&[dup]).unwrap();
+    let s = packet::expand(&pkt).unwrap();
+    assert_eq!((s[0].slot, s[1].slot), (1, 0));
+}
+
+#[test]
+fn duplex_order_key() {
+    // L2/L2 の memh 同士は du3+base+dst がフィールドなので、値が
+    // 異なってもどちらの順でも受理される。
+    for (lo, hi) in [(0x0440u16, 0x0012u16), (0x0012, 0x0440)] {
+        let dup = packet::pack_duplex(lo, hi, Group::L2, Group::L2).unwrap();
+        let (pkt, _) = packet::split(&[dup]).unwrap();
+        assert!(packet::expand(&pkt).is_ok());
+    }
+    // L2/L2 の memh(0x0440) と memb(0x1012) はオペコード桁が残る
+    // ので順序が強制される（小さい memh が slot1）。
+    let dup = packet::pack_duplex(0x1012, 0x0440, Group::L2, Group::L2).unwrap();
+    let (pkt, _) = packet::split(&[dup]).unwrap();
+    assert!(packet::expand(&pkt).is_ok());
+    let dup = packet::pack_duplex(0x0440, 0x1012, Group::L2, Group::L2).unwrap();
+    let (pkt, _) = packet::split(&[dup]).unwrap();
+    assert_eq!(packet::expand(&pkt).unwrap_err(), ComposeError::DuplexOrder);
+    // A/A の条件クリアは dprd[6:4] が比較に残る（clr p0 < clr !p0）。
+    let dup = packet::pack_duplex(0x1a72, 0x1a61, Group::A, Group::A).unwrap();
+    let (pkt, _) = packet::split(&[dup]).unwrap();
+    assert!(packet::expand(&pkt).is_ok());
+    let dup = packet::pack_duplex(0x1a61, 0x1a72, Group::A, Group::A).unwrap();
+    let (pkt, _) = packet::split(&[dup]).unwrap();
+    assert_eq!(packet::expand(&pkt).unwrap_err(), ComposeError::DuplexOrder);
+    // A/A の combine は第 1 即値 du2a[4:3] が比較に残る。
+    // key(cb(#0,#1)=0x1c20)=0x1c00 < key(cb(#1,#0)=0x1c09)=0x1c08
+    // なので 0x1c20 が slot1。
+    let dup = packet::pack_duplex(0x1c09, 0x1c20, Group::A, Group::A).unwrap();
+    let (pkt, _) = packet::split(&[dup]).unwrap();
+    assert!(packet::expand(&pkt).is_ok());
+    let dup = packet::pack_duplex(0x1c20, 0x1c09, Group::A, Group::A).unwrap();
+    let (pkt, _) = packet::split(&[dup]).unwrap();
+    assert_eq!(packet::expand(&pkt).unwrap_err(), ComposeError::DuplexOrder);
+}
+
+#[test]
+fn reserved_bits_and_values() {
+    // dx_a_clr の dprd 1-3 は未割当で拒否。
+    for sub in [0x1a13u16, 0x1a23, 0x1a33] {
+        assert_eq!(packet::decode_sub(Group::A, sub, 0), None);
+    }
+    // dx_l2_deallocframe は [5:0] が 0 固定（述語選択なし）。
+    assert_eq!(packet::decode_sub(Group::L2, 0x1f01, 0), None);
+    assert_eq!(packet::decode_sub(Group::L2, 0x1f08, 0), None);
+    assert_eq!(
+        packet::decode_sub(Group::L2, 0x1f00, 0),
+        Some(Insn::DxL2Deallocframe)
+    );
+    // S1 ストアは {t} が読み出しソース（形式は DXS1）。
+    let rt13 = |insn: Insn, ops: &[u64], g: Group| {
+        let w = encode(insn, ops).expect("encode13") as u16;
+        assert_eq!(packet::decode_sub(g, w, 0), Some(insn));
+        w
+    };
+    // memw(r4+#8)=r5 → s=4, t=5, u=2。
+    assert_eq!(rt13(Insn::DxS1Memw, &[4, 5, 2], Group::S1), 0x0245);
 }
 
 #[test]

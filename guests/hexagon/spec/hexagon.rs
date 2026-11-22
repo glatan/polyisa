@@ -353,6 +353,17 @@ pub fn build_model() -> polyisa_isadl::Model {
             val("u", "du4h"),
         ],
     ));
+    // S1 共通: u4 + base + data（DXLD と同じ桁だが {t} は
+    // 読み出しのソース）。
+    m.formats.push(dx(
+        "DXS1",
+        &["du4h", "dxs", "dxd"],
+        vec![
+            dxrd("s", "dxs", Access::Read),
+            dxrd("t", "dxd", Access::Read),
+            val("u", "du4h"),
+        ],
+    ));
     // L2 の h:1・b:0 系: u3 + base + dst。
     m.formats.push(dx(
         "DXL2",
@@ -398,7 +409,7 @@ pub fn build_model() -> polyisa_isadl::Model {
     m.formats.push(dx(
         "DXSMD",
         &["ds6", "ddp"],
-        vec![dxrd("tt", "ddp", Access::Read), val("s", "ds6")],
+        vec![dxrd("tt", "ddp", Access::Read), val("i", "ds6")],
     ));
     // S2 ストア即値形: U1 + base + u4。
     m.formats.push(dx(
@@ -478,9 +489,11 @@ pub fn build_model() -> polyisa_isadl::Model {
 
     // ---- 32 ビット命令（HX3 の代表形式）。
     // ICLASS → クラス/スロットの対応:
-    //   0000=extender, 0001/0010/0101=J{2,3}, 0011/0100=LDST{0,1},
-    //   0110=CR{3}, 0111/1011/1111=ALU32{0-3},
-    //   1000/1100/1101/1110=XTYPE{2,3}, 1001=LD{0,1}, 1010=ST{0}。
+    //   0000=extender, 0001/0010/0101=J{2,3}（ICLASS5 の間接系は
+    //   JR{2}）, 0011/0100=LDST{0,1}, 0110=CR{3},
+    //   0111/1011/1111=ALU32{0-3},
+    //   1000/1100/1101/1110=XTYPE{2,3}, 1001=LD{0,1}, 1010=ST{0}
+    //   （dual store / slot1 store+slot0 load 形では slot1）。
     // Ref: SPEC-HEXAGON-PRM (V79) Table: instruction class encoding.
     for (name, format, pattern, syntax, timing) in [
         // constant extender 語（ICLASS=0、実行スロットを消費しない。
@@ -535,17 +548,17 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("dx_l2_lddsp", "DXMD", "11110........", wl2(), "{dd}=memd(r29+#{u}:3)", "load"),
         // L2: フレーム/リターン。dprd3: 0=無条件、4/5=p0/!p0、
         // 6/7=p0.new/!p0.new（実符号と照合済み）。
-        ("dx_l2_deallocframe", "DXFR", "1111100......", wl2(), "deallocframe", "alu"),
+        ("dx_l2_deallocframe", "DXFR", "1111100000...", wl2(), "deallocframe", "alu"),
         ("dx_l2_deallocret", "DXFR", "1111101......", wl2(), "dealloc_return:{pred}", "branch"),
         ("dx_l2_jumpr", "DXFR", "1111111......", wl2(), "jumpr31:{pred}", "branch"),
         // S1: u4 + base + data。bit12=0 は w:2、1 は b:0。
-        ("dx_s1_memw", "DXLD", "0............", ws1(), "memw({s}+#{u}:2)={t}", "store"),
-        ("dx_s1_memb", "DXLD", "1............", ws1(), "memb({s}+#{u}:0)={t}", "store"),
+        ("dx_s1_memw", "DXS1", "0............", ws1(), "memw({s}+#{u}:2)={t}", "store"),
+        ("dx_s1_memb", "DXS1", "1............", ws1(), "memb({s}+#{u}:0)={t}", "store"),
         // S2: [12:11]=00 memh。u3 は h:1。
         ("dx_s2_memh", "DXST", "00...........", ws2(), "memh({s}+#{u}:1)={t}", "store"),
         // S2: r29 相対。
         ("dx_s2_stwsp", "DXSSP", "0100.........", ws2(), "memw(r29+#{u}:2)={t}", "store"),
-        ("dx_s2_stdsp", "DXSMD", "0101.........", ws2(), "memd(r29+#{s}:3)={tt}", "store"),
+        ("dx_s2_stdsp", "DXSMD", "0101.........", ws2(), "memd(r29+#{i}:3)={tt}", "store"),
         // S2: ストア即値形。bit9=0 は w:2、1 は b:0。
         ("dx_s2_stwi", "DXSI", "1000.........", ws2(), "memw({s}+#{u4}:2)=#{i}", "store"),
         ("dx_s2_stbi", "DXSI", "1001.........", ws2(), "memb({s}+#{u4}:0)=#{i}", "store"),
@@ -582,11 +595,31 @@ pub fn build_model() -> polyisa_isadl::Model {
     // 畳まれる（符号化上は同一命令の述語選択桁の一値）。
     // dealloc_return の dprd3: 0=無条件、4/5=p0/!p0、6/7=p0.new。
     for insn in m.insns.iter_mut() {
+        // deallocframe に述語選択はない。dprd3 桁（と上位の未使用
+        // 桁）は 0 固定。
+        if insn.name == "dx_l2_deallocframe" {
+            insn.wheres.push(WhereClause {
+                field: "dprd3".to_string(),
+                op: WhereOp::Eq,
+                rhs: WhereRhs::Lit(0),
+            });
+        }
         // dealloc_return の述語選択桁は 1/2/3 が未割当。
         if insn.name == "dx_l2_deallocret" {
             for bad in [1u128, 2, 3] {
                 insn.wheres.push(WhereClause {
                     field: "dprd3".to_string(),
+                    op: WhereOp::Ne,
+                    rhs: WhereRhs::Lit(bad),
+                });
+            }
+        }
+        // 条件クリアの述語選択桁（dprd: 0=無条件、4/5=p0.new/
+        // !p0.new、6/7=p0/!p0）は 1/2/3 が未割当なので拒否する。
+        if insn.name == "dx_a_clr" {
+            for bad in [1u128, 2, 3] {
+                insn.wheres.push(WhereClause {
+                    field: "dprd".to_string(),
                     op: WhereOp::Ne,
                     rhs: WhereRhs::Lit(bad),
                 });

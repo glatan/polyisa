@@ -121,35 +121,72 @@ pub fn decode_sub(g: Group, sub: u16, cpu_feats: u128) -> Option<Insn> {
 
 /// duplex 同一グループ規則の比較キー。「レジスタ・即値桁を 0 と
 /// みなした 13 ビット値」（Table 10-5 脚注）。各形のフィールド桁
-/// だけを落としたオペコード部分を返す。
+/// だけを落としたオペコード部分を返す。比較キーには述語選択桁
+/// （dprd/dprd3）と combine の第 1 即値桁（du2a）も残す
+/// （実符号の正規化はこれらを区別する）。
 /// Ref: SPEC-HEXAGON-PRM (V79) Table 10-5 note.
 fn order_key(g: Group, sub: u16) -> u16 {
     let keep = |m: u16| sub & m;
     match g {
-        // オペコードは bit12（w:2/ub:0）。
+        // オペコードは bit12（w:2/ub:0・b:0）。u4+base+reg は
+        // フィールド。
         Group::L1 | Group::S1 => keep(0x1000),
-        // オペコードは [12:6]。
-        Group::L2 => keep(0x1fc0),
-        // オペコードは [12:9]。
-        Group::S2 => keep(0x1e00),
-        Group::A => match sub >> 8 {
-            // `Rx=add(Rx,#s7)`（[12:11]=00）: s7 はフィールド。
-            _ if sub >> 11 == 0 => keep(0x1800),
-            // `Rd=#u6`/`add(r29,#u6:2)`（[12:10]=010/011）: u6 は
-            // フィールド。
-            _ if sub >> 10 == 0b010 || sub >> 10 == 0b011 => keep(0x1c00),
-            // `Rd=cmp.eq(Rs,#u2)`（11001）: [3:2] は固定 0。
-            0x19 => keep(0x1f0c),
-            // 条件クリア（11010）: [6:0] は述語選択/デスティネーション。
-            0x1a => keep(0x1f80),
-            // combine(#u2,#U2)（11100）: [7:0] はフィールド。
-            0x1c => keep(0x1f00),
-            // combine(#0,Rs)/(Rs,#0)（11101）: bit3 はオペコード。
-            0x1d => keep(0x1f08),
-            // その他（mov/add/and/sub/sxt/zxt/addr）は [12:8] が
-            // オペコードで [7:0] はフィールド。
-            _ => keep(0x1f00),
-        },
+        Group::L2 => {
+            if sub >> 11 != 0b11 {
+                // memh/memuh/memb（[12:11]=00/01/10）: オペコードは
+                // [12:11]。du3+base+dst はフィールド。
+                keep(0x1800)
+            } else if sub >> 9 == 0b1110 {
+                // ldwsp（1110）: オペコードは [12:9]。u5+dst は
+                // フィールド。
+                keep(0x1e00)
+            } else if sub >> 8 == 0b11110 {
+                // lddsp（11110）: オペコードは [12:8]。u5+ddp は
+                // フィールド。
+                keep(0x1f00)
+            } else {
+                // deallocframe/dealloc_return/jumpr（111110x/
+                // 111111x）: [12:6] がオペコード。[5:3] は未使用、
+                // dprd3（述語選択）は残す。
+                keep(0x1fc7)
+            }
+        }
+        Group::S2 => {
+            if sub >> 11 == 0 {
+                // memh（[12:11]=00）: オペコードは [12:11]。
+                keep(0x1800)
+            } else {
+                // stwsp/stdsp（010x）・stwi/stbi（100x）・
+                // allocframe（1110）: オペコードは [12:9]。
+                // 即値・base・data はすべてフィールド。
+                keep(0x1e00)
+            }
+        }
+        Group::A => {
+            if sub >> 11 == 0 {
+                // `Rx=add(Rx,#s7)`（[12:11]=00）: s7 はフィールド。
+                keep(0x1800)
+            } else if sub >> 10 == 0b010 || sub >> 10 == 0b011 {
+                // `Rd=#u6`/`add(r29,#u6:2)`（[12:10]=010/011）: u6 は
+                // フィールド。
+                keep(0x1c00)
+            } else {
+                match sub >> 8 {
+                    // 条件クリア（[12:7]=110100）: [6:4] は述語選択で
+                    // 比較に残し、[3:0] はデスティネーション。
+                    0x1a => keep(0x1ff0),
+                    // combine(#u2,#U2)（11100）: du2a[4:3] は比較に
+                    // 残し、du2b/ddp はフィールド。
+                    0x1c => keep(0x1f18),
+                    // combine(#0,Rs)/(Rs,#0)（11101）: bit3 は
+                    // オペコード。
+                    0x1d => keep(0x1f08),
+                    // その他（mov/add1/and1/sub1/sxt/zxt/addr/cmp.eq）
+                    // は [12:8] がオペコードで [7:0] はフィールド。
+                    _ => keep(0x1f00),
+                }
+            }
+        }
     }
 }
 
@@ -168,11 +205,15 @@ fn group_class(g: Group) -> Class {
 pub enum Class {
     /// J 系（slots 2,3）。
     J,
+    /// JR 系（間接ジャンプ。slot 2。duplex の jumpr R31 は
+    /// slot 0 に置ける）。
+    Jr,
     /// LDST 系（slots 0,1）。
     Ldst,
     /// LD 系（slots 0,1）。
     Ld,
-    /// ST 系（slot 0）。
+    /// ST 系（slot 0。dual store では slot 1、:mem_noshuf 形の
+    /// slot1 store + slot0 load でも slot 1 に置ける）。
     St,
     /// CR 系（slot 3）。
     Cr,
@@ -188,7 +229,23 @@ pub enum Class {
 pub fn word_class(word: u32) -> Option<Class> {
     Some(match iclass(word) {
         0 => return None, // constant extender
-        1 | 2 | 5 => Class::J,
+        1 | 2 => Class::J,
+        // ICLASS 5 は J（PC 相対）と JR（間接）が混在し、ICLASS 桁
+        // だけでは切り分けられない。JR（slot 2 固定）は
+        // bits[27:21] のオペコード値で判定する: 0000101=callr、
+        // 0000110=callrh、000100x=if([!]Pu)callr、0010100=jumpr、
+        // 0010110=jumprh、001101x=jumpr:{t,nt}。0010101=hintjr は
+        // JR クラスだが slots 2,3 なので J 側に含める。
+        5 => {
+            if matches!(
+                (word >> 21) & 0x7f,
+                0x05 | 0x06 | 0x08 | 0x09 | 0x14 | 0x16 | 0x1a | 0x1b
+            ) {
+                Class::Jr
+            } else {
+                Class::J
+            }
+        }
         3 | 4 => Class::Ldst,
         6 => Class::Cr,
         7 | 11 | 15 => Class::Alu32,
@@ -204,8 +261,9 @@ pub fn word_class(word: u32) -> Option<Class> {
 pub fn class_slots(c: Class) -> u8 {
     match c {
         Class::J => 0b1100,
+        Class::Jr => 0b0100,
         Class::Ldst | Class::Ld => 0b0011,
-        Class::St => 0b0001,
+        Class::St => 0b0011,
         Class::Cr => 0b1000,
         Class::Alu32 => 0b1111,
         Class::Xtype => 0b1100,
@@ -384,9 +442,13 @@ pub enum ComposeError {
     /// パケット内にメモリ命令が 1 つだけあるが slot 0 に置けない
     /// （単独の LD/ST は slot 0 が必須）。
     LoneMemNotSlot0,
-    /// slot 1 に ST 系があるのに slot 0 に ST 系がない
-    /// （ST が slot 1 を使うには slot 0 も ST が必要）。
+    /// slot 1 に ST 系があるのに slot 0 が ST（dual store）でも
+    /// LD（:mem_noshuf 形）でもない。
     StorePairRequired,
+    /// プログラムフロー命令の個数・組合せが dual-jump 表を
+    /// 満たさない（Section 9.7。3 個以上、先頭が無条件系、
+    /// または JR 系を含む組合せ）。
+    BadJumpCombo,
     /// 同じグループの duplex subinsn で、13 ビット値の小さい側が
     /// slot 1 にない（Table 10-5 の数値順規則）。
     DuplexOrder,
@@ -396,6 +458,48 @@ pub enum ComposeError {
     /// `.new` 消費命令（述語の .new を読む条件形）に対応する
     /// 生成側命令が同じパケット内にない。
     NewProducer,
+}
+
+/// プログラムフロー命令の dual-jump 適格（dual-jump 表の分類）。
+/// Ref: SPEC-HEXAGON-PRM (V79) Section 9.7.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Flow {
+    /// フロー命令ではない。
+    None,
+    /// dual jump を組めない（JR 系）。
+    Never,
+    /// 2 個目のジャンプにだけなれる（無条件 jump/call）。
+    Second,
+    /// 先頭・2 個目どちらにもなれる（条件付き jump・
+    /// compare-jump）。
+    Both,
+}
+
+/// 命令のフロー種別。`group` が `Some` のとき `word` は
+/// 13 ビット subinsn 語。
+/// Gap: GAP-0069（ICLASS 6 のフロー形・NVJ・endloop 制限は
+/// 未分離）。
+fn flow_of(len: u32, group: Option<Group>, word: u128, class: Class) -> Flow {
+    if len == 13 {
+        // L2 の dealloc_return/jumpr（フレーム命令）は JR 系で
+        // dual を組めない。deallocframe はフロー命令ではない。
+        return match (group, word >> 6) {
+            (Some(Group::L2), 0x7d | 0x7f) => Flow::Never,
+            _ => Flow::None,
+        };
+    }
+    match class {
+        Class::Jr => Flow::Never,
+        Class::J => match iclass(word as u32) {
+            // ICLASS 1/2 は compare-jump 複合（条件付き相当）。
+            1 | 2 => Flow::Both,
+            // ICLASS 5 では 0101 1100 が if(Pu) jump（条件付き）。
+            // if(Pu) call や無条件 jump/call は 2 個目専用。
+            5 if (word as u32 >> 24) & 0xf == 0b1100 => Flow::Both,
+            _ => Flow::Second,
+        },
+        _ => Flow::None,
+    }
 }
 
 /// パケットの extender 対結合とスロット割当てを行い、実行順
@@ -409,7 +513,11 @@ pub enum ComposeError {
 ///   （語の並びは slot 3 → 0 順）。
 /// - 各命令は命令クラスの許容スロットにだけ置ける。
 /// - メモリ命令が 1 つだけのパケットではそれは slot 0。
-/// - ST が slot 1 に置かれるには slot 0 にも ST が必要。
+/// - ST が slot 1 に置かれるのは dual store（slot 0 も ST）か
+///   slot1 store + slot0 load（:mem_noshuf 形）のときだけ。
+/// - プログラムフロー命令は最大 2 個で、先頭（低アドレス側）は
+///   条件付き jump/compare-jump、2 個目は無条件も可。JR 系は
+///   dual を組めない（Section 9.7 の dual-jump 表）。
 /// - duplex の同一グループ subinsn は 13 ビット値が小さい側が
 ///   slot 1（jumpr R31 は slot 0 固定）。
 /// - extender は直後の 1 命令にだけ適用し、duplex コンテナには
@@ -524,9 +632,11 @@ pub fn expand(pkt: &Packet) -> Result<Vec<SlotInsn>, ComposeError> {
             return Err(ComposeError::JumpRSlot);
         }
     }
-    // 2c. slot1 の ST 系には slot0 の ST 系が要る。duplex ICLASS の
-    //     値域が hi∈{S1,S2} ⟹ lo∈{S1,S2} を満たす組だけを持つため
-    //     構造的に保たれる（Table 10-5）。明示の条件として残す。
+    // 2c. slot1 の ST 系には slot0 の ST 系（dual store）または
+    //     LD 系（:mem_noshuf 形）が要る。duplex では ICLASS の
+    //     値域が hi∈{S1,S2} ⟹ lo∈{S1,S2} を満たす組だけを持つ
+    //     ため構造的に保たれる（Table 10-5）。通常命令については
+    //     3b で割当て後に検査する。
     if let Some(last) = pkt.words.last()
         && let Kind::Duplex { lo, hi } = last.kind
     {
@@ -537,6 +647,8 @@ pub fn expand(pkt: &Packet) -> Result<Vec<SlotInsn>, ComposeError> {
     }
     // 2d. 単独メモリ命令は slot 0 固定。duplex subinsn のスロットは
     //     固定（hi=1、lo=0）なので通常命令にだけ絞り込む。
+    //     現行の class_slots では memory 系は必ず slot0 を含むので
+    //     LoneMemNotSlot0 は発火しない防衛的検査。
     let is_mem = |c: &Cand| matches!(c.class, Class::Ldst | Class::Ld | Class::St);
     let mem_count = cands.iter().filter(|c| is_mem(c)).count();
     let mut masks: Vec<u8> = cands
@@ -552,6 +664,20 @@ pub fn expand(pkt: &Packet) -> Result<Vec<SlotInsn>, ComposeError> {
             }
         }
     }
+    // 2e. プログラムフロー命令の個数・組合せ（Section 9.7 の
+    //     dual-jump 表）。先頭（アドレスが小さい側）のジャンプは
+    //     条件付き jump・compare-jump に限り、JR 系は dual を
+    //     組めない。
+    let mut flows = cands
+        .iter()
+        .map(|c| flow_of(c.len, c.group, c.word, c.class))
+        .filter(|f| *f != Flow::None);
+    match (flows.next(), flows.next(), flows.next()) {
+        (Some(Flow::Both), Some(second), None) if second != Flow::Never => {}
+        (Some(_), None, _) => {}
+        (None, _, _) => {}
+        _ => return Err(ComposeError::BadJumpCombo),
+    }
 
     // 3. 貪欲に上位スロットから割当て（低アドレス側の命令ほど
     //    大きいスロット番号）。各候補は「直前の候補より小さい
@@ -566,6 +692,23 @@ pub fn expand(pkt: &Packet) -> Result<Vec<SlotInsn>, ComposeError> {
         let s = (7 - mask.leading_zeros()) as u8;
         slots[i] = s;
         upper = s as i8;
+    }
+    // 3b. slot1 の ST 系には slot0 に ST（dual store）か LD
+    //     （:mem_noshuf 形）が要る。memory 系の許容スロットは
+    //     {0,1} なので、slot1 を ST が埋めて割当てが成功するなら
+    //     slot0 は必ず他の memory 命令が埋まる。現行マスクでは
+    //     発火しない防衛的検査として規則を明示する。
+    for (i, c) in cands.iter().enumerate() {
+        if slots[i] != 1 || c.class != Class::St {
+            continue;
+        }
+        let ok = cands
+            .iter()
+            .zip(&slots)
+            .any(|(c, &s)| s == 0 && matches!(c.class, Class::St | Class::Ld | Class::Ldst));
+        if !ok {
+            return Err(ComposeError::StorePairRequired);
+        }
     }
 
     // 4. `.new` 述語の生成側規則（Section 6.1.4 / 3.3.4）:
@@ -596,14 +739,17 @@ pub fn expand(pkt: &Packet) -> Result<Vec<SlotInsn>, ComposeError> {
         match (c.len, c.group) {
             // A-type cmp.eq は p0 固定。
             (13, Some(Group::A)) if (c.word >> 8) & 0x1f == 0b11001 => Some(0),
-            // 32 ビット Pd=cmp.* は pd2 がデスティネーション。
+            // 32 ビット Pd=[!]cmp.* は pd2（bits[1:0]）が
+            // デスティネーション。比較族は
+            // Pd=cmp.*(Rs,Rt)（ICLASS 15、bits[27:24]=0010）と
+            // Pd=cmp.*(Rs,#imm)（ICLASS 7、bits[27:24]=0101）で、
+            // bits[4:2]=000 が cmp.*、100 が !cmp.*。
             (32, _) => {
                 let w = c.word as u32;
-                if w >> 28 == 0xf && (w >> 21) & 0x7c == 0x10 && (w >> 2) & 0x3f == 0 {
-                    Some((w & 3) as u8)
-                } else {
-                    None
-                }
+                let is_cmp = matches!((w >> 2) & 7, 0 | 4)
+                    && ((w >> 28 == 0xf && (w >> 24) & 0xf == 0b0010)
+                        || (w >> 28 == 0x7 && (w >> 24) & 0xf == 0b0101));
+                if is_cmp { Some((w & 3) as u8) } else { None }
             }
             _ => None,
         }
