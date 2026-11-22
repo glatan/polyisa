@@ -580,14 +580,17 @@ pub fn build_model() -> polyisa_isadl::Model {
 
     // `Rd = #-1`（条件クリアの無条件形）は dx_a_clr の dprd=0 に
     // 畳まれる（符号化上は同一命令の述語選択桁の一値）。
-    // dealloc_return の無条件形は正本にないため、dprd3=0 を拒否する。
+    // dealloc_return の dprd3: 0=無条件、4/5=p0/!p0、6/7=p0.new。
     for insn in m.insns.iter_mut() {
+        // dealloc_return の述語選択桁は 1/2/3 が未割当。
         if insn.name == "dx_l2_deallocret" {
-            insn.wheres.push(WhereClause {
-                field: "dprd3".to_string(),
-                op: WhereOp::Ne,
-                rhs: WhereRhs::Lit(0),
-            });
+            for bad in [1u128, 2, 3] {
+                insn.wheres.push(WhereClause {
+                    field: "dprd3".to_string(),
+                    op: WhereOp::Ne,
+                    rhs: WhereRhs::Lit(bad),
+                });
+            }
         }
         // jumpr R31 の述語選択桁（dprd3: 0=無条件、4/5=p0/!p0、
         // 6/7=p0.new）は 1/2/3 を拒否する。

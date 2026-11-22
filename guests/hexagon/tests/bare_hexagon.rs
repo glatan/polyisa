@@ -296,9 +296,16 @@ fn subinsn_decode() {
         Some(Insn::DxL2Deallocframe)
     );
     assert_eq!(
+        packet::decode_sub(Group::L2, 0x1f40, 0),
+        Some(Insn::DxL2Deallocret)
+    );
+    assert_eq!(
         packet::decode_sub(Group::L2, 0x1f44, 0),
         Some(Insn::DxL2Deallocret)
     );
+    // 述語選択桁 1-3 は未割当で拒否。
+    assert_eq!(packet::decode_sub(Group::L2, 0x1f41, 0), None);
+    assert_eq!(packet::decode_sub(Group::L2, 0x1fc1, 0), None);
     assert_eq!(
         packet::decode_sub(Group::L2, 0x1fc4, 0),
         Some(Insn::DxL2Jumpr)
