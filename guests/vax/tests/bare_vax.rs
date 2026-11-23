@@ -975,6 +975,538 @@ fn fp_word_order_3412() {
     assert_eq!(sem::fp_order(Width::L, 0xaabb_ccdd), 0xaabb_ccdd);
 }
 
+// ---- VX5: 整数演算 ----
+
+/// 条件コードを (N,Z,V,C) で取り出す。
+fn cc(env: &BareEnv) -> (bool, bool, bool, bool) {
+    let p = sem::psl_get(&env.backend);
+    (
+        p & (1 << psl::N) != 0,
+        p & (1 << psl::Z) != 0,
+        p & (1 << psl::V) != 0,
+        p & (1 << psl::C) != 0,
+    )
+}
+
+/// 1 命令を BASE に置いて 1 ステップ実行した環境を返す。
+fn exec1(bytes: &[u8]) -> BareEnv {
+    let mut env = run_env(1);
+    put(&mut env, BASE, bytes);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    env
+}
+
+#[test]
+fn new_integer_insns_decode() {
+    assert_eq!(dec1(0x7a), Some(Insn::Emul));
+    assert_eq!(dec1(0x7b), Some(Insn::Ediv));
+    assert_eq!(dec1(0x84), Some(Insn::Mulb2));
+    assert_eq!(dec1(0x87), Some(Insn::Divb3));
+    assert_eq!(dec1(0x8e), Some(Insn::Mnegb));
+    assert_eq!(dec1(0x98), Some(Insn::Cvtbl));
+    assert_eq!(dec1(0xa4), Some(Insn::Mulw2));
+    assert_eq!(dec1(0xa6), Some(Insn::Divw2));
+    assert_eq!(dec1(0xae), Some(Insn::Mnegw));
+    assert_eq!(dec1(0xce), Some(Insn::Mnegl));
+    assert_eq!(dec1(0x32), Some(Insn::Cvtwl));
+    assert_eq!(dec1(0x33), Some(Insn::Cvtwb));
+    assert_eq!(dec1(0xf6), Some(Insn::Cvtlb));
+    assert_eq!(dec1(0xf7), Some(Insn::Cvtlw));
+    assert_eq!(insn_ops(Insn::Emul), &[RL, RL, RL, WQ]);
+    assert_eq!(insn_ops(Insn::Ediv), &[RL, RQ, WL, WL]);
+    assert_eq!(insn_ops(Insn::Divb3), &[RB, RB, WB]);
+    assert_eq!(insn_ops(Insn::Cvtlw), &[RL, WW]);
+}
+
+#[test]
+fn add_results_and_cc() {
+    // addl3 #0x7fffffff, #1, r0 —— 正のあふれ: N=1 V=1 C=0。
+    let env = exec1(&[0xc1, 0x8f, 0xff, 0xff, 0xff, 0x7f, 0x8f, 1, 0, 0, 0, 0x50]);
+    assert_eq!(r(&env, 0), 0x8000_0000);
+    assert_eq!(cc(&env), (true, false, true, false));
+
+    // addb3 #0x7f, #1, r0 —— byte でも符号付きあふれは V=1。
+    let env = exec1(&[0x81, 0x8f, 0x7f, 0x8f, 0x01, 0x50]);
+    assert_eq!(r(&env, 0) & 0xff, 0x80);
+    assert_eq!(cc(&env), (true, false, true, false));
+
+    // addw3 #0xffff, #1, r0 —— 桁出し: Z=1 C=1 V=0。
+    let env = exec1(&[0xa1, 0x8f, 0xff, 0xff, 0x8f, 1, 0, 0x50]);
+    assert_eq!(r(&env, 0) & 0xffff, 0);
+    assert_eq!(cc(&env), (false, true, false, true));
+
+    // addl2 #-1, r0 —— 負の結果、あふれ・桁出しなし。
+    let mut env = run_env(1);
+    put(&mut env, BASE, &[0xc0, 0x8f, 0xff, 0xff, 0xff, 0xff, 0x50]);
+    sem::r_set(&mut env.backend, 0, 0);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 0), 0xffff_ffff);
+    assert_eq!(cc(&env), (true, false, false, false));
+
+    // addl2 #1, r0 —— 0xffffffff + 1: Z=1 C=1。
+    sem::r_set(&mut env.backend, 0, 0xffff_ffff);
+    put(&mut env, BASE + 0x10, &[0xc0, 0x8f, 1, 0, 0, 0, 0x50]);
+    env.pc = BASE + 0x10;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 0), 0);
+    assert_eq!(cc(&env), (false, true, false, true));
+
+    // addw2 は書き込み先の上位を保存（mw は 2 バイトだけ更新）。
+    let mut env = run_env(1);
+    sem::r_set(&mut env.backend, 0, 0xaabb_0001);
+    put(&mut env, BASE, &[0xa0, 0x8f, 0xff, 0xff, 0x50]);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 0), 0xaabb_0000);
+}
+
+#[test]
+fn sub_results_and_cc() {
+    // subl3 #0, #1, r0 —— 借り: N=1 C=1。
+    let env = exec1(&[0xc3, 0x8f, 0, 0, 0, 0, 0x8f, 1, 0, 0, 0, 0x50]);
+    assert_eq!(r(&env, 0), 0xffff_ffff);
+    assert_eq!(cc(&env), (true, false, false, true));
+
+    // subl3 #0x80000000, #1, r0 —— 最負値 - 1: V=1 C=0。
+    let env = exec1(&[0xc3, 0x8f, 0, 0, 0, 0x80, 0x8f, 1, 0, 0, 0, 0x50]);
+    assert_eq!(r(&env, 0), 0x7fff_ffff);
+    assert_eq!(cc(&env), (false, false, true, false));
+
+    // subb2 #1, r0 —— 0 - 1 = 0xff: N=1 C=1。
+    let mut env = run_env(1);
+    put(&mut env, BASE, &[0x82, 0x8f, 0x01, 0x50]);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 0) & 0xff, 0xff);
+    assert_eq!(cc(&env), (true, false, false, true));
+
+    // subw3 #1, #1, r0 —— 等しい: Z=1 C=0。
+    let env = exec1(&[0xa3, 0x8f, 1, 0, 0x8f, 1, 0, 0x50]);
+    assert_eq!(r(&env, 0) & 0xffff, 0);
+    assert_eq!(cc(&env), (false, true, false, false));
+}
+
+#[test]
+fn adwc_sbwc_carry_chains() {
+    // 桁入れ・借り入れとして C を使う。
+    let mut env = run_env(1);
+    // adwc #0, r0 —— r0=0xffffffff, C=1 → 0、新しい C=1。
+    put(&mut env, BASE, &[0xd8, 0x8f, 0, 0, 0, 0, 0x50]);
+    sem::r_set(&mut env.backend, 0, 0xffff_ffff);
+    sem::psl_put(&mut env.backend, psl::USER | (1 << psl::C));
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 0), 0);
+    assert_eq!(cc(&env), (false, true, false, true));
+
+    // adwc #0, r0 —— r0=5, C=1 → 6、C=0。
+    sem::r_set(&mut env.backend, 0, 5);
+    sem::psl_put(&mut env.backend, psl::USER | (1 << psl::C));
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 0), 6);
+    assert_eq!(cc(&env), (false, false, false, false));
+
+    // sbwc #0, r0 —— r0=0, C=1 → -1、借りで C=1。
+    put(&mut env, BASE + 0x10, &[0xd9, 0x8f, 0, 0, 0, 0, 0x50]);
+    sem::r_set(&mut env.backend, 0, 0);
+    sem::psl_put(&mut env.backend, psl::USER | (1 << psl::C));
+    env.pc = BASE + 0x10;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 0), 0xffff_ffff);
+    assert_eq!(cc(&env), (true, false, false, true));
+
+    // sbwc #0, r0 —— r0=5, C=1 → 4、C=0。
+    sem::r_set(&mut env.backend, 0, 5);
+    sem::psl_put(&mut env.backend, psl::USER | (1 << psl::C));
+    env.pc = BASE + 0x10;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 0), 4);
+    assert_eq!(cc(&env), (false, false, false, false));
+}
+
+#[test]
+fn inc_dec_flags() {
+    // incb r0 —— 0x7f → 0x80: N=1 V=1。C は保存（立てておく）。
+    let mut env = run_env(1);
+    sem::r_set(&mut env.backend, 0, 0x7f);
+    sem::psl_put(&mut env.backend, psl::USER | (1 << psl::C));
+    put(&mut env, BASE, &[0x96, 0x50]);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 0) & 0xff, 0x80);
+    assert_eq!(cc(&env), (true, false, true, true));
+
+    // decb r0 —— 0x80(-128) → 0x7f: V=1。C=0 を保存。
+    sem::r_set(&mut env.backend, 0, 0x80);
+    sem::psl_put(&mut env.backend, psl::USER);
+    put(&mut env, BASE + 0x10, &[0x97, 0x50]);
+    env.pc = BASE + 0x10;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 0) & 0xff, 0x7f);
+    assert_eq!(cc(&env), (false, false, true, false));
+
+    // incl r0 —— -1 + 1 = 0: Z=1 V=0。C=1 を保存。
+    sem::r_set(&mut env.backend, 0, 0xffff_ffff);
+    sem::psl_put(&mut env.backend, psl::USER | (1 << psl::C));
+    put(&mut env, BASE + 0x20, &[0xd6, 0x50]);
+    env.pc = BASE + 0x20;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 0), 0);
+    assert_eq!(cc(&env), (false, true, false, true));
+
+    // decw r0 —— 0 → 0xffff: N=1 V=0 C=0。
+    sem::r_set(&mut env.backend, 0, 0);
+    sem::psl_put(&mut env.backend, psl::USER);
+    put(&mut env, BASE + 0x30, &[0xb7, 0x50]);
+    env.pc = BASE + 0x30;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 0) & 0xffff, 0xffff);
+    assert_eq!(cc(&env), (true, false, false, false));
+}
+
+#[test]
+fn mneg_flags() {
+    // mnegl #5, r0 → -5: N=1 V=0 C=0（C は立てておいて消える）。
+    let mut env = run_env(1);
+    sem::psl_put(&mut env.backend, psl::USER | (1 << psl::C));
+    put(&mut env, BASE, &[0xce, 0x8f, 5, 0, 0, 0, 0x50]);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 0), 0xffff_fffb);
+    assert_eq!(cc(&env), (true, false, false, false));
+
+    // mnegb #0x80(-128), r0 → 反転できず 0x80: V=1。
+    let env = exec1(&[0x8e, 0x8f, 0x80, 0x50]);
+    assert_eq!(r(&env, 0) & 0xff, 0x80);
+    assert_eq!(cc(&env), (true, false, true, false));
+
+    // mnegw #0, r0 → 0: Z=1。
+    let env = exec1(&[0xae, 0x8f, 0, 0, 0x50]);
+    assert_eq!(r(&env, 0) & 0xffff, 0);
+    assert_eq!(cc(&env), (false, true, false, false));
+}
+
+#[test]
+fn mul_flags() {
+    // mull3 #0x10000, #0x10000, r0 —— 2^32 は longword に入らない:
+    // 切り詰め 0、V=1 Z=1。
+    let env = exec1(&[0xc5, 0x8f, 0, 0, 1, 0, 0x8f, 0, 0, 1, 0, 0x50]);
+    assert_eq!(r(&env, 0), 0);
+    assert_eq!(cc(&env), (false, true, true, false));
+
+    // mulb3 #0x40, #4, r0 —— 0x100 → 0x00、V=1。
+    let env = exec1(&[0x85, 0x8f, 0x40, 0x8f, 0x04, 0x50]);
+    assert_eq!(r(&env, 0) & 0xff, 0);
+    assert_eq!(cc(&env), (false, true, true, false));
+
+    // mull3 #-3, #5, r1 → -15: N=1 V=0。
+    let env = exec1(&[0xc5, 0x8f, 0xfd, 0xff, 0xff, 0xff, 0x8f, 5, 0, 0, 0, 0x51]);
+    assert_eq!(r(&env, 1), 0xffff_fff1);
+    assert_eq!(cc(&env), (true, false, false, false));
+
+    // mulw2 #3, r0 —— 7*3=21。
+    let mut env = run_env(1);
+    sem::r_set(&mut env.backend, 0, 7);
+    put(&mut env, BASE, &[0xa4, 0x8f, 3, 0, 0x50]);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 0) & 0xffff, 21);
+    assert_eq!(cc(&env), (false, false, false, false));
+}
+
+#[test]
+fn div_results() {
+    // divl3 #2, #-7, r0 —— 商は 0 方向切り詰めで -3（余りは捨てる）。
+    let env = exec1(&[0xc7, 0x8f, 2, 0, 0, 0, 0x8f, 0xf9, 0xff, 0xff, 0xff, 0x50]);
+    assert_eq!(r(&env, 0), 0xffff_fffd);
+    assert_eq!(cc(&env), (true, false, false, false));
+
+    // divl3 #-2, #7, r0 → -3。
+    let env = exec1(&[0xc7, 0x8f, 0xfe, 0xff, 0xff, 0xff, 0x8f, 7, 0, 0, 0, 0x50]);
+    assert_eq!(r(&env, 0), 0xffff_fffd);
+    assert_eq!(cc(&env), (true, false, false, false));
+
+    // divb3 #-3, #-8, r0 → 2（8/3 = 2.6 切り詰め）。
+    let env = exec1(&[0x87, 0x8f, 0xfd, 0x8f, 0xf8, 0x50]);
+    assert_eq!(r(&env, 0) & 0xff, 2);
+    assert_eq!(cc(&env), (false, false, false, false));
+
+    // divl2 #2, r0 —— r0=7 → 3。
+    let mut env = run_env(1);
+    sem::r_set(&mut env.backend, 0, 7);
+    put(&mut env, BASE, &[0xc6, 0x8f, 2, 0, 0, 0, 0x50]);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 0), 3);
+
+    // divb3 #0xff(-1), #0x80(-128), r0 —— 商 128 は byte に入らず
+    // V=1、結果は切り詰め 0x80。書き込み先の上位は保存。
+    let mut env = run_env(1);
+    sem::r_set(&mut env.backend, 0, 0xaabb_cc00);
+    put(&mut env, BASE, &[0x87, 0x8f, 0xff, 0x8f, 0x80, 0x50]);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 0), 0xaabb_cc80);
+    assert_eq!(cc(&env), (true, false, true, false));
+}
+
+#[test]
+fn div_by_zero_is_arithmetic_trap() {
+    struct Rec(u32);
+    impl TrapHandler for Rec {
+        fn handle_trap(&mut self, _env: &mut BareEnv, code: u32) -> TrapOutcome {
+            self.0 = code;
+            TrapOutcome::Handled
+        }
+    }
+    let mut env = run_env(1);
+    // divl2 #0, r0 —— 整数ゼロ除算 trap（IV とは無関係）。
+    put(&mut env, BASE, &[0xc6, 0x8f, 0, 0, 0, 0, 0x50, 0x01]);
+    sem::r_set(&mut env.backend, 0, 0xdead_beef);
+    sem::psl_put(&mut env.backend, psl::USER | (1 << psl::N));
+    env.pc = BASE;
+    let mut sys = Rec(0);
+    run::step(&mut env, &mut sys, DEFAULT_FEATS).unwrap();
+    assert_eq!(sys.0, sem::scb::arith(sem::scb::at::INT_DIV_ZERO));
+    // trap なので復帰先は次の命令。書き戻しと条件コードは行わない。
+    assert_eq!(env.pc, BASE + 7);
+    assert_eq!(r(&env, 0), 0xdead_beef);
+    assert!(sem::psl_get(&env.backend) & (1 << psl::N) != 0);
+
+    // divb3 #0, #5, r0 —— 除数は第 1 オペランド。
+    put(&mut env, BASE + 0x10, &[0x87, 0x8f, 0, 0x8f, 5, 0x50]);
+    env.pc = BASE + 0x10;
+    run::step(&mut env, &mut sys, DEFAULT_FEATS).unwrap();
+    assert_eq!(sys.0, sem::scb::arith(sem::scb::at::INT_DIV_ZERO));
+}
+
+#[test]
+fn integer_overflow_trap_gated_by_iv() {
+    struct Rec(u32);
+    impl TrapHandler for Rec {
+        fn handle_trap(&mut self, _env: &mut BareEnv, code: u32) -> TrapOutcome {
+            self.0 = code;
+            TrapOutcome::Handled
+        }
+    }
+    let mut env = run_env(1);
+    put(&mut env, BASE, &[0xc0, 0x8f, 1, 0, 0, 0, 0x50, 0x01]);
+    // IV=1: あふれで算術 trap（型パラメータ 1）。結果は書き戻し済み。
+    sem::r_set(&mut env.backend, 0, 0x7fff_ffff);
+    sem::psl_put(&mut env.backend, psl::USER | (1 << psl::IV));
+    env.pc = BASE;
+    let mut sys = Rec(0);
+    run::step(&mut env, &mut sys, DEFAULT_FEATS).unwrap();
+    assert_eq!(sys.0, sem::scb::arith(sem::scb::at::INT_OVERFLOW));
+    assert_eq!(env.pc, BASE + 7);
+    assert_eq!(r(&env, 0), 0x8000_0000);
+    // IV=0: 同じあふれは trap せず V=1 だけ。
+    sem::r_set(&mut env.backend, 0, 0x7fff_ffff);
+    sem::psl_put(&mut env.backend, psl::USER);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(cc(&env), (true, false, true, false));
+}
+
+#[test]
+fn emul_ediv_quadword() {
+    // emul #0x10000, #0x10000, #0, r0 —— r0:r1 = 2^32。
+    let env = exec1(&[
+        0x7a, 0x8f, 0, 0, 1, 0, 0x8f, 0, 0, 1, 0, 0x8f, 0, 0, 0, 0, 0x50,
+    ]);
+    assert_eq!(r(&env, 0), 0);
+    assert_eq!(r(&env, 1), 1);
+    assert_eq!(cc(&env), (false, false, false, false));
+
+    // emul #-2, #3, #5, r2 —— -1 を符号拡張した 64 ビット。
+    let env = exec1(&[
+        0x7a, 0x8f, 0xfe, 0xff, 0xff, 0xff, 0x8f, 3, 0, 0, 0, 0x8f, 5, 0, 0, 0, 0x52,
+    ]);
+    assert_eq!(r(&env, 2), 0xffff_ffff);
+    assert_eq!(r(&env, 3), 0xffff_ffff);
+    assert_eq!(cc(&env), (true, false, false, false));
+
+    // ediv #3, r0:r1, r2, r3 —— 0x1_0000_0007 / 3 = 0x5555_5557 余り 2。
+    let mut env = run_env(1);
+    sem::r_set(&mut env.backend, 0, 7);
+    sem::r_set(&mut env.backend, 1, 1);
+    put(&mut env, BASE, &[0x7b, 0x8f, 3, 0, 0, 0, 0x50, 0x52, 0x53]);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 2), 0x5555_5557);
+    assert_eq!(r(&env, 3), 2);
+    assert_eq!(cc(&env), (false, false, false, false));
+
+    // ediv #3, r0:r1(-7) —— 商 -2、剰余は被除数と同符号の -1。
+    sem::r_set(&mut env.backend, 0, 0xffff_fff9);
+    sem::r_set(&mut env.backend, 1, 0xffff_ffff);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 2), 0xffff_fffe);
+    assert_eq!(r(&env, 3), 0xffff_ffff);
+    assert_eq!(cc(&env), (true, false, false, false));
+
+    // ediv #1, r0:r1(2^32) —— 商が longword に入らず V=1。
+    sem::r_set(&mut env.backend, 0, 0);
+    sem::r_set(&mut env.backend, 1, 1);
+    put(
+        &mut env,
+        BASE + 0x20,
+        &[0x7b, 0x8f, 1, 0, 0, 0, 0x50, 0x52, 0x53],
+    );
+    env.pc = BASE + 0x20;
+    step(&mut env).unwrap();
+    assert_eq!(cc(&env), (false, true, true, false));
+}
+
+#[test]
+fn ediv_div_zero_trap() {
+    struct Rec(u32);
+    impl TrapHandler for Rec {
+        fn handle_trap(&mut self, _env: &mut BareEnv, code: u32) -> TrapOutcome {
+            self.0 = code;
+            TrapOutcome::Handled
+        }
+    }
+    let mut env = run_env(1);
+    put(&mut env, BASE, &[0x7b, 0x8f, 0, 0, 0, 0, 0x50, 0x52, 0x53]);
+    sem::r_set(&mut env.backend, 0, 1);
+    env.pc = BASE;
+    let mut sys = Rec(0);
+    run::step(&mut env, &mut sys, DEFAULT_FEATS).unwrap();
+    assert_eq!(sys.0, sem::scb::arith(sem::scb::at::INT_DIV_ZERO));
+}
+
+#[test]
+fn cmp_tst_flags() {
+    // cmpl #5, #5 → Z=1。
+    let env = exec1(&[0xd1, 0x8f, 5, 0, 0, 0, 0x8f, 5, 0, 0, 0]);
+    assert_eq!(cc(&env), (false, true, false, false));
+
+    // cmpl #1, #-1 —— 符号付きでは op1>op2（N=0）だが符号なしでは
+    // op1<op2（C=1）。差の符号（0x8000_0002→N 誤判定）でなく真の
+    // 比較結果。
+    let env = exec1(&[0xd1, 0x8f, 1, 0, 0, 0, 0x8f, 0xff, 0xff, 0xff, 0xff]);
+    assert_eq!(cc(&env), (false, false, false, true));
+
+    // cmpl #0x7fffffff, #-1 —— 差は負の符号だが真の比較は N=0。
+    let env = exec1(&[
+        0xd1, 0x8f, 0xff, 0xff, 0xff, 0x7f, 0x8f, 0xff, 0xff, 0xff, 0xff,
+    ]);
+    assert_eq!(cc(&env), (false, false, false, true));
+
+    // cmpl #-1, #1 —— N=1、符号なしは op1>op2 で C=0。
+    let env = exec1(&[0xd1, 0x8f, 0xff, 0xff, 0xff, 0xff, 0x8f, 1, 0, 0, 0]);
+    assert_eq!(cc(&env), (true, false, false, false));
+
+    // cmpb #0x80(-128), #0x7f —— 符号付きは小さい、符号なしは大きい。
+    let env = exec1(&[0x91, 0x8f, 0x80, 0x8f, 0x7f]);
+    assert_eq!(cc(&env), (true, false, false, false));
+
+    // cmpb S^#5, r0 —— 短リテラル指定子（5>3 で N=0 C=0）。
+    let mut env = run_env(1);
+    sem::r_set(&mut env.backend, 0, 3);
+    put(&mut env, BASE, &[0x91, 0x05, 0x50]);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(cc(&env), (false, false, false, false));
+
+    // tstl #-1 → N=1、tstb #0 → Z=1。tst は C を 0 にする。
+    let mut env = run_env(1);
+    sem::psl_put(&mut env.backend, psl::USER | (1 << psl::C));
+    put(&mut env, BASE, &[0xd5, 0x8f, 0xff, 0xff, 0xff, 0xff]);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(cc(&env), (true, false, false, false));
+    let env = exec1(&[0x95, 0x8f, 0x00]);
+    assert_eq!(cc(&env), (false, true, false, false));
+    let env = exec1(&[0xb5, 0x8f, 0x00, 0x80]);
+    assert_eq!(cc(&env), (true, false, false, false));
+}
+
+#[test]
+fn cvt_integer_widths() {
+    // cvtbl #0x80(-128), r0 → 符号拡張 0xffffff80。
+    let env = exec1(&[0x98, 0x8f, 0x80, 0x50]);
+    assert_eq!(r(&env, 0), 0xffff_ff80);
+    assert_eq!(cc(&env), (true, false, false, false));
+
+    // cvtbw #0x80, r0 → 0xff80。
+    let env = exec1(&[0x99, 0x8f, 0x80, 0x50]);
+    assert_eq!(r(&env, 0) & 0xffff, 0xff80);
+    assert_eq!(cc(&env), (true, false, false, false));
+
+    // cvtwl #-1, r0 → 0xffffffff。
+    let env = exec1(&[0x32, 0x8f, 0xff, 0xff, 0x50]);
+    assert_eq!(r(&env, 0), 0xffff_ffff);
+    assert_eq!(cc(&env), (true, false, false, false));
+
+    // cvtlb #0x180, r0 → 収まらず V=1、結果は下位 0x80。
+    let env = exec1(&[0xf6, 0x8f, 0x80, 0x01, 0, 0, 0x50]);
+    assert_eq!(r(&env, 0) & 0xff, 0x80);
+    assert_eq!(cc(&env), (true, false, true, false));
+
+    // cvtwb #0x7f00, r0 → V=1、結果 0。
+    let env = exec1(&[0x33, 0x8f, 0, 0x7f, 0x50]);
+    assert_eq!(r(&env, 0) & 0xff, 0);
+    assert_eq!(cc(&env), (false, true, true, false));
+
+    // cvtlw #0x18000, r0 → V=1、結果 0x8000。
+    let env = exec1(&[0xf7, 0x8f, 0, 0x80, 0x01, 0, 0x50]);
+    assert_eq!(r(&env, 0) & 0xffff, 0x8000);
+    assert_eq!(cc(&env), (true, false, true, false));
+
+    // cvtlb #0x7f, r0 → 収まる: V=0。
+    let env = exec1(&[0xf6, 0x8f, 0x7f, 0, 0, 0, 0x50]);
+    assert_eq!(r(&env, 0) & 0xff, 0x7f);
+    assert_eq!(cc(&env), (false, false, false, false));
+}
+
+#[test]
+fn arith_with_specifier_mix() {
+    // addl3 4(r2)[r1], #7, r3 —— index + 変位基底の読み出し。
+    let mut env = run_env(1);
+    put(&mut env, BASE + 0x300, &39u32.to_le_bytes());
+    sem::r_set(&mut env.backend, 1, 0x20);
+    sem::r_set(&mut env.backend, 2, (BASE + 0x300 - 4 - 0x80) as u32);
+    put(
+        &mut env,
+        BASE,
+        &[0xc1, 0x41, 0xa2, 0x04, 0x8f, 7, 0, 0, 0, 0x53],
+    );
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 3), 46);
+
+    // divb2 (r0)+, r1 —— 除数の自動増。（r0 はバイト刻み +1）
+    let mut env = run_env(1);
+    put(&mut env, BASE + 0x200, &[3]);
+    sem::r_set(&mut env.backend, 0, (BASE + 0x200) as u32);
+    sem::r_set(&mut env.backend, 1, 10);
+    put(&mut env, BASE, &[0x86, 0x80, 0x51]);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 1) & 0xff, 3);
+    assert_eq!(r(&env, 0), (BASE + 0x201) as u32);
+
+    // mnegw -(r0), r1 —— 書き込み側の自動減（word 刻み -2）。
+    let mut env = run_env(1);
+    sem::r_set(&mut env.backend, 0, (BASE + 0x204) as u32);
+    put(&mut env, BASE, &[0xae, 0x8f, 5, 0, 0x70]);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 0), (BASE + 0x202) as u32);
+    let mut b = [0u8; 2];
+    env.backend
+        .mem
+        .read(VirtAddr(BASE + 0x202), &mut b, Access::DATA_LE)
+        .unwrap();
+    assert_eq!(u16::from_le_bytes(b), 0xfffb);
+}
+
 #[test]
 fn subset_insn_goes_unimpl_hook() {
     // 機能集合にない命令（ka660 の movo）は補完経路のフックに渡る。
