@@ -12,7 +12,8 @@
 //! 対象は Linux ユーザモードの V73 系（配布物要件）と V79
 //! （主正本の最新版）。HVX は `hvx` 旗で有効化する代表部分
 //! 集合（vmem/vALU/q 論理の主形。残りは docs/gaps.md の語彙
-//! 棚卸し）。複数ハードウェアスレッドの交互実行は後段の段階。
+//! 棚卸し）。複数ハードウェアスレッドの交互実行は `threads`
+//! のコアモデルが束ねる。
 //! 出典は SPEC-HEXAGON-PRM V79 (80-N2040-60 Rev AB)。
 //! Ref: SPEC-HEXAGON-PRM (V79), SPEC-HEXAGON-PRM-PREV.
 
@@ -21,6 +22,7 @@
 pub mod packet;
 pub mod run;
 pub mod sem;
+pub mod threads;
 
 // ISADL モデルから生成した命令集合・デコード・逆アセンブルの殻。
 include!(concat!(env!("OUT_DIR"), "/generated.rs"));
@@ -188,8 +190,9 @@ pub struct CpuState {
     /// HVX 状態レジスタのモデル保持域（vcsr 相当。bit0 は
     /// 飽和 sticky。コンテキスト切替等の特権側は語彙外）。
     pub vcsr: u32,
-    /// ハードウェアスレッド状態の置き場（交互実行モデルの
-    /// スレッド番号・モデル識別。複数スレッドは HX10）。
+    /// ハードウェアスレッド状態の置き場（`threads` の交互実行
+    /// モデルが使うスレッド番号・休眠要求。割り当ては
+    /// `threads::hwt`）。
     pub hwt: u32,
     /// 現在のパケットがハードウェアループの終端なら立つ
     /// （bit0 = endloop0、bit1 = endloop1）。

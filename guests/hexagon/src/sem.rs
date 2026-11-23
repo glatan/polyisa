@@ -114,6 +114,13 @@ pub fn usr_ref() -> StateRef<W32> {
     StateRef::<W32>::from_offset(core::mem::offset_of!(CpuState, usr))
 }
 
+/// HW スレッド状態（hwt）の面。割り当ては `threads::hwt`。
+/// Ref: SPEC-HEXAGON-PRM (V79) hardware threads.
+#[must_use]
+pub fn hwt_ref() -> StateRef<W32> {
+    StateRef::<W32>::from_offset(core::mem::offset_of!(CpuState, hwt))
+}
+
 /// 制御レジスタ番号 → CpuState 面。ユーザ可視分だけを持つ
 /// （UPCYCLE/FRAMELIMIT/FRAMEKEY/PKTCOUNT/UTIMER 等の残りは
 /// 後段の段階で拡張する）。
@@ -1491,7 +1498,19 @@ pub fn exec(b: &mut InterpBackend, insn: Insn, word: u128, cx: Ctx) -> Result<bo
             pkt_w(b, 31, cx.next);
             jump(b, r_get(b, ops[0] as u32));
         }
-        Insn::Hintjr | Insn::Pause => {}
+        Insn::Hintjr => {}
+        // pause(#u) は休眠要求を hwt に残すだけで建築状態を
+        // 変えない（単スレッド経路では発行モデルが要求を見ない
+        // ので no-op と同じ効果）。
+        // Ref: SPEC-HEXAGON-PRM (V79) pause.
+        Insn::Pause => {
+            let h = get32(b, hwt_ref()) & !crate::threads::hwt::TID;
+            set32(
+                b,
+                hwt_ref(),
+                h | crate::threads::hwt::PAUSE | ((ops[0] as u32) << crate::threads::hwt::COUNT),
+            );
+        }
         // ---- HX7: 述語条件分岐 ----
         // `if ([!]Pu[.new]) jump/call`（ops = target, p, 否定）。
         // :t/:nt の予測桁は建築状態を変えない。
