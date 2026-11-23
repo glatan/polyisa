@@ -120,14 +120,14 @@ fn dotif_suppresses() {
         cond,
         ..sem::Ctx::default()
     };
-    // if (p0) は真で抑制しない（Unimplemented に達する）。
+    // if (p0) は真で抑制しない（命令の意味論に達する）。
     let c = sem::DotIf {
         p: 0,
         neg: false,
         new: false,
     };
-    let e = sem::exec(&mut env.backend, Insn::DxL2Deallocframe, 0, with(Some(c))).unwrap_err();
-    assert!(matches!(e, InterpExit::Unimplemented(_)));
+    let e = sem::exec(&mut env.backend, Insn::Trap0, 1, with(Some(c))).unwrap_err();
+    assert!(matches!(e, InterpExit::Exception(_)));
     // if (!p0) は偽なので抑制される。
     let c = sem::DotIf {
         p: 0,
@@ -148,20 +148,6 @@ fn dotif_suppresses() {
         sem::exec(&mut env.backend, Insn::Nop, 0, with(Some(c))),
         Ok(false)
     );
-}
-
-#[test]
-fn exec_is_unimplemented() {
-    let mut env = env();
-    // frame 系（allocframe/deallocframe/dealloc_return）は HX7。
-    let e = sem::exec(
-        &mut env.backend,
-        Insn::DxL2Deallocframe,
-        0,
-        sem::Ctx::default(),
-    )
-    .unwrap_err();
-    assert!(matches!(e, InterpExit::Unimplemented(_)));
 }
 
 // ---- HX3: パケット層のテスト ----
@@ -2497,4 +2483,588 @@ fn hx6_alignment() {
     sem::r_set(&mut env.backend, 4, (DATA + 1) as u32);
     exec1(&mut env, 0x9104c003);
     assert_eq!(sem::r_get(&env.backend, 3), 0x5a);
+}
+
+// ---- HX7: 分岐・frame・system ----
+// 語は llvm-mc 実符号（V73 プロファイル）をそのまま使う。
+
+#[test]
+fn hx7_pred_jumps() {
+    // { if (p0) jump #0 } = 0x5c00c000（jump:nt）。p0 真で分岐、
+    // 偽で次へ進む。分岐先として jump #0x10 の形を使う。
+    // { if (p0) jump:nt #off } — off は r15 桁（pc+off）。
+    let j = |off: u64| -> u32 {
+        // `if (p0) jump` = 0x5c00c000 + r15 桁（{23:22}+{20:16}
+        // +{13}+{7:1}、zfill 2）。
+        let f = (off >> 2) as u32;
+        0x5c00_c000
+            | (((f >> 13) & 3) << 22)
+            | (((f >> 8) & 0x1f) << 16)
+            | (((f >> 7) & 1) << 13)
+            | ((f & 0x7f) << 1)
+    };
+    let mut env = run_env();
+    put(&mut env, BASE, &[j(0x40)]);
+    env.pc = BASE;
+    sem::p_set(&mut env.backend, 0, 0xff);
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, BASE + 0x40);
+    let mut env = run_env();
+    put(&mut env, BASE, &[j(0x40)]);
+    env.pc = BASE;
+    sem::p_set(&mut env.backend, 0, 0);
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, BASE + 4);
+    // if (!p1) jump:t（llvm-mc 実符号 0x5c20d100 → +off）。
+    // { if (!p1) jump:t #off }：否定 + p1、hint は意味論を変えない。
+    let jn = |off: u64| -> u32 {
+        let f = (off >> 2) as u32;
+        0x5c20_d100
+            | (((f >> 13) & 3) << 22)
+            | (((f >> 8) & 0x1f) << 16)
+            | (((f >> 7) & 1) << 13)
+            | ((f & 0x7f) << 1)
+    };
+    let mut env = run_env();
+    put(&mut env, BASE, &[jn(0x40)]);
+    env.pc = BASE;
+    sem::p_set(&mut env.backend, 1, 0);
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, BASE + 0x40, "if (!p1) jump:t、p1 偽で分岐");
+    let mut env = run_env();
+    put(&mut env, BASE, &[jn(0x40)]);
+    env.pc = BASE;
+    sem::p_set(&mut env.backend, 1, 0xff);
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, BASE + 4, "if (!p1) jump:t、p1 真で抑制");
+    // { if (p0.new) jump:nt } の生産ペア（p0 = cmp.eq + jump_pqn。
+    // jump_pqn = 0x5c00c800 + r15 桁。実符号照合: 5343c800 系）。
+    let jpn = |off: u64| -> u32 {
+        let f = (off >> 2) as u32;
+        0x5c00_c800
+            | (((f >> 13) & 3) << 22)
+            | (((f >> 8) & 0x1f) << 16)
+            | (((f >> 7) & 1) << 13)
+            | ((f & 0x7f) << 1)
+    };
+    // { p0 = cmp.eq(r3,#5)（非終端）; if (p0.new) jump:nt }。
+    let mut env = run_env();
+    let cmp = with_pp(0x7503_40a0, 1); // p0 = cmp.eq(r3,#5)
+    put(&mut env, BASE, &[cmp, jpn(0x40)]);
+    env.pc = BASE;
+    sem::r_set(&mut env.backend, 3, 5);
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, BASE + 0x40, "p0.new 真で分岐");
+    assert_eq!(sem::p_get(&env.backend, 0), 0xff);
+    let mut env = run_env();
+    put(&mut env, BASE, &[cmp, jpn(0x40)]);
+    env.pc = BASE;
+    sem::r_set(&mut env.backend, 3, 4);
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, BASE + 8, "p0.new 偽で抑制（2 語分進む）");
+}
+
+#[test]
+fn hx7_cond_calls_and_indirect() {
+    // { if (p0) call } = 0x5d00c000 + r15 桁。p0 真で LR 更新+分岐。
+    let c = |off: u64| -> u32 {
+        let f = (off >> 2) as u32;
+        0x5d00_c000
+            | (((f >> 13) & 3) << 22)
+            | (((f >> 8) & 0x1f) << 16)
+            | (((f >> 7) & 1) << 13)
+            | ((f & 0x7f) << 1)
+    };
+    let mut env = run_env();
+    put(&mut env, BASE, &[c(0x40)]);
+    env.pc = BASE;
+    sem::p_set(&mut env.backend, 0, 0xff);
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, BASE + 0x40);
+    assert_eq!(sem::r_get(&env.backend, 31), (BASE + 4) as u32, "LR=r31");
+    let mut env = run_env();
+    put(&mut env, BASE, &[c(0x40)]);
+    env.pc = BASE;
+    sem::p_set(&mut env.backend, 0, 0);
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, BASE + 4);
+    assert_eq!(sem::r_get(&env.backend, 31), 0, "抑制時 LR は変えない");
+    // { if (p0) callr r3 } = 0x5103c000 / if (!p0) = 0x5123c000。
+    let mut env = run_env();
+    put(&mut env, BASE, &[0x5103_c000]);
+    env.pc = BASE;
+    sem::p_set(&mut env.backend, 0, 0xff);
+    sem::r_set(&mut env.backend, 3, 0x8000);
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, 0x8000);
+    assert_eq!(sem::r_get(&env.backend, 31), (BASE + 4) as u32);
+    let mut env = run_env();
+    put(&mut env, BASE, &[0x5123_c000]);
+    env.pc = BASE;
+    sem::p_set(&mut env.backend, 0, 0xff);
+    sem::r_set(&mut env.backend, 3, 0x8000);
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, BASE + 4, "if (!p0) callr、p0 真で抑制");
+    // { if (!p0) jumpr:t r3 } = 0x5363d000（hint は意味論を変えない）。
+    let mut env = run_env();
+    put(&mut env, BASE, &[0x5363_d000]);
+    env.pc = BASE;
+    sem::p_set(&mut env.backend, 0, 0);
+    sem::r_set(&mut env.backend, 3, 0x7000);
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, 0x7000);
+    // { if (p0.new) jumpr:nt r3 } = 0x5343c800（p0 生産ペア）。
+    let mut env = run_env();
+    let cmp = with_pp(0x7503_40a0, 1);
+    put(&mut env, BASE, &[cmp, 0x5343_c800]);
+    env.pc = BASE;
+    sem::r_set(&mut env.backend, 3, 0x6000);
+    sem::r_set(&mut env.backend, 4, 0); // cmp.eq 用の比較値は同じ r3
+    step(&mut env).unwrap();
+    // p0 = cmp.eq(r3,#5) は偽（r3=0x6000）→ jumpr 抑制。
+    assert_eq!(env.pc, BASE + 8);
+}
+
+#[test]
+fn hx7_reg_cond_jumps() {
+    // `if (Rs{!=,>=,==,<=} #0) jump`（llvm-mc 実符号系。
+    // r13 桁 = {21}+{13}+{11:1}、zfill 2）。hint 桁 bit12。
+    let rcj = |sel: u32, off: u64| -> u32 {
+        let f = (off >> 2) as u32;
+        0x6103_d000
+            | (sel << 22)
+            | (((f >> 12) & 1) << 21)
+            | (((f >> 7) & 1) << 13)
+            | ((f & 0x7f) << 1)
+    };
+    // sel: 00=!= 01=>= 10=== 11=<=
+    for (sel, v, want) in [
+        (0u32, 7u32, true), // r3!=0 で分岐
+        (0, 0, false),
+        (1, 0, true), // >=0 は 0 でも分岐
+        (1, 0xffff_ffff, false),
+        (2, 0, true), // ==0
+        (2, 1, false),
+        (3, 0xffff_ffff, true), // <=0 は負でも分岐
+        (3, 1, false),
+    ] {
+        let mut env = run_env();
+        put(&mut env, BASE, &[rcj(sel, 0x40)]);
+        env.pc = BASE;
+        sem::r_set(&mut env.backend, 3, v);
+        step(&mut env).unwrap();
+        assert_eq!(
+            env.pc,
+            if want { BASE + 0x40 } else { BASE + 4 },
+            "sel={sel} r3={v:#x}"
+        );
+    }
+}
+
+#[test]
+fn hx7_compound_cj() {
+    // `1440c206` = p0 = cmp.eq(r0,r2); if (!p0.new) jump:nt #0xc。
+    let mut env = run_env();
+    put(&mut env, BASE, &[0x1440_c206]);
+    env.pc = BASE;
+    sem::r_set(&mut env.backend, 0, 1);
+    sem::r_set(&mut env.backend, 2, 2);
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, BASE + 0xc, "cmp 偽 + !p0.new で分岐");
+    assert_eq!(sem::p_get(&env.backend, 0), 0);
+    let mut env = run_env();
+    put(&mut env, BASE, &[0x1440_c206]);
+    env.pc = BASE;
+    sem::r_set(&mut env.backend, 0, 2);
+    sem::r_set(&mut env.backend, 2, 2);
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, BASE + 4);
+    assert_eq!(sem::p_get(&env.backend, 0), 0xff);
+    // `1003c500` = p0 = cmp.eq(r3,#5); if (p0.new) jump:nt #0。
+    // オフセット 0 は自身へ分岐（pc + 0 → 無限ループになるので、
+    // 即値だけ直して正のオフセットにする）。bits[7:1]+[21:20]。
+    let cji = |r: u32, u: u32, off: u64| -> u32 {
+        let f = (off >> 2) as u32;
+        0x1003_c000 | (r << 16) | (u << 8) | (((f >> 7) & 3) << 20) | ((f & 0x7f) << 1)
+    };
+    let mut env = run_env();
+    put(&mut env, BASE, &[cji(3, 5, 0x30)]);
+    env.pc = BASE;
+    sem::r_set(&mut env.backend, 3, 5);
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, BASE + 0x30, "cmp.eq 真 + p0.new で分岐");
+    assert_eq!(sem::p_get(&env.backend, 0), 0xff);
+    let mut env = run_env();
+    put(&mut env, BASE, &[cji(3, 5, 0x30)]);
+    env.pc = BASE;
+    sem::r_set(&mut env.backend, 3, 9);
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, BASE + 4);
+}
+
+#[test]
+fn hx7_nvj() {
+    // `{ r3 = add(r0,#1); if (cmp.eq(r3.new,r5)) jump:t }` —
+    // llvm-mc 実符号 [0xb0004023, 0x2002e500]。N.t = 距離×2
+    // （nt3=2 → 1 命令前の生産を読む）。分岐先 r9=0 は自身。
+    let mut env = run_env();
+    put(
+        &mut env,
+        BASE,
+        &[
+            0xb000_4023, // r3 = add(r0,#1)（pp=01）
+            0x2002_e500, // if (cmp.eq(r3.new,r5)) jump:t #0
+        ],
+    );
+    env.pc = BASE;
+    sem::r_set(&mut env.backend, 0, 4);
+    sem::r_set(&mut env.backend, 5, 5);
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, BASE, "cmp 真で jump（target=パケット先頭）");
+    assert_eq!(sem::r_get(&env.backend, 3), 5, "生産側 add も commit");
+    // 偽なら 2 語進む。
+    let mut env = run_env();
+    put(&mut env, BASE, &[0xb000_4023, 0x2002_e500]);
+    env.pc = BASE;
+    sem::r_set(&mut env.backend, 0, 4);
+    sem::r_set(&mut env.backend, 5, 9);
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, BASE + 8);
+    // 距離 2 の生産も読める（llvm-mc 実符号 0x2004e500）。
+    let mut env = run_env();
+    put(
+        &mut env,
+        BASE,
+        &[
+            0xb000_4023,             // r3 = add(r0,#1)
+            with_pp(0xb000_c024, 1), // r4 = add(r0,#1)（途中語）
+            0x2004_e500,
+        ],
+    );
+    env.pc = BASE;
+    sem::r_set(&mut env.backend, 0, 4);
+    sem::r_set(&mut env.backend, 5, 5);
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, BASE, "距離 2 でも r3.new を読む");
+    // 即値形: `2402e500` = cmp.eq(r3.new,#5) 距離 1（実符号）。
+    let mut env = run_env();
+    put(&mut env, BASE, &[0xb000_4023, 0x2402_e500]);
+    env.pc = BASE;
+    sem::r_set(&mut env.backend, 0, 4);
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, BASE, "cmp.eq(r3.new,#5) 真で分岐");
+    // 生産者不在（NVJ だけ）→ illegal。
+    let mut env = run_env();
+    put(&mut env, BASE, &[0x2002_e500]);
+    env.pc = BASE;
+    assert!(matches!(step(&mut env), Err(Outcome::Unimplemented { .. })));
+}
+
+#[test]
+fn hx7_transfer_jump() {
+    // `1603c700` = r3 = #7; jump #0（tj_i）。`1704c300` = r3 = r4;
+    // jump #0（tj_r）。
+    let mut env = run_env();
+    put(&mut env, BASE, &[0x1603_c700]);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, BASE, "r9=0 で自身へ");
+    assert_eq!(sem::r_get(&env.backend, 3), 7);
+    let mut env = run_env();
+    put(&mut env, BASE, &[0x1704_c300]);
+    env.pc = BASE;
+    sem::r_set(&mut env.backend, 4, 0xbeef);
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, BASE);
+    assert_eq!(sem::r_get(&env.backend, 3), 0xbeef);
+}
+
+#[test]
+fn hx7_dual_jump() {
+    // { if (p0) jump A ; call B }: 先の jump が成立なら call は
+    // まるごと無視（LR を書かない）。
+    let j = |off: u64| -> u32 {
+        let f = (off >> 2) as u32;
+        0x5c00_4000 // pp=01（非終端）
+            | (((f >> 13) & 3) << 22)
+            | (((f >> 8) & 0x1f) << 16)
+            | (((f >> 7) & 1) << 13)
+            | ((f & 0x7f) << 1)
+    };
+    let call = |off: u64| -> u32 {
+        let f = (off >> 2) as u32;
+        0x5a00_c000
+            | (((f >> 13) & 3) << 22)
+            | (((f >> 8) & 0x1f) << 16)
+            | (((f >> 7) & 1) << 13)
+            | ((f & 0x7f) << 1)
+    };
+    // p0 真 → 1 個目の jump が勝ち、call の LR 更新は起きない。
+    let mut env = run_env();
+    put(&mut env, BASE, &[j(0x40), call(0x60)]);
+    env.pc = BASE;
+    sem::p_set(&mut env.backend, 0, 0xff);
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, BASE + 0x40);
+    assert_eq!(
+        sem::r_get(&env.backend, 31),
+        0,
+        "無視された call は LR を書かない"
+    );
+    // p0 偽 → call が実行され LR=r31 に次パケットを残す。
+    let mut env = run_env();
+    put(&mut env, BASE, &[j(0x40), call(0x60)]);
+    env.pc = BASE;
+    sem::p_set(&mut env.backend, 0, 0);
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, BASE + 0x60);
+    assert_eq!(sem::r_get(&env.backend, 31), (BASE + 8) as u32);
+    // 無条件系 2 個・JR を含む組合せは illegal。
+    let mut env = run_env();
+    put(
+        &mut env,
+        BASE,
+        &[
+            with_pp(0x5800_c004, 1), // jump #8
+            with_pp(0x5800_c004, 3), // jump #8
+        ],
+    );
+    env.pc = BASE;
+    assert!(matches!(step(&mut env), Err(Outcome::Unimplemented { .. })));
+    let mut env = run_env();
+    put(
+        &mut env,
+        BASE,
+        &[
+            with_pp(0x5c00_c004, 1), // if (p0) jump
+            with_pp(0x5283_c000, 3), // jumpr r3
+        ],
+    );
+    env.pc = BASE;
+    assert!(matches!(step(&mut env), Err(Outcome::Unimplemented { .. })));
+}
+
+#[test]
+fn hx7_frames() {
+    // allocframe(#0x18) = 0xa09dc003。SP=0x9000 → 記録は
+    // 0x8ff8 に {FP_old, LR_old}、FP=0x8ff8、SP=0x8fe0。
+    let mut env = run_env();
+    // フレーム記録の書き込み先がマップ済み領域に要る。
+    env.backend
+        .mem
+        .map(VirtAddr(0x8000), 1, Perms(Perms::RW.0))
+        .unwrap();
+    sem::r_set(&mut env.backend, 29, 0x9000);
+    sem::r_set(&mut env.backend, 30, 0xaaaa);
+    sem::r_set(&mut env.backend, 31, 0xbbbb);
+    put(&mut env, BASE, &[0xa09d_c003]);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(sem::r_get(&env.backend, 30), 0x8ff8);
+    assert_eq!(sem::r_get(&env.backend, 29), 0x8fe0);
+    assert_eq!(peek(&mut env, 0x8ff8, 4), 0xaaaa, "FP_old at [FP]");
+    assert_eq!(peek(&mut env, 0x8ffc, 4), 0xbbbb, "LR_old at [FP+4]");
+    // deallocframe: r31:30 = memd(r30); SP=r30+8。
+    let mut env = run_env();
+    env.backend
+        .mem
+        .map(VirtAddr(0x8000), 1, Perms(Perms::RW.0))
+        .unwrap();
+    poke(&mut env, 0x8ff8, 0x1111, 4);
+    poke(&mut env, 0x8ffc, 0x2222, 4);
+    sem::r_set(&mut env.backend, 29, 0x8fe0);
+    sem::r_set(&mut env.backend, 30, 0x8ff8);
+    put(&mut env, BASE, &[0x901e_c01e]); // deallocframe
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(sem::r_get(&env.backend, 30), 0x1111, "FP 復帰");
+    assert_eq!(sem::r_get(&env.backend, 31), 0x2222, "LR 復帰");
+    assert_eq!(sem::r_get(&env.backend, 29), 0x9000, "SP = r30+8");
+    // dealloc_return: 復帰のうえ LR（上位ワード）へ分岐。
+    let mut env = run_env();
+    env.backend
+        .mem
+        .map(VirtAddr(0x8000), 1, Perms(Perms::RW.0))
+        .unwrap();
+    poke(&mut env, 0x8ff8, 0x1111, 4);
+    poke(&mut env, 0x8ffc, 0x6000, 4);
+    sem::r_set(&mut env.backend, 29, 0x8fe0);
+    sem::r_set(&mut env.backend, 30, 0x8ff8);
+    put(&mut env, BASE, &[0x961e_c01e]); // dealloc_return
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, 0x6000);
+    assert_eq!(sem::r_get(&env.backend, 30), 0x1111);
+    assert_eq!(sem::r_get(&env.backend, 31), 0x6000);
+    assert_eq!(sem::r_get(&env.backend, 29), 0x9000);
+    // if (!p0) dealloc_return（0x961ef01e）: p0 偽で復帰、真で抑制。
+    let mut env = run_env();
+    env.backend
+        .mem
+        .map(VirtAddr(0x8000), 1, Perms(Perms::RW.0))
+        .unwrap();
+    poke(&mut env, 0x8ff8, 0x1111, 4);
+    poke(&mut env, 0x8ffc, 0x6000, 4);
+    sem::r_set(&mut env.backend, 30, 0x8ff8);
+    sem::p_set(&mut env.backend, 0, 0);
+    put(&mut env, BASE, &[0x961e_f01e]);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, 0x6000);
+    let mut env = run_env();
+    env.backend
+        .mem
+        .map(VirtAddr(0x8000), 1, Perms(Perms::RW.0))
+        .unwrap();
+    sem::r_set(&mut env.backend, 30, 0x8ff8);
+    sem::p_set(&mut env.backend, 0, 0xff);
+    put(&mut env, BASE, &[0x961e_f01e]);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, BASE + 4, "p0 真で !p0 抑制");
+    // r7:6 = deallocframe(r29):raw（0x901dc006）: 任意対への raw 形。
+    let mut env = run_env();
+    env.backend
+        .mem
+        .map(VirtAddr(0x8000), 1, Perms(Perms::RW.0))
+        .unwrap();
+    poke(&mut env, 0x8ff8, 0x3333, 4);
+    poke(&mut env, 0x8ffc, 0x4444, 4);
+    sem::r_set(&mut env.backend, 29, 0x8ff8);
+    put(&mut env, BASE, &[0x901d_c006]);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(sem::r_get(&env.backend, 6), 0x3333);
+    assert_eq!(sem::r_get(&env.backend, 7), 0x4444);
+    assert_eq!(sem::r_get(&env.backend, 29), 0x9000);
+    // allocframe → dealloc_return の往復。
+    let mut env = run_env();
+    env.backend
+        .mem
+        .map(VirtAddr(0x8000), 1, Perms(Perms::RW.0))
+        .unwrap();
+    sem::r_set(&mut env.backend, 29, 0x9000);
+    sem::r_set(&mut env.backend, 30, 0xaaaa);
+    sem::r_set(&mut env.backend, 31, 0x5000);
+    put(&mut env, BASE, &[0xa09d_c003, 0x961e_c01e]);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(sem::r_get(&env.backend, 29), 0x8fe0);
+    assert_eq!(sem::r_get(&env.backend, 30), 0x8ff8);
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, 0x5000, "LR 復帰先へ");
+    assert_eq!(sem::r_get(&env.backend, 30), 0xaaaa);
+    assert_eq!(sem::r_get(&env.backend, 31), 0x5000);
+    assert_eq!(sem::r_get(&env.backend, 29), 0x9000);
+    // duplex: { r0 = #0 ; allocframe(#0x10) }（実符号 0x68003c20）。
+    let mut env = run_env();
+    env.backend
+        .mem
+        .map(VirtAddr(0x8000), 1, Perms(Perms::RW.0))
+        .unwrap();
+    sem::r_set(&mut env.backend, 29, 0x9000);
+    sem::r_set(&mut env.backend, 30, 0xaaaa);
+    sem::r_set(&mut env.backend, 31, 0xbbbb);
+    put(&mut env, BASE, &[0x6800_3c20]);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(sem::r_get(&env.backend, 30), 0x8ff8);
+    assert_eq!(sem::r_get(&env.backend, 29), 0x8fe8);
+    // duplex: { r0 = #0 ; dealloc_return }（実符号 0x48003f40）。
+    let mut env = run_env();
+    env.backend
+        .mem
+        .map(VirtAddr(0x8000), 1, Perms(Perms::RW.0))
+        .unwrap();
+    poke(&mut env, 0x8ff8, 0x1111, 4);
+    poke(&mut env, 0x8ffc, 0x6000, 4);
+    sem::r_set(&mut env.backend, 30, 0x8ff8);
+    put(&mut env, BASE, &[0x4800_3f40]);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, 0x6000);
+    assert_eq!(sem::r_get(&env.backend, 30), 0x1111);
+    assert_eq!(sem::r_get(&env.backend, 29), 0x9000);
+    // duplex: { r0 = #0 ; deallocframe }（実符号 0x48003f00）。
+    let mut env = run_env();
+    env.backend
+        .mem
+        .map(VirtAddr(0x8000), 1, Perms(Perms::RW.0))
+        .unwrap();
+    poke(&mut env, 0x8ff8, 0x1111, 4);
+    poke(&mut env, 0x8ffc, 0x2222, 4);
+    sem::r_set(&mut env.backend, 30, 0x8ff8);
+    put(&mut env, BASE, &[0x4800_3f00]);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, BASE + 4, "deallocframe は分岐しない");
+    assert_eq!(sem::r_get(&env.backend, 30), 0x1111);
+    assert_eq!(sem::r_get(&env.backend, 31), 0x2222);
+    // duplex: { r0 = #0 ; if (!p0) jumpr r31 }（実符号 0x48003fc5）。
+    let mut env = run_env();
+    sem::r_set(&mut env.backend, 31, 0x7777);
+    sem::p_set(&mut env.backend, 0, 0);
+    put(&mut env, BASE, &[0x4800_3fc5]);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, 0x7777);
+    let mut env = run_env();
+    sem::r_set(&mut env.backend, 31, 0x7777);
+    sem::p_set(&mut env.backend, 0, 0xff);
+    put(&mut env, BASE, &[0x4800_3fc5]);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, BASE + 4);
+}
+
+#[test]
+fn hx7_traps_and_hints() {
+    // trap0(#0x3f) = 0x5400c71c（u8 即値）。trap1(r3,#0x7f) =
+    // 0x5483cf1c → code = 0x100|0x7f。pause は no-op。
+    let mut env = run_env();
+    put(&mut env, BASE, &[0x5400_c71c]);
+    env.pc = BASE;
+    let mut sys = Rec {
+        code: None,
+        outcome: TrapOutcome::Exit(9),
+    };
+    assert_eq!(run::step(&mut env, &mut sys, 0), Err(Outcome::Exit(9)));
+    assert_eq!(sys.code, Some(0x3f));
+    let mut env = run_env();
+    put(&mut env, BASE, &[0x5483_cf1c]);
+    env.pc = BASE;
+    let mut sys = Rec {
+        code: None,
+        outcome: TrapOutcome::Exit(9),
+    };
+    assert_eq!(run::step(&mut env, &mut sys, 0), Err(Outcome::Exit(9)));
+    assert_eq!(sys.code, Some(0x17f));
+    // pause(#0x155) = 0x5441ca14 は no-op で次へ進む。
+    let mut env = run_env();
+    put(&mut env, BASE, &[0x5441_ca14]);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, BASE + 4);
+    // hintjr(r3) = 0x52a3c000 は建築状態を変えない no-op。
+    let mut env = run_env();
+    put(&mut env, BASE, &[0x52a3_c000]);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, BASE + 4);
+    // if (!p0.new) jumpr:t r4（パケット内 p0 生産つき、
+    // llvm-mc 実符号 0x5364d800）。生産が真なら !p0.new で抑制。
+    let mut env = run_env();
+    put(&mut env, BASE, &[0x7503_40a0, 0x5364_d800]);
+    env.pc = BASE;
+    sem::r_set(&mut env.backend, 3, 5);
+    sem::r_set(&mut env.backend, 4, 0x4321);
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, BASE + 8, "p0.new 真で !p0.new 抑制");
+    let mut env = run_env();
+    put(&mut env, BASE, &[0x7503_40a0, 0x5364_d800]);
+    env.pc = BASE;
+    sem::r_set(&mut env.backend, 3, 4);
+    sem::r_set(&mut env.backend, 4, 0x4321);
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, 0x4321, "p0.new 偽で分岐");
 }

@@ -44,7 +44,6 @@
 
 | # | 内容 | 前提 | 判定 |
 |---|---|---|---|
-| HX7 | 分岐・jump/call/jumpr・述語付き実行・allocframe/deallocframe/dealloc_return・endloop・trap0 | HX4 | - |
 | HX8 | ハードウェアループ（loop0/loop1、LC/SA） | HX4 | - |
 | HX9 | HVX | HX4 | - |
 | HX10 | タイミングモデル: 複数ハードウェアスレッドの交互実行を表す専用モデル | HX4 | - |

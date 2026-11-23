@@ -202,6 +202,30 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("ps4s", 6, 3),
         // ssa6: ST shifted-abs の即値（bits[5:0]）。
         ("ssa6", 5, 0),
+        // ---- HX7: 分岐・frame・system ----
+        // jpv: 条件付き分岐・条件付き dealloc_return の述語
+        // 選択（bits[9:8] の Pu/Pv）。
+        ("jpv", 9, 8),
+        // jn21/jn13/jn22: 各条件形の否定桁（Pu 系の bit21、
+        // dealloc_return qualifier の bit13、compare-jump と
+        // new-value compare-jump の bit22）。
+        ("jn21", 21, 21),
+        ("jn13", 13, 13),
+        ("jn22", 22, 22),
+        // jpd25/jpd12: 複合 compare-jump（`pX = cmp.* ; if
+        // ([!]pX.new) jump` が 1 命令に畳まれた形）の述語宛先
+        // （即値形は bit25、レジスタ形は bit12）。
+        ("jpd25", 25, 25),
+        ("jpd12", 12, 12),
+        // j4/j4t: J 系複合命令の 4 ビット部分集合レジスタ
+        // （bits[19:16] と bits[11:8]。r0-7/r16-23 の符号）。
+        ("j4", 19, 16),
+        ("j4t", 11, 8),
+        // nt3: new-value compare-jump の生産距離（bits[18:16]。
+        // エンコード値がそのまま距離）。
+        ("nt3", 18, 16),
+        // u6t: 転送ジャンプ `Rd=#U6; jump` の U6（bits[13:8]）。
+        ("u6t", 13, 8),
     ] {
         m.fields.push(Field {
             name: name.to_string(),
@@ -221,8 +245,12 @@ pub fn build_model() -> polyisa_isadl::Model {
     for (name, parts, zfill) in [
         ("diclass", vec![(31, 29), (13, 13)], 0),
         ("imm26", vec![(27, 16), (13, 0)], 0),
-        // trap0(#u6) の分割即値（bits[10:8]+[4:2]）。
-        ("tu6", vec![(10, 8), (4, 2)], 0),
+        // trap0(#u8)/trap1(Rx,#u8) の分割即値
+        // （bits[12:11]+[10:8]+[4:2]。実符号照合済み）。
+        ("tu8", vec![(12, 11), (10, 8), (4, 2)], 0),
+        // pause(#u10) の分割即値（bits[17:16]+[12:11]+[10:8]
+        // +[4:2]。実符号照合済み）。
+        ("pu10", vec![(17, 16), (12, 11), (10, 8), (4, 2)], 0),
         ("s16", vec![(23, 22), (20, 16), (13, 5)], 0),
         ("ai16", vec![(27, 21), (13, 5)], 0),
         ("ui16", vec![(23, 22), (13, 0)], 0),
@@ -290,6 +318,20 @@ pub fn build_model() -> polyisa_isadl::Model {
         ("u6b", vec![(17, 16), (6, 3)], 0),
         // q2a: 述語付 abs ストアの qualifier（{bit13=.new}+{bit2=!}）。
         ("q2a", vec![(13, 13), (2, 2)], 0),
+        // ---- HX7: 分岐系の分割即値 ----
+        // r15: `if ([!]Pu[.new]) jump/call` の PC 相対オフセット
+        // （bits{23:22}+{20:16}+{13}+{7:1}、zfill 2）。
+        ("r15", vec![(23, 22), (20, 16), (13, 13), (7, 1)], 2),
+        // r13: `if (Rs {!=,==,>=,<=} #0) jump` の PC 相対
+        // オフセット（bits{21}+{13}+{11:1}、zfill 2）。
+        ("r13", vec![(21, 21), (13, 13), (11, 1)], 2),
+        // r9: 複合 compare-jump・new-value compare-jump・
+        // 転送ジャンプの PC 相対オフセット（bits{21:20}+{7:1}、
+        // zfill 2）。
+        ("r9", vec![(21, 20), (7, 1)], 2),
+        // af11: allocframe のフレームサイズ（bits[10:0]、
+        // zfill 3 でバイトオフセット）。
+        ("af11", vec![(10, 0)], 3),
     ] {
         m.fields.push(Field {
             name: name.to_string(),
@@ -881,13 +923,143 @@ pub fn build_model() -> polyisa_isadl::Model {
     ));
     // jump/call の PC 相対形。
     m.formats.push(fmt("FJ", &["r22"], vec![val("target", "r22")]));
-    // trap0(#u6)。
-    m.formats.push(fmt("FTRAP", &["tu6"], vec![val("u", "tu6")]));
-    // jumpr/callr のレジスタ形。
+    // trap0(#u8)。
+    m.formats.push(fmt("FTRAP", &["tu8"], vec![val("u", "tu8")]));
+    // trap1(Rx,#u8)。
+    m.formats.push(fmt(
+        "FTRAP1",
+        &["s5", "tu8"],
+        vec![gpr("x", "s5", Access::Read), val("u", "tu8")],
+    ));
+    // pause(#u10)。
+    m.formats.push(fmt("FPAUSE", &["pu10"], vec![val("u", "pu10")]));
+    // jumpr/callr/jumprh/callrh/hintjr のレジスタ形。
     m.formats.push(fmt(
         "FJR",
         &["s5"],
         vec![gpr("s", "s5", Access::Read)],
+    ));
+    // ---- HX7: 分岐・frame 系の形式 ----
+    // if ([!]Pu[.new]) jump/call。末尾 2 オペランドは (述語, 否定)。
+    m.formats.push(fmt(
+        "FJ15",
+        &["r15", "jpv", "jn21"],
+        vec![
+            val("target", "r15"),
+            preg("p", "jpv", Access::Read),
+            val("q", "jn21"),
+        ],
+    ));
+    // if ([!]Pu[.new]) jumpr/callr。末尾 2 オペランドは (述語, 否定)。
+    m.formats.push(fmt(
+        "FJRPQ",
+        &["s5", "jpv", "jn21"],
+        vec![
+            gpr("s", "s5", Access::Read),
+            preg("p", "jpv", Access::Read),
+            val("q", "jn21"),
+        ],
+    ));
+    // if (Rs {!=,==,>=,<=} #0) jump のレジスタ条件形。
+    m.formats.push(fmt(
+        "FRCJ",
+        &["s5", "r13"],
+        vec![gpr("s", "s5", Access::Read), val("target", "r13")],
+    ));
+    // 複合 compare-jump の即値形（pX = cmp.*(Rs,#U5);
+    // if ([!]pX.new) jump が 1 命令の形。否定は bit22）。
+    m.formats.push(fmt(
+        "FCJI",
+        &["j4", "t5", "jpd25", "jn22", "r9"],
+        vec![
+            gpr("s", "j4", Access::Read),
+            val("u", "t5"),
+            preg("d", "jpd25", Access::Write),
+            val("q", "jn22"),
+            val("target", "r9"),
+        ],
+    ));
+    // 複合 compare-jump の固定即値形（cmp.*(Rs,#-1)/tstbit。
+    // 即値桁は使わない）。
+    m.formats.push(fmt(
+        "FCJS",
+        &["j4", "jpd25", "jn22", "r9"],
+        vec![
+            gpr("s", "j4", Access::Read),
+            preg("d", "jpd25", Access::Write),
+            val("q", "jn22"),
+            val("target", "r9"),
+        ],
+    ));
+    // 複合 compare-jump のレジスタ形（pX = cmp.*(Rs,Rt)）。
+    m.formats.push(fmt(
+        "FCJR",
+        &["j4", "j4t", "jpd12", "jn22", "r9"],
+        vec![
+            gpr("s", "j4", Access::Read),
+            gpr("t", "j4t", Access::Read),
+            preg("d", "jpd12", Access::Write),
+            val("q", "jn22"),
+            val("target", "r9"),
+        ],
+    ));
+    // new-value compare-jump（slot 0 専用の .new 値比較形。
+    // U5/Rt はどちらも bits[12:8] の t5 桁）。
+    m.formats.push(fmt(
+        "FNVJ",
+        &["nt3", "t5", "jn22", "r9"],
+        vec![
+            val("nt", "nt3"),
+            gpr("t", "t5", Access::Read),
+            val("q", "jn22"),
+            val("target", "r9"),
+        ],
+    ));
+    // 転送ジャンプ `Rd=#U6; jump` / `Rd=Rs; jump`。
+    m.formats.push(fmt(
+        "FTJI",
+        &["j4", "u6t", "r9"],
+        vec![
+            gpr("d", "j4", Access::Write),
+            val("u", "u6t"),
+            val("target", "r9"),
+        ],
+    ));
+    m.formats.push(fmt(
+        "FTJR",
+        &["j4", "j4t", "r9"],
+        vec![
+            gpr("s", "j4", Access::Read),
+            gpr("d", "j4t", Access::Write),
+            val("target", "r9"),
+        ],
+    ));
+    // Rdd = deallocframe(Rs):raw。
+    m.formats.push(fmt(
+        "FDCF",
+        &["s5", "d5"],
+        vec![
+            gpr("dd", "d5", Access::Write),
+            gpr("s", "s5", Access::Read),
+        ],
+    ));
+    // if ([!]Pv[.new]) Rdd = dealloc_return(Rs):raw。末尾 2
+    // オペランドは (述語, 否定)。
+    m.formats.push(fmt(
+        "FDCP",
+        &["s5", "d5", "jpv", "jn13"],
+        vec![
+            gpr("dd", "d5", Access::Write),
+            gpr("s", "s5", Access::Read),
+            preg("p", "jpv", Access::Read),
+            val("q", "jn13"),
+        ],
+    ));
+    // allocframe(Rx,#u11:3):raw。
+    m.formats.push(fmt(
+        "FAF",
+        &["s5", "af11"],
+        vec![gpr("x", "s5", Access::ReadWrite), val("u", "af11")],
     ));
     // Rd = Cs。
     m.formats.push(fmt(
@@ -1468,10 +1640,71 @@ pub fn build_model() -> polyisa_isadl::Model {
         // jumpr/callr のレジスタ形。Ref: J indirect jump/call.
         ("jumpr", "FJR", "01010010100.....................", "jumpr {s}", "branch"),
         ("callr", "FJR", "01010000101.....................", "callr {s}", "branch"),
-        // trap0(#u6)。ユーザモードの #1 が OS 呼出し。trap1/2 は
-        // 特権でユーザ範囲外（HX7 で範囲を確定）。
+        // ---- HX7: 分岐・frame・system ----
+        // if ([!]Pu) jump（:t/:nt の予測桁は意味論を変えない）。
+        // Ref: J jump to address.
+        ("jump_pq", "FJ15", "01011100............0...........", "if(...) jump #{target}", "branch"),
+        // if ([!]Pu.new) jump。
+        ("jump_pqn", "FJ15", "01011100............1...........", "if(...new) jump #{target}", "branch"),
+        // if ([!]Pu) call（.new 形はない）。Ref: J call subroutine.
+        ("call_pq", "FJ15", "01011101............0...........", "if(...) call #{target}", "branch"),
+        // if ([!]Pu[.new]) jumpr（bit11 が .new、bit12 が :t
+        // ヒント、bit21 が否定）。Ref: J jump to address from reg.
+        ("jumpr_pq", "FJRPQ", "0101001101..........0...........", "if(...) jumpr {s}", "branch"),
+        ("jumpr_pqn", "FJRPQ", "0101001101..........1...........", "if(...new) jumpr {s}", "branch"),
+        // if ([!]Pu) callr（.new 形はないので bit11 = 0 固定）。
+        ("callr_pq", "FJRPQ", "0101000100..........0...........", "if(...) callr {s}", "branch"),
+        // hintjr は間接ジャンプ先の予測ヒント。建築状態を変えない。
+        ("hintjr", "FJR", "01010010101.....................", "hintjr {s}", "branch"),
+        // if (Rs {!=,>=,==,<=} #0) jump。Ref: J register-cond jump.
+        ("rcj_ne", "FRCJ", "0110000100......................", "if({s}!=#0) jump #{target}", "branch"),
+        ("rcj_ge", "FRCJ", "0110000101......................", "if({s}>=#0) jump #{target}", "branch"),
+        ("rcj_eq", "FRCJ", "0110000110......................", "if({s}==#0) jump #{target}", "branch"),
+        ("rcj_le", "FRCJ", "0110000111......................", "if({s}<=#0) jump #{target}", "branch"),
+        // 複合 compare-jump。Ref: J compare-and-jump.
+        ("cj_eqi", "FCJI", "000100.00.......................", "cmp.eq({s},#{u})/jump #{target}", "branch"),
+        ("cj_gti", "FCJI", "000100.01.......................", "cmp.gt({s},#{u})/jump #{target}", "branch"),
+        ("cj_gtui", "FCJI", "000100.10.......................", "cmp.gtu({s},#{u})/jump #{target}", "branch"),
+        ("cj_eqi1", "FCJS", "000100.11.............00........", "cmp.eq({s},#-1)/jump #{target}", "branch"),
+        ("cj_gti1", "FCJS", "000100.11.............01........", "cmp.gt({s},#-1)/jump #{target}", "branch"),
+        ("cj_tst", "FCJS", "000100.11.............11........", "tstbit({s},#0)/jump #{target}", "branch"),
+        ("cj_eqr", "FCJR", "000101000.......................", "cmp.eq({s},{t})/jump #{target}", "branch"),
+        ("cj_gtr", "FCJR", "000101001.......................", "cmp.gt({s},{t})/jump #{target}", "branch"),
+        ("cj_gtur", "FCJR", "000101010.......................", "cmp.gtu({s},{t})/jump #{target}", "branch"),
+        // new-value compare-jump（slot 0 専用。bits[27:22] が
+        // 比較選択+否定）。
+        // Ref: J jump to address condition on new register value.
+        ("nvj_eqr", "FNVJ", "001000000.......................", "if(cmp.eq(r.new,{t})) jump #{target}", "branch"),
+        ("nvj_gtr", "FNVJ", "001000001.......................", "if(cmp.gt(r.new,{t})) jump #{target}", "branch"),
+        ("nvj_gtur", "FNVJ", "001000010.......................", "if(cmp.gtu(r.new,{t})) jump #{target}", "branch"),
+        ("nvj_gtrr", "FNVJ", "001000011.......................", "if(cmp.gt({t},r.new)) jump #{target}", "branch"),
+        ("nvj_gturr", "FNVJ", "001000100.......................", "if(cmp.gtu({t},r.new)) jump #{target}", "branch"),
+        ("nvj_eqi", "FNVJ", "001001000.......................", "if(cmp.eq(r.new,#{t})) jump #{target}", "branch"),
+        ("nvj_gti", "FNVJ", "001001001.......................", "if(cmp.gt(r.new,#{t})) jump #{target}", "branch"),
+        ("nvj_gtui", "FNVJ", "001001010.......................", "if(cmp.gtu(r.new,#{t})) jump #{target}", "branch"),
+        ("nvj_tst", "FNVJ", "001001011.......................", "if(tstbit(r.new,#0)) jump #{target}", "branch"),
+        ("nvj_eqi1", "FNVJ", "001001100.......................", "if(cmp.eq(r.new,#-1)) jump #{target}", "branch"),
+        ("nvj_gti1", "FNVJ", "001001101.......................", "if(cmp.gt(r.new,#-1)) jump #{target}", "branch"),
+        // 転送ジャンプ `Rd=#U6; jump` / `Rd=Rs; jump`。
+        // Ref: J transfer and jump.
+        ("tj_i", "FTJI", "00010110........................", "{d}=#{u};jump #{target}", "branch"),
+        ("tj_r", "FTJR", "00010111........................", "{d}={s};jump #{target}", "branch"),
+        // frame の構築・解除・復帰。Ref: stack instructions.
+        ("allocframe", "FAF", "10100000100.......000...........", "allocframe {x},#{u}", "store"),
+        ("deallocframe", "FDCF", "10010000000.......0.............", "{dd}=deallocframe({s})", "load"),
+        ("deallocret", "FDCF", "10010110000.......0000..........", "{dd}=dealloc_return({s})", "branch"),
+        ("deallocret_pq", "FDCP", "10010110000........100..........", "if(...) {dd}=dealloc_return({s})", "branch"),
+        ("deallocret_pqn", "FDCP", "10010110000.........10..........", "if(...new) {dd}=dealloc_return({s})", "branch"),
+        // trap0(#u8)。ユーザモードの #1 が OS 呼出し。trap1 は
+        // monitor 系のトラップで、ユーザモードでは例外として
+        // OS パーソナリティに委ねる（code = 0x100|u）。trap2 は
+        // PRM に存在しない。pause はタイミングヒント（solo 命令、
+        // 建築状態を変えない）。brkpt/unpause/icinva/isync/
+        // syncht/dcfetch/l2fetch は語彙外（復号不能=illegal）。
         // Ref: system instructions.
-        ("trap0", "FTRAP", "01010100000.....................", "trap0(#{u})", "system"),
+        ("trap0", "FTRAP", "0101010000......................", "trap0(#{u})", "system"),
+        ("trap1", "FTRAP1", "0101010010......................", "trap1({x},#{u})", "system"),
+        ("pause", "FPAUSE", "0101010001......................", "pause(#{u})", "system"),
         // Rd = Cs / Cd = Rs。Ref: CR control register transfer.
         ("rdcr", "FRDC", "01101010000.....................", "{d}=c{c}", "system"),
         ("wrcr", "FWRC", "01100010001.....................", "c{d}={s}", "system"),

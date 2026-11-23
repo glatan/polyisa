@@ -320,6 +320,10 @@ pub struct Ctx {
     /// パケット内位置（pkt_prod の索引。`.new` ストア値の生産
     /// 距離 Nt の基準点）。
     pub pos: u32,
+    /// dual jump で先に分岐が確定した（Section 9.7: 2 個目の
+    /// 分岐命令はまるごと無視される。call の LR 更新・frame の
+    /// 復帰・pred 書き込みもしない）。
+    pub masked: bool,
 }
 
 /// extender 併合済みの即値。`raw` は extract_ops の値（zfill
@@ -744,6 +748,94 @@ fn jump(b: &mut InterpBackend, target: u32) {
     b.ctrl = Ctrl::Jump(u64::from(target));
 }
 
+// ---- HX7: 分岐・frame の共用ヘルパ ----
+
+/// 分岐内部の述語条件（`if ([!]Pu[.new])` qualifier）。真なら
+/// 分岐側を実行する。
+fn pq(b: &InterpBackend, p: u64, neg: u64, new: bool) -> bool {
+    let v = if new {
+        p_new(b, p as u32).unwrap_or_else(|| pred(b, p as u32))
+    } else {
+        pred(b, p as u32)
+    };
+    v != (neg != 0)
+}
+
+/// frame 記録の読み出し。Rs が指す 8 バイトを読み（下位ワードが
+/// 保存 FP、上位ワードが保存 LR）、SP を Rs+8 に戻す。返値は
+/// {LR,FP} の対（下位=FP、上位=LR）。FRAMEKEY による LR の
+/// XOR スクランブルは、ユーザ空間の既定値 0 で省略する。
+/// Ref: SPEC-HEXAGON-PRM (V79) software stack.
+fn dealloc(b: &mut InterpBackend, s: u32) -> Result<u64, InterpExit> {
+    let ea = r_get(b, s);
+    let frame = b.load::<W64>(u64::from(ea), DRD)?;
+    pkt_w(b, 29, ea.wrapping_add(8));
+    Ok(frame)
+}
+
+/// deallocframe/dealloc_return の共通部。`dd` は書き込み先の
+/// 対レジスタ（偶数側の番号）。`ret` なら復元 LR への分岐を
+/// 記録する。
+fn dealloc_to(b: &mut InterpBackend, dd: u32, s: u32, ret: bool) -> Result<(), InterpExit> {
+    let frame = dealloc(b, s)?;
+    pkt_w64(b, dd & !1, frame);
+    if ret {
+        jump(b, (frame >> 32) as u32);
+    }
+    Ok(())
+}
+
+/// `masked`（dual jump の先勝ち）でまるごと無視される分岐系
+/// 命令か。call の LR 書き込み・dealloc_return の frame 復帰・
+/// compare-jump の述語書き込みを抑止するために使う。
+/// Ref: SPEC-HEXAGON-PRM (V79) Section 9.7.
+fn branch_insn(insn: Insn) -> bool {
+    matches!(
+        insn,
+        Insn::JumpPcrel
+            | Insn::JumpPq
+            | Insn::JumpPqn
+            | Insn::CallPcrel
+            | Insn::CallPq
+            | Insn::Jumpr
+            | Insn::JumprPq
+            | Insn::JumprPqn
+            | Insn::Callr
+            | Insn::CallrPq
+            | Insn::RcjNe
+            | Insn::RcjGe
+            | Insn::RcjEq
+            | Insn::RcjLe
+            | Insn::CjEqi
+            | Insn::CjGti
+            | Insn::CjGtui
+            | Insn::CjEqi1
+            | Insn::CjGti1
+            | Insn::CjTst
+            | Insn::CjEqr
+            | Insn::CjGtr
+            | Insn::CjGtur
+            | Insn::NvjEqr
+            | Insn::NvjGtr
+            | Insn::NvjGtur
+            | Insn::NvjGtrr
+            | Insn::NvjGturr
+            | Insn::NvjEqi
+            | Insn::NvjGti
+            | Insn::NvjGtui
+            | Insn::NvjTst
+            | Insn::NvjEqi1
+            | Insn::NvjGti1
+            | Insn::TjI
+            | Insn::TjR
+            | Insn::Deallocret
+            | Insn::DeallocretPq
+            | Insn::DeallocretPqn
+            | Insn::DxL2Jumpr
+            | Insn::DxL2Deallocret
+    )
+}
+
 /// 1 命令ぶんの意味論。`word` は命令語（32 ビット語か 13 ビット
 /// subinsn 語）。戻り値は意味論を実行したか（dot-if で抑制された
 /// とき false）。
@@ -757,6 +849,11 @@ pub fn exec(b: &mut InterpBackend, insn: Insn, word: u128, cx: Ctx) -> Result<bo
         if v == c.neg {
             return Ok(false);
         }
+    }
+    // dual jump: 先の分岐が成立したあとの分岐命令はまるごと
+    // 無視される（LR 更新・frame 復帰・述語書き込みもしない）。
+    if cx.masked && branch_insn(insn) {
+        return Ok(false);
     }
     set32(b, nv_pos_ref(), cx.pos);
     let ops = extract_ops(insn, word);
@@ -1082,7 +1179,177 @@ pub fn exec(b: &mut InterpBackend, insn: Insn, word: u128, cx: Ctx) -> Result<bo
             pkt_w(b, 31, cx.next);
             jump(b, r_get(b, ops[0] as u32));
         }
+        Insn::Hintjr | Insn::Pause => {}
+        // ---- HX7: 述語条件分岐 ----
+        // `if ([!]Pu[.new]) jump/call`（ops = target, p, 否定）。
+        // :t/:nt の予測桁は建築状態を変えない。
+        Insn::JumpPq | Insn::JumpPqn => {
+            let new = matches!(insn, Insn::JumpPqn);
+            if pq(b, ops[1], ops[2], new) {
+                let off = jump_off(ops[0], 2, 17);
+                jump(b, cx.pc.wrapping_add(off));
+            }
+        }
+        Insn::CallPq => {
+            if pq(b, ops[1], ops[2], false) {
+                pkt_w(b, 31, cx.next);
+                let off = jump_off(ops[0], 2, 17);
+                jump(b, cx.pc.wrapping_add(off));
+            }
+        }
+        Insn::JumprPq | Insn::JumprPqn => {
+            let new = matches!(insn, Insn::JumprPqn);
+            if pq(b, ops[1], ops[2], new) {
+                jump(b, r_get(b, ops[0] as u32));
+            }
+        }
+        Insn::CallrPq => {
+            if pq(b, ops[1], ops[2], false) {
+                pkt_w(b, 31, cx.next);
+                jump(b, r_get(b, ops[0] as u32));
+            }
+        }
+        // `if (Rs {!=,>=,==,<=} #0) jump`（ops = s, target）。
+        Insn::RcjNe => {
+            if r_get(b, ops[0] as u32) != 0 {
+                let off = jump_off(ops[1], 2, 15);
+                jump(b, cx.pc.wrapping_add(off));
+            }
+        }
+        Insn::RcjGe => {
+            if r_get(b, ops[0] as u32) as i32 >= 0 {
+                let off = jump_off(ops[1], 2, 15);
+                jump(b, cx.pc.wrapping_add(off));
+            }
+        }
+        Insn::RcjEq => {
+            if r_get(b, ops[0] as u32) == 0 {
+                let off = jump_off(ops[1], 2, 15);
+                jump(b, cx.pc.wrapping_add(off));
+            }
+        }
+        Insn::RcjLe => {
+            if r_get(b, ops[0] as u32) as i32 <= 0 {
+                let off = jump_off(ops[1], 2, 15);
+                jump(b, cx.pc.wrapping_add(off));
+            }
+        }
+        // 複合 compare-jump。比較結果の述語を書き、条件成立で
+        // 分岐する（ops = s, 即値, pd, 否定, target）。
+        Insn::CjEqi | Insn::CjGti | Insn::CjGtui => {
+            let rs = r_get(b, ops[0] as u32);
+            let u = ops[1] as u32;
+            let v = match insn {
+                Insn::CjEqi => rs == u,
+                Insn::CjGti => (rs as i32) > (u as i32),
+                _ => rs > u,
+            };
+            pkt_pw(b, ops[2] as u32, pval(v));
+            if v != (ops[3] != 0) {
+                let off = jump_off(ops[4], 2, 11);
+                jump(b, cx.pc.wrapping_add(off));
+            }
+        }
+        // 固定即値形（ops = s, pd, 否定, target）。
+        Insn::CjEqi1 | Insn::CjGti1 | Insn::CjTst => {
+            let rs = r_get(b, ops[0] as u32);
+            let v = match insn {
+                Insn::CjEqi1 => rs == u32::MAX,
+                Insn::CjGti1 => (rs as i32) > -1,
+                _ => rs & 1 != 0,
+            };
+            pkt_pw(b, ops[1] as u32, pval(v));
+            if v != (ops[2] != 0) {
+                let off = jump_off(ops[3], 2, 11);
+                jump(b, cx.pc.wrapping_add(off));
+            }
+        }
+        // レジスタ形（ops = s, t, pd, 否定, target）。
+        Insn::CjEqr | Insn::CjGtr | Insn::CjGtur => {
+            let rs = r_get(b, ops[0] as u32);
+            let rt = r_get(b, ops[1] as u32);
+            let v = match insn {
+                Insn::CjEqr => rs == rt,
+                Insn::CjGtr => (rs as i32) > (rt as i32),
+                _ => rs > rt,
+            };
+            pkt_pw(b, ops[2] as u32, pval(v));
+            if v != (ops[3] != 0) {
+                let off = jump_off(ops[4], 2, 11);
+                jump(b, cx.pc.wrapping_add(off));
+            }
+        }
+        // new-value compare-jump（ops = nt3, t, 否定, target。
+        // nt3 は生産距離の 2 倍）。述語は書かず比較だけで分岐する。
+        Insn::NvjEqr
+        | Insn::NvjGtr
+        | Insn::NvjGtur
+        | Insn::NvjGtrr
+        | Insn::NvjGturr
+        | Insn::NvjEqi
+        | Insn::NvjGti
+        | Insn::NvjGtui
+        | Insn::NvjTst
+        | Insn::NvjEqi1
+        | Insn::NvjGti1 => {
+            let nt3 = ops[0];
+            if nt3 == 0 || nt3 & 1 != 0 {
+                return Err(trap(TRAP_ILL));
+            }
+            let ns = nv_src(b, cx.pos, nt3 >> 1)?;
+            let t = ops[1] as u32;
+            let v = match insn {
+                Insn::NvjEqr => ns == r_get(b, t),
+                Insn::NvjGtr => (ns as i32) > (r_get(b, t) as i32),
+                Insn::NvjGtur => ns > r_get(b, t),
+                Insn::NvjGtrr => (r_get(b, t) as i32) > (ns as i32),
+                Insn::NvjGturr => r_get(b, t) > ns,
+                Insn::NvjEqi => ns == t,
+                Insn::NvjGti => (ns as i32) > (t as i32),
+                Insn::NvjGtui => ns > t,
+                Insn::NvjTst => ns & 1 != 0,
+                Insn::NvjEqi1 => ns == u32::MAX,
+                _ => (ns as i32) > -1,
+            };
+            if v != (ops[2] != 0) {
+                let off = jump_off(ops[3], 2, 11);
+                jump(b, cx.pc.wrapping_add(off));
+            }
+        }
+        // 転送ジャンプ（`Rd=#U6; jump` / `Rd=Rs; jump`）。
+        Insn::TjI => {
+            pkt_w(b, ops[0] as u32, ops[1] as u32);
+            let off = jump_off(ops[2], 2, 11);
+            jump(b, cx.pc.wrapping_add(off));
+        }
+        Insn::TjR => {
+            pkt_w(b, ops[1] as u32, r_get(b, ops[0] as u32));
+            let off = jump_off(ops[2], 2, 11);
+            jump(b, cx.pc.wrapping_add(off));
+        }
+        // frame の構築・解除・復帰。`masked` は冒頭で裁く。
+        Insn::Allocframe => {
+            let x = ops[0] as u32;
+            let frame = ops[1] as u32;
+            let ea = r_get(b, x).wrapping_sub(8);
+            let pair = u64::from(r_get(b, 30)) | (u64::from(r_get(b, 31)) << 32);
+            b.store::<W64>(u64::from(ea), pair, DWR)?;
+            pkt_w(b, 30, ea);
+            pkt_w(b, x, ea.wrapping_sub(frame));
+        }
+        Insn::Deallocframe => dealloc_to(b, ops[0] as u32, ops[1] as u32, false)?,
+        Insn::Deallocret => dealloc_to(b, ops[0] as u32, ops[1] as u32, true)?,
+        Insn::DeallocretPq | Insn::DeallocretPqn => {
+            let new = matches!(insn, Insn::DeallocretPqn);
+            if pq(b, ops[2], ops[3], new) {
+                dealloc_to(b, ops[0] as u32, ops[1] as u32, true)?;
+            }
+        }
         Insn::Trap0 => return Err(trap(ops[0])),
+        // trap1 は monitor 系のトラップ。ユーザモードでは例外と
+        // して OS パーソナリティに委ねる（code = 0x100|u で
+        // trap0 と区別。trap2 は PRM に存在しない）。
+        Insn::Trap1 => return Err(trap(0x100 | ops[1])),
         Insn::Rdcr => pkt_w(b, ops[0] as u32, c_get(b, ops[1])?),
         Insn::Wrcr => c_set(b, ops[0], r_get(b, ops[1] as u32))?,
         Insn::CmpeqRr => {
@@ -3131,9 +3398,17 @@ pub fn exec(b: &mut InterpBackend, insn: Insn, word: u128, cx: Ctx) -> Result<bo
             pkt_w(b, lo + 1, (v >> 32) as u32);
         }
         Insn::DxL2Jumpr => jump(b, r_get(b, 31)),
-        // frame 系は HX7（allocframe/deallocframe/dealloc_return）。
-        Insn::DxL2Deallocframe | Insn::DxL2Deallocret | Insn::DxS2Allocframe => {
-            return Err(InterpExit::Unimplemented(format!("{insn:?}")));
+        // frame 系（HX7）。duplex の deallocframe/dealloc_return は
+        // `r31:30 = ...(r30)` 相当、allocframe は Rx=r29 固定。
+        Insn::DxL2Deallocframe => dealloc_to(b, 30, 30, false)?,
+        Insn::DxL2Deallocret => dealloc_to(b, 30, 30, true)?,
+        Insn::DxS2Allocframe => {
+            let frame = (ops[0] as u32) << 3;
+            let ea = r_get(b, 29).wrapping_sub(8);
+            let pair = u64::from(r_get(b, 30)) | (u64::from(r_get(b, 31)) << 32);
+            b.store::<W64>(u64::from(ea), pair, DWR)?;
+            pkt_w(b, 30, ea);
+            pkt_w(b, 29, ea.wrapping_sub(frame));
         }
         Insn::DxS1Memw => {
             let ea = dxr_get(b, ops[0]).wrapping_add((ops[2] as u32) << 2);

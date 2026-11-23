@@ -193,6 +193,9 @@ pub fn step(env: &mut BareEnv, sys: &mut impl TrapHandler, feats: u128) -> Resul
             pc,
             next,
             pos: u32::from(si.pos),
+            // dual jump: 先の分岐が確定したあとの分岐命令は
+            // まるごと無視（call の LR・frame 復帰・pred も）。
+            masked: target.is_some(),
         };
         match sem::exec(&mut env.backend, insn, si.word, cx) {
             Ok(_) => {

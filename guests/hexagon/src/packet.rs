@@ -241,16 +241,30 @@ fn nv_slot0(w: u32) -> bool {
     }
 }
 
-/// `.new` ストアの生産距離 Nt（エンコード値。通常形は
-/// bits[10:9] の nt2、reg-offset 形は bits[2:1] の nt2r）。
-/// `.new` ストアでなければ None。
+/// `.new` 値消費命令の生産距離（命令数単位）。`.new` 値ストア
+/// の Nt（通常形は bits[10:9] の nt2、reg-offset 形は
+/// bits[2:1] の nt2r）と、HX7 の new-value compare-jump の
+/// N.t（bits[18:16] = 距離の 2 倍）。消費命令でなければ None。
 fn nt_of(w: u32) -> Option<u32> {
     match iclass(w) {
         3 if (w >> 21) & 7 == 5 && matches!((w >> 25) & 7, 2 | 3 | 5) => Some((w >> 1) & 3),
         4 if w >> 27 & 1 == 0 && w >> 24 & 1 == 0 && (w >> 21) & 7 == 5 => Some((w >> 9) & 3),
         10 if (w >> 21) & 7 == 5 => Some((w >> 9) & 3),
+        // NVJ（[27:26]=00）: N.t = 生産距離 × 2。
+        2 if (w >> 26) & 3 == 0 => Some(((w >> 16) & 7) >> 1),
         _ => None,
     }
+}
+
+/// slot 0 専用の命令語。`.new` 値ストア・memop（`nv_slot0`）に
+/// 加え、HX7 で new-value compare-jump（ICLASS 2 の
+/// [27:26]=00）と 32 ビット dealloc_return 系（LD_tc_SLOT0、
+/// `1001 0110`）が該当する。
+/// Ref: SPEC-HEXAGON-PRM (V79) execution slot table.
+fn slot0_only(w: u32) -> bool {
+    nv_slot0(w)
+        || (iclass(w) == 2 && (w >> 26) & 3 == 0)
+        || (iclass(w) == 9 && (w >> 24) & 0xf == 6)
 }
 
 /// 32 ビット述語付きメモリ形の `pX.new` 消費判定。`.new`
@@ -285,6 +299,14 @@ fn pred_new32(w: u32) -> Option<u8> {
         // [27:24]∈{2,3,6,7}）と st_ip（`0011 100n` → new=
         // bit24 で [27:24]=9）。述語はどちらも [6:5]。
         3 if matches!((w >> 24) & 0xf, 2 | 3 | 6 | 7 | 9) => (w >> 5) & 3,
+        // HX7: `if ([!]Pu.new)` 消費。J 述語付 jump
+        // （`0101 1100`）、述語付 jumpr（`0101 0011`）は
+        // bit11=1 が .new で述語は [9:8]。
+        5 if (w >> 24) & 0xf == 0xc && w >> 11 & 1 != 0 => (w >> 8) & 3,
+        5 if (w >> 22) & 0x3f == 0b001101 && w >> 11 & 1 != 0 => (w >> 8) & 3,
+        // 述語付 dealloc_return（`1001 0110`、bit11=1 が .new、
+        // 述語は [9:8]）。
+        9 if (w >> 24) & 0xf == 6 && w >> 11 & 1 != 0 => (w >> 8) & 3,
         _ => return None,
     };
     Some(p as u8)
@@ -557,14 +579,38 @@ fn flow_of(len: u32, group: Option<Group>, word: u128, class: Class) -> Flow {
     }
     match class {
         Class::Jr => Flow::Never,
-        Class::J => match iclass(word as u32) {
-            // ICLASS 1/2 は compare-jump 複合（条件付き相当）。
-            1 | 2 => Flow::Both,
-            // ICLASS 5 では 0101 1100 が if(Pu) jump（条件付き）。
-            // if(Pu) call や無条件 jump/call は 2 個目専用。
-            5 if (word as u32 >> 24) & 0xf == 0b1100 => Flow::Both,
-            _ => Flow::Second,
-        },
+        Class::J => {
+            let w = word as u32;
+            match iclass(w) {
+                // ICLASS 1: compare-jump 複合は条件付き相当。
+                // 転送ジャンプ（`Rd=#U6; jump`/`Rd=Rs; jump`、
+                // [27:25]=011）は無条件相当で 2 個目専用。
+                1 => {
+                    if (w >> 25) & 7 == 0b011 {
+                        Flow::Second
+                    } else {
+                        Flow::Both
+                    }
+                }
+                // ICLASS 2: NVJ は slot 0 専用で dual を組めない。
+                2 => Flow::Never,
+                5 => match (w >> 24) & 0xf {
+                    // `0101 1100` = if ([!]Pu[.new]) jump（条件付き）。
+                    0b1100 => Flow::Both,
+                    // `0101 1101` = if ([!]Pu) call。dual-jump の
+                    // 2 個目は無条件 jump/call だけなので組めない。
+                    0b1101 => Flow::Never,
+                    _ => Flow::Second,
+                },
+                _ => Flow::Second,
+            }
+        }
+        // 32 ビット dealloc_return 系（ICLASS 9, [27:24]=0110）も
+        // JR 相当で dual を組めない。
+        Class::Ld if iclass(word as u32) == 9 && (word as u32 >> 24) & 0xf == 6 => Flow::Never,
+        // `if (Rs {!=,==,>=,<=} #0) jump`（ICLASS 6,
+        // [27:22]=000100）は条件付きジャンプ。
+        Class::Cr if (word as u32 >> 22) & 0x3f == 0b000100 => Flow::Both,
         _ => Flow::None,
     }
 }
@@ -731,14 +777,22 @@ pub fn expand(pkt: &Packet) -> Result<Vec<SlotInsn>, ComposeError> {
             }
         }
     }
-    // 2f. NV クラス（`.new` 値ストア + memop）は slot 0 専用。
+    // 2f. slot 0 専用の命令（NV クラスの `.new` 値ストア +
+    //     memop、HX7 の NVJ・32 ビット dealloc_return 系）。
     for (i, c) in cands.iter().enumerate() {
-        if c.len == 32 && c.fixed.is_none() && nv_slot0(c.word as u32) {
-            masks[i] &= 0b0001;
-            if masks[i] == 0 {
-                return Err(ComposeError::NoSlotAssign);
-            }
+        if c.len == 32 && c.fixed.is_none() && slot0_only(c.word as u32) {
+            // slot 0 専用はクラス表の mask（J=slots2,3）と交差
+            // しないことがあるので交差ではなく {0} に置き換える。
+            masks[i] = 0b0001;
         }
+    }
+    // pause(#u10) は solo 命令で他の命令とパケットを組めない。
+    if cands.len() > 1
+        && cands
+            .iter()
+            .any(|c| c.len == 32 && (c.word as u32 >> 22) == 0b01_0101_0001)
+    {
+        return Err(ComposeError::NoSlotAssign);
     }
     // 2e. プログラムフロー命令の個数・組合せ（Section 9.7 の
     //     dual-jump 表）。先頭（アドレスが小さい側）のジャンプは
