@@ -58,7 +58,7 @@ use polyisa_softfloat::{FP_DZ, FP_OF, FP_UF, Rm};
 use crate::specifier::{self, Acc, Ea, Fetched, Legality, Spec, Width};
 use crate::{
     CpuState, FEAT_DUAL_REGSET, Insn, JMP_REG_TRAP_VEC004, JmpRegTrapParam, MfptCodeParam,
-    OddAddrTrapParam, ops_fcm, ops_ff, ops_fn3, ops_fn6, ops_fr, ops_frd, ops_frn, psw, reg,
+    OddAddrTrapParam, cis, ops_fcm, ops_ff, ops_fn3, ops_fn6, ops_fr, ops_frd, ops_frn, psw, reg,
 };
 
 /// トラップベクタ（バイトアドレス）。EMT/TRAP のような命令由来と、
@@ -298,7 +298,8 @@ fn cc_mov(b: &mut InterpBackend, v: u16, w: Width) {
 
 /// 幅の値を調べる命令の条件コード（N=符号・Z=零・V=0・C=0。
 /// tst 系。clr は値を見ずに立てるので呼び出し側が定数を渡す）。
-fn cc_tst(b: &mut InterpBackend, v: u16, w: Width) {
+/// CIS の検査系が返す「TST R0」にも使う。
+pub fn cc_tst(b: &mut InterpBackend, v: u16, w: Width) {
     cc_mov(b, v, w);
     psw_flag_set(b, psw::C, false);
 }
@@ -2077,7 +2078,61 @@ pub fn exec(b: &mut InterpBackend, f: &Fetched, pc0: u16, feats: u128) -> Result
         Insn::Wait => {
             return Err(InterpExit::Unimplemented(format!("{:?}", f.insn)));
         }
-        // 残りの命令本体は PD5 以降。
+        // CIS（PD11 —— 076nnn。記述子形と in-line 形の文字列・
+        // 数値・パック文字列命令）。中断可能な命令は cis.rs 側で
+        // 記述子の進行を書き戻して命令先頭へ再入する。
+        Insn::L2d
+        | Insn::L3d
+        | Insn::Movc
+        | Insn::Movrc
+        | Insn::Movtc
+        | Insn::Locc
+        | Insn::Skpc
+        | Insn::Scanc
+        | Insn::Spanc
+        | Insn::Cmpc
+        | Insn::Matc
+        | Insn::Addn
+        | Insn::Subn
+        | Insn::Cmpn
+        | Insn::Cvtnl
+        | Insn::Cvtpn
+        | Insn::Cvtnp
+        | Insn::Ashn
+        | Insn::Cvtln
+        | Insn::Addp
+        | Insn::Subp
+        | Insn::Cmpp
+        | Insn::Cvtpl
+        | Insn::Mulp
+        | Insn::Divp
+        | Insn::Ashp
+        | Insn::Cvtlp
+        | Insn::Movci
+        | Insn::Movrci
+        | Insn::Movtci
+        | Insn::Locci
+        | Insn::Skpci
+        | Insn::Scanci
+        | Insn::Spanci
+        | Insn::Cmpci
+        | Insn::Matci
+        | Insn::Addni
+        | Insn::Subni
+        | Insn::Cmpni
+        | Insn::Cvtnli
+        | Insn::Cvtpni
+        | Insn::Cvtnpi
+        | Insn::Ashni
+        | Insn::Cvtlni
+        | Insn::Addpi
+        | Insn::Subpi
+        | Insn::Cmppi
+        | Insn::Cvtpli
+        | Insn::Mulpi
+        | Insn::Divpi
+        | Insn::Ashpi
+        | Insn::Cvtlpi => return cis::exec(b, f, pc0),
         _ => return Err(InterpExit::Unimplemented(format!("{:?}", f.insn))),
     }
     Ok(())

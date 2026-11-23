@@ -6,6 +6,7 @@ edition = "2024"
 rust-version = "1.99"
 
 [dependencies]
+polyisa-decimal = { path = "../../crates/decimal" }
 polyisa-engine = { path = "../../crates/engine" }
 polyisa-guest = { path = "../../crates/guest" }
 polyisa-mem = { path = "../../crates/mem" }

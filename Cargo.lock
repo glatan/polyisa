@@ -241,6 +241,7 @@ dependencies = [
 name = "polyisa-guest-pdp11"
 version = "0.0.0"
 dependencies = [
+ "polyisa-decimal",
  "polyisa-engine",
  "polyisa-guest",
  "polyisa-isadl",

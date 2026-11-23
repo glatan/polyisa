@@ -77,9 +77,10 @@ fn decode_gated_by_features() {
 #[test]
 fn insn_count() {
     // 二重 12 + 単一語 20 + 単一バイト 16 + JSR/RTS/SOB 3 + EIS/XOR 5
-    // + FIS 4 + FP11 26 + 分岐 15 + EMT/TRAP 2 + MARK/SPL 2 + 固定語 11
+    // + FIS 4 + FP11 26 + CIS 52（L2D/L3D 2 + レジスタ形 25 +
+    // in-line 形 25）+ 分岐 15 + EMT/TRAP 2 + MARK/SPL 2 + 固定語 11
     // （条件コード操作は nop + ccc/scc のマスク形として数える）。
-    assert_eq!(INSNS.len(), 116);
+    assert_eq!(INSNS.len(), 168);
 }
 
 #[test]
@@ -3191,4 +3192,799 @@ fn fp11_stack_operand() {
     step_m(&mut env, "pdp11_73").unwrap();
     assert_eq!(sem::r_get(&env.backend, reg::SP as u8), sp0 - 4);
     assert_eq!(getf(&env, sp0 - 4), F2_0);
+}
+
+// ---- PD11: CIS ----
+//
+// 076nnn の文字列・十進命令。レジスタ形は R0-R5 の記述子枠、
+// in-line 形は命令語列のポインタ/値語。中断は 1 単位=1 文字の
+// 反復（env.pc が命令先頭に戻る）で見る。
+// Ref: SPEC-PDP11-CIS.
+
+/// CIS を持つモデル（J-11 = KDJ11 系。cis は標準実装）。
+const CM: &str = "pdp11_73";
+
+/// バイトを書く。
+fn putb(env: &mut BareEnv, a: u16, v: u8) {
+    env.backend.mem.write(VirtAddr(u64::from(a)), &[v]).unwrap();
+}
+
+/// バイトを読む。
+fn getb(env: &BareEnv, a: u16) -> u8 {
+    let mut b = [0u8; 1];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(u64::from(a)),
+            &mut b,
+            Access {
+                endian: Endian::Le,
+                align: Align::Unaligned,
+                kind: AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    b[0]
+}
+
+/// バイト列を書く。
+fn put_str(env: &mut BareEnv, a: u16, s: &[u8]) {
+    env.backend.mem.write(VirtAddr(u64::from(a)), s).unwrap();
+}
+
+/// バイト列を読む。
+fn get_str(env: &BareEnv, a: u16, n: usize) -> Vec<u8> {
+    let mut b = vec![0u8; n];
+    env.backend
+        .mem
+        .read(
+            VirtAddr(u64::from(a)),
+            &mut b,
+            Access {
+                endian: Endian::Le,
+                align: Align::Unaligned,
+                kind: AccessKind::DataRead,
+            },
+        )
+        .unwrap();
+    b
+}
+
+/// 十進記述子の語1（len<4:0> | ty<14:12>）。
+const fn dscr1(len: u16, ty: u16) -> u16 {
+    len | (ty << 12)
+}
+
+/// 部分実行器の命令語。
+fn partial_word(env: &BareEnv) -> u16 {
+    let off = core::mem::offset_of!(CpuState, partial) + core::mem::offset_of!(PartialInsn, insn);
+    u16::from_le_bytes(env.backend.state[off..off + 2].try_into().unwrap())
+}
+
+/// CIS 命令を完了まで回す（中断する度に env.pc が pc0 に戻る）。
+fn cis_run(env: &mut BareEnv, pc0: u16) {
+    for _ in 0..0x20000 {
+        step_m(env, CM).unwrap();
+        if env.pc != u64::from(pc0) {
+            return;
+        }
+    }
+    panic!("CIS did not complete");
+}
+
+#[test]
+fn cis_feature_gate() {
+    // cis 旗がないモデルの 076030（movc）は予約命令 → vector 010。
+    let mut env = env_at("pdp11_34", 0o1000, &[0o076030]);
+    put16(&mut env, 0o010, 0o2400);
+    step_m(&mut env, "pdp11_34").unwrap();
+    assert_eq!(env.pc, 0o2400);
+    // デコード層でも旗で分かれる。
+    let w = u128::from(0o076030u16);
+    assert!(decode_model_ex(w, 16, false, model_feats(CM)).is_some());
+    assert!(decode_model_ex(w, 16, false, model_feats("pdp11_34")).is_none());
+    // in-line 形と L2D/L3D も同じ旗。
+    for w in [0o076130u16, 0o076020, 0o076060] {
+        let w = u128::from(w);
+        assert!(decode_model_ex(w, 16, false, model_feats(CM)).is_some());
+        assert!(decode_model_ex(w, 16, false, model_feats("pdp11_34")).is_none());
+    }
+}
+
+#[test]
+fn cis_insn_lengths() {
+    // レジスタ形は 1 語、in-line 形は記述子語を消費する。
+    let f = model_feats(CM);
+    let ilen = |w: u16| insn_len_ex(&[w], f);
+    assert_eq!(ilen(0o076030), Some(2)); // movc
+    assert_eq!(ilen(0o076130), Some(8)); // movci: 3 記述子語
+    assert_eq!(ilen(0o076132), Some(10)); // movtci: 4 語
+    assert_eq!(ilen(0o076140), Some(6)); // locci: 2 語
+    assert_eq!(ilen(0o076150), Some(8)); // addni: 3 語
+    assert_eq!(ilen(0o076156), Some(8)); // ashni: 3 語
+    assert_eq!(ilen(0o076153), Some(6)); // cvtnli: 2 語
+    assert_eq!(ilen(0o076021), Some(2)); // l2d r1
+    assert_eq!(ilen(0o076027), Some(6)); // l2d7: 2 ポインタ語
+    assert_eq!(ilen(0o076067), Some(8)); // l3d7: 3 ポインタ語
+}
+
+#[test]
+fn l2d_loads_two_descriptors() {
+    // l2d r5: R5 の指すポインタ対から記述子を R0-R3 へ。r>=4 で
+    // R5 は消費後の位置へ進む。
+    let mut env = env_at(CM, 0o1000, &[0o076025]);
+    put16(&mut env, 0o3000, 0o3100);
+    put16(&mut env, 0o3002, 0o3110);
+    put16(&mut env, 0o3100, 5);
+    put16(&mut env, 0o3102, 0o4000);
+    put16(&mut env, 0o3110, 3);
+    put16(&mut env, 0o3112, 0o4010);
+    sem::r_set(&mut env.backend, 5, 0o3000);
+    step_m(&mut env, CM).unwrap();
+    assert_eq!(sem::r_get(&env.backend, 0), 5);
+    assert_eq!(sem::r_get(&env.backend, 1), 0o4000);
+    assert_eq!(sem::r_get(&env.backend, 2), 3);
+    assert_eq!(sem::r_get(&env.backend, 3), 0o4010);
+    assert_eq!(sem::r_get(&env.backend, 5), 0o3004);
+    assert_eq!(env.pc, 0o1002);
+    // r<4 は記述子の読み込み先 —— ポインタ位置の書き戻しはない。
+    let mut env = env_at(CM, 0o1000, &[0o076021]);
+    put16(&mut env, 0o3000, 0o3100);
+    put16(&mut env, 0o3002, 0o3110);
+    put16(&mut env, 0o3100, 5);
+    put16(&mut env, 0o3102, 0o4000);
+    put16(&mut env, 0o3110, 3);
+    put16(&mut env, 0o3112, 0o4010);
+    sem::r_set(&mut env.backend, 1, 0o3000);
+    step_m(&mut env, CM).unwrap();
+    assert_eq!(sem::r_get(&env.backend, 1), 0o4000); // 記述子で上書き
+}
+
+#[test]
+fn l2d7_uses_stream_pointers() {
+    // l2d7 = @(pc)+: ポインタ語を命令ストリームから消費し PC=+6。
+    let mut env = env_at(CM, 0o1000, &[0o076027, 0o3100, 0o3110]);
+    put16(&mut env, 0o3100, 5);
+    put16(&mut env, 0o3102, 0o4000);
+    put16(&mut env, 0o3110, 3);
+    put16(&mut env, 0o3112, 0o4010);
+    step_m(&mut env, CM).unwrap();
+    assert_eq!(sem::r_get(&env.backend, 0), 5);
+    assert_eq!(sem::r_get(&env.backend, 1), 0o4000);
+    assert_eq!(sem::r_get(&env.backend, 3), 0o4010);
+    assert_eq!(env.pc, 0o1006);
+}
+
+#[test]
+fn l3d_loads_three_descriptors() {
+    // l3d r6: 3 記述子を R0-R5 へ。r>=6 で R6 も進む。
+    let mut env = env_at(CM, 0o1000, &[0o076066]);
+    for (i, (w1, w2)) in [(1u16, 0o4000u16), (2, 0o4010), (3, 0o4020)]
+        .iter()
+        .enumerate()
+    {
+        let pd = 0o3100 + 4 * i as u16;
+        put16(&mut env, 0o3000 + 2 * i as u16, pd);
+        put16(&mut env, pd, *w1);
+        put16(&mut env, pd + 2, *w2);
+    }
+    sem::r_set(&mut env.backend, 6, 0o3000);
+    step_m(&mut env, CM).unwrap();
+    for i in 0..3u8 {
+        assert_eq!(sem::r_get(&env.backend, 2 * i), u16::from(i) + 1);
+        assert_eq!(
+            sem::r_get(&env.backend, 2 * i + 1),
+            0o4000 + 0o10 * u16::from(i)
+        );
+    }
+    assert_eq!(sem::r_get(&env.backend, 6), 0o3006);
+}
+
+#[test]
+fn movc_copies_and_fills() {
+    // src 3 文字を dst 5 文字へコピーして残りを '.' で埋める。
+    // 1 単位=1 文字なので各ステップは命令先頭へ戻る。
+    let mut env = env_at(CM, 0o1000, &[0o076030]);
+    put_str(&mut env, 0o4000, b"ABC");
+    sem::r_set(&mut env.backend, 0, 3);
+    sem::r_set(&mut env.backend, 1, 0o4000);
+    sem::r_set(&mut env.backend, 2, 5);
+    sem::r_set(&mut env.backend, 3, 0o5000);
+    sem::r_set(&mut env.backend, 4, u16::from(b'.'));
+    // 1 単位目で中断 —— src<dst で後ろ向き（破壊しない向き）に
+    // なり、最初に最下位側の埋めが書かれる。
+    step_m(&mut env, CM).unwrap();
+    assert_eq!(env.pc, 0o1000);
+    assert_eq!(getb(&env, 0o5004), b'.');
+    assert_eq!(sem::r_get(&env.backend, 0), 3);
+    assert_eq!(sem::r_get(&env.backend, 1), 0o4002);
+    assert_eq!(sem::r_get(&env.backend, 2), 4);
+    assert_eq!(sem::r_get(&env.backend, 3), 0o5003);
+    assert_eq!(partial_word(&env), 0o076030);
+    cis_run(&mut env, 0o1000);
+    assert_eq!(env.pc, 0o1002);
+    assert_eq!(get_str(&env, 0o5000, 5), b"ABC..");
+    // 完了規則: R0=残り src.len、R1-R3=0、R4=0|fill。
+    assert_eq!(sem::r_get(&env.backend, 0), 0);
+    for i in 1..4 {
+        assert_eq!(sem::r_get(&env.backend, i), 0);
+    }
+    assert_eq!(sem::r_get(&env.backend, 4), u16::from(b'.'));
+    assert_eq!(partial_word(&env), PART_INSN_NONE);
+    // CC: src.len-dst.len = 3-5 → N=1・Z=0・V=0・C=1。
+    assert_eq!(
+        sem::psw_get(&env.backend) & 0xf,
+        (1 << psw::N) | (1 << psw::C)
+    );
+}
+
+#[test]
+fn movc_backward_copy_preserves_overlap() {
+    // dst>src の重なりは後ろ向きコピーで壊れない。
+    let mut env = env_at(CM, 0o1000, &[0o076030]);
+    put_str(&mut env, 0o4000, b"ABCD");
+    sem::r_set(&mut env.backend, 0, 4);
+    sem::r_set(&mut env.backend, 1, 0o4000);
+    sem::r_set(&mut env.backend, 2, 4);
+    sem::r_set(&mut env.backend, 3, 0o4001);
+    sem::r_set(&mut env.backend, 4, 0);
+    cis_run(&mut env, 0o1000);
+    assert_eq!(get_str(&env, 0o4001, 4), b"ABCD");
+    // src.len=dst.len → Z=1。
+    assert_ne!(sem::psw_get(&env.backend) & (1 << psw::Z), 0);
+}
+
+#[test]
+fn movc_vacant_dst_completes_immediately() {
+    // dst.len=0 は単位を持たず 1 ステップで完了。R0=src.len。
+    let mut env = env_at(CM, 0o1000, &[0o076030]);
+    sem::r_set(&mut env.backend, 0, 3);
+    sem::r_set(&mut env.backend, 1, 0o4000);
+    sem::r_set(&mut env.backend, 2, 0);
+    sem::r_set(&mut env.backend, 3, 0o5000);
+    step_m(&mut env, CM).unwrap();
+    assert_eq!(env.pc, 0o1002);
+    assert_eq!(sem::r_get(&env.backend, 0), 3);
+}
+
+#[test]
+fn movrc_right_justifies() {
+    // 2 文字を 4 文字へ右詰め（fill='.'）。
+    let mut env = env_at(CM, 0o1000, &[0o076031]);
+    put_str(&mut env, 0o4000, b"XY");
+    sem::r_set(&mut env.backend, 0, 2);
+    sem::r_set(&mut env.backend, 1, 0o4000);
+    sem::r_set(&mut env.backend, 2, 4);
+    sem::r_set(&mut env.backend, 3, 0o5000);
+    sem::r_set(&mut env.backend, 4, u16::from(b'.'));
+    cis_run(&mut env, 0o1000);
+    assert_eq!(get_str(&env, 0o5000, 4), b"..XY");
+    assert_eq!(sem::r_get(&env.backend, 0), 0);
+    assert_eq!(
+        sem::psw_get(&env.backend) & 0xf,
+        (1 << psw::N) | (1 << psw::C)
+    );
+}
+
+#[test]
+fn movrc_truncates_most_significant() {
+    // src.len>dst.len は最上位側を落として最下位側を写す。
+    let mut env = env_at(CM, 0o1000, &[0o076031]);
+    put_str(&mut env, 0o4000, b"ABCDE");
+    sem::r_set(&mut env.backend, 0, 5);
+    sem::r_set(&mut env.backend, 1, 0o4000);
+    sem::r_set(&mut env.backend, 2, 3);
+    sem::r_set(&mut env.backend, 3, 0o5000);
+    cis_run(&mut env, 0o1000);
+    assert_eq!(get_str(&env, 0o5000, 3), b"CDE");
+    assert_eq!(sem::r_get(&env.backend, 0), 2);
+}
+
+#[test]
+fn movtc_translates() {
+    // 変換表経由のコピー。表は 256 バイト全域が読める必要がある。
+    let mut env = env_at(CM, 0o1000, &[0o076032]);
+    put_str(&mut env, 0o4000, b"abc");
+    for i in 0u16..=0xff {
+        putb(&mut env, 0o6000 + i, i as u8);
+    }
+    putb(&mut env, 0o6000 + u16::from(b'a'), b'A');
+    putb(&mut env, 0o6000 + u16::from(b'b'), b'B');
+    putb(&mut env, 0o6000 + u16::from(b'c'), b'C');
+    sem::r_set(&mut env.backend, 0, 3);
+    sem::r_set(&mut env.backend, 1, 0o4000);
+    sem::r_set(&mut env.backend, 2, 3);
+    sem::r_set(&mut env.backend, 3, 0o5000);
+    sem::r_set(&mut env.backend, 5, 0o6000);
+    cis_run(&mut env, 0o1000);
+    assert_eq!(get_str(&env, 0o5000, 3), b"ABC");
+    assert_eq!(sem::r_get(&env.backend, 5), 0o6000); // R5=table.adr 不変
+}
+
+#[test]
+fn cmpc_equal_and_mismatch() {
+    // 全一致 → Z=1・残余は空記述子。
+    let mut env = env_at(CM, 0o1000, &[0o076044]);
+    put_str(&mut env, 0o4000, b"AB");
+    put_str(&mut env, 0o5000, b"AB");
+    sem::r_set(&mut env.backend, 0, 2);
+    sem::r_set(&mut env.backend, 1, 0o4000);
+    sem::r_set(&mut env.backend, 2, 2);
+    sem::r_set(&mut env.backend, 3, 0o5000);
+    cis_run(&mut env, 0o1000);
+    assert_eq!(sem::psw_get(&env.backend) & 0xf, 1 << psw::Z);
+    assert_eq!(sem::r_get(&env.backend, 0), 0);
+    assert_eq!(sem::r_get(&env.backend, 1), 0o4002); // 空記述子は末端+1
+    // 不一致位置で記述子が止まる（'C'<'X' → N=1・C=1）。
+    let mut env = env_at(CM, 0o1000, &[0o076044]);
+    put_str(&mut env, 0o4000, b"ABCDE");
+    put_str(&mut env, 0o5000, b"ABXDE");
+    sem::r_set(&mut env.backend, 0, 5);
+    sem::r_set(&mut env.backend, 1, 0o4000);
+    sem::r_set(&mut env.backend, 2, 5);
+    sem::r_set(&mut env.backend, 3, 0o5000);
+    cis_run(&mut env, 0o1000);
+    assert_eq!(
+        sem::psw_get(&env.backend) & 0xf,
+        (1 << psw::N) | (1 << psw::C)
+    );
+    assert_eq!(sem::r_get(&env.backend, 0), 3);
+    assert_eq!(sem::r_get(&env.backend, 1), 0o4002);
+    assert_eq!(sem::r_get(&env.backend, 2), 3);
+    assert_eq!(sem::r_get(&env.backend, 3), 0o5002);
+    // 片側が尽きた側は fill と比べる（"AB" vs "ABX" → 'X'>fill 0）。
+    let mut env = env_at(CM, 0o1000, &[0o076044]);
+    put_str(&mut env, 0o4000, b"AB");
+    put_str(&mut env, 0o5000, b"ABX");
+    sem::r_set(&mut env.backend, 0, 2);
+    sem::r_set(&mut env.backend, 1, 0o4000);
+    sem::r_set(&mut env.backend, 2, 3);
+    sem::r_set(&mut env.backend, 3, 0o5000);
+    cis_run(&mut env, 0o1000);
+    assert_eq!(
+        sem::psw_get(&env.backend) & 0xf,
+        (1 << psw::N) | (1 << psw::C)
+    );
+    assert_eq!(sem::r_get(&env.backend, 0), 0);
+    assert_eq!(sem::r_get(&env.backend, 1), 0o4002);
+}
+
+#[test]
+fn locc_skpc_scanc_spanc() {
+    // locc: 最初の 'L' 位置からの残余を返す。
+    let mut env = env_at(CM, 0o1000, &[0o076040]);
+    put_str(&mut env, 0o4000, b"HELLO");
+    sem::r_set(&mut env.backend, 0, 5);
+    sem::r_set(&mut env.backend, 1, 0o4000);
+    sem::r_set(&mut env.backend, 4, u16::from(b'L'));
+    cis_run(&mut env, 0o1000);
+    assert_eq!(sem::r_get(&env.backend, 0), 3);
+    assert_eq!(sem::r_get(&env.backend, 1), 0o4002);
+    assert_eq!(sem::psw_get(&env.backend) & 0xf, 0);
+    // 見つからない → 空記述子（末端+1）・Z=1。
+    let mut env = env_at(CM, 0o1000, &[0o076040]);
+    put_str(&mut env, 0o4000, b"HELLO");
+    sem::r_set(&mut env.backend, 0, 5);
+    sem::r_set(&mut env.backend, 1, 0o4000);
+    sem::r_set(&mut env.backend, 4, u16::from(b'Z'));
+    cis_run(&mut env, 0o1000);
+    assert_eq!(sem::r_get(&env.backend, 0), 0);
+    assert_eq!(sem::r_get(&env.backend, 1), 0o4005);
+    assert_eq!(sem::psw_get(&env.backend) & 0xf, 1 << psw::Z);
+    // skpc: 先頭の連続する文字を読み飛ばす。
+    let mut env = env_at(CM, 0o1000, &[0o076041]);
+    put_str(&mut env, 0o4000, b"  X");
+    sem::r_set(&mut env.backend, 0, 3);
+    sem::r_set(&mut env.backend, 1, 0o4000);
+    sem::r_set(&mut env.backend, 4, u16::from(b' '));
+    cis_run(&mut env, 0o1000);
+    assert_eq!(sem::r_get(&env.backend, 0), 1);
+    assert_eq!(sem::r_get(&env.backend, 1), 0o4002);
+    // scanc: 集合（表&マスク）に属する最初の文字で止まる。
+    let mut env = env_at(CM, 0o1000, &[0o076042]);
+    put_str(&mut env, 0o4000, b"12AB");
+    // 表: 'A','B' → 0x01。マスク 0x01。
+    putb(&mut env, 0o6000 + u16::from(b'A'), 1);
+    putb(&mut env, 0o6000 + u16::from(b'B'), 1);
+    sem::r_set(&mut env.backend, 0, 4);
+    sem::r_set(&mut env.backend, 1, 0o4000);
+    sem::r_set(&mut env.backend, 4, 1);
+    sem::r_set(&mut env.backend, 5, 0o6000);
+    cis_run(&mut env, 0o1000);
+    assert_eq!(sem::r_get(&env.backend, 0), 2);
+    assert_eq!(sem::r_get(&env.backend, 1), 0o4002);
+    // spanc: 集合に属する先頭部分を読み飛ばす。
+    let mut env = env_at(CM, 0o1000, &[0o076043]);
+    sem::r_set(&mut env.backend, 0, 4);
+    sem::r_set(&mut env.backend, 1, 0o4000);
+    sem::r_set(&mut env.backend, 4, 1);
+    sem::r_set(&mut env.backend, 5, 0o6000);
+    cis_run(&mut env, 0o1000);
+    assert_eq!(sem::r_get(&env.backend, 0), 4);
+    assert_eq!(sem::r_get(&env.backend, 1), 0o4000);
+}
+
+#[test]
+fn matc_finds_object() {
+    // "FOOBARBAZ" 中の "BAR" → 一致位置からの残余 "BARBAZ"。
+    let mut env = env_at(CM, 0o1000, &[0o076045]);
+    put_str(&mut env, 0o4000, b"FOOBARBAZ");
+    put_str(&mut env, 0o5000, b"BAR");
+    sem::r_set(&mut env.backend, 0, 9);
+    sem::r_set(&mut env.backend, 1, 0o4000);
+    sem::r_set(&mut env.backend, 2, 3);
+    sem::r_set(&mut env.backend, 3, 0o5000);
+    cis_run(&mut env, 0o1000);
+    assert_eq!(sem::r_get(&env.backend, 0), 6);
+    assert_eq!(sem::r_get(&env.backend, 1), 0o4003);
+    assert_eq!(sem::r_get(&env.backend, 2), 3); // obj.dscr は残る
+    assert_eq!(sem::r_get(&env.backend, 3), 0o5000);
+    // 不一致 → 空記述子（末端+1）・Z=1。
+    let mut env = env_at(CM, 0o1000, &[0o076045]);
+    put_str(&mut env, 0o4000, b"FOOBARBAZ");
+    put_str(&mut env, 0o5000, b"QUUX");
+    sem::r_set(&mut env.backend, 0, 9);
+    sem::r_set(&mut env.backend, 1, 0o4000);
+    sem::r_set(&mut env.backend, 2, 4);
+    sem::r_set(&mut env.backend, 3, 0o5000);
+    cis_run(&mut env, 0o1000);
+    assert_eq!(sem::r_get(&env.backend, 0), 0);
+    assert_eq!(sem::r_get(&env.backend, 1), 0o4011);
+    assert_eq!(sem::psw_get(&env.backend) & 0xf, 1 << psw::Z);
+}
+
+#[test]
+fn movci_inline_descriptors() {
+    // movci: [命令語, src.dscr.ptr, dst.dscr.ptr, fill] —— 8 バイト。
+    // レジスタは不変で記述子メモリが更新される。
+    let mut env = env_at(CM, 0o1000, &[0o076130, 0o3100, 0o3110, u16::from(b'.')]);
+    put16(&mut env, 0o3100, 3);
+    put16(&mut env, 0o3102, 0o4000);
+    put16(&mut env, 0o3110, 5);
+    put16(&mut env, 0o3112, 0o5000);
+    put_str(&mut env, 0o4000, b"ABC");
+    sem::r_set(&mut env.backend, 0, 0x1234);
+    sem::r_set(&mut env.backend, 5, 0x5670);
+    cis_run(&mut env, 0o1000);
+    assert_eq!(env.pc, 0o1010);
+    assert_eq!(get_str(&env, 0o5000, 5), b"ABC..");
+    assert_eq!(sem::r_get(&env.backend, 0), 0x1234);
+    assert_eq!(sem::r_get(&env.backend, 5), 0x5670);
+    // 記述子は最終カーソルを残す（後ろ向きコピーの src は先頭の
+    // 1 つ手前で止まる）。
+    assert_eq!(get16(&env, 0o3100), 0);
+    assert_eq!(get16(&env, 0o3102), 0o3777);
+    assert_eq!(get16(&env, 0o3110), 0);
+    assert_eq!(get16(&env, 0o3112), 0o4777);
+}
+
+#[test]
+fn locci_inline_result() {
+    // locci: [命令語, src.dscr.ptr, char] —— 結果は R0-R1。
+    let mut env = env_at(CM, 0o1000, &[0o076140, 0o3100, u16::from(b'D')]);
+    put16(&mut env, 0o3100, 5);
+    put16(&mut env, 0o3102, 0o4000);
+    put_str(&mut env, 0o4000, b"ABCDE");
+    cis_run(&mut env, 0o1000);
+    assert_eq!(env.pc, 0o1006);
+    assert_eq!(sem::r_get(&env.backend, 0), 2);
+    assert_eq!(sem::r_get(&env.backend, 1), 0o4003);
+}
+
+// ---- PD11: CIS 十進 ----
+
+#[test]
+fn addn_adds_zoned() {
+    // addn: dst <- src2 + src1（符号なしゾーン ty1）。
+    let mut env = env_at(CM, 0o1000, &[0o076050]);
+    put_str(&mut env, 0o4000, b"12"); // src1
+    put_str(&mut env, 0o5000, b"0345"); // src2
+    sem::r_set(&mut env.backend, 0, dscr1(2, 1));
+    sem::r_set(&mut env.backend, 1, 0o4000);
+    sem::r_set(&mut env.backend, 2, dscr1(4, 1));
+    sem::r_set(&mut env.backend, 3, 0o5000);
+    sem::r_set(&mut env.backend, 4, dscr1(4, 1));
+    sem::r_set(&mut env.backend, 5, 0o6000);
+    step_m(&mut env, CM).unwrap();
+    assert_eq!(get_str(&env, 0o6000, 4), b"0357");
+    assert_eq!(sem::psw_get(&env.backend) & 0xf, 0);
+    // ソース記述子のレジスタは消える。
+    for i in 0..4 {
+        assert_eq!(sem::r_get(&env.backend, i), 0);
+    }
+    assert_eq!(sem::r_get(&env.backend, 4), dscr1(4, 1));
+    assert_eq!(sem::r_get(&env.backend, 5), 0o6000);
+}
+
+#[test]
+fn addn_negative_zoned_sign() {
+    // 符号付きゾーン（ty0: 最終バイト上位ニブル 7=負）。
+    // src1=-3、src2=+10 → dst=+7 → N=0・Z=0・V=0・C=0。
+    let mut env = env_at(CM, 0o1000, &[0o076050]);
+    putb(&mut env, 0o4000, 0x73); // "-3"（ty0 len1）
+    put_str(&mut env, 0o5000, b"10"); // src2 +10（ty0 → 0x30 0x30|0 → 正）
+    sem::r_set(&mut env.backend, 0, dscr1(1, 0));
+    sem::r_set(&mut env.backend, 1, 0o4000);
+    sem::r_set(&mut env.backend, 2, dscr1(2, 0));
+    sem::r_set(&mut env.backend, 3, 0o5000);
+    sem::r_set(&mut env.backend, 4, dscr1(2, 0));
+    sem::r_set(&mut env.backend, 5, 0o6000);
+    step_m(&mut env, CM).unwrap();
+    assert_eq!(get_str(&env, 0o6000, 2), &[0x30, 0x37]);
+    assert_eq!(sem::psw_get(&env.backend) & 0xf, 0);
+}
+
+#[test]
+fn addp_packed_signed() {
+    // パック符号は {A,C,E,F}=+・{B,D}=- で VAX と同じ集合。
+    // src1=+12 [01 2C]・src2=+345 [34 5C] → dst=+357 [03 57 0C]。
+    let mut env = env_at(CM, 0o1000, &[0o076070]);
+    put_str(&mut env, 0o4000, &[0x01, 0x2c]);
+    put_str(&mut env, 0o5000, &[0x34, 0x5c]);
+    sem::r_set(&mut env.backend, 0, dscr1(2, 6));
+    sem::r_set(&mut env.backend, 1, 0o4000);
+    sem::r_set(&mut env.backend, 2, dscr1(3, 6));
+    sem::r_set(&mut env.backend, 3, 0o5000);
+    sem::r_set(&mut env.backend, 4, dscr1(4, 6));
+    sem::r_set(&mut env.backend, 5, 0o6000);
+    step_m(&mut env, CM).unwrap();
+    assert_eq!(get_str(&env, 0o6000, 3), &[0x00, 0x35, 0x7c]);
+    assert_eq!(sem::psw_get(&env.backend) & 0xf, 0);
+    // 負側: -5 + -7 = -12 → len3 は "012" → [0x01,0x2D]。
+    let mut env = env_at(CM, 0o1000, &[0o076070]);
+    put_str(&mut env, 0o4000, &[0x00, 0x7d]); // -7
+    put_str(&mut env, 0o5000, &[0x00, 0x5d]); // -5
+    sem::r_set(&mut env.backend, 0, dscr1(2, 6));
+    sem::r_set(&mut env.backend, 1, 0o4000);
+    sem::r_set(&mut env.backend, 2, dscr1(2, 6));
+    sem::r_set(&mut env.backend, 3, 0o5000);
+    sem::r_set(&mut env.backend, 4, dscr1(3, 6));
+    sem::r_set(&mut env.backend, 5, 0o6000);
+    step_m(&mut env, CM).unwrap();
+    // -5 + -7 = -12 → [0x01,0x2D]。
+    assert_eq!(get_str(&env, 0o6000, 2), &[0x01, 0x2d]);
+    assert_eq!(sem::psw_get(&env.backend) & 0xf, 1 << psw::N);
+}
+
+#[test]
+fn subp_mulp_divp() {
+    // subp: 12 - 45 = -33 → [0x03,0x3D]・N=1。
+    let mut env = env_at(CM, 0o1000, &[0o076071]);
+    put_str(&mut env, 0o4000, &[0x04, 0x5c]); // +45
+    put_str(&mut env, 0o5000, &[0x01, 0x2c]); // +12
+    sem::r_set(&mut env.backend, 0, dscr1(2, 6));
+    sem::r_set(&mut env.backend, 1, 0o4000);
+    sem::r_set(&mut env.backend, 2, dscr1(2, 6));
+    sem::r_set(&mut env.backend, 3, 0o5000);
+    sem::r_set(&mut env.backend, 4, dscr1(2, 6));
+    sem::r_set(&mut env.backend, 5, 0o6000);
+    step_m(&mut env, CM).unwrap();
+    assert_eq!(get_str(&env, 0o6000, 2), &[0x03, 0x3d]);
+    assert_eq!(sem::psw_get(&env.backend) & 0xf, 1 << psw::N);
+    // mulp: 12*34 = 408 → [0x40,0x8C]。
+    let mut env = env_at(CM, 0o1000, &[0o076074]);
+    put_str(&mut env, 0o4000, &[0x01, 0x2c]); // +12
+    put_str(&mut env, 0o5000, &[0x03, 0x4c]); // +34
+    sem::r_set(&mut env.backend, 0, dscr1(2, 6));
+    sem::r_set(&mut env.backend, 1, 0o4000);
+    sem::r_set(&mut env.backend, 2, dscr1(2, 6));
+    sem::r_set(&mut env.backend, 3, 0o5000);
+    sem::r_set(&mut env.backend, 4, dscr1(3, 6));
+    sem::r_set(&mut env.backend, 5, 0o6000);
+    step_m(&mut env, CM).unwrap();
+    assert_eq!(get_str(&env, 0o6000, 2), &[0x40, 0x8c]);
+    // divp: 408/12 = 34 → [0x03,0x4C]。divisor は src1。
+    let mut env = env_at(CM, 0o1000, &[0o076075]);
+    put_str(&mut env, 0o4000, &[0x01, 0x2c]); // +12（除数）
+    put_str(&mut env, 0o5000, &[0x40, 0x8c]); // +408（被除数）
+    sem::r_set(&mut env.backend, 0, dscr1(2, 6));
+    sem::r_set(&mut env.backend, 1, 0o4000);
+    sem::r_set(&mut env.backend, 2, dscr1(3, 6));
+    sem::r_set(&mut env.backend, 3, 0o5000);
+    sem::r_set(&mut env.backend, 4, dscr1(3, 6));
+    sem::r_set(&mut env.backend, 5, 0o6000);
+    step_m(&mut env, CM).unwrap();
+    assert_eq!(get_str(&env, 0o6000, 2), &[0x03, 0x4c]);
+    assert_eq!(sem::psw_get(&env.backend) & 0xf, 0);
+}
+
+#[test]
+fn divp_by_zero_sets_vc() {
+    // 0 除算: dst は書かれず V=1・C=1（N/Z は決定的に 0）。
+    let mut env = env_at(CM, 0o1000, &[0o076075]);
+    put_str(&mut env, 0o4000, &[0x00, 0x0c]); // +0
+    put_str(&mut env, 0o5000, &[0x01, 0x2c]); // +12
+    put_str(&mut env, 0o6000, &[0xaa, 0xaa]);
+    sem::r_set(&mut env.backend, 0, dscr1(2, 6));
+    sem::r_set(&mut env.backend, 1, 0o4000);
+    sem::r_set(&mut env.backend, 2, dscr1(2, 6));
+    sem::r_set(&mut env.backend, 3, 0o5000);
+    sem::r_set(&mut env.backend, 4, dscr1(2, 6));
+    sem::r_set(&mut env.backend, 5, 0o6000);
+    step_m(&mut env, CM).unwrap();
+    assert_eq!(get_str(&env, 0o6000, 2), &[0xaa, 0xaa]);
+    assert_eq!(
+        sem::psw_get(&env.backend) & 0xf,
+        (1 << psw::V) | (1 << psw::C)
+    );
+}
+
+#[test]
+fn cmpp_orders() {
+    // -5 vs +5 → N=1・Z=0・V=0・C=0。等しい → Z=1。
+    for (s1, s2, cc) in [
+        ([0x05, 0x5d], [0x05, 0x5c], 1u16 << psw::N),
+        ([0x05, 0x5c], [0x05, 0x5c], 1u16 << psw::Z),
+        ([0x05, 0x5c], [0x05, 0x5d], 0),
+    ] {
+        let mut env = env_at(CM, 0o1000, &[0o076072]);
+        put_str(&mut env, 0o4000, &s1);
+        put_str(&mut env, 0o5000, &s2);
+        sem::r_set(&mut env.backend, 0, dscr1(2, 6));
+        sem::r_set(&mut env.backend, 1, 0o4000);
+        sem::r_set(&mut env.backend, 2, dscr1(2, 6));
+        sem::r_set(&mut env.backend, 3, 0o5000);
+        step_m(&mut env, CM).unwrap();
+        assert_eq!(sem::psw_get(&env.backend) & 0xf, cc, "{s1:02x?} {s2:02x?}");
+    }
+}
+
+#[test]
+fn ashp_shift_and_round() {
+    // 左シフト cnt=+2: "12" → "1200"（len4 → [0x12,0x00,0x0C]）。
+    let mut env = env_at(CM, 0o1000, &[0o076076]);
+    put_str(&mut env, 0o4000, &[0x01, 0x2c]);
+    sem::r_set(&mut env.backend, 0, dscr1(2, 6));
+    sem::r_set(&mut env.backend, 1, 0o4000);
+    sem::r_set(&mut env.backend, 2, dscr1(4, 6));
+    sem::r_set(&mut env.backend, 3, 0o5000);
+    sem::r_set(&mut env.backend, 4, 2); // cnt=+2
+    step_m(&mut env, CM).unwrap();
+    assert_eq!(get_str(&env, 0o5000, 3), &[0x01, 0x20, 0x0c]);
+    // 右シフト cnt=-2・rnd=5: "12345" → 落ちる上位桁 4+5<10 → "123"。
+    let mut env = env_at(CM, 0o1000, &[0o076076]);
+    put_str(&mut env, 0o4000, &[0x12, 0x34, 0x5c]);
+    sem::r_set(&mut env.backend, 0, dscr1(5, 6));
+    sem::r_set(&mut env.backend, 1, 0o4000);
+    sem::r_set(&mut env.backend, 2, dscr1(3, 6));
+    sem::r_set(&mut env.backend, 3, 0o5000);
+    sem::r_set(&mut env.backend, 4, (5 << 8) | ((-2i16) as u16 & 0xff));
+    step_m(&mut env, CM).unwrap();
+    assert_eq!(get_str(&env, 0o5000, 2), &[0x12, 0x3c]);
+    // 丸め繰り上げ: "12955"・cnt=-2・rnd=5 → 落ちる上位桁 5+5>=10
+    // → 保持側 +1 で "130"。
+    let mut env = env_at(CM, 0o1000, &[0o076076]);
+    put_str(&mut env, 0o4000, &[0x12, 0x95, 0x5c]);
+    sem::r_set(&mut env.backend, 0, dscr1(5, 6));
+    sem::r_set(&mut env.backend, 1, 0o4000);
+    sem::r_set(&mut env.backend, 2, dscr1(3, 6));
+    sem::r_set(&mut env.backend, 3, 0o5000);
+    sem::r_set(&mut env.backend, 4, (5 << 8) | ((-2i16) as u16 & 0xff));
+    step_m(&mut env, CM).unwrap();
+    assert_eq!(get_str(&env, 0o5000, 2), &[0x13, 0x0c]);
+}
+
+#[test]
+fn cvtln_cvtlp_long_to_dec() {
+    // cvtln: R2:R3 = 12345 → 数値文字列 "12345"（ty1 len5）。
+    let mut env = env_at(CM, 0o1000, &[0o076057]);
+    sem::r_set(&mut env.backend, 0, dscr1(5, 1));
+    sem::r_set(&mut env.backend, 1, 0o6000);
+    sem::r_set(&mut env.backend, 2, 0);
+    sem::r_set(&mut env.backend, 3, 12345);
+    step_m(&mut env, CM).unwrap();
+    assert_eq!(get_str(&env, 0o6000, 5), b"12345");
+    assert_eq!(sem::r_get(&env.backend, 2), 0);
+    assert_eq!(sem::r_get(&env.backend, 3), 0);
+    // cvtlp: -42 → パック [0x04,0x2D]。レジスタ形の長整数は
+    // R2=s|high・R3=low。
+    let mut env = env_at(CM, 0o1000, &[0o076077]);
+    sem::r_set(&mut env.backend, 0, dscr1(2, 6));
+    sem::r_set(&mut env.backend, 1, 0o6000);
+    sem::r_set(&mut env.backend, 2, 0xffff);
+    sem::r_set(&mut env.backend, 3, (-42i16) as u16);
+    step_m(&mut env, CM).unwrap();
+    assert_eq!(get_str(&env, 0o6000, 2), &[0x04, 0x2d]);
+    assert_eq!(sem::psw_get(&env.backend) & 0xf, 1 << psw::N);
+}
+
+#[test]
+fn cvtnl_cvtpl_dec_to_long() {
+    // cvtnl: "12345"（ty1 len5）→ R2:R3 = 0:12345。C=0。
+    let mut env = env_at(CM, 0o1000, &[0o076053]);
+    put_str(&mut env, 0o4000, b"12345");
+    sem::r_set(&mut env.backend, 0, dscr1(5, 1));
+    sem::r_set(&mut env.backend, 1, 0o4000);
+    step_m(&mut env, CM).unwrap();
+    assert_eq!(sem::r_get(&env.backend, 2), 0);
+    assert_eq!(sem::r_get(&env.backend, 3), 12345);
+    assert_eq!(sem::psw_get(&env.backend) & 0xf, 0);
+    // cvtpl: パック "-2147483648"（len10、右詰めで
+    // [0x02,0x14,0x74,0x83,0x64,0x8D]）→ R2=0x8000・R3=0・N=1・C=1。
+    let mut env = env_at(CM, 0o1000, &[0o076073]);
+    put_str(&mut env, 0o4000, &[0x02, 0x14, 0x74, 0x83, 0x64, 0x8d]);
+    sem::r_set(&mut env.backend, 0, dscr1(10, 6));
+    sem::r_set(&mut env.backend, 1, 0o4000);
+    step_m(&mut env, CM).unwrap();
+    assert_eq!(sem::r_get(&env.backend, 2), 0x8000);
+    assert_eq!(sem::r_get(&env.backend, 3), 0);
+    assert_eq!(
+        sem::psw_get(&env.backend) & 0xf,
+        (1 << psw::N) | (1 << psw::C)
+    );
+    // 溢れ: "9999999999"（10 桁）> i32::MAX → V=1。
+    let mut env = env_at(CM, 0o1000, &[0o076053]);
+    put_str(&mut env, 0o4000, b"9999999999");
+    sem::r_set(&mut env.backend, 0, dscr1(10, 1));
+    sem::r_set(&mut env.backend, 1, 0o4000);
+    step_m(&mut env, CM).unwrap();
+    assert_ne!(sem::psw_get(&env.backend) & (1 << psw::V), 0);
+}
+
+#[test]
+fn cvtnp_cvtpn_representations() {
+    // cvtnp: "0123" → パック "123"（[0x12,0x3C]。有効桁は収まる）。
+    let mut env = env_at(CM, 0o1000, &[0o076055]);
+    put_str(&mut env, 0o4000, b"0123");
+    sem::r_set(&mut env.backend, 0, dscr1(4, 1));
+    sem::r_set(&mut env.backend, 1, 0o4000);
+    sem::r_set(&mut env.backend, 2, dscr1(3, 6));
+    sem::r_set(&mut env.backend, 3, 0o6000);
+    step_m(&mut env, CM).unwrap();
+    assert_eq!(get_str(&env, 0o6000, 2), &[0x12, 0x3c]);
+    assert_eq!(sem::psw_get(&env.backend) & 0xf, 0);
+    // cvtpn: パック "-45" → 符号付きゾーン "045"（ty0: 最終 0x35）。
+    let mut env = env_at(CM, 0o1000, &[0o076054]);
+    put_str(&mut env, 0o4000, &[0x04, 0x5d]);
+    sem::r_set(&mut env.backend, 0, dscr1(2, 6));
+    sem::r_set(&mut env.backend, 1, 0o4000);
+    sem::r_set(&mut env.backend, 2, dscr1(3, 0));
+    sem::r_set(&mut env.backend, 3, 0o6000);
+    step_m(&mut env, CM).unwrap();
+    assert_eq!(get_str(&env, 0o6000, 3), &[0x30, 0x34, 0x75]);
+    assert_eq!(sem::psw_get(&env.backend) & 0xf, 1 << psw::N);
+    // 変換の溢れ: "9999" → len2 のパックは 2 桁まで → V=1。
+    let mut env = env_at(CM, 0o1000, &[0o076055]);
+    put_str(&mut env, 0o4000, b"9999");
+    sem::r_set(&mut env.backend, 0, dscr1(4, 1));
+    sem::r_set(&mut env.backend, 1, 0o4000);
+    sem::r_set(&mut env.backend, 2, dscr1(2, 6));
+    sem::r_set(&mut env.backend, 3, 0o6000);
+    step_m(&mut env, CM).unwrap();
+    assert_eq!(get_str(&env, 0o6000, 2), &[0x09, 0x9c]); // 下位 2 桁
+    assert_eq!(sem::psw_get(&env.backend) & 0xf, 1 << psw::V);
+}
+
+#[test]
+fn addpi_inline_operands() {
+    // addpi: [命令語, src1.ptr, src2.ptr, dst.ptr] —— レジスタ不変。
+    let mut env = env_at(CM, 0o1000, &[0o076170, 0o3100, 0o3110, 0o3120]);
+    // 記述子: [len|ty<<12, adr]
+    put16(&mut env, 0o3100, dscr1(2, 6));
+    put16(&mut env, 0o3102, 0o4000);
+    put16(&mut env, 0o3110, dscr1(2, 6));
+    put16(&mut env, 0o3112, 0o5000);
+    put16(&mut env, 0o3120, dscr1(3, 6));
+    put16(&mut env, 0o3122, 0o6000);
+    put_str(&mut env, 0o4000, &[0x01, 0x2c]);
+    put_str(&mut env, 0o5000, &[0x03, 0x4c]);
+    sem::r_set(&mut env.backend, 0, 0x7777);
+    step_m(&mut env, CM).unwrap();
+    assert_eq!(env.pc, 0o1010);
+    assert_eq!(get_str(&env, 0o6000, 2), &[0x04, 0x6c]); // 12+34=46
+    assert_eq!(sem::r_get(&env.backend, 0), 0x7777); // R0-R6 不変
+}
+
+#[test]
+fn cvtnli_inline_long() {
+    // cvtnli: [命令語, src.dscr.ptr, dst.long.ptr] —— メモリの
+    // 長整数は ptr→low・ptr+2→s|high の語順。
+    let mut env = env_at(CM, 0o1000, &[0o076153, 0o3100, 0o6000]);
+    put16(&mut env, 0o3100, dscr1(5, 1));
+    put16(&mut env, 0o3102, 0o4000);
+    put_str(&mut env, 0o4000, b"12345");
+    step_m(&mut env, CM).unwrap();
+    assert_eq!(env.pc, 0o1006);
+    assert_eq!(get16(&env, 0o6000), 12345);
+    assert_eq!(get16(&env, 0o6002), 0);
 }

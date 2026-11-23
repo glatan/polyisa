@@ -296,7 +296,62 @@ pub fn insn_ops(insn: Insn) -> &'static [OpTy] {
         | Insn::Ldcif => &[RF],
         Insn::Stf | Insn::Stcfd | Insn::Stexp | Insn::Stcfi => &[WF],
         // 指定子を持たない命令: RTS/FIS/分岐/トラップ/MARK/SPL/固定語。
-        Insn::Rts
+        // CIS も語内の (mode,reg) 指定子を持たない —— レジスタ形は
+        // R0-R5 の固定枠、in-line 形は命令ストリームの記述子語を
+        // `cis_words` と `sem` の CIS 評価器が読む。
+        Insn::L2d
+        | Insn::L3d
+        | Insn::Movc
+        | Insn::Movrc
+        | Insn::Movtc
+        | Insn::Locc
+        | Insn::Skpc
+        | Insn::Scanc
+        | Insn::Spanc
+        | Insn::Cmpc
+        | Insn::Matc
+        | Insn::Addn
+        | Insn::Subn
+        | Insn::Cmpn
+        | Insn::Cvtnl
+        | Insn::Cvtpn
+        | Insn::Cvtnp
+        | Insn::Ashn
+        | Insn::Cvtln
+        | Insn::Addp
+        | Insn::Subp
+        | Insn::Cmpp
+        | Insn::Cvtpl
+        | Insn::Mulp
+        | Insn::Divp
+        | Insn::Ashp
+        | Insn::Cvtlp
+        | Insn::Movci
+        | Insn::Movrci
+        | Insn::Movtci
+        | Insn::Locci
+        | Insn::Skpci
+        | Insn::Scanci
+        | Insn::Spanci
+        | Insn::Cmpci
+        | Insn::Matci
+        | Insn::Addni
+        | Insn::Subni
+        | Insn::Cmpni
+        | Insn::Cvtnli
+        | Insn::Cvtpni
+        | Insn::Cvtnpi
+        | Insn::Ashni
+        | Insn::Cvtlni
+        | Insn::Addpi
+        | Insn::Subpi
+        | Insn::Cmppi
+        | Insn::Cvtpli
+        | Insn::Mulpi
+        | Insn::Divpi
+        | Insn::Ashpi
+        | Insn::Cvtlpi
+        | Insn::Rts
         | Insn::Sob
         | Insn::Fadd
         | Insn::Fsub
@@ -385,11 +440,14 @@ pub fn decode_insn_ex(words: &[u16], feats: u128) -> Option<Fetched> {
         ops.push(s);
         words_used += n as usize;
     }
+    // 全長は `insn_words` に任せる —— CIS の in-line 形と L2D7/
+    // L3D7 は語内フィールドで定まる記述子語を命令語の後ろに消費
+    // し、指定子列の消費語数（words_used）とは別系統。
     Some(Fetched {
         insn,
         word: w,
         ops,
-        len: 2 * words_used as u32,
+        len: insn_words(insn, w).unwrap_or(2 * words_used as u32),
     })
 }
 
@@ -413,9 +471,57 @@ pub fn insn_len_ex(words: &[u16], feats: u128) -> Option<u32> {
     insn_words(insn, w)
 }
 
+/// CIS in-line 形の命令が命令語に続けて消費する記述子語の数
+/// （KE44-A —— in-line 形のオペランドは命令ストリームの
+/// ポインタ/値語）。in-line 形以外は 0。
+// Ref: SPEC-PDP11-CIS（各命令の in-line 形式）.
+#[must_use]
+pub fn cis_ext_words(insn: Insn) -> u32 {
+    match insn {
+        // src.dscr.ptr + dst.dscr.ptr + fill 語。MOVTCI は
+        // さらに table.adr 語が続く。
+        Insn::Movci | Insn::Movrci | Insn::Cmpci => 3,
+        Insn::Movtci => 4,
+        // src.dscr.ptr + char 語、または src.dscr.ptr + set.dscr.ptr、
+        // src.dscr.ptr + obj.dscr.ptr。
+        Insn::Locci | Insn::Skpci | Insn::Scanci | Insn::Spanci | Insn::Matci => 2,
+        // 3 記述子形: src1.dscr.ptr + src2.dscr.ptr + dst.dscr.ptr。
+        Insn::Addni | Insn::Subni | Insn::Addpi | Insn::Subpi | Insn::Mulpi | Insn::Divpi => 3,
+        // 2 項形: src.dscr.ptr + dst.dscr.ptr（CVTNLI/CVTPLI は
+        // src.dscr.ptr + dst.long.ptr、CVTLNI/CVTLPI は
+        // dst.dscr.ptr + src.long.ptr）。
+        Insn::Cmpni
+        | Insn::Cvtnli
+        | Insn::Cvtpni
+        | Insn::Cvtnpi
+        | Insn::Cvtlni
+        | Insn::Cmppi
+        | Insn::Cvtpli
+        | Insn::Cvtlpi => 2,
+        // src.dscr.ptr + dst.dscr.ptr + shift.dscr 語。
+        Insn::Ashni | Insn::Ashpi => 3,
+        _ => 0,
+    }
+}
+
 /// デコード済み命令の語内フィールドから全長（バイト）を求める。
+/// CIS の in-line 形は語内フィールドで定まる固定数の記述子語を
+/// 消費し、L2Dr/L3Dr は r=PC のときポインタ語を命令ストリーム
+/// から消費する（@(PC)+ の規則）。
 #[must_use]
 pub fn insn_words(insn: Insn, w: u16) -> Option<u32> {
+    // CIS: in-line 形の記述子語、または L2Dr/L3Dr の r=PC。
+    let cis = cis_ext_words(insn);
+    if cis != 0 {
+        return Some(2 * (1 + cis));
+    }
+    if matches!(insn, Insn::L2d | Insn::L3d) {
+        let r = w & 7;
+        if r == 7 {
+            return Some(if insn == Insn::L2d { 6 } else { 8 });
+        }
+        return Some(2);
+    }
     let tys = insn_ops(insn);
     let mut n = 1u32;
     for i in 0..tys.len() {

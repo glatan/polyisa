@@ -27,6 +27,9 @@ include!(concat!(env!("OUT_DIR"), "/generated.rs"));
 /// long/F/D の「3412」語順写像。
 pub mod specifier;
 
+/// CIS（076nnn 空間）の記述子評価と文字列・十進命令の意味論。
+pub mod cis;
+
 /// 実行ループ（ワードフェッチ・トラップ境界の解決）。
 pub mod run;
 
