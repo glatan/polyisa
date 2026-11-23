@@ -740,3 +740,306 @@ fn program_runs_to_halt() {
     }
     assert_eq!(get16(&env, 0o2000), 0o42);
 }
+
+// ---- PD5: 整数命令（単一・二重オペランド）----
+
+/// 条件コード（PSW<3:0> = NZVC、N=8 Z=4 V=2 C=1）。
+fn nzvc(env: &BareEnv) -> u16 {
+    sem::psw_get(&env.backend) & 0xf
+}
+
+/// レジスタ dst の単一オペランド命令を (insn, 旧 r0, CC0) → (r0, CC) で
+/// 一括検査する。byte 命令のレジスタ宛ては下位バイトに作用し、
+/// 結果は符号拡張で書き戻される。
+// Ref: SPEC-PDP11-ARCH83（第5章）.
+#[test]
+fn alu_unary_cc_table() {
+    let r0 = &[Spec::Reg(0)][..];
+    for (insn, old, cc0, new, cc) in [
+        // com: dst ← ~dst。V=0・C=1。
+        (Insn::Com, 0o000377u16, 0, 0o177400, 0o11), // N+C
+        (Insn::Com, 0o177777, 0, 0, 0o5),            // Z+C
+        (Insn::Com, 0o177777, 0o17, 0, 0o5),         // 旧 CC は置き換わる
+        // comb: 下位バイトの補数を符号拡張で書き戻す。
+        (Insn::Comb, 0o000000, 0, 0o177777, 0o11), // N+C
+        (Insn::Comb, 0o000377, 0, 0, 0o5),         // Z+C
+        (Insn::Comb, 0o177400, 0, 0o177777, 0o11), // 上位は捨てられる
+        // inc: V=旧値が最大正。C 不変。
+        (Insn::Inc, 0o077777, 0o17, 0o100000, 0o13), // N+V+C保存
+        (Insn::Inc, 0o177777, 0o1, 0, 0o5),          // Z+C保存
+        (Insn::Inc, 0o000001, 0o2, 0o000002, 0),     // V は置き換わる
+        (Insn::Incb, 0o000177, 0, 0o177600, 0o12),   // 0177+1 → 0200: N+V
+        (Insn::Incb, 0o000377, 0, 0, 0o4),           // 0377+1 → 0: Z
+        // dec: V=旧値が最大負。C 不変。
+        (Insn::Dec, 0o100000, 0o1, 0o077777, 0o3), // V+C保存
+        (Insn::Dec, 0o000001, 0, 0, 0o4),          // Z
+        (Insn::Dec, 0o000000, 0, 0o177777, 0o10),  // N（負へ）
+        (Insn::Decb, 0o000200, 0o1, 0o000177, 0o3), // V+C保存
+        // neg: dst ← −dst。V=結果が最大負。C=結果が非零。
+        (Insn::Neg, 0o100000, 0, 0o100000, 0o13),  // N+V+C
+        (Insn::Neg, 0o000000, 0o17, 0, 0o4),       // Z、C 消える
+        (Insn::Neg, 0o000005, 0, 0o177773, 0o11),  // N+C
+        (Insn::Negb, 0o000200, 0, 0o177600, 0o13), // N+V+C
+        // adc: dst ← dst + C。V=旧値が最大正かつ C。C=旧値が全 1 かつ C。
+        (Insn::Adc, 0o077777, 0o1, 0o100000, 0o12), // N+V
+        (Insn::Adc, 0o177777, 0o1, 0, 0o5),         // Z+C
+        (Insn::Adc, 0o077777, 0, 0o077777, 0),      // C=0 なら変わらず
+        (Insn::Adc, 0o177777, 0, 0o177777, 0o10),   // N のみ
+        (Insn::Adcb, 0o000377, 0o1, 0, 0o5),        // Z+C
+        // sbc: dst ← dst − C。V=旧値が最大負（C 入力を問わない
+        // —— ARCH83 第5章の規則）。C=旧値が 0 かつ C 入力。
+        (Insn::Sbc, 0o100000, 0o1, 0o077777, 0o2), // V（真の溢れ）
+        (Insn::Sbc, 0o100000, 0, 0o100000, 0o12),  // V は C=0 でも立つ
+        (Insn::Sbc, 0o000000, 0o1, 0o177777, 0o11), // N+C（借り）
+        (Insn::Sbc, 0o000005, 0, 0o000005, 0),     // C=0 なら変わらず
+        (Insn::Sbc, 0o000001, 0o1, 0, 0o4),        // Z
+        (Insn::Sbcb, 0o000000, 0o1, 0o177777, 0o11), // byte の借り
+    ] {
+        let mut env = env_at("pdp11_34", 0o1000, &asm(insn, r0));
+        sem::psw_put(&mut env.backend, cc0);
+        sem::r_set(&mut env.backend, 0, old);
+        step_m(&mut env, "pdp11_34").unwrap();
+        assert_eq!(
+            (sem::r_get(&env.backend, 0), nzvc(&env)),
+            (new, cc),
+            "{insn:?} dst={old:o} cc0={cc0:o}"
+        );
+    }
+}
+
+/// レジスタ間の二重オペランド命令を (insn, src, 旧 dst, CC0) →
+/// （新 dst, CC) で一括検査する。byte 形は下位バイトで演算し
+/// 符号拡張で書き戻す。
+// Ref: SPEC-PDP11-ARCH83（第5章）.
+#[test]
+fn alu_double_cc_table() {
+    let rr = &[Spec::Reg(0), Spec::Reg(1)][..];
+    for (insn, s, d0, cc0, d1, cc) in [
+        // add: dst ← dst + src。
+        (Insn::Add, 0o000001u16, 0o077777, 0, 0o100000, 0o12), // N+V
+        (Insn::Add, 0o000001, 0o177777, 0, 0, 0o5),            // Z+C
+        (Insn::Add, 0o100000, 0o100000, 0, 0, 0o7),            // Z+V+C
+        (Insn::Add, 0o000005, 0o000003, 0, 0o000010, 0),
+        (Insn::Add, 0o177777, 0o177777, 0o17, 0o177776, 0o11), // N+C（桁出し）
+        (Insn::Add, 0o177777, 0o077777, 0, 0o077776, 0o1),     // C のみ（正の和）
+        // sub: dst ← dst − src。C=借り。
+        (Insn::Sub, 0o000001, 0o100000, 0, 0o077777, 0o2), // V
+        (Insn::Sub, 0o000001, 0o000000, 0, 0o177777, 0o11), // N+C（借り）
+        (Insn::Sub, 0o000005, 0o000005, 0, 0, 0o4),        // Z
+        (Insn::Sub, 0o100000, 0o077777, 0, 0o177777, 0o13), // N+V+C
+        // cmp: src − dst を調べる（書き戻しなし）。
+        (Insn::Cmp, 0o000001, 0o000002, 0, 0o000002, 0o11), // N+C
+        (Insn::Cmp, 0o000002, 0o000001, 0, 0o000001, 0),
+        (Insn::Cmp, 0o000005, 0o000005, 0, 0o000005, 0o4), // Z
+        (Insn::Cmp, 0o077777, 0o177777, 0, 0o177777, 0o13), // N+V+C
+        (Insn::Cmp, 0o100000, 0o000001, 0, 0o000001, 0o2), // V
+        // cmpb: byte の比較。−128−127 は溢れて V。
+        (Insn::Cmpb, 0o000200, 0o000177, 0, 0o000177, 0o2), // V
+        (Insn::Cmpb, 0o000001, 0o000002, 0, 0o000002, 0o11), // N+C
+        // bit: src ∧ dst を調べる。V=0・C 不変（dst は書き戻さない）。
+        (Insn::Bit, 0o177400, 0o007760, 0o1, 0o007760, 0o1), // C 保存のみ
+        (Insn::Bit, 0o100000, 0o177777, 0, 0o177777, 0o10),  // N
+        (Insn::Bit, 0o000000, 0o177777, 0o1, 0o177777, 0o5), // Z+C 保存
+        (Insn::Bitb, 0o000200, 0o000377, 0, 0o000377, 0o10), // N
+        // bic: dst ← dst ∧ ~src。V=0・C 不変。
+        (Insn::Bic, 0o000377, 0o177777, 0o1, 0o177400, 0o11), // N+C 保存
+        (Insn::Bic, 0o177777, 0o000005, 0, 0, 0o4),           // Z
+        (Insn::Bicb, 0o000177, 0x00ffu16, 0, 0o177600, 0o10), // ~0177∧0377=0200→符号拡張
+        // bis: dst ← dst ∨ src。V=0・C 不変。
+        (Insn::Bis, 0o100000, 0o000001, 0o1, 0o100001, 0o11), // N+C 保存
+        (Insn::Bis, 0o000000, 0o000000, 0, 0, 0o4),           // Z
+        (Insn::Bisb, 0o000200, 0o000001, 0, 0o177601, 0o10),  // 0201→符号拡張
+    ] {
+        let mut env = env_at("pdp11_34", 0o1000, &asm(insn, rr));
+        sem::psw_put(&mut env.backend, cc0);
+        sem::r_set(&mut env.backend, 0, s);
+        sem::r_set(&mut env.backend, 1, d0);
+        step_m(&mut env, "pdp11_34").unwrap();
+        assert_eq!(
+            (sem::r_get(&env.backend, 1), nzvc(&env)),
+            (d1, cc),
+            "{insn:?} src={s:o} dst={d0:o} cc0={cc0:o}"
+        );
+        // ソースは変わらない。
+        assert_eq!(sem::r_get(&env.backend, 0), s, "{insn:?}");
+    }
+}
+
+#[test]
+fn byte_ops_sign_extend_register_dst() {
+    // incb で 0177→0200（負）の境界、かつ非ゼロの上位桁が捨てられる
+    // こと（byte→レジスタの書き込みは常に符号拡張された全語）。
+    let mut env = env_at("pdp11_34", 0o1000, &asm(Insn::Incb, &[Spec::Reg(2)]));
+    sem::r_set(&mut env.backend, 2, 0o177177); // 上位にゴミ + 下位 0177
+    step_m(&mut env, "pdp11_34").unwrap();
+    assert_eq!(sem::r_get(&env.backend, 2), 0o177600);
+    assert_eq!(nzvc(&env), 0o12); // N+V
+    // negb r0: 下位バイトの 2 の補数を 16 ビットへ符号拡張。
+    let mut env = env_at("pdp11_34", 0o1000, &asm(Insn::Negb, &[Spec::Reg(0)]));
+    sem::r_set(&mut env.backend, 0, 0o000005);
+    step_m(&mut env, "pdp11_34").unwrap();
+    assert_eq!(sem::r_get(&env.backend, 0), 0o177773); // −5 を符号拡張
+    assert_eq!(nzvc(&env), 0o11); // N+C
+}
+
+#[test]
+fn immediate_and_memory_operands() {
+    // add #imm, r0 — 即値ソース。
+    let words = asm(Insn::Add, &[Spec::Imm(0o77), Spec::Reg(0)]);
+    let mut env = env_at("pdp11_34", 0o1000, &words);
+    sem::r_set(&mut env.backend, 0, 0o1);
+    step_m(&mut env, "pdp11_34").unwrap();
+    assert_eq!(sem::r_get(&env.backend, 0), 0o100);
+    assert_eq!(env.pc, 0o1004);
+
+    // add (r1)+, r0 — オート増の評価順序（ソース→宛先）。
+    let words = asm(Insn::Add, &[Spec::AutoInc(1), Spec::Reg(0)]);
+    let mut env = env_at("pdp11_34", 0o1000, &words);
+    put16(&mut env, 0o2000, 0o30);
+    sem::r_set(&mut env.backend, 0, 0o10);
+    sem::r_set(&mut env.backend, 1, 0o2000);
+    step_m(&mut env, "pdp11_34").unwrap();
+    assert_eq!(sem::r_get(&env.backend, 0), 0o40);
+    assert_eq!(sem::r_get(&env.backend, 1), 0o2002);
+
+    // sub r0, -(r2) — 宛先のオート減（先に下げてから読み・書き戻し）。
+    let words = asm(Insn::Sub, &[Spec::Reg(0), Spec::AutoDec(2)]);
+    let mut env = env_at("pdp11_34", 0o1000, &words);
+    put16(&mut env, 0o1776, 0o50);
+    sem::r_set(&mut env.backend, 0, 0o10);
+    sem::r_set(&mut env.backend, 2, 0o2000);
+    step_m(&mut env, "pdp11_34").unwrap();
+    assert_eq!(get16(&env, 0o1776), 0o40);
+    assert_eq!(sem::r_get(&env.backend, 2), 0o1776);
+
+    // neg @#a・inc @#a — メモリの読み・変形・書き戻し。
+    for (insn, old, new) in [
+        (Insn::Neg, 0o000005u16, 0o177773u16),
+        (Insn::Inc, 0o177777, 0),
+        (Insn::Com, 0o125252, 0o052525),
+        (Insn::Dec, 0o000001, 0),
+    ] {
+        let words = asm(insn, &[Spec::Abs(0o3000)]);
+        let mut env = env_at("pdp11_34", 0o1000, &words);
+        put16(&mut env, 0o3000, old);
+        step_m(&mut env, "pdp11_34").unwrap();
+        assert_eq!(get16(&env, 0o3000), new, "{insn:?}");
+    }
+
+    // bicb @#a, r0 — 絶対指定子の byte 読み出し（下位バイト）。
+    let words = asm(Insn::Bicb, &[Spec::Abs(0o3000), Spec::Reg(0)]);
+    let mut env = env_at("pdp11_34", 0o1000, &words);
+    env.backend.mem.write(VirtAddr(0o3000), &[0o037]).unwrap();
+    sem::r_set(&mut env.backend, 0, 0o177);
+    step_m(&mut env, "pdp11_34").unwrap();
+    assert_eq!(sem::r_get(&env.backend, 0), 0o140);
+}
+
+#[test]
+fn index_and_deferred_operands() {
+    // bis 4(r3), r0 — インデックス指定子。
+    let words = asm(Insn::Bis, &[Spec::Index { r: 3, x: 0o4 }, Spec::Reg(0)]);
+    let mut env = env_at("pdp11_34", 0o1000, &words);
+    put16(&mut env, 0o2004, 0o100000);
+    sem::r_set(&mut env.backend, 3, 0o2000);
+    step_m(&mut env, "pdp11_34").unwrap();
+    assert_eq!(sem::r_get(&env.backend, 0), 0o100000);
+    assert_eq!(nzvc(&env), 0o10); // N
+
+    // cmp @(r1)+, r0 — 間接オート増（指し先語は常に +2）。
+    let words = asm(Insn::Cmp, &[Spec::AutoIncDef(1), Spec::Reg(0)]);
+    let mut env = env_at("pdp11_34", 0o1000, &words);
+    put16(&mut env, 0o2000, 0o2010); // r1 の指し先 → オペランドアドレス
+    put16(&mut env, 0o2010, 0o7);
+    sem::r_set(&mut env.backend, 0, 0o7);
+    sem::r_set(&mut env.backend, 1, 0o2000);
+    step_m(&mut env, "pdp11_34").unwrap();
+    assert_eq!(nzvc(&env), 0o4); // Z（等しい）
+    assert_eq!(sem::r_get(&env.backend, 1), 0o2002);
+}
+
+#[test]
+fn same_register_autoinc_order() {
+    // mov (r0)+, (r0)+ 系の副作用順序は PD4 の指定子テストで見たが、
+    // add -(r0), -(r0) はソースの評価が先: src=-2、dst=-4。
+    let words = asm(Insn::Add, &[Spec::AutoDec(0), Spec::AutoDec(0)]);
+    let mut env = env_at("pdp11_34", 0o1000, &words);
+    put16(&mut env, 0o1776, 0o3); // src（先に -2 で指す）
+    put16(&mut env, 0o1774, 0o5); // dst（次に -4 で指す）
+    sem::r_set(&mut env.backend, 0, 0o2000);
+    step_m(&mut env, "pdp11_34").unwrap();
+    assert_eq!(get16(&env, 0o1774), 0o10); // dst += src
+    assert_eq!(get16(&env, 0o1776), 0o3);
+    assert_eq!(sem::r_get(&env.backend, 0), 0o1774);
+}
+
+#[test]
+fn cmp_tst_do_not_write() {
+    // cmp r0, @#a — 宛先メモリは変わらない。
+    let words = asm(Insn::Cmp, &[Spec::Reg(0), Spec::Abs(0o3000)]);
+    let mut env = env_at("pdp11_34", 0o1000, &words);
+    put16(&mut env, 0o3000, 0o7);
+    sem::r_set(&mut env.backend, 0, 0o5);
+    step_m(&mut env, "pdp11_34").unwrap();
+    assert_eq!(get16(&env, 0o3000), 0o7);
+    assert_eq!(nzvc(&env), 0o11); // N+C（5 < 7 の借り）
+
+    // bit r0, @#a も書き戻さない。
+    let words = asm(Insn::Bit, &[Spec::Reg(0), Spec::Abs(0o3000)]);
+    let mut env = env_at("pdp11_34", 0o1000, &words);
+    put16(&mut env, 0o3000, 0o7);
+    sem::r_set(&mut env.backend, 0, 0o4);
+    step_m(&mut env, "pdp11_34").unwrap();
+    assert_eq!(get16(&env, 0o3000), 0o7);
+    assert_eq!(nzvc(&env), 0); // 4∧7=4 → 全 CC 落ち
+}
+
+#[test]
+fn branch_uses_new_cc() {
+    // cmp #1, #2; bcc … — cmp が立てた C を直後の分岐が読む。
+    // 1-2 → C=1（借り）なので bcs が取られる。
+    let mut words = asm(Insn::Cmp, &[Spec::Imm(0o1), Spec::Imm(0o2)]);
+    words.push(0o103402); // bcs +2
+    words.push(0o000000); // halt（分岐が取られなければここで止まる）
+    words.push(0o000240);
+    words.push(0o000240);
+    let mut env = env_at("pdp11_34", 0o1000, &words);
+    step_m(&mut env, "pdp11_34").unwrap();
+    assert_eq!(nzvc(&env), 0o11); // N+C
+    step_m(&mut env, "pdp11_34").unwrap();
+    assert_eq!(env.pc, 0o1014); // bcs +2 成立（next=0o1010 + 4）
+}
+
+#[test]
+fn multi_precision_add_sub_chain() {
+    // adc/sbc が多倍長演算の鎖として働く形:
+    // 下位語の add が C=1 を出し、上位語の adc が C を拾う。
+    let mut env2 = env_at(
+        "pdp11_34",
+        0o1000,
+        &asm(Insn::Add, &[Spec::Reg(2), Spec::Reg(0)]),
+    );
+    sem::r_set(&mut env2.backend, 0, 1);
+    sem::r_set(&mut env2.backend, 2, 0o177777);
+    step_m(&mut env2, "pdp11_34").unwrap();
+    assert_eq!(sem::r_get(&env2.backend, 0), 0);
+    assert_eq!(nzvc(&env2), 0o5); // Z+C
+
+    // adc r1 — C を拾う。
+    let words = asm(Insn::Adc, &[Spec::Reg(1)]);
+    let mut env3 = env_at("pdp11_34", 0o1000, &words);
+    sem::psw_put(&mut env3.backend, 0o1);
+    sem::r_set(&mut env3.backend, 1, 0);
+    step_m(&mut env3, "pdp11_34").unwrap();
+    assert_eq!(sem::r_get(&env3.backend, 1), 1);
+    assert_eq!(nzvc(&env3), 0); // C 消える
+
+    // sbc で借りが伝播する（0 − C → −1、C 持続）。
+    let words = asm(Insn::Sbc, &[Spec::Reg(1)]);
+    let mut env4 = env_at("pdp11_34", 0o1000, &words);
+    sem::psw_put(&mut env4.backend, 0o1);
+    sem::r_set(&mut env4.backend, 1, 0);
+    step_m(&mut env4, "pdp11_34").unwrap();
+    assert_eq!(sem::r_get(&env4.backend, 1), 0o177777);
+    assert_eq!(nzvc(&env4), 0o11); // N+C
+}

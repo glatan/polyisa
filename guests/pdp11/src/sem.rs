@@ -1,13 +1,17 @@
 // Copyright (c) polyisa contributors
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! PDP-11 の命令意味論（PD4 の最小形）。
+//! PDP-11 の命令意味論（PD5 で整数群を網羅）。
 //!
 //! 指定子評価の実効版（`eval_op` — `specifier::eval` が返す EA と
 //! オート増減の書き戻しに、間接形の指し先語の読み出しと byte/word
-//! の読み書きを足す）と、実行経路を疎通させる最小命令群を実装する。
-//! 命令本体の網羅（算術・論理・シフト・EIS・浮動）は PD5 以降が
-//! 担い、ここでは mov/movb・clr/clrb・tst/tstb・nop・br/Bcc・jmp・
-//! emt/trap/bpt/iot・halt を置く。
+//! の読み書きを足す）と、整数命令群を実装する。二重オペランドは
+//! mov/movb・cmp/cmpb・add・sub・bit/bitb・bic/bicb・bis/bisb、
+//! 単一オペランドは clr/clrb・com/comb・inc/incb・dec/decb・
+//! neg/negb・adc/adcb・sbc/sbcb・tst/tstb。条件コードの規則は
+//! 命令ごとに ARCH83 第5章から写す（sbc の V は「dst が最大負」の
+//! みで C 入力を問わない、com は C=1、inc/dec は C 不変等）。
+//! 分岐・jmp・トラップ命令は PD4 の形のまま、論理・シフト・CC
+//! 操作（xor・swab・ror/rol・asr/asl・sxt・scc/ccc）は PD6 が担う。
 //!
 //! ワードアクセスの奇数アドレスは `odd_addr_trap` パラメータに従う:
 //! 立つモデルでは vector 004（バスエラー）に落ち、立たないモデル
@@ -29,7 +33,7 @@ use polyisa_engine::interp::{InterpBackend, InterpExit};
 use polyisa_mem::{Access, AccessKind, Align, Endian};
 use polyisa_sem::{Backend as _, ExceptionKind, GuestException, StateRef, W16};
 
-use crate::specifier::{self, Ea, Fetched, Legality, Spec, Width};
+use crate::specifier::{self, Acc, Ea, Fetched, Legality, Spec, Width};
 use crate::{CpuState, Insn, JMP_REG_TRAP_VEC004, JmpRegTrapParam, OddAddrTrapParam, psw, reg};
 
 /// トラップベクタ（バイトアドレス）。EMT/TRAP のような命令由来と、
@@ -213,16 +217,28 @@ pub fn fetch_w(b: &mut InterpBackend, a: u16) -> Result<u16, InterpExit> {
 
 // ---- 条件コード ----
 
-/// 幅の値で mov 系の条件コードを立てる（N=符号・Z=零・V=0・C 保存）。
-// Ref: SPEC-PDP11-ARCH83（第5章 mov の記述）.
-fn cc_mov(b: &mut InterpBackend, v: u16, w: Width) {
-    let (sign, mask) = if w == Width::B {
+/// 幅の符号ビット（最大負 M.N.I.）と値マスク。最大正 M.P.I. は
+/// `符号ビット - 1`、全 1 はマスクそのもので幅から導ける。
+fn sign_mask(w: Width) -> (u16, u16) {
+    if w == Width::B {
         (0x80, 0xff)
     } else {
         (0x8000, 0xffff)
-    };
+    }
+}
+
+/// 結果の N（符号）と Z（零）を立てる。V・C は命令ごとの規則が
+/// 追記する（保存を含む）。
+fn cc_nz(b: &mut InterpBackend, v: u16, w: Width) {
+    let (sign, mask) = sign_mask(w);
     psw_flag_set(b, psw::N, v & sign != 0);
     psw_flag_set(b, psw::Z, v & mask == 0);
+}
+
+/// 幅の値で mov 系の条件コードを立てる（N=符号・Z=零・V=0・C 保存）。
+// Ref: SPEC-PDP11-ARCH83（第5章 mov の記述）.
+fn cc_mov(b: &mut InterpBackend, v: u16, w: Width) {
+    cc_nz(b, v, w);
     psw_flag_set(b, psw::V, false);
 }
 
@@ -343,6 +359,86 @@ pub fn loc_addr(loc: &Loc) -> u16 {
     }
 }
 
+// ---- 整数演算 ----
+
+/// 単一オペランド算術（com/inc/dec/neg/adc/sbc と byte 形）。
+/// （結果, V, C）を返す。`None` はその条件コードを変えない
+/// （inc/dec の C）。
+// Ref: SPEC-PDP11-ARCH83（第5章 各命令の条件コード）.
+fn alu1(insn: Insn, v: u16, w: Width, c: bool) -> (u16, Option<bool>, Option<bool>) {
+    let (sgn, m) = sign_mask(w);
+    let v = v & m;
+    match insn {
+        // 1 の補数。V=0・C=1。
+        Insn::Com | Insn::Comb => (!v & m, Some(false), Some(true)),
+        // V=旧値が最大正（M.P.I.）。C 不変。
+        Insn::Inc | Insn::Incb => (v.wrapping_add(1) & m, Some(v == sgn - 1), None),
+        // V=旧値が最大負（M.N.I.）。C 不変。
+        Insn::Dec | Insn::Decb => (v.wrapping_sub(1) & m, Some(v == sgn), None),
+        // 2 の補数。V=結果が最大負。C=結果が非零。
+        Insn::Neg | Insn::Negb => {
+            let r = (!v).wrapping_add(1) & m;
+            (r, Some(r == sgn), Some(r != 0))
+        }
+        // C を足す。V=旧値が最大正かつ C 入力。C=旧値が全 1 かつ C 入力。
+        Insn::Adc | Insn::Adcb => (
+            v.wrapping_add(u16::from(c)) & m,
+            Some(v == sgn - 1 && c),
+            Some(v == m && c),
+        ),
+        // C を引く。V=旧値が最大負 —— C 入力の有無を問わない
+        // （ARCH83 第5章の規則。C=0 のとき dst−0 で算術的な溢れは
+        // ないが、V は dst=M.N.I. で立つ）。C=旧値が 0 かつ C 入力（借り）。
+        Insn::Sbc | Insn::Sbcb => (
+            v.wrapping_sub(u16::from(c)) & m,
+            Some(v == sgn),
+            Some(v == 0 && c),
+        ),
+        _ => unreachable!("alu1 の対象外"),
+    }
+}
+
+/// 二重オペランドの演算結果と条件コード。`s`・`d` はソース・
+/// 宛先の読み出し値。V は常に定まり（bit/bic/bis は 0）、
+/// C の `None` は C 不変（bit/bic/bis）。sub は dst−src、
+/// cmp は src−dst の向きで溢れと借りを見る（cmp は dst を書かない）。
+// Ref: SPEC-PDP11-ARCH83（第5章 各命令の条件コード）.
+fn alu2(insn: Insn, s: u16, d: u16, w: Width) -> (u16, bool, Option<bool>) {
+    let (sgn, m) = sign_mask(w);
+    let (s, d) = (s & m, d & m);
+    match insn {
+        // dst ← dst + src。V=同符号の被演算から異符号の結果へ。
+        // C=最上位桁からの桁出し。
+        Insn::Add => {
+            let r = d.wrapping_add(s) & m;
+            (
+                r,
+                (s ^ r) & (d ^ r) & sgn != 0,
+                Some(u32::from(d) + u32::from(s) > u32::from(m)),
+            )
+        }
+        // dst ← dst − src。V=被演算が異符号で結果が src の符号。
+        // C=借り（dst + ~src + 1 < 2^幅 ⟺ dst < src）。
+        Insn::Sub => {
+            let r = d.wrapping_sub(s) & m;
+            (r, (d ^ s) & (d ^ r) & sgn != 0, Some(d < s))
+        }
+        // src − dst を調べる（書き戻しなし）。V=被演算が異符号で
+        // 結果が dst の符号。C=借り（src < dst）。
+        Insn::Cmp | Insn::Cmpb => {
+            let r = s.wrapping_sub(d) & m;
+            (r, (s ^ d) & (s ^ r) & sgn != 0, Some(s < d))
+        }
+        // dst ← dst ∧ ~src。
+        Insn::Bic | Insn::Bicb => (d & !s & m, false, None),
+        // dst ← dst ∨ src。
+        Insn::Bis | Insn::Bisb => (d | s, false, None),
+        // src ∧ dst を調べる（書き戻しなし）。
+        Insn::Bit | Insn::Bitb => (s & d, false, None),
+        _ => unreachable!("alu2 の対象外"),
+    }
+}
+
 // ---- トラップ配送 ----
 
 /// トラップの配送。古い PSW と PC を（この順に）カーネルスタックに
@@ -437,6 +533,60 @@ pub fn exec(b: &mut InterpBackend, f: &Fetched, pc0: u16) -> Result<(), InterpEx
             let s = eval_op(b, f, pc0, 0)?;
             let v = read(b, &s, w)?;
             cc_tst(b, v, w);
+        }
+        // 二重オペランド: ソースの評価・読み出しが宛先の評価に先立つ
+        // （オート増減が同じレジスタに掛かるときの順序規則）。宛先が
+        // 読み出し専用の cmp/bit は書き戻さない。
+        Insn::Cmp
+        | Insn::Cmpb
+        | Insn::Bit
+        | Insn::Bitb
+        | Insn::Bic
+        | Insn::Bicb
+        | Insn::Bis
+        | Insn::Bisb
+        | Insn::Add
+        | Insn::Sub => {
+            let tys = specifier::insn_ops(f.insn);
+            let s = eval_op(b, f, pc0, 0)?;
+            let sv = read(b, &s, tys[0].width)?;
+            let d = eval_op(b, f, pc0, 1)?;
+            let dv = read(b, &d, tys[1].width)?;
+            let (r, v_f, c_f) = alu2(f.insn, sv, dv, tys[1].width);
+            if tys[1].acc == Acc::M {
+                write(b, &d, tys[1].width, r)?;
+            }
+            cc_nz(b, r, tys[1].width);
+            psw_flag_set(b, psw::V, v_f);
+            if let Some(cf) = c_f {
+                psw_flag_set(b, psw::C, cf);
+            }
+        }
+        // 単一オペランド算術（adc/sbc は C を読み込む）。
+        Insn::Com
+        | Insn::Comb
+        | Insn::Inc
+        | Insn::Incb
+        | Insn::Dec
+        | Insn::Decb
+        | Insn::Neg
+        | Insn::Negb
+        | Insn::Adc
+        | Insn::Adcb
+        | Insn::Sbc
+        | Insn::Sbcb => {
+            let w = specifier::insn_ops(f.insn)[0].width;
+            let d = eval_op(b, f, pc0, 0)?;
+            let v = read(b, &d, w)?;
+            let (r, v_f, c_f) = alu1(f.insn, v, w, psw_flag(b, psw::C));
+            write(b, &d, w, r)?;
+            cc_nz(b, r, w);
+            if let Some(vf) = v_f {
+                psw_flag_set(b, psw::V, vf);
+            }
+            if let Some(cf) = c_f {
+                psw_flag_set(b, psw::C, cf);
+            }
         }
         // 分岐: off8 は符号付き 8 ビットで語単位（×2）。基準は命令の
         // 次の語 —— 実行中の r7 はそこを指す。
