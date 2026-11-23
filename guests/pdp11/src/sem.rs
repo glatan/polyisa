@@ -19,8 +19,11 @@
 //! jsr（一時=宛先アドレス→link を -(SP) へ→link=次の命令→PC=一時）・
 //! rts（PC=link→link=(SP)+）・sob（レジスタ減算・非零なら PC−2×off6）・
 //! mark（SP=PC+2×nn→PC=r5→r5=(SP)+。rti 類似の手順除去）を持つ。
-//! 特権・システム命令（rti/rtt・spl・mtps/mfps・mfpt・csm・
-//! tstset/wrtlck）は PD8 が担う。
+//! 特権・システム命令は rti/rtt（スタックからの PC/PSW 復元とモード
+//! 切替、非カーネルの PSW 保護）・spl・mtps/mfps・mfpt（`mfpt_code`
+//! のモデル値）・csm（MMR3<3> 条件のスーパーバイザ呼出）・
+//! tstset/wrtlck（バスロックの単一スレッド近似）・reset（裸モデル
+//! では NOP）を持つ。
 //!
 //! ワードアクセスの奇数アドレスは `odd_addr_trap` パラメータに従う:
 //! 立つモデルでは vector 004（バスエラー）に落ち、立たないモデル
