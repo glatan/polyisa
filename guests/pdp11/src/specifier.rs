@@ -69,7 +69,7 @@ pub enum Acc {
     W,
     /// 読み・変形・書き戻し（add の宛先・単一オペランド算術）。
     M,
-    /// 実効アドレスがオペランド（jmp・jsr・csm。モード 0 は
+    /// 実効アドレスがオペランド（jmp・jsr。モード 0 は
     /// 違法で `jmp_reg_trap` パラメータのベクタに落ちる）。
     A,
 }
@@ -238,7 +238,10 @@ pub fn insn_ops(insn: Insn) -> &'static [OpTy] {
         Insn::Cmpb | Insn::Bitb => &[RB, RB],
         Insn::Bic | Insn::Bis | Insn::Add | Insn::Sub => &[RW, MW],
         Insn::Bicb | Insn::Bisb => &[RB, MB],
-        Insn::Jmp | Insn::Csm => &[AW],
+        Insn::Jmp => &[AW],
+        // csm は引数語を読むオペランド（モード 0 も合法で、その
+        // レジスタ値が積まれる —— KDJ11-E UG の CSM 記述）。
+        Insn::Csm => &[RW],
         Insn::Swab
         | Insn::Com
         | Insn::Inc

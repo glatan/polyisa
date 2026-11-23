@@ -1270,11 +1270,14 @@ fn cc_ops_apply_mask() {
         assert_eq!(nzvc(&env), cc, "{word:o} cc0={cc0:o}");
         assert_eq!(env.pc, 0o1002);
     }
-    // CC 以外の PSW 桁（T・優先度・モード）は触らない。
+    // CC 以外の PSW 桁（優先度・モード）は触らない。T は立てない —
+    // 立つと命令の完了時にトレーストラップが発火し、この裸環境の
+    // カーネルスタック退避先（ksp=0）は未写像で配送できない
+    // （発火自体の検証は PD8 節の tbit_trace_* が担う）。
     let mut env = env_at("pdp11_34", 0o1000, &[0o000257]); // ccc
-    sem::psw_put(&mut env.backend, 0o177777);
+    sem::psw_put(&mut env.backend, 0o177757);
     step_m(&mut env, "pdp11_34").unwrap();
-    assert_eq!(sem::psw_get(&env.backend), 0o177760);
+    assert_eq!(sem::psw_get(&env.backend), 0o177740);
 }
 
 // ---- PD7: サブルーチン命令（sob・jsr・rts・mark）----
@@ -1530,4 +1533,318 @@ fn jmp_jsr_specifier_forms() {
         let sp = sem::r_get(&env.backend, reg::SP as u8);
         assert_eq!(get16(&env, sp), 0o1000); // fault — 命令先頭
     }
+}
+
+// ---- PD8: トラップ・特権・システム命令 ----
+
+use polyisa_sem::{Backend, StateRef, W16};
+
+/// 状態面の語（ksp/ssp/usp/mmr などの退避先）を書く。
+fn st_put(env: &mut BareEnv, off: usize, v: u16) {
+    env.backend.set(StateRef::<W16>::from_offset(off), v);
+}
+
+/// 状態面の語を読む。
+fn st_get(env: &mut BareEnv, off: usize) -> u16 {
+    env.backend.get(StateRef::<W16>::from_offset(off))
+}
+
+const KSP: usize = core::mem::offset_of!(CpuState, ksp);
+const SSP: usize = core::mem::offset_of!(CpuState, ssp);
+const USP: usize = core::mem::offset_of!(CpuState, usp);
+const MMR3: usize = core::mem::offset_of!(CpuState, mmr) + 6;
+
+/// trap → ハンドラの rti で積まれた PC・PSW が往復する。
+/// スタック形状は PC が下位・PSW が上位（-(SP) PSW→PC の順）。
+// Ref: SPEC-PDP11-ARCH83（第5章 RTI・第8章）.
+#[test]
+fn rti_round_trip_through_trap() {
+    let mut env = env_at("pdp11_34", 0o1000, &[0o104400, 0o000240]); // trap / nop
+    put16(&mut env, 0o034, 0o2000);
+    put16(&mut env, 0o036, 0o17); // 新 PSW（CC 立ち）
+    put16(&mut env, 0o2000, 0o000002); // rti
+    step_m(&mut env, "pdp11_34").unwrap();
+    assert_eq!(env.pc, 0o2000);
+    let sp = sem::r_get(&env.backend, reg::SP as u8);
+    assert_eq!(sp, SP0 - 4);
+    assert_eq!(get16(&env, sp), 0o1002); // trap — 次の命令
+    assert_eq!(get16(&env, sp + 2), 0); // 旧 PSW
+    assert_eq!(sem::psw_get(&env.backend), 0o17);
+    step_m(&mut env, "pdp11_34").unwrap(); // rti
+    assert_eq!(env.pc, 0o1002);
+    assert_eq!(sem::psw_get(&env.backend), 0);
+    assert_eq!(sem::r_get(&env.backend, reg::SP as u8), SP0);
+}
+
+/// モードを跨ぐ RTI・トラップはモード別 SP 退避先を経由する。
+/// カーネルの rti がユーザーモード PSW を復元すれば r6 は USP に
+/// 切替わり、ユーザー側のトラップは（新 PSW の）カーネルスタックへ。
+// Ref: SPEC-PDP11-ARCH83（第5章 RTI・第9章）.
+#[test]
+fn rti_and_trap_switch_per_mode_stacks() {
+    let mut env = env_at("pdp11_70", 0o1000, &[0o000002]); // rti
+    put16(&mut env, SP0, 0o2000); // 復帰 PC
+    put16(&mut env, SP0 + 2, 0o140000); // ユーザーモード PSW
+    put16(&mut env, 0o2000, 0o104000); // ユーザー側で emt 0
+    put16(&mut env, 0o030, 0o2400); // emt ベクタ → カーネルハンドラ
+    put16(&mut env, 0o032, 0); // 新 PSW = カーネル
+    put16(&mut env, 0o2400, 0o000002); // ハンドラ末尾は rti
+    st_put(&mut env, USP, 0o6000);
+    step_m(&mut env, "pdp11_70").unwrap(); // rti — ユーザーモードへ
+    assert_eq!(env.pc, 0o2000);
+    assert_eq!(sem::psw_get(&env.backend), 0o140000);
+    assert_eq!(sem::r_get(&env.backend, reg::SP as u8), 0o6000); // USP
+    assert_eq!(st_get(&mut env, KSP), SP0 + 4); // pop 後のカーネル SP
+    step_m(&mut env, "pdp11_70").unwrap(); // ユーザーモードの emt
+    assert_eq!(env.pc, 0o2400);
+    assert_eq!(sem::psw_get(&env.backend), 0);
+    let sp = sem::r_get(&env.backend, reg::SP as u8);
+    assert_eq!(sp, SP0); // カーネルスタック（SP0+4）に 2 語
+    assert_eq!(get16(&env, sp), 0o2002);
+    assert_eq!(get16(&env, sp + 2), 0o140000); // 旧 PSW = ユーザー
+    assert_eq!(st_get(&mut env, USP), 0o6000); // USP 退避は不変
+    step_m(&mut env, "pdp11_70").unwrap(); // rti — ユーザーへ戻る
+    assert_eq!(env.pc, 0o2002);
+    assert_eq!(sem::psw_get(&env.backend), 0o140000);
+    assert_eq!(sem::r_get(&env.backend, reg::SP as u8), 0o6000);
+}
+
+/// カーネル以外で実行した rti は PSW 保護規則が掛かる —— 優先度
+/// <7:5> は現値のまま、<15:12>・RS<11> は旧値との OR でしか下がら
+/// ない（user から kernel へは戻れない）。
+// Ref: SPEC-PDP11-J11（8.4.1・8.4.4 RTI）.
+#[test]
+fn rti_in_user_mode_preserves_protected_bits() {
+    let mut env = env_at("pdp11_70", 0o1000, &[0o000002]); // rti
+    sem::psw_put(&mut env.backend, 0o140240); // ユーザー・優先度 5
+    sem::r_set(&mut env.backend, reg::SP as u8, 0o6000);
+    put16(&mut env, 0o6000, 0o3000); // 復帰 PC
+    put16(&mut env, 0o6002, 0o177757); // kernel・pri7・RS・CC を偽装
+    step_m(&mut env, "pdp11_70").unwrap();
+    assert_eq!(env.pc, 0o3000);
+    // <15:12> = user|kernel = user 維持、RS = 0|1 = 1、優先度は旧 5、
+    // <10:0> は積まれた値（T は積まれていないので発火しない）。
+    assert_eq!(sem::psw_get(&env.backend), 0o177657);
+    assert_eq!(sem::r_get(&env.backend, reg::SP as u8), 0o6004);
+}
+
+/// T ビットトレーストラップ。imm モデル（既定）では RTI が T を立てた
+/// 直後に発火、RTT は抑止して次の命令の完了時に発火する。traced な
+/// 命令が T を消しても発火する（フェッチ時の内部 flag）。
+// Ref: SPEC-PDP11-J11（8.7.7）, SPEC-PDP11-ARCH83（付録 B 項目 11）.
+#[test]
+fn tbit_trace_trap_and_rtt_timing() {
+    // RTI → T=1: 次の命令の実行前に vector 014 へ。
+    let mut env = env_at("pdp11_34", 0o1000, &[0o000002]); // rti
+    put16(&mut env, SP0, 0o2000);
+    put16(&mut env, SP0 + 2, 0o20); // T=1
+    put16(&mut env, 0o014, 0o2400);
+    put16(&mut env, 0o016, 0); // ハンドラ PSW（T=0）
+    step_m(&mut env, "pdp11_34").unwrap();
+    assert_eq!(env.pc, 0o2400);
+    let sp = sem::r_get(&env.backend, reg::SP as u8);
+    assert_eq!(get16(&env, sp), 0o2000); // 次の命令が積まれる
+    assert_eq!(get16(&env, sp + 2) & 0o20, 0o20); // 積んだ PSW は T=1
+    assert_eq!(sem::psw_get(&env.backend), 0);
+    // RTT → T=1: 境界では発火せず、次の命令の完了時に発火。
+    let mut env = env_at("pdp11_34", 0o1000, &[0o000006]); // rtt
+    put16(&mut env, SP0, 0o2000);
+    put16(&mut env, SP0 + 2, 0o20);
+    put16(&mut env, 0o2000, 0o000240); // 次の命令 nop
+    put16(&mut env, 0o014, 0o2400);
+    put16(&mut env, 0o016, 0);
+    step_m(&mut env, "pdp11_34").unwrap();
+    assert_eq!(env.pc, 0o2000); // 抑止
+    step_m(&mut env, "pdp11_34").unwrap(); // nop —— traced
+    assert_eq!(env.pc, 0o2400);
+    let sp = sem::r_get(&env.backend, reg::SP as u8);
+    assert_eq!(get16(&env, sp), 0o2002);
+    // traced な命令が T を消しても発火（積む PSW は T=0）。
+    let mut env = env_at("pdp11_34", 0o1000, &[0o000002]); // rti
+    sem::psw_put(&mut env.backend, 0o20); // T=1 で実行 —— traced
+    put16(&mut env, SP0, 0o2000);
+    put16(&mut env, SP0 + 2, 0); // T=0 を復元
+    put16(&mut env, 0o014, 0o2400);
+    put16(&mut env, 0o016, 0);
+    step_m(&mut env, "pdp11_34").unwrap();
+    assert_eq!(env.pc, 0o2400);
+    let sp = sem::r_get(&env.backend, reg::SP as u8);
+    assert_eq!(get16(&env, sp + 2), 0); // 積んだ PSW は T=0
+}
+
+/// mtps/mfps は PSW 下位バイトを読み書きする。mtps は T<4> を書けず、
+/// カーネル以外では NZVC だけが変わる。mfps のレジスタ宛ては bit7 の
+/// 符号拡張、N=bit7・Z=(byte==0)・V=0・C 不変。
+// Ref: SPEC-PDP11-J11（8.4.4 MTPS/MFPS）, SPEC-PDP11-ARCH83（第5章）.
+#[test]
+fn mtps_mfps_low_byte_semantics() {
+    // カーネル: <7:0> を書くが T は保存（0o377 を書いても T=0）。
+    let words = asm(Insn::Mtps, &[Spec::Imm(0o377)]);
+    let mut env = env_at("pdp11_03", 0o1000, &words);
+    step_m(&mut env, "pdp11_03").unwrap();
+    assert_eq!(sem::psw_get(&env.backend), 0o357);
+    // ユーザーモード: NZVC のみ書き換わる。
+    let mut env = env_at("pdp11_03", 0o1000, &words);
+    sem::psw_put(&mut env.backend, 0o140240); // ユーザー・優先度 5
+    step_m(&mut env, "pdp11_03").unwrap();
+    assert_eq!(sem::psw_get(&env.backend), 0o140257);
+    // mfps r0 —— 符号拡張（0o357 → 0o177757）。N=1・V=0・C 保存。
+    let words = asm(Insn::Mfps, &[Spec::Reg(0)]);
+    let mut env = env_at("pdp11_03", 0o1000, &words);
+    sem::psw_put(&mut env.backend, 0o357 | 1);
+    step_m(&mut env, "pdp11_03").unwrap();
+    assert_eq!(sem::r_get(&env.backend, 0), 0o177757);
+    assert_eq!(nzvc(&env), 0o11); // N=1・Z=0・V=0・C=1（保存）
+    // mfps @(r1) —— メモリ宛ては下位バイトのみ（上位は残る）。
+    let words = asm(Insn::Mfps, &[Spec::RegDef(1)]);
+    let mut env = env_at("pdp11_03", 0o1000, &words);
+    sem::psw_put(&mut env.backend, 0o244); // bit7=1・C=0
+    sem::r_set(&mut env.backend, 1, 0o2000);
+    put16(&mut env, 0o2000, 0o1234);
+    step_m(&mut env, "pdp11_03").unwrap();
+    assert_eq!(get16(&env, 0o2000), 0o1244); // 上位バイト 0o2 は残る
+    assert_eq!(nzvc(&env), 0o10); // N=1（bit7）
+}
+
+/// MFPT は R0 にモデル固有のプロセッサ型番を返す（`mfpt_code`
+/// パラメータ。上位バイトのサブコードは 0）。
+// Ref: SPEC-PDP11-ARCH83（第5章 MFPT）, SPEC-PDP11-J11（8.6 MFPT）.
+#[test]
+fn mfpt_returns_model_processor_code() {
+    for (model, code) in [
+        ("pdp11_44", 1u16),
+        ("pdp11_23", 3),
+        ("pdp11_24", 3), // 親チェーンで継承
+        ("pdp11_73", 5),
+        ("pdp11_93", 5),
+        ("t11", 4),
+    ] {
+        let mut env = env_at(model, 0o1000, &[0o000007]);
+        step_m(&mut env, model).unwrap();
+        assert_eq!(sem::r_get(&env.backend, 0), code, "{model}");
+    }
+}
+
+/// SPL はカーネルモードで PSW<7:5> を書き、他のモードでは NOP。
+// Ref: SPEC-PDP11-J11（8.4.1・8.4.4 SPL）.
+#[test]
+fn spl_sets_priority_in_kernel_only() {
+    let mut env = env_at("pdp11_70", 0o1000, &[0o000235]); // spl 5
+    step_m(&mut env, "pdp11_70").unwrap();
+    assert_eq!(sem::psw_get(&env.backend), 5 << psw::PRI);
+    let mut env = env_at("pdp11_70", 0o1000, &[0o000237]); // spl 7
+    sem::psw_put(&mut env.backend, 0o140000 | 0o17); // ユーザー・CC 立ち
+    step_m(&mut env, "pdp11_70").unwrap();
+    assert_eq!(sem::psw_get(&env.backend), 0o140000 | 0o17); // NOP —— CC も不変
+}
+
+/// CSM: MMR3<3> が立ちカーネル以外で実行すると、SSP に現 SP を残して
+/// スーパーバイザモードへ移り、3 語（CC 消し PSW・PC・引数語）を積み
+/// PC ← (010)。復帰は引数語を捨てて RTI。
+// Ref: SPEC-PDP11-J11（8.7.5）.
+#[test]
+fn csm_calls_supervisor_and_returns_via_rti() {
+    let words = asm(Insn::Csm, &[Spec::Imm(0o1234)]);
+    let mut env = env_at("pdp11_73", 0o1000, &words);
+    sem::psw_put(&mut env.backend, 0o140017); // ユーザー・CC 全部
+    sem::r_set(&mut env.backend, reg::SP as u8, 0o6000);
+    st_put(&mut env, SSP, 0o7777); // 旧 SSP は捨てられる
+    st_put(&mut env, MMR3, 0o10); // MMR3<3> = 1
+    put16(&mut env, 0o010, 0o2400);
+    step_m(&mut env, "pdp11_73").unwrap();
+    assert_eq!(env.pc, 0o2400);
+    // cur=sup・prev=user・T=0、優先度と CC は維持。
+    assert_eq!(sem::psw_get(&env.backend), 0o070017);
+    let sp = sem::r_get(&env.backend, reg::SP as u8);
+    assert_eq!(sp, 0o6000 - 6);
+    assert_eq!(get16(&env, sp), 0o1234); // -(SP) ← 引数語（最後に積む）
+    assert_eq!(get16(&env, sp + 2), 0o1004); // -(SP) ← 復帰 PC
+    assert_eq!(get16(&env, sp + 4), 0o140000); // -(SP) ← CC 消し PSW
+    assert_eq!(st_get(&mut env, SSP), 0o6000); // supervisor SP ← 現 SP
+    assert_eq!(st_get(&mut env, USP), 0o6000); // モード退避も残る
+    // ハンドラが引数語を捨てて RTI で戻る。
+    put16(&mut env, 0o2400, 0o000002); // rti
+    sem::r_set(&mut env.backend, reg::SP as u8, sp + 2);
+    step_m(&mut env, "pdp11_73").unwrap();
+    assert_eq!(env.pc, 0o1004);
+    // スーパーバイザの RTI は保護付き —— 復元モードは sup|user=user。
+    assert_eq!(sem::psw_get(&env.backend) >> psw::CUR_MOD, psw::USER);
+    assert_eq!(sem::r_get(&env.backend, reg::SP as u8), 0o6000);
+    // カーネルモードでは違法 —— vector 010 に fault（命令先頭）。
+    let mut env = env_at("pdp11_73", 0o1000, &words);
+    st_put(&mut env, MMR3, 0o10);
+    put16(&mut env, 0o010, 0o2200);
+    step_m(&mut env, "pdp11_73").unwrap();
+    assert_eq!(env.pc, 0o2200);
+    assert_eq!(get16(&env, sem::r_get(&env.backend, reg::SP as u8)), 0o1000);
+    // MMR3<3>=0 でも同じく vector 010 に fault。
+    let mut env = env_at("pdp11_73", 0o1000, &words);
+    sem::psw_put(&mut env.backend, 0o140000);
+    sem::r_set(&mut env.backend, reg::SP as u8, 0o6000);
+    st_put(&mut env, USP, 0o6000);
+    st_put(&mut env, KSP, SP0);
+    put16(&mut env, 0o010, 0o2200);
+    step_m(&mut env, "pdp11_73").unwrap();
+    assert_eq!(env.pc, 0o2200);
+}
+
+/// TSTSET/WRTLCK の読み書き不可分（単一スレッド近似で読み→書き）。
+/// TSTSET: R0←(dst)、(dst)←(dst)∨1、N・Z は読み出し値、C←旧 bit0。
+/// WRTLCK: (dst)←R0、N・Z は R0、C 不変。モード 0 は vector 010。
+// Ref: SPEC-PDP11-J11（8.4.4 WRTLCK/TSTSET）.
+#[test]
+fn tstset_and_wrtlck_interlock_words() {
+    let words = asm(Insn::Tstset, &[Spec::RegDef(1)]);
+    let mut env = env_at("pdp11_24", 0o1000, &words);
+    sem::r_set(&mut env.backend, 1, 0o2000);
+    put16(&mut env, 0o2000, 0o100000); // 負・bit0=0
+    step_m(&mut env, "pdp11_24").unwrap();
+    assert_eq!(sem::r_get(&env.backend, 0), 0o100000);
+    assert_eq!(get16(&env, 0o2000), 0o100001);
+    assert_eq!(nzvc(&env), 0o10); // N のみ（V=0・C=旧 bit0=0）
+    // 既に立った bit0 は C に残り、dst は 1 のまま。
+    let mut env = env_at("pdp11_24", 0o1000, &words);
+    sem::r_set(&mut env.backend, 1, 0o2000);
+    put16(&mut env, 0o2000, 0o000001);
+    step_m(&mut env, "pdp11_24").unwrap();
+    assert_eq!(sem::r_get(&env.backend, 0), 1);
+    assert_eq!(get16(&env, 0o2000), 1);
+    assert_eq!(nzvc(&env), 0o01); // C=1
+    // wrtlck @r1: (dst)←R0。N・Z は R0 で、C は不変。
+    let words = asm(Insn::Wrtlck, &[Spec::RegDef(1)]);
+    let mut env = env_at("pdp11_24", 0o1000, &words);
+    sem::r_set(&mut env.backend, 1, 0o2000);
+    sem::psw_put(&mut env.backend, 1); // C=1
+    step_m(&mut env, "pdp11_24").unwrap();
+    assert_eq!(get16(&env, 0o2000), 0);
+    assert_eq!(nzvc(&env), 0o05); // Z=1・C=1（不変）
+    // モード 0 の指定は vector 010 に fault。
+    for insn in [Insn::Tstset, Insn::Wrtlck] {
+        let words = asm(insn, &[Spec::Reg(2)]);
+        let mut env = env_at("pdp11_24", 0o1000, &words);
+        put16(&mut env, 0o010, 0o2400);
+        step_m(&mut env, "pdp11_24").unwrap();
+        assert_eq!(env.pc, 0o2400, "{insn:?}");
+        assert_eq!(get16(&env, sem::r_get(&env.backend, reg::SP as u8)), 0o1000);
+    }
+}
+
+/// halt はカーネルモードで CPU 停止（裸では終端）だが、他のモード
+/// では location 4 にトラップする。
+// Ref: SPEC-PDP11-J11（8.4.1）.
+#[test]
+fn halt_in_user_mode_traps_to_vector4() {
+    let mut env = env_at("pdp11_70", 0o1000, &[0o000000]); // halt
+    sem::psw_put(&mut env.backend, 0o140000); // ユーザー
+    sem::r_set(&mut env.backend, reg::SP as u8, 0o6000);
+    st_put(&mut env, USP, 0o6000);
+    st_put(&mut env, KSP, SP0);
+    put16(&mut env, 0o004, 0o2400);
+    step_m(&mut env, "pdp11_70").unwrap();
+    assert_eq!(env.pc, 0o2400);
+    let sp = sem::r_get(&env.backend, reg::SP as u8);
+    assert_eq!(get16(&env, sp), 0o1002); // trap — 次の命令
+    // カーネルでは従来どおり終端。
+    let mut env = env_at("pdp11_70", 0o1000, &[0o000000]);
+    assert!(step_m(&mut env, "pdp11_70").is_err());
 }

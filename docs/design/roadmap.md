@@ -44,7 +44,6 @@
 
 | # | 内容 | 前提 | 判定 |
 |---|---|---|---|
-| PD8 | トラップ・特権・システム命令: emt/trap/bpt/iot・rti/rtt・wait/reset/halt・spl・mtps/mfps・mfpt・csm・tstset/wrtlck とトラップ配送 | PD4 | - |
 | PD9 | EIS（mul/div/ash/ashc）と FIS（0750xR・KEV11） | PD5 | - |
 | PD10 | FP11: F/D 形式（decfp 再利用）・AC/FPS/FEC/FEA・例外と丸めモード | PD5 | - |
 | PD11 | CIS（076nnn: 記述子形と in-line 形の文字列・数値・パック文字列） | PD5 | - |

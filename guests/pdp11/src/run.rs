@@ -29,9 +29,9 @@
 use polyisa_engine::bare::BareEnv;
 use polyisa_engine::interp::InterpExit;
 use polyisa_engine::run::{Outcome, TrapHandler, TrapOutcome};
-use polyisa_sem::{ExceptionKind, GuestException};
+use polyisa_sem::{Backend, ExceptionKind, GuestException};
 
-use crate::{decode_model_ex, reg, sem, specifier};
+use crate::{Insn, RTI_TTRAP_IMM, RtiTtrapParam, decode_model_ex, psw, reg, sem, specifier};
 
 /// 例外をトラップ配送に写す。`vec` はベクタ（バイトアドレス）、
 /// `stacked` は積む PC で、同時にハンドラが見る再開点になる
@@ -138,11 +138,27 @@ pub fn step(env: &mut BareEnv, sys: &mut impl TrapHandler, feats: u128) -> Resul
     // 相対の基準と、実行後の次命令はここから決まる。
     let next = pc.wrapping_add(f.len as u16);
     sem::r_set(&mut env.backend, reg::PC as u8, next);
-    match env.step(|b| sem::exec(b, &f, pc)) {
+    // フェッチ時の T ビットを標本化する —— これが立つ命令が「traced
+    // な命令」で、実行で T を消しても完了時のトラップは発火する
+    // （実機の内部 trace flag —— KDJ11-E UG 8.7.7 項目 1・2）。
+    let traced = sem::psw_flag(&env.backend, psw::T);
+    match env.step(|b| sem::exec(b, &f, pc, feats)) {
         Ok(()) => {
             // 制御転送（jmp・分岐・mov …,pc も）は r7 の書き込みと
             // して表れる。
             env.pc = u64::from(sem::r_get(&env.backend, reg::PC as u8));
+            // T ビットトレーストラップ: traced な命令の完了、または
+            // RTI が T を立てた直後の発火点（`rti_ttrap` = imm の
+            // モデル）。next のモデルと RTT はこの境界では発火せず、
+            // 次の命令がフェッチ時に T を標本化してその完了時に
+            // トラップする（付録 B 項目 10・11 のモデル差・KDJ11-E
+            // UG 8.7.7）。積む PC は次の命令（trap の規則）。
+            let rti_imm = f.insn == Insn::Rti
+                && env.backend.param::<RtiTtrapParam>() == RTI_TTRAP_IMM
+                && sem::psw_flag(&env.backend, psw::T);
+            if traced || rti_imm {
+                return deliver(env, sys, sem::tv::BPT, env.pc as u16);
+            }
             Ok(())
         }
         Err(InterpExit::Exception(e)) => dispatch_err(env, sys, e, pc, next),

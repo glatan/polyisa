@@ -44,8 +44,8 @@ use polyisa_sem::{Backend as _, ExceptionKind, GuestException, StateRef, W16};
 
 use crate::specifier::{self, Acc, Ea, Fetched, Legality, Spec, Width};
 use crate::{
-    CpuState, Insn, JMP_REG_TRAP_VEC004, JmpRegTrapParam, OddAddrTrapParam, ops_fcm, ops_fn6,
-    ops_fr, ops_frd, ops_frn, psw, reg,
+    CpuState, FEAT_DUAL_REGSET, Insn, JMP_REG_TRAP_VEC004, JmpRegTrapParam, MfptCodeParam,
+    OddAddrTrapParam, ops_fcm, ops_fn3, ops_fn6, ops_fr, ops_frd, ops_frn, psw, reg,
 };
 
 /// トラップベクタ（バイトアドレス）。EMT/TRAP のような命令由来と、
@@ -158,6 +158,32 @@ fn ssp_ref() -> StateRef<W16> {
 /// ユーザー SP 退避先。
 fn usp_ref() -> StateRef<W16> {
     StateRef::<W16>::from_offset(core::mem::offset_of!(CpuState, usp))
+}
+
+/// モード値 <15:14> が選ぶ SP 退避先。値 2（予約）はカーネル枠に
+/// 畳む決定的な選択。
+fn mode_sp_ref(mode: u16) -> StateRef<W16> {
+    if mode == psw::SUPERVISOR {
+        ssp_ref()
+    } else if mode == psw::USER {
+        usp_ref()
+    } else {
+        ksp_ref()
+    }
+}
+
+/// 第 2 レジスタセット r_i′ の状態面（dual_regset モデル）。
+fn ralt_ref(i: u8) -> StateRef<W16> {
+    StateRef::<W16>::from_offset(core::mem::offset_of!(CpuState, ralt) + usize::from(i) * 2)
+}
+
+/// MMU 状態レジスタ MMR_i の値（mmu モデル。CSM は MMR3<3> が
+/// 有効化を担う —— KDJ11-E UG）。
+fn mmr_get(b: &InterpBackend, i: u8) -> u16 {
+    get16(
+        b,
+        StateRef::<W16>::from_offset(core::mem::offset_of!(CpuState, mmr) + usize::from(i) * 2),
+    )
 }
 
 /// fault 系の例外（命令を中断。復帰先は命令先頭）。
@@ -469,27 +495,22 @@ fn shift1(insn: Insn, v: u16, w: Width, c: bool) -> (u16, bool) {
 
 // ---- トラップ配送 ----
 
-/// トラップの配送。古い PSW と PC を（この順に）カーネルスタックに
-/// 積み、ベクタの 2 語から新しい PC/PSW を読む実機の形。
+/// トラップの配送。古い PSW と PC を（この順に）ベクタの新 PSW が
+/// 指すモードのスタックに積み、新しい PC/PSW を読む実機の形。
 /// `stacked` は積む PC（trap は次の命令、fault は命令先頭 ——
-/// 呼び出し側の規則）。
-/// カーネルモード以外では、現在の SP をモードの退避先（usp/ssp）に
-/// 保存してカーネル SP に切替える —— モード機構の最小形で、
-/// MMU・3 モードの全面化は PD8/PD12 が担う。
-// Ref: SPEC-PDP11-ARCH83（第8章 トラップと割込み）.
+/// 呼び出し側の規則）。現在の SP は現モードの退避先へ保存してから
+/// 新モードの退避先を読む —— モード機構の最小形で、MMU の全面化は
+/// PD12 が担う。モード値 2（予約）はカーネル枠に畳む決定的な選択。
+// Ref: SPEC-PDP11-ARCH83（第8章 トラップと割込み・第9章 メモリ管理
+// 制御下の割込み条件）.
 pub fn deliver(b: &mut InterpBackend, vec: u16, stacked: u16) -> Result<(), InterpExit> {
     let old_psw = psw_get(b);
-    let mode = old_psw >> psw::CUR_MOD & psw::MOD_MASK;
-    if mode != psw::KERNEL {
-        let slot = if mode == psw::SUPERVISOR {
-            ssp_ref()
-        } else {
-            usp_ref()
-        };
-        let sp = r_get(b, reg::SP as u8);
-        set16(b, slot, sp);
-        r_set(b, reg::SP as u8, get16(b, ksp_ref()));
-    }
+    let new_pc = load_w(b, vec)?;
+    let new_psw = load_w(b, vec.wrapping_add(2))?;
+    let old_mode = old_psw >> psw::CUR_MOD & psw::MOD_MASK;
+    let new_mode = new_psw >> psw::CUR_MOD & psw::MOD_MASK;
+    set16(b, mode_sp_ref(old_mode), r_get(b, reg::SP as u8));
+    r_set(b, reg::SP as u8, get16(b, mode_sp_ref(new_mode)));
     // -(SP) ← PSW、-(SP) ← PC —— RTI が PC→PSW の順に戻す形。
     let mut sp = r_get(b, reg::SP as u8);
     sp = sp.wrapping_sub(2);
@@ -498,8 +519,6 @@ pub fn deliver(b: &mut InterpBackend, vec: u16, stacked: u16) -> Result<(), Inte
     sp = sp.wrapping_sub(2);
     r_set(b, reg::SP as u8, sp);
     store_w(b, sp, stacked)?;
-    let new_pc = load_w(b, vec)?;
-    let new_psw = load_w(b, vec.wrapping_add(2))?;
     r_set(b, reg::PC as u8, new_pc);
     psw_put(b, new_psw);
     Ok(())
@@ -536,9 +555,11 @@ fn bcc(b: &InterpBackend, insn: Insn) -> bool {
 /// 命令 1 個の意味論。実行中の r7 は命令の終端（次の命令 —
 /// 呼び出し側が `pc0 + f.len` に設定済み）。制御転送は r7 への
 /// 書き込みとして表れ、呼び出し側が実行後の r7 を読む。
-/// `pc0` は命令の先頭アドレス。
+/// `pc0` は命令の先頭アドレス。`feats` は生成デコーダの機能
+/// ビット（命令の有無はデコード側が裁くので、ここでは同じ命令語が
+/// モデルで振る舞いを分ける効果 —— RS 桁の実効 —— にだけ使う）。
 // Ref: SPEC-PDP11-ARCH83（第5章 各命令の意味論）.
-pub fn exec(b: &mut InterpBackend, f: &Fetched, pc0: u16) -> Result<(), InterpExit> {
+pub fn exec(b: &mut InterpBackend, f: &Fetched, pc0: u16, feats: u128) -> Result<(), InterpExit> {
     match f.insn {
         Insn::Nop => {}
         Insn::Mov | Insn::Movb => {
@@ -758,14 +779,170 @@ pub fn exec(b: &mut InterpBackend, f: &Fetched, pc0: u16) -> Result<(), InterpEx
             r_set(b, reg::SP as u8, sp.wrapping_add(2));
             r_set(b, 5, v);
         }
+        // RTI/RTT: (SP)+ → PC、(SP)+ → PSW でスタックから復元する。
+        // カーネル以外で実行したときの PSW は保護規則が掛かる ——
+        // 優先度 <7:5> は現値のまま、モード桁 <15:12> は旧値との OR
+        // でしか下がらない（supervisor から kernel へは戻れない、
+        // user からは user のみ）、RS <11> は消せない（ARCH83 第5章
+        // RTI/RTT の記述）。モードが変われば SP もモード別退避先経由で
+        // 切替わる。T ビットトラップの発火点は run 側が裁く（RTT は
+        // 次の命令の実行後まで抑止、RTI は `rti_ttrap` パラメータ）。
+        Insn::Rti | Insn::Rtt => {
+            let old_psw = psw_get(b);
+            let sp0 = r_get(b, reg::SP as u8);
+            let new_pc = load_w(b, sp0)?;
+            let new_psw = load_w(b, sp0.wrapping_add(2))?;
+            let cur_mode = old_psw >> psw::CUR_MOD & psw::MOD_MASK;
+            // 退避するのは pop 後の SP。
+            set16(b, mode_sp_ref(cur_mode), sp0.wrapping_add(4));
+            let merged = if cur_mode == psw::KERNEL {
+                new_psw
+            } else {
+                // 非カーネルの PSW 書き込み保護（上記コメント）。
+                (new_psw & !(psw::PRI_MASK | 0o17_0000 | 1 << psw::RS))
+                    | (old_psw & psw::PRI_MASK)
+                    | ((old_psw | new_psw) & (0o17_0000 | 1 << psw::RS))
+            };
+            psw_put(b, merged);
+            // 第 2 レジスタセット: RS が変われば r0-r5 と ralt を交換する
+            // （dual_regset モデルのみ）。
+            if feats & FEAT_DUAL_REGSET != 0 && (old_psw ^ merged) >> psw::RS & 1 != 0 {
+                for i in 0..6u8 {
+                    let t = r_get(b, i);
+                    r_set(b, i, get16(b, ralt_ref(i)));
+                    set16(b, ralt_ref(i), t);
+                }
+            }
+            let new_mode = merged >> psw::CUR_MOD & psw::MOD_MASK;
+            r_set(b, reg::SP as u8, get16(b, mode_sp_ref(new_mode)));
+            r_set(b, reg::PC as u8, new_pc);
+        }
+        // SPL: PSW<7:5> ← n3。カーネルモードでのみ効き、他のモードでは
+        // NOP（CC は不変）。
+        Insn::Spl => {
+            if psw_get(b) >> psw::CUR_MOD & psw::MOD_MASK == psw::KERNEL {
+                let n = ops_fn3(u128::from(f.word)).n3 as u16;
+                psw_put(b, psw_get(b) & !psw::PRI_MASK | n << psw::PRI);
+            }
+        }
+        // MTPS: PSW<7:0> ← src.byte。T <4> はこの命令では書けない
+        // （保存 —— ARCH83 第5章 MTPS の記述・付録 B 項目 14）。カーネル
+        // 以外では NZVC <3:0> だけが書き換わる。
+        Insn::Mtps => {
+            let s = eval_op(b, f, pc0, 0)?;
+            let v = read(b, &s, Width::B)? & 0xff;
+            let p = psw_get(b);
+            psw_put(
+                b,
+                if p >> psw::CUR_MOD & psw::MOD_MASK == psw::KERNEL {
+                    p & !(0xff & !(1 << psw::T)) | v & !(1 << psw::T)
+                } else {
+                    p & !0xf | v & 0xf
+                },
+            );
+        }
+        // MFPS: dst.byte ← PS<7:0>。N=PS bit7・Z=PS<7:0>=0・V=0・C 不変
+        // （モード 0 宛ては bit7 の符号拡張 —— `write` の byte→レジスタ
+        // 規則が担う）。
+        Insn::Mfps => {
+            let d = eval_op(b, f, pc0, 0)?;
+            let v = psw_get(b) & 0xff;
+            write(b, &d, Width::B, v)?;
+            cc_mov(b, v, Width::B);
+        }
+        // MFPT: R0 ← プロセッサ型番（`mfpt_code` パラメータ。上位バイトは
+        // サブコードで現行全モデル 0 —— ARCH83 第5章 MFPT の記述）。
+        Insn::Mfpt => {
+            let code = b.param::<MfptCodeParam>() as u16;
+            r_set(b, 0, code);
+        }
+        // CSM: MMR3<3> が立ち現モードがカーネル以外なら、スーパーバイザ
+        // モードへ移って引数語呼出を行う（KDJ11-E UG 8.7.5・ARCH83 第5章
+        // CSM の記述）。SSP ← 現 SP、積む PSW は CC 消し、prev ← cur、
+        // cur ← supervisor、T ← 0、-(SP) に PSW・PC・(dst) の順、PC ← (10)。
+        // 条件が合わなければ vector 010 に fault。
+        Insn::Csm => {
+            let mode = psw_get(b) >> psw::CUR_MOD & psw::MOD_MASK;
+            if mode == psw::KERNEL || mmr_get(b, 3) & 0o10 == 0 {
+                return Err(fault(tv::ILL));
+            }
+            let d = eval_op(b, f, pc0, 0)?;
+            let dv = read(b, &d, Width::W)?;
+            let p = psw_get(b);
+            // 「supervisor SP ← 現モード SP」—— 呼出し側のスタックが
+            // スーパーバイザスタックになる。モード切替の退避規則で現
+            // モードの退避先にも同じ値を残す（RTI の復帰が取る面）。
+            let sp = r_get(b, reg::SP as u8);
+            set16(b, ssp_ref(), sp);
+            set16(b, mode_sp_ref(mode), sp);
+            let temp = p & 0o177_760;
+            psw_put(
+                b,
+                p & !(0o17 << psw::PRV_MOD | 1 << psw::T)
+                    | mode << psw::PRV_MOD
+                    | psw::SUPERVISOR << psw::CUR_MOD,
+            );
+            // -(SP) ← temp(PSW 形)、-(SP) ← PC、-(SP) ← 引数語 ——
+            // 復帰は引数語を捨ててから RTI（PC→PSW の順に pop）。
+            let mut sp = r_get(b, reg::SP as u8);
+            for v in [temp, r_get(b, reg::PC as u8), dv] {
+                sp = sp.wrapping_sub(2);
+                r_set(b, reg::SP as u8, sp);
+                store_w(b, sp, v)?;
+            }
+            let target = load_w(b, 0o10)?;
+            r_set(b, reg::PC as u8, target);
+        }
+        // TSTSET: R0 ← (dst)、(dst) ← (dst) ∨ 1 の読み書き不可分
+        // （バスロック —— 単一スレッド近似）。N・Z は読み出した値、
+        // V=0、C=旧 dst の bit0。モード 0 は vector 010 に fault。
+        // Gap: GAP-0081
+        Insn::Tstset => {
+            let d = eval_op(b, f, pc0, 0)?;
+            if let Loc::Reg(_) = d {
+                return Err(fault(tv::ILL));
+            }
+            let dv = read(b, &d, Width::W)?;
+            r_set(b, 0, dv);
+            write(b, &d, Width::W, dv | 1)?;
+            cc_nz(b, dv, Width::W);
+            psw_flag_set(b, psw::V, false);
+            psw_flag_set(b, psw::C, dv & 1 != 0);
+        }
+        // WRTLCK: (dst) ← R0 の書き込みロック（読み側の語は捨てる。
+        // 単一スレッド近似）。N・Z は R0 の値、V=0、C 不変。モード 0 は
+        // vector 010 に fault。
+        // Gap: GAP-0081
+        Insn::Wrtlck => {
+            let d = eval_op(b, f, pc0, 0)?;
+            if let Loc::Reg(_) = d {
+                return Err(fault(tv::ILL));
+            }
+            let v = r_get(b, 0);
+            write(b, &d, Width::W, v)?;
+            cc_mov(b, v, Width::W);
+        }
+        // RESET: システムバスへ INIT を出す（カーネルモード。他のモード
+        // では NOP —— KDJ11-E UG）。バス装置を持たない裸モデルでは
+        // 効果が起きないので NOP として決定的に振る舞う。
+        // Gap: GAP-0081
+        Insn::Reset => {}
         Insn::Bpt => return Err(trap(tv::BPT)),
         Insn::Iot => return Err(trap(tv::IOT)),
         Insn::Emt => return Err(trap(tv::EMT)),
         Insn::Trap => return Err(trap(tv::TRAP)),
         // halt は CPU 停止（カーネルモード）。停止状態の表現がない
         // 裸モデルでは実行の終端として Unimplemented に写す決定的な
-        // 選択。wait は割込み待ち —— 割込みは裸実行で発生しない。
-        Insn::Halt | Insn::Wait => {
+        // 選択。スーパーバイザ・ユーザーモードでは location 4 に
+        // トラップする（KDJ11-E UG 8.4.1）。wait は割込み待ち ——
+        // 割込みは裸実行で発生しない。
+        Insn::Halt => {
+            if psw_get(b) >> psw::CUR_MOD & psw::MOD_MASK != psw::KERNEL {
+                return Err(trap(tv::BUS));
+            }
+            return Err(InterpExit::Unimplemented(format!("{:?}", f.insn)));
+        }
+        Insn::Wait => {
             return Err(InterpExit::Unimplemented(format!("{:?}", f.insn)));
         }
         // 残りの命令本体は PD5 以降。

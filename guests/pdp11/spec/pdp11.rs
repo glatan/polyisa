@@ -84,7 +84,7 @@ pub fn build_model() -> polyisa_isadl::Model {
     }
 
     // 挙動パラメータ（付録 B の項目から。棚卸しと全項目の写しは
-    // PD13 で行い、ここでは骨格が要する 3 件を宣言する）。
+    // PD13 で行い、ここでは実装済み命令が要する 5 件を宣言する）。
     // Ref: SPEC-PDP11-ARCH83（付録 B）.
     m.param(
         "odd_addr_trap",
@@ -107,6 +107,22 @@ pub fn build_model() -> polyisa_isadl::Model {
         "vec010",
         "JMP Rn・JSR reg,Rn（宛先がモード 0 の違法指定）のトラップ \
          ベクタ（ARCH83 付録 B 項目 5）",
+    );
+    m.param(
+        "mfpt_code",
+        ParamKind::Int(0xFF),
+        "0",
+        "MFPT が R0<7:0> に返すプロセッサ型番（ARCH83 第5章 MFPT・\
+         KDJ11-E UG: 11/44=1・F-11 系=3・T-11=4・J-11 系=5。上位バイトは \
+         モデル固有のサブコードで現行全モデル 0）",
+    );
+    m.param(
+        "rti_ttrap",
+        ParamKind::Enum(vec!["imm".to_string(), "next".to_string()]),
+        "imm",
+        "RTI が T ビットを立てたときの trace trap の発火点。imm は RTI \
+         直後（次の命令の実行前）、next は次の命令の実行後（ARCH83 \
+         付録 B 項目 11 のモデル差）",
     );
 
     // CPU モデル。版の範囲は 11/03（KD11-F＝LSI-11 チップ）から
@@ -167,8 +183,8 @@ pub fn build_model() -> polyisa_isadl::Model {
         (
             "pdp11_44",
             "",
-            &["eis", "mmu", "id_split", "spl"][..],
-            &[("jmp_reg_trap", "vec004")][..],
+            &["eis", "mmu", "id_split", "spl", "mfpt"][..],
+            &[("jmp_reg_trap", "vec004"), ("mfpt_code", "1")][..],
         ),
         (
             "pdp11_60",
@@ -190,6 +206,7 @@ pub fn build_model() -> polyisa_isadl::Model {
                 ("odd_addr_trap", "false"),
                 ("psw_mapped", "false"),
                 ("jmp_reg_trap", "vec010"),
+                ("mfpt_code", "3"),
             ][..],
         ),
         (
@@ -198,7 +215,7 @@ pub fn build_model() -> polyisa_isadl::Model {
             &["tstset_wrtlck"][..],
             &[][..],
         ),
-        ("pdp11_73", "", j11, &[][..]),
+        ("pdp11_73", "", j11, &[("mfpt_code", "5")][..]),
         ("pdp11_83", "pdp11_73", &[][..], &[][..]),
         ("pdp11_93", "pdp11_83", &[][..], &[][..]),
         (
@@ -209,6 +226,7 @@ pub fn build_model() -> polyisa_isadl::Model {
                 ("odd_addr_trap", "false"),
                 ("psw_mapped", "false"),
                 ("jmp_reg_trap", "vec010"),
+                ("mfpt_code", "4"),
             ][..],
         ),
     ] {
