@@ -45,7 +45,6 @@
 
 | # | 内容 | 前提 | 判定 |
 |---|---|---|---|
-| VX6 | 論理・ビット・bitfield・shift/rot | VX4 | - |
 | VX7 | push/pop・queue 命令（insq*/remq* 系）・文字列命令（movc/cmpc/loc/skp/scan/span/matchc/movtc/movtuc/crc）・chmk/chme（段階 25 の BSD パーソナリティが使う） | VX4 | - |
 | VX8 | 分岐・calls/callg/ret のフレーム構築と解除 | VX4 | - |
 | VX9 | 浮動小数点（F・D・G・H。poly 系を含む）・cvt 系。D 形式のワード並び（middle-endian）はオペランド指定子側で扱う | VX4 | - |

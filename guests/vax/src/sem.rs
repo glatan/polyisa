@@ -326,6 +326,15 @@ pub enum Loc {
     Val { v: u128, addr: u32 },
 }
 
+/// bis/bic/xor の結合子（値と mask → 結果）。
+fn bit_op(insn: Insn, v: u128, m: u128) -> u128 {
+    match insn {
+        Insn::Bisb2 | Insn::Bisb3 | Insn::Bisw2 | Insn::Bisw3 | Insn::Bisl2 | Insn::Bisl3 => v | m,
+        Insn::Bicb2 | Insn::Bicb3 | Insn::Bicw2 | Insn::Bicw3 | Insn::Bicl2 | Insn::Bicl3 => v & !m,
+        _ => v ^ m,
+    }
+}
+
 /// データ幅のビットマスク。
 fn mask_w(w: Width) -> u128 {
     let n = w.bytes();
@@ -566,6 +575,106 @@ fn push(b: &mut InterpBackend, v: u128) -> Result<(), InterpExit> {
     let sp = r_get(b, reg::SP as u8).wrapping_sub(4);
     r_set(b, reg::SP as u8, sp);
     store(b, sp, 4, v)
+}
+
+// ---- 可変長ビットフィールド ----
+
+/// `size` ビットのマスク（size <= 32）。
+fn fmask(size: u32) -> u64 {
+    (1u64 << size) - 1
+}
+
+/// FIELD(pos, size, base) の予約オペランド検査。size > 32、または
+/// レジスタ基底で size != 0 かつ pos が 0-31 を越えると fault
+/// （pos は符号なし比較 —— 負値は 31 超として弾かれる）。
+// Ref: SPEC-VAX-ARM（可変長ビットフィールド命令の節）.
+fn field_check(loc: &Loc, pos: i32, size: u32) -> Result<(), InterpExit> {
+    if size > 32 || (size != 0 && matches!(loc, Loc::Reg(_)) && pos as u32 > 31) {
+        return Err(fault(scb::RESERVED_OPERAND, None));
+    }
+    Ok(())
+}
+
+/// FIELD(pos, size, base) の読み出し（size <= 32 で検査済み。
+/// size=0 は 0 を返しバイトを参照しない）。レジスタ基底は
+/// {R[n+1]'Rn} の連結、メモリ基底は base + pos<31:3> のバイト列の
+/// pos<2:0> ビット目から。
+// Ref: SPEC-VAX-ARM（FIELD マクロの定義）.
+fn field_get(b: &mut InterpBackend, loc: &Loc, pos: i32, size: u32) -> Result<u32, InterpExit> {
+    if size == 0 {
+        return Ok(0);
+    }
+    match *loc {
+        Loc::Reg(r) => {
+            let hi = r_get(b, r.wrapping_add(1) & 0xf);
+            let pair = u64::from(r_get(b, r)) | u64::from(hi) << 32;
+            Ok(((pair >> pos as u32) & fmask(size)) as u32)
+        }
+        _ => {
+            let a = loc_addr(loc)?.wrapping_add((pos >> 3) as u32);
+            let bit = (pos & 7) as u32;
+            let n = 1 + (size - 1 + bit) / 8;
+            let mut v = 0u64;
+            for i in 0..n {
+                v |= (load(b, a.wrapping_add(i), 1)? as u64) << (8 * i);
+            }
+            Ok(((v >> bit) & fmask(size)) as u32)
+        }
+    }
+}
+
+/// FIELD(pos, size, base) への `v` の下位 `size` ビットの書き込み
+/// （size <= 32 で検査済み。size=0 は何もしない）。
+fn field_put(
+    b: &mut InterpBackend,
+    loc: &Loc,
+    pos: i32,
+    size: u32,
+    v: u32,
+) -> Result<(), InterpExit> {
+    if size == 0 {
+        return Ok(());
+    }
+    match *loc {
+        Loc::Reg(r) => {
+            let hi = r_get(b, r.wrapping_add(1) & 0xf);
+            let pair = u64::from(r_get(b, r)) | u64::from(hi) << 32;
+            let m = fmask(size) << pos as u32;
+            let new = pair & !m | u64::from(v) << pos as u32 & m;
+            r_set(b, r, new as u32);
+            r_set(b, r.wrapping_add(1) & 0xf, (new >> 32) as u32);
+            Ok(())
+        }
+        _ => {
+            let a = loc_addr(loc)?.wrapping_add((pos >> 3) as u32);
+            let bit = (pos & 7) as u32;
+            let n = 1 + (size - 1 + bit) / 8;
+            let mut old = 0u64;
+            for i in 0..n {
+                old |= (load(b, a.wrapping_add(i), 1)? as u64) << (8 * i);
+            }
+            let m = fmask(size) << bit;
+            let new = old & !m | u64::from(v) << bit & m;
+            for i in 0..n {
+                store(b, a.wrapping_add(i), 1, u128::from((new >> (8 * i)) as u8))?;
+            }
+            Ok(())
+        }
+    }
+}
+
+/// 分岐変位オペランド（.b）の値。
+fn br_displ(f: &Fetched, i: usize) -> i32 {
+    match f.ops[i] {
+        Opnd::Br(d) => d,
+        _ => 0,
+    }
+}
+
+/// 分岐の成立（PC は命令の終端 —— 変位は命令終端基準）。
+fn branch(b: &mut InterpBackend, displ: i32) {
+    let pc = r_get(b, reg::PC as u8);
+    r_set(b, reg::PC as u8, pc.wrapping_add(displ as u32));
 }
 
 /// オペランド `i` の評価（`insn_ops` の型と `pos` の位置を引く）。
@@ -851,6 +960,286 @@ pub fn exec(
             let d = eval(b, f, pos, 1)?;
             write(b, &d, dw, sv as u128)?;
             cc_arith(b, sv as u128, !fits_s(sv, dw), false, dw);
+            iv_trap(b)?;
+        }
+        // ---- 論理・ビット・フィールド・分岐複合（VX6）----
+        // bis/bic/xor: 2 項は dst.mx を mask で変形、3 項は
+        // src を変形して dst.wx へ。N=結果の符号・Z=零・V=0・C 保存。
+        Insn::Bisb2
+        | Insn::Bisw2
+        | Insn::Bisl2
+        | Insn::Bicb2
+        | Insn::Bicw2
+        | Insn::Bicl2
+        | Insn::Xorb2
+        | Insn::Xorw2
+        | Insn::Xorl2 => {
+            let w = specifier::insn_ops(f.insn)[0].width;
+            let s = eval(b, f, pos, 0)?;
+            let m = read(b, &s, w)?;
+            let d = eval(b, f, pos, 1)?;
+            let dv = read(b, &d, w)?;
+            let r = bit_op(f.insn, dv, m) & mask_w(w);
+            write(b, &d, w, r)?;
+            cc_mov(b, r, w);
+        }
+        Insn::Bisb3
+        | Insn::Bisw3
+        | Insn::Bisl3
+        | Insn::Bicb3
+        | Insn::Bicw3
+        | Insn::Bicl3
+        | Insn::Xorb3
+        | Insn::Xorw3
+        | Insn::Xorl3 => {
+            let w = specifier::insn_ops(f.insn)[0].width;
+            let s0 = eval(b, f, pos, 0)?;
+            let m = read(b, &s0, w)?;
+            let s1 = eval(b, f, pos, 1)?;
+            let sv = read(b, &s1, w)?;
+            let d = eval(b, f, pos, 2)?;
+            let r = bit_op(f.insn, sv, m) & mask_w(w);
+            write(b, &d, w, r)?;
+            cc_mov(b, r, w);
+        }
+        // bit: src AND mask で条件コードだけ立てる（書き戻しなし）。
+        Insn::Bitb | Insn::Bitw | Insn::Bitl => {
+            let w = specifier::insn_ops(f.insn)[0].width;
+            let s0 = eval(b, f, pos, 0)?;
+            let m = read(b, &s0, w)?;
+            let s1 = eval(b, f, pos, 1)?;
+            let t = read(b, &s1, w)? & m & mask_w(w);
+            cc_mov(b, t, w);
+        }
+        // ash: 算術シフト。正のカウントは左（0 補充）、負は右
+        // （符号複製）。カウントが幅を越えると結果は 0（左）または
+        // 符号の複製（右）。V は左シフトで符号位置に入ったビットが
+        // 元の符号と異なるとき（幅を越える左カウントでは src≠0 なら
+        // 必ず立つ）。C=0。
+        Insn::Ashl | Insn::Ashq => {
+            let w = specifier::insn_ops(f.insn)[1].width;
+            let s = eval(b, f, pos, 0)?;
+            let cnt = sext_w(read(b, &s, Width::B)?, Width::B) as i32;
+            let s1 = eval(b, f, pos, 1)?;
+            let sv = read(b, &s1, w)?;
+            let bits = (w.bytes() * 8) as i32;
+            let (r, v) = if cnt > bits {
+                (0, sv & mask_w(w) != 0)
+            } else if cnt >= 0 {
+                let t = sext_w(sv, w) << cnt;
+                (t as u128 & mask_w(w), !fits_s(t, w))
+            } else if cnt <= 1 - bits {
+                (if sext_w(sv, w) < 0 { mask_w(w) } else { 0 }, false)
+            } else {
+                ((sext_w(sv, w) >> -cnt) as u128 & mask_w(w), false)
+            };
+            let d = eval(b, f, pos, 2)?;
+            write(b, &d, w, r)?;
+            cc_arith(b, r, v, false, w);
+            iv_trap(b)?;
+        }
+        // rotl: 32 ビットの左回転（負のカウントは右）。V=0・C 保存。
+        Insn::Rotl => {
+            let s = eval(b, f, pos, 0)?;
+            let cnt = sext_w(read(b, &s, Width::B)?, Width::B) as i32;
+            let s1 = eval(b, f, pos, 1)?;
+            let sv = read(b, &s1, Width::L)? as u32;
+            let d = eval(b, f, pos, 2)?;
+            let r = sv.rotate_left(cnt.rem_euclid(32) as u32);
+            write(b, &d, Width::L, u128::from(r))?;
+            cc_mov(b, u128::from(r), Width::L);
+        }
+        // extv/extzv: FIELD(pos,size,base) を符号/ゼロ拡張して
+        // dst.wl へ。size=0 は dst=0。N=結果の符号・Z=零・V=0・C 保存。
+        Insn::Extv | Insn::Extzv => {
+            let s = eval(b, f, pos, 0)?;
+            let p = read(b, &s, Width::L)? as u32 as i32;
+            let s = eval(b, f, pos, 1)?;
+            let size = read(b, &s, Width::B)? as u32;
+            let base = eval(b, f, pos, 2)?;
+            field_check(&base, p, size)?;
+            let d = eval(b, f, pos, 3)?;
+            let fv = field_get(b, &base, p, size)?;
+            let r = if f.insn == Insn::Extv && size != 0 {
+                (((fv << (32 - size)) as i32) >> (32 - size)) as u32
+            } else {
+                fv
+            };
+            write(b, &d, Width::L, u128::from(r))?;
+            cc_mov(b, u128::from(r), Width::L);
+        }
+        // cmpv/cmpzv: FIELD と src の比較のみ。フィールドが第 1 項
+        // （N=field LSS src・C=field LSSU src）。V=0。
+        Insn::Cmpv | Insn::Cmpzv => {
+            let s = eval(b, f, pos, 0)?;
+            let p = read(b, &s, Width::L)? as u32 as i32;
+            let s = eval(b, f, pos, 1)?;
+            let size = read(b, &s, Width::B)? as u32;
+            let base = eval(b, f, pos, 2)?;
+            field_check(&base, p, size)?;
+            let s = eval(b, f, pos, 3)?;
+            let src = read(b, &s, Width::L)? as u32;
+            let fv = field_get(b, &base, p, size)?;
+            let t = if f.insn == Insn::Cmpv && size != 0 {
+                (((fv << (32 - size)) as i32) >> (32 - size)) as u32
+            } else {
+                fv
+            };
+            cc_nzvc(b, (t as i32) < (src as i32), t == src, false, t < src);
+        }
+        // insv: src の下位 size ビットを FIELD へ。size=0 は何も
+        // しない。条件コードは変えない。
+        Insn::Insv => {
+            let s = eval(b, f, pos, 0)?;
+            let v = read(b, &s, Width::L)? as u32;
+            let s = eval(b, f, pos, 1)?;
+            let p = read(b, &s, Width::L)? as u32 as i32;
+            let s = eval(b, f, pos, 2)?;
+            let size = read(b, &s, Width::B)? as u32;
+            let base = eval(b, f, pos, 3)?;
+            field_check(&base, p, size)?;
+            field_put(b, &base, p, size, v)?;
+        }
+        // ffs/ffc: フィールド内を下位ビットから走査し、指定状態の
+        // 最初のビットの位置（base 基準の絶対位置）を findpos へ。
+        // 見つからなければ Z=1 で findpos=startpos+size、size=0
+        // なら findpos=startpos・Z=1。N=0・V=0・C=0。
+        Insn::Ffs | Insn::Ffc => {
+            let s = eval(b, f, pos, 0)?;
+            let p = read(b, &s, Width::L)? as u32 as i32;
+            let s = eval(b, f, pos, 1)?;
+            let size = read(b, &s, Width::B)? as u32;
+            let base = eval(b, f, pos, 2)?;
+            field_check(&base, p, size)?;
+            let d = eval(b, f, pos, 3)?;
+            let fv = field_get(b, &base, p, size)?;
+            let bits = fv & fmask(size) as u32;
+            // 探す状態に合わせて畳む（ffc はフィールド内の 0 ビット）。
+            let cand = if f.insn == Insn::Ffs {
+                bits
+            } else {
+                !bits & fmask(size) as u32
+            };
+            let found = cand != 0;
+            let at = if found {
+                cand.trailing_zeros() as i32
+            } else {
+                size as i32
+            };
+            write(b, &d, Width::L, p.wrapping_add(at) as u32 as u128)?;
+            cc_nzvc(b, false, !found, false, false);
+        }
+        // bb 系: FIELD(pos,1,base) を試して分岐。ss/cs/sc/cc/i 系は
+        // 試したビットを新しい状態に書き換える（bbssi/bbcci の
+        // インターロックは単一スレッドの近似で非インターロック版と
+        // 同じ）。条件コードは変えない。
+        Insn::Bbs
+        | Insn::Bbc
+        | Insn::Bbss
+        | Insn::Bbcs
+        | Insn::Bbsc
+        | Insn::Bbcc
+        | Insn::Bbssi
+        | Insn::Bbcci => {
+            let s = eval(b, f, pos, 0)?;
+            let p = read(b, &s, Width::L)? as u32 as i32;
+            let base = eval(b, f, pos, 1)?;
+            field_check(&base, p, 1)?;
+            let old = field_get(b, &base, p, 1)?;
+            // (試す状態, 新しい状態)。bbs/bbc は書き換えない。
+            let (test, new): (u32, Option<u32>) = match f.insn {
+                Insn::Bbs => (1, None),
+                Insn::Bbc => (0, None),
+                Insn::Bbss | Insn::Bbssi => (1, Some(1)),
+                Insn::Bbcs => (0, Some(1)),
+                Insn::Bbsc => (1, Some(0)),
+                _ => (0, Some(0)), // bbcc, bbcci
+            };
+            if let Some(n) = new {
+                field_put(b, &base, p, 1, n)?;
+            }
+            if old == test {
+                branch(b, br_displ(f, 2));
+            }
+        }
+        // blbs/blbc: src の最下位ビットを試して分岐。
+        Insn::Blbs | Insn::Blbc => {
+            let s = eval(b, f, pos, 0)?;
+            let v = read(b, &s, Width::L)?;
+            if v & 1 == u128::from(f.insn == Insn::Blbs) {
+                branch(b, br_displ(f, 1));
+            }
+        }
+        // case: tmp = selector - base（幅の減算）。tmp <=u limit なら
+        // 命令終端（=displ[0] の位置）を基準に語変位表で分岐、
+        // 越えれば表の直後（2+2*limit 先）へ。CC は tmp と limit の
+        // 比較（N=tmp LSS limit・Z=等値・V=0・C=tmp LSSU limit）。
+        Insn::Caseb | Insn::Casew | Insn::Casel => {
+            let w = specifier::insn_ops(f.insn)[0].width;
+            let s = eval(b, f, pos, 0)?;
+            let sel = read(b, &s, w)?;
+            let s = eval(b, f, pos, 1)?;
+            let bas = read(b, &s, w)?;
+            let s = eval(b, f, pos, 2)?;
+            let lim = read(b, &s, w)?;
+            let t = sel.wrapping_sub(bas) & mask_w(w);
+            let table = r_get(b, reg::PC as u8); // = displ[0] の位置
+            if t <= lim {
+                let d = load(b, table.wrapping_add(2 * t as u32), 2)? as u16;
+                branch(b, i32::from(d as i16));
+            } else {
+                r_set(b, reg::PC as u8, table.wrapping_add(2 + 2 * lim as u32));
+            }
+            cc_nzvc(b, sext_w(t, w) < sext_w(lim, w), t == lim, false, t < lim);
+        }
+        // acb: index += add。add の符号が比較の向きを決める
+        // （add>=0 → index<=limit、add<0 → index>=limit で分岐）。
+        // N/Z/V は新しい index、C は保存。
+        Insn::Acbb | Insn::Acbw | Insn::Acbl => {
+            let w = specifier::insn_ops(f.insn)[0].width;
+            let s = eval(b, f, pos, 0)?;
+            let lim = sext_w(read(b, &s, w)?, w);
+            let s = eval(b, f, pos, 1)?;
+            let add = sext_w(read(b, &s, w)?, w);
+            let d = eval(b, f, pos, 2)?;
+            let idx = read(b, &d, w)?;
+            let (r, v, _) = add_op(idx, add as u128, 0, w);
+            write(b, &d, w, r)?;
+            let ni = sext_w(r, w);
+            if (add >= 0 && ni <= lim) || (add < 0 && ni >= lim) {
+                branch(b, br_displ(f, 3));
+            }
+            cc_arith(b, r, v, psl_flag(b, psl::C), w);
+            iv_trap(b)?;
+        }
+        // aob: index += 1。aoblss は index<limit、aobleq は
+        // index<=limit で分岐。C 保存、V はあふれ。
+        Insn::Aoblss | Insn::Aobleq => {
+            let s = eval(b, f, pos, 0)?;
+            let lim = sext_w(read(b, &s, Width::L)?, Width::L);
+            let d = eval(b, f, pos, 1)?;
+            let idx = read(b, &d, Width::L)?;
+            let (r, v, _) = add_op(idx, 1, 0, Width::L);
+            write(b, &d, Width::L, r)?;
+            let ni = sext_w(r, Width::L);
+            if ni < lim || (f.insn == Insn::Aobleq && ni == lim) {
+                branch(b, br_displ(f, 2));
+            }
+            cc_arith(b, r, v, psl_flag(b, psl::C), Width::L);
+            iv_trap(b)?;
+        }
+        // sob: index -= 1。sobgeq は index>=0、sobgtr は index>0
+        // で分岐。C 保存、V はあふれ。
+        Insn::Sobgeq | Insn::Sobgtr => {
+            let d = eval(b, f, pos, 0)?;
+            let idx = read(b, &d, Width::L)?;
+            let (r, v, _) = sub_op(idx, 1, 0, Width::L);
+            write(b, &d, Width::L, r)?;
+            let ni = sext_w(r, Width::L);
+            if ni > 0 || (f.insn == Insn::Sobgeq && ni == 0) {
+                branch(b, br_displ(f, 1));
+            }
+            cc_arith(b, r, v, psl_flag(b, psl::C), Width::L);
             iv_trap(b)?;
         }
         Insn::Bpt => return Err(trap(scb::BPT)),

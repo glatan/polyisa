@@ -1546,3 +1546,897 @@ fn subset_insn_goes_unimpl_hook() {
     assert_eq!(r(&env, 4), 0);
     assert_eq!(env.pc, BASE + 4);
 }
+
+// ---- VX6: 論理・ビット・bitfield・shift/rot・分岐複合 ----
+
+#[test]
+fn new_bit_insns_decode() {
+    assert_eq!(dec1(0x78), Some(Insn::Ashl));
+    assert_eq!(dec1(0x79), Some(Insn::Ashq));
+    assert_eq!(dec1(0x88), Some(Insn::Bisb2));
+    assert_eq!(dec1(0x89), Some(Insn::Bisb3));
+    assert_eq!(dec1(0x8a), Some(Insn::Bicb2));
+    assert_eq!(dec1(0x8b), Some(Insn::Bicb3));
+    assert_eq!(dec1(0x8c), Some(Insn::Xorb2));
+    assert_eq!(dec1(0x8d), Some(Insn::Xorb3));
+    assert_eq!(dec1(0x93), Some(Insn::Bitb));
+    assert_eq!(dec1(0x9d), Some(Insn::Acbb));
+    assert_eq!(dec1(0xa8), Some(Insn::Bisw2));
+    assert_eq!(dec1(0xa9), Some(Insn::Bisw3));
+    assert_eq!(dec1(0xaa), Some(Insn::Bicw2));
+    assert_eq!(dec1(0xab), Some(Insn::Bicw3));
+    assert_eq!(dec1(0xac), Some(Insn::Xorw2));
+    assert_eq!(dec1(0xad), Some(Insn::Xorw3));
+    assert_eq!(dec1(0xb3), Some(Insn::Bitw));
+    assert_eq!(dec1(0xc9), Some(Insn::Bisl3));
+    assert_eq!(dec1(0xcb), Some(Insn::Bicl3));
+    assert_eq!(dec1(0xcd), Some(Insn::Xorl3));
+    assert_eq!(dec1(0xd3), Some(Insn::Bitl));
+    assert_eq!(dec1(0x3d), Some(Insn::Acbw));
+    assert_eq!(dec1(0xe3), Some(Insn::Bbcs));
+    assert_eq!(dec1(0xe4), Some(Insn::Bbsc));
+    assert_eq!(dec1(0xe6), Some(Insn::Bbssi));
+    assert_eq!(dec1(0xe7), Some(Insn::Bbcci));
+    assert_eq!(insn_ops(Insn::Ashl), &[RB, RL, WL]);
+    assert_eq!(insn_ops(Insn::Bisl3), &[RL, RL, WL]);
+    assert_eq!(insn_ops(Insn::Bitl), &[RL, RL]);
+    assert_eq!(insn_ops(Insn::Acbb), &[RB, RB, MB, BW]);
+    assert_eq!(insn_ops(Insn::Bbssi), &[RL, VB, BB]);
+}
+
+#[test]
+fn bis_bic_xor_results_and_cc() {
+    // bisl2 #0x0f0f, r0 —— OR。C は保存（立てておく）。
+    let mut env = run_env(1);
+    sem::r_set(&mut env.backend, 0, 0x00f0_0000);
+    sem::psl_put(&mut env.backend, psl::USER | (1 << psl::C));
+    put(&mut env, BASE, &[0xc8, 0x8f, 0x0f, 0x0f, 0, 0, 0x50]);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 0), 0x00f0_0f0f);
+    assert_eq!(cc(&env), (false, false, false, true));
+
+    // bisl3 #0xff00, #0x00ff, r1 → 0xffff。
+    let env = exec1(&[0xc9, 0x8f, 0, 0xff, 0, 0, 0x8f, 0xff, 0, 0, 0, 0x51]);
+    assert_eq!(r(&env, 1), 0x0000_ffff);
+    assert_eq!(cc(&env), (false, false, false, false));
+
+    // bicl2 #0xffff, r0 —— AND NOT（上位保存、下位がクリア）。
+    let mut env = run_env(1);
+    sem::r_set(&mut env.backend, 0, 0xaabb_ccdd);
+    put(&mut env, BASE, &[0xca, 0x8f, 0xff, 0xff, 0, 0, 0x50]);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 0), 0xaabb_0000);
+    assert_eq!(cc(&env), (true, false, false, false)); // 符号ビットが立つ
+
+    // bicw3 #0x00ff, #0xabcd, r1 → 0xab00。
+    let env = exec1(&[0xab, 0x8f, 0xff, 0, 0x8f, 0xcd, 0xab, 0x51]);
+    assert_eq!(r(&env, 1) & 0xffff, 0xab00);
+
+    // xorl2 #-1, r0 —— 1 の補数。
+    let mut env = run_env(1);
+    sem::r_set(&mut env.backend, 0, 0x1234_5678);
+    put(&mut env, BASE, &[0xcc, 0x8f, 0xff, 0xff, 0xff, 0xff, 0x50]);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 0), 0xedcb_a987);
+    assert_eq!(cc(&env), (true, false, false, false));
+
+    // xorb3 #0xf0, #0x3c, r1 → 0xcc（書き込み先は下位バイトのみ）。
+    let mut env = run_env(1);
+    sem::r_set(&mut env.backend, 1, 0xdead_be00);
+    put(&mut env, BASE, &[0x8d, 0x8f, 0xf0, 0x8f, 0x3c, 0x51]);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 1), 0xdead_becc);
+    assert_eq!(cc(&env), (true, false, false, false));
+
+    // bisb2 S^#1, r0 —— 短リテラル mask。
+    let mut env = run_env(1);
+    sem::r_set(&mut env.backend, 0, 0x40);
+    put(&mut env, BASE, &[0x88, 0x01, 0x50]);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 0) & 0xff, 0x41);
+}
+
+#[test]
+fn bit_flags_only() {
+    // bitl #0x0f, #0xf0 —— 積は 0: Z=1 N=0。オペランドは変えない。
+    let env = exec1(&[0xd3, 0x8f, 0x0f, 0, 0, 0, 0x8f, 0xf0, 0, 0, 0]);
+    assert_eq!(cc(&env), (false, true, false, false));
+
+    // bitl #0x8000_0000, #-1 —— 積の符号で N=1。
+    let env = exec1(&[0xd3, 0x8f, 0, 0, 0, 0x80, 0x8f, 0xff, 0xff, 0xff, 0xff]);
+    assert_eq!(cc(&env), (true, false, false, false));
+
+    // bitb #0x01, r0 —— 積が非零: Z=0。C は保存。
+    let mut env = run_env(1);
+    sem::r_set(&mut env.backend, 0, 3);
+    sem::psl_put(&mut env.backend, psl::USER | (1 << psl::C));
+    put(&mut env, BASE, &[0x93, 0x8f, 0x01, 0x50]);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 0), 3);
+    assert_eq!(cc(&env), (false, false, false, true));
+}
+
+#[test]
+fn ash_shifts_and_overflow() {
+    // ashl #4, #0x123, r0 → 0x1230。
+    let env = exec1(&[0x78, 0x8f, 4, 0x8f, 0x23, 0x01, 0, 0, 0x50]);
+    assert_eq!(r(&env, 0), 0x1230);
+    assert_eq!(cc(&env), (false, false, false, false));
+
+    // ashl #-4, #0x8000_0000, r0 → 右算術 0xf800_0000（N=1）。
+    let env = exec1(&[0x78, 0x8f, 0xfc, 0x8f, 0, 0, 0, 0x80, 0x50]);
+    assert_eq!(r(&env, 0), 0xf800_0000);
+    assert_eq!(cc(&env), (true, false, false, false));
+
+    // ashl #31, #-1, r0 → 0x8000_0000。符号位置に入るビットは
+    // すべて 1（= 元の符号）なので V=0。
+    let env = exec1(&[0x78, 0x8f, 31, 0x8f, 0xff, 0xff, 0xff, 0xff, 0x50]);
+    assert_eq!(r(&env, 0), 0x8000_0000);
+    assert_eq!(cc(&env), (true, false, false, false));
+
+    // ashl #1, #0x4000_0000, r0 → 0x8000_0000、V=1（正→負）。
+    let env = exec1(&[0x78, 0x8f, 1, 0x8f, 0, 0, 0, 0x40, 0x50]);
+    assert_eq!(r(&env, 0), 0x8000_0000);
+    assert_eq!(cc(&env), (true, false, true, false));
+
+    // ashl #33, #-1, r0 → カウント > 幅で 0。src≠0 なので
+    // 符号位置に入るビットが元の符号と異なり V=1。
+    let env = exec1(&[0x78, 0x8f, 33, 0x8f, 0xff, 0xff, 0xff, 0xff, 0x50]);
+    assert_eq!(r(&env, 0), 0);
+    assert_eq!(cc(&env), (false, true, true, false));
+
+    // ashl #-31, #1, r0 → 符号複製（正は 0）。
+    let env = exec1(&[0x78, 0x8f, 0xe1, 0x8f, 1, 0, 0, 0, 0x50]);
+    assert_eq!(r(&env, 0), 0);
+    // ashl #-31, #-1, r0 → 0xffff_ffff。
+    let env = exec1(&[0x78, 0x8f, 0xe1, 0x8f, 0xff, 0xff, 0xff, 0xff, 0x50]);
+    assert_eq!(r(&env, 0), 0xffff_ffff);
+
+    // ashq #8, r0:r1 → r2:r3。0x007f00ff_aabbccdd << 8（収まるので
+    // V=0、上位レジスタへ桁上がりする）。
+    let mut env = run_env(1);
+    sem::r_set(&mut env.backend, 0, 0xaabb_ccdd);
+    sem::r_set(&mut env.backend, 1, 0x007f_00ff);
+    put(&mut env, BASE, &[0x79, 0x8f, 8, 0x50, 0x52]);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!((r(&env, 2), r(&env, 3)), (0xbbcc_dd00, 0x7f00_ffaa));
+    assert_eq!(cc(&env), (false, false, false, false));
+
+    // ashq #40, r0:r1 → 上桁があふれて V=1（結果は切り詰め）。
+    let mut env = run_env(1);
+    sem::r_set(&mut env.backend, 0, 1);
+    sem::r_set(&mut env.backend, 1, 1);
+    put(&mut env, BASE, &[0x79, 0x8f, 40, 0x50, 0x52]);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!((r(&env, 2), r(&env, 3)), (0, 0x0100));
+    assert_eq!(cc(&env), (false, false, true, false));
+
+    // ashq #-40, 同 → 0x1_1000（正の値の右シフト）。
+    let mut env = run_env(1);
+    sem::r_set(&mut env.backend, 0, 1);
+    sem::r_set(&mut env.backend, 1, 0x0110_0000);
+    put(&mut env, BASE, &[0x79, 0x8f, 0xd8, 0x50, 0x52]);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!((r(&env, 2), r(&env, 3)), (0x1_1000, 0));
+    // ashq #65 → 0、src≠0 なので V=1。
+    let mut env = run_env(1);
+    sem::r_set(&mut env.backend, 0, 0xffff_ffff);
+    put(&mut env, BASE, &[0x79, 0x8f, 65, 0x50, 0x52]);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!((r(&env, 2), r(&env, 3)), (0, 0));
+    assert_eq!(cc(&env), (false, true, true, false));
+
+    // rotl #4, #0x1234_5678, r0 → 0x2345_6781。C 保存。
+    let mut env = run_env(1);
+    sem::psl_put(&mut env.backend, psl::USER | (1 << psl::C));
+    put(
+        &mut env,
+        BASE,
+        &[0x9c, 0x8f, 4, 0x8f, 0x78, 0x56, 0x34, 0x12, 0x50],
+    );
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 0), 0x2345_6781);
+    assert_eq!(cc(&env), (false, false, false, true));
+
+    // rotl #-4（右回転）→ 0x8123_4567。rotl #0 → src の写し。
+    let env = exec1(&[0x9c, 0x8f, 0xfc, 0x8f, 0x78, 0x56, 0x34, 0x12, 0x50]);
+    assert_eq!(r(&env, 0), 0x8123_4567);
+    let env = exec1(&[0x9c, 0x8f, 0, 0x8f, 0x78, 0x56, 0x34, 0x12, 0x50]);
+    assert_eq!(r(&env, 0), 0x1234_5678);
+}
+
+#[test]
+fn ash_overflow_traps_with_iv() {
+    struct Rec(u32);
+    impl TrapHandler for Rec {
+        fn handle_trap(&mut self, _env: &mut BareEnv, code: u32) -> TrapOutcome {
+            self.0 = code;
+            TrapOutcome::Handled
+        }
+    }
+    let mut env = run_env(1);
+    put(
+        &mut env,
+        BASE,
+        &[0x78, 0x8f, 1, 0x8f, 0, 0, 0, 0x40, 0x50, 0x01],
+    );
+    sem::psl_put(&mut env.backend, psl::USER | (1 << psl::IV));
+    env.pc = BASE;
+    let mut sys = Rec(0);
+    run::step(&mut env, &mut sys, DEFAULT_FEATS).unwrap();
+    assert_eq!(sys.0, sem::scb::arith(sem::scb::at::INT_OVERFLOW));
+    assert_eq!(r(&env, 0), 0x8000_0000);
+}
+
+#[test]
+fn extv_extzv_register_and_memory() {
+    // extv #8, #8, r2, r0 —— r2 の bits<15:8> を符号拡張。
+    let mut env = run_env(1);
+    sem::r_set(&mut env.backend, 2, 0x1234_8078);
+    put(
+        &mut env,
+        BASE,
+        &[0xee, 0x8f, 8, 0, 0, 0, 0x8f, 8, 0x52, 0x50],
+    );
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 0), 0xffff_ff80);
+    assert_eq!(cc(&env), (true, false, false, false));
+
+    // extzv 同条件 → ゼロ拡張 0x80。
+    let mut env = run_env(1);
+    sem::r_set(&mut env.backend, 2, 0x1234_8078);
+    put(
+        &mut env,
+        BASE,
+        &[0xef, 0x8f, 8, 0, 0, 0, 0x8f, 8, 0x52, 0x50],
+    );
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 0), 0x80);
+    assert_eq!(cc(&env), (false, false, false, false)); // ゼロ拡張なので N=0
+
+    // レジスタ越境: extzv #20, #20, r2 → r2<31:20> に r3<7:0> を
+    // 連結した 20 ビット。r2=0xfff0_0000, r3=0xa5 → 0xa5fff。
+    let mut env = run_env(1);
+    sem::r_set(&mut env.backend, 2, 0xfff0_0000);
+    sem::r_set(&mut env.backend, 3, 0xa5);
+    put(
+        &mut env,
+        BASE,
+        &[0xef, 0x8f, 20, 0, 0, 0, 0x8f, 20, 0x52, 0x50],
+    );
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 0), 0x000a_5fff);
+
+    // メモリ基底・負の位置: フィールドは base-1 の bit4 から。
+    // bytes[..]=0xBA, [..+1]=0xDC → (0xdcba >> 4) & 0xff = 0xcb。
+    let mut env = run_env(1);
+    put(&mut env, BASE + 0x200, &[0xba, 0xdc]);
+    put(
+        &mut env,
+        BASE,
+        &[
+            0xee, 0x8f, 0xfc, 0xff, 0xff, 0xff, 0x8f, 8, 0x9f, 0x01, 0x02, 0x01, 0x00, 0x50,
+        ],
+    );
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    // 0xcb を符号拡張 → 0xffff_ffcb。base は BASE+0x201、pos=-4。
+    assert_eq!(r(&env, 0), 0xffff_ffcb);
+
+    // size=32 のメモリフィールド（pos=0）→  longword まるごと。
+    let mut env = run_env(1);
+    put(&mut env, BASE + 0x200, &0xdead_beefu32.to_le_bytes());
+    put(
+        &mut env,
+        BASE,
+        &[
+            0xef, 0x8f, 0, 0, 0, 0, 0x8f, 32, 0x9f, 0x00, 0x02, 0x01, 0x00, 0x50,
+        ],
+    );
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 0), 0xdead_beef);
+
+    // size=0 → dst=0 Z=1（pos が不正でも fault しない）。
+    let mut env = run_env(1);
+    sem::r_set(&mut env.backend, 2, 1);
+    put(
+        &mut env,
+        BASE,
+        &[0xef, 0x8f, 99, 0, 0, 0, 0x8f, 0, 0x52, 0x50],
+    );
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 0), 0);
+    assert_eq!(cc(&env), (false, true, false, false));
+}
+
+#[test]
+fn insv_field_write() {
+    // insv #0xabc, #8, #12, r2 —— r2<19:8> に挿入。
+    let mut env = run_env(1);
+    sem::r_set(&mut env.backend, 2, 0xdead_beef);
+    put(
+        &mut env,
+        BASE,
+        &[
+            0xf0, 0x8f, 0xbc, 0x0a, 0, 0, 0x8f, 8, 0, 0, 0, 0x8f, 12, 0x52,
+        ],
+    );
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 2), 0xdeaa_bcef);
+
+    // レジスタ越境: insv #0xfffff, #20, #20, r2 —— r2<31:20> と
+    // r3<7:0> にまたがる。
+    let mut env = run_env(1);
+    put(
+        &mut env,
+        BASE,
+        &[
+            0xf0, 0x8f, 0xff, 0xff, 0x0f, 0, 0x8f, 20, 0, 0, 0, 0x8f, 20, 0x52,
+        ],
+    );
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 2), 0xfff0_0000);
+    assert_eq!(r(&env, 3), 0x0000_00ff);
+
+    // メモリ基底: insv #0b101, #13, #3, @#addr —— 2 バイトにまたがる。
+    let mut env = run_env(1);
+    put(&mut env, BASE + 0x200, &[0, 0]);
+    put(
+        &mut env,
+        BASE,
+        &[
+            0xf0, 0x8f, 5, 0, 0, 0, 0x8f, 13, 0, 0, 0, 0x8f, 3, 0x9f, 0x00, 0x02, 0x01, 0x00,
+        ],
+    );
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    // bits 13-15 → 上位バイト（base+1）の bit5-7 に 0b101。
+    let mut b = [0u8; 2];
+    env.backend
+        .mem
+        .read(VirtAddr(BASE + 0x200), &mut b, Access::DATA_LE)
+        .unwrap();
+    assert_eq!(b, [0x00, 0xa0]);
+
+    // size=0 は何も書かない。
+    let mut env = run_env(1);
+    put(&mut env, BASE + 0x200, &[0xaa]);
+    put(
+        &mut env,
+        BASE,
+        &[
+            0xf0, 0x8f, 1, 0, 0, 0, 0x8f, 0, 0, 0, 0, 0x8f, 0, 0x9f, 0x00, 0x02, 0x01, 0x00,
+        ],
+    );
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    let mut b = [0u8; 1];
+    env.backend
+        .mem
+        .read(VirtAddr(BASE + 0x200), &mut b, Access::DATA_LE)
+        .unwrap();
+    assert_eq!(b, [0xaa]);
+}
+
+#[test]
+fn field_reserved_operand_faults() {
+    struct Rec(Vec<u32>);
+    impl TrapHandler for Rec {
+        fn handle_trap(&mut self, _env: &mut BareEnv, code: u32) -> TrapOutcome {
+            self.0.push(code);
+            TrapOutcome::Unimplemented
+        }
+    }
+    let mut env = run_env(1);
+    let mut sys = Rec(Vec::new());
+    // extv #32, #4, r2, r0 —— レジスタ基底で pos>31 → fault 0x18。
+    sem::r_set(&mut env.backend, 2, 0x1234);
+    put(
+        &mut env,
+        BASE,
+        &[0xee, 0x8f, 32, 0, 0, 0, 0x8f, 4, 0x52, 0x50],
+    );
+    env.pc = BASE;
+    let _ = run::step(&mut env, &mut sys, DEFAULT_FEATS);
+    assert_eq!(sys.0, [sem::scb::RESERVED_OPERAND]);
+    // フィールド・dst は不変。
+    assert_eq!(r(&env, 0), 0);
+    assert_eq!(r(&env, 2), 0x1234);
+
+    // extv #0, #33, r2, r0 —— size>32 も fault。
+    put(
+        &mut env,
+        BASE + 0x10,
+        &[0xee, 0x8f, 0, 0, 0, 0, 0x8f, 33, 0x52, 0x50],
+    );
+    env.pc = BASE + 0x10;
+    let _ = run::step(&mut env, &mut sys, DEFAULT_FEATS);
+    assert_eq!(sys.0.last(), Some(&sem::scb::RESERVED_OPERAND));
+
+    // メモリ基底なら pos>31 は fault にならない（base+5 の bit0-3）。
+    put(&mut env, BASE + 0x305, &[0x05]);
+    put(
+        &mut env,
+        BASE + 0x20,
+        &[
+            0xef, 0x8f, 40, 0, 0, 0, 0x8f, 4, 0x9f, 0x00, 0x03, 0x01, 0x00, 0x50,
+        ],
+    );
+    env.pc = BASE + 0x20;
+    run::step(&mut env, &mut sys, DEFAULT_FEATS).unwrap();
+    assert_eq!(r(&env, 0), 5);
+
+    // bbs #32, r2, disp —— レジスタ基底で pos>31 → fault。
+    put(
+        &mut env,
+        BASE + 0x30,
+        &[0xe0, 0x8f, 32, 0, 0, 0, 0x52, 0x01],
+    );
+    env.pc = BASE + 0x30;
+    let _ = run::step(&mut env, &mut sys, DEFAULT_FEATS);
+    assert_eq!(sys.0.last(), Some(&sem::scb::RESERVED_OPERAND));
+}
+
+#[test]
+fn ffs_ffc_find_first() {
+    // ffs #0, #16, @#addr, r0 —— 0x2000 の先頭 set ビットは 13。
+    let mut env = run_env(1);
+    put(&mut env, BASE + 0x200, &[0x00, 0x20]);
+    put(
+        &mut env,
+        BASE,
+        &[
+            0xea, 0x8f, 0, 0, 0, 0, 0x8f, 16, 0x9f, 0x00, 0x02, 0x01, 0x00, 0x50,
+        ],
+    );
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 0), 13);
+    assert_eq!(cc(&env), (false, false, false, false));
+
+    // ffc 同条件 → 先頭の clear ビットは 0。
+    let mut env = run_env(1);
+    put(&mut env, BASE + 0x200, &[0x00, 0x20]);
+    put(
+        &mut env,
+        BASE,
+        &[
+            0xeb, 0x8f, 0, 0, 0, 0, 0x8f, 16, 0x9f, 0x00, 0x02, 0x01, 0x00, 0x50,
+        ],
+    );
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 0), 0);
+    assert_eq!(cc(&env), (false, false, false, false));
+
+    // ffs #4, #4, r2, r0 —— r2=0b1010_0000 → bits4-7 = 0b1010 →
+    // 最初の set はフィールド内 1 ビット目 → findpos=5。
+    let mut env = run_env(1);
+    sem::r_set(&mut env.backend, 2, 0xa0);
+    put(
+        &mut env,
+        BASE,
+        &[0xea, 0x8f, 4, 0, 0, 0, 0x8f, 4, 0x52, 0x50],
+    );
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 0), 5);
+
+    // 未発見: ffs #0, #8, r2 → r2=0 → findpos=0+8=8、Z=1。
+    let mut env = run_env(1);
+    put(
+        &mut env,
+        BASE,
+        &[0xea, 0x8f, 0, 0, 0, 0, 0x8f, 8, 0x52, 0x50],
+    );
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 0), 8);
+    assert_eq!(cc(&env), (false, true, false, false));
+
+    // ffc で全ビット set → 未発見: findpos=startpos+size、Z=1。
+    let mut env = run_env(1);
+    sem::r_set(&mut env.backend, 2, 0xff);
+    put(
+        &mut env,
+        BASE,
+        &[0xeb, 0x8f, 0, 0, 0, 0, 0x8f, 8, 0x52, 0x50],
+    );
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 0), 8);
+    assert_eq!(cc(&env), (false, true, false, false));
+
+    // size=0 → findpos=startpos、Z=1。
+    let mut env = run_env(1);
+    put(
+        &mut env,
+        BASE,
+        &[0xea, 0x8f, 7, 0, 0, 0, 0x8f, 0, 0x52, 0x50],
+    );
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 0), 7);
+    assert_eq!(cc(&env), (false, true, false, false));
+}
+
+#[test]
+fn cmpv_cmpzv_flags() {
+    // cmpv #4, #4, r2, #15 —— フィールド 0b0101(=5) vs 15。
+    // N = field < src、C = 符号なしでも小さい。
+    let mut env = run_env(1);
+    sem::r_set(&mut env.backend, 2, 0x50);
+    put(
+        &mut env,
+        BASE,
+        &[0xec, 0x8f, 4, 0, 0, 0, 0x8f, 4, 0x52, 0x8f, 15, 0, 0, 0],
+    );
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(cc(&env), (true, false, false, true));
+
+    // cmpv で負のフィールド: 0b1110 → -2。vs #0 → N=1、
+    // 符号なし比較は field(0xffff_fffe) > src で C=0。
+    let mut env = run_env(1);
+    sem::r_set(&mut env.backend, 2, 0xe0);
+    put(
+        &mut env,
+        BASE,
+        &[0xec, 0x8f, 4, 0, 0, 0, 0x8f, 4, 0x52, 0x8f, 0, 0, 0, 0],
+    );
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(cc(&env), (true, false, false, false));
+
+    // cmpzv 同条件 → 14 vs 0 → N=0、符号なし大きい C=0。
+    let mut env = run_env(1);
+    sem::r_set(&mut env.backend, 2, 0xe0);
+    put(
+        &mut env,
+        BASE,
+        &[0xed, 0x8f, 4, 0, 0, 0, 0x8f, 4, 0x52, 0x8f, 0, 0, 0, 0],
+    );
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(cc(&env), (false, false, false, false));
+}
+
+#[test]
+fn bb_branch_and_modify() {
+    // bbs #2, @#addr, +8 —— bit2=1 → 分岐。
+    let mut env = run_env(1);
+    put(&mut env, BASE + 0x200, &[0x04]);
+    put(
+        &mut env,
+        BASE,
+        &[0xe0, 0x8f, 2, 0, 0, 0, 0x9f, 0x00, 0x02, 0x01, 0x00, 8],
+    );
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, BASE + 12 + 8);
+
+    // bbc #3 —— bit3=0 → 分岐。bit2=1 に対しては落ちる。
+    let mut env = run_env(1);
+    put(&mut env, BASE + 0x200, &[0x04]);
+    put(
+        &mut env,
+        BASE,
+        &[0xe1, 0x8f, 3, 0, 0, 0, 0x9f, 0x00, 0x02, 0x01, 0x00, 8],
+    );
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, BASE + 12 + 8);
+    let mut env = run_env(1);
+    put(&mut env, BASE + 0x200, &[0x04]);
+    put(
+        &mut env,
+        BASE,
+        &[0xe1, 0x8f, 2, 0, 0, 0, 0x9f, 0x00, 0x02, 0x01, 0x00, 8],
+    );
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, BASE + 12); // 分岐しない
+
+    // bbsc #1, r2, -4 —— bit1=1 → 分岐してクリア → r2=0（8 バイト命令）。
+    let mut env = run_env(1);
+    sem::r_set(&mut env.backend, 2, 0x02);
+    put(&mut env, BASE, &[0xe4, 0x8f, 1, 0, 0, 0, 0x52, 0xfc]);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 2), 0);
+    assert_eq!(env.pc, BASE + 8 - 4);
+
+    // bbcs #0, r2 —— bit0=0 → 分岐してセット → r2=1。
+    let mut env = run_env(1);
+    put(&mut env, BASE, &[0xe3, 0x8f, 0, 0, 0, 0, 0x52, 0x10]);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 2), 1);
+    assert_eq!(env.pc, BASE + 8 + 0x10);
+
+    // bbss #7, r2 —— bit7=0 → 分岐しないがセット → r2=0x80。
+    let mut env = run_env(1);
+    put(&mut env, BASE, &[0xe2, 0x8f, 7, 0, 0, 0, 0x52, 0x10]);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 2), 0x80);
+    assert_eq!(env.pc, BASE + 8);
+
+    // bbcc #0, r2 —— bit0=0 → 分岐してクリア（変化なし）。
+    let mut env = run_env(1);
+    put(&mut env, BASE, &[0xe5, 0x8f, 0, 0, 0, 0, 0x52, 0x10]);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 2), 0);
+    assert_eq!(env.pc, BASE + 8 + 0x10);
+
+    // bbssi/bbcci —— 同じ動作（単一スレッド近似）。
+    let mut env = run_env(1);
+    sem::r_set(&mut env.backend, 2, 0x04);
+    put(&mut env, BASE, &[0xe6, 0x8f, 2, 0, 0, 0, 0x52, 0x10]);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 2), 0x04); // bit2 はすでに 1 → 分岐、再 set で不変
+    assert_eq!(env.pc, BASE + 8 + 0x10);
+    let mut env = run_env(1);
+    sem::r_set(&mut env.backend, 2, 0x04);
+    put(&mut env, BASE, &[0xe7, 0x8f, 2, 0, 0, 0, 0x52, 0x10]);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 2), 0); // bit2 は set → 分岐しないが clear
+    assert_eq!(env.pc, BASE + 8);
+
+    // メモリ基底の modify: bbss #9, @#addr —— byte1 の bit1 を立てる。
+    let mut env = run_env(1);
+    put(&mut env, BASE + 0x200, &[0, 0]);
+    put(
+        &mut env,
+        BASE,
+        &[0xe2, 0x8f, 9, 0, 0, 0, 0x9f, 0x00, 0x02, 0x01, 0x00, 4],
+    );
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    let mut b = [0u8; 2];
+    env.backend
+        .mem
+        .read(VirtAddr(BASE + 0x200), &mut b, Access::DATA_LE)
+        .unwrap();
+    assert_eq!(b, [0, 0x02]);
+    assert_eq!(env.pc, BASE + 12); // bit9=0 → 分岐しない
+
+    // blbs #3, +4 → 分岐。blbc #2 → 分岐。それぞれ逆は落ちる。
+    let env = exec1(&[0xe8, 0x8f, 3, 0, 0, 0, 4]);
+    assert_eq!(env.pc, BASE + 7 + 4);
+    let env = exec1(&[0xe9, 0x8f, 2, 0, 0, 0, 4]);
+    assert_eq!(env.pc, BASE + 7 + 4);
+    let env = exec1(&[0xe8, 0x8f, 2, 0, 0, 0, 4]);
+    assert_eq!(env.pc, BASE + 7);
+    let env = exec1(&[0xe9, 0x8f, 3, 0, 0, 0, 4]);
+    assert_eq!(env.pc, BASE + 7);
+}
+
+#[test]
+fn case_dispatch_table() {
+    // casel #5, #2, #7 —— tmp=3 ≤ 7 → displ[3] の語変位で分岐。
+    // 命令は 16 バイト、表は BASE+16。displ[3] は BASE+22。
+    let mut env = run_env(1);
+    put(
+        &mut env,
+        BASE,
+        &[0xcf, 0x8f, 5, 0, 0, 0, 0x8f, 2, 0, 0, 0, 0x8f, 7, 0, 0, 0],
+    );
+    put(&mut env, BASE + 22, &0x0020u16.to_le_bytes());
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, BASE + 16 + 0x20);
+    // tmp=3 < limit=7: N=1 C=1（符号・符号なしとも小さい）。
+    assert_eq!(cc(&env), (true, false, false, true));
+
+    // 範囲外: casel #100, #2, #7 —— tmp=98 > 7 → 表の直後へ
+    // （命令終端 + 2 + 2*7 = BASE+32）。CC: N=0（98 は 7 より大）。
+    let mut env = run_env(1);
+    put(
+        &mut env,
+        BASE,
+        &[0xcf, 0x8f, 100, 0, 0, 0, 0x8f, 2, 0, 0, 0, 0x8f, 7, 0, 0, 0],
+    );
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, BASE + 16 + 2 + 14);
+    assert_eq!(cc(&env), (false, false, false, false));
+
+    // caseb #3, #3, #0 —— tmp=0 ≤ 0 → displ[0]。Z=1 N=0 C=0。
+    let mut env = run_env(1);
+    put(&mut env, BASE, &[0x8f, 0x8f, 3, 0x8f, 3, 0x8f, 0]);
+    put(&mut env, BASE + 7, &0xfff0u16.to_le_bytes());
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, BASE + 7 - 16);
+    assert_eq!(cc(&env), (false, true, false, false));
+
+    // casew #0, #0x8000, #0 —— tmp=0x8000（符号付き -32768）≤u 0 は
+    // 偽 → 範囲外。N = tmp LSS limit（-32768 < 0 → 1）。
+    let mut env = run_env(1);
+    put(
+        &mut env,
+        BASE,
+        &[0xaf, 0x8f, 0, 0, 0x8f, 0, 0x80, 0x8f, 0, 0],
+    );
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, BASE + 10 + 2);
+    assert_eq!(cc(&env), (true, false, false, false));
+}
+
+#[test]
+fn acb_loops() {
+    // movl #0, r0; acbl #3, #1, r0, loop —— 4 回目で脱出。
+    // acbl は 14 バイト（1+5+5+1+2）。戻り変位 = -14。
+    let mut env = run_env(1);
+    put(&mut env, BASE, &[0xd0, 0x8f, 0, 0, 0, 0, 0x50]);
+    put(
+        &mut env,
+        BASE + 7,
+        &[0xf1, 0x8f, 3, 0, 0, 0, 0x8f, 1, 0, 0, 0, 0x50, 0xf2, 0xff],
+    );
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    for _ in 0..3 {
+        step(&mut env).unwrap();
+        assert_eq!(env.pc, BASE + 7);
+    }
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 0), 4);
+    assert_eq!(env.pc, BASE + 21);
+    assert_eq!(cc(&env), (false, false, false, false));
+
+    // acbl #0, #-1, r0 —— 負の add は index>=limit で分岐。
+    // r0=1 → 0 ≥ 0 → 分岐（Z=1）。r0=0 → -1 < 0 → 落ちる（N=1）。
+    let mut env = run_env(1);
+    sem::r_set(&mut env.backend, 0, 1);
+    put(
+        &mut env,
+        BASE,
+        &[
+            0xf1, 0x8f, 0, 0, 0, 0, 0x8f, 0xff, 0xff, 0xff, 0xff, 0x50, 0x10, 0x00,
+        ],
+    );
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 0), 0);
+    assert_eq!(env.pc, BASE + 14 + 0x10);
+    assert_eq!(cc(&env), (false, true, false, false));
+
+    let mut env = run_env(1);
+    put(
+        &mut env,
+        BASE,
+        &[
+            0xf1, 0x8f, 0, 0, 0, 0, 0x8f, 0xff, 0xff, 0xff, 0xff, 0x50, 0x10, 0x00,
+        ],
+    );
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 0), 0xffff_ffff);
+    assert_eq!(env.pc, BASE + 14);
+    assert_eq!(cc(&env), (true, false, false, false));
+
+    // acbb #10, #1, r0 —— byte の modify。V は byte のあふれ。
+    let mut env = run_env(1);
+    sem::r_set(&mut env.backend, 0, 0x7f);
+    put(&mut env, BASE, &[0x9d, 0x8f, 10, 0x8f, 1, 0x50, 0x05, 0x00]);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 0) & 0xff, 0x80);
+    assert_eq!(cc(&env), (true, false, true, false));
+    // 0x80 = -128 ≥ limit ではない（add>0、-128 <= 10 → 分岐）。
+    assert_eq!(env.pc, BASE + 8 + 5);
+
+    // acbw #0x7fff, #1, r0 —— word でも同じ。
+    let mut env = run_env(1);
+    sem::r_set(&mut env.backend, 0, 0x7fff);
+    put(
+        &mut env,
+        BASE,
+        &[0x3d, 0x8f, 0xff, 0x7f, 0x8f, 1, 0, 0x50, 0x05, 0x00],
+    );
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 0) & 0xffff, 0x8000);
+    assert_eq!(cc(&env), (true, false, true, false));
+    assert_eq!(env.pc, BASE + 10 + 5);
+}
+
+#[test]
+fn aob_sob_loop_branches() {
+    // aoblss #5, r0, +8 —— r0=4 → 5 < 5 は偽、分岐しない Z=1
+    // （aob 系は 8 バイト命令）。
+    let mut env = run_env(1);
+    sem::r_set(&mut env.backend, 0, 4);
+    put(&mut env, BASE, &[0xf2, 0x8f, 5, 0, 0, 0, 0x50, 8]);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 0), 5);
+    assert_eq!(env.pc, BASE + 8);
+    // Z は index 自身が 0 のときだけ立つ（比較結果ではない）。
+    assert_eq!(cc(&env), (false, false, false, false));
+
+    // aobleq #5, r0 —— 5 <= 5 → 分岐。
+    let mut env = run_env(1);
+    sem::r_set(&mut env.backend, 0, 4);
+    put(&mut env, BASE, &[0xf3, 0x8f, 5, 0, 0, 0, 0x50, 8]);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, BASE + 8 + 8);
+
+    // aoblss #5, r0 —— r0=7 → 8 < 5 偽、分岐しない。
+    let mut env = run_env(1);
+    sem::r_set(&mut env.backend, 0, 7);
+    put(&mut env, BASE, &[0xf2, 0x8f, 5, 0, 0, 0, 0x50, 8]);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, BASE + 8);
+
+    // sobgeq r0, -6 —— r0=3 → 2 ≥ 0 → 分岐。r0=0 → -1 → N=1 で落ちる。
+    let mut env = run_env(1);
+    sem::r_set(&mut env.backend, 0, 3);
+    put(&mut env, BASE, &[0xf4, 0x50, 0xfa]);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 0), 2);
+    assert_eq!(env.pc, BASE + 3 - 6);
+
+    let mut env = run_env(1);
+    put(&mut env, BASE, &[0xf4, 0x50, 0xfa]);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 0), 0xffff_ffff);
+    assert_eq!(env.pc, BASE + 3);
+    assert_eq!(cc(&env), (true, false, false, false));
+
+    // sobgeq のあふれ: r0=0x8000_0000 → 0x7fff_ffff、V=1 で分岐。
+    let mut env = run_env(1);
+    sem::r_set(&mut env.backend, 0, 0x8000_0000);
+    put(&mut env, BASE, &[0xf4, 0x50, 0xfa]);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 0), 0x7fff_ffff);
+    assert_eq!(cc(&env), (false, false, true, false));
+    assert_eq!(env.pc, BASE + 3 - 6);
+
+    // sobgtr r0 —— r0=1 → 0 > 0 偽 → 分岐しない。
+    let mut env = run_env(1);
+    sem::r_set(&mut env.backend, 0, 1);
+    put(&mut env, BASE, &[0xf5, 0x50, 0xfa]);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 0), 0);
+    assert_eq!(env.pc, BASE + 3);
+    assert_eq!(cc(&env), (false, true, false, false));
+
+    // sobgtr r0 —— r0=2 → 1 > 0 → 分岐。
+    let mut env = run_env(1);
+    sem::r_set(&mut env.backend, 0, 2);
+    put(&mut env, BASE, &[0xf5, 0x50, 0xfa]);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, BASE + 3 - 6);
+}
