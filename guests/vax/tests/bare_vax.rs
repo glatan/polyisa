@@ -3212,3 +3212,362 @@ fn chmk_dispatch() {
     assert_eq!(p >> psl::CUR_MOD & 3, 3);
     assert_eq!(p >> psl::PRV_MOD & 3, 3);
 }
+
+// ---- VX8: 分岐・calls/callg/ret ----
+
+/// 手続本体を `proc` に置く（入口マスク語 + 本体命令列）。
+fn proc_at(env: &mut BareEnv, proc: u64, mask: u16, body: &[u8]) {
+    put(env, proc, &mask.to_le_bytes());
+    put(env, proc + 2, body);
+}
+
+#[test]
+fn unconditional_branches() {
+    let mut env = run_env(1);
+    // brb: 変位は命令終端基準。+4 → 終端+4。
+    put(&mut env, BASE, &[0x11, 0x04]);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, BASE + 6);
+    // 負の変位。
+    put(&mut env, BASE, &[0x11, 0xfc]);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, BASE - 2);
+    // brw: 2 バイト変位。
+    put(&mut env, BASE, &[0x31, 0x00, 0x01]);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, BASE + 0x103);
+    // jmp @#dst。
+    let dst = BASE + 0x80;
+    let mut insn = vec![0x17];
+    abs(dst, &mut insn);
+    put(&mut env, BASE, &insn);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, dst);
+    // 条件コードは変えない（tstb で立てた Z が brb で生きる）。
+    put(&mut env, BASE + 0x20, &[0x95, 0x8f, 0x00]); // tstb #0
+    put(&mut env, BASE + 0x23, &[0x11, 0x00]); // brb +0（分岐しても PC=終端）
+    env.pc = BASE + 0x20;
+    step(&mut env).unwrap();
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, BASE + 0x25);
+    assert_eq!(cc(&env), (false, true, false, false));
+}
+
+#[test]
+fn bsb_jsb_rsb() {
+    let mut env = run_env_stack();
+    let sp0 = r(&env, 14);
+    // bsbb: 戻り PC（命令終端）を積んで BASE+0x20 の rsb へ。
+    put(&mut env, BASE, &[0x10, 0x1e]);
+    put(&mut env, BASE + 0x20, &[0x05]);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, BASE + 0x20);
+    assert_eq!(r(&env, 14), sp0 - 4);
+    assert_eq!(mem32(&env, u64::from(sp0 - 4)), (BASE + 2) as u32);
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, BASE + 2);
+    assert_eq!(r(&env, 14), sp0);
+    // bsbw: 2 バイト変位の往復。
+    put(&mut env, BASE + 0x10, &[0x30, 0x0e, 0x00]);
+    put(&mut env, BASE + 0x21, &[0x05]);
+    env.pc = BASE + 0x10;
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, BASE + 0x21);
+    assert_eq!(mem32(&env, u64::from(sp0 - 4)), (BASE + 0x13) as u32);
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, BASE + 0x13);
+    // jsb @#sub: 先に指定子を評価してから戻り PC を積む。
+    let mut insn = vec![0x16];
+    abs(BASE + 0x40, &mut insn);
+    put(&mut env, BASE + 0x30, &insn);
+    put(&mut env, BASE + 0x40, &[0x05]);
+    env.pc = BASE + 0x30;
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, BASE + 0x40);
+    assert_eq!(mem32(&env, u64::from(sp0 - 4)), (BASE + 0x36) as u32);
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, BASE + 0x36);
+    assert_eq!(r(&env, 14), sp0);
+}
+
+#[test]
+fn callg_frame_construction() {
+    let mut env = run_env_stack();
+    let sp0 = r(&env, 14);
+    let args = DATA + 0x100;
+    // 引数リスト: [個数, arg1, arg2]。
+    put(&mut env, args, &2u32.to_le_bytes());
+    put(&mut env, args + 4, &0xaaaau32.to_le_bytes());
+    put(&mut env, args + 8, &0xbbbbu32.to_le_bytes());
+    let proc = BASE + 0x200;
+    // 入口マスク: r2・r5 保存 + IV 有効（<14>）。本体は r2 を
+    // 壊してから ret（退避から復帰する証明）。
+    proc_at(
+        &mut env,
+        proc,
+        (1 << 2) | (1 << 5) | (1 << 14),
+        &[0xd0, 0x8f, 0xad, 0xde, 0x00, 0x00, 0x52, 0x04],
+    );
+    // callg @#args, @#proc
+    let mut insn = vec![0xfa];
+    abs(args, &mut insn);
+    abs(proc, &mut insn);
+    put(&mut env, BASE, &insn);
+    let ret_pc = BASE + insn.len() as u64;
+    sem::r_set(&mut env.backend, 2, 0x2222);
+    sem::r_set(&mut env.backend, 5, 0x5555);
+    sem::r_set(&mut env.backend, reg::AP as u8, 0xaaaa_0000);
+    sem::r_set(&mut env.backend, reg::FP as u8, 0xbbbb_0000);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    let fp = u64::from(r(&env, 13));
+    assert_eq!(env.pc, proc + 2);
+    assert_eq!(r(&env, 12), args as u32); // AP = 引数リスト
+    assert_eq!(r(&env, 14) as u64, fp); // SP = FP（フレーム最下位）
+    // フレーム（低アドレス側から）: 条件ハンドラ・フレーム語・
+    // 退避 AP/FP/PC・退避レジスタ（r0 側が最下位）。
+    assert_eq!(mem32(&env, fp), 0);
+    // S=0・SPA=0・mask<11:0>=0x024・退避 PSW=0。
+    assert_eq!(mem32(&env, fp + 4), 0x0024_0000);
+    assert_eq!(mem32(&env, fp + 8), 0xaaaa_0000);
+    assert_eq!(mem32(&env, fp + 12), 0xbbbb_0000);
+    assert_eq!(mem32(&env, fp + 16), ret_pc as u32);
+    assert_eq!(mem32(&env, fp + 20), 0x2222); // r2
+    assert_eq!(mem32(&env, fp + 24), 0x5555); // r5
+    // IV 有効・DV/FU/条件コードは 0。
+    let p = sem::psl_get(&env.backend);
+    assert_ne!(p & (1 << psl::IV), 0);
+    assert_eq!(p & (1 << psl::DV | 1 << psl::FU | 0xf), 0);
+    // 本体が r2 を壊す。
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 2), 0xdead);
+    // ret で完全復帰。
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, ret_pc);
+    assert_eq!(r(&env, 14), sp0);
+    assert_eq!(r(&env, 2), 0x2222);
+    assert_eq!(r(&env, 5), 0x5555);
+    assert_eq!(r(&env, 12), 0xaaaa_0000);
+    assert_eq!(r(&env, 13), 0xbbbb_0000);
+    assert_eq!(sem::psl_get(&env.backend) & 0xffff, 0);
+}
+
+#[test]
+fn calls_args_and_cleanup() {
+    let mut env = run_env_stack();
+    let sp0 = r(&env, 14);
+    // 引数 2 個を逆順で積む（arg1 が最下位）。
+    put(&mut env, BASE, &[0xdd, 0x8f, 0x22, 0x22, 0x22, 0x22]); // pushl #arg2
+    put(&mut env, BASE + 6, &[0xdd, 0x8f, 0x11, 0x11, 0x11, 0x11]); // pushl #arg1
+    // calls S^#2, @#proc
+    let mut insn = vec![0xfb, 0x02];
+    abs(BASE + 0x200, &mut insn);
+    put(&mut env, BASE + 12, &insn);
+    let ret_pc = BASE + 12 + insn.len() as u64;
+    // 本体: r0=(AP+4)=arg1・r1=(AP+8)=arg2・r2=フレーム語。
+    proc_at(
+        &mut env,
+        BASE + 0x200,
+        0,
+        &[
+            0xd0, 0xac, 0x04, 0x50, // movl 4(ap), r0
+            0xd0, 0xac, 0x08, 0x51, // movl 8(ap), r1
+            0xd0, 0xad, 0x04, 0x52, // movl 4(fp), r2
+            0x04, // ret
+        ],
+    );
+    env.pc = BASE;
+    step(&mut env).unwrap(); // pushl
+    step(&mut env).unwrap(); // pushl
+    step(&mut env).unwrap(); // calls
+    let ap = r(&env, 12);
+    let fp = u64::from(r(&env, 13));
+    assert_eq!(env.pc, BASE + 0x202);
+    assert_eq!(mem32(&env, u64::from(ap)), 2); // 個数語
+    step(&mut env).unwrap();
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 0), 0x1111_1111);
+    assert_eq!(r(&env, 1), 0x2222_2222);
+    step(&mut env).unwrap();
+    // S<29>=1（calls フレーム）・mask=0・SPA=0・退避 PSW=0。
+    assert_eq!(r(&env, 2), 1 << 29);
+    assert_eq!(mem32(&env, fp), 0);
+    step(&mut env).unwrap(); // ret
+    assert_eq!(env.pc, ret_pc);
+    // 個数語 + 引数リストが除去されて SP は呼出し前に戻る。
+    assert_eq!(r(&env, 14), sp0);
+}
+
+#[test]
+fn calls_unaligned_spa() {
+    let mut env = run_env_stack();
+    let sp0 = r(&env, 14);
+    // 非整列 SP（<1:0>=1）。callg の SPA は呼出し時点の SP<1:0>。
+    sem::r_set(&mut env.backend, reg::SP as u8, sp0 - 3);
+    let args = DATA + 0x100;
+    put(&mut env, args, &0u32.to_le_bytes());
+    let proc = BASE + 0x200;
+    proc_at(&mut env, proc, 0, &[0xd0, 0xad, 0x04, 0x52, 0x04]); // r2=フレーム語; ret
+    let mut insn = vec![0xfa];
+    abs(args, &mut insn);
+    abs(proc, &mut insn);
+    put(&mut env, BASE, &insn);
+    let ret_pc = BASE + insn.len() as u64;
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    let fp = u64::from(r(&env, 13));
+    // 整列後の SP（sp0-4）がフレーム上端。フレーム語は SPA<31:30>=1。
+    assert_eq!(fp + 20, u64::from(sp0 - 4));
+    assert_eq!(mem32(&env, fp + 4), 1 << 30);
+    step(&mut env).unwrap(); // movl 4(fp), r2
+    assert_eq!(r(&env, 2), 1 << 30);
+    step(&mut env).unwrap(); // ret
+    // SPA 分が復帰して SP は呼出し時の値に戻る。
+    assert_eq!(env.pc, ret_pc);
+    assert_eq!(r(&env, 14), sp0 - 3);
+}
+
+#[test]
+fn call_enables_and_saved_psw() {
+    let mut env = run_env_stack();
+    // 呼び出し側で FU・IV・N を立てる。退避語には T と条件
+    // コードを抜いた <14:0> が残る。
+    sem::psl_put(
+        &mut env.backend,
+        psl::USER | 1 << psl::FU | 1 << psl::IV | 1 << psl::N,
+    );
+    let args = DATA + 0x100;
+    put(&mut env, args, &0u32.to_le_bytes());
+    let proc = BASE + 0x200;
+    // マスク <15> で DV を有効化。本体はフレーム PSW へ条件
+    // コードを OR で書き足して戻る（ret が復帰する CC の源。
+    // 退避済みの IV/FU/DV 桁は同じバイトなので bisb2 で残す）。
+    proc_at(
+        &mut env,
+        proc,
+        1 << 15,
+        &[0x88, 0x8f, 0x0b, 0xad, 0x04, 0x04],
+    );
+    let mut insn = vec![0xfa];
+    abs(args, &mut insn);
+    abs(proc, &mut insn);
+    put(&mut env, BASE, &insn);
+    let ret_pc = BASE + insn.len() as u64;
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    let fp = u64::from(r(&env, 13));
+    // 呼出し後: DV=1（マスク<15>）・IV=0（マスク<14>=0）・FU=0・CC=0。
+    let p = sem::psl_get(&env.backend);
+    assert_ne!(p & (1 << psl::DV), 0);
+    assert_eq!(p & (1 << psl::IV | 1 << psl::FU | 0xf), 0);
+    // フレーム語の退避 PSW<14:0> は FU|IV（T・CC は 0）。
+    assert_eq!(
+        mem32(&env, fp + 4) & 0xffff,
+        (1 << psl::FU | 1 << psl::IV) as u32
+    );
+    // 本体がフレーム PSW<7:0> に 0x0b（N|V|C）を OR する。
+    step(&mut env).unwrap();
+    step(&mut env).unwrap(); // ret
+    assert_eq!(env.pc, ret_pc);
+    // 退避 PSW 復帰: 本体が書いた CC (N|V|C) + 呼出し時の
+    // FU|IV。DV は呼出し前になかったので 0 に戻る。
+    assert_eq!(cc(&env), (true, false, true, true));
+    let p = sem::psl_get(&env.backend);
+    assert_ne!(p & (1 << psl::FU | 1 << psl::IV), 0);
+    assert_eq!(p & (1 << psl::DV), 0);
+}
+
+#[test]
+fn call_nested() {
+    let mut env = run_env_stack();
+    let sp0 = r(&env, 14);
+    let (proca, procb) = (BASE + 0x200, BASE + 0x300);
+    let argsb = DATA + 0x200;
+    put(&mut env, argsb, &0u32.to_le_bytes());
+    // B: 何もしないで ret。A: callg で B を呼んでから ret。
+    proc_at(&mut env, procb, 0, &[0x04]);
+    let mut abody = vec![0xfa];
+    abs(argsb, &mut abody);
+    abs(procb, &mut abody);
+    let a_ret_pc = proca + 2 + abody.len() as u64;
+    abody.push(0x04);
+    proc_at(&mut env, proca, 1 << 2, &abody);
+    // calls S^#0, @#proca（r2 を壊して A のマスク復帰も見る）。
+    let mut insn = vec![0xfb, 0x00];
+    abs(proca, &mut insn);
+    put(&mut env, BASE, &insn);
+    let ret_pc = BASE + insn.len() as u64;
+    sem::r_set(&mut env.backend, 2, 0x2222);
+    sem::r_set(&mut env.backend, reg::FP as u8, 0xbbbb_0000);
+    env.pc = BASE;
+    step(&mut env).unwrap(); // calls → A
+    let fpa = u64::from(r(&env, 13));
+    assert_eq!(env.pc, proca + 2);
+    sem::r_set(&mut env.backend, 2, 0xbad);
+    step(&mut env).unwrap(); // A の callg → B
+    let fpb = u64::from(r(&env, 13));
+    assert_eq!(env.pc, procb + 2);
+    assert_ne!(fpb, fpa);
+    // B のフレームの退避 FP は A の FP、退避 PC は A の ret 位置。
+    assert_eq!(mem32(&env, fpb + 12) as u64, fpa);
+    assert_eq!(mem32(&env, fpb + 16), a_ret_pc as u32);
+    step(&mut env).unwrap(); // B の ret → A の ret へ
+    assert_eq!(env.pc, a_ret_pc);
+    assert_eq!(r(&env, 13) as u64, fpa);
+    step(&mut env).unwrap(); // A の ret → 呼出し側へ
+    assert_eq!(env.pc, ret_pc);
+    assert_eq!(r(&env, 14), sp0);
+    assert_eq!(r(&env, 2), 0x2222); // A のマスクで復帰
+    assert_eq!(r(&env, 13), 0xbbbb_0000);
+}
+
+#[test]
+fn call_frame_faults() {
+    struct Rec(u32);
+    impl TrapHandler for Rec {
+        fn handle_trap(&mut self, _env: &mut BareEnv, code: u32) -> TrapOutcome {
+            self.0 = code;
+            TrapOutcome::Unimplemented
+        }
+    }
+    // 入口マスク <13:12> != 0 → 予約オペランド fault。
+    let mut env = run_env_stack();
+    let args = DATA + 0x100;
+    put(&mut env, args, &0u32.to_le_bytes());
+    proc_at(&mut env, BASE + 0x200, 0x2000, &[0x04]);
+    let mut insn = vec![0xfa];
+    abs(args, &mut insn);
+    abs(BASE + 0x200, &mut insn);
+    put(&mut env, BASE, &insn);
+    env.pc = BASE;
+    let mut sys = Rec(0);
+    assert!(run::step(&mut env, &mut sys, DEFAULT_FEATS).is_err());
+    assert_eq!(sys.0, sem::scb::RESERVED_OPERAND);
+    assert_eq!(env.pc, BASE); // fault は命令先頭へ
+
+    // フレーム語 <15:8> != 0 → ret が予約オペランド fault。
+    let mut env = run_env_stack();
+    proc_at(
+        &mut env,
+        BASE + 0x200,
+        0,
+        &[0x90, 0x8f, 0x01, 0xad, 0x05, 0x04], // movb #1, 5(fp); ret
+    );
+    let mut insn = vec![0xfa];
+    abs(args, &mut insn);
+    abs(BASE + 0x200, &mut insn);
+    put(&mut env, BASE, &insn);
+    env.pc = BASE;
+    step(&mut env).unwrap(); // callg
+    step(&mut env).unwrap(); // movb
+    let mut sys = Rec(0);
+    let pc_ret = env.pc;
+    assert!(run::step(&mut env, &mut sys, DEFAULT_FEATS).is_err());
+    assert_eq!(sys.0, sem::scb::RESERVED_OPERAND);
+    assert_eq!(env.pc, pc_ret);
+}

@@ -1343,6 +1343,126 @@ fn crc(b: &mut InterpBackend, f: &Fetched, pos: &[(u32, u32)], pc0: u32) -> Resu
     Ok(())
 }
 
+// ---- 手続呼出（VX8）----
+// calls/callg が組み立てるフレーム（正本図3.2。低アドレス側から）:
+//   (FP+0)  条件ハンドラ（0 で初期化される）
+//   (FP+4)  フレーム語 = SPA<31:30>|S<29>|0<28>|入口マスク<27:16>
+//           |0<15>|退避 PSW<14:0>（T と条件コードは退避側を 0 に）
+//   (FP+8)  退避 AP、(FP+12) 退避 FP、(FP+16) 退避 PC
+//   (FP+20) 退避レジスタ群（入口マスク<11:0> で選んだもの。
+//           r0 が最下位 —— 積むときはビット 11 から 0 へ走査する）
+//   上位    SPA 分の整列隙間、（calls では）その上に引数リスト
+// FP はフレームの最下位語（条件ハンドラ）を指す。
+// Ref: SPEC-VAX-ARM（手続呼出命令の節、図3.1・3.2）.
+
+/// calls/callg のフレーム構築。calls は numarg.rl を先に積み、
+/// AP はその後の SP（引数リストの先頭）。callg は arglist.ab が
+/// そのまま AP になる。入口マスク（dst の 1 語）は <11:0> が保存
+/// レジスタの選択、<13:12> は 0 必須（違えば予約オペランド
+/// fault）、<14>/<15> が新しい IV/DV の有効値。PC は dst+2、
+/// 条件コードは全て 0、FU は 0、T は不変。
+// Ref: SPEC-VAX-ARM（calls・callg 命令の節）.
+fn call(b: &mut InterpBackend, f: &Fetched, pos: &[(u32, u32)]) -> Result<(), InterpExit> {
+    let calls = f.insn == Insn::Calls;
+    // オペランドは順に評価する（指定子の副作用は命令動作の積み
+    // 込みに先立つ）。calls の numarg はロングワードとして積む
+    // （<7:0> が個数、上位はソフトウェア用）。
+    let argl0 = if calls {
+        eval_r(b, f, pos, 0, Width::L)?
+    } else {
+        u128::from(eval_a(b, f, pos, 0)?)
+    };
+    let dst = eval_a(b, f, pos, 1)?;
+    let argl = if calls {
+        push(b, argl0)?;
+        r_get(b, reg::SP as u8)
+    } else {
+        argl0 as u32
+    };
+    let mask = load(b, dst, 2)? as u32;
+    if mask & 0x3000 != 0 {
+        return Err(fault(scb::RESERVED_OPERAND, None));
+    }
+    // SP をロングワード整列。捨てた下位 2 ビットが SPA として
+    // フレーム語に残る。
+    let sp0 = r_get(b, reg::SP as u8);
+    let spa = sp0 & 3;
+    r_set(b, reg::SP as u8, sp0 & !3);
+    // 入口マスクをビット 11 から 0 へ走査してレジスタを積む
+    // （先に積んだ r11 が最上位、r0 が最下位 = FP+20）。
+    for i in (0..=11u8).rev() {
+        if mask >> i & 1 != 0 {
+            push(b, u128::from(r_get(b, i)))?;
+        }
+    }
+    // 戻り PC（実行時の r15 = 命令の終端）・旧 FP・旧 AP。
+    push(b, u128::from(r_get(b, reg::PC as u8)))?;
+    push(b, u128::from(r_get(b, reg::FP as u8)))?;
+    push(b, u128::from(r_get(b, reg::AP as u8)))?;
+    // フレーム語（S<29> は calls で立つ。<15>・<28> は 0）。
+    // 退避 PSW は <14:0> から T<4> と条件コード<3:0> を抜いた形。
+    push(
+        b,
+        u128::from(
+            spa << 30 | u32::from(calls) << 29 | (mask & 0xfff) << 16 | (psl_get(b) & 0x7fe0),
+        ),
+    )?;
+    push(b, 0)?; // 条件ハンドラ
+    r_set(b, reg::FP as u8, r_get(b, reg::SP as u8));
+    r_set(b, reg::AP as u8, argl);
+    // トラップ有効を既知状態へ: IV←マスク<14>・DV←マスク<15>・
+    // FU←0。T は不変。条件コードは全て 0。
+    let p = (psl_get(b) & !(0xf | 1 << psl::IV | 1 << psl::FU | 1 << psl::DV))
+        | (mask & 0x4000) >> 14 << psl::IV
+        | (mask & 0x8000) >> 15 << psl::DV;
+    psl_put(b, p);
+    r_set(b, reg::PC as u8, dst.wrapping_add(2));
+    Ok(())
+}
+
+/// ret: FP の指すフレームを畳む。フレーム語（FP+4）の <15:8> が
+/// 0 でなければ予約オペランド fault（<28> は無視）。退避 AP/FP/
+/// PC・マスク選択のレジスタ（下位アドレスから順に取り出すので
+/// 走査はビット 0 から 11 へ）を復帰し、SPA 分進める。S が立つ
+/// （calls フレーム）なら個数語を取り出して引数リストも除去
+/// する。PSW<15:0> は退避値に置き換わる（上位の PSL 桁は不変）。
+// Ref: SPEC-VAX-ARM（ret 命令の節、図3.2）.
+fn ret(b: &mut InterpBackend) -> Result<(), InterpExit> {
+    let fp = r_get(b, reg::FP as u8);
+    let mut sp = fp.wrapping_add(4);
+    r_set(b, reg::SP as u8, sp);
+    let tmp = load(b, sp, 4)? as u32;
+    if tmp & 0xff00 != 0 {
+        return Err(fault(scb::RESERVED_OPERAND, None));
+    }
+    sp = sp.wrapping_add(4);
+    let ap = load(b, sp, 4)? as u32;
+    let nfp = load(b, sp.wrapping_add(4), 4)? as u32;
+    let pc = load(b, sp.wrapping_add(8), 4)? as u32;
+    sp = sp.wrapping_add(12);
+    for i in 0..=11u8 {
+        if tmp >> (16 + u32::from(i)) & 1 != 0 {
+            let v = load(b, sp, 4)? as u32;
+            r_set(b, i, v);
+            sp = sp.wrapping_add(4);
+        }
+    }
+    sp = sp.wrapping_add(tmp >> 30);
+    // 退避 PSW<15:0> を戻す（<15:8> は検査済みで 0）。
+    psl_put(b, psl_get(b) & !0xffff | tmp & 0xffff);
+    if tmp & 1 << 29 != 0 {
+        // calls: 引数個数語をスタックから取り、引数リストを
+        // 個数<7:0>×4 ぶん除去する。
+        let n = (load(b, sp, 4)? & 0xff) as u32;
+        sp = sp.wrapping_add(4 + 4 * n);
+    }
+    r_set(b, reg::SP as u8, sp);
+    r_set(b, reg::AP as u8, ap);
+    r_set(b, reg::FP as u8, nfp);
+    r_set(b, reg::PC as u8, pc);
+    Ok(())
+}
+
 /// 命令 1 個の意味論。`pos[i]` はオペランド i の指定子バイト列の
 /// 先頭・終端の絶対アドレス（PC 相対の基底と即値の位置に使う）。
 /// `pc0` は命令の先頭アドレス。実行時の r15 は命令の終端
@@ -2118,6 +2238,35 @@ pub fn exec(
             psl_put(b, p);
             return Err(trap(scb::CHMK + 4 * req));
         }
+        // ---- 分岐・サブルーチン・手続呼出（VX8）----
+        // brb/brw・jmp: 無条件転送。分岐変位は命令終端基準（実行時の
+        // r15 は既に終端を指す）。条件コードは変えない。
+        Insn::Brb | Insn::Brw => branch(b, br_displ(f, 0)),
+        Insn::Jmp => {
+            let a = eval_a(b, f, pos, 0)?;
+            r_set(b, reg::PC as u8, a);
+        }
+        // bsbb/bsbw・jsb: 戻り PC（命令終端）をスタックへ積んで
+        // 転送。rsb は積まれた PC を取り出して戻る。
+        Insn::Bsbb | Insn::Bsbw | Insn::Jsb => {
+            let target = if f.insn == Insn::Jsb {
+                eval_a(b, f, pos, 0)?
+            } else {
+                r_get(b, reg::PC as u8).wrapping_add(br_displ(f, 0) as u32)
+            };
+            let ret = r_get(b, reg::PC as u8);
+            push(b, u128::from(ret))?;
+            r_set(b, reg::PC as u8, target);
+        }
+        Insn::Rsb => {
+            let sp = r_get(b, reg::SP as u8);
+            let pc = load(b, sp, 4)? as u32;
+            r_set(b, reg::SP as u8, sp.wrapping_add(4));
+            r_set(b, reg::PC as u8, pc);
+        }
+        // calls/callg/ret: 手続呼出フレームの構築と解除。
+        Insn::Calls | Insn::Callg => call(b, f, pos)?,
+        Insn::Ret => ret(b)?,
         _ => return Err(InterpExit::Unimplemented(format!("{:?}", f.insn))),
     }
     Ok(())
