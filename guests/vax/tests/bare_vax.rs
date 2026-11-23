@@ -1,14 +1,17 @@
 // Copyright (c) polyisa contributors
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! VAX の骨格検査（段階23・VX2/VX3）。オペコード空間（1/2 バイト語）
+//! VAX の骨格検査（段階23・VX2/VX3/VX4）。オペコード空間（1/2 バイト語）
 //! のデコード、CPU モデル宣言・機能旗・挙動パラメータの形、
 //! オペランド指定子の読み取り・長さ・適合・再符号化と命令全体の
-//! ストリーム消費を見る。命令単位の実行検査は VX4 以降でこの
-//! ファイルに足す。
+//! ストリーム消費、実行ループ（可変長フェッチ・指定子評価・例外・
+//! 中断可能命令の途中状態の器）を見る。
 //! 出典は SPEC-VAX-ARM と SPEC-VAX-MICROVAX である。
 
+use polyisa_engine::bare::BareEnv;
+use polyisa_engine::run::{Outcome, TrapHandler, TrapOutcome};
 use polyisa_guest_vax::specifier::*;
 use polyisa_guest_vax::*;
+use polyisa_mem::{Access, PAGE_SIZE, Perms, VirtAddr};
 
 /// 1 バイトオペコード語のデコード。
 fn dec1(b: u8) -> Option<Insn> {
@@ -567,4 +570,447 @@ fn declared_operand_insns_decode() {
     for name in ["movl", "addl2", "cmpl", "beql", "movc3", "movo"] {
         assert!(INSNS.iter().any(|m| m.name == name), "{name}");
     }
+}
+
+// ---- VX4: 実行ループ ----
+
+const BASE: u64 = 0x1_0000;
+
+/// トラップを捌かないハンドラ。
+struct NoSys;
+
+impl TrapHandler for NoSys {
+    fn handle_trap(&mut self, _env: &mut BareEnv, _code: u32) -> TrapOutcome {
+        TrapOutcome::Unimplemented
+    }
+}
+
+/// 読み書き実行可能なページを BASE に `pages` 枚写像した環境。
+/// PSL はユーザーモード相当、SP は妥当な値を入れる。
+fn run_env(pages: u64) -> BareEnv {
+    let mut env = BareEnv::new(core::mem::size_of::<CpuState>());
+    env.backend
+        .mem
+        .map(VirtAddr(BASE), pages, Perms(Perms::RW.0 | Perms::X.0))
+        .unwrap();
+    env.backend.addr_mask = 0xFFFF_FFFF;
+    sem::psl_put(&mut env.backend, psl::USER);
+    sem::r_set(&mut env.backend, reg::SP as u8, 0x7fff_0000);
+    env
+}
+
+fn put(env: &mut BareEnv, addr: u64, bytes: &[u8]) {
+    env.backend.mem.write(VirtAddr(addr), bytes).unwrap();
+}
+
+fn step(env: &mut BareEnv) -> Result<(), Outcome> {
+    run::step(env, &mut NoSys, DEFAULT_FEATS)
+}
+
+fn r(env: &BareEnv, i: u8) -> u32 {
+    sem::r_get(&env.backend, i)
+}
+
+fn mem32(env: &BareEnv, a: u64) -> u32 {
+    let mut b = [0u8; 4];
+    env.backend
+        .mem
+        .read(VirtAddr(a), &mut b, Access::DATA_LE)
+        .unwrap();
+    u32::from_le_bytes(b)
+}
+
+#[test]
+fn variable_length_sequence() {
+    // 異なる長さの命令列: nop(1) movb #0x42,r0(4) clrw (r1)(2)
+    // movl #0x12345678,r2(7) —— ステップごとに PC が命令長ぶん進む。
+    let mut env = run_env(1);
+    let prog = [
+        0x01, // nop
+        0x90, 0x8f, 0x42, 0x50, // movb #0x42, r0
+        0xb4, 0x61, // clrw (r1)
+        0xd0, 0x8f, 0x78, 0x56, 0x34, 0x12, 0x52, // movl #0x12345678, r2
+    ];
+    put(&mut env, BASE, &prog);
+    put(&mut env, BASE + 0x100, &0xaabb_ccddu32.to_le_bytes());
+    sem::r_set(&mut env.backend, 1, (BASE + 0x100) as u32);
+    env.pc = BASE;
+
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, BASE + 1);
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, BASE + 5);
+    assert_eq!(r(&env, 0), 0x42);
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, BASE + 7);
+    // clrw は下位語だけを 0 にし、上位語は保存する。
+    assert_eq!(mem32(&env, BASE + 0x100), 0xaabb_0000);
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, BASE + 14);
+    assert_eq!(r(&env, 2), 0x1234_5678);
+    assert_eq!(env.steps, 4);
+}
+
+#[test]
+fn specifier_eval_side_effects() {
+    // 自動増・自動減・変位・間接の評価とレジスタ更新。
+    let mut env = run_env(1);
+    put(&mut env, BASE + 0x200, &0x1111_2222u32.to_le_bytes());
+    put(&mut env, BASE + 0x204, &0x3333_4444u32.to_le_bytes());
+    put(
+        &mut env,
+        BASE + 0x300,
+        &((BASE + 0x200) as u32).to_le_bytes(),
+    );
+    env.pc = BASE;
+
+    // movl (r0)+, r1 → r1=[r0], r0 += 4
+    put(&mut env, BASE, &[0xd0, 0x80, 0x51]);
+    sem::r_set(&mut env.backend, 0, (BASE + 0x200) as u32);
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 1), 0x1111_2222);
+    assert_eq!(r(&env, 0), (BASE + 0x204) as u32);
+
+    // movl -(r0), r2 → r0 -= 4, r2=[r0]
+    put(&mut env, BASE + 0x10, &[0xd0, 0x70, 0x52]);
+    env.pc = BASE + 0x10;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 0), (BASE + 0x200) as u32);
+    assert_eq!(r(&env, 2), 0x1111_2222);
+
+    // movl @4(r3), r4 → 4(r3) のロングワードがオペランドアドレス
+    put(&mut env, BASE + 0x20, &[0xd0, 0xb3, 0x04, 0x54]);
+    sem::r_set(&mut env.backend, 3, (BASE + 0x2fc) as u32);
+    env.pc = BASE + 0x20;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 4), 0x1111_2222);
+
+    // movl @(r5)+, r6 → r5 += 4（間接は常に longword）
+    put(&mut env, BASE + 0x30, &[0xd0, 0x95, 0x56]);
+    sem::r_set(&mut env.backend, 5, (BASE + 0x300) as u32);
+    env.pc = BASE + 0x30;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 6), 0x1111_2222);
+    assert_eq!(r(&env, 5), (BASE + 0x304) as u32);
+}
+
+#[test]
+fn specifier_eval_indexed_and_address() {
+    // index 指定子（基底変位 + 指数×データ幅）と .a オペランド。
+    let mut env = run_env(1);
+    for i in 0..4u32 {
+        put(
+            &mut env,
+            BASE + 0x400 + u64::from(i) * 4,
+            &(0x1000 + i).to_le_bytes(),
+        );
+    }
+    env.pc = BASE;
+    // movl 8(r2)[r1], r3 → addr = r2 + 8 + r1*4（0xa2 はバイト変位 r2）
+    put(&mut env, BASE, &[0xd0, 0x41, 0xa2, 0x08, 0x53]);
+    sem::r_set(&mut env.backend, 1, 1);
+    sem::r_set(&mut env.backend, 2, (BASE + 0x3f8) as u32);
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 3), 0x1001);
+
+    // movab (r9)+, r10 —— .ab の自動増は byte 刻み（+1）。
+    put(&mut env, BASE + 0x10, &[0x9e, 0x89, 0x5a]);
+    sem::r_set(&mut env.backend, 9, (BASE + 0x400) as u32);
+    env.pc = BASE + 0x10;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 10), (BASE + 0x400) as u32);
+    assert_eq!(r(&env, 9), (BASE + 0x401) as u32);
+
+    // moval #imm, r1 —— .a の即値は拡張バイトの位置がオペランド。
+    put(
+        &mut env,
+        BASE + 0x20,
+        &[0xde, 0x8f, 0xaa, 0xbb, 0xcc, 0xdd, 0x51],
+    );
+    env.pc = BASE + 0x20;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 1), (BASE + 0x22) as u32);
+}
+
+#[test]
+fn pc_relative_and_pc_write() {
+    let mut env = run_env(1);
+    put(&mut env, BASE + 0x40, &0xdead_beefu32.to_le_bytes());
+    env.pc = BASE;
+    // movl 4(PC), r0 —— 基底は指定子の終端（insn+3）。+4 で insn+7。
+    put(&mut env, BASE, &[0xd0, 0xaf, 0x04, 0x50]);
+    put(&mut env, BASE + 7, &0xdeadc0deu32.to_le_bytes());
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 0), 0xdeadc0de);
+
+    // movl #target, r15 —— PC への書き込みは分岐。
+    let dst = BASE + 0x80;
+    put(
+        &mut env,
+        BASE + 0x10,
+        &[
+            0xd0,
+            0x8f,
+            dst as u8,
+            (dst >> 8) as u8,
+            (dst >> 16) as u8,
+            (dst >> 24) as u8,
+            0x5f,
+        ],
+    );
+    env.pc = BASE + 0x10;
+    step(&mut env).unwrap();
+    assert_eq!(env.pc, dst);
+}
+
+#[test]
+fn push_and_stack() {
+    // pushl #v → SP-=4, [SP]=v。pushal @#a → アドレスを積む。
+    let mut env = run_env(1);
+    env.pc = BASE;
+    put(&mut env, BASE, &[0xdd, 0x8f, 0x44, 0x33, 0x22, 0x11]); // pushl #0x11223344
+    let sp = r(&env, 14);
+    // スタックの着地先を写像（0x7fff_0000 は未写像なのでテスト用に張る）。
+    env.backend
+        .mem
+        .map(
+            VirtAddr(0x7fff_0000 - PAGE_SIZE),
+            1,
+            Perms(Perms::RW.0 | Perms::X.0),
+        )
+        .unwrap();
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 14), sp - 4);
+    assert_eq!(mem32(&env, u64::from(sp - 4)), 0x1122_3344);
+}
+
+#[test]
+fn movcc_flags() {
+    // movb #0, r0 → Z=1 N=0 V=0、movb #0x80 → N=1。
+    let mut env = run_env(1);
+    put(&mut env, BASE, &[0x90, 0x8f, 0x00, 0x50]);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    let p = sem::psl_get(&env.backend);
+    assert_ne!(p & (1 << psl::Z), 0);
+    assert_eq!(p & (1 << psl::N), 0);
+    assert_eq!(p & (1 << psl::V), 0);
+    put(&mut env, BASE + 0x10, &[0x90, 0x8f, 0x80, 0x51]);
+    env.pc = BASE + 0x10;
+    step(&mut env).unwrap();
+    let p = sem::psl_get(&env.backend);
+    assert_eq!(p & (1 << psl::Z), 0);
+    assert_ne!(p & (1 << psl::N), 0);
+    // movb は書き込み先の上位バイトを保存する。
+    sem::r_set(&mut env.backend, 2, 0xaabb_ccdd);
+    put(&mut env, BASE + 0x20, &[0x90, 0x8f, 0x7f, 0x52]);
+    env.pc = BASE + 0x20;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 2), 0xaabb_cc7f);
+}
+
+#[test]
+fn halt_is_privileged_fault() {
+    // halt はユーザーモードで特権命令 fault（SCB 0x10）。
+    struct Rec(u32);
+    impl TrapHandler for Rec {
+        fn handle_trap(&mut self, _env: &mut BareEnv, code: u32) -> TrapOutcome {
+            self.0 = code;
+            TrapOutcome::Exit(0)
+        }
+    }
+    let mut env = run_env(1);
+    put(&mut env, BASE, &[0x00]);
+    env.pc = BASE;
+    let mut sys = Rec(0);
+    let r = run::step(&mut env, &mut sys, DEFAULT_FEATS);
+    assert_eq!(r, Err(Outcome::Exit(0)));
+    assert_eq!(sys.0, sem::scb::PRIV_INSN);
+    // fault なので復帰先は命令先頭。
+    assert_eq!(env.pc, BASE);
+}
+
+#[test]
+fn reserved_mode_and_insn_faults() {
+    struct Rec(Vec<u32>);
+    impl TrapHandler for Rec {
+        fn handle_trap(&mut self, _env: &mut BareEnv, code: u32) -> TrapOutcome {
+            self.0.push(code);
+            TrapOutcome::Unimplemented
+        }
+    }
+    let mut env = run_env(1);
+    let mut sys = Rec(Vec::new());
+    // movb S^#1, r0 —— 書き込み先にリテラルは使えない → fault 0x1c。
+    put(&mut env, BASE, &[0x90, 0x8f, 0x01, 0x01]);
+    env.pc = BASE;
+    let r = run::step(&mut env, &mut sys, DEFAULT_FEATS);
+    assert_eq!(sys.0, [sem::scb::RESERVED_MODE]);
+    assert!(matches!(r, Err(Outcome::Unimplemented { .. })));
+    // 0x08 は予約オペコード → 予約命令 fault 0x10。
+    put(&mut env, BASE + 0x10, &[0x08]);
+    env.pc = BASE + 0x10;
+    let r = run::step(&mut env, &mut sys, DEFAULT_FEATS);
+    assert_eq!(sys.0.last(), Some(&sem::scb::PRIV_INSN));
+    assert!(matches!(r, Err(Outcome::Unimplemented { .. })));
+}
+
+#[test]
+fn bpt_trap_advances_pc() {
+    // BPT は trap —— 復帰先は次の命令（fault と違い PC が進む）。
+    struct Rec(u32);
+    impl TrapHandler for Rec {
+        fn handle_trap(&mut self, _env: &mut BareEnv, code: u32) -> TrapOutcome {
+            self.0 = code;
+            TrapOutcome::Handled
+        }
+    }
+    let mut env = run_env(1);
+    put(&mut env, BASE, &[0x03, 0x01]); // bpt; nop
+    env.pc = BASE;
+    let mut sys = Rec(0);
+    run::step(&mut env, &mut sys, DEFAULT_FEATS).unwrap();
+    assert_eq!(sys.0, sem::scb::BPT);
+    assert_eq!(env.pc, BASE + 1);
+}
+
+#[test]
+fn fetch_fault_restart() {
+    // 未写像ページへのフェッチは ACV fault → ハンドラがページを
+    // 張って Handled → 同じ命令をやり直す（env.pc は動かない）。
+    struct MapSys(bool);
+    impl TrapHandler for MapSys {
+        fn handle_trap(&mut self, env: &mut BareEnv, code: u32) -> TrapOutcome {
+            if code == sem::scb::ACV && !self.0 {
+                self.0 = true;
+                env.backend
+                    .mem
+                    .map(
+                        VirtAddr(BASE + PAGE_SIZE),
+                        1,
+                        Perms(Perms::RW.0 | Perms::X.0),
+                    )
+                    .unwrap();
+                TrapOutcome::Handled
+            } else {
+                TrapOutcome::Unimplemented
+            }
+        }
+    }
+    let mut env = run_env(1);
+    let mut sys = MapSys(false);
+    env.pc = BASE + PAGE_SIZE;
+    let r = run::step(&mut env, &mut sys, DEFAULT_FEATS);
+    assert_eq!(r, Ok(()));
+    assert_eq!(env.pc, BASE + PAGE_SIZE);
+    assert!(sys.0);
+    // 張ったページに nop を置くと普通に実行できる。
+    put(&mut env, BASE + PAGE_SIZE, &[0x01]);
+    run::step(&mut env, &mut sys, DEFAULT_FEATS).unwrap();
+    assert_eq!(env.pc, BASE + PAGE_SIZE + 1);
+}
+
+#[test]
+fn specifier_crossing_page() {
+    // ページ末尾に置いた命令の即値拡張が次ページに跨る。
+    let mut env = run_env(2);
+    let insn = BASE + PAGE_SIZE - 3;
+    // movl #0x12345678, r0 —— 7 バイト（うち即値 4 バイトが跨ぐ）。
+    put(&mut env, insn, &[0xd0, 0x8f, 0x78, 0x56, 0x34, 0x12, 0x50]);
+    env.pc = insn;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 0), 0x1234_5678);
+    assert_eq!(env.pc, insn + 7);
+}
+
+#[test]
+fn fpd_roundtrip_vessel() {
+    // 反復命令が使う途中状態の器: 退避 → FPD=1・PC 復帰、再入 →
+    // 作業語、完了 → 消去。
+    let mut env = run_env(1);
+    // movc3 のオペコード語は 0x28。
+    sem::partial_save(&mut env.backend, 0x28, [7, 0x800, 9, 0x900], 0x200);
+    assert!(sem::fpd(&env.backend));
+    assert_eq!(r(&env, reg::PC as u8), 0x200);
+    assert_eq!(sem::partial_insn(&env.backend), 0x28);
+    // 自命令の作業語だけが再入に返る。
+    assert_eq!(
+        sem::partial_resume(&mut env.backend, 0x28),
+        Some([7, 0x800, 9, 0x900])
+    );
+    assert_eq!(sem::partial_resume(&mut env.backend, 0x2c), None);
+    // 完了は標識を消す。
+    sem::partial_done(&mut env.backend);
+    assert!(!sem::fpd(&env.backend));
+    assert_eq!(sem::partial_insn(&env.backend), PART_INSN_NONE);
+    assert_eq!(sem::partial_resume(&mut env.backend, 0x28), None);
+
+    // 部分実行の標識が残っていても、反復しない命令の実行で消える。
+    sem::partial_save(&mut env.backend, 0x28, [1, 2, 3, 4], 0x200);
+    put(&mut env, BASE, &[0x01]); // nop
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert!(!sem::fpd(&env.backend));
+    assert_eq!(sem::partial_insn(&env.backend), PART_INSN_NONE);
+}
+
+#[test]
+fn fp_word_order_3412() {
+    // D/G/H 浮動型の語順: 最上位語（符号・指数を含む）が最下位
+    // アドレスに来る「3412」順。正準形（符号が最上位ビット）との
+    // 写像は 16 ビット語の逆順 —— 自己逆で往復する。
+    // D: 8 バイト = 4 語。
+    let canon: u128 = 0x1111_2222_3333_4444;
+    let vax = sem::fp_order(Width::D, canon);
+    assert_eq!(vax, 0x4444_3333_2222_1111);
+    // 往復で元に戻る。
+    assert_eq!(sem::fp_order(Width::D, vax), canon);
+    // H: 16 バイト = 8 語。
+    let canon: u128 = 0x0102_0304_0506_0708_090a_0b0c_0d0e_0f10;
+    assert_eq!(
+        sem::fp_order(Width::H, canon),
+        0x0f10_0d0e_0b0c_090a_0708_0506_0304_0102
+    );
+    // 整数幅は素通し（mov の写像は生の語順）。
+    assert_eq!(sem::fp_order(Width::L, 0xaabb_ccdd), 0xaabb_ccdd);
+}
+
+#[test]
+fn subset_insn_goes_unimpl_hook() {
+    // 機能集合にない命令（ka660 の movo）は補完経路のフックに渡る。
+    struct Hook(u64, u64);
+    impl TrapHandler for Hook {
+        fn handle_trap(&mut self, _env: &mut BareEnv, _code: u32) -> TrapOutcome {
+            TrapOutcome::Unimplemented
+        }
+        fn handle_unimpl(&mut self, _env: &mut BareEnv, pc: u64, word: u64) -> TrapOutcome {
+            self.0 = pc;
+            self.1 = word;
+            TrapOutcome::Unimplemented
+        }
+    }
+    let mut env = run_env(1);
+    put(&mut env, BASE, &[0xfd, 0x7d, 0x50, 0x51]); // movo r0, r1
+    env.pc = BASE;
+    let ka660 = model_feats("ka660");
+    let mut sys = Hook(0, 0);
+    let res = run::step(&mut env, &mut sys, ka660);
+    assert_eq!(sys.0, BASE);
+    assert_eq!(sys.1, 0x7dfd);
+    assert!(matches!(res, Err(Outcome::Unimplemented { .. })));
+    // フル VAX モデルなら movo は解読できて意味論まで来る。
+    // .o のレジスタ指定子は Rn:Rn+3 —— movo r0,r1 は r0..r3 を
+    // r1..r4 に運ぶ（REI では引数領域と重なる正当な使い方）。
+    let mut env = run_env(1);
+    put(&mut env, BASE, &[0xfd, 0x7d, 0x50, 0x51]);
+    sem::r_set(&mut env.backend, 0, 0x1111_2222);
+    sem::r_set(&mut env.backend, 1, 0x3333_4444);
+    sem::r_set(&mut env.backend, 2, 0x5555_6666);
+    env.pc = BASE;
+    step(&mut env).unwrap();
+    assert_eq!(r(&env, 1), 0x1111_2222);
+    assert_eq!(r(&env, 2), 0x3333_4444);
+    assert_eq!(r(&env, 3), 0x5555_6666);
+    assert_eq!(r(&env, 4), 0);
+    assert_eq!(env.pc, BASE + 4);
 }

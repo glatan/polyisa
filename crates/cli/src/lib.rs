@@ -35,6 +35,8 @@ pub mod run_s390;
 pub mod run_sparc;
 #[cfg(feature = "guest-superh")]
 pub mod run_superh;
+#[cfg(feature = "guest-vax")]
+pub mod run_vax;
 #[cfg(feature = "guest-wasm")]
 pub mod run_wasm;
 #[cfg(feature = "guest-x86")]

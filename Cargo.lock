@@ -319,9 +319,11 @@ dependencies = [
 name = "polyisa-guest-vax"
 version = "0.0.0"
 dependencies = [
+ "polyisa-engine",
  "polyisa-guest",
  "polyisa-isadl",
  "polyisa-isagen",
+ "polyisa-mem",
  "polyisa-sem",
 ]
 

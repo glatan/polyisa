@@ -117,6 +117,10 @@ fn main() {
             for m in polyisa_guest_openrisc::MODELS {
                 println!("openrisc:{m}");
             }
+            #[cfg(feature = "guest-vax")]
+            for m in polyisa_guest_vax::MODELS {
+                println!("vax:{m}");
+            }
         }
         polyisa_cli::Command::Disasm => {
             #[cfg(feature = "guest-riscv")]

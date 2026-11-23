@@ -1,10 +1,11 @@
 // Copyright (c) polyisa contributors
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! VAX のゲスト ISA。段階23 の骨格。
+//! VAX のゲスト ISA。段階23。
 //!
 //! `CpuState`（r0-r15・PSL・中断可能命令の途中状態）と、
 //! ISADL から生成した命令集合・デコード・CPU モデル宣言の殻を
-//! 提供する。命令の意味論と実行ループは後続の段階で足す。
+//! 提供する。実行ループ（可変長フェッチ・例外の振り分け）は
+//! `run`、指定子評価と命令の意味論は `sem` が担う。
 //!
 //! VAX の命令は可変長で、オペコード（1 バイト本体、または
 //! 0xFD/0xFE/0xFF 接頭の 2 バイト）の後にオペランド指定子の
@@ -24,6 +25,11 @@ include!(concat!(env!("OUT_DIR"), "/generated.rs"));
 /// オペランド指定子の読み取り・長さ・適合検査・符号化と、
 /// 命令ごとの指定子シグネチャ。
 pub mod specifier;
+
+/// 実行ループ（可変長フェッチ・例外の振り分け）。
+pub mod run;
+/// 命令意味論（指定子評価・途中状態・命令本体）。
+pub mod sem;
 
 /// VAX の ISA ファミリ名。
 pub struct Vax;
@@ -94,6 +100,9 @@ pub mod psl {
     pub const USER: u32 = 0x3 << CUR_MOD;
 }
 
+/// `PartialInsn::insn` の「部分実行なし」の値。
+pub const PART_INSN_NONE: u16 = 0xffff;
+
 /// 中断可能命令の途中状態。文字列・十進文字列などの反復命令が
 /// PSL<FPD>=1 で同じ命令へ再入するときの進行情報の器。
 /// 建築上は中断点の進行が命令ごとに規定する退避先（多くは
@@ -102,13 +111,24 @@ pub mod psl {
 /// 各命令の意味論が定める（後続段階で正本から写す）。
 /// Ref: SPEC-VAX-ARM（例外と中断可能命令の章）.
 #[repr(C)]
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct PartialInsn {
-    /// 部分実行中の命令。`None` は部分実行なし（FPD=0 からの開始）。
-    pub insn: Option<Insn>,
+    /// 部分実行中の命令のオペコード語（1/2 バイトをフェッチ順に
+    /// 下位から詰めた形）。`PART_INSN_NONE` は部分実行なし
+    /// （FPD=0 からの開始）。
+    pub insn: u16,
     /// 反復をまたぐ命令固有の作業語。建築上の退避レジスタに
     /// 乗らない分の器。
     pub work: [u32; 4],
+}
+
+impl Default for PartialInsn {
+    fn default() -> Self {
+        Self {
+            insn: PART_INSN_NONE,
+            work: [0; 4],
+        }
+    }
 }
 
 /// CPU 状態。`#[repr(C)]` で配置を固定し、`StateRef` はここを指す。
@@ -164,7 +184,7 @@ mod tests {
     fn partial_insn_vessel() {
         // 途中状態の器は既定で「部分実行なし」。
         let cpu = CpuState::default();
-        assert!(cpu.partial.insn.is_none());
+        assert_eq!(cpu.partial.insn, PART_INSN_NONE);
         assert_eq!(cpu.partial.work, [0; 4]);
     }
 }

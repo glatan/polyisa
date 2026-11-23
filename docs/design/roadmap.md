@@ -45,7 +45,6 @@
 
 | # | 内容 | 前提 | 判定 |
 |---|---|---|---|
-| VX4 | `run_vax` 実行ループ: 可変長 fetch・中断可能な命令の途中状態 + bare 最小テスト | VX3 | - |
 | VX5 | 整数: mov/add/sub/mul/div/emul/ediv・cmp/tst/clr/inc/dec | VX4 | - |
 | VX6 | 論理・ビット・bitfield・shift/rot | VX4 | - |
 | VX7 | push/pop・queue 命令（insq*/remq* 系）・文字列命令（movc/cmpc/loc/skp/scan/span/matchc/movtc/movtuc/crc）・chmk/chme（段階 25 の BSD パーソナリティが使う） | VX4 | - |

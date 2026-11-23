@@ -1,0 +1,565 @@
+// Copyright (c) polyisa contributors
+// SPDX-License-Identifier: MIT OR Apache-2.0
+//! VAX の命令意味論。オペランド指定子の評価（実効アドレス・
+//! 自動増減の副作用・値の読み書き）と、最小限の命令本体。
+//!
+//! 指定子は `specifier` のデコード結果（`Spec`/`Opnd`）を、命令内の
+//! 位置情報つきで評価する。評価はオペランド順に逐一起こし、自動
+//! 減の先引き・自動増の後付け・間接の読み出しは評価時点の副作用
+//! とする。PC 相対の基底と即値の「オペランドアドレス」は命令内の
+//! 絶対位置で決まるので、評価には各指定子の先頭・終端の絶対
+//! アドレス（`pos`）を渡す。自動増減と index 乗数の刻みは
+//! オペランドのデータ型のバイト数（`.a` 系も含め指定子の型文字が
+//! 決める）で、index の指数はレジスタ値の乗算として足す。
+//!
+//! 中断可能命令（文字列・十進。本体は VX7 以降）は
+//! 「反復 1 回 = 1 ステップ」の規約で走る: 未完なら建築レジスタ
+//! （r0-r5 等。命令ごとの退避先は正本の規則）に進行を残し、
+//! `partial_save` が PSL<FPD>=1 と `partial` に作業語を記録して
+//! PC を命令先頭へ戻す。再入した同じ命令は `partial_resume` で
+//! 作業語を受け取って続きから進め、完了で `partial_done` が
+//! 標識を消す。部分実行のない命令の開始時にも `partial_done` を
+//! 掃く（FPD=1 でない命令への FPD 再入は建築上 UNPREDICTABLE —
+//! 新しい命令として走る決定的な選択）。
+//! Ref: SPEC-VAX-ARM.
+
+use polyisa_engine::interp::{InterpBackend, InterpExit};
+use polyisa_mem::{Access, AccessKind, Align, Endian};
+use polyisa_sem::{Backend as _, ExceptionKind, GuestException, StateRef, W8, W16, W32, W64, W128};
+
+use crate::specifier::{self, Fetched, Legality, OpTy, Opnd, Spec, Width};
+use crate::{CpuState, Insn, PART_INSN_NONE, PartialInsn, psl, reg};
+
+/// VAX の例外・トラップを OS パーソナリティへ渡すときのコード。
+/// SCB（システム制御ブロック）のベクタオフセットをそのまま使う。
+// Ref: SPEC-VAX-ARM（SCB の章）.
+pub mod scb {
+    /// 予約命令・特権命令 fault。
+    pub const PRIV_INSN: u32 = 0x10;
+    /// 予約オペランド fault。
+    pub const RESERVED_OPERAND: u32 = 0x18;
+    /// 予約アドレッシングモード fault。
+    pub const RESERVED_MODE: u32 = 0x1c;
+    /// アクセス制御違反 fault。
+    pub const ACV: u32 = 0x20;
+    /// 変換不能 fault。
+    pub const TNV: u32 = 0x24;
+    /// ブレークポイント trap。
+    pub const BPT: u32 = 0x2c;
+    /// 算術 trap。
+    pub const ARITHMETIC: u32 = 0x34;
+    /// change mode to user trap。
+    pub const CHMU: u32 = 0x4c;
+    /// サブセット命令の補完要求: 開始（FPD=0）。
+    pub const EMUL_START: u32 = 0xc8;
+    /// サブセット命令の補完要求: 継続（FPD=1）。
+    pub const EMUL_CONT: u32 = 0xcc;
+}
+
+/// データの読み出し・書き込みのアクセス属性。VAX は整列を要求
+/// しない（オペランドは任意のバイト境界）ので Unaligned。
+const DRD: Access = Access {
+    endian: Endian::Le,
+    align: Align::Unaligned,
+    kind: AccessKind::DataRead,
+};
+const DWR: Access = Access {
+    endian: Endian::Le,
+    align: Align::Unaligned,
+    kind: AccessKind::DataWrite,
+};
+
+fn get32(b: &InterpBackend, r: StateRef<W32>) -> u32 {
+    let off = r.offset();
+    u32::from_le_bytes(b.state[off..off + 4].try_into().expect("w32"))
+}
+
+fn set32(b: &mut InterpBackend, r: StateRef<W32>, v: u32) {
+    let off = r.offset();
+    b.state[off..off + 4].copy_from_slice(&v.to_le_bytes());
+}
+
+/// 汎用レジスタ r_i の状態面。
+#[must_use]
+pub fn r_ref(i: u8) -> StateRef<W32> {
+    StateRef::<W32>::from_offset(core::mem::offset_of!(CpuState, r) + usize::from(i) * 4)
+}
+
+/// 汎用レジスタ r_i の値。
+#[must_use]
+pub fn r_get(b: &InterpBackend, i: u8) -> u32 {
+    get32(b, r_ref(i))
+}
+
+/// 汎用レジスタ r_i への代入。
+pub fn r_set(b: &mut InterpBackend, i: u8, v: u32) {
+    set32(b, r_ref(i), v);
+}
+
+/// PSL の状態面。
+#[must_use]
+pub fn psl_ref() -> StateRef<W32> {
+    StateRef::<W32>::from_offset(core::mem::offset_of!(CpuState, psl))
+}
+
+/// PSL の値。
+#[must_use]
+pub fn psl_get(b: &InterpBackend) -> u32 {
+    get32(b, psl_ref())
+}
+
+/// PSL への代入。
+pub fn psl_put(b: &mut InterpBackend, v: u32) {
+    set32(b, psl_ref(), v);
+}
+
+/// PSL の 1 ビットを読む。
+#[must_use]
+pub fn psl_flag(b: &InterpBackend, bit: u32) -> bool {
+    psl_get(b) & (1 << bit) != 0
+}
+
+/// PSL の 1 ビットを書く。
+fn psl_flag_set(b: &mut InterpBackend, bit: u32, v: bool) {
+    let p = psl_get(b);
+    psl_put(b, if v { p | 1 << bit } else { p & !(1 << bit) });
+}
+
+/// 現在のアクセスモード（PSL<CUR_MOD>。0=kernel, 3=user）。
+#[must_use]
+pub fn cur_mod(b: &InterpBackend) -> u32 {
+    psl_get(b) >> psl::CUR_MOD & psl::MOD_MASK
+}
+
+/// PSL<FPD>（中断可能命令の部分実行の標識）。
+#[must_use]
+pub fn fpd(b: &InterpBackend) -> bool {
+    psl_flag(b, psl::FPD)
+}
+
+/// 条件コード N/Z/V を書く（C は保存。mov・mcom・mova 系の規則）。
+fn cc_nzv(b: &mut InterpBackend, n: bool, z: bool, v: bool) {
+    psl_flag_set(b, psl::N, n);
+    psl_flag_set(b, psl::Z, z);
+    psl_flag_set(b, psl::V, v);
+}
+
+/// 幅 `w` の結果値 `v` で mov 系の条件コードを立てる
+/// （N=符号・Z=零・V=0・C 保存）。
+fn cc_mov(b: &mut InterpBackend, v: u128, w: Width) {
+    let bits = w.bytes() * 8;
+    cc_nzv(b, (v >> (bits - 1)) & 1 == 1, v & mask_w(w) == 0, false);
+}
+
+// ---- 中断可能命令の途中状態 ----
+
+fn partial_insn_ref() -> StateRef<W16> {
+    StateRef::<W16>::from_offset(
+        core::mem::offset_of!(CpuState, partial) + core::mem::offset_of!(PartialInsn, insn),
+    )
+}
+
+fn partial_work_ref(i: usize) -> StateRef<W32> {
+    StateRef::<W32>::from_offset(
+        core::mem::offset_of!(CpuState, partial) + core::mem::offset_of!(PartialInsn, work) + i * 4,
+    )
+}
+
+/// `partial.insn` の生値（部分実行中の命令のオペコード語。
+/// `PART_INSN_NONE` は部分実行なし）。
+#[must_use]
+pub fn partial_insn(b: &InterpBackend) -> u16 {
+    let off = partial_insn_ref().offset();
+    u16::from_le_bytes(b.state[off..off + 2].try_into().expect("w16"))
+}
+
+/// `partial.work[i]` の値（テスト・診断用）。
+#[must_use]
+pub fn partial_work(b: &InterpBackend, i: usize) -> u32 {
+    get32(b, partial_work_ref(i))
+}
+
+/// 部分実行の標識を消す。命令の完結時と、部分実行を持たない
+/// 命令の開始時に呼ぶ。
+pub fn partial_done(b: &mut InterpBackend) {
+    psl_flag_set(b, psl::FPD, false);
+    b.set(partial_insn_ref(), PART_INSN_NONE);
+    for i in 0..4 {
+        b.set(partial_work_ref(i), 0u32);
+    }
+}
+
+/// 反復 1 回ぶんの進行を残して命令を中断する。PSL<FPD>=1、
+/// `partial` にオペコード語と作業語を記録し、PC を命令先頭
+/// `pc0` に戻す（次のステップが同じ命令へ再入する）。建築上の
+/// 退避先（r0-r5 等）への進行の格納は各命令の意味論が行う。
+// Ref: SPEC-VAX-ARM（例外と中断可能命令の章）.
+pub fn partial_save(b: &mut InterpBackend, opc: u16, work: [u32; 4], pc0: u32) {
+    psl_flag_set(b, psl::FPD, true);
+    b.set(partial_insn_ref(), opc);
+    for (i, &v) in work.iter().enumerate() {
+        b.set(partial_work_ref(i), v);
+    }
+    r_set(b, reg::PC as u8, pc0);
+}
+
+/// FPD=1 での再入: 部分実行が自命令（同じオペコード語）のもの
+/// なら退避した作業語を返す。命令本体はこれで途中から続くかを
+/// 決める。自命令でない・FPD=0 なら None（新しい開始）。
+#[must_use]
+pub fn partial_resume(b: &mut InterpBackend, opc: u16) -> Option<[u32; 4]> {
+    if !fpd(b) || partial_insn(b) != opc {
+        return None;
+    }
+    Some(core::array::from_fn(|i| b.get(partial_work_ref(i))))
+}
+
+// ---- オペランド指定子の評価 ----
+
+/// 指定子評価の結果。`.r/.m` は `read` で値を読み、`.w/.m` は
+/// `write` で値を書き、`.a` は `loc_addr` の値がオペランド、
+/// `.v` は Reg/Mem いずれの基底も取るフィールドの足場として残す。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Loc {
+    /// レジスタ内。4 バイトを超える幅は連続レジスタに跨る。
+    Reg(u8),
+    /// メモリ上（実効アドレス）。
+    Mem(u32),
+    /// 値自身（短リテラル・即値）。`addr` は指定子拡張の位置 —
+    /// .a/.v での評価と、.w/.m への書き込み先（建築上
+    /// UNPREDICTABLE の決定的な選択）に使う。
+    Val { v: u128, addr: u32 },
+}
+
+/// データ幅のビットマスク。
+fn mask_w(w: Width) -> u128 {
+    let n = w.bytes();
+    if n >= 16 {
+        u128::MAX
+    } else {
+        (1u128 << (n * 8)) - 1
+    }
+}
+
+/// レジスタファイルの `w` 幅の読み出し。4 バイトを超える幅は
+/// 連続レジスタを連結する。r15 を越える分は r0 へ折り返す
+/// （建築上 UNPREDICTABLE の決定的な選択）。
+fn reg_read(b: &InterpBackend, r: u8, w: Width) -> u128 {
+    let mut v = 0u128;
+    for i in 0..w.bytes().max(4) / 4 {
+        v |= u128::from(r_get(b, r.wrapping_add(i as u8) & 0xf)) << (32 * i);
+    }
+    v & mask_w(w)
+}
+
+/// レジスタファイルへの `w` 幅の書き込み。部分幅は指定のバイト
+/// だけを変えて残りを保存する。
+fn reg_write(b: &mut InterpBackend, r: u8, w: Width, v: u128) {
+    match w.bytes() {
+        1 => r_set(b, r, (r_get(b, r) & !0xff) | u32::from(v as u8)),
+        2 => r_set(b, r, (r_get(b, r) & !0xffff) | u32::from(v as u16)),
+        n => {
+            for i in 0..n / 4 {
+                r_set(b, r.wrapping_add(i as u8) & 0xf, (v >> (32 * i)) as u32);
+            }
+        }
+    }
+}
+
+/// メモリから `n` バイトを読む（1/2/4/8/16）。
+fn load(b: &mut InterpBackend, addr: u32, n: u32) -> Result<u128, InterpExit> {
+    let a = u64::from(addr);
+    Ok(match n {
+        1 => u128::from(b.load::<W8>(a, DRD)?),
+        2 => u128::from(b.load::<W16>(a, DRD)?),
+        4 => u128::from(b.load::<W32>(a, DRD)?),
+        8 => u128::from(b.load::<W64>(a, DRD)?),
+        _ => b.load::<W128>(a, DRD)?,
+    })
+}
+
+/// メモリへ `n` バイトを書く（1/2/4/8/16）。
+fn store(b: &mut InterpBackend, addr: u32, n: u32, v: u128) -> Result<(), InterpExit> {
+    let a = u64::from(addr);
+    match n {
+        1 => b.store::<W8>(a, v as u8, DWR),
+        2 => b.store::<W16>(a, v as u16, DWR),
+        4 => b.store::<W32>(a, v as u32, DWR),
+        8 => b.store::<W64>(a, v as u64, DWR),
+        _ => b.store::<W128>(a, v, DWR),
+    }
+}
+
+/// アドレスを生産する指定子の評価（index の基底・.a 系の中身）。
+/// `sz` はオペランドのデータ型のバイト数（自動増減の刻み）。
+/// `start`/`end` はこの指定子の先頭・終端の絶対アドレスで、
+/// PC 相対の基底は `end`。
+// Ref: SPEC-VAX-ARM（アドレッシングモードの章）.
+fn eval_addr(
+    b: &mut InterpBackend,
+    s: &Spec,
+    sz: u32,
+    _start: u32,
+    end: u32,
+) -> Result<u32, InterpExit> {
+    let pc = reg::PC as u8;
+    Ok(match s {
+        Spec::RegDef(r) => r_get(b, *r),
+        Spec::AutoDec(r) => {
+            // 使う前にオペランドのデータ型ぶん引く。
+            let a = r_get(b, *r).wrapping_sub(sz);
+            r_set(b, *r, a);
+            a
+        }
+        Spec::AutoInc(r) => {
+            // 使ったあとにオペランドのデータ型ぶん足す。
+            let a = r_get(b, *r);
+            r_set(b, *r, a.wrapping_add(sz));
+            a
+        }
+        Spec::AutoIncDef(r) => {
+            // 間接は常に longword（4）進む。
+            let p = r_get(b, *r);
+            r_set(b, *r, p.wrapping_add(4));
+            load(b, p, 4)? as u32
+        }
+        Spec::Abs(a) => *a,
+        // PC 相対の基底は指定子拡張の直後（=この指定子の終端）。
+        Spec::Disp { r, d, .. } => {
+            let base = if *r == pc { end } else { r_get(b, *r) };
+            base.wrapping_add(*d as u32)
+        }
+        Spec::DispDef { r, d, .. } => {
+            let base = if *r == pc { end } else { r_get(b, *r) };
+            load(b, base.wrapping_add(*d as u32), 4)? as u32
+        }
+        // リテラル・レジスタ・index・即値は基底を生産できない
+        // （legality が先に弾くので普通は到達しない）。
+        _ => return Err(fault(scb::RESERVED_MODE, None)),
+    })
+}
+
+/// 指定子を評価して読み書き先を返す。自動増減の更新と間接の
+/// 読み出しはここで起きる。`start`/`end` はこの指定子（index なら
+/// 全体）の先頭・終端の絶対アドレス。
+fn eval_spec(
+    b: &mut InterpBackend,
+    s: &Spec,
+    w: Width,
+    start: u32,
+    end: u32,
+) -> Result<Loc, InterpExit> {
+    let sz = w.bytes();
+    Ok(match s {
+        Spec::Lit(v) => Loc::Val {
+            v: u128::from(*v),
+            addr: start,
+        },
+        Spec::Indexed { rx, base } => {
+            // 基底指定子の終端は index 指定子全体の終端と同じ位置
+            // （PC 相対の基底もそこを基準にする）。
+            let a = eval_addr(b, base, sz, start + 1, end)?;
+            Loc::Mem(a.wrapping_add(r_get(b, *rx).wrapping_mul(sz)))
+        }
+        Spec::Reg(r) => Loc::Reg(*r),
+        // 即値のオペランドアドレスは拡張バイトの位置そのもの。
+        Spec::Imm { v, .. } => Loc::Val {
+            v: *v,
+            addr: start + 1,
+        },
+        _ => Loc::Mem(eval_addr(b, s, sz, start, end)?),
+    })
+}
+
+/// オペランド指定子をアクセス型つきで評価する。アクセスに合わ
+/// ない指定子は予約アドレッシングモード fault（SCB 0x1c）。
+/// UNPREDICTABLE は受理し、結果は指定子の自然な評価に従う。
+// Ref: SPEC-VAX-ARM（アドレッシングモードの章）.
+pub fn eval_op(
+    b: &mut InterpBackend,
+    op: &Opnd,
+    ty: OpTy,
+    start: u32,
+    end: u32,
+) -> Result<Loc, InterpExit> {
+    let Opnd::Spec(s) = op else {
+        return Err(fault(scb::RESERVED_MODE, None));
+    };
+    if specifier::legality(s, ty.acc) == Legality::Illegal {
+        return Err(fault(scb::RESERVED_MODE, None));
+    }
+    eval_spec(b, s, ty.width, start, end)
+}
+
+/// オペランドの読み出し（.r/.m）。幅 `w` のバイト数だけ見る。
+pub fn read(b: &mut InterpBackend, loc: &Loc, w: Width) -> Result<u128, InterpExit> {
+    match *loc {
+        Loc::Reg(r) => Ok(reg_read(b, r, w)),
+        Loc::Mem(a) => load(b, a, w.bytes()),
+        Loc::Val { v, .. } => Ok(v & mask_w(w)),
+    }
+}
+
+/// オペランドへの書き込み（.w/.m）。
+pub fn write(b: &mut InterpBackend, loc: &Loc, w: Width, v: u128) -> Result<(), InterpExit> {
+    match *loc {
+        Loc::Reg(r) => {
+            reg_write(b, r, w, v);
+            Ok(())
+        }
+        Loc::Mem(a) => store(b, a, w.bytes(), v),
+        // 即値への書き込みは建築上 UNPREDICTABLE — 拡張バイトの
+        // 位置へのメモリ書き込みとして決定的に振る舞う。
+        Loc::Val { addr, .. } => store(b, addr, w.bytes(), v),
+    }
+}
+
+/// .a/.v オペランドの実効アドレス。Reg は .a では fault
+/// （legality が先に弾くので普通は到達しない）。
+pub fn loc_addr(loc: &Loc) -> Result<u32, InterpExit> {
+    match *loc {
+        Loc::Mem(a) | Loc::Val { addr: a, .. } => Ok(a),
+        Loc::Reg(_) => Err(fault(scb::RESERVED_MODE, None)),
+    }
+}
+
+/// 浮動型の語順の並べ替え（自己逆）。VAX は F/D/G/H を 16 ビット
+/// 語単位の「3412」順（符号・指数を含む語が最下位アドレス）で
+/// 置く。decfp の正準形（`bits()`、符号は最上位ビット）との写像は
+/// この指定子層が担う — 整数の mov 系は生の語順を写し、浮動
+/// 演算（VX9）がオペランドの入出力にこの写像を掛ける。
+// Ref: SPEC-VAX-ARM（浮動小数点形式の章）.
+#[must_use]
+pub fn fp_order(w: Width, v: u128) -> u128 {
+    if !matches!(w, Width::F | Width::D | Width::G | Width::H) {
+        return v;
+    }
+    let n = w.bytes() / 2;
+    let mut out = 0u128;
+    for i in 0..n {
+        out |= ((v >> (16 * i)) & 0xffff) << (16 * (n - 1 - i));
+    }
+    out
+}
+
+/// VAX の fault（予約オペランド・予約モード・特権命令等 — 復帰先は
+/// 命令先頭）。SCB のオフセットをコードに載せる。
+#[must_use]
+pub fn fault(code: u32, addr: Option<u64>) -> InterpExit {
+    InterpExit::Exception(GuestException {
+        kind: ExceptionKind::Undefined,
+        code: u64::from(code),
+        addr,
+        in_delay_slot: false,
+    })
+}
+
+/// VAX の trap（BPT・算術等 — 復帰先は次の命令）。
+#[must_use]
+pub fn trap(code: u32) -> InterpExit {
+    InterpExit::Exception(GuestException {
+        kind: ExceptionKind::Trap,
+        code: u64::from(code),
+        addr: None,
+        in_delay_slot: false,
+    })
+}
+
+/// `-(SP)` への積み込み（pushl/pusha 系。SP は先に 4 引かれる。
+/// 条件コードは変えない）。
+fn push(b: &mut InterpBackend, v: u128) -> Result<(), InterpExit> {
+    let sp = r_get(b, reg::SP as u8).wrapping_sub(4);
+    r_set(b, reg::SP as u8, sp);
+    store(b, sp, 4, v)
+}
+
+/// オペランド `i` の評価（`insn_ops` の型と `pos` の位置を引く）。
+fn eval(
+    b: &mut InterpBackend,
+    f: &Fetched,
+    pos: &[(u32, u32)],
+    i: usize,
+) -> Result<Loc, InterpExit> {
+    let ty = specifier::insn_ops(f.insn)[i];
+    eval_op(b, &f.ops[i], ty, pos[i].0, pos[i].1)
+}
+
+/// 命令 1 個の意味論。`pos[i]` はオペランド i の指定子バイト列の
+/// 先頭・終端の絶対アドレス（PC 相対の基底と即値の位置に使う）。
+/// `pc0` は命令の先頭アドレス。実行時の r15 は命令の終端
+/// （呼び出し側が `pc0 + f.len` に設定済み）。
+// Ref: SPEC-VAX-ARM（各命令の意味論）.
+pub fn exec(
+    b: &mut InterpBackend,
+    f: &Fetched,
+    _pc0: u32,
+    pos: &[(u32, u32)],
+) -> Result<(), InterpExit> {
+    match f.insn {
+        Insn::Halt => {
+            // カーネルモード専用。bare はユーザーモード（psl::USER）
+            // で走るので特権命令 fault になるのが常。
+            return Err(if cur_mod(b) == 0 {
+                InterpExit::Unimplemented("halt (kernel)".to_string())
+            } else {
+                fault(scb::PRIV_INSN, None)
+            });
+        }
+        // 反復しない命令は開始時に部分実行の標識を消す。
+        _ => partial_done(b),
+    }
+    match f.insn {
+        Insn::Nop => {}
+        Insn::Movb | Insn::Movw | Insn::Movl | Insn::Movq | Insn::Movo => {
+            let w = specifier::insn_ops(f.insn)[0].width;
+            let s = eval(b, f, pos, 0)?;
+            let v = read(b, &s, w)?;
+            let d = eval(b, f, pos, 1)?;
+            write(b, &d, w, v)?;
+            cc_mov(b, v, w);
+        }
+        Insn::Clrb | Insn::Clrw | Insn::Clrl | Insn::Clrq => {
+            let w = specifier::insn_ops(f.insn)[0].width;
+            let d = eval(b, f, pos, 0)?;
+            write(b, &d, w, 0)?;
+            cc_nzv(b, false, true, false);
+        }
+        Insn::Mcomb | Insn::Mcomw | Insn::Mcoml => {
+            let w = specifier::insn_ops(f.insn)[0].width;
+            let s = eval(b, f, pos, 0)?;
+            let v = !read(b, &s, w)? & mask_w(w);
+            let d = eval(b, f, pos, 1)?;
+            write(b, &d, w, v)?;
+            cc_mov(b, v, w);
+        }
+        Insn::Movzbl | Insn::Movzbw | Insn::Movzwl => {
+            let tys = specifier::insn_ops(f.insn);
+            let s = eval(b, f, pos, 0)?;
+            let v = read(b, &s, tys[0].width)?;
+            let d = eval(b, f, pos, 1)?;
+            write(b, &d, tys[1].width, v)?;
+            // ゼロ拡張なので N は立たない。
+            cc_nzv(b, false, v == 0, false);
+        }
+        Insn::Movab | Insn::Movaw | Insn::Moval | Insn::Movaq | Insn::Movah => {
+            let s = eval(b, f, pos, 0)?;
+            let a = loc_addr(&s)?;
+            let d = eval(b, f, pos, 1)?;
+            write(b, &d, Width::L, u128::from(a))?;
+            cc_mov(b, u128::from(a), Width::L);
+        }
+        Insn::Pushab | Insn::Pushaw | Insn::Pushal | Insn::Pushaq | Insn::Pushah => {
+            let s = eval(b, f, pos, 0)?;
+            let a = loc_addr(&s)?;
+            push(b, u128::from(a))?;
+        }
+        Insn::Pushl => {
+            let s = eval(b, f, pos, 0)?;
+            let v = read(b, &s, Width::L)?;
+            push(b, v)?;
+        }
+        Insn::Bpt => return Err(trap(scb::BPT)),
+        _ => return Err(InterpExit::Unimplemented(format!("{:?}", f.insn))),
+    }
+    Ok(())
+}

@@ -55,6 +55,7 @@ default = [
     "guest-s390",
     "guest-sparc",
     "guest-superh",
+    "guest-vax",
     "guest-wasm",
     "guest-x86",
 ]
@@ -73,7 +74,6 @@ guest-riscv = ["dep:polyisa-guest-riscv", "polyisa-os-linux/guest-riscv"]
 guest-s390 = ["dep:polyisa-guest-s390", "polyisa-os-linux/guest-s390"]
 guest-sparc = ["dep:polyisa-guest-sparc", "polyisa-os-linux/guest-sparc"]
 guest-superh = ["dep:polyisa-guest-superh", "polyisa-os-linux/guest-superh"]
-# vax は実行ループ未接続のため既定には含めない（VX4 で run_vax と共に有効化）。
 guest-vax = ["dep:polyisa-guest-vax"]
 guest-wasm = [
     "dep:polyisa-guest-wasm",
